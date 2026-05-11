@@ -14,5 +14,6 @@ fn Term interact_dsu_num(u64 dsu_loc, Term lab_num) {
   heap_set(c + 0, a);
   heap_set(c + 1, b);
   ITRS++;
+  multi_emit(RULE_DSU_NUM, MULTI_SLIDE, 0, (u64)lab_num, 0);
   return term_new(0, TAG_SUP, lab, c);
 }

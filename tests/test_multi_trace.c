@@ -41,6 +41,30 @@ static Term build_app(Term f, Term x) {
     return term_new(0, TAG_APP, 0, loc);
 }
 
+// build_sup() and build_num() are provided by tests/test.h.
+
+// Helper: returns the dup_loc holding `body`.  Callers wrap with
+// TAG_DP0 / TAG_DP1 to construct the projections.
+static u64 build_dup(Term body) {
+    u64 loc = heap_alloc(1);
+    heap_set(loc, body);
+    return loc;
+}
+
+#ifdef THVM_TRACE
+// Search the current trace for an event with the given (rule, family)
+// pair appearing AT OR AFTER `from`.  Returns the event index or
+// (u64)-1 if not found.  Used by the cross-family coverage tests.
+static u64 find_event(u64 from, u8 rule, u8 family) {
+    u64 n = multi_trace_count();
+    for (u64 i = from; i < n; i++) {
+        const MultiEvent *e = multi_trace_get(i);
+        if (e && e->rule == rule && e->family == family) return i;
+    }
+    return (u64)-1;
+}
+#endif
+
 int main(void) {
     thvm_init();
 
@@ -142,6 +166,128 @@ int main(void) {
         CHECK_EQ(multi_trace_count(), 0u);
         CHECK_EQ(CURRENT_CTX->trace, 0);
 
+        multi_trace_free();
+    }
+
+    // === Cross-family coverage.  Each scenario fires one rule from a
+    // different family and checks that the right event appears. =======
+    //
+    // Coverage matrix:
+    //   MULTI_TERM    -- APP-LAM (already covered above)
+    //   MULTI_PRUNE   -- APP-ERA: `(* arg)` => ERA
+    //   MULTI_SLIDE   -- APP-SUP: `(&L{f,g}) arg` => `&L{(f arg_0), (g arg_1)}`
+    //   MULTI_FORK    -- DUP-LAM via cnf on DP0(&L = LAM)
+    //   MULTI_MERGE   -- DUP-SUP same label via cnf on DP0(&L = &L{a,b})
+    //   MULTI_SPLIT   -- DUP-SUP different label via cnf on DP0(&L = &R{a,b})
+    //   MULTI_PLUMB   -- DUP-NUM via cnf on DP0(dup = NUM)
+
+    TEST_BEGIN("multi-trace/family-coverage/app-era-prunes");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term era = term_new(0, TAG_ERA, 0, 0);
+        Term arg = term_new(0, TAG_LAM, 0, 0);   // any value
+        (void)wnf(build_app(era, arg));
+        u64 idx = find_event(from, RULE_APP_ERA, MULTI_PRUNE);
+        CHECK(idx != (u64)-1);
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/family-coverage/app-sup-slides");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term l1  = build_id_lam();
+        Term l2  = build_id_lam();
+        Term sup = build_sup(7, l1, l2);
+        Term era = term_new(0, TAG_ERA, 0, 0);
+        (void)wnf(build_app(sup, era));
+        u64 idx = find_event(from, RULE_APP_SUP, MULTI_SLIDE);
+        CHECK(idx != (u64)-1);
+        const MultiEvent *e = multi_trace_get(idx);
+        CHECK_EQ(e->delta_label, 7u);  // SUP label propagates
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/family-coverage/dup-sup-same-label-merges");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term era = term_new(0, TAG_ERA, 0, 0);
+        Term lam = term_new(0, TAG_LAM, 0, 0);
+        Term sup = build_sup(7, era, lam);
+        u64  dup = build_dup(sup);
+        Term dp0 = term_new(0, TAG_DP0, 7, dup);
+        (void)cnf(dp0);
+        u64 idx = find_event(from, RULE_DUP_SUP_ANN, MULTI_MERGE);
+        CHECK(idx != (u64)-1);
+        const MultiEvent *e = multi_trace_get(idx);
+        CHECK_EQ(e->delta_label, 7u);
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/family-coverage/dup-sup-diff-label-splits");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term era = term_new(0, TAG_ERA, 0, 0);
+        Term lam = term_new(0, TAG_LAM, 0, 0);
+        Term sup = build_sup(11, era, lam);       // sup label 11
+        u64  dup = build_dup(sup);
+        Term dp0 = term_new(0, TAG_DP0, 7, dup);  // dup label 7 (different)
+        (void)cnf(dp0);
+        u64 idx = find_event(from, RULE_DUP_SUP_COM, MULTI_SPLIT);
+        CHECK(idx != (u64)-1);
+        const MultiEvent *e = multi_trace_get(idx);
+        CHECK_EQ(e->delta_label, 7u);  // the DUP's label is what we record
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/family-coverage/dup-lam-forks");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term lam = build_id_lam();
+        u64  dup = build_dup(lam);
+        Term dp0 = term_new(0, TAG_DP0, 3, dup);
+        (void)cnf(dp0);
+        u64 idx = find_event(from, RULE_DUP_LAM, MULTI_FORK);
+        CHECK(idx != (u64)-1);
+        const MultiEvent *e = multi_trace_get(idx);
+        CHECK_EQ(e->delta_label, 3u);  // the DUP's label
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/family-coverage/dup-num-plumbs");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term num = term_new(0, TAG_NUM, 0, 42);
+        u64  dup = build_dup(num);
+        Term dp0 = term_new(0, TAG_DP0, 5, dup);
+        (void)cnf(dp0);
+        u64 idx = find_event(from, RULE_DUP_NUM, MULTI_PLUMB);
+        CHECK(idx != (u64)-1);
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/family-coverage/dup-era-prunes");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term era = term_new(0, TAG_ERA, 0, 0);
+        u64  dup = build_dup(era);
+        Term dp0 = term_new(0, TAG_DP0, 9, dup);
+        (void)cnf(dp0);
+        u64 idx = find_event(from, RULE_DUP_ERA, MULTI_PRUNE);
+        CHECK(idx != (u64)-1);
         multi_trace_free();
     }
 

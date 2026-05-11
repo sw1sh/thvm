@@ -26,10 +26,12 @@ fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
   u32 sup_lab = term_ext(sup);
   ITRS++;
   if (lab == sup_lab) {
+    multi_emit(RULE_DUP_SUP_ANN, MULTI_MERGE, (u64)sup, 0, lab);
     Term tm0 = heap_read(sup_loc + 0);
     Term tm1 = heap_read(sup_loc + 1);
     return heap_subst_cop(side, loc, tm0, tm1);
   }
+  multi_emit(RULE_DUP_SUP_COM, MULTI_SPLIT, (u64)sup, 0, lab);
 
   Term a = heap_read(sup_loc + 0);
   Term b = heap_read(sup_loc + 1);

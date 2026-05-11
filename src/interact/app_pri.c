@@ -19,6 +19,7 @@
 // cells; we treat that as count_so_far == 0.
 fn Term interact_app_pri(Term pri, Term arg) {
   ITRS++;
+  multi_emit(RULE_APP_PRI, MULTI_TERM, (u64)pri, (u64)arg, term_ext(pri));
   u32 prim_id = term_ext(pri);
   u32 arity   = prim_arity(prim_id);
 

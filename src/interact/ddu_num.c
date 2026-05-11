@@ -32,5 +32,6 @@ fn Term interact_ddu_num(u64 ddu_loc, Term lab_num) {
   heap_set(a1 + 0, app0);
   heap_set(a1 + 1, X1);
   ITRS++;
+  multi_emit(RULE_DDU_NUM, MULTI_SLIDE, 0, (u64)lab_num, 0);
   return term_new(0, TAG_APP, 0, a1);
 }

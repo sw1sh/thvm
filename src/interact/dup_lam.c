@@ -29,6 +29,7 @@
 // verbatim (see TinyHVM/HVM4/clang/wnf/dup_lam.c:19).
 fn Term interact_dup_lam(u32 lab, u64 loc, u8 side, Term lam) {
   ITRS++;
+  multi_emit(RULE_DUP_LAM, MULTI_FORK, (u64)lam, 0, lab);
   u32  lam_ext = term_ext(lam);
   u64  lam_loc = term_val(lam);
   Term body    = heap_read(lam_loc);

@@ -9,6 +9,7 @@
 
 fn Term interact_dup_bri(u32 lab, u64 loc, u8 side, Term bri) {
   ITRS++;
+  multi_emit(RULE_DUP_BRI, MULTI_FORK, (u64)bri, 0, lab);
   u64  bri_loc = term_val(bri);
   Term body    = heap_read(bri_loc);
 

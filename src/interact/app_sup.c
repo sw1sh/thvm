@@ -27,6 +27,7 @@
 // pointing at c+5.
 fn Term interact_app_sup(Term sup, Term arg) {
   ITRS++;
+  multi_emit(RULE_APP_SUP, MULTI_SLIDE, (u64)sup, (u64)arg, term_ext(sup));
   u64  sup_loc = term_val(sup);
   u32  lab     = term_ext(sup);
   Term f       = heap_read(sup_loc + 0);

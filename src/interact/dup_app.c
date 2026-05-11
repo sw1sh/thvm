@@ -19,6 +19,7 @@
 
 fn Term interact_dup_app(u32 lab, u64 loc, u8 side, Term app) {
   ITRS++;
+  multi_emit(RULE_DUP_APP, MULTI_FORK, (u64)app, 0, lab);
   u64 a_loc = term_val(app);
   u32 a_ext = term_ext(app);
   u64 r0_loc = heap_alloc(2);

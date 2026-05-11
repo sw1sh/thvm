@@ -29,6 +29,7 @@
 // Total = 12 cells.
 fn Term interact_app_mat_sup(Term mat, Term sup) {
     ITRS++;
+    multi_emit(RULE_APP_MAT_SUP, MULTI_SLIDE, (u64)mat, (u64)sup, term_ext(sup));
     u64  sup_loc = term_val(sup);
     u32  lab     = term_ext(sup);
     u64  mat_loc = term_val(mat);

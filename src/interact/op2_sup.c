@@ -16,6 +16,7 @@
 // SUP wrapper (2 cells).
 fn Term interact_op2_sup(u32 opr, Term sup, Term y) {
     ITRS++;
+    multi_emit(RULE_OP2_SUP, MULTI_SLIDE, (u64)sup, (u64)y, term_ext(sup));
     u64  sup_loc = term_val(sup);
     u32  lab     = term_ext(sup);
     Term a       = heap_read(sup_loc + 0);

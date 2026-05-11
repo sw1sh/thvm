@@ -14,6 +14,7 @@
 // (2 cells).
 fn Term interact_op2_num_sup(u32 opr, Term num, Term sup) {
     ITRS++;
+    multi_emit(RULE_OP2_NUM_SUP, MULTI_SLIDE, (u64)num, (u64)sup, term_ext(sup));
     u64  sup_loc = term_val(sup);
     u32  lab     = term_ext(sup);
     Term a       = heap_read(sup_loc + 0);

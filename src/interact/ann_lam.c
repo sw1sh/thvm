@@ -17,6 +17,7 @@
 //   c+5  ANN typ cell  (= old body, with substituted x)
 fn Term interact_ann_lam(Term val, Term lam) {
   ITRS++;
+  multi_emit(RULE_ANN_LAM, MULTI_TERM, (u64)val, (u64)lam, 0);
   u64  lam_loc = term_val(lam);
   Term body    = heap_read(lam_loc);
 

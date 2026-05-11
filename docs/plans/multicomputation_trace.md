@@ -1,11 +1,14 @@
 # Multicomputation trace -- a branch-cylinder-tagged token-event log
 
-Status: **M0 spike landed** (one rule wired -- `interact_app_lam` --
-plus the full compile-time / runtime gating discipline, and a C-side
-test that passes in both build variants); M1-M4 + the WL surface +
-the remaining `interact_*` rules are still open.  See
-[M0 spike outcome](#m0-spike-outcome) below for what shipped and what
-deliberately did not.  Conceptual companion:
+Status: **M0 covers every dedicated `interact_*` rule** (30 rules
+across `src/interact/`, 32 emit sites counting `dup_sup`'s two
+branches and `uop_assign`'s two paths) with the compile-time /
+runtime gating discipline intact and a cross-family C-side test that
+passes in both build variants.  Still open: the inline `ITRS++`
+sites in `src/wnf/_.c` (OP2-NUM-NUM, MAT-CTR, ...), the WL surface,
+and M1-M4.  See [M0 spike outcome](#m0-spike-outcome) and the
+[rule-coverage table](#101-rule-coverage-as-of-this-commit) below.
+Conceptual companion:
 [docs/multicomputation.md](../multicomputation.md) reads the
 SUP / DUP / INC machinery through Wolfram's multicomputation paradigm
 (a SUP-term is a *slice*; reduction is *slice evolution*; the
@@ -514,30 +517,85 @@ end-to-end; the next-step shape is clear.
   builds.  Hooked into the runtime by one line in
   [src/thvm.c](../../src/thvm.c) right after the existing
   `hot_counters.c` include.
-- **One rule wired up**:
-  [src/interact/app_lam.c](../../src/interact/app_lam.c) calls
-  `multi_emit(RULE_APP_LAM, MULTI_TERM, (u64)lam, (u64)arg, 0);`
-  immediately after `ITRS++`.  This is the vertical-slice proof; the
-  remaining ~60 `interact_*` rules will follow the same pattern.
+- **Every dedicated `interact_*` rule wired up** (30 files, 32 emit
+  sites): one `multi_emit(...)` line per `ITRS++`, with the
+  `(rule, family)` tuple chosen per §4 of this plan.  `dup_sup.c`
+  emits two different tags depending on the label-compare branch
+  (annihilate -> `RULE_DUP_SUP_ANN` / `MULTI_MERGE`; commute ->
+  `RULE_DUP_SUP_COM` / `MULTI_SPLIT`); `uop_assign.c` emits the same
+  `RULE_UOP_ASSIGN` from both backend-copy and host-roundtrip paths.
+  The one outlier is [src/interact/uop_grad.c](../../src/interact/uop_grad.c),
+  which has no `ITRS++` of its own (it delegates to the per-op grad
+  cells); a follow-up may decide to emit a synthetic event there.
 - **Surgical test** at
   [tests/test_multi_trace.c](../../tests/test_multi_trace.c), built
   twice from the same source via two Makefile targets:
   `bin/test_multi_trace` (default CFLAGS) and `bin/test_multi_trace_on`
   (`-DTHVM_TRACE`).  Default-build coverage: 2/2.  Trace-build
-  coverage: 22/22 -- runtime-flag off, runtime-flag on, mid-run
-  toggle, capacity growth.
+  coverage: **33/33** -- the original mechanism checks (runtime-flag
+  off/on, mid-run toggle, capacity growth) plus one assertion per
+  family (TERM, PRUNE, SLIDE, FORK, MERGE, SPLIT, PLUMB) firing the
+  expected (rule, family) tuple end-to-end.
 
-### Acceptance gate verified
+### Acceptance gate verified (re-checked after wiring all 30 rules)
 
 `make bin/test_app_lam bin/test_multi_trace` (both default CFLAGS):
-the inlined `interact_app_lam` portion of `_wnf` has *4022 instructions
-in both* binaries, and a `diff` of the disassembly (stripped of
-absolute addresses) shows differences only in immediate operands
-that reflect overall binary layout -- the opcode sequence is
-character-for-character identical.  `nm bin/test_multi_trace | grep
+`_wnf` (which inlines the dispatch and the per-rule bodies) has
+**4022 instructions in both** binaries -- unchanged from before any
+trace wiring existed, even though 30 `multi_emit(...)` call sites were
+added to `src/interact/*.c`.  `nm bin/test_multi_trace | grep
 multi_emit_body` returns nothing; `nm bin/test_multi_trace_on | grep
-multi_emit_body` returns one symbol.  The compile-time gating
-discipline holds: a default-build reducer pays zero instructions.
+multi_emit_body` returns one symbol.  The trace build's `_wnf` is
+4145 instructions (+123 -- roughly four per `if (UNLIKELY(trace))
+multi_emit_body(...)` branch across the 30 inlined rule bodies).  The
+compile-time gating discipline holds: a default-build reducer pays
+zero instructions, full stop.
+
+### 10.1 Rule coverage as of this commit
+
+| `interact_*` | `RULE_*` | `MULTI_*` |
+|---|---|---|
+| `app_lam` | `APP_LAM` | `TERM` |
+| `app_bri` | `APP_BRI` | `TERM` |
+| `app_pri` | `APP_PRI` | `TERM` |
+| `ann_lam` | `ANN_LAM` | `TERM` |
+| `ann_bri` | `ANN_BRI` | `TERM` |
+| `uop_assign` (x2 paths) | `UOP_ASSIGN` | `TERM` |
+| `uop_kernel` | `UOP_KERNEL` | `TERM` |
+| `app_era` | `APP_ERA` | `PRUNE` |
+| `dup_era` | `DUP_ERA` | `PRUNE` |
+| `dsu_era` | `DSU_ERA` | `PRUNE` |
+| `ddu_era` | `DDU_ERA` | `PRUNE` |
+| `app_sup` | `APP_SUP` | `SLIDE` |
+| `app_mat_sup` | `APP_MAT_SUP` | `SLIDE` |
+| `op2_sup` | `OP2_SUP` | `SLIDE` |
+| `op2_num_sup` | `OP2_NUM_SUP` | `SLIDE` |
+| `dsu_num` | `DSU_NUM` | `SLIDE` |
+| `dsu_sup` | `DSU_SUP` | `SLIDE` |
+| `ddu_num` | `DDU_NUM` | `SLIDE` |
+| `ddu_sup` | `DDU_SUP` | `SLIDE` |
+| `dup_lam` | `DUP_LAM` | `FORK` |
+| `dup_bri` | `DUP_BRI` | `FORK` |
+| `dup_ctr` | `DUP_CTR` | `FORK` |
+| `dup_app` | `DUP_APP` | `FORK` |
+| `dup_mat` | `DUP_MAT` | `FORK` |
+| `dup_op2` | `DUP_OP2` | `FORK` |
+| `dup_uop` | `DUP_UOP` | `FORK` |
+| `dup_sup` (same label) | `DUP_SUP_ANN` | `MERGE` |
+| `dup_sup` (diff label) | `DUP_SUP_COM` | `SPLIT` |
+| `dup_num` | `DUP_NUM` | `PLUMB` |
+| `dup_ten` | `DUP_TEN` | `PLUMB` |
+| `dup_any` | `DUP_ANY` | `PLUMB` |
+
+Provisional classifications worth a second look later:
+`DSU_NUM` / `DDU_NUM` are tagged `SLIDE` (treated as label-evaluation
+re-foliation) but a finer reading might call them `TERM`;
+`DDU_SUP` is `SLIDE` even though once the dynamic labels resolve it
+behaves like a `DUP-SUP` (`MERGE` or `SPLIT`) -- when the dynamic-
+label paths get their own per-case ITRS bumps, split it.  The tag is
+just metadata, so revising it later costs nothing.  Inline `ITRS++`
+sites in `src/wnf/_.c` (OP2-NUM-NUM literal fold, MAT-CTR / SWI-NUM
+match, etc.) are still unwired.
 
 ### Simplifications taken vs the original plan
 
@@ -565,20 +623,22 @@ discipline holds: a default-build reducer pays zero instructions.
   deferred to a follow-up; the M0 trace is consumed directly by the
   C test through the `multi_trace_*` API.
 - **No `WIRE_PROV_BUMP` in heap mutations yet.**  M1 territory.
+- **Inline `ITRS++` in `src/wnf/_.c` not yet covered.**  Those handle
+  WHNF-specific tag combinations (OP2-NUM-NUM literal fold, MAT-CTR /
+  SWI-NUM pattern match, INC commute, ...) that don't have a dedicated
+  `src/interact/<name>.c` file.  A follow-up should add `multi_emit`
+  there too, with new `RULE_*` constants (INC rules -> `MULTI_SLIDE`,
+  literal folds / matches -> `MULTI_TERM`).
 
 ### Followups, in dependency order
 
-1. **Extend the rule enum and wire the remaining `interact_*`.**
-   Add `RULE_APP_ERA`, `RULE_APP_SUP`, `RULE_DUP_LAM`,
-   `RULE_DUP_ERA`, `RULE_DUP_SUP_ANN`, `RULE_DUP_SUP_COM`,
-   `RULE_ERA_*`, `RULE_OP2_*`, `RULE_MAT_*`, `RULE_INC_*`,
-   `RULE_USE_*`, `RULE_EQL_*`, `RULE_AND_*`, `RULE_OR_*`, etc.
-   Family classification per the §4 table.  One-line `multi_emit(...)`
-   addition to each `src/interact/*.c` (next to its `ITRS++`).
-   Validate on a deliberately bad SAT encoding (independent variables
-   given the same label, per
+1. **Cover the inline `ITRS++` sites in `src/wnf/_.c`.**  Same
+   one-liner pattern, with `RULE_*` constants for OP2-NUM-NUM,
+   MAT-CTR, SWI-NUM, USE-VAL, EQL leaf, AND/OR literal, and the INC
+   commute rules.  Then validate on a deliberately bad SAT encoding
+   (independent variables given the same label, per
    [docs/research/sat_solver_paths.md](../research/sat_solver_paths.md))
-   that a spurious `MULTI_MERGE` shows up.
+   that a spurious `MULTI_MERGE` shows up in the trace.
 2. **WL surface.**  Add `thvm_wl_multi_trace_*` LibraryLink wrappers
    to [wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
    mirroring the `thvm_wl_hot_counters_*` pattern, and a new module

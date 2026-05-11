@@ -121,6 +121,7 @@ fn void kernel_fire_by_id(u32 kid) {
   // analysis on the kernel DAG, not per-fire accounting.
 
   ITRS++;
+  multi_emit(RULE_UOP_KERNEL, MULTI_TERM, (u64)kid, 0, 0);
 }
 
 fn Term interact_kernel(Term kernel) {

@@ -16,6 +16,7 @@
 
 fn Term interact_dup_ctr(u32 lab, u64 loc, u8 side, Term ctr) {
   ITRS++;
+  multi_emit(RULE_DUP_CTR, MULTI_FORK, (u64)ctr, 0, lab);
   u32 n = term_ctr_n(ctr);
   u32 k = term_ext(ctr);
   if (n == 0) {

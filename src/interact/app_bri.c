@@ -17,6 +17,7 @@
 //   c+5  ANN typ cell  (= arg)
 fn Term interact_app_bri(Term bri, Term arg) {
   ITRS++;
+  multi_emit(RULE_APP_BRI, MULTI_TERM, (u64)bri, (u64)arg, 0);
   u64  bri_loc = term_val(bri);
   Term body    = heap_read(bri_loc);
 

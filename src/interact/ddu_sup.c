@@ -50,5 +50,6 @@ fn Term interact_ddu_sup(u64 ddu_loc, Term lab_sup) {
   heap_set(r + 0, dd0);
   heap_set(r + 1, dd1);
   ITRS++;
+  multi_emit(RULE_DDU_SUP, MULTI_SLIDE, 0, (u64)lab_sup, 0);
   return term_new(0, TAG_SUP, lab, r);
 }

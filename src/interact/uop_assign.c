@@ -59,6 +59,7 @@ fn Term interact_assign_with(Term dst, Term src) {
       && dd->backend->buf_copy(dd->buf_id, sd->buf_id, nbytes) == 0) {
     kernel_fire_gen_bump();
     ITRS++;
+    multi_emit(RULE_UOP_ASSIGN, MULTI_TERM, (u64)dst, (u64)src, 0);
     return dst;
   }
 
@@ -72,6 +73,7 @@ fn Term interact_assign_with(Term dst, Term src) {
 
   kernel_fire_gen_bump();
   ITRS++;
+  multi_emit(RULE_UOP_ASSIGN, MULTI_TERM, (u64)dst, (u64)src, 0);
   return dst;
 }
 

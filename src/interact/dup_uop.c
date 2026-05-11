@@ -68,6 +68,7 @@ fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop) {
   u64 uop_loc = term_val(uop);
 
   ITRS++;
+  multi_emit(RULE_DUP_UOP, MULTI_FORK, (u64)uop, 0, lab);
 
   // Two new heap blocks for the duplicated UOPs (one per projection).
   u64 u0 = heap_alloc(arity);

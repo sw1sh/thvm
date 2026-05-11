@@ -1400,12 +1400,45 @@ typedef struct {
 #define MULTI_PRUNE  5  // ERA absorbs neighbour: dead branch
 #define MULTI_PLUMB  6  // pure sharing housekeeping (DUP-VAR, DUP-DP)
 
-// Rule kinds.  Extend as additional interact_* are wired up; the
-// numeric values are an internal enum, not an ABI -- the WL side
-// will eventually decode by symbolic name supplied alongside.
-#define RULE_APP_LAM       0  // beta
-// (RULE_APP_ERA, RULE_DUP_SUP_ANN, RULE_DUP_SUP_COM, ... follow as
-// the family classification table in §4 of the plan is wired up.)
+// Rule kinds.  One per `src/interact/<name>.c`; numeric values are
+// an internal enum (not an ABI) -- the WL side will eventually decode
+// by symbolic name supplied alongside.  `DUP_SUP` splits in two
+// because the same .c file emits different (family, rule) pairs for
+// the same-label (annihilate -> MULTI_MERGE) and different-label
+// (commute -> MULTI_SPLIT) cases.  Inline ITRS++ sites in
+// `src/wnf/_.c` (e.g. OP2-NUM-NUM, MAT-CTR pattern matches) are
+// *not* covered yet -- a follow-up.
+#define RULE_APP_LAM         0  // beta
+#define RULE_APP_ERA         1
+#define RULE_APP_SUP         2
+#define RULE_APP_BRI         3
+#define RULE_APP_PRI         4
+#define RULE_APP_MAT_SUP     5
+#define RULE_ANN_LAM         6
+#define RULE_ANN_BRI         7
+#define RULE_DUP_LAM         8
+#define RULE_DUP_BRI         9
+#define RULE_DUP_CTR        10
+#define RULE_DUP_APP        11
+#define RULE_DUP_MAT        12
+#define RULE_DUP_OP2        13
+#define RULE_DUP_ERA        14
+#define RULE_DUP_NUM        15
+#define RULE_DUP_TEN        16
+#define RULE_DUP_UOP        17
+#define RULE_DUP_ANY        18
+#define RULE_DUP_SUP_ANN    19  // same-label annihilate -> MULTI_MERGE
+#define RULE_DUP_SUP_COM    20  // different-label commute -> MULTI_SPLIT (stuck)
+#define RULE_OP2_SUP        21
+#define RULE_OP2_NUM_SUP    22
+#define RULE_DSU_NUM        23
+#define RULE_DSU_SUP        24
+#define RULE_DSU_ERA        25
+#define RULE_DDU_NUM        26
+#define RULE_DDU_SUP        27
+#define RULE_DDU_ERA        28
+#define RULE_UOP_ASSIGN     29
+#define RULE_UOP_KERNEL     30
 
 typedef struct MultiEvent {
     u64 id;            // monotone; == ITRS at the point this rule fired

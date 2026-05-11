@@ -15,6 +15,7 @@
 
 fn Term interact_dup_op2(u32 lab, u64 loc, u8 side, Term op2) {
   ITRS++;
+  multi_emit(RULE_DUP_OP2, MULTI_FORK, (u64)op2, 0, lab);
   u64 a_loc = term_val(op2);
   u32 a_ext = term_ext(op2);
   u64 r0_loc = heap_alloc(2);

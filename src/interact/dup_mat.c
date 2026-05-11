@@ -16,6 +16,7 @@
 
 fn Term interact_dup_mat(u32 lab, u64 loc, u8 side, Term mat) {
   ITRS++;
+  multi_emit(RULE_DUP_MAT, MULTI_FORK, (u64)mat, 0, lab);
   u64 a_loc = term_val(mat);
   u32 a_ext = term_ext(mat);
   u64 r0_loc = heap_alloc(2);
