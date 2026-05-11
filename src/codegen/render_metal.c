@@ -26,12 +26,113 @@ static int rmt_collect_conv2d_info(KernelEntry const *ke,
   return out->threads > 0 && out->threads <= 256;
 }
 
+// DAG-mode dispatch shape: derive (groups, threads) from the lifted
+// UOp DAG's RANGE-leaf axis types/extents, mirroring the render_uop.c
+// default-parallelise convention exactly so the launched grid covers
+// the kernel's `tid` decode with no over/under-launch:
+//   - promoted output axes  (KAX_LOOP)  -> the flat `tid` index range
+//   - in-thread loops       (KAX_UPCAST / KAX_UNROLL / KAX_REDUCE)
+//                                       -> do NOT contribute to `tid`
+//   - threadgroup-local     (KAX_LOCAL) -> threadgroup size
+//   - threadgroup-collective(KAX_GROUP_REDUCE) -> threadgroup size
+// Returns 1 with (groups, threads) on success; 0 if the DAG has no
+// axes / overflow / a threadgroup dim that exceeds the hw cap.
+//
+// This path runs ONLY for kernels with cached_lift.store_root != 0
+// (the production lifted-DAG kernels): kernel_apply_opt mutates the
+// DAG (not ke->schedule->applied_opts, which stays empty), so the
+// applied_opts-reading tile path would compute the pre-opt grid.
+static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
+                                  u32 *threads_x) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                               exts, MAX_AXES);
+  if (n == 0) return 0;
+  u64 total = 1;            // product of promoted-LOOP output extents
+  u64 local_total = 1;      // product of KAX_LOCAL extents
+  u32 group_reduce_extent = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (exts[i] == 0) return 0;
+    switch (types[i]) {
+      case KAX_LOOP:         total *= (u64)exts[i]; break;
+      case KAX_LOCAL:        local_total *= (u64)exts[i]; break;
+      case KAX_GROUP_REDUCE: group_reduce_extent = exts[i]; break;
+      // KAX_UPCAST / KAX_UNROLL / KAX_REDUCE: in-thread, not in `tid`.
+      default: break;
+    }
+  }
+  if (total == 0 || total > 0xFFFFFFFFu) return 0;
+  u32 groups, threads;
+  if (group_reduce_extent != 0) {
+    if (group_reduce_extent > 256) return 0;
+    if (total > 0xFFFFFFFFu) return 0;
+    groups  = (u32)total;
+    threads = group_reduce_extent;
+  } else if (local_total > 1) {
+    if (local_total > 1024) return 0;     // Apple maxTotalThreadsPerTG
+    // `tid` ranges over total*local_total threads (groups*threads); the
+    // renderer decodes every output axis from `tid` directly, so the
+    // threadgroup grouping only affects occupancy, not correctness.
+    if (total > 0xFFFFFFFFu / local_total) return 0;
+    threads = (u32)local_total;
+    u64 g = (total + local_total - 1) / local_total;
+    if (g == 0 || g > 0xFFFFFFFFu) return 0;
+    groups = (u32)g;
+  } else {
+    threads = total < 256 ? (u32)total : 256u;
+    groups  = (u32)((total + (u64)threads - 1) / (u64)threads);
+  }
+  if (groups == 0 || threads == 0) return 0;
+  if (groups_x  != NULL) *groups_x  = groups;
+  if (threads_x != NULL) *threads_x = threads;
+  return 1;
+}
+
+// True iff the lifted DAG carries any per-axis OPT-class axis
+// (UPCAST / UNROLL / LOCAL / GROUP_REDUCE) -- i.e. kernel_apply_opt
+// (DAG mode) ran.  The conv2d-flat dispatch reader keys its
+// outputs_per_thread off ke->schedule->applied_opts (empty in DAG
+// mode), so it would mis-size; bail to the generic DAG path instead.
+static int rmt_dag_has_opt_axes(KernelEntry const *ke) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                               exts, MAX_AXES);
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] == KAX_UPCAST || types[i] == KAX_UNROLL
+        || types[i] == KAX_LOCAL || types[i] == KAX_GROUP_REDUCE) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
   if (ke == NULL) return 0;
   // Metal hardware caps buffer attributes at index 30; reject
   // kernels that won't render (matches the renderer's reject).
   if (ke->n_inputs > 30) return 0;
+  // DAG-mode + per-axis OPTs present (hand-coded-opts / autotune ran
+  // and mutated the DAG): the conv2d-flat / scalar-tile readers can't
+  // see those (they key off the empty applied_opts log), so derive
+  // (groups, threads) straight from the DAG's axis types.  Skip when
+  // a TC matmul template is in play -- that binds its own grid.
+  {
+    Term sroot = ke->cached_lift.store_root;
+    int tc_template = 0;
+    if (sroot != 0 && term_tag(sroot) == TAG_UOP
+        && term_ext(sroot) == UOP_STORE) {
+      Term v = heap_read(term_val(sroot) + 2);
+      if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_OPT
+          && uop_opt_kind(v) == UOP_OPT_TC) tc_template = 1;
+    }
+    if (!tc_template && rmt_dag_has_opt_axes(ke)
+        && rmt_dag_dispatch_shape(ke, groups_x, threads_x)) {
+      return 1;
+    }
+  }
   // Conv2D flat: dispatch (c_out * patches / outputs_per_thread)
   // total threads divided into `threads` per group.
   TileConv2DInfo conv;
