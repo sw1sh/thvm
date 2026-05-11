@@ -243,14 +243,24 @@ static int hand_opt_is_tileable_reduce(KernelEntry const *ke,
   u32 r = hand_opt_reduce_axis(ax);
   if (r == 0xFFFFFFFFu) return 0;
   if (hand_opt_n_loop_axes(ax) < 2) return 0;
-  // Gate the deep conv tiling on a large contraction (>= 256) AND a wide
-  // contiguous spatial axis (>= 16, the last output axis): only then does
-  // the cOut register-block + wOut-LOCAL coalescing pay for the lost
-  // GLOBAL-grid parallelism.  The cheap convs (K ~ 25) and the late-stage
-  // small-spatial convs (wOut 6..8) regress under it.
-  if (ax->extent[r] < 256) return 0;
+  // Gate the deep conv tiling on a reasonably large contraction (K >=
+  // 128) AND a non-trivial contiguous spatial axis (>= 4).  The cheap
+  // first conv (K ~ 25) stays excluded.  The late-stage small-spatial
+  // convs (wOut 6, 8) now enter the deep tiling path -- when wOut is
+  // too small for the dual-UPCAST + outer-LOCAL coalescing (wOut/2 < 8
+  // would leave fewer than 8 threads per group), the case-2 UPCAST and
+  // case-3 LOCAL passes pick narrower factors adaptively (single cOut
+  // UPCAST + full-wOut LOCAL).
+  if (ax->extent[r] < 128) return 0;
   u32 c_axis = hand_opt_last_output_axis(ax);
-  if (c_axis == 0xFFFFFFFFu || ax->extent[c_axis] < 16) return 0;
+  if (c_axis == 0xFFFFFFFFu || ax->extent[c_axis] < 4) return 0;
+  // cOut must be UPCAST-able (>=4) so the case-2 register block has
+  // enough M to amortise the conv-input load.
+  u32 first = 0xFFFFFFFFu;
+  for (u32 i = 0; i < ax->n; i++) {
+    if (ax->kax_type[i] == KAX_LOOP) { first = i; break; }
+  }
+  if (first == 0xFFFFFFFFu || ax->extent[first] < 4) return 0;
   return 1;
 }
 
@@ -378,20 +388,19 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     }
     // Second UPCAST on the contiguous spatial axis (wOut).  After the M
     // UPCAST the axis indices have shifted; re-snapshot.  Try factor 2
-    // (every supported wOut is even after the standard convs); skip if
-    // the LOCAL pass would have nothing left (wOut/Uw >= 4 keeps a
-    // decent threadgroup size after the LOCAL split).  Cap upcast_size
-    // at 32 (matches tinygrad's budget).
+    // when (a) upcast_size still has room (< 32), and (b) the wOut
+    // OUTER half after the split would still be >= 8 -- otherwise the
+    // subsequent LOCAL pass can't fill a useful threadgroup on it and
+    // we're better off skipping the wOut UPCAST so LOCAL takes the
+    // FULL wOut.  This keeps the small-spatial late convs (wOut 6, 8)
+    // on the single-UPCAST + full-wOut-LOCAL path.
     if (hand_opt_snapshot_axes(ke, &ax)
         && hand_opt_upcast_size(&ax) < 32) {
       u32 c_axis = hand_opt_last_output_axis(&ax);
       if (c_axis != 0xFFFFFFFFu) {
         u32 ext = ax.extent[c_axis];
-        // factor 2 only -- conservative.  factor 4 would push register
-        // pressure too high (cOut 4 * wOut 4 = 16 accumulators) without
-        // a corresponding K bandwidth win.
         u32 f = 2;
-        if (ext % f == 0 && ext / f >= 4) {
+        if (ext % f == 0 && ext / f >= 8) {
           KOpt opt = { KOP_UPCAST, (u8)c_axis, f };
           if (kernel_apply_opt(ke, opt)) n_applied++;
         }
