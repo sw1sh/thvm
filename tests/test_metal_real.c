@@ -622,15 +622,15 @@ int main(void) {
     }
   }
 
-  // === Deep-tiled reduce parity: a {8,256,32} -> {8,256} reduce ===
-  // output_loop_product = 8*256 = 2048 >= 1024, so kernel_hand_coded_opts
-  // runs its UPCAST *loop* (multiple KAX_UPCAST splits, spread across the
-  // 256 and 8 output axes) AND the multi-axis LOCAL pass (>=2 KAX_LOCAL
-  // axes filling a <=256-thread threadgroup).  Exercises piece 1's
-  // multi-LOCAL `tt`-decode + piece 2's richer conv-style tiling
-  // end-to-end -- this is the heuristic shape the BS=512 beautiful_mnist
-  // conv-matmul reduce kernels take.  Must stay bit-parity with the CPU
-  // backend (the same correctness gate as the matmul/conv parity tests).
+  // === Bigger multi-output reduce parity: {8,256,32} -> {8,256} ===
+  // output_loop_product 2048 >= 1024 -- exercises kernel_hand_coded_opts
+  // on a multi-output-axis reduce (UPCAST + LOCAL split off the inner
+  // output axis, the generic accumulator emit path).  Must stay
+  // bit-parity with the CPU backend (the same correctness gate as the
+  // matmul/conv parity tests).  The deep conv-style tiling (multi-UPCAST
+  // + multi-LOCAL) is gated on OPT_CONV kernels -- see
+  // render-uop/two-local-axes-tt-decode for the xcrun-compiled
+  // multi-LOCAL renderer check.
   TEST_BEGIN("metal-real/deep-tiled-reduce-parity");
   {
     Shape sdt = {0}; sdt.ndim = 3; sdt.dims[0] = 8; sdt.dims[1] = 256;

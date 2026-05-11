@@ -44,19 +44,23 @@
 //      OPT(_, TC, 0) inside cg_emit_via_uop, so this is mostly a
 //      re-affirm; kept for the explicit `applied_opts` record on the
 //      schedule path + future parallel-TC dispatch work.)
-//   2. UPCAST -- for a TILEABLE reduce kernel ({B,cOut,hOut,wOut}-
-//      shaped output + (cin,kh,kw) reduce nest, i.e. >=1 KAX_REDUCE +
-//      >=2 KAX_LOOP output axes -- the BS=512 beautiful_mnist conv
-//      kernels), run tinygrad's UPCAST loop: while output_loop_product
-//      >= 1024 and upcast_size < 16, split the INNERMOST KAX_LOOP axis
-//      that divides 4 (then 2) -- repeating naturally spreads the
-//      upcast across axes.  Plus the "if nothing upcasted, do one
-//      easy UPCAST 4" fallback.  For a non-tileable kernel keep the
-//      prior conservative one-axis pass (4 then 2 on the last axis).
-//   3. LOCAL -- for a tileable reduce kernel, tinygrad's "local
-//      groups" pass: scan KAX_LOOP axes innermost->outermost, split
-//      each by the largest factor in {32,16,8,4,3,2} that divides and
-//      keeps prod(LOCAL extents) <= 256, up to 3 LOCAL axes.  For a
+//   2. UPCAST -- for a TILEABLE reduce kernel (OPT_CONV-marked conv-
+//      matmul kernel with a multi-axis output + a reduce nest -- the
+//      BS=512 beautiful_mnist conv kernels, which lower through
+//      render_uop.c's rmu_emit_conv template), run tinygrad's UPCAST
+//      loop: while output_loop_product >= 1024 and upcast_size < 16,
+//      split the INNERMOST KAX_LOOP axis that divides 4 (then 2) --
+//      repeating naturally spreads the upcast across axes.  Plus the
+//      "if nothing upcasted, do one easy UPCAST 4" fallback.  For a
+//      non-tileable kernel keep the prior conservative one-axis pass
+//      (4 then 2 on the last axis) -- the generic accumulator path
+//      that maxpool / BatchNorm reductions lower through has only been
+//      validated on a one-UPCAST-one-LOCAL output.
+//   3. LOCAL -- for a tileable conv kernel, tinygrad's "local groups"
+//      pass: scan KAX_LOOP axes innermost->outermost, split each by
+//      the largest factor in {32,16,8,4,3,2} that divides and keeps
+//      prod(LOCAL extents) <= 256, up to 3 LOCAL axes (the renderer's
+//      multi-LOCAL `tt`-decode -- piece 1 -- handles >=2).  For a
 //      non-tileable kernel keep the prior single-LOCAL split.
 //   4. GROUP -- SKIPPED for v3: the GROUP_REDUCE renderer + dispatch
 //      readers were validated only on the un-UPCAST'd reduce-tail
@@ -200,14 +204,37 @@ static u32 hand_opt_n_loop_axes(HandOptAxes const *ax) {
   return n;
 }
 
-// True iff this is a "reduce kernel" we want to tile deeply: it has a
-// reduction (>=1 KAX_REDUCE axis) AND a multi-axis output (>=2 KAX_LOOP
-// output axes) -- the shape the BS=512 beautiful_mnist conv-matmul
-// kernels take (output {B, cOut, hOut, wOut}, reduce nest (cin,kh,kw)).
-// Single-output-axis reduces (e.g. row softmax sums) get the simpler
-// one-UPCAST-one-LOCAL treatment to stay conservative.
-static int hand_opt_is_tileable_reduce(HandOptAxes const *ax) {
-  return hand_opt_reduce_axis(ax) != 0xFFFFFFFFu
+// True iff the lifted DAG's STORE value is OPT(_, CONV, _) -- the
+// im2col `_pool` conv-matmul marker installed by uop_recognise_conv.
+// These kernels lower through render_uop.c's rmu_emit_conv template,
+// which handles a multi-UPCAST + multi-LOCAL output tiling correctly
+// (the (cin,kh,kw) reduce nest is recovered + nested, the output axes
+// promoted/threadbound).  Other reduce kernels (maxpool, BatchNorm
+// reductions) lower through the generic accumulator path, which the
+// surgical suite has only validated on a one-UPCAST-one-LOCAL output;
+// deeper tiling there can produce an axis order the generic path
+// emits out of dependency order ("use of undeclared identifier") and
+// the kernel falls to the slow per-element interpreter.  So the deep
+// conv-style tiling (case 2/3's "tileable" arms) is gated on this.
+static int hand_opt_is_conv_kernel(KernelEntry const *ke) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  Term sroot = ke->cached_lift.store_root;
+  if (term_tag(sroot) != TAG_UOP || term_ext(sroot) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(sroot) + 2);
+  return term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+      && uop_opt_kind(value) == UOP_OPT_CONV;
+}
+
+// True iff this is a conv-matmul kernel we want to tile deeply: the
+// OPT_CONV marker is present AND the output is multi-axis (>=2 KAX_LOOP)
+// AND there's at least one reduce axis -- the shape the BS=512
+// beautiful_mnist conv-matmul kernels take (output {B, cOut, hOut, wOut}
+// or flattened {cOut, B*hOut*wOut}, reduce nest (cin,kh,kw)).  Everything
+// else gets the conservative one-UPCAST-one-LOCAL treatment.
+static int hand_opt_is_tileable_reduce(KernelEntry const *ke,
+                                       HandOptAxes const *ax) {
+  return hand_opt_is_conv_kernel(ke)
+      && hand_opt_reduce_axis(ax) != 0xFFFFFFFFu
       && hand_opt_n_loop_axes(ax) >= 2;
 }
 
@@ -287,7 +314,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   }
 
   if (!hand_opt_snapshot_axes(ke, &ax)) return n_applied;
-  int tileable = hand_opt_is_tileable_reduce(&ax);
+  int tileable = hand_opt_is_tileable_reduce(ke, &ax);
 
   // ---- 2. UPCAST: pull floats into per-thread registers ----
   // tinygrad's "potentially do more upcasts" loop (heuristic.py
