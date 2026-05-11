@@ -1378,6 +1378,48 @@ typedef struct {
 
 #define HOT_COUNTER_COUNT 15
 
+// === MultiEvent: multicomputation reduction trace ===
+//
+// See docs/multicomputation.md (conceptual reading) and
+// docs/plans/multicomputation_trace.md (build trajectory).
+//
+// Off by default.  Build with -DTHVM_TRACE to enable; even in that
+// build, the runtime flag CURRENT_CTX->trace must be set for events
+// to be recorded.  Without -DTHVM_TRACE the multi_emit() macro
+// expands to ((void)0) and no TContext fields exist; every
+// interact_* / heap_* compiles to the same instructions as today.
+// The default-build acceptance gate is: `bench-train` / `bench-atp`
+// / AOT match their pre-trace numbers within noise.
+
+// Family classification (docs/plans/multicomputation_trace.md §4).
+#define MULTI_TERM   0  // within-branch compute event (states-graph edge)
+#define MULTI_SLIDE  1  // re-foliation (APP-SUP commute, cnf lift, INC rules)
+#define MULTI_FORK   2  // 1 -> 2 (seeded SUP, DUP-CTR/LAM/NOD)
+#define MULTI_SPLIT  3  // DUP-SUP distinct labels: branchial cross product
+#define MULTI_MERGE  4  // DUP-SUP same label: branches reconverge
+#define MULTI_PRUNE  5  // ERA absorbs neighbour: dead branch
+#define MULTI_PLUMB  6  // pure sharing housekeeping (DUP-VAR, DUP-DP)
+
+// Rule kinds.  Extend as additional interact_* are wired up; the
+// numeric values are an internal enum, not an ABI -- the WL side
+// will eventually decode by symbolic name supplied alongside.
+#define RULE_APP_LAM       0  // beta
+// (RULE_APP_ERA, RULE_DUP_SUP_ANN, RULE_DUP_SUP_COM, ... follow as
+// the family classification table in §4 of the plan is wired up.)
+
+typedef struct MultiEvent {
+    u64 id;            // monotone; == ITRS at the point this rule fired
+    u8  rule;          // RULE_*
+    u8  family;        // MULTI_*
+    u8  _pad[6];       // align next u64
+    u64 term_a;        // active-pair Term words, captured pre-rewrite
+    u64 term_b;
+    u32 delta_label;   // SUP/DUP label (FORK/SPLIT/MERGE only; else 0)
+    u32 _pad2;
+    // v1+ adds: loc_a/loc_b (heap locs), n_alloc/alloc_base (allocated
+    // products), consumed[]/produced[] (WireIds), cyl_off/cyl_len.
+} MultiEvent;
+
 // === TContext ===
 // Bundles every piece of mutable runtime state into one struct so users
 // can hold multiple coexisting heaps via TContextNew[] / TInContext[].
@@ -1442,6 +1484,17 @@ typedef struct TContext {
 
     /* Hot-path counters (see HotCounters). */
     HotCounters hot;
+
+#ifdef THVM_TRACE
+    /* Multicomputation trace (see MultiEvent above and
+       docs/plans/multicomputation_trace.md).  Only present when the
+       binary is built with -DTHVM_TRACE; even then, events are
+       appended only while the runtime flag `trace` is non-zero. */
+    MultiEvent *multi_events;
+    u64         multi_events_len;
+    u64         multi_events_cap;
+    u8          trace;
+#endif
 } TContext;
 
 #define THVM_MAX_BACKENDS 4
@@ -1502,6 +1555,34 @@ extern _Thread_local WnfThreadState *CURRENT_WNF_STATE;
 #define HOT_JIT_REPLAY_ASSIGNS  (CURRENT_CTX->hot.jit_replay_assigns)
 #define HOT_JIT_GRAPH_RUNS      (CURRENT_CTX->hot.jit_graph_runs)
 #define HOT_JIT_GRAPH_DISPATCHES (CURRENT_CTX->hot.jit_graph_dispatches)
+
+// Multicomputation trace (see MultiEvent above).  All gated by
+// THVM_TRACE: the macro expands to ((void)0) by default, so call
+// sites in interact_* / heap_* contribute zero instructions to a
+// default build.  Even in a THVM_TRACE build the recorded path runs
+// only when CURRENT_CTX->trace is non-zero, behind a single
+// well-predicted branch.
+#ifdef THVM_TRACE
+#define MULTI_TRACE_ON          (CURRENT_CTX->trace)
+fn void multi_emit_body(u8 rule, u8 family,
+                        u64 term_a, u64 term_b,
+                        u32 delta_label);
+#define multi_emit(rule, family, term_a, term_b, delta_label)         \
+    do {                                                              \
+        if (__builtin_expect(MULTI_TRACE_ON, 0)) {                    \
+            multi_emit_body((u8)(rule), (u8)(family),                 \
+                            (u64)(term_a), (u64)(term_b),             \
+                            (u32)(delta_label));                      \
+        }                                                             \
+    } while (0)
+fn void                multi_trace_init(u64 initial_cap);
+fn void                multi_trace_reset(void);
+fn void                multi_trace_free(void);
+fn u64                 multi_trace_count(void);
+fn const MultiEvent  * multi_trace_get(u64 i);
+#else
+#define multi_emit(rule, family, term_a, term_b, delta_label) ((void)0)
+#endif
 
 // Replaces the old CURRENT_BACKEND global -- "default backend for
 // newly allocated tensors only".  Per-tensor ops use ten->backend.

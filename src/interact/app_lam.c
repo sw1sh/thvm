@@ -35,6 +35,7 @@
 //     the per-instance materialize cost is bounded.
 fn Term interact_app_lam(Term lam, Term arg) {
   ITRS++;
+  multi_emit(RULE_APP_LAM, MULTI_TERM, (u64)lam, (u64)arg, 0);
   u32  lam_ext = term_ext(lam);
   u64  loc     = term_val(lam);
   Term body    = heap_read(loc);

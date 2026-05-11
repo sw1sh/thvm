@@ -124,6 +124,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // Process-global hot-path counters for WL-side debugging.  Single
 // file-scope statics; downstream consumers `HOT_*++` directly.
 #include "instrument/hot_counters.c"
+// Multicomputation reduction trace.  Self-gated by `#ifdef THVM_TRACE`:
+// in default builds the entire translation unit is empty and the
+// `multi_emit(...)` macro at every call site is `((void)0)`.  See
+// docs/plans/multicomputation_trace.md and src/instrument/multi.c.
+#include "instrument/multi.c"
 
 // === lam/ ===
 // Side tables tied to LAM heap locs (shape annotation, future:

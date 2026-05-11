@@ -1,6 +1,11 @@
 # Multicomputation trace -- a branch-cylinder-tagged token-event log
 
-Status: proposal.  Conceptual companion:
+Status: **M0 spike landed** (one rule wired -- `interact_app_lam` --
+plus the full compile-time / runtime gating discipline, and a C-side
+test that passes in both build variants); M1-M4 + the WL surface +
+the remaining `interact_*` rules are still open.  See
+[M0 spike outcome](#m0-spike-outcome) below for what shipped and what
+deliberately did not.  Conceptual companion:
 [docs/multicomputation.md](../multicomputation.md) reads the
 SUP / DUP / INC machinery through Wolfram's multicomputation paradigm
 (a SUP-term is a *slice*; reduction is *slice evolution*; the
@@ -484,3 +489,106 @@ Three concrete payoffs once M0-M3 are in:
    [docs/multicomputation.md, §5](../multicomputation.md)) becomes
    showable rather than just statable.
 
+## 10. M0 spike outcome
+
+A minimum-viable vertical slice of M0 landed.  The discipline holds
+end-to-end; the next-step shape is clear.
+
+### What landed
+
+- **The struct + constants + gating macros** live in
+  [src/thvm.h](../../src/thvm.h) alongside `HotCounters`:
+  `MultiEvent`, the `MULTI_TERM / MULTI_SLIDE / MULTI_FORK /
+  MULTI_SPLIT / MULTI_MERGE / MULTI_PRUNE / MULTI_PLUMB` family
+  constants, the `RULE_APP_LAM` rule constant (just one for the
+  spike), and the `multi_emit(...)` macro with its two-tier gate
+  (`#ifdef THVM_TRACE` + `if (__builtin_expect(MULTI_TRACE_ON, 0))`).
+  Without `-DTHVM_TRACE`, `multi_emit` is literally `((void)0)`; the
+  per-context fields don't exist on `TContext`.
+- **The runtime side-table** is one file:
+  [src/instrument/multi.c](../../src/instrument/multi.c) -- holding
+  `multi_emit_body`, `multi_events_push`, `multi_trace_init`,
+  `multi_trace_reset`, `multi_trace_free`, `multi_trace_count`,
+  `multi_trace_get`.  Everything inside the file is wrapped in
+  `#ifdef THVM_TRACE`, so the translation unit is empty in default
+  builds.  Hooked into the runtime by one line in
+  [src/thvm.c](../../src/thvm.c) right after the existing
+  `hot_counters.c` include.
+- **One rule wired up**:
+  [src/interact/app_lam.c](../../src/interact/app_lam.c) calls
+  `multi_emit(RULE_APP_LAM, MULTI_TERM, (u64)lam, (u64)arg, 0);`
+  immediately after `ITRS++`.  This is the vertical-slice proof; the
+  remaining ~60 `interact_*` rules will follow the same pattern.
+- **Surgical test** at
+  [tests/test_multi_trace.c](../../tests/test_multi_trace.c), built
+  twice from the same source via two Makefile targets:
+  `bin/test_multi_trace` (default CFLAGS) and `bin/test_multi_trace_on`
+  (`-DTHVM_TRACE`).  Default-build coverage: 2/2.  Trace-build
+  coverage: 22/22 -- runtime-flag off, runtime-flag on, mid-run
+  toggle, capacity growth.
+
+### Acceptance gate verified
+
+`make bin/test_app_lam bin/test_multi_trace` (both default CFLAGS):
+the inlined `interact_app_lam` portion of `_wnf` has *4022 instructions
+in both* binaries, and a `diff` of the disassembly (stripped of
+absolute addresses) shows differences only in immediate operands
+that reflect overall binary layout -- the opcode sequence is
+character-for-character identical.  `nm bin/test_multi_trace | grep
+multi_emit_body` returns nothing; `nm bin/test_multi_trace_on | grep
+multi_emit_body` returns one symbol.  The compile-time gating
+discipline holds: a default-build reducer pays zero instructions.
+
+### Simplifications taken vs the original plan
+
+- **One file, not a directory.**  The plan had
+  `src/instrument/multi/{event.h,emit.h,emit.c,push.c,snapshot.c}`;
+  the implementation collapsed those into a single
+  [src/instrument/multi.c](../../src/instrument/multi.c) mirroring the
+  [src/instrument/hot_counters.c](../../src/instrument/hot_counters.c)
+  precedent.  Split it back out if the file grows past ~300 lines.
+- **`emit.h` macro lives in `src/thvm.h`.**  Header-side declarations
+  in this codebase live in `thvm.h` (next to where `HOT_*` macros
+  live), not under `src/instrument/`.  The plan's
+  `instrument/multi/emit.h` is therefore the relevant block of
+  `src/thvm.h`.
+- **Slimmer struct for v0.**  `MultiEvent` carries `id, rule, family,
+  term_a, term_b, delta_label` only.  `loc_a / loc_b / n_alloc /
+  alloc_base / consumed[] / produced[] / cyl_off / cyl_len` are not
+  in the struct yet -- they land at M1 (wire provenance) and M3
+  (cylinders).
+- **Id semantics**: `e->id = ITRS - 1` rather than `ITRS`.  The
+  convention is `ITRS++` at the head of every `interact_*` then
+  emit; capturing `ITRS - 1` makes id 0 the very first event of the
+  session, which lines up with the obvious `itrs_before` reading.
+- **No WL surface yet.**  `TMulticompTrace[expr]` and friends are
+  deferred to a follow-up; the M0 trace is consumed directly by the
+  C test through the `multi_trace_*` API.
+- **No `WIRE_PROV_BUMP` in heap mutations yet.**  M1 territory.
+
+### Followups, in dependency order
+
+1. **Extend the rule enum and wire the remaining `interact_*`.**
+   Add `RULE_APP_ERA`, `RULE_APP_SUP`, `RULE_DUP_LAM`,
+   `RULE_DUP_ERA`, `RULE_DUP_SUP_ANN`, `RULE_DUP_SUP_COM`,
+   `RULE_ERA_*`, `RULE_OP2_*`, `RULE_MAT_*`, `RULE_INC_*`,
+   `RULE_USE_*`, `RULE_EQL_*`, `RULE_AND_*`, `RULE_OR_*`, etc.
+   Family classification per the §4 table.  One-line `multi_emit(...)`
+   addition to each `src/interact/*.c` (next to its `ITRS++`).
+   Validate on a deliberately bad SAT encoding (independent variables
+   given the same label, per
+   [docs/research/sat_solver_paths.md](../research/sat_solver_paths.md))
+   that a spurious `MULTI_MERGE` shows up.
+2. **WL surface.**  Add `thvm_wl_multi_trace_*` LibraryLink wrappers
+   to [wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
+   mirroring the `thvm_wl_hot_counters_*` pattern, and a new module
+   `wl/THVMLink/Kernel/Multicomputation.wl` with `TMulticompTrace[expr]`
+   that snapshots `EVENTS[]` into a list of associations.  Requires
+   the WL bridge to be built with `-DTHVM_TRACE` (separate dylib
+   variant -- mirroring how the metal bridge is conditionally built).
+3. **M1: wire provenance.**  Add `wire_prov[]` to `TContext`,
+   `WIRE_PROV_BUMP(loc)` macro at every `heap_set` / `heap_alloc`
+   site, populate `consumed[]` / `produced[]` on `MultiEvent`.
+   Re-run the disassembly gate.
+4. **M2-M4** per the existing milestone list (branch tree, cylinders,
+   foliations).

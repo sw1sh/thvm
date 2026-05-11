@@ -112,7 +112,9 @@ TESTS := \
   $(BIN)/test_aot_emit \
   $(BIN)/test_aot_e2e \
   $(BIN)/test_aot_e2e_bench \
-  $(BIN)/test_aot_build
+  $(BIN)/test_aot_build \
+  $(BIN)/test_multi_trace \
+  $(BIN)/test_multi_trace_on
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -274,6 +276,16 @@ $(BIN)/test_aot_metal: tests/test_aot_metal.c $(SRC) $(METAL_OBJ) $(METAL_LIBPAT
 
 $(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+# Multicomputation trace -- built TWICE from the same source so we
+# can verify both halves of the gating discipline.  test_multi_trace
+# uses default CFLAGS (no -DTHVM_TRACE), so the multi_emit() call sites
+# in src/interact/*.c compile to ((void)0) and src/instrument/multi.c
+# is empty.  test_multi_trace_on adds -DTHVM_TRACE, so the runtime
+# flag and all multi_trace_* API are present.  Both binaries must
+# pass; see docs/plans/multicomputation_trace.md.
+$(BIN)/test_multi_trace_on: tests/test_multi_trace.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_TRACE -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(TEST_LDFLAGS)
