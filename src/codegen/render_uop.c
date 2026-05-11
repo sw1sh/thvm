@@ -1601,6 +1601,18 @@ static int rmu_detect_conv(Term store, Term *out_red_value) {
 //
 // Returns 1 on success; 0 if the shape can't be emitted through this
 // template and the caller should fall back to the generic accumulator.
+// Conv vectorized-M substitution: replace the UOP_RANGE leaf at axis_id
+// `m_axis` with the integer constant `m_val`.  Used by rmu_emit_conv to
+// register-block the conv-matmul M axis -- N separate accumulators sharing
+// one conv-input load per reduce iteration.
+typedef struct { u32 m_axis; u32 m_val; } RmuConvMSubstCtx;
+static Term rmu_conv_m_subst_rule(Term t, void *user) {
+  RmuConvMSubstCtx *cx = (RmuConvMSubstCtx *)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) return 0;
+  if ((u32)term_val(heap_read(term_val(t) + 0)) != cx->m_axis) return 0;
+  return uop_const(DT_INT32, cx->m_val);
+}
+
 static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   if (term_tag(conv_red) != TAG_UOP || term_ext(conv_red) != UOP_REDUCE) return 0;
@@ -1655,25 +1667,73 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
     fprintf(fp, "/* CONV2D template (KRED=%u split=", red_extent);
     for (u32 i = 0; i < sp.n; i++) fprintf(fp, "%s%u", i ? "x" : "", sp.extent[i]);
     fputs(") */\n", fp);
+    // Register-block the conv-matmul M axis: if one of the output axes is
+    // a KAX_UPCAST of modest extent (cOut, the axis the weight read
+    // depends on but the conv-input read does not -- hand_opts puts the
+    // UPCAST there), emit N separate accumulators and, inside the reduce
+    // nest, ONE conv-input load reused across all N (each scaled by its
+    // own weight element).  Without this the N-way #pragma-unroll'd output
+    // loop re-loads the conv input N times.  The N accumulator-updates are
+    // emitted as straight-line statements with the M-axis RANGE folded to
+    // a constant; the MSL compiler CSEs the (M-independent) conv-input
+    // load across them.
+    u32 m_axis = 0xFFFFFFFFu, m_ext = 0;
+    if (!RMU_TARGET_C) {
+      for (u32 i = 0; i < n_out; i++) {
+        Term r = out_ranges[i];
+        if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+        u32 at = (u32)term_val(heap_read(term_val(r) + 1));
+        if (at != KAX_UPCAST) continue;
+        u32 e = (u32)term_val(heap_read(term_val(r) + 2));
+        if (e < 2 || e > 16) continue;
+        m_axis = (u32)term_val(heap_read(term_val(r) + 0));
+        m_ext  = e;
+        break;
+      }
+    }
+    // Filtered output ranges (M axis removed) for the parallel-grid emit.
+    Term f_ranges[MAX_DIM]; u32 f_kinds[MAX_DIM]; u32 f_factors[MAX_DIM];
+    u32 f_n = 0;
+    for (u32 i = 0; i < n_out; i++) {
+      if (m_axis != 0xFFFFFFFFu) {
+        Term r = out_ranges[i];
+        if (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE
+            && (u32)term_val(heap_read(term_val(r) + 0)) == m_axis) continue;
+      }
+      f_ranges[f_n] = out_ranges[i];
+      f_kinds[f_n]  = out_kinds[i];
+      f_factors[f_n]= out_factors[i];
+      f_n++;
+    }
+    int vectM = (m_axis != 0xFFFFFFFFu);
     int needs_close[MAX_DIM] = {0};
-    u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
-                                           out_factors, n_out, depth, fp,
+    u32 body_depth = rmu_emit_output_loops(addr,
+                                           vectM ? f_ranges   : out_ranges,
+                                           vectM ? f_kinds    : out_kinds,
+                                           vectM ? f_factors  : out_factors,
+                                           vectM ? f_n : n_out, depth, fp,
                                            needs_close);
-    // Single accumulator outside ALL the reduce loops.
     char acc_name[32];
     snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
-    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    fprintf(fp, "float %s = ", acc_name);
-    rmu_emit_reduce_init(red_kind, fp);
-    fputs(";\n", fp);
-    // Decide which axes to #pragma-unroll: walk innermost (stride 1) ->
-    // outermost, unrolling while the cumulative unrolled iteration count
-    // stays within RMU_REDUCE_UNROLL_MAX -- so kh/kw straight-line into
-    // ~25 MAD ops but the larger cin loop stays rolled.  Once an axis
-    // can't be unrolled, no outer axis is either.
+    if (vectM) {
+      for (u32 k = 0; k < m_ext; k++) {
+        for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+        fprintf(fp, "float %s_%u = ", acc_name, k);
+        rmu_emit_reduce_init(red_kind, fp);
+        fputs(";\n", fp);
+      }
+    } else {
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      fprintf(fp, "float %s = ", acc_name);
+      rmu_emit_reduce_init(red_kind, fp);
+      fputs(";\n", fp);
+    }
+    // Decide which reduce axes to #pragma-unroll: walk innermost (stride 1)
+    // -> outermost, unrolling while the cumulative unrolled iteration count
+    // stays within RMU_REDUCE_UNROLL_MAX.
     int do_unroll[RMU_CONV_SPLIT_MAX] = {0};
     {
-      u64 prod = 1;
+      u64 prod = vectM ? (u64)m_ext : 1;
       for (u32 i = 0; i < sp.n; i++) {
         if ((u64)sp.extent[i] * prod <= RMU_REDUCE_UNROLL_MAX) {
           do_unroll[i] = 1; prod *= sp.extent[i];
@@ -1691,19 +1751,49 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
       rmu_emit_range_open(r, fp, loop_depth, RMU_NO_OPT);
       loop_depth++;
     }
-    for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
-    rmu_emit_reduce_combine(acc_name, red_kind, red_src2, fp);
+    if (vectM) {
+      for (u32 k = 0; k < m_ext; k++) {
+        RmuConvMSubstCtx mc = { m_axis, k };
+        UOpGraphRewriteRule mr[1] = { { "conv_m_subst", rmu_conv_m_subst_rule } };
+        Term rk = uop_graph_rewrite(red_src2, mr, 1, &mc);
+        for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+        if (red_kind == REDUCE_MAX) {
+          fprintf(fp, "%s_%u = fmax(%s_%u, ", acc_name, k, acc_name, k);
+          rmu_emit_term(rk, fp);
+          fputs(");\n", fp);
+        } else {
+          fprintf(fp, "%s_%u = %s_%u + ", acc_name, k, acc_name, k);
+          rmu_emit_term(rk, fp);
+          fputs(";\n", fp);
+        }
+      }
+    } else {
+      for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+      rmu_emit_reduce_combine(acc_name, red_kind, red_src2, fp);
+    }
     for (i32 i = (i32)sp.n - 1; i >= 0; i--) {
       loop_depth--;
       for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
       fputs("}\n", fp);
     }
-    // Final store.
-    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    fprintf(fp, "%s[", rmu_buf_name(buf));
-    rmu_emit_term(addr, fp);
-    fprintf(fp, "] = %s;\n", acc_name);
-    for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+    // Final store(s).
+    if (vectM) {
+      for (u32 k = 0; k < m_ext; k++) {
+        RmuConvMSubstCtx mc = { m_axis, k };
+        UOpGraphRewriteRule mr[1] = { { "conv_m_subst", rmu_conv_m_subst_rule } };
+        Term ak = uop_graph_rewrite(addr, mr, 1, &mc);
+        for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+        fprintf(fp, "%s[", rmu_buf_name(buf));
+        rmu_emit_term(ak, fp);
+        fprintf(fp, "] = %s_%u;\n", acc_name, k);
+      }
+    } else {
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      fprintf(fp, "%s[", rmu_buf_name(buf));
+      rmu_emit_term(addr, fp);
+      fprintf(fp, "] = %s;\n", acc_name);
+    }
+    for (i32 i = (i32)(vectM ? f_n : n_out) - 1; i >= 0; i--) {
       if (!needs_close[i]) continue;
       body_depth--;
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);

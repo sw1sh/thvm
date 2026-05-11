@@ -682,6 +682,65 @@ int main(void) {
     free(dt_src); free(dt_ref); free(dt_cpu); free(dt_gpu);
   }
 
+  // === 4D-output conv parity: BS-batched im2col-matmul conv ===
+  // Mirrors TConv2DIm2ColBatchedPool's strided-view `_pool` lowering with
+  // a 4-D output {cOut, B, hOut, wOut}: input {B,cIn,H,W} unfolded into a
+  // strided VIEW xCol6:{cIn,kh,kw,B,hOut,wOut} -> reshape {cIn*kh*kw,B,
+  // hOut,wOut}; weights {cOut,cIn,kh,kw} -> reshape {cOut, cIn*kh*kw};
+  // out4d = REDUCE_SUM_K(wExp * xExp).  Shape is sized so the deep conv
+  // tiling fires (K = cIn*kh*kw = 16*5*5 = 400 >= 256, wOut = 20 >= 16):
+  // hand_opts UPCASTs cOut by 8 and LOCALs wOut by 20, and render_uop's
+  // rmu_emit_conv emits the 8-way register-blocked accumulator.  GPU
+  // output must equal the CPU reference bit-tight (f32 tolerance).
+  TEST_BEGIN("metal-real/conv2-4d-output-parity");
+  {
+    enum { CB = 4, CCIN = 16, CCOUT = 8, CH = 24, CW = 24, CKH = 5, CKW = 5 };
+    enum { CHO = CH - CKH + 1, CWO = CW - CKW + 1 };  // 20 x 20
+    enum { CK = CCIN * CKH * CKW };                    // 400
+    enum { CXN = CB * CCIN * CH * CW, CWN = CCOUT * CCIN * CKH * CKW };
+    enum { CON = CCOUT * CB * CHO * CWO };             // 8*4*20*20 = 12800
+    f32 *cx = malloc((size_t)CXN * sizeof(f32));
+    f32 *cw = malloc((size_t)CWN * sizeof(f32));
+    for (u32 i = 0; i < (u32)CXN; i++) cx[i] = (f32)((i * 7 + 3) % 17) * 0.13f - 1.1f;
+    for (u32 i = 0; i < (u32)CWN; i++) cw[i] = (f32)((i * 5 + 1) % 13) * 0.07f - 0.4f;
+    // Reference: out[co][b][oh][ow] = sum_{ci,kh,kw} w[co][ci][kh][kw] *
+    //                                 x[b][ci][oh+kh][ow+kw]
+    f32 *cref = calloc((size_t)CON, sizeof(f32));
+    for (u32 co = 0; co < CCOUT; co++)
+    for (u32 b = 0; b < CB; b++)
+    for (u32 oh = 0; oh < CHO; oh++)
+    for (u32 ow = 0; ow < CWO; ow++) {
+      f32 acc = 0.0f;
+      for (u32 ci = 0; ci < CCIN; ci++)
+      for (u32 kh = 0; kh < CKH; kh++)
+      for (u32 kw = 0; kw < CKW; kw++)
+        acc += cw[((co*CCIN + ci)*CKH + kh)*CKW + kw]
+             * cx[((b*CCIN + ci)*CH + (oh+kh))*CW + (ow+kw)];
+      cref[((co*CB + b)*CHO + oh)*CWO + ow] = acc;
+    }
+    f32 *ccpu = calloc((size_t)CON, sizeof(f32));
+    f32 *cgpu = calloc((size_t)CON, sizeof(f32));
+
+    // Build the conv DAG and materialize it on a given backend.
+    #define CONV_BUILD_AND_RUN(out_buf)                                             do {                                                                            Shape sx = {0}; sx.ndim = 4; sx.dims[0] = CB; sx.dims[1] = CCIN;              sx.dims[2] = CH; sx.dims[3] = CW;                                             Shape sw = {0}; sw.ndim = 4; sw.dims[0] = CCOUT; sw.dims[1] = CCIN;           sw.dims[2] = CKH; sw.dims[3] = CKW;                                           u32 txid = tensor_alloc(CURRENT_BACKEND, sx, DT_FP32);                        u32 twid = tensor_alloc(CURRENT_BACKEND, sw, DT_FP32);                        CURRENT_BACKEND->buf_write(TENS[txid].buf_id, cx,                                                        (size_t)CXN * sizeof(f32));                        CURRENT_BACKEND->buf_write(TENS[twid].buf_id, cw,                                                        (size_t)CWN * sizeof(f32));                        Term xin = term_new(0, TAG_TEN, DT_FP32, txid);                               Term win = term_new(0, TAG_TEN, DT_FP32, twid);                               u32 rh = (CKH * (CH + 1) + CH - 1) / CH;                                      u32 rw = (CKW * (CW + 1) + CW - 1) / CW;                                      u32 d6a[6] = { CB, CCIN, 1, CH, 1, CW };                                      u32 d6b[6] = { CB, CCIN, rh, CH, rw, CW };                                    u32 d4a[4] = { CB, CCIN, rh*CH, rw*CW };                                      Term x1 = uop_reshape(uop_expand(uop_reshape(xin, 6, d6a), 6, d6b),                                 4, d4a);                                                u32 be4[8] = { 0,CB, 0,CCIN, 0,CKH*(CH+1), 0,CKW*(CW+1) };                    Term x2 = uop_shrink(x1, 4, be4);                                             u32 d6c[6] = { CB, CCIN, CKH, CH+1, CKW, CW+1 };                              Term x3 = uop_reshape(x2, 6, d6c);                                            u32 be6[12] = { 0,CB, 0,CCIN, 0,CKH, 0,CHO, 0,CKW, 0,CWO };                   Term x4 = uop_shrink(x3, 6, be6);                                             u32 prm[6] = { 1, 2, 4, 0, 3, 5 }; /* {cIn,kh,kw,B,hOut,wOut} */              Term xc6 = uop_permute(x4, 6, prm);                                           u32 d4x[4] = { CK, CB, CHO, CWO };                                            Term xc4 = uop_reshape(xc6, 4, d4x);                                          u32 d2w[2] = { CCOUT, CK };                                                   Term wf  = uop_reshape(win, 2, d2w);                                          u32 d5w[5] = { CCOUT, CK, 1, 1, 1 };                                          u32 d5e[5] = { CCOUT, CK, CB, CHO, CWO };                                     Term wexp = uop_expand(uop_reshape(wf, 5, d5w), 5, d5e);                      u32 d5x[5] = { 1, CK, CB, CHO, CWO };                                         Term xexp = uop_expand(uop_reshape(xc4, 5, d5x), 5, d5e);                     Term out4 = uop_reduce(REDUCE_SUM, 1, uop_binary(UOP_MUL, wexp, xexp));                   Term done = wnf(thvm_materialize(out4));                                      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,                                             (out_buf), (size_t)CON * sizeof(f32));            } while (0)
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    CONV_BUILD_AND_RUN(ccpu);
+    thvm_free();
+
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    CONV_BUILD_AND_RUN(cgpu);
+    thvm_free();
+    #undef CONV_BUILD_AND_RUN
+
+    for (u32 i = 0; i < (u32)CON; i++) {
+      f32 d = ccpu[i] - cref[i]; if (d < 0) d = -d; CHECK(d < 5e-3f);
+      d = cgpu[i] - cref[i];     if (d < 0) d = -d; CHECK(d < 5e-3f);
+      d = cgpu[i] - ccpu[i];     if (d < 0) d = -d; CHECK(d < 5e-3f);
+    }
+    free(cx); free(cw); free(cref); free(ccpu); free(cgpu);
+  }
+
   // === EXPAND parity (scalar -> tensor broadcast) ===
   TEST_BEGIN("metal-real/expand-scalar-to-tensor-parity");
   Shape sx = {0}; sx.ndim = 1; sx.dims[0] = 1;
