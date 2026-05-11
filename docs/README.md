@@ -65,6 +65,17 @@ until that step lands.
 - [bench/history.md](bench/history.md): consolidated benchmark
   history and current canaries for training, GPT-2, Metal, tile, and
   autotune work.
+- [multicomputation.md](multicomputation.md): self-contained
+  conceptual essay reading the SUP / DUP / INC machinery through
+  Wolfram's multicomputation paradigm -- a SUP-term is a *slice*,
+  reduction is *slice evolution*, the collapser is an *observer*,
+  `INC` is a *foliation*.  Vocabulary in
+  [glossary.md](glossary.md#multicomputation-slices-observers-and-the-reduction-trace).
+- [plans/multicomputation_trace.md](plans/multicomputation_trace.md):
+  thvm-side build trajectory for the trace -- a branch-cylinder-tagged
+  token-event log on top of `ITRS` + the hot-counter pattern -- and the
+  multiway / branchial / causal graph views derived from it.
+  Implementation memo for the ideas in `multicomputation.md`.
 
 ## Conventions
 

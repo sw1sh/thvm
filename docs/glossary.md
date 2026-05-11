@@ -6,7 +6,11 @@ down here so the rest of the docs can use them without parenthetical
 re-definitions every time.
 
 For the IC-side terminology (`term`, `agent`, `port`, `wire`, ...)
-see [term.md](term.md).
+see [term.md](term.md).  For the multicomputation reading of the
+SUP / DUP / INC machinery (slice, branch cylinder, observer,
+foliation, the reduction trace) see
+[multicomputation.md](multicomputation.md); the *Multicomputation*
+section near the bottom of this file is the short version.
 
 ## Tensor and storage
 
@@ -169,6 +173,40 @@ In short: HVM-SUP is the *search-space data structure*; ATP-superposition
 is the *one inference step* we're trying to enumerate over.  The two
 share a name purely by historical accident.  See sections 2 and 3 of
 the plan memo for the full treatment.
+
+## Multicomputation: slices, observers, and the reduction trace
+
+> The *multiway* face of the SUP / DUP / INC machinery -- the same
+> structure the ATP section above calls *entailment cones*.  Full
+> treatment in [multicomputation.md](multicomputation.md); this is the
+> vocabulary table.  Nothing in the "trace" rows is implemented yet --
+> see [the trace plan](plans/multicomputation_trace.md).
+
+| word | meaning | which layer |
+|---|---|---|
+| **multiway system** (Wolfram) | A rewriting system viewed as the graph of *all* possible derivations: states as nodes, rule applications as edges, with derivations that reach the same state identified.  See [Wolfram, "Multicomputation"](https://writings.stephenwolfram.com/2021/09/multicomputation-a-fourth-paradigm-for-theoretical-science/). | concept |
+| **slice** | The multiway state-set at one moment of multiway time.  In thvm: **one IC term that contains SUPs** -- the slice carried in shared (compressed) form.  `collapse` / the CNF readback ([src/cnf/_.c](../src/cnf/_.c)) enumerates the states in a slice. | runtime / IC |
+| **branch** | One state of the slice = one leaf of the term's SUP-label tree = one path "left/right at each label". | runtime / IC |
+| **branch cylinder** | A *partial* `label -> side` map: picks out a *cone* of branches (all leaves below that point).  The compressed representative of "all branches that share this much ancestry."  A *shared sub-term* lives in the cylinder of all branches below it -- which is why one IC interaction can be many multiway events at once. | runtime / IC |
+| **branchial space / branchial graph** | The metric on branches given by how recently they forked -- in thvm, *reified* as the live SUP-label tree plus literal heap-sharing.  Two branches are branchially close iff they still point at the same cells. | concept / IC |
+| **term evolution** | A *within-branch* interaction (`APP-LAM`, `OP2-NUM-NUM`, `MAT-CTR`, `USE-VAL`, ...).  A genuine multiway event -- an edge of the states graph. | runtime / IC |
+| **slice evolution** | A *re-foliation* interaction (`APP-SUP` / `OP2-SUP` / `MAT-SUP`, the `cnf` lift-first-SUP, every `INC` rule).  The state-set is unchanged; only the SUP boundary inside the term (or the observer's order) moves.  Not a states-graph edge. | runtime / IC |
+| **fork** | A step that fans a state out 1 -> 2: a seeded `&L{a,b}`, or `DUP` commuting through a constructor (`DUP-LAM`, `DUP-CTR`, `DUP-NOD`) which manufactures a SUP.  Analogue of a string multiway system's "the rule matched in two places."  (May be sharing plumbing if a same-label `merge` follows.) | runtime / IC |
+| **split** | `DUP-SUP` with *different* labels ([dup_sup.md](interact/dup_sup.md), commute case): the branchial cross product -- state count * 2.  Analogue of two disjoint regions of a string each branching independently. | runtime / IC |
+| **merge** | `DUP-SUP` with the *same* label ([dup_sup.md](interact/dup_sup.md), annihilate case): two separately-tracked branches reconverge / are identified -- a diamond closes.  Analogue of a string system identifying two derivations that produce equal states (by direct equality, not hashing).  A *label collision* is a *spurious* merge -- a failure mode unique to IC's label-as-branch-identity scheme. | runtime / IC |
+| **prune** | `ERA` absorbing a neighbour (`APP-ERA`, `DUP-ERA`, ... and ERA propagation): a dead-end branch dropped from the slice.  In `#SAT`, the unsatisfying assignment. | runtime / IC |
+| **observer** | Whatever sequentialises a slice into a definite *stream* of states.  In thvm: the priority collapser, [src/collapse/ordered.c](../src/collapse/ordered.c).  A bounded computation; it cannot present a slice "all at once," it walks the branches in some order. | runtime / IC |
+| **foliation / reference frame** | A choice of how to slice multiway time -- here, the order the collapser walks the branches in, set by the `INC` (`TAG_INC`) decoration: descending into a SUP raises the priority key, an `INC` wrapper lowers it.  Different `INC` schemes = different observers; by confluence they emit the same *set* of states, only the *order* differs. | runtime / IC |
+| **causal invariance** | Wolfram's term for "any two derivations produce *isomorphic causal graphs*" -- a *strictly stronger* property than confluence (which only requires the final state to agree).  Confluence is about endpoint states; causal invariance is about the entire event structure (same events, same partial order, only interleaved differently in clock time).  Most WPP-relevant string-rewriting systems satisfy it only asymptotically; **interaction nets satisfy it strictly, by construction** -- the per-active-pair rule discipline makes every event determined by the net and every causal dependency determined by wire-provenance, neither of which depends on the schedule.  This is what makes both "the multiway states graph of a trace" a well-defined quotient *and* "the causal graph of a trace" a program invariant. | concept / IC |
+| **reduction trace** | The recorded sequence of interactions of one run, the thing the multiway / branchial / causal / token-event graphs are projections of.  Proposed encoding: a **branch-cylinder-tagged token-event graph** -- see [the trace plan](plans/multicomputation_trace.md). | proposed |
+| **token-event graph** (Wolfram) | Tokens (persistent atoms) as one kind of node, events (rule firings, consuming/producing tokens) as the other.  An interaction net *is* one: wires = tokens, interactions = events.  The states / branchial / causal graphs are quotients of it. | concept / IC |
+| **multiway / branchial / causal / token-event view** | The four `Graph[]` objects derivable from a trace: states + `fork`/`merge`/`term` edges; the SUP-label tree at one antichain; events + token-provenance edges; the raw token-event graph.  Proposed WL surface `TMultiwayGraph` / `TBranchialGraph` / `TCausalGraph` / `TTokenEventGraph` -- see [plans/multicomputation_trace.md, §7](plans/multicomputation_trace.md#7-wl-surface). | proposed |
+
+For why this matters (debugging SUP-heavy code: spurious merges =
+label collisions, runaway splits = unintended branch dimensions; making
+the observer a first-class object; the contrast with the Wolfram
+Physics Project -- free confluence, branchial space as literal sharing,
+`INC` as foliation) see [multicomputation.md, §5 and §6](multicomputation.md); the implementation sketch lives in [plans/multicomputation_trace.md](plans/multicomputation_trace.md).
 
 ## Visualization
 
