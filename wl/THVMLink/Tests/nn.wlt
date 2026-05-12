@@ -806,7 +806,37 @@ VerificationTest[
     TestID -> "nn/categorical-ce-rank2-batch-mean"
 ]
 
-(* The rank-1 single-param Adam regression (DP1 fanout edge case)
-   moved to pending_adam_dp1.wlt -- see that file for the diagnosis.
-   Run as informational by the WL runner so it doesn't flip the
-   overall exit code while we work the fix. *)
+(* In-backend TAdam at lr=0.001, beta1=0.9, beta2=0.999, against
+   loss = (w - 0.05)^2 -- a degenerate per-element regression whose
+   gradient is 2(w - 0.05) = 2(1 - 0.05) = 1.9 at w = 1.
+       grad   = 1.9
+       m_new  = 0.9 * 0 + 0.1 * 1.9       = 0.19
+       v_new  = 0.999 * 0 + 0.001 * 1.9^2 = 0.00361
+       m_hat  = 0.19 / (1 - 0.9)          = 1.9
+       v_hat  = 0.00361 / (1 - 0.999)     = 3.61
+       w_new  = 1 - 0.001 * 1.9 / (sqrt(3.61) + 1e-8) = 0.999
+   Previously failing as `pending_adam_dp1.wlt`: TAdam's v-update
+   `(1-beta2) * (gTen * gTen)` lowered through WL's `Times` UpValue
+   which dedups the duplicate `gTen` factor and emits an IC-level
+   OP2 instead of a UOP node, and `OP2(DP1_x, DP1_x)` (from the
+   chain-rule grad) had no IC reduction rule -- v silently stayed at
+   zero.  Fix: TAdam writes `gTen^2` instead of `gTen * gTen`, which
+   routes through Power's UpValue to a TUOpMul call that yields a
+   proper TAG_UOP. *)
+VerificationTest[
+    TInit[];
+    w   = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+    tgt = TTensorCreate @ NumericArray[{0.05}, "Real32"];
+    m   = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    v   = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    loss = TL2Loss[w - tgt];
+    TAdam[loss, {w}, {m}, {v}, 1];
+    Max @ Abs @ Flatten @ {
+        Normal @ TTensorData[w] - {0.999},
+        Normal @ TTensorData[m] - {0.19},
+        Normal @ TTensorData[v] - {0.00361}
+    },
+    _ ? (# < 1.0*^-5 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/adam-rank1-l2-loss-matches-textbook"
+]

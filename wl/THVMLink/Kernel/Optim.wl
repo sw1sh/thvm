@@ -171,7 +171,16 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
                 mAfter, vAfter, denom
             },
                 mAfter = TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen];
-                vAfter = TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
+                (* `gTen^2` lowers via the rank-N Power UpValue to a
+                   TUOpMul[gTen, gTen] call against the underlying
+                   `$uopBinaryFn`.  Plain `gTen * gTen` triggers
+                   WL's `Times` UpValue which dedups the duplicate
+                   factor and emits an IC-level OP2 (binary-op
+                   intermediate) instead of a UOP node; the OP2
+                   doesn't have an IC reduction rule for
+                   `OP2(DP1_x, DP1_x)` from the chain-rule grad and
+                   silently stays symbolic, so v never updates. *)
+                vAfter = TAssign[vTen, beta2 * vTen + (1.0 - beta2) * gTen^2];
                 denom  = Sqrt[vAfter] * invSqrtB2cor + eps;
                 TAssign[wTen, wTen - lrHat * mAfter / denom]
             ],
