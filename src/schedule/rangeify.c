@@ -2326,6 +2326,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           u32 r_idx = region[i];
           u32 r_n_ranges = reduce_meta[r_idx].n_ranges;
           u32 r_inner    = reduce_meta[r_idx].inner;
+          u32 r_size     = reduce_meta[r_idx].size;
           u32 r_combined = reduce_range_per_reduce[r_idx];
           if (p->n_reduce_axes > 0 && p->src0_ndim > 0
               && p->src0_ndim <= MAX_DIM && p->out_ndim <= MAX_DIM
@@ -2367,12 +2368,30 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // trailing reduces like LeNet's conv-backward chain).
           if (!has_reduce || in_rngs.ndim >= MAX_DIM) break;
           u32 body_ndim = p->src0_ndim;
+          // Walk body shape from the back; r_axis is the position
+          // where (product of dims AFTER it) == r_inner.  Two modes
+          // distinguished by whether dims[k] == r_size:
+          //   single-axis reduce: dims[k] must match r_size --
+          //     critical when size-1 axes after the real reduce axis
+          //     make multiple k positions satisfy partial==r_inner
+          //     (e.g. reshape→{...,1,...}→EXPAND).  Prefer the k
+          //     whose own size equals r_size.
+          //   fused multi-axis trailing reduce: r_size is the
+          //     PRODUCT of trailing dims, larger than any single
+          //     dim.  Fall back to the original "last match from
+          //     back" (smallest k with partial==r_inner): the
+          //     reduce_range has the combined extent and the body
+          //     iterates it linearly via stride 1.
           if (body_ndim == 0) {
             u32 r_axis = (u32)-1;
             u32 partial = 1;
             for (i32 k = (i32)os->ndim; k >= 0; k--) {
-              if (partial == r_inner) { r_axis = (u32)k; break; }
-              if (k > 0) partial *= os->dims[k - 1];
+              u32 dim_k = (k > 0) ? os->dims[k - 1] : 1;
+              if (partial == r_inner) {
+                if (dim_k == r_size) { r_axis = (u32)k; break; }
+                if (r_axis == (u32)-1) r_axis = (u32)k;
+              }
+              if (k > 0) partial *= dim_k;
             }
             if (r_axis > os->ndim || in_rngs.ndim != os->ndim) {
               in_rngs.refs[in_rngs.ndim++] = r_combined;
@@ -2389,7 +2408,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           {
             u32 partial = 1;
             for (i32 k = (i32)body_ndim - 1; k >= 0; k--) {
-              if (partial == r_inner) { r_axis = (u32)k; break; }
+              if (partial == r_inner) {
+                if (p->src0_dims[k] == r_size) {
+                  r_axis = (u32)k;
+                  break;
+                }
+                if (r_axis == (u32)-1) r_axis = (u32)k;
+              }
               partial *= p->src0_dims[k];
             }
           }
@@ -2824,9 +2849,21 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         if (v->shape.ndim != in_ndim_r) RBAIL_MID("pre-reduce input ndim_r != in_ndim_r");
         u32 reduce_axis = (u32)-1;
         {
+          // Same two-mode disambiguator as line ~2390: prefer the k
+          // whose own size matches reduce_size_r (single-axis), but
+          // fall back to the original "last match from back"
+          // (smallest k with partial==reduce_inner_r) for fused
+          // multi-axis trailing reduces where r_size is a product
+          // larger than any single dim.
           u32 partial = 1;
           for (i32 k = (i32)in_ndim_r - 1; k >= 0; k--) {
-            if (partial == reduce_inner_r) { reduce_axis = (u32)k; break; }
+            if (partial == reduce_inner_r) {
+              if (v->shape.dims[k] == reduce_size_r) {
+                reduce_axis = (u32)k;
+                break;
+              }
+              if (reduce_axis == (u32)-1) reduce_axis = (u32)k;
+            }
             partial *= v->shape.dims[k];
           }
         }

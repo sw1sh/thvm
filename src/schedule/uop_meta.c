@@ -396,6 +396,18 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
     if (removed[i] >= MAX_DIM || seen[removed[i]]) return 0;
     seen[removed[i]] = 1;
   }
+  // Fusion contract: the rangeify body emit (src/schedule/rangeify.c)
+  // collapses a multi-axis reduce into ONE flattened reduce RANGE of
+  // extent prod(per-axis extents) and relies on row-major arithmetic
+  // to visit the (r0 * ext1 * ... + r1 * ... + rk) block.  That trick
+  // only stays correct when the reduced axes are the CONTIGUOUS
+  // TRAILING axes of the pre-reduce input -- otherwise the inner
+  // address computation skips the non-reduced axis sandwiched between
+  // reduced ones.  For non-trailing or non-contiguous reduce chains
+  // (e.g. batchnorm's reduce(B,H,W) over {B,C,H,W} = axes {0,2,3}),
+  // fall back to one kernel per reduce.
+  if (max_axis - min_axis + 1 != n) return 0;
+  if (max_axis != src_shape.ndim - 1) return 0;
 
   if (kind == REDUCE_SUM) {
     for (u32 i = 1; i < n; i++) {
