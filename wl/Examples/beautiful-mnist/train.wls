@@ -1,24 +1,28 @@
 #!/usr/bin/env wolframscript
-(* full-train.wls -- end-to-end beautiful_mnist training on real MNIST.
+(* train.wls -- end-to-end beautiful_mnist training on real MNIST.
 
-   Mirrors tinygrad's examples/beautiful_mnist.py: same architecture,
-   Adam at BS=512, sparse_categorical_crossentropy, test-acc eval
-   every TEST_EVERY steps.  This script wraps the trainStep with
-   TJit so the first step pays capture cost and subsequent steps
-   replay the kernel sequence.  Real MNIST samples are fed via
-   TSet'ing a pre-allocated input/target slot pair each step --
-   the buf_id stays stable so the captured DAG remains valid.
+   Mirrors tinygrad's examples/beautiful_mnist.py exactly: same
+   architecture (Conv5x5 1->32 -> ReLU -> Conv5x5 32->32 -> ReLU -> BN ->
+   MaxPool -> Conv3x3 32->64 -> ReLU -> Conv3x3 64->64 -> ReLU -> BN ->
+   MaxPool -> Flatten -> Linear 576->10), Adam at BS=512, sparse-
+   categorical-CE on int labels, test-acc eval every TEST_EVERY steps.
+
+   The trainStep is wrapped with TJit so the first step pays capture
+   cost and subsequent steps replay the kernel sequence.  Real MNIST
+   samples are fed via TSet'ing a pre-allocated input/target slot
+   pair each step -- the buf_id stays stable so the captured DAG
+   remains valid.
 
    Run from the repo root:
-       THVM_BACKEND=metal THVM_TILE=1 wolframscript -f wl/Examples/beautiful-mnist/full-train.wls
-       N_STEPS=70 TEST_EVERY=10 BS=512 THVM_BACKEND=metal THVM_TILE=1 wolframscript -f wl/Examples/beautiful-mnist/full-train.wls
+       wolframscript -f wl/Examples/beautiful-mnist/train.wls
+       THVM_BACKEND=metal THVM_TILE=1 N_STEPS=70 TEST_EVERY=10 BS=512 MNIST_LIMIT=All wolframscript -f wl/Examples/beautiful-mnist/train.wls
 
    Env:
      BS          (default 512)  -- batch size
      N_STEPS     (default 2)    -- training steps (one Adam update each)
      TEST_EVERY  (default 0)    -- run test-acc every N steps; 0 disables
-     MNIST_LIMIT (default 2048) -- # of train/test samples to load
-                                   (set to All for the real run) *)
+     MNIST_LIMIT (default 2048) -- # of train/test samples to load;
+                                   set to All for a real ~99 % run. *)
 
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
@@ -127,11 +131,22 @@ forwardLoss[x_TTerm, target_TTerm] := Module[{
     TSparseCategoricalCrossEntropy[logits, target]
 ]
 
+(* `lossSlot` is the readback channel for the per-step loss.  TJit's
+   replay return value is unreliable, so trainStep TAssigns loss into
+   lossSlot in its own bundled TRealize before TAdam updates the
+   weights.  The `0.0 * lossSlot + loss` wrapper on the RHS forces an
+   add to be emitted -- a bare TAssign[lossSlot, loss] with a UOP RHS
+   gets short-circuited and the assign never fires. *)
+lossSlot = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+
 trainStep = Function[{stepIdx}, Module[{loss = forwardLoss[xSlot, tgtSlot]},
+    TRealize @ {TAssign[lossSlot, 0.0 * lossSlot + loss]};
     TAdam[loss, params, mState, vState, stepIdx]; Null]];
 jittedStep = TJit[trainStep];
 
-runStep[step_Integer, label_String] := Module[{t0, dt, kBefore, kAfter, mem},
+runStep[step_Integer, label_String] := Module[{
+    t0, dt, kBefore, kAfter, mem, lossVal
+},
     kBefore = TKernelCount[];
     t0      = AbsoluteTime[];
     feedBatch[];
@@ -139,8 +154,10 @@ runStep[step_Integer, label_String] := Module[{t0, dt, kBefore, kAfter, mem},
     dt      = (AbsoluteTime[] - t0) * 1000.0;
     kAfter  = TKernelCount[];
     mem     = TMetalMemoryProfile[];
+    lossVal = First @ Normal @ TTensorData @ lossSlot;
     print[label, " step ", step,
-          ": wall=", NumberForm[dt, {8, 1}], "ms",
+          ": loss=", NumberForm[lossVal, {6, 3}],
+          " wall=", NumberForm[dt, {8, 1}], "ms",
           " kernels(new)=", kAfter - kBefore,
           " jit-ops=", TJitOpCount[jittedStep],
           " heap=", THeapPos[],
@@ -149,7 +166,70 @@ runStep[step_Integer, label_String] := Module[{t0, dt, kBefore, kAfter, mem},
     dt
 ]
 
-(* === Two-step cold + warm sanity run ============================== *)
-Do[runStep[step, If[ step == 1, "cold ", "warm "]], {step, 1, nSteps}];
+(* === Test-accuracy eval (when TEST_EVERY > 0).
+       Captures a separate forward-only DAG that reads from xSlot and
+       TAssigns the {bs, 10} logits into a stable `logitsSlot` -- TJit
+       captures the kernel sequence + the assign, but the *return*
+       value of a JIT'd function is unreliable (the replay path
+       returns Null), so the slot is the readback channel.  Argmax is
+       done host-side on {bs, 10} (cheap) -- no dedicated argmax op
+       needed. *)
+logitsSlot  = TTensorCreate @ NumericArray[ConstantArray[0., {bs, 10}], "Real32"];
+evalForward = Function[{}, Module[{
+    h1, r1, h2, r2, n1, p1, h3, r3, h4, r4, n2, p2, flat
+},
+    h1   = TConv2D[xSlot, W1, b1];
+    r1   = TReLU[h1];
+    h2   = TConv2D[r1, W2, b2];
+    r2   = TReLU[h2];
+    n1   = TBatchNormTrain[r2, g1, bn1];
+    p1   = TMaxPool2d[n1, 2];
+    h3   = TConv2D[p1, W3, b3];
+    r3   = TReLU[h3];
+    h4   = TConv2D[r3, W4, b4];
+    r4   = TReLU[h4];
+    n2   = TBatchNormTrain[r4, g2, bn2];
+    p2   = TMaxPool2d[n2, 2];
+    flat = TUOpReshape[p2, {bs, 576}];
+    TAssign[logitsSlot, TLinear[flat, W5, b5]]; Null
+]];
+jittedEval = TJit[evalForward];
+
+(* TestImages have been pulled to host as `testImgsHost` (rank-4
+   real32 array) and `testLabsHost` (int list).  Pad the trailing
+   partial batch with zeros and ignore those predictions when
+   tallying. *)
+testAcc[] := Module[{nBatches, correct, total, predicted, batchImg, gold},
+    nBatches  = Ceiling[nTest / bs];
+    correct   = 0;
+    total     = 0;
+    Do[
+        Module[{b0 = (i - 1) * bs + 1, b1 = Min[i * bs, nTest], pad},
+            batchImg = Take[testImgsHost, {b0, b1}];
+            gold     = Take[testLabsHost, {b0, b1}];
+            pad      = bs - Length[batchImg];
+            If[ pad > 0,
+                batchImg = Join[batchImg, ConstantArray[0., {pad, 1, 28, 28}]] ];
+            TSet[xSlot, TTensorCreate @ NumericArray[batchImg, "Real32"]];
+            jittedEval[];
+            predicted = Map[First @ Ordering[#, -1] - 1 &,
+                            Normal @ TTensorData @ logitsSlot];
+            predicted = Take[predicted, Length[gold]];
+            correct  += Count[MapThread[Equal, {predicted, gold}], True];
+            total    += Length[gold];
+        ],
+        {i, nBatches}];
+    100.0 * correct / total
+]
+
+(* === Train loop ================================================== *)
+Do[ Module[{},
+        runStep[step, If[ step == 1, "cold ", "warm "]];
+        If[ testEvery > 0 && Mod[step, testEvery] == 0,
+            print["    test_acc=", NumberForm[testAcc[], {6, 2}], "%"] ]],
+    {step, 1, nSteps}];
+
+If[ testEvery == 0 && nSteps > 2,
+    print["final test_acc=", NumberForm[testAcc[], {6, 2}], "%"] ];
 
 print["done."];

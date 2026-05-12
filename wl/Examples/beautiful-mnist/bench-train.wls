@@ -152,11 +152,6 @@ formatMetalMemory[p_Association] := StringRiffle[{
         ToString[p["RetainedBuffers"]]
 }, " "]
 
-oneHotBatch[labels_List, n_Integer] := NumericArray[
-    Table[If[j - 1 == labels[[i]], 1.0, 0.0],
-          {i, Length[labels]}, {j, n}],
-    "Real32"]
-
 randTensor[shape_List, scale_ : 0.05] :=
     TTensorCreate @ NumericArray[
         RandomVariate[NormalDistribution[0., scale], shape],
@@ -174,7 +169,7 @@ makeSyntheticBatch[bs_Integer] := Module[{imgs, labels},
     imgs = RandomReal[{0.0, 1.0}, {bs, 1, 28, 28}];
     labels = Mod[Range[0, bs - 1], 10];
     {TTensorCreate @ NumericArray[imgs, "Real32"],
-     TTensorCreate @ oneHotBatch[labels, 10],
+     TTensorCreate @ NumericArray[labels, "Integer32"],
      labels}
 ]
 
