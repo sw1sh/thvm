@@ -1530,13 +1530,23 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
             abs_unmark_count[slot] = 0;
           }
         }
-        if (slot != 0xFFFFFFFFu && abs_unmark_count[slot] >= 1) {
+        // Cap defaults to 1 per absorbing boundary (the BN-train BWD
+        // diamond's two sibling REDUCE chains).  THVM_REDUCE_UNMARK_CAP=0
+        // disables un-marking entirely (every REDUCE stays its own
+        // boundary kernel).  Useful as a kill switch when a complex
+        // backward chain produces a kernel the lifter can't handle.
+        u32 cap_limit = 1;
+        char const *_cap_e = getenv("THVM_REDUCE_UNMARK_CAP");
+        if (_cap_e != NULL && _cap_e[0] >= '0' && _cap_e[0] <= '9') {
+          cap_limit = (u32)(_cap_e[0] - '0');
+        }
+        if (slot != 0xFFFFFFFFu && abs_unmark_count[slot] >= cap_limit) {
           if (getenv("THVM_DUMP_SOFTMAX_REDUCE_CAP")) {
             fprintf(stderr,
                     "softmax-reduce-cap: kept realized loc=%llu"
-                    " abs=%llu (sibling REDUCE already inlined)\n",
+                    " abs=%llu (sibling REDUCE already inlined, cap=%u)\n",
                     (unsigned long long)info->loc,
-                    (unsigned long long)abs_loc);
+                    (unsigned long long)abs_loc, cap_limit);
           }
           continue;
         }
