@@ -158,15 +158,29 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
         beta1  = OptionValue["beta1"],
         beta2  = OptionValue["beta2"],
         eps    = OptionValue["eps"],
-        lrHat, invSqrtB2cor, lossK, grads, paramAssigns
+        lrHat, invSqrtB2cor, lossK, grads, gradsRealized, paramAssigns
     },
         lrHat        = lr  / (1.0 - beta1^t);
         invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
         lossK        = TMaterialize[loss];
         grads        = TGradMany[lossK, params];
+        (* Force each gradient to a TEN before threading it into the
+           Adam expressions.  The DP1 chain-rule cell returned by
+           TGradMany recomputes the gradient on each read inside a
+           bundled TRealize; later reads land in a state where
+           downstream kernel programs have been rewritten by earlier
+           reads' materialization, and the re-walk produces wrong
+           values (gradient shrinks ~5x at the 2nd conv layer).  With
+           the DP1 still wrapping each gTen, vAfter's `gTen * gTen`
+           reads land on those re-walked values, vAfter collapses,
+           denom -> eps, and the Adam update explodes by ~1e6 per
+           weight.  TRealize'ing once up front pins each gradient to a
+           concrete TEN buffer so all three downstream reads see the
+           same correct values. *)
+        gradsRealized = TRealize /@ grads;
         paramAssigns = Table[
             Block[{
-                wTen = params[[i]], gTen = grads[[i]],
+                wTen = params[[i]], gTen = gradsRealized[[i]],
                 mTen = mList[[i]],  vTen = vList[[i]],
                 mAfter, vAfter, denom
             },
