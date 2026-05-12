@@ -1466,11 +1466,27 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
     return 0;
   }
   int tile_cap_on = bufferize_softmax_reduce_tile_cap_enabled();
+  // Track per-absorbing-boundary how many REDUCEs we've already un-marked
+  // for inlining into that same kernel root.  The materializer's visit()
+  // bails when a non-root REDUCE is added to a kernel that already
+  // contains one.  Two sibling branches in an ADD/MUL root that each
+  // host a broadcast-fed REDUCE chain (the canonical BN-train BWD
+  // shape: ADD(reduce_chain_left, reduce_chain_right)) would otherwise
+  // both lose their realized bit and produce a kernel with two REDUCE
+  // ops -> materialize BAIL -> result returned as un-compiled UOP ->
+  // TRealize NotATensor.  Cap at 1 un-mark per absorbing boundary;
+  // the rest stay realized as their own boundary kernels.
+  u32 abs_cap = 16;
+  u64 abs_locs[64];
+  u32 abs_unmark_count[64];
+  u32 n_abs = 0;
+  (void)abs_cap;
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_REDUCE)    continue;
     if (!bufferize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+    u64 abs_loc = 0;
     if (tile_cap_on) {
       // Tile-feasibility gate: the materializer's "single REDUCE
       // per kernel" rule lets the kernel ROOT be a REDUCE
@@ -1483,7 +1499,7 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
       // onto the per-op metal encoder.  Keep this REDUCE realized
       // when the absorbing root is itself a REDUCE so the
       // resulting kernels stay tile-feasible.
-      u64 abs_loc = bufferize_absorbing_boundary(info->loc, 16);
+      abs_loc = bufferize_absorbing_boundary(info->loc, 16);
       if (abs_loc != 0) {
         u32 abs_idx = bufferize_info_find(abs_loc);
         if (abs_idx != 0xFFFFFFFFu
@@ -1497,6 +1513,34 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
           }
           continue;
         }
+      }
+      // Multi-REDUCE per absorbing-boundary cap: same kernel root cannot
+      // host more than one inlined REDUCE.  Look up `abs_loc`'s slot in
+      // the per-call counter table; if its count is already >= 1, skip
+      // un-marking THIS reduce (it stays realized as its own boundary).
+      if (abs_loc != 0) {
+        u32 slot = 0xFFFFFFFFu;
+        for (u32 k = 0; k < n_abs; k++) {
+          if (abs_locs[k] == abs_loc) { slot = k; break; }
+        }
+        if (slot == 0xFFFFFFFFu) {
+          if (n_abs < (sizeof abs_locs) / sizeof abs_locs[0]) {
+            slot = n_abs++;
+            abs_locs[slot] = abs_loc;
+            abs_unmark_count[slot] = 0;
+          }
+        }
+        if (slot != 0xFFFFFFFFu && abs_unmark_count[slot] >= 1) {
+          if (getenv("THVM_DUMP_SOFTMAX_REDUCE_CAP")) {
+            fprintf(stderr,
+                    "softmax-reduce-cap: kept realized loc=%llu"
+                    " abs=%llu (sibling REDUCE already inlined)\n",
+                    (unsigned long long)info->loc,
+                    (unsigned long long)abs_loc);
+          }
+          continue;
+        }
+        if (slot != 0xFFFFFFFFu) abs_unmark_count[slot]++;
       }
     }
     if (info->realized) hits++;

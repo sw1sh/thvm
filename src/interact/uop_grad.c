@@ -1252,6 +1252,19 @@ static inline void uop_act_memo_next_gen(void) {
 // Used by wnf's UOP enter/apply path (TAG_F_UOP_CHILD frames) to
 // scan a UOP's children for the next slot worth descending into.
 fn u8 uop_child_is_active(Term t) {
+  // Pre-resolve check: term_resolve eagerly unwraps a TAG_DP0 with
+  // DUP_GRAD_FLAG to its cell[0] body (so the chain rule can pattern-
+  // match through the FWD wrapper).  We must NOT let that unwrap hide
+  // the DP0 from this scan -- if the surrounding UOP has a DP0+grad
+  // child, wnf needs to descend and fire it (`heap_read(loc)` indirect
+  // dereference at wnf entry).  Without this, a MUL adjoint's
+  // `gy_for_a = b_fwd * gy` where b_fwd = DP0(grad cell of b) is
+  // reported inactive once interact_grad fills the cell with b, and
+  // the DP0 wrapper survives unreduced in the result -- materialize
+  // then bails on it.  Reproduces on TGrad through TBatchNormTrain
+  // (BN backward through centered*centered triggers this MUL fanout).
+  u8 raw_tag = term_tag(t);
+  if (raw_tag == TAG_DP0 || raw_tag == TAG_DP1) return 1;
   Term r = term_resolve(t);
   u8   tag = term_tag(r);
   if (tag == TAG_DP0 || tag == TAG_DP1) return 1;
