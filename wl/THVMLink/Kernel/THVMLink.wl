@@ -149,6 +149,7 @@ TUOpSqrt::usage      = "TUOpSqrt[a] builds a UOP_SQRT node.";
 TUOpCmplt::usage     = "TUOpCmplt[a, b] builds a UOP_CMPLT node.";
 TUOpCmpeq::usage     = "TUOpCmpeq[a, b] builds a UOP_CMPEQ node (elementwise a == b mask).";
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
+TUOpCast::usage      = "TUOpCast[src, dtype] builds a UOP_CAST node.  dtype is one of \"f32\"/\"i32\"/\"i8\" etc.  Backward gradient (under TGrad) is a CAST back to src.dtype.";
 TUOpGrad::usage      = "TUOpGrad[y, gy] builds the BWD projection of a dup-flavored grad cell holding [y, gy].  gy is the cotangent (must match y's shape).  Reducing under TWnf threads gy down via the per-operator adjoint chain rule and emits SUP^{leaf_tid}(zero, gy_at_leaf) at each TEN leaf; outer DUPs at the WL surface (TGrad) extract the per-target gradient.";
 TUOpLoad::usage      = "TUOpLoad[src] builds a UOP_LOAD node wrapping src.  Structural marker mirroring tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in the cpu kernel).";
 
@@ -388,6 +389,7 @@ $multiTraceCountFn     := $multiTraceCountFn     = load["thvm_wl_multi_trace_cou
 $multiTraceSnapshotFn  := $multiTraceSnapshotFn  = load["thvm_wl_multi_trace_snapshot",  {},        {Integer, 2}];
 $multiRuleNameFn       := $multiRuleNameFn       = load["thvm_wl_multi_rule_name",       {Integer}, "UTF8String"];
 $multiFamilyNameFn     := $multiFamilyNameFn     = load["thvm_wl_multi_family_name",     {Integer}, "UTF8String"];
+$multiWireProvSnapshotFn := $multiWireProvSnapshotFn = load["thvm_wl_multi_wire_prov_snapshot", {}, {Integer, 1}];
 
 (* tensor *)
 $tensorAllocFn   := $tensorAllocFn   = load["thvm_wl_tensor_alloc",   {Integer, {Integer, 1}}, Integer];

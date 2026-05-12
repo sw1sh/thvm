@@ -73,7 +73,8 @@ TOnes::usage             = "TOnes[shape] returns a fresh f32 TTerm tensor of one
 TZerosLike::usage        = "TZerosLike[t] returns a TTensor handle of zeros matching the shape and dtype of TTerm `t`.  Suitable for seeding Adam m/v moment buffers.";
 TOneHot::usage           = "TOneHot[label, n] / TOneHot[label, n, dtype] returns a TTerm tensor of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.";
 
-TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to log(sum(exp(logits))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  Numerically naive (no max-subtract); for the f32 inputs the MNIST training pipeline produces the magnitudes stay well within range.";
+TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, intLabels] computes the categorical cross-entropy loss given pre-softmax logits and integer class labels (one int per sample, NOT one-hot) -- the same convention as tinygrad / Keras.  intLabels' shape is logits' shape with the last (class) axis dropped.  Lowers to log(sum(exp(logits))) - logits[label] along the last axis, then averages over the leading batch axis.  Numerically naive (no max-subtract); for the f32 inputs the MNIST training pipeline produces the magnitudes stay well within range.  For one-hot targets, use TCategoricalCrossEntropy.";
+TCategoricalCrossEntropy::usage = "TCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to log(sum(exp(logits))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  For integer class labels, use TSparseCategoricalCrossEntropy.";
 
 TEmbedding::usage        = "TEmbedding[table, idx] returns row idx of a {V, D} table as a TTerm of shape {D}.  idx is a host-side Integer; lowers as TUOpShrink[table, {{idx, idx+1}, {0, D}}] + TUOpReshape to {D}.  Dynamic-idx gather (idx as a runtime tensor) needs a future UOP_GATHER opcode.";
 TEmbeddingMatrix::usage  = "TEmbeddingMatrix[table, ids] gathers rows `ids` from a {V, D} table into a {Length[ids], D} matrix.  ids is a host-side List[Integer].  Lowers as one TEmbedding + TUOpReshape to {1, D} per id, then stitches along the leading axis via PAD + sum (same idiom as TMultiHeadAttention's per-head concat -- no STACK op in thvm).  Dynamic-id gather needs a future UOP_GATHER opcode.";
@@ -708,13 +709,14 @@ TBatchNormTrain[x_TTerm, gamma_TTerm, beta_TTerm, eps_?NumericQ] :=
     ]
 ]
 
-(* TSparseCategoricalCrossEntropy[logits, targetOneHot] -- categorical
-   cross-entropy from logits.  loss = log(sum(exp(logits))) -
-   sum(target * logits), reduced along the LAST axis (the class axis);
-   for rank-2 batched inputs the per-sample loss is then averaged
-   along axis 0.  Numerically naive (no max-subtract); fine for the
-   activation magnitudes a typical NN forward produces. *)
-TSparseCategoricalCrossEntropy[logits_TTerm, target_TTerm] := With[{
+(* TCategoricalCrossEntropy[logits, targetOneHot] -- categorical
+   cross-entropy from logits with a one-hot target.  loss =
+   log(sum(exp(logits))) - sum(target * logits), reduced along the
+   LAST axis (the class axis); for rank-2 batched inputs the
+   per-sample loss is then averaged along axis 0.  Numerically naive
+   (no max-subtract); fine for the activation magnitudes a typical
+   NN forward produces. *)
+TCategoricalCrossEntropy[logits_TTerm, target_TTerm] := With[{
     shape = tUopShape[logits]
 },
     Module[{rank, classAxis, perSample},
@@ -726,6 +728,43 @@ TSparseCategoricalCrossEntropy[logits_TTerm, target_TTerm] := With[{
             perSample,
             Total[perSample] / shape[[1]]    (* batch mean over axis 0 *)
         ]
+    ]
+]
+
+(* TSparseCategoricalCrossEntropy[logits, intLabels] -- same loss as
+   TCategoricalCrossEntropy but the target is INTEGER class labels
+   (one int per sample, NOT one-hot), matching tinygrad / Keras.
+   `intLabels` shape = logits shape with the last (class) axis dropped:
+       logits {C}        -> labels scalar {}        (rank-1)
+       logits {B, C}     -> labels {B}              (rank-2)
+       logits {B, T, C}  -> labels {B, T}           (rank-3)
+   Builds a 0/1 one-hot mask inline via (arange(C) == labels) -- same
+   pattern tinygrad uses (no UOP_GATHER yet), then defers to the same
+   logsumexp - sum(mask * logits) reduction. *)
+TSparseCategoricalCrossEntropy[logits_TTerm, intLabels_TTerm] := With[{
+    shape = tUopShape[logits]
+},
+    Module[{rank, classAxis, nClasses, ramp, rampShape, labelShape,
+            mask, labels},
+        rank      = Length[shape];
+        classAxis = rank - 1;
+        nClasses  = shape[[rank]];
+        (* Build [0, 1, ..., C-1] as a {C} f32 ramp, then reshape to
+           {1, ..., 1, C} so it broadcasts against the labels along
+           every non-class axis. *)
+        ramp      = TTensorCreate @ NumericArray[
+                        Range[0, nClasses - 1], "Real32"];
+        rampShape = Append[ConstantArray[1, rank - 1], nClasses];
+        ramp      = TUOpReshape[ramp, rampShape];
+        ramp      = TUOpExpand[ramp, shape];
+        (* Cast labels to f32, reshape to {..., 1}, expand to logits'
+           full shape so the cmpeq is a pure elementwise broadcast. *)
+        labelShape = Append[Drop[shape, -1], 1];
+        labels     = TUOpCast[intLabels, "f32"];
+        labels     = TUOpReshape[labels, labelShape];
+        labels     = TUOpExpand[labels, shape];
+        mask       = TUOpCmpeq[ramp, labels];  (* {..., C} 0/1 f32 *)
+        TCategoricalCrossEntropy[logits, mask]
     ]
 ]
 
