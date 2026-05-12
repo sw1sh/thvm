@@ -2038,16 +2038,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
         }
       }
       if (!chain_inlined) goto single_reduce_emit;
-      if (loc != root_loc) {
-        for (u32 i = 0; i < ke->n_ops; i++) {
-          if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
-        }
-      }
+      // Multi-REDUCE per kernel is permitted: rangeify's scalar layer
+      // supports multiple reduce ranges per kernel
+      // (docs/plans/rewrite_fusion.md:161), and the legacy
+      // cpu_op_reduce path that the old "one REDUCE per kernel" rule
+      // protected was deleted in the F6 cleanup (src/thvm.c:173).
       u32 src_idx = visit(rc.src, ke, root_loc, memo);
       if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-      for (u32 i = 0; i < ke->n_ops; i++) {
-        if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
-      }
       kernel_program_reserve(ke, ke->n_ops + 1);
       KProgOp *p = &ke->program[ke->n_ops++];
       memset(p, 0, sizeof(*p));
@@ -2104,12 +2101,8 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
         return sidx;
       }
     }
-    if (loc != root_loc) {
-      // Non-root REDUCE: only allow ONE per kernel.
-      for (u32 i = 0; i < ke->n_ops; i++) {
-        if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
-      }
-    }
+    // Multi-REDUCE per kernel is permitted; see the comment in the
+    // multi-reduce-chain branch above.
     u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     kernel_program_reserve(ke, ke->n_ops + 1);

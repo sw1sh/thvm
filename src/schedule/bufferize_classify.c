@@ -1541,12 +1541,15 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
             abs_unmark_count[slot] = 0;
           }
         }
-        // Cap defaults to 1 per absorbing boundary (the BN-train BWD
-        // diamond's two sibling REDUCE chains).  THVM_REDUCE_UNMARK_CAP=0
-        // disables un-marking entirely (every REDUCE stays its own
-        // boundary kernel).  Useful as a kill switch when a complex
-        // backward chain produces a kernel the lifter can't handle.
-        u32 cap_limit = 1;
+        // Cap was originally 1 per absorbing boundary to dodge the
+        // materializer's "one REDUCE per kernel" gate (now removed).
+        // With multi-REDUCE permitted in a single kernel
+        // (materialize.c, rangeify scalar_uops), the cap is obsolete:
+        // any number of broadcast-fed REDUCE chains in the same
+        // absorbing-boundary root can fuse.  Default to UINT32_MAX
+        // (effectively unlimited); THVM_REDUCE_UNMARK_CAP=0..9 caps it
+        // explicitly for bisecting if a regression appears.
+        u32 cap_limit = (u32)-1;
         char const *_cap_e = getenv("THVM_REDUCE_UNMARK_CAP");
         if (_cap_e != NULL && _cap_e[0] >= '0' && _cap_e[0] <= '9') {
           cap_limit = (u32)(_cap_e[0] - '0');
