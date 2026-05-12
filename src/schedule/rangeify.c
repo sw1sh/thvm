@@ -2869,6 +2869,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         if (reduce_axis >= in_ndim_r) RBAIL_MID("reduce_axis search exhausted");
         u32 r_ids    [MAX_DIM + 1]; u32 r_strides[MAX_DIM + 1];
+        int fallback_to_rngs = 0;
         for (u32 d = 0; d < in_ndim_r; d++) {
           if (d < reduce_axis) {
             r_ids[d] = loop_ranges[d];
@@ -2886,10 +2887,30 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             continue;
           }
           if (v->shape.dims[d] != expected_dim && v->strides[d] != 0) {
+            // The simple "d > reduce_axis -> os->dims[d-1]" mapping only
+            // works when the kernel's output is exactly the post-reduce
+            // shape (no downstream EXPAND introducing new axes).  When a
+            // downstream EXPAND-from-1 adds axes to the output, the kept
+            // input axes no longer line up by index; e.g.
+            //   x:{2,3} -> reduce ax0 -> {3} -> reshape {1,3} -> expand
+            //   {2,3}
+            // has input axis 1 (size 3) mapping to OUTPUT axis 1, not
+            // output axis 0 as the d-1 formula assumes.  The fully
+            // general path (pre_index_rngs_fallback) consumes
+            // `input_rngs_in_region[r][i]` -- which carries the per-
+            // input-axis iter ref directly -- so the simple-mapping
+            // mismatch becomes a non-event.  Fall through there iff the
+            // rngs entry is well-formed at this input's ndim.
+            if (input_rngs_in_region[r][i].ndim == v->shape.ndim
+                && v->shape.ndim > 0) {
+              fallback_to_rngs = 1;
+              break;
+            }
             RBAIL_MID("pre-reduce dim mismatch (non-broadcast)");
           }
           r_strides[d] = (u32)v->strides[d];
         }
+        if (fallback_to_rngs) goto pre_index_rngs_fallback;
         if (chained) {
           u32 a = emit_addr_from_strides(ke, r_ids, r_strides, in_ndim_r, in_off);
           idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, a);
