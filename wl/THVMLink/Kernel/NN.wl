@@ -292,8 +292,9 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
    the K axis.  Both reshapes are contiguity-preserving so EXPAND just
    sets broadcast strides -- no extra materialization. *)
 TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
-    input, inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut,
-    rh, rw, x1, x2, x3, x4, xCol6, wExp, xExp, out4, outShaped, biasBcast
+    input, inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
+    kFlat, rh, rw, x1, x2, x3, x4, xCol6, xCol4, wFlat, wExp, xExp, out4,
+    outShaped, biasBcast
 },
     input = inputArg;
     inShape = tUopShape[input];
@@ -304,6 +305,8 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     kw   = wShape[[4]];
     hOut  = h  - kh + 1;
     wOut  = wd - kw + 1;
+    kSpat = kh * kw;
+    kFlat = cIn * kSpat;
     rh = Ceiling[kh * (h + 1) / h];
     rw = Ceiling[kw * (wd + 1) / wd];
     x1 = TUOpReshape[
@@ -316,32 +319,14 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     x4 = TUOpShrink[x3,
         {{0, batch}, {0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
     xCol6 = TUOpPermute[x4, {1, 2, 4, 0, 3, 5}];     (* {cIn,kh,kw,B,hOut,wOut} *)
-    (* Keep weights at their natural rank-4 shape {cOut, cIn, kh, kw}
-       and broadcast directly to the 7-D matmul operand layout
-       {cOut, cIn, kh, kw, B, hOut, wOut} -- the obvious "matmul with
-       extra trailing-broadcast axes" form.  The previous lowering
-       collapsed `cIn * kh * kw` into a single kFlat axis via
-       `TUOpReshape[weights, {cOut, kFlat}]`; that collapsed reshape
-       was correct in forward but the BACKWARD of that 3-axis-collapse
-       reshape silently dropped the cOut differentiation in the
-       gradient (cOut=1's weight grad came back as a copy of
-       cOut=0's, killing real training convergence -- see
-       wl/THVMLink/Tests/pending_conv_backward_cout.wlt).  Reducing
-       (cin, kh, kw) as three separate axes (in order) sidesteps the
-       buggy backward and aligns with the renderer's existing
-       (cin, kh, kw)-split recognition in `rmu_emit_conv`. *)
-    wExp = TUOpExpand[
-        TUOpReshape[weights, {cOut, cIn, kh, kw, 1, 1, 1}],
-        {cOut, cIn, kh, kw, batch, hOut, wOut}];
-    xExp = TUOpExpand[
-        TUOpReshape[xCol6, {1, cIn, kh, kw, batch, hOut, wOut}],
-        {cOut, cIn, kh, kw, batch, hOut, wOut}];
-    out4 = TUOpReduce[
-        TUOpReduce[
-            TUOpReduce[TUOpMul[wExp, xExp], 3, "SUM"],
-            2, "SUM"],
-        1, "SUM"];                                       (* {cOut, B, hOut, wOut} *)
-    outShaped = TUOpPermute[out4, {1, 0, 2, 3}];          (* {B, cOut, hOut, wOut} *)
+    xCol4 = TUOpReshape[xCol6, {kFlat, batch, hOut, wOut}];
+    wFlat = TUOpReshape[weights, {cOut, kFlat}];
+    wExp  = TUOpExpand[TUOpReshape[wFlat, {cOut, kFlat, 1, 1, 1}],
+                       {cOut, kFlat, batch, hOut, wOut}];
+    xExp  = TUOpExpand[TUOpReshape[xCol4, {1, kFlat, batch, hOut, wOut}],
+                       {cOut, kFlat, batch, hOut, wOut}];
+    out4      = TUOpReduce[TUOpMul[wExp, xExp], 1, "SUM"]; (* {cOut,B,hOut,wOut} *)
+    outShaped = TUOpPermute[out4, {1, 0, 2, 3}];           (* {B,cOut,hOut,wOut} *)
     biasBcast = TUOpExpand[
         TUOpReshape[bias, {1, cOut, 1, 1}],
         {batch, cOut, hOut, wOut}];
