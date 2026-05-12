@@ -263,6 +263,81 @@ have no peer-reviewed paper.
   neural network" (GLOM), 2021; arXiv:2102.12627.
   <https://arxiv.org/abs/2102.12627>
 
+## Sakana AI: evolution + collective intelligence (page 4)
+
+Sakana AI is the most prolific current engineering programme on the
+evolutionaries-tribe + collective-intelligence axis. Selected papers
+relevant to the brain-AI thread:
+
+- Luke Darlow, Ciaran Regan, Sebastian Risi, Jeffrey Seely, David
+  Ha et al., "Continuous Thought Machines" (CTM), arXiv:2505.05522
+  (May 2025). <https://arxiv.org/abs/2505.05522> ·
+  page <https://pub.sakana.ai/ctm/> ·
+  code <https://github.com/SakanaAI/continuous-thought-machines>
+- Edoardo Cetin, Qi Sun, Tianyu Tang, David Ha, Robert Tjarko Lange
+  et al., "An Evolved Universal Transformer Memory" (NAMM, Neural
+  Attention Memory Models), arXiv:2410.13166 (Oct 2024; ICLR 2025).
+  <https://arxiv.org/abs/2410.13166> · blog <https://sakana.ai/namm/>
+- Robert Tjarko Lange et al., "ShinkaEvolve: Towards Open-Ended and
+  Sample-Efficient Program Evolution", arXiv:2509.19349 (Sep 2025).
+  <https://arxiv.org/abs/2509.19349> ·
+  code <https://github.com/SakanaAI/ShinkaEvolve>
+- Jenny Zhang, Shengran Hu, Cong Lu et al., "Darwin-Godel Machine:
+  Open-Ended Evolution of Self-Improving Agents" (DGM),
+  arXiv:2505.22954 (May 2025). <https://arxiv.org/abs/2505.22954> ·
+  blog <https://sakana.ai/dgm/>
+- Chris Lu, Samuel Holt, Claudio Fanconi et al., "Discovering
+  Preference Optimization Algorithms with and for Large Language
+  Models" (DiscoPOP / LLM-squared), arXiv:2406.08414 (Jun 2024).
+  <https://arxiv.org/abs/2406.08414> ·
+  code <https://github.com/SakanaAI/DiscoPOP>
+- Robert Tjarko Lange et al., "Large Language Models as Evolution
+  Strategies" (EvoLLM), arXiv:2402.18381 (Feb 2024).
+  <https://arxiv.org/abs/2402.18381>
+- Yuichi Inoue, Kou Misaki, Yuki Imajuku, Daichi Murata, So Kuroki
+  et al., "AB-MCTS: Adaptive Branching Monte Carlo Tree Search for
+  Inference-Time Scaling", arXiv:2503.04412 (Mar 2025).
+  <https://arxiv.org/abs/2503.04412> · blog <https://sakana.ai/ab-mcts/>
+- Sakana AI, "Trinity / Conductor: a 7B model trained to orchestrate
+  LLMs", ICLR 2026; arXiv:2512.04695 (Dec 2025).
+  <https://arxiv.org/abs/2512.04695>
+- Takuya Akiba, Makoto Shing, Yujin Tang, Qi Sun & David Ha,
+  "Evolutionary Optimization of Model Merging Recipes", *Nature
+  Machine Intelligence* (2025); blog
+  <https://sakana.ai/evolutionary-model-merge/> ·
+  code <https://github.com/SakanaAI/evolutionary-model-merge>
+- So Kuroki, Taishi Nakamura, Takuya Akiba & Yujin Tang, "CycleQD:
+  Agent Skill Acquisition through Cyclic Quality-Diversity",
+  arXiv:2410.14735 (Oct 2024; NeurIPS 2024 / ICLR 2025).
+  <https://arxiv.org/abs/2410.14735>
+- Yuki Imajuku et al., "The AI Scientist v2: Workshop-Level Automated
+  Scientific Discovery via Agentic Tree Search", arXiv:2504.08066
+  (Apr 2025). <https://arxiv.org/abs/2504.08066> ·
+  code <https://github.com/SakanaAI/AI-Scientist-v2> · the v1 line +
+  *Nature* milestone: <https://sakana.ai/ai-scientist-nature/>
+- Makoto Shing, Kou Misaki, Han Bao, Sho Yokoi, Takuya Akiba,
+  "Temporally Adaptive Interpolated Distillation" (TAID), ICLR 2025.
+  Blog <https://sakana.ai/taid/>
+- Edoardo Cetin et al., "Reinforcement-Learned Teachers" (RLT),
+  arXiv:2506.08388 (Jun 2025). <https://arxiv.org/abs/2506.08388> ·
+  blog <https://sakana.ai/rlt/>
+- AI CUDA Engineer postmortem (reward-hacking case study, Feb 2025):
+  <https://sakana.ai/ai-cuda-engineer/> ·
+  <https://airevolution.poltextlab.com/controversies-surrounding-sakana-ais-cuda-engineer-framework/>
+
+Adjacent context for CTM's "thinking takes time" / synchronisation
+framing:
+
+- Wolf Singer, "Neuronal synchrony: a versatile code for the
+  definition of relations?", *Neuron* 24:49-65 (1999).
+  <https://doi.org/10.1016/s0896-6273(00)80821-1>
+- Pascal Fries, "A mechanism for cognitive dynamics: neuronal
+  communication through neuronal coherence", *Trends in Cognitive
+  Sciences* 9(10):474-480 (2005).
+  <https://doi.org/10.1016/j.tics.2005.08.011>
+  (Binding-by-synchrony / gamma-band coherence -- the neuroscience
+  CTM's synchronisation latent draws on.)
+
 ## Classical ML pillars (page 6, part 1)
 
 - Pedro Domingos, *The Master Algorithm: How the Quest for the
@@ -293,6 +368,46 @@ have no peer-reviewed paper.
 - Arthur Jacot, Franck Gabriel & Clement Hongler, "Neural Tangent
   Kernel: Convergence and Generalization in Neural Networks", NeurIPS
   2018; arXiv:1806.07572. <https://arxiv.org/abs/1806.07572>
+
+## Tensor Logic, tensor networks, einsum-as-primitive (page 6, part 1.5)
+
+- Pedro Domingos, "Tensor Logic: The Language of AI", arXiv:2510.12269
+  (Oct 2025). <https://arxiv.org/abs/2510.12269>
+- "Implementing Tensor Logic: Unifying Datalog and Neural Reasoning
+  via Tensor Contraction", arXiv:2601.17188 (Jan 2026).
+  <https://arxiv.org/abs/2601.17188>
+- Earlier in the differentiable-Datalog / neural-symbolic line --
+  William W. Cohen, Fan Yang & Kathryn Mazaitis, "TensorLog: A
+  Probabilistic Database Implemented as a Deep Neural Network",
+  arXiv:1707.05390 (2017). <https://arxiv.org/abs/1707.05390>
+- E. Miles Stoudenmire & David J. Schwab, "Supervised Learning with
+  Quantum-Inspired Tensor Networks", NIPS 2016; arXiv:1605.05775.
+  <https://arxiv.org/abs/1605.05775> ·
+  code <https://github.com/emstoudenmire/TNML>
+- Alexander Novikov, Dmitrii Podoprikhin, Anton Osokin & Dmitry
+  Vetrov, "Tensorizing Neural Networks", NeurIPS 2015;
+  arXiv:1509.06569. <https://arxiv.org/abs/1509.06569>
+- Ivan Glasser, Nicola Pancotti & J. Ignacio Cirac, "Supervised
+  learning with generalized tensor networks", arXiv:1806.05964
+  (2018). <https://arxiv.org/abs/1806.05964>
+- Ivan V. Oseledets, "Tensor-Train Decomposition", *SIAM Journal on
+  Scientific Computing* 33(5):2295-2317 (2011). DOI:
+  <https://doi.org/10.1137/090752286>
+- Pankaj Mehta & David J. Schwab, "An exact mapping between the
+  variational renormalization group and deep learning", 2014;
+  arXiv:1410.3831. <https://arxiv.org/abs/1410.3831>
+- ITensor library (research workhorse for tensor-network physics):
+  <https://itensor.org/>
+- Tensor Networks for ML community page: <https://tensornetwork.org/ml/>
+- Daniel G. A. Smith & Johnnie Gray, "opt_einsum -- A Python package
+  for optimizing contraction order for einsum-like expressions",
+  *Journal of Open Source Software* 3(26):753 (2018).
+  <https://doi.org/10.21105/joss.00753>
+- Alex Rogozhnikov, "Einops: Clear and Reliable Tensor Manipulations
+  with Einstein-like Notation", ICLR 2022; <https://einops.rocks>.
+  OpenReview: <https://openreview.net/forum?id=oapKSVM2bcj>
+- einx universal tensor-notation library:
+  <https://github.com/fferflo/einx>
 
 ## Modern alignment / RLHF / reasoning (page 6, part 2)
 

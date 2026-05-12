@@ -95,13 +95,25 @@ would unify all five" -- is more rallying cry than result, but the
   (automated machine learning) and neural-architecture search (mostly
   gradient- and RL-based these days, but evolutionary methods remain
   competitive).
-- **Status 2026:** niche but not dead. Where the loss landscape is
-  non-differentiable, discrete, or you need black-box optimisation
-  (hardware design, program synthesis, scientific discovery),
-  evolutionary methods still earn their keep. They are also the right
-  *frame* for thinking about evolution-of-architectures vs. learning-of-
-  weights -- a distinction Bennett's "innate priors vs lifelong
-  learning" leans on.
+- **Status 2026:** niche but not dead -- and arguably *re-emerging*
+  because **LLMs make the variation operator competent for the first
+  time.** The leading example is Tokyo's **Sakana AI**: evolution
+  applied at every level of the stack -- model merging (Evolutionary
+  Model Merge, CycleQD), training-loss discovery (DiscoPOP),
+  evolved memory policies (NAMM), self-modifying agents (DGM,
+  Darwin-Godel Machine), LLM-driven program search (ShinkaEvolve),
+  inference-time orchestration (AB-MCTS / Trinity / Conductor), and
+  the "AI Scientist" autonomous-research loop. The variation operator
+  is an LLM (with intelligent priors); the selector is a verifier or
+  benchmark (non-differentiable is fine). See the dedicated section
+  in [04-brain-inspired-ai.md](04-brain-inspired-ai.md#sakana-ai-evolution--collective-intelligence-as-a-working-brain-inspired-bet)
+  for what to take from this. Beyond Sakana, evolutionary methods
+  still earn their keep wherever the loss landscape is
+  non-differentiable, discrete, or black-box (hardware design,
+  program synthesis, scientific discovery). They are also the right
+  *frame* for thinking about evolution-of-architectures vs.
+  learning-of-weights -- a distinction Bennett's "innate priors vs
+  lifelong learning" leans on.
 
 ### 4. Bayesians -- "intelligence is probabilistic inference"
 
@@ -187,6 +199,235 @@ you're standing on -- a JEPA world model + planner is connectionist +
 Bayesian + a kernel/analogiser slice (the latent-space distance is a
 similarity), and the moment you bolt on a verifier (e.g. for a math
 or code toy problem) you've added a symbolist.
+
+---
+
+## Part 1.5: Tensors as the primitive -- Domingos's "Tensor Logic" sequel + the tensor-network line
+
+*(Added in response to a reader question, 2026-05-12 -- "is Pedro
+Domingos pushing 'tensor calculus' as a new quantum-inspired tribe?
+I'm interested in tensor networks too, not necessarily just for
+quantum circuits -- einsum as a compute-graph primitive is very
+powerful on its own.")*
+
+Short answer: **(a) yes, Domingos has a 2025 sequel called *Tensor
+Logic* that proposes the tensor equation as the unifying primitive
+for all of AI; (b) no, it is not a quantum-inspired tribe in the
+five-tribes sense -- it is Domingos's attempt at the "master
+algorithm" the 2015 book left open; (c) tensor *networks* (the
+physics-import line) are a separate, genuinely quantum-inspired ML
+programme; (d) einsum-as-a-primitive is the engineering version
+that powers JAX, tinygrad, and thvm itself, and is powerful on its
+own merits.** Three programmes, one substrate (tensors). Worth
+disentangling.
+
+### Tensor Logic (Domingos, Oct 2025)
+
+**"Tensor Logic: The Language of AI"** -- Pedro Domingos,
+arXiv:2510.12269 (Oct 2025). The book *The Master Algorithm* (2015)
+ended with "a master algorithm would unify all five tribes" but did
+not name one; this paper is the missing answer.
+
+**Central claim.** *Logical rules and Einstein summation are
+essentially the same operation.* Concretely: a Horn clause
+`p(X,Z) :- q(X,Y), r(Y,Z)` is, when you make the predicates
+indicator tensors, exactly the contraction `P[i,k] = sum_j
+Q[i,j] * R[j,k]` -- which is what `einsum('ij,jk->ik', Q, R)` does
+in NumPy / PyTorch / JAX / thvm. **The same arithmetic implements
+matrix multiplication, a relational join, a Datalog rule firing, and
+an attention head.** So Domingos proposes **the tensor equation as
+the sole construct** of an AI programming language. Everything else
+(neural, symbolic, statistical, attention, automatic
+differentiation) reduces to that primitive.
+
+**What it unifies.** The paper claims elegant implementations in
+tensor logic of:
+
+- **Transformers** -- attention is a tensor contraction with a
+  softmax along one axis.
+- **Formal reasoning / Datalog** -- a rule is a tensor equation
+  over indicator tensors; iterating the rules to fixed point is
+  repeated contraction.
+- **Kernel machines** -- the kernel matrix is a tensor; predictions
+  are contractions.
+- **Probabilistic graphical models** -- the sum-product algorithm
+  is a sequence of tensor contractions in log-space; Markov-chain
+  Monte Carlo (MCMC) is a tensor equation over states.
+
+The forward direction (Datalog programs as tensor equations) was
+already well known from the *neural-symbolic*, "differentiable
+Datalog" line (Cohen-Yang's TensorLog, NeurASP, DeepProbLog); a
+recent follow-up -- **"Implementing Tensor Logic: Unifying Datalog
+and Neural Reasoning via Tensor Contraction"** (arXiv:2601.17188,
+Jan 2026) -- claims an actual implementation and empirical
+validation of Domingos's framework.
+
+**The new direction Domingos cares about.** *Sound reasoning in
+embedding space*: lift a Datalog-style theorem prover into the
+*latent space* of a neural net, so the *combinational scalability*
+of attention buys you symbolic *reliability* at the same time.
+Whether this works is an open empirical question; the architectural
+proposition is the contribution.
+
+**Where it sits in the five-tribes story.** Tensor logic is
+**Domingos's own master-algorithm pitch**: not a new tribe, but the
+unifier of the existing five. It is closest in spirit to the
+symbolists (logic) and connectionists (gradient descent through
+tensors), with the Bayesians and analogisers folded in as special
+cases. Critique-wise, the right reservation is the obvious one:
+"AI = tensor equations" is *necessary but not sufficient* -- the
+hard problems aren't notational, they're algorithmic (learning,
+generalisation, planning, alignment), and renaming the primitive
+doesn't solve them. But as an organising lens for what *can* be
+expressed at all, it's defensible -- and it lines up almost
+exactly with thvm's own UOp / tensor-primitive substrate.
+
+### Tensor networks: the (genuinely) quantum-inspired ML line
+
+This is the "tensor networks" you were thinking of, and it is a
+**separate programme** from Tensor Logic -- imported from quantum
+many-body physics, not from logic. The core observation: a generic
+rank-N tensor (think: the full joint distribution over N variables)
+has 2^N parameters and is intractable, but in physically realistic
+states the entanglement structure is *local*, so the tensor
+decomposes into a *network* of small tensors contracted along
+shared indices. Compute by contracting the network.
+
+Names and primitives:
+
+- **MPS (Matrix Product States) / Tensor-Train decomposition** --
+  the simplest, 1-D chain. A rank-N tensor written as a sequence of
+  rank-3 tensors contracted on shared bonds. The Tensor-Train
+  decomposition (Oseledets 2011) is the same thing under a
+  different name in numerical linear algebra.
+- **PEPS (Projected Entangled Pair States)** -- 2-D grid.
+- **MERA (Multi-scale Entanglement Renormalization Ansatz)** --
+  hierarchical, captures long-range correlations.
+- **Tree tensor networks**.
+
+These have been *imported into machine learning* as
+parameterisations with explicit, controllable expressivity:
+
+- **Stoudenmire & Schwab, "Supervised Learning with Quantum-Inspired
+  Tensor Networks"**, NIPS 2016; arXiv:1605.05775. MPS-based
+  classifier reaches <1% test error on the handwritten-digit
+  benchmark, with an interpretable "bond-dimension as model
+  capacity" knob.
+- **Novikov et al., "Tensorizing Neural Networks"**, NIPS 2015;
+  arXiv:1509.06569. Replace a dense weight matrix with a
+  Tensor-Train; gigantic compression with small accuracy loss.
+- **Glasser, Pancotti & Cirac**, "Supervised learning with
+  generalized tensor networks" / "From probabilistic graphical
+  models to generalized tensor networks", arXiv:1806.05964 (2018).
+  Maps probabilistic graphical models *into* tensor-network
+  ansatze, bridging the Bayesians (page 6) with the physics line.
+- **TorchMPS, ITensor** -- standard libraries; ITensor is the
+  research workhorse for the physics community
+  (<https://itensor.org/>).
+- More recent work on **tensor-network language models** and
+  **tensor-train transformers** (e.g. Patel et al., Strässer
+  et al., Schuld et al., 2023-2025) -- still small relative to
+  standard transformers, but the *bond-dimension as a tunable
+  scaling axis* is genuinely useful and not available in vanilla
+  deep learning.
+
+**Why this is interesting from the brain-AI angle of this docs set.**
+Tensor networks are a *structured prior* in the
+[page 4](04-brain-inspired-ai.md) "structured priors the
+deep-learning mainstream hasn't absorbed" sense (Numenta's columns,
+hyperdimensional vectors, capsules). The bias they encode is
+**locality of entanglement / correlation** -- which is *also*
+roughly what the cortical microcircuit imposes (mostly local
+connections, sparse long-range). There is real work connecting
+**renormalisation group flow** in tensor networks to
+**hierarchical representation learning** (Mehta & Schwab, "An exact
+mapping between the variational renormalization group and deep
+learning", arXiv:1410.3831), which gives a clean theoretical reason
+to think the two should be related.
+
+### Einsum as a compute-graph primitive (the engineering version)
+
+This is your closing observation and it stands on its own,
+*independent of both Domingos and quantum physics*. The
+engineering line:
+
+- **NumPy's `einsum`** -- Einstein summation notation as a single
+  function that subsumes matmul, batched matmul, reductions, outer
+  products, contractions, transpose, dot product. One notation,
+  one optimiser, many shapes.
+- **`opt_einsum`** (Smith & Gray, 2018) -- contraction-path
+  optimisation: given a network of tensors to contract, find an
+  order with minimal floating-point cost. Borrowed directly from
+  tensor-network physics.
+- **einops** (Rogozhnikov, ICLR 2022, "Einops: Clear and Reliable
+  Tensor Manipulations with Einstein-like Notation",
+  <https://einops.rocks>) -- named-axes pattern language
+  (`'b c h w -> b (c h w)'`) covering rearrange / reduce / repeat
+  cleanly across PyTorch / TensorFlow / JAX / NumPy. The
+  *human-readable* version of einsum.
+- **einx** (2024, <https://github.com/fferflo/einx>) -- a
+  universal-notation cousin extending einops with arithmetic,
+  indexing, vmap. Probably the cleanest tensor DSL
+  (domain-specific language) today.
+- **JAX, tinygrad, thvm** -- whole compute stacks built on
+  *tensor primitives plus a small set of universal operations*.
+  thvm's UOps + rangeify pipeline ([../wl.md](../wl.md),
+  [../grad.md](../grad.md)) lives explicitly in this lineage:
+  programs are tensor expressions that get lowered to
+  scheduled / kernelised / fused contractions.
+
+**Why it's powerful on its own**, as you said: einsum gives you (1)
+*shape-checking by construction* (each named axis must match across
+operands), (2) *one optimisation surface* (contract in the best
+order, fuse where possible), (3) *cleanly differentiable*
+(`d(einsum(a,b))/da = einsum(...)` of dual indices), (4) a
+*single representation* that the compiler can lower to GEMM
+(general matrix multiply), batched GEMM, conv, attention, scan,
+reduce -- whichever is appropriate for the shape and the backend.
+Most of what makes modern ML systems fast comes from this
+substrate, not from architectural ingenuity above it.
+
+### How the three lines relate
+
+| Programme | Primitive | Origin | What it's selling |
+|---|---|---|---|
+| **Tensor Logic** (Domingos, 2025) | tensor equation = logical rule | symbolist + connectionist | a unified *language* / master algorithm |
+| **Tensor networks** (Stoudenmire-Schwab and physics line) | low-bond-dim tensor decomposition (MPS/PEPS/MERA) | quantum many-body physics | structured priors with controllable expressivity |
+| **Einsum-as-primitive** (NumPy / opt_einsum / einops / einx / JAX / thvm) | a single notation for tensor contractions | numerical linear algebra + engineering | clean shape-checked + compiler-friendly substrate |
+
+They share the *substrate* (tensors + contractions) but answer
+different questions: Domingos asks "what language should AI be
+written in?", the physics line asks "what tractable
+parameterisations have the right correlation structure?", and the
+einsum-as-primitive line asks "what compiler IR (intermediate
+representation) makes ML systems fast and correct?".
+
+### Where this lands for thvm
+
+thvm is already *deeply* in the einsum-as-primitive line: UOps are
+the universal tensor-operation node, the rangeify pass is
+shape-and-axis bookkeeping over them, and the autodiff and
+kernelisation layers are exactly the "lower one tensor expression
+to a fast scheduled program" story. The thvm-relevant directions
+from this section:
+
+1. **Tensor-network parameterisations as a thvm experiment.**
+   Replace a dense layer with a Tensor-Train (MPS) factorisation;
+   you only need a sequence of contractions and a "bond dimension"
+   knob. Excellent fit for thvm's UOp + autodiff layer; no new
+   primitive needed. The Stoudenmire-Schwab MNIST classifier is the
+   canonical small experiment.
+2. **A tensor-logic-style "differentiable Datalog" prototype in
+   thvm.** Indicator tensors + contractions = Datalog rules; iterate
+   to fixed point (or for a bounded number of steps) inside the
+   autodiff graph; train end-to-end against examples. Connects to
+   the waldmeister / ATP layer (the symbolist tribe in this doc):
+   the verifier is symbolic, the learner is differentiable, both
+   speak tensors.
+3. **Read the existing thvm pipeline through this lens.** The thvm
+   architecture *is* a tensor-equation language; Tensor Logic gives
+   you the philosophy and tensor networks give you the
+   parameterisations that would slot in cleanly.
 
 ---
 

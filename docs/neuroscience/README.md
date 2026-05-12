@@ -49,6 +49,18 @@ is the bridge.
     (2026-05-12) -- Numenta, HTM, the Thousand Brains Theory and
     Project, plus the cousin programmes (sparse coding, HDC/VSA,
     neuromorphic hardware, capsule networks).
+  - the "Sakana AI: evolution + collective intelligence" section in
+    [04-brain-inspired-ai.md](04-brain-inspired-ai.md#sakana-ai-evolution--collective-intelligence-as-a-working-brain-inspired-bet)
+    (2026-05-12) -- CTM, NAMM, ShinkaEvolve / DGM / DiscoPOP,
+    AB-MCTS / Trinity / Conductor, and the AI CUDA Engineer
+    cautionary tale.
+  - "Part 1.5: Tensors as the primitive" in
+    [06-classical-ml-and-rlhf.md](06-classical-ml-and-rlhf.md#part-15-tensors-as-the-primitive--domingoss-tensor-logic-sequel--the-tensor-network-line)
+    (2026-05-12) -- Domingos's 2025 *Tensor Logic* paper (the
+    master-algorithm sequel: tensor equation = logical rule via
+    einsum), tensor networks in ML (Stoudenmire-Schwab, MPS/PEPS/
+    MERA), and einsum-as-primitive (einops / einx / opt_einsum /
+    JAX / thvm).
 
 ### Abbreviation cheat sheet
 
@@ -89,6 +101,9 @@ is the bridge.
 | TBP | Thousand Brains Project | NuPIC | Numenta Platform for Intelligent Computing |
 | HDC | hyperdimensional computing | VSA | Vector Symbolic Architecture |
 | SNN | spiking neural network | SLT | statistical learning theory |
+| MPS | Matrix Product State | PEPS | Projected Entangled Pair State |
+| MERA | Multi-scale Entanglement Renorm. Ansatz | DSL | domain-specific language |
+| IR | intermediate representation | GEMM | general matrix multiply |
 
 (Common venue abbreviations -- *Nature*, NeurIPS, ICML, ICLR, CVPR,
 IJCAI, etc. -- are left as is.)
