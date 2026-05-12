@@ -1438,9 +1438,10 @@ typedef struct {
 #define RULE_DUP_LAM         8
 #define RULE_DUP_BRI         9
 #define RULE_DUP_CTR        10
-#define RULE_DUP_APP        11
-#define RULE_DUP_MAT        12
-#define RULE_DUP_OP2        13
+#define RULE_DUP_NOD        11  // generic eager-commute through n-ary node
+                                // (OP2/MAT/EQL/AND/OR/WHEN/ANN/DSU/DDU/INC);
+                                // term_a carries the term so trace can
+                                // recover the inner tag via term_tag(term_a)
 #define RULE_DUP_ERA        14
 #define RULE_DUP_NUM        15
 #define RULE_DUP_TEN        16

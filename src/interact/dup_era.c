@@ -8,6 +8,6 @@
 // eraser.
 fn Term interact_dup_era(u8 side, u64 loc, Term era) {
   ITRS++;
-  multi_emit(RULE_DUP_ERA, MULTI_PRUNE, (u64)era, 0, 0);
+  multi_emit(RULE_DUP_ERA, MULTI_PRUNE, loc, 0, 0);
   return heap_subst_cop(side, loc, era, era);
 }

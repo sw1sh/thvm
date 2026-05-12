@@ -7,6 +7,6 @@
 // term -- copying the constant into both sides.
 fn Term interact_dup_any(u8 side, u64 loc, Term any) {
   ITRS++;
-  multi_emit(RULE_DUP_ANY, MULTI_PLUMB, (u64)any, 0, 0);
+  multi_emit(RULE_DUP_ANY, MULTI_PLUMB, loc, 0, 0);
   return heap_subst_cop(side, loc, any, any);
 }

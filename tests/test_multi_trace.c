@@ -357,16 +357,18 @@ int main(void) {
         multi_trace_free();
     }
 
-    // === Label collision => spurious merge.  The headline failure
-    // mode the trace is meant to surface: two SUP-encoded choices that
-    // accidentally share a label correlate branch-left with branch-left
-    // (the OP2-SUP rule DUPs the other operand at the SUP's label, so a
-    // same-label DUP-SUP annihilates instead of fanning out).  Result:
-    // only the diagonal survives the collapse, not the full cross
-    // product.  Correct encoding: distinct labels => DUP-SUP commute =>
-    // MULTI_SPLIT => 4 leaves.  Buggy encoding: shared label => DUP-SUP
-    // annihilate => MULTI_MERGE => 2 leaves.  The trace tells them
-    // apart by family alone. ============================================
+    // === Label discipline: cross product vs diagonal.  Same-label
+    // DUP-SUP is IC's *annihilate* rule -- it's the correct semantics
+    // (the DUP's projections correspond pointwise to the SUP's
+    // branches), not a runtime bug.  It only *reads* like a bug when
+    // the user intended two independent branchial dimensions and
+    // accidentally reused a label -- the rule then projects to the
+    // diagonal instead of the cross product.  The trace surfaces this
+    // user-side mistake as a "spurious" MULTI_MERGE: the MERGE itself
+    // is correct IC, but it sits where the user expected a SPLIT.
+    // Distinct labels (independent dims) => DUP-SUP commute =>
+    // MULTI_SPLIT => 4 leaves.  Shared label (identified dim) =>
+    // DUP-SUP annihilate => MULTI_MERGE => 2 leaves. ====================
 
     TEST_BEGIN("multi-trace/label-collision/distinct-labels-cross-product");
     {
@@ -382,7 +384,7 @@ int main(void) {
         for (u64 i = 0; i < n; i++) { CHECK_EQ(term_tag(out[i]), TAG_NUM); sum += term_val(out[i]); }
         CHECK_EQ(sum, 11u + 12u + 21u + 22u);                   // {1+10, 1+20, 2+10, 2+20} = 66
         CHECK(count_events(from, MULTI_SPLIT) >= 1u);           // the A-vs-B DUP-SUP commute
-        CHECK_EQ(count_events(from, MULTI_MERGE), 0u);          // no spurious merge
+        CHECK_EQ(count_events(from, MULTI_MERGE), 0u);          // distinct labels => no DUP-SUP annihilate
         CHECK(find_event(from, RULE_DUP_SUP_COM, MULTI_SPLIT) != (u64)-1);
         multi_trace_free();
     }
@@ -393,14 +395,14 @@ int main(void) {
         CURRENT_CTX->trace = 1;
         u64 from = multi_trace_count();
         Term sa = build_sup(1, build_num(1),  build_num(2));    // &1{1,2}
-        Term sb = build_sup(1, build_num(10), build_num(20));   // &1{10,20} -- SAME label, the bug
+        Term sb = build_sup(1, build_num(10), build_num(20));   // &1{10,20} -- SAME label, identified dim
         Term out[16];
         u64  n = thvm_collapse(term_new_op2(OP_ADD, sa, sb), out, 16);
         CHECK_EQ(n, 2u);                                        // only the diagonal survives
         u64 sum = 0;
         for (u64 i = 0; i < n; i++) { CHECK_EQ(term_tag(out[i]), TAG_NUM); sum += term_val(out[i]); }
         CHECK_EQ(sum, 11u + 22u);                               // {1+10, 2+20} = 33
-        CHECK(count_events(from, MULTI_MERGE) >= 1u);           // the spurious DUP-SUP annihilation
+        CHECK(count_events(from, MULTI_MERGE) >= 1u);           // shared label => DUP-SUP annihilate fires
         CHECK(find_event(from, RULE_DUP_SUP_ANN, MULTI_MERGE) != (u64)-1);
         multi_trace_free();
     }
@@ -533,10 +535,14 @@ int main(void) {
         u64 idx = find_event(from, RULE_DUP_SUP_COM, MULTI_SPLIT);
         CHECK(idx != (u64)-1);
         const MultiEvent *e = multi_trace_get(idx);
-        // Active pair's SUP came from pre-trace; consumed[0] sees the
+        // dup_sup.c emits with (loc, sup) as the two carriers:
+        //   consumed[0] = wire_prov[loc]        -- DUP body cell
+        //   consumed[1] = wire_prov[term_val(sup)] -- SUP partner
+        // Both came from pre-trace construction here, so both are
         // sentinel.
-        CHECK_EQ(e->n_consumed,  1u);
+        CHECK_EQ(e->n_consumed,  2u);
         CHECK_EQ(e->consumed[0], MULTI_WIRE_NONE);
+        CHECK_EQ(e->consumed[1], MULTI_WIRE_NONE);
         // The SPLIT event allocated 6 cells and heap_set'd each; their
         // wire_prov entries must carry the SPLIT's id.  Scan the heap
         // range bumped during cnf and count stamps == e->id.

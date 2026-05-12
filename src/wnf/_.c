@@ -71,7 +71,7 @@ enter:
         if (term_tag(next) == TAG_DP0) {
           // FWD passthrough: cell holds y, force it.
           ITRS++;
-          multi_emit(RULE_GRAD_FWD, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_GRAD_FWD, MULTI_TERM, loc, 0, 0);
           next = heap_read(loc);
           goto enter;
         }
@@ -403,7 +403,7 @@ apply:
             }
             s_pos = WNF_S_POS;
             ITRS++;
-            multi_emit(RULE_MAT_DISPATCH, MULTI_TERM, 0, 0, match);
+            multi_emit(RULE_MAT_DISPATCH, MULTI_TERM, mat_loc, 0, match);
             if (term_tag(arg_w) == TAG_NUM &&
                 (u32)term_val(arg_w) == match) {
               next = heap_read(mat_loc + 0);
@@ -492,7 +492,7 @@ apply:
             continue;
           }
           ITRS++;
-          multi_emit(RULE_GRAD_BWD, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_GRAD_BWD, MULTI_TERM, gloc, 0, 0);
           next = g;
           goto enter;
         }
@@ -555,10 +555,34 @@ apply:
             next = r;
             goto enter;
           }
+          // Generic eager-commute via interact_dup_nod -- matches
+          // HVM4's wnf_dup_nod dispatch (~/src/HVM4/clang/wnf/_.c).
+          // APP is intentionally absent: HVM4's comment says
+          // "DO NOT ADD: DP0/DP1 do not interact with APP" because
+          // eager DUP-APP would duplicate a beta-equivalent redex.
+          // The tags here are primitive / structural compounds; their
+          // duplication only replicates non-beta interactions, so
+          // Levy-optimality is preserved.
+          case TAG_OP2:
+          case TAG_MAT:
+          case TAG_EQL:
+          case TAG_AND:
+          case TAG_OR:
+          case TAG_WHEN:
+          case TAG_ANN:
+          case TAG_DSU:
+          case TAG_DDU:
+          case TAG_INC: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_nod(lab, loc, side, whnf);
+            goto enter;
+          }
           default: {
-            // Body cnfs to a non-dispatchable tag (REF/ALO/VAR/INC/
-            // another DP/BJ).  Restore body and propagate the DP root
-            // as WHNF.  Outer consumers (cnf, etc.) will retry.
+            // Body cnfs to a non-dispatchable tag (REF/ALO/VAR/
+            // another DP/BJ/APP).  Restore body and propagate the DP
+            // root as WHNF.  Outer consumers (cnf, etc.) will retry.
+            // APP-bodied DPs in particular are intentionally not
+            // commuted -- see HVM4's "// DO NOT ADD" comment above.
             heap_set(loc, whnf);
             whnf = frame;
             continue;
@@ -646,7 +670,7 @@ apply:
           Term y = heap_read(loc + 1);
           if (term_tag(y) == TAG_NUM) {
             ITRS++;
-            multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, 0, 0, op);
+            multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, 0, op);
             u32 xv = (u32)term_val(whnf);
             u32 yv = (u32)term_val(y);
             u32 r;
@@ -672,13 +696,20 @@ apply:
             whnf = term_new(0, TAG_NUM, term_ext(whnf), r);
             continue;
           }
-          // x is NUM; descend into y with F_OP2_NUM frame holding
-          // x's NUM raw bits (val) + dtype (low 6 bits of ext, op
-          // packed at upper bits via ext field directly = op).
-          // Pack: ext = op | (dtype << 8); val = NUM raw bits.
+          // x is NUM; descend into y.  Stash the WHNF'd x on the heap
+          // at loc + 0 so the F_OP2_NUM frame can key on `loc` (i.e.
+          // the original OP2 cell) rather than baking x's raw bits
+          // into the frame's val.  Two payoffs:
+          //   (1) the trace's wire_prov sees a real cell for x and
+          //       multi_emit's consumed lookup hits a real producer
+          //       (whoever wrote loc+0);
+          //   (2) the "y stuck" fall-through can reuse the OP2 cell
+          //       in place instead of allocating a fresh 2-cell pair.
+          // ext stays (op | dtype<<8); val is now loc.
           u32 dtype = term_ext(whnf);
           u32 packed_ext = (op & 0xFF) | ((dtype & 0xFF) << 8);
-          stack[s_pos++] = term_new(0, TAG_F_OP2_NUM, packed_ext, term_val(whnf));
+          heap_set(loc + 0, whnf);
+          stack[s_pos++] = term_new(0, TAG_F_OP2_NUM, packed_ext, loc);
           next = y;
           goto enter;
         }
@@ -695,13 +726,17 @@ apply:
         continue;
       }
       case TAG_F_OP2_NUM: {
-        // F_OP2_NUM frame: x is NUM (val=raw bits, ext low 8=op,
-        // ext bits 8..15=dtype).  Whnf is y's reduction.  If NUM,
-        // fire op; otherwise rebuild OP2 with reduced y.
+        // F_OP2_NUM frame: y reduced to whnf.  x's WHNF'd NUM was
+        // stashed at heap[loc + 0] by the OP2 frame before this
+        // frame was pushed; the frame's val carries `loc` (the
+        // original OP2 cell), ext carries op | (dtype << 8).  Read
+        // x out of the heap so multi_emit can use loc as a real
+        // wire-prov carrier.
+        u64 loc        = term_val(frame);
         u32 packed_ext = term_ext(frame);
-        u32 op    = packed_ext & 0xFF;
-        u32 dtype = (packed_ext >> 8) & 0xFF;
-        u32 xv    = (u32)term_val(frame);
+        u32 op         = packed_ext & 0xFF;
+        u32 dtype      = (packed_ext >> 8) & 0xFF;
+        u32 xv         = (u32)term_val(heap_read(loc + 0));
         if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
           WNF_S_POS = s_pos;
           whnf = cnf(whnf);
@@ -710,7 +745,7 @@ apply:
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, 0, 0, op);
+          multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, 0, op);
           u32 yv = (u32)term_val(whnf);
           u32 r;
           switch (op) {
@@ -743,12 +778,11 @@ apply:
           whnf = interact_op2_num_sup(op, x, whnf);
           continue;
         }
-        // y stuck (not NUM, not SUP): rebuild OP2(NUM(xv), whnf).
-        Term x = term_new(0, TAG_NUM, dtype, xv);
-        u64 nloc = heap_alloc(2);
-        heap_set(nloc + 0, x);
-        heap_set(nloc + 1, whnf);
-        whnf = term_new(0, TAG_OP2, op, nloc);
+        // y stuck (not NUM, not SUP): rebuild OP2(x, whnf) in place
+        // at the original loc -- x is already at heap[loc+0] from the
+        // stash; just write the reduced y back to heap[loc+1].
+        heap_set(loc + 1, whnf);
+        whnf = term_new(0, TAG_OP2, op, loc);
         continue;
       }
       case TAG_F_UOP_CHILD: {
@@ -801,13 +835,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_EQL_ERA, MULTI_PRUNE, 0, 0, 0);
+          multi_emit(RULE_EQL_ERA, MULTI_PRUNE, loc, 0, 0);
           continue;   // whnf = ERA stays
         }
         if (term_tag(whnf) == TAG_ANY) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_EQL_ANY, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_EQL_ANY, MULTI_TERM, loc, 0, 0);
           whnf = term_new(0, TAG_NUM, 0, 1);
           continue;
         }
@@ -828,7 +862,7 @@ apply:
           heap_set(ns + 0, e0);
           heap_set(ns + 1, e1);
           ITRS++;
-          multi_emit(RULE_EQL_SUP, MULTI_SLIDE, 0, 0, lab);
+          multi_emit(RULE_EQL_SUP, MULTI_SLIDE, loc, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
@@ -847,13 +881,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_EQL_ERA, MULTI_PRUNE, 0, 0, 0);
+          multi_emit(RULE_EQL_ERA, MULTI_PRUNE, loc, 0, 0);
           continue;   // whnf = ERA stays
         }
         if (term_tag(whnf) == TAG_ANY) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_EQL_ANY, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_EQL_ANY, MULTI_TERM, loc, 0, 0);
           whnf = term_new(0, TAG_NUM, 0, 1);
           continue;
         }
@@ -873,14 +907,14 @@ apply:
           heap_set(ns + 0, e0);
           heap_set(ns + 1, e1);
           ITRS++;
-          multi_emit(RULE_EQL_SUP, MULTI_SLIDE, 0, 0, lab);
+          multi_emit(RULE_EQL_SUP, MULTI_SLIDE, loc, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
         if (term_tag(a) == TAG_NUM && term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_EQL_NUM, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_EQL_NUM, MULTI_TERM, loc, 0, 0);
           u32 r = ((u32)term_val(a) == (u32)term_val(whnf)) ? 1 : 0;
           whnf = term_new(0, TAG_NUM, term_ext(a), r);
           continue;
@@ -896,13 +930,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_AND_ERA, MULTI_PRUNE, 0, 0, 0);
+          multi_emit(RULE_AND_ERA, MULTI_PRUNE, loc, 0, 0);
           continue;
         }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_AND_NUM, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_AND_NUM, MULTI_TERM, loc, 0, 0);
           if ((u32)term_val(whnf) == 0) {
             continue;     // whnf = NUM(0) stays
           }
@@ -926,7 +960,7 @@ apply:
           heap_set(ns + 0, n0);
           heap_set(ns + 1, n1);
           ITRS++;
-          multi_emit(RULE_AND_SUP, MULTI_SLIDE, 0, 0, lab);
+          multi_emit(RULE_AND_SUP, MULTI_SLIDE, loc, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
@@ -941,13 +975,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_OR_ERA, MULTI_PRUNE, 0, 0, 0);
+          multi_emit(RULE_OR_ERA, MULTI_PRUNE, loc, 0, 0);
           continue;
         }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_OR_NUM, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_OR_NUM, MULTI_TERM, loc, 0, 0);
           if ((u32)term_val(whnf) == 0) {
             // a is NUM(0): result is wnf(b).
             next = heap_read(loc + 1);
@@ -971,7 +1005,7 @@ apply:
           heap_set(ns + 0, n0);
           heap_set(ns + 1, n1);
           ITRS++;
-          multi_emit(RULE_OR_SUP, MULTI_SLIDE, 0, 0, lab);
+          multi_emit(RULE_OR_SUP, MULTI_SLIDE, loc, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
@@ -985,13 +1019,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_WHEN_ERA, MULTI_PRUNE, 0, 0, 0);
+          multi_emit(RULE_WHEN_ERA, MULTI_PRUNE, loc, 0, 0);
           continue;
         }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_WHEN_NUM, MULTI_TERM, 0, 0, 0);
+          multi_emit(RULE_WHEN_NUM, MULTI_TERM, loc, 0, 0);
           if ((u32)term_val(whnf) == 0) {
             whnf = term_new(0, TAG_ERA, 0, 0);
             continue;
@@ -1014,7 +1048,7 @@ apply:
           heap_set(ns + 0, w0);
           heap_set(ns + 1, w1);
           ITRS++;
-          multi_emit(RULE_WHEN_SUP, MULTI_SLIDE, 0, 0, lab);
+          multi_emit(RULE_WHEN_SUP, MULTI_SLIDE, loc, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }

@@ -223,8 +223,8 @@ TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] := With[{
         icon,
         {
             {
-                BoxForm`SummaryItem[{"dtype: ", dtypeName[$termExtFn[id]]}],
-                BoxForm`SummaryItem[{"bits: ",  $termValFn[id]}]
+                BoxForm`SummaryItem[{"number: ", $termValFn[id]}],
+                BoxForm`SummaryItem[{"dtype: ",  dtypeName[$termExtFn[id]]}]
             }
         },
         {

@@ -675,7 +675,29 @@ agentDiagram[base_Integer, $TagDDU, principal_, _Association, _Association] :=
 
 refLabelText[defId_Integer] := "REF\nd" <> ToString[defId]
 numLabelText[loc_Integer]   := With[{t = THeapRead[loc]},
-    "NUM\n" <> ToString[TTermVal[t]]
+    "NUM\n" <> ToString[TTermVal[t]] <> "@" <> ToString[loc]
+]
+
+(* Substituted-binder leaf: a LAM cell whose body is SUB-flagged is
+   logically dead (its binder has been beta-substituted out).  We
+   drop the LAM agent from the diagram and replace its binder wire
+   (`var<binder>`) with a leaf carrying the substituted value -- so
+   VAR cells in surviving slots still have something to join to,
+   showing the literal that the variable was substituted with. *)
+deadLamBinderLabel[binder_Integer] := Block[
+    {cell = THeapRead[binder], tag, val},
+    tag = TTermTag[cell]; val = TTermVal[cell];
+    Switch[tag,
+        $TagNUM, "NUM\n" <> ToString[val] <> "@" <> ToString[binder],
+        $TagERA, "ERA",
+        _,       TTagName[tag] <> "@" <> ToString[binder]
+    ]
+]
+
+deadLamBinderLeaf[binder_Integer] := Diagram[
+    deadLamBinderLabel[binder], {}, {SuperStar["var" <> ToString[binder]]},
+    "Shape" -> agentShape[$TagNUM],
+    "Style" -> agentStyle[$TagNUM]
 ]
 
 leafSideAndPolarity[loc_Integer, agents_Association, opcodes_Association] := Block[{
@@ -727,6 +749,20 @@ numLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
         Diagram[label, ins, outs,
             "Shape" -> agentShape[$TagNUM], "Style" -> agentStyle[$TagNUM]
         ]
+    ]
+]
+
+(* Standalone NUM atom: a TTerm whose tag is NUM and val carries the
+   integer.  No heap cell of its own (the value is packed directly
+   into the Term word).  Render as a one-port leaf so reductions that
+   end on a literal -- e.g. (\x.x+1) 5 collapsing to NUM[6] -- still
+   have a picture instead of an empty DiagramNetwork. *)
+numAtomLeafDiagram[val_Integer] := With[
+    {label = "NUM\n" <> ToString[val],
+     wire  = "natom" <> ToString[val]},
+    Diagram[label, {}, {wire},
+        "Shape" -> agentShape[$TagNUM],
+        "Style" -> agentStyle[$TagNUM]
     ]
 ]
 
@@ -865,6 +901,71 @@ discoverUopOpcodesHere[seedTerms_List] := Block[{lo = THeapBase[], n = THeapPos[
     Association[uopOpcodeRule /@ terms]
 ]
 
+(* BFS the heap from `seedTerms` forward, returning only those agents
+   transitively reachable through their slot cells.  Mirror of
+   `reachableICAgents` in Visualization.wl but using the
+   diagram's agentRule shape (base -> tag) and reusing the
+   `agentChildSlots` walker (defined in Visualization.wl; shared
+   THVMLink`Private context).  Restricting THeapDiagram[term] to
+   the reachable closure of `term` keeps stale pre-WNF cells, prior
+   constructions, and unrelated heap garbage out of the diagram, so
+   the wire names of independent agents never get mixed up. *)
+(* A LAM whose body cell at base is SUB-flagged was consumed by a
+   prior APP-LAM beta -- the LAM is fully dead and rendering it
+   would show a ghost with the substituted literal dangling from
+   its body slot.  DUPs are NOT in this category: their SUB-flagged
+   body is the *other projection's* value waiting to be consumed,
+   so the DUP and that value must stay visible in the diagram. *)
+agentRuleIsDead[base_Integer, tag_Integer] :=
+    tag === $TagLAM && TTermSub[THeapRead[base]] === 1
+
+reachableAgentsHere[seedTerms_List] := Block[
+    {result = <||>, queue = seedTerms, t, rule, base, tag},
+    While[ Length[queue] > 0,
+        t    = First[queue]; queue = Rest[queue];
+        rule = agentRule[t];
+        If[ rule =!= Nothing,
+            base = First[rule]; tag = Last[rule];
+            If[ ! agentRuleIsDead[base, tag] && ! KeyExistsQ[result, base],
+                result[base] = tag;
+                queue = Join[queue, THeapRead /@ agentChildSlots[t]]]]
+    ];
+    result
+]
+
+(* Slot cells holding a VAR whose binder (heap[val]) is SUB-flagged.
+   Each unique binder loc gets one synthesized leaf (above) -- DC
+   spider-joins it with every VAR cell that names the same wire. *)
+deadLamBinders[agents_Association, opcodes_Association] := DeleteDuplicates @
+    Cases[
+        agentSlotsOf[agents, opcodes],
+        slot_Integer /; With[{t = THeapRead[slot]},
+            TTermTag[t] === $TagVAR && TTermSub[THeapRead[TTermVal[t]]] === 1
+        ] :> TTermVal[THeapRead[slot]]
+    ]
+
+reachableUopOpcodesHere[seedTerms_List] := Block[
+    {result = <||>, seen = <||>, queue = seedTerms, t, rule, base, op},
+    While[ Length[queue] > 0,
+        t    = First[queue]; queue = Rest[queue];
+        rule = uopOpcodeRule[t];
+        If[ rule =!= Nothing,
+            base = First[rule]; op = Last[rule];
+            If[ ! KeyExistsQ[result, base], result[base] = op]];
+        rule = agentRule[t];
+        If[ rule =!= Nothing,
+            base = First[rule];
+            (* Visited-set on the descent side: agentRule's `base` is
+               the heap loc of the compound, and an identity-style
+               λx.x (heap[loc] = VAR(loc)) would otherwise re-enqueue
+               itself forever. *)
+            If[ ! KeyExistsQ[seen, base],
+                seen[base] = True;
+                queue = Join[queue, THeapRead /@ agentChildSlots[t]]]]
+    ];
+    result
+]
+
 discoverErasHere[] := Block[{lo = THeapBase[], n = THeapPos[]},
     Select[Range[lo, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
 ]
@@ -964,18 +1065,32 @@ externalKernelInputLeaf[tid_Integer] := Diagram[
     "Style" -> agentStyle[$TagTEN]
 ]
 
-THeapDiagram[t_] := Block[{
+(* THeapDiagram[]      -- render every agent on the heap
+   THeapDiagram[t]     -- render only the agents reachable from `t`
+   THeapDiagram[{...}] -- render the union of agents reachable from
+                          each seed term
+
+   Reachable-only mode (the seeded forms) is the default for inspecting
+   a specific value -- stale cells from prior reductions never leak
+   into the wire-name space.  The no-arg form keeps the legacy
+   "everything on the heap" behaviour as an escape hatch. *)
+THeapDiagram[]                       := iThvmHeapDiagram[{},  All]
+THeapDiagram[ts : {___}]             := iThvmHeapDiagram[ts,  "Reachable"]
+THeapDiagram[t_]                     := iThvmHeapDiagram[{t}, "Reachable"]
+
+iThvmHeapDiagram[seeds_List, mode_] := Block[{
     fullAgents, reachOps, allKernels, kernelKids, allInputTids,
     coveredTids, externalInputTids, agents, opcodes, eras, tens,
-    consts, refs, nums, ds, $uopOpcodeContext
+    consts, refs, nums, atomSeeds, ds, $uopOpcodeContext
 },
-    fullAgents = discoverAgentsHere[{t}];
-    reachOps   = reachableUopsHere[{t}];
-    (* Stash full UOP opcode table (CONSTs included even though they
-       aren't in reachOps) so uopShapeOf in Uop.wl can resolve every
-       base without re-scanning the heap.  Block above scopes the
-       rebind to this render. *)
-    $uopOpcodeContext = discoverUopOpcodesHere[{t}];
+    {fullAgents, reachOps, $uopOpcodeContext} = If[ mode === "Reachable",
+        {reachableAgentsHere[seeds],
+         reachableUopsHere[seeds],
+         reachableUopOpcodesHere[seeds]},
+        {discoverAgentsHere[seeds],
+         reachableUopsHere[seeds],
+         discoverUopOpcodesHere[seeds]}
+    ];
     (* UOP_KERNEL cells store their input tids OUTSIDE the heap (in
        the C-side KERNELS table), so non-sink kernels are unreachable
        via the BFS even though they're alive in the heap.  Pull every
@@ -985,7 +1100,7 @@ THeapDiagram[t_] := Block[{
                         $uopOpcodeContext[#] === $UopKernel &];
     reachOps = Join[reachOps,
                     Association[(# -> $UopKernel) & /@ allKernels]];
-    (* Keep IC agents from full discovery; replace UOP entries with
+    (* Keep IC agents from the discovery; replace UOP entries with
        only the reachable ones so old pre-rewrite UOPs (plus their
        transitively-reached TENs) drop out of the diagram. *)
     agents = Join[
@@ -993,7 +1108,13 @@ THeapDiagram[t_] := Block[{
         Association[(# -> $TagUOP) & /@ Keys[reachOps]]
     ];
     opcodes = reachOps;
-    eras    = discoverErasHere[];
+    (* ERAs: full-heap walk in no-arg mode; in reachable mode, keep
+       only those sitting inside a wire slot of a reachable agent
+       (otherwise stale ERAs from prior reductions sneak in and add
+       dangling wires). *)
+    eras = If[ mode === "Reachable",
+        agentWireSlotCells[agents, TTermTag[#] === $TagERA &],
+        discoverErasHere[]];
     tens    = reachableTenCells[reachOps];
     consts  = reachableConstCells[reachOps];
     (* REF / NUM leaves embedded in wire slots of any rendered IC /
@@ -1012,6 +1133,18 @@ THeapDiagram[t_] := Block[{
         TTermVal[THeapRead[# + 0]] & /@ allKernels   (* output_buf tids *)
     ];
     externalInputTids = Complement[allInputTids, coveredTids];
+    (* Standalone NUM atom seeds (e.g. the NUM[6] left after fully
+       reducing (\x.x+1) 5) carry no heap loc, so they're invisible
+       to the agent BFS.  Surface them as one-port leaves so the
+       network isn't empty. *)
+    atomSeeds = If[ mode === "Reachable",
+        Select[seeds, TTermTag[#] === $TagNUM &],
+        {}];
+    (* Dead LAM binders: filter agents to drop SUB-flagged LAMs/DUPs,
+       then collect the binder locs of surviving VAR slots so the
+       leaf-attached-to-wire trick fills the picture. *)
+    agents = KeySelect[agents,
+        Function[base, ! agentRuleIsDead[base, agents[base]]]];
     ds = Join[
         KeyValueMap[
             agentDiagram[#1, #2, principalCellOf[#1, #2, agents, opcodes],
@@ -1023,7 +1156,9 @@ THeapDiagram[t_] := Block[{
         constLeafDiagram[#, agents, opcodes] & /@ consts,
         refLeafDiagram[#, agents, opcodes]   & /@ refs,
         numLeafDiagram[#, agents, opcodes]   & /@ nums,
-        externalKernelInputLeaf /@ externalInputTids
+        externalKernelInputLeaf /@ externalInputTids,
+        numAtomLeafDiagram[TTermVal[#]] & /@ atomSeeds,
+        deadLamBinderLeaf /@ deadLamBinders[agents, opcodes]
     ];
     DiagramNetwork @@ ds
 ]

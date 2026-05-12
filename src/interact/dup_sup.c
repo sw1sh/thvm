@@ -25,13 +25,21 @@ fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
   u64 sup_loc = term_val(sup);
   u32 sup_lab = term_ext(sup);
   ITRS++;
+  /* Pass `loc` (the DUP cell's body slot) as the first carrier and
+     the SUP partner as the second.  When OP2_SUP slid a SUP across
+     an operator, the new DUP cell at `loc` was freshly allocated by
+     that slide -- wire_prov[loc] picks up the slide's event id,
+     giving the DUP_SUP_(ANN|COM) a causal predecessor.  The SUP
+     partner often comes from pre-trace construction (the user-built
+     literal), so its wire_prov is sentinel and the second slot stays
+     unfilled. */
   if (lab == sup_lab) {
-    multi_emit(RULE_DUP_SUP_ANN, MULTI_MERGE, (u64)sup, 0, lab);
+    multi_emit(RULE_DUP_SUP_ANN, MULTI_MERGE, loc, (u64)sup, lab);
     Term tm0 = heap_read(sup_loc + 0);
     Term tm1 = heap_read(sup_loc + 1);
     return heap_subst_cop(side, loc, tm0, tm1);
   }
-  multi_emit(RULE_DUP_SUP_COM, MULTI_SPLIT, (u64)sup, 0, lab);
+  multi_emit(RULE_DUP_SUP_COM, MULTI_SPLIT, loc, (u64)sup, lab);
 
   Term a = heap_read(sup_loc + 0);
   Term b = heap_read(sup_loc + 1);

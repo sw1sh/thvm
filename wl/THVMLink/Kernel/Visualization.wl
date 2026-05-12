@@ -131,6 +131,97 @@ discoverAgents[seedTerms_List : {}] := Block[{lo = THeapBase[], n = THeapPos[], 
     Association[agentFromTerm /@ terms]
 ]
 
+(* Slot cells to follow when BFS'ing from a compound: each agent
+   tag exposes some number of heap children at base+0 .. base+n-1.
+   These are the cells the agent points at; their contents are the
+   referenced child terms.  Atoms (NUM/ERA/REF/TEN/VAR/DP0/DP1)
+   have no follow-up cells -- their term word is self-contained --
+   so they return {}. *)
+agentChildSlots[term_] := With[{tag = TTermTag[term], base = TTermVal[term]},
+    Switch[tag,
+        $TagLAM | $TagDUP,                   {base},
+        $TagAPP | $TagSUP | $TagMAT | $TagOP2, {base, base + 1},
+        $TagALO,                             {base},                (* slot 1 = state metadata *)
+        $TagDSU | $TagDDU,                   {base, base + 1, base + 2},
+        $TagCTR,                             Range[base + 1, base + TTermVal[THeapRead[base]]],
+        $TagVAR,                             {base},                (* heap[base] = LAM body *)
+        $TagDP0 | $TagDP1,                   {base},                (* heap[base] = DUP body *)
+        _,                                   {}
+    ]
+]
+
+(* Atom-as-seed vertex constructor: a seed term whose tag is an atom
+   (NUM, ERA, REF, TEN, ANY) has no heap cell of its own.  We mint a
+   distinct vertex id so the graph has at least one node when the
+   seed itself is the whole show.  Heap-resident NUM cells keep
+   numVertexId; seed atoms use the "natom" / "eraatom" / etc.
+   prefixes so they never collide. *)
+agentFromAtomSeed[term_] := With[{tag = TTermTag[term], val = TTermVal[term]},
+    Switch[tag,
+        $TagNUM, "natom" <> ToString[val] -> <|"tag" -> $TagNUM, "value" -> val|>,
+        $TagERA, "eraatom"                -> <|"tag" -> $TagERA|>,
+        $TagREF, refVertexId[TTermExt[term]] -> <|"tag" -> $TagREF, "defId" -> TTermExt[term]|>,
+        $TagTEN, tenVertexId[val]         -> <|"tag" -> $TagTEN, "dtype" -> TTermExt[term]|>,
+        _,       Nothing
+    ]
+]
+
+(* BFS the heap from the seed terms forward, collecting only the
+   agents transitively reachable through their slot cells.  Pre-WNF
+   stale cells, heap garbage, and unrelated terms left over from
+   prior constructions are excluded -- the rendered graph then
+   matches the user's mental model of "what this term references".
+   No-arg THeapGraph[] keeps the full-heap walk; only the seeded
+   forms route through here.
+
+   Top-level atom seeds (NUM/ERA/REF/TEN) get a synthetic vertex via
+   agentFromAtomSeed so a one-atom seed still has something to draw.
+   Transitively-reached atoms (e.g. NUM children of an OP2 or APP)
+   stay inlined via the parent's edge to a heap-loc-keyed vertex --
+   no double-rendering. *)
+(* A LAM/DUP cell is "dead" once a prior interaction has substituted
+   its body cell out -- heap[base] is SUB-flagged with the substituted
+   value.  Registering such a cell as an agent would surface a ghost
+   LAM (or DUP) in the post-rewrite diagram with the substituted
+   literal dangling from its body slot. *)
+agentIsDead[term_] := Block[
+    {tag = TTermTag[term], isLamOrDup},
+    isLamOrDup = (tag === $TagLAM || tag === $TagDUP);
+    isLamOrDup && TTermSub[THeapRead[TTermVal[term]]] === 1
+]
+agentIsDeadVar[term_] := Block[
+    {tag = TTermTag[term], isVarLike},
+    isVarLike = (tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1);
+    isVarLike && TTermSub[THeapRead[TTermVal[term]]] === 1
+]
+
+reachableICAgents[seedTerms_List] := Block[
+    {result = <||>, queue, t, rule, vid, info, atomRule},
+    Do[
+        atomRule = agentFromAtomSeed[seed];
+        If[ atomRule =!= Nothing,
+            {vid, info} = {First[atomRule], Last[atomRule]};
+            If[ ! KeyExistsQ[result, vid], result[vid] = info]],
+        {seed, seedTerms}
+    ];
+    queue = seedTerms;
+    While[ Length[queue] > 0,
+        t    = First[queue]; queue = Rest[queue];
+        (* Skip VAR/DP0/DP1 whose binder is SUB-flagged -- the
+           substituted value is surfaced by childVertexId as an edge
+           endpoint, no LAM/DUP agent should be registered. *)
+        If[ agentIsDeadVar[t], Continue[]];
+        rule = agentFromTerm[t];
+        If[ rule =!= Nothing,
+            {vid, info} = {First[rule], Last[rule]};
+            (* Also drop dead LAM/DUP agents discovered directly. *)
+            If[ ! KeyExistsQ[result, vid] && ! agentIsDead[t],
+                result[vid] = info;
+                queue = Join[queue, THeapRead /@ agentChildSlots[t]]]]
+    ];
+    result
+]
+
 discoverEras[] := Block[{lo = THeapBase[], n = THeapPos[]},
     Select[Range[lo, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
 ]
@@ -142,29 +233,59 @@ discoverEras[] := Block[{lo = THeapBase[], n = THeapPos[]},
    pairs.  Edge labels (port names, src offsets) get rendered only
    if the caller asks via "ShowEdgeLabels" -> True. *)
 
+(* True iff a VAR/DP0/DP1 cell has been substituted out -- the
+   binder cell at `val` is SUB-flagged, meaning a prior interaction
+   (e.g. APP-LAM beta) wrote the substituted value there.  For
+   visualisation purposes we treat the substituted value as the
+   logical content of the slot and resolve "through" the dead binder. *)
+varIsSubResolved[loc_Integer] := Block[
+    {t = THeapRead[loc], tag, binder},
+    tag = TTermTag[t];
+    If[ tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1,
+        binder = THeapRead[TTermVal[t]];
+        TTermSub[binder] === 1,
+        False
+    ]
+]
+
 (* Resolve any cell at `loc` to its source vertex id (or Nothing if
    the cell is something we don't render -- which today is just raw
-   TAG_NUM children we'd rather surface via the parent's label). *)
+   TAG_NUM children we'd rather surface via the parent's label).
+   When the cell is a VAR/DP0/DP1 pointing at a SUB-flagged binder,
+   re-route the wire to a vertex keyed on the binder loc holding the
+   substituted value (so post-beta diagrams show the substituted
+   literal where the variable used to be, instead of a ghost LAM). *)
 childVertexId[loc_Integer] :=
-    Block[{t = THeapRead[loc], tag, val, ext},
+    Block[{t = THeapRead[loc], tag, val, ext, binder, btag, varTag, subResolved},
         tag = TTermTag[t]; val = TTermVal[t]; ext = TTermExt[t];
-        Switch[tag,
-            $TagLAM | $TagAPP | $TagSUP | $TagDUP, icVertexId[val],
-            $TagVAR,                               icVertexId[val],
-            $TagDP0 | $TagDP1,                     icVertexId[val],
-            $TagERA,                               eraVertexId[loc],
-            $TagUOP,
-                If[ ext === $UopKernel, kerVertexId[val], uopVertexId[val]],
-            $TagTEN,                               tenVertexId[val],
-            $TagREF,                               refVertexId[ext],
-            $TagALO,                               aloVertexId[val],
-            $TagCTR,                               ctrVertexId[val],
-            $TagMAT,                               matVertexId[val],
-            $TagOP2,                               op2VertexId[val],
-            $TagDSU,                               dsuVertexId[val],
-            $TagDDU,                               dduVertexId[val],
-            $TagNUM,                               numVertexId[loc],
-            _, Nothing
+        varTag      = (tag === $TagVAR || tag === $TagDP0 || tag === $TagDP1);
+        subResolved = varTag && TTermSub[THeapRead[val]] === 1;
+        If[ subResolved,
+            binder = THeapRead[val];
+            btag   = TTermTag[binder];
+            Switch[btag,
+                $TagNUM, numVertexId[val],
+                $TagERA, eraVertexId[val],
+                _,       numVertexId[val]
+            ],
+            Switch[tag,
+                $TagLAM | $TagAPP | $TagSUP | $TagDUP, icVertexId[val],
+                $TagVAR,                               icVertexId[val],
+                $TagDP0 | $TagDP1,                     icVertexId[val],
+                $TagERA,                               eraVertexId[loc],
+                $TagUOP,
+                    If[ ext === $UopKernel, kerVertexId[val], uopVertexId[val]],
+                $TagTEN,                               tenVertexId[val],
+                $TagREF,                               refVertexId[ext],
+                $TagALO,                               aloVertexId[val],
+                $TagCTR,                               ctrVertexId[val],
+                $TagMAT,                               matVertexId[val],
+                $TagOP2,                               op2VertexId[val],
+                $TagDSU,                               dsuVertexId[val],
+                $TagDDU,                               dduVertexId[val],
+                $TagNUM,                               numVertexId[loc],
+                _, Nothing
+            ]
         ]
     ]
 
@@ -412,8 +533,14 @@ refLabel[defId_Integer] := "REF\nd" <> ToString[defId]
 
 numLabel[loc_Integer] :=
     Block[{t = THeapRead[loc]},
-        ToString[TTermVal[t]]
+        Column[{ToString[TTermVal[t]],
+                "@" <> ToString[loc]}, Center, Spacings -> 0]
     ]
+
+(* Atom-NUM vertices come from seed terms (NUM packed in a Term word,
+   no heap cell of its own).  The vertex id is "natom" <> value to
+   keep it disjoint from heap NUM vertex ids "n" <> loc. *)
+numAtomLabel[val_Integer] := ToString[val]
 
 vertexLabel[vid_String, info_Association] := Switch[info["tag"],
     $TagLAM | $TagAPP | $TagSUP | $TagDUP,
@@ -429,7 +556,10 @@ vertexLabel[vid_String, info_Association] := Switch[info["tag"],
     $TagOP2, op2Label[ToExpression[StringDrop[vid, 1]], info["opcode"]],
     $TagDSU, Column[{"DSU", "@" <> ToString[ToExpression[StringDrop[vid, 1]]]}, Center, Spacings -> 0],
     $TagDDU, Column[{"DDU", "@" <> ToString[ToExpression[StringDrop[vid, 1]]]}, Center, Spacings -> 0],
-    $TagNUM, numLabel[ToExpression[StringDrop[vid, 1]]],
+    $TagNUM,
+        If[ StringStartsQ[vid, "natom"],
+            numAtomLabel[ToExpression[StringDrop[vid, 5]]],
+            numLabel[ToExpression[StringDrop[vid, 1]]]],
     _, ""
 ]
 
@@ -440,15 +570,37 @@ Options[THeapGraph] = Join[
     Options[Graph]
 ];
 
-THeapGraph[opts : OptionsPattern[]] :=
-    buildHeapGraph[discoverAgents[{}], opts]
-THeapGraph[ts_List, opts : OptionsPattern[]] :=
-    buildHeapGraph[discoverAgents[ts], opts]
-THeapGraph[term_, opts : OptionsPattern[]] :=
-    buildHeapGraph[discoverAgents[{term}], opts]
+(* ERA locs that appear in some slot of one of `agents` -- gives the
+   reachable-mode entry points the ERA list they need to render ERA
+   vertices with the correct shape (the no-arg path uses
+   discoverEras[] which walks the full heap). *)
+icAgentSpan[vid_String, info_Association] := With[
+    {tag = info["tag"], base = ToExpression[StringDrop[vid, 1]]},
+    Which[
+        tag === $TagLAM || tag === $TagDUP, {base},
+        tag === $TagAPP || tag === $TagSUP || tag === $TagMAT || tag === $TagOP2 || tag === $TagALO,
+            {base, base + 1},
+        tag === $TagDSU || tag === $TagDDU, {base, base + 1, base + 2},
+        tag === $TagCTR, Range[base + 1, base + TTermVal[THeapRead[base]]],
+        True, {}
+    ]
+]
 
-buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Block[{
-    eras = discoverEras[],
+erasReachableFrom[agents_Association] := DeleteDuplicates @ Cases[
+    Catenate[KeyValueMap[icAgentSpan, agents]],
+    loc_Integer /; TTermTag[THeapRead[loc]] === $TagERA
+]
+
+THeapGraph[opts : OptionsPattern[]] :=
+    buildHeapGraph[discoverAgents[{}], discoverEras[], opts]
+THeapGraph[ts_List, opts : OptionsPattern[]] :=
+    With[{agents = reachableICAgents[ts]},
+        buildHeapGraph[agents, erasReachableFrom[agents], opts]]
+THeapGraph[term_, opts : OptionsPattern[]] :=
+    With[{agents = reachableICAgents[{term}]},
+        buildHeapGraph[agents, erasReachableFrom[agents], opts]]
+
+buildHeapGraph[agents_Association, eras_List, userOpts : OptionsPattern[THeapGraph]] := Block[{
     edgeRecords, edges, edgeLabels, vertices, vshapes, subVertices,
     layout, showLabels
 },

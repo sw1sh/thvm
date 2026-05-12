@@ -639,6 +639,28 @@ EXTERN_C DLLEXPORT int thvm_wl_multi_family_name(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+/* Snapshot multi_wire_prov[0 .. HEAP_NEXT) so the host can derive a
+   per-event "produced" set: locs whose wire_prov[loc] == E.id are
+   the cells E wrote during its rewrite.  Sentinel MULTI_WIRE_NONE
+   (no producer recorded) is translated to -1 for WL ergonomics.
+   Must be called BEFORE multi_trace_free wipes the table. */
+EXTERN_C DLLEXPORT int thvm_wl_multi_wire_prov_snapshot(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  u64 n = CURRENT_CTX->heap_next;
+  MTensor out;
+  mint dims[1] = { (mint)n };
+  int err = libData->MTensor_new(MType_Integer, 1, dims, &out);
+  if (err != LIBRARY_NO_ERROR) return err;
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u64 i = 0; i < n; i++) {
+    u32 v = multi_wire_prov_get(i);
+    dst[i] = (v == MULTI_WIRE_NONE) ? (mint)-1 : (mint)v;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 #else  // !THVM_TRACE -- stubs so the dylib still links and the WL
        // surface reports "trace not compiled in" instead of failing
        // to load.
@@ -699,6 +721,16 @@ EXTERN_C DLLEXPORT int thvm_wl_multi_family_name(WolframLibraryData libData,
         mint argc, MArgument *args, MArgument res) {
   (void)libData; (void)argc; (void)args;
   MArgument_setUTF8String(res, (char *)"FAMILY?");
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_wire_prov_snapshot(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  MTensor out;
+  mint dims[1] = { 0 };
+  int err = libData->MTensor_new(MType_Integer, 1, dims, &out);
+  if (err != LIBRARY_NO_ERROR) return err;
+  MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
 }
 

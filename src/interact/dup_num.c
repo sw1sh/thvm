@@ -7,6 +7,10 @@
 // so projections simply copy the Term value into both sides.
 fn Term interact_dup_num(u8 side, u64 loc, Term num) {
   ITRS++;
-  multi_emit(RULE_DUP_NUM, MULTI_PLUMB, (u64)num, 0, 0);
+  /* Pass `loc` (the DUP cell's heap loc holding the NUM body) as the
+     carrier so wire_prov[loc] gives the producer event.  Passing the
+     NUM Term word would have term_val = the integer value, which is
+     not a heap loc -- the consumed lookup would be meaningless. */
+  multi_emit(RULE_DUP_NUM, MULTI_PLUMB, loc, 0, 0);
   return heap_subst_cop(side, loc, num, num);
 }

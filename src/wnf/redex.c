@@ -62,7 +62,18 @@ fn u8 is_redex(Term t) {
       Term body = term_resolve(cell);
       u8 bt = term_tag(body);
       if (bt == TAG_SUP || bt == TAG_LAM || bt == TAG_ERA ||
-          bt == TAG_NUM || bt == TAG_TEN || bt == TAG_CTR) return 1;
+          bt == TAG_NUM || bt == TAG_TEN || bt == TAG_CTR ||
+          bt == TAG_ANY || bt == TAG_BRI) return 1;
+      // Eager n-ary commute via interact_dup_nod -- matches HVM4's
+      // wnf_dup_nod dispatch.  Includes OP2/MAT/EQL/AND/OR/WHEN/ANN/
+      // DSU/DDU/INC.  These are primitive/structural compounds so the
+      // duplication doesn't replicate beta redexes (Levy preserved).
+      // APP is *intentionally absent* -- HVM4 explicitly forbids it
+      // because eager DUP-APP would duplicate a beta opportunity.
+      if (bt == TAG_OP2  || bt == TAG_MAT  || bt == TAG_EQL ||
+          bt == TAG_AND  || bt == TAG_OR   || bt == TAG_WHEN ||
+          bt == TAG_ANN  || bt == TAG_DSU  || bt == TAG_DDU  ||
+          bt == TAG_INC) return 1;
       // DUP-UOP commute: a lazy-compute UOP (CONST/ADD/MUL/NEG/REDUCE/
       // EXPAND/RESHAPE/FLIP) is eligible.  Active UOPs (KERNEL/ASSIGN)
       // are NOT -- they need to fire their own interaction first.
@@ -571,6 +582,8 @@ fn Term redex_fire(Term redex) {
         case TAG_NUM: result = interact_dup_num(side, loc, body);      break;
         case TAG_TEN: result = interact_dup_ten(side, loc, body);      break;
         case TAG_CTR: result = interact_dup_ctr(lab, loc, side, body); break;
+        case TAG_BRI: result = interact_dup_bri(lab, loc, side, body); break;
+        case TAG_ANY: result = interact_dup_any(side, loc, body);      break;
         case TAG_UOP: {
           Term r = interact_dup_uop(lab, loc, side, body);
           if (r == 0) {
@@ -580,6 +593,15 @@ fn Term redex_fire(Term redex) {
           result = r;
           break;
         }
+        // Generic eager n-ary commute (HVM4's wnf_dup_nod).  See the
+        // matching dispatch comment in src/wnf/_.c -- APP is excluded
+        // by design (would duplicate a beta redex).
+        case TAG_OP2: case TAG_MAT: case TAG_EQL:
+        case TAG_AND: case TAG_OR:  case TAG_WHEN:
+        case TAG_ANN: case TAG_DSU: case TAG_DDU:
+        case TAG_INC:
+          result = interact_dup_nod(lab, loc, side, body);
+          break;
         default:
           heap_set(loc, cell);  // restore -- not a redex anymore
           return 0;

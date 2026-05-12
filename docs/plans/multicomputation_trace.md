@@ -6,16 +6,19 @@ sites) *and* every inline `ITRS++` site in `src/wnf/_.c` (21 sites /
 17 rules: OP2-NUM-NUM literal fold, MAT/SWI dispatch, EQL/AND/OR/WHEN
 per-tag cases, the two grad-cell projections) emit `MultiEvent`s; the
 label-collision spurious-`MULTI_MERGE` failure mode is validated;
-`TMulticompTrace[expr]` is exposed from WL (opt-in trace dylib:
-`make WL_TRACE=1 wl`); and **M1 wire provenance** is in: every
+`TMultiTrace[expr]` is exposed from WL (opt-in trace dylib:
+default `make wl`); and **M1 wire provenance** is in: every
 `heap_set` / `heap_set_rel` / `heap_subst_var{,_rel}` / `heap_cas`
 runs `WIRE_PROV_BUMP(loc)` (no-op in default builds), every event
 captures `consumed[]` from the active pair's payload locs, and
 `TCausalGraph[trace]` projects the events into a `Graph[]`.  The
 compile-time / runtime gating discipline is intact -- default-build
-`_wnf` is still byte-identical to pre-trace (4022 instructions),
-default `make wl` has zero `multi_emit_body` / `multi_wire_prov_bump`
-symbols.  Still open: the inline `ITRS++` in `src/wnf/redex.c` (the
+`_wnf` is 4025 instructions (was 4022 pre-trace; +3 from the
+F_OP2_NUM frame refactor that stashes the WHNF'd x on the heap so
+the inline `OP2_NUM_NUM` emit can carry the OP2's loc -- a tiny
+reducer cost in exchange for a usable consumed[] field on every
+OP2 fold).  Default `make wl` still has zero `multi_emit_body` /
+`multi_wire_prov_bump` symbols.  Still open: the inline `ITRS++` in `src/wnf/redex.c` (the
 parallel-pool / `TInteract` per-redex driver), and M2-M4 (branch
 tree; cylinders; foliations).  See
 [M0 spike outcome](#m0-spike-outcome) and the
@@ -131,7 +134,7 @@ use **two stacked switches**:
 2. A **runtime flag** `TContext.trace` (also off by default), used
    only inside trace-enabled builds, so you can toggle the trace on
    and off from WL within a single session without rebuilding -- e.g.
-   `TMulticompTrace[expr]` flips it on for `expr`, captures the
+   `TMultiTrace[expr]` flips it on for `expr`, captures the
    trace, flips it back off, returns.  When toggled *off* in a
    trace-enabled build, the cost is one well-predicted branch per
    `interact_*` and per `heap_set` (`if (UNLIKELY(ctx->trace))
@@ -367,7 +370,7 @@ program" a well-typed object rather than an artifact of
 LibraryLink bridge ([docs/wl.md](../wl.md)), echoing `THotCounters` /
 `THeapGraph` / `THeapDiagram`:
 
-- **`TMulticompTrace[expr]`** -- run `expr` with tracing on, return the
+- **`TMultiTrace[expr]`** -- run `expr` with tracing on, return the
   `EVENTS[]` log as a list of associations (or a WXF blob for big
   runs):
 
@@ -402,7 +405,7 @@ the project lives in (cf. [docs/heap_graph.md](../heap_graph.md),
 
 - **M0 -- redex log (v0).**  `EVENTS[]` behind the trace flag; the
   `family` classification on every `interact_*` in
-  [src/interact/](../../src/interact/); `TMulticompTrace[expr]`.
+  [src/interact/](../../src/interact/); `TMultiTrace[expr]`.
   Validate:
   - **No bench delta in default builds.**  `bench-train`, `bench-atp`,
     and the AOT bench (no `-DTHVM_TRACE`) match their pre-M0 numbers
@@ -419,7 +422,7 @@ the project lives in (cf. [docs/heap_graph.md](../heap_graph.md),
   Files: `src/instrument/multi/{emit.h,emit.c,push.c,snapshot.c,event.h}`,
   one-line `multi_emit(...)` call added next to `ITRS++` in every
   `src/interact/*.c`, `wl/THVMLink/Kernel/Multicomputation.wl` (just
-  `TMulticompTrace`), `tests/test_multi_trace.c`,
+  `TMultiTrace`), `tests/test_multi_trace.c`,
   `wl/THVMLink/Tests/multicomputation.wlt`.
 
 - **M1 -- causal graph (v1).**  Add `wire_prov[]`; emit
@@ -600,15 +603,24 @@ reducer pays zero instructions, full stop.
 | `dup_lam` | `DUP_LAM` | `FORK` |
 | `dup_bri` | `DUP_BRI` | `FORK` |
 | `dup_ctr` | `DUP_CTR` | `FORK` |
-| `dup_app` | `DUP_APP` | `FORK` |
-| `dup_mat` | `DUP_MAT` | `FORK` |
-| `dup_op2` | `DUP_OP2` | `FORK` |
+| `dup_nod` (OP2, MAT, EQL, AND, OR, WHEN, ANN, DSU, DDU, INC) | `DUP_NOD` | `FORK` (`PLUMB` for ari=0 fallback) |
 | `dup_uop` | `DUP_UOP` | `FORK` |
 | `dup_sup` (same label) | `DUP_SUP_ANN` | `MERGE` |
 | `dup_sup` (diff label) | `DUP_SUP_COM` | `SPLIT` |
 | `dup_num` | `DUP_NUM` | `PLUMB` |
 | `dup_ten` | `DUP_TEN` | `PLUMB` |
 | `dup_any` | `DUP_ANY` | `PLUMB` |
+
+`dup_nod` is the generic eager n-ary commute, mirroring HVM4's
+`wnf_dup_nod` ([~/src/HVM4/clang/wnf/dup_nod.c](file:///Users/swish/src/HVM4/clang/wnf/dup_nod.c)).
+`DP0/DP1 \[Times] APP` is **intentionally NOT dispatched** -- HVM4's
+DP-frame switch carries the comment `// !! DO NOT ADD: DP0/DP1 do
+not interact with APP.` because eager DUP-APP would duplicate a
+beta-equivalent redex.  See [src/wnf/_.c](../../src/wnf/_.c) DP-frame
+default branch.  The dispatch is now active in both `src/wnf/_.c`
+(sequential WHNF) and `src/wnf/redex.c` (parallel NF pool's
+`is_redex` + `redex_fire`), so DUP-OP2 etc. fires in the parallel
+drain too.
 
 Inline WHNF-frame rules in `src/wnf/_.c` (no dedicated `interact_*`
 file -- the stack machine handles them via per-frame cases):
@@ -671,7 +683,7 @@ already-wired `interact_*` functions, but a handful are inline like
   convention is `ITRS++` at the head of every `interact_*` then
   emit; capturing `ITRS - 1` makes id 0 the very first event of the
   session, which lines up with the obvious `itrs_before` reading.
-- **No WL surface yet.**  `TMulticompTrace[expr]` and friends are
+- **No WL surface yet.**  `TMultiTrace[expr]` and friends are
   deferred to a follow-up; the M0 trace is consumed directly by the
   C test through the `multi_trace_*` API.
 - **No `WIRE_PROV_BUMP` in heap mutations yet.**  M1 territory.
@@ -683,19 +695,20 @@ already-wired `interact_*` functions, but a handful are inline like
 
 ### Followups, in dependency order
 
-1. ~~**Validate the spurious-`MULTI_MERGE` failure mode.**~~ **Done.**
-   `tests/test_multi_trace.c` builds the canonical label-collision
-   shape `OP2["+", &La{1,2}, &Lb{10,20}]` two ways: distinct labels
-   (`La != Lb`) -> `DUP-SUP` commute -> `MULTI_SPLIT` -> 4-leaf cross
-   product `{11,12,21,22}`; shared label (`La == Lb`, the bug) -> the
+1. ~~**Validate that DUP-SUP annihilate vs commute is visible in the
+   trace.**~~ **Done.**  `tests/test_multi_trace.c` builds the
+   canonical shape `OP2["+", &La{1,2}, &Lb{10,20}]` two ways: distinct
+   labels (`La != Lb`) -> `DUP-SUP` commute -> `MULTI_SPLIT` -> 4-leaf
+   cross product `{11,12,21,22}`; shared label (`La == Lb`) -> the
    `OP2-SUP` rule DUPs the right operand at the SUP's label, so the
    `DUP-SUP` *annihilates* -> `MULTI_MERGE` -> only the diagonal
    `{11,22}` survives.  The trace tells them apart by event family
-   alone (the buggy run has a `MULTI_MERGE`, the correct one has
-   zero).  Caveat: spotting the merge as *spurious* (vs. an intended
-   same-variable annihilation) needs to know which labels are
-   "supposed to be independent" -- that's branch-tree metadata, M2.
-   (Still optional: wire `src/wnf/redex.c`'s inline `ITRS++` so the
+   alone.  Note: the annihilation is *correct IC semantics* (the
+   DUP's projections correspond pointwise to the SUP's branches);
+   whether a given `MULTI_MERGE` is "spurious" or intended is a
+   user-side judgement that needs to know which labels were meant to
+   be independent -- that's branch-tree metadata, M2.  (Still
+   optional: wire `src/wnf/redex.c`'s inline `ITRS++` so the
    parallel-pool / `TInteract` path is covered too.)
 2. ~~**WL surface.**~~ **Done.**
    [wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
@@ -707,13 +720,15 @@ already-wired `interact_*` functions, but a handful are inline like
    indexed so they can't drift) and `#else` stubs (so a trace-free
    dylib still links, with `thvm_wl_multi_trace_supported` -> 0).
    [wl/THVMLink/Kernel/Multicomputation.wl](../../wl/THVMLink/Kernel/Multicomputation.wl)
-   owns `TMulticompTrace[expr]` (HoldFirst: recording on, eval,
+   owns `TMultiTrace[expr]` (HoldFirst: recording on, eval,
    recording off, snapshot -> `<|"Result" -> value, "Trace" ->
    {<|"id", "rule", "ruleCode", "family", "familyCode", "termA",
-   "termB", "deltaLabel"|>, ...}|>`) and `TMulticompTraceQ[]`.  Test:
+   "termB", "deltaLabel"|>, ...}|>`) and `TMultiTraceQ[]`.  Test:
    [wl/THVMLink/Tests/multicomputation.wlt](../../wl/THVMLink/Tests/multicomputation.wlt)
    (4 tests; skips with 0-tests, not failures, under a trace-free
-   dylib).  **The trace dylib is OPT-IN: `make WL_TRACE=1 wl`.**  The
+   dylib).  **The trace dylib is the DEFAULT** (post-M1 change to
+   the Makefile -- `WL_TRACE ?= 1`); opt out via `WL_TRACE=0 make wl`
+   if you need the byte-identical pre-trace dylib for benching.  The
    default `make wl` is byte-identical to before -- no `-DTHVM_TRACE`,
    Metal enabled, hot path untouched, `nm` shows zero
    `multi_emit_body`.  `-DTHVM_TRACE` grows `TContext` (the new fields
@@ -763,7 +778,7 @@ already-wired `interact_*` functions, but a handful are inline like
 - **WL surface** extended.  The snapshot MTensor widened from
   `{n, 6}` to `{n, 8}` (adds `consumed[0]` / `consumed[1]`, with
   `MULTI_WIRE_NONE` translated to `-1` for WL ergonomics).
-  `TMulticompTrace[expr]`'s events now carry a `"consumed"` key (list
+  `TMultiTrace[expr]`'s events now carry a `"consumed"` key (list
   of producer ids, sentinels filtered out).  New `TCausalGraph[trace]`
   builds a directed `Graph[]` from the events + `consumed[]` edges
   (options: `VertexLabels -> Automatic` to label each vertex with its
@@ -787,11 +802,16 @@ already-wired `interact_*` functions, but a handful are inline like
 
 ### Acceptance gate verified
 
-`_wnf` in the default build (no `-DTHVM_TRACE`) is **4022
-instructions** -- byte-identical to pre-M0 and pre-M1.  The default
-WL dylib has zero `multi_emit_body` *and* zero
-`multi_wire_prov_bump_body` symbols (`nm` confirmed).  M1 lands at
-zero cost in the default build, full stop.
+`_wnf` in the default build (no `-DTHVM_TRACE`) is **4025
+instructions** -- was 4022 before this work.  The +3 instructions
+come from the [F_OP2_NUM frame
+refactor](#m1-consumed-fix-f_op2_num-frame): stashing the WHNF'd x
+on the heap at `loc + 0` before pushing the frame, so the inline
+OP2_NUM_NUM emit can pass the OP2's loc as a carrier.  Trace
+instrumentation alone still costs nothing: the default WL dylib
+has zero `multi_emit_body` / `multi_wire_prov_bump_body` symbols
+(`nm` confirmed), every `multi_emit` / `WIRE_PROV_BUMP` macro
+expands to `((void)0)`.
 
 ### Soundness note: the "off-by-one" rules
 
@@ -852,7 +872,7 @@ field would be ignored by the default build.
 - **No `gen` field on wires yet.**  `wire_prov[loc]` is a single
   `u32` storing the producer event id, not `(event_id, gen)`.  As
   long as we're not running the Cheney GC during a traced reduction
-  -- and the M1 use case (WL `TMulticompTrace[expr]`) typically
+  -- and the M1 use case (WL `TMultiTrace[expr]`) typically
   doesn't -- locs don't get reused, so the gen field would always be
   0.  Add when M3 collisions show up.
 - **`consumed[2]` not `consumed[MULTI_MAX_PORTS]`.**  Two slots is
