@@ -1476,9 +1476,20 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
   // ops -> materialize BAIL -> result returned as un-compiled UOP ->
   // TRealize NotATensor.  Cap at 1 un-mark per absorbing boundary;
   // the rest stay realized as their own boundary kernels.
+  // abs_locs[] tracks distinct absorbing-boundary roots we've already
+  // un-marked at least once.  Deep backward chains (BN-on-BN + MaxPool
+  // backward through Conv2D) emit far more than the previous 64-slot
+  // budget -- W2-grad in beautiful_mnist BS=15 needs 500+ distinct
+  // boundaries with REDUCE children.  When the table overflows,
+  // `slot` comes back 0xFFFFFFFFu and the per-boundary cap check
+  // silently no-ops -- letting all sibling REDUCEs un-mark into the
+  // same kernel root and tripping the materializer's "one REDUCE per
+  // kernel" invariant (VISIT_BAIL @ materialize.c:2110), which makes
+  // the whole gradient kernel return Missing[NotATensor, UOP].
+  // 1024 slots = 16 KB stack, comfortable for the stack frame.
   u32 abs_cap = 16;
-  u64 abs_locs[64];
-  u32 abs_unmark_count[64];
+  u64 abs_locs[1024];
+  u32 abs_unmark_count[1024];
   u32 n_abs = 0;
   (void)abs_cap;
   u32 hits = 0;
