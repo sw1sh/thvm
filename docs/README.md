@@ -76,6 +76,16 @@ until that step lands.
   token-event log on top of `ITRS` + the hot-counter pattern -- and the
   multiway / branchial / causal graph views derived from it.
   Implementation memo for the ideas in `multicomputation.md`.
+- [neuroscience/README.md](neuroscience/README.md): a primer on
+  neuroscience for toy AI, organised around Max Bennett's *A Brief
+  History of Intelligence* (the five evolutionary breakthroughs and
+  their AI analogies -- dopamine as TD error, basal ganglia as
+  actor-critic, neocortex as a Helmholtz-style world model, ...),
+  extended to JEPA / LeJEPA / LeWorldModel, the wider NeuroAI
+  literature, Domingos's five tribes of classical ML, and modern
+  LLM alignment (RLHF / DPO / GRPO / DeepSeek-R1), with a closing
+  menu of thvm-sized experiments.  Reading and orientation only --
+  nothing here is implemented in the repo yet.
 
 ## Conventions
 
