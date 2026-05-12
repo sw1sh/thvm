@@ -60,19 +60,9 @@ TTotalBufBytes[] := (ensureInit[]; $totalBufBytesFn[])
 
 (* === predicates ===
    tensorTermQ[t]: true iff t is a TTerm whose tag makes it a
-   tensor-shaped value:
-     TAG_TEN  -- concrete tensor handle
-     TAG_UOP  -- lazy UOp graph node
-     TAG_DP0/DP1 with DUP_GRAD_FLAG set -- chain-rule projection
-       from TUOpGradWithTarget that fires to a tensor
-     TAG_OP2  -- binary-op intermediate.  Produced when a DUP-flavour
-       term (a TGrad projection) appears in BOTH operands of a UOp
-       binary op (e.g. `grad * grad` in Adam's v-update) -- the IC
-       reducer holds the multiply as TAG_OP2 until the DUP is
-       commuted past it.  It is still tensor-shaped, so downstream
-       elementwise / reduce / Sqrt UpValues must accept it; if we
-       reject TAG_OP2 here, Sqrt[grad*grad] in TAdam silently stays
-       symbolic, no weight update ever fires.
+   tensor-shaped value (TAG_TEN, TAG_UOP, or TAG_DP0/DP1 with
+   the DUP_GRAD_FLAG bit set on its ext -- a chain-rule
+   projection from TUOpGradWithTarget that fires to a tensor).
    Used to guard the numerical UpValues so we never intercept IC
    combinators (LAM, APP, regular DUP, ...) -- those still follow
    the normal IC reduction rules. *)
@@ -81,7 +71,7 @@ tensorTermQ[t_TTerm] := With[{
     raw = ttermRaw[t], tag = $termTagFn[ttermRaw[t]]
 },
     Or[
-        tag === $TagTEN, tag === $TagUOP, tag === $TagOP2,
+        tag === $TagTEN, tag === $TagUOP,
         And[ Or[tag === $TagDP0, tag === $TagDP1],
              BitAnd[$termExtFn[raw], $DupGradFlag] =!= 0 ]
     ]

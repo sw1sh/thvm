@@ -158,11 +158,23 @@ TMatChain[arms_Association, fallback_] := Fold[
    `TSup[1,2] + 3` and `dp0 * 2` route through TOp2 -- OP2-SUP
    commutes the op into each branch; the OP2 frame drives DP heads
    through cnf before folding).  REF / ALO are deliberately excluded
-   -- a named recursive def isn't necessarily numeric. *)
-numericTermQ[t_TTerm] := With[{tag = $termTagFn[ttermRaw[t]]},
+   -- a named recursive def isn't necessarily numeric.
+
+   DP0/DP1 cells with DupGradFlag set are tensor projections from
+   TGradMany's chain-rule walk -- NOT numeric scalars.  Without this
+   guard, `grad * grad` (e.g. Adam's v-update) would match the
+   numeric `Times[a ? numericTermQ, b ? numericTermQ]` UpValue below
+   and emit a tensor-shaped TAG_OP2 the IC reducer has no
+   `OP2(DP1_x, DP1_x)`-self rule for -- the OP2 stays symbolic, no
+   weight update fires.  Let those fall through to Tensor.wl's
+   tensor-arithmetic Times UpValue, which routes through TUOpMul and
+   produces a clean TAG_UOP. *)
+numericTermQ[t_TTerm] := With[{raw = ttermRaw[t], tag = $termTagFn[ttermRaw[t]]},
     tag === $TagNUM || tag === $TagVAR ||
     tag === $TagOP2 || tag === $TagMAT ||
-    tag === $TagSUP || tag === $TagDP0 || tag === $TagDP1
+    tag === $TagSUP ||
+    And[ Or[tag === $TagDP0, tag === $TagDP1],
+         BitAnd[$termExtFn[raw], $DupGradFlag] === 0 ]
 ]
 numericTermQ[_] := False
 
