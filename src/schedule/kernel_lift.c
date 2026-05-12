@@ -767,7 +767,15 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       if (n_out == 0 || n_in == 0 || n_out > MAX_DIM || n_in > MAX_DIM)
         return 0;
       // Read output iters (lift each via the existing range/expr path)
-      // and their extents.
+      // and their extents.  When the ref is an EXPRESSION (e.g. the
+      // size-1 axis emitted as S_IMOD(S_ICONST(0), S_ICONST(1)) by
+      // rangeify's S_RESHAPE_V builder), fall back to scalar_ref_extent
+      // to recover the per-axis extent from the IMOD modulus: without
+      // it, out_ext[d]=0 poisons every UPSTREAM axis's stride product
+      // (stride = product of out_ext[e] for e > d), silently dropping
+      // those axes' contributions from flat_idx -- the reshape then
+      // reads only the first cOut slab and replicates it across all
+      // cOut outputs (LeNet's conv-backward cOut-collapse bug).
       Term out_iter[MAX_DIM];
       u32  out_ext [MAX_DIM];
       for (u32 d = 0; d < n_out; d++) {
@@ -781,9 +789,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
           // expression-as-iter (e.g. S_IMOD); lift via scalar_to_uop
           out_iter[d] = lift_scalar_value(ke, r_sid, ranges, n_ranges,
                                           out_buf, in_bufs, n_inputs);
-          out_ext [d] = 0;  // unknown extent for expressions
+          out_ext [d] = scalar_ref_extent(ke, r_sid);
         }
         if (out_iter[d] == 0) return 0;
+        if (out_ext [d] == 0) return 0;   // unknown extent -- bail
       }
       // Compute flat_idx = sum(out_iter[d] * out_stride[d]).
       Term flat = 0;

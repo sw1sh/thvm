@@ -712,12 +712,50 @@ VerificationTest[
     TestID -> "nn/conv2d-rank4-batch-matches-rank3-slices"
 ]
 
-(* The conv weight-gradient regression test moved to
-   pending_conv_backward_reshape.wlt -- the rank-changing reshape
-   inside TConv2DIm2ColBatchedPool still drops cOut differentiation
-   in the backward chain.  Workaround (un-flat 7-D operand) was
-   correct but too memory-hungry; reverted in 661c7662.  Proper fix
-   needs the reshape adjoint in src/uop/grad.c or equivalent. *)
+(* Conv weight-gradient FD-parity guard.  The rank-changing reshape
+   inside TConv2DIm2ColBatchedPool's matmul lowering used to silently
+   drop cOut differentiation: gW[cOut=1] came back identical to
+   gW[cOut=0].  Root cause was in kernel_lift's S_RESHAPE_V flat-idx
+   builder, which read out_ext = 0 for expression-emitted size-1
+   axis refs (S_IMOD(0,1)) and let that 0 poison every UPSTREAM
+   axis's stride product (stride = product of out_ext[e] for e > d),
+   silently dropping those axes' contributions from flat_idx.  Fixed
+   by falling back to scalar_ref_extent on non-S_RANGE out refs. *)
+VerificationTest[
+    TInit[];
+    SeedRandom[42];
+    xH = N @ RandomReal[{-1, 1}, {2, 1, 5, 5}];
+    wH = N @ RandomVariate[NormalDistribution[0., 0.5], {2, 1, 3, 3}];
+    bH = N @ RandomReal[{-0.2, 0.2}, {2}];
+    tH = N @ RandomReal[{-1, 1}, {2, 2, 3, 3}];
+    fwdLoss[wD_] := Module[{x, w, b, t, diff},
+        TInit[];
+        x = TTensorCreate @ NumericArray[xH, "Real32"];
+        w = TTensorCreate @ NumericArray[wD, "Real32"];
+        b = TTensorCreate @ NumericArray[bH, "Real32"];
+        t = TTensorCreate @ NumericArray[tH, "Real32"];
+        diff = TConv2D[x, w, b] - t;
+        First @ Normal @ TTensorData @ TRealize @ TUOpReduce[TUOpReduce[
+            TUOpReduce[TUOpReduce[diff * diff, 3, "SUM"], 2, "SUM"],
+            1, "SUM"], 0, "SUM"]];
+    TInit[];
+    xT = TTensorCreate @ NumericArray[xH, "Real32"];
+    wT = TTensorCreate @ NumericArray[wH, "Real32"];
+    bT = TTensorCreate @ NumericArray[bH, "Real32"];
+    tT = TTensorCreate @ NumericArray[tH, "Real32"];
+    diff = TConv2D[xT, wT, bT] - tT;
+    loss = TUOpReduce[TUOpReduce[TUOpReduce[TUOpReduce[diff * diff,
+        3, "SUM"], 2, "SUM"], 1, "SUM"], 0, "SUM"];
+    gW = Normal @ TTensorData @ TRealize @ TGrad[loss, wT];
+    fdGW = Table[
+        (fwdLoss[ReplacePart[wH, {co, ci, ki, kj} -> wH[[co, ci, ki, kj]] + 0.001]]
+       - fwdLoss[ReplacePart[wH, {co, ci, ki, kj} -> wH[[co, ci, ki, kj]] - 0.001]]) / 0.002,
+        {co, 2}, {ci, 1}, {ki, 3}, {kj, 3}];
+    Max @ Abs @ Flatten[gW - fdGW],
+    _ ? (# < 0.01 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/conv2d-grad-w-matches-finite-difference"
+]
 
 VerificationTest[
     TInit[];
