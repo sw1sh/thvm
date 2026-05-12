@@ -62,13 +62,20 @@ typedef struct {
 // Capacity of the per-call LiftRangeMap[] arrays.  The entry-level
 // builder in kernel_lift_to_uop emits one slot per BUFFERIZE range
 // (up to MAX_DIM) and then sweeps the arena for per-USE auxiliary
-// S_RANGE leaves (up to another MAX_DIM), so n_ranges can reach
-// MAX_DIM * 2.  Every local LiftRangeMap[] inside lift_scalar_value
-// that copies the incoming `ranges` array must size to this cap, or
-// the `for (i = 0; i < n_ranges; i++) shifted[i] = ranges[i];` copies
+// S_RANGE leaves.  Per-USE leaves come from chained S_RESHAPE_V
+// wrappers (one VIRT axis per input dim of each rank-change RESHAPE),
+// from chain-reduce per-reduce ranges, and from PAD/SHRINK shifts.
+// Backward kernels through BN-train + MaxPool can chain 3-4
+// rank-change RESHAPEs, each contributing up to MAX_DIM VIRT axes;
+// the cap must cover the worst-case sum across the whole arena.
+// MAX_DIM * 4 = 32 is the empirical bound for the beautiful_mnist
+// W2/W1 backward kernels (28 distinct S_RANGE leaves observed).
+// Every local LiftRangeMap[] inside lift_scalar_value that copies
+// the incoming `ranges` array must size to this cap, or the
+// `for (i = 0; i < n_ranges; i++) shifted[i] = ranges[i];` copies
 // overflow the stack canary and SIGABRT via __stack_chk_fail (seen
 // on beautiful_mnist forward at BS=32).
-#define LIFT_RANGES_CAP (MAX_DIM * 2)
+#define LIFT_RANGES_CAP (MAX_DIM * 4)
 
 static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
                               LiftRangeMap const *ranges, u32 n_ranges,
