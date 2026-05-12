@@ -430,6 +430,150 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
       }
     }
   }
+  // Trailing-collapsed-iter fast path: ndim > outer_rank where the
+  // first (outer_rank - 1) range extents equal the leading buf dims
+  // AND the last range extent equals the product of the trailing
+  // buf dims [outer_rank-1 .. ndim).  This is the canonical multi-
+  // axis reduce shape: the reducer flattens trailing axes into one
+  // S_RANGE leaf, but the body's input access still iterates over
+  // the full ndim buffer.  The collapsed iter visits trailing axes
+  // in row-major order, so its stride is the buf's innermost
+  // stride (=1 for contiguous, =0 for broadcast over all trailing
+  // dims).  We require the trailing block to be either fully
+  // contiguous (row-major: stride[d-1] == stride[d] * dim[d]) or
+  // fully broadcast (every trailing stride == 0); mixed trailing
+  // strides are ambiguous and we fall through to the reject.
+  // Diagnosed via beautiful_mnist BN-train: dims=[B,C,H,W]
+  // range_extents=[B,C,H*W] from the per-channel mean/var broadcast,
+  // produced all-zero output when the lifter declined.
+  if (ndim > outer_rank && outer_rank >= 1) {
+    char const *_ge = getenv("THVM_LIFT_TRAILING_COLLAPSE");
+    int _on = (_ge == NULL) ? 1 : (_ge[0] != '0');
+    if (_on) {
+      // Resolve the input view strides for this buffer (if any).
+      // For DEFINE_OUTPUT or non-input buffers, view_strides_ok stays
+      // 0 and we use the row-major dim-product stride.
+      i64 view_strides_tc[MAX_DIM];
+      int have_view_strides_tc = 0;
+      if (ke->input_views != NULL) {
+        u32 inst = uop_buffer_inst_get(buf);
+        if (inst >= 1 && inst - 1 < ke->n_inputs) {
+          u32 slot = inst - 1;
+          View const *v = &ke->input_views[slot];
+          if (v->shape.ndim == ndim) {
+            for (u32 d = 0; d < ndim; d++) view_strides_tc[d] = v->strides[d];
+            have_view_strides_tc = 1;
+          }
+        }
+      }
+      int extents_align = 1;
+      // First (outer_rank - 1) ranges must match leading buf dims.
+      for (u32 d = 0; d + 1 < outer_rank; d++) {
+        u32 r_sid = u->src[1 + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          extents_align = 0; break;
+        }
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) { extents_align = 0; break; }
+        u32 range_extent = (u32)(ru->extra & 0xFFFFFFFFu);
+        if (range_extent != uop_buffer_dim(buf, d)) {
+          extents_align = 0; break;
+        }
+      }
+      // Last range must match the PRODUCT of trailing buf dims
+      // [outer_rank-1 .. ndim).
+      u32 trailing_prod = 1;
+      for (u32 d = outer_rank - 1; d < ndim; d++) {
+        trailing_prod *= uop_buffer_dim(buf, d);
+      }
+      u32 last_r_sid = u->src[outer_rank];     // src[1 + (outer_rank-1)]
+      if (extents_align) {
+        if (last_r_sid == 0 || last_r_sid >= ke->n_scalar_uops) {
+          extents_align = 0;
+        } else {
+          ScalarUop const *ru = &ke->scalar_uops[last_r_sid];
+          if (ru->op != S_RANGE) extents_align = 0;
+          else {
+            u32 range_extent = (u32)(ru->extra & 0xFFFFFFFFu);
+            if (range_extent != trailing_prod) extents_align = 0;
+          }
+        }
+      }
+      // Check the trailing block is either contiguous (row-major)
+      // OR fully broadcast (all trailing strides == 0).  Determines
+      // the stride for the collapsed iter.
+      i64 collapsed_stride = 0;
+      int trailing_ok = 0;
+      if (extents_align) {
+        if (have_view_strides_tc) {
+          // Fully broadcast: every trailing stride == 0.
+          int all_zero = 1;
+          for (u32 d = outer_rank - 1; d < ndim; d++) {
+            if (view_strides_tc[d] != 0) { all_zero = 0; break; }
+          }
+          if (all_zero) {
+            collapsed_stride = 0; trailing_ok = 1;
+          } else {
+            // Row-major contiguous: stride[d-1] == stride[d] * dim[d]
+            // for d in [outer_rank..ndim).  Innermost stride is the
+            // collapsed_stride.
+            int rm_contig = 1;
+            for (u32 d = outer_rank; d < ndim; d++) {
+              i64 expected = view_strides_tc[d]
+                           * (i64)uop_buffer_dim(buf, d);
+              if (view_strides_tc[d - 1] != expected) {
+                rm_contig = 0; break;
+              }
+            }
+            if (rm_contig) {
+              collapsed_stride = view_strides_tc[ndim - 1];
+              trailing_ok = 1;
+            }
+          }
+        } else {
+          // No view: dim-product row-major strides.  Collapsed iter
+          // stride is the innermost (=1).
+          collapsed_stride = 1; trailing_ok = 1;
+        }
+      }
+      if (extents_align && trailing_ok) {
+        Term acc = 0;
+        // Leading ranges: their stride is the row-major stride of
+        // the corresponding buf dim (or view stride if known).
+        for (u32 d = 0; d + 1 < outer_rank; d++) {
+          u32 r_sid = u->src[1 + d];
+          Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+          if (r_uop == 0) { acc = 0; break; }
+          i64 stride;
+          if (have_view_strides_tc) {
+            stride = view_strides_tc[d];
+            if (stride == 0) continue;      // broadcast axis
+          } else {
+            stride = 1;
+            for (u32 e = d + 1; e < ndim; e++) stride *= uop_buffer_dim(buf, e);
+          }
+          Term term = (stride == 1) ? r_uop
+                    : uop_int_binary(UOP_IMUL, r_uop,
+                                     uop_const(DT_INT32, (u32)stride));
+          acc = (acc == 0) ? term
+              : uop_int_binary(UOP_IADD, acc, term);
+        }
+        // Collapsed trailing range.
+        if (collapsed_stride != 0) {
+          Term r_uop = lift_lookup_range(ranges, n_ranges, last_r_sid);
+          if (r_uop != 0) {
+            Term term = (collapsed_stride == 1) ? r_uop
+                      : uop_int_binary(UOP_IMUL, r_uop,
+                                       uop_const(DT_INT32, (u32)collapsed_stride));
+            acc = (acc == 0) ? term
+                : uop_int_binary(UOP_IADD, acc, term);
+          }
+        }
+        if (acc == 0) acc = uop_const(DT_INT32, 0);
+        return acc;
+      }
+    }
+  }
   if (ndim == 0 || ndim != outer_rank) {
     // Match the env-gating on every other lift_reject_log site --
     // the unconditional one-line stderr print used to fire even
