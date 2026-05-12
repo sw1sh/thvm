@@ -712,6 +712,49 @@ VerificationTest[
     TestID -> "nn/conv2d-rank4-batch-matches-rank3-slices"
 ]
 
+(* Regression guard for the cOut-replication conv-backward bug:
+   TConv2DIm2ColBatchedPool previously flattened weights through
+   `{cOut, cIn*kh*kw}` and the BACKWARD of that 3-axis-collapse
+   reshape silently dropped the cOut differentiation in the gradient
+   (cOut=1's weight grad came back as a copy of cOut=0's), blocking
+   real training convergence.  Now keeps weights at their natural
+   rank-4 shape -- this FD-parity test stays within ~1e-3. *)
+VerificationTest[
+    TInit[];
+    SeedRandom[42];
+    xH = N @ RandomReal[{-1, 1}, {2, 1, 5, 5}];
+    wH = N @ RandomVariate[NormalDistribution[0., 0.5], {2, 1, 3, 3}];
+    bH = N @ RandomReal[{-0.2, 0.2}, {2}];
+    tH = N @ RandomReal[{-1, 1}, {2, 2, 3, 3}];
+    fwdLoss[wD_] := Module[{x, w, b, t, diff},
+        TInit[];
+        x = TTensorCreate @ NumericArray[xH, "Real32"];
+        w = TTensorCreate @ NumericArray[wD, "Real32"];
+        b = TTensorCreate @ NumericArray[bH, "Real32"];
+        t = TTensorCreate @ NumericArray[tH, "Real32"];
+        diff = TConv2D[x, w, b] - t;
+        First @ Normal @ TTensorData @ TRealize @ TUOpReduce[TUOpReduce[
+            TUOpReduce[TUOpReduce[diff * diff, 3, "SUM"], 2, "SUM"],
+            1, "SUM"], 0, "SUM"]];
+    TInit[];
+    xT = TTensorCreate @ NumericArray[xH, "Real32"];
+    wT = TTensorCreate @ NumericArray[wH, "Real32"];
+    bT = TTensorCreate @ NumericArray[bH, "Real32"];
+    tT = TTensorCreate @ NumericArray[tH, "Real32"];
+    diff = TConv2D[xT, wT, bT] - tT;
+    loss = TUOpReduce[TUOpReduce[TUOpReduce[TUOpReduce[diff * diff,
+        3, "SUM"], 2, "SUM"], 1, "SUM"], 0, "SUM"];
+    gW = Normal @ TTensorData @ TRealize @ TGrad[loss, wT];
+    fdGW = Table[
+        (fwdLoss[ReplacePart[wH, {co, ci, ki, kj} -> wH[[co, ci, ki, kj]] + 0.001]]
+       - fwdLoss[ReplacePart[wH, {co, ci, ki, kj} -> wH[[co, ci, ki, kj]] - 0.001]]) / 0.002,
+        {co, 2}, {ci, 1}, {ki, 3}, {kj, 3}];
+    Max @ Abs @ Flatten[gW - fdGW],
+    _ ? (# < 0.01 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/conv2d-grad-w-matches-finite-difference"
+]
+
 VerificationTest[
     TInit[];
     xH = N @ {
