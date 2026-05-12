@@ -967,9 +967,118 @@ static u32 emit_ref_with_extent(KernelEntry *ke, u32 ref, u32 extent,
   if (ref == 0 || extent == 0) return 0;
   u32 got = scalar_ref_extent(ke, ref);
   if (got == extent) return ref;
+  // Derived refs (not bare S_RANGE leaves) come from the rangeify
+  // backward walker's index arithmetic -- e.g. S_IDIV(flat, stride)
+  // or S_IMOD(S_IDIV(flat, stride), dim).  These are by construction
+  // bounded to the consumer-side axis extent the walker was building.
+  // scalar_ref_extent can't always read that extent off the structure
+  // (it only knows S_RANGE and S_IMOD-with-const-rhs).  Wrap with
+  // S_IMOD(ref, extent): for d>0 axes the walker already emitted that
+  // mod (idempotent); for d=0 the ref is `flat / total_inner_stride`,
+  // naturally bounded to [0, extent), so mod is identity.  Mirrors
+  // tinygrad's apply_movement_op which always keeps per-axis iters
+  // mod'd to their out_dim.
+  if (ref < ke->n_scalar_uops
+      && ke->scalar_uops[ref].op != S_RANGE) {
+    u32 c = emit_iconst(ke, (i64)extent);
+    return emit_ibinop(ke, S_IMOD, ref, c);
+  }
   if (!allow_mod) return 0;
   u32 c = emit_iconst(ke, (i64)extent);
   return emit_ibinop(ke, S_IMOD, ref, c);
+}
+
+// Emit per-out-axis index refs for a rank-change RESHAPE whose
+// consumer iterates `os_dims[0..os_ndim)`.  Walks both shapes with a
+// two-pointer cursor accumulating products on each side until they
+// match, producing one "segment" at a time.  Within each segment:
+//
+//   - n_os == 1, n_out >= 1 (SPLIT): out_iter[d] for d in segment =
+//     (loop_range / stride_d) % out_dims[d], with stride_d the
+//     row-major stride over the remaining out_dims in the segment.
+//   - n_out == 1, n_os >= 1 (MERGE): out_iter[d_out] = sum over the
+//     segment's os axes of (loop_range[e] * stride_e), with
+//     stride_e the row-major stride over the remaining os dims.
+//   - n_os == 1, n_out == 1 (matched extents): out_iter = loop_range.
+//   - n_os == 0, n_out >= 1 (only size-1 out_dims left): all zero.
+//
+// Size-1 axes on either side are advanced eagerly between segments
+// and produce a zero ref for out (matching the legacy fallback).
+// Returns 1 on success with out_refs[0..n_out) populated; 0 on bail
+// (no axis match possible, e.g. an extent that uses the reduce axis
+// -- caller falls through to the reduce_size fallback or RBAIL_MID).
+//
+// Mirrors tinygrad's apply_movement_op for RESHAPE: split via
+// IDIV/IMOD, merge via IMUL/IADD; both forms are "virtual" -- the
+// underlying buffer is unchanged, only the per-axis iter math.
+static int emit_reshape_segment_refs(KernelEntry *ke,
+                                     u32 const *out_dims, u32 n_out,
+                                     u32 const *os_dims, u32 n_os,
+                                     u32 const *loop_ranges,
+                                     u32 *out_refs) {
+  u32 i_out = 0, i_os = 0;
+  while (i_out < n_out || i_os < n_os) {
+    // Consume leading size-1 dims independently on each side.  Out
+    // size-1 axes contribute 0 to flat_idx (their stride is 1 and
+    // their iter is bounded to [0,1)).  Os size-1 axes are
+    // iteration-noops (the consumer's loop has extent 1).
+    while (i_out < n_out && out_dims[i_out] == 1) {
+      u32 zref = emit_zero_ref_with_extent(ke, 1);
+      if (zref == 0) return 0;
+      out_refs[i_out++] = zref;
+    }
+    while (i_os < n_os && os_dims[i_os] == 1) i_os++;
+    if (i_out == n_out && i_os == n_os) break;
+    if (i_out == n_out || i_os == n_os) return 0;
+    // Grow each side until the running products match.
+    u32 lo_out = i_out, lo_os = i_os;
+    u64 prod_out = out_dims[i_out++];
+    u64 prod_os  = os_dims [i_os++];
+    while (prod_out != prod_os) {
+      if (prod_out < prod_os) {
+        if (i_out >= n_out) return 0;
+        prod_out *= out_dims[i_out++];
+      } else {
+        if (i_os >= n_os) return 0;
+        prod_os *= os_dims[i_os++];
+      }
+    }
+    u32 hi_out = i_out, hi_os = i_os;
+    // Build flat_idx over this segment from os iters (row-major).
+    u32 flat = 0;
+    for (u32 e = lo_os; e < hi_os; e++) {
+      u64 stride = 1;
+      for (u32 k = e + 1; k < hi_os; k++) stride *= os_dims[k];
+      u32 term = loop_ranges[e];
+      if (stride != 1) {
+        u32 cstride = emit_iconst(ke, (i64)stride);
+        term = emit_ibinop(ke, S_IMUL, term, cstride);
+      }
+      flat = (flat == 0) ? term : emit_ibinop(ke, S_IADD, flat, term);
+    }
+    if (flat == 0) flat = emit_iconst(ke, 0);
+    // Decompose flat_idx into out_dims[lo_out..hi_out) row-major:
+    //   out_iter[d] = (flat / inner_stride[d]) % out_dims[d]
+    // where inner_stride[d] = prod(out_dims[k] for k>d in segment).
+    for (u32 d = lo_out; d < hi_out; d++) {
+      if (out_dims[d] == 1) { out_refs[d] = emit_zero_ref_with_extent(ke, 1); if (out_refs[d] == 0) return 0; continue; }
+      u64 inner = 1;
+      for (u32 k = d + 1; k < hi_out; k++) inner *= out_dims[k];
+      u32 cur = flat;
+      if (inner != 1) {
+        u32 cstride = emit_iconst(ke, (i64)inner);
+        cur = emit_ibinop(ke, S_IDIV, cur, cstride);
+      }
+      // Innermost axis (inner==1) needs no IDIV; its mod by
+      // out_dims[d] is still emitted because the iter may be
+      // wider than the extent.  The IDIV/IMOD constant-folder
+      // collapses the no-op cases.
+      u32 cmod = emit_iconst(ke, (i64)out_dims[d]);
+      out_refs[d] = emit_ibinop(ke, S_IMOD, cur, cmod);
+      if (out_refs[d] == 0) return 0;
+    }
+  }
+  return 1;
 }
 
 // Phase B3: file-scope range map populated by rangeify_try_lower_elementwise.
@@ -3378,10 +3487,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               // in out_refs, ordered like out_dims so flat_idx is row-major.
               u8  os_used[MAX_DIM] = {0};
               int reduce_used = 0;
+              int unmatched = 0;
               for (u32 d = 0; d < p->out_ndim; d++) {
                 if (p->out_dims[d] == 1) {
                   out_refs[d] = emit_zero_ref_with_extent(ke, 1);
-                  if (out_refs[d] == 0) { can_use_v = 0; break; }
+                  if (out_refs[d] == 0) { unmatched = 1; break; }
                   continue;
                 }
                 int matched = 0;
@@ -3405,7 +3515,39 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                   reduce_used = 1;
                   matched = 1;
                 }
-                if (!matched) { can_use_v = 0; break; }
+                if (!matched) { unmatched = 1; break; }
+              }
+              if (unmatched) {
+                // Per-axis 1:1 (and reduce_size) match didn't cover the
+                // RESHAPE.  Try segment-based split/merge mapping: walk
+                // os and out_dims together accumulating products of
+                // consecutive axes until they match, then emit IDIV/IMOD
+                // (split) or IMUL/IADD (merge) per axis in the segment.
+                // Handles MaxPool-backward RESHAPEs of the form
+                // {B,C,H,W} -> {B,C,H/k,k,W/k,k} where the consumer
+                // iterates os = {B,C,H,W} (single LOOP axis maps to two
+                // out_dims via IDIV+IMOD by k).
+                for (u32 d = 0; d < p->out_ndim; d++) out_refs[d] = 0;
+                int seg_ok = emit_reshape_segment_refs(
+                  ke, p->out_dims, p->out_ndim,
+                  os->dims, os->ndim, loop_ranges, out_refs);
+                if (!seg_ok) can_use_v = 0;
+                if (getenv("THVM_RANGEIFY_BAIL")) {
+                  fprintf(stderr, "  RESHAPE-V segment-match: ok=%d"
+                          " src0_dims=[", seg_ok);
+                  for (u32 d = 0; d < p->src0_ndim; d++)
+                    fprintf(stderr, "%u%s", p->src0_dims[d],
+                            d+1==p->src0_ndim?"":",");
+                  fprintf(stderr, "] out_dims=[");
+                  for (u32 d = 0; d < p->out_ndim; d++)
+                    fprintf(stderr, "%u%s", p->out_dims[d],
+                            d+1==p->out_ndim?"":",");
+                  fprintf(stderr, "] os.dims=[");
+                  for (u32 d = 0; d < os->ndim; d++)
+                    fprintf(stderr, "%u%s", os->dims[d],
+                            d+1==os->ndim?"":",");
+                  fputs("]\n", stderr);
+                }
               }
             }
           }
