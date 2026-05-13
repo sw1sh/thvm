@@ -716,7 +716,7 @@ apply:
         if (term_tag(whnf) == TAG_SUP) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           Term y = heap_read(loc + 1);
-          whnf = interact_op2_sup(op, whnf, y);
+          whnf = interact_op2_sup(op, whnf, y, loc);
           continue;
         }
         // x stuck (not NUM, not SUP): rebuild OP2 with reduced x.
@@ -774,7 +774,7 @@ apply:
         if (term_tag(whnf) == TAG_SUP) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           Term x = term_new(0, TAG_NUM, dtype, xv);
-          whnf = interact_op2_num_sup(op, x, whnf);
+          whnf = interact_op2_num_sup(op, x, whnf, loc);
           continue;
         }
         // y stuck (not NUM, not SUP): rebuild OP2(x, whnf) in place

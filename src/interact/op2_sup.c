@@ -14,9 +14,15 @@
 //
 // Allocates 7 cells: 1 DUP body + 2 OP2 layouts (2 cells each) + 1
 // SUP wrapper (2 cells).
-fn Term interact_op2_sup(u32 opr, Term sup, Term y) {
+fn Term interact_op2_sup(u32 opr, Term sup, Term y, u64 op2_loc) {
     ITRS++;
-    multi_emit(RULE_OP2_SUP, MULTI_SLIDE, (u64)sup, (u64)y, term_ext(sup));
+    // Use the OP2's own slot locs as wire-prov anchors: heap[op2_loc+0]
+    // may still hold a VAR/DP cell that was SUB-resolved by an earlier
+    // event (e.g. APP_LAM), so multi_resolve_producer can chase it.
+    // Passing (sup, y) term values would look up wire_prov at the SUP's
+    // body loc, which was written at construction time (NONE), losing
+    // the causal link to whatever event materialized the SUP here.
+    multi_emit(RULE_OP2_SUP, MULTI_SLIDE, op2_loc, op2_loc + 1, term_ext(sup));
     u64  sup_loc = term_val(sup);
     u32  lab     = term_ext(sup);
     Term a       = heap_read(sup_loc + 0);

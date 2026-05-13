@@ -12,9 +12,12 @@
 //
 // Allocates 6 cells: 2 OP2 layouts (2 cells each) + 1 SUP wrapper
 // (2 cells).
-fn Term interact_op2_num_sup(u32 opr, Term num, Term sup) {
+fn Term interact_op2_num_sup(u32 opr, Term num, Term sup, u64 op2_loc) {
     ITRS++;
-    multi_emit(RULE_OP2_NUM_SUP, MULTI_SLIDE, (u64)num, (u64)sup, term_ext(sup));
+    // See interact_op2_sup: pass the OP2's own slot locs so
+    // multi_resolve_producer can chase through any SUB-flagged
+    // VAR/DP that an earlier event substituted into the cell.
+    multi_emit(RULE_OP2_NUM_SUP, MULTI_SLIDE, op2_loc, op2_loc + 1, term_ext(sup));
     u64  sup_loc = term_val(sup);
     u32  lab     = term_ext(sup);
     Term a       = heap_read(sup_loc + 0);
