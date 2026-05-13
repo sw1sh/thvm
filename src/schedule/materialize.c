@@ -14,6 +14,14 @@
 static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_TID  [BOUNDARY_ORDER_CAP];   // emitted output TenDesc id
 static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
+// Phase 4d-1: per-BOUNDARY_ORDER slot, the UOP_BUFFERIZE Term the unified
+// rangeify pass emitted at this boundary (0 in OLD-path mode or when the
+// boundary has no unified-pass record).  Mirror: tinygrad's
+// tinygrad/schedule/indexing.py:77 lands a `UOp(Ops.BUFFERIZE, ...)` per
+// realize boundary; the scheduler downstream walks those.  thvm projects
+// the term onto a per-boundary slot so emit_kernel_for_boundary can read
+// it without re-doing the bufferize_info_find lookup.
+static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_ORDER_LEN = 0;
 
 // Multi-output kernel merge planning (Step 2 of multi-output groundwork).
@@ -419,6 +427,38 @@ static void topo_sort_boundaries(Term root) {
                 (unsigned)op, reasons);
       }
     }
+  }
+}
+
+// Phase 4d-1: unified-rangeify boundary walker.  Runs the legacy
+// topo_sort_boundaries (which keys off BUFFERIZE_NODES.realized -- the
+// canonical post-bufferize_classify realize set) and then captures the
+// UOP_BUFFERIZE Term the unified rangeify pass emitted at each
+// boundary into BOUNDARY_BUFFERIZE_TERM[].  Mirror: tinygrad's
+// scheduler walks BUFFERIZE+STORE pairs in the lowered tsink
+// (tinygrad/engine/realize.py); thvm reuses the legacy topo and
+// attaches the unified-pass Term per slot for Phase 4d-2 KernelEntry
+// wiring.
+//
+// Gate: thvm_materialize calls this when rangeify_unified_enabled() is
+// 1 (THVM_UNIFIED_RANGEIFY=1, default ON post Phase 3).  Set the env
+// var to 0 to revert to topo_sort_boundaries directly.
+//
+// 4d-1 does NOT mutate BUFFERIZE_NODES.realized -- the OLD-path named
+// removal rules (inline-constants, remove-removable-bufferize, etc.)
+// run AFTER run_rangeify_unified inside bufferize_classify and they
+// must remain authoritative for the realize set.  RU_BUFFERIZE_TERM[i]
+// reflects RU's snapshot BEFORE those rules; capturing it as a side
+// attribute (BOUNDARY_BUFFERIZE_TERM) leaves the realize set under
+// bufferize_classify's control while still giving emit_kernel_for_boundary
+// a handle on the lowered-DAG boundary Term.
+static void topo_sort_buffers_unified(Term root) {
+  topo_sort_boundaries(root);
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+    u32 idx = bufferize_info_find(BOUNDARY_ORDER[i]);
+    BOUNDARY_BUFFERIZE_TERM[i] = (idx != 0xFFFFFFFFu)
+                                    ? rangeify_unified_bufferize_at(idx)
+                                    : 0;
   }
 }
 
@@ -2815,7 +2855,18 @@ fn Term thvm_materialize(Term term) {
   }
 
   bufferize_classify(term);
-  topo_sort_boundaries(term);
+  // Phase 4d-1: when the unified rangeify pass ran inside
+  // bufferize_classify (rangeify_unified_enabled() == 1), project its
+  // UOP_BUFFERIZE Terms back onto BUFFERIZE_NODES.realized and capture
+  // BOUNDARY_BUFFERIZE_TERM[].  Mirror: tinygrad walks the lowered
+  // tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py) -- we
+  // map that to the legacy topo via the realized bit.  When unified is
+  // off, fall through to the legacy walker.
+  if (rangeify_unified_enabled()) {
+    topo_sort_buffers_unified(term);
+  } else {
+    topo_sort_boundaries(term);
+  }
   plan_kernel_merges();
   mem_plan_reset();
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
