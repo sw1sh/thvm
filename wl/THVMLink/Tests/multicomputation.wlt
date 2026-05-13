@@ -26,7 +26,7 @@ If[ ! TMultiTraceQ[],
        on the SUP and the DUP, so DUP-SUP commutes (cross product) and
        both projections collapse to {4, 5}.  The trace records the
        OP2-SUP slide, the DUP-SUP commute (SPLIT), the OP2-NUM-NUM
-       folds (TERM), and the DUP-NUM passthroughs (PLUMB); no spurious
+       folds (TERM), and the DUP-NUM passthroughs (DIST); no spurious
        MERGE. *)
     VerificationTest[
         TInit[];

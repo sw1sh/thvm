@@ -1417,7 +1417,9 @@ typedef struct {
 #define MULTI_SPLIT  3  // DUP-SUP distinct labels: branchial cross product
 #define MULTI_MERGE  4  // DUP-SUP same label: branches reconverge
 #define MULTI_PRUNE  5  // ERA absorbs neighbour: dead branch
-#define MULTI_PLUMB  6  // pure sharing housekeeping (DUP-VAR, DUP-DP)
+#define MULTI_DIST   6  // DUP distributes through a non-SUP term
+                        // (DUP-NUM / DUP-TEN / DUP-ANY atom-copy,
+                        //  DUP-NOD / DUP-UOP structural clone)
 
 // Rule kinds.  One per `src/interact/<name>.c`; numeric values are
 // an internal enum (not an ABI) -- the WL side will eventually decode

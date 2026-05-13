@@ -42,6 +42,6 @@ fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop) {
       break;
   }
   ITRS++;
-  multi_emit(RULE_DUP_UOP, MULTI_PLUMB, loc, (u64)uop, 0);
+  multi_emit(RULE_DUP_UOP, MULTI_DIST, loc, (u64)uop, 0);
   return heap_subst_cop(side, loc, uop, uop);
 }

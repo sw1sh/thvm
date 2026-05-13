@@ -197,7 +197,7 @@ Dataset[crossOut["Trace"]][All, {"id", "rule", "family", "consumed", "produced"}
 The directed acyclic projection of the trace.  Vertices are colour-
 coded by event family (TERM = within-branch compute, SLIDE = re-
 foliation, SPLIT = DUP-SUP cross-product, MERGE = DUP-SUP annihilate,
-PRUNE = ERA, PLUMB = sharing housekeeping); the legend names them.
+PRUNE = ERA, DIST = sharing housekeeping); the legend names them.
 
 ```wolfram
 TCausalGraph[crossOut["Trace"], VertexLabels -> Automatic, PlotLegends -> Automatic]
@@ -212,7 +212,7 @@ vertex per leaf (so `SUP{1+3, 2+3}` is two vertices, `SUP{a, b} + 3`
 is one).  Edges are events between consecutive slices, drawn as the
 cross product of source-leaves × target-leaves so a SPLIT event fans
 out into multiple edges.  Family colours the edges (TERM blue,
-SLIDE orange, SPLIT purple, MERGE red, PRUNE/PLUMB grey).
+SLIDE orange, SPLIT purple, MERGE red, PRUNE/DIST grey).
 
 ```wolfram
 {crossDp0, crossDp1} = TDup[TSup[1, 2] + 3]

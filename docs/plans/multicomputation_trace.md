@@ -166,7 +166,7 @@ typedef struct {
   u64    id;            // monotone; == ITRS at the point this rule fired
   u8     rule;          // RULE_APP_LAM, RULE_DUP_SUP_ANN, RULE_DUP_SUP_COM, ...
   u8     family;        // MULTI_TERM | MULTI_SLIDE | MULTI_FORK | MULTI_SPLIT
-                        //                    | MULTI_MERGE | MULTI_PRUNE | MULTI_PLUMB
+                        //                    | MULTI_MERGE | MULTI_PRUNE | MULTI_DIST
   // active pair, captured *before* the rule fires:
   u64    loc_a, loc_b;  // the two redex cells in Heap[]
   u64    term_a, term_b;// their packed Term words (enough to replay)
@@ -225,7 +225,7 @@ classification and the term / slice split.  It is also the natural
 | `DUP-SUP`, *different* label ([docs/interact/dup_sup.md](../interact/dup_sup.md), commute case) | `MULTI_SPLIT` | branchial cross product; state count * 2 |
 | `DUP-SUP`, *same* label ([docs/interact/dup_sup.md](../interact/dup_sup.md), annihilate case) | `MULTI_MERGE` | two branches reconverge / are identified; a diamond closes |
 | `ERA`-anything (`APP-ERA`, `DUP-ERA`, `OP2-ERA`, ... and ERA propagation) | `MULTI_PRUNE` | a dead branch is dropped (also: failed candidate -> ERA in collapse) |
-| `DUP-VAR`, `DUP-DP0` / `DUP-DP1` | `MULTI_PLUMB` | pure sharing housekeeping; not a multiway event |
+| `DUP-VAR`, `DUP-DP0` / `DUP-DP1` | `MULTI_DIST` | pure sharing housekeeping; not a multiway event |
 
 Implementation: each `interact_*` function in
 [src/interact/](../../src/interact/) already begins (or ends) with
@@ -377,7 +377,7 @@ LibraryLink bridge ([docs/wl.md](../wl.md)), echoing `THotCounters` /
   ```mathematica
   <| "id" -> _Integer
    , "rule" -> "APP_LAM" | "DUP_SUP_ANN" | "DUP_SUP_COM" | ...
-   , "family" -> "TERM" | "SLIDE" | "FORK" | "SPLIT" | "MERGE" | "PRUNE" | "PLUMB"
+   , "family" -> "TERM" | "SLIDE" | "FORK" | "SPLIT" | "MERGE" | "PRUNE" | "DIST"
    , "cylinder" -> <| label_Integer -> 0 | 1, ... |>
    , "consumed" -> {__WireId}
    , "produced" -> {__WireId}
@@ -518,7 +518,7 @@ end-to-end; the next-step shape is clear.
 - **The struct + constants + gating macros** live in
   [src/thvm.h](../../src/thvm.h) alongside `HotCounters`:
   `MultiEvent`, the `MULTI_TERM / MULTI_SLIDE / MULTI_FORK /
-  MULTI_SPLIT / MULTI_MERGE / MULTI_PRUNE / MULTI_PLUMB` family
+  MULTI_SPLIT / MULTI_MERGE / MULTI_PRUNE / MULTI_DIST` family
   constants, the `RULE_APP_LAM` rule constant (just one for the
   spike), and the `multi_emit(...)` macro with its two-tier gate
   (`#ifdef THVM_TRACE` + `if (__builtin_expect(MULTI_TRACE_ON, 0))`).
@@ -603,13 +603,13 @@ reducer pays zero instructions, full stop.
 | `dup_lam` | `DUP_LAM` | `FORK` |
 | `dup_bri` | `DUP_BRI` | `FORK` |
 | `dup_ctr` | `DUP_CTR` | `FORK` |
-| `dup_nod` (OP2, MAT, EQL, AND, OR, WHEN, ANN, DSU, DDU, INC) | `DUP_NOD` | `FORK` (`PLUMB` for ari=0 fallback) |
+| `dup_nod` (OP2, MAT, EQL, AND, OR, WHEN, ANN, DSU, DDU, INC) | `DUP_NOD` | `FORK` (`DIST` for ari=0 fallback) |
 | `dup_uop` | `DUP_UOP` | `FORK` |
 | `dup_sup` (same label) | `DUP_SUP_ANN` | `MERGE` |
 | `dup_sup` (diff label) | `DUP_SUP_COM` | `SPLIT` |
-| `dup_num` | `DUP_NUM` | `PLUMB` |
-| `dup_ten` | `DUP_TEN` | `PLUMB` |
-| `dup_any` | `DUP_ANY` | `PLUMB` |
+| `dup_num` | `DUP_NUM` | `DIST` |
+| `dup_ten` | `DUP_TEN` | `DIST` |
+| `dup_any` | `DUP_ANY` | `DIST` |
 
 `dup_nod` is the generic eager n-ary commute, mirroring HVM4's
 `wnf_dup_nod` ([~/src/HVM4/clang/wnf/dup_nod.c](file:///Users/swish/src/HVM4/clang/wnf/dup_nod.c)).

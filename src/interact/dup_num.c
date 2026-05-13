@@ -11,6 +11,6 @@ fn Term interact_dup_num(u8 side, u64 loc, Term num) {
      carrier so wire_prov[loc] gives the producer event.  Passing the
      NUM Term word would have term_val = the integer value, which is
      not a heap loc -- the consumed lookup would be meaningless. */
-  multi_emit(RULE_DUP_NUM, MULTI_PLUMB, loc, 0, 0);
+  multi_emit(RULE_DUP_NUM, MULTI_DIST, loc, 0, 0);
   return heap_subst_cop(side, loc, num, num);
 }

@@ -42,7 +42,7 @@ fn Term interact_dup_nod(u32 lab, u64 loc, u8 side, Term term) {
        keep the path so a future caller dispatching atomic tags
        through dup_nod stays correct). */
     ITRS++;
-    multi_emit(RULE_DUP_NOD, MULTI_PLUMB, loc, (u64)term, lab);
+    multi_emit(RULE_DUP_NOD, MULTI_DIST, loc, (u64)term, lab);
     return heap_subst_cop(side, loc, term, term);
   }
   ITRS++;

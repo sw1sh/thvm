@@ -189,7 +189,7 @@ int main(void) {
     //   MULTI_FORK    -- DUP-LAM via cnf on DP0(&L = LAM)
     //   MULTI_MERGE   -- DUP-SUP same label via cnf on DP0(&L = &L{a,b})
     //   MULTI_SPLIT   -- DUP-SUP different label via cnf on DP0(&L = &R{a,b})
-    //   MULTI_PLUMB   -- DUP-NUM via cnf on DP0(dup = NUM)
+    //   MULTI_DIST   -- DUP-NUM via cnf on DP0(dup = NUM)
 
     TEST_BEGIN("multi-trace/family-coverage/app-era-prunes");
     {
@@ -282,7 +282,7 @@ int main(void) {
         u64  dup = build_dup(num);
         Term dp0 = term_new(0, TAG_DP0, 5, dup);
         (void)cnf(dp0);
-        u64 idx = find_event(from, RULE_DUP_NUM, MULTI_PLUMB);
+        u64 idx = find_event(from, RULE_DUP_NUM, MULTI_DIST);
         CHECK(idx != (u64)-1);
         multi_trace_free();
     }

@@ -16,7 +16,7 @@
                                  "termA", "termB", "deltaLabel",
                                  "consumed" |>.
                             `family` is one of TERM / SLIDE / FORK /
-                            SPLIT / MERGE / PRUNE / PLUMB.
+                            SPLIT / MERGE / PRUNE / DIST.
                             "consumed" is a list of event ids the
                             current event read from (M1 wire prov,
                             see docs/plans/multicomputation_trace.md
@@ -41,11 +41,11 @@
 
 BeginPackage["THVMLink`"];
 
-TMultiTrace::usage = "TMultiTrace[expr] evaluates `expr` (HoldFirst) with the multicomputation reduction trace recording, then returns <|\"Result\" -> value of expr, \"Trace\" -> {event, ...}|>, where each `event` is an Association <|\"id\", \"rule\", \"ruleCode\", \"family\", \"familyCode\", \"termA\", \"termB\", \"deltaLabel\", \"consumed\", \"produced\"|>.  An event is one interaction-net rule firing; `family` is one of TERM (within-branch compute), SLIDE (re-foliation: APP-SUP commute, INC, ...), FORK (1 -> 2), SPLIT (DUP-SUP cross product), MERGE (DUP-SUP annihilate), PRUNE (ERA), PLUMB (sharing housekeeping) -- see docs/multicomputation.md.  `consumed` is the list of producer event ids (M1 wire provenance: a list element `id` means \"this event's active pair includes a wire most recently written by event `id`\"); empty for events whose active pair was built outside the trace.  `produced` is the dual: the list of heap locs the event wrote (last-writer-wins snapshot of wire_prov at trace end -- so cells overwritten by a later event aren't attributed here).  Recording is turned on for the duration of `expr` and off afterwards.  The default \"make wl\" already builds a trace-enabled dylib; check TMultiTraceQ[].";
+TMultiTrace::usage = "TMultiTrace[expr] evaluates `expr` (HoldFirst) with the multicomputation reduction trace recording, then returns <|\"Result\" -> value of expr, \"Trace\" -> {event, ...}|>, where each `event` is an Association <|\"id\", \"rule\", \"ruleCode\", \"family\", \"familyCode\", \"termA\", \"termB\", \"deltaLabel\", \"consumed\", \"produced\"|>.  An event is one interaction-net rule firing; `family` is one of TERM (within-branch compute), SLIDE (re-foliation: APP-SUP commute, INC, ...), FORK (1 -> 2), SPLIT (DUP-SUP cross product), MERGE (DUP-SUP annihilate), PRUNE (ERA), DIST (sharing housekeeping) -- see docs/multicomputation.md.  `consumed` is the list of producer event ids (M1 wire provenance: a list element `id` means \"this event's active pair includes a wire most recently written by event `id`\"); empty for events whose active pair was built outside the trace.  `produced` is the dual: the list of heap locs the event wrote (last-writer-wins snapshot of wire_prov at trace end -- so cells overwritten by a later event aren't attributed here).  Recording is turned on for the duration of `expr` and off afterwards.  The default \"make wl\" already builds a trace-enabled dylib; check TMultiTraceQ[].";
 TMultiTraceQ::usage = "TMultiTraceQ[] returns True iff the loaded THVMLink dylib was built with -DTHVM_TRACE -- the default for \"make wl\".  Pass WL_TRACE=0 to make to opt out of the trace machinery (e.g. for benching), in which case TMultiTrace returns $Failed.";
 TMultiSteps::usage = "TMultiSteps[term] (or TMultiSteps[term, maxSteps]) fires one IC interaction at a time -- via TStep -- with the multicomputation trace recording on, snapshotting the heap diagram after every step.  Returns a list of Associations <|\"Step\" -> i, \"Term\" -> partiallyReducedTerm, \"Diagram\" -> THeapDiagram[partial, \"Arrange\"], \"Events\" -> {event, ...}, \"ITRS\" -> n|>; the diagram is built BEFORE the next TStep mutates the heap, so the per-step pictures are usable after the reduction completes.  Step 0 is the input term with no events.  Stops when no more interactions fire (normal form) or after `maxSteps` (default: unbounded).  Pass option \"DiagramSeeds\" -> {auxTerms...} to seed the per-step diagrams with additional roots (e.g. the sibling projection from TDup so the diagram surfaces both halves of a DUP-SUP commute).  Requires the trace dylib (TMultiTraceQ[] === True).";
-TCausalGraph::usage = "TCausalGraph[trace] returns a directed Graph[] of the causal structure of `trace` (= the \"Trace\" field of TMultiTrace).  Vertices are event ids; edges F -> E iff F's id appears in E's \"consumed\" list (wire provenance from M1).  Each vertex is coloured by its event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / PLUMB) so the trace shape is readable at a glance.  Options: \"VertexLabels\" -> Automatic labels each event with its rule name; \"Family\" -> {\"TERM\", ...} filters by family; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour (default None).";
-TMultiwayGraph::usage = "TMultiwayGraph[steps] returns the multiway view of a `TMultiSteps` reduction.  Vertices are TERM-slices: per step, the active term's SUP-head is unfolded so that a term with head SUP{a, b} contributes one vertex per leaf (recursively, until non-SUP heads), and a term with non-SUP head contributes a single vertex.  Edges represent trace events between consecutive steps: source-target pairs are taken as a cross product (one edge per (source, target) pair across the two slices), coloured by the firing event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / PLUMB).  Options: \"Branchial\" -> True overlays a branchial clique (dashed WPP-styled edges) between sibling vertices within each SUP-bearing slice (default False); \"VertexLabels\" -> Automatic labels each vertex with the leaf term's tag/value; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour.";
+TCausalGraph::usage = "TCausalGraph[trace] returns a directed Graph[] of the causal structure of `trace` (= the \"Trace\" field of TMultiTrace).  Vertices are event ids; edges F -> E iff F's id appears in E's \"consumed\" list (wire provenance from M1).  Each vertex is coloured by its event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST) so the trace shape is readable at a glance.  Options: \"VertexLabels\" -> Automatic labels each event with its rule name; \"Family\" -> {\"TERM\", ...} filters by family; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour (default None).";
+TMultiwayGraph::usage = "TMultiwayGraph[steps] returns the multiway view of a `TMultiSteps` reduction.  Vertices are TERM-slices: per step, the active term's SUP-head is unfolded so that a term with head SUP{a, b} contributes one vertex per leaf (recursively, until non-SUP heads), and a term with non-SUP head contributes a single vertex.  Edges represent trace events between consecutive steps: source-target pairs are taken as a cross product (one edge per (source, target) pair across the two slices), coloured by the firing event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST).  Options: \"Branchial\" -> True overlays a branchial clique (dashed WPP-styled edges) between sibling vertices within each SUP-bearing slice (default False); \"VertexLabels\" -> Automatic labels each vertex with the leaf term's tag/value; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour.";
 
 Begin["`Private`"];
 
@@ -328,7 +328,7 @@ $familyColors = <|
     "SPLIT" -> StandardPurple,
     "MERGE" -> StandardRed,
     "PRUNE" -> LightDarkSwitched[GrayLevel[0.5], GrayLevel[0.6]],
-    "PLUMB" -> LightDarkSwitched[GrayLevel[0.75], GrayLevel[0.35]]
+    "DIST" -> LightDarkSwitched[GrayLevel[0.75], GrayLevel[0.35]]
 |>;
 
 (* The legend SwatchLegend; only include families actually present in
@@ -517,7 +517,8 @@ Options[TMultiwayGraph] = Join[
 TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[
     {slices, sliceKeys, vertexLabel, allKeys, edges, branchial,
      vlabels, labelStyle, legendOpt, presentFamilies, legend,
-     edgeStyles, edgeFamilies, brStyle, userGraphOpts, edgeList},
+     edgeStyles, edgeFamilies, edgeRules, brStyle, userGraphOpts,
+     edgeList},
     (* Vertex identity = canonical SUB-resolved form of the slice
        leaf.  Two leaves at different steps with the same canonical
        form are the SAME vertex (an unchanged branch persists across
@@ -542,23 +543,26 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[
        whose canonical form is unchanged by the firing). *)
     edgeList = Catenate[
         MapIndexed[
-            {prevKeys, idx} |-> Block[{i, curKeys, fam, pairs},
+            {prevKeys, idx} |-> Block[
+                {i, curKeys, fam, rule, ev, pairs},
                 i = First[idx];
                 If[ i >= Length[sliceKeys], Return[{}, Block]];
                 curKeys = sliceKeys[[i + 1]];
-                fam = If[ steps[[i + 1]]["Events"] === {},
-                    "WALK",
-                    steps[[i + 1]]["Events"][[1, "family"]]];
+                ev = steps[[i + 1]]["Events"];
+                {fam, rule} = If[ ev === {},
+                    {"WALK", ""},
+                    {ev[[1, "family"]], ev[[1, "rule"]]}];
                 pairs = If[ Length[prevKeys] === Length[curKeys],
                     Transpose[{prevKeys, curKeys}],
                     Tuples[{prevKeys, curKeys}]];
                 Select[
                     Map[
-                        p |-> {DirectedEdge[First[p], Last[p]], fam},
+                        p |-> {DirectedEdge[First[p], Last[p]], fam, rule},
                         pairs],
                     pe |-> First[pe][[1]] =!= First[pe][[2]]]],
             sliceKeys]];
     edgeFamilies = AssociationThread[edgeList[[All, 1]] -> edgeList[[All, 2]]];
+    edgeRules    = AssociationThread[edgeList[[All, 1]] -> edgeList[[All, 3]]];
     edges = DeleteDuplicates[edgeList[[All, 1]]];
     (* Optional branchial clique inside each multi-leaf slice. *)
     branchial = If[ OptionValue["Branchial"],
@@ -598,7 +602,8 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[
         Automatic | True, familyLegend[presentFamilies],
         _, legendOpt];
     userGraphOpts = FilterRules[{opts}, Options[Graph]] /.
-        (VertexLabels -> _) -> Nothing;
+        (VertexLabels -> _) -> Nothing /.
+        (EdgeLabels   -> _) -> Nothing;
     With[{g = Graph[
         allKeys,
         Join[edges, branchial],
@@ -610,9 +615,17 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[
             None, None,
             _, vlabels],
         VertexLabelStyle -> labelStyle,
+        EdgeLabels -> Switch[OptionValue[EdgeLabels],
+            Automatic, Map[
+                e |-> e -> Lookup[edgeRules, e, ""],
+                edges],
+            None, None,
+            _, OptionValue[EdgeLabels]],
+        EdgeLabelStyle -> labelStyle,
         EdgeStyle -> edgeStyles,
         Background -> LightDarkSwitched[White, GrayLevel[0.13]],
-        GraphLayout -> "LayeredDigraphEmbedding"]},
+        GraphLayout -> "LayeredDigraphEmbedding"]
+    },
         If[ legend === None, g, Legended[g, legend]]]
 ]
 

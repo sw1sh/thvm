@@ -94,7 +94,7 @@ static const char *const MULTI_FAMILY_NAMES[] = {
     [MULTI_SPLIT] = "SPLIT",
     [MULTI_MERGE] = "MERGE",
     [MULTI_PRUNE] = "PRUNE",
-    [MULTI_PLUMB] = "PLUMB",
+    [MULTI_DIST]  = "DIST",
 };
 
 fn const char *multi_rule_name(u8 r) {

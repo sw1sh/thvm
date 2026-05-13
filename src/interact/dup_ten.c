@@ -7,6 +7,6 @@
 // the same tensor by id; sharing is implicit.  No heap copy.
 fn Term interact_dup_ten(u8 side, u64 loc, Term ten) {
   ITRS++;
-  multi_emit(RULE_DUP_TEN, MULTI_PLUMB, loc, 0, 0);
+  multi_emit(RULE_DUP_TEN, MULTI_DIST, loc, 0, 0);
   return heap_subst_cop(side, loc, ten, ten);
 }
