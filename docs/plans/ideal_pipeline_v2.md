@@ -83,6 +83,38 @@ Goal: flip the default. The unified pass becomes the only path; OLD path becomes
 - 3c. If the cut-over reveals a gap (something the OLD path handled that the new one doesn't), pick ONE specific case, port the corresponding tinygrad rule, repeat. Each round commits independently. NO bundling.
 - 3d. Verify: full suite all green, kernel counts within tinygrad parity bands.
 
+### Phase 4a-pre: UOP_BUFFERIZE first-class + main-heap mutation (substrate)
+
+Status: in progress. Substrate that unblocks Phase 4a's REDUCE-seed removal.
+
+Why this exists: Phase 2 wrote the unified pass output to side-tables
+(`RU_RANGE_MAP` / `RU_REALIZE_MAP` / `RU_SUBST` in
+`src/schedule/rangeify_unified.c`). The Phase 3a cut-over wiring activated
+the pass as an additive seed contributor but did not mutate
+`BUFFERIZE_NODES.realized`. Phase 4a wants to REMOVE the OLD-path
+REDUCE-as-boundary seed in `bufferize_classify.c`; doing so without a
+new boundary contract breaks `materialize.c` (which walks the OLD-path
+realized bits + emits one `KernelEntry` per realized REDUCE).
+
+Phase 4a-pre lands the new contract:
+
+- 4a-pre-1. **UOP_BUFFERIZE opcode + main-heap allocator.** Add
+  `UOP_BUFFERIZE` to the opcode space and `uop_bufferize_new(value,
+  addrspace, removable, n_ranges, ranges)` to `src/uop/index.c` (hash-cons
+  via `uop_mov_cache`). Accessors: `uop_bufferize_value/_addrspace/
+  _removable/_n_ranges/_range_at`. Mirror: tinygrad/schedule/indexing.py:77.
+  **LANDED.**
+- 4a-pre-2. Unified pass writes UOP_BUFFERIZE on main heap at realize
+  boundaries (replaces `RU_SUBST` side-table writes). Mirror:
+  `create_bufferize_and_index_based_on_ranges`.
+- 4a-pre-3. REDUCE-via-RANGE production: rewrite `REDUCE(op, axis)` as
+  `REDUCE(op)` with explicit RANGE args. Mirror:
+  `convert_reduce_to_reduce_with_ranges`.
+- 4a-pre-4. `materialize.c` walks the lowered DAG (UOP_BUFFERIZE as
+  boundary signal, not `BUFFERIZE_NODES.realized`). The OLD-path
+  REDUCE-as-boundary seed can be removed CONDITIONALLY behind unified-on.
+- 4a-pre-5. Re-verify probe_w2_bs3 kernel count (target < 100).
+
 ### Phase 4: Delete the OLD path
 
 Goal: remove the dead code that the unified pass replaced. Each commit is a single targeted deletion; reverting any one of them brings back working old-path code (gated behind THVM_UNIFIED_RANGEIFY=0).

@@ -238,3 +238,82 @@ fn Term uop_invalid(void) {
   uop_mov_insert(key, t);
   return t;
 }
+
+// === UOP_BUFFERIZE: realize-boundary main-heap node ===
+//
+// Heap layout: [value, NUM(addrspace), NUM(removable), NUM(n_ranges),
+//               range_0, ..., range_{n_ranges-1}].
+//
+// Mirror source: tinygrad/schedule/indexing.py:77 (`UOp(Ops.BUFFERIZE,
+// s.dtype, src=(new_src,)+closed_ranges, arg=opts)` inside
+// `create_bufferize_and_index_based_on_ranges`).
+//
+// Hash-cons via uop_mov_cache so reusing the same (value, addrspace,
+// removable, ranges) tuple returns the same Term.  Phase 4a-pre's
+// unified-pass main-heap rewrite calls this once per realize boundary
+// the run_rangeify walk decided; identical boundaries dedup naturally.
+
+fn Term uop_bufferize_new(Term value, u32 addrspace, u32 removable,
+                          u32 n_ranges, Term const *ranges) {
+  // Bound the range list to MAX_DIM (the same per-axis limit
+  // RU_RANGE_MAP uses).  Tinygrad bounds via its UPat semantics; we
+  // bound here to keep the heap layout deterministic.
+  if (n_ranges > MAX_DIM) n_ranges = MAX_DIM;
+
+  // Build hash key over (op, value, addrspace, removable, n_ranges, ranges...).
+  // 2 u32 per Term + 3 u32 for the header = 2 + 3 + 2*n_ranges.
+  u32 args[3 + 2 + 2 * MAX_DIM];
+  args[0] = (u32)value;
+  args[1] = (u32)(value >> 32);
+  args[2] = addrspace;
+  args[3] = removable;
+  args[4] = n_ranges;
+  for (u32 i = 0; i < n_ranges; i++) {
+    args[5 + 2 * i + 0] = (u32)ranges[i];
+    args[5 + 2 * i + 1] = (u32)(ranges[i] >> 32);
+  }
+  u64 key = uop_mov_hash(UOP_BUFFERIZE, 0, args, 5 + 2 * n_ranges);
+  Term hit = uop_mov_lookup(key);
+  if (hit != 0) return hit;
+
+  // Heap layout: [value, NUM(addrspace), NUM(removable), NUM(n_ranges),
+  //               range_0, ..., range_{n-1}].
+  u64 loc = heap_alloc(4 + n_ranges);
+  heap_set(loc + 0, value);
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, addrspace));
+  heap_set(loc + 2, term_new(0, TAG_NUM, DT_INT32, removable));
+  heap_set(loc + 3, term_new(0, TAG_NUM, DT_INT32, n_ranges));
+  for (u32 i = 0; i < n_ranges; i++) {
+    heap_set(loc + 4 + i, ranges[i]);
+  }
+  Term t = term_new(0, TAG_UOP, UOP_BUFFERIZE, loc);
+  uop_mov_insert(key, t);
+  return t;
+}
+
+fn Term uop_bufferize_value(Term b) {
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE) return 0;
+  return heap_read(term_val(b) + 0);
+}
+
+fn u32 uop_bufferize_addrspace(Term b) {
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE) return 0;
+  return (u32)term_val(heap_read(term_val(b) + 1));
+}
+
+fn u32 uop_bufferize_removable(Term b) {
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE) return 0;
+  return (u32)term_val(heap_read(term_val(b) + 2));
+}
+
+fn u32 uop_bufferize_n_ranges(Term b) {
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE) return 0;
+  return (u32)term_val(heap_read(term_val(b) + 3));
+}
+
+fn Term uop_bufferize_range_at(Term b, u32 i) {
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE) return 0;
+  u32 n = uop_bufferize_n_ranges(b);
+  if (i >= n) return 0;
+  return heap_read(term_val(b) + 4 + i);
+}

@@ -413,7 +413,30 @@ int             dtype_is_packed   (u32 dt);
                              //   directive carries no scalar (TC, LOCAL).
                              //   The renderer walks UOp shape + OptOp
                              //   annotations to fire specialised templates.
-#define UOP_COUNT       40
+// === Unified rangeify boundary (mirrors tinygrad's Ops.BUFFERIZE) ===
+// Heap layout: [value, NUM(addrspace), NUM(removable), NUM(n_ranges),
+//               range_0, ..., range_{n_ranges-1}].
+//   value         : the producer Term whose output this buffer holds.
+//                   In tinygrad src=(new_src,)+closed_ranges; we mirror by
+//                   storing the value at slot 0 and the closed ranges
+//                   following the (addrspace, removable, n_ranges) header.
+//   addrspace     : UOP_SCOPE_GLOBAL / LOCAL / REG (mirrors
+//                   BufferizeOpts.addrspace in tinygrad/schedule/indexing.py).
+//   removable     : 1 if a downstream pass may collapse this boundary into
+//                   its single consumer (mirrors BufferizeOpts.removable).
+//                   0 forces it to materialize (e.g. CONTIGUOUS / COPY src).
+//   n_ranges      : number of "closed" range Terms that follow.
+//   range_i       : the UOP_RANGE leaves that index this buffer; their
+//                   extents are the buffer's shape.  Mirrors tinygrad's
+//                   `(new_src,)+closed_ranges` src tuple at
+//                   tinygrad/schedule/indexing.py:77.
+//
+// pm_apply_rangeify in tinygrad emits BUFFERIZE at every realize boundary
+// the run_rangeify walk decided; Phase 4a-pre wires the unified pass on
+// the thvm side to do the same on the main heap (rather than the
+// RU_SUBST side-table the Phase 2 land used).
+#define UOP_BUFFERIZE   40
+#define UOP_COUNT       41
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2533,6 +2556,21 @@ fn Term uop_index_e  (Term buffer, Term addr);
 fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
+
+// === Phase 4a-pre (ideal_pipeline_v2): UOP_BUFFERIZE main-heap allocator ===
+// 1-to-1 port of tinygrad/schedule/indexing.py:77 (`UOp(Ops.BUFFERIZE,
+// s.dtype, src=(new_src,)+closed_ranges, arg=opts)`).  Hash-cons via
+// uop_mov_cache like the rest of the UOp layer.  addrspace uses
+// UOP_SCOPE_GLOBAL / LOCAL / REG; removable mirrors
+// BufferizeOpts.removable.  Accessors return 0 / zero-init on tag
+// mismatch (caller validates).
+fn Term uop_bufferize_new(Term value, u32 addrspace, u32 removable,
+                          u32 n_ranges, Term const *ranges);
+fn Term uop_bufferize_value     (Term b);
+fn u32  uop_bufferize_addrspace (Term b);
+fn u32  uop_bufferize_removable (Term b);
+fn u32  uop_bufferize_n_ranges  (Term b);
+fn Term uop_bufferize_range_at  (Term b, u32 i);
 
 // === Phase 1c (ideal_pipeline_v2): movement-op range swizzlers ===
 // 1-to-1 port of tinygrad/schedule/indexing.py:apply_movement_op (line 129)

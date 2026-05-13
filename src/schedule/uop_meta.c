@@ -25,6 +25,13 @@ fn u8 uop_arity(u8 op) {
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
     case UOP_REDUCE:  case UOP_LOAD:
     case UOP_CAST:    case UOP_BITCAST:
+    // UOP_BUFFERIZE heap: [value, NUM(addrspace), NUM(removable),
+    // NUM(n_ranges), range_0, ...].  Only slot 0 (value) is a
+    // recursable producer Term -- the trailing UOP_RANGE leaves are
+    // themselves arity-0 atoms that hash-cons separately.  Variable
+    // payload mirrors RESHAPE/EXPAND's [src, NUM(ndim), NUM(d0)...]
+    // convention (arity=1 even though the heap holds more slots).
+    case UOP_BUFFERIZE:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:
@@ -190,6 +197,13 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
       || op == UOP_CAST || op == UOP_BITCAST) {
     return term_shape_in(heap_read(loc), 0, out);
   }
+  // UOP_BUFFERIZE is a realize-boundary marker; its shape == value.shape.
+  // Mirror tinygrad/schedule/indexing.py:77 -- the BUFFERIZE wraps the
+  // producer Term and inherits its dtype/shape; the closed_ranges trailing
+  // the value are the buffer's index leaves, not shape mutators.
+  if (op == UOP_BUFFERIZE) {
+    return term_shape_in(heap_read(loc), 0, out);
+  }
   if (uop_is_binary_elementwise(op)) {
     Shape la, lb; int la_ok = term_shape_in(heap_read(loc + 0), 0, &la);
     int lb_ok = term_shape_in(heap_read(loc + 1), 0, &lb);
@@ -284,7 +298,8 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
     if (uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
         || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
         || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP
-        || op == UOP_REDUCE  || op == UOP_LOAD    || op == UOP_ASSIGN) {
+        || op == UOP_REDUCE  || op == UOP_LOAD    || op == UOP_ASSIGN
+        || op == UOP_BUFFERIZE) {
       Term src0 = heap_read(loc);
       return term_dtype_in(src0, env_id, out);
     }
