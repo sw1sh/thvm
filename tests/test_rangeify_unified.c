@@ -35,11 +35,10 @@ static u32 alloc_f32_tensor2(u32 d0, u32 d1) {
 int main(void) {
   thvm_init();
 
-  // (a) Gate-off default. Without the env var, rangeify_unified_enabled
-  // returns 0 and consumers do not invoke run_rangeify_unified.
-  TEST_BEGIN("unified-rangeify/gate-default-off");
+  // (a) Phase 3 cutover: default ON. Set =0 to opt out.
+  TEST_BEGIN("unified-rangeify/gate-default-on");
   unsetenv("THVM_UNIFIED_RANGEIFY");
-  CHECK_EQ(rangeify_unified_enabled(), 0);
+  CHECK_EQ(rangeify_unified_enabled(), 1);
   setenv("THVM_UNIFIED_RANGEIFY", "0", 1);
   CHECK_EQ(rangeify_unified_enabled(), 0);
   setenv("THVM_UNIFIED_RANGEIFY", "1", 1);

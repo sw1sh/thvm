@@ -107,9 +107,12 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
 }
 
 // === Env-gate. Mirrors the THVM_* env-pattern used elsewhere. ===
+// Phase 3 (ideal_pipeline_v2): flipped default to 1 (unified path).
+// Set THVM_UNIFIED_RANGEIFY=0 to opt back into the OLD named-rule pipeline.
 fn int rangeify_unified_enabled(void) {
   char const *e = getenv("THVM_UNIFIED_RANGEIFY");
-  return e != NULL && e[0] == '1';
+  if (e == NULL) return 1;      // default ON (Phase 3 cutover)
+  return e[0] != '0';
 }
 
 // === Mirror source: tinygrad/uop/ops.py:resolve  ===
