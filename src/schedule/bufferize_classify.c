@@ -1825,10 +1825,42 @@ fn void bufferize_classify(Term root) {
         // boundaries (mirrors tinygrad's matmul-protect).  Other REDUCEs
         // fuse inline via the unified pass's REDUCE-via-RANGE expansion
         // + render_uop's _accN accumulator hoist.
-        if (bufferize_uop_is_matmul(info->loc)) {
+        //
+        // Conservative exception: when the REDUCE's src is itself a
+        // UOP_REDUCE (nested same-kind chain like maxpool 2x2 =
+        // REDUCE(REDUCE(x, MAX, ax_row), MAX, ax_col)), the inner reduce
+        // body references the outer's iter axis in its INDEX expression
+        // after pm_apply_rangeify rewrites BUFFERIZE.value.  render_uop's
+        // flat `_accN` emission doesn't track inter-reduce iter
+        // dependencies, so a chained inner+outer fuse produces wrong
+        // values (e.g. _acc3's body references undefined a4).  Keep
+        // the inner REDUCE as a boundary so it emits as its own kernel.
+        int keep_for_matmul = bufferize_uop_is_matmul(info->loc);
+        int keep_for_chain = 0;
+        if (direct && !keep_for_matmul) {
+          // Descend through movement ops (RESHAPE/PERMUTE/EXPAND/PAD/
+          // SHRINK/FLIP) and casts to find a nested UOP_REDUCE in the
+          // src subtree.  Any chain whose body's reduce-iter axes
+          // appear in the outer reduce's body needs separate kernels.
+          Term cur = term_resolve(heap_read(info->loc));
+          for (u32 hops = 0; hops < 8; hops++) {
+            if (term_tag(cur) != TAG_UOP) break;
+            u8 cop = term_ext(cur);
+            if (cop == UOP_REDUCE) { keep_for_chain = 1; break; }
+            if (cop == UOP_RESHAPE || cop == UOP_PERMUTE
+             || cop == UOP_EXPAND  || cop == UOP_PAD
+             || cop == UOP_SHRINK  || cop == UOP_FLIP
+             || cop == UOP_CAST    || cop == UOP_BITCAST) {
+              cur = term_resolve(heap_read(term_val(cur)));
+              continue;
+            }
+            break;
+          }
+        }
+        if (keep_for_matmul) {
           bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
-        } else if (!direct) {
+        } else if (!direct || keep_for_chain) {
           bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
         }
       }
