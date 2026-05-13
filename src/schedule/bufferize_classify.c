@@ -1838,25 +1838,47 @@ fn void bufferize_classify(Term root) {
         int keep_for_matmul = bufferize_uop_is_matmul(info->loc);
         int keep_for_chain = 0;
         if (direct && !keep_for_matmul) {
-          // When this REDUCE has another REDUCE as a CONSUMER (chained
-          // pattern like maxpool's REDUCE(REDUCE(x))), keep THIS REDUCE
-          // as a boundary so the outer kernel reads from this one's
-          // buffer instead of inlining its iter axis -- which would
-          // hit render_uop's flat _accN emission bug for inter-reduce
-          // iter dependencies.  Uses the cmap built in Phase 1a.
-          u64 consumer_locs[16];
-          u32 n_cons = bufferize_consumers_for_loc(info->loc, consumer_locs, 16);
-          for (u32 ci = 0; ci < n_cons && ci < 16; ci++) {
-            // consumer_locs are u64 heap locs; the consumer's Term op is
-            // term_ext of whatever the parent stored.  Look it up via
-            // BUFFERIZE_NODES for op.
-            u32 c_idx = bufferize_info_find(consumer_locs[ci]);
-            if (c_idx == 0xFFFFFFFFu) continue;
-            if (BUFFERIZE_NODES[c_idx].op == UOP_REDUCE) {
-              keep_for_chain = 1;
-              break;
+          // When this REDUCE has another REDUCE as a TRANSITIVE
+          // CONSUMER (chained pattern like maxpool's REDUCE(REDUCE(x))
+          // or CE's REDUCE -> exp/log/sub -> REDUCE), keep THIS REDUCE
+          // as a boundary so the downstream kernel reads from this
+          // one's buffer instead of inlining its iter axis -- which
+          // would hit render_uop's flat _accN emission bug for
+          // inter-reduce iter dependencies.  BFS over consumers up to
+          // 64 nodes; stop traversing through other UOP_REDUCE
+          // consumers (their iter scope is separate; we only want to
+          // know "is there ANY downstream REDUCE in the kernel that
+          // shares this kernel's iter scope").
+          #define CHAIN_VISIT_CAP 1024
+          static u32 visited_buf[CHAIN_VISIT_CAP];
+          static u32 queue_buf[CHAIN_VISIT_CAP];
+          u32 n_vis = 0;
+          u32 q_len = 0;
+          u32 self_idx = (u32)i;
+          queue_buf[q_len++] = self_idx;
+          visited_buf[n_vis++] = self_idx;
+          for (u32 qi = 0; qi < q_len && qi < CHAIN_VISIT_CAP; qi++) {
+            u32 cur_idx = queue_buf[qi];
+            u64 cur_loc = BUFFERIZE_NODES[cur_idx].loc;
+            u64 cons[64];
+            u32 n_cons = bufferize_consumers_for_loc(cur_loc, cons, 64);
+            for (u32 ci = 0; ci < n_cons && ci < 64; ci++) {
+              u32 c_idx = bufferize_info_find(cons[ci]);
+              if (c_idx == 0xFFFFFFFFu) continue;
+              if (c_idx == self_idx) continue;
+              if (BUFFERIZE_NODES[c_idx].op == UOP_REDUCE) {
+                keep_for_chain = 1;
+                break;
+              }
+              int seen = 0;
+              for (u32 v = 0; v < n_vis; v++) if (visited_buf[v] == c_idx) { seen = 1; break; }
+              if (seen) continue;
+              if (n_vis < CHAIN_VISIT_CAP) visited_buf[n_vis++] = c_idx;
+              if (q_len < CHAIN_VISIT_CAP) queue_buf[q_len++] = c_idx;
             }
+            if (keep_for_chain) break;
           }
+          #undef CHAIN_VISIT_CAP
         }
         if (keep_for_matmul) {
           bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
