@@ -86,6 +86,22 @@ static RuEndingRanges  RU_ENDING_RANGES[RU_MAX_NODES];
 static RuReduceRanges  RU_REDUCE_RANGES[RU_MAX_NODES];
 static u32             RU_RANGE_IDX_COUNTER;  // monotonic axis_id source
 
+// Reverse-topological order (consumers before producers).  Mirror
+// source: tinygrad/uop/ops.py:consumer_map_from_toposort +
+// `reversed(tsink.toposort(gate_kernel_sink))` at
+// schedule/indexing.py:161.  bufferize_walk_rec's DFS PRE-order does
+// NOT strictly satisfy this on DAGs with shared subexpressions: a
+// shared producer reachable via the LAST-visited consumer path lands
+// in BUFFERIZE_NODES AFTER that consumer.  This caused softmax /
+// attention regressions because EXP's consumer-divergence wasn't
+// observable until ALL its consumers' range_maps were filled (see
+// nn.wlt softmax-* tests under THVM_RANGEIFY_DIRECT=1 with the MULTI
+// seed dropped).  We compute a proper Kahn's-algorithm order on
+// BUFFERIZE_NODES below.
+static u32             RU_TOPO_ORDER[RU_MAX_NODES];
+static u32             RU_TOPO_ORDER_LEN;
+static u32             RU_TOPO_REMAINING[RU_MAX_NODES];  // unprocessed-consumer counter
+
 // Stats / introspection accessors for the new test.
 static u32 RU_LAST_NODES_WALKED;
 static u32 RU_LAST_NEW_REALIZES;       // realize decisions made by THIS pass
@@ -390,13 +406,98 @@ static int ru_apply_movement(u64 loc, u8 op,
   return 0;
 }
 
+// Mirror source: tinygrad/uop/ops.py:consumer_map_from_toposort.
+// Builds RU_TOPO_ORDER[] such that for every (consumer, producer)
+// edge, consumer's index in the array is strictly less than
+// producer's.  Equivalent to tinygrad's
+// `reversed(tsink.toposort(gate_kernel_sink))` at
+// schedule/indexing.py:161.
+//
+// Implementation: Kahn's algorithm over BUFFERIZE_NODES seen as a
+// DAG with one edge per (node -> source) pair.  In-degree = number of
+// CONSUMERS of the node within BUFFERIZE_NODES (= consumer_count
+// minus consumers outside the node table; in practice that's 0 since
+// bufferize_walk_rec adds every reachable UOp).  We seed the worklist
+// with consumer_count == 0 nodes (the SINK -- typically a single root,
+// possibly multiple roots if bufferize_classify was called with a
+// nested SINK).  Each dequeue decrements the in-degree of all UOP
+// producers reachable via heap[loc + arity] slots; producers whose
+// counter hits 0 are enqueued.
+//
+// Falls back to forward BUFFERIZE_NODES order if Kahn's leaves nodes
+// unvisited (cycle / inconsistent consumer_count) -- this matches the
+// pre-fix behaviour and keeps tests green even on pathological
+// graphs.
+static void ru_compute_topo_order(void) {
+  RU_TOPO_ORDER_LEN = 0;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    RU_TOPO_REMAINING[i] = BUFFERIZE_NODES[i].consumer_count;
+  }
+  // Seed worklist with nodes that have no consumers in BUFFERIZE_NODES
+  // (the SINK / root).  Push them onto the order array directly --
+  // RU_TOPO_ORDER doubles as worklist; new entries appended at the
+  // tail are processed in FIFO order.
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (RU_TOPO_REMAINING[i] == 0) {
+      RU_TOPO_ORDER[RU_TOPO_ORDER_LEN++] = i;
+    }
+  }
+  u32 head = 0;
+  while (head < RU_TOPO_ORDER_LEN) {
+    u32 idx  = RU_TOPO_ORDER[head++];
+    UOpInfo const *info = &BUFFERIZE_NODES[idx];
+    u8 ar = uop_arity(info->op);
+    u64 seen[MAX_UOP_SRC] = {0};
+    u8  n_seen = 0;
+    for (u8 c = 0; c < ar; c++) {
+      Term child = term_resolve(heap_read(info->loc + c));
+      if (term_tag(child) != TAG_UOP) continue;
+      if (term_ext(child) == UOP_KERNEL) continue;
+      u64 cloc = term_val(child);
+      u8 dup = 0;
+      for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+      if (dup) continue;
+      seen[n_seen++] = cloc;
+      u32 cidx = bufferize_info_find(cloc);
+      if (cidx == 0xFFFFFFFFu) continue;
+      if (RU_TOPO_REMAINING[cidx] == 0) continue;     // already enqueued
+      RU_TOPO_REMAINING[cidx]--;
+      if (RU_TOPO_REMAINING[cidx] == 0) {
+        RU_TOPO_ORDER[RU_TOPO_ORDER_LEN++] = cidx;
+      }
+    }
+  }
+  // Fallback: append any nodes that didn't reach in-degree 0 (broken
+  // consumer_count / cycle).  Preserves the previous "iterate every
+  // node" invariant even if Kahn's was incomplete.
+  if (RU_TOPO_ORDER_LEN < BUFFERIZE_NODES_LEN) {
+    u8 *enqueued = (u8 *)calloc(BUFFERIZE_NODES_LEN, 1);
+    if (enqueued != NULL) {
+      for (u32 k = 0; k < RU_TOPO_ORDER_LEN; k++) {
+        enqueued[RU_TOPO_ORDER[k]] = 1;
+      }
+      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+        if (!enqueued[i]) {
+          RU_TOPO_ORDER[RU_TOPO_ORDER_LEN++] = i;
+        }
+      }
+      free(enqueued);
+    }
+  }
+}
+
+// Accessor for testing.
+fn u32 rangeify_unified_topo_order_len(void) { return RU_TOPO_ORDER_LEN; }
+fn u32 rangeify_unified_topo_order_at(u32 i) {
+  if (i >= RU_TOPO_ORDER_LEN) return 0xFFFFFFFFu;
+  return RU_TOPO_ORDER[i];
+}
+
 // === Mirror source: indexing.py:148-269 run_rangeify ===
 //
-// Reverse-topo walk over BUFFERIZE_NODES. Since BUFFERIZE_NODES is
-// populated post-order by bufferize_walk_rec (children before parents),
-// iterating it in REVERSE is equivalent to tinygrad's
-// `reversed(tsink.toposort(gate_kernel_sink))`. Parents (consumers)
-// come first; children (producers) follow.
+// Reverse-topo walk over BUFFERIZE_NODES via RU_TOPO_ORDER (Kahn's,
+// consumers strictly before producers).  Mirrors tinygrad's
+// `reversed(tsink.toposort(gate_kernel_sink))`.
 //
 // Pre-condition: caller must have run bufferize_classify(root) first;
 // this fills BUFFERIZE_NODES + CMAP_LL + the existing realized-bit.
@@ -436,30 +537,50 @@ fn void run_rangeify_unified(Term root) {
   u32 root_node = bufferize_info_find(term_val(root));
   if (root_node == 0xFFFFFFFFu) return;
 
-  // *** Mirror indexing.py:152-153 (generate realize map) ***
-  // The OLD path's bufferize_classify already produces a realize set
-  // (root + multi-consumer + REDUCE + matmul-protect). Mirror that
-  // here by seeding RU_REALIZE_MAP from the existing UOpInfo.realized
-  // bit -- this is the closest analog to running pm_generate_realize_map
-  // without re-implementing the whole rewrite. Tinygrad's pm_generate_realize_map
-  // realizes COPY/CONTIGUOUS/STORE + srcs of COPY/MSELECT/MSTACK; thvm
-  // doesn't have those opcodes today, so the seed equals BUFFERIZE_NODES.realized.
+  // *** Mirror indexing.py:28-35 (pm_generate_realize_map) ***
+  // tinygrad seeds realize_map only for COPY/CONTIGUOUS/STORE
+  // (indexing.py:30) and srcs of COPY/MSELECT/MSTACK (indexing.py:32).
+  // None of those opcodes exist in thvm today; the closest analog is
+  // BUFFERIZE_REASON_ROOT (the explicit TRealize entry-point), plus
+  // BUFFERIZE_REASON_REDUCE / BUFFERIZE_REASON_MATMUL which the
+  // materialize.c emit walker still requires as kernel boundaries
+  // until REDUCE-via-RANGE lowering is wired end-to-end.
+  //
+  // CRITICAL: We do NOT seed from BUFFERIZE_REASON_MULTI here.  The
+  // OLD path's multi-consumer rule pre-marks every node with
+  // consumer_count >= 2 as realized; tinygrad's run_rangeify decides
+  // multi-consumer realize NATIVELY via consumer-divergence
+  // (indexing.py:196-220): when 2+ consumers thread the SAME range
+  // expression, no realize; only DIVERGENT range expressions force a
+  // partial-realize on the diverging axes.  Seeding from
+  // BUFFERIZE_NODES.realized for MULTI-only marks short-circuits this
+  // logic and over-realizes by ~250 nodes on probe_w2_bs3 (542 vs
+  // <100 tinygrad parity).  Mirror source: indexing.py:28-35 (seeds)
+  // + indexing.py:196-220 (consumer-divergence decision).
+  u32 const seed_reasons = BUFFERIZE_REASON_ROOT
+                         | BUFFERIZE_REASON_REDUCE
+                         | BUFFERIZE_REASON_MATMUL
+                         | BUFFERIZE_REASON_FANIN_CAP;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    if (BUFFERIZE_NODES[i].realized) {
+    if (BUFFERIZE_NODES[i].realized
+        && (BUFFERIZE_NODES[i].reasons & seed_reasons)) {
       RU_REALIZE_MAP[i].realized_full = 1;
       RU_REALIZE_MAP[i].n_realized_axes = MAX_DIM;  // placeholder; filled when shape is known
     }
   }
 
   // *** Mirror indexing.py:161 (reverse-topo walk) ***
-  // BUFFERIZE_NODES is populated by bufferize_walk_rec in DFS PRE-order:
-  // parents are appended before recursing into children. So iterating
-  // FORWARD (idx 0 = root, last = deepest leaf) is consumers-before-
-  // producers, which mirrors tinygrad's `reversed(tsink.toposort())`.
-  // (Tinygrad's toposort returns producers-first; `reversed` flips to
-  // consumers-first; our DFS pre-order already gives consumers-first.)
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    u32 node_idx = i;
+  // bufferize_walk_rec's PRE-order does NOT strictly satisfy
+  // "consumers-before-producers" on DAGs with shared subexpressions
+  // (e.g. softmax's EXP node is reached via MUL first, but its
+  // REDUCE_SUM consumer is appended later via the RECIP path).  We
+  // compute a true reverse-topological order via Kahn's algorithm and
+  // iterate it here.  Mirror: tinygrad/uop/ops.py
+  // :consumer_map_from_toposort, used at
+  // schedule/indexing.py:157 (`consumer_map = ...`).
+  ru_compute_topo_order();
+  for (u32 oi = 0; oi < RU_TOPO_ORDER_LEN; oi++) {
+    u32 node_idx = RU_TOPO_ORDER[oi];
     UOpInfo *info = &BUFFERIZE_NODES[node_idx];
     if (ru_is_skip_op(info->op)) continue;
     RU_LAST_NODES_WALKED++;
@@ -826,11 +947,11 @@ fn void pm_apply_rangeify(Term root) {
   RU_LAST_BUFFERIZES_EMITTED = 0;
 
   // Walk nodes bottom-up (children-first) so each consumer sees its
-  // producers' substitutes. BUFFERIZE_NODES is DFS PRE-order
-  // (parents first), so we iterate REVERSE here -- the opposite of
-  // run_rangeify_unified's consumer-first walk.
-  for (i64 ii = (i64)BUFFERIZE_NODES_LEN - 1; ii >= 0; ii--) {
-    u32 i = (u32)ii;
+  // producers' substitutes.  RU_TOPO_ORDER is consumer-first
+  // (computed by ru_compute_topo_order at run_rangeify_unified entry);
+  // reversing it gives producer-first / children-before-parents.
+  for (i64 oi = (i64)RU_TOPO_ORDER_LEN - 1; oi >= 0; oi--) {
+    u32 i = RU_TOPO_ORDER[oi];
     UOpInfo const *info = &BUFFERIZE_NODES[i];
     if (ru_is_skip_op(info->op)) continue;
     RuRangeMap const *rm = &RU_RANGE_MAP[i];
