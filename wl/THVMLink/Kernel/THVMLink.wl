@@ -1066,6 +1066,7 @@ TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]   (* heapWith coerces bare-In
 
 TSup[a_, b_]                          := TSup[TFreshLabel[], a, b]
 TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]   (* heapWith coerces bare-Integer children *)
+TSup[xs_List]                         := Fold[TSup, xs]
 
 (* Dynamic-label SUP / DUP (HVM4 DSU / DDU).  The label is a Term
    that wnf reduces strict-left before dispatching the matching

@@ -679,7 +679,7 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
                     packTerm[0, TTermTag[cell], TTermExt[cell],
                              TTermVal[cell]],
                     d - 1],
-                Subscript["x", val]],
+                "x"],
         $TagDP0 | $TagDP1,
             (* Pre-resolution: render the body with a 0/1 superscript
                so DP0 and DP1 of the same body are visually distinct
@@ -725,7 +725,7 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
                `val` / `body`. Use Row[\[Lambda] x_loc. body] form, which
                renders nicely in TraditionalForm without bogus binders. *)
             With[{v = val, b = body},
-                Row[{"\[Lambda]", Subscript["x", v], ". ", b}]],
+                Row[{"\[Lambda]", "x", ". ", b}]],
         $TagUOP,
             (* Inactive is HoldAll, so we have to build the head Symbol
                BEFORE Inactive wraps -- otherwise the Symbol[...]
@@ -747,9 +747,9 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
                 Subscript[OverHat[b], s]],
         $TagCTR,
             (* CTR -- constructor.  heap[base] = NUM(arity), rest is
-               children.  Render as C^tag[child1, ..., childN]. *)
+               children.  Render as C[child1, ..., childN]. *)
             With[{n = TTermVal[THeapRead[val]]},
-                Subscript["C", ext] @@
+                "C" @@
                     Table[tTermTradDepth[THeapRead[val + 1 + i], d - 1],
                           {i, 0, n - 1}]],
         $TagMAT,
