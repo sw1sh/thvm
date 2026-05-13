@@ -1965,7 +1965,8 @@ fn void bufferize_classify(Term root) {
       // Under DIRECT=1 the unified pass's consumer-divergence already
       // encodes most named rules' effects.  inline-softmax-broadcast-
       // reduce stays as the one keep -- the unified pass doesn't yet
-      // sharpen the softmax max -> exp -> sum fusion into 2 kernels.
+      // sharpen the softmax max -> exp -> sum fusion into 2 kernels
+      // (fusion_count test 1/8 regresses without this).
       RealizeRewriteRule direct_rules[] = {
         {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
       };

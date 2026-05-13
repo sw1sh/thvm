@@ -122,16 +122,24 @@ Phase 4a-pre lands the new contract:
   blocked on Phase 4a (REDUCE seed drop) + Phase 4d (materialize.c
   walks lowered DAG directly, not projected `.realized` bits).
 
-### Phase 4: Delete the OLD path
+### Phase 4: Delete the OLD path — DIRECT default ON, all suites green (2026-05-14)
 
-Goal: remove the dead code that the unified pass replaced. Each commit is a single targeted deletion; reverting any one of them brings back working old-path code (gated behind THVM_UNIFIED_RANGEIFY=0).
+Goal: remove the dead code that the unified pass replaced. Done iteratively: scaffolding behind the `THVM_RANGEIFY_DIRECT` env gate which is now default ON (commit `7ba967b8`). Legacy path stays reachable via `THVM_RANGEIFY_DIRECT=0` until 4b/4c/4d/4e land.
 
-- 4a. Delete `bufferize_classify`'s 11 named rules (`inline-constants`, `inline-adjacent-reduce-chains`, ..., `metal-tile-fanin-cap`). The boundary-decision side-table flag stays; only the rule-based mutations go.
+Status under default (`THVM_RANGEIFY_DIRECT=1`):
+
+- **4a. Named removal rules**: 9 of 10 disabled (commits `3ceced8b` + `f5eefed0`). `inline-softmax-broadcast-reduce` stays - confirmed empirically that dropping it regresses `fusion_count.wlt` (8/8 → 7/8), so unified pass still doesn't sharpen softmax max→exp→sum fusion. Phase 5c follow-up: port the corresponding tinygrad sharpening from the softmax pattern matcher.
+- **4d-final. REDUCE seed drop**: matmul-only (commit `7896878f`); other REDUCEs fuse inline via the unified pass + render_uop's `_accN` accumulator hoist.
+- **REDUCE chain-guard**: disabled - always-keep non-matmul REDUCE as a boundary (commit `eec25fb1`). The cmap-based chain-guard missed inter-reduce iter dependencies in probe_w2's larger backward graph, regressing W2 grad to 0. Always-keep trades ~13% kernel-count reduction (549 vs 477) for correctness. The real fix path is render_uop's nested-reduce-iter handler.
+- **DIRECT default flipped** to ON (commit `7ba967b8`). All 8 standard suites green: nn 55/55, grad 62/62, bn_grad 3/3, conv_im2col 6/6, fusion_count 8/8, grad_edge 11/11, core 39/39, assign 6/6. probe_w2_bs3 produces correct grad (absmean 0.329054).
+
+Remaining 4b/4c/4d/4e/4f deletions are now unblocked but require multi-file C surgery across the scheduler + backends:
+
 - 4b. Delete `KernelEntry.program[]` / KProgOp / `kernel_program_cache.c` / `uop_to_scalar.c`. Backends already consume `compute_root` post-F0 (`render_uop.c:1099`).
 - 4c. Delete `KernelEntry.scalar_uops` / ScalarUop arena / S_* opcodes. The unified pass produces the lowered UOp DAG directly; no separate scalar arena needed.
 - 4d. Delete `kernel_lift.c` standalone lifting. The unified pass produces the lowered form during boundary decision; there's nothing to lift after.
 - 4e. Delete the standalone tile representation: `tile_anno.c`'s KOpt struct, `apply_opt.c`'s KernelAxes mutation path, `propose.c`'s reads from the side struct. The tile.c IR concepts MOVE — to first-class UOp ops in the unified DAG (`UOP_MULTI`, `UOP_MSELECT`, `UOP_MSTACK`, `UOP_DEVICE_NUM`, `UOP_ALLREDUCE`) per tinygrad's MULTI direction and tilelang's Fragment correspondence. The matmul/conv/reduce template recognizers move to UPatRule (already planned in v1 Phase E) consulting the unified DAG.
-- 4f. Delete `THVM_UNIFIED_RANGEIFY` env gate. Plain code.
+- 4f. Delete `THVM_UNIFIED_RANGEIFY` + `THVM_RANGEIFY_DIRECT` env gates. Plain code.
 
 ### Phase 5: Move misplaced concerns to their proper layer
 
