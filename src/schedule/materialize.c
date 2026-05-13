@@ -2375,6 +2375,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
   ke->output_shape  = out_shape;
   ke->output_numel  = TENS[out_tid].view.numel;
   ke->source_uop    = root_term;
+  // Phase 4d-2: attach the unified-pass UOP_BUFFERIZE Term so
+  // downstream consumers (kernel_lift, gc) can route through it.
+  // Mirror: tinygrad/schedule/indexing.py:77 emits one
+  // `UOp(Ops.BUFFERIZE, ...)` per realize boundary; the consumer side
+  // reads it as the boundary handle.  topo_sort_buffers_unified
+  // captured this in BOUNDARY_BUFFERIZE_TERM[bi] (0 in OLD-path mode).
+  ke->compute_bufferize = BOUNDARY_BUFFERIZE_TERM[bi];
   TENS[out_tid].producer_kid = kid;
 
   // Multi-output kernel splice (Step 6 of multi-output groundwork).

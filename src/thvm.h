@@ -1277,6 +1277,22 @@ typedef struct KernelEntry {
   // it directly instead of re-running kernel_lift_to_uop.
   Term      compute_root;
 
+  // Phase 4d-2 (ideal_pipeline_v2): the UOP_BUFFERIZE Term the unified
+  // rangeify pass (src/schedule/rangeify_unified.c) emitted at this
+  // boundary, captured by topo_sort_buffers_unified into
+  // BOUNDARY_BUFFERIZE_TERM[] and copied here by
+  // emit_kernel_for_boundary.  0 when the OLD path runs
+  // (rangeify_unified_enabled() == 0) or when the unified pass did not
+  // emit a UOP_BUFFERIZE for this boundary (e.g. boundaries seeded by
+  // bufferize_classify's named rules AFTER pm_apply_rangeify ran).
+  //
+  // Mirror: tinygrad's `UOp(Ops.BUFFERIZE, s.dtype, src=(value,)+
+  // closed_ranges, arg=opts)` from tinygrad/schedule/indexing.py:77.
+  // uop_bufferize_value(compute_bufferize) yields the same Term as
+  // source_uop in the unified path.  Heap-resident; walked by
+  // gc_evacuate_side_tables across collections.
+  Term      compute_bufferize;
+
   // Phase C slice 2: cached output of kernel_lift_to_uop, populated
   // by emit_kernel_for_boundary alongside compute_root.  When the
   // lift declines, cached_lift.store_root stays 0 (matches the
