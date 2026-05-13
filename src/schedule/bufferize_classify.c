@@ -151,6 +151,35 @@ static void bufferize_node_unmark(UOpInfo *info, u32 reason) {
   bufferize_unrealize(info->loc);
 }
 
+// Find the first UOP node reachable from a Term, descending through any
+// chain of TAG_DP0/TAG_DP1 cells (cell[0]/cell[1] slots).  Returns 0 if
+// no UOP is found within bound or a cycle is hit.  Used so cmap can
+// connect a UOP-child's location across grad-projection cells (TGrad's
+// reverse-mode chain bridges REDUCE -> DP1+GRAD -> ... -> REDUCE; without
+// this, the chain-guard's BFS can't trace inter-reduce iter deps in the
+// backward pass).  visited_dls is an array of seen DUP-cell locs to
+// break cycles; cap is its capacity.
+static Term bufferize_unwrap_dp(Term t, u64 *visited_dls, u32 *n_visited,
+                                 u32 cap, u32 bound) {
+  for (u32 hops = 0; hops < bound; hops++) {
+    t = term_resolve(t);
+    u8 tag = term_tag(t);
+    if (tag == TAG_UOP) return t;
+    if (tag != TAG_DP0 && tag != TAG_DP1) return 0;
+    u64 dl = term_val(t);
+    if (dl >= HEAP_NEXT) return 0;
+    int seen = 0;
+    for (u32 v = 0; v < *n_visited; v++) if (visited_dls[v] == dl) { seen = 1; break; }
+    if (seen) return 0;
+    if (*n_visited < cap) visited_dls[(*n_visited)++] = dl;
+    Term inner0 = bufferize_unwrap_dp(heap_read(dl + 0), visited_dls,
+                                       n_visited, cap, bound - hops - 1);
+    if (inner0 != 0) return inner0;
+    t = heap_read(dl + 1);
+  }
+  return 0;
+}
+
 static void bufferize_walk_rec(Term t, u8 *visited) {
   if (term_tag(t) != TAG_UOP) return;
   u8 op = term_ext(t);
@@ -172,8 +201,28 @@ static void bufferize_walk_rec(Term t, u8 *visited) {
     // beta exposes the bound argument's UOP rather than the bare
     // VAR cell -- mirrors visit() in materialize.c so the walker
     // and the kernel walker agree on what's a kernel boundary.
-    Term child = term_resolve(heap_read(loc + i));
-    if (term_tag(child) != TAG_UOP) continue;
+    Term raw = heap_read(loc + i);
+    Term child = term_resolve(raw);
+    u8 ctag = term_tag(child);
+    // When the child is a DP projection (grad-flavored or otherwise),
+    // chase through cell[0]/cell[1] to find the first UOP and add a
+    // cmap edge from THIS node to it.  No bump to consumer_count --
+    // only the cmap edge (the chain-guard's BFS reader) needs to see
+    // the connection; OLD-path MULTI-seed thresholds stay unchanged.
+    if (ctag == TAG_DP0 || ctag == TAG_DP1) {
+      u64 dp_vis[32];
+      u32 dp_n = 0;
+      Term inner = bufferize_unwrap_dp(child, dp_vis, &dp_n, 32, 16);
+      if (inner != 0 && term_tag(inner) == TAG_UOP
+          && term_ext(inner) != UOP_KERNEL) {
+        u64 iloc = term_val(inner);
+        u32 iidx = bufferize_node_get_or_add(iloc, term_ext(inner));
+        if (iidx != 0xFFFFFFFFu) bufferize_cmap_add(iidx, loc);
+        bufferize_walk_rec(inner, visited);
+      }
+      continue;
+    }
+    if (ctag != TAG_UOP) continue;
     if (term_ext(child) == UOP_KERNEL) continue;
     u64 cloc = term_val(child);
     u8 dup = 0;
