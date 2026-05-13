@@ -70,7 +70,7 @@ VerificationTest[
         t = First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]],
         steps, d, sup, op2
     },
-        steps = TMultiTrace[t];
+        steps = TMultiTrace[t, All];
         d     = steps[[2]]["Diagram"];                (* post APP_LAM *)
         sup   = findOne[d, "SUP"];
         op2   = findOne[d, "OP2 +"];
@@ -123,7 +123,7 @@ VerificationTest[
         t = First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]],
         steps, d
     },
-        steps = TMultiTrace[t];
+        steps = TMultiTrace[t, All];
         d     = steps[[4]]["Diagram"];                (* post DUP_SUP_ANN *)
         Length @ findAll[d, "OP2 +"]
     ],
@@ -145,7 +145,7 @@ nodeLabels[d_] := Sort @ Map[
 
 VerificationTest[
     TInit[];
-    Block[{steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]]]},
+    Block[{steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]], All]},
         nodeLabels /@ steps[[All, "Diagram"]]
     ],
     {
@@ -164,7 +164,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Block[{
-        steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]]],
+        steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]], All],
         d, op2, sup
     },
         d   = steps[[2]]["Diagram"];                  (* post APP_LAM *)
@@ -190,7 +190,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Block[{
-        steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]]],
+        steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]], All],
         d, dup, op2s, dupOuts, op2SecondSlotWires
     },
         d    = steps[[3]]["Diagram"];                 (* post OP2_SUP *)

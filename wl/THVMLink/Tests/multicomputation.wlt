@@ -32,10 +32,10 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{dp0, dp1, out, trace},
             {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
-            out = TMultiTrace[TCollapse[dp0]];
+            out = TMultiTrace[dp0, {"Events", "Slice"}];
             trace = Catenate[out[[All, "Events"]]];
             {
-                Sort[TTermVal /@ Last[out]["Term"]],                   (* {4, 5} *)
+                Sort[TTermVal /@ Last[out]["Slice"]],                  (* {4, 5} *)
                 SubsetQ[                                               (* keys present *)
                     Keys[First[trace]],
                     {"id", "rule", "ruleCode", "family", "familyCode",
@@ -47,7 +47,7 @@ If[ ! TMultiTraceQ[],
             }
         ],
         {{4, 5}, True, True, True, True, 0},
-        TestID -> "TMultiTrace[TCollapse[dp0]] -- fresh labels, cross product, SPLIT not MERGE"
+        TestID -> "TMultiTrace[dp0] -- fresh labels, cross product, SPLIT not MERGE"
     ];
 
     (* M1 wire provenance.  Each event carries a "consumed" list of
@@ -61,7 +61,7 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{dp0, dp1, trace, ids, consumers, dag},
             {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
-            trace = Catenate[TMultiTrace[TCollapse[dp0]][[All, "Events"]]];
+            trace = Catenate[TMultiTrace[dp0][[All, "Events"]]];
             ids = trace[[All, "id"]];
             (* (a) every consumed id is a valid event id *)
             consumers = DeleteDuplicates @ Flatten[trace[[All, "consumed"]]];
@@ -86,7 +86,7 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{dp0, dp1, trace, g, edgeRefs},
             {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
-            trace = Catenate[TMultiTrace[TCollapse[dp0]][[All, "Events"]]];
+            trace = Catenate[TMultiTrace[dp0][[All, "Events"]]];
             (* Use unreduced graph: this test checks one-to-one
                correspondence between consumed[] entries and graph
                edges, which only holds before transitive reduction. *)
@@ -119,12 +119,12 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{e0, e1, out0, out1, trace0},
             {e0, e1} = TDup[7, TOp2["+", TSup[7, 1, 2], 3]];
-            out0 = TMultiTrace[TCollapse[e0]];
-            out1 = TMultiTrace[TCollapse[e1]];
+            out0 = TMultiTrace[e0, {"Events", "Slice"}];
+            out1 = TMultiTrace[e1, {"Events", "Slice"}];
             trace0 = Catenate[out0[[All, "Events"]]];
             {
-                TTermVal /@ Last[out0]["Term"],                        (* {4} *)
-                TTermVal /@ Last[out1]["Term"],                        (* {5} *)
+                TTermVal /@ Last[out0]["Slice"],                       (* {4} *)
+                TTermVal /@ Last[out1]["Slice"],                       (* {5} *)
                 Count[trace0, e_ /; e["family"] === "MERGE"] >= 1,
                 Count[trace0, e_ /; e["rule"]   === "DUP_SUP_ANN"] >= 1
             }
@@ -141,15 +141,15 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{a, b, fresh, after, freshFams, afterFams},
             {a, b}   = TDup[TOp2["+", TSup[1, 2], 3]];
-            fresh    = TMultiTrace[TCollapse[a]];
+            fresh    = TMultiTrace[a, {"Events", "Slice"}];
             {a, b}   = TDup[TOp2["+", TSup[1, 2], 3]];      (* a fresh, independent term *)
-            TCollapse[TDup[TOp2["*", TSup[4, 5], 6]][[1]]]; (* an unrelated reduction, untraced *)
-            after    = TMultiTrace[TCollapse[a]];
+            TMultiTrace[TDup[TOp2["*", TSup[4, 5], 6]][[1]]]; (* an unrelated reduction *)
+            after    = TMultiTrace[a, {"Events", "Slice"}];
             freshFams = Catenate[fresh[[All, "Events"]]][[All, "family"]];
             afterFams = Catenate[after[[All, "Events"]]][[All, "family"]];
             {
-                Sort[TTermVal /@ Last[after]["Term"]] ===
-                    Sort[TTermVal /@ Last[fresh]["Term"]],
+                Sort[TTermVal /@ Last[after]["Slice"]] ===
+                    Sort[TTermVal /@ Last[fresh]["Slice"]],
                 Sort[afterFams] === Sort[freshFams]
             }
         ],
@@ -192,7 +192,7 @@ If[ ! TMultiTraceQ[],
                 Length[steps],
                 Total[Length /@ steps[[All, "Events"]]],
                 AllTrue[edges, e |-> First[e] =!= Last[e]],
-                Sort[Last[steps]["SliceCanonical"]] ===
+                Sort[Last[steps]["CanonicalSlice"]] ===
                     Sort[{{"NUM", 4}, {"NUM", 5}}]
             }
         ],
@@ -234,7 +234,7 @@ If[ ! TMultiTraceQ[],
             edges = EdgeList[g];
             {
                 AllTrue[edges, e |-> First[e] =!= Last[e]],
-                Sort[Last[steps]["SliceCanonical"]] ===
+                Sort[Last[steps]["CanonicalSlice"]] ===
                     Sort[{{"NUM", 4}, {"NUM", 5}}]
             }
         ],
@@ -248,8 +248,8 @@ If[ ! TMultiTraceQ[],
     VerificationTest[
         TInit[];
         Block[{out, trace, ann},
-            out = TMultiTrace[TCollapse[
-                First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]]]];
+            out = TMultiTrace[
+                First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]]];
             trace = Catenate[out[[All, "Events"]]];
             ann = SelectFirst[trace, #["rule"] === "DUP_SUP_ANN" &];
             {ann["consumed"], DeleteDuplicates[ann["consumed"]]}
@@ -264,7 +264,7 @@ If[ ! TMultiTraceQ[],
     VerificationTest[
         TInit[];
         Block[{traceForm, stepsForm, traced, stepped},
-            traced  = TMultiTrace[TCollapse[TSup[1, 2] + 3]];
+            traced  = TMultiTrace[TSup[1, 2] + 3];
             traceForm = TCausalGraph[Catenate[traced[[All, "Events"]]]];
             TInit[];
             stepped = TMultiTrace[TSup[1, 2] + 3];
@@ -278,6 +278,37 @@ If[ ! TMultiTraceQ[],
         TestID -> "TCausalGraph accepts either trace or steps; result is the same"
     ];
 
+    (* TCausalGraph and TMultiwayGraph accept a TTerm directly --
+       they run TMultiTrace internally with just the keys their
+       view needs.  Optional max-steps arg caps iteration. *)
+    VerificationTest[
+        TInit[];
+        Block[{direct, viaSteps},
+            direct   = TCausalGraph[TSup[1, 2] + 3];
+            TInit[];
+            viaSteps = TCausalGraph[TMultiTrace[TSup[1, 2] + 3, {"Events"}]];
+            {
+                Head[direct] === Graph,
+                Sort @ EdgeList[direct] === Sort @ EdgeList[viaSteps]
+            }
+        ],
+        {True, True},
+        TestID -> "TCausalGraph[term] runs TMultiTrace internally"
+    ];
+
+    VerificationTest[
+        TInit[];
+        Block[{direct},
+            direct = TMultiwayGraph[TSup[1, 2] + 3];
+            {
+                Head[direct] === Graph,
+                Length @ EdgeList[direct] > 0
+            }
+        ],
+        {True, True},
+        TestID -> "TMultiwayGraph[term] runs TMultiTrace internally"
+    ];
+
     (* TMultiwayGraph requires steps -- a flat trace is missing the
        slice info needed to form WPP-style vertices.  Should fail
        loudly rather than producing a wrong-looking graph. *)
@@ -285,7 +316,7 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{trace},
             trace = Catenate[
-                TMultiTrace[TCollapse[TSup[1, 2] + 3]][[All, "Events"]]];
+                TMultiTrace[TSup[1, 2] + 3][[All, "Events"]]];
             TMultiwayGraph[trace]
         ],
         $Failed,
