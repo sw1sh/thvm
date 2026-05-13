@@ -155,15 +155,39 @@ If[ ! TMultiTraceQ[],
        semantic for the multiway view. *)
     VerificationTest[
         TInit[];
-        Module[{dp0, dp1, body},
-            {dp0, dp1} = TDup[3, TNum[42]];
+        Block[{dp0, dp1, body},
+            {dp0, dp1} = TDup[3, 42];
             body = THVMLink`Private`canonicalForm[dp0];
             {
                 MatchQ[body, {"DP0", 3, {"NUM", 42}}],
                 MatchQ[THVMLink`Private`canonicalForm[dp1], {"DP1", 3, {"NUM", 42}}]
-            }],
+            }
+        ],
         {True, True},
         TestID -> "canonicalForm wraps unresolved DP with projection index + label"
+    ];
+
+    (* === TMultiSteps on `TSup[L, ...] + N` (no enclosing DUP):
+       OP2 commutes over SUP, the introduced inner DUP gets atom-
+       copied, then both branch arithmetics fold.  4 events, 5
+       slice snapshots, no self-loops, final slice = {4, 5}. *)
+    VerificationTest[
+        TInit[];
+        Block[{seed, steps, g, edges},
+            seed = TSup[1, 2] + 3;
+            steps = TMultiSteps[seed];
+            g = TMultiwayGraph[steps];
+            edges = EdgeList[g];
+            {
+                Length[steps],
+                Total[Length /@ steps[[All, "Events"]]],
+                AllTrue[edges, e |-> First[e] =!= Last[e]],
+                Sort[Last[steps]["SliceCanonical"]] ===
+                    Sort[{{"NUM", 4}, {"NUM", 5}}]
+            }
+        ],
+        {5, 4, True, True},
+        TestID -> "TMultiSteps + TMultiwayGraph: TSup[1, 2] + 3 yields {4, 5}, no self-loops"
     ];
 
     (* === TMultiSteps on `First @ TDup[L, TLam[x, x + N][TSup[L, ...]]]`
@@ -172,8 +196,8 @@ If[ ! TMultiTraceQ[],
        the user's "no self-loop after DUP_NUM" requirement. *)
     VerificationTest[
         TInit[];
-        Module[{seed, steps, g, edges},
-            seed = First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]];
+        Block[{seed, steps, g, edges},
+            seed = First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]];
             steps = TMultiSteps[seed];
             g = TMultiwayGraph[steps];
             edges = EdgeList[g];
@@ -182,7 +206,8 @@ If[ ! TMultiTraceQ[],
                 Total[Length /@ steps[[All, "Events"]]],
                 AllTrue[edges, e |-> First[e] =!= Last[e]],
                 Length[edges]
-            }],
+            }
+        ],
         {6, 5, True, 5},
         TestID -> "TMultiSteps + TMultiwayGraph: no self-loops on First@TDup[0, lam[sup[0,...]]]"
     ];
@@ -192,16 +217,17 @@ If[ ! TMultiTraceQ[],
        multiway view structure for the canonical fan-out case. *)
     VerificationTest[
         TInit[];
-        Module[{seed, steps, g, edges, finalSlice},
-            seed = First @ TDup[3, TLam[x, x + TNum[3]][TSup[7, 1, 2]]];
+        Block[{seed, steps, g, edges},
+            seed = First @ TDup[3, TLam[x, x + 3][TSup[7, 1, 2]]];
             steps = TMultiSteps[seed];
             g = TMultiwayGraph[steps];
             edges = EdgeList[g];
-            finalSlice = Last[steps]["SliceCanonical"];
             {
                 AllTrue[edges, e |-> First[e] =!= Last[e]],
-                Sort[finalSlice] === Sort[{{"NUM", 4}, {"NUM", 5}}]
-            }],
+                Sort[Last[steps]["SliceCanonical"]] ===
+                    Sort[{{"NUM", 4}, {"NUM", 5}}]
+            }
+        ],
         {True, True},
         TestID -> "TMultiSteps + TMultiwayGraph: distinct-label DUP-SUP-COM yields {4, 5}"
     ];
@@ -211,11 +237,12 @@ If[ ! TMultiTraceQ[],
        causal graph should record one edge per producer, not two. *)
     VerificationTest[
         TInit[];
-        Module[{out, ann},
+        Block[{out, ann},
             out = TMultiTrace[TCollapse[
-                First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]]]];
+                First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]]]];
             ann = SelectFirst[out["Trace"], #["rule"] === "DUP_SUP_ANN" &];
-            {ann["consumed"], DeleteDuplicates[ann["consumed"]]}],
+            {ann["consumed"], DeleteDuplicates[ann["consumed"]]}
+        ],
         {{1}, {1}},
         TestID -> "DUP_SUP_ANN event consumed list is deduplicated"
     ];
