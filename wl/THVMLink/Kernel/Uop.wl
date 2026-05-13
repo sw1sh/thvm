@@ -113,13 +113,14 @@ uopShapeOfFor[$UopReduce, base_] := dropAxis[
     TTermVal[THeapRead[base + 2]]    (* axis NUM in heap layout *)
 ]
 
-(* EXPAND output: same rank as the source (tinygrad EXPAND keeps
-   rank), per-axis dims read straight from the heap NUM cells. *)
-uopShapeOfFor[$UopExpand, base_] := With[{src = uopSrcShape[base, 0]},
-    If[ ListQ[src],
-        Table[TTermVal[THeapRead[base + 1 + i]], {i, 0, Length[src] - 1}],
-        Missing[]
-    ]
+(* EXPAND heap layout (src/uop/expand.c):
+     heap[base + 0]         = src
+     heap[base + 1]         = NUM(ndim)
+     heap[base + 2 + i]     = NUM(d_i)   for i in 0..ndim-1
+   ndim is stored explicitly so EXPAND can change rank (e.g. lift a
+   scalar to a non-singleton target shape during backprop). *)
+uopShapeOfFor[$UopExpand, base_] := Block[{ndim = TTermVal[THeapRead[base + 1]]},
+    Table[TTermVal[THeapRead[base + 2 + i]], {i, 0, ndim - 1}]
 ]
 
 (* GRAD/FWD share cell [y]; both have y's shape (the bw is shape-

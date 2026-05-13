@@ -542,7 +542,10 @@ gradDiagram[base_Integer, principal_] := Block[{
 ]
 
 (* The DUP cell carries no label of its own; find one from any
-   DP0/DP1 cell that references it.  Fallback 0 if none in heap. *)
+   DP0/DP1 cell that references it -- either an on-heap slot or
+   one of the WL-held seed terms ($dupSeedExt, populated by
+   iThvmHeapDiagram for the TGrad case where the DP only exists
+   as a return value).  Fallback 0 if neither has one. *)
 dupLabelFor[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
     cell = SelectFirst[
         Range[lo, n - 1],
@@ -551,24 +554,35 @@ dupLabelFor[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
             TTermVal[t] === base] &,
         None
     ];
-    If[ cell === None, 0, TTermExt[THeapRead[cell]]]
+    If[ cell =!= None,
+        TTermExt[THeapRead[cell]],
+        Lookup[$dupSeedExt, base, 0]]
 ]
 
 (* DUP: principal is incoming plain input at the top apex (body to
    duplicate comes IN via cell[base]); dp0, dp1 are outgoing outputs
    at the flat bottom.  Always render both projection outputs -- a
    DUP node visually means "fork", so a one-output node misreads as
-   a one-port consumer.  Unused projections dangle but stay visible. *)
+   a one-port consumer.  Unused projections dangle but stay visible.
+
+   When the DP projections carry the $DupGradFlag bit in `ext`, the
+   pair came from TGrad / TGradPair -- render as GRAD with the
+   uopStyle[$UopGrad] orange to mirror how the GRAD UOP itself
+   appears in the graph. *)
 agentDiagram[base_Integer, $TagDUP, _, agents_Association,
-             opcodes_Association] := Block[{lab, label, ins, outs},
-    lab   = dupLabelFor[base];
-    label = agentLabelText[base, $TagDUP];
-    ins   = {wireFor[base]};
-    outs  = {"dup" <> ToString[base] <> "_dp0_lab" <> ToString[lab],
-             "dup" <> ToString[base] <> "_dp1_lab" <> ToString[lab]};
+             opcodes_Association] := Block[{lab, isGrad, label, ins, outs, style},
+    lab    = dupLabelFor[base];
+    isGrad = BitAnd[lab, $DupGradFlag] =!= 0;
+    label  = If[ isGrad,
+                 Column[{"GRAD", "@" <> ToString[base]}, Center, Spacings -> 0],
+                 agentLabelText[base, $TagDUP]];
+    style  = If[ isGrad, uopStyle[$UopGrad], agentStyle[$TagDUP]];
+    ins    = {wireFor[base]};
+    outs   = {"dup" <> ToString[base] <> "_dp0_lab" <> ToString[lab],
+              "dup" <> ToString[base] <> "_dp1_lab" <> ToString[lab]};
     Diagram[label, ins, outs,
         "Shape" -> agentShape[$TagDUP],
-        "Style" -> agentStyle[$TagDUP]]
+        "Style" -> style]
 ]
 
 (* === Lazy / book / case agents === *)
@@ -1249,9 +1263,18 @@ iThvmHeapDiagram[seedsRaw_List, mode_] := Block[{
     seeds, fullAgents, reachOps, allKernels, kernelKids, allInputTids,
     coveredTids, externalInputTids, agents, opcodes, eras, tens,
     consts, refs, nums, atomSeeds, ds, $uopOpcodeContext,
-    $deadLamCompoundAlias = <||>
+    $deadLamCompoundAlias = <||>,
+    $dupSeedExt = <||>
 },
     seeds = expandDupSiblings[seedsRaw];
+    (* TGrad's output (DP1 with $DupGradFlag in ext) lives only as a
+       WL-held TTerm -- there's no heap cell for it.  Stash the ext
+       field of any DP0/DP1 seed so `dupLabelFor` can find the grad
+       flag when the on-heap scan returns nothing. *)
+    Scan[
+        t |-> If[ TTermTag[t] === $TagDP0 || TTermTag[t] === $TagDP1,
+            $dupSeedExt[TTermVal[t]] = TTermExt[t]],
+        seedsRaw];
     {fullAgents, reachOps, $uopOpcodeContext} = If[ mode === "Reachable",
         {reachableAgentsHere[seeds],
          reachableUopsHere[seeds],

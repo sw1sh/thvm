@@ -137,11 +137,11 @@ VerificationTest[
 
 (* === TGrad over a tensor surfaces the full UOP DAG.
    `e = TGrad[2 x, x]` for x = TTensorCreate[...] yields a
-   DP1 projection of a DUP wrapping MUL(EXPAND(CONST), TEN).
-   All five nodes -- DUP, MUL, EXPAND, TEN, CONST -- must
-   appear; in particular the TEN handle (the user's tensor)
-   must not be silently dropped because reachableUopsHere
-   bailed on the non-UOP DP1 seed. *)
+   $DupGradFlag-marked DP1 projection wrapping
+   MUL(EXPAND(CONST), TEN).  The DUP wrapper renders as GRAD
+   (with the orange grad style).  All five nodes -- GRAD, MUL,
+   EXPAND, TEN, CONST -- must appear; in particular the TEN
+   handle (the user's tensor) must not be silently dropped. *)
 VerificationTest[
     TInit[];
     Block[{
@@ -151,7 +151,7 @@ VerificationTest[
         e = TGrad[2 x, x];
         d = THeapDiagram[e];
         {
-            findOne[d, "DUP"]["OutputArity"] === 2,
+            findOne[d, "GRAD"]["OutputArity"] === 2,
             ! MissingQ @ findOne[d, "MUL"],
             ! MissingQ @ findOne[d, "EXPAND"],
             ! MissingQ @ findOne[d, "TEN"],
@@ -159,7 +159,7 @@ VerificationTest[
         }
     ],
     {True, True, True, True, True},
-    TestID -> "THeapDiagram[TGrad[2 x, x]] surfaces DUP + MUL + EXPAND + TEN + CONST"
+    TestID -> "THeapDiagram[TGrad[2 x, x]] surfaces GRAD + MUL + EXPAND + TEN + CONST"
 ]
 
 (* === per-step topology for `TLam[x, x + 3][TSup[1, 2]]`.
