@@ -164,13 +164,16 @@ multicompStepsImpl[term0_, maxSteps_, auxSeeds_List] := Block[
     $multiTraceInitFn[0];
     $multiTraceSetFn[1];
     seedTerm = term0;
-    (* Diagram seeds: anchors (SUPs the walker descended through) +
-       user auxSeeds + the active term.  Anchors keep the lifted
-       SUP(s) visible in every later step's diagram; the active
-       term ensures the walker's current focus appears even if it
-       is a free atom (NUM/ERA/...) not yet tied into the heap. *)
+    (* Diagram seeds: the original term0, anchors (SUPs the walker
+       descended through), user auxSeeds, and the active term.
+       Including `seedTerm` keeps the initial root reachable every
+       step -- if it's a DP projection, expandDupSiblings (inside
+       THeapDiagram) auto-adds the sibling DP, so post-DUP-SUP-ANN
+       both branches stay visible.  Anchors keep lifted SUP(s)
+       visible; `t` ensures the walker's focus appears even when
+       it is a free atom not yet tied into the heap. *)
     snapshot[t_, anchors_List] :=
-        THeapDiagram[Join[anchors, auxSeeds, {t}]];
+        THeapDiagram[Join[anchors, auxSeeds, {seedTerm, t}]];
     (* Slice for the multiway view: live state of every alive branch
        at the time the record is built (heap reads are point-in-time;
        must run BEFORE the next advance mutates the heap).  Branches
@@ -458,19 +461,19 @@ canonicalFormDepth[term_, depth_Integer] := If[ depth <= 0,
             $TagDP0 | $TagDP1,
                 cell = THeapRead[val];
                 If[ TTermSub[cell] === 1,
-                    (* DUP-X fired: projection resolved to one of the
-                       two branches; canonical = the branch's canonical. *)
+                    (* DUP-X fired: projection resolved to a specific
+                       branch; canonical = branch's canonical. *)
                     canonicalFormDepth[
                         packTerm[0, TTermTag[cell], TTermExt[cell],
                                  TTermVal[cell]],
                         depth - 1],
-                    (* Pre-resolution: include the projection index +
-                       the (still un-resolved) duplicated body's
-                       canonical so reductions inside the body produce
-                       real vertex transitions in the multiway view
-                       rather than self-loops. *)
-                    {If[ tag === $TagDP0, "DP0", "DP1"], ext,
-                     canonicalFormDepth[cell, depth - 1]}],
+                    (* Pre-resolution: the projection is an observer
+                       of the duplicated body -- it doesn't have its
+                       own identity, it IS the body.  Canonical equals
+                       the body's canonical so DP0 and DP1 of the same
+                       DUP collapse to one vertex.  Reductions inside
+                       the body produce real transitions. *)
+                    canonicalFormDepth[cell, depth - 1]],
             $TagVAR,
                 cell = THeapRead[val];
                 If[ TTermSub[cell] === 1,

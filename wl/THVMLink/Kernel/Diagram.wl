@@ -141,6 +141,28 @@ principalCellOf[agentBase_Integer, agentTag_Integer,
     ]
 ]
 
+(* Principal output wire for an agent.  Normal case: wireFor[cell] on
+   the slot that holds the agent's term value.  Fallback: a dead-LAM
+   binder whose SUB content is this compound -- output to var<binder>
+   so the VAR consumers spider-join the compound's output. *)
+principalWireOf[agentBase_Integer, agentTag_Integer,
+                principal_, agents_Association, opcodes_Association] :=
+    If[ principal =!= None,
+        wireFor[principal],
+        With[{aliasBinder = Lookup[
+                $deadLamCompoundAlias,
+                Key[{agentBase, agentTag}],
+                None]},
+            If[ aliasBinder === None, None, "var" <> ToString[aliasBinder]]]]
+
+(* Wrap principalWireOf for the standard "either 0 or 1 output port"
+   pattern used by SUP / LAM / OP2 / MAT / ANY / CTR / ALO / DSU /
+   DDU agentDiagram dispatchers.  Returns {} or {wire}. *)
+principalOutputs[agentBase_Integer, agentTag_Integer,
+                 principal_, agents_Association, opcodes_Association] :=
+    With[{w = principalWireOf[agentBase, agentTag, principal, agents, opcodes]},
+        If[w === None, {}, {w}]]
+
 (* === slot ownership lookup ===
    Number of heap cells used per agent type, and the port type of
    each slot offset.
@@ -365,7 +387,7 @@ agentDiagram[base_Integer, $TagLAM, principal_, agents_Association, opcodes_Asso
 },
     label   = agentLabelText[base, $TagLAM];
     inputs  = {SuperStar[binderWire[base]], wireFor[base]};
-    outputs = If[ principal === None, {}, {wireFor[principal]}];
+    outputs = principalOutputs[base, $TagLAM, principal, agents, opcodes];
     d = Diagram[label, inputs, outputs,
         "Shape" -> agentShape[$TagLAM],
         "Style" -> agentStyle[$TagLAM]];
@@ -396,11 +418,11 @@ agentDiagram[base_Integer, $TagAPP, principal_, _Association, _Association] :=
    that the caller is holding outside the heap), drop the output
    port so the diagram framework doesn't draw an orphan "p<loc>"
    wire. *)
-agentDiagram[base_Integer, $TagSUP, principal_, _Association, _Association] :=
+agentDiagram[base_Integer, $TagSUP, principal_, agents_Association, opcodes_Association] :=
     With[{
         label   = agentLabelText[base, $TagSUP],
         inputs  = {wireFor[base], wireFor[base + 1]},
-        outputs = If[ principal === None, {}, {wireFor[principal]}],
+        outputs = principalOutputs[base, $TagSUP, principal, agents, opcodes],
         shape   = agentShape[$TagSUP], style = agentStyle[$TagSUP]
     },
         Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
@@ -534,11 +556,11 @@ aloLabelText[base_Integer] := With[{stateCell = THeapRead[base + 1]},
             "s" <> ToString[TTermVal[stateCell]]}, Center, Spacings -> 0]
 ]
 
-agentDiagram[base_Integer, $TagALO, principal_, _Association, _Association] :=
+agentDiagram[base_Integer, $TagALO, principal_, agents_Association, opcodes_Association] :=
     With[{
         label   = aloLabelText[base],
         inputs  = {wireFor[base]},
-        outputs = If[ principal === None, {}, {wireFor[principal]}]
+        outputs = principalOutputs[base, $TagALO, principal, agents, opcodes]
     },
         Diagram[label, inputs, outputs,
             "Shape" -> agentShape[$TagALO],
@@ -554,12 +576,12 @@ ctrLabelText[base_Integer, ctrTag_Integer] := With[{n = TTermVal[THeapRead[base]
             "n=" <> ToString[n]}, Center, Spacings -> 0]
 ]
 
-agentDiagram[base_Integer, $TagCTR, principal_, _Association, _Association] :=
+agentDiagram[base_Integer, $TagCTR, principal_, agents_Association, opcodes_Association] :=
     Block[{n, ctrTag, inWires, outs, lab},
         n       = TTermVal[THeapRead[base]];
         ctrTag  = ctrTagFor[base];
         inWires = Table[wireFor[base + 1 + i], {i, 0, n - 1}];
-        outs    = If[ principal === None, {}, {wireFor[principal]}];
+        outs    = principalOutputs[base, $TagCTR, principal, agents, opcodes];
         lab     = ctrLabelText[base, ctrTag];
         Diagram[lab, inWires, outs,
             "Shape" -> agentShape[$TagCTR],
@@ -597,11 +619,11 @@ heapReadMatCell[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
     If[cell === None, 0, TTermExt[THeapRead[cell]]]
 ]
 
-agentDiagram[base_Integer, $TagMAT, principal_, _Association, _Association] :=
+agentDiagram[base_Integer, $TagMAT, principal_, agents_Association, opcodes_Association] :=
     With[{
         label   = matLabelText[base, heapReadMatCell[base]],
         inputs  = {wireFor[base], wireFor[base + 1]},
-        outputs = If[ principal === None, {}, {wireFor[principal]}]
+        outputs = principalOutputs[base, $TagMAT, principal, agents, opcodes]
     },
         Diagram[label, inputs, outputs,
             "Shape" -> agentShape[$TagMAT],
@@ -623,11 +645,11 @@ heapReadOp2Cell[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
     If[cell === None, 0, TTermExt[THeapRead[cell]]]
 ]
 
-agentDiagram[base_Integer, $TagOP2, principal_, _Association, _Association] :=
+agentDiagram[base_Integer, $TagOP2, principal_, agents_Association, opcodes_Association] :=
     With[{
         label   = op2LabelText[base, heapReadOp2Cell[base]],
         inputs  = {wireFor[base], wireFor[base + 1]},
-        outputs = If[ principal === None, {}, {wireFor[principal]}]
+        outputs = principalOutputs[base, $TagOP2, principal, agents, opcodes]
     },
         Diagram[label, inputs, outputs,
             "Shape" -> agentShape[$TagOP2],
@@ -978,13 +1000,43 @@ surfacedAtomLocs[seedTerms_List] := Block[
 
 (* Slot cells holding a VAR whose binder (heap[val]) is SUB-flagged.
    Each unique binder loc gets one synthesized leaf (above) -- DC
-   spider-joins it with every VAR cell that names the same wire. *)
+   spider-joins it with every VAR cell that names the same wire.
+   Atom-substituted binders only -- if the substituted value is a
+   compound (SUP, LAM, OP2, ...) the agent for that compound is
+   already in the agent set and its principal port is rewired to
+   `var<binder>` by deadLamCompoundAliasMap, so a leaf would
+   duplicate the node. *)
 deadLamBinders[agents_Association, opcodes_Association] := DeleteDuplicates @
     Cases[
         agentSlotsOf[agents, opcodes],
-        slot_Integer /; With[{t = THeapRead[slot]},
-            TTermTag[t] === $TagVAR && TTermSub[THeapRead[TTermVal[t]]] === 1
+        slot_Integer /; Block[{t = THeapRead[slot], body, btag},
+            body = THeapRead[TTermVal[t]];
+            btag = TTermTag[body];
+            TTermTag[t] === $TagVAR && TTermSub[body] === 1 &&
+                (btag === $TagNUM || btag === $TagERA ||
+                 btag === $TagTEN || btag === $TagANY ||
+                 btag === $TagREF)
         ] :> TTermVal[THeapRead[slot]]
+    ]
+
+(* Map (agent_base, agent_tag) -> binder_loc for dead-LAM binders
+   whose SUB content is a COMPOUND agent (SUP / LAM / OP2 / ...).
+   The compound's principal wire becomes `var<binder>` -- the same
+   wire VAR consumers use -- so the compound renders at its own
+   slot range and connects through to its consumers without a
+   redundant atom-style leaf at the binder. *)
+deadLamCompoundAliasMap[agents_Association, opcodes_Association] :=
+    Association @ Cases[
+        agentSlotsOf[agents, opcodes],
+        slot_Integer /; Block[{t = THeapRead[slot], body, btag},
+            body = THeapRead[TTermVal[t]];
+            btag = TTermTag[body];
+            TTermTag[t] === $TagVAR && TTermSub[body] === 1 &&
+                btag =!= $TagNUM && btag =!= $TagERA &&
+                btag =!= $TagTEN && btag =!= $TagANY &&
+                btag =!= $TagREF
+        ] :> Block[{body = THeapRead[TTermVal[THeapRead[slot]]]},
+            {TTermVal[body], TTermTag[body]} -> TTermVal[THeapRead[slot]]]
     ]
 
 reachableUopOpcodesHere[seedTerms_List] := Block[
@@ -1121,11 +1173,29 @@ THeapDiagram[]                       := iThvmHeapDiagram[{},  All]
 THeapDiagram[ts : {___}]             := iThvmHeapDiagram[ts,  "Reachable"]
 THeapDiagram[t_]                     := iThvmHeapDiagram[{t}, "Reachable"]
 
-iThvmHeapDiagram[seeds_List, mode_] := Block[{
-    fullAgents, reachOps, allKernels, kernelKids, allInputTids,
+(* For every DP0/DP1 seed, synthesize its sibling projection
+   (same label, same dup_loc, flipped tag).  Pre-ANN this is
+   redundant (the BFS reaches both projections through the DUP's
+   shared body).  Post-ANN the DUP wrapper is gone -- the active
+   side returned a concrete term and the inactive side's branch
+   sits under heap[loc]'s SUB flag, reachable only through the
+   sibling projection.  Surfacing the sibling keeps both branches
+   visible in the diagram. *)
+expandDupSiblings[seedTerms_List] := DeleteDuplicates @ Join[
+    seedTerms,
+    Cases[seedTerms,
+        t_ /; (TTermTag[t] === $TagDP0 || TTermTag[t] === $TagDP1) :>
+            packTerm[0,
+                If[ TTermTag[t] === $TagDP0, $TagDP1, $TagDP0],
+                TTermExt[t], TTermVal[t]]]]
+
+iThvmHeapDiagram[seedsRaw_List, mode_] := Block[{
+    seeds, fullAgents, reachOps, allKernels, kernelKids, allInputTids,
     coveredTids, externalInputTids, agents, opcodes, eras, tens,
-    consts, refs, nums, atomSeeds, ds, $uopOpcodeContext
+    consts, refs, nums, atomSeeds, ds, $uopOpcodeContext,
+    $deadLamCompoundAlias = <||>
 },
+    seeds = expandDupSiblings[seedsRaw];
     {fullAgents, reachOps, $uopOpcodeContext} = If[ mode === "Reachable",
         {reachableAgentsHere[seeds],
          reachableUopsHere[seeds],
@@ -1201,6 +1271,11 @@ iThvmHeapDiagram[seeds_List, mode_] := Block[{
        leaf-attached-to-wire trick fills the picture. *)
     agents = KeySelect[agents,
         Function[base, ! agentRuleIsDead[base, agents[base]]]];
+    (* Compute the dead-LAM compound alias map BEFORE rendering --
+       agentDiagram (via principalWireOf) looks this up to route a
+       compound's principal port to its binder's var<loc> when no
+       slot in the agent set directly consumes it. *)
+    $deadLamCompoundAlias = deadLamCompoundAliasMap[agents, opcodes];
     ds = Join[
         KeyValueMap[
             agentDiagram[#1, #2, principalCellOf[#1, #2, agents, opcodes],
