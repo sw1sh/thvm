@@ -664,14 +664,32 @@ fn void run_rangeify_unified(Term root) {
 //
 // thvm-side implementation: walk every node and compute the canonical
 // substitute Term. The substitute table is for Phase 3 cut-over to
-// consult; Phase 2 keeps the heap untouched.
+// consult.
+//
+// Phase 4a-pre-2 (this commit): at realize boundaries we now emit a
+// real UOP_BUFFERIZE Term on the MAIN HEAP via uop_bufferize_new and
+// stash it in RU_BUFFERIZE_TERM for materialize.c to walk. RU_SUBST
+// continues to hold the INDEX expression a consumer threads in (for
+// the eventual cut-over of consumer-side rewrites).
 
 #define RU_SUBST_CAP RU_MAX_NODES
 static Term RU_SUBST[RU_SUBST_CAP];
+// Phase 4a-pre-2: main-heap UOP_BUFFERIZE Term per realized node.
+// Zero means "no boundary emitted here". Mirrors tinygrad's
+// `UOp(Ops.BUFFERIZE, ..., src=(value,)+closed_ranges, arg=opts)`
+// landing in the tsink graph at the realize boundary.
+static Term RU_BUFFERIZE_TERM[RU_SUBST_CAP];
 
 fn Term rangeify_unified_subst_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_SUBST[node_idx];
+}
+
+// Phase 4a-pre-2 accessor: the UOP_BUFFERIZE Term emitted at this
+// node's realize boundary. 0 if the node is not a boundary.
+fn Term rangeify_unified_bufferize_at(u32 node_idx) {
+  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
+  return RU_BUFFERIZE_TERM[node_idx];
 }
 
 // Builds the "INDEX expression" Term that a consumer references when it
@@ -693,10 +711,46 @@ static Term ru_build_index_addr(RuRangeMap const *rm) {
   return acc;
 }
 
+// Phase 4a-pre-2: count of UOP_BUFFERIZE nodes emitted on the main
+// heap by the most recent pm_apply_rangeify run. Stats / introspection.
+static u32 RU_LAST_BUFFERIZES_EMITTED;
+fn u32 rangeify_unified_last_bufferizes_emitted(void) {
+  return RU_LAST_BUFFERIZES_EMITTED;
+}
+
+// Collect "closed ranges" for a realize boundary at node `i`. Mirror:
+// tinygrad/schedule/indexing.py:66 (`closed_ranges = tuple([r for i,r in
+// enumerate(ctx.range_map[s][1]) if i in realized_ranges])`) -- i.e. the
+// out_rngs at the realized axes. Returns the number of ranges written
+// (>= 0, <= MAX_DIM).
+//
+// For realized_full, every axis is closed.  For realized_partial only
+// the axes in axes_mask are closed.  RANGEs that hash-cons to
+// UOP_CONST(0) (extent==1 axes) are dropped, mirroring tinygrad's
+// `if r.op is Ops.RANGE` filter at tinygrad/schedule/indexing.py:69.
+static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
+  RuRangeMap const *rm = &RU_RANGE_MAP[i];
+  RuRealizeEntry const *rl = &RU_REALIZE_MAP[i];
+  u32 n = 0;
+  for (u8 a = 0; a < rm->out_ndim && n < cap; a++) {
+    int axis_realized = rl->realized_full
+                     || ((rl->axes_mask >> a) & 1u);
+    if (!axis_realized) continue;
+    Term r = rm->out_rngs[a];
+    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+    out_ranges[n++] = r;
+  }
+  return n;
+}
+
 fn void pm_apply_rangeify(Term root) {
   (void)root;
-  // Clear substitute table.
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) RU_SUBST[i] = 0;
+  // Clear substitute + bufferize tables.
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    RU_SUBST[i]           = 0;
+    RU_BUFFERIZE_TERM[i]  = 0;
+  }
+  RU_LAST_BUFFERIZES_EMITTED = 0;
 
   // Walk nodes bottom-up (children-first) so each consumer sees its
   // producers' substitutes. BUFFERIZE_NODES is DFS PRE-order
@@ -717,21 +771,42 @@ fn void pm_apply_rangeify(Term root) {
     int realized = RU_REALIZE_MAP[i].realized_full
                 || RU_REALIZE_MAP[i].realized_partial;
 
+    Term self = term_new(0, TAG_UOP, info->op, info->loc);
+
     if (realized) {
-      // Mirror indexing.py:75-77: emit BUFFERIZE(value, ...closed_ranges).
-      // thvm doesn't have UOP_BUFFERIZE yet (Phase 4 substrate gap).
-      // Park: store the input Term as the "BUFFERIZE source" and
-      // record the INDEX into RU_SUBST. Tests inspect this via the
-      // rangeify_unified_subst_at accessor.
-      Term self = term_new(0, TAG_UOP, info->op, info->loc);
+      // Mirror indexing.py:75-77:
+      //   new_src = UOp(Ops.BUFFERIZE, s.dtype, src=(new_src,)+closed_ranges,
+      //                 arg=opts)
+      // Phase 4a-pre-2 lands the main-heap node via uop_bufferize_new.
+      Term closed_ranges[MAX_DIM];
+      u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
+      // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
+      // full-realize -> GLOBAL device memory; partial-realize falls back
+      // to LOCAL (threadgroup-shared) because the per-axis collapse
+      // matches tinygrad's `len(range_map[s][1]) != len(realized_ranges)`
+      // branch at tinygrad/schedule/indexing.py:75-76.
+      u32 addrspace = RU_REALIZE_MAP[i].realized_full
+                    ? UOP_SCOPE_GLOBAL
+                    : UOP_SCOPE_LOCAL;
+      // removable mirrors `removable = x.op is not Ops.COPY and s.op
+      // not in ALWAYS_CONTIGUOUS` from indexing.py:73. thvm has no
+      // COPY opcode at the tensor-level UOp layer yet (TCopy lives in
+      // backend dispatch); we default removable=1 here.
+      u32 removable = 1;
+      Term b = uop_bufferize_new(self, addrspace, removable,
+                                 n_closed, closed_ranges);
+      RU_BUFFERIZE_TERM[i] = b;
+      RU_LAST_BUFFERIZES_EMITTED++;
+      // The consumer-side INDEX expression now references the
+      // BUFFERIZE node, mirroring indexing.py:78
+      //   `new_src = new_src.index(*[r for ... if i in realized_ranges])`.
       Term addr = ru_build_index_addr(rm);
-      RU_SUBST[i] = uop_index_e(self, addr);
+      RU_SUBST[i] = uop_index_e(b, addr);
     } else {
       // Mirror indexing.py:107 (passthrough INDEX without BUFFERIZE wrap).
       // The consumer reads the producer's source directly under the
       // producer's in_rngs. We re-use the node Term as a placeholder for
       // Phase 2 inspection.
-      Term self = term_new(0, TAG_UOP, info->op, info->loc);
       Term addr = ru_build_index_addr(rm);
       RU_SUBST[i] = uop_index_e(self, addr);
     }

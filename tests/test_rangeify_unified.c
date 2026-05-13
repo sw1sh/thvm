@@ -142,6 +142,47 @@ int main(void) {
   run_rangeify_unified(ten_root);
   CHECK_EQ(rangeify_unified_last_nodes_walked(), 0);
 
+  // (h) Phase 4a-pre-2: main-heap UOP_BUFFERIZE emitted at realize
+  // boundaries.  After run_rangeify_unified on a small ADD-of-ADDs root,
+  // the root realize should produce a UOP_BUFFERIZE Term whose value
+  // is the root node and whose closed_ranges are RANGE leaves matching
+  // the realized axes.  Mirror: tinygrad/schedule/indexing.py:77.
+  TEST_BEGIN("unified-rangeify/bufferize-at-root-realize");
+  Term ha = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(4, 5));
+  Term hb = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(4, 5));
+  Term hsum = uop_binary(UOP_ADD, ha, hb);
+  bufferize_classify(hsum);
+  run_rangeify_unified(hsum);
+  u32 hsum_idx = bufferize_info_find(term_val(hsum));
+  CHECK(hsum_idx != 0xFFFFFFFFu);
+  Term bz = rangeify_unified_bufferize_at(hsum_idx);
+  CHECK(bz != 0);
+  CHECK_EQ(term_tag(bz), TAG_UOP);
+  CHECK_EQ(term_ext(bz), UOP_BUFFERIZE);
+  // BUFFERIZE.value points back at the producer node (root ADD).
+  Term bz_value = uop_bufferize_value(bz);
+  CHECK_EQ(term_tag(bz_value), TAG_UOP);
+  CHECK_EQ(term_ext(bz_value), UOP_ADD);
+  // Full-realize -> GLOBAL addrspace.
+  CHECK_EQ(uop_bufferize_addrspace(bz), UOP_SCOPE_GLOBAL);
+  // 2D output -> 2 closed RANGE leaves.
+  CHECK_EQ(uop_bufferize_n_ranges(bz), 2);
+  Term r0 = uop_bufferize_range_at(bz, 0);
+  Term r1 = uop_bufferize_range_at(bz, 1);
+  CHECK_EQ(term_tag(r0), TAG_UOP);
+  CHECK_EQ(term_ext(r0), UOP_RANGE);
+  CHECK_EQ(term_tag(r1), TAG_UOP);
+  CHECK_EQ(term_ext(r1), UOP_RANGE);
+  // The stats counter ticks: at least one BUFFERIZE emitted.
+  CHECK(rangeify_unified_last_bufferizes_emitted() >= 1);
+  // The substitute is INDEX_E over the BUFFERIZE Term (not the raw node).
+  Term hsub = rangeify_unified_subst_at(hsum_idx);
+  CHECK_EQ(term_tag(hsub), TAG_UOP);
+  CHECK_EQ(term_ext(hsub), UOP_INDEX_E);
+  // INDEX_E.buffer = the BUFFERIZE term.
+  Term hsub_buf = heap_read(term_val(hsub));
+  CHECK_EQ(hsub_buf, bz);
+
   thvm_free();
   TEST_REPORT();
 }

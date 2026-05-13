@@ -2625,6 +2625,11 @@ fn u32  rangeify_unified_out_ndim_at           (u32 node_idx);
 fn Term rangeify_unified_out_rng_at            (u32 node_idx, u32 axis);
 fn int  rangeify_unified_is_realized           (u32 node_idx);
 fn Term rangeify_unified_subst_at              (u32 node_idx);
+// Phase 4a-pre-2: main-heap UOP_BUFFERIZE Term at this node's realize
+// boundary. 0 if the node isn't a boundary. Mirrors tinygrad's
+// `Ops.BUFFERIZE` landing in the tsink at indexing.py:77.
+fn Term rangeify_unified_bufferize_at          (u32 node_idx);
+fn u32  rangeify_unified_last_bufferizes_emitted(void);
 
 // === Phase E1: UOP_RANGE field accessors + axis_type rewriter ===
 // Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type
