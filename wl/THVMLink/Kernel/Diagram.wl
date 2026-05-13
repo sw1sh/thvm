@@ -507,47 +507,18 @@ dupLabelFor[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
     If[ cell === None, 0, TTermExt[THeapRead[cell]]]
 ]
 
-(* True iff the DUP projection (side 0 or 1) at `base` has any
-   reachable consumer: either some rendered agent's slot reads it,
-   or it is externally held as a diagram seed (e.g. the user did
-   `t = First @ TDup[...]` and is inspecting that projection root).
-   Without the seed check both projections would be suppressed when
-   the user holds one in WL and the heap has no internal consumer
-   -- the DUP would render as a node with zero output ports. *)
-dupProjConsumed[base_Integer, side_Integer, agents_Association,
-                opcodes_Association] :=
-    TrueQ[$dupSeedHeld[{base, side}]] || AnyTrue[
-        agentSlotsOf[agents, opcodes],
-        With[{t = THeapRead[#]},
-            TTermVal[t] === base &&
-            ((side === 0 && TTermTag[t] === $TagDP0) ||
-             (side === 1 && TTermTag[t] === $TagDP1))] &]
-
-(* Map {dup_base, side} -> True for every DP0/DP1 projection in the
-   seed list.  Block-scoped from iThvmHeapDiagram so dupProjConsumed
-   can see it without threading another parameter through every
-   agentDiagram[...] arm. *)
-dupSeedHeldSet[seedTerms_List] := Association @ Map[
-    t |-> {TTermVal[t], If[ TTermTag[t] === $TagDP0, 0, 1]} -> True,
-    Select[seedTerms,
-        TTermTag[#] === $TagDP0 || TTermTag[#] === $TagDP1 &]
-]
-
 (* DUP: principal is incoming plain input at the top apex (body to
    duplicate comes IN via cell[base]); dp0, dp1 are outgoing outputs
-   at the flat bottom.  Suppress an output port whose projection has
-   no consumer in the agent set -- prevents an orphan dangling wire
-   when the user is holding one projection externally as a root. *)
+   at the flat bottom.  Always render both projection outputs -- a
+   DUP node visually means "fork", so a one-output node misreads as
+   a one-port consumer.  Unused projections dangle but stay visible. *)
 agentDiagram[base_Integer, $TagDUP, _, agents_Association,
              opcodes_Association] := Block[{lab, label, ins, outs},
     lab   = dupLabelFor[base];
     label = agentLabelText[base, $TagDUP];
     ins   = {wireFor[base]};
-    outs  = Pick[
-        {"dup" <> ToString[base] <> "_dp0_lab" <> ToString[lab],
-         "dup" <> ToString[base] <> "_dp1_lab" <> ToString[lab]},
-        {dupProjConsumed[base, 0, agents, opcodes],
-         dupProjConsumed[base, 1, agents, opcodes]}];
+    outs  = {"dup" <> ToString[base] <> "_dp0_lab" <> ToString[lab],
+             "dup" <> ToString[base] <> "_dp1_lab" <> ToString[lab]};
     Diagram[label, ins, outs,
         "Shape" -> agentShape[$TagDUP],
         "Style" -> agentStyle[$TagDUP]]
@@ -952,14 +923,18 @@ reachableAgentsHere[seedTerms_List] := Block[
         If[ rule =!= Nothing,
             base = First[rule]; tag = Last[rule];
             Which[
-                (* Dead DUP: skip the wrapper but follow the body
-                   so the substituted compound (SUP/LAM/...) or atom
-                   (NUM/ERA/TEN/...) is discovered through it. *)
-                tag === $TagDUP && agentRuleIsDead[base, tag],
+                (* Dead DUP / Dead LAM: skip the wrapper but follow
+                   the body so the substituted content (SUP / LAM /
+                   atom) reachable through a VAR or DP-projection
+                   still surfaces.  After APP-LAM, heap[lam_loc]
+                   holds the arg (SUB-flagged); a VAR(lam_loc) in
+                   the body queues here, and following heap[base]
+                   reaches the arg's compound structure (e.g. the
+                   SUP slots) so the diagram shows what the LAM
+                   has been reduced to. *)
+                (tag === $TagDUP || tag === $TagLAM)
+                    && agentRuleIsDead[base, tag],
                     queue = Append[queue, THeapRead[base]],
-                (* Dead LAM: skip both wrapper and body. *)
-                tag === $TagLAM && agentRuleIsDead[base, tag],
-                    Null,
                 ! KeyExistsQ[result, base],
                     result[base] = tag;
                     queue = Join[queue, THeapRead /@ agentChildSlots[t]]
@@ -1149,8 +1124,7 @@ THeapDiagram[t_]                     := iThvmHeapDiagram[{t}, "Reachable"]
 iThvmHeapDiagram[seeds_List, mode_] := Block[{
     fullAgents, reachOps, allKernels, kernelKids, allInputTids,
     coveredTids, externalInputTids, agents, opcodes, eras, tens,
-    consts, refs, nums, atomSeeds, ds, $uopOpcodeContext,
-    $dupSeedHeld = dupSeedHeldSet[seeds]
+    consts, refs, nums, atomSeeds, ds, $uopOpcodeContext
 },
     {fullAgents, reachOps, $uopOpcodeContext} = If[ mode === "Reachable",
         {reachableAgentsHere[seeds],

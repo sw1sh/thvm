@@ -229,14 +229,15 @@ reachableICAgents[seedTerms_List] := Block[
         rule = agentFromTerm[t];
         If[ rule =!= Nothing,
             {vid, info} = {First[rule], Last[rule]};
-            (* Dead DUP: drop the wrapper but still walk into the body
-               so the substituted value (reachable via the sibling
-               projection) gets registered.  Dead LAM: drop wrapper
-               and body -- nothing else points at the substituted
-               literal. *)
+            (* Dead DUP / LAM: drop the wrapper but still walk into
+               the body so the substituted value (the arg
+               substituted for VAR by APP-LAM, the sibling
+               projection through a DUP-X firing) gets registered.
+               heap[lam_loc] / heap[dup_loc] holds the substituted
+               content after the firing, SUB-flagged. *)
             Which[
-                TTermTag[t] === $TagDUP &&
-                    TTermSub[THeapRead[TTermVal[t]]] === 1,
+                (TTermTag[t] === $TagDUP || TTermTag[t] === $TagLAM)
+                    && TTermSub[THeapRead[TTermVal[t]]] === 1,
                     queue = Append[queue, THeapRead[TTermVal[t]]],
                 agentIsDead[t],
                     Null,

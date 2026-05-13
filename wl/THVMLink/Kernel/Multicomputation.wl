@@ -458,11 +458,19 @@ canonicalFormDepth[term_, depth_Integer] := If[ depth <= 0,
             $TagDP0 | $TagDP1,
                 cell = THeapRead[val];
                 If[ TTermSub[cell] === 1,
+                    (* DUP-X fired: projection resolved to one of the
+                       two branches; canonical = the branch's canonical. *)
                     canonicalFormDepth[
                         packTerm[0, TTermTag[cell], TTermExt[cell],
                                  TTermVal[cell]],
                         depth - 1],
-                    {If[tag === $TagDP0, "DP0", "DP1"], val, ext}],
+                    (* Pre-resolution: include the projection index +
+                       the (still un-resolved) duplicated body's
+                       canonical so reductions inside the body produce
+                       real vertex transitions in the multiway view
+                       rather than self-loops. *)
+                    {If[ tag === $TagDP0, "DP0", "DP1"], ext,
+                     canonicalFormDepth[cell, depth - 1]}],
             $TagVAR,
                 cell = THeapRead[val];
                 If[ TTermSub[cell] === 1,
