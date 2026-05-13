@@ -507,17 +507,31 @@ dupLabelFor[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
     If[ cell === None, 0, TTermExt[THeapRead[cell]]]
 ]
 
-(* True iff some reachable agent's slot holds a DP-projection (side
-   0 or 1) of the DUP at `base`.  We pass the agents map in so the
-   check uses the agent set we're about to render (post-dead-filter)
-   -- a projection consumed only by a dead-LAM body wouldn't count. *)
+(* True iff the DUP projection (side 0 or 1) at `base` has any
+   reachable consumer: either some rendered agent's slot reads it,
+   or it is externally held as a diagram seed (e.g. the user did
+   `t = First @ TDup[...]` and is inspecting that projection root).
+   Without the seed check both projections would be suppressed when
+   the user holds one in WL and the heap has no internal consumer
+   -- the DUP would render as a node with zero output ports. *)
 dupProjConsumed[base_Integer, side_Integer, agents_Association,
-                opcodes_Association] := AnyTrue[
-    agentSlotsOf[agents, opcodes],
-    With[{t = THeapRead[#]},
-        TTermVal[t] === base &&
-        ((side === 0 && TTermTag[t] === $TagDP0) ||
-         (side === 1 && TTermTag[t] === $TagDP1))] &];
+                opcodes_Association] :=
+    TrueQ[$dupSeedHeld[{base, side}]] || AnyTrue[
+        agentSlotsOf[agents, opcodes],
+        With[{t = THeapRead[#]},
+            TTermVal[t] === base &&
+            ((side === 0 && TTermTag[t] === $TagDP0) ||
+             (side === 1 && TTermTag[t] === $TagDP1))] &]
+
+(* Map {dup_base, side} -> True for every DP0/DP1 projection in the
+   seed list.  Block-scoped from iThvmHeapDiagram so dupProjConsumed
+   can see it without threading another parameter through every
+   agentDiagram[...] arm. *)
+dupSeedHeldSet[seedTerms_List] := Association @ Map[
+    t |-> {TTermVal[t], If[ TTermTag[t] === $TagDP0, 0, 1]} -> True,
+    Select[seedTerms,
+        TTermTag[#] === $TagDP0 || TTermTag[#] === $TagDP1 &]
+]
 
 (* DUP: principal is incoming plain input at the top apex (body to
    duplicate comes IN via cell[base]); dp0, dp1 are outgoing outputs
@@ -1135,7 +1149,8 @@ THeapDiagram[t_]                     := iThvmHeapDiagram[{t}, "Reachable"]
 iThvmHeapDiagram[seeds_List, mode_] := Block[{
     fullAgents, reachOps, allKernels, kernelKids, allInputTids,
     coveredTids, externalInputTids, agents, opcodes, eras, tens,
-    consts, refs, nums, atomSeeds, ds, $uopOpcodeContext
+    consts, refs, nums, atomSeeds, ds, $uopOpcodeContext,
+    $dupSeedHeld = dupSeedHeldSet[seeds]
 },
     {fullAgents, reachOps, $uopOpcodeContext} = If[ mode === "Reachable",
         {reachableAgentsHere[seeds],

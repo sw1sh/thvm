@@ -144,23 +144,24 @@ If[ TrueQ[OptionValue["Branchial"]], ..., ...]
 If[ OptionValue["Branchial"], ..., ...]
 ```
 
-### Later options win -- don't strip user options
+### First option wins -- forced overrides go FIRST
 
 When a wrapper needs to force certain options on the inner call but
-also let the user pass through extras, put the user's filtered
-options FIRST and the forced overrides LATER in the argument list.
-Wolfram functions take the last option setting on collision, so
-later overrides win.  Don't `/. (Key -> _) -> Nothing` to scrub
-user options out -- just place the override after them.
+also let the user pass through extras, put the forced overrides
+FIRST and the user's filtered options LATER in the argument list.
+Wolfram functions take the FIRST setting on collision (verify with
+`Options[Graph[..., EdgeLabels -> "a", EdgeLabels -> "b"]]` -> `"a"`).
+Don't `/. (Key -> _) -> Nothing` to scrub user options out -- just
+place the forced override first.
 
 ```wolfram
-(* GOOD: user's GraphLayout / ImageSize / etc. pass through; our
-   VertexLabels override always wins. *)
+(* GOOD: our forced VertexLabels wins; user's GraphLayout /
+   ImageSize / etc. pass through. *)
 Graph[
     vs, es,
-    FilterRules[{opts}, Options[Graph]],
     VertexLabels -> myLabels,
-    Background -> LightDarkSwitched[White, GrayLevel[0.13]]
+    Background -> LightDarkSwitched[White, GrayLevel[0.13]],
+    FilterRules[{opts}, Options[Graph]]
 ]
 
 (* BAD: ceremonial stripping; harder to read, easy to forget a key *)

@@ -79,7 +79,7 @@ eventFromRow[row_List] := <|
     "termA"      -> row[[4]],
     "termB"      -> row[[5]],
     "deltaLabel" -> row[[6]],
-    "consumed"   -> DeleteCases[{row[[7]], row[[8]]}, -1]
+    "consumed"   -> DeleteDuplicates @ DeleteCases[{row[[7]], row[[8]]}, -1]
 |>
 
 (* `produced` is the implicit dual of `consumed`: the set of heap
@@ -542,12 +542,17 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
     allKeys = DeleteDuplicates @ Flatten[sliceKeys, 1];
     (* Edges: for each consecutive (prev, cur) slice pair, draw
        edges between same-index leaves (same-size) or cross product
-       (size mismatch -- SPLIT / MERGE).  Drop self-loops (a branch
-       whose canonical form is unchanged by the firing). *)
+       (size mismatch -- SPLIT / MERGE).  Self-loop policy: a
+       branch whose canonical form didn't change is normally
+       dropped (it would clutter mixed-fire steps where only one
+       sibling changed).  But if NO pair changed -- the firing
+       happened entirely "inside" the projection wrapper of an
+       unresolved DP0/DP1, so the slice stayed identical -- keep
+       a single self-loop so the event still appears in the view. *)
     edgeList = Catenate[
         MapIndexed[
             {prevKeys, idx} |-> Block[{
-                i, curKeys, fam, rule, ev, pairs
+                i, curKeys, fam, rule, ev, pairs, changed
             },
                 i = First[idx];
                 If[ i >= Length[sliceKeys], Return[{}, Block]];
@@ -563,19 +568,34 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
                     ,
                     Tuples[{prevKeys, curKeys}]
                 ];
-                Select[
-                    Map[
-                        p |-> {DirectedEdge[First[p], Last[p]], fam, rule},
-                        pairs
-                    ],
-                    pe |-> First[pe][[1]] =!= First[pe][[2]]]
+                changed = Select[pairs, First[#] =!= Last[#] &];
+                Map[
+                    p |-> {DirectedEdge[First[p], Last[p]], fam, rule},
+                    If[ changed === {},
+                        DeleteDuplicates[pairs]
+                        ,
+                        changed]
+                ]
             ],
             sliceKeys
         ]
     ];
-    edgeFamilies = AssociationThread[edgeList[[All, 1]] -> edgeList[[All, 2]]];
-    edgeRules    = AssociationThread[edgeList[[All, 1]] -> edgeList[[All, 3]]];
+    (* Multiple events can collapse onto the same edge -- most often
+       a self-loop on a stable vertex that successive intra-wrapper
+       rules all fire on.  Keep one edge but accumulate the rule
+       names so the EdgeLabel shows the full firing sequence; family
+       takes the first occurrence (used only for colour). *)
     edges = DeleteDuplicates[edgeList[[All, 1]]];
+    edgeFamilies = AssociationMap[
+        e |-> First @ Cases[edgeList, {e, f_, _} :> f],
+        edges
+    ];
+    edgeRules = AssociationMap[
+        e |-> StringRiffle[
+            DeleteDuplicates @ Cases[edgeList, {e, _, r_} :> r],
+            ", "],
+        edges
+    ];
     (* Optional branchial clique inside each multi-leaf slice. *)
     branchial = If[
         TrueQ[OptionValue["Branchial"]]
@@ -625,14 +645,14 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
     With[{g = Graph[
         allKeys,
         Join[edges, branchial],
-        FilterRules[{opts}, Options[Graph]],
         VertexLabels -> Map[k |-> k -> RawBoxes[vertexLabel[k]], allKeys],
         VertexLabelStyle -> labelStyle,
-        EdgeLabels -> Lookup[edgeRules, edges, ""],
+        EdgeLabels -> Normal[edgeRules],
         EdgeLabelStyle -> labelStyle,
         EdgeStyle -> edgeStyles,
         Background -> LightDarkSwitched[White, GrayLevel[0.13]],
-        GraphLayout -> "LayeredDigraphEmbedding"]
+        GraphLayout -> "LayeredDigraphEmbedding",
+        FilterRules[{opts}, Options[Graph]]]
     },
         If[ legend === None, g, Legended[g, legend]]
     ]
