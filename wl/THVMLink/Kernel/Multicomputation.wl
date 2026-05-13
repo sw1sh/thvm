@@ -529,18 +529,10 @@ canonicalFormDepth[term_, depth_Integer] := If[ depth <= 0,
 
 (* Short caption for a term (used as the vertex label).  Mirrors
    what diagrams print: e.g. "NUM 4@12", "DP0@4", "SUP@14..15". *)
-$tagShortName = <|
-    $TagVAR -> "VAR", $TagDP0 -> "DP0", $TagDP1 -> "DP1",
-    $TagLAM -> "LAM", $TagAPP -> "APP", $TagSUP -> "SUP",
-    $TagERA -> "ERA", $TagDUP -> "DUP", $TagNUM -> "NUM",
-    $TagREF -> "REF", $TagOP2 -> "OP2", $TagMAT -> "MAT",
-    $TagCTR -> "CTR", $TagALO -> "ALO", $TagDSU -> "DSU",
-    $TagDDU -> "DDU", $TagTEN -> "TEN", $TagANY -> "ANY",
-    $TagUOP -> "UOP", $TagINC -> "INC"|>;
 termCaption[t_] := Block[{tag, val, nm},
     tag = TTermTag[t];
     val = TTermVal[t];
-    nm = Lookup[$tagShortName, tag, "?" <> ToString[tag]];
+    nm = TTagName[tag];
     Switch[tag,
         $TagNUM, nm <> " " <> ToString[val],
         $TagSUP, nm <> "@" <> ToString[val] <> ".." <> ToString[val + 1],

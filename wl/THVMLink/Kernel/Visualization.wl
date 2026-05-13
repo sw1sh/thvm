@@ -517,10 +517,6 @@ $externalTids := Block[{tens = TTensTable[]},
 ]
 
 vertexCategory[vid_String, info_Association] := Switch[info["tag"],
-    $TagLAM, "LAM",
-    $TagAPP, "APP",
-    $TagSUP, "SUP",
-    $TagDUP, "DUP",
     $TagUOP,
         Switch[info["opcode"],
             $UopKernel, "KERNEL",
@@ -531,15 +527,7 @@ vertexCategory[vid_String, info_Association] := Switch[info["tag"],
     $TagTEN,
         With[{id = ToExpression[StringDrop[vid, 1]]},
             If[ MemberQ[$externalTids, id], "ExternalTEN", "TEN"]],
-    $TagREF, "REF",
-    $TagALO, "ALO",
-    $TagCTR, "CTR",
-    $TagMAT, "MAT",
-    $TagOP2, "OP2",
-    $TagDSU, "DSU",
-    $TagDDU, "DDU",
-    $TagNUM, "NUM",
-    _, "UOP"
+    _, TTagName[info["tag"]]
 ]
 
 (* Label helpers for the new tag types. *)
