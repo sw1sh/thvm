@@ -1145,6 +1145,21 @@ TDup[label_Integer, body_] := With[{loc = heapWith[body]},   (* heapWith coerces
 TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
 TDup[label_Integer, body_, k_]        := k @@ TDup[label, body]
 
+(* `TDup[{dp0, dp1}]` -- inverse for the projection pair: given two
+   TTerm projections that share a label and body loc, return the
+   DUP wrapper TTerm at that loc.  Native operation: retag the
+   projection's tag field (DP0=4 / DP1=5) to DUP (7), keeping ext
+   (label) and val (loc) unchanged.  No heap access -- the body
+   already lives at heap[loc] from the original TDup that produced
+   the pair.  Mismatched projections (different DUPs) stay
+   unevaluated rather than falling through to the body-constructor. *)
+TDup[{dp0_TTerm, dp1_TTerm}] /; (
+    TTermTag[dp0] === $TagDP0 && TTermTag[dp1] === $TagDP1
+    && TTermExt[dp0] === TTermExt[dp1]
+    && TTermVal[dp0] === TTermVal[dp1]) :=
+    packTerm[0, $TagDUP, TTermExt[dp0], TTermVal[dp0]]
+TDup[{_TTerm, _TTerm}] := $Failed
+
 (* === heap graph rendering ===
    Defined in Visualization.wl (loaded below).  Public symbol
    THeapGraph; per-tag shapes / colours are private. *)
