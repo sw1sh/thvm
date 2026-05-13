@@ -1811,14 +1811,11 @@ fn void bufferize_classify(Term root) {
       if (info->consumer_count >= 2) {
         bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
       }
-      // Matmul recognition keeps the GEMM kernel its own boundary so
-      // tile_analyze_gemm routes through the TC template (mirrors
-      // tinygrad's matmul-protect).  Other REDUCEs fuse inline via the
-      // unified pass's REDUCE-via-RANGE expansion + render_uop's _accN
-      // hoist.
-      if (info->op == UOP_REDUCE && bufferize_uop_is_matmul(info->loc)) {
+      if (info->op == UOP_REDUCE) {
         bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
-        bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
+        if (bufferize_uop_is_matmul(info->loc)) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
+        }
       }
     }
     bufferize_seed_from_nodes(root);
