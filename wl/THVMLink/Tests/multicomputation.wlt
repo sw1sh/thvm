@@ -323,4 +323,54 @@ If[ ! TMultiTraceQ[],
         TMultiwayGraph::needsteps,
         TestID -> "TMultiwayGraph rejects flat-trace input with a clear message"
     ];
+
+    (* === canonicalForm covers ALO / CTR / MAT / UOP and uses
+       TTagName for any other tag (no raw integer rendering).
+       Probes the worst-offender: TLazyRange produces a graph
+       full of ALO + CTR + MAT after the first REF unfolds. *)
+    VerificationTest[
+        TInit[];
+        Block[{steps, canon, tags},
+            steps = TMultiTrace[TLazyRange[3]];
+            canon = Catenate[steps[[All, "CanonicalSlice"]]];
+            tags = DeleteDuplicates[
+                Cases[canon, h_ /; StringQ[h] :> h, Infinity]];
+            (* No raw stringified tag-ints sneak through as "9", "12", etc. *)
+            AllTrue[tags, ! StringMatchQ[#, DigitCharacter ..] &]
+        ],
+        True,
+        TestID -> "TMultiTrace[TLazyRange[3]] canonical uses tag NAMES not raw ints"
+    ];
+
+    (* === Term + maxSteps: cap iteration without changing topology. *)
+    VerificationTest[
+        TInit[];
+        Block[{full, capped},
+            full   = TMultiTrace[TSup[1, 2] + 3];
+            TInit[];
+            capped = TMultiTrace[TSup[1, 2] + 3, $multiDefaultKeys, 2];
+            {Length[full], Length[capped]}
+        ],
+        {5, 3},                                  (* full = 5, capped = 1 init + 2 fires *)
+        TestID -> "TMultiTrace[expr, keys, maxSteps] caps iteration"
+    ];
+
+    (* === UOP / GRAD: the trace machinery handles UOP nodes from
+       TGrad over a tensor; canonical doesn't blow up and graphs
+       build without errors. *)
+    VerificationTest[
+        TInit[];
+        Block[{x, e, steps, g},
+            x = TTensorCreate[{1, 2, 3}];
+            e = TGrad[2 x, x];
+            steps = TMultiTrace[e, {"Events", "CanonicalSlice"}];
+            g = TMultiwayGraph[e];
+            {
+                Length[steps] >= 1,
+                Head[g] === Graph
+            }
+        ],
+        {True, True},
+        TestID -> "TMultiTrace + TMultiwayGraph on TGrad[2 x, x] -- UOP DAG"
+    ];
 ]

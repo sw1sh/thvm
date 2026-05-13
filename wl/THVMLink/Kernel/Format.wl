@@ -727,10 +727,38 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
             With[{v = val, b = body},
                 Row[{"\[Lambda]", Subscript["x", v], ". ", b}]],
         $TagUOP,
-            Inactive[Symbol["uop" <> ToString[ext]]] @@
-                Table[tTermTradDepth[THeapRead[val + i], d - 1],
-                      {i, 0, Min[4, uopArity[ext] - 1]}],
-        _, "?" <> ToString[tag]]];
+            (* Inactive is HoldAll, so we have to build the head Symbol
+               BEFORE Inactive wraps -- otherwise the Symbol[...]
+               expression itself shows up literally as the head, and
+               `ext` leaks as `Private\`ext`. *)
+            With[
+                {sym = Symbol[
+                    "thvm" <> Lookup[$uopNames, ext, "uop" <> ToString[ext]]],
+                 children = Table[
+                     tTermTradDepth[THeapRead[val + i], d - 1],
+                     {i, 0, Min[4, uopArity[ext] - 1]}]},
+                Inactive[sym] @@ children],
+        $TagALO,
+            (* ALO(body, state) -- lazy thunk.  Render as Defer[body]^s
+               so users can tell it's been thunked, and at which state. *)
+            With[
+                {b = tTermTradDepth[THeapRead[val + 0], d - 1],
+                 s = TTermVal[THeapRead[val + 1]]},
+                Subscript[OverHat[b], s]],
+        $TagCTR,
+            (* CTR -- constructor.  heap[base] = NUM(arity), rest is
+               children.  Render as C^tag[child1, ..., childN]. *)
+            With[{n = TTermVal[THeapRead[val]]},
+                Subscript["C", ext] @@
+                    Table[tTermTradDepth[THeapRead[val + 1 + i], d - 1],
+                          {i, 0, n - 1}]],
+        $TagMAT,
+            (* MAT(scrut, case-tree) -- match scrut against constructor ext. *)
+            With[
+                {scrut = tTermTradDepth[THeapRead[val + 0], d - 1],
+                 cases = tTermTradDepth[THeapRead[val + 1], d - 1]},
+                Row[{"match", Subscript["#", ext], "[", scrut, " | ", cases, "]"}]],
+        _, Row[{TTagName[tag], "@", val}]]];
 
 (* TraditionalForm of a TTerm dispatches inside the existing
    MakeBoxes UpValue rules above (search for `fmt === TraditionalForm`).

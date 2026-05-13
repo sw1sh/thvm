@@ -408,7 +408,7 @@ TCausalGraph[t_TTerm, max_Integer ? Positive, opts : OptionsPattern[]] :=
 TCausalGraph[input_List ? multiStepsQ, opts : OptionsPattern[]] :=
     TCausalGraph[traceFromInput[input], opts]
 TCausalGraph[trace_List, opts : OptionsPattern[]] := Block[
-    {events, ids, families, keep, edges, vlabels, wpp, labelStyle,
+    {events, ids, families, keep, edges, wpp, labelStyle,
      vstyles, legendOpt, presentFamilies, legend, userGraphOpts, tr},
     families = OptionValue["Family"];
     keep = If[ families === All,
@@ -428,7 +428,6 @@ TCausalGraph[trace_List, opts : OptionsPattern[]] := Block[
     edges = If[ TrueQ[tr],
         EdgeList @ TransitiveReductionGraph @ Graph[ids, edges],
         edges];
-    vlabels = OptionValue[VertexLabels];
     wpp = $wppCausalStyle;
     labelStyle = Directive[
         FontFamily -> "Helvetica", FontSize -> 9,
@@ -453,16 +452,12 @@ TCausalGraph[trace_List, opts : OptionsPattern[]] := Block[
        pass-through so the user-Automatic still gets our semantics.
        Other Graph options (ImageSize, GraphLayout, AspectRatio, ...)
        come first in Graph[]'s arg list so they win on overlap. *)
-    userGraphOpts = FilterRules[{opts}, Options[Graph]] /.
-        (VertexLabels -> _) -> Nothing;
+    userGraphOpts = FilterRules[{opts}, Options[Graph]];
     With[{g = Graph[
         ids,
         edges,
         Sequence @@ userGraphOpts,
-        VertexLabels -> Switch[vlabels,
-            Automatic, Thread[ids -> events[[All, "rule"]]],
-            None, None,
-            _, vlabels],
+        VertexLabels -> Thread[ids -> events[[All, "rule"]]],
         VertexLabelStyle -> labelStyle,
         VertexStyle -> vstyles,
         EdgeStyle -> wpp["EdgeStyle"],
@@ -558,7 +553,35 @@ canonicalFormDepth[term_, depth_Integer] := If[ depth <= 0,
             $TagDUP,
                 {"DUP", val,
                  canonicalFormDepth[THeapRead[val], depth - 1]},
-            _, {ToString[tag], val, ext}]]];
+            $TagALO,
+                (* ALO(body, state) -- thunk for lazy reduction.  Body
+                   at val+0, state metadata (atomic id) at val+1. *)
+                {"ALO",
+                 canonicalFormDepth[THeapRead[val + 0], depth - 1],
+                 TTermVal[THeapRead[val + 1]]},
+            $TagCTR,
+                (* CTR with `ext` carrying the constructor tag (from
+                   the referring cell -- we don't have a ref here so
+                   pass val); heap[base] = NUM(arity), then n children. *)
+                Block[{n = TTermVal[THeapRead[val]]},
+                    Join[
+                        {"CTR", ext},
+                        Table[
+                            canonicalFormDepth[
+                                THeapRead[val + 1 + i],
+                                depth - 1],
+                            {i, 0, n - 1}]]],
+            $TagMAT,
+                {"MAT", ext,
+                 canonicalFormDepth[THeapRead[val + 0], depth - 1],
+                 canonicalFormDepth[THeapRead[val + 1], depth - 1]},
+            $TagUOP,
+                (* UOP -- opcode-dependent arity; the children live at
+                   val..val+(arity-1).  We keep ext (opcode) and the
+                   loc to avoid walking arbitrary UOP sub-DAGs (they
+                   can be large, e.g. kernel bodies). *)
+                {"UOP", ext, val},
+            _, {TTagName[tag], val, ext}]]];
 
 (* Short caption for a term (used as the vertex label).  Mirrors
    what diagrams print: e.g. "NUM 4@12", "DP0@4", "SUP@14..15". *)
