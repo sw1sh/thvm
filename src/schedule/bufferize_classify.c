@@ -1900,20 +1900,26 @@ fn void bufferize_classify(Term root) {
     // "kernel boundary".
     bufferize_classify_project_unified();
     // Run the OLD-path removal rules to prune unnecessary realizes.
-    RealizeRewriteRule unified_rules[] = {
-      {"inline-constants",                bufferize_rule_inline_constants},
-      {"inline-adjacent-reduce-chains",   bufferize_rule_inline_adjacent_reduce_chains},
-      {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
-      {"inline-reduce-scalar-tail",       bufferize_rule_inline_reduce_scalar_tail},
-      {"inline-large-expand-fanout",      bufferize_rule_inline_large_expand_fanout},
-      {"inline-reduce-fanout",            bufferize_rule_inline_reduce_fanout},
-      {"remove-removable-bufferize",      bufferize_rule_remove_removable_bufferize},
-      {"remove-by-cost-score",            bufferize_rule_remove_by_cost_score},
-      {"inline-pure-fanout-probe",        bufferize_rule_inline_pure_fanout_probe},
-      {"metal-tile-fanin-cap",            bufferize_rule_metal_tile_fanin_cap},
-    };
-    bufferize_rewrite_apply(root, unified_rules,
-        (u32)(sizeof(unified_rules) / sizeof(unified_rules[0])));
+    // Under THVM_RANGEIFY_DIRECT=1, the unified pass's consumer-
+    // divergence + ending-ranges machinery + the chain-guards above
+    // already encode the realize-set tinygrad would emit, so the
+    // named-rule rewrites become noise.  Skip them in direct mode.
+    if (!direct) {
+      RealizeRewriteRule unified_rules[] = {
+        {"inline-constants",                bufferize_rule_inline_constants},
+        {"inline-adjacent-reduce-chains",   bufferize_rule_inline_adjacent_reduce_chains},
+        {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
+        {"inline-reduce-scalar-tail",       bufferize_rule_inline_reduce_scalar_tail},
+        {"inline-large-expand-fanout",      bufferize_rule_inline_large_expand_fanout},
+        {"inline-reduce-fanout",            bufferize_rule_inline_reduce_fanout},
+        {"remove-removable-bufferize",      bufferize_rule_remove_removable_bufferize},
+        {"remove-by-cost-score",            bufferize_rule_remove_by_cost_score},
+        {"inline-pure-fanout-probe",        bufferize_rule_inline_pure_fanout_probe},
+        {"metal-tile-fanin-cap",            bufferize_rule_metal_tile_fanin_cap},
+      };
+      bufferize_rewrite_apply(root, unified_rules,
+          (u32)(sizeof(unified_rules) / sizeof(unified_rules[0])));
+    }
     bufferize_finalize_stores(root);
     return;
   }
