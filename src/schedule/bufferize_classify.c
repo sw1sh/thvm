@@ -1760,6 +1760,79 @@ fn void bufferize_classify(Term root) {
     bufferize_node_mark(&BUFFERIZE_NODES[root_idx], BUFFERIZE_REASON_ROOT);
   }
 
+  // === Phase 3 cutover branch ===
+  // When the unified rangeify pass is enabled, we replace the OLD-path
+  // seeds (multi-consumer / REDUCE / matmul / matmul-input-protect) AND
+  // the 11 named rewrite rules with one call to run_rangeify_unified.
+  // The unified pass mirrors tinygrad/schedule/indexing.py:run_rangeify
+  // which only seeds COPY/CONTIGUOUS/STORE (none of which exist in
+  // thvm today) -- everything else is decided by the consumer-divergence
+  // walk. The root is already seeded above.
+  //
+  // After the walk we project RU_REALIZE_MAP back onto
+  // BUFFERIZE_NODES.realized so downstream consumers (materialize.c,
+  // bufferize.c, the kernel walker) observe the new decisions through
+  // the same side-table they already read.
+  if (rangeify_unified_enabled()) {
+    // Carry over the OLD-path REDUCE seed.  thvm's materialize.c +
+    // kernel_lift.c emit one KernelEntry per BUFFERIZE_NODES.realized
+    // bit; fusing a REDUCE into its elementwise consumer requires the
+    // downstream pipeline to lower REDUCE-via-RANGE inline, which the
+    // Phase 2 unified pass does not yet emit into the heap (it writes
+    // RU_RANGE_MAP only). Until Phase 4's UOP_BUFFERIZE production
+    // rewrite lands, mirror tinygrad's eventual STORE-realize on
+    // REDUCE by keeping the seed here so the existing renderers
+    // continue to see a per-REDUCE boundary.
+    // Mirror source: tinygrad/schedule/indexing.py:32 (`realize`
+    // pattern on COPY/CONTIGUOUS/STORE), the STORE branch of which
+    // is the closest analog to thvm's per-REDUCE realize today.
+    for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+      UOpInfo *info = &BUFFERIZE_NODES[i];
+      if (info->op == UOP_REDUCE) {
+        bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+        if (bufferize_uop_is_matmul(info->loc)) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
+        }
+      }
+    }
+    // bufferize_classify is the entry-point for the seed snapshot used
+    // by bufferize_node_mark; we still need to seed the bufferize graph
+    // for downstream queries that consult bufferize_is_realized.
+    bufferize_seed_from_nodes(root);
+    run_rangeify_unified(root);
+    for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+      int u_realized = rangeify_unified_is_realized(i);
+      if (u_realized && !BUFFERIZE_NODES[i].realized) {
+        bufferize_node_mark(&BUFFERIZE_NODES[i],
+                            BUFFERIZE_REASON_MULTI);
+      }
+    }
+    // Run the OLD-path removal rules to prune unnecessary realizes the
+    // unified pass added (it only ADDS; it cannot REMOVE). Phase 4 +
+    // 5c will subsume these rules with native unified-pass handling
+    // (per ideal_pipeline_v2.md:103). The "remove-*" + "inline-*"
+    // rules are what currently make the 597-kernel W2-grad fit under
+    // the 100-kernel target.
+    RealizeRewriteRule unified_rules[] = {
+      {"inline-constants",                bufferize_rule_inline_constants},
+      {"inline-adjacent-reduce-chains",   bufferize_rule_inline_adjacent_reduce_chains},
+      {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
+      {"inline-reduce-scalar-tail",       bufferize_rule_inline_reduce_scalar_tail},
+      {"inline-large-expand-fanout",      bufferize_rule_inline_large_expand_fanout},
+      {"inline-reduce-fanout",            bufferize_rule_inline_reduce_fanout},
+      {"remove-removable-bufferize",      bufferize_rule_remove_removable_bufferize},
+      {"remove-by-cost-score",            bufferize_rule_remove_by_cost_score},
+      {"inline-pure-fanout-probe",        bufferize_rule_inline_pure_fanout_probe},
+      {"metal-tile-fanin-cap",            bufferize_rule_metal_tile_fanin_cap},
+    };
+    bufferize_rewrite_apply(root, unified_rules,
+        (u32)(sizeof(unified_rules) / sizeof(unified_rules[0])));
+    bufferize_finalize_stores(root);
+    return;
+  }
+
+  // === OLD path (opt-out via THVM_UNIFIED_RANGEIFY=0) ===
+
   // Rules (b) + (c): multi-consumer or REDUCE.  Later named rules
   // can clear the final `realized` bit while preserving these
   // reason bits for diagnostics and tests.
