@@ -1885,8 +1885,16 @@ fn void bufferize_classify(Term root) {
         // values (e.g. _acc3's body references undefined a4).  Keep
         // the inner REDUCE as a boundary so it emits as its own kernel.
         int keep_for_matmul = bufferize_uop_is_matmul(info->loc);
-        int keep_for_chain = 0;
-        if (direct && !keep_for_matmul) {
+        // Probe_w2 (synthetic BN-train backward) showed the cmap-based
+        // chain-guard misses some inter-reduce iter dependencies in
+        // larger backward graphs -- grad came out 0 with the chain-guard
+        // active, correct with always-keep.  Since the kernel-count
+        // savings of the chain-guard (~13%) don't outweigh the
+        // correctness risk, conservatively keep ALL non-matmul REDUCEs
+        // as boundaries under DIRECT=1 too.  The fix path is in
+        // render_uop's nested-reduce-iter handler (file as task #21).
+        int keep_for_chain = 1;
+        if (0 && direct && !keep_for_matmul) {
           // When this REDUCE has another REDUCE as a TRANSITIVE
           // CONSUMER (chained pattern like maxpool's REDUCE(REDUCE(x))
           // or CE's REDUCE -> exp/log/sub -> REDUCE), keep THIS REDUCE
