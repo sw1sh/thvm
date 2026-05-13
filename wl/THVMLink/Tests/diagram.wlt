@@ -70,7 +70,7 @@ VerificationTest[
         t = First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]],
         steps, d, sup, op2
     },
-        steps = TMultiSteps[t];
+        steps = TMultiTrace[t];
         d     = steps[[2]]["Diagram"];                (* post APP_LAM *)
         sup   = findOne[d, "SUP"];
         op2   = findOne[d, "OP2 +"];
@@ -123,7 +123,7 @@ VerificationTest[
         t = First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]],
         steps, d
     },
-        steps = TMultiSteps[t];
+        steps = TMultiTrace[t];
         d     = steps[[4]]["Diagram"];                (* post DUP_SUP_ANN *)
         Length @ findAll[d, "OP2 +"]
     ],
@@ -145,7 +145,7 @@ nodeLabels[d_] := Sort @ Map[
 
 VerificationTest[
     TInit[];
-    Block[{steps = TMultiSteps[TLam[x, x + 3][TSup[1, 2]]]},
+    Block[{steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]]]},
         nodeLabels /@ steps[[All, "Diagram"]]
     ],
     {
@@ -156,7 +156,7 @@ VerificationTest[
         Sort @ {"SUP", "OP2 +", "NUM", "NUM", "NUM"},                 (* step 5: first OP2_NUM_NUM *)
         Sort @ {"SUP", "NUM", "NUM"}                                  (* step 6: final *)
     },
-    TestID -> "TMultiSteps[lam[x, x + 3][sup[1, 2]]] -- per-step node-label sets"
+    TestID -> "TMultiTrace[lam[x, x + 3][sup[1, 2]]] -- per-step node-label sets"
 ]
 
 (* Wires: a key topology invariant is that VAR(0) in the OP2 body
@@ -164,7 +164,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Block[{
-        steps = TMultiSteps[TLam[x, x + 3][TSup[1, 2]]],
+        steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]]],
         d, op2, sup
     },
         d   = steps[[2]]["Diagram"];                  (* post APP_LAM *)
@@ -190,7 +190,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Block[{
-        steps = TMultiSteps[TLam[x, x + 3][TSup[1, 2]]],
+        steps = TMultiTrace[TLam[x, x + 3][TSup[1, 2]]],
         d, dup, op2s, dupOuts, op2SecondSlotWires
     },
         d    = steps[[3]]["Diagram"];                 (* post OP2_SUP *)

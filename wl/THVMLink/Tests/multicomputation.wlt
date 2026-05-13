@@ -30,20 +30,22 @@ If[ ! TMultiTraceQ[],
        MERGE. *)
     VerificationTest[
         TInit[];
-        Module[{dp0, dp1, out},
+        Block[{dp0, dp1, out, trace},
             {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
             out = TMultiTrace[TCollapse[dp0]];
+            trace = Catenate[out[[All, "Events"]]];
             {
-                Sort[TTermVal /@ out["Result"]],                       (* {4, 5} *)
+                Sort[TTermVal /@ Last[out]["Term"]],                   (* {4, 5} *)
                 SubsetQ[                                               (* keys present *)
-                    Keys[First[out["Trace"]]],
+                    Keys[First[trace]],
                     {"id", "rule", "ruleCode", "family", "familyCode",
                      "termA", "termB", "deltaLabel", "consumed"}],
-                Count[out["Trace"], e_ /; e["family"] === "SLIDE"] >= 1,
-                Count[out["Trace"], e_ /; e["family"] === "SPLIT"] >= 1,
-                Count[out["Trace"], e_ /; e["rule"]   === "DUP_SUP_COM"] >= 1,
-                Count[out["Trace"], e_ /; e["family"] === "MERGE"]                  (* distinct labels => no annihilate *)
-            }],
+                Count[trace, e_ /; e["family"] === "SLIDE"] >= 1,
+                Count[trace, e_ /; e["family"] === "SPLIT"] >= 1,
+                Count[trace, e_ /; e["rule"]   === "DUP_SUP_COM"] >= 1,
+                Count[trace, e_ /; e["family"] === "MERGE"]            (* distinct labels => no annihilate *)
+            }
+        ],
         {{4, 5}, True, True, True, True, 0},
         TestID -> "TMultiTrace[TCollapse[dp0]] -- fresh labels, cross product, SPLIT not MERGE"
     ];
@@ -57,9 +59,9 @@ If[ ! TMultiTraceQ[],
             graph is a DAG, which TCausalGraph also enforces). *)
     VerificationTest[
         TInit[];
-        Module[{dp0, dp1, trace, ids, consumers, dag},
+        Block[{dp0, dp1, trace, ids, consumers, dag},
             {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
-            trace = TMultiTrace[TCollapse[dp0]]["Trace"];
+            trace = Catenate[TMultiTrace[TCollapse[dp0]][[All, "Events"]]];
             ids = trace[[All, "id"]];
             (* (a) every consumed id is a valid event id *)
             consumers = DeleteDuplicates @ Flatten[trace[[All, "consumed"]]];
@@ -70,7 +72,8 @@ If[ ! TMultiTraceQ[],
                 SubsetQ[ids, consumers],
                 Length[consumers] > 0,         (* at least some chains observed *)
                 dag
-            }],
+            }
+        ],
         {True, True, True},
         TestID -> "TMultiTrace -- consumed[] references valid earlier events"
     ];
@@ -81,9 +84,9 @@ If[ ! TMultiTraceQ[],
        references that point at other events in the trace. *)
     VerificationTest[
         TInit[];
-        Module[{dp0, dp1, trace, g, edgeRefs},
+        Block[{dp0, dp1, trace, g, edgeRefs},
             {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
-            trace = TMultiTrace[TCollapse[dp0]]["Trace"];
+            trace = Catenate[TMultiTrace[TCollapse[dp0]][[All, "Events"]]];
             (* Use unreduced graph: this test checks one-to-one
                correspondence between consumed[] entries and graph
                edges, which only holds before transitive reduction. *)
@@ -99,7 +102,8 @@ If[ ! TMultiTraceQ[],
                 DirectedGraphQ[g],
                 VertexCount[g] === Length[trace],
                 EdgeCount[g]   === edgeRefs
-            }],
+            }
+        ],
         {True, True, True, True, True},
         TestID -> "TCausalGraph[trace] -- DAG matching consumed[] edges"
     ];
@@ -113,16 +117,18 @@ If[ ! TMultiTraceQ[],
        two branchial dimensions to be independent. *)
     VerificationTest[
         TInit[];
-        Module[{e0, e1, out0, out1},
+        Block[{e0, e1, out0, out1, trace0},
             {e0, e1} = TDup[7, TOp2["+", TSup[7, 1, 2], 3]];
             out0 = TMultiTrace[TCollapse[e0]];
             out1 = TMultiTrace[TCollapse[e1]];
+            trace0 = Catenate[out0[[All, "Events"]]];
             {
-                TTermVal /@ out0["Result"],                            (* {4} *)
-                TTermVal /@ out1["Result"],                            (* {5} *)
-                Count[out0["Trace"], e_ /; e["family"] === "MERGE"] >= 1,
-                Count[out0["Trace"], e_ /; e["rule"]   === "DUP_SUP_ANN"] >= 1
-            }],
+                TTermVal /@ Last[out0]["Term"],                        (* {4} *)
+                TTermVal /@ Last[out1]["Term"],                        (* {5} *)
+                Count[trace0, e_ /; e["family"] === "MERGE"] >= 1,
+                Count[trace0, e_ /; e["rule"]   === "DUP_SUP_ANN"] >= 1
+            }
+        ],
         {{4}, {5}, True, True},
         TestID -> "TMultiTrace -- shared label collapses to the diagonal, trace shows MERGE"
     ];
@@ -133,16 +139,20 @@ If[ ! TMultiTraceQ[],
        trace must look exactly like a fresh trace of the same expr. *)
     VerificationTest[
         TInit[];
-        Module[{a, b, fresh, after},
+        Block[{a, b, fresh, after, freshFams, afterFams},
             {a, b}   = TDup[TOp2["+", TSup[1, 2], 3]];
             fresh    = TMultiTrace[TCollapse[a]];
             {a, b}   = TDup[TOp2["+", TSup[1, 2], 3]];      (* a fresh, independent term *)
             TCollapse[TDup[TOp2["*", TSup[4, 5], 6]][[1]]]; (* an unrelated reduction, untraced *)
             after    = TMultiTrace[TCollapse[a]];
+            freshFams = Catenate[fresh[[All, "Events"]]][[All, "family"]];
+            afterFams = Catenate[after[[All, "Events"]]][[All, "family"]];
             {
-                Sort[TTermVal /@ after["Result"]] === Sort[TTermVal /@ fresh["Result"]],
-                Sort[after["Trace"][[All, "family"]]] === Sort[fresh["Trace"][[All, "family"]]]
-            }],
+                Sort[TTermVal /@ Last[after]["Term"]] ===
+                    Sort[TTermVal /@ Last[fresh]["Term"]],
+                Sort[afterFams] === Sort[freshFams]
+            }
+        ],
         {True, True},
         TestID -> "TMultiTrace buffer is reset -- a prior untraced reduction doesn't leak in"
     ];
@@ -175,7 +185,7 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{seed, steps, g, edges},
             seed = TSup[1, 2] + 3;
-            steps = TMultiSteps[seed];
+            steps = TMultiTrace[seed];
             g = TMultiwayGraph[steps];
             edges = EdgeList[g];
             {
@@ -198,7 +208,7 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{seed, steps, g, edges},
             seed = First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]];
-            steps = TMultiSteps[seed];
+            steps = TMultiTrace[seed];
             g = TMultiwayGraph[steps];
             edges = EdgeList[g];
             {
@@ -219,7 +229,7 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{seed, steps, g, edges},
             seed = First @ TDup[3, TLam[x, x + 3][TSup[7, 1, 2]]];
-            steps = TMultiSteps[seed];
+            steps = TMultiTrace[seed];
             g = TMultiwayGraph[steps];
             edges = EdgeList[g];
             {
@@ -237,26 +247,28 @@ If[ ! TMultiTraceQ[],
        causal graph should record one edge per producer, not two. *)
     VerificationTest[
         TInit[];
-        Block[{out, ann},
+        Block[{out, trace, ann},
             out = TMultiTrace[TCollapse[
                 First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]]]];
-            ann = SelectFirst[out["Trace"], #["rule"] === "DUP_SUP_ANN" &];
+            trace = Catenate[out[[All, "Events"]]];
+            ann = SelectFirst[trace, #["rule"] === "DUP_SUP_ANN" &];
             {ann["consumed"], DeleteDuplicates[ann["consumed"]]}
         ],
         {{1}, {1}},
         TestID -> "DUP_SUP_ANN event consumed list is deduplicated"
     ];
 
-    (* === TCausalGraph accepts either a trace or a steps list and
-       returns the same graph (events are flattened across steps). *)
+    (* === TCausalGraph accepts either a flat trace or a steps list
+       (an event-only TMultiTrace OR a full per-step record).  The
+       resulting graph is identical. *)
     VerificationTest[
         TInit[];
-        Block[{out, traceForm, steps, stepsForm},
-            out       = TMultiTrace[TCollapse[TSup[1, 2] + 3]];
-            traceForm = TCausalGraph[out["Trace"]];
+        Block[{traceForm, stepsForm, traced, stepped},
+            traced  = TMultiTrace[TCollapse[TSup[1, 2] + 3]];
+            traceForm = TCausalGraph[Catenate[traced[[All, "Events"]]]];
             TInit[];
-            steps     = TMultiSteps[TSup[1, 2] + 3];
-            stepsForm = TCausalGraph[steps];
+            stepped = TMultiTrace[TSup[1, 2] + 3];
+            stepsForm = TCausalGraph[stepped];
             {
                 Length @ VertexList[traceForm] === Length @ VertexList[stepsForm],
                 Sort @ EdgeList[traceForm] === Sort @ EdgeList[stepsForm]
@@ -272,7 +284,8 @@ If[ ! TMultiTraceQ[],
     VerificationTest[
         TInit[];
         Block[{trace},
-            trace = TMultiTrace[TCollapse[TSup[1, 2] + 3]]["Trace"];
+            trace = Catenate[
+                TMultiTrace[TCollapse[TSup[1, 2] + 3]][[All, "Events"]]];
             TMultiwayGraph[trace]
         ],
         $Failed,

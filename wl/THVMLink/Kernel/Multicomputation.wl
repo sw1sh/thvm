@@ -41,9 +41,8 @@
 
 BeginPackage["THVMLink`"];
 
-TMultiTrace::usage = "TMultiTrace[expr] evaluates `expr` (HoldFirst) with the multicomputation reduction trace recording, then returns <|\"Result\" -> value of expr, \"Trace\" -> {event, ...}|>, where each `event` is an Association <|\"id\", \"rule\", \"ruleCode\", \"family\", \"familyCode\", \"termA\", \"termB\", \"deltaLabel\", \"consumed\", \"produced\"|>.  An event is one interaction-net rule firing; `family` is one of TERM (within-branch compute), SLIDE (re-foliation: APP-SUP commute, INC, ...), FORK (1 -> 2), SPLIT (DUP-SUP cross product), MERGE (DUP-SUP annihilate), PRUNE (ERA), DIST (sharing housekeeping) -- see docs/multicomputation.md.  `consumed` is the list of producer event ids (M1 wire provenance: a list element `id` means \"this event's active pair includes a wire most recently written by event `id`\"); empty for events whose active pair was built outside the trace.  `produced` is the dual: the list of heap locs the event wrote (last-writer-wins snapshot of wire_prov at trace end -- so cells overwritten by a later event aren't attributed here).  Recording is turned on for the duration of `expr` and off afterwards.  The default \"make wl\" already builds a trace-enabled dylib; check TMultiTraceQ[].";
+TMultiTrace::usage = "TMultiTrace[expr, keys, maxSteps] evaluates `expr` (HoldFirst) with the multicomputation reduction trace recording on, then runs the collapse walk one TStep at a time, returning a list of per-step Associations.  Each step record contains the user-requested `keys` (default: all of them).  Available keys: \"Step\", \"Term\", \"Events\", \"ITRS\", \"Slice\", \"SliceCanonical\", \"SliceBoxes\", \"Diagram\".  Pass `keys` as a list of strings, the literal `All`, or a single string.  `keys` controls cost -- \"SliceBoxes\" and \"Diagram\" are expensive (TraditionalForm rendering, DC diagram materialisation), so request only what your view needs.  Step 0 captures any events that fired during `expr`'s evaluation itself (so `TMultiTrace[TCollapse[t]]` attributes the whole collapse to step 0).  Each event is an Association <|\"id\", \"rule\", \"ruleCode\", \"family\", \"familyCode\", \"termA\", \"termB\", \"deltaLabel\", \"consumed\", \"produced\"|>; `family` is one of TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST (see docs/multicomputation.md).  `consumed` is the list of producer event ids (M1 wire provenance: a list element `id` means \"this event's active pair includes a wire most recently written by event `id`\"); empty for events whose active pair was built outside the trace.  `produced` is the dual: the list of heap locs the event wrote (last-writer-wins snapshot of wire_prov at trace end).  Recording is turned on for the duration of `expr` and off afterwards.  The default `make wl` already builds a trace-enabled dylib; check TMultiTraceQ[].  Option \"DiagramSeeds\" -> {auxTerms...} seeds the per-step diagrams with additional roots.";
 TMultiTraceQ::usage = "TMultiTraceQ[] returns True iff the loaded THVMLink dylib was built with -DTHVM_TRACE -- the default for \"make wl\".  Pass WL_TRACE=0 to make to opt out of the trace machinery (e.g. for benching), in which case TMultiTrace returns $Failed.";
-TMultiSteps::usage = "TMultiSteps[term] (or TMultiSteps[term, maxSteps]) fires one IC interaction at a time -- via TStep -- with the multicomputation trace recording on, snapshotting the heap diagram after every step.  Returns a list of Associations <|\"Step\" -> i, \"Term\" -> partiallyReducedTerm, \"Diagram\" -> THeapDiagram[partial, \"Arrange\"], \"Events\" -> {event, ...}, \"ITRS\" -> n|>; the diagram is built BEFORE the next TStep mutates the heap, so the per-step pictures are usable after the reduction completes.  Step 0 is the input term with no events.  Stops when no more interactions fire (normal form) or after `maxSteps` (default: unbounded).  Pass option \"DiagramSeeds\" -> {auxTerms...} to seed the per-step diagrams with additional roots (e.g. the sibling projection from TDup so the diagram surfaces both halves of a DUP-SUP commute).  Requires the trace dylib (TMultiTraceQ[] === True).";
 TCausalGraph::usage = "TCausalGraph[input] returns a directed Graph[] of the causal structure of a reduction.  `input` is either a `trace` (TMultiTrace[...][\"Trace\"], a flat list of event Associations) or a `steps` list (from TMultiSteps[...]) -- in the steps case the events are flattened across all step records.  Vertices are event ids; edges F -> E iff F's id appears in E's \"consumed\" list (wire provenance from M1).  Each vertex is coloured by its event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST) so the trace shape is readable at a glance.  Options: \"VertexLabels\" -> Automatic labels each event with its rule name; \"Family\" -> {\"TERM\", ...} filters by family; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour (default None).";
 TMultiwayGraph::usage = "TMultiwayGraph[steps] returns the multiway view of a TMultiSteps reduction.  `steps` is a list of step Associations (each carrying \"SliceCanonical\", \"SliceBoxes\", \"Events\") -- TMultiwayGraph needs the slice info, so unlike TCausalGraph it does NOT accept a flat trace; call TMultiSteps first.  Vertices are TERM-slices: per step, the active term's SUP-head is unfolded so a term with head SUP{a, b} contributes one vertex per leaf (recursively, until non-SUP heads), and a term with non-SUP head contributes a single vertex.  Edges represent trace events between consecutive steps: source-target pairs are taken as a cross product (one edge per (source, target) pair across the two slices), coloured by the firing event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST).  Options: \"Branchial\" -> True overlays a branchial clique (dashed WPP-styled edges) between sibling vertices within each SUP-bearing slice (default False); \"VertexLabels\" -> Automatic labels each vertex with the leaf term's tag/value; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour.";
 TMultiwayGraph::needsteps = "TMultiwayGraph requires step records (from TMultiSteps), not a flat trace.  Use TCausalGraph[trace] for an event-id-vertices view, or call TMultiSteps to capture the slice canonicals needed for the multiway view.";
@@ -94,27 +93,15 @@ producedFromWireProv[wireProv_List] :=
             {_, -1}],
         Last -> First]
 
-SetAttributes[TMultiTrace, HoldFirst];
-TMultiTrace[expr_] := Block[
-    {result, rows, wireProv, produced, events},
-    ensureInit[];
-    If[ ! TMultiTraceQ[], Message[TMultiTrace::notrace]; Return[$Failed]];
-    $multiTraceInitFn[0];     (* allocate the events buffer; flag stays off *)
-    $multiTraceSetFn[1];      (* recording on *)
-    result = expr;            (* HoldFirst -- evaluated here, traced *)
-    $multiTraceSetFn[0];      (* recording off *)
-    rows = $multiTraceSnapshotFn[];          (* {Integer, 2}, n x 8 *)
-    wireProv = $multiWireProvSnapshotFn[];   (* {Integer, 1}, HEAP_NEXT *)
-    $multiTraceFreeFn[];      (* release the buffer *)
-    events = Map[eventFromRow, rows];
-    produced = producedFromWireProv[wireProv];
-    <|
-        "Result" -> result,
-        "Trace" -> Map[
-            e |-> Append[e, "produced" -> Lookup[produced, e["id"], {}]],
-            events]
-    |>
-]
+(* All step-record keys the implementation can populate. *)
+$multiAllKeys = {"Step", "Term", "Events", "ITRS",
+                 "Slice", "SliceCanonical", "SliceBoxes", "Diagram"};
+
+(* Keys that require the slice walk + its dependent computations. *)
+$multiSliceKeys = {"Slice", "SliceCanonical", "SliceBoxes"};
+$multiDiagramKeys = {"Diagram"};
+keysNeedSlice[keys_]   := IntersectingQ[keys, $multiSliceKeys];
+keysNeedDiagram[keys_] := IntersectingQ[keys, $multiDiagramKeys];
 
 (* TMultiSteps -- stepwise replay of a reduction.  Each TStep
    fires exactly one IC interaction; we snapshot the heap (= render
@@ -128,15 +115,20 @@ TMultiTrace[expr_] := Block[
    wl/GUIDE.md (Mutation, Control flow).  The step record carries a
    private "_evBefore" key to thread the event-buffer cursor through
    the iteration; we strip it before returning. *)
-SetAttributes[TMultiSteps, HoldFirst];
-Options[TMultiSteps] = {"DiagramSeeds" -> {}};
+SetAttributes[TMultiTrace, HoldFirst];
+Options[TMultiTrace] = {"DiagramSeeds" -> {}};
 
-TMultiSteps[term0_, opts : OptionsPattern[]] :=
-    multicompStepsImpl[term0, Infinity, OptionValue["DiagramSeeds"]]
-TMultiSteps[term0_, max_Integer ? Positive, opts : OptionsPattern[]] :=
-    multicompStepsImpl[term0, max, OptionValue["DiagramSeeds"]]
-TMultiSteps[term0_, 0, opts : OptionsPattern[]] :=
-    multicompStepsImpl[term0, Infinity, OptionValue["DiagramSeeds"]]
+resolveKeys[All]              := $multiAllKeys
+resolveKeys[ks_List]          := ks
+resolveKeys[k_String]         := {k}
+
+TMultiTrace[expr_, opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, $multiAllKeys, Infinity, OptionValue["DiagramSeeds"]]
+TMultiTrace[expr_, keys : (_List | All | _String), opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, resolveKeys[keys], Infinity, OptionValue["DiagramSeeds"]]
+TMultiTrace[expr_, keys : (_List | All | _String),
+            max_Integer ? Positive, opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, resolveKeys[keys], max, OptionValue["DiagramSeeds"]]
 
 (* `term0` is held by the HoldFirst on TMultiSteps.  Inside the
    impl we evaluate it AFTER turning the trace flag on, so any
@@ -155,8 +147,11 @@ TMultiSteps[term0_, 0, opts : OptionsPattern[]] :=
    multiway tree even after the walker has descended into a single
    branch.  ERA / any other leaf pops the frontier.  The walk
    terminates when both TStep is a no-op and the frontier is empty. *)
-multicompStepsImpl[term0_, maxSteps_, auxSeeds_List] := Block[
-    {seedTerm, snapshot, mkRecord, advance, recs},
+SetAttributes[multiTraceImpl, HoldFirst];
+multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List] := Block[
+    {seedTerm, snapshot, mkRecord, advance, recs, preEvents,
+     wantSlice = keysNeedSlice[keys], wantDiagram = keysNeedDiagram[keys],
+     produced, wireProv},
     ensureInit[];
     If[ ! TMultiTraceQ[],
         Message[TMultiTrace::notrace];
@@ -165,6 +160,12 @@ multicompStepsImpl[term0_, maxSteps_, auxSeeds_List] := Block[
     $multiTraceInitFn[0];
     $multiTraceSetFn[1];
     seedTerm = term0;
+    (* Capture events that fired during seedTerm's evaluation (e.g.
+       TCollapse[expr] traces the entire collapse in one shot).
+       These get attributed to step 0; the per-step iteration below
+       then handles subsequent firings as it descends through the
+       reduction tree. *)
+    preEvents = Map[eventFromRow, $multiTraceSnapshotFn[]];
     (* Diagram seeds: anchors (SUPs the walker descended through),
        user auxSeeds, and the active term.  `seedTerm` is included
        ONLY when it is a DP projection -- in that case
@@ -195,23 +196,24 @@ multicompStepsImpl[term0_, maxSteps_, auxSeeds_List] := Block[
                      unfoldSupHead[THeapRead[loc + 1]]]],
             anchors]];
     mkRecord[stepNum_, term_, events_, itrs_, evCursor_, frontier_,
-             anchors_, parentSlot_] := With[
-        {sl = sliceNow[term, anchors]},
+             anchors_, parentSlot_] := Block[{sl},
+        sl = If[ wantSlice, sliceNow[term, anchors], None];
         <|
             "Step"           -> stepNum,
             "Term"           -> term,
-            "Diagram"        -> snapshot[term, anchors],
+            "Diagram"        -> If[ wantDiagram, snapshot[term, anchors], None],
             "Slice"          -> sl,
-            "SliceCanonical" -> Map[canonicalForm, sl],
+            "SliceCanonical" -> If[ wantSlice && MemberQ[keys, "SliceCanonical"],
+                                    Map[canonicalForm, sl], None],
             (* Pre-compute the TraditionalForm rendering NOW, while
                the heap is in this step's state.  We can't defer to
                display time -- subsequent steps mutate the heap, so
                a late TraditionalForm[t] would render the FINAL
                state for every step.  Store as box expressions to
                drop straight into vertex labels via RawBoxes. *)
-            "SliceBoxes"     -> Map[
-                t |-> ToBoxes[t, TraditionalForm],
-                sl],
+            "SliceBoxes"     -> If[ wantSlice && MemberQ[keys, "SliceBoxes"],
+                                    Map[t |-> ToBoxes[t, TraditionalForm], sl],
+                                    None],
             "Events"         -> events,
             "ITRS"           -> itrs,
             "_evBefore"      -> evCursor,
@@ -241,6 +243,13 @@ multicompStepsImpl[term0_, maxSteps_, auxSeeds_List] := Block[
          evBefore = s["_evBefore"],
          before, after, next, evAfter, rows, events, tag, loc, l, r,
          done = False, result = $Done},
+        (* Step the collapse walk only while the active term is a
+           TTerm.  When the user passed e.g. TCollapse[expr] (which
+           evaluates to a List of TTerms before TMultiTrace's
+           HoldFirst lets the expr settle), there's nothing left to
+           step -- the step-0 record already holds the pre-evaluation
+           events.  Return $Done so NestWhileList stops. *)
+        If[ ! MatchQ[term, _TTerm], Return[$Done, Block]];
         While[ ! done,
             before = TItrs[];
             next   = TStep[term];
@@ -290,16 +299,25 @@ multicompStepsImpl[term0_, maxSteps_, auxSeeds_List] := Block[
     advance[$Done] := $Done;
     recs = NestWhileList[
         advance,
-        mkRecord[0, seedTerm, {}, TItrs[], $multiTraceCountFn[], {},
+        mkRecord[0, seedTerm, preEvents, TItrs[], $multiTraceCountFn[], {},
                  {}, Missing[]],
         r |-> r =!= $Done,
         1,
         maxSteps
     ];
     $multiTraceSetFn[0];
+    wireProv = $multiWireProvSnapshotFn[];
     $multiTraceFreeFn[];
+    (* Decorate each event with `produced` (the heap locs the event
+       wrote, derived from a single wireProv snapshot at trace end).
+       Done as a post-processing pass so the cost is paid once. *)
+    produced = producedFromWireProv[wireProv];
     Map[
-        r |-> KeyDrop[r, {"_evBefore", "_frontier", "_anchors", "_parent"}],
+        r |-> KeySelect[
+            Append[r, "Events" -> Map[
+                e |-> Append[e, "produced" -> Lookup[produced, e["id"], {}]],
+                r["Events"]]],
+            MemberQ[keys, #] &],
         DeleteCases[recs, $Done]]
 ]
 
