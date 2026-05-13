@@ -1,5 +1,5 @@
-(* heap_snapshot.wlt -- HeapSnapshot / HeapInitialize / HeapStrip /
-   THeapToTermTree from Heap.wl.
+(* heap_snapshot.wlt -- TContextSnapshot / TInitialize / TContextStrip /
+   TContextToTermTree from Heap.wl.
 
    Roundtrip strategy: build a term, snapshot, TReset, initialize,
    compare TTermExpr of the new root vs. the original.  TTermExpr
@@ -10,12 +10,12 @@
 VerificationTest[
     TInit[];
     TReset[];
-    Module[{h = HeapSnapshot[TEra[]], a},
+    Module[{h = TContextSnapshot[TEra[]], a},
         a = First[h];
         {Head[h], KeyExistsQ[a, "Cells"], KeyExistsQ[a, "Tensors"],
          KeyExistsQ[a, "Root"], KeyExistsQ[a, "State"]}
     ],
-    {Heap, True, True, True, True},
+    {TContext, True, True, True, True},
     TestID -> "heap-snapshot/structural-keys"
 ]
 
@@ -23,7 +23,7 @@ VerificationTest[
     (* Empty heap: TEra[] is atomic so nothing gets allocated. *)
     TInit[];
     TReset[];
-    Module[{h = HeapSnapshot[TEra[]]},
+    Module[{h = TContextSnapshot[TEra[]]},
         {Length[First[h]["Cells"]], First[h]["State"]}
     ],
     {0, "Initialized"},
@@ -35,7 +35,7 @@ VerificationTest[
     TInit[];
     TReset[];
     Module[{lam = TLam[x, x], h, root},
-        h = HeapSnapshot[lam];
+        h = TContextSnapshot[lam];
         root = First[h]["Root"];
         {Head[root], root[[1]], root[[3]]}
     ],
@@ -71,9 +71,9 @@ VerificationTest[
     Module[{orig, before, h, restored, after},
         orig = TLam[x, x];
         before = TTermExpr[orig];
-        h = HeapSnapshot[orig];
+        h = TContextSnapshot[orig];
         TReset[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         after = TTermExpr[restored];
         before === after
     ],
@@ -89,9 +89,9 @@ VerificationTest[
     Module[{orig, before, h, restored, after},
         orig = TLam[x, TApp[x, TEra[]]];
         before = TTermExpr[orig];
-        h = HeapSnapshot[orig];
+        h = TContextSnapshot[orig];
         TReset[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         after = TTermExpr[restored];
         before === after
     ],
@@ -107,9 +107,9 @@ VerificationTest[
     Module[{orig, before, h, restored, after},
         orig = TSup[42, TEra[], TEra[]];
         before = TTermExpr[orig];
-        h = HeapSnapshot[orig];
+        h = TContextSnapshot[orig];
         TReset[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         after = TTermExpr[restored];
         before === after
     ],
@@ -124,10 +124,10 @@ VerificationTest[
     TReset[];
     Module[{h, fresh1},
         TFreshLabel[]; TFreshLabel[]; TFreshLabel[];   (* counter -> 4 *)
-        h = HeapSnapshot[TEra[]];
+        h = TContextSnapshot[TEra[]];
         TReset[];
         TFreshLabel[];                                 (* counter would be 2 if not restored *)
-        HeapInitialize[h];
+        TInitialize[h];
         fresh1 = TFreshLabel[];
         {First[h]["Labels"], fresh1}
     ],
@@ -142,9 +142,9 @@ VerificationTest[
     TReset[];
     Module[{orig, h, restored},
         orig = TTensor[{4}, {1., 2., 3., 4.}];
-        h = HeapSnapshot[orig];
+        h = TContextSnapshot[orig];
         TReset[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         Normal @ TTensorData[restored]
     ],
     {1., 2., 3., 4.},
@@ -159,7 +159,7 @@ VerificationTest[
     TReset[];
     Module[{a = TTensor[{2}, {1., 2.}], b = TTensor[{2}, {3., 4.}], expr, h, slots},
         expr = TUOpAdd[a, b];
-        h = HeapSnapshot[expr];
+        h = TContextSnapshot[expr];
         slots = Sort @ Keys @ First[h]["Tensors"];
         slots
     ],
@@ -167,15 +167,15 @@ VerificationTest[
     TestID -> "heap-snapshot/tensor-slots-dense"
 ]
 
-(* === HeapStrip and ZeroFill init === *)
+(* === TContextStrip and ZeroFill init === *)
 
 VerificationTest[
     TInit[];
     TReset[];
     Module[{orig, h, stripped},
         orig = TTensor[{3}, {7., 8., 9.}];
-        h = HeapSnapshot[orig];
-        stripped = HeapStrip[h];
+        h = TContextSnapshot[orig];
+        stripped = TContextStrip[h];
         {First[stripped]["State"],
          AssociationQ @ First[stripped]["Tensors"][0],
          First[stripped]["Tensors"][0]["shape"],
@@ -190,10 +190,10 @@ VerificationTest[
     TReset[];
     Module[{orig, h, stripped, restored},
         orig = TTensor[{3}, {7., 8., 9.}];
-        h = HeapSnapshot[orig];
-        stripped = HeapStrip[h];
+        h = TContextSnapshot[orig];
+        stripped = TContextStrip[h];
         TReset[];
-        restored = HeapInitialize[stripped, "ZeroFill" -> True];
+        restored = TInitialize[stripped, "ZeroFill" -> True];
         {Normal @ TTensorData[restored], TTensorShape[restored]}
     ],
     {{0., 0., 0.}, {3}},
@@ -206,27 +206,27 @@ VerificationTest[
     TReset[];
     Catch[
         Module[{h, stripped},
-            h = HeapSnapshot[TTensor[{2}, {1., 2.}]];
-            stripped = HeapStrip[h];
+            h = TContextSnapshot[TTensor[{2}, {1., 2.}]];
+            stripped = TContextStrip[h];
             TReset[];
-            HeapInitialize[stripped]
+            TInitialize[stripped]
         ],
-        "HeapInitialize::uninit"
+        "TInitialize::uninit"
     ],
     $Failed,
-    {HeapInitialize::uninit},
+    {TInitialize::uninit},
     TestID -> "heap-init/uninit-without-zerofill-throws"
 ]
 
-(* === THeapToTermTree projection === *)
+(* === TContextToTermTree projection === *)
 
 VerificationTest[
     TInit[];
     TReset[];
     Module[{orig = TLam[x, TApp[x, TEra[]]], h, viaProjection, viaWalk},
         viaWalk = TTermExpr[orig];
-        h = HeapSnapshot[orig];
-        viaProjection = THeapToTermTree[h];
+        h = TContextSnapshot[orig];
+        viaProjection = TContextToTermTree[h];
         viaProjection === viaWalk
     ],
     True,
@@ -240,11 +240,11 @@ VerificationTest[
     TReset[];
     Module[{orig, h, text, parsed, restored},
         orig = TLam[x, TApp[x, TEra[]]];
-        h = HeapSnapshot[orig];
+        h = TContextSnapshot[orig];
         text = ToString[h, InputForm];
         parsed = ToExpression[text];
         TReset[];
-        restored = HeapInitialize[parsed];
+        restored = TInitialize[parsed];
         TTermExpr[restored] === TTermExpr[orig]
     ],
     True,
@@ -264,9 +264,9 @@ VerificationTest[
     TDef["id-snap", TLam[x, x]];
     Module[{ref, h, restored, out},
         ref = TRef["id-snap"];
-        h = HeapSnapshot[ref];
+        h = TContextSnapshot[ref];
         TReset[];   (* defs + book preserved *)
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         out = TWnf @ TApp[restored, TEra[]];
         {TTagName[TTermTag[restored]], TTagName[TTermTag[out]]}
     ],
@@ -282,9 +282,9 @@ VerificationTest[
     TDef["id-snap2", TLam[x, x]];
     Module[{expr, h, restored, out},
         expr = TApp[TRef["id-snap2"], TEra[]];
-        h = HeapSnapshot[expr];
+        h = TContextSnapshot[expr];
         TReset[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         out = TWnf[restored];
         TTagName[TTermTag[out]]
     ],
@@ -296,7 +296,7 @@ VerificationTest[
    ALO cells are created by alo_realize when REF unfolds.  ALO_STATES
    and ALO_STATES_NEXT also survive thvm_wl_reset; combined with our
    1:1 cells-index = heap-loc layout, the new_loc references inside
-   ALO_STATES stay valid after HeapInitialize, so an ALO cell from
+   ALO_STATES stay valid after TInitialize, so an ALO cell from
    the snapshot continues to force correctly post-restore. *)
 
 VerificationTest[
@@ -307,9 +307,9 @@ VerificationTest[
     TDef["loop-snap", TLam[x, TRef["loop-snap"]]];
     Module[{out1, h, restored, out2},
         out1 = TWnf @ TApp[TRef["loop-snap"], TEra[]];
-        h = HeapSnapshot[out1];
+        h = TContextSnapshot[out1];
         TReset[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         out2 = TWnf @ TApp[restored, TEra[]];
         {TTagName[TTermTag[out1]], TTagName[TTermTag[out2]]}
     ],
@@ -327,9 +327,9 @@ VerificationTest[
     Module[{out, h, restored, before, after},
         out = TWnf @ TApp[TApp[TRef["pair-snap"], TEra[]], TEra[]];
         before = TTermExpr[out];
-        h = HeapSnapshot[out];
+        h = TContextSnapshot[out];
         TReset[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         after = TTermExpr[restored];
         before === after
     ],
@@ -340,7 +340,7 @@ VerificationTest[
 (* === cross-restart bundling ===
    BookCells / Defs / AloStates are bundled in the snapshot so a
    restore after TFree + TInit (a fresh kernel) reconstructs the same
-   runtime state.  HeapInitialize auto-detects the bundle and wipes
+   runtime state.  TInitialize auto-detects the bundle and wipes
    book / DEFS / ALO_STATES via thvm_wl_book_reset before restoring. *)
 
 VerificationTest[
@@ -348,7 +348,7 @@ VerificationTest[
     TReset[];
     TDef["x-snap", TLam[x, x]];
     Module[{h},
-        h = HeapSnapshot[TRef["x-snap"]];
+        h = TContextSnapshot[TRef["x-snap"]];
         Length[First[h]["Defs"]] >= 1 &&
             Length[First[h]["BookCells"]] >= 1
     ],
@@ -358,15 +358,15 @@ VerificationTest[
 
 VerificationTest[
     (* Full kernel restart: TFree + TInit wipes book/defs/alo state.
-       HeapInitialize must rebuild everything from the bundle. *)
+       TInitialize must rebuild everything from the bundle. *)
     TInit[];
     TReset[];
     TDef["restart-id", TLam[x, x]];
     Module[{h, restored, out},
-        h = HeapSnapshot[TRef["restart-id"]];
+        h = TContextSnapshot[TRef["restart-id"]];
         TFree[];
         TInit[];   (* fresh kernel: no defs, no book, no alo state *)
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         out = TWnf @ TApp[restored, TEra[]];
         {TTagName[TTermTag[restored]], TTagName[TTermTag[out]]}
     ],
@@ -384,10 +384,10 @@ VerificationTest[
     Module[{out1, h, restored, expected, after},
         out1 = TWnf @ TApp[TApp[TRef["restart-pair"], TEra[]], TEra[]];
         expected = TTermExpr[out1];
-        h = HeapSnapshot[out1];
+        h = TContextSnapshot[out1];
         TFree[];
         TInit[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         after = TTermExpr[restored];
         after === expected
     ],
@@ -402,10 +402,10 @@ VerificationTest[
     TReset[];
     TDef["restart-loop", TLam[x, TRef["restart-loop"]]];
     Module[{h, restored, out},
-        h = HeapSnapshot[TRef["restart-loop"]];
+        h = TContextSnapshot[TRef["restart-loop"]];
         TFree[];
         TInit[];
-        restored = HeapInitialize[h];
+        restored = TInitialize[h];
         out = TWnf @ TApp[restored, TEra[]];
         TTagName[TTermTag[out]]
     ],
@@ -421,12 +421,12 @@ VerificationTest[
     TDef["restart-txt", TLam[x, x]];
     Module[{orig, h, text, parsed, restored},
         orig = TRef["restart-txt"];
-        h = HeapSnapshot[orig];
+        h = TContextSnapshot[orig];
         text = ToString[h, InputForm];
         TFree[];
         TInit[];
         parsed = ToExpression[text];
-        restored = HeapInitialize[parsed];
+        restored = TInitialize[parsed];
         TTagName[TTermTag[TWnf @ TApp[restored, TEra[]]]]
     ],
     "ERA",

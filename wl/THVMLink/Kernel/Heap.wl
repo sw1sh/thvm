@@ -6,27 +6,27 @@
      - Term[tag, ext, val] / Term[tag, ext, val, sub]: positional
        per-cell descriptor for a DYNAMIC-heap cell.  `val` is an
        index into the enclosing Heap's Cells list; for TAG_TEN cells
-       `val` is a dense slot id keyed against Heap["Tensors"]; for
+       `val` is a dense slot id keyed against TContext["Tensors"]; for
        TAG_NUM / TAG_REF / TAG_ERA `val` stays as raw bits / name id
        / 0.
-     - BookTerm[tag, ext, val] / BookTerm[tag, ext, val, sub]: same
+     - BookCell[tag, ext, val] / BookCell[tag, ext, val, sub]: same
        schema as Term but for cells living in the BOOK heap (or for a
        book-domain term sitting at heap[ALO.val] inside the dyn heap).
-       `val` is an index into Heap["BookCells"].
-     - Heap[<|"Root", "Cells", "BookCells", "Tensors", "Defs",
+       `val` is an index into TContext["BookCells"].
+     - TContext[<|"Root", "Cells", "BookCells", "Tensors", "Defs",
               "AloStates", "Labels", "State"|>]: the full snapshot.
 
    Cross-restart roundtrip: bundling BookCells + Defs + AloStates lets
    a snapshot be loaded after TFree+TInit (a fresh kernel).  When any
-   of those three keys is non-empty, HeapInitialize calls the C-side
+   of those three keys is non-empty, TInitialize calls the C-side
    wipe (book + defs + alo states) before restoring everything from
-   the bundle.  When they're all empty, HeapInitialize falls back to
+   the bundle.  When they're all empty, TInitialize falls back to
    the dyn-only TReset path (no book/defs/alo to restore).
 
    Snapshot strategy: dump the entire [0, THeapPos[]) dyn range and
    the entire [0, BookPos[]) book range.  No reachability walk -- it
    sidesteps variable-arity UOp / ALO arity logic and matches THeap[]
-   semantics.  Cells at heap[ALO.val] are tagged BookTerm because
+   semantics.  Cells at heap[ALO.val] are tagged BookCell because
    their Term's val refers to BOOK_HEAP, not the dyn heap.
 
    Tensor slot ids are renumbered to dense 0..N-1 during snapshot so
@@ -40,13 +40,13 @@
 
 BeginPackage["THVMLink`"];
 
-Heap::usage         = "Heap[<|\"Root\", \"Cells\", \"BookCells\", \"Tensors\", \"Defs\", \"AloStates\", \"Labels\", \"State\"|>] is a portable snapshot of the live heap.  Construct via HeapSnapshot[]; restore via HeapInitialize.  When BookCells / Defs / AloStates are non-empty, the snapshot is self-contained and survives a fresh kernel (TFree + TInit).";
-Term::usage         = "Term has two forms.\n  1. Term[t_TTerm]: walks the live heap from `t` and returns a fully unrolled nested `Term[head, args...]` expression -- the structural canonical form, no locs (LAMs carry a binder id so VAR references back).  Substructure is recursive: `Term[\"OP2\", \"+\", Term[\"NUM\", 1], Term[\"NUM\", 2]]`.  Used as vertex identity in TMultiwayGraph and as a readable / serialisable representation of a TTerm.\n  2. Term[tag_String, ext, val] / Term[tag, ext, val, sub]: a single heap-cell descriptor used inside Heap[\"Cells\"] (snapshot form).  `val` is a heap loc; ext is the secondary field (op code, dtype, label, ...).  Hand-authored Term[<|\"tag\", \"ext\", \"val\", \"sub\"|>] is accepted and normalized to the positional form.";
-BookTerm::usage     = "BookTerm[tag_String, ext, val] is the same as Term[tag, ext, val] but for a BOOK-domain cell (lives either in Heap[\"BookCells\"] or in the dyn cell at heap[ALO.val]).  `val` is an index into Heap[\"BookCells\"].";
-HeapSnapshot::usage = "HeapSnapshot[] returns a Heap[<|...|>] capturing every cell in [0, THeapPos[]), every book cell in [1, BookPos[]), all referenced tensors with data, the DEFS table (with name strings interned in TDef), and the ALO substitution chain.  HeapSnapshot[root_TTerm] additionally records `root` as the snapshot's entry point.";
-HeapInitialize::usage = "HeapInitialize[h_Heap] restores `h` into the live runtime and returns the root as a live TTerm (or Missing[\"NoRoot\"] if the snapshot has no root).  Cross-restart capable: when BookCells / Defs / AloStates are bundled, HeapInitialize wipes the C-side book / DEFS / ALO_STATES first, then restores them, then the dyn heap.  HeapInitialize[h, \"ZeroFill\" -> True] also accepts Uninitialized snapshots; tensors are allocated zero-filled.";
-HeapStrip::usage    = "HeapStrip[h_Heap] returns h with all NumericArray tensor buffers replaced by <|\"shape\" -> _, \"dtype\" -> _|>.  Pure WL; does not touch the runtime.";
-THeapToTermTree::usage = "THeapToTermTree[h_Heap] returns a nested string-headed expression mirroring TTermExpr but driven by the snapshot's Cells list (no live runtime needed).  Cycles render as \"Cycle\"[idx].  Read-only projection.";
+TContext::usage     = "TContext[<|\"Root\", \"Cells\", \"BookCells\", \"Tensors\", \"Defs\", \"AloStates\", \"Labels\", \"State\"|>] is a portable snapshot of the live thvm runtime context.  Construct via TContextSnapshot[]; restore via TInitialize.  When BookCells / Defs / AloStates are non-empty, the snapshot is self-contained and survives a fresh kernel (TFree + TInit).";
+Term::usage         = "Term has two forms.\n  1. Term[t_TTerm]: walks the live heap from `t` and returns a fully unrolled nested `Term[head, args...]` expression -- the structural canonical form (LAMs / DUPs carry a binder id so VAR / DP references back).  Substructure is recursive: `Term[\"OP2\", \"+\", Term[\"NUM\", 1], Term[\"NUM\", 2]]`.  Used as vertex identity in TMultiwayGraph and as a readable / serialisable representation of a TTerm.\n  2. Term[tag_String, ext, val] / Term[tag, ext, val, sub]: a single heap-cell descriptor used inside TContext[\"Cells\"] (snapshot form).  `val` is a heap loc; ext is the secondary field (op code, dtype, label, ...).  Hand-authored Term[<|\"tag\", \"ext\", \"val\", \"sub\"|>] is accepted and normalized to the positional form.";
+BookCell::usage     = "BookCell[tag_String, ext, val] is the same as Term[tag, ext, val] but for a BOOK-domain cell (lives either in TContext[\"BookCells\"] or in the dyn cell at heap[ALO.val]).  `val` is an index into TContext[\"BookCells\"].";
+TContextSnapshot::usage = "TContextSnapshot[] returns a TContext[<|...|>] capturing every cell in [0, THeapPos[]), every book cell in [1, BookPos[]), all referenced tensors with data, the DEFS table (with name strings interned in TDef), and the ALO substitution chain.  TContextSnapshot[root_TTerm] additionally records `root` as the snapshot's entry point.";
+TInitialize::usage = "TInitialize[h_TContext] restores `h` into the live runtime and returns the root as a live TTerm (or Missing[\"NoRoot\"] if the snapshot has no root).  Cross-restart capable: when BookCells / Defs / AloStates are bundled, TInitialize wipes the C-side book / DEFS / ALO_STATES first, then restores them, then the dyn heap.  TInitialize[h, \"ZeroFill\" -> True] also accepts Uninitialized snapshots; tensors are allocated zero-filled.";
+TContextStrip::usage    = "TContextStrip[h_TContext] returns h with all NumericArray tensor buffers replaced by <|\"shape\" -> _, \"dtype\" -> _|>.  Pure WL; does not touch the runtime.";
+TContextToTermTree::usage = "TContextToTermTree[h_TContext] returns a nested string-headed expression mirroring TTermExpr but driven by the snapshot's Cells list (no live runtime needed).  Cycles render as \"Cycle\"[idx].  Read-only projection.";
 
 Begin["`Private`"];
 
@@ -97,7 +97,7 @@ numericArrayDType[na_NumericArray] := Switch[ NumericArrayType[na],
     _,           "f32"
 ]
 
-(* === Term / BookTerm: Association-form normalization to positional === *)
+(* === Term / BookCell: Association-form normalization to positional === *)
 
 Term[a_Association] /; KeyExistsQ[a, "tag"] && KeyExistsQ[a, "ext"] && KeyExistsQ[a, "val"] :=
     With[{tag = a["tag"], ext = a["ext"], val = a["val"], sub = Lookup[a, "sub", 0]},
@@ -107,11 +107,11 @@ Term[a_Association] /; KeyExistsQ[a, "tag"] && KeyExistsQ[a, "ext"] && KeyExists
         ]
     ]
 
-BookTerm[a_Association] /; KeyExistsQ[a, "tag"] && KeyExistsQ[a, "ext"] && KeyExistsQ[a, "val"] :=
+BookCell[a_Association] /; KeyExistsQ[a, "tag"] && KeyExistsQ[a, "ext"] && KeyExistsQ[a, "val"] :=
     With[{tag = a["tag"], ext = a["ext"], val = a["val"], sub = Lookup[a, "sub", 0]},
         If[ sub === 0,
-            BookTerm[tag, ext, val],
-            BookTerm[tag, ext, val, sub]
+            BookCell[tag, ext, val],
+            BookCell[tag, ext, val, sub]
         ]
     ]
 
@@ -214,14 +214,14 @@ termFromTTermDepth[t_TTerm, d_Integer] := Block[
 
 (* === predicates === *)
 
-heapPayloadQ[a_Association] :=
+contextPayloadQ[a_Association] :=
     KeyExistsQ[a, "Cells"] && KeyExistsQ[a, "Tensors"]
-heapPayloadQ[___] := False
+contextPayloadQ[___] := False
 
-heapNewQ[Heap[a_Association]] := heapPayloadQ[a]
-heapNewQ[___] := False
+contextNewQ[TContext[a_Association]] := contextPayloadQ[a]
+contextNewQ[___] := False
 
-heapStateOf[a_Association] := With[{vals = Values[a]},
+contextStateOf[a_Association] := With[{vals = Values[a]},
     Which[
         vals === {},                                "Initialized",
         AllTrue[vals, MatchQ[#, _NumericArray] &],   "Initialized",
@@ -230,7 +230,7 @@ heapStateOf[a_Association] := With[{vals = Values[a]},
     ]
 ]
 
-(* === HeapSnapshot ===
+(* === TContextSnapshot ===
    Walk every cell in [0, THeapPos[]) (dyn) and [1, BookPos[]) (book).
    Collect every TAG_TEN val (the runtime tensor id) across BOTH
    heaps + def roots, renumber to dense 0..N-1.  Read each tensor's
@@ -247,7 +247,7 @@ collectTensorRemap[allRaws_List] := Module[{ids},
 ]
 
 (* Convert a packed runtime u64 into a portable head[...] (Term or
-   BookTerm).  Only TAG_TEN val is rewritten (runtime tensor id ->
+   BookCell).  Only TAG_TEN val is rewritten (runtime tensor id ->
    dense slot).  All other val fields are heap locs (matching Cells
    or BookCells indices since both are 1:1 with locs) or atomic data
    (NUM bits, REF slot, ERA 0).  ext is rendered symbolically for
@@ -278,11 +278,11 @@ rawToHead[head_, raw_Integer, remap_Association] := Module[{
 ]
 
 rawToTerm[raw_, remap_]     := rawToHead[Term,     raw, remap]
-rawToBookTerm[raw_, remap_] := rawToHead[BookTerm, raw, remap]
+rawToBookCell[raw_, remap_] := rawToHead[BookCell, raw, remap]
 
 (* For each TAG_ALO cell at dyn loc K, mark heap[ALO.val] as a
    book-domain holder: the term sitting in that cell has its `val`
-   pointing into BOOK_HEAP, so it must be serialized as BookTerm. *)
+   pointing into BOOK_HEAP, so it must be serialized as BookCell. *)
 collectBookHolderIndices[cellRaws_List] :=
     DeleteDuplicates @ Cases[
         cellRaws,
@@ -294,7 +294,7 @@ collectBookHolderIndices[cellRaws_List] :=
 snapshotBookCells[remap_Association] := Module[{nb},
     nb = $bookPosFn[];
     Association @ Table[
-        i -> rawToBookTerm[$bookReadFn[i], remap],
+        i -> rawToBookCell[$bookReadFn[i], remap],
         {i, 1, nb - 1}
     ]
 ]
@@ -311,7 +311,7 @@ snapshotDefs[remap_Association] := Module[{slotToName, entries = {}},
             If[ rootRaw =!= 0,
                 AppendTo[entries, slot -> <|
                     "name" -> Lookup[slotToName, slot, None],
-                    "root" -> rawToBookTerm[rootRaw, remap]
+                    "root" -> rawToBookCell[rootRaw, remap]
                 |>]
             ]
         ],
@@ -334,11 +334,11 @@ snapshotAloStates[] := Module[{n},
     ]
 ]
 
-HeapSnapshot[]                    := HeapSnapshot[Missing["NoRoot"]]
+TContextSnapshot[]                    := TContextSnapshot[Missing["NoRoot"]]
 
-HeapSnapshot[root_TTerm]          := snapshotImpl[ttermRaw[root]]
-HeapSnapshot[Missing["NoRoot"]]   := snapshotImpl[Missing["NoRoot"]]
-HeapSnapshot[None]                := snapshotImpl[Missing["NoRoot"]]
+TContextSnapshot[root_TTerm]          := snapshotImpl[ttermRaw[root]]
+TContextSnapshot[Missing["NoRoot"]]   := snapshotImpl[Missing["NoRoot"]]
+TContextSnapshot[None]                := snapshotImpl[Missing["NoRoot"]]
 
 snapshotImpl[rootRawOrMissing_] := Module[{
     lo, n, nb, cellRaws, cellLocs, bookRaws, defRootRaws, bookHolders,
@@ -363,7 +363,7 @@ snapshotImpl[rootRawOrMissing_] := Module[{
         Function[{raw, idx},
             With[{i = First[idx] - 1, locOff = lo},
                 (i + locOff) -> If[ MemberQ[bookHolders, i],
-                    rawToBookTerm[raw, remap],
+                    rawToBookCell[raw, remap],
                     rawToTerm[raw, remap]
                 ]
             ]
@@ -381,7 +381,7 @@ snapshotImpl[rootRawOrMissing_] := Module[{
         rawToTerm[rootRawOrMissing, remap],
         Missing["NoRoot"]
     ];
-    Heap[<|
+    TContext[<|
         "Root"      -> rootTerm,
         "Cells"     -> cells,
         "BookCells" -> bookCells,
@@ -389,11 +389,11 @@ snapshotImpl[rootRawOrMissing_] := Module[{
         "Defs"      -> defs,
         "AloStates" -> aloStates,
         "Labels"    -> $labelCounter,
-        "State"     -> heapStateOf[tensors]
+        "State"     -> contextStateOf[tensors]
     |>]
 ]
 
-(* === HeapStrip ===
+(* === TContextStrip ===
    Replace each NumericArray with <|"shape", "dtype"|>.  Pure WL. *)
 
 stripTensorEntry[na_NumericArray] := <|
@@ -402,9 +402,9 @@ stripTensorEntry[na_NumericArray] := <|
 |>
 stripTensorEntry[a_Association] := a
 
-HeapStrip[Heap[a_Association]] := Module[{stripped},
+TContextStrip[TContext[a_Association]] := Module[{stripped},
     stripped = Map[stripTensorEntry, Lookup[a, "Tensors", <||>]];
-    Heap[<|
+    TContext[<|
         "Root"      -> Lookup[a, "Root",      Missing["NoRoot"]],
         "Cells"     -> Lookup[a, "Cells",     <||>],
         "BookCells" -> Lookup[a, "BookCells", <||>],
@@ -412,11 +412,11 @@ HeapStrip[Heap[a_Association]] := Module[{stripped},
         "Defs"      -> Lookup[a, "Defs",      <||>],
         "AloStates" -> Lookup[a, "AloStates", {}],
         "Labels"    -> Lookup[a, "Labels", 1],
-        "State"     -> heapStateOf[stripped]
+        "State"     -> contextStateOf[stripped]
     |>]
 ]
 
-(* === HeapInitialize ===
+(* === TInitialize ===
    1. If BookCells / Defs / AloStates are non-empty, wipe BOOK_HEAP +
       DEFS + ALO_STATES via thvm_wl_book_reset, then restore them.
       Otherwise leave them alone (legacy in-session restore).
@@ -429,13 +429,13 @@ HeapStrip[Heap[a_Association]] := Module[{stripped},
    7. THeapAlloc[Length[Cells]] in one go (heap is fresh, so base = 0
       and Cells indices line up 1:1 with heap locs).
    8. Iterate writing each cell, remapping TAG_TEN val through the
-      slot -> runtime-id map.  Both Term and BookTerm cells pack via
+      slot -> runtime-id map.  Both Term and BookCell cells pack via
       the same termToRaw -- val passes through directly because
       cell-domain interpretation is the receiver's responsibility. *)
 
-Options[HeapInitialize] = {"ZeroFill" -> False}
+Options[TInitialize] = {"ZeroFill" -> False}
 
-HeapInitialize[Heap[a_Association], opts:OptionsPattern[]] := Module[{
+TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
     cellsAssoc, bookCellsAssoc, tensorsAssoc, defs, aloStates,
     root, labels, zeroFill, hasBundle,
     cellList, n, bookKeys, base, slotToRuntime, rootRaw
@@ -514,7 +514,7 @@ HeapInitialize[Heap[a_Association], opts:OptionsPattern[]] := Module[{
     $labelCounter = labels;
 
     rootRaw = Which[
-        MatchQ[root, _Term] || MatchQ[root, _BookTerm],
+        MatchQ[root, _Term] || MatchQ[root, _BookCell],
             termToRaw[root, slotToRuntime],
         True,
             Missing["NoRoot"]
@@ -541,8 +541,8 @@ initTensorEntry[a_Association, zeroFill_] := Module[{
     shape = a["shape"], dtype = a["dtype"], rid, count
 },
     If[ ! zeroFill,
-        Message[HeapInitialize::uninit];
-        Throw[$Failed, "HeapInitialize::uninit"]
+        Message[TInitialize::uninit];
+        Throw[$Failed, "TInitialize::uninit"]
     ];
     rid   = TTermVal @ $tensorAllocFn[dtypeCode[dtype], shape];
     count = Times @@ shape;
@@ -553,13 +553,13 @@ initTensorEntry[a_Association, zeroFill_] := Module[{
     rid
 ]
 
-HeapInitialize::uninit = "HeapInitialize: snapshot is Uninitialized; pass \"ZeroFill\" -> True to allocate zero-filled tensor buffers.";
+TInitialize::uninit = "TInitialize: snapshot is Uninitialized; pass \"ZeroFill\" -> True to allocate zero-filled tensor buffers.";
 
 (* Convert a Term[...] back into a packed runtime u64 via $termNewFn.
    Symbolic ext fields for OP2 / UOP / TEN / NUM are decoded back to
    integer codes; TAG_TEN val is remapped via slotMap. *)
 
-(* Term/BookTerm[a_Association] normalize via the global rewrite up
+(* Term/BookCell[a_Association] normalize via the global rewrite up
    top, so by the time we get here `t` is positional.  Both heads
    pack identically -- domain interpretation (dyn vs book loc) is the
    C-side runtime's job and only matters for tag-context references
@@ -584,15 +584,15 @@ packCell[tag_String, ext_, val_, sub_, slotMap_] := Module[{
 
 termToRaw[Term[tag_String, ext_, val_],                slotMap_] := packCell[tag, ext, val, 0,   slotMap]
 termToRaw[Term[tag_String, ext_, val_, sub_Integer],   slotMap_] := packCell[tag, ext, val, sub, slotMap]
-termToRaw[BookTerm[tag_String, ext_, val_],            slotMap_] := packCell[tag, ext, val, 0,   slotMap]
-termToRaw[BookTerm[tag_String, ext_, val_, sub_Integer], slotMap_] := packCell[tag, ext, val, sub, slotMap]
+termToRaw[BookCell[tag_String, ext_, val_],            slotMap_] := packCell[tag, ext, val, 0,   slotMap]
+termToRaw[BookCell[tag_String, ext_, val_, sub_Integer], slotMap_] := packCell[tag, ext, val, sub, slotMap]
 
-(* === THeapToTermTree ===
+(* === TContextToTermTree ===
    Recursive nested-Term view, mirroring tTreeWalk in THVMLink.wl
    but reading from a Cells Association instead of $heapReadFn.
    Cycles render as "Cycle"[idx].  Read-only projection. *)
 
-THeapToTermTree[Heap[a_Association]] := With[{
+TContextToTermTree[TContext[a_Association]] := With[{
     root = Lookup[a, "Root", Missing["NoRoot"]]
 },
     If[ MatchQ[root, _Term],
@@ -601,7 +601,7 @@ THeapToTermTree[Heap[a_Association]] := With[{
     ]
 ]
 
-THeapToTermTree[Heap[a_Association], root_Term] :=
+TContextToTermTree[TContext[a_Association], root_Term] :=
     cellTreeWalkTerm[a["Cells"], root, <||>]
 
 cellTreeWalkLoc[cells_, idx_Integer, seen_] := With[{
@@ -609,7 +609,7 @@ cellTreeWalkLoc[cells_, idx_Integer, seen_] := With[{
 },
     Which[
         MatchQ[cell, _Term],     cellTreeWalkTerm[cells, cell, seen],
-        MatchQ[cell, _BookTerm], "Book"[cell[[1]], cell[[2]], cell[[3]]],
+        MatchQ[cell, _BookCell], "Book"[cell[[1]], cell[[2]], cell[[3]]],
         True,                    cell
     ]
 ]
