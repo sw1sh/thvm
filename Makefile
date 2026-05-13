@@ -50,6 +50,7 @@ TESTS := \
   $(BIN)/test_gc_mark_term \
   $(BIN)/test_extern_pin \
   $(BIN)/test_bufferize_classify \
+  $(BIN)/test_rangeify_unified \
   $(BIN)/test_bufferize \
   $(BIN)/test_uop_to_scalar \
   $(BIN)/test_uop_buffer \

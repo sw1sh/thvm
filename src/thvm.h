@@ -2563,6 +2563,29 @@ fn void apply_movement_op_pad    (u32 ndim, u32 const *in_shape,
 fn Term pm_simplify_valid_apply   (Term t);
 fn Term pm_drop_and_clauses_apply (Term t);
 
+// === Phase 2 (ideal_pipeline_v2): unified rangeify pass ===
+// 1-to-1 port of tinygrad/schedule/indexing.py:148-269 (run_rangeify) and
+// :101-110 (pm_apply_rangeify). Gated behind THVM_UNIFIED_RANGEIFY=1
+// (default 0). Pre-condition: caller has run bufferize_classify(root) so
+// BUFFERIZE_NODES + CMAP_LL are populated. Populates side tables
+// RU_RANGE_MAP / RU_REALIZE_MAP / RU_ENDING_RANGES / RU_SUBST in-place.
+// Does NOT mutate the heap or BUFFERIZE_NODES.realized -- Phase 3's
+// cut-over reconciles the two realize records. See
+// src/schedule/rangeify_unified.c for design notes.
+fn int  rangeify_unified_enabled               (void);
+fn void run_rangeify_unified                   (Term root);
+fn void pm_apply_rangeify                      (Term root);
+fn u32  rangeify_unified_last_nodes_walked     (void);
+fn u32  rangeify_unified_last_new_realizes     (void);
+fn u32  rangeify_unified_last_full_realizes    (void);
+fn u32  rangeify_unified_last_partial_realizes (void);
+fn u32  rangeify_unified_range_idx_counter     (void);
+fn int  rangeify_unified_has_ranges_at         (u32 node_idx);
+fn u32  rangeify_unified_out_ndim_at           (u32 node_idx);
+fn Term rangeify_unified_out_rng_at            (u32 node_idx, u32 axis);
+fn int  rangeify_unified_is_realized           (u32 node_idx);
+fn Term rangeify_unified_subst_at              (u32 node_idx);
+
 // === Phase E1: UOP_RANGE field accessors + axis_type rewriter ===
 // Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type
 // port (Phase E).  Today these wrap the [NUM(axis_id), NUM(axis_type),

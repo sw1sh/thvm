@@ -292,6 +292,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "schedule/bufferize_rewrite.c"
 #include "schedule/bufferize.c"
 #include "schedule/bufferize_classify.c"
+// Phase 2 (ideal_pipeline_v2): unified rangeify pass. Must follow
+// bufferize_classify.c (uses BUFFERIZE_NODES + CMAP_LL +
+// bufferize_consumers_for_loc) and indexing.c (apply_movement_op_*).
+// Gated behind THVM_UNIFIED_RANGEIFY at runtime; no-op for the OLD path.
+#include "schedule/rangeify_unified.c"
 #include "schedule/materialize.c"
 
 // === jit/ ===
