@@ -12,45 +12,35 @@
        wired via `var<binder>` (no atom-style Disk leaf duplicating
        the substituted compound)
      - post-DUP_SUP_ANN step shows BOTH branches via the auto-added
-       sibling DP projection in the seed list *)
+       sibling DP projection in the seed list
+
+   Uses Wolfram`DiagrammaticComputation`'s native pattern API:
+     - DiagramCases[d, DiagramPattern[exprPat]] finds subdiagrams.
+     - port["Name"] returns the clean wire name (no PortDual wrap).
+     - Through[ports["Name"]] applies Name to each port in a list. *)
 
 Needs["Wolfram`DiagrammaticComputation`"];
 
 TInit[];
 
-(* Subdiagram with a given label.  The label is wrapped in HoldForm[]
-   by DC and may be a bare string ("LAM") or a Column[{"APP", "@5..6"}, ...]
-   for compounds with @-suffix. *)
-subDiagramByLabel[d_, lab_String] := SelectFirst[
-    d["SubDiagrams"],
-    With[{name = ReleaseHold @ #["Name"]},
-        Or[ name === lab,
-            MatchQ[name, Column[{lab, ___}, ___]]]] &,
-    Missing[]
-];
-subDiagramsByLabel[d_, lab_String] := Select[
-    d["SubDiagrams"],
-    With[{name = ReleaseHold @ #["Name"]},
-        Or[ name === lab,
-            MatchQ[name, Column[{lab, ___}, ___]]]] &
-];
-(* Port is an Atom from Wolfram`DiagrammaticComputation` -- Part access
-   doesn't work; use the property accessor.  Strip a PortDual wrapper
-   so dual / undual wires share the same name in queries. *)
-portWireName[p_]      := Replace[p["Expression"], PortDual[w_] :> w];
-portWireNames[ps_List]:= portWireName /@ ps;
-networkOutputWires[d_]:= portWireNames[d["Ports"]];
+(* Compound nodes label as Column[{"NAME", "@loc"}, ...]; matchExpr
+   reduces that to a `Column[{name, ___}, ___]` pattern. *)
+labelPat[name_String] := Column[{name, ___}, ___];
+findOne[d_, name_String] :=
+    First @ DiagramCases[d, DiagramPattern[labelPat[name]]];
+findAll[d_, name_String] :=
+    DiagramCases[d, DiagramPattern[labelPat[name]]];
 
 (* === root APP held externally surfaces principal as network out === *)
 VerificationTest[
     TInit[];
     Module[{t = TLam[x, x + TNum[3]][TSup[1, 2]], d, app},
         d   = THeapDiagram[{t}];
-        app = subDiagramByLabel[d, "APP"];
+        app = findOne[d, "APP"];
         {
-            app["InputArity"],                        (* 1 incoming *)
-            app["OutputArity"],                       (* 2: arg + principal *)
-            MemberQ[networkOutputWires[d], "p5"]      (* principal exposed *)
+            app["InputArity"],
+            app["OutputArity"],
+            MemberQ[Through[d["OutputPorts"]["Name"]], "p5"]
         }],
     {1, 2, True},
     TestID -> "THeapDiagram: root APP has principal port surfaced as network output"
@@ -62,10 +52,9 @@ VerificationTest[
    still render (DUP is structurally a fork). *)
 VerificationTest[
     TInit[];
-    Module[{t = First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]],
-            d, dup},
+    Module[{t = First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]], d, dup},
         d   = THeapDiagram[{t}];
-        dup = subDiagramByLabel[d, "DUP"];
+        dup = findOne[d, "DUP"];
         dup["OutputArity"]],
     2,
     TestID -> "THeapDiagram: DUP exposes both projection output ports"
@@ -76,33 +65,35 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Module[{t = First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]],
-            steps, d, sup},
+            steps, d, sup, op2},
         steps = TMultiSteps[t];
         d     = steps[[2]]["Diagram"];                (* post APP_LAM *)
-        sup   = subDiagramByLabel[d, "SUP"];
+        sup   = findOne[d, "SUP"];
+        op2   = findOne[d, "OP2 +"];
         {
-            (* Compound SUP present (not just a leaf) *)
-            sup["InputArity"] === 2 && sup["OutputArity"] === 1,
-            (* SUP's principal output IS var0 -- routed to VAR consumers *)
-            MemberQ[portWireNames[sup["Ports"]], "var0"],
-            (* No duplicate "SUP@0" atom leaf *)
-            MissingQ[subDiagramByLabel[d, "SUP@0"]]
+            sup["InputArity"] === 2,
+            sup["OutputArity"] === 1,
+            (* SUP and OP2 share var0 -- the LAM binder wire *)
+            Intersection[
+                Through[sup["Ports"]["Name"]],
+                Through[op2["Ports"]["Name"]]] === {"var0"},
+            (* No duplicate atom leaf for the substituted SUP *)
+            DiagramCases[d, DiagramPattern["SUP@0"]] === {}
         }],
-    {True, True, True},
+    {True, True, True, True},
     TestID -> "THeapDiagram: post-APP_LAM SUP body renders as compound wired via var<binder>"
 ]
 
 (* === post-DUP_SUP_ANN: both branches visible (sibling auto-seeded).
-   DP0's branch reaches OP2@9 (NUM 1 side); the sibling DP1 surfaces
-   OP2@11 (NUM 2 side) through heap[loc]'s SUB flag. *)
+   DP0's branch surfaces OP2(NUM 1, ...); the sibling DP1 surfaces
+   OP2(NUM 2, ...) through heap[loc]'s SUB flag. *)
 VerificationTest[
     TInit[];
     Module[{t = First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]],
-            steps, d, op2s},
+            steps, d},
         steps = TMultiSteps[t];
         d     = steps[[4]]["Diagram"];                (* post DUP_SUP_ANN *)
-        op2s  = subDiagramsByLabel[d, "OP2 +"];
-        Length[op2s]],
+        Length @ findAll[d, "OP2 +"]],
     2,
     TestID -> "THeapDiagram: post-DUP_SUP_ANN both branches visible via sibling auto-seed"
 ]
