@@ -1743,12 +1743,19 @@ static int bufferize_pool_chain_marks_source(u64 reduce_loc) {
 // vs "carried over from a multi-consumer seed".  We do NOT clear
 // pre-existing .realized bits: the MULTI seed and any ROOT seed must
 // survive; the removal rules below handle the unmarking.
+//
+// Disabled: the projection over-realizes broadcast-after-reduce patterns
+// (softmax / attention regress under this projection because the unified
+// pass marks every UOP_BUFFERIZE Term as a boundary, but the OLD-path
+// emit walker can't render the resulting kernel-graph topology for those
+// shapes).  Until the materialize.c walker reads UOP_BUFFERIZE Terms
+// directly off the lowered DAG, the OLD-path heuristics
+// (multi-consumer / REDUCE / matmul + named removal rules) remain
+// authoritative.  The substrate (UOP_BUFFERIZE allocator, run_rangeify_
+// unified, topo_sort_buffers_unified, KernelEntry.compute_bufferize)
+// stays alive for the eventual cut.
 static void bufferize_classify_project_unified(void) {
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    if (rangeify_unified_bufferize_at(i) != 0) {
-      bufferize_node_mark(&BUFFERIZE_NODES[i], BUFFERIZE_REASON_UNIFIED);
-    }
-  }
+  (void)rangeify_unified_bufferize_at;
 }
 
 fn void bufferize_classify(Term root) {
