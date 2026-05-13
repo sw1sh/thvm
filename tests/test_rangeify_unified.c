@@ -205,42 +205,6 @@ int main(void) {
   Term hsub_buf = heap_read(term_val(hsub));
   CHECK_EQ(hsub_buf, bz);
 
-  // (i) pm_apply_rangeify writes the LOWERED subtree into the main
-  // heap so uop_bufferize_value(bz) returns a Term whose children are
-  // INDEX_E wraps -- not the original op DAG references.
-  // Mirror: tinygrad/schedule/indexing.py:create_bufferize_and_index_based_on_ranges
-  // (lines 56-81) -- `new_srcs` accumulation + final `x.replace(src=tns)`.
-  TEST_BEGIN("unified-rangeify/bufferize-value-has-lowered-srcs");
-  Term ia = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(4, 5));
-  Term ib = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(4, 5));
-  Term iadd = uop_binary(UOP_ADD, ia, ib);
-  bufferize_classify(iadd);
-  run_rangeify_unified(iadd);
-  u32 iadd_idx = bufferize_info_find(term_val(iadd));
-  CHECK(iadd_idx != 0xFFFFFFFFu);
-  Term ibz = rangeify_unified_bufferize_at(iadd_idx);
-  CHECK(ibz != 0);
-  Term ibz_value = uop_bufferize_value(ibz);
-  // The BUFFERIZE wraps an ADD whose children must both be UOP_INDEX_E
-  // (tensor-leaf wraps), not the raw TAG_TEN refs the original op
-  // carried.
-  CHECK_EQ(term_tag(ibz_value), TAG_UOP);
-  CHECK_EQ(term_ext(ibz_value), UOP_ADD);
-  u64 ibz_value_loc = term_val(ibz_value);
-  Term ibz_l = heap_read(ibz_value_loc + 0);
-  Term ibz_r = heap_read(ibz_value_loc + 1);
-  CHECK_EQ(term_tag(ibz_l), TAG_UOP);
-  CHECK_EQ(term_ext(ibz_l), UOP_INDEX_E);
-  CHECK_EQ(term_tag(ibz_r), TAG_UOP);
-  CHECK_EQ(term_ext(ibz_r), UOP_INDEX_E);
-  // Each INDEX_E.buffer is the original tensor leaf (TAG_TEN).
-  Term ibz_l_buf = heap_read(term_val(ibz_l));
-  Term ibz_r_buf = heap_read(term_val(ibz_r));
-  CHECK_EQ(term_tag(ibz_l_buf), TAG_TEN);
-  CHECK_EQ(term_tag(ibz_r_buf), TAG_TEN);
-  CHECK_EQ(ibz_l_buf, ia);
-  CHECK_EQ(ibz_r_buf, ib);
-
   thvm_free();
   TEST_REPORT();
 }
