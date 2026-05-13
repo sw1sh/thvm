@@ -60,7 +60,7 @@ No intermediate `KProgOp[]`. No `scalar_uops[]`. No `kernel_program_cache`. No 1
 Goal: make the data structures the tinygrad walk needs available on the tensor-level UOp heap.
 
 - 1a. Add `consumer_map`: per UOp loc, list of consumer UOp locs. Currently `BUFFERIZE_NODES[i].consumer_count` is an integer; we need the list. Source: `tinygrad/schedule/indexing.py:155-160` (where `cmap` is built).
-- 1b. Make `UOP_RANGE` allocatable at the tensor-level heap phase (not just inside kernel-lift). RANGE carries `(idx, AxisType)` per tinygrad `UOp.range`. Add C helper `uop_range_new(idx, axis_type, extent)`.
+- 1b. Verify `UOP_RANGE` allocatable at tensor-level phase: `uop_range(axis_id, axis_type, extent)` in `src/uop/index.c` is already phase-agnostic (raw `heap_alloc(3)` + hash-cons through `uop_mov_cache`, no caller gate). KAX_LOOP/REDUCE/GLOBAL/VIRT match tinygrad's AxisType enum (KAX_VIRT == AxisType.PLACEHOLDER per thvm.h:920). **No new helper.** Phase 1b reduces to a verification commit; substrate gap closes in 1c via the first non-kernel-lift caller (apply_movement_op).
 - 1c. Port `apply_movement_op` (tinygrad/schedule/rangeify.py:`apply_movement_op`) for SHRINK/PERMUTE/FLIP/EXPAND/PAD over RANGE values. RESHAPE deferred to Phase 2 (needs `pm_simplify_valid`).
 - 1d. Port `pm_simplify_valid` and `pm_drop_and_clauses` (tinygrad/uop/symbolic.py). These canonicalize `% / //` expressions; required for RESHAPE's index decomposition.
 - 1e. Verify: existing tests all green. Substrate is additive; nothing else uses it yet.

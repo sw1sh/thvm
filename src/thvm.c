@@ -281,6 +281,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // Produces the scheduled DAG of UOP_KERNEL terms that
 // interact_kernel fires bottom-up.
 #include "schedule/rangeify.c"
+#include "schedule/indexing.c"
 #include "schedule/uop_to_scalar.c"
 #include "schedule/kernel_lift.c"
 #include "schedule/tile.c"

@@ -2532,6 +2532,37 @@ fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IM
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
 
+// === Phase 1c (ideal_pipeline_v2): movement-op range swizzlers ===
+// 1-to-1 port of tinygrad/schedule/indexing.py:apply_movement_op (line 129)
+// per-op cases. Each rewrites the consumer's per-axis range expressions
+// (`out_rngs`) into the producer's per-axis expressions (`in_rngs`).
+// All variants use uop_const / uop_int_binary / uop_iwhere / uop_invalid,
+// which hash-cons through uop_mov_cache. RESHAPE deferred to Phase 2 (needs
+// pm_simplify_valid). `ndim` is bounded by MAX_DIM. Buffers must be sized
+// for ndim entries; in-place (in_rngs == out_rngs) is unsafe (PERMUTE).
+fn void apply_movement_op_shrink (u32 ndim, u32 const *begin_end,
+                                  Term const *out_rngs, Term *in_rngs);
+fn void apply_movement_op_permute(u32 ndim, u32 const *perm,
+                                  Term const *out_rngs, Term *in_rngs);
+fn void apply_movement_op_flip   (u32 ndim, u32 const *in_shape,
+                                  u32 const *flip_mask,
+                                  Term const *out_rngs, Term *in_rngs);
+fn void apply_movement_op_expand (u32 ndim, u32 const *in_shape,
+                                  u32 const *out_shape,
+                                  Term const *out_rngs, Term *in_rngs);
+fn void apply_movement_op_pad    (u32 ndim, u32 const *in_shape,
+                                  u32 const *begin_end,
+                                  Term const *out_rngs, Term *in_rngs);
+
+// === Phase 1d (ideal_pipeline_v2): pm_simplify_valid + pm_drop_and_clauses ===
+// 1-to-1 port surface of tinygrad/uop/symbolic.py:423 / 385. Phase 1d ships
+// identity stubs (correctness preserved, only output size differs from
+// tinygrad). Phase 2/3 iterations sharpen each as concrete RESHAPE-output
+// regressions surface. Call sites Phase 2 wires: PAD's WHERE-gate rewrite
+// and RESHAPE's _apply_reshape graph_rewrite tail.
+fn Term pm_simplify_valid_apply   (Term t);
+fn Term pm_drop_and_clauses_apply (Term t);
+
 // === Phase E1: UOP_RANGE field accessors + axis_type rewriter ===
 // Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type
 // port (Phase E).  Today these wrap the [NUM(axis_id), NUM(axis_type),
