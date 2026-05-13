@@ -1838,23 +1838,24 @@ fn void bufferize_classify(Term root) {
         int keep_for_matmul = bufferize_uop_is_matmul(info->loc);
         int keep_for_chain = 0;
         if (direct && !keep_for_matmul) {
-          // Descend through movement ops (RESHAPE/PERMUTE/EXPAND/PAD/
-          // SHRINK/FLIP) and casts to find a nested UOP_REDUCE in the
-          // src subtree.  Any chain whose body's reduce-iter axes
-          // appear in the outer reduce's body needs separate kernels.
-          Term cur = term_resolve(heap_read(info->loc));
-          for (u32 hops = 0; hops < 8; hops++) {
-            if (term_tag(cur) != TAG_UOP) break;
-            u8 cop = term_ext(cur);
-            if (cop == UOP_REDUCE) { keep_for_chain = 1; break; }
-            if (cop == UOP_RESHAPE || cop == UOP_PERMUTE
-             || cop == UOP_EXPAND  || cop == UOP_PAD
-             || cop == UOP_SHRINK  || cop == UOP_FLIP
-             || cop == UOP_CAST    || cop == UOP_BITCAST) {
-              cur = term_resolve(heap_read(term_val(cur)));
-              continue;
+          // When this REDUCE has another REDUCE as a CONSUMER (chained
+          // pattern like maxpool's REDUCE(REDUCE(x))), keep THIS REDUCE
+          // as a boundary so the outer kernel reads from this one's
+          // buffer instead of inlining its iter axis -- which would
+          // hit render_uop's flat _accN emission bug for inter-reduce
+          // iter dependencies.  Uses the cmap built in Phase 1a.
+          u64 consumer_locs[16];
+          u32 n_cons = bufferize_consumers_for_loc(info->loc, consumer_locs, 16);
+          for (u32 ci = 0; ci < n_cons && ci < 16; ci++) {
+            // consumer_locs are u64 heap locs; the consumer's Term op is
+            // term_ext of whatever the parent stored.  Look it up via
+            // BUFFERIZE_NODES for op.
+            u32 c_idx = bufferize_info_find(consumer_locs[ci]);
+            if (c_idx == 0xFFFFFFFFu) continue;
+            if (BUFFERIZE_NODES[c_idx].op == UOP_REDUCE) {
+              keep_for_chain = 1;
+              break;
             }
-            break;
           }
         }
         if (keep_for_matmul) {
