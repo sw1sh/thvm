@@ -84,7 +84,10 @@ If[ ! TMultiTraceQ[],
         Module[{dp0, dp1, trace, g, edgeRefs},
             {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
             trace = TMultiTrace[TCollapse[dp0]]["Trace"];
-            g = TCausalGraph[trace];
+            (* Use unreduced graph: this test checks one-to-one
+               correspondence between consumed[] entries and graph
+               edges, which only holds before transitive reduction. *)
+            g = TCausalGraph[trace, "TransitiveReduction" -> False];
             edgeRefs = Total @ Map[
                 e |-> Length @ Select[
                     e["consumed"],
