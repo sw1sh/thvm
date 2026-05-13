@@ -1875,6 +1875,7 @@ typedef struct {
   u64 loc;
   u32 consumer_count;
   u32 reasons;
+  u32 cmap_head;          // linked-list head into CMAP_LL; UINT32_MAX = empty
   u8  op;
   u8  realized;
 } UOpInfo;
@@ -1884,6 +1885,19 @@ fn u32  bufferize_info_find(u64 loc);
 fn u8   bufferize_is_realized(Term uop_term);
 fn u32  bufferize_consumer_count(Term uop_term);
 fn u32  bufferize_reasons(Term uop_term);
+
+// Per-node consumer-list pool. Each producer node's UOpInfo.cmap_head
+// indexes into CMAP_LL; chain via .next. Populated by the bufferize
+// walker (same pass that increments consumer_count). Tinygrad parity:
+// the `cmap` (Dict[UOp, List[UOp]]) in tinygrad/schedule/indexing.py:155-160.
+// Cap sized for ~4x BUFFERIZE_NODES_CAP avg fanout.
+#define CMAP_LL_CAP (BUFFERIZE_NODES_CAP * 4)
+typedef struct { u64 consumer_loc; u32 next; } CMapNode;
+extern CMapNode CMAP_LL[CMAP_LL_CAP];
+extern u32      CMAP_LL_LEN;
+// Fill up to `cap` consumer_locs for `producer_loc`. Returns true count
+// (may exceed cap; caller is responsible for sizing).
+fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 fn void bufferize_rewrite_stats_clear(void);
 fn u32  bufferize_rewrite_stats_len(void);
 fn u32  bufferize_rewrite_stat_hits(char const *name);

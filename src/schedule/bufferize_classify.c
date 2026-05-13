@@ -33,6 +33,9 @@
 UOpInfo BUFFERIZE_NODES    [BUFFERIZE_NODES_CAP];
 u32     BUFFERIZE_NODES_LEN = 0;
 
+CMapNode CMAP_LL    [CMAP_LL_CAP];
+u32      CMAP_LL_LEN = 0;
+
 // Open-addressed hash table mapping loc -> BUFFERIZE_NODES index.
 // Without this, bufferize_info_find did a linear scan of BUFFERIZE_NODES,
 // which made bufferize_classify O(N^2) for the N UOPs in a recursive
@@ -51,6 +54,7 @@ static inline u32 bufferize_node_hash(u64 loc) {
 
 fn void bufferize_info_clear(void) {
   BUFFERIZE_NODES_LEN = 0;
+  CMAP_LL_LEN = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_HASH_CAP; i++)
     BUFFERIZE_NODES_HASH[i] = BUFFERIZE_NODES_HASH_EMPTY;
 }
@@ -87,10 +91,33 @@ static u32 bufferize_node_get_or_add(u64 loc, u8 op) {
   BUFFERIZE_NODES[idx].loc            = loc;
   BUFFERIZE_NODES[idx].consumer_count = 0;
   BUFFERIZE_NODES[idx].reasons        = 0;
+  BUFFERIZE_NODES[idx].cmap_head      = 0xFFFFFFFFu;
   BUFFERIZE_NODES[idx].op             = op;
   BUFFERIZE_NODES[idx].realized       = 0;
   bufferize_node_hash_insert(loc, idx);
   return idx;
+}
+
+static void bufferize_cmap_add(u32 producer_idx, u64 consumer_loc) {
+  if (producer_idx == 0xFFFFFFFFu) return;
+  if (CMAP_LL_LEN >= CMAP_LL_CAP) return;     // cap overflow: dropped silently; consumer_count is still authoritative
+  u32 slot = CMAP_LL_LEN++;
+  CMAP_LL[slot].consumer_loc = consumer_loc;
+  CMAP_LL[slot].next         = BUFFERIZE_NODES[producer_idx].cmap_head;
+  BUFFERIZE_NODES[producer_idx].cmap_head = slot;
+}
+
+fn u32 bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap) {
+  u32 idx = bufferize_info_find(producer_loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  u32 cur = BUFFERIZE_NODES[idx].cmap_head;
+  u32 n = 0;
+  while (cur != 0xFFFFFFFFu) {
+    if (out_locs != NULL && n < cap) out_locs[n] = CMAP_LL[cur].consumer_loc;
+    n++;
+    cur = CMAP_LL[cur].next;
+  }
+  return n;
 }
 
 static void bufferize_node_mark(UOpInfo *info, u32 reason) {
@@ -155,7 +182,10 @@ static void bufferize_walk_rec(Term t, u8 *visited) {
     seen[n_seen++] = cloc;
 
     u32 cidx = bufferize_node_get_or_add(cloc, term_ext(child));
-    if (cidx != 0xFFFFFFFFu) BUFFERIZE_NODES[cidx].consumer_count++;
+    if (cidx != 0xFFFFFFFFu) {
+      BUFFERIZE_NODES[cidx].consumer_count++;
+      bufferize_cmap_add(cidx, loc);
+    }
     bufferize_walk_rec(child, visited);
   }
 }
