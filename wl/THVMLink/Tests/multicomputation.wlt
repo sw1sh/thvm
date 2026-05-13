@@ -146,4 +146,77 @@ If[ ! TMultiTraceQ[],
         {True, True},
         TestID -> "TMultiTrace buffer is reset -- a prior untraced reduction doesn't leak in"
     ];
+
+    (* === DP canonical: pre-resolution wraps body with projection
+       index (`{DP0|DP1, label, body}`), post-SUB resolves to the
+       branch's canonical alone.  Both projections of an UNRESOLVED
+       DUP are distinct vertices; post-fire they collapse onto the
+       resolved branch.  Locks in the user's `0/1 superscript`
+       semantic for the multiway view. *)
+    VerificationTest[
+        TInit[];
+        Module[{dp0, dp1, body},
+            {dp0, dp1} = TDup[3, TNum[42]];
+            body = THVMLink`Private`canonicalForm[dp0];
+            {
+                MatchQ[body, {"DP0", 3, {"NUM", 42}}],
+                MatchQ[THVMLink`Private`canonicalForm[dp1], {"DP1", 3, {"NUM", 42}}]
+            }],
+        {True, True},
+        TestID -> "canonicalForm wraps unresolved DP with projection index + label"
+    ];
+
+    (* === TMultiSteps on `First @ TDup[L, TLam[x, x + N][TSup[L, ...]]]`
+       (same-label DUP-SUP-ANN): six steps, five events, no self-loops
+       in the multiway view (every event changes canonical).  Locks in
+       the user's "no self-loop after DUP_NUM" requirement. *)
+    VerificationTest[
+        TInit[];
+        Module[{seed, steps, g, edges},
+            seed = First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]];
+            steps = TMultiSteps[seed];
+            g = TMultiwayGraph[steps];
+            edges = EdgeList[g];
+            {
+                Length[steps],
+                Total[Length /@ steps[[All, "Events"]]],
+                AllTrue[edges, e |-> First[e] =!= Last[e]],
+                Length[edges]
+            }],
+        {6, 5, True, 5},
+        TestID -> "TMultiSteps + TMultiwayGraph: no self-loops on First@TDup[0, lam[sup[0,...]]]"
+    ];
+
+    (* === TMultiSteps + TMultiwayGraph on distinct-label DUP-SUP-COM:
+       cross-product splits into 2 branches.  Locks in the
+       multiway view structure for the canonical fan-out case. *)
+    VerificationTest[
+        TInit[];
+        Module[{seed, steps, g, edges, finalSlice},
+            seed = First @ TDup[3, TLam[x, x + TNum[3]][TSup[7, 1, 2]]];
+            steps = TMultiSteps[seed];
+            g = TMultiwayGraph[steps];
+            edges = EdgeList[g];
+            finalSlice = Last[steps]["SliceCanonical"];
+            {
+                AllTrue[edges, e |-> First[e] =!= Last[e]],
+                Sort[finalSlice] === Sort[{{"NUM", 4}, {"NUM", 5}}]
+            }],
+        {True, True},
+        TestID -> "TMultiSteps + TMultiwayGraph: distinct-label DUP-SUP-COM yields {4, 5}"
+    ];
+
+    (* === DUP_SUP_ANN trace event has deduplicated `consumed` list:
+       both wires often come from the same prior OP2_SUP, but the
+       causal graph should record one edge per producer, not two. *)
+    VerificationTest[
+        TInit[];
+        Module[{out, ann},
+            out = TMultiTrace[TCollapse[
+                First @ TDup[0, TLam[x, x + TNum[3]][TSup[0, 1, 2]]]]];
+            ann = SelectFirst[out["Trace"], #["rule"] === "DUP_SUP_ANN" &];
+            {ann["consumed"], DeleteDuplicates[ann["consumed"]]}],
+        {{1}, {1}},
+        TestID -> "DUP_SUP_ANN event consumed list is deduplicated"
+    ];
 ]

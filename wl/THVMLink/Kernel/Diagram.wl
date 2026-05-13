@@ -128,40 +128,66 @@ agentSlotsOf[agents_Association, opcodes_Association] := Catenate[
     ]
 ]
 
+(* Cell in another rendered agent's slot that holds this agent's
+   term value.  Returns None if no such consumer exists. *)
 principalCellOf[agentBase_Integer, agentTag_Integer,
-                agents_Association, opcodes_Association] := Block[{
-    n = THeapPos[], inSlot
-},
-    inSlot = agentSlotsOf[agents, opcodes];
+                agents_Association, opcodes_Association] :=
     SelectFirst[
-        inSlot,
+        agentSlotsOf[agents, opcodes],
         With[{t = THeapRead[#]},
             TTermVal[t] === agentBase && TTermTag[t] === agentTag] &,
-        None
-    ]
+        None]
+
+(* Any non-SUB-flagged heap cell holding this agent's term value.
+   Used by principalWireOf only AFTER agent-slot + dead-LAM alias
+   lookups fail -- a cell sitting in the heap but not in any
+   rendered agent's slot range is usually stale (e.g. the original
+   SUP cell at the LAM's binder loc that APP-LAM substituted),
+   and we prefer the alias's `var<binder>` wire over wireFor on a
+   stale cell. *)
+principalCellInHeap[agentBase_Integer, agentTag_Integer] := Block[
+    {lo = THeapBase[], n = THeapPos[]},
+    SelectFirst[
+        Range[lo, n - 1],
+        With[{t = THeapRead[#]},
+            TTermSub[t] === 0 && TTermVal[t] === agentBase
+              && TTermTag[t] === agentTag] &,
+        None]
 ]
 
-(* Principal output wire for an agent.  Normal case: wireFor[cell] on
-   the slot that holds the agent's term value.  Fallback: a dead-LAM
-   binder whose SUB content is this compound -- output to var<binder>
-   so the VAR consumers spider-join the compound's output. *)
+(* Principal output wire for an agent.  Resolution order:
+   1. Slot of another rendered agent that holds this agent's term
+      value -- wireFor[cell] gives the parent->child wire.
+   2. Dead-LAM binder whose SUB content is this compound --
+      var<binder> spider-joins it with VAR consumers.
+   3. Any non-SUB heap cell holding this term -- typically a
+      hand-built term sitting outside the agent graph that we
+      still want to anchor; only useful when the cell is later
+      consumed by something not in `agents` (rare).
+   4. None of the above: synthesise a free `p<base>` wire so DC
+      auto-surfaces it as a network output port. *)
 principalWireOf[agentBase_Integer, agentTag_Integer,
                 principal_, agents_Association, opcodes_Association] :=
     If[ principal =!= None,
         wireFor[principal],
-        With[{aliasBinder = Lookup[
+        With[
+            {aliasBinder = Lookup[
                 $deadLamCompoundAlias,
                 Key[{agentBase, agentTag}],
                 None]},
-            If[ aliasBinder === None, None, "var" <> ToString[aliasBinder]]]]
+            If[ aliasBinder =!= None,
+                "var" <> ToString[aliasBinder],
+                With[{cell = principalCellInHeap[agentBase, agentTag]},
+                    If[ cell =!= None,
+                        wireFor[cell],
+                        "p" <> ToString[agentBase]]]]]]
 
-(* Wrap principalWireOf for the standard "either 0 or 1 output port"
-   pattern used by SUP / LAM / OP2 / MAT / ANY / CTR / ALO / DSU /
-   DDU agentDiagram dispatchers.  Returns {} or {wire}. *)
+(* Wrap principalWireOf for the standard "exactly one principal
+   output port" pattern used by SUP / LAM / OP2 / MAT / CTR / ALO /
+   DSU / DDU agentDiagram dispatchers.  Always returns {wire}. *)
 principalOutputs[agentBase_Integer, agentTag_Integer,
                  principal_, agents_Association, opcodes_Association] :=
-    With[{w = principalWireOf[agentBase, agentTag, principal, agents, opcodes]},
-        If[w === None, {}, {w}]]
+    {principalWireOf[agentBase, agentTag, principal, agents, opcodes]}
 
 (* === slot ownership lookup ===
    Number of heap cells used per agent type, and the port type of
@@ -399,13 +425,12 @@ agentDiagram[base_Integer, $TagLAM, principal_, agents_Association, opcodes_Asso
    incoming principal input (plain) at the top apex.  Aux ports
    at the bottom are {x, out*} with x plain outgoing and out
    dualed (SuperStar = arrow reversed). *)
-agentDiagram[base_Integer, $TagAPP, principal_, _Association, _Association] :=
+agentDiagram[base_Integer, $TagAPP, principal_, agents_Association, opcodes_Association] :=
     With[{
         label   = agentLabelText[base, $TagAPP],
         inputs  = {wireFor[base]},
-        outputs = If[ principal === None,
-                      {SuperStar[wireFor[base + 1]]},
-                      {SuperStar[wireFor[base + 1]], wireFor[principal]}]
+        outputs = {SuperStar[wireFor[base + 1]],
+                   principalWireOf[base, $TagAPP, principal, agents, opcodes]}
     },
         Diagram[label, inputs, outputs,
             "Shape" -> agentShape[$TagAPP],
