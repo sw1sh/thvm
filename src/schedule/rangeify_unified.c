@@ -537,35 +537,36 @@ fn void run_rangeify_unified(Term root) {
   u32 root_node = bufferize_info_find(term_val(root));
   if (root_node == 0xFFFFFFFFu) return;
 
-  // *** Mirror indexing.py:28-35 (pm_generate_realize_map) ***
-  // tinygrad seeds realize_map only for COPY/CONTIGUOUS/STORE
-  // (indexing.py:30) and srcs of COPY/MSELECT/MSTACK (indexing.py:32).
-  // None of those opcodes exist in thvm today; the closest analog is
-  // BUFFERIZE_REASON_ROOT (the explicit TRealize entry-point), plus
-  // BUFFERIZE_REASON_REDUCE / BUFFERIZE_REASON_MATMUL which the
-  // materialize.c emit walker still requires as kernel boundaries
-  // until REDUCE-via-RANGE lowering is wired end-to-end.
+  // *** Mirror indexing.py:152-153 (generate realize map) ***
+  // Seed RU_REALIZE_MAP from BUFFERIZE_NODES.realized -- the
+  // post-bufferize_classify-rules realize set.  Tinygrad's
+  // pm_generate_realize_map seeds only COPY/CONTIGUOUS/STORE
+  // (indexing.py:28-35); thvm doesn't have those opcodes, so we
+  // inherit the OLD path's realize bit (= ROOT seed + MULTI seed +
+  // REDUCE/MATMUL seed + matmul-input-protect + the 11 named
+  // removal rules' result).
   //
-  // CRITICAL: We do NOT seed from BUFFERIZE_REASON_MULTI here.  The
-  // OLD path's multi-consumer rule pre-marks every node with
-  // consumer_count >= 2 as realized; tinygrad's run_rangeify decides
-  // multi-consumer realize NATIVELY via consumer-divergence
-  // (indexing.py:196-220): when 2+ consumers thread the SAME range
-  // expression, no realize; only DIVERGENT range expressions force a
-  // partial-realize on the diverging axes.  Seeding from
-  // BUFFERIZE_NODES.realized for MULTI-only marks short-circuits this
-  // logic and over-realizes by ~250 nodes on probe_w2_bs3 (542 vs
-  // <100 tinygrad parity).  Mirror source: indexing.py:28-35 (seeds)
-  // + indexing.py:196-220 (consumer-divergence decision).
-  u32 const seed_reasons = BUFFERIZE_REASON_ROOT
-                         | BUFFERIZE_REASON_REDUCE
-                         | BUFFERIZE_REASON_MATMUL
-                         | BUFFERIZE_REASON_FANIN_CAP;
+  // Phase 5c bisect (2026-05-13): we experimented with dropping the
+  // MULTI-seed by filtering to ROOT|REDUCE|MATMUL|FANIN_CAP reasons,
+  // letting consumer-divergence (indexing.py:196-220) decide
+  // multi-consumer realize natively.  Result: probe_w2_bs3 unified_buf
+  // dropped 793 -> 788 (only 5 nodes, because most multi-consumer
+  // producers in BN/conv backward have actually-divergent consumer
+  // ranges and get partial-realized anyway), kernel count unchanged
+  // at 542 (intersection bounded by OLD-path's 551 realized set),
+  // BUT introduced numerical regressions in grad/higher-order-pad-
+  // square (gives {2, 0} instead of {2, 2}) and a fusion-count
+  // off-by-one in fusion-count/linear-mse-forward-plus-backward-eq-3.
+  // The root cause: TGrad's second-order machinery and the
+  // MSE-linear-backward fusion-count gate depend on MULTI-realization
+  // of certain dup'd intermediate nodes that consumer-divergence
+  // would inline.  Reverting to all-realized seed; the topo-order
+  // fix below (Kahn's algorithm) lands independently and is what
+  // softmax / attention need.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    if (BUFFERIZE_NODES[i].realized
-        && (BUFFERIZE_NODES[i].reasons & seed_reasons)) {
+    if (BUFFERIZE_NODES[i].realized) {
       RU_REALIZE_MAP[i].realized_full = 1;
-      RU_REALIZE_MAP[i].n_realized_axes = MAX_DIM;  // placeholder; filled when shape is known
+      RU_REALIZE_MAP[i].n_realized_axes = MAX_DIM;
     }
   }
 

@@ -80,7 +80,7 @@ int main(void) {
   // branch (run_rangeify_unified.c, mirror indexing.py:205-213) shares
   // ranges WITHOUT realizing.  `shared` is inlined into both
   // consumers.
-  TEST_BEGIN("unified-rangeify/diamond-shared-producer-inlined");
+  TEST_BEGIN("unified-rangeify/diamond-shared-producer-realized");
   Term d = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor1(3));
   Term shared = uop_binary(UOP_ADD, a, b);
   Term p1 = uop_binary(UOP_MUL, shared, c);
@@ -90,16 +90,9 @@ int main(void) {
   run_rangeify_unified(root);
   u32 shared_idx = bufferize_info_find(term_val(shared));
   CHECK(shared_idx != 0xFFFFFFFFu);
-  // Mirror tinygrad/schedule/indexing.py:196-220: when 2+ consumers
-  // thread the SAME range expression (here both MULs see `shared` at
-  // identity index), the consumer-divergence walk takes the
-  // `all_all_same` branch and shares ranges without realizing.  The
-  // shared producer's body gets INLINED into both MULs (recomputed
-  // twice), matching tinygrad's run_rangeify behavior.  Pre-Phase-5c
-  // this assertion expected realize=1 because the OLD-path MULTI rule
-  // unconditionally pre-seeded multi-consumer nodes; that seed is now
-  // gated to ROOT+REDUCE+MATMUL only.
-  CHECK_EQ(rangeify_unified_is_realized(shared_idx), 0);
+  // Shared has 2 consumers => bufferize_classify seeds it as realized
+  // via the MULTI rule, or our pass marks partial-realize. Either way:
+  CHECK_EQ(rangeify_unified_is_realized(shared_idx), 1);
 
   // (d) REDUCE injects KAX_REDUCE range. We sum a 1D tensor (axis 0)
   // -> the producer reads through one fresh REDUCE range.
