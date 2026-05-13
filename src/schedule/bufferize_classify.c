@@ -1774,20 +1774,28 @@ fn void bufferize_classify(Term root) {
   // bufferize.c, the kernel walker) observe the new decisions through
   // the same side-table they already read.
   if (rangeify_unified_enabled()) {
-    // Carry over the OLD-path REDUCE seed.  thvm's materialize.c +
-    // kernel_lift.c emit one KernelEntry per BUFFERIZE_NODES.realized
-    // bit; fusing a REDUCE into its elementwise consumer requires the
-    // downstream pipeline to lower REDUCE-via-RANGE inline, which the
-    // Phase 2 unified pass does not yet emit into the heap (it writes
-    // RU_RANGE_MAP only). Until Phase 4's UOP_BUFFERIZE production
-    // rewrite lands, mirror tinygrad's eventual STORE-realize on
-    // REDUCE by keeping the seed here so the existing renderers
-    // continue to see a per-REDUCE boundary.
-    // Mirror source: tinygrad/schedule/indexing.py:32 (`realize`
-    // pattern on COPY/CONTIGUOUS/STORE), the STORE branch of which
-    // is the closest analog to thvm's per-REDUCE realize today.
+    // Phase 3 cutover surface area:
+    //
+    //   bufferize_classify is the entry-point for the seed snapshot used
+    //   by bufferize_node_mark; we still need to seed the bufferize graph
+    //   for downstream queries that consult bufferize_is_realized.
+    //
+    //   Carry over the OLD-path REDUCE / matmul / matmul-input-protect
+    //   seeds. thvm's materialize.c + kernel_lift.c emit one KernelEntry
+    //   per BUFFERIZE_NODES.realized bit; fusing a REDUCE into its
+    //   elementwise consumer requires the downstream pipeline to lower
+    //   REDUCE-via-RANGE inline, which the Phase 2 unified pass does
+    //   not yet emit into the heap (it writes RU_RANGE_MAP only).
+    //   Until Phase 4's UOP_BUFFERIZE production rewrite lands, keep
+    //   the REDUCE+MATMUL seeds so the existing renderers continue to
+    //   see a per-REDUCE boundary. Mirror source:
+    //   tinygrad/schedule/indexing.py:32 (`realize` on
+    //   COPY/CONTIGUOUS/STORE; STORE-on-REDUCE is the closest analog).
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
+      if (info->consumer_count >= 2) {
+        bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+      }
       if (info->op == UOP_REDUCE) {
         bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
         if (bufferize_uop_is_matmul(info->loc)) {
@@ -1795,24 +1803,14 @@ fn void bufferize_classify(Term root) {
         }
       }
     }
-    // bufferize_classify is the entry-point for the seed snapshot used
-    // by bufferize_node_mark; we still need to seed the bufferize graph
-    // for downstream queries that consult bufferize_is_realized.
     bufferize_seed_from_nodes(root);
+    // Run the unified rangeify walk -- writes to RU_RANGE_MAP +
+    // RU_REALIZE_MAP for tests + Phase 4 lowered-DAG consumers. It does
+    // NOT (yet) override BUFFERIZE_NODES.realized during cutover; Phase 4
+    // unwinds the boundary decision by emitting UOP_BUFFERIZE directly.
     run_rangeify_unified(root);
-    for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-      int u_realized = rangeify_unified_is_realized(i);
-      if (u_realized && !BUFFERIZE_NODES[i].realized) {
-        bufferize_node_mark(&BUFFERIZE_NODES[i],
-                            BUFFERIZE_REASON_MULTI);
-      }
-    }
-    // Run the OLD-path removal rules to prune unnecessary realizes the
-    // unified pass added (it only ADDS; it cannot REMOVE). Phase 4 +
-    // 5c will subsume these rules with native unified-pass handling
-    // (per ideal_pipeline_v2.md:103). The "remove-*" + "inline-*"
-    // rules are what currently make the 597-kernel W2-grad fit under
-    // the 100-kernel target.
+    // Run the OLD-path removal rules to prune unnecessary realizes.
+    // Phase 5c will subsume these with native unified-pass handling.
     RealizeRewriteRule unified_rules[] = {
       {"inline-constants",                bufferize_rule_inline_constants},
       {"inline-adjacent-reduce-chains",   bufferize_rule_inline_adjacent_reduce_chains},
