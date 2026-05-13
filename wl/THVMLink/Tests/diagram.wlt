@@ -54,7 +54,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Block[{t = First @ TDup[0, TLam[x, x + 3][TSup[0, 1, 2]]], d, dup},
-        d   = THeapDiagram[{t}];
+        d   = THeapDiagram[t];
         dup = findOne[d, "DUP"];
         dup["OutputArity"]
     ],
@@ -95,7 +95,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     Block[{
-        d = THeapDiagram[{TSup[1, 2] + 3}], op2, sup, nums
+        d = THeapDiagram[TSup[1, 2] + 3], op2, sup, nums
     },
         op2  = findOne[d, "OP2 +"];
         sup  = findOne[d, "SUP"];
@@ -129,4 +129,86 @@ VerificationTest[
     ],
     2,
     TestID -> "THeapDiagram: post-DUP_SUP_ANN both branches visible via sibling auto-seed"
+]
+
+(* === per-step topology for `TLam[x, x + 3][TSup[1, 2]]`.
+   No enclosing DUP -- the active term itself updates step-to-step
+   and each step's diagram should reflect ONLY the currently live
+   subgraph (dead APP/LAM cleaned out, no stale references from the
+   original APP seed leaking forward). *)
+nodeLabels[d_] := Sort @ Map[
+    Function[s,
+        Replace[ReleaseHold @ s["HoldExpression"], {
+            Column[{name_, ___}, ___] :> name,
+            s_String :> StringSplit[s, "\n"][[1]]}]],
+    d["SubDiagrams"]];
+
+VerificationTest[
+    TInit[];
+    Block[{steps = TMultiSteps[TLam[x, x + 3][TSup[1, 2]]]},
+        nodeLabels /@ steps[[All, "Diagram"]]
+    ],
+    {
+        Sort @ {"APP", "LAM", "SUP", "OP2 +", "NUM", "NUM", "NUM"},   (* step 1: initial *)
+        Sort @ {"OP2 +", "SUP", "NUM", "NUM", "NUM"},                 (* step 2: APP_LAM consumed APP+LAM *)
+        Sort @ {"SUP", "OP2 +", "OP2 +", "DUP", "NUM", "NUM", "NUM"}, (* step 3: OP2_SUP commuted *)
+        Sort @ {"SUP", "OP2 +", "OP2 +", "NUM", "NUM", "NUM"},        (* step 4: DUP_NUM atom-copied *)
+        Sort @ {"SUP", "OP2 +", "NUM", "NUM", "NUM"},                 (* step 5: first OP2_NUM_NUM *)
+        Sort @ {"SUP", "NUM", "NUM"}                                  (* step 6: final *)
+    },
+    TestID -> "TMultiSteps[lam[x, x + 3][sup[1, 2]]] -- per-step node-label sets"
+]
+
+(* Wires: a key topology invariant is that VAR(0) in the OP2 body
+   shares its wire with the substituted SUP arg after APP_LAM. *)
+VerificationTest[
+    TInit[];
+    Block[{
+        steps = TMultiSteps[TLam[x, x + 3][TSup[1, 2]]],
+        d, op2, sup
+    },
+        d   = steps[[2]]["Diagram"];                  (* post APP_LAM *)
+        op2 = findOne[d, "OP2 +"];
+        sup = findOne[d, "SUP"];
+        {
+            (* var0 IS the wire connecting OP2's slot 0 to the SUP's
+               principal -- the LAM's binder was substituted with the
+               SUP arg. *)
+            MemberQ[Through[op2["Ports"]["Name"]], "var0"],
+            MemberQ[Through[sup["Ports"]["Name"]], "var0"],
+            (* OP2's principal is exposed as the network output. *)
+            Through[d["OutputPorts"]["Name"]] === {"p1"}
+        }
+    ],
+    {True, True, True},
+    TestID -> "TMultiSteps step 2: APP+LAM consumed, OP2 wired to SUP via var0"
+]
+
+(* Step 3: OP2_SUP commute introduces a DUP and a new outer SUP.
+   The new SUP's two slots are OP2s; each OP2's slot 1 wire is one
+   of the DUP's projection outputs. *)
+VerificationTest[
+    TInit[];
+    Block[{
+        steps = TMultiSteps[TLam[x, x + 3][TSup[1, 2]]],
+        d, dup, op2s, dupOuts, op2SecondSlotWires
+    },
+        d    = steps[[3]]["Diagram"];                 (* post OP2_SUP *)
+        dup  = findOne[d, "DUP"];
+        op2s = findAll[d, "OP2 +"];
+        (* DUP outputs both projection wires. *)
+        dupOuts = Sort @ Through[dup["OutputPorts"]["Name"]];
+        (* Collect the SECOND slot wire (= the duped NUM 3 ref) from
+           each OP2.  Should be one DP0 wire and one DP1 wire. *)
+        op2SecondSlotWires = Sort @ Map[
+            Function[op2, op2["InputPorts"][[2]]["Name"]],
+            op2s];
+        {
+            dup["OutputArity"] === 2,
+            Length[op2s] === 2,
+            dupOuts === op2SecondSlotWires
+        }
+    ],
+    {True, True, True},
+    TestID -> "TMultiSteps step 3: OP2_SUP introduces DUP whose projections feed both new OP2s"
 ]

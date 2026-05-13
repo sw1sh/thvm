@@ -951,16 +951,28 @@ discoverUopOpcodesHere[seedTerms_List] := Block[{lo = THeapBase[], n = THeapPos[
    the reachable closure of `term` keeps stale pre-WNF cells, prior
    constructions, and unrelated heap garbage out of the diagram, so
    the wire names of independent agents never get mixed up. *)
-(* A LAM/DUP whose body cell at `base` is SUB-flagged was consumed
-   by a prior interaction (APP-LAM beta for LAM; DUP-XXX for DUP).
+(* An agent that's been consumed by a prior firing.  Three cases:
+   - LAM / DUP whose body cell at `base` is SUB-flagged (APP-LAM
+     beta for LAM, DUP-XXX for DUP).
+   - APP whose left slot is a LAM whose binder is SUB-flagged
+     (APP-LAM already fired -- the APP cell isn't itself SUB-flagged
+     but the interaction has resolved).
    Either way the wrapper is dropped from the picture.  For a DUP
    whose body is an atom, the substituted atom is surfaced as a
    plain NUM/ERA/TEN leaf by `surfacedAtomLocs` below, and `wireFor`
    chases the DP-projection's wire to that leaf so both projection
    consumers connect to it. *)
 agentRuleIsDead[base_Integer, tag_Integer] :=
-    (tag === $TagLAM || tag === $TagDUP) &&
-        TTermSub[THeapRead[base]] === 1
+    Which[
+        tag === $TagLAM || tag === $TagDUP,
+            TTermSub[THeapRead[base]] === 1,
+        tag === $TagAPP,
+            With[{lam = THeapRead[base]},
+                TTermTag[lam] === $TagLAM &&
+                    TTermSub[THeapRead[TTermVal[lam]]] === 1],
+        True,
+            False
+    ]
 
 reachableAgentsHere[seedTerms_List] := Block[
     {result = <||>, queue = seedTerms, t, rule, base, tag},
@@ -970,18 +982,25 @@ reachableAgentsHere[seedTerms_List] := Block[
         If[ rule =!= Nothing,
             base = First[rule]; tag = Last[rule];
             Which[
-                (* Dead DUP / Dead LAM: skip the wrapper but follow
-                   the body so the substituted content (SUP / LAM /
+                (* Dead DUP / LAM: skip the wrapper but follow the
+                   body so the substituted content (SUP / LAM /
                    atom) reachable through a VAR or DP-projection
                    still surfaces.  After APP-LAM, heap[lam_loc]
                    holds the arg (SUB-flagged); a VAR(lam_loc) in
                    the body queues here, and following heap[base]
-                   reaches the arg's compound structure (e.g. the
-                   SUP slots) so the diagram shows what the LAM
-                   has been reduced to. *)
+                   reaches the arg's compound structure. *)
                 (tag === $TagDUP || tag === $TagLAM)
                     && agentRuleIsDead[base, tag],
                     queue = Append[queue, THeapRead[base]],
+                (* Dead APP: APP-LAM already fired.  Skip the APP
+                   and stop descending through it -- the LAM body
+                   is now the active term (reached via the snapshot
+                   pipeline's `t` argument), and walking the dead
+                   APP's slots would only drag in the consumed LAM
+                   and the original SUP arg, both of which are
+                   reachable through `t`'s VAR chase anyway. *)
+                tag === $TagAPP && agentRuleIsDead[base, tag],
+                    Null,
                 ! KeyExistsQ[result, base],
                     result[base] = tag;
                     queue = Join[queue, THeapRead /@ agentChildSlots[t]]

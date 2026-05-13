@@ -246,4 +246,37 @@ If[ ! TMultiTraceQ[],
         {{1}, {1}},
         TestID -> "DUP_SUP_ANN event consumed list is deduplicated"
     ];
+
+    (* === TCausalGraph accepts either a trace or a steps list and
+       returns the same graph (events are flattened across steps). *)
+    VerificationTest[
+        TInit[];
+        Block[{out, traceForm, steps, stepsForm},
+            out       = TMultiTrace[TCollapse[TSup[1, 2] + 3]];
+            traceForm = TCausalGraph[out["Trace"]];
+            TInit[];
+            steps     = TMultiSteps[TSup[1, 2] + 3];
+            stepsForm = TCausalGraph[steps];
+            {
+                Length @ VertexList[traceForm] === Length @ VertexList[stepsForm],
+                Sort @ EdgeList[traceForm] === Sort @ EdgeList[stepsForm]
+            }
+        ],
+        {True, True},
+        TestID -> "TCausalGraph accepts either trace or steps; result is the same"
+    ];
+
+    (* TMultiwayGraph requires steps -- a flat trace is missing the
+       slice info needed to form WPP-style vertices.  Should fail
+       loudly rather than producing a wrong-looking graph. *)
+    VerificationTest[
+        TInit[];
+        Block[{trace},
+            trace = TMultiTrace[TCollapse[TSup[1, 2] + 3]]["Trace"];
+            TMultiwayGraph[trace]
+        ],
+        $Failed,
+        TMultiwayGraph::needsteps,
+        TestID -> "TMultiwayGraph rejects flat-trace input with a clear message"
+    ];
 ]

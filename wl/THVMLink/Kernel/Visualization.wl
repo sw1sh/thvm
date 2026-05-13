@@ -190,7 +190,7 @@ agentFromAtomSeed[term_] := With[{tag = TTermTag[term], val = TTermVal[term]},
    edges), and the DUP wrapper is the only node that ties both
    projections to the atom.  Keep the wrapper visible in that case. *)
 agentIsDead[term_] := Block[
-    {tag = TTermTag[term], body, btag},
+    {tag = TTermTag[term], body, btag, lam},
     Which[
         tag === $TagLAM,
             TTermSub[THeapRead[TTermVal[term]]] === 1,
@@ -201,6 +201,12 @@ agentIsDead[term_] := Block[
                 btag =!= $TagNUM && btag =!= $TagERA &&
                 btag =!= $TagTEN && btag =!= $TagANY &&
                 btag =!= $TagREF,
+        tag === $TagAPP,
+            (* APP-LAM has fired -- left slot is a LAM whose binder
+               is SUB-flagged.  The APP wrapper is logically gone. *)
+            lam = THeapRead[TTermVal[term]];
+            TTermTag[lam] === $TagLAM &&
+                TTermSub[THeapRead[TTermVal[lam]]] === 1,
         True, False
     ]
 ]
