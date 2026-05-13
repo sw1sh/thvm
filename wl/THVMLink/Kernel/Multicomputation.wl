@@ -357,15 +357,15 @@ familyLegend[families_List] := SwatchLegend[
        TMultiTrace[...]["Trace"]), or
      - a steps list (a list of per-step Associations from
        TMultiSteps[...]), each with at least an "Events" key.
-   The shared lifter `traceFromInput` extracts events; the result is
-   the minimal data both functions consume. *)
-multiTraceQ[x_List] :=
-    x === {} || (AssociationQ[First[x]] && KeyExistsQ[First[x], "id"])
-multiStepsQ[x_List] :=
-    Length[x] > 0 && AssociationQ[First[x]] && KeyExistsQ[First[x], "Events"]
-traceFromInput[x_ /; multiTraceQ[x]] := x
-traceFromInput[x_ /; multiStepsQ[x]] :=
-    Catenate @ Map[#["Events"] &, x]
+   Distinguished by KeyValuePattern on the first element.  The
+   shared lifter `traceFromInput` extracts events; the result is the
+   minimal data both functions consume. *)
+$multiTracePat = {} | {KeyValuePattern["id" -> _] ..};
+$multiStepsPat = {KeyValuePattern["Events" -> _] ..};
+multiTraceQ[x_] := MatchQ[x, $multiTracePat];
+multiStepsQ[x_] := MatchQ[x, $multiStepsPat];
+traceFromInput[x : $multiStepsPat] := Catenate @ Map[#["Events"] &, x]
+traceFromInput[x : $multiTracePat] := x
 
 Options[TCausalGraph] = Join[
     {"Family" -> All,
