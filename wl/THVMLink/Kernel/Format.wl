@@ -670,23 +670,28 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
         $TagANY, Style["*", Italic],
         $TagTEN, Subscript["T", val],
         $TagREF, Subscript["R", ext],
-        $TagVAR, Subscript["x", val],
-        $TagDP0 | $TagDP1,
-            (* Both projections of a DUP are the SAME variable (IC
-               notation `! &L{x, x} = body`); we distinguish them
-               with a superscript projection index (0 or 1) and a
-               subscript heap loc for the dup cell.  When the cell
-               is SUB-flagged (a prior DUP-XXX fired), chase through
-               -- the projection wrapper is gone. *)
+        $TagVAR,
+            (* Chase through SUB so post-beta labels show the
+               substituted arg, not the original binder reference. *)
             cell = THeapRead[val];
             If[ TTermSub[cell] === 1,
                 tTermTradDepth[
                     packTerm[0, TTermTag[cell], TTermExt[cell],
                              TTermVal[cell]],
                     d - 1],
-                Subscript[
-                    Superscript["x", If[ tag === $TagDP0, "0", "1"]],
-                    val]],
+                Subscript["x", val]],
+        $TagDP0 | $TagDP1,
+            (* Both projections of a DUP are the SAME variable (IC
+               notation `! &L{x, x} = body`); render as `dp` with a
+               superscript projection index (0 or 1).  When the cell
+               is SUB-flagged (a prior DUP-XXX fired), chase through. *)
+            cell = THeapRead[val];
+            If[ TTermSub[cell] === 1,
+                tTermTradDepth[
+                    packTerm[0, TTermTag[cell], TTermExt[cell],
+                             TTermVal[cell]],
+                    d - 1],
+                Superscript["dp", If[ tag === $TagDP0, "0", "1"]]],
         $TagDUP,
             (* DUP wrapper is transparent at the TraditionalForm level. *)
             tTermTradDepth[THeapRead[val], d - 1],
