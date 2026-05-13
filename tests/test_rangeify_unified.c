@@ -75,11 +75,9 @@ int main(void) {
 
   // (c) Diamond fan-out: shared = a + b; consumers are
   // parent1 = shared * c, parent2 = shared * d, root = p1 + p2.
-  // Both MULs thread the SAME range expression into `shared` (slot-0
-  // identity index), so the consumer-divergence walk's `all_all_same`
-  // branch (run_rangeify_unified.c, mirror indexing.py:205-213) shares
-  // ranges WITHOUT realizing.  `shared` is inlined into both
-  // consumers.
+  // bufferize_classify pre-seeds `shared` as realized via the MULTI
+  // rule (consumer_count >= 2), so the unified pass inherits
+  // realized_full = 1 from that seed.
   TEST_BEGIN("unified-rangeify/diamond-shared-producer-realized");
   Term d = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor1(3));
   Term shared = uop_binary(UOP_ADD, a, b);
