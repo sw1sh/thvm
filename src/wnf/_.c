@@ -670,7 +670,7 @@ apply:
           Term y = heap_read(loc + 1);
           if (term_tag(y) == TAG_NUM) {
             ITRS++;
-            multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, 0, op);
+            multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, loc + 1, op);
             u32 xv = (u32)term_val(whnf);
             u32 yv = (u32)term_val(y);
             u32 r;
@@ -696,19 +696,18 @@ apply:
             whnf = term_new(0, TAG_NUM, term_ext(whnf), r);
             continue;
           }
-          // x is NUM; descend into y.  Stash the WHNF'd x on the heap
-          // at loc + 0 so the F_OP2_NUM frame can key on `loc` (i.e.
-          // the original OP2 cell) rather than baking x's raw bits
-          // into the frame's val.  Two payoffs:
-          //   (1) the trace's wire_prov sees a real cell for x and
-          //       multi_emit's consumed lookup hits a real producer
-          //       (whoever wrote loc+0);
-          //   (2) the "y stuck" fall-through can reuse the OP2 cell
-          //       in place instead of allocating a fresh 2-cell pair.
-          // ext stays (op | dtype<<8); val is now loc.
+          // x is NUM; descend into y.  Stash the WHNF'd x at
+          // heap[loc + 0] so F_OP2_NUM can key on `loc` (the
+          // original OP2 cell).  IMPORTANT: write WITHOUT bumping
+          // wire_prov -- the stash is a transient cache, not a
+          // logical event.  Bumping clobbers x's real producer
+          // with the in-flight OP2's id, polluting consumed[] of
+          // any later OP2_NUM_NUM reading heap[loc+0] (e.g. when a
+          // sibling-branch OP2 reads the shared SUB-resolved NUM
+          // via its DP-projection slot).
           u32 dtype = term_ext(whnf);
           u32 packed_ext = (op & 0xFF) | ((dtype & 0xFF) << 8);
-          heap_set(loc + 0, whnf);
+          HEAP[loc + 0] = whnf;   // raw store, no wire_prov bump
           stack[s_pos++] = term_new(0, TAG_F_OP2_NUM, packed_ext, loc);
           next = y;
           goto enter;
@@ -745,7 +744,7 @@ apply:
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
-          multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, 0, op);
+          multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, loc + 1, op);
           u32 yv = (u32)term_val(whnf);
           u32 r;
           switch (op) {
@@ -1115,18 +1114,16 @@ bail:
       heap_set(term_val(frame) + 1, whnf);
       whnf = frame;
     } else if (ftag == TAG_F_OP2_NUM) {
-      // x is NUM (baked in frame), in-flight whnf is partial y.
-      // Rebuild OP2(NUM, whnf) on a fresh cell so the bail snapshot
-      // points to a valid term we can resume.
+      // After the M1 redesign, F_OP2_NUM's frame.val carries the
+      // ORIGINAL OP2 cell's loc (not xv).  x is stashed at
+      // heap[loc+0]; heap[loc+1] still holds the ORIGINAL DP
+      // projection (the apply path never wrote y back here).  Just
+      // rebuild OP2 at loc; resumption re-derives y from
+      // heap[loc+1] via SUB-chase.
       u32 packed_ext = term_ext(frame);
-      u32 op    = packed_ext & 0xFF;
-      u32 dtype = (packed_ext >> 8) & 0xFF;
-      u32 xv    = (u32)term_val(frame);
-      Term x = term_new(0, TAG_NUM, dtype, xv);
-      u64 nloc = heap_alloc(2);
-      heap_set(nloc + 0, x);
-      heap_set(nloc + 1, whnf);
-      whnf = term_new(0, TAG_OP2, op, nloc);
+      u32 op         = packed_ext & 0xFF;
+      u64 loc        = term_val(frame);
+      whnf = term_new(0, TAG_OP2, op, loc);
     } else if (ftag == TAG_F_EQL_R) {
       // a stored at heap[loc+0]; in-flight whnf is partial b.
       u64 loc = term_val(frame);

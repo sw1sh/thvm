@@ -162,6 +162,28 @@ fn u32 multi_wire_prov_get(u64 loc) {
     return CURRENT_CTX->multi_wire_prov[loc];
 }
 
+// Effective producer of the value living at `loc`.  When the cell
+// is a live DP/VAR projection whose binder is SUB-flagged, the
+// "logical" producer is whoever wrote the substituted value -- not
+// the OP2/etc. that allocated this slot.  Chasing SUB lets a
+// downstream OP2_NUM_NUM record DUP_NUM as a consumed[] producer
+// when its operand comes from a SUB-resolved DP projection.
+fn u32 multi_resolve_producer(u64 loc) {
+    if (loc >= CURRENT_CTX->multi_wire_prov_cap) return MULTI_WIRE_NONE;
+    Term cell = HEAP[loc];
+    u8   tag  = term_tag(cell);
+    if (tag == TAG_DP0 || tag == TAG_DP1 || tag == TAG_VAR) {
+        u64 target = term_val(cell);
+        if (target < CURRENT_CTX->multi_wire_prov_cap) {
+            Term tcell = HEAP[target];
+            if (term_sub_get(tcell)) {
+                return CURRENT_CTX->multi_wire_prov[target];
+            }
+        }
+    }
+    return CURRENT_CTX->multi_wire_prov[loc];
+}
+
 fn void multi_emit_body(u8 rule, u8 family,
                         u64 term_a, u64 term_b,
                         u32 delta_label) {
@@ -196,10 +218,12 @@ fn void multi_emit_body(u8 rule, u8 family,
     e->consumed[1] = MULTI_WIRE_NONE;
     u8 nc = 0;
     if (term_a) {
-        e->consumed[nc++] = multi_wire_prov_get((u64)term_val((Term)term_a));
+        e->consumed[nc++] = multi_resolve_producer(
+            (u64)term_val((Term)term_a));
     }
     if (term_b) {
-        e->consumed[nc++] = multi_wire_prov_get((u64)term_val((Term)term_b));
+        e->consumed[nc++] = multi_resolve_producer(
+            (u64)term_val((Term)term_b));
     }
     e->n_consumed = nc;
 }
