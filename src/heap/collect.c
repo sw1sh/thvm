@@ -279,10 +279,6 @@ static void gc_evacuate_side_tables(u64 *alloc) {
     if (ke->compute_root != 0) {
       ke->compute_root = gc_evacuate(ke->compute_root, alloc);
     }
-    // Phase 4d-2: compute_bufferize holds the unified rangeify pass's
-    // UOP_BUFFERIZE Term (allocated on the main heap via
-    // uop_bufferize_new).  Evacuate alongside compute_root so the
-    // kernel keeps a live handle on its boundary across collections.
     if (ke->compute_bufferize != 0) {
       ke->compute_bufferize = gc_evacuate(ke->compute_bufferize, alloc);
     }

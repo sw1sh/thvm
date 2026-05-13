@@ -23,6 +23,14 @@ static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
 // it without re-doing the bufferize_info_find lookup.
 static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_ORDER_LEN = 0;
+// Direct-rangeify cutover: parallel UOP_BUFFERIZE Term per slot in
+// BOUNDARY_ORDER, populated by topo_sort_boundaries when
+// THVM_RANGEIFY_DIRECT=1 and the unified pass produced a non-zero
+// RU_BUFFERIZE_TERM for that boundary. emit_kernel_for_boundary
+// stashes this onto ke->compute_bufferize after kernel_alloc.
+// 0 = "no UOP_BUFFERIZE term for this boundary" (OLD path, or
+// realized boundary the unified pass didn't surface).
+static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 
 // Multi-output kernel merge planning (Step 2 of multi-output groundwork).
 // After topo_sort_boundaries fills BOUNDARY_ORDER, plan_kernel_merges
@@ -386,20 +394,57 @@ static void boundary_compute_last_use(void) {
   free(visited);
 }
 
+// Direct-rangeify cutover gate.  When set, topo_sort_boundaries
+// selects the kernel set from the unified pass's UOP_BUFFERIZE terms
+// (RU_BUFFERIZE_TERM[i] != 0) instead of the OLD-path realized flag
+// (BUFFERIZE_NODES[i].realized).  Default 0 (legacy behaviour).
+// Mirror source: tinygrad/schedule/indexing.py:75-77 emits BUFFERIZE
+// at realize boundaries; the create_kernel walker downstream
+// consumes that BUFFERIZE node set directly.
+static int rangeify_direct_enabled(void) {
+  char const *e = getenv("THVM_RANGEIFY_DIRECT");
+  return e != NULL && e[0] != '0';
+}
+
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
+  for (u32 i = 0; i < BOUNDARY_ORDER_CAP; i++) BOUNDARY_BUFFERIZE_TERM[i] = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_CAP; i++)
     BOUNDARY_DEPTH[i] = BOUNDARY_DEPTH_INVALID;
   boundary_depth_rec(term_val(root));
   boundary_compute_last_use();
 
-  struct { u64 loc; u32 depth; } items[BOUNDARY_ORDER_CAP];
+  int direct = rangeify_direct_enabled();
+
+  struct { u64 loc; u32 depth; Term buf; } items[BOUNDARY_ORDER_CAP];
   u32 n = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN && n < BOUNDARY_ORDER_CAP; i++) {
-    if (!BUFFERIZE_NODES[i].realized) continue;
+    Term buf = 0;
+    if (direct) {
+      // Select on the unified pass's UOP_BUFFERIZE Term.  Skip nodes
+      // the unified rewrite didn't surface; those are either non-
+      // boundary intermediates (consumer-divergence walk inlined
+      // them) or movement-only nodes whose substitute forwards to a
+      // producer's BUFFERIZE.  Either way, no separate kernel emit.
+      //
+      // Intersect with BUFFERIZE_NODES.realized so the OLD-path
+      // prune rules (inline-pure-fanout-probe, remove-by-cost-score,
+      // etc. -- bufferize_classify.c:1814-1825) still trim the
+      // realize set.  Without this, we emit a kernel per UOP_BUFFERIZE
+      // including those the prune rewrites dropped, inflating count
+      // and breaking softmax / attention nn.wlt tests that depend on
+      // the pruned-set fusion.  Phase 5c plan: subsume the rewrites
+      // into the unified pass so the intersection is identity.
+      buf = rangeify_unified_bufferize_at(i);
+      if (buf == 0) continue;
+      if (!BUFFERIZE_NODES[i].realized) continue;
+    } else {
+      if (!BUFFERIZE_NODES[i].realized) continue;
+    }
     items[n].loc   = BUFFERIZE_NODES[i].loc;
     items[n].depth = BOUNDARY_DEPTH[i];
+    items[n].buf   = buf;
     n++;
   }
   for (u32 i = 1; i < n; i++) {
@@ -409,11 +454,13 @@ static void topo_sort_boundaries(Term root) {
       if (!swap) break;
       u64 lt = items[j].loc;   items[j].loc   = items[j-1].loc;   items[j-1].loc   = lt;
       u32 dt = items[j].depth; items[j].depth = items[j-1].depth; items[j-1].depth = dt;
+      Term bt = items[j].buf;  items[j].buf   = items[j-1].buf;   items[j-1].buf   = bt;
     }
   }
   for (u32 i = 0; i < n; i++) {
     u32 idx = BOUNDARY_ORDER_LEN++;
     BOUNDARY_ORDER[idx] = items[i].loc;
+    BOUNDARY_BUFFERIZE_TERM[idx] = items[i].buf;
     boundary_hash_insert(items[i].loc, idx);
     {
       char const *e = getenv("THVM_DUMP_BOUNDARY_ORDER");
@@ -422,10 +469,26 @@ static void topo_sort_boundaries(Term root) {
         u8 op = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].op : 0xFF;
         u32 reasons = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].reasons : 0;
         fprintf(stderr,
-                "boundary-order: idx=%u loc=%llu op=%u reasons=0x%x\n",
+                "boundary-order: idx=%u loc=%llu op=%u reasons=0x%x buf=%llu\n",
                 idx, (unsigned long long)items[i].loc,
-                (unsigned)op, reasons);
+                (unsigned)op, reasons,
+                (unsigned long long)items[i].buf);
       }
+    }
+  }
+  {
+    char const *e = getenv("THVM_DUMP_DIRECT_COUNT");
+    if (e != NULL && e[0] == '1') {
+      u32 realized_n = 0;
+      u32 unified_n  = 0;
+      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+        if (BUFFERIZE_NODES[i].realized) realized_n++;
+        if (rangeify_unified_bufferize_at(i) != 0) unified_n++;
+      }
+      fprintf(stderr,
+              "direct-count: direct=%d realized=%u unified_buf=%u "
+              "ordered=%u\n",
+              direct, realized_n, unified_n, BOUNDARY_ORDER_LEN);
     }
   }
 }
@@ -2375,12 +2438,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
   ke->output_shape  = out_shape;
   ke->output_numel  = TENS[out_tid].view.numel;
   ke->source_uop    = root_term;
-  // Phase 4d-2: attach the unified-pass UOP_BUFFERIZE Term so
-  // downstream consumers (kernel_lift, gc) can route through it.
-  // Mirror: tinygrad/schedule/indexing.py:77 emits one
-  // `UOp(Ops.BUFFERIZE, ...)` per realize boundary; the consumer side
-  // reads it as the boundary handle.  topo_sort_buffers_unified
-  // captured this in BOUNDARY_BUFFERIZE_TERM[bi] (0 in OLD-path mode).
+  // Direct-rangeify cutover: when topo_sort_boundaries selected this
+  // boundary from RU_BUFFERIZE_TERM[], stash the UOP_BUFFERIZE node
+  // here so later consumers (cached_lift wiring, debug dumps) can
+  // walk the lowered subtree via uop_bufferize_value(b).  0 in OLD-
+  // path mode (realized-flag selection).
   ke->compute_bufferize = BOUNDARY_BUFFERIZE_TERM[bi];
   TENS[out_tid].producer_kid = kid;
 
