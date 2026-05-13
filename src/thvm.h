@@ -2630,6 +2630,13 @@ fn Term rangeify_unified_subst_at              (u32 node_idx);
 // `Ops.BUFFERIZE` landing in the tsink at indexing.py:77.
 fn Term rangeify_unified_bufferize_at          (u32 node_idx);
 fn u32  rangeify_unified_last_bufferizes_emitted(void);
+// Phase 4a-pre-3: reduce-ranges attached to a UOP_REDUCE node by the
+// unified pass. Mirrors tinygrad's `src=(value,)+tuple(new_ranges)`
+// from convert_reduce_to_reduce_with_ranges (indexing.py:90-96).
+// Returns 0 for non-REDUCE nodes or REDUCE nodes whose reduce axes are
+// extent-1 (which collapse to UOP_CONST(0) per `resolve(s!=1)`).
+fn u32  rangeify_unified_reduce_n_ranges_at    (u32 node_idx);
+fn Term rangeify_unified_reduce_range_at       (u32 node_idx, u32 i);
 
 // === Phase E1: UOP_RANGE field accessors + axis_type rewriter ===
 // Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type

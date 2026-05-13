@@ -142,6 +142,28 @@ int main(void) {
   run_rangeify_unified(ten_root);
   CHECK_EQ(rangeify_unified_last_nodes_walked(), 0);
 
+  // (h-pre) Phase 4a-pre-3: REDUCE-via-RANGE production. The unified
+  // pass records the fresh KAX_REDUCE range it injects on the
+  // UOP_REDUCE node's reduce axis. Mirror: tinygrad/schedule/indexing.
+  // py:90-96 (convert_reduce_to_reduce_with_ranges) puts the new
+  // ranges in `src=(value,)+tuple(new_ranges)`; we record them in a
+  // side-table accessible via rangeify_unified_reduce_range_at.
+  TEST_BEGIN("unified-rangeify/reduce-ranges-recorded");
+  Term rb = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor1(8));
+  Term rred2 = uop_reduce(REDUCE_SUM, /*axis*/0, rb);
+  bufferize_classify(rred2);
+  run_rangeify_unified(rred2);
+  u32 rred2_idx = bufferize_info_find(term_val(rred2));
+  CHECK(rred2_idx != 0xFFFFFFFFu);
+  CHECK_EQ(rangeify_unified_reduce_n_ranges_at(rred2_idx), 1);
+  Term rrng = rangeify_unified_reduce_range_at(rred2_idx, 0);
+  CHECK_EQ(term_tag(rrng), TAG_UOP);
+  CHECK_EQ(term_ext(rrng), UOP_RANGE);
+  // axis_type marks it as a reduce iteration.
+  CHECK_EQ(uop_range_axis_type(rrng), KAX_REDUCE);
+  // extent matches the reduced-axis dim.
+  CHECK_EQ(uop_range_extent(rrng), 8);
+
   // (h) Phase 4a-pre-2: main-heap UOP_BUFFERIZE emitted at realize
   // boundaries.  After run_rangeify_unified on a small ADD-of-ADDs root,
   // the root realize should produce a UOP_BUFFERIZE Term whose value

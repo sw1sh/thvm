@@ -70,9 +70,22 @@ typedef struct {
   u8  n;
 } RuEndingRanges;
 
+// Phase 4a-pre-3: per-node reduce-range vector.  Mirrors tinygrad's
+// `UOp(Ops.REDUCE, dtype, src=(value,)+tuple(new_ranges), arg=(kind, ()))`
+// at tinygrad/schedule/indexing.py:90-96 (convert_reduce_to_reduce_with_ranges).
+// Filled by run_rangeify_unified when it visits a UOP_REDUCE node; read
+// by materialize.c (Phase 4a-pre-4) to enumerate the reduce-axes the
+// emit walker needs to iterate. n == 0 for non-REDUCE nodes or for
+// REDUCE nodes with all-extent-1 reduce axes.
+typedef struct {
+  Term ranges[MAX_DIM];
+  u8   n;
+} RuReduceRanges;
+
 static RuRangeMap      RU_RANGE_MAP    [RU_MAX_NODES];
 static RuRealizeEntry  RU_REALIZE_MAP  [RU_MAX_NODES];
 static RuEndingRanges  RU_ENDING_RANGES[RU_MAX_NODES];
+static RuReduceRanges  RU_REDUCE_RANGES[RU_MAX_NODES];
 static u32             RU_RANGE_IDX_COUNTER;  // monotonic axis_id source
 
 // Stats / introspection accessors for the new test.
@@ -104,6 +117,21 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_REALIZE_MAP[node_idx].realized_full
       || RU_REALIZE_MAP[node_idx].realized_partial;
+}
+
+// Phase 4a-pre-3: number of reduce-ranges attached to this node.
+// Non-zero only for UOP_REDUCE nodes whose reduce axes have extent > 1.
+// Mirrors tinygrad's `len(x.src[1:])` after
+// convert_reduce_to_reduce_with_ranges runs (indexing.py:94).
+fn u32 rangeify_unified_reduce_n_ranges_at(u32 node_idx) {
+  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
+  return RU_REDUCE_RANGES[node_idx].n;
+}
+
+fn Term rangeify_unified_reduce_range_at(u32 node_idx, u32 i) {
+  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
+  if (i >= RU_REDUCE_RANGES[node_idx].n) return 0;
+  return RU_REDUCE_RANGES[node_idx].ranges[i];
 }
 
 // === Env-gate. Mirrors the THVM_* env-pattern used elsewhere. ===
@@ -397,6 +425,8 @@ fn void run_rangeify_unified(Term root) {
     RU_REALIZE_MAP[i].axes_mask        = 0;
     RU_REALIZE_MAP[i].n_realized_axes  = 0;
     RU_ENDING_RANGES[i].n = 0;
+    RU_REDUCE_RANGES[i].n = 0;
+    for (u32 a = 0; a < MAX_DIM; a++) RU_REDUCE_RANGES[i].ranges[a] = 0;
   }
   RU_RANGE_IDX_COUNTER    = 0;
   RU_LAST_NODES_WALKED    = 0;
@@ -611,6 +641,13 @@ fn void run_rangeify_unified(Term root) {
       // Mirror indexing.py:253-254
       //   `tuple(rctx.new_range(s, axistype=AxisType.REDUCE) if i in arg[1] else r ...`
       // thvm UOP_REDUCE stores a single axis at heap[loc + 2].
+      //
+      // Phase 4a-pre-3 also records the fresh REDUCE range Term in
+      // RU_REDUCE_RANGES[node_idx] so materialize.c (Phase 4a-pre-4)
+      // can enumerate the reduce-axes via accessor without re-deriving
+      // them from the heap. This is the thvm-side equivalent of
+      // tinygrad's `convert_reduce_to_reduce_with_ranges` storing the
+      // ranges in `src=(value,) + tuple(new_ranges)` at indexing.py:94.
       Shape src_shape;
       if (!ru_node_src_shape(info->loc, &src_shape)) {
         for (u8 a = 0; a < my_ndim; a++) in_rngs[a] = out_rngs[a];
@@ -623,9 +660,22 @@ fn void run_rangeify_unified(Term root) {
         u8 dst_ndim = (u8)src_shape.ndim;
         if (dst_ndim > RU_MAX_AXES) dst_ndim = RU_MAX_AXES;
         u8 src_cursor = 0;
+        RU_REDUCE_RANGES[node_idx].n = 0;
         for (u8 a = 0; a < dst_ndim; a++) {
           if (a == raxis) {
-            in_rngs[a] = ru_new_range(src_shape.dims[a], KAX_REDUCE);
+            Term rng = ru_new_range(src_shape.dims[a], KAX_REDUCE);
+            in_rngs[a] = rng;
+            // Record only true UOP_RANGE leaves (extent-1 reduce axes
+            // collapse to UOP_CONST(0) per ru_new_range; tinygrad's
+            // convert_reduce_to_reduce_with_ranges filters via
+            // `len(x.arg[1])` and the `i in x.arg[1]` check at line 93).
+            if (term_tag(rng) == TAG_UOP && term_ext(rng) == UOP_RANGE) {
+              u8 k = RU_REDUCE_RANGES[node_idx].n;
+              if (k < MAX_DIM) {
+                RU_REDUCE_RANGES[node_idx].ranges[k] = rng;
+                RU_REDUCE_RANGES[node_idx].n = k + 1;
+              }
+            }
           } else {
             in_rngs[a] = (src_cursor < my_ndim)
                        ? out_rngs[src_cursor]
