@@ -1813,15 +1813,23 @@ fn void bufferize_classify(Term root) {
     // (pm_generate_realize_map realizes COPY/CONTIGUOUS/STORE only;
     //  REDUCE realize emerges from ending_ranges + consumer-divergence
     //  inside run_rangeify).
+    char const *direct_env = getenv("THVM_RANGEIFY_DIRECT");
+    int direct = (direct_env != NULL && direct_env[0] != '0');
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->consumer_count >= 2) {
         bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
       }
       if (info->op == UOP_REDUCE) {
-        bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+        // Under THVM_RANGEIFY_DIRECT=1: only MATMUL REDUCEs stay as
+        // boundaries (mirrors tinygrad's matmul-protect).  Other REDUCEs
+        // fuse inline via the unified pass's REDUCE-via-RANGE expansion
+        // + render_uop's _accN accumulator hoist.
         if (bufferize_uop_is_matmul(info->loc)) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
+        } else if (!direct) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
         }
       }
     }
