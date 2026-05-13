@@ -462,18 +462,20 @@ canonicalFormDepth[term_, depth_Integer] := If[ depth <= 0,
                 cell = THeapRead[val];
                 If[ TTermSub[cell] === 1,
                     (* DUP-X fired: projection resolved to a specific
-                       branch; canonical = branch's canonical. *)
+                       branch; canonical = branch's canonical (the
+                       superscript wrapper drops off once the
+                       projection has a definite value). *)
                     canonicalFormDepth[
                         packTerm[0, TTermTag[cell], TTermExt[cell],
                                  TTermVal[cell]],
                         depth - 1],
-                    (* Pre-resolution: the projection is an observer
-                       of the duplicated body -- it doesn't have its
-                       own identity, it IS the body.  Canonical equals
-                       the body's canonical so DP0 and DP1 of the same
-                       DUP collapse to one vertex.  Reductions inside
-                       the body produce real transitions. *)
-                    canonicalFormDepth[cell, depth - 1]],
+                    (* Pre-resolution: wrap the body's canonical with
+                       the projection index (DP0 / DP1) and the dup
+                       label so DP0 and DP1 of the same DUP are
+                       distinct vertices, and reductions inside the
+                       body still produce real transitions. *)
+                    {If[ tag === $TagDP0, "DP0", "DP1"], ext,
+                     canonicalFormDepth[cell, depth - 1]}],
             $TagVAR,
                 cell = THeapRead[val];
                 If[ TTermSub[cell] === 1,

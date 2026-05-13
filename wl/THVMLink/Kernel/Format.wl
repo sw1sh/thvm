@@ -681,18 +681,20 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
                     d - 1],
                 Subscript["x", val]],
         $TagDP0 | $TagDP1,
-            (* The projection is just an observer of the body; render
-               transparently (matching canonicalForm).  Post-fire the
-               cell is SUB-flagged with the resolved branch and we
-               chase through; pre-fire we render the body directly so
-               vertex labels stay readable as reductions advance. *)
+            (* Pre-resolution: render the body with a 0/1 superscript
+               so DP0 and DP1 of the same body are visually distinct
+               (matches canonicalForm's wrapping).  Post-fire (cell
+               SUB-flagged), the projection has resolved to a specific
+               branch -- chase through, drop the superscript. *)
             cell = THeapRead[val];
             If[ TTermSub[cell] === 1,
                 tTermTradDepth[
                     packTerm[0, TTermTag[cell], TTermExt[cell],
                              TTermVal[cell]],
                     d - 1],
-                tTermTradDepth[cell, d - 1]],
+                Superscript[
+                    tTermTradDepth[cell, d - 1],
+                    If[ tag === $TagDP0, "0", "1"]]],
         $TagDUP,
             (* DUP wrapper is transparent at the TraditionalForm level. *)
             tTermTradDepth[THeapRead[val], d - 1],
