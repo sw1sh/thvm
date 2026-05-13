@@ -705,10 +705,19 @@ tTermTradDepth[t_TTerm, d_Integer] := Block[
         $TagAPP,
             a = tTermTradDepth[THeapRead[val + 0], d - 1];
             b = tTermTradDepth[THeapRead[val + 1], d - 1];
-            Inactive[a][b],
+            (* Plain Row, no Inactive. Inactive-as-head wraps the
+               function position in an InactiveHead template which
+               attaches its own automatic tooltip showing the raw
+               box expression -- not what we want layered under the
+               outer structural tooltip. *)
+            With[{aa = a, bb = b}, Row[{"(", aa, ")(", bb, ")"}]],
         $TagLAM,
             body = tTermTradDepth[THeapRead[val], d - 1];
-            HoldForm[Function[Subscript["x", val], body]],
+            (* Same Hold trap: `HoldForm` would leak the local symbols
+               `val` / `body`. Use Row[\[Lambda] x_loc. body] form, which
+               renders nicely in TraditionalForm without bogus binders. *)
+            With[{v = val, b = body},
+                Row[{"\[Lambda]", Subscript["x", v], ". ", b}]],
         $TagUOP,
             Inactive[Symbol["uop" <> ToString[ext]]] @@
                 Table[tTermTradDepth[THeapRead[val + i], d - 1],
