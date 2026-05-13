@@ -432,3 +432,84 @@ VerificationTest[
     "ERA",
     TestID -> "heap-snapshot/cross-restart-textual-roundtrip"
 ]
+
+(* === Term[t_TTerm]: nested constructor form ===
+
+   Distinct from the per-cell positional Term[tag, ext, val]: the
+   walker produces a fully-unrolled tree whose every node is a
+   `Term[head_String, args...]` expression with no heap locs (LAMs
+   carry a binder id so VAR back-references match). *)
+
+VerificationTest[
+    TInit[];
+    TReset[];
+    Term[TSup[1, 2] + 3],
+    Term["OP2", "+",
+        Term["SUP", _, Term["NUM", 1], Term["NUM", 2]],
+        Term["NUM", 3]],
+    SameTest -> MatchQ,
+    TestID -> "term/walker/sup-plus-num"
+]
+
+VerificationTest[
+    TInit[];
+    TReset[];
+    Term[TLam[x, x + 3]],
+    Term["LAM", _Integer,
+        Term["OP2", "+", Term["VAR", _Integer], Term["NUM", 3]]],
+    SameTest -> MatchQ,
+    TestID -> "term/walker/lam-binder-and-body"
+]
+
+(* === TInitialize[Term[...]] round-trip ===
+
+   Build a TTerm, snapshot to Term, reset the heap, then rebuild
+   from Term and compare TTermExpr (which is heap-loc agnostic). *)
+
+VerificationTest[
+    Module[{orig, t, restored, before, after},
+        TInit[];
+        TReset[];
+        orig = TLam[x, x + 3][TSup[1, 2]];
+        t = Term[orig];
+        before = TTermExpr[orig];
+        TReset[];
+        restored = TInitialize[t];
+        after = TTermExpr[restored];
+        before === after
+    ],
+    True,
+    TestID -> "term/initialize/lam-app-sup-roundtrip"
+]
+
+VerificationTest[
+    Module[{orig, t, restored, before, after},
+        TInit[];
+        TReset[];
+        orig = TSup[1, 2] + 3;
+        t = Term[orig];
+        before = TTermExpr[orig];
+        TReset[];
+        restored = TInitialize[t];
+        after = TTermExpr[restored];
+        before === after
+    ],
+    True,
+    TestID -> "term/initialize/op2-sup-roundtrip"
+]
+
+(* === Term[t] is what `CanonicalSlice` in TMultiTrace records,
+   so distinct projections of a DUP map to distinct vertex IDs. *)
+VerificationTest[
+    TInit[];
+    TReset[];
+    Module[{dp0, dp1},
+        {dp0, dp1} = TDup[3, 42];
+        {
+            MatchQ[Term[dp0], Term["DP0", 3, Term["NUM", 42]]],
+            MatchQ[Term[dp1], Term["DP1", 3, Term["NUM", 42]]]
+        }
+    ],
+    {True, True},
+    TestID -> "term/walker/dp-projection-wrapping"
+]
