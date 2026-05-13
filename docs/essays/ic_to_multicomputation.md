@@ -194,10 +194,44 @@ Dataset[crossOut["Trace"]][All, {"id", "rule", "family", "consumed", "produced"}
 
 ## TCausalGraph
 
-The directed acyclic projection of the trace.
+The directed acyclic projection of the trace.  Vertices are colour-
+coded by event family (TERM = within-branch compute, SLIDE = re-
+foliation, SPLIT = DUP-SUP cross-product, MERGE = DUP-SUP annihilate,
+PRUNE = ERA, PLUMB = sharing housekeeping); the legend names them.
 
 ```wolfram
-TCausalGraph[crossOut["Trace"], VertexLabels -> Automatic]
+TCausalGraph[crossOut["Trace"], VertexLabels -> Automatic, PlotLegends -> Automatic]
+```
+
+## TMultiwayGraph
+
+A different shape: vertices are **terms** (states), not events.
+Each step of a `TMultiSteps` reduction is a slice; the slice's active
+term is unfolded at the head — every SUP-headed slice contributes one
+vertex per leaf (so `SUP{1+3, 2+3}` is two vertices, `SUP{a, b} + 3`
+is one).  Edges are events between consecutive slices, drawn as the
+cross product of source-leaves × target-leaves so a SPLIT event fans
+out into multiple edges.  Family colours the edges (TERM blue,
+SLIDE orange, SPLIT purple, MERGE red, PRUNE/PLUMB grey).
+
+```wolfram
+{crossDp0, crossDp1} = TDup[TSup[1, 2] + 3]
+```
+
+```wolfram
+crossSteps = TMultiSteps[crossDp0, "DiagramSeeds" -> {crossDp1}]
+```
+
+```wolfram
+TMultiwayGraph[crossSteps, VertexLabels -> Automatic, PlotLegends -> Automatic]
+```
+
+`"Branchial" -> True` overlays an undirected clique between sibling
+leaves within each SUP-headed slice — the WPP "branchial graph" view
+of parallel-world states.
+
+```wolfram
+TMultiwayGraph[crossSteps, "Branchial" -> True, VertexLabels -> Automatic]
 ```
 
 ## Label discipline: cross product vs diagonal
@@ -238,14 +272,41 @@ diagSup = TMultiTrace[TCollapse[TSup[1, 1, 2] + TSup[1, 10, 20]]]
 ```
 
 Side-by-side causal graphs.  Same arithmetic shape, different branch
-event in the middle.
+event in the middle -- the cross-label case shows a SPLIT (purple)
+where the shared-label case shows a MERGE (red).
 
 ```wolfram
 Grid[{
     {Style["distinct labels (cross)",  Bold],
      Style["shared label  (diagonal)", Bold]},
-    {TCausalGraph[crossSup["Trace"], VertexLabels -> Automatic],
-     TCausalGraph[diagSup["Trace"],  VertexLabels -> Automatic]}},
+    {TCausalGraph[crossSup["Trace"], VertexLabels -> Automatic, PlotLegends -> Automatic],
+     TCausalGraph[diagSup["Trace"],  VertexLabels -> Automatic, PlotLegends -> Automatic]}},
+    Frame -> All]
+```
+
+And the multiway view side-by-side.  Build a TMultiSteps run for each
+seed (TMultiwayGraph consumes step records, not raw traces -- the
+slice-by-slice term snapshots come from there).  The cross-label
+multiway has multiple vertices per slice after the SPLIT (the SUP-leaf
+unfold); the shared-label one stays single-track because the MERGE
+keeps the head non-SUP.
+
+```wolfram
+{crossSupDp0, crossSupDp1} = TDup[TOp2["+", TSup[1, 1, 2], TSup[2, 10, 20]]];
+crossSupSteps = TMultiSteps[crossSupDp0, "DiagramSeeds" -> {crossSupDp1}]
+```
+
+```wolfram
+{diagSupDp0, diagSupDp1} = TDup[TOp2["+", TSup[1, 1, 2], TSup[1, 10, 20]]];
+diagSupSteps = TMultiSteps[diagSupDp0, "DiagramSeeds" -> {diagSupDp1}]
+```
+
+```wolfram
+Grid[{
+    {Style["distinct labels (cross)",  Bold],
+     Style["shared label  (diagonal)", Bold]},
+    {TMultiwayGraph[crossSupSteps, "Branchial" -> True, PlotLegends -> Automatic],
+     TMultiwayGraph[diagSupSteps,  "Branchial" -> True, PlotLegends -> Automatic]}},
     Frame -> All]
 ```
 
