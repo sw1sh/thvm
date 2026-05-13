@@ -211,7 +211,7 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List] := Block[
             "Diagram"        -> If[ wantDiagram, snapshot[term, anchors], None],
             "Slice"          -> sl,
             "CanonicalSlice" -> If[ wantSlice && MemberQ[keys, "CanonicalSlice"],
-                                    Map[canonicalForm, sl], None],
+                                    Map[Term, sl], None],
             (* Pre-compute the TraditionalForm rendering NOW, while
                the heap is in this step's state.  We can't defer to
                display time -- subsequent steps mutate the heap, so
@@ -490,98 +490,12 @@ unfoldSupHead[term_] := If[ TTermTag[term] === $TagSUP,
              unfoldSupHead[THeapRead[loc + 1]]]],
     {term}];
 
-(* Canonical form of a term: recursive structural representation
-   that chases through SUB-flagged DP/VAR projections, so two terms
-   that resolve to the same content (e.g. OP2(1, DP@4-sub-NUM(3))
-   vs OP2(1, NUM(3))) compare equal.  Used as the vertex identity
-   in TMultiwayGraph -- a branch whose head Term value is unchanged
-   across steps but whose SUB-resolved content changed shows up as
-   a new vertex.  Depth-limited at 16 to bound recursion through
-   cyclic structures (e.g. self-referential ALOs). *)
-canonicalForm[term_] := canonicalFormDepth[term, 16];
-canonicalFormDepth[term_, depth_Integer] := If[ depth <= 0,
-    {"?"},
-    Block[{tag = TTermTag[term], val = TTermVal[term],
-           ext = TTermExt[term], cell},
-        Switch[tag,
-            $TagNUM, {"NUM", val},
-            $TagERA, {"ERA"},
-            $TagTEN, {"TEN", val},
-            $TagREF, {"REF", val},
-            $TagANY, {"ANY"},
-            $TagDP0 | $TagDP1,
-                cell = THeapRead[val];
-                If[ TTermSub[cell] === 1,
-                    (* DUP-X fired: projection resolved to a specific
-                       branch; canonical = branch's canonical (the
-                       superscript wrapper drops off once the
-                       projection has a definite value). *)
-                    canonicalFormDepth[
-                        packTerm[0, TTermTag[cell], TTermExt[cell],
-                                 TTermVal[cell]],
-                        depth - 1],
-                    (* Pre-resolution: wrap the body's canonical with
-                       the projection index (DP0 / DP1) and the dup
-                       label so DP0 and DP1 of the same DUP are
-                       distinct vertices, and reductions inside the
-                       body still produce real transitions. *)
-                    {If[ tag === $TagDP0, "DP0", "DP1"], ext,
-                     canonicalFormDepth[cell, depth - 1]}],
-            $TagVAR,
-                cell = THeapRead[val];
-                If[ TTermSub[cell] === 1,
-                    canonicalFormDepth[
-                        packTerm[0, TTermTag[cell], TTermExt[cell],
-                                 TTermVal[cell]],
-                        depth - 1],
-                    {"VAR", val}],
-            $TagOP2,
-                {"OP2", ext,
-                 canonicalFormDepth[THeapRead[val + 0], depth - 1],
-                 canonicalFormDepth[THeapRead[val + 1], depth - 1]},
-            $TagAPP,
-                {"APP",
-                 canonicalFormDepth[THeapRead[val + 0], depth - 1],
-                 canonicalFormDepth[THeapRead[val + 1], depth - 1]},
-            $TagSUP,
-                {"SUP", ext,
-                 canonicalFormDepth[THeapRead[val + 0], depth - 1],
-                 canonicalFormDepth[THeapRead[val + 1], depth - 1]},
-            $TagLAM,
-                {"LAM", val,
-                 canonicalFormDepth[THeapRead[val], depth - 1]},
-            $TagDUP,
-                {"DUP", val,
-                 canonicalFormDepth[THeapRead[val], depth - 1]},
-            $TagALO,
-                (* ALO(body, state) -- thunk for lazy reduction.  Body
-                   at val+0, state metadata (atomic id) at val+1. *)
-                {"ALO",
-                 canonicalFormDepth[THeapRead[val + 0], depth - 1],
-                 TTermVal[THeapRead[val + 1]]},
-            $TagCTR,
-                (* CTR with `ext` carrying the constructor tag (from
-                   the referring cell -- we don't have a ref here so
-                   pass val); heap[base] = NUM(arity), then n children. *)
-                Block[{n = TTermVal[THeapRead[val]]},
-                    Join[
-                        {"CTR", ext},
-                        Table[
-                            canonicalFormDepth[
-                                THeapRead[val + 1 + i],
-                                depth - 1],
-                            {i, 0, n - 1}]]],
-            $TagMAT,
-                {"MAT", ext,
-                 canonicalFormDepth[THeapRead[val + 0], depth - 1],
-                 canonicalFormDepth[THeapRead[val + 1], depth - 1]},
-            $TagUOP,
-                (* UOP -- opcode-dependent arity; the children live at
-                   val..val+(arity-1).  We keep ext (opcode) and the
-                   loc to avoid walking arbitrary UOP sub-DAGs (they
-                   can be large, e.g. kernel bodies). *)
-                {"UOP", ext, val},
-            _, {TTagName[tag], val, ext}]]];
+(* Canonical form of a term = `Term[t_TTerm]`, defined in Heap.wl.
+   Walks the heap recursively, chasing SUB-flagged DP / VAR
+   projections, and returns a nested Term[head, args...] expression.
+   Used as the vertex identity in TMultiwayGraph -- a branch whose
+   head Term value is unchanged across steps but whose SUB-resolved
+   content changed shows up as a new vertex. *)
 
 (* Short caption for a term (used as the vertex label).  Mirrors
    what diagrams print: e.g. "NUM 4@12", "DP0@4", "SUP@14..15". *)

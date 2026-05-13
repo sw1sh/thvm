@@ -167,14 +167,13 @@ If[ ! TMultiTraceQ[],
         TInit[];
         Block[{dp0, dp1, body},
             {dp0, dp1} = TDup[3, 42];
-            body = THVMLink`Private`canonicalForm[dp0];
             {
-                MatchQ[body, {"DP0", 3, {"NUM", 42}}],
-                MatchQ[THVMLink`Private`canonicalForm[dp1], {"DP1", 3, {"NUM", 42}}]
+                MatchQ[Term[dp0], Term["DP0", 3, Term["NUM", 42]]],
+                MatchQ[Term[dp1], Term["DP1", 3, Term["NUM", 42]]]
             }
         ],
         {True, True},
-        TestID -> "canonicalForm wraps unresolved DP with projection index + label"
+        TestID -> "Term[dp] wraps unresolved DP with projection index + label"
     ];
 
     (* === TMultiSteps on `TSup[L, ...] + N` (no enclosing DUP):
@@ -193,7 +192,7 @@ If[ ! TMultiTraceQ[],
                 Total[Length /@ steps[[All, "Events"]]],
                 AllTrue[edges, e |-> First[e] =!= Last[e]],
                 Sort[Last[steps]["CanonicalSlice"]] ===
-                    Sort[{{"NUM", 4}, {"NUM", 5}}]
+                    Sort[{Term["NUM", 4], Term["NUM", 5]}]
             }
         ],
         {5, 4, True, True},
@@ -235,7 +234,7 @@ If[ ! TMultiTraceQ[],
             {
                 AllTrue[edges, e |-> First[e] =!= Last[e]],
                 Sort[Last[steps]["CanonicalSlice"]] ===
-                    Sort[{{"NUM", 4}, {"NUM", 5}}]
+                    Sort[{Term["NUM", 4], Term["NUM", 5]}]
             }
         ],
         {True, True},

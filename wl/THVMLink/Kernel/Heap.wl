@@ -41,8 +41,8 @@
 BeginPackage["THVMLink`"];
 
 Heap::usage         = "Heap[<|\"Root\", \"Cells\", \"BookCells\", \"Tensors\", \"Defs\", \"AloStates\", \"Labels\", \"State\"|>] is a portable snapshot of the live heap.  Construct via HeapSnapshot[]; restore via HeapInitialize.  When BookCells / Defs / AloStates are non-empty, the snapshot is self-contained and survives a fresh kernel (TFree + TInit).";
-Term::usage         = "Term[tag_String, ext, val] (or Term[tag, ext, val, sub]) is a dynamic-heap cell descriptor inside a Heap.  `val` is heap-relative -- an index into the enclosing Heap's Cells list.  For TAG_TEN cells, `val` is a dense slot id keyed in Heap[\"Tensors\"]; for TAG_NUM, val is the raw bits; for TAG_REF, val is the def slot.  Hand-authored Term[<|\"tag\", \"ext\", \"val\", \"sub\"|>] is accepted and normalized to the positional form.";
-BookTerm::usage     = "BookTerm[tag_String, ext, val] is the same as Term[...] but for a BOOK-domain cell (lives either in Heap[\"BookCells\"] or in the dyn cell at heap[ALO.val]).  `val` is an index into Heap[\"BookCells\"].";
+Term::usage         = "Term has two forms.\n  1. Term[t_TTerm]: walks the live heap from `t` and returns a fully unrolled nested `Term[head, args...]` expression -- the structural canonical form, no locs (LAMs carry a binder id so VAR references back).  Substructure is recursive: `Term[\"OP2\", \"+\", Term[\"NUM\", 1], Term[\"NUM\", 2]]`.  Used as vertex identity in TMultiwayGraph and as a readable / serialisable representation of a TTerm.\n  2. Term[tag_String, ext, val] / Term[tag, ext, val, sub]: a single heap-cell descriptor used inside Heap[\"Cells\"] (snapshot form).  `val` is a heap loc; ext is the secondary field (op code, dtype, label, ...).  Hand-authored Term[<|\"tag\", \"ext\", \"val\", \"sub\"|>] is accepted and normalized to the positional form.";
+BookTerm::usage     = "BookTerm[tag_String, ext, val] is the same as Term[tag, ext, val] but for a BOOK-domain cell (lives either in Heap[\"BookCells\"] or in the dyn cell at heap[ALO.val]).  `val` is an index into Heap[\"BookCells\"].";
 HeapSnapshot::usage = "HeapSnapshot[] returns a Heap[<|...|>] capturing every cell in [0, THeapPos[]), every book cell in [1, BookPos[]), all referenced tensors with data, the DEFS table (with name strings interned in TDef), and the ALO substitution chain.  HeapSnapshot[root_TTerm] additionally records `root` as the snapshot's entry point.";
 HeapInitialize::usage = "HeapInitialize[h_Heap] restores `h` into the live runtime and returns the root as a live TTerm (or Missing[\"NoRoot\"] if the snapshot has no root).  Cross-restart capable: when BookCells / Defs / AloStates are bundled, HeapInitialize wipes the C-side book / DEFS / ALO_STATES first, then restores them, then the dyn heap.  HeapInitialize[h, \"ZeroFill\" -> True] also accepts Uninitialized snapshots; tensors are allocated zero-filled.";
 HeapStrip::usage    = "HeapStrip[h_Heap] returns h with all NumericArray tensor buffers replaced by <|\"shape\" -> _, \"dtype\" -> _|>.  Pure WL; does not touch the runtime.";
@@ -114,6 +114,103 @@ BookTerm[a_Association] /; KeyExistsQ[a, "tag"] && KeyExistsQ[a, "ext"] && KeyEx
             BookTerm[tag, ext, val, sub]
         ]
     ]
+
+(* === Term[t_TTerm]: TTerm -> nested Term[head, args...] form ===
+
+   Walks the live heap from `t`, chasing SUB-flagged DP / VAR
+   projections, and returns a fully unrolled `Term[...]` tree.  Used
+   as canonical vertex identity in TMultiwayGraph (two terms with
+   the same structural content compare equal via SameQ regardless of
+   heap layout) and as a readable / serialisable representation of a
+   TTerm.
+
+   Depth-bounded at 16 to break cycles (e.g. self-referential ALO);
+   over-deep subtrees collapse to Term["..."].  LAMs / DUPs carry a
+   binder id (the lam_loc / dup_loc) so VAR / DP references can
+   match the binder symbolically -- this id IS the heap loc today
+   but is treated as an opaque binder identifier in the
+   structural-equality sense, matching how TLam[x, body]'s `x` is
+   alpha-renamable. *)
+$termDepthDefault = 16;
+
+Term[t_TTerm] := termFromTTermDepth[t, $termDepthDefault]
+
+termFromTTermDepth[t_TTerm, 0] := Term["..."]
+termFromTTermDepth[t_TTerm, d_Integer] := Block[
+    {tag, val, ext, cell},
+    tag = TTermTag[t];
+    val = TTermVal[t];
+    ext = TTermExt[t];
+    Switch[tag,
+        $TagNUM, Term["NUM", val],
+        $TagERA, Term["ERA"],
+        $TagTEN, Term["TEN", val],
+        $TagREF, Term["REF", ext],
+        $TagANY, Term["ANY"],
+        $TagDP0 | $TagDP1,
+            cell = THeapRead[val];
+            If[ TTermSub[cell] === 1,
+                (* DUP-X fired: projection resolved -- chase through
+                   to the substituted branch's canonical. *)
+                termFromTTermDepth[
+                    packTerm[0, TTermTag[cell], TTermExt[cell],
+                             TTermVal[cell]],
+                    d - 1],
+                (* Pre-resolution: wrap the body's term with the
+                   projection index (DP0 / DP1) and the dup label so
+                   DP0 and DP1 of the same DUP are distinct. *)
+                Term[
+                    If[ tag === $TagDP0, "DP0", "DP1"], ext,
+                    termFromTTermDepth[cell, d - 1]]],
+        $TagVAR,
+            cell = THeapRead[val];
+            If[ TTermSub[cell] === 1,
+                termFromTTermDepth[
+                    packTerm[0, TTermTag[cell], TTermExt[cell],
+                             TTermVal[cell]],
+                    d - 1],
+                Term["VAR", val]],
+        $TagLAM,
+            Term["LAM", val, termFromTTermDepth[THeapRead[val], d - 1]],
+        $TagAPP,
+            Term["APP",
+                termFromTTermDepth[THeapRead[val + 0], d - 1],
+                termFromTTermDepth[THeapRead[val + 1], d - 1]],
+        $TagSUP,
+            Term["SUP", ext,
+                termFromTTermDepth[THeapRead[val + 0], d - 1],
+                termFromTTermDepth[THeapRead[val + 1], d - 1]],
+        $TagDUP,
+            Term["DUP", val,
+                termFromTTermDepth[THeapRead[val], d - 1]],
+        $TagOP2,
+            Term["OP2", Lookup[$op2Names, ext, ext],
+                termFromTTermDepth[THeapRead[val + 0], d - 1],
+                termFromTTermDepth[THeapRead[val + 1], d - 1]],
+        $TagMAT,
+            Term["MAT", ext,
+                termFromTTermDepth[THeapRead[val + 0], d - 1],
+                termFromTTermDepth[THeapRead[val + 1], d - 1]],
+        $TagCTR,
+            Block[{n = TTermVal[THeapRead[val]]},
+                Term @@ Join[
+                    {"CTR", ext},
+                    Table[
+                        termFromTTermDepth[THeapRead[val + 1 + i], d - 1],
+                        {i, 0, n - 1}]]],
+        $TagALO,
+            Term["ALO", TTermVal[THeapRead[val + 1]],
+                termFromTTermDepth[THeapRead[val + 0], d - 1]],
+        $TagUOP,
+            Block[{opName = Lookup[$uopNames, ext, ext],
+                   arity  = uopCellCount[ext]},
+                Term @@ Join[
+                    {"UOP", opName},
+                    Table[
+                        termFromTTermDepth[THeapRead[val + i], d - 1],
+                        {i, 0, arity - 1}]]],
+        _, Term[TTagName[tag], val, ext]]
+];
 
 (* === predicates === *)
 
