@@ -2442,8 +2442,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // boundary from RU_BUFFERIZE_TERM[], stash the UOP_BUFFERIZE node
   // here so later consumers (cached_lift wiring, debug dumps) can
   // walk the lowered subtree via uop_bufferize_value(b).  0 in OLD-
-  // path mode (realized-flag selection).
-  ke->compute_bufferize = BOUNDARY_BUFFERIZE_TERM[bi];
+  // path mode (realized-flag selection) so downstream readers can
+  // use compute_bufferize != 0 as a "direct cutover active" predicate.
+  ke->compute_bufferize = rangeify_direct_enabled()
+                       ? BOUNDARY_BUFFERIZE_TERM[bi]
+                       : 0;
   TENS[out_tid].producer_kid = kid;
 
   // Multi-output kernel splice (Step 6 of multi-output groundwork).
