@@ -83,9 +83,9 @@ Goal: flip the default. The unified pass becomes the only path; OLD path becomes
 - 3c. If the cut-over reveals a gap (something the OLD path handled that the new one doesn't), pick ONE specific case, port the corresponding tinygrad rule, repeat. Each round commits independently. NO bundling.
 - 3d. Verify: full suite all green, kernel counts within tinygrad parity bands.
 
-### Phase 4a-pre: UOP_BUFFERIZE first-class + main-heap mutation (substrate)
+### Phase 4a-pre: UOP_BUFFERIZE first-class + main-heap mutation (substrate) — LANDED 2026-05-13
 
-Status: in progress. Substrate that unblocks Phase 4a's REDUCE-seed removal.
+Substrate that unblocks Phase 4a's REDUCE-seed removal. All 5 sub-steps committed; full suite green; probe_w2_bs3 dropped from 597 → 543 kernels (additive substrate; main reduction comes when Phase 4a drops the REDUCE seed and Phase 4d folds materialize.c onto the lowered DAG).
 
 Why this exists: Phase 2 wrote the unified pass output to side-tables
 (`RU_RANGE_MAP` / `RU_REALIZE_MAP` / `RU_SUBST` in
@@ -110,10 +110,17 @@ Phase 4a-pre lands the new contract:
 - 4a-pre-3. REDUCE-via-RANGE production: rewrite `REDUCE(op, axis)` as
   `REDUCE(op)` with explicit RANGE args. Mirror:
   `convert_reduce_to_reduce_with_ranges`.
-- 4a-pre-4. `materialize.c` walks the lowered DAG (UOP_BUFFERIZE as
-  boundary signal, not `BUFFERIZE_NODES.realized`). The OLD-path
-  REDUCE-as-boundary seed can be removed CONDITIONALLY behind unified-on.
-- 4a-pre-5. Re-verify probe_w2_bs3 kernel count (target < 100).
+- 4a-pre-4. **Project UOP_BUFFERIZE → BUFFERIZE_NODES.realized.** Additive
+  projection via `bufferize_classify_project_unified` after
+  `run_rangeify_unified`; new `BUFFERIZE_REASON_UNIFIED` flag tags
+  unified-pass boundaries. `materialize.c` reads `.realized` unchanged.
+  OLD seeds (multi-consumer / REDUCE / matmul) stay; dropping REDUCE
+  here broke MaxPool/Softmax/BN-train/CE (Phase 4a's job). **LANDED**
+  (commit `72ad620d`).
+- 4a-pre-5. **Re-probe.** probe_w2_bs3: 597 → 543 kernels; target <100
+  not reached at substrate level (additive). **LANDED.** Target 100
+  blocked on Phase 4a (REDUCE seed drop) + Phase 4d (materialize.c
+  walks lowered DAG directly, not projected `.realized` bits).
 
 ### Phase 4: Delete the OLD path
 

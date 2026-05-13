@@ -1748,6 +1748,14 @@ static int bufferize_pool_chain_marks_source(u64 reduce_loc) {
 // We do NOT clear pre-existing .realized bits: the MULTI seed at the
 // top of the unified branch and any ROOT seed must survive. The
 // removal rules below handle the unmarking.
+//
+// Phase 4a-pre-5 measurement (probe_w2_bs3 = BN-train backward W2 grad,
+// BS=3): kernel count 597 (pre-substrate baseline) -> 543 (substrate
+// landed). Additive substrate captures ~54 consumer-divergence /
+// ending-ranges boundaries the OLD-path heuristic missed; main
+// reduction toward <100 target blocked on Phase 4a (drop OLD REDUCE
+// seed) + Phase 4d (materialize.c walks UOP_BUFFERIZE directly, not
+// the projected .realized bits).
 static void bufferize_classify_project_unified(void) {
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     if (rangeify_unified_bufferize_at(i) != 0) {
