@@ -1904,7 +1904,17 @@ fn void bufferize_classify(Term root) {
     // divergence + ending-ranges machinery + the chain-guards above
     // already encode the realize-set tinygrad would emit, so the
     // named-rule rewrites become noise.  Skip them in direct mode.
-    if (!direct) {
+    if (direct) {
+      // Under DIRECT=1 the unified pass's consumer-divergence already
+      // encodes most named rules' effects.  inline-softmax-broadcast-
+      // reduce stays as the one keep -- the unified pass doesn't yet
+      // sharpen the softmax max -> exp -> sum fusion into 2 kernels.
+      RealizeRewriteRule direct_rules[] = {
+        {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
+      };
+      bufferize_rewrite_apply(root, direct_rules,
+          (u32)(sizeof(direct_rules) / sizeof(direct_rules[0])));
+    } else {
       RealizeRewriteRule unified_rules[] = {
         {"inline-constants",                bufferize_rule_inline_constants},
         {"inline-adjacent-reduce-chains",   bufferize_rule_inline_adjacent_reduce_chains},
