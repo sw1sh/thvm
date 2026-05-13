@@ -1127,17 +1127,29 @@ walkArity[op_] := If[op === $UopGrad, 1, uopArity[op]]
    instead of one shared agent, so a CONST referenced from N slots
    draws N triangles without needing DUPs to share the value.  Skip
    them during the BFS so they don't end up in reachOps. *)
-reachableUopsHere[seedTerms_List] := Block[{seen = <||>, queue, t, base, op, n},
+reachableUopsHere[seedTerms_List] := Block[
+    {seen = <||>, visited = <||>, queue, t, base, op, n, tag},
     queue = seedTerms;
     While[ Length[queue] > 0,
         t = First[queue]; queue = Rest[queue];
-        If[ TTermTag[t] === $TagUOP,
-            base = TTermVal[t]; op = TTermExt[t];
-            If[ op =!= $UopConst && ! KeyExistsQ[seen, base],
-                seen[base] = op;
-                n = walkArity[op];
-                queue = Join[queue, Table[THeapRead[base + i], {i, 0, n - 1}]]
-            ]
+        tag = TTermTag[t];
+        Which[
+            tag === $TagUOP,
+                base = TTermVal[t]; op = TTermExt[t];
+                If[ op =!= $UopConst && ! KeyExistsQ[seen, base],
+                    seen[base] = op;
+                    n = walkArity[op];
+                    queue = Join[queue,
+                        Table[THeapRead[base + i], {i, 0, n - 1}]]],
+            (* Non-UOP IC term -- descend through its child slots so a
+               UOP buried under a DP / VAR / OP2 / ... still surfaces.
+               `visited` is keyed by the IC agent base so a cyclic
+               structure (e.g. self-referential ALO) doesn't loop. *)
+            True,
+                base = TTermVal[t];
+                If[ ! KeyExistsQ[visited, {tag, base}],
+                    visited[{tag, base}] = True;
+                    queue = Join[queue, THeapRead /@ agentChildSlots[t]]]
         ]
     ];
     seen

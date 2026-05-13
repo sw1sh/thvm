@@ -875,10 +875,13 @@ uopCellCount[op_] := Switch[op,
     $UopFwd,                                                        1,
     $UopKernel,                                                     2,
     $UopAssign,                                                     2,
-    (* RESHAPE: report 1 (the src) so TTermExpr renders UOP[RESHAPE,
-       <src-subtree>].  The trailing NUM(d_i) cells are integer
-       parameters, not children of structural interest. *)
-    $UopReshape,                                                    1,
+    (* Movement ops: report 1 (the src) so TTermExpr renders
+       UOP[RESHAPE | PERMUTE | EXPAND | ..., <src-subtree>].  The
+       trailing NUM(d_i) / NUM(axis_i) cells are integer parameters,
+       not children of structural interest. *)
+    $UopReshape | $UopPermute | $UopExpand |
+      $UopPad | $UopShrink | $UopFlip,                              1,
+    $UopMaterialize,                                                1,
     $UopLoad,                                                       1,
     (* Phase E additions.  Heap layouts mirror src/thvm.h opcode
        comments.  RANGE, INDEX_E, IADD..IAND are pure structural;

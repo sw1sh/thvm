@@ -24,9 +24,13 @@ Needs["Wolfram`DiagrammaticComputation`"];
 (* Compound nodes label as Column[{"NAME", "@loc"}, ...]; atoms
    (NUM / ERA / TEN / ...) label as a bare String "NAME\n<info>".
    labelPat covers both. *)
-labelPat[name_String] := Column[{name, ___}, ___] |
+labelPat[name_String] :=
+    Column[{_String ? (StringStartsQ[#, name] &), ___}, ___] |
     _String ? (StringStartsQ[#, name] &);
-findOne[d_, name_String] := First @ DiagramCases[d, DiagramPattern[labelPat[name]]];
+findOne[d_, name_String] :=
+    Replace[DiagramCases[d, DiagramPattern[labelPat[name]]],
+        {{}                 -> Missing["NotFound", name],
+         {first_, ___}      :> first}];
 findAll[d_, name_String] := DiagramCases[d, DiagramPattern[labelPat[name]]];
 
 (* === root APP held externally surfaces principal as network out === *)
@@ -129,6 +133,33 @@ VerificationTest[
     ],
     2,
     TestID -> "THeapDiagram: post-DUP_SUP_ANN both branches visible via sibling auto-seed"
+]
+
+(* === TGrad over a tensor surfaces the full UOP DAG.
+   `e = TGrad[2 x, x]` for x = TTensorCreate[...] yields a
+   DP1 projection of a DUP wrapping MUL(EXPAND(CONST), TEN).
+   All five nodes -- DUP, MUL, EXPAND, TEN, CONST -- must
+   appear; in particular the TEN handle (the user's tensor)
+   must not be silently dropped because reachableUopsHere
+   bailed on the non-UOP DP1 seed. *)
+VerificationTest[
+    TInit[];
+    Block[{
+        x = TTensorCreate[{1, 2, 3}],
+        e, d
+    },
+        e = TGrad[2 x, x];
+        d = THeapDiagram[e];
+        {
+            findOne[d, "DUP"]["OutputArity"] === 2,
+            ! MissingQ @ findOne[d, "MUL"],
+            ! MissingQ @ findOne[d, "EXPAND"],
+            ! MissingQ @ findOne[d, "TEN"],
+            ! MissingQ @ findOne[d, "CONST"]
+        }
+    ],
+    {True, True, True, True, True},
+    TestID -> "THeapDiagram[TGrad[2 x, x]] surfaces DUP + MUL + EXPAND + TEN + CONST"
 ]
 
 (* === per-step topology for `TLam[x, x + 3][TSup[1, 2]]`.
