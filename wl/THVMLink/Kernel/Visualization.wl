@@ -179,15 +179,30 @@ agentFromAtomSeed[term_] := With[{tag = TTermTag[term], val = TTermVal[term]},
    Transitively-reached atoms (e.g. NUM children of an OP2 or APP)
    stay inlined via the parent's edge to a heap-loc-keyed vertex --
    no double-rendering. *)
-(* A LAM/DUP cell is "dead" once a prior interaction has substituted
-   its body cell out -- heap[base] is SUB-flagged with the substituted
-   value.  Registering such a cell as an agent would surface a ghost
-   LAM (or DUP) in the post-rewrite diagram with the substituted
-   literal dangling from its body slot. *)
+(* Dead LAM: body cell SUB-flagged after APP-LAM beta.  Drop the
+   wrapper AND the literal in its body slot.
+
+   Dead DUP: drop the wrapper only if the substituted body is a
+   compound agent (SUP / LAM / DUP / ...) -- the compound is
+   reachable from the sibling projection's chase, so the wrapper
+   adds no information.  If the body is an ATOM (NUM/ERA/TEN/...),
+   atoms aren't first-class agents (they render inline on slot
+   edges), and the DUP wrapper is the only node that ties both
+   projections to the atom.  Keep the wrapper visible in that case. *)
 agentIsDead[term_] := Block[
-    {tag = TTermTag[term], isLamOrDup},
-    isLamOrDup = (tag === $TagLAM || tag === $TagDUP);
-    isLamOrDup && TTermSub[THeapRead[TTermVal[term]]] === 1
+    {tag = TTermTag[term], body, btag},
+    Which[
+        tag === $TagLAM,
+            TTermSub[THeapRead[TTermVal[term]]] === 1,
+        tag === $TagDUP,
+            body = THeapRead[TTermVal[term]];
+            btag = TTermTag[body];
+            TTermSub[body] === 1 &&
+                btag =!= $TagNUM && btag =!= $TagERA &&
+                btag =!= $TagTEN && btag =!= $TagANY &&
+                btag =!= $TagREF,
+        True, False
+    ]
 ]
 agentIsDeadVar[term_] := Block[
     {tag = TTermTag[term], isVarLike},
@@ -214,10 +229,21 @@ reachableICAgents[seedTerms_List] := Block[
         rule = agentFromTerm[t];
         If[ rule =!= Nothing,
             {vid, info} = {First[rule], Last[rule]};
-            (* Also drop dead LAM/DUP agents discovered directly. *)
-            If[ ! KeyExistsQ[result, vid] && ! agentIsDead[t],
-                result[vid] = info;
-                queue = Join[queue, THeapRead /@ agentChildSlots[t]]]]
+            (* Dead DUP: drop the wrapper but still walk into the body
+               so the substituted value (reachable via the sibling
+               projection) gets registered.  Dead LAM: drop wrapper
+               and body -- nothing else points at the substituted
+               literal. *)
+            Which[
+                TTermTag[t] === $TagDUP &&
+                    TTermSub[THeapRead[TTermVal[t]]] === 1,
+                    queue = Append[queue, THeapRead[TTermVal[t]]],
+                agentIsDead[t],
+                    Null,
+                ! KeyExistsQ[result, vid],
+                    result[vid] = info;
+                    queue = Join[queue, THeapRead /@ agentChildSlots[t]]
+            ]]
     ];
     result
 ]
