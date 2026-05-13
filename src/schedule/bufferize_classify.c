@@ -1863,7 +1863,7 @@ fn void bufferize_classify(Term root) {
     //  REDUCE realize emerges from ending_ranges + consumer-divergence
     //  inside run_rangeify).
     char const *direct_env = getenv("THVM_RANGEIFY_DIRECT");
-    int direct = (direct_env != NULL && direct_env[0] != '0');
+    int direct = (direct_env == NULL || direct_env[0] != '0');
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->consumer_count >= 2) {

@@ -394,16 +394,16 @@ static void boundary_compute_last_use(void) {
   free(visited);
 }
 
-// Direct-rangeify cutover gate.  When set, topo_sort_boundaries
-// selects the kernel set from the unified pass's UOP_BUFFERIZE terms
-// (RU_BUFFERIZE_TERM[i] != 0) instead of the OLD-path realized flag
-// (BUFFERIZE_NODES[i].realized).  Default 0 (legacy behaviour).
+// Direct-rangeify cutover gate.  Default ON: kernel set comes from the
+// unified pass's UOP_BUFFERIZE terms (RU_BUFFERIZE_TERM[i] != 0).
+// Set THVM_RANGEIFY_DIRECT=0 to fall back to the OLD-path realized
+// flag (BUFFERIZE_NODES[i].realized).
 // Mirror source: tinygrad/schedule/indexing.py:75-77 emits BUFFERIZE
 // at realize boundaries; the create_kernel walker downstream
 // consumes that BUFFERIZE node set directly.
 static int rangeify_direct_enabled(void) {
   char const *e = getenv("THVM_RANGEIFY_DIRECT");
-  return e != NULL && e[0] != '0';
+  return e == NULL || e[0] != '0';
 }
 
 static void topo_sort_boundaries(Term root) {
