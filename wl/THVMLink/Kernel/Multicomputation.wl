@@ -511,14 +511,16 @@ termCaption[t_] := Block[{tag, val, nm},
         _, nm <> "@" <> ToString[val]]];
 
 Options[TMultiwayGraph] = Join[
-    {"Branchial" -> False,
-     PlotLegends -> None},
-    Options[Graph]];
-TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[
-    {slices, sliceKeys, vertexLabel, allKeys, edges, branchial,
-     vlabels, labelStyle, legendOpt, presentFamilies, legend,
-     edgeStyles, edgeFamilies, edgeRules, brStyle, userGraphOpts,
-     edgeList},
+    {"Branchial" -> False, PlotLegends -> None},
+    Options[Graph]
+]
+
+TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
+    slices, sliceKeys, vertexLabel, allKeys, edges, branchial,
+    vlabels, labelStyle, presentFamilies, legend,
+    edgeStyles, edgeFamilies, edgeRules,
+    edgeList
+},
     (* Vertex identity = canonical SUB-resolved form of the slice
        leaf.  Two leaves at different steps with the same canonical
        form are the SAME vertex (an unchanged branch persists across
@@ -532,10 +534,11 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[
     vertexLabel = <||>;
     MapThread[
         {keys, boxes} |-> MapThread[
-            {k, b} |-> If[ ! KeyExistsQ[vertexLabel, k],
-                vertexLabel[k] = b],
-            {keys, boxes}],
-        {sliceKeys, slices}];
+            {k, b} |-> If[! KeyExistsQ[vertexLabel, k], vertexLabel[k] = b],
+            {keys, boxes}
+        ],
+        {sliceKeys, slices}
+    ];
     allKeys = DeleteDuplicates @ Flatten[sliceKeys, 1];
     (* Edges: for each consecutive (prev, cur) slice pair, draw
        edges between same-index leaves (same-size) or cross product
@@ -543,90 +546,96 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[
        whose canonical form is unchanged by the firing). *)
     edgeList = Catenate[
         MapIndexed[
-            {prevKeys, idx} |-> Block[
-                {i, curKeys, fam, rule, ev, pairs},
+            {prevKeys, idx} |-> Block[{
+                i, curKeys, fam, rule, ev, pairs
+            },
                 i = First[idx];
                 If[ i >= Length[sliceKeys], Return[{}, Block]];
                 curKeys = sliceKeys[[i + 1]];
                 ev = steps[[i + 1]]["Events"];
                 {fam, rule} = If[ ev === {},
-                    {"WALK", ""},
-                    {ev[[1, "family"]], ev[[1, "rule"]]}];
+                    {"WALK", ""}
+                    ,
+                    {ev[[1, "family"]], ev[[1, "rule"]]}
+                ];
                 pairs = If[ Length[prevKeys] === Length[curKeys],
-                    Transpose[{prevKeys, curKeys}],
-                    Tuples[{prevKeys, curKeys}]];
+                    Transpose[{prevKeys, curKeys}]
+                    ,
+                    Tuples[{prevKeys, curKeys}]
+                ];
                 Select[
                     Map[
                         p |-> {DirectedEdge[First[p], Last[p]], fam, rule},
-                        pairs],
-                    pe |-> First[pe][[1]] =!= First[pe][[2]]]],
-            sliceKeys]];
+                        pairs
+                    ],
+                    pe |-> First[pe][[1]] =!= First[pe][[2]]]
+            ],
+            sliceKeys
+        ]
+    ];
     edgeFamilies = AssociationThread[edgeList[[All, 1]] -> edgeList[[All, 2]]];
     edgeRules    = AssociationThread[edgeList[[All, 1]] -> edgeList[[All, 3]]];
     edges = DeleteDuplicates[edgeList[[All, 1]]];
     (* Optional branchial clique inside each multi-leaf slice. *)
-    branchial = If[ OptionValue["Branchial"],
-        DeleteDuplicates @ Catenate[
+    branchial = If[
+        TrueQ[OptionValue["Branchial"]]
+        ,
+        DeleteDuplicates @ Catenate @
             Map[
                 s |-> If[ Length[s] >= 2,
                     Map[
                         pair |-> UndirectedEdge @@ pair,
                         DeleteDuplicates[Map[Sort, Subsets[s, {2}]]]],
-                    {}],
-                sliceKeys]],
-        {}];
+                    {}
+                ],
+                sliceKeys
+            ]
+        ,
+        {}
+    ];
     vlabels = OptionValue[VertexLabels];
     labelStyle = Directive[
         FontFamily -> "Helvetica", FontSize -> 9,
-        LightDarkSwitched[GrayLevel[0.15], GrayLevel[0.95]]];
-    brStyle = $wppBranchialStyle;
+        LightDarkSwitched[GrayLevel[0.15], GrayLevel[0.95]]
+    ];
     edgeStyles = Join[
         KeyValueMap[
             {edge, fam} |-> edge -> Directive[
                 Arrowheads[Small],
                 Lookup[$familyColors, fam,
                     LightDarkSwitched[GrayLevel[0.5], GrayLevel[0.6]]],
-                AbsoluteThickness[1.5]],
-            edgeFamilies],
+                AbsoluteThickness[1.5]
+            ],
+            edgeFamilies
+        ],
         Map[
             be |-> be -> Directive[
                 Dashing[Small],
-                brStyle["EdgeStyle"],
-                AbsoluteThickness[1.2]],
-            branchial]];
-    legendOpt = OptionValue[PlotLegends];
-    presentFamilies = DeleteCases[
-        DeleteDuplicates @ Values[edgeFamilies], "WALK"];
-    legend = Switch[legendOpt,
-        None | False, None,
-        Automatic | True, familyLegend[presentFamilies],
-        _, legendOpt];
-    userGraphOpts = FilterRules[{opts}, Options[Graph]] /.
-        (VertexLabels -> _) -> Nothing /.
-        (EdgeLabels   -> _) -> Nothing;
+                $wppBranchialStyle["EdgeStyle"],
+                AbsoluteThickness[1.2]
+            ],
+            branchial
+        ]
+    ];
+    presentFamilies = DeleteCases[DeleteDuplicates @ Values[edgeFamilies], "WALK"];
+    legend = Replace[OptionValue[PlotLegends], {
+        None | False -> None,
+        Automatic | True :> familyLegend[presentFamilies]
+    }];
     With[{g = Graph[
         allKeys,
         Join[edges, branchial],
-        Sequence @@ userGraphOpts,
-        VertexLabels -> Switch[vlabels,
-            Automatic, Map[
-                k |-> k -> RawBoxes[vertexLabel[k]],
-                allKeys],
-            None, None,
-            _, vlabels],
+        FilterRules[{opts}, Options[Graph]],
+        VertexLabels -> Map[k |-> k -> RawBoxes[vertexLabel[k]], allKeys],
         VertexLabelStyle -> labelStyle,
-        EdgeLabels -> Switch[OptionValue[EdgeLabels],
-            Automatic, Map[
-                e |-> e -> Lookup[edgeRules, e, ""],
-                edges],
-            None, None,
-            _, OptionValue[EdgeLabels]],
+        EdgeLabels -> Lookup[edgeRules, edges, ""],
         EdgeLabelStyle -> labelStyle,
         EdgeStyle -> edgeStyles,
         Background -> LightDarkSwitched[White, GrayLevel[0.13]],
         GraphLayout -> "LayeredDigraphEmbedding"]
     },
-        If[ legend === None, g, Legended[g, legend]]]
+        If[ legend === None, g, Legended[g, legend]]
+    ]
 ]
 
 End[];

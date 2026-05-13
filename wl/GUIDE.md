@@ -130,11 +130,62 @@ myFn[args___, opts : OptionsPattern[]] :=
     ]
 ```
 
+### Boolean options: `TrueQ[OptionValue[...]]`
+
+Wrap boolean options in `TrueQ` so non-`True` values (unbound symbols,
+typos, `Automatic`, etc.) collapse to `False` instead of propagating
+into `If` as an unevaluated test.
+
+```wolfram
+(* GOOD *)
+If[ TrueQ[OptionValue["Branchial"]], ..., ...]
+
+(* BAD: if user passes "Branchial" -> Bogus, the If never evaluates *)
+If[ OptionValue["Branchial"], ..., ...]
+```
+
+### Later options win -- don't strip user options
+
+When a wrapper needs to force certain options on the inner call but
+also let the user pass through extras, put the user's filtered
+options FIRST and the forced overrides LATER in the argument list.
+Wolfram functions take the last option setting on collision, so
+later overrides win.  Don't `/. (Key -> _) -> Nothing` to scrub
+user options out -- just place the override after them.
+
+```wolfram
+(* GOOD: user's GraphLayout / ImageSize / etc. pass through; our
+   VertexLabels override always wins. *)
+Graph[
+    vs, es,
+    FilterRules[{opts}, Options[Graph]],
+    VertexLabels -> myLabels,
+    Background -> LightDarkSwitched[White, GrayLevel[0.13]]
+]
+
+(* BAD: ceremonial stripping; harder to read, easy to forget a key *)
+userOpts = FilterRules[{opts}, Options[Graph]] /.
+    (VertexLabels -> _) -> Nothing;
+Graph[vs, es, Sequence @@ userOpts, VertexLabels -> myLabels]
+```
+
 ## Definitions
 
 Prefer `Block` for local workspaces unless `Module`'s unique-symbol
-guarantee is actually required. Don't add a trailing `;` to
-`SetDelayed` definitions.
+guarantee is actually required. Don't add a trailing `;` to any
+top-level assignment -- `SetDelayed` (`:=`) AND `Set` (`=`).  Each
+definition is a complete expression; line breaks separate them.
+
+```wolfram
+(* GOOD *)
+Options[myFn] = {GraphLayout -> "LayeredDigraphEmbedding"}
+
+myFn[x_] := x + 1
+
+(* BAD *)
+Options[myFn] = {GraphLayout -> "LayeredDigraphEmbedding"};
+myFn[x_] := x + 1;
+```
 
 ```wolfram
 f[x_] := x + 1
@@ -173,6 +224,66 @@ For[i = 1, i <= n, i++,
 
 (* GOOD *)
 acc = Table[f[i], {i, n}]
+```
+
+### `Replace` over `Switch` for value-to-value mapping
+
+When the cases are simple value patterns mapping to values (no
+structural tests, no side effects), `Replace` with a rule list is
+more concise and reads as data, not control flow.
+
+```wolfram
+(* GOOD *)
+legend = Replace[OptionValue[PlotLegends], {
+    None | False -> None,
+    Automatic | True :> familyLegend[presentFamilies]
+}]
+
+(* BAD: same shape but pretends to be control flow *)
+legendOpt = OptionValue[PlotLegends];
+legend = Switch[legendOpt,
+    None | False, None,
+    Automatic | True, familyLegend[presentFamilies],
+    _, legendOpt
+]
+```
+
+Use `Switch` (or `Which`) when branches have side effects, dispatch
+on richer patterns, or need fallthrough `_` to the original value.
+
+### Comma-on-own-line between multi-line branches
+
+When the branches of `If` (or args of `Block`, `Switch`, `With`,
+etc.) are each multi-line, put the separating commas on their own
+line at the head's indent column.  The comma reads as a branch
+boundary, like a horizontal rule.
+
+```wolfram
+(* GOOD *)
+branchial = If[ TrueQ[OptionValue["Branchial"]]
+    ,
+    DeleteDuplicates @ Catenate @ Map[
+        s |-> ...,
+        sliceKeys
+    ]
+    ,
+    {}
+]
+
+(* GOOD: short branches keep commas inline *)
+If[ Length[dirs] === 0,
+    debugPrint["no examples"];
+    Exit[1]
+]
+
+(* BAD: trailing comma after a multi-line branch hides the boundary *)
+branchial = If[ TrueQ[OptionValue["Branchial"]],
+    DeleteDuplicates @ Catenate @ Map[
+        s |-> ...,
+        sliceKeys
+    ],
+    {}
+]
 ```
 
 ### No `Head[expr] === Foo` -- use `MatchQ`
@@ -247,6 +358,59 @@ Module[{x, y, z},
 
 This makes block boundaries scan-readable and matches what the IDE
 auto-formatter expects.
+
+## Composition
+
+### `@` chain for unary right-application
+
+For chains of unary calls, prefer `f @ g @ h[x]` over `f[g[h[x]]]`.
+Less bracket nesting, reads top-down (apply `h`, then `g`, then `f`).
+Use `[]` only where you need multiple args.
+
+```wolfram
+(* GOOD *)
+DeleteDuplicates @ Catenate @ Map[fn, xs]
+
+presentFamilies = DeleteCases[
+    DeleteDuplicates @ Values[edgeFamilies],
+    "WALK"
+]
+
+(* BAD: ceremonial nesting *)
+DeleteDuplicates[Catenate[Map[fn, xs]]]
+```
+
+### `Lookup` is vectorized; prefer it over `Map[Lookup, ...]`
+
+`Lookup[assoc, listOfKeys, default]` returns a list of values in
+the order of the keys.  Use it directly when feeding a list-shaped
+slot (e.g. `EdgeLabels -> {lbl1, lbl2, ...}`).
+
+```wolfram
+(* GOOD *)
+EdgeLabels -> Lookup[edgeRules, edges, ""]
+
+(* BAD *)
+EdgeLabels -> Map[e |-> e -> Lookup[edgeRules, e, ""], edges]
+```
+
+### Don't name single-use intermediates
+
+If a value is read exactly once, inline it.  Naming it adds a line
+of bookkeeping without buying readability.
+
+```wolfram
+(* GOOD *)
+legend = Replace[OptionValue[PlotLegends], {...}]
+
+(* BAD: legendOpt is never used outside the next line *)
+legendOpt = OptionValue[PlotLegends];
+legend    = Replace[legendOpt, {...}]
+```
+
+Exception: name it when the expression is long enough that the
+named form actually reads better, or when the name carries domain
+meaning the inline expression doesn't.
 
 ## Naming
 
