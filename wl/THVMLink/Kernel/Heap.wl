@@ -48,6 +48,13 @@ TInitialize::usage = "TInitialize[h_TContext] restores `h` into the live runtime
 TContextStrip::usage    = "TContextStrip[h_TContext] returns h with all NumericArray tensor buffers replaced by <|\"shape\" -> _, \"dtype\" -> _|>.  Pure WL; does not touch the runtime.";
 TContextToTermTree::usage = "TContextToTermTree[h_TContext] returns a nested string-headed expression mirroring TTermExpr but driven by the snapshot's Cells list (no live runtime needed).  Cycles render as \"Cycle\"[idx].  Read-only projection.";
 
+(* Forward references -- the high-level constructors live in sibling
+   files (Switch.wl, etc.) that load AFTER Heap.wl in alphabetical
+   FileNames order.  Touching the symbols here interns them in the
+   PUBLIC `THVMLink`` context so references inside our Private body
+   resolve correctly when used. *)
+TOp2; TLam; TApp; TSup; TDup; TNum; TEra; TAny;
+
 Begin["`Private`"];
 
 (* === library function loaders for cross-restart bundling ===
@@ -434,6 +441,72 @@ TContextStrip[TContext[a_Association]] := Module[{stripped},
       cell-domain interpretation is the receiver's responsibility. *)
 
 Options[TInitialize] = {"ZeroFill" -> False}
+
+(* === TInitialize[Term[...]]: construct a nested Term in the live heap ===
+
+   Inverse of `Term[t_TTerm]`.  Walks the nested expression
+   bottom-up, calling the standard high-level constructors
+   (TNum / TEra / TSup / TApp / TLam / TDup / TOp2 / ...) so the
+   result is a freshly-allocated TTerm in the current dyn heap.
+
+   Binder ids in LAM / DUP / DP0 / DP1 are alpha-renamed during the
+   walk -- the id in the Term is just a placeholder telling the
+   walker which VAR / DP cells inside the body refer back to which
+   binder.  Fresh symbols are minted via Unique[] and substituted
+   for the placeholders so the high-level TLam / TDup machinery
+   handles binding correctly. *)
+
+TInitialize[t_TTerm] := t                                     (* identity *)
+TInitialize[Term["NUM", v_Integer]]      := TNum[v]
+TInitialize[Term["NUM", _, v_Integer]]   := TNum[v]
+TInitialize[Term["ERA"]]                 := TEra[]
+TInitialize[Term["ANY"]]                 := TAny[]
+TInitialize[Term["REF", slot_Integer]]   := packTerm[0, $TagREF, slot, 0]
+TInitialize[Term["TEN", id_Integer]]     := packTerm[0, $TagTEN, 5, id]
+TInitialize[Term["VAR", binderId_]]      :=
+    (Message[TInitialize::orphanvar, binderId]; $Failed)
+TInitialize::orphanvar = "Term[\"VAR\", ``] outside any enclosing Term[\"LAM\", ``, ...] -- VARs only make sense in a LAM body.";
+
+(* Identity rule for already-built TTerms: lets nested recursion mix
+   freshly-built TTerm leaves into a Term-shaped expression. *)
+TInitialize[s_TTerm] := s
+
+TInitialize[Term["LAM", binderId_, body_]] :=
+    Block[{xSym},
+        xSym = Unique["x$"];
+        (* Substitute Term["VAR", binderId] with a Term["@VAR", xSym]
+           placeholder before handing the body to TLam.  TLam's
+           HoldAll + Function[xSym, body] then alpha-substitutes xSym
+           -> TVarFor[loc] inside the held body, so each placeholder
+           becomes Term["@VAR", TVarFor[loc]] -- which TInitialize's
+           leaf rule below unwraps to TVarFor[loc] during the walk. *)
+        TLam[xSym,
+            TInitialize[body /. Term["VAR", binderId] :> Term["@VAR", xSym]]]
+    ]
+
+TInitialize[Term["@VAR", t_]] := t
+
+TInitialize[Term["APP", f_, x_]] := TApp[TInitialize[f], TInitialize[x]]
+
+TInitialize[Term["SUP", label_Integer, a_, b_]] :=
+    TSup[label, TInitialize[a], TInitialize[b]]
+
+TInitialize[Term["OP2", op_, a_, b_]] :=
+    TOp2[op, TInitialize[a], TInitialize[b]]
+
+(* DUP / DP0 / DP1 share a body cell; the binder id in the Term tells
+   us which DP-projection sites in nested bodies refer back to it.
+   First TDup the body, then substitute the projection slots in the
+   outer body, then pick the appropriate projection. *)
+TInitialize[Term["DUP", binderId_, body_]] :=
+    Block[{dp0, dp1, b = TInitialize[body]},
+        {dp0, dp1} = TDup[b];
+        TDup[{dp0, dp1}]
+    ]
+TInitialize[Term["DP0", label_Integer, body_]] :=
+    First @ TDup[label, TInitialize[body]]
+TInitialize[Term["DP1", label_Integer, body_]] :=
+    Last  @ TDup[label, TInitialize[body]]
 
 TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
     cellsAssoc, bookCellsAssoc, tensorsAssoc, defs, aloStates,
