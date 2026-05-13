@@ -1728,6 +1728,34 @@ static int bufferize_pool_chain_marks_source(u64 reduce_loc) {
   return hits;
 }
 
+// Phase 4a-pre-4: project the unified pass's UOP_BUFFERIZE emission
+// onto BUFFERIZE_NODES.realized so materialize.c's existing
+// BOUNDARY_ORDER walker (topo_sort_boundaries -- materialize.c:381)
+// picks up the new boundary set without changing its read API.
+//
+// Mirror source: tinygrad/schedule/indexing.py:56-81
+// (create_bufferize_and_index_based_on_ranges produces the BUFFERIZE
+//  Term; the surrounding scheduler consumes the Term's presence in the
+//  tsink graph as the "this is a realize boundary" signal).
+//
+// We additionally mark the boundary with BUFFERIZE_REASON_UNIFIED so
+// the existing removal rules (the 10 rules in the unified branch of
+// bufferize_classify above) can introspect "this realize came from
+// the unified pass" vs "this realize was carried over from a multi-
+// consumer seed". Today no rule consults the reason; the flag is for
+// Phase 4a-pre-5 + future bisects.
+//
+// We do NOT clear pre-existing .realized bits: the MULTI seed at the
+// top of the unified branch and any ROOT seed must survive. The
+// removal rules below handle the unmarking.
+static void bufferize_classify_project_unified(void) {
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (rangeify_unified_bufferize_at(i) != 0) {
+      bufferize_node_mark(&BUFFERIZE_NODES[i], BUFFERIZE_REASON_UNIFIED);
+    }
+  }
+}
+
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   bufferize_rewrite_stats_clear();
@@ -1780,17 +1808,24 @@ fn void bufferize_classify(Term root) {
     //   by bufferize_node_mark; we still need to seed the bufferize graph
     //   for downstream queries that consult bufferize_is_realized.
     //
-    //   Carry over the OLD-path REDUCE / matmul / matmul-input-protect
-    //   seeds. thvm's materialize.c + kernel_lift.c emit one KernelEntry
-    //   per BUFFERIZE_NODES.realized bit; fusing a REDUCE into its
-    //   elementwise consumer requires the downstream pipeline to lower
-    //   REDUCE-via-RANGE inline, which the Phase 2 unified pass does
-    //   not yet emit into the heap (it writes RU_RANGE_MAP only).
-    //   Until Phase 4's UOP_BUFFERIZE production rewrite lands, keep
-    //   the REDUCE+MATMUL seeds so the existing renderers continue to
-    //   see a per-REDUCE boundary. Mirror source:
-    //   tinygrad/schedule/indexing.py:32 (`realize` on
-    //   COPY/CONTIGUOUS/STORE; STORE-on-REDUCE is the closest analog).
+    //   Phase 4a-pre-4: OLD-path multi-consumer / REDUCE / matmul
+    //   seeds stay. We tried dropping REDUCE in Phase 4a-pre-4 itself
+    //   but the unified pass's ending-ranges + consumer-divergence
+    //   logic in run_rangeify_unified.c:541-560 doesn't yet catch all
+    //   the REDUCE realize cases tinygrad's run_rangeify decides --
+    //   removing the seed broke MaxPool / Softmax / BN-train / CE
+    //   (10 nn.wlt failures, all reduce-bearing topologies). Dropping
+    //   the REDUCE seed is Phase 4a's job; Phase 4a-pre-4 stays
+    //   ADDITIVE -- we project the unified pass's UOP_BUFFERIZE
+    //   emission onto BUFFERIZE_NODES.realized via
+    //   bufferize_classify_project_unified, picking up the partial-
+    //   realize / consumer-divergence boundaries the unified pass
+    //   found beyond the OLD seeds without removing any.
+    //
+    //   Mirror context: tinygrad/schedule/indexing.py:28-35
+    //   (pm_generate_realize_map realizes COPY/CONTIGUOUS/STORE only;
+    //    REDUCE realize emerges from ending_ranges + consumer-
+    //    divergence inside run_rangeify).
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->consumer_count >= 2) {
@@ -1805,10 +1840,19 @@ fn void bufferize_classify(Term root) {
     }
     bufferize_seed_from_nodes(root);
     // Run the unified rangeify walk -- writes to RU_RANGE_MAP +
-    // RU_REALIZE_MAP for tests + Phase 4 lowered-DAG consumers. It does
-    // NOT (yet) override BUFFERIZE_NODES.realized during cutover; Phase 4
-    // unwinds the boundary decision by emitting UOP_BUFFERIZE directly.
+    // RU_REALIZE_MAP + RU_BUFFERIZE_TERM (the Phase 4a-pre-2 main-heap
+    // UOP_BUFFERIZE node at each realize boundary).
     run_rangeify_unified(root);
+    // Phase 4a-pre-4: project every UOP_BUFFERIZE the unified pass
+    // emitted onto BUFFERIZE_NODES.realized so materialize.c's existing
+    // BOUNDARY_ORDER walker picks them up. The unified pass also
+    // decides partial-realize via consumer-divergence + ending-ranges
+    // (run_rangeify_unified.c:493-560); RU_BUFFERIZE_TERM != 0 ==
+    // "this node is a kernel boundary". This is the materialize.c
+    // "walks the lowered DAG" hook -- the lowered-DAG node is the
+    // UOP_BUFFERIZE Term; consulting RU_BUFFERIZE_TERM is equivalent
+    // to walking the main-heap BUFFERIZE leaves.
+    bufferize_classify_project_unified();
     // Run the OLD-path removal rules to prune unnecessary realizes.
     // Phase 5c will subsume these with native unified-pass handling.
     RealizeRewriteRule unified_rules[] = {
