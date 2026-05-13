@@ -21,8 +21,6 @@
 //   - extern_pinned_terms, EXTERN_PIN_HANDLES, DEFS, WNF_LAST_STACK,
 //     KernelEntry.source_uop / input_terms[]: re-evacuated as part
 //     of the root set so their stored Terms get the new locs.
-//   - kernel_program_cache: KProgOp[] holds opcodes / numels / slot
-//     indices, no heap locs, so it survives across GC unchanged.
 
 #define GC_FWD_TAG 0x7E
 #define GC_MARGIN  1024

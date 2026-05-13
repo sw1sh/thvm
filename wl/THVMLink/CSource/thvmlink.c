@@ -1771,8 +1771,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
 
 // Autotune: bench-and-pick the winning TOpt for kid.  Returns 1 on
 // "winning opt applied", 0 on "no opt beat baseline / no candidates
-// / invalid kid".  The applied opt lives on KpCacheSlot.schedule so it
-// propagates to every other kid sharing this KProgOp[].
+// / invalid kid".
 EXTERN_C DLLEXPORT int thvm_wl_kernel_autotune(WolframLibraryData l, mint a,
                                                MArgument *args, MArgument res) {
   (void)l; (void)a;
@@ -1854,7 +1853,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_program_cache_size(WolframLibraryData libD
                                                           MArgument *args,
                                                           MArgument res) {
   (void)libData; (void)argc; (void)args;
-  MArgument_setInteger(res, (mint)kernel_program_cache_size());
+  MArgument_setInteger(res, 0);
   return LIBRARY_NO_ERROR;
 }
 
@@ -1862,18 +1861,8 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_program_key(WolframLibraryData libData,
                                                   mint argc,
                                                   MArgument *args,
                                                   MArgument res) {
-  (void)libData; (void)argc;
-  u32 kid = (u32)MArgument_getInteger(args[0]);
-  u64 key = 0;
-  if (kid > 0 && kid < KERNELS_NEXT) {
-    KernelEntry const *ke = &KERNELS[kid];
-    if (ke->program_shared) {
-      key = kernel_program_key(ke->program, ke->n_ops);
-    } else if (ke->schedule != NULL && ke->schedule != &ke->_local_schedule) {
-      key = kernel_rangeified_key(ke);
-    }
-  }
-  MArgument_setInteger(res, (mint)key);
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 0);
   return LIBRARY_NO_ERROR;
 }
 

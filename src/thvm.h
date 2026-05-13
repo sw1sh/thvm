@@ -596,8 +596,7 @@ typedef struct {
   KOpt applied_opts[MAX_OPTS];
   u8   n_applied;
   u8   autotuned;              // 1 = kernel_autotune has run on this
-                               // KpSchedule (per-program-shape via the
-                               // KpCacheSlot).  Guards the "fire-time
+                               // KpSchedule.  Guards the "fire-time
                                // autotune" path against re-running on
                                // every dispatch and against infinite
                                // recursion when autotune itself fires
@@ -1241,14 +1240,6 @@ typedef struct KernelEntry {
   u32       n_ops;
   u32       ops_cap;
   KProgOp  *program;
-  // 1 = `program` points into the kernel-program cache (owned by
-  // the cache, not by this kernel).  kernel_free_arrays must not
-  // free() it.  Set by emit_kernel_for_boundary after a cache hit
-  // or after the program is interned into the cache.  Sharing is
-  // safe because KProgOp[] is structurally keyed (input slot
-  // indices, not concrete tids), and per-kernel I/O lives in
-  // input_tids[] / output_tid which are NOT shared.
-  u8        program_shared;
 
   // Original root UOP term that this kernel was built from.  The
   // walker rewrites parent cells to UOP_KERNEL but leaves the
@@ -1317,17 +1308,9 @@ typedef struct KernelEntry {
                                    // Bumped per top-level interact_kernel.
   void     *compiled;              // backend-specific; NULL for interpreter
 
-  // Axis-typed scheduling plan.  Per-program-shape
-  // sharing: `axes` is a POINTER, normally aimed at the
-  // KpSchedule embedded in this kernel's kernel_program_cache
-  // slot so every kid with the same KProgOp[] sees the same opts.
-  // Apply once -> propagates to all sharing kids; the C-side
-  // proposer can attach opts to a program shape and every future
-  // training-loop iter inherits them automatically.
-  //
-  // `_local_schedule` is the fallback storage for kernels that didn't
-  // make it into the cache (n_ops == 0 or cache full); `axes`
-  // points at it in that case.
+  // Axis-typed scheduling plan.  `schedule` is a pointer for
+  // historical reasons; today it always aims at `_local_schedule`
+  // below (each kernel owns its own plan).
   KpSchedule  *schedule;
   KpSchedule   _local_schedule;
 
@@ -2423,7 +2406,7 @@ fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
 u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
 KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
 // Hash all per-axis (kax_type, extent) into the running FNV-1a state.
-// Used by cache-key generation (kernel_program_cache.c, autotune.c).
+// Used by cache-key generation in autotune.c.
 u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
 // Writer-side facade: thin wrapper over kernel_apply_opt.
 // Source-of-truth flip switches this to mutate TILE_AXIS.
@@ -2469,9 +2452,7 @@ fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 // against the baseline (no opts) with direct kernel dispatch, expand
 // the best variants into short opt sequences when enabled, pick the
 // winner, and leave KpSchedule mutated to the winning sequence.
-// Because axes live on the shared KpCacheSlot, the winner auto-
-// applies to every other kid sharing this KProgOp[].  Returns 1 if
-// a winning opt sequence was applied, 0 if baseline won.
+// Returns 1 if a winning opt sequence was applied, 0 if baseline won.
 fn int kernel_autotune(u32 kid);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True
@@ -4088,27 +4069,6 @@ fn AtpStatus thvm_atp_run (AtpState *s);
 fn u8   is_redex(Term t);
 fn Term redex_fire(Term redex);
 fn u32  redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap);
-
-// Kernel-program hash-cons cache.  Reset from thvm_init.  Lookup
-// returns the cached program pointer + n_ops on hit (NULL on
-// miss); insert copies into a tight cache-owned buffer and
-// returns its pointer (or NULL if the cache is full).  Both
-// pointers are cache-owned; the caller marks its KernelEntry
-// with program_shared=1 to suppress double-free.
-fn void     kernel_program_cache_reset(void);
-fn u64      kernel_program_key(KProgOp const *prog, u32 n_ops);
-fn u64      kernel_rangeified_key(KernelEntry const *ke);
-fn KpSchedule *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *ke);
-fn u32      kernel_program_cache_size(void);
-
-// Slot-bearing variants used by Per-shape per-program-shape opt
-// sharing: materialize parks `&slot->schedule` into KernelEntry.schedule
-// so every kid emitted with the same KProgOp[] reads/writes the
-// same KpSchedule.  Apply once -> propagates to all sharing kids;
-// the C-side proposer attaches opts to a program shape, not a kid.
-typedef struct KpCacheSlot KpCacheSlot;
-fn KpCacheSlot *kernel_program_cache_lookup_slot(KProgOp const *prog, u32 n_ops);
-fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops);
 
 // Lambda-bound-variable shape annotation table.  Populated by
 // `TLamShape[shape, body]` at the WL surface so a TVAR(lam_loc)

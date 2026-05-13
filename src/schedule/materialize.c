@@ -2510,40 +2510,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
 
   materialize_dump_big_input_source(ke, boundary_loc);
 
-  // Hash-cons the KProgOp[] against the kernel-program cache.
-  // Two boundaries with bit-for-bit identical programs (opcode +
-  // dtype + n_src + arg + numel + src[] + shape/perm/pad bytes)
-  // share the underlying program array.  Memory savings on
-  // recursive lambda loops where each iter emits a structurally
-  // identical step kernel; correctness is unchanged because
-  // input_tids[] / output_tid stay per-kernel.
-  // Phase 16: kernel-program-cache slot owns the shared `KpSchedule`
-  // so every kid with the same KProgOp[] sees the same opts.  Apply
-  // once -> propagates to all sharing kids.  For kernels that don't
-  // make it into the cache (n_ops == 0 OR cache full), fall back to
-  // KernelEntry._local_schedule.
-  KpCacheSlot *slot = NULL;
-  if (ke->n_ops > 0) {
-    slot = kernel_program_cache_lookup_slot(ke->program, ke->n_ops);
-    if (slot != NULL) {
-      free(ke->program);
-      ke->program        = slot->program;
-      ke->n_ops          = slot->n_ops;
-      ke->ops_cap        = slot->n_ops;
-      ke->program_shared = 1;
-    } else {
-      slot = kernel_program_cache_insert_slot(ke->program, ke->n_ops);
-      if (slot != NULL) {
-        free(ke->program);
-        ke->program        = slot->program;
-        ke->ops_cap        = ke->n_ops;
-        ke->program_shared = 1;
-      }
-      // (cache full -- silently keep the kernel-owned copy; axes
-      //  fall back to _local_schedule below)
-    }
-  }
-  ke->schedule = (slot != NULL) ? &slot->schedule : &ke->_local_schedule;
+  ke->schedule = &ke->_local_schedule;
 
   // Default-init the axis-typed scheduling plan now that the program
   // and output_shape are finalized.  Idempotent: a cached slot whose
@@ -2586,12 +2553,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
       // bench-train showed the lift-reject count was identical with
       // THVM_SCALAR_SIMPLIFY=0 -- the simplifier wasn't load-bearing
       // for the post-L54 view-folding path.)
-    }
-    if (!ke->program_shared) {
-      KpSchedule *shared_axes = kernel_rangeified_axes_cache_lookup_or_insert(ke);
-      if (shared_axes != NULL) {
-        ke->schedule = shared_axes;
-      }
     }
     if (lowered) {
       axes_ensure_scalar_reduce(ke);
@@ -2695,18 +2656,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
     char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
     int free_program_on = (free_e != NULL) && (free_e[0] == '1');
     if (free_program_on) {
-      // ke->program may be cache-shared (program_shared=1 -- the
-      // KP_CACHE slot owns it) or kernel-owned.  The free path in
-      // kernel_alloc.c respects program_shared, so we just clear the
-      // pointer + n_ops; for the kernel-owned case, free explicitly
-      // first to avoid a leak.
-      if (!ke->program_shared && ke->program != NULL) {
+      if (ke->program != NULL) {
         free(ke->program);
       }
       ke->program        = NULL;
       ke->n_ops          = 0;
       ke->ops_cap        = 0;
-      ke->program_shared = 0;
     }
   }
 

@@ -286,7 +286,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "schedule/kernel_lift.c"
 #include "schedule/tile.c"
 #include "schedule/kernel_alloc.c"
-#include "schedule/kernel_program_cache.c"
 #include "schedule/uop_meta.c"
 #include "schedule/consumer_count.c"
 #include "schedule/bufferize_rewrite.c"
@@ -507,8 +506,6 @@ void thvm_init(void) {
   uop_const_cache_reset();   // CONST cache keyed by raw bits + dtype;
                              // stale entries point into a freed heap.
   uop_mov_cache_reset();     // movement-op cache, same lifecycle.
-  kernel_program_cache_reset();   // KProgOp[] hash-cons; stale
-                             // entries would alias freed kernels.
   lam_shape_reset();         // LAM-bound-var shape table; stale
                              // entries reference invalid lam_loc.
   extern_pin_clear();   // drop any leftover pins from a prior session
@@ -568,7 +565,6 @@ void thvm_free(void) {
   // Same order as thvm_init for obvious symmetry.
   uop_const_cache_reset();
   uop_mov_cache_reset();
-  kernel_program_cache_reset();
   lam_shape_reset();
   extern_pin_clear();
   extern_pin_handle_clear();
@@ -652,7 +648,7 @@ void thvm_context_destroy(u32 slot) {
     thvm_set_current_ctx(ctx);
     if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
     // No cache / side-table resets here: uop_const_cache, uop_mov_cache,
-    // KP_CACHE, LAM_SHAPE_TABLE, EXTERN_PIN*, JIT_CAPTURES, K_PROFILE
+    // LAM_SHAPE_TABLE, EXTERN_PIN*, JIT_CAPTURES, K_PROFILE
     // are all file-static globals shared across every context, not
     // per-ctx state.  Wiping them here would clobber live entries from
     // other contexts.  thvm_free() is the only correct site.

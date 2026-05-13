@@ -1,13 +1,12 @@
-// codegen/autotune.c -- per-program-shape opt benchmarker.
+// codegen/autotune.c -- per-kernel opt benchmarker.
 //
 // Given a kernel, walk the proposer's candidates, time each variant
 // (n_runs back-to-back fires + min wallclock), optionally expand the
 // best single opts into short sequences, pick the winner, and leave
-// the kernel's KpSchedule mutated to the winning opt sequence.  Axes
-// live on the shared KpCacheSlot (autotune knobs cached per-program-
-// shape), so the pick applies to every other kid with the same
-// KProgOp[] -- a training loop that emits one new kid per step
-// inherits the autotuned variant on iter 2+.
+// the kernel's KpSchedule mutated to the winning opt sequence.  The
+// on-disk autotune cache is keyed by a structural FNV hash of the
+// kernel program / scalar-uop graph so reruns on the same shape pick
+// up the previous winner.
 //
 // Reset semantics: each variant is benched against the SAME baseline
 // axes (no opts).  Proposers return a single visible KOpt per
@@ -147,17 +146,58 @@ static char const *kautotune_backend_name(u32 backend_id) {
   }
 }
 
+static u64 kautotune_program_key(KProgOp const *prog, u32 n_ops) {
+  if (prog == NULL || n_ops == 0) {
+    return 0;
+  }
+  u64 h = 0xcbf29ce484222325ULL;
+  h = kautotune_hash_u64(h, (u64)n_ops);
+  h = kautotune_hash_bytes(h, prog, (size_t)n_ops * sizeof(KProgOp));
+  return h | (1ULL << 63);
+}
+
+static u64 kautotune_rangeified_key(KernelEntry const *ke) {
+  if (ke == NULL) {
+    return 0;
+  }
+  u64 h = 0xcbf29ce484222325ULL ^ 0x52414E4745584B41ULL;
+  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
+    h = kautotune_hash_u64(h, 1);
+    h = kautotune_hash_u64(h, (u64)ke->n_scalar_uops);
+    h = kautotune_hash_bytes(h, ke->scalar_uops,
+                             (size_t)ke->n_scalar_uops * sizeof(ScalarUop));
+  } else if (ke->schedule != NULL && axes_resolve_n_axes(ke) > 0) {
+    h = kautotune_hash_u64(h, 2);
+    h = kautotune_hash_u64(h, (u64)term_tag(ke->source_uop));
+    h = kautotune_hash_u64(h, (u64)term_ext(ke->source_uop));
+    h = tile_anno_hash_axes(ke, h);
+  } else {
+    return 0;
+  }
+  h = kautotune_hash_u64(h, (u64)ke->n_inputs);
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    h = kautotune_hash_u64(h, (u64)ke->input_dtypes[i]);
+    h = kautotune_hash_u64(h, (u64)ke->input_numels[i]);
+  }
+  h = kautotune_hash_u64(h, (u64)ke->output_dtype);
+  h = kautotune_hash_u64(h, (u64)ke->output_numel);
+  h = kautotune_hash_u64(h, (u64)ke->output_shape.ndim);
+  h = kautotune_hash_bytes(h, ke->output_shape.dims,
+                           (size_t)ke->output_shape.ndim * sizeof(u32));
+  return (h & 0x3FFFFFFFFFFFFFFFULL) | (1ULL << 62);
+}
+
 static u64 kautotune_structural_key(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
   }
   if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
-    return kernel_rangeified_key(ke);
+    return kautotune_rangeified_key(ke);
   }
   if (ke->program != NULL && ke->n_ops > 0) {
-    return kernel_program_key(ke->program, ke->n_ops);
+    return kautotune_program_key(ke->program, ke->n_ops);
   }
-  return kernel_rangeified_key(ke);
+  return kautotune_rangeified_key(ke);
 }
 
 static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,

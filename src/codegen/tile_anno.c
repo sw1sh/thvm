@@ -112,8 +112,8 @@ KOpt const *tile_anno_applied_opts(KernelEntry const *ke) {
 }
 
 // Hash all per-axis (kax_type, extent) pairs into the running FNV-1a
-// state and return the updated hash.  Used by kernel_program_cache.c
-// and autotune.c to produce cache keys that include axis structure.
+// state and return the updated hash.  Used by autotune.c to produce
+// cache keys that include axis structure.
 // Memory_scope and vector_width are NOT included today; they'll join
 // when the cache slot format expands to TileAxisInfo arrays.
 u64 tile_anno_hash_axes(KernelEntry const *ke, u64 h) {

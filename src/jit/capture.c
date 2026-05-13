@@ -387,11 +387,6 @@ fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
           row[9]  = ke->n_ops;
           row[10] = ke->n_scalar_uops;
           row[11] = ke->n_tile_uops;
-          if (ke->program_shared) {
-            row[7] = kernel_program_key(ke->program, ke->n_ops);
-          } else if (ke->schedule != NULL && ke->schedule != &ke->_local_schedule) {
-            row[7] = kernel_rangeified_key(ke);
-          }
         }
         break;
       }
