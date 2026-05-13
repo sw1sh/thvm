@@ -785,6 +785,37 @@ static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
   return n;
 }
 
+// Rebuild the producer Term at (loc, op) by REWRITING each child slot:
+//   - child has RU_SUBST[child_idx] != 0  ->  use RU_SUBST[child_idx]
+//   - child is a leaf tensor (TAG_TEN)    ->  wrap with uop_index_e(child, addr)
+//   - everything else (atoms, passthroughs)  ->  keep
+// Mirror: tinygrad/schedule/indexing.py:create_bufferize_and_index_based_on_ranges
+// (lines 56-81), `new_srcs` accumulation loop + final `x.replace(src=tns)`.
+static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term my_addr) {
+  u8 ar = uop_arity(op);
+  if (ar == 0) return self;
+  Term srcs[MAX_UOP_SRC] = {0};
+  int changed = 0;
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old_child = heap_read(loc + i);
+    Term new_child = old_child;
+    Term resolved  = term_resolve(old_child);
+    u8 ctag = term_tag(resolved);
+    if (ctag == TAG_UOP) {
+      u32 cidx = bufferize_info_find(term_val(resolved));
+      if (cidx != 0xFFFFFFFFu && RU_SUBST[cidx] != 0) {
+        new_child = RU_SUBST[cidx];
+      }
+    } else if (ctag == TAG_TEN) {
+      new_child = uop_index_e(resolved, my_addr);
+    }
+    srcs[i] = new_child;
+    if (new_child != old_child) changed = 1;
+  }
+  if (!changed) return self;
+  return uop_graph_rebuild_with_srcs(self, srcs);
+}
+
 fn void pm_apply_rangeify(Term root) {
   (void)root;
   // Clear substitute + bufferize tables.
@@ -819,7 +850,13 @@ fn void pm_apply_rangeify(Term root) {
       // Mirror indexing.py:75-77:
       //   new_src = UOp(Ops.BUFFERIZE, s.dtype, src=(new_src,)+closed_ranges,
       //                 arg=opts)
-      // The main-heap node lands via uop_bufferize_new.
+      // The main-heap node wraps the REWRITTEN subtree so
+      // uop_bufferize_value returns the lowered form with INDEX_E around
+      // realized-producer references.  RU_SUBST keeps using `self` (the
+      // ORIGINAL op Term) because downstream materialize.c consumers
+      // resolve through it via term_resolve / heap_read identity.
+      Term my_addr   = ru_build_index_addr(rm);
+      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, my_addr);
       Term closed_ranges[MAX_DIM];
       u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
       // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
@@ -835,15 +872,14 @@ fn void pm_apply_rangeify(Term root) {
       // COPY opcode at the tensor-level UOp layer yet (TCopy lives in
       // backend dispatch); we default removable=1 here.
       u32 removable = 1;
-      Term b = uop_bufferize_new(self, addrspace, removable,
+      Term b = uop_bufferize_new(rewritten, addrspace, removable,
                                  n_closed, closed_ranges);
       RU_BUFFERIZE_TERM[i] = b;
       RU_LAST_BUFFERIZES_EMITTED++;
       // The consumer-side INDEX expression now references the
       // BUFFERIZE node, mirroring indexing.py:78
       //   `new_src = new_src.index(*[r for ... if i in realized_ranges])`.
-      Term addr = ru_build_index_addr(rm);
-      RU_SUBST[i] = uop_index_e(b, addr);
+      RU_SUBST[i] = uop_index_e(b, my_addr);
     } else {
       // Mirror indexing.py:107 (passthrough INDEX without BUFFERIZE wrap).
       // The consumer reads the producer's source directly under the
