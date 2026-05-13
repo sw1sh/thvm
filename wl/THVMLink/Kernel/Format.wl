@@ -132,31 +132,44 @@ THeap /: MakeBoxes[s_THeap /; tHeapQ[Unevaluated[s]], fmt_] := With[{
     ]
 ]
 
-TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]] && ! tTenQ[t] && ! tUopQ[t] && ! tNumQ[t], fmt_] := With[{
-    id   = ttermRaw[t],
-    icon = termSummaryIcon[]
-},
-    BoxForm`ArrangeSummaryBox[
-        "TTerm",
-        t,
-        icon,
-        {
-            {
-                BoxForm`SummaryItem[{"tag: ",
-                    Row[{TTagName[$termTagFn[id]], "@", $termValFn[id]}]}],
-                BoxForm`SummaryItem[{"ext: ", $termExtFn[id]}]
-            }
+(* TraditionalForm of a TTerm: math-style render via `tTermTrad`
+   with a Tooltip carrying the verbose TTermExpr.  Wrapped in
+   InterpretationBox so the cell stays interpretable as the
+   underlying TTerm (Convert -> Form -> StandardForm flips back to
+   the summary box, etc.).  Other formats fall through to the
+   existing collapsible summary box. *)
+TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]] && ! tTenQ[t] && ! tUopQ[t] && ! tNumQ[t], fmt_] :=
+    If[ fmt === TraditionalForm,
+        With[
+            {disp = ToBoxes[
+                Tooltip[tTermTrad[t], tTermExprResolved[t]], fmt]},
+            InterpretationBox[disp, t, SelectWithContents -> True]],
+        With[{
+            id   = ttermRaw[t],
+            icon = termSummaryIcon[]
         },
-        {
-            {
-                BoxForm`SummaryItem[{"sub: ", $termSubFn[id]}],
-                BoxForm`SummaryItem[{"raw: ", id}]
-            }
-        },
-        fmt,
-        "Interpretable" -> Automatic
+            BoxForm`ArrangeSummaryBox[
+                "TTerm",
+                t,
+                icon,
+                {
+                    {
+                        BoxForm`SummaryItem[{"tag: ",
+                            Row[{TTagName[$termTagFn[id]], "@", $termValFn[id]}]}],
+                        BoxForm`SummaryItem[{"ext: ", $termExtFn[id]}]
+                    }
+                },
+                {
+                    {
+                        BoxForm`SummaryItem[{"sub: ", $termSubFn[id]}],
+                        BoxForm`SummaryItem[{"raw: ", id}]
+                    }
+                },
+                fmt,
+                "Interpretable" -> Automatic
+            ]
+        ]
     ]
-]
 
 (* Tag-specialized summary boxes: TAG_TEN / TAG_UOP / TAG_NUM each
    render with their own icon + domain-specific fields. *)
@@ -213,7 +226,14 @@ TTerm /: MakeBoxes[t_TTerm /; tUopQ[t], fmt_] := With[{
     ]
 ]
 
-TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] := With[{
+TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] :=
+    If[ fmt === TraditionalForm,
+        With[
+            {disp = ToBoxes[
+                Tooltip[tTermTrad[t], tTermExprResolved[t]], fmt]},
+            InterpretationBox[disp, t, SelectWithContents -> True]],
+        tNumSummaryBox[t, fmt]];
+tNumSummaryBox[t_, fmt_] := With[{
     id   = ttermRaw[t],
     icon = termSummaryIcon[]
 },
@@ -565,6 +585,140 @@ TContext /: MakeBoxes[c_TContext /; tContextQ[Unevaluated[c]], fmt_] := With[{
         ]
     ]
 ]
+
+(* ===========================================================
+   TraditionalForm rendering for TTerm.
+   ===========================================================
+   A clean, math-like display: OP2 as infix, SUP as angle
+   brackets, DUP wrappers transparent, DP projections that
+   resolve through SUB-flagged binders show the substituted
+   value, otherwise as subscripted xs.  The full verbose form
+   (with labels, locs, and Term-word identifiers) goes into a
+   Tooltip so the structural detail is one hover away. *)
+
+(* Symbol used for an unresolved DP-projection.  Subscript so
+   the IDE highlights the binder loc clearly. *)
+$opInactiveHeads = <|
+    "+" -> Inactive[Plus],
+    "-" -> Inactive[Subtract],
+    "*" -> Inactive[Times],
+    "/" -> Inactive[Divide]
+|>;
+
+(* SUB-resolving variant of TTermExpr: walks the heap, chasing
+   through SUB-flagged DP/VAR projections so a resolved DP shows up
+   as the substituted value (no DP wrapper).  Used as the Tooltip
+   content for TraditionalForm rendering -- if the display says
+   `1 + 3` then the tooltip should not contradict that with
+   `OP2[+, NUM[1], DP0[1, NUM[3]]]`. *)
+tTermExprResolved[t_TTerm] := tTermExprResolvedDepth[t, 16];
+tTermExprResolvedDepth[t_TTerm, 0] := "?";
+tTermExprResolvedDepth[t_TTerm, d_Integer] := Block[
+    {tag, val, ext, cell},
+    tag = TTermTag[t];
+    val = TTermVal[t];
+    ext = TTermExt[t];
+    Switch[tag,
+        $TagNUM, "NUM"[val],
+        $TagERA, "ERA",
+        $TagANY, "ANY",
+        $TagTEN, "TEN"[val],
+        $TagREF, "REF"[ext],
+        $TagVAR,
+            cell = THeapRead[val];
+            If[ TTermSub[cell] === 1,
+                tTermExprResolvedDepth[
+                    packTerm[0, TTermTag[cell], TTermExt[cell],
+                             TTermVal[cell]],
+                    d - 1],
+                "VAR"[val]],
+        $TagDP0 | $TagDP1,
+            cell = THeapRead[val];
+            If[ TTermSub[cell] === 1,
+                tTermExprResolvedDepth[
+                    packTerm[0, TTermTag[cell], TTermExt[cell],
+                             TTermVal[cell]],
+                    d - 1],
+                Superscript[If[ tag === $TagDP0, "DP0", "DP1"], ext][val]],
+        $TagDUP,
+            "DUP"[tTermExprResolvedDepth[THeapRead[val], d - 1]],
+        $TagSUP,
+            Superscript["SUP", ext][
+                tTermExprResolvedDepth[THeapRead[val + 0], d - 1],
+                tTermExprResolvedDepth[THeapRead[val + 1], d - 1]],
+        $TagOP2,
+            "OP2"[Lookup[$op2Names, ext, ToString[ext]],
+                  tTermExprResolvedDepth[THeapRead[val + 0], d - 1],
+                  tTermExprResolvedDepth[THeapRead[val + 1], d - 1]],
+        $TagAPP,
+            "APP"[tTermExprResolvedDepth[THeapRead[val + 0], d - 1],
+                  tTermExprResolvedDepth[THeapRead[val + 1], d - 1]],
+        $TagLAM,
+            "LAM"[val, tTermExprResolvedDepth[THeapRead[val], d - 1]],
+        _, "?" <> ToString[tag]]];
+
+tTermTrad[t_TTerm] := tTermTradDepth[t, 16];
+tTermTradDepth[t_TTerm, 0] := "..";
+tTermTradDepth[t_TTerm, d_Integer] := Block[
+    {tag, val, ext, cell, opName, head, a, b, body},
+    tag = TTermTag[t];
+    val = TTermVal[t];
+    ext = TTermExt[t];
+    Switch[tag,
+        $TagNUM, val,
+        $TagERA, Style["e", Italic],
+        $TagANY, Style["*", Italic],
+        $TagTEN, Subscript["T", val],
+        $TagREF, Subscript["R", ext],
+        $TagVAR, Subscript["x", val],
+        $TagDP0 | $TagDP1,
+            (* Both projections of a DUP are the SAME variable (IC
+               notation `! &L{x, x} = body`); we distinguish them
+               with a superscript projection index (0 or 1) and a
+               subscript heap loc for the dup cell.  When the cell
+               is SUB-flagged (a prior DUP-XXX fired), chase through
+               -- the projection wrapper is gone. *)
+            cell = THeapRead[val];
+            If[ TTermSub[cell] === 1,
+                tTermTradDepth[
+                    packTerm[0, TTermTag[cell], TTermExt[cell],
+                             TTermVal[cell]],
+                    d - 1],
+                Subscript[
+                    Superscript["x", If[ tag === $TagDP0, "0", "1"]],
+                    val]],
+        $TagDUP,
+            (* DUP wrapper is transparent at the TraditionalForm level. *)
+            tTermTradDepth[THeapRead[val], d - 1],
+        $TagSUP,
+            AngleBracket[
+                tTermTradDepth[THeapRead[val + 0], d - 1],
+                tTermTradDepth[THeapRead[val + 1], d - 1]],
+        $TagOP2,
+            a = tTermTradDepth[THeapRead[val + 0], d - 1];
+            b = tTermTradDepth[THeapRead[val + 1], d - 1];
+            opName = Lookup[$op2Names, ext, ToString[ext]];
+            head = Lookup[$opInactiveHeads, opName, Missing[]];
+            If[ MissingQ[head],
+                Row[{a, " ", opName, " ", b}],
+                head[a, b]],
+        $TagAPP,
+            a = tTermTradDepth[THeapRead[val + 0], d - 1];
+            b = tTermTradDepth[THeapRead[val + 1], d - 1];
+            Inactive[a][b],
+        $TagLAM,
+            body = tTermTradDepth[THeapRead[val], d - 1];
+            HoldForm[Function[Subscript["x", val], body]],
+        $TagUOP,
+            Inactive[Symbol["uop" <> ToString[ext]]] @@
+                Table[tTermTradDepth[THeapRead[val + i], d - 1],
+                      {i, 0, Min[4, uopArity[ext] - 1]}],
+        _, "?" <> ToString[tag]]];
+
+(* TraditionalForm of a TTerm dispatches inside the existing
+   MakeBoxes UpValue rules above (search for `fmt === TraditionalForm`).
+   No separate rule needed -- adding one didn't beat the broader
+   UpValues on specificity. *)
 
 End[];
 
