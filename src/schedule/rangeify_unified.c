@@ -1,9 +1,10 @@
-// schedule/rangeify_unified.c - Phase 2 of ideal_pipeline_v2:
+// schedule/rangeify_unified.c
+//
 // 1-to-1 port of tinygrad/schedule/indexing.py:run_rangeify (lines
 // 148-269) + pm_apply_rangeify (lines 101-110).
 //
-// The unified pass replaces the OLD path's (bufferize_classify named
-// rules + materialize.c visit() + kernel_lift) with one imperative
+// The unified pass replaces the named-rule bufferize_classify +
+// materialize.c visit() + kernel_lift trio with one imperative
 // reverse-topological walk that:
 //   - assigns per-axis RANGE expressions to every node in the DAG
 //   - decides realize boundaries by looking at the consumer ranges
@@ -11,26 +12,23 @@
 //   - emits a rewrite map that pm_apply_rangeify uses to replace each
 //     node's src with the appropriate BUFFERIZE/INDEX expression
 //
-// This is gated behind THVM_UNIFIED_RANGEIFY=1 (env var, default 0).
-// All existing tests run on the OLD path; only the new test (and
-// future Phase 3 cut-over) exercises this code.
+// Gated behind THVM_UNIFIED_RANGEIFY (env var, default 1).
+// THVM_UNIFIED_RANGEIFY=0 keeps the OLD path alive for bisects.
 //
 // THVM-SIDE DATA STRUCTURES vs TINYGRAD:
 //
 //   tinygrad                            | thvm
 //   ------------------------------------+-------------------------------
 //   tsink.toposort(gate_kernel_sink)    | BUFFERIZE_NODES (post bufferize_walk_rec)
-//   consumer_map: Dict[UOp, List[UOp]]  | CMAP_LL + cmap_head (Phase 1a)
+//   consumer_map: Dict[UOp, List[UOp]]  | CMAP_LL + cmap_head
 //   range_map: Dict[UOp, (in,out)]      | RU_RANGE_MAP[node_idx]
 //   realize_map: Dict[UOp, None|list]   | RU_REALIZE_MAP[node_idx]
 //   ending_ranges: dict[UOp, List]      | RU_ENDING_RANGES[node_idx]
 //
 // pm_apply_rangeify in tinygrad is one PatternMatcher rewrite; in thvm
 // we run an equivalent imperative walk that updates a substitution
-// table (RU_SUBST[node_idx]). The actual heap rewrite is parked in
-// the table so Phase 2 stays additive (no behavior change on default
-// path). Phase 3 (cut-over) wires the substitution back into the
-// schedule pipeline.
+// table (RU_SUBST[node_idx]) and writes UOP_BUFFERIZE Terms onto the
+// main heap at realize boundaries.
 //
 // Mirror source: tinygrad/schedule/indexing.py:148-269.
 
@@ -70,13 +68,13 @@ typedef struct {
   u8  n;
 } RuEndingRanges;
 
-// Phase 4a-pre-3: per-node reduce-range vector.  Mirrors tinygrad's
+// Per-node reduce-range vector.  Mirrors tinygrad's
 // `UOp(Ops.REDUCE, dtype, src=(value,)+tuple(new_ranges), arg=(kind, ()))`
 // at tinygrad/schedule/indexing.py:90-96 (convert_reduce_to_reduce_with_ranges).
 // Filled by run_rangeify_unified when it visits a UOP_REDUCE node; read
-// by materialize.c (Phase 4a-pre-4) to enumerate the reduce-axes the
-// emit walker needs to iterate. n == 0 for non-REDUCE nodes or for
-// REDUCE nodes with all-extent-1 reduce axes.
+// by materialize.c to enumerate the reduce-axes the emit walker needs to
+// iterate. n == 0 for non-REDUCE nodes or for REDUCE nodes with
+// all-extent-1 reduce axes.
 typedef struct {
   Term ranges[MAX_DIM];
   u8   n;
@@ -119,10 +117,10 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
       || RU_REALIZE_MAP[node_idx].realized_partial;
 }
 
-// Phase 4a-pre-3: number of reduce-ranges attached to this node.
-// Non-zero only for UOP_REDUCE nodes whose reduce axes have extent > 1.
-// Mirrors tinygrad's `len(x.src[1:])` after
-// convert_reduce_to_reduce_with_ranges runs (indexing.py:94).
+// Number of reduce-ranges attached to this node.  Non-zero only for
+// UOP_REDUCE nodes whose reduce axes have extent > 1.  Mirrors
+// tinygrad's `len(x.src[1:])` after convert_reduce_to_reduce_with_ranges
+// runs (indexing.py:94).
 fn u32 rangeify_unified_reduce_n_ranges_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_REDUCE_RANGES[node_idx].n;
@@ -135,11 +133,11 @@ fn Term rangeify_unified_reduce_range_at(u32 node_idx, u32 i) {
 }
 
 // === Env-gate. Mirrors the THVM_* env-pattern used elsewhere. ===
-// Phase 3 (ideal_pipeline_v2): flipped default to 1 (unified path).
-// Set THVM_UNIFIED_RANGEIFY=0 to opt back into the OLD named-rule pipeline.
+// Default ON; set THVM_UNIFIED_RANGEIFY=0 to opt back into the OLD
+// named-rule pipeline.
 fn int rangeify_unified_enabled(void) {
   char const *e = getenv("THVM_UNIFIED_RANGEIFY");
-  if (e == NULL) return 1;      // default ON (Phase 3 cutover)
+  if (e == NULL) return 1;
   return e[0] != '0';
 }
 
@@ -226,7 +224,7 @@ static int ru_node_src_shape(u64 loc, Shape *out) {
 }
 
 // === Mirror source: indexing.py:155-160 (consumer_map gather) ===
-// We rely on Phase 1a's CMAP_LL/cmap_head: per producer node, the
+// We rely on the CMAP_LL/cmap_head table: per producer node, the
 // linked-list of consumer locs is already populated by bufferize_walk_rec.
 // This wrapper resolves consumer locs -> node indices and trims invalid
 // entries (consumer never made it into BUFFERIZE_NODES).
@@ -311,18 +309,16 @@ static int ru_all_same_axis(RuConsumerRangs const *rs, u32 n, u8 axis) {
 // We call into the Phase-1c apply_movement_op_* family in indexing.c.
 //
 // Returns 1 if a swizzle was applied (in_rngs/in_ndim filled), 0 if
-// the op isn't a movement op the swizzler handles. RESHAPE is parked
-// for Phase 3 (needs concrete pm_simplify_valid).
+// the op isn't a movement op the swizzler handles.  RESHAPE is parked
+// until pm_simplify_valid_apply is sharpened beyond its identity stub.
 static int ru_apply_movement(u64 loc, u8 op,
                               Term const *out_rngs, u32 out_ndim,
                               Term *in_rngs, u32 *in_ndim) {
   if (op == UOP_RESHAPE) {
     // Tinygrad's RESHAPE goes through _apply_reshape which needs
-    // pm_simplify_valid (Phase 1d landed identity-stub). Until Phase 3
-    // hooks the real simplifier, fall through to identity at the
-    // producer's source shape -- this is a known thvm-side gap relative
-    // to tinygrad; Phase 3 will surface concrete RESHAPE regressions and
-    // we'll sharpen pm_simplify_valid_apply per case.
+    // pm_simplify_valid (identity stub today).  Fall through to identity
+    // at the producer's source shape -- known thvm-side gap relative to
+    // tinygrad; sharpen pm_simplify_valid_apply per failing case.
     *in_ndim = 0;
     return 0;
   }
@@ -406,9 +402,9 @@ static int ru_apply_movement(u64 loc, u8 op,
 // this fills BUFFERIZE_NODES + CMAP_LL + the existing realized-bit.
 //
 // Side effects: populates RU_RANGE_MAP + RU_REALIZE_MAP + RU_ENDING_RANGES.
-// Does NOT modify BUFFERIZE_NODES.realized -- Phase 2 leaves the
-// realize decision side-table separate from the existing one for
-// inspectability. Phase 3's cut-over will reconcile them.
+// The realize decision is kept in RU_REALIZE_MAP separate from
+// BUFFERIZE_NODES.realized; bufferize_classify_project_unified
+// reconciles them after the walk.
 
 fn void run_rangeify_unified(Term root) {
   // Clear per-node state.
@@ -642,10 +638,10 @@ fn void run_rangeify_unified(Term root) {
       //   `tuple(rctx.new_range(s, axistype=AxisType.REDUCE) if i in arg[1] else r ...`
       // thvm UOP_REDUCE stores a single axis at heap[loc + 2].
       //
-      // Phase 4a-pre-3 also records the fresh REDUCE range Term in
-      // RU_REDUCE_RANGES[node_idx] so materialize.c (Phase 4a-pre-4)
-      // can enumerate the reduce-axes via accessor without re-deriving
-      // them from the heap. This is the thvm-side equivalent of
+      // We also record the fresh REDUCE range Term in
+      // RU_REDUCE_RANGES[node_idx] so materialize.c can enumerate the
+      // reduce-axes via accessor without re-deriving them from the
+      // heap. This is the thvm-side equivalent of
       // tinygrad's `convert_reduce_to_reduce_with_ranges` storing the
       // ranges in `src=(value,) + tuple(new_ranges)` at indexing.py:94.
       Shape src_shape;
@@ -713,19 +709,15 @@ fn void run_rangeify_unified(Term root) {
 //   4. Movement ops post-rangeify: drop them (rngs already swizzled in).
 //
 // thvm-side implementation: walk every node and compute the canonical
-// substitute Term. The substitute table is for Phase 3 cut-over to
-// consult.
-//
-// Phase 4a-pre-2 (this commit): at realize boundaries we now emit a
-// real UOP_BUFFERIZE Term on the MAIN HEAP via uop_bufferize_new and
-// stash it in RU_BUFFERIZE_TERM for materialize.c to walk. RU_SUBST
-// continues to hold the INDEX expression a consumer threads in (for
-// the eventual cut-over of consumer-side rewrites).
+// substitute Term.  RU_SUBST holds the INDEX expression a consumer
+// threads in; at realize boundaries we additionally emit a UOP_BUFFERIZE
+// Term on the MAIN HEAP via uop_bufferize_new and stash it in
+// RU_BUFFERIZE_TERM for materialize.c to walk.
 
 #define RU_SUBST_CAP RU_MAX_NODES
 static Term RU_SUBST[RU_SUBST_CAP];
-// Phase 4a-pre-2: main-heap UOP_BUFFERIZE Term per realized node.
-// Zero means "no boundary emitted here". Mirrors tinygrad's
+// Main-heap UOP_BUFFERIZE Term per realized node.  Zero means "no
+// boundary emitted here".  Mirrors tinygrad's
 // `UOp(Ops.BUFFERIZE, ..., src=(value,)+closed_ranges, arg=opts)`
 // landing in the tsink graph at the realize boundary.
 static Term RU_BUFFERIZE_TERM[RU_SUBST_CAP];
@@ -735,8 +727,8 @@ fn Term rangeify_unified_subst_at(u32 node_idx) {
   return RU_SUBST[node_idx];
 }
 
-// Phase 4a-pre-2 accessor: the UOP_BUFFERIZE Term emitted at this
-// node's realize boundary. 0 if the node is not a boundary.
+// Accessor for the UOP_BUFFERIZE Term emitted at this node's realize
+// boundary.  0 if the node is not a boundary.
 fn Term rangeify_unified_bufferize_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_BUFFERIZE_TERM[node_idx];
@@ -752,8 +744,8 @@ static Term ru_build_index_addr(RuRangeMap const *rm) {
   if (rm->out_ndim == 0) return uop_const(DT_INT32, 0);
   // Row-major: addr = ... ((r0*d1 + r1)*d2 + r2)*d3 + ...
   // We don't have the consumer's shape dims handy without rederiving,
-  // so we emit a flat IADD of all ranges (Phase 3 wires real strides
-  // from the producer's shape).
+  // so we emit a flat IADD of all ranges (real-stride wiring is a
+  // follow-up that needs the producer's shape).
   Term acc = rm->out_rngs[0];
   for (u8 a = 1; a < rm->out_ndim; a++) {
     acc = uop_int_binary(UOP_IADD, acc, rm->out_rngs[a]);
@@ -761,8 +753,8 @@ static Term ru_build_index_addr(RuRangeMap const *rm) {
   return acc;
 }
 
-// Phase 4a-pre-2: count of UOP_BUFFERIZE nodes emitted on the main
-// heap by the most recent pm_apply_rangeify run. Stats / introspection.
+// Count of UOP_BUFFERIZE nodes emitted on the main heap by the most
+// recent pm_apply_rangeify run.  Stats / introspection.
 static u32 RU_LAST_BUFFERIZES_EMITTED;
 fn u32 rangeify_unified_last_bufferizes_emitted(void) {
   return RU_LAST_BUFFERIZES_EMITTED;
@@ -827,7 +819,7 @@ fn void pm_apply_rangeify(Term root) {
       // Mirror indexing.py:75-77:
       //   new_src = UOp(Ops.BUFFERIZE, s.dtype, src=(new_src,)+closed_ranges,
       //                 arg=opts)
-      // Phase 4a-pre-2 lands the main-heap node via uop_bufferize_new.
+      // The main-heap node lands via uop_bufferize_new.
       Term closed_ranges[MAX_DIM];
       u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
       // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
@@ -855,8 +847,8 @@ fn void pm_apply_rangeify(Term root) {
     } else {
       // Mirror indexing.py:107 (passthrough INDEX without BUFFERIZE wrap).
       // The consumer reads the producer's source directly under the
-      // producer's in_rngs. We re-use the node Term as a placeholder for
-      // Phase 2 inspection.
+      // producer's in_rngs.  We re-use the node Term as a placeholder
+      // for inspection.
       Term addr = ru_build_index_addr(rm);
       RU_SUBST[i] = uop_index_e(self, addr);
     }

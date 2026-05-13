@@ -249,9 +249,9 @@ fn Term uop_invalid(void) {
 // `create_bufferize_and_index_based_on_ranges`).
 //
 // Hash-cons via uop_mov_cache so reusing the same (value, addrspace,
-// removable, ranges) tuple returns the same Term.  Phase 4a-pre's
-// unified-pass main-heap rewrite calls this once per realize boundary
-// the run_rangeify walk decided; identical boundaries dedup naturally.
+// removable, ranges) tuple returns the same Term.  The unified pass
+// calls this once per realize boundary the run_rangeify walk decided;
+// identical boundaries dedup naturally.
 
 fn Term uop_bufferize_new(Term value, u32 addrspace, u32 removable,
                           u32 n_ranges, Term const *ranges) {

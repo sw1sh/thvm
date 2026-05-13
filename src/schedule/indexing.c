@@ -1,12 +1,11 @@
-// schedule/indexing.c - movement-op range swizzler + (Phase 1d) symbolic simplifier
-// + (Phase 2) run_rangeify_unified.
+// schedule/indexing.c - movement-op range swizzler + symbolic-valid simplifier.
 //
 // Mirrors tinygrad/schedule/indexing.py.  Each movement op rewrites the
 // per-axis index expression (RANGE Term or arithmetic over RANGE leaves)
 // that a downstream consumer uses when indexing into the producer.
 //
-// Phase 1c (this file's first content): SHRINK / PERMUTE / FLIP / EXPAND /
-// PAD swizzles.  RESHAPE is deferred to Phase 2 (needs pm_simplify_valid).
+// SHRINK / PERMUTE / FLIP / EXPAND / PAD swizzles are implemented here;
+// RESHAPE is handled in the unified rangeify pass via pm_simplify_valid.
 //
 // Mirror source: tinygrad/schedule/indexing.py:129  apply_movement_op
 //
@@ -14,10 +13,7 @@
 //   - `out_rngs[ndim_out]` are the per-axis range Terms the CONSUMER uses
 //     (one per output axis of the movement op).
 //   - `in_rngs[ndim_in]` are the per-axis range Terms the PRODUCER sees
-//     (filled by this function).  Output ranks vary by op:
-//       SHRINK / PAD / FLIP / EXPAND : ndim_in == ndim_out
-//       PERMUTE                       : ndim_in == ndim_out
-//       (RESHAPE in Phase 2 with possibly different ndim_in vs ndim_out)
+//     (filled by this function).  ndim_in == ndim_out for these ops.
 //
 // Backing constructors all hash-cons through uop_mov_cache, so repeated
 // swizzles with identical inputs deduplicate.
@@ -119,44 +115,23 @@ fn void apply_movement_op_pad(u32 ndim,
   }
 }
 
-// === Phase 1d (ideal_pipeline_v2): symbolic-valid simplifiers ===
+// === Symbolic-valid simplifiers ===
 //
 // Mirror source: tinygrad/uop/symbolic.py:423 pm_simplify_valid +
 //                tinygrad/uop/symbolic.py:385 pm_drop_and_clauses.
-//
-// Tinygrad implements these as PatternMatcher rule sets:
-//   pm_simplify_valid    : [(Ops.AND, simplify_valid), (invalid_gate, gated_given_valid)]
-//   pm_drop_and_clauses  : [(invalid_gate, drop_and_clauses)]
 //
 // Both consume a Term that may contain UOP_IAND chains gating a
 // UOP_IWHERE-INVALID expression (the standard PAD/RESHAPE output shape)
 // and rewrite the gate into a smaller equivalent form.
 //
-// Phase 1d intent: ship identity-stub entry points so Phase 2's
-// run_rangeify_unified port can call them at the same sites tinygrad
-// does (rangeify.py `apply_movement_op` PAD case; `_apply_reshape`
-// graph_rewrite). Until Phase 2/3 surfaces concrete cases where the
-// identity output's size or behavior diverges from tinygrad, these
-// remain identity. Each iteration adds one targeted rewrite. This is
-// the "land substrate first, sharpen by failing case" pattern -- the
-// alternative (porting hundreds of lines of symbolic algebra
-// speculatively) was rejected in v2 because Phase 1 should not
-// gate on a phase-3 behavior change.
+// Identity stubs for now. Sharpen with targeted rewrites driven by
+// concrete RESHAPE-output regressions vs tinygrad parity; the call
+// seam is what callers in the unified rangeify pass depend on.
 
 fn Term pm_simplify_valid_apply(Term t) {
-  // Identity. Future iterations of Phase 2/3 (driven by RESHAPE-output
-  // size regressions vs tinygrad parity) add specific rewrites here:
-  //   - AND(TRUE, x) -> x   and   AND(x, TRUE) -> x
-  //   - AND(c, c)    -> c   (idempotence)
-  //   - simplify_valid range-membership inference
-  //   - gated_given_valid for WHERE-INVALID gates
   return t;
 }
 
 fn Term pm_drop_and_clauses_apply(Term t) {
-  // Identity. Future iteration adds drop_and_clauses: when an AND-gated
-  // WHERE has clauses whose ranges don't appear in the WHERE-true value,
-  // those clauses are redundant and drop. Needed only when RESHAPE-of-PAD
-  // chains produce gates broader than the RESHAPE consumer's ranges.
   return t;
 }
