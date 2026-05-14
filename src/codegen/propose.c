@@ -43,37 +43,15 @@ static u32 propose_kprog_reduce_axis_size(KernelEntry const *ke) {
 }
 
 static u32 propose_scalar_reduce_axis_size(KernelEntry const *ke) {
-  if (ke == NULL || ke->scalar_uops == NULL) {
-    return 0;
-  }
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    ScalarUop const *u = &ke->scalar_uops[i];
-    if (u->op != S_REDUCE_SUM && u->op != S_REDUCE_MAX) {
-      continue;
-    }
-    if (u->src_count < 2 || u->src[1] == 0
-        || u->src[1] >= ke->n_scalar_uops) {
-      return 0;
-    }
-    ScalarUop const *rng = &ke->scalar_uops[u->src[1]];
-    if (rng->op != S_RANGE) {
-      return 0;
-    }
-    u32 axis_type = (u32)(rng->extra >> 32);
-    u32 extent    = (u32)(rng->extra & 0xFFFFFFFFu);
-    if (axis_type != S_AXIS_REDUCE) {
-      return 0;
-    }
-    return extent;
-  }
+  (void)ke;
   return 0;
 }
 
 // Phase C slice 4: when cached_lift.store_root is populated walk the
 // lifted UOp DAG for the reduce axis extent.  Used by autotune-time
 // callers that already pay the lift cost at materialize-time; ke->
-// program / ke->scalar_uops remain valid fallbacks for kernels that
-// declined the lift.
+// cached_lift.store_root is always populated post-lifter-coverage-
+// closure (commit ee882fe5).
 static u32 propose_uop_reduce_axis_size(KernelEntry const *ke) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   return uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
@@ -263,99 +241,9 @@ static int propose_metal_tile_enabled(void) {
   return propose_metal_backend_enabled() && tile != NULL && tile[0] == '1';
 }
 
-static int propose_metal_tile_scalar_reduce_op_ok(u8 op) {
-  switch (op) {
-    case S_NONE:
-    case S_RANGE:
-    case S_DEFINE_PARAM:
-    case S_DEFINE_OUTPUT:
-    case S_INDEX:
-    case S_INDEX_E:
-    case S_LOAD:
-    case S_STORE:
-    case S_BUFFERIZE:
-    case S_ADD:
-    case S_MUL:
-    case S_NEG:
-    case S_RECIP:
-    case S_SQRT:
-    case S_EXP2:
-    case S_LOG2:
-    case S_CMPLT:
-    case S_CMPEQ:
-    case S_REDUCE_SUM:
-    case S_REDUCE_MAX:
-    case S_CAST:
-    case S_RESHAPE_V:
-    case S_CONST:
-    case S_ICONST:
-    case S_IADD:
-    case S_ISUB:
-    case S_IMUL:
-    case S_IDIV:
-    case S_IMOD:
-    case S_ILT:
-    case S_IAND:
-    case S_IWHERE:
-      return 1;
-    default:
-      return 0;
-  }
-}
-
-static int propose_scalar_op_carries_kernel_dtype(ScalarUop const *u) {
-  switch (u->op) {
-    case S_LOAD:
-    case S_STORE:
-    case S_CONST:
-    case S_ADD:
-    case S_MUL:
-    case S_NEG:
-    case S_RECIP:
-    case S_SQRT:
-    case S_EXP2:
-    case S_LOG2:
-    case S_CMPLT:
-    case S_CMPEQ:
-    case S_REDUCE_SUM:
-    case S_REDUCE_MAX:
-    case S_CAST:
-    case S_RESHAPE_V:
-      return 1;
-    case S_IWHERE:
-      return u->dtype != DT_INT64;
-    default:
-      return 0;
-  }
-}
-
 static int propose_metal_tile_scalar_reduce_kernel(KernelEntry const *ke) {
-  if (!propose_metal_tile_enabled() || ke->scalar_uops == NULL
-      || ke->n_scalar_uops < 2 || ke->output_dtype != DT_FP32) {
-    return 0;
-  }
-  if (tile_rejects_conv2d_flat_cin1(ke)) {
-    return 0;
-  }
-  int has_reduce = 0;
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_dtypes[i] != DT_FP32) {
-      return 0;
-    }
-  }
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    ScalarUop const *u = &ke->scalar_uops[i];
-    if (!propose_metal_tile_scalar_reduce_op_ok(u->op)) {
-      return 0;
-    }
-    if (propose_scalar_op_carries_kernel_dtype(u) && u->dtype != DT_FP32) {
-      return 0;
-    }
-    if (u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX) {
-      has_reduce = 1;
-    }
-  }
-  return has_reduce;
+  (void)ke;
+  return 0;
 }
 
 static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
@@ -416,9 +304,9 @@ static int propose_metal_tile_kernel(KernelEntry const *ke) {
   if (!propose_metal_tile_enabled()) {
     return 0;
   }
-  if (ke->output_dtype != DT_FP32 || ke->scalar_uops == NULL
-      || ke->n_scalar_uops < 2 || ke->tile_uops == NULL
-      || ke->n_tile_uops < 2 || ke->schedule == NULL || ke->n_inputs > 30) {
+  if (ke->output_dtype != DT_FP32
+      || ke->tile_uops == NULL || ke->n_tile_uops < 2
+      || ke->schedule == NULL || ke->n_inputs > 30) {
     return 0;
   }
   int has_loop = 0;
