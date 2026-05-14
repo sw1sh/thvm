@@ -35,15 +35,6 @@ static u32 alloc_f32_tensor2(u32 d0, u32 d1) {
 int main(void) {
   thvm_init();
 
-  // (a) Phase 3 cutover: default ON. Set =0 to opt out.
-  TEST_BEGIN("unified-rangeify/gate-default-on");
-  unsetenv("THVM_UNIFIED_RANGEIFY");
-  CHECK_EQ(rangeify_unified_enabled(), 1);
-  setenv("THVM_UNIFIED_RANGEIFY", "0", 1);
-  CHECK_EQ(rangeify_unified_enabled(), 0);
-  setenv("THVM_UNIFIED_RANGEIFY", "1", 1);
-  CHECK_EQ(rangeify_unified_enabled(), 1);
-
   // (b) Single-consumer chain. A linear ADD chain: (a + b) * c.
   // The ADD is consumed by MUL once -> ADD inherits MUL's ranges, no
   // partial-realize. MUL is the root -> realized_full.
@@ -205,17 +196,12 @@ int main(void) {
 
   thvm_free();
 
-  // === direct-cutover gating + compute_bufferize wiring ===
-  // Build a small ADD kernel, materialise under THVM_RANGEIFY_DIRECT=1
-  // and confirm:
-  //   (a) the emit succeeds end-to-end (kernel term returned).
-  //   (b) the kernel's compute_bufferize field points at a
-  //       UOP_BUFFERIZE Term whose value is the boundary's UOP root.
-  //   (c) under THVM_RANGEIFY_DIRECT=0 (default), compute_bufferize
-  //       stays 0 (legacy behaviour).
-  TEST_BEGIN("unified-rangeify/direct-cutover-compute-bufferize");
+  // === compute_bufferize wiring on the always-on unified path ===
+  // Build a small ADD kernel, materialise and confirm the kernel's
+  // compute_bufferize field points at a UOP_BUFFERIZE Term whose
+  // value is the boundary's UOP root.
+  TEST_BEGIN("unified-rangeify/compute-bufferize-wired");
   unsetenv("THVM_BACKEND");
-  setenv("THVM_RANGEIFY_DIRECT", "1", 1);
   thvm_init();
   Shape sd = {0}; sd.ndim = 1; sd.dims[0] = 4;
   f32 srcda[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -229,13 +215,11 @@ int main(void) {
       term_new(0, TAG_TEN, DT_FP32, tda),
       term_new(0, TAG_TEN, DT_FP32, tdb)));
   CHECK(dadd != 0);
-  // At least one emitted kernel must carry compute_bufferize.
   int saw_bz = 0;
   for (u32 k = ks_before; k < KERNELS_NEXT; k++) {
     if (KERNELS[k].compute_bufferize != 0) { saw_bz = 1; break; }
   }
   CHECK(saw_bz);
-  // The field must point at a real UOP_BUFFERIZE Term.
   for (u32 k = ks_before; k < KERNELS_NEXT; k++) {
     Term cb = KERNELS[k].compute_bufferize;
     if (cb == 0) continue;
@@ -243,29 +227,6 @@ int main(void) {
     CHECK_EQ(term_ext(cb), UOP_BUFFERIZE);
     Term val = uop_bufferize_value(cb);
     CHECK(val != 0);
-  }
-  thvm_free();
-  unsetenv("THVM_RANGEIFY_DIRECT");
-
-  // (c) under DIRECT=0 default, compute_bufferize stays 0.
-  TEST_BEGIN("unified-rangeify/direct-cutover-off-clears-bufferize");
-  unsetenv("THVM_RANGEIFY_DIRECT");
-  unsetenv("THVM_BACKEND");
-  thvm_init();
-  Shape se = {0}; se.ndim = 1; se.dims[0] = 4;
-  f32 srcea[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-  f32 srceb[4] = {5.0f, 6.0f, 7.0f, 8.0f};
-  u32 tea = tensor_alloc(CURRENT_BACKEND, se, DT_FP32);
-  u32 teb = tensor_alloc(CURRENT_BACKEND, se, DT_FP32);
-  CURRENT_BACKEND->buf_write(TENS[tea].buf_id, srcea, sizeof(srcea));
-  CURRENT_BACKEND->buf_write(TENS[teb].buf_id, srceb, sizeof(srceb));
-  u32 ks_before2 = KERNELS_NEXT;
-  Term eadd = thvm_materialize(uop_binary(UOP_ADD,
-      term_new(0, TAG_TEN, DT_FP32, tea),
-      term_new(0, TAG_TEN, DT_FP32, teb)));
-  CHECK(eadd != 0);
-  for (u32 k = ks_before2; k < KERNELS_NEXT; k++) {
-    CHECK_EQ(KERNELS[k].compute_bufferize, 0u);
   }
   thvm_free();
 

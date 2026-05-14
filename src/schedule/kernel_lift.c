@@ -213,9 +213,9 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
         return chain_addr;
       }
     }
-    // Chain fold declined: fall through to the legacy buf-of-INDEX
-    // see-through (preserves the existing 2-layer pad/shrink residue
-    // handling where the inner ranges happen to be no-ops).
+    // Chain fold declined: fall through to the 2-layer buf-of-INDEX
+    // see-through below (handles pad/shrink residue where the inner
+    // ranges happen to be no-ops).
   }
   if (bu->op == S_DEFINE_PARAM) {
     u32 slot = (u32)bu->extra;
@@ -567,15 +567,10 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
   // the LAST outer_rank buf dims equal the range extents.  The
   // leading (ndim - outer_rank) buf dims are missing from the iter
   // context -- treat them as 0 (broadcast page 0 of the leading
-  // axes, sum offset over only the trailing ranges).  Diagnosed via
-  // lenet-mnist bench-train (16 hits per training step, all
-  // dims=[16,4,2] range_extents=[4,2]).  Default-on after A/B
-  // confirmed identical loss (2.3026, log 10) with the path
-  // enabled; THVM_LIFT_NDIM_BROADCAST=0 reverts to the reject
-  // for bisection.  The earlier axis-append attempt broke numerics
-  // for cases where ranges DIDN'T match buf dims; here they MUST
-  // match exactly (extents_align check), so the offset composition
-  // is unambiguous.
+  // axes, sum offset over only the trailing ranges).  Requires
+  // extents_align (trailing buf dims == range extents) so the offset
+  // composition is unambiguous.  THVM_LIFT_NDIM_BROADCAST=0 reverts
+  // for bisection.
   if (ndim > outer_rank && outer_rank >= 1) {
     char const *_ge = getenv("THVM_LIFT_NDIM_BROADCAST");
     int _on = (_ge == NULL) ? 1 : (_ge[0] != '0');
@@ -783,10 +778,7 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
       }
       fputs("] range_extents=[", stderr);
       // Dump per-axis-ref scalar source: extent for S_RANGE leaves,
-      // op-name for expressions.  This is what the earlier reverted
-      // axis-append attempt needed to design against -- knowing whether
-      // the ranges collectively span the buffer's numel and in what
-      // order is the prerequisite for a safe lift.
+      // op-name for expressions.
       for (u32 d = 0; d < outer_rank; d++) {
         u32 r_sid = u->src[1 + d];
         if (d) fputc(',', stderr);
@@ -809,15 +801,11 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
 compute_offset:;
   // Strides: prefer the View's actual strides (which encode broadcast
   // as stride=0 on EXPANDED dims and reflect non-contiguous storage)
-  // over reconstructed dim-product strides. Falling back to dim-product
-  // if the buffer isn't an input we can resolve to a View.
-  // F3.5 fix: previously this computed `stride[d] = product(dims[d+1..])`
-  // which is correct for contiguous materialised buffers but wrong for
-  // virtual EXPAND views (e.g. matmul A reshape->[M,K,1] expand->[M,K,N]
-  // is shape=[M,K,N] strides=[K,1,0] over a 256-element underlying
-  // buffer). The dim-product strides [256,16,1] would address a
-  // 4096-element materialised buffer, but the schedule keeps EXPAND
-  // virtual -- so reads at offsets >= numel are out-of-bounds.
+  // over reconstructed dim-product strides.  Dim-product strides
+  // would address a fully-materialised buffer, but the schedule keeps
+  // EXPAND virtual: reads at offsets >= numel would be out-of-bounds.
+  // Fall back to dim-product only if the buffer isn't an input we can
+  // resolve to a View.
   i64 view_strides[MAX_DIM];
   int have_view_strides = 0;
   if (ke->input_views != NULL) {
@@ -1338,17 +1326,14 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
                                out_buf, in_bufs, n_inputs);
     }
     case S_RESHAPE: {
-      // Legacy shared-LOOP-refs RESHAPE: src[1..nrng) are LOOP
-      // ranges used as both input and output via in-place iter
-      // shift.  extra packs out_dims (low 32, 4xu8) and in_dims
-      // (high 32, 4xu8).  Body sees iter shifted: in_iter[d] is
-      // derived from a flat index built over out_dims, then split
-      // by in_dims.  Mirrors S_RESHAPE_V's algorithm but with
-      // shared range refs (input and output iters share the same
-      // S_RANGE slots, just remapped via the LiftRangeMap override).
-      // Without this case, lenet-mnist bench-train falls back to
-      // the legacy ScalarUop renderer for ~128 kernels per step
-      // (lift_reject "value/unknown-op op=S_?(25)").
+      // Shared-LOOP-refs RESHAPE: src[1..nrng) are LOOP ranges used
+      // as both input and output via in-place iter shift.  extra
+      // packs out_dims (low 32, 4xu8) and in_dims (high 32, 4xu8).
+      // Body sees iter shifted: in_iter[d] is derived from a flat
+      // index built over out_dims, then split by in_dims.  Same
+      // algorithm as S_RESHAPE_V but with shared range refs (input
+      // and output iters share the same S_RANGE slots, just remapped
+      // via the LiftRangeMap override).
       if (u->src_count < 2) {
         lift_reject_log(ke, sid, "value/reshape-src-count");
         return 0;
@@ -2045,9 +2030,8 @@ static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
   // Chain: store_root = STORE(primary) AFTER STORE(extra_0) AFTER ...
   // Walker emits the AFTER chain in inner-first order (uwalk_emit_after
   // recurses into after_node before node), so wrapping primary on the
-  // outside means primary writes LAST -- matching cpu_interpret's
-  // legacy "last op writes to out_buf_id" semantics that the splice
-  // post-pass leaves untouched.
+  // outside means primary writes LAST -- the splice post-pass requires
+  // the "last op writes to out_buf_id" ordering.
   Term root = primary_store;
   for (u32 ei = 0; ei < ke->n_extra_outputs; ei++) {
     if (extra_stores[ei] == 0) {
