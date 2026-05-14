@@ -1170,6 +1170,16 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // those axes' contributions from flat_idx -- the reshape then
       // reads only the first cOut slab and replicates it across all
       // cOut outputs (LeNet's conv-backward cOut-collapse bug).
+      //
+      // Folded size-1 ref shape: emit_zero_ref_with_extent(ke, 1)
+      // builds S_IMOD(S_ICONST(0), S_ICONST(1)) which emit_ibinop's
+      // constant-S_IMOD fold collapses to a bare S_ICONST(0).  Every
+      // S_ICONST out-ref produced by the rangeify emitter corresponds
+      // to extent=1 (the only paths that fold S_IMOD to a scalar
+      // constant fire when modulus==1 in the emit_*_with_extent
+      // helpers).  Infer out_ext[d]=1; the iter contributes 0 to
+      // flat_idx and the stride product for upstream axes multiplies
+      // by 1, both correct.
       Term out_iter[MAX_DIM];
       u32  out_ext [MAX_DIM];
       for (u32 d = 0; d < n_out; d++) {
@@ -1187,6 +1197,9 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
           out_iter[d] = lift_scalar_value(ke, r_sid, ranges, n_ranges,
                                           out_buf, in_bufs, n_inputs);
           out_ext [d] = scalar_ref_extent(ke, r_sid);
+          if (out_ext[d] == 0 && ru->op == S_ICONST && ru->extra == 0) {
+            out_ext[d] = 1;
+          }
         }
         if (out_iter[d] == 0) {
           lift_reject_log(ke, r_sid, "value/reshape-v-out-iter-fail");
