@@ -338,7 +338,7 @@ static int jit_replay_pack_enabled(void) {
 // Export the capture sequence as a flat table for WL-side profiling.
 // Header: {n_ops, row_width}.  Row width is JIT_CAPTURE_EXPORT_ROW_WIDTH:
 // {kind, kid, dispatch_kind, n_inputs, out_buf_id, input0, input1,
-//  program_key, output_numel, n_ops, n_scalar_uops, n_tile_uops,
+//  program_key, output_numel, n_ops, _unused, n_tile_uops,
 //  assign_dst_tid, assign_src_tid, replay_skip, replay_packed}.
 fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
   if (out == NULL || cap_words < 2) {
@@ -385,7 +385,7 @@ fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
           KernelEntry const *ke = &KERNELS[op->kid];
           row[8]  = ke->output_numel;
           row[9]  = ke->n_ops;
-          row[10] = ke->n_scalar_uops;
+          row[10] = 0;
           row[11] = ke->n_tile_uops;
         }
         break;
@@ -562,80 +562,6 @@ static void jit_capture_drop_dead_output(JitCaptureOp const *op) {
   b->buf_decref(op->out_buf_id);
 }
 
-static i32 jit_scalar_index_param_slot(KernelEntry const *ke, u32 idx_id) {
-  if (ke == NULL || ke->scalar_uops == NULL) {
-    return -1;
-  }
-  while (idx_id != 0 && idx_id < ke->n_scalar_uops) {
-    ScalarUop const *u = &ke->scalar_uops[idx_id];
-    if (u->op != S_INDEX && u->op != S_INDEX_E) {
-      return -1;
-    }
-    u32 base_id = u->src[0];
-    if (base_id == 0 || base_id >= ke->n_scalar_uops) {
-      return -1;
-    }
-    ScalarUop const *base = &ke->scalar_uops[base_id];
-    if (base->op == S_DEFINE_PARAM) {
-      return (i32)(u32)base->extra;
-    }
-    idx_id = base_id;
-  }
-  return -1;
-}
-
-static int jit_scalar_same_index_coord(KernelEntry const *ke, u32 a_id,
-                                       u32 b_id) {
-  if (ke == NULL || ke->scalar_uops == NULL) {
-    return 0;
-  }
-  if (a_id == 0 || b_id == 0
-      || a_id >= ke->n_scalar_uops || b_id >= ke->n_scalar_uops) {
-    return 0;
-  }
-  ScalarUop const *a = &ke->scalar_uops[a_id];
-  ScalarUop const *b = &ke->scalar_uops[b_id];
-  if (a->op != b->op) {
-    return 0;
-  }
-  if (a->op == S_INDEX_E) {
-    return a->src[1] == b->src[1];
-  }
-  if (a->op != S_INDEX || a->src_count != b->src_count
-      || a->extra != b->extra) {
-    return 0;
-  }
-  ScalarUop const *abase = &ke->scalar_uops[a->src[0]];
-  ScalarUop const *bbase = &ke->scalar_uops[b->src[0]];
-  if (abase->op == S_INDEX || bbase->op == S_INDEX) {
-    if (abase->op != S_INDEX || bbase->op != S_INDEX) {
-      return 0;
-    }
-    if (!jit_scalar_same_index_coord(ke, a->src[0], b->src[0])) {
-      return 0;
-    }
-  }
-  for (u32 i = 1; i < a->src_count; i++) {
-    if (a->src[i] != b->src[i]) {
-      return 0;
-    }
-  }
-  return 1;
-}
-
-static u32 jit_kernel_store_index(KernelEntry const *ke) {
-  if (ke == NULL || ke->scalar_uops == NULL) {
-    return 0;
-  }
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    ScalarUop const *u = &ke->scalar_uops[i];
-    if (u->op == S_STORE && u->src_count >= 2) {
-      return u->src[0];
-    }
-  }
-  return 0;
-}
-
 static int jit_assign_sink_safe(JitCaptureOp const *producer,
                                 u32 dst_tid, u32 dst_buf_id) {
   if (producer == NULL || producer->kind != JIT_OP_DISPATCH
@@ -664,35 +590,14 @@ static int jit_assign_sink_safe(JitCaptureOp const *producer,
       || dst->view.numel != ke->output_numel) {
     return 0;
   }
-  u32 store_idx = jit_kernel_store_index(ke);
-  if (store_idx == 0) {
-    return 0;
-  }
-  u32 const *ids = producer->heap_in_buf_ids != NULL
-                 ? producer->heap_in_buf_ids
-                 : producer->in_buf_ids;
-  for (u32 slot = 0; slot < producer->n_inputs; slot++) {
-    int same_dst = ids[slot] == dst_buf_id;
-    if (ke->input_tids != NULL && slot < ke->n_inputs) {
-      same_dst = same_dst || ke->input_tids[slot] == dst_tid;
-    }
-    if (!same_dst) {
-      continue;
-    }
-    for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-      ScalarUop const *u = &ke->scalar_uops[i];
-      if (u->op != S_LOAD && u->op != S_LOAD_RAW) {
-        continue;
-      }
-      if (jit_scalar_index_param_slot(ke, u->src[0]) != (i32)slot) {
-        continue;
-      }
-      if (!jit_scalar_same_index_coord(ke, u->src[0], store_idx)) {
-        return 0;
-      }
-    }
-  }
-  return 1;
+  // Conservative bail: the scalar-uops-based coord-equality check that
+  // used to live here was the only consumer of the now-deprecated
+  // ScalarUop arena in this file.  The optimization elided redundant
+  // metal-tile -> assign copies; re-port on cached_lift.store_root
+  // (UOp DAG) when reviving.  Until then, never sink: extra copy but
+  // correctness preserved.
+  (void)ke;
+  return 0;
 }
 
 static int jit_capture_op_refs_buf(JitCaptureOp const *op,
