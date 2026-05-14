@@ -1429,7 +1429,6 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
     }
     case S_ICONST: case S_IADD: case S_ISUB: case S_IMUL:
     case S_IDIV: case S_IMOD: case S_ILT: case S_IAND:
-    case S_IWHERE:
       // Integer-side scalar ops -- handled by scalar_to_uop with a
       // UopRangeMap built from the same ranges.
       {
@@ -1443,6 +1442,38 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
         if (r == 0) lift_reject_log(ke, sid, "value/scalar-to-uop-fail");
         return r;
       }
+    case S_IWHERE: {
+      // Select(cond, y, n).  When dtype is integer the whole subtree
+      // is integer-side and scalar_to_uop handles it.  When dtype is
+      // float, cond is still integer-typed but y/n carry float
+      // subtrees that scalar_to_uop's int-only switch refuses;
+      // lift y/n via the recursive value-lifter instead.
+      if (u->src_count != 3) {
+        lift_reject_log(ke, sid, "value/iwhere-src-count");
+        return 0;
+      }
+      UopRangeMap srm[MAX_DIM];
+      u32 n = (n_ranges < MAX_DIM) ? n_ranges : MAX_DIM;
+      for (u32 i = 0; i < n; i++) {
+        srm[i].scalar_id = ranges[i].scalar_id;
+        srm[i].axis_uop  = ranges[i].axis_uop;
+      }
+      if (dtype_is_int(u->dtype)) {
+        Term r = scalar_to_uop(ke, sid, srm, n);
+        if (r == 0) lift_reject_log(ke, sid, "value/scalar-to-uop-fail");
+        return r;
+      }
+      Term c = scalar_to_uop(ke, u->src[0], srm, n);
+      Term y = lift_scalar_value(ke, u->src[1], ranges, n_ranges,
+                                 out_buf, in_bufs, n_inputs);
+      Term nv = lift_scalar_value(ke, u->src[2], ranges, n_ranges,
+                                  out_buf, in_bufs, n_inputs);
+      if (c == 0 || y == 0 || nv == 0) {
+        lift_reject_log(ke, sid, "value/iwhere-fp-operand-fail");
+        return 0;
+      }
+      return uop_iwhere(c, y, nv);
+    }
     default:
       lift_reject_log(ke, sid, "value/unknown-op");
       return 0;
