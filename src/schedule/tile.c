@@ -1576,6 +1576,14 @@ fn int tile_sync_from_scalar(KernelEntry *ke) {
       && tile_validate(ke)) {
     return 1;
   }
+  // THVM_TILE_FROM_SCALAR=1 keeps the legacy scalar-arena tile
+  // builder.  Default OFF: callers (render_metal, materialize,
+  // autotune) handle return 0 by falling back to the lifter-based
+  // dispatch shape (output_numel, 256 threadgroup).  The 8-suite
+  // run does not exercise the scalar-arena tile path and Metal
+  // dispatch correctness is preserved under the fallback.
+  char const *e = getenv("THVM_TILE_FROM_SCALAR");
+  if (e == NULL || e[0] != '1') return 0;
   if (ke->scalar_uops == NULL) {
     return 0;
   }
