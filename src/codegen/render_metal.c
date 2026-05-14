@@ -149,26 +149,14 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     return 1;
   }
   if (tile_rejects_conv2d_flat_cin1(ke)) return 0;
-  // Generic path: walk the tile_uops graph (built from the kernel's
-  // axis structure) and compute (groups, threads).  Handles
-  // FLAT_GRID / LOCAL_GLOBAL / GROUP_REDUCE modes from KAX_* axis
-  // types directly.
-  if (tile_sync_from_scalar(ke)) {
-    if (tile_compute_dispatch_shape(ke, groups_x, threads_x)) return 1;
-    // tile_compute_dispatch_shape rejected (axis types it doesn't
-    // recognise) -- fall through to the lifter fallback below. Now
-    // safe because the lifter uses view.strides for input addressing
-    // (correct for virtual EXPAND broadcast).
-  }
-  // Lifter-based fallback: the default path.  tile_sync_from_scalar
-  // is opt-in (THVM_TILE_FROM_SCALAR=1); under the default off path
-  // it returns 0 and we land here.  If the kernel_lift would succeed,
-  // render_uop emits a valid kernel; dispatch shape is just
-  // (output_numel, 256-default threadgroup).  The kernel's outer
-  // for-loops handle work distribution within each thread (each
-  // thread runs the full body redundantly; last-writer-wins on the
-  // output buffer gives correct results).  Future wedges can
-  // specialize when M/N-axes get bound to thread positions via
+  // Lifter-based fallback: the only remaining path after the
+  // scalar-arena tile_build_from_scalar seeder was deleted.  If the
+  // kernel_lift would succeed, render_uop emits a valid kernel;
+  // dispatch shape is just (output_numel, 256-default threadgroup).
+  // The kernel's outer for-loops handle work distribution within each
+  // thread (each thread runs the full body redundantly; last-writer-
+  // wins on the output buffer gives correct results).  Future wedges
+  // can specialize when M/N-axes get bound to thread positions via
   // UOP_OPT_LOCAL annotations.
   //
   // Phase C slice 2: prefer the cached lift outcome as the "would

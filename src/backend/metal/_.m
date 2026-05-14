@@ -1214,13 +1214,11 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   // slots and we re-compile for every BS.
   //
   // Two further exclusions for symbolic kernels:
-  //   - tile_uops[]: built LAZILY (NULL pre-dispatch, populated by
-  //     tile_sync_from_scalar inside cg_tile_metal_dispatch_shape) and
-  //     it bakes the literal output_shape.dims, so it both makes the
-  //     hash unstable across a dispatch AND varies per BS.  The MSL
-  //     source comes from render_uop over cached_lift.store_root, not
-  //     tile_uops, so dropping tile_uops here doesn't lose any
-  //     MSL-determining content.
+  //   - tile_uops[]: in production this stays NULL through dispatch
+  //     because tile_sync_from_scalar is a no-op stub since the
+  //     scalar-arena seeder was deleted.  The MSL source comes from
+  //     render_uop over cached_lift.store_root, not tile_uops, so
+  //     excluding tile_uops here matches the actual signal flow.
   //   - input/output numels (below).
   //
   // The UOp DAG (cached_lift.store_root) Term hash captures S_RANGE

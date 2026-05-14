@@ -971,16 +971,13 @@ typedef struct {
 // loops, Metal threadgroups, local memory, barriers, and eventually
 // MMA intrinsics.
 //
-// tile_build_from_scalar creates
-//   TILE_LOOP_NEST(TILE_STORE(TILE_SCALAR_BODY(value_id)), TILE_AXIS...)
-// or, for scalar reducers,
-//   TILE_LOOP_NEST(TILE_STORE(TILE_REDUCE(TILE_SCALAR_BODY(value_id))), ...)
-// from a KernelEntry's scalar_uops[] + KpSchedule.  Slice 8 session 5
-// retired the dedicated matmul seeding path; matmul shape facts now
-// flow through ke->cached_lift.store_root via
-// uop_dag_classify_matmul_shape.
-// Dispatch consumes tile_uops only on opt-in tile paths; default
-// execution still follows the scalar/KProgOp routes.
+// The scalar-arena TILE_LOOP_NEST seeder (tile_build_from_scalar) and
+// its TILE_AXIS helpers have been deleted; ke->tile_uops is populated
+// only by tile_lower_reduce_broadcast in the reduce-broadcast unit
+// test.  Slice 8 session 5 had already retired the dedicated matmul
+// seeding path; matmul shape facts now flow through
+// ke->cached_lift.store_root via uop_dag_classify_matmul_shape.
+// Dispatch in production routes through the lifter-based path.
 // Memory memory scope constants.  Used by TILE_AXIS.memory_scope,
 // TILE_LOCAL_ALLOC.scope, and TILE_BARRIER.scope.  Default 0 = global
 // (device memory) so legacy zero-valued packings still mean
@@ -1324,7 +1321,10 @@ typedef struct KernelEntry {
   u32        scalar_uops_cap;
 
   // Tile-level schedule/memory plan above scalar_uops.  NULL until
-  // tile_build_from_scalar (or a future tile planner) populates it.
+  // a future tile planner populates it (the scalar-arena seeder has
+  // been deleted; only the reduce-broadcast unit test in
+  // test_tile_reduce_broadcast.c builds tile_uops via
+  // tile_lower_reduce_broadcast for its own coverage).
   // Slot 0 is TILE_NONE; live ops occupy [1, n_tile_uops).
   // Owned by the KernelEntry; freed by kernel_free_arrays.
   TileUop   *tile_uops;
@@ -2231,11 +2231,9 @@ fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
 // log).  Mirrors the writer trio (axes_default_for +
 // axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
 // number of axes written; 0 on overflow / unknown opt class.  Used by
-// tile_emit_axes_from_kernel_signals as the source of TILE_AXIS leaf
-// kax_type values and by axes_resolve_kax_type as the single read
-// point.  Wedge 8 retired the legacy `axis_types[]` fallback once the
-// last 2 hand-write tests in test_tile_graph migrated to the writer
-// trio.
+// axes_resolve_kax_type as the single read point.  Wedge 8 retired
+// the legacy `axis_types[]` fallback once the last 2 hand-write tests
+// in test_tile_graph migrated to the writer trio.
 fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                 u32 cap);
 
@@ -2437,11 +2435,10 @@ int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
 // Slice 8 session 5: tile_analyze_gemm + tile_collect_mma_plan retired
 // (KProgOp-side matmul recognisers).  Matmul shape facts flow through
 // uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
-// Seed a TILE_LOOP_NEST(TILE_STORE(...)) plan from scalar_uops + KpSchedule.
-// Returns 1 on success, 0 when scalar_uops is absent or malformed.
-fn int  tile_build_from_scalar(struct KernelEntry *ke);
-// Rebuild only when the cached tile plan is missing, invalid, or was
-// built against an older KpSchedule version.
+// tile_build_from_scalar (scalar-arena TILE_LOOP_NEST seeder) deleted;
+// dispatch consumers route through the lifter-based path instead.
+// tile_sync_from_scalar is a no-op stub that returns 0; callers handle
+// the failure by routing through the lifter-based dispatch shape.
 fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);

@@ -1275,92 +1275,6 @@ static u32 tile_find_scalar_bufferize(KernelEntry const *ke) {
   return 0;
 }
 
-// E9-prep wedge 4+8: emit TILE_AXIS leaves from a signal-derived
-// `axis_types[]` simulation (output_shape + tail-reduce + scalar-reduce
-// + applied_opts) instead of reading `ke->schedule->axis_types[]`
-// directly.  See `axes_compute_axis_types` for the simulation contract;
-// it mirrors the writer trio (axes_default_for +
-// axes_ensure_scalar_reduce + axes_apply_opt) by construction.
-//
-// Renamed from `tile_emit_axes_from_kernel_axes` to reflect the new
-// source of axis_type values.
-//
-// E9 session 3: extents now come from `axes_compute_full_shape` (the
-// signal-replay resolver), matching the kax_type derivation.  Both
-// reads consult the same applied_opts log + output_shape signals;
-// `ke->schedule->full_shape[]` is no longer touched here.  The function
-// still calls `axes_default_for(ke)` to materialize the writer-side
-// shape when uninitialised (the resolver speaks against ke->schedule,
-// which the writer trio populates).
-static u32 tile_emit_axes_from_kernel_signals(KernelEntry *ke, u32 *out,
-                                              u32 cap) {
-  if (ke->schedule == NULL) {
-    return 0;
-  }
-  if (axes_resolve_n_axes(ke) == 0) {
-    axes_default_for(ke);
-  }
-  u32 n_axes = axes_resolve_n_axes(ke);
-  if (n_axes == 0 || n_axes > cap) {
-    return 0;
-  }
-
-  u8 types[MAX_AXES] = {0};
-  u32 n_types = axes_compute_axis_types(ke, types, MAX_AXES);
-  if (n_types == 0 || n_types != n_axes) {
-    return 0;
-  }
-  u32 extents[MAX_AXES] = {0};
-  u32 n_ext = axes_compute_full_shape(ke, extents, MAX_AXES);
-  if (n_ext == 0 || n_ext != n_axes) {
-    return 0;
-  }
-
-  for (u32 i = 0; i < n_axes; i++) {
-    TileAxisInfo info = {
-      .kax_type     = types[i],
-      .extent       = extents[i],
-      .memory_scope = 0,
-      .vector_width = 0,
-    };
-    out[i] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(info));
-  }
-  return n_axes;
-}
-
-static u32 tile_emit_axes_from_scalar_root(KernelEntry *ke, u32 root,
-                                           u32 *out, u32 cap) {
-  ScalarUop const *buf = &ke->scalar_uops[root];
-  if (buf->op != S_BUFFERIZE || buf->src_count == 0) {
-    return 0;
-  }
-  u32 n_axes = (u32)buf->src_count - 1;
-  if (n_axes == 0 || n_axes > cap) {
-    return 0;
-  }
-
-  for (u32 i = 0; i < n_axes; i++) {
-    u32 rid = buf->src[1 + i];
-    if (rid == 0 || rid >= ke->n_scalar_uops) {
-      return 0;
-    }
-    ScalarUop const *r = &ke->scalar_uops[rid];
-    if (r->op != S_RANGE) {
-      return 0;
-    }
-    u32 scalar_axis = (u32)((r->extra >> 32) & 0xFFFFFFFFu);
-    u32 extent      = (u32)(r->extra & 0xFFFFFFFFu);
-    TileAxisInfo info = {
-      .kax_type     = tile_axis_from_scalar_axis(scalar_axis),
-      .extent       = extent,
-      .memory_scope = 0,
-      .vector_width = 0,
-    };
-    out[i] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(info));
-  }
-  return n_axes;
-}
-
 // Phase D3: detect the reduce-broadcast pattern in a kernel's scalar
 // program.  A kernel is reduce-broadcast if it has at least one
 // S_REDUCE_SUM/MAX whose result feeds a non-store-direct consumer
@@ -1416,10 +1330,9 @@ fn u32 tile_analyze_reduce_broadcast(KernelEntry const *ke) {
 // `reduce_scalar_id` is the S_REDUCE_* slot returned by
 // tile_analyze_reduce_broadcast.  The lowering wires the scalar
 // reduce body into TILE_REDUCE and the post-reduce scalar tail
-// into TILE_SCALAR_BODY.  No renderer reads this yet; Phase F's
-// render_metal.c rewrite is the first consumer.  Returns 0 on
-// failure (caller falls back to tile_build_from_scalar's default
-// shape).
+// into TILE_SCALAR_BODY.  Returns the TILE_STORE id on success or 0
+// on failure.  Exercised directly from test_tile_reduce_broadcast;
+// no production caller wraps it in a TILE_LOOP_NEST.
 fn u32 tile_lower_reduce_broadcast(KernelEntry *ke, u32 reduce_scalar_id,
                                    u32 reduce_groups) {
   if (ke == NULL || reduce_scalar_id == 0
@@ -1458,141 +1371,11 @@ fn u32 tile_lower_reduce_broadcast(KernelEntry *ke, u32 reduce_scalar_id,
   return tile_store;
 }
 
-fn int tile_build_from_scalar(KernelEntry *ke) {
-  u32 root = tile_find_scalar_bufferize(ke);
-  if (root == 0) {
-    return 0;
-  }
-  if (ke->scalar_uops[root].src_count == 0) {
-    return 0;
-  }
-
-  // Phase D3: opt-in path -- when THVM_TILE_REDUCE_BROADCAST=1 and
-  // the analyzer matches, build the explicit reduce-broadcast shape
-  // (TILE_BLOCK preamble) instead of the default wrap.  Renderer
-  // doesn't yet read TILE_BLOCK (Phase F work), so this stays opt-in
-  // until F lands.  Gated env-var lets D3 ship and be exercised by
-  // unit tests without breaking the existing dispatch path.
-  if (getenv("THVM_TILE_REDUCE_BROADCAST")) {
-    u32 reduce_id = tile_analyze_reduce_broadcast(ke);
-    if (reduce_id != 0) {
-      tile_free(ke);
-      u32 store = tile_lower_reduce_broadcast(ke, reduce_id, /*groups=*/32);
-      if (store != 0) {
-        u32 axes[MAX_AXES];
-        u32 n_axes = tile_emit_axes_from_kernel_signals(ke, axes, MAX_AXES);
-        if (n_axes == 0) n_axes = tile_emit_axes_from_scalar_root(ke, root,
-                                                                  axes,
-                                                                  MAX_AXES);
-        if (n_axes != 0) {
-          u32 src[TILE_MAX_SRC] = {store};
-          for (u32 i = 0; i < n_axes; i++) src[1 + i] = axes[i];
-          ke->tile_root = tile_emit(ke, TILE_LOOP_NEST,
-                                    ke->scalar_uops[root].dtype,
-                                    (u8)(1 + n_axes), src, 0);
-          if (tile_validate(ke)) {
-            ke->tile_axes_hash = tile_axes_hash(ke);
-            return 1;
-          }
-        }
-        tile_free(ke);
-      }
-      // Fall through to default lowering on any failure.
-    }
-  }
-  u32 scalar_store = ke->scalar_uops[root].src[0];
-  if (scalar_store == 0 || scalar_store >= ke->n_scalar_uops
-      || ke->scalar_uops[scalar_store].op != S_STORE
-      || ke->scalar_uops[scalar_store].src_count < 2) {
-    return 0;
-  }
-  u32 scalar_value = ke->scalar_uops[scalar_store].src[1];
-  if (scalar_value == 0 || scalar_value >= ke->n_scalar_uops) {
-    return 0;
-  }
-  u32 scalar_body_value = scalar_value;
-  int has_reduce = 0;
-  if (ke->scalar_uops[scalar_value].op == S_REDUCE_SUM
-      || ke->scalar_uops[scalar_value].op == S_REDUCE_MAX) {
-    if (ke->scalar_uops[scalar_value].src_count < 2
-        || ke->scalar_uops[scalar_value].src[0] == 0
-        || ke->scalar_uops[scalar_value].src[0] >= ke->n_scalar_uops) {
-      return 0;
-    }
-    scalar_body_value = ke->scalar_uops[scalar_value].src[0];
-    has_reduce = 1;
-  }
-
-  tile_free(ke);
-
-  u32 body = tile_emit_leaf(ke, TILE_SCALAR_BODY,
-                            ke->scalar_uops[scalar_body_value].dtype,
-                            scalar_body_value);
-  u32 store_value = body;
-  if (has_reduce) {
-    u32 reduce_src[1] = {body};
-    store_value = tile_emit(ke, TILE_REDUCE,
-                            ke->scalar_uops[scalar_value].dtype,
-                            1, reduce_src, scalar_value);
-  }
-  u32 store_src[1] = {store_value};
-  u32 store = tile_emit(ke, TILE_STORE, ke->scalar_uops[scalar_store].dtype,
-                        1, store_src, scalar_store);
-  u32 axes[MAX_AXES];
-  u32 n_axes = tile_emit_axes_from_kernel_signals(ke, axes, MAX_AXES);
-  if (n_axes == 0) {
-    n_axes = tile_emit_axes_from_scalar_root(ke, root, axes, MAX_AXES);
-  }
-  if (n_axes == 0) {
-    tile_free(ke);
-    return 0;
-  }
-
-  u32 src[TILE_MAX_SRC] = {store};
-  for (u32 i = 0; i < n_axes; i++) {
-    src[1 + i] = axes[i];
-  }
-  ke->tile_root = tile_emit(ke, TILE_LOOP_NEST, ke->scalar_uops[root].dtype,
-                            (u8)(1 + n_axes), src, 0);
-  if (!tile_validate(ke)) {
-    tile_free(ke);
-    return 0;
-  }
-  ke->tile_axes_hash = tile_axes_hash(ke);
-  return 1;
-}
-
+// tile_build_from_scalar deleted: callers (render_metal, materialize,
+// autotune) now route exclusively through the lifter-based dispatch
+// shape.  tile_sync_from_scalar is a no-op stub kept so those callers
+// can stay as-is; it returns 0 unconditionally.
 fn int tile_sync_from_scalar(KernelEntry *ke) {
-  if (ke == NULL) {
-    return 0;
-  }
-  // Phase F prep: DUMP_TILE_IR=1 prints the tile-IR after each
-  // sync.  Useful for debugging D3/D4 lowering and the eventual
-  // renderer rewrite.
-  int dump_after = getenv("DUMP_TILE_IR") != NULL;
-  (void)dump_after;
-  u64 axes_hash = tile_axes_hash(ke);
-  if (ke->tile_uops != NULL && ke->tile_axes_hash == axes_hash
-      && tile_validate(ke)) {
-    return 1;
-  }
-  // THVM_TILE_FROM_SCALAR=1 keeps the legacy scalar-arena tile
-  // builder.  Default OFF: callers (render_metal, materialize,
-  // autotune) handle return 0 by falling back to the lifter-based
-  // dispatch shape (output_numel, 256 threadgroup).  The 8-suite
-  // run does not exercise the scalar-arena tile path and Metal
-  // dispatch correctness is preserved under the fallback.
-  char const *e = getenv("THVM_TILE_FROM_SCALAR");
-  if (e == NULL || e[0] != '1') return 0;
-  if (ke->scalar_uops == NULL) {
-    return 0;
-  }
-  // Slice 8 session 5: tile_build_mma_from_gemm retired along with
-  // tile_analyze_gemm.  Matmul shape facts are consumed downstream
-  // from the lifted UOp DAG via uop_dag_classify_matmul_shape.
-  int ok = tile_build_from_scalar(ke);
-  if (ok && dump_after) {
-    tile_dump(ke, stderr);
-  }
-  return ok;
+  (void)ke;
+  return 0;
 }
