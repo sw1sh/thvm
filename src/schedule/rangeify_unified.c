@@ -3,17 +3,14 @@
 // 1-to-1 port of tinygrad/schedule/indexing.py:run_rangeify (lines
 // 148-269) + pm_apply_rangeify (lines 101-110).
 //
-// The unified pass replaces the named-rule bufferize_classify +
-// materialize.c visit() + kernel_lift trio with one imperative
-// reverse-topological walk that:
+// The unified pass is the only rangeify path; it replaces the
+// named-rule bufferize_classify + materialize.c visit() + kernel_lift
+// trio with one imperative reverse-topological walk that:
 //   - assigns per-axis RANGE expressions to every node in the DAG
 //   - decides realize boundaries by looking at the consumer ranges
 //     (consumer-divergence, ending-ranges, REDUCE/EXPAND injection)
 //   - emits a rewrite map that pm_apply_rangeify uses to replace each
 //     node's src with the appropriate BUFFERIZE/INDEX expression
-//
-// Gated behind THVM_UNIFIED_RANGEIFY (env var, default 1).
-// THVM_UNIFIED_RANGEIFY=0 keeps the OLD path alive for bisects.
 //
 // THVM-SIDE DATA STRUCTURES vs TINYGRAD:
 //
