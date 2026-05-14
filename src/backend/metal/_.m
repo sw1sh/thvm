@@ -1218,24 +1218,21 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   //     tile_sync_from_scalar inside cg_tile_metal_dispatch_shape) and
   //     it bakes the literal output_shape.dims, so it both makes the
   //     hash unstable across a dispatch AND varies per BS.  The MSL
-  //     source itself comes from kernel_lift_to_uop over scalar_uops,
-  //     not tile_uops, so dropping tile_uops here doesn't lose any
+  //     source comes from render_uop over cached_lift.store_root, not
+  //     tile_uops, so dropping tile_uops here doesn't lose any
   //     MSL-determining content.
   //   - input/output numels (below).
   //
-  // The scalar_uops byte-hash ALREADY captures S_RANGE.extra (which
-  // encodes the var_id in the low 31 bits with bit 31 set), so two
-  // symbolic kernels at different BS values share that contribution.
+  // The UOp DAG (cached_lift.store_root) Term hash captures S_RANGE
+  // var_ids via kvar_collect_from_dag, so symbolic kernels at
+  // different BS values still share the same UOp identity.
   u32 used_vars[KVAR_USED_CAP];
-  u32 n_vars = kvar_collect_from_scalar(ke->scalar_uops, ke->n_scalar_uops,
-                                        used_vars, KVAR_USED_CAP);
+  u32 n_vars = kvar_collect_from_dag(ke->cached_lift.store_root,
+                                     used_vars, KVAR_USED_CAP);
   int is_symbolic = (n_vars > 0);
-  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
-    u8 const *bytes = (u8 const *)ke->scalar_uops;
-    size_t total = (size_t)ke->n_scalar_uops * sizeof(ScalarUop);
-    for (size_t i = 0; i < total; i++) {
-      h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
-    }
+  if (ke->cached_lift.store_root != 0) {
+    u64 root_bits = (u64)ke->cached_lift.store_root;
+    h ^= root_bits; h *= 0x100000001b3ULL;
   }
   if (!is_symbolic && ke->tile_uops != NULL && ke->n_tile_uops > 0) {
     u8 const *bytes = (u8 const *)ke->tile_uops;
@@ -1437,9 +1434,8 @@ static int metal_tile_jit_encode(KernelEntry *ke,
   // case static upper bound).
   {
     u32 used_vars[KVAR_USED_CAP];
-    u32 n_vars = kvar_collect_from_scalar(ke->scalar_uops,
-                                          ke->n_scalar_uops,
-                                          used_vars, KVAR_USED_CAP);
+    u32 n_vars = kvar_collect_from_dag(ke->cached_lift.store_root,
+                                       used_vars, KVAR_USED_CAP);
     u32 base = 1 + ke->n_inputs + (is_conv ? 1u : 0u);
     for (u32 i = 0; i < n_vars; i++) {
       u32 v = kernel_kvar_value(ke, used_vars[i]);
