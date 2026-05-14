@@ -372,4 +372,96 @@ If[ ! TMultiTraceQ[],
         {True, True},
         TestID -> "TMultiTrace + TMultiwayGraph on TGrad[2 x, x] -- UOP DAG"
     ];
+
+    (* === Branchial graph has NO self-loops even when a slice
+       contains duplicate canonical leaves.  Picks the user's
+       lam[x, x + 10][sup{1,2,3}] case where, post DUP_NUM, the
+       slice walker re-discovers the same canonical leaves through
+       both sibling projections; duplicates must collapse to a
+       single multiway vertex, not an UndirectedEdge[k, k]. *)
+    VerificationTest[
+        TInit[];
+        Block[{steps, g, edges},
+            steps = TMultiTrace[TLam[x, x + 10][TSup[{1, 2, 3}]]];
+            g = TMultiwayGraph[steps, "Branchial" -> True];
+            edges = EdgeList[g];
+            AllTrue[edges, e |-> First[e] =!= Last[e]]
+        ],
+        True,
+        TestID -> "TMultiwayGraph[..., Branchial -> True] has no self-loops on duplicate-canonical slices"
+    ];
+
+    (* === Per-step diagrams stay structurally connected through every
+       reduction.  Building a wire-incidence graph over each step's
+       SubDiagrams must yield a single connected component; otherwise
+       a DUP / SUP / OP2 floated free of the rest of the picture. *)
+    VerificationTest[
+        TInit[];
+        Block[{steps, comp},
+            steps = TMultiTrace[TLam[x, x + 10][TSup[{1, 2, 3}]], All];
+            comp = Function[d, Block[{
+                subs, nodes, nodeWires, allWires, edges
+            },
+                subs = d["SubDiagrams"];
+                nodes = Range[Length[subs]];
+                nodeWires = Map[
+                    i |-> Join[
+                        Through[subs[[i]]["InputPorts"]["Name"]],
+                        Through[subs[[i]]["OutputPorts"]["Name"]]],
+                    nodes];
+                allWires = DeleteDuplicates @ Flatten[nodeWires];
+                edges = DeleteDuplicates @ Catenate @ Map[
+                    w |-> Block[{ns = Select[nodes, MemberQ[nodeWires[[#]], w] &]},
+                        If[ Length[ns] >= 2,
+                            Map[Sort, Subsets[ns, {2}]],
+                            {}]],
+                    allWires];
+                Length @ ConnectedComponents[
+                    Graph[nodes, UndirectedEdge @@@ edges]]
+            ]];
+            comp /@ steps[[All, "Diagram"]]
+        ],
+        ConstantArray[1, 9],
+        TestID -> "TMultiTrace per-step diagrams stay connected for lam[x, x+10][sup{1,2,3}]"
+    ];
+
+    (* === Each OP2_SUP fires a NEW DUP into the picture; that new
+       DUP must be wired: 1 input port (the duped value), 2 output
+       ports (the projections), and BOTH projections consumed by
+       fresh OP2 nodes in the same step's diagram.  Locks in the
+       structural shape of the OP2_SUP commute. *)
+    VerificationTest[
+        TInit[];
+        Block[{steps, dupIO},
+            steps = TMultiTrace[TLam[x, x + 10][TSup[{1, 2, 3}]], All];
+            dupIO = Function[d, Block[{dups, outs, allIns},
+                dups = Select[d["SubDiagrams"],
+                    StringStartsQ[
+                        Replace[ReleaseHold @ #["HoldExpression"], {
+                            Column[{n_, ___}, ___] :> n,
+                            s_String :> s}],
+                        "DUP"] &];
+                allIns = Catenate @ Map[
+                    sd |-> Through[sd["InputPorts"]["Name"]],
+                    d["SubDiagrams"]];
+                Map[
+                    dup |-> Block[{
+                        ins = Through[dup["InputPorts"]["Name"]],
+                        ous = Through[dup["OutputPorts"]["Name"]]},
+                        {Length[ins], Length[ous],
+                         AllTrue[ous, MemberQ[allIns, #] &]}],
+                    dups]
+            ]];
+            (* Step 3: first OP2_SUP -- one new DUP, 1-in 2-out, both
+               projections consumed.  Step 4: second OP2_SUP -- two
+               DUPs present, both 1-in 2-out, all projections used. *)
+            {dupIO[steps[[3]]["Diagram"]],
+             dupIO[steps[[4]]["Diagram"]]}
+        ],
+        {
+            {{1, 2, True}},
+            {{1, 2, True}, {1, 2, True}}
+        },
+        TestID -> "OP2_SUP introduces fully-wired DUPs (1-in/2-out, both projections consumed)"
+    ];
 ]

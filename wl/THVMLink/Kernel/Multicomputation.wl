@@ -615,18 +615,21 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
             ", "],
         edges
     ];
-    (* Optional branchial clique inside each multi-leaf slice. *)
+    (* Optional branchial clique inside each multi-leaf slice.
+       Dedupe within-slice first: two leaves whose canonical forms
+       coincide are the same multiway vertex (no self-loop edge). *)
     branchial = If[
         TrueQ[OptionValue["Branchial"]]
         ,
         DeleteDuplicates @ Catenate @
             Map[
-                s |-> If[ Length[s] >= 2,
-                    Map[
-                        pair |-> UndirectedEdge @@ pair,
-                        DeleteDuplicates[Map[Sort, Subsets[s, {2}]]]],
-                    {}
-                ],
+                s |-> Block[{u = DeleteDuplicates[s]},
+                    If[ Length[u] >= 2,
+                        Map[
+                            pair |-> UndirectedEdge @@ pair,
+                            Subsets[u, {2}]],
+                        {}
+                    ]],
                 sliceKeys
             ]
         ,
