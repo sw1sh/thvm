@@ -2588,12 +2588,27 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // diverge.
     if (rangeify_direct_enabled() && getenv("THVM_LIFT_BUFFERIZE_TRACE")) {
       Term ru_root = rangeify_unified_store_root_at(idx);
-      if (ru_root != 0 && ru_root != ke->cached_lift.store_root) {
+      Term l_root  = ke->cached_lift.store_root;
+      if (ru_root != 0 && ru_root != l_root) {
+        Term l_buf   = uop_store_buf  (l_root);
+        Term l_addr  = uop_store_addr (l_root);
+        Term l_value = uop_store_value(l_root);
+        Term r_buf   = uop_store_buf  (ru_root);
+        Term r_addr  = uop_store_addr (ru_root);
+        Term r_value = uop_store_value(ru_root);
+        char const *which =
+            (l_buf   != r_buf)   ? "buf"   :
+            (l_addr  != r_addr)  ? "addr"  :
+            (l_value != r_value) ? "value" : "shape";
         fprintf(stderr,
-                "THVM_LIFT_BUFFERIZE_MISMATCH kid=%u lift=%016llx unified=%016llx\n",
-                kid,
-                (unsigned long long)ke->cached_lift.store_root,
-                (unsigned long long)ru_root);
+                "THVM_LIFT_BUFFERIZE_MISMATCH kid=%u diverges=%s "
+                "lift_buf=%016llx unified_buf=%016llx "
+                "lift_addr=%016llx unified_addr=%016llx "
+                "lift_value=%016llx unified_value=%016llx\n",
+                kid, which,
+                (unsigned long long)l_buf,  (unsigned long long)r_buf,
+                (unsigned long long)l_addr, (unsigned long long)r_addr,
+                (unsigned long long)l_value, (unsigned long long)r_value);
       }
     }
     // E9-prep wedge 1: post-lift UPatRule pass.  Composes the four
