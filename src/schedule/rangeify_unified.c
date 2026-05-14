@@ -870,38 +870,36 @@ fn Term rangeify_unified_store_root_at(u32 node_idx) {
   return RU_STORE_ROOT[node_idx];
 }
 
-// Builds the "INDEX expression" Term that a consumer references when it
-// reads this node. Mirrors tinygrad's
-//   `new_src = new_src.index(*ctx.range_map[x][0])`
-// We model `.index(*r)` as a chain of UOP_INDEX_E.addr over an IADD-tree
-// of (range_i * stride_i) -- tinygrad's INDEX is multi-arg but the
-// downstream stride-collapse simplification yields the same scalar.
-static Term ru_build_index_addr(RuRangeMap const *rm) {
-  if (rm->out_ndim == 0) return uop_const(DT_INT32, 0);
-  // Row-major: addr = r[0]*prod(d[1..]) + r[1]*prod(d[2..]) + ... + r[n-1].
-  // Range extents live at field 2 of each UOP_RANGE heap node.  Strides
-  // are computed innermost-first.
+// Build a row-major linear addr Term from an array of UOP_RANGE leaves.
+// Strides come from each range's extent (heap field 2); the result is
+//   r[0]*prod(d[1..]) + r[1]*prod(d[2..]) + ... + r[n-1].
+// Used both for the OUTPUT addr (rm->out_rngs) when threading a producer
+// into its consumer, and for the BODY/INPUT addr (rm->in_rngs) when
+// wrapping TAG_TEN leaves under a REDUCE (whose body iterates over
+// out_rngs + the injected reduce range).
+static Term ru_build_addr_from_ranges(Term const *rngs, u8 ndim) {
+  if (ndim == 0) return uop_const(DT_INT32, 0);
   u32 dims[RU_MAX_AXES] = {0};
-  for (u8 a = 0; a < rm->out_ndim; a++) {
-    Term r = rm->out_rngs[a];
+  for (u8 a = 0; a < ndim; a++) {
+    Term r = rngs[a];
     if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
       // Fallback: flat IADD if any range isn't a recognisable extent.
-      Term acc = rm->out_rngs[0];
-      for (u8 b = 1; b < rm->out_ndim; b++) {
-        acc = uop_int_binary(UOP_IADD, acc, rm->out_rngs[b]);
+      Term acc = rngs[0];
+      for (u8 b = 1; b < ndim; b++) {
+        acc = uop_int_binary(UOP_IADD, acc, rngs[b]);
       }
       return acc;
     }
     dims[a] = (u32)term_val(heap_read(term_val(r) + 2));
   }
   u32 strides[RU_MAX_AXES] = {0};
-  strides[rm->out_ndim - 1] = 1;
-  for (i8 a = (i8)rm->out_ndim - 2; a >= 0; a--) {
+  strides[ndim - 1] = 1;
+  for (i8 a = (i8)ndim - 2; a >= 0; a--) {
     strides[a] = strides[a + 1] * dims[a + 1];
   }
   Term acc = 0;
-  for (u8 a = 0; a < rm->out_ndim; a++) {
-    Term term = rm->out_rngs[a];
+  for (u8 a = 0; a < ndim; a++) {
+    Term term = rngs[a];
     if (strides[a] != 1) {
       term = uop_int_binary(UOP_IMUL, term,
                             uop_const(DT_INT32, strides[a]));
@@ -909,6 +907,24 @@ static Term ru_build_index_addr(RuRangeMap const *rm) {
     acc = (acc == 0) ? term : uop_int_binary(UOP_IADD, acc, term);
   }
   return acc != 0 ? acc : uop_const(DT_INT32, 0);
+}
+
+// Builds the "INDEX expression" Term that a consumer references when it
+// reads this node. Mirrors tinygrad's
+//   `new_src = new_src.index(*ctx.range_map[x][0])`
+// We model `.index(*r)` as a chain of UOP_INDEX_E.addr over an IADD-tree
+// of (range_i * stride_i) -- tinygrad's INDEX is multi-arg but the
+// downstream stride-collapse simplification yields the same scalar.
+static Term ru_build_index_addr(RuRangeMap const *rm) {
+  return ru_build_addr_from_ranges(rm->out_rngs, rm->out_ndim);
+}
+
+// Body/input addr: includes the reduce range (and any movement-op
+// swizzle). For non-REDUCE nodes this is identical to the output addr
+// because in_rngs == out_rngs; for REDUCE the reduce range was injected
+// at raxis in run_rangeify_unified's UOP_REDUCE branch.
+static Term ru_build_input_addr(RuRangeMap const *rm) {
+  return ru_build_addr_from_ranges(rm->in_rngs, rm->in_ndim);
 }
 
 // Count of UOP_BUFFERIZE nodes emitted on the main heap by the most
@@ -944,12 +960,21 @@ static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
 }
 
 // Rebuild the producer Term at (loc, op) by REWRITING each child slot:
-//   - child has RU_SUBST[child_idx] != 0  ->  use RU_SUBST[child_idx]
-//   - child is a leaf tensor (TAG_TEN)    ->  wrap with uop_index_e(child, addr)
+//   - child has RU_SUBST[child_idx] != 0
+//       -> if RU_SUBST is a UOP_BUFFERIZE, wrap with uop_index_e(BUFFERIZE, in_addr)
+//          so the load happens at THIS consumer's iter (mirrors tinygrad
+//          indexing.py:78 -- BUFFERIZE.index(*consumer_ranges)).
+//       -> otherwise (non-realized producer's rewritten value) splice in
+//          as-is; its TAG_TEN leaves were already wrapped at its own iter.
+//   - child is a leaf tensor (TAG_TEN)    ->  wrap with uop_index_e(child, in_addr)
 //   - everything else (atoms, passthroughs)  ->  keep
+// in_addr is the addr at which TAG_TEN/BUFFERIZE INPUTS are loaded at
+// THIS op's iteration -- for elementwise it matches the op's own
+// out-addr, for REDUCE it must include the reduce range (built from
+// rm->in_rngs).
 // Mirror: tinygrad/schedule/indexing.py:create_bufferize_and_index_based_on_ranges
 // (lines 56-81), `new_srcs` accumulation loop + final `x.replace(src=tns)`.
-static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term my_addr) {
+static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr) {
   u8 ar = uop_arity(op);
   if (ar == 0) return self;
   Term srcs[MAX_UOP_SRC] = {0};
@@ -962,10 +987,16 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term my_addr) {
     if (ctag == TAG_UOP) {
       u32 cidx = bufferize_info_find(term_val(resolved));
       if (cidx != 0xFFFFFFFFu && RU_SUBST[cidx] != 0) {
-        new_child = RU_SUBST[cidx];
+        Term sub = RU_SUBST[cidx];
+        // BUFFERIZE substitute (realized producer): re-index at OUR iter.
+        if (term_tag(sub) == TAG_UOP && term_ext(sub) == UOP_BUFFERIZE) {
+          new_child = uop_index_e(sub, in_addr);
+        } else {
+          new_child = sub;
+        }
       }
     } else if (ctag == TAG_TEN) {
-      new_child = uop_index_e(resolved, my_addr);
+      new_child = uop_index_e(resolved, in_addr);
     }
     srcs[i] = new_child;
     if (new_child != old_child) changed = 1;
@@ -1014,8 +1045,16 @@ fn void pm_apply_rangeify(Term root) {
       // realized-producer references.  RU_SUBST keeps using `self` (the
       // ORIGINAL op Term) because downstream materialize.c consumers
       // resolve through it via term_resolve / heap_read identity.
+      // my_addr is the OUTPUT addr (uop_store(buf, my_addr, value)).
+      // in_addr threads INPUT (TAG_TEN / cross-realize BUFFERIZE) loads
+      // at this op's INPUT iter: REDUCE injects the reduce range, and
+      // movement ops (EXPAND, PAD, SHRINK, PERMUTE, FLIP) swizzle axes
+      // so a stride-0 broadcast axis becomes CONST(0). Built from
+      // rm->in_rngs uniformly; the elementwise case is the identity
+      // in_rngs == out_rngs and falls through to the same shape.
       Term my_addr   = ru_build_index_addr(rm);
-      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, my_addr);
+      Term in_addr   = ru_build_input_addr(rm);
+      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
       Term closed_ranges[MAX_DIM];
       u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
       // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
@@ -1049,17 +1088,26 @@ fn void pm_apply_rangeify(Term root) {
           RU_STORE_ROOT[i] = uop_store(out_buf, my_addr, rewritten);
         }
       }
-      // The consumer-side INDEX expression now references the
-      // BUFFERIZE node, mirroring indexing.py:78
-      //   `new_src = new_src.index(*[r for ... if i in realized_ranges])`.
-      RU_SUBST[i] = uop_index_e(b, my_addr);
+      // RU_SUBST holds the bare BUFFERIZE; ru_rewrite_subtree wraps
+      // each downstream consumer with uop_index_e(BUFFERIZE, consumer_in_addr)
+      // so cross-realize loads use the CONSUMER's iter (mirrors
+      // tinygrad/schedule/indexing.py:78 `BUFFERIZE.index(*consumer_ranges)`).
+      // The pre-wrapped `uop_index_e(b, my_addr)` form would pin reads to
+      // the PRODUCER's range axis_id -- correct only when consumer and
+      // producer share the same RANGE Term, which fails when both are
+      // realized (each minted a fresh range at lines 621-622).
+      RU_SUBST[i] = b;
     } else {
       // Mirror indexing.py:107 (passthrough INDEX without BUFFERIZE wrap).
-      // The consumer reads the producer's source directly under the
-      // producer's in_rngs.  We re-use the node Term as a placeholder
-      // for inspection.
-      Term addr = ru_build_index_addr(rm);
-      RU_SUBST[i] = uop_index_e(self, addr);
+      // The consumer threads our VALUE EXPRESSION at the current iter.
+      // RU_SUBST is the REWRITTEN subtree: TAG_TEN children are wrapped
+      // with INDEX_E at the input addr (in_rngs for REDUCE, out_rngs
+      // otherwise), and downstream producer RU_SUBSTs are spliced in.
+      // The consumer's own ru_rewrite_subtree then plugs this in
+      // verbatim (its TAG_UOP child branch hits our RU_SUBST entry).
+      Term in_addr   = ru_build_input_addr(rm);
+      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
+      RU_SUBST[i] = rewritten;
     }
 
     // Mirror indexing.py:98-99 (remove_movement_op_after_rangeify):
