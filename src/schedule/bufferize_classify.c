@@ -761,6 +761,74 @@ fn void bufferize_classify(Term root) {
         }
       }
     }
+    // Softmax-style REDUCE unmark: a REDUCE whose every consumer chain
+    // bottoms out at EXPAND through scalar-preserving hops is the
+    // broadcast-back-to-vector pattern (softmax sum, BN-mean, mean/N
+    // -- see bufferize_reduce_consumer_is_broadcast_chain for the
+    // exact chain shape). Tinygrad's pm_generate_realize_map only
+    // realizes REDUCEs whose ranges include AxisType.OUTER; thvm has
+    // no OUTER axis tag, so we approximate the same predicate
+    // structurally here: drop the REDUCE seed for chains that re-broadcast
+    // through EXPAND, leaving the unified pass's REDUCE-via-RANGE
+    // expansion + render_uop's _accN accumulator hoist to fuse them
+    // inline. Skip when the absorbing kernel root is itself a REDUCE
+    // (rangeify_try_lower_elementwise bails > 1 REDUCE per kernel) and
+    // honour the per-boundary unmark cap so BN-train backward's
+    // sibling-REDUCE branches don't all collapse into one kernel.
+    // Mirror context: tinygrad/schedule/indexing.py:31 (REDUCE realize
+    // predicate). The chain-walk + tile-cap + per-boundary cap helpers
+    // (bufferize_reduce_consumer_is_broadcast_chain,
+    // bufferize_absorbing_boundary,
+    // bufferize_softmax_reduce_tile_cap_enabled,
+    // bufferize_reduce_fuse_multi_enabled) stay as-is.
+    int tile_cap_on = bufferize_softmax_reduce_tile_cap_enabled();
+    int fuse_multi_on = bufferize_reduce_fuse_multi_enabled();
+    if (fuse_multi_on || bufferize_reduce_count() == 1) {
+      u64 abs_locs[1024];
+      u32 abs_unmark_count[1024];
+      u32 n_abs = 0;
+      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+        UOpInfo *info = &BUFFERIZE_NODES[i];
+        if (info->op != UOP_REDUCE) continue;
+        if (!info->realized) continue;
+        if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
+        if (!bufferize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+        u64 abs_loc = 0;
+        if (tile_cap_on) {
+          abs_loc = bufferize_absorbing_boundary(info->loc, 16);
+          if (abs_loc != 0) {
+            u32 abs_idx = bufferize_info_find(abs_loc);
+            if (abs_idx != 0xFFFFFFFFu
+                && BUFFERIZE_NODES[abs_idx].op == UOP_REDUCE) {
+              continue;
+            }
+          }
+          if (abs_loc != 0) {
+            u32 slot = 0xFFFFFFFFu;
+            for (u32 k = 0; k < n_abs; k++) {
+              if (abs_locs[k] == abs_loc) { slot = k; break; }
+            }
+            if (slot == 0xFFFFFFFFu) {
+              if (n_abs < (sizeof abs_locs) / sizeof abs_locs[0]) {
+                slot = n_abs++;
+                abs_locs[slot] = abs_loc;
+                abs_unmark_count[slot] = 0;
+              }
+            }
+            u32 cap_limit = (u32)-1;
+            char const *_cap_e = getenv("THVM_REDUCE_UNMARK_CAP");
+            if (_cap_e != NULL && _cap_e[0] >= '0' && _cap_e[0] <= '9') {
+              cap_limit = (u32)(_cap_e[0] - '0');
+            }
+            if (slot != 0xFFFFFFFFu && abs_unmark_count[slot] >= cap_limit) {
+              continue;
+            }
+            if (slot != 0xFFFFFFFFu) abs_unmark_count[slot]++;
+          }
+        }
+        bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
+      }
+    }
     bufferize_seed_from_nodes(root);
     // The unified walk writes RU_RANGE_MAP / RU_REALIZE_MAP and the
     // main-heap UOP_BUFFERIZE Terms (one per realize boundary).
@@ -772,35 +840,6 @@ fn void bufferize_classify(Term root) {
     // (run_rangeify_unified.c:493-560); RU_BUFFERIZE_TERM != 0 means
     // "kernel boundary".
     bufferize_classify_project_unified();
-    // The unified pass's consumer-divergence + ending-ranges machinery
-    // + the chain-guards above already encode most of the realize-set
-    // tinygrad would emit.  inline-softmax-broadcast-reduce stays as
-    // the one keep -- the unified pass doesn't yet sharpen the softmax
-    // max -> exp -> sum fusion into 2 kernels (fusion_count test 1/8
-    // regresses without this).
-    RealizeRewriteRule direct_rules[] = {
-      {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
-    };
-    bufferize_rewrite_apply(root, direct_rules,
-        (u32)(sizeof(direct_rules) / sizeof(direct_rules[0])));
-    // Re-run pm_apply_rangeify so RU_BUFFERIZE_TERM / RU_STORE_ROOT /
-    // RU_SUBST observe the post-prune realize set. Without this rerun,
-    // realized consumers' store-root DAGs still reference BUFFERIZE Terms
-    // for producers whose realized bit was cleared by the prune rules
-    // (e.g. inline-softmax-broadcast-reduce). The unified-bypass walker
-    // (materialize.c:unified_rewrite_buffer_for_bufferize) then fails to
-    // map those stale BUFFERIZE leaves to any kernel-input slot and
-    // cpu_uop_walk's uwalk_resolve_buf inst-zero fallback silently aliases
-    // them to the output buffer, producing NaN / garbage in dispatch.
-    //
-    // Only the THVM_LIFT_FROM_UNIFIED bypass observes RU_STORE_ROOT; the
-    // default cached_lift path is unaffected (its kernel_lift_to_uop walk
-    // never sees these BUFFERIZE Terms because it lifts the per-kernel
-    // scalar arena, which is already inlined).
-    if (getenv("THVM_LIFT_FROM_UNIFIED")) {
-      rangeify_unified_resync_realize_from_nodes();
-      pm_apply_rangeify(root);
-    }
     bufferize_finalize_stores(root);
     return;
   }
