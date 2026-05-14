@@ -766,14 +766,13 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
     }
   }
 
-  // Slice 8 (conv2d-flat session): prefer the DAG-side structural gate
-  // when the lifter has populated `cached_lift.store_root`.  Under
-  // default `THVM_PHASE_C7_FREE_PROGRAM=1` the program[] array is freed
-  // post-materialize, so the legacy `last->opcode == UOP_REDUCE` check
-  // would always early-bail (program == NULL) for production conv
-  // kernels.  Falling back to the program[] reader covers the
-  // lift-decline path AND the test fixtures in test_tile_graph.c that
-  // hand-build KProgOp without running the lifter.
+  // Prefer the DAG-side structural gate when the lifter has
+  // populated cached_lift.store_root.  Under default
+  // THVM_PHASE_C7_FREE_PROGRAM=1 program[] is freed post-materialize,
+  // so the program[] reader would early-bail (program == NULL) for
+  // production conv kernels.  The program[] fallback covers the
+  // lift-decline path AND test_tile_graph fixtures that hand-build
+  // KProgOp without running the lifter.
   if (ke->cached_lift.store_root != 0) {
     if (!uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root, ke)) {
       return 0;

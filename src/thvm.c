@@ -169,10 +169,9 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // === backend/cpu/ ===
 // Order: init defines CPU_BUFS + CPU_BUFS_NEXT first, then the buf_*
 // helpers reference them, then the scalar / tile interpreters, and
-// finally _.c assembles the Backend vtable.  The legacy per-op
-// dispatch (cpu_interpret + cpu/op/*.c) was deleted in the F6
-// cleanup wedge -- the UOp DAG walker (uop_walk.c) covers every
-// kernel shape the surgical suite produces.
+// finally _.c assembles the Backend vtable.  The UOp DAG walker
+// (uop_walk.c) is the sole dispatch path; per-op interpreters are
+// gone.
 #include "backend/cpu/init.c"
 #include "backend/cpu/buf_freelist.c"   // needed by buf_alloc.c
 #include "backend/cpu/buf_alloc.c"

@@ -272,7 +272,7 @@ int main(void) {
   // unchanged (no OPT wrap installed).
   CHECK_EQ(uop_recognise_tc(stC), stC);
 
-  // === Slice 8 session 3: DOT classifier coverage ===
+  // === DOT classifier coverage ===
   TEST_BEGIN("recognise-tc/dot-classifier-positive");
   {
     // Build STORE(C{1}, 0, REDUCE_SUM(MUL(INDEX_E(A, k), INDEX_E(B, k)))).
@@ -306,7 +306,7 @@ int main(void) {
     CHECK_EQ(wf, 0);
   }
 
-  // === Slice 8 session 3: GEMV classifier coverage ===
+  // === GEMV classifier coverage ===
   TEST_BEGIN("recognise-tc/gemv-classifier-positive");
   {
     // Build STORE(c{M}, m, REDUCE_SUM(MUL(INDEX_E(W, m*K+k),
@@ -352,7 +352,7 @@ int main(void) {
     CHECK_EQ(wf2, 0);
   }
 
-  // === Slice 8 session 3: DAG-side shape extractor for DOT ===
+  // === DAG-side shape extractor for DOT ===
   TEST_BEGIN("recognise-tc/dag-classify-dot-shape");
   {
     KernelEntry ke = {0};
@@ -398,7 +398,7 @@ int main(void) {
     CHECK_EQ(ds2.K, 0xCAFEu);
   }
 
-  // === Slice 8 session 3: DAG-side shape extractor for GEMV ===
+  // === DAG-side shape extractor for GEMV ===
   TEST_BEGIN("recognise-tc/dag-classify-gemv-shape");
   {
     enum { GM2 = 16, GK2 = 24 };
@@ -461,7 +461,7 @@ int main(void) {
     CHECK_EQ(gs2.x_input, 1u);
   }
 
-  // === input_views-decouple session 2: addr-stride extractor ============
+  // === addr-stride extractor =============================================
   TEST_BEGIN("recognise-tc/extract-strides-matmul-A-non-trans");
   {
     // addr_A = IADD(IMUL(r_m, ICONST(K)), r_k)  -- non-transposed A

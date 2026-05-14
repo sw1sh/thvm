@@ -79,10 +79,10 @@ static u32 build_metal_tile_add_kernel(u32 extent, u32 groups, u32 threads,
   u32 root_src[2] = {sto, r0};
   rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, root_src, 0);
 
-  // E9-prep wedge 6: drive the axes through axes_default_for +
-  // kernel_apply_opt instead of hand-writing axis_types[].  Final
-  // shape: [GLOBAL=groups, LOCAL=threads] (or swapped).  Built from
-  // initial [LOOP=extent] via KOP_LOCAL(threads) + KOP_GLOBAL(groups)
+  // Drive the axes through axes_default_for + kernel_apply_opt
+  // instead of hand-writing axis_types[].  Final shape:
+  // [GLOBAL=groups, LOCAL=threads] (or swapped).  Built from initial
+  // [LOOP=extent] via KOP_LOCAL(threads) + KOP_GLOBAL(groups)
   // (+ KOP_SWAP for the local-first variant).
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = extent;
@@ -342,13 +342,11 @@ int main(void) {
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 mm_cpu, sizeof(mm_cpu));
     }
-    // Slice 8 probe: under default THVM_PHASE_C7_FREE_PROGRAM=1 the
-    // CPU matmul kernel must route through cblas_sgemm via the new
-    // DAG-side classifier (uop_dag_classify_matmul_shape), NOT through
-    // the legacy program[]-reading path (program[] is freed at
-    // materialize time).  Pre-Slice-8 this counter would be 0 and
-    // cpu_dispatch_kernel would fall through to render_uop_c -- a
-    // documented 30-100x perf regression.
+    // Under default THVM_PHASE_C7_FREE_PROGRAM=1 the CPU matmul
+    // kernel must route through cblas_sgemm via the DAG-side
+    // classifier (uop_dag_classify_matmul_shape).  If the dispatch
+    // falls through to render_uop_c there is a 30-100x perf cliff,
+    // so this counter doubles as a regression guard.
     CHECK(cpu_blas_gemm_dispatch_dag_count() > 0);
     thvm_free();
 
@@ -389,7 +387,7 @@ int main(void) {
     }
   }
 
-  // === Slice 8 session 3: DOT routes through cblas_sdot via DAG ===
+  // === DOT routes through cblas_sdot via DAG ===
   TEST_BEGIN("metal-real/dot-cpu-routes-through-cblas-via-dag");
   {
     enum { DK = 64 };
@@ -428,7 +426,7 @@ int main(void) {
     thvm_free();
   }
 
-  // === Slice 8 session 3: GEMV routes through cblas_sgemv via DAG ===
+  // === GEMV routes through cblas_sgemv via DAG ===
   TEST_BEGIN("metal-real/gemv-cpu-routes-through-cblas-via-dag");
   {
     enum { GM = 16, GK = 24 };

@@ -213,7 +213,7 @@ int main(void) {
   Term conv_inner = heap_read(term_val(conv_after_both) + 2);
   CHECK_EQ(uop_opt_kind(conv_inner), UOP_OPT_CONV);
 
-  // === input_views-decouple session 1: full-shape extractor =============
+  // === full-shape extractor ============================================
   // Build a representative single-input non-degenerate conv2d address
   // tree (mirrors kernel_lift_from_conv2d) and verify the extractor
   // recovers every shape field.  Two cases: batch=1 stride1, and
