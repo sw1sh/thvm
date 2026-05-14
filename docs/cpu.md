@@ -53,12 +53,13 @@ Compute paths:
   mirroring the traversal pattern of `cg_render_uop_kernel_c`
   without going through clang. Primary CPU compute path for any
   kernel the lifter accepts.
-- [interpret.c](../src/backend/cpu/interpret.c): rangeify
-  scalar-UOp recursive evaluator (`cpu_dispatch_scalar`) and the
-  env-gated `TileUop` interpreter (`cpu_dispatch_tile`). Holds
-  the `cpu_dispatch_kernel` entry point that pre-materializes
+- [interpret.c](../src/backend/cpu/interpret.c): holds the
+  `cpu_dispatch_kernel` entry point that pre-materializes
   non-contiguous + multi-view inputs into temp buffers before
-  running the dispatch ladder.
+  running the dispatch ladder. The legacy interpreters
+  (`cpu_interpret`, `cpu_dispatch_scalar`, `cpu_dispatch_tile`) have
+  all been deleted; the UOp DAG walker in `uop_walk.c` is the
+  primary compute path.
 - [blas.c](../src/backend/cpu/blas.c): pattern matcher. Recognizes
   the exact `KProgOp[]` shapes produced by `TDot`, `TMatVec`,
   `TMatMul` and routes them to `cblas_{s,d}{dot,gemv,gemm}`. Returns
@@ -80,20 +81,14 @@ through `Backend.dispatch_kernel`. The body lives at the bottom of
 1. Recover `kid = ke - KERNELS` and snapshot `t0 = cg_now_us()`.
 2. `cpu_blas_dispatch(ke, ...)` first. On a non-zero return, record
    the route via `cg_profile_record(kid, blas_kind, ...)` and stop.
-3. If `THVM_TILE=1`, try `cpu_dispatch_tile(ke, ...)` for the tile
-   interpreter. On a hit, record `KDISPATCH_CPU_TILE` and stop.
-4. If `THVM_CPU_UOP_WALK` is not set to `0`, call
+3. If `THVM_CPU_UOP_WALK` is not set to `0`, call
    `cpu_uop_walk(ke, ...)`. On success, record
    `KDISPATCH_INTERPRETER` and stop. The walker is the primary CPU
    compute path; the JIT below remains reachable when the walker
    declines.
-5. `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
+4. `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
    `KDISPATCH_JIT` and stop.
-6. If `ke->scalar_uops` exists, run `cpu_dispatch_scalar(ke, ...)`
-   and record `KDISPATCH_INTERPRETER`. The fallback that catches
-   patterns the walker declines.
-7. Otherwise return 0 with the same `KDISPATCH_INTERPRETER`
-   timestamp recorded.
+5. Otherwise return 0 with `KDISPATCH_INTERPRETER` recorded.
 
 Each path writes its elapsed wallclock through `cg_profile_record`
 (see [src/codegen/profile.c](../src/codegen/profile.c)) so per-kid

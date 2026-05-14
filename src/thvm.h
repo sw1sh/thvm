@@ -3273,7 +3273,7 @@ typedef enum {
   KDISPATCH_INTERPRETER = 5,   // CPU interpreter
   KDISPATCH_METAL_JIT   = 6,   // [retired in 88f536c3 -- metal_jit_encode deleted]
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (one encoder per KProgOp)
-  KDISPATCH_CPU_TILE    = 8,   // CPU TileUop path over ScalarUop
+  KDISPATCH_CPU_TILE    = 8,   // [retired -- cpu_dispatch_tile deleted; slot reserved]
   KDISPATCH_METAL_TILE  = 9,   // Metal: render_uop UOp-DAG -> MSL -> single-encoder dispatch
   KDISPATCH_METAL_GEMM  = 10,  // [retired in 4e30432b -- metal_try_gemm deleted]
   // 11 was KDISPATCH_METAL_CONV (retired; metal_try_conv2d_flat was a

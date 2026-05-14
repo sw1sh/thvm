@@ -17,16 +17,15 @@
 
 // cg_supports_tile / cg_supports_scalar / cg_emit_tile / cg_emit_scalar
 // lived in src/codegen/render_c_scalar.c, deleted as part of the
-// Phase G ScalarUop / TileUop C-renderer cull.  The corresponding
-// CPU JIT path (cpu_jit_dispatch_tile / cpu_jit_dispatch_scalar)
-// was deleted with it; cpu_dispatch_tile (the interpreter) survives
-// and run_tile_jit_1 below routes through it.  Tests that string-
-// matched the rendered C source are now vacuous on these stubs --
-// the live coverage they offered (matmul tile construction,
-// tile_analyze_gemm, dispatch-side metal-gemm-with-TC routing) was
-// retired with the deletion of the underlying KProgOp pattern
-// matchers in slice 8 session 5; the surviving coverage now lives in
-// `test_uop_recognise_tc.c` (DAG-side classifier) and
+// ScalarUop / TileUop C-renderer cull.  The corresponding CPU JIT
+// paths (cpu_jit_dispatch_tile / cpu_jit_dispatch_scalar) and the
+// CPU tile interpreter (cpu_dispatch_tile) have all been deleted.
+// Tests that string-matched the rendered C source are now vacuous on
+// these stubs -- the live coverage they offered (matmul tile
+// construction, tile_analyze_gemm, dispatch-side metal-gemm-with-TC
+// routing) was retired with the deletion of the underlying KProgOp
+// pattern matchers in slice 8 session 5; the surviving coverage now
+// lives in `test_uop_recognise_tc.c` (DAG-side classifier) and
 // `test_metal_real.c` (live cblas dispatcher integration).
 static int cg_supports_tile  (KernelEntry const *ke) { (void)ke; return 0; }
 static int cg_supports_scalar(KernelEntry const *ke) { (void)ke; return 0; }
@@ -88,28 +87,6 @@ static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
     s.dims[i] = dims[i];
   }
   return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
-}
-
-static void run_tile_jit_1(KernelEntry *ke, const void *input, u64 input_bytes,
-                           void *output, u64 output_bytes) {
-  u32 in_buf  = cpu_buf_alloc(input_bytes);
-  u32 out_buf = cpu_buf_alloc(output_bytes);
-  CHECK_EQ(cpu_buf_write(in_buf, input, input_bytes), 0);
-  CHECK_EQ(cpu_buf_write(out_buf, output, output_bytes), 0);
-  u32 in_bufs[1] = {in_buf};
-  cpu_jit_cache_reset();
-  // cpu_jit_dispatch_tile was deleted in the Phase G slice that
-  // removed render_c_scalar.c; fall through to cpu_dispatch_tile
-  // (the interpreter), which has the same signature and runs the
-  // same TileUop[] plan via the interpreter loop instead of clang.
-  int jit_hit = 0;
-  for (u32 attempt = 0; attempt < 3; attempt++) {
-    if (cpu_dispatch_tile(ke, in_bufs, out_buf)) {
-      jit_hit = 1;
-    }
-  }
-  CHECK(jit_hit);
-  CHECK_EQ(cpu_buf_read(out_buf, output, output_bytes), 0);
 }
 
 static u32 build_scalar_pad_graph(KernelEntry *ke) {
