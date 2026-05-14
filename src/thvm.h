@@ -2616,6 +2616,11 @@ fn Term rangeify_unified_subst_at              (u32 node_idx);
 // a boundary). Mirrors tinygrad's Ops.BUFFERIZE landing in the tsink at
 // indexing.py:77.
 fn Term rangeify_unified_bufferize_at          (u32 node_idx);
+// Main-heap UOP_STORE Term at this node's realize boundary (0 if not
+// a boundary or if dtype inference declined).  Structurally equivalent
+// to `cached_lift.store_root` from kernel_lift_to_uop; serves as the
+// substrate for the lifter-bypass cutover.
+fn Term rangeify_unified_store_root_at         (u32 node_idx);
 fn u32  rangeify_unified_last_bufferizes_emitted(void);
 // Reduce-ranges attached to a UOP_REDUCE node by the unified pass.
 // Mirrors tinygrad's `src=(value,)+tuple(new_ranges)` from

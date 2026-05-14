@@ -843,6 +843,13 @@ static Term RU_SUBST[RU_SUBST_CAP];
 // `UOp(Ops.BUFFERIZE, ..., src=(value,)+closed_ranges, arg=opts)`
 // landing in the tsink graph at the realize boundary.
 static Term RU_BUFFERIZE_TERM[RU_SUBST_CAP];
+// Main-heap UOP_STORE Term per realized node, structurally equivalent
+// to what `kernel_lift_to_uop` emits as `cached_lift.store_root`.
+// Built from the rewritten subtree + a fresh UOP_BUFFER sized by the
+// boundary's closed-range extents.  Zero if no boundary or if dtype
+// inference declined.  Consumed under THVM_LIFT_FROM_BUFFERIZE=1 by
+// materialize.c to bypass the legacy ScalarUop-arena walker.
+static Term RU_STORE_ROOT[RU_SUBST_CAP];
 
 fn Term rangeify_unified_subst_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
@@ -854,6 +861,13 @@ fn Term rangeify_unified_subst_at(u32 node_idx) {
 fn Term rangeify_unified_bufferize_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_BUFFERIZE_TERM[node_idx];
+}
+
+// Accessor for the UOP_STORE Term emitted at this node's realize
+// boundary, structurally equivalent to `cached_lift.store_root`.
+fn Term rangeify_unified_store_root_at(u32 node_idx) {
+  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
+  return RU_STORE_ROOT[node_idx];
 }
 
 // Builds the "INDEX expression" Term that a consumer references when it
@@ -944,6 +958,7 @@ fn void pm_apply_rangeify(Term root) {
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     RU_SUBST[i]           = 0;
     RU_BUFFERIZE_TERM[i]  = 0;
+    RU_STORE_ROOT[i]      = 0;
   }
   RU_LAST_BUFFERIZES_EMITTED = 0;
 
@@ -998,6 +1013,31 @@ fn void pm_apply_rangeify(Term root) {
                                  n_closed, closed_ranges);
       RU_BUFFERIZE_TERM[i] = b;
       RU_LAST_BUFFERIZES_EMITTED++;
+      // Mirror kernel_lift_to_uop's `out->store_root`: assemble a
+      // UOP_STORE(out_buf, addr, value) where out_buf is shaped by
+      // the n_closed RANGE extents and dtype comes from the
+      // rewritten value.  Only emit if dtype is recoverable; the
+      // legacy lifter remains the fallback otherwise.
+      u32 store_dtype = 0;
+      if (n_closed > 0 && n_closed <= MAX_DIM
+          && term_dtype_in(rewritten, 0, &store_dtype)
+          && store_dtype != 0) {
+        u32 dims[MAX_DIM] = {0};
+        int dims_ok = 1;
+        for (u32 d = 0; d < n_closed; d++) {
+          Term r = closed_ranges[d];
+          if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
+            dims_ok = 0; break;
+          }
+          dims[d] = (u32)term_val(heap_read(term_val(r) + 2));
+          if (dims[d] == 0) { dims_ok = 0; break; }
+        }
+        if (dims_ok) {
+          Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, store_dtype,
+                                         n_closed, dims, 0);
+          RU_STORE_ROOT[i] = uop_store(out_buf, my_addr, rewritten);
+        }
+      }
       // The consumer-side INDEX expression now references the
       // BUFFERIZE node, mirroring indexing.py:78
       //   `new_src = new_src.index(*[r for ... if i in realized_ranges])`.

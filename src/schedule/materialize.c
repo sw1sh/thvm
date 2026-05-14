@@ -2580,6 +2580,22 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // the root.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
     ke->compute_root = ke->cached_lift.store_root;
+    // Identity check: rangeify_unified_store_root_at(idx) is the
+    // unified-pass UOP_STORE for this boundary (when rangeify_direct
+    // and dtype inference succeeded).  Under THVM_LIFT_BUFFERIZE_TRACE=1
+    // emit a stderr line on every mismatch so the eventual lifter
+    // bypass has a clear bisect signal for which kernel shapes still
+    // diverge.
+    if (rangeify_direct_enabled() && getenv("THVM_LIFT_BUFFERIZE_TRACE")) {
+      Term ru_root = rangeify_unified_store_root_at(idx);
+      if (ru_root != 0 && ru_root != ke->cached_lift.store_root) {
+        fprintf(stderr,
+                "THVM_LIFT_BUFFERIZE_MISMATCH kid=%u lift=%016llx unified=%016llx\n",
+                kid,
+                (unsigned long long)ke->cached_lift.store_root,
+                (unsigned long long)ru_root);
+      }
+    }
     // E9-prep wedge 1: post-lift UPatRule pass.  Composes the four
     // E2/E3/E4-E6/E7 entries into one DAG walk that re-stamps every
     // UOP_RANGE leaf's axis_type from applied_opts[].  In the default
