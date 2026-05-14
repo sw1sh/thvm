@@ -406,6 +406,154 @@ static int rangeify_direct_enabled(void) {
   return e == NULL || e[0] != '0';
 }
 
+// THVM_LIFT_FROM_UNIFIED=1 helper.  The unified-pass store_root carries
+// TAG_TEN leaves (wrapped inside UOP_INDEX_E.buffer slots; see
+// ru_rewrite_subtree in rangeify_unified.c).  The legacy kernel_lift
+// path replaces those tensor handles with hash-consed UOP_BUFFER nodes
+// keyed by (slot+1) instance disambiguator, and cpu_uop_walk binds the
+// kernel's runtime input table to UOP_BUFFER leaves matched by that
+// same instance number.  Substitute every TAG_TEN whose tid appears in
+// ke->input_tids[] with the matching UOP_BUFFER so the unified subtree
+// becomes structurally compatible with the walker's identity binding.
+// Mirror source: kernel_lift.c:1540-1558 lift_input_buffer.
+
+#define UNIFIED_REWRITE_MEMO_CAP 4096
+typedef struct {
+  Term key;
+  Term value;
+} UnifiedRewriteMemoSlot;
+
+typedef struct {
+  KernelEntry const     *ke;
+  UnifiedRewriteMemoSlot memo[UNIFIED_REWRITE_MEMO_CAP];
+  u32                    memo_used;
+} UnifiedRewriteState;
+
+static u32 unified_rewrite_hash(Term t) {
+  u64 x = t;
+  x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
+  x ^= x >> 33;
+  return (u32)x & (UNIFIED_REWRITE_MEMO_CAP - 1);
+}
+
+static int unified_rewrite_memo_lookup(UnifiedRewriteState *st, Term key,
+                                       Term *out) {
+  u32 h = unified_rewrite_hash(key);
+  for (u32 p = 0; p < UNIFIED_REWRITE_MEMO_CAP; p++) {
+    u32 i = (h + p) & (UNIFIED_REWRITE_MEMO_CAP - 1);
+    if (st->memo[i].key == 0) return 0;
+    if (st->memo[i].key == key) { *out = st->memo[i].value; return 1; }
+  }
+  return 0;
+}
+
+static void unified_rewrite_memo_insert(UnifiedRewriteState *st, Term key,
+                                        Term value) {
+  if (st->memo_used * 2 >= UNIFIED_REWRITE_MEMO_CAP) return;
+  u32 h = unified_rewrite_hash(key);
+  for (u32 p = 0; p < UNIFIED_REWRITE_MEMO_CAP; p++) {
+    u32 i = (h + p) & (UNIFIED_REWRITE_MEMO_CAP - 1);
+    if (st->memo[i].key == 0) {
+      st->memo[i].key = key;
+      st->memo[i].value = value;
+      st->memo_used++;
+      return;
+    }
+    if (st->memo[i].key == key) {
+      st->memo[i].value = value;
+      return;
+    }
+  }
+}
+
+// Build the UOP_BUFFER replacement for a TAG_TEN leaf if `tid` is an
+// input slot in `ke`.  Returns 0 when no match (caller keeps the
+// original TAG_TEN; the unified pass may carry tensor handles that
+// aren't kernel inputs, e.g. constants or output backrefs).
+static Term unified_rewrite_buffer_for_tid(KernelEntry const *ke, u32 tid) {
+  if (tid == 0 || tid >= TENS_NEXT) return 0;
+  if (ke->input_tids == NULL) return 0;
+  for (u32 slot = 0; slot < ke->n_inputs; slot++) {
+    if (ke->input_tids[slot] != tid) continue;
+    u32 dtype = (ke->input_dtypes != NULL) ? ke->input_dtypes[slot] : DT_FP32;
+    TenDesc const *td = &TENS[tid];
+    return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype,
+                           td->view.shape.ndim, td->view.shape.dims,
+                           slot + 1);
+  }
+  return 0;
+}
+
+// Resolve a UOP_BUFFERIZE Term (an upstream realized boundary) back to
+// its producer tid via BOUNDARY_BUFFERIZE_TERM[] / BOUNDARY_TID[], then
+// build the matching UOP_BUFFER for that input slot.  Returns 0 when
+// the bufferize doesn't correspond to one of this kernel's inputs (it
+// may be the kernel's own output bufferize, or a sibling boundary that
+// hasn't been wired through input_tids[]).
+static Term unified_rewrite_buffer_for_bufferize(KernelEntry const *ke,
+                                                 Term buf) {
+  for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
+    if (BOUNDARY_BUFFERIZE_TERM[bi] != buf) continue;
+    u32 tid = BOUNDARY_TID[bi];
+    return unified_rewrite_buffer_for_tid(ke, tid);
+  }
+  return 0;
+}
+
+static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
+  if (depth > 256) return t;
+  Term resolved = term_resolve(t);
+  u8 tag = term_tag(resolved);
+  if (tag == TAG_TEN) {
+    Term repl = unified_rewrite_buffer_for_tid(st->ke, (u32)term_val(resolved));
+    return repl != 0 ? repl : resolved;
+  }
+  if (tag != TAG_UOP) return resolved;
+  if (term_ext(resolved) == UOP_KERNEL) return resolved;
+
+  // UOP_BUFFERIZE leaf: an upstream realized-boundary's output buffer.
+  // Replace with the kernel's input-slot UOP_BUFFER when the bufferize
+  // term maps to one of ke->input_tids[].  Treat as leaf (do not
+  // recurse into its src tree) so the consumer's INDEX expression
+  // reads against the BUFFER inst that cpu_uop_walk binds to in_ptrs[].
+  if (term_ext(resolved) == UOP_BUFFERIZE) {
+    Term repl = unified_rewrite_buffer_for_bufferize(st->ke, resolved);
+    return repl != 0 ? repl : resolved;
+  }
+
+  Term hit = 0;
+  if (unified_rewrite_memo_lookup(st, resolved, &hit)) return hit;
+
+  u8  op  = term_ext(resolved);
+  u64 loc = term_val(resolved);
+
+  u8 ar = uop_arity(op);
+  if (ar == 0) {
+    unified_rewrite_memo_insert(st, resolved, resolved);
+    return resolved;
+  }
+  Term srcs[MAX_UOP_SRC] = {0};
+  int changed = 0;
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old_child = heap_read(loc + i);
+    Term new_child = unified_rewrite_rec(st, old_child, depth + 1);
+    srcs[i] = new_child;
+    if (new_child != old_child) changed = 1;
+  }
+  Term out = changed ? uop_graph_rebuild_with_srcs(resolved, srcs) : resolved;
+  unified_rewrite_memo_insert(st, resolved, out);
+  return out;
+}
+
+static Term unified_store_root_for_walker(KernelEntry const *ke, Term root) {
+  if (root == 0 || ke == NULL) return root;
+  UnifiedRewriteState st;
+  memset(&st, 0, sizeof(st));
+  st.ke = ke;
+  return unified_rewrite_rec(&st, root, 0);
+}
+
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
@@ -2589,8 +2737,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
     if (rangeify_direct_enabled() && getenv("THVM_LIFT_FROM_UNIFIED")) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
-        ke->cached_lift.store_root = ru_root;
-        ke->compute_root           = ru_root;
+        Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
+        ke->cached_lift.store_root = ru_rewritten;
+        ke->compute_root           = ru_rewritten;
       }
     }
     // Identity check: rangeify_unified_store_root_at(idx) is the
