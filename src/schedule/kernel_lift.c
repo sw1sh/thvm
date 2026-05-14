@@ -823,7 +823,10 @@ compute_offset:;
   for (u32 d = 0; d < ndim; d++) {
     u32 r_sid = u->src[1 + d];
     Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
-    if (r_uop == 0) return 0;
+    if (r_uop == 0) {
+      lift_reject_log(ke, r_sid, "index/range-not-mapped");
+      return 0;
+    }
     i64 stride;
     if (have_view_strides) {
       stride = view_strides[d];
@@ -904,7 +907,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
                               LiftRangeMap const *ranges, u32 n_ranges,
                               Term out_buf, Term const *in_bufs,
                               u32 n_inputs) {
-  if (sid == 0 || sid >= ke->n_scalar_uops) return 0;
+  if (sid == 0 || sid >= ke->n_scalar_uops) {
+    lift_reject_log(ke, sid, "value/sid-oor");
+    return 0;
+  }
   ScalarUop const *u = &ke->scalar_uops[sid];
   switch (u->op) {
     case S_CONST: {
@@ -912,37 +918,61 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       return uop_const(u->dtype, bits);
     }
     case S_LOAD: case S_LOAD_RAW: {
-      if (u->src_count != 1) return 0;
+      if (u->src_count != 1) {
+        lift_reject_log(ke, sid, "value/load-src-count");
+        return 0;
+      }
       Term buf = 0;
       Term addr = lift_scalar_index(ke, u->src[0], ranges, n_ranges,
                                     out_buf, in_bufs, n_inputs, &buf);
-      if (addr == 0 || buf == 0) return 0;
+      if (addr == 0 || buf == 0) {
+        lift_reject_log(ke, sid, "value/load-addr-or-buf");
+        return 0;
+      }
       return uop_index_e(buf, addr);
     }
     case S_NEG: case S_RECIP: case S_EXP2:
     case S_LOG2: case S_SQRT: {
-      if (u->src_count != 1) return 0;
+      if (u->src_count != 1) {
+        lift_reject_log(ke, sid, "value/unary-src-count");
+        return 0;
+      }
       u32 op = lift_scalar_unary_op(u->op);
       Term src = lift_scalar_value(ke, u->src[0], ranges, n_ranges,
                                    out_buf, in_bufs, n_inputs);
-      if (src == 0) return 0;
+      if (src == 0) {
+        lift_reject_log(ke, sid, "value/unary-src-fail");
+        return 0;
+      }
       return uop_unary(op, src);
     }
     case S_ADD: case S_MUL: case S_CMPLT: case S_CMPEQ: {
-      if (u->src_count != 2) return 0;
+      if (u->src_count != 2) {
+        lift_reject_log(ke, sid, "value/binary-src-count");
+        return 0;
+      }
       u32 op = lift_scalar_binary_op(u->op);
       Term a = lift_scalar_value(ke, u->src[0], ranges, n_ranges,
                                  out_buf, in_bufs, n_inputs);
       Term b = lift_scalar_value(ke, u->src[1], ranges, n_ranges,
                                  out_buf, in_bufs, n_inputs);
-      if (a == 0 || b == 0) return 0;
+      if (a == 0 || b == 0) {
+        lift_reject_log(ke, sid, "value/binary-src-fail");
+        return 0;
+      }
       return uop_binary(op, a, b);
     }
     case S_REDUCE_SUM: case S_REDUCE_MAX: {
-      if (u->src_count < 1) return 0;
+      if (u->src_count < 1) {
+        lift_reject_log(ke, sid, "value/reduce-src-count");
+        return 0;
+      }
       Term body = lift_scalar_value(ke, u->src[0], ranges, n_ranges,
                                     out_buf, in_bufs, n_inputs);
-      if (body == 0) return 0;
+      if (body == 0) {
+        lift_reject_log(ke, sid, "value/reduce-body-fail");
+        return 0;
+      }
       // The reduce axis_id == the first range's axis_id (RANGE
       // ordering at BUFFERIZE matches semantic axis order).  Rangeify
       // emits exactly ONE reduce range per S_REDUCE (a multi-axis
@@ -950,9 +980,15 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // the body's load address composes the per-axis decomposition),
       // so a single uop_reduce here matches the renderer's
       // single-axis accumulator.
-      if (u->src_count < 2) return 0;
+      if (u->src_count < 2) {
+        lift_reject_log(ke, sid, "value/reduce-no-axis");
+        return 0;
+      }
       Term r_uop = lift_lookup_range(ranges, n_ranges, u->src[1]);
-      if (r_uop == 0) return 0;
+      if (r_uop == 0) {
+        lift_reject_log(ke, u->src[1], "value/reduce-range-not-mapped");
+        return 0;
+      }
       // See-through UOP_OPT(target=range, ...) to find the inner
       // UOP_RANGE: per-USE ranges may be wrapped in
       // UOP_OPT_GROUP_REDUCE for autotune-driven cooperative
@@ -963,6 +999,7 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
         inner = uop_opt_target(inner);
       }
       if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_RANGE) {
+        lift_reject_log(ke, u->src[1], "value/reduce-inner-not-range");
         return 0;
       }
       u32 axis_id = term_val(heap_read(term_val(inner) + 0));
@@ -989,10 +1026,16 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       return uop_reduce(kind, axis_id, body);
     }
     case S_CAST: {
-      if (u->src_count != 1) return 0;
+      if (u->src_count != 1) {
+        lift_reject_log(ke, sid, "value/cast-src-count");
+        return 0;
+      }
       Term src = lift_scalar_value(ke, u->src[0], ranges, n_ranges,
                                    out_buf, in_bufs, n_inputs);
-      if (src == 0) return 0;
+      if (src == 0) {
+        lift_reject_log(ke, sid, "value/cast-src-fail");
+        return 0;
+      }
       return uop_cast(src, u->dtype);
     }
     case S_RANGE: {
@@ -1008,10 +1051,19 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // begin offsets (4 axes at 16 bits each).  Lifter rewrites the
       // matching axis_uop entries to UOP_IADD(original, begin) so
       // body LOADs read the shifted source.
-      if (u->src_count < 2) return 0;
+      if (u->src_count < 2) {
+        lift_reject_log(ke, sid, "value/shrink-src-count");
+        return 0;
+      }
       u32 ndim = (u32)u->src_count - 1;
-      if (ndim > 4) return 0;
-      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      if (ndim > 4) {
+        lift_reject_log(ke, sid, "value/shrink-ndim");
+        return 0;
+      }
+      if (n_ranges > LIFT_RANGES_CAP) {
+        lift_reject_log(ke, sid, "value/shrink-ranges-cap");
+        return 0;
+      }
       LiftRangeMap shifted[LIFT_RANGES_CAP];
       u32 n_sh = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) shifted[i] = ranges[i];
@@ -1037,10 +1089,19 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // source, AND wraps the body's value in UOP_IWHERE guarded
       // against shifted_iter ∈ [0, src_dim).  Out-of-range reads
       // yield UOP_INVALID (renderer emits 0 / reduce identity).
-      if (u->src_count < 2) return 0;
+      if (u->src_count < 2) {
+        lift_reject_log(ke, sid, "value/pad-src-count");
+        return 0;
+      }
       u32 ndim = (u32)u->src_count - 1;
-      if (ndim > 4) return 0;
-      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      if (ndim > 4) {
+        lift_reject_log(ke, sid, "value/pad-ndim");
+        return 0;
+      }
+      if (n_ranges > LIFT_RANGES_CAP) {
+        lift_reject_log(ke, sid, "value/pad-ranges-cap");
+        return 0;
+      }
       LiftRangeMap shifted[LIFT_RANGES_CAP];
       u32 n_sh = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) shifted[i] = ranges[i];
@@ -1076,7 +1137,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       }
       Term body = lift_scalar_value(ke, u->src[0], shifted, n_sh,
                                     out_buf, in_bufs, n_inputs);
-      if (body == 0) return 0;
+      if (body == 0) {
+        lift_reject_log(ke, sid, "value/pad-body-fail");
+        return 0;
+      }
       if (cond_acc == 0) return body;
       return uop_iwhere(cond_acc, body, uop_invalid());
     }
@@ -1086,11 +1150,16 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // input iters set to (flat_idx / in_stride[d]) % in_extent[d]
       // where flat_idx = sum(out_iter[d] * out_stride[d]) and strides
       // are row-major over the respective extents.
-      if (u->src_count < 2) return 0;
+      if (u->src_count < 2) {
+        lift_reject_log(ke, sid, "value/reshape-v-src-count");
+        return 0;
+      }
       u32 n_out = (u32)(u->extra & 0xFFu);
       u32 n_in  = (u32)u->src_count - 1 - n_out;
-      if (n_out == 0 || n_in == 0 || n_out > MAX_DIM || n_in > MAX_DIM)
+      if (n_out == 0 || n_in == 0 || n_out > MAX_DIM || n_in > MAX_DIM) {
+        lift_reject_log(ke, sid, "value/reshape-v-rank-bad");
         return 0;
+      }
       // Read output iters (lift each via the existing range/expr path)
       // and their extents.  When the ref is an EXPRESSION (e.g. the
       // size-1 axis emitted as S_IMOD(S_ICONST(0), S_ICONST(1)) by
@@ -1105,7 +1174,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       u32  out_ext [MAX_DIM];
       for (u32 d = 0; d < n_out; d++) {
         u32 r_sid = u->src[1 + d];
-        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          lift_reject_log(ke, r_sid, "value/reshape-v-out-sid-oor");
+          return 0;
+        }
         ScalarUop const *ru = &ke->scalar_uops[r_sid];
         if (ru->op == S_RANGE) {
           out_iter[d] = lift_lookup_range(ranges, n_ranges, r_sid);
@@ -1116,8 +1188,14 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
                                           out_buf, in_bufs, n_inputs);
           out_ext [d] = scalar_ref_extent(ke, r_sid);
         }
-        if (out_iter[d] == 0) return 0;
-        if (out_ext [d] == 0) return 0;   // unknown extent -- bail
+        if (out_iter[d] == 0) {
+          lift_reject_log(ke, r_sid, "value/reshape-v-out-iter-fail");
+          return 0;
+        }
+        if (out_ext [d] == 0) {
+          lift_reject_log(ke, r_sid, "value/reshape-v-out-ext-unknown");
+          return 0;
+        }
       }
       // Compute flat_idx = sum(out_iter[d] * out_stride[d]).
       Term flat = 0;
@@ -1136,14 +1214,26 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       u32 in_sid[MAX_DIM];
       for (u32 d = 0; d < n_in; d++) {
         u32 r_sid = u->src[1 + n_out + d];
-        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          lift_reject_log(ke, r_sid, "value/reshape-v-in-sid-oor");
+          return 0;
+        }
         ScalarUop const *ru = &ke->scalar_uops[r_sid];
-        if (ru->op != S_RANGE) return 0;
+        if (ru->op != S_RANGE) {
+          lift_reject_log(ke, r_sid, "value/reshape-v-in-not-range");
+          return 0;
+        }
         in_sid[d] = r_sid;
         in_ext[d] = (u32)(ru->extra & 0xFFFFFFFFu);
-        if (in_ext[d] == 0) return 0;
+        if (in_ext[d] == 0) {
+          lift_reject_log(ke, r_sid, "value/reshape-v-in-ext-zero");
+          return 0;
+        }
       }
-      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      if (n_ranges > LIFT_RANGES_CAP) {
+        lift_reject_log(ke, sid, "value/reshape-v-ranges-cap");
+        return 0;
+      }
       LiftRangeMap reshaped[LIFT_RANGES_CAP];
       u32 n_re = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) reshaped[i] = ranges[i];
@@ -1181,11 +1271,20 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // (extent - 1 - iter) for axis d when evaluating the body.
       // Implemented by rebuilding the LiftRangeMap for the body so
       // matching range lookups return the flipped UOp expression.
-      if (u->src_count < 2) return 0;
+      if (u->src_count < 2) {
+        lift_reject_log(ke, sid, "value/flip-src-count");
+        return 0;
+      }
       u32 mask = (u32)u->extra;
       u32 ndim = (u32)u->src_count - 1;
-      if (ndim > MAX_DIM) return 0;
-      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      if (ndim > MAX_DIM) {
+        lift_reject_log(ke, sid, "value/flip-ndim");
+        return 0;
+      }
+      if (n_ranges > LIFT_RANGES_CAP) {
+        lift_reject_log(ke, sid, "value/flip-ranges-cap");
+        return 0;
+      }
       LiftRangeMap flipped[LIFT_RANGES_CAP];
       u32 n_flipped = 0;
       // Copy + override ranges that are in the flip bitmask.
@@ -1201,7 +1300,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
           if (flipped[i].scalar_id != r_sid) continue;
           Term r = flipped[i].axis_uop;
           u32 ext = term_val(heap_read(term_val(r) + 2));
-          if (ext == 0) return 0;
+          if (ext == 0) {
+            lift_reject_log(ke, r_sid, "value/flip-extent-zero");
+            return 0;
+          }
           Term ext_m1 = uop_const(DT_INT32, ext - 1);
           flipped[i].axis_uop = uop_int_binary(UOP_ISUB, ext_m1, r);
           break;
@@ -1222,9 +1324,15 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // Without this case, lenet-mnist bench-train falls back to
       // the legacy ScalarUop renderer for ~128 kernels per step
       // (lift_reject "value/unknown-op op=S_?(25)").
-      if (u->src_count < 2) return 0;
+      if (u->src_count < 2) {
+        lift_reject_log(ke, sid, "value/reshape-src-count");
+        return 0;
+      }
       u32 nrng = (u32)u->src_count - 1;
-      if (nrng > 4 || nrng > MAX_DIM) return 0;
+      if (nrng > 4 || nrng > MAX_DIM) {
+        lift_reject_log(ke, sid, "value/reshape-ndim");
+        return 0;
+      }
       u32 lo = (u32)(u->extra & 0xFFFFFFFFu);
       u32 hi = (u32)((u->extra >> 32) & 0xFFFFFFFFu);
       u32 out_dims[MAX_DIM] = {0};
@@ -1232,7 +1340,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       for (u32 d = 0; d < nrng; d++) {
         out_dims[d] = (lo >> (8 * d)) & 0xFFu;
         in_dims [d] = (hi >> (8 * d)) & 0xFFu;
-        if (out_dims[d] == 0 || in_dims[d] == 0) return 0;
+        if (out_dims[d] == 0 || in_dims[d] == 0) {
+          lift_reject_log(ke, sid, "value/reshape-dim-zero");
+          return 0;
+        }
       }
       // Out and in must have same numel for the reshape to compose.
       u32 out_numel = 1, in_numel = 1;
@@ -1240,17 +1351,29 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
         out_numel *= out_dims[d];
         in_numel  *= in_dims[d];
       }
-      if (out_numel != in_numel) return 0;
+      if (out_numel != in_numel) {
+        lift_reject_log(ke, sid, "value/reshape-numel-mismatch");
+        return 0;
+      }
       // Build out_iter from the shared ranges (each src[1+d] is a
       // shared S_RANGE; the existing range map gives its UOP iter).
       Term out_iter[MAX_DIM];
       for (u32 d = 0; d < nrng; d++) {
         u32 r_sid = u->src[1 + d];
-        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          lift_reject_log(ke, r_sid, "value/reshape-src-sid-oor");
+          return 0;
+        }
         ScalarUop const *ru = &ke->scalar_uops[r_sid];
-        if (ru->op != S_RANGE) return 0;
+        if (ru->op != S_RANGE) {
+          lift_reject_log(ke, r_sid, "value/reshape-src-not-range");
+          return 0;
+        }
         out_iter[d] = lift_lookup_range(ranges, n_ranges, r_sid);
-        if (out_iter[d] == 0) return 0;
+        if (out_iter[d] == 0) {
+          lift_reject_log(ke, r_sid, "value/reshape-out-iter-not-mapped");
+          return 0;
+        }
       }
       // flat_idx = sum(out_iter[d] * out_stride[d]) row-major.
       Term flat = 0;
@@ -1267,7 +1390,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // Decompose flat into per-dim in_iters and override the shared
       // range mapping so the body sees in_iter[d] for the same
       // scalar_id slot.
-      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      if (n_ranges > LIFT_RANGES_CAP) {
+        lift_reject_log(ke, sid, "value/reshape-ranges-cap");
+        return 0;
+      }
       LiftRangeMap reshaped[LIFT_RANGES_CAP];
       u32 n_re = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) reshaped[i] = ranges[i];
@@ -1289,7 +1415,10 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
           }
         }
         if (!found) {
-          if (n_re >= LIFT_RANGES_CAP) return 0;
+          if (n_re >= LIFT_RANGES_CAP) {
+            lift_reject_log(ke, sid, "value/reshape-ranges-cap-append");
+            return 0;
+          }
           reshaped[n_re].scalar_id = sid_d;
           reshaped[n_re].axis_uop  = iter_d;
           n_re++;
@@ -1310,7 +1439,9 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
           srm[i].scalar_id = ranges[i].scalar_id;
           srm[i].axis_uop  = ranges[i].axis_uop;
         }
-        return scalar_to_uop(ke, sid, srm, n);
+        Term r = scalar_to_uop(ke, sid, srm, n);
+        if (r == 0) lift_reject_log(ke, sid, "value/scalar-to-uop-fail");
+        return r;
       }
     default:
       lift_reject_log(ke, sid, "value/unknown-op");
@@ -1488,14 +1619,35 @@ static void lift_reject_log(KernelEntry const *ke, u32 sid,
 static int kernel_lift_from_conv2d(KernelEntry const *ke,
                                    KernelUopLift *out) {
   TileConv2DInfo conv;
-  if (!tile_analyze_conv2d_flat(ke, &conv)) return 0;
-  if (conv.batch == 0 || conv.h_out == 0 || conv.w_out == 0) return 0;
-  if (conv.spatial_patches == 0) return 0;
-  if (conv.w_input >= ke->n_inputs) return 0;
-  if (conv.patch_input_count == 0 && conv.x_input >= ke->n_inputs) return 0;
+  if (!tile_analyze_conv2d_flat(ke, &conv)) {
+    lift_reject_log(ke, 0, "conv2d/tile-analyze-fail");
+    return 0;
+  }
+  if (conv.batch == 0 || conv.h_out == 0 || conv.w_out == 0) {
+    lift_reject_log(ke, 0, "conv2d/zero-batch-or-out");
+    return 0;
+  }
+  if (conv.spatial_patches == 0) {
+    lift_reject_log(ke, 0, "conv2d/zero-spatial-patches");
+    return 0;
+  }
+  if (conv.w_input >= ke->n_inputs) {
+    lift_reject_log(ke, 0, "conv2d/w-input-oor");
+    return 0;
+  }
+  if (conv.patch_input_count == 0 && conv.x_input >= ke->n_inputs) {
+    lift_reject_log(ke, 0, "conv2d/x-input-oor");
+    return 0;
+  }
   if (conv.patch_input_count != 0
-      && (u64)conv.patch_input_base + conv.patch_input_count > ke->n_inputs) return 0;
-  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) return 0;
+      && (u64)conv.patch_input_base + conv.patch_input_count > ke->n_inputs) {
+    lift_reject_log(ke, 0, "conv2d/patch-input-range-oor");
+    return 0;
+  }
+  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
+    lift_reject_log(ke, 0, "conv2d/n-inputs-over-cap");
+    return 0;
+  }
 
   // Buffers.  Conv2d output is [c_out, patches].
   u32 dims_w[2] = { conv.c_out, conv.c_in * conv.kh * conv.kw };
@@ -1512,7 +1664,10 @@ static int kernel_lift_from_conv2d(KernelEntry const *ke,
 
   u32 patches = conv.patches;
   u32 KRED    = conv.c_in * conv.kh * conv.kw;
-  if (KRED == 0) return 0;
+  if (KRED == 0) {
+    lift_reject_log(ke, 0, "conv2d/zero-kred");
+    return 0;
+  }
 
   // Range axes.
   Term r_out = uop_range(0, 0 /*LOOP*/,   conv.c_out * patches);
@@ -1574,7 +1729,10 @@ static int kernel_lift_from_conv2d(KernelEntry const *ke,
     // Each pi has its own input slot + per-axis strides; address is
     // `pv->offset + bi * psb + oh * psh + ow * psw` (no ci/kh/kw --
     // those are encoded statically by which pi the q lands in).
-    if (ke->input_views == NULL) return 0;
+    if (ke->input_views == NULL) {
+      lift_reject_log(ke, 0, "conv2d/multi-input-no-views");
+      return 0;
+    }
     // Build bottom-up so the chain is right-leaning.
     ldX = uop_const(x_dt, 0);  // default for q out of range
     for (u32 pi = conv.patch_input_count; pi > 0; pi--) {
@@ -1684,12 +1842,21 @@ static int kprog_step_value(KernelEntry const *ke, u32 step,
     u32 raw = p->src[s];
     if (KSRC_IS_INPUT(raw)) {
       u32 idx = KSRC_INDEX(raw);
-      if (idx >= ke->n_inputs) return 0;
+      if (idx >= ke->n_inputs) {
+        lift_reject_log(ke, 0, "kprog-step/input-idx-oor");
+        return 0;
+      }
       src_vals[s] = uop_index_e(in_buf_terms[idx], addr);
     } else {
       u32 idx = KSRC_INDEX(raw);
-      if (idx >= step) return 0;          // forward refs not allowed
-      if (step_terms[idx] == 0) return 0;  // earlier step bailed
+      if (idx >= step) {
+        lift_reject_log(ke, 0, "kprog-step/forward-ref");
+        return 0;
+      }
+      if (step_terms[idx] == 0) {
+        lift_reject_log(ke, 0, "kprog-step/earlier-step-bailed");
+        return 0;
+      }
       src_vals[s] = step_terms[idx];
     }
   }
@@ -1701,6 +1868,7 @@ static int kprog_step_value(KernelEntry const *ke, u32 step,
     *out_value = uop_binary(p->opcode, src_vals[0], src_vals[1]);
     return 1;
   }
+  lift_reject_log(ke, 0, "kprog-step/unsupported-shape");
   return 0;
 }
 
@@ -1735,21 +1903,39 @@ static Term lift_extra_output_buffer(KernelEntry const *ke, u32 ei) {
 // uwalk_resolve_buf's term-identity match.
 static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
   if (ke->n_extra_outputs == 0) return 0;       // single-output uses other path
-  if (ke->n_ops == 0 || ke->program == NULL) return 0;
-  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) return 0;
+  if (ke->n_ops == 0 || ke->program == NULL) {
+    lift_reject_log(ke, 0, "kprog/empty-program");
+    return 0;
+  }
+  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
+    lift_reject_log(ke, 0, "kprog/n-inputs-over-cap");
+    return 0;
+  }
   // Validate that every op is in the supported elementwise + CONST set
   // and every output (primary + extras) shares numel == output_numel.
   // The merge planner only fuses kernels with identical iter shapes,
   // so the numel uniformity is a structural invariant we can rely on.
   u32 primary_numel = ke->output_numel;
-  if (primary_numel == 0) return 0;
+  if (primary_numel == 0) {
+    lift_reject_log(ke, 0, "kprog/zero-primary-numel");
+    return 0;
+  }
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp const *p = &ke->program[i];
-    if (!kprog_op_is_lift_supported(p->opcode)) return 0;
-    if (p->numel != 1 && p->numel != primary_numel) return 0;
+    if (!kprog_op_is_lift_supported(p->opcode)) {
+      lift_reject_log(ke, 0, "kprog/unsupported-opcode");
+      return 0;
+    }
+    if (p->numel != 1 && p->numel != primary_numel) {
+      lift_reject_log(ke, 0, "kprog/numel-mismatch");
+      return 0;
+    }
   }
   for (u32 ei = 0; ei < ke->n_extra_outputs; ei++) {
-    if (ke->extra_output_numels[ei] != primary_numel) return 0;
+    if (ke->extra_output_numels[ei] != primary_numel) {
+      lift_reject_log(ke, 0, "kprog/extra-output-numel-mismatch");
+      return 0;
+    }
   }
   // Build the output range (single LOOP axis over the flat numel).
   // Match the splice's flat layout: every elementwise op iterates
@@ -1761,7 +1947,10 @@ static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
   out->n_inputs = ke->n_inputs;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     Term in_buf = lift_input_buffer(ke, i);
-    if (in_buf == 0) return 0;
+    if (in_buf == 0) {
+      lift_reject_log(ke, 0, "kprog/in-buf-build-fail");
+      return 0;
+    }
     out->in_bufs[i] = in_buf;
   }
   // Build primary output buffer.  Reuse lift_output_buffer fallback
@@ -1779,20 +1968,30 @@ static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
                                      out_ndim, out_dims, 0);
   out->out_buf     = primary_buf;
   out->n_outputs   = 1u + ke->n_extra_outputs;
-  if (out->n_outputs > KERNEL_LIFT_MAX_OUTPUT) return 0;
+  if (out->n_outputs > KERNEL_LIFT_MAX_OUTPUT) {
+    lift_reject_log(ke, 0, "kprog/n-outputs-over-cap");
+    return 0;
+  }
   out->out_bufs[0] = primary_buf;
   for (u32 ei = 0; ei < ke->n_extra_outputs; ei++) {
     Term eb = lift_extra_output_buffer(ke, ei);
-    if (eb == 0) return 0;
+    if (eb == 0) {
+      lift_reject_log(ke, 0, "kprog/extra-out-buf-build-fail");
+      return 0;
+    }
     out->out_bufs[1 + ei] = eb;
   }
   // Walk program; cache each step's lifted UOp value Term.
   Term *step_terms = (Term *)calloc(ke->n_ops, sizeof(Term));
-  if (step_terms == NULL) return 0;
+  if (step_terms == NULL) {
+    lift_reject_log(ke, 0, "kprog/calloc-fail");
+    return 0;
+  }
   Term extra_stores[KERNEL_MAX_EXTRA_OUTPUTS] = {0};
   for (u32 step = 0; step < ke->n_ops; step++) {
     Term v = 0;
     if (!kprog_step_value(ke, step, step_terms, out->in_bufs, r_addr, &v)) {
+      lift_reject_log(ke, 0, "kprog/step-value-fail");
       free(step_terms);
       return 0;
     }
@@ -1801,6 +2000,7 @@ static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
     if (p->store_extra_plus_one > 0) {
       u32 ei = (u32)p->store_extra_plus_one - 1u;
       if (ei >= ke->n_extra_outputs) {
+        lift_reject_log(ke, 0, "kprog/store-extra-idx-oor");
         free(step_terms);
         return 0;
       }
@@ -1809,6 +2009,7 @@ static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
   }
   Term primary_value = step_terms[ke->n_ops - 1];
   if (primary_value == 0) {
+    lift_reject_log(ke, 0, "kprog/primary-value-zero");
     free(step_terms);
     return 0;
   }
@@ -1826,6 +2027,7 @@ static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
       // splice should have marked exactly one op per extra; if a slot
       // is unmarked the splice metadata is inconsistent -- bail rather
       // than emit a kernel that would silently leave the extra zero.
+      lift_reject_log(ke, 0, "kprog/extra-store-unset");
       return 0;
     }
     root = uop_after(root, extra_stores[ei]);
@@ -1923,7 +2125,10 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   }
   if (buf_sid == 0) { lift_reject_log(ke, 0, "entry/no-bufferize-root"); return 0; }
   ScalarUop const *bu = &ke->scalar_uops[buf_sid];
-  if (bu->src_count < 1) return 0;
+  if (bu->src_count < 1) {
+    lift_reject_log(ke, buf_sid, "entry/bufferize-src-count");
+    return 0;
+  }
 
   // Build LiftRangeMap from BUFFERIZE.src[1..n] (axis-id ordering)
   // PLUS every other S_RANGE leaf in the arena (per-USE ranges that
@@ -1971,7 +2176,10 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // axis_types per applied_opts.  Per-USE auxiliary S_RANGE leaves
   // (KOP_GROUP / KOP_GROUPTOP wraps) are still handled below.
   u32 n_buf = (u32)bu->src_count - 1;
-  if (n_buf > MAX_DIM) return 0;
+  if (n_buf > MAX_DIM) {
+    lift_reject_log(ke, buf_sid, "entry/bufferize-ndim");
+    return 0;
+  }
   LiftRangeMap ranges[LIFT_RANGES_CAP];
   u32 n_ranges = 0;
   // Pre-split origin_extent[i] / origin_axis_type[i] -- read once from
@@ -1983,9 +2191,15 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   u32 r_sids[MAX_DIM];
   for (u32 i = 0; i < n_buf; i++) {
     u32 r_sid = bu->src[1 + i];
-    if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
+    if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+      lift_reject_log(ke, r_sid, "entry/bufferize-range-sid-oor");
+      return 0;
+    }
     ScalarUop const *ru = &ke->scalar_uops[r_sid];
-    if (ru->op != S_RANGE) return 0;
+    if (ru->op != S_RANGE) {
+      lift_reject_log(ke, r_sid, "entry/bufferize-not-range");
+      return 0;
+    }
     r_sids[i] = r_sid;
     origin_axis_type[i] = (u32)(ru->extra >> 32) & 0xFFu;
     origin_extent[i]    = (u32)(ru->extra & 0xFFFFFFFFu);
@@ -2053,30 +2267,51 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   }
 
   // Build buffers.
-  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) return 0;
+  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
+    lift_reject_log(ke, 0, "entry/n-inputs-over-cap");
+    return 0;
+  }
   out->n_inputs = ke->n_inputs;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     Term in_buf = lift_input_buffer(ke, i);
-    if (in_buf == 0) return 0;
+    if (in_buf == 0) {
+      lift_reject_log(ke, 0, "entry/in-buf-build-fail");
+      return 0;
+    }
     out->in_bufs[i] = in_buf;
   }
   out->out_buf = lift_output_buffer(ke, ranges, n_ranges);
-  if (out->out_buf == 0) return 0;
+  if (out->out_buf == 0) {
+    lift_reject_log(ke, 0, "entry/out-buf-build-fail");
+    return 0;
+  }
 
   // Lift the body STORE.
   u32 store_sid = bu->src[0];
-  if (store_sid == 0 || store_sid >= ke->n_scalar_uops) return 0;
+  if (store_sid == 0 || store_sid >= ke->n_scalar_uops) {
+    lift_reject_log(ke, store_sid, "entry/store-sid-oor");
+    return 0;
+  }
   ScalarUop const *su = &ke->scalar_uops[store_sid];
-  if (su->op != S_STORE || su->src_count != 2) return 0;
+  if (su->op != S_STORE || su->src_count != 2) {
+    lift_reject_log(ke, store_sid, "entry/not-S_STORE");
+    return 0;
+  }
   Term ignored;
   Term addr = lift_scalar_index(ke, su->src[0], ranges, n_ranges,
                                 out->out_buf, out->in_bufs,
                                 out->n_inputs, &ignored);
-  if (addr == 0) return 0;
+  if (addr == 0) {
+    lift_reject_log(ke, su->src[0], "entry/store-addr-fail");
+    return 0;
+  }
   Term value = lift_scalar_value(ke, su->src[1], ranges, n_ranges,
                                  out->out_buf, out->in_bufs,
                                  out->n_inputs);
-  if (value == 0) return 0;
+  if (value == 0) {
+    lift_reject_log(ke, su->src[1], "entry/store-value-fail");
+    return 0;
+  }
   out->store_root = uop_store(out->out_buf, addr, value);
   return 1;
 }
