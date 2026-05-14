@@ -1406,7 +1406,6 @@ int main(void) {
   // n_extra was still 0, before this test injected the extra).  We
   // just check the dispatch succeeds.
   CHECK_EQ(cpu_dispatch_kernel(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
-  CHECK_EQ(cpu_dispatch_scalar(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), -1);
   CHECK_EQ(cpu_dispatch_tile  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   CHECK_EQ(cpu_blas_dispatch  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   // Clear the synthetic output so the kernel is single-output again

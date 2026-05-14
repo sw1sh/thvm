@@ -7,8 +7,6 @@
 // THVM_CPU_INTERPRET_TRACE hits remaining at deletion time.
 //
 // What stays here:
-//   - cpu_dispatch_scalar: rangeify scalar-UOp recursive evaluator
-//     (REDUCE / FLIP / PAD / SHRINK / packed nibbles / narrow FPs).
 //   - cpu_dispatch_tile:   TileUop interpreter (env-gated;
 //     correctness fallback until Phase G also collapses TileUop[]).
 //   - cpu_dispatch_kernel: the dispatch ladder itself.
@@ -159,7 +157,6 @@ static u64 scalar_load_typed(const void *p, u32 off, u32 dtype) {
 static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
   // Packed nibbles: read-modify-write the byte holding this nibble.
   // Note: NOT thread-safe across nibbles in the same byte; the
-  // cpu_dispatch_scalar outer loop is single-threaded today.
   if (dtype == DT_INT4 || dtype == DT_UINT4) {
     u8 *base = (u8 *)p;
     u8 *bp   = &base[off >> 1];
@@ -751,84 +748,6 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
 }
 
 
-fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (cg_kernel_has_extra_outputs(ke)) return -1;
-  if (ke->scalar_uops == NULL || ke->n_scalar_uops < 2) return -1;
-  // Find the S_BUFFERIZE root.  Its src[0] is the kernel's S_STORE.
-  u32 buf_id = 0;
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    if (ke->scalar_uops[i].op == S_BUFFERIZE) { buf_id = i; break; }
-  }
-  if (buf_id == 0) return -1;
-  u32 store_id = ke->scalar_uops[buf_id].src[0];
-  if (ke->scalar_uops[store_id].op != S_STORE) return -1;
-
-  // Collect LOOP ranges + their extents from the BUFFERIZE root.
-  // BUFFERIZE.src[0..n) = STORE then 1+n LOOP ranges in axis order.
-  ScalarUop *bu = &ke->scalar_uops[buf_id];
-  u32 n_loops = (u32)bu->src_count - 1;
-  if (n_loops > MAX_DIM) return -1;
-  u32 loop_ids    [MAX_DIM];
-  u32 loop_extents[MAX_DIM];
-  for (u32 d = 0; d < n_loops; d++) {
-    u32 r = bu->src[1 + d];
-    loop_ids    [d] = r;
-    loop_extents[d] = (u32)(ke->scalar_uops[r].extra & 0xFFFFFFFFu);
-  }
-
-  // Resolve raw input pointers.  We bailed at lower-time on non-
-  // contig inputs, so no view pre-mat is needed.
-  u32 n_inputs = ke->n_inputs;
-  void *in_ptrs_buf[n_inputs ? n_inputs : 1];
-  void **in_ptrs = in_ptrs_buf;
-  for (u32 i = 0; i < n_inputs; i++) {
-    in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
-  }
-
-  // Per-op iter slot.  Only S_RANGE op ids are read; reusing one
-  // u32 array indexed by op id keeps the dispatcher branch-free.
-  u32 *range_iter = (u32 *)calloc(ke->n_scalar_uops, sizeof(u32));
-  if (range_iter == NULL) return -1;
-
-  ScalarCtx ctx = {
-    .ke          = ke,
-    .in_ptrs     = in_ptrs,
-    .out_p       = CPU_BUFS[out_buf_id].data,
-    .range_iter  = range_iter,
-    .odtype      = ke->output_dtype,
-  };
-
-  // Outer LOOP nest: iterate every LOOP range.  For Phase B/C we
-  // support up to 3 LOOP dims; the BUFFERIZE captured them in
-  // canonical row-major order so we can iterate flat by k and
-  // decode strides.
-  u32 onum = ke->output_numel;
-  // Precompute the LOOP strides for k -> per-range-iter decoding.
-  u32 loop_strides[MAX_DIM] = {0};
-  if (n_loops > 0) {
-    loop_strides[n_loops - 1] = 1;
-    for (i32 d = (i32)n_loops - 2; d >= 0; d--)
-      loop_strides[d] = loop_strides[d + 1] * loop_extents[d + 1];
-  }
-  for (u32 k = 0; k < onum; k++) {
-    for (u32 d = 0; d < n_loops; d++) {
-      u32 ext = loop_extents[d];
-      u32 str = loop_strides[d];
-      range_iter[loop_ids[d]] = (str > 0) ? ((k / str) % ext) : 0;
-    }
-    // Evaluate the STORE: writes one element to out_p.  Address +
-    // value width are both dtype-aware via scalar_store_typed.
-    ScalarUop const *st = &ke->scalar_uops[store_id];
-    u64 idx_r   = eval_scalar(&ctx, st->src[0]);
-    u32 off     = (u32)(idx_r & 0xFFFFFFFFu);
-    u64 bits    = eval_scalar(&ctx, st->src[1]);
-    scalar_store_typed(ctx.out_p, off, ctx.odtype, bits);
-  }
-
-  free(range_iter);
-  return 0;
-}
-
 static int cpu_tile_enabled(void) {
   char const *e = getenv("THVM_TILE");
   return e != NULL && e[0] == '1';
@@ -1132,17 +1051,6 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;
-  }
-  // 5. Rangeify scalar-uops interpreter: the broad fallback that
-  //    handles patterns cpu_uop_walk declines (path 3) and that
-  //    cpu_jit_dispatch (path 4) bails on.  Telemetry on the
-  //    8-suite run shows path 5 fires ~19 times -- a real coverage
-  //    gap on path 3, not dead code.  Closing the gap is the
-  //    prerequisite for deleting the scalar interpreter.
-  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
-    int rc = cpu_dispatch_scalar(ke, in_buf_ids, out_buf_id);
-    cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
-    return rc;
   }
   cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
   return 0;
