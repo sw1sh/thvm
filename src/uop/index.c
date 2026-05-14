@@ -31,7 +31,7 @@ fn Term uop_range(u32 axis_id, u32 axis_type, u32 extent) {
   return t;
 }
 
-// === Phase E1: UOP_RANGE accessors + axis_type rewriter ===
+// === UOP_RANGE accessors + axis_type rewriter ===
 //
 // Groundwork for porting `apply_opt.c`'s KpSchedule mutations onto
 // UPatRule[] over UOP_RANGE leaves.  Today KpSchedule.axis_types[]

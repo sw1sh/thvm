@@ -115,7 +115,7 @@ fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
   return uop_pattern_rewrite(root, upat_kop_global_rules, 1, &ctx);
 }
 
-// === Phase E3: KOP_SWAP UPatRule mirror =============================
+// === KOP_SWAP UPatRule mirror ========================================
 //
 // codegen/apply_opt.c:92-103 stamps:
 //
@@ -341,7 +341,7 @@ static u32 sim_kop_history(KOpt const *applied_opts, u32 n_applied,
       desired_out[a] = desired_out[b];
       desired_out[b] = t;
     } else if (op == KOP_TC) {
-      // Phase E7: KOP_TC is kernel-aware metadata (tensor-core hint
+      // KOP_TC is kernel-aware metadata (tensor-core hint
       // recognised by render_uop's rmu_detect_matmul_tc /
       // rmu_emit_matmul_tc and by uop_recognise_tc which installs the
       // UOP_OPT(_, TC, 0) wrapper around the matmul reduce).  It does
@@ -408,7 +408,7 @@ fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
   return uop_pattern_rewrite(root, upat_kop_split_rules, 1, &ctx);
 }
 
-// === Phase E7: KOP_TC UPatRule mirror ================================
+// === KOP_TC UPatRule mirror ==========================================
 //
 // codegen/apply_opt.c:116-132 routes KOP_TC through `kernel_apply_opt`
 // (NOT axes_apply_opt): it validates the axis index and the requested

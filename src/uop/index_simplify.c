@@ -27,8 +27,8 @@ static int uop_iconst_value(Term t, i64 *out) {
 
 // Read a UOP_RANGE's extent.  Returns 1 if `t` is a RANGE leaf with
 // an int extent in its heap layout.  Used by range-bound-aware folds.
-// Renamed from uop_range_extent in Phase E1 to reserve that name for
-// the public direct-return accessor in src/uop/index.c.
+// (Distinct from the public uop_range_extent accessor: that returns
+// the extent directly; this one writes via an out param.)
 static int uop_range_extent_into(Term t, u32 *out) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) return 0;
   Term ext_cell = heap_read(term_val(t) + 2);

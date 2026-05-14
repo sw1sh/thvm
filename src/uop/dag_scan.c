@@ -281,7 +281,7 @@ Term uop_dag_heap_read(u64 loc, u32 offset) {
 int uop_dag_is_unary_ew (u32 op) { return uop_is_unary_elementwise ((u8)op); }
 int uop_dag_is_binary_ew(u32 op) { return uop_is_binary_elementwise((u8)op); }
 
-// === Slice 8: DAG-side GEMM-shape extractor ===========================
+// === DAG-side GEMM-shape extractor ====================================
 //
 // `cpu_blas_dispatch` (backend/cpu/blas.c) historically read M/N/K and
 // the input-slot mapping out of `ke->program[]` via
@@ -814,7 +814,7 @@ int uop_dag_classify_gemv_shape(Term root,
   return 1;
 }
 
-// === Slice 8 (conv2d-flat session): DAG-side structural gate ===========
+// === DAG-side structural gate for conv2d-flat =========================
 //
 // `tile_analyze_conv2d_flat` (src/schedule/tile.c) reads the conv shape
 // almost entirely from `ke->input_views[]`, `ke->output_shape`,
