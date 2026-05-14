@@ -121,11 +121,7 @@ a view-only no-op when contiguous-compatible).
 | CPU BLAS (Accelerate) | f32 only (matmul / matvec / dot) |
 | Metal shaders | f32 only |
 
-Non-f32 paths fall through to interpret.  Extending the JIT to
-cover the integer family + f64 is a contained change ([src/backend/cpu/jit.c](../src/backend/cpu/jit.c)
-already accepts dtype-typed strings); BLAS extension to f64 needs
-`cblas_dgemm`/`dgemv`/`ddot` calls; Metal needs per-(op, dtype)
-shader variants.  These are scoped as future phases on this branch.
+Non-f32 paths fall through to interpret.
 
 ## WL surface examples
 

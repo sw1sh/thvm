@@ -1,6 +1,13 @@
 # Kernelization Boundaries: thvm v1 vs. tinygrad
 
-## Status quo: one UOP, one kernel
+> Design memo from the conv2d-removal arc, when materialize emitted
+> one KernelEntry per UOP. The fusion direction it sketches landed
+> in `src/schedule/bufferize_*.c`, `rangeify.c`, `tile.c`, and
+> `kernel_lift.c`. Kept as historical context for the original
+> motivation; for current scheduler behavior read those sources and
+> `docs/lowering_passes.md`.
+
+## One UOP, one kernel (the v1 starting point)
 
 thvm's materializer (`src/schedule/materialize{,_in_env}.c`) lowers
 each UOP into its own `KernelEntry`:

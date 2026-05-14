@@ -155,8 +155,9 @@ extern u64 ITRS;   // src/thvm.h
 ITRS++;            // each interact_*.c after argument validation
 ```
 
-A future tracing facility (planned for step 15) will piggyback on
-this counter to snapshot the heap after each step.
+For per-step heap snapshots and finer-grained event tracing, see
+[`src/instrument/`](../src/instrument/) (`hot_counters.c`, `multi.c`),
+which read this counter alongside other per-op tallies.
 
 ## `nf`: explicit normal-form reducer
 

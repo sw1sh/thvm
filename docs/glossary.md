@@ -1,9 +1,8 @@
 # Glossary
 
-Words that appear across [tensors.md](tensors.md), the future
-fusion / scheduling / codegen docs, and PLAN.md steps 12–15. Pinned
-down here so the rest of the docs can use them without parenthetical
-re-definitions every time.
+Words that appear across the tensor, scheduling, codegen, and
+backend docs. Pinned down here so the rest of the docs can use them
+without parenthetical re-definitions every time.
 
 For the IC-side terminology (`term`, `agent`, `port`, `wire`, ...)
 see [term.md](term.md).  For the multicomputation reading of the
@@ -50,28 +49,20 @@ file paths, and other docs.
 
 | stage | what it does | where it lives |
 |-----|-----|-----|
-| **build** | User constructs a UOp graph through WL surface (`TUOpAdd`, `TUOpReshape`, ...). No reduction yet. | wl/THVMLink/Kernel/Tensor.wl |
-| **materialize** | Rewriting a raw UOp graph into a scheduled DAG of `UOP_KERNEL` nodes. Runs schedule + kernelize + compile in one rewrite. **Fires no kernels.** Reachable two ways: as a rule on `UOP_MATERIALIZE` under `TWnf`, or directly via the `TMaterialize` WL helper (which calls the rewrite without invoking `wnf`). | src/schedule/materialize.c |
-| **schedule** | Decide which UOps become kernels and in what order. v1 = trivial (one kernel per materialize). Part of materialize. | src/schedule/schedule.c |
-| **kernelize** | Rewrite the raw UOp graph into `UOP_KERNEL[output_buf, ast_root]` (and later `UOP_ASSIGN` / `UOP_SINK`) nodes. Part of materialize. | src/schedule/kernelize.c |
-| **fusion** | Decide which compute ops run in one kernel without intermediate buffers. v1 = elementwise chains until a shape-changing op; step 14 = full producer-consumer fusion. Part of **schedule**. | src/schedule/schedule.c |
-| **memory planning** | Assign physical buffers / reusable temporary slots to a kernel's intermediates. v1 = each `KProgOp` gets its own temp (no reuse); step 14 rewrites `program[]` with reused slots. | src/schedule/plan.c (step 14) |
-| **linearization** | Flatten a kernel's AST into an SSA-over-indices list (`KernelEntry.program[]`). Each entry is `{opcode, dtype, src_indices, arg}` referencing earlier positions. Same representation tinygrad pickles to the PYTHON device. | src/schedule/linearize.c |
-| **lowering** | Take a linearized kernel and turn it into a backend-specific IR (e.g. SSA over indices with register assignment). v1 = skipped (interpreter reads `program[]` directly). | src/lower/ (step 14) |
-| **codegen** | Emit source code (C, Metal Shading Language) from the lowered IR. v1 = skipped; the CPU backend *is* the interpreter, analogous to tinygrad's PYTHON device. | src/codegen/ (step 14) |
-| **render** | Synonym for codegen when the output is a string of source. (Tinygrad uses "render" specifically for source emission.) | src/codegen/ (step 14) |
-| **compile** | Turn a linearized kernel into something `dispatch_fn` can invoke. v1 auto path = nop (store `program[]` + `dispatch_fn = cpu_interpret`). v1 custom path (`TCompileKernel`) = `cc -shared` + `dlsym`. Step 14 adds the codegen auto path. | src/schedule/compile.c |
-| **kernel cache** | Content-addressed store keyed by the structural signature of a kernel AST (or by user-provided id for custom kernels). Compile once, reuse forever. | src/schedule/kernel_cache.c (step 14) |
+| **build** | User constructs a UOp graph through the WL surface (`TUOpAdd`, `TUOpReshape`, ...). No reduction yet. | wl/THVMLink/Kernel/Tensor.wl |
+| **materialize** | Rewrites a raw UOp graph into a scheduled DAG of `UOP_KERNEL` nodes. Runs schedule + kernelize + bufferize + compile in one rewrite. **Fires no kernels.** Reachable two ways: as a rule on `UOP_MATERIALIZE` under `TWnf`, or directly via the `TMaterialize` WL helper. | src/schedule/materialize.c |
+| **schedule** | Decide which UOps become kernels and in what order. | src/schedule/ |
+| **kernelize** | Rewrite the raw UOp graph into `UOP_KERNEL[output_buf, ast_root]` (with `UOP_ASSIGN` / `UOP_SINK` for in-place / multi-output) nodes. | src/schedule/kernel_lift.c |
+| **bufferize / rangeify** | Schedule IR pass that picks materialization boundaries via `UOP_BUFFERIZE` and lowers index ranges. Default on (`THVM_RANGEIFY_DIRECT=1`). | src/schedule/bufferize*.c, rangeify*.c |
+| **fusion** | Decide which compute ops run in one kernel without intermediate buffers. Driven by bufferize boundaries plus the rewrite-driven kernel-lift pass. | src/schedule/kernel_lift.c |
+| **linearization** | Flatten a kernel's AST into an SSA-over-indices list (`KernelEntry.program[]`). Each entry is `{opcode, dtype, src_indices, arg}` referencing earlier positions. | src/schedule/uop_to_scalar.c |
+| **codegen / render** | Emit source code (C for the CPU JIT, Metal Shading Language for the Metal backend) from the linearized kernel. "Render" is the tinygrad-style synonym used for source emission. | src/codegen/ |
+| **compile** | Turn the emitted source into something `dispatch_fn` can invoke. CPU JIT = `cc -shared` + `dlsym`; Metal = `newComputePipelineState` (cached PSO). | src/jit/, src/backend/metal/ |
+| **autotune** | For tile-shaped kernels, beam-search over UPCAST / LOCAL annotations and pick the fastest variant. | src/codegen/autotune.c, hand_opts.c |
+| **AOT** | Ahead-of-time compile a `TDef`'d body to fork-friendly C source or a Metal compute kernel. Alternative to the JIT path. | src/aot/ |
 | **dispatch** | Backend invocation of a compiled kernel with concrete input + output buffers. Triggered by `interact_kernel` once all of a `UOP_KERNEL`'s AST leaves are `TAG_TEN`. | backend->dispatch_kernel |
 | **launch** | Synonym for dispatch when emphasising the GPU side. |  |
 | **firing** | A `UOP_KERNEL` whose AST leaves are all `TAG_TEN` runs `interact_kernel`, which calls dispatch and returns its output `TAG_TEN`. The IC-level "interaction" event. Happens naturally under `TWnf`. | src/interact/uop_kernel.c |
-
-The v1 (step 12) implementation does **build → realize → schedule
-(trivial) → kernelize (one kernel per realize) → dispatch
-(interpreter)**. Everything in between (fusion, memory planning,
-linearization, lowering, codegen, render, compile, kernel cache)
-arrives in step 14, by which point the upstream stages will have
-been made richer to feed them.
 
 ## Backend and device
 
@@ -99,27 +90,27 @@ been made richer to feed them.
 | word | meaning |
 |-----|-----|
 | **output buffer** | The destination tensor a kernel writes into. Held in `Heap[loc]` of a `UOP_KERNEL`. |
-| **input buffer** | A tensor a kernel reads from. Discovered by walking the kernel's AST for `TAG_TEN` (or in step 14, `UOP_BUFFER` / `UOP_LOAD`) leaves. |
+| **input buffer** | A tensor a kernel reads from. Discovered by walking the kernel's AST for `TAG_TEN`, `UOP_BUFFER`, and `UOP_LOAD` leaves. |
 | **assign** | Pin a kernel's result to a specific buffer. `UOP_ASSIGN[target, src_kernel]`. |
 | **sink** | A root that aggregates multiple `UOP_ASSIGN` nodes for graphs that produce more than one output. `UOP_SINK[a0, a1, ...]`. |
 | **in-place** | A kernel whose output buffer is an existing live tensor (rather than a fresh one). Common for optimizer steps and accumulation. |
-| **epoch** | A monotonic counter on a buffer, bumped on every write. Lets the kernel cache invalidate stale results without recomputing the kernel signature. (TinyHVM concept; we don't need it in step 12.) |
 
-## Symbolic shapes (deferred, step 14+)
+## Symbolic shapes
 
 | word | meaning |
 |-----|-----|
-| **symbolic shape** | A shape whose dimensions can be variables (e.g. `batch_size`) instead of constants. Lets one compiled kernel serve a range of shapes. |
-| **bind** | Substitute a symbolic variable with a concrete value at dispatch time. |
+| **symbolic shape** | A shape whose dimensions can be variables (e.g. `BS`) instead of constants. Lets one compiled kernel serve a range of shapes. Registry lives in `src/schedule/kvar.c`. |
+| **kvar** | One entry in the kvar registry: an `id` + human name. `UOP_RANGE` extents and kernel-signature args reference kvars by id. |
+| **bind** | Substitute a kvar with a concrete value at dispatch time (CPU JIT: scalar arg; Metal: `setBytes:`). |
 | **simplify** | Constant-fold + range-bound a symbolic expression so kernel-cache lookups don't see equivalent forms as distinct. |
 
-## Kernel cache vocabulary (step 14+)
+## Kernel cache vocabulary
 
 | word | meaning |
 |-----|-----|
-| **structural signature** | Hash of a kernel's AST shape, dtypes, and reduction axes — independent of the specific buffers it operates on. Two kernels with the same signature share a compiled binary. |
+| **structural signature** | Hash of a kernel's AST shape, dtypes, and reduction axes -- independent of the specific buffers it operates on. Two kernels with the same signature share a compiled binary. |
 | **CAM** | Content-addressed memory; here, the kernel cache keyed by structural signature. |
-| **JIT** | Just-in-time compilation. The first dispatch of a kernel signature compiles it; subsequent dispatches reuse the binary. |
+| **JIT** | Just-in-time compilation. The first dispatch of a kernel signature compiles it; subsequent dispatches reuse the binary. Lives in `src/jit/` (CPU C) and `src/backend/metal/` (Metal PSO cache). |
 
 ## Equational reasoning and the IC-as-ATP layer
 
@@ -214,4 +205,3 @@ Physics Project -- free confluence, branchial space as literal sharing,
 |-----|-----|
 | **THeapGraph** | The full heap-graph rendering ([heap_graph.md](heap_graph.md)). Shows every cell. |
 | **THeapDiagram** | The IC string-diagram rendering ([diagrams.md](diagrams.md)). Shows agents and wires only. |
-| **AST overlay** | (Future) A rendering mode that highlights the AST inside a `UOP_KERNEL` as a sub-region. |

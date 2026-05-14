@@ -1,9 +1,9 @@
 # AOT-on-Metal
 
-Phase 7 of the AOT pipeline: emit a Metal compute kernel from a TDef'd
-body, compile it via `xcrun -sdk macosx metal/metallib`, and dispatch
-on the GPU.  Sister to the CPU AOT path (`docs/aot.md`); chosen by the
-`Method` option on `TAOTRun`.
+Emit a Metal compute kernel from a TDef'd body, compile it via
+`xcrun -sdk macosx metal/metallib`, and dispatch on the GPU.  Sister
+to the CPU AOT path (`docs/aot.md`); chosen by the `Method` option on
+`TAOTRun`.
 
 ## Quickstart
 
@@ -63,7 +63,7 @@ buffers read back after the dispatch.
 | ---------------------------------------- | ------------------ | -------------------- |
 | `"Metal"`                                | GPU                | this doc             |
 | `"CPU"`                                  | single-thread C    | `docs/aot.md`        |
-| `{"CPU", "NumThreads" -> n}` (`n>1`)     | C + work-stealing  | `docs/aot.md`, Phase 1 worker pool |
+| `{"CPU", "NumThreads" -> n}` (`n>1`)     | C + work-stealing  | `docs/aot.md`        |
 
 Default `Method -> "Metal"`.  Method dispatcher in
 `wl/THVMLink/Kernel/AOT.wl` routes to the right path.  Bare `"CPU"`
@@ -81,12 +81,12 @@ some caveats around heap allocation.
 | TNum     | yes        | u32 literal                                     |
 | TOp2     | yes        | ADD, SUB, MUL, EQ, LT folded recursively        |
 | TApp     | yes        | only as call site of REF (cross-def call)       |
-| TRef     | yes        | inlined at the call site (iter G); recursion bails to NULL |
+| TRef     | yes        | inlined at the call site; recursion bails to NULL |
 | TMat     | yes        | App-of-MAT-of-TVar dispatch (numeric-switch)    |
 | TCtr     | yes (build)| as body root: alloc + init via `aot_book_alloc` |
 | DP0/DP1  | yes        | per-emit memo dedups multi-use binder values    |
 | TLam-arm | yes        | inside MAT arm: peels & binds destructured CTR  |
-| TUOp     | no         | tensor ops not yet on the Metal AOT path        |
+| TUOp     | no         | tensor ops not on the Metal AOT path            |
 | TSup     | no         | superpositions need IC duplication semantics    |
 | TPri     | no         | side-effect mechanism stays on CPU              |
 
@@ -114,8 +114,8 @@ TAOTRun["pair_sum", {TCtr[2, TNum[7], TNum[35]]}, Method -> "Metal"]
 TAOTRun["pair_sum", {TBookCtr[2, TNum[7], TNum[35]]}, Method -> "Metal"]
 ```
 
-CTRs constructed BY the kernel (via iter H's body emit) live in
-book_heap automatically -- they're written via `aot_book_alloc`.
+CTRs constructed BY the kernel live in book_heap automatically -
+they're written via `aot_book_alloc`.
 
 ## Caching layers
 
@@ -141,7 +141,7 @@ Three caches make repeated calls fast:
 | ------------------------ | --------------------------------------------------- |
 | `THVM_AOT_METAL_DUMP=1`  | Print emitted MSL source to stderr per dispatch     |
 | `THVM_THREADS=N`         | Override default `NumThreads` for `Method -> "CPU"` |
-| `THVM_NF_PARALLEL_STEP_SESSION=1` | Enable step session at T>1 (Phase 1)       |
+| `THVM_NF_PARALLEL_STEP_SESSION=1` | Enable step session at T>1                 |
 
 Failure messages include the def name and a brief reason:
 ```
@@ -161,12 +161,12 @@ independent reductions to dispatch in batches (see "Batch dispatch"
 below), not when you're spinning a tight reduce-tiny-thing loop.
 
 CPU baseline for the same OP2(NUM,NUM) fold via `wnf` (no kernel
-launch): ~0.26 us / call -- ~1000x faster than Metal for tiny defs.
+launch): ~0.26 us / call - ~1000x faster than Metal for tiny defs.
 
 ## Batch dispatch
 
 When you have N independent OP2 redexes queued up, fire them in a
-SINGLE Metal dispatch via the iter B-2 batch kernel
+SINGLE Metal dispatch via the batch kernel
 (`aot_eval_op2_fold_batch`):
 
 ```wolfram
@@ -181,7 +181,7 @@ Bench numbers (M3 Max) for 256 OP2 ADD redexes:
 
 The batch path is the dominant win for Metal AOT.  Build OP2 cells
 in book_heap (so the kernel's `heap` MTLBuffer can deref them) via
-the private bridges -- see `wl/THVMLink/Tests/aot_metal.wlt`'s
+the private bridges - see `wl/THVMLink/Tests/aot_metal.wlt`'s
 TAOTBatchOp2Fold test for a worked example.
 
 ## Source layout
@@ -190,27 +190,16 @@ TAOTBatchOp2Fold test for a worked example.
 | ------------------------------------------------- | ----------------------------------- |
 | `src/aot/metal_emit.c`                            | MSL emitter                         |
 | `src/backend/metal/shaders/aot_eval.metal`        | Hand-written MSL primitives         |
-| `src/backend/metal/_.m` (Phase 7 sections)        | Host dispatch + PSO cache           |
+| `src/backend/metal/_.m`                           | Host dispatch + PSO cache           |
 | `wl/THVMLink/CSource/thvmlink.c` (`thvm_wl_aot_metal_run_n`, `thvm_wl_aot_metal_op2_fold_batch`) | LibraryLink bridges |
 | `wl/THVMLink/Kernel/AOT.wl` (`aotMetalRunImpl`, `TAOTBatchOp2Fold`) | WL Method dispatcher + batch surface |
 | `tests/test_aot_metal_run.c`                      | C-level e2e tests                   |
 | `wl/THVMLink/Tests/aot_metal.wlt`                 | WL e2e regression suite             |
-| `src/aot/wnf_metal_shim.h`                        | Iter M scaffold for wnf port (deferred) |
+| `src/aot/wnf_metal_shim.h`                        | wnf() macro-shim scaffold           |
 
-## Roadmap
+## Coverage gaps
 
-| Status     | Iter | Description                                    |
-| ---------- | ---- | ---------------------------------------------- |
-| done       | A-V  | MSL primitives, emit shapes, host dispatch, WL surface |
-| done       | Q+J  | Per-worker WNF TLS + parallel CPU dispatch     |
-| done       | T    | TBookCtr for Metal-AOT-friendly CTR inputs     |
-| done       | X    | Persistent metallib disk cache                 |
-| done       | Y    | Variadic args (lift 4-arg cap)                 |
-| done       | HH+II| Preserve TNum dtype through emit               |
-| done       | LL   | Unbound TVar -> explicit emit failure          |
-| done       | OO   | Nested CTR construction                        |
-| done       | QQ   | WL surface for batch OP2 fold dispatcher       |
-| done       | RR   | Batch-vs-sequential perf bench (~231x speedup) |
-| scaffolded | M    | Full wnf() macro-shim port (HVM4 CUDA pattern) |
-| pending    | -    | Auto-marshal HEAP CTRs to book_heap            |
-| pending    | -    | TUOp body emit (bridge to tensor backend)      |
+- HEAP-allocated CTRs flowing into the kernel still need the
+  `TBookCtr` workaround; auto-marshal to `book_heap` is not wired.
+- `TUOp` body emit (bridge to the tensor backend) is not yet
+  available on the Metal AOT path.

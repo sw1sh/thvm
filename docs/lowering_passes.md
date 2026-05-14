@@ -199,4 +199,3 @@ GROUP_REDUCE modes).  Threads-per-threadgroup are configured from
 | Kernel boundary -> UOp DAG | [src/schedule/kernel_lift.c](../src/schedule/kernel_lift.c) |
 | MSL renderer | [src/codegen/render_uop.c](../src/codegen/render_uop.c) |
 | Metal dispatch | [src/backend/metal/_.m](../src/backend/metal/_.m) |
-| Migration plan + history | [docs/plans/flickering-watching-gem.md](../../.claude/plans/flickering-watching-gem.md) |

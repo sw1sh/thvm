@@ -1,8 +1,7 @@
 # Grad: dup-like VJP with gy threading
 
-This doc describes the current automatic-differentiation design in
-thvm: what `TGrad` builds, how it reduces, and how the runtime
-materializes it.
+Automatic differentiation in thvm: what `TGrad` builds, how it
+reduces, and how the runtime materializes it.
 
 The pieces:
 
@@ -174,9 +173,7 @@ where CONST(0) is shape {1}, broadcasts via cpu_op_add/mul
 The scalar-zero mismatch slot is critical: `cpu_op_add` / `cpu_op_mul`
 broadcast `numel == 1` operands, so when the outer combiner sees
 `ADD(matched_at_leaf_shape_X, CONST(0))`, the result is just
-`matched_at_leaf_shape_X` regardless of `X`. The earlier design
-emitted zero at leaf shape, which created shape-inconsistent ADDs
-across siblings with different leaf shapes (fixed by `eac4e17`).
+`matched_at_leaf_shape_X` regardless of `X`.
 
 The WL surface then wraps the BWD term in a per-leaf-tid DUP nest
 that projects each target's gradient. Used by `TGradPair` and any
@@ -262,12 +259,10 @@ materialized tensor. Apply `TGrad` to it again to get the Hessian
 output as if it were any other UOp graph; the outer wnf pass drives
 both rounds.
 
-The wnf alignment in commit `d59b862` was the original fix that
-made the apply phase for grad-DP1 see the resolved `cell[0]`
-regardless of how deeply DPs nest. Combined with the dynamic
-KernelEntry arrays (commit `1b0c0a2` — kernels grow geometrically
-instead of being capped at 64 inputs / 256 ops), 4th-, 5th-, 6th-order
-derivatives all work.
+The apply phase for grad-DP1 sees the resolved `cell[0]` regardless
+of how deeply DPs nest. Combined with the dynamic KernelEntry arrays
+(kernels grow geometrically instead of being capped at 64 inputs /
+256 ops), 4th-, 5th-, 6th-order derivatives all work.
 
 Example: Newton's method using TGrad twice (in
 [`wl/Examples/newton-1d/newton.wls`](../wl/Examples/newton-1d/newton.wls)):
@@ -300,30 +295,26 @@ then compiles the freshly exposed compute UOPs to kernels;
 subsequent iterations exist mainly to expose UOP graphs that were
 hidden behind a still-active grad cell on the prior round.
 
-### Dynamic KernelEntry arrays (commit `1b0c0a2`)
+### Dynamic KernelEntry arrays
 
-Originally `KernelEntry::input_*` and `program` were inline arrays
-sized `[KERNEL_MAX_INPUT=64]` and `[KPROG_MAX_OPS=256]`. For
-higher-order grad chains they overflowed and `visit()` bailed.
-
-Now both are heap-grown pointers with `inputs_cap` / `ops_cap`
-fields. Helpers in [`src/schedule/kernel_alloc.c`](../src/schedule/kernel_alloc.c):
+`KernelEntry::input_*` and `program` are heap-grown pointers with
+`inputs_cap` / `ops_cap` fields. Helpers in
+[`src/schedule/kernel_alloc.c`](../src/schedule/kernel_alloc.c):
 
   - `kernel_inputs_reserve(ke, needed)` — `realloc` to geometric
     capacity (init=8, doubles).
   - `kernel_program_reserve(ke, needed)` — same for the program.
   - `kernel_free_arrays(ke)` — release on dealloc.
 
-`KERNEL_MAX_INPUT` / `KPROG_MAX_OPS` became 1M sanity bounds (only
-trip on runaway allocation). The static stack arrays in
-`cpu/interpret.c`, `metal/_.m`, and `interact/uop_kernel.c` had to
-become VLAs sized by `ke->n_inputs` / `ke->n_ops` — a static
-`[KERNEL_MAX_INPUT]` declaration with the new 1M cap would request
-4MB of stack.
+`KERNEL_MAX_INPUT` / `KPROG_MAX_OPS` act as 1M sanity bounds (only
+trip on runaway allocation). The stack arrays in
+`cpu/interpret.c`, `metal/_.m`, and `interact/uop_kernel.c` are VLAs
+sized by `ke->n_inputs` / `ke->n_ops`, because a static
+`[KERNEL_MAX_INPUT]` declaration with the 1M cap would request 4MB
+of stack.
 
-Memory: `KernelEntry` shrank from ~33KB inline to ~136 bytes +
-proportional growth. KERNELS table baseline went from ~528MB to
-~2MB.
+Memory: `KernelEntry` is ~136 bytes + proportional growth, giving a
+~2MB KERNELS table baseline.
 
 ---
 
@@ -365,16 +356,16 @@ Companion APIs:
   - `TProfilePlot[ps, k]` — line plot of metric `k` across snapshots
 
 The regression test [`wl/THVMLink/Tests/profile.wlt`](../wl/THVMLink/Tests/profile.wlt)
-locks in current allocation counts for known workloads so future
-bloat trips a test.
+locks in allocation counts for known workloads, so bloat trips a
+test.
 
 ---
 
 ## See also
 
-  - [`kernelization.md`](kernelization.md) — boundary classification
-    and the materialize → wnf loop
-  - [`heap.md`](heap.md) — heap layout, cell tags, SUB-bit
+  - [`lowering_passes.md`](lowering_passes.md) - boundary
+    classification and the materialize -> wnf loop
+  - [`heap.md`](heap.md) - heap layout, cell tags, SUB-bit
     substitution semantics
-  - [`normal_form.md`](normal_form.md) — wnf vs nf, the reduction
+  - [`normal_form.md`](normal_form.md) - wnf vs nf, the reduction
     discipline

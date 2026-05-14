@@ -143,18 +143,18 @@ candidates: `interact_kernel` re-firing, `alo_realize` walks per
 chain-rule round, `wnf` recursion through deeply substituted
 lambda bodies.  Counter instrumentation is still pending here.
 
-## Optimisations applied so far
+## Per-iter sharing
 
-- **`gy` resolve at chain-rule entry** (`a9873a6`).  Was causing
-  N identical "ones-at-shape" kernels (one per iter); now shared.
-  Cell delta n=5: -15, kernel delta: -5.
-- **Variable-identity match in `interact_grad`** (`eb281e9`).
-  Without this, recursive iters can't propagate gradient because
-  the bound `w` substitutes to a not-yet-materialized UOP graph.
-- **Hash-cons binary/unary UOPs** (`a9873a6`).  Catches identical
-  ADD/MUL/NEG/RECIP terms; small per-iter cell saving.
-- **O(1) dedup in `redex_collect_one`** (`785c0b5`).  Drops
-  N*R quadratic from `redex_enumerate` to N.
+- **`gy` resolve at chain-rule entry**: the chain rule resolves the
+  cotangent up front so N identical "ones-at-shape" kernels collapse
+  to one shared kernel.
+- **Variable-identity match in `interact_grad`**: recursive iters
+  propagate gradient even when the bound `w` substitutes to a
+  not-yet-materialized UOP graph.
+- **Hash-cons binary/unary UOPs**: identical ADD/MUL/NEG/RECIP terms
+  share a heap cell.
+- **O(1) dedup in `redex_collect_one`**: drops the N*R quadratic in
+  `redex_enumerate` to N.
 
 ## ASSIGN pattern scaling
 
@@ -175,14 +175,13 @@ costs ~n; total time is still <10 ms at n=1000 because
 heap_replace's per-fire cost is on a small heap (no compute
 graph piling up -- ASSIGN reuses the same buffers).
 
-## What's been landed
+## Kernel program hash-cons
 
-**Kernel program hash-cons** (`c83c29b`, src/schedule/kernel_program_cache.c).
-The `KProgOp[]` array is shared across boundaries with bit-for-
-bit identical programs (opcode + dtype + n_src + arg + numel +
-src[] + shape/perm/pad bytes).  Each `KernelEntry` keeps its
-own `input_tids[] / output_tid` -- per-instance I/O is
-unchanged.  Concretely:
+`src/schedule/kernel_program_cache.c` shares the `KProgOp[]` array
+across boundaries with bit-for-bit identical programs (opcode +
+dtype + n_src + arg + numel + src[] + shape/perm/pad bytes).  Each
+`KernelEntry` keeps its own `input_tids[] / output_tid`, so
+per-instance I/O is unchanged.  Concretely:
 
   bound-w n=5:  6 kernels,  **2 distinct programs**
   bound-w n=10: 11 kernels, **2 distinct programs**
@@ -191,13 +190,12 @@ unchanged.  Concretely:
 Tracked by `TKernelProgramCacheSize[]`; asserted in
 `training-loop/bound-w-kernel-program-hash-cons`.
 
-This caps **program** memory at the number of distinct
-structural shapes (typically 1-2 per loop), which is the
-groundwork the next path needs.
+This caps **program** memory at the number of distinct structural
+shapes (typically 1-2 per loop).
 
-## Path 3: shape inference for compile-once-dispatch-many (landed)
+## Shape inference for compile-once-dispatch-many
 
-Three commits, ~400 lines total:
+Three pieces:
 
 1. **`src/lam/shape.c`** -- side table mapping LAM heap loc to a
    bound-var shape.  Propagated through `clone_to_book_rec`
@@ -214,24 +212,15 @@ Three commits, ~400 lines total:
    SUB to whatever APP-LAM beta has bound it to and reads
    that tensor's buffer.
 
-3. **`interact_app_lam` JIT path** -- when a TLam is applied,
-   if the body is a UOP graph and the argument carries a shape
-   (TEN or shape-inferable UOP), APP-LAM infers the bound
-   variable's shape from the argument, registers it on
-   `lam_shape`, materializes the body into a UOP_KERNEL, and
-   then proceeds with the standard `heap_subst_var` beta.
-   No flag, no separate constructor: every `TLam` whose body
-   is compute goes through this path.  Bodies that aren't
-   compute (curried lambdas, `TIfZero`, `TApp`-headed) skip
-   the JIT step -- materialize would be a no-op anyway.
-
-(We considered using the existing `TAG_ANN` / `TAG_BRI`
-machinery for shape propagation -- ICC's type-directed
-reduction would naturally push annotations to var sites -- but
-the existing rules do full type-checking with BRI bridges,
-which is heavier than what shape inference needs.  The side
-table is opt-in, has zero overhead for unannotated LAMs, and
-keeps the ICC reduction rules untouched.)
+3. **`interact_app_lam` JIT path** -- when a TLam is applied, if
+   the body is a UOP graph and the argument carries a shape (TEN
+   or shape-inferable UOP), APP-LAM infers the bound variable's
+   shape from the argument, registers it on `lam_shape`,
+   materializes the body into a UOP_KERNEL, and then proceeds
+   with the standard `heap_subst_var` beta.  Every `TLam` whose
+   body is compute goes through this path.  Bodies that aren't
+   compute (curried lambdas, `TIfZero`, `TApp`-headed) skip the
+   JIT step -- materialize would be a no-op anyway.
 
 End-to-end test (`lam-shape/tlam-jit-on-first-apply`):
 
@@ -250,37 +239,7 @@ where the body needs to materialize *before* any TApp (e.g.
 direct `TMaterialize` on the body for inspection, or when the
 argument's shape can't be inferred at first APP).
 
-### What's still missing for fully-automatic loops
-
-`TLamMaterialized` makes the user opt in.  For the recursive
-REF/ALO sgd_loop pattern in `sgd.wlt` to benefit
-automatically, the realize loop would need to walk into
-REF bodies, detect shape-annotated lambdas, materialize their
-bodies once, and cache by `(book_loc, arg_shape_signature)`.
-Each iter's `App(REF, arg_K)` then hits the cache and just
-dispatches with `arg_K`.
-
-Approximate work:
-  - `realize_classify` recognizes `App(REF, arg)` with
-    shape-annotated REF body.
-  - `materialize_lam_body` (new) compiles the body once,
-    keyed on (book_loc, arg_shape).
-  - `interact_kernel` extended for the TVAR-resolve at fire
-    time (already done in 9e66ab3 -- input_tids[i]=0 +
-    input_terms[i]!=0 path).
-
-Not landed yet; ~200 lines.
-
-## Other open follow-ups
-
-1. **Heap compaction**.  Per-iter cell growth is linear so
-   n=1000 gives ~130K cells (1MB heap).  Tolerable but
-   unbounded; a mark-and-sweep that drops cells unreachable from
-   the result tensor would let arbitrarily long training loops
-   run.
-2. **Replace `heap_replace`'s O(HEAP_NEXT) cascade with HVM4-
-   style SUB-bit substitution**.  Removes one per-fire linear
-   cost.
-3. **Profile interactions inside `redex_fire`'s case dispatch**
-   to localise the cubic cliff in the bound-w pattern (already
-   ruled out: heap_replace, redex_enumerate, is_redex).
+`TLamMaterialized` lets the caller opt in explicitly.  The
+recursive REF/ALO `sgd_loop` pattern in `sgd.wlt` does not benefit
+from cache-by-`(book_loc, arg_shape_signature)` automatically;
+that path is opt-in for now.

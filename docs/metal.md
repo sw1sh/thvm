@@ -1,23 +1,18 @@
 # Metal backend - embedding strategy
 
 See [cpu.md](cpu.md) for the codegen pipeline this backend shares
-with the CPU JIT.  Both backends now route through the same
-UOp-DAG renderer: `cg_render_uop_kernel` (MSL) and
-`cg_render_uop_kernel_c` (C99).  The former cg_emit + Renderer
-abstraction was deleted in F6 (2026-05-08, see
-[plans/ideal_pipeline.md](plans/ideal_pipeline.md)).
+with the CPU JIT.  Both backends route through the same UOp-DAG
+renderer: `cg_render_uop_kernel` (MSL) and `cg_render_uop_kernel_c`
+(C99).
 
 ## TL;DR
 
-Add a `Metal` backend mirroring `backend/cpu/` as Objective-C (`.m`)
-files that expose plain C functions. The runtime stays single-TU C.
-Shader source lives in `src/backend/metal/shaders/*.metal` and is
-compiled offline by `xcrun metal` into a `default.metallib`. The
-runtime loads the metallib at backend init and resolves kernel
-function names by string lookup.
-
-This file documents the decision so the next task items don't have
-to re-derive it.
+The Metal backend mirrors `backend/cpu/` as Objective-C (`.m`) files
+that expose plain C functions. The runtime stays single-TU C. Shader
+source lives in `src/backend/metal/shaders/*.metal` and is compiled
+offline by `xcrun metal` into a `default.metallib`. The runtime
+loads the metallib at backend init and resolves kernel function
+names by string lookup.
 
 ## Why not pure-C bindings
 
@@ -116,8 +111,10 @@ side does. Per opcode, it:
 4. `[encoder dispatchThreads:threadsPerThreadgroup:]` with
    threadgroup size taken from the pipeline state's
    `maxTotalThreadsPerThreadgroup`.
-5. Commits the command buffer; for v1 we wait synchronously
-   (`[cmdBuffer waitUntilCompleted]`) — async pipelining lands later.
+5. Commits the command buffer. Synchronous wait
+   (`[cmdBuffer waitUntilCompleted]`) at the dispatch boundary; the
+   batch / deferred-decref scaffolding for amortising encoder cost
+   lives in `metal_dispatch_flush` (see `docs/memory.md`).
 
 ## Buffers
 
@@ -127,37 +124,18 @@ unwrapped only inside the backend `.m` files. The existing
 refcount / free / read / write functions already abstract this —
 swapping the implementation is mechanical.
 
-## What we won't do in v1
+## Scope notes
 
-- **Multi-device.** One default `MTLDevice` selected at init.
-- **Async pipelining.** Synchronous wait per kernel.
-- **Shader specialisation constants.** All shapes pack into the
-  arg buffer; no recompilation per call.
-- **Indirect command buffers.** Standard `MTLComputeCommandEncoder`.
-- **Half-precision.** f32 only, matching the rest of thvm.
-- **Backward / grad.** Forward only initially. Grad rules don't care
-  what backend they run on — once forward is correct the chain rule
-  graph just dispatches to whatever backend is active.
+- **Single device.** One default `MTLDevice` selected at init.
+- **Shader specialisation constants.** All shapes pack into the arg
+  buffer; no recompilation per call.
+- **Standard command encoders.** Indirect command buffers are not
+  used.
+- **f32 only on the GPU.** Non-f32 dtypes fall through to CPU
+  interpret. See `docs/dtypes.md` for backend coverage.
 
-## Risk
+## Build dependency
 
 Shader compilation with `xcrun metal` requires the macOS SDK and
-Xcode command-line tools. The CI environment must have those. If
-not, the build falls back to CPU-only by skipping the Darwin block
-in the makefile.
-
-## Next items in the queue
-
-The decomposition under Phase 5 already lists these:
-
-1. Stub `backend/metal/_.m` with a Backend vtable that returns errors
-   for everything (forces the dispatch path to choose CPU until each
-   kernel lands).
-2. CONST kernel (constant fill — simplest possible compute).
-3. ADD, MUL, NEG (elementwise).
-4. REDUCE_SUM, EXPAND.
-5. RESHAPE.
-6. MUL+REDUCE (matmul shape — the LinearLayer hot path).
-7. CONV2D last (it's the largest single shader).
-
-Each ships with a CPU-vs-Metal numeric parity test.
+Xcode command-line tools. Without them, the build falls back to
+CPU-only by skipping the Darwin block in the makefile.

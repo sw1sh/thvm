@@ -1,16 +1,19 @@
-# Tensors
+# Tensors -- original design memo
 
-Proposal for [PLAN.md](../PLAN.md) step 12: `TTensor` and `TUOp`
-primitives for building computational graphs that compile to CPU and
-Metal backends.
+Historical design proposal for the `TTensor` / `TUOp` primitives.
+Implemented; superseded by the live code under `src/uop/`,
+`src/tensor/`, `src/schedule/`, `src/codegen/`, `src/backend/`, and by
+the WL surface in `wl/THVMLink/Kernel/Tensor.wl`. Kept here as a
+record of the original four-reconnaissance design pass; the staged
+"step 12 / step 14" framing throughout the doc reflects PLAN.md at
+the time it was written, not the current shape of the tree.
 
-> Vocabulary: see [glossary.md](glossary.md) for definitions of
-> *tensor*, *buffer*, *View*, *ShapeTracker*, *opcode*, *AST*,
-> *kernelize*, *fusion*, *linearization*, *codegen*, *dispatch*,
-> *firing*, etc.
+> Vocabulary: see [../glossary.md](../glossary.md) for current
+> definitions of *tensor*, *buffer*, *View*, *ShapeTracker*,
+> *opcode*, *AST*, *kernelize*, *fusion*, *linearization*,
+> *codegen*, *dispatch*, *firing*, etc.
 
-This is a *design proposal* — nothing is implemented yet. It draws
-on four reconnaissance passes:
+The proposal drew on four reconnaissance passes:
 
 - **tinygrad** (`/Users/swish/src/tinygrad/`) — the canonical UOp
   vocabulary for representing tensors as a lazy graph

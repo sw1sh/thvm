@@ -211,4 +211,4 @@ MSL.
 - [Apple Metal Performance Primitives Programming Guide (PDF)](https://developer.apple.com/download/files/Metal-Performance-Primitives-Programming-Guide.pdf)
 - [tinygrad #1167 — Match torch speed on M1 for sum reduction](https://github.com/tinygrad/tinygrad/issues/1167)
 - [Metal SIMD reduction example (gist by rgov)](https://gist.github.com/rgov/9139d725841670e8cbdf1593d5f369da)
-- [docs/tilelang_scout.md §3 LayoutInference, §7 AutoTuner](../tilelang_scout.md) — neither covers simdgroup-level reduce primitives either; same architectural opportunity.
+- [docs/plans/tilelang_scout.md §3 LayoutInference, §7 AutoTuner](tilelang_scout.md) — neither covers simdgroup-level reduce primitives either; same architectural opportunity.

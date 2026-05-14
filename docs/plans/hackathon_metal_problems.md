@@ -181,7 +181,7 @@ Every artifact we build to support the hackathon is a thvm wedge:
 |---|---|
 | Standalone MSL compile + dispatch + bench | bench harness embryo (no thvm equivalent today; closest is `make test` correctness-only) |
 | PyTorch reference -> UOp DAG | Torch front-end (none today; would unlock HuggingFace-model ingestion) |
-| UOp DAG textual format | Tier-1 prereq for on-disk autotune cache ([docs/tilelang_scout.md:443-459](../tilelang_scout.md#L443-L459)) |
+| UOp DAG textual format | Tier-1 prereq for on-disk autotune cache ([docs/plans/tilelang_scout.md:443-459](tilelang_scout.md#L443-L459)) |
 | Pattern fragment library (matmul, conv, softmax, layernorm, attention) | F3 / F4 UPatRule tables in `render_uop.c` |
 | Roofline scorer over arch model | Carver-shape `propose.c` |
 | Correctness oracle vs PyTorch | Regression seam for every plan-relevant test |

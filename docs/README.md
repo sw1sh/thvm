@@ -28,14 +28,14 @@ If you are new to the project, read these in order:
    codegen pipeline (`src/codegen/`).  Walks the
    `cpu_dispatch_kernel` order (BLAS, optional tile path, JITs,
    interpreters), the `propose -> apply_opt` chain, and the JIT
-   cache key.  (Doc has a 2026-05-08 status banner: render_c.c is
-   gone; CPU JIT compiles through `cg_render_uop_kernel_c`.)
+   cache key.
 
 ## What's not here yet
 
-Tracked in [PLAN.md](../PLAN.md). Anything labelled "step N" in the
-status table at [README.md](../README.md) is intentionally absent
-until that step lands.
+Anything marked "in progress" or "open" in the status table at
+[../README.md](../README.md) is documented only where the live code
+already exists; design memos for not-yet-built layers live under
+[plans/](plans/).
 
 ## Plans and references
 

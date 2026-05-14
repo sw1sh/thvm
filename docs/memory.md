@@ -1,9 +1,7 @@
 # Memory And Lifetime Model
 
-This document is the current reference for thvm buffer lifetime,
-memory diagnostics, and the safety boundary around memory planning.
-It supersedes the older LeNet-only notes that treated memory as a CPU
-buffer-pool problem.
+Buffer lifetime, memory diagnostics, and the safety boundary around
+memory planning.
 
 The practical rule is simple: do not run large autotune or batch-size
 sweeps until the small memory invariants here pass and repeated-step
@@ -316,10 +314,9 @@ Current policy:
 
 Why Metal planner reuse is disabled: a schedule planner can decide an
 output is dead in graph order, but Metal also has command-buffer order
-and a deferred-decref queue.  Until the planner has a Metal-specific
-drain/proof equivalent to CPU's end-of-pass freelist drain, pushing
-planner-dead Metal buffers to the freelist risks reusing storage too
-early.
+and a deferred-decref queue.  Without a Metal-specific drain/proof
+equivalent to CPU's end-of-pass freelist drain, pushing planner-dead
+Metal buffers to the freelist risks reusing storage too early.
 
 ## Fusion And Memory
 
@@ -457,10 +454,9 @@ Expected properties for a healthy small run:
 Only after that should larger batch tests be considered.  A single
 large run that spikes memory pressure is not a valid tuning result.
 
-## Historical LeNet Baseline
+## LeNet CPU baseline
 
-The older LeNet probe measured one forward plus one backward target on
-CPU:
+The LeNet probe measures one forward plus one backward target on CPU:
 
 ```text
 TenDescs:      511
@@ -468,32 +464,15 @@ Buf bytes:     about 15.6 MiB
 KernelEntries: 330 before view/fusion cleanup, about 280 after
 ```
 
-Those numbers were useful for proving that conv partials and
-elementwise chains dominated CPU allocation.  They are not sufficient
-for Metal training today because Metal pressure is driven by retained
-`MTLBuffer` storage, deferred batch releases, and fused/tiled dispatch
-coverage.
+These numbers show that conv partials and elementwise chains dominate
+CPU allocation.  They are not sufficient for Metal training, where
+pressure is driven by retained `MTLBuffer` storage, deferred batch
+releases, and fused/tiled dispatch coverage.
 
-The probe script still exists:
+The probe script:
 
 ```bash
 wolframscript -f wl/Examples/lenet-mnist/memory-probe.wls
 ```
 
-Use it for regression context, not as proof that Metal training memory
-is safe.
-
-## Open Work
-
-The remaining memory work is ordered:
-
-1. Add a small repeated-step memory regression that asserts
-   `DeferredBytes == 0` after every dispatch boundary and checks that
-   `PeakRetainedBytes` stays under a conservative cap.
-2. Add Metal-specific planner proof/drain machinery before enabling
-   `THVM_REUSE_BUFS` for Metal.
-3. Continue rangeify/tile fusion coverage so movement-heavy gradients
-   and reductions stop materializing large intermediate chains.
-4. Feed `TProfileProgramGroups` plus `TMetalMemoryProfile` into
-   autotune triage so search optimizes time without hiding memory
-   regressions.
+Use it for CPU regression context.

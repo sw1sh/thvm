@@ -458,7 +458,7 @@ evolves. The `.wlt` xvalid suite runs in CI alongside `make test`.
 ### Comparison artifact for tinygrad and TileLang
 
 Both have similar Opt vocabularies (see
-[tilelang_scout.md](tilelang_scout.md)) but neither has a
+[tilelang_scout.md](tilelang_scout.md)). Neither has a
 declarative spec. Publishing the WL rule set is a useful
 contribution back to the broader ecosystem -- it documents
 "what kernel rewrites mean" more cleanly than reading any
