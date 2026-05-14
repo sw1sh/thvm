@@ -12,9 +12,9 @@ fn void kernel_lift_counters_reset(void) {
   KERNEL_LIFT_SUCCESSES = 0;
 }
 
-// Increment helpers for callers in earlier translation units (codegen/
-// render_metal.c is #include'd before this file; they can't reach the
-// static globals directly).
+// Increment helpers for callers that precede this TU in the unity
+// build (codegen/render_metal.c is #include'd first and can't reach
+// the static globals directly).
 fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
 fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
 
@@ -2050,13 +2050,11 @@ static int kernel_lift_from_kprog(KernelEntry const *ke, KernelUopLift *out) {
 fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   if (ke == NULL || out == NULL) return 0;
   // Multi-output (kernel-merge splice): always go through the direct
-  // KProgOp -> UOp DAG path because rangeify is skipped for these
-  // kernels (materialize doesn't run rangeify_try_lower_elementwise
-  // when spliced_ok=1, so scalar_uops stays NULL).  Fires ahead of
-  // the scalar-arena lifter even when scalar_uops is non-NULL --
-  // future relaxations of the merge gate could conceivably allow
-  // scalar_uops on multi-output kernels, but the KProgOp lifter is
-  // the lowest-friction path until then.
+  // KProgOp -> UOp DAG path.  Rangeify is skipped for these kernels
+  // (materialize doesn't run rangeify_try_lower_elementwise when
+  // spliced_ok=1, so scalar_uops stays NULL), and the KProgOp lifter
+  // is the canonical path for spliced kernels regardless of arena
+  // state.
   if (ke->n_extra_outputs > 0) {
     if (kernel_lift_from_kprog(ke, out)) return 1;
     return 0;
@@ -2145,45 +2143,15 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // The first n_buf entries get axis_ids matching BUFFERIZE order; the
   // rest get axis_ids continuing past n_buf.
   //
-  // === E9-prep wedge 2 stage (d) session 3: applied_opts replay retired ==
-  //
-  // Session 2 stripped split-class stamping from the lifter and replaced
-  // it with a compact `cur_extent[] / origin_extent[]` bookkeeping shell
-  // that ran the KOP_GLOBAL extent guard, the KOP_SWAP arg-range guard,
-  // and a defensive unknown-opcode reject.  Session 3 deletes that shell
-  // entirely: every check it duplicates is already enforced by
-  // `kernel_apply_opt` (codegen/apply_opt.c) at WRITE time before an opt
-  // ever lands in `applied_opts[]`:
-  //
-  //   - axis < n_axes                                  (apply_opt.c:69)
-  //   - split arg != 0 + arg divides full_shape[axis]  (apply_opt.c:74-80)
-  //   - n_axes < MAX_AXES                              (apply_opt.c:81)
-  //   - KOP_GLOBAL: arg == full_shape[axis] && resolves to KAX_LOOP
-  //                                                    (apply_opt.c:99-102)
-  //   - KOP_SWAP:   arg < n_axes                       (apply_opt.c:106)
-  //   - unknown opcodes rejected                       (apply_opt.c:115)
-  //   - KOP_TC: validated via tile_anno_record_opt and the DAG-side
-  //             matmul classifier (uop_dag_classify_matmul_shape over
-  //             ke->cached_lift.store_root) -- session 5 retired the
-  //             tile_analyze_gemm fallback (apply_opt.c:54-63)
-  //   - n_applied < MAX_OPTS                           (apply_opt.c:66)
-  //
-  // The lifter's `cur_extent[]` was a S_RANGE-derived view of the same
-  // shape that `kernel_apply_opt` validates against
-  // `axes_compute_full_shape` (signal-derived from output_shape +
-  // applied_opts);
-  // for any well-formed kernel (whether produced by rangeify or by a
-  // direct hand-write whose output_shape matches the BUFFERIZE S_RANGE
-  // extents) the two views agree by construction.  No production path
-  // writes `applied_opts[]` without going through `kernel_apply_opt` /
-  // `tile_anno_record_opt` (the only writers in tree).
-  //
-  // The lifter now emits ONE bare UOP_RANGE leaf per BUFFERIZE origin
-  // with its pre-split extent + axis_type; the post-lift UPatRule pass
-  // (`uop_apply_split_dag` + `uop_apply_kernel_opts` in materialize.c)
+  // Emit ONE bare UOP_RANGE leaf per BUFFERIZE origin with its
+  // pre-split extent + axis_type; the post-lift pass
+  // (uop_apply_split_dag + uop_apply_kernel_opts in materialize.c)
   // rewires them into the (outer * k + inner) chain and stamps
   // axis_types per applied_opts.  Per-USE auxiliary S_RANGE leaves
-  // (KOP_GROUP / KOP_GROUPTOP wraps) are still handled below.
+  // (KOP_GROUP / KOP_GROUPTOP wraps) are handled below.
+  // Validation of applied_opts (axis bounds, split divisibility,
+  // KOP_GLOBAL extent, etc.) lives in kernel_apply_opt at WRITE time;
+  // this lifter trusts the cached entries.
   u32 n_buf = (u32)bu->src_count - 1;
   if (n_buf > MAX_DIM) {
     lift_reject_log(ke, buf_sid, "entry/bufferize-ndim");
@@ -2255,7 +2223,6 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     u32 axes_idx = n_buf + per_use_idx;
     per_use_idx++;
     if (orig_kax != NULL && axes_idx < axes_resolve_n_axes(ke)) {
-      // E9 session 3 piece B-lite: applied_opts via tile_anno facade.
       KOpt const *applied_opts_p = tile_anno_applied_opts(ke);
       u32         applied_opts_n = tile_anno_applied_opts_count(ke);
       for (u32 oi = 0; oi < applied_opts_n; oi++) {
