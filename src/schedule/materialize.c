@@ -2660,18 +2660,16 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // that plan while default dispatch still routes through the existing
   // scalar/KProgOp paths.  When rangeify bails (op not yet supported,
   // broadcast pattern not handled, etc.), the legacy KProgOp[]
-  // dispatch runs and scalar_uops/tile_uops stay empty.  DEFAULT-ON
-  // as of Phase E -- THVM_RANGEIFY=0 disables and reverts to the
-  // legacy emit path for every kernel.
+  // dispatch runs and scalar_uops/tile_uops stay empty.  Default ON;
+  // THVM_RANGEIFY=0 disables and reverts to the legacy emit path.
   // Reads getenv per emit (cheap; ~1us) so test harnesses can flip
   // the flag mid-session without restarting the runtime.
   // Multi-output kernels (spliced_ok above) can't go through
   // rangeify today: rangeify_try_lower_elementwise emits a single
   // S_BUFFERIZE / S_STORE pair against output slot 0, with no
   // facility for a second BUFFERIZE rooted at the extra-output
-  // slot.  Skip lowering on those kernels so cpu_dispatch_kernel's
-  // path 5 (scalar-uops) doesn't fire and dispatch falls through
-  // to path 6 (cpu_interpret), which DOES honor
+  // slot.  Skip lowering on those kernels so dispatch falls through
+  // to the legacy emit path, which honors
   // KProgOp.store_extra_plus_one.  Rangeify multi-output is
   // tracked as a separate follow-up under
   // docs/plans/rewrite_fusion.md.
