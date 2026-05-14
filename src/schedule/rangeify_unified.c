@@ -878,15 +878,37 @@ fn Term rangeify_unified_store_root_at(u32 node_idx) {
 // downstream stride-collapse simplification yields the same scalar.
 static Term ru_build_index_addr(RuRangeMap const *rm) {
   if (rm->out_ndim == 0) return uop_const(DT_INT32, 0);
-  // Row-major: addr = ... ((r0*d1 + r1)*d2 + r2)*d3 + ...
-  // We don't have the consumer's shape dims handy without rederiving,
-  // so we emit a flat IADD of all ranges (real-stride wiring is a
-  // follow-up that needs the producer's shape).
-  Term acc = rm->out_rngs[0];
-  for (u8 a = 1; a < rm->out_ndim; a++) {
-    acc = uop_int_binary(UOP_IADD, acc, rm->out_rngs[a]);
+  // Row-major: addr = r[0]*prod(d[1..]) + r[1]*prod(d[2..]) + ... + r[n-1].
+  // Range extents live at field 2 of each UOP_RANGE heap node.  Strides
+  // are computed innermost-first.
+  u32 dims[RU_MAX_AXES] = {0};
+  for (u8 a = 0; a < rm->out_ndim; a++) {
+    Term r = rm->out_rngs[a];
+    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
+      // Fallback: flat IADD if any range isn't a recognisable extent.
+      Term acc = rm->out_rngs[0];
+      for (u8 b = 1; b < rm->out_ndim; b++) {
+        acc = uop_int_binary(UOP_IADD, acc, rm->out_rngs[b]);
+      }
+      return acc;
+    }
+    dims[a] = (u32)term_val(heap_read(term_val(r) + 2));
   }
-  return acc;
+  u32 strides[RU_MAX_AXES] = {0};
+  strides[rm->out_ndim - 1] = 1;
+  for (i8 a = (i8)rm->out_ndim - 2; a >= 0; a--) {
+    strides[a] = strides[a + 1] * dims[a + 1];
+  }
+  Term acc = 0;
+  for (u8 a = 0; a < rm->out_ndim; a++) {
+    Term term = rm->out_rngs[a];
+    if (strides[a] != 1) {
+      term = uop_int_binary(UOP_IMUL, term,
+                            uop_const(DT_INT32, strides[a]));
+    }
+    acc = (acc == 0) ? term : uop_int_binary(UOP_IADD, acc, term);
+  }
+  return acc != 0 ? acc : uop_const(DT_INT32, 0);
 }
 
 // Count of UOP_BUFFERIZE nodes emitted on the main heap by the most
