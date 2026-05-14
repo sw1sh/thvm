@@ -5,11 +5,13 @@ Forward, autograd, kernel scheduling, and CPU + Metal dispatch
 all live as rewrite rules over a single flat heap. Wolfram
 Language is the host; C is the runtime.
 
-Successor to the earlier
-[sw1sh/TinyHVM](https://github.com/sw1sh/TinyHVM) prototype,
-which explored HVM-style interaction nets directly in Wolfram
-Language; this repository rebuilds that core in C and grows
-the tensor / autograd / kernel-scheduling layers on top.
+Clean-room rewrite of [sw1sh/TinyHVM](https://github.com/sw1sh/TinyHVM),
+the earlier research project that explored the same HVM + tinygrad
+fusion (single-TU C runtime, paclet, Python, Metal, autograd as
+interaction rules). thvm rebuilds that design from scratch with a
+stricter software-engineering workflow now that the mechanisms are
+clear -- small files, path-is-the-function-name, one interaction per
+file, tests-first, and per-piece architecture docs.
 
 - Architecture, one piece per page: [docs/README.md](docs/README.md)
 - WL-side style rules: [wl/GUIDE.md](wl/GUIDE.md)
