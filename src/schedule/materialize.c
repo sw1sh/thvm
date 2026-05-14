@@ -2602,6 +2602,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
     if (rangeify_direct_enabled() && getenv("THVM_LIFT_BUFFERIZE_TRACE")) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       Term l_root  = ke->cached_lift.store_root;
+      // Under THVM_LIFT_BUFFERIZE_SIMPLIFY=1, run uop_graph_simplify
+      // on both before comparing.  Catches canonicalization-only
+      // divergences (IADD/IMUL nesting order, identity folds, etc.).
+      if (getenv("THVM_LIFT_BUFFERIZE_SIMPLIFY")) {
+        if (l_root != 0)  l_root  = uop_graph_simplify(l_root);
+        if (ru_root != 0) ru_root = uop_graph_simplify(ru_root);
+      }
       if (ru_root != 0 && ru_root != l_root) {
         Term l_buf   = uop_store_buf  (l_root);
         Term l_addr  = uop_store_addr (l_root);
