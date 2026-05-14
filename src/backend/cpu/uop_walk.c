@@ -12,10 +12,12 @@
 // UOP_CAST, UOP_BITCAST, UOP_REDUCE (SUM/MAX) -- the same set the
 // renderer emits.
 //
-// Wired into cpu_dispatch_kernel between cpu_jit_dispatch and the
-// scalar_uops + per-op interpreter fallbacks. Gated initially by
-// THVM_CPU_UOP_WALK=1 (defaults off in the first landing); once
-// validated bit-equal across the surgical suite the default flips.
+// Wired into cpu_dispatch_kernel after cpu_blas_dispatch.  The
+// scalar-UOp interpreter fallback (cpu_dispatch_scalar) and the
+// tile interpreter (cpu_dispatch_tile) were deleted once the
+// walker's coverage reached every kernel shape the suite produces.
+// Default-ON; THVM_CPU_UOP_WALK=0 retained for bisection but the
+// only remaining downstream fallback is cpu_jit_dispatch.
 //
 // LIMITATIONS: f32 only for the float ALU evaluator; integer values
 // are evaluated as i64. Mixed-dtype kernels (CAST chains) are
