@@ -153,9 +153,13 @@ Remaining 4b/4c/4d/4e/4f deletions are now unblocked but require multi-file C su
     - **A1.13 (Phase 4e-1, commit `fa7b395f`)**: `cpu_dispatch_tile` + ScalarUop interpreter helpers (`eval_scalar`, `eval_index`, `eval_iter_ref_extent`, `ScalarCtx`, `scalar_load_typed`, `scalar_store_typed`) deleted from `src/backend/cpu/interpret.c` (-909 LOC net across 5 files; interpret.c shrunk 1073 -> 198 lines). `tests/test_tile_graph.c` retained (its primary subjects are tile-plan arena lifecycle, conv2d analysis, kernel-axes seeding — not the deleted interpreter).
     - **4b/3.a remaining (multi-session)**: three ScalarUop arena readers still alive and block field deletion:
         - `src/schedule/kernel_lift.c` main walker (2368 LOC; ~1745 LOC of it lifts the arena to UOp DAG). Plan: delete once `compute_root` is the only consumer.
-        - `src/schedule/tile.c::tile_build_from_scalar` (~750 LOC of 1590) - still feeds Metal-tile dispatch shape via `tile_sync_from_scalar` (callers in materialize.c, render_metal.c, autotune.c, thvmlink.c).
         - `src/schedule/uop_to_scalar.c` (136 LOC) - the bidirectional bridge; rangeify.c uses it to lift scalar ops to UOp form during address construction.
         - `src/schedule/rangeify.c` (47 refs) - the writer side that emits the arena.
+- **Phase 4e-2 LANDED (commit `aa6b6a84`)**: `tile_build_from_scalar` + 13 obsolete tile_uops test cases deleted (-670 LOC). `tile_uops.wlt` retired (-286 LOC, commit `00728dfc`). `tile_sync_from_scalar` no-op stub + all 8 callers deleted (-18 LOC, commit `728ebe1c`).
+- **Phase 4f LANDED (commit `5b99749d`)**: THVM_RANGEIFY_DIRECT=0 legacy path retired (-1255 LOC, 9 named bufferize rules + ~30 helpers).
+- **Phase 5c LANDED (commit `099cbbea`)**: `inline-softmax-broadcast-reduce` moved inline pre-seed; the post-pass rule + re-run gone.
+- **Phase 4f-2 LANDED (commit `a5b6de98`)**: THVM_UNIFIED_RANGEIFY=0 OLD path retired (-121 LOC, `bufferize_rangeify_enabled` gate + OLD-else body).
+- **Phase 4f-3 LANDED (commits `320b9253` + `dd653362` + `7b9c1f70`)**: bufferize_rewrite_apply harness retired, attribution helpers + dead reason flags removed (-137 LOC), test_bufferize_classify cleaned to 29/29 green (commit `76f99d1c`, -9 obsolete tests).
     - **4b/3.b**: delete `KernelEntry.program` / `n_ops` / `ops_cap` field. Only after 4b/3.a; verify by stubbing `ke->program = NULL` and re-running the 8 suites.
     - **4b/3.c**: delete `KProgOp` struct (49 hits in `rangeify.c` + `materialize.c` + `thvm.h`; fields `chain_op_idx`, `chain_edge_idx`, `chain_input_slot`, `source_uop`, `store_extra_plus_one` route the bufferize-chain wedge, multi-output splice, and `uop_grad`'s numel recovery).
 - 4c. Delete `KernelEntry.scalar_uops` / ScalarUop arena / S_* opcodes. The unified pass produces the lowered UOp DAG directly; no separate scalar arena needed.

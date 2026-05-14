@@ -648,18 +648,12 @@ static void topo_sort_boundaries(Term root) {
 // (tinygrad/engine/realize.py); thvm reuses the legacy topo and
 // attaches the unified-pass Term per slot for KernelEntry wiring.
 //
-// Gate: thvm_materialize calls this when rangeify_unified_enabled() is
-// 1 (THVM_UNIFIED_RANGEIFY=1, default ON).  Set the env var to 0 to
-// revert to topo_sort_boundaries directly.
-//
-// Does NOT mutate BUFFERIZE_NODES.realized -- the
-// inline-softmax-broadcast-reduce rule runs AFTER run_rangeify_unified
-// inside bufferize_classify and must remain authoritative for the
-// realize set.  RU_BUFFERIZE_TERM[i] reflects RU's snapshot BEFORE
-// that rule; capturing it as a side attribute (BOUNDARY_BUFFERIZE_TERM)
-// leaves the realize set under bufferize_classify's control while
-// still giving emit_kernel_for_boundary a handle on the lowered-DAG
-// boundary Term.
+// Does NOT mutate BUFFERIZE_NODES.realized -- bufferize_classify's
+// pre-seed pass (including the inline softmax-broadcast-reduce unmark)
+// has already settled the realize set before the unified pass runs.
+// Capturing RU_BUFFERIZE_TERM[i] as a side attribute (BOUNDARY_BUFFERIZE_TERM)
+// gives emit_kernel_for_boundary a handle on the lowered-DAG boundary
+// Term without altering the realize bits.
 static void topo_sort_buffers_unified(Term root) {
   topo_sort_boundaries(root);
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
