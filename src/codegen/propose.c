@@ -57,10 +57,8 @@ static u32 propose_uop_reduce_axis_size(KernelEntry const *ke) {
   return uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
 }
 
-// Slice 8 session 5: TC tile-size proposer counter.  The legacy
-// fallback arm (tile_analyze_gemm over program[]) retired with session
-// 5's tile.c deletion; the only remaining gate is the DAG classifier.
-// Counter retained for surgical-suite coverage assertions.
+// TC tile-size proposer counter.  The only gate is the DAG
+// classifier; counter exposes coverage to the surgical suite.
 static u64 PROPOSE_TC_DAG = 0;
 
 fn u64 kernel_opts_propose_tc_dag_count(void) {
@@ -70,9 +68,8 @@ fn void kernel_opts_propose_tc_counters_reset(void) {
   PROPOSE_TC_DAG = 0;
 }
 
-// Slice 8 session 5: matmul-shape + dtype gate for the TC tile-size
-// proposer reads uop_dag_classify_matmul_shape over
-// ke->cached_lift.store_root.
+// Matmul-shape + dtype gate for the TC tile-size proposer.  Reads
+// uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
 static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   UopDagGemmShape shape;

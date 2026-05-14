@@ -37,23 +37,19 @@
 //     Reserved.  Rejected here; no axis-structure mutation.
 //
 //   TC
-//     Kernel-aware metadata (matmul-shape gate).  Slice 8 session 5:
-//     reads `ke->cached_lift.store_root` via
-//     `uop_dag_classify_matmul_shape` (DAG-side matmul classifier).
-//     The legacy `tile_analyze_gemm` fallback retired with the
-//     dedicated KProgOp-side recogniser; rangeify produces the
-//     canonical MUL+REDUCE+OPT_TC scalar_uops pattern for every
-//     matmul-shaped kernel, which the lifter (kernel_lift_to_uop)
-//     turns into the UOp DAG this gate inspects.  Does not mutate
-//     axis structure; routes to tile_anno_record_opt.
+//     Kernel-aware metadata (matmul-shape gate).  Reads
+//     ke->cached_lift.store_root via uop_dag_classify_matmul_shape
+//     (DAG-side matmul classifier).  Rangeify produces the canonical
+//     MUL+REDUCE+OPT_TC scalar_uops pattern for every matmul-shaped
+//     kernel, which the lifter (kernel_lift_to_uop) turns into the
+//     UOp DAG this gate inspects.  Does not mutate axis structure;
+//     routes to tile_anno_record_opt.
 //
 // Returns 1 on success, 0 on validation failure (axis out of range,
 // arg doesn't divide, applied_opts full, MAX_AXES exceeded).
 
-// Slice 8 session 5: KOP_TC gate counter.  The legacy fallback arm
-// (tile_analyze_gemm over program[]) retired with session 5's tile.c
-// deletion; the only remaining gate is the DAG classifier.  The
-// counter is kept to expose dispatch coverage to the surgical suite.
+// KOP_TC gate counter -- exposes dispatch coverage of the DAG
+// classifier to the surgical suite.
 static u64 APPLY_OPT_TC_GATE_DAG = 0;
 
 fn u64 kernel_apply_opt_tc_dag_count(void) {
@@ -63,7 +59,7 @@ fn void kernel_apply_opt_tc_counters_reset(void) {
   APPLY_OPT_TC_GATE_DAG = 0;
 }
 
-// Slice 8 session 5: matmul-shape + dtype gate for KOP_TC reads
+// Matmul-shape + dtype gate for KOP_TC: reads
 // uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
 // Returns 1 with `*out_dtype` populated on match; 0 otherwise.
 static int apply_opt_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
@@ -129,12 +125,11 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (sched->n_applied >= MAX_OPTS) {
     return 0;
   }
-  // E9 session 5: `_writer.full_shape[]` / `_writer.n_axes` retired.
   // Derive the current pre-opt extents on-demand from
   // (output_shape + tail-reduce + scalar-reduce + applied_opts) via
-  // `axes_compute_full_shape`.  Validate the opt against the derived
-  // scratch, then append to applied_opts -- subsequent calls see the
-  // post-opt state by replaying the longer log.
+  // axes_compute_full_shape.  Validate the opt against the derived
+  // scratch, then append to applied_opts -- subsequent calls see
+  // the post-opt state by replaying the longer log.
   u32 cur_shape[MAX_AXES];
   u32 n_axes = axes_compute_full_shape(ke, cur_shape, MAX_AXES);
   if (n_axes == 0 || opt.axis >= n_axes) {
@@ -173,8 +168,8 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   }
 
   sched->applied_opts[sched->n_applied++] = opt;
-  // E9 session 2: no version++.  Freshness is `tile_axes_hash(ke)` over
-  // (applied_opts, output_shape, source_uop) -- recording the new opt
-  // already mutates the hash deterministically.
+  // No version bump: freshness is tile_axes_hash(ke) over
+  // (applied_opts, output_shape, source_uop) and recording the new
+  // opt already mutates that hash deterministically.
   return 1;
 }
