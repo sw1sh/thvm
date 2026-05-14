@@ -582,9 +582,16 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     }
   }
   if (ndim == 0 || ndim != outer_rank) {
-    // Match the env-gating on every other lift_reject_log site --
-    // the unconditional one-line stderr print used to fire even
-    // when the bench wasn't asking for diagnostics.
+    // Telemetry on the 8-suite run (THVM_DUMP_LIFT_REJECT=1):
+    // 12 hits collapse to two unhandled outer_rank > ndim shapes
+    // on a 1D buffer (dim=[8]):
+    //   - outer_rank=2 range_extents=[4,8]  (x10) -- broadcast leading,
+    //     last range matches dim (offset = r[outer_rank-1] * 1).
+    //   - outer_rank=2 range_extents=[2,4]  (x2)  -- flattened iter
+    //     where prod(extents) == dim (offset = r[0]*4 + r[1]).
+    // Closing these two fast paths is the precondition for deleting
+    // cpu_dispatch_scalar (the path-5 fallback that currently catches
+    // these declines).
     char const *e = getenv("THVM_DUMP_LIFT_REJECT");
     int dump_on = (e != NULL && e[0] == '1');
     if (dump_on) {
