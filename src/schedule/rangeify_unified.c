@@ -1019,22 +1019,11 @@ fn void pm_apply_rangeify(Term root) {
       // rewritten value.  Only emit if dtype is recoverable; the
       // legacy lifter remains the fallback otherwise.
       u32 store_dtype = 0;
-      if (n_closed > 0 && n_closed <= MAX_DIM
-          && term_dtype_in(rewritten, 0, &store_dtype)
-          && store_dtype != 0) {
-        u32 dims[MAX_DIM] = {0};
-        int dims_ok = 1;
-        for (u32 d = 0; d < n_closed; d++) {
-          Term r = closed_ranges[d];
-          if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
-            dims_ok = 0; break;
-          }
-          dims[d] = (u32)term_val(heap_read(term_val(r) + 2));
-          if (dims[d] == 0) { dims_ok = 0; break; }
-        }
-        if (dims_ok) {
+      if (term_dtype_in(self, 0, &store_dtype) && store_dtype != 0) {
+        Shape out_shape = {0};
+        if (term_shape_in(self, 0, &out_shape) && out_shape.ndim <= MAX_DIM) {
           Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, store_dtype,
-                                         n_closed, dims, 0);
+                                         out_shape.ndim, out_shape.dims, 0);
           RU_STORE_ROOT[i] = uop_store(out_buf, my_addr, rewritten);
         }
       }
