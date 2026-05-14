@@ -126,12 +126,6 @@ static void bufferize_node_mark(UOpInfo *info, u32 reason) {
   }
   info->realized = 1;
   info->reasons |= reason;
-  // Forward to the bufferize graph so rule-driven boundary additions
-  // (e.g. metal-tile-fanin-cap promoting a child) get a B_BUFFERIZE
-  // record stamped with the current rule.  bufferize_realize_with_reason
-  // is a no-op until bufferize_seed_from_nodes has run, so the
-  // initial ROOT/MULTI/REDUCE seed pass does not double-mutate.
-  bufferize_realize_with_reason(info->loc, info->op, reason);
 }
 
 static void bufferize_node_unmark(UOpInfo *info, u32 reason) {
@@ -139,16 +133,13 @@ static void bufferize_node_unmark(UOpInfo *info, u32 reason) {
     return;
   }
   // Matmul reduces stay realized: we want them as their own kernel so
-  // tile_analyze_gemm passes (clean 2-input/2-op program) and dispatch
-  // routes through metal-gemm-with-TC instead of metal-tile (~40x).
-  // Diagnosed in Levels 27-36 of docs/plans/autotune_beam_profile.md.
+  // dispatch routes through metal-gemm-with-TC.
   if (info->reasons & BUFFERIZE_REASON_MATMUL) {
     info->reasons |= reason;
     return;
   }
   info->realized = 0;
   info->reasons |= reason;
-  bufferize_unrealize(info->loc);
 }
 
 // Find the first UOP node reachable from a Term, descending through any

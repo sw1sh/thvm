@@ -2034,10 +2034,6 @@ typedef struct {
 fn void              bufferize_classify(Term root);
 fn void              bufferize_seed_from_nodes(Term root);
 fn void              bufferize_finalize_stores(Term root);
-fn void              bufferize_set_current_rule(char const *name);
-fn char const       *bufferize_current_rule(void);
-fn void              bufferize_unrealize(u64 loc);
-fn void              bufferize_realize_with_reason(u64 loc, u8 op, u32 reason);
 fn u32               bufferize_buffer_count(void);
 fn u32               bufferize_realized_count(void);
 fn BBufferize const *bufferize_buffer_at(u32 i);

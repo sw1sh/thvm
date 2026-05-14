@@ -44,7 +44,6 @@ static BIndexRule BUFFERIZE_INDEX_RULES[6] = {
 // bufferize_rewrite_apply sets this around each rule->apply call so
 // bufferize_node_mark/bufferize_node_unmark can stamp the rule that decided.
 // NULL means "outside any named rule" (seeding, post-pass cleanup).
-static char const *BUFFERIZE_CURRENT_RULE = NULL;
 
 // Reason mirror: only the bits already on BUFFERIZE_NODES map across.
 // Phase 1 still uses inline BUFFERIZE_REASON_INLINE to mark "a rule
@@ -562,7 +561,6 @@ fn void bufferize_seed_from_nodes(Term root) {
   BUFFERIZE_BUFS_LEN     = 0;
   BUFFERIZE_STORES_LEN   = 0;
   BUFFERIZE_INDEXES_LEN  = 0;
-  BUFFERIZE_CURRENT_RULE = NULL;
 
   // Non-UOp roots are not schedulable; leave the graph empty.
   if (term_tag(root) != TAG_UOP) return;
@@ -627,65 +625,6 @@ fn void bufferize_finalize_stores(Term root) {
 
   bufferize_dump(root);
   bufferize_dump_candidates();
-}
-
-fn void bufferize_set_current_rule(char const *name) {
-  BUFFERIZE_CURRENT_RULE = name;
-}
-
-fn char const *bufferize_current_rule(void) {
-  return BUFFERIZE_CURRENT_RULE;
-}
-
-fn void bufferize_unrealize(u64 loc) {
-  // Forwarders only take effect inside bufferize_rewrite_apply, which
-  // sets the current-rule pointer.  Calls outside that window
-  // (e.g. the ROOT/MULTI/REDUCE seeding pass that runs before the
-  // graph has been (re)snapshotted) would otherwise mutate stale
-  // state from a previous bufferize_classify.
-  if (BUFFERIZE_CURRENT_RULE == NULL) return;
-  u32 idx = bufferize_find_by_loc(loc);
-  if (idx == 0xFFFFFFFFu) return;
-  BBufferize *b = &BUFFERIZE_BUFS[idx];
-  if (!b->realized) return;     // already removed; first rule wins
-  b->realized   = 0;
-  b->removed_by = BUFFERIZE_CURRENT_RULE;
-}
-
-fn void bufferize_realize_with_reason(u64 loc, u8 op, u32 reason) {
-  if (BUFFERIZE_CURRENT_RULE == NULL) return;
-  u32 idx = bufferize_find_by_loc(loc);
-  if (idx != 0xFFFFFFFFu) {
-    BBufferize *b = &BUFFERIZE_BUFS[idx];
-    b->reasons |= bufferize_project_reasons(reason);
-    if (!b->realized) {
-      // A previously-removed buffer that a later rule re-realizes
-      // (e.g. fanin-cap promoting a child).  Drop the removed_by
-      // stamp - the new rule owns it now.
-      b->realized   = 1;
-      b->removed_by = NULL;
-      b->added_by   = BUFFERIZE_CURRENT_RULE;
-    }
-    return;
-  }
-  // Brand-new buffer introduced by a rule (fanin-cap is the only
-  // current example).  Look up consumer_count from BUFFERIZE_NODES so
-  // the bufferize record stays consistent with the projection.
-  if (BUFFERIZE_BUFS_LEN >= BUFFERIZE_GRAPH_CAP) return;
-  u32 ri = bufferize_info_find(loc);
-  u32 cc = (ri != 0xFFFFFFFFu) ? BUFFERIZE_NODES[ri].consumer_count : 0;
-  u32 rb = (ri != 0xFFFFFFFFu) ? BUFFERIZE_NODES[ri].reasons        : reason;
-  BBufferize *b = &BUFFERIZE_BUFS[BUFFERIZE_BUFS_LEN];
-  b->loc            = loc;
-  b->buffer_id      = BUFFERIZE_BUFS_LEN + 1;
-  b->reasons        = bufferize_project_reasons(rb);
-  b->consumer_count = cc;
-  b->op             = op;
-  b->is_root        = 0;
-  b->realized       = 1;
-  b->removed_by     = NULL;
-  b->added_by       = BUFFERIZE_CURRENT_RULE;
-  BUFFERIZE_BUFS_LEN++;
 }
 
 fn u32 bufferize_buffer_count(void) {
