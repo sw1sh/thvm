@@ -41,10 +41,10 @@ static int RMU_TARGET_C = 0;
 
 // Buffer name resolution.
 //
-// Phase C slice 3 (structural slot indexing): production callers
-// resolve buffer names through the UOP_BUFFER `instance` field
-// (kernel_lift.c sets instance=0 on the output and instance=slot+1 on
-// the i-th input).  rmu_buf_name(t) decodes instance directly:
+// Production callers resolve buffer names through the UOP_BUFFER
+// `instance` field (kernel_lift.c sets instance=0 on the output and
+// instance=slot+1 on the i-th input).  rmu_buf_name(t) decodes
+// instance directly:
 //
 //   instance == 0  -> "out" (resolved via the legacy map below)
 //   instance >= 1  -> "in<instance-1>"
@@ -2497,10 +2497,10 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   fputs("}\n", fp);
 }
 
-// Phase C slice 3: structural-mode MSL renderer.  Walks `root` to
-// discover every UOP_BUFFER node by `instance` (output at slot 0,
-// input at slot k+1).  No `out_buf`/`in_bufs[]` parameters: the
-// caller passes the post-lift root (e.g. ke->compute_root /
+// Structural-mode MSL renderer.  Walks `root` to discover every
+// UOP_BUFFER node by `instance` (output at slot 0, input at
+// slot k+1).  No out_buf/in_bufs[] parameters: the caller passes
+// the post-lift root (e.g. ke->compute_root /
 // ke->cached_lift.store_root) and the renderer derives the kernel
 // signature from the DAG itself.
 //
@@ -2637,7 +2637,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   fputs("}\n", fp);
 }
 
-// Phase C slice 3: structural-mode C99 renderer.  Counterpart of
+// Structural-mode C99 renderer.  Counterpart of
 // cg_render_uop_kernel_root for the CPU JIT path.  Discovers buffer
 // slots from `root` via UOP_BUFFER.instance instead of trusting an
 // out_buf/in_bufs[] tuple from the caller.  cpu/jit.c uses this to

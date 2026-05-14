@@ -87,13 +87,12 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
       h ^= 0xC0u; h *= 0x100000001b3ULL;
     }
   }
-  // Phase C slice 7: when the lift succeeded the kernel's structural
-  // identity is encoded by the lifted UOp DAG root (a hash-consed
-  // Term).  Fold the root Term itself in -- equal lifted DAGs share
-  // a Term value, so this gives the same de-dup behaviour as the
-  // KProgOp byte-hash (and works when program[] is NULL under
-  // THVM_PHASE_C7_FREE_PROGRAM).  Falls back to KProgOp bytes when
-  // the lift declined.
+  // When the lift succeeded the kernel's structural identity is
+  // encoded by the lifted UOp DAG root (a hash-consed Term).  Fold
+  // the root Term in -- equal lifted DAGs share a Term value, so
+  // this gives the same de-dup as the KProgOp byte-hash and works
+  // when program[] is NULL under THVM_PHASE_C7_FREE_PROGRAM.  Falls
+  // back to KProgOp bytes when the lift declined.
   if (ke->cached_lift.store_root != 0) {
     h ^= (u64)ke->cached_lift.store_root; h *= 0x100000001b3ULL;
   } else {
@@ -157,24 +156,19 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // (lift_to_uop returns 0) bail to the interpreter naturally; no
   // silent JIT compile of a wrong kernel.
   //
-  // Phase C slice 2: read the cached KernelUopLift populated by
+  // Read the cached KernelUopLift populated by
   // emit_kernel_for_boundary.  The lift is deterministic in the
-  // post-materialize kernel state (program[] / scalar_uops[] /
-  // input_views[] are immutable after materialize), so reading from
-  // cache produces the same store_root / out_buf / in_bufs[] as a
-  // fresh kernel_lift_to_uop call would.  When materialize-time
-  // lift declined, cached_lift.store_root is 0 -- early-bail to the
-  // interpreter (matches slice 1 behavior; second lift would have
-  // declined identically).
+  // post-materialize kernel state, so reading from cache produces
+  // the same store_root / out_buf / in_bufs[] as a fresh
+  // kernel_lift_to_uop call.  When the lift declined, store_root
+  // is 0 -- early-bail to the interpreter.
   //
-  // Phase C slice 3: pass the cached store_root directly into the
-  // structural-mode renderer entry point.  Buffer names (out, inN)
-  // are decoded from each UOP_BUFFER's instance field (set by
-  // kernel_lift.c to slot+1 on inputs, 0 on the output).
-  // ke->cached_lift.in_bufs[] is no longer load-bearing for buffer
-  // naming; it's still useful as a GC root and as a cache for
-  // cpu_uop_walk's per-slot identity matching, but the renderer
-  // doesn't consult it.
+  // Pass cached_lift.store_root directly into the structural-mode
+  // renderer entry point: buffer names (out, inN) are decoded from
+  // each UOP_BUFFER's instance field (kernel_lift.c sets slot+1 on
+  // inputs, 0 on the output).  in_bufs[] is kept as a GC root and a
+  // per-slot identity cache for cpu_uop_walk; the renderer doesn't
+  // consult it.
   if (ke->cached_lift.store_root == 0) return NULL;
   Term store_root = ke->cached_lift.store_root;
   char buf[16384];
@@ -310,10 +304,9 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     nums_buf[i] = ke->input_numels[i];
   }
   void *out = CPU_BUFS[out_buf_id].data;
-  // Phase C slice 7: read the output numel from KernelEntry directly
-  // (output_numel is set independently of program[]).  Previously we
-  // read program[n_ops-1].numel which is null-unsafe under
-  // THVM_PHASE_C7_FREE_PROGRAM=1.
+  // Read the output numel from KernelEntry directly (output_numel
+  // is set independently of program[] and survives the
+  // THVM_PHASE_C7_FREE_PROGRAM=1 free).
   unsigned numel = (unsigned)ke->output_numel;
   if (numel == 0 && ke->n_ops > 0 && ke->program != NULL) {
     numel = ke->program[ke->n_ops - 1].numel;

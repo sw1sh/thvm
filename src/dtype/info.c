@@ -1,11 +1,10 @@
 // dtype/info.c - dtype metadata table.
 //
-// The runtime carries a dtype tag on every numeric value (TAG_NUM ext,
-// UOP_CONST ext, TAG_TEN ext, TenDesc.dtype, KProgOp.dtype).  The set
-// mirrors tinygrad's full dtype enum (15 concrete dtypes plus packed
-// int4/uint4 for modern quantization).  Every slot has a populated
-// row by the end of Phase F; reserved rows (none today) trip the
-// assertion in dtype_itemsize().
+// The runtime carries a dtype tag on every numeric value (TAG_NUM
+// ext, UOP_CONST ext, TAG_TEN ext, TenDesc.dtype, KProgOp.dtype).
+// The set mirrors tinygrad's full dtype enum (15 concrete dtypes
+// plus packed int4/uint4).  Reserved rows trip the assertion in
+// dtype_itemsize().
 //
 // Reference: TinyHVM/tinygrad/tinygrad/dtype.py:130-146.
 //
@@ -15,8 +14,7 @@
 // src/backend/metal/_.m, which only #includes thvm.h) can call them.
 
 // Indexed by DT_* enum.  The 32-slot fixed size keeps the 6-bit ext
-// field safe.  Phase A: only DT_FP32 (slot 13) and DT_INT32 (slot 5)
-// are wired; reserved slots have itemsize=0.
+// field safe.  Reserved slots have itemsize=0 and abort on lookup.
 static DTypeInfo const DTYPE_INFO[32] = {
     [DT_BOOL]      = { 1, DK_BOOL,      8, 0, "bool"     },
     [DT_INT8]      = { 1, DK_SINT,      8, 1, "i8"       },
@@ -46,9 +44,8 @@ DTypeInfo const *dtype_info(u32 dt) {
 
 u32 dtype_itemsize(u32 dt) {
     if (dt >= 32 || DTYPE_INFO[dt].itemsize == 0) {
-        // Phase A: nothing past F32/I32 is wired yet.  Fail loudly so
-        // call sites surface the missing rows during the per-phase
-        // rollout instead of silently sizing buffers to 0.
+        // Fail loudly on unwired rows rather than silently sizing
+        // buffers to 0.
         fprintf(stderr, "dtype_itemsize: dtype %u not yet enabled\n", dt);
         abort();
     }

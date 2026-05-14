@@ -47,11 +47,9 @@ static u32 propose_scalar_reduce_axis_size(KernelEntry const *ke) {
   return 0;
 }
 
-// Phase C slice 4: when cached_lift.store_root is populated walk the
-// lifted UOp DAG for the reduce axis extent.  Used by autotune-time
-// callers that already pay the lift cost at materialize-time; ke->
-// cached_lift.store_root is always populated post-lifter-coverage-
-// closure (commit ee882fe5).
+// Walk the lifted UOp DAG for the reduce axis extent when
+// cached_lift.store_root is populated (the autotune-time path
+// pays the lift cost at materialize-time).
 static u32 propose_uop_reduce_axis_size(KernelEntry const *ke) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   return uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
@@ -250,10 +248,10 @@ static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
   if (propose_metal_tile_scalar_reduce_kernel(ke)) {
     return 1;
   }
-  // Phase C slice 4: when cached_lift.store_root is populated, mirror
-  // the per-op KProgOp gate via the lifted UOp DAG: every
-  // dtype-carrying node is FP32 AND at least one UOP_REDUCE is
-  // reachable.  Lifted kernels skip the per-op walk entirely.
+  // When cached_lift.store_root is populated, mirror the per-op
+  // KProgOp gate via the lifted UOp DAG: every dtype-carrying node
+  // is FP32 AND at least one UOP_REDUCE is reachable.  Lifted
+  // kernels skip the per-op walk entirely.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (ke->input_dtypes[i] != DT_FP32) {
       return 0;
@@ -366,17 +364,14 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     }
   }
 
-  // Gate flip (slice 8 conv2d-flat session): mirrors the BEAM TC entry
-  // gate above.  `tile_analyze_conv2d_flat` now accepts DAG kernels via
-  // `uop_dag_classify_conv2d_flat_shape` (when
-  // `ke->cached_lift.store_root != 0`) AND keeps the legacy program[]
-  // path as a fallback for lift-decline fixtures.  The outer
-  // `axes != NULL && axis_count > 0` proxy is replaced by
-  // `cached_lift.store_root != 0` for production kernels, mirroring
-  // the slice 8 BEAM TC entry above.  The legacy fixture in
-  // `tests/test_tile_graph.c::metal-conv2d-flat-proposes-local` builds
-  // KProgOp + KpSchedule but never runs the lifter, so we OR the gate:
-  // either DAG present OR the legacy axes-presence proxy.
+  // Mirrors the BEAM TC entry gate above.  tile_analyze_conv2d_flat
+  // accepts DAG kernels via uop_dag_classify_conv2d_flat_shape (when
+  // ke->cached_lift.store_root != 0) AND keeps the program[] path
+  // as a fallback for lift-decline fixtures.  OR the gate:
+  // production kernels carry cached_lift.store_root, but the
+  // tests/test_tile_graph.c::metal-conv2d-flat-proposes-local
+  // fixture builds KProgOp + KpSchedule without running the lifter,
+  // so the axes-presence proxy still has to fire.
   if (propose_metal_tile_enabled()
       && (ke->cached_lift.store_root != 0
           || (ke->schedule != NULL
