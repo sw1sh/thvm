@@ -1071,6 +1071,19 @@ fn void pm_apply_rangeify(Term root) {
       Term my_addr   = ru_build_index_addr(rm);
       Term in_addr   = ru_build_input_addr(rm);
       Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
+      // Same REDUCE-axis rewire as the non-realized branch below: when
+      // this node itself is a REDUCE that landed at the realize boundary,
+      // its axis cell still holds the original shape-axis index. The
+      // walker expects the fresh UOP_RANGE.axis_id.
+      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n > 0
+          && term_tag(rewritten) == TAG_UOP
+          && term_ext(rewritten) == UOP_REDUCE) {
+        Term rng = RU_REDUCE_RANGES[i].ranges[0];
+        u32 r_aid = (u32)term_val(heap_read(term_val(rng) + 0));
+        u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
+        Term src  = heap_read(term_val(rewritten) + 0);
+        rewritten = uop_reduce(kind, r_aid, src);
+      }
       Term closed_ranges[MAX_DIM];
       u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
       // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
@@ -1123,6 +1136,22 @@ fn void pm_apply_rangeify(Term root) {
       // verbatim (its TAG_UOP child branch hits our RU_SUBST entry).
       Term in_addr   = ru_build_input_addr(rm);
       Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
+      // Rewire UOP_REDUCE's axis field from the original shape-axis index
+      // (e.g. "axis 1 of {3,2}") to the freshly minted UOP_RANGE's axis_id.
+      // uop_graph_rebuild_with_srcs preserves the original axis cell from
+      // info->loc, but downstream walkers (cpu_uop_walk's uwalk_run_reduce,
+      // render_uop's rmu_emit_store_reduce) match the REDUCE's stored axis
+      // against the body's UOP_RANGE.axis_id -- which is now the fresh
+      // RU_REDUCE_RANGES[i].ranges[0]'s axis_id, not the shape-axis index.
+      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n > 0
+          && term_tag(rewritten) == TAG_UOP
+          && term_ext(rewritten) == UOP_REDUCE) {
+        Term rng = RU_REDUCE_RANGES[i].ranges[0];
+        u32 r_aid = (u32)term_val(heap_read(term_val(rng) + 0));
+        u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
+        Term src  = heap_read(term_val(rewritten) + 0);
+        rewritten = uop_reduce(kind, r_aid, src);
+      }
       RU_SUBST[i] = rewritten;
     }
 
