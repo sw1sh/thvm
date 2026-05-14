@@ -2697,7 +2697,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
     if (lowered) {
       axes_ensure_scalar_reduce(ke);
-      tile_sync_from_scalar(ke);
     }
   }
 

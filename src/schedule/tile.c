@@ -1371,11 +1371,3 @@ fn u32 tile_lower_reduce_broadcast(KernelEntry *ke, u32 reduce_scalar_id,
   return tile_store;
 }
 
-// tile_build_from_scalar deleted: callers (render_metal, materialize,
-// autotune) now route exclusively through the lifter-based dispatch
-// shape.  tile_sync_from_scalar is a no-op stub kept so those callers
-// can stay as-is; it returns 0 unconditionally.
-fn int tile_sync_from_scalar(KernelEntry *ke) {
-  (void)ke;
-  return 0;
-}

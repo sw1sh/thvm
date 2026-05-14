@@ -2437,9 +2437,7 @@ int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
 // uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
 // tile_build_from_scalar (scalar-arena TILE_LOOP_NEST seeder) deleted;
 // dispatch consumers route through the lifter-based path instead.
-// tile_sync_from_scalar is a no-op stub that returns 0; callers handle
 // the failure by routing through the lifter-based dispatch shape.
-fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 

@@ -542,7 +542,6 @@ static int kautotune_apply_seq(KernelEntry *ke, KOptSeq const *seq) {
       return 0;
     }
   }
-  tile_sync_from_scalar(ke);
   return 1;
 }
 
@@ -686,7 +685,6 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
 
   // Leave at baseline.
   axes_reset_to_default(ke);
-  tile_sync_from_scalar(ke);
   return n_out;
 }
 
@@ -739,7 +737,6 @@ fn int kernel_autotune(u32 kid) {
         }
         axes_reset_to_default(ke);
       } else {
-        tile_sync_from_scalar(ke);
         return 0;
       }
     }
@@ -834,7 +831,6 @@ fn int kernel_autotune(u32 kid) {
     }
     return applied;
   }
-  tile_sync_from_scalar(ke);
   if (cache_ready) {
     kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
                           depth, beam_width, best_seq, best_us);
