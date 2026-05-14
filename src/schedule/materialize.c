@@ -23,13 +23,12 @@ static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
 // it without re-doing the bufferize_info_find lookup.
 static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_ORDER_LEN = 0;
-// Direct-rangeify cutover: parallel UOP_BUFFERIZE Term per slot in
-// BOUNDARY_ORDER, populated by topo_sort_boundaries when
-// THVM_RANGEIFY_DIRECT=1 and the unified pass produced a non-zero
+// Parallel UOP_BUFFERIZE Term per slot in BOUNDARY_ORDER, populated
+// by topo_sort_boundaries when the unified pass produced a non-zero
 // RU_BUFFERIZE_TERM for that boundary. emit_kernel_for_boundary
 // stashes this onto ke->compute_bufferize after kernel_alloc.
-// 0 = "no UOP_BUFFERIZE term for this boundary" (OLD path, or
-// realized boundary the unified pass didn't surface).
+// 0 = "no UOP_BUFFERIZE term for this boundary" (realized boundary
+// the unified pass didn't surface).
 static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 
 // Multi-output kernel merge planning (Step 2 of multi-output groundwork).
@@ -394,18 +393,6 @@ static void boundary_compute_last_use(void) {
   free(visited);
 }
 
-// Direct-rangeify cutover gate.  Default ON: kernel set comes from the
-// unified pass's UOP_BUFFERIZE terms (RU_BUFFERIZE_TERM[i] != 0).
-// Set THVM_RANGEIFY_DIRECT=0 to fall back to the OLD-path realized
-// flag (BUFFERIZE_NODES[i].realized).
-// Mirror source: tinygrad/schedule/indexing.py:75-77 emits BUFFERIZE
-// at realize boundaries; the create_kernel walker downstream
-// consumes that BUFFERIZE node set directly.
-static int rangeify_direct_enabled(void) {
-  char const *e = getenv("THVM_RANGEIFY_DIRECT");
-  return e == NULL || e[0] != '0';
-}
-
 // THVM_LIFT_FROM_UNIFIED=1 helper.  The unified-pass store_root carries
 // TAG_TEN leaves (wrapped inside UOP_INDEX_E.buffer slots; see
 // ru_rewrite_subtree in rangeify_unified.c).  The legacy kernel_lift
@@ -584,33 +571,24 @@ static void topo_sort_boundaries(Term root) {
   boundary_depth_rec(term_val(root));
   boundary_compute_last_use();
 
-  int direct = rangeify_direct_enabled();
-
   struct { u64 loc; u32 depth; Term buf; } items[BOUNDARY_ORDER_CAP];
   u32 n = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN && n < BOUNDARY_ORDER_CAP; i++) {
-    Term buf = 0;
-    if (direct) {
-      // Select on the unified pass's UOP_BUFFERIZE Term.  Skip nodes
-      // the unified rewrite didn't surface; those are either non-
-      // boundary intermediates (consumer-divergence walk inlined
-      // them) or movement-only nodes whose substitute forwards to a
-      // producer's BUFFERIZE.  Either way, no separate kernel emit.
-      //
-      // Intersect with BUFFERIZE_NODES.realized so the OLD-path
-      // prune rules (inline-pure-fanout-probe, remove-by-cost-score,
-      // etc. -- bufferize_classify.c:1814-1825) still trim the
-      // realize set.  Without this, we emit a kernel per UOP_BUFFERIZE
-      // including those the prune rewrites dropped, inflating count
-      // and breaking softmax / attention nn.wlt tests that depend on
-      // the pruned-set fusion.  Phase 5c plan: subsume the rewrites
-      // into the unified pass so the intersection is identity.
-      buf = rangeify_unified_bufferize_at(i);
-      if (buf == 0) continue;
-      if (!BUFFERIZE_NODES[i].realized) continue;
-    } else {
-      if (!BUFFERIZE_NODES[i].realized) continue;
-    }
+    // Select on the unified pass's UOP_BUFFERIZE Term.  Skip nodes
+    // the unified rewrite didn't surface; those are either non-
+    // boundary intermediates (consumer-divergence walk inlined
+    // them) or movement-only nodes whose substitute forwards to a
+    // producer's BUFFERIZE.  Either way, no separate kernel emit.
+    //
+    // Intersect with BUFFERIZE_NODES.realized so the
+    // inline-softmax-broadcast-reduce prune still trims the realize
+    // set.  Without this, we emit a kernel per UOP_BUFFERIZE
+    // including those the prune dropped, inflating count and breaking
+    // softmax / attention nn.wlt tests that depend on the pruned-set
+    // fusion.
+    Term buf = rangeify_unified_bufferize_at(i);
+    if (buf == 0) continue;
+    if (!BUFFERIZE_NODES[i].realized) continue;
     items[n].loc   = BUFFERIZE_NODES[i].loc;
     items[n].depth = BOUNDARY_DEPTH[i];
     items[n].buf   = buf;
@@ -655,35 +633,33 @@ static void topo_sort_boundaries(Term root) {
         if (rangeify_unified_bufferize_at(i) != 0) unified_n++;
       }
       fprintf(stderr,
-              "direct-count: direct=%d realized=%u unified_buf=%u "
-              "ordered=%u\n",
-              direct, realized_n, unified_n, BOUNDARY_ORDER_LEN);
+              "direct-count: realized=%u unified_buf=%u ordered=%u\n",
+              realized_n, unified_n, BOUNDARY_ORDER_LEN);
     }
   }
 }
 
-// Phase 4d-1: unified-rangeify boundary walker.  Runs the legacy
-// topo_sort_boundaries (which keys off BUFFERIZE_NODES.realized -- the
-// canonical post-bufferize_classify realize set) and then captures the
-// UOP_BUFFERIZE Term the unified rangeify pass emitted at each
-// boundary into BOUNDARY_BUFFERIZE_TERM[].  Mirror: tinygrad's
-// scheduler walks BUFFERIZE+STORE pairs in the lowered tsink
+// Unified-rangeify boundary walker.  Runs topo_sort_boundaries (which
+// keys off BUFFERIZE_NODES.realized -- the canonical post-
+// bufferize_classify realize set) and captures the UOP_BUFFERIZE Term
+// the unified rangeify pass emitted at each boundary into
+// BOUNDARY_BUFFERIZE_TERM[].  Mirror: tinygrad's scheduler walks
+// BUFFERIZE+STORE pairs in the lowered tsink
 // (tinygrad/engine/realize.py); thvm reuses the legacy topo and
-// attaches the unified-pass Term per slot for Phase 4d-2 KernelEntry
-// wiring.
+// attaches the unified-pass Term per slot for KernelEntry wiring.
 //
 // Gate: thvm_materialize calls this when rangeify_unified_enabled() is
-// 1 (THVM_UNIFIED_RANGEIFY=1, default ON post Phase 3).  Set the env
-// var to 0 to revert to topo_sort_boundaries directly.
+// 1 (THVM_UNIFIED_RANGEIFY=1, default ON).  Set the env var to 0 to
+// revert to topo_sort_boundaries directly.
 //
-// 4d-1 does NOT mutate BUFFERIZE_NODES.realized -- the OLD-path named
-// removal rules (inline-constants, remove-removable-bufferize, etc.)
-// run AFTER run_rangeify_unified inside bufferize_classify and they
-// must remain authoritative for the realize set.  RU_BUFFERIZE_TERM[i]
-// reflects RU's snapshot BEFORE those rules; capturing it as a side
-// attribute (BOUNDARY_BUFFERIZE_TERM) leaves the realize set under
-// bufferize_classify's control while still giving emit_kernel_for_boundary
-// a handle on the lowered-DAG boundary Term.
+// Does NOT mutate BUFFERIZE_NODES.realized -- the
+// inline-softmax-broadcast-reduce rule runs AFTER run_rangeify_unified
+// inside bufferize_classify and must remain authoritative for the
+// realize set.  RU_BUFFERIZE_TERM[i] reflects RU's snapshot BEFORE
+// that rule; capturing it as a side attribute (BOUNDARY_BUFFERIZE_TERM)
+// leaves the realize set under bufferize_classify's control while
+// still giving emit_kernel_for_boundary a handle on the lowered-DAG
+// boundary Term.
 static void topo_sort_buffers_unified(Term root) {
   topo_sort_boundaries(root);
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
@@ -2607,15 +2583,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
   ke->output_shape  = out_shape;
   ke->output_numel  = TENS[out_tid].view.numel;
   ke->source_uop    = root_term;
-  // Direct-rangeify cutover: when topo_sort_boundaries selected this
-  // boundary from RU_BUFFERIZE_TERM[], stash the UOP_BUFFERIZE node
-  // here so later consumers (cached_lift wiring, debug dumps) can
-  // walk the lowered subtree via uop_bufferize_value(b).  0 in OLD-
-  // path mode (realized-flag selection) so downstream readers can
-  // use compute_bufferize != 0 as a "direct cutover active" predicate.
-  ke->compute_bufferize = rangeify_direct_enabled()
-                       ? BOUNDARY_BUFFERIZE_TERM[bi]
-                       : 0;
+  // topo_sort_boundaries selects this boundary from
+  // RU_BUFFERIZE_TERM[]; stash the UOP_BUFFERIZE node here so later
+  // consumers (cached_lift wiring, debug dumps) can walk the lowered
+  // subtree via uop_bufferize_value(b).
+  ke->compute_bufferize = BOUNDARY_BUFFERIZE_TERM[bi];
   TENS[out_tid].producer_kid = kid;
 
   // Multi-output kernel splice (Step 6 of multi-output groundwork).
@@ -2755,7 +2727,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // n_inputs) stay populated from the legacy path, so downstream
     // CPU walker / Metal renderer use the unified root for compute
     // but the legacy buffer table for I/O binding.
-    if (rangeify_direct_enabled() && getenv("THVM_LIFT_FROM_UNIFIED")) {
+    if (getenv("THVM_LIFT_FROM_UNIFIED")) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
         Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
@@ -2764,12 +2736,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
       }
     }
     // Identity check: rangeify_unified_store_root_at(idx) is the
-    // unified-pass UOP_STORE for this boundary (when rangeify_direct
-    // and dtype inference succeeded).  Under THVM_LIFT_BUFFERIZE_TRACE=1
-    // emit a stderr line on every mismatch so the eventual lifter
-    // bypass has a clear bisect signal for which kernel shapes still
-    // diverge.
-    if (rangeify_direct_enabled() && getenv("THVM_LIFT_BUFFERIZE_TRACE")) {
+    // unified-pass UOP_STORE for this boundary (when dtype inference
+    // succeeded).  Under THVM_LIFT_BUFFERIZE_TRACE=1 emit a stderr
+    // line on every mismatch so the eventual lifter bypass has a
+    // clear bisect signal for which kernel shapes still diverge.
+    if (getenv("THVM_LIFT_BUFFERIZE_TRACE")) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       Term l_root  = ke->cached_lift.store_root;
       // Under THVM_LIFT_BUFFERIZE_SIMPLIFY=1, run uop_graph_simplify
