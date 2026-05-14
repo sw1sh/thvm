@@ -20,13 +20,12 @@
 // ScalarUop / TileUop C-renderer cull.  The corresponding CPU JIT
 // paths (cpu_jit_dispatch_tile / cpu_jit_dispatch_scalar) and the
 // CPU tile interpreter (cpu_dispatch_tile) have all been deleted.
-// Tests that string-matched the rendered C source are now vacuous on
-// these stubs -- the live coverage they offered (matmul tile
+// Tests that string-matched the rendered C source are now vacuous
+// on these stubs -- the live coverage they offered (matmul tile
 // construction, tile_analyze_gemm, dispatch-side metal-gemm-with-TC
-// routing) was retired with the deletion of the underlying KProgOp
-// pattern matchers in slice 8 session 5; the surviving coverage now
-// lives in `test_uop_recognise_tc.c` (DAG-side classifier) and
-// `test_metal_real.c` (live cblas dispatcher integration).
+// routing) now lives in test_uop_recognise_tc.c (DAG-side
+// classifier) and test_metal_real.c (live cblas dispatcher
+// integration).
 static int cg_supports_tile  (KernelEntry const *ke) { (void)ke; return 0; }
 static int cg_supports_scalar(KernelEntry const *ke) { (void)ke; return 0; }
 static char *cg_emit_tile    (KernelEntry const *ke) { (void)ke; return NULL; }
@@ -434,19 +433,10 @@ int main(void) {
   CHECK_EQ(ke->scalar_uops[add_id].src[0], ke->scalar_uops[add_id].src[1]);
   kernel_free_arrays(ke);
 
-  // Slice 8 session 5: TileGemmInfo / tile_analyze_gemm /
-  // tile_collect_mma_plan / tile_build_mma_from_gemm retired.  The
-  // direct unit tests for KProgOp matmul pattern matching
-  // (`gemm-analysis-normal-and-transposed`,
-  // `gemm-analysis-square-view-disambiguates`,
-  // `gemv-expand-promotes-to-mma-plan`,
-  // `build-mma-plan-from-gemm`) and the legacy-arm coverage tests
-  // (`metal-gemm-proposes-tc`, `metal-gemv-expand-proposes-tc`,
-  // `metal-gemm-tc-via-cached-lift-dag`) deleted with the underlying
-  // pattern matchers.  Equivalent shape-recognition coverage is in
-  // `test_uop_recognise_tc.c` (DAG-side `uop_dag_classify_matmul_shape`)
+  // Matmul shape-recognition coverage lives in
+  // test_uop_recognise_tc.c (DAG-side uop_dag_classify_matmul_shape)
   // and the live `metal-real/{gemm,dot,gemv}-cpu-routes-through-cblas`
-  // checks in `test_metal_real.c` cover the dispatcher integration.
+  // checks in test_metal_real.c.
 
   TEST_BEGIN("tile-graph/conv2d-flat-analysis-and-metal-source");
   build_kprog_conv2d_flat(ke);
@@ -523,8 +513,8 @@ int main(void) {
   conv_seq.opts[0] = conv_upcast4;
   conv_seq.opts[1] = conv_local4;
   CHECK(kautotune_apply_seq(ke, &conv_seq));
-  // E9 session 4: read applied_opts via the tile_anno facade so the
-  // eventual ownership move is a single-file change.
+  // Read applied_opts via the tile_anno facade so the eventual
+  // ownership move is a single-file change.
   CHECK_EQ(tile_anno_applied_opts_count(ke), 3u);
   CHECK_EQ(tile_anno_applied_opts(ke)[0].op, (u32)KOP_UPCAST);
   CHECK_EQ(tile_anno_applied_opts(ke)[1].op, (u32)KOP_LOCAL);

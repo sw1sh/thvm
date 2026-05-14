@@ -1,17 +1,15 @@
-// test_uop_range_axis_type.c -- Phase E1..E8 acceptance.
+// test_uop_range_axis_type.c -- UOP_RANGE axis-type rewrite suite.
 //
-// E1 introduced UOP_RANGE field accessors + uop_range_with_axis_type
-// rewriter primitive; E2-E7 ported KOP_GLOBAL / KOP_SWAP / KOP_UPCAST
-// /UNROLL/LOCAL/GROUP/GROUPTOP / KOP_TC as UPatRule rewrites.
+// Covers the UPatRule mirrors of KpSchedule's KOP_* mutations:
+// KOP_GLOBAL / KOP_SWAP / KOP_UPCAST / UNROLL / LOCAL / GROUP /
+// GROUPTOP / KOP_TC, plus the unified uop_apply_kernel_opts entry
+// and the uop_range_split / uop_apply_split_dag DAG-split primitive.
 //
-// E8 extends uop_arity + uop_graph_rebuild_with_srcs so that
-// uop_pattern_rewrite descends through the symbolic INDEX layer
-// (UOP_STORE / UOP_INDEX_E / UOP_IADD / UOP_IMUL / UOP_IDIV /
-// UOP_IMOD / UOP_ILT / UOP_IAND / UOP_IWHERE / UOP_INVALID /
-// UOP_OPT / UOP_RANGE). In production lifter output, UOP_RANGE
-// leaves are nested several levels deep beneath UOP_INDEX_E.addr.
-// Pre-E8 the rewriter stopped at the first non-enumerated opcode
-// and never reached the leaves.
+// uop_pattern_rewrite must descend through the symbolic INDEX
+// layer (UOP_STORE / UOP_INDEX_E / UOP_IADD / UOP_IMUL / UOP_IDIV
+// / UOP_IMOD / UOP_ILT / UOP_IAND / UOP_IWHERE / UOP_INVALID /
+// UOP_OPT / UOP_RANGE) -- in production lifter output, UOP_RANGE
+// leaves sit several levels deep beneath UOP_INDEX_E.addr.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -151,7 +149,7 @@ int main(void) {
   CHECK_EQ(term_ext(out_factor), UOP_OPT);
   CHECK_EQ(uop_opt_factor(out_factor), 8u);
 
-  // === Phase E2: KOP_GLOBAL UPatRule mirror ========================
+  // === KOP_GLOBAL UPatRule mirror ===================================
   // uop_apply_kop_global is the public entry from src/uop/apply_opt.c.
   // It mirrors codegen/apply_opt.c's KOP_GLOBAL stamp and
   // kernel_lift.c's structural-replay GLOBAL line-up, applied
@@ -240,7 +238,7 @@ int main(void) {
   CHECK_EQ(r2_zero, r2);
   CHECK_EQ(uop_range_axis_type(r2_zero), (u32)KAX_LOOP);
 
-  // === Phase E3: KOP_SWAP UPatRule mirror ==========================
+  // === KOP_SWAP UPatRule mirror =====================================
   // uop_apply_kop_swap walks applied_opts and replays the composed
   // KOP_GLOBAL + KOP_SWAP history on a desired_axis_type[] array,
   // then stamps each UOP_RANGE leaf with its computed axis_type.
@@ -389,7 +387,7 @@ int main(void) {
   Term not_range_out = uop_apply_kop_swap(not_range, opts_simple, 1);
   CHECK_EQ(not_range_out, not_range);
 
-  // === Phase E4-E6: split-class (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP)
+  // === Split-class (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP)
   //                  UPatRule mirror -- pragmatic stamp port ============
   // uop_apply_kop_split replays the full applied_opts history (splits +
   // GLOBAL + SWAP) on a desired[MAX_AXES] vector and stamps each
@@ -757,7 +755,7 @@ int main(void) {
   CHECK_EQ(ctx3.fire_count, 1);
   }
 
-  // === Phase E7: KOP_TC UPatRule mirror ==============================
+  // === KOP_TC UPatRule mirror =======================================
   // uop_apply_kop_tc shares the `sim_kop_history` simulation with the
   // split-class rule and exposes a public entry whose semantics make
   // KOP_TC's empty axis_type mutation explicit at the API level.
@@ -959,7 +957,7 @@ int main(void) {
   // Shared-simulation rule stamps anyway -- documents the divergence.
   CHECK_EQ(uop_range_axis_type(bad_via_tc), (u32)KAX_GLOBAL);
 
-  // === E9-prep wedge 1: uop_apply_kernel_opts unified entry ============
+  // === uop_apply_kernel_opts unified entry =============================
   // The single composed pass that wires E2/E3/E4-E6/E7 into one DAG
   // walk.  The pass adds extent tracking on top of the shared
   // `sim_kop_history` so the GLOBAL extent guard from
@@ -1109,7 +1107,7 @@ int main(void) {
   CHECK_EQ(vfires3, 0u);
   CHECK_EQ(vout3, k_outer);
 
-  // === (10) Phase E9-prep wedge 2: uop_range_split primitive ========
+  // === (10) uop_range_split primitive ================================
   //
   // Replaces a single UOP_RANGE leaf with (outer, inner) pair plus the
   // linear_index = outer * k + inner reconstruction.  Mirrors
@@ -1214,7 +1212,7 @@ int main(void) {
   CHECK_EQ(rs.inner,        rs_direct_inner);
   CHECK_EQ(rs.linear_index, rs_direct_iadd);
 
-  // === (11) Phase E9-prep wedge 2: uop_apply_split_dag UPatRule =====
+  // === (11) uop_apply_split_dag UPatRule =============================
   //
   // Wraps uop_range_split into a DAG-level rewrite that walks the
   // applied_opts split-class entries left-to-right; for each
@@ -1260,15 +1258,14 @@ int main(void) {
   CHECK_EQ(uop_range_extent(sd_out_outer),     8u);
 
   TEST_BEGIN("apply-split-dag/post-split-extent-guard");
-  // E9-prep wedge 2 stage (d) retired the sentinel-walk idempotence
-  // guard: uop_apply_split_dag is no longer idempotent on already-split
-  // DAGs (calling it on `sd_out` would double-split because the capture
-  // loop reads max-extent leaves which are now post-split).  In
-  // production the materialize.c caller invokes the rule exactly once
-  // per lift on a pre-split DAG -- idempotence is not a contract.  We
-  // also can't assert "running twice on a hash-cons-equal pre-split DAG
-  // produces equal output" because rebuild walks emit fresh UOP_LOAD
-  // terms (LOAD is not hash-cons-cached).
+  // uop_apply_split_dag is NOT idempotent on already-split DAGs:
+  // calling it on sd_out would double-split because the capture
+  // loop reads max-extent leaves which are now post-split.  In
+  // production materialize.c invokes the rule exactly once per
+  // lift on a pre-split DAG; idempotence is not a contract.  We
+  // also can't assert "running twice on a hash-cons-equal pre-split
+  // DAG produces equal output" because rebuild walks emit fresh
+  // UOP_LOAD terms (LOAD is not hash-cons-cached).
   //
   // The per-leaf extent + axis_type guard in rw_split_dag_range is
   // still the structural gate.  The post-split DAG has outer.extent =
@@ -1346,11 +1343,10 @@ int main(void) {
   // final origin_expr[0] is:
   //   IADD(IMUL(IADD(IMUL(RANGE(0,LOOP,2), 2), RANGE(?,UPCAST,2)), 4),
   //        RANGE(1,LOCAL,4))
-  // The "?" inner axis_id is what the lifter assigns -- in our rule
-  // it's a+1 = 1, the same axis_id the LOCAL inner already uses.
-  // That's the lifter's behaviour too (kernel_lift.c uses the same
-  // o.axis+1 slot for the new inner).  This wedge keeps the same
-  // contract; downstream stages can re-number per-leaf axis_ids if
+  // The "?" inner axis_id is what the lifter assigns -- in our
+  // rule it's a+1 = 1, the same axis_id the LOCAL inner already
+  // uses (kernel_lift.c uses the same o.axis+1 slot for the new
+  // inner).  Downstream stages can re-number per-leaf axis_ids if
   // needed.
   Term sd3_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){16});
   Term sd3_r0   = uop_range(0, KAX_LOOP, 16);

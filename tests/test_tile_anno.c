@@ -54,10 +54,9 @@ int main(void) {
 
   tile_free(ke);
 
-  // E9 session 2: full_shape + n_axes resolvers.  Build a kernel via
-  // the writer trio (axes_default_for + axes_apply_opt UPCAST), then
-  // confirm the resolver output matches the writer state on every
-  // axis.
+  // full_shape + n_axes resolvers.  Build a kernel via the writer
+  // trio (axes_default_for + axes_apply_opt UPCAST), then confirm
+  // the resolver output matches the writer state on every axis.
   TEST_BEGIN("axes-resolve/default-shape");
   ke->schedule = &ke->_local_schedule;
   memset(ke->schedule, 0, sizeof(KpSchedule));
