@@ -2580,6 +2580,19 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // the root.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
     ke->compute_root = ke->cached_lift.store_root;
+    // THVM_LIFT_FROM_UNIFIED=1: substitute the lifter's store_root
+    // with the unified-pass output where available.  Diagnostic
+    // bypass; the lifter's other cached_lift fields (in_bufs[],
+    // n_inputs) stay populated from the legacy path, so downstream
+    // CPU walker / Metal renderer use the unified root for compute
+    // but the legacy buffer table for I/O binding.
+    if (rangeify_direct_enabled() && getenv("THVM_LIFT_FROM_UNIFIED")) {
+      Term ru_root = rangeify_unified_store_root_at(idx);
+      if (ru_root != 0) {
+        ke->cached_lift.store_root = ru_root;
+        ke->compute_root           = ru_root;
+      }
+    }
     // Identity check: rangeify_unified_store_root_at(idx) is the
     // unified-pass UOP_STORE for this boundary (when rangeify_direct
     // and dtype inference succeeded).  Under THVM_LIFT_BUFFERIZE_TRACE=1
