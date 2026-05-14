@@ -495,8 +495,7 @@ fn u32 rangeify_unified_topo_order_at(u32 i) {
 //
 // Side effects: populates RU_RANGE_MAP + RU_REALIZE_MAP + RU_ENDING_RANGES.
 // The realize decision is kept in RU_REALIZE_MAP separate from
-// BUFFERIZE_NODES.realized; bufferize_classify_project_unified
-// reconciles them after the walk.
+// BUFFERIZE_NODES.realized.
 
 fn void run_rangeify_unified(Term root) {
   // Clear per-node state.
@@ -537,23 +536,6 @@ fn void run_rangeify_unified(Term root) {
   // REDUCE/MATMUL seed + matmul-input-protect + the 11 named
   // removal rules' result).
   //
-  // Phase 5c bisect (2026-05-13): we experimented with dropping the
-  // MULTI-seed by filtering to ROOT|REDUCE|MATMUL|FANIN_CAP reasons,
-  // letting consumer-divergence (indexing.py:196-220) decide
-  // multi-consumer realize natively.  Result: probe_w2_bs3 unified_buf
-  // dropped 793 -> 788 (only 5 nodes, because most multi-consumer
-  // producers in BN/conv backward have actually-divergent consumer
-  // ranges and get partial-realized anyway), kernel count unchanged
-  // at 542 (intersection bounded by OLD-path's 551 realized set),
-  // BUT introduced numerical regressions in grad/higher-order-pad-
-  // square (gives {2, 0} instead of {2, 2}) and a fusion-count
-  // off-by-one in fusion-count/linear-mse-forward-plus-backward-eq-3.
-  // The root cause: TGrad's second-order machinery and the
-  // MSE-linear-backward fusion-count gate depend on MULTI-realization
-  // of certain dup'd intermediate nodes that consumer-divergence
-  // would inline.  Reverting to all-realized seed; the topo-order
-  // fix below (Kahn's algorithm) lands independently and is what
-  // softmax / attention need.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     if (BUFFERIZE_NODES[i].realized) {
       RU_REALIZE_MAP[i].realized_full = 1;

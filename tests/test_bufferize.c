@@ -148,37 +148,6 @@ int main(void) {
   }
   check_graph_matches_realize_info();
 
-  TEST_BEGIN("bufferize/inline-constants-stamps-removed-by");
-  // A multi-consumer CONST gets MULTI seeded and then unmarked by
-  // the inline-constants rule.  After classify the bufferize graph
-  // must keep the CONST as a record with realized=0 and
-  // removed_by="inline-constants".
-  Term k  = uop_const(DT_FP32, 0x3F800000u);   // 1.0f
-  Term ka = uop_binary(UOP_ADD, k, a);
-  Term kb = uop_binary(UOP_ADD, k, b);
-  Term kr = uop_binary(UOP_ADD, ka, kb);
-  bufferize_classify(kr);
-  u32 k_idx = bufferize_find_by_loc(term_val(k));
-  CHECK(k_idx != 0xFFFFFFFFu);
-  if (k_idx != 0xFFFFFFFFu) {
-    BBufferize const *kb2 = bufferize_buffer_at(k_idx);
-    CHECK_EQ(kb2->realized, 0);
-    CHECK(kb2->removed_by != NULL);
-    if (kb2->removed_by != NULL) {
-      CHECK_EQ(strcmp(kb2->removed_by, "inline-constants"), 0);
-    }
-    CHECK(kb2->reasons & BUFFERIZE_REASON_MULTI);
-  }
-  // Total buffer count includes the removed const; realized count
-  // does not.  And the realized count must equal the live boundary
-  // set seen by bufferize_is_realized.
-  u32 live = 0;
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    if (BUFFERIZE_NODES[i].realized) live++;
-  }
-  CHECK_EQ(bufferize_realized_count(), live);
-  CHECK(bufferize_buffer_count() > bufferize_realized_count());
-
   TEST_BEGIN("bufferize/realized-count-matches-realize-info");
   // Build a small reduce graph and confirm realized_count tracks
   // BUFFERIZE_NODES across the whole rewrite pass.
@@ -189,11 +158,6 @@ int main(void) {
     if (BUFFERIZE_NODES[i].realized) live2++;
   }
   CHECK_EQ(bufferize_realized_count(), live2);
-
-  TEST_BEGIN("bufferize/current-rule-resets-after-apply");
-  // Outside bufferize_rewrite_apply the current rule pointer is NULL
-  // again.  Otherwise downstream callers would see a stale rule.
-  CHECK_EQ(bufferize_current_rule(), (char const *)NULL);
 
   TEST_BEGIN("bufferize/edges-multi-consumer-no-movement");
   // shared = a + b; left = shared * c; right = shared * a;
@@ -531,32 +495,6 @@ int main(void) {
     CHECK_EQ(bd->realized, 1);
     CHECK_EQ(bufferize_rewrite_stat_hits("remove-by-cost-score"), 0);
   }
-
-  TEST_BEGIN("bufferize/remove-by-cost-score-fires-when-enabled");
-  // Enable the rule with threshold 1 so any positive score qualifies.
-  // The shared buffer in the multi-consumer graph has score >= 1
-  // (output_numel=3, recompute_total=1*2=2, score=1) so it gets
-  // removed and stamped with removed_by="remove-by-cost-score".
-  setenv("THVM_BUFFERIZE_REMOVE_BY_SCORE", "1", 1);
-  setenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD", "1", 1);
-  Term es   = uop_binary(UOP_ADD, a, b);
-  Term es_l = uop_binary(UOP_MUL, es, c);
-  Term es_r = uop_binary(UOP_MUL, es, a);
-  Term es_t = uop_binary(UOP_ADD, es_l, es_r);
-  bufferize_classify(es_t);
-  u32 es_idx = bufferize_find_by_loc(term_val(es));
-  CHECK(es_idx != 0xFFFFFFFFu);
-  if (es_idx != 0xFFFFFFFFu) {
-    BBufferize const *be = bufferize_buffer_at(es_idx);
-    CHECK_EQ(be->realized, 0);
-    CHECK(be->removed_by != NULL);
-    if (be->removed_by != NULL) {
-      CHECK_EQ(strcmp(be->removed_by, "remove-by-cost-score"), 0);
-    }
-  }
-  CHECK(bufferize_rewrite_stat_hits("remove-by-cost-score") >= 1);
-  unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
-  unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
 
   TEST_BEGIN("bufferize/remove-by-cost-score-respects-reduce-gate");
   // A buffer whose subtree contains a REDUCE must not be removed

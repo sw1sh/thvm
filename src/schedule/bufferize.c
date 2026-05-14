@@ -46,15 +46,13 @@ static BIndexRule BUFFERIZE_INDEX_RULES[6] = {
 // NULL means "outside any named rule" (seeding, post-pass cleanup).
 
 // Reason mirror: only the bits already on BUFFERIZE_NODES map across.
-// Phase 1 still uses inline BUFFERIZE_REASON_INLINE to mark "a rule
-// touched this", but the bufferize graph records the rule by name
-// directly via removed_by, so we do not project INLINE.
+// BUFFERIZE_REASON_INLINE is omitted because the bufferize graph
+// records the rule by name directly via removed_by.
 static u32 bufferize_project_reasons(u32 r) {
   u32 out = 0;
-  if (r & BUFFERIZE_REASON_ROOT)      out |= BUFFERIZE_REASON_ROOT;
-  if (r & BUFFERIZE_REASON_MULTI)     out |= BUFFERIZE_REASON_MULTI;
-  if (r & BUFFERIZE_REASON_REDUCE)    out |= BUFFERIZE_REASON_REDUCE;
-  if (r & BUFFERIZE_REASON_FANIN_CAP) out |= BUFFERIZE_REASON_BACKEND_CAP;
+  if (r & BUFFERIZE_REASON_ROOT)   out |= BUFFERIZE_REASON_ROOT;
+  if (r & BUFFERIZE_REASON_MULTI)  out |= BUFFERIZE_REASON_MULTI;
+  if (r & BUFFERIZE_REASON_REDUCE) out |= BUFFERIZE_REASON_REDUCE;
   return out;
 }
 
@@ -822,11 +820,8 @@ fn u64 bufferize_removal_score(u32 buffer_id) {
   if (!b->realized) return 0;
   // Reason gates: only buffers seeded purely for MULTI (or unmarked
   // outright) are removal candidates.  ROOT is the realize output;
-  // REDUCE has accumulator semantics that need explicit handling;
-  // BACKEND_CAP was added to satisfy a hardware limit.
-  if (b->reasons & (BUFFERIZE_REASON_ROOT
-                  | BUFFERIZE_REASON_REDUCE
-                  | BUFFERIZE_REASON_BACKEND_CAP)) {
+  // REDUCE has accumulator semantics that need explicit handling.
+  if (b->reasons & (BUFFERIZE_REASON_ROOT | BUFFERIZE_REASON_REDUCE)) {
     return 0;
   }
   // Phase 5 reduce-aware gate: was conservative because pre-FLAT_GRID

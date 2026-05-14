@@ -1927,14 +1927,7 @@ fn u32  bufferize_rewrite_stat_hits(char const *name);
 #define BUFFERIZE_REASON_ROOT        (1u << 0)
 #define BUFFERIZE_REASON_MULTI       (1u << 1)
 #define BUFFERIZE_REASON_REDUCE      (1u << 2)
-#define BUFFERIZE_REASON_BACKEND_CAP (1u << 3)
-// Set when the unified pass emitted a UOP_BUFFERIZE Term at this node's
-// realize boundary; materialize.c emits one KernelEntry here independent
-// of the OLD-path REDUCE / multi-consumer heuristics.
-#define BUFFERIZE_REASON_UNIFIED     (1u << 7)
-// Legacy realize-rule reasons folded into the bufferize namespace.
 #define BUFFERIZE_REASON_INLINE      (1u << 4)
-#define BUFFERIZE_REASON_FANIN_CAP   (1u << 5)
 #define BUFFERIZE_REASON_MATMUL      (1u << 6)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value

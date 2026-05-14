@@ -640,36 +640,6 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
   return is_mul && distinct;
 }
 
-// Project the unified pass's UOP_BUFFERIZE emission onto
-// BUFFERIZE_NODES.realized so materialize.c's BOUNDARY_ORDER walker
-// (topo_sort_boundaries) picks up the new boundary set without changing
-// its read API.
-//
-// Mirror source: tinygrad/schedule/indexing.py:56-81
-// (create_bufferize_and_index_based_on_ranges produces the BUFFERIZE
-//  Term; the scheduler consumes its presence in tsink as the "realize
-//  boundary" signal).
-//
-// We additionally mark the boundary with BUFFERIZE_REASON_UNIFIED so the
-// removal rules can introspect "this realize came from the unified pass"
-// vs "carried over from a multi-consumer seed".  We do NOT clear
-// pre-existing .realized bits: the MULTI seed and any ROOT seed must
-// survive; the removal rules below handle the unmarking.
-//
-// Disabled: the projection over-realizes broadcast-after-reduce patterns
-// (softmax / attention regress under this projection because the unified
-// pass marks every UOP_BUFFERIZE Term as a boundary, but the OLD-path
-// emit walker can't render the resulting kernel-graph topology for those
-// shapes).  Until the materialize.c walker reads UOP_BUFFERIZE Terms
-// directly off the lowered DAG, the OLD-path heuristics
-// (multi-consumer / REDUCE / matmul + named removal rules) remain
-// authoritative.  The substrate (UOP_BUFFERIZE allocator, run_rangeify_
-// unified, topo_sort_buffers_unified, KernelEntry.compute_bufferize)
-// stays alive for the eventual cut.
-static void bufferize_classify_project_unified(void) {
-  (void)rangeify_unified_bufferize_at;
-}
-
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   bufferize_rewrite_stats_clear();
@@ -823,13 +793,6 @@ fn void bufferize_classify(Term root) {
     // The unified walk writes RU_RANGE_MAP / RU_REALIZE_MAP and the
     // main-heap UOP_BUFFERIZE Terms (one per realize boundary).
     run_rangeify_unified(root);
-    // Project every UOP_BUFFERIZE the unified pass emitted onto
-    // BUFFERIZE_NODES.realized so materialize.c's existing
-    // BOUNDARY_ORDER walker picks them up.  Partial-realize cases come
-    // from consumer-divergence + ending-ranges
-    // (run_rangeify_unified.c:493-560); RU_BUFFERIZE_TERM != 0 means
-    // "kernel boundary".
-    bufferize_classify_project_unified();
     bufferize_finalize_stores(root);
     return;
 }
