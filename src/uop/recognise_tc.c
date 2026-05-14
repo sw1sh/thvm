@@ -230,7 +230,7 @@ fn Term uop_recognise_tc(Term root) {
   return uop_store(buf_out, addr_out, tc);
 }
 
-// Slice 8 (session 3): structural classifier for the DOT shape.
+// Structural classifier for the DOT shape.
 // STORE(C, addr_out, REDUCE_SUM(MUL(INDEX_E(A, addr_a), INDEX_E(B, addr_b))))
 // where A and B are distinct rank-1 buffers and the addresses reference
 // the same single UOP_RANGE leaf (the K reduce axis).  Returns 1 + the
@@ -281,7 +281,7 @@ fn int uop_classify_dot(Term root, u32 *out_k_extent) {
   return 1;
 }
 
-// Slice 8 (session 3): structural classifier for the GEMV shape.
+// Structural classifier for the GEMV shape.
 // STORE(C, addr_out, REDUCE_SUM(MUL(INDEX_E(W, addr_w), INDEX_E(x, addr_x))))
 // where W's address touches exactly 2 distinct ranges (m,k) and x's
 // address touches exactly 1 distinct range (k -- the reduce axis,

@@ -101,7 +101,7 @@ fn Term uop_range_with_axis_type(Term r, u32 new_axis_type) {
   return uop_range(axis_id, new_axis_type, extent);
 }
 
-// === Phase E9-prep wedge 2: uop_range_split primitive =================
+// === uop_range_split primitive ========================================
 //
 // Replaces a single UOP_RANGE leaf with a (outer, inner) pair that
 // represents the same iteration space, plus a `linear_index` Term that

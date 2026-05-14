@@ -351,7 +351,7 @@ static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
   return 1;
 }
 
-// input_views-decouple session 2: DAG-side stride extractor.
+// DAG-side stride extractor.
 //
 // `lift_scalar_index` (kernel_lift.c:388-407) builds an INDEX_E.addr by
 // looping over the buffer's view dims and accumulating per-dim terms:
@@ -608,7 +608,7 @@ int uop_dag_classify_matmul_shape(Term root,
   return 1;
 }
 
-// === Slice 8 session 3: DAG-side DOT-shape extractor =================
+// === DAG-side DOT-shape extractor =====================================
 //
 // `cpu_blas_dispatch` historically read DOT shape facts (K, slot
 // indices, dtype) out of `ke->program[]` via a hand-rolled matcher.
@@ -661,7 +661,7 @@ int uop_dag_classify_dot_shape(Term root,
   if (uop_buffer_dtype(buf_a) != dt) return 0;
   if (uop_buffer_dtype(buf_b) != dt) return 0;
 
-  // input_views-decouple session 2: DOT addresses are bare RANGE(k)
+  // DOT addresses are bare RANGE(k)
   // leaves -- the structural classifier `uop_classify_dot` already
   // verified each INDEX_E.addr references exactly one range and that
   // it's the reduce axis.  No stride extraction is needed: a bare
@@ -681,7 +681,7 @@ int uop_dag_classify_dot_shape(Term root,
   return 1;
 }
 
-// === Slice 8 session 3: DAG-side GEMV-shape extractor ================
+// === DAG-side GEMV-shape extractor ====================================
 //
 // GEMV: W:{M,K} @ x:{K} -> {M}.  In the WL/lift representation the
 // vector x is broadcast to {M,K} via EXPAND so the MUL is elementwise.
@@ -739,13 +739,13 @@ int uop_dag_classify_gemv_shape(Term root,
   if (uop_buffer_dtype(buf_w) != dt) return 0;
   if (uop_buffer_dtype(buf_x) != dt) return 0;
 
-  // input_views-decouple session 2: DAG-side stride extraction.
+  // DAG-side stride extraction.
   //
-  // W's address is `IADD(arm_m, arm_k)` -- the same matmul-A shape the
-  // session 2 extractor handles (the "ld" arm is the m-arm, the reduce
-  // arm is the k-arm).  x's address is bare RANGE(k) -- the structural
-  // classifier already verified it references precisely the reduce axis,
-  // so no stride extraction is needed for x.
+  // W's address is `IADD(arm_m, arm_k)` -- the matmul-A shape the
+  // stride extractor handles (the "ld" arm is the m-arm, the reduce
+  // arm is the k-arm).  x's address is bare RANGE(k) -- the
+  // structural classifier already verified it references precisely
+  // the reduce axis, so no stride extraction is needed for x.
   Term addr_w = heap_read(term_val(w_idx) + 1);
   Term addr_x = heap_read(term_val(x_idx) + 1);
   if (term_tag(addr_x) != TAG_UOP || term_ext(addr_x) != UOP_RANGE) return 0;
@@ -859,7 +859,7 @@ int uop_dag_classify_conv2d_flat_shape(Term root,
   return 1;
 }
 
-// === input_views-decouple session 1 (conv2d-flat): DAG-side full-shape ====
+// === DAG-side full-shape extractor (conv2d-flat) ======================
 //
 // Inverts `kernel_lift_from_conv2d` (src/schedule/kernel_lift.c:981-1108)
 // for the single-input non-degenerate conv2d case so the conv shape facts

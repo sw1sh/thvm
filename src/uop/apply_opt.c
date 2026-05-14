@@ -1,19 +1,11 @@
 // uop/apply_opt.c -- UPatRule[] mirror of codegen/apply_opt.c's
 // KpSchedule mutations against UOP_RANGE.axis_type.
 //
-// Phase E ports each apply_opt op class to a UPatRule over the UOP_RANGE
-// leaves emitted by kernel_lift_to_uop's structural-replay loop
-// (src/schedule/kernel_lift.c).  E1 landed the read/write seam (field
-// accessors on UOP_RANGE + uop_range_with_axis_type rewriter primitive
-// in src/uop/index.c, plus an end-to-end UPatRule probe in
-// tests/test_uop_range_axis_type.c); E2 lands the first concrete
-// mutation: KOP_GLOBAL.
-//
-// The rule does NOT yet replace the corresponding write in
-// codegen/apply_opt.c -- both representations stay live during the
-// E* wedge sequence.  KpSchedule.axis_types[] remains the primary
-// source of truth; this rule mirrors the same decision in
-// declarative form so subsequent E* wedges can compose against it.
+// Each apply_opt op class has a UPatRule over the UOP_RANGE leaves
+// emitted by kernel_lift_to_uop.  Both representations stay live:
+// KpSchedule.axis_types[] is the primary source of truth, and the
+// UPatRules mirror the same decisions in declarative form so the
+// passes compose.
 //
 // === KOP_GLOBAL semantics (mirroring axes_apply_opt) =================
 //
@@ -37,42 +29,27 @@
 //
 // === Scoping ==========================================================
 //
-// A KpSchedule can carry a sequence of opts that interleave splits
-// (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) with SWAPs and GLOBALs.  Splits
-// reshape cur[] (insert a new entry); SWAPs reorder it.  After replay,
-// the final UOP_RANGE.axis_id equals the position in the post-replay
-// cur[] vector -- not the axis index that KOP_GLOBAL named when it was
-// recorded.  Tracking that index drift requires the same per-opt
-// shifting the lifter does.
-//
-// E2 keeps the rule simple: it matches when KOP_GLOBAL.axis is a
-// stable index, i.e. the no-split-and-no-swap-between case.  This is
-// the typical autotune use ("LOCAL splits N into LOOP(N/L) + LOCAL(L);
-// GLOBAL marks the resulting LOOP(N/L) for grid-binding") whose
-// LOCAL split happens BEFORE GLOBAL on the SAME axis -- in that case
-// KOP_GLOBAL.axis still equals the outer axis_id in cur[].  The full
-// SWAP-between-GLOBAL coverage lands in a later wedge alongside
-// KOP_SWAP's own port.  When the rule's guard fails, the lifter's
-// in-tree replay still produces the correct UOP_RANGE.axis_type, so
-// behaviour is unchanged.
+// The rule matches only when KOP_GLOBAL.axis is a stable index --
+// i.e. no SPLIT/SWAP between the GLOBAL and the leaf re-positions
+// the axis.  This is the typical autotune sequence
+// ("LOCAL splits N into LOOP(N/L) + LOCAL(L); GLOBAL marks the
+// resulting LOOP(N/L) for grid-binding") where the LOCAL split
+// fires BEFORE GLOBAL on the same axis, so KOP_GLOBAL.axis still
+// equals the outer axis_id in cur[].  When the guard fails, the
+// lifter's in-tree replay produces the correct UOP_RANGE.axis_type,
+// so behaviour is unchanged.
 //
 // === Rewriter reach (orthogonal limitation) ===========================
 //
-// uop_pattern_rewrite descends through nodes whose opcodes appear in
-// uop_arity()'s switch (src/schedule/uop_meta.c) and whose rebuild
-// case is enumerated in uop_graph_rebuild_with_srcs (graph_rewrite.c).
-// Both currently cover float arithmetic (UOP_NEG/RECIP/EXP2/LOG2/SQRT,
-// UOP_ADD/MUL/CMPLT/CMPEQ, UOP_REDUCE), movement (UOP_RESHAPE/PERMUTE/
-// EXPAND/PAD/SHRINK/FLIP), and UOP_LOAD/CAST/BITCAST -- but NOT the
-// integer arithmetic (UOP_IADD/IMUL/IDIV/IMOD/ILT/IAND), UOP_INDEX_E,
-// UOP_OPT, UOP_RANGE, UOP_IWHERE, or UOP_INVALID.  In production
+// uop_pattern_rewrite descends through nodes whose opcodes appear
+// in uop_arity()'s switch and whose rebuild case is enumerated in
+// uop_graph_rebuild_with_srcs.  Both cover float arithmetic, REDUCE,
+// movement (RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP), and LOAD/CAST/
+// BITCAST -- but NOT integer arithmetic (IADD/IMUL/IDIV/IMOD/ILT/
+// IAND), INDEX_E, OPT, RANGE, IWHERE, or INVALID.  In production
 // kernel_lift output the UOP_RANGE leaves are always nested inside
-// UOP_INDEX_E.addr expressions (which themselves are IADD/IMUL chains),
-// so this rule only fires when applied to a bare UOP_RANGE root.
-// Wiring it into a production pass requires extending uop_arity +
-// uop_graph_rebuild_with_srcs first; that's a separate wedge from the
-// per-mutation port itself, deferred until the pass actually consumes
-// kernel_lift output.
+// UOP_INDEX_E.addr (IADD/IMUL chains), so this rule only fires when
+// applied to a bare UOP_RANGE root.
 
 // === ctx + rewrite fn =================================================
 
@@ -156,24 +133,23 @@ fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
 //
 // === Composition with KOP_GLOBAL =====================================
 //
-// KOP_SWAP is meaningful for axis_type only when something else has
+// KOP_SWAP is meaningful for axis_type only when something has
 // previously stamped a non-LOOP type on one of the swapped positions
 // (otherwise both ends are KAX_LOOP and the swap is a no-op for
-// axis_type).  In practice the autotune sequence shape is "LOCAL/UPCAST
-// split, GLOBAL stamp, then SWAP to reorder".  E3 therefore composes
-// against KOP_GLOBAL within the same scan: we simulate desired[i]
-// transitions through both KOP_GLOBAL and KOP_SWAP entries, ignoring
-// split-class opts (whose axis-insertion semantics belong to a later
-// wedge alongside per-axis index drift tracking).
+// axis_type).  The typical autotune shape is "LOCAL/UPCAST split,
+// GLOBAL stamp, then SWAP to reorder", so this rule composes against
+// KOP_GLOBAL within the same scan: simulate desired[i] transitions
+// through both KOP_GLOBAL and KOP_SWAP entries, ignoring split-class
+// opts (axis-insertion drift is handled by uop_apply_split_dag).
 //
 // === Single-pass full-history simulation =============================
 //
 // The rule walks applied_opts left-to-right, tracking a
-// desired_axis_type[MAX_AXES] state initialised to KAX_LOOP for every
-// position.  KOP_GLOBAL(a, _) sets desired[a]=KAX_GLOBAL when desired[a]
-// is currently KAX_LOOP (mirrors apply_opt's LOOP precondition); other
-// transitions are ignored (out-of-scope for this wedge).  KOP_SWAP(a,
-// b) swaps desired[a] and desired[b].
+// desired_axis_type[MAX_AXES] state initialised to KAX_LOOP for
+// every position.  KOP_GLOBAL(a, _) sets desired[a]=KAX_GLOBAL when
+// desired[a] is currently KAX_LOOP (mirrors apply_opt's LOOP
+// precondition); KOP_SWAP(a, b) swaps desired[a] and desired[b].
+// Other opt classes are out of scope (handled by other rules).
 //
 // For the matched UOP_RANGE leaf at axis_id=a, if desired[a] differs
 // from the leaf's current axis_type, rewrite to a UOP_RANGE with the
@@ -225,8 +201,8 @@ static Term rw_kop_swap_stamp(Term const *bindings, void *ctx_in) {
       }
     }
     // Other opts (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP/TC/PADTO/NOLOCALS)
-    // are out of scope for the SWAP wedge; their axis-insertion semantics
-    // belong to later wedges that will track per-opt index drift.
+    // are out of scope here; axis-insertion drift is tracked by
+    // uop_apply_split_dag.
   }
 
   u32 axis_id = uop_range_axis_id(range);
@@ -254,10 +230,9 @@ fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
   return uop_pattern_rewrite(root, upat_kop_swap_rules, 1, &ctx);
 }
 
-// === Phase E4-E6: split-class UPatRule (UPCAST/UNROLL/LOCAL/GROUP/
-//                                        GROUPTOP) -- pragmatic stamp ====
+// === Split-class UPatRule (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) =========
 //
-// codegen/apply_opt.c:61-85 splits axis a with arg k into:
+// Splits axis a with arg k into:
 //   outer at position a    (size /= k, axis_type unchanged)
 //   inner at position a+1  (size  = k, axis_type = inner_kax)
 // where inner_kax is:
@@ -267,30 +242,17 @@ fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
 //   KOP_GROUP    -> KAX_GROUP_REDUCE
 //   KOP_GROUPTOP -> KAX_GROUP_REDUCE
 //
-// kernel_lift.c:1574-1617 mirrors the same on its SplitAxis cur[] and
-// then emits UOP_RANGE leaves keyed by post-replay position.  Each
-// emitted leaf already carries the post-replay axis_type / extent.
+// kernel_lift.c mirrors the same on its SplitAxis cur[] and emits
+// UOP_RANGE leaves keyed by post-replay position; each leaf already
+// carries the post-replay axis_type / extent.
 //
-// === Pragmatic scope (stamp-only, no DAG split) ========================
-//
-// The full UPat-driven port would need to REPLACE one UOP_RANGE leaf
-// with two new UOP_RANGE leaves wired into a UOP_IADD/IMUL chain --
-// the same DAG transform kernel_lift.c performs structurally today.
-// That's a multi-step rewrite that doesn't fit a single rewrite-fn
-// emitting one Term.  This wedge keeps splits in kernel_lift.c's
-// replay loop and ports only the axis_type stamping: the rule
-// simulates the same cur[] evolution to compute desired[a] for every
-// post-replay position, then stamps EXISTING UOP_RANGE leaves whose
-// axis_id matches a position whose desired[] differs from the leaf's
-// current axis_type.
-//
-// The actual range-creation (the "split" itself) stays in
-// kernel_lift.c structural-replay until a future wedge introduces a
-// `uop_range_split` primitive that returns a (outer, inner) pair and
-// rewires the consumer's INDEX_E address arithmetic.  Until then, this
-// rule is exercised in E4-E6 tests on already-emitted leaves and can be
-// composed declaratively over apply_opt history without altering the
-// in-tree structural lowering.
+// This rule is the stamp-only half: it simulates the same cur[]
+// evolution to compute desired[a] for every post-replay position,
+// then stamps EXISTING UOP_RANGE leaves whose axis_id matches a
+// position whose desired[] differs from the current axis_type.
+// The DAG-level split (replacing one UOP_RANGE leaf with two new
+// leaves wired into an IADD/IMUL chain) lives in
+// uop_apply_split_dag.
 //
 // === Single-pass full-history simulation ==============================
 //
@@ -532,14 +494,12 @@ fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
   return uop_pattern_rewrite(root, upat_kop_tc_rules, 1, &ctx);
 }
 
-// === E9-prep wedge 1: unified kernel-opts pass =======================
+// === Unified kernel-opts pass ==========================================
 //
-// uop_apply_kernel_opts composes the four E2/E3/E4-E6/E7 entries into a
-// single DAG walk that stamps every UOP_RANGE leaf with its post-replay
-// axis_type.  The composition is faithful to the lifter's structural
-// replay (kernel_lift.c:1568-1633) when applied AFTER the lifter has
-// already produced UOP_RANGE leaves keyed by their post-replay
-// axis_id and extent.
+// uop_apply_kernel_opts composes the GLOBAL/SWAP/split-stamp rules
+// into a single DAG walk that stamps every UOP_RANGE leaf with its
+// post-replay axis_type.  Applied AFTER kernel_lift has produced
+// UOP_RANGE leaves keyed by their post-replay axis_id and extent.
 //
 // Faithful semantics (matching the lifter):
 //   - Initial desired[] starts at KAX_LOOP for every position.
@@ -552,23 +512,22 @@ fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
 //     lifter keeps).
 //   - TC is metadata-only -- explicit no-op.
 //
-// The shared `sim_kop_history` (used by E4-E7) already handles
-// splits/SWAP/GLOBAL/TC composition but lacks the extent guard on
-// GLOBAL because it has no per-axis extent table.  This unified pass
-// runs the simulation with extent tracking, mirroring the lifter's
-// SplitAxis cur[] vector.
+// The shared `sim_kop_history` handles splits/SWAP/GLOBAL/TC
+// composition but lacks the extent guard on GLOBAL because it has
+// no per-axis extent table.  This unified pass runs the simulation
+// with extent tracking, mirroring the lifter's SplitAxis cur[]
+// vector.
 //
 // Idempotent: desired[a] is a pure function of `applied_opts` and the
 // initial extents read from the matched UOP_RANGE leaves.  Running the
 // pass twice produces hash-cons-identical output.
 //
-// Wired into materialize.c after kernel_lift_to_uop succeeds.  In the
-// default config the lifter already stamps the same axis_types via its
-// own structural replay, so this pass is a no-op (every leaf's
-// axis_type already equals desired[axis_id]).  The
-// uop_apply_kernel_opts_validate variant exposes the per-pass fire
-// counter for tests that need to assert no-op semantics directly
-// (see tests/test_uop_range_axis_type.c).
+// Wired into materialize.c after kernel_lift_to_uop succeeds.  The
+// lifter already stamps the same axis_types via its own structural
+// replay, so this pass is typically a no-op (every leaf's axis_type
+// equals desired[axis_id]).  The uop_apply_kernel_opts_validate
+// variant exposes the per-pass fire counter for tests asserting
+// no-op semantics (tests/test_uop_range_axis_type.c).
 
 // Per-pass fire counter for validation.  Captured per call (not
 // global) via the ctx struct.
@@ -730,28 +689,24 @@ fn Term uop_apply_kernel_opts_validate(Term root, KOpt const *applied_opts,
   return out;
 }
 
-// === Phase E9-prep wedge 2: uop_apply_split_dag UPatRule =============
+// === uop_apply_split_dag UPatRule =====================================
 //
 // Walks `applied_opts` and applies the split-class entries
 // (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG level via the
-// uop_range_split primitive (src/uop/index.c).  Mirrors
-// kernel_lift.c:1561-1604's structural-replay split block but operates
-// on an EMITTED UOP DAG: the rule walks every UOP_RANGE leaf reachable
-// from `root` (descending through INDEX_E / IADD / IMUL / IWHERE /
-// STORE / OPT thanks to the E8 uop_arity / uop_graph_rebuild_with_srcs
-// extension) and replaces leaves whose pre-split axis_id matches a
-// split-class opt's target with the (outer * k + inner) sub-expression
-// the primitive returns.
+// uop_range_split primitive (src/uop/index.c).  The rule walks every
+// UOP_RANGE leaf reachable from `root` (descending through INDEX_E /
+// IADD / IMUL / IWHERE / STORE / OPT) and replaces leaves whose
+// pre-split axis_id matches a split-class opt's target with the
+// (outer * k + inner) sub-expression the primitive returns.
 //
 // === Pre-condition ===================================================
 //
 // The input DAG must be the lifter output WITHOUT structural-replay
-// splits applied -- i.e. each pre-replay axis position N appears in
-// the DAG as a UOP_RANGE leaf with axis_id = N and the pre-replay
-// extent.  axis_type may already be stamped (E2/E3/E4-E6/E7 stamps
-// it via uop_apply_kernel_opts independently); this rule keeps the
-// outer's existing axis_type and only writes inner.axis_type =
-// kop_inner_axis_type(opt).
+// splits applied -- i.e. each pre-replay axis position N appears as
+// a UOP_RANGE leaf with axis_id = N and the pre-replay extent.
+// axis_type may already be stamped by uop_apply_kernel_opts; this
+// rule keeps the outer's existing axis_type and only writes
+// inner.axis_type = kop_inner_axis_type(opt).
 //
 // === Single-pass full-history simulation =============================
 //
@@ -1006,16 +961,13 @@ fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
     if (referenced[a] && ctx.origin_extent[a] == 0) return root;
   }
 
-  // E9-prep wedge 2 stage (d): the lifter's structural-replay split
-  // block is retired, so on a normal lift this rule sees a pre-split
-  // DAG (one bare UOP_RANGE per BUFFERIZE origin with full pre-split
-  // extent + axis_type) and rewires it once.  The materialize.c caller
-  // invokes uop_apply_split_dag exactly once per lift, so we no longer
-  // need the sentinel-walk idempotence guard that previously detected
-  // already-split DAGs and bailed.  The per-leaf extent + axis_type
-  // match in the rule body (rw_split_dag_range) is the sole gate: it
-  // fires only on a leaf whose extent equals the captured pre-split
-  // origin_extent[axis_id].
+  // On a normal lift this rule sees a pre-split DAG (one bare
+  // UOP_RANGE per BUFFERIZE origin with full pre-split extent +
+  // axis_type) and rewires it once.  materialize.c invokes
+  // uop_apply_split_dag exactly once per lift; the per-leaf extent
+  // match in rw_split_dag_range is the sole gate (it fires only on
+  // a leaf whose extent equals the captured pre-split
+  // origin_extent[axis_id]).
 
   // Run the simulation: for each split-class opt, drill into
   // origin_expr[o.axis] (or seed a fresh RANGE leaf), apply
