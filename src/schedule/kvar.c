@@ -233,21 +233,3 @@ u32 kvar_collect_from_dag(Term root, u32 *out_ids, u32 cap) {
   return n;
 }
 
-u32 kvar_collect_from_scalar(ScalarUop const *arena, u32 n_arena,
-                             u32 *out_ids, u32 cap) {
-  u32 n = 0;
-  if (arena == NULL || out_ids == NULL || cap == 0) return 0;
-  for (u32 i = 1; i < n_arena && n < cap; i++) {
-    if (arena[i].op != S_RANGE) continue;
-    u32 ext = (u32)(arena[i].extra & 0xFFFFFFFFu);
-    if (!kvar_extent_is_var(ext)) continue;
-    u32 vid = kvar_extent_var_id(ext);
-    if (vid == 0) continue;
-    int seen = 0;
-    for (u32 j = 0; j < n; j++) if (out_ids[j] == vid) { seen = 1; break; }
-    if (seen) continue;
-    out_ids[n++] = vid;
-  }
-  kvar_sort_ascending(out_ids, n);
-  return n;
-}

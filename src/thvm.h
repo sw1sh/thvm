@@ -1875,8 +1875,6 @@ int          kvar_extent_is_var(u32 packed_extent);
 u32          kvar_extent_var_id(u32 packed_extent);
 u32          kvar_extent_static(u32 packed_extent);
 u32          kvar_collect_from_dag(Term root, u32 *out_ids, u32 cap);
-u32          kvar_collect_from_scalar(ScalarUop const *arena, u32 n_arena,
-                                      u32 *out_ids, u32 cap);
 int          kernel_kvar_bind (struct KernelEntry *ke, u32 var_id, u32 value);
 u32          kernel_kvar_value(struct KernelEntry const *ke, u32 var_id);
 
