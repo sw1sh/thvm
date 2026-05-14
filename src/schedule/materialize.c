@@ -14,13 +14,13 @@
 static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_TID  [BOUNDARY_ORDER_CAP];   // emitted output TenDesc id
 static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
-// Phase 4d-1: per-BOUNDARY_ORDER slot, the UOP_BUFFERIZE Term the unified
-// rangeify pass emitted at this boundary (0 in OLD-path mode or when the
-// boundary has no unified-pass record).  Mirror: tinygrad's
-// tinygrad/schedule/indexing.py:77 lands a `UOp(Ops.BUFFERIZE, ...)` per
-// realize boundary; the scheduler downstream walks those.  thvm projects
-// the term onto a per-boundary slot so emit_kernel_for_boundary can read
-// it without re-doing the bufferize_info_find lookup.
+// Per-BOUNDARY_ORDER slot, the UOP_BUFFERIZE Term the unified
+// rangeify pass emitted at this boundary (0 when the boundary has
+// no unified-pass record).  Mirror: tinygrad/schedule/indexing.py:77
+// lands a UOp(Ops.BUFFERIZE, ...) per realize boundary; the
+// scheduler downstream walks those.  thvm projects the term onto a
+// per-boundary slot so emit_kernel_for_boundary can read it without
+// re-doing the bufferize_info_find lookup.
 static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_ORDER_LEN = 0;
 // Parallel UOP_BUFFERIZE Term per slot in BOUNDARY_ORDER, populated
@@ -144,15 +144,14 @@ static void visit_memo_store(VisitMemo *m, u64 loc, u32 ref) {
 
 // === per-realize memory planner =====================================
 //
-// Phase 8 of the tinygrad-parity arc (Metal extension: M3/M4 of
-// docs/plans/beautiful_mnist_parity.md).  After topo_sort + last_use
-// computation, the emit loop walks boundaries in alloc-depth order;
-// before each kernel allocates its output buf, the planner pushes
-// any earlier-emitted kernel's output buf whose last_use_depth has
-// already passed onto the backend's free-list.  The next tensor_alloc
-// -> backend->buf_alloc then pops a same-nbytes match instead of
-// growing the buffer table -- tinygrad's MemoryPlanner, scoped to one
-// materialize pass.
+// After topo_sort + last_use computation, the emit loop walks
+// boundaries in alloc-depth order; before each kernel allocates its
+// output buf, the planner pushes any earlier-emitted kernel's
+// output buf whose last_use_depth has already passed onto the
+// backend's free-list.  The next tensor_alloc -> backend->buf_alloc
+// then pops a same-nbytes match instead of growing the buffer
+// table -- tinygrad's MemoryPlanner, scoped to one materialize
+// pass.
 //
 // Metal safety: the push + pop only ever happen between kernels
 // emitted in the *same* materialize pass, and no kernel is dispatched
@@ -1055,9 +1054,9 @@ fn u32 materialize_boundary_last_use_at(u32 i) {
   return BOUNDARY_LAST_USE[ridx];
 }
 
-// Phase 2 follow-up accessors: read the per-input-slot bufferize
-// source id and look up the BIndex chain summary for the
-// (this kernel's loc, source buffer's loc) edge.
+// Accessors: read the per-input-slot bufferize source id and look
+// up the BIndex chain summary for the (this kernel's loc, source
+// buffer's loc) edge.
 fn u32 kernel_entry_input_source_buffer_id(u32 kid, u32 slot) {
   if (kid >= KERNELS_NEXT) return 0;
   KernelEntry const *ke = &KERNELS[kid];
@@ -1145,11 +1144,10 @@ fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
   return 1;
 }
 
-// Phase 2 follow-up diagnostic: print the bufferize edge summary
-// for every input slot of every emitted kernel.  Gated by
-// DUMP_BUFFERIZE_KERNEL_EDGES=1 so it stays silent in normal use.
-// Useful for verifying the input_source_buffer_ids wiring against
-// the bufferize edge table during ground-truth regression work.
+// Diagnostic: print the bufferize edge summary for every input
+// slot of every emitted kernel.  Gated by
+// DUMP_BUFFERIZE_KERNEL_EDGES=1; useful for verifying
+// input_source_buffer_ids wiring against the bufferize edge table.
 static int materialize_dump_kernel_edges_enabled(void) {
   char const *e = getenv("DUMP_BUFFERIZE_KERNEL_EDGES");
   return e != NULL && e[0] == '1';
@@ -1703,10 +1701,9 @@ static u8 kprog_op_is_identity(KProgOp const *p) {
   return 0;
 }
 
-// Phase 2 follow-up: propagate chain_op_idx + chain_input_slot +
-// chain_edge_idx from a single src ksrc reference to a freshly-
-// zeroed KProgOp `p`.  See KProgOp definition in thvm.h for the
-// chain semantics.
+// Propagate chain_op_idx + chain_input_slot + chain_edge_idx from
+// a single src ksrc reference to a freshly-zeroed KProgOp `p`.
+// See KProgOp definition in thvm.h for the chain semantics.
 //
 // Movement src that is also an identity is invisible to the
 // bufferize chain (bufferize_apply_identity_reshape elides it), so
@@ -2011,13 +2008,12 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       if (tid == 0) return VISIT_BAIL;
       u32 slot = input_slot_dedup(ke, tid, boundary_term);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-      // Phase 2 follow-up: record the source buffer id so rangeify
-      // and other consumers can call bufferize_edge_summary with
-      // (root_loc, loc).  bufferize_find_by_loc returns the index
-      // (0-based); we store the buffer_id (1-based) here.  When the
-      // source isn't in the bufferize graph (defensive case for
-      // boundaries that were inserted post-classify), leave the
-      // sentinel 0.
+      // Record the source buffer id so rangeify and other consumers
+      // can call bufferize_edge_summary with (root_loc, loc).
+      // bufferize_find_by_loc returns the index (0-based); store the
+      // buffer_id (1-based) here.  When the source isn't in the
+      // bufferize graph (defensive case for boundaries inserted
+      // post-classify), leave the sentinel 0.
       u32 sidx = bufferize_find_by_loc(loc);
       if (sidx != 0xFFFFFFFFu && ke->input_source_buffer_ids != NULL) {
         BBufferize const *src_buf = bufferize_buffer_at(sidx);
@@ -2692,24 +2688,20 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
   }
 
-  // Phase C dual-write (slices 1 + 2): cache the full
-  // kernel_lift_to_uop output on the KernelEntry alongside the
-  // legacy program[] / scalar_uops[] outputs.  The lifter handles
-  // three shapes: (a) gemm-only kernels that bypass rangeify
+  // Cache the full kernel_lift_to_uop output on the KernelEntry
+  // alongside the program[] / scalar_uops[] outputs.  The lifter
+  // handles three shapes: (a) gemm-only kernels that bypass rangeify
   // (scalar_uops == NULL but kernel_lift_from_gemm succeeds),
   // (b) conv2d-only kernels (kernel_lift_from_conv2d), and
-  // (c) rangeified kernels (the ScalarUop walker in
-  // kernel_lift_to_uop).  When the lift declines (multi-output
-  // spliced, unsupported shape, n_inputs > KERNEL_LIFT_MAX_INPUT),
-  // cached_lift stays zero-initialized and the legacy program[]
-  // path remains primary.
+  // (c) rangeified kernels (the ScalarUop walker).  When the lift
+  // declines (multi-output spliced, unsupported shape, n_inputs >
+  // KERNEL_LIFT_MAX_INPUT), cached_lift stays zero-initialized and
+  // the program[] path remains primary.
   //
-  // Slice 2: lift directly into ke->cached_lift so dispatch-time
-  // consumers (cpu_jit_build, cg_emit_via_uop, cpu_uop_walk) can
-  // read store_root / out_buf / in_bufs[] without re-running the
-  // lifter.  compute_root is kept populated as a redundant view of
-  // cached_lift.store_root for E1-style consumers that only need
-  // the root.
+  // Dispatch-time consumers (cpu_jit_build, cg_emit_via_uop,
+  // cpu_uop_walk) read store_root / out_buf / in_bufs[] from
+  // cached_lift without re-running the lifter.  compute_root is
+  // kept populated as a redundant view of cached_lift.store_root.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
     ke->compute_root = ke->cached_lift.store_root;
     // THVM_LIFT_FROM_UNIFIED=1: substitute the lifter's store_root
@@ -2849,9 +2841,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // and their true last_use isn't always equal to BOUNDARY_LAST_USE.
   // The Phase-3 fusion relaxation also lets some non-realized
   // intermediates feed multiple consumers without a shared buf;
-  // restricting recycling here keeps those cases safe.  Phase 9
-  // can lift this guard once the planner has explicit ASSIGN +
-  // DUP-aware lifetime tracking.
+  // restricting recycling here keeps those cases safe.  Lifting
+  // this guard requires explicit ASSIGN + DUP-aware lifetime
+  // tracking in the planner.
   if (BOUNDARY_LAST_USE[idx] > 0
       && BUFFERIZE_NODES[idx].consumer_count == 1) {
     mem_plan_record(TENS[out_tid].buf_id,
@@ -3077,8 +3069,8 @@ fn Term thvm_materialize(Term term) {
   // from them (the chain rule's freshly-emitted UOPs may still
   // reference those tids).
   mem_plan_drain_freelist();
-  // Phase 2 follow-up diagnostic: print per-kernel input edge data
-  // for every kernel emitted in this pass.  No-op unless
+  // Diagnostic: print per-kernel input edge data for every kernel
+  // emitted in this pass.  No-op unless
   // DUMP_BUFFERIZE_KERNEL_EDGES=1.
   materialize_dump_kernel_edges(kernels_at_start);
   return sink_kernel != 0 ? sink_kernel : term;
