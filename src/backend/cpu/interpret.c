@@ -1134,11 +1134,11 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
     return 0;
   }
   // 5. Rangeify scalar-uops interpreter: the broad fallback that
-  //    handles every pattern the WL grid produces (REDUCE, FLIP,
-  //    PAD/SHRINK chains, BITCAST, packed nibbles, narrow FPs).
-  //    Final rung now that the legacy cpu_interpret per-op fallback
-  //    is gone -- the F6 surgical sweep showed walker + scalar_uops
-  //    cover every kernel shape the suite produces.
+  //    handles patterns cpu_uop_walk declines (path 3) and that
+  //    cpu_jit_dispatch (path 4) bails on.  Telemetry on the
+  //    8-suite run shows path 5 fires ~19 times -- a real coverage
+  //    gap on path 3, not dead code.  Closing the gap is the
+  //    prerequisite for deleting the scalar interpreter.
   if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
     int rc = cpu_dispatch_scalar(ke, in_buf_ids, out_buf_id);
     cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
