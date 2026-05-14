@@ -3087,18 +3087,11 @@ fn Term thvm_materialize(Term term) {
   }
 
   bufferize_classify(term);
-  // Phase 4d-1: when the unified rangeify pass ran inside
-  // bufferize_classify (rangeify_unified_enabled() == 1), project its
-  // UOP_BUFFERIZE Terms back onto BUFFERIZE_NODES.realized and capture
-  // BOUNDARY_BUFFERIZE_TERM[].  Mirror: tinygrad walks the lowered
-  // tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py) -- we
-  // map that to the legacy topo via the realized bit.  When unified is
-  // off, fall through to the legacy walker.
-  if (rangeify_unified_enabled()) {
-    topo_sort_buffers_unified(term);
-  } else {
-    topo_sort_boundaries(term);
-  }
+  // The unified rangeify pass projects its UOP_BUFFERIZE Terms back
+  // onto BUFFERIZE_NODES.realized; we capture them into
+  // BOUNDARY_BUFFERIZE_TERM[] here.  Mirror: tinygrad walks the
+  // lowered tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py).
+  topo_sort_buffers_unified(term);
   plan_kernel_merges();
   mem_plan_reset();
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {

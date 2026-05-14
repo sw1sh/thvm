@@ -2596,7 +2596,6 @@ fn Term pm_drop_and_clauses_apply (Term t);
 // RU_RANGE_MAP / RU_REALIZE_MAP / RU_ENDING_RANGES / RU_SUBST in-place and
 // writes UOP_BUFFERIZE Terms onto the main heap at realize boundaries.
 // See src/schedule/rangeify_unified.c for design notes.
-fn int  rangeify_unified_enabled               (void);
 fn void run_rangeify_unified                   (Term root);
 fn void pm_apply_rangeify                      (Term root);
 fn u32  rangeify_unified_last_nodes_walked     (void);

@@ -723,7 +723,6 @@ fn void bufferize_classify(Term root) {
   // BUFFERIZE_NODES.realized so downstream consumers (materialize.c,
   // bufferize.c, the kernel walker) observe the new decisions through
   // the same side-table they already read.
-  if (rangeify_unified_enabled()) {
     // OLD-path multi-consumer / REDUCE / matmul seeds stay.  Dropping
     // REDUCE here without lowered-DAG materialize.c support breaks every
     // reduce-bearing topology (MaxPool/Softmax/BN-train/CE); the seed
@@ -842,109 +841,6 @@ fn void bufferize_classify(Term root) {
     bufferize_classify_project_unified();
     bufferize_finalize_stores(root);
     return;
-  }
-
-  // === OLD path (opt-out via THVM_UNIFIED_RANGEIFY=0) ===
-
-  // Rules (b) + (c): multi-consumer or REDUCE.  Later named rules
-  // can clear the final `realized` bit while preserving these
-  // reason bits for diagnostics and tests.
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    UOpInfo *info = &BUFFERIZE_NODES[i];
-    if (info->consumer_count >= 2) {
-      bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
-    }
-    if (info->op == UOP_REDUCE) {
-      bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
-      if (bufferize_uop_is_matmul(info->loc)) {
-        bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
-      }
-    }
-  }
-  // Matmul-input-protect: walk upstream one hop from each matmul
-  // reduce's MUL operands.  When an input is an elementwise op
-  // (ADD/SUB/MUL/etc) that would otherwise get inlined into the
-  // matmul kernel, mark it realized so it becomes its own boundary
-  // and visit() routes it as input.  Without this, materialize's
-  // visit() absorbs upstream bias-add chains into the matmul kernel,
-  // bloating n_ops/n_inputs past the strict tile_analyze_gemm gates
-  // and forcing the slow metal-tile dispatch.  Structural recognition
-  // (UOP_MUL with 2 children, captured at slots 0/1) goes through
-  // upat_match; the ADD-or-MUL gate + side-effect marking on
-  // BUFFERIZE_NODES stay imperative because they touch the side
-  // channel rather than the heap DAG.
-  //
-  // SIZE GATE (Level 56): the protect pays off only when the
-  // resulting matmul is big enough to amortize the launch overhead
-  // of the +1 split-off elementwise kernel (~150-200us metal-gemm
-  // launch on M3 Max).  Use the MUL's shape numel = M*N*K (matmul
-  // flops) as the gate -- not the REDUCE output (M*N) -- because
-  // it captures the actual GEMM work that metal-gemm-with-TC
-  // accelerates.  Transformer kids 4/5/6/14 are 32*64*64 = 131k;
-  // kid 19 is 32*64*256 = 524k.  Lenet's fc layers are
-  // 1*120*400 = 48k (fc1), 1*84*120 = 10k (fc2), 1*10*84 = 840
-  // (fc3).  Threshold 100000 keeps all transformer matmuls but
-  // excludes lenet's tiny fc layers.
-  // Override via THVM_MATMUL_PROTECT_MIN_FLOPS.
-  u64 protect_min_flops = 100000;
-  {
-    char const *e = getenv("THVM_MATMUL_PROTECT_MIN_FLOPS");
-    if (e != NULL) protect_min_flops = (u64)strtoull(e, NULL, 10);
-  }
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    UOpInfo *info = &BUFFERIZE_NODES[i];
-    if (!(info->reasons & BUFFERIZE_REASON_MATMUL)) continue;
-    {
-      // The MUL is heap[reduce_loc + 0]; its shape numel = M*N*K.
-      Term mul_term = term_resolve(heap_read(info->loc + 0));
-      Shape s; u64 mul_numel = 0;
-      if (term_shape_in(mul_term, 0, &s)) {
-        mul_numel = 1;
-        for (u32 d = 0; d < s.ndim; d++) mul_numel *= s.dims[d];
-      }
-      if (mul_numel < protect_min_flops) continue;
-    }
-    Term mul = term_resolve(heap_read(info->loc + 0));
-    Term bindings[UPAT_NUM_BINDINGS] = {0};
-    if (!upat_match(&bufferize_upat_mul, mul, bindings)) continue;
-    for (u32 a = 0; a < 2; a++) {
-      Term arg = bindings[a];
-      // Walk past movement ops (RESHAPE/EXPAND/PERMUTE/SHRINK/PAD/
-      // FLIP) to find the underlying elementwise parent.  Without
-      // this, an LN-style `EXPAND(RESHAPE(ADD(...)))` operand hides
-      // the ADD from the protect pass; the ADD then gets absorbed
-      // into the matmul kernel and inflates n_inputs past the
-      // tile_analyze_gemm gate (Level 47 transformer kid 14
-      // diagnosis).  Each movement op stores src at heap[loc+0]
-      // so the step is uniform.  Bounded by 8 hops to match the
-      // existing chain walker.
-      for (u32 hops = 0; hops < 8; hops++) {
-        if (term_tag(arg) != TAG_UOP) break;
-        if (!upat_match(&bufferize_upat_movement_any, arg, NULL)) break;
-        arg = term_resolve(heap_read(term_val(arg) + 0));
-      }
-      if (term_tag(arg) != TAG_UOP) continue;
-      u8 arg_op = term_ext(arg);
-      if (arg_op != UOP_ADD && arg_op != UOP_MUL) continue;
-      u32 arg_idx = bufferize_info_find(term_val(arg));
-      if (arg_idx == 0xFFFFFFFFu) continue;
-      bufferize_node_mark(&BUFFERIZE_NODES[arg_idx],
-                          BUFFERIZE_REASON_MATMUL);
-    }
-  }
-  RealizeRewriteRule rules[] = {
-    {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
-  };
-  // Snapshot the seeded BUFFERIZE_NODES into the bufferize graph,
-  // then run the named rewrite rules.  bufferize_node_mark and
-  // bufferize_node_unmark forward into bufferize_realize_with_reason
-  // and bufferize_unrealize so each rule's effect is recorded as
-  // added_by/removed_by on the explicit graph.  Finalize the store
-  // table after rewrites land.
-  bufferize_seed_from_nodes(root);
-  bufferize_rewrite_apply(root, rules, (u32)(sizeof(rules) / sizeof(rules[0])));
-  bufferize_rewrite_stats_dump();
-  bufferize_finalize_stores(root);
 }
 
 fn u8 bufferize_is_realized(Term uop_term) {

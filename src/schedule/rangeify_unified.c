@@ -148,15 +148,6 @@ fn Term rangeify_unified_reduce_range_at(u32 node_idx, u32 i) {
   return RU_REDUCE_RANGES[node_idx].ranges[i];
 }
 
-// === Env-gate. Mirrors the THVM_* env-pattern used elsewhere. ===
-// Default ON; set THVM_UNIFIED_RANGEIFY=0 to opt back into the OLD
-// named-rule pipeline.
-fn int rangeify_unified_enabled(void) {
-  char const *e = getenv("THVM_UNIFIED_RANGEIFY");
-  if (e == NULL) return 1;
-  return e[0] != '0';
-}
-
 // === Mirror source: tinygrad/uop/ops.py:resolve  ===
 // In tinygrad, `resolve(s != 1)` returns False iff s is structurally 1.
 // We mirror with the static-extent check on a literal.
