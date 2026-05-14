@@ -585,13 +585,11 @@ typedef struct {
   // via axes_resolve_kax_type / axes_compute_axis_types in
   // codegen/axis.c.
   //
-  // E9 session 5: full_shape[] / n_axes retired.  Per-axis extents +
-  // axis count derive on demand from
+  // Per-axis extents + axis count derive on demand from
   // (output_shape + tail-reduce + scalar-reduce + applied_opts) via
   //   axes_resolve_full_shape(ke, d, *out)
   //   axes_resolve_n_axes(ke)
-  // -- the same signals that drove the writer trio in session 4.
-  // KpSchedule now carries only the applied_opts log + the autotune
+  // KpSchedule carries only the applied_opts log + autotune
   // bookkeeping bits.
   KOpt applied_opts[MAX_OPTS];
   u8   n_applied;
@@ -604,11 +602,10 @@ typedef struct {
                                // across axes_reset_to_default so a
                                // proposer-explored variant doesn't
                                // re-trigger autotune mid-bench.
-                               // E9 session 2: legacy `u32 version`
-                               // counter retired -- freshness is now a
-                               // content hash via `tile_axes_hash(ke)`
-                               // (codegen/axis.c) over (applied_opts,
-                               // output_shape, source_uop).
+                               // (Freshness flows through
+                               // tile_axes_hash(ke) over
+                               // (applied_opts, output_shape,
+                               // source_uop); no version counter.)
 } KpSchedule;
 
 struct Backend {
@@ -971,13 +968,10 @@ typedef struct {
 // loops, Metal threadgroups, local memory, barriers, and eventually
 // MMA intrinsics.
 //
-// The scalar-arena TILE_LOOP_NEST seeder (tile_build_from_scalar) and
-// its TILE_AXIS helpers have been deleted; ke->tile_uops is populated
-// only by tile_lower_reduce_broadcast in the reduce-broadcast unit
-// test.  Slice 8 session 5 had already retired the dedicated matmul
-// seeding path; matmul shape facts now flow through
-// ke->cached_lift.store_root via uop_dag_classify_matmul_shape.
-// Dispatch in production routes through the lifter-based path.
+// ke->tile_uops is populated only by tile_lower_reduce_broadcast in
+// the reduce-broadcast unit test; matmul shape facts flow through
+// ke->cached_lift.store_root via uop_dag_classify_matmul_shape and
+// production dispatch routes through the lifter-based path.
 // Memory memory scope constants.  Used by TILE_AXIS.memory_scope,
 // TILE_LOCAL_ALLOC.scope, and TILE_BARRIER.scope.  Default 0 = global
 // (device memory) so legacy zero-valued packings still mean
@@ -1068,10 +1062,9 @@ typedef struct {
   u64 extra;                 // op-specific payload
 } TileUop;
 
-// Slice 8 session 5: TileGemmInfo retired with tile_analyze_gemm.
-// Matmul shape facts (M/N/K/ldA/ldB/flags/dtype/a_input/b_input) now
-// flow through `UopDagGemmShape` (src/uop/dag_scan.c) read directly
-// from `ke->cached_lift.store_root`.
+// Matmul shape facts (M/N/K/ldA/ldB/flags/dtype/a_input/b_input)
+// flow through UopDagGemmShape (src/uop/dag_scan.c) read from
+// ke->cached_lift.store_root.
 
 typedef struct {
   u32 dtype;
@@ -1118,8 +1111,7 @@ typedef struct {
   u32 axis_ids    [MAX_AXES];
   u32 axis_types  [MAX_AXES];
   u32 axis_extents[MAX_AXES];
-  // Slice 8 session 5: `mma_tile_id` + `mma` retired along with
-  // tile_analyze_gemm.  Matmul shape facts now flow through
+  // Matmul shape facts (formerly mma_tile_id / mma) flow through
   // ke->cached_lift.store_root via uop_dag_classify_matmul_shape.
 } TilePlanInfo;
 
@@ -1331,12 +1323,11 @@ typedef struct KernelEntry {
   u32        n_tile_uops;
   u32        tile_uops_cap;
   u32        tile_root;       // root TileUop id, usually TILE_LOOP_NEST; 0 = none
-  u64        tile_axes_hash;    // E9 session 2: content hash of
-                                 // (applied_opts, output_shape, source_uop)
-                                 // captured when tile_uops was built.
-                                 // Compared against tile_axes_hash(ke) on
-                                 // each tile_sync to detect stale plans.
-                                 // Replaces the legacy u32 version counter.
+  u64        tile_axes_hash;    // Content hash of (applied_opts,
+                                 // output_shape, source_uop) captured
+                                 // when tile_uops was built.  Compared
+                                 // against tile_axes_hash(ke) on each
+                                 // tile_sync to detect stale plans.
 
   // kvar wedge: per-dispatch runtime values for any symbolic-shape
   // Variables bound to RANGE leaves in this kernel.  Sparse: each
@@ -2200,70 +2191,62 @@ fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
 fn Term interact_kernel (Term kernel);
 
 // === codegen/ axis ===
-// E9 session 5: lifecycle hooks retained as no-ops.  The signal-
-// driven resolvers cover the initial state (nd LOOPs + optional
-// trailing REDUCE) directly from
+// Lifecycle hooks retained as no-ops -- the signal-driven resolvers
+// cover the initial state (nd LOOPs + optional trailing REDUCE) from
 // (output_shape + tail-reduce + scalar-reduce), so neither helper
 // has scratch to populate.  Kept callable so existing call ordering
-// in materialize.c / tile.c / tile_anno.c stays valid without churn.
+// in materialize.c / tile.c / tile_anno.c stays valid.
 fn void axes_default_for(struct KernelEntry *ke);
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke);
-// E9-prep wedge 3: predicate that mirrors the legacy
-// `axes_has_reduce_axis(ke->schedule)` answer without reading
-// `ke->schedule->axis_types[]`.  Walks the higher-level signals each
+// Predicate mirroring the answer of `axes_has_reduce_axis` without
+// reading axis_types[].  Walks higher-level signals each
 // REDUCE-class writer leaves (program tail UOP_REDUCE, applied_opts
 // log carrying KOP_GROUP / KOP_GROUPTOP, scalar arena reduce extent).
 fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
 
-// E9-prep wedge 4: derive per-axis KAX_ types from the higher-level
-// signals (output shape + tail-reduce + scalar-reduce + applied_opts
-// log).  Mirrors the writer trio (axes_default_for +
+// Derive per-axis KAX_ types from the higher-level signals
+// (output shape + tail-reduce + scalar-reduce + applied_opts log).
+// Mirrors the writer trio (axes_default_for +
 // axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
-// number of axes written; 0 on overflow / unknown opt class.  Used by
-// axes_resolve_kax_type as the single read point.  Wedge 8 retired
-// the legacy `axis_types[]` fallback once the last 2 hand-write tests
-// in test_tile_graph migrated to the writer trio.
+// number of axes written; 0 on overflow / unknown opt class.  Used
+// by axes_resolve_kax_type as the single read point.
 fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                 u32 cap);
 
-// E9-prep wedge 7+8: resolve a single axis's KAX_ type via the wedge-4
-// simulator.  Returns KAX_LOOP when the simulator can't speak (NULL
-// ke/axes, d >= n_axes, simulator overflow / unknown opt).  Used by
-// tile_anno.c readers as the only axis-type read source -- no direct
-// axis_types[i] reads remain in codegen/tile_anno.c.
+// Resolve a single axis's KAX_ type via the axis-types simulator.
+// Returns KAX_LOOP when the simulator can't speak (NULL ke/axes,
+// d >= n_axes, simulator overflow / unknown opt).  Used by
+// tile_anno.c readers as the only axis-type read source -- no
+// direct axis_types[i] reads remain in codegen/tile_anno.c.
 fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
 
-// E9 session 2: derive per-axis full_shape extents from the higher-
-// level signals (output_shape + tail-reduce + scalar-reduce +
-// applied_opts).  Mirrors the writer trio (axes_default_for +
+// Derive per-axis full_shape extents from the higher-level signals
+// (output_shape + tail-reduce + scalar-reduce + applied_opts).
+// Mirrors the writer trio (axes_default_for +
 // axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
 // number of extents written; 0 on overflow / unknown opt / invalid
-// replay.  Used by `axes_resolve_full_shape` and (eventually) by
-// readers migrating off direct `ke->schedule->full_shape[]` reads.
+// replay.  Used by axes_resolve_full_shape.
 fn u32  axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
                                 u32 cap);
 
-// E9 session 2: per-axis full_shape resolver.  E9 session 5: this is
-// the canonical (and only) read path for axis extents -- writer
-// scratch retired.  Writes the derived extent for axis `d` into
+// Per-axis full_shape resolver.  Canonical (and only) read path for
+// axis extents.  Writes the derived extent for axis `d` into
 // `*out_extent` and returns 1 on success; 0 (with `*out_extent = 0`)
 // when ke/axes are NULL, d is out of range, or the simulator can't
 // speak.
 fn u32  axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                 u32 *out_extent);
 
-// E9 session 2: axis-count resolver.  E9 session 5: this is the
-// canonical (and only) read path for n_axes -- writer scratch
-// retired.  Returns the derived axis count (output_shape.ndim clipped
-// to MAX_AXES-1, plus 1 if a trailing REDUCE-class axis is present,
+// Axis-count resolver.  Canonical (and only) read path for n_axes.
+// Returns the derived axis count (output_shape.ndim clipped to
+// MAX_AXES-1, plus 1 if a trailing REDUCE-class axis is present,
 // plus the count of split-class applied_opts).
 fn u32  axes_resolve_n_axes(struct KernelEntry const *ke);
 
-// E9 session 2: content hash of (applied_opts, output_shape,
-// source_uop) -- the inputs that fully determine the resolver
-// output.  Replaces the legacy `ke->schedule->version` u32 freshness
-// counter.  Snapshots taken into `ke->tile_axes_hash` and compared
-// across tile_sync_from_scalar to detect stale tile_uops.
+// Content hash of (applied_opts, output_shape, source_uop) -- the
+// inputs that fully determine the resolver output.  Snapshots taken
+// into `ke->tile_axes_hash` and compared across tile_sync_from_scalar
+// to detect stale tile_uops.
 fn u64  tile_axes_hash(struct KernelEntry const *ke);
 
 // Apply one TOpt to a KernelEntry's axis structure.  Split-class opts
@@ -2273,9 +2256,9 @@ fn u64  tile_axes_hash(struct KernelEntry const *ke);
 // is metadata-only.  Returns 0 on validation failure (axis out of
 // range, arg doesn't divide, applied_opts full, unsupported opt).
 //
-// E9: per-axis kax_type is no longer stored on KpSchedule; the writer
-// records the opt and `axes_resolve_kax_type` derives the type from
-// the applied_opts log on read.
+// Per-axis kax_type is not stored on KpSchedule; the writer records
+// the opt and axes_resolve_kax_type derives the type from the
+// applied_opts log on read.
 fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
 
 // Shape-heuristic kernel opt proposer: looks at the kernel's
@@ -2401,10 +2384,9 @@ int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
 // Reset axes to the default LOOP/REDUCE shape (autotune between-
 // candidates baseline; preserves autotuned + version).
 void       tile_anno_axes_reset(struct KernelEntry *ke);
-// E9 session 5: no-op stub.  Writer scratch (`_writer.full_shape[]` /
-// `_writer.n_axes`) retired; the resolvers derive axis count + extents
-// from (output_shape + tail-reduce + scalar-reduce + applied_opts) on
-// read.  Symbol kept for the public header signature; safe to call.
+// No-op stub.  The resolvers derive axis count + extents from
+// (output_shape + tail-reduce + scalar-reduce + applied_opts) on
+// read; this symbol is kept for the public header signature.
 int        tile_anno_axis_append(struct KernelEntry *ke, TileAxisInfo info);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
@@ -2421,12 +2403,9 @@ fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
 int     tile_analyze_conv2d_flat(struct KernelEntry const *ke,
                                  TileConv2DInfo *out);
 int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
-// Slice 8 session 5: tile_analyze_gemm + tile_collect_mma_plan retired
-// (KProgOp-side matmul recognisers).  Matmul shape facts flow through
-// uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
-// tile_build_from_scalar (scalar-arena TILE_LOOP_NEST seeder) deleted;
-// dispatch consumers route through the lifter-based path instead.
-// the failure by routing through the lifter-based dispatch shape.
+// Matmul shape facts flow through uop_dag_classify_matmul_shape
+// over ke->cached_lift.store_root; dispatch consumers route through
+// the lifter-based path.
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 
@@ -2618,19 +2597,18 @@ fn u32  rangeify_unified_last_bufferizes_emitted(void);
 fn u32  rangeify_unified_reduce_n_ranges_at    (u32 node_idx);
 fn Term rangeify_unified_reduce_range_at       (u32 node_idx, u32 i);
 
-// === Phase E1: UOP_RANGE field accessors + axis_type rewriter ===
+// === UOP_RANGE field accessors + axis_type rewriter ===
 // Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type
-// port (Phase E).  Today these wrap the [NUM(axis_id), NUM(axis_type),
-// NUM(extent)] heap layout so rule bodies don't poke heap slots
-// directly.  Returns 0 / unchanged on tag mismatch.  See
-// src/uop/index.c for design notes; see Phase E in
-// docs/plans/ideal_pipeline.md for the multi-wedge rollout.
+// rule bodies.  Wrap the [NUM(axis_id), NUM(axis_type), NUM(extent)]
+// heap layout so callers don't poke heap slots directly.  Returns 0
+// / unchanged on tag mismatch.  See src/uop/index.c for design
+// notes.
 fn u32  uop_range_axis_id  (Term r);
 fn u32  uop_range_axis_type(Term r);
 fn u32  uop_range_extent   (Term r);
 fn Term uop_range_with_axis_type(Term r, u32 new_axis_type);
 
-// === Phase E9-prep wedge 2: uop_range_split primitive ===
+// === uop_range_split primitive ===
 // Splits one UOP_RANGE leaf into a (outer, inner) pair plus a
 // `linear_index` Term that reconstructs the original axis position
 // (`outer * k + inner`).  Replaces the structural-replay block in
@@ -2660,81 +2638,66 @@ typedef struct {
 } UopRangeSplit;
 fn UopRangeSplit uop_range_split(Term old_range, u32 k, u32 inner_axis_type);
 
-// === Phase E2: KOP_GLOBAL UPatRule mirror (src/uop/apply_opt.c) ===
+// === KOP_GLOBAL UPatRule mirror (src/uop/apply_opt.c) ===
 // Walks the DAG rooted at `root` and stamps any UOP_RANGE leaf whose
 // axis_id matches a KOP_GLOBAL entry in `applied_opts` (with arg ==
-// extent and current axis_type == KAX_LOOP) to a fresh UOP_RANGE with
-// axis_type=KAX_GLOBAL.  Mirrors codegen/apply_opt.c's KpSchedule
-// write + kernel_lift.c's structural-replay stamp; both representations
-// stay live during the E* wedge sequence.  Idempotent: re-running the
-// rule on a previously-stamped DAG is a no-op (the LOOP guard rejects
-// KAX_GLOBAL leaves).  See docs/plans/ideal_pipeline.md row E.
+// extent and current axis_type == KAX_LOOP) to a fresh UOP_RANGE
+// with axis_type=KAX_GLOBAL.  Mirrors codegen/apply_opt.c's
+// KpSchedule write + kernel_lift.c's structural-replay stamp; both
+// representations stay live.  Idempotent: re-running the rule on a
+// previously-stamped DAG is a no-op (the LOOP guard rejects
+// KAX_GLOBAL leaves).
 fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
                              u32 n_applied);
 
-// === Phase E3: KOP_SWAP UPatRule mirror (src/uop/apply_opt.c) =====
-// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf with
-// the axis_type produced by simulating the KOP_GLOBAL + KOP_SWAP
-// history in `applied_opts` (initial state KAX_LOOP for all positions).
-// Mirrors codegen/apply_opt.c's pairwise axis_type swap +
-// kernel_lift.c's structural-replay swap; both representations stay
-// live during the E* wedge sequence.  Composes KOP_GLOBAL stamps and
-// KOP_SWAPs in order so SWAP-after-GLOBAL produces the relabelled
-// axis_type at the destination position.  Other KOP_* classes (split
-// ops, KOP_TC) are ignored by this rule -- their per-opt index drift
-// is a later wedge.  Idempotent: the simulated desired state is a pure
-// function of `applied_opts`, so re-applying is a no-op once the leaves
-// carry their computed axis_types.  See docs/plans/ideal_pipeline.md
-// row E.
+// === KOP_SWAP UPatRule mirror (src/uop/apply_opt.c) =====
+// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf
+// with the axis_type produced by simulating the KOP_GLOBAL +
+// KOP_SWAP history in `applied_opts` (initial state KAX_LOOP for
+// all positions).  Mirrors codegen/apply_opt.c's pairwise axis_type
+// swap + kernel_lift.c's structural-replay swap.  Composes
+// KOP_GLOBAL stamps and KOP_SWAPs in order so SWAP-after-GLOBAL
+// produces the relabelled axis_type at the destination position.
+// Split-class opts and KOP_TC are ignored here (axis-insertion
+// drift is handled by uop_apply_split_dag).  Idempotent: the
+// simulated desired state is a pure function of applied_opts.
 fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
                            u32 n_applied);
 
-// === Phase E4-E6: split-class UPatRule mirror (src/uop/apply_opt.c) ===
-// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf with
-// the axis_type produced by simulating the full applied_opts history
-// (split-class KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP + KOP_GLOBAL +
-// KOP_SWAP) on a desired[MAX_AXES] vector.  Each split inserts a new
-// position at o.axis+1 (shifting later positions right), with the
-// outer at o.axis keeping its current axis_type and the inner at
-// o.axis+1 taking the opt's KAX_ type (UPCAST/UNROLL/LOCAL/GROUP_REDUCE).
-// GLOBAL stamps KAX_GLOBAL on a LOOP position; SWAP swaps two positions'
-// axis_types.  Other KOP_* (KOP_TC, KOP_PADTO, KOP_NOLOCALS) are
-// no-ops here (mirroring axes_apply_opt's behaviour).
+// === Split-class UPatRule mirror (src/uop/apply_opt.c) ===
+// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf
+// with the axis_type produced by simulating the full applied_opts
+// history (split-class KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP +
+// KOP_GLOBAL + KOP_SWAP) on a desired[MAX_AXES] vector.  Each split
+// inserts a new position at o.axis+1 (shifting later positions
+// right): outer at o.axis keeps its axis_type, inner at o.axis+1
+// takes the opt's KAX_ type (UPCAST/UNROLL/LOCAL/GROUP_REDUCE).
+// GLOBAL stamps KAX_GLOBAL on a LOOP position; SWAP swaps two
+// positions.  Other KOP_* (KOP_TC, KOP_PADTO, KOP_NOLOCALS) are
+// no-ops (mirroring axes_apply_opt).
 //
-// This is the pragmatic stamp-only port: kernel_lift.c structural
-// replay still creates the new UOP_RANGE leaves for each split (the
-// "axis-INSERTION" half of the rewrite); this rule only fixes up
-// axis_type on already-emitted leaves whose axis_id sits in the
-// post-replay range.  The full UPat-driven splitting (replacing one
-// UOP_RANGE with two new leaves wired into the consumer's IADD/IMUL
-// chain) is deferred until a future wedge introduces a `uop_range_split`
-// primitive returning an (outer, inner) pair.  Idempotent:
-// desired[a] is a pure function of applied_opts.  See
-// docs/plans/ideal_pipeline.md row E.
+// Stamp-only: this rule fixes up axis_type on already-emitted
+// leaves; the DAG-level split itself lives in uop_apply_split_dag.
+// Idempotent: desired[a] is a pure function of applied_opts.
 fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
                             u32 n_applied);
 
-// === Phase E7: KOP_TC UPatRule mirror (src/uop/apply_opt.c) =========
-// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf with
-// the axis_type produced by simulating the full applied_opts history
-// on a desired[MAX_AXES] vector.  KOP_TC is kernel-aware metadata
-// (tensor-core hint) and contributes NO axis_type mutation: its
-// effect lives in render_uop.c's matmul-TC pattern matcher and the
-// uop_recognise_tc producer that wraps the matmul reduce in
-// UOP_OPT(_, TC, 0).  This rule mirrors codegen/apply_opt.c's
-// kernel_apply_opt routing of KOP_TC through tile_anno_record_opt
-// (which appends to applied_opts[] without touching axis_types[]),
-// and kernel_lift.c's structural-replay treatment ("Tensor-core opt
-// is metadata-only; pattern-matched in render").  Composes with the
-// other E* opts via the shared `sim_kop_history` simulation; in
-// practice autotune emits TC alone or as the FIRST of a multi-opt
-// sequence (kautotune_seq_can_append).  Idempotent: desired[a] is a
-// pure function of applied_opts -- KOP_TC contributes nothing.  See
-// docs/plans/ideal_pipeline.md row E.
+// === KOP_TC UPatRule mirror (src/uop/apply_opt.c) =========
+// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf
+// with the axis_type produced by simulating the full applied_opts
+// history.  KOP_TC is kernel-aware metadata (tensor-core hint) and
+// contributes NO axis_type mutation: its effect lives in
+// render_uop.c's matmul-TC pattern matcher and the uop_recognise_tc
+// producer that wraps the matmul reduce in UOP_OPT(_, TC, 0).
+// Mirrors codegen/apply_opt.c's kernel_apply_opt routing of KOP_TC
+// through tile_anno_record_opt (appends to applied_opts[] without
+// touching axis_types[]).  Composes with the other rules via the
+// shared sim_kop_history.  Idempotent: desired[a] is a pure
+// function of applied_opts.
 fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
                         u32 n_applied);
 
-// === Phase E9-prep wedge 2: uop_apply_split_dag UPatRule =============
+// === uop_apply_split_dag UPatRule =====================================
 // Walks the DAG rooted at `root`, applies every split-class entry in
 // `applied_opts` (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG
 // level via the uop_range_split primitive, and returns the rewritten
@@ -2848,13 +2811,11 @@ Term uop_dag_heap_read    (u64 loc, u32 offset);
 int uop_dag_is_unary_ew   (u32 op);
 int uop_dag_is_binary_ew  (u32 op);
 
-// === Slice 8: DAG-side GEMM-shape extractor ===========================
-// Migration target for cpu_blas_dispatch / blas_try_gemm: recover the
-// matmul facts (M, N, K, input slot mapping, ldA/ldB, transpose flags)
-// from the lifted UOp DAG (`ke->cached_lift.store_root`) plus
-// `ke->input_views[]` instead of from `ke->program[]` -- which is
-// freed at materialize time under default `THVM_PHASE_C7_FREE_PROGRAM=1`.
-// See src/uop/dag_scan.c for the full prose + matching strategy.
+// === DAG-side GEMM-shape extractor =====================================
+// Recover the matmul facts (M, N, K, input slot mapping, ldA/ldB,
+// transpose flags) from the lifted UOp DAG
+// (ke->cached_lift.store_root) plus ke->input_views[].
+// See src/uop/dag_scan.c for the matching strategy.
 typedef struct {
   u32 dtype;
   u32 M;
@@ -2871,8 +2832,8 @@ int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out);
 
-// input_views-decouple session 2: extract per-arm coefficients from a
-// 2-D matmul-style INDEX_E address built by lift_scalar_index.  The
+// Extract per-arm coefficients from a 2-D matmul-style INDEX_E
+// address built by lift_scalar_index.  The
 // address pattern for the matmul A operand under a 3-axis [M,K,N] lift
 // is either `IADD(IMUL(r_m, ICONST(K)), r_k)` (untransposed; ldA=K) or
 // `IADD(r_m, IMUL(r_k, ICONST(M)))` (transposed; ldA=M) -- and similarly
@@ -2898,10 +2859,8 @@ int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
                                              u32 *out_other_coeff,
                                              u32 *out_other_axis_id);
 
-// Slice 8 (session 3): DAG-side shape extractors for DOT and GEMV.
-// Mirror `uop_dag_classify_matmul_shape` for the two simpler BLAS
-// shapes the legacy program[]-reading path was handling via its own
-// pattern matchers in src/backend/cpu/blas.c.
+// DAG-side shape extractors for DOT and GEMV.  Mirror
+// uop_dag_classify_matmul_shape for the two simpler BLAS shapes.
 //
 // DOT: STORE(out_buf, _, REDUCE_SUM(MUL(INDEX_E(A, k), INDEX_E(B, k))))
 //   - out_buf is rank-0 or rank-1 numel=1
@@ -2940,28 +2899,21 @@ int uop_dag_classify_gemv_shape(Term root,
                                 struct KernelEntry const *ke,
                                 UopDagGemvShape *out);
 
-// Slice 8 (conv2d-flat session): DAG-side structural gate for
-// conv2d_flat kernels.  Mirrors the slice 8 GEMM/DOT/GEMV pattern but
-// minimalist: the legacy `tile_analyze_conv2d_flat` reads conv shape
-// almost entirely from `ke->input_views[]` + `ke->output_shape` (which
-// survive program[] free under THVM_PHASE_C7_FREE_PROGRAM=1).  The
-// only program[]-side gate it actually needs is "last op is REDUCE_SUM".
-// This DAG-side classifier replaces that single gate by checking the
-// `cached_lift.store_root`'s STORE.value is a UOP_REDUCE with
-// REDUCE_SUM kind, optionally wrapped in UOP_OPT(_, CONV, 0) by F4's
-// recogniser.  No shape extraction is needed -- the caller still reads
-// extents from `ke->input_views[]` exactly as the legacy reader did.
+// DAG-side structural gate for conv2d_flat kernels.  Checks that
+// cached_lift.store_root's STORE.value is a UOP_REDUCE with
+// REDUCE_SUM kind, optionally wrapped in UOP_OPT(_, CONV, 0) by the
+// conv recogniser.  No shape extraction is needed -- the caller
+// still reads extents from ke->input_views[].
 //
 // Returns 1 on match.  No extents-out parameter -- conv2d_flat's
 // shape lives in input_views, not in the lifted DAG.
 int uop_dag_classify_conv2d_flat_shape(Term root,
                                        struct KernelEntry const *ke);
 
-// === input_views-decouple session 1 (conv2d-flat): full-shape extractor ===
-// Inverts kernel_lift_from_conv2d's IDIV/IMOD address decomposition so
-// the conv2d shape facts can flow from the lifted DAG instead of from
-// `ke->input_views[]`.  Mirrors session 2's matmul/dot/gemv migration
-// pattern but on the IDIV/IMOD-laden conv addresses.
+// === conv2d-flat full-shape extractor ==================================
+// Inverts kernel_lift_from_conv2d's IDIV/IMOD address decomposition
+// so the conv2d shape facts can flow from the lifted DAG instead of
+// from ke->input_views[].
 //
 // In-scope: single-input non-degenerate conv2d (c_in*kh*kw > 1, kh>=1,
 // kw>=1; multi-input IWHERE chain handled by the caller via the
@@ -3038,7 +2990,7 @@ fn Term uop_recognise_tc(Term root);
 // fires (when K%8==0) versus falling back to its generic accumulator.
 fn int uop_classify_matmul(Term root, u32 *out_k_extent);
 
-// Slice 8 (session 3): structural classifiers for the DOT and GEMV
+// Structural classifiers for the DOT and GEMV
 // shapes.  Mirrors uop_classify_matmul but with different range-count
 // signatures: DOT addresses each touch exactly 1 distinct UOP_RANGE
 // (the reduce axis); GEMV has one address with 2 ranges (matrix m,k)

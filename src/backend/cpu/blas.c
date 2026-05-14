@@ -1,19 +1,15 @@
 // backend/cpu/blas.c - pattern-recognise matmul / matvec / dot
 // kernels from the lifted UOp DAG and dispatch them to Apple
 // Accelerate (cblas_*).  10-100x speedup on the hot ML workload
-// (matmul) -- a kernel that the JIT path doesn't even attempt
-// today (it bails at REDUCE).
+// (matmul) -- a kernel that the JIT path doesn't attempt (it bails
+// at REDUCE).
 //
-// Slice 8 session 5: every dispatcher reads M/N/K + dtype + slot
-// mapping from `ke->cached_lift.store_root` via
-// `uop_dag_classify_matmul_shape` / `uop_dag_classify_dot_shape` /
-// `uop_dag_classify_gemv_shape`.  The legacy program[]-reading
-// fallback paths (`blas_try_*_legacy`) and the
-// `THVM_BLAS_DAG_DISABLE` bisection knob retired with session 5's
-// `tile_analyze_gemm` deletion; rangeify produces the canonical
-// MUL+REDUCE+OPT_TC scalar_uops pattern for every matmul-shaped
-// kernel, which the lifter (`kernel_lift_to_uop`) turns into the
-// UOp DAG these dispatchers inspect.
+// Every dispatcher reads M/N/K + dtype + slot mapping from
+// ke->cached_lift.store_root via uop_dag_classify_matmul_shape /
+// uop_dag_classify_dot_shape / uop_dag_classify_gemv_shape.
+// Rangeify produces the canonical MUL+REDUCE+OPT_TC scalar_uops
+// pattern for every matmul-shaped kernel, which kernel_lift_to_uop
+// turns into the UOp DAG these dispatchers inspect.
 
 #ifdef __APPLE__
 #define ACCELERATE_NEW_LAPACK
@@ -25,10 +21,9 @@
 
 #if HAVE_BLAS
 
-// Slice 8 instrumentation: count cblas dispatches landed via the
-// DAG-side classifier.  Read by THVM_BLAS_DISPATCH_TRACE=1 + queried
-// by tests.  Reset by thvm_init.  The legacy counter pair retired
-// alongside the legacy fallback path in session 5.
+// Count cblas dispatches landed via the DAG-side classifier.  Read
+// by THVM_BLAS_DISPATCH_TRACE=1 and queried by tests.  Reset by
+// thvm_init.
 static u64 BLAS_GEMM_DISPATCH_DAG = 0;
 static u64 BLAS_DOT_DISPATCH_DAG  = 0;
 static u64 BLAS_GEMV_DISPATCH_DAG = 0;
