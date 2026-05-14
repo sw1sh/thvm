@@ -2776,79 +2776,35 @@ static Term emit_kernel_for_boundary(u32 bi) {
         }
       }
     }
-    // E9-prep wedge 1: post-lift UPatRule pass.  Composes the four
-    // E2/E3/E4-E6/E7 entries into one DAG walk that re-stamps every
-    // UOP_RANGE leaf's axis_type from applied_opts[].  In the default
-    // config the lifter has already stamped the same axis_types via
-    // its own structural replay (kernel_lift.c:1568-1633), so this
-    // pass observes desired[axis_id] == leaf.axis_type for every
-    // matched leaf and returns hash-cons-identical output.  That
-    // bit-equality validates the rules for everything the surgical
-    // suite exercises.
-    //
-    // E9 session 3 piece B-lite: read applied_opts via the tile_anno
-    // facade so the eventual ownership move (KpSchedule -> KernelEntry
-    // or a private writer struct) is a single-file change.
+    // Post-lift UPatRule pass.  Reads applied_opts via the tile_anno
+    // facade (single read site so the eventual KpSchedule -> KernelEntry
+    // ownership move is a one-file change).
     KOpt const *m_opts   = tile_anno_applied_opts(ke);
     u32         m_n_app  = tile_anno_applied_opts_count(ke);
     if (ke->cached_lift.store_root && m_opts != NULL && m_n_app > 0) {
-      // E9-prep wedge 2: uop_apply_split_dag composes the split-class
-      // entries (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG
-      // level via the uop_range_split primitive, replacing each
-      // pre-replay UOP_RANGE leaf with the (outer * k + inner) sub-
-      // expression.  In the default lifter config (kernel_lift.c's
-      // structural-replay split block at lines ~1561-1604 still fires)
-      // this pass is a no-op: the lifter has already produced the
-      // post-split DAG, and the rule's idempotence guard detects the
-      // post-split sentinel leaves and bails.  The pass becomes useful
-      // when the lifter's structural-replay split block retires
-      // (Stage d of E9-prep wedge 2).
+      // uop_apply_split_dag composes the split-class entries
+      // (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG level via
+      // the uop_range_split primitive, replacing each pre-split
+      // UOP_RANGE leaf with the (outer * k + inner) sub-expression.
       //
       // Order: split-DAG runs FIRST (rewires axis-id space + extents),
       // then uop_apply_kernel_opts stamps axis_types via the simulator
-      // that already accounts for SPLIT shifts.  Running stamp first
-      // would stamp the pre-split leaves which split-DAG would then
-      // replace -- losing the stamps.
+      // that accounts for SPLIT shifts.  Running stamp first would
+      // stamp pre-split leaves that split-DAG would then replace --
+      // losing the stamps.
       Term root_after_split = uop_apply_split_dag(ke->cached_lift.store_root,
                                                   m_opts, m_n_app);
       Term post = uop_apply_kernel_opts(root_after_split, m_opts, m_n_app);
       ke->cached_lift.store_root = post;
       ke->compute_root           = post;
     }
-    // Phase C slice 7 -- single-write migration:
-    // when the lift succeeds, the UOp DAG (cached_lift.store_root)
-    // is the canonical kernel representation and `program[]` becomes
-    // redundant.  Dispatch consumers (metal_kernel_supported,
-    // cg_supports, cpu_jit_hash, the per-op DAG encoder) read from
-    // cached_lift / the lifted DAG; they no longer require
-    // program[] to be populated.
-    //
-    // Default-ON.  test_compute_root_dual_write exercises the
-    // single-write contract end-to-end (materialize + dispatch under
-    // both CPU and Metal); test_bufferize tolerates a NULL program[]
-    // for the bufferize-emit-builds-program checks (the underlying
-    // movement-op encoding is still validated through the bufferize
-    // edge table).  THVM_PHASE_C7_FREE_PROGRAM=0 reverts to the
-    // dual-write Slice 1+2 contract: program[] populated alongside
-    // cached_lift.  Bisection knob; we keep it for A/B testing
-    // perf regressions on lift-eligible matmul (cpu_blas_dispatch
-    // and tile.c gemm/gemv recognisers consume program[] today;
-    // slice 8 ports them to the UOp DAG).
-    //
-    // No static cache here -- the test harness flips the env between
-    // thvm_init() / thvm_free() pairs, and the per-getenv overhead
-    // (one syscall) is negligible compared to the lifter cost above.
-    // DEFAULT-OFF (commit 56ba050f flipped it ON; reverted in the
-    // materialize-regression fix): freeing ke->program[] post-lift on
-    // the assumption that cached_lift.store_root is the sole canonical
-    // kernel rep broke LeNet training -- TAdam differentiates a
-    // TMaterialize'd loss (a UOP_KERNEL term), and the
-    // backprop-through-UOP_KERNEL path + cpu_blas_dispatch + the tile
-    // gemv recogniser still read program[].  NULL program[] -> all-zero
-    // gradients -> loss byte-identical step to step.  Keep the
-    // dual-write (program[] alongside cached_lift) by default;
-    // THVM_PHASE_C7_FREE_PROGRAM=1 re-enables the free for memory/perf
-    // experiments once every program[] consumer is DAG-only.
+    // Dual-write: when the lift succeeds, cached_lift.store_root is
+    // the canonical UOp DAG and program[] is the legacy KProgOp side
+    // table.  cpu_blas_dispatch and tile.c's gemm/gemv recognisers
+    // still consume program[]; backprop through UOP_KERNEL reads it
+    // too.  NULL program[] -> all-zero gradients -> training breaks.
+    // THVM_PHASE_C7_FREE_PROGRAM=1 frees program[] post-lift for
+    // memory/perf experiments once every consumer is DAG-only.
     char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
     int free_program_on = (free_e != NULL) && (free_e[0] == '1');
     if (free_program_on) {
