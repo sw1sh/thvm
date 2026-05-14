@@ -149,6 +149,285 @@ detail because it's a model of what a *good* analogy looks like.
   Resonant with the meta-RL theme -- and with the idea that evolution
   "discovered" the brain's learning rules.
 
+## Mentalizing AI: theory of mind, imitation, and intent inference (breakthrough 4)
+
+*(Added in response to a reader question, 2026-05-13 -- "what AI
+systems are associated with breakthrough four (mentalizing, theory
+of mind, imitation, anticipating future intent)?")*
+
+[Breakthrough 4 in Bennett](02-five-breakthroughs.md#breakthrough-4---mentalizing-the-first-primates-30-65-mya)
+is the *speculative* one in the spine -- granular prefrontal cortex
+modelling other minds (theory of mind, ToM), one's own future self,
+recursive intent, social strategy. **AI's analog is correspondingly
+the weakest of the five layers**, but it's also where some of the
+most interesting recent results sit. The lay of the land:
+
+### Computational theory of mind: Bayesian inverse planning
+
+The foundational *computational* model of ToM is **Bayesian inverse
+planning** (Baker, Saxe & Tenenbaum, "Action understanding as
+inverse planning", *Cognition* 113(3):329-349, 2009): if you assume
+the other agent is approximately rational, then *observe a sequence
+of actions* and *invert the planner* (Bayes' rule) to recover the
+agent's goals and beliefs. Generalised in **Bayesian Theory of Mind
+(BToM)** (Baker, Jara-Ettinger, Saxe & Tenenbaum, *Nature Human
+Behaviour* 2017) -- jointly infer beliefs *and* desires from
+behaviour, matching human judgements in goal-attribution tasks.
+This is the Bayesian-tribe ([page 6](06-classical-ml-and-rlhf.md))
+account of mentalizing, and it has stayed the cleanest *normative*
+benchmark against which neural approaches are compared.
+
+### ToMnet and meta-learning approaches
+
+**ToMnet** -- Rabinowitz, Perbet, Song, Zhang, Eslami, Botvinick,
+"Machine Theory of Mind", ICML 2018, arXiv:1802.07740. The
+canonical "ToM by meta-learning" paper. From a few observed
+episodes of a target agent, predict its *next* action and its
+*beliefs* (including false-belief states) in held-out situations.
+The architecture is a meta-learner: one "character net" embeds the
+agent from past trajectories, one "mental-state net" embeds the
+current episode so far, then a prediction head reads off
+actions / consumed-objects / beliefs. Works on gridworld agents
+with varying policies and sensory limitations -- importantly it
+*passes false-belief tasks at the agent level* by predicting the
+agent's belief state, not just its policy. Still the cleanest
+demonstrator of "ToM = meta-learning over policies".
+
+A natural extension is **meta-RL** (Wang et al. 2018 "Prefrontal
+cortex as a meta-reinforcement learning system", already covered
+above): the same machinery that lets *your* recurrent network
+adapt within an episode lets you model another *agent* adapting
+within an episode -- the substrate is symmetric.
+
+### Cicero (Diplomacy) -- the strongest concrete result so far
+
+**Cicero** (Bakhtin, Brown, Dinan, Farina et al., Meta FAIR
+Diplomacy Team, "Human-level play in the game of Diplomacy by
+combining language models with strategic reasoning", *Science* 378,
+Nov 2022, doi:10.1126/science.ade9097). The first AI to reach
+human-level performance in Diplomacy -- a seven-player negotiation
+game where the entire surface of play is *natural-language
+dialog with the other six players* mixed with strategic move
+choice. Cicero's pipeline:
+
+1. A **strategic reasoning engine** runs an algorithm (piKL --
+   policy-improving via Kullback-Leibler (KL)-regularised search)
+   that *predicts every
+   other player's policy* conditioned on the dialog observed so
+   far, then iteratively improves Cicero's own policy against
+   those predictions. **This is the explicit theory-of-mind module
+   -- it models the others as approximately-rational agents whose
+   beliefs depend on what was said.**
+2. A **controllable dialogue model** (a language model trained on
+   annotated Diplomacy games) generates messages *conditioned on
+   the planned moves* -- so the dialog and the play are
+   consistent, and the model can negotiate, deceive (mildly),
+   promise, and persuade. Auto-annotation in training links
+   each historical message to the move it was about.
+3. Across 40 anonymous online games, Cicero scored **more than 2x
+   the average human** and ranked in the **top 10%** of players who
+   played more than one game -- *without other humans realising
+   they were playing an AI*.
+
+Why it matters here: Cicero is the first credible demonstration of
+"ToM + recursive opponent modelling + linguistic intent
+communication" together in one agent, on a task that *actually
+requires* all three. Open question (Gary Marcus's running critique):
+how much is genuine theory of mind versus surface-pattern fluency
+plus a strong planner? The published architecture leaves room for
+both readings.
+
+### Imitation learning: behaviour cloning, IRL, GAIL, and modern policies
+
+If mentalizing's first job is "do what *they* did", imitation
+learning is the AI analog. The lineage:
+
+- **Behaviour cloning** -- supervised learning of `action |
+  observation` from demonstration trajectories. The 1989 ALVINN
+  self-driving system was already this. Works when distributions
+  match; fails catastrophically off-distribution (compounding
+  error / "covariate shift").
+- **Inverse reinforcement learning (IRL)** -- Ng & Russell,
+  "Algorithms for Inverse Reinforcement Learning", ICML 2000.
+  Don't clone the actions -- *infer the reward function* that
+  makes them optimal, then plan under that reward. Cleanly
+  recovers from off-distribution states.
+- **Maximum-entropy IRL** -- Ziebart, Maas, Bagnell & Dey, AAAI
+  2008. Closes the loop on IRL's underdetermination by maximising
+  entropy over equally-good rewards.
+- **Apprenticeship learning** -- Abbeel & Ng, ICML 2004 -- match
+  feature expectations between expert and learner.
+- **GAIL (Generative Adversarial Imitation Learning)** -- Ho &
+  Ermon, NeurIPS 2016, arXiv:1606.03476. A discriminator learns
+  to tell expert from agent trajectories; the agent's reward is
+  "fool the discriminator". GAN-style imitation, much more
+  sample-efficient than naive IRL.
+- **Modern visuomotor policies.** **Diffusion Policy** (Chi et
+  al., RSS 2023; arXiv:2303.04137) -- diffusion models as the
+  action head; the best-performing single-task imitation policy
+  for robot manipulation as of 2024-2025. **ACT (Action Chunking
+  Transformer)** (Zhao et al., 2023) -- transformer policies that
+  predict short *chunks* of future actions; the basis for the
+  ALOHA / mobile-ALOHA bimanual demonstrations.
+- **Robot foundation models** -- **RT-1** (Brohan et al. 2022),
+  **RT-2** (Brohan et al. 2023, vision-language-action), **Octo**
+  (Octo Team, 2024), **OpenVLA** (Kim et al. 2024). Generalist
+  imitation policies trained on millions of robot trajectories.
+  Strong on in-distribution skills, still brittle out-of-
+  distribution -- imitation without much of a *world model*
+  (compare V-JEPA 2-AC on [page 3](03-jepa-and-world-models.md),
+  which is the model-based alternative).
+
+The bridge to mentalizing: imitation *requires* at least a thin
+theory of mind (what was the demonstrator trying to do?). IRL
+makes that thinness explicit ("recover the reward"); GAIL hides
+it inside the discriminator; LLM-driven imitation tends to fake
+it via in-context examples and chain-of-thought rationalisation.
+
+### Opponent modelling and multi-agent strategy
+
+When the others aren't just expert demonstrators but *adversaries
+or partners reasoning about you*, you need real ToM:
+
+- **AlphaStar** (Vinyals et al., "Grandmaster level in StarCraft
+  II using multi-agent reinforcement learning", *Nature* 575,
+  2019) -- league play with a *population* of agents that train
+  against each other; the *league* is the implicit
+  opponent-modeller (selection picks robust strategies). Reaches
+  Grandmaster level.
+- **Pluribus** (Brown & Sandholm, "Superhuman AI for multiplayer
+  poker", *Science* 365, 2019) -- counterfactual regret
+  minimisation (CFR) + Monte-Carlo rollouts in six-player
+  no-limit Texas hold'em. Pluribus's "blueprint strategy" plus
+  online search beat top human professionals over 10,000+ hands.
+  The "modelling the others" here is game-theoretic
+  (Nash-equilibrium-flavoured), not Bayesian, but it's the same
+  problem.
+- **LOLA (Learning with Opponent-Learning Awareness)** -- Foerster,
+  Chen, Al-Shedivat, Whiteson, Abbeel & Mordatch, AAMAS 2018,
+  arXiv:1709.04326. Each agent's gradient step includes a term
+  that *anticipates* the other agent's *next* gradient step --
+  one-step recursive opponent modelling baked into the learning
+  rule. Produces tit-for-tat cooperation in iterated prisoner's
+  dilemma where vanilla policy gradient races to defection.
+- **Cicero** (above) -- the high-water mark to date because
+  modelling the others *and* communicating with them are both
+  required.
+
+### LLM theory of mind -- the live debate (2023-2026)
+
+The most active recent thread. Started with **Kosinski**,
+"Evaluating large language models in theory of mind tasks",
+*PNAS* (2024); arXiv:2302.02083 (Feb 2023). Tested 11 LLMs on a
+custom 640-prompt battery of false-belief / true-belief task
+pairs (the "Sally-Anne" family from developmental psychology).
+GPT-3-davinci-003 / ChatGPT-3.5: ~20% solved; GPT-4: ~75%,
+matching six-year-old children. Provocative claim: theory of mind
+**spontaneously emerged** as a byproduct of language scaling.
+
+**Ullman**, "Large Language Models Fail on Trivial Alterations to
+Theory-of-Mind Tasks", arXiv:2302.08399 (Feb 2023). The
+counter-punch: trivial modifications (e.g. the container is now
+*transparent*; the agent can see inside) that should obviously
+flip the answer often *don't* -- the models keep producing the
+canonical false-belief response. Suggests LLMs are pattern-matching
+on familiar task templates rather than representing beliefs.
+
+The 2024-2025 follow-up literature has been a careful tug-of-war:
+
+- **Strachan, Albergo, Borghini et al.**, "Testing theory of mind
+  in large language models and humans", *Nature Human Behaviour*
+  8:1285-1295 (2024). Tested GPT-4 and LLaMA-2 on a five-task
+  ToM battery against human controls; LLMs match or exceed humans
+  on most, but with systematic failure patterns (e.g.
+  faux-pas detection is harder for GPT-4).
+- **"Dissecting the Ullman Variations with a SCALPEL"**
+  (arXiv:2406.14737, 2024) -- argues many Ullman-style failures
+  are about *common-sense reasoning* (transparency implies you
+  can see in) rather than ToM per se; once you control for that,
+  LLM ToM holds up better.
+- **Sap, Le Bras, Fried & Choi**, "Neural Theory-of-Mind? On the
+  Limits of Social Intelligence in Large LMs", EMNLP 2022 --
+  earlier shot from the same family.
+- **FANToM** (Kim et al., EMNLP 2023) -- a benchmark for ToM in
+  *conversation* (information asymmetry across speakers), where
+  current LLMs struggle more than on Sally-Anne.
+
+Honest synthesis: *something* in LLMs handles many text-based
+false-belief tasks, but it is brittle to perturbations that humans
+shrug off, sensitive to wording, and not obviously a
+representation of others' beliefs. The Bennett verdict from
+[page 2](02-five-breakthroughs.md) ("layer 5 (language) built on
+top of a brittle layer 4 (mentalizing)") is empirically supported
+here.
+
+### Generative agents, social simulation, and recursive LLM ToM
+
+**Park, O'Brien, Cai, Morris, Liang & Bernstein**, "Generative
+Agents: Interactive Simulacra of Human Behavior", UIST 2023,
+arXiv:2304.03442. 25 LLM-driven agents in a small town
+("Smallville") with memory streams, reflection, and planning;
+they emergently organise a party, propagate gossip, model each
+other's relationships. The first vivid demonstration of
+**LLM-as-mentalizer + LLM-as-actor in a multi-agent social
+sandbox**. Architecturally crude but suggestive; spawned a small
+industry of "agent society" simulations (CAMEL, AutoGen multi-
+agent, AgentVerse).
+
+### Pragmatic language and Rational Speech Acts (RSA)
+
+A computational tradition that *requires* theory of mind for its
+core construct: **the speaker reasons about how the listener will
+interpret an utterance**, and recursively. **Frank & Goodman**,
+"Predicting pragmatic reasoning in language games", *Science* 336,
+2012. The RSA framework -- a Bayesian listener reasons about a
+literal speaker, a pragmatic speaker reasons about that listener,
+and so on -- has remained the cleanest formal account of
+conversational implicature, scalar inference, and reference
+resolution. Connects directly to LLM-ToM via "what does this
+utterance imply that the speaker believes about the listener?"
+
+### Anticipating future intent: trajectory and action prediction
+
+The sensorimotor side of mentalizing -- predicting *what an agent
+will do next* from their motion / context.
+
+- **Social pooling LSTMs** (Alahi et al., CVPR 2016) and
+  **Trajectron++** (Salzmann et al., ECCV 2020) -- pedestrian
+  trajectory prediction conditioned on social context. Used in
+  autonomous driving stacks.
+- **V-JEPA 2** ([page 3](03-jepa-and-world-models.md)) reports a
+  state-of-the-art on **Epic-Kitchens-100 action anticipation**
+  (predict the *next* action a person will perform from a
+  partial video). That is mentalizing-without-language at the
+  sensorimotor scale -- and it's something a JEPA-style latent
+  predictor does *better* than a generative pixel model, which is
+  why LeCun keeps pointing to it.
+
+### How it sits against the rest of the docs
+
+- Mentalizing AI is **still the weakest layer**, exactly as
+  Bennett predicts on [page 2](02-five-breakthroughs.md). Cicero
+  is the closest current existence proof of "real" mentalizing
+  in a deployed system; LLM ToM benchmarks are encouraging but
+  contested; ToMnet remains the cleanest demonstrator.
+- The *tools* are all over the rest of the docs: **meta-RL**
+  (this page, RL section) for "model the other as another
+  meta-learner"; **inverse planning** (Bayesian tribe,
+  [page 6](06-classical-ml-and-rlhf.md)) for inferring goals from
+  behaviour; **multi-agent search** (AlphaStar, Pluribus); **JEPA-
+  style latent action prediction** (V-JEPA 2, page 3) for the
+  sensorimotor side; **RLAIF (RL from AI feedback) / Constitutional
+  AI** (page 6) as a
+  thin self-mentalizing loop (the agent anticipates a judge LLM's
+  verdict). Mentalizing is a *recombination* problem, not a
+  primitive-missing problem.
+- For thvm, the realistic toy experiments are the ones already on
+  [page 5](05-toy-problems-with-thvm.md) under breakthrough 4:
+  a ToMnet-style network in a gridworld, or an RL^2-style meta-RL
+  setup. Both are reachable with the existing autodiff + Adam +
+  small-net stack.
+
 ## Whole-brain functional models (the Spaun line)
 
 Eliasmith's group: **Spaun** (Eliasmith et al., "A large-scale model

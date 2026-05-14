@@ -171,6 +171,98 @@ have no peer-reviewed paper.
   hippocampal formation", ICLR 2022; arXiv:2112.04035.
   <https://arxiv.org/abs/2112.04035>
 
+## Mentalizing AI: theory of mind, imitation, opponent modelling (page 4)
+
+- Chris L. Baker, Rebecca Saxe & Joshua B. Tenenbaum, "Action
+  understanding as inverse planning", *Cognition* 113(3):329-349
+  (2009). <https://doi.org/10.1016/j.cognition.2009.07.005>
+- Chris L. Baker, Julian Jara-Ettinger, Rebecca Saxe & Joshua B.
+  Tenenbaum, "Rational quantitative attribution of beliefs, desires
+  and percepts in human mentalizing" (Bayesian ToM), *Nature Human
+  Behaviour* 1:0064 (2017). <https://doi.org/10.1038/s41562-017-0064>
+- Neil C. Rabinowitz, Frank Perbet, H. Francis Song, Chiyuan Zhang,
+  S. M. Ali Eslami & Matthew Botvinick, "Machine Theory of Mind"
+  (ToMnet), ICML 2018; arXiv:1802.07740.
+  <https://arxiv.org/abs/1802.07740>
+- Anton Bakhtin, Noam Brown, Emily Dinan, Gabriele Farina et al.
+  (Meta Fundamental AI Research Diplomacy Team), "Human-level play
+  in the game of Diplomacy by combining language models with
+  strategic reasoning" (Cicero), *Science* 378(6624):1067-1074 (Nov
+  2022). <https://doi.org/10.1126/science.ade9097> ·
+  blog <https://ai.meta.com/blog/cicero-ai-negotiates-persuades-and-cooperates-with-people/>
+- Michal Kosinski, "Theory of Mind May Have Spontaneously Emerged
+  in Large Language Models", arXiv:2302.02083 (Feb 2023); published
+  as "Evaluating large language models in theory of mind tasks",
+  *PNAS* (2024). <https://arxiv.org/abs/2302.02083> ·
+  <https://www.pnas.org/doi/10.1073/pnas.2405460121>
+- Tomer Ullman, "Large Language Models Fail on Trivial Alterations
+  to Theory-of-Mind Tasks", arXiv:2302.08399 (Feb 2023).
+  <https://arxiv.org/abs/2302.08399>
+- James W. A. Strachan, Dalila Albergo, Giulia Borghini et al.,
+  "Testing theory of mind in large language models and humans",
+  *Nature Human Behaviour* 8:1285-1295 (2024).
+  <https://doi.org/10.1038/s41562-024-01882-z>
+- "Dissecting the Ullman Variations with a SCALPEL: Why do LLMs fail
+  at Trivial Alterations to the False Belief Task?", arXiv:2406.14737
+  (2024). <https://arxiv.org/abs/2406.14737>
+- Maarten Sap, Ronan Le Bras, Daniel Fried & Yejin Choi, "Neural
+  Theory-of-Mind? On the Limits of Social Intelligence in Large
+  LMs", EMNLP 2022; arXiv:2210.13312.
+  <https://arxiv.org/abs/2210.13312>
+- Hyunwoo Kim et al., "FANToM: A Benchmark for Stress-testing
+  Machine Theory of Mind in Interactions", EMNLP 2023;
+  arXiv:2310.15421. <https://arxiv.org/abs/2310.15421>
+- Joon Sung Park, Joseph C. O'Brien, Carrie J. Cai, Meredith
+  Ringel Morris, Percy Liang & Michael S. Bernstein, "Generative
+  Agents: Interactive Simulacra of Human Behavior", UIST 2023;
+  arXiv:2304.03442. <https://arxiv.org/abs/2304.03442>
+- Michael C. Frank & Noah D. Goodman, "Predicting Pragmatic
+  Reasoning in Language Games" (Rational Speech Acts), *Science*
+  336(6084):998 (2012). <https://doi.org/10.1126/science.1218633>
+- Andrew Y. Ng & Stuart Russell, "Algorithms for Inverse
+  Reinforcement Learning", ICML 2000.
+  <https://ai.stanford.edu/~ang/papers/icml00-irl.pdf>
+- Pieter Abbeel & Andrew Y. Ng, "Apprenticeship Learning via Inverse
+  Reinforcement Learning", ICML 2004.
+  <https://ai.stanford.edu/~ang/papers/icml04-apprentice.pdf>
+- Brian D. Ziebart, Andrew Maas, J. Andrew Bagnell & Anind K. Dey,
+  "Maximum Entropy Inverse Reinforcement Learning", AAAI 2008.
+  <https://www.aaai.org/Papers/AAAI/2008/AAAI08-227.pdf>
+- Jonathan Ho & Stefano Ermon, "Generative Adversarial Imitation
+  Learning" (GAIL), NeurIPS 2016; arXiv:1606.03476.
+  <https://arxiv.org/abs/1606.03476>
+- Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau,
+  Benjamin Burchfiel & Shuran Song, "Diffusion Policy: Visuomotor
+  Policy Learning via Action Diffusion", RSS 2023; arXiv:2303.04137.
+  <https://arxiv.org/abs/2303.04137>
+- Tony Z. Zhao et al., "Learning Fine-Grained Bimanual Manipulation
+  with Low-Cost Hardware" (ALOHA / ACT), RSS 2023; arXiv:2304.13705.
+  <https://arxiv.org/abs/2304.13705>
+- Anthony Brohan et al., "RT-2: Vision-Language-Action Models",
+  CoRL 2023; arXiv:2307.15818. <https://arxiv.org/abs/2307.15818>
+- Octo Model Team, "Octo: An Open-Source Generalist Robot Policy",
+  RSS 2024; arXiv:2405.12213. <https://arxiv.org/abs/2405.12213>
+- Moo Jin Kim et al., "OpenVLA: An Open-Source Vision-Language-Action
+  Model", 2024; arXiv:2406.09246. <https://arxiv.org/abs/2406.09246>
+- Oriol Vinyals et al., "Grandmaster level in StarCraft II using
+  multi-agent reinforcement learning" (AlphaStar), *Nature*
+  575:350-354 (2019). <https://doi.org/10.1038/s41586-019-1724-z>
+- Noam Brown & Tuomas Sandholm, "Superhuman AI for multiplayer
+  poker" (Pluribus), *Science* 365(6456):885-890 (2019).
+  <https://doi.org/10.1126/science.aay2400>
+- Jakob N. Foerster, Richard Y. Chen, Maruan Al-Shedivat, Shimon
+  Whiteson, Pieter Abbeel & Igor Mordatch, "Learning with
+  Opponent-Learning Awareness" (LOLA), AAMAS 2018; arXiv:1709.04326.
+  <https://arxiv.org/abs/1709.04326>
+- Alexandre Alahi, Kratarth Goel, Vignesh Ramanathan, Alexandre
+  Robicquet, Li Fei-Fei & Silvio Savarese, "Social LSTM: Human
+  Trajectory Prediction in Crowded Spaces", CVPR 2016.
+  <https://doi.org/10.1109/CVPR.2016.110>
+- Tim Salzmann, Boris Ivanovic, Punarjay Chakravarty & Marco
+  Pavone, "Trajectron++: Dynamically-Feasible Trajectory Forecasting
+  with Heterogeneous Data", ECCV 2020; arXiv:2001.03093.
+  <https://arxiv.org/abs/2001.03093>
+
 ## Meta-RL, prefrontal cortex, learned learning rules (pages 2, 4)
 
 - Jane X. Wang et al., "Prefrontal cortex as a meta-reinforcement
@@ -463,10 +555,117 @@ framing:
   Inference: Tutorial and Review", 2018; arXiv:1805.00909.
   <https://arxiv.org/abs/1805.00909>
 
+## ARC-AGI ladder, fixed-curriculum environments, auto-curriculum (page 5)
+
+The page-5 north star, the fixed environment set, and the
+auto-curriculum / LLM-outer-loop literature.
+
+### ARC-AGI
+
+- Francois Chollet, "On the Measure of Intelligence", 2019;
+  arXiv:1911.01547. <https://arxiv.org/abs/1911.01547>
+- ARC Prize Foundation, "ARC Prize 2025: Technical Report",
+  arXiv:2601.10904. <https://arxiv.org/abs/2601.10904>
+- "ARC-AGI-3: A New Challenge for Frontier Agentic Intelligence",
+  arXiv:2603.24621 (Mar 2026). <https://arxiv.org/abs/2603.24621> ·
+  launch announcement <https://arcprize.org/blog/arc-agi-3-launch> ·
+  benchmark page <https://arcprize.org/arc-agi/3>
+
+### Fixed-curriculum environments
+
+- Greg Brockman et al., "OpenAI Gym", 2016; arXiv:1606.01540 (now
+  maintained as **Gymnasium** by Farama Foundation,
+  <https://gymnasium.farama.org/>). The classic control suite
+  baseline.
+- Yuval Tassa et al., "DeepMind Control Suite", 2018;
+  arXiv:1801.00690. <https://arxiv.org/abs/1801.00690>
+- Maxime Chevalier-Boisvert, Lucas Willems & Suman Pal,
+  "Minimalistic Gridworld Environment for OpenAI Gym" (MiniGrid),
+  2018; <https://github.com/Farama-Foundation/Minigrid>
+- Maxime Chevalier-Boisvert et al., "BabyAI: A Platform to Study
+  the Sample Efficiency of Grounded Language Learning", ICLR 2019;
+  arXiv:1810.08272. <https://arxiv.org/abs/1810.08272>
+- Karl Cobbe et al., "Leveraging Procedural Generation to Benchmark
+  Reinforcement Learning" (Procgen), ICML 2020; arXiv:1912.01588.
+  <https://arxiv.org/abs/1912.01588>
+- Danijar Hafner, "Benchmarking the Spectrum of Agent Capabilities"
+  (Crafter), 2022; arXiv:2109.06780.
+  <https://arxiv.org/abs/2109.06780> ·
+  <https://github.com/danijar/crafter>
+- Heinrich Kuttler et al., "The NetHack Learning Environment",
+  NeurIPS 2020; arXiv:2006.13760.
+  <https://arxiv.org/abs/2006.13760>
+- Michael Samvelyan et al., "MiniHack the Planet: A Sandbox for
+  Open-Ended Reinforcement Learning Research", NeurIPS 2021;
+  arXiv:2109.13202. <https://arxiv.org/abs/2109.13202>
+- Nolan Bard et al., "The Hanabi Challenge: A New Frontier for AI
+  Research", *Artificial Intelligence* 280:103216 (2020);
+  arXiv:1902.00506. <https://arxiv.org/abs/1902.00506>
+- John P. Agapiou et al., "Melting Pot 2.0", 2022; arXiv:2211.13746.
+  <https://arxiv.org/abs/2211.13746>
+- Micah Carroll et al., "On the Utility of Learning about Humans
+  for Human-AI Coordination" (Overcooked-AI), NeurIPS 2019;
+  arXiv:1910.05789. <https://arxiv.org/abs/1910.05789>
+- Mohit Shridhar et al., "ALFWorld: Aligning Text and Embodied
+  Environments for Interactive Learning", ICLR 2021;
+  arXiv:2010.03768. <https://arxiv.org/abs/2010.03768>
+- Linxi Fan et al., "MineDojo: Building Open-Ended Embodied Agents
+  with Internet-Scale Knowledge", NeurIPS 2022; arXiv:2206.08853.
+  <https://arxiv.org/abs/2206.08853>
+
+### Auto-curriculum and open-ended learning
+
+- Rui Wang, Joel Lehman, Jeff Clune & Kenneth O. Stanley, "Paired
+  Open-Ended Trailblazer (POET): Endlessly Generating Increasingly
+  Complex and Diverse Learning Environments and Their Solutions",
+  arXiv:1901.01753 (2019). <https://arxiv.org/abs/1901.01753>
+- Rui Wang et al., "Enhanced POET: Open-Ended Reinforcement Learning
+  through Unbounded Invention of Learning Challenges and their
+  Solutions", ICML 2020; arXiv:2003.08536.
+  <https://arxiv.org/abs/2003.08536>
+- Minqi Jiang, Edward Grefenstette & Tim Rocktaschel, "Prioritized
+  Level Replay" (PLR), ICML 2021; arXiv:2010.03934.
+  <https://arxiv.org/abs/2010.03934>
+- Jack Parker-Holder, Minqi Jiang, Michael Dennis et al., "Evolving
+  Curricula with Regret-Based Environment Design" (ACCEL), ICML
+  2022; arXiv:2203.01302. <https://arxiv.org/abs/2203.01302>
+- Jenny Zhang, Joel Lehman, Kenneth Stanley & Jeff Clune, "OMNI:
+  Open-endedness via Models of human Notions of Interestingness",
+  arXiv:2306.01711 (NeurIPS 2024).
+  <https://arxiv.org/abs/2306.01711>
+- Yecheng Jason Ma et al., "Eureka: Human-Level Reward Design via
+  Coding Large Language Models", arXiv:2310.12931 (NVIDIA, 2023).
+  <https://arxiv.org/abs/2310.12931>
+- Jean-Baptiste Mouret & Jeff Clune, "Illuminating search spaces by
+  mapping elites" (MAP-Elites), 2015; arXiv:1504.04909.
+  <https://arxiv.org/abs/1504.04909>
+- James Kirkpatrick et al., "Overcoming catastrophic forgetting in
+  neural networks" (EWC), *PNAS* 114(13):3521-3526 (2017).
+  <https://doi.org/10.1073/pnas.1611835114>
+- Yoshua Bengio, Jerome Louradour, Ronan Collobert & Jason Weston,
+  "Curriculum learning", ICML 2009.
+  <https://doi.org/10.1145/1553374.1553380>
+- Open-Ended Learning Team (DeepMind), "Open-Ended Learning Leads
+  to Generally Capable Agents" (XLand), 2021; arXiv:2107.12808.
+  <https://arxiv.org/abs/2107.12808>
+
+### LLM-driven outer loop (Voyager + Sakana templates)
+
+- Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei
+  Xiao, Yuke Zhu, Linxi Fan & Anima Anandkumar, "Voyager: An
+  Open-Ended Embodied Agent with Large Language Models",
+  arXiv:2305.16291 (2023). <https://arxiv.org/abs/2305.16291>
+- Sakana AI: AI Scientist v2 (arXiv:2504.08066), DGM
+  (arXiv:2505.22954), ShinkaEvolve (arXiv:2509.19349) -- full
+  citations in the [Sakana block](#sakana-ai-evolution--collective-intelligence-page-4)
+  above.
+- Repo-local: the [ralph-loop skill](../../.claude/skills/ralph-loop/SKILL.md)
+  is the minimum-viable LLM outer loop already wired into this
+  workspace.
+
 ## thvm internal docs referenced
 
-- [../grad.md](../grad.md), [../grad-roadmap.md](../grad-roadmap.md) --
-  autodiff.
+- [../grad.md](../grad.md) -- autodiff.
 - [../wl.md](../wl.md) -- the Wolfram LibraryLink surface.
 - [../cpu.md](../cpu.md), [../metal.md](../metal.md) -- backends.
 - `wl/THVMLink/Kernel/NN.wl`, `wl/THVMLink/Kernel/Optim.wl` -- NN

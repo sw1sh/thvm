@@ -61,6 +61,42 @@ is the bridge.
     einsum), tensor networks in ML (Stoudenmire-Schwab, MPS/PEPS/
     MERA), and einsum-as-primitive (einops / einx / opt_einsum /
     JAX / thvm).
+  - "Mentalizing AI: theory of mind, imitation, and intent
+    inference" in
+    [04-brain-inspired-ai.md](04-brain-inspired-ai.md#mentalizing-ai-theory-of-mind-imitation-and-intent-inference-breakthrough-4)
+    (2026-05-13) -- Bayesian Theory of Mind (Baker-Saxe-Tenenbaum),
+    ToMnet, Cicero (Diplomacy), the imitation-learning family
+    (BC / IRL / MaxEnt-IRL / GAIL / Diffusion Policy / RT-2 / Octo /
+    OpenVLA), opponent modelling (AlphaStar, Pluribus, LOLA), the
+    LLM-ToM debate (Kosinski / Ullman / Strachan / FANToM /
+    SCALPEL), Generative Agents, Rational Speech Acts, and
+    sensorimotor intent anticipation (trajectory prediction,
+    V-JEPA 2 action anticipation).
+  - [05-toy-problems-with-thvm.md](05-toy-problems-with-thvm.md)
+    *restructured in full* (2026-05-13) -- replaced the "menu of
+    independent experiments per breakthrough" with a single
+    **bootstrap track**: one growing agent, shared substrate
+    (`phi`/`pi`/`c`/`z`), each stage adds a module on top of the
+    previous (Hebbian -> TD critic -> latent world model + MPC ->
+    agent-conditioned f + ToMnet -> language configurator). The
+    old per-breakthrough toys survive as *verification milestones*
+    inside each stage; continual-learning hygiene (curriculum
+    mixing, replay across stages, EWC) is the spine.
+  - Page 05 *extended* (2026-05-13, same day) with three new
+    sections framing the whole pipeline:
+    [North star: ARC-AGI 1/2/3](05-toy-problems-with-thvm.md#north-star-arc-agi-1-2-3----the-ultimate-generalisation-test)
+    (the agentic-generalisation target; ARC-AGI-3 launched Mar 25,
+    2026, humans 100% / frontier AI ~0.5%);
+    [The fixed curriculum](05-toy-problems-with-thvm.md#the-fixed-curriculum-a-diverse-environment-set-spanning-the-rungs)
+    (a permanent environment mix per rung: gradient world,
+    Classic Control, MiniGrid, Procgen, Crafter, NLE, Hanabi,
+    Melting Pot, Overcooked, BabyAI, ALFWorld, MineDojo);
+    [Auto-curriculum: evolve the environment stream](05-toy-problems-with-thvm.md#auto-curriculum-evolve-the-environment-stream)
+    (POET / Enhanced POET / PLR / ACCEL / OMNI / Eureka /
+    MAP-Elites-driven environment mutation);
+    [The outer loop: LLM agents bootstrap the bootstrap](05-toy-problems-with-thvm.md#the-outer-loop-llm-agents-bootstrap-the-bootstrap)
+    (Sakana templates -- AI Scientist v2, DGM, ShinkaEvolve --
+    plus Voyager and the repo's `ralph-loop` skill).
 
 ### Abbreviation cheat sheet
 
@@ -104,6 +140,16 @@ is the bridge.
 | MPS | Matrix Product State | PEPS | Projected Entangled Pair State |
 | MERA | Multi-scale Entanglement Renorm. Ansatz | DSL | domain-specific language |
 | IR | intermediate representation | GEMM | general matrix multiply |
+| ToM | theory of mind | BToM | Bayesian Theory of Mind |
+| IRL | inverse reinforcement learning | GAIL | Generative Adversarial Imitation Learning |
+| BC | behaviour cloning | ACT | Action Chunking Transformer |
+| VLA | vision-language-action (robot policy) | CFR | counterfactual regret minimisation |
+| LOLA | Learning with Opponent-Learning Awareness | RSA | Rational Speech Acts |
+| ARC-AGI | Abstraction and Reasoning Corpus (the Chollet benchmark ladder) | POET | Paired Open-Ended Trailblazer |
+| PLR | Prioritised Level Replay | ACCEL | Adversarially Compounding Complexity by Editing Levels |
+| OMNI | Open-endedness via Models of human Notions of Interestingness | NLE | NetHack Learning Environment |
+| EWC | Elastic Weight Consolidation | CEM | cross-entropy method |
+| NEAT | NeuroEvolution of Augmenting Topologies | XLand | DeepMind open-ended-RL env |
 
 (Common venue abbreviations -- *Nature*, NeurIPS, ICML, ICLR, CVPR,
 IJCAI, etc. -- are left as is.)

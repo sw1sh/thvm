@@ -5,6 +5,12 @@ Forward, autograd, kernel scheduling, and CPU + Metal dispatch
 all live as rewrite rules over a single flat heap. Wolfram
 Language is the host; C is the runtime.
 
+Successor to the earlier
+[sw1sh/TinyHVM](https://github.com/sw1sh/TinyHVM) prototype,
+which explored HVM-style interaction nets directly in Wolfram
+Language; this repository rebuilds that core in C and grows
+the tensor / autograd / kernel-scheduling layers on top.
+
 - Architecture, one piece per page: [docs/README.md](docs/README.md)
 - WL-side style rules: [wl/GUIDE.md](wl/GUIDE.md)
 - Working notes for contributors: [AGENTS.md](AGENTS.md)
@@ -17,22 +23,34 @@ End-to-end working today: `TOptim["Adam"]` training
 Silicon. Loss converges 2.61 -> 0.025 in 4 Adam steps on a
 single sample; predicted class flips from 0 to 4 (correct).
 
-| Layer                                 | Status                          |
-| ------------------------------------- | ------------------------------- |
-| Term packing + flat heap              | implemented + tested            |
-| WNF stack machine + 9 interactions    | implemented + tested            |
-| Tensors / TUOp graph                  | implemented + tested            |
-| Schedule + kernelize + linearize      | implemented + tested            |
-| CPU backend (interpreter)             | implemented + tested            |
-| Metal backend (kernel dispatch)       | implemented + tested            |
-| Autograd via UOP_GRAD interaction     | implemented + tested            |
-| TGrad through Conv2D / softmax / etc. | implemented + tested            |
-| TOptim["Adam"], TOptim["SGD"]         | implemented + tested            |
-| Multi-context API                     | in progress                     |
-| Lifetime-aware schedule (mem savings) | open                            |
+| Layer                                        | Status                  |
+| -------------------------------------------- | ----------------------- |
+| Term packing + flat heap                     | implemented + tested    |
+| WNF stack machine + 29 interactions          | implemented + tested    |
+| Tensors / TUOp graph                         | implemented + tested    |
+| Materialize + kernelize + linearize          | implemented + tested    |
+| Bufferize / rangeify schedule IR (default on)| implemented + tested    |
+| CPU backend (interpreter + UOp JIT)          | implemented + tested    |
+| Metal backend (kernel dispatch)              | implemented + tested    |
+| Tile-level path (CPU + Metal, opt-in)        | implemented + tested    |
+| AOT compiler (C + Metal targets)             | implemented + tested    |
+| Autograd via UOP_GRAD interaction            | implemented + tested    |
+| TGrad through Conv2D / softmax / etc.        | implemented + tested    |
+| TOptim["Adam"], TOptim["SGD"]                | implemented + tested    |
+| Einx-style verbs over TUOp                   | implemented + tested    |
+| Multi-context API (TContextSnapshot, slices) | in progress             |
+| Metal autotune (GEMM beam search)            | in progress             |
+| Lifetime-aware schedule (mem savings)        | open                    |
 
-`make test` runs 27 C test executables (~200 sub-checks);
-`make wl-test` runs 28 `.wlt` files (270 WL VerificationTests).
+A separate equational-reasoning / ATP research layer
+(Waldmeister-style unfailing Knuth-Bendix completion built on the
+same interaction-net heap) lives under `src/wald/`, `src/kbo/`,
+`src/rewrite/`, `src/unify/`, `src/cp/`, `src/cnf/`, `src/atp/`;
+see [docs/plans/waldmeister_ic_atp.md](docs/plans/waldmeister_ic_atp.md).
+
+`make test` builds and runs every C test under `tests/`;
+`make wl-test` runs every `.wlt` under `wl/THVMLink/Tests/`
+plus the example-helper tests under `wl/Examples/_lib/Tests/`.
 
 ## Build
 
@@ -80,10 +98,18 @@ THVM_BACKEND=metal wolframscript -f wl/Examples/lenet-mnist/verify.wls
 `wl/Examples/` ships runnable scripts for both core IC patterns
 and full training pipelines:
 
-- `lenet-mnist/`     - LeCun LeNet inference + Adam training step
-- `beautiful-mnist/` - tinygrad-style 32->64 conv arch (forward only)
-- `mlp-mnist/`       - dense MLP forward
-- `_bench/`          - per-step wall-time + memory baselines
+- Training pipelines:
+  - `lenet-mnist/`     - LeCun LeNet inference + Adam training step
+  - `beautiful-mnist/` - tinygrad-style 32->64 conv arch (forward only)
+  - `mlp-mnist/`       - dense MLP forward
+- IC primitives: `church-1/`, `dup-sup-annihilate/`, `era-app/`,
+  `id-app-era/`, `identity/`, `k-combinator/`, `nested-apps/`,
+  `sup-of-eras/`
+- Tensor / autograd: `uop-add/`, `uop-mul/`, `uop-mul-add/`,
+  `grad-add/`, `grad-mul/`, `grad-x-times-x/`
+- `_bench/` - per-step wall-time + memory baselines
+
+`wolframscript -f wl/Examples/run.wls` renders every example.
 
 Cross-framework benchmarks live at the repo root in `bench/`:
 
@@ -93,13 +119,6 @@ Cross-framework benchmarks live at the repo root in `bench/`:
 
 See `bench/README.md` for invocation; results in
 `docs/plans/profiling_methodology.md` §4.6.
-- IC primitives: `church-1/`, `dup-sup-annihilate/`, `era-app/`,
-  `id-app-era/`, `identity/`, `k-combinator/`, `nested-apps/`,
-  `sup-of-eras/`
-- Tensor / autograd: `uop-add/`, `uop-mul/`, `uop-mul-add/`,
-  `grad-add/`, `grad-mul/`, `grad-x-times-x/`
-
-`wolframscript -f wl/Examples/run.wls` renders every example.
 
 ## Layout
 
@@ -108,17 +127,30 @@ src/
   thvm.h          public types, term layout, function decls
   thvm.c          single-TU hub - #includes every other .c
   term/           term packing/unpacking
-  heap/           flat allocator + read/set/take + subst
+  heap/           flat allocator + read/set/take + subst + snapshots
   book/           static term store (REF / ALO support)
   alo/            named-definition realize / force chain
   view/           Shape + View descriptors
+  dtype/          dtype machinery (f32/i32/...)
   uop/            UOp constructors (CONST / unary / binary / ...)
   tensor/         TenDesc lifecycle + refcount
-  schedule/       materialize, kernelize, linearize, GC, splice
-  interact/       one interaction rule per file
+  schedule/       materialize, kernelize, linearize, bufferize/rangeify
+  codegen/        kernel codegen (scalar + tile, CPU C + Metal MSL)
+  jit/            CPU UOp-graph JIT
+  aot/            ahead-of-time compiler (C + Metal targets)
+  interact/       one interaction rule per file (29 rules)
   wnf/            stack-machine reducer + redex enumeration
+  eval/           full normal-form sweep
+  collapse/       SUP collapser / observer
   backend/cpu/    interpreter + per-op kernels
   backend/metal/  MTLDevice + .metal shader dispatch
+  instrument/     trace hooks, multi-trace, profiling
+  lam/            lambda-form helpers
+  kbo/  lpo/      Knuth-Bendix / lex-path orderings  (ATP)
+  unify/  cp/     unification + critical pairs        (ATP)
+  rewrite/  cnf/  rewrite engine + CNF                 (ATP)
+  wald/  atp/     Waldmeister-style ATP driver         (ATP)
+  util/           shared helpers
 tests/            one self-contained C test per executable
 docs/             architecture pages, glossary, plans
 wl/

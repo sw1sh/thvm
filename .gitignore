@@ -30,3 +30,5 @@ __pycache__/
 
 # Built dylib for py/ ctypes wrapper (rebuild via `make py`)
 py/thvm/libthvm_py.dylib
+
+brain/

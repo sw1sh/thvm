@@ -276,7 +276,11 @@ RL with sub-goals; and -- a stretch Bennett makes -- the
 self-modelling that lets an agent reason about its own future
 behaviour. Honestly, this is where AI has the *least* to offer back:
 large-language-model (LLM) agents have shallow, brittle theory of
-mind, and multi-agent "social" RL is a niche.
+mind, and multi-agent "social" RL is a niche. For a fuller survey
+of the AI side of mentalizing (Bayesian theory of mind, ToMnet,
+Cicero, imitation learning and IRL, opponent modelling, the LLM-ToM
+benchmark debate, generative agents, RSA, action anticipation), see
+[04-brain-inspired-ai.md](04-brain-inspired-ai.md#mentalizing-ai-theory-of-mind-imitation-and-intent-inference-breakthrough-4).
 
 **Evidence:** weaker. The gPFC-as-mind-modeller story is a reasonable
 synthesis but far less nailed down than the basal-ganglia or
