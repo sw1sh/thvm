@@ -1054,6 +1054,24 @@ fn void pm_apply_rangeify(Term root) {
         Term src  = heap_read(term_val(rewritten) + 0);
         rewritten = uop_reduce(kind, r_aid, src);
       }
+      // The realized-store value subtree for movement-op nodes (EXPAND,
+      // RESHAPE, PERMUTE, PAD, SHRINK, FLIP): ru_rewrite_subtree returns
+      // the rebuilt movement shell wrapping an INDEX_E whose addr
+      // already encodes the swizzle.  The non-realized branch (below)
+      // strips that shell into the inner INDEX_E so consumers splice in
+      // just the value tree.  Apply the same strip when building
+      // RU_STORE_ROOT.value so cpu_uop_walk (no value-layer movement-op
+      // handler) sees the indexed read, not the wrapper.  RU_BUFFERIZE_TERM
+      // keeps the unstripped form for upstream-boundary identity checks.
+      Term store_value = rewritten;
+      int is_movement_op = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
+                         || info->op == UOP_EXPAND  || info->op == UOP_PAD
+                         || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
+      if (is_movement_op && term_tag(store_value) == TAG_UOP
+          && term_ext(store_value) == info->op) {
+        Term inner = heap_read(term_val(store_value) + 0);
+        if (inner != 0) store_value = inner;
+      }
       Term closed_ranges[MAX_DIM];
       u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
       // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
@@ -1084,7 +1102,7 @@ fn void pm_apply_rangeify(Term root) {
         if (term_shape_in(self, 0, &out_shape) && out_shape.ndim <= MAX_DIM) {
           Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, store_dtype,
                                          out_shape.ndim, out_shape.dims, 0);
-          RU_STORE_ROOT[i] = uop_store(out_buf, my_addr, rewritten);
+          RU_STORE_ROOT[i] = uop_store(out_buf, my_addr, store_value);
         }
       }
       // RU_SUBST holds the bare BUFFERIZE; ru_rewrite_subtree wraps

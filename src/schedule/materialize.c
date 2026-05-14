@@ -524,9 +524,34 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   // term maps to one of ke->input_tids[].  Treat as leaf (do not
   // recurse into its src tree) so the consumer's INDEX expression
   // reads against the BUFFER inst that cpu_uop_walk binds to in_ptrs[].
+  // Fall through to the generic recurser when no boundary match: the
+  // BUFFERIZE may wrap an in-kernel intermediate whose value subtree
+  // still references TAG_TEN leaves we need to rewrite into UOP_BUFFER
+  // input slots for the cpu_uop_walk to bind correctly.
   if (term_ext(resolved) == UOP_BUFFERIZE) {
     Term repl = unified_rewrite_buffer_for_bufferize(st->ke, resolved);
-    return repl != 0 ? repl : resolved;
+    if (repl != 0) return repl;
+  }
+
+  // INDEX_E(BUFFERIZE(CONST(v)), addr) -> CONST(v).  Some unified-pass
+  // BUFFERIZE wraps a scalar producer (e.g. the `mean_count` reciprocal
+  // baked into a 1-elem buffer) whose value tree is a single UOP_CONST.
+  // The legacy kernel_lift_to_uop inlines such constant-broadcast
+  // producers into their consumers; the cpu_uop_walk value dispatcher
+  // otherwise has no BUFFERIZE handler at the value layer and stalls,
+  // yielding zeros.  Detect the pattern here so the consumer subtree
+  // sees a plain CONST in place of the INDEX_E wrap.
+  if (term_ext(resolved) == UOP_INDEX_E) {
+    Term inner_buf = term_resolve(heap_read(term_val(resolved) + 0));
+    if (term_tag(inner_buf) == TAG_UOP
+        && term_ext(inner_buf) == UOP_BUFFERIZE
+        && unified_rewrite_buffer_for_bufferize(st->ke, inner_buf) == 0) {
+      Term v = uop_bufferize_value(inner_buf);
+      if (v != 0 && term_tag(v) == TAG_UOP && term_ext(v) == UOP_CONST) {
+        unified_rewrite_memo_insert(st, resolved, v);
+        return v;
+      }
+    }
   }
 
   Term hit = 0;
@@ -559,6 +584,47 @@ static Term unified_store_root_for_walker(KernelEntry const *ke, Term root) {
   memset(&st, 0, sizeof(st));
   st.ke = ke;
   return unified_rewrite_rec(&st, root, 0);
+}
+
+// Walk a (post-rewrite) UOp subtree and return 1 if any UOP_BUFFERIZE
+// survives.  Used as the unified-bypass safety gate: cpu_uop_walk's
+// INDEX_E handler only resolves UOP_BUFFER leaves, so a residual
+// BUFFERIZE means the kernel cannot execute via the bypass.  Uses a
+// small visited stack keyed on Term identity to keep the walk O(N)
+// over the hash-consed DAG without re-scanning shared subtrees.
+#define BUFFERIZE_SCAN_VISITED_CAP 1024
+typedef struct {
+  Term  keys[BUFFERIZE_SCAN_VISITED_CAP];
+  u32   n;
+} BufferizeScanVisited;
+
+static int bufferize_scan_seen(BufferizeScanVisited *v, Term t) {
+  for (u32 i = 0; i < v->n; i++) if (v->keys[i] == t) return 1;
+  if (v->n < BUFFERIZE_SCAN_VISITED_CAP) v->keys[v->n++] = t;
+  return 0;
+}
+
+static int bufferize_scan_rec(BufferizeScanVisited *v, Term t, u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  if (bufferize_scan_seen(v, r)) return 0;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_BUFFERIZE) return 1;
+  if (op == UOP_KERNEL || op == UOP_BUFFER) return 0;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (bufferize_scan_rec(v, heap_read(loc + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+
+static int uop_subtree_has_residual_bufferize(Term root) {
+  if (root == 0) return 0;
+  BufferizeScanVisited v;
+  v.n = 0;
+  return bufferize_scan_rec(&v, root, 0);
 }
 
 static void topo_sort_boundaries(Term root) {
@@ -2714,8 +2780,19 @@ static Term emit_kernel_for_boundary(u32 bi) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
         Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
-        ke->cached_lift.store_root = ru_rewritten;
-        ke->compute_root           = ru_rewritten;
+        // Per-kernel safety gate: the cpu_uop_walk INDEX_E handler
+        // resolves the buffer src via uwalk_resolve_buf, which only
+        // accepts UOP_BUFFER leaves.  A residual UOP_BUFFERIZE inside
+        // the value tree (an in-kernel intermediate the rangeify_unified
+        // pass didn't realize) crashes the walker into the 0.0 default
+        // and the kernel produces all-zero output.  When the rewriter
+        // can't lower every BUFFERIZE to a UOP_BUFFER input slot, leave
+        // store_root as the legacy lifter's output for this kernel; the
+        // rest of the schedule still gets the bypass.
+        if (!uop_subtree_has_residual_bufferize(ru_rewritten)) {
+          ke->cached_lift.store_root = ru_rewritten;
+          ke->compute_root           = ru_rewritten;
+        }
       }
     }
     // Identity check: rangeify_unified_store_root_at(idx) is the
