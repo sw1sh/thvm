@@ -27,6 +27,30 @@
 #define UWALK_MAX_INPUTS KERNEL_LIFT_MAX_INPUT
 #define UWALK_MAX_OUTPUTS KERNEL_LIFT_MAX_OUTPUT
 
+// THVM_TRACE_UOP_WALK_DECLINE=1 emits one stderr line per decline
+// site, classified by short tag + detail. Off by default; one cached
+// getenv on first call. Stable prefix `THVM_UOP_WALK_DECLINE` so
+// `grep | sort | uniq -c` over a suite tabulates the decline taxonomy.
+static int uwalk_decline_trace_enabled(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_TRACE_UOP_WALK_DECLINE");
+    on = (e != NULL && e[0] != '0');
+    known = 1;
+  }
+  return on;
+}
+
+#define UWALK_DECLINE(kid, reason, fmt, ...)                              \
+  do {                                                                    \
+    if (uwalk_decline_trace_enabled()) {                                  \
+      fprintf(stderr,                                                     \
+              "THVM_UOP_WALK_DECLINE kid=%u reason=\"%s\" detail=\""      \
+              fmt "\"\n",                                                 \
+              (unsigned)(kid), (reason), ##__VA_ARGS__);                  \
+    }                                                                     \
+  } while (0)
+
 typedef struct {
   // Range state: indexed by range slot in the kernel's collected
   // range list. Each entry holds the axis_id (used for lookup) and
@@ -50,6 +74,10 @@ typedef struct {
   void *out_ptrs  [UWALK_MAX_OUTPUTS];
   u32   out_dtypes[UWALK_MAX_OUTPUTS];
   u32   n_outputs;
+  // Kid (index into KERNELS[]) of the currently-walking entry, used
+  // only for THVM_TRACE_UOP_WALK_DECLINE telemetry. Set by
+  // cpu_uop_walk before any uwalk_emit_* helper runs.
+  u32   kid;
 } UWalkCtx;
 
 // Resolve a UOP_BUFFER term to (ptr, dtype). Returns 1 on hit.
@@ -640,14 +668,23 @@ static void uwalk_loop_and_store(UWalkCtx *c,
 
 // Drive a single STORE through the walker.
 static int uwalk_emit_store(UWalkCtx *c, Term store) {
-  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) {
+    UWALK_DECLINE(c->kid, "store_root_not_store",
+                  "tag=%u ext=%u",
+                  (unsigned)term_tag(store), (unsigned)term_ext(store));
+    return 0;
+  }
   u64 sloc = term_val(store);
   Term store_buf  = heap_read(sloc + 0);
   Term store_addr = heap_read(sloc + 1);
   Term store_val  = heap_read(sloc + 2);
   // Resolve output buffer.
   void *out_p; u32 out_dt;
-  if (!uwalk_resolve_buf(c, store_buf, &out_p, &out_dt)) return 0;
+  if (!uwalk_resolve_buf(c, store_buf, &out_p, &out_dt)) {
+    UWALK_DECLINE(c->kid, "store_buf_unresolved", "buf_term=%llu",
+                  (unsigned long long)store_buf);
+    return 0;
+  }
   // Detect REDUCE-as-store-value (possibly wrapped in OPT(_, TC, _)).
   Term value_for_emit = store_val;
   Term reduce_as_value = 0;
@@ -689,6 +726,10 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
     if (slot >= UWALK_MAX_RANGES) {
       // Overflow: pop already-pushed slots and bail.
       for (u32 j = 0; j < i; j++) uwalk_pop_range_slot(c);
+      UWALK_DECLINE(c->kid, "range_slot_overflow",
+                    "axis_id=%u n_ranges=%u cap=%u",
+                    (unsigned)axis_id, (unsigned)c->n_ranges,
+                    (unsigned)UWALK_MAX_RANGES);
       return 0;
     }
     range_extents[i] = ext;
@@ -727,6 +768,10 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
     if (!hoistable[i]) continue;
     if (c->n_reduces >= UWALK_MAX_REDUCES) {
       for (u32 j = 0; j < n_out; j++) uwalk_pop_range_slot(c);
+      UWALK_DECLINE(c->kid, "reduce_slot_overflow",
+                    "n_reduces=%u cap=%u",
+                    (unsigned)c->n_reduces,
+                    (unsigned)UWALK_MAX_REDUCES);
       return 0;
     }
     u32 idx = c->n_reduces++;
@@ -755,15 +800,25 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
 static int uwalk_emit_after(UWalkCtx *c, Term after);
 
 static int uwalk_emit_node(UWalkCtx *c, Term node) {
-  if (term_tag(node) != TAG_UOP) return 0;
+  if (term_tag(node) != TAG_UOP) {
+    UWALK_DECLINE(c->kid, "node_non_uop", "tag=%u",
+                  (unsigned)term_tag(node));
+    return 0;
+  }
   u32 op = term_ext(node);
   if (op == UOP_STORE) return uwalk_emit_store(c, node);
   if (op == UOP_AFTER) return uwalk_emit_after(c, node);
+  UWALK_DECLINE(c->kid, "node_unsupported_op", "op=%u", (unsigned)op);
   return 0;
 }
 
 static int uwalk_emit_after(UWalkCtx *c, Term after) {
-  if (term_tag(after) != TAG_UOP || term_ext(after) != UOP_AFTER) return 0;
+  if (term_tag(after) != TAG_UOP || term_ext(after) != UOP_AFTER) {
+    UWALK_DECLINE(c->kid, "after_not_after_op",
+                  "tag=%u ext=%u",
+                  (unsigned)term_tag(after), (unsigned)term_ext(after));
+    return 0;
+  }
   u64 loc = term_val(after);
   Term node       = heap_read(loc + 0);
   Term after_node = heap_read(loc + 1);
@@ -832,6 +887,7 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     trace_on = (e != NULL && e[0] == '1');
     trace_known = 1;
   }
+  u32 kid = (u32)(ke - KERNELS);
   // F6 multi-output: walker now handles n_extra_outputs > 0 kernels
   // when the lifter (kernel_lift_from_kprog) emitted a STORE-AFTER
   // chain for them.  store_root==0 means the lift declined; the
@@ -840,11 +896,21 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     if (trace_on) fprintf(stderr, "uop_walk: lift declined n_inputs=%u n_ops=%u "
                           "n_extra=%u\n",
                           ke->n_inputs, ke->n_ops, (u32)ke->n_extra_outputs);
+    UWALK_DECLINE(kid, "lift_declined",
+                  "n_inputs=%u n_ops=%u n_extra=%u",
+                  (unsigned)ke->n_inputs, (unsigned)ke->n_ops,
+                  (unsigned)ke->n_extra_outputs);
     return 0;
   }
   KernelUopLift const *lift = &ke->cached_lift;
-  if (lift->n_inputs > UWALK_MAX_INPUTS) return 0;
+  if (lift->n_inputs > UWALK_MAX_INPUTS) {
+    UWALK_DECLINE(kid, "lift_n_inputs_over_cap",
+                  "n_inputs=%u cap=%u",
+                  (unsigned)lift->n_inputs, (unsigned)UWALK_MAX_INPUTS);
+    return 0;
+  }
   UWalkCtx ctx = {0};
+  ctx.kid       = kid;
   ctx.n_inputs  = lift->n_inputs;
   // Populate primary output (slot 0).
   ctx.out_terms [0] = lift->out_buf;
@@ -858,13 +924,38 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // AFTER chain dispatch correctly via uwalk_resolve_buf's identity
   // match on the Term.
   if (lift->n_outputs > 1) {
-    if (lift->n_outputs > UWALK_MAX_OUTPUTS) return 0;
+    if (lift->n_outputs > UWALK_MAX_OUTPUTS) {
+      UWALK_DECLINE(kid, "lift_n_outputs_over_cap",
+                    "n_outputs=%u cap=%u",
+                    (unsigned)lift->n_outputs,
+                    (unsigned)UWALK_MAX_OUTPUTS);
+      return 0;
+    }
     for (u32 ei = 0; ei < lift->n_outputs - 1; ei++) {
-      if (ei >= ke->n_extra_outputs) return 0;
+      if (ei >= ke->n_extra_outputs) {
+        UWALK_DECLINE(kid, "extra_output_count_mismatch",
+                      "ei=%u n_extra=%u lift_n_outputs=%u",
+                      (unsigned)ei,
+                      (unsigned)ke->n_extra_outputs,
+                      (unsigned)lift->n_outputs);
+        return 0;
+      }
       u32 extra_tid = ke->extra_output_tids[ei];
-      if (extra_tid == 0 || extra_tid >= TENS_NEXT) return 0;
+      if (extra_tid == 0 || extra_tid >= TENS_NEXT) {
+        UWALK_DECLINE(kid, "extra_output_bad_tid",
+                      "ei=%u tid=%u TENS_NEXT=%u",
+                      (unsigned)ei, (unsigned)extra_tid,
+                      (unsigned)TENS_NEXT);
+        return 0;
+      }
       u32 buf_id = TENS[extra_tid].buf_id;
-      if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return 0;
+      if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) {
+        UWALK_DECLINE(kid, "extra_output_bad_buf_id",
+                      "ei=%u buf_id=%u CPU_BUFS_NEXT=%u",
+                      (unsigned)ei, (unsigned)buf_id,
+                      (unsigned)CPU_BUFS_NEXT);
+        return 0;
+      }
       ctx.out_terms [1 + ei] = lift->out_bufs[1 + ei];
       ctx.out_ptrs  [1 + ei] = CPU_BUFS[buf_id].data;
       ctx.out_dtypes[1 + ei] = ke->extra_output_dtypes[ei];
@@ -885,6 +976,9 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     }
     void *p = NULL;
     if (uwalk_resolve_input_ptr(ke, i, in_buf_ids[i], &p) < 0) {
+      UWALK_DECLINE(kid, "input_ptr_unresolved",
+                    "slot=%u buf_id=%u",
+                    (unsigned)i, (unsigned)in_buf_ids[i]);
       return 0;
     }
     ctx.in_ptrs[i] = p;
@@ -896,12 +990,20 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     u32 op = term_ext(root);
     if      (op == UOP_STORE) ok = uwalk_emit_store(&ctx, root);
     else if (op == UOP_AFTER) ok = uwalk_emit_after(&ctx, root);
+    else {
+      UWALK_DECLINE(kid, "root_unsupported_op", "op=%u", (unsigned)op);
+    }
     if (trace_on) fprintf(stderr,
                           "uop_walk: n_inputs=%u root_op=%u rc=%d\n",
                           ke->n_inputs, op, ok);
-  } else if (trace_on) {
-    fprintf(stderr, "uop_walk: empty/non-UOP root tag=%u\n",
-            (unsigned)term_tag(root));
+  } else {
+    UWALK_DECLINE(kid, "root_empty_or_non_uop",
+                  "root=%llu tag=%u",
+                  (unsigned long long)root, (unsigned)term_tag(root));
+    if (trace_on) {
+      fprintf(stderr, "uop_walk: empty/non-UOP root tag=%u\n",
+              (unsigned)term_tag(root));
+    }
   }
   return ok;
 }
