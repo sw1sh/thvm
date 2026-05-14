@@ -161,12 +161,7 @@ static u64 kautotune_rangeified_key(KernelEntry const *ke) {
     return 0;
   }
   u64 h = 0xcbf29ce484222325ULL ^ 0x52414E4745584B41ULL;
-  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
-    h = kautotune_hash_u64(h, 1);
-    h = kautotune_hash_u64(h, (u64)ke->n_scalar_uops);
-    h = kautotune_hash_bytes(h, ke->scalar_uops,
-                             (size_t)ke->n_scalar_uops * sizeof(ScalarUop));
-  } else if (ke->schedule != NULL && axes_resolve_n_axes(ke) > 0) {
+  if (ke->schedule != NULL && axes_resolve_n_axes(ke) > 0) {
     h = kautotune_hash_u64(h, 2);
     h = kautotune_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kautotune_hash_u64(h, (u64)term_ext(ke->source_uop));
@@ -191,9 +186,6 @@ static u64 kautotune_structural_key(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
   }
-  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
-    return kautotune_rangeified_key(ke);
-  }
   if (ke->program != NULL && ke->n_ops > 0) {
     return kautotune_program_key(ke->program, ke->n_ops);
   }
@@ -207,7 +199,6 @@ static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,
   h = kautotune_hash_cstr(h, "thvm-autotune-cache");
   h = kautotune_hash_u64(h, KAUTOTUNE_CACHE_VERSION);
   h = kautotune_hash_u64(h, sizeof(KProgOp));
-  h = kautotune_hash_u64(h, sizeof(ScalarUop));
   h = kautotune_hash_u64(h, sizeof(KOpt));
   h = kautotune_hash_u64(h, kautotune_backend_id(ke));
   h = kautotune_hash_u64(h, n_runs);
