@@ -11,11 +11,11 @@
 // variant emitter is under construction.
 
 fn void axes_default_for(KernelEntry *ke) {
-  // E9 session 5: signal-driven resolvers cover the initial state
-  // (nd LOOPs + optional trailing REDUCE) directly from
-  // (output_shape + tail-reduce + scalar-reduce).  No scratch to
-  // populate; callers retained for symbol stability and so the
-  // existing call ordering in materialize.c / tile.c stays valid.
+  // Signal-driven resolvers cover the initial state (nd LOOPs +
+  // optional trailing REDUCE) directly from (output_shape +
+  // tail-reduce + scalar-reduce).  No scratch to populate; symbol
+  // kept so existing call ordering in materialize.c / tile.c stays
+  // valid.
   (void)ke;
 }
 
@@ -24,11 +24,11 @@ static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
   return 0;
 }
 
-// E9-prep wedge 3: predicate that answers "will ke->schedule carry a
-// REDUCE-class axis (KAX_REDUCE or KAX_GROUP_REDUCE)?" without reading
-// `ke->schedule->axis_types[]`.  It mirrors the writer side exactly: every
-// production writer of a REDUCE-class entry leaves a higher-level
-// signal that this predicate consults.
+// Predicate: "will ke->schedule carry a REDUCE-class axis
+// (KAX_REDUCE or KAX_GROUP_REDUCE)?", derived from higher-level
+// signals without reading axis_types[].  Mirrors the writer side
+// exactly: every production writer of a REDUCE-class entry leaves a
+// signal this predicate consults.
 //
 //   1. axes_default_for appends a trailing KAX_REDUCE iff the kernel
 //      program ends in UOP_REDUCE.  Signal: ke->program tail opcode.
@@ -68,7 +68,7 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
 }
 
 // Mirror of apply_opt.c's static kop_to_axis_type.  Inlined here to
-// keep the wedge-4 simulator self-contained without exporting the
+// keep the axis-type simulator self-contained without exporting the
 // helper from apply_opt.c.
 static u8 axis_kop_to_axis_type(u8 op) {
   switch (op) {
@@ -81,11 +81,10 @@ static u8 axis_kop_to_axis_type(u8 op) {
   }
 }
 
-// E9-prep wedge 4: derive per-axis kax_type[] from the higher-level
-// signals (output_shape + tail-reduce + scalar-reduce + applied_opts)
-// instead of reading `ke->schedule->axis_types[]`.  Mirrors the writer
-// trio (axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt)
-// exactly:
+// Derive per-axis kax_type[] from the higher-level signals
+// (output_shape + tail-reduce + scalar-reduce + applied_opts).
+// Mirrors the writer trio (axes_default_for +
+// axes_ensure_scalar_reduce + axes_apply_opt) exactly:
 //
 //   1. Initial state: `nd = output_shape.ndim` LOOPs (clipped to
 //      MAX_AXES-1), optionally followed by a single trailing REDUCE.
@@ -107,10 +106,7 @@ static u8 axis_kop_to_axis_type(u8 op) {
 // On overflow, returns 0.
 //
 // Used by axes_resolve_kax_type as the single kax_type read point
-// outside the writer trio.  Wedge 8 retired the previous legacy-
-// fallback shape; the prior TILE_AXIS emitter consumer
-// (tile_emit_axes_from_kernel_signals) was deleted alongside
-// tile_build_from_scalar.
+// outside the writer trio.
 fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                u32 cap) {
   if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
@@ -195,23 +191,16 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
   return n;
 }
 
-// E9-prep wedge 7+8: single resolve point for kax_type reads outside
-// the writer trio.  Returns the wedge-4 simulator output -- signal-
-// derived from output_shape + tail-reduce + scalar-reduce + applied_opts
-// -- which mirrors the writer trio (axes_default_for +
-// axes_ensure_scalar_reduce + axes_apply_opt) by construction.
+// Single kax_type read point outside the writer trio.  Returns the
+// simulator output -- signal-derived from (output_shape + tail-reduce
+// + scalar-reduce + applied_opts), which mirrors the writer trio
+// (axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt) by
+// construction.
 //
-// Wedge 8 retired the legacy `ke->schedule->axis_types[d]` fallback: the 2
-// remaining hand-write tests in test_tile_graph (wedge-6 residuals)
-// were rebuilt against the writer trio, so every read site now has
-// either applied_opts > 0 (simulator authoritative) or a signal-only
-// state that the simulator can derive (default_for: nd LOOPs +
-// optional trailing REDUCE).
-//
-// Returns the resolved kax_type (KAX_*) for axis `d`.  When ke / axes
-// are NULL, `d >= n_axes`, or the simulator can't speak (overflow /
-// unknown opt -- bug in the writer trio's applied_opts log), returns
-// KAX_LOOP as a safe default.
+// Returns the resolved kax_type (KAX_*) for axis `d`.  When ke /
+// axes are NULL, `d >= n_axes`, or the simulator can't speak
+// (overflow / unknown opt -- bug in the writer trio's applied_opts
+// log), returns KAX_LOOP as a safe default.
 fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
   if (ke == NULL || ke->schedule == NULL) {
     return KAX_LOOP;
@@ -224,12 +213,10 @@ fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
   return types[d];
 }
 
-// E9 session 2: derive per-axis full_shape extents from the higher-
-// level signals (output_shape + tail-reduce + scalar-reduce +
-// applied_opts) instead of reading `ke->schedule->_writer.full_shape[]`
-// directly (writer-trio scratch as of session 4).
-// Mirrors the writer trio (axes_default_for + axes_ensure_scalar_reduce
-// + axes_apply_opt) exactly:
+// Derive per-axis full_shape extents from the higher-level signals
+// (output_shape + tail-reduce + scalar-reduce + applied_opts).
+// Mirrors the writer trio (axes_default_for +
+// axes_ensure_scalar_reduce + axes_apply_opt) exactly:
 //
 //   1. Initial state: extents[i] = output_shape.dims[i] for i < nd
 //      (clipped to MAX_AXES-1), optionally followed by a trailing
@@ -340,11 +327,11 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
   return n;
 }
 
-// E9 session 2: per-axis full_shape resolver.  Returns the derived
-// extent for axis `d` (signal-replay over output_shape + applied_opts);
-// 0 when ke/axes are NULL, d is out of range, or the simulator can't
-// speak.  E9 session 5: writer scratch retired, so this is now the
-// only authoritative source -- nothing left to cross-check against.
+// Per-axis full_shape resolver.  Returns the derived extent for
+// axis `d` (signal-replay over output_shape + applied_opts); 0 when
+// ke/axes are NULL, d is out of range, or the simulator can't speak.
+// This is the only authoritative source -- nothing left to
+// cross-check against.
 fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                u32 *out_extent) {
   if (ke == NULL || ke->schedule == NULL) {
@@ -361,11 +348,10 @@ fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
   return 1;
 }
 
-// E9 session 2: axis-count resolver.  Returns the derived axis count
+// Axis-count resolver.  Returns the derived axis count
 // (output_shape.ndim clipped to MAX_AXES-1, plus 1 if a trailing
 // REDUCE-class axis is present, plus the count of split-class
-// applied_opts).  E9 session 5: writer scratch retired; this is the
-// authoritative count.
+// applied_opts).  Authoritative count.
 fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
   if (ke == NULL || ke->schedule == NULL) {
     return 0;
@@ -374,12 +360,11 @@ fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
   return axes_compute_full_shape(ke, extents, MAX_AXES);
 }
 
-// E9 session 2: content hash of the kernel's axis-defining inputs.
-// Replaces the `ke->schedule->version` u32 freshness counter with a
-// deterministic u64 hash of (applied_opts, output_shape, source_uop)
-// -- the same triple that drives the resolvers above.  Cache equality
-// semantics stay (one u64 == one u64); the hash is bit-stable across
-// runs given the same input state, so cross-process / cross-session
+// Content hash of the kernel's axis-defining inputs.  Deterministic
+// u64 hash of (applied_opts, output_shape, source_uop) -- the same
+// triple that drives the resolvers above.  Cache equality semantics
+// stay (one u64 == one u64); the hash is bit-stable across runs
+// given the same input state, so cross-process / cross-session
 // caches stay coherent.
 //
 // FNV-1a over: applied_opts[0..n_applied] bytes, output_shape.dims +
@@ -417,10 +402,10 @@ fn u64 tile_axes_hash(struct KernelEntry const *ke) {
 }
 
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
-  // E9 session 5: signal-driven resolvers cover the trailing
-  // REDUCE-axis case directly via `axes_scalar_reduce_extent` inside
-  // `axes_compute_full_shape`.  No scratch to extend; symbol kept so
-  // the existing call ordering in materialize.c / tile_anno.c stays
+  // Signal-driven resolvers cover the trailing REDUCE-axis case
+  // directly via axes_scalar_reduce_extent inside
+  // axes_compute_full_shape.  No scratch to extend; symbol kept so
+  // existing call ordering in materialize.c / tile_anno.c stays
   // valid.
   (void)ke;
 }

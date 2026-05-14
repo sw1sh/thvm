@@ -38,26 +38,14 @@ fn int tile_anno_axis_at(KernelEntry const *ke, u32 d, TileAxisInfo *out) {
   return 1;
 }
 
-// Phase E migration helper: read axis info preferring TILE_AXIS,
-// falling back to ke->schedule when tile_uops isn't populated.  Lets
-// consumers in apply_opt.c / propose.c / render_metal.c migrate to
-// the new read path without first needing the tile_build to run
-// upstream.  Once every consumer goes through this helper AND
-// tile_uops is populated before each consumer, switch the helper's
-// impl to TILE_AXIS-only and delete the KpSchedule fallback (and
-// then KpSchedule itself).
-// Stale-tile detection: when KpSchedule has been mutated after the
-// last tile_build (apply_opt-driven autotune mutates ke->schedule
-// in place), tile_uops carries STALE axis info.  Prefer ke->schedule
-// in that case so consumers see the current state.
-//
-// E9 session 2: freshness compares `ke->tile_axes_hash` (snapshot
-// captured when tile_uops was built) against `tile_axes_hash(ke)`
-// (current content hash over applied_opts + output_shape +
-// source_uop).  Replaced the legacy u32 version counter; the hash
-// is collision-resistant by construction so the secondary axis-count
-// check is no longer needed for disambiguation, but kept as a cheap
-// structural guard.
+// Freshness predicate: compare ke->tile_axes_hash (snapshot taken
+// when tile_uops was built) against tile_axes_hash(ke) (current
+// content hash over applied_opts + output_shape + source_uop).
+// apply_opt-driven autotune mutates ke->schedule in place after
+// tile_build, leaving tile_uops with STALE axis info; this guard
+// makes consumers fall back to ke->schedule in that case.
+// The secondary axis-count check is a cheap structural sanity
+// guard atop the hash.
 static int tile_anno_tile_uops_fresh(KernelEntry const *ke) {
   if (ke == NULL || ke->schedule == NULL) return 1;  // no axes to compare
   if (ke->tile_axes_hash != tile_axes_hash(ke)) return 0;
@@ -70,11 +58,10 @@ fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,
                                     TileAxisInfo *out) {
   if (out == NULL) return 0;
   if (tile_anno_tile_uops_fresh(ke) && tile_anno_axis_at(ke, d, out)) return 1;
-  // E9 session 3: read kax_type + extent through the resolvers (signal-
-  // derived from output_shape + tail-reduce + scalar-reduce +
-  // applied_opts) instead of `ke->schedule->full_shape[]` directly.  The
-  // `ke->schedule == NULL` guard moves into the resolvers; both bail to 0 /
-  // KAX_LOOP when the kernel hasn't been axes-defaulted yet.
+  // Read kax_type + extent through the resolvers (signal-derived
+  // from output_shape + tail-reduce + scalar-reduce + applied_opts).
+  // Both bail to 0 / KAX_LOOP when the kernel hasn't been
+  // axes-defaulted yet.
   if (ke == NULL || ke->schedule == NULL) return 0;
   u32 extent = 0;
   if (!axes_resolve_full_shape(ke, d, &extent)) return 0;
@@ -90,7 +77,6 @@ fn u32 tile_anno_axis_count_or_kernelaxes(KernelEntry const *ke) {
     u32 n = tile_anno_axis_count(ke);
     if (n != 0) return n;
   }
-  // E9 session 3: count via resolver (signal-derived).
   return axes_resolve_n_axes(ke);
 }
 
@@ -152,8 +138,8 @@ int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
   if (ke == NULL || ke->schedule == NULL) return 0;
   if (ke->schedule->n_applied >= MAX_OPTS) return 0;
   ke->schedule->applied_opts[ke->schedule->n_applied++] = opt;
-  // E9 session 2: freshness via `tile_axes_hash(ke)` over the new
-  // applied_opts log; no version bump.
+  // Freshness flows through tile_axes_hash(ke) over the new
+  // applied_opts log; no version bump needed.
   return 1;
 }
 
@@ -171,16 +157,14 @@ void tile_anno_axes_reset(KernelEntry *ke) {
 
 // Append a new axis at the end.
 //
-// E9 session 5: writer-private scratch
-// (`_writer.full_shape[]` / `_writer.n_axes`) retired.  The
-// resolvers derive axis count + extents from
+// The resolvers derive axis count + extents from
 // (output_shape + tail-reduce + scalar-reduce + applied_opts) on
-// read, so the only writer-trio shape signal that matters is
-// applied_opts (mutated by `kernel_apply_opt`).  This function is a
-// no-op now; symbol kept for the public header signature.
+// read; the only writer-trio shape signal that matters is
+// applied_opts (mutated by kernel_apply_opt).  This function is a
+// no-op; symbol kept for the public header signature.
 //
-// Returns 1 (info accepted; nothing to record); 0 only on NULL kernel
-// for callers that want to detect a closed kernel.
+// Returns 1 (info accepted; nothing to record); 0 only on NULL
+// kernel for callers that want to detect a closed kernel.
 int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
   if (ke == NULL || ke->schedule == NULL) return 0;
   (void)info;
