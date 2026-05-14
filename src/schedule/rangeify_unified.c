@@ -1075,7 +1075,7 @@ fn void pm_apply_rangeify(Term root) {
       // this node itself is a REDUCE that landed at the realize boundary,
       // its axis cell still holds the original shape-axis index. The
       // walker expects the fresh UOP_RANGE.axis_id.
-      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n > 0
+      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 1
           && term_tag(rewritten) == TAG_UOP
           && term_ext(rewritten) == UOP_REDUCE) {
         Term rng = RU_REDUCE_RANGES[i].ranges[0];
@@ -1143,7 +1143,7 @@ fn void pm_apply_rangeify(Term root) {
       // render_uop's rmu_emit_store_reduce) match the REDUCE's stored axis
       // against the body's UOP_RANGE.axis_id -- which is now the fresh
       // RU_REDUCE_RANGES[i].ranges[0]'s axis_id, not the shape-axis index.
-      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n > 0
+      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 1
           && term_tag(rewritten) == TAG_UOP
           && term_ext(rewritten) == UOP_REDUCE) {
         Term rng = RU_REDUCE_RANGES[i].ranges[0];
