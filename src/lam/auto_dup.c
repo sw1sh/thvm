@@ -117,9 +117,15 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       if (seen) continue;
       if (v_count >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
       visited_bases[v_count++] = val;
-      for (u32 i = 0; i < n; i++) {
+      // Push in REVERSE so LIFO pop walks children left-to-right,
+      // matching HVM4 parse/auto_dup.c's recursive descent.  Forward
+      // push reverses sibling visit order, which mis-assigns DP0/DP1
+      // to the wrong VAR occurrences -- a downstream label-matched
+      // DUP-SUP-ANN then pairs against the wrong arm of the source
+      // SUP and the body silently computes a non-diagonal product.
+      for (u32 i = n; i > 0; i--) {
         if (s_pos >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
-        u64 cloc = val + 1 + i;
+        u64 cloc = val + i;   // child i-1 lives at val + 1 + (i-1) = val + i
         stack_locs[s_pos]  = cloc;
         stack_terms[s_pos] = heap_read(cloc);
         s_pos++;
@@ -140,9 +146,10 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
     if (v_count >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
     visited_bases[v_count++] = val;
 
-    for (u32 i = 0; i < ar; i++) {
+    // Push in REVERSE for forward-DFS visit order (see CTR branch).
+    for (u32 i = ar; i > 0; i--) {
       if (s_pos >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
-      u64 cloc = val + i;
+      u64 cloc = val + i - 1;
       stack_locs[s_pos]  = cloc;
       stack_terms[s_pos] = heap_read(cloc);
       s_pos++;
