@@ -160,18 +160,16 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     // safe because the lifter uses view.strides for input addressing
     // (correct for virtual EXPAND broadcast).
   }
-  // Lifter-based fallback: tile_sync_from_scalar declines for kernels
-  // that don't have a clean gemm-shape AND don't have scalar_uops
-  // (e.g. TMatMul-equivalent UOp DAGs that go straight to materialize
-  // without rangeify, multi-output kernels, or kernels whose
-  // ScalarUop arena has shapes tile_build_from_scalar doesn't handle).
-  // For those, if the kernel_lift would succeed, render_uop can emit
-  // a valid kernel; dispatch shape is just (output_numel, 256-default
-  // threadgroup).  The kernel's outer for-loops handle work
-  // distribution within each thread (each thread runs the full body
-  // redundantly; last-writer-wins on the output buffer gives correct
-  // results).  Future wedges can specialize when M/N-axes get bound
-  // to thread positions via UOP_OPT_LOCAL annotations.
+  // Lifter-based fallback: the default path.  tile_sync_from_scalar
+  // is opt-in (THVM_TILE_FROM_SCALAR=1); under the default off path
+  // it returns 0 and we land here.  If the kernel_lift would succeed,
+  // render_uop emits a valid kernel; dispatch shape is just
+  // (output_numel, 256-default threadgroup).  The kernel's outer
+  // for-loops handle work distribution within each thread (each
+  // thread runs the full body redundantly; last-writer-wins on the
+  // output buffer gives correct results).  Future wedges can
+  // specialize when M/N-axes get bound to thread positions via
+  // UOP_OPT_LOCAL annotations.
   //
   // Phase C slice 2: prefer the cached lift outcome as the "would
   // the lifter succeed?" oracle when populated.  When 0, fall back
