@@ -1358,13 +1358,20 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
           return 0;
         }
       }
-      // Out and in must have same numel for the reshape to compose.
+      // out_numel must be <= in_numel for the per-axis decompose of
+      // flat into in_iter to stay in range.  Strict equality is the
+      // canonical pure-reshape case; out_numel < in_numel covers
+      // shape-collapsing reshapes that feed broadcast (stride-0)
+      // S_INDEX bodies, where the body's value is the same regardless
+      // of which in_iter we pick from the larger view (grad through
+      // EXPAND emits this pattern: [3,4] input view collapsed to [1,4]
+      // output coords with the body reading a stride-0 scalar load).
       u32 out_numel = 1, in_numel = 1;
       for (u32 d = 0; d < nrng; d++) {
         out_numel *= out_dims[d];
         in_numel  *= in_dims[d];
       }
-      if (out_numel != in_numel) {
+      if (out_numel > in_numel) {
         lift_reject_log(ke, sid, "value/reshape-numel-mismatch");
         return 0;
       }
