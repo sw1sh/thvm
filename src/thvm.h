@@ -2621,6 +2621,11 @@ fn Term rangeify_unified_bufferize_at          (u32 node_idx);
 // to `cached_lift.store_root` from kernel_lift_to_uop; serves as the
 // substrate for the lifter-bypass cutover.
 fn Term rangeify_unified_store_root_at         (u32 node_idx);
+// Re-seed RU_REALIZE_MAP[i].realized_full from BUFFERIZE_NODES[i].realized.
+// Call after bufferize_classify's prune rules so a follow-up
+// pm_apply_rangeify invocation observes the same realize set the boundary
+// walker uses.
+fn void rangeify_unified_resync_realize_from_nodes(void);
 fn u32  rangeify_unified_last_bufferizes_emitted(void);
 // Reduce-ranges attached to a UOP_REDUCE node by the unified pass.
 // Mirrors tinygrad's `src=(value,)+tuple(new_ranges)` from

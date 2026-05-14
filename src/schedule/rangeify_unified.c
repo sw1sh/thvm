@@ -870,6 +870,22 @@ fn Term rangeify_unified_store_root_at(u32 node_idx) {
   return RU_STORE_ROOT[node_idx];
 }
 
+// Resync RU_REALIZE_MAP[i].realized_full from BUFFERIZE_NODES[i].realized.
+// bufferize_classify's prune rules (inline-softmax-broadcast-reduce et al.)
+// mutate BUFFERIZE_NODES.realized after run_rangeify_unified has populated
+// RU_REALIZE_MAP. Without this resync a re-invocation of pm_apply_rangeify
+// would emit BUFFERIZE Terms for stale-realized nodes whose realized bit
+// has since been cleared. Partial-realize state is left untouched.
+fn void rangeify_unified_resync_realize_from_nodes(void) {
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (BUFFERIZE_NODES[i].realized) {
+      RU_REALIZE_MAP[i].realized_full = 1;
+    } else {
+      RU_REALIZE_MAP[i].realized_full = 0;
+    }
+  }
+}
+
 // Build a row-major linear addr Term from an array of UOP_RANGE leaves.
 // Strides come from each range's extent (heap field 2); the result is
 //   r[0]*prod(d[1..]) + r[1]*prod(d[2..]) + ... + r[n-1].
@@ -1117,15 +1133,32 @@ fn void pm_apply_rangeify(Term root) {
                     || info->op == UOP_EXPAND  || info->op == UOP_PAD
                     || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
     if (is_movement) {
-      // Forward to producer's substitute if it exists; otherwise keep
-      // our own (the swizzler already pushed ranges to in_rngs, but the
-      // consumer still references this node's loc).
+      // Forward to producer's substitute if it exists; otherwise unwrap
+      // the movement-op shell built by ru_rewrite_subtree -- its slot 0
+      // already holds the INDEX_E(producer, swizzled_addr) we want
+      // consumers to splice in (the swizzler folded the broadcast /
+      // permute into in_addr). Leaving the bare RESHAPE/EXPAND/etc.
+      // wrapper in RU_SUBST[i] surfaces it in downstream consumer DAGs
+      // (e.g. matmul's REDUCE-of-MUL body) where the walker has no
+      // movement-op handler. Mirror: tinygrad's
+      // remove_movement_op_after_rangeify strips the outer op
+      // unconditionally (indexing.py:98-99).
       Term producer = term_resolve(heap_read(info->loc));
       if (term_tag(producer) == TAG_UOP) {
         u32 pidx = bufferize_info_find(term_val(producer));
         if (pidx != 0xFFFFFFFFu && RU_SUBST[pidx] != 0) {
           RU_SUBST[i] = RU_SUBST[pidx];
+          continue;
         }
+      }
+      // No upstream BUFFERIZE_NODES entry (typically a TAG_TEN leaf).
+      // Unwrap the movement shell: RU_SUBST[i] is currently the rebuilt
+      // movement-op Term (e.g. UOP_EXPAND(UOP_INDEX_E(...), ndim, dims))
+      // and we want just the inner INDEX_E. Slot 0 holds it directly.
+      Term cur = RU_SUBST[i];
+      if (term_tag(cur) == TAG_UOP) {
+        Term inner = heap_read(term_val(cur) + 0);
+        if (inner != 0) RU_SUBST[i] = inner;
       }
     }
   }

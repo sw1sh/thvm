@@ -471,6 +471,13 @@ static void unified_rewrite_memo_insert(UnifiedRewriteState *st, Term key,
 // input slot in `ke`.  Returns 0 when no match (caller keeps the
 // original TAG_TEN; the unified pass may carry tensor handles that
 // aren't kernel inputs, e.g. constants or output backrefs).
+//
+// View-aliased fallback: when the rewriter sees a TAG_TEN whose tid
+// predates the legacy visit()'s view_resolve aliasing (e.g. matmul's
+// inner W reference, before EXPAND folded into an alias tid), the
+// initial exact-tid scan misses. tensor_view_of clones share buf_id,
+// so a second pass matches by underlying buffer -- the consumer reads
+// the same bytes regardless of which alias-tid the input slot tracks.
 static Term unified_rewrite_buffer_for_tid(KernelEntry const *ke, u32 tid) {
   if (tid == 0 || tid >= TENS_NEXT) return 0;
   if (ke->input_tids == NULL) return 0;
@@ -481,6 +488,20 @@ static Term unified_rewrite_buffer_for_tid(KernelEntry const *ke, u32 tid) {
     return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype,
                            td->view.shape.ndim, td->view.shape.dims,
                            slot + 1);
+  }
+  // Fall back to buf_id match for view-aliased tids.
+  u32 want_buf = TENS[tid].buf_id;
+  if (want_buf != 0) {
+    for (u32 slot = 0; slot < ke->n_inputs; slot++) {
+      u32 in_tid = ke->input_tids[slot];
+      if (in_tid == 0 || in_tid >= TENS_NEXT) continue;
+      if (TENS[in_tid].buf_id != want_buf) continue;
+      u32 dtype = (ke->input_dtypes != NULL) ? ke->input_dtypes[slot] : DT_FP32;
+      TenDesc const *td = &TENS[in_tid];
+      return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype,
+                             td->view.shape.ndim, td->view.shape.dims,
+                             slot + 1);
+    }
   }
   return 0;
 }

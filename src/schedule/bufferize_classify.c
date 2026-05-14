@@ -1988,6 +1988,24 @@ fn void bufferize_classify(Term root) {
       bufferize_rewrite_apply(root, unified_rules,
           (u32)(sizeof(unified_rules) / sizeof(unified_rules[0])));
     }
+    // Re-run pm_apply_rangeify so RU_BUFFERIZE_TERM / RU_STORE_ROOT /
+    // RU_SUBST observe the post-prune realize set. Without this rerun,
+    // realized consumers' store-root DAGs still reference BUFFERIZE Terms
+    // for producers whose realized bit was cleared by the prune rules
+    // (e.g. inline-softmax-broadcast-reduce). The unified-bypass walker
+    // (materialize.c:unified_rewrite_buffer_for_bufferize) then fails to
+    // map those stale BUFFERIZE leaves to any kernel-input slot and
+    // cpu_uop_walk's uwalk_resolve_buf inst-zero fallback silently aliases
+    // them to the output buffer, producing NaN / garbage in dispatch.
+    //
+    // Only the THVM_LIFT_FROM_UNIFIED bypass observes RU_STORE_ROOT; the
+    // default cached_lift path is unaffected (its kernel_lift_to_uop walk
+    // never sees these BUFFERIZE Terms because it lifts the per-kernel
+    // scalar arena, which is already inlined).
+    if (getenv("THVM_LIFT_FROM_UNIFIED")) {
+      rangeify_unified_resync_realize_from_nodes();
+      pm_apply_rangeify(root);
+    }
     bufferize_finalize_stores(root);
     return;
   }
