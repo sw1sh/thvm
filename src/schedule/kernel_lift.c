@@ -384,6 +384,173 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     }
     // Otherwise reject below as the strict ndim-mismatch case.
   }
+  // Broadcast-leading-iter into low-ndim buffer: ndim < outer_rank
+  // where the LAST ndim range extents match the buffer's dims and
+  // the leading (outer_rank - ndim) ranges are broadcast away (this
+  // buf doesn't index them).  Example: dims=[8] outer_rank=2
+  // range_extents=[4,8] -- the [4] is a broadcast leading iter, the
+  // [8] indexes dim[0].  Offset = r[outer_rank-1] * 1 (or strided
+  // sum over the trailing ndim ranges in general).
+  if (ndim >= 1 && ndim < outer_rank) {
+    char const *_ge = getenv("THVM_LIFT_BROADCAST_LEADING_LOW");
+    int _on = (_ge == NULL) ? 1 : (_ge[0] != '0');
+    if (_on) {
+      int extents_align = 1;
+      u32 lead = outer_rank - ndim;
+      for (u32 d = 0; d < ndim; d++) {
+        u32 r_sid = u->src[1 + lead + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          extents_align = 0; break;
+        }
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) { extents_align = 0; break; }
+        u32 range_extent = (u32)(ru->extra & 0xFFFFFFFFu);
+        if (range_extent != uop_buffer_dim(buf, d)) {
+          extents_align = 0; break;
+        }
+      }
+      if (extents_align) {
+        Term acc = 0;
+        for (u32 d = 0; d < ndim; d++) {
+          u32 r_sid = u->src[1 + lead + d];
+          Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+          if (r_uop == 0) { acc = 0; break; }
+          u32 stride = 1;
+          for (u32 e = d + 1; e < ndim; e++) stride *= uop_buffer_dim(buf, e);
+          Term term = (stride == 1) ? r_uop
+                    : uop_int_binary(UOP_IMUL, r_uop,
+                                     uop_const(DT_INT32, stride));
+          acc = (acc == 0) ? term
+              : uop_int_binary(UOP_IADD, acc, term);
+        }
+        if (acc != 0) return acc;
+      }
+    }
+  }
+  // Flattened-iter into low-ndim buffer: ndim == 1 < outer_rank and
+  // the PRODUCT of all range extents equals the buffer's only dim.
+  // Example: dim=[8] outer_rank=2 range_extents=[2,4] -- the iter
+  // visits the buffer as if [2,4] were its row-major shape.  Offset
+  // = r[0]*4 + r[1] (stride[d] = product of extents AFTER d).
+  if (ndim == 1 && outer_rank > 1) {
+    char const *_ge = getenv("THVM_LIFT_FLATTEN_ITER_LOW");
+    int _on = (_ge == NULL) ? 1 : (_ge[0] != '0');
+    if (_on) {
+      int extents_ok = 1;
+      u32 extents[MAX_DIM];
+      u32 prod = 1;
+      if (outer_rank > MAX_DIM) extents_ok = 0;
+      for (u32 d = 0; d < outer_rank && extents_ok; d++) {
+        u32 r_sid = u->src[1 + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          extents_ok = 0; break;
+        }
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) { extents_ok = 0; break; }
+        extents[d] = (u32)(ru->extra & 0xFFFFFFFFu);
+        prod *= extents[d];
+      }
+      if (extents_ok && prod == uop_buffer_dim(buf, 0)) {
+        Term acc = 0;
+        for (u32 d = 0; d < outer_rank; d++) {
+          u32 r_sid = u->src[1 + d];
+          Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+          if (r_uop == 0) { acc = 0; break; }
+          u32 stride = 1;
+          for (u32 e = d + 1; e < outer_rank; e++) stride *= extents[e];
+          Term term = (stride == 1) ? r_uop
+                    : uop_int_binary(UOP_IMUL, r_uop,
+                                     uop_const(DT_INT32, stride));
+          acc = (acc == 0) ? term
+              : uop_int_binary(UOP_IADD, acc, term);
+        }
+        if (acc != 0) return acc;
+      }
+    }
+  }
+  // Broadcast-leading-iter into low-ndim buffer: ndim < outer_rank
+  // where the LAST ndim range extents match the buffer's dims; the
+  // leading (outer_rank - ndim) ranges are broadcast away (this buf
+  // doesn't index them).  Example: dims=[8] outer_rank=2
+  // range_extents=[4,8] -- the [4] is a broadcast leading iter; the
+  // [8] indexes dim[0].  Offset = sum over trailing ndim ranges with
+  // row-major buf strides.
+  if (ndim >= 1 && ndim < outer_rank) {
+    char const *_ge = getenv("THVM_LIFT_BROADCAST_LEADING_LOW");
+    int _on = (_ge == NULL) ? 1 : (_ge[0] != '0');
+    if (_on) {
+      int extents_align = 1;
+      u32 lead = outer_rank - ndim;
+      for (u32 d = 0; d < ndim; d++) {
+        u32 r_sid = u->src[1 + lead + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          extents_align = 0; break;
+        }
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) { extents_align = 0; break; }
+        u32 range_extent = (u32)(ru->extra & 0xFFFFFFFFu);
+        if (range_extent != uop_buffer_dim(buf, d)) {
+          extents_align = 0; break;
+        }
+      }
+      if (extents_align) {
+        Term acc = 0;
+        for (u32 d = 0; d < ndim; d++) {
+          u32 r_sid = u->src[1 + lead + d];
+          Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+          if (r_uop == 0) { acc = 0; break; }
+          u32 stride = 1;
+          for (u32 e = d + 1; e < ndim; e++) stride *= uop_buffer_dim(buf, e);
+          Term term = (stride == 1) ? r_uop
+                    : uop_int_binary(UOP_IMUL, r_uop,
+                                     uop_const(DT_INT32, stride));
+          acc = (acc == 0) ? term
+              : uop_int_binary(UOP_IADD, acc, term);
+        }
+        if (acc != 0) return acc;
+      }
+    }
+  }
+  // Flattened-iter into low-ndim buffer: ndim == 1 < outer_rank and
+  // the product of all range extents equals the buffer's only dim.
+  // Example: dim=[8] outer_rank=2 range_extents=[2,4] -- the iter
+  // visits the buffer as if [2,4] were its row-major shape.  Offset
+  // = r[0]*4 + r[1] (stride[d] = product of extents AFTER d).
+  if (ndim == 1 && outer_rank > 1) {
+    char const *_ge = getenv("THVM_LIFT_FLATTEN_ITER_LOW");
+    int _on = (_ge == NULL) ? 1 : (_ge[0] != '0');
+    if (_on && outer_rank <= MAX_DIM) {
+      int extents_ok = 1;
+      u32 extents[MAX_DIM];
+      u32 prod = 1;
+      for (u32 d = 0; d < outer_rank && extents_ok; d++) {
+        u32 r_sid = u->src[1 + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          extents_ok = 0; break;
+        }
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) { extents_ok = 0; break; }
+        extents[d] = (u32)(ru->extra & 0xFFFFFFFFu);
+        prod *= extents[d];
+      }
+      if (extents_ok && prod == uop_buffer_dim(buf, 0)) {
+        Term acc = 0;
+        for (u32 d = 0; d < outer_rank; d++) {
+          u32 r_sid = u->src[1 + d];
+          Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+          if (r_uop == 0) { acc = 0; break; }
+          u32 stride = 1;
+          for (u32 e = d + 1; e < outer_rank; e++) stride *= extents[e];
+          Term term = (stride == 1) ? r_uop
+                    : uop_int_binary(UOP_IMUL, r_uop,
+                                     uop_const(DT_INT32, stride));
+          acc = (acc == 0) ? term
+              : uop_int_binary(UOP_IADD, acc, term);
+        }
+        if (acc != 0) return acc;
+      }
+    }
+  }
   // Broadcast-over-leading-iter fast path: ndim > outer_rank where
   // the LAST outer_rank buf dims equal the range extents.  The
   // leading (ndim - outer_rank) buf dims are missing from the iter
