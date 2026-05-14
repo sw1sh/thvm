@@ -20,29 +20,7 @@ fn void axes_default_for(KernelEntry *ke) {
 }
 
 static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
-  if (ke == NULL || ke->scalar_uops == NULL) {
-    return 0;
-  }
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    ScalarUop const *u = &ke->scalar_uops[i];
-    if (u->op != S_REDUCE_SUM && u->op != S_REDUCE_MAX) {
-      continue;
-    }
-    if (u->src_count < 2 || u->src[1] == 0
-        || u->src[1] >= ke->n_scalar_uops) {
-      return 0;
-    }
-    ScalarUop const *rng = &ke->scalar_uops[u->src[1]];
-    if (rng->op != S_RANGE) {
-      return 0;
-    }
-    u32 axis_type = (u32)(rng->extra >> 32);
-    u32 extent    = (u32)(rng->extra & 0xFFFFFFFFu);
-    if (axis_type != S_AXIS_REDUCE || extent == 0) {
-      return 0;
-    }
-    return extent;
-  }
+  (void)ke;
   return 0;
 }
 
