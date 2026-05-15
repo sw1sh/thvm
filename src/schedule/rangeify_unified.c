@@ -1087,13 +1087,103 @@ static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
   return n;
 }
 
+// Per-axis range substitution table used when splicing a non-realized
+// producer's RU_SUBST into a consumer.  The producer minted its
+// out_rngs against one of its consumers (typically the first one
+// reached in topological order); a different consumer reading the same
+// shared producer has its own in_rngs at the same axis positions.
+// Without rewiring, the spliced subtree carries the producer-scope
+// axis_ids verbatim and uop_subtree_has_stranded_range trips because
+// cpu_uop_walk only sets up loop slots for the consumer's iter axes.
+typedef struct {
+  u32 from_aid[RU_MAX_AXES];   // producer-side axis_id to replace
+  Term to_term [RU_MAX_AXES];  // consumer-side replacement Term
+  u8  n;
+} RuAxisSubst;
+
+static int ru_axis_subst_lookup(RuAxisSubst const *m, u32 aid, Term *out) {
+  for (u8 i = 0; i < m->n; i++) {
+    if (m->from_aid[i] == aid) {
+      *out = m->to_term[i];
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Walk a spliced subtree and rebuild it with each UOP_RANGE leaf whose
+// axis_id matches m->from_aid[k] replaced by m->to_term[k].  Mirrors
+// tinygrad's variable-substitution sweep used inside
+// create_bufferize_and_index_based_on_ranges when a producer's index
+// expression is reused across consumers (indexing.py:56-81 substitutes
+// via `.substitute` over the per-consumer range_map).  Other Terms
+// (CONST, IADD, etc.) are descended structurally; UOP_BUFFERIZE /
+// UOP_BUFFER / UOP_KERNEL are opaque boundaries we never enter.
+static Term ru_subtree_rewrite_ranges(Term t, RuAxisSubst const *m,
+                                       u32 depth) {
+  if (depth > 64 || m->n == 0) return t;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return t;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) {
+    Term repl;
+    if (ru_axis_subst_lookup(m, uop_range_axis_id(r), &repl)) return repl;
+    return t;
+  }
+  if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return t;
+  u8 ar = uop_arity(op);
+  if (ar == 0) return t;
+  Term srcs[MAX_UOP_SRC] = {0};
+  u64 loc = term_val(r);
+  int changed = 0;
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old_c = heap_read(loc + i);
+    Term new_c = ru_subtree_rewrite_ranges(old_c, m, depth + 1);
+    srcs[i] = new_c;
+    if (new_c != old_c) changed = 1;
+  }
+  if (!changed) return t;
+  return uop_graph_rebuild_with_srcs(r, srcs);
+}
+
+// Build the producer->consumer axis_id substitution map for the edge
+// where consumer `consumer_rm` reads producer at node `pidx`.  Producer
+// minted out_rngs[a] at its own iter scope; consumer reads at the same
+// axis position with rm->in_rngs[a].  When the producer's out_rng is
+// not a bare UOP_RANGE (extent-1 collapse to CONST(0), or a partial-
+// realize that minted a fresh range), no substitution is needed for
+// that axis.  Returns the populated map.
+static RuAxisSubst ru_build_axis_subst(u32 pidx,
+                                       RuRangeMap const *consumer_rm) {
+  RuAxisSubst m;
+  m.n = 0;
+  if (pidx >= BUFFERIZE_NODES_LEN) return m;
+  RuRangeMap const *prm = &RU_RANGE_MAP[pidx];
+  if (!prm->has_ranges) return m;
+  u8 nd = prm->out_ndim;
+  if (nd > consumer_rm->in_ndim) nd = consumer_rm->in_ndim;
+  for (u8 a = 0; a < nd && m.n < RU_MAX_AXES; a++) {
+    Term pr = prm->out_rngs[a];
+    Term cr = consumer_rm->in_rngs[a];
+    if (term_tag(pr) != TAG_UOP || term_ext(pr) != UOP_RANGE) continue;
+    if (pr == cr) continue;
+    m.from_aid[m.n] = uop_range_axis_id(pr);
+    m.to_term [m.n] = cr;
+    m.n++;
+  }
+  return m;
+}
+
 // Rebuild the producer Term at (loc, op) by REWRITING each child slot:
 //   - child has RU_SUBST[child_idx] != 0
 //       -> if RU_SUBST is a UOP_BUFFERIZE, wrap with uop_index_e(BUFFERIZE, in_addr)
 //          so the load happens at THIS consumer's iter (mirrors tinygrad
 //          indexing.py:78 -- BUFFERIZE.index(*consumer_ranges)).
 //       -> otherwise (non-realized producer's rewritten value) splice in
-//          as-is; its TAG_TEN leaves were already wrapped at its own iter.
+//          with a producer->consumer axis_id rewrite: the producer minted
+//          out_rngs against one of its consumers but other consumers read
+//          at different axis_ids, so without the rewrite uop_subtree_has_
+//          stranded_range trips on the producer-side leaves.
 //   - child is a leaf tensor (TAG_TEN)    ->  wrap with uop_index_e(child, in_addr)
 //   - everything else (atoms, passthroughs)  ->  keep
 // in_addr is the addr at which TAG_TEN/BUFFERIZE INPUTS are loaded at
@@ -1102,7 +1192,8 @@ static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
 // rm->in_rngs).
 // Mirror: tinygrad/schedule/indexing.py:create_bufferize_and_index_based_on_ranges
 // (lines 56-81), `new_srcs` accumulation loop + final `x.replace(src=tns)`.
-static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr) {
+static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
+                                RuRangeMap const *consumer_rm) {
   u8 ar = uop_arity(op);
   if (ar == 0) return self;
   Term srcs[MAX_UOP_SRC] = {0};
@@ -1120,7 +1211,15 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr) {
         if (term_tag(sub) == TAG_UOP && term_ext(sub) == UOP_BUFFERIZE) {
           new_child = uop_index_e(sub, in_addr);
         } else {
-          new_child = sub;
+          // Non-realized producer: splice in its value subtree, but
+          // first rewrite producer-scope RANGE axis_ids to the
+          // consumer's equivalent at the same axis position.
+          if (consumer_rm != NULL) {
+            RuAxisSubst m = ru_build_axis_subst(cidx, consumer_rm);
+            new_child = ru_subtree_rewrite_ranges(sub, &m, 0);
+          } else {
+            new_child = sub;
+          }
         }
       }
     } else if (ctag == TAG_TEN || ctag == TAG_VAR) {
@@ -1224,7 +1323,8 @@ fn void pm_apply_rangeify(Term root) {
       // in_rngs == out_rngs and falls through to the same shape.
       Term my_addr   = ru_build_index_addr_for(rm, self);
       Term in_addr   = ru_build_input_addr_for(rm, info->loc);
-      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
+      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
+                                          in_addr, rm);
       // Same REDUCE-axis rewire as the non-realized branch below: when
       // this node itself is a REDUCE that landed at the realize boundary,
       // its axis cell still holds the original shape-axis index. The
@@ -1325,7 +1425,8 @@ fn void pm_apply_rangeify(Term root) {
       // The consumer's own ru_rewrite_subtree then plugs this in
       // verbatim (its TAG_UOP child branch hits our RU_SUBST entry).
       Term in_addr   = ru_build_input_addr_for(rm, info->loc);
-      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
+      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
+                                          in_addr, rm);
       // Rewire UOP_REDUCE's axis field from the original shape-axis index
       // (e.g. "axis 1 of {3,2}") to the freshly minted UOP_RANGE's axis_id.
       // uop_graph_rebuild_with_srcs preserves the original axis cell from
