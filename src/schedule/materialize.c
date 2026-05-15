@@ -835,6 +835,71 @@ static u64 uop_buffer_numel(Term t) {
   return n;
 }
 
+// Upper bound on the value an addr expression can produce, evaluated
+// statically from its UOP tree.  Returns UINT64_MAX when the expression
+// uses an op the estimator doesn't model (in which case the caller must
+// treat the read as potentially out-of-bounds).  The estimator's
+// purpose is to let `broadcast_input_scan_rec` decide whether an
+// INDEX_E read can statically exceed its BUFFER's numel.  If it can't,
+// the read is safe even though the consumer's REDUCE-multiplied iter
+// footprint exceeds buf_numel -- the addr just doesn't span the full
+// iter cube.
+#define ADDR_MAX_UNKNOWN ((u64)~0ull)
+static u64 addr_max_value(Term t, u32 depth) {
+  if (depth > 64) return ADDR_MAX_UNKNOWN;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return ADDR_MAX_UNKNOWN;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_CONST) {
+    u64 bits = term_val(heap_read(loc + 0));
+    return bits;
+  }
+  if (op == UOP_RANGE) {
+    u32 ext = (u32)term_val(heap_read(loc + 2));
+    if (ext == 0) return 0;
+    return (u64)(ext - 1);
+  }
+  if (op == UOP_IADD) {
+    u64 a = addr_max_value(heap_read(loc + 0), depth + 1);
+    u64 b = addr_max_value(heap_read(loc + 1), depth + 1);
+    if (a == ADDR_MAX_UNKNOWN || b == ADDR_MAX_UNKNOWN) return ADDR_MAX_UNKNOWN;
+    if (a + b < a) return ADDR_MAX_UNKNOWN;
+    return a + b;
+  }
+  if (op == UOP_IMUL) {
+    u64 a = addr_max_value(heap_read(loc + 0), depth + 1);
+    u64 b = addr_max_value(heap_read(loc + 1), depth + 1);
+    if (a == ADDR_MAX_UNKNOWN || b == ADDR_MAX_UNKNOWN) return ADDR_MAX_UNKNOWN;
+    if (a != 0 && b > ADDR_MAX_UNKNOWN / a) return ADDR_MAX_UNKNOWN;
+    return a * b;
+  }
+  if (op == UOP_IDIV) {
+    // a / b: max <= max(a) / min(b).  When b is CONST > 0, that's
+    // max(a) / b_val.  Otherwise fall back to max(a) (b >= 1).
+    Term b_t = term_resolve(heap_read(loc + 1));
+    if (term_tag(b_t) == TAG_UOP && term_ext(b_t) == UOP_CONST) {
+      u64 bv = term_val(heap_read(term_val(b_t) + 0));
+      if (bv > 0) {
+        u64 a = addr_max_value(heap_read(loc + 0), depth + 1);
+        if (a == ADDR_MAX_UNKNOWN) return ADDR_MAX_UNKNOWN;
+        return a / bv;
+      }
+    }
+    return addr_max_value(heap_read(loc + 0), depth + 1);
+  }
+  if (op == UOP_IMOD) {
+    // a % b: max <= b - 1 when b is CONST > 0.
+    Term b_t = term_resolve(heap_read(loc + 1));
+    if (term_tag(b_t) == TAG_UOP && term_ext(b_t) == UOP_CONST) {
+      u64 bv = term_val(heap_read(term_val(b_t) + 0));
+      if (bv > 0) return bv - 1;
+    }
+    return ADDR_MAX_UNKNOWN;
+  }
+  return ADDR_MAX_UNKNOWN;
+}
+
 static int broadcast_input_scan_rec(KernelEntry const *ke,
                                     BufferizeScanVisited *v, Term t,
                                     u64 out_numel,
@@ -845,33 +910,51 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
   if (bufferize_scan_seen(v, r)) return 0;
   u8  op  = term_ext(r);
   u64 loc = term_val(r);
-  // INDEX_E(BUFFER, addr): check that BUFFER numel matches the
-  // consumer's iter footprint (out_numel for the elementwise case;
-  // reduce-axes are handled by descending under the REDUCE handler
-  // below).  When BUFFER numel < footprint AND the input view has a
-  // matching stride-0 pattern, the legacy lift would emit CONST(0)
-  // for the broadcast axis; the bypass instead reads at the consumer
-  // iter and goes out-of-bounds.  Decline.
+  // INDEX_E(BUFFER, addr): the read is safe iff the addr expression's
+  // statically-bounded max value is < BUFFER.numel.  The legacy
+  // numel-vs-iter-footprint check fires false positives on
+  //   - INDEX_E inside a REDUCE body whose addr is a bare reduce-axis
+  //     RANGE (max addr = extent-1, fully in-bounds of dims=[extent])
+  //   - INDEX_E whose addr uses fewer axes than the enclosing iter
+  //     cube (broadcast over the missing axes -- addr stays small)
+  // When `addr_max_value` returns UINT64_MAX (estimator doesn't model
+  // some op in the addr tree), fall back to the conservative
+  // numel-vs-footprint check that was the original gate.
+  //
+  // INDEX_E(TAG_TEN, addr): the unified pass inlines a producer
+  // BUFFERIZE's value subtree into the consumer.  When that subtree
+  // referenced a TAG_TEN that the consumer's input_tids[] does NOT
+  // carry, materialize.c's unified_rewrite_buffer_for_tid returns 0
+  // and the TAG_TEN is left in the rewritten tree -- cpu_uop_walk
+  // can't bind a runtime buffer for it and the kernel reads garbage.
+  // Decline; legacy kernel_lift_to_uop's per-kernel realize-projection
+  // ensures every TAG_TEN referenced inside the lifted value has a
+  // matching input slot.
   if (op == UOP_INDEX_E) {
     Term buf_t = term_resolve(heap_read(loc + 0));
+    if (term_tag(buf_t) == TAG_TEN) {
+      return 1;
+    }
     if (term_tag(buf_t) == TAG_UOP && term_ext(buf_t) == UOP_BUFFER) {
       u32 inst = uop_buffer_inst_get(buf_t);
       // Output buf (inst=0) is the writer's own slot; skip the size check.
       if (inst >= 1) {
         u64 buf_numel = uop_buffer_numel(buf_t);
-        // INDEX_E(BUFFER_1elem, CONST(0)) is a designed scalar
-        // broadcast: the addr is the literal zero, the read offset
-        // is fixed at 0 regardless of the consumer iter.  This
-        // mirrors the legacy lifter's CONST(0) emit for stride-0
-        // axes -- no out-of-bounds risk.  Skip the size-mismatch
-        // gate for this shape.
         Term addr_t = term_resolve(heap_read(loc + 1));
-        int addr_is_zero = (term_tag(addr_t) == TAG_UOP
-                         && term_ext(addr_t) == UOP_CONST
-                         && term_val(heap_read(term_val(addr_t) + 0)) == 0);
-        if (!addr_is_zero
-            && buf_numel > 0 && out_numel > 0 && buf_numel < out_numel) {
-          return 1;
+        u64 max_addr = addr_max_value(addr_t, 0);
+        if (max_addr != ADDR_MAX_UNKNOWN) {
+          if (buf_numel > 0 && max_addr >= buf_numel) {
+            return 1;
+          }
+          // addr is bounded < buf_numel -> safe regardless of out_numel.
+        } else {
+          int addr_is_zero = (term_tag(addr_t) == TAG_UOP
+                           && term_ext(addr_t) == UOP_CONST
+                           && term_val(heap_read(term_val(addr_t) + 0)) == 0);
+          if (!addr_is_zero
+              && buf_numel > 0 && out_numel > 0 && buf_numel < out_numel) {
+            return 1;
+          }
         }
       }
     }
