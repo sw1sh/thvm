@@ -579,23 +579,49 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
     if (repl != 0) return repl;
   }
 
-  // INDEX_E(BUFFERIZE(CONST(v)), addr) -> CONST(v).  Some unified-pass
-  // BUFFERIZE wraps a scalar producer (e.g. the `mean_count` reciprocal
-  // baked into a 1-elem buffer) whose value tree is a single UOP_CONST.
-  // The legacy kernel_lift_to_uop inlines such constant-broadcast
-  // producers into their consumers; the cpu_uop_walk value dispatcher
-  // otherwise has no BUFFERIZE handler at the value layer and stalls,
-  // yielding zeros.  Detect the pattern here so the consumer subtree
-  // sees a plain CONST in place of the INDEX_E wrap.
+  // INDEX_E(BUFFERIZE(value), addr) where the BUFFERIZE doesn't map
+  // to a kernel-input boundary -> inline rewrite(value).  Some
+  // unified-pass BUFFERIZE wraps an in-kernel intermediate (a
+  // constant scalar, a reduce-to-scalar, a product of reduced
+  // scalars) that ISN'T a realize boundary.  The legacy
+  // kernel_lift_to_uop inlines such producers into their consumer;
+  // the cpu_uop_walk value dispatcher has no BUFFERIZE handler and
+  // would read 0 if left in place.  Only inline the scalar case
+  // (n_ranges == 0 AND addr is CONST(0) or literal scalar): the
+  // value subtree's axes are all closed by enclosing reduces, so
+  // splicing the rewritten value at the consumer's iter is
+  // identity-correct.  Multi-range BUFFERIZE intermediates need an
+  // addr-folding rewrite that maps the consumer's INDEX_E.addr into
+  // the BUFFERIZE's closed-range coordinates; until that lands the
+  // resid gate keeps those kernels on the legacy lifter (the
+  // gates `stranded` and `bcast` only catch a subset of the
+  // unsoundness so a bare strip would corrupt e.g. max-pool grad).
   if (term_ext(resolved) == UOP_INDEX_E) {
     Term inner_buf = term_resolve(heap_read(term_val(resolved) + 0));
+    Term addr_term = term_resolve(heap_read(term_val(resolved) + 1));
     if (term_tag(inner_buf) == TAG_UOP
         && term_ext(inner_buf) == UOP_BUFFERIZE
         && unified_rewrite_buffer_for_bufferize(st->ke, inner_buf) == 0) {
       Term v = uop_bufferize_value(inner_buf);
+      // Fast path for CONST: bypass the recursive rewrite (the
+      // inner is a literal scalar with no children).
       if (v != 0 && term_tag(v) == TAG_UOP && term_ext(v) == UOP_CONST) {
         unified_rewrite_memo_insert(st, resolved, v);
         return v;
+      }
+      // Scalar-inline path: the BUFFERIZE has zero ranges and the
+      // read addr is the literal zero.  The value subtree's axes
+      // are all closed by enclosing reduces; recursively rewrite
+      // (mapping TAG_TEN -> UOP_BUFFER, resolving further nested
+      // BUFFERIZE-as-input handles).
+      int addr_is_zero = (term_tag(addr_term) == TAG_UOP
+                       && term_ext(addr_term) == UOP_CONST
+                       && term_val(heap_read(term_val(addr_term) + 0)) == 0);
+      u32 n_ranges = uop_bufferize_n_ranges(inner_buf);
+      if (v != 0 && n_ranges == 0 && addr_is_zero) {
+        Term out = unified_rewrite_rec(st, v, depth + 1);
+        unified_rewrite_memo_insert(st, resolved, out);
+        return out;
       }
     }
   }
@@ -833,7 +859,18 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
       // Output buf (inst=0) is the writer's own slot; skip the size check.
       if (inst >= 1) {
         u64 buf_numel = uop_buffer_numel(buf_t);
-        if (buf_numel > 0 && out_numel > 0 && buf_numel < out_numel) {
+        // INDEX_E(BUFFER_1elem, CONST(0)) is a designed scalar
+        // broadcast: the addr is the literal zero, the read offset
+        // is fixed at 0 regardless of the consumer iter.  This
+        // mirrors the legacy lifter's CONST(0) emit for stride-0
+        // axes -- no out-of-bounds risk.  Skip the size-mismatch
+        // gate for this shape.
+        Term addr_t = term_resolve(heap_read(loc + 1));
+        int addr_is_zero = (term_tag(addr_t) == TAG_UOP
+                         && term_ext(addr_t) == UOP_CONST
+                         && term_val(heap_read(term_val(addr_t) + 0)) == 0);
+        if (!addr_is_zero
+            && buf_numel > 0 && out_numel > 0 && buf_numel < out_numel) {
           return 1;
         }
       }
