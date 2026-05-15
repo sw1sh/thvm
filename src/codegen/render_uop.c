@@ -996,8 +996,13 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
         && (out_kinds[i] == UOP_OPT_UNROLL || out_kinds[i] == UOP_OPT_UPCAST)
         && !threadbound) {
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      if (out_factors[i] > 0) fprintf(fp, "#pragma unroll(%u)\n", out_factors[i]);
-      else                    fputs("#pragma unroll\n", fp);
+      if (RMU_TARGET_C) {
+        if (out_factors[i] > 0) fprintf(fp, "#pragma clang loop unroll_count(%u)\n", out_factors[i]);
+        else                    fputs("#pragma clang loop unroll(full)\n", fp);
+      } else {
+        if (out_factors[i] > 0) fprintf(fp, "#pragma unroll(%u)\n", out_factors[i]);
+        else                    fputs("#pragma unroll\n", fp);
+      }
     }
     rmu_emit_range_open_ctx(r, fp, body_depth, out_kinds[i], &gd);
     if (!threadbound) { needs_close[i] = 1; body_depth++; }
@@ -2005,8 +2010,13 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   // MSL compiler can straight-line the contraction MADs.
   if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
-    else                    fputs("#pragma unroll\n", fp);
+    if (RMU_TARGET_C) {
+      if (red_factor_opt > 0) fprintf(fp, "#pragma clang loop unroll_count(%u)\n", red_factor_opt);
+      else                    fputs("#pragma clang loop unroll(full)\n", fp);
+    } else {
+      if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
+      else                    fputs("#pragma unroll\n", fp);
+    }
   } else if (red_kind_opt == RMU_NO_OPT && !RMU_TARGET_C) {
     u32 red_extent = uop_range_extent(red_range);
     if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {

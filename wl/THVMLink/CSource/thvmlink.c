@@ -1565,13 +1565,20 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
+  // Prefer the cached lift's mutated store_root when apply_opt has
+  // updated it post-realize.  kernel_lift_to_uop re-runs from scratch
+  // and reproduces the pre-opt DAG; cached_lift.store_root reflects
+  // TKernelApplyOpt mutations.
+  Term store_root = (KERNELS[kid].cached_lift.store_root != 0)
+                  ? KERNELS[kid].cached_lift.store_root
+                  : lift.store_root;
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) {
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
-  cg_render_uop_kernel_c(lift.store_root, "k", lift.out_buf,
+  cg_render_uop_kernel_c(store_root, "k", lift.out_buf,
                          lift.in_bufs, lift.n_inputs, fp);
   long n = ftell(fp);
   fclose(fp);
