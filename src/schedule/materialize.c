@@ -550,9 +550,42 @@ static Term unified_rewrite_buffer_for_var(KernelEntry const *ke,
   return 0;
 }
 
+// Substitution map: replace any Term-identity match of from[i] with to[i]
+// while rewriting `t`.  Mirrors tinygrad's `UOp.substitute(map)` over a
+// closed-range scope: a BUFFERIZE's closed_ranges (the producer's iter
+// axes) get re-bound to the consumer's INDEX_E.addr components so the
+// rewritten subtree iterates in the consumer's range scope.  The TAG_TEN
+// / TAG_VAR / kernel-input-BUFFERIZE rewrites still apply on the way down.
+#define UNIFIED_SUBST_CAP MAX_DIM
+typedef struct {
+  Term from[UNIFIED_SUBST_CAP];
+  Term to  [UNIFIED_SUBST_CAP];
+  u32  n;
+} UnifiedSubst;
+
+static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
+                                    UnifiedSubst const *sub,
+                                    Term t, u32 depth);
+
 static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
+  return unified_rewrite_rec_sub(st, NULL, t, depth);
+}
+
+static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
+                                    UnifiedSubst const *sub,
+                                    Term t, u32 depth) {
   if (depth > 256) return t;
   Term resolved = term_resolve(t);
+  // Substitution map: when active, replace any Term-identity hit with
+  // the matching `to` Term (a consumer-iter expression bound to a
+  // BUFFERIZE's closed_range).  Checked first so a RANGE leaf inside
+  // the inlined value subtree gets rebound before any other branch
+  // (TAG_TEN -> UOP_BUFFER, BUFFERIZE -> kernel-input slot, etc.).
+  if (sub != NULL) {
+    for (u32 i = 0; i < sub->n; i++) {
+      if (sub->from[i] == resolved) return sub->to[i];
+    }
+  }
   u8 tag = term_tag(resolved);
   if (tag == TAG_TEN) {
     Term repl = unified_rewrite_buffer_for_tid(st->ke, (u32)term_val(resolved));
@@ -579,26 +612,44 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
     if (repl != 0) return repl;
   }
 
-  // INDEX_E(BUFFERIZE(value), addr) where the BUFFERIZE doesn't map
-  // to a kernel-input boundary -> inline rewrite(value).  Some
-  // unified-pass BUFFERIZE wraps an in-kernel intermediate (a
-  // constant scalar, a reduce-to-scalar, a product of reduced
-  // scalars) that ISN'T a realize boundary.  The legacy
-  // kernel_lift_to_uop inlines such producers into their consumer;
-  // the cpu_uop_walk value dispatcher has no BUFFERIZE handler and
-  // would read 0 if left in place.  Only inline the scalar case
-  // (n_ranges == 0 AND addr is CONST(0) or literal scalar): the
-  // value subtree's axes are all closed by enclosing reduces, so
-  // splicing the rewritten value at the consumer's iter is
-  // identity-correct.  Multi-range BUFFERIZE intermediates need an
-  // addr-folding rewrite that maps the consumer's INDEX_E.addr into
-  // the BUFFERIZE's closed-range coordinates; until that lands the
-  // resid gate keeps those kernels on the legacy lifter (the
-  // gates `stranded` and `bcast` only catch a subset of the
-  // unsoundness so a bare strip would corrupt e.g. max-pool grad).
+  // INDEX_E(BUFFERIZE(value, closed_ranges), addr) where the BUFFERIZE
+  // doesn't map to a kernel-input boundary -> inline value, rebinding
+  // each closed_range RANGE leaf inside `value` to the matching
+  // component of `addr`.  Some unified-pass BUFFERIZE wraps an
+  // in-kernel intermediate (a constant scalar, a reduce-to-scalar,
+  // a product of reduced scalars, a per-row softmax denominator)
+  // that isn't a realize boundary.  The legacy kernel_lift_to_uop
+  // inlines such producers into their consumer; the cpu_uop_walk
+  // value dispatcher has no BUFFERIZE handler and would read 0 if
+  // left in place.
+  //
+  // Inline cases handled here:
+  //
+  //   * n_ranges == 0: 1-element buffer.  Every addr maps to the same
+  //     scalar value; inline `value` and recursively rewrite.
+  //
+  //   * n_ranges == 1 && addr is a single UOP_RANGE Term: bind the
+  //     closed_range to `addr` (a Term-identity rewrite over the value
+  //     subtree).  This is the BUFFERIZE(REDUCE(...))-fed-by-consumer-
+  //     range pattern that nn cross-entropy backward, layer-norm grad,
+  //     and softmax forward all produce.
+  //
+  // Multi-range BUFFERIZE intermediates with compound addrs (IADD/IMUL
+  // strides over multiple consumer ranges) still need an addr-folding
+  // rewrite that splits addr into per-axis indices; until that lands
+  // the resid gate keeps those kernels on the legacy lifter.
   if (term_ext(resolved) == UOP_INDEX_E) {
     Term inner_buf = term_resolve(heap_read(term_val(resolved) + 0));
     Term addr_term = term_resolve(heap_read(term_val(resolved) + 1));
+    // Run the addr through the active subst (and TAG_TEN/VAR/BUFFERIZE
+    // rewrites) so the rebound expression carries forward into nested
+    // inline.  This handles BUFFERIZE(BUFFERIZE(...)) chains where the
+    // outer's value subtree contains an inner INDEX_E with a closed_
+    // range leaf in its addr -- the outer subst has to fire on that
+    // inner addr before the inner inline kicks in.
+    if (sub != NULL) {
+      addr_term = unified_rewrite_rec_sub(st, sub, addr_term, depth + 1);
+    }
     if (term_tag(inner_buf) == TAG_UOP
         && term_ext(inner_buf) == UOP_BUFFERIZE
         && unified_rewrite_buffer_for_bufferize(st->ke, inner_buf) == 0) {
@@ -606,31 +657,78 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
       // Fast path for CONST: bypass the recursive rewrite (the
       // inner is a literal scalar with no children).
       if (v != 0 && term_tag(v) == TAG_UOP && term_ext(v) == UOP_CONST) {
-        unified_rewrite_memo_insert(st, resolved, v);
         return v;
       }
-      // Scalar-inline path: the BUFFERIZE has zero ranges and the
-      // read addr is the literal zero.  The value subtree's axes
-      // are all closed by enclosing reduces; recursively rewrite
-      // (mapping TAG_TEN -> UOP_BUFFER, resolving further nested
-      // BUFFERIZE-as-input handles).
-      int addr_is_zero = (term_tag(addr_term) == TAG_UOP
-                       && term_ext(addr_term) == UOP_CONST
-                       && term_val(heap_read(term_val(addr_term) + 0)) == 0);
       u32 n_ranges = uop_bufferize_n_ranges(inner_buf);
-      if (v != 0 && n_ranges == 0 && addr_is_zero) {
-        Term out = unified_rewrite_rec(st, v, depth + 1);
-        unified_rewrite_memo_insert(st, resolved, out);
-        return out;
+      if (v != 0 && n_ranges == 0) {
+        // Scalar 1-element buffer: any read returns the same value.
+        // Recurse with the SAME subst so any RANGE leaves bound by
+        // the active subst keep their bindings.
+        return unified_rewrite_rec_sub(st, sub, v, depth + 1);
       }
+      // Single closed-range, addr is a fresh RANGE Term: rebind the
+      // closed_range to addr while rewriting the value subtree.
+      // This covers per-row reduce-to-scalar BUFFERIZE intermediates
+      // (cross-entropy forward, softmax denominator, layer-norm mean)
+      // whose value subtree's only free RANGE is the producer's row
+      // axis and whose consumer reads them at the same row iter.
+      // Compound IADD/IMUL addrs would also be valid substitutions
+      // semantically (the value tree treats closed_range[0] as an
+      // opaque i32), but in practice they encode strided / transposed
+      // views where the BUFFERIZE's extent doesn't match the consumer
+      // iter footprint -- the pool/reshape-reduce-max-then-sum gradient
+      // hits this and decodes wrong results.
+      if (v != 0 && n_ranges == 1
+          && term_tag(addr_term) == TAG_UOP
+          && term_ext(addr_term) == UOP_RANGE) {
+        Term old_r = uop_bufferize_range_at(inner_buf, 0);
+        if (old_r == addr_term) {
+          // Closed range already coincides with consumer's addr Term;
+          // no substitution needed, just recursively rewrite.
+          return unified_rewrite_rec_sub(st, sub, v, depth + 1);
+        }
+        if (old_r != 0) {
+          // Compose: if a subst is already active, extend it with the
+          // new (old_r -> addr_term) entry so a chain of BUFFERIZEs
+          // each rebinds its own closed_range without losing the
+          // outer scope's bindings.  Bounded by UNIFIED_SUBST_CAP.
+          UnifiedSubst new_sub;
+          new_sub.n = 0;
+          if (sub != NULL) {
+            for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+              new_sub.from[new_sub.n] = sub->from[i];
+              new_sub.to  [new_sub.n] = sub->to  [i];
+              new_sub.n++;
+            }
+          }
+          if (new_sub.n < UNIFIED_SUBST_CAP) {
+            new_sub.from[new_sub.n] = old_r;
+            new_sub.to  [new_sub.n] = addr_term;
+            new_sub.n++;
+          }
+          return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+        }
+      }
+    }
+    // Fall through: rebuild the INDEX_E with possibly-substituted
+    // addr (the buffer side gets the standard recursion below).
+    if (sub != NULL && addr_term != term_resolve(heap_read(term_val(resolved) + 1))) {
+      Term buf_rw = unified_rewrite_rec_sub(st, sub, heap_read(term_val(resolved) + 0),
+                                            depth + 1);
+      return uop_index_e(buf_rw, addr_term);
     }
   }
 
-  Term hit = 0;
-  if (unified_rewrite_memo_lookup(st, resolved, &hit)) return hit;
-
   u8  op  = term_ext(resolved);
   u64 loc = term_val(resolved);
+
+  // Memo is only valid when no subst is active: the memo is keyed on
+  // the input Term, and an active subst would cache the substituted
+  // result against the unsubstituted key, poisoning later lookups.
+  if (sub == NULL) {
+    Term hit = 0;
+    if (unified_rewrite_memo_lookup(st, resolved, &hit)) return hit;
+  }
 
   // UOP_LOAD is a structural marker (mirrors tinygrad's Ops.LOAD): at
   // the value layer it's an identity around its single src.  The legacy
@@ -641,26 +739,26 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   // its output.  Strip it here so the rewritten subtree is structurally
   // identical to the legacy lifter's output.
   if (op == UOP_LOAD) {
-    Term inner = unified_rewrite_rec(st, heap_read(loc), depth + 1);
-    unified_rewrite_memo_insert(st, resolved, inner);
+    Term inner = unified_rewrite_rec_sub(st, sub, heap_read(loc), depth + 1);
+    if (sub == NULL) unified_rewrite_memo_insert(st, resolved, inner);
     return inner;
   }
 
   u8 ar = uop_arity(op);
   if (ar == 0) {
-    unified_rewrite_memo_insert(st, resolved, resolved);
+    if (sub == NULL) unified_rewrite_memo_insert(st, resolved, resolved);
     return resolved;
   }
   Term srcs[MAX_UOP_SRC] = {0};
   int changed = 0;
   for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
     Term old_child = heap_read(loc + i);
-    Term new_child = unified_rewrite_rec(st, old_child, depth + 1);
+    Term new_child = unified_rewrite_rec_sub(st, sub, old_child, depth + 1);
     srcs[i] = new_child;
     if (new_child != old_child) changed = 1;
   }
   Term out = changed ? uop_graph_rebuild_with_srcs(resolved, srcs) : resolved;
-  unified_rewrite_memo_insert(st, resolved, out);
+  if (sub == NULL) unified_rewrite_memo_insert(st, resolved, out);
   return out;
 }
 
