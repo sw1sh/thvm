@@ -190,42 +190,6 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
   return n;
 }
 
-static int propose_metal_tile_group_reduce_kernel(KernelEntry const *ke);
-
-static u32 propose_group_reduce_opts(KernelEntry const *ke, KOpt *out,
-                                     u32 n, u32 cap, u8 axis,
-                                     u32 axis_size) {
-  if (axis_size == 0 || axis == 0xFF
-      || !propose_metal_tile_group_reduce_kernel(ke)) {
-    return n;
-  }
-  if (axis_size <= 256 && n < cap) {
-    out[n].op   = KOP_GROUP;
-    out[n].axis = axis;
-    out[n].arg  = axis_size;
-    n++;
-  }
-  static const u32 group_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
-  u32 n_group_factors = sizeof(group_factors)/sizeof(*group_factors);
-  for (u32 i = 0; i < n_group_factors; i++) {
-    u32 f = group_factors[i];
-    if (f == axis_size) {
-      continue;
-    }
-    if (axis_size % f != 0 || f > axis_size) {
-      continue;
-    }
-    if (n >= cap) {
-      break;
-    }
-    out[n].op   = KOP_GROUP;
-    out[n].axis = axis;
-    out[n].arg  = f;
-    n++;
-  }
-  return n;
-}
-
 static int propose_metal_backend_enabled(void) {
   char const *backend = getenv("THVM_BACKEND");
   return backend != NULL && strcmp(backend, "metal") == 0;
@@ -325,17 +289,6 @@ static int propose_metal_tile_kernel(KernelEntry const *ke) {
   return 1;
 }
 
-static int propose_metal_tile_group_reduce_kernel(KernelEntry const *ke) {
-  if (!propose_metal_tile_kernel(ke)) {
-    return 0;
-  }
-  TilePlanInfo info;
-  if (!tile_collect_plan_info(ke, &info)) {
-    return 0;
-  }
-  return info.scalar_reduce_id != 0;
-}
-
 fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   if (ke == NULL || out == NULL || cap == 0) return 0;
   u32 n = 0;
@@ -378,14 +331,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
               && tile_anno_axis_count_or_kernelaxes(ke) > 0))) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
-      u8  red_axis = propose_reduce_axis_index(ke);
-      TileAxisInfo red_info;
-      u32 red_size = (red_axis != 0xFF
-                      && tile_anno_axis_or_kernelaxes(ke, red_axis, &red_info))
-                       ? red_info.extent : 0;
       n = propose_conv2d_local_opts(ke, out, n, cap);
       n = propose_conv2d_upcast_opts(ke, out, n, cap);
-      n = propose_group_reduce_opts(ke, out, n, cap, red_axis, red_size);
       return propose_conv2d_unroll_opts(ke, out, n, cap);
     }
   }
@@ -401,7 +348,6 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
                                         &axis_info) ? axis_info.extent : 0);
   if (axis_size > 0 && axis_idx != 0xFF
       && propose_metal_reduce_unroll_kernel(ke)) {
-    n = propose_group_reduce_opts(ke, out, n, cap, axis_idx, axis_size);
     for (u32 i = 0; i < n_factors; i++) {
       u32 f = split_factors[i];
       if (axis_size % f != 0) continue;
