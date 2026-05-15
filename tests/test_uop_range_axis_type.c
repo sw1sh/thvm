@@ -443,19 +443,6 @@ int main(void) {
   CHECK_EQ(uop_range_axis_id(lcl_in_st),   1);
   CHECK_EQ(uop_range_axis_type(lcl_in_st), (u32)KAX_LOCAL);
 
-  // === KOP_GROUP / KOP_GROUPTOP stamping ===========================
-  TEST_BEGIN("apply-kop-split/group-stamps-group-reduce");
-  Term grp_in_lp = uop_range(1, KAX_LOOP, 4);
-  KOpt opts_group[1] = {{ KOP_GROUP, 0, 4 }};
-  Term grp_in_st = uop_apply_kop_split(grp_in_lp, opts_group, 1);
-  CHECK_EQ(uop_range_axis_type(grp_in_st), (u32)KAX_GROUP_REDUCE);
-
-  TEST_BEGIN("apply-kop-split/grouptop-stamps-group-reduce");
-  Term gtp_in_lp = uop_range(1, KAX_LOOP, 4);
-  KOpt opts_gtp[1] = {{ KOP_GROUPTOP, 0, 4 }};
-  Term gtp_in_st = uop_apply_kop_split(gtp_in_lp, opts_gtp, 1);
-  CHECK_EQ(uop_range_axis_type(gtp_in_st), (u32)KAX_GROUP_REDUCE);
-
   // === Negative: no-applied-opts no-op =============================
   TEST_BEGIN("apply-kop-split/no-applied-opts-noop");
   Term r_neg = uop_range(0, KAX_LOOP, 32);
@@ -1387,17 +1374,13 @@ int main(void) {
 
   TEST_BEGIN("apply-split-dag/all-split-classes");
   // Verify each split-class opt picks the right inner axis_type and
-  // (for non-LOCAL classes) wraps the inner in a UOP_OPT annotation
-  // mirroring kernel_lift.c:1582-1603.
-  for (u32 i = 0; i < 5; i++) {
-    static u8 const ops[5]      = { KOP_UPCAST, KOP_UNROLL, KOP_LOCAL,
-                                    KOP_GROUP,  KOP_GROUPTOP };
-    static u8 const expect[5]   = { (u8)KAX_UPCAST, (u8)KAX_UNROLL,
-                                    (u8)KAX_LOCAL, (u8)KAX_GROUP_REDUCE,
-                                    (u8)KAX_GROUP_REDUCE };
-    static u8 const opt_kind[5] = { (u8)UOP_OPT_UPCAST, (u8)UOP_OPT_UNROLL,
-                                    0xFFu, (u8)UOP_OPT_GROUP_REDUCE,
-                                    (u8)UOP_OPT_GROUP_REDUCE };
+  // (for non-LOCAL classes) wraps the inner in a UOP_OPT annotation.
+  for (u32 i = 0; i < 3; i++) {
+    static u8 const ops[3]      = { KOP_UPCAST, KOP_UNROLL, KOP_LOCAL };
+    static u8 const expect[3]   = { (u8)KAX_UPCAST, (u8)KAX_UNROLL,
+                                    (u8)KAX_LOCAL };
+    static u8 const opt_kind[3] = { (u8)UOP_OPT_UPCAST, (u8)UOP_OPT_UNROLL,
+                                    0xFFu };
     Term sda_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){32});
     Term sda_r0   = uop_range(0, KAX_LOOP, 32);
     Term sda_ie   = uop_index_e(sda_buf, sda_r0);

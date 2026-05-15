@@ -52,15 +52,6 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
   if (ke->n_ops > 0 && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
     return 1;
   }
-  if (ke->schedule != NULL) {
-    KOpt const *opts = ke->schedule->applied_opts;
-    u32 n_applied = (u32)ke->schedule->n_applied;
-    for (u32 i = 0; i < n_applied; i++) {
-      if (opts[i].op == KOP_GROUP || opts[i].op == KOP_GROUPTOP) {
-        return 1;
-      }
-    }
-  }
   if (axes_scalar_reduce_extent(ke) != 0) {
     return 1;
   }
@@ -75,8 +66,6 @@ static u8 axis_kop_to_axis_type(u8 op) {
     case KOP_UPCAST:   return KAX_UPCAST;
     case KOP_UNROLL:   return KAX_UNROLL;
     case KOP_LOCAL:    return KAX_LOCAL;
-    case KOP_GROUP:    return KAX_GROUP_REDUCE;
-    case KOP_GROUPTOP: return KAX_GROUP_REDUCE;
     default:           return KAX_LOOP;
   }
 }
@@ -148,8 +137,7 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
       // No axis-structure mutation.
       continue;
     }
-    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
-        || op == KOP_GROUP  || op == KOP_GROUPTOP) {
+    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL) {
       if (o.axis >= n || n >= MAX_AXES) {
         return 0;
       }
@@ -287,8 +275,7 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
       // No shape mutation.
       continue;
     }
-    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
-        || op == KOP_GROUP  || op == KOP_GROUPTOP) {
+    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL) {
       if (o.axis >= n || n >= MAX_AXES || o.arg == 0) {
         return 0;
       }

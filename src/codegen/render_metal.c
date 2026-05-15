@@ -10,16 +10,6 @@ char *cg_emit_metal(KernelEntry const *ke) {
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
                                    TileConv2DInfo *out) {
-  {
-    u32 n_app = tile_anno_applied_opts_count(ke);
-    KOpt const *opts = tile_anno_applied_opts(ke);
-    for (u32 i = 0; i < n_app; i++) {
-      u8 op = opts[i].op;
-      if (op == KOP_GROUP || op == KOP_GROUPTOP) {
-        return 0;
-      }
-    }
-  }
   if (!tile_analyze_conv2d_flat(ke, out)) {
     return 0;
   }

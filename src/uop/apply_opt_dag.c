@@ -295,15 +295,12 @@ static u8 apply_opt_dag_inner_kax(u8 op) {
   if (op == KOP_UPCAST)   return (u8)KAX_UPCAST;
   if (op == KOP_UNROLL)   return (u8)KAX_UNROLL;
   if (op == KOP_LOCAL)    return (u8)KAX_LOCAL;
-  if (op == KOP_GROUP)    return (u8)KAX_GROUP_REDUCE;
-  if (op == KOP_GROUPTOP) return (u8)KAX_GROUP_REDUCE;
   return (u8)KAX_LOOP;
 }
 
 static u32 apply_opt_dag_inner_opt_kind(u8 op) {
   if (op == KOP_UPCAST)                              return UOP_OPT_UPCAST;
   if (op == KOP_UNROLL)                              return UOP_OPT_UNROLL;
-  if (op == KOP_GROUP || op == KOP_GROUPTOP)         return UOP_OPT_GROUP_REDUCE;
   return 0xFFu;  // KOP_LOCAL: no UOP_OPT wrap
 }
 
@@ -809,8 +806,6 @@ fn Term uop_dag_apply_kopt(Term root, KOpt opt) {
     case KOP_UPCAST:
     case KOP_UNROLL:
     case KOP_LOCAL:
-    case KOP_GROUP:
-    case KOP_GROUPTOP:
       return uop_dag_apply_split(root, opt.op, opt.axis, opt.arg);
     case KOP_FAST_MATH:
       return uop_dag_apply_fast_math(root);

@@ -76,8 +76,7 @@ static int apply_opt_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
 
 // True if this opt class splits an axis (vs SWAP / no-op opts).
 static int kop_splits_axis(u8 op) {
-  return op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
-      || op == KOP_GROUP  || op == KOP_GROUPTOP;
+  return op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL;
 }
 
 // Forward decl: defined in uop/apply_opt_dag.c, included after this file

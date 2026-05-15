@@ -523,8 +523,7 @@ static int kautotune_seq_can_append(KOptSeq const *seq, KOpt opt) {
   if (opt.op == KOP_TC) {
     return seq->n == 0;
   }
-  if ((opt.op == KOP_LOCAL || opt.op == KOP_GROUP)
-      && kautotune_seq_has_op(seq, opt.op)) {
+  if (opt.op == KOP_LOCAL && kautotune_seq_has_op(seq, opt.op)) {
     return 0;
   }
   return 1;

@@ -284,14 +284,11 @@ static u8 kop_inner_axis_type(u8 op) {
   if (op == KOP_UPCAST)   return (u8)KAX_UPCAST;
   if (op == KOP_UNROLL)   return (u8)KAX_UNROLL;
   if (op == KOP_LOCAL)    return (u8)KAX_LOCAL;
-  if (op == KOP_GROUP)    return (u8)KAX_GROUP_REDUCE;
-  if (op == KOP_GROUPTOP) return (u8)KAX_GROUP_REDUCE;
   return (u8)KAX_LOOP;
 }
 
 static int kop_is_split(u8 op) {
-  return op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
-      || op == KOP_GROUP  || op == KOP_GROUPTOP;
+  return op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL;
 }
 
 // Simulate the full applied_opts history on a desired[MAX_AXES] vector.
@@ -987,15 +984,13 @@ fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
     u32 k = o->arg;
     if (k == 0) continue;
     u8  inner_kax = kop_inner_axis_type(o->op);
-    // Inner OPT kind (mirrors kernel_lift.c:1595-1599):
+    // Inner OPT kind:
     //   KOP_UPCAST -> UOP_OPT_UPCAST
     //   KOP_UNROLL -> UOP_OPT_UNROLL
-    //   KOP_GROUP / KOP_GROUPTOP -> UOP_OPT_GROUP_REDUCE
     //   KOP_LOCAL -> no OPT wrap
     u32 opt_kind = 0xFFu;  // sentinel: no OPT wrap
-    if (o->op == KOP_UPCAST)                              opt_kind = UOP_OPT_UPCAST;
-    else if (o->op == KOP_UNROLL)                         opt_kind = UOP_OPT_UNROLL;
-    else if (o->op == KOP_GROUP || o->op == KOP_GROUPTOP) opt_kind = UOP_OPT_GROUP_REDUCE;
+    if (o->op == KOP_UPCAST)      opt_kind = UOP_OPT_UPCAST;
+    else if (o->op == KOP_UNROLL) opt_kind = UOP_OPT_UNROLL;
 
     Term cur_expr = ctx.origin_expr[a];
     Term outer_leaf;
