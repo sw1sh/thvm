@@ -240,7 +240,18 @@ EXPORT int py_metal_dispatch_timed(uint32_t pso_handle,
       return 0;
     }
     if (wall_ns_out) *wall_ns_out = t_done - t0;
-    if (gpu_ns_out)  *gpu_ns_out  = t_done - t_commit;
+    // True GPU execution time: the command buffer's GPUEndTime /
+    // GPUStartTime (seconds, set by the driver once the buffer has
+    // run).  This excludes encode + commit + queue + readback wall
+    // overhead, unlike `t_done - t_commit`.  Same source the Metal
+    // backend uses in metal_record_gpu_time (src/backend/metal/_.m).
+    if (gpu_ns_out) {
+      double g0 = cmd.GPUStartTime;
+      double g1 = cmd.GPUEndTime;
+      *gpu_ns_out = (g1 > g0 && g0 > 0.0)
+                    ? (uint64_t)((g1 - g0) * 1e9)
+                    : (t_done - t_commit);   // fallback if unavailable
+    }
     return 1;
   }
 }
