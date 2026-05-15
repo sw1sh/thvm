@@ -560,6 +560,20 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   u8  op  = term_ext(resolved);
   u64 loc = term_val(resolved);
 
+  // UOP_LOAD is a structural marker (mirrors tinygrad's Ops.LOAD): at
+  // the value layer it's an identity around its single src.  The legacy
+  // kernel_lift drops it when assembling store_root (LOAD steps land in
+  // ke->program[] but never wrap an INDEX_E/CONST/etc. inside the lifted
+  // value tree).  cpu_uop_walk's value dispatcher has no UOP_LOAD case,
+  // so a stray LOAD wrapping an INDEX_E reads as 0 and the kernel zeroes
+  // its output.  Strip it here so the rewritten subtree is structurally
+  // identical to the legacy lifter's output.
+  if (op == UOP_LOAD) {
+    Term inner = unified_rewrite_rec(st, heap_read(loc), depth + 1);
+    unified_rewrite_memo_insert(st, resolved, inner);
+    return inner;
+  }
+
   u8 ar = uop_arity(op);
   if (ar == 0) {
     unified_rewrite_memo_insert(st, resolved, resolved);
