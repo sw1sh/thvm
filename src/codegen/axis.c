@@ -347,47 +347,6 @@ fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
   return axes_compute_full_shape(ke, extents, MAX_AXES);
 }
 
-// Content hash of the kernel's axis-defining inputs.  Deterministic
-// u64 hash of (applied_opts, output_shape, source_uop) -- the same
-// triple that drives the resolvers above.  Cache equality semantics
-// stay (one u64 == one u64); the hash is bit-stable across runs
-// given the same input state, so cross-process / cross-session
-// caches stay coherent.
-//
-// FNV-1a over: applied_opts[0..n_applied] bytes, output_shape.dims +
-// ndim, source_uop (tag + ext).  Always non-zero so the empty-state
-// sentinel `tile_axes_hash = 0` (uninitialised tile_uops) stays
-// disambiguated from a real hash.
-fn u64 tile_axes_hash(struct KernelEntry const *ke) {
-  if (ke == NULL || ke->schedule == NULL) {
-    return 0;
-  }
-  u64 h = 0xcbf29ce484222325ULL ^ 0x415845535F484148ULL;  // "AXES_HAH"
-  u32 n_applied = (u32)ke->schedule->n_applied;
-  h ^= (u64)n_applied;
-  h *= 0x100000001b3ULL;
-  KOpt const *opts = ke->schedule->applied_opts;
-  u8 const *opts_bytes = (u8 const *)opts;
-  size_t opts_n = (size_t)n_applied * sizeof(KOpt);
-  for (size_t i = 0; i < opts_n; i++) {
-    h ^= (u64)opts_bytes[i]; h *= 0x100000001b3ULL;
-  }
-  h ^= (u64)ke->output_shape.ndim;
-  h *= 0x100000001b3ULL;
-  u8 const *dim_bytes = (u8 const *)ke->output_shape.dims;
-  size_t dim_n = (size_t)ke->output_shape.ndim * sizeof(u32);
-  for (size_t i = 0; i < dim_n; i++) {
-    h ^= (u64)dim_bytes[i]; h *= 0x100000001b3ULL;
-  }
-  h ^= (u64)term_tag(ke->source_uop);
-  h *= 0x100000001b3ULL;
-  h ^= (u64)term_ext(ke->source_uop);
-  h *= 0x100000001b3ULL;
-  // Bias bit 63 so the hash is never zero (zero is the
-  // empty-tile-uops sentinel in tile_anno_tile_uops_fresh).
-  return h | (1ULL << 63);
-}
-
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   // Signal-driven resolvers cover the trailing REDUCE-axis case
   // directly via axes_scalar_reduce_extent inside

@@ -136,7 +136,6 @@ fn void tile_free(KernelEntry *ke) {
   ke->n_tile_uops   = 0;
   ke->tile_uops_cap = 0;
   ke->tile_root     = 0;
-  ke->tile_axes_hash    = 0;
 }
 
 // Phase F prep: tile-IR pretty-printer.  `tile_dump(ke, fp)` walks

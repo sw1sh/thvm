@@ -167,8 +167,5 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   }
 
   sched->applied_opts[sched->n_applied++] = opt;
-  // No version bump: freshness is tile_axes_hash(ke) over
-  // (applied_opts, output_shape, source_uop) and recording the new
-  // opt already mutates that hash deterministically.
   return 1;
 }

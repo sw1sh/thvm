@@ -602,10 +602,6 @@ typedef struct {
                                // across axes_reset_to_default so a
                                // proposer-explored variant doesn't
                                // re-trigger autotune mid-bench.
-                               // (Freshness flows through
-                               // tile_axes_hash(ke) over
-                               // (applied_opts, output_shape,
-                               // source_uop); no version counter.)
 } KpSchedule;
 
 struct Backend {
@@ -1303,11 +1299,6 @@ typedef struct KernelEntry {
   u32        n_tile_uops;
   u32        tile_uops_cap;
   u32        tile_root;       // root TileUop id, usually TILE_LOOP_NEST; 0 = none
-  u64        tile_axes_hash;    // Content hash of (applied_opts,
-                                 // output_shape, source_uop) captured
-                                 // when tile_uops was built.  Compared
-                                 // against tile_axes_hash(ke) on each
-                                 // tile_sync to detect stale plans.
 
   // kvar wedge: per-dispatch runtime values for any symbolic-shape
   // Variables bound to RANGE leaves in this kernel.  Sparse: each
@@ -2223,12 +2214,6 @@ fn u32  axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
 // plus the count of split-class applied_opts).
 fn u32  axes_resolve_n_axes(struct KernelEntry const *ke);
 
-// Content hash of (applied_opts, output_shape, source_uop) -- the
-// inputs that fully determine the resolver output.  Snapshots taken
-// into `ke->tile_axes_hash` and compared across tile_sync_from_scalar
-// to detect stale tile_uops.
-fn u64  tile_axes_hash(struct KernelEntry const *ke);
-
 // Apply one TOpt to a KernelEntry's axis structure.  Split-class opts
 // (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) split the indicated axis,
 // growing n_axes by one; KOP_GLOBAL marks a LOOP axis as GLOBAL via
@@ -2310,9 +2295,6 @@ fn int tile_compute_dispatch_shape(struct KernelEntry const *ke,
 // (instead of KpSchedule side channel).  As consumers migrate, these
 // become the single read path; KpSchedule deletes once the migration
 // completes.
-fn u32  tile_anno_axis_count(struct KernelEntry const *ke);
-fn int  tile_anno_axis_at(struct KernelEntry const *ke, u32 d,
-                          TileAxisInfo *out);
 // Migration helpers that fall back to KpSchedule when tile_uops
 // isn't populated.  Used by migrations of code that runs
 // before tile_sync_from_scalar (autotune, propose).
