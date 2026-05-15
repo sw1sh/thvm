@@ -566,6 +566,7 @@ typedef struct {
 static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
                                     UnifiedSubst const *sub,
                                     Term t, u32 depth);
+static u64 uop_buffer_numel(Term t);
 
 static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   return unified_rewrite_rec_sub(st, NULL, t, depth);
@@ -1017,6 +1018,17 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     if (sub != NULL && addr_term != term_resolve(heap_read(term_val(resolved) + 1))) {
       Term buf_rw = unified_rewrite_rec_sub(st, sub, heap_read(term_val(resolved) + 0),
                                             depth + 1);
+      // numel-1 BUFFER: reading at any addr other than 0 is OOB.  The
+      // legacy lifter encodes broadcast-from-scalar via stride=0 in
+      // input_views and folds the addr to CONST(0); the unified pass
+      // builds addr from raw consumer ranges and leaks the multi-axis
+      // expression through.  Substitute CONST(0) here so the rewritten
+      // INDEX_E reads in-bounds regardless of the addr the substitution
+      // produced.
+      if (term_tag(buf_rw) == TAG_UOP && term_ext(buf_rw) == UOP_BUFFER
+          && uop_buffer_numel(buf_rw) == 1) {
+        addr_term = uop_const(DT_INT32, 0);
+      }
       return uop_index_e(buf_rw, addr_term);
     }
   }
@@ -1058,6 +1070,19 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     Term new_child = unified_rewrite_rec_sub(st, sub, old_child, depth + 1);
     srcs[i] = new_child;
     if (new_child != old_child) changed = 1;
+  }
+  // INDEX_E(numel-1 UOP_BUFFER, addr): the only legal addr is 0.  Legacy
+  // kernel_lift encodes stride-0 broadcasts on a 1-element backing store
+  // by consulting ke->input_views[slot].strides; the unified pass
+  // builds addrs from the consumer's iter ranges and leaks a multi-axis
+  // RANGE/IADD expression through when the consumer iter footprint
+  // exceeds the producer's realized numel.  Folding to CONST(0) here
+  // keeps the read in-bounds.
+  if (op == UOP_INDEX_E
+      && term_tag(srcs[0]) == TAG_UOP && term_ext(srcs[0]) == UOP_BUFFER
+      && uop_buffer_numel(srcs[0]) == 1) {
+    Term czero = uop_const(DT_INT32, 0);
+    if (srcs[1] != czero) { srcs[1] = czero; changed = 1; }
   }
   Term out = changed ? uop_graph_rebuild_with_srcs(resolved, srcs) : resolved;
   if (sub == NULL) unified_rewrite_memo_insert(st, resolved, out);
