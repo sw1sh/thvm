@@ -7,77 +7,106 @@ to call a winner.
 
 ## The score harness contract
 
-All score harnesses emit five lines on stdout:
+The current harnesses emit **eight lines** on stdout:
 
 ```
 status=ok|compile_err|correctness_err|runtime_err
 correctness=max_abs:X max_rel:Y
-candidate=p50:Xus p10:Yus
-mlx_baseline=p50:Xus p10:Yus
-speedup_vs_mlx=Kx
+candidate_gpu=p50:Xus p10:Yus
+candidate_wall=p50:Xus p10:Yus
+mlx_amortized=p50:Xus p10:Yus
+mlx_wall=p50:Xus p10:Yus
+speedup_gpu=Kx
+speedup_wall=Kx
 ```
 
 Exit code: 0 if `status=ok`, 1 otherwise.  Parse these lines, log
 them in `RESULTS.md`, iterate.
 
-The two reference harnesses:
+**`speedup_gpu` is the headline number.**  It compares GPU time to
+GPU time (see below).  `speedup_wall` is the legacy wall-vs-wall
+metric, kept as a diagnostic: when `speedup_gpu` and `speedup_wall`
+disagree by a lot, the kernel is dispatch-bound -- trust
+`speedup_gpu`.
 
-- `bench/metal-problems/runner/score_one.py` -- agent kernel as
-  Python module (`SOURCE` + `dispatch()`); MLX baseline is `a @ b`,
-  `mx.softmax(x)`, etc. depending on the op
-- `py/examples/agent_softmax_msl/score.sh` -- agent kernel as
-  `kernel.metal` + `dispatch.json`; MLX baseline is `mx.softmax`
+The shared timing module is
+`py/examples/metaltime.py`.  Per-op score harnesses
+(e.g. `py/examples/agent_matmul/score.py`) import it; they differ
+only in the reference computation, buffer layout, and MLX baseline.
 
-Both run **30 reps after 3 warmup**; report **p10 and p50** wall-time.
+The harness runs **200 candidate reps** and **60 amortized MLX
+batches** after warmup.
 
-## `Metal.dispatch_timed`
+## Why GPU timing -- the wall-time noise floor
+
+Wall time = `time.perf_counter_ns()` around dispatch +
+`waitUntilCompleted`.  It includes Python dispatch, encoder, queue,
+and readback latency.  For sub-millisecond kernels that fixed
+overhead is ~100-200us and swamps the actual kernel time -- a
+~2x noise floor.  The 1.05x success threshold sits *below* that
+noise.  Every agent in the May 2026 swarm hit this.
+
+The fix, both halves in `metaltime.py`:
+
+### Candidate: `gpu_ns` from `dispatch_timed`
 
 ```python
 wall_ns, gpu_ns = m.dispatch_timed(pso, bufs, grid=..., threadgroup=...)
 ```
 
-Returns two timings:
+`gpu_ns` is the Metal command-buffer `GPUEndTime - GPUStartTime` --
+the kernel's true GPU execution time, no Python, no encoder.
+`bench_candidate` collects it over 200 reps.
 
-- `wall_ns`: `time.perf_counter_ns()` around the dispatch +
-  `[cmdBuffer waitUntilCompleted]`.  Includes encoder + queue +
-  GPU + readback latency.  **This is what the score harnesses use.**
-- `gpu_ns`: derived from `MTLCommandBuffer.GPUStartTime` / `.GPUEndTime`.
-  Pure GPU execution time, no encoder/queue overhead.  More precise
-  for small kernels.
+### MLX: amortized eval
 
-For sub-100us kernels, **`wall_ns` is dominated by encoder cost**
-and the variance is high.  `gpu_ns` is the better signal but the
-score harnesses don't (yet) use it -- if you're chasing a sub-5%
-improvement, you'll need the GPU timing path.
+MLX exposes no per-op GPU timer.  `bench_mlx_amortized` recovers a
+GPU-time-equivalent: build B (=32) distinct ops, then ONE `mx.eval`.
+MLX pipelines all B kernels on the GPU back-to-back, so `wall/B`
+converges to the GPU-bound per-op cost as B grows.  Distinct input
+buffers defeat MLX's common-subexpression dedup.
+
+`speedup_gpu = mlx_amortized_p50 / candidate_gpu_p50` -- GPU-time vs
+GPU-time, the honest comparison.
 
 ## How many samples?
 
-The harness uses 30 samples + p50.  This is the minimum for
-sub-millisecond kernels.  For a tight comparison (1.05x threshold):
+The harness uses 200 candidate reps + 60 amortized MLX batches.
+With `gpu_ns` the per-sample noise is far lower than wall time, so
+200 is plenty even for sub-100us kernels.  Still: run the whole
+score 3 times and take the median speedup -- run-to-run system
+state (thermal, other GPU clients) shifts the absolute numbers even
+when the kernel is fixed.
 
-| Kernel runtime | Samples needed for 1.05x detection |
-|---|---|
-| > 10 ms | 5-10 |
-| 1-10 ms | 20-50 |
-| 100us-1ms | 50-200 |
-| < 100us | 200+ (or use `gpu_ns`) |
-
-If 30 samples give you `1.0x +/- 0.2x`, run more.  If 100 samples
-still give `1.05x +/- 0.1x`, the difference is below your noise
-floor -- declare it a tie or change the kernel materially.
+If 3 runs give you `speedup_gpu = 1.0x +/- 0.05x`, the difference is
+below the floor -- declare a tie or change the kernel materially.
 
 ## p10 vs p50
 
-- **p50** (median): reflects "typical" performance.  The score
-  harness compares this.
+- **p50** (median): reflects "typical" performance.  `speedup_gpu`
+  is computed from p50.
 - **p10** (10th percentile, fastest 10%): reflects "best achievable".
   Useful for sanity-checking that you can hit a number even if you
   can't hit it consistently.
 
-If your `cand p10` beats MLX p50 but your `cand p50` doesn't, the
-kernel is fast in principle but inconsistent -- usually a TG
-occupancy issue, register spilling under contention, or grid shape
-mismatched to GPU core count.
+If your `candidate_gpu p10` beats MLX but `p50` doesn't, the kernel
+is fast in principle but inconsistent -- usually a TG occupancy
+issue, register spilling under contention, or grid shape mismatched
+to GPU core count.
+
+## Reading candidate_gpu vs candidate_wall
+
+`candidate_wall - candidate_gpu` is your dispatch + sync overhead.
+If they're within a few us, the kernel dominates and either number
+is fine.  If `candidate_wall` is 2x `candidate_gpu`, the kernel is
+fast but you're paying a lot to launch it -- the fix is fewer,
+fatter dispatches (one big kernel, not many small ones), which
+`speedup_gpu` already credits you for.
+
+`mlx_wall - mlx_amortized` shows the same for MLX -- and it's
+usually large (MLX pays Python + graph overhead per op).  That gap
+is *not* something your kernel beats; `speedup_gpu` correctly
+ignores it by comparing GPU time to GPU time.
 
 ## Correctness
 
@@ -85,10 +114,10 @@ mismatched to GPU core count.
 correctness=max_abs:X max_rel:Y
 ```
 
-Default thresholds in `score_one.py`:
-- `max_abs ≤ 1e-3` OR `max_rel ≤ 1e-3` -> pass
-
-Tighter for softmax (`score.py`): `max_abs ≤ 1e-4` OR `max_rel ≤ 1e-3`.
+Default thresholds in the per-op `score.py` harnesses:
+- matmul / vector_add: `max_abs ≤ 1e-2` (matmul) / `1e-4`
+  (vector_add) OR `max_rel ≤ 1e-3` -> pass
+- softmax: `max_abs ≤ 1e-4` OR `max_rel ≤ 1e-3`
 
 Reference is computed in NumPy (FP32 matmul / softmax / layernorm).
 For workloads where bit-exact match isn't possible (e.g. if you reorder
@@ -141,11 +170,11 @@ is below the wall-time noise floor without GPU timing.
 
 The `bench/metal-problems/runner/sweep.py` driver runs all four
 (your kernel, MLX eager, MLX compile, PyTorch MPS, optionally
-tinygrad with BEAM) and prints the comparison.  Useful for
-"speedup_vs_mlx" framing.
+tinygrad with BEAM) and prints the comparison -- broader baseline
+context than the single MLX number `score.sh` gives.
 
-For one-off scoring, use `score_one.py` (Python kernel module) or
-`score.sh` (raw MSL).  Both already run MLX baseline as part of the
+For the iteration loop, `./score.sh` in your `py/examples/agent_<op>/`
+workspace is what you run -- it builds the MLX baseline into every
 score.
 
 ## What to write in `RESULTS.md`
@@ -177,13 +206,13 @@ Per-iteration log + final report.  Template:
 ## Final 3-run variance
 
 Shape A:
-| run | cand p50 | mlx p50 | speedup |
+| run | candidate_gpu p50 | mlx_amortized p50 | speedup_gpu |
 |---|---|---|---|
 | 1 | 240us | 257us | 1.07x |
-| 2 | 265us | 240us | 0.91x |
-| 3 | 207us | 257us | 1.24x |
+| 2 | 245us | 252us | 1.03x |
+| 3 | 238us | 261us | 1.10x |
 
-(median speedup: 1.07x, range: 0.91-1.24x)
+(median speedup_gpu: 1.07x, range: 1.03-1.10x)
 
 ## What surprised me about MLX
 ...

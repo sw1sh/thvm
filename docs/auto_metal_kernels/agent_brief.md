@@ -6,19 +6,25 @@ Pick or accept a workload from `bench/metal-problems/`.  Write a
 Metal Shading Language kernel that beats `mlx`'s implementation of
 the same op on Apple M-series GPU.
 
-You measure success with the score harness:
+You measure success with the score harness (8 lines; see
+[profiling.md](profiling.md) for the full contract):
 
 ```
-candidate=p50:Xus p10:Yus
-mlx_baseline=p50:Xus p10:Yus
-speedup_vs_mlx=Kx
+candidate_gpu=p50:Xus p10:Yus      <- your kernel's true GPU time
+mlx_amortized=p50:Xus p10:Yus      <- MLX's GPU-bound per-op time
+speedup_gpu=Kx                     <- THE HEADLINE NUMBER
+speedup_wall=Kx                    <- legacy wall metric, diagnostic
 ```
 
 **Stop conditions:**
-- `speedup_vs_mlx ≥ 1.05x` median across 3 fresh score runs at
+- `speedup_gpu ≥ 1.05x` median across 3 fresh score runs at
   every shape your problem requires, OR
 - 12 iterations completed, OR
 - Time cap reached.
+
+`speedup_gpu` compares GPU time to GPU time, so it is not fooled by
+dispatch overhead.  If `speedup_gpu` and `speedup_wall` disagree
+sharply, the kernel is dispatch-bound -- trust `speedup_gpu`.
 
 If you stop on iterations or time without hitting 1.05x, that's
 still a useful run -- log every iteration in `RESULTS.md` so the next
@@ -45,21 +51,29 @@ Read these in order, only what's relevant to your op:
 
 ## Pick your track
 
-### Track A: Raw MSL (recommended for first iteration)
+### Track A: Raw MSL (recommended)
 
-You write `kernel.metal` + `dispatch.json`, score with `./score.sh`.
-Full control over MSL.  Maximum freedom; minimum scaffolding.
+You edit `kernel.metal` + `dispatch.json`, score with `./score.sh`.
+Full control over MSL.
 
-Workspace template: `py/examples/agent_softmax_msl/` -- copy the
-whole directory, edit kernel.metal, edit dispatch.json, run
-`./score.sh R C`.
+For the corpus problems (matmul, softmax, vector_sum, vector_add,
+layernorm) the workspace is **pre-built** at `py/examples/agent_<op>/`
+-- a naive `kernel.metal` baseline, a starting `dispatch.json`, a
+working `score.py`/`score.sh`, and a per-op `STARTER.md`.  You only
+edit `kernel.metal` and `dispatch.json`.
 
 Iteration loop:
 1. Edit `kernel.metal` (one change, see [pitfalls.md](pitfalls.md)
    "one change per iteration").
-2. Run `./score.sh <shape>`.
+2. Run `./score.sh <shape args>`.
 3. Append a row to the iteration log in `RESULTS.md`.
 4. Repeat.
+
+`dispatch.json` supports shape-adaptive dispatch: instead of fixed
+`grid`/`threadgroup`, give `rule` (-> threadgroup total threads) and
+`grid_rule` (-> grid total threads) as Python exprs.  Names in
+scope: the shape vars (`M N K` or `R C` or `N`), `ceildiv max min
+simd tg`.  Lets one kernel serve every shape.
 
 ### Track B: Autotune via thvm KOpts
 
@@ -85,31 +99,29 @@ shape-table dispatch (MLX's pattern -- see
 ## Workspace setup
 
 You were spawned with an isolated git worktree.  `cd` to the
-worktree path you were given.  Create your run directory:
+worktree path you were given.
+
+For a corpus problem, the workspace already exists:
+`py/examples/agent_<op>/` with `kernel.metal` (naive baseline),
+`dispatch.json`, `score.py`, `score.sh`, `STARTER.md`.  Read its
+`STARTER.md`, then edit `kernel.metal` + `dispatch.json` in place.
+
+If you need a fresh run dir (e.g. a second variant), copy the
+existing one:
 
 ```
-mkdir -p py/examples/agent_<op>_<your-id>/
-cp py/examples/agent_softmax_msl/{score.sh,score.py,STARTER.md} \
-   py/examples/agent_<op>_<your-id>/
-# now edit your run dir's kernel.metal + dispatch.json
-```
-
-Or for the autotune track:
-
-```
-mkdir -p py/examples/agent_<op>_<your-id>/
-cp py/examples/matmul_beam_loop.py py/examples/agent_<op>_<your-id>/loop.py
-# adapt loop.py for your op
+cp -r py/examples/agent_<op> py/examples/agent_<op>_v2
 ```
 
 ## What to write at the end
 
 `RESULTS.md` in your workspace dir.  Required sections:
 
-- **Iteration log** (table: iter | change | speedup at each shape)
-- **Final kernel** (or "see kernel.metal" / "see loop.py")
-- **Final dispatch** (json or grid/threadgroup tuple)
-- **3-run variance** (table: run | cand p50 | mlx p50 | speedup)
+- **Iteration log** (table: iter | change | speedup_gpu at each shape)
+- **Final kernel** (or "see kernel.metal")
+- **Final dispatch** (the `dispatch.json`)
+- **3-run variance** (table: run | candidate_gpu p50 | mlx_amortized
+  p50 | speedup_gpu)
 - **One thing surprising about MLX** (the line of MLX source you
   didn't expect)
 - **2-3 micro-optimizations to try with more budget**

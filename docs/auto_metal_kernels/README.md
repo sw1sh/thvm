@@ -24,28 +24,31 @@ reference material that brief points to.
    directory, and your success criteria.
 2. Read **mlx_reference.md** for the exact MLX kernel you're trying to
    beat (line refs into `external/mlx/...`).
-3. Edit `kernel.metal` (raw MSL track) or write a Python kernel.py
-   (UOp-DAG track) in your workspace.
-4. Run `./score.sh` (or `python3 score_one.py kernel.py`) -- 5-line
-   machine-parseable output.  Iterate.
+3. Edit `kernel.metal` + `dispatch.json` in your workspace.
+4. Run `./score.sh` -- 8-line machine-parseable output.  Iterate.
 5. Stop on first of: success threshold met, iteration cap, time cap.
    Write `RESULTS.md` in your workspace.
 
 ## How this is organized
 
-- **The agent's workspace** is `bench/metal-problems/<problem>/runs/<run-id>/`
-  or `py/examples/agent_<problem>_<variant>/`.  All edits go there.
+- **The agent's workspace** is `py/examples/agent_<problem>/` (or
+  `_<variant>`).  All edits go there -- `kernel.metal` + `dispatch.json`.
 - **Reference docs** (this directory) are read-only background; don't
   rewrite them, link to them.
-- **The score harnesses** live in `bench/metal-problems/runner/` and
-  `py/examples/agent_softmax_msl/score.sh`.  They emit five lines:
+- **The timing module** is `py/examples/metaltime.py`;
+  per-op `score.py` harnesses import it.  The score emits eight lines:
   ```
   status=ok|compile_err|correctness_err|runtime_err
   correctness=max_abs:X max_rel:Y
-  candidate=p50:Xus p10:Yus
-  mlx_baseline=p50:Xus p10:Yus
-  speedup_vs_mlx=Kx
+  candidate_gpu=p50:Xus p10:Yus
+  candidate_wall=p50:Xus p10:Yus
+  mlx_amortized=p50:Xus p10:Yus
+  mlx_wall=p50:Xus p10:Yus
+  speedup_gpu=Kx
+  speedup_wall=Kx
   ```
+  `speedup_gpu` (GPU-time vs GPU-time) is the headline; see
+  [profiling.md](profiling.md).
 
 ## What this repo already knows about
 

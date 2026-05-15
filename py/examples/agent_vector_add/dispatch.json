@@ -1,0 +1,5 @@
+{
+  "_comment": "rule -> threadgroup total threads; grid_rule -> grid total threads. Names in scope: N ceildiv max min simd tg. Naive baseline: one thread per element, 256-thread TGs.",
+  "rule": "256",
+  "grid_rule": "ceildiv(N, 256) * 256"
+}
