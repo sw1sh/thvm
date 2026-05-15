@@ -627,6 +627,107 @@ static int uop_subtree_has_residual_bufferize(Term root) {
   return bufferize_scan_rec(&v, root, 0);
 }
 
+// Safety gate for THVM_LIFT_FROM_UNIFIED=1: collect every UOP_RANGE
+// axis_id that appears in a STORE's addr or as the axis of a UOP_REDUCE
+// found anywhere in the value subtree.  Then verify every UOP_RANGE
+// leaf in the value subtree has an axis_id in that set.  A "stranded
+// range" -- one whose axis_id isn't iterated by the cpu_uop_walk loop
+// scaffolding -- silently reads only iter=0 and the kernel produces
+// wrong results.  Mirror: cpu_uop_walk only sets up loop slots for
+// ranges that appear in the STORE's addr (via uwalk_split_ranges) plus
+// the REDUCE axis (pushed in uwalk_run_reduce).  Anything else has no
+// home and reads as 0.
+#define RANGE_AXIS_CAP 256
+typedef struct {
+  u32   axes[RANGE_AXIS_CAP];
+  u32   n;
+} RangeAxisSet;
+
+static int range_axis_has(RangeAxisSet const *s, u32 aid) {
+  for (u32 i = 0; i < s->n; i++) if (s->axes[i] == aid) return 1;
+  return 0;
+}
+
+static void range_axis_add(RangeAxisSet *s, u32 aid) {
+  if (range_axis_has(s, aid)) return;
+  if (s->n < RANGE_AXIS_CAP) s->axes[s->n++] = aid;
+}
+
+static void stranded_range_collect_addr(RangeAxisSet *iter_axes,
+                                        BufferizeScanVisited *v, Term t,
+                                        u32 depth) {
+  if (depth > 256) return;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return;
+  if (bufferize_scan_seen(v, r)) return;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(loc + 0));
+    range_axis_add(iter_axes, aid);
+    return;
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFER) return;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    stranded_range_collect_addr(iter_axes, v, heap_read(loc + i), depth + 1);
+  }
+}
+
+static int stranded_range_check_value(RangeAxisSet const *iter_axes,
+                                      BufferizeScanVisited *v, Term t,
+                                      u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  if (bufferize_scan_seen(v, r)) return 0;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(loc + 0));
+    return range_axis_has(iter_axes, aid) ? 0 : 1;
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFER) return 0;
+  if (op == UOP_REDUCE) {
+    // Enter the reduce's axis into the iterated set for the body walk.
+    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    RangeAxisSet inner = *iter_axes;
+    range_axis_add(&inner, r_aid);
+    BufferizeScanVisited iv;
+    iv.n = 0;
+    return stranded_range_check_value(&inner, &iv, heap_read(loc + 0),
+                                      depth + 1);
+  }
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (stranded_range_check_value(iter_axes, v, heap_read(loc + i),
+                                   depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// Returns 1 when `store_root` has a UOP_RANGE leaf in its value
+// subtree whose axis_id is neither in the STORE's addr nor inside the
+// scope of an enclosing UOP_REDUCE.  cpu_uop_walk's loop scaffolding
+// has no slot for such a "stranded" range, so it reads iter=0 forever
+// and the kernel writes only the slice-0 result.
+static int uop_subtree_has_stranded_range(Term store_root) {
+  if (store_root == 0) return 0;
+  if (term_tag(store_root) != TAG_UOP) return 0;
+  if (term_ext(store_root) != UOP_STORE) return 0;
+  u64 sloc = term_val(store_root);
+  Term s_addr  = heap_read(sloc + 1);
+  Term s_value = heap_read(sloc + 2);
+  RangeAxisSet iter_axes;
+  iter_axes.n = 0;
+  BufferizeScanVisited v;
+  v.n = 0;
+  stranded_range_collect_addr(&iter_axes, &v, s_addr, 0);
+  BufferizeScanVisited vv;
+  vv.n = 0;
+  return stranded_range_check_value(&iter_axes, &vv, s_value, 0);
+}
+
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
@@ -2780,16 +2881,36 @@ static Term emit_kernel_for_boundary(u32 bi) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
         Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
-        // Per-kernel safety gate: the cpu_uop_walk INDEX_E handler
-        // resolves the buffer src via uwalk_resolve_buf, which only
-        // accepts UOP_BUFFER leaves.  A residual UOP_BUFFERIZE inside
-        // the value tree (an in-kernel intermediate the rangeify_unified
-        // pass didn't realize) crashes the walker into the 0.0 default
-        // and the kernel produces all-zero output.  When the rewriter
-        // can't lower every BUFFERIZE to a UOP_BUFFER input slot, leave
-        // store_root as the legacy lifter's output for this kernel; the
-        // rest of the schedule still gets the bypass.
-        if (!uop_subtree_has_residual_bufferize(ru_rewritten)) {
+        // Per-kernel safety gates for the unified-bypass:
+        //
+        //   has_resid:   the cpu_uop_walk INDEX_E handler only resolves
+        //                UOP_BUFFER leaves; a residual UOP_BUFFERIZE in
+        //                the value tree (an in-kernel intermediate the
+        //                rangeify_unified pass didn't realize) reads as
+        //                0.0 default and the kernel zeroes its output.
+        //
+        //   has_stranded: the value subtree references a UOP_RANGE
+        //                whose axis_id is neither in the STORE addr nor
+        //                in scope of an enclosing UOP_REDUCE.  The
+        //                walker sets up loop slots only for addr ranges
+        //                + REDUCE axes, so any other RANGE leaf reads
+        //                iter=0 forever -- producing only the slice-0
+        //                result.  This happens when ru_rewrite_subtree
+        //                splices a non-realized producer's RU_SUBST
+        //                verbatim into a consumer whose iter space has
+        //                different RANGE.axis_ids (the producer's
+        //                ru_build_input_addr_for ranges leak through
+        //                into the consumer's value tree).  Conv2d
+        //                grad-w hits this in the dY*X matmul-back
+        //                kernel where one INDEX_E feeds from a non-
+        //                realized PERMUTE/RESHAPE chain.
+        //
+        // When either gate trips, leave store_root as the legacy
+        // lifter's output for this kernel; the rest of the schedule
+        // still gets the bypass.
+        int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
+        int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
+        if (!has_resid && !has_stranded) {
           ke->cached_lift.store_root = ru_rewritten;
           ke->compute_root           = ru_rewritten;
         }
