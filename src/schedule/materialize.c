@@ -709,6 +709,110 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
           return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
         }
       }
+      // n_ranges==1 broadcast inline: addr is a compound IADD/IMUL
+      // tree (the consumer's full row-major addr) but the BUFFERIZE
+      // only closed over one axis (the value is replicated along the
+      // dropped axes -- a per-row REDUCE-to-scalar fed to a row*col
+      // consumer, e.g. softmax denom or layer-norm mean).  Decompose
+      // addr into (stride, expr) leaves and look for a UNIQUE bare
+      // UOP_RANGE leaf whose extent matches closed_range[0]'s extent
+      // AND whose axis_type is 0 (regular iter, not REDUCE).  Bail
+      // when the matched got_expr would be a type=1 reduce-axis or
+      // when any got_expr is a non-RANGE swizzler whose extent we
+      // can't read from a leaf: the pool/reshape-MAX gradient hits
+      // an IDIV(R0,2) variant where the only bare RANGE with matching
+      // extent is the type=1 reduce axis and pairing it routes the
+      // CMPEQ mask through the wrong axis (all-ones instead of one-
+      // hot).
+      if (v != 0 && n_ranges == 1
+          && (term_tag(addr_term) != TAG_UOP
+              || term_ext(addr_term) != UOP_RANGE)) {
+        Term old_r = uop_bufferize_range_at(inner_buf, 0);
+        if (old_r != 0
+            && term_tag(old_r) == TAG_UOP
+            && term_ext(old_r) == UOP_RANGE) {
+          u32 want_ext = (u32)term_val(heap_read(term_val(old_r) + 2));
+          Term decomp_stack[UNIFIED_SUBST_CAP * 2];
+          Term decomp_exprs[UNIFIED_SUBST_CAP];
+          u32  dtop = 0;
+          u32  dn   = 0;
+          decomp_stack[dtop++] = addr_term;
+          int decomp_ok = 1;
+          int has_unknown_extent = 0;
+          while (dtop > 0 && decomp_ok) {
+            Term cur = term_resolve(decomp_stack[--dtop]);
+            u8   cop = (term_tag(cur) == TAG_UOP) ? term_ext(cur) : 0xFF;
+            if (cop == UOP_IADD && dtop + 2 <= UNIFIED_SUBST_CAP * 2) {
+              decomp_stack[dtop++] = heap_read(term_val(cur) + 0);
+              decomp_stack[dtop++] = heap_read(term_val(cur) + 1);
+              continue;
+            }
+            if (cop == UOP_CONST
+                && term_val(heap_read(term_val(cur) + 0)) == 0) {
+              continue;
+            }
+            Term e = cur;
+            if (cop == UOP_IMUL) {
+              Term a = term_resolve(heap_read(term_val(cur) + 0));
+              Term b = term_resolve(heap_read(term_val(cur) + 1));
+              if (term_tag(b) == TAG_UOP && term_ext(b) == UOP_CONST) {
+                e = a;
+              } else if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST) {
+                e = b;
+              }
+            }
+            if (term_tag(e) != TAG_UOP || term_ext(e) != UOP_RANGE) {
+              // A swizzler (IDIV/IMOD/...) appeared.  Mark its extent
+              // as unknown so it can't masquerade-match by collision
+              // with closed_range's extent.  Track via a sentinel slot
+              // that fails the extent compare.
+              has_unknown_extent = 1;
+              continue;
+            }
+            if (dn >= UNIFIED_SUBST_CAP) {
+              decomp_ok = 0;
+              break;
+            }
+            decomp_exprs[dn++] = e;
+          }
+          if (decomp_ok && !has_unknown_extent && dn >= 2) {
+            int found = -1;
+            for (u32 j = 0; j < dn; j++) {
+              Term e = decomp_exprs[j];
+              u32 e_ext = (u32)term_val(heap_read(term_val(e) + 2));
+              if (e_ext != want_ext) continue;
+              u32 atype = (u32)term_val(heap_read(term_val(e) + 1));
+              if (atype != 0) {
+                // A reduce-axis collision: closed_range can't bind to
+                // a type=1 RANGE (the value tree was lifted out of a
+                // pre-REDUCE scope).  Bail on the whole match to keep
+                // pool-style gradients on the legacy lifter.
+                found = -1;
+                break;
+              }
+              if (found >= 0) { found = -1; break; }
+              found = (i32)j;
+            }
+            if (found >= 0) {
+              UnifiedSubst new_sub;
+              new_sub.n = 0;
+              if (sub != NULL) {
+                for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+                  new_sub.from[new_sub.n] = sub->from[i];
+                  new_sub.to  [new_sub.n] = sub->to  [i];
+                  new_sub.n++;
+                }
+              }
+              if (new_sub.n < UNIFIED_SUBST_CAP) {
+                new_sub.from[new_sub.n] = old_r;
+                new_sub.to  [new_sub.n] = decomp_exprs[found];
+                new_sub.n++;
+              }
+              return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+            }
+          }
+        }
+      }
       // Multi-axis BUFFERIZE: addr is IADD/IMUL tree encoding row-major
       // (per-axis stride * iter) sum.  Mirror ru_build_addr_with_dims
       // (rangeify_unified.c) to derive per-closed_range strides from
@@ -718,6 +822,18 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       // The producer is row-major over its closed_ranges, so axis i
       // pairs with the i-th decreasing stride.  Used for n_r=2 softmax-
       // CE intermediates and n_r=4 conv2d-grad-input rerolls.
+      //
+      // When got_n > n_ranges (the consumer's iter has more axes than
+      // the producer realized, because the producer dropped reduce /
+      // broadcast axes), the stride-match falls back to extent-match
+      // on bare-RANGE got_exprs: each closed_range[i] = RANGE.extent
+      // E_i pairs to the unique got_exprs[j] that is a bare UOP_RANGE
+      // leaf with the same extent.  The remaining got_exprs are
+      // broadcast axes the producer's value doesn't reference, so
+      // dropping them is sound.  Used for partial-realize chains where
+      // the unified pass wraps INDEX_E(BUFFERIZE, addr) with the
+      // consumer's full iter addr but the BUFFERIZE only closes over
+      // a subset of axes (softmax denom replicated across cols).
       if (v != 0 && n_ranges >= 2 && n_ranges <= UNIFIED_SUBST_CAP) {
         u32 dims[UNIFIED_SUBST_CAP] = {0};
         Term old_ranges[UNIFIED_SUBST_CAP] = {0};
@@ -788,12 +904,15 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
             got_exprs  [got_n] = e;
             got_n++;
           }
-          // Match got vs. want by stride.  Each closed_range[i] needs
-          // an entry with stride == want_strides[i]; size-1 axes (their
+          int matched = 0;
+          Term to_terms[UNIFIED_SUBST_CAP] = {0};
+          // First pass: stride match.  Each closed_range[i] needs an
+          // entry with stride == want_strides[i]; size-1 axes (their
           // entry was dropped at build time as CONST(0)) bind to
-          // CONST(0).  Order-independent; duplicate strides bail.
-          if (decompose_ok) {
-            Term to_terms[UNIFIED_SUBST_CAP] = {0};
+          // CONST(0).  Requires got_n == n_ranges so each got entry
+          // pairs uniquely with a closed_range.  Order-independent;
+          // duplicate strides bail.
+          if (decompose_ok && got_n == n_ranges) {
             int match_ok = 1;
             for (u32 i = 0; i < n_ranges && match_ok; i++) {
               if (dims[i] == 1) {
@@ -813,23 +932,82 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
               }
               to_terms[i] = got_exprs[found];
             }
-            if (match_ok) {
-              UnifiedSubst new_sub;
-              new_sub.n = 0;
-              if (sub != NULL) {
-                for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
-                  new_sub.from[new_sub.n] = sub->from[i];
-                  new_sub.to  [new_sub.n] = sub->to  [i];
-                  new_sub.n++;
-                }
+            if (match_ok) matched = 1;
+          }
+          // Second pass: extent match for got_n > n_ranges.  The
+          // consumer addressed the BUFFERIZE through its full iter
+          // (including reduce / broadcast axes the producer dropped),
+          // so stride-based pairing fails.  Pair each closed_range[i]
+          // (a RANGE leaf with extent dims[i]) to the unique got_exprs
+          // entry that is a bare UOP_RANGE with matching extent.  The
+          // unmatched got_exprs are the dropped axes; ignoring them
+          // is sound because the value tree's free vars are exactly
+          // the closed_ranges.
+          //
+          // Guard: bail when any got_expr is a non-RANGE (IDIV/IMOD
+          // swizzler) or a type=1 reduce-axis RANGE.  Both can have
+          // extents that collide with a closed_range without being
+          // the right axis to bind (e.g. a [2,2] reshape-MAX-pool
+          // grad has IADD(IMUL(IDIV(R0,2),2), R1_red ext=2); pairing
+          // closed_range row-axis ext=2 to R1_red would route the
+          // CMPEQ mask through the reduce axis and produce all-ones
+          // instead of one-hot).  Stride match keeps handling the
+          // canonical row-major case.
+          if (!matched && decompose_ok && got_n > n_ranges) {
+            int safe = 1;
+            for (u32 j = 0; j < got_n && safe; j++) {
+              Term ge = got_exprs[j];
+              if (term_tag(ge) != TAG_UOP || term_ext(ge) != UOP_RANGE) {
+                safe = 0;
+                break;
               }
-              for (u32 i = 0; i < n_ranges && new_sub.n < UNIFIED_SUBST_CAP; i++) {
-                new_sub.from[new_sub.n] = old_ranges[i];
-                new_sub.to  [new_sub.n] = to_terms[i];
+              u32 atype = (u32)term_val(heap_read(term_val(ge) + 1));
+              if (atype != 0) {
+                safe = 0;
+                break;
+              }
+            }
+            u8  used[UNIFIED_SUBST_CAP] = {0};
+            int match_ok = safe;
+            for (u32 i = 0; i < n_ranges && match_ok; i++) {
+              if (dims[i] == 1) {
+                to_terms[i] = uop_const(DT_INT32, 0);
+                continue;
+              }
+              int found = -1;
+              for (u32 j = 0; j < got_n; j++) {
+                if (used[j]) continue;
+                Term ge = got_exprs[j];
+                u32 ge_ext = (u32)term_val(heap_read(term_val(ge) + 2));
+                if (ge_ext != dims[i]) continue;
+                if (found >= 0) { found = -1; break; }
+                found = (i32)j;
+              }
+              if (found < 0) {
+                match_ok = 0;
+                break;
+              }
+              to_terms[i] = got_exprs[found];
+              used[found] = 1;
+            }
+            if (match_ok) matched = 1;
+          }
+          if (matched) {
+            UnifiedSubst new_sub;
+            new_sub.n = 0;
+            if (sub != NULL) {
+              for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+                new_sub.from[new_sub.n] = sub->from[i];
+                new_sub.to  [new_sub.n] = sub->to  [i];
                 new_sub.n++;
               }
-              return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
             }
+            for (u32 i = 0; i < n_ranges && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+              new_sub.from[new_sub.n] = old_ranges[i];
+              new_sub.to  [new_sub.n] = to_terms[i];
+              new_sub.n++;
+            }
+            return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
           }
         }
       }
@@ -1336,6 +1514,29 @@ static void bypass_dbg_dump_rec(Term t, u32 indent, u32 depth) {
       fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(r, d));
     }
     fputs("]\n", stderr);
+    return;
+  }
+  if (op == UOP_BUFFERIZE) {
+    // Print closed_ranges as identity-only summary (axis_id/type/ext)
+    // so the bypass-bisect log captures the producer's row-major
+    // layout context that uop_arity(BUFFERIZE)==1 would otherwise
+    // drop.  Then recurse into the value subtree for the body.
+    u32 n_r = uop_bufferize_n_ranges(r);
+    fprintf(stderr, "BUFFERIZE n_r=%u closed=[", n_r);
+    for (u32 i = 0; i < n_r && i < 8; i++) {
+      Term cr = uop_bufferize_range_at(r, i);
+      if (term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE) {
+        u32 aid = (u32)term_val(heap_read(term_val(cr) + 0));
+        u32 atp = (u32)term_val(heap_read(term_val(cr) + 1));
+        u32 ext = (u32)term_val(heap_read(term_val(cr) + 2));
+        fprintf(stderr, "%said=%u/t=%u/ext=%u", i ? "," : "", aid, atp, ext);
+      } else {
+        fprintf(stderr, "%s?", i ? "," : "");
+      }
+    }
+    fputs("]\n", stderr);
+    Term v = uop_bufferize_value(r);
+    if (v != 0) bypass_dbg_dump_rec(v, indent + 2, depth + 1);
     return;
   }
   if (op == UOP_REDUCE) {
