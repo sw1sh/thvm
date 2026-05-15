@@ -1,5 +1,5 @@
 {
-  "_comment": "rule -> threadgroup total threads; grid_rule -> grid total threads. Names in scope: M N K ceildiv max min simd tg. Naive baseline: one thread per output element, 256-thread TGs.",
+  "_comment": "stage4: 64x64 output tile per TG, 8 simdgroups = 256 threads. grid = (M/64)*(N/64) threadgroups; grid_rule is total threads = TG count * tg.",
   "rule": "256",
-  "grid_rule": "ceildiv(M*N, 256) * 256"
+  "grid_rule": "ceildiv(M,64)*ceildiv(N,64)*tg"
 }
