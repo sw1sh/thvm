@@ -575,8 +575,8 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     if (reject_log_on) {
       fprintf(stderr,
               "lift reject: entry/no-scalar-arena n_inputs=%u "
-              "n_ops=%u n_tile_uops=%u\n",
-              ke->n_inputs, ke->n_ops, ke->n_tile_uops);
+              "n_ops=%u\n",
+              ke->n_inputs, ke->n_ops);
       // Probe: source_uop populated on each KProgOp?  If yes, the
       // future kernel_lift_from_kprog can use it as the lift root.
       if (ke->n_ops > 0 && ke->program != NULL) {

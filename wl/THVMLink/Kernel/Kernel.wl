@@ -807,75 +807,12 @@ TKernelScalarUops[kid_Integer] := Module[{raw, n, srcWidth, headerWidth,
     decoded
 ]
 
-$tileOpNames = <|
-    0 -> "TILE_NONE",        1 -> "TILE_AXIS",
-    2 -> "TILE_SCALAR_BODY", 3 -> "TILE_LOOP_NEST",
-    4 -> "TILE_LOCAL_ALLOC", 5 -> "TILE_LOAD",
-    6 -> "TILE_STORE",       7 -> "TILE_BARRIER",
-    8 -> "TILE_REDUCE",      9 -> "TILE_MMA"
-|>;
-
 $tileAxisNames = <|
     0 -> "LOOP",   1 -> "REDUCE", 2 -> "UPCAST", 3 -> "UNROLL",
     4 -> "LOCAL",  5 -> "GLOBAL", 6 -> "GROUP_REDUCE"
 |>;
 
-TKernelTileUops[kid_Integer] := Module[{raw, n, srcWidth, rowWidth, decoded},
-    raw = Normal @ $kernelTileUopsFn[kid];
-    If[ raw === {} || First[raw] == 0,
-      Return @ Missing["NotLowered"] ];
-    n = raw[[1]];
-    srcWidth = raw[[2]];
-    rowWidth = 3 + srcWidth + 2;
-    decoded = Table[
-      With[{base = 2 + (i - 1) * rowWidth},
-        With[{
-          opCode = raw[[base + 1]],
-          extra  = BitOr[
-            raw[[base + 4 + srcWidth]],
-            BitShiftLeft[raw[[base + 5 + srcWidth]], 32]]
-        },
-          With[{
-            opName   = Lookup[$tileOpNames, opCode, "TILE_?"],
-            srcCount = raw[[base + 3]],
-            src      = raw[[base + 4 ;; base + 3 + srcWidth]]
-          },
-            If[ opName === "TILE_AXIS",
-              <|
-                "id"        -> i - 1,
-                "op"        -> opName,
-                "dtype"     -> dtypeName[raw[[base + 2]]],
-                "src"       -> Take[src, srcCount],
-                "extent"    -> BitAnd[extra, 16^^FFFFFFFF],
-                "axis_type" -> Lookup[$tileAxisNames,
-                                  BitShiftRight[extra, 32], "?"]
-              |>,
-              If[ opName === "TILE_MMA",
-                <|
-                  "id"       -> i - 1,
-                  "op"       -> opName,
-                  "dtype"    -> dtypeName[raw[[base + 2]]],
-                  "src"      -> Take[src, srcCount],
-                  "extra"    -> extra,
-                  "a_input"  -> BitAnd[extra, 16^^FFFF],
-                  "b_input"  -> BitAnd[BitShiftRight[extra, 16], 16^^FFFF],
-                  "flags"    -> BitAnd[BitShiftRight[extra, 32], 16^^FF]
-                |>,
-                <|
-                  "id"     -> i - 1,
-                  "op"     -> opName,
-                  "dtype"  -> dtypeName[raw[[base + 2]]],
-                  "src"    -> Take[src, srcCount],
-                  "extra"  -> extra
-                |>
-              ]
-            ]
-          ]
-        ]
-      ],
-      {i, n}];
-    decoded
-]
+TKernelTileUops[kid_Integer] := Missing["NotLowered"]
 
 End[];
 EndPackage[];

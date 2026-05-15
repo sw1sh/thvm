@@ -957,106 +957,15 @@ typedef struct {
 #define SUOP_INIT_CAP   16
 #define SUOP_MAX_CAP    (1u << 20)
 
-// === tile UOp plan =====================================================
-// TileUop is the next scheduling layer above ScalarUop.  It does not
-// replace rangeify: it wraps a proven scalar graph with an explicit
-// tile / loop / memory plan that renderers can later lower to CPU
-// loops, Metal threadgroups, local memory, barriers, and eventually
-// MMA intrinsics.
-//
-// ke->tile_uops is unused in production (only a handful of unit tests
-// build TileUop graphs directly).  Matmul shape facts flow through
-// ke->cached_lift.store_root via uop_dag_classify_matmul_shape and
-// production dispatch routes through the lifter-based path.
-// Memory memory scope constants.  Used by TILE_AXIS.memory_scope,
-// TILE_LOCAL_ALLOC.scope, and TILE_BARRIER.scope.  Default 0 = global
-// (device memory) so legacy zero-valued packings still mean
-// "no special placement".
-#define TILE_MEM_GLOBAL    0   // device memory (default)
-#define TILE_MEM_SHARED    1   // threadgroup-shared (Metal: `threadgroup`)
-#define TILE_MEM_LOCAL     2   // per-thread (Metal: `thread`)
-#define TILE_MEM_REGISTER  3   // explicit register
-
-// Memory TILE_AXIS carries memory-scope + vector-width annotations
-// in addition to the legacy (kax_type, extent) packing.  Both are
-// zero-valued today (= use the existing default behavior); D2/D3
-// callers populate them when emitting threadgroup/shared-memory
-// reductions and vectorized loads.  Helper accessors below.
-//
-// Bit layout in TileUop.extra:
-//   bits  0..31  extent
-//   bits 32..47  kax_type           (KAX_LOOP, KAX_REDUCE, ...)
-//   bits 48..55  memory_scope       (0=global default; future shared/local/register)
-//   bits 56..63  vector_width       (0=scalar default; future 2/4/8)
-//
-// Reading kax_type as `(extra >> 32)` (the legacy pattern in
-// schedule/tile.c) yields a value with kax_type in low 16 bits and
-// memory_scope/vector_width in higher bytes -- so an exact equality
-// check against KAX_LOOP only works while the new fields are 0.
-// Use tile_axis_unpack to read the full info; the legacy reads are
-// migrated to it in this commit so future non-zero values don't
-// silently break them.
+// === axis annotation type =============================================
+// Per-axis info returned by tile_anno_axis_or_kernelaxes.  memory_scope
+// and vector_width are 0-valued today; reserved for future use.
 typedef struct {
   u32 kax_type;
   u32 extent;
   u32 memory_scope;
   u32 vector_width;
 } TileAxisInfo;
-
-static inline u64 tile_axis_pack(TileAxisInfo info) {
-  return ((u64)info.extent       & 0xFFFFFFFFu)
-       | (((u64)info.kax_type     & 0xFFFFu)        << 32)
-       | (((u64)info.memory_scope & 0xFFu)          << 48)
-       | (((u64)info.vector_width & 0xFFu)          << 56);
-}
-
-static inline TileAxisInfo tile_axis_unpack(u64 extra) {
-  TileAxisInfo info;
-  info.extent       = (u32)(extra & 0xFFFFFFFFu);
-  info.kax_type     = (u32)((extra >> 32) & 0xFFFFu);
-  info.memory_scope = (u32)((extra >> 48) & 0xFFu);
-  info.vector_width = (u32)((extra >> 56) & 0xFFu);
-  return info;
-}
-
-typedef enum {
-  TILE_NONE = 0,
-  TILE_AXIS,        // extra = tile_axis_pack(kax_type, extent, memory_scope, vector_width)
-  TILE_SCALAR_BODY, // extra = ScalarUop id of value expression
-  TILE_LOOP_NEST,   // src[0] = TILE_STORE body, src[1..] = TILE_AXIS nodes
-  TILE_LOCAL_ALLOC, // future: threadgroup/local memory allocation
-  TILE_LOAD,        // future: cooperative tile load
-  TILE_STORE,       // src[0] = TILE_SCALAR_BODY/TILE_REDUCE, extra = scalar S_STORE id
-  TILE_BARRIER,     // future: target barrier between tile stages
-  TILE_REDUCE,      // src[0] = TILE_SCALAR_BODY, extra = scalar S_REDUCE_* id
-  TILE_BLOCK,       // ordered list: src[0..src_count-1] are executed in order;
-                    // the block's value is the LAST src's value (typically a
-                    // TILE_LOAD or TILE_SCALAR_BODY).  The reduce-broadcast lowering uses this to
-                    // hold the canonical reduce-broadcast preamble:
-                    //   TILE_BLOCK(alloc, reduce-into-alloc, barrier, load,
-                    //              post-reduce body)
-  TILE_INPUT_BUF,   // Renderer prep: kernel input buffer reference.  extra =
-                    // input slot id; dtype carries the element type.
-                    // Used as src[0] of TILE_LOAD for global-memory
-                    // reads (parallel to TILE_LOCAL_ALLOC for shared).
-  TILE_OUTPUT_BUF,  // Renderer prep: kernel output buffer reference.  extra =
-                    // output slot id (0 = primary, 1..n = extras for
-                    // multi-output kernels).  Used by future TILE_STORE
-                    // shapes that need explicit output binding.
-  TILE__COUNT
-} TileOp;
-
-#define TILE_MAX_SRC  (MAX_AXES + 1)
-#define TILE_INIT_CAP 16
-#define TILE_MAX_CAP  (1u << 20)
-
-typedef struct {
-  u8  op;                    // TileOp
-  u8  src_count;             // number of valid src[] entries
-  u32 dtype;                 // DT_* where meaningful, DT_COUNT otherwise
-  u32 src[TILE_MAX_SRC];     // indices into TileUop[]; 0 = unused
-  u64 extra;                 // op-specific payload
-} TileUop;
 
 // Matmul shape facts (M/N/K/ldA/ldB/flags/dtype/a_input/b_input)
 // flow through UopDagGemmShape (src/uop/dag_scan.c) read from
@@ -1288,17 +1197,6 @@ typedef struct KernelEntry {
   ScalarUop *scalar_uops;
   u32        n_scalar_uops;
   u32        scalar_uops_cap;
-
-  // Tile-level schedule/memory plan above scalar_uops.  NULL until
-  // a future tile planner populates it (the scalar-arena seeder has
-  // been deleted; only a handful of tile-arena unit tests build
-  // tile_uops directly via the emit helpers).
-  // Slot 0 is TILE_NONE; live ops occupy [1, n_tile_uops).
-  // Owned by the KernelEntry; freed by kernel_free_arrays.
-  TileUop   *tile_uops;
-  u32        n_tile_uops;
-  u32        tile_uops_cap;
-  u32        tile_root;       // root TileUop id, usually TILE_LOOP_NEST; 0 = none
 
   // kvar wedge: per-dispatch runtime values for any symbolic-shape
   // Variables bound to RANGE leaves in this kernel.  Sparse: each
@@ -2259,72 +2157,29 @@ fn void rangeify_free(struct KernelEntry *ke);
 // introspection / debug printing.
 fn const char *scalar_op_name (u8 op);
 
-// === tile UOp arena ops (schedule/tile.c) ===
-// The tile plan is the optimization layer above scalar_uops.  These
-// helpers mirror the scalar arena API: slot 0 is TILE_NONE, live ops
-// start at 1, and src[] entries of 0 mean "unused".
-fn u32  tile_emit(struct KernelEntry *ke, u8 op, u32 dtype,
-                  u8 src_count, const u32 *src, u64 extra);
-fn u32  tile_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
-fn u32  tile_emit_alloc(struct KernelEntry *ke, u32 dtype, u32 scope, u32 n_elements);
-fn u32  tile_emit_barrier(struct KernelEntry *ke, u32 scope);
-fn u32  tile_emit_load(struct KernelEntry *ke, u32 dtype, u32 alloc_id, u32 addr_id);
-fn u32  tile_emit_block(struct KernelEntry *ke, u32 dtype,
-                        u32 const *stmts, u8 n_stmts);
-fn u32  tile_emit_input_buf(struct KernelEntry *ke, u32 dtype, u32 input_slot);
-fn u32  tile_emit_output_buf(struct KernelEntry *ke, u32 dtype, u32 output_slot);
-fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
-
-// Emit a pseudo-MSL skeleton from the tile_uops graph.
-// Walks TILE_LOOP_NEST -> TILE_STORE -> TILE_BLOCK -> TILE_REDUCE/
-// TILE_LOAD/TILE_BARRIER/TILE_LOCAL_ALLOC/TILE_SCALAR_BODY/TILE_AXIS
-// and emits opening loop braces, alloc declarations, barrier calls,
-// and placeholder scalar bodies.  Verifies the IR carries enough
-// info for a real renderer; doesn't substitute scalar bodies (that's
-// the existing rmt_emit_value).
-fn void tile_render_msl_skeleton(struct KernelEntry const *ke, FILE *fp);
-
-// Tile-IR-native dispatch shape.  Walks tile_root's
-// TILE_AXIS children and computes (groups, threads) directly from
-// kax_type + extent, without going through KpSchedule.  Returns 1 on
-// success; 0 if no tile_root, malformed axes, or GROUP_REDUCE > 256.
-fn int tile_compute_dispatch_shape(struct KernelEntry const *ke,
-                                   u32 *groups_out, u32 *threads_out);
-
-// Annotation scaffolding: axis-info read helpers that go through TILE_AXIS
-// (instead of KpSchedule side channel).  As consumers migrate, these
-// become the single read path; KpSchedule deletes once the migration
-// completes.
-// Migration helpers that fall back to KpSchedule when tile_uops
-// isn't populated.  Used by migrations of code that runs
-// before tile_sync_from_scalar (autotune, propose).
+// === axis annotation read API (codegen/tile_anno.c) ===
+// Resolves axis count + per-axis TileAxisInfo from the KpSchedule
+// signal trio (output_shape + tail-reduce + scalar-reduce + applied_opts).
 fn int  tile_anno_axis_or_kernelaxes(struct KernelEntry const *ke, u32 d,
                                      TileAxisInfo *out);
 fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
 
-// applied_opts facade.  Today reads from KpSchedule.applied_opts;
-// future work moves these into Tile-IR mutation records.
-// External linkage (no `fn`) so backend_metal.o can call these.
+// applied_opts facade.  External linkage (no `fn`) so backend_metal.o
+// can call these.
 u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
 KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
 // Hash all per-axis (kax_type, extent) into the running FNV-1a state.
 // Used by cache-key generation in autotune.c.
 u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
 // Writer-side facade: thin wrapper over kernel_apply_opt.
-// Source-of-truth flip switches this to mutate TILE_AXIS.
 int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
 // Record an opt as applied without changing axis structure (KOP_TC).
 int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
 // Reset axes to the default LOOP/REDUCE shape (autotune between-
 // candidates baseline; preserves autotuned + version).
 void       tile_anno_axes_reset(struct KernelEntry *ke);
-// No-op stub.  The resolvers derive axis count + extents from
-// (output_shape + tail-reduce + scalar-reduce + applied_opts) on
-// read; this symbol is kept for the public header signature.
+// No-op stub kept for API stability.
 int        tile_anno_axis_append(struct KernelEntry *ke, TileAxisInfo info);
-fn void tile_free(struct KernelEntry *ke);
-fn const char *tile_op_name(u8 op);
-fn const char *tile_axis_name(u32 axis_type);
 // Recognize the im2col-fused Conv2D reduce template produced by the
 // lowered UOp graph.  Renderers use this as a tile template instead
 // of carrying backend-private conv pattern matchers.

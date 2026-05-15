@@ -2278,45 +2278,6 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_scalar_uops(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
-// thvm_wl_kernel_tile_uops(kid) -- flat TileUop[] snapshot:
-// [n_tile_uops, src_width, op, dtype, src_count, src..., extra_lo,
-//  extra_hi, ...].
-EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_uops(WolframLibraryData libData,
-                                                mint argc, MArgument *args,
-                                                MArgument res) {
-  (void)argc;
-  mint kid = MArgument_getInteger(args[0]);
-  if (kid < 0 || (u32)kid >= KERNELS_NEXT) {
-    MArgument_setMTensor(res, NULL);
-    return LIBRARY_FUNCTION_ERROR;
-  }
-  KernelEntry *ke = &KERNELS[kid];
-  mint n         = (ke->tile_uops == NULL) ? 0 : (mint)ke->n_tile_uops;
-  mint src_width = (mint)TILE_MAX_SRC;
-  mint row_width = 3 + src_width + 2;
-  mint nFields   = 2 + n * row_width;
-  mint dims[1]   = {nFields};
-  MTensor out;
-  libData->MTensor_new(MType_Integer, 1, dims, &out);
-  mint *dst = libData->MTensor_getIntegerData(out);
-  mint idx  = 0;
-  dst[idx++] = n;
-  dst[idx++] = src_width;
-  for (mint i = 0; i < n; i++) {
-    TileUop *u = &ke->tile_uops[i];
-    dst[idx++] = (mint)u->op;
-    dst[idx++] = (mint)u->dtype;
-    dst[idx++] = (mint)u->src_count;
-    for (mint j = 0; j < src_width; j++) {
-      dst[idx++] = (mint)u->src[j];
-    }
-    dst[idx++] = (mint)(u->extra & 0xFFFFFFFFu);
-    dst[idx++] = (mint)((u->extra >> 32) & 0xFFFFFFFFu);
-  }
-  MArgument_setMTensor(res, out);
-  return LIBRARY_NO_ERROR;
-}
-
 // === REF / ALO surface ===
 
 EXTERN_C DLLEXPORT int thvm_wl_def_register(WolframLibraryData libData, mint argc,

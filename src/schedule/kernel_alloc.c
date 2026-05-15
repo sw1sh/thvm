@@ -86,7 +86,6 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   ke->n_ops      = 0;
   ke->ops_cap    = 0;
   rangeify_free(ke);
-  tile_free(ke);
 }
 
 fn u32 kernel_alloc(void) {

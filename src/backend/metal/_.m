@@ -1232,13 +1232,6 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
     u64 root_bits = (u64)ke->cached_lift.store_root;
     h ^= root_bits; h *= 0x100000001b3ULL;
   }
-  if (!is_symbolic && ke->tile_uops != NULL && ke->n_tile_uops > 0) {
-    u8 const *bytes = (u8 const *)ke->tile_uops;
-    size_t total = (size_t)ke->n_tile_uops * sizeof(TileUop);
-    for (size_t i = 0; i < total; i++) {
-      h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
-    }
-  }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     h ^= (u64)ke->input_dtypes[i]; h *= 0x100000001b3ULL;
     if (!is_symbolic) {

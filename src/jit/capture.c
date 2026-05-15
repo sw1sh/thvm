@@ -386,7 +386,7 @@ fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
           row[8]  = ke->output_numel;
           row[9]  = ke->n_ops;
           row[10] = 0;
-          row[11] = ke->n_tile_uops;
+          row[11] = 0;
         }
         break;
       }
