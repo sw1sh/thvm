@@ -1240,17 +1240,21 @@ fn void pm_apply_rangeify(Term root) {
                     || info->op == UOP_EXPAND  || info->op == UOP_PAD
                     || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
     if (is_movement) {
-      // Forward to producer's substitute when the producer is a NON-
-      // realized rewrite (i.e. RU_SUBST[pidx] is itself the producer's
-      // value subtree, not a UOP_BUFFERIZE leaf).  When the producer
-      // already realized to a UOP_BUFFERIZE, the EXPAND/PAD/etc has
-      // built `INDEX_E(producer_bufferize, swizzled_addr)` as slot 0 of
-      // the movement-shell -- forwarding to the bare BUFFERIZE would
-      // drop the swizzle and the consumer's own `ru_rewrite_subtree`
-      // would re-wrap with `INDEX_E(BUFFERIZE, consumer_addr)` against
-      // the unbroadcast output range.  Detect the BUFFERIZE-producer
-      // case and unwrap the shell instead so the pre-swizzled INDEX_E
-      // survives.
+      // Forward to producer's substitute by default.  RESHAPE / PERMUTE
+      // need a special case when the producer realized to a UOP_BUFFERIZE:
+      // their movement-shell's slot 0 already holds INDEX_E(producer_buf,
+      // swizzled_addr) where the swizzle encodes the rank merge or axis
+      // permutation.  Forwarding to the bare BUFFERIZE drops that
+      // swizzle and the consumer re-wraps with INDEX_E(BUFFERIZE,
+      // consumer_addr) against the unswizzled output range, reading the
+      // wrong element (this is what gd-loss / mse-grad / SGD-step / etc.
+      // exercise -- their dot-product chains realize through PERMUTE
+      // and RESHAPE).  Unwrap the shell in those cases so the swizzled
+      // INDEX_E survives.  EXPAND / PAD / SHRINK / FLIP stick with
+      // bare-forward; the bn_grad dgamma chain has an EXPAND whose
+      // realized BUFFERIZE producer is laid out so the consumer's own
+      // re-wrap is correct, and injecting the pre-swizzled INDEX_E
+      // there reads stale data.
       Term producer = term_resolve(heap_read(info->loc));
       if (term_tag(producer) == TAG_UOP) {
         u32 pidx = bufferize_info_find(term_val(producer));
@@ -1258,7 +1262,10 @@ fn void pm_apply_rangeify(Term root) {
           Term psub = RU_SUBST[pidx];
           int psub_is_bufferize = (term_tag(psub) == TAG_UOP
                                 && term_ext(psub) == UOP_BUFFERIZE);
-          if (!psub_is_bufferize) {
+          int keep_swizzle = psub_is_bufferize
+                          && (info->op == UOP_PERMUTE
+                           || info->op == UOP_RESHAPE);
+          if (!keep_swizzle) {
             RU_SUBST[i] = psub;
             continue;
           }
