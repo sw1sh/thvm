@@ -2125,6 +2125,43 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     }
     return 0;
   }
+  // Unified-pass short-circuit: when the rangeify_unified pass already
+  // emitted a UOP_STORE for this kernel's boundary, the legacy
+  // ScalarUop walker below produces output that emit_kernel_for_boundary
+  // immediately replaces with the unified store_root.  Skip the walker
+  // and only build the buffer fields that the bypass safety gates still
+  // consult (in_bufs[], n_inputs, out_buf).  Gated on
+  // THVM_LIFT_FROM_UNIFIED so the bisection knob still reverts to the
+  // full legacy path.  If the boundary isn't tracked (no source_uop, no
+  // BUFFERIZE_NODES match), fall through to the walker.
+  {
+    char const *unified_e = getenv("THVM_LIFT_FROM_UNIFIED");
+    int unified_on = (unified_e == NULL) || (unified_e[0] != '0');
+    if (unified_on && ke->source_uop != 0) {
+      u32 ru_idx = bufferize_info_find(term_val(ke->source_uop));
+      if (ru_idx != 0xFFFFFFFFu) {
+        Term ru_root = rangeify_unified_store_root_at(ru_idx);
+        if (ru_root != 0) {
+          if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
+            lift_reject_log(ke, 0, "entry/n-inputs-over-cap");
+            return 0;
+          }
+          out->n_inputs = ke->n_inputs;
+          for (u32 i = 0; i < ke->n_inputs; i++) {
+            Term in_buf = lift_input_buffer(ke, i);
+            if (in_buf == 0) {
+              lift_reject_log(ke, 0, "entry/in-buf-build-fail");
+              return 0;
+            }
+            out->in_bufs[i] = in_buf;
+          }
+          out->out_buf    = uop_store_buf(ru_root);
+          out->store_root = ru_root;
+          return 1;
+        }
+      }
+    }
+  }
   // Find the BUFFERIZE root.
   u32 buf_sid = 0;
   for (u32 i = 1; i < ke->n_scalar_uops; i++) {
