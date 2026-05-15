@@ -343,9 +343,26 @@ b63464e3.
    tautology axioms `a == a` survive parameter passing without
    collapsing to `True`.  Verified: trivial-refl, transitivity,
    subst, head-mismatch, sym, backward-needed all give the right
-   ProofObject vs `$Failed` answer.  Outstanding: replace the
-   BFS itself with IC SUP-path decoding (the original milestone-4
-   intent).  Until that lands, the BFS does the heavy lifting.
+   ProofObject vs `$Failed` answer.
+
+   IC-search provability oracle landed (ATP.wl `=== IC-search
+   provability oracle ===` section): `icSearchProvable[conjPair,
+   axPairs, depth]` builds a depth-D SUP-fanout search Term and
+   decides provability from a NUM(1) leaf in the collapse --
+   IC reduction, no WL-side BFS.  Atomic-equational only;
+   structured/pattern problems return `$Failed` and fall back to
+   the BFS.  Cross-checked in atp.wlt
+   (`ATP/IC/oracle-agrees-with-bfs-on-atomic-battery`): the
+   oracle's verdict matches the BFS-driven `TFindEquationalProof`
+   on every atomic case.  The atp_ic toys' duplicated
+   `buildSearchTerm` will be rewired onto this shared builder.
+
+   Outstanding: decode the winning leaf's SUP-path into a chain
+   of (axiom, direction, side) records so the IC search produces
+   a full verifier-ready ProofObject -- then `TFindEquationalProof`
+   can route through IC reduction (CPU or Metal) instead of the
+   BFS.  Until that decoder lands, the BFS still synthesizes the
+   chain; the IC oracle is a sound provability cross-check.
 
 5. **Pattern axioms** (DONE -- not via pre-instantiation, via WL
    Rule semantics).  The original plan was to enumerate

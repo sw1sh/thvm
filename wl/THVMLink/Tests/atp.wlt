@@ -593,3 +593,80 @@ VerificationTest[
     $Failed,
     TestID -> "ATP/TFEP/doc-scope-insufficient-axioms"
 ]
+
+(* === IC-search provability oracle (milestone 4) ==================== *)
+
+(* icSearchProvable decides provability by IC reduction: it builds a
+   depth-D SUP-fanout search Term and checks the collapse for a
+   NUM(1) leaf.  Atomic-equational only; structured/pattern problems
+   return $Failed.  These tests pin the oracle directly and
+   cross-check it against the BFS-driven TFindEquationalProof. *)
+
+VerificationTest[
+    THVMLink`Private`icSearchProvable[{a, c}, {{a, b}, {b, c}}, 2],
+    True,
+    TestID -> "ATP/IC/transitivity-3-provable"
+]
+
+VerificationTest[
+    THVMLink`Private`icSearchProvable[{a, d}, {{a, b}, {b, c}}, 2],
+    False,
+    TestID -> "ATP/IC/unprovable-no-num1-leaf"
+]
+
+VerificationTest[
+    THVMLink`Private`icSearchProvable[{b, a}, {{a, b}}, 1],
+    True,
+    TestID -> "ATP/IC/symmetry-1step-provable"
+]
+
+VerificationTest[
+    THVMLink`Private`icSearchProvable[
+        {a, e}, {{a, b}, {b, c}, {c, d}, {d, e}}, 4],
+    True,
+    TestID -> "ATP/IC/4-step-chain-provable"
+]
+
+VerificationTest[
+    THVMLink`Private`icSearchProvable[{a, a}, {}, 0],
+    True,
+    TestID -> "ATP/IC/trivial-reflexivity-provable"
+]
+
+VerificationTest[
+    (* Structured conjecture -> not atomic -> $Failed (BFS fallback). *)
+    THVMLink`Private`icSearchProvable[{f[a], f[b]}, {{a, b}}, 1],
+    $Failed,
+    TestID -> "ATP/IC/non-atomic-yields-failed"
+]
+
+VerificationTest[
+    (* Cross-check: on the atomic battery, the IC oracle's verdict
+       must agree with the BFS-driven TFindEquationalProof.  Each
+       case is {conjPair, axPairs, conjExpr, axExpr-list}. *)
+    Module[{cases, agree},
+        cases = {
+            {{a, c}, {{a, b}, {b, c}}, a == c, {a == b, b == c}},
+            {{a, d}, {{a, b}, {b, c}}, a == d, {a == b, b == c}},
+            {{b, a}, {{a, b}}, b == a, {a == b}},
+            {{c, a}, {{a, b}, {b, c}}, c == a, {a == b, b == c}},
+            {{a, e}, {{a, b}, {b, c}, {c, d}, {d, e}},
+                a == e, {a == b, b == c, c == d, d == e}}
+        };
+        agree = Function[case,
+            Module[{icv, bfsv},
+                icv = THVMLink`Private`icSearchProvable[
+                    case[[1]], case[[2]], Length[case[[2]]]];
+                (* TFindEquationalProof is HoldAll: With-inject the
+                   already-evaluated conjecture/axioms so it sees the
+                   values, not the held `case[[3]]` Part expression. *)
+                bfsv = With[{cj = case[[3]], ax = case[[4]]},
+                    Head[TFindEquationalProof[cj, ax]] === ProofObject];
+                icv === bfsv
+            ]
+        ] /@ cases;
+        AllTrue[agree, TrueQ]
+    ],
+    True,
+    TestID -> "ATP/IC/oracle-agrees-with-bfs-on-atomic-battery"
+]

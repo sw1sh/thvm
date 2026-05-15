@@ -37,6 +37,15 @@ TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP satura
 
 TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the WL-side BFS chain synth and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  The 4th-arg Association is built to satisfy ProofObjectQ, which causes WL to skip its auto-dispatch back to FindEquationalProof and preserve thvm's data.  ProofDataset entries are keyed by {\"Axiom\" | \"Hypothesis\" | \"SubstitutionLemma\" | \"Conclusion\", k} with Statement and Proof sub-fields.  Returns $Failed when the BFS doesn't close the conjecture within its budget.";
 
+(* Forward-declare symbols owned by sibling files (Switch.wl owns
+   the IC term constructors) so bare references inside
+   Begin[`Private`] resolve to THVMLink`X instead of a phantom
+   THVMLink`Private`X.  ATP.wl is parsed first in alphabetical
+   order, so these public names don't yet exist when this file's
+   body runs.  Mirrors the same guard in Lazy.wl. *)
+{TDef, TRef, TIfZero, TOp2, TNum, TSup, TApp, TLam,
+ TCollapse, FromTTerm, TTerm};
+
 Begin["`Private`"];
 
 (* === LibraryLink loaders =========================================== *)
@@ -584,6 +593,125 @@ buildRuleList[axioms_, axiomKeys_] := Flatten[
         {i, Length[axioms]}
     ],
     1
+]
+
+(* === IC-search provability oracle ================================ *)
+
+(* Milestone 4: decide provability by IC reduction instead of the
+   WL-side BFS.  buildSearchTerm builds a depth-D Term whose normal
+   form is a SUP-tree of NUM(0)/NUM(1) leaves -- the conjecture is
+   provable iff any leaf is NUM(1).  Each step fans over (rewrite
+   fn, side) via SUPs, so the collapse enumerates every depth-<=D
+   rewrite combination at once.
+
+   Atomic-equational only (axioms + conjecture must be bare
+   symbols).  Structured / pattern problems fall back to the BFS.
+   Decoding the winning leaf's SUP-path into a verifier chain is
+   the next milestone-4 step; today this is a cross-check oracle
+   that must agree with the BFS on every atomic case.
+
+   Mirrors wl/Examples/atp_ic/transitivity.wls; that toy will be
+   rewired onto this shared builder once the decoder lands. *)
+
+(* Per-call counter so repeated runs get fresh TDef names instead
+   of clobbering each other's rewrite-fn defs. *)
+$icCallCtr = 0;
+
+(* True iff every axiom side + both conjecture sides are bare
+   symbols -- the shape the atomic IC search handles. *)
+icAtomicProblemQ[axPairs_, conjPair_] :=
+    AllTrue[Flatten[{axPairs, conjPair}], MatchQ[#, _Symbol] &]
+
+(* atom -> positive Int id over axioms + conjecture. *)
+icCollectAtoms[axPairs_, conjPair_] := Block[{atoms},
+    atoms = DeleteDuplicates @ Flatten[{axPairs, conjPair}];
+    AssociationThread[atoms -> Range[Length[atoms]]]
+]
+
+(* Register one (axiom, direction) rewrite fn as a TDef: a unary
+   lambda mapping NUM(old) -> NUM(new), identity elsewhere. *)
+icDefineRewriteFn[name_String, old_Integer, new_Integer] := With[{
+    v = Module[{vs}, vs]
+},
+    TDef[name, TLam[v, TIfZero[TOp2["==", v, TNum[old]], v, TNum[new]]]]
+]
+
+(* For each axiom, register fwd + bwd rewrite fns and return the
+   flat list of TRef.  `pfx` namespaces this call's defs. *)
+icAllRewriteRefs[pfx_String, axPairs_, atomMap_] := Flatten @ Table[
+    Block[{ax = axPairs[[i]], oldId, newId, fwdName, bwdName},
+        oldId = atomMap[ax[[1]]];
+        newId = atomMap[ax[[2]]];
+        fwdName = pfx <> "ax" <> ToString[i] <> "_fwd";
+        bwdName = pfx <> "ax" <> ToString[i] <> "_bwd";
+        icDefineRewriteFn[fwdName, oldId, newId];
+        icDefineRewriteFn[bwdName, newId, oldId];
+        {TRef[fwdName], TRef[bwdName]}
+    ],
+    {i, Length[axPairs]}
+]
+
+(* Right-associated nested SUP over a flat value list; each nested
+   SUP gets a distinct label so DUP-SUP labels don't collide. *)
+icNestedSup[baseLab_Integer, ts_List] := Which[
+    Length[ts] === 1, ts[[1]],
+    Length[ts] === 2, TSup[baseLab, ts[[1]], ts[[2]]],
+    True, TSup[baseLab, ts[[1]], icNestedSup[baseLab + 1, Rest[ts]]]
+]
+
+(* Apply rChoice to v iff sideChoice picks mySideNum, else pass
+   v through unchanged. *)
+icSideUpdate[v_, mySideNum_, sideChoice_, rChoice_] :=
+    TIfZero[TOp2["==", sideChoice, mySideNum], v, TApp[rChoice, v]]
+
+$icSupBase = 100;
+
+(* One depth step: pick (rewrite fn, side) via shared SUPs, apply
+   the chosen rewrite to the chosen side.  Fresh labels per step so
+   DUPs across steps commute (independent choices) rather than
+   annihilate. *)
+icStepFold[rFns_, n_][acc_, stepIdx_] := Block[{
+    lhs = acc[[1]], rhs = acc[[2]], labCur = acc[[3]], rSup, sideSup
+},
+    rSup = icNestedSup[labCur, rFns];
+    sideSup = TSup[labCur + n, TNum[0], TNum[1]];
+    {
+        icSideUpdate[lhs, TNum[0], sideSup, rSup],
+        icSideUpdate[rhs, TNum[1], sideSup, rSup],
+        labCur + n + 1
+    }
+]
+
+(* Build the depth-D search Term: TOp2["==", lhsD, rhsD] -- yields
+   NUM(1) on a leaf iff that combination of rewrites closed the
+   conjecture. *)
+icBuildSearchTerm[conjPair_, axPairs_, depth_Integer] := Block[{
+    pfx, atomMap, lhs0, rhs0, rFns, n, final
+},
+    $icCallCtr += 1;
+    pfx = "atp_ic_" <> ToString[$icCallCtr] <> "_";
+    atomMap = icCollectAtoms[axPairs, conjPair];
+    lhs0 = TNum[atomMap[conjPair[[1]]]];
+    rhs0 = TNum[atomMap[conjPair[[2]]]];
+    rFns = icAllRewriteRefs[pfx, axPairs, atomMap];
+    n = Length[rFns];
+    final = Fold[icStepFold[rFns, n],
+        {lhs0, rhs0, $icSupBase}, Range[depth]];
+    TOp2["==", final[[1]], final[[2]]]
+]
+
+(* True iff the conjecture is provable from the axioms in <= depth
+   rewrite steps, decided by IC reduction + collapse.  Returns
+   $Failed when the problem isn't atomic (caller falls back to the
+   BFS). *)
+icSearchProvable[conjPair_, axPairs_, depth_Integer] := If[
+    ! icAtomicProblemQ[axPairs, conjPair],
+    $Failed,
+    Block[{term, leaves},
+        term = icBuildSearchTerm[conjPair, axPairs, depth];
+        leaves = FromTTerm /@ TCollapse[term];
+        AnyTrue[leaves, # === 1 &]
+    ]
 ]
 
 (* === ProofDataset builder ======================================== *)
