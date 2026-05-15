@@ -319,10 +319,29 @@ static int ru_apply_movement(u64 loc, u8 op,
                               Term const *out_rngs, u32 out_ndim,
                               Term *in_rngs, u32 *in_ndim) {
   if (op == UOP_RESHAPE) {
-    // Tinygrad's RESHAPE goes through _apply_reshape which needs
-    // pm_simplify_valid (identity stub today).  Fall through to identity
-    // at the producer's source shape -- known thvm-side gap relative to
-    // tinygrad; sharpen pm_simplify_valid_apply per failing case.
+    // Decompose the reshape into matching axis groups and swizzle the
+    // consumer's flat ranges into producer-axis-aligned IDIV/IMOD
+    // expressions.  Falls back to the identity stub when the shapes
+    // don't decompose cleanly (the stride-trick rank-merge tinygrad
+    // routes through `pm_simplify_valid`).
+    Shape src_shape;
+    if (!ru_node_src_shape(loc, &src_shape)) {
+      *in_ndim = 0;
+      return 0;
+    }
+    u32 out_dims[RU_MAX_AXES] = {0};
+    for (u32 i = 0; i < out_ndim; i++) {
+      out_dims[i] = (u32)term_val(heap_read(loc + 2 + i));
+    }
+    u32 in_dims[RU_MAX_AXES] = {0};
+    u32 src_ndim = src_shape.ndim;
+    if (src_ndim > RU_MAX_AXES) src_ndim = RU_MAX_AXES;
+    for (u32 i = 0; i < src_ndim; i++) in_dims[i] = src_shape.dims[i];
+    if (apply_movement_op_reshape(out_ndim, out_dims, src_ndim, in_dims,
+                                  out_rngs, in_rngs)) {
+      *in_ndim = src_ndim;
+      return 1;
+    }
     *in_ndim = 0;
     return 0;
   }
@@ -856,27 +875,31 @@ fn void rangeify_unified_resync_realize_from_nodes(void) {
   }
 }
 
-// Build a row-major linear addr Term from an array of UOP_RANGE leaves.
-// Strides come from each range's extent (heap field 2); the result is
-//   r[0]*prod(d[1..]) + r[1]*prod(d[2..]) + ... + r[n-1].
-// Used both for the OUTPUT addr (rm->out_rngs) when threading a producer
-// into its consumer, and for the BODY/INPUT addr (rm->in_rngs) when
-// wrapping TAG_TEN leaves under a REDUCE (whose body iterates over
-// out_rngs + the injected reduce range).
-static Term ru_build_addr_from_ranges(Term const *rngs, u8 ndim) {
+// Build a row-major linear addr Term from an array of per-axis range
+// expressions and the producing tensor's shape.  Each range may be a
+// bare UOP_RANGE leaf (the elementwise case) or an arithmetic
+// expression over RANGE leaves (the RESHAPE swizzler's IDIV/IMOD
+// decomposition). Strides come from the dims[] argument when supplied;
+// when dims[] is NULL we recover them from each UOP_RANGE leaf's
+// extent (heap field 2) and fall back to a flat IADD if any axis isn't
+// a bare RANGE -- caller responsibility for the elementwise path.
+static Term ru_build_addr_with_dims(Term const *rngs, u8 ndim,
+                                     u32 const *dims) {
   if (ndim == 0) return uop_const(DT_INT32, 0);
-  u32 dims[RU_MAX_AXES] = {0};
-  for (u8 a = 0; a < ndim; a++) {
-    Term r = rngs[a];
-    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
-      // Fallback: flat IADD if any range isn't a recognisable extent.
-      Term acc = rngs[0];
-      for (u8 b = 1; b < ndim; b++) {
-        acc = uop_int_binary(UOP_IADD, acc, rngs[b]);
+  u32 local_dims[RU_MAX_AXES] = {0};
+  if (dims == NULL) {
+    for (u8 a = 0; a < ndim; a++) {
+      Term r = rngs[a];
+      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
+        Term acc = rngs[0];
+        for (u8 b = 1; b < ndim; b++) {
+          acc = uop_int_binary(UOP_IADD, acc, rngs[b]);
+        }
+        return acc;
       }
-      return acc;
+      local_dims[a] = (u32)term_val(heap_read(term_val(r) + 2));
     }
-    dims[a] = (u32)term_val(heap_read(term_val(r) + 2));
+    dims = local_dims;
   }
   u32 strides[RU_MAX_AXES] = {0};
   strides[ndim - 1] = 1;
@@ -885,7 +908,13 @@ static Term ru_build_addr_from_ranges(Term const *rngs, u8 ndim) {
   }
   Term acc = 0;
   for (u8 a = 0; a < ndim; a++) {
+    if (strides[a] == 0) continue;
     Term term = rngs[a];
+    // Drop CONST(0) addends and stride-1 IMULs to keep the tree tight.
+    if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_CONST
+        && term_val(heap_read(term_val(term) + 0)) == 0) {
+      continue;
+    }
     if (strides[a] != 1) {
       term = uop_int_binary(UOP_IMUL, term,
                             uop_const(DT_INT32, strides[a]));
@@ -893,6 +922,10 @@ static Term ru_build_addr_from_ranges(Term const *rngs, u8 ndim) {
     acc = (acc == 0) ? term : uop_int_binary(UOP_IADD, acc, term);
   }
   return acc != 0 ? acc : uop_const(DT_INT32, 0);
+}
+
+static Term ru_build_addr_from_ranges(Term const *rngs, u8 ndim) {
+  return ru_build_addr_with_dims(rngs, ndim, NULL);
 }
 
 // Builds the "INDEX expression" Term that a consumer references when it
@@ -908,9 +941,29 @@ static Term ru_build_index_addr(RuRangeMap const *rm) {
 // Body/input addr: includes the reduce range (and any movement-op
 // swizzle). For non-REDUCE nodes this is identical to the output addr
 // because in_rngs == out_rngs; for REDUCE the reduce range was injected
-// at raxis in run_rangeify_unified's UOP_REDUCE branch.
-static Term ru_build_input_addr(RuRangeMap const *rm) {
+// at raxis in run_rangeify_unified's UOP_REDUCE branch.  When `loc` is
+// supplied we read the producer's shape (heap[loc + 0]) and use its
+// dims for strides -- needed when the RESHAPE / PAD swizzler produced
+// IDIV/IMOD expressions whose extents can't be recovered from a bare
+// UOP_RANGE leaf.
+// Heap loc 0 is a legitimate heap allocation -- it can't double as
+// "no loc" without colliding.  Use HEAP_NEXT (one past the high-water
+// mark) as the sentinel.
+#define RU_NO_LOC ((u64)~0ull)
+
+static Term ru_build_input_addr_for(RuRangeMap const *rm, u64 loc) {
+  Shape src_shape;
+  if (loc != RU_NO_LOC && ru_node_src_shape(loc, &src_shape)
+      && src_shape.ndim == rm->in_ndim) {
+    u32 dims[RU_MAX_AXES] = {0};
+    for (u8 a = 0; a < rm->in_ndim; a++) dims[a] = src_shape.dims[a];
+    return ru_build_addr_with_dims(rm->in_rngs, rm->in_ndim, dims);
+  }
   return ru_build_addr_from_ranges(rm->in_rngs, rm->in_ndim);
+}
+
+static Term ru_build_input_addr(RuRangeMap const *rm) {
+  return ru_build_input_addr_for(rm, RU_NO_LOC);
 }
 
 // Count of UOP_BUFFERIZE nodes emitted on the main heap by the most
@@ -1039,7 +1092,7 @@ fn void pm_apply_rangeify(Term root) {
       // rm->in_rngs uniformly; the elementwise case is the identity
       // in_rngs == out_rngs and falls through to the same shape.
       Term my_addr   = ru_build_index_addr(rm);
-      Term in_addr   = ru_build_input_addr(rm);
+      Term in_addr   = ru_build_input_addr_for(rm, info->loc);
       Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
       // Same REDUCE-axis rewire as the non-realized branch below: when
       // this node itself is a REDUCE that landed at the realize boundary,
@@ -1122,7 +1175,7 @@ fn void pm_apply_rangeify(Term root) {
       // otherwise), and downstream producer RU_SUBSTs are spliced in.
       // The consumer's own ru_rewrite_subtree then plugs this in
       // verbatim (its TAG_UOP child branch hits our RU_SUBST entry).
-      Term in_addr   = ru_build_input_addr(rm);
+      Term in_addr   = ru_build_input_addr_for(rm, info->loc);
       Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
       // Rewire UOP_REDUCE's axis field from the original shape-axis index
       // (e.g. "axis 1 of {3,2}") to the freshly minted UOP_RANGE's axis_id.

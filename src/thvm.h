@@ -2546,6 +2546,16 @@ fn void apply_movement_op_expand (u32 ndim, u32 const *in_shape,
 fn void apply_movement_op_pad    (u32 ndim, u32 const *in_shape,
                                   u32 const *begin_end,
                                   Term const *out_rngs, Term *in_rngs);
+// RESHAPE handler. Maps consumer's `out_rngs` (rank = out_ndim, with extents
+// `out_shape[]`) into the producer's `in_rngs` (rank = in_ndim, extents
+// `in_shape[]`) by aligning groups of axes whose cumulative products match.
+// Returns 1 when the alignment succeeds (covers the common "merge contiguous
+// axes" and "split one axis" cases); 0 when the shapes don't decompose into
+// matching groups (e.g. a stride-trick rank-merge that needs tinygrad's
+// `_apply_reshape`/`pm_simplify_valid` and falls back to the identity stub).
+fn int  apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
+                                  u32 in_ndim,  u32 const *in_shape,
+                                  Term const *out_rngs, Term *in_rngs);
 
 // === pm_simplify_valid + pm_drop_and_clauses ===
 // 1-to-1 port surface of tinygrad/uop/symbolic.py:423 / 385.  Identity
