@@ -30,6 +30,19 @@ static void rmu_emit_term(Term t, FILE *fp);
 // plain function signature without Metal kernel attributes.
 static int RMU_TARGET_C = 0;
 
+// Emit an unroll pragma matching the current target's syntax.  C99 /
+// clang accept `#pragma clang loop unroll_count(N)`; MSL / GPU targets
+// use the GCC-style `#pragma unroll(N)`.  factor==0 means "full".
+static void rmu_emit_unroll_pragma(FILE *fp, u32 factor) {
+  if (RMU_TARGET_C) {
+    if (factor > 0) fprintf(fp, "#pragma clang loop unroll_count(%u)\n", factor);
+    else            fputs("#pragma clang loop unroll(full)\n", fp);
+  } else {
+    if (factor > 0) fprintf(fp, "#pragma unroll(%u)\n", factor);
+    else            fputs("#pragma unroll\n", fp);
+  }
+}
+
 // Reduce-axis loop unroll threshold.  When a scalar accumulator's
 // reduce axis has extent <= this and the target is MSL (not C99), the
 // renderer emits `#pragma unroll(<extent>)` immediately above the
@@ -996,13 +1009,7 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
         && (out_kinds[i] == UOP_OPT_UNROLL || out_kinds[i] == UOP_OPT_UPCAST)
         && !threadbound) {
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      if (RMU_TARGET_C) {
-        if (out_factors[i] > 0) fprintf(fp, "#pragma clang loop unroll_count(%u)\n", out_factors[i]);
-        else                    fputs("#pragma clang loop unroll(full)\n", fp);
-      } else {
-        if (out_factors[i] > 0) fprintf(fp, "#pragma unroll(%u)\n", out_factors[i]);
-        else                    fputs("#pragma unroll\n", fp);
-      }
+      rmu_emit_unroll_pragma(fp, out_factors[i]);
     }
     rmu_emit_range_open_ctx(r, fp, body_depth, out_kinds[i], &gd);
     if (!threadbound) { needs_close[i] = 1; body_depth++; }
@@ -2010,13 +2017,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   // MSL compiler can straight-line the contraction MADs.
   if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    if (RMU_TARGET_C) {
-      if (red_factor_opt > 0) fprintf(fp, "#pragma clang loop unroll_count(%u)\n", red_factor_opt);
-      else                    fputs("#pragma clang loop unroll(full)\n", fp);
-    } else {
-      if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
-      else                    fputs("#pragma unroll\n", fp);
-    }
+    rmu_emit_unroll_pragma(fp, red_factor_opt);
   } else if (red_kind_opt == RMU_NO_OPT && !RMU_TARGET_C) {
     u32 red_extent = uop_range_extent(red_range);
     if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
@@ -2293,11 +2294,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
             || opt_kinds[i] == UOP_OPT_UPCAST)
         && !threadbound) {
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      if (opt_factors[i] > 0) {
-        fprintf(fp, "#pragma unroll(%u)\n", opt_factors[i]);
-      } else {
-        fputs("#pragma unroll\n", fp);
-      }
+      rmu_emit_unroll_pragma(fp, opt_factors[i]);
     }
     rmu_emit_range_open_ctx(r, fp, body_depth, opt_kinds[i], &g_decode);
     if (!threadbound) {
