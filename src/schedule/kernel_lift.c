@@ -34,6 +34,11 @@ fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
 
 // Reject diagnostic: when env-gated, print the first ScalarUop the
 // lifter doesn't handle.
+// Diagnostic: when env-gated, log a lift decline.  The original
+// scalar-arena inspection went with the legacy walker (commit
+// 8f5e9420); kernels reaching this dispatcher either succeed via
+// the unified short-circuit or via kernel_lift_from_conv2d /
+// kernel_lift_from_kprog.
 static void lift_reject_log(KernelEntry const *ke, u32 sid,
                             const char *where) {
   static int reject_log_inited = 0;
@@ -44,49 +49,13 @@ static void lift_reject_log(KernelEntry const *ke, u32 sid,
     reject_log_inited = 1;
   }
   if (!reject_log_on) return;
-  if (sid == 0 || sid >= ke->n_scalar_uops) {
-    fprintf(stderr, "lift reject: %s sid=%u (out of range)\n", where, sid);
-    return;
-  }
-  ScalarUop const *u = &ke->scalar_uops[sid];
-  fprintf(stderr,
-          "lift reject: %s op=%s(%u) src_count=%u dtype=%u\n",
-          where, scalar_op_name(u->op), u->op, u->src_count, u->dtype);
+  (void)ke;
+  fprintf(stderr, "lift reject: %s sid=%u\n", where, sid);
 }
 
-// Walk the scalar arena to find an S_INDEX(slot, ranges...) usage
-// for the given DEFINE_PARAM slot id, and read the per-axis extents
-// from the referenced S_RANGE leaves.  Used as a fallback when the
-// kernel's input_tids[slot] doesn't have a TenDesc (synthetic test
-// kernels, or paths where TenDesc isn't yet wired).  Returns 1 on
-// success, filling `*ndim_out` and `dims_out[]`.
-static int infer_input_shape_from_usage(KernelEntry const *ke, u32 slot,
-                                        u32 *ndim_out, u32 *dims_out) {
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    ScalarUop const *u = &ke->scalar_uops[i];
-    if (u->op != S_INDEX || u->src_count < 1) continue;
-    u32 buf_sid = u->src[0];
-    if (buf_sid == 0 || buf_sid >= ke->n_scalar_uops) continue;
-    ScalarUop const *bu = &ke->scalar_uops[buf_sid];
-    if (bu->op != S_DEFINE_PARAM || (u32)bu->extra != slot) continue;
-    u32 ndim = (u32)u->src_count - 1;
-    if (ndim == 0 || ndim > MAX_DIM) continue;
-    for (u32 d = 0; d < ndim; d++) {
-      u32 r_sid = u->src[1 + d];
-      if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
-      ScalarUop const *ru = &ke->scalar_uops[r_sid];
-      if (ru->op != S_RANGE) return 0;
-      dims_out[d] = (u32)(ru->extra & 0xFFFFFFFFu);
-    }
-    *ndim_out = ndim;
-    return 1;
-  }
-  return 0;
-}
-
-// Build a UOP_BUFFER for kernel input slot `slot`.  Prefers the
-// TenDesc shape when present; falls back to inferring from the
-// S_INDEX usage in the scalar arena (test kernels, synthetic shapes).
+// Build a UOP_BUFFER for kernel input slot `slot` from the
+// TenDesc shape.  Falls back to a 1D dummy when the slot has no
+// TenDesc (test fixtures or paths where TenDesc isn't wired).
 //
 // The `instance` field on UOP_BUFFER ensures distinct slots get
 // distinct Terms even when shape collides; we use slot+1 (since
@@ -101,12 +70,6 @@ static Term lift_input_buffer(KernelEntry const *ke, u32 slot) {
     return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype,
                            td->view.shape.ndim, td->view.shape.dims, inst);
   }
-  u32 ndim = 0;
-  u32 dims[MAX_DIM] = {0};
-  if (infer_input_shape_from_usage(ke, slot, &ndim, dims)) {
-    return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, ndim, dims, inst);
-  }
-  // No usage found -- 1D dummy buffer.
   u32 dummy[1] = { 1 };
   return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, 1, dummy, inst);
 }
