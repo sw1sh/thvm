@@ -700,6 +700,43 @@ icBuildSearchTerm[conjPair_, axPairs_, depth_Integer] := Block[{
     TOp2["==", final[[1]], final[[2]]]
 ]
 
+(* Trace-term counterpart of icStepFold: instead of rewriting atoms,
+   accumulate the per-step choice code.  rIdxSup fans over the
+   rewrite-fn INDICES {0..n-1} at the SAME labels icStepFold's rSup
+   uses, and sideSup over {0,1} at the same label.
+
+   Per-step code = side*n + rewriteIdx, placed in base-(2n) digit
+   position stepIdx-1 (step 1 = least significant).  The current
+   step's code is the LEFT operand of the accumulating OP2, so its
+   SUP lifts outermost on collapse -- matching the search Term,
+   where lhsD/rhsD wrap the last step's sideSup outermost.  Equal
+   nesting => identical collapse leaf order => the two collapses
+   zip leaf-for-leaf. *)
+icTraceStepFold[n_][acc_, stepIdx_] := Block[{
+    traceAcc = acc[[1]], labCur = acc[[2]], rIdxSup, sideSup, stepCode
+},
+    rIdxSup = icNestedSup[labCur, Table[TNum[i], {i, 0, n - 1}]];
+    sideSup = TSup[labCur + n, TNum[0], TNum[1]];
+    stepCode = TOp2["+", TOp2["*", sideSup, TNum[n]], rIdxSup];
+    {
+        TOp2["+",
+            TOp2["*", stepCode, TNum[(2 n)^(stepIdx - 1)]],
+            traceAcc],
+        labCur + n + 1
+    }
+]
+
+(* Build the trace Term parallel to icBuildSearchTerm: same depth,
+   same SUP labels, so collapse-leaf k of this Term carries the
+   choice code for collapse-leaf k of the search Term.  Decoding
+   the code (base 2n, depth digits) recovers each step's
+   (side, rewriteIdx). *)
+icBuildTraceTerm[axPairs_, depth_Integer] := Block[{n},
+    n = 2 * Length[axPairs];
+    First @ Fold[icTraceStepFold[n],
+        {TNum[0], $icSupBase}, Range[depth]]
+]
+
 (* True iff the conjecture is provable from the axioms in <= depth
    rewrite steps, decided by IC reduction + collapse.  Returns
    $Failed when the problem isn't atomic (caller falls back to the
@@ -788,17 +825,18 @@ trivialConclusionEntry[hypInactive_] := {$ConclusionSym, 1} -> <|
     |>
 |>
 
-buildProofDataset[axioms_, conjecture_] := Block[{
-    axCount = Length[axioms],
-    axiomKeys, hypInactive, ruleList, chainRes, chain,
+(* Assemble the sorted ProofDataset from a finished rewrite chain.
+   `chain` is a list of step records (<|NewExpr, Position, RuleIdx,
+   Rule|>); `ruleList` is the forward+backward rule table the
+   RuleIdx fields index into.  Shared by the BFS path
+   (buildProofDataset) and the IC-search path (icBuildProofDataset)
+   so both emit byte-identical dataset shape. *)
+assembleDataset[axioms_, conjecture_, chain_, ruleList_] := Block[{
+    axCount = Length[axioms], axiomKeys, hypInactive,
     axiomEntries, chainEntries, allEntries
 },
     hypInactive = Inactive[Equal] @@ conjecture;
-    ruleList = buildRuleList[axioms, axiomKeys = Table[{$AxiomSym, k},
-        {k, axCount}]];
-    chainRes = synthesizeChain[hypInactive, ruleList];
-    If[ ! chainRes["Closed"], Return[$Failed] ];
-    chain = chainRes["Hist"];
+    axiomKeys = Table[{$AxiomSym, k}, {k, axCount}];
     axiomEntries = Table[
         axiomKeys[[k]] -> <|
             "Statement" -> toHoldEq[Inactive[Equal] @@ axioms[[k]]],
@@ -833,6 +871,121 @@ buildProofDataset[axioms_, conjecture_] := Block[{
     SortBy[allEntries, $ProofKeyOrder[First[#]] &]
 ]
 
+buildProofDataset[axioms_, conjecture_] := Block[{
+    axiomKeys, ruleList, chainRes
+},
+    ruleList = buildRuleList[axioms, axiomKeys = Table[{$AxiomSym, k},
+        {k, Length[axioms]}]];
+    chainRes = synthesizeChain[Inactive[Equal] @@ conjecture, ruleList];
+    If[ ! chainRes["Closed"], Return[$Failed] ];
+    assembleDataset[axioms, conjecture, chainRes["Hist"], ruleList]
+]
+
+(* === IC-search proof decoder (milestone 4) ======================== *)
+
+(* One replay step.  acc = {state, stepRecs}.  `step` is a decoded
+   {side, ruleIdx0} pair.  Applies ruleList[[ruleIdx0+1]]'s rewrite
+   to the chosen side of the Inactive[Equal] state; emits a step
+   record only when the rewrite actually fired (atoms that don't
+   match the rule's lhs leave the state unchanged -- the IC search
+   freely picks such no-op steps, and they're dropped here).  Once
+   the state is a tautology the proof is closed; further steps are
+   ignored. *)
+icReplayStep[ruleList_][acc_, step_] := Block[{
+    state = acc[[1]], recs = acc[[2]],
+    side = step[[1]], r = step[[2]], rule, newState
+},
+    If[ tautologyQ[state],
+        acc,
+        rule = ruleList[[r + 1]]["Rule"];
+        newState = ReplaceAt[state, rule, {side + 1}];
+        If[ newState === state,
+            acc,
+            {newState, Append[recs, <|
+                "NewExpr" -> newState,
+                "Position" -> {side + 1},
+                "RuleIdx" -> r + 1,
+                "Rule" -> rule
+            |>]}
+        ]
+    ]
+]
+
+(* Replay a decoded choice sequence into a chain of step records.
+   Atomic problems only -- each rewrite targets a whole side of the
+   Inactive[Equal], so Position is {1} (lhs) or {2} (rhs). *)
+icReplayChain[conjPair_, decoded_, ruleList_] := Last @ Fold[
+    icReplayStep[ruleList],
+    {Inactive[Equal] @@ conjPair, {}},
+    decoded
+]
+
+(* True iff `chain` (a list of replay step records) actually closes
+   the conjecture: empty chain is valid only for an already-reflexive
+   conjecture, otherwise the last step's NewExpr must be a tautology. *)
+icChainClosedQ[chain_, conjPair_] := If[
+    chain === {},
+    conjPair[[1]] === conjPair[[2]],
+    tautologyQ[Last[chain]["NewExpr"]]
+]
+
+(* Decode the IC search's winning leaf into a rewrite chain.  Builds
+   the depth-D search Term + the parallel trace Term, collapses
+   both, and zips: the search collapse marks which leaf closed the
+   conjecture (NUM(1)), the trace collapse carries that leaf's
+   choice code.  IntegerDigits base-2n splits the code into per-step
+   (side, rewriteIdx); icReplayChain turns those into step records.
+
+   The trace zip relies on the search Term and trace Term collapsing
+   to the same leaf order; that holds while the search Term's
+   multi-step OP2-SUP annihilation keeps the per-step skeleton clean
+   (verified through depth 2).  Deeper searches can drift, so the
+   decoded chain is replay-verified here -- icChainClosedQ rejects a
+   chain that doesn't reach a tautology, and the caller falls back
+   to the BFS.  Returns $Failed when no leaf closes within `depth`
+   or the decoded chain doesn't replay-close. *)
+icDecodeChain[conjPair_, axPairs_, depth_Integer, ruleList_] := Block[{
+    n, proofLeaves, traceLeaves, provenPos, traceCode,
+    stepCodes, decoded, chain
+},
+    n = 2 * Length[axPairs];
+    proofLeaves = FromTTerm /@ TCollapse[
+        icBuildSearchTerm[conjPair, axPairs, depth]];
+    traceLeaves = FromTTerm /@ TCollapse[
+        icBuildTraceTerm[axPairs, depth]];
+    If[ Length[proofLeaves] =!= Length[traceLeaves],
+        Return[$Failed]
+    ];
+    provenPos = FirstPosition[proofLeaves, 1, $Failed, {1}];
+    If[ provenPos === $Failed, Return[$Failed] ];
+    traceCode = traceLeaves[[ First[provenPos] ]];
+    (* traceCode is base-(2n): step 1 = least-significant digit.
+       IntegerDigits is most-significant-first, so Reverse gets
+       {step1code, ..., stepDcode}. *)
+    stepCodes = If[ depth === 0 || n === 0,
+        {},
+        Reverse @ IntegerDigits[traceCode, 2 n, depth]
+    ];
+    decoded = Function[sc, {Quotient[sc, n], Mod[sc, n]}] /@ stepCodes;
+    chain = icReplayChain[conjPair, decoded, ruleList];
+    If[ icChainClosedQ[chain, conjPair], chain, $Failed ]
+]
+
+(* IC-search counterpart of buildProofDataset: decide + decode the
+   proof by IC reduction, then assemble the same dataset shape.
+   Atomic-equational only; returns $Failed otherwise (or when the
+   conjecture isn't provable within `depth`). *)
+icBuildProofDataset[conjPair_, axPairs_, depth_Integer] := Block[{
+    axiomKeys, ruleList, chain
+},
+    If[ ! icAtomicProblemQ[axPairs, conjPair], Return[$Failed] ];
+    ruleList = buildRuleList[axPairs, axiomKeys = Table[{$AxiomSym, k},
+        {k, Length[axPairs]}]];
+    chain = icDecodeChain[conjPair, axPairs, depth, ruleList];
+    If[ chain === $Failed, Return[$Failed] ];
+    assembleDataset[axPairs, conjPair, chain, ruleList]
+]
+
 $ProofKeyOrder[{"Axiom", k_}] := {1, k}
 $ProofKeyOrder[{"Hypothesis", k_}] := {2, k}
 $ProofKeyOrder[{"SubstitutionLemma", k_}] := {3, k}
@@ -841,20 +994,23 @@ $ProofKeyOrder[_] := {5, 0}
 
 (* === TFindEquationalProof ======================================== *)
 
-(* Build a verifier-ready ProofDataset via the WL-side BFS chain
-   synth and wrap it in a real WL ProofObject.  The chain synth
-   does the heavy lifting: when it reaches an Inactive[Equal][x,
-   x] tautology, the chain itself is the proof.  Returns $Failed
-   when the BFS doesn't close the conjecture within its budget.
+(* Build a verifier-ready ProofDataset and wrap it in a real WL
+   ProofObject.
 
-   Historically this also called the C-side ATP saturator and
-   accepted proven-by-C as a secondary signal.  The C path is
-   gone (milestone 6 of the IC-native ATP arc); the BFS is the
-   sole provability check.  IC-search-based reduction (milestone
-   4 of the same arc) would replace the BFS once the SUP-path
-   decoder lands -- the IC search produces "is provable" much
-   like the BFS does, but driven by IC reduction instead of
-   WL-side rewrite enumeration.
+   Atomic-equational problems take the IC-search path
+   (icBuildProofDataset): the proof is decided AND decoded by IC
+   reduction -- a depth-D SUP-fanout search Term collapses to
+   NUM(0)/NUM(1) leaves, the winning leaf's choice code is read
+   off the parallel trace Term, and the decoded rewrite sequence
+   replays into the chain.  Structured / pattern problems (and any
+   atomic case the IC search can't close within its depth bound)
+   fall back to the WL-side BFS chain synth (buildProofDataset).
+   Both paths funnel through assembleDataset, so the ProofObject
+   shape is identical and the WL verifier accepts either.
+
+   Returns $Failed when neither path closes the conjecture.  The
+   C-side ATP saturator is no longer consulted (milestone 6 of
+   the IC-native ATP arc).
 
    atpEncodeProblem still validates axiom/conjecture shape
    (HoldAll + MatchQ HoldComplete[Equal[_,_]]) and surfaces the
@@ -878,7 +1034,23 @@ TFindEquationalProof[conjecture_, axioms_, OptionsPattern[]] := Catch[
         conjPair = enc["ConjPair"];
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         conjStmt = holdToInactive[enc["ConjHCRaw"]];
-        dataset = buildProofDataset[enc["AxPairs"], conjPair];
+        (* Atomic problems: decide + decode via IC reduction.  Depth
+           bound = axiom count (a minimal atomic proof uses each
+           directed edge at most once).  Fall back to the BFS when
+           the IC search doesn't close it, or for non-atomic
+           (structured / pattern) problems. *)
+        dataset = If[ icAtomicProblemQ[enc["AxPairs"], conjPair],
+            With[{
+                icd = icBuildProofDataset[conjPair, enc["AxPairs"],
+                    Length[enc["AxPairs"]]]
+            },
+                If[ icd === $Failed,
+                    buildProofDataset[enc["AxPairs"], conjPair],
+                    icd
+                ]
+            ],
+            buildProofDataset[enc["AxPairs"], conjPair]
+        ];
         If[ dataset === $Failed, Return[$Failed] ];
         varNames = Symbol /@ Keys[enc["State"]["var"]];
         ProofObject[

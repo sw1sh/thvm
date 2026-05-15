@@ -670,3 +670,62 @@ VerificationTest[
     True,
     TestID -> "ATP/IC/oracle-agrees-with-bfs-on-atomic-battery"
 ]
+
+(* === IC-search proof decoder (milestone 4) ========================= *)
+
+(* icBuildProofDataset decides + decodes a proof entirely by IC
+   reduction: the SUP-fanout search picks a winning leaf, the
+   parallel trace Term carries its choice code, and the decoded
+   rewrite sequence replays into a chain.  The decoded chain is
+   replay-verified (icChainClosedQ) -- a chain that doesn't reach a
+   tautology yields $Failed so TFindEquationalProof falls back to
+   the BFS.  Atomic-equational only. *)
+
+VerificationTest[
+    (* Decoder produces a full dataset for transitivity-3, keyed by
+       the expected proof-step roles. *)
+    First /@ THVMLink`Private`icBuildProofDataset[
+        {a, c}, {{a, b}, {b, c}}, 2],
+    {{"Axiom", 1}, {"Axiom", 2}, {"Hypothesis", 1},
+     {"SubstitutionLemma", 1}, {"Conclusion", 1}},
+    TestID -> "ATP/ICdec/transitivity-3-dataset-shape"
+]
+
+VerificationTest[
+    (* The IC-decoded chain closes: the Conclusion Statement is a
+       reflexive Equal. *)
+    Module[{ds, concl},
+        ds = THVMLink`Private`icBuildProofDataset[
+            {a, c}, {{a, b}, {b, c}}, 2];
+        concl = Cases[ds, ({"Conclusion", _} -> e_) :> e["Statement"]];
+        MatchQ[concl, {HoldForm[Equal[x_, x_]]}]
+    ],
+    True,
+    TestID -> "ATP/ICdec/transitivity-3-conclusion-reflexive"
+]
+
+VerificationTest[
+    (* Unprovable conjecture: no winning leaf -> $Failed. *)
+    THVMLink`Private`icBuildProofDataset[{a, d}, {{a, b}, {b, c}}, 2],
+    $Failed,
+    TestID -> "ATP/ICdec/unprovable-yields-failed"
+]
+
+VerificationTest[
+    (* Non-atomic problem -> $Failed (caller uses the BFS). *)
+    THVMLink`Private`icBuildProofDataset[{f[a], f[b]}, {{a, b}}, 1],
+    $Failed,
+    TestID -> "ATP/ICdec/non-atomic-yields-failed"
+]
+
+VerificationTest[
+    (* End to end: an IC-decoded ProofObject passes WL's verifier.
+       backward-needed forces both axioms to be used right-to-left,
+       which the decoder handles via Orientation -> -1. *)
+    Module[{p},
+        p = TFindEquationalProof[c == a, {a == b, b == c}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/ICdec/backward-needed-ic-decoded-verifies"
+]

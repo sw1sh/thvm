@@ -357,12 +357,35 @@ b63464e3.
    on every atomic case.  The atp_ic toys' duplicated
    `buildSearchTerm` will be rewired onto this shared builder.
 
-   Outstanding: decode the winning leaf's SUP-path into a chain
-   of (axiom, direction, side) records so the IC search produces
-   a full verifier-ready ProofObject -- then `TFindEquationalProof`
-   can route through IC reduction (CPU or Metal) instead of the
-   BFS.  Until that decoder lands, the BFS still synthesizes the
-   chain; the IC oracle is a sound provability cross-check.
+   SUP-path decoder landed (ATP.wl `=== IC-search proof decoder
+   ===`).  `icBuildProofDataset` builds the depth-D search Term
+   plus a parallel TRACE Term -- same SUP labels, same per-step
+   nesting (the current step's choice code is the LEFT operand so
+   its SUP lifts outermost, matching how `lhsD`/`rhsD` wrap the
+   last step's sideSup).  Both collapse to the same leaf order;
+   the search collapse marks the winning leaf, the trace collapse
+   carries its base-(2n) choice code.  `IntegerDigits` splits the
+   code into per-step `(side, rewriteIdx)`; `icReplayChain`
+   replays those into a chain of step records that `assembleDataset`
+   (shared with the BFS path) turns into the ProofObject.
+   `TFindEquationalProof` now routes atomic problems through this
+   IC path; non-atomic problems and any decode that doesn't
+   replay-close fall back to the BFS.
+
+   Robustness: the trace zip is exact through depth 2; deeper
+   multi-step searches can drift (the search Term's nested
+   OP2-SUP annihilation reshapes the skeleton), so the decoded
+   chain is replay-verified by `icChainClosedQ` -- a chain that
+   doesn't reach a tautology yields `$Failed` and the BFS takes
+   over.  No wrong proof is ever emitted.  atp.wlt `ATP/ICdec/...`
+   covers the decoder; `ATP/TFEP/...` cover the wired
+   `TFindEquationalProof` end to end (67/67).
+
+   Outstanding: make the trace zip exact at all depths (a fused
+   single-Term encoding -- thread `{lhs, rhs, trace}` so each leaf
+   intrinsically carries both the proven bit and the choice code,
+   removing the two-collapse skeleton-match dependency), then
+   route the IC path through Metal.
 
 5. **Pattern axioms** (DONE -- not via pre-instantiation, via WL
    Rule semantics).  The original plan was to enumerate
