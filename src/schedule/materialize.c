@@ -3132,13 +3132,21 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // kept populated as a redundant view of cached_lift.store_root.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
     ke->compute_root = ke->cached_lift.store_root;
-    // THVM_LIFT_FROM_UNIFIED=1: substitute the lifter's store_root
-    // with the unified-pass output where available.  Diagnostic
-    // bypass; the lifter's other cached_lift fields (in_bufs[],
-    // n_inputs) stay populated from the legacy path, so downstream
-    // CPU walker / Metal renderer use the unified root for compute
-    // but the legacy buffer table for I/O binding.
-    if (getenv("THVM_LIFT_FROM_UNIFIED")) {
+    // Substitute the lifter's store_root with the unified-pass
+    // output where available.  The lifter's other cached_lift
+    // fields (in_bufs[], n_inputs) stay populated from the legacy
+    // path, so downstream CPU walker / Metal renderer use the
+    // unified root for compute but the legacy buffer table for I/O
+    // binding.  Three per-kernel safety gates (residual-BUFFERIZE,
+    // stranded-RANGE, broadcast-input) leave store_root on the
+    // legacy lifter's output for kernels the unified pass can't
+    // fully lower; the rest of the schedule still gets the bypass.
+    // THVM_LIFT_FROM_UNIFIED=0 reverts to the legacy lifter for the
+    // entire schedule (bisection knob; default ON).
+    {
+      char const *_e = getenv("THVM_LIFT_FROM_UNIFIED");
+      int _bypass_on = (_e == NULL) || (_e[0] != '0');
+    if (_bypass_on) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
         Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
@@ -3199,6 +3207,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
           ke->compute_root           = ru_rewritten;
         }
       }
+    }
     }
     // Identity check: rangeify_unified_store_root_at(idx) is the
     // unified-pass UOP_STORE for this boundary (when dtype inference
