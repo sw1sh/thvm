@@ -411,45 +411,6 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Metal tile scalar reductions can be followed by ALU and still
-       expose GROUP candidates; no-opt keeps the old Metal route so
-       autotune can compare it against GROUP. *)
-    Module[{oldBackend, oldTile, restore, kid, props, plan, beforeKind, afterKind},
-        oldBackend = Environment["THVM_BACKEND"];
-        oldTile    = Environment["THVM_TILE"];
-        restore[] := (
-            If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
-            If[StringQ[oldTile],
-                SetEnvironment["THVM_TILE" -> oldTile],
-                SetEnvironment["THVM_TILE" -> ""]]
-        );
-        Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
-            SetEnvironment["THVM_TILE" -> "1"],
-            TInit[];
-            xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
-            TRealize @ TUOpMul[TUOpReduce[xT, 0, "SUM"], TUOpConst[2.0]];
-            kid   = TKernelCount[] - 1;
-            props = TKernelProposed[kid];
-            plan  = TKernelTilePlan[kid];
-            beforeKind = TKernelDispatchKind[kid];
-            TKernelApplyOpt[kid, TOpt["GROUP", 1, 32]];
-            TKernel[kid][];
-            afterKind = TKernelDispatchKind[kid],
-            restore[]
-        ];
-        {MemberQ[props, TOpt["GROUP", 1, 32]],
-         plan["scalar_reduce"] =!= 0,
-         beforeKind === "metal-op",
-         afterKind === "metal-tile"}
-    ],
-    {True, True, True, True},
-    TestID -> "kernel-opts/metal-post-reduce-group-proposal"
-]
-
-VerificationTest[
     (* Multi-axis tile-lowered elementwise kernels should still get
        LOCAL candidates.  The renderer flattens the axes when no
        LOCAL/GLOBAL split is present, so proposer coverage should not

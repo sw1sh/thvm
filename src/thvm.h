@@ -1096,25 +1096,6 @@ typedef struct {
   u32 reduce_unroll;      // unroll factor for the flattened conv reduction
 } TileConv2DInfo;
 
-typedef struct {
-  u32 root_id;
-  u32 store_tile_id;
-  u32 reduce_tile_id;
-  u32 body_tile_id;
-  u32 scalar_store_id;
-  u32 scalar_index_id;
-  u32 scalar_value_id;
-  u32 scalar_body_value_id;
-  u32 scalar_reduce_id;
-  u32 dtype;
-  u32 n_axes;
-  u32 axis_ids    [MAX_AXES];
-  u32 axis_types  [MAX_AXES];
-  u32 axis_extents[MAX_AXES];
-  // Matmul shape facts (formerly mma_tile_id / mma) flow through
-  // ke->cached_lift.store_root via uop_dag_classify_matmul_shape.
-} TilePlanInfo;
-
 // === Kernel lift to UOp DAG (forward decl) ===
 // Full prose lives near the kernel_lift_to_uop declaration further down;
 // the typedef is hoisted here so KernelEntry can embed it by-value as
@@ -2362,9 +2343,6 @@ int        tile_anno_axis_append(struct KernelEntry *ke, TileAxisInfo info);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);
-fn int  tile_validate(struct KernelEntry const *ke);
-fn int  tile_collect_plan_info(struct KernelEntry const *ke,
-                               TilePlanInfo *out);
 // Recognize the im2col-fused Conv2D reduce template produced by the
 // lowered UOp graph.  Renderers use this as a tile template instead
 // of carrying backend-private conv pattern matchers.

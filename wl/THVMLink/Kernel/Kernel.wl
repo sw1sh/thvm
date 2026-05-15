@@ -49,7 +49,6 @@ TKernelProgramKey::usage = "TKernelProgramKey[kid] returns the structural key fo
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].  Equivalent to TKernel[kid][\"Program\"] paired with the header (n_inputs, n_ops, output_numel, output_dtype).";
 TKernelScalarUops::usage = "TKernelScalarUops[kid] returns the post-lowering scalar-UOp graph snapshot stored at KERNELS[kid].scalar_uops, as a List of Associations (one per scalar op, with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\", and -- for S_RANGE -- \"axis_type\" and \"extent\").  Returns Missing[\"NotLowered\"] when the kernel was emitted via the legacy per-tensor-UOp visit() path (i.e. rangeify lowering was off or didn't apply).  Slot 0 (S_NONE sentinel) is included so list indices match C-side ScalarUop[] indices; live ops occupy positions [2..].";
 TKernelTileUops::usage = "TKernelTileUops[kid] returns the tile-UOp plan snapshot stored at KERNELS[kid].tile_uops, as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", and \"extra\".  TILE_AXIS entries also expose \"axis_type\" and \"extent\".  Returns Missing[\"NotLowered\"] when no rangeify tile plan exists.  Slot 0 (TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.";
-TKernelTilePlan::usage = "TKernelTilePlan[kid] returns a validated compact Association for KERNELS[kid].tile_uops: tile root/store/body ids, scalar store/index/value ids, dtype, axis metadata, and \"mma\" metadata for recognized matmul plans.  Returns Missing[\"NotLowered\"] when no validated rangeify tile plan exists.";
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
@@ -876,56 +875,6 @@ TKernelTileUops[kid_Integer] := Module[{raw, n, srcWidth, rowWidth, decoded},
       ],
       {i, n}];
     decoded
-]
-
-TKernelTilePlan[kid_Integer] := Module[{raw, nAxes, mmaBase, mma},
-    raw = Normal @ $kernelTilePlanInfoFn[kid];
-    If[ raw === {} || First[raw] == 0,
-      Return @ Missing["NotLowered"] ];
-    nAxes = raw[[2]];
-    mmaBase = 12 + nAxes * 3;
-    mma = If[ Length[raw] >= mmaBase + 11 && raw[[mmaBase + 1]] =!= 0,
-      <|
-        "tile"        -> raw[[mmaBase + 1]],
-        "dtype"       -> dtypeName[raw[[mmaBase + 2]]],
-        "M"           -> raw[[mmaBase + 3]],
-        "N"           -> raw[[mmaBase + 4]],
-        "K"           -> raw[[mmaBase + 5]],
-        "a_input"     -> raw[[mmaBase + 6]],
-        "b_input"     -> raw[[mmaBase + 7]],
-        "ldA"         -> raw[[mmaBase + 8]],
-        "ldB"         -> raw[[mmaBase + 9]],
-        "flags"       -> raw[[mmaBase + 10]],
-        "tile_size"   -> raw[[mmaBase + 11]],
-        "transpose_a" -> BitAnd[raw[[mmaBase + 10]], 1] =!= 0,
-        "transpose_b" -> BitAnd[raw[[mmaBase + 10]], 2] =!= 0
-      |>,
-      Missing["NotMMA"]
-    ];
-    <|
-      "valid"        -> True,
-      "root"         -> raw[[3]],
-      "store_tile"   -> raw[[4]],
-      "reduce_tile"  -> raw[[5]],
-      "body_tile"    -> raw[[6]],
-      "scalar_store" -> raw[[7]],
-      "scalar_index" -> raw[[8]],
-      "scalar_value" -> raw[[9]],
-      "scalar_body_value" -> raw[[10]],
-      "scalar_reduce" -> raw[[11]],
-      "dtype"        -> dtypeName[raw[[12]]],
-      "axes"         -> Table[
-          With[{base = 12 + (i - 1) * 3},
-            <|
-              "id"        -> raw[[base + 1]],
-              "axis_type" -> Lookup[$tileAxisNames, raw[[base + 2]], "?"],
-              "extent"    -> raw[[base + 3]]
-            |>
-          ],
-          {i, nAxes}
-      ],
-      "mma"          -> mma
-    |>
 ]
 
 End[];

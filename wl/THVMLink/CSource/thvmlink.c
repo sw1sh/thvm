@@ -2317,59 +2317,6 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_uops(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
-// thvm_wl_kernel_tile_plan_info(kid) -- compact TilePlanInfo snapshot:
-// [valid, n_axes, root, store_tile, reduce_tile, body_tile,
-//  scalar_store, scalar_index, scalar_value, scalar_body_value,
-//  scalar_reduce, dtype, axis_id, axis_type, extent, ...,
-//  mma_tile, mma_dtype, M, N, K, a_input, b_input, ldA, ldB, flags,
-//  tile_size].
-EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
-                                                     mint argc, MArgument *args,
-                                                     MArgument res) {
-  (void)argc;
-  mint kid = MArgument_getInteger(args[0]);
-  if (kid < 0 || (u32)kid >= KERNELS_NEXT) {
-    MArgument_setMTensor(res, NULL);
-    return LIBRARY_FUNCTION_ERROR;
-  }
-  KernelEntry  *ke      = &KERNELS[kid];
-  TilePlanInfo  info;
-  int           ok      = tile_collect_plan_info(ke, &info);
-  mint          nFields = ok ? (23 + (mint)info.n_axes * 3) : 1;
-  mint          dims[1] = {nFields};
-  MTensor out;
-  libData->MTensor_new(MType_Integer, 1, dims, &out);
-  mint *dst = libData->MTensor_getIntegerData(out);
-  mint idx  = 0;
-  dst[idx++] = ok ? 1 : 0;
-  if (ok) {
-    dst[idx++] = (mint)info.n_axes;
-    dst[idx++] = (mint)info.root_id;
-    dst[idx++] = (mint)info.store_tile_id;
-    dst[idx++] = (mint)info.reduce_tile_id;
-    dst[idx++] = (mint)info.body_tile_id;
-    dst[idx++] = (mint)info.scalar_store_id;
-    dst[idx++] = (mint)info.scalar_index_id;
-    dst[idx++] = (mint)info.scalar_value_id;
-    dst[idx++] = (mint)info.scalar_body_value_id;
-    dst[idx++] = (mint)info.scalar_reduce_id;
-    dst[idx++] = (mint)info.dtype;
-    for (u32 i = 0; i < info.n_axes; i++) {
-      dst[idx++] = (mint)info.axis_ids[i];
-      dst[idx++] = (mint)info.axis_types[i];
-      dst[idx++] = (mint)info.axis_extents[i];
-    }
-    // Slice 8 session 5 retired TilePlanInfo.mma_tile_id and TilePlanInfo.mma.
-    // TILE_MMA roots are no longer constructed by any in-tree path; matmul
-    // dispatch goes through cached_lift.store_root + recognise_tc instead.
-    // Emit 11 zeros to preserve the wire format -- WL TKernelTilePlan reads
-    // mma_tile_id == 0 as Missing["NotMMA"] (Kernel.wl:888).
-    for (u32 i = 0; i < 11; i++) dst[idx++] = 0;
-  }
-  MArgument_setMTensor(res, out);
-  return LIBRARY_NO_ERROR;
-}
-
 // === REF / ALO surface ===
 
 EXTERN_C DLLEXPORT int thvm_wl_def_register(WolframLibraryData libData, mint argc,

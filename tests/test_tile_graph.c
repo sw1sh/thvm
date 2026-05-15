@@ -374,9 +374,6 @@ int main(void) {
   CHECK_EQ(ke->n_tile_uops, 0);
   CHECK_EQ(ke->tile_uops_cap, 0);
   CHECK_EQ(ke->tile_root, 0);
-  TilePlanInfo info = {0};
-  CHECK(!tile_collect_plan_info(ke, &info));
-  CHECK(!tile_collect_plan_info(ke, NULL));
 
   TEST_BEGIN("tile-graph/opname-helpers-cover-enum");
   for (u8 op = TILE_NONE; op < TILE__COUNT; op++) {
@@ -657,7 +654,6 @@ int main(void) {
   CHECK_EQ(ke->tile_uops[100].op, TILE_AXIS);
   CHECK_EQ((u32)ke->tile_uops[100].extra, 99u);
   CHECK_EQ(ke->tile_root, 0);
-  CHECK(!tile_validate(ke));
 
   TEST_BEGIN("tile-graph/kernel-free-cleans-tile-and-scalar");
   kernel_free_arrays(ke);

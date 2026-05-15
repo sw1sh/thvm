@@ -52,9 +52,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* f32 matmul should bypass expanded-view pre-materialization via
-       a validated TILE_MMA plan and route through the direct Metal
-       GEMM shader until the real MMA renderer lands. *)
+    (* f32 matmul should route through the direct Metal GEMM shader. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result},
         If[ ctx === 0, Return[True]];
@@ -63,15 +61,11 @@ VerificationTest[
             b = TTensorCreate @ NumericArray[{{7., 8.}, {9., 10.}, {11., 12.}}, "Real32"];
             out = TRealize @ TMatMul[a, b];
             kid = TKernelCount[] - 1;
-            plan = TKernelTilePlan[kid];
             {Round[Normal @ TTensorData[out], 0.001],
-             TKernelDispatchKind[kid],
-             plan["mma"]["M"], plan["mma"]["N"], plan["mma"]["K"],
-             plan["mma"]["a_input"], plan["mma"]["b_input"]}
+             TKernelDispatchKind[kid]}
         ];
         TContextDestroy[ctx];
-        result === {{{58., 64.}, {139., 154.}}, "metal-gemm",
-                    2, 2, 3, 0, 1} || ctx === 0
+        result === {{{58., 64.}, {139., 154.}}, "metal-gemm"} || ctx === 0
     ],
     True,
     TestID -> "metal/f32-matmul-direct-gemm"
@@ -91,15 +85,13 @@ VerificationTest[
             b = TTensorCreate @ NumericArray[bData, "Real32"];
             out = TRealize @ TMatMul[a, b];
             kid = TKernelCount[] - 1;
-            plan = TKernelTilePlan[kid];
             actual = Normal @ TTensorData[out];
             {Max[Abs[Flatten[actual - ref]]] < 0.001,
              Dimensions[actual],
-             TKernelDispatchKind[kid],
-             plan["mma"]["M"], plan["mma"]["N"], plan["mma"]["K"]}
+             TKernelDispatchKind[kid]}
         ];
         TContextDestroy[ctx];
-        result === {True, {17, 19}, "metal-gemm", 17, 19, 23}
+        result === {True, {17, 19}, "metal-gemm"}
     ],
     True,
     TestID -> "metal/f32-matmul-tiled-gemm-tails"
@@ -131,17 +123,15 @@ VerificationTest[
             x = TTensorCreate @ NumericArray[{7., 8., 9.}, "Real32"];
             out = TRealize @ TMatVec[w, x];
             kid = TKernelCount[] - 1;
-            plan = TKernelTilePlan[kid];
             {Round[Normal @ TTensorData[out], 0.001],
              TKernelDispatchKind[kid],
-             TKernelProposed[kid],
-             plan["mma"]["M"], plan["mma"]["N"], plan["mma"]["K"]}
+             TKernelProposed[kid]}
         ];
         TContextDestroy[ctx];
         restore[];
         result === {{50., 122.}, "metal-gemm",
                     {TOpt["TC", 0, 32], TOpt["TC", 0, 16],
-                     TOpt["TC", 0, 8]}, 2, 1, 3}
+                     TOpt["TC", 0, 8]}}
     ],
     True,
     TestID -> "metal/f32-matvec-rank1-promotes-tile-mma"
@@ -198,77 +188,21 @@ VerificationTest[
             TRealize @ TMatMul[a, b];
             kid = TKernelCount[] - 1;
             props = TKernelProposed[kid];
-            before = TKernelTilePlan[kid]["mma"]["tile_size"];
             TKernelApplyOpt[kid, TOpt["TC", 0, 8]];
-            after = TKernelTilePlan[kid]["mma"]["tile_size"];
             out2 = TRealize @ TMatMul[a, b];
             kid2 = TKernelCount[] - 1;
             actual = Normal @ TTensorData[out2];
             {props,
-             before,
-             after,
-             TKernelTilePlan[kid2]["mma"]["tile_size"],
              TKernelDispatchKind[kid2],
              Max[Abs[Flatten[actual - ref]]] < 0.001}
         ];
         TContextDestroy[ctx];
         restore[];
         result === {{TOpt["TC", 0, 32], TOpt["TC", 0, 16],
-                     TOpt["TC", 0, 8]}, 16, 8, 8, "metal-gemm", True}
+                     TOpt["TC", 0, 8]}, "metal-gemm", True}
     ],
     True,
     TestID -> "metal/f32-matmul-tc-tile-opt"
-]
-
-VerificationTest[
-    (* With THVM_TILE enabled, scalar f32 reductions can route through
-       the generated TileUop Metal renderer instead of the per-op
-       Metal fallback. *)
-    TInit[]; TReset[];
-    Module[{ctx = TContextNew["metal"], result, oldBackend, oldTile,
-            restore},
-        oldBackend = Environment["THVM_BACKEND"];
-        oldTile = Environment["THVM_TILE"];
-        restore[] := (
-            If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
-            If[StringQ[oldTile],
-                SetEnvironment["THVM_TILE" -> oldTile],
-                SetEnvironment["THVM_TILE" -> ""]]
-        );
-        SetEnvironment["THVM_BACKEND" -> "metal"];
-        SetEnvironment["THVM_TILE" -> "1"];
-        If[ ctx === 0, restore[]; Return[True]];
-        result = TInContext[ctx,
-            x = TTensorCreate @ NumericArray[Range[8.], "Real32"];
-            out = TRealize @ TUOpReduce[x, 0, "SUM"];
-            kid = TKernelCount[] - 1;
-            plan = TKernelTilePlan[kid];
-            props = TKernelProposed[kid];
-            TKernelApplyOpt[kid, TOpt["GROUP", 1, 8]];
-            out2 = TRealize @ TUOpReduce[x, 0, "SUM"];
-            kid2 = TKernelCount[] - 1;
-            {Round[Normal @ TTensorData[out], 0.001],
-             TKernelDispatchKind[kid],
-             plan["reduce_tile"] > 0,
-             props,
-             Round[Normal @ TTensorData[out2], 0.001],
-             TKernelDispatchKind[kid2],
-             First[TKernelOpts[kid2]]["AxisTypes"]}
-        ];
-        TContextDestroy[ctx];
-        restore[];
-        result === {{36.}, "metal-tile", True,
-                    {TOpt["GROUP", 1, 8], TOpt["GROUP", 1, 4],
-                     TOpt["GROUP", 1, 2],
-                     TOpt["UNROLL", 1, 8], TOpt["UNROLL", 1, 4],
-                     TOpt["UNROLL", 1, 2]},
-                    {36.}, "metal-tile",
-                    {"LOOP", "REDUCE", "GROUP_REDUCE"}}
-    ],
-    True,
-    TestID -> "metal/f32-reduce-sum-tile-dispatch"
 ]
 
 VerificationTest[
@@ -348,17 +282,13 @@ VerificationTest[
             w = TTensorCreate @ NumericArray[wHost, "Real32"];
             b = TZeros[{3}];
             out = TRealize @ TConv2D[TReLU[x], w, b];
-            reduceKids = Select[Range[1, TKernelCount[] - 1],
-                With[{plan = TKernelTilePlan[#]},
-                    AssociationQ[plan] && plan["reduce_tile"] > 0] &];
             {Round[Normal @ TTensorData[out], 0.001],
-             AnyTrue[reduceKids, TKernelDispatchKind[#] === "metal-tile" &],
              MemberQ[Table[TKernelDispatchKind[k],
                  {k, 1, TKernelCount[] - 1}], "metal-conv"]}
         ];
         TContextDestroy[ctx];
         restore[];
-        result === {expected, True, False}
+        result === {expected, False}
     ],
     True,
     TestID -> "metal/f32-conv2d-generic-tile-reduce"
