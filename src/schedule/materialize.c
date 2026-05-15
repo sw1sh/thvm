@@ -1256,6 +1256,99 @@ static int uop_subtree_has_residual_bufferize(Term root) {
   return bufferize_scan_rec(&v, root, 0);
 }
 
+// === input_chain_composed bookkeeping for the unified-bypass path ===
+//
+// Mirror of rangeify.c's input_chain_composed flag-set for slots whose
+// tid carries non-trivial layout (prior_views chain or a non-contig
+// public view).  The unified pass's apply_movement_op_* swizzler
+// embedded the movement chain into INDEX_E.addr over the UNDERLYING
+// buffer; visit() separately routed the same movement through
+// view_resolve so the slot's tid points at a chained / non-contig
+// descriptor.  Without the flag the backend pre-mats via the public
+// view (wrong numel) while the kernel reads at the swizzled
+// underlying-buffer index -- the addr lands in the wrong region of the
+// pre-mat buffer.  Setting input_chain_composed=1 tells the backend to
+// skip pre-mat and bind the underlying buffer directly.
+//
+// Two code paths reach the flag:
+//   - ru_rewrite_subtree's TAG_TEN branch sees a chained tid at
+//     unified-pass time, composes via ru_compose_view_chain, and sets
+//     RU_TID_CHAIN_COMPOSED.  input_slot_dedup reads that flag and
+//     mirrors it into ke->input_chain_composed[slot].
+//   - The pass below covers the other case: the unified pass saw the
+//     pre-chain TAG_TEN (the swizzler ran on a movement op in the
+//     kernel DAG) and visit() later minted a chained / non-contig slot
+//     tid.  RU_TID_CHAIN_COMPOSED is NOT set for that tid; we scan the
+//     rewritten store_root for INDEX_E(UOP_BUFFER slot, addr) cells and
+//     flag those slots so the backend skips pre-mat.
+typedef struct {
+  u32 slot_mask_lo;       // bit i set iff slot i was flagged (slots 0..31)
+  u32 slot_mask_hi;       // slot 32..63
+} ChainFoldMarks;
+
+static int slot_needs_chain_skip(u32 tid) {
+  if (tid == 0 || tid >= TENS_NEXT) return 0;
+  TenDesc const *td = &TENS[tid];
+  return (td->nviews > 0
+       || !td->view.contiguous
+       || td->view.offset != 0);
+}
+
+static void unified_fold_chain_scan(KernelEntry const *ke, Term t,
+                                    ChainFoldMarks *marks,
+                                    BufferizeScanVisited *v, u32 depth) {
+  if (depth > 256) return;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return;
+  if (bufferize_scan_seen(v, r)) return;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_KERNEL || op == UOP_BUFFER) return;
+  if (op == UOP_INDEX_E && ke->input_tids != NULL) {
+    Term buf = term_resolve(heap_read(loc + 0));
+    if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFER) {
+      u32 inst = uop_buffer_inst_get(buf);
+      if (inst > 0 && (u32)(inst - 1) < ke->n_inputs) {
+        u32 slot = inst - 1;
+        u32 tid  = ke->input_tids[slot];
+        int already = (ke->input_chain_composed != NULL
+                       && ke->input_chain_composed[slot] != 0);
+        if (slot_needs_chain_skip(tid)
+            && !already
+            && !rangeify_unified_tid_chain_composed(tid)) {
+          if (slot < 32) marks->slot_mask_lo |= (1u << slot);
+          else if (slot < 64) marks->slot_mask_hi |= (1u << (slot - 32));
+        }
+      }
+    }
+  }
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    unified_fold_chain_scan(ke, heap_read(loc + i), marks, v, depth + 1);
+  }
+}
+
+static Term unified_fold_chain(KernelEntry *ke, Term root, ChainFoldMarks *marks) {
+  marks->slot_mask_lo = 0;
+  marks->slot_mask_hi = 0;
+  if (root == 0 || ke == NULL || ke->input_tids == NULL) return root;
+  BufferizeScanVisited v;
+  v.n = 0;
+  unified_fold_chain_scan(ke, root, marks, &v, 0);
+  return root;
+}
+
+static void unified_fold_chain_commit_flags(KernelEntry *ke,
+                                             ChainFoldMarks const *marks) {
+  if (ke == NULL || ke->input_chain_composed == NULL) return;
+  for (u32 slot = 0; slot < ke->n_inputs && slot < 64; slot++) {
+    u32 bit = (slot < 32)
+              ? ((marks->slot_mask_lo >> slot) & 1u)
+              : ((marks->slot_mask_hi >> (slot - 32)) & 1u);
+    if (bit) ke->input_chain_composed[slot] = 1;
+  }
+}
+
 // Safety gate for THVM_LIFT_FROM_UNIFIED=1: collect every UOP_RANGE
 // axis_id that appears in a STORE's addr or as the axis of a UOP_REDUCE
 // found anywhere in the value subtree.  Then verify every UOP_RANGE
@@ -3017,6 +3110,18 @@ static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term) {
   ke->input_numels [slot] = TENS[tid].view.numel;
   ke->input_terms  [slot] = term;
   ke->input_views  [slot] = TENS[tid].view;     // codegen consumes for strided reads
+  // Mirror rangeify.c's input_chain_composed[] bookkeeping for the
+  // unified-pass path: when the unified pass folded prior_views into
+  // the TAG_TEN-wrapped INDEX_E.addr, the backend pre-mat must SKIP
+  // the gather (the kernel reads the underlying buffer directly with
+  // the chain-composed addr).  The matching addr rewrite for chained
+  // tids minted by visit()/view_resolve INSIDE materialize lives in
+  // unified_rewrite_rec_sub's INDEX_E case, which also flips this
+  // flag at that point.
+  if (ke->input_chain_composed != NULL
+      && rangeify_unified_tid_chain_composed(tid)) {
+    ke->input_chain_composed[slot] = 1;
+  }
   return slot;
 }
 
@@ -3877,7 +3982,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
   //   emit_chained_index_from_addr + input_chain_composed bookkeeping
   //   into a standalone pass materialize.c calls independently of
   //   rangeify_try_lower_elementwise.
-  if (!spliced_ok) {
+  if (!spliced_ok && getenv("THVM_DISABLE_LEGACY_RANGEIFY") == NULL) {
     const char *e = getenv("THVM_RANGEIFY");
     int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
     int lowered = rangeify_on && rangeify_try_lower_elementwise(ke);
@@ -3930,6 +4035,16 @@ static Term emit_kernel_for_boundary(u32 bi) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
         Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
+        // Scan the rewritten store_root for INDEX_E reads against slots
+        // whose tid carries non-trivial layout (chain or non-contig
+        // view).  The flag commit is deferred until the bypass-succeeded
+        // branch below so a gate-declined kernel doesn't get its pre-mat
+        // skipped while still reading via the legacy unfolded
+        // store_root.
+        ChainFoldMarks _cf_marks;
+        _cf_marks.slot_mask_lo = 0;
+        _cf_marks.slot_mask_hi = 0;
+        ru_rewritten = unified_fold_chain(ke, ru_rewritten, &_cf_marks);
         // Per-kernel safety gates for the unified-bypass:
         //
         //   has_resid:   the cpu_uop_walk INDEX_E handler only resolves
@@ -3990,6 +4105,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
           BYPASS_KERNEL_USED_UNIFIED++;
           ke->cached_lift.store_root = ru_rewritten;
           ke->compute_root           = ru_rewritten;
+          unified_fold_chain_commit_flags(ke, &_cf_marks);
         }
       }
     }

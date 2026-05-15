@@ -912,6 +912,22 @@ static Term RU_BUFFERIZE_TERM[RU_SUBST_CAP];
 // materialize.c to bypass the legacy ScalarUop-arena walker.
 static Term RU_STORE_ROOT[RU_SUBST_CAP];
 
+// Per-tid flag: set to 1 by ru_compose_view_chain when the unified pass
+// folds td->prior_views into the INDEX_E.addr for a TAG_TEN input.
+// materialize.c's input_slot_dedup reads this and sets the matching
+// ke->input_chain_composed[slot]=1 so the backend's pre-mat pass skips
+// the gather (the addr already encodes the chain walk).  Mirrors the
+// rangeify.c emit_chained_index_from_addr + input_chain_composed
+// bookkeeping; without it the backend would gather the strided view
+// into a contig buffer AND the kernel would read at our chain-composed
+// addr -- double-application, wrong reads.
+static u8 RU_TID_CHAIN_COMPOSED[TENS_CAP];
+
+fn int rangeify_unified_tid_chain_composed(u32 tid) {
+  if (tid == 0 || tid >= TENS_CAP) return 0;
+  return RU_TID_CHAIN_COMPOSED[tid] != 0;
+}
+
 fn Term rangeify_unified_subst_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_SUBST[node_idx];
@@ -1053,6 +1069,91 @@ static Term ru_build_input_addr_for(RuRangeMap const *rm, u64 loc) {
 
 static Term ru_build_input_addr(RuRangeMap const *rm) {
   return ru_build_input_addr_for(rm, RU_NO_LOC);
+}
+
+// === prior_views chain composition into INDEX_E.addr ===
+//
+// Mirrors rangeify.c's `input_chain_foldable` +
+// `emit_chained_index_from_addr` over scalar UOps -- here emitted as
+// UOp DAG IDIV/IMOD/IMUL/IADD via uop_int_binary.  The unified pass
+// builds `in_addr` as a row-major flat index into the producer's iter
+// cube, which for a TAG_TEN with `td->nviews > 0` equals the
+// public-view shape's row-major flat index (assuming the public view
+// is contiguous -- the common case after a RESHAPE on a non-contig
+// source appended a fresh canonical outermost view via
+// tensor_view_chain_append).  Compose prior_views[nviews-1] ...
+// prior_views[0] via decompose-by-shape: coord[d] = (flat /
+// suffix[d]) % dims[d], buffer_idx += coord[d] * strides[d] + offset.
+// Returns 0 on bail (non-foldable chain, negative strides, packed
+// dtype, non-contig public view); caller then leaves in_addr alone
+// and the backend pre-mat handles the chain at dispatch time.
+static int ru_chain_foldable(u32 tid) {
+  if (tid == 0 || tid >= TENS_NEXT) return 0;
+  TenDesc const *td = &TENS[tid];
+  if (td->nviews == 0 || td->prior_views == NULL) return 0;
+  if (dtype_is_packed(td->dtype)) return 0;
+  // Outermost public view must be contig+offset0 so the unified pass's
+  // row-major flat addr lands at the right entry of prior_views[nviews-1].
+  if (!td->view.contiguous || td->view.offset != 0) return 0;
+  for (u8 k = 0; k < td->nviews; k++) {
+    View const *pv = &td->prior_views[k];
+    if (pv->shape.ndim < 1 || pv->shape.ndim > MAX_DIM) return 0;
+    if (pv->offset < 0) return 0;
+    for (u32 d = 0; d < pv->shape.ndim; d++) {
+      if (pv->strides[d] < 0) return 0;
+    }
+  }
+  return 1;
+}
+
+// Build the per-view decompose-by-shape map as a UOp DAG over `cur`.
+// `cur` is a flat index into pv->shape; returns sum_d coord_d*pv->strides[d]
+// + pv->offset where coord_d = (cur / suffix[d]) % pv->shape.dims[d].
+// Broadcast axes (strides[d]==0) contribute nothing.  Mirror of
+// rangeify.c's build_addr_from_flat_iter over the UOp DAG.
+static Term ru_compose_one_view(Term cur, View const *pv) {
+  u32 ndim = pv->shape.ndim;
+  if (ndim == 0) {
+    return pv->offset != 0 ? uop_const(DT_INT32, pv->offset) : uop_const(DT_INT32, 0);
+  }
+  u32 suffix[MAX_DIM];
+  suffix[ndim - 1] = 1;
+  for (i32 d = (i32)ndim - 2; d >= 0; d--) {
+    suffix[d] = suffix[d + 1] * pv->shape.dims[d + 1];
+  }
+  Term acc = pv->offset != 0 ? uop_const(DT_INT32, pv->offset) : 0;
+  for (u32 d = 0; d < ndim; d++) {
+    if (pv->strides[d] == 0) continue;          // broadcast: no contribution
+    Term coord = cur;
+    if (suffix[d] != 1) {
+      coord = uop_int_binary(UOP_IDIV, coord, uop_const(DT_INT32, suffix[d]));
+    }
+    if (d != 0) {
+      coord = uop_int_binary(UOP_IMOD, coord, uop_const(DT_INT32, pv->shape.dims[d]));
+    }
+    if (pv->strides[d] != 1) {
+      coord = uop_int_binary(UOP_IMUL, coord, uop_const(DT_INT32, pv->strides[d]));
+    }
+    acc = (acc == 0) ? coord : uop_int_binary(UOP_IADD, acc, coord);
+  }
+  return acc != 0 ? acc : uop_const(DT_INT32, 0);
+}
+
+// Walk the chain prior_views[nviews-1] -> prior_views[0], composing
+// each view's decompose-by-shape into the running flat index.  Returns
+// the original addr on bail; sets RU_TID_CHAIN_COMPOSED[tid]=1 on
+// success so input_slot_dedup can flip ke->input_chain_composed[].
+static Term ru_compose_view_chain(Term addr0, u32 tid) {
+  if (addr0 == 0) return addr0;
+  if (!ru_chain_foldable(tid)) return addr0;
+  TenDesc const *td = &TENS[tid];
+  Term cur = addr0;
+  for (i32 k = (i32)td->nviews - 1; k >= 0; k--) {
+    cur = ru_compose_one_view(cur, &td->prior_views[k]);
+    if (cur == 0) return addr0;
+  }
+  RU_TID_CHAIN_COMPOSED[tid] = 1;
+  return cur;
 }
 
 // Count of UOP_BUFFERIZE nodes emitted on the main heap by the most
@@ -1229,7 +1330,24 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
       // the bypass rewriter (unified_rewrite_buffer_for_var in
       // materialize.c) substitutes it with the matching UOP_BUFFER
       // before cpu_uop_walk binds runtime input pointers.
-      new_child = uop_index_e(resolved, in_addr);
+      //
+      // For TAG_TEN whose TenDesc carries a non-trivial prior_views
+      // chain we fold the ShapeTracker decompose-by-shape into the
+      // INDEX_E.addr (mirrors rangeify.c's
+      // emit_chained_index_from_addr).  In practice most chained
+      // descs are minted by view_resolve INSIDE materialize.c's visit
+      // -- not visible here -- so materialize.c's
+      // unified_rewrite_rec_sub runs an equivalent compose pass over
+      // the rebuilt INDEX_E; this branch handles the rarer case
+      // where the chained desc is already on the TAG_TEN at
+      // unified-pass time (cross-realize reuse of a chained
+      // intermediate).
+      Term addr = in_addr;
+      if (ctag == TAG_TEN) {
+        u32 tid = (u32)term_val(resolved);
+        addr = ru_compose_view_chain(in_addr, tid);
+      }
+      new_child = uop_index_e(resolved, addr);
     }
     srcs[i] = new_child;
     if (new_child != old_child) changed = 1;
@@ -1281,6 +1399,11 @@ fn void pm_apply_rangeify(Term root) {
     RU_SUBST[i]           = 0;
     RU_BUFFERIZE_TERM[i]  = 0;
     RU_STORE_ROOT[i]      = 0;
+  }
+  // Clear chain-composed tid bookkeeping; the live TENS window is
+  // [1, TENS_NEXT) so the reset only touches in-use slots.
+  for (u32 t = 1; t < TENS_NEXT && t < TENS_CAP; t++) {
+    RU_TID_CHAIN_COMPOSED[t] = 0;
   }
   RU_LAST_BUFFERIZES_EMITTED = 0;
 
