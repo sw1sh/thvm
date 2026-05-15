@@ -968,8 +968,8 @@ typedef struct {
 // loops, Metal threadgroups, local memory, barriers, and eventually
 // MMA intrinsics.
 //
-// ke->tile_uops is populated only by tile_lower_reduce_broadcast in
-// the reduce-broadcast unit test; matmul shape facts flow through
+// ke->tile_uops is unused in production (only a handful of unit tests
+// build TileUop graphs directly).  Matmul shape facts flow through
 // ke->cached_lift.store_root via uop_dag_classify_matmul_shape and
 // production dispatch routes through the lifter-based path.
 // Memory memory scope constants.  Used by TILE_AXIS.memory_scope,
@@ -1314,9 +1314,8 @@ typedef struct KernelEntry {
 
   // Tile-level schedule/memory plan above scalar_uops.  NULL until
   // a future tile planner populates it (the scalar-arena seeder has
-  // been deleted; only the reduce-broadcast unit test in
-  // test_tile_reduce_broadcast.c builds tile_uops via
-  // tile_lower_reduce_broadcast for its own coverage).
+  // been deleted; only a handful of tile-arena unit tests build
+  // tile_uops directly via the emit helpers).
   // Slot 0 is TILE_NONE; live ops occupy [1, n_tile_uops).
   // Owned by the KernelEntry; freed by kernel_free_arrays.
   TileUop   *tile_uops;
@@ -2332,10 +2331,6 @@ fn u32  tile_emit_block(struct KernelEntry *ke, u32 dtype,
                         u32 const *stmts, u8 n_stmts);
 fn u32  tile_emit_input_buf(struct KernelEntry *ke, u32 dtype, u32 input_slot);
 fn u32  tile_emit_output_buf(struct KernelEntry *ke, u32 dtype, u32 output_slot);
-fn u32  tile_analyze_reduce_broadcast(struct KernelEntry const *ke);
-fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
-                                    u32 reduce_scalar_id,
-                                    u32 reduce_groups);
 fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 
 // Emit a pseudo-MSL skeleton from the tile_uops graph.
