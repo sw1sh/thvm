@@ -556,6 +556,14 @@ void thvm_free(void) {
             "thvm: kernel_lift coverage -- attempts=%llu successes=%llu\n",
             (unsigned long long)kernel_lift_attempts(),
             (unsigned long long)kernel_lift_successes());
+    fprintf(stderr,
+            "thvm: bypass coverage -- total=%llu used_unified=%llu "
+            "(resid=%llu stranded=%llu bcast=%llu)\n",
+            (unsigned long long)bypass_kernel_total_count(),
+            (unsigned long long)bypass_kernel_used_unified_count(),
+            (unsigned long long)bypass_gate_resid_count(),
+            (unsigned long long)bypass_gate_stranded_count(),
+            (unsigned long long)bypass_gate_bcast_count());
   }
   if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
   // Wipe every file-static cache / side table that thvm_init seeds.

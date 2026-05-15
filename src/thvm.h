@@ -3045,6 +3045,17 @@ fn void kernel_lift_counters_reset(void);
 fn void kernel_lift_count_attempt(void);
 fn void kernel_lift_count_success(void);
 
+// Bypass-substitution telemetry: how many kernels the unified-pass
+// store_root replaced the legacy lifter's output for, vs how many
+// the safety gates declined.  Per-gate breakdown distinguishes
+// residual-BUFFERIZE / stranded-RANGE / broadcast-input declines.
+fn u64  bypass_kernel_total_count       (void);
+fn u64  bypass_kernel_used_unified_count(void);
+fn u64  bypass_gate_resid_count         (void);
+fn u64  bypass_gate_stranded_count      (void);
+fn u64  bypass_gate_bcast_count         (void);
+fn void bypass_kernel_counters_reset    (void);
+
 // === UOp DAG renderer ===
 // Walks the UOp DAG rooted at `root` and emits pseudo-MSL.  Replaces
 // the kernel-output store walker.
