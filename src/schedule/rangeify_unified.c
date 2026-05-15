@@ -157,11 +157,21 @@ static int ru_extent_is_one(u32 extent) {
 //   -- already covered by hash-cons via uop_range
 // `if resolve(s != 1)`: build a fresh RANGE; else CONST(0).
 static Term ru_new_range(u32 extent, u32 axistype) {
+  // Always bump RU_RANGE_IDX_COUNTER so the axis_id space matches the
+  // legacy lifter's (which assigns an axis to every output dim,
+  // including size-1).  Downstream consumers - kernel_apply_opt's
+  // apply_opt_dag_find_range, tile/codegen axis lookup, etc. - index
+  // into this space by user-facing axis number; collapsing size-1
+  // axes to CONST(0) without bumping the counter would shift every
+  // subsequent axis_id down by one.
+  u32 axis_id = RU_RANGE_IDX_COUNTER++;
   if (ru_extent_is_one(extent)) {
-    // Mirror tinygrad: UOp.const(dtypes.weakint, 0)
+    // Mirror tinygrad: UOp.const(dtypes.weakint, 0).  The collapsed
+    // CONST(0) still consumes axis_id `axis_id`; the loss of the
+    // RANGE leaf is harmless at the addr-build layer since size-1
+    // axes contribute stride*0 to the address.
     return uop_const(DT_INT32, 0);
   }
-  u32 axis_id = RU_RANGE_IDX_COUNTER++;
   return uop_range(axis_id, axistype, extent);
 }
 
@@ -1113,7 +1123,13 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr) {
           new_child = sub;
         }
       }
-    } else if (ctag == TAG_TEN) {
+    } else if (ctag == TAG_TEN || ctag == TAG_VAR) {
+      // TAG_VAR (shape-annotated TLam-bound variable): treated as a
+      // symbolic input slot just like TAG_TEN. The legacy lifter's
+      // visit() maps it to KSRC_AS_INPUT via input_slot_dedup_var;
+      // the bypass rewriter (unified_rewrite_buffer_for_var in
+      // materialize.c) substitutes it with the matching UOP_BUFFER
+      // before cpu_uop_walk binds runtime input pointers.
       new_child = uop_index_e(resolved, in_addr);
     }
     srcs[i] = new_child;

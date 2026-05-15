@@ -508,12 +508,37 @@ static Term unified_rewrite_buffer_for_bufferize(KernelEntry const *ke,
   return 0;
 }
 
+// TAG_VAR substitute: the legacy visit() registers a TLam-bound TVAR
+// (with a shape annotation in the lam_shape side table) as an input
+// slot with input_tids[slot]==0 and input_terms[slot]==var_term.
+// Match that slot here and synthesize the corresponding UOP_BUFFER
+// so cpu_uop_walk binds the runtime buffer (which gets resolved at
+// fire time through term_resolve on the symbolic var) to the same
+// inst that the legacy lifter would have emitted.
+static Term unified_rewrite_buffer_for_var(KernelEntry const *ke,
+                                           Term var_term) {
+  if (ke->input_tids == NULL || ke->input_terms == NULL) return 0;
+  for (u32 slot = 0; slot < ke->n_inputs; slot++) {
+    if (ke->input_tids[slot] != 0) continue;
+    if (ke->input_terms[slot] != var_term) continue;
+    u32 dtype = (ke->input_dtypes != NULL) ? ke->input_dtypes[slot] : DT_FP32;
+    u32 numel = (ke->input_numels != NULL) ? ke->input_numels[slot] : 1;
+    Shape s = {0}; s.ndim = 1; s.dims[0] = numel;
+    return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, s.ndim, s.dims, slot + 1);
+  }
+  return 0;
+}
+
 static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   if (depth > 256) return t;
   Term resolved = term_resolve(t);
   u8 tag = term_tag(resolved);
   if (tag == TAG_TEN) {
     Term repl = unified_rewrite_buffer_for_tid(st->ke, (u32)term_val(resolved));
+    return repl != 0 ? repl : resolved;
+  }
+  if (tag == TAG_VAR) {
+    Term repl = unified_rewrite_buffer_for_var(st->ke, resolved);
     return repl != 0 ? repl : resolved;
   }
   if (tag != TAG_UOP) return resolved;

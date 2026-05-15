@@ -443,6 +443,13 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
       if (dst == DT_INT32 || dst == DT_UINT32) {
+        // Int-to-int BITCAST at the same itemsize is a value passthrough
+        // at the bit level (e.g. u32 -> i32 keeps the bit pattern).
+        // Going through uwalk_eval_float would round-trip the u32 value
+        // through a double and lose the original bits when the value
+        // can't be represented exactly in f32, or even when it CAN --
+        // 1.0_u32 becomes (f32)1.0 whose bit pattern is 0x3F800000.
+        if (uwalk_term_is_int(c, src)) return uwalk_eval_int(c, src);
         double f = uwalk_eval_float(c, src);
         union { u32 b; f32 f; } pun;
         pun.f = (f32)f;
