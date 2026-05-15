@@ -1124,6 +1124,17 @@ fn void pm_apply_rangeify(Term root) {
         Term src  = heap_read(term_val(rewritten) + 0);
         rewritten = uop_reduce(kind, r_aid, src);
       }
+      // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
+      // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
+      // == 0.  cpu_uop_walk's uwalk_run_reduce would find no UOP_RANGE
+      // in the body and return 0 (the r_extent==0 fallback at uop_walk.c
+      // line 567).  Mirror the legacy lifter's behavior and unwrap the
+      // REDUCE shell to its source: sum_{i in [0,1)} f(i) == f(0).
+      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 0
+          && term_tag(rewritten) == TAG_UOP
+          && term_ext(rewritten) == UOP_REDUCE) {
+        rewritten = heap_read(term_val(rewritten) + 0);
+      }
       // The realized-store value subtree for movement-op nodes (EXPAND,
       // RESHAPE, PERMUTE, PAD, SHRINK, FLIP): ru_rewrite_subtree returns
       // the rebuilt movement shell wrapping an INDEX_E whose addr
@@ -1210,6 +1221,15 @@ fn void pm_apply_rangeify(Term root) {
         Term src  = heap_read(term_val(rewritten) + 0);
         rewritten = uop_reduce(kind, r_aid, src);
       }
+      // Trivial REDUCE (extent-1 reduce axis): see the realized branch
+      // above for the same identity.  Without this strip, downstream
+      // consumers splice in a UOP_REDUCE whose body has no UOP_RANGE
+      // leaf, and the walker silently returns 0.
+      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 0
+          && term_tag(rewritten) == TAG_UOP
+          && term_ext(rewritten) == UOP_REDUCE) {
+        rewritten = heap_read(term_val(rewritten) + 0);
+      }
       RU_SUBST[i] = rewritten;
     }
 
@@ -1220,25 +1240,30 @@ fn void pm_apply_rangeify(Term root) {
                     || info->op == UOP_EXPAND  || info->op == UOP_PAD
                     || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
     if (is_movement) {
-      // Forward to producer's substitute if it exists; otherwise unwrap
-      // the movement-op shell built by ru_rewrite_subtree -- its slot 0
-      // already holds the INDEX_E(producer, swizzled_addr) we want
-      // consumers to splice in (the swizzler folded the broadcast /
-      // permute into in_addr). Leaving the bare RESHAPE/EXPAND/etc.
-      // wrapper in RU_SUBST[i] surfaces it in downstream consumer DAGs
-      // (e.g. matmul's REDUCE-of-MUL body) where the walker has no
-      // movement-op handler. Mirror: tinygrad's
-      // remove_movement_op_after_rangeify strips the outer op
-      // unconditionally (indexing.py:98-99).
+      // Forward to producer's substitute when the producer is a NON-
+      // realized rewrite (i.e. RU_SUBST[pidx] is itself the producer's
+      // value subtree, not a UOP_BUFFERIZE leaf).  When the producer
+      // already realized to a UOP_BUFFERIZE, the EXPAND/PAD/etc has
+      // built `INDEX_E(producer_bufferize, swizzled_addr)` as slot 0 of
+      // the movement-shell -- forwarding to the bare BUFFERIZE would
+      // drop the swizzle and the consumer's own `ru_rewrite_subtree`
+      // would re-wrap with `INDEX_E(BUFFERIZE, consumer_addr)` against
+      // the unbroadcast output range.  Detect the BUFFERIZE-producer
+      // case and unwrap the shell instead so the pre-swizzled INDEX_E
+      // survives.
       Term producer = term_resolve(heap_read(info->loc));
       if (term_tag(producer) == TAG_UOP) {
         u32 pidx = bufferize_info_find(term_val(producer));
         if (pidx != 0xFFFFFFFFu && RU_SUBST[pidx] != 0) {
-          RU_SUBST[i] = RU_SUBST[pidx];
-          continue;
+          Term psub = RU_SUBST[pidx];
+          int psub_is_bufferize = (term_tag(psub) == TAG_UOP
+                                && term_ext(psub) == UOP_BUFFERIZE);
+          if (!psub_is_bufferize) {
+            RU_SUBST[i] = psub;
+            continue;
+          }
         }
       }
-      // No upstream BUFFERIZE_NODES entry (typically a TAG_TEN leaf).
       // Unwrap the movement shell: RU_SUBST[i] is currently the rebuilt
       // movement-op Term (e.g. UOP_EXPAND(UOP_INDEX_E(...), ndim, dims))
       // and we want just the inner INDEX_E. Slot 0 holds it directly.
