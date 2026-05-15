@@ -650,7 +650,6 @@ static int tile_id_ok(KernelEntry const *ke, u32 id) {
 }
 
 #define TILE_REDUCE_KIND(arg)  (((arg) >> 24) & 0xFFu)
-#define TILE_REDUCE_INNER(arg) ((arg) & 0xFFFFFFu)
 
 // Matmul shapes are canonicalised as MUL+REDUCE+OPT_TC scalar_uops by
 // rangeify and lifted into the UOp DAG by kernel_lift_to_uop.
