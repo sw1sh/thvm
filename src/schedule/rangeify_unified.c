@@ -1061,6 +1061,42 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr) {
   return uop_graph_rebuild_with_srcs(self, srcs);
 }
 
+// PAD value-side guard: build IWHERE(cond, body, INVALID) where `cond`
+// is the AND of per-axis `(out_rng >= begin) & (out_rng < begin + in_dim)`.
+// Mirrors tinygrad's PAD-as-WHERE rule (schedule/indexing.py:108) and the
+// kernel_lift S_PAD case in src/schedule/kernel_lift.c.  Without this wrap,
+// the PAD's "outside the kept window" cells inherit whatever value the
+// inner subtree computes -- correct only when the inner is an INDEX_E into
+// a tensor whose address swizzler already injected the INVALID guard.
+// CONST / EXPAND / WHERE bodies (e.g. a SHRINK gradient's gy=CONST(1)
+// seed) have no addr-driven read to gate on, so the WHERE-INVALID has to
+// land on the value side.
+static Term ru_pad_wrap_where(u64 loc, RuRangeMap const *rm, Term body) {
+  Shape src_shape;
+  if (!ru_node_src_shape(loc, &src_shape)) return body;
+  u32 ndim = rm->out_ndim;
+  if (ndim == 0 || src_shape.ndim != ndim) return body;
+  Term cond_acc = 0;
+  for (u32 d = 0; d < ndim; d++) {
+    u32 begin = (u32)term_val(heap_read(loc + 2 + 2 * d));
+    u32 in_dim = src_shape.dims[d];
+    Term r = rm->out_rngs[d];
+    if (r == 0) continue;
+    Term lo = 0;
+    if (begin > 0) {
+      Term s_m1 = uop_const(DT_INT32, begin - 1);
+      lo = uop_int_binary(UOP_ILT, s_m1, r);   // (begin-1) < r  iff  r >= begin
+    }
+    Term hi_bound = uop_const(DT_INT32, in_dim + begin);
+    Term hi = uop_int_binary(UOP_ILT, r, hi_bound);
+    Term axis_cond = (lo == 0) ? hi : uop_int_binary(UOP_IAND, lo, hi);
+    cond_acc = (cond_acc == 0) ? axis_cond
+                               : uop_int_binary(UOP_IAND, cond_acc, axis_cond);
+  }
+  if (cond_acc == 0) return body;
+  return uop_iwhere(cond_acc, body, uop_invalid());
+}
+
 fn void pm_apply_rangeify(Term root) {
   (void)root;
   // Clear substitute + bufferize tables.
@@ -1153,6 +1189,9 @@ fn void pm_apply_rangeify(Term root) {
         Term inner = heap_read(term_val(store_value) + 0);
         if (inner != 0) store_value = inner;
       }
+      if (info->op == UOP_PAD) {
+        store_value = ru_pad_wrap_where(info->loc, rm, store_value);
+      }
       Term closed_ranges[MAX_DIM];
       u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
       // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
@@ -1239,6 +1278,16 @@ fn void pm_apply_rangeify(Term root) {
     int is_movement = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
                     || info->op == UOP_EXPAND  || info->op == UOP_PAD
                     || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
+    // For realized PAD specifically the BUFFERIZE we just emitted IS the
+    // canonical view of the post-WHERE-guarded value -- forwarding to
+    // the unguarded producer drops the mask.  Other realized movement
+    // ops can still forward (their BUFFERIZE's stored value equals the
+    // unguarded producer at the swizzled addr; consumers re-index off
+    // it correctly).  Stay with RU_SUBST[i] = b for the PAD-realized
+    // boundary case below.
+    if (is_movement && realized && info->op == UOP_PAD) {
+      continue;
+    }
     if (is_movement) {
       // Forward to producer's substitute by default.  RESHAPE / PERMUTE
       // need a special case when the producer realized to a UOP_BUFFERIZE:
@@ -1266,7 +1315,24 @@ fn void pm_apply_rangeify(Term root) {
                           && (info->op == UOP_PERMUTE
                            || info->op == UOP_RESHAPE);
           if (!keep_swizzle) {
-            RU_SUBST[i] = psub;
+            // For non-realized PAD the consumer would otherwise read
+            // psub verbatim at every iter -- including iters outside
+            // the kept window where the producer's bytes are stale /
+            // unrelated.  Wrap psub with the value-side WHERE guard
+            // so out-of-window reads collapse to INVALID -> 0.  When
+            // psub is a bare BUFFERIZE we first wrap it in INDEX_E at
+            // the PAD's input addr (rm->in_rngs already encodes the
+            // shifted iter), mirroring ru_rewrite_subtree's
+            // BUFFERIZE-as-leaf substitution path.
+            Term fwd = psub;
+            if (info->op == UOP_PAD && !realized) {
+              if (psub_is_bufferize) {
+                Term in_addr = ru_build_input_addr_for(rm, info->loc);
+                fwd = uop_index_e(psub, in_addr);
+              }
+              fwd = ru_pad_wrap_where(info->loc, rm, fwd);
+            }
+            RU_SUBST[i] = fwd;
             continue;
           }
         }
@@ -1277,7 +1343,12 @@ fn void pm_apply_rangeify(Term root) {
       Term cur = RU_SUBST[i];
       if (term_tag(cur) == TAG_UOP) {
         Term inner = heap_read(term_val(cur) + 0);
-        if (inner != 0) RU_SUBST[i] = inner;
+        if (inner != 0) {
+          if (info->op == UOP_PAD && !realized) {
+            inner = ru_pad_wrap_where(info->loc, rm, inner);
+          }
+          RU_SUBST[i] = inner;
+        }
       }
     }
   }
