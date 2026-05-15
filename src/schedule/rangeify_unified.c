@@ -170,6 +170,68 @@ static int ru_is_range(Term t) {
   return term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE;
 }
 
+// Walk a UOp subtree and return 1 if any UOP_RANGE leaf has axis_id == aid.
+// Used after ru_rewrite_subtree to detect when a REDUCE's body lost the
+// reduce-axis range (e.g. a CONST broadcast collapsed past the rewrite,
+// leaving the REDUCE iterating an axis that the walker can't measure).
+static int ru_subtree_uses_axis(Term t, u32 aid, u32 depth) {
+  if (depth > 64) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) {
+    return uop_range_axis_id(r) == aid;
+  }
+  // Don't descend into UOP_BUFFER (its dim cells are TAG_NUM leaves) or
+  // UOP_BUFFERIZE (opaque cross-realize boundary).
+  if (op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++) {
+    if (ru_subtree_uses_axis(heap_read(loc + i), aid, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// Build f32 CONST term with given value.
+static u32 ru_f32_bits(f32 v) {
+  u32 b;
+  memcpy(&b, &v, sizeof b);
+  return b;
+}
+
+// Repair a REDUCE term whose body lost the reduce-axis range (e.g. a
+// stride-0 broadcast collapsed past ru_rewrite_subtree).  The
+// cpu_uop_walk's uwalk_run_reduce walks the body for a UOP_RANGE with
+// axis_id == r_aid to recover the loop extent; without one it falls back
+// to the reduce identity (0 for SUM, -INF for MAX) and the kernel writes
+// zeros.  Mirror the legacy kernel_lift behavior: the reduce of a
+// body that's constant along the reduce axis equals `body * extent` for
+// SUM (and just `body` for MAX/MIN).
+static Term ru_reduce_repair_broadcast_body(Term reduce_t, Term reduce_range) {
+  if (term_tag(reduce_t) != TAG_UOP || term_ext(reduce_t) != UOP_REDUCE) {
+    return reduce_t;
+  }
+  if (term_tag(reduce_range) != TAG_UOP
+      || term_ext(reduce_range) != UOP_RANGE) {
+    return reduce_t;
+  }
+  u64 rloc  = term_val(reduce_t);
+  u32 kind  = (u32)term_val(heap_read(rloc + 1));
+  u32 r_aid = (u32)term_val(heap_read(rloc + 2));
+  Term body = heap_read(rloc + 0);
+  if (ru_subtree_uses_axis(body, r_aid, 0)) return reduce_t;
+  u32 extent = uop_range_extent(reduce_range);
+  if (extent == 0) return reduce_t;
+  if (kind == REDUCE_SUM) {
+    if (extent == 1) return body;
+    Term k = uop_const(DT_FP32, ru_f32_bits((f32)extent));
+    return uop_binary(UOP_MUL, body, k);
+  }
+  // MAX/MIN of a constant-in-axis body == body.
+  return body;
+}
+
 // Walk addr-expression Term `t` recursively, collecting axis_ids of
 // UOP_RANGE leaves into `out_axes` (bounded by `cap`). Returns the
 // number written.  Mirrors tinygrad's UOp.ranges accessor.
@@ -1159,6 +1221,10 @@ fn void pm_apply_rangeify(Term root) {
         u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
         Term src  = heap_read(term_val(rewritten) + 0);
         rewritten = uop_reduce(kind, r_aid, src);
+        // Repair: if the rewritten body lost its reduce-axis RANGE leaf
+        // (e.g. a stride-0 broadcast collapsed past ru_rewrite_subtree),
+        // collapse the REDUCE to `body * extent` (SUM) or `body` (MAX).
+        rewritten = ru_reduce_repair_broadcast_body(rewritten, rng);
       }
       // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
       // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
@@ -1259,6 +1325,11 @@ fn void pm_apply_rangeify(Term root) {
         u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
         Term src  = heap_read(term_val(rewritten) + 0);
         rewritten = uop_reduce(kind, r_aid, src);
+        // Repair: same fix as the realized branch above.  When the
+        // rewritten body lost the reduce-axis RANGE leaf (a stride-0
+        // broadcast collapsed past ru_rewrite_subtree), collapse the
+        // REDUCE shell to `body * extent` (SUM) or `body` (MAX).
+        rewritten = ru_reduce_repair_broadcast_body(rewritten, rng);
       }
       // Trivial REDUCE (extent-1 reduce axis): see the realized branch
       // above for the same identity.  Without this strip, downstream

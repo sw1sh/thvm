@@ -728,6 +728,228 @@ static int uop_subtree_has_stranded_range(Term store_root) {
   return stranded_range_check_value(&iter_axes, &vv, s_value, 0);
 }
 
+// Safety gate: scan the rewritten subtree for any UOP_INDEX_E reading
+// from a UOP_BUFFER input slot whose static numel is smaller than the
+// consumer's iter footprint (output STORE numel + any enclosing REDUCE
+// extents).  This indicates a stride-0 broadcast view: the legacy
+// kernel_lift consults ke->input_views[slot].strides and emits CONST(0)
+// for the broadcast axis; the unified bypass builds addr expressions from
+// per-axis ranges without consulting strides and reads out-of-bounds on
+// the 1-element backing store.  Until ru_pass threads view strides
+// through INDEX_E address construction, decline the bypass for these
+// inputs.
+//
+// Compute the static numel of a UOP_BUFFER (product of dims).  Returns
+// 0 if t is not a UOP_BUFFER.
+static u64 uop_buffer_numel(Term t) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_BUFFER) return 0;
+  u32 ndim = uop_buffer_ndim(t);
+  u64 n = 1;
+  for (u32 d = 0; d < ndim; d++) n *= (u64)uop_buffer_dim(t, d);
+  return n;
+}
+
+static int broadcast_input_scan_rec(KernelEntry const *ke,
+                                    BufferizeScanVisited *v, Term t,
+                                    u64 out_numel,
+                                    u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  if (bufferize_scan_seen(v, r)) return 0;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  // INDEX_E(BUFFER, addr): check that BUFFER numel matches the
+  // consumer's iter footprint (out_numel for the elementwise case;
+  // reduce-axes are handled by descending under the REDUCE handler
+  // below).  When BUFFER numel < footprint AND the input view has a
+  // matching stride-0 pattern, the legacy lift would emit CONST(0)
+  // for the broadcast axis; the bypass instead reads at the consumer
+  // iter and goes out-of-bounds.  Decline.
+  if (op == UOP_INDEX_E) {
+    Term buf_t = term_resolve(heap_read(loc + 0));
+    if (term_tag(buf_t) == TAG_UOP && term_ext(buf_t) == UOP_BUFFER) {
+      u32 inst = uop_buffer_inst_get(buf_t);
+      // Output buf (inst=0) is the writer's own slot; skip the size check.
+      if (inst >= 1) {
+        u64 buf_numel = uop_buffer_numel(buf_t);
+        if (buf_numel > 0 && out_numel > 0 && buf_numel < out_numel) {
+          return 1;
+        }
+      }
+    }
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFERIZE) return 0;
+  // Multiply REDUCE extent into out_numel when descending into a reduce
+  // body so the broadcast check counts the full iteration footprint.
+  if (op == UOP_REDUCE) {
+    u64 inner_out = out_numel;
+    Term body = heap_read(loc + 0);
+    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    // Find the reduce range's extent by scanning the body for a
+    // UOP_RANGE with this axis_id.
+    u32 r_ext = 0;
+    BufferizeScanVisited iv;
+    iv.n = 0;
+    // small inline scan
+    Term stack[64];
+    u32  top = 0;
+    stack[top++] = body;
+    while (top > 0 && r_ext == 0) {
+      Term cur = term_resolve(stack[--top]);
+      if (term_tag(cur) != TAG_UOP) continue;
+      u8  cop = term_ext(cur);
+      u64 cloc = term_val(cur);
+      if (cop == UOP_RANGE) {
+        u32 aid = (u32)term_val(heap_read(cloc + 0));
+        if (aid == r_aid) {
+          r_ext = (u32)term_val(heap_read(cloc + 2));
+          break;
+        }
+        continue;
+      }
+      if (cop == UOP_BUFFER || cop == UOP_BUFFERIZE || cop == UOP_KERNEL) continue;
+      u8 car = uop_arity(cop);
+      for (u8 i = 0; i < car && top < 64; i++) {
+        stack[top++] = heap_read(cloc + i);
+      }
+    }
+    if (r_ext > 0) inner_out *= (u64)r_ext;
+    return broadcast_input_scan_rec(ke, v, body, inner_out, depth + 1);
+  }
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (broadcast_input_scan_rec(ke, v, heap_read(loc + i),
+                                 out_numel, depth + 1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int uop_subtree_has_broadcast_input(KernelEntry const *ke,
+                                            Term root) {
+  if (root == 0 || ke == NULL) return 0;
+  // root is a UOP_STORE; compute its iter footprint from the output BUFFER.
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+  u64 sloc = term_val(root);
+  Term out_buf = heap_read(sloc + 0);
+  Term s_value = heap_read(sloc + 2);
+  u64 out_numel = uop_buffer_numel(out_buf);
+  if (out_numel == 0) return 0;
+  BufferizeScanVisited v;
+  v.n = 0;
+  return broadcast_input_scan_rec(ke, &v, s_value, out_numel, 0);
+}
+
+// === Debug dumper for THVM_DEBUG_BYPASS_LAST=1 ===
+// Pretty-prints a UOp subtree with indent + opcode name + key fields.
+// Used to bisect bypass divergences against the legacy lifter root.
+static char const *bypass_dbg_op_name(u8 op) {
+  switch (op) {
+    case UOP_CONST:       return "CONST";
+    case UOP_RESHAPE:     return "RESHAPE";
+    case UOP_PERMUTE:     return "PERMUTE";
+    case UOP_EXPAND:      return "EXPAND";
+    case UOP_PAD:         return "PAD";
+    case UOP_SHRINK:      return "SHRINK";
+    case UOP_FLIP:        return "FLIP";
+    case UOP_CMPLT:       return "CMPLT";
+    case UOP_REDUCE:      return "REDUCE";
+    case UOP_LOAD:        return "LOAD";
+    case UOP_RANGE:       return "RANGE";
+    case UOP_INDEX_E:     return "INDEX_E";
+    case UOP_IADD:        return "IADD";
+    case UOP_IMUL:        return "IMUL";
+    case UOP_ILT:         return "ILT";
+    case UOP_IWHERE:      return "IWHERE";
+    case UOP_INVALID:     return "INVALID";
+    case UOP_BUFFER:      return "BUFFER";
+    case UOP_STORE:       return "STORE";
+    case UOP_BUFFERIZE:   return "BUFFERIZE";
+    default:              return "?";
+  }
+}
+
+static void bypass_dbg_dump_rec(Term t, u32 indent, u32 depth) {
+  if (depth > 40) {
+    for (u32 i = 0; i < indent; i++) fputc(' ', stderr);
+    fputs("...max-depth...\n", stderr);
+    return;
+  }
+  Term r = term_resolve(t);
+  for (u32 i = 0; i < indent; i++) fputc(' ', stderr);
+  u8  tag = term_tag(r);
+  if (tag == TAG_TEN) {
+    fprintf(stderr, "TEN tid=%u\n", (u32)term_val(r));
+    return;
+  }
+  if (tag == TAG_NUM) {
+    fprintf(stderr, "NUM %llu\n", (unsigned long long)term_val(r));
+    return;
+  }
+  if (tag != TAG_UOP) {
+    fprintf(stderr, "TAG=%u val=%llx\n", tag, (unsigned long long)term_val(r));
+    return;
+  }
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  char const *name = bypass_dbg_op_name(op);
+  if (op == UOP_CONST) {
+    u64 bits = term_val(heap_read(loc + 0));
+    union { u64 u; f64 f; } u;
+    u.u = bits;
+    f32 f = 0.0f;
+    memcpy(&f, &bits, sizeof(f));
+    fprintf(stderr, "CONST dtype=%u bits=%llx f32=%g\n",
+            term_ext(r), (unsigned long long)bits, (double)f);
+    return;
+  }
+  if (op == UOP_RANGE) {
+    u32 aid    = (u32)term_val(heap_read(loc + 0));
+    u32 atype  = (u32)term_val(heap_read(loc + 1));
+    u32 extent = (u32)term_val(heap_read(loc + 2));
+    fprintf(stderr, "RANGE aid=%u type=%u extent=%u\n", aid, atype, extent);
+    return;
+  }
+  if (op == UOP_BUFFER) {
+    u32 scope = (u32)term_val(heap_read(loc + 0));
+    u32 dtype = (u32)term_val(heap_read(loc + 1));
+    u32 ndim  = (u32)term_val(heap_read(loc + 2));
+    u32 inst  = uop_buffer_inst_get(r);
+    fprintf(stderr, "BUFFER scope=%u dtype=%u ndim=%u inst=%u dims=[",
+            scope, dtype, ndim, inst);
+    for (u32 d = 0; d < ndim && d < 8; d++) {
+      fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(r, d));
+    }
+    fputs("]\n", stderr);
+    return;
+  }
+  if (op == UOP_REDUCE) {
+    u32 kind = (u32)term_val(heap_read(loc + 1));
+    u32 axis = (u32)term_val(heap_read(loc + 2));
+    fprintf(stderr, "REDUCE kind=%u axis=%u\n", kind, axis);
+    bypass_dbg_dump_rec(heap_read(loc + 0), indent + 2, depth + 1);
+    return;
+  }
+  fprintf(stderr, "%s (ext=%u, loc=%llx)\n", name, term_ext(r),
+          (unsigned long long)loc);
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    bypass_dbg_dump_rec(heap_read(loc + i), indent + 2, depth + 1);
+  }
+}
+
+static void bypass_dbg_dump(char const *label, u32 kid, Term root) {
+  fprintf(stderr, "=== BYPASS_DBG kid=%u %s root=%llx ===\n",
+          kid, label, (unsigned long long)root);
+  if (root == 0) {
+    fputs("<null>\n", stderr);
+    return;
+  }
+  bypass_dbg_dump_rec(root, 0, 0);
+}
+
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
@@ -2905,12 +3127,35 @@ static Term emit_kernel_for_boundary(u32 bi) {
         //                kernel where one INDEX_E feeds from a non-
         //                realized PERMUTE/RESHAPE chain.
         //
-        // When either gate trips, leave store_root as the legacy
+        //   has_bcast:   the rewritten subtree reads from a UOP_BUFFER
+        //                input slot whose backing View has a stride-0
+        //                (broadcast) axis, negative stride (FLIP) or
+        //                a non-row-major stride pattern (PERMUTE /
+        //                SHRINK view).  ru_pass builds addresses from
+        //                per-axis ranges without consulting strides;
+        //                the legacy kernel_lift consults
+        //                ke->input_views[slot].strides and emits
+        //                CONST(0) for broadcast axes.  Until ru_pass
+        //                threads view strides through INDEX_E address
+        //                construction, decline the bypass for these
+        //                inputs.  Softmax-CE backward hits this where
+        //                a 1-element scalar feeds a 3-element consumer
+        //                via stride-0 broadcast.
+        //
+        // When any gate trips, leave store_root as the legacy
         // lifter's output for this kernel; the rest of the schedule
         // still gets the bypass.
         int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
         int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
-        if (!has_resid && !has_stranded) {
+        int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
+        if (getenv("THVM_DEBUG_BYPASS_LAST")) {
+          fprintf(stderr,
+                  "BYPASS_DBG kid=%u resid=%d stranded=%d bcast=%d\n",
+                  kid, has_resid, has_stranded, has_bcast);
+          bypass_dbg_dump("lift_root", kid, ke->cached_lift.store_root);
+          bypass_dbg_dump("ru_rewrit", kid, ru_rewritten);
+        }
+        if (!has_resid && !has_stranded && !has_bcast) {
           ke->cached_lift.store_root = ru_rewritten;
           ke->compute_root           = ru_rewritten;
         }
