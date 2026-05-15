@@ -1,5 +1,5 @@
 {
-  "_comment": "rule -> threadgroup total threads; grid_rule -> grid total threads. Names in scope: N ceildiv max min simd tg. Naive baseline: one thread per element, 256-thread TGs.",
-  "rule": "256",
-  "grid_rule": "ceildiv(N, 256) * 256"
+  "_comment": "MLX binary_vv f32 path: work_per_thread=2, mandatory 1024-thread block. grid = ceildiv(N,2) threads.",
+  "rule": "min(1024, ceildiv(N, 2))",
+  "grid_rule": "ceildiv(N, 2)"
 }
