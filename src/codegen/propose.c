@@ -42,11 +42,6 @@ static u32 propose_kprog_reduce_axis_size(KernelEntry const *ke) {
   return src_numel / out_numel;
 }
 
-static u32 propose_scalar_reduce_axis_size(KernelEntry const *ke) {
-  (void)ke;
-  return 0;
-}
-
 // Walk the lifted UOp DAG for the reduce axis extent when
 // cached_lift.store_root is populated (the autotune-time path
 // pays the lift cost at materialize-time).
@@ -83,8 +78,7 @@ static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
 static u32 propose_reduce_axis_size(KernelEntry const *ke) {
   u32 size = propose_uop_reduce_axis_size(ke);
   if (size != 0) return size;
-  size = propose_kprog_reduce_axis_size(ke);
-  return size != 0 ? size : propose_scalar_reduce_axis_size(ke);
+  return propose_kprog_reduce_axis_size(ke);
 }
 
 // Index of the reduce axis -- the last axis of type KAX_REDUCE.
@@ -200,16 +194,8 @@ static int propose_metal_tile_enabled(void) {
   return propose_metal_backend_enabled() && tile != NULL && tile[0] == '1';
 }
 
-static int propose_metal_tile_scalar_reduce_kernel(KernelEntry const *ke) {
-  (void)ke;
-  return 0;
-}
-
 static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
   if (!propose_metal_backend_enabled()) {
-    return 1;
-  }
-  if (propose_metal_tile_scalar_reduce_kernel(ke)) {
     return 1;
   }
   // When cached_lift.store_root is populated, mirror the per-op

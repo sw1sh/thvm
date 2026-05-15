@@ -139,10 +139,9 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     return 1;
   }
   if (tile_rejects_conv2d_flat_cin1(ke)) return 0;
-  // Lifter-based fallback: the only remaining path after the
-  // scalar-arena tile_build_from_scalar seeder was deleted.  If the
-  // kernel_lift would succeed, render_uop emits a valid kernel;
-  // dispatch shape is just (output_numel, 256-default threadgroup).
+  // Lifter-based fallback.  If the kernel_lift would succeed,
+  // render_uop emits a valid kernel; dispatch shape is just
+  // (output_numel, 256-default threadgroup).
   // The kernel's outer for-loops handle work distribution within each
   // thread (each thread runs the full body redundantly; last-writer-
   // wins on the output buffer gives correct results).  Future wedges
