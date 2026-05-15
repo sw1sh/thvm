@@ -934,8 +934,25 @@ static Term ru_build_addr_from_ranges(Term const *rngs, u8 ndim) {
 // We model `.index(*r)` as a chain of UOP_INDEX_E.addr over an IADD-tree
 // of (range_i * stride_i) -- tinygrad's INDEX is multi-arg but the
 // downstream stride-collapse simplification yields the same scalar.
-static Term ru_build_index_addr(RuRangeMap const *rm) {
+// When the node's own output shape (heap-resolvable via `self_term`) is
+// known we thread its dims through so the addr's row-major strides match
+// the realized BUFFER's stride layout.  Without dims, size-1 axes hash-
+// cons to UOP_CONST(0) and ru_build_addr_with_dims falls back to a
+// stride-1 IADD chain (the non-bare-RANGE bail-out), which produces
+// wrong addrs when any axis is degenerate.
+static Term ru_build_index_addr_for(RuRangeMap const *rm, Term self_term) {
+  Shape out_shape;
+  if (self_term != 0 && term_shape_in(self_term, 0, &out_shape)
+      && out_shape.ndim == rm->out_ndim) {
+    u32 dims[RU_MAX_AXES] = {0};
+    for (u8 a = 0; a < rm->out_ndim; a++) dims[a] = out_shape.dims[a];
+    return ru_build_addr_with_dims(rm->out_rngs, rm->out_ndim, dims);
+  }
   return ru_build_addr_from_ranges(rm->out_rngs, rm->out_ndim);
+}
+
+static Term ru_build_index_addr(RuRangeMap const *rm) {
+  return ru_build_index_addr_for(rm, 0);
 }
 
 // Body/input addr: includes the reduce range (and any movement-op
@@ -1091,7 +1108,7 @@ fn void pm_apply_rangeify(Term root) {
       // so a stride-0 broadcast axis becomes CONST(0). Built from
       // rm->in_rngs uniformly; the elementwise case is the identity
       // in_rngs == out_rngs and falls through to the same shape.
-      Term my_addr   = ru_build_index_addr(rm);
+      Term my_addr   = ru_build_index_addr_for(rm, self);
       Term in_addr   = ru_build_input_addr_for(rm, info->loc);
       Term rewritten = ru_rewrite_subtree(self, info->loc, info->op, in_addr);
       // Same REDUCE-axis rewire as the non-realized branch below: when
