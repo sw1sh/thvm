@@ -709,6 +709,130 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
           return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
         }
       }
+      // Multi-axis BUFFERIZE: addr is IADD/IMUL tree encoding row-major
+      // (per-axis stride * iter) sum.  Mirror ru_build_addr_with_dims
+      // (rangeify_unified.c) to derive per-closed_range strides from
+      // each closed_range's extent, then decompose addr into
+      // (stride -> iter_expr) bindings and substitute each closed_
+      // range[i] with the iter_expr whose stride matches strides[i].
+      // The producer is row-major over its closed_ranges, so axis i
+      // pairs with the i-th decreasing stride.  Used for n_r=2 softmax-
+      // CE intermediates and n_r=4 conv2d-grad-input rerolls.
+      if (v != 0 && n_ranges >= 2 && n_ranges <= UNIFIED_SUBST_CAP) {
+        u32 dims[UNIFIED_SUBST_CAP] = {0};
+        Term old_ranges[UNIFIED_SUBST_CAP] = {0};
+        int extents_ok = 1;
+        for (u32 i = 0; i < n_ranges; i++) {
+          Term cr = uop_bufferize_range_at(inner_buf, i);
+          if (cr == 0
+              || term_tag(cr) != TAG_UOP
+              || term_ext(cr) != UOP_RANGE) {
+            extents_ok = 0;
+            break;
+          }
+          u32 ext = (u32)term_val(heap_read(term_val(cr) + 2));
+          if (ext == 0) {
+            extents_ok = 0;
+            break;
+          }
+          old_ranges[i] = cr;
+          dims[i] = ext;
+        }
+        if (extents_ok) {
+          u32 want_strides[UNIFIED_SUBST_CAP] = {0};
+          want_strides[n_ranges - 1] = 1;
+          for (i32 i = (i32)n_ranges - 2; i >= 0; i--) {
+            want_strides[i] = want_strides[i + 1] * dims[i + 1];
+          }
+          // Decompose addr_term into (stride, expr) pairs.  Walk an
+          // IADD-tree; each leaf is either CONST(0) (drop), IMUL(expr,
+          // CONST(s)) / IMUL(CONST(s), expr) (stride=s), or a bare
+          // expr (stride=1).  Bounded to UNIFIED_SUBST_CAP terms.
+          u32 got_strides[UNIFIED_SUBST_CAP] = {0};
+          Term got_exprs  [UNIFIED_SUBST_CAP] = {0};
+          u32 got_n = 0;
+          Term stack[UNIFIED_SUBST_CAP * 2];
+          u32  top = 0;
+          stack[top++] = addr_term;
+          int decompose_ok = 1;
+          while (top > 0 && decompose_ok) {
+            Term cur = term_resolve(stack[--top]);
+            u8  cop = (term_tag(cur) == TAG_UOP) ? term_ext(cur) : 0xFF;
+            if (cop == UOP_IADD && top + 2 <= UNIFIED_SUBST_CAP * 2) {
+              stack[top++] = heap_read(term_val(cur) + 0);
+              stack[top++] = heap_read(term_val(cur) + 1);
+              continue;
+            }
+            if (cop == UOP_CONST
+                && term_val(heap_read(term_val(cur) + 0)) == 0) {
+              continue;
+            }
+            u32 s = 1;
+            Term e = cur;
+            if (cop == UOP_IMUL) {
+              Term a = term_resolve(heap_read(term_val(cur) + 0));
+              Term b = term_resolve(heap_read(term_val(cur) + 1));
+              if (term_tag(b) == TAG_UOP && term_ext(b) == UOP_CONST) {
+                s = (u32)term_val(heap_read(term_val(b) + 0));
+                e = a;
+              } else if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST) {
+                s = (u32)term_val(heap_read(term_val(a) + 0));
+                e = b;
+              }
+            }
+            if (got_n >= UNIFIED_SUBST_CAP) {
+              decompose_ok = 0;
+              break;
+            }
+            got_strides[got_n] = s;
+            got_exprs  [got_n] = e;
+            got_n++;
+          }
+          // Match got vs. want by stride.  Each closed_range[i] needs
+          // an entry with stride == want_strides[i]; size-1 axes (their
+          // entry was dropped at build time as CONST(0)) bind to
+          // CONST(0).  Order-independent; duplicate strides bail.
+          if (decompose_ok) {
+            Term to_terms[UNIFIED_SUBST_CAP] = {0};
+            int match_ok = 1;
+            for (u32 i = 0; i < n_ranges && match_ok; i++) {
+              if (dims[i] == 1) {
+                to_terms[i] = uop_const(DT_INT32, 0);
+                continue;
+              }
+              int found = -1;
+              for (u32 j = 0; j < got_n; j++) {
+                if (got_strides[j] == want_strides[i]) {
+                  if (found >= 0) { found = -1; break; }
+                  found = (i32)j;
+                }
+              }
+              if (found < 0) {
+                match_ok = 0;
+                break;
+              }
+              to_terms[i] = got_exprs[found];
+            }
+            if (match_ok) {
+              UnifiedSubst new_sub;
+              new_sub.n = 0;
+              if (sub != NULL) {
+                for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+                  new_sub.from[new_sub.n] = sub->from[i];
+                  new_sub.to  [new_sub.n] = sub->to  [i];
+                  new_sub.n++;
+                }
+              }
+              for (u32 i = 0; i < n_ranges && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+                new_sub.from[new_sub.n] = old_ranges[i];
+                new_sub.to  [new_sub.n] = to_terms[i];
+                new_sub.n++;
+              }
+              return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+            }
+          }
+        }
+      }
     }
     // Fall through: rebuild the INDEX_E with possibly-substituted
     // addr (the buffer side gets the standard recursion below).
