@@ -99,15 +99,15 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    xT = TTensorCreate @ N @ Range[24];
-    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    xT = TTensorCreate @ NumericArray[Table[N[i], {i, 16}], "Real32"];
+    TRealize @ TUOpMul[xT, xT];
     kid = TKernelCount[] - 1;
-    TKernelApplyOpt[kid, TOpt["UPCAST", 0, 1]];      (* split LOOP(1) into LOOP(1) + UPCAST(1); no-op shape but adds axis *)
+    TKernelApplyOpt[kid, TOpt["UPCAST", 0, 4]];      (* split LOOP(16) -> LOOP(4) + UPCAST(4) *)
     pre  = First @ TKernelOpts[kid];
     res  = TKernelApplyOpt[kid, TOpt["SWAP", 0, 1]];
     post = First[res];
     {pre["AxisTypes"], post["AxisTypes"]},
-    {{"LOOP", "UPCAST", "REDUCE"}, {"UPCAST", "LOOP", "REDUCE"}},
+    {{"LOOP", "UPCAST"}, {"UPCAST", "LOOP"}},
     TestID -> "kernel-opts/apply-swap-exchanges-axes"
 ]
 
