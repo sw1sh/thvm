@@ -1,15 +1,17 @@
 #!/usr/bin/env wolframscript
-(* atp_ic/debug/bisect_aot_metal.wls -- bisect probe for the residual
-   AOT-Metal off-by-1 in the IC-native ATP search.
+(* atp_ic/debug/bisect_aot_metal.wls -- regression fixture for the
+   AOT-Metal off-by-1 in the IC-native ATP search (now fixed).
 
-   See docs/plans/atp_ic_native.md "Findings from milestone-3" for
-   the analysis and two attack angles.
-
-   B0..B3 all MATCH between CPU and Metal.  B4 mismatches (cpu
-   {0,0,0,0} vs metal {0,0,1,1}) -- adding `TApp[rSup, NUM]` in the
-   elseTerms is what triggers the bug.  Use this file as a fixture
-   to track down the regression once the runtime / encoder fix
-   lands. *)
+   B0..B4 all MATCH between CPU and Metal.  B4 was the trigger:
+   `TApp[rSup, NUM]` in both elseTerms, where `rSup` is a SUP of
+   two TRefs.  Each TRef inlining re-walked the same book template,
+   so the auto-dup DP0/DP1 inside the ref'd lambda bodies carried
+   identical book dup_locs -- and metal_emit.c's dup memo (keyed on
+   dup_loc) aliased inlining #2's projections onto inlining #1's
+   GPU dup cell.  Fixed by scoping the dup memo per TAG_REF inline
+   (save/restore g_msl_dup_n / g_msl_dup_term_n around the body
+   emit).  Kept as a fixture so the off-by-1 can't silently
+   regress. *)
 
 PacletDirectoryLoad[FileNameJoin[{Directory[], "wl", "THVMLink"}]];
 Needs["THVMLink`"];

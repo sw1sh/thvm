@@ -477,9 +477,23 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
             snprintf(out, 96, "0u /* undefined REF */");
             return out;
         }
+        // Scope the auto-dup memos to this inlining.  Both DUP memos
+        // key on the book dup_loc, but a def inlined at N TRef sites
+        // re-walks the SAME book template -- so the auto-dup DP0/DP1
+        // inside the def body carry identical dup_locs every time.
+        // Without this window, inlining #2's DP0/DP1 would alias
+        // inlining #1's GPU dup cell (which holds inlining #1's
+        // VAR binder), silently breaking the second copy of the
+        // lambda.  Saving/restoring the memo counts gives each
+        // inlining a fresh window: DP0+DP1 of one dup still share
+        // within the window; distinct inlinings stay independent.
+        u32 saved_dup_n      = g_msl_dup_n;
+        u32 saved_dup_term_n = g_msl_dup_term_n;
         // Recurse on the def's body.  The returned MSL local is a Term.
         const char *bt = aot_msl_emit_term(b, ref_body, bind);
         snprintf(out, 96, "%s", bt);
+        g_msl_dup_n      = saved_dup_n;
+        g_msl_dup_term_n = saved_dup_term_n;
         return out;
     }
 
