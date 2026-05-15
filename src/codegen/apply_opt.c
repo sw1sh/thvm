@@ -101,6 +101,13 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     ke->cached_lift.store_root = new_root;
     ke->compute_root = new_root;
     if (opt.op == KOP_TC) APPLY_OPT_TC_GATE_DAG++;
+    // Mirror the mutation into schedule->applied_opts so WL
+    // introspection (TKernelOpts["Applied"]) and the axis-type
+    // resolver see the post-opt state.  Skip when the schedule slot
+    // is unallocated (Python-built kernels) or already full.
+    if (ke->schedule != NULL && ke->schedule->n_applied < MAX_OPTS) {
+      ke->schedule->applied_opts[ke->schedule->n_applied++] = opt;
+    }
     return 1;
   }
   if (ke->schedule == NULL) {
