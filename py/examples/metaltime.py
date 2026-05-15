@@ -67,28 +67,31 @@ def bench_candidate(m, pso, bufs, *, grid, threadgroup,
     return Timing.from_samples(gpus), Timing.from_samples(walls)
 
 
-def bench_mlx_amortized(mlx_op, inputs, *, reps: int = 60,
-                        batch: int = 32, warmup: int = 5):
-    """Amortized GPU-time estimate for an MLX op.
+def bench_mlx_amortized(mlx_op, make_batch, *, reps: int = 40,
+                        batch: int = 16, warmup: int = 4):
+    """Amortized per-op time for an MLX op.
 
-    `mlx_op(x)` must return an unevaluated mx.array.  `inputs` is a
-    list of >= `batch` distinct mx.array inputs (distinct buffers, so
-    MLX cannot common-subexpression the batch into one kernel).
+    `make_batch()` must return a FRESH list of `batch` distinct,
+    already-evaluated mx.array inputs every time it is called -- fresh
+    data each rep is essential: MLX memoizes evaluated arrays, so if
+    the same input objects are reused, every rep after the first is a
+    free cache hit and the measurement collapses to ~0 (the bug this
+    signature replaces).
 
-    Each rep builds `batch` ops then a single `mx.eval`; per-op time
-    is wall/batch.  Returns a Timing over `reps` per-op samples.
+    `mlx_op(x)` returns one unevaluated mx.array.  Each rep builds
+    `batch` ops over the fresh inputs, then one `mx.eval`; per-op time
+    is wall/batch.  Python's per-call overhead is paid once per batch,
+    not once per op, so as `batch` grows per-op converges to MLX's
+    GPU-bound cost.
 
-    As `batch` grows, per-op -> MLX's GPU-bound cost: the GPU runs
-    the B kernels back-to-back while Python's per-call overhead is
-    paid once per batch, not once per op.
+    Returns a Timing over `reps` per-op samples.
     """
     import mlx.core as mx
 
-    assert len(inputs) >= batch, "need >= batch distinct inputs"
-    mx.eval(*inputs)
-
     def one_batch() -> float:
-        outs = [mlx_op(inputs[i]) for i in range(batch)]
+        ins = make_batch()
+        mx.eval(*ins)                       # inputs ready, not timed
+        outs = [mlx_op(x) for x in ins]
         t0 = time.perf_counter_ns()
         mx.eval(*outs)
         return (time.perf_counter_ns() - t0) / batch

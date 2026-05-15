@@ -71,15 +71,36 @@ GPU-time, the honest comparison.
 
 ## How many samples?
 
-The harness uses 200 candidate reps + 60 amortized MLX batches.
+The harness uses 200 candidate reps + 40 amortized MLX batches.
 With `gpu_ns` the per-sample noise is far lower than wall time, so
 200 is plenty even for sub-100us kernels.  Still: run the whole
-score 3 times and take the median speedup -- run-to-run system
-state (thermal, other GPU clients) shifts the absolute numbers even
-when the kernel is fixed.
+score 3 times and take the median speedup.
 
-If 3 runs give you `speedup_gpu = 1.0x +/- 0.05x`, the difference is
-below the floor -- declare a tie or change the kernel materially.
+## Quiesce the machine -- GPU DVFS is real
+
+Apple GPUs run dynamic voltage/frequency scaling.  The *same* kernel
+measures very differently depending on the GPU's clock state, which
+depends on what ran just before and on thermal headroom.  Observed:
+a matmul kernel scored `44us` then `171us` on back-to-back harness
+invocations with nothing changed -- a 4x swing from clock state and
+contention alone.
+
+Before trusting a number:
+
+- Close other GPU clients (browsers with hardware accel, other
+  bench processes, Metal apps).  Do not run two score harnesses
+  concurrently.
+- Warm up: the harness does 5 warmup dispatches, but a cold GPU may
+  need more.  If run-to-run medians swing >20%, warm up by hand
+  (run the score once, throw it away, run it 3 more times).
+- Trust the *shape* of the result, not the absolute us.  If a kernel
+  reports the same `candidate_gpu` for two very different problem
+  sizes, the measurement is corrupt -- the GPU was in a different
+  clock state, or contended.  Re-run on a quiet machine.
+
+If 3 runs on a quiet machine give `speedup_gpu = 1.0x +/- 0.05x`,
+the difference is below the floor -- declare a tie or change the
+kernel materially.
 
 ## p10 vs p50
 

@@ -101,13 +101,15 @@ def main() -> int:
                                           threadgroup=tg, reps=200)
 
     import mlx.core as mx
-    # distinct input buffers so MLX cannot CSE the amortized batch
-    a_in = [mx.array(rng.uniform(-1, 1, (M, K)).astype(np.float32))
-            for _ in range(32)]
     b_mx = mx.array(b)
-    mx.eval(b_mx, *a_in)
-    mlx_amort = bench_mlx_amortized(lambda x: x @ b_mx, a_in,
-                                    reps=60, batch=32)
+    mx.eval(b_mx)
+    # fresh input data each rep -- MLX memoizes evaluated arrays, so
+    # reusing the same arrays would make every rep a free cache hit.
+    def make_batch():
+        return [mx.array(rng.uniform(-1, 1, (M, K)).astype(np.float32))
+                for _ in range(16)]
+    mlx_amort = bench_mlx_amortized(lambda x: x @ b_mx, make_batch,
+                                    reps=40, batch=16)
 
     a_mx = mx.array(a)
     mx.eval(a_mx)
