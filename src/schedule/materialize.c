@@ -413,6 +413,10 @@ static void boundary_compute_last_use(void) {
   free(visited);
 }
 
+// Forward decl: input_slot_dedup adds (tid, term) to ke->input_tids[]
+// (or returns the existing slot).  Defined in the build_kernel section.
+static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term);
+
 // THVM_LIFT_FROM_UNIFIED=1 helper.  The unified-pass store_root carries
 // TAG_TEN leaves (wrapped inside UOP_INDEX_E.buffer slots; see
 // ru_rewrite_subtree in rangeify_unified.c).  The legacy kernel_lift
@@ -431,7 +435,7 @@ typedef struct {
 } UnifiedRewriteMemoSlot;
 
 typedef struct {
-  KernelEntry const     *ke;
+  KernelEntry           *ke;
   UnifiedRewriteMemoSlot memo[UNIFIED_REWRITE_MEMO_CAP];
   u32                    memo_used;
 } UnifiedRewriteState;
@@ -513,6 +517,44 @@ static Term unified_rewrite_buffer_for_tid(KernelEntry const *ke, u32 tid) {
   return 0;
 }
 
+// Same lookup as unified_rewrite_buffer_for_tid, but when no slot
+// matches, dynamically extend ke->input_tids[] with the new tid and
+// mirror the slot into cached_lift.in_bufs[] so cpu_uop_walk binds
+// a runtime buffer for it.  Mirrors the legacy kernel_lift_to_uop's
+// per-kernel realize-projection that synthesizes an input slot for
+// every TAG_TEN referenced inside the lifted value subtree.  Used by
+// the TAG_TEN handler in unified_rewrite_rec_sub when the consumer's
+// input_tids[] doesn't carry the tid (the unified pass inlined a
+// producer BUFFERIZE whose value subtree references a TAG_TEN that's
+// not in the consumer's iter scope).
+static Term unified_rewrite_buffer_for_tid_extend(KernelEntry *ke, u32 tid) {
+  Term repl = unified_rewrite_buffer_for_tid(ke, tid);
+  if (repl != 0) return repl;
+  if (tid == 0 || tid >= TENS_NEXT) return 0;
+  if (ke->n_inputs >= KERNEL_LIFT_MAX_INPUT) return 0;
+  TenDesc const *td = &TENS[tid];
+  Term ten_term = term_new(0, TAG_TEN, td->dtype, tid);
+  u32 slot = input_slot_dedup(ke, tid, ten_term);
+  if (slot >= KERNEL_LIFT_MAX_INPUT) return 0;
+  u32 dtype = ke->input_dtypes[slot];
+  Term buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype,
+                             td->view.shape.ndim, td->view.shape.dims,
+                             slot + 1);
+  // Mirror into cached_lift.in_bufs[] / n_inputs so cpu_uop_walk's
+  // ctx.in_terms[slot] resolves to the same BUFFER inst we just
+  // emitted into the rewritten value tree.  in_chain_composed defaults
+  // to 0 for the new slot (kernel_inputs_reserve zero-pads), matching
+  // the legacy lifter's per-slot view-aware addressing for tids that
+  // weren't wired through ru_pass's input_chain logic.
+  if (slot < KERNEL_LIFT_MAX_INPUT) {
+    ke->cached_lift.in_bufs[slot] = buf;
+    if (ke->cached_lift.n_inputs < ke->n_inputs) {
+      ke->cached_lift.n_inputs = ke->n_inputs;
+    }
+  }
+  return buf;
+}
+
 // Resolve a UOP_BUFFERIZE Term (an upstream realized boundary) back to
 // its producer tid via BOUNDARY_BUFFERIZE_TERM[] / BOUNDARY_TID[], then
 // build the matching UOP_BUFFER for that input slot.  Returns 0 when
@@ -589,7 +631,7 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   }
   u8 tag = term_tag(resolved);
   if (tag == TAG_TEN) {
-    Term repl = unified_rewrite_buffer_for_tid(st->ke, (u32)term_val(resolved));
+    Term repl = unified_rewrite_buffer_for_tid_extend(st->ke, (u32)term_val(resolved));
     return repl != 0 ? repl : resolved;
   }
   if (tag == TAG_VAR) {
@@ -807,6 +849,61 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
               if (new_sub.n < UNIFIED_SUBST_CAP) {
                 new_sub.from[new_sub.n] = old_r;
                 new_sub.to  [new_sub.n] = decomp_exprs[found];
+                new_sub.n++;
+              }
+              return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+            }
+          }
+          // Pure-swizzler addr: decomposition found NO bare RANGE
+          // leaves matching closed_range[0] (dn == 0 with has_unknown_
+          // extent set, e.g. addr = IDIV(R,2) on a length-2 producer).
+          // Direct substitution (old_r -> full addr_term) is semantic-
+          // ally equivalent to the legacy lifter rendering the same
+          // swizzler inside its own iter scope.  Distinct from the
+          // dn >= 2 case where a subcomponent match could route to the
+          // wrong axis -- here there's no subcomponent to pick, only
+          // the whole expr.  Guard: only apply when addr_term's free
+          // RANGE leaves are all type=0 (regular iter), so the substi-
+          // tuted value tree's free vars stay in the consumer's iter
+          // scope.  A type=1 reduce-axis leaf in addr_term would bind
+          // closed_range[0] to a value that varies across the
+          // consumer's REDUCE iter -- breaking the producer's per-
+          // closed_range invariant.
+          if (decomp_ok && has_unknown_extent && dn == 0) {
+            // Scan addr_term for type=1 leaves.
+            int safe = 1;
+            Term sscan[UNIFIED_SUBST_CAP * 4];
+            u32  stop = 0;
+            sscan[stop++] = addr_term;
+            while (stop > 0 && safe) {
+              Term cur = term_resolve(sscan[--stop]);
+              if (term_tag(cur) != TAG_UOP) continue;
+              u8  scop = term_ext(cur);
+              u64 sloc = term_val(cur);
+              if (scop == UOP_RANGE) {
+                u32 atype = (u32)term_val(heap_read(sloc + 1));
+                if (atype != 0) { safe = 0; break; }
+                continue;
+              }
+              if (scop == UOP_BUFFER || scop == UOP_BUFFERIZE || scop == UOP_KERNEL) continue;
+              u8 ar = uop_arity(scop);
+              for (u8 i = 0; i < ar && stop < UNIFIED_SUBST_CAP * 4; i++) {
+                sscan[stop++] = heap_read(sloc + i);
+              }
+            }
+            if (safe) {
+              UnifiedSubst new_sub;
+              new_sub.n = 0;
+              if (sub != NULL) {
+                for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+                  new_sub.from[new_sub.n] = sub->from[i];
+                  new_sub.to  [new_sub.n] = sub->to  [i];
+                  new_sub.n++;
+                }
+              }
+              if (new_sub.n < UNIFIED_SUBST_CAP) {
+                new_sub.from[new_sub.n] = old_r;
+                new_sub.to  [new_sub.n] = addr_term;
                 new_sub.n++;
               }
               return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
@@ -1058,6 +1155,27 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     return inner;
   }
 
+  // Movement ops (RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP) inside a value
+  // subtree.  The unified pass keeps them as structural markers (their
+  // dims params describe the producer's iter shape, not a runtime read),
+  // but cpu_uop_walk's value dispatcher has no movement-op cases.  At
+  // the value layer they're identities around their single src: the
+  // surrounding INDEX_E.addr already encodes the linear read, and any
+  // RANGE leaves inside use axis_ids that map to ctx slots regardless
+  // of the producer's shape annotation.  The legacy kernel_lift folds
+  // movement ops into the addr expression via S_RESHAPE_V / movement
+  // handling in kernel_lift.c; the unified pass leaves them in place.
+  // Strip them so the rewritten subtree is walkable.  Pool-style
+  // reshape-MAX gradients reach this when an n_r=1 BUFFERIZE inline
+  // produces RESHAPE(INDEX_E(...)) around the LHS of a CMPEQ.
+  if (op == UOP_RESHAPE || op == UOP_PERMUTE
+      || op == UOP_EXPAND  || op == UOP_PAD
+      || op == UOP_SHRINK  || op == UOP_FLIP) {
+    Term inner = unified_rewrite_rec_sub(st, sub, heap_read(loc), depth + 1);
+    if (sub == NULL) unified_rewrite_memo_insert(st, resolved, inner);
+    return inner;
+  }
+
   u8 ar = uop_arity(op);
   if (ar == 0) {
     if (sub == NULL) unified_rewrite_memo_insert(st, resolved, resolved);
@@ -1089,7 +1207,7 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   return out;
 }
 
-static Term unified_store_root_for_walker(KernelEntry const *ke, Term root) {
+static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {
   if (root == 0 || ke == NULL) return root;
   UnifiedRewriteState st;
   memset(&st, 0, sizeof(st));
@@ -1396,6 +1514,34 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
     }
   }
   if (op == UOP_KERNEL || op == UOP_BUFFERIZE) return 0;
+  // IWHERE(cond, then, else) where one branch is UOP_INVALID is the
+  // PAD/OOB-mask pattern (conv2d-grad uses it to guard windowed reads
+  // against shifted-window OOB).  The walker only evaluates the picked
+  // branch at runtime, so the surviving INDEX_E reads are runtime-
+  // guarded by the cond.  Scan the cond (no buffer reads there) but
+  // skip address-bound checks inside the guarded branch -- the static
+  // addr_max_value can't see the IWHERE guard and would conservatively
+  // flag the read as OOB on the iter cube where cond=0.  The other
+  // INVALID-paired branch is skipped entirely (returns 0 at runtime).
+  if (op == UOP_IWHERE) {
+    Term then_t = term_resolve(heap_read(loc + 1));
+    Term else_t = term_resolve(heap_read(loc + 2));
+    int then_invalid = (term_tag(then_t) == TAG_UOP
+                     && term_ext(then_t) == UOP_INVALID);
+    int else_invalid = (term_tag(else_t) == TAG_UOP
+                     && term_ext(else_t) == UOP_INVALID);
+    if (then_invalid || else_invalid) {
+      // Scan the cond (no INDEX_E in here for conv2d grads, but stay
+      // strict for the rare case where a cond pulls from a kernel
+      // input).  Skip the guarded branch -- runtime cond keeps its
+      // reads in-bounds; only the non-INVALID branch needs scanning.
+      if (broadcast_input_scan_rec(ke, v, heap_read(loc + 0),
+                                   out_numel, depth + 1)) {
+        return 1;
+      }
+      return 0;
+    }
+  }
   // Multiply REDUCE extent into out_numel when descending into a reduce
   // body so the broadcast check counts the full iteration footprint.
   if (op == UOP_REDUCE) {
