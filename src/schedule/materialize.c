@@ -3982,21 +3982,16 @@ static Term emit_kernel_for_boundary(u32 bi) {
   //   emit_chained_index_from_addr + input_chain_composed bookkeeping
   //   into a standalone pass materialize.c calls independently of
   //   rangeify_try_lower_elementwise.
-  if (!spliced_ok && getenv("THVM_DISABLE_LEGACY_RANGEIFY") == NULL) {
-    const char *e = getenv("THVM_RANGEIFY");
-    int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
-    int lowered = rangeify_on && rangeify_try_lower_elementwise(ke);
+  // Legacy rangeify call: produced the ScalarUop arena.  After the
+  // unified-pass port of input_chain_composed bookkeeping
+  // (commit 32a7e4e4), the unified pass is self-sufficient and this
+  // call is redundant.  Kept behind THVM_ENABLE_LEGACY_RANGEIFY=1 as
+  // a bisection knob; default OFF.
+  if (!spliced_ok && getenv("THVM_ENABLE_LEGACY_RANGEIFY") != NULL) {
+    int lowered = rangeify_try_lower_elementwise(ke);
     if (lowered) {
       rangeify_cse(ke);
       rangeify_dce(ke);
-      axes_ensure_scalar_reduce(ke);
-      // (Scalar-UOp divandmod simplification was deleted with
-      // src/scalar/simplify.c.  An A/B test on lenet-mnist
-      // bench-train showed the lift-reject count was identical with
-      // THVM_SCALAR_SIMPLIFY=0 -- the simplifier wasn't load-bearing
-      // for the post-L54 view-folding path.)
-    }
-    if (lowered) {
       axes_ensure_scalar_reduce(ke);
     }
   }
