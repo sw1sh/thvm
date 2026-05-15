@@ -753,7 +753,10 @@ static void stranded_range_collect_addr(RangeAxisSet *iter_axes,
     range_axis_add(iter_axes, aid);
     return;
   }
-  if (op == UOP_KERNEL || op == UOP_BUFFER) return;
+  // UOP_BUFFERIZE is a closed cross-realize unit: the stored value has its
+  // own closed_ranges scope, never the consumer's iter.  Stop descent (the
+  // walker treats it as a memory leaf via uwalk_resolve_buf).
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return;
   u8 ar = uop_arity(op);
   for (u8 i = 0; i < ar; i++) {
     stranded_range_collect_addr(iter_axes, v, heap_read(loc + i), depth + 1);
@@ -773,7 +776,15 @@ static int stranded_range_check_value(RangeAxisSet const *iter_axes,
     u32 aid = (u32)term_val(heap_read(loc + 0));
     return range_axis_has(iter_axes, aid) ? 0 : 1;
   }
-  if (op == UOP_KERNEL || op == UOP_BUFFER) return 0;
+  // UOP_BUFFERIZE is opaque: its stored value subtree carries closed_ranges
+  // (its own iter scope), not the consumer's.  cpu_uop_walk's INDEX_E case
+  // dispatches via uwalk_resolve_buf for a BUFFERIZE leaf (either a kernel
+  // input slot or, if unresolved, caught by has_resid before this gate
+  // matters) and never iterates the stored-value subtree at this consumer's
+  // iter.  Descending here yielded false-positive stranded reports for any
+  // unresolved BUFFERIZE residual whose body referenced producer-side
+  // RANGE leaves -- entirely unobservable from the walker's perspective.
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
   if (op == UOP_REDUCE) {
     // Enter the reduce's axis into the iterated set for the body walk.
     u32 r_aid = (u32)term_val(heap_read(loc + 2));
