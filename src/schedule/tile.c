@@ -649,30 +649,6 @@ static int tile_id_ok(KernelEntry const *ke, u32 id) {
   return id != 0 && id < ke->n_tile_uops;
 }
 
-fn u32 tile_loop_axis_count(KernelEntry const *ke) {
-  TilePlanInfo info;
-  if (!tile_collect_plan_info(ke, &info)) {
-    return 0;
-  }
-  return info.n_axes;
-}
-
-fn u32 tile_loop_axis_type(KernelEntry const *ke, u32 axis) {
-  TilePlanInfo info;
-  if (!tile_collect_plan_info(ke, &info) || axis >= info.n_axes) {
-    return 0;
-  }
-  return info.axis_types[axis];
-}
-
-fn u32 tile_loop_axis_extent(KernelEntry const *ke, u32 axis) {
-  TilePlanInfo info;
-  if (!tile_collect_plan_info(ke, &info) || axis >= info.n_axes) {
-    return 0;
-  }
-  return info.axis_extents[axis];
-}
-
 #define TILE_REDUCE_KIND(arg)  (((arg) >> 24) & 0xFFu)
 #define TILE_REDUCE_INNER(arg) ((arg) & 0xFFFFFFu)
 

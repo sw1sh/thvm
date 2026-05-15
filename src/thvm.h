@@ -2365,9 +2365,6 @@ fn const char *tile_axis_name(u32 axis_type);
 fn int  tile_validate(struct KernelEntry const *ke);
 fn int  tile_collect_plan_info(struct KernelEntry const *ke,
                                TilePlanInfo *out);
-fn u32  tile_loop_axis_count(struct KernelEntry const *ke);
-fn u32  tile_loop_axis_type(struct KernelEntry const *ke, u32 axis);
-fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
 // Recognize the im2col-fused Conv2D reduce template produced by the
 // lowered UOp graph.  Renderers use this as a tile template instead
 // of carrying backend-private conv pattern matchers.

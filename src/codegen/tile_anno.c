@@ -14,8 +14,7 @@
 //   tile_anno_axis_at(ke, d, *info) -- per-axis info via
 //                                       tile_axis_unpack.
 //
-// These mirror tile_loop_axis_count / tile_loop_axis_type / etc. but
-// with a TileAxisInfo-typed return shape so the caller gets all four
+// Returns a TileAxisInfo-typed shape so the caller gets all four
 // fields (kax_type, extent, memory_scope, vector_width) in one read.
 
 fn u32 tile_anno_axis_count(KernelEntry const *ke) {
