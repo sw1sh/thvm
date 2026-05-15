@@ -299,12 +299,25 @@ static int aot_msl_needs_ic_walk(Term t,
                aot_msl_needs_ic_walk(book_read(val + 1), visited, visited_n);
     }
     if (tag == TAG_MAT) {
-        // MAT cells are case-trees; if the handler or fallback
-        // contains a SUP/LAM, the IC path is required.  Note the
-        // scrutinee comes via the containing APP, so it's walked
-        // separately above.
-        return aot_msl_needs_ic_walk(book_read(val + 0), visited, visited_n) ||
-               aot_msl_needs_ic_walk(book_read(val + 1), visited, visited_n);
+        // MAT cells are case-trees; if a handler or the fallback
+        // contains a SUP, the IC path is required.  The scrutinee
+        // comes via the containing APP, walked separately above.
+        //
+        // A LAM-chain handler is the CTR-destructure arm binder
+        // structure (e.g. `#2 x y -> ...` emits Lam[x, Lam[y, ...]]),
+        // NOT an IC Church value -- peel it before walking so a plain
+        // CTR-destructure MAT routes to the static-unfold path (which
+        // emits CTR-arm dispatch) rather than the IC state machine
+        // (which does not).  Only a SUP under the peeled body forces
+        // the IC path.
+        Term handler  = book_read(val + 0);
+        Term fallback = book_read(val + 1);
+        for (u32 guard = 0;
+             guard < 64 && term_tag(handler) == TAG_LAM; guard++) {
+            handler = book_read(term_val(handler));
+        }
+        return aot_msl_needs_ic_walk(handler, visited, visited_n) ||
+               aot_msl_needs_ic_walk(fallback, visited, visited_n);
     }
     return 0;
 }
