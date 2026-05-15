@@ -283,7 +283,12 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
     case UOP_CONST: {
       u32 dt   = term_ext(heap_read(loc));
       u32 bits = (u32)term_val(heap_read(loc));
-      if (dt == DT_FP32) {
+      // thvm_wl_uop_const stores every float dtype's bits as the f32
+      // representation of the input mreal (see thvmlink.c:1141-1147), so
+      // CONST nodes flagged DT_FP64/FP16/BF16 still carry an f32 payload
+      // here.  Decode uniformly as f32 for any float dtype; upcast to
+      // f64 happens via the (double)pun.f promotion.
+      if (uwalk_dtype_is_float(dt)) {
         union { u32 b; f32 f; } pun = { .b = bits };
         return (double)pun.f;
       }
@@ -381,7 +386,9 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     case UOP_CONST: {
       u32 dt   = term_ext(heap_read(loc));
       u32 bits = (u32)term_val(heap_read(loc));
-      if (dt == DT_FP32) {
+      // See uwalk_eval_float's UOP_CONST: producer stores f32 bits for
+      // every float dtype, so decode uniformly here too.
+      if (uwalk_dtype_is_float(dt)) {
         union { u32 b; f32 f; } pun = { .b = bits };
         return (i64)pun.f;
       }
