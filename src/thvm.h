@@ -2289,33 +2289,9 @@ fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u3
 // Free the per-kernel scalar arena.  Called from kernel_free_arrays.
 fn void rangeify_free(struct KernelEntry *ke);
 
-// === UOp -> ScalarUop translator ===
-// Translate a UOp INDEX-expression Term into the equivalent ScalarUop
-// slot id in `ke`'s arena.  Caller provides a UopRangeMap[] table
-// mapping UOP_RANGE Terms to existing S_RANGE slot ids.
-typedef struct {
-  Term axis_uop;
-  u32  scalar_id;
-} UopRangeMap;
-fn u32  uop_to_scalar(struct KernelEntry *ke, Term t,
-                      UopRangeMap const *ranges, u32 n_ranges);
-// Inverse: rebuild the UOp Term equivalent of a ScalarUop arena slot.
-// Returns 0 on unsupported subtree.
-fn Term scalar_to_uop(struct KernelEntry const *ke, u32 scalar_id,
-                      UopRangeMap const *ranges, u32 n_ranges);
-// Structural CSE over dedup-safe scalar expression nodes.  Keeps
-// S_RANGE / STORE / BUFFERIZE identity intact, remaps sources, and
-// returns the number of eliminated nodes.
-fn u32  rangeify_cse(struct KernelEntry *ke);
-// Remove scalar nodes not reachable from S_BUFFERIZE roots.
-fn u32  rangeify_dce(struct KernelEntry *ke);
 // Look up a scalar opname / axis-type name as a const C string for
 // introspection / debug printing.
 fn const char *scalar_op_name (u8 op);
-// Try to lower a fully-emitted KernelEntry's KProgOp[] to
-// the scalar form.  Returns 1 on success (ke->scalar_uops populated;
-// caller can dispatch through the scalar path) and 0 on bail.
-fn int  rangeify_try_lower_elementwise(struct KernelEntry *ke);
 
 // === tile UOp arena ops (schedule/tile.c) ===
 // The tile plan is the optimization layer above scalar_uops.  These

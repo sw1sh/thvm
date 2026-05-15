@@ -28,6 +28,16 @@
 // integration).
 static int cg_supports_tile  (KernelEntry const *ke) { (void)ke; return 0; }
 static int cg_supports_scalar(KernelEntry const *ke) { (void)ke; return 0; }
+
+// Local emit helpers (previously static-internal to rangeify.c, now
+// deleted with the legacy lowering pass).  Keep the test-only graph
+// builders self-contained.
+static u32 emit_iconst(KernelEntry *ke, i64 v) {
+  return rangeify_emit_leaf(ke, S_ICONST, DT_INT64, (u64)v);
+}
+static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
+  return rangeify_emit_binary(ke, op, DT_INT64, a, b);
+}
 static char *cg_emit_tile    (KernelEntry const *ke) { (void)ke; return NULL; }
 static char *cg_emit_scalar  (KernelEntry const *ke) { (void)ke; return NULL; }
 
@@ -46,37 +56,6 @@ static u32 build_scalar_add_graph(KernelEntry *ke, u32 extent) {
   u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, sum);
   u32 src[2] = {sto, r0};
   return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, src, 0);
-}
-
-static u32 build_scalar_duplicate_expr_graph(KernelEntry *ke) {
-  kernel_inputs_reserve(ke, 1);
-  ke->n_inputs        = 1;
-  ke->input_tids[0]   = 0;
-  ke->input_dtypes[0] = DT_FP32;
-  ke->input_numels[0] = 4;
-  ke->output_dtype    = DT_FP32;
-  ke->output_numel    = 4;
-
-  u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
-                              ((u64)S_AXIS_LOOP << 32) | 4u);
-  u32 pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
-  u32 pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
-  u32 z0 = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 0);
-  u32 z1 = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 0);
-  u32 a0 = rangeify_emit_binary(ke, S_IADD, DT_INT64, r0, z0);
-  u32 a1 = rangeify_emit_binary(ke, S_IADD, DT_INT64, r0, z1);
-  u32 ia_src[2] = {pa, a0};
-  u32 ib_src[2] = {pa, a1};
-  u32 ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, ia_src, 0);
-  u32 ib = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, ib_src, 0);
-  u32 la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
-  u32 lb = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ib);
-  u32 sum = rangeify_emit_binary(ke, S_ADD, DT_FP32, la, lb);
-  u32 out_src[2] = {pc, r0};
-  u32 oi = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
-  u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, oi, sum);
-  u32 buf_src[2] = {sto, r0};
-  return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
 }
 
 static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
@@ -412,25 +391,8 @@ int main(void) {
   CHECK_EQ((u64)tile_axis_name(KAX_GLOBAL)[0], (u64)'G');
   CHECK_EQ((u64)tile_axis_name(KAX_GROUP_REDUCE)[0], (u64)'G');
 
-  TEST_BEGIN("tile-graph/rangeify-cse-dedupes-expression-nodes");
-  CHECK(build_scalar_duplicate_expr_graph(ke) != 0);
-  u32 old_n = ke->n_scalar_uops;
-  u32 removed = rangeify_cse(ke);
-  CHECK_EQ(removed, 4u);
-  CHECK_EQ(ke->n_scalar_uops, old_n - 4u);
-  u32 n_load = 0;
-  u32 add_id = 0;
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    if (ke->scalar_uops[i].op == S_LOAD) {
-      n_load++;
-    }
-    if (ke->scalar_uops[i].op == S_ADD) {
-      add_id = i;
-    }
-  }
-  CHECK_EQ(n_load, 1u);
-  CHECK(add_id != 0);
-  CHECK_EQ(ke->scalar_uops[add_id].src[0], ke->scalar_uops[add_id].src[1]);
+  // rangeify_cse was retired with the legacy ScalarUop lowering pass;
+  // the unified-rangeify pass owns CSE at the UOp-DAG level now.
   kernel_free_arrays(ke);
 
   // Matmul shape-recognition coverage lives in
