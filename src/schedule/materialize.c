@@ -3825,24 +3825,58 @@ static Term emit_kernel_for_boundary(u32 bi) {
   axes_default_for(ke);
 
   // Rangeify lowering: produce a parallel scalar-UOp form alongside
-  // the legacy KProgOp[].  When the lowering succeeds, seed the
-  // TileUop schedule plan above it; opt-in tile dispatch can consume
-  // that plan while default dispatch still routes through the existing
-  // scalar/KProgOp paths.  When rangeify bails (op not yet supported,
-  // broadcast pattern not handled, etc.), the legacy KProgOp[]
-  // dispatch runs and scalar_uops/tile_uops stay empty.  Default ON;
-  // THVM_RANGEIFY=0 disables and reverts to the legacy emit path.
-  // Reads getenv per emit (cheap; ~1us) so test harnesses can flip
-  // the flag mid-session without restarting the runtime.
-  // Multi-output kernels (spliced_ok above) can't go through
-  // rangeify today: rangeify_try_lower_elementwise emits a single
-  // S_BUFFERIZE / S_STORE pair against output slot 0, with no
-  // facility for a second BUFFERIZE rooted at the extra-output
-  // slot.  Skip lowering on those kernels so dispatch falls through
-  // to the legacy emit path, which honors
-  // KProgOp.store_extra_plus_one.  Rangeify multi-output is
-  // tracked as a separate follow-up under
-  // docs/plans/rewrite_fusion.md.
+  // the legacy KProgOp[].  THVM_RANGEIFY=0 disables (test harnesses
+  // can flip the flag mid-session; getenv is ~1us).  Multi-output
+  // kernels (spliced_ok above) skip rangeify because
+  // rangeify_try_lower_elementwise emits a single S_BUFFERIZE /
+  // S_STORE pair against output slot 0 -- no facility for a second
+  // BUFFERIZE rooted at the extra-output slot.  Rangeify multi-output
+  // tracked in docs/plans/rewrite_fusion.md.
+  //
+  // Why this call is still load-bearing (despite the unified-rangeify
+  // bypass covering 632/632 kernels for store_root):
+  //
+  //   rangeify writes one piece of KernelEntry state the unified pass
+  //   does NOT replicate -- `ke->input_chain_composed[slot]`.  When a
+  //   kernel input's TenDesc has a non-trivial ShapeTracker chain
+  //   (td->nviews > 0; e.g. PERMUTE->RESHAPE residue),
+  //   rangeify_try_lower_elementwise's emit_chained_index_from_addr
+  //   walks td->prior_views[] composing each view's
+  //   decompose-by-shape map into the kernel's INDEX expression as
+  //   S_IDIV/S_IMOD/S_IMUL/S_IADD scalar UOps and sets
+  //   input_chain_composed[i]=1.
+  //
+  //   The cpu_premat_chained_input pre-mat pass (interpret.c:59) gates
+  //   on that flag: when set, it skips the gather (the address already
+  //   folds the chain over the raw buffer); when unset, it gathers the
+  //   strided view into a fresh contig tid and swaps it in.
+  //
+  //   The unified pass (rangeify_unified.c) does NOT inspect
+  //   td->prior_views, does NOT touch ke->input_chain_composed, and
+  //   does NOT consult ke->input_views[slot].strides when building
+  //   INDEX_E addresses (it builds them from consumer iter ranges).
+  //   With rangeify removed:
+  //     - input_chain_composed stays zeroed
+  //     - pre-mat fires and overwrites ke->input_views[slot] with the
+  //       new contig view's strides
+  //     - BUT the unified pass's INDEX_E addresses encode the
+  //       OUTPUT/REDUCE iter cube (post-PERMUTE+RESHAPE shape), not the
+  //       producer's contig storage order.  The gathered buffer is in
+  //       the public-view shape's row-major order, so its element[k]
+  //       == strided_index(k) of the original, BUT addresses keyed on
+  //       consumer iter ranges land on different elements when the
+  //       consumer's iter cube and the public-view shape disagree
+  //       (e.g. REDUCE flattens a multi-axis input -- pre-mat keeps
+  //       the public {3,40} shape, but the kernel iter is {3} x
+  //       reduce-40, addresses computed as range_c*40 + range_k).
+  //
+  //   Net: removing this call breaks 5 tests (PERMUTE+RESHAPE chains
+  //   feeding REDUCE/conv2d_helper).  Fix path is to thread
+  //   prior_views composition into rangeify_unified.c's INDEX_E
+  //   address construction, OR to extract rangeify's
+  //   emit_chained_index_from_addr + input_chain_composed bookkeeping
+  //   into a standalone pass materialize.c calls independently of
+  //   rangeify_try_lower_elementwise.
   if (!spliced_ok) {
     const char *e = getenv("THVM_RANGEIFY");
     int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
