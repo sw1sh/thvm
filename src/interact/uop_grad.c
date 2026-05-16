@@ -822,6 +822,15 @@ static Term interact_grad_dispatch(Term grad_term) {
         u32 tid = (u32)term_val(y);
         u32 kid = tid < TENS_NEXT ? TENS[tid].producer_kid : 0;
         if (kid != 0 && kid < KERNELS_NEXT) {
+          // Backprop through the kernel by descending into its
+          // source_uop (tensor-level UOp tree).  grad_bwd_for_child
+          // dispatches on UOP_ADD/MUL/REDUCE/etc. via grad_bwd_of,
+          // hitting TAG_TEN input leaves and accumulating onto the
+          // target.  No program[] / KProgOp reads needed.
+          Term src = KERNELS[kid].source_uop;
+          if (src != 0 && term_tag(src) == TAG_UOP) {
+            return grad_bwd_for_child(src, gy);
+          }
           Term kgrad = grad_kernel_backprop(&KERNELS[kid], gy);
           if (kgrad != 0) return kgrad;
         }
@@ -1152,21 +1161,23 @@ static Term interact_grad_dispatch(Term grad_term) {
     }
 
     case UOP_KERNEL: {
-      // KERNEL: chain rule should run on the pre-kernelize source UOp,
-      // recovered from KernelEntry.source_uop.
+      // KERNEL: chain rule runs on the pre-kernelize source UOp tree
+      // recovered from KernelEntry.source_uop.  grad_bwd_for_child
+      // dispatches on the tensor-level UOps the kernel computes
+      // (UOP_ADD/MUL/REDUCE/etc.) without reading program[].
       u32 kid = (u32)term_val(heap_read(y_loc + 1));
       if (kid == 0 || kid >= KERNELS_NEXT) {
         return grad_zero_at(y);
+      }
+      Term src = KERNELS[kid].source_uop;
+      if (src != 0 && term_tag(src) == TAG_UOP) {
+        return grad_bwd_for_child(src, gy);
       }
       Term kgrad = grad_kernel_backprop(&KERNELS[kid], gy);
       if (kgrad != 0) {
         return kgrad;
       }
-      Term src = KERNELS[kid].source_uop;
-      if (src == 0) {
-        return grad_zero_at(y);
-      }
-      return grad_bwd_for_child(src, gy);
+      return grad_zero_at(y);
     }
 
     case UOP_CAST: {
