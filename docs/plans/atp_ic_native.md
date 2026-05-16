@@ -448,6 +448,62 @@ b63464e3.
 
 Stages 4-6 only after 1-3 land cleanly.
 
+## Milestone 7: completion engine investment
+
+The IC-native path (milestones 1-5) proves ground + shallow-pattern
+equational logic.  Hard single-axiom proofs (e.g.
+`FindEquationalProof[DoubleNegation, WolframAxioms]` -- a 54-step
+proof) need real Knuth-Bendix completion.
+
+`src/atp/_.c` already IS an unfailing-completion engine, and a
+more capable one than first assumed: best-first CP selection (the
+`--add` / `--mix` heuristics, via INC^k-wrapping + collapse_ordered),
+KBO orientation with unfailing fallback, interreduction, trivial-CP
+discard, PCL-shaped trace.  The blockers measured on the Wolfram
+axiom are *operational*, not algorithmic:
+
+- **Fixed caps** (`thvm.h`): `ATP_MAX_RULES = 256`,
+  `ATP_MAX_CPS = 4096`.  Completion of the Wolfram axiom overruns
+  both -- CPs past 4096 are silently dropped (`n_cps >= ATP_MAX_CPS
+  -> break`), so the engine cannot be complete on hard problems.
+- **No GC in the saturation loop**: `thvm_atp_step` only reclaims
+  heap on trivially-joined CPs (checkpoint/reset); a long run
+  exhausts the 128M-cell GC space (`heap_alloc: from-space
+  exhausted` at ~4096 steps).
+- **`select_cp` rebuilds** an O(n_cps) SUP-tree + collapse_ordered
+  every step -- O(n^2) allocation over a run.
+
+Measured: depth 64 -> 64 rules / CP queue 4096 (capped, no proof);
+depth 4096 -> heap exhausted.
+
+### Workstreams (sequenced by enabling-order)
+
+- **7a -- memory**: growable rule / CP arrays (drop the 256 / 4096
+  caps) + GC inside `thvm_atp_step` (register the AtpState term
+  arrays -- `lhs/rhs/cp_lhs/cp_rhs` -- as copying-GC roots so a
+  collect relocates+updates them; collect under heap pressure).
+  This is the *enabling* fix: without it the engine cannot run
+  long enough to evaluate anything else.
+- **7b -- convergence assessment**: with 7a, run the Wolfram-axiom
+  completion long; measure rule/CP growth, KBO orientation rate,
+  whether it finds the proof or grows unboundedly.
+- **7c -- redundancy strengthening** (if 7b shows runaway growth):
+  full forward+backward subsumption, simplify-reflect, blocked-CP
+  deletion -- the Waldmeister redundancy criteria.
+- **7d -- term indexing**: discrimination trees / fingerprints so
+  matching + subsumption aren't O(rules) per step.  Perf, after
+  correctness.
+- **7e -- wire-through**: route `TFindEquationalProof`'s structured
+  problems through completion; decode the PCL trace into a
+  verifier-passing `ProofObject`.  (Also fixes the bound-symbol
+  encoder bug: a caller-bound `wax = ForAll[...]` reaches the
+  HoldAll surface as a held symbol -- resolve via `OwnValues`
+  before `forAllToPattern`.)
+
+This supersedes milestone 6: `src/atp/_.c` is NOT retired -- it is
+the hard-proof engine.  The IC path stays for the easy/shallow
+class it already handles well (and is GPU-targetable).
+
 ## Scope cuts (v1)
 
 - No INC-labels-as-precedence yet.  Branch order is left-first
