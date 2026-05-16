@@ -417,16 +417,15 @@ static void boundary_compute_last_use(void) {
 // (or returns the existing slot).  Defined in the build_kernel section.
 static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term);
 
-// THVM_LIFT_FROM_UNIFIED=1 helper.  The unified-pass store_root carries
-// TAG_TEN leaves (wrapped inside UOP_INDEX_E.buffer slots; see
-// ru_rewrite_subtree in rangeify_unified.c).  The legacy kernel_lift
-// path replaces those tensor handles with hash-consed UOP_BUFFER nodes
-// keyed by (slot+1) instance disambiguator, and cpu_uop_walk binds the
-// kernel's runtime input table to UOP_BUFFER leaves matched by that
-// same instance number.  Substitute every TAG_TEN whose tid appears in
+// The unified-pass store_root carries TAG_TEN leaves (wrapped inside
+// UOP_INDEX_E.buffer slots; see ru_rewrite_subtree in
+// rangeify_unified.c).  The legacy kernel_lift path replaces those
+// tensor handles with hash-consed UOP_BUFFER nodes keyed by (slot+1)
+// instance disambiguator, and cpu_uop_walk binds the kernel's runtime
+// input table to UOP_BUFFER leaves matched by that same instance
+// number.  Substitute every TAG_TEN whose tid appears in
 // ke->input_tids[] with the matching UOP_BUFFER so the unified subtree
 // becomes structurally compatible with the walker's identity binding.
-// Mirror source: kernel_lift.c:1540-1558 lift_input_buffer.
 
 #define UNIFIED_REWRITE_MEMO_CAP 4096
 typedef struct {
@@ -1404,8 +1403,8 @@ static void unified_fold_chain_commit_flags(KernelEntry *ke,
   }
 }
 
-// Safety gate for THVM_LIFT_FROM_UNIFIED=1: collect every UOP_RANGE
-// axis_id that appears in a STORE's addr or as the axis of a UOP_REDUCE
+// Per-kernel bypass safety gate: collect every UOP_RANGE axis_id
+// that appears in a STORE's addr or as the axis of a UOP_REDUCE
 // found anywhere in the value subtree.  Then verify every UOP_RANGE
 // leaf in the value subtree has an axis_id in that set.  A "stranded
 // range" -- one whose axis_id isn't iterated by the cpu_uop_walk loop
@@ -4013,12 +4012,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // stranded-RANGE, broadcast-input) leave store_root on the
     // legacy lifter's output for kernels the unified pass can't
     // fully lower; the rest of the schedule still gets the bypass.
-    // THVM_LIFT_FROM_UNIFIED=0 reverts to the legacy lifter for the
-    // entire schedule (bisection knob; default ON).
     {
-      char const *_e = getenv("THVM_LIFT_FROM_UNIFIED");
-      int _bypass_on = (_e == NULL) || (_e[0] != '0');
-    if (_bypass_on) {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
         Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
@@ -4101,7 +4095,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
           unified_fold_chain_commit_flags(ke, &_cf_marks);
         }
       }
-    }
     }
     // Identity check: rangeify_unified_store_root_at(idx) is the
     // unified-pass UOP_STORE for this boundary (when dtype inference

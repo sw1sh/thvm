@@ -531,33 +531,28 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // fields the bypass-substitution site reads (in_bufs[], n_inputs,
   // out_buf) and hand back the unified root as store_root.  Walked
   // BEFORE the conv2d-direct path because the unified pass owns every
-  // non-multi-output, non-conv2d kernel today.  THVM_LIFT_FROM_UNIFIED=0
-  // skips this and falls through to the conv2d/empty-arena paths.
-  {
-    char const *unified_e = getenv("THVM_LIFT_FROM_UNIFIED");
-    int unified_on = (unified_e == NULL) || (unified_e[0] != '0');
-    if (unified_on && ke->source_uop != 0) {
-      u32 ru_idx = bufferize_info_find(term_val(ke->source_uop));
-      if (ru_idx != 0xFFFFFFFFu) {
-        Term ru_root = rangeify_unified_store_root_at(ru_idx);
-        if (ru_root != 0) {
-          if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
-            lift_reject_log(ke, 0, "entry/n-inputs-over-cap");
+  // non-multi-output, non-conv2d kernel today.
+  if (ke->source_uop != 0) {
+    u32 ru_idx = bufferize_info_find(term_val(ke->source_uop));
+    if (ru_idx != 0xFFFFFFFFu) {
+      Term ru_root = rangeify_unified_store_root_at(ru_idx);
+      if (ru_root != 0) {
+        if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
+          lift_reject_log(ke, 0, "entry/n-inputs-over-cap");
+          return 0;
+        }
+        out->n_inputs = ke->n_inputs;
+        for (u32 i = 0; i < ke->n_inputs; i++) {
+          Term in_buf = lift_input_buffer(ke, i);
+          if (in_buf == 0) {
+            lift_reject_log(ke, 0, "entry/in-buf-build-fail");
             return 0;
           }
-          out->n_inputs = ke->n_inputs;
-          for (u32 i = 0; i < ke->n_inputs; i++) {
-            Term in_buf = lift_input_buffer(ke, i);
-            if (in_buf == 0) {
-              lift_reject_log(ke, 0, "entry/in-buf-build-fail");
-              return 0;
-            }
-            out->in_bufs[i] = in_buf;
-          }
-          out->out_buf    = uop_store_buf(ru_root);
-          out->store_root = ru_root;
-          return 1;
+          out->in_bufs[i] = in_buf;
         }
+        out->out_buf    = uop_store_buf(ru_root);
+        out->store_root = ru_root;
+        return 1;
       }
     }
   }
