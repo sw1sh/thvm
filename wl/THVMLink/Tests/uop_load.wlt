@@ -79,10 +79,13 @@ VerificationTest[
     k    = TMaterialize[TUOpAdd[a, TUOpLoad[b]]];
     kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
     info = TKernelInfo[kid];
-    {info["n_inputs"], info["n_ops"],
-     info["program"][[1, "opcode"]],
-     info["program"][[2, "opcode"]]},
-    {2, 2, "LOAD", "ADD"},
+    (* Pre THVM_PHASE_C7_FREE_PROGRAM the test also asserted the
+       per-KProgOp opcode list (n_ops == 2, program = [LOAD, ADD]);
+       under FREE_PROGRAM=1 default, program[] is freed post-lift.
+       n_inputs == 2 stays as the surviving observation: explicit
+       LOAD wraps an input without folding it away. *)
+    info["n_inputs"],
+    2,
     TestID -> "uop-load/explicit-load-emits-program-step"
 ]
 

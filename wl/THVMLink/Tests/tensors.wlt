@@ -142,15 +142,16 @@ VerificationTest[
     a    = TTensor[{3}, {1.0, 2.0, 3.0}];
     (* Go through TUOpAdd directly -- `a + a` would be simplified to
        `2*a` by WL's Orderless Plus before our UpValue fires.
-       Materialize dedups the duplicate input, so the ADD has 1
-       input and both src slots reference KSRC_AS_INPUT(0). *)
+       Materialize dedups the duplicate input, so the kernel has
+       n_inputs == 1.  Pre THVM_PHASE_C7_FREE_PROGRAM the test also
+       asserted the ADD opcode and src-slot equality on the KProgOp;
+       under FREE_PROGRAM=1 default, program[] is freed post-lift so
+       n_inputs is the surviving dedup observation. *)
     k    = TMaterialize[TUOpAdd[a, a]];
     kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
     info = TKernelInfo[kid];
-    {info["n_inputs"],
-     info["program"][[1, "opcode"]],
-     info["program"][[1, "src", 1]] === info["program"][[1, "src", 2]]},
-    {1, "ADD", True},
+    info["n_inputs"],
+    1,
     TestID -> "TMaterialize/dedups-duplicate-inputs"
 ]
 
@@ -158,12 +159,13 @@ VerificationTest[
     TInit[];
     a    = TTensor[{3}, {1.0, 2.0, 3.0}];
     k    = TMaterialize[TUOpReduce[a, 0, "SUM"]];
-    (* Kernel id sits in the second heap cell of the UOP_KERNEL.
-       Program is just `[REDUCE]`; output_numel collapses the
-       reduced axis to 1. *)
+    (* output_numel collapses the reduced axis to 1.  AxisTypes
+       includes REDUCE (axis.c reads this from the lifted DAG's
+       UOP_RANGE leaves with KAX_REDUCE / KAX_GROUP_REDUCE). *)
     kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
     info = TKernelInfo[kid];
-    {info["program"][[1, "opcode"]], info["output_numel"]},
-    {"REDUCE", 1},
+    axisTypes = First[TKernelOpts[kid]]["AxisTypes"];
+    {info["output_numel"], MemberQ[axisTypes, "REDUCE" | "GROUP_REDUCE"]},
+    {1, True},
     TestID -> "TMaterialize/reduce-output-shape"
 ]
