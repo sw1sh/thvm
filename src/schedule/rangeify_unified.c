@@ -976,16 +976,19 @@ static Term ru_build_addr_with_dims(Term const *rngs, u8 ndim,
   if (ndim == 0) return uop_const(DT_INT32, 0);
   u32 local_dims[RU_MAX_AXES] = {0};
   if (dims == NULL) {
+    // Derive per-axis extents from each rng.  RANGE leaves contribute
+    // their extent; CONST(0) (broadcast-axis placeholder) contributes
+    // 1 (no stride mass).  Any other shape (a swizzler IADD/IMUL,
+    // CONST(non-zero), etc.) defaults to 1 too -- the surrounding
+    // call already knows the underlying numel from src_shape when
+    // it matters; this path is the dims-NULL fallback.
     for (u8 a = 0; a < ndim; a++) {
       Term r = rngs[a];
-      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
-        Term acc = rngs[0];
-        for (u8 b = 1; b < ndim; b++) {
-          acc = uop_int_binary(UOP_IADD, acc, rngs[b]);
-        }
-        return acc;
+      if (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE) {
+        local_dims[a] = (u32)term_val(heap_read(term_val(r) + 2));
+      } else {
+        local_dims[a] = 1;
       }
-      local_dims[a] = (u32)term_val(heap_read(term_val(r) + 2));
     }
     dims = local_dims;
   }
