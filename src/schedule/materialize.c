@@ -4173,10 +4173,14 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // table.  cpu_blas_dispatch and tile.c's gemm/gemv recognisers
     // still consume program[]; backprop through UOP_KERNEL reads it
     // too.  NULL program[] -> all-zero gradients -> training breaks.
-    // THVM_PHASE_C7_FREE_PROGRAM=1 frees program[] post-lift for
-    // memory/perf experiments once every consumer is DAG-only.
+    // Free program[] post-lift now that every consumer reads either
+    // cached_lift.store_root directly or routes through one of the
+    // DAG-first wrappers (axes_compute_*, cg_kernel_flops,
+    // jit_capture_kernel_op_count, grad_bwd_for_child via source_uop,
+    // uop_dag_classify_*).  THVM_PHASE_C7_FREE_PROGRAM=0 reverts to
+    // keeping program[] around as a bisection knob.
     char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-    int free_program_on = (free_e != NULL) && (free_e[0] == '1');
+    int free_program_on = (free_e == NULL) || (free_e[0] != '0');
     if (free_program_on) {
       if (ke->program != NULL) {
         free(ke->program);
