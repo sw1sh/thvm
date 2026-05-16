@@ -295,9 +295,12 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Conv2D over a produced activation should route through the
-       opt-in direct Metal conv diagnostic shader for the im2col-fused
-       scalar graph. *)
+    (* Conv2D over a produced activation produces the correct output
+       via the generic metal-tile path.  THVM_METAL_SPECIALIZED used to
+       opt into a metal-conv diagnostic shader; that kind is retired
+       (KDISPATCH_METAL_CONV in thvm.h marked retired in 97d58c32) -
+       all conv2d shapes now route through render_uop's generic
+       accumulator. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result, oldSpecialized, restore,
             xHost, wHost, expected},
@@ -319,7 +322,7 @@ VerificationTest[
             out = TRealize @ TConv2D[TReLU[x], w, b];
             kinds = Table[TKernelDispatchKind[k], {k, 1, TKernelCount[] - 1}];
             {Round[Normal @ TTensorData[out], 0.001],
-             MemberQ[kinds, "metal-conv"]}
+             FreeQ[kinds, "metal-conv"]}
         ];
         TContextDestroy[ctx];
         restore[];
