@@ -186,24 +186,15 @@ static void rmu_emit_term(Term t, FILE *fp) {
       u32 dtype = term_ext(heap_read(loc));
       u32 bits  = (u32)term_val(heap_read(loc));
       if (dtype == DT_FP32) {
-        // C target: emit as THVM_BITCAST(float, 0xBITS) so the
-        // constant survives decimal round-trip bit-exactly.  Metal
-        // target keeps the human-readable decimal form since MSL
-        // accepts the same literals and the bitcast macro isn't in
-        // scope there.
+        // Both targets: emit f32 as a bit-exact bitcast so the
+        // constant survives decimal round-trip without any
+        // compiler-side fp formatting drift.  C target uses the
+        // THVM_BITCAST macro from the prologue; Metal target uses
+        // MSL's `as_type<float>` reinterpreter.
         if (RMU_TARGET_C) {
           fprintf(fp, "THVM_BITCAST(float, 0x%08xu)", bits);
         } else {
-          union { u32 b; float f; } pun = { .b = bits };
-          char numbuf[32];
-          snprintf(numbuf, sizeof(numbuf), "%.9g", (double)pun.f);
-          int has_decimal = (strchr(numbuf, '.') != NULL
-                             || strchr(numbuf, 'e') != NULL
-                             || strchr(numbuf, 'E') != NULL
-                             || strchr(numbuf, 'n') != NULL  /* nan/inf */
-                             || strchr(numbuf, 'i') != NULL);
-          if (has_decimal) fprintf(fp, "%sf", numbuf);
-          else             fprintf(fp, "%s.0f", numbuf);
+          fprintf(fp, "as_type<float>(0x%08xu)", bits);
         }
       } else {
         fprintf(fp, "%d", (int)bits);
