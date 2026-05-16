@@ -186,26 +186,24 @@ static void rmu_emit_term(Term t, FILE *fp) {
       u32 dtype = term_ext(heap_read(loc));
       u32 bits  = (u32)term_val(heap_read(loc));
       if (dtype == DT_FP32) {
-        union { u32 b; float f; } pun = { .b = bits };
-        // %.9g round-trips fp32 exactly with the shortest decimal
-        // representation -- but for whole numbers it produces "2"
-        // which becomes "2f" (invalid C/MSL float literal -- needs
-        // a decimal point or exponent).  Detect that case and add
-        // ".0" so the literal stays valid.  Replaces the previous
-        // %f .6 default which truncated tiny constants like 1e-7
-        // to "0.000000f", silently zeroing the addend in e.g.
-        // cross-entropy eps clamps.
-        char numbuf[32];
-        snprintf(numbuf, sizeof(numbuf), "%.9g", (double)pun.f);
-        int has_decimal = (strchr(numbuf, '.') != NULL
-                           || strchr(numbuf, 'e') != NULL
-                           || strchr(numbuf, 'E') != NULL
-                           || strchr(numbuf, 'n') != NULL  /* nan/inf */
-                           || strchr(numbuf, 'i') != NULL);
-        if (has_decimal) {
-          fprintf(fp, "%sf", numbuf);
+        // C target: emit as THVM_BITCAST(float, 0xBITS) so the
+        // constant survives decimal round-trip bit-exactly.  Metal
+        // target keeps the human-readable decimal form since MSL
+        // accepts the same literals and the bitcast macro isn't in
+        // scope there.
+        if (RMU_TARGET_C) {
+          fprintf(fp, "THVM_BITCAST(float, 0x%08xu)", bits);
         } else {
-          fprintf(fp, "%s.0f", numbuf);
+          union { u32 b; float f; } pun = { .b = bits };
+          char numbuf[32];
+          snprintf(numbuf, sizeof(numbuf), "%.9g", (double)pun.f);
+          int has_decimal = (strchr(numbuf, '.') != NULL
+                             || strchr(numbuf, 'e') != NULL
+                             || strchr(numbuf, 'E') != NULL
+                             || strchr(numbuf, 'n') != NULL  /* nan/inf */
+                             || strchr(numbuf, 'i') != NULL);
+          if (has_decimal) fprintf(fp, "%sf", numbuf);
+          else             fprintf(fp, "%s.0f", numbuf);
         }
       } else {
         fprintf(fp, "%d", (int)bits);
