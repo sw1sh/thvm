@@ -478,27 +478,49 @@ depth 4096 -> heap exhausted.
 
 ### Workstreams (sequenced by enabling-order)
 
-- **7a -- memory**: growable rule / CP arrays (drop the 256 / 4096
-  caps) + GC inside `thvm_atp_step` (register the AtpState term
-  arrays -- `lhs/rhs/cp_lhs/cp_rhs` -- as copying-GC roots so a
-  collect relocates+updates them; collect under heap pressure).
-  This is the *enabling* fix: without it the engine cannot run
-  long enough to evaluate anything else.
-- **7b -- convergence assessment**: with 7a, run the Wolfram-axiom
-  completion long; measure rule/CP growth, KBO orientation rate,
-  whether it finds the proof or grows unboundedly.
+- **7a -- memory** (DONE, commit c500f833): growable rule / CP
+  arrays (dropped the 256 / 4096 caps) + GC inside `thvm_atp_step`.
+  Verified: the Wolfram-axiom CP queue now grows past 4096 and a
+  60s run does not exhaust the heap.
+
+- **7c' -- kill the O(n^2) per-step cost** (NEW, now the blocker):
+  measured after 7a -- `thvm_atp_step` runs MaxSteps=24 in ~0s but
+  MaxSteps=64 in ~60s.  The per-step cost explodes super-linearly,
+  so the engine cannot run deep enough to prove anything hard
+  (24 steps -> 24 rules, 613 CPs queued, no proof).  Cause:
+  `thvm_atp_select_cp` rebuilds an O(n_cps) `wrapped[]` SUP-tree +
+  runs `collapse_ordered` *every step* -> O(steps * n_cps) overall;
+  and `generate_cps` is O(n_rules) per step.  Fix: an incremental
+  CP priority structure (binary heap keyed on `atp_cp_priority`, or
+  a kept-sorted array) so selection is O(log n) per step, not a
+  full rebuild.  This must land before 7b/7c -- without it no long
+  run is observable.
+
+- **7b -- convergence assessment**: with 7a + 7c', run the
+  Wolfram-axiom completion long; measure rule/CP growth, KBO
+  orientation rate, whether it finds the proof or grows unboundedly.
+  Debug ladder (per the "scale the proof" strategy): WL's own
+  `FindEquationalProof[DoubleNegation, WolframAxioms]` ProofDataset
+  is a DAG of 34 CriticalPairLemma + 17 SubstitutionLemma + the
+  Conclusion.  `CriticalPairLemma 1/2` derive from `{Axiom 1}`
+  alone (distance 1); later lemmas derive from earlier ones.  Prove
+  each lemma `TATP[{axiom}, lemma_k]` at increasing distance: a
+  failure at small distance pinpoints an *inference* bug; a
+  failure only at large distance is a *search/scaling* limit.
+  `SubstitutionLemma 17` is the theorem itself.
+
 - **7c -- redundancy strengthening** (if 7b shows runaway growth):
   full forward+backward subsumption, simplify-reflect, blocked-CP
   deletion -- the Waldmeister redundancy criteria.
 - **7d -- term indexing**: discrimination trees / fingerprints so
-  matching + subsumption aren't O(rules) per step.  Perf, after
-  correctness.
+  matching + subsumption aren't O(rules) per step.
 - **7e -- wire-through**: route `TFindEquationalProof`'s structured
   problems through completion; decode the PCL trace into a
   verifier-passing `ProofObject`.  (Also fixes the bound-symbol
   encoder bug: a caller-bound `wax = ForAll[...]` reaches the
   HoldAll surface as a held symbol -- resolve via `OwnValues`
-  before `forAllToPattern`.)
+  before `forAllToPattern`; or callers use `With[{l = ax}, ...]`
+  to inject the value past HoldAll.)
 
 This supersedes milestone 6: `src/atp/_.c` is NOT retired -- it is
 the hard-proof engine.  The IC path stays for the easy/shallow
