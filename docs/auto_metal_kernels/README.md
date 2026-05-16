@@ -17,6 +17,7 @@ reference material that brief points to.
 | [mlx_reference.md](mlx_reference.md) | What MLX's softmax / matmul / reduce kernels do that's hard to beat -- `simd_max`, `fast::exp`, N_READS, two-stage TG reduce, `-FLT_MAX` sentinel |
 | [profiling.md](profiling.md) | `Metal.dispatch_timed`, the score harnesses, GPU vs wall clock, jitter floor |
 | [pitfalls.md](pitfalls.md) | NaN traps, alignment, axis_size==C convention, `mx.eval` synchronization, common compile errors |
+| [field_guide.md](field_guide.md) | Background reading: what kernels are, the GPU model, how kernels are written, the HuggingFace Kernel Hub, autotuning families, thvm UOpt vs tinygrad vs TileLang, a worked softmax example |
 
 ## Quickstart for an agent landing here cold
 
