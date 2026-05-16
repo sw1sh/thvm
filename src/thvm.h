@@ -3244,9 +3244,18 @@ typedef enum {
   ATP_QUEUE_EMPTY = 4,
 } AtpStatus;
 
-#define ATP_MAX_RULES 256
-#define ATP_MAX_CPS   4096
-#define ATP_MAX_TRACE 4096
+// Initial heap capacities for the growable rule / CP arrays in
+// AtpState.  The arrays double on demand (see atp_ensure_rule_cap /
+// atp_ensure_cp_cap), so these are starting sizes, not ceilings --
+// a long completion run grows them as far as host memory allows.
+#define ATP_INIT_RULES 256
+#define ATP_INIT_CPS   4096
+#define ATP_MAX_TRACE  4096
+
+// Sentinel for "no rule excluded" in the connectedness check
+// (atp_cp_source_disjoint_connected): any value >= n_rules works,
+// but callers pass this explicitly.
+#define ATP_RULE_NONE  0xFFFFFFFFu
 
 // Reason labels for trace entries (used as the CTR label).
 // Each TraceEntry is a TAG_CTR with label = reason and children =
@@ -3304,25 +3313,32 @@ fn u32                kbo_cfg_register(u32 cfg_id, const KboConfig *cfg);
 fn const KboConfig   *kbo_cfg_get     (u32 cfg_id);
 
 typedef struct {
-  // Rule set R: parallel arrays sized for thvm_rewrite_normalize /
-  // thvm_critical_pairs to consume directly.  r_trace[i] is the
-  // trace-entry index that produced rule i (TRACE_ORIENT for rules
-  // added by atp_step; ATP_TRACE_NONE for rules manually injected
-  // by tests / setup code that bypassed the saturation pipeline).
-  Term lhs[ATP_MAX_RULES];
-  Term rhs[ATP_MAX_RULES];
-  u32  r_trace[ATP_MAX_RULES];
-  u32  n_rules;
+  // Rule set R: growable parallel arrays sized for
+  // thvm_rewrite_normalize / thvm_critical_pairs to consume
+  // directly.  r_trace[i] is the trace-entry index that produced
+  // rule i (TRACE_ORIENT for rules added by atp_step;
+  // ATP_TRACE_NONE for rules manually injected by tests / setup
+  // code that bypassed the saturation pipeline).  Heap-allocated by
+  // thvm_atp_init at ATP_INIT_RULES capacity; atp_ensure_rule_cap
+  // doubles on demand so saturation never silently drops a rule.
+  Term *lhs;
+  Term *rhs;
+  u32  *r_trace;
+  u32   n_rules;
+  u32   r_cap;
 
   // CP queue (open-form: not INC-wrapped here; the priority encoding
   // happens at selection time in thvm_atp_select).  cp_trace[i]
   // holds the trace-entry index that birthed cp[i] (TRACE_AXIOM
   // for queued axioms, TRACE_CP for generated CPs in 6.1c, or
-  // ATP_TRACE_NONE if tracing is disabled / unavailable).
-  Term cp_lhs[ATP_MAX_CPS];
-  Term cp_rhs[ATP_MAX_CPS];
-  u32  cp_trace[ATP_MAX_CPS];
-  u32  n_cps;
+  // ATP_TRACE_NONE if tracing is disabled / unavailable).  Growable
+  // like the rule arrays: heap-allocated at ATP_INIT_CPS,
+  // atp_ensure_cp_cap doubles on demand.
+  Term *cp_lhs;
+  Term *cp_rhs;
+  u32  *cp_trace;
+  u32   n_cps;
+  u32   cp_cap;
 
   // Transient: set by thvm_atp_select_cp to the trace-entry index
   // of the popped CP; consumed by thvm_atp_step right after the
@@ -3520,6 +3536,16 @@ fn u32       thvm_atp_narrow_all  (AtpState *s, Term lhs, Term rhs,
 // where neither l nor r is used downstream.
 fn u64       thvm_atp_heap_checkpoint(void);
 fn void      thvm_atp_heap_reset     (u64 checkpoint);
+
+// 7a: in-loop Cheney collection for the saturation engine.  Gathers
+// every live Term reachable from the AtpState (rule set, CP queue,
+// goal, trace entries, narrowing witness) into a root array, runs
+// gc_collect, and writes the relocated Terms back.  thvm_atp_step
+// calls this when the dyn heap crosses the half-full mark so a long
+// completion run no longer exhausts from-space.  Returns 1 if a
+// collection ran, 0 if GC is disabled or `s` is NULL.  Safe to call
+// directly (e.g. from tests) -- it is a no-op without GC.
+fn u8        thvm_atp_gc_collect     (AtpState *s);
 
 // 8.9c: set an existential conjecture.  Sets goal_lhs / goal_rhs
 // AND flips `s->goal_existential = 1` so `thvm_atp_goal_check`

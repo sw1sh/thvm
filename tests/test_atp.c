@@ -130,19 +130,23 @@ int main(void) {
     thvm_atp_free(s);
   }
 
-  TEST_BEGIN("atp/add-equation-rejects-when-full");
+  TEST_BEGIN("atp/add-equation-queue-grows-past-initial-cap");
   {
+    // 7a: the CP queue is growable -- add_equation never rejects
+    // for being full.  Push well past ATP_INIT_CPS and confirm the
+    // queue keeps every entry (capacity doubled on demand).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    // Fill the queue with cheap equations.
     Term lhs = mk_e();
     Term rhs = mk_e();
-    for (u32 i = 0; i < ATP_MAX_CPS; i++) {
+    u32 n_push = ATP_INIT_CPS + 17u;
+    for (u32 i = 0; i < n_push; i++) {
       CHECK(thvm_atp_add_equation(s, lhs, rhs));
     }
-    CHECK_EQ(s->n_cps, (u64)ATP_MAX_CPS);
-    // One more should fail.
-    CHECK_EQ(thvm_atp_add_equation(s, lhs, rhs), 0u);
-    CHECK_EQ(s->n_cps, (u64)ATP_MAX_CPS);
+    CHECK_EQ(s->n_cps, (u64)n_push);
+    CHECK(s->cp_cap >= n_push);
+    // One more still succeeds -- no ceiling.
+    CHECK_EQ(thvm_atp_add_equation(s, lhs, rhs), 1u);
+    CHECK_EQ(s->n_cps, (u64)n_push + 1u);
     thvm_atp_free(s);
   }
 
@@ -926,7 +930,7 @@ int main(void) {
 
   TEST_BEGIN("atp/cp-connectedness-empty-filter-falls-through");
   {
-    // ATP_MAX_RULES as the "exclude no rules" sentinel: with both
+    // ATP_RULE_NONE as the "exclude no rules" sentinel: with both
     // rule_a and rule_b out of range, the filtered set equals R
     // and the result matches trivial-joinability.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
@@ -940,8 +944,8 @@ int main(void) {
     Term r = mk_a();
     u8 join = atp_cp_trivially_joinable(s, l, r);
     u8 conn = atp_cp_source_disjoint_connected(s, l, r,
-                                               ATP_MAX_RULES,
-                                               ATP_MAX_RULES);
+                                               ATP_RULE_NONE,
+                                               ATP_RULE_NONE);
     CHECK_EQ(join, 1u);
     CHECK_EQ(conn, 1u);
     thvm_atp_free(s);
@@ -1124,7 +1128,7 @@ int main(void) {
     u32 before_cnt = s->n_cps;
     u32 pushed = atp_push_cps_traced(s, batch, 1,
                                      ATP_TRACE_NONE, ATP_TRACE_NONE,
-                                     ATP_MAX_RULES, ATP_MAX_RULES);
+                                     ATP_RULE_NONE, ATP_RULE_NONE);
     CHECK_EQ(pushed, 0u);
     CHECK_EQ(s->n_cps, before_cnt);   // queue did not grow
     CHECK(s->n_cps_dropped_queue_subsumed >= 1u);

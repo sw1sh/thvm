@@ -271,21 +271,72 @@ static Term atp_rewrite_normalize(AtpState *s, Term t,
   return thvm_rewrite_normalize(t, lhs, rhs, n_rules, step_cap);
 }
 
+// Grow the rule arrays (lhs / rhs / r_trace) to hold at least
+// `need` entries.  No-op when capacity already suffices.  Doubles
+// from the current capacity so amortized push cost stays O(1).
+// New r_trace slots are filled with ATP_TRACE_NONE so a manually
+// written rule that bypasses orient_and_add still has a defined
+// trace index.  Aborts the process on OOM (matches heap_alloc's
+// fatal policy -- there is no meaningful recovery for the caller).
+static void atp_ensure_rule_cap(AtpState *s, u32 need) {
+  if (need <= s->r_cap) return;
+  u32 cap = s->r_cap ? s->r_cap : ATP_INIT_RULES;
+  while (cap < need) cap *= 2;
+  Term *nl = (Term *)realloc(s->lhs,     cap * sizeof(Term));
+  Term *nr = (Term *)realloc(s->rhs,     cap * sizeof(Term));
+  u32  *nt = (u32  *)realloc(s->r_trace, cap * sizeof(u32));
+  if (nl == NULL || nr == NULL || nt == NULL) {
+    fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
+            cap);
+    exit(1);
+  }
+  s->lhs = nl; s->rhs = nr; s->r_trace = nt;
+  for (u32 i = s->r_cap; i < cap; i++) s->r_trace[i] = ATP_TRACE_NONE;
+  s->r_cap = cap;
+}
+
+// Grow the CP arrays (cp_lhs / cp_rhs / cp_trace) to hold at least
+// `need` entries.  Same doubling discipline as atp_ensure_rule_cap.
+static void atp_ensure_cp_cap(AtpState *s, u32 need) {
+  if (need <= s->cp_cap) return;
+  u32 cap = s->cp_cap ? s->cp_cap : ATP_INIT_CPS;
+  while (cap < need) cap *= 2;
+  Term *nl = (Term *)realloc(s->cp_lhs,   cap * sizeof(Term));
+  Term *nr = (Term *)realloc(s->cp_rhs,   cap * sizeof(Term));
+  u32  *nt = (u32  *)realloc(s->cp_trace, cap * sizeof(u32));
+  if (nl == NULL || nr == NULL || nt == NULL) {
+    fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
+    exit(1);
+  }
+  s->cp_lhs = nl; s->cp_rhs = nr; s->cp_trace = nt;
+  for (u32 i = s->cp_cap; i < cap; i++) s->cp_trace[i] = ATP_TRACE_NONE;
+  s->cp_cap = cap;
+}
+
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
   s->kbo      = cfg;
   s->step_cap = step_cap;
   atp_register_primitives();
-  // Trace-index slots default to ATP_TRACE_NONE (calloc gives 0,
-  // which is a valid trace index, so we explicitly fill).
-  for (u32 i = 0; i < ATP_MAX_RULES; i++) s->r_trace[i]  = ATP_TRACE_NONE;
-  for (u32 i = 0; i < ATP_MAX_CPS;   i++) s->cp_trace[i] = ATP_TRACE_NONE;
+  // Allocate the growable rule / CP arrays at their initial
+  // capacity.  ensure_*_cap fills the trace slots with
+  // ATP_TRACE_NONE (0 is a valid trace index, so explicit fill
+  // is required); a fresh array starts with r_cap == 0 so the
+  // helper treats the whole span as new.
+  atp_ensure_rule_cap(s, ATP_INIT_RULES);
+  atp_ensure_cp_cap(s, ATP_INIT_CPS);
   return s;
 }
 
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
+  free(s->lhs);
+  free(s->rhs);
+  free(s->r_trace);
+  free(s->cp_lhs);
+  free(s->cp_rhs);
+  free(s->cp_trace);
   free(s);
 }
 
@@ -299,6 +350,91 @@ fn void thvm_atp_heap_reset(u64 checkpoint) {
   // term_new_* for that).  Silent no-op on out-of-range to make
   // the API safe to sprinkle in step paths.
   if (checkpoint <= HEAP_NEXT) HEAP_NEXT = checkpoint;
+}
+
+// === 7a: in-loop GC for the saturation engine ======================
+//
+// thvm_atp_heap_checkpoint/reset only reclaims the per-step
+// normalization scratch when a CP is trivially joined.  Every
+// rule / CP / trace Term that survives a step is a heap-resident
+// cell that lives forever, so a long completion run otherwise
+// bumps HEAP_NEXT until heap_alloc reports "from-space exhausted".
+//
+// The fix: gather every live Term reachable from the AtpState into
+// a root array and hand it to the Cheney collector (gc_collect).
+// The collector evacuates each root to to-space, rewrites the root
+// slot with the moved location, and swaps semi-spaces -- exactly
+// the discipline `thvm_realize` uses for the WL session.  Writing
+// the moved Terms back into the AtpState arrays keeps the engine
+// pointing at the live copies.
+//
+// Live Term fields rooted here:
+//   - lhs[0..n_rules), rhs[0..n_rules)        -- the rule set R
+//   - cp_lhs[0..n_cps), cp_rhs[0..n_cps)      -- the CP queue
+//   - goal_lhs, goal_rhs                      -- the conjecture
+//   - trace[0..n_trace)                       -- TAG_CTR entries
+//                                                (each holds lhs/rhs)
+//   - witness_subst.bindings[0..REWRITE_MAX_VAR) -- narrowing σ
+//
+// Returns 1 if a collection ran, 0 if GC is disabled / no state.
+fn u8 thvm_atp_gc_collect(AtpState *s) {
+  if (s == NULL || !gc_enabled()) return 0;
+
+  // Count the root slots so we can size the array exactly.
+  u32 n_roots = 2u * s->n_rules + 2u * s->n_cps + 2u /* goal */
+              + s->n_trace + REWRITE_MAX_VAR;
+  Term *roots = (Term *)malloc((size_t)n_roots * sizeof(Term));
+  if (roots == NULL) return 0;
+
+  u32 w = 0;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    roots[w++] = s->lhs[i];
+    roots[w++] = s->rhs[i];
+  }
+  for (u32 i = 0; i < s->n_cps; i++) {
+    roots[w++] = s->cp_lhs[i];
+    roots[w++] = s->cp_rhs[i];
+  }
+  roots[w++] = s->goal_lhs;
+  roots[w++] = s->goal_rhs;
+  for (u32 i = 0; i < s->n_trace; i++) roots[w++] = s->trace[i];
+  for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
+    roots[w++] = s->witness_subst.bindings[i];
+  }
+
+  gc_collect(roots, w);
+
+  // Write the relocated Terms back into the AtpState in the same
+  // order they were gathered.
+  w = 0;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    s->lhs[i] = roots[w++];
+    s->rhs[i] = roots[w++];
+  }
+  for (u32 i = 0; i < s->n_cps; i++) {
+    s->cp_lhs[i] = roots[w++];
+    s->cp_rhs[i] = roots[w++];
+  }
+  s->goal_lhs = roots[w++];
+  s->goal_rhs = roots[w++];
+  for (u32 i = 0; i < s->n_trace; i++) s->trace[i] = roots[w++];
+  for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
+    s->witness_subst.bindings[i] = roots[w++];
+  }
+
+  free(roots);
+  return 1;
+}
+
+// Trigger threshold: collect when the from-space bump cursor has
+// crossed this fraction of the live semi-space.  Half-full mirrors
+// the default trigger in `thvm_realize` (realize.c).
+static u8 atp_heap_under_pressure(void) {
+  if (!gc_enabled()) return 0;
+  u64 lo   = gc_from_start();
+  u64 hi   = gc_from_end();
+  u64 half = lo + (hi - lo) / 2;
+  return HEAP_NEXT > half;
 }
 
 // Push a trace entry as a TAG_CTR with label = reason and children
@@ -327,9 +463,11 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 // saturation loop's orient + generate machinery processes it
 // uniformly with later-derived CPs.  Also records a TRACE_AXIOM
 // entry so the proof trace (stage 6.1) can identify this CP's
-// origin downstream.  Returns 1 on success, 0 if the queue is full.
+// origin downstream.  The CP queue is growable, so this never
+// rejects for being full; returns 1 on success, 0 only on NULL
+// state or a sort-check rejection.
 fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
-  if (s == NULL || s->n_cps >= ATP_MAX_CPS) return 0;
+  if (s == NULL) return 0;
   // 8.4d: when a WaldSpec is attached, reject ill-sorted inputs
   // before mutating state.  Each side must be well-sorted AND
   // both sides must share the same sort (an equation l = r in
@@ -346,6 +484,7 @@ fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
   u32 trace_idx = atp_trace_push(s, TRACE_AXIOM,
                                  ATP_TRACE_NONE, ATP_TRACE_NONE,
                                  lhs, rhs);
+  atp_ensure_cp_cap(s, s->n_cps + 1);
   s->cp_lhs[s->n_cps]   = lhs;
   s->cp_rhs[s->n_cps]   = rhs;
   s->cp_trace[s->n_cps] = trace_idx;
@@ -466,8 +605,10 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 
   // Build wrapped[i] = INC^k_i(CTR_label=i([lhs_i, rhs_i])).
   // 8.8: `atp_cp_priority` picks `--add` or `--mix` based on
-  // s->use_mix_heuristic.
-  Term wrapped[ATP_MAX_CPS];
+  // s->use_mix_heuristic.  wrapped[] / out[] are heap-allocated and
+  // sized to the live n_cps -- the CP queue is unbounded now.
+  Term *wrapped = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
+  if (wrapped == NULL) return 0;
   for (u32 i = 0; i < s->n_cps; i++) {
     u32 k = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
     Term children[2] = { s->cp_lhs[i], s->cp_rhs[i] };
@@ -489,14 +630,15 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
 
   // Collapse, sorted by INC depth ascending.
-  Term out[ATP_MAX_CPS];
+  Term *out = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
+  if (out == NULL) { free(wrapped); return 0; }
   u64 n_out = thvm_collapse_ordered(sup, out, (u64)s->n_cps);
-  if (n_out == 0) return 0;
+  if (n_out == 0) { free(wrapped); free(out); return 0; }
 
   Term first = out[0];
-  if (term_tag(first) != TAG_CTR) return 0;
+  if (term_tag(first) != TAG_CTR) { free(wrapped); free(out); return 0; }
   u32 idx = term_ext(first);
-  if (idx >= s->n_cps) return 0;
+  if (idx >= s->n_cps) { free(wrapped); free(out); return 0; }
 
   *lhs_out = s->cp_lhs[idx];
   *rhs_out = s->cp_rhs[idx];
@@ -507,12 +649,16 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_trace[j - 1] = s->cp_trace[j];
   }
   s->n_cps--;
+  free(wrapped);
+  free(out);
   return 1;
 }
 
-// Push one rule onto R; returns 1 on success, 0 if R is full.
+// Push one rule onto R; the rule array is growable, so this always
+// succeeds (returns 1) unless the state pointer is NULL.
 static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
-  if (s->n_rules >= ATP_MAX_RULES) return 0;
+  if (s == NULL) return 0;
+  atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
   s->n_rules++;
@@ -543,6 +689,18 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   if (goal != ATP_RUNNING) return goal;
 
   if (s->step >= s->step_cap) return ATP_TIMEOUT;
+
+  // 7a: in-loop GC.  When the dyn heap has crossed the half-full
+  // mark, run a Cheney collection BEFORE allocating this step's
+  // normalization / CP-enumeration scratch.  Done here -- before
+  // select_cp pops -- so every live Term is still parked in the
+  // AtpState arrays and gets rooted by thvm_atp_gc_collect.  A
+  // long completion run otherwise exhausts from-space; with this
+  // the heap floats around the live working set instead of
+  // climbing monotonically.
+  if (atp_heap_under_pressure()) {
+    thvm_atp_gc_collect(s);
+  }
 
   Term cp_lhs = 0, cp_rhs = 0;
   if (!thvm_atp_select_cp(s, &cp_lhs, &cp_rhs)) {
@@ -887,15 +1045,22 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term lhs, Term rhs) {
 // when AC matching or extended joinability lands in 7.4+.
 //
 // `rule_a`/`rule_b` are indices into `s->lhs[] / s->rhs[]`.  Pass
-// any out-of-range value (e.g. ATP_MAX_RULES) to mean "no rule
-// excluded" -- equivalent to running 7.1.
+// ATP_RULE_NONE (or any value >= n_rules) to mean "no rule
+// excluded" -- equivalent to running 7.1.  The filtered rule
+// arrays are heap-allocated, sized to the live n_rules, since the
+// rule set is unbounded.
 static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
                                            u32 rule_a, u32 rule_b) {
   const u32 NORM_CAP = 64;
-  Term filt_l[ATP_MAX_RULES];
-  Term filt_r[ATP_MAX_RULES];
+  u32 n = s->n_rules;
+  Term *filt_l = (n > 0) ? (Term *)malloc((size_t)n * sizeof(Term)) : NULL;
+  Term *filt_r = (n > 0) ? (Term *)malloc((size_t)n * sizeof(Term)) : NULL;
+  if (n > 0 && (filt_l == NULL || filt_r == NULL)) {
+    free(filt_l); free(filt_r);
+    return 0;
+  }
   u32 n_filt = 0;
-  for (u32 k = 0; k < s->n_rules; k++) {
+  for (u32 k = 0; k < n; k++) {
     if (k == rule_a || k == rule_b) continue;
     filt_l[n_filt] = s->lhs[k];
     filt_r[n_filt] = s->rhs[k];
@@ -903,6 +1068,8 @@ static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
   }
   Term l = atp_rewrite_normalize(s, lhs, filt_l, filt_r, n_filt, NORM_CAP);
   Term r = atp_rewrite_normalize(s, rhs, filt_l, filt_r, n_filt, NORM_CAP);
+  free(filt_l);
+  free(filt_r);
   return kbo_eq(l, r);
 }
 
@@ -1000,7 +1167,6 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 rule_a, u32 rule_b) {
   u32 pushed = 0;
   for (u32 i = 0; i < ncps; i++) {
-    if (s->n_cps >= ATP_MAX_CPS) break;
     u8 joinable    = atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs);
     u8 connected   = atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
                                                       rule_a, rule_b);
@@ -1018,6 +1184,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
     u32 t = atp_trace_push(s, TRACE_CP, parent_a, parent_b,
                            cps[i].lhs, cps[i].rhs);
+    atp_ensure_cp_cap(s, s->n_cps + 1);
     s->cp_lhs[s->n_cps]   = cps[i].lhs;
     s->cp_rhs[s->n_cps]   = cps[i].rhs;
     s->cp_trace[s->n_cps] = t;
@@ -1046,7 +1213,6 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   // existing rules (including the new ones for new x new self-overlap).
   for (u32 i = first; i < last; i++) {
     for (u32 j = 0; j < n; j++) {
-      if (s->n_cps >= ATP_MAX_CPS) break;
       u32 nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
                                            i, i + 1, j, j + 1,
                                            buf, ATP_CP_BATCH);
@@ -1059,7 +1225,6 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   // (old x new): old rule on the outside, new rule fed as inner.
   for (u32 i = 0; i < first; i++) {
     for (u32 j = first; j < last; j++) {
-      if (s->n_cps >= ATP_MAX_CPS) break;
       u32 nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
                                            i, i + 1, j, j + 1,
                                            buf, ATP_CP_BATCH);
@@ -1156,7 +1321,6 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
 
   for (u32 i = first; i < last; i++) {
     for (u32 j = 0; j < n; j++) {
-      if (s->n_cps >= ATP_MAX_CPS) break;
       ctx.li    = s->lhs[i];
       ctx.ri    = s->rhs[i];
       ctx.lj    = thvm_rename_vars(s->lhs[j], CP_RENAME_OFFSET);
@@ -1174,7 +1338,6 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
 
   for (u32 i = 0; i < first; i++) {
     for (u32 j = first; j < last; j++) {
-      if (s->n_cps >= ATP_MAX_CPS) break;
       ctx.li    = s->lhs[i];
       ctx.ri    = s->rhs[i];
       ctx.lj    = thvm_rename_vars(s->lhs[j], CP_RENAME_OFFSET);
@@ -1221,8 +1384,9 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       return r;
     }
     case KBO_UN: {
-      // Unfailing fallback: need 2 slots for atomicity.
-      if (s->n_rules + 2 > ATP_MAX_RULES) return r;
+      // Unfailing fallback: reserve 2 slots up front so the pair is
+      // added atomically (the array is growable, so this can't fail).
+      atp_ensure_rule_cap(s, s->n_rules + 2);
       u32 idx = s->n_rules;
       atp_push_rule(s, lhs, rhs);
       atp_push_rule(s, rhs, lhs);
@@ -1260,8 +1424,11 @@ fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
   }
 
   // Build wrapped[i] = INC^priority_i(CTR_label=i([lhs_i, rhs_i]))
-  // exactly as select_cp does.
-  Term wrapped[ATP_MAX_CPS];
+  // exactly as select_cp does.  wrapped[] / collapsed[] are
+  // heap-allocated, sized to the live n_cps -- the queue is
+  // unbounded.
+  Term *wrapped = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
+  if (wrapped == NULL) return 0;
   for (u32 i = 0; i < s->n_cps; i++) {
     u32 prio = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
     Term children[2] = { s->cp_lhs[i], s->cp_rhs[i] };
@@ -1277,21 +1444,25 @@ fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
     heap_set(loc + 1, sup);
     sup = term_new(0, TAG_SUP, 0, loc);
   }
-  Term collapsed[ATP_MAX_CPS];
+  Term *collapsed = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
+  if (collapsed == NULL) { free(wrapped); return 0; }
   u64 n_out = thvm_collapse_ordered(sup, collapsed, (u64)s->n_cps);
-  if (n_out == 0) return 0;
+  if (n_out == 0) { free(wrapped); free(collapsed); return 0; }
   if ((u32)n_out < k) k = (u32)n_out;
 
   // Decode each leaf's CTR label back to a queue index.
+  u32 produced = k;
   for (u32 i = 0; i < k; i++) {
     Term leaf = collapsed[i];
-    if (term_tag(leaf) != TAG_CTR) return i;   // partial result
+    if (term_tag(leaf) != TAG_CTR) { produced = i; break; }  // partial
     u32 idx = term_ext(leaf);
-    if (idx >= s->n_cps) return i;
+    if (idx >= s->n_cps) { produced = i; break; }
     out_lhs[i] = s->cp_lhs[idx];
     out_rhs[i] = s->cp_rhs[idx];
   }
-  return k;
+  free(wrapped);
+  free(collapsed);
+  return produced;
 }
 
 // === 8.9b: narrowing primitives ====================================
