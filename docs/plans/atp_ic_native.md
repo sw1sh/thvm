@@ -528,11 +528,37 @@ depth 4096 -> heap exhausted.
   near the axiom is an inference bug, a failure far out a search
   limit.  `SubstitutionLemma 17` is the theorem itself.
 
-- **7c -- redundancy strengthening** (if 7b shows runaway growth):
-  full forward+backward subsumption, simplify-reflect, blocked-CP
-  deletion -- the Waldmeister redundancy criteria.
-- **7d -- term indexing**: discrimination trees / fingerprints so
-  matching + subsumption aren't O(rules) per step.
+### 7b profiler diagnosis (the concrete bottleneck)
+
+`sample` on the bench mid-run (CP queue ~64k) -- top of stack:
+
+    thvm_match            15158   (~91%)
+    atp_push_cps_traced    1322
+    thvm_rewrite_step       292
+
+Call tree: the `thvm_match` samples are all under
+`atp_push_cps_traced`, which runs three per-CP redundancy checks
+-- `atp_cp_source_disjoint_connected`, `atp_cp_rule_subsumed`,
+`atp_cp_queue_subsumed`.  `atp_cp_queue_subsumed` scans the ENTIRE
+CP queue calling `thvm_match` per entry: with n_cps = 64k and
+~257 new CPs/step that is ~16M recursive `thvm_match` calls per
+step, on deeply-nested Wolfram-axiom terms.  That single O(n_cps)
+scan is the wall.
+
+So the inference is correct (group-theory completion proves
+`f(a,i(a))==e` in <=20 steps, `test_atp` 8544/8544) -- the
+Wolfram axiom is purely a redundancy/indexing scaling wall.
+
+- **7d -- term indexing** (now the lead lever): a discrimination
+  tree / feature-vector index over the CP queue + rule set so
+  `atp_cp_queue_subsumed` / `atp_cp_rule_subsumed` find candidates
+  in ~O(1) instead of an O(n) `thvm_match` scan.  A cheap interim:
+  a symbol-count / top-symbol feature pre-filter before the
+  recursive `thvm_match`.  This kills the 91%.
+- **7c -- redundancy strengthening** (after 7d): full
+  forward+backward subsumption, simplify-reflect, blocked-CP
+  deletion -- the Waldmeister redundancy criteria, to keep the
+  queue small.  7d makes the checks cheap; 7c makes them stronger.
 - **7e -- wire-through**: route `TFindEquationalProof`'s structured
   problems through completion; decode the PCL trace into a
   verifier-passing `ProofObject`.  (Also fixes the bound-symbol
