@@ -496,18 +496,37 @@ depth 4096 -> heap exhausted.
   full rebuild.  This must land before 7b/7c -- without it no long
   run is observable.
 
-- **7b -- convergence assessment**: with 7a + 7c', run the
-  Wolfram-axiom completion long; measure rule/CP growth, KBO
-  orientation rate, whether it finds the proof or grows unboundedly.
-  Debug ladder (per the "scale the proof" strategy): WL's own
+- **7b -- convergence assessment** (DONE -- verdict: does NOT
+  converge).  Measured with the standalone bench
+  `tests/test_atp_wolfram_bench.c` (a plain C process with an
+  in-loop wall-clock guard -- it cannot orphan a kernel the way
+  `timeout`-wrapped `wolframscript` probes did).  Wolfram-axiom
+  DoubleNegation completion: at **step 250 the CP queue is
+  64,275** and growing ~257/step while the rule set grows ~1/step.
+  The queue runs away -- the engine generates critical pairs far
+  faster than its redundancy criteria (trivial-join, interreduce,
+  subsumption) eliminate them.
+
+  And the per-step cost re-explodes: step 64 was 0.47s (post-7c'),
+  step 250 took 87s.  7c' fixed `select_cp`; the new dominant cost
+  is the O(n_cps) linear scan in `atp_cp_queue_subsumed` -- every
+  newly generated CP is subsumption-checked against the entire
+  64k-entry queue, so a step costs O(new_cps * n_cps) ~ millions
+  of match attempts.
+
+  Conclusion: completion of a 54-step single-axiom proof is
+  blocked on BOTH (a) the CP queue ballooning -- needs stronger
+  redundancy (7c) -- and (b) O(n) queue/rule scans -- needs term
+  indexing (7d).  Neither alone suffices: 7c keeps the queue
+  small, 7d makes whatever scans remain cheap.
+
+  Debug ladder (kept for once the engine converges): WL's own
   `FindEquationalProof[DoubleNegation, WolframAxioms]` ProofDataset
   is a DAG of 34 CriticalPairLemma + 17 SubstitutionLemma + the
-  Conclusion.  `CriticalPairLemma 1/2` derive from `{Axiom 1}`
-  alone (distance 1); later lemmas derive from earlier ones.  Prove
-  each lemma `TATP[{axiom}, lemma_k]` at increasing distance: a
-  failure at small distance pinpoints an *inference* bug; a
-  failure only at large distance is a *search/scaling* limit.
-  `SubstitutionLemma 17` is the theorem itself.
+  Conclusion; `CriticalPairLemma 1/2` derive from `{Axiom 1}`
+  alone.  Prove each lemma at increasing distance -- a failure
+  near the axiom is an inference bug, a failure far out a search
+  limit.  `SubstitutionLemma 17` is the theorem itself.
 
 - **7c -- redundancy strengthening** (if 7b shows runaway growth):
   full forward+backward subsumption, simplify-reflect, blocked-CP
