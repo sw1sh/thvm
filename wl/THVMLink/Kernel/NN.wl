@@ -27,7 +27,7 @@
      TSum[x]                     -- UOP_REDUCE SUM along axis 0
      TSquare[x]                  -- x * x
      TDot[a, b]                  -- sum(a * b)
-     TMatVec[W, x]               -- W:{out,in} @ x:{1,in} -> {out}
+     TMatVec[W, x]               -- W:{out,in} @ x:{in} or {1,in} -> {out}
      TL2Loss[x]                  -- sum(x*x)
      TMSELoss[pred, target]      -- sum((pred - target)^2)
      TReLU[x]                    -- elementwise max(x, 0)
@@ -47,7 +47,7 @@ TLayerToTensors::usage  = "TLayerToTensors[layer] is the same as TLayerWeights b
 TSum::usage             = "TSum[x] = TUOpReduce[x, 0, \"SUM\"].";
 TSquare::usage          = "TSquare[x] = TUOpMul[x, x].";
 TDot::usage             = "TDot[a, b] = TSum[TUOpMul[a, b]].";
-TMatVec::usage          = "TMatVec[W, x] computes W @ x where W has shape {out, in} and x has shape {1, in}.  Result has shape {out}.  EXPAND-broadcast then REDUCE_SUM along the inner axis.";
+TMatVec::usage          = "TMatVec[W, x] computes W @ x where W has shape {out, in} and x has shape {in} (rank-1) or {1, in} (rank-2).  Result has shape {out}.  EXPAND-broadcast then REDUCE_SUM along the inner axis.";
 TMatMul::usage          = "TMatMul[A, B] computes A @ B where A has shape {M, K} and B has shape {K, N}.  Result has shape {M, N}.  Lowered as RESHAPE + EXPAND to a common {M, K, N} shape, MUL elementwise, then REDUCE_SUM along axis 1.  cpu_blas_dispatch recognises this KProgOp[] pattern and routes to cblas_sgemm.";
 TLinear::usage          = "TLinear[x, W, b] computes x @ W + b where x has shape {..., M, K}, W has shape {K, N}, and b has shape {N} (or None for bias-free).  The bias is reshaped to {1,...,1,N} and EXPAND'd to the matmul output shape; without the explicit EXPAND the elementwise numel-cycle aligns only the first leading-axis row and writes garbage into the rest.  Standard nn.Linear analogue (tinygrad's Tensor.linear).";
 TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
