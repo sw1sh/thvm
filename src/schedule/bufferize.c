@@ -1,16 +1,15 @@
-// schedule/bufferize.c - Phase 0 + Phase 1 of docs/plans/bufferize.md.
+// schedule/bufferize.c - bufferize graph: live mirror of
+// BUFFERIZE_NODES with per-buffer rule-attribution telemetry.
 //
-// Phase 0 was a post-rewrite mirror of BUFFERIZE_NODES.  Phase 1 makes
-// the bufferize graph live during the rewrite pass: every named
-// realize-map rule that mutates BUFFERIZE_NODES via bufferize_node_mark or
-// bufferize_node_unmark is forwarded into bufferize_realize_with_reason or
-// bufferize_unrealize, which stamps added_by / removed_by from the
-// current rule pointer set by bufferize_rewrite_apply.
+// Every named realize-map rule that mutates BUFFERIZE_NODES via
+// bufferize_node_mark or bufferize_node_unmark is forwarded into
+// bufferize_realize_with_reason or bufferize_unrealize, which stamps
+// added_by / removed_by from the current rule pointer set by
+// bufferize_rewrite_apply.
 //
-// Materialize.c still reads BUFFERIZE_NODES directly, so the kernel
-// schedule is unchanged.  The bufferize graph is the canonical
-// rule-history record; future phases will let materialize consume it
-// directly and let new rules edit only the graph.
+// Materialize.c reads BUFFERIZE_NODES directly; this graph exists for
+// DUMP_BUFFERIZE / DUMP_BUFFERIZE_CANDIDATES telemetry and for the
+// cost-model fields that drive removal-candidate ranking.
 
 static BBufferize BUFFERIZE_BUFS [BUFFERIZE_GRAPH_CAP];
 static u32        BUFFERIZE_BUFS_LEN = 0;
@@ -24,10 +23,10 @@ static u32    BUFFERIZE_STORES_LEN = 0;
 static BIndex BUFFERIZE_INDEXES[BUFFERIZE_INDEX_CAP];
 static u32    BUFFERIZE_INDEXES_LEN = 0;
 
-// Phase 3: one entry per named index rewrite rule, hit count
-// recomputed from the BUFFERIZE_INDEXES table after every
-// bufferize_classify pass.  Order is fixed so callers can address by
-// index.  Names mirror the plan's index-* family.
+// One entry per named index rewrite rule, hit count recomputed from
+// the BUFFERIZE_INDEXES table after every bufferize_classify pass.
+// Order is fixed so callers can address by index.  Names mirror the
+// plan's index-* family.
 typedef struct {
   char const *name;
   u32         hits;
@@ -69,10 +68,10 @@ static int bufferize_dump_candidates_enabled(void) {
 #define BUFFERIZE_CANDIDATE_TOP 20
 
 // Print the top removal candidates sorted by descending
-// bufferize_removal_score.  Phase 4: this is the user-visible
-// surface that drives manual / autotune decisions, and the
-// telemetry future cost-model rules will read.  Selection sort over
-// at most BUFFERIZE_CANDIDATE_TOP keeps the dump O(N * top).
+// bufferize_removal_score.  User-visible surface that drives manual
+// / autotune decisions; cost-model rules read the same telemetry.
+// Selection sort over at most BUFFERIZE_CANDIDATE_TOP keeps the dump
+// O(N * top).
 static void bufferize_dump_candidates(void) {
   if (!bufferize_dump_candidates_enabled()) return;
   u32 n = BUFFERIZE_BUFS_LEN < BUFFERIZE_CANDIDATE_TOP
@@ -242,8 +241,8 @@ static void bufferize_build_indexes(void) {
   }
 }
 
-// Phase 3 edge transform: detect identity movement ops in each
-// chain and elide them.
+// Edge transform: detect identity movement ops in each chain and
+// elide them.
 //   identity reshape: src_ndim == out_ndim and src_dims == out_dims
 //   identity permute: axis_perm[i] == i for every i
 //   identity expand : src_ndim == out_ndim and src_dims == out_dims
@@ -305,16 +304,15 @@ fn u32 bufferize_identity_reshape_elision_hits(void) {
   return BUFFERIZE_IDENTITY_RESHAPE_HITS;
 }
 
-// Phase 4: count UOps in the producer subtree of `loc` for use as a
-// recompute-cost estimate.  Stops at any other realized buffer
-// (those would still cache the recomputed value), at REDUCE
-// (recompute crosses a fusion boundary we can't cheaply replicate),
-// at TEN/VAR leaves, and at any non-pure op.  Const and load are
-// counted as zero-cost; other UOps each cost 1.  The walk is bounded
-// by depth so pathological graphs cannot blow up the estimate.
-// Phase 5: also reports whether the subtree contained a REDUCE via
-// the `*has_reduce` out-param, so reduce-aware rules can gate
-// recompute removal.
+// Count UOps in the producer subtree of `loc` as a recompute-cost
+// estimate.  Stops at any other realized buffer (those would still
+// cache the recomputed value), at REDUCE (recompute crosses a fusion
+// boundary we can't cheaply replicate), at TEN/VAR leaves, and at any
+// non-pure op.  Const and load are counted as zero-cost; other UOps
+// each cost 1.  The walk is bounded by depth so pathological graphs
+// cannot blow up the estimate.  Also reports whether the subtree
+// contained a REDUCE via the `*has_reduce` out-param, so reduce-aware
+// rules can gate recompute removal.
 static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth,
                                          u8 *has_reduce) {
   if (depth > 64) return 0;
@@ -383,9 +381,9 @@ static void bufferize_compute_costs(void) {
                         : 0;
     u32 mult = b->consumer_count > 0 ? b->consumer_count : 1;
     b->recompute_total = (u64)b->recompute_ops * (u64)mult;
-    // Phase 5: reduce metadata for UOP_REDUCE buffers.  Heap layout
-    // for UOP_REDUCE is [src, NUM(kind), NUM(axis)], and the source
-    // shape gives us the axis extent.
+    // Reduce metadata for UOP_REDUCE buffers.  Heap layout for
+    // UOP_REDUCE is [src, NUM(kind), NUM(axis)], and the source shape
+    // gives us the axis extent.
     b->reduce_kind      = 0;
     b->reduce_axis      = 0;
     b->reduce_axis_size = 0;
@@ -408,7 +406,7 @@ static void bufferize_compute_costs(void) {
   }
 }
 
-// Phase 6: per-buffer topological depth from B_INDEX edges.
+// Per-buffer topological depth from B_INDEX edges.
 // depth[i] = max(depth[s] for s in incoming sources) + 1; depth=1
 // for buffers with no source-buffer edges (leaves).  Memoised via
 // `visited[]`; bufferize is small (<= BUFFERIZE_GRAPH_CAP) so
@@ -465,11 +463,11 @@ static void bufferize_compute_lifetimes(void) {
   }
 }
 
-// Phase 3: recompute hit counts for the named index-* rules from
-// the freshly-built B_INDEX table.  Each edge carrying a movement
-// flag counts as one hit for the corresponding rule, mirroring how
-// bufferize_rewrite_apply tracks hits for boundary rules.  This makes
-// the implicit rangeify movement-folding visible as named rules in
+// Recompute hit counts for the named index-* rules from the freshly-
+// built B_INDEX table.  Each edge carrying a movement flag counts as
+// one hit for the corresponding rule, mirroring how
+// bufferize_rewrite_apply tracks hits for boundary rules.  Makes the
+// implicit rangeify movement-folding visible as named rules in
 // DUMP_BUFFERIZE without changing codegen behavior.
 static void bufferize_update_index_rule_stats(void) {
   for (u32 i = 0; i < 6; i++) BUFFERIZE_INDEX_RULES[i].hits = 0;
@@ -585,11 +583,10 @@ fn void bufferize_seed_from_nodes(Term root) {
     BUFFERIZE_BUFS_LEN++;
   }
 
-  // Phase 4 follow-up: compute the cost-model fields immediately so
-  // rules running inside bufferize_rewrite_apply can read
-  // bufferize_removal_score on the seed-time realized set.
-  // bufferize_finalize_stores recomputes after rules so the dump
-  // and post-rule callers see the final state.
+  // Compute the cost-model fields immediately so rules running inside
+  // bufferize_rewrite_apply can read bufferize_removal_score on the
+  // seed-time realized set.  bufferize_finalize_stores recomputes
+  // after rules so the dump and post-rule callers see the final state.
   bufferize_compute_costs();
 }
 
@@ -610,12 +607,11 @@ fn void bufferize_finalize_stores(Term root) {
   }
 
   // Build the producer-buffer to consumer-buffer edge table once the
-  // realized set has settled; this is the seed for Phase 4+ removal
-  // and Phase 5 reduce rules and the data rangeify will eventually
-  // consume in Phase 2's rangeify follow-up.
+  // realized set has settled; this drives the removal-candidate cost
+  // model and the reduce-aware rules.
   bufferize_build_indexes();
-  // Phase 3 transform: collapse identity reshapes before stats so
-  // index-reshape hit counts reflect only meaningful folds.
+  // Collapse identity reshapes before stats so index-reshape hit
+  // counts reflect only meaningful folds.
   BUFFERIZE_IDENTITY_RESHAPE_HITS = bufferize_apply_identity_reshape();
   bufferize_update_index_rule_stats();
   bufferize_compute_costs();
@@ -735,7 +731,7 @@ fn int bufferize_buffer_lifetime(u32 buffer_id,
   return 1;
 }
 
-// Phase 7: deterministic schedule key + aggregates.
+// Deterministic schedule key + aggregates.
 fn u64 bufferize_schedule_key(void) {
   u64 h = 0xcbf29ce484222325ULL;
   u64 const prime = 0x100000001b3ULL;
@@ -824,11 +820,11 @@ fn u64 bufferize_removal_score(u32 buffer_id) {
   if (b->reasons & (BUFFERIZE_REASON_ROOT | BUFFERIZE_REASON_REDUCE)) {
     return 0;
   }
-  // Phase 5 reduce-aware gate: was conservative because pre-FLAT_GRID
-  // lift, kernels with nested reduces fell off the tile-JIT path onto
-  // the per-op metal-op encoder, regressing wall time.  Commit 3b11bf6
-  // lifted that path; consumers absorbing a reduce now stay on tile-JIT.
-  // THVM_BUFFERIZE_REMOVE_SCORE_LIFT_REDUCE_GATE=0 reverts.
+  // Reduce-aware gate: consumers absorbing a reduce stay on tile-JIT
+  // (pre-FLAT_GRID they fell back onto the per-op metal-op encoder,
+  // regressing wall time; that path is gone).
+  // THVM_BUFFERIZE_REMOVE_SCORE_LIFT_REDUCE_GATE=0 reverts to the
+  // conservative behavior.
   char const *e_red = getenv("THVM_BUFFERIZE_REMOVE_SCORE_LIFT_REDUCE_GATE");
   int lift_reduce = (e_red == NULL) || (e_red[0] != '0');
   if (b->subtree_has_reduce && !lift_reduce) return 0;
