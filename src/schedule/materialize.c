@@ -4033,10 +4033,16 @@ static Term emit_kernel_for_boundary(u32 bi) {
         if (has_resid)    BYPASS_GATE_RESID++;
         if (has_stranded) BYPASS_GATE_STRANDED++;
         if (has_bcast)    BYPASS_GATE_BCAST++;
+        // Always substitute the rewritten store_root.  The raw unified
+        // ru_root carries TAG_TEN / UOP_BUFFERIZE leaves that the
+        // renderer can't name (falls through to the buf%llu fallback
+        // -> undeclared identifier in MSL).  The rewriter replaces
+        // those with proper UOP_BUFFER terms carrying input-slot
+        // instance, which is benign regardless of gate outcome.
+        ke->cached_lift.store_root = ru_rewritten;
+        ke->compute_root           = ru_rewritten;
         if (!has_resid && !has_stranded && !has_bcast) {
           BYPASS_KERNEL_USED_UNIFIED++;
-          ke->cached_lift.store_root = ru_rewritten;
-          ke->compute_root           = ru_rewritten;
           unified_fold_chain_commit_flags(ke, &_cf_marks);
         }
       }
