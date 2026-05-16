@@ -24,49 +24,6 @@ static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
   return 0;
 }
 
-// Walk a UOp subtree looking for a UOP_RANGE leaf whose axis_id matches
-// `want`.  Returns its extent on hit, 0 otherwise.  Bounded recursion
-// for cycle-safety; the lifted DAG is finite + small.
-static u32 axes_dag_find_range_extent(Term t, u32 want, int depth) {
-  if (depth > 64) return 0;
-  if (term_tag(t) != TAG_UOP) return 0;
-  u32 op = term_ext(t);
-  if (op == UOP_RANGE) {
-    if (uop_range_axis_id(t) == want) return uop_range_extent(t);
-    return 0;
-  }
-  u64 loc = term_val(t);
-  u8 ar = uop_arity((u8)op);
-  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-    u32 e = axes_dag_find_range_extent(heap_read(loc + i), want, depth + 1);
-    if (e != 0) return e;
-  }
-  return 0;
-}
-
-// Detect a tail-REDUCE on the lifted DAG.  STORE.value either IS the
-// REDUCE node directly or sits under UOP_OPT (TC / CONV / SIMD-REDUCE
-// wrappers).  Returns 1 on detection with `*out_extent` set to the
-// reduce axis's UOP_RANGE extent (the reduce-axis extent that
-// axes_compute_full_shape needs).
-static int axes_dag_tail_reduce(KernelEntry const *ke, u32 *out_extent) {
-  if (out_extent != NULL) *out_extent = 0;
-  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
-  Term root = ke->cached_lift.store_root;
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-  Term value = heap_read(term_val(root) + 2);
-  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT) {
-    value = uop_opt_target(value);
-  }
-  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
-  if (out_extent == NULL) return 1;
-  u64 rloc = term_val(value);
-  u32 red_axis = (u32)term_val(heap_read(rloc + 2));
-  Term red_src = heap_read(rloc + 0);
-  *out_extent = axes_dag_find_range_extent(red_src, red_axis, 0);
-  return 1;
-}
-
 // Predicate: "will ke->schedule carry a REDUCE-class axis
 // (KAX_REDUCE or KAX_GROUP_REDUCE)?", derived from higher-level
 // signals without reading axis_types[].  Mirrors the writer side
@@ -92,11 +49,7 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
   }
-  if (axes_dag_tail_reduce(ke, NULL)) {
-    return 1;
-  }
-  if (ke->program != NULL && ke->n_ops > 0
-      && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
+  if (ke->n_ops > 0 && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
     return 1;
   }
   if (axes_scalar_reduce_extent(ke) != 0) {
@@ -163,9 +116,8 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
     types[n++] = KAX_LOOP;
   }
   int has_initial_reduce =
-      axes_dag_tail_reduce(ke, NULL)
-      || (ke->n_ops > 0 && ke->program != NULL
-          && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE)
+      (ke->n_ops > 0 && ke->program != NULL
+       && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE)
       || (axes_scalar_reduce_extent(ke) != 0);
   if (has_initial_reduce && n < MAX_AXES) {
     types[n++] = KAX_REDUCE;
@@ -289,28 +241,19 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
     }
     extents[n++] = ke->output_shape.dims[i];
   }
-  u32 dag_reduce_extent = 0;
-  int has_dag_reduce = axes_dag_tail_reduce(ke, &dag_reduce_extent);
   int has_initial_reduce =
-      has_dag_reduce
-      || (ke->n_ops > 0 && ke->program != NULL
-          && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE);
+      (ke->n_ops > 0 && ke->program != NULL
+       && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE);
   if (has_initial_reduce && n < MAX_AXES) {
-    u32 reduce_extent = 0;
-    if (has_dag_reduce && dag_reduce_extent != 0) {
-      reduce_extent = dag_reduce_extent;
-    } else if (ke->program != NULL && ke->n_ops > 0) {
-      KProgOp const *rd = &ke->program[ke->n_ops - 1];
-      u32 src_numel;
-      if (KSRC_IS_INPUT(rd->src[0])) {
-        src_numel = ke->input_numels[KSRC_INDEX(rd->src[0])];
-      } else {
-        src_numel = ke->program[KSRC_INDEX(rd->src[0])].numel;
-      }
-      u32 out_numel = ke->output_numel ? ke->output_numel : 1;
-      reduce_extent = src_numel / out_numel;
+    KProgOp const *rd = &ke->program[ke->n_ops - 1];
+    u32 src_numel;
+    if (KSRC_IS_INPUT(rd->src[0])) {
+      src_numel = ke->input_numels[KSRC_INDEX(rd->src[0])];
+    } else {
+      src_numel = ke->program[KSRC_INDEX(rd->src[0])].numel;
     }
-    extents[n++] = reduce_extent;
+    u32 out_numel = ke->output_numel ? ke->output_numel : 1;
+    extents[n++] = src_numel / out_numel;
   } else {
     u32 sru = axes_scalar_reduce_extent(ke);
     if (sru != 0 && n < MAX_AXES) {
