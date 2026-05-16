@@ -1213,17 +1213,10 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   // is symbolic-shape -- otherwise BS=4 and BS=32 hash to different
   // slots and we re-compile for every BS.
   //
-  // Two further exclusions for symbolic kernels:
-  //   - tile_uops[]: in production this stays NULL through dispatch
-  //     because tile_sync_from_scalar is a no-op stub since the
-  //     scalar-arena seeder was deleted.  The MSL source comes from
-  //     render_uop over cached_lift.store_root, not tile_uops, so
-  //     excluding tile_uops here matches the actual signal flow.
-  //   - input/output numels (below).
-  //
-  // The UOp DAG (cached_lift.store_root) Term hash captures S_RANGE
-  // var_ids via kvar_collect_from_dag, so symbolic kernels at
-  // different BS values still share the same UOp identity.
+  // Input/output numels are excluded for symbolic kernels (below) for
+  // the same reason.  The UOp DAG (cached_lift.store_root) Term hash
+  // captures S_RANGE var_ids via kvar_collect_from_dag, so symbolic
+  // kernels at different BS values still share the same UOp identity.
   u32 used_vars[KVAR_USED_CAP];
   u32 n_vars = kvar_collect_from_dag(ke->cached_lift.store_root,
                                      used_vars, KVAR_USED_CAP);

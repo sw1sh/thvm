@@ -83,8 +83,8 @@ static u32 propose_reduce_axis_size(KernelEntry const *ke) {
 
 // Index of the reduce axis -- the last axis of type KAX_REDUCE.
 // Returns 0xFF if none (caller checks `< n_axes`).
-// Phase E migration: reads via tile_anno_axis_or_kernelaxes so
-// it works whether tile_uops is fresh, stale, or absent.
+// Reads through tile_anno_axis_count_or_kernelaxes / tile_anno_axis,
+// which derive axis info from cached_lift.store_root.
 static u8 propose_reduce_axis_index(KernelEntry const *ke) {
   u32 n = tile_anno_axis_count_or_kernelaxes(ke);
   if (n == 0) return 0xFF;

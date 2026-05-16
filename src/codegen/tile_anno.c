@@ -2,9 +2,7 @@
 //
 // Resolves axis count + per-axis TileAxisInfo from the KpSchedule
 // signal trio (output_shape + tail-reduce + scalar-reduce + applied_opts).
-// The Tile-IR-backed branch is gone with the tile_uops retirement
-// (see Phase 4b/7); these helpers are now thin wrappers over the
-// axes_resolve_* family.
+// Thin wrappers over the axes_resolve_* family.
 
 fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,
                                     TileAxisInfo *out) {

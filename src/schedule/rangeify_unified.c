@@ -507,8 +507,9 @@ static int ru_apply_movement(u64 loc, u8 op,
 // counter hits 0 are enqueued.
 //
 // Falls back to forward BUFFERIZE_NODES order if Kahn's leaves nodes
-// unvisited (cycle / inconsistent consumer_count) -- this matches the
-// pre-fix behaviour and keeps tests green even on pathological
+// unvisited (cycle / inconsistent consumer_count); the forward order
+// still satisfies the consumer-after-producer invariant for any
+// already-toposorted prefix and degrades gracefully on pathological
 // graphs.
 static void ru_compute_topo_order(void) {
   RU_TOPO_ORDER_LEN = 0;

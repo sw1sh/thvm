@@ -338,7 +338,7 @@ static int jit_replay_pack_enabled(void) {
 // Export the capture sequence as a flat table for WL-side profiling.
 // Header: {n_ops, row_width}.  Row width is JIT_CAPTURE_EXPORT_ROW_WIDTH:
 // {kind, kid, dispatch_kind, n_inputs, out_buf_id, input0, input1,
-//  program_key, output_numel, n_ops, _unused, n_tile_uops,
+//  program_key, output_numel, n_ops, _unused, _unused2,
 //  assign_dst_tid, assign_src_tid, replay_skip, replay_packed}.
 fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
   if (out == NULL || cap_words < 2) {

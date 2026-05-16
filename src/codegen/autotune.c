@@ -442,8 +442,6 @@ static void kautotune_cache_store(char const *path, u64 key, u32 backend_id,
 // doesn't re-fire while we're benching variants of an already-
 // tuned kernel.
 static void axes_reset_to_default(KernelEntry *ke) {
-  // Phase E: route through tile_anno_axes_reset so the reset stays
-  // consistent if the structure changes (e.g. tile_uops also rebuild).
   tile_anno_axes_reset(ke);
 }
 
