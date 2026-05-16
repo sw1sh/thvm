@@ -74,8 +74,12 @@ static u64 cg_kernel_flops_dag(Term t, u64 iter_extent, u32 depth) {
       }
     }
     if (red_ext == 0) red_ext = 1;
+    // The REDUCE itself contributes one accumulator-combine op per
+    // source element (the implicit SUM/MAX/MIN over the body's value).
+    u64 body_iter = iter_extent * (u64)red_ext;
+    total += body_iter;
     // Recurse into body with multiplied iter_extent.
-    total += cg_kernel_flops_dag(src, iter_extent * (u64)red_ext, depth + 1);
+    total += cg_kernel_flops_dag(src, body_iter, depth + 1);
     return total;
   }
   // STORE/AFTER: pass through to value.

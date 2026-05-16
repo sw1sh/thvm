@@ -522,9 +522,17 @@ TKernelAutotuneUnique[] := (ensureInit[];
         Association @ Table[k -> TKernelAutotune[k], {k, reps}]
     ])
 
-tKernelAutotuneTopHasOp[row_Association, op_String] := AnyTrue[
-    Keys @ Lookup[row, "Ops", <||>],
-    ToString[#] === op &]
+tKernelAutotuneTopHasOp[row_Association, op_String] := Or[
+    AnyTrue[
+        Keys @ Lookup[row, "Ops", <||>],
+        ToString[#] === op &],
+    (* Fallback when info["program"] is empty (THVM_PHASE_C7_FREE_PROGRAM
+       freed program[] post-lift): derive REDUCE-presence from
+       AxisTypes, which axis.c populates via the lifted DAG. *)
+    op === "REDUCE" && MemberQ[
+        Lookup[row, "AxisTypes", {}],
+        "REDUCE" | "GROUP_REDUCE"]
+]
 
 tKernelAutotuneTopMetric[row_Association, metric_String] := Switch[metric,
     "TotalUs",       Lookup[row, "TotalUs", 0],
@@ -661,7 +669,17 @@ TProfileProgramGroups[profile_Association] := Module[{groups},
                     "OutputNumel" -> info["output_numel"],
                     "TotalOutputNumel" -> info["output_numel"] * nDispatch,
                     "OutputDtype" -> info["output_dtype"],
-                    "Ops" -> Counts[info["program"][[All, "opcode"]]]
+                    "Ops" -> Counts[info["program"][[All, "opcode"]]],
+                    (* AxisTypes is DAG-aware (axes_compute_axis_types
+                       consults cached_lift.store_root first), so it
+                       remains populated even under
+                       THVM_PHASE_C7_FREE_PROGRAM=1 when "Ops" goes
+                       empty.  tKernelAutotuneTopHasOp consults this
+                       for REDUCE-presence in that case. *)
+                    "AxisTypes" -> Quiet @ Check[
+                        First[TKernelOpts[repKid]]["AxisTypes"],
+                        {}
+                    ]
                 |>
             ],
             {group, groups}],
