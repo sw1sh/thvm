@@ -3793,6 +3793,10 @@ fn WaldErr wald_parse_file(const char *path, WaldSpec *spec);
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.
 fn u8        thvm_atp_select_cp   (AtpState *s, Term *lhs_out, Term *rhs_out);
+// 7c': re-heapify the CP queue after a caller populated cp_lhs /
+// cp_rhs / n_cps directly (the normal path uses the internal
+// heap-push).  Required before select / peek on a hand-built queue.
+fn void      thvm_atp_cp_reheapify(AtpState *s);
 
 // Index range of rules just added by orient_and_add.
 //   {first: 0, count: 0}     -> nothing added (KBO_EQ, or R full)

@@ -1320,6 +1320,7 @@ int main(void) {
     s->cp_lhs[2] = mk_a();
     s->cp_rhs[2] = mk_e();
     s->n_cps = 3;
+    thvm_atp_cp_reheapify(s);  // 7c': hand-built queue -> heap
 
     Term o_lhs[3] = {0, 0, 0}, o_rhs[3] = {0, 0, 0};
     u32 n = thvm_atp_peek_top_k(s, 3u, o_lhs, o_rhs);
@@ -1341,6 +1342,7 @@ int main(void) {
     s->cp_lhs[0] = mk_a(); s->cp_rhs[0] = mk_e();
     s->cp_lhs[1] = mk_e(); s->cp_rhs[1] = mk_a();
     s->n_cps = 2;
+    thvm_atp_cp_reheapify(s);  // 7c': hand-built queue -> heap
     Term o_lhs[10], o_rhs[10];
     u32 n = thvm_atp_peek_top_k(s, 10u, o_lhs, o_rhs);
     CHECK_EQ(n, 2u);
@@ -1359,6 +1361,7 @@ int main(void) {
     s->n_cps = 2;
     s->cp_trace[0] = 100;
     s->cp_trace[1] = 200;
+    thvm_atp_cp_reheapify(s);  // 7c': hand-built queue -> heap
 
     Term peek_lhs[2], peek_rhs[2];
     u32 n = thvm_atp_peek_top_k(s, 2u, peek_lhs, peek_rhs);

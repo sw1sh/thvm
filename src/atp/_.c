@@ -295,8 +295,9 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   s->r_cap = cap;
 }
 
-// Grow the CP arrays (cp_lhs / cp_rhs / cp_trace) to hold at least
-// `need` entries.  Same doubling discipline as atp_ensure_rule_cap.
+// Grow the CP arrays (cp_lhs / cp_rhs / cp_trace / cp_pri / cp_seq)
+// to hold at least `need` entries.  Same doubling discipline as
+// atp_ensure_rule_cap.
 static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   if (need <= s->cp_cap) return;
   u32 cap = s->cp_cap ? s->cp_cap : ATP_INIT_CPS;
@@ -304,14 +305,22 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   Term *nl = (Term *)realloc(s->cp_lhs,   cap * sizeof(Term));
   Term *nr = (Term *)realloc(s->cp_rhs,   cap * sizeof(Term));
   u32  *nt = (u32  *)realloc(s->cp_trace, cap * sizeof(u32));
-  if (nl == NULL || nr == NULL || nt == NULL) {
+  u32  *np = (u32  *)realloc(s->cp_pri,   cap * sizeof(u32));
+  u32  *nq = (u32  *)realloc(s->cp_seq,   cap * sizeof(u32));
+  if (nl == NULL || nr == NULL || nt == NULL || np == NULL || nq == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
   s->cp_lhs = nl; s->cp_rhs = nr; s->cp_trace = nt;
+  s->cp_pri = np; s->cp_seq = nq;
   for (u32 i = s->cp_cap; i < cap; i++) s->cp_trace[i] = ATP_TRACE_NONE;
   s->cp_cap = cap;
 }
+
+// 7c': push one CP onto the binary min-heap CP queue.  Defined
+// below (after atp_cp_priority); forward-declared here so the
+// earlier add_equation push site can call it.
+static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace);
 
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
@@ -337,6 +346,8 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_lhs);
   free(s->cp_rhs);
   free(s->cp_trace);
+  free(s->cp_pri);
+  free(s->cp_seq);
   free(s);
 }
 
@@ -484,11 +495,7 @@ fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
   u32 trace_idx = atp_trace_push(s, TRACE_AXIOM,
                                  ATP_TRACE_NONE, ATP_TRACE_NONE,
                                  lhs, rhs);
-  atp_ensure_cp_cap(s, s->n_cps + 1);
-  s->cp_lhs[s->n_cps]   = lhs;
-  s->cp_rhs[s->n_cps]   = rhs;
-  s->cp_trace[s->n_cps] = trace_idx;
-  s->n_cps++;
+  atp_cp_heap_push(s, lhs, rhs, trace_idx);
   return 1;
 }
 
@@ -580,78 +587,110 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
   return base;
 }
 
-// Pop the cheapest CP from the queue, where "cheap" = lowest
-// total symbol count across (lhs + rhs) -- the `--add` heuristic.
+// === 7c': CP-queue binary min-heap ==================================
 //
-// IC-side encoding (per docs/plans/saturation_loop.md sec.3):
-//   each CP becomes  INC^k (CTR_label=idx [lhs, rhs])  where
-//   k = symbol_count(lhs) + symbol_count(rhs).  All wrappings are
-//   folded into a SUP tree and run through thvm_collapse_ordered;
-//   the cheapest leaf comes out first, its CTR label decodes back
-//   to the original queue index, and we pop that index.
+// The CP queue (cp_lhs/cp_rhs/cp_trace/cp_pri/cp_seq) is kept as a
+// binary min-heap ordered by (cp_pri, cp_seq): cheapest priority
+// first, insertion order breaking ties.  This reproduces the old
+// `--add` selection order (collapse_ordered sorted by INC depth,
+// ties by queue index) but at O(log n) per push/pop instead of
+// rebuilding an n-leaf INC-SUP tree + collapse on every step.
+
+// Ordering predicate: does queue slot i sort strictly before j?
+static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
+  if (s->cp_pri[i] != s->cp_pri[j]) return s->cp_pri[i] < s->cp_pri[j];
+  return s->cp_seq[i] < s->cp_seq[j];
+}
+
+// Swap all five parallel CP arrays at slots i, j.
+static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
+  Term tl = s->cp_lhs[i];   s->cp_lhs[i]   = s->cp_lhs[j];   s->cp_lhs[j]   = tl;
+  Term tr = s->cp_rhs[i];   s->cp_rhs[i]   = s->cp_rhs[j];   s->cp_rhs[j]   = tr;
+  u32  tt = s->cp_trace[i]; s->cp_trace[i] = s->cp_trace[j]; s->cp_trace[j] = tt;
+  u32  tp = s->cp_pri[i];   s->cp_pri[i]   = s->cp_pri[j];   s->cp_pri[j]   = tp;
+  u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
+}
+
+static void atp_cp_sift_up(AtpState *s, u32 i) {
+  while (i > 0) {
+    u32 parent = (i - 1) / 2;
+    if (!atp_cp_before(s, i, parent)) break;
+    atp_cp_swap(s, i, parent);
+    i = parent;
+  }
+}
+
+static void atp_cp_sift_down(AtpState *s, u32 i) {
+  for (;;) {
+    u32 l = 2 * i + 1, r = 2 * i + 2, m = i;
+    if (l < s->n_cps && atp_cp_before(s, l, m)) m = l;
+    if (r < s->n_cps && atp_cp_before(s, r, m)) m = r;
+    if (m == i) break;
+    atp_cp_swap(s, i, m);
+    i = m;
+  }
+}
+
+// Push one CP onto the heap.  Computes its priority once (the cost
+// the old select_cp paid n times per step) and sifts up.  O(log n).
+static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
+  atp_ensure_cp_cap(s, s->n_cps + 1);
+  u32 i = s->n_cps;
+  s->cp_lhs[i]   = lhs;
+  s->cp_rhs[i]   = rhs;
+  s->cp_trace[i] = trace;
+  s->cp_pri[i]   = atp_cp_priority(s, lhs, rhs);
+  s->cp_seq[i]   = s->cp_seq_next++;
+  s->n_cps++;
+  atp_cp_sift_up(s, i);
+}
+
+// Pop the cheapest CP from the queue (lowest (cp_pri, cp_seq) --
+// the `--add` heuristic, ties by insertion order).
 //
-// Singleton case skips the SUP/INC plumbing for speed.  Returns
-// 1 on success (out-params populated), 0 on empty queue or any
-// decoding failure (defensive).
+// 7c': the CP queue is a binary min-heap (atp_cp_heap_push keeps it
+// so).  Selection is heap pop-min: take the root, move the last
+// element into the root slot, sift down.  O(log n) per call --
+// replacing the old per-step rebuild of an n-leaf INC-SUP tree +
+// thvm_collapse_ordered, which was O(n) per step => O(n^2) over a
+// run and the dominant cost past ~24 steps on hard problems.
+//
+// Returns 1 on success (out-params populated), 0 on empty queue.
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL || s->n_cps == 0) return 0;
-  if (s->n_cps == 1) {
-    *lhs_out = s->cp_lhs[0];
-    *rhs_out = s->cp_rhs[0];
-    s->last_popped_trace = s->cp_trace[0];
-    s->n_cps = 0;
-    return 1;
-  }
-
-  // Build wrapped[i] = INC^k_i(CTR_label=i([lhs_i, rhs_i])).
-  // 8.8: `atp_cp_priority` picks `--add` or `--mix` based on
-  // s->use_mix_heuristic.  wrapped[] / out[] are heap-allocated and
-  // sized to the live n_cps -- the CP queue is unbounded now.
-  Term *wrapped = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
-  if (wrapped == NULL) return 0;
-  for (u32 i = 0; i < s->n_cps; i++) {
-    u32 k = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
-    Term children[2] = { s->cp_lhs[i], s->cp_rhs[i] };
-    Term w = term_new_ctr(i, children, 2);
-    for (u32 j = 0; j < k; j++) w = term_new_inc(w);
-    wrapped[i] = w;
-  }
-
-  // Fold into SUP-tree: SUP(w_0, SUP(w_1, ..., w_{n-1})).  The SUP
-  // labels don't matter for collapse_ordered (just structural
-  // recursion); use 0.
-  Term sup = wrapped[s->n_cps - 1];
-  for (u32 i = s->n_cps - 1; i > 0; ) {
-    i--;
-    u64 loc = heap_alloc(2);
-    heap_set(loc + 0, wrapped[i]);
-    heap_set(loc + 1, sup);
-    sup = term_new(0, TAG_SUP, 0, loc);
-  }
-
-  // Collapse, sorted by INC depth ascending.
-  Term *out = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
-  if (out == NULL) { free(wrapped); return 0; }
-  u64 n_out = thvm_collapse_ordered(sup, out, (u64)s->n_cps);
-  if (n_out == 0) { free(wrapped); free(out); return 0; }
-
-  Term first = out[0];
-  if (term_tag(first) != TAG_CTR) { free(wrapped); free(out); return 0; }
-  u32 idx = term_ext(first);
-  if (idx >= s->n_cps) { free(wrapped); free(out); return 0; }
-
-  *lhs_out = s->cp_lhs[idx];
-  *rhs_out = s->cp_rhs[idx];
-  s->last_popped_trace = s->cp_trace[idx];
-  for (u32 j = idx + 1; j < s->n_cps; j++) {
-    s->cp_lhs[j - 1]   = s->cp_lhs[j];
-    s->cp_rhs[j - 1]   = s->cp_rhs[j];
-    s->cp_trace[j - 1] = s->cp_trace[j];
-  }
+  *lhs_out = s->cp_lhs[0];
+  *rhs_out = s->cp_rhs[0];
+  s->last_popped_trace = s->cp_trace[0];
   s->n_cps--;
-  free(wrapped);
-  free(out);
+  if (s->n_cps > 0) {
+    u32 last = s->n_cps;
+    s->cp_lhs[0]   = s->cp_lhs[last];
+    s->cp_rhs[0]   = s->cp_rhs[last];
+    s->cp_trace[0] = s->cp_trace[last];
+    s->cp_pri[0]   = s->cp_pri[last];
+    s->cp_seq[0]   = s->cp_seq[last];
+    atp_cp_sift_down(s, 0);
+  }
   return 1;
+}
+
+// 7c': re-establish the CP-queue heap invariant over cp_lhs[0..n_cps)
+// / cp_rhs[0..n_cps).  The normal path keeps the queue a heap via
+// atp_cp_heap_push, but a caller (chiefly tests) that populates
+// cp_lhs/cp_rhs/n_cps directly must call this so cp_pri / cp_seq are
+// filled and the array satisfies the heap order before select / peek.
+fn void thvm_atp_cp_reheapify(AtpState *s) {
+  if (s == NULL || s->n_cps == 0) return;
+  atp_ensure_cp_cap(s, s->n_cps);
+  for (u32 i = 0; i < s->n_cps; i++) {
+    s->cp_pri[i] = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
+    s->cp_seq[i] = s->cp_seq_next++;
+  }
+  // Floyd build-heap: sift down every internal node, last to first.
+  for (u32 i = s->n_cps / 2; i > 0; ) {
+    i--;
+    atp_cp_sift_down(s, i);
+  }
 }
 
 // Push one rule onto R; the rule array is growable, so this always
@@ -1184,11 +1223,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
     u32 t = atp_trace_push(s, TRACE_CP, parent_a, parent_b,
                            cps[i].lhs, cps[i].rhs);
-    atp_ensure_cp_cap(s, s->n_cps + 1);
-    s->cp_lhs[s->n_cps]   = cps[i].lhs;
-    s->cp_rhs[s->n_cps]   = cps[i].rhs;
-    s->cp_trace[s->n_cps] = t;
-    s->n_cps++;
+    atp_cp_heap_push(s, cps[i].lhs, cps[i].rhs, t);
     pushed++;
   }
   return pushed;
@@ -1402,67 +1437,48 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
 
 // === 8.10b: top-K CP peek ==========================================
 //
-// Builds the same INC-priority SUP tree that `thvm_atp_select_cp`
-// uses, calls `thvm_collapse_ordered` to get the cheapest-first
-// ordering, copies the top K leaves' (lhs, rhs) into the
-// caller's buffers WITHOUT modifying `s->cp_lhs/rhs/trace/n_cps`.
+// Copies the top K cheapest CPs' (lhs, rhs) into the caller's
+// buffers WITHOUT modifying the queue.  "Cheapest" is the same
+// (cp_pri, cp_seq) order the heap pops in, so peek[0] always
+// equals the next `thvm_atp_select_cp` result.
 //
 // Caller-side use case: see top-K candidates before deciding
 // which (if any) to commit; useful for branching CP selectors,
 // multi-CP batch heuristics, lookahead.
+
+// (pri, seq, idx) triple sorted to realize the peek order.
+typedef struct { u32 pri; u32 seq; u32 idx; } AtpPeekEnt;
+static int atp_peek_cmp(const void *a, const void *b) {
+  const AtpPeekEnt *x = (const AtpPeekEnt *)a;
+  const AtpPeekEnt *y = (const AtpPeekEnt *)b;
+  if (x->pri != y->pri) return (x->pri < y->pri) ? -1 : 1;
+  if (x->seq != y->seq) return (x->seq < y->seq) ? -1 : 1;
+  return 0;
+}
+
 fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
                            Term *out_lhs, Term *out_rhs) {
   if (s == NULL || s->n_cps == 0) return 0;
   if (k > s->n_cps) k = s->n_cps;
   if (k == 0) return 0;
 
-  // Singleton fast path: just one CP, no collapse needed.
-  if (s->n_cps == 1) {
-    out_lhs[0] = s->cp_lhs[0];
-    out_rhs[0] = s->cp_rhs[0];
-    return 1;
-  }
-
-  // Build wrapped[i] = INC^priority_i(CTR_label=i([lhs_i, rhs_i]))
-  // exactly as select_cp does.  wrapped[] / collapsed[] are
-  // heap-allocated, sized to the live n_cps -- the queue is
-  // unbounded.
-  Term *wrapped = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
-  if (wrapped == NULL) return 0;
+  // The heap array is ordered by the heap invariant, not fully
+  // sorted -- so copy the (pri, seq, idx) triples and sort them
+  // by the queue's selection key to read off the top K.
+  AtpPeekEnt *ent = (AtpPeekEnt *)malloc((size_t)s->n_cps * sizeof(AtpPeekEnt));
+  if (ent == NULL) return 0;
   for (u32 i = 0; i < s->n_cps; i++) {
-    u32 prio = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
-    Term children[2] = { s->cp_lhs[i], s->cp_rhs[i] };
-    Term w = term_new_ctr(i, children, 2);
-    for (u32 j = 0; j < prio; j++) w = term_new_inc(w);
-    wrapped[i] = w;
+    ent[i].pri = s->cp_pri[i];
+    ent[i].seq = s->cp_seq[i];
+    ent[i].idx = i;
   }
-  Term sup = wrapped[s->n_cps - 1];
-  for (u32 i = s->n_cps - 1; i > 0; ) {
-    i--;
-    u64 loc = heap_alloc(2);
-    heap_set(loc + 0, wrapped[i]);
-    heap_set(loc + 1, sup);
-    sup = term_new(0, TAG_SUP, 0, loc);
-  }
-  Term *collapsed = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
-  if (collapsed == NULL) { free(wrapped); return 0; }
-  u64 n_out = thvm_collapse_ordered(sup, collapsed, (u64)s->n_cps);
-  if (n_out == 0) { free(wrapped); free(collapsed); return 0; }
-  if ((u32)n_out < k) k = (u32)n_out;
-
-  // Decode each leaf's CTR label back to a queue index.
-  u32 produced = k;
+  qsort(ent, s->n_cps, sizeof(AtpPeekEnt), atp_peek_cmp);
   for (u32 i = 0; i < k; i++) {
-    Term leaf = collapsed[i];
-    if (term_tag(leaf) != TAG_CTR) { produced = i; break; }  // partial
-    u32 idx = term_ext(leaf);
-    if (idx >= s->n_cps) { produced = i; break; }
-    out_lhs[i] = s->cp_lhs[idx];
-    out_rhs[i] = s->cp_rhs[idx];
+    out_lhs[i] = s->cp_lhs[ent[i].idx];
+    out_rhs[i] = s->cp_rhs[ent[i].idx];
   }
-  free(wrapped);
-  free(collapsed);
-  return produced;
+  free(ent);
+  return k;
 }
 
 // === 8.9b: narrowing primitives ====================================
