@@ -597,25 +597,39 @@ buildRuleList[axioms_, axiomKeys_] := Flatten[
 
 (* === IC-search provability oracle ================================ *)
 
-(* Milestone 4: decide provability by IC reduction instead of the
-   WL-side BFS.  buildSearchTerm builds a depth-D Term whose normal
-   form is a SUP-tree of NUM(0)/NUM(1) leaves -- the conjecture is
-   provable iff any leaf is NUM(1).  Each step fans over (rewrite
-   fn, side) via SUPs, so the collapse enumerates every depth-<=D
-   rewrite combination at once.
+(* Milestone 4: decide AND decode a proof by IC reduction instead of
+   the WL-side BFS.
+
+   The search Term threads a single packed-Int state through D
+   depth steps.  The state encodes the whole proof position in one
+   NUM:
+     state = trace*(m*m) + rhs*m + lhs
+   where lhs/rhs are atom ids (< m) and trace is the running
+   base-(nAct) choice code.  Each step fans over nAct = 4*|axioms|
+   "actions" via one SUP; an action (s, r) rewrites side s of the
+   conjecture with rewrite r AND folds the choice code into trace.
+   Because the trace rides the SAME state through the SAME SUP
+   fan-out as the atoms, every collapse leaf intrinsically carries
+   both the proven bit and its exact choice code -- no separate
+   trace Term, no skeleton-matching, exact at every depth.
+
+   The final `finalize` lambda turns the leaf state into
+     proven*big + trace      (big = nAct^depth)
+   so a leaf >= big means proven, and (leaf mod big) is the
+   base-nAct choice code -- IntegerDigits splits it into per-step
+   (side, rewriteIdx).
 
    Atomic-equational only (axioms + conjecture must be bare
-   symbols).  Structured / pattern problems fall back to the BFS.
-   Decoding the winning leaf's SUP-path into a verifier chain is
-   the next milestone-4 step; today this is a cross-check oracle
-   that must agree with the BFS on every atomic case.
+   symbols); structured / pattern problems fall back to the BFS. *)
 
-   Mirrors wl/Examples/atp_ic/transitivity.wls; that toy will be
-   rewired onto this shared builder once the decoder lands. *)
-
-(* Per-call counter so repeated runs get fresh TDef names instead
-   of clobbering each other's rewrite-fn defs. *)
-$icCallCtr = 0;
+(* Fixed def-name prefix.  Each icBuildFusedTerm call re-registers
+   the action / finalize defs under these names; TDefName interns a
+   string to a STABLE slot (Ref.wl), so re-registration overwrites
+   in place rather than leaking a fresh slot per call.  Each call
+   collapses its term before returning, so the previous call's defs
+   are never needed once overwritten. *)
+$icDefPfx  = "atp_ic_";
+$icSupBase = 100;
 
 (* True iff every axiom side + both conjecture sides are bare
    symbols -- the shape the atomic IC search handles. *)
@@ -628,29 +642,6 @@ icCollectAtoms[axPairs_, conjPair_] := Block[{atoms},
     AssociationThread[atoms -> Range[Length[atoms]]]
 ]
 
-(* Register one (axiom, direction) rewrite fn as a TDef: a unary
-   lambda mapping NUM(old) -> NUM(new), identity elsewhere. *)
-icDefineRewriteFn[name_String, old_Integer, new_Integer] := With[{
-    v = Module[{vs}, vs]
-},
-    TDef[name, TLam[v, TIfZero[TOp2["==", v, TNum[old]], v, TNum[new]]]]
-]
-
-(* For each axiom, register fwd + bwd rewrite fns and return the
-   flat list of TRef.  `pfx` namespaces this call's defs. *)
-icAllRewriteRefs[pfx_String, axPairs_, atomMap_] := Flatten @ Table[
-    Block[{ax = axPairs[[i]], oldId, newId, fwdName, bwdName},
-        oldId = atomMap[ax[[1]]];
-        newId = atomMap[ax[[2]]];
-        fwdName = pfx <> "ax" <> ToString[i] <> "_fwd";
-        bwdName = pfx <> "ax" <> ToString[i] <> "_bwd";
-        icDefineRewriteFn[fwdName, oldId, newId];
-        icDefineRewriteFn[bwdName, newId, oldId];
-        {TRef[fwdName], TRef[bwdName]}
-    ],
-    {i, Length[axPairs]}
-]
-
 (* Right-associated nested SUP over a flat value list; each nested
    SUP gets a distinct label so DUP-SUP labels don't collide. *)
 icNestedSup[baseLab_Integer, ts_List] := Which[
@@ -659,82 +650,90 @@ icNestedSup[baseLab_Integer, ts_List] := Which[
     True, TSup[baseLab, ts[[1]], icNestedSup[baseLab + 1, Rest[ts]]]
 ]
 
-(* Apply rChoice to v iff sideChoice picks mySideNum, else pass
-   v through unchanged. *)
-icSideUpdate[v_, mySideNum_, sideChoice_, rChoice_] :=
-    TIfZero[TOp2["==", sideChoice, mySideNum], v, TApp[rChoice, v]]
+(* Packed-state field extractors, written in terms of the bound var
+   `st` of an action / finalize lambda.  SetDelayed so each use
+   rebuilds a fresh OP2 cell -- the var `st` is what gets shared
+   (auto-dup handles that), never an OP2 cell. *)
+icLhsOf[st_]   := TOp2["%", st, TNum[$icM]]
+icRhsOf[st_]   := TOp2["%", TOp2["/", st, TNum[$icM]], TNum[$icM]]
+icTraceOf[st_] := TOp2["/", st, TNum[$icMM]]
 
-$icSupBase = 100;
-
-(* One depth step: pick (rewrite fn, side) via shared SUPs, apply
-   the chosen rewrite to the chosen side.  Fresh labels per step so
-   DUPs across steps commute (independent choices) rather than
-   annihilate. *)
-icStepFold[rFns_, n_][acc_, stepIdx_] := Block[{
-    lhs = acc[[1]], rhs = acc[[2]], labCur = acc[[3]], rSup, sideSup
+(* Body of one action lambda.  c = s*nRw + r is the choice code;
+   the action rewrites side s with (rwOld -> rwNew) and folds c
+   into the running trace.  Repacks trace*(m*m) + rhs*m + lhs. *)
+icActionBody[st_, s_, rwOld_, rwNew_, c_, nAct_] := Block[{
+    newL, newR, newT
 },
-    rSup = icNestedSup[labCur, rFns];
-    sideSup = TSup[labCur + n, TNum[0], TNum[1]];
-    {
-        icSideUpdate[lhs, TNum[0], sideSup, rSup],
-        icSideUpdate[rhs, TNum[1], sideSup, rSup],
-        labCur + n + 1
-    }
+    newL = If[ s === 0,
+        TIfZero[TOp2["==", icLhsOf[st], TNum[rwOld]],
+            icLhsOf[st], TNum[rwNew]],
+        icLhsOf[st]];
+    newR = If[ s === 1,
+        TIfZero[TOp2["==", icRhsOf[st], TNum[rwOld]],
+            icRhsOf[st], TNum[rwNew]],
+        icRhsOf[st]];
+    newT = TOp2["+", TOp2["*", icTraceOf[st], TNum[nAct]], TNum[c]];
+    TOp2["+",
+        TOp2["+", TOp2["*", newT, TNum[$icMM]], TOp2["*", newR, TNum[$icM]]],
+        newL]
 ]
 
-(* Build the depth-D search Term: TOp2["==", lhsD, rhsD] -- yields
-   NUM(1) on a leaf iff that combination of rewrites closed the
-   conjecture. *)
-icBuildSearchTerm[conjPair_, axPairs_, depth_Integer] := Block[{
-    pfx, atomMap, lhs0, rhs0, rFns, n, final
+(* Body of the finalize lambda: leaf state -> proven*big + trace. *)
+icFinalizeBody[st_, big_] := TOp2["+",
+    TOp2["*", TOp2["==", icLhsOf[st], icRhsOf[st]], TNum[big]],
+    icTraceOf[st]]
+
+(* Register the nAct action lambdas as TDefs (one per (side,
+   rewrite) choice) and return the flat list of TRef.  Action index
+   c in [0, nAct): s = c / nRw, r = c % nRw; r selects axiom
+   r/2 (0-based) forward (r even) or backward (r odd). *)
+icActionDefs[pfx_String, axPairs_, atomMap_, nRw_, nAct_] := Table[
+    Block[{c = cc - 1, s, r, ax, oldId, newId, rwOld, rwNew, nm},
+        s = Quotient[c, nRw];
+        r = Mod[c, nRw];
+        ax = axPairs[[Quotient[r, 2] + 1]];
+        oldId = atomMap[ax[[1]]];
+        newId = atomMap[ax[[2]]];
+        {rwOld, rwNew} = If[ Mod[r, 2] === 0,
+            {oldId, newId}, {newId, oldId}];
+        nm = pfx <> "act" <> ToString[c];
+        With[{v = Module[{vs}, vs]},
+            TDef[nm, TLam[v, icActionBody[v, s, rwOld, rwNew, c, nAct]]]];
+        TRef[nm]
+    ],
+    {cc, 1, nAct}
+]
+
+icFinalizeDef[pfx_String, big_] := Block[{nm = pfx <> "finalize"},
+    With[{v = Module[{vs}, vs]},
+        TDef[nm, TLam[v, icFinalizeBody[v, big]]]];
+    TRef[nm]
+]
+
+(* Build the depth-D fused search Term.  Sets the package-scoped
+   $icM / $icMM (the packing radix) for the field extractors, then
+   threads state0 through D action-SUP applications and finalize. *)
+icBuildFusedTerm[conjPair_, axPairs_, depth_Integer] := Block[{
+    pfx = $icDefPfx, atomMap, nRw, nAct, big,
+    actionRefs, finalizeRef, state0
 },
-    $icCallCtr += 1;
-    pfx = "atp_ic_" <> ToString[$icCallCtr] <> "_";
     atomMap = icCollectAtoms[axPairs, conjPair];
-    lhs0 = TNum[atomMap[conjPair[[1]]]];
-    rhs0 = TNum[atomMap[conjPair[[2]]]];
-    rFns = icAllRewriteRefs[pfx, axPairs, atomMap];
-    n = Length[rFns];
-    final = Fold[icStepFold[rFns, n],
-        {lhs0, rhs0, $icSupBase}, Range[depth]];
-    TOp2["==", final[[1]], final[[2]]]
-]
-
-(* Trace-term counterpart of icStepFold: instead of rewriting atoms,
-   accumulate the per-step choice code.  rIdxSup fans over the
-   rewrite-fn INDICES {0..n-1} at the SAME labels icStepFold's rSup
-   uses, and sideSup over {0,1} at the same label.
-
-   Per-step code = side*n + rewriteIdx, placed in base-(2n) digit
-   position stepIdx-1 (step 1 = least significant).  The current
-   step's code is the LEFT operand of the accumulating OP2, so its
-   SUP lifts outermost on collapse -- matching the search Term,
-   where lhsD/rhsD wrap the last step's sideSup outermost.  Equal
-   nesting => identical collapse leaf order => the two collapses
-   zip leaf-for-leaf. *)
-icTraceStepFold[n_][acc_, stepIdx_] := Block[{
-    traceAcc = acc[[1]], labCur = acc[[2]], rIdxSup, sideSup, stepCode
-},
-    rIdxSup = icNestedSup[labCur, Table[TNum[i], {i, 0, n - 1}]];
-    sideSup = TSup[labCur + n, TNum[0], TNum[1]];
-    stepCode = TOp2["+", TOp2["*", sideSup, TNum[n]], rIdxSup];
-    {
-        TOp2["+",
-            TOp2["*", stepCode, TNum[(2 n)^(stepIdx - 1)]],
-            traceAcc],
-        labCur + n + 1
-    }
-]
-
-(* Build the trace Term parallel to icBuildSearchTerm: same depth,
-   same SUP labels, so collapse-leaf k of this Term carries the
-   choice code for collapse-leaf k of the search Term.  Decoding
-   the code (base 2n, depth digits) recovers each step's
-   (side, rewriteIdx). *)
-icBuildTraceTerm[axPairs_, depth_Integer] := Block[{n},
-    n = 2 * Length[axPairs];
-    First @ Fold[icTraceStepFold[n],
-        {TNum[0], $icSupBase}, Range[depth]]
+    $icM = Length[atomMap] + 1;
+    $icMM = $icM * $icM;
+    nRw = 2 * Length[axPairs];
+    nAct = 2 * nRw;
+    big = If[ depth === 0, 1, nAct^depth];
+    actionRefs = icActionDefs[pfx, axPairs, atomMap, nRw, nAct];
+    finalizeRef = icFinalizeDef[pfx, big];
+    state0 = TNum[atomMap[conjPair[[2]]] * $icM + atomMap[conjPair[[1]]]];
+    TApp[finalizeRef,
+        Fold[
+            Function[{st, k},
+                TApp[icNestedSup[$icSupBase + (k - 1) * nAct, actionRefs],
+                    st]],
+            state0, Range[depth]
+        ]
+    ]
 ]
 
 (* True iff the conjecture is provable from the axioms in <= depth
@@ -744,10 +743,12 @@ icBuildTraceTerm[axPairs_, depth_Integer] := Block[{n},
 icSearchProvable[conjPair_, axPairs_, depth_Integer] := If[
     ! icAtomicProblemQ[axPairs, conjPair],
     $Failed,
-    Block[{term, leaves},
-        term = icBuildSearchTerm[conjPair, axPairs, depth];
-        leaves = FromTTerm /@ TCollapse[term];
-        AnyTrue[leaves, # === 1 &]
+    Block[{nAct, big, leaves},
+        nAct = 4 * Length[axPairs];
+        big = If[ depth === 0, 1, nAct^depth];
+        leaves = FromTTerm /@ TCollapse[
+            icBuildFusedTerm[conjPair, axPairs, depth]];
+        AnyTrue[leaves, # >= big &]
     ]
 ]
 
@@ -930,43 +931,35 @@ icChainClosedQ[chain_, conjPair_] := If[
 ]
 
 (* Decode the IC search's winning leaf into a rewrite chain.  Builds
-   the depth-D search Term + the parallel trace Term, collapses
-   both, and zips: the search collapse marks which leaf closed the
-   conjecture (NUM(1)), the trace collapse carries that leaf's
-   choice code.  IntegerDigits base-2n splits the code into per-step
-   (side, rewriteIdx); icReplayChain turns those into step records.
-
-   The trace zip relies on the search Term and trace Term collapsing
-   to the same leaf order; that holds while the search Term's
-   multi-step OP2-SUP annihilation keeps the per-step skeleton clean
-   (verified through depth 2).  Deeper searches can drift, so the
-   decoded chain is replay-verified here -- icChainClosedQ rejects a
-   chain that doesn't reach a tautology, and the caller falls back
-   to the BFS.  Returns $Failed when no leaf closes within `depth`
-   or the decoded chain doesn't replay-close. *)
+   the depth-D fused search Term, collapses it once, and picks the
+   first leaf >= big (proven).  That leaf's value is proven*big +
+   trace; (leaf mod big) is the base-(nAct) choice code, which
+   IntegerDigits splits into per-step codes c = side*nRw + rewIdx.
+   icReplayChain turns the decoded (side, rewIdx) sequence into step
+   records.  Because the trace rides the same packed state through
+   the same SUP fan-out as the atoms, leaf code <-> proven bit are
+   intrinsically paired -- exact at every depth.  icChainClosedQ
+   still replay-verifies as a defensive check.  Returns $Failed when
+   no leaf is proven or the decoded chain doesn't replay-close. *)
 icDecodeChain[conjPair_, axPairs_, depth_Integer, ruleList_] := Block[{
-    n, proofLeaves, traceLeaves, provenPos, traceCode,
-    stepCodes, decoded, chain
+    nRw, nAct, big, leaves, provenLeaf, traceVal, stepCodes,
+    decoded, chain
 },
-    n = 2 * Length[axPairs];
-    proofLeaves = FromTTerm /@ TCollapse[
-        icBuildSearchTerm[conjPair, axPairs, depth]];
-    traceLeaves = FromTTerm /@ TCollapse[
-        icBuildTraceTerm[axPairs, depth]];
-    If[ Length[proofLeaves] =!= Length[traceLeaves],
-        Return[$Failed]
-    ];
-    provenPos = FirstPosition[proofLeaves, 1, $Failed, {1}];
-    If[ provenPos === $Failed, Return[$Failed] ];
-    traceCode = traceLeaves[[ First[provenPos] ]];
-    (* traceCode is base-(2n): step 1 = least-significant digit.
-       IntegerDigits is most-significant-first, so Reverse gets
-       {step1code, ..., stepDcode}. *)
-    stepCodes = If[ depth === 0 || n === 0,
+    nRw  = 2 * Length[axPairs];
+    nAct = 2 * nRw;
+    big  = If[ depth === 0, 1, nAct^depth];
+    leaves = FromTTerm /@ TCollapse[
+        icBuildFusedTerm[conjPair, axPairs, depth]];
+    provenLeaf = SelectFirst[leaves, # >= big &, $Failed];
+    If[ provenLeaf === $Failed, Return[$Failed] ];
+    traceVal = Mod[provenLeaf, big];
+    (* trace was folded newT = trace*nAct + c, so step 1 ends up the
+       most-significant digit -- IntegerDigits is MSD-first already. *)
+    stepCodes = If[ depth === 0 || nAct === 0,
         {},
-        Reverse @ IntegerDigits[traceCode, 2 n, depth]
+        IntegerDigits[traceVal, nAct, depth]
     ];
-    decoded = Function[sc, {Quotient[sc, n], Mod[sc, n]}] /@ stepCodes;
+    decoded = Function[c, {Quotient[c, nRw], Mod[c, nRw]}] /@ stepCodes;
     chain = icReplayChain[conjPair, decoded, ruleList];
     If[ icChainClosedQ[chain, conjPair], chain, $Failed ]
 ]

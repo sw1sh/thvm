@@ -729,3 +729,29 @@ VerificationTest[
     Success,
     TestID -> "ATP/ICdec/backward-needed-ic-decoded-verifies"
 ]
+
+VerificationTest[
+    (* The fused single-Term encoding threads {lhs, rhs, trace} as
+       one packed NUM, so the decode is exact at every depth -- a
+       depth-4 chain decodes through the IC path directly (not the
+       BFS fallback).  Chain ends with a reflexive Conclusion. *)
+    Module[{ds, concl},
+        ds = THVMLink`Private`icBuildProofDataset[
+            {a, e}, {{a, b}, {b, c}, {c, d}, {d, e}}, 4];
+        concl = Cases[ds, ({"Conclusion", _} -> e_) :> e["Statement"]];
+        {ds =!= $Failed, MatchQ[concl, {HoldForm[Equal[x_, x_]]}]}
+    ],
+    {True, True},
+    TestID -> "ATP/ICdec/depth-4-chain-ic-decoded"
+]
+
+VerificationTest[
+    (* depth-4 IC-decoded ProofObject passes WL's verifier. *)
+    Module[{p},
+        p = TFindEquationalProof[a == e,
+            {a == b, b == c, c == d, d == e}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/ICdec/depth-4-verifies"
+]

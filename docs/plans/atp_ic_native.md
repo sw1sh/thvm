@@ -357,35 +357,44 @@ b63464e3.
    on every atomic case.  The atp_ic toys' duplicated
    `buildSearchTerm` will be rewired onto this shared builder.
 
-   SUP-path decoder landed (ATP.wl `=== IC-search proof decoder
-   ===`).  `icBuildProofDataset` builds the depth-D search Term
-   plus a parallel TRACE Term -- same SUP labels, same per-step
-   nesting (the current step's choice code is the LEFT operand so
-   its SUP lifts outermost, matching how `lhsD`/`rhsD` wrap the
-   last step's sideSup).  Both collapse to the same leaf order;
-   the search collapse marks the winning leaf, the trace collapse
-   carries its base-(2n) choice code.  `IntegerDigits` splits the
-   code into per-step `(side, rewriteIdx)`; `icReplayChain`
-   replays those into a chain of step records that `assembleDataset`
-   (shared with the BFS path) turns into the ProofObject.
-   `TFindEquationalProof` now routes atomic problems through this
-   IC path; non-atomic problems and any decode that doesn't
-   replay-close fall back to the BFS.
+   SUP-path decoder landed (ATP.wl `=== IC-search provability
+   oracle ===` + `=== IC-search proof decoder ===`).  It uses a
+   FUSED single-Term encoding: one packed-Int state
+   `trace*(m*m) + rhs*m + lhs` threads through D depth steps; each
+   step fans over `nAct = 4*|axioms|` action lambdas via one SUP,
+   and an action `(s, r)` rewrites side `s` with rewrite `r` AND
+   folds the choice code into `trace`.  Because the trace rides
+   the SAME packed state through the SAME SUP fan-out as the
+   atoms, every collapse leaf intrinsically carries both the
+   proven bit and its exact choice code -- one collapse, no second
+   Term, no skeleton-matching, exact at every depth.  The
+   `finalize` lambda maps the leaf state to `proven*big + trace`
+   (`big = nAct^depth`); `IntegerDigits` base-`nAct` splits the
+   code into per-step `(side, rewriteIdx)`, `icReplayChain`
+   replays them into step records, `assembleDataset` (shared with
+   the BFS path) builds the ProofObject.
 
-   Robustness: the trace zip is exact through depth 2; deeper
-   multi-step searches can drift (the search Term's nested
-   OP2-SUP annihilation reshapes the skeleton), so the decoded
-   chain is replay-verified by `icChainClosedQ` -- a chain that
-   doesn't reach a tautology yields `$Failed` and the BFS takes
-   over.  No wrong proof is ever emitted.  atp.wlt `ATP/ICdec/...`
-   covers the decoder; `ATP/TFEP/...` cover the wired
-   `TFindEquationalProof` end to end (67/67).
+   `TFindEquationalProof` routes atomic problems through this IC
+   path.  `icChainClosedQ` replay-verifies the decoded chain as a
+   defensive check; non-atomic problems and any non-closing decode
+   fall back to the BFS, so no wrong proof is ever emitted.
+   atp.wlt `ATP/ICdec/...` covers the decoder (incl. a depth-4
+   chain decoded entirely through IC); `ATP/TFEP/...` cover the
+   wired `TFindEquationalProof` end to end (69/69).  Action /
+   finalize defs use fixed names so re-registration overwrites
+   stable slots instead of leaking the 256-slot def table.
 
-   Outstanding: make the trace zip exact at all depths (a fused
-   single-Term encoding -- thread `{lhs, rhs, trace}` so each leaf
-   intrinsically carries both the proven bit and the choice code,
-   removing the two-collapse skeleton-match dependency), then
-   route the IC path through Metal.
+   Practical envelope: the SUP fan-out enumerates every depth-D
+   rewrite combination, so the collapse leaf count is
+   `nAct^depth` -- fine for shallow proofs (depth<=4: 16^4 ~ 65k
+   leaves), explosive deeper (depth 6: 24^6 ~ 1.9e8).  Deep
+   problems fall back to the directed BFS.  This is inherent to
+   enumerate-all-paths search and is exactly the workload GPU
+   parallelism addresses.
+
+   Outstanding: route the IC path through Metal (the fused Term is
+   OP2/SUP/LAM/APP only -- all covered by the AOT-Metal emit +
+   state machine), so the depth-D enumeration runs on the GPU.
 
 5. **Pattern axioms** (DONE -- not via pre-instantiation, via WL
    Rule semantics).  The original plan was to enumerate
