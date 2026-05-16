@@ -65,7 +65,7 @@ VerificationTest[
              TKernelDispatchKind[kid]}
         ];
         TContextDestroy[ctx];
-        result === {{{58., 64.}, {139., 154.}}, "metal-gemm"} || ctx === 0
+        result === {{{58., 64.}, {139., 154.}}, "metal-tile"} || ctx === 0
     ],
     True,
     TestID -> "metal/f32-matmul-direct-gemm"
@@ -91,7 +91,7 @@ VerificationTest[
              TKernelDispatchKind[kid]}
         ];
         TContextDestroy[ctx];
-        result === {True, {17, 19}, "metal-gemm"}
+        result === {True, {17, 19}, "metal-tile"}
     ],
     True,
     TestID -> "metal/f32-matmul-tiled-gemm-tails"
@@ -129,7 +129,7 @@ VerificationTest[
         ];
         TContextDestroy[ctx];
         restore[];
-        result === {{50., 122.}, "metal-gemm",
+        result === {{50., 122.}, "metal-tile",
                     {TOpt["TC", 0, 32], TOpt["TC", 0, 16],
                      TOpt["TC", 0, 8]}}
     ],
@@ -160,7 +160,7 @@ VerificationTest[
         ];
         TContextDestroy[ctx];
         restore[];
-        result === {{50., 122.}, "metal-gemm"} || ctx === 0
+        result === {{50., 122.}, "metal-tile"} || ctx === 0
     ],
     True,
     TestID -> "metal/f32-matvec-specialized-still-generic"
@@ -199,7 +199,7 @@ VerificationTest[
         TContextDestroy[ctx];
         restore[];
         result === {{TOpt["TC", 0, 32], TOpt["TC", 0, 16],
-                     TOpt["TC", 0, 8]}, "metal-gemm", True}
+                     TOpt["TC", 0, 8]}, "metal-tile", True}
     ],
     True,
     TestID -> "metal/f32-matmul-tc-tile-opt"
