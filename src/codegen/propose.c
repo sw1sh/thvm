@@ -320,6 +320,28 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // leading-size-1 movement views from hiding large inner loops from
   // the Metal LOCAL/GLOBAL autotune path.
   if (axis_size == 0 && ke->output_numel > 0) {
+    int metal_elementwise_ok = propose_metal_tile_enabled()
+        && ke->output_dtype == DT_FP32
+        && ke->n_inputs <= 30;
+    if (metal_elementwise_ok) {
+      for (u32 i = 0; i < ke->n_inputs && metal_elementwise_ok; i++) {
+        if (ke->input_dtypes[i] != DT_FP32) metal_elementwise_ok = 0;
+      }
+    }
+    if (metal_elementwise_ok) {
+      static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
+      u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
+      for (u32 i = 0; i < n_local_factors; i++) {
+        u32 f = local_factors[i];
+        u8 loop_axis = propose_loop_axis_for_factor(ke, 0, f);
+        if (loop_axis == 0xFF) continue;
+        if (n >= cap) break;
+        out[n].op   = KOP_LOCAL;
+        out[n].axis = loop_axis;
+        out[n].arg  = f;
+        n++;
+      }
+    }
     if (!propose_metal_backend_enabled()) {
       for (u32 i = 0; i < n_factors; i++) {
         u32 f = split_factors[i];
