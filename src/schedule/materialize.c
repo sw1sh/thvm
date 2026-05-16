@@ -568,6 +568,24 @@ static Term unified_rewrite_buffer_for_bufferize(KernelEntry const *ke,
     u32 tid = BOUNDARY_TID[bi];
     return unified_rewrite_buffer_for_tid(ke, tid);
   }
+  // Fallback: identity match missed (often because addrspace or
+  // closed_ranges differ between the consumer-side INDEX_E.buf and
+  // the boundary's stored bufferize term).  Match by producer value
+  // instead -- two bufferize terms wrapping the same value subtree
+  // refer to the same realized buffer.
+  if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFERIZE) {
+    Term want_value = uop_bufferize_value(buf);
+    if (want_value != 0) {
+      for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
+        Term cand = BOUNDARY_BUFFERIZE_TERM[bi];
+        if (cand == 0 || cand == buf) continue;
+        if (term_tag(cand) != TAG_UOP || term_ext(cand) != UOP_BUFFERIZE) continue;
+        if (uop_bufferize_value(cand) != want_value) continue;
+        u32 tid = BOUNDARY_TID[bi];
+        return unified_rewrite_buffer_for_tid(ke, tid);
+      }
+    }
+  }
   return 0;
 }
 
