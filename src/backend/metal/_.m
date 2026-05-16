@@ -1999,19 +1999,19 @@ static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
 // kernels return -1 so cpu_dispatch_kernel falls back to the CPU
 // path (interpret / JIT).
 //
-// Phase C slice 4: when `cached_lift.store_root != 0` (materialize-
-// time lift succeeded) the per-op dtype check walks the lifted UOp
-// DAG via uop_dag_dtype_uniform instead of iterating ke->program[].
-// Equivalent invariant -- every BUFFER / CONST / CAST-dst dtype in
-// the DAG must equal `dt` -- but the read goes through cached_lift,
-// keeping program[] off the hot path for kernels that lift.  Lift
-// declines (multi-output spliced, n_inputs > KERNEL_LIFT_MAX_INPUT,
-// gemm/conv2d shape miss) keep the legacy program[] walk.
+// When `cached_lift.store_root != 0` (materialize-time lift succeeded)
+// the per-op dtype check walks the lifted UOp DAG via
+// uop_dag_dtype_uniform instead of iterating ke->program[].  Equivalent
+// invariant -- every BUFFER / CONST / CAST-dst dtype in the DAG must
+// equal `dt` -- but the read goes through cached_lift, keeping
+// program[] off the hot path for kernels that lift.  Lift declines
+// (multi-output spliced, n_inputs > KERNEL_LIFT_MAX_INPUT, gemm/conv2d
+// shape miss) keep the legacy program[] walk.
 static int metal_kernel_supported(struct KernelEntry const *ke) {
-  // Phase C slice 7: when the lift succeeded use the lifted DAG to
-  // decide eligibility (kernel may have program == NULL under
-  // THVM_PHASE_C7_FREE_PROGRAM=1).  When the lift declined fall back
-  // to the legacy program[] walk.
+  // When the lift succeeded use the lifted DAG to decide eligibility
+  // (kernel may have program == NULL under THVM_PHASE_C7_FREE_PROGRAM
+  // =1).  When the lift declined fall back to the legacy program[]
+  // walk.
   u32 dt;
   if (ke->cached_lift.store_root != 0) {
     if (ke->n_inputs == 0) return 0;
@@ -2044,7 +2044,7 @@ static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
   return 0;
 }
 
-// === Phase C slice 5: DAG-side per-op encoder ========================
+// === DAG-side per-op encoder ========================================
 //
 // Mirrors the per-KProgOp encoder loop below, but walks
 // ke->cached_lift.store_root (a UOP_STORE / UOP_AFTER chain produced
@@ -2574,9 +2574,9 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     temp_buf_ids     [i] = tmp_id;
   }
 
-  // Phase C slice 5: DAG-side per-op encoder.  Fires when the lift
-  // succeeded (typical case for multi-output kernels that bypassed
-  // tile_jit_encode at the cg_kernel_has_extra_outputs gate).  Skips
+  // DAG-side per-op encoder.  Fires when the lift succeeded (typical
+  // case for multi-output kernels that bypassed tile_jit_encode at
+  // the cg_kernel_has_extra_outputs gate).  Skips
   // ke->program[] entirely; walks ke->cached_lift.store_root instead.
   // Falls through to the legacy KProgOp loop on failure (or when
   // store_root == 0 = lift declined).

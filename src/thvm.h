@@ -1004,7 +1004,7 @@ typedef struct {
 // === Kernel lift to UOp DAG (forward decl) ===
 // Full prose lives near the kernel_lift_to_uop declaration further down;
 // the typedef is hoisted here so KernelEntry can embed it by-value as
-// `cached_lift` (Phase C slice 2).
+// `cached_lift`.
 //
 // KERNEL_LIFT_MAX_INPUT bounds the in_bufs[] inline array for stack
 // safety -- KERNEL_MAX_INPUT (1M) is a sanity cap, not a typical
@@ -1130,17 +1130,15 @@ typedef struct KernelEntry {
   // compute (the UOP_STORE produced by kernel_lift_to_uop).  0 / NULL
   // when the lift hasn't been attempted (gemm/conv2d-only kernels
   // before dispatch) or declines.  Populated by emit_kernel_for_boundary
-  // alongside the legacy program[] / scalar_uops[] outputs so consumers
-  // can prefer this representation; program[] remains the primary
-  // source of truth until every consumer flips.  Heap-resident terms
-  // are evacuated by gc_evacuate_side_tables (heap/collect.c).
+  // alongside cached_lift below.  Heap-resident terms are evacuated by
+  // gc_evacuate_side_tables (heap/collect.c).
   //
-  // Phase C slice 2: `compute_root` is a redundant view of
-  // `cached_lift.store_root` (kept populated for E1-style consumers
-  // that only need the root); the full lift output (in_bufs[],
-  // out_buf, n_inputs) lives in `cached_lift` so dispatch-time
-  // consumers (cpu_jit_build, cg_emit_via_uop, cpu_uop_walk) read
-  // it directly instead of re-running kernel_lift_to_uop.
+  // `compute_root` is a redundant view of `cached_lift.store_root`
+  // (kept populated for consumers that only need the root); the full
+  // lift output (in_bufs[], out_buf, n_inputs) lives in `cached_lift`
+  // so dispatch-time consumers (cpu_jit_build, cg_emit_via_uop,
+  // cpu_uop_walk) read it directly instead of re-running
+  // kernel_lift_to_uop.
   Term      compute_root;
 
   // Direct-rangeify cutover: when THVM_RANGEIFY_DIRECT=1 the topo
@@ -1152,15 +1150,15 @@ typedef struct KernelEntry {
   // kernel was emitted via the legacy realized-flag predicate.
   Term      compute_bufferize;
 
-  // Phase C slice 2: cached output of kernel_lift_to_uop, populated
-  // by emit_kernel_for_boundary alongside compute_root.  When the
-  // lift declines, cached_lift.store_root stays 0 (matches the
-  // compute_root convention).  All five Term-typed fields
-  // (store_root, out_buf, in_bufs[0..n_inputs)) are heap-resident
-  // and walked by gc_evacuate_side_tables across collections.
-  // Embedded by-value (~528 B per slot, KERNELS_CAP-bounded) so
-  // there's no extra allocation / lifetime management; the kernel
-  // entry already memset-zeroes on alloc.
+  // Cached output of kernel_lift_to_uop, populated by
+  // emit_kernel_for_boundary alongside compute_root.  When the lift
+  // declines, cached_lift.store_root stays 0 (matches the compute_root
+  // convention).  All five Term-typed fields (store_root, out_buf,
+  // in_bufs[0..n_inputs)) are heap-resident and walked by
+  // gc_evacuate_side_tables across collections.  Embedded by-value
+  // (~528 B per slot, KERNELS_CAP-bounded) so there's no extra
+  // allocation / lifetime management; the kernel entry already
+  // memset-zeroes on alloc.
   KernelUopLift cached_lift;
 
   u8        spliced;               // 1 if the kernel's program was inlined
@@ -2540,7 +2538,7 @@ fn u32  uop_buffer_ndim (Term t);
 fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
 fn u32  uop_buffer_inst_get(Term t);       // 0 if not UOP_BUFFER
 
-// === DAG read-side scanners (Phase C slice 4) ===
+// === DAG read-side scanners ===
 // Helpers used by metal_kernel_supported / propose.c to derive
 // per-kernel facts from a lifted UOp DAG without re-running the
 // lifter.  Every helper returns a safe default (0 / "uniform") on
@@ -2861,13 +2859,12 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
                                Term out_buf, Term const *in_bufs,
                                u32 n_inputs, FILE *fp);
 
-// Phase C slice 3: structural-mode entry points.  Discover the
-// kernel's buffer slots from the DAG itself via UOP_BUFFER.instance
-// (kernel_lift.c sets instance=0 on the output and instance=slot+1
-// on input slot k).  Production callers (cg_emit_via_uop, cpu_jit
-// _build) pass ke->compute_root / ke->cached_lift.store_root
-// directly; no out_buf/in_bufs[] tuple needed.  Output is bit-equal
-// with the legacy entry points when invoked on the same root.
+// Structural-mode entry points.  Discover the kernel's buffer slots
+// from the DAG itself via UOP_BUFFER.instance (kernel_lift.c sets
+// instance=0 on the output and instance=slot+1 on input slot k).
+// Production callers (cg_emit_via_uop, cpu_jit_build) pass
+// ke->compute_root / ke->cached_lift.store_root directly; no
+// out_buf/in_bufs[] tuple needed.
 fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
                                   FILE *fp);
 fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
@@ -3338,6 +3335,14 @@ typedef struct {
   Term *cp_rhs;
   u32  *cp_trace;
   u32   n_cps;
+  // 7c': the CP queue is a binary min-heap keyed on
+  // (cp_pri, cp_seq) -- cp_pri is atp_cp_priority computed once at
+  // push, cp_seq is a monotonic insertion counter breaking ties.
+  // Selection is O(log n) pop-min; this replaces the old
+  // rebuild-an-INC-SUP-tree-every-step O(n) scan.
+  u32  *cp_pri;
+  u32  *cp_seq;
+  u32   cp_seq_next;
   u32   cp_cap;
 
   // Transient: set by thvm_atp_select_cp to the trace-entry index

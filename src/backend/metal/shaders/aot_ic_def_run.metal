@@ -18,9 +18,9 @@
 // Single-thread (grid_size=1, only tid=0 runs).  Same wnf state
 // machine + IC interaction inlines as aot_ic_collapse.metal -- copies
 // here for self-containment and to add the BJ -> DP unfold cases that
-// iter Z's per-def emit handled at compile time but the shared
-// shader didn't (book templates carry BJ tags after Phase C's
-// clone_to_book DP->BJ rewrite).
+// the per-def emit path handles at compile time but the shared shader
+// didn't (book templates carry BJ tags after clone_to_book's DP->BJ
+// rewrite).
 //
 // Args are applied as APP(prev, args[i]) chains: the def is left
 // curried in book, the kernel builds the call site in fresh book

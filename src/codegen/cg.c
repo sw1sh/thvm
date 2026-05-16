@@ -83,11 +83,11 @@ int cg_supports(KernelEntry const *ke) {
   // so this only fires when THVM_KERNEL_MERGE=1 is set without the
   // matching codegen + dispatch rollout.  Falls back to interpreter.
   if (cg_kernel_has_extra_outputs(ke)) return 0;
-  // Phase C slice 7: when the materialize-time lift succeeded the
-  // kernel is renderable via cg_render_uop_kernel_c_root regardless
-  // of program[] (which may be NULL under THVM_PHASE_C7_FREE_PROGRAM).
-  // Skip the per-KProgOp gate; cpu_jit_build will hand the lifted
-  // root directly to the renderer.
+  // When the materialize-time lift succeeded the kernel is renderable
+  // via cg_render_uop_kernel_c_root regardless of program[] (which
+  // may be NULL under THVM_PHASE_C7_FREE_PROGRAM).  Skip the
+  // per-KProgOp gate; cpu_jit_build will hand the lifted root
+  // directly to the renderer.
   if (ke->cached_lift.store_root != 0) return 1;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp const *p = &ke->program[i];

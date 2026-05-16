@@ -677,13 +677,12 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
       case TAG_DP1:
       case TAG_BJ0:
       case TAG_BJ1: {
-        // Iter V: auto-dup of multi-use binders.  Both DP0 and DP1
-        // (or BJ0/BJ1, after Phase C's BJ rewrite at clone_to_book)
-        // of the same dup_loc reference the SAME body; we emit the
-        // body's uint value once and memo the var name so the
-        // sibling projection reuses it.  Equivalent to firing
-        // DUP-NUM (both projections become NUM(v)) but materialized
-        // statically at emit time.
+        // Auto-dup of multi-use binders.  Both DP0 and DP1 (or BJ0/BJ1
+        // after clone_to_book's BJ rewrite) of the same dup_loc
+        // reference the SAME body; we emit the body's uint value once
+        // and memo the var name so the sibling projection reuses it.
+        // Equivalent to firing DUP-NUM (both projections become NUM(v))
+        // but materialized statically at emit time.
         u64 dup_loc = term_val(t);
         const char *memoed = aot_msl_dup_lookup(dup_loc);
         if (memoed != NULL) {

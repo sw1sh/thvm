@@ -1,6 +1,6 @@
 // uop/dag_scan.c -- read-side scanners over a UOp DAG.
 //
-// Phase C slice 4: KProgOp-iterating consumers (metal_kernel_supported,
+// KProgOp-iterating consumers (metal_kernel_supported,
 // metal_dispatch_kernel's pre-build dtype gate, propose_kprog_*) need
 // structural facts about a kernel that today come from walking
 // `ke->program[]`.  After kernel_lift_to_uop materialises `cached_lift`
@@ -232,13 +232,13 @@ int uop_dag_is_reduce_unroll_kernel(Term t) {
   return ok && has_reduce;
 }
 
-// === Phase C slice 5: external-linkage decode helpers =================
+// === External-linkage decode helpers =================================
 //
 // The Metal backend (src/backend/metal/_.m) lives in a separate TU
 // from the main runtime, so the `fn`-prefixed (static inline) heap /
 // term / uop_buffer accessors aren't visible.  Re-export the small
 // subset the DAG-side per-op encoder needs as external-linkage shims.
-// Mirrors the slice-4 pattern (uop_dag_dtype_uniform et al.).
+// Mirrors the same pattern as uop_dag_dtype_uniform et al.
 
 // Decode the (op, loc) pair for a Term `t` that's expected to be a
 // UOp.  Returns 1 on success with *out_op + *out_loc set; 0 if the

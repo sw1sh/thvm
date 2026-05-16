@@ -262,11 +262,11 @@ static void gc_evacuate_side_tables(u64 *alloc) {
   // it here keeps those cells alive across collections while the
   // kernel is still in KERNELS[].
   //
-  // Phase C slice 2: `cached_lift` carries the same store_root plus
-  // out_buf and in_bufs[0..n_inputs).  out_buf is a UOP_BUFFER cell
-  // (heap-resident), each in_bufs[i] is either a UOP_BUFFER cell or
-  // a UOP_NUM literal (when the lifter reads a const input).  All
-  // are heap-walkable Terms; evacuating them keeps the renderer's
+  // `cached_lift` carries the same store_root plus out_buf and
+  // in_bufs[0..n_inputs).  out_buf is a UOP_BUFFER cell (heap-
+  // resident), each in_bufs[i] is either a UOP_BUFFER cell or a
+  // UOP_NUM literal (when the lifter reads a const input).  All are
+  // heap-walkable Terms; evacuating them keeps the renderer's
   // identity-based buffer-name resolution stable across collections
   // since rmu_buf_names_set compares by Term equality.
   for (u32 k = 0; k < KERNELS_NEXT; k++) {

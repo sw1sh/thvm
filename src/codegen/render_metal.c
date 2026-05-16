@@ -148,11 +148,11 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   // can specialize when M/N-axes get bound to thread positions via
   // UOP_OPT_LOCAL annotations.
   //
-  // Phase C slice 2: prefer the cached lift outcome as the "would
-  // the lifter succeed?" oracle when populated.  When 0, fall back
-  // to a fresh kernel_lift_to_uop -- test infra builds kernels via
-  // rangeify_emit() bypassing materialize, so cached_lift stays 0
-  // even though the lift would succeed.
+  // Prefer the cached lift outcome as the "would the lifter succeed?"
+  // oracle when populated.  When 0, fall back to a fresh
+  // kernel_lift_to_uop -- test infra builds kernels via rangeify_emit()
+  // bypassing materialize, so cached_lift stays 0 even though the lift
+  // would succeed.
   if (ke->cached_lift.store_root == 0) {
     KernelUopLift fresh = {0};
     if (!kernel_lift_to_uop(ke, &fresh)) return 0;
@@ -181,29 +181,27 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 // when render_uop became the sole emit path -- the actual MTLLibrary
 // PSO build downstream is now the source of truth for compilability.)
 //
-// Phase C slice 3: passes compute_root (= cached_lift.store_root)
-// directly into cg_render_uop_kernel_root, which discovers buffer
-// slots structurally from the DAG via UOP_BUFFER.instance.  No
-// in_bufs[] dependency: kernel_lift.c stamps instance=slot+1 on each
-// input BUFFER, so the renderer reconstructs slot positions from the
-// DAG itself.
+// Passes compute_root (= cached_lift.store_root) directly into
+// cg_render_uop_kernel_root, which discovers buffer slots structurally
+// from the DAG via UOP_BUFFER.instance.  No in_bufs[] dependency:
+// kernel_lift.c stamps instance=slot+1 on each input BUFFER, so the
+// renderer reconstructs slot positions from the DAG itself.
 static char *cg_emit_via_uop(KernelEntry const *ke) {
   kernel_lift_count_attempt();
   // Metal hardware caps buffer attributes at index 30 (31 slots total
   // including output).  Reject kernels with too many inputs.
   if (ke->n_inputs > 30) return NULL;
-  // Phase C slice 2: prefer the cached KernelUopLift populated by
+  // Prefer the cached KernelUopLift populated by
   // emit_kernel_for_boundary.  When the cache is populated
   // (cached_lift.store_root != 0) we read it directly and skip the
-  // redundant kernel_lift_to_uop call.  When the cache is 0 there
-  // are two possibilities: materialize-time lift declined (the
-  // common case in the materialize pipeline), OR the kernel was
-  // constructed by test infra via rangeify_emit() bypassing
-  // materialize entirely (test_kernel_lift_coverage,
-  // test_tile_graph, test_metal_real cover this).  We can't tell
-  // them apart so we fall back to a fresh on-demand lift; it will
-  // succeed on rangeify-built kernels and decline on truly
-  // unsupported ones, matching the pre-slice-2 behavior.
+  // redundant kernel_lift_to_uop call.  When the cache is 0 there are
+  // two possibilities: materialize-time lift declined (the common case
+  // in the materialize pipeline), OR the kernel was constructed by
+  // test infra via rangeify_emit() bypassing materialize entirely
+  // (test_kernel_lift_coverage, test_tile_graph, test_metal_real cover
+  // this).  We can't tell them apart so we fall back to a fresh
+  // on-demand lift; it will succeed on rangeify-built kernels and
+  // decline on truly unsupported ones.
   Term cached_root = ke->cached_lift.store_root;
   KernelUopLift fresh = {0};
   if (cached_root == 0) {
