@@ -1020,6 +1020,43 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
             got_exprs  [got_n] = e;
             got_n++;
           }
+          // Merge got entries that share a stride into one IADD per
+          // stride.  An IADD-tree leaf decomposes into multiple bare-
+          // expr entries with the same stride when the consumer's
+          // per-axis index expression itself has multiple terms (e.g.
+          // im2col kernel row = patch_row + kernel_row, both stride 1
+          // within the row axis).  Combining lets the first-pass
+          // stride match see got_n == n_ranges.
+          if (decompose_ok && got_n > n_ranges) {
+            u32 m_strides[UNIFIED_SUBST_CAP] = {0};
+            Term m_exprs[UNIFIED_SUBST_CAP] = {0};
+            u32 m_n = 0;
+            int merge_ok = 1;
+            for (u32 j = 0; j < got_n; j++) {
+              u32 s = got_strides[j];
+              int found = -1;
+              for (u32 k = 0; k < m_n; k++) {
+                if (m_strides[k] == s) { found = (i32)k; break; }
+              }
+              if (found < 0) {
+                if (m_n >= UNIFIED_SUBST_CAP) { merge_ok = 0; break; }
+                m_strides[m_n] = s;
+                m_exprs[m_n]   = got_exprs[j];
+                m_n++;
+              } else {
+                m_exprs[found] = uop_int_binary(UOP_IADD,
+                                                m_exprs[found],
+                                                got_exprs[j]);
+              }
+            }
+            if (merge_ok && m_n == n_ranges) {
+              for (u32 j = 0; j < m_n; j++) {
+                got_strides[j] = m_strides[j];
+                got_exprs[j]   = m_exprs[j];
+              }
+              got_n = m_n;
+            }
+          }
           int matched = 0;
           Term to_terms[UNIFIED_SUBST_CAP] = {0};
           // First pass: stride match.  Each closed_range[i] needs an
