@@ -490,6 +490,106 @@ static int bufferize_softmax_reduce_tile_cap_enabled(void) {
 // an optimisation.  Without it, multi-consumer REDUCEs whose
 // branches all bottom out at the same EXPAND would be considered.
 
+// === Metal fanin-cap split ==========================================
+// The metal renderer declines kernels with > 30 inputs (render_metal.c
+// gate at n_inputs > 30 -> NULL).  Without an upstream split, a wide
+// ADD/MUL tree (Adam updates folding 30+ tensors, BN-train backward
+// reducing many feature groups) lands at the render decline and falls
+// onto the per-op interpreter.  This rule walks each realized
+// boundary's expression tree, counts distinct realized inputs, and if
+// the total exceeds `cap` greedily marks the largest split-class
+// (elementwise / movement) child as realized to split the fan-in.
+// Iterates until either the boundary fits under cap or no eligible
+// child remains.
+static int bufferize_metal_tile_fanin_cap_enabled(void) {
+  char const *backend = getenv("THVM_BACKEND");
+  char const *tile    = getenv("THVM_TILE");
+  return backend != NULL && strcmp(backend, "metal") == 0
+      && tile != NULL && tile[0] == '1';
+}
+
+static u32 bufferize_metal_tile_fanin_cap(void) {
+  char const *e = getenv("THVM_METAL_FUSION_MAX_INPUTS");
+  if (e != NULL && e[0] != '\0') {
+    unsigned long v = strtoul(e, NULL, 10);
+    if (v >= 2 && v <= 30) {
+      return (u32)v;
+    }
+  }
+  return 24;
+}
+
+static int bufferize_fanin_split_child_op(u8 op) {
+  return uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
+      || op == UOP_CAST    || op == UOP_BITCAST
+      || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
+      || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
+}
+
+static u32 bufferize_fanin_uop_count(u64 loc, u64 boundary_root, u32 cap);
+
+static u32 bufferize_fanin_term_count(Term t, u64 boundary_root, u32 cap) {
+  t = term_resolve(t);
+  if (term_tag(t) == TAG_TEN) return 1;
+  if (term_tag(t) == TAG_VAR) return 1;
+  if (term_tag(t) != TAG_UOP) return 0;
+  if (term_ext(t) == UOP_KERNEL) return 1;
+  return bufferize_fanin_uop_count(term_val(t), boundary_root, cap);
+}
+
+static u32 bufferize_fanin_uop_count(u64 loc, u64 boundary_root, u32 cap) {
+  if (loc >= HEAP_NEXT) return 1;
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 1;
+  UOpInfo *info = &BUFFERIZE_NODES[idx];
+  if (loc != boundary_root && info->realized) return 1;
+  if (info->op == UOP_CONST) return 0;
+
+  u8  ar = uop_arity(info->op);
+  u32 total = 0;
+  u32 child_idx  [MAX_UOP_SRC] = {0};
+  u32 child_count[MAX_UOP_SRC] = {0};
+  for (u8 i = 0; i < ar; i++) {
+    child_idx[i] = 0xFFFFFFFFu;
+    Term child = term_resolve(heap_read(loc + i));
+    child_count[i] = bufferize_fanin_term_count(child, boundary_root, cap);
+    total += child_count[i];
+    if (term_tag(child) == TAG_UOP && term_ext(child) != UOP_KERNEL) {
+      child_idx[i] = bufferize_info_find(term_val(child));
+    }
+  }
+
+  while (total > cap) {
+    u8  best = 0xFF;
+    u32 best_size = 1;
+    for (u8 i = 0; i < ar; i++) {
+      u32 cidx = child_idx[i];
+      if (cidx == 0xFFFFFFFFu) continue;
+      if (child_count[i] <= best_size) continue;
+      if (!bufferize_fanin_split_child_op(BUFFERIZE_NODES[cidx].op)) continue;
+      best = i;
+      best_size = child_count[i];
+    }
+    if (best == 0xFF) break;
+    UOpInfo *child_info = &BUFFERIZE_NODES[child_idx[best]];
+    bufferize_node_mark(child_info, BUFFERIZE_REASON_FANIN_CAP);
+    total = total - child_count[best] + 1;
+    child_count[best] = 1;
+  }
+  return total;
+}
+
+static void bufferize_rule_metal_tile_fanin_cap(Term root) {
+  if (!bufferize_metal_tile_fanin_cap_enabled()) return;
+  if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) return;
+  u32 cap = bufferize_metal_tile_fanin_cap();
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (!BUFFERIZE_NODES[i].realized) continue;
+    bufferize_fanin_uop_count(BUFFERIZE_NODES[i].loc, BUFFERIZE_NODES[i].loc,
+                              cap);
+  }
+}
+
 static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
   (void)root;
   if (!bufferize_reduce_fuse_multi_enabled() && bufferize_reduce_count() != 1) {
@@ -789,6 +889,11 @@ fn void bufferize_classify(Term root) {
         bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
       }
     }
+    // Fanin-cap split: mark wide-fanin elementwise/movement children
+    // as realized boundaries so the metal renderer's n_inputs > 30
+    // decline doesn't trigger.  Runs after softmax-unmark so the
+    // boundary set reflects every other rule first.
+    bufferize_rule_metal_tile_fanin_cap(root);
     bufferize_seed_from_nodes(root);
     // The unified walk writes RU_RANGE_MAP / RU_REALIZE_MAP and the
     // main-heap UOP_BUFFERIZE Terms (one per realize boundary).

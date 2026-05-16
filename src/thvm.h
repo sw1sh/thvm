@@ -1787,6 +1787,7 @@ fn u32  bufferize_rewrite_stat_hits(char const *name);
 #define BUFFERIZE_REASON_ROOT        (1u << 0)
 #define BUFFERIZE_REASON_MULTI       (1u << 1)
 #define BUFFERIZE_REASON_REDUCE      (1u << 2)
+#define BUFFERIZE_REASON_FANIN_CAP   (1u << 3)
 #define BUFFERIZE_REASON_INLINE      (1u << 4)
 #define BUFFERIZE_REASON_MATMUL      (1u << 6)
 typedef struct {
