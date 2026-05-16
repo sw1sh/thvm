@@ -44,7 +44,7 @@ TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the
    order, so these public names don't yet exist when this file's
    body runs.  Mirrors the same guard in Lazy.wl. *)
 {TDef, TRef, TIfZero, TOp2, TNum, TSup, TApp, TLam,
- TCollapse, FromTTerm, TTerm};
+ TCollapse, TCnf, TTermTag, TTermVal, FromTTerm, TTerm};
 
 Begin["`Private`"];
 
@@ -736,19 +736,64 @@ icBuildFusedTerm[conjPair_, axPairs_, depth_Integer] := Block[{
     ]
 ]
 
+(* === Lazy proven-leaf finder ===================================== *)
+
+(* Node-visit budget for the lazy DFS.  A provable conjecture with
+   good rewrite ordering finds its leaf well inside this; hitting
+   the cap (deep / badly-ordered search) throws "icCap" and the
+   caller falls back to the BFS. *)
+$icLeafCap = 200000;
+
+(* Lazily walk the fused search Term's SUP-tree, returning the first
+   leaf NUM >= big (a proven leaf) as a plain integer, or Missing[]
+   when the tree holds no proven leaf.
+
+   This is the IC-native pruner: TCnf forces only the head of each
+   visited node, so descending one child leaves the sibling subtree
+   an unforced redex.  Short-circuiting at the first proven leaf
+   means every branch to its right is never TCnf'd -- never reduced,
+   never enumerated.  No eager TCollapse, no runtime-side walker;
+   pruning falls straight out of IC's demand-driven reduction.
+   `TWnf`-style laziness, the way TLazyTake leaves its tail
+   unforced. *)
+icFindLeafRec[t_, big_] := (
+    If[ ++$icVisits > $icLeafCap, Throw[$Failed, "icCap"] ];
+    Block[{w = TCnf[t], tag, loc, lft},
+        tag = TTermTag[w];
+        Which[
+            tag === $TagSUP,
+                loc = TTermVal[w];
+                lft = icFindLeafRec[TTerm[$heapReadFn[loc]], big];
+                If[ lft =!= Missing[],
+                    lft,
+                    icFindLeafRec[TTerm[$heapReadFn[loc + 1]], big]
+                ],
+            tag === $TagNUM,
+                With[{v = FromTTerm[w]},
+                    If[ IntegerQ[v] && v >= big, v, Missing[]]],
+            True, Missing[]   (* ERA / stuck: dead branch *)
+        ]
+    ]
+)
+
+(* Entry point: integer leaf value when a proof is found, Missing[]
+   when none exists within `depth`, $Failed when the visit cap is
+   hit (caller treats both non-integers as "use the BFS"). *)
+icFindProvenLeaf[t_, big_] := Block[{$icVisits = 0},
+    Catch[icFindLeafRec[t, big], "icCap"]
+]
+
 (* True iff the conjecture is provable from the axioms in <= depth
-   rewrite steps, decided by IC reduction + collapse.  Returns
-   $Failed when the problem isn't atomic (caller falls back to the
-   BFS). *)
+   rewrite steps, decided by lazy IC reduction.  Returns $Failed
+   when the problem isn't atomic (caller falls back to the BFS). *)
 icSearchProvable[conjPair_, axPairs_, depth_Integer] := If[
     ! icAtomicProblemQ[axPairs, conjPair],
     $Failed,
-    Block[{nAct, big, leaves},
+    Block[{nAct, big},
         nAct = 4 * Length[axPairs];
         big = If[ depth === 0, 1, nAct^depth];
-        leaves = FromTTerm /@ TCollapse[
-            icBuildFusedTerm[conjPair, axPairs, depth]];
-        AnyTrue[leaves, # >= big &]
+        IntegerQ @ icFindProvenLeaf[
+            icBuildFusedTerm[conjPair, axPairs, depth], big]
     ]
 ]
 
@@ -931,27 +976,27 @@ icChainClosedQ[chain_, conjPair_] := If[
 ]
 
 (* Decode the IC search's winning leaf into a rewrite chain.  Builds
-   the depth-D fused search Term, collapses it once, and picks the
-   first leaf >= big (proven).  That leaf's value is proven*big +
-   trace; (leaf mod big) is the base-(nAct) choice code, which
-   IntegerDigits splits into per-step codes c = side*nRw + rewIdx.
-   icReplayChain turns the decoded (side, rewIdx) sequence into step
-   records.  Because the trace rides the same packed state through
-   the same SUP fan-out as the atoms, leaf code <-> proven bit are
+   the depth-D fused search Term and lazily walks its SUP-tree
+   (icFindProvenLeaf) for the first leaf >= big -- pruning every
+   branch past it.  That leaf's value is proven*big + trace; (leaf
+   mod big) is the base-(nAct) choice code, which IntegerDigits
+   splits into per-step codes c = side*nRw + rewIdx.  icReplayChain
+   turns the decoded (side, rewIdx) sequence into step records.
+   Because the trace rides the same packed state through the same
+   SUP fan-out as the atoms, leaf code <-> proven bit are
    intrinsically paired -- exact at every depth.  icChainClosedQ
    still replay-verifies as a defensive check.  Returns $Failed when
-   no leaf is proven or the decoded chain doesn't replay-close. *)
+   no leaf is proven, the visit cap is hit, or the decoded chain
+   doesn't replay-close. *)
 icDecodeChain[conjPair_, axPairs_, depth_Integer, ruleList_] := Block[{
-    nRw, nAct, big, leaves, provenLeaf, traceVal, stepCodes,
-    decoded, chain
+    nRw, nAct, big, provenLeaf, traceVal, stepCodes, decoded, chain
 },
     nRw  = 2 * Length[axPairs];
     nAct = 2 * nRw;
     big  = If[ depth === 0, 1, nAct^depth];
-    leaves = FromTTerm /@ TCollapse[
-        icBuildFusedTerm[conjPair, axPairs, depth]];
-    provenLeaf = SelectFirst[leaves, # >= big &, $Failed];
-    If[ provenLeaf === $Failed, Return[$Failed] ];
+    provenLeaf = icFindProvenLeaf[
+        icBuildFusedTerm[conjPair, axPairs, depth], big];
+    If[ ! IntegerQ[provenLeaf], Return[$Failed] ];
     traceVal = Mod[provenLeaf, big];
     (* trace was folded newT = trace*nAct + c, so step 1 ends up the
        most-significant digit -- IntegerDigits is MSD-first already. *)

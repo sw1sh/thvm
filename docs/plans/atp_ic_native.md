@@ -384,17 +384,34 @@ b63464e3.
    finalize defs use fixed names so re-registration overwrites
    stable slots instead of leaking the 256-slot def table.
 
-   Practical envelope: the SUP fan-out enumerates every depth-D
-   rewrite combination, so the collapse leaf count is
-   `nAct^depth` -- fine for shallow proofs (depth<=4: 16^4 ~ 65k
-   leaves), explosive deeper (depth 6: 24^6 ~ 1.9e8).  Deep
-   problems fall back to the directed BFS.  This is inherent to
-   enumerate-all-paths search and is exactly the workload GPU
-   parallelism addresses.
+   Lazy pruner: the SUP fan-out still encodes every depth-D
+   rewrite combination (`nAct^depth` leaves), but `icFindProvenLeaf`
+   no longer collapses it eagerly.  It walks the SUP-tree
+   depth-first WL-side, `TCnf`-forcing only the head of each
+   visited node and short-circuiting at the first leaf >= big (a
+   proven leaf).  Descending one child leaves the sibling subtree
+   an unforced redex -- so every branch past the first proof is
+   never `TCnf`'d, never reduced, never enumerated.  Pruning falls
+   straight out of IC's demand-driven reduction (TLazyTake-style);
+   no eager `TCollapse`, no runtime-side walker.  A visit cap
+   (200k nodes) bounds pathological searches -- hitting it throws
+   "icCap" and the caller falls back to the BFS.
 
-   Outstanding: route the IC path through Metal (the fused Term is
-   OP2/SUP/LAM/APP only -- all covered by the AOT-Metal emit +
-   state machine), so the depth-D enumeration runs on the GPU.
+   With the pruner, provable conjectures stop at their proof
+   instead of materializing the whole tree: depth-6 chains now
+   produce a verified ProofObject through the IC path (were BFS
+   fallback).  Search cost is "tree position of the first proven
+   leaf in DFS order", not `nAct^depth` -- so it depends on rewrite
+   ordering, which is what KBO is for (next).
+
+   Outstanding:
+   - KBO-order the action list so DFS-left branches are the
+     KBO-decreasing rewrites -- puts the proof near the front of
+     the DFS, turning the pruner from "bounded" into "fast" at
+     depth 5-6 (currently ~4 s, cap-bounded, BFS-backed).
+   - Route the IC path through Metal (the fused Term is
+     OP2/SUP/LAM/APP only -- all covered by the AOT-Metal emit +
+     state machine), so the depth-D enumeration runs on the GPU.
 
 5. **Pattern axioms** (DONE -- not via pre-instantiation, via WL
    Rule semantics).  The original plan was to enumerate
