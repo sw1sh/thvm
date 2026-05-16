@@ -284,6 +284,10 @@ static void gc_evacuate_side_tables(u64 *alloc) {
       ke->cached_lift.store_root =
           gc_evacuate(ke->cached_lift.store_root, alloc);
     }
+    if (ke->cached_lift_init_root != 0) {
+      ke->cached_lift_init_root =
+          gc_evacuate(ke->cached_lift_init_root, alloc);
+    }
     if (ke->cached_lift.out_buf != 0) {
       ke->cached_lift.out_buf =
           gc_evacuate(ke->cached_lift.out_buf, alloc);

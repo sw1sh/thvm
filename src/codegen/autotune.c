@@ -443,6 +443,13 @@ static void kautotune_cache_store(char const *path, u64 key, u32 backend_id,
 // tuned kernel.
 static void axes_reset_to_default(KernelEntry *ke) {
   tile_anno_axes_reset(ke);
+  // kernel_apply_opt's DAG-mode mutates cached_lift.store_root +
+  // compute_root in place.  Revert them to the materialize-time
+  // snapshot so DAG readers see the baseline state.
+  if (ke != NULL && ke->cached_lift_init_root != 0) {
+    ke->cached_lift.store_root = ke->cached_lift_init_root;
+    ke->compute_root           = ke->cached_lift_init_root;
+  }
 }
 
 static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {

@@ -24,6 +24,54 @@ static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
   return 0;
 }
 
+// Collect the kernel's full post-opt axis structure from cached_lift
+// .store_root.  The lifted DAG is post-mutation (uop_dag_apply_kopt
+// rewrites RANGE leaves in place for every split-class opt), so the
+// RANGE set + their axis_type fields encode the FINAL axis layout.
+// Output axes whose extent is 1 may not appear as RANGE leaves (the
+// addr collapses to CONST(0)); we synthesise them from output_shape.
+//
+// Returns axis count (sorted by axis_id), or 0 when the DAG is empty.
+// Caller arrays must be sized >= MAX_AXES.
+static u32 axes_dag_collect(KernelEntry const *ke, u8 *kax_out,
+                            u32 *extent_out, u32 cap) {
+  if (ke == NULL || ke->cached_lift.store_root == 0 || cap == 0) return 0;
+  u32 axis_ids[MAX_AXES] = {0};
+  u32 axis_types[MAX_AXES] = {0};
+  u32 extents[MAX_AXES] = {0};
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root,
+                               axis_ids, axis_types, extents,
+                               MAX_AXES);
+  // Synthesise missing output axes (extent 1 ones whose addr folded
+  // to CONST(0)).  Output axis_ids are [0, output_shape.ndim).
+  u32 out_ndim = ke->output_shape.ndim;
+  if (out_ndim > MAX_AXES - 1) out_ndim = MAX_AXES - 1;
+  for (u32 d = 0; d < out_ndim && n < MAX_AXES; d++) {
+    int found = 0;
+    for (u32 i = 0; i < n; i++) if (axis_ids[i] == d) { found = 1; break; }
+    if (!found) {
+      // Insert at sorted position.
+      u32 ins = n;
+      for (u32 i = 0; i < n; i++) if (axis_ids[i] > d) { ins = i; break; }
+      for (u32 i = n; i > ins; i--) {
+        axis_ids[i]   = axis_ids[i - 1];
+        axis_types[i] = axis_types[i - 1];
+        extents[i]    = extents[i - 1];
+      }
+      axis_ids[ins]   = d;
+      axis_types[ins] = (u32)KAX_LOOP;
+      extents[ins]    = ke->output_shape.dims[d];
+      n++;
+    }
+  }
+  if (n == 0 || n > cap) return 0;
+  for (u32 i = 0; i < n; i++) {
+    kax_out[i]    = (u8)axis_types[i];
+    extent_out[i] = extents[i];
+  }
+  return n;
+}
+
 // Predicate: "will ke->schedule carry a REDUCE-class axis
 // (KAX_REDUCE or KAX_GROUP_REDUCE)?", derived from higher-level
 // signals without reading axis_types[].  Mirrors the writer side
@@ -49,7 +97,17 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
   }
-  if (ke->n_ops > 0 && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
+  if (ke->cached_lift.store_root != 0) {
+    u8 kax[MAX_AXES] = {0};
+    u32 ext[MAX_AXES] = {0};
+    u32 n = axes_dag_collect(ke, kax, ext, MAX_AXES);
+    for (u32 i = 0; i < n; i++) {
+      if (kax[i] == KAX_REDUCE || kax[i] == KAX_GROUP_REDUCE) return 1;
+    }
+    if (n > 0) return 0;
+  }
+  if (ke->program != NULL && ke->n_ops > 0
+      && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
     return 1;
   }
   if (axes_scalar_reduce_extent(ke) != 0) {
@@ -100,6 +158,20 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                u32 cap) {
   if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
     return 0;
+  }
+  // Lifted DAG path: uop_dag_apply_kopt mutates RANGE leaves in place
+  // for every split-class opt, so the DAG's post-opt RANGE set encodes
+  // the final axis layout.  Skip applied_opts replay -- the DAG IS
+  // post-opt.  axes_reset_to_default reverts cached_lift.store_root
+  // from cached_lift_init_root so autotune's bench loop is consistent.
+  {
+    u8 kax_dag[MAX_AXES] = {0};
+    u32 ext_dag[MAX_AXES] = {0};
+    u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
+    if (n_dag > 0 && n_dag <= cap) {
+      for (u32 i = 0; i < n_dag; i++) out[i] = kax_dag[i];
+      return n_dag;
+    }
   }
 
   // Initial layout: nd LOOPs + optional trailing REDUCE.
@@ -227,6 +299,17 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
                                u32 cap) {
   if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
     return 0;
+  }
+  // Lifted DAG path: the post-opt RANGE leaves carry final extents.
+  // Skip applied_opts replay -- the DAG IS post-opt.
+  {
+    u8 kax_dag[MAX_AXES] = {0};
+    u32 ext_dag[MAX_AXES] = {0};
+    u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
+    if (n_dag > 0 && n_dag <= cap) {
+      for (u32 i = 0; i < n_dag; i++) out[i] = ext_dag[i];
+      return n_dag;
+    }
   }
 
   u32 nd = ke->output_shape.ndim;

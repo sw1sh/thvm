@@ -1159,6 +1159,14 @@ typedef struct KernelEntry {
   // memset-zeroes on alloc.
   KernelUopLift cached_lift;
 
+  // Snapshot of cached_lift.store_root at materialize time, before any
+  // kernel_apply_opt DAG mutations.  axes_reset_to_default restores
+  // cached_lift.store_root + compute_root from this so autotune's
+  // bench-each-variant flow can rewind DAG state after each candidate.
+  // 0 when the lift declined; that case keeps the legacy program[]-
+  // driven reset path which is naturally idempotent.
+  Term      cached_lift_init_root;
+
   u8        spliced;               // 1 if the kernel's program was inlined
                                    // into a parent via
                                    // materialize_splice_into; kernel_fire_by_id

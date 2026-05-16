@@ -4187,6 +4187,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
   }
 
+  // Snapshot the post-materialize / pre-runtime-opt cached_lift state
+  // so axes_reset_to_default can revert kernel_apply_opt's DAG
+  // mutations during autotune's bench-each-variant flow.
+  ke->cached_lift_init_root = ke->cached_lift.store_root;
+
   u64 kloc = heap_alloc(2);
   heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, out_tid));
   heap_set(kloc + 1, term_new(0, TAG_NUM, DT_INT32, kid));
