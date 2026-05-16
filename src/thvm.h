@@ -1141,13 +1141,11 @@ typedef struct KernelEntry {
   // kernel_lift_to_uop.
   Term      compute_root;
 
-  // Direct-rangeify cutover: when THVM_RANGEIFY_DIRECT=1 the topo
-  // walker selects this kernel's boundary from RU_BUFFERIZE_TERM[]
-  // (the unified-pass main-heap UOP_BUFFERIZE node) and stashes it
-  // here. Mirror source: tinygrad/schedule/indexing.py:77 (the
-  // BUFFERIZE node consumed by create_kernel via the lowered DAG).
-  // Heap-resident; gc_evacuate_side_tables walks it.  0 when the
-  // kernel was emitted via the legacy realized-flag predicate.
+  // The topo walker selects this kernel's boundary from
+  // RU_BUFFERIZE_TERM[] (the unified-pass main-heap UOP_BUFFERIZE node)
+  // and stashes it here. Mirror source: tinygrad/schedule/indexing.py:77
+  // (the BUFFERIZE node consumed by create_kernel via the lowered DAG).
+  // Heap-resident; gc_evacuate_side_tables walks it.
   Term      compute_bufferize;
 
   // Cached output of kernel_lift_to_uop, populated by
@@ -2348,13 +2346,13 @@ fn Term pm_simplify_valid_apply   (Term t);
 fn Term pm_drop_and_clauses_apply (Term t);
 
 // === Unified rangeify pass ===
-// 1-to-1 port of tinygrad/schedule/indexing.py:148-269 (run_rangeify) and
-// :101-110 (pm_apply_rangeify). Gated behind THVM_UNIFIED_RANGEIFY (default
-// 1). Pre-condition: caller has run bufferize_classify(root) so
-// BUFFERIZE_NODES + CMAP_LL are populated. Populates side tables
-// RU_RANGE_MAP / RU_REALIZE_MAP / RU_ENDING_RANGES / RU_SUBST in-place and
-// writes UOP_BUFFERIZE Terms onto the main heap at realize boundaries.
-// See src/schedule/rangeify_unified.c for design notes.
+// 1-to-1 port of tinygrad/schedule/indexing.py:148-269 (run_rangeify)
+// and :101-110 (pm_apply_rangeify).  Pre-condition: caller has run
+// bufferize_classify(root) so BUFFERIZE_NODES + CMAP_LL are populated.
+// Populates side tables RU_RANGE_MAP / RU_REALIZE_MAP /
+// RU_ENDING_RANGES / RU_SUBST in-place and writes UOP_BUFFERIZE Terms
+// onto the main heap at realize boundaries.  See
+// src/schedule/rangeify_unified.c for design notes.
 fn void run_rangeify_unified                   (Term root);
 fn void pm_apply_rangeify                      (Term root);
 fn u32  rangeify_unified_last_nodes_walked     (void);

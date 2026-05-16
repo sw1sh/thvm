@@ -91,10 +91,8 @@ static u32             RU_RANGE_IDX_COUNTER;  // monotonic axis_id source
 // shared producer reachable via the LAST-visited consumer path lands
 // in BUFFERIZE_NODES AFTER that consumer.  This caused softmax /
 // attention regressions because EXP's consumer-divergence wasn't
-// observable until ALL its consumers' range_maps were filled (see
-// nn.wlt softmax-* tests under THVM_RANGEIFY_DIRECT=1 with the MULTI
-// seed dropped).  We compute a proper Kahn's-algorithm order on
-// BUFFERIZE_NODES below.
+// observable until ALL its consumers' range_maps were filled.  We
+// compute a proper Kahn's-algorithm order on BUFFERIZE_NODES below.
 static u32             RU_TOPO_ORDER[RU_MAX_NODES];
 static u32             RU_TOPO_ORDER_LEN;
 static u32             RU_TOPO_REMAINING[RU_MAX_NODES];  // unprocessed-consumer counter
