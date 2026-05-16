@@ -459,9 +459,12 @@ static int ru_apply_movement(u64 loc, u8 op,
   }
 
   if (op == UOP_EXPAND) {
+    // Broadcast aligns by SUFFIX: when target rank > src rank, the new
+    // axes are prepended at the front and contribute extent 1 each.
     u32 ins[RU_MAX_AXES], outs[RU_MAX_AXES];
+    u32 rank_diff = out_ndim > src_shape.ndim ? out_ndim - src_shape.ndim : 0;
     for (u32 i = 0; i < out_ndim; i++) {
-      ins[i]  = (i < src_shape.ndim) ? src_shape.dims[i] : 1;
+      ins[i]  = (i < rank_diff) ? 1 : src_shape.dims[i - rank_diff];
       outs[i] = (u32)term_val(heap_read(loc + 2 + i));
     }
     apply_movement_op_expand(out_ndim, ins, outs, out_rngs, in_rngs);
