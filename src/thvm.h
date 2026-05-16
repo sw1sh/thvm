@@ -2199,6 +2199,7 @@ fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 // winner, and leave KpSchedule mutated to the winning sequence.
 // Returns 1 if a winning opt sequence was applied, 0 if baseline won.
 fn int kernel_autotune(u32 kid);
+fn u64 kautotune_structural_key(struct KernelEntry const *ke);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True
 // iff (env opt-in `THVM_AUTOTUNE=1`) AND (this KpSchedule hasn't

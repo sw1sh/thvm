@@ -1867,8 +1867,15 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_program_key(WolframLibraryData libData,
                                                   mint argc,
                                                   MArgument *args,
                                                   MArgument res) {
-  (void)libData; (void)argc; (void)args;
-  MArgument_setInteger(res, 0);
+  (void)libData; (void)argc;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_NO_ERROR;
+  }
+  u64 key = kautotune_structural_key(&KERNELS[kid]);
+  // mint is 64-bit on darwin-arm64; cast straight through.
+  MArgument_setInteger(res, (mint)key);
   return LIBRARY_NO_ERROR;
 }
 

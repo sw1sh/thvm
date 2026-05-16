@@ -182,7 +182,7 @@ static u64 kautotune_rangeified_key(KernelEntry const *ke) {
   return (h & 0x3FFFFFFFFFFFFFFFULL) | (1ULL << 62);
 }
 
-static u64 kautotune_structural_key(KernelEntry const *ke) {
+fn u64 kautotune_structural_key(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
   }
