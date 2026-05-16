@@ -335,6 +335,39 @@ static int jit_replay_pack_enabled(void) {
   return e == NULL || e[0] != '0';
 }
 
+// Count distinct UOP nodes reachable from a lifted-DAG root.  Used by
+// jit_capture_export_ops to expose an "OpCount" surrogate when
+// program[] has been freed (THVM_PHASE_C7_FREE_PROGRAM=1).  Bounded
+// recursion via a small visited stack; the lifted DAG is finite.
+static u32 jit_capture_dag_op_count_walk(Term t, u32 depth) {
+  if (depth > 256 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID
+      || op == UOP_RANGE) return 0;
+  u32 count = 1;
+  u64 loc = term_val(t);
+  if (op == UOP_OPT) {
+    return count + jit_capture_dag_op_count_walk(uop_opt_target(t), depth + 1);
+  }
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term child = heap_read(loc + i);
+    if (term_tag(child) == TAG_UOP) {
+      count += jit_capture_dag_op_count_walk(child, depth + 1);
+    }
+  }
+  return count;
+}
+
+static u32 jit_capture_kernel_op_count(KernelEntry const *ke) {
+  if (ke == NULL) return 0;
+  if (ke->n_ops > 0 && ke->program != NULL) return ke->n_ops;
+  if (ke->cached_lift.store_root != 0) {
+    return jit_capture_dag_op_count_walk(ke->cached_lift.store_root, 0);
+  }
+  return 0;
+}
+
 // Export the capture sequence as a flat table for WL-side profiling.
 // Header: {n_ops, row_width}.  Row width is JIT_CAPTURE_EXPORT_ROW_WIDTH:
 // {kind, kid, dispatch_kind, n_inputs, out_buf_id, input0, input1,
@@ -384,7 +417,7 @@ fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
         if (op->kid > 0 && op->kid < KERNELS_NEXT) {
           KernelEntry const *ke = &KERNELS[op->kid];
           row[8]  = ke->output_numel;
-          row[9]  = ke->n_ops;
+          row[9]  = jit_capture_kernel_op_count(ke);
           row[10] = 0;
           row[11] = 0;
         }
