@@ -153,6 +153,10 @@ static double uwalk_load_f64(void *p, i64 off, u32 dt) {
   switch (dt) {
     case DT_FP32: { f32 v = ((f32 *)p)[off]; return (double)v; }
     case DT_FP64: { f64 v = ((f64 *)p)[off]; return v; }
+    case DT_FP16:  return (double)fp16_to_f32(((u16 *)p)[off]);
+    case DT_BF16:  return (double)bf16_to_f32(((u16 *)p)[off]);
+    case DT_FP8E4M3: return (double)fp8e4m3_to_f32(((u8 *)p)[off]);
+    case DT_FP8E5M2: return (double)fp8e5m2_to_f32(((u8 *)p)[off]);
     case DT_INT8:  return (double)((i8  *)p)[off];
     case DT_UINT8: return (double)((u8  *)p)[off];
     case DT_INT16: return (double)((i16 *)p)[off];
@@ -170,6 +174,10 @@ static i64 uwalk_load_i64(void *p, i64 off, u32 dt) {
   switch (dt) {
     case DT_FP32: { f32 v = ((f32 *)p)[off]; return (i64)v; }
     case DT_FP64: { f64 v = ((f64 *)p)[off]; return (i64)v; }
+    case DT_FP16:  return (i64)fp16_to_f32(((u16 *)p)[off]);
+    case DT_BF16:  return (i64)bf16_to_f32(((u16 *)p)[off]);
+    case DT_FP8E4M3: return (i64)fp8e4m3_to_f32(((u8 *)p)[off]);
+    case DT_FP8E5M2: return (i64)fp8e5m2_to_f32(((u8 *)p)[off]);
     case DT_INT8:  return (i64)((i8  *)p)[off];
     case DT_UINT8: return (i64)((u8  *)p)[off];
     case DT_INT16: return (i64)((i16 *)p)[off];
@@ -184,13 +192,19 @@ static i64 uwalk_load_i64(void *p, i64 off, u32 dt) {
 }
 
 static int uwalk_dtype_is_float(u32 dt) {
-  return dt == DT_FP32 || dt == DT_FP64;
+  return dt == DT_FP32 || dt == DT_FP64
+      || dt == DT_FP16 || dt == DT_BF16
+      || dt == DT_FP8E4M3 || dt == DT_FP8E5M2;
 }
 
 static void uwalk_store_f64(void *p, i64 off, u32 dt, double v) {
   switch (dt) {
     case DT_FP32:  ((f32 *)p)[off] = (f32)v; break;
     case DT_FP64:  ((f64 *)p)[off] = v;      break;
+    case DT_FP16:  ((u16 *)p)[off] = f32_to_fp16((f32)v); break;
+    case DT_BF16:  ((u16 *)p)[off] = f32_to_bf16((f32)v); break;
+    case DT_FP8E4M3: ((u8 *)p)[off] = f32_to_fp8e4m3((f32)v); break;
+    case DT_FP8E5M2: ((u8 *)p)[off] = f32_to_fp8e5m2((f32)v); break;
     case DT_INT8:  ((i8  *)p)[off] = (i8 )v; break;
     case DT_UINT8: ((u8  *)p)[off] = (u8 )v; break;
     case DT_INT16: ((i16 *)p)[off] = (i16)v; break;
@@ -208,6 +222,10 @@ static void uwalk_store_i64(void *p, i64 off, u32 dt, i64 v) {
   switch (dt) {
     case DT_FP32:  ((f32 *)p)[off] = (f32)v; break;
     case DT_FP64:  ((f64 *)p)[off] = (f64)v; break;
+    case DT_FP16:  ((u16 *)p)[off] = f32_to_fp16((f32)v); break;
+    case DT_BF16:  ((u16 *)p)[off] = f32_to_bf16((f32)v); break;
+    case DT_FP8E4M3: ((u8 *)p)[off] = f32_to_fp8e4m3((f32)v); break;
+    case DT_FP8E5M2: ((u8 *)p)[off] = f32_to_fp8e5m2((f32)v); break;
     case DT_INT8:  ((i8  *)p)[off] = (i8 )v; break;
     case DT_UINT8: ((u8  *)p)[off] = (u8 )v; break;
     case DT_INT16: ((i16 *)p)[off] = (i16)v; break;
