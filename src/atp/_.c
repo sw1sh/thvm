@@ -2160,12 +2160,84 @@ static u32 atp_symbol_count(Term t) {
   }
 }
 
+#ifdef ATP_GOAL_HEURISTIC
+// === Waldmeister lever 1: goal-directed CP selection ================
+//
+// Waldmeister's CPinGoal / GoalinCP heuristics (Clas_CP_Goal.c) weight
+// a critical pair by its structural relationship to the conjecture: a
+// CP whose subterms match the goal is selected first, a CP unrelated
+// to the goal is pushed far down the queue.  Without this the engine
+// saturates blindly -- cpl1 / subl2 / thm trace identical trajectories
+// because the goal only gates the goal-check, never CP selection.
+//
+// A CP side "relates" to the goal when one of its non-trivial subterms
+// one-way-matches (in either direction) a non-trivial goal side.
+// Trivial matches are filtered by MIN_STRUCT (a bare nand(x,y) shell
+// matches everything and carries no signal).
+//
+// The goal score is a BOUNDED ADDITIVE penalty on the base size weight
+// (Waldmeister's weights are sums; its classification actions are
+// bounded ~2x).  A goal-unrelated CP gets at most +NONE_PENALTY.
+// Additive-and-bounded means goal-direction only reorders CPs within a
+// few size-units of each other -- it never lets a large goal-
+// resembling CP leapfrog a much smaller one, so it cannot trigger the
+// large-CP blowup a multiplicative factor would (measured: a x24
+// multiplicative factor diverged subl2).  A hard FIFO-interleave
+// fairness guarantee a la Waldmeister's WeightEntryT{w1,w2} is a
+// noted follow-up.
+#define ATP_GOAL_MIN_STRUCT      4u
+#define ATP_GOAL_SINGLE_PENALTY  2u
+#define ATP_GOAL_NONE_PENALTY    5u
+
+// One-way match in either direction (a generalizes b, or b generalizes
+// a).  Each direction gets a fresh zeroed substitution.
+static int atp_goal_match2(Term a, Term b) {
+  RewriteSubst s1 = {{0}};
+  if (thvm_match(a, b, &s1)) return 1;
+  RewriteSubst s2 = {{0}};
+  return thvm_match(b, a, &s2);
+}
+
+// Does some non-trivial subterm of `t` relate to a non-trivial goal
+// side?  Short-circuits on the first hit.  ngl / ngr are the goal
+// sides' symbol counts, hoisted by the caller.
+static int atp_goal_relates(Term t, Term gl, Term gr, u32 ngl, u32 ngr) {
+  if (atp_symbol_count(t) >= ATP_GOAL_MIN_STRUCT) {
+    if (ngl >= ATP_GOAL_MIN_STRUCT && atp_goal_match2(t, gl)) return 1;
+    if (ngr >= ATP_GOAL_MIN_STRUCT && atp_goal_match2(t, gr)) return 1;
+  }
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      if (atp_goal_relates(term_ctr_at(t, i), gl, gr, ngl, ngr)) return 1;
+    }
+  }
+  return 0;
+}
+
+// Goal-directed additive penalty on a CP's base priority.  Both sides
+// relate to the goal -> 0 (no penalty); one side -> SINGLE; neither
+// -> NONE.  No goal set (completion mode) -> 0, a no-op.
+static u32 atp_goal_penalty(const AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL || s->goal_lhs == 0) return 0u;
+  Term gl = s->goal_lhs, gr = s->goal_rhs;
+  u32 ngl = atp_symbol_count(gl), ngr = atp_symbol_count(gr);
+  int rl = atp_goal_relates(lhs, gl, gr, ngl, ngr);
+  int rr = atp_goal_relates(rhs, gl, gr, ngl, ngr);
+  if (rl && rr) return 0u;
+  if (rl || rr) return ATP_GOAL_SINGLE_PENALTY;
+  return ATP_GOAL_NONE_PENALTY;
+}
+#endif /* ATP_GOAL_HEURISTIC */
+
 // 8.8: priority weight for a CP.  Default `--add` heuristic is
 // the symbol-count sum.  When `s->use_mix_heuristic` is set, add
 // a penalty for CPs that fail to orient cleanly (KBO_UN or
 // KBO_EQ) -- mirrors Waldmeister's `--mix` heuristic in
 // `ClasHeuristics.c`.  The penalty (`MIX_UNORIENTED_PENALTY`)
-// is conservative; experiments may want to tune it.
+// is conservative; experiments may want to tune it.  Under
+// -DATP_GOAL_HEURISTIC a bounded goal-directed penalty is then
+// added (Waldmeister lever 1, above).
 #define MIX_UNORIENTED_PENALTY 4u
 static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
   u32 base = atp_symbol_count(lhs) + atp_symbol_count(rhs);
@@ -2176,6 +2248,9 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
       base += MIX_UNORIENTED_PENALTY;
     }
   }
+#ifdef ATP_GOAL_HEURISTIC
+  base += atp_goal_penalty(s, lhs, rhs);
+#endif
   return base;
 }
 

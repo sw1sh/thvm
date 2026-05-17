@@ -1041,3 +1041,46 @@ This is the research bet of the arc, stated plainly:
 This supersedes the bolt-on 7d term index: 8e delivers the same
 candidate-retrieval speedup as an emergent property of the shared
 representation, with nothing extra to keep coherent.
+
+## Milestone 9: Waldmeister convergence levers
+
+After 7c the engine *converges* on the shallow ladder (`cpl1`,
+`cpl2`, `subl2` all prove) but `thm` -- the 54-step DoubleNegation
+target -- still diverges: the CP queue runs away ~560/step and
+exhausts the heap.  A diagnosis found this is not a single wall but
+two: redundancy fires (joinability drops jumped to ~20k after 7c)
+yet cannot bound *this* search, and CP selection is goal-agnostic
+(`cpl1` / `subl2` / `thm` traced byte-identical trajectories,
+because the goal only gated the goal-check).
+
+To pin what bounds a divergent completion, the bundled Waldmeister
+source (`waldmeister/`, the Kaiserslautern unfailing-completion
+prover) was studied directly.  Techniques our engine lacked:
+
+- **Goal-directed CP selection** -- `CPinGoal` / `GoalinCP`
+  (`Clas_CP_Goal.c`): weight a CP by structural match against the
+  conjecture, so the search steers toward the goal.
+- **Ground-joinability** -- the Martin-Nipkow redundancy criterion
+  (`Grundzusammenfuehrung`, "basic merging"): discard a CP joinable
+  for all ground instances even when not directly joinable.
+- **Orphan deletion** -- `Waisenmord` ("orphan murder"): when a
+  parent rule is interreduced away, kill its descendant CPs in the
+  queue.
+- Periodic interreduction of the passive CP set; a killer-criterion
+  classification layer (`Crit_*` / `Act_*`); LPO as an alternative
+  ordering (the docs stress the ordering is the single biggest
+  lever).
+
+### 9a -- goal-directed CP selection (DONE)
+
+`-DATP_GOAL_HEURISTIC` adds a goal-relatedness term to
+`atp_cp_priority`: a CP whose non-trivial subterms one-way-match a
+non-trivial goal side is preferred.  The score is a **bounded
+additive** penalty (0 / 2 / 5 for double / single / no match), not
+a multiplier: a measured x24 multiplicative factor diverged `subl2`
+by letting large goal-resembling CPs leapfrog small ones, so the
+penalty is capped to reorder only within a few size-units.  Result:
+`test_atp` 8544/8544, `cpl1` 13->11 steps, `cpl2` 2->1, `subl2`
+14->22 (all still prove fast); `thm` queue ~3-7% smaller but still
+divergent.  Selection alone cannot bound a runaway queue -- that is
+levers 9b (ground-joinability) and 9c (orphan deletion).

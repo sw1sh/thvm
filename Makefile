@@ -78,6 +78,20 @@ ATP_DEFINES    += $(if $(filter-out 0,$(ATP_RULE_INDEX)),-DATP_RULE_INDEX,)
 ATP_VAR_NORM ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_VAR_NORM)),-DATP_VAR_NORM,)
 
+# thm convergence (Waldmeister lever 1): -DATP_GOAL_HEURISTIC adds
+# goal-directed CP selection (Waldmeister CPinGoal / GoalinCP, see
+# waldmeister/sources/CLAS/Clas_CP_Goal.c).  A CP whose subterms
+# structurally match the conjecture is preferred; one unrelated to the
+# goal has its priority scaled up so it sinks in the selection heap.
+# This steers saturation toward the goal instead of blindly enumerating
+# -- without it cpl1 / subl2 / thm trace identical trajectories because
+# the goal only gates the goal-check.  Off by default; independent of
+# every other ATP flag.  CHANGES BEHAVIOR (a heuristic -- the search
+# trajectory moves, completion stays sound).  No effect in completion
+# mode (no goal).
+ATP_GOAL_HEURISTIC ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_GOAL_HEURISTIC)),-DATP_GOAL_HEURISTIC,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \
