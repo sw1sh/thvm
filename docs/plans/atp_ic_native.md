@@ -1256,3 +1256,50 @@ iteration (goal-similarity) did not suffice; further progress would
 need a substantially better node heuristic, deeper Waldmeister-grade
 tuning (the adaptive `MNF_PQ` + `MNF_AnalyseNM` strategy machinery),
 or far more compute.  `thm` stays the documented open frontier.
+
+### 10 profiling -- MNF is correct; thm is a search-shape problem
+
+Before iterating the heuristic again, the MNF search was instrumented
+(`ATP_MNF_DIAG`): per-colour node counters, queue best-scores, backward-
+step (`anti`) and duplicate (`dup`) counts, `MNF_SUCC_CAP` truncation,
+node-table-full detection, and -- the soundness half -- an independent
+join verifier.  Each `MnfNode` now carries a `parent` index; on a join
+`mnf_verify` walks both parent chains, re-derives every step against the
+final rule set, and confirms the chain roots are exactly `goal_lhs` /
+`goal_rhs`.
+
+Correctness, confirmed.  cpl1 / cpl2 / subl2 all report
+`chain roots == goal: YES` with every step replaying.  Each joins the
+same way: the RED front reaches the GREEN seed (`= goal_lhs`) in ONE
+rewrite once completion derives the closing rule -- they are distance-1
+lemmas, so the bidirectional machinery is sound but not stressed.
+`trunc` and `full` stay 0 throughout: no successors are silently
+dropped, the 400k table never overflows.
+
+Why `thm` does not join -- three measured causes, none a bug:
+
+1. *The heuristic degenerates.*  `thm`'s `goal_rhs` is the bare
+   variable `w`, so `mnf_diff(green_node, w)` collapses to
+   `symbol_count(green_node) + 1` -- the v1.2 "goal-similarity" score
+   is, on the actual target, just term-size.  The GREEN queue's best
+   score wanders in the 54-128 range and never trends toward 2 (a
+   bare `w`): the frontier never approaches the join term.
+2. *Backward-step fan-out dominates.*  `anti` tracks `n_nodes` almost
+   exactly (94816 of 94818 at call 273) -- nearly every node has a
+   term-growing backward step in its lineage.  Capped at
+   `MNF_MAX_ANTI = 2` per lineage, the fan-out still floods the node
+   population with ever-larger terms instead of shrinking toward `w`.
+3. *The incremental feed is superlinear.*  `mnf_step` step (a)
+   re-expands every already-expanded node against each newly derived
+   rule -- O(n_nodes x n_rules).  At ~94k nodes this dominates the wall
+   clock; the diagnostic run reaches only completion step 154 in 124s.
+   `dup` hits 273k (2.9x `n_nodes`): most expansion work re-derives
+   terms already in the table.
+
+Verdict: the MNF reducer is sound and complete-within-budget -- the
+instrumentation found no correctness defect.  `thm` is unreached
+because the search *shape* is wrong for a bare-variable goal side, not
+because the algorithm is broken.  A productive next iteration would
+attack the shape: a heuristic with real signal when one goal side is a
+variable, a tighter `anti` policy, and an incremental feed that does
+not rescan the whole node set per rule.

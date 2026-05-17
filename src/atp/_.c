@@ -2877,14 +2877,16 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 #define MNF_SUCC_CAP   2048u
 #define MNF_BUDGET     192u
 #define MNF_N_BUCKETS  (1u << 21)        // 2097152, power of two
+#define MNF_ROOT_PARENT 0xFFFFFFFFu      // mnf_insert: this term is a seed
 
 typedef struct {
   Term term;
   u32  hash;
+  u32  parent;     // node this term was first reached from (root: self)
+  u32  score;      // v1.2: structural distance to the opposite front's origin
   u8   colour;     // MNF_RED / MNF_GREEN
   u8   anti;       // backward steps used on the path to this term
   u8   expanded;   // successors already generated against [0, n_rules_seen)
-  u32  score;      // v1.2: structural distance to the opposite front's origin
 } MnfNode;
 
 typedef struct AtpMnf {
@@ -2899,7 +2901,18 @@ typedef struct AtpMnf {
   u32      n_rules_seen;     // rules already fed in
   Term     seed_red;         // goal_rhs -- the RED front's origin
   Term     seed_green;       // goal_lhs -- the GREEN front's origin
+  u32      n_red, n_green;   // nodes reached per colour
+  u32      n_anti;           // nodes reached via a backward (r->l) step
+  u32      n_dup;            // same-colour duplicate terms (dropped)
+  u32      n_trunc;          // node expansions that hit MNF_SUCC_CAP
+  u8       full;             // node table reached MNF_MAX_NODES
   u8       joined;
+#ifdef ATP_MNF_DIAG
+  u32      meet_a;           // existing table node the join collided with
+  u32      meet_b_parent;    // parent of the colliding (uncreated) node
+  Term     meet_term;        // the term both fronts reached
+  u8       meet_b_col;       // colour of the colliding (uncreated) node
+#endif
 } AtpMnf;
 
 // Structural hash of a term (FNV-ish mix over the preorder).
@@ -2958,26 +2971,39 @@ static u32 mnf_lookup(const AtpMnf *m, Term t, u32 h) {
   }
 }
 
-// Insert `t` (colour `col`, lineage anti-count `anti`).  Returns 1 if
-// this insertion JOINED the fronts (an opposite-colour node already
-// held `t`).  Same-colour duplicate -> dropped.  Fresh term -> added,
-// indexed, enqueued.
-static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti) {
+// Insert `t` (colour `col`, lineage anti-count `anti`, reached from node
+// `parent` -- MNF_ROOT_PARENT for a seed).  Returns 1 if this insertion
+// JOINED the fronts (an opposite-colour node already held `t`).  Same-
+// colour duplicate -> dropped.  Fresh term -> added, indexed, enqueued.
+static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti, u32 parent) {
   u32 h   = mnf_hash(t);
   u32 idx = mnf_lookup(m, t, h);
   if (idx != MNF_MAX_NODES) {
-    if (m->nodes[idx].colour != col) { m->joined = 1u; return 1; }
+    if (m->nodes[idx].colour != col) {
+#ifdef ATP_MNF_DIAG
+      m->meet_a        = idx;
+      m->meet_b_parent = parent;
+      m->meet_term     = t;
+      m->meet_b_col    = col;
+#endif
+      m->joined = 1u;
+      return 1;
+    }
+    m->n_dup++;
     return 0;
   }
-  if (m->n_nodes >= MNF_MAX_NODES) return 0;     // set full
+  if (m->n_nodes >= MNF_MAX_NODES) { m->full = 1u; return 0; }   // set full
   u32 ni = m->n_nodes++;
   m->nodes[ni].term     = t;
   m->nodes[ni].hash     = h;
+  m->nodes[ni].parent   = (parent == MNF_ROOT_PARENT) ? ni : parent;
   m->nodes[ni].colour   = col;
   m->nodes[ni].anti     = anti;
   m->nodes[ni].expanded = 0u;
   m->nodes[ni].score    = mnf_diff(t, (col == MNF_RED) ? m->seed_green
                                                        : m->seed_red);
+  if (col == MNF_RED) m->n_red++; else m->n_green++;
+  if (anti > 0u) m->n_anti++;
   u32 mask = m->n_buckets - 1u;
   u32 probe = h & mask;
   while (m->buckets[probe] != 0u) probe = (probe + 1u) & mask;
@@ -3042,16 +3068,12 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
   Term t    = m->nodes[ni].term;
   u32  n    = 0u;
   mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
-  // Insert backward successors first, forward last: the LIFO stacks
-  // then pop forward steps first, so the DFS drives each front toward
-  // a normal form and only falls back on backward (term-growing) steps.
+  if (n >= MNF_SUCC_CAP) m->n_trunc++;   // successor buffer overflowed
+  // Insert every one-step rewrite as a same-colour node parented at
+  // `ni`.  A backward (r->l) step bumps the lineage anti-count; the
+  // best-first queues (mnf_pop_min) decide expansion order by score.
   for (u32 k = 0; k < n && !m->joined; k++) {
-    if (mnf_succ_anti[k]) {
-      mnf_insert(m, mnf_succ_buf[k], col, (u8)(anti + 1u));
-    }
-  }
-  for (u32 k = 0; k < n && !m->joined; k++) {
-    if (!mnf_succ_anti[k]) mnf_insert(m, mnf_succ_buf[k], col, anti);
+    mnf_insert(m, mnf_succ_buf[k], col, (u8)(anti + mnf_succ_anti[k]), ni);
   }
 }
 
@@ -3076,8 +3098,8 @@ static AtpMnf *mnf_create(AtpState *s) {
   }
   m->seed_green = s->goal_lhs;     // the GREEN front's origin
   m->seed_red   = s->goal_rhs;     // the RED front's origin
-  mnf_insert(m, s->goal_lhs, MNF_GREEN, 0u);
-  mnf_insert(m, s->goal_rhs, MNF_RED,   0u);
+  mnf_insert(m, s->goal_lhs, MNF_GREEN, 0u, MNF_ROOT_PARENT);
+  mnf_insert(m, s->goal_rhs, MNF_RED,   0u, MNF_ROOT_PARENT);
   return m;
 }
 
@@ -3113,6 +3135,65 @@ static u32 mnf_pop_min(AtpMnf *m, u32 *q, u32 *qn) {
   return ni;
 }
 
+#ifdef ATP_MNF_DIAG
+// Independent join verifier.  A join is sound because every MNF node is,
+// by construction, a one-step equational rewrite of its parent (forward
+// l->r or variable-safe backward r->l) -- so goal_lhs ->* meet <-* goal_rhs
+// is a closed equational chain.  This re-checks that claim from the parent
+// pointers: walk `ni` up to its root and confirm each child term is a
+// genuine one-step rewrite of its parent under the FINAL rule set.  Steps
+// taken with a rule that interreduction has since retired will not replay
+// (still equationally valid -- just no longer in R); `*replayed` counts
+// the ones that do.  Returns the root node index.
+static u32 mnf_verify_chain(AtpState *s, AtpMnf *m, u32 ni,
+                            u32 *len, u32 *replayed) {
+  u32 guard = 0u;
+  while (m->nodes[ni].parent != ni && guard++ < m->n_nodes) {
+    u32 p = m->nodes[ni].parent;
+    u32 n = 0u;
+    mnf_successors(s, m->nodes[p].term, 1u, 0u, s->n_rules, &n);
+    for (u32 k = 0; k < n; k++) {
+      if (kbo_eq(mnf_succ_buf[k], m->nodes[ni].term)) { (*replayed)++; break; }
+    }
+    (*len)++;
+    ni = p;
+  }
+  return ni;
+}
+
+// Re-check the join captured by mnf_insert and report to stderr.
+static void mnf_verify(AtpState *s, AtpMnf *m) {
+  u32 lenA = 0u, repA = 0u;
+  u32 rootA = mnf_verify_chain(s, m, m->meet_a, &lenA, &repA);
+  // Side B's node was never created -- meet_term is a one-step rewrite of
+  // meet_b_parent; verify that link, then walk meet_b_parent to its root.
+  u32 nB = 0u, lenB = 1u, repB = 0u;
+  mnf_successors(s, m->nodes[m->meet_b_parent].term, 1u, 0u, s->n_rules, &nB);
+  for (u32 k = 0; k < nB; k++) {
+    if (kbo_eq(mnf_succ_buf[k], m->meet_term)) { repB++; break; }
+  }
+  u32 rootB = mnf_verify_chain(s, m, m->meet_b_parent, &lenB, &repB);
+  u8   colA      = m->nodes[m->meet_a].colour;
+  Term grootA    = m->nodes[rootA].term;
+  Term grootB    = m->nodes[rootB].term;
+  // colA owns side A; meet_b_col (opposite) owns side B.
+  int roots_ok = (colA == MNF_GREEN)
+      ? (kbo_eq(grootA, m->seed_green) && kbo_eq(grootB, m->seed_red))
+      : (kbo_eq(grootA, m->seed_red)   && kbo_eq(grootB, m->seed_green));
+  u32 green_len = (colA == MNF_GREEN) ? lenA : lenB;
+  u32 red_len   = (colA == MNF_GREEN) ? lenB : lenA;
+  u32 green_rep = (colA == MNF_GREEN) ? repA : repB;
+  u32 red_rep   = (colA == MNF_GREEN) ? repB : repA;
+  fprintf(stderr,
+      "[mnf] JOIN: meet has %u symbols; green-side chain %u step(s) "
+      "(%u replay under final R), red-side chain %u step(s) (%u replay); "
+      "chain roots == goal: %s\n",
+      atp_symbol_count(m->meet_term),
+      green_len, green_rep, red_len, red_rep,
+      roots_ok ? "YES" : "NO -- BUG");
+}
+#endif /* ATP_MNF_DIAG */
+
 // One MNF advance: (a) feed any rules completion derived since the last
 // call to every already-expanded node; (b) expand up to `budget` queued
 // (first-expansion) nodes against the full current R.  Returns 1 once
@@ -3121,11 +3202,20 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   if (m->joined) return 1;
 #ifdef ATP_MNF_DIAG
   { static u32 c = 0;
-    if (c++ % 256u == 0u) {
-      fprintf(stderr, "[mnf] call=%u nodes=%u red=%u green=%u "
-              "rules_seen=%u/%u joined=%u\n",
-              c, m->n_nodes, m->qred_n, m->qgreen_n,
-              m->n_rules_seen, s->n_rules, m->joined);
+    if (c++ % 16u == 0u) {
+      u32 sr = 0xffffffffu, sg = 0xffffffffu;
+      for (u32 k = 0; k < m->qred_n; k++)
+        if (m->nodes[m->qred[k]].score < sr) sr = m->nodes[m->qred[k]].score;
+      for (u32 k = 0; k < m->qgreen_n; k++)
+        if (m->nodes[m->qgreen[k]].score < sg) sg = m->nodes[m->qgreen[k]].score;
+      fprintf(stderr,
+        "[mnf] call=%-6u nodes=%-7u red=%-7u green=%-7u "
+        "queue(r=%u g=%u) best-score(r=%u g=%u) anti=%u dup=%u "
+        "trunc=%u full=%u rules=%u/%u\n",
+        c, m->n_nodes, m->n_red, m->n_green, m->qred_n, m->qgreen_n,
+        (sr == 0xffffffffu ? 0u : sr), (sg == 0xffffffffu ? 0u : sg),
+        m->n_anti, m->n_dup, m->n_trunc, m->full,
+        m->n_rules_seen, s->n_rules);
     } }
 #endif
   if (s->n_rules > m->n_rules_seen) {
@@ -3134,7 +3224,6 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       if (m->nodes[ni].expanded) mnf_expand_node(s, m, ni, lo, hi);
     }
     m->n_rules_seen = hi;
-    if (m->joined) return 1;
   }
   // (b) best-first expand the two fronts in alternation: from each
   // colour's queue take the node closest (mnf_diff score) to the
@@ -3159,6 +3248,9 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     }
     if (!did) break;
   }
+#ifdef ATP_MNF_DIAG
+  if (m->joined) mnf_verify(s, m);
+#endif
   return m->joined;
 }
 #endif /* ATP_MNF */
