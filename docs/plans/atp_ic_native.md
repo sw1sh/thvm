@@ -580,3 +580,201 @@ class it already handles well (and is GPU-targetable).
   enumerates rewrite *applications*, not derived rules.
 - No infinite-rule support.  Depth bound caps the search.
 - No witness extraction (existential goals).  Defer to v2.
+
+## Milestone 8: IC-native completion -- the CP set as a live SUP-graph
+
+Milestone 7 located the wall precisely.  The engine's inference is
+correct -- group-theory completion proves `f(a,i(a))==e` in <=20
+steps, `cpgen` derives WL's distance-1 `CriticalPairLemma 1/2`
+exactly, `test_atp` is 8544/8544.  What drowns the Wolfram axiom is
+an un-indexed redundancy scan: `atp_cp_queue_subsumed` calls
+`thvm_match` against every one of ~64k queued critical pairs (CPs)
+each step -- 7b measured ~16M match calls/step, 91% of runtime.
+7d's planned answer was a bolt-on discrimination tree.
+
+Milestone 8 takes the IC-native answer instead, because a
+maximally-shared SUP-graph IS a discrimination tree.  Both exploit
+structural sharing for fast candidate retrieval -- a discrimination
+tree shares term *prefixes*; a hash-consed term DAG shares term
+*subterms*.  thvm already hash-conses every cell.  So if the whole
+CP set is ONE shared Term rather than ~64k disjoint array entries:
+
+- normalizing the CP set under a newly oriented rule is ONE
+  reduction whose optimal sharing rewrites each distinct redex
+  once, not once per CP containing it;
+- a subsumption query is ONE match traversal that shares
+  per-subterm match work across every CP, not n disjoint scans;
+- exact-duplicate CPs annihilate for free via same-label DUP-SUP;
+- trivially-joined CPs collapse to ERA and vanish from the graph
+  during normalization -- no external discard pass.
+
+This is the milestone the whole arc was built toward.  The toy IC
+mechanisms prototyped in `ATP.wl` -- SUP fan-out search, the
+INC-priority `collapse_ordered`, the `icFindProvenLeaf` lazy
+pruner -- become the engine's actual data structures in
+`src/atp/_.c`.
+
+### Representation
+
+Today `AtpState` (`src/thvm.h`) holds the CP set as five parallel
+growable arrays: the *term payload* `cp_lhs` / `cp_rhs` (`Term`)
+and the *metadata* `cp_trace` / `cp_pri` / `cp_seq` (`u32`), with
+`n_cps`.  `cp_trace` is an index into the `trace[]` derivation
+log, not a Term; `cp_pri` / `cp_seq` are the 7c' binary-heap key.
+Milestone 8 replaces only the term payload:
+
+    Term cp_graph;   // SUP-tree; each leaf a Cp[lhs,rhs] CTR node
+
+The `u32` metadata arrays are cheap and not the bottleneck -- they
+stay as side arrays indexed by leaf order.  The sharing wins
+8b/8e need operate on the lhs/rhs *terms*, which is exactly what
+`cp_graph` carries.
+
+Each leaf is a 2-child CTR `Cp[lhs,rhs]`.  Because thvm
+hash-conses every cell, two CPs sharing a subterm share its heap
+cells with no extra bookkeeping -- `cp_graph` is already a
+maximally-shared DAG.  There is no reusable "fused decoder":
+`ATP.wl`'s IC proof decoder packs *integers*
+(`trace*(m*m)+rhs*m+lhs`), not CP terms; the C side gets a fresh
+`Cp[lhs,rhs]` codec.
+
+Priority migrates into the graph structurally only at 8d -- a CP
+of priority k wrapped in INC^k, the combinator `collapse_ordered`
+already reads.  Until 8d, selection stays the 7c' binary heap
+over the unchanged `cp_pri` / `cp_seq` side arrays.
+
+### Workstreams (sequenced; each independently bench-validatable)
+
+- **8a -- introduce `cp_graph` behind `-DATP_CP_GRAPH`** (pure
+  representation swap; bit-identical).  Add `Term cp_graph` to
+  `AtpState`, a 2-child `Cp[lhs,rhs]` CTR leaf codec, and the
+  build flag.  Under the flag every CP mutation
+  (`thvm_atp_add_equation`, `atp_push_cps_traced`, the `select_cp`
+  pop) maintains `cp_graph` in lockstep and the engine reads CP
+  terms from it; the `cp_lhs` / `cp_rhs` arrays are kept as a
+  synced mirror so `tests/test_atp.c`'s ~30 direct `s->cp_lhs[i]`
+  / `s->n_cps` reads need no edits.  Selection stays the 7c' heap
+  over `cp_pri` / `cp_seq` -- INC-priority is 8d, not here.  A
+  debug assertion checks `decode(cp_graph)` equals the mirror
+  every step.  Flag OFF: today's code, byte-for-byte.
+  Acceptance: with the flag ON, identical proof output AND
+  identical step counts on `test_atp` (stays 8544/8544) and
+  `bin/test_atp_wolfram_bench cpgen` (identical 5-CP set).
+
+- **8b -- shared normalization** (the headline optimal-sharing
+  win -- and a deliberate semantic change, NOT a pure swap).
+  Today normalization is lazy: `thvm_atp_step` runs
+  `atp_rewrite_normalize` only on the *popped* CP.  8b adds
+  `atp_normalize_graph(cp_graph, rules)` -- one IC reduction of
+  the whole graph when a rule is oriented, so optimal sharing
+  contracts each distinct redex once even though it occurs in
+  many CPs.  Eagerly normalizing queued CPs changes which become
+  trivial-joined when, so 8b is gated on *proof still found* +
+  bench cost, NOT on bit-identical step counts (that gate was
+  8a's alone).
+
+- **8c -- trivial-join + simplify-reflect by reduction**.  Install
+  a built-in reflexivity rule `Eql[x,x] -> ERA`.  During 8b's
+  single normalization sweep any CP whose two sides converge
+  becomes `Eql[t,t]`, reduces to ERA, and drops out of the graph
+  -- the trivial-CP discard and simplify-reflect criteria fall
+  out of reduction for free, shared across the whole set.
+
+- **8d -- selection via INC-priority lazy collapse**.  Port the
+  `icFindProvenLeaf` lazy-pruner mechanism into C
+  (`src/collapse/ordered.c` already has `collapse_walk_pri`).
+  Selection = find the minimum-INC-depth leaf of `cp_graph`
+  without materializing the rest (lazy take); the selected leaf
+  is rewritten to ERA and pruned at the next 8b sweep.  `cp_seq`
+  becomes a secondary INC label for tie-breaking.  Retires the
+  7c' heap on the IC-native path (it stays the array-engine
+  fallback).
+
+- **8e -- SUP-aware matching: the 91%-killer**.  Add
+  `thvm_match_multi(query, pattern_graph)` -- `thvm_match` plus
+  (a) a SUP-fork case (at a SUP node in the pattern graph the
+  match forks left/right against the *same* shared subject node,
+  so the subject traversal up to the fork is done once) and (b) a
+  `(pattern_cell, subject_cell) -> result` memo so a subterm
+  shared by many CPs is matched against a given query subterm
+  exactly once.  Forward subsumption and backward subsumption
+  each become ONE `thvm_match_multi` call against `cp_graph`
+  instead of an O(n_cps) loop.  On the Wolfram axiom, where CPs
+  share deep nand-nested subterms, this turns the 16M-call scan
+  into roughly O(distinct subterm pairs).  Backward-subsumed
+  leaves are rewritten to ERA and pruned at the next 8b sweep.
+
+- **8f -- CP generation as SUP fan-out + rule set as a shared
+  DAG**.  Rewrite `thvm_critical_pairs` (`src/cp/_.c`) so
+  superposition of a new rule against the rule set emits its
+  overlap candidates as a SUP node, appended to `cp_graph` in
+  O(1) (wrap old root + new SUP in a fresh SUP).  The rule set
+  becomes a shared `rule_graph` DAG.  Then wire-through (was
+  7e): route `TFindEquationalProof` through the IC-native engine
+  and decode the trace into a verifier-passing `ProofObject`
+  identical to WL's `FindEquationalProof`, fixing the
+  bound-symbol encoder bug noted in 7e.
+
+### SUP-label management (the hard part -- called out explicitly)
+
+DUP-SUP annihilation is free duplicate elimination ONLY when
+duplicate CPs carry the same SUP label and genuinely distinct CPs
+carry different ones.  Labels are a bounded field, so a perfect
+"label = identity of the CP" scheme is impossible.  The plan does
+not try.  Instead:
+
+- **Structural dedup via labels**: CPs from the same overlap
+  family -- same `(rule_i, rule_j, position)` superposition --
+  share a label derived from a hash of that triple.  Re-deriving
+  an overlap (the most common duplicate source) annihilates on
+  contact.  This is the cheap, reliable 80%.
+- **General subsumption modulo a substitution stays a
+  discriminating walk** -- it is NOT free from sharing.  8e makes
+  that walk cheap by sharing per-subterm match work and by only
+  ever walking *candidates* the shared-graph traversal surfaces,
+  never the full 64k.  The honest claim is "indexing for free,
+  the sigma-check still runs -- but only on candidates."
+
+### Risks and fallback
+
+This is the research bet of the arc, stated plainly:
+
+- The optimal-sharing win in 8b is real and low-risk -- it is the
+  runtime's core guarantee.  8c falls straight out of 8b.
+- 8e's payoff depends on CPs actually sharing subterms.  On the
+  Wolfram axiom they demonstrably do (deep shared nand nests);
+  on a problem whose CPs are structurally disjoint the memo buys
+  little and `thvm_match_multi` degrades gracefully to the
+  per-CP scan -- no worse than today.
+- SUP-label collisions would mis-annihilate distinct CPs ->
+  incompleteness.  Mitigation: the label hash is dedup-only; a
+  collision drops a CP that is then re-derived from its overlap
+  family, so it is a *performance* bug, not a soundness bug.
+- Fallback: every workstream is gated; the milestone-7 array
+  engine remains the default (`-DATP_CP_GRAPH` off) and the
+  regression oracle.  8 ships only when the bench shows the
+  IC-native path proving a lemma the array engine cannot.
+
+### Sequencing and validation
+
+8a -> 8b -> 8c -> 8d -> 8e -> 8f, each gated by:
+
+1. `test_atp` stays 8544/8544 -- a correctness gate for every
+   workstream (inference is unchanged throughout).
+2. `cpgen` still derives `CriticalPairLemma 1/2` exactly.
+3. `tests/test_atp_wolfram_bench.c` -- the orphan-free harness --
+   shows the intended cost drop for that workstream (8b:
+   normalization cost; 8e: the 91% match scan collapses).
+4. Bit-identical step counts are required of **8a only** -- it is
+   a pure representation swap.  8b onward deliberately change the
+   search (eager normalization, stronger redundancy) and are
+   gated on *proof still found* + cost, not step-count identity.
+5. Once 8e lands, climb the 7b debug ladder: prove `cpl1`,
+   `cpl2`, `subl2` at increasing distance from the axiom; a
+   failure near the axiom is an inference regression, far out a
+   remaining search-limit.  `thm` (the 54-step DoubleNegation
+   target) is the milestone-8 acceptance proof.
+
+This supersedes the bolt-on 7d term index: 8e delivers the same
+candidate-retrieval speedup as an emergent property of the shared
+representation, with nothing extra to keep coherent.

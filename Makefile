@@ -8,6 +8,15 @@ CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-unused-function
 BIN     := bin
 BUILD   := build
 
+# Milestone 8a: -DATP_CP_GRAPH switches the ATP CP set onto the
+# IC-native shared SUP-graph representation (src/atp/_.c).  Off by
+# default -- the milestone-7 array engine is the regression oracle
+# and ships byte-for-byte.  `make ATP_CP_GRAPH=1 bin/test_atp`
+# builds the graph path; both flag states must compile and, for 8a,
+# produce bit-identical proofs.
+ATP_CP_GRAPH ?=
+ATP_DEFINES  := $(if $(filter-out 0,$(ATP_CP_GRAPH)),-DATP_CP_GRAPH,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \
@@ -330,7 +339,7 @@ $(BIN)/test_multi_trace_on: tests/test_multi_trace.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_TRACE -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(TEST_LDFLAGS)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
 # === py/ ctypes bindings (libthvm_py.{dylib,so}) =====================
 # Single-TU build of src/thvm.c + extern-C wrapper that re-exports the

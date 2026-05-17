@@ -2885,6 +2885,14 @@ typedef enum {
 #define TRACE_CP       3u   // critical pair generated from two rules
 #define ATP_TRACE_NONE 0xFFFFFFFFu
 
+// 8a: CTR labels for the IC-native CP-set graph (-DATP_CP_GRAPH).
+// ATP_CP_LABEL labels a 2-child `Cp[lhs,rhs]` leaf; ATP_CPSET_LABEL
+// labels the `CpSet[...]` container whose children are those leaves
+// in cp_lhs[] / cp_rhs[] slot order.  Distinct from the TRACE_*
+// labels so a leaf is never confused with a trace entry.
+#define ATP_CP_LABEL    16u  // Cp[lhs, rhs]
+#define ATP_CPSET_LABEL 17u  // CpSet[Cp, Cp, ...]
+
 // 8.1c: ATP primitives registered into the TAG_PRI table by
 // thvm_atp_init.  Tests registers them once; the saturation loop
 // in 8.1d-e calls them via APP-PRI evaluation.
@@ -2966,6 +2974,22 @@ typedef struct {
   u32  *cp_seq;
   u32   cp_seq_next;
   u32   cp_cap;
+
+  // 8a: IC-native CP-set representation.  Behind -DATP_CP_GRAPH the
+  // CP queue is also held as ONE shared Term: a CTR `CpSet[...]`
+  // whose children are 2-child `Cp[lhs,rhs]` CTR leaves, one per
+  // queued CP, in the same slot order as cp_lhs[] / cp_rhs[].
+  // Because thvm hash-conses every cell, two CPs sharing a subterm
+  // share its heap cells -- cp_graph is a maximally-shared DAG.
+  // Every CP mutation rebuilds cp_graph from the (still-maintained)
+  // arrays so it stays in lockstep; the arrays are the synced
+  // mirror tests/test_atp.c reads directly.  Selection stays the
+  // 7c' heap over cp_pri / cp_seq -- INC-priority is 8d.  Flag OFF
+  // this field is absent and the engine is byte-for-byte the
+  // milestone-7 array engine.
+#ifdef ATP_CP_GRAPH
+  Term cp_graph;
+#endif
 
   // Transient: set by thvm_atp_select_cp to the trace-entry index
   // of the popped CP; consumed by thvm_atp_step right after the

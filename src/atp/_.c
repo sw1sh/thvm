@@ -322,6 +322,97 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
 // earlier add_equation push site can call it.
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace);
 
+// === 8a: IC-native CP-set graph (-DATP_CP_GRAPH) ====================
+//
+// Under the flag the CP queue is ALSO held as one shared Term:
+// `cp_graph = CpSet[Cp[l0,r0], Cp[l1,r1], ...]`, the leaves in the
+// same slot order as the cp_lhs[] / cp_rhs[] mirror arrays.  Every
+// CP mutation (heap push, select pop, heap reorder, reheapify)
+// rebuilds cp_graph from the arrays so the two stay in lockstep; a
+// debug assertion checks decode(cp_graph) equals the mirror.  This
+// is a pure representation swap -- selection, priority, and search
+// are the unchanged milestone-7 array engine.  8b makes cp_graph
+// the thing reductions act on.
+#ifdef ATP_CP_GRAPH
+
+// Encode one CP as a 2-child `Cp[lhs,rhs]` CTR leaf.
+static Term atp_cp_encode_leaf(Term lhs, Term rhs) {
+  Term children[2] = { lhs, rhs };
+  return term_new_ctr(ATP_CP_LABEL, children, 2);
+}
+
+// Decode a `Cp[lhs,rhs]` leaf back into its two terms.  Returns 1
+// on a well-formed leaf, 0 otherwise.
+static int atp_cp_decode_leaf(Term leaf, Term *lhs_out, Term *rhs_out) {
+  if (term_tag(leaf) != TAG_CTR) return 0;
+  if (term_ext(leaf) != ATP_CP_LABEL) return 0;
+  if (term_ctr_n(leaf) != 2) return 0;
+  *lhs_out = term_ctr_at(leaf, 0);
+  *rhs_out = term_ctr_at(leaf, 1);
+  return 1;
+}
+
+// Rebuild s->cp_graph from the cp_lhs[] / cp_rhs[] mirror arrays.
+// Called at the end of every CP mutation so the graph stays in
+// lockstep.  The container is a fresh CTR each rebuild, but the
+// Cp[] leaves carry the already-hash-consed lhs/rhs cells, so two
+// CPs sharing a subterm still share its heap cells.
+static void atp_cp_graph_rebuild(AtpState *s) {
+  if (s == NULL) return;
+  if (s->n_cps == 0) {
+    s->cp_graph = term_new_ctr(ATP_CPSET_LABEL, NULL, 0);
+    return;
+  }
+  Term *leaves = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
+  if (leaves == NULL) {
+    fprintf(stderr, "atp_cp_graph_rebuild: malloc for %u leaves failed\n",
+            s->n_cps);
+    exit(1);
+  }
+  for (u32 i = 0; i < s->n_cps; i++) {
+    leaves[i] = atp_cp_encode_leaf(s->cp_lhs[i], s->cp_rhs[i]);
+  }
+  s->cp_graph = term_new_ctr(ATP_CPSET_LABEL, leaves, s->n_cps);
+  free(leaves);
+}
+
+// Debug assertion: decode(cp_graph) must equal the cp_lhs[] /
+// cp_rhs[] mirror, slot for slot.  Run after every mutation so a
+// drift between the two representations aborts immediately rather
+// than corrupting a proof silently.
+static void atp_cp_graph_assert(const AtpState *s) {
+  if (s == NULL) return;
+  assert(term_tag(s->cp_graph) == TAG_CTR
+         && "cp_graph must be a CTR");
+  assert(term_ext(s->cp_graph) == ATP_CPSET_LABEL
+         && "cp_graph must carry the CpSet label");
+  assert(term_ctr_n(s->cp_graph) == s->n_cps
+         && "cp_graph leaf count must equal n_cps");
+  for (u32 i = 0; i < s->n_cps; i++) {
+    Term gl = 0, gr = 0;
+    int ok = atp_cp_decode_leaf(term_ctr_at(s->cp_graph, i), &gl, &gr);
+    assert(ok && "cp_graph child must be a well-formed Cp[lhs,rhs] leaf");
+    assert(gl == s->cp_lhs[i]
+           && "cp_graph leaf lhs must equal cp_lhs[] mirror");
+    assert(gr == s->cp_rhs[i]
+           && "cp_graph leaf rhs must equal cp_rhs[] mirror");
+  }
+}
+
+// Maintain cp_graph after a CP mutation: rebuild + assert lockstep.
+static void atp_cp_graph_sync(AtpState *s) {
+  atp_cp_graph_rebuild(s);
+  atp_cp_graph_assert(s);
+}
+
+#else  // !ATP_CP_GRAPH -- the milestone-7 array engine, byte-for-byte.
+
+// No-op so mutation sites carry one unconditional call site instead
+// of #ifdef'd blocks; the compiler elides it with the flag off.
+static inline void atp_cp_graph_sync(AtpState *s) { (void)s; }
+
+#endif // ATP_CP_GRAPH
+
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
@@ -335,6 +426,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // helper treats the whole span as new.
   atp_ensure_rule_cap(s, ATP_INIT_RULES);
   atp_ensure_cp_cap(s, ATP_INIT_CPS);
+#ifdef ATP_CP_GRAPH
+  // 8a: start cp_graph as the empty CpSet[] -- n_cps is 0 here, so
+  // the array mirror and the graph agree from the first instant.
+  atp_cp_graph_sync(s);
+#endif
   return s;
 }
 
@@ -434,6 +530,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   }
 
   free(roots);
+
+  // 8a: cp_graph's CTR cells were not rooted -- gc_collect could
+  // not relocate them.  Rebuild the graph from the (now relocated)
+  // cp_lhs[] / cp_rhs[] mirror so it points at live heap cells.
+  atp_cp_graph_sync(s);
+
   return 1;
 }
 
@@ -643,6 +745,8 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   s->cp_seq[i]   = s->cp_seq_next++;
   s->n_cps++;
   atp_cp_sift_up(s, i);
+  // 8a: keep cp_graph in lockstep with the array mirror.
+  atp_cp_graph_sync(s);
 }
 
 // Pop the cheapest CP from the queue (lowest (cp_pri, cp_seq) --
@@ -658,8 +762,23 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
 // Returns 1 on success (out-params populated), 0 on empty queue.
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL || s->n_cps == 0) return 0;
+#ifdef ATP_CP_GRAPH
+  // 8a: read the popped CP's terms from the IC-native cp_graph
+  // (decode the slot-0 leaf), not the array.  The array is the
+  // synced mirror -- atp_cp_graph_assert guarantees the decode
+  // yields exactly cp_lhs[0] / cp_rhs[0], so this is bit-identical
+  // to the array engine while exercising the graph read path.
+  {
+    Term gl = 0, gr = 0;
+    int ok = atp_cp_decode_leaf(term_ctr_at(s->cp_graph, 0), &gl, &gr);
+    assert(ok && "select_cp: cp_graph slot 0 must be a Cp[] leaf");
+    *lhs_out = gl;
+    *rhs_out = gr;
+  }
+#else
   *lhs_out = s->cp_lhs[0];
   *rhs_out = s->cp_rhs[0];
+#endif
   s->last_popped_trace = s->cp_trace[0];
   s->n_cps--;
   if (s->n_cps > 0) {
@@ -671,6 +790,8 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_seq[0]   = s->cp_seq[last];
     atp_cp_sift_down(s, 0);
   }
+  // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
+  atp_cp_graph_sync(s);
   return 1;
 }
 
@@ -691,6 +812,8 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     i--;
     atp_cp_sift_down(s, i);
   }
+  // 8a: a caller populated the arrays directly -- resync cp_graph.
+  atp_cp_graph_sync(s);
 }
 
 // Push one rule onto R; the rule array is growable, so this always
