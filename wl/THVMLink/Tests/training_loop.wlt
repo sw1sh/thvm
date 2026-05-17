@@ -168,14 +168,17 @@ VerificationTest[
         kernels10 = TKernelCount[] - 1;
         prog10    = TKernelProgramCacheSize[];
 
-        (* Kernel count grows with n (bound-w emits one KernelEntry per
-           iter); the program cache stays bounded -- the per-iter step
-           kernel is structurally identical and the per-realize grad
-           memo keeps the scalar-zero branch from becoming a second
-           program.  prog should NOT grow with n. *)
-        {kernels5, prog5, kernels10, prog10, prog5 === prog10}
+        (* Post-cache-retirement (commit 4a7431b7), TKernelProgramCacheSize
+           stubs to 0 unconditionally.  Kernel reuse is now aggressive
+           enough that the bound-w loop emits a SHARED step kernel rather
+           than one KernelEntry per iter -- kernel count stays at 2
+           regardless of n (the per-iter grad memo + structural kernel
+           hash-cons collapse identical step shapes).  Both counts must
+           NOT grow with n. *)
+        {kernels5, prog5, kernels10, prog10,
+         kernels5 === kernels10 && prog5 === prog10}
     ],
-    {5, 1, 10, 1, True},
+    {2, 0, 2, 0, True},
     TestID -> "training-loop/bound-w-kernel-program-hash-cons"
 ]
 
