@@ -303,6 +303,24 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       Term src0 = heap_read(loc);
       return term_dtype_in(src0, env_id, out);
     }
+    // INDEX_E reads an element from the indexed buffer; the dtype is
+    // the buffer's dtype.  Without this case, term_dtype_in falls
+    // through to the DT_FP32 default and graph_rewrite's BITCAST
+    // reconstruction (uop_bitcast(rewritten_index_e, dst)) sees the
+    // source as f32 -- tripping uop_bitcast's itemsize-mismatch guard
+    // for any sub-32-bit BITCAST (f16->u16, fp8->u8, etc.).
+    if (op == UOP_INDEX_E) {
+      Term buf = heap_read(loc + 0);
+      return term_dtype_in(buf, env_id, out);
+    }
+    // BUFFER's dtype lives in heap[loc+1] as a NUM cell (set by
+    // uop_buffer_inst).  Same rationale as INDEX_E: without this,
+    // any BUFFER consumer routed through term_dtype_in defaults to
+    // DT_FP32 and breaks dtype-sensitive folds.
+    if (op == UOP_BUFFER) {
+      *out = uop_buffer_dtype(t);
+      return 1;
+    }
   }
   // TUOpGradWithTarget chain-rule projection: cell is [y, gy, target];
   // the gradient result has y's dtype (= gy's dtype = leaf's dtype).
