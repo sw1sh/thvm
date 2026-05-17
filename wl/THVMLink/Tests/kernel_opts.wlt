@@ -915,22 +915,28 @@ VerificationTest[
 VerificationTest[
     TInit[];
     xT = TTensorCreate @ N @ Range[12];
-    (* Two structurally-identical reduces -> two kids sharing one
-       cached KProgOp[]. *)
+    (* Two structurally-identical reduces produce two kernels with
+       the same program key.  The kernel-program cache (which once
+       shared one KpCacheSlot.axes across all kids with the same key)
+       was deleted in commit 4a7431b7 (Phase 4b/2); each kernel now
+       owns its `_local_schedule`.  Program-key equality still drives
+       autotune-unique dedup, but applied_opts no longer cross-propagate
+       between kids -- kid2 stays at baseline after kid1.applied_opts
+       grows.  TKernelAutotuneUnique below is the surviving dedup
+       observation. *)
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid1 = TKernelCount[] - 1;
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid2 = TKernelCount[] - 1;
     key1 = TKernelProgramKey[kid1];
     key2 = TKernelProgramKey[kid2];
-    (* Apply opt to kid1; must show up on kid2's TKernelOpts because
-       both kids point at the same KpCacheSlot.axes. *)
     TKernelApplyOpt[kid1, TOpt["UNROLL", 1, 4]];
     {kid1 =!= kid2,
      key1 === key2,
      key1 =!= 0,
+     First[TKernelOpts[kid1]]["Applied"],
      First[TKernelOpts[kid2]]["Applied"]},
-    {True, True, True, {TOpt["UNROLL", 1, 4]}},
+    {True, True, True, {TOpt["UNROLL", 1, 4]}, {}},
     TestID -> "kernel-opts/per-program-shape-sharing"
 ]
 
