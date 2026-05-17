@@ -145,11 +145,21 @@ static const char *rmu_msl_type_name(u32 dtype) {
 // ever routed through this path.
 static const char *rmu_c_type_name(u32 dtype) {
   switch (dtype) {
+    case DT_BOOL:  return "unsigned char";
     case DT_FP32:  return "float";
-    case DT_FP16:  return "float";   // see comment above
-    case DT_INT32: return "int";
-    case DT_INT64: return "long";
+    case DT_FP64:  return "double";
+    case DT_FP16:  return "float";   // promote-to-f32; load/store via fp_convert
+    case DT_BF16:  return "float";   // ditto
+    case DT_FP8E4M3:
+    case DT_FP8E5M2: return "float"; // ditto
+    case DT_INT8:  return "signed char";
     case DT_UINT8: return "unsigned char";
+    case DT_INT16: return "short";
+    case DT_UINT16:return "unsigned short";
+    case DT_INT32: return "int";
+    case DT_UINT32:return "unsigned int";
+    case DT_INT64: return "long";
+    case DT_UINT64:return "unsigned long";
     default:       return "float";
   }
 }
@@ -279,6 +289,15 @@ static void rmu_emit_term(Term t, FILE *fp) {
           rmu_emit_term(src, fp);
           fputs(")", fp);
         }
+      } else if (dst_dt == DT_BOOL) {
+        // CAST-to-bool is truthiness (!= 0), not numeric truncation.
+        // Negative floats (`-2.0`) would otherwise wrap as 0xFE in u8;
+        // tinygrad's BOOL semantics match Python's `bool(x)` instead.
+        fputs("((", fp);
+        fputs(type_name, fp);
+        fputs(")(", fp);
+        rmu_emit_term(src, fp);
+        fputs(" != 0))", fp);
       } else {
         fprintf(fp, "((%s)", type_name);
         rmu_emit_term(src, fp);
