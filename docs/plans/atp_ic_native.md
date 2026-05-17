@@ -1175,3 +1175,54 @@ the distance-1 lemma to proving `cpl1`/`cpl2`/`subl2`, ~3-74x faster
 selection (9a), orphan deletion (9b), and order-aware rewriting
 (9c-foundation) -- all sound, all flag-gated, `test_atp` 8544/8544
 throughout.
+
+## Milestone 10: MNF -- the goal-directed search
+
+The Milestone-9 conclusion -- `thm` needs the goal to *participate*,
+not be a passive end-check -- led to the bundled Waldmeister source.
+Its goal-directed search is the **MNF module** ("MultipleNormalFormen",
+Multiple Normal Forms): a bidirectional rewrite search.  `goal_lhs`
+seeds a GREEN front, `goal_rhs` a RED one; each front rewrites with the
+current rule set R; a hash table holds every reached term; an
+**opposite-colour collision** -- a red term equal to a green term --
+means the fronts have met and the goal is proved.  Unlike the
+single-normal-form check it needs no convergent R: it only needs ONE
+common reduct, found by exploring the rewrite graph, and it is fed
+incrementally as completion derives rules.
+
+A note settled in passing: G1 ("freeze goal variables to constants")
+was attempted, measured to *regress* the ladder (it de-tunes 9a, whose
+heuristic reads the goal), and found unnecessary -- MNF is a *match*-
+based search, so the goal's universal variables are always rewrite
+*subjects* and are never instantiated ("frozen for free").  There is
+no skolemization step.
+
+### 10 v1 -- the MNF search (DONE)
+
+`-DATP_MNF` (with `ATP_MNF_DIAG` for a bring-up trace).  A new module
+in `src/atp/_.c`: a hash table of coloured term-nodes (`mnf_hash` +
+`kbo_eq`, one node per distinct term -- the first colour to reach it),
+two LIFO stacks (red / green), `mnf_successors` (all one-step rewrites
+of a term), `mnf_expand_node`, `mnf_step` (DFS-alternate the two
+fronts; feed completion's new rules to expanded nodes incrementally).
+`thvm_atp_goal_check`'s universal path, under the flag, drives the MNF
+search instead of the single-NF check.
+
+v1 is **forward-only** (`MNF_MAX_ANTI = 0`).  A first cut used a single
+FIFO queue (breadth-first) -- it drowned in the rewrite fan-out before
+reaching any normal form; the fix is Waldmeister's two-stack LIFO
+design (each front DFS-drives toward a normal form).  Backward "anti"
+steps grow terms and fan the search out, so they are deferred.
+
+Result: `test_atp` 8544/8544; the ladder proves through MNF --
+`cpl1` 12 steps, `cpl2` 1, `subl2` 21 -- identical to the single-NF
+check.  The MNF infrastructure is validated.
+
+### 10 v1.1 -- what `thm` still needs
+
+Forward-only MNF cannot crack `thm` (its forward-reduct fronts need not
+meet under a non-convergent R).  v1.1: bounded backward steps
+(`MNF_MAX_ANTI > 0`, variable-safe via `atp_vars_contained`) so the
+fronts can climb, plus GC-rooting of the MNF node terms (a long `thm`
+run otherwise exhausts the heap or is corrupted by the completion
+loop's collector).  Then measure `thm`.

@@ -3011,6 +3011,14 @@ typedef struct {
   struct AtpFvIndex *fv_index;
 #endif
 
+  // Milestone 10: MNF goal-directed search state (opaque pointer).
+  // Behind -DATP_MNF; created lazily on the first goal_check, then
+  // drives a bidirectional rewrite search from the conjecture instead
+  // of the passive single-normal-form check.
+#ifdef ATP_MNF
+  struct AtpMnf *mnf;
+#endif
+
   // 7e (lever 2): discrimination tree over the rule LHS terms.  Behind
   // -DATP_RULE_INDEX, the ATP-side normalizer's per-position redex
   // search consults this instead of `rewrite_try_top`'s O(n_rules)

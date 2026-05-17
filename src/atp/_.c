@@ -1882,6 +1882,10 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   return s;
 }
 
+#ifdef ATP_MNF
+static void mnf_destroy(struct AtpMnf *m);   // defined with the MNF module below
+#endif
+
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
   free(s->lhs);
@@ -1897,6 +1901,9 @@ fn void thvm_atp_free(AtpState *s) {
 #endif
 #ifdef ATP_RULE_INDEX
   atp_ri_free(s->rule_index);
+#endif
+#ifdef ATP_MNF
+  mnf_destroy(s->mnf);
 #endif
   free(s);
 }
@@ -2157,18 +2164,10 @@ static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
   return thvm_kbo(lhs, rhs, s->kbo);
 }
 
-#ifdef ATP_ORDERED_REWRITE
-// === 9c-foundation: ordered rewriting ===============================
-//
-// Proper unfailing-completion rewriting.  The KBO_UN both-ways hack
-// stored an unorientable equation u=v as two looping rules u->v and
-// v->u.  Here an equation is stored once and the rewrite step tries
-// every rule in BOTH directions, applying a direction only when the
-// result strictly decreases the redex in the reduction order.  An
-// oriented rule l->r (l > r, hence l.sigma > r.sigma for every sigma)
-// fires forward only; an unorientable equation fires whichever
-// direction is decreasing for the instance at hand.  Every rewrite
-// strictly descends a well-founded order, so normalization terminates.
+#if defined(ATP_ORDERED_REWRITE) || defined(ATP_MNF)
+// === variable-occurrence helpers ====================================
+// Shared by 9c ordered rewriting (variable-safe rewrite directions)
+// and the Milestone-10 MNF search (variable-safe backward steps).
 
 // Does variable id `id` occur in `t`?
 static int atp_term_has_var(Term t, u32 id) {
@@ -2200,6 +2199,20 @@ static int atp_vars_contained(Term a, Term b) {
     default: return 1;
   }
 }
+#endif /* ATP_ORDERED_REWRITE || ATP_MNF */
+
+#ifdef ATP_ORDERED_REWRITE
+// === 9c-foundation: ordered rewriting ===============================
+//
+// Proper unfailing-completion rewriting.  The KBO_UN both-ways hack
+// stored an unorientable equation u=v as two looping rules u->v and
+// v->u.  Here an equation is stored once and the rewrite step tries
+// every rule in BOTH directions, applying a direction only when the
+// result strictly decreases the redex in the reduction order.  An
+// oriented rule l->r (l > r, hence l.sigma > r.sigma for every sigma)
+// fires forward only; an unorientable equation fires whichever
+// direction is decreasing for the instance at hand.  Every rewrite
+// strictly descends a well-founded order, so normalization terminates.
 
 // One ordered rewrite at the top of `t`.
 //
@@ -2808,6 +2821,258 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // with the (potentially larger) rule set.
 #define ATP_NARROW_BUDGET 8
 
+#ifdef ATP_MNF
+// === Milestone 10: MNF -- the Multiple-Normal-Forms goal search =====
+//
+// A port of Waldmeister's MNF module.  The conjecture stops being a
+// passive single-normal-form check and becomes a bidirectional rewrite
+// search: goal_lhs seeds a GREEN front, goal_rhs a RED one.  Each front
+// rewrites with the current rule set R; every reached term is held in a
+// hash table.  When a newly reached term collides with a term already
+// in the table of the OPPOSITE colour -- a red term equal to a green
+// term -- the two fronts have met: goal_lhs and goal_rhs share an
+// equational-rewrite path, so the goal is proved.
+//
+// Unlike the single-NF check, this needs no convergent R: it only needs
+// ONE common reduct, found by exploring the rewrite graph.  It is fed
+// incrementally -- each rule completion derives is applied to the
+// already-reached terms.  Forward rewrites (l->r) are unrationed;
+// backward "anti" rewrites (r->l, variable-safe) grow terms and are
+// capped per lineage by MNF_MAX_ANTI.  MNF_MAX_NODES bounds the set.
+//
+// v1: no GC-rooting of the node terms -- run without ATP_BENCH_GC
+// (validated on the lemma ladder); thm needs the GC-root follow-up.
+
+#define MNF_RED        0u
+#define MNF_GREEN      1u
+// v1 is FORWARD-ONLY (MNF_MAX_ANTI = 0): backward "anti" steps grow
+// terms and fan the search out; the lemma ladder joins via forward
+// rewriting alone.  Bounded backward steps are the v1.1 follow-up.
+#define MNF_MAX_ANTI   0u
+#define MNF_MAX_NODES  400000u
+#define MNF_SUCC_CAP   2048u
+#define MNF_BUDGET     192u
+#define MNF_N_BUCKETS  (1u << 21)        // 2097152, power of two
+
+typedef struct {
+  Term term;
+  u32  hash;
+  u8   colour;     // MNF_RED / MNF_GREEN
+  u8   anti;       // backward steps used on the path to this term
+  u8   expanded;   // successors already generated against [0, n_rules_seen)
+} MnfNode;
+
+typedef struct AtpMnf {
+  MnfNode *nodes;
+  u32      n_nodes;
+  u32      cap_nodes;
+  u32     *qred;             // RED front -- nodes pending expansion (LIFO)
+  u32     *qgreen;           // GREEN front -- nodes pending expansion (LIFO)
+  u32      qred_n, qgreen_n, q_cap;
+  u32     *buckets;          // open addressing: bucket -> node_idx + 1
+  u32      n_buckets;
+  u32      n_rules_seen;     // rules already fed in
+  u8       joined;
+} AtpMnf;
+
+// Structural hash of a term (FNV-ish mix over the preorder).
+static u32 mnf_hash(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        h = (h ^ mnf_hash(term_ctr_at(t, i))) * 0x01000193u;
+      }
+      return h ^ (n + 0x9e3779b9u);
+    }
+    case TAG_FVR:
+      return (0x2545f491u ^ term_ext(t)) * 0x01000193u;
+    default:
+      return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
+  }
+}
+
+// Find a node whose term is kbo_eq to `t` (hash `h`); MNF_MAX_NODES if
+// absent.  The table holds one node per distinct term -- the first
+// colour to reach it.
+static u32 mnf_lookup(const AtpMnf *m, Term t, u32 h) {
+  u32 mask = m->n_buckets - 1u;
+  for (u32 probe = h & mask; ; probe = (probe + 1u) & mask) {
+    u32 slot = m->buckets[probe];
+    if (slot == 0u) return MNF_MAX_NODES;
+    u32 idx = slot - 1u;
+    if (m->nodes[idx].hash == h && kbo_eq(m->nodes[idx].term, t)) return idx;
+  }
+}
+
+// Insert `t` (colour `col`, lineage anti-count `anti`).  Returns 1 if
+// this insertion JOINED the fronts (an opposite-colour node already
+// held `t`).  Same-colour duplicate -> dropped.  Fresh term -> added,
+// indexed, enqueued.
+static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti) {
+  u32 h   = mnf_hash(t);
+  u32 idx = mnf_lookup(m, t, h);
+  if (idx != MNF_MAX_NODES) {
+    if (m->nodes[idx].colour != col) { m->joined = 1u; return 1; }
+    return 0;
+  }
+  if (m->n_nodes >= MNF_MAX_NODES) return 0;     // set full
+  u32 ni = m->n_nodes++;
+  m->nodes[ni].term     = t;
+  m->nodes[ni].hash     = h;
+  m->nodes[ni].colour   = col;
+  m->nodes[ni].anti     = anti;
+  m->nodes[ni].expanded = 0u;
+  u32 mask = m->n_buckets - 1u;
+  u32 probe = h & mask;
+  while (m->buckets[probe] != 0u) probe = (probe + 1u) & mask;
+  m->buckets[probe] = ni + 1u;
+  if (col == MNF_RED) m->qred[m->qred_n++]     = ni;   // each <= MNF_MAX_NODES
+  else                m->qgreen[m->qgreen_n++] = ni;
+  return 0;
+}
+
+// One-step rewrites of `t` (all positions, rules [rule_lo, rule_hi),
+// forward + -- when allow_anti -- variable-safe backward) collected
+// into mnf_succ_buf / mnf_succ_anti.
+static Term mnf_succ_buf[MNF_SUCC_CAP];
+static u8   mnf_succ_anti[MNF_SUCC_CAP];
+
+static void mnf_successors(AtpState *s, Term t, u8 allow_anti,
+                           u32 rule_lo, u32 rule_hi, u32 *n) {
+  for (u32 j = rule_lo; j < rule_hi; j++) {
+    if (*n >= MNF_SUCC_CAP) return;
+    {
+      RewriteSubst sub = {{0}};
+      if (thvm_match(s->lhs[j], t, &sub)) {
+        mnf_succ_buf[*n]  = thvm_subst_apply(s->rhs[j], &sub);
+        mnf_succ_anti[*n] = 0u;
+        (*n)++;
+        if (*n >= MNF_SUCC_CAP) return;
+      }
+    }
+    if (allow_anti && atp_vars_contained(s->lhs[j], s->rhs[j])) {
+      RewriteSubst sb = {{0}};
+      if (thvm_match(s->rhs[j], t, &sb)) {
+        mnf_succ_buf[*n]  = thvm_subst_apply(s->lhs[j], &sb);
+        mnf_succ_anti[*n] = 1u;
+        (*n)++;
+        if (*n >= MNF_SUCC_CAP) return;
+      }
+    }
+  }
+  if (term_tag(t) == TAG_CTR) {
+    u32 m = term_ctr_n(t);
+    if (m > REWRITE_MAX_ARITY) return;
+    for (u32 i = 0; i < m; i++) {
+      u32 base = *n;
+      mnf_successors(s, term_ctr_at(t, i), allow_anti, rule_lo, rule_hi, n);
+      for (u32 k = base; k < *n; k++) {
+        Term ch[REWRITE_MAX_ARITY];
+        for (u32 c = 0; c < m; c++) {
+          ch[c] = (c == i) ? mnf_succ_buf[k] : term_ctr_at(t, c);
+        }
+        mnf_succ_buf[k] = term_new_ctr(term_ext(t), ch, m);
+      }
+    }
+  }
+}
+
+// Generate node `ni`'s successors against rules [rule_lo, rule_hi) and
+// insert each (same colour, anti-count incremented for a backward step).
+static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
+                            u32 rule_lo, u32 rule_hi) {
+  u8   col  = m->nodes[ni].colour;
+  u8   anti = m->nodes[ni].anti;
+  Term t    = m->nodes[ni].term;
+  u32  n    = 0u;
+  mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
+  for (u32 k = 0; k < n && !m->joined; k++) {
+    u8 a = (u8)(anti + (mnf_succ_anti[k] ? 1u : 0u));
+    mnf_insert(m, mnf_succ_buf[k], col, a);
+  }
+}
+
+// Create the MNF set for the current goal: goal_lhs -> GREEN front,
+// goal_rhs -> RED front.  An immediate collision (goal_lhs kbo_eq
+// goal_rhs) already joins.
+static AtpMnf *mnf_create(AtpState *s) {
+  AtpMnf *m = (AtpMnf *)calloc(1, sizeof(AtpMnf));
+  if (m == NULL) return NULL;
+  m->cap_nodes = MNF_MAX_NODES;
+  m->q_cap     = MNF_MAX_NODES;
+  m->n_buckets = MNF_N_BUCKETS;
+  m->nodes   = (MnfNode *)calloc(m->cap_nodes, sizeof(MnfNode));
+  m->qred    = (u32 *)calloc(m->q_cap, sizeof(u32));
+  m->qgreen  = (u32 *)calloc(m->q_cap, sizeof(u32));
+  m->buckets = (u32 *)calloc(m->n_buckets, sizeof(u32));
+  if (m->nodes == NULL || m->qred == NULL || m->qgreen == NULL ||
+      m->buckets == NULL) {
+    free(m->nodes); free(m->qred); free(m->qgreen);
+    free(m->buckets); free(m);
+    return NULL;
+  }
+  mnf_insert(m, s->goal_lhs, MNF_GREEN, 0u);
+  mnf_insert(m, s->goal_rhs, MNF_RED,   0u);
+  return m;
+}
+
+static void mnf_destroy(struct AtpMnf *m) {
+  if (m == NULL) return;
+  free(m->nodes); free(m->qred); free(m->qgreen); free(m->buckets); free(m);
+}
+
+// One MNF advance: (a) feed any rules completion derived since the last
+// call to every already-expanded node; (b) expand up to `budget` queued
+// (first-expansion) nodes against the full current R.  Returns 1 once
+// the fronts have joined.
+static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
+  if (m->joined) return 1;
+#ifdef ATP_MNF_DIAG
+  { static u32 c = 0;
+    if (c++ % 256u == 0u) {
+      fprintf(stderr, "[mnf] call=%u nodes=%u red=%u green=%u "
+              "rules_seen=%u/%u joined=%u\n",
+              c, m->n_nodes, m->qred_n, m->qgreen_n,
+              m->n_rules_seen, s->n_rules, m->joined);
+    } }
+#endif
+  if (s->n_rules > m->n_rules_seen) {
+    u32 lo = m->n_rules_seen, hi = s->n_rules, upto = m->n_nodes;
+    for (u32 ni = 0; ni < upto && !m->joined; ni++) {
+      if (m->nodes[ni].expanded) mnf_expand_node(s, m, ni, lo, hi);
+    }
+    m->n_rules_seen = hi;
+    if (m->joined) return 1;
+  }
+  // (b) DFS-expand the two fronts in alternation: red, green, red, ...
+  // LIFO stacks so each front drives toward a normal form instead of
+  // drowning in a breadth-first fan-out.
+  for (u32 b = 0; b < budget && !m->joined; b++) {
+    int did = 0;
+    if (m->qred_n > 0u) {
+      u32 ni = m->qred[--m->qred_n];
+      if (!m->nodes[ni].expanded) {
+        mnf_expand_node(s, m, ni, 0u, s->n_rules);
+        m->nodes[ni].expanded = 1u;
+      }
+      did = 1;
+    }
+    if (!m->joined && m->qgreen_n > 0u) {
+      u32 ni = m->qgreen[--m->qgreen_n];
+      if (!m->nodes[ni].expanded) {
+        mnf_expand_node(s, m, ni, 0u, s->n_rules);
+        m->nodes[ni].expanded = 1u;
+      }
+      did = 1;
+    }
+    if (!did) break;
+  }
+  return m->joined;
+}
+#endif /* ATP_MNF */
+
 fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   if (s == NULL || s->goal_lhs == 0) return ATP_RUNNING;
   const u32 NORM_CAP = 64;
@@ -2841,6 +3106,17 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     return ATP_RUNNING;
   }
 
+#ifdef ATP_MNF
+  // Milestone 10: drive the MNF bidirectional search instead of the
+  // single-normal-form check.  Created lazily on the first call; each
+  // call feeds in completion's new rules and expands a budget of
+  // nodes.  An opposite-colour collision (the fronts met) is the proof.
+  if (s->mnf == NULL) s->mnf = mnf_create(s);
+  if (s->mnf != NULL) {
+    return mnf_step(s, s->mnf, MNF_BUDGET) ? ATP_PROVED : ATP_RUNNING;
+  }
+  // mnf allocation failed -- fall through to the single-NF check.
+#endif
   Term l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
   Term r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,

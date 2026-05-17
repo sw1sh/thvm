@@ -117,6 +117,22 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
 ATP_ORDERED_REWRITE ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRITE,)
 
+# Milestone 10: -DATP_MNF builds the MNF goal-directed search (a port
+# of Waldmeister's "MultipleNormalFormen" module).  Instead of the
+# passive single-normal-form goal_check, the goal becomes a bidirec-
+# tional rewrite search: goal_lhs seeds a GREEN front, goal_rhs a RED
+# one; each front rewrites with R; a hash table holds every reached
+# term; an opposite-colour collision (a red term equals a green term)
+# is the join -- the goal is proved.  Fed incrementally by completion's
+# new rules.  Off by default; the universal-goal path is otherwise the
+# milestone-7 single-NF check.
+ATP_MNF ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF)),-DATP_MNF,)
+# ATP_MNF_DIAG: stderr trace of the MNF set (node count, queue sizes,
+# rules fed) -- a bring-up diagnostic, implies -DATP_MNF.
+ATP_MNF_DIAG ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF_DIAG)),-DATP_MNF -DATP_MNF_DIAG,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \
