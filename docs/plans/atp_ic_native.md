@@ -1269,12 +1269,34 @@ final rule set, and confirms the chain roots are exactly `goal_lhs` /
 `goal_rhs`.
 
 Correctness, confirmed.  cpl1 / cpl2 / subl2 all report
-`chain roots == goal: YES` with every step replaying.  Each joins the
-same way: the RED front reaches the GREEN seed (`= goal_lhs`) in ONE
-rewrite once completion derives the closing rule -- they are distance-1
-lemmas, so the bidirectional machinery is sound but not stressed.
-`trunc` and `full` stay 0 throughout: no successors are silently
-dropped, the 400k table never overflows.
+`chain roots == goal: YES` with every step replaying -- but each joins
+the same trivial way: the RED front reaches the GREEN seed
+(`= goal_lhs`) in ONE rewrite once completion derives the closing rule.
+They are distance-1 lemmas; the multi-step parent-chain machinery is
+never stressed by them.
+
+To actually stress it, the bench gained multi-step goals -- the missing
+rungs between the distance-1 lemmas and the distance-54 thm.  `wrapk`
+stacks `k` axiom instances (each `axiom_inst(a,b,X)` rewrites to `X` in
+one step), so the stack reduces to a common term in `k` steps; with
+distinct wrap variables the two fronts share only that reduct -- a
+genuine middle-meet.
+
+- `chain3`: green-side chain 3 steps, red-side 3 -- all 6 replay,
+  `roots == goal: YES`.
+- `chain4`: 4 + 4 steps -- all 8 replay, roots YES.
+- `deep5`: a one-sided 5-step green chain (RED seed static) -- all 5
+  replay, roots YES.
+
+So the verifier's multi-step chain walk is now genuinely exercised:
+3-, 4-, and 5-step chains, bidirectional and one-sided, every step
+independently re-derived.  `trunc` and `full` stay 0 throughout: no
+successors are silently dropped, the 400k table never overflows.
+
+`chain6` (a 6-step path, but `|wrapk| ~ 2^k` so ~885 symbols per side)
+does NOT join -- the search hits 158k nodes by call 17 and drowns.  It
+is a known-provable goal that reproduces thm's fan-out wall in
+isolation, kept as a capacity probe.
 
 Why `thm` does not join -- three measured causes, none a bug:
 

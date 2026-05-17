@@ -8,7 +8,13 @@
 // Not a pass/fail test (not in the Makefile TESTS list) -- build
 // with `make bin/test_atp_wolfram_bench` and run:
 //   bin/test_atp_wolfram_bench [goal] [step_cap] [wall_cap_s]
-// goal in { thm, cpl1, cpl2, subl2 } (default thm).
+// goal in { thm, cpl1, cpl2, subl2, chain3, chain4, chain6, deep5,
+// cpgen } (default thm).  chain3/chain4/deep5 are multi-step join
+// goals -- the rungs between the distance-1 lemmas and the
+// distance-54 thm -- and join+verify cleanly.  chain6 is provable
+// (a 6-step outer path) but the MNF search drowns in its duplicated-
+// redex fan-out before finding it: a capacity probe for the same
+// wall thm hits.
 //
 // The "ladder" idea (debug whether inference is even right): WL's
 // own FindEquationalProof[DoubleNegation, WolframAxioms] proof is a
@@ -37,11 +43,13 @@ static Term fv(u32 id) { return term_new_fvr(id); }
 
 // Wolfram axiom:
 //   nand(nand(nand(a,b),c), nand(a,nand(nand(a,c),a))) == c
-static Term axiom_lhs(void) {
-  Term a = fv(0), b = fv(1), c = fv(2);
+// axiom_inst(a,b,c) is the LHS with its three variables free: for ANY
+// a, b, c it matches the axiom rule and rewrites to `c` in one step.
+static Term axiom_inst(Term a, Term b, Term c) {
   return nand2(nand2(nand2(a, b), c),
                nand2(a, nand2(nand2(a, c), a)));
 }
+static Term axiom_lhs(void) { return axiom_inst(fv(0), fv(1), fv(2)); }
 
 // Goal equations.  *_lhs / *_rhs build the two sides; free
 // variables fv(0..3) = a,b,c,(e2|w) are universally quantified.
@@ -90,6 +98,37 @@ static void goal_subl2(Term *l, Term *r) {
   *l = fv(0);
   *r = nand2(nand2(nand2(b, Q), a),
              nand2(c, nand2(nand2(c, a), c)));
+}
+
+// Multi-step goals -- the missing rungs between the distance-1 lemmas
+// (cpl1/cpl2/subl2) and the distance-54 thm.  wrapk stacks `k` axiom
+// instances: each axiom_inst(a,b,X) rewrites to X in one step, so the
+// stack reduces to M in exactly k steps (reduce the outermost each
+// time).  These join via the AXIOM ALONE -- no completion needed --
+// exercising the MNF parent-chain machinery on chains longer than one.
+// The axiom LHS holds its `c` argument twice, so |wrapk| ~ 2^k: k<=5
+// joins fast, k=6 (~885 symbols/side) drowns the search -- see chain6.
+static Term wrapk(Term a, Term b, Term m, u32 k) {
+  Term t = m;
+  for (u32 i = 0; i < k; i++) t = axiom_inst(a, b, t);
+  return t;
+}
+
+// Two-sided meet: both fronts reduce to M = nand(fv7,fv8) along
+// DISJOINT paths (distinct wrap variables), so the join is a genuine
+// middle-meet after ~k steps on each side.
+static void goal_chain(Term *l, Term *r, u32 k) {
+  Term m = nand2(fv(7), fv(8));
+  *l = wrapk(fv(0), fv(1), m, k);
+  *r = wrapk(fv(4), fv(5), m, k);
+}
+
+// One-sided deep chain: L reduces to M in k steps, R = M -- a single
+// long GREEN parent chain, the RED seed static at M.
+static void goal_deep(Term *l, Term *r, u32 k) {
+  Term m = nand2(fv(7), fv(8));
+  *l = wrapk(fv(0), fv(1), m, k);
+  *r = m;
 }
 
 int main(int argc, char **argv) {
@@ -160,10 +199,14 @@ int main(int argc, char **argv) {
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
   Term gl = 0, gr = 0;
-  if      (strcmp(goal, "cpl1")  == 0) goal_cpl1(&gl, &gr);
-  else if (strcmp(goal, "cpl2")  == 0) goal_cpl2(&gl, &gr);
-  else if (strcmp(goal, "subl2") == 0) goal_subl2(&gl, &gr);
-  else                                 goal_thm(&gl, &gr);
+  if      (strcmp(goal, "cpl1")   == 0) goal_cpl1(&gl, &gr);
+  else if (strcmp(goal, "cpl2")   == 0) goal_cpl2(&gl, &gr);
+  else if (strcmp(goal, "subl2")  == 0) goal_subl2(&gl, &gr);
+  else if (strcmp(goal, "chain3") == 0) goal_chain(&gl, &gr, 3u);
+  else if (strcmp(goal, "chain4") == 0) goal_chain(&gl, &gr, 4u);
+  else if (strcmp(goal, "chain6") == 0) goal_chain(&gl, &gr, 6u);
+  else if (strcmp(goal, "deep5")  == 0) goal_deep(&gl, &gr, 5u);
+  else                                  goal_thm(&gl, &gr);
   thvm_atp_set_goal(s, gl, gr);
 
   printf("=== Wolfram-axiom completion : goal=%s ===\n", goal);
