@@ -133,6 +133,20 @@ int main(int argc, char **argv) {
     return (n > 0u) ? 0 : 1;
   }
 
+  // Opt-in in-loop GC.  ATP_BENCH_GC=<half-space-cells> enables the
+  // Cheney collector so a long completion run floats around its live
+  // working set instead of climbing into from-space exhaustion.  Off
+  // by default (flat 128M heap) so the cost numbers stay comparable
+  // to earlier milestones; set it to exercise thvm_atp_gc_collect --
+  // and, under -DATP_CP_GRAPH, the 8b cp_graph GC root.
+  {
+    const char *gc_env = getenv("ATP_BENCH_GC");
+    if (gc_env != NULL && gc_env[0] != '\0') {
+      u64 half = strtoull(gc_env, NULL, 10);
+      if (half > 0) gc_init(half);
+    }
+  }
+
   AtpState *s = thvm_atp_init(&cfg, step_cap);
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
@@ -176,6 +190,25 @@ int main(int argc, char **argv) {
   printf("=> %s\n", sn);
   printf("   goal=%s  steps=%u  rules=%u  cps=%u  max_cps=%u  %.1fs\n",
          goal, i, s->n_rules, s->n_cps, max_cps, el);
+
+#ifdef ATP_NORM_STATS
+  // 8b: optimal-sharing ratio of the cross-CP normalization memo.
+  // A hit = a subterm shared with an already-visited CP whose normal
+  // form was reused; misses = distinct subterm cells actually
+  // normalized.  hits/(hits+misses) is the work the sharing saved.
+  {
+    u64 hits = 0, misses = 0;
+    double secs = 0.0;
+    thvm_atp_norm_stats(&hits, &misses, &secs);
+    u64 total = hits + misses;
+    double ratio = (total > 0) ? (100.0 * (double)hits / (double)total) : 0.0;
+    double frac  = (el > 0.0) ? (100.0 * secs / el) : 0.0;
+    printf("   norm-memo: %llu hits / %llu distinct-cells  (%.1f%% shared)\n",
+           (unsigned long long)hits, (unsigned long long)misses, ratio);
+    printf("   norm-sweep: %.2fs  (%.1f%% of %.1fs total)\n",
+           secs, frac, el);
+  }
+#endif
 
   thvm_atp_free(s);
   return (st == ATP_PROVED) ? 0 : 1;
