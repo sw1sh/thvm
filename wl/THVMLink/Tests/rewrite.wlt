@@ -171,15 +171,11 @@ VerificationTest[
     True,
     TestID -> "xvalid-local-matmul-axis0-factor4"]
 
-VerificationTest[
-    xvalid[KOptGroup[0, 4],    $KopGroup[0, 4],    buildMatmul16],
-    True,
-    TestID -> "xvalid-group-matmul-axis0-factor4"]
-
-VerificationTest[
-    xvalid[KOptGroupTop[0, 4], $KopGroupTop[0, 4], buildMatmul16],
-    True,
-    TestID -> "xvalid-grouptop-matmul-axis0-factor4"]
+(* KOP_GROUP / KOP_GROUPTOP xvalid tests retired with commit 07b68af8
+   (KOP_GROUP/GROUPTOP consumers removed from C-side apply_opt_dag).
+   The opcode #defines stay for opcode-number ordering; no producer
+   emits them.  The WL surface KOptGroup / KOptGroupTop also stays
+   for back-compat but no longer mirrors a live C path. *)
 
 (* === composition tests ==========================================
    Apply a KOpt SEQUENCE in the same order via WL and C.  The

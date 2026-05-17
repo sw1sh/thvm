@@ -195,11 +195,29 @@ splitRule[innerKax_, optKind_, axis_, k_] := With[{
     }
 ]
 
-KOptUpcast  [axis_Integer, k_Integer] := ReplaceAll[splitRule[$KaxUpcast,       $OptUpcast,      axis, k]]
-KOptUnroll  [axis_Integer, k_Integer] := ReplaceAll[splitRule[$KaxUnroll,       $OptUnroll,      axis, k]]
-KOptLocal   [axis_Integer, k_Integer] := ReplaceAll[splitRule[$KaxLocal,        None,            axis, k]]
-KOptGroup   [axis_Integer, k_Integer] := ReplaceAll[splitRule[$KaxGroupReduce,  $OptGroupReduce, axis, k]]
-KOptGroupTop[axis_Integer, k_Integer] := ReplaceAll[splitRule[$KaxGroupReduce,  $OptGroupReduce, axis, k]]
+(* REDUCE's own axis arg is a bare NUM (not a RANGE leaf), so the RANGE
+   rules in splitRule[] don't reach it.  Mirror C-side apply_opt_dag.c
+   reduce_shift_above: any red_axis > the target axis shifts by +1.
+   Applied as a SEPARATE second pass because if it lived inside
+   splitRule[]'s rule list, ReplaceAll would match the REDUCE
+   first and stop descending into the body, leaving the body's RANGE
+   leaves un-rewritten. *)
+reduceAxisShift[axis_] := {
+    "UOP"["REDUCE", body_, kindN_, "NUM"[redAxis_Integer /; redAxis > axis]] :>
+        "UOP"["REDUCE", body, kindN, "NUM"[redAxis + 1]]
+}
+
+doSplit[innerKax_, optKind_, axis_, k_][expr_] :=
+    (expr /. splitRule[innerKax, optKind, axis, k]) /. reduceAxisShift[axis]
+
+KOptUpcast  [axis_Integer, k_Integer] := doSplit[$KaxUpcast, $OptUpcast,   axis, k]
+KOptUnroll  [axis_Integer, k_Integer] := doSplit[$KaxUnroll, $OptUnroll,   axis, k]
+KOptLocal   [axis_Integer, k_Integer] := doSplit[$KaxLocal,  None,         axis, k]
+(* KOP_GROUP / KOP_GROUPTOP are retired opcodes (Phase 4b/4-5) but their
+   KOpt entry points stay for back-compat.  C-side apply_opt_dag falls
+   through to KAX_LOOP + no-OPT default for these; WL mirrors that. *)
+KOptGroup   [axis_Integer, k_Integer] := doSplit[$KaxLoop,   None,         axis, k]
+KOptGroupTop[axis_Integer, k_Integer] := doSplit[$KaxLoop,   None,         axis, k]
 
 (* ---- SWAP: bidirectional axis swap.  ReplaceAll's single-pass
    semantics give us idempotent swap for free: rule 1 fires on each
