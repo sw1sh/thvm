@@ -1234,14 +1234,25 @@ call 257, ~180k at call 513 -- but does NOT join in 120-150s (step
 correct and GC-safe, but its plain forward-first DFS is not *guided*
 enough to find `thm`'s 54-step join in the combinatorial explosion.
 
-### 10 v1.2 -- what `thm` still needs
+### 10 v1.2 -- goal-similarity heuristic (DONE)
 
-Cracking `thm` needs the heuristic layer the v1 port left out -- the
-Waldmeister MNF refinements: the adaptive priority queue (`MNF_PQ`'s
-`lastWasIrred`-driven pop, not a plain LIFO stack), the `MNF_AnalyseNM`
-strategy switch, and -- most likely the decisive one -- a goal-
-similarity node ordering: expand the node structurally closest to the
-opposite front first, so the two fronts are steered *toward each other*
-rather than fanning out blindly.  That is the "make-or-break heuristic"
-the milestone-10 plan flagged as the risk -- genuine search tuning, the
-open frontier.
+The MNF queues became best-first: each node carries a `score` =
+`mnf_diff` (structural distance) to the *opposite* front's origin -- a
+RED node to `goal_lhs`, a GREEN node to `goal_rhs` -- and `mnf_step`
+expands the lowest-score (closest) node of each colour first, so the
+two fronts are steered toward each other instead of fanning out
+blindly.
+
+Result: `test_atp` 8544/8544, the ladder still proves.  On `thm`:
+still RUNNING (step ~330 in 150s, ~97k completion CPs) -- the
+goal-similarity ordering does not crack it.
+
+Honest state.  The MNF goal-directed search is built, correct,
+GC-safe, and validated -- the post-Milestone-9 conclusion realised in
+code.  But `thm` -- saturating the Wolfram NAND axiom to
+DoubleNegation, a famously hard automated-reasoning problem -- is not
+reached by the MNF search as it stands.  One principled heuristic
+iteration (goal-similarity) did not suffice; further progress would
+need a substantially better node heuristic, deeper Waldmeister-grade
+tuning (the adaptive `MNF_PQ` + `MNF_AnalyseNM` strategy machinery),
+or far more compute.  `thm` stays the documented open frontier.

@@ -2884,18 +2884,21 @@ typedef struct {
   u8   colour;     // MNF_RED / MNF_GREEN
   u8   anti;       // backward steps used on the path to this term
   u8   expanded;   // successors already generated against [0, n_rules_seen)
+  u32  score;      // v1.2: structural distance to the opposite front's origin
 } MnfNode;
 
 typedef struct AtpMnf {
   MnfNode *nodes;
   u32      n_nodes;
   u32      cap_nodes;
-  u32     *qred;             // RED front -- nodes pending expansion (LIFO)
-  u32     *qgreen;           // GREEN front -- nodes pending expansion (LIFO)
+  u32     *qred;             // RED front -- pending nodes (best-first by score)
+  u32     *qgreen;           // GREEN front -- pending nodes (best-first by score)
   u32      qred_n, qgreen_n, q_cap;
   u32     *buckets;          // open addressing: bucket -> node_idx + 1
   u32      n_buckets;
   u32      n_rules_seen;     // rules already fed in
+  Term     seed_red;         // goal_rhs -- the RED front's origin
+  Term     seed_green;       // goal_lhs -- the GREEN front's origin
   u8       joined;
 } AtpMnf;
 
@@ -2915,6 +2918,31 @@ static u32 mnf_hash(Term t) {
     default:
       return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
   }
+}
+
+// v1.2 goal-similarity: structural distance between `a` and a fixed
+// target `b`.  Aligned constructors (same label/arity) recurse into
+// children; where the structures diverge the whole mismatched mass
+// counts.  A RED node is scored by its distance to goal_lhs (the GREEN
+// origin) and a GREEN node by its distance to goal_rhs -- so each front
+// is steered toward the other's origin, the two crossing in the middle.
+static u32 mnf_diff(Term a, Term b) {
+  if (term_tag(a) == TAG_CTR && term_tag(b) == TAG_CTR &&
+      term_ext(a) == term_ext(b)) {
+    u32 na = term_ctr_n(a), nb = term_ctr_n(b);
+    if (na == nb) {
+      u32 d = 0u;
+      for (u32 i = 0; i < na; i++) {
+        d += mnf_diff(term_ctr_at(a, i), term_ctr_at(b, i));
+      }
+      return d;
+    }
+  }
+  if (term_tag(a) == TAG_FVR && term_tag(b) == TAG_FVR &&
+      term_ext(a) == term_ext(b)) {
+    return 0u;
+  }
+  return atp_symbol_count(a) + atp_symbol_count(b);
 }
 
 // Find a node whose term is kbo_eq to `t` (hash `h`); MNF_MAX_NODES if
@@ -2948,6 +2976,8 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti) {
   m->nodes[ni].colour   = col;
   m->nodes[ni].anti     = anti;
   m->nodes[ni].expanded = 0u;
+  m->nodes[ni].score    = mnf_diff(t, (col == MNF_RED) ? m->seed_green
+                                                       : m->seed_red);
   u32 mask = m->n_buckets - 1u;
   u32 probe = h & mask;
   while (m->buckets[probe] != 0u) probe = (probe + 1u) & mask;
@@ -3044,6 +3074,8 @@ static AtpMnf *mnf_create(AtpState *s) {
     free(m->buckets); free(m);
     return NULL;
   }
+  m->seed_green = s->goal_lhs;     // the GREEN front's origin
+  m->seed_red   = s->goal_rhs;     // the RED front's origin
   mnf_insert(m, s->goal_lhs, MNF_GREEN, 0u);
   mnf_insert(m, s->goal_rhs, MNF_RED,   0u);
   return m;
@@ -3069,6 +3101,18 @@ static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
   for (u32 i = 0; i < m->n_nodes; i++) m->nodes[i].term = roots[base + i];
 }
 
+// Pop the queued node with the smallest score -- the one structurally
+// closest to the opposite front's origin.  Scan + swap-remove, O(qn).
+static u32 mnf_pop_min(AtpMnf *m, u32 *q, u32 *qn) {
+  u32 best = 0u;
+  for (u32 k = 1u; k < *qn; k++) {
+    if (m->nodes[q[k]].score < m->nodes[q[best]].score) best = k;
+  }
+  u32 ni = q[best];
+  q[best] = q[--(*qn)];
+  return ni;
+}
+
 // One MNF advance: (a) feed any rules completion derived since the last
 // call to every already-expanded node; (b) expand up to `budget` queued
 // (first-expansion) nodes against the full current R.  Returns 1 once
@@ -3092,13 +3136,13 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     m->n_rules_seen = hi;
     if (m->joined) return 1;
   }
-  // (b) DFS-expand the two fronts in alternation: red, green, red, ...
-  // LIFO stacks so each front drives toward a normal form instead of
-  // drowning in a breadth-first fan-out.
+  // (b) best-first expand the two fronts in alternation: from each
+  // colour's queue take the node closest (mnf_diff score) to the
+  // opposite front's origin, so the fronts steer toward each other.
   for (u32 b = 0; b < budget && !m->joined; b++) {
     int did = 0;
     if (m->qred_n > 0u) {
-      u32 ni = m->qred[--m->qred_n];
+      u32 ni = mnf_pop_min(m, m->qred, &m->qred_n);
       if (!m->nodes[ni].expanded) {
         mnf_expand_node(s, m, ni, 0u, s->n_rules);
         m->nodes[ni].expanded = 1u;
@@ -3106,7 +3150,7 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
       did = 1;
     }
     if (!m->joined && m->qgreen_n > 0u) {
-      u32 ni = m->qgreen[--m->qgreen_n];
+      u32 ni = mnf_pop_min(m, m->qgreen, &m->qgreen_n);
       if (!m->nodes[ni].expanded) {
         mnf_expand_node(s, m, ni, 0u, s->n_rules);
         m->nodes[ni].expanded = 1u;
