@@ -1884,6 +1884,12 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
 
 #ifdef ATP_MNF
 static void mnf_destroy(struct AtpMnf *m);   // defined with the MNF module below
+// GC support: the MNF coloured nodes hold reached Terms on the heap, so
+// they are collector roots.  Defined with the MNF module; declared here
+// for thvm_atp_gc_collect (which precedes the module).
+static u32  mnf_gc_count(struct AtpMnf *m);
+static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w);
+static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base);
 #endif
 
 fn void thvm_atp_free(AtpState *s) {
@@ -1966,6 +1972,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // skipping it would need a live-count pre-pass).
   if (s->fv_index != NULL) n_roots += 2u * s->fv_index->n_recs;
 #endif
+#ifdef ATP_MNF
+  // Milestone 10: every MNF coloured node holds a reached Term.  Root
+  // them so the collector relocates them; the hash table (structural
+  // hashes, node indices) is GC-invariant and needs no fixup.
+  n_roots += mnf_gc_count(s->mnf);
+#endif
   Term *roots = (Term *)malloc((size_t)n_roots * sizeof(Term));
   if (roots == NULL) return 0;
 
@@ -1996,6 +2008,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
       roots[w++] = s->fv_index->recs[i].rhs;
     }
   }
+#endif
+#ifdef ATP_MNF
+  u32 mnf_node_root = w;
+  mnf_gc_gather(s->mnf, roots, &w);
 #endif
 
   gc_collect(roots, w);
@@ -2039,6 +2055,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
       s->fv_index->recs[i].rhs = roots[rw++];
     }
   }
+#endif
+#ifdef ATP_MNF
+  // Write the relocated reached-Terms back into the MNF nodes.  No
+  // hash-table fixup: mnf_hash is structural, so a relocated term
+  // keeps its hash and stays in its bucket.
+  mnf_gc_writeback(s->mnf, roots, mnf_node_root);
 #endif
 
   free(roots);
@@ -2845,10 +2867,12 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 
 #define MNF_RED        0u
 #define MNF_GREEN      1u
-// v1 is FORWARD-ONLY (MNF_MAX_ANTI = 0): backward "anti" steps grow
-// terms and fan the search out; the lemma ladder joins via forward
-// rewriting alone.  Bounded backward steps are the v1.1 follow-up.
-#define MNF_MAX_ANTI   0u
+// Backward "anti" steps (r->l, increasing) let the two fronts climb
+// toward each other when their forward reducts do not meet -- needed
+// once the rule set is non-convergent.  They grow terms and fan the
+// search out, so they are capped per lineage by MNF_MAX_ANTI and the
+// DFS explores forward steps first (see mnf_expand_node).
+#define MNF_MAX_ANTI   2u
 #define MNF_MAX_NODES  400000u
 #define MNF_SUCC_CAP   2048u
 #define MNF_BUDGET     192u
@@ -2988,9 +3012,16 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
   Term t    = m->nodes[ni].term;
   u32  n    = 0u;
   mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
+  // Insert backward successors first, forward last: the LIFO stacks
+  // then pop forward steps first, so the DFS drives each front toward
+  // a normal form and only falls back on backward (term-growing) steps.
   for (u32 k = 0; k < n && !m->joined; k++) {
-    u8 a = (u8)(anti + (mnf_succ_anti[k] ? 1u : 0u));
-    mnf_insert(m, mnf_succ_buf[k], col, a);
+    if (mnf_succ_anti[k]) {
+      mnf_insert(m, mnf_succ_buf[k], col, (u8)(anti + 1u));
+    }
+  }
+  for (u32 k = 0; k < n && !m->joined; k++) {
+    if (!mnf_succ_anti[k]) mnf_insert(m, mnf_succ_buf[k], col, anti);
   }
 }
 
@@ -3021,6 +3052,21 @@ static AtpMnf *mnf_create(AtpState *s) {
 static void mnf_destroy(struct AtpMnf *m) {
   if (m == NULL) return;
   free(m->nodes); free(m->qred); free(m->qgreen); free(m->buckets); free(m);
+}
+
+// GC support: the coloured nodes' terms are collector roots.  Gather
+// them for thvm_atp_gc_collect and write the relocated terms back; the
+// hash table (structural hashes, node indices) is GC-invariant.
+static u32 mnf_gc_count(struct AtpMnf *m) {
+  return (m == NULL) ? 0u : m->n_nodes;
+}
+static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
+  if (m == NULL) return;
+  for (u32 i = 0; i < m->n_nodes; i++) roots[(*w)++] = m->nodes[i].term;
+}
+static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
+  if (m == NULL) return;
+  for (u32 i = 0; i < m->n_nodes; i++) m->nodes[i].term = roots[base + i];
 }
 
 // One MNF advance: (a) feed any rules completion derived since the last

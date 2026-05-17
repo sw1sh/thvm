@@ -1218,11 +1218,30 @@ Result: `test_atp` 8544/8544; the ladder proves through MNF --
 `cpl1` 12 steps, `cpl2` 1, `subl2` 21 -- identical to the single-NF
 check.  The MNF infrastructure is validated.
 
-### 10 v1.1 -- what `thm` still needs
+### 10 v1.1 -- backward steps + GC-rooting (DONE)
 
-Forward-only MNF cannot crack `thm` (its forward-reduct fronts need not
-meet under a non-convergent R).  v1.1: bounded backward steps
-(`MNF_MAX_ANTI > 0`, variable-safe via `atp_vars_contained`) so the
-fronts can climb, plus GC-rooting of the MNF node terms (a long `thm`
-run otherwise exhausts the heap or is corrupted by the completion
-loop's collector).  Then measure `thm`.
+Bounded backward "anti" steps (`MNF_MAX_ANTI = 2`, variable-safe) let
+the fronts climb when their forward reducts do not meet; the DFS
+explores forward steps first so backward (term-growing) steps are a
+fallback.  The MNF node terms are GC-rooted in `thvm_atp_gc_collect`
+(gathered / relocated / written back alongside the rule and CP arrays;
+the hash table is GC-invariant since `mnf_hash` is structural).
+
+Result: `test_atp` 8544/8544, the ladder still proves (cpl1 12,
+cpl2 1, subl2 21).  On `thm` (GC enabled): MNF runs -- ~78k nodes at
+call 257, ~180k at call 513 -- but does NOT join in 120-150s (step
+~310; the 400k node cap not yet reached).  The MNF infrastructure is
+correct and GC-safe, but its plain forward-first DFS is not *guided*
+enough to find `thm`'s 54-step join in the combinatorial explosion.
+
+### 10 v1.2 -- what `thm` still needs
+
+Cracking `thm` needs the heuristic layer the v1 port left out -- the
+Waldmeister MNF refinements: the adaptive priority queue (`MNF_PQ`'s
+`lastWasIrred`-driven pop, not a plain LIFO stack), the `MNF_AnalyseNM`
+strategy switch, and -- most likely the decisive one -- a goal-
+similarity node ordering: expand the node structurally closest to the
+opposite front first, so the two fronts are steered *toward each other*
+rather than fanning out blindly.  That is the "make-or-break heuristic"
+the milestone-10 plan flagged as the risk -- genuine search tuning, the
+open frontier.
