@@ -902,8 +902,19 @@ fn void bufferize_classify(Term root) {
       if (cidx == 0xFFFFFFFFu) continue;
       if (BUFFERIZE_NODES[cidx].op != UOP_REDUCE) continue;
       if (!BUFFERIZE_NODES[cidx].realized) continue;
-      Term outer_src = term_resolve(heap_read(consumer_locs[0] + 0));
-      if (term_tag(outer_src) != TAG_UOP) continue;
+      // bufferize_unwrap_dp follows DP cells across SUB-marked fired
+      // dups too -- accept any chain whose outer.src[0] resolves to
+      // this inner UOP after DUP traversal.  The CPU walker handles
+      // DUP-traversed addr / body expressions correctly because
+      // term_resolve in uwalk_eval_* unwraps SUB-marked cells; the
+      // chain-guard's old cmap-BFS limitation no longer applies once
+      // execution is via uwalk_run_reduce (which re-runs the inner per
+      // outer iteration) rather than the legacy hoist-cache lookup.
+      u64 visited[8];
+      u32 n_visited = 0;
+      Term outer_src = bufferize_unwrap_dp(heap_read(consumer_locs[0] + 0),
+                                            visited, &n_visited, 8, 16);
+      if (outer_src == 0 || term_tag(outer_src) != TAG_UOP) continue;
       if (term_val(outer_src) != info->loc) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
