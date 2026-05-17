@@ -477,6 +477,25 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       if (uwalk_reduce_lookup(c, t, &v) >= 0) return (i64)v;
       return (i64)uwalk_run_reduce(c, t);
     }
+    // UOP_ADD / MUL / CMPLT / CMPEQ / NEG over integer-typed operands.
+    // The high-level WL Plus / Times / etc. emit these generic ALU ops
+    // regardless of element type; for integer tensors the store-side
+    // dtype dispatch routes here.  Mirror the float branch's semantics
+    // but stay in integer arithmetic to preserve wrap / unsigned bits.
+    case UOP_ADD:
+      return uwalk_eval_int(c, heap_read(loc + 0))
+           + uwalk_eval_int(c, heap_read(loc + 1));
+    case UOP_MUL:
+      return uwalk_eval_int(c, heap_read(loc + 0))
+           * uwalk_eval_int(c, heap_read(loc + 1));
+    case UOP_NEG:
+      return -uwalk_eval_int(c, heap_read(loc + 0));
+    case UOP_CMPLT:
+      return (uwalk_eval_int(c, heap_read(loc + 0))
+            < uwalk_eval_int(c, heap_read(loc + 1))) ? 1 : 0;
+    case UOP_CMPEQ:
+      return (uwalk_eval_int(c, heap_read(loc + 0))
+           == uwalk_eval_int(c, heap_read(loc + 1))) ? 1 : 0;
     default:
       return 0;
   }
