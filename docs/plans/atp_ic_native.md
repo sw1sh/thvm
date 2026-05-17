@@ -703,10 +703,75 @@ Wolfram axiom is purely a redundancy/indexing scaling wall.
   strategy -- not a faster inner loop.  7c is the right next lever:
   7d/7e made the per-CP checks cheap, 7c makes them strong enough to
   bound the queue.
-- **7c -- redundancy strengthening** (after 7d): full
-  forward+backward subsumption, simplify-reflect, blocked-CP
-  deletion -- the Waldmeister redundancy criteria, to keep the
-  queue small.  7d makes the checks cheap; 7c makes them stronger.
+- **7c -- canonical variable normalization** (DONE -- `-DATP_VAR_NORM`,
+  default OFF).  The convergence re-diagnosis found the real wall was
+  not "redundancy too weak" -- it was **the rewriter going DEAD on
+  out-of-range variables**, which made redundancy a structural no-op.
+
+  Root cause: `thvm_match` / `thvm_subst_apply` (`src/rewrite/_.c`)
+  silently treat any FVR with id `>= REWRITE_MAX_VAR` (=64) as an
+  unmatchable constant.  The CP enumerator renames rule j by
+  `CP_RENAME_OFFSET` (=32) before unification and BAKES that offset
+  into the stored CP -- there was no variable-normalization pass
+  anywhere.  Each completion round a stored rule's variables creep up
+  by +32, so after ~2 rounds rule/CP variable ids cross 64.  Past that
+  cliff the rewriter cannot fire on the rule -- joinability is a no-op,
+  subsumption returns 0, interreduction never drops a rule.  ALL
+  redundancy dies at once.  Measured (var_norm OFF, 60 steps): rules
+  reach `max_var=66` (57 of 60 cross 64), CPs reach `max_var=98`
+  (3670 of 3673 cross 64); the first 2000 queued CPs collapse to **16
+  distinct** modulo renaming -- a 99.2%-duplicate queue the dead
+  matcher cannot detect.  Over a 1308-step run only **3** CPs were
+  ever dropped joinable and **1** queue-subsumed; `rules` tracked
+  `steps` 1:1 and the queue ran away past 1.7M.
+
+  The fix: `thvm_normalize_vars` (`src/unify/_.c`) canonically
+  renumbers a stored (lhs, rhs) pair -- a deterministic preorder walk
+  (lhs fully, then rhs) assigns each DISTINCT variable a dense id
+  `0,1,2,...` by first occurrence, with the two sides SHARING the
+  numbering (a variable in both is one variable).  It is
+  alpha-renaming: meaning preserved, and alpha-equivalent rules/CPs
+  become BYTE-IDENTICAL.  Applied at every storage point:
+  `atp_push_cps_traced` (a CP before it lands in the queue),
+  `atp_push_rule` (a rule before it enters R, axiom path included via
+  `thvm_atp_add_equation`).  Every stored rule/CP then carries dense
+  ids `[0, k)` -- nothing crosses 64, the matcher never goes dead.  A
+  cheap **duplicate-rule guard** in `atp_push_rule` rejects a rule
+  already in R (both sides `kbo_eq`) -- belt-and-suspenders against
+  the "add the same rule 300x" pathology now that alpha-equivalent
+  rules are byte-identical.
+
+  Result (`ATP_FV_INDEX=1 ATP_RULE_INDEX=1 ATP_VAR_NORM=1`): the
+  redundancy criteria fire.  At step 250 of completion `joinable`
+  drops jump from 3 (whole prior run) to **5720**, `queue-subsumed`
+  from 1 to **1636**; `rules` grows ~0.7/step (192 rules at step 250)
+  instead of 1:1; **0 duplicate rules** in R.  The inference ladder:
+  `cpl1` PROVED in **13 steps** (was divergent, never proved),
+  `cpl2` PROVED in 2, `subl2` PROVED in **14 steps** (was divergent).
+  The queue stays tiny (cps ~300-360) on the lemmas instead of
+  running away to 1.7M.
+
+  *The milestone target `thm` (54-step DoubleNegation) still does NOT
+  prove.*  var_norm makes redundancy fire and slows the divergence,
+  but `thm`'s queue still grows -- step 250 cps=60,882, step 500
+  cps=200,651 (~560/step net) -- and the run exhausts even the
+  256M-cell heap (with or without the Cheney GC, since the live set
+  itself is unbounded).  So 7c is necessary and unblocks the shallow
+  ladder, but not sufficient for the deep target: `thm` needs a
+  further convergence lever -- a stronger CP-selection heuristic, a
+  goal-directed strategy, or simplify-reflect / blocked-CP deletion
+  -- on top of the now-working redundancy criteria.
+
+  Gated behind `-DATP_VAR_NORM` (default OFF -- the all-flags-off
+  build stays the milestone-7 engine for A/B).  CHANGES BEHAVIOR by
+  design: the search trajectory differs because the redundancy
+  criteria now actually fire.  test_atp stays 8544/8544 on the flag;
+  `atp/orient-and-add-kbo-un-pushes-both` was updated -- under
+  var_norm the two orientations of an unorientable equation
+  `x = y` both renumber to `(v0, v1)` and the duplicate guard
+  collapses them to one rule (behavior-neutral for the rewriter:
+  byte-identical rules are indistinguishable to it), so that test now
+  asserts one stored rule plus that a re-add stores nothing.
 - **7e -- wire-through**: route `TFindEquationalProof`'s structured
   problems through completion; decode the PCL trace into a
   verifier-passing `ProofObject`.  (Also fixes the bound-symbol

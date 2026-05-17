@@ -2827,6 +2827,9 @@ fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
 fn u8   thvm_unify        (Term s, Term t, RewriteSubst *subst);
 fn Term thvm_rename_vars  (Term t, u32 offset);
 fn Term thvm_unify_apply  (Term t, const RewriteSubst *subst);
+// 7c: canonically renumber a stored equation/rule's variables to a
+// dense [0, k) set shared across both sides (alpha-renaming).
+fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 
 // === cp/ ===
 // Critical-pair enumeration for an oriented rule set (stage 4).

@@ -62,6 +62,22 @@ ATP_DEFINES += $(if $(filter-out 0,$(ATP_CP_DIAG)),-DATP_CP_DIAG,)
 ATP_RULE_INDEX ?=
 ATP_DEFINES    += $(if $(filter-out 0,$(ATP_RULE_INDEX)),-DATP_RULE_INDEX,)
 
+# Milestone 7c (convergence fix): -DATP_VAR_NORM canonically renumbers
+# the variables of every stored rule and queued CP to a dense [0, k)
+# set shared across both sides (alpha-renaming).  This keeps every
+# stored variable below the REWRITE_MAX_VAR (=64) matcher cliff -- the
+# CP enumerator bakes CP_RENAME_OFFSET into stored terms, so deep
+# overlaps otherwise carry ids past 64 where thvm_match goes dead and
+# all redundancy (joinability / subsumption / interreduction) dies.
+# Renumbering also makes alpha-equivalent rules/CPs byte-identical so
+# the dedup + duplicate-rule guard fire.  Off by default -- the
+# all-flags-off build is the milestone-7 (buggy, divergent) engine,
+# kept for A/B.  Independent of every other ATP flag.  CHANGES
+# BEHAVIOR by design: the search trajectory differs from the buggy
+# engine because the redundancy criteria now actually fire.
+ATP_VAR_NORM ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_VAR_NORM)),-DATP_VAR_NORM,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \

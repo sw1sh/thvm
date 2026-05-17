@@ -114,3 +114,104 @@ fn Term thvm_unify_apply(Term t, const RewriteSubst *subst) {
     default: return t;
   }
 }
+
+// === 7c: canonical variable normalization ==========================
+//
+// `thvm_normalize_vars` alpha-renames the variables of a stored
+// (lhs, rhs) equation/rule so they carry a canonically dense set of
+// ids `[0, k)`, k = the count of DISTINCT variables across BOTH
+// sides.  This is the convergence-fix unblocker (milestone 7c):
+//
+//   - The matcher / subst-apply (`src/rewrite/_.c`) silently treat
+//     any FVR with id >= REWRITE_MAX_VAR (=64) as an unmatchable
+//     constant.  The CP enumerator renames rule j by
+//     CP_RENAME_OFFSET and BAKES that offset into the stored CP, so
+//     deep overlaps carry ids that cross 64 -- past which the
+//     rewriter can no longer fire, killing joinability / subsumption.
+//   - Renumbering every stored rule and CP to a dense `[0, k)` set
+//     guarantees no stored variable ever crosses the cliff.
+//   - It is alpha-renaming: it does NOT change a term's meaning.  A
+//     variable occurring in both sides is ONE variable and gets ONE
+//     id (lhs and rhs share the numbering).
+//   - It makes alpha-equivalent rules/CPs BYTE-IDENTICAL, so the
+//     dedup / subsumption criteria start catching them.
+//
+// The walk is a fixed deterministic preorder: lhs fully, then rhs.
+// Each distinct old id is assigned the next free dense id by first
+// occurrence.
+
+// nv_map: old-id -> dense-id, as a first-occurrence-ordered list of
+// pairs.  Linear search is fine -- stored rules carry few distinct
+// variables.  REWRITE_MAX_VAR slots is ample headroom (canonical
+// output is always [0, k) with k far below REWRITE_MAX_VAR).
+typedef struct {
+  u32 old_id[REWRITE_MAX_VAR];
+  u32 n;
+} NvMap;
+
+// Look up `old`'s dense id, assigning the next free one on first
+// sight.  If the map is full (pathological -- more distinct vars
+// than REWRITE_MAX_VAR), fold onto the last slot rather than
+// overflow; downstream is no worse than the pre-7c behavior.
+static u32 nv_map_index(NvMap *m, u32 old) {
+  for (u32 i = 0; i < m->n; i++) {
+    if (m->old_id[i] == old) return i;
+  }
+  if (m->n >= REWRITE_MAX_VAR) return REWRITE_MAX_VAR - 1u;
+  m->old_id[m->n] = old;
+  return m->n++;
+}
+
+// First pass: walk `t` in preorder, registering each distinct FVR id
+// in `m` (assigning dense ids by first occurrence).
+static void nv_collect(Term t, NvMap *m) {
+  switch (term_tag(t)) {
+    case TAG_FVR: nv_map_index(m, term_ext(t)); break;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n > REWRITE_MAX_ARITY) return;
+      for (u32 i = 0; i < n; i++) nv_collect(term_ctr_at(t, i), m);
+      break;
+    }
+    default: break;
+  }
+}
+
+// Second pass: rebuild `t` with every FVR id replaced by its dense
+// id from the (already-populated) map.
+static Term nv_rewrite(Term t, const NvMap *m) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 old = term_ext(t);
+      for (u32 i = 0; i < m->n; i++) {
+        if (m->old_id[i] == old) return term_new_fvr(i);
+      }
+      return t;  // unreachable: nv_collect registered every id
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n > REWRITE_MAX_ARITY) return t;
+      Term children[REWRITE_MAX_ARITY];
+      for (u32 i = 0; i < n; i++) {
+        children[i] = nv_rewrite(term_ctr_at(t, i), m);
+      }
+      return term_new_ctr(term_ext(t), children, n);
+    }
+    default: return t;
+  }
+}
+
+// Canonically renumber the variables of the equation/rule
+// `(*lhs, *rhs)` in place.  The two sides SHARE the numbering: a
+// variable occurring in both is one variable with one dense id.
+// After the call, every FVR id is in `[0, k)` for some k <=
+// REWRITE_MAX_VAR.  Alpha-renaming -- preserves meaning.
+fn void thvm_normalize_vars(Term *lhs, Term *rhs) {
+  if (lhs == NULL || rhs == NULL) return;
+  NvMap m;
+  m.n = 0;
+  nv_collect(*lhs, &m);
+  nv_collect(*rhs, &m);
+  *lhs = nv_rewrite(*lhs, &m);
+  *rhs = nv_rewrite(*rhs, &m);
+}

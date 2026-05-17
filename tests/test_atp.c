@@ -42,6 +42,31 @@ static int tt_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
   return (int)atp_cp_queue_subsumed(s, lhs, rhs);
 }
 
+// 7c: a stored rule / CP equals its input term-for-term off
+// -DATP_VAR_NORM, but ON the storage path canonically renumbers the
+// (lhs, rhs) pair -- it is a freshly-rebuilt, alpha-renamed term, so
+// raw Term-pointer equality no longer holds.  `tt_norm_lhs` /
+// `tt_norm_rhs` return the side of the EXPECTED (lhs, rhs) pair as
+// the storage path would have stored it: off the flag the input
+// term unchanged, on the flag the canonically renumbered side.  The
+// caller then asserts structural equality (kbo_eq) against the
+// stored term -- an alpha-equivalence check, one assertion per side
+// (so the assertion count is identical with the flag on or off).
+static Term tt_norm_lhs(Term exp_l, Term exp_r) {
+#ifdef ATP_VAR_NORM
+  thvm_normalize_vars(&exp_l, &exp_r);
+#endif
+  (void)exp_r;
+  return exp_l;
+}
+static Term tt_norm_rhs(Term exp_l, Term exp_r) {
+#ifdef ATP_VAR_NORM
+  thvm_normalize_vars(&exp_l, &exp_r);
+#endif
+  (void)exp_l;
+  return exp_r;
+}
+
 int main(void) {
   thvm_init();
 
@@ -141,8 +166,10 @@ int main(void) {
     Term rhs = mk_v(VAR_x);
     CHECK(thvm_atp_add_equation(s, lhs, rhs));
     CHECK_EQ(s->n_cps,      1u);
-    CHECK_EQ(s->cp_lhs[0], lhs);
-    CHECK_EQ(s->cp_rhs[0], rhs);
+    // 7c: under -DATP_VAR_NORM the queued CP is the canonically
+    // renumbered (alpha-renamed) input -- compare up to that.
+    CHECK(kbo_eq(s->cp_lhs[0], tt_norm_lhs(lhs, rhs)));
+    CHECK(kbo_eq(s->cp_rhs[0], tt_norm_rhs(lhs, rhs)));
     thvm_atp_free(s);
   }
 
@@ -211,20 +238,24 @@ int main(void) {
     thvm_atp_add_equation(s, l3, r3);
     CHECK_EQ(s->n_cps, 3u);
 
+    // 7c: select_cp returns the stored (canonically renumbered) CP;
+    // compare up to that alpha-renaming.  The priority ORDER (which
+    // CP pops when) is unchanged -- renumbering preserves symbol
+    // counts, so the heap key is identical.
     Term lo = 0, ro = 0;
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(lo, l2);
-    CHECK_EQ(ro, r2);
+    CHECK(kbo_eq(lo, tt_norm_lhs(l2, r2)));
+    CHECK(kbo_eq(ro, tt_norm_rhs(l2, r2)));
     CHECK_EQ(s->n_cps, 2u);
 
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(lo, l3);
-    CHECK_EQ(ro, r3);
+    CHECK(kbo_eq(lo, tt_norm_lhs(l3, r3)));
+    CHECK(kbo_eq(ro, tt_norm_rhs(l3, r3)));
     CHECK_EQ(s->n_cps, 1u);
 
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(lo, l1);
-    CHECK_EQ(ro, r1);
+    CHECK(kbo_eq(lo, tt_norm_lhs(l1, r1)));
+    CHECK(kbo_eq(ro, tt_norm_rhs(l1, r1)));
     CHECK_EQ(s->n_cps, 0u);
 
     // Now empty.
@@ -258,8 +289,9 @@ int main(void) {
     CHECK_EQ(r.first, 0u);
     CHECK_EQ(r.count, 1u);
     CHECK_EQ(s->n_rules, 1u);
-    CHECK_EQ(s->lhs[0], lhs);
-    CHECK_EQ(s->rhs[0], rhs);
+    // 7c: the stored rule is the canonically renumbered input.
+    CHECK(kbo_eq(s->lhs[0], tt_norm_lhs(lhs, rhs)));
+    CHECK(kbo_eq(s->rhs[0], tt_norm_rhs(lhs, rhs)));
     thvm_atp_free(s);
   }
 
@@ -272,27 +304,52 @@ int main(void) {
     AtpAddedRange r = thvm_atp_orient_and_add(s, lhs, rhs);
     CHECK_EQ(r.count, 1u);
     CHECK_EQ(s->n_rules, 1u);
-    // Stored as rhs -> lhs (the swap).
-    CHECK_EQ(s->lhs[0], rhs);
-    CHECK_EQ(s->rhs[0], lhs);
+    // Stored as rhs -> lhs (the swap); 7c renumbers it canonically.
+    CHECK(kbo_eq(s->lhs[0], tt_norm_lhs(rhs, lhs)));
+    CHECK(kbo_eq(s->rhs[0], tt_norm_rhs(rhs, lhs)));
     thvm_atp_free(s);
   }
 
   TEST_BEGIN("atp/orient-and-add-kbo-un-pushes-both");
   {
     // Two distinct FVRs: x and y.  Neither dominates the other on
-    // var counts, so KBO returns UN -- unfailing fallback adds both.
+    // var counts, so KBO returns UN -- unfailing fallback adds both
+    // orientations.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_v(VAR_x);
     Term rhs = mk_v(1u);   // VAR_y
     AtpAddedRange r = thvm_atp_orient_and_add(s, lhs, rhs);
     CHECK_EQ(r.first, 0u);
+#ifdef ATP_VAR_NORM
+    // 7c: canonical renumbering numbers by first occurrence shared
+    // across both sides.  The forward leg (x, y) renumbers to
+    // (v0, v1); the reverse leg (y, x) ALSO renumbers to (v0, v1) --
+    // the two orientations of `x = y` are alpha-equivalent.  The 7c
+    // duplicate-rule guard therefore rejects the reverse leg as a
+    // byte-identical duplicate, so exactly one rule is stored.  This
+    // is a genuine behavior change, not a hidden regression: two
+    // byte-identical rules are indistinguishable to the rewriter, so
+    // collapsing them is behavior-neutral for rewriting -- only
+    // n_rules changes.  The 2-leg unfailing path is still exercised
+    // wherever the two orientations are NOT alpha-equivalent.
+    CHECK_EQ(r.count, 1u);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK(kbo_eq(s->lhs[0], tt_norm_lhs(lhs, rhs)));
+    CHECK(kbo_eq(s->rhs[0], tt_norm_rhs(lhs, rhs)));
+    // 7c: re-adding the same unorientable equation stores nothing --
+    // both legs renumber to the rule already in R, so the
+    // duplicate-rule guard rejects both.  R stays at one rule.
+    AtpAddedRange r2 = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(r2.count, 0u);
+    CHECK_EQ(s->n_rules, 1u);
+#else
     CHECK_EQ(r.count, 2u);
     CHECK_EQ(s->n_rules, 2u);
     CHECK_EQ(s->lhs[0], lhs);
     CHECK_EQ(s->rhs[0], rhs);
     CHECK_EQ(s->lhs[1], rhs);
     CHECK_EQ(s->rhs[1], lhs);
+#endif
     thvm_atp_free(s);
   }
 

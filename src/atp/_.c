@@ -2078,6 +2078,12 @@ fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
       return 0;
     }
   }
+#ifdef ATP_VAR_NORM
+  // 7c: an axiom enters the engine as a queued CP.  Canonicalize its
+  // variables here so the very first CP, like every later-derived
+  // one, carries a dense [0, k) variable set.
+  thvm_normalize_vars(&lhs, &rhs);
+#endif
   u32 trace_idx = atp_trace_push(s, TRACE_AXIOM,
                                  ATP_TRACE_NONE, ATP_TRACE_NONE,
                                  lhs, rhs);
@@ -2325,8 +2331,26 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
 
 // Push one rule onto R; the rule array is growable, so this always
 // succeeds (returns 1) unless the state pointer is NULL.
+//
+// 7c: under -DATP_VAR_NORM the rule's variables are canonically
+// renumbered before storage (dense [0, k), shared across both
+// sides) -- alpha-renaming that keeps every stored variable below
+// the REWRITE_MAX_VAR matcher cliff -- and an identical rule
+// already in R (both sides `kbo_eq`) is rejected (returns 0,
+// nothing stored).  The renumbering makes alpha-equivalent rules
+// byte-identical, so the duplicate guard catches the "add the same
+// rule 300x" pathology that interreduction's subsumption misses
+// while the matcher is dead on out-of-range variables.
 static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return 0;
+#ifdef ATP_VAR_NORM
+  thvm_normalize_vars(&lhs, &rhs);
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (kbo_eq(s->lhs[i], lhs) && kbo_eq(s->rhs[i], rhs)) {
+      return 0;  // duplicate rule -- already in R
+    }
+  }
+#endif
   atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
@@ -2902,16 +2926,27 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   (void)rule_b;
 #endif
   for (u32 i = 0; i < ncps; i++) {
-    u8 joinable    = atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs);
+    Term cp_lhs = cps[i].lhs;
+    Term cp_rhs = cps[i].rhs;
+#ifdef ATP_VAR_NORM
+    // 7c: canonically renumber the CP's variables before it lands in
+    // the queue.  The CP enumerator bakes CP_RENAME_OFFSET into the
+    // stored term, so deep overlaps carry ids past REWRITE_MAX_VAR
+    // where the matcher goes dead.  Renumbering to a dense [0, k) set
+    // keeps every stored var matchable AND makes alpha-equivalent CPs
+    // byte-identical so the subsumption filters below actually fire.
+    thvm_normalize_vars(&cp_lhs, &cp_rhs);
+#endif
+    u8 joinable    = atp_cp_trivially_joinable(s, cp_lhs, cp_rhs);
     // 8e: under -DATP_CP_GRAPH this runs ONE thvm_match_multi
     // traversal of cp_graph; off the flag it is the array scan.
-    u8 q_subsmd    = atp_cp_queue_subsumed(s, cps[i].lhs, cps[i].rhs);
+    u8 q_subsmd    = atp_cp_queue_subsumed(s, cp_lhs, cp_rhs);
 #ifdef ATP_CP_DIAG
-    if (atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
+    if (atp_cp_source_disjoint_connected(s, cp_lhs, cp_rhs,
                                          rule_a, rule_b)) {
       s->n_cps_dropped_connected++;
     }
-    if (atp_cp_rule_subsumed(s, cps[i].lhs, cps[i].rhs)) {
+    if (atp_cp_rule_subsumed(s, cp_lhs, cp_rhs)) {
       s->n_cps_dropped_rule_subsumed++;
     }
 #endif
@@ -2924,8 +2959,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       continue;
     }
     u32 t = atp_trace_push(s, TRACE_CP, parent_a, parent_b,
-                           cps[i].lhs, cps[i].rhs);
-    atp_cp_heap_push(s, cps[i].lhs, cps[i].rhs, t);
+                           cp_lhs, cp_rhs);
+    atp_cp_heap_push(s, cp_lhs, cp_rhs, t);
     pushed++;
   }
 #if defined(ATP_CP_GRAPH) && defined(ATP_MATCH_STATS)
@@ -3126,12 +3161,16 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
     case KBO_UN: {
       // Unfailing fallback: reserve 2 slots up front so the pair is
       // added atomically (the array is growable, so this can't fail).
+      // 7c: atp_push_rule may reject either orientation as a
+      // duplicate -- r must span exactly the rules actually stored,
+      // so generate_cps overlaps only the freshly-added range.
       atp_ensure_rule_cap(s, s->n_rules + 2);
       u32 idx = s->n_rules;
-      atp_push_rule(s, lhs, rhs);
-      atp_push_rule(s, rhs, lhs);
+      u32 added = 0;
+      added += atp_push_rule(s, lhs, rhs) ? 1u : 0u;
+      added += atp_push_rule(s, rhs, lhs) ? 1u : 0u;
       r.first = idx;
-      r.count = 2;
+      r.count = added;
       return r;
     }
     case KBO_EQ:
