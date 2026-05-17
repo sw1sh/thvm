@@ -1137,3 +1137,41 @@ early-phase sample looked smaller; corrected.)
 levers that remain are the reduction ordering itself -- Waldmeister's
 most-emphasized control, repeatedly deprioritized here -- or a
 goal-directed proof procedure instead of blind saturation.
+
+### Ordering experiment -- and the conclusion for `thm`
+
+The bench gained an `ATP_BENCH_ORD` switch (`kbo` default, `kbo0` =
+KBO with var_weight 0, `lpo` = lexicographic path ordering -- the
+`thvm_lpo` engine code already existed).  Measured on `thm`:
+
+| ordering | step 250            | step 500              |
+|----------|---------------------|-----------------------|
+| kbo      | rules=191 cps=59892 | rules=357 cps=208628  |
+| kbo0     | rules=191 cps=59892 | rules=357 cps=208628  |
+| lpo      | rules=191 cps=64312 | rules=357 cps=218241  |
+
+`kbo0` is byte-identical to `kbo`; `lpo` derives the *same* rule
+counts but slightly *more* CPs.  The ordering lever does not help
+`thm` -- with a single function symbol the ordering space is too
+constrained for the KBO/LPO swing the Waldmeister docs describe (their
+decisive examples are multi-symbol: distributivity, a precedence
+between + and x).
+
+**Conclusion.** `thm` -- saturating the Wolfram NAND axiom to
+DoubleNegation -- is not reachable by this saturation-based completion
+engine.  Every lever has been measured and exhausted: redundancy
+(9a/9b), ordered rewriting + ground-joinability (9c -- vacuous, no
+unorientable equations arise), and the reduction ordering (above).
+The CP queue diverges with an accelerating rate under all of them.
+`thm` needs a fundamentally different proof procedure: goal-directed
+proof *search* from the conjecture (the way WL's `FindEquationalProof`
+finds its 54-step proof), not blind forward saturation.  That is a
+separate engine, not a lever -- the honest stopping point for this
+arc.
+
+What the arc delivered: an equational ATP that went from diverging on
+the distance-1 lemma to proving `cpl1`/`cpl2`/`subl2`, ~3-74x faster
+(7d subsumption index + the normalization-wall fix), with goal-directed
+selection (9a), orphan deletion (9b), and order-aware rewriting
+(9c-foundation) -- all sound, all flag-gated, `test_atp` 8544/8544
+throughout.

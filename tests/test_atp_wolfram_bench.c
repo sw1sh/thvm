@@ -99,17 +99,25 @@ int main(int argc, char **argv) {
   u32    step_cap  = (argc > 2) ? (u32)strtoul(argv[2], NULL, 10) : 200000u;
   double wall_cap  = (argc > 3) ? strtod(argv[3], NULL)          : 120.0;
 
-  // KBO: one binary symbol `nand` (label 1), weight 1, var weight 1
-  // -- KBO weight is then plain symbol count, so a deeply-nested
-  // lhs outweighs a bare-variable rhs and orients lhs -> rhs.
+  // Reduction ordering.  Default KBO (one binary symbol `nand`,
+  // weight 1, var weight 1 -- KBO weight is plain symbol count, so a
+  // deeply-nested lhs outweighs a bare-variable rhs).  ATP_BENCH_ORD
+  // selects an alternative for the ordering experiment:
+  //   "kbo0" -- KBO with var_weight 0 (variables weigh nothing)
+  //   "lpo"  -- lexicographic path ordering instead of KBO
+  const char *ord_env = getenv("ATP_BENCH_ORD");
+  int use_lpo  = (ord_env != NULL && strcmp(ord_env, "lpo")  == 0);
+  int use_kbo0 = (ord_env != NULL && strcmp(ord_env, "kbo0") == 0);
   static u32 weights[2]    = { 0u, 1u };
   static u32 precedence[2] = { 0u, 1u };
   KboConfig cfg = {
     .weights    = weights,
     .precedence = precedence,
     .n_labels   = 2u,
-    .var_weight = 1u,
+    .var_weight = use_kbo0 ? 0u : 1u,
   };
+  static u32 lpo_prec[2] = { 0u, 1u };
+  static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 2u };
 
   // cpgen mode: generate the critical pairs of the axiom with
   // itself -- the distance-1 lemmas -- in ONE CP-generation call,
@@ -148,6 +156,7 @@ int main(int argc, char **argv) {
   }
 
   AtpState *s = thvm_atp_init(&cfg, step_cap);
+  if (use_lpo) thvm_atp_set_lpo(s, &lpo);
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
   Term gl = 0, gr = 0;
@@ -158,7 +167,8 @@ int main(int argc, char **argv) {
   thvm_atp_set_goal(s, gl, gr);
 
   printf("=== Wolfram-axiom completion : goal=%s ===\n", goal);
-  printf("step_cap=%u  wall_cap=%.0fs\n", step_cap, wall_cap);
+  printf("ordering=%s  step_cap=%u  wall_cap=%.0fs\n",
+         use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"), step_cap, wall_cap);
 
   clock_t   t0  = clock();
   AtpStatus st  = ATP_RUNNING;
