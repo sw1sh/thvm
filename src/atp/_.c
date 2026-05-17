@@ -2737,8 +2737,56 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
 // the coverage to sub-positions without changing this function.
 //
 // Returns the number of older rules that were dropped.
+#ifdef ATP_ORPHAN_KILL
+// 9b: orphan deletion (Waldmeister's "Waisenmord", orphan murder).
+// When interreduce drops a rule, the queued CPs descended from it are
+// redundant -- the re-queued reduced equation regenerates whatever
+// they would contribute.  `dead` holds the trace ids of the dropped
+// rules; a queued CP is an orphan iff its TRACE_CP entry names a dead
+// rule as a parent.  Survivors are compacted down and the queue heap
+// / FV index / cp_graph rebuilt via thvm_atp_cp_reheapify.
+static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
+  if (s == NULL || n_dead == 0 || s->n_cps == 0) return;
+  u32 w = 0;
+  for (u32 i = 0; i < s->n_cps; i++) {
+    int orphan = 0;
+    u32 ti = s->cp_trace[i];
+    if (ti != ATP_TRACE_NONE && ti < s->n_trace) {
+      Term te = s->trace[ti];
+      if (term_tag(te) == TAG_CTR && term_ext(te) == TRACE_CP) {
+        u32 pa = (u32)term_val(term_ctr_at(te, 0));
+        u32 pb = (u32)term_val(term_ctr_at(te, 1));
+        for (u32 d = 0; d < n_dead; d++) {
+          if (pa == dead[d] || pb == dead[d]) { orphan = 1; break; }
+        }
+      }
+    }
+    if (!orphan) {
+      if (w != i) {
+        s->cp_lhs[w]   = s->cp_lhs[i];
+        s->cp_rhs[w]   = s->cp_rhs[i];
+        s->cp_trace[w] = s->cp_trace[i];
+        s->cp_pri[w]   = s->cp_pri[i];
+        s->cp_seq[w]   = s->cp_seq[i];
+      }
+      w++;
+    }
+  }
+  if (w != s->n_cps) {
+    s->n_cps = w;
+    thvm_atp_cp_reheapify(s);   // rebuilds heap + FV index + cp_graph
+  }
+}
+#endif /* ATP_ORPHAN_KILL */
+
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
+#ifdef ATP_ORPHAN_KILL
+  // 9b: collect the trace ids of rules dropped below, then kill the
+  // queued CPs descended from them once the compaction loop is done.
+  u32 *atp_dead   = (u32 *)malloc(added.first * sizeof(u32));
+  u32  atp_n_dead = 0;
+#endif
 
   // Copy the new rules' Terms by value so we can safely compact the
   // R array beneath them.  Term is 64-bit; the heap cells they point
@@ -2762,6 +2810,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // The older rule's LHS simplified -- drop it and requeue
       // (reduced, old_rhs) for re-orientation.
       thvm_atp_add_equation(s, reduced, old_rhs);
+#ifdef ATP_ORPHAN_KILL
+      // Capture the dropped rule's trace id before the shift below
+      // overwrites r_trace[i].  Its descendant CPs are now orphans.
+      if (atp_dead != NULL && s->r_trace[i] != ATP_TRACE_NONE) {
+        atp_dead[atp_n_dead++] = s->r_trace[i];
+      }
+#endif
       for (u32 j = i + 1; j < s->n_rules; j++) {
         s->lhs[j - 1]     = s->lhs[j];
         s->rhs[j - 1]     = s->rhs[j];
@@ -2780,6 +2835,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       i++;
     }
   }
+#ifdef ATP_ORPHAN_KILL
+  if (atp_dead != NULL) {
+    if (atp_n_dead > 0) atp_cp_kill_orphans(s, atp_dead, atp_n_dead);
+    free(atp_dead);
+  }
+#endif
   return dropped;
 }
 

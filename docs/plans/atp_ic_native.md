@@ -1083,4 +1083,19 @@ penalty is capped to reorder only within a few size-units.  Result:
 `test_atp` 8544/8544, `cpl1` 13->11 steps, `cpl2` 2->1, `subl2`
 14->22 (all still prove fast); `thm` queue ~3-7% smaller but still
 divergent.  Selection alone cannot bound a runaway queue -- that is
-levers 9b (ground-joinability) and 9c (orphan deletion).
+levers 9b (orphan deletion) and 9c (ground-joinability).
+
+### 9b -- orphan deletion / Waisenmord (DONE)
+
+`-DATP_ORPHAN_KILL`.  When `thvm_atp_interreduce` drops a rule, the
+queued CPs descended from it are redundant -- the re-queued reduced
+equation regenerates whatever they would contribute.  The trace DAG
+makes this cheap: each dropped rule's trace id is captured, and a CP
+is an orphan iff its `TRACE_CP` entry names a dead rule as a parent.
+Orphans are compacted out of the queue; the heap / FV index /
+cp_graph are rebuilt via `thvm_atp_cp_reheapify`.  Result: `test_atp`
+8544/8544, the ladder still proves (cpl1 12, cpl2 1, subl2 21);
+`thm` still divergent -- orphan deletion is bursty (it fires only on
+rule drops) and the trajectory churn roughly cancels the gain on
+this single-symbol problem.  9a + 9b together do not crack `thm`;
+the strong *steady* redundancy lever is 9c (ground-joinability).

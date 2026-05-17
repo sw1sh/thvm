@@ -92,6 +92,17 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_VAR_NORM)),-DATP_VAR_NORM,)
 ATP_GOAL_HEURISTIC ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_GOAL_HEURISTIC)),-DATP_GOAL_HEURISTIC,)
 
+# thm convergence (Waldmeister lever 2): -DATP_ORPHAN_KILL adds orphan
+# deletion (Waldmeister's "Waisenmord").  When interreduction drops a
+# rule, the queued critical pairs descended from it are redundant --
+# the re-queued reduced equation regenerates whatever they contribute
+# -- so they are compacted out of the CP queue.  Bounds the runaway
+# queue.  Off by default; independent of every other ATP flag.  CHANGES
+# BEHAVIOR (a redundancy criterion -- a sound completion criterion, the
+# search trajectory moves).
+ATP_ORPHAN_KILL ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \
