@@ -623,14 +623,32 @@ static int jit_assign_sink_safe(JitCaptureOp const *producer,
       || dst->view.numel != ke->output_numel) {
     return 0;
   }
-  // Conservative bail: the scalar-uops-based coord-equality check that
-  // used to live here was the only consumer of the now-deprecated
-  // ScalarUop arena in this file.  The optimization elided redundant
-  // metal-tile -> assign copies; re-port on cached_lift.store_root
-  // (UOp DAG) when reviving.  Until then, never sink: extra copy but
-  // correctness preserved.
-  (void)ke;
-  return 0;
+  // The producer must write a contiguous row-major fill covering exactly
+  // output_numel positions in its output buffer.  We approximate that by
+  // walking cached_lift.store_root and verifying the product of its
+  // non-reduce axes' extents equals output_numel: a METAL_TILE kernel
+  // whose lifted DAG addresses each output element exactly once via the
+  // standard rangeified addr expression.  uop_dag_collect_axes returns
+  // every UOP_RANGE leaf in the DAG; we skip KAX_REDUCE axes (those
+  // appear in the reduce body, not the output addressing).
+  Term root = ke->cached_lift.store_root;
+  if (root == 0 || term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) {
+    return 0;
+  }
+  u32 axis_ids  [MAX_DIM];
+  u32 axis_types[MAX_DIM];
+  u32 extents   [MAX_DIM];
+  u32 n_axes = uop_dag_collect_axes(root, axis_ids, axis_types, extents, MAX_DIM);
+  if (n_axes == 0) return 0;
+  u64 product = 1;
+  for (u32 i = 0; i < n_axes; i++) {
+    if (axis_types[i] == KAX_REDUCE) continue;
+    if (extents[i] == 0) return 0;
+    product *= extents[i];
+    if (product > 0xFFFFFFFFu) return 0;
+  }
+  if ((u32)product != ke->output_numel) return 0;
+  return 1;
 }
 
 static int jit_capture_op_refs_buf(JitCaptureOp const *op,
