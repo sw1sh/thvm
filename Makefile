@@ -37,6 +37,20 @@ ATP_DEFINES     += $(if $(filter-out 0,$(ATP_MATCH_STATS)),-DATP_CP_GRAPH -DATP_
 ATP_FV_INDEX ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FV_INDEX)),-DATP_FV_INDEX,)
 
+# Milestone 7e (normalization wall, lever 1): -DATP_CP_DIAG re-enables
+# the two COUNTER-ONLY CP filters in `atp_push_cps_traced` --
+# `atp_cp_source_disjoint_connected` (7.2b) and `atp_cp_rule_subsumed`
+# (7.3a).  Their verdicts feed only `n_cps_dropped_connected` /
+# `n_cps_dropped_rule_subsumed`; neither ever drops a CP, so the
+# default build skips both calls (each is two full
+# `atp_rewrite_normalize` passes + an O(n_rules) match scan -- ~half
+# the per-CP filter cost).  Skipping them is behavior-identical: same
+# CPs queued, same proof.  Set ATP_CP_DIAG=1 to recover the
+# measurement counters.  The functions stay defined either way (the
+# test_atp unit tests call them directly).
+ATP_CP_DIAG ?=
+ATP_DEFINES += $(if $(filter-out 0,$(ATP_CP_DIAG)),-DATP_CP_DIAG,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \

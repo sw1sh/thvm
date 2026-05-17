@@ -2410,14 +2410,23 @@ static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
 // silently.  Filters and counters fire on each CP:
 //   - 7.1:  trivially-joinable under R         -> drop, tick `n_cps_dropped_joinable`
 //   - 7.2b: source-rule-disjoint connected     -> tick `n_cps_dropped_connected`
-//                                                 (counter only)
+//                                                 (counter only, -DATP_CP_DIAG)
 //   - 7.3a: rule-subsumed by some `(l, r) ∈ R` -> tick `n_cps_dropped_rule_subsumed`
-//                                                 (counter only)
+//                                                 (counter only, -DATP_CP_DIAG)
 //   - 7.3b: queue-subsumed by some queued CP   -> drop, tick `n_cps_dropped_queue_subsumed`
 //                                                 (real filter, orthogonal to 7.1)
 // `rule_a`/`rule_b` are the rule indices that birthed this CP batch
 // (passed through to the connectedness check); `parent_a`/`parent_b`
 // are their trace indices.  Returns count of CPs pushed.
+//
+// 7e lever 1: the 7.2b connectedness and 7.3a rule-subsumption checks
+// are COUNTER-ONLY -- their verdicts feed `n_cps_dropped_connected` /
+// `n_cps_dropped_rule_subsumed` and never drop a CP (only `joinable`
+// and `q_subsmd` `continue`).  Each is two full `atp_rewrite_normalize`
+// passes (plus a malloc) / an O(n_rules) two-sided match scan -- about
+// half the per-CP filter cost.  They run only under -DATP_CP_DIAG;
+// the default hot loop skips them.  Skipping is behavior-identical:
+// same CPs queued, same proof, identical step/rule/cps trajectory.
 static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
@@ -2425,16 +2434,24 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
 #if defined(ATP_CP_GRAPH) && defined(ATP_MATCH_STATS)
   clock_t mm_t0 = clock();
 #endif
+#ifndef ATP_CP_DIAG
+  (void)rule_a;
+  (void)rule_b;
+#endif
   for (u32 i = 0; i < ncps; i++) {
     u8 joinable    = atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs);
-    u8 connected   = atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
-                                                      rule_a, rule_b);
-    u8 rule_subsmd = atp_cp_rule_subsumed(s, cps[i].lhs, cps[i].rhs);
     // 8e: under -DATP_CP_GRAPH this runs ONE thvm_match_multi
     // traversal of cp_graph; off the flag it is the array scan.
     u8 q_subsmd    = atp_cp_queue_subsumed(s, cps[i].lhs, cps[i].rhs);
-    if (connected)   s->n_cps_dropped_connected++;
-    if (rule_subsmd) s->n_cps_dropped_rule_subsumed++;
+#ifdef ATP_CP_DIAG
+    if (atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
+                                         rule_a, rule_b)) {
+      s->n_cps_dropped_connected++;
+    }
+    if (atp_cp_rule_subsumed(s, cps[i].lhs, cps[i].rhs)) {
+      s->n_cps_dropped_rule_subsumed++;
+    }
+#endif
     if (joinable) {
       s->n_cps_dropped_joinable++;
       continue;
