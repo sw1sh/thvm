@@ -1357,6 +1357,15 @@ match them), so under `noAnti` MNF stays at `nodes=2` and waits --
 exactly Waldmeister's design: completion must derive the closing rule.
 My completion engine reaches only ~150 steps / 124 rules in 90s, far
 short of `thm`'s depth.  MNF is no longer the wall; completion
-throughput is.  The next lever is either a faster completion engine or
-the `antiWOVar` escape hatch (`MNF_MAX_ANTI > 0`) for goals whose
-sides are R-irreducible.
+throughput is.
+
+The `antiWOVar` escape hatch was then swept to confirm this.
+`MNF_MAX_ANTI` is now overridable (`-DMNF_MAX_ANTI=N`, default 0).
+With `N = 1..4` the backward steps let `thm`'s fronts climb out of
+their R-irreducible normal forms and the MNF set grows -- but stays
+*controlled* (82 nodes at `N=1`, not the 158k of the old best-first
+fan-out: the depth-first deque holds even with anti).  `thm` still
+does not join at any cap: the 54-step proof is simply not reachable
+within R's 124-rule frontier, with or without backward steps.  This
+pins the verdict -- the lever for `thm` is completion throughput, full
+stop.

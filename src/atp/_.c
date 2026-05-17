@@ -2872,8 +2872,10 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // defaults to noAnti -- forward normalisation only -- and relies on
 // completion to grow R until the fronts' forward reducts coincide.  A
 // non-zero cap opts into variable-safe backward steps, capped per
-// lineage (Waldmeister's antiWOVar).
+// lineage (Waldmeister's antiWOVar).  Overridable with -DMNF_MAX_ANTI=N.
+#ifndef MNF_MAX_ANTI
 #define MNF_MAX_ANTI   0u
+#endif
 #define MNF_MAX_NODES  400000u
 #define MNF_SUCC_CAP   2048u
 #define MNF_BUDGET     192u
