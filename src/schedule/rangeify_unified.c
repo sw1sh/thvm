@@ -1525,9 +1525,13 @@ fn void pm_apply_rangeify(Term root) {
       // UOP_STORE(out_buf, addr, value) where out_buf is shaped by
       // the n_closed RANGE extents and dtype comes from the
       // rewritten value.  Only emit if dtype is recoverable; the
-      // legacy lifter remains the fallback otherwise.
+      // legacy lifter remains the fallback otherwise.  Note: DT_BOOL
+      // == 0 is a valid dtype, so we MUST use term_dtype_in's return
+      // value rather than gating on `store_dtype != 0` -- the latter
+      // would silently drop every cast-to-bool kernel and leave its
+      // output buffer at the init zeros.
       u32 store_dtype = 0;
-      if (term_dtype_in(self, 0, &store_dtype) && store_dtype != 0) {
+      if (term_dtype_in(self, 0, &store_dtype)) {
         Shape out_shape = {0};
         if (term_shape_in(self, 0, &out_shape) && out_shape.ndim <= MAX_DIM) {
           Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, store_dtype,
