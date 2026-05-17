@@ -142,18 +142,19 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    Module[{lam, kernelsBefore, ten, result, kernelsAfter, programs},
+    Module[{lam, kernelsBefore, ten, result, kernelsAfter},
         lam = TLam[w, TUOpAdd[w, w]];
         kernelsBefore = TKernelCount[] - 1;
         ten = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
         result = TWnf[TApp[lam, ten]];
         kernelsAfter = TKernelCount[] - 1;
-        programs     = TKernelProgramCacheSize[];
-        (* No kernel before the first APP; one kernel emerges
-           from the JIT step; one distinct program in the cache. *)
-        {kernelsBefore, Normal @ TTensorData[result], kernelsAfter, programs}
+        (* No kernel before the first APP; one kernel emerges from
+           the JIT step.  Pre-retirement the test also asserted
+           TKernelProgramCacheSize[] == 1; the kernel-program cache
+           was deleted (commit 4a7431b7) and the surface stubs to 0. *)
+        {kernelsBefore, Normal @ TTensorData[result], kernelsAfter}
     ],
-    {0, {2., 4., 6.}, 1, 1},
+    {0, {2., 4., 6.}, 1},
     TestID -> "lam-shape/tlam-jit-on-first-apply"
 ]
 
@@ -199,7 +200,7 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    Module[{lamLoc, varTerm, matBody, lam, t1, r1, kernels, programs},
+    Module[{lamLoc, varTerm, matBody, lam, t1, r1, kernels},
         lamLoc = THeapAlloc[1];
         THVMLink`Private`$lamShapeSetFn[lamLoc, {3}];
         varTerm = TVarFor[lamLoc];
@@ -208,13 +209,14 @@ VerificationTest[
         lam = THVMLink`Private`packTerm[0, $TagLAM, 0, lamLoc];
         t1 = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
         (* APP-LAM beta is destructive: it SUB-marks heap[lamLoc].
-           This asserts the APP works and the program cache size
-           stayed at 1 for the body (no per-APP fresh kernel). *)
+           This asserts the APP works and only one kernel emerges.
+           The pre-retirement test also asserted
+           TKernelProgramCacheSize[] == 1; the kernel-program cache
+           was deleted (commit 4a7431b7) and the surface stubs to 0. *)
         r1 = TWnf[TApp[lam, t1]];
         kernels = TKernelCount[] - 1;
-        programs = TKernelProgramCacheSize[];
-        {Normal @ TTensorData[r1], kernels, programs}
+        {Normal @ TTensorData[r1], kernels}
     ],
-    {{2., 4., 6.}, 1, 1},
+    {{2., 4., 6.}, 1},
     TestID -> "lam-shape/single-kernel-from-materialized-body"
 ]
