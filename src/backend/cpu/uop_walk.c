@@ -486,6 +486,24 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
         pun.f = (f32)f;
         return (i64)(i32)pun.b;
       }
+      // For smaller-than-32-bit bit reinterpret (u16, u8, etc.) and
+      // f16/bf16/fp8 sources, eval_int(INDEX_E) would route through
+      // fp_convert.c's value-preserving load and lose the bits.  Read
+      // raw bytes from the source buffer when src is a direct INDEX_E.
+      if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_INDEX_E) {
+        u64 iloc = term_val(src);
+        Term buf = heap_read(iloc + 0);
+        Term addr = heap_read(iloc + 1);
+        void *bp; u32 bdt;
+        if (uwalk_resolve_buf(c, buf, &bp, &bdt)) {
+          i64 off = uwalk_eval_int(c, addr);
+          u32 sz = dtype_itemsize(bdt);
+          if (sz == 1) return (i64)((u8  *)bp)[off];
+          if (sz == 2) return (i64)((u16 *)bp)[off];
+          if (sz == 4) return (i64)((u32 *)bp)[off];
+          if (sz == 8) return (i64)((u64 *)bp)[off];
+        }
+      }
       return uwalk_eval_int(c, src);
     }
     case UOP_OPT:
