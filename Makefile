@@ -26,6 +26,17 @@ ATP_MATCH_STATS ?=
 ATP_DEFINES     += $(if $(filter-out 0,$(ATP_NORM_STATS)),-DATP_CP_GRAPH -DATP_NORM_STATS,)
 ATP_DEFINES     += $(if $(filter-out 0,$(ATP_MATCH_STATS)),-DATP_CP_GRAPH -DATP_MATCH_STATS,)
 
+# Milestone 7d: -DATP_FV_INDEX adds a feature-vector subsumption index
+# over the CP queue (and rule set) -- a sound over-approximation that
+# turns the O(n_cps) thvm_match scan in atp_cp_queue_subsumed into an
+# O(retrieval) candidate lookup + thvm_match on the survivors.  Off by
+# default -- the milestone-7 array scan is the regression oracle and
+# ships byte-for-byte.  Independent of -DATP_CP_GRAPH.  Both flag
+# states must compile and produce behavior-identical proofs.
+# `make ATP_FV_INDEX=1 bin/test_atp` builds the indexed path.
+ATP_FV_INDEX ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FV_INDEX)),-DATP_FV_INDEX,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \

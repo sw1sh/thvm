@@ -814,6 +814,583 @@ static inline void atp_cp_graph_sync(AtpState *s) { (void)s; }
 
 #endif // ATP_CP_GRAPH
 
+// === 7d: CP-queue subsumption index (-DATP_FV_INDEX) ===============
+//
+// THE WALL.  7b profiling pinned ~91% of completion runtime on
+// `thvm_match`, every call under `atp_push_cps_traced` ->
+// `atp_cp_queue_subsumed`.  That function asks, for each freshly
+// generated candidate CP (lhs, rhs): is there a queued CP (qs, qt)
+// and a substitution sigma with (lhs, rhs) = (sigma qs, sigma qt)
+// (forward) or = (sigma qt, sigma qs) (symmetric)?  The milestone-7
+// engine answers it with a flat O(n_cps) loop -- on the deep Wolfram
+// axiom, n_cps climbs to ~64k and the loop issues ~16M recursive
+// `thvm_match` calls per step.  The query almost always answers "no"
+// (over a 200-step cpl1 run only ONE CP is ever queue-subsumed), so
+// the cost is entirely in proving the negative -- ruling out every
+// queued CP.
+//
+// Milestone 8 bet thvm's structural sharing would let the CP set act
+// as a free discrimination tree.  8e REFUTED that: thvm has a bump
+// allocator (src/heap/alloc.c), NOT hash-consing -- a fresh
+// subsumption query shares no cells with stored CPs, and the match is
+// root-anchored, so the flat-CpSet shared traversal is exactly the
+// per-CP scan.  7d is the proven fix every serious completion prover
+// uses: a real term index.
+//
+// WHY A DISCRIMINATION TREE, NOT A FEATURE VECTOR.  7d was first
+// built as a feature-vector (FV) index -- the structure the plan
+// recommended -- on cheap monotone integer features (symbol count,
+// per-depth CTR profile, term depth) where a more-general term is
+// componentwise <=.  It was sound, GC-trivial, and MEASURED: on the
+// single-symbol Wolfram nand axiom it plateaued at ~47% false-
+// positive survival (18.8k of 40.2k queued CPs surviving the filter
+// per query) and adding depth-profile features did not move it.  The
+// reason is structural: a CP whose one side is a bare variable -- a
+// large fraction of the queue -- has the size profile of its other
+// side alone, so its FV dominates almost every larger CP's FV.  A
+// size-based FV simply cannot exclude a small term that "could
+// generalize" a large one by shape but does not.
+//
+// Excluding by SHAPE needs a position-keyed symbol test, and that is
+// exactly a discrimination tree.  The plan permitted the deviation
+// "with a strong reason, justified against the GC-stability point".
+// The reason: the measured FV plateau.  The GC point still holds --
+// the 8b worry was MOVING CELL POINTERS in the index.  This tree is
+// keyed entirely on integer LABEL ids (a CTR's label, or a wildcard
+// marker for a variable); label ids are not heap addresses and do
+// not move under the Cheney collector.  The only Term-valued storage
+// is each leaf record's (lhs, rhs) mirror, rooted in
+// thvm_atp_gc_collect.  So the index is as GC-trivial as the FV trie
+// was -- the flag is still spelled -DATP_FV_INDEX.
+//
+// THE STRUCTURE -- a PERFECT discrimination tree.  The tree spans
+// the PREORDER traversal of the CP viewed as one synthetic term
+// `Cp(lhs, rhs)` (a binary node `Cp` so one tree covers both sides).
+// A plain discrimination tree treats every variable as one wildcard
+// `*`; that was MEASURED and plateaued at ~47% retrieval, because
+// the deep nand-trees have many REPEATED variables and a one-`*`
+// tree cannot tell `nand(x,x)` from `nand(x,y)`.  This is the
+// PERFECT variant: it numbers a pattern's variables by first-
+// appearance order, so `nand(x,x)` flattens to `nand *0 *0` and
+// `nand(x,y)` to `nand *0 *1`.  Each tree edge is keyed on a flat
+// symbol:
+//   ATP_DT_NUM             a TAG_NUM atom
+//   ATP_DT_STAR_BASE + k   the k-th DISTINCT pattern variable
+//   ATP_DT_CTR_BASE  + lab a TAG_CTR with label `lab`
+//
+// INSERT renumbers the stored CP's variables (first occurrence of a
+// var -> the next free k) and walks the renumbered preorder string,
+// descending / creating an edge per symbol; the node reached after
+// the whole string gets a leaf record.
+//
+// RETRIEVAL ("find every stored pattern that one-way MATCHES subject
+// T") flattens T to a preorder subterm array and walks it in
+// lockstep with the tree, carrying a binding array
+// `star_bind[k] -> subject subterm`.  At the tree node for the
+// current subject subterm `t`:
+//   - a CTR edge equal to `t`'s own label -- follow it; `t`'s
+//     children are the next preorder positions.
+//   - a STAR_BASE+k edge -- the k-th pattern variable:
+//       * k unbound  -> bind star_bind[k] := t, descend past t's
+//                       whole subtree, unbind on backtrack;
+//       * k bound    -> follow only if kbo_eq(star_bind[k], t)
+//                       (the variable's earlier occurrence pinned
+//                       a value; a repeat must equal it), descend
+//                       past t's subtree.
+// Every other edge is pruned.  This folds full one-way matching --
+// structure AND variable consistency -- into the descent: a stored
+// CP reaches a leaf IFF it matches T.  The leaf still runs the SAME
+// two-sided thvm_match for byte-identical verdicts (and as a guard),
+// but it now essentially always confirms.
+//
+// SOUNDNESS (never misses a subsumer).  thvm_match(pattern, subject)
+// succeeds iff at every preorder position the pattern has a CTR
+// equal to the subject's there, or a variable whose every occurrence
+// binds a kbo_eq subterm.  The descent above follows exactly the
+// edge that case takes -- CTR-equal, first-var-bind, or repeat-var-
+// kbo_eq -- so it reaches a subsuming CP's leaf and never prunes it.
+// The symmetric orientation is covered by a second retrieval over
+// `Cp(rhs,lhs)`.  The tree's verdict is therefore identical to the
+// array scan, CP for CP: same drops, same proof, same step/CP
+// counts.
+
+#ifdef ATP_FV_INDEX
+
+// Flat-symbol alphabet for a perfect-discrimination-tree edge.
+// Ordering matters: NUM < every STAR(k) < every CTR(lab), so the
+// sym-ascending child list lets a descent stop scanning early.
+#define ATP_DT_NUM        0u                 // TAG_NUM atom
+#define ATP_DT_MAXVARS    64u                // distinct vars per CP
+#define ATP_DT_STAR_BASE  1u                 // STAR(k) = BASE + k
+#define ATP_DT_CTR_BASE   (ATP_DT_STAR_BASE + ATP_DT_MAXVARS)
+#define ATP_DT_NIL        0xFFFFFFFFu
+
+// Preorder-flattened subject cap.  A CP on the Wolfram axiom stays
+// well under this; an over-deep term aborts retrieval to the full
+// scan (atp_dt_query_orient) -- never a silent under-retrieval.
+#define ATP_DT_FLAT_CAP   4096u
+
+// Per-term variable renumbering: maps a raw TAG_FVR id to its
+// first-appearance index 0,1,2,...  `slot[id]` holds (index+1), 0 =
+// not yet seen.  Reset per CP at insert and per orientation at
+// retrieval.
+typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; } AtpDtVarMap;
+
+static void atp_dt_varmap_reset(AtpDtVarMap *vm) {
+  for (u32 i = 0; i < REWRITE_MAX_VAR; i++) vm->slot[i] = 0;
+  vm->n = 0;
+}
+
+// First-appearance index of variable id `vid` (assigns the next free
+// index on first sight).  Ids >= REWRITE_MAX_VAR (which thvm_match
+// itself refuses to bind) fold onto the last slot -- still sound:
+// such a CP could never subsume anyway, and folding only makes the
+// tree COARSER, never drops a real candidate.
+static u32 atp_dt_var_index(AtpDtVarMap *vm, u32 vid) {
+  if (vid >= REWRITE_MAX_VAR) vid = REWRITE_MAX_VAR - 1u;
+  if (vm->slot[vid] == 0) {
+    u32 idx = (vm->n < ATP_DT_MAXVARS) ? vm->n : (ATP_DT_MAXVARS - 1u);
+    vm->slot[vid] = idx + 1u;
+    if (vm->n < ATP_DT_MAXVARS) vm->n++;
+  }
+  return vm->slot[vid] - 1u;
+}
+
+// flatsym of one term node under variable renumbering `vm`.
+static u32 atp_dt_flatsym(Term t, AtpDtVarMap *vm) {
+  switch (term_tag(t)) {
+    case TAG_CTR: return ATP_DT_CTR_BASE + term_ext(t);
+    case TAG_NUM: return ATP_DT_NUM;
+    case TAG_FVR:
+    default:      return ATP_DT_STAR_BASE + atp_dt_var_index(vm, term_ext(t));
+  }
+}
+
+// A discrimination-tree node: a left-child / right-sibling tree in a
+// flat realloc-grown pool addressed by u32 INDEX (no pointers, so a
+// pool realloc never invalidates the structure).  `sym` is the flat
+// symbol of the edge INTO this node.  `rec_head` is the head of this
+// node's leaf record list.
+typedef struct {
+  u32 sym;        // flat symbol of the in-edge
+  u32 child;      // first child node index, or ATP_DT_NIL
+  u32 sibling;    // next sibling node index, or ATP_DT_NIL
+  u32 rec_head;   // first record index, or ATP_DT_NIL
+} AtpDtNode;
+
+// One indexed CP.  `lhs`/`rhs` mirror cp_lhs[..]/cp_rhs[..]; they are
+// GC roots so the collector keeps them current.  `live` is cleared
+// when the CP is popped / dropped -- a dead record is skipped by
+// retrieval, reclaimed by the next index rebuild.  `seq` is the CP's
+// stable id (the seq->record map key).  `next` links the leaf list.
+typedef struct {
+  Term lhs;
+  Term rhs;
+  u32  seq;
+  u32  next;
+  u8   live;
+} AtpDtRec;
+
+// seq -> record-index open-addressing hash entry (NIL = empty).
+typedef struct { u32 seq; u32 rec; } AtpDtSeqEnt;
+
+// The index.  Named `struct AtpFvIndex` -- the flag and the opaque
+// thvm.h forward declaration are spelled that way; the structure
+// inside is the discrimination tree the measurement settled on.
+struct AtpFvIndex {
+  AtpDtNode   *nodes;
+  u32          n_nodes, cap_nodes;
+  AtpDtRec    *recs;
+  u32          n_recs, cap_recs;        // n_recs == GC-rooted span
+  u32          n_live;                  // live record count (== n_cps)
+  AtpDtSeqEnt *seqmap;                   // seq -> rec index
+  u32          seqmap_cap;               // power of two
+  u32          root;                     // tree root node index
+  // Instrumentation (cheap counters, always compiled).
+  u64 q_calls;            // atp_cp_queue_subsumed queries
+  u64 q_candidates;       // leaf records reached by retrieval
+  u64 q_matchcalls;       // thvm_match calls issued on candidates
+  u64 q_nodevisits;       // discrimination-tree nodes touched
+};
+typedef struct AtpFvIndex AtpFvIndex;
+
+static u32 atp_dt_node_new(AtpFvIndex *ix, u32 sym) {
+  if (ix->n_nodes == ix->cap_nodes) {
+    u32 cap = ix->cap_nodes ? ix->cap_nodes * 2u : 1024u;
+    AtpDtNode *p = (AtpDtNode *)realloc(ix->nodes, cap * sizeof(AtpDtNode));
+    if (p == NULL) { fprintf(stderr, "atp_dt: node pool OOM\n"); exit(1); }
+    ix->nodes = p;
+    ix->cap_nodes = cap;
+  }
+  u32 i = ix->n_nodes++;
+  ix->nodes[i].sym      = sym;
+  ix->nodes[i].child    = ATP_DT_NIL;
+  ix->nodes[i].sibling  = ATP_DT_NIL;
+  ix->nodes[i].rec_head = ATP_DT_NIL;
+  return i;
+}
+
+static u32 atp_dt_rec_new(AtpFvIndex *ix) {
+  if (ix->n_recs == ix->cap_recs) {
+    u32 cap = ix->cap_recs ? ix->cap_recs * 2u : 1024u;
+    AtpDtRec *p = (AtpDtRec *)realloc(ix->recs, cap * sizeof(AtpDtRec));
+    if (p == NULL) { fprintf(stderr, "atp_dt: rec pool OOM\n"); exit(1); }
+    ix->recs = p;
+    ix->cap_recs = cap;
+  }
+  return ix->n_recs++;
+}
+
+// Find `parent`'s child reached by edge `sym`, creating it absent.
+// Children kept in ascending-sym order -- deterministic across runs.
+static u32 atp_dt_child(AtpFvIndex *ix, u32 parent, u32 sym) {
+  u32 prev = ATP_DT_NIL;
+  u32 cur  = ix->nodes[parent].child;
+  while (cur != ATP_DT_NIL && ix->nodes[cur].sym < sym) {
+    prev = cur;
+    cur  = ix->nodes[cur].sibling;
+  }
+  if (cur != ATP_DT_NIL && ix->nodes[cur].sym == sym) return cur;
+  u32 nn = atp_dt_node_new(ix, sym);          // may realloc the pool
+  ix->nodes[nn].sibling = cur;
+  if (prev == ATP_DT_NIL) ix->nodes[parent].child = nn;
+  else                    ix->nodes[prev].sibling = nn;
+  return nn;
+}
+
+// --- seq -> record map (open addressing, linear probe) -------------
+
+static void atp_dt_seqmap_init(AtpFvIndex *ix, u32 cap) {
+  ix->seqmap_cap = cap;
+  ix->seqmap = (AtpDtSeqEnt *)malloc(cap * sizeof(AtpDtSeqEnt));
+  if (ix->seqmap == NULL) { fprintf(stderr, "atp_dt: seqmap OOM\n"); exit(1); }
+  for (u32 i = 0; i < cap; i++) ix->seqmap[i].seq = ATP_DT_NIL;
+}
+
+static void atp_dt_seqmap_put(AtpFvIndex *ix, u32 seq, u32 rec);
+
+static void atp_dt_seqmap_grow(AtpFvIndex *ix) {
+  u32 old_cap = ix->seqmap_cap;
+  AtpDtSeqEnt *old = ix->seqmap;
+  atp_dt_seqmap_init(ix, old_cap * 2u);
+  for (u32 i = 0; i < old_cap; i++) {
+    if (old[i].seq != ATP_DT_NIL) atp_dt_seqmap_put(ix, old[i].seq, old[i].rec);
+  }
+  free(old);
+}
+
+static void atp_dt_seqmap_put(AtpFvIndex *ix, u32 seq, u32 rec) {
+  if ((ix->n_live + 1u) * 2u > ix->seqmap_cap) atp_dt_seqmap_grow(ix);
+  u32 mask = ix->seqmap_cap - 1u;
+  u32 h = (seq * 2654435761u) & mask;
+  while (ix->seqmap[h].seq != ATP_DT_NIL) h = (h + 1u) & mask;
+  ix->seqmap[h].seq = seq;
+  ix->seqmap[h].rec = rec;
+}
+
+static u32 atp_dt_seqmap_get(const AtpFvIndex *ix, u32 seq) {
+  u32 mask = ix->seqmap_cap - 1u;
+  u32 h = (seq * 2654435761u) & mask;
+  while (ix->seqmap[h].seq != ATP_DT_NIL) {
+    if (ix->seqmap[h].seq == seq) return ix->seqmap[h].rec;
+    h = (h + 1u) & mask;
+  }
+  return ATP_DT_NIL;
+}
+
+// Delete `seq` (Knuth back-shift, keeps probe chains intact).
+static void atp_dt_seqmap_del(AtpFvIndex *ix, u32 seq) {
+  u32 mask = ix->seqmap_cap - 1u;
+  u32 h = (seq * 2654435761u) & mask;
+  while (ix->seqmap[h].seq != ATP_DT_NIL && ix->seqmap[h].seq != seq) {
+    h = (h + 1u) & mask;
+  }
+  if (ix->seqmap[h].seq == ATP_DT_NIL) return;
+  u32 j = h;
+  for (;;) {
+    ix->seqmap[h].seq = ATP_DT_NIL;
+    u32 k;
+    do {
+      j = (j + 1u) & mask;
+      if (ix->seqmap[j].seq == ATP_DT_NIL) return;
+      k = (ix->seqmap[j].seq * 2654435761u) & mask;
+    } while ((h <= j) ? (h < k && k <= j) : (h < k || k <= j));
+    ix->seqmap[h] = ix->seqmap[j];
+    h = j;
+  }
+}
+
+// --- index lifecycle -----------------------------------------------
+
+static AtpFvIndex *atp_fv_index_new(void) {
+  AtpFvIndex *ix = (AtpFvIndex *)calloc(1, sizeof(AtpFvIndex));
+  if (ix == NULL) { fprintf(stderr, "atp_dt: index OOM\n"); exit(1); }
+  atp_dt_seqmap_init(ix, 1024u);
+  ix->root = atp_dt_node_new(ix, ATP_DT_NIL);  // root edge unused
+  return ix;
+}
+
+static void atp_fv_index_free(AtpFvIndex *ix) {
+  if (ix == NULL) return;
+  free(ix->nodes);
+  free(ix->recs);
+  free(ix->seqmap);
+  free(ix);
+}
+
+// --- insert --------------------------------------------------------
+//
+// Walk term `t` in preorder, descending the tree by flatsym per
+// node, creating edges as needed.  `vm` renumbers variables by
+// first appearance.  Returns the node reached after `t`'s whole
+// preorder string.  A TAG_CTR's children extend the string in
+// left-to-right order; a TAG_FVR / TAG_NUM is one symbol.
+static u32 atp_dt_insert_term(AtpFvIndex *ix, u32 node, Term t,
+                              AtpDtVarMap *vm) {
+  node = atp_dt_child(ix, node, atp_dt_flatsym(t, vm));
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      node = atp_dt_insert_term(ix, node, term_ctr_at(t, i), vm);
+    }
+  }
+  return node;
+}
+
+// Insert CP (lhs, rhs) with stable id `seq`.  The CP is indexed as
+// the synthetic term `Cp(lhs, rhs)` so a single tree spans both
+// sides; ATP_CP_LABEL is the `Cp` head used elsewhere in the engine.
+// One variable renumbering spans the WHOLE CP -- a variable shared
+// between lhs and rhs (the common case for an equation) keeps one
+// star index across both sides.
+static void atp_fv_index_insert(AtpFvIndex *ix, Term lhs, Term rhs, u32 seq) {
+  AtpDtVarMap vm;
+  atp_dt_varmap_reset(&vm);
+  u32 node = ix->root;
+  node = atp_dt_child(ix, node, ATP_DT_CTR_BASE + ATP_CP_LABEL);  // Cp head
+  node = atp_dt_insert_term(ix, node, lhs, &vm);
+  node = atp_dt_insert_term(ix, node, rhs, &vm);
+  u32 rec = atp_dt_rec_new(ix);
+  ix->recs[rec].lhs  = lhs;
+  ix->recs[rec].rhs  = rhs;
+  ix->recs[rec].seq  = seq;
+  ix->recs[rec].live = 1u;
+  ix->recs[rec].next = ix->nodes[node].rec_head;
+  ix->nodes[node].rec_head = rec;
+  atp_dt_seqmap_put(ix, seq, rec);
+  ix->n_live++;
+}
+
+// Drop CP `seq`: clear the record's live flag, unhook from the seq
+// map.  The dead record stays in its leaf list (cheap); a rebuild
+// reclaims the pool slot.
+static void atp_fv_index_remove(AtpFvIndex *ix, u32 seq) {
+  u32 rec = atp_dt_seqmap_get(ix, seq);
+  if (rec == ATP_DT_NIL) return;
+  if (ix->recs[rec].live) {
+    ix->recs[rec].live = 0u;
+    ix->n_live--;
+  }
+  atp_dt_seqmap_del(ix, seq);
+}
+
+// Discard every record / node and rebuild the tree from the live CP
+// arrays.  Used when a wholesale CP-set mutation (reheapify after an
+// atp_normalize_graph compaction; a test populating the arrays
+// directly) reshuffles seqs out from under the incremental path.
+static void atp_fv_index_rebuild(AtpState *s) {
+  AtpFvIndex *ix = s->fv_index;
+  if (ix == NULL) return;
+  ix->n_nodes = 0;
+  ix->n_recs  = 0;
+  ix->n_live  = 0;
+  ix->root    = atp_dt_node_new(ix, ATP_DT_NIL);
+  for (u32 i = 0; i < ix->seqmap_cap; i++) ix->seqmap[i].seq = ATP_DT_NIL;
+  for (u32 i = 0; i < s->n_cps; i++) {
+    atp_fv_index_insert(ix, s->cp_lhs[i], s->cp_rhs[i], s->cp_seq[i]);
+  }
+}
+
+// --- retrieval -----------------------------------------------------
+
+// Preorder-flatten `t` into `flat[]` from index `*pos`, recording
+// per position the SUBTREE SIZE (preorder-position span) in
+// `subsz[]`.  Returns 1 on success, 0 if the cap is hit (caller
+// falls back to the full scan -- never silently under-retrieves).
+static u8 atp_dt_flatten(Term t, Term *flat, u32 *subsz, u32 cap, u32 *pos) {
+  u32 here = *pos;
+  if (here >= cap) return 0;
+  flat[here] = t;
+  *pos = here + 1u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      if (!atp_dt_flatten(term_ctr_at(t, i), flat, subsz, cap, pos)) return 0;
+    }
+  }
+  subsz[here] = *pos - here;          // positions covered by t's subtree
+  return 1;
+}
+
+// One retrieval's immutable parameters, threaded through the
+// recursion without a wide signature.  The saturation engine is
+// single-threaded (one AtpState per run), so file-static query
+// scratch is safe and keeps the hot descent lean.  `g_atp_dt_star`
+// is the descent's per-path binding array: star_bind[k] is the
+// subject subterm the k-th pattern variable was first bound to (0 =
+// unbound on the current path).
+static AtpFvIndex *g_atp_dt_ix      = NULL;
+static const Term *g_atp_dt_flat    = NULL;
+static const u32  *g_atp_dt_subsz   = NULL;
+static u32         g_atp_dt_flatlen = 0;
+static Term        g_atp_dt_qlhs    = 0;
+static Term        g_atp_dt_qrhs    = 0;
+static Term        g_atp_dt_star[ATP_DT_MAXVARS];
+
+// Confirm with the SAME two-sided thvm_match the array scan ran, for
+// the records on leaf `node`, against query (q_lhs, q_rhs) in the
+// orientation the descent encoded.  The perfect-tree descent already
+// proved structure + variable consistency, so this essentially
+// always succeeds -- it is kept as the authoritative byte-identity
+// guard.  Returns 1 on a real subsumer.
+static u8 atp_dt_leaf_match(u32 node) {
+  AtpFvIndex *ix = g_atp_dt_ix;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_DT_NIL;
+       r = ix->recs[r].next) {
+    AtpDtRec *rc = &ix->recs[r];
+    if (!rc->live) continue;
+    ix->q_candidates++;
+    RewriteSubst subst = {{0}};
+    ix->q_matchcalls += 2u;
+    if (thvm_match(rc->lhs, g_atp_dt_qlhs, &subst) &&
+        thvm_match(rc->rhs, g_atp_dt_qrhs, &subst)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Walk the flattened subject from preorder index `pos` in lockstep
+// with tree node `node`, threading the per-path variable bindings in
+// g_atp_dt_star.  Returns 1 as soon as a reachable leaf yields a
+// genuine subsumer.
+static u8 atp_dt_descend(u32 node, u32 pos) {
+  g_atp_dt_ix->q_nodevisits++;
+  if (pos == g_atp_dt_flatlen) {
+    // Whole subject consumed -- this node's records are leaves.
+    return atp_dt_leaf_match(node);
+  }
+  AtpFvIndex *ix = g_atp_dt_ix;
+  Term t   = g_atp_dt_flat[pos];
+  u32  sz  = g_atp_dt_subsz[pos];        // preorder span of t's subtree
+  u8   tc  = (term_tag(t) == TAG_CTR);
+  u32  csym_exact = tc ? (ATP_DT_CTR_BASE + term_ext(t))
+                       : (term_tag(t) == TAG_NUM ? ATP_DT_NUM : 0xFFFFFFFFu);
+  for (u32 c = ix->nodes[node].child; c != ATP_DT_NIL;
+       c = ix->nodes[c].sibling) {
+    u32 csym = ix->nodes[c].sym;
+    if (csym >= ATP_DT_STAR_BASE && csym < ATP_DT_CTR_BASE) {
+      // Stored variable, the (csym-STAR_BASE)-th distinct pattern
+      // var.  One-way match: the FIRST occurrence binds it to t; a
+      // REPEAT occurrence applies only if t equals that binding.
+      u32 k = csym - ATP_DT_STAR_BASE;
+      Term bound = g_atp_dt_star[k];
+      if (bound == 0) {
+        g_atp_dt_star[k] = t;                 // first occurrence: bind
+        u8 hit = atp_dt_descend(c, pos + sz);
+        g_atp_dt_star[k] = 0;                 // unbind on backtrack
+        if (hit) return 1;
+      } else if (kbo_eq(bound, t)) {
+        if (atp_dt_descend(c, pos + sz)) return 1;
+      }
+    } else if (csym == csym_exact) {
+      // Stored CTR/NUM equal to t's own symbol -- consume t's head;
+      // t's children are the next preorder positions.
+      if (atp_dt_descend(c, pos + 1u)) return 1;
+    }
+  }
+  return 0;
+}
+
+// Retrieve over one orientation: descend the tree for the synthetic
+// subject `Cp(o_lhs, o_rhs)`.  Returns 1 if a queued CP subsumes the
+// candidate in this orientation.
+static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
+  Term  flat_s[ATP_DT_FLAT_CAP];
+  u32   subsz_s[ATP_DT_FLAT_CAP];
+  Term *flat  = flat_s;
+  u32  *subsz = subsz_s;
+  // Reserve flat[0] for the synthetic `Cp` head: it spans the whole
+  // subject, so subsz[0] = total positions.
+  u32 pos = 1u;
+  u8  ok  = atp_dt_flatten(o_lhs, flat, subsz, ATP_DT_FLAT_CAP, &pos)
+         && atp_dt_flatten(o_rhs, flat, subsz, ATP_DT_FLAT_CAP, &pos);
+  if (!ok) {
+    // Cap hit -- fall back to a full scan so a deep CP can never be
+    // silently under-retrieved (which would drop a real subsumer).
+    for (u32 r = 0; r < ix->n_recs; r++) {
+      if (!ix->recs[r].live) continue;
+      ix->q_candidates++;
+      RewriteSubst subst = {{0}};
+      ix->q_matchcalls += 2u;
+      if (thvm_match(ix->recs[r].lhs, o_lhs, &subst) &&
+          thvm_match(ix->recs[r].rhs, o_rhs, &subst)) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  flat[0]  = 0;                           // Cp head: placeholder term
+  subsz[0] = pos;                         // whole subject span
+  g_atp_dt_ix      = ix;
+  g_atp_dt_flat    = flat;
+  g_atp_dt_subsz   = subsz;
+  g_atp_dt_flatlen = pos;
+  g_atp_dt_qlhs    = o_lhs;
+  g_atp_dt_qrhs    = o_rhs;
+  for (u32 i = 0; i < ATP_DT_MAXVARS; i++) g_atp_dt_star[i] = 0;
+  // Descend from the root: its single real edge is the `Cp` head,
+  // which lines up with flat[0] (also a Cp-head symbol).
+  u32 cp_sym = ATP_DT_CTR_BASE + ATP_CP_LABEL;
+  for (u32 c = ix->nodes[ix->root].child; c != ATP_DT_NIL;
+       c = ix->nodes[c].sibling) {
+    if (ix->nodes[c].sym == cp_sym) return atp_dt_descend(c, 1u);
+  }
+  return 0;
+}
+
+// 7d: forward subsumption of candidate (lhs, rhs) against the queued
+// CP set via the discrimination tree.  Behaviour-identical to the
+// array scan: the tree is a sound over-approximation, so any CP it
+// surfaces is then confirmed by the SAME thvm_match the scan used,
+// and any CP it prunes provably could not have matched.  Two
+// orientations: forward Cp(lhs,rhs), symmetric Cp(rhs,lhs).
+static u8 atp_fv_index_query(AtpFvIndex *ix, Term lhs, Term rhs) {
+  ix->q_calls++;
+  if (atp_dt_query_orient(ix, lhs, rhs)) return 1;
+  if (atp_dt_query_orient(ix, rhs, lhs)) return 1;
+  return 0;
+}
+
+// 7d instrumentation accessor: per-run retrieval stats so a bench can
+// confirm the O(n_cps) scan collapsed.  `calls` is the number of
+// atp_cp_queue_subsumed queries; `node_visits` the discrimination-
+// tree nodes touched; `candidates` the leaf records reached; and
+// `matchcalls` the thvm_match calls those candidates triggered.
+// candidates / calls is the false-positive volume; the array scan
+// would have touched n_cps records per query.
+fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
+                          u64 *candidates, u64 *matchcalls, u32 *nodes) {
+  AtpFvIndex *ix = (s != NULL) ? s->fv_index : NULL;
+  if (calls       != NULL) *calls       = (ix != NULL) ? ix->q_calls : 0;
+  if (node_visits != NULL) *node_visits = (ix != NULL) ? ix->q_nodevisits : 0;
+  if (candidates  != NULL) *candidates  = (ix != NULL) ? ix->q_candidates : 0;
+  if (matchcalls  != NULL) *matchcalls  = (ix != NULL) ? ix->q_matchcalls : 0;
+  if (nodes       != NULL) *nodes       = (ix != NULL) ? ix->n_nodes : 0;
+}
+
+#endif // ATP_FV_INDEX
+
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
@@ -832,6 +1409,10 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // the array mirror and the graph agree from the first instant.
   atp_cp_graph_sync(s);
 #endif
+#ifdef ATP_FV_INDEX
+  // 7d: an empty FV subsumption index; CPs enter it on enqueue.
+  s->fv_index = atp_fv_index_new();
+#endif
   return s;
 }
 
@@ -845,6 +1426,9 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_trace);
   free(s->cp_pri);
   free(s->cp_seq);
+#ifdef ATP_FV_INDEX
+  atp_fv_index_free(s->fv_index);
+#endif
   free(s);
 }
 
@@ -897,6 +1481,15 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // not rebuilt afterward.  One extra root slot for the CpSet term.
   n_roots += 1u;
 #endif
+#ifdef ATP_FV_INDEX
+  // 7d: each FV-index record mirrors a queued CP's (lhs, rhs).  The
+  // FV keys are ints (GC-invariant), but the mirror Terms move with
+  // the heap -- root them so the collector relocates them in
+  // lockstep with cp_lhs[]/cp_rhs[].  2 slots per record (live AND
+  // dead -- a dead record's stale Term is harmless to relocate and
+  // skipping it would need a live-count pre-pass).
+  if (s->fv_index != NULL) n_roots += 2u * s->fv_index->n_recs;
+#endif
   Term *roots = (Term *)malloc((size_t)n_roots * sizeof(Term));
   if (roots == NULL) return 0;
 
@@ -918,6 +1511,15 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #ifdef ATP_CP_GRAPH
   u32 cp_graph_root = w;
   roots[w++] = s->cp_graph;
+#endif
+#ifdef ATP_FV_INDEX
+  u32 fv_rec_root = w;
+  if (s->fv_index != NULL) {
+    for (u32 i = 0; i < s->fv_index->n_recs; i++) {
+      roots[w++] = s->fv_index->recs[i].lhs;
+      roots[w++] = s->fv_index->recs[i].rhs;
+    }
+  }
 #endif
 
   gc_collect(roots, w);
@@ -948,6 +1550,19 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // -- no rebuild-everything pass.
   s->cp_graph = roots[cp_graph_root];
   atp_cp_graph_assert(s);
+#endif
+#ifdef ATP_FV_INDEX
+  // 7d: write the relocated mirror Terms back into the FV records.
+  // The FV keys / trie / seq map are pure ints -- a structural
+  // feature is invariant under a Cheney copy -- so they need no
+  // fixup: a relocated CP keeps its FV and stays in its trie slot.
+  if (s->fv_index != NULL) {
+    u32 rw = fv_rec_root;
+    for (u32 i = 0; i < s->fv_index->n_recs; i++) {
+      s->fv_index->recs[i].lhs = roots[rw++];
+      s->fv_index->recs[i].rhs = roots[rw++];
+    }
+  }
 #endif
 
   free(roots);
@@ -1158,11 +1773,18 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   s->cp_rhs[i]   = rhs;
   s->cp_trace[i] = trace;
   s->cp_pri[i]   = atp_cp_priority(s, lhs, rhs);
-  s->cp_seq[i]   = s->cp_seq_next++;
+  u32 seq        = s->cp_seq_next++;
+  s->cp_seq[i]   = seq;
   s->n_cps++;
   atp_cp_sift_up(s, i);
   // 8a: keep cp_graph in lockstep with the array mirror.
   atp_cp_graph_sync(s);
+#ifdef ATP_FV_INDEX
+  // 7d: index the new CP under its (GC-stable) seq id.  The trie
+  // keys on the FV, not the heap slot, so the sift-up above does not
+  // touch the index.
+  atp_fv_index_insert(s->fv_index, lhs, rhs, seq);
+#endif
 }
 
 // Pop the cheapest CP from the queue (lowest (cp_pri, cp_seq) --
@@ -1196,6 +1818,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   *rhs_out = s->cp_rhs[0];
 #endif
   s->last_popped_trace = s->cp_trace[0];
+#ifdef ATP_FV_INDEX
+  // 7d: the popped CP leaves the queue -- drop it from the index so a
+  // later subsumption query never matches a stale, no-longer-queued
+  // CP (which would diverge from the array-scan verdict).
+  u32 popped_seq = s->cp_seq[0];
+#endif
   s->n_cps--;
   if (s->n_cps > 0) {
     u32 last = s->n_cps;
@@ -1206,6 +1834,9 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_seq[0]   = s->cp_seq[last];
     atp_cp_sift_down(s, 0);
   }
+#ifdef ATP_FV_INDEX
+  atp_fv_index_remove(s->fv_index, popped_seq);
+#endif
   // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
   atp_cp_graph_sync(s);
   return 1;
@@ -1230,6 +1861,13 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
   }
   // 8a: a caller populated the arrays directly -- resync cp_graph.
   atp_cp_graph_sync(s);
+#ifdef ATP_FV_INDEX
+  // 7d: reheapify reassigned every cp_seq[] (the index's stable key)
+  // and a normalize-graph compaction may have dropped CPs.  The
+  // incremental insert/remove path can no longer track the set, so
+  // rebuild the index wholesale from the live CP arrays.
+  atp_fv_index_rebuild(s);
+#endif
 }
 
 // Push one rule onto R; the rule array is growable, so this always
@@ -1723,7 +2361,20 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
 // memo-free: the (pattern_cell, subject_cell) memo measured 0%
 // sharing on the flat CpSet, so shipping it would be pure overhead
 // (see the 8e block comment at thvm_match_multi).
-#ifdef ATP_CP_GRAPH
+//
+// 7d: with -DATP_FV_INDEX the O(n_cps) scan is replaced by an
+// FV-index retrieval -- componentwise-dominated FVs are pulled from
+// the trie and the SAME two-sided thvm_match runs only on those.
+// The FV filter is a sound over-approximation, so the verdict is
+// IDENTICAL to the scan, CP for CP.  The FV path takes priority over
+// the -DATP_CP_GRAPH thvm_match_multi traversal (they are the same
+// verdict; FV is the faster one).
+#if defined(ATP_FV_INDEX)
+static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
+  if (s->n_cps == 0) return 0;
+  return atp_fv_index_query(s->fv_index, lhs, rhs);
+}
+#elif defined(ATP_CP_GRAPH)
 static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
   if (s->n_cps == 0) return 0;
   return thvm_match_multi(s->cp_graph, lhs, rhs);

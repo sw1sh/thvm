@@ -2991,6 +2991,23 @@ typedef struct {
   Term cp_graph;
 #endif
 
+  // 7d: feature-vector subsumption index over the CP queue.  Behind
+  // -DATP_FV_INDEX, `atp_cp_queue_subsumed` consults this instead of
+  // the O(n_cps) thvm_match scan: each queued CP carries a vector of
+  // cheap integer features where a more-general (subsuming) term is
+  // componentwise <= the candidate's, so retrieval = "find stored
+  // FVs dominated by the query FV" via an FV-trie, then thvm_match
+  // runs only on the retrieved candidates.  The index stores plain
+  // ints (feature values, CP seq ids) plus mirror Term pairs that
+  // ride the GC alongside cp_lhs[]/cp_rhs[].  Maintained
+  // incrementally: insert on CP enqueue, mark-dead on dequeue.  Flag
+  // OFF this field is absent and the engine is the milestone-7 array
+  // scan, byte-for-byte.  Independent of -DATP_CP_GRAPH.  Opaque
+  // pointer so the struct layout does not leak the index internals.
+#ifdef ATP_FV_INDEX
+  struct AtpFvIndex *fv_index;
+#endif
+
   // Transient: set by thvm_atp_select_cp to the trace-entry index
   // of the popped CP; consumed by thvm_atp_step right after the
   // pop so orient_and_add's TRACE_ORIENT entry can record the

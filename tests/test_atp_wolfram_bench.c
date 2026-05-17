@@ -190,6 +190,10 @@ int main(int argc, char **argv) {
   printf("=> %s\n", sn);
   printf("   goal=%s  steps=%u  rules=%u  cps=%u  max_cps=%u  %.1fs\n",
          goal, i, s->n_rules, s->n_cps, max_cps, el);
+  printf("   dropped: joinable=%u queue-subsumed=%u "
+         "rule-subsumed=%u connected=%u\n",
+         s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
+         s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected);
 
 #ifdef ATP_NORM_STATS
   // 8b: optimal-sharing ratio of the cross-CP normalization memo.
@@ -228,6 +232,28 @@ int main(int argc, char **argv) {
            (unsigned long long)hits, (unsigned long long)miss, mratio);
     printf("   match-sweep: %.2fs  (%.1f%% of %.1fs total)\n",
            secs, frac, el);
+  }
+#endif
+
+#ifdef ATP_FV_INDEX
+  // 7d: subsumption-index retrieval stats.  candidates / query is the
+  // average CPs the discrimination tree handed to thvm_match (the
+  // array scan handed it n_cps); matchcalls is the thvm_match volume
+  // the index issued -- the milestone-7 scan would have issued
+  // ~4 * n_cps per query.  node_visits / query is the average tree
+  // nodes the descent touched.
+  {
+    u64 calls = 0, nodevisits = 0, cands = 0, matchcalls = 0;
+    u32 nodes = 0;
+    thvm_atp_fv_stats(s, &calls, &nodevisits, &cands, &matchcalls, &nodes);
+    double avg_cand = (calls > 0) ? ((double)cands / (double)calls) : 0.0;
+    double avg_node = (calls > 0) ? ((double)nodevisits / (double)calls) : 0.0;
+    printf("   fv-index: %llu queries  %u tree-nodes\n",
+           (unsigned long long)calls, nodes);
+    printf("   fv-retrieval: %.1f candidates/query  %.1f tree-nodes/query\n",
+           avg_cand, avg_node);
+    printf("   fv-match: %llu thvm_match calls on survivors\n",
+           (unsigned long long)matchcalls);
   }
 #endif
 

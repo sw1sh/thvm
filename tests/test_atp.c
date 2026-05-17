@@ -31,10 +31,12 @@ static const KboConfig DUMMY_CFG = {
 // IC-native cp_graph is stale until thvm_atp_cp_reheapify resyncs
 // it -- 8e routes queue subsumption through cp_graph (one
 // thvm_match_multi traversal), so the resync must happen before the
-// check.  Off the flag this is a thin pass-through to the array
-// scan.
+// check.  7d's -DATP_FV_INDEX is the same story: the FV index is
+// maintained incrementally on heap push/pop, so a test that pokes
+// the arrays directly must reheapify to rebuild it.  Off both flags
+// this is a thin pass-through to the array scan.
 static int tt_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
-#ifdef ATP_CP_GRAPH
+#if defined(ATP_CP_GRAPH) || defined(ATP_FV_INDEX)
   thvm_atp_cp_reheapify(s);
 #endif
   return (int)atp_cp_queue_subsumed(s, lhs, rhs);

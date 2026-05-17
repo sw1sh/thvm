@@ -549,12 +549,71 @@ So the inference is correct (group-theory completion proves
 `f(a,i(a))==e` in <=20 steps, `test_atp` 8544/8544) -- the
 Wolfram axiom is purely a redundancy/indexing scaling wall.
 
-- **7d -- term indexing** (now the lead lever): a discrimination
-  tree / feature-vector index over the CP queue + rule set so
-  `atp_cp_queue_subsumed` / `atp_cp_rule_subsumed` find candidates
-  in ~O(1) instead of an O(n) `thvm_match` scan.  A cheap interim:
-  a symbol-count / top-symbol feature pre-filter before the
-  recursive `thvm_match`.  This kills the 91%.
+- **7d -- term indexing** (DONE -- `-DATP_FV_INDEX`, default OFF):
+  a real subsumption index over the CP queue so
+  `atp_cp_queue_subsumed` finds candidates in ~O(1) instead of the
+  O(n_cps) `thvm_match` scan.  Resumed as the genuine fix after
+  Milestone 8's "structural sharing makes the CP set a free
+  discrimination tree" thesis was REFUTED by 8e (thvm has a bump
+  allocator, not hash-consing -- a fresh query shares no cells with
+  stored CPs; the flat-CpSet shared traversal IS the per-CP scan).
+
+  *Design path.*  Built first as the plan-recommended feature-vector
+  (FV) index -- sound monotone integer features (symbol count,
+  per-depth CTR profile, term depth) where a generalization is
+  componentwise <=, stored in an FV-trie.  MEASURED: on the single-
+  symbol Wolfram nand axiom it plateaued at ~47% false-positive
+  survival (18.8k of 40.2k queued CPs surviving the filter per
+  query) -- a CP whose one side is a bare variable has the size
+  profile of its other side alone, so its FV dominates almost every
+  larger CP's FV; a size-based FV cannot exclude a small term that
+  "could generalize" a large one by shape.  Adding depth-profile
+  features did not move it.
+
+  *What shipped: a PERFECT discrimination tree.*  Excluding by SHAPE
+  needs a position-keyed symbol test -- a discrimination tree.  The
+  plan permitted the deviation "with a strong reason, justified
+  against the GC-stability point": the reason is the measured FV
+  plateau, and the GC point still holds -- the tree is keyed
+  entirely on integer label ids (a CTR's label; a numbered wildcard
+  for a variable), not heap addresses, so it needs no fixup under
+  the Cheney collector (the only Term-valued storage is each leaf
+  record's lhs/rhs mirror, rooted in `thvm_atp_gc_collect`).  The
+  tree spans the preorder of the synthetic term `Cp(lhs,rhs)`.  It
+  is the *perfect* variant: pattern variables are numbered by first-
+  appearance order, so `nand(x,x)` -> `nand *0 *0` while
+  `nand(x,y)` -> `nand *0 *1`.  Retrieval walks the flattened
+  subject in lockstep with the tree, carrying a per-path binding
+  array: a STAR(k) edge with k unbound binds it to the current
+  subject subterm, k bound applies only if the subterm `kbo_eq` the
+  binding.  This folds full one-way matching -- structure AND
+  variable consistency -- into the descent: a stored CP reaches a
+  leaf IFF it matches.  Sound (never misses a subsumer): a
+  subsuming CP must have all var ids < `REWRITE_MAX_VAR` (else
+  `thvm_match` rejects it), and for that matchable subset the
+  numbering is exact, so the descent reaches its leaf and never
+  prunes it; the leaf still runs the same two-sided `thvm_match`
+  as the byte-identity guard.
+
+  *Measured result (cpl1, the rung the 7b profiler ran).*
+  Behavior-identical -- `cps=10113` at 100 steps, `cps=40213` at
+  200 steps, ON == OFF exactly; `test_atp` 8544/8544 with the flag
+  on; `cpgen` still 5 CPs.  Wall time: 200 steps **39.2s -> 4.4s**
+  (~9x); at the 120s wall the engine reaches **step 608** vs the
+  array scan's **step 258** (2.4x further up the ladder).  The
+  index hands `thvm_match` **0.0 candidates/query** -- only 2
+  `thvm_match` calls in a 372k-query run -- even at n_cps=371k, so
+  retrieval is genuinely O(1), not just a constant-factor cut.
+  `sample` mid-run: `atp_cp_queue_subsumed` no longer appears in
+  the hot path; the 91% `thvm_match` wall is GONE.  The new
+  dominant cost is `thvm_rewrite_step` (the trivial-joinability /
+  connectedness normalization) -- a different wall, 7e/8b
+  territory.  cpl2 proves in 2 steps either way; subl2/thm are
+  normalization-bound from step 1, so 7d is wall-neutral on them
+  (index-maintenance overhead is within run-to-run noise --
+  `cps=90313` at 300 steps, ~18s ON and OFF).  Gated behind
+  `-DATP_FV_INDEX`, independent of `-DATP_CP_GRAPH`; OFF is the
+  byte-for-byte milestone-7 array scan.
 - **7c -- redundancy strengthening** (after 7d): full
   forward+backward subsumption, simplify-reflect, blocked-CP
   deletion -- the Waldmeister redundancy criteria, to keep the
