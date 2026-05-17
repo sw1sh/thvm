@@ -203,6 +203,17 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // expect one C buffer).  Multi-output kernels must skip BLAS
   // until the dispatch wiring lands.
   if (cg_kernel_has_extra_outputs(ke)) return 0;
+  // Bisection knob: THVM_CPU_BLAS_DISABLE=1 forces every kernel past
+  // the BLAS try-ladder so the walker / JIT path runs instead.  Used
+  // for isolating BLAS-classifier bugs (mis-mapped A/B operand order,
+  // bad transA/transB recovery) from kernel-body bugs.
+  static int disable_known = 0, disable_on = 0;
+  if (!disable_known) {
+    char const *e = getenv("THVM_CPU_BLAS_DISABLE");
+    disable_on = (e != NULL && e[0] == '1');
+    disable_known = 1;
+  }
+  if (disable_on) return 0;
   if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
   if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;

@@ -398,6 +398,7 @@ $tensorWriteIFn  := $tensorWriteIFn  = load["thvm_wl_tensor_write",   {Integer, 
 $tensorReadFn    := $tensorReadFn    = load["thvm_wl_tensor_read",    {Integer},               "NumericArray"];
 $tensorShapeFn   := $tensorShapeFn   = load["thvm_wl_tensor_shape",   {Integer},               {Integer, 1}];
 $tensorRcFn      := $tensorRcFn      = load["thvm_wl_tensor_refcount",{Integer},               Integer];
+$tensorViewDbgFn := $tensorViewDbgFn = load["thvm_wl_tensor_view_debug", {Integer}, {Integer, 1}];
 
 (* Zero-copy tensor-from-NumericArray.  The "Shared" passing mode
    tells WL to give the C side a shared reference; C bridge stores

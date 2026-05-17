@@ -39,6 +39,8 @@ TRealToFP8E5M2::usage = "TRealToFP8E5M2[reals] packs a list of Reals into a Nume
 TFP8E4M3ToReal::usage = "TFP8E4M3ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e4m3 bytes into a Real list.";
 TFP8E5M2ToReal::usage = "TFP8E5M2ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e5m2 bytes into a Real list.";
 
+TTensorViewDebug::usage = "TTensorViewDebug[tid] returns the TenDesc's View internals as {ndim, dims..., strides..., offset, contiguous, nviews, buf_id, producer_kid}.  No-ops (returns {-1}) when THVM_WL_TENSOR_VIEW_DEBUG is unset.  Diagnostic only.";
+
 TPackInt4::usage   = "TPackInt4[ints] packs a list of Integers in [-8, 7] into a UnsignedInteger8 NumericArray of packed nibbles (2 elements per byte, low nibble first).";
 TPackUInt4::usage  = "TPackUInt4[ints] packs a list of Integers in [0, 15] into a UnsignedInteger8 NumericArray of packed nibbles.";
 TUnpackInt4::usage = "TUnpackInt4[na, numel] unpacks `numel` signed nibbles from a packed-byte NumericArray into a list of Integers.";
@@ -171,6 +173,13 @@ TTensorDType[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
 
 TTensorRefcount[t_ ? tensorIdQ] := $tensorRcFn[TTermVal[t]]
 TTensorRefcount[t_TTerm]        := Missing["NotATensor", TTagName[TTermTag[t]]]
+
+(* Debug-only: dump View internals as {ndim, dims..., strides..., offset,
+   contiguous, nviews, buf_id, producer_kid}.  No-ops (returns {-1}) when
+   THVM_WL_TENSOR_VIEW_DEBUG is unset.  Used to isolate output-view
+   stride bugs from kernel-body bugs. *)
+TTensorViewDebug[t_ ? tensorIdQ] := Normal @ $tensorViewDbgFn[TTermVal[t]]
+TTensorViewDebug[t_Integer]      := Normal @ $tensorViewDbgFn[t]
 
 (* TTensorData returns a NumericArray whose type matches the
    tensor's dtype (Real32 for DT_F32, Integer32 for DT_I32).  Callers

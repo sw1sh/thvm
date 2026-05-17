@@ -1128,6 +1128,52 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_refcount(WolframLibraryData libData, mint 
   return LIBRARY_NO_ERROR;
 }
 
+// Debug-only: dump View internals for a TenDesc as a flat integer
+// MTensor: {ndim, dims..., strides..., offset, contiguous, nviews,
+// buf_id, producer_kid}.  Gated on THVM_WL_TENSOR_VIEW_DEBUG so it
+// no-ops in production (returns a single -1 element when the env is
+// unset).  Used to isolate output-view stride bugs from kernel-body
+// bugs without rebuilding the dylib for every probe.
+EXTERN_C DLLEXPORT int thvm_wl_tensor_view_debug(WolframLibraryData libData,
+                                                 mint argc, MArgument *args,
+                                                 MArgument res) {
+  (void)argc;
+  mint id = MArgument_getInteger(args[0]);
+  if (getenv("THVM_WL_TENSOR_VIEW_DEBUG") == NULL) {
+    mint one = 1;
+    MTensor out;
+    libData->MTensor_new(MType_Integer, 1, &one, &out);
+    libData->MTensor_getIntegerData(out)[0] = -1;
+    MArgument_setMTensor(res, out);
+    return LIBRARY_NO_ERROR;
+  }
+  if (id <= 0 || (u32)id >= TENS_NEXT) {
+    mint one = 1;
+    MTensor out;
+    libData->MTensor_new(MType_Integer, 1, &one, &out);
+    libData->MTensor_getIntegerData(out)[0] = -2;
+    MArgument_setMTensor(res, out);
+    return LIBRARY_NO_ERROR;
+  }
+  TenDesc const *d = &TENS[id];
+  u32 ndim = d->view.shape.ndim;
+  mint n = 1 + ndim + ndim + 1 + 1 + 1 + 1 + 1;
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, &n, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  mint k = 0;
+  dst[k++] = (mint)ndim;
+  for (u32 i = 0; i < ndim; i++) dst[k++] = (mint)d->view.shape.dims[i];
+  for (u32 i = 0; i < ndim; i++) dst[k++] = (mint)d->view.strides[i];
+  dst[k++] = (mint)d->view.offset;
+  dst[k++] = (mint)d->view.contiguous;
+  dst[k++] = (mint)d->nviews;
+  dst[k++] = (mint)d->buf_id;
+  dst[k++] = (mint)d->producer_kid;
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 // === UOp graph constructors ===
 // Each returns a packed TAG_UOP term.  Shape / axis args come in as
 // integer MTensors where relevant.

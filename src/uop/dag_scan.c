@@ -571,6 +571,42 @@ int uop_dag_classify_matmul_shape(Term root,
   } else {
     // Sanity: each arm's other_axis must be distinct (m != n).
     if (axis_m == axis_n) return 0;
+    // Decode the OUTPUT STORE addr to identify the TRUE M-axis_id (the
+    // arm with coefficient N) and N-axis_id (the arm with coefficient
+    // 1).  udg_classify_matmul_store blindly assigns MUL operand 0 ->
+    // A, operand 1 -> B; if the caller wrote MUL(B, A) (e.g. via
+    // WL's Orderless Times reordering), `axis_m` and `axis_n` here
+    // come back swapped.  We then need to swap a_input/b_input + ldA
+    // /ldB + transA/transB so BLAS sees the canonical A @ B layout.
+    Term addr_out = heap_read(term_val(root) + 1);
+    u32 out_axis_M = 0xFFFFFFFFu, out_axis_N = 0xFFFFFFFFu;
+    if (term_tag(addr_out) == TAG_UOP && term_ext(addr_out) == UOP_IADD) {
+      Term oa1 = heap_read(term_val(addr_out) + 0);
+      Term oa2 = heap_read(term_val(addr_out) + 1);
+      u32 oax1 = 0, oax2 = 0, oc1 = 0, oc2 = 0;
+      if (udg_extract_addr_arm(oa1, &oax1, &oc1)
+          && udg_extract_addr_arm(oa2, &oax2, &oc2)
+          && oax1 != oax2) {
+        // Row-major output of shape {M, N}: m-arm carries coeff N,
+        // n-arm carries coeff 1.
+        if (oc1 == N && oc2 == 1)        { out_axis_M = oax1; out_axis_N = oax2; }
+        else if (oc2 == N && oc1 == 1)   { out_axis_M = oax2; out_axis_N = oax1; }
+      }
+    }
+    if (out_axis_M != 0xFFFFFFFFu) {
+      // Detect mis-mapped operand assignment: axis_m should land on
+      // the M axis, axis_n on the N axis.  When swapped, swap A/B.
+      if (axis_m == out_axis_N && axis_n == out_axis_M) {
+        u32 tmp_input  = a_input;     a_input     = b_input;     b_input     = tmp_input;
+        u32 tmp_red    = a_red_coeff; a_red_coeff = b_red_coeff; b_red_coeff = tmp_red;
+        u32 tmp_other  = a_other_coeff; a_other_coeff = b_other_coeff; b_other_coeff = tmp_other;
+        u32 tmp_axis   = axis_m;      axis_m      = axis_n;      axis_n      = tmp_axis;
+      } else if (axis_m != out_axis_M || axis_n != out_axis_N) {
+        // Neither canonical nor swap-able -- bail so BLAS declines
+        // and the walker handles the kernel via the generic path.
+        return 0;
+      }
+    }
     // BLAS convention (see uop_dag_extract_matmul_strides_from_addr docs):
     //   A: ldA = max(red, other), transA = (red_coeff != 1)
     //   B: ldB = max(red, other), transB = (other_coeff != 1)
