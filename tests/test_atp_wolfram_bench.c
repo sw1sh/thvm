@@ -210,6 +210,27 @@ int main(int argc, char **argv) {
   }
 #endif
 
+#ifdef ATP_MATCH_STATS
+  // 8e: shared-traversal match stats.  memo_hits / (hits + misses) is
+  // the per-subterm sharing ratio -- how often a (pattern_cell,
+  // subject_cell) pair was served from the memo rather than walked.
+  // node_visits / calls is the average traversal size.
+  {
+    u64 calls = 0, nodes = 0, hits = 0, miss = 0;
+    double secs = 0.0;
+    thvm_atp_match_stats(&calls, &nodes, &hits, &miss, &secs);
+    u64 mtot = hits + miss;
+    double mratio = (mtot > 0) ? (100.0 * (double)hits / (double)mtot) : 0.0;
+    double frac   = (el > 0.0) ? (100.0 * secs / el) : 0.0;
+    printf("   match-multi: %llu calls  %llu node-visits\n",
+           (unsigned long long)calls, (unsigned long long)nodes);
+    printf("   match-memo: %llu hits / %llu miss  (%.1f%% shared)\n",
+           (unsigned long long)hits, (unsigned long long)miss, mratio);
+    printf("   match-sweep: %.2fs  (%.1f%% of %.1fs total)\n",
+           secs, frac, el);
+  }
+#endif
+
   thvm_atp_free(s);
   return (st == ATP_PROVED) ? 0 : 1;
 }

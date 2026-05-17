@@ -17,6 +17,15 @@ BUILD   := build
 ATP_CP_GRAPH ?=
 ATP_DEFINES  := $(if $(filter-out 0,$(ATP_CP_GRAPH)),-DATP_CP_GRAPH,)
 
+# Milestone 8b/8e instrumentation.  ATP_NORM_STATS reports the 8b
+# normalization-memo sharing ratio; ATP_MATCH_STATS reports the 8e
+# shared-traversal multi-match memo sharing ratio + sweep cost.
+# Both imply -DATP_CP_GRAPH (the graph path they instrument).
+ATP_NORM_STATS  ?=
+ATP_MATCH_STATS ?=
+ATP_DEFINES     += $(if $(filter-out 0,$(ATP_NORM_STATS)),-DATP_CP_GRAPH -DATP_NORM_STATS,)
+ATP_DEFINES     += $(if $(filter-out 0,$(ATP_MATCH_STATS)),-DATP_CP_GRAPH -DATP_MATCH_STATS,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \

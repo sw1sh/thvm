@@ -704,6 +704,56 @@ over the unchanged `cp_pri` / `cp_seq` side arrays.
   into roughly O(distinct subterm pairs).  Backward-subsumed
   leaves are rewritten to ERA and pruned at the next 8b sweep.
 
+  **8e RESULT (negative -- the milestone go/no-go signal).**  8e
+  shipped as `thvm_match_multi`, routing the forward-subsumption
+  scan in `atp_cp_queue_subsumed` through ONE fan-out traversal of
+  `cp_graph`.  The `(pattern_cell, subject_cell)` memo from part
+  (b) was built, instrumented (`-DATP_MATCH_STATS`), and measured.
+  It does **not** work on the flat `CpSet` container, for two
+  reasons found by reading + measuring the code, not predicted:
+
+  1. thvm has a **bump allocator, not hash-consing** -- the plan's
+     "thvm hash-conses every cell" premise is factually wrong.
+     `term_new_ctr` (`src/term/new_ctr.c`) always allocates a
+     fresh cell, so two structurally-equal CTR subterms are the
+     same `Term` value only when the literal same cell is reused.
+     The 8b normalization memo still gets 52% sharing (its key is
+     a single cell and CP generation reuses pass-through cells),
+     but the 8e memo keyed on a `(P,S)` *pair* needs both cells to
+     recur together.
+  2. On the flat `CpSet[Cp,Cp,...]` every CP leaf has a **distinct
+     top cell**, so `thvm_match` discriminates at the leaf root
+     and fails fast *before* descending to any deep subterm CPs
+     might share.  A discrimination tree shares term *prefixes*
+     (the root-anchored test); a flat hash-consed DAG of
+     disjoint-headed CPs shares *subterms* but no prefix.  The
+     fan-out re-traverses the subject in full per leaf.
+
+  Measured hit rate on `cpl1`: **0.0%** -- 0 hits over 3.25
+  billion subterm-pair lookups at 200 steps, three independent
+  measurements.  The memo's per-node hash + probe + partial-subst
+  bookkeeping was pure overhead; with it, `cpl1` ran ~16x SLOWER
+  than 8b.  Per the plan's "degrades gracefully ... no worse than
+  today" requirement, 8e ships **memo-free**: `thvm_match_multi`
+  is the fan-out over plain `thvm_match`, which IS the per-CP
+  scan -- behavior-identical (`cpl1` `cps=10108`/`40208` at
+  100/200 steps, matching 8b) and 8b-cost (`cpl1` 100 steps 4.1s
+  vs 8b 3.9s; 200 steps 45.2s vs 8b 45.1s).  `thvm_match` remains
+  79.6% of runtime -- the 91% wall is unmoved.
+
+  **Conclusion for the milestone thesis:** the shared-graph
+  representation does NOT deliver candidate-retrieval speedup *as
+  a flat `CpSet`*.  Maximal subterm sharing is real (8b's 52%) but
+  irrelevant to a root-anchored subsumption match -- that needs
+  *prefix* sharing, which only the SUP fan-out **container** of
+  8f provides.  8e was sequenced first to validate the thesis
+  before investing in 8c/8d; the validation says: do not expect
+  8e-style matching to pay off until 8f restructures `cp_graph`
+  from a flat list into a discrimination-tree-shaped SUP DAG.
+  The "a maximally-shared SUP-graph IS a discrimination tree"
+  claim holds only if the graph is *built* prefix-first; the
+  flat 8a container is not.
+
 - **8f -- CP generation as SUP fan-out + rule set as a shared
   DAG**.  Rewrite `thvm_critical_pairs` (`src/cp/_.c`) so
   superposition of a new rule against the rule set emits its

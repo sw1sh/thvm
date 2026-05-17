@@ -26,6 +26,20 @@ static const KboConfig DUMMY_CFG = {
   .var_weight  = 1,
 };
 
+// Test wrapper for atp_cp_queue_subsumed.  These tests populate
+// s->cp_lhs[] / s->n_cps directly, so with -DATP_CP_GRAPH the
+// IC-native cp_graph is stale until thvm_atp_cp_reheapify resyncs
+// it -- 8e routes queue subsumption through cp_graph (one
+// thvm_match_multi traversal), so the resync must happen before the
+// check.  Off the flag this is a thin pass-through to the array
+// scan.
+static int tt_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
+#ifdef ATP_CP_GRAPH
+  thvm_atp_cp_reheapify(s);
+#endif
+  return (int)atp_cp_queue_subsumed(s, lhs, rhs);
+}
+
 int main(void) {
   thvm_init();
 
@@ -1050,7 +1064,7 @@ int main(void) {
 
     Term lhs = mk_f(mk_a(), mk_e());
     Term rhs = mk_a();
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 1);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 1);
     thvm_atp_free(s);
   }
 
@@ -1065,7 +1079,7 @@ int main(void) {
 
     Term lhs = mk_a();
     Term rhs = mk_f(mk_a(), mk_e());
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 1);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 1);
     thvm_atp_free(s);
   }
 
@@ -1075,7 +1089,7 @@ int main(void) {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_f(mk_a(), mk_e());
     Term rhs = mk_a();
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 0);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 0);
     thvm_atp_free(s);
   }
 
@@ -1090,7 +1104,7 @@ int main(void) {
 
     Term lhs = mk_a();         // not a CTR with the f label
     Term rhs = mk_e();
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 0);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 0);
     thvm_atp_free(s);
   }
 
@@ -1121,6 +1135,10 @@ int main(void) {
     // atp_push_cps_traced with a hand-built CriticalPair
     // batch.
     s->n_rules = 0;   // no rules so trivially-joinable doesn't fire spuriously
+
+    // 8e: atp_push_cps_traced routes queue subsumption through
+    // cp_graph; resync it from the hand-populated cp_lhs[]/n_cps.
+    thvm_atp_cp_reheapify(s);
 
     CriticalPair batch[1];
     batch[0].lhs = mk_f(mk_a(), mk_e());

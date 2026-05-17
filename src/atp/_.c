@@ -668,6 +668,144 @@ fn void thvm_atp_norm_stats(u64 *hits, u64 *misses, double *secs) {
 }
 #endif
 
+// === 8e: shared-traversal multi-match (the 91%-killer) ==============
+//
+// Milestone 7 located the wall: atp_cp_queue_subsumed scans EVERY
+// queued CP (~64k) calling thvm_match per leaf -- 7b measured ~16M
+// match calls / step, 91% of runtime.  The scan asks, for a freshly
+// generated candidate CP (lhs, rhs): is there a queued CP (qs, qt)
+// and a substitution sigma with (lhs, rhs) = (sigma qs, sigma qt)?
+// The QUEUED CP is the PATTERN (it carries the FVR variables); the
+// CANDIDATE is the SUBJECT.  This is FORWARD subsumption -- the new
+// candidate is subsumed by an existing queued CP and dropped before
+// it ever reaches the queue.
+//
+// 8e routes that scan through ONE thvm_match_multi traversal of
+// cp_graph instead of an explicit O(n_cps) loop.  cp_graph is the
+// flat CTR `CpSet[Cp[qs0,qt0], Cp[qs1,qt1], ...]`; the CpSet
+// container is the fan-out point -- thvm_match_multi forks over its
+// n leaves against the one shared (lhs, rhs) subject.
+//
+// THE THESIS-FAILING RESULT -- documented honestly, per the plan's
+// "8e's payoff depends on CPs actually sharing subterms ... report
+// it honestly" instruction.
+//
+// 8e's intended win was a (pattern_cell, subject_cell) -> match
+// memo: a subterm shared by many CPs would be matched against a
+// given subject subterm once.  That memo was BUILT, INSTRUMENTED
+// (-DATP_MATCH_STATS) and MEASURED.  Verdict on the Wolfram axiom
+// (cpl1): 0.0% memo hit rate -- 0 hits over 7.7M subterm-pair
+// lookups, three independent measurements.  Diagnosis:
+//
+//  - thvm has a BUMP allocator, NOT a hash-cons table.  term_new_ctr
+//    (src/term/new_ctr.c) always heap_allocs a fresh cell, so two
+//    structurally-equal CTR subterms are the SAME Term value ONLY
+//    when the literal same cell is reused.  The plan's premise
+//    "thvm hash-conses every cell" is factually wrong.
+//  - The memo key is the (pattern, subject) cell PAIR.  A hit needs
+//    BOTH cells to recur together.  On the flat CpSet every CP leaf
+//    has a DISTINCT top cell, so thvm_match fails fast at the leaf
+//    root -- the discrimination happens at the root, before the
+//    traversal ever descends to any deep subterm CPs might share.
+//  - A discrimination tree shares term PREFIXES (the root-anchored
+//    test).  A flat hash-consed DAG of disjoint-headed CPs shares
+//    term SUBTERMS but no prefix.  The flat CpSet provides zero
+//    prefix sharing for a root-anchored match -- so the fan-out
+//    re-traverses the subject in full per leaf.  Real prefix
+//    sharing needs the SUP fan-out CONTAINER of workstream 8f, not
+//    the flat 8a container.
+//
+// The memo, with its per-node hash + probe + partial-subst
+// bookkeeping, was pure overhead at 0% hits -- it ran cpl1 ~16x
+// SLOWER than 8b.  Per the plan's "degrades gracefully to the
+// per-CP scan -- no worse than today" requirement, 8e ships WITHOUT
+// the memo: thvm_match_multi is the fan-out over plain thvm_match,
+// which IS the per-CP scan -- behavior-identical and 8b-cost.  8e
+// is the milestone go/no-go signal and the signal is: the
+// flat-CpSet shared-traversal does not beat the scan; revisit at 8f
+// with the SUP container that actually shares prefixes.
+
+#ifdef ATP_MATCH_STATS
+#include <time.h>
+static u64    g_atp_mm_calls       = 0;  // thvm_match_multi invocations
+static u64    g_atp_mm_node_visits = 0;  // CP leaves walked
+static u64    g_atp_mm_memo_hits   = 0;  // structurally 0 -- no memo
+static u64    g_atp_mm_memo_miss   = 0;  // thvm_match calls issued
+static double g_atp_mm_secs        = 0.0;
+#endif
+
+// 8e: forward subsumption of candidate (lhs, rhs) against the whole
+// queued CP set in ONE traversal of cp_graph -- the replacement for
+// atp_cp_queue_subsumed's explicit O(n_cps) thvm_match loop.
+//
+// `graph` is cp_graph: `CpSet[Cp[qs,qt], ...]`.  The CpSet container
+// is the fan-out point: thvm_match_multi forks over its n Cp[] leaves
+// against the one shared (lhs, rhs) subject.  Each leaf runs the same
+// two-sided match the per-CP scan did -- forward (sigma qs = lhs AND
+// sigma qt = rhs, one sigma threaded through both) then symmetric --
+// via plain thvm_match.  Returns 1 on the first subsuming leaf.
+//
+// The verdict is IDENTICAL to the per-CP loop, leaf for leaf: 8e is
+// a routing change, not a semantic one.  The (P,S) memo that was
+// meant to share per-subterm work is absent BY MEASUREMENT, not
+// oversight -- see the block comment above.
+static u8 thvm_match_multi(Term graph, Term lhs, Term rhs) {
+#ifdef ATP_MATCH_STATS
+  g_atp_mm_calls++;
+#endif
+  if (term_tag(graph) != TAG_CTR) return 0;
+  if (term_ext(graph) != ATP_CPSET_LABEL) return 0;
+  u32 n = term_ctr_n(graph);
+  for (u32 k = 0; k < n; k++) {
+#ifdef ATP_MATCH_STATS
+    g_atp_mm_node_visits++;
+#endif
+    Term qs = 0, qt = 0;
+    if (!atp_cp_decode_leaf(term_ctr_at(graph, k), &qs, &qt)) continue;
+    // Forward: sigma qs = lhs AND sigma qt = rhs, one sigma threaded
+    // through both matches (equational subsumption).
+    {
+      RewriteSubst subst = {{0}};
+#ifdef ATP_MATCH_STATS
+      g_atp_mm_memo_miss += 2u;
+#endif
+      if (thvm_match(qs, lhs, &subst) &&
+          thvm_match(qt, rhs, &subst)) {
+        return 1;
+      }
+    }
+    // Symmetric: sigma qs = rhs AND sigma qt = lhs.
+    {
+      RewriteSubst subst = {{0}};
+#ifdef ATP_MATCH_STATS
+      g_atp_mm_memo_miss += 2u;
+#endif
+      if (thvm_match(qs, rhs, &subst) &&
+          thvm_match(qt, lhs, &subst)) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+#ifdef ATP_MATCH_STATS
+// 8e instrumentation accessor: thvm_match_multi calls, CP leaves
+// walked, and thvm_match calls issued.  memo_hits is structurally 0
+// -- 8e ships memo-free (the (P,S) memo measured 0% on the flat
+// CpSet; see the 8e block comment).  Kept so the bench can report
+// the scan size and confirm thvm_match is still the hot spot.
+fn void thvm_atp_match_stats(u64 *calls, u64 *node_visits,
+                             u64 *memo_hits, u64 *memo_miss,
+                             double *secs) {
+  if (calls       != NULL) *calls       = g_atp_mm_calls;
+  if (node_visits != NULL) *node_visits = g_atp_mm_node_visits;
+  if (memo_hits   != NULL) *memo_hits   = g_atp_mm_memo_hits;
+  if (memo_miss   != NULL) *memo_miss   = g_atp_mm_memo_miss;
+  if (secs        != NULL) *secs        = g_atp_mm_secs;
+}
+#endif
+
 #else  // !ATP_CP_GRAPH -- the milestone-7 array engine, byte-for-byte.
 
 // No-op so mutation sites carry one unconditional call site instead
@@ -1577,6 +1715,20 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
 // Cost: O(|queue| * |term|) per candidate; cheap relative to a
 // `thvm_rewrite_normalize` because matching has no fixed-point
 // loop.
+//
+// 8e: with -DATP_CP_GRAPH the explicit per-CP loop is replaced by
+// ONE thvm_match_multi traversal of cp_graph (the CpSet container is
+// the fan-out point).  The verdict is IDENTICAL to the loop, leaf
+// for leaf -- 8e is a routing change, not a semantic one.  It is
+// memo-free: the (pattern_cell, subject_cell) memo measured 0%
+// sharing on the flat CpSet, so shipping it would be pure overhead
+// (see the 8e block comment at thvm_match_multi).
+#ifdef ATP_CP_GRAPH
+static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
+  if (s->n_cps == 0) return 0;
+  return thvm_match_multi(s->cp_graph, lhs, rhs);
+}
+#else
 static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
   for (u32 k = 0; k < s->n_cps; k++) {
     Term qs = s->cp_lhs[k];
@@ -1600,6 +1752,7 @@ static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
   }
   return 0;
 }
+#endif
 
 // Helper: push a batch of CPs onto the queue with TRACE_CP entries
 // pointing at the two source rules' trace indices.  Drops overflow
@@ -1618,11 +1771,16 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
   u32 pushed = 0;
+#if defined(ATP_CP_GRAPH) && defined(ATP_MATCH_STATS)
+  clock_t mm_t0 = clock();
+#endif
   for (u32 i = 0; i < ncps; i++) {
     u8 joinable    = atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs);
     u8 connected   = atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
                                                       rule_a, rule_b);
     u8 rule_subsmd = atp_cp_rule_subsumed(s, cps[i].lhs, cps[i].rhs);
+    // 8e: under -DATP_CP_GRAPH this runs ONE thvm_match_multi
+    // traversal of cp_graph; off the flag it is the array scan.
     u8 q_subsmd    = atp_cp_queue_subsumed(s, cps[i].lhs, cps[i].rhs);
     if (connected)   s->n_cps_dropped_connected++;
     if (rule_subsmd) s->n_cps_dropped_rule_subsumed++;
@@ -1639,6 +1797,9 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     atp_cp_heap_push(s, cps[i].lhs, cps[i].rhs, t);
     pushed++;
   }
+#if defined(ATP_CP_GRAPH) && defined(ATP_MATCH_STATS)
+  g_atp_mm_secs += (double)(clock() - mm_t0) / CLOCKS_PER_SEC;
+#endif
   return pushed;
 }
 
