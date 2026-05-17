@@ -257,17 +257,40 @@ static Term atp_rewrite_normalize_ic(Term t,
   return t;
 }
 
+#ifdef ATP_RULE_INDEX
+// 7e lever 2: forward declaration -- the rule-LHS redex index and its
+// indexed normalizer are defined further down (after the FV-index
+// block, where the discrimination-tree skeleton lives); the shim
+// below dispatches to it.
+static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
+#endif
+
 // 8.3e-i: AtpState-aware shim.  Dispatches between the C-direct
 // and IC-routed normalize paths based on s->use_ic_rewrite.
 // Replaces direct `thvm_rewrite_normalize` calls in
 // AtpState-internal callers (saturation step, goal-check,
 // interreduce, joinability/connectedness filters).
+//
+// 7e lever 2: under -DATP_RULE_INDEX, a normalize call against the
+// FULL current rule set (lhs == s->lhs && n_rules == s->n_rules --
+// the hot `atp_cp_trivially_joinable` / saturation-step / goal-check
+// path) routes to the rule-LHS discrimination index instead of
+// `rewrite_try_top`'s linear scan.  Calls against any OTHER rule
+// array (interreduce's 1-2 rule slice; the diag connectedness
+// filter's filtered set) keep the linear scan -- the index reflects
+// s->lhs[] only.  IC-routed rewriting (use_ic_rewrite) takes
+// precedence, unchanged.
 static Term atp_rewrite_normalize(AtpState *s, Term t,
                                   const Term *lhs, const Term *rhs,
                                   u32 n_rules, u32 step_cap) {
   if (s != NULL && s->use_ic_rewrite) {
     return atp_rewrite_normalize_ic(t, lhs, rhs, n_rules, step_cap);
   }
+#ifdef ATP_RULE_INDEX
+  if (s != NULL && lhs == s->lhs && rhs == s->rhs && n_rules == s->n_rules) {
+    return atp_rewrite_normalize_indexed(s, t, step_cap);
+  }
+#endif
   return thvm_rewrite_normalize(t, lhs, rhs, n_rules, step_cap);
 }
 
@@ -1391,6 +1414,425 @@ fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
 
 #endif // ATP_FV_INDEX
 
+// === 7e lever 2: rule-LHS redex index (-DATP_RULE_INDEX) ============
+//
+// THE OTHER WALL.  Once 7d collapsed the CP-queue subsumption scan,
+// the diagnosis re-profiled and pinned the remaining normalization
+// wall on `thvm_rewrite_step` -- specifically `rewrite_try_top`'s
+// O(n_rules) linear LHS scan.  `atp_cp_trivially_joinable` runs two
+// full `atp_rewrite_normalize` calls per CP candidate; each is up to
+// NORM_CAP=64 `thvm_rewrite_step`s; each step calls `rewrite_try_top`
+// at every preorder position of the term; and `rewrite_try_top` tries
+// every rule LHS at that position.  As R climbs past 250 rules the
+// linear scan dominates.
+//
+// THE FIX -- the DUAL of 7d.  7d indexes `Cp(lhs, rhs)` PAIRS and, for
+// a subject CP, retrieves a stored pattern that one-way matches it
+// (subsumption retrieval).  Here we index single rule-LHS TERMS and,
+// for a subject subterm, retrieve which rule LHS one-way matches it
+// (redex retrieval) -- the same matching direction (stored pattern has
+// variables, subject is concrete), so 7d's perfect-discrimination-tree
+// descent is reused VERBATIM: CTR-exact edge / first-var-bind STAR /
+// repeat-var-kbo_eq STAR, the STAR/CTR flat alphabet, the preorder
+// flatten with subtree spans.  Only the insert key (one term, no `Cp`
+// wrapper) and the leaf action (collect a rule index, not return-on-
+// first-hit) are rewritten.
+//
+// BEHAVIOR-IDENTITY -- the lowest-rule-index rule.  `rewrite_try_top`
+// tries rules in index order and the FIRST match wins; mid-completion
+// R is not confluent, so which rule fires changes the normal form.
+// The tree returns leaves in tree order, not index order.  So the
+// descent does NOT stop on first hit: it visits EVERY reachable leaf
+// and tracks the minimum rule index.  The leaf still runs the SAME
+// one-way `thvm_match` the linear scan ran, as the authoritative
+// guard, so a stored LHS reaches "winner" status iff `thvm_match`
+// confirms it -- byte-identical to the linear scan picking that rule.
+// `thvm_rewrite_step`'s redex-selection order (top, then children
+// left-to-right) is untouched -- only the per-position rule choice is
+// indexed.  This block is independent of -DATP_FV_INDEX (it carries
+// its own copy of the discrimination-tree skeleton).
+
+#ifdef ATP_RULE_INDEX
+
+// Flat-symbol alphabet -- same scheme as 7d's atp_dt_*: NUM < every
+// STAR(k) < every CTR(lab) so a sym-ascending child list lets the
+// descent stop scanning early.
+#define ATP_RI_NUM        0u
+#define ATP_RI_MAXVARS    64u
+#define ATP_RI_STAR_BASE  1u
+#define ATP_RI_CTR_BASE   (ATP_RI_STAR_BASE + ATP_RI_MAXVARS)
+#define ATP_RI_NIL        0xFFFFFFFFu
+#define ATP_RI_FLAT_CAP   4096u
+
+// Per-term variable renumbering by first appearance (see 7d's
+// AtpDtVarMap).  `slot[id]` holds (index+1); 0 = not yet seen.
+typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; } AtpRiVarMap;
+
+static void atp_ri_varmap_reset(AtpRiVarMap *vm) {
+  for (u32 i = 0; i < REWRITE_MAX_VAR; i++) vm->slot[i] = 0;
+  vm->n = 0;
+}
+
+static u32 atp_ri_var_index(AtpRiVarMap *vm, u32 vid) {
+  if (vid >= REWRITE_MAX_VAR) vid = REWRITE_MAX_VAR - 1u;
+  if (vm->slot[vid] == 0) {
+    u32 idx = (vm->n < ATP_RI_MAXVARS) ? vm->n : (ATP_RI_MAXVARS - 1u);
+    vm->slot[vid] = idx + 1u;
+    if (vm->n < ATP_RI_MAXVARS) vm->n++;
+  }
+  return vm->slot[vid] - 1u;
+}
+
+static u32 atp_ri_flatsym(Term t, AtpRiVarMap *vm) {
+  switch (term_tag(t)) {
+    case TAG_CTR: return ATP_RI_CTR_BASE + term_ext(t);
+    case TAG_NUM: return ATP_RI_NUM;
+    case TAG_FVR:
+    default:      return ATP_RI_STAR_BASE + atp_ri_var_index(vm, term_ext(t));
+  }
+}
+
+// A discrimination-tree node: left-child / right-sibling in a flat
+// realloc-grown pool addressed by u32 index (a realloc never
+// invalidates the structure).  `rec_head` heads the leaf record list.
+typedef struct {
+  u32 sym;
+  u32 child;
+  u32 sibling;
+  u32 rec_head;
+} AtpRiNode;
+
+// One indexed rule: `rule` is the index into s->lhs[]/s->rhs[].
+// `next` links the leaf list.  No Term mirror -- the index is rebuilt
+// from s->lhs[] whenever R mutates, so it never outlives a GC move.
+typedef struct {
+  u32 rule;
+  u32 next;
+} AtpRiRec;
+
+struct AtpRuleIndex {
+  AtpRiNode *nodes;
+  u32        n_nodes, cap_nodes;
+  AtpRiRec  *recs;
+  u32        n_recs, cap_recs;
+  u32        root;
+  u32        n_rules_built;     // R size the tree currently reflects
+};
+typedef struct AtpRuleIndex AtpRuleIndex;
+
+static u32 atp_ri_node_new(AtpRuleIndex *ix, u32 sym) {
+  if (ix->n_nodes == ix->cap_nodes) {
+    u32 cap = ix->cap_nodes ? ix->cap_nodes * 2u : 1024u;
+    AtpRiNode *p = (AtpRiNode *)realloc(ix->nodes, cap * sizeof(AtpRiNode));
+    if (p == NULL) { fprintf(stderr, "atp_ri: node pool OOM\n"); exit(1); }
+    ix->nodes = p;
+    ix->cap_nodes = cap;
+  }
+  u32 i = ix->n_nodes++;
+  ix->nodes[i].sym      = sym;
+  ix->nodes[i].child    = ATP_RI_NIL;
+  ix->nodes[i].sibling  = ATP_RI_NIL;
+  ix->nodes[i].rec_head = ATP_RI_NIL;
+  return i;
+}
+
+static u32 atp_ri_rec_new(AtpRuleIndex *ix) {
+  if (ix->n_recs == ix->cap_recs) {
+    u32 cap = ix->cap_recs ? ix->cap_recs * 2u : 1024u;
+    AtpRiRec *p = (AtpRiRec *)realloc(ix->recs, cap * sizeof(AtpRiRec));
+    if (p == NULL) { fprintf(stderr, "atp_ri: rec pool OOM\n"); exit(1); }
+    ix->recs = p;
+    ix->cap_recs = cap;
+  }
+  return ix->n_recs++;
+}
+
+// Find `parent`'s child reached by edge `sym`, creating it absent.
+// Children kept in ascending-sym order.
+static u32 atp_ri_child(AtpRuleIndex *ix, u32 parent, u32 sym) {
+  u32 prev = ATP_RI_NIL;
+  u32 cur  = ix->nodes[parent].child;
+  while (cur != ATP_RI_NIL && ix->nodes[cur].sym < sym) {
+    prev = cur;
+    cur  = ix->nodes[cur].sibling;
+  }
+  if (cur != ATP_RI_NIL && ix->nodes[cur].sym == sym) return cur;
+  u32 nn = atp_ri_node_new(ix, sym);          // may realloc the pool
+  ix->nodes[nn].sibling = cur;
+  if (prev == ATP_RI_NIL) ix->nodes[parent].child = nn;
+  else                    ix->nodes[prev].sibling = nn;
+  return nn;
+}
+
+static AtpRuleIndex *atp_ri_new(void) {
+  AtpRuleIndex *ix = (AtpRuleIndex *)calloc(1, sizeof(AtpRuleIndex));
+  if (ix == NULL) { fprintf(stderr, "atp_ri: index OOM\n"); exit(1); }
+  ix->root = atp_ri_node_new(ix, ATP_RI_NIL);
+  return ix;
+}
+
+static void atp_ri_free(AtpRuleIndex *ix) {
+  if (ix == NULL) return;
+  free(ix->nodes);
+  free(ix->recs);
+  free(ix);
+}
+
+// Walk rule LHS `t` in preorder, descending the tree by flatsym per
+// node.  Returns the node reached after `t`'s whole preorder string.
+static u32 atp_ri_insert_term(AtpRuleIndex *ix, u32 node, Term t,
+                              AtpRiVarMap *vm) {
+  node = atp_ri_child(ix, node, atp_ri_flatsym(t, vm));
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      node = atp_ri_insert_term(ix, node, term_ctr_at(t, i), vm);
+    }
+  }
+  return node;
+}
+
+// Discard every node / record and rebuild the tree from s->lhs[0..
+// n_rules).  Rules are inserted in ascending index order -- the leaf
+// list at a node is then index-descending (push-front), which the
+// retrieval's min-tracking does not depend on but keeps deterministic.
+static void atp_ri_rebuild(AtpState *s) {
+  AtpRuleIndex *ix = s->rule_index;
+  if (ix == NULL) return;
+  ix->n_nodes = 0;
+  ix->n_recs  = 0;
+  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
+  for (u32 i = 0; i < s->n_rules; i++) {
+    AtpRiVarMap vm;
+    atp_ri_varmap_reset(&vm);
+    u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
+    u32 rec  = atp_ri_rec_new(ix);
+    ix->recs[rec].rule = i;
+    ix->recs[rec].next = ix->nodes[node].rec_head;
+    ix->nodes[node].rec_head = rec;
+  }
+  ix->n_rules_built = s->n_rules;
+  s->rule_index_dirty = 0u;
+}
+
+// --- retrieval -----------------------------------------------------
+
+// Preorder-flatten `t` into `flat[]`, recording each position's
+// subtree span in `subsz[]`.  Returns 1 on success, 0 on cap.  ONE
+// flatten per `atp_ri_rewrite_step` covers every redex position -- the
+// per-position descents below all read this shared array, so the
+// flatten is O(S) for the whole step, not O(S^2) re-flattened per
+// position.
+static u8 atp_ri_flatten(Term t, Term *flat, u32 *subsz, u32 cap, u32 *pos) {
+  u32 here = *pos;
+  if (here >= cap) return 0;
+  flat[here] = t;
+  *pos = here + 1u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      if (!atp_ri_flatten(term_ctr_at(t, i), flat, subsz, cap, pos)) return 0;
+    }
+  }
+  subsz[here] = *pos - here;
+  return 1;
+}
+
+// One retrieval's immutable parameters (single-threaded saturation, so
+// file-static query scratch is safe).  `g_atp_ri_flat`/`subsz` span
+// the WHOLE subject of the current `atp_ri_rewrite_step`; a query at
+// preorder position `p` walks the slice flat[p .. p+subsz[p]).
+// `g_atp_ri_best` is the lowest rule index a reachable leaf has
+// confirmed so far -- ATP_RI_NIL = none.
+static AtpRuleIndex *g_atp_ri_ix      = NULL;
+static const Term   *g_atp_ri_flat    = NULL;
+static const u32    *g_atp_ri_subsz   = NULL;
+static const Term   *g_atp_ri_lhs     = NULL;  // s->lhs[] for the leaf guard
+static u32           g_atp_ri_qend    = 0;     // end of the queried slice
+static Term          g_atp_ri_star[ATP_RI_MAXVARS];
+static u32           g_atp_ri_best    = ATP_RI_NIL;
+static Term          g_atp_ri_qsubj   = 0;     // subject at the query position
+
+// At a leaf node: update g_atp_ri_best with the minimum rule index
+// whose LHS genuinely one-way matches the query subject.  The
+// perfect-tree descent proves structure + variable consistency for
+// the var ids the tree distinguishes, but `atp_ri_var_index` folds
+// ids >= REWRITE_MAX_VAR onto one slot (coarser tree), so the leaf
+// re-runs `thvm_match` -- the authoritative guard, exactly the test
+// `rewrite_try_top`'s linear scan applies.
+static void atp_ri_leaf_collect(u32 node) {
+  AtpRuleIndex *ix = g_atp_ri_ix;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+       r = ix->recs[r].next) {
+    u32 rule = ix->recs[r].rule;
+    if (rule >= g_atp_ri_best) continue;          // cannot lower the min
+    RewriteSubst subst = {{0}};
+    if (thvm_match(g_atp_ri_lhs[rule], g_atp_ri_qsubj, &subst)) {
+      g_atp_ri_best = rule;
+    }
+  }
+}
+
+// Walk the flattened subject slice from preorder index `pos` in
+// lockstep with tree node `node`, threading per-path variable
+// bindings in g_atp_ri_star.  Visits EVERY reachable leaf (does not
+// stop early) so g_atp_ri_best ends at the global minimum matching
+// rule index for this position.
+static void atp_ri_descend(u32 node, u32 pos) {
+  AtpRuleIndex *ix = g_atp_ri_ix;
+  if (pos == g_atp_ri_qend) {
+    atp_ri_leaf_collect(node);
+    return;
+  }
+  Term t   = g_atp_ri_flat[pos];
+  u32  sz  = g_atp_ri_subsz[pos];
+  u8   tc  = (term_tag(t) == TAG_CTR);
+  u32  csym_exact = tc ? (ATP_RI_CTR_BASE + term_ext(t))
+                       : (term_tag(t) == TAG_NUM ? ATP_RI_NUM : 0xFFFFFFFFu);
+  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+       c = ix->nodes[c].sibling) {
+    u32 csym = ix->nodes[c].sym;
+    if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+      // Stored rule variable: FIRST occurrence binds it to t; a REPEAT
+      // applies only if t equals that binding (one-way matching).
+      u32 k = csym - ATP_RI_STAR_BASE;
+      Term bound = g_atp_ri_star[k];
+      if (bound == 0) {
+        g_atp_ri_star[k] = t;
+        atp_ri_descend(c, pos + sz);
+        g_atp_ri_star[k] = 0;
+      } else if (kbo_eq(bound, t)) {
+        atp_ri_descend(c, pos + sz);
+      }
+    } else if (csym == csym_exact) {
+      // Stored CTR/NUM equal to t's own symbol: consume t's head;
+      // t's children are the next preorder positions.
+      atp_ri_descend(c, pos + 1u);
+    }
+  }
+}
+
+// Retrieve the lowest rule index whose LHS one-way matches the subject
+// subterm at preorder position `qpos` of the shared flat array.
+// Returns ATP_RI_NIL if no rule LHS matches there.
+static u32 atp_ri_query_pos(u32 qpos) {
+  g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
+  g_atp_ri_qsubj = g_atp_ri_flat[qpos];
+  g_atp_ri_best  = ATP_RI_NIL;
+  for (u32 i = 0; i < ATP_RI_MAXVARS; i++) g_atp_ri_star[i] = 0;
+  atp_ri_descend(g_atp_ri_ix->root, qpos);
+  return g_atp_ri_best;
+}
+
+// Find the FIRST preorder position of the shared subject that is a
+// redex (some rule LHS matches there).  Preorder = outermost-leftmost
+// = exactly `thvm_rewrite_step`'s "try top, then children left-to-
+// right" order.  Sets *redex_pos / *redex_rule and returns 1; returns
+// 0 if the subject has no redex.
+static u8 atp_ri_find_redex(u32 flatlen, u32 *redex_pos, u32 *redex_rule) {
+  for (u32 p = 0; p < flatlen; p++) {
+    u32 m = atp_ri_query_pos(p);
+    if (m != ATP_RI_NIL) {
+      *redex_pos  = p;
+      *redex_rule = m;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Rebuild `t` with the subterm at preorder position `redex_pos`
+// replaced by `repl`.  `*cursor` tracks the running preorder index as
+// the structural walk descends; `subsz` gives the redex subtree span
+// so the matched subtree is skipped in one jump.  Cells above the
+// redex are rebuilt (one fresh CTR block per CTR layer on the path);
+// cells off the path are shared -- exactly `thvm_rewrite_step`'s
+// rebuild discipline (it never recurses past a position once the
+// redex fired).
+static Term atp_ri_apply_at(Term t, u32 redex_pos, const u32 *subsz,
+                            Term repl, u32 *cursor) {
+  u32 here = (*cursor)++;
+  if (here == redex_pos) {
+    *cursor = here + subsz[redex_pos];            // skip the whole subtree
+    return repl;
+  }
+  // Once the redex (a strictly-earlier preorder position) has fired,
+  // a CTR layer entirely after it cannot contain redex_pos -- but the
+  // cursor must still advance over it.  The span check short-circuits.
+  if (term_tag(t) == TAG_CTR && redex_pos < here + subsz[here]) {
+    u32 n = term_ctr_n(t);
+    Term children[REWRITE_MAX_ARITY];
+    u8  changed = 0;
+    for (u32 i = 0; i < n; i++) {
+      Term ch  = term_ctr_at(t, i);
+      Term nch = atp_ri_apply_at(ch, redex_pos, subsz, repl, cursor);
+      children[i] = nch;
+      if (nch != ch) changed = 1;
+    }
+    if (changed) return term_new_ctr(term_ext(t), children, n);
+    return t;
+  }
+  // Off the redex path: advance the cursor past `t`'s subtree, share.
+  *cursor = here + subsz[here];
+  return t;
+}
+
+// Indexed analog of `thvm_rewrite_step`: one outermost-leftmost
+// rewrite anywhere in `t`.  Flattens `t` ONCE, finds the first
+// preorder redex via the rule index, applies the lowest-index rule
+// there.  Behavior-identical to the linear `thvm_rewrite_step`: same
+// redex (first preorder position), same rule (lowest index), same
+// substitution (the leaf's `thvm_match`).
+static Term atp_ri_rewrite_step(AtpState *s, Term t,
+                                Term *flat, u32 *subsz) {
+  u32 flatlen = 0u;
+  if (!atp_ri_flatten(t, flat, subsz, ATP_RI_FLAT_CAP, &flatlen)) {
+    // Over-deep subject: fall back to the linear rewriter for this
+    // step so a cap overflow can never silently skip a redex.
+    return thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
+  }
+  g_atp_ri_ix    = s->rule_index;
+  g_atp_ri_flat  = flat;
+  g_atp_ri_subsz = subsz;
+  g_atp_ri_lhs   = s->lhs;
+
+  u32 redex_pos = 0u, redex_rule = 0u;
+  if (!atp_ri_find_redex(flatlen, &redex_pos, &redex_rule)) {
+    return t;                                     // no redex: fixpoint
+  }
+  // Re-derive the substitution for the chosen rule at the redex
+  // subterm, apply its RHS, splice it back into `t`.
+  Term subj = flat[redex_pos];
+  RewriteSubst subst = {{0}};
+  if (!thvm_match(s->lhs[redex_rule], subj, &subst)) {
+    return t;                                     // unreachable: leaf confirmed
+  }
+  Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
+  u32  cursor = 0u;
+  return atp_ri_apply_at(t, redex_pos, subsz, repl, &cursor);
+}
+
+// Indexed analog of `thvm_rewrite_normalize`: iterate the indexed
+// step until fixpoint or step_cap.  Rebuilds the rule index first if
+// R has mutated since the last build.  The flatten scratch is
+// allocated once per normalize and reused across every step.
+static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
+  if (s->rule_index == NULL) s->rule_index = atp_ri_new();
+  if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
+    atp_ri_rebuild(s);
+  }
+  static Term flat[ATP_RI_FLAT_CAP];
+  static u32  subsz[ATP_RI_FLAT_CAP];
+  for (u32 i = 0; i < step_cap; i++) {
+    Term t2 = atp_ri_rewrite_step(s, t, flat, subsz);
+    if (kbo_eq(t, t2)) return t;
+    t = t2;
+  }
+  return t;
+}
+
+#endif // ATP_RULE_INDEX
+
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
@@ -1413,6 +1855,14 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // 7d: an empty FV subsumption index; CPs enter it on enqueue.
   s->fv_index = atp_fv_index_new();
 #endif
+#ifdef ATP_RULE_INDEX
+  // 7e lever 2: the rule-LHS redex index is built lazily on the first
+  // indexed normalize -- start it NULL, dirty so the first build
+  // fires.  (calloc already zeroed both, the explicit set documents
+  // intent.)
+  s->rule_index       = NULL;
+  s->rule_index_dirty = 1u;
+#endif
   return s;
 }
 
@@ -1428,6 +1878,9 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_seq);
 #ifdef ATP_FV_INDEX
   atp_fv_index_free(s->fv_index);
+#endif
+#ifdef ATP_RULE_INDEX
+  atp_ri_free(s->rule_index);
 #endif
   free(s);
 }
@@ -1878,6 +2331,10 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
   s->n_rules++;
+#ifdef ATP_RULE_INDEX
+  // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.
+  s->rule_index_dirty = 1u;
+#endif
   return 1;
 }
 
@@ -2212,6 +2669,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->r_trace[j - 1] = s->r_trace[j];
       }
       s->n_rules--;
+#ifdef ATP_RULE_INDEX
+      // 7e lever 2: a rule was dropped and the array compacted -- the
+      // rule-LHS index's index->LHS mapping is stale even if a later
+      // re-add restores n_rules.  Force a rebuild on the next query.
+      s->rule_index_dirty = 1u;
+#endif
       dropped++;
       // Don't increment i; the next older rule shifted down to slot i.
     } else {

@@ -3008,6 +3008,21 @@ typedef struct {
   struct AtpFvIndex *fv_index;
 #endif
 
+  // 7e (lever 2): discrimination tree over the rule LHS terms.  Behind
+  // -DATP_RULE_INDEX, the ATP-side normalizer's per-position redex
+  // search consults this instead of `rewrite_try_top`'s O(n_rules)
+  // linear LHS scan: it retrieves, for a subject subterm, the LOWEST
+  // rule index whose LHS one-way matches there -- exactly the rule the
+  // linear scan's first-match would pick.  Built lazily over
+  // `lhs[0..n_rules)`; `rule_index_dirty` is set on every rule-set
+  // mutation (orient_and_add append, interreduce drop) so the next
+  // indexed normalize rebuilds.  Opaque pointer; flag OFF this field
+  // is absent and the engine uses the linear scan, byte-for-byte.
+#ifdef ATP_RULE_INDEX
+  struct AtpRuleIndex *rule_index;
+  u8                   rule_index_dirty;
+#endif
+
   // Transient: set by thvm_atp_select_cp to the trace-entry index
   // of the popped CP; consumed by thvm_atp_step right after the
   // pop so orient_and_add's TRACE_ORIENT entry can record the

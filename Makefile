@@ -51,6 +51,17 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FV_INDEX)),-DATP_FV_INDEX,)
 ATP_CP_DIAG ?=
 ATP_DEFINES += $(if $(filter-out 0,$(ATP_CP_DIAG)),-DATP_CP_DIAG,)
 
+# Milestone 7e (normalization wall, lever 2): -DATP_RULE_INDEX builds a
+# discrimination tree over rule LHS terms and routes the ATP-side
+# normalizer's redex search through it instead of the O(n_rules)
+# linear LHS scan in `rewrite_try_top`.  Off by default -- the linear
+# scan is the regression oracle.  Behavior-identical: among the
+# indexed candidates matching a position the lowest rule index wins,
+# exactly replicating the linear scan's first-match choice.
+# Independent of every other ATP flag.
+ATP_RULE_INDEX ?=
+ATP_DEFINES    += $(if $(filter-out 0,$(ATP_RULE_INDEX)),-DATP_RULE_INDEX,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \

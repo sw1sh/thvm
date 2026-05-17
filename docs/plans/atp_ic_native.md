@@ -614,6 +614,95 @@ Wolfram axiom is purely a redundancy/indexing scaling wall.
   `cps=90313` at 300 steps, ~18s ON and OFF).  Gated behind
   `-DATP_FV_INDEX`, independent of `-DATP_CP_GRAPH`; OFF is the
   byte-for-byte milestone-7 array scan.
+- **7e (normalization wall) -- the `thvm_rewrite_step` fix**
+  (DONE -- two levers; all work assumes `-DATP_FV_INDEX` ON, i.e. 7d
+  active).  7d pinned the next wall: with the CP-queue scan gone,
+  `sample` shows the hot path is `thvm_rewrite_step`.  A re-diagnosis
+  pinned it precisely to `atp_push_cps_traced`'s per-CP filter block,
+  which ran **four full `atp_rewrite_normalize` calls per candidate**.
+  Each normalize is `O(term_size x n_rules)`: `rewrite_try_top`
+  (`src/rewrite/_.c`) tries every rule LHS at the top of a term,
+  `thvm_rewrite_step` recurses into every CTR child so that runs at
+  every position, and `thvm_rewrite_normalize` restarts from the root
+  up to `NORM_CAP=64` times.
+
+  *Lever 1 -- drop the dead counter-only filters* (`-DATP_CP_DIAG`,
+  default OFF).  Of the per-CP filters only 7.1 trivial-joinability
+  and 7.3b queue-subsumption are real drop filters.  7.2b
+  source-disjoint connectedness (`atp_cp_source_disjoint_connected`,
+  two normalizes + a malloc) and 7.3a rule-subsumption
+  (`atp_cp_rule_subsumed`, an O(n_rules) two-sided match scan) are
+  COUNTER-ONLY -- their verdicts only ever tick
+  `n_cps_dropped_connected` / `n_cps_dropped_rule_subsumed` and never
+  drop a CP.  Both calls now run only under `-DATP_CP_DIAG`; the
+  default hot loop skips them.  Behavior-identical (same CPs queued,
+  same proof); the functions stay defined for the `test_atp` unit
+  tests.  Measured ~2.1x on cpl1 (step 500: 66.7s -> 30.7s, with 7d
+  ON, rule index OFF).
+
+  *Lever 2 -- a rule-LHS redex index* (`-DATP_RULE_INDEX`, default
+  OFF, independent of every other ATP flag).  `rewrite_try_top`'s
+  O(n_rules) linear LHS scan becomes an index lookup.  The index is
+  the DUAL of 7d's discrimination tree: 7d indexes `Cp(lhs,rhs)` pairs
+  and retrieves a stored pattern subsuming a subject CP; this indexes
+  single rule-LHS terms and, at each subject position, retrieves which
+  rule LHS one-way matches the subterm there -- the SAME matching
+  direction (stored pattern has variables, subject is concrete), so
+  7d's perfect-discrimination-tree descent (CTR-exact / first-var-bind
+  STAR / repeat-var-`kbo_eq` STAR, the STAR/CTR flat alphabet, the
+  preorder flatten with subtree spans) is reused verbatim.  Only the
+  insert key (one term, no `Cp` wrapper) and the leaf action (collect
+  a rule index) are rewritten.  ATP-side, mirroring the
+  `atp_ic_rewrite_step` / `atp_rewrite_normalize_ic` precedent:
+  `src/rewrite/_.c` (the shared runtime rewriter) is UNTOUCHED; the
+  indexed normalizer (`atp_rewrite_normalize_indexed`) is reached
+  through the existing `atp_rewrite_normalize` shim, taken only when
+  the call targets the full current rule set
+  (`lhs == s->lhs && n_rules == s->n_rules` -- the hot
+  trivial-joinability / saturation-step / goal-check path).  The
+  index is built lazily over `s->lhs[0..n_rules)` and rebuilt when a
+  `rule_index_dirty` flag (set on every `atp_push_rule` append and
+  every `interreduce` drop) or an `n_rules` mismatch is seen.
+
+  Behavior-identity subtlety: the mid-completion rule set is NOT
+  confluent, so WHICH rule fires changes the normal form.
+  `rewrite_try_top` picks the FIRST (lowest-index) matching rule; the
+  tree returns leaves in tree order.  So the descent does not stop on
+  first hit -- it visits every reachable leaf, runs the SAME one-way
+  `thvm_match` as the authoritative guard, and tracks the MINIMUM
+  confirmed rule index.  The redex-selection order is the first
+  preorder position with a redex -- exactly `thvm_rewrite_step`'s
+  top-then-children-left-to-right.  A single flatten per step feeds
+  every per-position descent (no O(S^2) re-flatten).
+
+  *Measured result.*  `test_atp` 8544/8544 in default,
+  `ATP_RULE_INDEX=1`, and `ATP_FV_INDEX=1 ATP_RULE_INDEX=1` builds;
+  `cpgen` still 5 CPs.  Behavior-identical on cpl1 (with both
+  indexes): step 250 rules=251 cps=63265, step 500 rules=501
+  cps=251515 -- byte-identical to the pre-fix baseline.  Wall: cpl1
+  step 250 **8.6s -> 0.2s** (~43x), step 500 **66.7s -> 0.9s**
+  (~74x); 1000 steps in 2.8s.  Headline (`ATP_FV_INDEX=1
+  ATP_RULE_INDEX=1`, both vs 7d-only): subl2 reaches **1309 steps in
+  60s** (vs 482, ~2.7x; ~8.0 -> ~21.8 steps/s); thm **1308 steps in
+  60s** (vs 484, ~2.7x); at 120s subl2 ~1469 and thm ~1468.  A
+  `sample` mid-run confirms `thvm_rewrite_step` is GONE from the hot
+  path -- time is now spread across the 7d FV index, CP enumeration
+  (`thvm_unify`), and `gc_evacuate`.
+
+  *NOT a proof -- the engine diverges (convergence is a separate
+  follow-up).*  This fix is a pure speedup; it does NOT make subl2 or
+  thm prove.  The re-diagnosis found the completion engine is
+  *divergent* on these goals: it generates ~753 CPs per step and the
+  queue runs away past 250k+ (over 2.1M at 120s).  Each step is now
+  2-10x faster, so the engine climbs the ladder further per wall-
+  second, but a divergent search never terminates regardless of
+  per-step speed.  Making subl2/thm actually prove needs a
+  convergence change -- stronger redundancy (7c: full forward/backward
+  subsumption, simplify-reflect, blocked-CP deletion to keep the queue
+  bounded), a better CP-selection heuristic, or a goal-directed
+  strategy -- not a faster inner loop.  7c is the right next lever:
+  7d/7e made the per-CP checks cheap, 7c makes them strong enough to
+  bound the queue.
 - **7c -- redundancy strengthening** (after 7d): full
   forward+backward subsumption, simplify-reflect, blocked-CP
   deletion -- the Waldmeister redundancy criteria, to keep the
