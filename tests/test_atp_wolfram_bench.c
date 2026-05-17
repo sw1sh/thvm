@@ -9,12 +9,9 @@
 // with `make bin/test_atp_wolfram_bench` and run:
 //   bin/test_atp_wolfram_bench [goal] [step_cap] [wall_cap_s]
 // goal in { thm, cpl1, cpl2, subl2, chain3, chain4, chain6, deep5,
-// cpgen } (default thm).  chain3/chain4/deep5 are multi-step join
-// goals -- the rungs between the distance-1 lemmas and the
-// distance-54 thm -- and join+verify cleanly.  chain6 is provable
-// (a 6-step outer path) but the MNF search drowns in its duplicated-
-// redex fan-out before finding it: a capacity probe for the same
-// wall thm hits.
+// cpgen } (default thm).  chain3/chain4/chain6/deep5 are multi-step
+// join goals -- the rungs between the distance-1 lemmas and the
+// distance-54 thm -- and all join+verify cleanly.
 //
 // The "ladder" idea (debug whether inference is even right): WL's
 // own FindEquationalProof[DoubleNegation, WolframAxioms] proof is a
@@ -106,8 +103,8 @@ static void goal_subl2(Term *l, Term *r) {
 // stack reduces to M in exactly k steps (reduce the outermost each
 // time).  These join via the AXIOM ALONE -- no completion needed --
 // exercising the MNF parent-chain machinery on chains longer than one.
-// The axiom LHS holds its `c` argument twice, so |wrapk| ~ 2^k: k<=5
-// joins fast, k=6 (~885 symbols/side) drowns the search -- see chain6.
+// The axiom LHS holds its `c` argument twice, so |wrapk| ~ 2^k --
+// ~885 symbols/side at k=6, still joined by the depth-first deque.
 static Term wrapk(Term a, Term b, Term m, u32 k) {
   Term t = m;
   for (u32 i = 0; i < k; i++) t = axiom_inst(a, b, t);

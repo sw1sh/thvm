@@ -2847,32 +2847,33 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // === Milestone 10: MNF -- the Multiple-Normal-Forms goal search =====
 //
 // A port of Waldmeister's MNF module.  The conjecture stops being a
-// passive single-normal-form check and becomes a bidirectional rewrite
-// search: goal_lhs seeds a GREEN front, goal_rhs a RED one.  Each front
-// rewrites with the current rule set R; every reached term is held in a
-// hash table.  When a newly reached term collides with a term already
-// in the table of the OPPOSITE colour -- a red term equal to a green
-// term -- the two fronts have met: goal_lhs and goal_rhs share an
-// equational-rewrite path, so the goal is proved.
+// passive single-normal-form check and becomes a goal search: goal_lhs
+// seeds a GREEN front, goal_rhs a RED one.  Each front *normalises* its
+// term forward (l->r) with the current rule set R; because R is not
+// confluent a term has many forward reducts, so each front is a set,
+// held in a hash table.  When a reduct collides with a term already in
+// the table of the OPPOSITE colour the fronts have met: goal_lhs and
+// goal_rhs share a rewrite path, so the goal is proved.
 //
-// Unlike the single-NF check, this needs no convergent R: it only needs
-// ONE common reduct, found by exploring the rewrite graph.  It is fed
-// incrementally -- each rule completion derives is applied to the
-// already-reached terms.  Forward rewrites (l->r) are unrationed;
-// backward "anti" rewrites (r->l, variable-safe) grow terms and are
-// capped per lineage by MNF_MAX_ANTI.  MNF_MAX_NODES bounds the set.
+// The set is fed incrementally -- each rule completion derives is
+// applied to the already-reached terms -- so progress comes from
+// completion growing R until the fronts' forward reducts coincide.
 //
-// v1: no GC-rooting of the node terms -- run without ATP_BENCH_GC
-// (validated on the lemma ladder); thm needs the GC-root follow-up.
+// Search order is Waldmeister's irreducible-adaptive deque: expand
+// depth-first (newest node) while reductions stay productive, switch
+// to breadth-first (oldest node) the moment the last node expanded was
+// irreducible -- a normal form, a dead end (see mnf_pop / mnf_step).
+//
+// Backward "anti" steps (r->l) are OFF by default -- see MNF_MAX_ANTI.
 
 #define MNF_RED        0u
 #define MNF_GREEN      1u
-// Backward "anti" steps (r->l, increasing) let the two fronts climb
-// toward each other when their forward reducts do not meet -- needed
-// once the rule set is non-convergent.  They grow terms and fan the
-// search out, so they are capped per lineage by MNF_MAX_ANTI and the
-// DFS explores forward steps first (see mnf_expand_node).
-#define MNF_MAX_ANTI   2u
+// Backward "anti" steps (r->l) are OFF by default: Waldmeister's MNF
+// defaults to noAnti -- forward normalisation only -- and relies on
+// completion to grow R until the fronts' forward reducts coincide.  A
+// non-zero cap opts into variable-safe backward steps, capped per
+// lineage (Waldmeister's antiWOVar).
+#define MNF_MAX_ANTI   0u
 #define MNF_MAX_NODES  400000u
 #define MNF_SUCC_CAP   2048u
 #define MNF_BUDGET     192u
@@ -2883,19 +2884,26 @@ typedef struct {
   Term term;
   u32  hash;
   u32  parent;     // node this term was first reached from (root: self)
-  u32  score;      // v1.2: structural distance to the opposite front's origin
   u8   colour;     // MNF_RED / MNF_GREEN
   u8   anti;       // backward steps used on the path to this term
   u8   expanded;   // successors already generated against [0, n_rules_seen)
+  u8   irred;      // 1 until a forward (size-reducing) successor is found
 } MnfNode;
 
 typedef struct AtpMnf {
   MnfNode *nodes;
   u32      n_nodes;
   u32      cap_nodes;
-  u32     *qred;             // RED front -- pending nodes (best-first by score)
-  u32     *qgreen;           // GREEN front -- pending nodes (best-first by score)
-  u32      qred_n, qgreen_n, q_cap;
+  // Each front is a deque of pending node indices.  Successors are
+  // pushed on the left; mnf_pop takes the left (newest, depth-first)
+  // or right (oldest, breadth-first) end per the irred-adaptive policy.
+  u32     *qred;
+  u32     *qgreen;
+  u32      qred_head, qred_tail;       // live deque span is q[head, tail)
+  u32      qgreen_head, qgreen_tail;
+  u32      q_cap;
+  u8       red_last_irred;             // last RED node expanded was a NF
+  u8       green_last_irred;
   u32     *buckets;          // open addressing: bucket -> node_idx + 1
   u32      n_buckets;
   u32      n_rules_seen;     // rules already fed in
@@ -2931,31 +2939,6 @@ static u32 mnf_hash(Term t) {
     default:
       return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
   }
-}
-
-// v1.2 goal-similarity: structural distance between `a` and a fixed
-// target `b`.  Aligned constructors (same label/arity) recurse into
-// children; where the structures diverge the whole mismatched mass
-// counts.  A RED node is scored by its distance to goal_lhs (the GREEN
-// origin) and a GREEN node by its distance to goal_rhs -- so each front
-// is steered toward the other's origin, the two crossing in the middle.
-static u32 mnf_diff(Term a, Term b) {
-  if (term_tag(a) == TAG_CTR && term_tag(b) == TAG_CTR &&
-      term_ext(a) == term_ext(b)) {
-    u32 na = term_ctr_n(a), nb = term_ctr_n(b);
-    if (na == nb) {
-      u32 d = 0u;
-      for (u32 i = 0; i < na; i++) {
-        d += mnf_diff(term_ctr_at(a, i), term_ctr_at(b, i));
-      }
-      return d;
-    }
-  }
-  if (term_tag(a) == TAG_FVR && term_tag(b) == TAG_FVR &&
-      term_ext(a) == term_ext(b)) {
-    return 0u;
-  }
-  return atp_symbol_count(a) + atp_symbol_count(b);
 }
 
 // Find a node whose term is kbo_eq to `t` (hash `h`); MNF_MAX_NODES if
@@ -3000,16 +2983,16 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti, u32 parent) {
   m->nodes[ni].colour   = col;
   m->nodes[ni].anti     = anti;
   m->nodes[ni].expanded = 0u;
-  m->nodes[ni].score    = mnf_diff(t, (col == MNF_RED) ? m->seed_green
-                                                       : m->seed_red);
+  m->nodes[ni].irred    = 1u;   // until a forward successor proves otherwise
   if (col == MNF_RED) m->n_red++; else m->n_green++;
   if (anti > 0u) m->n_anti++;
   u32 mask = m->n_buckets - 1u;
   u32 probe = h & mask;
   while (m->buckets[probe] != 0u) probe = (probe + 1u) & mask;
   m->buckets[probe] = ni + 1u;
-  if (col == MNF_RED) m->qred[m->qred_n++]     = ni;   // each <= MNF_MAX_NODES
-  else                m->qgreen[m->qgreen_n++] = ni;
+  // Push left onto the colour's deque (each node enqueued exactly once).
+  if (col == MNF_RED) m->qred[--m->qred_head]     = ni;
+  else                m->qgreen[--m->qgreen_head] = ni;
   return 0;
 }
 
@@ -3060,7 +3043,10 @@ static void mnf_successors(AtpState *s, Term t, u8 allow_anti,
 }
 
 // Generate node `ni`'s successors against rules [rule_lo, rule_hi) and
-// insert each (same colour, anti-count incremented for a backward step).
+// insert each (same colour, anti-count bumped for a backward step).  A
+// node that yields at least one forward (size-reducing) rewrite is
+// reducible -- its `irred` flag is cleared; one that yields none is a
+// normal form and stays irreducible.
 static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
                             u32 rule_lo, u32 rule_hi) {
   u8   col  = m->nodes[ni].colour;
@@ -3069,10 +3055,8 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
   u32  n    = 0u;
   mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
   if (n >= MNF_SUCC_CAP) m->n_trunc++;   // successor buffer overflowed
-  // Insert every one-step rewrite as a same-colour node parented at
-  // `ni`.  A backward (r->l) step bumps the lineage anti-count; the
-  // best-first queues (mnf_pop_min) decide expansion order by score.
   for (u32 k = 0; k < n && !m->joined; k++) {
+    if (mnf_succ_anti[k] == 0u) m->nodes[ni].irred = 0u;   // forward redex
     mnf_insert(m, mnf_succ_buf[k], col, (u8)(anti + mnf_succ_anti[k]), ni);
   }
 }
@@ -3096,6 +3080,9 @@ static AtpMnf *mnf_create(AtpState *s) {
     free(m->buckets); free(m);
     return NULL;
   }
+  // Deques start empty at the right end -- mnf_insert pushes left.
+  m->qred_head   = m->qred_tail   = m->q_cap;
+  m->qgreen_head = m->qgreen_tail = m->q_cap;
   m->seed_green = s->goal_lhs;     // the GREEN front's origin
   m->seed_red   = s->goal_rhs;     // the RED front's origin
   mnf_insert(m, s->goal_lhs, MNF_GREEN, 0u, MNF_ROOT_PARENT);
@@ -3123,16 +3110,14 @@ static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
   for (u32 i = 0; i < m->n_nodes; i++) m->nodes[i].term = roots[base + i];
 }
 
-// Pop the queued node with the smallest score -- the one structurally
-// closest to the opposite front's origin.  Scan + swap-remove, O(qn).
-static u32 mnf_pop_min(AtpMnf *m, u32 *q, u32 *qn) {
-  u32 best = 0u;
-  for (u32 k = 1u; k < *qn; k++) {
-    if (m->nodes[q[k]].score < m->nodes[q[best]].score) best = k;
-  }
-  u32 ni = q[best];
-  q[best] = q[--(*qn)];
-  return ni;
+// Take a node from a colour's deque.  Waldmeister's irreducible-
+// adaptive policy: if the last node expanded for this colour was
+// irreducible (a normal form -- a dead end), pop the OLDEST node
+// (right end, breadth-first -- go try elsewhere); otherwise pop the
+// NEWEST (left end, depth-first -- keep driving the reduction down).
+static u32 mnf_pop(u32 *q, u32 *head, u32 *tail, u8 last_irred) {
+  if (last_irred) return q[--(*tail)];   // FIFO end: oldest
+  return q[(*head)++];                   // LIFO end: newest
 }
 
 #ifdef ATP_MNF_DIAG
@@ -3203,17 +3188,11 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
 #ifdef ATP_MNF_DIAG
   { static u32 c = 0;
     if (c++ % 16u == 0u) {
-      u32 sr = 0xffffffffu, sg = 0xffffffffu;
-      for (u32 k = 0; k < m->qred_n; k++)
-        if (m->nodes[m->qred[k]].score < sr) sr = m->nodes[m->qred[k]].score;
-      for (u32 k = 0; k < m->qgreen_n; k++)
-        if (m->nodes[m->qgreen[k]].score < sg) sg = m->nodes[m->qgreen[k]].score;
       fprintf(stderr,
         "[mnf] call=%-6u nodes=%-7u red=%-7u green=%-7u "
-        "queue(r=%u g=%u) best-score(r=%u g=%u) anti=%u dup=%u "
-        "trunc=%u full=%u rules=%u/%u\n",
-        c, m->n_nodes, m->n_red, m->n_green, m->qred_n, m->qgreen_n,
-        (sr == 0xffffffffu ? 0u : sr), (sg == 0xffffffffu ? 0u : sg),
+        "queue(r=%u g=%u) anti=%u dup=%u trunc=%u full=%u rules=%u/%u\n",
+        c, m->n_nodes, m->n_red, m->n_green,
+        m->qred_tail - m->qred_head, m->qgreen_tail - m->qgreen_head,
         m->n_anti, m->n_dup, m->n_trunc, m->full,
         m->n_rules_seen, s->n_rules);
     } }
@@ -3225,25 +3204,30 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     }
     m->n_rules_seen = hi;
   }
-  // (b) best-first expand the two fronts in alternation: from each
-  // colour's queue take the node closest (mnf_diff score) to the
-  // opposite front's origin, so the fronts steer toward each other.
+  // (b) expand the two fronts in alternation -- one node each per
+  // round -- taking each colour's node by the irred-adaptive deque
+  // policy (mnf_pop).  A node's `irred` is settled by mnf_expand_node;
+  // it feeds the next pop of the same colour.
   for (u32 b = 0; b < budget && !m->joined; b++) {
     int did = 0;
-    if (m->qred_n > 0u) {
-      u32 ni = mnf_pop_min(m, m->qred, &m->qred_n);
+    if (m->qred_head < m->qred_tail) {
+      u32 ni = mnf_pop(m->qred, &m->qred_head, &m->qred_tail,
+                       m->red_last_irred);
       if (!m->nodes[ni].expanded) {
         mnf_expand_node(s, m, ni, 0u, s->n_rules);
         m->nodes[ni].expanded = 1u;
       }
+      m->red_last_irred = m->nodes[ni].irred;
       did = 1;
     }
-    if (!m->joined && m->qgreen_n > 0u) {
-      u32 ni = mnf_pop_min(m, m->qgreen, &m->qgreen_n);
+    if (!m->joined && m->qgreen_head < m->qgreen_tail) {
+      u32 ni = mnf_pop(m->qgreen, &m->qgreen_head, &m->qgreen_tail,
+                       m->green_last_irred);
       if (!m->nodes[ni].expanded) {
         mnf_expand_node(s, m, ni, 0u, s->n_rules);
         m->nodes[ni].expanded = 1u;
       }
+      m->green_last_irred = m->nodes[ni].irred;
       did = 1;
     }
     if (!did) break;

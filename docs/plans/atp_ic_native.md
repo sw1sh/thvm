@@ -1321,7 +1321,42 @@ Why `thm` does not join -- three measured causes, none a bug:
 Verdict: the MNF reducer is sound and complete-within-budget -- the
 instrumentation found no correctness defect.  `thm` is unreached
 because the search *shape* is wrong for a bare-variable goal side, not
-because the algorithm is broken.  A productive next iteration would
-attack the shape: a heuristic with real signal when one goal side is a
-variable, a tighter `anti` policy, and an incremental feed that does
-not rescan the whole node set per rule.
+because the algorithm is broken.
+
+### 10 v1.3 -- Waldmeister-faithful: noAnti + irreducible-adaptive deque
+
+The v1/v1.1/v1.2 port had drifted from the reference.  Reading
+`waldmeister/sources/MNF/` settled the design:
+
+- *Anti steps are OFF by default.*  `MNF_AntiT` defaults to `noAnti`
+  ([MNF.c:987,1099](../../waldmeister/sources/MNF/MNF.c)); backward
+  (`r->l`) steps are an opt-in escape hatch, capped per lineage.  My
+  port had them always-on (`MNF_MAX_ANTI = 2`) -- the measured
+  `anti ~ n_nodes` fan-out.  Now `MNF_MAX_ANTI = 0`.
+- *The search order is an irreducible-adaptive deque*
+  ([MNF_PQ.c](../../waldmeister/sources/MNF/MNF_PQ.c)): pop the newest
+  node (depth-first) while reductions stay productive; pop the oldest
+  (breadth-first) the moment the last node expanded was irreducible --
+  a normal form.  My `mnf_diff` goal-similarity score was an invention
+  and is gone; `MnfNode` now carries an `irred` bit instead.
+
+Result:
+
+- The lemma ladder (cpl1/cpl2/subl2) and the multi-step goals
+  (chain3/chain4/deep5) still join, every step verified, roots == goal.
+- `chain6` -- which drowned at 158k nodes under the best-first fan-out
+  -- now joins **instantly** (`steps=0`): the depth-first deque commits
+  to a reduction path instead of fanning out.  The capacity probe is
+  cracked.
+- `test_atp` 8544/8544.
+
+`thm` still does not join, but the bottleneck has *moved* and is now
+correctly located.  Both `thm` goal sides are already R-irreducible
+(7- and 1-symbol terms; every derived rule's LHS is larger and cannot
+match them), so under `noAnti` MNF stays at `nodes=2` and waits --
+exactly Waldmeister's design: completion must derive the closing rule.
+My completion engine reaches only ~150 steps / 124 rules in 90s, far
+short of `thm`'s depth.  MNF is no longer the wall; completion
+throughput is.  The next lever is either a faster completion engine or
+the `antiWOVar` escape hatch (`MNF_MAX_ANTI > 0`) for goals whose
+sides are R-irreducible.
