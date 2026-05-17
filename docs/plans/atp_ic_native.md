@@ -1369,3 +1369,27 @@ does not join at any cap: the 54-step proof is simply not reachable
 within R's 124-rule frontier, with or without backward steps.  This
 pins the verdict -- the lever for `thm` is completion throughput, full
 stop.
+
+### 10 -- completion profiling: KBO
+
+A `sample` profile of the `thm` completion put ~31% of the wall in
+`kbo_weight` + `kbo_var_acc`: `kbo_rec` walks each compared term up to
+five times (equality, two variable-count walks, two weight walks).
+
+First attempt -- a per-comparison memo of weight and variable counts --
+*regressed*: the lexicographic recursion turns out to be shallow, so
+there is no recomputation to amortise, and a dense 64-wide var-count
+vector made each computation heavier than the walk it replaced.
+Measured, confirmed, reverted.
+
+What landed instead: `kbo_stats` fuses the weight walk and the
+variable-count walk into one bottom-up pass (the two visit identical
+nodes), so `kbo_rec` does two traversals for the statistics instead of
+four.  No algorithm change -- the KBO result is identical (`test_kbo`
+8/8, `test_atp` 8544/8544, every bench proof unchanged) -- but the
+`thm` 152-step trajectory that took ~91 s completes in ~60 s.
+
+`thm` is still completion-bound.  KBO micro-optimisation buys a
+constant factor, not the order of magnitude `thm` needs; that remains
+a completion-algorithm question (sharper critical-pair selection --
+derive the *right* rules, not merely more of them).

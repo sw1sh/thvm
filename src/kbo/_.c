@@ -46,21 +46,29 @@ static u8 kbo_eq(Term s, Term t) {
   }
 }
 
-// === variable counts =================================================
+// === weight + variable counts ========================================
 
-static void kbo_var_acc(Term t, u32 *counts) {
+// Single bottom-up pass: returns the KBO weight of `t` and accumulates
+// its per-variable occurrence counts into `counts`.  kbo_rec needs both
+// for every term it compares; fusing them halves the term traversals --
+// the weight walk and the variable walk visit the same nodes.
+static u64 kbo_stats(Term t, const KboConfig *cfg, u32 *counts) {
   switch (term_tag(t)) {
     case TAG_FVR: {
       u32 id = term_ext(t);
       if (id < KBO_MAX_VAR) counts[id]++;
-      return;
+      return cfg->var_weight;
     }
     case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) kbo_var_acc(term_ctr_at(t, i), counts);
-      return;
+      u32 lab = term_ext(t);
+      u64 w   = (lab < cfg->n_labels) ? cfg->weights[lab] : 0;
+      u32 n   = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        w += kbo_stats(term_ctr_at(t, i), cfg, counts);
+      }
+      return w;
     }
-    default: return;
+    default: return 0;
   }
 }
 
@@ -70,22 +78,6 @@ static u8 kbo_dominates(const u32 *lhs, const u32 *rhs) {
     if (lhs[i] < rhs[i]) return 0;
   }
   return 1;
-}
-
-// === weight ==========================================================
-
-static u64 kbo_weight(Term t, const KboConfig *cfg) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return cfg->var_weight;
-    case TAG_CTR: {
-      u32 lab = term_ext(t);
-      u64 w   = (lab < cfg->n_labels) ? cfg->weights[lab] : 0;
-      u32 n   = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) w += kbo_weight(term_ctr_at(t, i), cfg);
-      return w;
-    }
-    default: return 0;
-  }
 }
 
 // === main comparator =================================================
@@ -101,14 +93,12 @@ static KboCmp kbo_rec(Term s, Term t, const KboConfig *cfg) {
 
   u32 vc_s[KBO_MAX_VAR] = {0};
   u32 vc_t[KBO_MAX_VAR] = {0};
-  kbo_var_acc(s, vc_s);
-  kbo_var_acc(t, vc_t);
+  u64 ws = kbo_stats(s, cfg, vc_s);
+  u64 wt = kbo_stats(t, cfg, vc_t);
   u8 s_dom = kbo_dominates(vc_s, vc_t);
   u8 t_dom = kbo_dominates(vc_t, vc_s);
   if (!s_dom && !t_dom) return KBO_UN;
 
-  u64 ws = kbo_weight(s, cfg);
-  u64 wt = kbo_weight(t, cfg);
   if (ws > wt) return s_dom ? KBO_GT : KBO_UN;
   if (ws < wt) return t_dom ? KBO_LT : KBO_UN;
 
