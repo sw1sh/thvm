@@ -265,6 +265,14 @@ static Term atp_rewrite_normalize_ic(Term t,
 static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
 #endif
 
+#ifdef ATP_ORDERED_REWRITE
+// 9c-foundation: forward declaration -- the ordered normalizer is
+// defined after atp_compare (it needs the reduction-order compare).
+static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
+                                          const Term *lhs, const Term *rhs,
+                                          u32 n_rules, u32 step_cap);
+#endif
+
 // 8.3e-i: AtpState-aware shim.  Dispatches between the C-direct
 // and IC-routed normalize paths based on s->use_ic_rewrite.
 // Replaces direct `thvm_rewrite_normalize` calls in
@@ -283,6 +291,14 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
 static Term atp_rewrite_normalize(AtpState *s, Term t,
                                   const Term *lhs, const Term *rhs,
                                   u32 n_rules, u32 step_cap) {
+#ifdef ATP_ORDERED_REWRITE
+  // 9c-foundation: proper unfailing-completion rewriting.  Supersedes
+  // the indexed / IC / linear paths below (which all assume rules are
+  // pre-oriented).  Needs s for the reduction-order comparison.
+  if (s != NULL) {
+    return atp_rewrite_normalize_ordered(s, t, lhs, rhs, n_rules, step_cap);
+  }
+#endif
   if (s != NULL && s->use_ic_rewrite) {
     return atp_rewrite_normalize_ic(t, lhs, rhs, n_rules, step_cap);
   }
@@ -2141,6 +2157,135 @@ static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
   return thvm_kbo(lhs, rhs, s->kbo);
 }
 
+#ifdef ATP_ORDERED_REWRITE
+// === 9c-foundation: ordered rewriting ===============================
+//
+// Proper unfailing-completion rewriting.  The KBO_UN both-ways hack
+// stored an unorientable equation u=v as two looping rules u->v and
+// v->u.  Here an equation is stored once and the rewrite step tries
+// every rule in BOTH directions, applying a direction only when the
+// result strictly decreases the redex in the reduction order.  An
+// oriented rule l->r (l > r, hence l.sigma > r.sigma for every sigma)
+// fires forward only; an unorientable equation fires whichever
+// direction is decreasing for the instance at hand.  Every rewrite
+// strictly descends a well-founded order, so normalization terminates.
+
+// Does variable id `id` occur in `t`?
+static int atp_term_has_var(Term t, u32 id) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == id;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (atp_term_has_var(term_ctr_at(t, i), id)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+// Every variable of `a` also occurs in `b`?  A rewrite direction is
+// variable-safe only when the result side's variables are contained
+// in the matched side's -- else the rewrite would introduce variables.
+static int atp_vars_contained(Term a, Term b) {
+  switch (term_tag(a)) {
+    case TAG_FVR: return atp_term_has_var(b, term_ext(a));
+    case TAG_CTR: {
+      u32 n = term_ctr_n(a);
+      for (u32 i = 0; i < n; i++) {
+        if (!atp_vars_contained(term_ctr_at(a, i), b)) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// One ordered rewrite at the top of `t`.
+//
+// An oriented rule (lhs[i] > rhs[i]) is decreasing for every instance,
+// so it fires forward with NO order check and NO discarded `repl` --
+// the same cost as the plain rewriter.  Only an unorientable equation
+// pays the both-directions order-gated path: each direction is tried
+// only when variable-safe and applied only when it strictly decreases
+// `t`.  This fast path matters: without it, building a `repl` per
+// failed order-check on every rule churns the heap catastrophically.
+static Term atp_ordered_try_top(AtpState *s, Term t,
+                                const Term *lhs, const Term *rhs,
+                                u32 n_rules, u8 *fired) {
+  for (u32 i = 0; i < n_rules; i++) {
+    if (atp_compare(s, lhs[i], rhs[i]) == KBO_GT) {
+      // oriented rule -- forward only, no order check, no waste.
+      RewriteSubst subst = {{0}};
+      if (thvm_match(lhs[i], t, &subst)) {
+        *fired = 1;
+        return thvm_subst_apply(rhs[i], &subst);
+      }
+      continue;
+    }
+    // unorientable equation -- both directions, variable-safe + order-gated.
+    if (atp_vars_contained(rhs[i], lhs[i])) {       // l -> r
+      RewriteSubst subst = {{0}};
+      if (thvm_match(lhs[i], t, &subst)) {
+        Term repl = thvm_subst_apply(rhs[i], &subst);
+        if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
+      }
+    }
+    if (atp_vars_contained(lhs[i], rhs[i])) {       // r -> l
+      RewriteSubst subst = {{0}};
+      if (thvm_match(rhs[i], t, &subst)) {
+        Term repl = thvm_subst_apply(lhs[i], &subst);
+        if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// One outermost-leftmost ordered rewrite anywhere in `t`: tries the
+// top, else descends into TAG_CTR children left-to-right.
+static Term atp_ordered_rewrite_step(AtpState *s, Term t,
+                                     const Term *lhs, const Term *rhs,
+                                     u32 n_rules, u8 *fired) {
+  Term top = atp_ordered_try_top(s, t, lhs, rhs, n_rules, fired);
+  if (*fired) return top;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    for (u32 i = 0; i < n; i++) {
+      u8 cf = 0;
+      Term nch = atp_ordered_rewrite_step(s, term_ctr_at(t, i),
+                                          lhs, rhs, n_rules, &cf);
+      if (cf) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 j = 0; j < n; j++) {
+          children[j] = (j == i) ? nch : term_ctr_at(t, j);
+        }
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// Ordered normalization to fixpoint.  step_cap is a safety bound only
+// -- ordered rewriting genuinely terminates.
+static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
+                                          const Term *lhs, const Term *rhs,
+                                          u32 n_rules, u32 step_cap) {
+  for (u32 i = 0; i < step_cap; i++) {
+    u8 fired = 0;
+    Term t2 = atp_ordered_rewrite_step(s, t, lhs, rhs, n_rules, &fired);
+    if (!fired) break;
+    t = t2;
+  }
+  return t;
+}
+#endif /* ATP_ORDERED_REWRITE */
+
 // Total symbol count: TAG_FVR / atoms count as 1; TAG_CTR counts
 // itself + the symbols of its children.  This is the "size" used
 // by Waldmeister's `--add` heuristic in `ClasHeuristics.c`
@@ -3295,6 +3440,14 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       return r;
     }
     case KBO_UN: {
+#ifdef ATP_ORDERED_REWRITE
+      // 9c-foundation: ordered rewriting drives an unorientable
+      // equation in whichever direction decreases, so store it ONCE
+      // (no looping u->v / v->u pair, no doubled CP generation).
+      u32 idx = s->n_rules;
+      if (atp_push_rule(s, lhs, rhs)) { r.first = idx; r.count = 1; }
+      return r;
+#else
       // Unfailing fallback: reserve 2 slots up front so the pair is
       // added atomically (the array is growable, so this can't fail).
       // 7c: atp_push_rule may reject either orientation as a
@@ -3308,6 +3461,7 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       r.first = idx;
       r.count = added;
       return r;
+#endif
     }
     case KBO_EQ:
     default:

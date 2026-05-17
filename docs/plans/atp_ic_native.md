@@ -1099,3 +1099,41 @@ cp_graph are rebuilt via `thvm_atp_cp_reheapify`.  Result: `test_atp`
 rule drops) and the trajectory churn roughly cancels the gain on
 this single-symbol problem.  9a + 9b together do not crack `thm`;
 the strong *steady* redundancy lever is 9c (ground-joinability).
+
+### 9c-foundation -- order-aware rewriting (DONE)
+
+`-DATP_ORDERED_REWRITE`.  Investigating 9c revealed the engine had no
+order-dependent rewriting at all: `orient_and_add`'s `KBO_UN` branch
+stored an unorientable equation `u = v` as TWO looping rules `u->v`
+and `v->u`.  That hack is both a queue-blowup source (doubled rules
+-> doubled CP generation) and the reason classical ground-joinability
+could not bolt on (no per-order rewriting to case-split).
+
+Proper unfailing-completion rewriting: an unorientable equation is
+stored ONCE, and the rewrite step tries every rule in both directions,
+applying a direction only when it strictly decreases the redex in the
+reduction order.  An oriented rule (`l > r`) is decreasing for every
+instance, so it fast-paths forward with no order check; only a genuine
+equation pays the both-directions order-gated path.  Variable-safety
+gates each direction.  Terminating (every rewrite descends a
+well-founded order).
+
+Result: `test_atp` 8544/8544, the ladder still proves.  A correct
+general engine improvement -- but, measured, a **no-op for `thm`**:
+the ordered-rewriting trajectory is byte-identical to the non-ordered
+engine (step 250: `rules=191 cps=59892` in both).  `KBO_UN` never
+fires for the Wolfram axiom under this KBO -- one symbol, weight 1, so
+every derived rule orients by symbol count -- hence the both-ways hack
+was never triggered and there are no unorientable equations to rewrite
+in order.  Classical ground-joinability (case-split on variable
+orderings) is likewise vacuous here.  The `thm` queue genuinely
+diverges: an *accelerating* ~189 -> ~347 -> ~356 CPs/step -- a hard
+completion explosion, not a both-ways artefact.  (An earlier draft of
+this note misread an early-phase cps average as a rate drop -- the
+unindexed ordered rewriter is ~10-20x slower per step, so the
+early-phase sample looked smaller; corrected.)
+
+9c proper (ground-joinability) thus cannot help `thm` either.  The
+levers that remain are the reduction ordering itself -- Waldmeister's
+most-emphasized control, repeatedly deprioritized here -- or a
+goal-directed proof procedure instead of blind saturation.

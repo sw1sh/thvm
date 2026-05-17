@@ -103,6 +103,20 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_GOAL_HEURISTIC)),-DATP_GOAL_HEURISTIC,
 ATP_ORPHAN_KILL ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
 
+# thm convergence (9c foundation): -DATP_ORDERED_REWRITE replaces the
+# KBO_UN both-ways hack (which stored an unorientable equation u=v as
+# two looping rules u->v and v->u, a queue-blowup source) with proper
+# unfailing-completion ordered rewriting: the equation is stored once,
+# and the rewrite step tries every rule in BOTH directions, applying a
+# direction only when it strictly decreases the redex in the reduction
+# order.  An oriented rule fires forward only; an unorientable equation
+# fires whichever direction decreases.  Terminating.  Off by default;
+# independent of every other ATP flag.  CHANGES BEHAVIOR (a different,
+# sound rewrite relation).  Bypasses the rule-LHS index for now (a
+# first cut -- correctness + queue measurement before re-indexing).
+ATP_ORDERED_REWRITE ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRITE,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \
