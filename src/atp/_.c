@@ -2350,63 +2350,85 @@ static u32 atp_symbol_count(Term t) {
 // saturates blindly -- cpl1 / subl2 / thm trace identical trajectories
 // because the goal only gates the goal-check, never CP selection.
 //
-// A CP side "relates" to the goal when one of its non-trivial subterms
-// one-way-matches (in either direction) a non-trivial goal side.
-// Trivial matches are filtered by MIN_STRUCT (a bare nand(x,y) shell
-// matches everything and carries no signal).
+// This is a port of Waldmeister's CPinGoal classifier (Clas_CP_Goal.c).
+// A CP (cl,cr) is weighted by its structural match to the conjecture,
+// graded into three levels:
 //
-// The goal score is a BOUNDED ADDITIVE penalty on the base size weight
-// (Waldmeister's weights are sums; its classification actions are
-// bounded ~2x).  A goal-unrelated CP gets at most +NONE_PENALTY.
-// Additive-and-bounded means goal-direction only reorders CPs within a
-// few size-units of each other -- it never lets a large goal-
-// resembling CP leapfrog a much smaller one, so it cannot trigger the
-// large-CP blowup a multiplicative factor would (measured: a x24
-// multiplicative factor diverged subl2).  A hard FIFO-interleave
-// fairness guarantee a la Waldmeister's WeightEntryT{w1,w2} is a
-// noted follow-up.
-#define ATP_GOAL_MIN_STRUCT      4u
-#define ATP_GOAL_SINGLE_PENALTY  2u
-#define ATP_GOAL_NONE_PENALTY    5u
+//   Doppelmatch  -- one CP side generalises a subterm of one goal side
+//                   AND the other CP side generalises a subterm of the
+//                   other goal side, under one consistent substitution.
+//                   Weight = the goal's RESIDUAL mass: phi(goal) minus
+//                   what the match covered.  Small when the CP closely
+//                   resembles the goal.
+//   Einfachmatch -- only one CP side matches.  Weight = residual mass
+//                   x SINGLE_FACTOR.
+//   Nullmatch    -- neither matches.  Weight = the CP's own mass
+//                   x NONE_FACTOR.
+//
+// The key (vs the earlier additive penalty): a matched CP is scored by
+// the goal residual, NOT its own size -- so a large goal-resembling CP
+// still scores small and is selected early, while a flat multiplicative
+// factor on a binary relate/not signal let large CPs leapfrog.
+// SINGLE_FACTOR / NONE_FACTOR are Waldmeister's CIGICInit defaults.
+#define ATP_GOAL_MIN_STRUCT    4u
+#define ATP_GOAL_SINGLE_FACTOR 5u
+#define ATP_GOAL_NONE_FACTOR   50u
 
-// One-way match in either direction (a generalizes b, or b generalizes
-// a).  Each direction gets a fresh zeroed substitution.
-static int atp_goal_match2(Term a, Term b) {
-  RewriteSubst s1 = {{0}};
-  if (thvm_match(a, b, &s1)) return 1;
-  RewriteSubst s2 = {{0}};
-  return thvm_match(b, a, &s2);
-}
-
-// Does some non-trivial subterm of `t` relate to a non-trivial goal
-// side?  Short-circuits on the first hit.  ngl / ngr are the goal
-// sides' symbol counts, hoisted by the caller.
-static int atp_goal_relates(Term t, Term gl, Term gr, u32 ngl, u32 ngr) {
-  if (atp_symbol_count(t) >= ATP_GOAL_MIN_STRUCT) {
-    if (ngl >= ATP_GOAL_MIN_STRUCT && atp_goal_match2(t, gl)) return 1;
-    if (ngr >= ATP_GOAL_MIN_STRUCT && atp_goal_match2(t, gr)) return 1;
+// Match pattern `pat` against `subj` or any subterm of it, extending
+// `sub` (a later match against the same sub stays consistent -- the
+// Sigma-matching of CPinGoal).  Returns the symbol count of the matched
+// subterm, 0 if none.  Patterns below MIN_STRUCT are ignored: a bare
+// nand(x,y) shell matches everything and carries no signal.
+static u32 atp_goal_match_into(Term pat, Term subj, RewriteSubst *sub) {
+  if (atp_symbol_count(pat) >= ATP_GOAL_MIN_STRUCT) {
+    RewriteSubst save = *sub;
+    if (thvm_match(pat, subj, sub)) return atp_symbol_count(subj);
+    *sub = save;
   }
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
+  if (term_tag(subj) == TAG_CTR) {
+    u32 n = term_ctr_n(subj);
     for (u32 i = 0; i < n; i++) {
-      if (atp_goal_relates(term_ctr_at(t, i), gl, gr, ngl, ngr)) return 1;
+      u32 c = atp_goal_match_into(pat, term_ctr_at(subj, i), sub);
+      if (c) return c;
     }
   }
   return 0;
 }
 
-// Goal-directed additive penalty on a CP's base priority.  Both sides
-// relate to the goal -> 0 (no penalty); one side -> SINGLE; neither
-// -> NONE.  No goal set (completion mode) -> 0, a no-op.
-static u32 atp_goal_penalty(const AtpState *s, Term lhs, Term rhs) {
+// CPinGoal weight of CP (cl,cr) against the conjecture.  No goal set
+// (completion mode) -> 0.  See the block comment above.
+static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
   if (s == NULL || s->goal_lhs == 0) return 0u;
   Term gl = s->goal_lhs, gr = s->goal_rhs;
-  u32 ngl = atp_symbol_count(gl), ngr = atp_symbol_count(gr);
-  int rl = atp_goal_relates(lhs, gl, gr, ngl, ngr);
-  int rr = atp_goal_relates(rhs, gl, gr, ngl, ngr);
-  if (rl && rr) return 0u;
-  if (rl || rr) return ATP_GOAL_SINGLE_PENALTY;
-  return ATP_GOAL_NONE_PENALTY;
+  u32  phi_g = atp_symbol_count(gl) + atp_symbol_count(gr);
+  u32  phi_c = atp_symbol_count(cl) + atp_symbol_count(cr);
+  u32  best  = phi_c * ATP_GOAL_NONE_FACTOR;       // Nullmatch fallback
+  // Two pairings: (cl into gl, cr into gr) and (cl into gr, cr into gl).
+  for (u32 swap = 0; swap < 2u; swap++) {
+    Term ga = swap ? gr : gl;
+    Term gb = swap ? gl : gr;
+    RewriteSubst sub = {{0}};
+    u32 ca = atp_goal_match_into(cl, ga, &sub);
+    u32 cb = ca ? atp_goal_match_into(cr, gb, &sub) : 0u;
+    if (ca && cb) {                                // Doppelmatch
+      u32 cov = ca + cb;
+      u32 res = (cov < phi_g) ? phi_g - cov : 0u;
+      if (res < best) best = res;
+    }
+    if (ca) {                                      // Einfachmatch via cl
+      u32 res = (ca < phi_g) ? phi_g - ca : 0u;
+      u32 w   = res * ATP_GOAL_SINGLE_FACTOR;
+      if (w < best) best = w;
+    }
+    RewriteSubst s2 = {{0}};                       // Einfachmatch via cr
+    u32 cc = atp_goal_match_into(cr, gb, &s2);
+    if (cc) {
+      u32 res = (cc < phi_g) ? phi_g - cc : 0u;
+      u32 w   = res * ATP_GOAL_SINGLE_FACTOR;
+      if (w < best) best = w;
+    }
+  }
+  return best;
 }
 #endif /* ATP_GOAL_HEURISTIC */
 
@@ -2420,6 +2442,13 @@ static u32 atp_goal_penalty(const AtpState *s, Term lhs, Term rhs) {
 // added (Waldmeister lever 1, above).
 #define MIX_UNORIENTED_PENALTY 4u
 static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
+#ifdef ATP_GOAL_HEURISTIC
+  // Goal-directed run: Waldmeister uses CPinGoal as THE classifier --
+  // the weight is the CP's graded structural distance to the goal, not
+  // its size.  Completion-mode runs (no goal) fall through to the
+  // size/mix heuristic below.
+  if (s != NULL && s->goal_lhs != 0) return atp_goal_weight(s, lhs, rhs);
+#endif
   u32 base = atp_symbol_count(lhs) + atp_symbol_count(rhs);
   if (s != NULL && s->use_mix_heuristic) {
     KboCmp c = atp_compare(s, lhs, rhs);
@@ -2428,9 +2457,6 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
       base += MIX_UNORIENTED_PENALTY;
     }
   }
-#ifdef ATP_GOAL_HEURISTIC
-  base += atp_goal_penalty(s, lhs, rhs);
-#endif
   return base;
 }
 

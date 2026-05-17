@@ -1393,3 +1393,43 @@ four.  No algorithm change -- the KBO result is identical (`test_kbo`
 constant factor, not the order of magnitude `thm` needs; that remains
 a completion-algorithm question (sharper critical-pair selection --
 derive the *right* rules, not merely more of them).
+
+### 11 -- Waldmeister CP selection: faithful CPinGoal
+
+A sweep of Waldmeister's `CLAS/` (classification) and `INF/` modules
+settled how its completion picks critical pairs: best-first by a
+heuristic weight on a two-component key `(w1, w2)` -- `w1` the
+heuristic, `w2` a FIFO/age counter (`NewClassification.c`).  The
+goal-directed classifier is `CPinGoal` (`Clas_CP_Goal.c`): a CP is
+graded by how it matches the conjecture --
+
+- *Doppelmatch* -- both CP sides generalise subterms of the two goal
+  sides under one consistent substitution; weight = the goal's
+  *residual* mass (what the match did not cover).
+- *Einfachmatch* -- one side matches; weight = residual x `5`.
+- *Nullmatch* -- neither; weight = the CP's own mass x `50`.
+
+The engine already had the `(w1, w2)` heap (`cp_pri` + `cp_seq`), but
+its goal heuristic was a crude *additive* `+0/+2/+5` penalty -- noise
+against base weights of 20-60, so completion was effectively not
+goal-directed.  A prior *multiplicative* attempt had diverged; the
+honest reason, found in this sweep, is that it scaled a *binary*
+relate/not signal, letting a large off-goal CP that merely "related"
+leapfrog.  `CPinGoal` is safe at x50 precisely because a *matched* CP
+is scored by the goal residual, not its own size.
+
+`atp_goal_weight` ports `CPinGoal` faithfully (graded residual-mass,
+factors 5 / 50 -- Waldmeister's `CIGICInit` defaults) and becomes the
+CP classifier for goal-directed runs.  Result: `test_atp` 8544/8544;
+**cpl1 12 steps -> 1, subl2 21 -> 2** -- completion now derives the
+closing rule almost immediately when the goal has structure to steer
+by.
+
+`thm` still does not fall (157 steps / 120 s).  Honest reason: its
+conjecture `nand(nand(w,w),nand(w,w)) = w` is structurally *thin* --
+7 symbols, the right side a bare variable -- so almost every CP is a
+Nullmatch and `CPinGoal` cannot discriminate.  Goal-direction is a
+beacon only when the goal is big enough to cast a gradient; `thm`'s is
+not.  Cracking it needs the completion to saturate enough of the NAND
+theory outright -- raw throughput, or a structurally richer goal
+encoding.
