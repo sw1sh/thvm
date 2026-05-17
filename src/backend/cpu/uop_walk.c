@@ -131,8 +131,13 @@ static int uwalk_resolve_buf(UWalkCtx const *c, Term buf, void **out_ptr,
 }
 
 static u32 uwalk_lookup_iter(UWalkCtx const *c, u32 axis_id) {
-  for (u32 i = 0; i < c->n_ranges; i++) {
-    if (c->axis_id[i] == axis_id) return c->iter[i];
+  // Walk last-to-first so the most-recently pushed slot wins.  This
+  // gives correct innermost-binding semantics for nested reduces: when
+  // an outer REDUCE iterates its axis a1 and its body's inner REDUCE
+  // iterates a2, the inner's a2 slot (pushed last) shadows any earlier
+  // a2 slot pushed by the output loop.
+  for (u32 i = c->n_ranges; i > 0; i--) {
+    if (c->axis_id[i - 1] == axis_id) return c->iter[i - 1];
   }
   return 0;
 }
@@ -219,6 +224,7 @@ static void uwalk_store_i64(void *p, i64 off, u32 dt, i64 v) {
 // Forward decls.
 static double uwalk_eval_float(UWalkCtx *c, Term t);
 static i64    uwalk_eval_int  (UWalkCtx *c, Term t);
+static double uwalk_run_reduce(UWalkCtx *c, Term red);
 
 // Decide whether to evaluate a term as float vs int. Floats: ADD/MUL/
 // CMPLT/CMPEQ/NEG/RECIP/EXP2/LOG2/SQRT/REDUCE/INDEX_E (depending on
@@ -366,7 +372,14 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
     case UOP_REDUCE: {
       double v = 0.0;
       if (uwalk_reduce_lookup(c, t, &v) >= 0) return v;
-      return 0.0;
+      // Cache miss: this REDUCE wasn't pre-registered as
+      // hoistable/non-hoistable (e.g. an inner reduce inside another
+      // reduce's body that wasn't collected via uwalk_collect_reduces
+      // at the STORE level OR was collected but not yet evaluated for
+      // this iteration of the enclosing reduce).  Run it inline so the
+      // chain produces correct values; the result is iteration-local
+      // and not cached.
+      return uwalk_run_reduce(c, t);
     }
     case UOP_OPT:
       return uwalk_eval_float(c, heap_read(loc + 0));
@@ -462,7 +475,7 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     case UOP_REDUCE: {
       double v = 0.0;
       if (uwalk_reduce_lookup(c, t, &v) >= 0) return (i64)v;
-      return 0;
+      return (i64)uwalk_run_reduce(c, t);
     }
     default:
       return 0;
@@ -506,27 +519,34 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
       uwalk_collect_ranges(heap_read(loc + 1), ranges, n_out);
       uwalk_collect_ranges(heap_read(loc + 2), ranges, n_out);
       return;
+    case UOP_REDUCE:
+      // Recurse into the reduce body so outer reduces over chained
+      // inner reduces find their own reduce-axis range (extent) and
+      // any output axes used by the inner body.  Without this, an
+      // outer REDUCE whose body is itself a UOP_REDUCE sees zero
+      // ranges in uwalk_run_reduce -> r_extent==0 -> returns
+      // 0.0 / -INFINITY immediately.
+      uwalk_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      return;
     default:
       return;
   }
 }
 
-// Collect REDUCE nodes (mirrors rmu_collect_reduces).  Post-order add:
-// recurse into the REDUCE body so any nested reduce is registered
-// (and run) BEFORE its outer consumer; otherwise the outer's
-// uwalk_eval_float on a nested UOP_REDUCE term would hit
-// uwalk_reduce_lookup with no slot and silently return 0.
+// Collect TOP-LEVEL REDUCE nodes (those reachable from `t` without
+// crossing another UOP_REDUCE boundary).  Reduces nested inside another
+// reduce's body are NOT collected here: the outer's uwalk_run_reduce
+// will iterate its axis, and uwalk_eval_float on the inner UOP_REDUCE
+// re-runs it on every iteration via uwalk_run_reduce (see eval_float's
+// UOP_REDUCE cache-miss branch).  Pre-registering inner reduces would
+// cache a stale value (computed once with the outer's axis at 0) and
+// the outer's accumulator would combine the same value N times.
 static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   if (term_tag(t) != TAG_UOP) return;
   if (*n_out >= UWALK_MAX_REDUCES) return;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_REDUCE) {
-    for (u32 i = 0; i < *n_out; i++) {
-      if (reduces[i] == t) return;
-    }
-    uwalk_collect_reduces(heap_read(loc + 0), reduces, n_out);
-    if (*n_out >= UWALK_MAX_REDUCES) return;
     for (u32 i = 0; i < *n_out; i++) {
       if (reduces[i] == t) return;
     }

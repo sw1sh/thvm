@@ -889,6 +889,24 @@ fn void bufferize_classify(Term root) {
         bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
       }
     }
+    for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+      UOpInfo *info = &BUFFERIZE_NODES[i];
+      if (info->op != UOP_REDUCE) continue;
+      if (!info->realized) continue;
+      if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
+      if (info->consumer_count != 1) continue;
+      u64 consumer_locs[1];
+      u32 n_cons = bufferize_consumers_for_loc(info->loc, consumer_locs, 1);
+      if (n_cons != 1) continue;
+      u32 cidx = bufferize_info_find(consumer_locs[0]);
+      if (cidx == 0xFFFFFFFFu) continue;
+      if (BUFFERIZE_NODES[cidx].op != UOP_REDUCE) continue;
+      if (!BUFFERIZE_NODES[cidx].realized) continue;
+      Term outer_src = term_resolve(heap_read(consumer_locs[0] + 0));
+      if (term_tag(outer_src) != TAG_UOP) continue;
+      if (term_val(outer_src) != info->loc) continue;
+      bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
+    }
     // Fanin-cap split: mark wide-fanin elementwise/movement children
     // as realized boundaries so the metal renderer's n_inputs > 30
     // decline doesn't trigger.  Runs after softmax-unmark so the
