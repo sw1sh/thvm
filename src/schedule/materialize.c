@@ -588,6 +588,41 @@ static Term unified_rewrite_buffer_for_bufferize(KernelEntry const *ke,
   return 0;
 }
 
+// Mutating variant: when the boundary lookup finds a producer tid but
+// unified_rewrite_buffer_for_tid declines (tid not yet in this kernel's
+// input_tids[]), EXTEND ke->input_tids[] with the new tid and mint a
+// UOP_BUFFER for the new slot.  Mirrors unified_rewrite_buffer_for_tid_extend's
+// TAG_TEN path.  Without this, bench-train backward kernels (where the
+// unified pass produces BUFFERIZE Terms whose producer tid isn't in the
+// consumer's static input_tids[]) leave bare UOP_BUFFERIZE leaves in the
+// rendered DAG; rmu_buf_name then falls through to `buf{loc}` and Metal
+// fails to compile on the undeclared identifier.
+static Term unified_rewrite_buffer_for_bufferize_extend(KernelEntry *ke,
+                                                        Term buf) {
+  Term repl = unified_rewrite_buffer_for_bufferize(ke, buf);
+  if (repl != 0) return repl;
+  // Look up boundary's producer tid and extend.
+  u32 tid = 0;
+  for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
+    if (BOUNDARY_BUFFERIZE_TERM[bi] == buf) { tid = BOUNDARY_TID[bi]; break; }
+  }
+  if (tid == 0 && term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFERIZE) {
+    Term want_value = uop_bufferize_value(buf);
+    if (want_value != 0) {
+      for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
+        Term cand = BOUNDARY_BUFFERIZE_TERM[bi];
+        if (cand == 0 || cand == buf) continue;
+        if (term_tag(cand) != TAG_UOP || term_ext(cand) != UOP_BUFFERIZE) continue;
+        if (uop_bufferize_value(cand) != want_value) continue;
+        tid = BOUNDARY_TID[bi];
+        break;
+      }
+    }
+  }
+  if (tid == 0) return 0;
+  return unified_rewrite_buffer_for_tid_extend(ke, tid);
+}
+
 // TAG_VAR substitute: the legacy visit() registers a TLam-bound TVAR
 // (with a shape annotation in the lam_shape side table) as an input
 // slot with input_tids[slot]==0 and input_terms[slot]==var_term.
@@ -668,7 +703,16 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   // still references TAG_TEN leaves we need to rewrite into UOP_BUFFER
   // input slots for the cpu_uop_walk to bind correctly.
   if (term_ext(resolved) == UOP_BUFFERIZE) {
-    Term repl = unified_rewrite_buffer_for_bufferize(st->ke, resolved);
+    // Use the extend variant: when boundary lookup finds a producer tid
+    // but the consumer's static input_tids[] doesn't carry it (common
+    // in TGrad backward kernels where ru_pass emits BUFFERIZE refs to
+    // tids the legacy lifter never registered), dynamically extend
+    // input_tids[] and mint a UOP_BUFFER for the new slot.  Without
+    // this the BUFFERIZE leaks to the Metal renderer's rmu_buf_name
+    // fallback (`buf{loc}`) and MSL compile fails on the undeclared
+    // identifier, which was what blocked beautiful_mnist bench-train
+    // at every backward step.
+    Term repl = unified_rewrite_buffer_for_bufferize_extend(st->ke, resolved);
     if (repl != 0) return repl;
   }
 

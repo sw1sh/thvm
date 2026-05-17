@@ -353,6 +353,7 @@ $gcCountFn   := $gcCountFn   = load["thvm_wl_gc_count",   {},                   
 $kernelSourceCFn     := $kernelSourceCFn     = load["thvm_wl_kernel_source_c",     {Integer}, "UTF8String"];
 $kernelSourceMetalFn := $kernelSourceMetalFn = load["thvm_wl_kernel_source_metal", {Integer}, "UTF8String"];
 $kernelFlopsFn         := $kernelFlopsFn         = load["thvm_wl_kernel_flops",          {Integer}, Integer];
+$kernelStoreRootFn     := $kernelStoreRootFn     = load["thvm_wl_kernel_store_root",     {Integer}, Integer];
 $kernelDispatchKindFn  := $kernelDispatchKindFn  = load["thvm_wl_kernel_dispatch_kind",  {Integer}, Integer];
 $kernelDispatchCountFn := $kernelDispatchCountFn = load["thvm_wl_kernel_dispatch_count", {Integer}, Integer];
 $kernelTotalUsFn       := $kernelTotalUsFn       = load["thvm_wl_kernel_total_us",       {Integer}, Integer];

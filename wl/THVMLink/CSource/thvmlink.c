@@ -1679,6 +1679,20 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_flops(WolframLibraryData l, mint a,
   return LIBRARY_NO_ERROR;
 }
 
+// Expose KERNELS[kid].cached_lift.store_root as a raw Term integer that
+// WL can wrap in TTerm and walk with TTermExpr/TTermSubexprs.  Use case:
+// inspect the lifted DAG for residual UOP_BUFFERIZE / TAG_TEN leaves
+// that the renderer would emit as `buf{loc}` undeclared identifiers
+// before any GPU dispatch.  Returns 0 when the lift declined.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_store_root(WolframLibraryData l, mint a,
+                                                 MArgument *args, MArgument res) {
+  (void)l;(void)a;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  Term r = (kid > 0 && kid < KERNELS_NEXT) ? KERNELS[kid].cached_lift.store_root : 0;
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // 0=none, 1=blas-dot, 2=blas-gemv, 3=blas-gemm, 4=jit, 5=interpreter,
 // 6=metal-jit, 7=metal-op, 8=tile, 9=metal-tile, 10=metal-gemm,
 // 11=metal-conv, 12=metal-gemv, 13=metal-alias.

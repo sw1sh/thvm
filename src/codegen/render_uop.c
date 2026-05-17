@@ -698,6 +698,110 @@ static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
                          RMU_NO_OPT, 0);
 }
 
+// Like rmu_collect_ranges_rec but DESCENDS into UOP_REDUCE bodies.
+// The REDUCE-blind primary collector exists because the outer store's
+// ranges[] is for OUTPUT axes (axes that index the store position) --
+// a reduce-axis used only inside a reduce body must not surface as an
+// outer for-loop.  But for the per-reduce `required_pos` scan and the
+// reduce-axis range-term lookup inside RMU_EMIT_ONE_REDUCE we need to
+// see ranges transitively reachable through nested reduces: a reduce
+// whose body contains another reduce whose body references some axis
+// still depends on that axis structurally.  Stopping at the first
+// UOP_REDUCE boundary (as the primary collector does) drops those
+// axes and yields kernels with declared `_accN` accumulators whose
+// for-loops were never emitted (the reduce-axis range was unreachable)
+// or `required_pos` undercounts that flat-hoist a reduce above the
+// output loops it actually needs.
+static void rmu_collect_ranges_rec_through_reduce(
+    Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors,
+    u32 *n_out, u32 inherit_kind, u32 inherit_factor) {
+  if (term_tag(t) != TAG_UOP) return;
+  if (*n_out >= MAX_DIM) return;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_REDUCE) {
+    // The reduce-axis at heap_read(loc + 2) is a raw u32 axis id --
+    // NOT a UOP_RANGE term -- so the body recursion can't accidentally
+    // surface it independently; the corresponding UOP_RANGE node lives
+    // inside the body itself and will be collected naturally.
+    rmu_collect_ranges_rec_through_reduce(
+        heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+        RMU_NO_OPT, 0);
+    return;
+  }
+  if (op == UOP_RANGE) {
+    u32 axis_id = term_val(heap_read(loc + 0));
+    for (u32 i = 0; i < *n_out; i++) {
+      u32 existing = term_val(heap_read(term_val(ranges[i]) + 0));
+      if (existing == axis_id) return;
+    }
+    ranges     [*n_out] = t;
+    opt_kinds  [*n_out] = inherit_kind;
+    opt_factors[*n_out] = inherit_factor;
+    (*n_out)++;
+    return;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+          RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out,
+          RMU_NO_OPT, 0);
+      return;
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+          RMU_NO_OPT, 0);
+      return;
+    case UOP_IWHERE:
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+          RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out,
+          RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 2), ranges, opt_kinds, opt_factors, n_out,
+          RMU_NO_OPT, 0);
+      return;
+    case UOP_OPT: {
+      u32 kind   = term_val(heap_read(loc + 1));
+      u32 factor = term_val(heap_read(loc + 2));
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+          kind, factor);
+      return;
+    }
+    case UOP_CAST: case UOP_BITCAST:
+      rmu_collect_ranges_rec_through_reduce(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+          RMU_NO_OPT, 0);
+      return;
+    default:
+      return;
+  }
+}
+
+static void rmu_collect_ranges_through_reduce(
+    Term t, Term *ranges, u32 *n_out) {
+  u32 dummy_kinds[MAX_DIM]   = {0};
+  u32 dummy_factors[MAX_DIM] = {0};
+  rmu_collect_ranges_rec_through_reduce(
+      t, ranges, dummy_kinds, dummy_factors, n_out, 0, 0);
+}
+
+static void rmu_collect_ranges_with_opts_through_reduce(
+    Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors, u32 *n_out) {
+  rmu_collect_ranges_rec_through_reduce(
+      t, ranges, opt_kinds, opt_factors, n_out, RMU_NO_OPT, 0);
+}
+
 // Returns 1 if `kind`/`axis_type` indicates the axis binds directly to
 // a thread/group position (no for-loop emitted).  These paths emit a
 // `uint aN = tt;` or `uint aN = tg;` declaration instead.
@@ -2283,7 +2387,11 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     Term r_src = heap_read(term_val(reduces[i]) + 0);
     Term r_ranges[MAX_DIM];
     u32  r_n = 0;
-    rmu_collect_ranges(r_src, r_ranges, &r_n);
+    // Descend through nested UOP_REDUCE bodies so axes referenced only
+    // by a transitively-nested reduce still bump required_pos.  Without
+    // this an outer reduce hoists above output loops whose axes its
+    // inner reduces actually need, producing undeclared-axis MSL.
+    rmu_collect_ranges_through_reduce(r_src, r_ranges, &r_n);
     u32 max_pos = 0;
     for (u32 j = 0; j < r_n; j++) {
       if (term_tag(r_ranges[j]) != TAG_UOP
@@ -2348,8 +2456,13 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     u32  _r_kinds[MAX_DIM] = {0}; \
     u32  _r_factors[MAX_DIM] = {0}; \
     u32  _n_r_ranges = 0; \
-    rmu_collect_ranges_with_opts(_r_src, _r_ranges, _r_kinds, \
-                                 _r_factors, &_n_r_ranges); \
+    /* Descend through nested UOP_REDUCE bodies: the reduce-axis */ \
+    /* range term we need to open this reduce's for-loop on may */ \
+    /* live inside a nested reduce body.  Without this descent the */ \
+    /* lookup misses, `_reduce_range_term == 0`, the loop is */ \
+    /* skipped, and `_accN` is declared but never updated. */ \
+    rmu_collect_ranges_with_opts_through_reduce( \
+        _r_src, _r_ranges, _r_kinds, _r_factors, &_n_r_ranges); \
     Term _reduce_range_term = 0; \
     u32  _reduce_extent = 0; \
     for (u32 _j = 0; _j < _n_r_ranges; _j++) { \
@@ -2513,15 +2626,53 @@ static void rmu_emit_after(Term after, FILE *fp, u32 depth) {
 // matching the Metal buffer-attribute cap).
 #define RMU_DISCOVER_MAX RMU_BUF_MAX
 static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
+  // TAG_TEN: bare tensor leaves the unified pass / kernel_lift left in
+  // the DAG instead of converting to UOP_BUFFER input slots.  Treat as
+  // input slots: promote to the next free slot and register so
+  // rmu_buf_name finds them; otherwise the body's INDEX_E call hits
+  // the `buf{term_val}` fallback and Metal compile fails on the
+  // undeclared identifier.
+  if (term_tag(t) == TAG_TEN) {
+    for (u32 i = (*n_inputs_out) + 1; i < RMU_DISCOVER_MAX; i++) {
+      if (slot_bufs[i] == t) return;
+      if (slot_bufs[i] == 0) {
+        slot_bufs[i] = t;
+        *n_inputs_out = i;
+        return;
+      }
+    }
+    return;
+  }
   if (term_tag(t) != TAG_UOP) return;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_BUFFER) {
     u32 inst = uop_buffer_inst_get(t);
     if (inst >= RMU_DISCOVER_MAX) return;
+    // Already filled by this exact Term -- a reuse (same BUFFER appears
+    // in multiple positions of the DAG).  Nothing to do.
+    if (slot_bufs[inst] == t) return;
     if (slot_bufs[inst] == 0) {
       slot_bufs[inst] = t;
       if (inst >= 1 && inst > *n_inputs_out) *n_inputs_out = inst;
+      return;
+    }
+    // Slot collision with a DIFFERENT Term.  Common case: bench-train
+    // backward kernels carry multiple bare UOP_BUFFER nodes with inst=0
+    // (the unified pass / kernel_lift fold left some external buffers
+    // unstamped).  Without promotion these get silently dropped from
+    // the kernel signature, and rmu_buf_name's `buf{loc}` fallback
+    // fires in the body -- the resulting MSL references undeclared
+    // identifiers (`buf53991`, etc.) and Metal compile fails.  Promote
+    // to the next free input slot.
+    for (u32 i = (*n_inputs_out) + 1; i < RMU_DISCOVER_MAX; i++) {
+      if (slot_bufs[i] == t) return;       // already promoted by an
+                                            // earlier visit of the same Term
+      if (slot_bufs[i] == 0) {
+        slot_bufs[i] = t;
+        *n_inputs_out = i;
+        return;
+      }
     }
     return;
   }
@@ -2669,6 +2820,19 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   // identity map for it.  Inputs are resolved structurally so we
   // don't bother registering them.
   if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
+  // Register names for any BUFFERs the discover promoted (their
+  // .instance field is still 0 but they landed at slot[i>=1]).  Without
+  // this rmu_buf_name's structural path (`in<inst-1>`) returns "in-1"
+  // for them and the body falls to the `buf{loc}` fallback.
+  for (u32 i = 1; i <= n_inputs; i++) {
+    Term b = slot_bufs[i];
+    if (b == 0) continue;
+    u32 inst = uop_buffer_inst_get(b);
+    if (inst == i) continue;  // structural name "in<i-1>" is already correct
+    char nm[16];
+    snprintf(nm, sizeof(nm), "in%u", i - 1);
+    rmu_buf_names_set(b, nm);
+  }
   fputs("#include <metal_stdlib>\n", fp);
   fputs("using namespace metal;\n\n", fp);
   fprintf(fp, "kernel void %s(\n", kernel_name);

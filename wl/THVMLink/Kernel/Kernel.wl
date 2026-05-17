@@ -98,6 +98,31 @@ TKernelAutotuneTop::usage = "TKernelAutotuneTop[n] tunes at most n representativ
    accessors. *)
 TKernelTable::usage  = "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per kernel (kid 1 .. KERNELS_NEXT - 1).  Snapshot, not a live view.";
 TKernelInputs::usage = "TKernelInputs[kid] returns the input_tids of kernel `kid` (length n_inputs).";
+TKernelStoreRoot::usage = "TKernelStoreRoot[kid] returns the lifted UOP DAG (cached_lift.store_root) as a TTerm.  Walk with TTermExpr / TTermSubexprs to inspect for residual UOP_BUFFERIZE / TAG_TEN leaves the renderer would lower to a `buf{loc}` undeclared-identifier fallback.  Returns Missing[\"LiftDeclined\"] when the kernel has no lifted DAG (kernel_lift_to_uop returned 0).";
+TKernelHasBufferizeLeak::usage = "TKernelHasBufferizeLeak[kid] returns True if the kernel's lifted DAG carries an unresolved UOP_BUFFERIZE leaf (i.e. one the unified rewriter failed to map to a UOP_BUFFER input slot).  Such leaks emit `buf{loc}` undeclared identifiers in MSL/C99 and fail Metal compile.  Cheap structural check; no dispatch.";
+TKernelHasTenLeak::usage = "TKernelHasTenLeak[kid] returns True if the kernel's lifted DAG carries a bare TAG_TEN leaf (same fallback semantics as BUFFERIZE leak).  Pair with TKernelHasBufferizeLeak.";
+TKernelAuditLeaks::usage = "TKernelAuditLeaks[] returns a List of <|Kid, BufferizeLeak, TenLeak|> rows for every live kernel that has at least one leak.  Use to triage which kernels would fail Metal compile before any GPU dispatch.";
+TKernelLeakReport::usage = "TKernelLeakReport[kid] returns <|Kid, BufferizeLeak, TenLeak, FallbackRefs, BufLines|>: FallbackRefs counts distinct `buf<NNNN>` identifiers in TKernelSource[kid, \"Metal\"]; BufLines lists the (1-based) source-line numbers that reference such fallbacks.  Use to pinpoint which body terms the unified rewriter failed to lower.";
+
+(* === explosion-audit helpers ============================
+   Characterize a kernel-count / memory blowup (bench-train,
+   beautiful_mnist forward+backward) without dispatching: hash
+   the MSL of every live kernel, group structural duplicates,
+   histogram op signatures, and rank kernels by output-buffer
+   bytes.  All pure WL on top of TKernelSource + TMemoryPlan;
+   no GPU work. *)
+
+TKernelSourceHashes::usage = "TKernelSourceHashes[] returns <|kid -> hash|> where hash is the MD5 of TKernelSource[kid, \"Metal\"].  Kernels whose Metal source is empty (lift declined) hash an empty string and group together; use TKernelDuplicateGroups[] to surface the structural duplicates downstream.";
+
+TKernelDuplicateGroups::usage = "TKernelDuplicateGroups[] returns <|hash -> {kid1, kid2, ...}|> for every MSL hash that backs >= 2 kernels, sorted by group size descending.  Empty-source kernels (lift declined) are skipped so they don't dominate the report.";
+
+TKernelOpHistogram::usage = "TKernelOpHistogram[] returns <|opName -> count|> summarising the kinds of work the live kernel fleet does.  Counts are coarse (one tally per kernel that mentions the signature in its MSL, not per dynamic instance): keys cover matmul, conv, reduce_sum, reduce_max, elementwise, exp, log, sqrt, rsqrt, cast, compare.";
+
+TKernelOutputBytes::usage = "TKernelOutputBytes[] returns <|kid -> bytes|>, the output-buffer size of every live kernel, derived from TMemoryPlan[]'s producer_kid -> nbytes index.  Kernels with no buffer entry (external / unrealized) map to 0.";
+
+TKernelMemoryTopProducers::usage = "TKernelMemoryTopProducers[n_Integer:20] returns the top n kernels by output-buffer bytes, each as <|Kid, OutputBytes, MSLLines, HashGroup|>.  HashGroup is the list of kids that share the kernel's MSL hash (length 1 when unique).  Pair with TKernelDuplicateGroups[] to triage the explosion's hot allocations.";
+
+TBufferProducerKid::usage = "TBufferProducerKid[bufid] returns the kid that produced buffer `bufid`, or 0 when the buffer is external (no producing kernel).  Pure WL: walks the TMemoryPlan[] Bufs records and returns the recorded producer_kid for the matching buf entry.";
 
 (* Forward-decl TTensTable: defined in Tensor.wl which loads
    alphabetically AFTER Kernel.wl.  Without the public stub here,
@@ -395,6 +420,74 @@ TKernelSource[kid_Integer, b_String] := Failure["UnknownBackend",
     <|"Message" -> "TKernelSource backend must be \"C\" or \"Metal\"",
       "Backend" -> b|>]
 TKernelFlops[kid_Integer]         := (ensureInit[]; $kernelFlopsFn[kid])
+TKernelStoreRoot[kid_Integer] := With[{
+    raw = (ensureInit[]; $kernelStoreRootFn[kid])
+},
+    If[ raw === 0, Missing["LiftDeclined"], TTerm[raw]]
+]
+
+(* Structural search: walk a TTermExpr snapshot and return True iff any
+   subexpression matches one of `pats`.  Used by the leak audits below.
+   Cheap pattern walk; no dispatch. *)
+THVMLink`Private`tKernelTermContainsPatterns[term_TTerm, pats_List] :=
+    Module[{snap = TTermExpr[term]},
+        AnyTrue[pats, !FreeQ[snap, #] &]
+    ]
+THVMLink`Private`tKernelTermContainsPatterns[_, _] := False
+
+TKernelHasBufferizeLeak[kid_Integer] := Module[{root},
+    root = TKernelStoreRoot[kid];
+    If[ Head[root] =!= TTerm, Return[False]];
+    THVMLink`Private`tKernelTermContainsPatterns[root,
+        {"UOP"["BUFFERIZE", ___]}]
+]
+TKernelHasTenLeak[kid_Integer] := Module[{root, snap},
+    root = TKernelStoreRoot[kid];
+    If[ Head[root] =!= TTerm, Return[False]];
+    snap = TTermExpr[root];
+    (* TAG_TEN appears in TTermExpr as bare "TEN"[tid].  Look for any
+       "TEN"[_Integer] anywhere in the lifted DAG -- the rewriter should
+       have converted all of these to "UOP"["BUFFER", ...] input slots. *)
+    !FreeQ[snap, "TEN"[_Integer]]
+]
+TKernelAuditLeaks[] := Module[{kids = If[TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {}], rows},
+    rows = Map[
+        Function[k, <|
+            "Kid"           -> k,
+            "BufferizeLeak" -> TKernelHasBufferizeLeak[k],
+            "TenLeak"       -> TKernelHasTenLeak[k]
+        |>],
+        kids
+    ];
+    Select[rows, #["BufferizeLeak"] || #["TenLeak"] &]
+]
+
+TKernelLeakReport[kid_Integer] := Module[{src, fbRefs, lines, hits},
+    src = TKernelSource[kid, "Metal"];
+    If[ !StringQ[src] || src === "",
+        Return[<|
+            "Kid"           -> kid,
+            "BufferizeLeak" -> TKernelHasBufferizeLeak[kid],
+            "TenLeak"       -> TKernelHasTenLeak[kid],
+            "FallbackRefs"  -> 0,
+            "BufLines"      -> {},
+            "MSL"           -> Missing["NoMSL"]
+        |>]];
+    fbRefs = DeleteDuplicates @ StringCases[src, RegularExpression["\\bbuf\\d{4,}"]];
+    lines  = StringSplit[src, "\n"];
+    hits   = Select[Range[Length[lines]],
+        Function[i, StringMatchQ[lines[[i]], ___ ~~ "buf" ~~ DigitCharacter ..  ~~ ___]
+                 && !StringMatchQ[lines[[i]], ___ ~~ "buffer(" ~~ ___]]];
+    <|
+        "Kid"           -> kid,
+        "BufferizeLeak" -> TKernelHasBufferizeLeak[kid],
+        "TenLeak"       -> TKernelHasTenLeak[kid],
+        "FallbackRefs"  -> Length[fbRefs],
+        "FallbackNames" -> fbRefs,
+        "BufLines"      -> hits,
+        "MSL"           -> src
+    |>
+]
 TKernelDispatchKind[kid_Integer]  := (ensureInit[];
     decodeDispatchKind[$kernelDispatchKindFn[kid]])
 TKernelDispatchCount[kid_Integer] := (ensureInit[]; $kernelDispatchCountFn[kid])
@@ -831,6 +924,165 @@ $tileAxisNames = <|
 |>;
 
 TKernelTileUops[kid_Integer] := Missing["NotLowered"]
+
+(* === explosion-audit helpers === *)
+
+(* Per-kernel MSL hash.  Empty MSL (kernel_lift_to_uop declined,
+   so the renderer returns "") still gets an entry; downstream
+   helpers filter that case explicitly. *)
+TKernelSourceHashes[] := Module[{kids},
+    kids = If[ TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {} ];
+    Association @ Table[
+        k -> Hash[TKernelSource[k, "Metal"], "MD5"],
+        {k, kids}
+    ]
+]
+
+(* Group kids by identical MSL.  Drops the empty-source hash so
+   "lift declined" kernels don't dominate the duplicate report;
+   filters out singleton groups before sorting. *)
+TKernelDuplicateGroups[] := Module[{
+    hashes, emptyHash, grouped, withDupes, sorted
+},
+    hashes    = TKernelSourceHashes[];
+    emptyHash = Hash["", "MD5"];
+    grouped   = GroupBy[Normal @ hashes, Last -> First];
+    grouped   = KeyDrop[grouped, emptyHash];
+    withDupes = Select[grouped, Length[#] >= 2 &];
+    sorted    = ReverseSortBy[Normal @ withDupes, Length @* Last];
+    Association @ sorted
+]
+
+(* Op-signature histogram across all live kernels.  Patterns are
+   coarse heuristics keyed off the MSL the renderer emits today:
+   - "/*reduce*/" sentinel emitted by cg_render_uop for reduce
+     loops; combined with "fmax"/"fmin" presence to split sum vs
+     max.
+   - Matmul currently lowers as a triply-nested loop with a
+     contiguous /*reduce*/ + an inner fma chain; conv lowers to
+     nested /*reduce*/ over the kernel window.  The pattern below
+     calls anything with a /*reduce*/ a reduce_sum unless an
+     fmax/fmin is in scope (then reduce_max).  Distinct matmul/
+     conv buckets need a structural axis-type check (axes_get
+     returns REDUCE for matmul/conv reduce dims): added below.
+   - exp/log/sqrt/rsqrt count distinct calls, not occurrences.
+   - "cast" counts the static_cast<...> emitted by cg_render_uop
+     for UOP_CAST.
+   - "compare" counts "==" / "<" / ">" comparisons used by
+     CMPLT / CMPEQ branches in the MSL.
+   - "elementwise" is the catch-all bucket: kernels with no
+     reduce loop and no matmul/conv pattern. *)
+tKernelOpBuckets[] := <|
+    "matmul" -> 0, "conv" -> 0,
+    "reduce_sum" -> 0, "reduce_max" -> 0,
+    "elementwise" -> 0,
+    "exp" -> 0, "log" -> 0, "sqrt" -> 0, "rsqrt" -> 0,
+    "cast" -> 0, "compare" -> 0
+|>
+
+(* Per-kernel classification.  Returns an Association whose
+   buckets sum to the kernel's contribution to the histogram.
+   Empty MSL contributes nothing. *)
+tKernelClassifyMSL[src_String] /; src === "" := tKernelOpBuckets[]
+tKernelClassifyMSL[src_String] := Module[{
+    h, hasReduce, hasFmax, hasFmin, hasMatmul, hasConv,
+    isElementwise
+},
+    h = tKernelOpBuckets[];
+    hasReduce = StringContainsQ[src, "/*reduce*/"];
+    hasFmax   = StringContainsQ[src, "fmax" | "max("];
+    hasFmin   = StringContainsQ[src, "fmin" | "min("];
+    (* Matmul fingerprint: two output ranges + one reduce range
+       + an fma-style chain ("+= ... *" inside the reduce loop).
+       Conv fingerprint: three or more nested /*reduce*/ markers
+       (kernel H/W + input channel). *)
+    hasMatmul = hasReduce && StringCount[src, "/*reduce*/"] === 1
+                && StringContainsQ[src, " += " ~~ ___ ~~ " * "];
+    hasConv   = StringCount[src, "/*reduce*/"] >= 2;
+    isElementwise = !hasReduce && !hasMatmul && !hasConv;
+    h["matmul"]      = If[hasMatmul, 1, 0];
+    h["conv"]        = If[hasConv, 1, 0];
+    h["reduce_max"]  = If[hasReduce && (hasFmax || hasFmin) && !hasMatmul && !hasConv, 1, 0];
+    h["reduce_sum"]  = If[hasReduce && !hasFmax && !hasFmin && !hasMatmul && !hasConv, 1, 0];
+    h["elementwise"] = If[isElementwise, 1, 0];
+    h["exp"]         = If[StringContainsQ[src, "exp(" | "exp2(" | "metal::exp"], 1, 0];
+    h["log"]         = If[StringContainsQ[src, "log(" | "log2(" | "metal::log"], 1, 0];
+    h["sqrt"]        = If[StringContainsQ[src, "sqrt(" | "metal::sqrt"], 1, 0];
+    h["rsqrt"]       = If[StringContainsQ[src, "rsqrt(" | "metal::rsqrt"], 1, 0];
+    h["cast"]        = If[StringContainsQ[src, "static_cast<" | "as_type<"], 1, 0];
+    h["compare"]     = If[StringContainsQ[src, " == " | " != " | " < " | " > " | " <= " | " >= "], 1, 0];
+    h
+]
+
+TKernelOpHistogram[] := Module[{kids, classified, totals, keys},
+    kids = If[ TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {} ];
+    classified = tKernelClassifyMSL[TKernelSource[#, "Metal"]] & /@ kids;
+    keys = Keys @ tKernelOpBuckets[];
+    totals = Association @ Table[
+        k -> Total[Lookup[#, k, 0] & /@ classified],
+        {k, keys}
+    ];
+    totals
+]
+
+(* Per-kid output bytes via TMemoryPlan[].  The Bufs records
+   already carry producer_kid + nbytes; invert into a kid index
+   so callers don't re-walk the bufs list. *)
+TKernelOutputBytes[] := Module[{plan, bufs, kids, kidBytes},
+    plan = TMemoryPlan[];
+    bufs = plan[[1]]["Bufs"];
+    kids = If[ TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {} ];
+    kidBytes = GroupBy[
+        Select[bufs, #["producer_kid"] > 0 &],
+        #["producer_kid"] &,
+        Total[#["nbytes"] & /@ #] &
+    ];
+    Association @ Table[ k -> Lookup[kidBytes, k, 0], {k, kids} ]
+]
+
+(* Top-N producers by output bytes, joined with MSL line count
+   and the structural-duplicate group the kid sits in (a
+   length-1 list means unique). *)
+TKernelMemoryTopProducers[n_Integer : 20] := Module[{
+    bytes, dupGroups, kidToGroup, ranked
+},
+    bytes = TKernelOutputBytes[];
+    dupGroups = TKernelDuplicateGroups[];
+    kidToGroup = Association @ Flatten[
+        KeyValueMap[
+            Function[{h, kids}, Map[(# -> kids) &, kids]],
+            dupGroups],
+        1];
+    ranked = ReverseSortBy[Normal @ bytes, Last];
+    ranked = Take[ranked, UpTo[Max[0, n]]];
+    Map[
+        Function[entry,
+            With[{
+                kid = First[entry],
+                outB = Last[entry],
+                src = TKernelSource[First[entry], "Metal"]
+            },
+                <|
+                    "Kid"         -> kid,
+                    "OutputBytes" -> outB,
+                    "MSLLines"    -> If[ StringQ[src] && src =!= "",
+                                         Length @ StringSplit[src, "\n"], 0],
+                    "HashGroup"   -> Lookup[kidToGroup, kid, {kid}]
+                |>
+            ]
+        ],
+        ranked
+    ]
+]
+
+(* Buffer -> producing kid lookup.  Walks TMemoryPlan[]'s Bufs
+   records (already keyed by buf id with a producer_kid field);
+   returns 0 if the buf is external or missing. *)
+TBufferProducerKid[bufid_Integer] := Module[{plan, hit},
+    plan = TMemoryPlan[];
+    hit = SelectFirst[plan[[1]]["Bufs"], #["id"] === bufid &, Missing[]];
+    If[ MissingQ[hit], 0, hit["producer_kid"] ]
+]
 
 End[];
 EndPackage[];
