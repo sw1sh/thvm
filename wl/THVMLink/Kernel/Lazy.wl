@@ -767,6 +767,13 @@ TLazyMap[f_TTerm, s_TTerm] := (
     ]
 )
 
+(* Non-TTerm predicate (a plain WL function/symbol): force the stream
+   then Map on the WL side.  Mirrors the pre-IC TLazyMap semantics so
+   callers like `TLazyMap[Function, ...]` or `TLazyMap[symbol, ...]`
+   keep working; the IC-native path above takes precedence when the
+   predicate is a TTerm (the more general case). *)
+TLazyMap[f_ /; ! MatchQ[f, _TTerm], s_TTerm] := Map[f, TLazyToList[s]]
+
 (* TLazySelect / TLazyCatenate -- WL-side eager walkers in this slice.
    The IC-native TDef versions ran into a runaway when cnf had to drive
    the predicate at every Cons step (the predicate's auto-dup'd binder
