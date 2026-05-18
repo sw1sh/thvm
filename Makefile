@@ -29,12 +29,12 @@ ATP_DEFINES     += $(if $(filter-out 0,$(ATP_MATCH_STATS)),-DATP_CP_GRAPH -DATP_
 # Milestone 7d: -DATP_FV_INDEX adds a feature-vector subsumption index
 # over the CP queue (and rule set) -- a sound over-approximation that
 # turns the O(n_cps) thvm_match scan in atp_cp_queue_subsumed into an
-# O(retrieval) candidate lookup + thvm_match on the survivors.  Off by
-# default -- the milestone-7 array scan is the regression oracle and
-# ships byte-for-byte.  Independent of -DATP_CP_GRAPH.  Both flag
-# states must compile and produce behavior-identical proofs.
-# `make ATP_FV_INDEX=1 bin/test_atp` builds the indexed path.
-ATP_FV_INDEX ?=
+# O(retrieval) candidate lookup + match on the survivors.  ON by
+# default: it is part of the canonical engine and ships byte-for-byte
+# (same verdict as the array scan, just faster).  Independent of
+# -DATP_CP_GRAPH.  `make ATP_FV_INDEX=0 bin/test_atp` builds the
+# milestone-7 array scan -- the regression oracle.
+ATP_FV_INDEX ?= 1
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FV_INDEX)),-DATP_FV_INDEX,)
 
 # Milestone 7e (normalization wall, lever 1): -DATP_CP_DIAG re-enables
@@ -54,12 +54,13 @@ ATP_DEFINES += $(if $(filter-out 0,$(ATP_CP_DIAG)),-DATP_CP_DIAG,)
 # Milestone 7e (normalization wall, lever 2): -DATP_RULE_INDEX builds a
 # discrimination tree over rule LHS terms and routes the ATP-side
 # normalizer's redex search through it instead of the O(n_rules)
-# linear LHS scan in `rewrite_try_top`.  Off by default -- the linear
-# scan is the regression oracle.  Behavior-identical: among the
-# indexed candidates matching a position the lowest rule index wins,
-# exactly replicating the linear scan's first-match choice.
-# Independent of every other ATP flag.
-ATP_RULE_INDEX ?=
+# linear LHS scan in `rewrite_try_top`.  ON by default: part of the
+# canonical engine and behavior-identical -- among the indexed
+# candidates matching a position the lowest rule index wins, exactly
+# replicating the linear scan's first-match choice.  Independent of
+# every other ATP flag.  `make ATP_RULE_INDEX=0` recovers the linear
+# scan -- the regression oracle.
+ATP_RULE_INDEX ?= 1
 ATP_DEFINES    += $(if $(filter-out 0,$(ATP_RULE_INDEX)),-DATP_RULE_INDEX,)
 
 # Milestone 7c (convergence fix): -DATP_VAR_NORM canonically renumbers
@@ -70,12 +71,12 @@ ATP_DEFINES    += $(if $(filter-out 0,$(ATP_RULE_INDEX)),-DATP_RULE_INDEX,)
 # overlaps otherwise carry ids past 64 where thvm_match goes dead and
 # all redundancy (joinability / subsumption / interreduction) dies.
 # Renumbering also makes alpha-equivalent rules/CPs byte-identical so
-# the dedup + duplicate-rule guard fire.  Off by default -- the
-# all-flags-off build is the milestone-7 (buggy, divergent) engine,
-# kept for A/B.  Independent of every other ATP flag.  CHANGES
-# BEHAVIOR by design: the search trajectory differs from the buggy
-# engine because the redundancy criteria now actually fire.
-ATP_VAR_NORM ?=
+# the dedup + duplicate-rule guard fire.  ON by default: it is the
+# convergence fix -- without it the engine diverges and never proves
+# `thm` (with it `thm` proves in ~0.2s).  `make ATP_VAR_NORM=0`
+# recovers the milestone-7 (buggy, divergent) engine for A/B.
+# Independent of every other ATP flag.
+ATP_VAR_NORM ?= 1
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_VAR_NORM)),-DATP_VAR_NORM,)
 
 # thm convergence (Waldmeister lever 1): -DATP_GOAL_HEURISTIC adds

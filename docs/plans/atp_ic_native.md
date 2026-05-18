@@ -1863,3 +1863,51 @@ subsumption index still degrades to ~18000 candidates/query as the
 queue passes 30k CPs.  That is the pre-existing index-degradation
 issue (section 20's closing note), not a GC problem -- the next
 target, and now the dominant one.
+
+### 24 -- the default build was the divergent engine; `thm` proves in 0.2s
+
+Chasing section 23's "FV index degrades to 18000 candidates/query"
+turned up the real story, and it is not an index problem.
+
+The bench was being run without `-DATP_VAR_NORM`.  That flag
+(milestone 7c) is the convergence fix: it canonically renumbers every
+stored CP's variables to a dense `[0, k)` set.  Without it the CP
+enumerator's `CP_RENAME_OFFSET` carries variable ids past the
+`REWRITE_MAX_VAR` = 64 matcher cliff, `thvm_match` goes dead, and every
+redundancy criterion -- joinability, subsumption, interreduction --
+silently stops firing.  The queue then never shrinks: `thm` runs
+forever, the pool climbs past 40k CPs, and *that* pool is the
+"62M-cell GC live set" sections 22-23 profiled.  The whole late-game
+GC-wall narrative was an artifact of running the engine in its
+acknowledged-buggy milestone-7 configuration.
+
+With `-DATP_VAR_NORM` the subsumption filter fires properly -- 8249
+CPs dropped on `thm`, not 6 -- the queue stays bounded, and **`thm`
+proves: 120 steps, 72 rules, max 9395 CPs, ~0.2 s.**  That is the
+DoubleNegation goal Waldmeister proves in 3 s with 629 rules; thvm
+proves it in a fraction of a second.  It always did, with the right
+build.
+
+Two traps stacked here.  The flag was off-by-default only to "keep the
+milestone-7 buggy engine for A/B" (the Makefile's own words) -- so the
+plain `make` build *was* the divergent engine.  And `make` keys
+rebuilds on file mtime, not on `-D` flags, so `make ATP_VAR_NORM=1
+bin/foo` over an already-built `bin/foo` is a silent no-op: two
+"VAR_NORM" measurements during this work were actually the stale
+non-VAR_NORM binary until an unrelated source edit forced a recompile.
+
+The fix: `ATP_VAR_NORM`, `ATP_FV_INDEX`, and `ATP_RULE_INDEX` now
+default ON -- the plain `make` build is the canonical converging,
+indexed engine, and proves `thm` plus the whole `cpl1`/`cpl2`/`subl2`
+ladder.  `=0` on any of them recovers the legacy path for A/B.
+VAR_NORM is the convergence fix; the two indexes are byte-for-byte
+speed.  `test_bench_atp` re-baselined: `group_commutative_inverse` and
+`group_left_id_from_assoc` flip TIMEOUT -> PROVED (15 steps / 9 rules,
+13 steps / 8 rules) -- exactly the improvement the `.expect` files'
+own notes anticipated.
+
+Section 23's Stringterms port stays -- it is trajectory-neutral and
+the packed matcher is a genuine speedup -- but its headline GC win was
+measured against the divergent build.  With the queue bounded the
+collector is no longer a `thm` bottleneck; Stringterms remains the
+right representation for any problem whose pool stays genuinely large.

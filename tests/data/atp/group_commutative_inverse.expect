@@ -1,7 +1,8 @@
 % Expected outcome for tests/data/atp/group_commutative_inverse.pr.
-% Currently TIMEOUT under our 256-step budget; landing the LPO
-% comparator (stage 8.5) and AC-aware joinability is expected to
-% bring this within reach.
-status=TIMEOUT
-max_step=256
-max_rules=512
+% PROVED in 15 steps / 9 rules under the canonical engine (ATP_VAR_NORM
+% plus the subsumption / rule indexes, all default-on).  The
+% milestone-7 flags-off engine TIMEOUTs here -- canonical variable
+% normalization is what makes the redundancy criteria fire.
+status=PROVED
+max_step=15
+max_rules=9

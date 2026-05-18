@@ -1,9 +1,9 @@
-% Stage 9.4b: derives left-identity from right-id + right-
-% inverse + associativity.  Predicted TIMEOUT @ 32; observed
-% TIMEOUT @ 32 across all 4 modes -- saturation accumulates
-% 20 rules and 116 trace entries before hitting the budget.
-% Expected to flip to PROVED if/when AC-aware joinability or
-% the lemma f(i(x), x) = e is discovered (out of scope here).
-status=TIMEOUT
-max_step=32
-max_rules=20
+% Stage 9.4b: derives left-identity from right-id + right-inverse +
+% associativity.  PROVED in 13 steps / 8 rules under the canonical
+% engine (ATP_VAR_NORM plus the subsumption / rule indexes, all
+% default-on) -- exactly the flip the original TIMEOUT note predicted:
+% canonical variable normalization makes the redundancy criteria fire,
+% with no AC-aware joinability needed.
+status=PROVED
+max_step=13
+max_rules=8
