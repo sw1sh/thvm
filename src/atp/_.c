@@ -1850,40 +1850,29 @@ static u8 atp_ri_find_redex(u32 flatlen, u32 clean_before,
   return 0;
 }
 
-// Rebuild `t` with the subterm at preorder position `redex_pos`
-// replaced by `repl`.  `*cursor` tracks the running preorder index as
-// the structural walk descends; `subsz` gives the redex subtree span
-// so the matched subtree is skipped in one jump.  Cells above the
-// redex are rebuilt (one fresh CTR block per CTR layer on the path);
-// cells off the path are shared -- exactly `thvm_rewrite_step`'s
-// rebuild discipline (it never recurses past a position once the
-// redex fired).
-static Term atp_ri_apply_at(Term t, u32 redex_pos, const u32 *subsz,
-                            Term repl, u32 *cursor) {
-  u32 here = (*cursor)++;
-  if (here == redex_pos) {
-    *cursor = here + subsz[redex_pos];            // skip the whole subtree
-    return repl;
+// Materialise a tree Term from the flat arrays at preorder position
+// `pos`.  Called ONCE per normalize (at fixpoint) -- the per-step
+// rewrites only SPLICE the flat arrays, never the tree.  `flatsym`
+// distinguishes a CTR (>= CTR_BASE) from a leaf; `flat[pos]` carries
+// each node's pre-splice Term, so a subtree no splice touched rebuilds
+// child-for-child equal to its original cell and is returned as-is --
+// untouched subtrees cost zero allocation, only the union of the
+// rewrite paths gets fresh CTR blocks.
+static Term atp_ri_build(const Term *flat, const u32 *subsz,
+                         const u32 *flatsym, u32 pos) {
+  if (flatsym[pos] < ATP_RI_CTR_BASE) return flat[pos];  // NUM / variable leaf
+  Term src = flat[pos];
+  u32  n   = term_ctr_n(src);
+  Term children[REWRITE_MAX_ARITY];
+  u8   changed = 0u;
+  u32  c = pos + 1u;
+  for (u32 i = 0; i < n; i++) {
+    children[i] = atp_ri_build(flat, subsz, flatsym, c);
+    if (children[i] != term_ctr_at(src, i)) changed = 1u;
+    c += subsz[c];
   }
-  // Once the redex (a strictly-earlier preorder position) has fired,
-  // a CTR layer entirely after it cannot contain redex_pos -- but the
-  // cursor must still advance over it.  The span check short-circuits.
-  if (term_tag(t) == TAG_CTR && redex_pos < here + subsz[here]) {
-    u32 n = term_ctr_n(t);
-    Term children[REWRITE_MAX_ARITY];
-    u8  changed = 0;
-    for (u32 i = 0; i < n; i++) {
-      Term ch  = term_ctr_at(t, i);
-      Term nch = atp_ri_apply_at(ch, redex_pos, subsz, repl, cursor);
-      children[i] = nch;
-      if (nch != ch) changed = 1;
-    }
-    if (changed) return term_new_ctr(term_ext(t), children, n);
-    return t;
-  }
-  // Off the redex path: advance the cursor past `t`'s subtree, share.
-  *cursor = here + subsz[here];
-  return t;
+  if (!changed) return src;                       // subtree untouched -- share
+  return term_new_ctr(term_ext(src), children, n);
 }
 
 // Splice a rewrite into the persistent flat arrays.  A normalize step
@@ -1902,8 +1891,8 @@ static u8 atp_ri_splice(Term *flat, u32 *subsz, u32 *flatsym, u32 *flatlen,
   u32 tail  = *flatlen - redex_pos - oldsz;      // positions after the redex
   if (redex_pos + rlen + tail > cap) return 0;   // would overrun
   // Fan the size delta into every ancestor of redex_pos.  Their flatsym
-  // is unchanged (atp_ri_apply_at rebuilds CTRs with the same head) but
-  // their span grows/shrinks by rlen-oldsz.  Walk the path with the
+  // is unchanged (the rewrite replaces a subtree, not an ancestor head)
+  // but their span grows/shrinks by rlen-oldsz.  Walk the path with the
   // OLD spans; modular u32 arithmetic carries a negative delta exactly.
   u32 a = 0u;
   while (a != redex_pos) {
@@ -1930,13 +1919,14 @@ static u8 atp_ri_splice(Term *flat, u32 *subsz, u32 *flatsym, u32 *flatlen,
 
 // Indexed analog of `thvm_rewrite_normalize`: rewrite `t` to fixpoint
 // (or step_cap) via the rule-LHS discrimination index.  The subject is
-// flattened ONCE; each step then SPLICES the rewritten subtree into the
-// persistent flat arrays (atp_ri_splice) instead of re-flattening -- a
-// normalize is O(subject + sum repl) rather than O(steps * subject).
-// The incremental redex search resumes from the last redex (the
-// `clean_before` arg of atp_ri_find_redex).  Behavior-identical to the
-// linear ordered scan: same outermost-leftmost redex, same lowest-index
-// rule, same substitution.
+// flattened ONCE; each step SPLICES the rewrite into the persistent
+// flat arrays (atp_ri_splice) -- no per-step tree rebuild, no
+// re-flatten.  The tree Term is materialised ONCE, at fixpoint, by
+// atp_ri_build.  A normalize is thus O(subject + sum repl + final tree)
+// rather than O(steps * subject).  The incremental redex search resumes
+// from the last redex (atp_ri_find_redex's `clean_before`).  Behavior-
+// identical to the linear ordered scan: same outermost-leftmost redex,
+// same lowest-index rule, same substitution.
 static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   if (s->rule_index == NULL) s->rule_index = atp_ri_new();
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
@@ -1977,7 +1967,7 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
     g_atp_ri_query_folded = folded;
     u32 redex_pos = 0u, redex_rule = 0u;
     if (!atp_ri_find_redex(flatlen, prev_redex, &redex_pos, &redex_rule)) {
-      return t;                         // no redex: fixpoint
+      return atp_ri_build(flat, subsz, flatsym, 0u);   // no redex: fixpoint
     }
     // Build the chosen rule's substitution.  A perfect descent already
     // bound every rule variable -- g_atp_ri_best_star[k] is the preorder
@@ -1993,25 +1983,23 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
         }
       }
     } else if (!thvm_match(s->lhs[redex_rule], flat[redex_pos], &subst)) {
-      return t;                         // unreachable: leaf confirmed
+      return atp_ri_build(flat, subsz, flatsym, 0u);   // unreachable: confirmed
     }
-    Term repl   = thvm_subst_apply(s->rhs[redex_rule], &subst);
-    u32  cursor = 0u;
-    t = atp_ri_apply_at(t, redex_pos, subsz, repl, &cursor);
-    // Splice the rewrite into the flat arrays; on overrun, re-flatten
-    // (which resumes the splice path, or trips the linear branch above
-    // if the term grew over-deep).
-    if (!atp_ri_splice(flat, subsz, flatsym, &flatlen, &folded,
-                       redex_pos, repl, ATP_RI_FLAT_CAP)) {
-      flatlen = 0u; folded = 0u;
-      flattened = atp_ri_flatten(t, flat, subsz, flatsym, &folded,
-                                 ATP_RI_FLAT_CAP, &flatlen);
-      prev_redex = 0u;
-    } else {
+    Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
+    if (atp_ri_splice(flat, subsz, flatsym, &flatlen, &folded,
+                      redex_pos, repl, ATP_RI_FLAT_CAP)) {
       prev_redex = redex_pos;
+    } else {
+      // The rewrite would grow the term past the cap.  Materialise the
+      // current (pre-rewrite) tree -- atp_ri_splice left the flat arrays
+      // untouched on overrun -- and drop to the linear branch, which
+      // re-finds and applies this same redex, then re-flattens once the
+      // term shrinks back under the cap.
+      t = atp_ri_build(flat, subsz, flatsym, 0u);
+      flattened = 0u;
     }
   }
-  return t;
+  return flattened ? atp_ri_build(flat, subsz, flatsym, 0u) : t;
 }
 
 #endif // ATP_RULE_INDEX

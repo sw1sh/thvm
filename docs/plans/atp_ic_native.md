@@ -1612,3 +1612,43 @@ The wall is now `atp_ri_apply_at` (~37%) and `atp_ri_descend` (~27%) --
 the indexed normaliser's per-step tree rebuild and discrimination-tree
 descent.  That is genuinely the indexed normaliser earning its keep;
 the linear rewriter is finally off the hot path.
+
+### 17 -- iter 11: the full flatterm normaliser (build the tree once)
+
+iter 9's incremental flatten maintained TWO representations in lockstep:
+the flat arrays (spliced per step) and the tree Term (rebuilt per step
+by `atp_ri_apply_at`).  But the tree is only ever read as the final
+return value -- the redex search and the splice work entirely on the
+flat arrays.  Rebuilding the tree path on EVERY step is pure waste:
+`atp_ri_apply_at` profiled at ~40%.
+
+iter 11 drops the per-step tree rebuild entirely.  The loop touches
+only the flat arrays; the tree Term is materialised ONCE, at fixpoint,
+by `atp_ri_build`.  `atp_ri_build` walks the flat structure and shares
+every subtree no splice touched -- an untouched subtree rebuilds
+child-for-child equal to its original cell, so it is returned as-is
+with zero allocation; only the union of the rewrite paths gets fresh
+`term_new_ctr` blocks.  That is the same sharing `atp_ri_apply_at` did
+per step, but computed once for all the step's splices combined --
+each node allocated at most once instead of once per rewrite whose
+path crossed it.  `atp_ri_apply_at` is deleted.
+
+The one case that still needs a tree mid-normalize -- a splice that
+would grow the term past `ATP_RI_FLAT_CAP` -- builds the pre-rewrite
+tree (`atp_ri_splice` leaves the arrays untouched on overrun) and drops
+to the linear branch, which re-finds and applies the same redex.  It
+is cold: rewriting is weight-decreasing, so a term rarely grows.
+
+This is Waldmeister's flatterm discipline: normalisation runs on the
+flat array, the tree is reconstructed only at the boundary.
+
+Measured on `thm` at a fixed 200 steps (identical trajectory, so this
+is a clean fixed-work comparison): 29.3 s -> 17.0 s, a 1.72x speedup.
+`atp_ri_apply_at` (a profile top-2 entry) is gone; `atp_ri_build` does
+not register in the profile top-13.  `thm` at 120 steps is
+bit-identical (`steps=120 rules=71 cps=7951 max_cps=9022`) -- the
+change is transparent.  `test_atp` 8544/8544; the ladder proves.
+
+The wall is now `atp_ri_descend` alone (~50% of the profile) -- the
+discrimination-tree descent inside the redex search.  That is the next
+tick's target.
