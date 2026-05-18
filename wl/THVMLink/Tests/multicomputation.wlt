@@ -373,6 +373,29 @@ If[ ! TMultiTraceQ[],
         TestID -> "TMultiTrace + TMultiwayGraph on TGrad[2 x, x] -- UOP DAG"
     ];
 
+    (* === TMultiwayGraph edges match canonical transformations, not
+       size-mismatch cross-products.  For sup{lam, lam}(sup{5,7}) the
+       previous cross-product implementation produced ~70 edges with
+       many spurious DUP_NUM / OP2_SUP duplicates; canonical-matching
+       (intersection + residual cross-product) drops it to <50 with
+       each edge corresponding to a real transformation.  Pins the
+       edge count so a regression to cross-product behavior fails
+       loudly. *)
+    VerificationTest[
+        TInit[];
+        Block[{steps, g, n},
+            steps = TMultiTrace[
+                TSup[{TLam[x, x + 1], TLam[x, x*x]}][TSup[5, 7]]];
+            g = TMultiwayGraph[steps];
+            n = Length @ EdgeList[g];
+            (* Sanity band: legitimate edges live in [25, 60]; old
+               cross-product impl produced >70. *)
+            25 <= n <= 60
+        ],
+        True,
+        TestID -> "TMultiwayGraph edges scale with transformations, not slice cross-product"
+    ];
+
     (* === Branchial graph has NO self-loops even when a slice
        contains duplicate canonical leaves.  Picks the user's
        lam[x, x + 10][sup{1,2,3}] case where, post DUP_NUM, the

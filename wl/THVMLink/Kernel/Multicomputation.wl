@@ -41,7 +41,7 @@
 
 BeginPackage["THVMLink`"];
 
-TMultiTrace::usage = "TMultiTrace[expr, keys, maxSteps] evaluates `expr` (HoldFirst) with the multicomputation reduction trace recording on, then runs the collapse walk one TStep at a time, returning a list of per-step Associations.  Each step record contains the user-requested `keys` (default: all of them).  Available keys: \"Step\", \"Term\", \"Events\", \"ITRS\", \"Slice\", \"CanonicalSlice\", \"SliceBoxes\", \"Diagram\".  Pass `keys` as a list of strings, the literal `All`, or a single string.  `keys` controls cost -- \"SliceBoxes\" and \"Diagram\" are expensive (TraditionalForm rendering, DC diagram materialisation), so request only what your view needs.  Step 0 captures any events that fired during `expr`'s evaluation itself (so `TMultiTrace[TCollapse[t]]` attributes the whole collapse to step 0).  Each event is an Association <|\"id\", \"rule\", \"ruleCode\", \"family\", \"familyCode\", \"termA\", \"termB\", \"deltaLabel\", \"consumed\", \"produced\"|>; `family` is one of TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST (see docs/multicomputation.md).  `consumed` is the list of producer event ids (M1 wire provenance: a list element `id` means \"this event's active pair includes a wire most recently written by event `id`\"); empty for events whose active pair was built outside the trace.  `produced` is the dual: the list of heap locs the event wrote (last-writer-wins snapshot of wire_prov at trace end).  Recording is turned on for the duration of `expr` and off afterwards.  The default `make wl` already builds a trace-enabled dylib; check TMultiTraceQ[].  Option \"DiagramSeeds\" -> {auxTerms...} seeds the per-step diagrams with additional roots.";
+TMultiTrace::usage = "TMultiTrace[expr, keys, maxSteps] evaluates `expr` (HoldFirst) with the multicomputation reduction trace recording on, then runs the collapse walk one TStep at a time.  Return shape depends on `keys`: a list of strings or `All` returns a list of per-step Associations keyed by the requested fields; a SINGLE STRING returns a flat list of that field's values (one entry per step).  Available keys: \"Step\", \"Term\", \"Events\", \"ITRS\", \"Slice\", \"CanonicalSlice\", \"SliceBoxes\", \"Diagram\".  `keys` controls cost -- \"SliceBoxes\" and \"Diagram\" are expensive (TraditionalForm rendering, DC diagram materialisation), so request only what your view needs.  Step 0 captures any events that fired during `expr`'s evaluation itself (so `TMultiTrace[TCollapse[t]]` attributes the whole collapse to step 0).  Each event is an Association <|\"id\", \"rule\", \"ruleCode\", \"family\", \"familyCode\", \"termA\", \"termB\", \"deltaLabel\", \"consumed\", \"produced\"|>; `family` is one of TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST (see docs/multicomputation.md).  `consumed` is the list of producer event ids (M1 wire provenance: a list element `id` means \"this event's active pair includes a wire most recently written by event `id`\"); empty for events whose active pair was built outside the trace.  `produced` is the dual: the list of heap locs the event wrote (last-writer-wins snapshot of wire_prov at trace end).  Recording is turned on for the duration of `expr` and off afterwards.  The default `make wl` already builds a trace-enabled dylib; check TMultiTraceQ[].  Option \"DiagramSeeds\" -> {auxTerms...} seeds the per-step diagrams with additional roots.";
 TMultiTraceQ::usage = "TMultiTraceQ[] returns True iff the loaded THVMLink dylib was built with -DTHVM_TRACE -- the default for \"make wl\".  Pass WL_TRACE=0 to make to opt out of the trace machinery (e.g. for benching), in which case TMultiTrace returns $Failed.";
 TCausalGraph::usage = "TCausalGraph[input] returns a directed Graph[] of the causal structure of a reduction.  `input` is either a `trace` (TMultiTrace[...][\"Trace\"], a flat list of event Associations) or a `steps` list (from TMultiSteps[...]) -- in the steps case the events are flattened across all step records.  Vertices are event ids; edges F -> E iff F's id appears in E's \"consumed\" list (wire provenance from M1).  Each vertex is coloured by its event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST) so the trace shape is readable at a glance.  Options: \"VertexLabels\" -> Automatic labels each event with its rule name; \"Family\" -> {\"TERM\", ...} filters by family; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour (default None).";
 TMultiwayGraph::usage = "TMultiwayGraph[steps] returns the multiway view of a TMultiSteps reduction.  `steps` is a list of step Associations (each carrying \"CanonicalSlice\", \"SliceBoxes\", \"Events\") -- TMultiwayGraph needs the slice info, so unlike TCausalGraph it does NOT accept a flat trace; call TMultiSteps first.  Vertices are TERM-slices: per step, the active term's SUP-head is unfolded so a term with head SUP{a, b} contributes one vertex per leaf (recursively, until non-SUP heads), and a term with non-SUP head contributes a single vertex.  Edges represent trace events between consecutive steps: source-target pairs are taken as a cross product (one edge per (source, target) pair across the two slices), coloured by the firing event's family (TERM / SLIDE / FORK / SPLIT / MERGE / PRUNE / DIST).  Options: \"Branchial\" -> True overlays a branchial clique (dashed WPP-styled edges) between sibling vertices within each SUP-bearing slice (default False); \"VertexLabels\" -> Automatic labels each vertex with the leaf term's tag/value; \"PlotLegends\" -> Automatic emits a SwatchLegend of family -> colour.";
@@ -129,13 +129,27 @@ resolveKeys[All]              := $multiAllKeys
 resolveKeys[ks_List]          := ks
 resolveKeys[k_String]         := {k}
 
+(* When `keys` is a single string, return a flat list of that key's
+   values (one per step) instead of the list-of-associations form;
+   list / All keys keep the list-of-associations shape. *)
 TMultiTrace[expr_, opts : OptionsPattern[]] :=
-    multiTraceImpl[expr, $multiDefaultKeys, Infinity, OptionValue["DiagramSeeds"]]
-TMultiTrace[expr_, keys : (_List | All | _String), opts : OptionsPattern[]] :=
-    multiTraceImpl[expr, resolveKeys[keys], Infinity, OptionValue["DiagramSeeds"]]
-TMultiTrace[expr_, keys : (_List | All | _String),
+    multiTraceImpl[expr, $multiDefaultKeys, Infinity,
+                   OptionValue["DiagramSeeds"], None]
+TMultiTrace[expr_, max_Integer ? Positive, opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, $multiDefaultKeys, max,
+                   OptionValue["DiagramSeeds"], None]
+TMultiTrace[expr_, key_String, opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, {key}, Infinity, OptionValue["DiagramSeeds"], key]
+TMultiTrace[expr_, keys : (_List | All), opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, resolveKeys[keys], Infinity,
+                   OptionValue["DiagramSeeds"], None]
+TMultiTrace[expr_, key_String,
             max_Integer ? Positive, opts : OptionsPattern[]] :=
-    multiTraceImpl[expr, resolveKeys[keys], max, OptionValue["DiagramSeeds"]]
+    multiTraceImpl[expr, {key}, max, OptionValue["DiagramSeeds"], key]
+TMultiTrace[expr_, keys : (_List | All),
+            max_Integer ? Positive, opts : OptionsPattern[]] :=
+    multiTraceImpl[expr, resolveKeys[keys], max,
+                   OptionValue["DiagramSeeds"], None]
 
 (* `term0` is held by the HoldFirst on TMultiSteps.  Inside the
    impl we evaluate it AFTER turning the trace flag on, so any
@@ -155,10 +169,11 @@ TMultiTrace[expr_, keys : (_List | All | _String),
    branch.  ERA / any other leaf pops the frontier.  The walk
    terminates when both TStep is a no-op and the frontier is empty. *)
 SetAttributes[multiTraceImpl, HoldFirst];
-multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List] := Block[
+multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List,
+               singleKey_] := Block[
     {seedTerm, snapshot, mkRecord, advance, recs, preEvents,
      wantSlice = keysNeedSlice[keys], wantDiagram = keysNeedDiagram[keys],
-     produced, wireProv},
+     produced, wireProv, records},
     ensureInit[];
     If[ ! TMultiTraceQ[],
         Message[TMultiTrace::notrace];
@@ -319,13 +334,16 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List] := Block[
        wrote, derived from a single wireProv snapshot at trace end).
        Done as a post-processing pass so the cost is paid once. *)
     produced = producedFromWireProv[wireProv];
-    Map[
+    records = Map[
         r |-> KeySelect[
             Append[r, "Events" -> Map[
                 e |-> Append[e, "produced" -> Lookup[produced, e["id"], {}]],
                 r["Events"]]],
             MemberQ[keys, #] &],
-        DeleteCases[recs, $Done]]
+        DeleteCases[recs, $Done]];
+    If[ StringQ[singleKey],
+        records[[All, singleKey]],
+        records]
 ]
 
 (* TCausalGraph[trace] -- the M1 causal graph view.  Vertices = event
@@ -358,7 +376,7 @@ $familyColors = <|
     "TERM"  -> StandardBlue,
     "SLIDE" -> StandardOrange,
     "FORK"  -> StandardGreen,
-    "SPLIT" -> StandardPurple,
+    "SPLIT" -> StandardCyan,
     "MERGE" -> StandardRed,
     "PRUNE" -> LightDarkSwitched[GrayLevel[0.5], GrayLevel[0.6]],
     "DIST" -> LightDarkSwitched[GrayLevel[0.75], GrayLevel[0.35]]
@@ -559,19 +577,24 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
         {sliceKeys, slices}
     ];
     allKeys = DeleteDuplicates @ Flatten[sliceKeys, 1];
-    (* Edges: for each consecutive (prev, cur) slice pair, draw
-       edges between same-index leaves (same-size) or cross product
-       (size mismatch -- SPLIT / MERGE).  Self-loop policy: a
-       branch whose canonical form didn't change is normally
-       dropped (it would clutter mixed-fire steps where only one
-       sibling changed).  But if NO pair changed -- the firing
-       happened entirely "inside" the projection wrapper of an
-       unresolved DP0/DP1, so the slice stayed identical -- keep
-       a single self-loop so the event still appears in the view. *)
+    (* Edges: for each consecutive (prev, cur) slice pair, match
+       leaves by canonical equality.  prev \cap cur = unchanged
+       (no edge); prev \ cur = consumed; cur \ prev = produced;
+       cross-product over the residuals attributes the firing only
+       to the leaves that actually transformed.  This is robust to
+       the slice walker emitting duplicate canonical entries
+       (DeleteDuplicates collapses them to a single multiway state).
+       Index-pairing the size-equal case would also misalign if the
+       walker reorders entries -- canonical matching avoids that.
+       Self-loop policy: when neither residual exists, the firing
+       happened entirely "inside" an unresolved DP0/DP1 wrapper and
+       no canonical changed; keep one self-loop per shared state so
+       the event still appears in the view. *)
     edgeList = Catenate[
         MapIndexed[
             {prevKeys, idx} |-> Block[{
-                i, curKeys, fam, rule, ev, pairs, changed
+                i, curKeys, fam, rule, ev, prevSet, curSet,
+                shared, prevResid, curResid, pairs
             },
                 i = First[idx];
                 If[ i >= Length[sliceKeys], Return[{}, Block]];
@@ -582,18 +605,36 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
                     ,
                     {ev[[1, "family"]], ev[[1, "rule"]]}
                 ];
-                pairs = If[ Length[prevKeys] === Length[curKeys],
-                    Transpose[{prevKeys, curKeys}]
-                    ,
-                    Tuples[{prevKeys, curKeys}]
+                prevSet   = DeleteDuplicates[prevKeys];
+                curSet    = DeleteDuplicates[curKeys];
+                shared    = Intersection[prevSet, curSet];
+                (* Select-not-MemberQ preserves first-occurrence
+                   order so index-pairing below is meaningful;
+                   Complement re-sorts and would scramble it. *)
+                prevResid = Select[prevSet, ! MemberQ[shared, #] &];
+                curResid  = Select[curSet,  ! MemberQ[shared, #] &];
+                pairs = Which[
+                    prevResid === {} && curResid === {},
+                        Map[k |-> {k, k}, shared],
+                    Length[prevResid] === Length[curResid],
+                        (* Size-preserving firing (DIST / TERM /
+                           same-size SPLIT): pair by slice-order so
+                           each consumed leaf has exactly one outgoing
+                           edge to its corresponding produced leaf,
+                           not a cross-product to every sibling. *)
+                        Transpose[{prevResid, curResid}],
+                    prevResid =!= {} && curResid =!= {},
+                        (* Genuine fan-out / fan-in (SLIDE / FORK /
+                           MERGE with mismatched cardinality). *)
+                        Tuples[{prevResid, curResid}],
+                    prevResid =!= {} && curResid === {},
+                        Tuples[{prevResid, shared}],
+                    True,
+                        Tuples[{shared, curResid}]
                 ];
-                changed = Select[pairs, First[#] =!= Last[#] &];
                 Map[
                     p |-> {DirectedEdge[First[p], Last[p]], fam, rule},
-                    If[ changed === {},
-                        DeleteDuplicates[pairs]
-                        ,
-                        changed]
+                    pairs
                 ]
             ],
             sliceKeys
@@ -615,23 +656,38 @@ TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{
             ", "],
         edges
     ];
-    (* Optional branchial clique inside each multi-leaf slice.
-       Dedupe within-slice first: two leaves whose canonical forms
-       coincide are the same multiway vertex (no self-loop edge). *)
+    (* Optional branchial clique: connect ONLY the new sibling
+       cohort introduced by a SPLIT or SLIDE firing.  Pre-existing
+       slice leaves and DIST / TERM / MERGE post-states don't get
+       redrawn -- those clutter without conveying new branchial
+       structure.  A new sibling cohort = curSet \setminus prevSet,
+       the leaves that didn't exist in the previous slice. *)
     branchial = If[
         TrueQ[OptionValue["Branchial"]]
         ,
-        DeleteDuplicates @ Catenate @
-            Map[
-                s |-> Block[{u = DeleteDuplicates[s]},
-                    If[ Length[u] >= 2,
+        DeleteDuplicates @ Catenate @ Table[
+            Block[{
+                curKeys = sliceKeys[[i]],
+                prevKeys = sliceKeys[[i - 1]],
+                ev = steps[[i]]["Events"], fam, curResid
+            },
+                fam = If[ev === {}, "WALK", ev[[1, "family"]]];
+                If[ ! MemberQ[{"SLIDE", "SPLIT"}, fam],
+                    {}
+                    ,
+                    curResid = Select[
+                        DeleteDuplicates[curKeys],
+                        ! MemberQ[DeleteDuplicates[prevKeys], #] &];
+                    If[ Length[curResid] >= 2,
                         Map[
                             pair |-> UndirectedEdge @@ pair,
-                            Subsets[u, {2}]],
+                            Subsets[curResid, {2}]],
                         {}
-                    ]],
-                sliceKeys
-            ]
+                    ]
+                ]
+            ],
+            {i, 2, Length[sliceKeys]}
+        ]
         ,
         {}
     ];

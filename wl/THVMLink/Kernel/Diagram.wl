@@ -1307,7 +1307,14 @@ iThvmHeapDiagram[seedsRaw_List, mode_] := Block[{
     eras = If[ mode === "Reachable",
         agentWireSlotCells[agents, TTermTag[#] === $TagERA &],
         discoverErasHere[]];
-    tens    = reachableTenCells[reachOps];
+    (* TEN cells: anywhere in a rendered agent's wire slot OR
+       referenced as a UOP input.  The UOP path covers kernel inputs;
+       agentWireSlotCells covers IC slots like APP arg / OP2 lhs
+       (e.g. `(λx. ...)(tensor)`) where the TEN is not consumed by
+       any UOP at all. *)
+    tens = DeleteDuplicates @ Join[
+        reachableTenCells[reachOps],
+        agentWireSlotCells[agents, TTermTag[#] === $TagTEN &]];
     consts  = reachableConstCells[reachOps];
     (* REF / NUM leaves embedded in wire slots of any rendered IC /
        CTR / MAT / OP2 / ALO agent.  Per-reference: each occurrence

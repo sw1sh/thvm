@@ -54,10 +54,28 @@ auditCounts = Module[{bs = 3, W1, b1, gamma, beta, W2, b2, x, tgt,
         Length[DeleteDuplicates @ StringCases[
             TKernelSource[#, "Metal"],
             RegularExpression["\\bbuf\\d{4,}"]]] > 0 &];
+    (* Use-before-decl: for each kernel, find every aN axis reference
+       and every (uint|int) aN = declaration; flag the kernel if any
+       referenced axis name was never declared in the same source.
+       Symptom of the reduce-emit-nesting bug: reduces are sibling-
+       hoisted but their bodies reference axes owned by other reduces
+       emitted later in the same kernel (or never, when the inner
+       reduce's for-loop is dropped because its reduce-axis range term
+       was unreachable). *)
+    undecl = Length @ Select[Range[1, n],
+        Function[k, Module[{src, decls, refs},
+            src = TKernelSource[k, "Metal"];
+            decls = DeleteDuplicates @ StringCases[src,
+                RegularExpression["(?:uint|int) (a\\d+)"] -> "$1"];
+            refs = DeleteDuplicates @ StringCases[src,
+                RegularExpression["\\b(a\\d+)\\b"] -> "$1"];
+            Length[Complement[refs, decls]] > 0
+        ]]];
     <|
-        "Kernels"   -> n,
-        "Fallbacks" -> fallbacks,
-        "Leaks"     -> Length @ TKernelAuditLeaks[]
+        "Kernels"      -> n,
+        "Fallbacks"    -> fallbacks,
+        "Leaks"        -> Length @ TKernelAuditLeaks[],
+        "UndeclaredAx" -> undecl
     |>
 ];
 
@@ -92,4 +110,20 @@ VerificationTest[
     auditCounts["Kernels"] <= 1500,
     True,
     TestID -> "thvm/render/backward-kernel-count-under-1500"
+]
+
+(* === Bug 4: no axis variable referenced before its for-loop declares it ===
+   The reduce emit macro (RMU_EMIT_ONE_REDUCE in src/codegen/render_uop.c)
+   treats every reduce as a free-standing block ordered by required_pos.
+   If reduce A's body reads reduce B's loop variable (B's reduce-axis),
+   A must be emitted INSIDE B's for-loop body; current emitter has no
+   such nesting -- it sibling-hoists all reduces, producing kernels
+   where `_acc<A>`'s body references `aN` whose `for (uint aN = ...)`
+   only appears later (or never, when an inner reduce's loop drops
+   because its reduce-axis range term was structurally unreachable).
+   These kernels fail Metal compile with `undeclared identifier`. *)
+VerificationTest[
+    auditCounts["UndeclaredAx"],
+    0,
+    TestID -> "thvm/render/no-undeclared-axis-vars-in-backward"
 ]

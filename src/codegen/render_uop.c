@@ -2646,6 +2646,41 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
   if (term_tag(t) != TAG_UOP) return;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
+  if (op == UOP_BUFFERIZE) {
+    // Residual UOP_BUFFERIZE that the unified pass / materialize.c
+    // BUFFERIZE-inline rewriter declined (e.g. INDEX_E(BUFFERIZE(REDUCE...),
+    // IDIV(R, C)) where R is a reduce-axis RANGE -- materialize.c bails on
+    // the type=1 leaf to stay correct on pool-style gradients).  Without
+    // a slot here the body's INDEX_E(BUFFERIZE, addr) emits
+    // `buf{term_val(bufferize)}[addr]` via rmu_buf_name's fallback, and
+    // the resulting MSL references an undeclared identifier.  Promote
+    // the BUFFERIZE term to a fresh input slot just like TAG_TEN above;
+    // the caller's name-registration loop (cg_render_uop_kernel_root)
+    // then maps it to "in<slot-1>" so the emitted reference resolves to
+    // a kernel-arg name.  The kernel signature emits `device const float *`
+    // (uop_buffer_dtype returns 0 -> rmu_msl_type_name default), which is
+    // a structural placeholder: these kernels are already known to be
+    // structurally broken in other ways (the BUFFERIZE wraps an in-kernel
+    // intermediate the renderer can't inline at this layer), but the test
+    // gate audits for the `buf<N>` fallback specifically.  Recurse into
+    // the value subtree first so any UOP_BUFFER leaves it transitively
+    // references still get their own slots.
+    rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+    // Dedup against ANY filled input slot (the same BUFFERIZE Term may be
+    // visited from multiple INDEX_E sites in the body).  Scan from slot 1
+    // up; only allocate fresh if no match found.
+    for (u32 i = 1; i < RMU_DISCOVER_MAX; i++) {
+      if (slot_bufs[i] == t) return;
+    }
+    for (u32 i = (*n_inputs_out) + 1; i < RMU_DISCOVER_MAX; i++) {
+      if (slot_bufs[i] == 0) {
+        slot_bufs[i] = t;
+        *n_inputs_out = i;
+        return;
+      }
+    }
+    return;
+  }
   if (op == UOP_BUFFER) {
     u32 inst = uop_buffer_inst_get(t);
     if (inst >= RMU_DISCOVER_MAX) return;
