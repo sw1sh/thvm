@@ -263,6 +263,9 @@ static Term atp_rewrite_normalize_ic(Term t,
 // block, where the discrimination-tree skeleton lives); the shim
 // below dispatches to it.
 static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
+// Preorder node count -- defined after atp_compare; the indexed
+// normalizer needs it up here to size an incremental-flatten splice.
+static u32 atp_symbol_count(Term t);
 #endif
 
 #ifdef ATP_ORDERED_REWRITE
@@ -1535,6 +1538,29 @@ static u32 atp_ri_flatsym(Term t, AtpRiVarMap *vm) {
   }
 }
 
+// Flat symbol under RAW variable ids -- no first-appearance renumbering.
+// The subject-side flatten uses this (rule-LHS inserts keep the
+// first-appearance scheme above).  Raw ids make a flatsym position
+// independent of the rest of the term, so an incremental re-flatten can
+// SPLICE a rewritten subtree without re-deriving the whole string.  For
+// a var-normalised subject (dense [0,k) ids, first appearance == id) it
+// is bit-identical to atp_ri_flatsym; the variable-consistency relation
+// the descent's repeat-var memcmp depends on is preserved either way
+// (both are consistent global encodings).  `*folded` is raised if a raw
+// id crosses ATP_RI_MAXVARS (then the descent re-confirms via thvm_match).
+static u32 atp_ri_flatsym_raw(Term t, u8 *folded) {
+  switch (term_tag(t)) {
+    case TAG_CTR: return ATP_RI_CTR_BASE + term_ext(t);
+    case TAG_NUM: return ATP_RI_NUM;
+    case TAG_FVR:
+    default: {
+      u32 id = term_ext(t);
+      if (id >= ATP_RI_MAXVARS) { *folded = 1u; id = ATP_RI_MAXVARS - 1u; }
+      return ATP_RI_STAR_BASE + id;
+    }
+  }
+}
+
 // A discrimination-tree node: left-child / right-sibling in a flat
 // realloc-grown pool addressed by u32 index (a realloc never
 // invalidates the structure).  `rec_head` heads the leaf record list.
@@ -1663,23 +1689,22 @@ static void atp_ri_rebuild(AtpState *s) {
 
 // --- retrieval -----------------------------------------------------
 
-// Preorder-flatten `t` into `flat[]`, recording each position's
-// subtree span in `subsz[]`.  Returns 1 on success, 0 on cap.  ONE
-// flatten per `atp_ri_rewrite_step` covers every redex position -- the
-// per-position descents below all read this shared array, so the
-// flatten is O(S) for the whole step, not O(S^2) re-flattened per
-// position.
+// Preorder-flatten `t` into `flat[]` from `*pos`, recording each
+// position's subtree span in `subsz[]` and its raw flat-symbol in
+// `flatsym[]`.  Returns 1 on success, 0 on cap.  Used both for the
+// whole-subject flatten at the start of a normalize and -- with `*pos`
+// set to a redex position -- to splice a rewritten subtree in place.
 static u8 atp_ri_flatten(Term t, Term *flat, u32 *subsz, u32 *flatsym,
-                         AtpRiVarMap *vm, u32 cap, u32 *pos) {
+                         u8 *folded, u32 cap, u32 *pos) {
   u32 here = *pos;
   if (here >= cap) return 0;
   flat[here]    = t;
-  flatsym[here] = atp_ri_flatsym(t, vm);
+  flatsym[here] = atp_ri_flatsym_raw(t, folded);
   *pos = here + 1u;
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
     for (u32 i = 0; i < n; i++) {
-      if (!atp_ri_flatten(term_ctr_at(t, i), flat, subsz, flatsym, vm,
+      if (!atp_ri_flatten(term_ctr_at(t, i), flat, subsz, flatsym, folded,
                           cap, pos)) return 0;
     }
   }
@@ -1855,63 +1880,57 @@ static Term atp_ri_apply_at(Term t, u32 redex_pos, const u32 *subsz,
   return t;
 }
 
-// Indexed analog of `thvm_rewrite_step`: one outermost-leftmost
-// rewrite anywhere in `t`.  Flattens `t` ONCE, finds the first
-// preorder redex via the rule index, applies the lowest-index rule
-// there.  Behavior-identical to the linear `thvm_rewrite_step`: same
-// redex (first preorder position), same rule (lowest index), same
-// substitution (the leaf's `thvm_match`).
-static Term atp_ri_rewrite_step(AtpState *s, Term t,
-                                Term *flat, u32 *subsz, u32 *flatsym,
-                                u32 clean_before, u32 *out_redex) {
-  *out_redex = 0u;
-  u32 flatlen = 0u;
-  AtpRiVarMap vm;
-  atp_ri_varmap_reset(&vm);
-  if (!atp_ri_flatten(t, flat, subsz, flatsym, &vm, ATP_RI_FLAT_CAP,
-                      &flatlen)) {
-    // Over-deep subject: fall back to the linear rewriter for this
-    // step so a cap overflow can never silently skip a redex.
-    return thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
+// Splice a rewrite into the persistent flat arrays.  A normalize step
+// rewrote preorder position `redex_pos` (old subtree span
+// `subsz[redex_pos]`) into `repl`.  Rather than re-flatten the whole
+// new term, replace the redex region in place: shift the tail, write
+// `repl`'s flattening at `redex_pos`, and fan the size delta into the
+// ancestors' subtree spans.  Raw-id flat symbols make every untouched
+// position's flatsym splice-stable, so this is exact.  Returns 1 on
+// success, 0 if the spliced length would overrun `cap` (caller then
+// re-flattens from scratch).
+static u8 atp_ri_splice(Term *flat, u32 *subsz, u32 *flatsym, u32 *flatlen,
+                        u8 *folded, u32 redex_pos, Term repl, u32 cap) {
+  u32 oldsz = subsz[redex_pos];
+  u32 rlen  = atp_symbol_count(repl);            // repl's preorder length
+  u32 tail  = *flatlen - redex_pos - oldsz;      // positions after the redex
+  if (redex_pos + rlen + tail > cap) return 0;   // would overrun
+  // Fan the size delta into every ancestor of redex_pos.  Their flatsym
+  // is unchanged (atp_ri_apply_at rebuilds CTRs with the same head) but
+  // their span grows/shrinks by rlen-oldsz.  Walk the path with the
+  // OLD spans; modular u32 arithmetic carries a negative delta exactly.
+  u32 a = 0u;
+  while (a != redex_pos) {
+    u32 c = a + 1u;                              // first child position
+    while (c + subsz[c] <= redex_pos) c += subsz[c];
+    subsz[a] = subsz[a] + rlen - oldsz;
+    a = c;
   }
-  g_atp_ri_ix           = s->rule_index;
-  g_atp_ri_flat         = flat;
-  g_atp_ri_subsz        = subsz;
-  g_atp_ri_flatsym      = flatsym;
-  g_atp_ri_lhs          = s->lhs;
-  g_atp_ri_query_folded = vm.folded;
-
-  u32 redex_pos = 0u, redex_rule = 0u;
-  if (!atp_ri_find_redex(flatlen, clean_before, &redex_pos, &redex_rule)) {
-    return t;                                     // no redex: fixpoint
+  // Shift the tail [redex_pos+oldsz, flatlen) to [redex_pos+rlen, ...).
+  if (tail > 0u && rlen != oldsz) {
+    memmove(&flat[redex_pos + rlen],    &flat[redex_pos + oldsz],
+            (size_t)tail * sizeof(Term));
+    memmove(&subsz[redex_pos + rlen],   &subsz[redex_pos + oldsz],
+            (size_t)tail * sizeof(u32));
+    memmove(&flatsym[redex_pos + rlen], &flatsym[redex_pos + oldsz],
+            (size_t)tail * sizeof(u32));
   }
-  *out_redex = redex_pos;
-  // The chosen rule's substitution.  With a perfect descent (no var
-  // folding) the discrimination-tree walk already bound every rule
-  // variable -- g_atp_ri_best_star[k] is the preorder position of the
-  // subterm bound to rule variable k -- so the substitution is read
-  // off directly.  thvm_match (a second full match) runs only in the
-  // folded fallback.  Rule LHS variables are dense [0,k) after
-  // thvm_normalize_vars, so the star index IS the variable id.
-  RewriteSubst subst = {{0}};
-  if (!g_atp_ri_ix->any_folded && !g_atp_ri_query_folded) {
-    for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
-      if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
-        subst.bindings[k] = flat[g_atp_ri_best_star[k]];
-      }
-    }
-  } else if (!thvm_match(s->lhs[redex_rule], flat[redex_pos], &subst)) {
-    return t;                                     // unreachable: leaf confirmed
-  }
-  Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
-  u32  cursor = 0u;
-  return atp_ri_apply_at(t, redex_pos, subsz, repl, &cursor);
+  // Flatten repl into the freed [redex_pos, redex_pos+rlen) region.
+  u32 p = redex_pos;
+  atp_ri_flatten(repl, flat, subsz, flatsym, folded, cap, &p);
+  *flatlen = redex_pos + rlen + tail;
+  return 1;
 }
 
-// Indexed analog of `thvm_rewrite_normalize`: iterate the indexed
-// step until fixpoint or step_cap.  Rebuilds the rule index first if
-// R has mutated since the last build.  The flatten scratch is
-// allocated once per normalize and reused across every step.
+// Indexed analog of `thvm_rewrite_normalize`: rewrite `t` to fixpoint
+// (or step_cap) via the rule-LHS discrimination index.  The subject is
+// flattened ONCE; each step then SPLICES the rewritten subtree into the
+// persistent flat arrays (atp_ri_splice) instead of re-flattening -- a
+// normalize is O(subject + sum repl) rather than O(steps * subject).
+// The incremental redex search resumes from the last redex (the
+// `clean_before` arg of atp_ri_find_redex).  Behavior-identical to the
+// linear ordered scan: same outermost-leftmost redex, same lowest-index
+// rule, same substitution.
 static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   if (s->rule_index == NULL) s->rule_index = atp_ri_new();
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
@@ -1920,13 +1939,66 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
   static u32  flatsym[ATP_RI_FLAT_CAP];
+  u32 flatlen = 0u;
+  u8  folded  = 0u;
+  if (!atp_ri_flatten(t, flat, subsz, flatsym, &folded, ATP_RI_FLAT_CAP,
+                      &flatlen)) {
+    // Over-deep subject: the flat arrays cannot represent it.  Finish
+    // the whole normalize on the linear rewriter -- correct, just slow.
+    for (u32 i = 0; i < step_cap; i++) {
+      Term t2 = thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
+      if (kbo_eq(t, t2)) return t;
+      t = t2;
+    }
+    return t;
+  }
+  g_atp_ri_ix      = s->rule_index;
+  g_atp_ri_flat    = flat;
+  g_atp_ri_subsz   = subsz;
+  g_atp_ri_flatsym = flatsym;
+  g_atp_ri_lhs     = s->lhs;
+
   u32 prev_redex = 0u;                  // 0 on the first step -> full scan
   for (u32 i = 0; i < step_cap; i++) {
-    u32 redex_pos = 0u;
-    Term t2 = atp_ri_rewrite_step(s, t, flat, subsz, flatsym,
-                                  prev_redex, &redex_pos);
-    if (kbo_eq(t, t2)) return t;
-    t = t2;
+    g_atp_ri_query_folded = folded;
+    u32 redex_pos = 0u, redex_rule = 0u;
+    if (!atp_ri_find_redex(flatlen, prev_redex, &redex_pos, &redex_rule)) {
+      return t;                         // no redex: fixpoint
+    }
+    // Build the chosen rule's substitution.  A perfect descent already
+    // bound every rule variable -- g_atp_ri_best_star[k] is the preorder
+    // position of the subterm bound to rule variable k -- so read it
+    // straight off flat[].  thvm_match runs only when folding made the
+    // descent inexact.  Rule LHS vars are dense [0,k) after
+    // thvm_normalize_vars, so the star index IS the variable id.
+    RewriteSubst subst = {{0}};
+    if (!g_atp_ri_ix->any_folded && !folded) {
+      for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
+        if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
+          subst.bindings[k] = flat[g_atp_ri_best_star[k]];
+        }
+      }
+    } else if (!thvm_match(s->lhs[redex_rule], flat[redex_pos], &subst)) {
+      return t;                         // unreachable: leaf confirmed
+    }
+    Term repl   = thvm_subst_apply(s->rhs[redex_rule], &subst);
+    u32  cursor = 0u;
+    t = atp_ri_apply_at(t, redex_pos, subsz, repl, &cursor);
+    // Splice the rewrite into the flat arrays; on overrun, re-flatten.
+    if (!atp_ri_splice(flat, subsz, flatsym, &flatlen, &folded,
+                       redex_pos, repl, ATP_RI_FLAT_CAP)) {
+      flatlen = 0u;
+      folded  = 0u;
+      if (!atp_ri_flatten(t, flat, subsz, flatsym, &folded,
+                          ATP_RI_FLAT_CAP, &flatlen)) {
+        for (u32 j = i + 1; j < step_cap; j++) {
+          Term t2 = thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
+          if (kbo_eq(t, t2)) return t;
+          t = t2;
+        }
+        return t;
+      }
+    }
     prev_redex = redex_pos;
   }
   return t;

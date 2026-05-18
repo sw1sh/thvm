@@ -1536,3 +1536,39 @@ for a completion engine to be spending its time, and the next loop
 tick's target: the subject is re-flattened in full on every rewrite
 step, and a queued CP is normalised once at generation and again at
 selection against a larger R.
+
+### 15 -- iter 9: incremental flatten (the flatterm splice)
+
+The indexed normaliser (`atp_rewrite_normalize_indexed`) re-flattened
+the WHOLE subject into the `flat` / `subsz` / `flatsym` arrays on every
+rewrite step -- O(steps * subject) -- so `atp_ri_flatten` profiled at
+~18%.  A rewrite at preorder position `p`, though, changes only the
+subtree at `p` and the spans of its ancestors; everything else just
+shifts.  iter 9 flattens the subject ONCE and then SPLICES each rewrite
+into the persistent arrays (`atp_ri_splice`): shift the tail with a
+`memmove`, write `repl`'s flattening in place at `p`, fan the size
+delta into the ancestor spans.  This is Waldmeister's flatterm-splice
+normalisation (`ART/Termpaar.c`, *term-pair*).
+
+The splice needs every untouched flatsym to be position-independent, so
+the subject side switched from first-appearance variable renumbering to
+RAW ids (`atp_ri_flatsym_raw`).  For the var-normalised subjects the
+indexed path actually sees (dense `[0,k)` ids, first appearance == id)
+this is bit-identical; both schemes are consistent global encodings, so
+the descent's repeat-variable `memcmp` is unaffected.
+
+Measured: `atp_ri_flatten` 18% -> 0.2% of the profile.  `thm` at a
+fixed 120 steps is bit-identical to iter 8 (`steps=120 rules=71
+cps=7951 max_cps=9022`) -- the change is transparent.  `test_atp`
+8544/8544; the ladder proves (cpl1/cpl2/subl2).  A splice is
+O(tail + |repl|) against the old O(|subject|) re-flatten, and a
+`memmove` beats a structural walk byte-for-byte, so it is provably
+non-regressive.
+
+What remains on top is the LINEAR rewriter (`thvm_rewrite_step` /
+`thvm_match`): `thvm_atp_interreduce` re-normalises every older rule
+against the 1-2 freshly added rules, and that 1-2-rule slice is not
+`s->lhs`, so it bypasses the discrimination index.  Routing it through
+the index is blocked by per-rule self-exclusion -- an older rule's LHS
+sits in `s->lhs` and would be rewritten by the rule itself.  That is
+the next tick's target.
