@@ -1911,3 +1911,41 @@ the packed matcher is a genuine speedup -- but its headline GC win was
 measured against the divergent build.  With the queue bounded the
 collector is no longer a `thm` bottleneck; Stringterms remains the
 right representation for any problem whose pool stays genuinely large.
+
+### 25 -- the next frontier: NAND commutativity, and CP-queue interleaving
+
+With `thm` (double negation) proved in 0.2 s, the next Wolfram-axiom
+benchmark is `wolfram.pr` from the Waldmeister source tree: NAND
+*commutativity* `nand(x,y) = nand(y,x)` from the single Sheffer-stroke
+axiom -- the deep sibling of `thm`.  Added as the `wolfram` goal in
+`test_atp_wolfram_bench`.  thvm does NOT prove it: the rule set churns
+between 51 and 81 rules and the run never converges.
+
+The diagnosed gap: thvm's CP selection (`atp_cp_priority`) was pure
+smallest-weight, FIFO only as a tie-break.  Waldmeister's set of
+unselected equations is a K-D heap (Ding-Weiss multi-dimensional
+priority queue, `BASIC/KDHeap.c`) with TWO keys -- a weight key and a
+FIFO insertion key -- and `KPVerwaltung.c`'s `CPdimension` extracts
+along the FIFO dimension for `thresholdCP` of every `moduloCP`
+selections, the weight dimension otherwise (ratios `{1:10 .. 1:200}`,
+`YFiles.c`).  A pure-weight heap can starve: it keeps picking light
+CPs while a proof-critical heavier CP sits unselected forever.
+
+Ported here as `thvm_atp_select_cp`'s interleaving: 1 FIFO pick (the
+oldest queued CP, lowest `cp_seq`) per 11 selections, the rest the
+weight min.  Extraction generalised to an arbitrary heap slot
+(backfill + sift).  The FIFO pick is phased to the *end* of each
+modulo window -- same ratio, but a queue selected fewer than 10 times
+stays on a pure weight order, which the weight-order unit tests rely
+on.  `test_atp` 8567/8567 (new `select-cp-fifo-interleave` test),
+`test_bench_atp` 106/106, `thm` + the ladder all still prove.
+
+Honest result: the interleaving stabilises the churn -- the rule set
+goes from oscillating 51-81 to a steady 67-69 -- but it does NOT crack
+`wolfram`.  At a 1:11 ratio the queue grows unbounded (870k CPs in
+300 s) while the rule set stays pinned at ~69 and never derives the
+70th.  CP-selection fairness was necessary infrastructure but is not
+sufficient: the real frontier is *why completion saturates the rule
+set at ~69 without the goal becoming joinable* -- an over-aggressive
+redundancy criterion, an orientation/saturation issue, or a goal-check
+that misses a derivable proof.  That diagnosis is the next tick.

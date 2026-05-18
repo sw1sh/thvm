@@ -58,6 +58,17 @@ static void goal_thm(Term *l, Term *r) {
   *r = fv(3);
 }
 
+// wolfram = NAND commutativity from the Sheffer-stroke axiom:
+//   nand(x, y) == nand(y, x)   -- Waldmeister's wolfram.pr conjecture.
+// The hard sibling of `thm`: `thm` (double negation) is the distance-54
+// goal; deriving full commutativity from the single axiom is the
+// deeper Wolfram-axiom benchmark.
+static void goal_wolfram(Term *l, Term *r) {
+  Term x = fv(0), y = fv(1);
+  *l = nand2(x, y);
+  *r = nand2(y, x);
+}
+
 // cpl1 (CriticalPairLemma 1, distance 1): a critical pair of the
 // axiom with itself.
 //   nand(a,nand(nand(a,b),a))
@@ -203,6 +214,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "chain4") == 0) goal_chain(&gl, &gr, 4u);
   else if (strcmp(goal, "chain6") == 0) goal_chain(&gl, &gr, 6u);
   else if (strcmp(goal, "deep5")  == 0) goal_deep(&gl, &gr, 5u);
+  else if (strcmp(goal, "wolfram")== 0) goal_wolfram(&gl, &gr);
   else                                  goal_thm(&gl, &gr);
   thvm_atp_set_goal(s, gl, gr);
 

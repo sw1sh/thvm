@@ -2987,6 +2987,11 @@ typedef struct {
   u32  *cp_seq;
   u32   cp_seq_next;
   u32   cp_cap;
+  // Waldmeister CP-queue interleaving: selection alternates between
+  // the weight key (cp_pri) and the FIFO key (cp_seq, oldest first).
+  // cp_select_count is the running selection counter that drives the
+  // ratio -- see thvm_atp_select_cp / ATP_CP_FIFO_MODULO.
+  u32   cp_select_count;
 
   // 8a: IC-native CP-set representation.  Behind -DATP_CP_GRAPH the
   // CP queue is also held as ONE shared Term: a CTR `CpSet[...]`

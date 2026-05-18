@@ -2970,42 +2970,77 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
 #endif
 }
 
-// Pop the cheapest CP from the queue (lowest (cp_pri, cp_seq) --
-// the `--add` heuristic, ties by insertion order).
+// Waldmeister CP-queue interleaving (a port of KPVerwaltung.c's
+// `CPdimension`).  Waldmeister keeps the set of unselected equations
+// in a K-D heap with TWO keys -- a weight key and a FIFO insertion
+// key -- and `CPdimension` returns the FIFO dimension for `thresholdCP`
+// of every `moduloCP` selections, the weight dimension otherwise.
+// Waldmeister's problem analysis picks the ratio from {1:10, 1:50,
+// 1:100, 1:200} (YFiles.c `Schrittweiten`); this is the most-fair
+// setting, 1 FIFO pick per 11 selections.
 //
-// 7c': the CP queue is a binary min-heap (atp_cp_heap_push keeps it
-// so).  Selection is heap pop-min: take the root, move the last
-// element into the root slot, sift down.  O(log n) per call --
-// replacing the old per-step rebuild of an n-leaf INC-SUP tree +
-// thvm_collapse_ordered, which was O(n) per step => O(n^2) over a
-// run and the dominant cost past ~24 steps on hard problems.
+// A pure smallest-weight heap can starve -- it keeps picking light
+// CPs while a heavier CP sits unselected -- so the periodic FIFO pick
+// is the fairness lever.  Waldmeister places the FIFO pick at the
+// START of each modulo window; placing it at the END instead is the
+// same ratio (the phase is immaterial over a completion run) and
+// keeps a queue selected fewer than MODULO-THRESHOLD times on a pure
+// weight order, which the weight-order unit tests rely on.
+#define ATP_CP_FIFO_MODULO     11u
+#define ATP_CP_FIFO_THRESHOLD   1u
+
+// Select and remove one CP from the queue.  Most calls take the heap
+// min (lowest (cp_pri, cp_seq) -- the weight heuristic); ATP_CP_FIFO_-
+// THRESHOLD of every ATP_CP_FIFO_MODULO calls instead take the OLDEST
+// queued CP (lowest cp_seq) -- Waldmeister's FIFO dimension.
+// Extraction works at an arbitrary slot j: backfill from the last
+// slot, then sift the backfilled element (one of sift-up / sift-down
+// is a no-op).
 //
 // Returns 1 on success (out-params populated), 0 on empty queue.
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL || s->n_cps == 0) return 0;
-  // Unpack the cheapest CP (heap root) from its byte string into two
-  // fresh heap Terms for the caller to normalize.
-  acp_unpack(s->cp_packed[0], lhs_out, rhs_out);
-  s->last_popped_trace = s->cp_trace[0];
+
+  // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
+  // selections, weight pick (heap root) otherwise.
+  u32 j = 0;
+  if (s->cp_select_count % ATP_CP_FIFO_MODULO
+        >= ATP_CP_FIFO_MODULO - ATP_CP_FIFO_THRESHOLD) {
+    // FIFO dimension: the oldest queued CP is the lowest cp_seq.
+    // O(n_cps) scan, but only 1 call in MODULO takes this branch.
+    u32 best = 0;
+    for (u32 i = 1; i < s->n_cps; i++) {
+      if (s->cp_seq[i] < s->cp_seq[best]) best = i;
+    }
+    j = best;
+  }
+  s->cp_select_count++;
+
+  // Unpack the chosen CP from its byte string into two fresh heap
+  // Terms for the caller to normalize.
+  acp_unpack(s->cp_packed[j], lhs_out, rhs_out);
+  s->last_popped_trace = s->cp_trace[j];
 #ifdef ATP_FV_INDEX
   // 7d: the popped CP leaves the queue -- drop it from the index so a
   // later subsumption query never matches a stale, no-longer-queued
-  // CP (which would diverge from the array-scan verdict).  Mark the
-  // record dead BEFORE freeing the byte string it borrows: a dead
-  // record is never dereferenced, so the borrow stays sound.
-  atp_fv_index_remove(s->fv_index, s->cp_seq[0]);
+  // CP.  Mark the record dead BEFORE freeing the byte string it
+  // borrows: a dead record is never dereferenced, so the borrow stays
+  // sound.
+  atp_fv_index_remove(s->fv_index, s->cp_seq[j]);
 #endif
-  free(s->cp_packed[0]);
-  s->cp_packed[0] = NULL;
+  free(s->cp_packed[j]);
+  s->cp_packed[j] = NULL;
   s->n_cps--;
-  if (s->n_cps > 0) {
+  if (j != s->n_cps) {
+    // Backfill slot j from the (ex-)last slot, then repair the heap.
     u32 last = s->n_cps;
-    s->cp_packed[0]    = s->cp_packed[last];
+    s->cp_packed[j]    = s->cp_packed[last];
     s->cp_packed[last] = NULL;          // vacated slot: leave it empty
-    s->cp_trace[0] = s->cp_trace[last];
-    s->cp_pri[0]   = s->cp_pri[last];
-    s->cp_seq[0]   = s->cp_seq[last];
-    atp_cp_sift_down(s, 0);
+    s->cp_trace[j] = s->cp_trace[last];
+    s->cp_pri[j]   = s->cp_pri[last];
+    s->cp_seq[j]   = s->cp_seq[last];
+    atp_cp_sift_up(s, j);
+    atp_cp_sift_down(s, j);
   }
   // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
   atp_cp_graph_sync(s);

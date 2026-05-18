@@ -265,6 +265,38 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/select-cp-fifo-interleave");
+  {
+    // Waldmeister CP-queue interleaving (port of KPVerwaltung.c
+    // CPdimension): 1 FIFO pick per ATP_CP_FIFO_MODULO (=11)
+    // selections.  CP 0 is the oldest (lowest cp_seq) AND the
+    // heaviest; CPs 1..11 are 11 identical light CPs.  The first 10
+    // selections take the weight min -> light CPs; selection 11 is
+    // the FIFO dimension -> the oldest CP (CP 0), which pure weight
+    // would defer to last.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term heavy = mk_f(mk_f(mk_a(), mk_a()), mk_f(mk_a(), mk_a()));
+    thvm_atp_cp_set(s, 0, heavy, mk_a());          // oldest + heaviest
+    for (u32 i = 1; i <= 11; i++) {
+      thvm_atp_cp_set(s, i, mk_a(), mk_a());       // light
+      s->cp_trace[i] = ATP_TRACE_NONE;
+    }
+    s->cp_trace[0] = ATP_TRACE_NONE;
+    s->n_cps = 12;
+    thvm_atp_cp_reheapify(s);
+
+    Term lo = 0, ro = 0;
+    for (u32 i = 0; i < 10; i++) {
+      CHECK(thvm_atp_select_cp(s, &lo, &ro));
+      CHECK_EQ(term_ext(lo), LAB_a);               // weight picks: light
+    }
+    // Selection 11 (cp_select_count == 10) -- the FIFO dimension.
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(term_tag(lo), TAG_CTR);
+    CHECK_EQ(term_ext(lo), LAB_f);                 // the heavy oldest CP
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/select-cp-shifts-tail-densely");
   {
     // After one pop, the remaining items should occupy slots [0..n-1).
