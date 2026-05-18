@@ -1682,6 +1682,7 @@ static const Term   *g_atp_ri_lhs     = NULL;  // s->lhs[] for the leaf guard
 static u32           g_atp_ri_qend    = 0;     // end of the queried slice
 static u32           g_atp_ri_star[ATP_RI_MAXVARS];  // first-bind positions
 static u32           g_atp_ri_best    = ATP_RI_NIL;
+static u32           g_atp_ri_best_star[ATP_RI_MAXVARS]; // star[] at the win
 static Term          g_atp_ri_qsubj   = 0;     // subject at the query position
 static u8            g_atp_ri_query_folded = 0; // subject flatten folded a var
 
@@ -1707,6 +1708,12 @@ static void atp_ri_leaf_collect(u32 node) {
     if (rule >= g_atp_ri_best) continue;          // cannot lower the min
     if (perfect) {
       g_atp_ri_best = rule;
+      // Snapshot the path's variable bindings: with a perfect descent
+      // these ARE the match substitution, so atp_ri_rewrite_step reads
+      // them off directly instead of re-running thvm_match.
+      for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
+        g_atp_ri_best_star[k] = g_atp_ri_star[k];
+      }
       continue;
     }
     RewriteSubst subst = {{0}};
@@ -1860,11 +1867,21 @@ static Term atp_ri_rewrite_step(AtpState *s, Term t,
     return t;                                     // no redex: fixpoint
   }
   *out_redex = redex_pos;
-  // Re-derive the substitution for the chosen rule at the redex
-  // subterm, apply its RHS, splice it back into `t`.
-  Term subj = flat[redex_pos];
+  // The chosen rule's substitution.  With a perfect descent (no var
+  // folding) the discrimination-tree walk already bound every rule
+  // variable -- g_atp_ri_best_star[k] is the preorder position of the
+  // subterm bound to rule variable k -- so the substitution is read
+  // off directly.  thvm_match (a second full match) runs only in the
+  // folded fallback.  Rule LHS variables are dense [0,k) after
+  // thvm_normalize_vars, so the star index IS the variable id.
   RewriteSubst subst = {{0}};
-  if (!thvm_match(s->lhs[redex_rule], subj, &subst)) {
+  if (!g_atp_ri_ix->any_folded && !g_atp_ri_query_folded) {
+    for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
+      if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
+        subst.bindings[k] = flat[g_atp_ri_best_star[k]];
+      }
+    }
+  } else if (!thvm_match(s->lhs[redex_rule], flat[redex_pos], &subst)) {
     return t;                                     // unreachable: leaf confirmed
   }
   Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
