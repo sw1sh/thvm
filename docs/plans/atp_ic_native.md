@@ -1774,3 +1774,37 @@ gone.  Step 233 is reached in 72.8 s, down from 102.4 s -- the late
 game runs ~1.4x faster.  `thm`@120 bit-identical (`steps=120 rules=71
 cps=7951`); `thm`@200 unchanged (`steps=200 rules=124 cps=20725`);
 `test_atp` 8544/8544; the ladder proves.
+
+### 22 -- iters 16-17: the GC wall, and porting Waldmeister Stringterms
+
+iter 16 re-profiled the late game and found the wall is the COLLECTOR:
+`gc_evacuate` ~68% at `thm` step ~230, re-copying a ~62M-cell live set
+every collection.  iter 17 confirmed the 62M is the critical-pair
+queue itself -- ~33k CPs held as IC heap term-graphs -- and that
+reducing GC frequency is a wash (frequent collection was incidentally
+keeping the working set cache-compact).  The non-IC tuning frontier
+(iters 8-15: a multi-fold per-step speedup, two crashes fixed) is
+exhausted; the remaining wall is the term REPRESENTATION.
+
+So the loop stopped grinding and went to the Waldmeister source.
+Waldmeister's "set of unselected equations" (`sources/TPR/Stringterms.c`,
+`TermpairRepresentation.c`) does NOT hold critical pairs as term
+graphs.  Each CP is a `PTermpaarT` -- a PACKED PREORDER BYTE STRING,
+one byte per symbol (three for a large variable id).  A 30-symbol CP
+is a 30-byte string in plain memory; it never enters the managed heap,
+so no collector ever copies it.  That is the structural answer to the
+62M wall, and it is a Waldmeister algorithm to port verbatim, not an
+IC lever.
+
+Stage 1 (this tick): the representation.  `acp_pack` / `acp_unpack`
+in `src/atp/_.c` are a direct port of `STT_TermpaarEinpacken` /
+`...Auspacken` -- preorder pack of a CP into a `u8 *`, rebuild via
+per-node arity (thvm has no global symbol table, so each CTR packs its
+own arity; otherwise it is Waldmeister's scheme).  `acp_selftest`,
+run at every `thvm_atp_init`, asserts an exact round-trip; `test_atp`
+8544/8544 and the ladder all exercise it.
+
+Stage 2+ (next): wire the packed form into the queue -- `cp_lhs[]`/
+`cp_rhs[]` become packed byte strings, the collector stops rooting
+them, and the subsumption index keys on the packed form -- which is
+what actually frees the 62M and unblocks the late game.

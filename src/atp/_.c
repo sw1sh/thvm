@@ -365,6 +365,154 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
 // earlier add_equation push site can call it.
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace);
 
+// === Waldmeister Stringterms: packed byte-string critical pairs =====
+//
+// A direct port of Waldmeister's `Stringterms` module (sources/TPR/
+// Stringterms.c).  Waldmeister keeps its set of unselected equations
+// not as heap term-graphs but as PACKED PREORDER BYTE STRINGS -- one
+// `PTermpaarT = byte *` per critical pair.  A 30-symbol CP is a
+// ~30-byte string in plain malloc memory: it never enters the IC heap,
+// so the copying collector never touches it.  thvm's CP queue stores
+// CPs as IC heap terms instead; at `thm` step ~230 that queue is a
+// ~62M-cell live set the GC re-copies every collection (the late-game
+// wall the loop hit at iters 16-17).
+//
+// thvm has no global symbol table (Waldmeister's SO_Stelligkeit gives
+// a symbol's arity), so each CTR node packs its own arity -- otherwise
+// this is Waldmeister's technique verbatim: walk the pair in preorder,
+// emit one self-delimiting record per node, rebuild from arity.
+//
+// `acp_pack` returns a malloc'd buffer (caller frees); `acp_unpack`
+// rebuilds the two heap Terms.  Stage 1 of the port: the
+// representation + an exact round-trip.  Stage 2 wires it into the
+// queue (cp_lhs[]/cp_rhs[] -> packed), which is what frees the heap.
+
+// LEB128 varint -- 7 bits/byte, high bit = "more".
+static void acp_put_varint(u8 **pp, u64 v) {
+  while (v >= 0x80u) { *(*pp)++ = (u8)(v | 0x80u); v >>= 7; }
+  *(*pp)++ = (u8)v;
+}
+static u64 acp_get_varint(const u8 **pp) {
+  u64 v = 0; u32 shift = 0; u8 b;
+  do { b = *(*pp)++; v |= (u64)(b & 0x7Fu) << shift; shift += 7u; }
+  while (b & 0x80u);
+  return v;
+}
+
+// Worst-case packed bytes for term `t`: 1 discriminator + 2 varints,
+// each varint <= 10 bytes -> 21 bytes per node is a safe bound.
+static u32 acp_packed_bound(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t), c = 21u;
+      for (u32 i = 0; i < n; i++) c += acp_packed_bound(term_ctr_at(t, i));
+      return c;
+    }
+    default: return 21u;
+  }
+}
+
+// Append `t`'s preorder packing to `*pp`.  CTR: 'C', label, arity,
+// then children; FVR: 'V', var id; NUM: 'N', dtype, raw value;
+// anything else: 'E' (era placeholder -- ATP terms are first-order, so
+// this is unreachable in practice but keeps unpack total).
+static void acp_pack_term(Term t, u8 **pp) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      *(*pp)++ = (u8)'C';
+      acp_put_varint(pp, term_ext(t));
+      acp_put_varint(pp, n);
+      for (u32 i = 0; i < n; i++) acp_pack_term(term_ctr_at(t, i), pp);
+      return;
+    }
+    case TAG_NUM:
+      *(*pp)++ = (u8)'N';
+      acp_put_varint(pp, term_ext(t));
+      acp_put_varint(pp, term_val(t));
+      return;
+    case TAG_FVR:
+      *(*pp)++ = (u8)'V';
+      acp_put_varint(pp, term_ext(t));
+      return;
+    default:
+      *(*pp)++ = (u8)'E';
+      return;
+  }
+}
+
+// Rebuild one preorder-packed term, advancing `*pp` past it.
+static Term acp_unpack_term(const u8 **pp) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+      Term kids[REWRITE_MAX_ARITY];
+      for (u32 i = 0; i < n; i++) kids[i] = acp_unpack_term(pp);
+      return term_new_ctr(label, kids, n);
+    }
+    case 'N': {
+      u32 dtype = (u32)acp_get_varint(pp);
+      u64 val   = acp_get_varint(pp);
+      return term_new(0, TAG_NUM, dtype, val);
+    }
+    case 'V':
+    default:
+      return term_new_fvr((u32)acp_get_varint(pp));
+  }
+}
+
+// Pack a critical pair (lhs, rhs) into a fresh malloc'd byte string;
+// `*out_len` receives its length.  The two terms pack back to back --
+// the preorder records are self-delimiting via arity, so acp_unpack
+// reads lhs then rhs with no separator.
+static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len) {
+  u32 bound = acp_packed_bound(lhs) + acp_packed_bound(rhs);
+  u8 *buf = (u8 *)malloc(bound);
+  if (buf == NULL) { fprintf(stderr, "acp_pack: OOM\n"); exit(1); }
+  u8 *p = buf;
+  acp_pack_term(lhs, &p);
+  acp_pack_term(rhs, &p);
+  if (out_len != NULL) *out_len = (u32)(p - buf);
+  return buf;
+}
+
+// Inverse of acp_pack: rebuild both heap Terms from the byte string.
+static void acp_unpack(const u8 *buf, Term *lhs, Term *rhs) {
+  const u8 *p = buf;
+  Term l = acp_unpack_term(&p);
+  Term r = acp_unpack_term(&p);
+  if (lhs != NULL) *lhs = l;
+  if (rhs != NULL) *rhs = r;
+}
+
+// One-time port self-check, run at engine init: a hand-built pair --
+// nested CTRs, repeated variable, a NUM -- must survive a pack/unpack
+// round-trip structurally intact, so a broken Stringterms port fails
+// loudly and immediately rather than corrupting the CP queue later.
+static void acp_selftest(void) {
+  static u8 done = 0;
+  if (done) return;
+  done = 1;
+  Term v0 = term_new_fvr(0u), v1 = term_new_fvr(1u);
+  Term inner[2]  = { v0, v1 };
+  Term f         = term_new_ctr(7u, inner, 2u);          // f(v0, v1)
+  Term spine[2]  = { f, v0 };                            // var v0 repeats
+  Term lhs       = term_new_ctr(7u, spine, 2u);          // f(f(v0,v1), v0)
+  Term rhs       = term_new(0, TAG_NUM, 0u, 42u);        // NUM 42
+  u32  len = 0;
+  u8  *packed = acp_pack(lhs, rhs, &len);
+  Term ul = 0, ur = 0;
+  acp_unpack(packed, &ul, &ur);
+  free(packed);
+  if (!kbo_eq(lhs, ul) || !kbo_eq(rhs, ur)) {
+    fprintf(stderr, "acp_selftest: Stringterms round-trip FAILED\n");
+    exit(1);
+  }
+}
+
 // === 8a: IC-native CP-set graph (-DATP_CP_GRAPH) ====================
 //
 // Under the flag the CP queue is ALSO held as one shared Term:
@@ -2052,6 +2200,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   s->kbo      = cfg;
   s->step_cap = step_cap;
   atp_register_primitives();
+  acp_selftest();   // verify the Stringterms pack/unpack round-trip
   // Allocate the growable rule / CP arrays at their initial
   // capacity.  ensure_*_cap fills the trace slots with
   // ATP_TRACE_NONE (0 is a valid trace index, so explicit fill
