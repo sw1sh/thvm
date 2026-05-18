@@ -1985,3 +1985,25 @@ commutativity stays the open frontier; the remaining suspects are the
 reduction order (the Wolfram-axiom problems are notoriously
 ordering-sensitive) and Waldmeister's strategy-switching completion
 (`HK_TestStrategieWechsel`), neither yet ported.
+
+### 27 -- speed: drop the redundant symbol-count traversals
+
+A profile of `wolfram` put `atp_symbol_count` at ~14 % of the run --
+and it was pure redundancy.  Two callers, both walking a term a
+second time when an adjacent pass already had the count:
+
+  - `atp_cp_heap_push` weights each pushed CP by symbol count, right
+    after `acp_pack` has packed it -- and the pack walks every node.
+    `acp_pack` now returns the node count as a free by-product (its
+    `out_nodes` out-param); `atp_cp_priority_sized` takes that
+    pre-counted weight.
+  - `atp_ri_splice` (one call per rewrite step of every normalize)
+    walked `repl` once for its preorder length and again to flatten
+    it.  It now flattens `repl` into a scratch triple -- the flatten
+    cursor *is* the length -- and `memcpy`s that into place, which
+    also replaces the in-place re-flatten with a contiguous copy.
+
+Both are value-identical (the weight is the same integer, the spliced
+arrays are byte-for-byte the same), so the search trajectory does not
+move.  Measured: `wolfram`@3000 7.3 s -> 6.5 s (~12 %); `test_atp`
+8567/8567, `test_bench_atp` 106/106, `thm` + the ladder all prove.

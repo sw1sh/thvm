@@ -419,15 +419,19 @@ static u32 acp_packed_bound(Term t) {
 // Append `t`'s preorder packing to `*pp`.  CTR: 'C', label, arity,
 // then children; FVR: 'V', var id; NUM: 'N', dtype, raw value;
 // anything else: 'E' (era placeholder -- ATP terms are first-order, so
-// this is unreachable in practice but keeps unpack total).
-static void acp_pack_term(Term t, u8 **pp) {
+// this is unreachable in practice but keeps unpack total).  `*nodes`
+// is bumped once per node visited -- the pack walks every node anyway,
+// so the CP's symbol count (its selection weight) falls out for free,
+// sparing atp_cp_priority a second full traversal.
+static void acp_pack_term(Term t, u8 **pp, u32 *nodes) {
+  (*nodes)++;
   switch (term_tag(t)) {
     case TAG_CTR: {
       u32 n = term_ctr_n(t);
       *(*pp)++ = (u8)'C';
       acp_put_varint(pp, term_ext(t));
       acp_put_varint(pp, n);
-      for (u32 i = 0; i < n; i++) acp_pack_term(term_ctr_at(t, i), pp);
+      for (u32 i = 0; i < n; i++) acp_pack_term(term_ctr_at(t, i), pp, nodes);
       return;
     }
     case TAG_NUM:
@@ -469,17 +473,21 @@ static Term acp_unpack_term(const u8 **pp) {
 }
 
 // Pack a critical pair (lhs, rhs) into a fresh malloc'd byte string;
-// `*out_len` receives its length.  The two terms pack back to back --
-// the preorder records are self-delimiting via arity, so acp_unpack
-// reads lhs then rhs with no separator.
-static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len) {
+// `*out_len` receives its length, `*out_nodes` the total symbol count
+// of lhs+rhs (the CP's selection weight).  Either out-param may be
+// NULL.  The two terms pack back to back -- the preorder records are
+// self-delimiting via arity, so acp_unpack reads lhs then rhs with no
+// separator.
+static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len, u32 *out_nodes) {
   u32 bound = acp_packed_bound(lhs) + acp_packed_bound(rhs);
   u8 *buf = (u8 *)malloc(bound);
   if (buf == NULL) { fprintf(stderr, "acp_pack: OOM\n"); exit(1); }
   u8 *p = buf;
-  acp_pack_term(lhs, &p);
-  acp_pack_term(rhs, &p);
-  if (out_len != NULL) *out_len = (u32)(p - buf);
+  u32 nodes = 0u;
+  acp_pack_term(lhs, &p, &nodes);
+  acp_pack_term(rhs, &p, &nodes);
+  if (out_len   != NULL) *out_len   = (u32)(p - buf);
+  if (out_nodes != NULL) *out_nodes = nodes;
   return buf;
 }
 
@@ -560,7 +568,7 @@ static void acp_selftest(void) {
   Term lhs       = term_new_ctr(7u, spine, 2u);          // f(f(v0,v1), v0)
   Term rhs       = term_new(0, TAG_NUM, 0u, 42u);        // NUM 42
   u32  len = 0;
-  u8  *packed = acp_pack(lhs, rhs, &len);
+  u8  *packed = acp_pack(lhs, rhs, &len, NULL);
   Term ul = 0, ur = 0;
   acp_unpack(packed, &ul, &ur);
   free(packed);
@@ -579,7 +587,7 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   if (s == NULL) return;
   atp_ensure_cp_cap(s, i + 1u);
   free(s->cp_packed[i]);                 // free(NULL) is a no-op
-  s->cp_packed[i] = acp_pack(lhs, rhs, NULL);
+  s->cp_packed[i] = acp_pack(lhs, rhs, NULL, NULL);
 }
 
 // Unpack CP queue slot i back into two fresh transient heap Terms --
@@ -908,7 +916,7 @@ static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
       // CP rewritten -- repack into a fresh byte string at slot w.
       free(s->cp_packed[i]);
       s->cp_packed[i] = NULL;
-      s->cp_packed[w] = acp_pack(l, r, NULL);
+      s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
       touched = 1;
     } else if (w != i) {
       // Unchanged -- compact the existing buffer down to slot w.
@@ -2157,6 +2165,12 @@ static Term atp_ri_build(const Term *flat, const u32 *subsz,
   return term_new_ctr(term_ext(src), children, n);
 }
 
+// Splice scratch: `repl` is flattened here first so its preorder
+// length is the advanced cursor -- no separate atp_symbol_count walk.
+static Term g_atp_ri_repl_flat   [ATP_RI_FLAT_CAP];
+static u32  g_atp_ri_repl_subsz  [ATP_RI_FLAT_CAP];
+static u32  g_atp_ri_repl_flatsym[ATP_RI_FLAT_CAP];
+
 // Splice a rewrite into the persistent flat arrays.  A normalize step
 // rewrote preorder position `redex_pos` (old subtree span
 // `subsz[redex_pos]`) into `repl`.  Rather than re-flatten the whole
@@ -2169,7 +2183,14 @@ static Term atp_ri_build(const Term *flat, const u32 *subsz,
 static u8 atp_ri_splice(Term *flat, u32 *subsz, u32 *flatsym, u32 *flatlen,
                         u8 *folded, u32 redex_pos, Term repl, u32 cap) {
   u32 oldsz = subsz[redex_pos];
-  u32 rlen  = atp_symbol_count(repl);            // repl's preorder length
+  // Flatten repl into the scratch arrays: its preorder length `rlen`
+  // is the cursor the flatten advances, so the old separate
+  // atp_symbol_count(repl) walk (one per rewrite step) is gone.
+  u32 rlen  = 0u;
+  if (!atp_ri_flatten(repl, g_atp_ri_repl_flat, g_atp_ri_repl_subsz,
+                      g_atp_ri_repl_flatsym, folded, cap, &rlen)) {
+    return 0;                                    // repl alone overruns
+  }
   u32 tail  = *flatlen - redex_pos - oldsz;      // positions after the redex
   if (redex_pos + rlen + tail > cap) return 0;   // would overrun
   // Fan the size delta into every ancestor of redex_pos.  Their flatsym
@@ -2192,9 +2213,17 @@ static u8 atp_ri_splice(Term *flat, u32 *subsz, u32 *flatsym, u32 *flatlen,
     memmove(&flatsym[redex_pos + rlen], &flatsym[redex_pos + oldsz],
             (size_t)tail * sizeof(u32));
   }
-  // Flatten repl into the freed [redex_pos, redex_pos+rlen) region.
-  u32 p = redex_pos;
-  atp_ri_flatten(repl, flat, subsz, flatsym, folded, cap, &p);
+  // Place the pre-flattened repl into the freed [redex_pos,
+  // redex_pos+rlen) region.  flat / subsz / flatsym entries are
+  // position-independent (Term cells, self-relative spans, raw
+  // symbols), so a contiguous copy is exact -- and far cheaper than
+  // re-walking repl's tree.
+  memcpy(&flat[redex_pos],    g_atp_ri_repl_flat,
+         (size_t)rlen * sizeof(Term));
+  memcpy(&subsz[redex_pos],   g_atp_ri_repl_subsz,
+         (size_t)rlen * sizeof(u32));
+  memcpy(&flatsym[redex_pos], g_atp_ri_repl_flatsym,
+         (size_t)rlen * sizeof(u32));
   *flatlen = redex_pos + rlen + tail;
   return 1;
 }
@@ -2878,7 +2907,10 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
 // -DATP_GOAL_HEURISTIC a bounded goal-directed penalty is then
 // added (Waldmeister lever 1, above).
 #define MIX_UNORIENTED_PENALTY 4u
-static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
+// Priority weight for a CP whose symbol-count sum is already known
+// (`base`) -- e.g. counted for free during acp_pack.  Identical
+// verdict to atp_cp_priority; only the redundant size walk is skipped.
+static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
 #ifdef ATP_GOAL_HEURISTIC
   // Goal-directed run: Waldmeister uses CPinGoal as THE classifier --
   // the weight is the CP's graded structural distance to the goal, not
@@ -2886,7 +2918,6 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
   // size/mix heuristic below.
   if (s != NULL && s->goal_lhs != 0) return atp_goal_weight(s, lhs, rhs);
 #endif
-  u32 base = atp_symbol_count(lhs) + atp_symbol_count(rhs);
   if (s != NULL && s->use_mix_heuristic) {
     KboCmp c = atp_compare(s, lhs, rhs);
     if (c != KBO_GT && c != KBO_LT) {
@@ -2895,6 +2926,10 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
     }
   }
   return base;
+}
+static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
+  return atp_cp_priority_sized(s, lhs, rhs,
+                               atp_symbol_count(lhs) + atp_symbol_count(rhs));
 }
 
 // === 7c': CP-queue binary min-heap ==================================
@@ -2952,10 +2987,13 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   // slots and every pop / drop NULLs the slot it vacates.  `packed`
   // is the buffer's identity; a later sift only moves the pointer
   // between slots, so it stays valid for the index borrow below.
-  u8  *packed    = acp_pack(lhs, rhs, NULL);
+  u32  cp_nodes  = 0u;
+  u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
   s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
-  s->cp_pri[i]   = atp_cp_priority(s, lhs, rhs);
+  // acp_pack already counted every node -- reuse it as the CP weight
+  // instead of paying atp_symbol_count a second pair of traversals.
+  s->cp_pri[i]   = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
   s->n_cps++;
