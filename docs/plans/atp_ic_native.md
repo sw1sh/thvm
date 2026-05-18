@@ -1652,3 +1652,35 @@ change is transparent.  `test_atp` 8544/8544; the ladder proves.
 The wall is now `atp_ri_descend` alone (~50% of the profile) -- the
 discrimination-tree descent inside the redex search.  That is the next
 tick's target.
+
+### 18 -- iter 12: the descent resists, and a redundant reset
+
+iter 12 went after `atp_ri_descend`.  Instrumentation: 2.6M position
+queries per `thm`@120, ~9.4 descend calls each, only ~1% reaching a
+record leaf.  The incremental redex search (iter 6) already keeps the
+query count near one scan per normalize, so the descent count is
+essentially inherent to "normalize this many critical pairs".
+
+A size prune was tried: tag each discrimination-tree node with
+`min_complete` (the fewest preorder symbols any routed rule still owes)
+and abandon a descent whose subject has fewer symbols left.  It is
+sound and cut descend CALLS by 37% -- but the calls it removed were the
+cheap tail ones, and the per-node check it added ran on all of them.
+Back-to-back timing showed a ~1% REGRESSION, so it was dropped (a
+measured regression is not shipped, however clean the idea).
+
+What did land: `atp_ri_query_pos` reset all 64 slots of the descent's
+variable-binding array on every query.  But `atp_ri_descend` unwinds
+each binding on backtrack and never returns early, so the array is
+already all-NIL between queries -- the reset was pure redundancy, a
+64-store loop on each of millions of queries.  Moved to once per
+normalize.  Back-to-back `thm`@200: 17.49 s -> 17.30 s median, ~1.2%.
+`thm`@120 bit-identical; `test_atp` 8544/8544; the ladder proves.
+
+The honest read after iter 12: the indexed normaliser's descent is
+near-inherent for the current workload.  The remaining large lever is
+the WORKLOAD itself -- `thm`@200 generates ~191 k critical pairs and
+drops ~88 % of them (joinable or queue-subsumed) after normalising
+each.  Cutting CP generation (Waldmeister's prime-critical-pair and
+connectedness criteria, currently counter-only under `ATP_CP_DIAG`) is
+the next real target, and a larger change than one descent tweak.

@@ -1819,7 +1819,10 @@ static u32 atp_ri_query_pos(u32 qpos) {
   g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
   g_atp_ri_qsubj = g_atp_ri_flat[qpos];
   g_atp_ri_best  = ATP_RI_NIL;
-  for (u32 i = 0; i < ATP_RI_MAXVARS; i++) g_atp_ri_star[i] = ATP_RI_NIL;
+  // g_atp_ri_star is NOT reset here: atp_ri_descend pairs every
+  // `star[k] = pos` with a `star[k] = NIL` on backtrack and never
+  // returns early, so star[] is all-NIL on entry and exit of every
+  // descent.  The one reset is done once per normalize.
   atp_ri_descend(g_atp_ri_ix->root, qpos);
   return g_atp_ri_best;
 }
@@ -1940,6 +1943,11 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   g_atp_ri_subsz   = subsz;
   g_atp_ri_flatsym = flatsym;
   g_atp_ri_lhs     = s->lhs;
+  // Reset the descent's variable-binding array ONCE per normalize.  Every
+  // atp_ri_descend leaves it all-NIL (each bind is unwound on backtrack),
+  // so the per-query reset that used to live in atp_ri_query_pos was
+  // redundant -- a 64-store loop on every one of millions of queries.
+  for (u32 k = 0; k < ATP_RI_MAXVARS; k++) g_atp_ri_star[k] = ATP_RI_NIL;
 
   u32 flatlen = 0u;
   u8  folded  = 0u;
