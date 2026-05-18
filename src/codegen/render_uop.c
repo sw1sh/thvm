@@ -24,11 +24,21 @@
 
 static void rmu_emit_term(Term t, FILE *fp);
 
-// Renderer target. 0 = MSL (default), 1 = C99 for CPU JIT (F6).
-// When C99, axis-type LOCAL/GLOBAL is rendered as a regular for-loop
-// (no thread-position bind), and the prologue/epilogue switch to a
-// plain function signature without Metal kernel attributes.
-static int RMU_TARGET_C = 0;
+// Renderer target.  The body emit (rmu_emit_*) is shared across all
+// three; targets differ in preamble/signature plus a handful of
+// branches.  CG_TARGET_C (the CPU JIT, F6) renders axis-type
+// LOCAL/GLOBAL as plain for-loops (no thread-position bind) and uses
+// a plain function signature.  CG_TARGET_METAL and CG_TARGET_CUDA are
+// both GPU targets: they share the thread/block-position binding and
+// the FAST_MATH / VEC_LOAD / SIMD_REDUCE / reduce-unroll lowerings,
+// and differ only in target-specific syntax (preamble, builtins,
+// intrinsic spellings, the simdgroup_matrix vs WMMA matmul template).
+typedef enum {
+  CG_TARGET_METAL = 0,
+  CG_TARGET_C     = 1,
+  CG_TARGET_CUDA  = 2,
+} cg_target;
+static cg_target RMU_TARGET = CG_TARGET_METAL;
 
 // Emit an unroll pragma matching the current target's syntax.  C99 /
 // clang accept `#pragma clang loop unroll_count(N)`; MSL / GPU targets
@@ -137,6 +147,27 @@ static const char *rmu_msl_type_name(u32 dtype) {
     case DT_UINT8: return "uchar";
     default:       return "float";  // safe fallback for the renderer
   }
+}
+
+// CUDA scalar type names.  Differs from MSL on the fp16 / byte types:
+// CUDA spells half `__half` (cuda_fp16.h) and bytes `unsigned char`.
+static const char *rmu_cuda_type_name(u32 dtype) {
+  switch (dtype) {
+    case DT_FP32:  return "float";
+    case DT_FP16:  return "__half";
+    case DT_INT32: return "int";
+    case DT_INT64: return "long long";
+    case DT_UINT8: return "unsigned char";
+    default:       return "float";
+  }
+}
+
+// GPU-target type name: dispatches MSL vs CUDA on RMU_TARGET.  The
+// shared body emit calls this on either GPU target; the CPU JIT path
+// calls rmu_c_type_name directly.
+static const char *rmu_gpu_type_name(u32 dtype) {
+  return (RMU_TARGET == CG_TARGET_CUDA) ? rmu_cuda_type_name(dtype)
+                                        : rmu_msl_type_name(dtype);
 }
 
 // F6: C99 lacks `half` and `uchar`; emit equivalents that math.h /
@@ -271,10 +302,11 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // heap = [src, NUM(dst_dtype)].
       Term src      = heap_read(loc + 0);
       u32  dst_dt   = term_val(heap_read(loc + 1));
-      const char *type_name = RMU_TARGET_C ? rmu_c_type_name(dst_dt)
-                                           : rmu_msl_type_name(dst_dt);
+      const char *type_name = (RMU_TARGET == CG_TARGET_C)
+                                 ? rmu_c_type_name(dst_dt)
+                                 : rmu_gpu_type_name(dst_dt);
       if (op == UOP_BITCAST) {
-        if (RMU_TARGET_C) {
+        if (RMU_TARGET == CG_TARGET_C) {
           // C99 bitcast via the THVM_BITCAST statement-expression
           // macro emitted in the C-target prologue.  Pattern:
           //   THVM_BITCAST(<dst>, <expr>)
@@ -340,21 +372,33 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // Annotation: render the target, ignore the directive in F0
       // (F1+ pattern-matches for specialised templates).
       // FAST_MATH peels: when wrapping a unary EXP2/LOG2/SQRT, emit
-      // the Apple `fast::*` intrinsic instead of the precise variant.
-      // Apple's `fast::` namespace skips edge-case handling (denorms /
-      // NaNs / OOB inputs) for ~5-15% throughput on softmax / layernorm
-      // / attention where the result is renormalised anyway.  See
+      // a fast-intrinsic spelling instead of the precise variant.
+      // Apple's `fast::` namespace and CUDA's `__exp2f`/`__log2f`
+      // family both skip edge-case handling (denorms / NaNs / OOB
+      // inputs) for ~5-15% throughput on softmax / layernorm /
+      // attention where the result is renormalised anyway.  See
       // mlx/backend/metal/kernels/softmax.h for the reference pattern.
       Term inner = heap_read(loc + 0);
       u32 opt_kind = (u32)term_val(heap_read(loc + 1));
-      if (opt_kind == UOP_OPT_FAST_MATH && !RMU_TARGET_C
+      // GPU-generic: FAST_MATH applies on Metal AND CUDA (CUDA has the
+      // `__exp2f`/`__log2f`/`sqrtf` device intrinsics); only the C
+      // target lacks a fast-math peel.  Intrinsic spelling branches on
+      // the GPU target below.
+      if (opt_kind == UOP_OPT_FAST_MATH && RMU_TARGET != CG_TARGET_C
           && term_tag(inner) == TAG_UOP) {
         u32 inner_op = term_ext(inner);
         if (inner_op == UOP_EXP2 || inner_op == UOP_LOG2
             || inner_op == UOP_SQRT) {
-          const char *fn_name = (inner_op == UOP_EXP2) ? "fast::exp2"
-                              : (inner_op == UOP_LOG2) ? "fast::log2"
-                              :                          "fast::sqrt";
+          const char *fn_name;
+          if (RMU_TARGET == CG_TARGET_CUDA) {
+            fn_name = (inner_op == UOP_EXP2) ? "__exp2f"
+                    : (inner_op == UOP_LOG2) ? "__log2f"
+                    :                          "sqrtf";
+          } else {
+            fn_name = (inner_op == UOP_EXP2) ? "fast::exp2"
+                    : (inner_op == UOP_LOG2) ? "fast::log2"
+                    :                          "fast::sqrt";
+          }
           fprintf(fp, "%s(", fn_name);
           rmu_emit_term(heap_read(term_val(inner) + 0), fp);
           fputs(")", fp);
@@ -363,22 +407,28 @@ static void rmu_emit_term(Term t, FILE *fp) {
       }
       // VEC_LOAD peel: wrap UOP_INDEX_E with a floatN reinterpret_cast
       // at the load site.  Pattern (correctness-preserving slice):
-      //   ((device const floatN*)(buf))[(addr) / N][(addr) % N]
-      // Semantically identical to buf[addr]; lets Metal coalesce N
+      //   ((device const floatN*)(buf))[(addr) / N][(addr) % N]   (MSL)
+      //   ((const floatN*)(buf))[(addr) / N][(addr) % N]          (CUDA)
+      // Semantically identical to buf[addr]; lets the GPU coalesce N
       // consecutive scalar loads into one vector load when the address
       // is contiguous.  See docs/plans/mlx_features_to_port.md (4) +
       // mlx/backend/metal/kernels/softmax.h.  factor = 2/4/8/16.
-      if (opt_kind == UOP_OPT_VEC_LOAD && !RMU_TARGET_C
+      // GPU-generic: both Metal and CUDA have floatN vector types; the
+      // C target keeps the plain scalar load.  Only the address-space
+      // qualifier (`device ` on Metal, none on CUDA) differs.
+      if (opt_kind == UOP_OPT_VEC_LOAD && RMU_TARGET != CG_TARGET_C
           && term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_INDEX_E) {
         u32 width = (u32)term_val(heap_read(loc + 2));
         Term buf  = heap_read(term_val(inner) + 0);
         Term addr = heap_read(term_val(inner) + 1);
         u32 dt    = uop_buffer_dtype(buf);
-        const char *base = rmu_msl_type_name(dt);
+        const char *base = rmu_gpu_type_name(dt);
         if ((dt == DT_FP32 || dt == DT_FP16)
             && (width == 2 || width == 4 || width == 8 || width == 16)) {
-          fprintf(fp, "((device const %s%u*)(%s))[(",
-                  base, width, rmu_buf_name(buf));
+          const char *addr_space =
+              (RMU_TARGET == CG_TARGET_METAL) ? "device const " : "const ";
+          fprintf(fp, "((%s%s%u*)(%s))[(",
+                  addr_space, base, width, rmu_buf_name(buf));
           rmu_emit_term(addr, fp);
           fprintf(fp, ") / %u][(", width);
           rmu_emit_term(addr, fp);
@@ -880,7 +930,7 @@ static void rmu_collect_ranges_with_opts_kernel(
 // a thread/group position (no for-loop emitted).  These paths emit a
 // `uint aN = tt;` or `uint aN = tg;` declaration instead.
 static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
-  if (RMU_TARGET_C) return 0;  // F6: C99 target has no thread positions
+  if (RMU_TARGET == CG_TARGET_C) return 0;  // C99 has no thread positions
   return (opt_kind == UOP_OPT_LOCAL)
       || axis_type == 4  /* legacy KAX_LOCAL  */
       || axis_type == 5  /* legacy KAX_GLOBAL */;
@@ -1090,7 +1140,10 @@ static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
   }
   out->n_globals = n_glb;
   out->total     = (n_glb > 0) ? total : 0;
-  if (!RMU_TARGET_C) {
+  // GPU-generic: LOCAL axes decode from the threadgroup/block-local
+  // index (`tt`).  Both Metal threadgroups and CUDA thread blocks have
+  // this notion; only the C target (serial loops) has no LOCAL decode.
+  if (RMU_TARGET != CG_TARGET_C) {
     // LOCAL axes: right-to-left so the innermost (last in ranges[]) gets
     // stride 1.  `tt = sum_K lK * local_stride[K]` mirrors the GLOBAL
     // flat decode over `tg`.
@@ -1160,8 +1213,12 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
   // per-axis emit below handles -- `#pragma unroll` loop / `tt` bind).
   // So a UPCAST'd matmul still gets one-output-element-per-thread on
   // its M / N-outer axes while the N-inner axis is the unroll loop.
+  // GPU-generic: parallel-grid promotion of plain output axes applies
+  // to Metal AND CUDA -- both have a 1-D dispatch index (`tid`) from
+  // which each thread decodes its axis tuple.  The C target keeps the
+  // serial loop nest.
   u8 promote[MAX_DIM] = {0};
-  if (!RMU_TARGET_C) {
+  if (RMU_TARGET != CG_TARGET_C) {
     for (u32 i = 0; i < n_out; i++) {
       Term r = out_ranges[i];
       if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
@@ -1868,8 +1925,11 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   // nested reduce loops with a single accumulator -- removing the
   // 2 idiv + 2 imod per inner iteration and making every address
   // affine in each component axis (so the TC matmul template can fire).
+  // GPU-generic: the conv-split template (parallel grid + register
+  // blocking) targets Metal AND CUDA -- both run one output element
+  // per thread.  The C target stays on the rolled serial conv loop.
   RmuConvSplit sp = {0};
-  if (!RMU_TARGET_C
+  if (RMU_TARGET != CG_TARGET_C
       && rmu_recover_conv_split(red_src, red_axis, red_extent, addr, &sp)) {
     Term composite = rmu_build_conv_split_composite(&sp);
     RmuConvSubstCtx cx = { red_axis, composite };
@@ -1895,9 +1955,12 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
     // and MADs; the weight (cOut only) is loaded Um times, the conv-input
     // (wOut only) Uw times -- Um+Uw loads sustaining Um*Uw MADs.  This is
     // the classic 2D register-blocked matmul inner.
+    // GPU-generic: register-blocking the UPCAST'd conv output axes
+    // (straight-line accumulators) helps Metal AND CUDA equally; the
+    // C target leaves them as serial loops.
     RmuConvMSubstCtx up = {0};
     u32 up_total = 1;
-    if (!RMU_TARGET_C) {
+    if (RMU_TARGET != CG_TARGET_C) {
       for (u32 i = 0; i < n_out && up.n < RMU_CONV_UPCAST_MAX; i++) {
         Term r = out_ranges[i];
         if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
@@ -2077,7 +2140,10 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   fprintf(fp, "float %s = ", acc_name);
   rmu_emit_reduce_init(red_kind, fp);
   fputs(";\n", fp);
-  if (!RMU_TARGET_C && red_extent <= RMU_REDUCE_UNROLL_MAX) {
+  // GPU-generic: `#pragma unroll(N)` is accepted by both the Metal
+  // and CUDA (nvcc/nvrtc) compilers; the C target omits it (C99 has
+  // no standard unroll pragma).
+  if (RMU_TARGET != CG_TARGET_C && red_extent <= RMU_REDUCE_UNROLL_MAX) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fprintf(fp, "#pragma unroll(%u)\n", red_extent);
   }
@@ -2336,7 +2402,10 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     rmu_emit_unroll_pragma(fp, red_factor_opt);
-  } else if (red_kind_opt == RMU_NO_OPT && !RMU_TARGET_C) {
+  } else if (red_kind_opt == RMU_NO_OPT && RMU_TARGET != CG_TARGET_C) {
+    // GPU-generic: default small-extent reduce unroll for Metal AND
+    // CUDA (`#pragma unroll(N)` compiles on both); C target stays
+    // rolled.
     u32 red_extent = uop_range_extent(red_range);
     if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
@@ -2422,8 +2491,11 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // is a plain KAX_LOOP and gets promoted; the INNER half carries the
   // OPT wrapper and emits via its OPT-specific path (`#pragma unroll`
   // for UPCAST/UNROLL, `tt` bind for LOCAL).
+  // GPU-generic: default-parallelise output axes onto the grid for
+  // Metal AND CUDA (both decode the axis tuple from a 1-D `tid`); the
+  // C target keeps the serial for-loop nest.
   u8 promote_global[RMU_MAX_RANGES] = {0};
-  if (!RMU_TARGET_C) {
+  if (RMU_TARGET != CG_TARGET_C) {
     for (u32 i = 0; i < n_ranges; i++) {
       Term r = ranges[i];
       if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
@@ -2556,10 +2628,14 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       } \
     } \
     if (_reduce_range_term != 0) { \
-      if ((is_simd) && !RMU_TARGET_C) { \
+      /* GPU-generic gate: the SIMD-collective reduce shape applies to */ \
+      /* Metal AND CUDA -- both have a 32-lane warp/simdgroup with a */ \
+      /* collective reduce (Metal simd_sum, CUDA __shfl_down_sync). */ \
+      /* The C target keeps the scalar accumulator.  The emitted body */ \
+      /* inside branches on RMU_TARGET for the per-target intrinsics. */ \
+      if ((is_simd) && RMU_TARGET != CG_TARGET_C) { \
         /* SIMD-collective shape: each lane processes a 1/32 slice of */ \
-        /* extent, then simd_<op> combines the 32 lane partials in a */ \
-        /* single instruction. */ \
+        /* extent, then a collective op combines the 32 lane partials. */ \
         for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
         fprintf(fp, "for (uint a%u = thread_index_in_simdgroup; " \
                 "a%u < %u; a%u += 32u) {\n", \
@@ -2575,7 +2651,8 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
           fprintf(fp, "%s = simd_sum(%s);\n", _acc_name, _acc_name); \
         } \
       } else { \
-        if (!RMU_TARGET_C && _reduce_extent > 0 \
+        /* GPU-generic: small-extent reduce unroll for Metal AND CUDA. */ \
+        if (RMU_TARGET != CG_TARGET_C && _reduce_extent > 0 \
             && _reduce_extent <= RMU_REDUCE_UNROLL_MAX) { \
           for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
           fprintf(fp, "#pragma unroll(%u)\n", _reduce_extent); \
@@ -3006,7 +3083,8 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
 // cpu_jit_dispatch: `void k(void *out_v, const void *const *ins_v,
 //                           unsigned n, const unsigned *in_numels)`.
 // The body emit shares all rmu_emit_* helpers with the MSL path; the
-// RMU_TARGET_C flag flips axis-binding (LOCAL/GLOBAL -> for-loop).
+// RMU_TARGET == CG_TARGET_C path flips axis-binding (LOCAL/GLOBAL ->
+// for-loop).
 // `uint` is typedef'd to `unsigned int` so the body emit's `uint aN`
 // / `for (uint a; ...)` patterns compile as C99.
 //
@@ -3050,7 +3128,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
     fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
-  RMU_TARGET_C = 1;
+  RMU_TARGET = CG_TARGET_C;
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
@@ -3061,7 +3139,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   } else {
     fputs("  /* empty kernel */\n", fp);
   }
-  RMU_TARGET_C = 0;
+  RMU_TARGET = CG_TARGET_METAL;
   fputs("}\n", fp);
 }
 
@@ -3099,7 +3177,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
     fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
-  RMU_TARGET_C = 1;
+  RMU_TARGET = CG_TARGET_C;
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
@@ -3110,6 +3188,6 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   } else {
     fputs("  /* empty kernel */\n", fp);
   }
-  RMU_TARGET_C = 0;
+  RMU_TARGET = CG_TARGET_METAL;
   fputs("}\n", fp);
 }
