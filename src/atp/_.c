@@ -321,15 +321,16 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   if (need <= s->r_cap) return;
   u32 cap = s->r_cap ? s->r_cap : ATP_INIT_RULES;
   while (cap < need) cap *= 2;
-  Term *nl = (Term *)realloc(s->lhs,     cap * sizeof(Term));
-  Term *nr = (Term *)realloc(s->rhs,     cap * sizeof(Term));
-  u32  *nt = (u32  *)realloc(s->r_trace, cap * sizeof(u32));
-  if (nl == NULL || nr == NULL || nt == NULL) {
+  Term *nl = (Term *)realloc(s->lhs,      cap * sizeof(Term));
+  Term *nr = (Term *)realloc(s->rhs,      cap * sizeof(Term));
+  u32  *nt = (u32  *)realloc(s->r_trace,  cap * sizeof(u32));
+  u8   *no = (u8   *)realloc(s->r_orient, cap * sizeof(u8));
+  if (nl == NULL || nr == NULL || nt == NULL || no == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
   }
-  s->lhs = nl; s->rhs = nr; s->r_trace = nt;
+  s->lhs = nl; s->rhs = nr; s->r_trace = nt; s->r_orient = no;
   for (u32 i = s->r_cap; i < cap; i++) s->r_trace[i] = ATP_TRACE_NONE;
   s->r_cap = cap;
 }
@@ -1897,6 +1898,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->lhs);
   free(s->rhs);
   free(s->r_trace);
+  free(s->r_orient);
   free(s->cp_lhs);
   free(s->cp_rhs);
   free(s->cp_trace);
@@ -2248,8 +2250,16 @@ static int atp_vars_contained(Term a, Term b) {
 static Term atp_ordered_try_top(AtpState *s, Term t,
                                 const Term *lhs, const Term *rhs,
                                 u32 n_rules, u8 *fired) {
+  // A rule's orientation is fixed at creation; for the live rule set it
+  // is cached in s->r_orient.  Recomputing it here -- a full KBO compare
+  // per rule, per rewrite position -- was ~70% of the completion wall.
+  // A custom rule array (interreduction's 2-rule set) is not the live
+  // set, so it falls back to the direct compare.
+  const u8 *orient = (lhs == s->lhs && rhs == s->rhs) ? s->r_orient : NULL;
   for (u32 i = 0; i < n_rules; i++) {
-    if (atp_compare(s, lhs[i], rhs[i]) == KBO_GT) {
+    u8 oriented = orient ? orient[i]
+                         : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
+    if (oriented) {
       // oriented rule -- forward only, no order check, no waste.
       RewriteSubst subst = {{0}};
       if (thvm_match(lhs[i], t, &subst)) {
@@ -2635,6 +2645,9 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
+  // Cache the rule's orientation once -- atp_ordered_try_top reads this
+  // instead of recomputing a full KBO compare per rewrite position.
+  s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
   s->n_rules++;
 #ifdef ATP_RULE_INDEX
   // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.
@@ -3433,9 +3446,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       }
 #endif
       for (u32 j = i + 1; j < s->n_rules; j++) {
-        s->lhs[j - 1]     = s->lhs[j];
-        s->rhs[j - 1]     = s->rhs[j];
-        s->r_trace[j - 1] = s->r_trace[j];
+        s->lhs[j - 1]      = s->lhs[j];
+        s->rhs[j - 1]      = s->rhs[j];
+        s->r_trace[j - 1]  = s->r_trace[j];
+        s->r_orient[j - 1] = s->r_orient[j];
       }
       s->n_rules--;
 #ifdef ATP_RULE_INDEX

@@ -2954,6 +2954,7 @@ typedef struct {
   Term *lhs;
   Term *rhs;
   u32  *r_trace;
+  u8   *r_orient;            // r_orient[i]=1 iff rule i is KBO-oriented (lhs>rhs)
   u32   n_rules;
   u32   r_cap;
 
