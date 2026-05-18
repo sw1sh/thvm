@@ -1490,3 +1490,49 @@ by pointer.  That collapses the whole O(term-size) traversal class at
 once.  It is a real architectural change (an ATP-level hash-cons table,
 all term construction routed through it, GC-relocation handling) --
 the next milestone, not a loop tick.
+
+### 14 -- the loop resumes: port Waldmeister algorithms, defer the IC levers
+
+The IC-sharability verdict above was set aside on a steer to keep
+porting *known Waldmeister algorithms* first.  The loop continued:
+
+- *iters 5-7* -- the rule-LHS redex index (`atp_ri_*`) got a perfect
+  discrimination tree: retrieval descends a flat-SYMBOL string (CTR /
+  NUM / STAR-k codes), a repeat rule variable is confirmed by a
+  flatsym-slice `memcmp`, and when neither rule nor subject folded a
+  variable the descent IS the match proof -- `thvm_match` is skipped
+  and the path's star bindings ARE the substitution.
+
+- *iter 8* -- two findings.  (a) The CP-subsumption index `atp_dt` was
+  still the *old* design (descend by `Term`, `kbo_eq` repeat-check,
+  leaf `thvm_match` to confirm).  Ported it to the same perfect
+  flat-symbol tree as `atp_ri`, with a per-record `folded` flag so one
+  oversized CP cannot poison the fast path for its leaf-mates.
+
+  (b) The real gap.  Critical pairs were queued **un-normalised**:
+  `atp_cp_trivially_joinable` reduced both sides under R only to test
+  joinability, then *discarded the normal forms* and queued the raw
+  overlap.  Standard completion (Waldmeister's `Vervollstaendigung`,
+  "completion") adds the *reduced* pair.  A raw overlap of two deep
+  rules runs past thousands of nodes; such a CP overran the retrieval
+  flatten cap (`ATP_DT_FLAT_CAP` = 4096) and fell back to a full
+  O(n_cps) `thvm_match` scan -- the entire `thvm_match` profile spike.
+  Fix: queue the normal forms `atp_cp_trivially_joinable` already
+  computes (variable-renumber AFTER reduction, since rewriting drops
+  variables).  Zero new normalisation work; the forms were being
+  thrown away.
+
+  Measured on `thm`, 25 s wall: `fv-match` 151 508 888 -> 317 536
+  `thvm_match` calls; retrieval 1029.3 -> 2.5 candidates/query; live
+  queue 57 086 -> 13 418 CPs; `queue-subsumed` 1299 -> 72 820 (reduced
+  CPs are byte-identical when alpha-equivalent, so the subsumption
+  filter finally fires).  `test_atp` 8544/8544; the ladder still
+  proves (cpl1/cpl2/subl2), with fewer CPs each.
+
+The bottleneck has now shifted onto normalisation itself --
+`atp_ri_flatten` / `atp_ri_descend` / `thvm_rewrite_step` /
+`thvm_match` together ~60% of the profile.  That is the correct place
+for a completion engine to be spending its time, and the next loop
+tick's target: the subject is re-flattened in full on every rewrite
+step, and a queued CP is normalised once at generation and again at
+selection against a larger R.

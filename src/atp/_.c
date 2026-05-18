@@ -974,24 +974,27 @@ static inline void atp_cp_graph_sync(AtpState *s) { (void)s; }
 // first-appearance index 0,1,2,...  `slot[id]` holds (index+1), 0 =
 // not yet seen.  Reset per CP at insert and per orientation at
 // retrieval.
-typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; } AtpDtVarMap;
+typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; u8 folded; } AtpDtVarMap;
 
 static void atp_dt_varmap_reset(AtpDtVarMap *vm) {
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) vm->slot[i] = 0;
   vm->n = 0;
+  vm->folded = 0;
 }
 
-// First-appearance index of variable id `vid` (assigns the next free
-// index on first sight).  Ids >= REWRITE_MAX_VAR (which thvm_match
-// itself refuses to bind) fold onto the last slot -- still sound:
-// such a CP could never subsume anyway, and folding only makes the
-// tree COARSER, never drops a real candidate.
+// First-appearance index of variable id `vid`.  Ids >= REWRITE_MAX_VAR,
+// or more than ATP_DT_MAXVARS distinct vars, fold onto the last slot --
+// sound (folding only coarsens the tree, never drops a candidate) but
+// it makes the descent inexact: `folded` records that so the leaf
+// keeps the confirming thvm_match.  folded == 0 -> the descent is an
+// exact subsumption proof.
 static u32 atp_dt_var_index(AtpDtVarMap *vm, u32 vid) {
-  if (vid >= REWRITE_MAX_VAR) vid = REWRITE_MAX_VAR - 1u;
+  if (vid >= REWRITE_MAX_VAR) { vid = REWRITE_MAX_VAR - 1u; vm->folded = 1u; }
   if (vm->slot[vid] == 0) {
-    u32 idx = (vm->n < ATP_DT_MAXVARS) ? vm->n : (ATP_DT_MAXVARS - 1u);
+    u32 idx;
+    if (vm->n < ATP_DT_MAXVARS) { idx = vm->n; vm->n++; }
+    else                       { idx = ATP_DT_MAXVARS - 1u; vm->folded = 1u; }
     vm->slot[vid] = idx + 1u;
-    if (vm->n < ATP_DT_MAXVARS) vm->n++;
   }
   return vm->slot[vid] - 1u;
 }
@@ -1029,6 +1032,7 @@ typedef struct {
   u32  seq;
   u32  next;
   u8   live;
+  u8   folded;    // this CP folded a var -> descent inexact for it
 } AtpDtRec;
 
 // seq -> record-index open-addressing hash entry (NIL = empty).
@@ -1211,10 +1215,11 @@ static void atp_fv_index_insert(AtpFvIndex *ix, Term lhs, Term rhs, u32 seq) {
   node = atp_dt_insert_term(ix, node, lhs, &vm);
   node = atp_dt_insert_term(ix, node, rhs, &vm);
   u32 rec = atp_dt_rec_new(ix);
-  ix->recs[rec].lhs  = lhs;
-  ix->recs[rec].rhs  = rhs;
-  ix->recs[rec].seq  = seq;
-  ix->recs[rec].live = 1u;
+  ix->recs[rec].lhs    = lhs;
+  ix->recs[rec].rhs    = rhs;
+  ix->recs[rec].seq    = seq;
+  ix->recs[rec].live   = 1u;
+  ix->recs[rec].folded = vm.folded;
   ix->recs[rec].next = ix->nodes[node].rec_head;
   ix->nodes[node].rec_head = rec;
   atp_dt_seqmap_put(ix, seq, rec);
@@ -1253,19 +1258,25 @@ static void atp_fv_index_rebuild(AtpState *s) {
 
 // --- retrieval -----------------------------------------------------
 
-// Preorder-flatten `t` into `flat[]` from index `*pos`, recording
-// per position the SUBTREE SIZE (preorder-position span) in
-// `subsz[]`.  Returns 1 on success, 0 if the cap is hit (caller
-// falls back to the full scan -- never silently under-retrieves).
-static u8 atp_dt_flatten(Term t, Term *flat, u32 *subsz, u32 cap, u32 *pos) {
+// Preorder-flatten `t` from index `*pos`, recording per position the
+// SUBTREE SIZE (preorder-position span) in `subsz[]` and the flat
+// SYMBOL CODE in `flatsym[]` -- CTR_BASE+lab / NUM / STAR+idx under
+// the variable renumbering `vm`.  The flatsym string drives the
+// perfect-tree descent: a CTR/NUM symbol matches exactly, a repeat
+// pattern variable is confirmed by a flatsym-slice memcmp.  Returns 1
+// on success, 0 if the cap is hit (caller falls back to the full scan
+// -- never silently under-retrieves).
+static u8 atp_dt_flatten(Term t, u32 *subsz, u32 *flatsym,
+                         AtpDtVarMap *vm, u32 cap, u32 *pos) {
   u32 here = *pos;
   if (here >= cap) return 0;
-  flat[here] = t;
+  flatsym[here] = atp_dt_flatsym(t, vm);
   *pos = here + 1u;
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
     for (u32 i = 0; i < n; i++) {
-      if (!atp_dt_flatten(term_ctr_at(t, i), flat, subsz, cap, pos)) return 0;
+      if (!atp_dt_flatten(term_ctr_at(t, i), subsz, flatsym, vm, cap, pos))
+        return 0;
     }
   }
   subsz[here] = *pos - here;          // positions covered by t's subtree
@@ -1276,23 +1287,27 @@ static u8 atp_dt_flatten(Term t, Term *flat, u32 *subsz, u32 cap, u32 *pos) {
 // recursion without a wide signature.  The saturation engine is
 // single-threaded (one AtpState per run), so file-static query
 // scratch is safe and keeps the hot descent lean.  `g_atp_dt_star`
-// is the descent's per-path binding array: star_bind[k] is the
-// subject subterm the k-th pattern variable was first bound to (0 =
-// unbound on the current path).
+// is the descent's per-path binding array: star[k] is the PREORDER
+// POSITION the k-th pattern variable was first bound to (0 = unbound;
+// real positions are >= 1 since flat[0] is the synthetic Cp head).
 static AtpFvIndex *g_atp_dt_ix      = NULL;
-static const Term *g_atp_dt_flat    = NULL;
 static const u32  *g_atp_dt_subsz   = NULL;
+static const u32  *g_atp_dt_flatsym = NULL;  // per-position flat-symbol code
 static u32         g_atp_dt_flatlen = 0;
 static Term        g_atp_dt_qlhs    = 0;
 static Term        g_atp_dt_qrhs    = 0;
-static Term        g_atp_dt_star[ATP_DT_MAXVARS];
+static u32         g_atp_dt_star[ATP_DT_MAXVARS];
+static u8          g_atp_dt_query_folded = 0;  // subject flatten folded a var
 
-// Confirm with the SAME two-sided thvm_match the array scan ran, for
-// the records on leaf `node`, against query (q_lhs, q_rhs) in the
-// orientation the descent encoded.  The perfect-tree descent already
-// proved structure + variable consistency, so this essentially
-// always succeeds -- it is kept as the authoritative byte-identity
-// guard.  Returns 1 on a real subsumer.
+// A leaf reached by the descent: report whether a live CP sits here.
+// When neither THIS CP nor the subject folded a variable (the common
+// case after thvm_normalize_vars), the flatsym descent has already
+// proved both sides exactly -- CTR/NUM symbols matched exactly,
+// variable consistency by flatsym-slice memcmp -- so the live record
+// IS the subsumer and the two-sided thvm_match is skipped.  A fold
+// makes that record's path coarser; it alone re-runs the SAME
+// thvm_match the array scan used as the authoritative guard -- one
+// oversized CP no longer poisons the fast path for its leaf-mates.
 static u8 atp_dt_leaf_match(u32 node) {
   AtpFvIndex *ix = g_atp_dt_ix;
   for (u32 r = ix->nodes[node].rec_head; r != ATP_DT_NIL;
@@ -1300,6 +1315,7 @@ static u8 atp_dt_leaf_match(u32 node) {
     AtpDtRec *rc = &ix->recs[r];
     if (!rc->live) continue;
     ix->q_candidates++;
+    if (!rc->folded && !g_atp_dt_query_folded) return 1;  // exact descent
     RewriteSubst subst = {{0}};
     ix->q_matchcalls += 2u;
     if (thvm_match(rc->lhs, g_atp_dt_qlhs, &subst) &&
@@ -1321,26 +1337,26 @@ static u8 atp_dt_descend(u32 node, u32 pos) {
     return atp_dt_leaf_match(node);
   }
   AtpFvIndex *ix = g_atp_dt_ix;
-  Term t   = g_atp_dt_flat[pos];
-  u32  sz  = g_atp_dt_subsz[pos];        // preorder span of t's subtree
-  u8   tc  = (term_tag(t) == TAG_CTR);
-  u32  csym_exact = tc ? (ATP_DT_CTR_BASE + term_ext(t))
-                       : (term_tag(t) == TAG_NUM ? ATP_DT_NUM : 0xFFFFFFFFu);
+  u32  sz         = g_atp_dt_subsz[pos];     // preorder span of t's subtree
+  u32  csym_exact = g_atp_dt_flatsym[pos];   // CTR_BASE+lab / NUM / STAR+idx
   for (u32 c = ix->nodes[node].child; c != ATP_DT_NIL;
        c = ix->nodes[c].sibling) {
     u32 csym = ix->nodes[c].sym;
     if (csym >= ATP_DT_STAR_BASE && csym < ATP_DT_CTR_BASE) {
       // Stored variable, the (csym-STAR_BASE)-th distinct pattern
-      // var.  One-way match: the FIRST occurrence binds it to t; a
-      // REPEAT occurrence applies only if t equals that binding.
+      // var.  One-way match: the FIRST occurrence binds it to this
+      // subterm's preorder position; a REPEAT applies only if the two
+      // subterms' flatsym slices are byte-identical.
       u32 k = csym - ATP_DT_STAR_BASE;
-      Term bound = g_atp_dt_star[k];
+      u32 bound = g_atp_dt_star[k];
       if (bound == 0) {
-        g_atp_dt_star[k] = t;                 // first occurrence: bind
+        g_atp_dt_star[k] = pos;               // first occurrence: bind
         u8 hit = atp_dt_descend(c, pos + sz);
         g_atp_dt_star[k] = 0;                 // unbind on backtrack
         if (hit) return 1;
-      } else if (kbo_eq(bound, t)) {
+      } else if (g_atp_dt_subsz[bound] == sz &&
+                 memcmp(&g_atp_dt_flatsym[bound], &g_atp_dt_flatsym[pos],
+                        (size_t)sz * sizeof(u32)) == 0) {
         if (atp_dt_descend(c, pos + sz)) return 1;
       }
     } else if (csym == csym_exact) {
@@ -1356,15 +1372,17 @@ static u8 atp_dt_descend(u32 node, u32 pos) {
 // subject `Cp(o_lhs, o_rhs)`.  Returns 1 if a queued CP subsumes the
 // candidate in this orientation.
 static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
-  Term  flat_s[ATP_DT_FLAT_CAP];
-  u32   subsz_s[ATP_DT_FLAT_CAP];
-  Term *flat  = flat_s;
-  u32  *subsz = subsz_s;
-  // Reserve flat[0] for the synthetic `Cp` head: it spans the whole
+  u32 subsz_s[ATP_DT_FLAT_CAP];
+  u32 flatsym_s[ATP_DT_FLAT_CAP];
+  // One variable renumbering spans the whole synthetic Cp(o_lhs,o_rhs)
+  // -- exactly as atp_fv_index_insert renumbers the stored CP.
+  AtpDtVarMap vm;
+  atp_dt_varmap_reset(&vm);
+  // Reserve position 0 for the synthetic `Cp` head: it spans the whole
   // subject, so subsz[0] = total positions.
   u32 pos = 1u;
-  u8  ok  = atp_dt_flatten(o_lhs, flat, subsz, ATP_DT_FLAT_CAP, &pos)
-         && atp_dt_flatten(o_rhs, flat, subsz, ATP_DT_FLAT_CAP, &pos);
+  u8  ok  = atp_dt_flatten(o_lhs, subsz_s, flatsym_s, &vm, ATP_DT_FLAT_CAP, &pos)
+         && atp_dt_flatten(o_rhs, subsz_s, flatsym_s, &vm, ATP_DT_FLAT_CAP, &pos);
   if (!ok) {
     // Cap hit -- fall back to a full scan so a deep CP can never be
     // silently under-retrieved (which would drop a real subsumer).
@@ -1380,14 +1398,15 @@ static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
     }
     return 0;
   }
-  flat[0]  = 0;                           // Cp head: placeholder term
-  subsz[0] = pos;                         // whole subject span
-  g_atp_dt_ix      = ix;
-  g_atp_dt_flat    = flat;
-  g_atp_dt_subsz   = subsz;
-  g_atp_dt_flatlen = pos;
-  g_atp_dt_qlhs    = o_lhs;
-  g_atp_dt_qrhs    = o_rhs;
+  flatsym_s[0] = ATP_DT_CTR_BASE + ATP_CP_LABEL;  // synthetic Cp head
+  subsz_s[0]   = pos;                             // whole subject span
+  g_atp_dt_ix           = ix;
+  g_atp_dt_subsz        = subsz_s;
+  g_atp_dt_flatsym      = flatsym_s;
+  g_atp_dt_flatlen      = pos;
+  g_atp_dt_qlhs         = o_lhs;
+  g_atp_dt_qrhs         = o_rhs;
+  g_atp_dt_query_folded = vm.folded;
   for (u32 i = 0; i < ATP_DT_MAXVARS; i++) g_atp_dt_star[i] = 0;
   // Descend from the root: its single real edge is the `Cp` head,
   // which lines up with flat[0] (also a Cp-head symbol).
@@ -3569,10 +3588,15 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 
 #define ATP_CP_BATCH 1024
 
-// Stage 7.1: trivial-joinability check.  Normalize both sides of a
-// candidate CP under the current rule set R and compare; if they
-// collapse to the same term, the CP is joinable-by-R and adds no
-// new equational consequences -- it can be discarded.
+// Stage 7.1: trivial-joinability check AND critical-pair reduction.
+// Normalize both sides of a candidate CP under the current rule set R
+// and write the reduced pair back through `*lhs`/`*rhs`: standard
+// completion queues the NORMALIZED CP, not the raw overlap.  The
+// un-normalized overlap of two deep rules blows past thousands of
+// nodes -- dragging every later KBO compare / match / index descent
+// and overrunning the retrieval flatten cap into a full O(n) scan.
+// Returns 1 iff the two normal forms collapse to one term: the CP is
+// joinable-by-R, adds no new consequence, and the caller discards it.
 //
 // This is the Waldmeister `Grundzusammenfuehrung` ("ground-merging")
 // criterion at its weakest, equivalent to Twee's "joinable-by-current-
@@ -3582,10 +3606,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 // Cost: two `thvm_rewrite_normalize` calls per CP candidate.  Worth
 // it when the saturation produces many joinable CPs (group axioms
 // generate ~hundreds of trivially-joinable overlaps per round).
-static u8 atp_cp_trivially_joinable(AtpState *s, Term lhs, Term rhs) {
+static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   const u32 NORM_CAP = 64;
-  Term l = atp_rewrite_normalize(s, lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-  Term r = atp_rewrite_normalize(s, rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term l = atp_rewrite_normalize(s, *lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term r = atp_rewrite_normalize(s, *rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  *lhs = l;
+  *rhs = r;
   return kbo_eq(l, r);
 }
 
@@ -3773,16 +3799,24 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   for (u32 i = 0; i < ncps; i++) {
     Term cp_lhs = cps[i].lhs;
     Term cp_rhs = cps[i].rhs;
+    // Reduce the CP w.r.t. R before it lands in the queue: standard
+    // completion adds the NORMALIZED critical pair.  atp_cp_trivially_-
+    // joinable writes the two normal forms back through cp_lhs/cp_rhs
+    // and returns whether they collapsed (joinable -> drop).  A reduced
+    // CP is dramatically smaller than the raw overlap, so the KBO
+    // priority, the subsumption query, the index insert, and every
+    // later retrieval against it all stay cheap.
+    u8 joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
 #ifdef ATP_VAR_NORM
-    // 7c: canonically renumber the CP's variables before it lands in
-    // the queue.  The CP enumerator bakes CP_RENAME_OFFSET into the
-    // stored term, so deep overlaps carry ids past REWRITE_MAX_VAR
-    // where the matcher goes dead.  Renumbering to a dense [0, k) set
-    // keeps every stored var matchable AND makes alpha-equivalent CPs
+    // 7c: canonically renumber the CP's variables -- AFTER reduction,
+    // since rewriting can drop variables, so the dense [0, k) set is
+    // computed on the form actually queued.  The CP enumerator bakes
+    // CP_RENAME_OFFSET into the stored term, carrying ids past
+    // REWRITE_MAX_VAR where the matcher goes dead; renumbering keeps
+    // every stored var matchable AND makes alpha-equivalent CPs
     // byte-identical so the subsumption filters below actually fire.
     thvm_normalize_vars(&cp_lhs, &cp_rhs);
 #endif
-    u8 joinable    = atp_cp_trivially_joinable(s, cp_lhs, cp_rhs);
     // 8e: under -DATP_CP_GRAPH this runs ONE thvm_match_multi
     // traversal of cp_graph; off the flag it is the array scan.
     u8 q_subsmd    = atp_cp_queue_subsumed(s, cp_lhs, cp_rhs);

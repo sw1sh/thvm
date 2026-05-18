@@ -1015,7 +1015,8 @@ int main(void) {
     // connected (with sentinel exclusion).
     Term l = mk_f(mk_a(), mk_e());
     Term r = mk_a();
-    u8 join = atp_cp_trivially_joinable(s, l, r);
+    Term jl = l, jr = r;          // joinability reduces its args in place
+    u8 join = atp_cp_trivially_joinable(s, &jl, &jr);
     u8 conn = atp_cp_source_disjoint_connected(s, l, r,
                                                ATP_RULE_NONE,
                                                ATP_RULE_NONE);
@@ -1055,8 +1056,9 @@ int main(void) {
 
     Term lhs = mk_f(mk_a(), mk_e());
     Term rhs = mk_a();
+    Term jl = lhs, jr = rhs;      // joinability reduces its args in place
     CHECK_EQ((int)atp_cp_rule_subsumed(s, lhs, rhs),       1);
-    CHECK_EQ((int)atp_cp_trivially_joinable(s, lhs, rhs), 1);
+    CHECK_EQ((int)atp_cp_trivially_joinable(s, &jl, &jr), 1);
     thvm_atp_free(s);
   }
 
