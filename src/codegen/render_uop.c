@@ -417,12 +417,21 @@ static void rmu_emit_term(Term t, FILE *fp) {
 // distinctly from "OPT(_, UNROLL, _)" since UOP_OPT_UNROLL == 0
 // would otherwise collide with the zero-init default.
 #define RMU_NO_OPT 0xFFu
-static void rmu_collect_ranges_rec(Term t, Term *ranges,
-                                   u32 *opt_kinds, u32 *opt_factors,
-                                   u32 *n_out,
-                                   u32 inherit_kind, u32 inherit_factor) {
+
+// Per-render cap on collected ranges.  Larger than MAX_DIM (tensor
+// rank) because a kernel's iter scope can combine many axes: output
+// axes + auxiliary LOOP axes inside reduce bodies + reduce-axes
+// themselves.  Bench-train backward kernels touching 5-layer
+// conv+BN+maxpool chains can reach ~12 distinct axes.  32 matches
+// RMU_BUF_MAX (the Metal buffer-attribute cap) for symmetry.
+#define RMU_MAX_RANGES 32
+
+static void rmu_collect_ranges_rec_cap(Term t, Term *ranges,
+                                       u32 *opt_kinds, u32 *opt_factors,
+                                       u32 *n_out, u32 cap,
+                                       u32 inherit_kind, u32 inherit_factor) {
   if (term_tag(t) != TAG_UOP) return;
-  if (*n_out >= MAX_DIM) return;
+  if (*n_out >= cap) return;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_RANGE) {
@@ -442,23 +451,23 @@ static void rmu_collect_ranges_rec(Term t, Term *ranges,
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
-      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, RMU_NO_OPT, 0);
-      rmu_collect_ranges_rec(heap_read(loc + 1), ranges, opt_kinds,
-                             opt_factors, n_out, RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 1), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:
-      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
       return;
     case UOP_IWHERE:
-      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, RMU_NO_OPT, 0);
-      rmu_collect_ranges_rec(heap_read(loc + 1), ranges, opt_kinds,
-                             opt_factors, n_out, RMU_NO_OPT, 0);
-      rmu_collect_ranges_rec(heap_read(loc + 2), ranges, opt_kinds,
-                             opt_factors, n_out, RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 1), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 2), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
       return;
     case UOP_OPT: {
       // OPT(target, kind, factor): inherit annotation into the
@@ -466,17 +475,31 @@ static void rmu_collect_ranges_rec(Term t, Term *ranges,
       // outermost kind (last-wins for now).
       u32 kind   = term_val(heap_read(loc + 1));
       u32 factor = term_val(heap_read(loc + 2));
-      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, kind, factor);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, kind, factor);
       return;
     }
     case UOP_CAST: case UOP_BITCAST:
-      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, RMU_NO_OPT, 0);
+      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
+                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
       return;
     default:
       return;
   }
+}
+
+// Default-cap wrapper used by callers that don't need more than MAX_DIM
+// ranges (the most common case -- e.g. per-reduce body-scans for
+// required_pos and reduce-axis lookup, where the iter scope is bounded
+// by tensor rank).  rmu_emit_store uses the _cap variant directly with
+// RMU_MAX_RANGES so kernel-iter scopes spanning many axes don't drop
+// late LOOP axes.
+static void rmu_collect_ranges_rec(Term t, Term *ranges,
+                                   u32 *opt_kinds, u32 *opt_factors,
+                                   u32 *n_out,
+                                   u32 inherit_kind, u32 inherit_factor) {
+  rmu_collect_ranges_rec_cap(t, ranges, opt_kinds, opt_factors, n_out,
+                             MAX_DIM, inherit_kind, inherit_factor);
 }
 
 // Walks the term subgraph rooted at `t` (descending through every
@@ -725,12 +748,13 @@ static int rmu_axis_is_bound(u32 const *bound, u32 n_bound, u32 aid) {
   return 0;
 }
 
-static void rmu_collect_ranges_rec_through_reduce(
+static void rmu_collect_ranges_rec_through_reduce_cap(
     Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors,
-    u32 *n_out, u32 inherit_kind, u32 inherit_factor,
+    u32 *n_out, u32 cap,
+    u32 inherit_kind, u32 inherit_factor,
     u32 *bound_axes, u32 *n_bound) {
   if (term_tag(t) != TAG_UOP) return;
-  if (*n_out >= MAX_DIM) return;
+  if (*n_out >= cap) return;
   u32 op  = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_REDUCE) {
@@ -747,8 +771,8 @@ static void rmu_collect_ranges_rec_through_reduce(
       (*n_bound)++;
       pushed = 1;
     }
-    rmu_collect_ranges_rec_through_reduce(
-        heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+    rmu_collect_ranges_rec_through_reduce_cap(
+        heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
         RMU_NO_OPT, 0, bound_axes, n_bound);
     if (pushed) (*n_bound)--;
     return;
@@ -771,41 +795,41 @@ static void rmu_collect_ranges_rec_through_reduce(
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
           RMU_NO_OPT, 0, bound_axes, n_bound);
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out, cap,
           RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
           RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     case UOP_IWHERE:
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
           RMU_NO_OPT, 0, bound_axes, n_bound);
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out, cap,
           RMU_NO_OPT, 0, bound_axes, n_bound);
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 2), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 2), ranges, opt_kinds, opt_factors, n_out, cap,
           RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     case UOP_OPT: {
       u32 kind   = term_val(heap_read(loc + 1));
       u32 factor = term_val(heap_read(loc + 2));
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
           kind, factor, bound_axes, n_bound);
       return;
     }
     case UOP_CAST: case UOP_BITCAST:
-      rmu_collect_ranges_rec_through_reduce(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
+      rmu_collect_ranges_rec_through_reduce_cap(
+          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
           RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     default:
@@ -813,22 +837,43 @@ static void rmu_collect_ranges_rec_through_reduce(
   }
 }
 
+// Default-cap wrappers (MAX_DIM) for callers that don't need more.
 static void rmu_collect_ranges_through_reduce(
     Term t, Term *ranges, u32 *n_out) {
   u32 dummy_kinds[MAX_DIM]   = {0};
   u32 dummy_factors[MAX_DIM] = {0};
   u32 bound[RMU_BOUND_AXIS_CAP];
   u32 n_bound = 0;
-  rmu_collect_ranges_rec_through_reduce(
-      t, ranges, dummy_kinds, dummy_factors, n_out, 0, 0, bound, &n_bound);
+  rmu_collect_ranges_rec_through_reduce_cap(
+      t, ranges, dummy_kinds, dummy_factors, n_out, MAX_DIM,
+      0, 0, bound, &n_bound);
 }
 
 static void rmu_collect_ranges_with_opts_through_reduce(
     Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors, u32 *n_out) {
   u32 bound[RMU_BOUND_AXIS_CAP];
   u32 n_bound = 0;
-  rmu_collect_ranges_rec_through_reduce(
-      t, ranges, opt_kinds, opt_factors, n_out, RMU_NO_OPT, 0, bound, &n_bound);
+  rmu_collect_ranges_rec_through_reduce_cap(
+      t, ranges, opt_kinds, opt_factors, n_out, MAX_DIM,
+      RMU_NO_OPT, 0, bound, &n_bound);
+}
+
+// RMU_MAX_RANGES-cap variants used by rmu_emit_store so kernel iter
+// scopes spanning >MAX_DIM axes (output + aux LOOP + reduce) don't
+// drop late LOOP axes to the cap.
+static void rmu_collect_ranges_with_opts_through_reduce_kernel(
+    Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors, u32 *n_out) {
+  u32 bound[RMU_BOUND_AXIS_CAP];
+  u32 n_bound = 0;
+  rmu_collect_ranges_rec_through_reduce_cap(
+      t, ranges, opt_kinds, opt_factors, n_out, RMU_MAX_RANGES,
+      RMU_NO_OPT, 0, bound, &n_bound);
+}
+
+static void rmu_collect_ranges_with_opts_kernel(
+    Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors, u32 *n_out) {
+  rmu_collect_ranges_rec_cap(t, ranges, opt_kinds, opt_factors, n_out,
+                             RMU_MAX_RANGES, RMU_NO_OPT, 0);
 }
 
 // Returns 1 if `kind`/`axis_type` indicates the axis binds directly to
@@ -2334,27 +2379,28 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   Term addr  = heap_read(loc + 1);
   Term value = heap_read(loc + 2);
 
-  Term ranges[MAX_DIM];
-  u32  opt_kinds[MAX_DIM]   = {0};
-  u32  opt_factors[MAX_DIM] = {0};
+  Term ranges[RMU_MAX_RANGES];
+  u32  opt_kinds[RMU_MAX_RANGES]   = {0};
+  u32  opt_factors[RMU_MAX_RANGES] = {0};
   u32  n_ranges = 0;
-  rmu_collect_ranges_with_opts(addr,  ranges, opt_kinds, opt_factors, &n_ranges);
+  rmu_collect_ranges_with_opts_kernel(
+      addr,  ranges, opt_kinds, opt_factors, &n_ranges);
   // Descend into UOP_REDUCE bodies on the value side so auxiliary LOOP
   // axes minted inside a reduce body (e.g. a swizzler-decomposed pool
   // window axis whose enclosing UOP_REDUCE chain was elsewhere lost)
   // still get a for-loop in the emitted kernel.  Reduce-axes that bind
-  // their own loop via RMU_EMIT_ONE_REDUCE get filtered out below so
-  // they don't double-emit.
-  rmu_collect_ranges_with_opts_through_reduce(
+  // their own loop via RMU_EMIT_ONE_REDUCE get filtered out by the
+  // bound-axis tracker so they don't double-emit.
+  rmu_collect_ranges_with_opts_through_reduce_kernel(
       value, ranges, opt_kinds, opt_factors, &n_ranges);
 
   // Collect output-axis ids: ranges in the addr expression are
   // output axes (they index the store position).  Ranges that
   // appear ONLY in the value expression are reduce or auxiliary.
-  Term addr_ranges[MAX_DIM];
+  Term addr_ranges[RMU_MAX_RANGES];
   u32  addr_n = 0;
   rmu_collect_ranges(addr, addr_ranges, &addr_n);
-  u32 addr_axes[MAX_DIM];
+  u32 addr_axes[RMU_MAX_RANGES];
   for (u32 i = 0; i < addr_n; i++) {
     addr_axes[i] = (term_tag(addr_ranges[i]) == TAG_UOP
                     && term_ext(addr_ranges[i]) == UOP_RANGE)
@@ -2376,7 +2422,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // is a plain KAX_LOOP and gets promoted; the INNER half carries the
   // OPT wrapper and emits via its OPT-specific path (`#pragma unroll`
   // for UPCAST/UNROLL, `tt` bind for LOCAL).
-  u8 promote_global[MAX_DIM] = {0};
+  u8 promote_global[RMU_MAX_RANGES] = {0};
   if (!RMU_TARGET_C) {
     for (u32 i = 0; i < n_ranges; i++) {
       Term r = ranges[i];
@@ -2413,12 +2459,12 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // Anything in between (e.g. softmax max_r depends only on the row
   // axis) emits BETWEEN output loops, avoiding redundant recompute
   // per inner-axis iteration.
-  Term reduces[MAX_DIM];
-  u8   reduce_simd_flag[MAX_DIM] = {0};
+  Term reduces[RMU_MAX_RANGES];
+  u8   reduce_simd_flag[RMU_MAX_RANGES] = {0};
   u32  n_reduces = 0;
   rmu_collect_reduces_with_simd(value, 0, reduces, reduce_simd_flag,
                                 &n_reduces);
-  u32 required_pos[MAX_DIM] = {0};
+  u32 required_pos[RMU_MAX_RANGES] = {0};
   for (u32 i = 0; i < n_reduces; i++) {
     Term r_src = heap_read(term_val(reduces[i]) + 0);
     Term r_ranges[MAX_DIM];
@@ -2566,7 +2612,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // Track which output ranges opened a `{` (thread-bound axes
   // don't), so we close the right number at the end.
   u32 body_depth = depth;
-  int needs_close[MAX_DIM] = {0};
+  int needs_close[RMU_MAX_RANGES] = {0};
   for (u32 i = 0; i < n_ranges; i++) {
     Term r = ranges[i];
     u32 axis_id   = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
