@@ -968,10 +968,15 @@ static inline void atp_cp_graph_sync(AtpState *s) { (void)s; }
 #define ATP_DT_CTR_BASE   (ATP_DT_STAR_BASE + ATP_DT_MAXVARS)
 #define ATP_DT_NIL        0xFFFFFFFFu
 
-// Preorder-flattened subject cap.  A CP on the Wolfram axiom stays
-// well under this; an over-deep term aborts retrieval to the full
-// scan (atp_dt_query_orient) -- never a silent under-retrieval.
-#define ATP_DT_FLAT_CAP   4096u
+// Preorder-flattened subject cap.  Sized to hold a deep-saturation
+// critical pair: at thm step ~230 a ~1% tail of queued CPs flattens
+// past the old 4096, and each such query spilled to the O(n_recs)
+// full scan -- ~500M thvm_match calls, the late-game wall.  32768
+// keeps that tail on the perfect-tree descent; the descent's STAR
+// recursion is then bounded by half the cap (atp_dt_descend loops the
+// CTR spine), well within the stack.  A still-bigger term aborts to
+// the full scan (correct, never a silent under-retrieval).
+#define ATP_DT_FLAT_CAP   32768u
 
 // Per-term variable renumbering: maps a raw TAG_FVR id to its
 // first-appearance index 0,1,2,...  `slot[id]` holds (index+1), 0 =
@@ -1333,50 +1338,66 @@ static u8 atp_dt_leaf_match(u32 node) {
 // with tree node `node`, threading the per-path variable bindings in
 // g_atp_dt_star.  Returns 1 as soon as a reachable leaf yields a
 // genuine subsumer.
+//
+// A CTR/NUM subject head matches at most ONE child, so that branch is
+// a tail continuation followed by LOOPING (advance node/pos in place)
+// rather than recursing -- only the STAR branches recurse.  This both
+// drops call overhead on the CTR spine and bounds the recursion depth
+// to the path's STAR-edge count, so a deep (ATP_DT_FLAT_CAP-long)
+// subject cannot overflow the stack.
 static u8 atp_dt_descend(u32 node, u32 pos) {
-  g_atp_dt_ix->q_nodevisits++;
-  if (pos == g_atp_dt_flatlen) {
-    // Whole subject consumed -- this node's records are leaves.
-    return atp_dt_leaf_match(node);
-  }
   AtpFvIndex *ix = g_atp_dt_ix;
-  u32  sz         = g_atp_dt_subsz[pos];     // preorder span of t's subtree
-  u32  csym_exact = g_atp_dt_flatsym[pos];   // CTR_BASE+lab / NUM / STAR+idx
-  for (u32 c = ix->nodes[node].child; c != ATP_DT_NIL;
-       c = ix->nodes[c].sibling) {
-    u32 csym = ix->nodes[c].sym;
-    if (csym >= ATP_DT_STAR_BASE && csym < ATP_DT_CTR_BASE) {
-      // Stored variable, the (csym-STAR_BASE)-th distinct pattern
-      // var.  One-way match: the FIRST occurrence binds it to this
-      // subterm's preorder position; a REPEAT applies only if the two
-      // subterms' flatsym slices are byte-identical.
-      u32 k = csym - ATP_DT_STAR_BASE;
-      u32 bound = g_atp_dt_star[k];
-      if (bound == 0) {
-        g_atp_dt_star[k] = pos;               // first occurrence: bind
-        u8 hit = atp_dt_descend(c, pos + sz);
-        g_atp_dt_star[k] = 0;                 // unbind on backtrack
-        if (hit) return 1;
-      } else if (g_atp_dt_subsz[bound] == sz &&
-                 memcmp(&g_atp_dt_flatsym[bound], &g_atp_dt_flatsym[pos],
-                        (size_t)sz * sizeof(u32)) == 0) {
-        if (atp_dt_descend(c, pos + sz)) return 1;
-      }
-    } else if (csym == csym_exact) {
-      // Stored CTR/NUM equal to t's own symbol -- consume t's head;
-      // t's children are the next preorder positions.
-      if (atp_dt_descend(c, pos + 1u)) return 1;
+  for (;;) {
+    ix->q_nodevisits++;
+    if (pos == g_atp_dt_flatlen) {
+      // Whole subject consumed -- this node's records are leaves.
+      return atp_dt_leaf_match(node);
     }
+    u32  sz         = g_atp_dt_subsz[pos];   // preorder span of t's subtree
+    u32  csym_exact = g_atp_dt_flatsym[pos]; // CTR_BASE+lab / NUM / STAR+idx
+    u32  ctr_next   = ATP_DT_NIL;            // the lone CTR/NUM-match child
+    for (u32 c = ix->nodes[node].child; c != ATP_DT_NIL;
+         c = ix->nodes[c].sibling) {
+      u32 csym = ix->nodes[c].sym;
+      if (csym >= ATP_DT_STAR_BASE && csym < ATP_DT_CTR_BASE) {
+        // Stored variable, the (csym-STAR_BASE)-th distinct pattern
+        // var.  One-way match: the FIRST occurrence binds it to this
+        // subterm's preorder position; a REPEAT applies only if the two
+        // subterms' flatsym slices are byte-identical.
+        u32 k = csym - ATP_DT_STAR_BASE;
+        u32 bound = g_atp_dt_star[k];
+        if (bound == 0) {
+          g_atp_dt_star[k] = pos;             // first occurrence: bind
+          u8 hit = atp_dt_descend(c, pos + sz);
+          g_atp_dt_star[k] = 0;               // unbind on backtrack
+          if (hit) return 1;
+        } else if (g_atp_dt_subsz[bound] == sz &&
+                   memcmp(&g_atp_dt_flatsym[bound], &g_atp_dt_flatsym[pos],
+                          (size_t)sz * sizeof(u32)) == 0) {
+          if (atp_dt_descend(c, pos + sz)) return 1;
+        }
+      } else if (csym == csym_exact) {
+        // Stored CTR/NUM equal to t's own symbol -- consume t's head;
+        // t's children are the next preorder positions.
+        ctr_next = c;
+      }
+    }
+    if (ctr_next == ATP_DT_NIL) return 0;     // no CTR continuation: done
+    node = ctr_next;                          // tail-continue without a call
+    pos  = pos + 1u;
   }
-  return 0;
 }
 
 // Retrieve over one orientation: descend the tree for the synthetic
 // subject `Cp(o_lhs, o_rhs)`.  Returns 1 if a queued CP subsumes the
 // candidate in this orientation.
 static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
-  u32 subsz_s[ATP_DT_FLAT_CAP];
-  u32 flatsym_s[ATP_DT_FLAT_CAP];
+  // Static (not stack): ATP_DT_FLAT_CAP is large enough that a 512 KB
+  // pair of arrays would overflow the frame.  The saturation engine is
+  // single-threaded and atp_dt_query_orient does not recurse, so one
+  // shared scratch pair is safe -- each call refills it before use.
+  static u32 subsz_s[ATP_DT_FLAT_CAP];
+  static u32 flatsym_s[ATP_DT_FLAT_CAP];
   // One variable renumbering spans the whole synthetic Cp(o_lhs,o_rhs)
   // -- exactly as atp_fv_index_insert renumbers the stored CP.
   AtpDtVarMap vm;

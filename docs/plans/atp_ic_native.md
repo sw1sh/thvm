@@ -1745,3 +1745,32 @@ tighter: `thm`@200 15.44 s -> 14.80 s, ~4.5% faster.  Transparent --
 (At step ~230 the subsumption index degrades -- `fv-retrieval` climbs
 to ~790 candidates/query as the queue passes 30k CPs and queries spill
 to the full-scan fallback.  That is the next tick's target.)
+
+### 21 -- iter 15: keep the subsumption index off the full-scan fallback
+
+The late-game profile (thm step ~230) is 58% `kbo_eq` + `thvm_match`,
+and the call tree pins it on ONE frame: `atp_dt_query_orient`'s
+cap-overflow fallback.  When a subsumption query's `Cp(lhs,rhs)`
+flattens past `ATP_DT_FLAT_CAP` (4096) the descent aborts to a full
+O(n_recs) scan -- and at step 230 n_recs is ~33k records, each
+costing a two-sided `thvm_match`.  A ~1% tail of queries overflows;
+those alone are 525M `thvm_match` calls.
+
+The cap was raised to 32768 -- the same fix iter 10 applied to the
+rule index.  But the subsumption descent recurses one frame per
+preorder position, so a 32768-long subject would overflow the stack
+(it did, at 65536).  So `atp_dt_descend` also took iter 13's hybrid-
+loop transformation: the lone CTR/NUM-match child is a tail
+continuation followed by LOOPING in place; only the STAR branches
+recurse.  Recursion depth drops to the path's STAR-edge count -- well
+within the stack -- and the CTR spine loses its call overhead.  The
+two scratch arrays became `static` (a 256 KB pair would overflow the
+frame; the engine is single-threaded and the function does not
+recurse into itself).
+
+Measured on `thm` to step 233: `fv-match` 525M -> 0 `thvm_match`
+calls; `fv-retrieval` 781 -> 0.9 candidates/query; the full scan is
+gone.  Step 233 is reached in 72.8 s, down from 102.4 s -- the late
+game runs ~1.4x faster.  `thm`@120 bit-identical (`steps=120 rules=71
+cps=7951`); `thm`@200 unchanged (`steps=200 rules=124 cps=20725`);
+`test_atp` 8544/8544; the ladder proves.
