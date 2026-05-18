@@ -2875,6 +2875,12 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
                                   FILE *fp);
 fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
                                     FILE *fp);
+// CUDA counterpart: emits an `extern "C" __global__` kernel with the
+// thread-builtin prologue (blockIdx/blockDim/threadIdx) in place of
+// Metal `[[ ... ]]` attributes.  The CUDA backend runtime (Stage 2)
+// passes the post-lift store root, same as the MSL/C99 entries.
+fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
+                                       FILE *fp);
 
 // === Per-USE movement-chain resolver ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,

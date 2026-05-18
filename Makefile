@@ -60,6 +60,7 @@ TESTS := \
   $(BIN)/test_uop_recognise_conv \
   $(BIN)/test_render_uop \
   $(BIN)/test_render_uop_metal \
+  $(BIN)/test_render_uop_cuda \
   $(BIN)/test_kernel_lift \
   $(BIN)/test_kernel_lift_coverage \
   $(BIN)/test_compute_root_dual_write \

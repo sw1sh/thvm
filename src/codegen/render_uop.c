@@ -1590,6 +1590,68 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     return 0;
   }
 
+  // CUDA WMMA path.  The simdgroup_matrix template below is Metal-
+  // only; CUDA gets its own emit.  WMMA's natural fp32-accumulate
+  // fragment is 16x16x16, so M/N/K must all be multiples of 16 for the
+  // tensor-core template -- otherwise fall back to the generic scalar
+  // accumulator (return 0), exactly as Metal falls back from
+  // simdgroup_matrix when K%8!=0.  One warp per 16x16 output tile.
+  if (RMU_TARGET == CG_TARGET_CUDA) {
+    if ((m_extent % 16) != 0 || (n_extent % 16) != 0
+        || (k_extent % 16) != 0) {
+      // Non-conforming shape: scalar-accumulator fallback.
+      return 0;
+    }
+    u32 n_tiles_n_w = n_extent / 16;
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("/* TC WMMA matmul (nvcuda::wmma 16x16x16) */\n", fp);
+    // Warp id from the flat thread index: one warp owns one 16x16
+    // output tile.  warp = tid / 32; tiles linearise row-major over
+    // (m_tile, n_tile).
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("uint _warp = tid / 32u;\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "uint a%u = (_warp / %uu) * 16u;\n",
+            m_axis_id, n_tiles_n_w);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "uint a%u = (_warp %% %uu) * 16u;\n",
+            n_axis_id_v, n_tiles_n_w);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("wmma::fragment<wmma::matrix_a, 16, 16, 16, half, "
+          "wmma::row_major> _a_frag;\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("wmma::fragment<wmma::matrix_b, 16, 16, 16, half, "
+          "wmma::row_major> _b_frag;\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("wmma::fragment<wmma::accumulator, 16, 16, 16, float> "
+          "_c_frag;\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("wmma::fill_fragment(_c_frag, 0.0f);\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 16) {\n",
+            red_axis, red_axis, k_extent, red_axis);
+    // A fragment loads from &A[addr_a] with leading dimension K; B
+    // from &B[addr_b] with leading dimension N -- the same base+ldm
+    // shape simdgroup_load uses for the Metal path.
+    for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+    fprintf(fp, "wmma::load_matrix_sync(_a_frag, &%s[", rmu_buf_name(buf_a));
+    rmu_emit_term(addr_a, fp);
+    fprintf(fp, "], %u);\n", k_extent);
+    for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+    fprintf(fp, "wmma::load_matrix_sync(_b_frag, &%s[", rmu_buf_name(buf_b));
+    rmu_emit_term(addr_b, fp);
+    fprintf(fp, "], %u);\n", n_extent);
+    for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+    fputs("wmma::mma_sync(_c_frag, _a_frag, _b_frag, _c_frag);\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "wmma::store_matrix_sync(&%s[", rmu_buf_name(buf_c));
+    rmu_emit_term(addr_c, fp);
+    fprintf(fp, "], _c_frag, %u, wmma::mem_row_major);\n", n_extent);
+    return 1;
+  }
+
   // Parallel-TC selector.  If the M and N axes carry GLOBAL axis_type
   // (Phase E annotation), the caller's dispatch shape binds each
   // threadgroup to a unique 8x8 output tile, so the multi-SG write
@@ -2636,19 +2698,42 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       if ((is_simd) && RMU_TARGET != CG_TARGET_C) { \
         /* SIMD-collective shape: each lane processes a 1/32 slice of */ \
         /* extent, then a collective op combines the 32 lane partials. */ \
+        /* CUDA: lane index = threadIdx.x % 32; the cross-lane combine */ \
+        /* is a 5-step __shfl_down_sync butterfly.  Metal: lane index */ \
+        /* = thread_index_in_simdgroup; the combine is one simd_<op>. */ \
+        const char *_lane = (RMU_TARGET == CG_TARGET_CUDA) \
+                              ? "(threadIdx.x % 32u)" \
+                              : "thread_index_in_simdgroup"; \
         for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-        fprintf(fp, "for (uint a%u = thread_index_in_simdgroup; " \
+        fprintf(fp, "for (uint a%u = %s; " \
                 "a%u < %u; a%u += 32u) {\n", \
-                _r_axis, _r_axis, _reduce_extent, _r_axis); \
+                _r_axis, _lane, _r_axis, _reduce_extent, _r_axis); \
         for (u32 _d = 0; _d < (emit_depth) + 1; _d++) fputs("  ", fp); \
         rmu_emit_reduce_combine(_acc_name, _r_kind, _r_src, fp); \
         for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
         fputs("}\n", fp); \
-        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-        if (_r_kind == REDUCE_MAX) { \
-          fprintf(fp, "%s = simd_max(%s);\n", _acc_name, _acc_name); \
+        if (RMU_TARGET == CG_TARGET_CUDA) { \
+          /* Warp butterfly: 5 __shfl_down_sync steps fold 32 lanes. */ \
+          const char *_op = (_r_kind == REDUCE_MAX) ? "fmaxf" : "+"; \
+          for (u32 _s = 16; _s >= 1; _s >>= 1) { \
+            for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
+            if (_r_kind == REDUCE_MAX) { \
+              fprintf(fp, "%s = %s(%s, " \
+                      "__shfl_down_sync(0xffffffffu, %s, %uu));\n", \
+                      _acc_name, _op, _acc_name, _acc_name, _s); \
+            } else { \
+              fprintf(fp, "%s = %s %s " \
+                      "__shfl_down_sync(0xffffffffu, %s, %uu);\n", \
+                      _acc_name, _acc_name, _op, _acc_name, _s); \
+            } \
+          } \
         } else { \
-          fprintf(fp, "%s = simd_sum(%s);\n", _acc_name, _acc_name); \
+          for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
+          if (_r_kind == REDUCE_MAX) { \
+            fprintf(fp, "%s = simd_max(%s);\n", _acc_name, _acc_name); \
+          } else { \
+            fprintf(fp, "%s = simd_sum(%s);\n", _acc_name, _acc_name); \
+          } \
         } \
       } else { \
         /* GPU-generic: small-extent reduce unroll for Metal AND CUDA. */ \
@@ -3178,6 +3263,119 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
   RMU_TARGET = CG_TARGET_C;
+  if (root != 0 && term_tag(root) == TAG_UOP) {
+    u32 op = term_ext(root);
+    if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
+    else if (op == UOP_AFTER) rmu_emit_after(root, fp, 1);
+    else {
+      fputs("  /* unsupported root op */\n", fp);
+    }
+  } else {
+    fputs("  /* empty kernel */\n", fp);
+  }
+  RMU_TARGET = CG_TARGET_METAL;
+  fputs("}\n", fp);
+}
+
+// Walk the DAG for a UOP_OPT(_, TC, _) annotation -- the tell that the
+// matmul tensor-core template will fire.  The CUDA entry point uses
+// this to decide whether to emit the WMMA headers (#include <mma.h> +
+// <cuda_fp16.h>); a non-matmul kernel skips them.
+static int rmu_dag_has_tc(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  switch (op) {
+    case UOP_OPT:
+      if ((u32)term_val(heap_read(loc + 1)) == UOP_OPT_TC) return 1;
+      return rmu_dag_has_tc(heap_read(loc + 0));
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E: case UOP_AFTER:
+      return rmu_dag_has_tc(heap_read(loc + 0))
+          || rmu_dag_has_tc(heap_read(loc + 1));
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_REDUCE:
+      return rmu_dag_has_tc(heap_read(loc + 0));
+    case UOP_IWHERE:
+    case UOP_STORE:
+      return rmu_dag_has_tc(heap_read(loc + 0))
+          || rmu_dag_has_tc(heap_read(loc + 1))
+          || rmu_dag_has_tc(heap_read(loc + 2));
+    default:
+      return 0;
+  }
+}
+
+// Structural-mode CUDA renderer.  Counterpart of
+// cg_render_uop_kernel_root for the CUDA backend.  Discovers buffer
+// slots from `root` via UOP_BUFFER.instance, exactly like the MSL and
+// C99 entry points; emits an `extern "C" __global__` kernel.
+//
+// Differences from the MSL entry (cg_render_uop_kernel_root):
+//   - No `#include <metal_stdlib>` / `using namespace metal`; instead
+//     the WMMA headers (gated on a TC annotation in the DAG).
+//   - Signature: `extern "C" __global__ void k(T *out, const T *in0,
+//     ...)` -- plain pointers, no `[[ buffer(N) ]]` attributes.
+//   - Thread builtins are computed in a prologue from blockIdx /
+//     blockDim / threadIdx rather than bound via `[[ ... ]]`:
+//       tid = blockIdx.x*blockDim.x + threadIdx.x   (grid index)
+//       tg  = blockIdx.x                            (block index)
+//       tt  = threadIdx.x                           (block-local idx)
+//       sgi = threadIdx.x / 32                      (warp in block)
+//     thread_index_in_simdgroup has no separate `uint` here -- the
+//     SIMD-reduce lowering spells the lane index `threadIdx.x % 32`
+//     inline (see RMU_EMIT_ONE_REDUCE).
+fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
+                                       FILE *fp) {
+  if (fp == NULL) fp = stderr;
+  if (kernel_name == NULL) kernel_name = "uop_kernel";
+  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
+  u32 n_inputs = 0;
+  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
+  Term out_buf = slot_bufs[0];
+  rmu_buf_names_reset();
+  if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
+  RMU_TARGET = CG_TARGET_CUDA;
+  // WMMA headers: only emitted when the DAG carries a TC annotation
+  // (the matmul tensor-core path).  nvrtc ships both headers.
+  if (rmu_dag_has_tc(root)) {
+    fputs("#include <mma.h>\n", fp);
+    fputs("#include <cuda_fp16.h>\n", fp);
+    fputs("using namespace nvcuda;\n", fp);
+  }
+  fputs("typedef unsigned int uint;\n\n", fp);
+  fprintf(fp, "extern \"C\" __global__ void %s(\n", kernel_name);
+  u32 out_dtype = uop_buffer_dtype(out_buf);
+  fprintf(fp, "    %s *out", rmu_cuda_type_name(out_dtype));
+  for (u32 i = 0; i < n_inputs; i++) {
+    Term in_buf = slot_bufs[i + 1];
+    u32 dt = uop_buffer_dtype(in_buf);
+    fprintf(fp, ",\n    const %s *in%u", rmu_cuda_type_name(dt), i);
+  }
+  // kvar wedge: same DAG scan as the MSL entry, emitted as plain
+  // `unsigned` value args (no `constant ... &` Metal reference form).
+  {
+    u32 used_vars[KVAR_USED_CAP];
+    u32 n_vars = kvar_collect_from_dag(root, used_vars, KVAR_USED_CAP);
+    for (u32 i = 0; i < n_vars; i++) {
+      const char *vn = kvar_name(used_vars[i]);
+      if (vn == NULL) vn = "V";
+      fprintf(fp, ",\n    unsigned V_%s", vn);
+    }
+  }
+  fputs(") {\n", fp);
+  // Thread-builtin prologue: the body emit references tid/tg/tt/sgi
+  // exactly as on Metal; here they are ordinary locals derived from
+  // the CUDA launch builtins instead of `[[ ... ]]`-bound kernel args.
+  fputs("  uint tid = blockIdx.x * blockDim.x + threadIdx.x;\n", fp);
+  fputs("  uint tg  = blockIdx.x;\n", fp);
+  fputs("  uint tt  = threadIdx.x;\n", fp);
+  fputs("  uint sgi = threadIdx.x / 32u;\n", fp);
+  fputs("  (void)tid; (void)tg; (void)tt; (void)sgi;\n", fp);
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
