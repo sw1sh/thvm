@@ -46,38 +46,63 @@ static u8 kbo_eq(Term s, Term t) {
   }
 }
 
-// === weight + variable counts ========================================
+// === single-pass weight + variable difference ========================
 
-// Single bottom-up pass: returns the KBO weight of `t` and accumulates
-// its per-variable occurrence counts into `counts`.  kbo_rec needs both
-// for every term it compares; fusing them halves the term traversals --
-// the weight walk and the variable walk visit the same nodes.
-static u64 kbo_stats(Term t, const KboConfig *cfg, u32 *counts) {
+// Add term `t` entirely to one side of the balance: weight*sign into
+// *wb, per-variable occurrence counts*sign into bal[].  kbo_diff uses
+// this for the subtrees where the two compared terms diverge.
+static void kbo_addto(Term t, int sign, const KboConfig *cfg,
+                      long long *wb, int *bal) {
   switch (term_tag(t)) {
     case TAG_FVR: {
       u32 id = term_ext(t);
-      if (id < KBO_MAX_VAR) counts[id]++;
-      return cfg->var_weight;
+      if (id < KBO_MAX_VAR) bal[id] += sign;
+      *wb += (long long)sign * (long long)cfg->var_weight;
+      return;
     }
     case TAG_CTR: {
       u32 lab = term_ext(t);
-      u64 w   = (lab < cfg->n_labels) ? cfg->weights[lab] : 0;
-      u32 n   = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        w += kbo_stats(term_ctr_at(t, i), cfg, counts);
-      }
-      return w;
+      *wb += (long long)sign *
+             (long long)((lab < cfg->n_labels) ? cfg->weights[lab] : 0);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++)
+        kbo_addto(term_ctr_at(t, i), sign, cfg, wb, bal);
+      return;
     }
-    default: return 0;
+    default: return;
   }
 }
 
-// returns 1 iff for all i, lhs[i] >= rhs[i].
-static u8 kbo_dominates(const u32 *lhs, const u32 *rhs) {
-  for (u32 i = 0; i < KBO_MAX_VAR; i++) {
-    if (lhs[i] < rhs[i]) return 0;
+// Simultaneous diff-traversal of `s` and `t` -- Waldmeister's Vortest
+// (ORD/KBO.c).  One pass accumulates weight(s)-weight(t) into *wb and
+// count(s,v)-count(t,v) into bal[]: matching nodes contribute nothing
+// and cancel exactly; only the subtrees where s and t diverge are
+// summed.  Returns 1 iff s and t are structurally identical.  Replaces
+// the old kbo_eq + two weight/var walks -- three traversals collapse
+// to one, and a pointer-equal subtree is skipped whole.
+static int kbo_diff(Term s, Term t, const KboConfig *cfg,
+                    long long *wb, int *bal) {
+  if (s == t) return 1;                              // identical subtree
+  u32 tg = term_tag(s);
+  if (tg == term_tag(t) && term_ext(s) == term_ext(t)) {
+    if (tg == TAG_FVR) return 1;                     // same variable
+    if (tg == TAG_CTR) {
+      u32 ns = term_ctr_n(s), nt = term_ctr_n(t);
+      if (ns == nt) {
+        int ident = 1;
+        for (u32 i = 0; i < ns; i++)
+          ident &= kbo_diff(term_ctr_at(s, i), term_ctr_at(t, i),
+                            cfg, wb, bal);
+        return ident;
+      }
+    } else if (term_val(s) == term_val(t)) {
+      return 1;                                      // equal atom (NUM, ...)
+    }
   }
-  return 1;
+  // diverge: s wholly on the + side, t wholly on the - side.
+  kbo_addto(s, +1, cfg, wb, bal);
+  kbo_addto(t, -1, cfg, wb, bal);
+  return 0;
 }
 
 // === main comparator =================================================
@@ -89,18 +114,19 @@ fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
 }
 
 static KboCmp kbo_rec(Term s, Term t, const KboConfig *cfg) {
-  if (kbo_eq(s, t)) return KBO_EQ;
+  long long wb = 0;                       // weight(s) - weight(t)
+  int bal[KBO_MAX_VAR] = {0};              // count(s,v) - count(t,v)
+  if (kbo_diff(s, t, cfg, &wb, bal)) return KBO_EQ;
 
-  u32 vc_s[KBO_MAX_VAR] = {0};
-  u32 vc_t[KBO_MAX_VAR] = {0};
-  u64 ws = kbo_stats(s, cfg, vc_s);
-  u64 wt = kbo_stats(t, cfg, vc_t);
-  u8 s_dom = kbo_dominates(vc_s, vc_t);
-  u8 t_dom = kbo_dominates(vc_t, vc_s);
+  u8 s_dom = 1, t_dom = 1;                 // s/t dominates: balance never -/+
+  for (u32 i = 0; i < KBO_MAX_VAR; i++) {
+    if (bal[i] < 0) s_dom = 0;
+    if (bal[i] > 0) t_dom = 0;
+  }
   if (!s_dom && !t_dom) return KBO_UN;
 
-  if (ws > wt) return s_dom ? KBO_GT : KBO_UN;
-  if (ws < wt) return t_dom ? KBO_LT : KBO_UN;
+  if (wb > 0) return s_dom ? KBO_GT : KBO_UN;
+  if (wb < 0) return t_dom ? KBO_LT : KBO_UN;
 
   // weights equal: compare top symbols
   u8 s_is_fvr = (term_tag(s) == TAG_FVR);

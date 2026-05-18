@@ -1433,3 +1433,29 @@ beacon only when the goal is big enough to cast a gradient; `thm`'s is
 not.  Cracking it needs the completion to saturate enough of the NAND
 theory outright -- raw throughput, or a structurally richer goal
 encoding.
+
+### 12 -- Waldmeister as oracle; single-pass KBO
+
+Built a native arm64 Waldmeister from `waldmeister/sources/` (the
+prebuilt binaries are x86-64 Linux; the source builds clean once the
+MathLink path is excluded -- `WALD_LIB` undefined).  Ran it on
+DoubleNegation (`thm`): **proved in 3.0 s** -- 774109 critical pairs,
+629 rules; the closing rule is DoubleNegation itself, derived by plain
+completion.  My engine on the same goal: 130 rules / 26k CPs in 120 s,
+unproved.  The gap is ~1000x raw completion throughput, not a
+heuristic -- Waldmeister churns ~258000 CPs/s, mine ~200.  Waldmeister
+is now an oracle to profile against.
+
+First profile of my completion (`sample`): KBO term comparison is
+~70% of the wall -- `kbo_rec` walked each compared term up to five
+times (one equality walk, two weight walks, two variable walks).
+
+Ported Waldmeister's `Vortest` (`ORD/KBO.c`): `kbo_diff` does ONE
+simultaneous diff-traversal of both terms, accumulating
+weight(s)-weight(t) and the per-variable balance together -- matching
+nodes cancel and contribute nothing, and a pointer-equal subtree is
+skipped whole.  Three traversals collapse to one.  Transparent (the
+KBO result is unchanged: `test_kbo` 8/8, `test_atp` 8544/8544) and
+~1.9x faster on the `thm` completion trajectory (159 steps in 64 s vs
+157 in 120 s).  KBO's remaining cost is the lexicographic recursion
+re-walking subterms -- the next profiling target.
