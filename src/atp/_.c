@@ -3809,22 +3809,30 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     return ATP_RUNNING;
   }
 
-#ifdef ATP_MNF
-  // Milestone 10: drive the MNF bidirectional search instead of the
-  // single-normal-form check.  Created lazily on the first call; each
-  // call feeds in completion's new rules and expands a budget of
-  // nodes.  An opposite-colour collision (the fronts met) is the proof.
-  if (s->mnf == NULL) s->mnf = mnf_create(s);
-  if (s->mnf != NULL) {
-    return mnf_step(s, s->mnf, MNF_BUDGET) ? ATP_PROVED : ATP_RUNNING;
-  }
-  // mnf allocation failed -- fall through to the single-NF check.
-#endif
+  // Single-normal-form check: sound and cheap.  If both goal sides
+  // rewrite to the same normal form under R the goal is proved.  This
+  // catches every goal whose two sides share a normal form (e.g. thm,
+  // whose deep lhs reduces to its rhs).
   Term l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
   Term r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
-  return kbo_eq(l, r) ? ATP_PROVED : ATP_RUNNING;
+  if (kbo_eq(l, r)) return ATP_PROVED;
+#ifdef ATP_MNF
+  // Milestone 10: the MNF bidirectional search AUGMENTS the single-NF
+  // check -- it does not replace it.  goal_lhs seeds a GREEN front,
+  // goal_rhs a RED one; each rewrites with R; an opposite-colour
+  // collision is the join.  This is the only detector that can prove a
+  // goal whose two sides never share one normal form -- a symmetric
+  // goal like commutativity nand(x,y)=nand(y,x), where neither side
+  // rewrites to the other, so the single-NF check above structurally
+  // cannot fire.  (An earlier revision had MNF REPLACE the single-NF
+  // check; that regressed thm, which MNF's front search did not close
+  // but the single-NF check does.  Both are sound -- run both.)
+  if (s->mnf == NULL) s->mnf = mnf_create(s);
+  if (s->mnf != NULL && mnf_step(s, s->mnf, MNF_BUDGET)) return ATP_PROVED;
+#endif
+  return ATP_RUNNING;
 }
 
 // 8.9c: set an existential conjecture.  Mirrors thvm_atp_set_goal

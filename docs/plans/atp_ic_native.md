@@ -2007,3 +2007,44 @@ Both are value-identical (the weight is the same integer, the spliced
 arrays are byte-for-byte the same), so the search trajectory does not
 move.  Measured: `wolfram`@3000 7.3 s -> 6.5 s (~12 %); `test_atp`
 8567/8567, `test_bench_atp` 106/106, `thm` + the ladder all prove.
+
+### 28 -- the goal check cannot see a commutativity proof; fix MNF
+
+A 600 s `wolfram` run settled the strategic picture.  The completion
+*is* progressing -- with orphan deletion the rule set grows steadily
+(84 rules at step 3 k, 201 at step 43 k) -- so commutativity is
+provable in principle, just deep.  But there is a separate, structural
+blocker.
+
+The default goal check is single-normal-form: rewrite `goal_lhs` and
+`goal_rhs` to normal form under R, succeed iff they coincide.  That
+works for `thm` -- its deep lhs reduces to its rhs.  It can NEVER work
+for `wolfram`: the goal `nand(x,y) = nand(y,x)` is symmetric, neither
+side rewrites toward the other, so under any terminating R the two
+sides sit in distinct normal forms.  No amount of completion makes the
+single-NF check fire on commutativity.
+
+The detector that *can* prove it is MNF (milestone 10, a port of
+Waldmeister's MultipleNormalFormen): a bidirectional search -- a GREEN
+front from `goal_lhs`, a RED front from `goal_rhs`, both rewriting
+with R, an opposite-colour collision is the join.  That join can route
+through unorientable equations, which a one-directional normalize
+cannot.
+
+But MNF was wired to REPLACE the single-NF check, and MNF's front
+search does not close `thm` -- so `-DATP_MNF` regressed `thm` from a
+0.2 s proof to a non-terminating run.  Fixed here: the goal check runs
+the single-NF check FIRST (cheap, sound, closes `thm` and the ladder)
+and MNF only as an AUGMENTING second detector.  Both are sound; running
+both strictly dominates either alone.  `ATP_MNF=1` now keeps `thm` +
+the ladder proving (`test_atp` 8567/8567); the default build is
+untouched (the single-NF reorder is a no-op without `-DATP_MNF`).
+
+Honest status: the fixed MNF still does not crack `wolfram` within
+300 s -- the bidirectional fronts have not collided by step 31 k.  So
+MNF is now correct and usable but not yet sufficient; commutativity
+needs the front search to run far deeper, or MNF itself tuned.  The
+`GOAL_HEURISTIC` CP weight was also tried and is neutral on `wolfram`.
+A further finding for the next tick: by step 43 k the dominant cost
+has shifted from the rule index to the FV subsumption index --
+546 discrimination-tree nodes per query as the CP queue passes 1 M.
