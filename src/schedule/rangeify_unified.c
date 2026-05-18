@@ -1582,7 +1582,24 @@ fn void pm_apply_rangeify(Term root) {
         break;
       }
     }
-    if (!realized && has_nontrivial_out_axis) {
+    // PAD / SHRINK carry an OFFSET shift between in_rngs and out_rngs
+    // (PAD inserts begin zeros; SHRINK skips begin entries).  When
+    // force-realized at this node, the realize branch emits a BUFFERIZE
+    // whose closed_ranges = out_rngs (covering only OUTPUT-iter axes);
+    // any deeper-producer iter axis that leaked into the rewritten
+    // subtree survives as a free RANGE because the BUFFERIZE-promotion
+    // at materialize.c rebuilds the consumer's in_addr from out_rngs.
+    // For conv-im2col's backward path the leaked axes come from an
+    // EXPAND-of-broadcast input feeding a multi-reduce chain: their
+    // proper binding lives at the OUTER consumer's REDUCE scope, not at
+    // this movement-op level.  Defer the realize decision to a deeper
+    // non-shift producer where out_rngs actually scopes the strand.
+    // RESHAPE / PERMUTE / EXPAND / FLIP are pure swizzles (stride
+    // remap, broadcast, sign-flip) so the conservative skip doesn't
+    // apply -- their realize at this level still nets a valid
+    // BUFFERIZE for downstream INDEX_E.
+    int is_shift_op_skip = (info->op == UOP_PAD || info->op == UOP_SHRINK);
+    if (!realized && has_nontrivial_out_axis && !is_shift_op_skip) {
       RuFreeAxisSet fs;
       fs.n_bound = 0;
       fs.n_free  = 0;
