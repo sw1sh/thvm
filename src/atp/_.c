@@ -1483,19 +1483,26 @@ fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
 
 // Per-term variable renumbering by first appearance (see 7d's
 // AtpDtVarMap).  `slot[id]` holds (index+1); 0 = not yet seen.
-typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; } AtpRiVarMap;
+typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; u8 folded; } AtpRiVarMap;
 
 static void atp_ri_varmap_reset(AtpRiVarMap *vm) {
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) vm->slot[i] = 0;
   vm->n = 0;
+  vm->folded = 0;
 }
 
+// `folded` records whether any variable hit an imperfect case -- an id
+// >= REWRITE_MAX_VAR, or more than ATP_RI_MAXVARS distinct vars -- where
+// two distinct variables collapse onto one star slot.  A flatten with
+// folded == 0 distinguishes every variable, so a discrimination-tree
+// descent that reaches a leaf is then an exact match proof.
 static u32 atp_ri_var_index(AtpRiVarMap *vm, u32 vid) {
-  if (vid >= REWRITE_MAX_VAR) vid = REWRITE_MAX_VAR - 1u;
+  if (vid >= REWRITE_MAX_VAR) { vid = REWRITE_MAX_VAR - 1u; vm->folded = 1u; }
   if (vm->slot[vid] == 0) {
-    u32 idx = (vm->n < ATP_RI_MAXVARS) ? vm->n : (ATP_RI_MAXVARS - 1u);
+    u32 idx;
+    if (vm->n < ATP_RI_MAXVARS) { idx = vm->n; vm->n++; }
+    else                       { idx = ATP_RI_MAXVARS - 1u; vm->folded = 1u; }
     vm->slot[vid] = idx + 1u;
-    if (vm->n < ATP_RI_MAXVARS) vm->n++;
   }
   return vm->slot[vid] - 1u;
 }
@@ -1534,6 +1541,7 @@ struct AtpRuleIndex {
   u32        n_recs, cap_recs;
   u32        root;
   u32        n_rules_built;     // R size the tree currently reflects
+  u8         any_folded;        // some rule LHS folded a var -> imperfect
 };
 typedef struct AtpRuleIndex AtpRuleIndex;
 
@@ -1618,11 +1626,13 @@ static void atp_ri_rebuild(AtpState *s) {
   if (ix == NULL) return;
   ix->n_nodes = 0;
   ix->n_recs  = 0;
+  ix->any_folded = 0;
   ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
   for (u32 i = 0; i < s->n_rules; i++) {
     AtpRiVarMap vm;
     atp_ri_varmap_reset(&vm);
     u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
+    if (vm.folded) ix->any_folded = 1u;
     u32 rec  = atp_ri_rec_new(ix);
     ix->recs[rec].rule = i;
     ix->recs[rec].next = ix->nodes[node].rec_head;
@@ -1640,15 +1650,18 @@ static void atp_ri_rebuild(AtpState *s) {
 // per-position descents below all read this shared array, so the
 // flatten is O(S) for the whole step, not O(S^2) re-flattened per
 // position.
-static u8 atp_ri_flatten(Term t, Term *flat, u32 *subsz, u32 cap, u32 *pos) {
+static u8 atp_ri_flatten(Term t, Term *flat, u32 *subsz, u32 *flatsym,
+                         AtpRiVarMap *vm, u32 cap, u32 *pos) {
   u32 here = *pos;
   if (here >= cap) return 0;
-  flat[here] = t;
+  flat[here]    = t;
+  flatsym[here] = atp_ri_flatsym(t, vm);
   *pos = here + 1u;
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
     for (u32 i = 0; i < n; i++) {
-      if (!atp_ri_flatten(term_ctr_at(t, i), flat, subsz, cap, pos)) return 0;
+      if (!atp_ri_flatten(term_ctr_at(t, i), flat, subsz, flatsym, vm,
+                          cap, pos)) return 0;
     }
   }
   subsz[here] = *pos - here;
@@ -1664,11 +1677,13 @@ static u8 atp_ri_flatten(Term t, Term *flat, u32 *subsz, u32 cap, u32 *pos) {
 static AtpRuleIndex *g_atp_ri_ix      = NULL;
 static const Term   *g_atp_ri_flat    = NULL;
 static const u32    *g_atp_ri_subsz   = NULL;
+static const u32    *g_atp_ri_flatsym = NULL;  // per-position flat-symbol code
 static const Term   *g_atp_ri_lhs     = NULL;  // s->lhs[] for the leaf guard
 static u32           g_atp_ri_qend    = 0;     // end of the queried slice
-static Term          g_atp_ri_star[ATP_RI_MAXVARS];
+static u32           g_atp_ri_star[ATP_RI_MAXVARS];  // first-bind positions
 static u32           g_atp_ri_best    = ATP_RI_NIL;
 static Term          g_atp_ri_qsubj   = 0;     // subject at the query position
+static u8            g_atp_ri_query_folded = 0; // subject flatten folded a var
 
 // At a leaf node: update g_atp_ri_best with the minimum rule index
 // whose LHS genuinely one-way matches the query subject.  The
@@ -1679,10 +1694,21 @@ static Term          g_atp_ri_qsubj   = 0;     // subject at the query position
 // `rewrite_try_top`'s linear scan applies.
 static void atp_ri_leaf_collect(u32 node) {
   AtpRuleIndex *ix = g_atp_ri_ix;
+  // When neither the rule LHSs nor this subject folded a variable (the
+  // common case after thvm_normalize_vars), the flatsym descent has
+  // already proved the match exactly -- CTR symbols matched exactly,
+  // variable consistency by flatsym memcmp -- so reaching this leaf IS
+  // the proof and thvm_match is skipped.  A fold makes the tree coarser
+  // and the leaf re-runs thvm_match as the authoritative guard.
+  u8 perfect = !ix->any_folded && !g_atp_ri_query_folded;
   for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
        r = ix->recs[r].next) {
     u32 rule = ix->recs[r].rule;
     if (rule >= g_atp_ri_best) continue;          // cannot lower the min
+    if (perfect) {
+      g_atp_ri_best = rule;
+      continue;
+    }
     RewriteSubst subst = {{0}};
     if (thvm_match(g_atp_ri_lhs[rule], g_atp_ri_qsubj, &subst)) {
       g_atp_ri_best = rule;
@@ -1701,29 +1727,29 @@ static void atp_ri_descend(u32 node, u32 pos) {
     atp_ri_leaf_collect(node);
     return;
   }
-  Term t   = g_atp_ri_flat[pos];
-  u32  sz  = g_atp_ri_subsz[pos];
-  u8   tc  = (term_tag(t) == TAG_CTR);
-  u32  csym_exact = tc ? (ATP_RI_CTR_BASE + term_ext(t))
-                       : (term_tag(t) == TAG_NUM ? ATP_RI_NUM : 0xFFFFFFFFu);
+  u32 sz         = g_atp_ri_subsz[pos];
+  u32 csym_exact = g_atp_ri_flatsym[pos];   // CTR_BASE+lab / NUM / STAR+idx
   for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
        c = ix->nodes[c].sibling) {
     u32 csym = ix->nodes[c].sym;
     if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
-      // Stored rule variable: FIRST occurrence binds it to t; a REPEAT
-      // applies only if t equals that binding (one-way matching).
+      // Stored rule variable: FIRST occurrence binds it to this
+      // subterm's preorder position; a REPEAT applies only if the two
+      // subterms' flatsym slices are byte-identical (one-way matching).
       u32 k = csym - ATP_RI_STAR_BASE;
-      Term bound = g_atp_ri_star[k];
-      if (bound == 0) {
-        g_atp_ri_star[k] = t;
+      u32 bound = g_atp_ri_star[k];
+      if (bound == ATP_RI_NIL) {
+        g_atp_ri_star[k] = pos;
         atp_ri_descend(c, pos + sz);
-        g_atp_ri_star[k] = 0;
-      } else if (kbo_eq(bound, t)) {
+        g_atp_ri_star[k] = ATP_RI_NIL;
+      } else if (g_atp_ri_subsz[bound] == sz &&
+                 memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
+                        (size_t)sz * sizeof(u32)) == 0) {
         atp_ri_descend(c, pos + sz);
       }
     } else if (csym == csym_exact) {
-      // Stored CTR/NUM equal to t's own symbol: consume t's head;
-      // t's children are the next preorder positions.
+      // Stored CTR/NUM equal to the subject's head: consume the head;
+      // the subject's children are the next preorder positions.
       atp_ri_descend(c, pos + 1u);
     }
   }
@@ -1736,7 +1762,7 @@ static u32 atp_ri_query_pos(u32 qpos) {
   g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
   g_atp_ri_qsubj = g_atp_ri_flat[qpos];
   g_atp_ri_best  = ATP_RI_NIL;
-  for (u32 i = 0; i < ATP_RI_MAXVARS; i++) g_atp_ri_star[i] = 0;
+  for (u32 i = 0; i < ATP_RI_MAXVARS; i++) g_atp_ri_star[i] = ATP_RI_NIL;
   atp_ri_descend(g_atp_ri_ix->root, qpos);
   return g_atp_ri_best;
 }
@@ -1801,17 +1827,22 @@ static Term atp_ri_apply_at(Term t, u32 redex_pos, const u32 *subsz,
 // redex (first preorder position), same rule (lowest index), same
 // substitution (the leaf's `thvm_match`).
 static Term atp_ri_rewrite_step(AtpState *s, Term t,
-                                Term *flat, u32 *subsz) {
+                                Term *flat, u32 *subsz, u32 *flatsym) {
   u32 flatlen = 0u;
-  if (!atp_ri_flatten(t, flat, subsz, ATP_RI_FLAT_CAP, &flatlen)) {
+  AtpRiVarMap vm;
+  atp_ri_varmap_reset(&vm);
+  if (!atp_ri_flatten(t, flat, subsz, flatsym, &vm, ATP_RI_FLAT_CAP,
+                      &flatlen)) {
     // Over-deep subject: fall back to the linear rewriter for this
     // step so a cap overflow can never silently skip a redex.
     return thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
   }
-  g_atp_ri_ix    = s->rule_index;
-  g_atp_ri_flat  = flat;
-  g_atp_ri_subsz = subsz;
-  g_atp_ri_lhs   = s->lhs;
+  g_atp_ri_ix           = s->rule_index;
+  g_atp_ri_flat         = flat;
+  g_atp_ri_subsz        = subsz;
+  g_atp_ri_flatsym      = flatsym;
+  g_atp_ri_lhs          = s->lhs;
+  g_atp_ri_query_folded = vm.folded;
 
   u32 redex_pos = 0u, redex_rule = 0u;
   if (!atp_ri_find_redex(flatlen, &redex_pos, &redex_rule)) {
@@ -1840,8 +1871,9 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   }
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
+  static u32  flatsym[ATP_RI_FLAT_CAP];
   for (u32 i = 0; i < step_cap; i++) {
-    Term t2 = atp_ri_rewrite_step(s, t, flat, subsz);
+    Term t2 = atp_ri_rewrite_step(s, t, flat, subsz, flatsym);
     if (kbo_eq(t, t2)) return t;
     t = t2;
   }
