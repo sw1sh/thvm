@@ -1459,3 +1459,34 @@ KBO result is unchanged: `test_kbo` 8/8, `test_atp` 8544/8544) and
 ~1.9x faster on the `thm` completion trajectory (159 steps in 64 s vs
 157 in 120 s).  KBO's remaining cost is the lexicographic recursion
 re-walking subterms -- the next profiling target.
+
+### 13 -- completion-throughput loop vs the Waldmeister oracle
+
+A profile-driven optimisation loop against the 3 s Waldmeister oracle:
+
+- *iter 1* -- single-pass KBO (above).
+- *iter 2* -- `atp_ordered_try_top` recomputed a full KBO compare per
+  rule per rewrite position to recheck a rule's (fixed) orientation;
+  cached it in `r_orient[]`.  KBO `kbo_addto` 16252 -> 32 samples.
+- *iter 3* -- the ordered-rewrite path scanned all `n_rules`,
+  `thvm_match`-ing each.  Measured 0 unorientable rules (completion
+  orients everything), so the existing discrimination-tree normalizer
+  is an exact equivalent; routed to it.
+- *iter 4* -- added a pointer-identity fast path to `kbo_eq`.
+
+Each step was transparent (`test_atp` 8544/8544, ladder proves).  But
+the returns fell off a cliff: ~1.9x, real, ~1.14x, ~0.  The iter-4
+profile is the tell -- cost is now *evenly spread* across O(term-size)
+term traversal: `kbo_eq` ~28%, `atp_ri_descend` ~22%, `thvm_match`
+~22%.  There is no hot spot left to shave; the per-CP cost is
+fundamental.  My engine still does ~200 CP/s where Waldmeister does
+~258000.
+
+The honest verdict: closing that gap is not a micro-optimisation.  It
+is the IC-sharability lever -- maximal structural sharing of terms
+(hash-consing), so `kbo_eq` and the discrimination-tree variable-
+repeat checks become O(1) pointer compares and normalisation memoises
+by pointer.  That collapses the whole O(term-size) traversal class at
+once.  It is a real architectural change (an ATP-level hash-cons table,
+all term construction routed through it, GC-relocation handling) --
+the next milestone, not a loop tick.

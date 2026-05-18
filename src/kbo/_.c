@@ -29,6 +29,8 @@
 // === structural equality ============================================
 
 static u8 kbo_eq(Term s, Term t) {
+  if (s == t) return 1;   // pointer-identical -- rewriting/subst_apply
+                          // share subterm cells, so this fires often
   if (term_tag(s) != term_tag(t)) return 0;
   if (term_ext(s) != term_ext(t)) return 0;
   switch (term_tag(s)) {
