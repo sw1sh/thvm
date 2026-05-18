@@ -20,9 +20,10 @@ and the rest of this directory.
 7. thvm's UOpt approach (KOpt rewriting)
 8. tinygrad: the UOp graph and BEAM
 9. TileLang: the tile DSL and carver
-10. A worked example: softmax from naive to speed-of-light
-11. The frontier
-12. Further reading
+10. TPU kernels and JAX Pallas: a different machine
+11. A worked example: softmax from naive to speed-of-light
+12. The frontier
+13. Further reading
 
 ---
 
@@ -593,7 +594,93 @@ NVIDIA Hopper/Blackwell path (TMA, warp specialization, WGMMA), none
 of which exists on Apple hardware.  See `docs/plans/tilelang_scout.md`
 for the full port analysis.
 
-## 10. A worked example: softmax from naive to speed-of-light
+## 10. TPU kernels and JAX Pallas: a different machine
+
+Everything so far assumed a GPU: a grid of parallel threads, simdgroups,
+a scratchpad, occupancy.  Google's Tensor Processing Unit (TPU) is a
+different machine, and the contrast sharpens what is GPU-specific and
+what is fundamental.
+
+### Pallas: JAX's kernel language
+
+Pallas is JAX's extension for writing custom kernels.  In this
+document's taxonomy it is a Level-2 tile DSL, the JAX-native peer of
+Triton and TileLang.  You write a kernel body that operates on `Ref`s
+(mutable references to memory) with `pl.load` / `pl.store`, declare a
+`grid` ("kernels in a loop"), and give a `BlockSpec` per input that
+says how to chunk it into blocks.  One front-end, two lowerings:
+**Mosaic GPU** for the GPU backend, and **Mosaic** -- Google's TPU
+compiler -- for the TPU backend.
+
+### The TPU is a systolic-array machine
+
+A GPU is a throughput machine made of many parallel threads.  A TPU
+is built around the **MXU** (Matrix Unit), a systolic array that
+performs on the order of 65,000 multiply-accumulates per cycle in
+current generations.  Matrix multiply is the *native* primitive --
+not an instruction you reach for, the thing the chip is.  There are
+three compute units:
+
+- **Scalar unit** -- control flow and scalar arithmetic, on its own
+  scalar memory (SMEM).
+- **Vector unit (VPU)** -- the bulk of elementwise and reduction work,
+  on 2D vector registers (8x128 for 32-bit values).
+- **Matrix unit (MXU)** -- matrix multiplies, executed *asynchronously*
+  to the main instruction stream.
+
+There are no warps, no simdgroups, and no thread divergence.
+
+### The grid is a sequential loop, not parallel threads
+
+This is the deepest difference.  A GPU grid is thousands of threads
+running at once.  A Pallas-TPU grid executes **sequentially, in
+lexicographic order**, on one core.  You think sequentially.
+Consecutive grid iterations writing the same output slice are
+race-free by construction -- but ordering them correctly is now your
+job, not the hardware's.
+
+### Memory is explicit, DMA-staged, and compiler-pipelined
+
+The hierarchy is HBM (high-bandwidth main memory, high latency) ->
+VMEM (vector memory, a 16-95 MB scratchpad) -> vector registers.  The
+kernel body receives `Ref`s that already point into VMEM or SMEM; the
+Mosaic compiler inserts the HBM<->VMEM DMA transfers.  Crucially it
+also **pipelines** them automatically: the HBM->VMEM copy for grid
+iteration N+1 overlaps the compute of iteration N, and when
+consecutive iterations share an input slice the transfer is skipped.
+
+### Tiling and alignment are rigid
+
+The last two array dimensions are mapped onto the 8x128 vector
+register, so block shapes must be divisible by 8 and 128 on those
+dimensions.  Reshapes and reductions that touch them are expensive or
+unsupported.  Patterns "unnatural to the hardware" fall back to slow
+software emulation.
+
+### What this teaches
+
+| | GPU | TPU |
+|---|---|---|
+| Parallelism | many concurrent simdgroups | a systolic array + wide vectors |
+| The grid | thousands of parallel threads | a sequential loop, one core |
+| Latency hiding | occupancy (swap in another simdgroup) | explicit software pipelining |
+| Hazards | thread divergence | tiling/alignment to 8x128 |
+| Fast memory | threadgroup scratchpad you manage | VMEM, DMA managed by the compiler |
+| Native primitive | fused multiply-add lanes | the matmul itself |
+
+A GPU kernel writer's skill is occupancy balancing and avoiding
+divergence.  A TPU kernel writer's skill is pipelining and keeping the
+MXU fed.  Both are answers to the same question -- how do you hide
+memory latency -- with opposite mechanisms: the GPU overlaps *many
+threads*, the TPU overlaps *stages of one loop*.
+
+Relevant to thvm: its UOp `RANGE` axis types (`GLOBAL`, `LOCAL`, and
+the rest) encode a GPU thread-grid model.  A TPU target would not
+reuse them -- it would need a sequential-grid plus DMA-pipeline model,
+which is why a "portable" kernel IR is so hard: the machines do not
+agree on what a kernel *is*.
+
+## 11. A worked example: softmax from naive to speed-of-light
 
 Softmax over the rows of an `R x C` matrix:
 `out[r,c] = exp(x[r,c] - max_c x[r,:]) / sum_c exp(x[r,:] - max_c)`.
@@ -651,7 +738,7 @@ through fast memory, vectorize, use the fast intrinsic, then
 restructure -- is the same for layernorm, for reductions, for
 attention.  Only the arithmetic in the middle changes.
 
-## 11. The frontier
+## 12. The frontier
 
 What is still hard, and where the field is moving.
 
@@ -687,7 +774,7 @@ The throughline: producing a fast kernel, measuring it honestly, and
 shipping it are three separate hard problems, and a complete system
 needs an answer to all three.
 
-## 12. Further reading
+## 13. Further reading
 
 In this repository:
 
@@ -712,6 +799,8 @@ External:
   `huggingface.co/kernels`.
 - tinygrad source: `codegen/kernel.py`, `engine/search.py`.
 - TileLang and its `carver` subdirectory.
+- JAX Pallas docs (`docs.jax.dev/en/latest/pallas`) -- the kernel
+  language; the TPU-details and pipelining pages for the TPU model.
 - `philipturner/metal-benchmarks` -- Apple GPU microarchitecture
   cycle counts, the ground truth for any roofline estimate.
 - The Flash Attention papers -- the canonical fused-kernel case study.
