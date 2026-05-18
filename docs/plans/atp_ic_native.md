@@ -1949,3 +1949,39 @@ sufficient: the real frontier is *why completion saturates the rule
 set at ~69 without the goal becoming joinable* -- an over-aggressive
 redundancy criterion, an orientation/saturation issue, or a goal-check
 that misses a derivable proof.  That diagnosis is the next tick.
+
+### 26 -- the wolfram churn: interreduction, and defaulting Waisenmord
+
+Two A/B probes pinned the `wolfram` churn down.
+
+Queue subsumption is NOT the cause: disabling `atp_cp_queue_subsumed`
+leaves the rule set even smaller (51 vs 64 at step 3000) and the
+queue larger -- it is a sound, useful filter.
+
+Interreduction IS what caps the rule count.  With interreduction off
+the rule set grows monotonically -- 481 rules at step 2254 instead of
+churning 51-81 around ~64 -- and `thm` still proves, so interreduction
+is an optimisation, not a correctness requirement.  But the
+uninterreduced 481-rule system is much slower per step and still does
+not prove `wolfram`, so "keep more rules" is not itself the answer.
+
+The churn has a concrete cost, though: every rule interreduction drops
+leaves its already-queued critical pairs behind as ORPHANS -- CPs
+whose parent rule no longer exists.  At step 3000 the 99k-CP queue is
+mostly such orphans.  thvm already had the fix gated off -- orphan
+deletion (`-DATP_ORPHAN_KILL`, Waldmeister's "Waisenmord", a relative
+of its `selectNonOrphan`): when interreduction drops a rule, the CPs
+descended from it are compacted out of the queue (sound -- the
+re-queued reduced equation regenerates anything they would have
+contributed).
+
+Defaulted on this tick.  Measured: `wolfram`@3000 halves, 14.3 s ->
+7.3 s, the queue drops 99k -> 44k; `thm` still proves (and a touch
+faster); `test_atp` 8567/8567, `test_bench_atp` 106/106, the ladder
+proves.  It does NOT crack `wolfram` -- the completion still does not
+converge on commutativity in the step budget -- but it removes the
+wasted work on dead-parent CPs and bounds the queue.  NAND
+commutativity stays the open frontier; the remaining suspects are the
+reduction order (the Wolfram-axiom problems are notoriously
+ordering-sensitive) and Waldmeister's strategy-switching completion
+(`HK_TestStrategieWechsel`), neither yet ported.

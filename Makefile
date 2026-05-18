@@ -97,11 +97,13 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_GOAL_HEURISTIC)),-DATP_GOAL_HEURISTIC,
 # deletion (Waldmeister's "Waisenmord").  When interreduction drops a
 # rule, the queued critical pairs descended from it are redundant --
 # the re-queued reduced equation regenerates whatever they contribute
-# -- so they are compacted out of the CP queue.  Bounds the runaway
-# queue.  Off by default; independent of every other ATP flag.  CHANGES
-# BEHAVIOR (a redundancy criterion -- a sound completion criterion, the
-# search trajectory moves).
-ATP_ORPHAN_KILL ?=
+# -- so they are compacted out of the CP queue.  ON by default: it is
+# a sound completion criterion (a relative of Waldmeister's
+# selectNonOrphan) and a measured win -- on the deep wolfram benchmark
+# it halves the per-step cost and keeps the CP queue from filling with
+# CPs of churned-away rules.  `make ATP_ORPHAN_KILL=0` recovers the
+# legacy path.  Independent of every other ATP flag.
+ATP_ORPHAN_KILL ?= 1
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
 
 # thm convergence (9c foundation): -DATP_ORDERED_REWRITE replaces the
