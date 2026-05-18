@@ -1808,3 +1808,58 @@ Stage 2+ (next): wire the packed form into the queue -- `cp_lhs[]`/
 `cp_rhs[]` become packed byte strings, the collector stops rooting
 them, and the subsumption index keys on the packed form -- which is
 what actually frees the 62M and unblocks the late game.
+
+### 23 -- Stringterms stage 2+3: the packed CP queue, and a packed matcher
+
+Stage 2+3 landed the queue conversion in one atomic change.
+`AtpState.cp_lhs[] / cp_rhs[]` (two parallel `Term` arrays) became one
+`u8 **cp_packed` -- slot `i` is a malloc'd preorder byte string, the
+`acp_pack` of the critical pair.  The subsumption-index record
+(`AtpDtRec`) dropped its `Term lhs/rhs` mirror for a single borrowed
+`u8 *packed` (the queue owns the buffer; the record only reads it,
+only while live).  And `thvm_atp_gc_collect` deleted two root spans:
+the `2 * n_cps` CP-queue terms and the `2 * n_recs` FV-index mirror
+terms.  After the change the collector roots only R, the goal, the
+trace, and the narrowing substitution -- the CP set is entirely
+outside the managed heap, exactly as Waldmeister's `PTermpaarT` pool.
+
+That is the whole point: `thm`@300 with the in-loop collector enabled
+goes 153.0 s -> 106.4 s (~1.44x), and the gap widens with the queue
+(step 250 1.25x, step 300 1.44x).  A `sample` of the late game no
+longer shows `gc_evacuate` at all -- the GC wall is gone.  The
+trajectory is bit-identical at every checkpoint measured against the
+stage-1 commit: `thm`@120 `rules=119 cps=14288`, @200 `cps=39808`,
+@300 `cps=89708`; `cpl2` 3 steps; `cpl1`/`subl2` `80/79/6328`.
+
+The bring-up surfaced one thing the plan underestimated.  A first cut
+that simply `acp_unpack`'d a CP at every point of use was **9x slower**
+without the collector even running (`thm`@120 2.1 s -> 18.7 s).  A
+`sample` pinned it on `acp_unpack_term`: the subsumption index's
+late-game hot path examines hundreds of millions of candidate records
+(`thm`@200: 733M two-sided matches), and unpacking each candidate to a
+heap tree -- one hash-cons per node -- before `thvm_match` is pure
+overhead the stored-`Term` baseline never paid.
+
+The fix is itself a Waldmeister technique: match on the packed
+representation directly.  `acp_match_term` / `acp_match_pair` are the
+Stringterms counterpart of `thvm_match` -- a one-way matcher that
+walks the pattern's preorder byte string against the subject `Term` in
+lockstep, fast-failing on a head-symbol mismatch after one
+discriminator byte, with zero allocation.  Verdict bit-identical to
+`thvm_match` (a NUM/ERA pattern matches nothing; a variable past the
+`REWRITE_MAX_VAR` cliff fails; a repeat variable is `kbo_eq`-checked).
+The FV index's folded-leaf and cap-fallback paths, and the off-flag
+array scan, all match straight off `cp_packed[]` -- no per-candidate
+unpack.  `thm`@120 is then 1.8 s (faster than the 2.1 s baseline --
+the packed walk is cache-compact), @200 17.6 s vs 17.1 s (neutral).
+
+`acp_unpack` survives only on the genuinely O(1)-per-step paths --
+`thvm_atp_select_cp` (the one popped CP), `reheapify`, the eager
+`atp_normalize_graph` sweep -- where its cost is in the noise (an A/B
+disabling the eager sweep moved `thm`@200 not at all).
+
+The remaining late-game ceiling is now `acp_match_term` volume: the FV
+subsumption index still degrades to ~18000 candidates/query as the
+queue passes 30k CPs.  That is the pre-existing index-degradation
+issue (section 20's closing note), not a GC problem -- the next
+target, and now the dominant one.

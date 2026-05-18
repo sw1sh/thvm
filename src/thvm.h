@@ -2966,8 +2966,16 @@ typedef struct {
   // ATP_TRACE_NONE if tracing is disabled / unavailable).  Growable
   // like the rule arrays: heap-allocated at ATP_INIT_CPS,
   // atp_ensure_cp_cap doubles on demand.
-  Term *cp_lhs;
-  Term *cp_rhs;
+  //
+  // Waldmeister Stringterms port: a queued CP is NOT held as a pair
+  // of IC heap term-graphs but as one packed preorder byte string
+  // (acp_pack / acp_unpack in src/atp/_.c) -- `cp_packed[i]` is a
+  // malloc'd `u8 *` outside the managed heap, so the Cheney collector
+  // never copies it.  This is the structural fix for the late-game GC
+  // wall (the CP queue was a ~62M-cell live set re-copied every
+  // collection).  cp_packed[i] is owned by the queue: allocated on
+  // push, freed on pop / drop.
+  u8  **cp_packed;
   u32  *cp_trace;
   u32   n_cps;
   // 7c': the CP queue is a binary min-heap keyed on
@@ -3484,10 +3492,19 @@ fn WaldErr wald_parse_file(const char *path, WaldSpec *spec);
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.
 fn u8        thvm_atp_select_cp   (AtpState *s, Term *lhs_out, Term *rhs_out);
-// 7c': re-heapify the CP queue after a caller populated cp_lhs /
-// cp_rhs / n_cps directly (the normal path uses the internal
+// 7c': re-heapify the CP queue after a caller populated the queue
+// slots / n_cps directly (the normal path uses the internal
 // heap-push).  Required before select / peek on a hand-built queue.
 fn void      thvm_atp_cp_reheapify(AtpState *s);
+
+// Stringterms port: queue slot i holds a packed byte string, not a
+// pair of heap Terms.  Callers that build the queue directly (chiefly
+// tests) go through these accessors -- `cp_set` packs (lhs, rhs) into
+// slot i (freeing any prior buffer there), `cp_get` unpacks it back to
+// two fresh transient heap Terms.
+fn void      thvm_atp_cp_set      (AtpState *s, u32 i, Term lhs, Term rhs);
+fn void      thvm_atp_cp_get      (const AtpState *s, u32 i,
+                                   Term *lhs, Term *rhs);
 
 // Index range of rules just added by orient_and_add.
 //   {first: 0, count: 0}     -> nothing added (KBO_EQ, or R full)

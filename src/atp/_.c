@@ -338,25 +338,29 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   s->r_cap = cap;
 }
 
-// Grow the CP arrays (cp_lhs / cp_rhs / cp_trace / cp_pri / cp_seq)
-// to hold at least `need` entries.  Same doubling discipline as
-// atp_ensure_rule_cap.
+// Grow the CP arrays (cp_packed / cp_trace / cp_pri / cp_seq) to hold
+// at least `need` entries.  Same doubling discipline as
+// atp_ensure_rule_cap.  New cp_packed slots are NULL-initialised so
+// thvm_atp_cp_set / thvm_atp_free can tell an unused slot apart from a
+// live packed buffer.
 static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   if (need <= s->cp_cap) return;
   u32 cap = s->cp_cap ? s->cp_cap : ATP_INIT_CPS;
   while (cap < need) cap *= 2;
-  Term *nl = (Term *)realloc(s->cp_lhs,   cap * sizeof(Term));
-  Term *nr = (Term *)realloc(s->cp_rhs,   cap * sizeof(Term));
+  u8  **nc = (u8 **)realloc(s->cp_packed, cap * sizeof(u8 *));
   u32  *nt = (u32  *)realloc(s->cp_trace, cap * sizeof(u32));
   u32  *np = (u32  *)realloc(s->cp_pri,   cap * sizeof(u32));
   u32  *nq = (u32  *)realloc(s->cp_seq,   cap * sizeof(u32));
-  if (nl == NULL || nr == NULL || nt == NULL || np == NULL || nq == NULL) {
+  if (nc == NULL || nt == NULL || np == NULL || nq == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
-  s->cp_lhs = nl; s->cp_rhs = nr; s->cp_trace = nt;
+  s->cp_packed = nc; s->cp_trace = nt;
   s->cp_pri = np; s->cp_seq = nq;
-  for (u32 i = s->cp_cap; i < cap; i++) s->cp_trace[i] = ATP_TRACE_NONE;
+  for (u32 i = s->cp_cap; i < cap; i++) {
+    s->cp_packed[i] = NULL;
+    s->cp_trace[i]  = ATP_TRACE_NONE;
+  }
   s->cp_cap = cap;
 }
 
@@ -383,9 +387,9 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace);
 // emit one self-delimiting record per node, rebuild from arity.
 //
 // `acp_pack` returns a malloc'd buffer (caller frees); `acp_unpack`
-// rebuilds the two heap Terms.  Stage 1 of the port: the
-// representation + an exact round-trip.  Stage 2 wires it into the
-// queue (cp_lhs[]/cp_rhs[] -> packed), which is what frees the heap.
+// rebuilds the two heap Terms.  The CP queue (`cp_packed[]`) and the
+// subsumption-index records hold these byte strings directly; the
+// collector roots neither, which is what frees the late-game heap.
 
 // LEB128 varint -- 7 bits/byte, high bit = "more".
 static void acp_put_varint(u8 **pp, u64 v) {
@@ -488,6 +492,59 @@ static void acp_unpack(const u8 *buf, Term *lhs, Term *rhs) {
   if (rhs != NULL) *rhs = r;
 }
 
+// One-way match of a PACKED pattern term against a heap Term subject --
+// the Stringterms counterpart of thvm_match (rewrite/_.c:27), and the
+// Waldmeister technique of matching on the packed representation
+// directly.  The pattern is never unpacked to a heap tree: the matcher
+// walks the preorder byte string and the subject term in lockstep, so
+// a head-symbol mismatch fast-fails after one discriminator byte with
+// zero allocation.  This is what keeps the subsumption index off the
+// per-candidate acp_unpack that an unpack-then-thvm_match would pay.
+//
+// `*pp` advances past the pattern term on a full match; on a mismatch
+// it is left mid-record (the caller aborts the whole match, so the
+// stale cursor is never used).  Verdict is bit-identical to
+// thvm_match: a NUM / ERA pattern matches nothing (thvm_match's
+// default branch returns 0); a variable id past the REWRITE_MAX_VAR
+// matcher cliff fails; a repeated variable is confirmed with kbo_eq.
+static u8 acp_match_term(const u8 **pp, Term subj, RewriteSubst *sub) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (term_tag(subj) != TAG_CTR) return 0;
+      if (term_ext(subj) != label)   return 0;
+      if (term_ctr_n(subj) != n)     return 0;
+      for (u32 i = 0; i < n; i++) {
+        if (!acp_match_term(pp, term_ctr_at(subj, i), sub)) return 0;
+      }
+      return 1;
+    }
+    case 'V': {
+      u32 id = (u32)acp_get_varint(pp);
+      if (id >= REWRITE_MAX_VAR) return 0;
+      if (sub->bindings[id] == 0) { sub->bindings[id] = subj; return 1; }
+      return kbo_eq(sub->bindings[id], subj);
+    }
+    default:         // 'N' (NUM) / 'E' -- thvm_match's default: no match
+      return 0;
+  }
+}
+
+// Two-sided one-way match: does the packed CP `pack(plhs)++pack(prhs)`
+// match (qlhs, qrhs) under a single shared substitution?  Equivalent
+// to `thvm_match(plhs,qlhs,&s) && thvm_match(prhs,qrhs,&s)` with the
+// pattern kept packed.  The lhs match advances the cursor exactly past
+// `pack(plhs)` (preorder is self-delimiting), so the rhs match resumes
+// at `pack(prhs)`.
+static u8 acp_match_pair(const u8 *packed, Term qlhs, Term qrhs,
+                         RewriteSubst *sub) {
+  const u8 *p = packed;
+  if (!acp_match_term(&p, qlhs, sub)) return 0;
+  return acp_match_term(&p, qrhs, sub);
+}
+
 // One-time port self-check, run at engine init: a hand-built pair --
 // nested CTRs, repeated variable, a NUM -- must survive a pack/unpack
 // round-trip structurally intact, so a broken Stringterms port fails
@@ -513,11 +570,29 @@ static void acp_selftest(void) {
   }
 }
 
+// Pack (lhs, rhs) into CP queue slot i, freeing any byte string
+// already there.  Callers that build the queue directly -- chiefly
+// tests -- use this instead of writing the (now packed) queue slots
+// by hand.  The slot's priority / seq are filled by a subsequent
+// thvm_atp_cp_reheapify, exactly as before the port.
+fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
+  if (s == NULL) return;
+  atp_ensure_cp_cap(s, i + 1u);
+  free(s->cp_packed[i]);                 // free(NULL) is a no-op
+  s->cp_packed[i] = acp_pack(lhs, rhs, NULL);
+}
+
+// Unpack CP queue slot i back into two fresh transient heap Terms --
+// the read counterpart of thvm_atp_cp_set.
+fn void thvm_atp_cp_get(const AtpState *s, u32 i, Term *lhs, Term *rhs) {
+  acp_unpack(s->cp_packed[i], lhs, rhs);
+}
+
 // === 8a: IC-native CP-set graph (-DATP_CP_GRAPH) ====================
 //
 // Under the flag the CP queue is ALSO held as one shared Term:
 // `cp_graph = CpSet[Cp[l0,r0], Cp[l1,r1], ...]`, the leaves in the
-// same slot order as the cp_lhs[] / cp_rhs[] mirror arrays.  Every
+// same slot order as the cp_packed[] queue.  Every
 // CP mutation (heap push, select pop, heap reorder, reheapify)
 // rebuilds cp_graph from the arrays so the two stay in lockstep; a
 // debug assertion checks decode(cp_graph) equals the mirror.  This
@@ -543,7 +618,7 @@ static int atp_cp_decode_leaf(Term leaf, Term *lhs_out, Term *rhs_out) {
   return 1;
 }
 
-// Rebuild s->cp_graph from the cp_lhs[] / cp_rhs[] mirror arrays.
+// Rebuild s->cp_graph from the cp_packed[] queue (each slot unpacked).
 // Called at the end of every CP mutation so the graph stays in
 // lockstep.  The container is a fresh CTR each rebuild, but the
 // Cp[] leaves carry the already-hash-consed lhs/rhs cells, so two
@@ -561,16 +636,18 @@ static void atp_cp_graph_rebuild(AtpState *s) {
     exit(1);
   }
   for (u32 i = 0; i < s->n_cps; i++) {
-    leaves[i] = atp_cp_encode_leaf(s->cp_lhs[i], s->cp_rhs[i]);
+    Term l = 0, r = 0;
+    acp_unpack(s->cp_packed[i], &l, &r);
+    leaves[i] = atp_cp_encode_leaf(l, r);
   }
   s->cp_graph = term_new_ctr(ATP_CPSET_LABEL, leaves, s->n_cps);
   free(leaves);
 }
 
-// Debug assertion: decode(cp_graph) must equal the cp_lhs[] /
-// cp_rhs[] mirror, slot for slot.  Run after every mutation so a
-// drift between the two representations aborts immediately rather
-// than corrupting a proof silently.
+// Debug assertion: decode(cp_graph) must equal the cp_packed[] queue
+// (unpacked), slot for slot.  Run after every mutation so a drift
+// between the two representations aborts immediately rather than
+// corrupting a proof silently.
 static void atp_cp_graph_assert(const AtpState *s) {
   if (s == NULL) return;
   assert(term_tag(s->cp_graph) == TAG_CTR
@@ -583,10 +660,12 @@ static void atp_cp_graph_assert(const AtpState *s) {
     Term gl = 0, gr = 0;
     int ok = atp_cp_decode_leaf(term_ctr_at(s->cp_graph, i), &gl, &gr);
     assert(ok && "cp_graph child must be a well-formed Cp[lhs,rhs] leaf");
-    assert(gl == s->cp_lhs[i]
-           && "cp_graph leaf lhs must equal cp_lhs[] mirror");
-    assert(gr == s->cp_rhs[i]
-           && "cp_graph leaf rhs must equal cp_rhs[] mirror");
+    Term cl = 0, cr = 0;
+    acp_unpack(s->cp_packed[i], &cl, &cr);
+    assert(kbo_eq(gl, cl)
+           && "cp_graph leaf lhs must equal cp_packed[] mirror");
+    assert(kbo_eq(gr, cr)
+           && "cp_graph leaf rhs must equal cp_packed[] mirror");
   }
 }
 
@@ -787,7 +866,7 @@ static Term atp_norm_memo(AtpNormMemo *m, Term t,
 // Trivially-joined CPs (both sides converge under the new rule) drop
 // out here -- 8c will route that through an Eql[x,x] -> ERA
 // reflexivity rule during the sweep; for 8b the kbo_eq check does the
-// same pruning.  Updates the cp_lhs[]/cp_rhs[] mirror, then reheapify
+// same pruning.  Repacks the cp_packed[] queue, then reheapify
 // recomputes priorities and rebuilds cp_graph + the heap.
 static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
   if (s == NULL || s->n_cps == 0 || added.count == 0) return;
@@ -812,20 +891,30 @@ static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
   u32 w = 0;
   int touched = 0;   // any CP term rewritten or dropped this sweep?
   for (u32 i = 0; i < s->n_cps; i++) {
-    Term l = atp_norm_memo(&memo, s->cp_lhs[i], new_lhs, new_rhs,
-                           n_new, NORM_CAP);
-    Term r = atp_norm_memo(&memo, s->cp_rhs[i], new_lhs, new_rhs,
-                           n_new, NORM_CAP);
+    Term ol = 0, orr = 0;
+    acp_unpack(s->cp_packed[i], &ol, &orr);
+    Term l = atp_norm_memo(&memo, ol,  new_lhs, new_rhs, n_new, NORM_CAP);
+    Term r = atp_norm_memo(&memo, orr, new_lhs, new_rhs, n_new, NORM_CAP);
     // Trivially-joined: both sides converged.  Drop the CP -- it adds
     // no equational consequence.
     if (kbo_eq(l, r)) {
       s->n_cps_dropped_joinable++;
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
       touched = 1;
       continue;
     }
-    if (l != s->cp_lhs[i] || r != s->cp_rhs[i]) touched = 1;
-    s->cp_lhs[w]   = l;
-    s->cp_rhs[w]   = r;
+    if (l != ol || r != orr) {
+      // CP rewritten -- repack into a fresh byte string at slot w.
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      s->cp_packed[w] = acp_pack(l, r, NULL);
+      touched = 1;
+    } else if (w != i) {
+      // Unchanged -- compact the existing buffer down to slot w.
+      s->cp_packed[w] = s->cp_packed[i];
+      s->cp_packed[i] = NULL;
+    }
     s->cp_trace[w] = s->cp_trace[i];
     w++;
   }
@@ -1177,14 +1266,17 @@ typedef struct {
   u32 rec_head;   // first record index, or ATP_DT_NIL
 } AtpDtNode;
 
-// One indexed CP.  `lhs`/`rhs` mirror cp_lhs[..]/cp_rhs[..]; they are
-// GC roots so the collector keeps them current.  `live` is cleared
-// when the CP is popped / dropped -- a dead record is skipped by
-// retrieval, reclaimed by the next index rebuild.  `seq` is the CP's
-// stable id (the seq->record map key).  `next` links the leaf list.
+// One indexed CP.  `packed` BORROWS the queue's cp_packed[] byte
+// string for this CP -- the queue owns and frees it; the index only
+// reads it (and only while `live`).  Storing the packed pointer, not a
+// pair of heap Terms, keeps the collector out of the index entirely.
+// `live` is cleared when the CP is popped / dropped -- a dead record
+// is skipped by retrieval (its `packed` may by then dangle, but a dead
+// record is never dereferenced) and reclaimed by the next index
+// rebuild.  `seq` is the CP's stable id (the seq->record map key);
+// `next` links the leaf list.
 typedef struct {
-  Term lhs;
-  Term rhs;
+  u8  *packed;
   u32  seq;
   u32  next;
   u8   live;
@@ -1363,7 +1455,11 @@ static u32 atp_dt_insert_term(AtpFvIndex *ix, u32 node, Term t,
 // One variable renumbering spans the WHOLE CP -- a variable shared
 // between lhs and rhs (the common case for an equation) keeps one
 // star index across both sides.
-static void atp_fv_index_insert(AtpFvIndex *ix, Term lhs, Term rhs, u32 seq) {
+// `packed` is the queue's cp_packed[] byte string for this CP; the
+// record borrows it (queue owns and frees).  `lhs`/`rhs` are the
+// unpacked terms, needed only to descend the discrimination tree.
+static void atp_fv_index_insert(AtpFvIndex *ix, Term lhs, Term rhs,
+                                u8 *packed, u32 seq) {
   AtpDtVarMap vm;
   atp_dt_varmap_reset(&vm);
   u32 node = ix->root;
@@ -1371,8 +1467,7 @@ static void atp_fv_index_insert(AtpFvIndex *ix, Term lhs, Term rhs, u32 seq) {
   node = atp_dt_insert_term(ix, node, lhs, &vm);
   node = atp_dt_insert_term(ix, node, rhs, &vm);
   u32 rec = atp_dt_rec_new(ix);
-  ix->recs[rec].lhs    = lhs;
-  ix->recs[rec].rhs    = rhs;
+  ix->recs[rec].packed = packed;
   ix->recs[rec].seq    = seq;
   ix->recs[rec].live   = 1u;
   ix->recs[rec].folded = vm.folded;
@@ -1408,7 +1503,9 @@ static void atp_fv_index_rebuild(AtpState *s) {
   ix->root    = atp_dt_node_new(ix, ATP_DT_NIL);
   for (u32 i = 0; i < ix->seqmap_cap; i++) ix->seqmap[i].seq = ATP_DT_NIL;
   for (u32 i = 0; i < s->n_cps; i++) {
-    atp_fv_index_insert(ix, s->cp_lhs[i], s->cp_rhs[i], s->cp_seq[i]);
+    Term l = 0, r = 0;
+    acp_unpack(s->cp_packed[i], &l, &r);
+    atp_fv_index_insert(ix, l, r, s->cp_packed[i], s->cp_seq[i]);
   }
 }
 
@@ -1472,10 +1569,11 @@ static u8 atp_dt_leaf_match(u32 node) {
     if (!rc->live) continue;
     ix->q_candidates++;
     if (!rc->folded && !g_atp_dt_query_folded) return 1;  // exact descent
+    // Match the stored CP straight off its packed byte string -- no
+    // per-candidate acp_unpack (the late-game FV-index hot path).
     RewriteSubst subst = {{0}};
     ix->q_matchcalls += 2u;
-    if (thvm_match(rc->lhs, g_atp_dt_qlhs, &subst) &&
-        thvm_match(rc->rhs, g_atp_dt_qrhs, &subst)) {
+    if (acp_match_pair(rc->packed, g_atp_dt_qlhs, g_atp_dt_qrhs, &subst)) {
       return 1;
     }
   }
@@ -1563,8 +1661,7 @@ static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
       ix->q_candidates++;
       RewriteSubst subst = {{0}};
       ix->q_matchcalls += 2u;
-      if (thvm_match(ix->recs[r].lhs, o_lhs, &subst) &&
-          thvm_match(ix->recs[r].rhs, o_rhs, &subst)) {
+      if (acp_match_pair(ix->recs[r].packed, o_lhs, o_rhs, &subst)) {
         return 1;
       }
     }
@@ -2244,8 +2341,12 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->rhs);
   free(s->r_trace);
   free(s->r_orient);
-  free(s->cp_lhs);
-  free(s->cp_rhs);
+  // Each cp_packed[] slot is a malloc'd byte string the queue owns;
+  // free every non-NULL slot (free(NULL) is a no-op) then the array.
+  if (s->cp_packed != NULL) {
+    for (u32 i = 0; i < s->cp_cap; i++) free(s->cp_packed[i]);
+    free(s->cp_packed);
+  }
   free(s->cp_trace);
   free(s->cp_pri);
   free(s->cp_seq);
@@ -2291,33 +2392,30 @@ fn void thvm_atp_heap_reset(u64 checkpoint) {
 //
 // Live Term fields rooted here:
 //   - lhs[0..n_rules), rhs[0..n_rules)        -- the rule set R
-//   - cp_lhs[0..n_cps), cp_rhs[0..n_cps)      -- the CP queue
 //   - goal_lhs, goal_rhs                      -- the conjecture
 //   - trace[0..n_trace)                       -- TAG_CTR entries
 //                                                (each holds lhs/rhs)
 //   - witness_subst.bindings[0..REWRITE_MAX_VAR) -- narrowing σ
+//
+// The CP queue is NOT rooted: after the Waldmeister Stringterms port
+// each queued CP is a packed byte string in plain malloc memory
+// (cp_packed[]), outside the managed heap, so the collector never
+// touches it.  This is the structural fix for the late-game GC wall.
+// The subsumption-index records borrow those byte strings (u8 *, not
+// Term), so the index needs no rooting either.
 //
 // Returns 1 if a collection ran, 0 if GC is disabled / no state.
 fn u8 thvm_atp_gc_collect(AtpState *s) {
   if (s == NULL || !gc_enabled()) return 0;
 
   // Count the root slots so we can size the array exactly.
-  u32 n_roots = 2u * s->n_rules + 2u * s->n_cps + 2u /* goal */
+  u32 n_roots = 2u * s->n_rules + 2u /* goal */
               + s->n_trace + REWRITE_MAX_VAR;
 #ifdef ATP_CP_GRAPH
   // 8b: cp_graph is now a thing reductions act on (atp_normalize_graph
   // rewrites it), so its CTR cells must be relocated by the collector,
   // not rebuilt afterward.  One extra root slot for the CpSet term.
   n_roots += 1u;
-#endif
-#ifdef ATP_FV_INDEX
-  // 7d: each FV-index record mirrors a queued CP's (lhs, rhs).  The
-  // FV keys are ints (GC-invariant), but the mirror Terms move with
-  // the heap -- root them so the collector relocates them in
-  // lockstep with cp_lhs[]/cp_rhs[].  2 slots per record (live AND
-  // dead -- a dead record's stale Term is harmless to relocate and
-  // skipping it would need a live-count pre-pass).
-  if (s->fv_index != NULL) n_roots += 2u * s->fv_index->n_recs;
 #endif
 #ifdef ATP_MNF
   // Milestone 10: every MNF coloured node holds a reached Term.  Root
@@ -2333,10 +2431,6 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
     roots[w++] = s->lhs[i];
     roots[w++] = s->rhs[i];
   }
-  for (u32 i = 0; i < s->n_cps; i++) {
-    roots[w++] = s->cp_lhs[i];
-    roots[w++] = s->cp_rhs[i];
-  }
   roots[w++] = s->goal_lhs;
   roots[w++] = s->goal_rhs;
   for (u32 i = 0; i < s->n_trace; i++) roots[w++] = s->trace[i];
@@ -2346,15 +2440,6 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #ifdef ATP_CP_GRAPH
   u32 cp_graph_root = w;
   roots[w++] = s->cp_graph;
-#endif
-#ifdef ATP_FV_INDEX
-  u32 fv_rec_root = w;
-  if (s->fv_index != NULL) {
-    for (u32 i = 0; i < s->fv_index->n_recs; i++) {
-      roots[w++] = s->fv_index->recs[i].lhs;
-      roots[w++] = s->fv_index->recs[i].rhs;
-    }
-  }
 #endif
 #ifdef ATP_MNF
   u32 mnf_node_root = w;
@@ -2370,10 +2455,6 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
     s->lhs[i] = roots[w++];
     s->rhs[i] = roots[w++];
   }
-  for (u32 i = 0; i < s->n_cps; i++) {
-    s->cp_lhs[i] = roots[w++];
-    s->cp_rhs[i] = roots[w++];
-  }
   s->goal_lhs = roots[w++];
   s->goal_rhs = roots[w++];
   for (u32 i = 0; i < s->n_trace; i++) s->trace[i] = roots[w++];
@@ -2382,26 +2463,11 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   }
 #ifdef ATP_CP_GRAPH
   // 8b: cp_graph was rooted, so the collector relocated its CpSet +
-  // Cp[] cells in place.  Hash-consing means each leaf's lhs/rhs cell
-  // is the SAME cell as the mirror's cp_lhs[i]/cp_rhs[i], which the
-  // Cheney forwarding pointers relocate consistently.  Write the moved
-  // CpSet back; a debug assertion confirms it still mirrors the arrays
-  // -- no rebuild-everything pass.
+  // Cp[] cells in place.  Write the moved CpSet back; a debug
+  // assertion confirms it still decodes to the cp_packed[] queue
+  // (unpacked) -- no rebuild-everything pass.
   s->cp_graph = roots[cp_graph_root];
   atp_cp_graph_assert(s);
-#endif
-#ifdef ATP_FV_INDEX
-  // 7d: write the relocated mirror Terms back into the FV records.
-  // The FV keys / trie / seq map are pure ints -- a structural
-  // feature is invariant under a Cheney copy -- so they need no
-  // fixup: a relocated CP keeps its FV and stays in its trie slot.
-  if (s->fv_index != NULL) {
-    u32 rw = fv_rec_root;
-    for (u32 i = 0; i < s->fv_index->n_recs; i++) {
-      s->fv_index->recs[i].lhs = roots[rw++];
-      s->fv_index->recs[i].rhs = roots[rw++];
-    }
-  }
 #endif
 #ifdef ATP_MNF
   // Write the relocated reached-Terms back into the MNF nodes.  No
@@ -2833,7 +2899,7 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
 
 // === 7c': CP-queue binary min-heap ==================================
 //
-// The CP queue (cp_lhs/cp_rhs/cp_trace/cp_pri/cp_seq) is kept as a
+// The CP queue (cp_packed/cp_trace/cp_pri/cp_seq) is kept as a
 // binary min-heap ordered by (cp_pri, cp_seq): cheapest priority
 // first, insertion order breaking ties.  This reproduces the old
 // `--add` selection order (collapse_ordered sorted by INC depth,
@@ -2846,10 +2912,11 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
   return s->cp_seq[i] < s->cp_seq[j];
 }
 
-// Swap all five parallel CP arrays at slots i, j.
+// Swap all four parallel CP arrays at slots i, j.  cp_packed swaps the
+// pointer only -- the byte string itself does not move, so a
+// subsumption-index record still borrows a valid buffer after a sift.
 static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
-  Term tl = s->cp_lhs[i];   s->cp_lhs[i]   = s->cp_lhs[j];   s->cp_lhs[j]   = tl;
-  Term tr = s->cp_rhs[i];   s->cp_rhs[i]   = s->cp_rhs[j];   s->cp_rhs[j]   = tr;
+  u8  *tc = s->cp_packed[i];s->cp_packed[i]= s->cp_packed[j];s->cp_packed[j]= tc;
   u32  tt = s->cp_trace[i]; s->cp_trace[i] = s->cp_trace[j]; s->cp_trace[j] = tt;
   u32  tp = s->cp_pri[i];   s->cp_pri[i]   = s->cp_pri[j];   s->cp_pri[j]   = tp;
   u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
@@ -2880,8 +2947,13 @@ static void atp_cp_sift_down(AtpState *s, u32 i) {
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   atp_ensure_cp_cap(s, s->n_cps + 1);
   u32 i = s->n_cps;
-  s->cp_lhs[i]   = lhs;
-  s->cp_rhs[i]   = rhs;
+  // Pack the CP into a byte string outside the managed heap.  Slot i
+  // (== n_cps) is always NULL here -- atp_ensure_cp_cap NULL-inits new
+  // slots and every pop / drop NULLs the slot it vacates.  `packed`
+  // is the buffer's identity; a later sift only moves the pointer
+  // between slots, so it stays valid for the index borrow below.
+  u8  *packed    = acp_pack(lhs, rhs, NULL);
+  s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
   s->cp_pri[i]   = atp_cp_priority(s, lhs, rhs);
   u32 seq        = s->cp_seq_next++;
@@ -2891,10 +2963,10 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   // 8a: keep cp_graph in lockstep with the array mirror.
   atp_cp_graph_sync(s);
 #ifdef ATP_FV_INDEX
-  // 7d: index the new CP under its (GC-stable) seq id.  The trie
-  // keys on the FV, not the heap slot, so the sift-up above does not
-  // touch the index.
-  atp_fv_index_insert(s->fv_index, lhs, rhs, seq);
+  // 7d: index the new CP under its (GC-stable) seq id.  The record
+  // borrows `packed`; the trie keys on the FV, not the heap slot, so
+  // the sift-up above does not touch the index.
+  atp_fv_index_insert(s->fv_index, lhs, rhs, packed, seq);
 #endif
 }
 
@@ -2911,58 +2983,47 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
 // Returns 1 on success (out-params populated), 0 on empty queue.
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL || s->n_cps == 0) return 0;
-#ifdef ATP_CP_GRAPH
-  // 8a: read the popped CP's terms from the IC-native cp_graph
-  // (decode the slot-0 leaf), not the array.  The array is the
-  // synced mirror -- atp_cp_graph_assert guarantees the decode
-  // yields exactly cp_lhs[0] / cp_rhs[0], so this is bit-identical
-  // to the array engine while exercising the graph read path.
-  {
-    Term gl = 0, gr = 0;
-    int ok = atp_cp_decode_leaf(term_ctr_at(s->cp_graph, 0), &gl, &gr);
-    assert(ok && "select_cp: cp_graph slot 0 must be a Cp[] leaf");
-    *lhs_out = gl;
-    *rhs_out = gr;
-  }
-#else
-  *lhs_out = s->cp_lhs[0];
-  *rhs_out = s->cp_rhs[0];
-#endif
+  // Unpack the cheapest CP (heap root) from its byte string into two
+  // fresh heap Terms for the caller to normalize.
+  acp_unpack(s->cp_packed[0], lhs_out, rhs_out);
   s->last_popped_trace = s->cp_trace[0];
 #ifdef ATP_FV_INDEX
   // 7d: the popped CP leaves the queue -- drop it from the index so a
   // later subsumption query never matches a stale, no-longer-queued
-  // CP (which would diverge from the array-scan verdict).
-  u32 popped_seq = s->cp_seq[0];
+  // CP (which would diverge from the array-scan verdict).  Mark the
+  // record dead BEFORE freeing the byte string it borrows: a dead
+  // record is never dereferenced, so the borrow stays sound.
+  atp_fv_index_remove(s->fv_index, s->cp_seq[0]);
 #endif
+  free(s->cp_packed[0]);
+  s->cp_packed[0] = NULL;
   s->n_cps--;
   if (s->n_cps > 0) {
     u32 last = s->n_cps;
-    s->cp_lhs[0]   = s->cp_lhs[last];
-    s->cp_rhs[0]   = s->cp_rhs[last];
+    s->cp_packed[0]    = s->cp_packed[last];
+    s->cp_packed[last] = NULL;          // vacated slot: leave it empty
     s->cp_trace[0] = s->cp_trace[last];
     s->cp_pri[0]   = s->cp_pri[last];
     s->cp_seq[0]   = s->cp_seq[last];
     atp_cp_sift_down(s, 0);
   }
-#ifdef ATP_FV_INDEX
-  atp_fv_index_remove(s->fv_index, popped_seq);
-#endif
   // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
   atp_cp_graph_sync(s);
   return 1;
 }
 
-// 7c': re-establish the CP-queue heap invariant over cp_lhs[0..n_cps)
-// / cp_rhs[0..n_cps).  The normal path keeps the queue a heap via
-// atp_cp_heap_push, but a caller (chiefly tests) that populates
-// cp_lhs/cp_rhs/n_cps directly must call this so cp_pri / cp_seq are
-// filled and the array satisfies the heap order before select / peek.
+// 7c': re-establish the CP-queue heap invariant over cp_packed[0..n_cps).
+// The normal path keeps the queue a heap via atp_cp_heap_push, but a
+// caller (chiefly tests) that populates cp_packed / n_cps directly
+// (via thvm_atp_cp_set) must call this so cp_pri / cp_seq are filled
+// and the array satisfies the heap order before select / peek.
 fn void thvm_atp_cp_reheapify(AtpState *s) {
   if (s == NULL || s->n_cps == 0) return;
   atp_ensure_cp_cap(s, s->n_cps);
   for (u32 i = 0; i < s->n_cps; i++) {
-    s->cp_pri[i] = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
+    Term l = 0, r = 0;
+    acp_unpack(s->cp_packed[i], &l, &r);
+    s->cp_pri[i] = atp_cp_priority(s, l, r);
     s->cp_seq[i] = s->cp_seq_next++;
   }
   // Floyd build-heap: sift down every internal node, last to first.
@@ -3751,16 +3812,20 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
         }
       }
     }
-    if (!orphan) {
-      if (w != i) {
-        s->cp_lhs[w]   = s->cp_lhs[i];
-        s->cp_rhs[w]   = s->cp_rhs[i];
-        s->cp_trace[w] = s->cp_trace[i];
-        s->cp_pri[w]   = s->cp_pri[i];
-        s->cp_seq[w]   = s->cp_seq[i];
-      }
-      w++;
+    if (orphan) {
+      // Drop the orphan -- free its byte string (the queue owns it).
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      continue;
     }
+    if (w != i) {
+      s->cp_packed[w] = s->cp_packed[i];
+      s->cp_packed[i] = NULL;
+      s->cp_trace[w]  = s->cp_trace[i];
+      s->cp_pri[w]    = s->cp_pri[i];
+      s->cp_seq[w]    = s->cp_seq[i];
+    }
+    w++;
   }
   if (w != s->n_cps) {
     s->n_cps = w;
@@ -3967,8 +4032,8 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
 
 // Stage 7.3b: queue subsumption check.  Returns 1 if the candidate
 // `(lhs, rhs)` is a substitution instance of some queued CP
-// `(s->cp_lhs[k], s->cp_rhs[k])` -- i.e., there is σ such that
-// `(lhs, rhs) = (σ cp_lhs[k], σ cp_rhs[k])` (or symmetric).
+// the CP unpacked from `s->cp_packed[k]` -- i.e., there is σ such
+// that `(lhs, rhs) = (σ qs[k], σ qt[k])` (or symmetric).
 //
 // Genuinely orthogonal to 7.1: the queue does not participate in
 // `thvm_rewrite_normalize`, so a CP can be queue-subsumed without
@@ -4007,24 +4072,13 @@ static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
 #else
 static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
   for (u32 k = 0; k < s->n_cps; k++) {
-    Term qs = s->cp_lhs[k];
-    Term qt = s->cp_rhs[k];
+    // Match the queued CP straight off its packed byte string.
     // Forward: σqs = lhs AND σqt = rhs (one σ).
-    {
-      RewriteSubst subst = {{0}};
-      if (thvm_match(qs, lhs, &subst) &&
-          thvm_match(qt, rhs, &subst)) {
-        return 1;
-      }
-    }
+    RewriteSubst fwd = {{0}};
+    if (acp_match_pair(s->cp_packed[k], lhs, rhs, &fwd)) return 1;
     // Symmetric.
-    {
-      RewriteSubst subst = {{0}};
-      if (thvm_match(qs, rhs, &subst) &&
-          thvm_match(qt, lhs, &subst)) {
-        return 1;
-      }
-    }
+    RewriteSubst sym = {{0}};
+    if (acp_match_pair(s->cp_packed[k], rhs, lhs, &sym)) return 1;
   }
   return 0;
 }
@@ -4385,8 +4439,7 @@ fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
   }
   qsort(ent, s->n_cps, sizeof(AtpPeekEnt), atp_peek_cmp);
   for (u32 i = 0; i < k; i++) {
-    out_lhs[i] = s->cp_lhs[ent[i].idx];
-    out_rhs[i] = s->cp_rhs[ent[i].idx];
+    acp_unpack(s->cp_packed[ent[i].idx], &out_lhs[i], &out_rhs[i]);
   }
   free(ent);
   return k;

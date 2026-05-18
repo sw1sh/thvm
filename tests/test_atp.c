@@ -27,7 +27,7 @@ static const KboConfig DUMMY_CFG = {
 };
 
 // Test wrapper for atp_cp_queue_subsumed.  These tests populate
-// s->cp_lhs[] / s->n_cps directly, so with -DATP_CP_GRAPH the
+// the queue (thvm_atp_cp_set) / s->n_cps directly, so with -DATP_CP_GRAPH the
 // IC-native cp_graph is stale until thvm_atp_cp_reheapify resyncs
 // it -- 8e routes queue subsumption through cp_graph (one
 // thvm_match_multi traversal), so the resync must happen before the
@@ -168,8 +168,10 @@ int main(void) {
     CHECK_EQ(s->n_cps,      1u);
     // 7c: under -DATP_VAR_NORM the queued CP is the canonically
     // renumbered (alpha-renamed) input -- compare up to that.
-    CHECK(kbo_eq(s->cp_lhs[0], tt_norm_lhs(lhs, rhs)));
-    CHECK(kbo_eq(s->cp_rhs[0], tt_norm_rhs(lhs, rhs)));
+    Term q_lhs = 0, q_rhs = 0;
+    thvm_atp_cp_get(s, 0, &q_lhs, &q_rhs);
+    CHECK(kbo_eq(q_lhs, tt_norm_lhs(lhs, rhs)));
+    CHECK(kbo_eq(q_rhs, tt_norm_rhs(lhs, rhs)));
     thvm_atp_free(s);
   }
 
@@ -274,8 +276,10 @@ int main(void) {
     thvm_atp_select_cp(s, &lo, &ro);
     CHECK_EQ(s->n_cps, 1u);
     // The remaining equation is now at slot 0.
-    CHECK(s->cp_lhs[0] != 0);
-    CHECK_EQ(term_ext(s->cp_lhs[0]), LAB_a);
+    Term q_lhs = 0, q_rhs = 0;
+    thvm_atp_cp_get(s, 0, &q_lhs, &q_rhs);
+    CHECK(q_lhs != 0);
+    CHECK_EQ(term_ext(q_lhs), LAB_a);
     thvm_atp_free(s);
   }
 
@@ -1118,8 +1122,7 @@ int main(void) {
     // (f(x, e), x).  A candidate (f(a, e), a) is its instance
     // under σ = {x -> a}; queue-subsumed should fire.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->cp_trace[0] = ATP_TRACE_NONE;
     s->n_cps = 1;
 
@@ -1133,8 +1136,7 @@ int main(void) {
   {
     // Same setup but candidate sides swapped.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->cp_trace[0] = ATP_TRACE_NONE;
     s->n_cps = 1;
 
@@ -1159,8 +1161,7 @@ int main(void) {
     // Queue has (f(x, e), x).  Candidate (g(a), a) does not
     // unify with the queued LHS (different head symbol).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->n_cps = 1;
 
     Term lhs = mk_a();         // not a CTR with the f label
@@ -1179,8 +1180,7 @@ int main(void) {
     //
     // Pre-queue the more-general (f(x, e), x).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->cp_trace[0] = ATP_TRACE_NONE;
     s->n_cps = 1;
 
@@ -1198,7 +1198,7 @@ int main(void) {
     s->n_rules = 0;   // no rules so trivially-joinable doesn't fire spuriously
 
     // 8e: atp_push_cps_traced routes queue subsumption through
-    // cp_graph; resync it from the hand-populated cp_lhs[]/n_cps.
+    // cp_graph; resync it from the hand-populated cp_packed[]/n_cps.
     thvm_atp_cp_reheapify(s);
 
     CriticalPair batch[1];
@@ -1359,8 +1359,7 @@ int main(void) {
   TEST_BEGIN("atp/peek/k-zero-returns-zero");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_a();
-    s->cp_rhs[0] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_a(), mk_e());
     s->n_cps = 1;
     Term o_lhs[1], o_rhs[1];
     CHECK_EQ(thvm_atp_peek_top_k(s, 0u, o_lhs, o_rhs), 0u);
@@ -1372,8 +1371,7 @@ int main(void) {
   TEST_BEGIN("atp/peek/singleton");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_a();
-    s->cp_rhs[0] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_a(), mk_e());
     s->n_cps = 1;
     Term o_lhs[2] = {0, 0}, o_rhs[2] = {0, 0};
     u32 n = thvm_atp_peek_top_k(s, 2u, o_lhs, o_rhs);
@@ -1392,12 +1390,10 @@ int main(void) {
     // CP_BIG = (f(f(x, e), e), x), size 5+1=6
     // CP_MID = (f(x, e), x),         size 3+1=4
     // CP_SML = (a, e),               size 1+1=2
-    s->cp_lhs[0] = mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
-    s->cp_lhs[1] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[1] = mk_v(VAR_x);
-    s->cp_lhs[2] = mk_a();
-    s->cp_rhs[2] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e()),
+                    mk_v(VAR_x));
+    thvm_atp_cp_set(s, 1, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_cp_set(s, 2, mk_a(), mk_e());
     s->n_cps = 3;
     thvm_atp_cp_reheapify(s);  // 7c': hand-built queue -> heap
 
@@ -1418,8 +1414,8 @@ int main(void) {
   TEST_BEGIN("atp/peek/k-greater-than-n-clamps");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_a(); s->cp_rhs[0] = mk_e();
-    s->cp_lhs[1] = mk_e(); s->cp_rhs[1] = mk_a();
+    thvm_atp_cp_set(s, 0, mk_a(), mk_e());
+    thvm_atp_cp_set(s, 1, mk_e(), mk_a());
     s->n_cps = 2;
     thvm_atp_cp_reheapify(s);  // 7c': hand-built queue -> heap
     Term o_lhs[10], o_rhs[10];
@@ -1433,10 +1429,8 @@ int main(void) {
     // Peek shows cheapest first; subsequent select_cp should pop
     // the same CP that peek's [0] revealed.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
-    s->cp_lhs[1] = mk_a();
-    s->cp_rhs[1] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_cp_set(s, 1, mk_a(), mk_e());
     s->n_cps = 2;
     s->cp_trace[0] = 100;
     s->cp_trace[1] = 200;
