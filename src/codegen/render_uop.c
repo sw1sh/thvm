@@ -712,25 +712,50 @@ static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
 // for-loops were never emitted (the reduce-axis range was unreachable)
 // or `required_pos` undercounts that flat-hoist a reduce above the
 // output loops it actually needs.
+// Per-recursion bound-axis tracker.  When descending into a UOP_REDUCE
+// body, the reduce-axis is bound by the reduce loop and shouldn't
+// surface as a free range in the caller's collection (it would consume
+// a slot in the MAX_DIM=8 ranges[] cap and also conflict with
+// RMU_EMIT_ONE_REDUCE's loop emit).  The bound-axis list is small
+// (capped at 2*MAX_DIM since reduce-axes nest at most that deep) and
+// scanned linearly per UOP_RANGE leaf.
+#define RMU_BOUND_AXIS_CAP (2 * MAX_DIM)
+static int rmu_axis_is_bound(u32 const *bound, u32 n_bound, u32 aid) {
+  for (u32 i = 0; i < n_bound; i++) if (bound[i] == aid) return 1;
+  return 0;
+}
+
 static void rmu_collect_ranges_rec_through_reduce(
     Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors,
-    u32 *n_out, u32 inherit_kind, u32 inherit_factor) {
+    u32 *n_out, u32 inherit_kind, u32 inherit_factor,
+    u32 *bound_axes, u32 *n_bound) {
   if (term_tag(t) != TAG_UOP) return;
   if (*n_out >= MAX_DIM) return;
   u32 op  = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_REDUCE) {
-    // The reduce-axis at heap_read(loc + 2) is a raw u32 axis id --
-    // NOT a UOP_RANGE term -- so the body recursion can't accidentally
-    // surface it independently; the corresponding UOP_RANGE node lives
-    // inside the body itself and will be collected naturally.
+    // Push the reduce-axis id onto the bound set, descend into body,
+    // then pop.  Without this push the reduce-axis's UOP_RANGE leaf
+    // inside the body would land in ranges[] and either consume slots
+    // (MAX_DIM=8 cap) needed for genuine free aux LOOP axes, or
+    // double-emit a for-loop conflicting with RMU_EMIT_ONE_REDUCE.
+    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    int pushed = 0;
+    if (!rmu_axis_is_bound(bound_axes, *n_bound, r_aid)
+        && *n_bound < RMU_BOUND_AXIS_CAP) {
+      bound_axes[*n_bound] = r_aid;
+      (*n_bound)++;
+      pushed = 1;
+    }
     rmu_collect_ranges_rec_through_reduce(
         heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
-        RMU_NO_OPT, 0);
+        RMU_NO_OPT, 0, bound_axes, n_bound);
+    if (pushed) (*n_bound)--;
     return;
   }
   if (op == UOP_RANGE) {
     u32 axis_id = term_val(heap_read(loc + 0));
+    if (rmu_axis_is_bound(bound_axes, *n_bound, axis_id)) return;
     for (u32 i = 0; i < *n_out; i++) {
       u32 existing = term_val(heap_read(term_val(ranges[i]) + 0));
       if (existing == axis_id) return;
@@ -748,40 +773,40 @@ static void rmu_collect_ranges_rec_through_reduce(
     case UOP_INDEX_E:
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
-          RMU_NO_OPT, 0);
+          RMU_NO_OPT, 0, bound_axes, n_bound);
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out,
-          RMU_NO_OPT, 0);
+          RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
-          RMU_NO_OPT, 0);
+          RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     case UOP_IWHERE:
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
-          RMU_NO_OPT, 0);
+          RMU_NO_OPT, 0, bound_axes, n_bound);
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out,
-          RMU_NO_OPT, 0);
+          RMU_NO_OPT, 0, bound_axes, n_bound);
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 2), ranges, opt_kinds, opt_factors, n_out,
-          RMU_NO_OPT, 0);
+          RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     case UOP_OPT: {
       u32 kind   = term_val(heap_read(loc + 1));
       u32 factor = term_val(heap_read(loc + 2));
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
-          kind, factor);
+          kind, factor, bound_axes, n_bound);
       return;
     }
     case UOP_CAST: case UOP_BITCAST:
       rmu_collect_ranges_rec_through_reduce(
           heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out,
-          RMU_NO_OPT, 0);
+          RMU_NO_OPT, 0, bound_axes, n_bound);
       return;
     default:
       return;
@@ -792,14 +817,18 @@ static void rmu_collect_ranges_through_reduce(
     Term t, Term *ranges, u32 *n_out) {
   u32 dummy_kinds[MAX_DIM]   = {0};
   u32 dummy_factors[MAX_DIM] = {0};
+  u32 bound[RMU_BOUND_AXIS_CAP];
+  u32 n_bound = 0;
   rmu_collect_ranges_rec_through_reduce(
-      t, ranges, dummy_kinds, dummy_factors, n_out, 0, 0);
+      t, ranges, dummy_kinds, dummy_factors, n_out, 0, 0, bound, &n_bound);
 }
 
 static void rmu_collect_ranges_with_opts_through_reduce(
     Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors, u32 *n_out) {
+  u32 bound[RMU_BOUND_AXIS_CAP];
+  u32 n_bound = 0;
   rmu_collect_ranges_rec_through_reduce(
-      t, ranges, opt_kinds, opt_factors, n_out, RMU_NO_OPT, 0);
+      t, ranges, opt_kinds, opt_factors, n_out, RMU_NO_OPT, 0, bound, &n_bound);
 }
 
 // Returns 1 if `kind`/`axis_type` indicates the axis binds directly to
@@ -2310,7 +2339,14 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   u32  opt_factors[MAX_DIM] = {0};
   u32  n_ranges = 0;
   rmu_collect_ranges_with_opts(addr,  ranges, opt_kinds, opt_factors, &n_ranges);
-  rmu_collect_ranges_with_opts(value, ranges, opt_kinds, opt_factors, &n_ranges);
+  // Descend into UOP_REDUCE bodies on the value side so auxiliary LOOP
+  // axes minted inside a reduce body (e.g. a swizzler-decomposed pool
+  // window axis whose enclosing UOP_REDUCE chain was elsewhere lost)
+  // still get a for-loop in the emitted kernel.  Reduce-axes that bind
+  // their own loop via RMU_EMIT_ONE_REDUCE get filtered out below so
+  // they don't double-emit.
+  rmu_collect_ranges_with_opts_through_reduce(
+      value, ranges, opt_kinds, opt_factors, &n_ranges);
 
   // Collect output-axis ids: ranges in the addr expression are
   // output axes (they index the store position).  Ranges that
