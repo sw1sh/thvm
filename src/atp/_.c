@@ -2321,6 +2321,20 @@ static Term atp_ordered_rewrite_step(AtpState *s, Term t,
 static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
                                           const Term *lhs, const Term *rhs,
                                           u32 n_rules, u32 step_cap) {
+#ifdef ATP_RULE_INDEX
+  // Completion only ever adds ORIENTED rules (lhs > rhs) -- s->has_unorient
+  // stays 0.  With every rule oriented, every forward rewrite is
+  // order-decreasing, so the discrimination-tree normalizer is an exact
+  // equivalent of the linear ordered scan (same outermost-leftmost
+  // redex, same lowest-index rule) and replaces the per-position
+  // O(n_rules) thvm_match scan with a tree descent.  An unorientable
+  // equation, should one ever appear, flips has_unorient and drops back
+  // to the linear path (where both rewrite directions are order-gated).
+  if (!s->has_unorient && lhs == s->lhs && rhs == s->rhs &&
+      n_rules == s->n_rules) {
+    return atp_rewrite_normalize_indexed(s, t, step_cap);
+  }
+#endif
   for (u32 i = 0; i < step_cap; i++) {
     u8 fired = 0;
     Term t2 = atp_ordered_rewrite_step(s, t, lhs, rhs, n_rules, &fired);
@@ -2648,6 +2662,7 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // Cache the rule's orientation once -- atp_ordered_try_top reads this
   // instead of recomputing a full KBO compare per rewrite position.
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
+  if (!s->r_orient[s->n_rules]) s->has_unorient = 1u;
   s->n_rules++;
 #ifdef ATP_RULE_INDEX
   // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.

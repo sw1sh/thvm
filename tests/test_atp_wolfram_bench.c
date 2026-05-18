@@ -244,6 +244,9 @@ int main(int argc, char **argv) {
          "rule-subsumed=%u connected=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
          s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected);
+  { u32 unor = 0;
+    for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;
+    printf("   unorientable rules: %u / %u\n", unor, s->n_rules); }
 
 #ifdef ATP_NORM_STATS
   // 8b: optimal-sharing ratio of the cross-CP normalization memo.
