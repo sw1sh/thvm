@@ -1770,10 +1770,19 @@ static u32 atp_ri_query_pos(u32 qpos) {
 // Find the FIRST preorder position of the shared subject that is a
 // redex (some rule LHS matches there).  Preorder = outermost-leftmost
 // = exactly `thvm_rewrite_step`'s "try top, then children left-to-
-// right" order.  Sets *redex_pos / *redex_rule and returns 1; returns
-// 0 if the subject has no redex.
-static u8 atp_ri_find_redex(u32 flatlen, u32 *redex_pos, u32 *redex_rule) {
+// right" order.  `clean_before` is the previous step's rewrite
+// position: every position strictly before it that is NOT one of its
+// ancestors (q + subsz[q] <= clean_before) was unchanged by that
+// rewrite and was already found non-redex, so it is skipped -- the
+// search re-examines only the ancestors and the changed subtree.  This
+// returns the identical redex a full scan would (incremental
+// outermost normalisation, Waldmeister's ascend-from-last-redex).
+static u8 atp_ri_find_redex(u32 flatlen, u32 clean_before,
+                            u32 *redex_pos, u32 *redex_rule) {
   for (u32 p = 0; p < flatlen; p++) {
+    if (p < clean_before && p + g_atp_ri_subsz[p] <= clean_before) {
+      continue;                              // unchanged, known non-redex
+    }
     u32 m = atp_ri_query_pos(p);
     if (m != ATP_RI_NIL) {
       *redex_pos  = p;
@@ -1827,7 +1836,9 @@ static Term atp_ri_apply_at(Term t, u32 redex_pos, const u32 *subsz,
 // redex (first preorder position), same rule (lowest index), same
 // substitution (the leaf's `thvm_match`).
 static Term atp_ri_rewrite_step(AtpState *s, Term t,
-                                Term *flat, u32 *subsz, u32 *flatsym) {
+                                Term *flat, u32 *subsz, u32 *flatsym,
+                                u32 clean_before, u32 *out_redex) {
+  *out_redex = 0u;
   u32 flatlen = 0u;
   AtpRiVarMap vm;
   atp_ri_varmap_reset(&vm);
@@ -1845,9 +1856,10 @@ static Term atp_ri_rewrite_step(AtpState *s, Term t,
   g_atp_ri_query_folded = vm.folded;
 
   u32 redex_pos = 0u, redex_rule = 0u;
-  if (!atp_ri_find_redex(flatlen, &redex_pos, &redex_rule)) {
+  if (!atp_ri_find_redex(flatlen, clean_before, &redex_pos, &redex_rule)) {
     return t;                                     // no redex: fixpoint
   }
+  *out_redex = redex_pos;
   // Re-derive the substitution for the chosen rule at the redex
   // subterm, apply its RHS, splice it back into `t`.
   Term subj = flat[redex_pos];
@@ -1872,10 +1884,14 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
   static u32  flatsym[ATP_RI_FLAT_CAP];
+  u32 prev_redex = 0u;                  // 0 on the first step -> full scan
   for (u32 i = 0; i < step_cap; i++) {
-    Term t2 = atp_ri_rewrite_step(s, t, flat, subsz, flatsym);
+    u32 redex_pos = 0u;
+    Term t2 = atp_ri_rewrite_step(s, t, flat, subsz, flatsym,
+                                  prev_redex, &redex_pos);
     if (kbo_eq(t, t2)) return t;
     t = t2;
+    prev_redex = redex_pos;
   }
   return t;
 }
