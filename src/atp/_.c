@@ -1501,7 +1501,13 @@ fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
 #define ATP_RI_STAR_BASE  1u
 #define ATP_RI_CTR_BASE   (ATP_RI_STAR_BASE + ATP_RI_MAXVARS)
 #define ATP_RI_NIL        0xFFFFFFFFu
-#define ATP_RI_FLAT_CAP   4096u
+// Preorder-flatten capacity for the indexed normalizer.  Sized to
+// hold a raw (un-reduced) critical-pair side -- the deep overlap of
+// two rules can run to tens of thousands of nodes before it is
+// normalized down; an over-deep subject still works (the normalizer
+// takes linear steps and re-flattens once rewriting shrinks it back
+// under the cap) but pays the linear rate while it does.
+#define ATP_RI_FLAT_CAP   65536u
 
 // Per-term variable renumbering by first appearance (see 7d's
 // AtpDtVarMap).  `slot[id]` holds (index+1); 0 = not yet seen.
@@ -1939,27 +1945,35 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
   static u32  flatsym[ATP_RI_FLAT_CAP];
-  u32 flatlen = 0u;
-  u8  folded  = 0u;
-  if (!atp_ri_flatten(t, flat, subsz, flatsym, &folded, ATP_RI_FLAT_CAP,
-                      &flatlen)) {
-    // Over-deep subject: the flat arrays cannot represent it.  Finish
-    // the whole normalize on the linear rewriter -- correct, just slow.
-    for (u32 i = 0; i < step_cap; i++) {
-      Term t2 = thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
-      if (kbo_eq(t, t2)) return t;
-      t = t2;
-    }
-    return t;
-  }
   g_atp_ri_ix      = s->rule_index;
   g_atp_ri_flat    = flat;
   g_atp_ri_subsz   = subsz;
   g_atp_ri_flatsym = flatsym;
   g_atp_ri_lhs     = s->lhs;
 
-  u32 prev_redex = 0u;                  // 0 on the first step -> full scan
+  u32 flatlen = 0u;
+  u8  folded  = 0u;
+  // Flatten the subject into the persistent arrays.  An over-deep term
+  // (> ATP_RI_FLAT_CAP nodes -- a raw critical-pair side can be) cannot
+  // be flattened: the loop then takes a single linear rewrite step and
+  // RE-FLATTENS, so the fast splice path resumes the instant rewriting
+  // shrinks the term back under the cap (a whole-normalize linear
+  // fallback would never resume).
+  u8  flattened   = atp_ri_flatten(t, flat, subsz, flatsym, &folded,
+                                   ATP_RI_FLAT_CAP, &flatlen);
+  u32 prev_redex  = 0u;                 // 0 on the first step -> full scan
   for (u32 i = 0; i < step_cap; i++) {
+    if (!flattened) {
+      // Over-deep: one linear rewrite, then retry the flatten.
+      Term t2 = thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
+      if (kbo_eq(t, t2)) return t;       // fixpoint
+      t = t2;
+      flatlen = 0u; folded = 0u;
+      flattened = atp_ri_flatten(t, flat, subsz, flatsym, &folded,
+                                 ATP_RI_FLAT_CAP, &flatlen);
+      prev_redex = 0u;
+      continue;
+    }
     g_atp_ri_query_folded = folded;
     u32 redex_pos = 0u, redex_rule = 0u;
     if (!atp_ri_find_redex(flatlen, prev_redex, &redex_pos, &redex_rule)) {
@@ -1984,22 +1998,18 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
     Term repl   = thvm_subst_apply(s->rhs[redex_rule], &subst);
     u32  cursor = 0u;
     t = atp_ri_apply_at(t, redex_pos, subsz, repl, &cursor);
-    // Splice the rewrite into the flat arrays; on overrun, re-flatten.
+    // Splice the rewrite into the flat arrays; on overrun, re-flatten
+    // (which resumes the splice path, or trips the linear branch above
+    // if the term grew over-deep).
     if (!atp_ri_splice(flat, subsz, flatsym, &flatlen, &folded,
                        redex_pos, repl, ATP_RI_FLAT_CAP)) {
-      flatlen = 0u;
-      folded  = 0u;
-      if (!atp_ri_flatten(t, flat, subsz, flatsym, &folded,
-                          ATP_RI_FLAT_CAP, &flatlen)) {
-        for (u32 j = i + 1; j < step_cap; j++) {
-          Term t2 = thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
-          if (kbo_eq(t, t2)) return t;
-          t = t2;
-        }
-        return t;
-      }
+      flatlen = 0u; folded = 0u;
+      flattened = atp_ri_flatten(t, flat, subsz, flatsym, &folded,
+                                 ATP_RI_FLAT_CAP, &flatlen);
+      prev_redex = 0u;
+    } else {
+      prev_redex = redex_pos;
     }
-    prev_redex = redex_pos;
   }
   return t;
 }
@@ -2478,15 +2488,17 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
                                           const Term *lhs, const Term *rhs,
                                           u32 n_rules, u32 step_cap) {
 #ifdef ATP_RULE_INDEX
-  // Completion only ever adds ORIENTED rules (lhs > rhs) -- s->has_unorient
-  // stays 0.  With every rule oriented, every forward rewrite is
-  // order-decreasing, so the discrimination-tree normalizer is an exact
-  // equivalent of the linear ordered scan (same outermost-leftmost
-  // redex, same lowest-index rule) and replaces the per-position
-  // O(n_rules) thvm_match scan with a tree descent.  An unorientable
-  // equation, should one ever appear, flips has_unorient and drops back
-  // to the linear path (where both rewrite directions are order-gated).
-  if (!s->has_unorient && lhs == s->lhs && rhs == s->rhs &&
+  // When EVERY rule in R is KBO-oriented (lhs > rhs), every forward
+  // rewrite is order-decreasing, so the discrimination-tree normalizer
+  // is an exact equivalent of the linear ordered scan (same outermost-
+  // leftmost redex, same lowest-index rule) and replaces the per-
+  // position O(n_rules) thvm_match scan with a tree descent.  An
+  // unorientable equation, while present in R, drops to the linear
+  // path (where both rewrite directions are order-gated).  `n_unorient`
+  // is a live COUNT, not a sticky flag: a transient unorientable rule
+  // -- interreduced away or re-oriented after reduction -- restores the
+  // indexed path the moment R is orientable again.
+  if (s->n_unorient == 0u && lhs == s->lhs && rhs == s->rhs &&
       n_rules == s->n_rules) {
     return atp_rewrite_normalize_indexed(s, t, step_cap);
   }
@@ -2818,7 +2830,7 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   // Cache the rule's orientation once -- atp_ordered_try_top reads this
   // instead of recomputing a full KBO compare per rewrite position.
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
-  if (!s->r_orient[s->n_rules]) s->has_unorient = 1u;
+  if (!s->r_orient[s->n_rules]) s->n_unorient++;
   s->n_rules++;
 #ifdef ATP_RULE_INDEX
   // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.
@@ -3616,6 +3628,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         atp_dead[atp_n_dead++] = s->r_trace[i];
       }
 #endif
+      // Keep the unorientable-rule count live: the dropped rule leaves
+      // R here (it re-enters as a queued equation, re-counted only if
+      // re-oriented unorientable at its next atp_push_rule).
+      if (!s->r_orient[i]) s->n_unorient--;
       for (u32 j = i + 1; j < s->n_rules; j++) {
         s->lhs[j - 1]      = s->lhs[j];
         s->rhs[j - 1]      = s->rhs[j];

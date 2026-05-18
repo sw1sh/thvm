@@ -1572,3 +1572,43 @@ against the 1-2 freshly added rules, and that 1-2-rule slice is not
 the index is blocked by per-rule self-exclusion -- an older rule's LHS
 sits in `s->lhs` and would be rewritten by the rule itself.  That is
 the next tick's target.
+
+### 16 -- iter 10: the over-deep fallback was eating its own tail
+
+The next-tick suspicion above (interreduction) was WRONG.  Tracing the
+`thvm_rewrite_step` calls in the profile pinned them on a different
+caller: `atp_cp_trivially_joinable`, the iter-8 CP normaliser.  It feeds
+the RAW (un-reduced) critical-pair side to `atp_rewrite_normalize` --
+and a raw overlap of two deep rules runs to tens of thousands of nodes.
+That overran `ATP_RI_FLAT_CAP` (4096), and iter 9's over-deep fallback
+then ran the ENTIRE normalize on the linear rewriter -- it never
+re-checked whether the term had shrunk back under the cap.  iter 9's
+own incremental flatten had quietly regressed the over-deep case (the
+pre-iter-9 code retried the indexed path every step).
+
+The fix has three parts:
+
+- The over-deep fallback is now PER-STEP: one linear `thvm_rewrite_step`,
+  then re-flatten -- so the splice path resumes the instant rewriting
+  shrinks the subject back under the cap (normalisation is weight-
+  decreasing, so a huge raw CP collapses under cap within a few steps).
+- `ATP_RI_FLAT_CAP` 4096 -> 65536, so most raw CP sides flatten
+  directly into the indexed path with no linear detour at all.
+- The sticky `s->has_unorient` flag became a live count `s->n_unorient`
+  (incremented in `atp_push_rule`, decremented when `thvm_atp_interreduce`
+  drops a rule).  The old flag latched on the first unorientable rule
+  and NEVER cleared, permanently banning the indexed normaliser even
+  after the rule was interreduced away.  It happens never to trip on
+  `thm` (no incomparable CP is selected), but it was a latent O(n)-per-
+  normalize cliff for any problem that produces one.
+
+Measured on `thm`: 30 s wall reaches 200 steps, up from 147 (~1.36x);
+`thvm_rewrite_step` drops out of the profile top-15 entirely and
+`thvm_match` falls 6568 -> 105 samples.  `thm` at a fixed 120 steps is
+bit-identical (`steps=120 rules=71 cps=7951 max_cps=9022`) -- the change
+is transparent.  `test_atp` 8544/8544; the ladder proves.
+
+The wall is now `atp_ri_apply_at` (~37%) and `atp_ri_descend` (~27%) --
+the indexed normaliser's per-step tree rebuild and discrimination-tree
+descent.  That is genuinely the indexed normaliser earning its keep;
+the linear rewriter is finally off the hot path.

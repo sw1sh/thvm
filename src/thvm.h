@@ -2957,7 +2957,7 @@ typedef struct {
   u8   *r_orient;            // r_orient[i]=1 iff rule i is KBO-oriented (lhs>rhs)
   u32   n_rules;
   u32   r_cap;
-  u8    has_unorient;        // sticky: an unorientable rule was ever added
+  u32   n_unorient;          // count of unorientable rules currently in R
 
   // CP queue (open-form: not INC-wrapped here; the priority encoding
   // happens at selection time in thvm_atp_select).  cp_trace[i]
