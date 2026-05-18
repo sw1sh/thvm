@@ -1778,37 +1778,50 @@ static void atp_ri_leaf_collect(u32 node) {
 // bindings in g_atp_ri_star.  Visits EVERY reachable leaf (does not
 // stop early) so g_atp_ri_best ends at the global minimum matching
 // rule index for this position.
+//
+// At most ONE child can match a CTR/NUM subject head (the children
+// carry distinct symbols), so that branch is a tail continuation: it
+// is followed by LOOPING -- advancing `node`/`pos` in place -- rather
+// than recursing.  Only the STAR (rule-variable) branches, which can
+// fan out, recurse.  For the typical CTR spine of a rule LHS the whole
+// descent is then one loop with no call overhead.
 static void atp_ri_descend(u32 node, u32 pos) {
   AtpRuleIndex *ix = g_atp_ri_ix;
-  if (pos == g_atp_ri_qend) {
-    atp_ri_leaf_collect(node);
-    return;
-  }
-  u32 sz         = g_atp_ri_subsz[pos];
-  u32 csym_exact = g_atp_ri_flatsym[pos];   // CTR_BASE+lab / NUM / STAR+idx
-  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
-       c = ix->nodes[c].sibling) {
-    u32 csym = ix->nodes[c].sym;
-    if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
-      // Stored rule variable: FIRST occurrence binds it to this
-      // subterm's preorder position; a REPEAT applies only if the two
-      // subterms' flatsym slices are byte-identical (one-way matching).
-      u32 k = csym - ATP_RI_STAR_BASE;
-      u32 bound = g_atp_ri_star[k];
-      if (bound == ATP_RI_NIL) {
-        g_atp_ri_star[k] = pos;
-        atp_ri_descend(c, pos + sz);
-        g_atp_ri_star[k] = ATP_RI_NIL;
-      } else if (g_atp_ri_subsz[bound] == sz &&
-                 memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
-                        (size_t)sz * sizeof(u32)) == 0) {
-        atp_ri_descend(c, pos + sz);
-      }
-    } else if (csym == csym_exact) {
-      // Stored CTR/NUM equal to the subject's head: consume the head;
-      // the subject's children are the next preorder positions.
-      atp_ri_descend(c, pos + 1u);
+  for (;;) {
+    if (pos == g_atp_ri_qend) {
+      atp_ri_leaf_collect(node);
+      return;
     }
+    u32 sz         = g_atp_ri_subsz[pos];
+    u32 csym_exact = g_atp_ri_flatsym[pos];   // CTR_BASE+lab / NUM / STAR+idx
+    u32 ctr_next   = ATP_RI_NIL;              // the lone CTR-match child
+    for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+         c = ix->nodes[c].sibling) {
+      u32 csym = ix->nodes[c].sym;
+      if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+        // Stored rule variable: FIRST occurrence binds it to this
+        // subterm's preorder position; a REPEAT applies only if the two
+        // subterms' flatsym slices are byte-identical (one-way matching).
+        u32 k = csym - ATP_RI_STAR_BASE;
+        u32 bound = g_atp_ri_star[k];
+        if (bound == ATP_RI_NIL) {
+          g_atp_ri_star[k] = pos;
+          atp_ri_descend(c, pos + sz);
+          g_atp_ri_star[k] = ATP_RI_NIL;
+        } else if (g_atp_ri_subsz[bound] == sz &&
+                   memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
+                          (size_t)sz * sizeof(u32)) == 0) {
+          atp_ri_descend(c, pos + sz);
+        }
+      } else if (csym == csym_exact) {
+        // Stored CTR/NUM equal to the subject's head: consume the head;
+        // the subject's children are the next preorder positions.
+        ctr_next = c;
+      }
+    }
+    if (ctr_next == ATP_RI_NIL) return;       // no CTR continuation: done
+    node = ctr_next;                          // tail-continue without a call
+    pos  = pos + 1u;
   }
 }
 

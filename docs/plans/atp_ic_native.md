@@ -1684,3 +1684,28 @@ drops ~88 % of them (joinable or queue-subsumed) after normalising
 each.  Cutting CP generation (Waldmeister's prime-critical-pair and
 connectedness criteria, currently counter-only under `ATP_CP_DIAG`) is
 the next real target, and a larger change than one descent tweak.
+
+### 19 -- iter 13: a hybrid loop/recursion descent
+
+iter 13 reconsidered the CP-count lever and rejected it: thvm's two
+dormant criteria (`atp_cp_source_disjoint_connected`,
+`atp_cp_rule_subsumed`) are, per their own domination lemmas, strictly
+WEAKER than the joinability check that already runs -- activating them
+drops zero additional CPs.  And the ~166 k queue-subsumed pairs are
+genuinely distinct raw overlaps that converge only under
+normalisation, so they cannot be filtered without normalising.  The
+descent is inherent to the workload.
+
+What IS removable is call overhead.  `atp_ri_descend` recurses for
+every tree edge it follows.  But a CTR/NUM subject head matches at most
+ONE child (children carry distinct symbols), so that branch is a tail
+continuation -- it can LOOP (advance `node`/`pos` in place) instead of
+recursing.  Only the STAR (rule-variable) branches, which fan out,
+still recurse.  For the CTR spine of a rule LHS -- the bulk of every
+descent -- the whole walk is now one loop with no per-node call.
+
+Back-to-back `thm`@200: 16.52 s -> 15.74 s median, a ~4.7 % speedup
+(every run of the new code beat every run of the old).  `thm`@120 is
+bit-identical (`steps=120 rules=71 cps=7951`); `test_atp` 8544/8544;
+the ladder proves.  Transparent -- identical traversal, identical
+results, just fewer stack frames.
