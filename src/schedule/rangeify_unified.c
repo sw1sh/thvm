@@ -1201,9 +1201,16 @@ static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
 // Without rewiring, the spliced subtree carries the producer-scope
 // axis_ids verbatim and uop_subtree_has_stranded_range trips because
 // cpu_uop_walk only sets up loop slots for the consumer's iter axes.
+//
+// CAP at 2*RU_MAX_AXES so we have room for the OUT_RNGS rewire pairs
+// (one per axis, up to RU_MAX_AXES) PLUS the fresh-range injections
+// (also up to RU_MAX_AXES) used when a producer-internal range that
+// was a REDUCE-axis got stripped past `ru_rewrite_subtree` and needs a
+// fresh consumer-scope range with an enclosing REDUCE_SUM scaffold.
+#define RU_AXIS_SUBST_CAP (RU_MAX_AXES * 2)
 typedef struct {
-  u32 from_aid[RU_MAX_AXES];   // producer-side axis_id to replace
-  Term to_term [RU_MAX_AXES];  // consumer-side replacement Term
+  u32 from_aid[RU_AXIS_SUBST_CAP];   // producer-side axis_id to replace
+  Term to_term [RU_AXIS_SUBST_CAP];  // consumer-side replacement Term
   u8  n;
 } RuAxisSubst;
 
@@ -1215,6 +1222,74 @@ static int ru_axis_subst_lookup(RuAxisSubst const *m, u32 aid, Term *out) {
     }
   }
   return 0;
+}
+
+// Free-axis tracker used to find producer-scope RANGE leaves in a
+// spliced subtree without an enclosing UOP_REDUCE.  As we descend into
+// a UOP_REDUCE we push its axis_id onto the bound-set; on exit we pop.
+// A UOP_RANGE leaf whose axis_id is NOT in the bound set is "free" --
+// the caller's iter scope is responsible for iterating it.
+//
+// We cap the bound set at RU_AXIS_SUBST_CAP since reduce-axes nest at
+// most as deep as the producer's value subtree, which is bounded by
+// RU_MAX_AXES * 2 in practice (each REDUCE level adds one axis).
+typedef struct {
+  u32 bound_aids[RU_AXIS_SUBST_CAP];
+  u8  n_bound;
+  u32 free_aids[RU_AXIS_SUBST_CAP];
+  u8  n_free;
+} RuFreeAxisSet;
+
+static int ru_free_axis_bound_has(RuFreeAxisSet const *s, u32 aid) {
+  for (u8 i = 0; i < s->n_bound; i++) if (s->bound_aids[i] == aid) return 1;
+  return 0;
+}
+
+static int ru_free_axis_free_has(RuFreeAxisSet const *s, u32 aid) {
+  for (u8 i = 0; i < s->n_free; i++) if (s->free_aids[i] == aid) return 1;
+  return 0;
+}
+
+static void ru_free_axis_add_free(RuFreeAxisSet *s, u32 aid) {
+  if (ru_free_axis_free_has(s, aid)) return;
+  if (s->n_free < RU_AXIS_SUBST_CAP) s->free_aids[s->n_free++] = aid;
+}
+
+// Walk subtree `t`, populate `s->free_aids` with axis_ids of UOP_RANGE
+// leaves that are NOT inside the scope of a UOP_REDUCE with matching
+// axis.  Stops at UOP_BUFFER / UOP_BUFFERIZE / UOP_KERNEL leaves
+// (opaque boundaries; their internal ranges are scoped separately).
+static void ru_collect_free_axes_rec(Term t, RuFreeAxisSet *s, u32 depth) {
+  if (depth > 128) return;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) {
+    u32 aid = uop_range_axis_id(r);
+    if (!ru_free_axis_bound_has(s, aid)) ru_free_axis_add_free(s, aid);
+    return;
+  }
+  if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return;
+  u64 loc = term_val(r);
+  if (op == UOP_REDUCE) {
+    // The REDUCE's axis cell at heap[loc + 2] is the axis_id (a raw u32
+    // stored as a TAG_NUM Term).  Push it onto the bound set, recurse
+    // into the body, then pop.
+    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    int pushed = 0;
+    if (!ru_free_axis_bound_has(s, r_aid)
+        && s->n_bound < RU_AXIS_SUBST_CAP) {
+      s->bound_aids[s->n_bound++] = r_aid;
+      pushed = 1;
+    }
+    ru_collect_free_axes_rec(heap_read(loc + 0), s, depth + 1);
+    if (pushed) s->n_bound--;
+    return;
+  }
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    ru_collect_free_axes_rec(heap_read(loc + i), s, depth + 1);
+  }
 }
 
 // Walk a spliced subtree and rebuild it with each UOP_RANGE leaf whose
@@ -1268,7 +1343,7 @@ static RuAxisSubst ru_build_axis_subst(u32 pidx,
   if (!prm->has_ranges) return m;
   u8 nd = prm->out_ndim;
   if (nd > consumer_rm->in_ndim) nd = consumer_rm->in_ndim;
-  for (u8 a = 0; a < nd && m.n < RU_MAX_AXES; a++) {
+  for (u8 a = 0; a < nd && m.n < RU_AXIS_SUBST_CAP; a++) {
     Term pr = prm->out_rngs[a];
     Term cr = consumer_rm->in_rngs[a];
     if (term_tag(pr) != TAG_UOP || term_ext(pr) != UOP_RANGE) continue;
@@ -1433,6 +1508,112 @@ fn void pm_apply_rangeify(Term root) {
 
     Term self = term_new(0, TAG_UOP, info->op, info->loc);
 
+    // Compute the rewritten subtree FIRST for both realize / non-realize
+    // paths.  The realize path uses it as the BUFFERIZE's stored value;
+    // the non-realize path uses it directly as the splice substitute.
+    // After computing, we apply REDUCE-axis rewire / repair / trivial-
+    // strip, then run the strand check that may force-realize.
+    Term in_addr   = ru_build_input_addr_for(rm, info->loc);
+    Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
+                                        in_addr, rm);
+    // Rewire UOP_REDUCE's axis field from the original shape-axis index
+    // (e.g. "axis 1 of {3,2}") to the freshly minted UOP_RANGE's axis_id.
+    // uop_graph_rebuild_with_srcs preserves the original axis cell from
+    // info->loc, but downstream walkers (cpu_uop_walk's uwalk_run_reduce,
+    // render_uop's rmu_emit_store_reduce) match the REDUCE's stored axis
+    // against the body's UOP_RANGE.axis_id -- which is now the fresh
+    // RU_REDUCE_RANGES[i].ranges[0]'s axis_id, not the shape-axis index.
+    if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 1
+        && term_tag(rewritten) == TAG_UOP
+        && term_ext(rewritten) == UOP_REDUCE) {
+      Term rng = RU_REDUCE_RANGES[i].ranges[0];
+      u32 r_aid = (u32)term_val(heap_read(term_val(rng) + 0));
+      u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
+      Term src  = heap_read(term_val(rewritten) + 0);
+      rewritten = uop_reduce(kind, r_aid, src);
+      // Repair: if the rewritten body lost the reduce-axis RANGE leaf
+      // (e.g. a stride-0 broadcast collapsed past ru_rewrite_subtree),
+      // collapse the REDUCE to `body * extent` (SUM) or `body` (MAX).
+      rewritten = ru_reduce_repair_broadcast_body(rewritten, rng);
+    }
+    // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
+    // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
+    // == 0.  cpu_uop_walk's uwalk_run_reduce would find no UOP_RANGE
+    // in the body and return 0 (the r_extent==0 fallback at uop_walk.c
+    // line 567).  Mirror the legacy lifter's behavior and unwrap the
+    // REDUCE shell to its source: sum_{i in [0,1)} f(i) == f(0).
+    if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 0
+        && term_tag(rewritten) == TAG_UOP
+        && term_ext(rewritten) == UOP_REDUCE) {
+      rewritten = heap_read(term_val(rewritten) + 0);
+    }
+
+    // Force-realize when the rewritten subtree contains FREE RANGE
+    // leaves whose axis_ids aren't covered by either:
+    //   (a) the producer's out_rngs (consumers substitute these on
+    //       splice via ru_build_axis_subst), OR
+    //   (b) the producer's own REDUCE shells in the subtree (the
+    //       walker tracks bound-axes via REDUCE descent).
+    // Any other free axis_id is a "stranded" producer-internal range:
+    // a partial-realize child's closed_range leaked through the
+    // BUFFERIZE inline rewriter, or a REDUCE-axis whose enclosing
+    // REDUCE got stripped past ru_rewrite_subtree.  Splicing such a
+    // subtree into a consumer trips uop_subtree_has_stranded_range
+    // because the consumer's iter scope has no slot for that axis.
+    // Force-realize converts the producer to a UOP_BUFFERIZE leaf so
+    // the consumer reads via INDEX_E(BUFFERIZE, addr) at its own iter
+    // and the inner ranges stay scoped to the producer's BUFFERIZE
+    // body (whose closed_ranges = out_rngs cover them).
+    //
+    // Producer's iter scope (out_rngs) must include at least one
+    // non-extent-1 axis -- otherwise this is a scalar producer (all
+    // axes collapsed to CONST(0)) and force-realize would emit a
+    // 1-element BUFFERIZE which the materialize.c rewriter mis-handles
+    // as a broadcast read (numel-1 path).  For scalar producers, the
+    // free RANGEs in the rewritten subtree come from a deeper
+    // producer's iter that should remain inlined; the strand check is
+    // a false positive at this node and the deeper producer (with
+    // non-trivial out_rngs) is where realize should actually fire.
+    int has_nontrivial_out_axis = 0;
+    for (u8 a = 0; a < rm->out_ndim; a++) {
+      Term pr = rm->out_rngs[a];
+      if (term_tag(pr) == TAG_UOP && term_ext(pr) == UOP_RANGE) {
+        has_nontrivial_out_axis = 1;
+        break;
+      }
+    }
+    if (!realized && has_nontrivial_out_axis) {
+      RuFreeAxisSet fs;
+      fs.n_bound = 0;
+      fs.n_free  = 0;
+      ru_collect_free_axes_rec(rewritten, &fs, 0);
+      int stranded = 0;
+      for (u8 fi = 0; fi < fs.n_free; fi++) {
+        u32 aid = fs.free_aids[fi];
+        int covered = 0;
+        for (u8 a = 0; a < rm->out_ndim && !covered; a++) {
+          Term pr = rm->out_rngs[a];
+          if (term_tag(pr) == TAG_UOP && term_ext(pr) == UOP_RANGE
+              && uop_range_axis_id(pr) == aid) {
+            covered = 1;
+          }
+        }
+        if (!covered) { stranded = 1; break; }
+      }
+      if (stranded) {
+        // Switch this node to realized_full.  The realize branch below
+        // will emit BUFFERIZE with closed_ranges = out_rngs, so the
+        // consumer reads at its own iter (no inlined stranded axes).
+        RU_REALIZE_MAP[i].realized_full = 1;
+        RU_REALIZE_MAP[i].n_realized_axes = rm->out_ndim;
+        RU_REALIZE_MAP[i].axes_mask =
+            (rm->out_ndim < 8) ? (u8)((1u << rm->out_ndim) - 1u) : 0xFFu;
+        RU_LAST_NEW_REALIZES++;
+        RU_LAST_FULL_REALIZES++;
+        realized = 1;
+      }
+    }
+
     if (realized) {
       // Mirror indexing.py:75-77:
       //   new_src = UOp(Ops.BUFFERIZE, s.dtype, src=(new_src,)+closed_ranges,
@@ -1443,44 +1624,7 @@ fn void pm_apply_rangeify(Term root) {
       // ORIGINAL op Term) because downstream materialize.c consumers
       // resolve through it via term_resolve / heap_read identity.
       // my_addr is the OUTPUT addr (uop_store(buf, my_addr, value)).
-      // in_addr threads INPUT (TAG_TEN / cross-realize BUFFERIZE) loads
-      // at this op's INPUT iter: REDUCE injects the reduce range, and
-      // movement ops (EXPAND, PAD, SHRINK, PERMUTE, FLIP) swizzle axes
-      // so a stride-0 broadcast axis becomes CONST(0). Built from
-      // rm->in_rngs uniformly; the elementwise case is the identity
-      // in_rngs == out_rngs and falls through to the same shape.
-      Term my_addr   = ru_build_index_addr_for(rm, self);
-      Term in_addr   = ru_build_input_addr_for(rm, info->loc);
-      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
-                                          in_addr, rm);
-      // Same REDUCE-axis rewire as the non-realized branch below: when
-      // this node itself is a REDUCE that landed at the realize boundary,
-      // its axis cell still holds the original shape-axis index. The
-      // walker expects the fresh UOP_RANGE.axis_id.
-      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 1
-          && term_tag(rewritten) == TAG_UOP
-          && term_ext(rewritten) == UOP_REDUCE) {
-        Term rng = RU_REDUCE_RANGES[i].ranges[0];
-        u32 r_aid = (u32)term_val(heap_read(term_val(rng) + 0));
-        u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
-        Term src  = heap_read(term_val(rewritten) + 0);
-        rewritten = uop_reduce(kind, r_aid, src);
-        // Repair: if the rewritten body lost its reduce-axis RANGE leaf
-        // (e.g. a stride-0 broadcast collapsed past ru_rewrite_subtree),
-        // collapse the REDUCE to `body * extent` (SUM) or `body` (MAX).
-        rewritten = ru_reduce_repair_broadcast_body(rewritten, rng);
-      }
-      // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
-      // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
-      // == 0.  cpu_uop_walk's uwalk_run_reduce would find no UOP_RANGE
-      // in the body and return 0 (the r_extent==0 fallback at uop_walk.c
-      // line 567).  Mirror the legacy lifter's behavior and unwrap the
-      // REDUCE shell to its source: sum_{i in [0,1)} f(i) == f(0).
-      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 0
-          && term_tag(rewritten) == TAG_UOP
-          && term_ext(rewritten) == UOP_REDUCE) {
-        rewritten = heap_read(term_val(rewritten) + 0);
-      }
+      Term my_addr = ru_build_index_addr_for(rm, self);
       // The realized-store value subtree for movement-op nodes (EXPAND,
       // RESHAPE, PERMUTE, PAD, SHRINK, FLIP): ru_rewrite_subtree returns
       // the rebuilt movement shell wrapping an INDEX_E whose addr
@@ -1551,44 +1695,12 @@ fn void pm_apply_rangeify(Term root) {
     } else {
       // Mirror indexing.py:107 (passthrough INDEX without BUFFERIZE wrap).
       // The consumer threads our VALUE EXPRESSION at the current iter.
-      // RU_SUBST is the REWRITTEN subtree: TAG_TEN children are wrapped
-      // with INDEX_E at the input addr (in_rngs for REDUCE, out_rngs
-      // otherwise), and downstream producer RU_SUBSTs are spliced in.
-      // The consumer's own ru_rewrite_subtree then plugs this in
-      // verbatim (its TAG_UOP child branch hits our RU_SUBST entry).
-      Term in_addr   = ru_build_input_addr_for(rm, info->loc);
-      Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
-                                          in_addr, rm);
-      // Rewire UOP_REDUCE's axis field from the original shape-axis index
-      // (e.g. "axis 1 of {3,2}") to the freshly minted UOP_RANGE's axis_id.
-      // uop_graph_rebuild_with_srcs preserves the original axis cell from
-      // info->loc, but downstream walkers (cpu_uop_walk's uwalk_run_reduce,
-      // render_uop's rmu_emit_store_reduce) match the REDUCE's stored axis
-      // against the body's UOP_RANGE.axis_id -- which is now the fresh
-      // RU_REDUCE_RANGES[i].ranges[0]'s axis_id, not the shape-axis index.
-      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 1
-          && term_tag(rewritten) == TAG_UOP
-          && term_ext(rewritten) == UOP_REDUCE) {
-        Term rng = RU_REDUCE_RANGES[i].ranges[0];
-        u32 r_aid = (u32)term_val(heap_read(term_val(rng) + 0));
-        u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
-        Term src  = heap_read(term_val(rewritten) + 0);
-        rewritten = uop_reduce(kind, r_aid, src);
-        // Repair: same fix as the realized branch above.  When the
-        // rewritten body lost the reduce-axis RANGE leaf (a stride-0
-        // broadcast collapsed past ru_rewrite_subtree), collapse the
-        // REDUCE shell to `body * extent` (SUM) or `body` (MAX).
-        rewritten = ru_reduce_repair_broadcast_body(rewritten, rng);
-      }
-      // Trivial REDUCE (extent-1 reduce axis): see the realized branch
-      // above for the same identity.  Without this strip, downstream
-      // consumers splice in a UOP_REDUCE whose body has no UOP_RANGE
-      // leaf, and the walker silently returns 0.
-      if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 0
-          && term_tag(rewritten) == TAG_UOP
-          && term_ext(rewritten) == UOP_REDUCE) {
-        rewritten = heap_read(term_val(rewritten) + 0);
-      }
+      // RU_SUBST is the REWRITTEN subtree (computed and finalized above):
+      // TAG_TEN children are wrapped with INDEX_E at the input addr
+      // (in_rngs for REDUCE, out_rngs otherwise), and downstream
+      // producer RU_SUBSTs are spliced in.  The consumer's own
+      // ru_rewrite_subtree then plugs this in verbatim (its TAG_UOP
+      // child branch hits our RU_SUBST entry).
       RU_SUBST[i] = rewritten;
     }
 
