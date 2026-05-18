@@ -1709,3 +1709,39 @@ Back-to-back `thm`@200: 16.52 s -> 15.74 s median, a ~4.7 % speedup
 bit-identical (`steps=120 rules=71 cps=7951`); `test_atp` 8544/8544;
 the ladder proves.  Transparent -- identical traversal, identical
 results, just fewer stack frames.
+
+### 20 -- iter 14: thvm could not finish `thm` at all
+
+iter 14 asked the question the per-step optimisation never did: does
+thvm actually PROVE `thm`?  Run uncapped, it does NOT -- it dies with
+`heap_alloc: from-space exhausted` around step 230.  Every speedup so
+far only moved the crash later.
+
+GC instrumentation found the cause -- and it is NOT a leak.  The live
+working set is small (the queued-CP term total is under 1M cells; the
+whole live set 3-20M).  The crash is a single saturation STEP
+out-allocating a GC semi-space.  The collector ran only at step top,
+but one step overlaps the new rules against ~all of R -- ~120 pairs,
+each producing raw critical pairs (the un-normalised overlap of two
+deep rules is tens of thousands of nodes) plus a NORM_CAP-deep
+normalisation each.  A late step's transient scratch exceeds the
+~128M-cell semi-space, and from-space exhausts mid-step before the
+next step-top collection can run.
+
+The fix: collect between overlap PAIRS.  `thvm_atp_generate_cps` (both
+the IC and the C path) now runs `thvm_atp_gc_collect` after each
+pair's `atp_push_cps_traced`, when `atp_heap_under_pressure()`.  At
+that point `buf` is fully processed -- its kept CPs are already in the
+GC-rooted queue, its raw CPs are garbage -- so no in-flight CP needs
+rooting and the collection is safe.  The per-step transient is now
+bounded to one pressure window instead of a whole step.
+
+`thm` runs to the wall cap (`RUNNING`, step 233 and climbing) instead
+of crashing.  And collecting garbage promptly keeps the working set
+tighter: `thm`@200 15.44 s -> 14.80 s, ~4.5% faster.  Transparent --
+`thm`@120 bit-identical (`steps=120 rules=71 cps=7951`), `test_atp`
+8544/8544, the ladder proves.
+
+(At step ~230 the subsumption index degrades -- `fv-retrieval` climbs
+to ~790 candidates/query as the queue passes 30k CPs and queries spill
+to the full-scan fallback.  That is the next tick's target.)

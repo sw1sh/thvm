@@ -3970,6 +3970,12 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
       pushed += atp_push_cps_traced(s, buf, nbuf,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
+      // A single saturation step can out-allocate a whole GC
+      // semi-space in raw critical-pair + normalisation scratch.
+      // Collect between overlap pairs -- `buf` is fully processed
+      // here, so no in-flight CP needs rooting -- to bound the
+      // transient working set instead of crashing mid-step.
+      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
     }
   }
 
@@ -3982,6 +3988,7 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
       pushed += atp_push_cps_traced(s, buf, nbuf,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
+      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);   // see above
     }
   }
 
@@ -4084,6 +4091,10 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       pushed += atp_push_cps_traced(s, buf, ctx.count,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
+      // Bound the per-step transient: a step can out-allocate a GC
+      // semi-space in raw-CP + normalisation scratch.  `buf` is fully
+      // processed here, so a collection between overlap pairs is safe.
+      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
     }
   }
 
@@ -4101,6 +4112,7 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       pushed += atp_push_cps_traced(s, buf, ctx.count,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
+      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);   // see above
     }
   }
 
