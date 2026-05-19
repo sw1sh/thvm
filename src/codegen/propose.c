@@ -355,5 +355,46 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
       }
     }
   }
+
+  // CUDA: propose KOP_LOCAL on an output LOOP axis -- maps the tile to
+  // a CUDA threadblock.  LOCAL is never offered on the non-Metal path
+  // otherwise (the blocks above give UPCAST/UNROLL only), yet it is
+  // the key occupancy lever: cuda_dag_dispatch_shape launches a
+  // LOCAL-split kernel with the matching block geometry, so these
+  // candidates are dispatchable.  Reduce-tail kernels (matmul) are
+  // included -- the output LOOP axes tile independently of the
+  // in-thread reduce axis, so this fires whether axis_size is 0 or not.
+  if (propose_cuda_backend_enabled()) {
+    static const u32 cuda_local[] = {256, 128, 64, 32};
+    u32 n_cuda_local = sizeof(cuda_local) / sizeof(*cuda_local);
+    for (u32 i = 0; i < n_cuda_local && n < cap; i++) {
+      u8 loop_axis = propose_loop_axis_for_factor(ke, 0, cuda_local[i]);
+      if (loop_axis == 0xFF) continue;
+      out[n].op   = KOP_LOCAL;
+      out[n].axis = loop_axis;
+      out[n].arg  = cuda_local[i];
+      n++;
+    }
+    // KOP_UPCAST: each thread computes `factor` output rows -- the
+    // outputs-per-thread tiling lever (raises arithmetic intensity,
+    // shrinks the launched thread count).  UPCAST is in-thread, so
+    // cuda_dag_dispatch_shape leaves it out of the grid/block and the
+    // flat geometry already covers it -- no dispatch change needed.
+    // Gated on axis_size > 0 (reduce-tail kernels -- matmul): the
+    // elementwise block above already proposes UPCAST when axis_size
+    // is 0, so this only fills the matmul gap it leaves.
+    if (axis_size > 0) {
+      static const u32 cuda_upcast[] = {8, 4, 2};
+      u32 n_cuda_upcast = sizeof(cuda_upcast) / sizeof(*cuda_upcast);
+      for (u32 i = 0; i < n_cuda_upcast && n < cap; i++) {
+        u8 loop_axis = propose_loop_axis_for_factor(ke, 0, cuda_upcast[i]);
+        if (loop_axis == 0xFF) continue;
+        out[n].op   = KOP_UPCAST;
+        out[n].axis = loop_axis;
+        out[n].arg  = cuda_upcast[i];
+        n++;
+      }
+    }
+  }
   return n;
 }
