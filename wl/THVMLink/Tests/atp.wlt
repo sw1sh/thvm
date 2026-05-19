@@ -716,3 +716,31 @@ VerificationTest[
     Success,
     TestID -> "ATP/TFEP/numeric-literal-constant-verifies"
 ]
+
+(* === TFindEquationalProof: multi-equation conjectures ============== *)
+
+(* AxiomaticTheory ships some NotableTheorems as a multi-element list
+   of equations -- e.g. BooleanAxioms `DeMorgan` is the pair of De
+   Morgan laws.  The string form proves each conjunct separately and
+   returns a List of ProofObjects (equational provability distributes
+   over conjunction). *)
+
+VerificationTest[
+    MatchQ[
+        TFindEquationalProof["DeMorgan", "BooleanAxioms"],
+        {_ProofObject, _ProofObject}
+    ],
+    True,
+    TestID -> "ATP/TFEP/multi-eq-demorgan-proves"
+]
+
+VerificationTest[
+    Module[{ps},
+        ps = TFindEquationalProof["DeMorgan", "BooleanAxioms"];
+        AllTrue[ps,
+            Head @ Quiet @ Check[
+                #["ProofFunction"][#["Theorems"]], $Failed] === Success &]
+    ],
+    True,
+    TestID -> "ATP/TFEP/multi-eq-demorgan-verifies"
+]

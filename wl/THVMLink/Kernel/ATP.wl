@@ -38,7 +38,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.";
 
 (* Forward-declare symbols owned by sibling files (Switch.wl owns
    the IC term constructors) so bare references inside
@@ -1334,13 +1334,34 @@ TFindEquationalProof[thm_String, theory_String, opts:OptionsPattern[]] := Catch[
                     "\", \"NotableTheorems\"]"|>],
                 "TATPError"]
         ];
-        (* A NotableTheorem resolves to a one-element list holding
-           the theorem formula. *)
-        cjRaw = If[ ListQ[cjRaw] && Length[cjRaw] === 1,
-            First[cjRaw], cjRaw];
         axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
-        conjecture = CanonicalizePatterns @ unquantifyFormula @ cjRaw;
-        TFindEquationalProof[conjecture, axioms, opts]
+        (* A NotableTheorem resolves to a list of equation formulas:
+           a one-element list holds a single theorem, a longer list
+           is a conjunction (e.g. BooleanAxioms `DeMorgan` ships both
+           DeMorgan equations).  Equational provability distributes
+           over conjunction -- {eq1, ..., eqn} holds iff each eq_i
+           does -- so prove each conjunct separately, returning a
+           list of ProofObjects.  $Failed if any conjunct fails. *)
+        Which[
+            ! ListQ[cjRaw],
+                TFindEquationalProof[
+                    CanonicalizePatterns @ unquantifyFormula @ cjRaw,
+                    axioms, opts],
+            Length[cjRaw] === 1,
+                TFindEquationalProof[
+                    CanonicalizePatterns @ unquantifyFormula @ First[cjRaw],
+                    axioms, opts],
+            True,
+                Module[{proofs},
+                    proofs = Table[
+                        TFindEquationalProof[
+                            CanonicalizePatterns @ unquantifyFormula @ c,
+                            axioms, opts],
+                        {c, cjRaw}];
+                    If[ AllTrue[proofs, Head[#] === ProofObject &],
+                        proofs, $Failed]
+                ]
+        ]
     ],
     "TATPError"
 ]
