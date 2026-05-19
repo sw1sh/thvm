@@ -1,16 +1,13 @@
-// uop/dag_scan.c -- read-side scanners over a UOp DAG.
+// uop/dag_scan.c -- read-side scanners over a lifted UOp DAG.
 //
-// KProgOp-iterating consumers (metal_kernel_supported,
-// metal_dispatch_kernel's pre-build dtype gate, propose_kprog_*) need
-// structural facts about a kernel that today come from walking
-// `ke->program[]`.  After kernel_lift_to_uop materialises `cached_lift`
-// the same facts are recoverable from the lifted UOp DAG without re-
-// running the lifter.  This file collects the small read-only walks.
+// Consumers (metal_kernel_supported, metal_dispatch_kernel's pre-build
+// dtype gate, propose_*) need structural facts about a kernel.
+// kernel_lift_to_uop materialises cached_lift.store_root; these
+// helpers recover the same facts from that DAG.
 //
 // Helpers here treat `root` as a UOP_STORE (single-output) or UOP_AFTER
 // chain of stores.  They return safe defaults (0 / "uniform") when
-// `root` is 0 so callers can chain them with the legacy program[] read
-// behind a `cached_lift.store_root != 0` gate.
+// `root` is 0 so callers can early-bail when the lift declined.
 //
 // Coverage matches rmu_discover_bufs_rec in render_uop.c (every UOp
 // shape that appears in lifted kernels: arithmetic, INDEX_E, REDUCE,
@@ -646,11 +643,9 @@ int uop_dag_classify_matmul_shape(Term root,
 
 // === DAG-side DOT-shape extractor =====================================
 //
-// `cpu_blas_dispatch` historically read DOT shape facts (K, slot
-// indices, dtype) out of `ke->program[]` via a hand-rolled matcher.
-// Under default `THVM_PHASE_C7_FREE_PROGRAM=1` the program[] is freed
-// and the legacy gate early-bails -- regressing what would be a single
-// `cblas_sdot` call to the per-element render_uop_c triple-loop.
+// cpu_blas_dispatch reads DOT shape facts (K, slot indices, dtype)
+// from the lifted UOp DAG so the matmul-shaped kernel dispatches via
+// a single cblas_sdot call instead of the per-element triple-loop.
 //
 // Strategy mirrors the GEMM extractor: classify via
 // `uop_classify_dot`, then read M=1 / N=1 / output buffer rank from
@@ -855,11 +850,8 @@ int uop_dag_classify_gemv_shape(Term root,
 // `tile_analyze_conv2d_flat` (src/schedule/tile.c) reads the conv shape
 // almost entirely from `ke->input_views[]`, `ke->output_shape`,
 // `ke->input_dtypes[]`, and `ke->n_inputs` -- all of which survive
-// program[] free under default `THVM_PHASE_C7_FREE_PROGRAM=1`.  The
-// ONE program[]-side gate it actually needs is "the kernel's last op
-// is UOP_REDUCE with REDUCE_SUM kind" (program[ke->n_ops - 1]).
-//
-// This DAG-side classifier replaces that gate.  Strategy:
+// DAG-side classifier for "the kernel's last op is UOP_REDUCE with
+// REDUCE_SUM kind".  Strategy:
 //   1. `root` must be UOP_STORE.
 //   2. STORE.value must be UOP_REDUCE (bare) OR UOP_OPT(_, CONV, 0)
 //      wrapping a UOP_REDUCE (F4's recogniser may have wrapped it).
