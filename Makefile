@@ -154,6 +154,16 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF_DIAG)),-DATP_MNF -DATP_MNF_DIAG,)
 ATP_CP_CLASSIFY ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_CLASSIFY)),-DATP_CP_CLASSIFY,)
 
+# ATP auto-precedence (Waldmeister PhilMarlow / Praezedenzgenerator
+# port): -DATP_AUTO_PREC makes the ATP bench harness + WL glue
+# replace the syntactic `precedence[i]=i+1` default with a
+# precedence derived from per-operator algebraic-property analysis
+# (commutativity / associativity / idempotence / units / inverses /
+# distributivity).  OFF by default until benchmarked: build with
+# `make ATP_AUTO_PREC=1` to opt in.  See src/atp/precedence.c.
+ATP_AUTO_PREC ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_AUTO_PREC)),-DATP_AUTO_PREC,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \
@@ -225,6 +235,7 @@ TESTS := \
   $(BIN)/test_icc \
   $(BIN)/test_wald \
   $(BIN)/test_atp \
+  $(BIN)/test_atp_analysis \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
   $(BIN)/test_app_sup \

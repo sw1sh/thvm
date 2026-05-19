@@ -3274,6 +3274,62 @@ fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 // formula, all ports of Waldmeister's `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 
+// === atp/precedence -- algebraic-structure detection =================
+// Ported from Waldmeister's `PhilMarlow` (algebraic-structure
+// recognition; "Erkennung algebraischer Strukturen") and
+// `Praezedenzgenerator` (precedence generator).  Given an axiom
+// set, classify each function symbol's algebraic properties and
+// auto-tune the KBO/LPO precedence so completion converges better.
+//
+// `atp_analyze_axioms` mirrors PhilMarlow's `ACSymboleSuchen`
+// ("search for AC symbols") + `DistributivgesetzeSuchen` ("search
+// for distributive laws"), plus the Sinai law table's idempotence
+// / identity / inverse patterns.  Detection predicates port
+// Waldmeister's `TO_IstKommutativitaet` / `TO_IstAssoziativitaet`
+// / `TO_IstDistribution` (`WASIC/TermOperationen.c`).
+//
+// `atp_generate_precedence` ports `Praezedenzgenerator`'s
+// `FuchsPraezedenz` ordering rule: equation symbols ranked by
+// arity (n-ary > ... > unary > constant), with structurally
+// "defining" symbols (units, inverses, distributors) promoted.
+
+// Per-symbol algebraic-property record.  One entry per CTR label;
+// `seen` is 0 for labels with no occurrence in the axiom set.
+typedef struct {
+  u8  seen;             // 1 if this label appears in the axiom set
+  u32 arity;            // observed function-symbol arity
+  u8  is_commutative;   // some axiom is f(x,y) = f(y,x)
+  u8  is_associative;   // some axiom is f(f(x,y),z) = f(x,f(y,z))
+  u8  is_idempotent;    // some axiom is f(x,x) = x
+  u8  has_left_unit;    // some axiom is f(e,x) = x
+  u8  has_right_unit;   // some axiom is f(x,e) = x
+  u8  has_inverse;      // some axiom is f(i(x),x)=e or f(x,i(x))=e
+  u8  is_unit_symbol;   // this label is the unit constant `e`
+  u8  is_inverse_symbol;// this label is the inverse operator `i`
+  u8  distributes;      // f distributes over some other operator
+  u32 distributes_over; // label of the operator f distributes over
+} AtpSymProps;
+
+// Analyze `n_eqns` equation pairs (parallel `lhs[]` / `rhs[]`
+// arrays of TAG_CTR + TAG_FVR terms).  Fills `out[0..n_labels)`
+// with one AtpSymProps per CTR label.  `out` must hold at least
+// `n_labels` entries; caller zero-inits not required (the routine
+// clears it).
+fn void atp_analyze_axioms(const Term *lhs, const Term *rhs, u32 n_eqns,
+                           AtpSymProps *out, u32 n_labels);
+
+// Generate a precedence array from a completed analysis.  Writes
+// `prec[0..n_labels)`; higher value = greater symbol.  Labels not
+// `seen` get rank 0.  Returns the number of distinct ranks used.
+fn u32  atp_generate_precedence(const AtpSymProps *props, u32 n_labels,
+                                u32 *prec);
+
+// Convenience: analyze then generate in one call.  Equivalent to
+// atp_analyze_axioms followed by atp_generate_precedence on a
+// scratch AtpSymProps array (capped at WALD_MAX_SYMBOLS labels).
+fn u32  atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
+                            u32 n_labels, u32 *prec);
+
 // 8.10b: top-K peek into the CP queue.  Reuses the existing
 // INC-priority + collapse_ordered pipeline from
 // `thvm_atp_select_cp` but does NOT pop -- the queue is left

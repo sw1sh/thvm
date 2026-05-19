@@ -102,8 +102,18 @@ static AtpStatus run_one(const char *pr_path,
   }
   for (u32 i = 0; i < spec->n_symbols; i++) {
     weights[spec->symbols[i].label] = 1;
-    prec[spec->symbols[i].label]    = spec->symbols[i].prec_rank + 1;
   }
+#ifdef ATP_AUTO_PREC
+  // Waldmeister-style auto-precedence: derive the symbol order
+  // from per-operator algebraic-property analysis of the axiom
+  // set, instead of the .pr-file ORDERING declaration.
+  atp_auto_precedence(spec->eqn_lhs, spec->eqn_rhs, spec->n_eqns,
+                      max_label + 1, prec);
+#else
+  for (u32 i = 0; i < spec->n_symbols; i++) {
+    prec[spec->symbols[i].label] = spec->symbols[i].prec_rank + 1;
+  }
+#endif
   static KboConfig cfg;
   cfg.weights    = weights;
   cfg.precedence = prec;
