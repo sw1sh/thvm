@@ -74,7 +74,6 @@ static u32 build_fill_kernel(u32 bs_var, u32 bs_runtime) {
   ke->output_shape.dims[0] = bs_runtime;
   ke->schedule = &ke->_local_schedule;
   memset(ke->schedule, 0, sizeof(KpSchedule));
-  axes_default_for(ke);
 
   // Stamp the per-dispatch runtime value for the Variable.
   CHECK(kernel_kvar_bind(ke, bs_var, bs_runtime));

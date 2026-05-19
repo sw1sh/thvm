@@ -77,8 +77,6 @@ void tile_anno_axes_reset(KernelEntry *ke) {
   u8  autotuned = ke->schedule->autotuned;
   memset(ke->schedule, 0, sizeof(KpSchedule));
   ke->schedule->autotuned = autotuned;
-  axes_default_for(ke);
-  axes_ensure_scalar_reduce(ke);
 }
 
 // No-op kept for API stability; axis structure is signal-derived

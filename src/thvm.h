@@ -2080,17 +2080,8 @@ fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
 fn Term interact_kernel (Term kernel);
 
 // === codegen/ axis ===
-// Lifecycle hooks retained as no-ops -- the signal-driven resolvers
-// cover the initial state (nd LOOPs + optional trailing REDUCE) from
-// (output_shape + tail-reduce + scalar-reduce), so neither helper
-// has scratch to populate.  Kept callable so existing call ordering
-// in materialize.c / tile.c / tile_anno.c stays valid.
-fn void axes_default_for(struct KernelEntry *ke);
-fn void axes_ensure_scalar_reduce(struct KernelEntry *ke);
-// Predicate mirroring the answer of `axes_has_reduce_axis` without
-// reading axis_types[].  Walks higher-level signals each
-// REDUCE-class writer leaves (program tail UOP_REDUCE, applied_opts
-// log carrying KOP_GROUP / KOP_GROUPTOP, scalar arena reduce extent).
+// Predicate: does this kernel's lifted DAG carry a REDUCE-class
+// axis (KAX_REDUCE or KAX_GROUP_REDUCE)?  Reads cached_lift.store_root.
 fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
 
 // Derive per-axis KAX_ types from the higher-level signals

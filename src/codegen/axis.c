@@ -1,23 +1,11 @@
-// codegen/axis.c -- KpSchedule lifecycle: default constructor +
-// applied-opt query helpers.  The mutation (axes_apply_opt) lives in
-// codegen/apply_opt.c.
+// codegen/axis.c -- KpSchedule axis queries.  The mutation
+// (axes_apply_opt) lives in codegen/apply_opt.c.  Mirrors tinygrad's
+// Kernel.axis_types[] / Kernel.full_shape[]
+// (tinygrad/codegen/opt/kernel.py).
 //
-// Mirrors tinygrad's `Kernel.axis_types[]` / `Kernel.full_shape[]`
-// (tinygrad/codegen/opt/kernel.py).  Default at materialize-time:
-// one LOOP axis per output dim, plus a trailing REDUCE axis sized at
-// `src_numel / out_numel` for kernels whose final program op is
-// UOP_REDUCE.  This matches today's flat `for i = 0..numel-1` emit
-// and keeps the existing 393/393 test grid passing while the
-// variant emitter is under construction.
-
-fn void axes_default_for(KernelEntry *ke) {
-  // Signal-driven resolvers cover the initial state (nd LOOPs +
-  // optional trailing REDUCE) directly from (output_shape +
-  // tail-reduce + scalar-reduce).  No scratch to populate; symbol
-  // kept so existing call ordering in materialize.c / tile.c stays
-  // valid.
-  (void)ke;
-}
+// All resolvers read the lifted UOp DAG (cached_lift.store_root):
+// uop_dag_apply_kopt mutates RANGE leaves in place for every
+// split-class opt, so the DAG IS the post-opt axis structure.
 
 // Collect the kernel's full post-opt axis structure from cached_lift
 // .store_root.  The lifted DAG is post-mutation (uop_dag_apply_kopt
@@ -218,13 +206,4 @@ fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
   }
   u32 extents[MAX_AXES] = {0};
   return axes_compute_full_shape(ke, extents, MAX_AXES);
-}
-
-fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
-  // Signal-driven resolvers cover the trailing REDUCE-axis case
-  // directly via axes_scalar_reduce_extent inside
-  // axes_compute_full_shape.  No scratch to extend; symbol kept so
-  // existing call ordering in materialize.c / tile_anno.c stays
-  // valid.
-  (void)ke;
 }

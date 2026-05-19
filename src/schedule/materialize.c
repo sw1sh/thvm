@@ -4057,13 +4057,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
 
   ke->schedule = &ke->_local_schedule;
 
-  // Default-init the axis-typed scheduling plan now that the program
-  // and output_shape are finalized.  Idempotent: a cached slot whose
-  // axes were already populated by an earlier kid sharing this
-  // program is a no-op, so opts already applied to the program shape
-  // survive across new kid emissions.
-  axes_default_for(ke);
-
   // Cache kernel_lift_to_uop output on the KernelEntry: the lifter
   // resolves the unified-pass store_root and packages it as
   // KernelUopLift.  When the lift declines (no source_uop /
