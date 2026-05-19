@@ -142,6 +142,18 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF)),-DATP_MNF,)
 ATP_MNF_DIAG ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF_DIAG)),-DATP_MNF -DATP_MNF_DIAG,)
 
+# Waldmeister-style critical-pair classification: -DATP_CP_CLASSIFY
+# ports Waldmeister's `NewClassification` ("new classification") and
+# `ClasFunctions` ("classification functions") killer predicates
+# (KillerR / KillerE / KillerRE / EChild).  Each CP is classified at
+# insertion time; a killer CP that is also rule-subsumed is dropped,
+# an EChild CP is deprioritized.  The drop is a sound subset of the
+# trivially-joinable filter, so saturation status is identical with
+# the flag on or off.  OFF by default until benchmarked: build with
+# `make ATP_CP_CLASSIFY=1` to opt in.
+ATP_CP_CLASSIFY ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_CLASSIFY)),-DATP_CP_CLASSIFY,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \

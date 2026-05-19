@@ -2142,6 +2142,128 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === ATP_CP_CLASSIFY: Waldmeister CP classification ==============
+  // The `n_cps_dropped_classified` counter exists in AtpState in
+  // both build modes.  With the flag OFF the classifier is compiled
+  // out, so the counter must stay 0 even after a full run.
+
+  TEST_BEGIN("atp/classify/counter-zero-when-flag-off");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 8);
+    // f(x, e) = x : a clean oriented rule that saturates fast.
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_run(s);
+#ifndef ATP_CP_CLASSIFY
+    CHECK_EQ(s->n_cps_dropped_classified, 0u);
+#endif
+    thvm_atp_free(s);
+  }
+
+#ifdef ATP_CP_CLASSIFY
+  TEST_BEGIN("atp/classify/killer-r-fires-when-cp-reduces-a-rule");
+  {
+    // R holds an oriented rule  f(a, a) -> a.  The CP  (f(a, a), a)
+    // -- the same pair -- oriented big->small reduces that rule's
+    // LHS, so KillerR must fire.  An unrelated CP  (i(b), b)  whose
+    // LHS matches nothing in R must not.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    CHECK_EQ(s->n_rules, 1u);
+
+    CHECK(atp_clas_killer_r(s, mk_f(mk_a(), mk_a()), mk_a()) == 1u);
+    // i(a) -> a : LHS i(a) matches no subterm of f(a,a), so no kill.
+    CHECK(atp_clas_killer_r(s, mk_i(mk_a()), mk_a()) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/killer-e-needs-unorientable-cp");
+  {
+    // KillerE only fires for an unorientable CP.  An orientable CP
+    // that reduces a rule is a KillerR case, not KillerE.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+
+    // (f(a,a), a) is orientable (KBO_GT) -> KillerE must be 0.
+    CHECK(atp_clas_killer_e(s, mk_f(mk_a(), mk_a()), mk_a()) == 0u);
+    // (x, y) -- two distinct vars -- is unorientable; but its LHS
+    // is a bare variable that matches no rule LHS, so still 0.
+    CHECK(atp_clas_killer_e(s, mk_v(VAR_x), mk_v(1u)) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/killer-re-is-union-of-r-and-e");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    // KillerRE fires because KillerR fires.
+    CHECK(atp_clas_killer_re(s, mk_f(mk_a(), mk_a()), mk_a()) == 1u);
+    // Neither R nor E -- no rule LHS is reducible.
+    CHECK(atp_clas_killer_re(s, mk_i(mk_a()), mk_a()) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/echild-detects-unorientable-parent");
+  {
+    // Rule 0 oriented (f(a,a) -> a).  Rule 1 born unorientable
+    // (x = y -> orient_and_add stores both directions / fallback).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    AtpAddedRange un = thvm_atp_orient_and_add(s, mk_v(VAR_x), mk_v(1u));
+    CHECK(un.count >= 1u);
+    u32 un_idx = un.first;
+    // A CP whose parent un_idx is unorientable -> EChild fires.
+    CHECK(atp_clas_echild(s, 0u, un_idx) == 1u);
+    // Both parents the oriented rule 0 -> EChild does not fire.
+    CHECK(atp_clas_echild(s, 0u, 0u) == 0u);
+    // Out-of-range "no parent" indices -> EChild does not fire.
+    CHECK(atp_clas_echild(s, s->n_rules, s->n_rules) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/classify-cp-drops-rule-subsumed-killer");
+  {
+    // The CP  (f(a, a), a)  is rule-subsumed by  f(a, a) -> a  AND a
+    // KillerRE.  The default config maps KillerRE -> Act_never, and
+    // the rule-subsumption soundness guard holds, so atp_classify_cp
+    // signals a drop.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    u32 pri = 99u;
+    u8 drop = atp_classify_cp(s, mk_f(mk_a(), mk_a()), mk_a(),
+                              0u, 0u, &pri);
+    CHECK_EQ((int)drop, 1);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/classify-cp-keeps-non-killer");
+  {
+    // (i(a), a) is neither a killer nor EChild for this R, so the
+    // classifier keeps it and leaves the priority unscaled.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    u32 base = atp_cp_priority(s, mk_i(mk_a()), mk_a());
+    u32 pri  = base;
+    u8 drop  = atp_classify_cp(s, mk_i(mk_a()), mk_a(), 0u, 0u, &pri);
+    CHECK_EQ((int)drop, 0);
+    CHECK_EQ(pri, base);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/generate-cps-counter-resolves-status");
+  {
+    // End-to-end through atp_push_cps_traced: run a full saturation
+    // and confirm the run still resolves to a normal terminal
+    // status with the classifier wired into the CP-insertion path.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 32);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_i(mk_v(VAR_x)), mk_v(VAR_x)), mk_e());
+    AtpStatus st = thvm_atp_run(s);
+    CHECK(st == ATP_QUEUE_EMPTY || st == ATP_TIMEOUT ||
+          st == ATP_PROVED);
+    thvm_atp_free(s);
+  }
+#endif  // ATP_CP_CLASSIFY
+
   thvm_free();
   TEST_REPORT();
 }

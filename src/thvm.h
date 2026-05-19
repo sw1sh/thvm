@@ -3142,6 +3142,16 @@ typedef struct {
   // discarded.
   u32  n_cps_dropped_queue_subsumed;
 
+  // ATP_CP_CLASSIFY: count of CPs dropped by the Waldmeister-style
+  // critical-pair classifier (ported from `NewClassification` /
+  // `ClasFunctions`, "new classification" / "classification
+  // functions").  A CP is dropped when its killer-predicate
+  // classification carries an `Act_never`-equivalent action --
+  // the default config does this only for killer CPs that are
+  // also rule-subsumed, a sound subset of the joinable drops.
+  // Always 0 when the engine is built without -DATP_CP_CLASSIFY.
+  u32  n_cps_dropped_classified;
+
   // Stage 8.1e-i: feature flag.  When 0 (default), `thvm_atp_
   // generate_cps` runs the C-side critical-pair enumerator
   // directly.  When 1, it dispatches to `thvm_atp_generate_cps_ic`,

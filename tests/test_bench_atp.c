@@ -1,7 +1,7 @@
 // test_bench_atp.c -- stage 7.4c bench harness for the IC-native ATP.
 //
 // Walks `tests/data/atp/*.pr`, runs our ATP on each (with a fixed
-// step budget), records 8 metrics per run into `build/bench-atp.csv`,
+// step budget), records per-run metrics into `build/bench-atp.csv`,
 // and soft-checks each result against the matching `.expect`:
 // only the final ATP status (PROVED / TIMEOUT / QUEUE_EMPTY) is
 // asserted; step/rule counts are written to the CSV but not gated
@@ -143,7 +143,7 @@ int main(void) {
   if (csv == NULL) { thvm_free(); return 1; }
   fprintf(csv, "file,mode,status,wall_ms,step,n_rules,n_trace,"
                "drop_joinable,drop_connected,drop_rule_subsumed,"
-               "drop_queue_subsumed\n");
+               "drop_queue_subsumed,drop_classified\n");
 
   // Collect .pr file names from tests/data/atp/.
   DIR *dir = opendir("tests/data/atp");
@@ -218,13 +218,14 @@ int main(void) {
         mode_label[0] = path_names[mc][0];
         mode_label[1] = path_names[mr][0];
         mode_label[2] = 0;
-        fprintf(csv, "%s,%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u\n",
+        fprintf(csv, "%s,%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u,%u\n",
                 files[i], mode_label, st_str, wall_ms,
                 atp->step, atp->n_rules, atp->n_trace,
                 atp->n_cps_dropped_joinable,
                 atp->n_cps_dropped_connected,
                 atp->n_cps_dropped_rule_subsumed,
-                atp->n_cps_dropped_queue_subsumed);
+                atp->n_cps_dropped_queue_subsumed,
+                atp->n_cps_dropped_classified);
 
         if (er == 0 && expected[0] != 0) {
           CHECK_EQ((int)strcmp(st_str, expected), 0);
