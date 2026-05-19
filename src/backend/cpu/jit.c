@@ -87,21 +87,10 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
       h ^= 0xC0u; h *= 0x100000001b3ULL;
     }
   }
-  // When the lift succeeded the kernel's structural identity is
-  // encoded by the lifted UOp DAG root (a hash-consed Term).  Fold
-  // the root Term in -- equal lifted DAGs share a Term value, so
-  // this gives the same de-dup as the KProgOp byte-hash and works
-  // when program[] is NULL under THVM_PHASE_C7_FREE_PROGRAM.  Falls
-  // back to KProgOp bytes when the lift declined.
-  if (ke->cached_lift.store_root != 0) {
-    h ^= (u64)ke->cached_lift.store_root; h *= 0x100000001b3ULL;
-  } else {
-    u8 const *bytes = (u8 const *)ke->program;
-    size_t total = (size_t)ke->n_ops * sizeof(KProgOp);
-    for (size_t i = 0; i < total; i++) {
-      h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
-    }
-  }
+  // The kernel's structural identity is encoded by the lifted UOp
+  // DAG root (a hash-consed Term).  Equal lifted DAGs share a Term
+  // value, so the de-dup is identity-based.
+  h ^= (u64)ke->cached_lift.store_root; h *= 0x100000001b3ULL;
   // Fold applied_opts into the key via tile_anno facade so two
   // kernels with identical KProgOp[] but different opts get
   // distinct .dylibs.  axis_types[] / full_shape[] are derived from
@@ -304,13 +293,8 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     nums_buf[i] = ke->input_numels[i];
   }
   void *out = CPU_BUFS[out_buf_id].data;
-  // Read the output numel from KernelEntry directly (output_numel
-  // is set independently of program[] and survives the
-  // THVM_PHASE_C7_FREE_PROGRAM=1 free).
+  // Read the output numel directly from KernelEntry.
   unsigned numel = (unsigned)ke->output_numel;
-  if (numel == 0 && ke->n_ops > 0 && ke->program != NULL) {
-    numel = ke->program[ke->n_ops - 1].numel;
-  }
   jfn(out, ins_buf, numel, nums_buf);
   return 1;
 }
