@@ -88,21 +88,39 @@ the pod scripts, and the `reference_tinygrad_cuda_pod` memory note.
 
 ## Phase 1 -- C bridge
 
-`py.thvm` has `py_uop_*` (DAG primitives) + `py_kernel_*` (autotune)
-+ `py_cuda_*`/`py_metal_*`.  Missing -- the high-level pipeline:
+`py.thvm` (`py/csource/thvm_py.c`) today exposes only the *low-level*
+UOp-DAG layer: `py_uop_*` builds renderer-facing DAG nodes (BUFFER,
+RANGE, INDEX_E, STORE), `py_kernel_*` drives autotune, `py_render_*`
+emits MSL/CUDA.  Hand-building UOp DAGs is the dead end.
 
-- `py_ten_*` -- tensor create from host data / shape+dtype.
-- `py_materialize` / `py_realize` -- drive thvm's schedule + dispatch
-  from a `TAG_TEN` root.
-- `py_grad` -- thvm's `uop_grad` (the NN-arc agent flagged this gap;
-  it is the entry that lets `Tensor.backward()` use thvm's real
-  autodiff instead of hand-built backward DAGs).
-- introspection accessors -- read kernel list/count, the memory plan,
-  the schedule, and the rendered MSL/CUDA, so the Phase-4 cross-check
-  list is *observable* from Python.
+The high-level tensor-term layer (`TAG_TEN`) is NOT in the py bridge
+-- but it already exists in C, and is already wrapped, by the WL
+LibraryLink glue `wl/THVMLink/CSource/thvmlink.c` (`thvm_wl_*`, ~198
+exports).  Phase 1 is therefore a *port*: add `extern "C"` `py_*`
+wrappers over the SAME underlying C entry points -- `thvm_py.c` is a
+single-TU `#include "src/thvm.c"`, so the wrappers call `tensor_alloc`
+/ `uop_grad` / `thvm_realize` directly, exactly as `py_uop_binary`
+already calls `uop_binary`.  No new engine logic; the WL path proves
+these functions work.
 
-The Tensor *algebra* needs no new C: the Python ops compose the
-existing `py_uop_*` primitives exactly as `NN.wl` composes `TUOp*`.
+The surface to mirror:
+
+- tensor create / host I/O -- `tensor_alloc`, host->tensor and
+  tensor->host copies, `tensor_shape` -> `py_ten_*`.
+- tensor algebra -- the high-level term builders `uop_const`,
+  `uop_unary`, `uop_binary`, `uop_reduce`, `uop_cast` and the
+  movement ops `uop_reshape`/`permute`/`expand`/`pad`/`shrink`/`flip`.
+  These are the `TAG_TEN` builders `NN.wl`'s `TUOp*` wrap -- distinct
+  from the existing low-level `py_uop_*` (which build the post-lift
+  DAG).
+- autodiff -- `uop_grad`, `uop_grad_with_target`, `uop_fwd` ->
+  `py_grad`.  Routes `Tensor.backward()` to thvm's real `uop_grad`.
+- reduce + dispatch -- `wnf` (reduce to weak normal form),
+  `realize` / `realize_many` -> `py_wnf` / `py_realize`.
+- introspection -- `tens_count`, `tens_table`, `uop_leaf_tids`, plus
+  the kernel list/count, memory plan, schedule, and rendered
+  MSL/CUDA, so the Phase-4 cross-check list is observable from
+  Python.
 
 ## Phase 2 -- `thvm/tensor.py`
 

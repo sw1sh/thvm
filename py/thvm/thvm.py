@@ -79,6 +79,38 @@ _uop_store = _bind("py_uop_store", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_after = _bind("py_uop_after", c_uint64, c_uint64, c_uint64)
 _uop_load = _bind("py_uop_load", c_uint64, c_uint64)
 
+# ---------------- high-level tensor surface (TAG_TEN) ----------------
+_ten_create = _bind("py_ten_create", c_uint64,
+                    c_uint32, c_uint32, ctypes.POINTER(c_uint32))
+_ten_write = _bind("py_ten_write", c_int32, c_uint64, c_void_p, c_uint64)
+_ten_read = _bind("py_ten_read", c_int32, c_uint64, c_void_p, c_uint64)
+_ten_dtype = _bind("py_ten_dtype", c_uint32, c_uint64)
+_ten_numel = _bind("py_ten_numel", c_uint64, c_uint64)
+_ten_shape = _bind("py_ten_shape", c_uint32, c_uint64,
+                   ctypes.POINTER(c_uint32))
+_uop_unary = _bind("py_uop_unary", c_uint64, c_uint32, c_uint64)
+_uop_cast = _bind("py_uop_cast", c_uint64, c_uint64, c_uint32)
+_uop_reshape = _bind("py_uop_reshape", c_uint64,
+                     c_uint64, c_uint32, ctypes.POINTER(c_uint32))
+_uop_permute = _bind("py_uop_permute", c_uint64,
+                     c_uint64, c_uint32, ctypes.POINTER(c_uint32))
+_uop_expand = _bind("py_uop_expand", c_uint64,
+                    c_uint64, c_uint32, ctypes.POINTER(c_uint32))
+_uop_pad = _bind("py_uop_pad", c_uint64,
+                 c_uint64, c_uint32, ctypes.POINTER(c_uint32))
+_uop_shrink = _bind("py_uop_shrink", c_uint64,
+                    c_uint64, c_uint32, ctypes.POINTER(c_uint32))
+_uop_flip = _bind("py_uop_flip", c_uint64, c_uint64, c_uint32)
+_grad = _bind("py_grad", c_uint64, c_uint64, c_uint64)
+_grad_with_target = _bind("py_grad_with_target", c_uint64,
+                          c_uint64, c_uint64, c_uint64)
+_fwd = _bind("py_fwd", c_uint64, c_uint64, c_uint64)
+_wnf = _bind("py_wnf", c_uint64, c_uint64)
+_nf = _bind("py_nf", c_uint64, c_uint64)
+_realize = _bind("py_realize", c_uint64, c_uint64)
+_tens_count = _bind("py_tens_count", c_uint32)
+_kernel_count = _bind("py_kernel_count", c_uint32)
+
 # ---------------- buffer accessors ----------------
 _uop_buffer_scope = _bind("py_uop_buffer_scope", c_uint32, c_uint64)
 _uop_buffer_dtype = _bind("py_uop_buffer_dtype", c_uint32, c_uint64)
@@ -206,6 +238,9 @@ class _Constants:
     # dtypes
     INT32 = _read_uint32_const("py_const_DT_INT32")
     FP32 = _read_uint32_const("py_const_DT_FP32")
+    # tensor term tag + max rank
+    TAG_TEN = _read_uint32_const("py_const_TAG_TEN")
+    MAX_DIM = _read_uint32_const("py_const_MAX_DIM")
     # buffer scopes
     SCOPE_GLOBAL = _read_uint32_const("py_const_UOP_SCOPE_GLOBAL")
     SCOPE_LOCAL = _read_uint32_const("py_const_UOP_SCOPE_LOCAL")
@@ -361,11 +396,9 @@ class Thvm:
         return Term(_uop_binary(c_uint32(K.CMPEQ), c_uint64(int(a)), c_uint64(int(b))))
 
     # ---------------- FP unary ----------------
-    # The C-side `uop_binary` constructor handles unary opcodes too:
-    # for unary opcodes only `heap[loc+0]` is read, so we pass `x` for
-    # both args.  Builds UOP_NEG / RECIP / EXP2 / LOG2 / SQRT nodes.
+    # Builds UOP_NEG / RECIP / EXP2 / LOG2 / SQRT nodes.
     def _unary(self, opcode: int, x: Term) -> Term:
-        return Term(_uop_binary(c_uint32(opcode), c_uint64(int(x)), c_uint64(int(x))))
+        return Term(_uop_unary(c_uint32(opcode), c_uint64(int(x))))
 
     def neg(self, x: Term) -> Term:    return self._unary(K.NEG, x)
     def recip(self, x: Term) -> Term:  return self._unary(K.RECIP, x)
@@ -397,6 +430,104 @@ class Thvm:
 
     def load(self, src: Term) -> Term:
         return Term(_uop_load(c_uint64(int(src))))
+
+    # ============ high-level tensor surface (TAG_TEN) ============
+    # Phase 1 of the Python Tensor frontend.  add / mul / cmplt /
+    # cmpeq / reduce above already compose TAG_TEN operands; these add
+    # tensor create, host I/O, unary/cast, movement, autodiff, and the
+    # realize entry point.
+
+    def ten_create(self, dtype: int, dims) -> Term:
+        """Allocate a tensor on the DEV-selected backend; returns TAG_TEN."""
+        ndim = len(dims)
+        arr = (c_uint32 * max(ndim, 1))(*[c_uint32(int(d)) for d in dims])
+        return Term(_ten_create(c_uint32(int(dtype)), c_uint32(ndim), arr))
+
+    def ten_write(self, t: Term, data: bytes) -> bool:
+        """Copy raw host bytes into a tensor's backend buffer."""
+        return bool(_ten_write(c_uint64(int(t)), data, c_uint64(len(data))))
+
+    def ten_read(self, t: Term, nbytes: int) -> bytes:
+        """Copy a (realized) tensor's backend buffer out to host bytes."""
+        buf = ctypes.create_string_buffer(nbytes)
+        if not _ten_read(c_uint64(int(t)), buf, c_uint64(nbytes)):
+            raise RuntimeError(f"ten_read failed for term {int(t):#x}")
+        return buf.raw
+
+    def ten_dtype(self, t: Term) -> int:
+        return int(_ten_dtype(c_uint64(int(t))))
+
+    def ten_numel(self, t: Term) -> int:
+        return int(_ten_numel(c_uint64(int(t))))
+
+    def ten_shape(self, t: Term) -> tuple[int, ...]:
+        out = (c_uint32 * K.MAX_DIM)()
+        ndim = int(_ten_shape(c_uint64(int(t)), out))
+        return tuple(int(out[i]) for i in range(ndim))
+
+    # ---- tensor algebra (unary / cast) ----
+    def unary(self, opcode: int, x: Term) -> Term:
+        return Term(_uop_unary(c_uint32(int(opcode)), c_uint64(int(x))))
+
+    def cast(self, x: Term, dst_dtype: int) -> Term:
+        return Term(_uop_cast(c_uint64(int(x)), c_uint32(int(dst_dtype))))
+
+    # ---- movement ops ----
+    def _move(self, fn, src: Term, dims) -> Term:
+        arr = (c_uint32 * max(len(dims), 1))(*[c_uint32(int(d)) for d in dims])
+        return Term(fn(c_uint64(int(src)), c_uint32(len(dims)), arr))
+
+    def reshape(self, src: Term, dims) -> Term:
+        return self._move(_uop_reshape, src, dims)
+
+    def permute(self, src: Term, perm) -> Term:
+        return self._move(_uop_permute, src, perm)
+
+    def expand(self, src: Term, dims) -> Term:
+        return self._move(_uop_expand, src, dims)
+
+    def pad(self, src: Term, begin_end) -> Term:
+        """begin_end has 2*ndim entries: (begin, end) pad per axis."""
+        arr = (c_uint32 * len(begin_end))(*[c_uint32(int(d)) for d in begin_end])
+        return Term(_uop_pad(c_uint64(int(src)),
+                             c_uint32(len(begin_end) // 2), arr))
+
+    def shrink(self, src: Term, begin_end) -> Term:
+        arr = (c_uint32 * len(begin_end))(*[c_uint32(int(d)) for d in begin_end])
+        return Term(_uop_shrink(c_uint64(int(src)),
+                                c_uint32(len(begin_end) // 2), arr))
+
+    def flip(self, src: Term, axes_bitmask: int) -> Term:
+        return Term(_uop_flip(c_uint64(int(src)), c_uint32(int(axes_bitmask))))
+
+    # ---- autodiff (thvm's real uop_grad chain-rule rewrite) ----
+    def grad(self, y: Term, gy: Term) -> Term:
+        return Term(_grad(c_uint64(int(y)), c_uint64(int(gy))))
+
+    def grad_with_target(self, y: Term, gy: Term, target: Term) -> Term:
+        return Term(_grad_with_target(c_uint64(int(y)), c_uint64(int(gy)),
+                                      c_uint64(int(target))))
+
+    def fwd(self, y: Term, gy: Term) -> Term:
+        return Term(_fwd(c_uint64(int(y)), c_uint64(int(gy))))
+
+    # ---- reduce to normal form + dispatch ----
+    def wnf(self, t: Term) -> Term:
+        return Term(_wnf(c_uint64(int(t))))
+
+    def nf(self, t: Term) -> Term:
+        return Term(_nf(c_uint64(int(t))))
+
+    def realize(self, t: Term) -> Term:
+        """Drive wnf -> materialize -> kernelize -> schedule -> dispatch."""
+        return Term(_realize(c_uint64(int(t))))
+
+    # ---- introspection (Phase-4 cross-check surface) ----
+    def tens_count(self) -> int:
+        return int(_tens_count())
+
+    def kernel_count(self) -> int:
+        return int(_kernel_count())
 
     # ---------------- buffer accessors ----------------
     def buffer_scope(self, t: Term) -> int:

@@ -89,6 +89,149 @@ EXPORT uint64_t py_uop_after(uint64_t node, uint64_t after_node) {
 
 EXPORT uint64_t py_uop_load(uint64_t src) { return uop_load(src); }
 
+// ============== high-level tensor surface (TAG_TEN) ==================
+// Phase 1 of the Python Tensor frontend (docs/plans/py_tensor_frontend
+// .md): the high-level tensor-term layer, ported from the WL
+// LibraryLink glue (wl/THVMLink/CSource/thvmlink.c, thvm_wl_*).
+// thvm_py.c is a single-TU #include of src/thvm.c, so these call
+// tensor_alloc / uop_grad / thvm_realize directly -- exactly as
+// py_uop_binary calls uop_binary.
+//
+// A TAG_TEN term packs (dtype, tensor-id).  The algebra + movement
+// builders compose TAG_TEN terms; py_realize drives wnf -> materialize
+// -> kernelize -> schedule -> dispatch and returns the result TAG_TEN.
+
+// --- tensor create / host I/O ---
+
+// Allocate a fresh tensor on the DEV-selected backend; returns the
+// packed TAG_TEN term.  dims[] holds `ndim` (<= MAX_DIM) extents.
+EXPORT uint64_t py_ten_create(uint32_t dtype, uint32_t ndim,
+                              const uint32_t *dims) {
+  Shape shape;
+  shape.ndim = ndim > MAX_DIM ? MAX_DIM : ndim;
+  for (uint32_t i = 0; i < MAX_DIM; i++) {
+    shape.dims[i] = (i < shape.ndim) ? dims[i] : 0;
+  }
+  u32 id = tensor_alloc(CURRENT_BACKEND, shape, dtype);
+  return term_new(0, TAG_TEN, dtype, id);
+}
+
+// Copy raw host bytes into a TAG_TEN tensor's backend buffer.  The
+// caller packs the dtype-native layout; the bridge memcpies nbytes.
+// Returns 1 on success, 0 for a bad term / backend.
+EXPORT int py_ten_write(uint64_t t, const void *data, uint64_t nbytes) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  TenDesc *d = &TENS[id];
+  if (d->backend == NULL || d->backend->buf_write == NULL) return 0;
+  d->backend->buf_write(d->buf_id, data, nbytes);
+  return 1;
+}
+
+// Copy a (realized) TAG_TEN tensor's backend buffer out to host bytes.
+EXPORT int py_ten_read(uint64_t t, void *out, uint64_t nbytes) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  TenDesc *d = &TENS[id];
+  if (d->backend == NULL || d->backend->buf_read == NULL) return 0;
+  d->backend->buf_read(d->buf_id, out, nbytes);
+  return 1;
+}
+
+// Tensor introspection: dtype, element count, shape (writes ndim
+// extents into out_dims[>=MAX_DIM], returns ndim).
+EXPORT uint32_t py_ten_dtype(uint64_t t) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  return TENS[id].dtype;
+}
+EXPORT uint64_t py_ten_numel(uint64_t t) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  return (uint64_t)TENS[id].view.numel;
+}
+EXPORT uint32_t py_ten_shape(uint64_t t, uint32_t *out_dims) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  Shape *s = &TENS[id].view.shape;
+  for (uint32_t i = 0; i < s->ndim && i < MAX_DIM; i++) {
+    out_dims[i] = s->dims[i];
+  }
+  return s->ndim;
+}
+
+// --- tensor algebra (py_uop_binary / py_uop_reduce above already
+//     cover BINARY / REDUCE) ---
+EXPORT uint64_t py_uop_unary(uint32_t opcode, uint64_t src) {
+  return uop_unary(opcode, src);
+}
+EXPORT uint64_t py_uop_cast(uint64_t src, uint32_t dst_dtype) {
+  return uop_cast(src, dst_dtype);
+}
+
+// --- movement ops (tinygrad reshape/permute/expand/pad/shrink/flip).
+//     pad / shrink take begin_end[2*ndim]; flip takes an axes bitmask. ---
+EXPORT uint64_t py_uop_reshape(uint64_t src, uint32_t ndim,
+                               const uint32_t *dims) {
+  return uop_reshape(src, ndim, dims);
+}
+EXPORT uint64_t py_uop_permute(uint64_t src, uint32_t ndim,
+                               const uint32_t *perm) {
+  return uop_permute(src, ndim, perm);
+}
+EXPORT uint64_t py_uop_expand(uint64_t src, uint32_t ndim,
+                              const uint32_t *dims) {
+  return uop_expand(src, ndim, dims);
+}
+EXPORT uint64_t py_uop_pad(uint64_t src, uint32_t ndim,
+                           const uint32_t *begin_end) {
+  return uop_pad(src, ndim, begin_end);
+}
+EXPORT uint64_t py_uop_shrink(uint64_t src, uint32_t ndim,
+                              const uint32_t *begin_end) {
+  return uop_shrink(src, ndim, begin_end);
+}
+EXPORT uint64_t py_uop_flip(uint64_t src, uint32_t axes_bitmask) {
+  return uop_flip(src, axes_bitmask);
+}
+
+// --- autodiff: thvm's real uop_grad chain-rule rewrite ---
+// py_grad builds the BWD projection of y w.r.t. its leaves, seeded by
+// gy -- Tensor.backward() routes here, not a hand-built backward DAG.
+EXPORT uint64_t py_grad(uint64_t y, uint64_t gy) {
+  return uop_grad(y, gy);
+}
+EXPORT uint64_t py_grad_with_target(uint64_t y, uint64_t gy,
+                                    uint64_t target) {
+  return uop_grad_with_target(y, gy, target);
+}
+EXPORT uint64_t py_fwd(uint64_t y, uint64_t gy) {
+  return uop_fwd(y, gy);
+}
+
+// --- reduce + dispatch ---
+// py_wnf: weak normal form.  py_nf: full normal form (fires every
+// heap-resident UOp/GRAD/kernel -- surfaces grads before materialize).
+// py_realize: the full pipeline, returns the result TAG_TEN.
+EXPORT uint64_t py_wnf(uint64_t t)     { return wnf(t); }
+EXPORT uint64_t py_nf(uint64_t t)      { return nf(t); }
+EXPORT uint64_t py_realize(uint64_t t) { return thvm_realize(t); }
+
+// --- introspection (Phase-4 cross-check surface) ---
+EXPORT uint32_t py_tens_count(void) {
+  return TENS_NEXT > 1 ? TENS_NEXT - 1 : 0;
+}
+EXPORT uint32_t py_kernel_count(void) {
+  return KERNELS_NEXT > 1 ? KERNELS_NEXT - 1 : 0;
+}
+EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
+EXPORT uint32_t py_const_MAX_DIM(void) { return MAX_DIM; }
+
 // ---------------- buffer accessors (handy for debug) ----------------
 EXPORT uint32_t py_uop_buffer_scope(uint64_t t) { return uop_buffer_scope(t); }
 EXPORT uint32_t py_uop_buffer_dtype(uint64_t t) { return uop_buffer_dtype(t); }
