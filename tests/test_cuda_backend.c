@@ -198,6 +198,85 @@ int main(void) {
     thvm_cuda_buf_free(b);
   }
 
+  // === vtable dispatch: CUDA_BACKEND.dispatch_kernel end to end ======
+  // Stage 3: a KernelEntry routed through cuda_dispatch_kernel (the
+  // backend-vtable entry THVM_BACKEND=cuda selects) renders the lifted
+  // DAG, nvrtc-compiles it, packs the cuLaunchKernel args and launches.
+  // Build the matmul DAG, populate a synthetic KernelEntry's
+  // cached_lift exactly as the schedule's materialize lift would, and
+  // dispatch -- no standalone thvm_cuda_* helper in the path.
+  TEST_BEGIN("cuda-backend/vtable-dispatch-kernel-matmul");
+  {
+    enum { M = 8, K = 4, N = 8 };
+    u32 dC[2] = { M, N }, dA[2] = { M, K }, dB[2] = { K, N };
+    Term C = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dC, 0);
+    Term A = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dA, 1);
+    Term B = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dB, 2);
+    Term r_m = uop_range(0, KAX_LOOP, M);
+    Term r_n = uop_range(1, KAX_LOOP, N);
+    Term r_k = uop_range(2, KAX_REDUCE, K);
+    Term kK = uop_const(DT_INT32, K), kN = uop_const(DT_INT32, N);
+    Term addrA = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_m, kK), r_k);
+    Term addrB = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_k, kN), r_n);
+    Term mul = uop_binary(UOP_MUL, uop_index_e(A, addrA), uop_index_e(B, addrB));
+    Term red = uop_reduce(REDUCE_SUM, 2, mul);
+    Term addrC = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_m, kN), r_n);
+    Term st = uop_store(C, addrC, red);
+
+    // Synthetic KernelEntry: cached_lift.store_root + n_inputs +
+    // output_numel are everything cuda_dispatch_kernel reads.
+    u32 kid = kernel_alloc();
+    KernelEntry *ke = &KERNELS[kid];
+    ke->cached_lift.store_root = st;
+    ke->cached_lift.n_inputs = 2;
+    ke->compute_root = st;
+    ke->n_inputs = 2;
+    ke->output_numel = M * N;
+
+    float hA[M * K], hB[K * N], hC_ref[M * N], hC_gpu[M * N];
+    for (int i = 0; i < M * K; i++) hA[i] = (float)(i % 7) * 0.5f - 1.0f;
+    for (int i = 0; i < K * N; i++) hB[i] = (float)(i % 5) * 0.25f + 0.3f;
+    for (int m = 0; m < M; m++)
+      for (int n = 0; n < N; n++) {
+        float acc = 0.0f;
+        for (int k = 0; k < K; k++) acc += hA[m * K + k] * hB[k * N + n];
+        hC_ref[m * N + n] = acc;
+      }
+
+    u32 bC = thvm_cuda_buf_alloc((u64)M * N * sizeof(float));
+    u32 bA = thvm_cuda_buf_alloc((u64)M * K * sizeof(float));
+    u32 bB = thvm_cuda_buf_alloc((u64)K * N * sizeof(float));
+    CHECK(thvm_cuda_buf_write(bA, hA, sizeof hA) == 0);
+    CHECK(thvm_cuda_buf_write(bB, hB, sizeof hB) == 0);
+
+    // Drive the backend vtable directly: in_buf_ids = {A, B} (slot
+    // order), out_buf_id = C.
+    u32 in_buf_ids[2] = { bA, bB };
+    int rc = CUDA_BACKEND.dispatch_kernel(ke, in_buf_ids, bC);
+    if (rc != 0) {
+      fprintf(stderr, "  vtable dispatch failed: %s\n", thvm_cuda_last_error());
+    }
+    CHECK(rc == 0);
+
+    CHECK(thvm_cuda_buf_read(bC, hC_gpu, sizeof hC_gpu) == 0);
+    int all_ok = 1;
+    for (int i = 0; i < M * N; i++) {
+      if (!approx_eq(hC_gpu[i], hC_ref[i])) {
+        all_ok = 0;
+        fprintf(stderr, "  vtable matmul mismatch at %d: gpu=%f ref=%f\n",
+                i, hC_gpu[i], hC_ref[i]);
+      }
+    }
+    CHECK(all_ok);
+
+    thvm_cuda_buf_free(bC);
+    thvm_cuda_buf_free(bA);
+    thvm_cuda_buf_free(bB);
+  }
+
   // === jit cache: second compile of the same source is a hit ========
   TEST_BEGIN("cuda-backend/jit-cache-hit-on-identical-source");
   {
