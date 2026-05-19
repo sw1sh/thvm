@@ -178,6 +178,53 @@ fn int cuda_jit_launch(CUfunction func,
   return 0;
 }
 
+// Launch geometry (grid blocks x block threads) from the lifted DAG's
+// axis structure -- the CUDA analogue of rmt_dag_dispatch_shape in
+// render_metal.c.  Promoted-LOOP extents product = grid; KAX_LOCAL
+// extents product = block; KAX_GROUP_REDUCE extent = block.  UPCAST /
+// UNROLL / REDUCE are in-thread and do not affect the launch.  A plain
+// kernel (only LOOP axes) collapses to the flat one-thread-per-output
+// shape.  Returns 1 with (*grid_x, *block_x) set, or 0 when the axes
+// can't be read -- caller falls back to the output_numel path.
+static int cuda_dag_dispatch_shape(struct KernelEntry const *ke,
+                                   u32 *grid_x, u32 *block_x) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                               exts, MAX_AXES);
+  if (n == 0) return 0;
+  u64 total = 1;             // product of promoted-LOOP output extents
+  u64 local_total = 1;       // product of KAX_LOCAL extents
+  u32 group_reduce_extent = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (exts[i] == 0) return 0;
+    switch (types[i]) {
+      case KAX_LOOP:         total *= (u64)exts[i]; break;
+      case KAX_LOCAL:        local_total *= (u64)exts[i]; break;
+      case KAX_GROUP_REDUCE: group_reduce_extent = exts[i]; break;
+      default: break;        // UPCAST / UNROLL / REDUCE: in-thread
+    }
+  }
+  if (total == 0 || total > 0xFFFFFFFFu) return 0;
+  u32 grid, block;
+  if (group_reduce_extent != 0) {
+    if (group_reduce_extent > 1024) return 0;   // CUDA maxThreadsPerBlock
+    grid  = (u32)total;
+    block = group_reduce_extent;
+  } else if (local_total > 1) {
+    if (local_total > 1024) return 0;
+    grid  = (u32)total;
+    block = (u32)local_total;
+  } else {
+    block = total < 256 ? (u32)total : 256u;
+    grid  = (u32)((total + (u64)block - 1) / (u64)block);
+  }
+  if (grid == 0 || block == 0) return 0;
+  if (grid_x  != NULL) *grid_x  = grid;
+  if (block_x != NULL) *block_x = block;
+  return 1;
+}
+
 // Backend-vtable dispatch_kernel.  Mirrors cpu_jit_dispatch's
 // structural-lift path for the CUDA target:
 //
@@ -263,20 +310,25 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     args[1 + n_in + i] = &kvar_val[i];
   }
 
-  // Launch geometry: total threads = output_numel (one promoted
-  // output element per thread; the renderer's `tid >= total` guard
-  // makes a slightly-over-sized grid safe).  A scalar-output kernel
-  // (output_numel <= 1, e.g. a full reduce) launches a single thread.
-  u64 total = ke->output_numel;
-  if (total == 0) total = 1;
-  u32 block_x = 256;
-  if ((u64)block_x > total) {
-    // Round the block down to the nearest warp multiple that still
-    // covers `total`, never below 32 (warp granularity).
-    block_x = (u32)((total + 31) / 32 * 32);
-    if (block_x < 32) block_x = 32;
+  // Launch geometry: derive (grid, block) from the lifted DAG's axis
+  // structure so a LOCAL-split kernel (hand-opts / autotune mutated
+  // the DAG) launches with the block shape the renderer's tg/tt decode
+  // expects.  A plain LOOP-only kernel collapses to one-thread-per-
+  // output.  Fall back to the flat output_numel path if the axes
+  // can't be read.
+  u32 grid_x = 0, block_x = 0;
+  if (!cuda_dag_dispatch_shape(ke, &grid_x, &block_x)) {
+    u64 total = ke->output_numel;
+    if (total == 0) total = 1;
+    block_x = 256;
+    if ((u64)block_x > total) {
+      // Round the block down to the nearest warp multiple that still
+      // covers `total`, never below 32 (warp granularity).
+      block_x = (u32)((total + 31) / 32 * 32);
+      if (block_x < 32) block_x = 32;
+    }
+    grid_x = (u32)((total + block_x - 1) / block_x);
   }
-  u32 grid_x = (u32)((total + block_x - 1) / block_x);
 
   return cuda_jit_launch(func, grid_x, block_x, args);
 }
