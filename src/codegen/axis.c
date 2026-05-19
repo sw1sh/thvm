@@ -19,11 +19,6 @@ fn void axes_default_for(KernelEntry *ke) {
   (void)ke;
 }
 
-static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
-  (void)ke;
-  return 0;
-}
-
 // Collect the kernel's full post-opt axis structure from cached_lift
 // .store_root.  The lifted DAG is post-mutation (uop_dag_apply_kopt
 // rewrites RANGE leaves in place for every split-class opt), so the
@@ -72,60 +67,22 @@ static u32 axes_dag_collect(KernelEntry const *ke, u8 *kax_out,
   return n;
 }
 
-// Predicate: "will ke->schedule carry a REDUCE-class axis
-// (KAX_REDUCE or KAX_GROUP_REDUCE)?", derived from higher-level
-// signals without reading axis_types[].  Mirrors the writer side
-// exactly: every production writer of a REDUCE-class entry leaves a
-// signal this predicate consults.
-//
-//   1. axes_default_for appends a trailing KAX_REDUCE iff the kernel
-//      program ends in UOP_REDUCE.  Signal: ke->program tail opcode.
-//   2. axes_apply_opt(KOP_GROUP / KOP_GROUPTOP) splits an axis and
-//      marks the new inner with KAX_GROUP_REDUCE.  Signal: applied_opts
-//      log carries one of those op codes.  No other axes_apply_opt
-//      class introduces a REDUCE-class type, and SWAP/UPCAST/UNROLL/
-//      LOCAL/GLOBAL preserve any REDUCE outer that was already there.
-//   3. axes_ensure_scalar_reduce appends a trailing KAX_REDUCE when
-//      the scalar arena carries an S_REDUCE_* over an S_AXIS_REDUCE
-//      range.  Signal: axes_scalar_reduce_extent(ke) != 0.
-//
-// All three signals are read-only over the kernel program / scalar
-// arena / applied_opts log, never axis_types[].  Used by:
-//   - kernel_lift.c's test-seam guard (tests for a REDUCE before
-//     deciding whether the single-origin linearisation is safe).
+// Predicate: "does this kernel's lifted DAG carry a REDUCE-class
+// axis (KAX_REDUCE or KAX_GROUP_REDUCE)?".  axes_dag_collect reads
+// the final post-opt RANGE leaves out of cached_lift.store_root,
+// which is already mutated in place by every split-class opt.
 fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
   }
-  if (ke->cached_lift.store_root != 0) {
-    u8 kax[MAX_AXES] = {0};
-    u32 ext[MAX_AXES] = {0};
-    u32 n = axes_dag_collect(ke, kax, ext, MAX_AXES);
-    for (u32 i = 0; i < n; i++) {
-      if (kax[i] == KAX_REDUCE || kax[i] == KAX_GROUP_REDUCE) return 1;
-    }
-    if (n > 0) return 0;
-  }
-  if (ke->program != NULL && ke->n_ops > 0
-      && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
-    return 1;
-  }
-  if (axes_scalar_reduce_extent(ke) != 0) {
-    return 1;
+  if (ke->cached_lift.store_root == 0) return 0;
+  u8 kax[MAX_AXES] = {0};
+  u32 ext[MAX_AXES] = {0};
+  u32 n = axes_dag_collect(ke, kax, ext, MAX_AXES);
+  for (u32 i = 0; i < n; i++) {
+    if (kax[i] == KAX_REDUCE || kax[i] == KAX_GROUP_REDUCE) return 1;
   }
   return 0;
-}
-
-// Mirror of apply_opt.c's static kop_to_axis_type.  Inlined here to
-// keep the axis-type simulator self-contained without exporting the
-// helper from apply_opt.c.
-static u8 axis_kop_to_axis_type(u8 op) {
-  switch (op) {
-    case KOP_UPCAST:   return KAX_UPCAST;
-    case KOP_UNROLL:   return KAX_UNROLL;
-    case KOP_LOCAL:    return KAX_LOCAL;
-    default:           return KAX_LOOP;
-  }
 }
 
 // Derive per-axis kax_type[] from the higher-level signals
@@ -159,96 +116,17 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
   if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
     return 0;
   }
-  // Lifted DAG path: uop_dag_apply_kopt mutates RANGE leaves in place
-  // for every split-class opt, so the DAG's post-opt RANGE set encodes
-  // the final axis layout.  Skip applied_opts replay -- the DAG IS
-  // post-opt.  axes_reset_to_default reverts cached_lift.store_root
-  // from cached_lift_init_root so autotune's bench loop is consistent.
-  {
-    u8 kax_dag[MAX_AXES] = {0};
-    u32 ext_dag[MAX_AXES] = {0};
-    u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
-    if (n_dag > 0 && n_dag <= cap) {
-      for (u32 i = 0; i < n_dag; i++) out[i] = kax_dag[i];
-      return n_dag;
-    }
-  }
-
-  // Initial layout: nd LOOPs + optional trailing REDUCE.
-  u32 nd = ke->output_shape.ndim;
-  if (nd > MAX_AXES - 1) {
-    nd = MAX_AXES - 1;
-  }
-  u8 types[MAX_AXES] = {0};
-  u32 n = 0;
-  for (u32 i = 0; i < nd; i++) {
-    if (n >= MAX_AXES) {
-      return 0;
-    }
-    types[n++] = KAX_LOOP;
-  }
-  int has_initial_reduce =
-      (ke->n_ops > 0 && ke->program != NULL
-       && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE)
-      || (axes_scalar_reduce_extent(ke) != 0);
-  if (has_initial_reduce && n < MAX_AXES) {
-    types[n++] = KAX_REDUCE;
-  }
-
-  // Replay applied_opts using axes_apply_opt's structural logic.  We
-  // don't validate splits (size % arg) or GLOBAL preconditions here:
-  // applied_opts is the LOG of opts that ALREADY succeeded against the
-  // axis structure, so the replay is guaranteed-valid by construction.
-  KOpt const *opts = ke->schedule->applied_opts;
-  u32 n_applied   = (u32)ke->schedule->n_applied;
-  for (u32 k = 0; k < n_applied; k++) {
-    KOpt o = opts[k];
-    u8 op = o.op;
-    if (op == KOP_TC || op == KOP_NONE || op == KOP_PADTO
-        || op == KOP_NOLOCALS) {
-      // No axis-structure mutation.
-      continue;
-    }
-    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL) {
-      if (o.axis >= n || n >= MAX_AXES) {
-        return 0;
-      }
-      // Shift positions > axis right by one; insert at axis+1.
-      for (i32 i = (i32)n; i > (i32)o.axis + 1; i--) {
-        types[i] = types[i - 1];
-      }
-      // Outer keeps its type; inner takes the opt's KAX_ type.
-      types[o.axis + 1] = axis_kop_to_axis_type(op);
-      n++;
-      continue;
-    }
-    if (op == KOP_GLOBAL) {
-      if (o.axis >= n) {
-        return 0;
-      }
-      types[o.axis] = KAX_GLOBAL;
-      continue;
-    }
-    if (op == KOP_SWAP) {
-      if (o.axis >= n || (u8)o.arg >= n) {
-        return 0;
-      }
-      u8 tmp = types[o.axis];
-      types[o.axis]  = types[o.arg];
-      types[o.arg]   = tmp;
-      continue;
-    }
-    // Unknown opt -- bail (caller falls back to legacy path).
-    return 0;
-  }
-
-  if (n > cap) {
-    return 0;
-  }
-  for (u32 i = 0; i < n; i++) {
-    out[i] = types[i];
-  }
-  return n;
+  // uop_dag_apply_kopt mutates RANGE leaves in place for every
+  // split-class opt, so the DAG's post-opt RANGE set encodes the
+  // final axis layout.  axes_reset_to_default reverts
+  // cached_lift.store_root from cached_lift_init_root so autotune's
+  // bench loop is consistent.
+  u8 kax_dag[MAX_AXES] = {0};
+  u32 ext_dag[MAX_AXES] = {0};
+  u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
+  if (n_dag == 0 || n_dag > cap) return 0;
+  for (u32 i = 0; i < n_dag; i++) out[i] = kax_dag[i];
+  return n_dag;
 }
 
 // Single kax_type read point outside the writer trio.  Returns the
@@ -300,101 +178,13 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
   if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
     return 0;
   }
-  // Lifted DAG path: the post-opt RANGE leaves carry final extents.
-  // Skip applied_opts replay -- the DAG IS post-opt.
-  {
-    u8 kax_dag[MAX_AXES] = {0};
-    u32 ext_dag[MAX_AXES] = {0};
-    u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
-    if (n_dag > 0 && n_dag <= cap) {
-      for (u32 i = 0; i < n_dag; i++) out[i] = ext_dag[i];
-      return n_dag;
-    }
-  }
-
-  u32 nd = ke->output_shape.ndim;
-  if (nd > MAX_AXES - 1) {
-    nd = MAX_AXES - 1;
-  }
-  u32 extents[MAX_AXES] = {0};
-  u32 n = 0;
-  for (u32 i = 0; i < nd; i++) {
-    if (n >= MAX_AXES) {
-      return 0;
-    }
-    extents[n++] = ke->output_shape.dims[i];
-  }
-  int has_initial_reduce =
-      (ke->n_ops > 0 && ke->program != NULL
-       && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE);
-  if (has_initial_reduce && n < MAX_AXES) {
-    KProgOp const *rd = &ke->program[ke->n_ops - 1];
-    u32 src_numel;
-    if (KSRC_IS_INPUT(rd->src[0])) {
-      src_numel = ke->input_numels[KSRC_INDEX(rd->src[0])];
-    } else {
-      src_numel = ke->program[KSRC_INDEX(rd->src[0])].numel;
-    }
-    u32 out_numel = ke->output_numel ? ke->output_numel : 1;
-    extents[n++] = src_numel / out_numel;
-  } else {
-    u32 sru = axes_scalar_reduce_extent(ke);
-    if (sru != 0 && n < MAX_AXES) {
-      extents[n++] = sru;
-    }
-  }
-
-  // Replay applied_opts using kernel_apply_opt's structural logic.
-  // applied_opts is the LOG of opts that ALREADY succeeded against
-  // the axis structure, so the replay is guaranteed-valid by
-  // construction.
-  KOpt const *opts = ke->schedule->applied_opts;
-  u32 n_applied   = (u32)ke->schedule->n_applied;
-  for (u32 k = 0; k < n_applied; k++) {
-    KOpt o = opts[k];
-    u8 op = o.op;
-    if (op == KOP_TC || op == KOP_NONE || op == KOP_PADTO
-        || op == KOP_NOLOCALS || op == KOP_GLOBAL) {
-      // No shape mutation.
-      continue;
-    }
-    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL) {
-      if (o.axis >= n || n >= MAX_AXES || o.arg == 0) {
-        return 0;
-      }
-      u32 axis_size = extents[o.axis];
-      if (axis_size % o.arg != 0) {
-        return 0;
-      }
-      // Shift positions > axis right by one; insert at axis+1.
-      for (i32 i = (i32)n; i > (i32)o.axis + 1; i--) {
-        extents[i] = extents[i - 1];
-      }
-      extents[o.axis]     = axis_size / o.arg;
-      extents[o.axis + 1] = o.arg;
-      n++;
-      continue;
-    }
-    if (op == KOP_SWAP) {
-      if (o.axis >= n || (u8)o.arg >= n) {
-        return 0;
-      }
-      u32 tmp = extents[o.axis];
-      extents[o.axis]  = extents[o.arg];
-      extents[o.arg]   = tmp;
-      continue;
-    }
-    // Unknown opt -- bail.
-    return 0;
-  }
-
-  if (n > cap) {
-    return 0;
-  }
-  for (u32 i = 0; i < n; i++) {
-    out[i] = extents[i];
-  }
-  return n;
+  // The post-opt RANGE leaves carry final extents.
+  u8 kax_dag[MAX_AXES] = {0};
+  u32 ext_dag[MAX_AXES] = {0};
+  u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
+  if (n_dag == 0 || n_dag > cap) return 0;
+  for (u32 i = 0; i < n_dag; i++) out[i] = ext_dag[i];
+  return n_dag;
 }
 
 // Per-axis full_shape resolver.  Returns the derived extent for
