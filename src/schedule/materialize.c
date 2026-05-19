@@ -118,6 +118,12 @@ static u32 BOUNDARY_DEPTH    [BUFFERIZE_NODES_CAP];
 static u32 BOUNDARY_LAST_USE [BUFFERIZE_NODES_CAP];
 
 #define VISIT_BAIL 0xDEADBEEFu
+// VISIT_OK signals "subgraph visited successfully but no kernel
+// program slot was emitted".  Used by every visit() branch that
+// formerly appended a KProgOp.  Since KSRC_AS_INPUT(slot) sets
+// the 0x80000000 input bit, VISIT_OK (0) is distinguishable from
+// any input-slot ref via KSRC_IS_INPUT().
+#define VISIT_OK   0u
 
 typedef struct {
   u64 *locs;
@@ -2504,9 +2510,8 @@ fn int kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
   return 0;
 }
 
-// Forward decl: kprog_op_is_identity sits below
-// op_is_chain_movement in this file.  Both helpers are file-static
-// so the accessor can reference them ahead of their definitions.
+// Forward decl: kprog_op_is_identity is file-static and defined
+// later in this file.
 static u8 kprog_op_is_identity(KProgOp const *p);
 
 fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
@@ -2515,8 +2520,6 @@ fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
   if (prog_idx >= ke->n_ops) return 0;
   KProgOp const *p = &ke->program[prog_idx];
   // Only movement ops have a meaningful BIndex chain entry.
-  // Inline the chain-movement check so the accessor can live before
-  // the materialize-internal op_is_chain_movement helper.
   u8 op = p->opcode;
   int is_movement = (op == UOP_RESHAPE || op == UOP_EXPAND
                   || op == UOP_PERMUTE || op == UOP_SHRINK
@@ -3073,17 +3076,10 @@ static u8 op_is_view_movement(u8 op) {
       || op == UOP_SHRINK  || op == UOP_FLIP;
 }
 
-// True for any movement op the bufferize chain tracks.
-static u8 op_is_chain_movement(u8 op) {
-  return op_is_view_movement(op) || op == UOP_PAD;
-}
-
-// Identity check that mirrors bufferize_chain_op_is_identity in
-// schedule/bufferize.c.  Used by prog_chain_propagate to skip src
-// ops that bufferize_apply_identity_reshape elided from the
-// B_INDEX chain so KProgOp chain depth stays aligned with the
-// post-elision BIndex chain length.  Identity covers RESHAPE/EXPAND
-// with src_dims == out_dims and PERMUTE with axis_perm[i] == i.
+// Identity check used by kernel_entry_prog_chain_op to skip movement
+// KProgOps that bufferize_apply_identity_reshape elided from the
+// B_INDEX chain.  Identity covers RESHAPE/EXPAND with src_dims ==
+// out_dims and PERMUTE with axis_perm[i] == i.
 static u8 kprog_op_is_identity(KProgOp const *p) {
   if (p->src0_ndim == 0) return 0;
   if (p->opcode == UOP_RESHAPE || p->opcode == UOP_EXPAND) {
@@ -3101,61 +3097,6 @@ static u8 kprog_op_is_identity(KProgOp const *p) {
     return 1;
   }
   return 0;
-}
-
-// Propagate chain_op_idx + chain_input_slot + chain_edge_idx from
-// a single src ksrc reference to a freshly-zeroed KProgOp `p`.
-// See KProgOp definition in thvm.h for the chain semantics.
-//
-// Movement src that is also an identity is invisible to the
-// bufferize chain (bufferize_apply_identity_reshape elides it), so
-// we treat it as non-movement here to keep chain_op_idx aligned
-// with B_INDEX chain entries.
-//
-// chain_edge_idx is taken from `ke->input_visit_counts[slot] - 1`
-// when src is a fresh INPUT leaf, then propagated unchanged through
-// every parent in the chain.
-static void prog_chain_propagate(KernelEntry *ke, KProgOp *p, u32 src_idx) {
-  if (KSRC_IS_INPUT(src_idx)) {
-    u32 slot = KSRC_INDEX(src_idx);
-    p->chain_op_idx     = 0;
-    p->chain_input_slot = slot;
-    u32 count = (ke->input_visit_counts != NULL && slot < ke->n_inputs)
-                  ? ke->input_visit_counts[slot] : 0;
-    if (count == 0) count = 1;          // defensive: at least one visit
-    p->chain_edge_idx = (count - 1) > 255u ? 255u : (u8)(count - 1);
-    return;
-  }
-  u32 si = KSRC_INDEX(src_idx);
-  if (si >= ke->n_ops) {
-    p->chain_op_idx     = 0;
-    p->chain_input_slot = 0xFFFFFFFFu;
-    p->chain_edge_idx   = 0;
-    return;
-  }
-  KProgOp const *src_p = &ke->program[si];
-  if (src_p->chain_input_slot == 0xFFFFFFFFu) {
-    p->chain_op_idx     = 0;
-    p->chain_input_slot = 0xFFFFFFFFu;
-    p->chain_edge_idx   = 0;
-    return;
-  }
-  int src_counts =
-      op_is_chain_movement(src_p->opcode) && !kprog_op_is_identity(src_p);
-  u32 depth = (u32)src_p->chain_op_idx + (src_counts ? 1u : 0u);
-  if (depth > 255u) depth = 255u;
-  p->chain_op_idx     = (u8)depth;
-  p->chain_input_slot = src_p->chain_input_slot;
-  p->chain_edge_idx   = src_p->chain_edge_idx;
-}
-
-// For chain-breaking ops (binary, REDUCE, etc.) - explicitly mark
-// the chain as broken.  The 0xFFFFFFFF sentinel matches the default
-// when no source has been visited yet.
-static void prog_chain_break(KProgOp *p) {
-  p->chain_op_idx     = 0;
-  p->chain_input_slot = 0xFFFFFFFFu;
-  p->chain_edge_idx   = 0;
 }
 
 // Flatten a non-contig TenDesc into a fresh contiguous copy via
@@ -3281,15 +3222,6 @@ static u32 input_slot_dedup_var(KernelEntry *ke, Term var_term,
   Shape s = {0}; s.ndim = 1; s.dims[0] = numel;
   ke->input_views  [slot] = view_create(s);
   return slot;
-}
-
-static u32 src_dtype(KernelEntry *ke, u32 src_idx) {
-  return KSRC_IS_INPUT(src_idx) ? ke->input_dtypes[KSRC_INDEX(src_idx)]
-                                 : ke->program[src_idx].dtype;
-}
-static u64 src_numel(KernelEntry *ke, u32 src_idx) {
-  return KSRC_IS_INPUT(src_idx) ? ke->input_numels[KSRC_INDEX(src_idx)]
-                                 : ke->program[src_idx].numel;
 }
 
 static int materialize_dump_big_input_source_enabled(void) {
@@ -3452,36 +3384,15 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   }
 
   if (op == UOP_CONST) {
-    kernel_program_reserve(ke, ke->n_ops + 1);
-    Term num = heap_read(loc);
-    KProgOp *p = &ke->program[ke->n_ops++];
-    memset(p, 0, sizeof(*p));
-    p->opcode = UOP_CONST;
-    p->dtype  = term_ext(num);            // dtype on the NUM cell
-    p->arg    = (u32)term_val(num);
-    p->n_src  = 0;
-    p->numel  = 1;
-    prog_chain_break(p);                  // CONST has no src chain
-    u32 ref = ke->n_ops - 1;
-    visit_memo_store(memo, loc, ref);
-    return ref;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
   }
 
   if (uop_is_unary_elementwise(op) || op == UOP_LOAD) {
     u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    kernel_program_reserve(ke, ke->n_ops + 1);
-    KProgOp *p = &ke->program[ke->n_ops++];
-    memset(p, 0, sizeof(*p));
-    p->opcode = (u8)op;
-    p->dtype  = src_dtype(ke, src_idx);
-    p->numel  = src_numel(ke, src_idx);
-    p->n_src  = 1;
-    p->src[0] = src_idx;
-    prog_chain_propagate(ke, p, src_idx); // unary passthrough
-    u32 ref = ke->n_ops - 1;
-    visit_memo_store(memo, loc, ref);
-    return ref;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
   }
 
   if (op == UOP_CAST || op == UOP_BITCAST) {
@@ -3489,22 +3400,8 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     Term num = heap_read(loc + 1);
     if (term_tag(num) != TAG_NUM) return VISIT_BAIL;
-    u32 dst_dtype = (u32)term_val(num);
-    kernel_program_reserve(ke, ke->n_ops + 1);
-    KProgOp *p = &ke->program[ke->n_ops++];
-    memset(p, 0, sizeof(*p));
-    p->opcode = (u8)op;
-    p->dtype  = dst_dtype;
-    // arg carries the source dtype so the kernel can route through
-    // to_fp32_lane / from_fp32_lane (see backend/cpu/op/cast.c).
-    p->arg    = src_dtype(ke, src_idx);
-    p->numel  = src_numel(ke, src_idx);
-    p->n_src  = 1;
-    p->src[0] = src_idx;
-    prog_chain_propagate(ke, p, src_idx); // CAST/BITCAST passthrough
-    u32 ref = ke->n_ops - 1;
-    visit_memo_store(memo, loc, ref);
-    return ref;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
   }
 
   if (uop_is_binary_elementwise(op)) {
@@ -3512,41 +3409,8 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     if (li == VISIT_BAIL) return VISIT_BAIL;
     u32 ri = visit(heap_read(loc + 1), ke, root_loc, memo);
     if (ri == VISIT_BAIL) return VISIT_BAIL;
-    kernel_program_reserve(ke, ke->n_ops + 1);
-    KProgOp *p = &ke->program[ke->n_ops++];
-    memset(p, 0, sizeof(*p));
-    p->opcode = (u8)op;
-    // p->numel is the op's *output* element count.  Compute it from
-    // the term's broadcast output shape as a u64 product -- NOT as
-    // max(operand .numel), because an operand resolved to a strided
-    // input view stores its (possibly > 2^32) logical numel in a u32
-    // View.numel / KernelEntry.input_numels[] slot, which truncates.
-    // An im2col-matmul's MUL operand {cOut, cIn*kh*kw, B*hOut*wOut} =
-    // {32,800,204800} has 5.24e9 logical elems at BS=512; the
-    // truncated 947912704 then poisons the downstream REDUCE's
-    // numel (= mul.numel / reduce_extent) and rangeify's
-    // divisibility gate -> spurious bail -> per-op fallback ->
-    // 3.8 GB alloc -> ceiling refusal.  Falls back to max(operand
-    // numels) only if term_shape_in fails (degenerate / unshaped).
-    {
-      Shape out_shape = {0};
-      if (term_shape_in(t, 0, &out_shape) && out_shape.ndim > 0) {
-        u64 onum = 1;
-        for (u32 i = 0; i < out_shape.ndim; i++) onum *= (u64)out_shape.dims[i];
-        p->numel = onum;
-      } else {
-        u64 ln = src_numel(ke, li), rn = src_numel(ke, ri);
-        p->numel = (ln >= rn) ? ln : rn;
-      }
-    }
-    p->dtype  = src_dtype(ke, li);
-    p->n_src  = 2;
-    p->src[0] = li;
-    p->src[1] = ri;
-    prog_chain_break(p);                  // binary: chain has two paths, breaks
-    u32 ref = ke->n_ops - 1;
-    visit_memo_store(memo, loc, ref);
-    return ref;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
   }
 
   // GRAD is a stop point in materialize -- the architecture is
@@ -3561,7 +3425,8 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   // Movement ops as a child of the kernel: try view-only resolve
   // first.  If the source isn't a contig TenDesc-resolvable chain
   // (e.g., EXPAND wrapping a MUL from interact_grad), fall through
-  // to kernel-op emit with the appropriate metadata.
+  // to a recursive visit that walks the source for input-slot
+  // tracking + bail propagation.
   if (op_is_view_movement(op)) {
     u32 alias_tid = view_resolve(t);
     if (alias_tid != 0) {
@@ -3571,107 +3436,22 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       visit_memo_store(memo, loc, ref);
       return ref;
     }
-    // Fallback: emit as a kernel op.  Recurse into source, look up
-    // shapes, populate the metadata cpu_op_<op> + Metal shaders need.
     u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    kernel_program_reserve(ke, ke->n_ops + 1);
-    Shape src_shape = {0};
-    if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
-    Shape out_shape = {0};
-    if (!term_shape_in(t, 0, &out_shape)) return VISIT_BAIL;
-    // KProgOp.numel is u64 (so big conv-bwd-dInput shapes don't overflow);
-    // accumulate in u64 too so the multiply can't lose high bits.
-    u64 out_numel = 1;
-    for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= (u64)out_shape.dims[i];
-    KProgOp *p = &ke->program[ke->n_ops++];
-    memset(p, 0, sizeof(*p));
-    p->opcode    = op;
-    p->dtype     = src_dtype(ke, src_idx);
-    p->numel     = out_numel;
-    p->n_src     = 1;
-    p->src[0]    = src_idx;
-    p->src0_ndim = (u8)(src_shape.ndim & 0xFF);
-    p->out_ndim  = (u8)(out_shape.ndim & 0xFF);
-    for (u32 i = 0; i < src_shape.ndim; i++) p->src0_dims[i] = src_shape.dims[i];
-    for (u32 i = 0; i < out_shape.ndim; i++) p->out_dims [i] = out_shape.dims[i];
-    if (op == UOP_PERMUTE) {
-      for (u32 i = 0; i < src_shape.ndim; i++) {
-        u32 pi = (u32)term_val(heap_read(loc + 2 + i));
-        p->axis_perm[i] = (u8)(pi & 0xFF);
-      }
-    }
-    if (op == UOP_SHRINK) {
-      for (u32 i = 0; i < src_shape.ndim; i++) {
-        u32 b = (u32)term_val(heap_read(loc + 2 + 2 * i));
-        u32 e = (u32)term_val(heap_read(loc + 3 + 2 * i));
-        p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
-        p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
-      }
-    }
-    if (op == UOP_FLIP) {
-      // axes_mask sits in the wrapping UOP cell's ext field
-      // (uop_flip stuffs it via term_new's ext).  Wait -- actually
-      // uop_flip puts the mask in heap[loc+1] as a NUM cell.  Check
-      // the constructor.
-      Term mask_num = heap_read(loc + 1);
-      if (term_tag(mask_num) == TAG_NUM) p->arg = (u32)term_val(mask_num);
-    }
-    prog_chain_propagate(ke, p, src_idx);   // movement op (view-path)
-    u32 ref = ke->n_ops - 1;
-    visit_memo_store(memo, loc, ref);
-    return ref;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
   }
 
-  // PAD as a kernel emit (g2c2): allocate a fresh buf, run
-  // cpu_op_pad / metal pad shader.  Unlike SHRINK/PERMUTE/etc, PAD
-  // can't be a view-only alias because reading bytes outside the
-  // alloc is UB even when calloc'd.
   if (op == UOP_PAD) {
     u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    kernel_program_reserve(ke, ke->n_ops + 1);
-    // Source shape: from the PAD's source term (TenDesc lookup).
-    Shape src_shape = {0};
-    if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
-    // Output shape: src.dim[i] + b_i + e_i per axis.
-    Shape out_shape = src_shape;
-    u64   out_numel = 1;
-    for (u32 i = 0; i < src_shape.ndim; i++) {
-      u32 b = (u32)term_val(heap_read(loc + 2 + 2 * i));
-      u32 e = (u32)term_val(heap_read(loc + 3 + 2 * i));
-      out_shape.dims[i] = src_shape.dims[i] + b + e;
-      out_numel        *= (u64)out_shape.dims[i];
-    }
-    KProgOp *p = &ke->program[ke->n_ops++];
-    memset(p, 0, sizeof(*p));
-    p->opcode    = UOP_PAD;
-    p->dtype     = src_dtype(ke, src_idx);
-    p->numel     = out_numel;
-    p->n_src     = 1;
-    p->src[0]    = src_idx;
-    p->src0_ndim = (u8)(src_shape.ndim & 0xFF);
-    p->out_ndim  = (u8)(out_shape.ndim & 0xFF);
-    for (u32 i = 0; i < src_shape.ndim; i++) {
-      p->src0_dims[i] = src_shape.dims[i];
-      p->out_dims [i] = out_shape.dims[i];
-      u32 b = (u32)term_val(heap_read(loc + 2 + 2 * i));
-      u32 e = (u32)term_val(heap_read(loc + 3 + 2 * i));
-      p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
-      p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
-    }
-    prog_chain_propagate(ke, p, src_idx);   // PAD movement op
-    u32 ref = ke->n_ops - 1;
-    visit_memo_store(memo, loc, ref);
-    return ref;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
   }
 
   // REDUCE -- as the kernel root (tail-fuse) or as an intermediate
   // op whose result is consumed elementwise (broadcast) by later
-  // program ops.  The "at most one REDUCE per kernel" invariant
-  // (used by render_uop's reduce-tail accumulator hoist and by
-  // cpu_op_reduce's per-output indexing) is enforced by counting
-  // REDUCEs already in the program.
+  // program ops.
   if (op == UOP_REDUCE) {
     ReduceChainInfo rc;
     if (reduce_chain_collect(t, &rc)) {
@@ -3684,38 +3464,10 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
         }
       }
       if (!chain_inlined) goto single_reduce_emit;
-      // Multi-REDUCE per kernel is permitted: rangeify's scalar layer
-      // supports multiple reduce ranges per kernel
-      // (docs/plans/rewrite_fusion.md:161), and the legacy
-      // cpu_op_reduce path that the old "one REDUCE per kernel" rule
-      // protected was deleted in the F6 cleanup (src/thvm.c:173).
       u32 src_idx = visit(rc.src, ke, root_loc, memo);
       if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-      kernel_program_reserve(ke, ke->n_ops + 1);
-      KProgOp *p = &ke->program[ke->n_ops++];
-      memset(p, 0, sizeof(*p));
-        p->opcode = UOP_REDUCE;
-      p->dtype  = src_dtype(ke, src_idx);
-      p->arg    = (rc.kind << 24) | (rc.inner & 0x00FFFFFFu);
-      p->numel  = rc.out_numel;
-      p->n_src  = 1;
-      p->src[0] = src_idx;
-      p->src0_ndim      = rc.src_ndim;
-      p->out_ndim       = rc.out_ndim;
-      p->n_reduce_axes  = rc.n_reduce_axes;
-      for (u32 i = 0; i < rc.src_ndim && i < MAX_DIM; i++) {
-        p->src0_dims[i] = rc.src_dims[i];
-      }
-      for (u32 i = 0; i < rc.out_ndim && i < MAX_DIM; i++) {
-        p->out_dims[i] = rc.out_dims[i];
-      }
-      for (u32 i = 0; i < rc.n_reduce_axes && i < MAX_DIM; i++) {
-        p->reduce_axes[i] = rc.reduce_axes[i];
-      }
-      prog_chain_break(p);                  // REDUCE breaks the chain
-      u32 ref = ke->n_ops - 1;
-      visit_memo_store(memo, loc, ref);
-      return ref;
+      visit_memo_store(memo, loc, VISIT_OK);
+      return VISIT_OK;
     }
 
   single_reduce_emit:
@@ -3746,60 +3498,10 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
         return sidx;
       }
     }
-    // Multi-REDUCE per kernel is permitted; see the comment in the
-    // multi-reduce-chain branch above.
     u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    kernel_program_reserve(ke, ke->n_ops + 1);
-    u32 kind = (u32)term_val(heap_read(loc + 1));
-    u32 axis = (u32)term_val(heap_read(loc + 2));
-    // arg encoding (cpu_op_reduce / Metal reduce shader):
-    //   bits 24..31 = kind, bits 0..23 = inner = prod(dims[axis+1..]).
-    // Packing axis here (the round-1 bug) gave inner = 0 -> fallback
-    // to 1 -> axis treated as innermost, which is correct only when
-    // axis IS innermost.  Compute inner from the source shape.
-    Shape src_shape = {0};
-    u32 inner = 1;
-    u64 src_numel_total = src_numel(ke, src_idx);
-    if (term_shape_in(heap_read(loc), 0, &src_shape)) {
-      for (u32 i = axis + 1; i < src_shape.ndim; i++) inner *= src_shape.dims[i];
-    }
-    // Output numel of THIS REDUCE op (not necessarily the kernel's
-    // output): src_numel / axis_size.  axis_size = src_shape.dims[axis]
-    // when shape is known; otherwise fall back to the kernel's
-    // output_numel (root-REDUCE case).
-    u64 reduce_numel = ke->output_numel;
-    if (src_shape.ndim > axis) {
-      u32 axis_size = src_shape.dims[axis] ? src_shape.dims[axis] : 1;
-      reduce_numel = src_numel_total / axis_size;
-    }
-    KProgOp *p = &ke->program[ke->n_ops++];
-    memset(p, 0, sizeof(*p));
-    p->opcode = UOP_REDUCE;
-    p->dtype  = src_dtype(ke, src_idx);
-    p->arg    = (kind << 24) | (inner & 0x00FFFFFFu);
-    p->numel  = reduce_numel;
-    p->n_src  = 1;
-    p->src[0] = src_idx;
-    if (src_shape.ndim > 0 && src_shape.ndim <= MAX_DIM) {
-      p->src0_ndim     = (u8)src_shape.ndim;
-      p->n_reduce_axes = 1;
-      p->reduce_axes[0] = (u8)(axis & 0xFFu);
-      for (u32 i = 0; i < src_shape.ndim; i++) {
-        p->src0_dims[i] = src_shape.dims[i];
-      }
-      Shape out_shape = {0};
-      if (term_shape_in(t, 0, &out_shape)) {
-        p->out_ndim = (u8)out_shape.ndim;
-        for (u32 i = 0; i < out_shape.ndim && i < MAX_DIM; i++) {
-          p->out_dims[i] = out_shape.dims[i];
-        }
-      }
-    }
-    prog_chain_break(p);                    // REDUCE breaks the chain
-    u32 ref = ke->n_ops - 1;
-    visit_memo_store(memo, loc, ref);
-    return ref;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
   }
 
   return VISIT_BAIL;
@@ -4022,16 +3724,16 @@ static Term emit_kernel_for_boundary(u32 bi) {
   }
 
   // Degenerate case: visit() consumed the whole boundary subgraph as
-  // a single input slot (n_ops == 0, result == KSRC_AS_INPUT).  This
-  // happens when the boundary's root is a movement-op chain whose
-  // view_resolve found a direct alias TenDesc -- no compute to do.
-  // Without this branch the kernel commits with an empty program;
-  // cpu_interpret runs nothing; the alloc'd output buffer stays
-  // zero-initialized, silently zeroing whatever signal was supposed
-  // to flow through (the gy=CONST(1.0) seed in MSE backward, etc).
-  // Skip kernel emission and alias the boundary's output to the
-  // input tid directly.
-  if (ke->n_ops == 0 && KSRC_IS_INPUT(result)) {
+  // a single input slot (result == KSRC_AS_INPUT).  This happens when
+  // the boundary's root is a movement-op chain whose view_resolve
+  // found a direct alias TenDesc -- no compute to do.  Without this
+  // branch the kernel commits with an empty program; cpu_interpret
+  // runs nothing; the alloc'd output buffer stays zero-initialized,
+  // silently zeroing whatever signal was supposed to flow through
+  // (the gy=CONST(1.0) seed in MSE backward, etc).  Skip kernel
+  // emission and alias the boundary's output to the input tid
+  // directly.
+  if (KSRC_IS_INPUT(result)) {
     u32 alias_tid = ke->input_tids[KSRC_INDEX(result)];
     if (alias_tid != 0 && alias_tid < TENS_NEXT) {
       // Release the unused output_tid we speculatively allocated.
@@ -4221,27 +3923,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
                                                   m_opts, m_n_app);
       Term post = uop_apply_kernel_opts(root_after_split, m_opts, m_n_app);
       ke->cached_lift.store_root = post;
-    }
-    // Dual-write: when the lift succeeds, cached_lift.store_root is
-    // the canonical UOp DAG and program[] is the legacy KProgOp side
-    // table.  cpu_blas_dispatch and tile.c's gemm/gemv recognisers
-    // still consume program[]; backprop through UOP_KERNEL reads it
-    // too.  NULL program[] -> all-zero gradients -> training breaks.
-    // Free program[] post-lift now that every consumer reads either
-    // cached_lift.store_root directly or routes through one of the
-    // DAG-first wrappers (axes_compute_*, cg_kernel_flops,
-    // jit_capture_kernel_op_count, grad_bwd_for_child via source_uop,
-    // uop_dag_classify_*).  THVM_PHASE_C7_FREE_PROGRAM=0 reverts to
-    // keeping program[] around as a bisection knob.
-    char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-    int free_program_on = (free_e == NULL) || (free_e[0] != '0');
-    if (free_program_on) {
-      if (ke->program != NULL) {
-        free(ke->program);
-      }
-      ke->program        = NULL;
-      ke->n_ops          = 0;
-      ke->ops_cap        = 0;
     }
   }
 
