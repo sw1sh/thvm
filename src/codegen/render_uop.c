@@ -40,6 +40,13 @@ typedef enum {
 } cg_target;
 static cg_target RMU_TARGET = CG_TARGET_METAL;
 
+// 1 when the kernel currently being rendered carries an
+// OPT(_, SIMD_REDUCE, _) wrapper: the 32 warp lanes cooperate on one
+// output element, so the promoted output axis decodes from the warp
+// (block) index `tg` rather than the per-thread `tid`.  Set per render
+// by cg_render_uop_kernel_cuda_root; the MSL / C99 entries leave it 0.
+static int RMU_SIMD_WARP = 0;
+
 // Emit an unroll pragma matching the current target's syntax.  C99 /
 // clang accept `#pragma clang loop unroll_count(N)`; MSL / GPU targets
 // use the GCC-style `#pragma unroll(N)`.  factor==0 means "full".
@@ -1100,7 +1107,11 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   if (gctx != NULL && axis_id < 256 && gctx->modulus_of_axis[axis_id] != 0) {
     u32 stride = gctx->stride_of_axis[axis_id];
     u32 mod    = gctx->modulus_of_axis[axis_id];
-    char const *idx = gctx->has_local ? "tg" : "tid";
+    // SIMD_REDUCE: one threadblock = one warp = one output row, so the
+    // promoted output axis decodes from the block index `tg` (the same
+    // form a LOCAL split uses) -- never the per-thread `tid`, which
+    // would split a warp across 32 distinct rows.
+    char const *idx = (gctx->has_local || RMU_SIMD_WARP) ? "tg" : "tid";
     if (gctx->n_globals == 1) {
       fprintf(fp, "uint a%u = %s; /* global ext=%u */\n", axis_id, idx, extent);
     } else if (stride <= 1) {
@@ -1273,7 +1284,8 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
   if (gd.n_globals > 0 && gd.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "if (%s >= %lluu) return;\n",
-            gd.has_local ? "tg" : "tid", (unsigned long long)gd.total);
+            (gd.has_local || RMU_SIMD_WARP) ? "tg" : "tid",
+            (unsigned long long)gd.total);
   }
   u32 body_depth = depth;
   for (u32 i = 0; i < n_out; i++) {
@@ -2766,17 +2778,22 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
         for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
         fputs("}\n", fp); \
         if (RMU_TARGET == CG_TARGET_CUDA) { \
-          /* Warp butterfly: 5 __shfl_down_sync steps fold 32 lanes. */ \
+          /* Warp butterfly: 5 __shfl_xor_sync steps fold 32 lanes. */ \
+          /* xor (not down) makes this an ALL-reduce -- every lane */ \
+          /* ends with the full result, matching Metal simd_sum/ */ \
+          /* simd_max broadcast semantics.  A down-shuffle would */ \
+          /* leave the result in lane 0 only, so the unguarded */ \
+          /* per-lane store of the reduced value would be a race. */ \
           const char *_op = (_r_kind == REDUCE_MAX) ? "fmaxf" : "+"; \
           for (u32 _s = 16; _s >= 1; _s >>= 1) { \
             for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
             if (_r_kind == REDUCE_MAX) { \
               fprintf(fp, "%s = %s(%s, " \
-                      "__shfl_down_sync(0xffffffffu, %s, %uu));\n", \
+                      "__shfl_xor_sync(0xffffffffu, %s, %uu));\n", \
                       _acc_name, _op, _acc_name, _acc_name, _s); \
             } else { \
               fprintf(fp, "%s = %s %s " \
-                      "__shfl_down_sync(0xffffffffu, %s, %uu);\n", \
+                      "__shfl_xor_sync(0xffffffffu, %s, %uu);\n", \
                       _acc_name, _acc_name, _op, _acc_name, _s); \
             } \
           } \
@@ -2813,7 +2830,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   if (g_decode.n_globals > 0 && g_decode.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "if (%s >= %lluu) return;\n",
-            g_decode.has_local ? "tg" : "tid",
+            (g_decode.has_local || RMU_SIMD_WARP) ? "tg" : "tid",
             (unsigned long long)g_decode.total);
   }
 
@@ -3330,6 +3347,43 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   fputs("}\n", fp);
 }
 
+// Walk the DAG for a UOP_OPT(_, SIMD_REDUCE, _) annotation.  When the
+// reduce was wrapped for the warp-collective lowering, the 32 lanes of
+// a warp cooperate on ONE output element: the cross-lane butterfly
+// (__shfl_down_sync) only combines lanes within the same warp, so
+// every lane must decode the SAME output-axis tuple.  The CUDA entry
+// uses this to switch the promoted output axis from a per-thread `tid`
+// decode (32 lanes -> 32 distinct rows -- a correctness bug) to a
+// per-warp `tg` decode (one threadblock = one warp = one output row).
+static int rmu_dag_has_simd_reduce(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  switch (op) {
+    case UOP_OPT:
+      if ((u32)term_val(heap_read(loc + 1)) == UOP_OPT_SIMD_REDUCE) return 1;
+      return rmu_dag_has_simd_reduce(heap_read(loc + 0));
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E: case UOP_AFTER:
+      return rmu_dag_has_simd_reduce(heap_read(loc + 0))
+          || rmu_dag_has_simd_reduce(heap_read(loc + 1));
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_REDUCE:
+      return rmu_dag_has_simd_reduce(heap_read(loc + 0));
+    case UOP_IWHERE:
+    case UOP_STORE:
+      return rmu_dag_has_simd_reduce(heap_read(loc + 0))
+          || rmu_dag_has_simd_reduce(heap_read(loc + 1))
+          || rmu_dag_has_simd_reduce(heap_read(loc + 2));
+    default:
+      return 0;
+  }
+}
+
 // Walk the DAG for a UOP_OPT(_, TC, _) annotation -- the tell that the
 // matmul tensor-core template will fire.  The CUDA entry point uses
 // this to decide whether to emit the WMMA headers (#include <mma.h> +
@@ -3393,8 +3447,12 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   rmu_buf_names_reset();
   if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
   RMU_TARGET = CG_TARGET_CUDA;
-  // WMMA headers: only emitted when the DAG carries a TC annotation
-  // (the matmul tensor-core path).  nvrtc ships both headers.
+  // Warp-collective reduce: when SIMD_REDUCE wraps a reduce, the
+  // promoted output axis must decode from `tg` (one block = one warp =
+  // one output row) so all 32 lanes of a __shfl_down_sync butterfly
+  // agree on the row.  The launch geometry (cuda_dag_dispatch_shape)
+  // matches: grid = output-LOOP product, block = 32.
+  RMU_SIMD_WARP = rmu_dag_has_simd_reduce(root);
   if (rmu_dag_has_tc(root)) {
     fputs("#include <mma.h>\n", fp);
     fputs("#include <cuda_fp16.h>\n", fp);
@@ -3447,5 +3505,6 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
     fputs("  /* empty kernel */\n", fp);
   }
   RMU_TARGET = CG_TARGET_METAL;
+  RMU_SIMD_WARP = 0;
   fputs("}\n", fp);
 }

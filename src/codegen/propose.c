@@ -441,6 +441,19 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
         n++;
       }
     }
+    // KOP_SIMD_REDUCE: replace each scalar reduce-axis accumulator with
+    // a warp-collective reduce -- the 32 lanes of a warp each take a
+    // 1/32 stripe of the reduce extent, then a 5-step __shfl_xor_sync
+    // butterfly folds the lane partials.  Offered only on a reduce-tail
+    // kernel (axis_size > 0); the apply pass wraps every UOP_REDUCE, so
+    // axis/arg are unused.  cuda_dag_dispatch_shape launches it
+    // grid = output rows, block = 32 (one warp per row).
+    if (axis_size > 0 && n < cap) {
+      out[n].op   = KOP_SIMD_REDUCE;
+      out[n].axis = 0;
+      out[n].arg  = 0;
+      n++;
+    }
   }
   return n;
 }

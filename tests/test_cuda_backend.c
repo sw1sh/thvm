@@ -437,6 +437,77 @@ int main(void) {
     thvm_cuda_buf_free(bB);
   }
 
+  // === vtable dispatch of a KOP_SIMD_REDUCE multi-row reduce =========
+  // out[r] = sum_c in[r,c] for R rows of width C.  KOP_SIMD_REDUCE
+  // wraps the reduce in OPT(_, SIMD_REDUCE, _): each row's reduction is
+  // a warp-collective __shfl_xor_sync butterfly.  The 32 lanes of a
+  // warp cooperate on ONE row, so cuda_dag_dispatch_shape must launch
+  // grid = R blocks, block = 32 -- and the renderer (RMU_SIMD_WARP)
+  // must decode the row axis from `tg`, not `tid` (a `tid` decode
+  // would scatter a warp across 32 distinct rows).  Result must match
+  // the per-row CPU reference.
+  TEST_BEGIN("cuda-backend/vtable-dispatch-kop-simd-reduce");
+  {
+    enum { R = 12, C = 96 };
+    u32 dOut[1] = { R }, dIn[2] = { R, C };
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dOut, 0);
+    Term in  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dIn,  1);
+    Term r_r = uop_range(0, KAX_LOOP, R);
+    Term r_c = uop_range(1, KAX_REDUCE, C);
+    Term kC  = uop_const(DT_INT32, C);
+    Term addrIn = uop_int_binary(UOP_IADD,
+                                 uop_int_binary(UOP_IMUL, r_r, kC), r_c);
+    Term red = uop_reduce(REDUCE_SUM, 1, uop_index_e(in, addrIn));
+    Term st  = uop_store(out, r_r, red);
+
+    KOpt opt = { .op = KOP_SIMD_REDUCE, .axis = 0, .arg = 0 };
+    Term st_sr = uop_dag_apply_kopt(st, opt);
+    CHECK(st_sr != 0);
+    CHECK(st_sr != st);    // the wrapper actually rewrote the DAG
+
+    u32 kid = kernel_alloc();
+    KernelEntry *ke = &KERNELS[kid];
+    ke->cached_lift.store_root = st_sr;
+    ke->cached_lift.n_inputs = 1;
+    ke->compute_root = st_sr;
+    ke->n_inputs = 1;
+    ke->output_numel = R;
+
+    float hIn[R * C], hOut_ref[R], hOut_gpu[R];
+    for (int i = 0; i < R * C; i++) hIn[i] = (float)(i % 13) * 0.1f - 0.6f;
+    for (int r = 0; r < R; r++) {
+      float acc = 0.0f;
+      for (int c = 0; c < C; c++) acc += hIn[r * C + c];
+      hOut_ref[r] = acc;
+    }
+
+    u32 bOut = thvm_cuda_buf_alloc((u64)R * sizeof(float));
+    u32 bIn  = thvm_cuda_buf_alloc((u64)R * C * sizeof(float));
+    CHECK(thvm_cuda_buf_write(bIn, hIn, sizeof hIn) == 0);
+
+    u32 in_buf_ids[1] = { bIn };
+    int rc = CUDA_BACKEND.dispatch_kernel(ke, in_buf_ids, bOut);
+    if (rc != 0) {
+      fprintf(stderr, "  vtable SIMD_REDUCE dispatch failed: %s\n",
+              thvm_cuda_last_error());
+    }
+    CHECK(rc == 0);
+
+    CHECK(thvm_cuda_buf_read(bOut, hOut_gpu, sizeof hOut_gpu) == 0);
+    int all_ok = 1;
+    for (int r = 0; r < R; r++) {
+      if (!approx_eq(hOut_gpu[r], hOut_ref[r])) {
+        all_ok = 0;
+        fprintf(stderr, "  SIMD_REDUCE row %d mismatch: gpu=%f ref=%f\n",
+                r, hOut_gpu[r], hOut_ref[r]);
+      }
+    }
+    CHECK(all_ok);
+
+    thvm_cuda_buf_free(bOut);
+    thvm_cuda_buf_free(bIn);
+  }
+
   // === jit cache: second compile of the same source is a hit ========
   TEST_BEGIN("cuda-backend/jit-cache-hit-on-identical-source");
   {
