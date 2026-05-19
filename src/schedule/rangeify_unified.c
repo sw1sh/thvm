@@ -1396,7 +1396,32 @@ static Term ru_subtree_rewrite_ranges(Term t, RuAxisSubst const *m,
     if (new_c != old_c) changed = 1;
   }
   if (!changed) return t;
-  return uop_graph_rebuild_with_srcs(r, srcs);
+  Term rebuilt = uop_graph_rebuild_with_srcs(r, srcs);
+  // If we're rebuilding an INDEX_E that had per-axis info registered
+  // for its original loc, propagate the registration to the rebuilt
+  // loc with the substitution m applied to each axis range.  Without
+  // this, the bypass rewriter's axis-table lookup on the rebuilt
+  // INDEX_E misses and falls back to flat-addr decomposition.
+  if (op == UOP_INDEX_E && rebuilt != t) {
+    Term old_ax_rngs[MAX_DIM];
+    u8 old_n = rangeify_unified_index_axes_lookup(
+        term_val(t), old_ax_rngs, MAX_DIM);
+    if (old_n > 0) {
+      Term new_ax_rngs[MAX_DIM];
+      for (u8 a = 0; a < old_n; a++) {
+        Term cur = old_ax_rngs[a];
+        if (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_RANGE) {
+          Term repl;
+          if (ru_axis_subst_lookup(m, uop_range_axis_id(cur), &repl)) {
+            cur = repl;
+          }
+        }
+        new_ax_rngs[a] = cur;
+      }
+      ru_index_axes_register(rebuilt, new_ax_rngs, old_n);
+    }
+  }
+  return rebuilt;
 }
 
 // Build the producer->consumer axis_id substitution map for the edge
