@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ctypes as _ct
 import math
+import weakref
 from typing import Any, Sequence
 
 import numpy as np
@@ -32,6 +33,11 @@ from .thvm import K, Term, Thvm, _uop_binary
 
 # Process-global bridge.  All Tensors share one Thvm instance.
 _TH = Thvm()
+
+# Phase 3B: tensors with requires_grad=True register here so backward()
+# can enumerate the leaves to differentiate against.  WeakSet so dead
+# tensors auto-drop -- nn parameters stay alive via their layer object.
+_REQUIRES_GRAD: "weakref.WeakSet[Tensor]" = weakref.WeakSet()
 
 
 def _wrap_other(self_t: "Tensor", other) -> "Tensor":
@@ -46,7 +52,8 @@ def _wrap_other(self_t: "Tensor", other) -> "Tensor":
 class Tensor:
     """thvm tensor: TAG_TEN handle + Python-tracked dtype + shape."""
 
-    __slots__ = ("term", "_dtype", "_shape", "requires_grad", "grad")
+    __slots__ = ("term", "_dtype", "_shape", "requires_grad", "grad",
+                 "__weakref__")
 
     # tinygrad's class-level `Tensor.training` flag; BatchNorm reads it.
     training: bool = False
@@ -162,14 +169,27 @@ class Tensor:
 
     def requires_grad_(self, requires_grad: bool = True) -> "Tensor":
         self.requires_grad = requires_grad
+        if requires_grad:
+            _REQUIRES_GRAD.add(self)
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Phase 3B will wire .backward() to thvm's uop_grad and
-        populate each requires_grad leaf's .grad.  Phase 3A: stub."""
-        raise NotImplementedError(
-            "Tensor.backward(): autograd flow through requires_grad "
-            "is Phase 3B; use Thvm.grad_with_target for explicit grads")
+        """Build BWD projections via thvm's uop_grad_with_target -- one
+        per requires_grad leaf registered in _REQUIRES_GRAD.  Each leaf's
+        .grad is set to a Tensor wrapping the (unrealized) grad term;
+        the caller realizes them on demand (`Tensor.realize(*grads)`)."""
+        if gradient is None:
+            if self.numel() != 1:
+                raise RuntimeError(
+                    "backward(): implicit gradient only for scalar outputs")
+            gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
+                        else Tensor.ones(*self._shape, dtype=self._dtype))
+        for leaf in list(_REQUIRES_GRAD):
+            if not leaf.requires_grad:
+                continue
+            g = _TH.grad_with_target(self.term, gradient.term, leaf.term)
+            leaf.grad = Tensor._from_term(g, leaf._dtype, leaf._shape)
+        return self
 
     def sequential(self, layers) -> "Tensor":
         """Apply a list of callables to self in sequence."""
@@ -466,6 +486,22 @@ class Tensor:
             flat *= d
         return self.reshape(*before, flat)
 
+    def pad(self, begin_end) -> "Tensor":
+        """Pad each axis with zeros.  begin_end has 2*ndim entries:
+        [b0, e0, b1, e1, ...]."""
+        new_shape = tuple(self._shape[i] + begin_end[2*i] + begin_end[2*i+1]
+                          for i in range(self.ndim))
+        t = _TH.pad(self.term, list(begin_end))
+        return Tensor._from_term(t, self._dtype, new_shape)
+
+    def shrink(self, begin_end) -> "Tensor":
+        """Take a sub-range per axis.  begin_end has 2*ndim entries:
+        [b0, e0, b1, e1, ...] -- begin inclusive, end exclusive."""
+        new_shape = tuple(begin_end[2*i+1] - begin_end[2*i]
+                          for i in range(self.ndim))
+        t = _TH.shrink(self.term, list(begin_end))
+        return Tensor._from_term(t, self._dtype, new_shape)
+
     # ---- nn-flavoured helpers (compose Tensor ops) --------------------
 
     def linear(self, weight: "Tensor", bias: "Tensor | None" = None
@@ -529,30 +565,54 @@ class Tensor:
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
                groups: int = 1, stride=1, dilation=1, padding=0) -> "Tensor":
-        del dilation
+        """Phase 3B: composed conv2d -- pad + per-(h,w,c_in)
+        shrink-multiply-accumulate.  No host cheat -- the entire
+        forward lives in thvm's graph and uop_grad traces it for
+        .backward().  Slow (kH*kW*C_in graph branches) vs a fused
+        kernel, but real.
+
+        NOTE: avoids the (xs * ws).sum(axis=size-1-C_in) accumulator
+        pattern, which currently mis-materializes in thvm when many
+        such size-1 reduce contributions are summed; the explicit
+        per-C_in slice path sidesteps that and is numerically exact.
+        Stride/dilation > 1 and groups > 1 are Phase 3C.
+        """
         if groups != 1:
-            raise NotImplementedError(
-                "conv2d groups != 1: Phase 3B (host-side path is the "
-                "single-group bootstrap)")
-        x = self.realize().numpy()
-        w = weight.realize().numpy()
+            raise NotImplementedError("conv2d groups != 1: Phase 3C")
         sH, sW = (stride, stride) if isinstance(stride, int) else stride
+        if sH != 1 or sW != 1:
+            raise NotImplementedError("conv2d stride != 1: Phase 3C")
+        if dilation not in (1, (1, 1)):
+            raise NotImplementedError("conv2d dilation != 1: Phase 3C")
         if isinstance(padding, int):
             pH = pW = padding
         else:
             pH, pW = padding[0], padding[1]
+
+        x = self
         if pH or pW:
-            x = np.pad(x, ((0, 0), (0, 0), (pH, pH), (pW, pW)))
+            x = x.pad([0, 0, 0, 0, pH, pH, pW, pW])
         B, C_in, H, W = x.shape
-        C_out, _, kH, kW = w.shape
-        out_h = (H - kH) // sH + 1
-        out_w = (W - kW) // sW + 1
-        out = np.zeros((B, C_out, out_h, out_w), dtype=x.dtype)
-        for h in range(out_h):
-            for wi in range(out_w):
-                patch = x[:, :, h*sH:h*sH+kH, wi*sW:wi*sW+kW]
-                out[:, :, h, wi] = np.einsum("bchw,ochw->bo", patch, w)
+        C_out, _, kH, kW = weight.shape
+        H_out = H - kH + 1
+        W_out = W - kW + 1
+
+        acc: "Tensor | None" = None
+        for h in range(kH):
+            for w in range(kW):
+                for c in range(C_in):
+                    # x[:, c, h:h+H_out, w:w+W_out] -- (B, 1, H_out, W_out)
+                    xs = x.shrink([0, B, c, c + 1,
+                                   h, h + H_out, w, w + W_out])
+                    xs_b = xs.expand(B, C_out, H_out, W_out)
+                    # weight[:, c, h, w] -- (C_out, 1, 1, 1) -> broadcast
+                    ws = weight.shrink([0, C_out, c, c + 1,
+                                        h, h + 1, w, w + 1])
+                    ws_b = (ws.reshape(1, C_out, 1, 1)
+                            .expand(B, C_out, H_out, W_out))
+                    contrib = xs_b * ws_b
+                    acc = contrib if acc is None else acc + contrib
+        assert acc is not None
         if bias is not None:
-            b = bias.realize().numpy()
-            out = out + b.reshape(1, -1, 1, 1)
-        return Tensor(out, dtype=self._dtype)
+            acc = acc + bias.reshape(1, C_out, 1, 1)
+        return acc
