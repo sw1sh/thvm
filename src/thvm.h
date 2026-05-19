@@ -3078,7 +3078,6 @@ int   cg_supports(KernelEntry const *ke);
 // multi-output today, see backend/cpu/interpret.c).
 // External linkage (not `fn`) so the Metal .m TU can call it.
 int   cg_kernel_has_extra_outputs(KernelEntry const *ke);
-u32   cg_program_dtype(KernelEntry const *ke);   // DT_COUNT on mixed
 char *cg_emit_metal(KernelEntry const *ke);   // caller frees
 char *cg_emit_tile_metal(KernelEntry const *ke);   // caller frees
 int   cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x, u32 *threads_x);
