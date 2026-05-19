@@ -13,10 +13,10 @@
 // dtype-typed pointer in the prologue, so the generated kernel
 // stays uniform across dtypes from the caller's POV.
 //
-// Cache key: KProgOp[] + n_inputs + per-input numel.  Numel goes
-// in because the codegen embeds broadcast checks (numel==1) at
-// emit time, so a program with the same KProgOp[] but different
-// input numels needs a fresh build.
+// Cache key: cached_lift.store_root + n_inputs + per-input numel.
+// Numel goes in because the codegen embeds broadcast checks
+// (numel==1) at emit time, so a program with the same lifted DAG
+// but different input numels needs a fresh build.
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -47,12 +47,11 @@ static CpuJitSlot CPU_JIT_CACHE[CPU_JIT_CACHE_CAP];
 
 fn u64 cpu_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL;
-  h ^= (u64)ke->n_ops; h *= 0x100000001b3ULL;
   h ^= (u64)ke->n_inputs; h *= 0x100000001b3ULL;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     h ^= (u64)ke->input_numels[i]; h *= 0x100000001b3ULL;
     // Fold per-input view stride pattern (and full ShapeTracker
-    // chain) into the key.  Same KProgOp[] with different input
+    // chain) into the key.  Same lifted DAG with different input
     // strides or chain depth now renders to different inline
     // expressions / chain helpers, so MUST get distinct cache
     // keys -- otherwise reuse of the wrong dylib reads memory at
@@ -92,7 +91,7 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
   // value, so the de-dup is identity-based.
   h ^= (u64)ke->cached_lift.store_root; h *= 0x100000001b3ULL;
   // Fold applied_opts into the key via tile_anno facade so two
-  // kernels with identical KProgOp[] but different opts get
+  // kernels with identical lifted DAGs but different opts get
   // distinct .dylibs.  axis_types[] / full_shape[] are derived from
   // applied_opts + output_shape so applied_opts alone is sufficient.
   {
@@ -139,11 +138,9 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // existing CPU-JIT contract (void k(out_v, ins_v, n, in_numels))
   // so the surrounding compile/dlopen/dlsym code is unchanged.
   //
-  // F6 step 15 (2026-05-08): the legacy cg_emit + render_c.c
-  // KProgOp-flat path is gone after a passing 1851-test validation
-  // and a default-on flip in fc40c60a. Kernels the lifter declines
-  // (lift_to_uop returns 0) bail to the interpreter naturally; no
-  // silent JIT compile of a wrong kernel.
+  // The only JIT compile path is render_uop over the lifted DAG.
+  // Kernels the lifter declines (lift_to_uop returns 0) bail to the
+  // interpreter naturally; no silent JIT compile of a wrong kernel.
   //
   // Read the cached KernelUopLift populated by
   // emit_kernel_for_boundary.  The lift is deterministic in the

@@ -364,9 +364,9 @@ static u64 shape_numel_u32(Shape const *s) {
 }
 
 // Collapses a chain of same-kind reductions into the equivalent
-// single contiguous-axis reduction accepted by KProgOp REDUCE.  For
-// SUM, require the original axes to be consumed from inner to outer
-// so the fused loop preserves the old row-major addition order.
+// single contiguous-axis UOP_REDUCE.  For SUM, require the original
+// axes to be consumed from inner to outer so the fused loop
+// preserves the old row-major addition order.
 static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
   memset(out, 0, sizeof(*out));
   root = term_resolve(root);

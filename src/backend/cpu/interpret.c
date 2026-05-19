@@ -1,10 +1,8 @@
 // backend/cpu/interpret.c - CPU dispatch ladder + chained-input pre-materialise.
 //
-// The legacy KProgOp tree-walker (cpu_interpret), the scalar-UOp
-// interpreter (cpu_dispatch_scalar), the TileUop interpreter
-// (cpu_dispatch_tile), and the per-op kernel files (backend/cpu/op/*.c)
-// have all been removed. The UOp DAG walker (backend/cpu/uop_walk.c)
-// covers every kernel shape the surgical suite produces.
+// The UOp DAG walker (backend/cpu/uop_walk.c) covers every kernel
+// shape the surgical suite produces; BLAS / JIT sit above it for
+// the patterns those paths handle faster.
 //
 // What stays here:
 //   - cpu_dispatch_kernel: the dispatch ladder + chained-input
@@ -142,7 +140,7 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
   // 1. BLAS first: matmul / matvec / dot patterns get cblas_*
   //    (Accelerate on macOS) -- 10-100x faster than anything we can
   //    JIT-compile or scalar-interpret near-term.  Pattern-matches
-  //    on KProgOp[]; UOp DAG walker runs only on no-match.
+  //    on the lifted UOp DAG; UOp DAG walker runs only on no-match.
   int blas_kind = cpu_blas_dispatch(ke, in_buf_ids, out_buf_id);
   if (blas_kind) {
     cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
@@ -165,9 +163,9 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
       return 0;
     }
   }
-  // 3. KProgOp JIT: clang-compiled fused inner loop for elementwise
-  //    chains (cached by program hash).  Faster than the scalar
-  //    interpreter for the patterns it covers (no REDUCE > 1, etc.).
+  // 3. CPU JIT: clang-compiled fused inner loop for elementwise
+  //    chains (cached by lifted-DAG hash).  Faster than the walker
+  //    for the patterns it covers (no REDUCE > 1, etc.).
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;

@@ -3,13 +3,14 @@
 // dispatch counters are bumped from the per-backend dispatchers
 // (cpu_blas_dispatch, cpu_jit_dispatch, cpu_interpret).
 //
-// FLOPS estimate is the static count baked into the kernel program:
-// per KProgOp we charge a tiny constant cost based on its opcode
+// FLOPS estimate is the static count baked into the lifted DAG:
+// per UOp we charge a tiny constant cost based on its opcode
 // (1 flop for ADD/MUL, 2 for FMA-style chains, 1 for unary, 0 for
-// movement / reshape / load).  Multiplied by op->numel because each
-// program slot writes one value per element.  This is the same
-// methodology tinygrad's `BEAM` profiler uses; it's a coarse number
-// but useful for "are we hitting BLAS GFLOPs?" sanity checks.
+// movement / reshape / load).  Multiplied by the op's element
+// count because each compute node writes one value per element.
+// This is the same methodology tinygrad's `BEAM` profiler uses;
+// it's a coarse number but useful for "are we hitting BLAS GFLOPs?"
+// sanity checks.
 
 // KDispatchKind is declared in thvm.h so the Metal .m file (compiled
 // in a separate TU) can pass route ids back to cg_profile_record.

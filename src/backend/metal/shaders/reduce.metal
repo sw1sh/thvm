@@ -2,14 +2,14 @@
 // over an arbitrary single axis.  Per-dtype variants suffixed
 // _f32 / _i32.
 //
-// Mirrors backend/cpu/op/reduce.c.  KProgOp.arg packing:
+// Mirrors backend/cpu/op/reduce.c.  Per-op arg packing:
 //     bits 24..31 : kind  (REDUCE_SUM = 0, REDUCE_MAX = 1)
 //     bits  0..23 : inner = product of input dims after the
 //                   reduced axis (1 means innermost).
 //
 // Buffer-binding convention (set by metal_dispatch_kernel):
 //     buffer(0)  : output
-//     buffer(1)  : KProgOp.arg
+//     buffer(1)  : per-op arg
 //     buffer(2)  : input
 //     buffer(3)  : src_numels[0] = in_numel
 

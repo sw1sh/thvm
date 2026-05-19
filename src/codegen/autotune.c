@@ -185,7 +185,7 @@ static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,
   u64 h = 0xcbf29ce484222325ULL;
   h = kautotune_hash_cstr(h, "thvm-autotune-cache");
   h = kautotune_hash_u64(h, KAUTOTUNE_CACHE_VERSION);
-  h = kautotune_hash_u64(h, sizeof(KProgOp));
+  h = kautotune_hash_u64(h, sizeof(KernelEntry));
   h = kautotune_hash_u64(h, sizeof(KOpt));
   h = kautotune_hash_u64(h, kautotune_backend_id(ke));
   h = kautotune_hash_u64(h, n_runs);

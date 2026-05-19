@@ -519,7 +519,7 @@ static Term interact_grad_dispatch(Term grad_term) {
           // source_uop (tensor-level UOp tree).  grad_bwd_for_child
           // dispatches on UOP_ADD/MUL/REDUCE/etc. via grad_bwd_of,
           // hitting TAG_TEN input leaves and accumulating onto the
-          // target.  No program[] / KProgOp reads needed.
+          // target.
           Term src = KERNELS[kid].source_uop;
           if (src != 0 && term_tag(src) == TAG_UOP) {
             return grad_bwd_for_child(src, gy);

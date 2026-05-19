@@ -431,7 +431,7 @@ static u32 bufferize_reduce_count(void) {
 // scalar-preserving elementwise, etc.) until we hit the first
 // REALIZED ancestor in BUFFERIZE_NODES.  Returns that ancestor's
 // loc -- the "absorbing boundary" that owns the kernel which would
-// receive `start_loc`'s inlined KProgOp graph.  Returns 0 if the
+// receive `start_loc`'s inlined UOp subgraph.  Returns 0 if the
 // walk loses uniqueness (multi-parent intermediate, no parent
 // found in BUFFERIZE_NODES) before finding one.  Bounded by
 // `hops_left` to avoid pathological recursion.

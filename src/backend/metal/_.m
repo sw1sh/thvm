@@ -5,8 +5,8 @@
 // (extern Backend), and links this .o under -DTHVM_HAS_METAL.
 //
 // Includes the runtime header for type definitions (Backend,
-// KernelEntry, KProgOp, UOP_* enums).  thvm.h is C-only but
-// compiles cleanly under Objective-C / ARC.
+// KernelEntry, UOP_* enums).  thvm.h is C-only but compiles
+// cleanly under Objective-C / ARC.
 
 #include <stdio.h>
 #include <stdint.h>
@@ -1131,9 +1131,8 @@ static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 
 static int metal_tile_enabled(void) {
   // Default ON: render_uop is the primary Metal MSL emit path. Set
-  // THVM_TILE=0 to opt back into the legacy KProgOp-flat shader and
-  // per-op interpreter fall-through (kept around as a regression
-  // bisection knob until F2 deletes them).
+  // THVM_TILE=0 to force the DAG-side per-op encoder fall-through
+  // (kept as a regression-bisection knob).
   char const *e = getenv("THVM_TILE");
   return e == NULL || e[0] != '0';
 }
@@ -1879,87 +1878,15 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode,
   return pso;
 }
 
-// Buffer-binding convention:
-//     buffer(0)                       : output
-//     buffer(1)                       : per-op constant arg (KProgOp.arg)
-//     buffer(2..2+n_in-1)             : input tensor buffers
-//     buffer(2+n_in..2+2*n_in-1)      : per-input numel (uint;
-//                                       1 = broadcast in shader)
-// Threads = ke->program[0].numel; threadgroup size capped at the
-// pipeline's maxTotalThreadsPerThreadgroup.
-// Encode one op into `enc`: bind out, arg, srcs, numels, plus any
-// movement-op shape info.  src_bufs[s] / src_numels[s] resolve
-// already via the caller; this helper just walks the binding slots.
-// Returns 0 on success, -1 if the pipeline state is missing.
-// __unsafe_unretained on the buffer array avoids ARC's writeback
-// for inout pointer-to-id parameters (we don't write back).
-static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
-                            KProgOp *p,
-                            __unsafe_unretained id<MTLBuffer> *src_bufs,
-                            u32 *src_numels,
-                            id<MTLBuffer> outBuf) {
-  id<MTLComputePipelineState> pso = metal_pipeline_for(p->opcode, p->dtype);
-  if (pso == nil) {
-    fprintf(stderr, "thvm: metal dispatch -- no pipeline for opcode %u dtype %u\n",
-            p->opcode, p->dtype);
-    return -1;
-  }
-  [enc setComputePipelineState:pso];
-  [enc setBuffer:outBuf offset:0 atIndex:0];
-  [enc setBytes:&p->arg length:sizeof(p->arg) atIndex:1];
-  for (u32 i = 0; i < p->n_src; i++) {
-    [enc setBuffer:src_bufs[i] offset:0 atIndex:(2 + i)];
-  }
-  for (u32 i = 0; i < p->n_src; i++) {
-    u32 nm = src_numels[i];
-    [enc setBytes:&nm length:sizeof(nm) atIndex:(2 + p->n_src + i)];
-  }
-  // Movement-op shape info: pack src0_ndim/src0_dims and out_ndim/
-  // out_dims as uint arrays of length 1+MAX_DIM so the shader can
-  // walk axes without re-deriving shape from numels.
-  if (p->opcode == UOP_EXPAND || p->opcode == UOP_FLIP
-      || p->opcode == UOP_PAD || p->opcode == UOP_PERMUTE
-      || p->opcode == UOP_SHRINK) {
-    u32 src0[1 + MAX_DIM] = {0};
-    u32 outd[1 + MAX_DIM] = {0};
-    src0[0] = p->src0_ndim;
-    outd[0] = p->out_ndim;
-    for (u32 i = 0; i < MAX_DIM; i++) src0[1 + i] = p->src0_dims[i];
-    for (u32 i = 0; i < MAX_DIM; i++) outd[1 + i] = p->out_dims [i];
-    [enc setBytes:src0 length:sizeof(src0) atIndex:(2 + 2 * p->n_src)];
-    [enc setBytes:outd length:sizeof(outd) atIndex:(2 + 2 * p->n_src + 1)];
-  }
-  if (p->opcode == UOP_PAD || p->opcode == UOP_SHRINK) {
-    u32 padw[2 * MAX_DIM] = {0};
-    for (u32 i = 0; i < 2 * MAX_DIM; i++) padw[i] = p->pad_widths[i];
-    [enc setBytes:padw length:sizeof(padw) atIndex:(2 + 2 * p->n_src + 2)];
-  }
-  if (p->opcode == UOP_PERMUTE) {
-    u32 perm[MAX_DIM] = {0};
-    for (u32 i = 0; i < MAX_DIM; i++) perm[i] = p->axis_perm[i];
-    [enc setBytes:perm length:sizeof(perm) atIndex:(2 + 2 * p->n_src + 2)];
-  }
-  NSUInteger n = (NSUInteger)p->numel;
-  if (n == 0) n = 1;
-  NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
-  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
-   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-  return 0;
-}
-
-// Predicate: every input + every program op is one of the dtypes
-// the Metal shader library covers (f32 + i32 today; f16 + the rest
-// follow as shader variants land).  Mixed-dtype or unsupported
-// kernels return -1 so cpu_dispatch_kernel falls back to the CPU
-// path (interpret / JIT).
+// Predicate: every input + every reachable UOp in the lifted DAG
+// uses one of the dtypes the Metal shader library covers (f32 +
+// i32 today; f16 + the rest follow as shader variants land).
+// Mixed-dtype or unsupported kernels return 0 so cpu_dispatch_kernel
+// falls back to the CPU path (interpret / JIT).
 //
-// When `cached_lift.store_root != 0` (materialize-time lift succeeded)
-// the per-op dtype check walks the lifted UOp DAG via
-// uop_dag_dtype_uniform instead of iterating ke->program[].  Equivalent
-// invariant -- every BUFFER / CONST / CAST-dst dtype in the DAG must
-// equal `dt` -- but the read goes through cached_lift, keeping
-// program[] off the hot path for kernels that lift.  Lift declines
-// (multi-output spliced, n_inputs > KERNEL_LIFT_MAX_INPUT, gemm/conv2d
+// uop_dag_dtype_uniform walks the lifted UOp DAG and confirms every
+// BUFFER / CONST / CAST-dst dtype equals `dt`.  Kernels whose lift
+// declined (cached_lift.store_root == 0) are unsupported here.
 static int metal_kernel_supported(struct KernelEntry const *ke) {
   // Materialize populates cached_lift.store_root on every emitted
   // kernel; eligibility is uniform-dtype over the lifted DAG.
@@ -1986,26 +1913,21 @@ static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
 
 // === DAG-side per-op encoder ========================================
 //
-// Mirrors the per-KProgOp encoder loop below, but walks
-// ke->cached_lift.store_root (a UOP_STORE / UOP_AFTER chain produced
-// by kernel_lift_to_uop) instead of ke->program[].  Fires when the
-// lift succeeded (cached_lift.store_root != 0) AND metal_tile_jit
-// _encode declined (today only multi-output kernels that bail at
-// cg_kernel_has_extra_outputs reach this path with a non-zero
-// store_root; lift declines keep the legacy program[] loop).
+// Walks ke->cached_lift.store_root (a UOP_STORE / UOP_AFTER chain
+// produced by kernel_lift_to_uop) and emits one
+// MTLComputeCommandEncoder per UOp tree node so Metal hazard-tracks
+// reads/writes across encoders.  Fires when the lift succeeded
+// (cached_lift.store_root != 0) AND metal_tile_jit_encode declined
+// (typically multi-output kernels that bail at the
+// cg_kernel_has_extra_outputs gate).
 //
-// Mapping is mechanical: KProgOp.opcode is already a UOP_* tag, so
 // metal_pipeline_for(opcode, dtype) -- the table that resolves a
-// (UOP_*, dtype) pair to an MTLComputePipelineState -- reuses 1:1.
-// The shapes the lifter produces for multi-output kernels are
-// elementwise + UOP_CONST + UOP_INDEX_E(input_buf, range_addr) only
-// (kernel_lift_from_kprog rejects anything else).  REDUCE / movement
-// ops never appear in lift-eligible multi-output programs because
+// (UOP_*, dtype) pair to an MTLComputePipelineState -- handles the
+// shader lookup.  The shapes the lifter produces for multi-output
+// kernels are elementwise + UOP_CONST + UOP_INDEX_E(input_buf,
+// range_addr) only.  REDUCE / movement ops never appear in
+// lift-eligible multi-output programs because
 // merge_boundary_is_elementwise filters them out at splice time.
-//
-// One MTLComputeCommandEncoder per UOp tree node so Metal hazard-
-// tracks reads/writes across encoders -- same convention the legacy
-// per-op loop relies on.
 
 #define DAG_ENCODE_MAX_VISITED 256u
 #define DAG_ENCODE_MAX_INTERMS  64u
@@ -2271,9 +2193,10 @@ static int dag_enc_emit_node(DagEncCtx *c, Term node, u32 primary_out_buf_id) {
 }
 
 // Public entry point: encode the lifted DAG.  Returns 1 on success
-// (caller submits the command buffer + cleans up); 0 to fall through
-// to the legacy per-op KProgOp encoder.  Releases its own intermediate
-// buffer allocations on either path.
+// (caller submits the command buffer + cleans up); 0 if the encoder
+// declined (unsupported op shape, alloc failure, etc.) -- callers
+// have no further fallback and must surface the failure.  Releases
+// its own intermediate buffer allocations on either path.
 //
 // `cmd` is the SAME MTLCommandBuffer the caller would pass to the
 // legacy encoder; the encoder appends compute-command-encoders to it
@@ -2320,9 +2243,9 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   METAL_PEROP_CUR_KID = 0;
 
   // Bound the deferred-decref backlog *between* kernels.  Within a
-  // batched step the per-op fallback path (metal-op) materializes one
-  // MTLBuffer per KProgOp and decref_after_batch's them all -- but
-  // those decrefs run with METAL_ENCODING_DEPTH > 0, so the
+  // batched step the DAG-side per-op encoder materializes one
+  // MTLBuffer per intermediate UOp and decref_after_batch's them all
+  // -- but those decrefs run with METAL_ENCODING_DEPTH > 0, so the
   // limit-exceeded flush in metal_buf_alloc / metal_buf_decref_after_batch
   // never fires and the backlog grows without bound (observed: 2.2 GB
   // of deferred buffers at BS=32, ~35 GB projected at BS=512).  Here,
@@ -2341,8 +2264,8 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u32 tile_threads_x = 0;
   int tile_supported = metal_tile_enabled()
       && cg_tile_metal_dispatch_shape(ke, &tile_groups_x, &tile_threads_x);
-  int kprog_supported = metal_kernel_supported(ke);
-  if (!tile_supported && !kprog_supported) return -1;
+  int dag_supported = metal_kernel_supported(ke);
+  if (!tile_supported && !dag_supported) return -1;
 
   // Profile this dispatch.  kid = ke - KERNELS gives the slot index
   // the WL TKernelProfile / TKernelDispatchKind surface reads.
@@ -2367,53 +2290,11 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   if (_disp_trace) {
     u32 in0 = ke->n_inputs ? ke->input_numels[0] : 0;
     fprintf(stderr,
-            "[disp kid=%u n_ops=%u n_inputs=%u out_numel=%llu in0_numel=%u tile=%d kprog=%d]\n",
-            kid, ke->n_ops, ke->n_inputs,
+            "[disp kid=%u n_inputs=%u out_numel=%llu in0_numel=%u tile=%d dag=%d]\n",
+            kid, ke->n_inputs,
             (unsigned long long)ke->output_numel, in0,
-            tile_supported, kprog_supported);
+            tile_supported, dag_supported);
     fflush(stderr);
-  }
-
-  // THVM_DUMP_KID_PROGRAM=1 prints the program op-list of every
-  // dispatched kernel that contains a REDUCE.  Mirrors the
-  // tile_analyze_gemm reject-ops diagnostic but for the dispatched
-  // (post-rejection) side: we get to see kid 14 / kid 16's actual
-  // program shape so the matmul-shape relaxation in tile_analyze_gemm
-  // can target the right pattern.  Level 50.
-  {
-    char const *_e   = getenv("THVM_DUMP_KID_PROGRAM");
-    char const *_eall = getenv("THVM_DUMP_KID_PROGRAM_ALL");
-    int _dump = (_e != NULL && _e[0] == '1');
-    int _all  = (_eall != NULL && _eall[0] == '1');
-    if ((_dump || _all) && ke != NULL && ke->program != NULL) {
-      int has_reduce = 0;
-      for (u32 i = 0; i < ke->n_ops; i++) {
-        if (ke->program[i].opcode == UOP_REDUCE) { has_reduce = 1; break; }
-      }
-      // _all bypasses the REDUCE filter so non-REDUCE kernels (e.g.
-      // conv-prep kid 1) get dumped for cross-shape investigation.
-      if (has_reduce || _all) {
-        fprintf(stderr, "  dispatch-kid kid=%u n_inputs=%u n_ops=%u ops=[",
-                kid, ke->n_inputs, ke->n_ops);
-        for (u32 i = 0; i < ke->n_ops; i++) {
-          fprintf(stderr, "%s%u", i ? "," : "", (unsigned)ke->program[i].opcode);
-        }
-        // For sizing the matmul relaxation: append per-op numel and
-        // arg (the latter encodes REDUCE inner = arg & 0xFFFFFF, kind
-        // = (arg>>24)&0xFF).  Reader derives M*N from REDUCE.numel,
-        // N from inner, K from MUL.numel/REDUCE.numel.
-        fprintf(stderr, "] numel=[");
-        for (u32 i = 0; i < ke->n_ops; i++) {
-          fprintf(stderr, "%s%llu", i ? "," : "",
-                  (unsigned long long)ke->program[i].numel);
-        }
-        fprintf(stderr, "] arg=[");
-        for (u32 i = 0; i < ke->n_ops; i++) {
-          fprintf(stderr, "%s%u", i ? "," : "", (unsigned)ke->program[i].arg);
-        }
-        fprintf(stderr, "]\n");
-      }
-    }
   }
 
   if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
@@ -2425,14 +2306,14 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // generated-tile path declined: metal_tile_jit_encode binds the
   // ORIGINAL strided input buffers directly and bakes the view
   // strides into the address expressions it emits, so it must NOT
-  // see pre-materialised buffers.  The KProgOp per-op loop and the
-  // DAG-side per-op encoder, on the other hand, read inputs
-  // contiguously and DO need the pre-mat.  Doing it eagerly here
-  // (gated only on !tile_supported, i.e. tile *eligibility*) was the
-  // conv-im2col Metal bug: cg_tile_metal_dispatch_shape says "yes
-  // eligible" for the im2col reduce kernel but metal_tile_jit_encode
-  // then bails -- and the per-op fall-through read the raw strided
-  // SHRINK-patch buffers as if contiguous, computing garbage.
+  // see pre-materialised buffers.  The DAG-side per-op encoder, on
+  // the other hand, reads inputs contiguously and DOES need the
+  // pre-mat.  Doing it eagerly here (gated only on !tile_supported,
+  // i.e. tile *eligibility*) was the conv-im2col Metal bug:
+  // cg_tile_metal_dispatch_shape says "yes eligible" for the
+  // im2col reduce kernel but metal_tile_jit_encode then bails --
+  // and the per-op fall-through read the raw strided SHRINK-patch
+  // buffers as if contiguous, computing garbage.
   u32 effective_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
   u32 temp_buf_ids     [ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) temp_buf_ids[i] = 0;
@@ -2463,16 +2344,16 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     }
   }
 
-  if (!kprog_supported) {
+  if (!dag_supported) {
     for (u32 i = 0; i < ke->n_inputs; i++) {
       if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
     }
     return -1;
   }
 
-  // Tile path declined (or wasn't eligible).  The per-op / DAG
-  // encoders below read inputs contiguously, so pre-materialise any
-  // strided-view input now into a contiguous temp buffer (mirror of
+  // Tile path declined (or wasn't eligible).  The DAG encoder below
+  // reads inputs contiguously, so pre-materialise any strided-view
+  // input now into a contiguous temp buffer (mirror of
   // cpu_interpret's strided pre-mat).  MTLResourceStorageModeShared
   // keeps the bytes host-readable so the copy is plain pointer
   // arithmetic with no extra memcpy out of Metal.
@@ -2509,220 +2390,24 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     temp_buf_ids     [i] = tmp_id;
   }
 
-  // DAG-side per-op encoder.  Fires when the lift succeeded (typical
-  // case for multi-output kernels that bypassed tile_jit_encode at
-  // the cg_kernel_has_extra_outputs gate).  Skips
-  // ke->program[] entirely; walks ke->cached_lift.store_root instead.
-  // Falls through to the legacy KProgOp loop on failure (or when
-  // store_root == 0 = lift declined).
-  if (ke->cached_lift.store_root != 0) {
-    METAL_ENCODING_DEPTH++;
-    id<MTLCommandBuffer> dag_cmd = metal_command_buffer();
-    int dag_ok = dag_metal_encode_kernel(ke, effective_buf_ids,
-                                          out_buf_id, dag_cmd);
-    if (dag_ok) {
-      metal_submit_if_standalone(dag_cmd);
-      METAL_ENCODING_DEPTH--;
-      for (u32 i = 0; i < ke->n_inputs; i++) {
-        if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
-      }
-      cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
-      if (_disp_trace)
-        fprintf(stderr, "[disp-done kid=%u path=dag us=%llu]\n", kid,
-                (unsigned long long)(cg_now_us() - t0));
-      return 0;
-    }
-    METAL_ENCODING_DEPTH--;
-    // Encoder declined (unsupported op shape, alloc failure, etc.).
-    // Fall through to the legacy program[] loop below.  No partial
-    // command-buffer state to roll back: dag_metal_encode_kernel
-    // appends encoders to dag_cmd which we never submit on the
-    // failure path; ARC drops the unsubmitted command buffer.
-  }
-
-  // Per-op interpreter path: one encoder per KProgOp[] entry.  Mirror
-  // of cpu_interpret.  Allocate one Metal buf per intermediate op;
-  // the final op writes to outBuf.  All ops share a single
-  // MTLCommandBuffer, and Metal hazard-tracks reads/writes of
-  // MTLResourceStorageModeShared buffers across encoders so each
-  // encoder naturally sees the previous encoder's writes without an
-  // explicit barrier.
-  // Sized to ke->n_ops (KPROG_MAX_OPS is now a sanity bound, not a
-  // typical size).  ke->n_ops > 0 since we early-bailed when 0.
-  u32 inter_buf_ids[ke->n_ops];
-  for (u32 i = 0; i < ke->n_ops; i++) inter_buf_ids[i] = 0;
-  // last_use[i] = highest op index that reads intermediate i (an
-  // earlier op's output).  After op last_use[i] runs, buffer i is
-  // dead and -- once the GPU has drained those reads -- reclaimable.
-  // No reader (degenerate) -> i (drop right after it's written).  The
-  // final op writes outBuf and store_extra ops write the extra-output
-  // buffer, so neither owns an inter_buf_ids[] slot; only "plain" ops
-  // do, and those normally have a downstream reader.
-  u32 last_use[ke->n_ops];
-  for (u32 i = 0; i < ke->n_ops; i++) last_use[i] = i;
-  for (u32 j = 0; j < ke->n_ops; j++) {
-    KProgOp *q = &ke->program[j];
-    for (u8 s = 0; s < q->n_src; s++) {
-      u32 raw = q->src[s];
-      if (KSRC_IS_INPUT(raw)) continue;
-      u32 idx = KSRC_INDEX(raw);
-      if (idx < ke->n_ops && j > last_use[idx]) last_use[idx] = j;
-    }
-  }
-  u64 live_inter_bytes = 0;
-  // Per-op-loop checkpoint threshold.  Once the materialised
-  // intermediates exceed this, drain the GPU and recycle the dead
-  // ones back onto the free-list (see below).  Default 64 MiB --
-  // small enough that a conv-im2col program (dozens of O(100 MB)
-  // intermediates) checkpoints every couple of ops, keeping the
-  // count of distinct freshly-backed MTLBuffers tiny: the GPU's
-  // first write to a fresh shared buffer is pathologically slow
-  // (cold pages stall the command processor; a single ~80 MB
-  // conv-im2col PAD intermediate measured tens of seconds of GPU
-  // "execution" at BS=64+).  THVM_METAL_PEROP_BUDGET overrides
-  // (bytes; 0 = use the legacy metal_defer_limit_bytes()).
-  u64 inter_budget;
-  {
-    static int known = 0;
-    static u64 budget = 0;
-    if (!known) {
-      char const *e = getenv("THVM_METAL_PEROP_BUDGET");
-      if (e != NULL && e[0] != '\0') budget = strtoull(e, NULL, 10);
-      known = 1;
-    }
-    inter_budget = budget != 0 ? budget : (64ull * 1024ull * 1024ull);
-    if (inter_budget == 0) inter_budget = metal_defer_limit_bytes();
-  }
+  // DAG-side per-op encoder.  Fires when the lift succeeded; walks
+  // ke->cached_lift.store_root and emits one MTLComputeCommandEncoder
+  // per UOp tree node.  metal_kernel_supported already gates this on
+  // store_root != 0, so reaching here without a lift would have
+  // returned -1 above via the !dag_supported guard.
   METAL_ENCODING_DEPTH++;
-  id<MTLCommandBuffer> cmd = metal_command_buffer();
-  int rc = 0;
-
-  for (u32 step = 0; step < ke->n_ops; step++) {
-    KProgOp *p = &ke->program[step];
-
-    // Resolve this op's src buffers and numels.  KSRC_IS_INPUT(s)
-    // -> kernel input (effective_buf_ids[KSRC_INDEX(s)]); plain
-    // index -> output of earlier op (inter_buf_ids[KSRC_INDEX(s)]).
-    __unsafe_unretained id<MTLBuffer> src_bufs[MAX_UOP_SRC] = {0};
-    u32                                src_numels[MAX_UOP_SRC] = {0};
-    int src_resolve_ok = 1;
-    for (u8 s = 0; s < p->n_src; s++) {
-      u32 raw = p->src[s];
-      u32 idx = KSRC_INDEX(raw);
-      if (KSRC_IS_INPUT(raw)) {
-        if (idx >= ke->n_inputs) { src_resolve_ok = 0; break; }
-        u32 ib = effective_buf_ids[idx];
-        if (ib == 0 || ib >= METAL_BUFS_NEXT) { src_resolve_ok = 0; break; }
-        src_bufs  [s] = METAL_BUFS[ib].buf;
-        src_numels[s] = ke->input_numels[idx];
-      } else {
-        if (idx >= step) { src_resolve_ok = 0; break; }
-        u32 ib = inter_buf_ids[idx];
-        if (ib == 0 || ib >= METAL_BUFS_NEXT) { src_resolve_ok = 0; break; }
-        src_bufs  [s] = METAL_BUFS[ib].buf;
-        src_numels[s] = ke->program[idx].numel;
-      }
-    }
-    if (!src_resolve_ok) { rc = -1; break; }
-
-    // Decide where this op writes:
-    //   - last op -> outBuf (legacy primary output);
-    //   - store_extra_plus_one > 0 -> extra output's Metal buffer
-    //     (Step 6 of multi-output groundwork: the merged kernel
-    //     fans the marked mid-program op directly into its
-    //     dedicated extra output buf; safe because the splice
-    //     puts the child boundary's final op last in its own
-    //     subtree, with no downstream KProgOp consuming it);
-    //   - otherwise -> a fresh intermediate Metal buffer sized
-    //     for this op's dtype.
-    id<MTLBuffer> dst_buf;
-    if (step + 1 == ke->n_ops) {
-      dst_buf = outBuf;
-    } else if (p->store_extra_plus_one > 0) {
-      u32 extra_idx = (u32)p->store_extra_plus_one - 1u;
-      if (extra_idx >= (u32)ke->n_extra_outputs) { rc = -1; break; }
-      u32 extra_tid = ke->extra_output_tids[extra_idx];
-      if (extra_tid == 0 || extra_tid >= TENS_NEXT) { rc = -1; break; }
-      u32 extra_buf_id = TENS[extra_tid].buf_id;
-      if (extra_buf_id == 0 || extra_buf_id >= METAL_BUFS_NEXT
-          || METAL_BUFS[extra_buf_id].buf == nil) { rc = -1; break; }
-      dst_buf = METAL_BUFS[extra_buf_id].buf;
-    } else {
-      u32 dst_numel = p->numel ? p->numel : 1;
-      u64 dst_bytes = dtype_storage_bytes(p->dtype, dst_numel);
-      // Before the alloc would push our materialized-intermediate
-      // footprint over budget, drain the GPU and reclaim everything
-      // dead so far.  Bounds the per-op-loop peak to roughly
-      // budget + a couple of consecutive ops' outputs, instead of
-      // sum-of-all-N-intermediates (the im2col-style conv-backward
-      // fallback programs were materialising GBs at high BS).
-      if (inter_budget != 0 && live_inter_bytes + dst_bytes > inter_budget
-          && live_inter_bytes > 0) {
-        u64 _cp0 = _disp_trace ? cg_now_us() : 0;
-        [cmd commit];
-        [cmd waitUntilCompleted];
-        if (cmd == METAL_BATCH_CMD) METAL_BATCH_CMD = nil;
-        for (u32 i = 0; i < step; i++) {
-          if (inter_buf_ids[i] != 0 && last_use[i] < step) {
-            live_inter_bytes -= METAL_BUFS[inter_buf_ids[i]].nbytes;
-            // Recycle the buffer object onto the free-list instead of
-            // releasing the MTLBuffer.  The per-op fallback for a
-            // conv-im2col program emits dozens of equal-size
-            // intermediates one after another; releasing each one
-            // forces a fresh newBufferWithLength: for the next, and
-            // the GPU's first write to a freshly-backed shared buffer
-            // is pathologically slow (the cold pages stall the GPU
-            // command processor -- a single ~80 MB conv-im2col PAD
-            // intermediate measured tens of seconds of GPU "execution"
-            // at BS=64+, scaling super-linearly with batch size).
-            // Pushing to the free-list lets the loop reuse the same
-            // handful of buffer objects (whose pages stay wired), so
-            // only a couple of intermediates per size class ever pay
-            // the cold-page cost.  We've already committed + waited on
-            // `cmd`, so the buffer's GPU work is done -- recycling is
-            // sound.
-            if (!metal_buf_freelist_push_impl(inter_buf_ids[i])) {
-              metal_buf_free(inter_buf_ids[i]);
-            }
-            inter_buf_ids[i] = 0;
-          }
-        }
-        cmd = metal_command_buffer();
-        if (_disp_trace)
-          fprintf(stderr, "[disp-cp kid=%u step=%u live=%llu us=%llu]\n",
-                  kid, step, (unsigned long long)live_inter_bytes,
-                  (unsigned long long)(cg_now_us() - _cp0));
-      }
-      u32 tmp_id = metal_buf_alloc(dst_bytes);
-      if (tmp_id == 0) { rc = -1; break; }
-      inter_buf_ids[step] = tmp_id;
-      live_inter_bytes += METAL_BUFS[tmp_id].nbytes;
-      dst_buf = METAL_BUFS[tmp_id].buf;
-    }
-
-    // New encoder per op; Metal hazard-tracks shared buffer
-    // dependencies across encoders in the same command buffer.
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-    int enc_rc = metal_encode_op(enc, p, src_bufs, src_numels, dst_buf);
-    [enc endEncoding];
-    if (enc_rc != 0) { rc = enc_rc; break; }
-  }
-
-  if (rc == 0) {
-    metal_submit_if_standalone(cmd);
-  }
-
-  // Cleanup: drop intermediate Metal buffers + view-pre-mat temps.
-  for (u32 i = 0; i < ke->n_ops; i++) {
-    if (inter_buf_ids[i]) metal_buf_decref_after_batch(inter_buf_ids[i]);
-  }
+  id<MTLCommandBuffer> dag_cmd = metal_command_buffer();
+  int dag_ok = dag_metal_encode_kernel(ke, effective_buf_ids,
+                                        out_buf_id, dag_cmd);
+  METAL_ENCODING_DEPTH--;
+  int rc = dag_ok ? 0 : -1;
+  if (dag_ok) metal_submit_if_standalone(dag_cmd);
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
   }
-  METAL_ENCODING_DEPTH--;
   if (rc == 0) cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
   if (_disp_trace)
-    fprintf(stderr, "[disp-done kid=%u path=op rc=%d us=%llu]\n", kid, rc,
+    fprintf(stderr, "[disp-done kid=%u path=dag rc=%d us=%llu]\n", kid, rc,
             (unsigned long long)(cg_now_us() - t0));
   return rc;
 }

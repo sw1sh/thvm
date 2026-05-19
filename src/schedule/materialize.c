@@ -5,10 +5,12 @@
 // g2b: build_kernel emits one KernelEntry per boundary by visiting
 //      its UOp subgraph and inlining every non-boundary upstream
 //      elementwise / CONST / LOAD / REDUCE-as-tail op into the
-//      kernel's program[].  Movement ops (g2c) and GRAD (g2d) are
-//      not yet supported -- visit() returns 0xDEADBEEF on those,
-//      which makes the boundary's emit bail and thvm_materialize
-//      fall back to returning the input unchanged.
+//      kernel's lifted UOp DAG.  The visit walk records input
+//      bindings; the lift (kernel_lift_to_uop) packages the
+//      bufferize-rooted subtree into cached_lift.store_root.
+//      Movement ops (g2c) and GRAD (g2d) walks return 0xDEADBEEF
+//      on unsupported shapes, making the boundary's emit bail and
+//      thvm_materialize fall back to returning the input unchanged.
 
 #define BOUNDARY_ORDER_CAP 16384
 static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
@@ -118,11 +120,12 @@ static u32 BOUNDARY_DEPTH    [BUFFERIZE_NODES_CAP];
 static u32 BOUNDARY_LAST_USE [BUFFERIZE_NODES_CAP];
 
 #define VISIT_BAIL 0xDEADBEEFu
-// VISIT_OK signals "subgraph visited successfully but no kernel
-// program slot was emitted".  Used by every visit() branch that
-// formerly appended a KProgOp.  Since KSRC_AS_INPUT(slot) sets
-// the 0x80000000 input bit, VISIT_OK (0) is distinguishable from
-// any input-slot ref via KSRC_IS_INPUT().
+// VISIT_OK signals "subgraph visited successfully".  Visit walks
+// the UOp graph to populate the kernel's input bindings; the body
+// lives on the lifted UOp DAG (cached_lift.store_root), not on a
+// per-op array, so visit() never emits per-op slots.  Since
+// KSRC_AS_INPUT(slot) sets the 0x80000000 input bit, VISIT_OK (0)
+// is distinguishable from any input-slot ref via KSRC_IS_INPUT().
 #define VISIT_OK   0u
 
 typedef struct {
@@ -340,11 +343,11 @@ static u32 boundary_depth_rec(u64 loc) {
 // `visited` is a bitmap sized to HEAP_NEXT to dedup the recursion.
 //
 // The walk has to descend through non-realized UOps because the
-// emit loop INLINES them into the parent's program (visit() in
-// emit_kernel_for_boundary recurses through them as KProgOp slots);
-// the boundary that the program eventually reads is the realized
-// kid, so its true last_use_depth is the realized PARENT'S depth,
-// not the non-realized intermediate's "depth" (which equals the
+// emit loop INLINES them into the parent's lifted UOp DAG (visit()
+// in emit_kernel_for_boundary recurses through them); the boundary
+// that the kernel eventually reads is the realized kid, so its
+// true last_use_depth is the realized PARENT'S depth, not the
+// non-realized intermediate's "depth" (which equals the
 // child's, see boundary_depth_rec where non-realized just inherits).
 static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
                                       u8 *visited) {
@@ -1283,10 +1286,10 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   }
 
   // UOP_LOAD is a structural marker (mirrors tinygrad's Ops.LOAD): at
-  // the value layer it's an identity around its single src.  The legacy
-  // kernel_lift drops it when assembling store_root (LOAD steps land in
-  // ke->program[] but never wrap an INDEX_E/CONST/etc. inside the lifted
-  // value tree).  cpu_uop_walk's value dispatcher has no UOP_LOAD case,
+  // the value layer it's an identity around its single src.  The
+  // kernel_lift drops it when assembling store_root, so the lifted
+  // value tree never wraps an INDEX_E/CONST/etc. inside a LOAD.
+  // cpu_uop_walk's value dispatcher has no UOP_LOAD case,
   // so a stray LOAD wrapping an INDEX_E reads as 0 and the kernel zeroes
   // its output.  Strip it here so the rewritten subtree is structurally
   // identical to the legacy lifter's output.
@@ -2265,9 +2268,9 @@ static int merge_shapes_equal(Shape const *a, Shape const *b) {
 
 // Consumer-op count proxy: count UOP children reachable from a
 // boundary's subtree (stopping at realized boundaries).  Cheap
-// pre-emit estimate of how many KProgOp's the visit() pass would
-// emit; merged total must stay below KERNEL_MERGE_OP_BUDGET to
-// keep the kernel tile-feasible.
+// pre-emit estimate of how many ops the lifter would emit;
+// merged total must stay below KERNEL_MERGE_OP_BUDGET to keep
+// the kernel tile-feasible.
 static u32 merge_op_count_estimate(u64 from_loc, u8 *visited) {
   if (from_loc >= HEAP_NEXT) return 0;
   if (visited[from_loc]) return 0;
@@ -2507,14 +2510,6 @@ fn int kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
     }
     seen++;
   }
-  return 0;
-}
-
-fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
-  // visit() no longer populates ke->program[], so there are no
-  // movement-op KProgOps to look up.  Always miss; the per-USE
-  // bufferize chain resolves at the unified-rangeify layer now.
-  (void)kid; (void)prog_idx; (void)out;
   return 0;
 }
 
@@ -3045,10 +3040,6 @@ static u8 op_is_view_movement(u8 op) {
       || op == UOP_SHRINK  || op == UOP_FLIP;
 }
 
-// Identity check used by kernel_entry_prog_chain_op to skip movement
-// KProgOps that bufferize_apply_identity_reshape elided from the
-// B_INDEX chain.  Identity covers RESHAPE/EXPAND with src_dims ==
-// out_dims and PERMUTE with axis_perm[i] == i.
 // Flatten a non-contig TenDesc into a fresh contiguous copy via
 // view_strided_index.  Used by thvm_materialize when the root is a
 // movement-op chain that resolves to a view alias the caller will
@@ -3207,15 +3198,16 @@ static void materialize_dump_big_input_source(KernelEntry *ke,
   if (!materialize_dump_big_input_source_enabled()) return;
   if (ke == NULL || ke->n_inputs <= 30) return;
   fprintf(stderr,
-          "big_input_source kid=%u n_inputs=%u n_ops=%u out=%u source_op=%u loc=%llu\n",
-          (u32)(ke - KERNELS), ke->n_inputs, ke->n_ops,
+          "big_input_source kid=%u n_inputs=%u out=%u source_op=%u loc=%llu\n",
+          (u32)(ke - KERNELS), ke->n_inputs,
           ke->output_numel, term_ext(ke->source_uop),
           (unsigned long long)boundary_loc);
   materialize_dump_source_child(ke->source_uop, 0);
 }
 
-// Recursive visit.  Returns a program-index (0..n_ops-1) or
-// VISIT_BAIL on any unsupported op.
+// Recursive visit.  Returns VISIT_OK on success (the per-op
+// program is gone; visit now exists only to populate ke's input
+// bindings) or VISIT_BAIL on any unsupported op.
 static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   // Resolve VAR (SUB-bit) + ALO (one-layer force) chains so a body
   // post-APP-LAM-beta exposes its bound argument's TEN/UOP rather
@@ -3459,52 +3451,21 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
 
 // === Multi-output kernel splice (Step 6 of multi-output groundwork) ===
 //
-// When THVM_KERNEL_MERGE=1 and the active backend's dispatcher
-// honors KProgOp.store_extra_plus_one (today: CPU's cpu_interpret
-// post-pass and Metal's per-op encoder), emit_kernel_for_boundary
-// calls splice_child_into_host on every host A whose plan flagged
-// a child B with merge_into[B]=A.
-//
-// Sequencing inside A's emit_kernel_for_boundary:
-//   1. Detect a planned merge child B (via find_merge_child).
-//   2. PREMERGE: visit B's term against the SAME (still-empty)
-//      KernelEntry so B's KProgOps land at [0, b_n).  Sharing the
-//      KernelEntry's input_tids[] table means common boundary
-//      inputs dedup automatically across A and B's subgraphs.
-//   3. Mark B's last op (b_n - 1) with store_extra_plus_one = 1,
-//      so cpu_interpret's post-pass / metal_dispatch_kernel's
-//      per-op encoder routes its value to the kernel's first
-//      extra output buffer instead of (or in addition to) the
-//      legacy scratch slot.
-//   4. The caller then visits A's term normally, appending A's
-//      KProgOps at [b_n, total).  The LAST op of the combined
-//      program is A's last op, which the legacy "last op writes
-//      to out_buf_id" cpu_interpret semantics correctly route to
-//      A's primary output tid.
-//   5. Allocate B's output TenDesc on the host backend, register
-//      it via kernel_entry_set_extra_output(slot=1, ...), and
-//      rebind BOUNDARY_TID[B] / BOUNDARY_TERM[B] so downstream
-//      visit() lookups + sink-kernel resolution see the new tid.
-//   6. Set TENS[extra_out_tid].producer_kid = host_kid so
-//      kernel_fire_by_id chases the merged kernel when wnf
-//      consumes B's output.
-//
-// emit_kernel_for_boundary(B) (later in the BOUNDARY_ORDER walk)
-// detects BOUNDARY_TID[B] is already populated and short-circuits
-// via the alias-Term early return at the top of the function.
-//
-// Returns 1 on successful splice, 0 if the splice was skipped or
-// bailed.  When 0, the caller proceeds with A's normal emit and
-// the planner's flag is silently downgraded.
+// When THVM_KERNEL_MERGE=1, emit_kernel_for_boundary calls the
+// per-host splice on every host A whose plan flagged a child B
+// with merge_into[B]=A.  Today the splice no-ops because visit()
+// no longer populates a per-op program: the kernel body lives on
+// the lifted UOp DAG (cached_lift.store_root) and the lifter
+// hasn't grown a multi-STORE entry path that mirrors the legacy
+// "B's last op writes to extra output, A's last op writes to
+// primary" routing.  Until that lands the child boundary just
+// emits separately later in the BOUNDARY_ORDER walk.
 static int splice_child_into_host_premerge(KernelEntry *ke,
                                             u32 host_bi,
                                             u32 child_bi) {
   (void)host_bi;
   if (child_bi >= BOUNDARY_ORDER_LEN) return 0;
   if (ke->n_extra_outputs >= KERNEL_MAX_EXTRA_OUTPUTS) return 0;
-  // Splice runs BEFORE A's visit; ke must be empty of program ops
-  // so B lands at indices [0, b_n).
-  if (ke->n_ops != 0) return 0;
 
   u64 child_loc = BOUNDARY_ORDER[child_bi];
   u32 child_ridx = bufferize_info_find(child_loc);
@@ -3517,14 +3478,12 @@ static int splice_child_into_host_premerge(KernelEntry *ke,
   u32 child_dtype = DT_FP32;
   term_dtype_in(child_term, 0, &child_dtype);
 
-  // visit() no longer populates program[], so n_ops stays 0 and the
-  // splice can't mark a last-op KProgOp with store_extra_plus_one.
-  // Drop the would-be splice on the floor; the child boundary emits
-  // separately later.
+  // Run B's visit against the shared KernelEntry so input slot
+  // dedup carries across A and B's subgraphs; the per-op output of
+  // visit is dropped because there is no per-op program any more.
   VisitMemo b_memo = {0};
   (void)visit(child_term, ke, child_loc, &b_memo);
   visit_memo_free(&b_memo);
-  ke->n_ops = 0;
   return 0;
 }
 
@@ -3540,15 +3499,10 @@ static u32 find_merge_child(u32 host_bi) {
 }
 
 // Predicate: does the active backend's dispatcher honor
-// kernel_entry_set_extra_output / KProgOp.store_extra_plus_one?
-// As of Step 6+7 (this commit), CPU's cpu_interpret post-pass and
-// Metal's per-op encoder both route the marked KProgOp's value to
-// the extra output buffer.  JIT and tile-JIT paths still bail at
-// cg_kernel_has_extra_outputs guards (those backends would need a
-// per-output JIT signature to land first).  Returning 1 here makes
-// the splice fire on either backend; when it fails to fire (e.g.
-// custom Backend that doesn't yet honor extras), the splice is
-// silently skipped and the kernel stays single-output.
+// kernel_entry_set_extra_output?  Today every backend reaches the
+// extras via cached_lift.out_bufs[] when the lifter produces a
+// multi-STORE chain, so the splice is gated only on having a
+// backend at all.
 static int splice_target_backend_supports_multi_output(void) {
   return CURRENT_BACKEND != NULL;
 }
@@ -3603,23 +3557,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
   TENS[out_tid].producer_kid = kid;
 
   // Multi-output kernel splice (Step 6 of multi-output groundwork).
-  // PREMERGE: when THVM_KERNEL_MERGE=1 and the planner flagged a
-  // child boundary B with merge_into[B]=bi, visit B's program
-  // FIRST so its KProgOps occupy program indices [0, b_n) -- this
-  // way A's last op stays the LAST op overall and cpu_interpret /
-  // metal_dispatch_kernel's "last op -> primary out_buf_id" path
-  // continues to write A's value to A's tid.  B's last op is
-  // marked with store_extra_plus_one = 1 so the dispatcher's post-
-  // pass / encoder routes B's computed value into the kernel's
-  // first extra output buffer.  Skipped when:
-  //   - THVM_KERNEL_MERGE=0 (default; find_merge_child returns
-  //     NONE),
-  //   - active backend can't dispatch multi-output kernels (today
-  //     CPU + Metal both can; future Backend impls without
-  //     store_extra_plus_one support fall back here),
-  //   - the splice itself bails (visit on B returned VISIT_BAIL,
-  //     cap full, or extra output slot exhausted) -- the kernel
-  //     stays single-output and B emits separately later.
+  // When THVM_KERNEL_MERGE=1 and the planner flagged a child
+  // boundary B with merge_into[B]=bi, run B's visit against the
+  // shared KernelEntry so input slot dedup carries.  The splice
+  // currently no-ops at the body level (see
+  // splice_child_into_host_premerge); the child emits its own
+  // boundary later in the BOUNDARY_ORDER walk.
   if (kernel_merge_enabled()
       && splice_target_backend_supports_multi_output()) {
     u32 child_bi = find_merge_child(bi);
@@ -3668,8 +3611,10 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // resolves the unified-pass store_root and packages it as
   // KernelUopLift.  When the lift declines (no source_uop /
   // bufferize_info miss / n_inputs > KERNEL_LIFT_MAX_INPUT)
-  // cached_lift stays zero-initialized and the program[] path
-  // remains primary.
+  // cached_lift stays zero-initialized and the dispatch ladder
+  // falls back to whatever paths each backend exposes for unlifted
+  // kernels (today: cpu_blas_dispatch by pattern, cpu_jit_dispatch
+  // declines, cpu_uop_walk declines, Metal dispatch returns -1).
   //
   // Dispatch-time consumers (cpu_jit_build, cg_emit_via_uop,
   // cpu_uop_walk) read store_root / out_buf / in_bufs[] from

@@ -982,12 +982,12 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // store_root==0 means the lift declined; the walker can't help in
   // that case (legacy fallback runs).
   if (ke->cached_lift.store_root == 0) {
-    if (trace_on) fprintf(stderr, "uop_walk: lift declined n_inputs=%u n_ops=%u "
+    if (trace_on) fprintf(stderr, "uop_walk: lift declined n_inputs=%u "
                           "n_extra=%u\n",
-                          ke->n_inputs, ke->n_ops, (u32)ke->n_extra_outputs);
+                          ke->n_inputs, (u32)ke->n_extra_outputs);
     UWALK_DECLINE(kid, "lift_declined",
-                  "n_inputs=%u n_ops=%u n_extra=%u",
-                  (unsigned)ke->n_inputs, (unsigned)ke->n_ops,
+                  "n_inputs=%u n_extra=%u",
+                  (unsigned)ke->n_inputs,
                   (unsigned)ke->n_extra_outputs);
     return 0;
   }

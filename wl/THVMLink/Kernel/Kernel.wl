@@ -44,16 +44,16 @@ TKernelDispatch::usage = "TKernelDispatch[k] dispatches the kernel by TWnf-firin
 (* === kernel-entry introspection (kid-keyed, no TKernel wrap needed) === *)
 
 TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
-TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns the number of distinct KProgOp[] arrays interned in the kernel-program hash-cons cache.  After a TRealize, this is at most TKernelCount[]-1; structurally identical kernels (e.g. successive iters of a recursive lambda's step) share a single entry.";
-TKernelProgramKey::usage = "TKernelProgramKey[kid] returns the structural key for the kernel's shared schedule slot, or 0 when the kernel has no shared axes entry.  KProg kernels use the KProgOp[] cache key; rangeified scalar/tile kernels use a scalar graph key.  Kernels with the same nonzero key share one C-side KpSchedule schedule slot, so autotuning one representative applies to the whole program shape.";
-TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].  Equivalent to TKernel[kid][\"Program\"] paired with the header (n_inputs, n_ops, output_numel, output_dtype).";
+TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns 0 (the kernel-program hash-cons cache is gone; the kernel body lives on the lifted UOp DAG, which is hash-consed by the heap itself).  Kept on the surface as a no-op for legacy callers.";
+TKernelProgramKey::usage = "TKernelProgramKey[kid] returns the structural key for the kernel's shared schedule slot, or 0 when the kernel has no shared axes entry.  Kernels with the same nonzero key share one C-side KpSchedule schedule slot, so autotuning one representative applies to the whole program shape.";
+TKernelInfo::usage     = "TKernelInfo[kid] returns an Association with the shape header for KERNELS[kid]: \"n_inputs\", \"n_ops\" (always 0; the per-op program array is gone), \"output_numel\", \"output_dtype\".  \"program\" is always {} -- use TKernelSource / TKernelScalarUops for the lifted UOp DAG.";
 TKernelScalarUops::usage = "TKernelScalarUops[kid] returns the post-lowering scalar-UOp graph snapshot stored at KERNELS[kid].scalar_uops, as a List of Associations (one per scalar op, with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\", and -- for S_RANGE -- \"axis_type\" and \"extent\").  Returns Missing[\"NotLowered\"] when the kernel was emitted via the legacy per-tensor-UOp visit() path (i.e. rangeify lowering was off or didn't apply).  Slot 0 (S_NONE sentinel) is included so list indices match C-side ScalarUop[] indices; live ops occupy positions [2..].";
 TKernelTileUops::usage = "TKernelTileUops[kid] returns the tile-UOp plan snapshot stored at KERNELS[kid].tile_uops, as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", and \"extra\".  TILE_AXIS entries also expose \"axis_type\" and \"extent\".  Returns Missing[\"NotLowered\"] when no rangeify tile plan exists.  Slot 0 (TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.";
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
 TKernelSource::usage      = "TKernelSource[kid] / TKernelSource[kid, backend] returns the source kid's program would render to on the named backend (\"C\" / \"Metal\").  Default backend is the active one (THVM_BACKEND env var; \"C\" otherwise).  Empty string when kernel_lift_to_uop declines (n_inputs > 30, no scalar arena, etc.) -- the kernel falls back to the per-op interpreter.  Property surface: TKernel[kid][\"Source\"] / TKernel[kid][\"Source\", backend].";
-TKernelFlops::usage         = "TKernelFlops[kid] = TKernel[kid][\"Flops\"].  Static FLOPS estimate for one execution of kid (sum over KProgOp[]: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
+TKernelFlops::usage         = "TKernelFlops[kid] = TKernel[kid][\"Flops\"].  Static FLOPS estimate for one execution of kid (sum over the lifted UOp DAG: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
 TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] = TKernel[kid][\"DispatchKind\"].  The route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", \"metal-tile\", \"metal-gemm\", \"metal-conv\", or \"metal-alias\".";
 TKernelDispatchCount::usage = "TKernelDispatchCount[kid] = TKernel[kid][\"DispatchCount\"].  Cumulative number of times kid has fired since thvm_init.";
 TKernelTotalUs::usage       = "TKernelTotalUs[kid] = TKernel[kid][\"TotalUs\"].  Cumulative wallclock microseconds across every fire of kid.";
@@ -815,29 +815,17 @@ TKernelCount[]            := (ensureInit[]; $kernelCountFn[])
 TKernelProgramCacheSize[] := (ensureInit[]; $kernelProgramCacheSizeFn[])
 
 (* TKernelInfo[kid] returns a flat Association with the kernel's
-   linearized program + shape metadata.  Used by tests + visualization
-   overlays.  Same data as decodeKernelInfo above, repackaged with the
-   snake_case keys callers expect. *)
-TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid], n, nOps},
-    n    = raw[[1]];
-    nOps = raw[[2]];
+   shape metadata.  The per-op program array is gone (the kernel
+   body lives on the lifted UOp DAG, accessed via TKernelSource /
+   TKernelScalarUops); "n_ops" stays in the surface for backward
+   compat but is always 0, and "program" is always {}. *)
+TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid]},
     <|
-      "n_inputs"     -> n,
-      "n_ops"        -> nOps,
+      "n_inputs"     -> raw[[1]],
+      "n_ops"        -> raw[[2]],
       "output_numel" -> raw[[3]],
       "output_dtype" -> dtypeName[raw[[4]]],
-      "program"      -> Table[
-          With[{base = 4 + (i - 1) * 6},
-            <|
-              "opcode" -> Lookup[$uopNames, raw[[base + 1]], "?"],
-              "n_src"  -> raw[[base + 2]],
-              "src"    -> { raw[[base + 3]], raw[[base + 4]] },
-              "arg"    -> raw[[base + 5]],
-              "numel"  -> raw[[base + 6]]
-            |>
-          ],
-          {i, nOps}
-      ]
+      "program"      -> {}
     |>
 ]
 

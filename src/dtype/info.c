@@ -1,7 +1,7 @@
 // dtype/info.c - dtype metadata table.
 //
 // The runtime carries a dtype tag on every numeric value (TAG_NUM
-// ext, UOP_CONST ext, TAG_TEN ext, TenDesc.dtype, KProgOp.dtype).
+// ext, UOP_CONST ext, TAG_TEN ext, TenDesc.dtype, UOP_BUFFER dtype).
 // The set mirrors tinygrad's full dtype enum (15 concrete dtypes
 // plus packed int4/uint4).  Reserved rows trip the assertion in
 // dtype_itemsize().

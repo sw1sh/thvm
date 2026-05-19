@@ -5,7 +5,7 @@
 //
 // Buffer-binding convention (set by metal_dispatch_kernel):
 //     buffer(0)  : output
-//     buffer(1)  : KProgOp.arg              (used only by FLIP)
+//     buffer(1)  : per-op arg                (used only by FLIP)
 //     buffer(2)  : input
 //     buffer(3)  : src_numels[0] = in_numel
 //     buffer(4)  : src0[0] = ndim, src0[1..MAX_DIM] = dims

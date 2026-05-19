@@ -260,13 +260,10 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   }
 
   // Mirrors the BEAM TC entry gate above.  tile_analyze_conv2d_flat
-  // accepts DAG kernels via uop_dag_classify_conv2d_flat_shape (when
-  // ke->cached_lift.store_root != 0) AND keeps the program[] path
-  // as a fallback for lift-decline fixtures.  OR the gate:
-  // production kernels carry cached_lift.store_root, but the
-  // tests/test_tile_graph.c::metal-conv2d-flat-proposes-local
-  // fixture builds KProgOp + KpSchedule without running the lifter,
-  // so the axes-presence proxy still has to fire.
+  // accepts DAG kernels via uop_dag_classify_conv2d_flat_shape when
+  // ke->cached_lift.store_root != 0; the axes-presence proxy gates
+  // any synthetic fixture that builds KpSchedule without running
+  // the lifter.
   if (propose_metal_tile_enabled()
       && (ke->cached_lift.store_root != 0
           || (ke->schedule != NULL

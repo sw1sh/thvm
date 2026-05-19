@@ -150,9 +150,8 @@ u32 uop_dag_reduce_axis_extent(Term t) {
 
 // Walk the DAG rooted at `t` and verify every UOP_REDUCE node carries
 // a sum/max kind compatible with the reduce-unroll/group-reduce
-// metal templates.  Today both KProgOp and UOp REDUCE encode kind in a
-// child slot; we conservatively pass any REDUCE we find (the legacy
-// path's per-op switch covered REDUCE only without further checks).
+// metal templates.  UOP_REDUCE encodes kind in a child slot; we
+// conservatively pass any REDUCE we find.
 //
 // Returns 1 if at least one UOP_REDUCE is reachable from `t` AND every
 // reachable arithmetic op is one of the float-only set the metal
@@ -169,7 +168,7 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
   u32 op = term_ext(t);
   u64 loc = term_val(t);
   // Coverage of accepted ops mirrors propose_metal_reduce_unroll
-  // _kernel's KProgOp switch: float arithmetic + REDUCE + index-domain
+  // _kernel: float arithmetic + REDUCE + index-domain
   // (RANGE / I* / INVALID) + leaves (BUFFER/CONST) + STORE/AFTER
   // structural.  CMPEQ/CMPLT and OPT pass through.  Anything else
   // (e.g. CAST to a non-fp32 dtype) flips out_ok.
@@ -209,7 +208,7 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
       return;
     case UOP_CAST: case UOP_BITCAST:
       // The renderer handles BITCAST same-itemsize moves and CAST is
-      // already in propose's accepted KProgOp set indirectly via the
+      // already in propose's accepted set indirectly via the
       // renderer's coverage; conservative: treat as ok.
       uop_dag_reduce_unroll_walk(heap_read(loc + 0), out_ok, out_has_reduce);
       return;
@@ -221,7 +220,7 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
 
 // Public surface: returns 1 iff the DAG rooted at `t` has at least one
 // UOP_REDUCE and every reachable op is in the metal reduce-unroll
-// accepted set.  Mirrors the KProgOp gate in propose.c.
+// accepted set.  Mirrors the per-op gate in propose.c.
 int uop_dag_is_reduce_unroll_kernel(Term t) {
   int ok = 1;
   int has_reduce = 0;
@@ -280,16 +279,12 @@ int uop_dag_is_binary_ew(u32 op) { return uop_is_binary_elementwise((u8)op); }
 
 // === DAG-side GEMM-shape extractor ====================================
 //
-// `cpu_blas_dispatch` (backend/cpu/blas.c) historically read M/N/K and
-// the input-slot mapping out of `ke->program[]` via
-// `tile_analyze_gemm`.  Under default `THVM_PHASE_C7_FREE_PROGRAM=1`
-// the program[] array is freed at materialize time, so the legacy
-// path early-bails and matmul kernels regress to the slower
-// per-element render_uop_c triple-loop.  This helper recovers the
-// same TileGemmInfo-shaped facts from `ke->cached_lift.store_root`
-// (the lifted UOp DAG) plus `ke->input_views[]` (which the lifter
-// already used to compute matmul addresses, and which survives the
-// program[] free).
+// `cpu_blas_dispatch` (backend/cpu/blas.c) needs M/N/K and the
+// input-slot mapping for matmul-shaped kernels so it can issue an
+// Accelerate dgemm.  This helper recovers a TileGemmInfo-shaped
+// summary from `ke->cached_lift.store_root` (the lifted UOp DAG)
+// plus `ke->input_views[]` (which the lifter already used to
+// compute matmul addresses).
 //
 // Strategy:
 //   1. Peel an optional UOP_OPT(_, TC, _) wrapper from STORE.value
@@ -623,7 +618,7 @@ int uop_dag_classify_matmul_shape(Term root,
   }
 
   // Uniform dtype: every BUFFER reachable from the store_root must
-  // share dtype; mirrors tile_gemm_uniform_dtype's KProgOp gate.
+  // share dtype; mirrors tile_gemm_uniform_dtype's per-op gate.
   u32 dt = uop_buffer_dtype(buf_out);
   if (dt != DT_FP32 && dt != DT_FP64) return 0;
   if (uop_buffer_dtype(buf_a) != dt) return 0;

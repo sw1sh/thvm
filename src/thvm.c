@@ -624,9 +624,8 @@ void thvm_free(void) {
   free(WNF_LAST_STACK);  WNF_LAST_STACK  = NULL;
   free(TENS);            TENS            = NULL;
   // Free per-kernel heap arrays before freeing the KERNELS table
-  // itself (each KernelEntry now owns input_*[] and program[] on
-  // the heap; calloc-zeroed entries have NULL pointers, free is
-  // NULL-safe).
+  // itself (each KernelEntry owns input_*[] on the heap; calloc-
+  // zeroed entries have NULL pointers, free is NULL-safe).
   if (KERNELS) {
     for (u32 i = 0; i < KERNELS_NEXT; i++) kernel_free_arrays(&KERNELS[i]);
   }

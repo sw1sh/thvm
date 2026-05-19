@@ -1185,10 +1185,11 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_const(WolframLibraryData libData, mint argc,
   mreal   value = MArgument_getReal   (args[1]);
   u32 bits;
   if (dtype_is_float((u32)dtype)) {
-    // The KProgOp arg is u32, so all float constants pass through
-    // an f32 intermediate at materialize time.  For DT_FP64 inputs
-    // outside f32 range, the WL caller can fall back to a typed
-    // tensor (TTensorCreate from a Real64 NumericArray).
+    // UOP_CONST stores its payload in a u32 ext slot, so all float
+    // constants pass through an f32 intermediate at materialize
+    // time.  For DT_FP64 inputs outside f32 range, the WL caller
+    // can fall back to a typed tensor (TTensorCreate from a Real64
+    // NumericArray).
     f32 v = (f32)value;
     memcpy(&bits, &v, sizeof(bits));
   } else {
@@ -1739,9 +1740,6 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_jit_dylib_path(WolframLibraryData l, mint 
   return LIBRARY_NO_ERROR;
 }
 
-// Number of distinct KProgOp[] arrays interned in the kernel-
-// program hash-cons cache.  Used by tests to assert that two
-// kernels with structurally identical programs share storage.
 // === KpSchedule / TOpt surface (Phase 16 codegen variant scaffold) ===
 //
 // Snapshot of a kernel's axis-typed scheduling plan + applied opts.
@@ -2276,28 +2274,18 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc
     return LIBRARY_FUNCTION_ERROR;
   }
   KernelEntry *ke = &KERNELS[kid];
-  // Return a flat MTensor: [n_inputs, n_ops, output_numel, output_dtype,
-  //                         op0_opcode, op0_n_src, op0_src0, op0_src1, op0_arg, op0_numel,
-  //                         ... repeat for each op ...]
-  mint nFields = 4 + (mint)ke->n_ops * 6;
+  // Return a flat MTensor: [n_inputs, n_ops=0, output_numel, output_dtype].
+  // n_ops stays in the header for backward compatibility with WL callers
+  // that still read it; the per-op program[] array no longer exists.
+  mint nFields = 4;
   mint dims[1] = {nFields};
   MTensor out;
   libData->MTensor_new(MType_Integer, 1, dims, &out);
   mint *dst = libData->MTensor_getIntegerData(out);
-  mint idx = 0;
-  dst[idx++] = (mint)ke->n_inputs;
-  dst[idx++] = (mint)ke->n_ops;
-  dst[idx++] = (mint)ke->output_numel;
-  dst[idx++] = (mint)ke->output_dtype;
-  for (u32 i = 0; i < ke->n_ops; i++) {
-    KProgOp *p = &ke->program[i];
-    dst[idx++] = (mint)p->opcode;
-    dst[idx++] = (mint)p->n_src;
-    dst[idx++] = (mint)p->src[0];
-    dst[idx++] = (mint)(p->n_src >= 2 ? p->src[1] : 0);
-    dst[idx++] = (mint)p->arg;
-    dst[idx++] = (mint)p->numel;
-  }
+  dst[0] = (mint)ke->n_inputs;
+  dst[1] = 0;
+  dst[2] = (mint)ke->output_numel;
+  dst[3] = (mint)ke->output_dtype;
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
 }

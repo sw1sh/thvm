@@ -1150,12 +1150,11 @@ int main(void) {
     mco_in_bufs[i] = (itid != 0 && itid < TENS_NEXT) ? TENS[itid].buf_id : 0;
   }
   u32 mco_out_buf = TENS[KERNELS[mco_kid].output_tid].buf_id;
-  // The synthetic kernel has n_extra_outputs=1 but no KProgOp marked
-  // with store_extra_plus_one > 0, so the extra output buffer stays
-  // uninitialized; the walker still completes the primary-output
-  // dispatch via the cached_lift produced at materialize time (when
-  // n_extra was still 0, before this test injected the extra).  We
-  // just check the dispatch succeeds.
+  // The synthetic kernel has n_extra_outputs=1 but the lifter ran
+  // before the extra was injected (single-output cached_lift), so
+  // the extra output buffer stays uninitialized; the walker still
+  // completes the primary-output dispatch via the cached_lift.
+  // We just check the dispatch succeeds.
   CHECK_EQ(cpu_dispatch_kernel(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   CHECK_EQ(cpu_blas_dispatch  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   // Clear the synthetic output so the kernel is single-output again
@@ -1191,16 +1190,13 @@ int main(void) {
   TEST_BEGIN("kernel-merge/spliced-host-produces-both-outputs-via-uop-walker");
   // Step 6 + 7: end-to-end verification.  Two sibling elementwise
   // boundaries that share an input.  With THVM_KERNEL_MERGE=1, the
-  // planner flags the (host, child) pair, the splice action
-  // appends the child's program to the host's KernelEntry, marks
-  // the child's last KProgOp with store_extra_plus_one = 1, and
+  // planner flags the (host, child) pair, the splice action shares
+  // the host's KernelEntry's input bindings with the child, and
   // registers the child's output as the kernel's first extra
-  // output.  Post F6 cleanup, the UOp DAG walker (cpu_uop_walk)
-  // dispatches each STORE to the right CpuBuf via the lifter's
-  // STORE-AFTER chain; the legacy cpu_interpret post-pass that did
-  // the same thing was deleted.  The test reads both buffers and
-  // asserts the values match the per-boundary single-output
-  // computation.
+  // output.  The UOp DAG walker (cpu_uop_walk) dispatches each
+  // STORE to the right CpuBuf via the lifter's STORE-AFTER chain.
+  // The test reads both buffers and asserts the values match the
+  // per-boundary single-output computation.
   setenv("THVM_KERNEL_MERGE", "1", 1);
   setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
   // Fresh tensors written with known values so we can predict the
@@ -1230,37 +1226,22 @@ int main(void) {
   CHECK_EQ(materialize_kernel_merge_candidate_count(), 1);
   // Find the merged kernel: the host boundary's output_tid is the
   // primary output (a+b); the kernel's first extra output is
-  // (a*c).  Walk KERNELS to find a kid with n_extra_outputs == 1
-  // AND at least one KProgOp marked with store_extra_plus_one>0
-  // (the splice action's signature).  Earlier tests in this file
+  // (a*c).  Walk KERNELS to find the most recent kid with
+  // n_extra_outputs == 1 (the kernel_merge planner sets this on
+  // host kernels only).  Earlier tests in this file
   // leave kids with n_extra_outputs=1 but no store_extra_plus_one
   // (synthetic extras attached for guard tests); those don't have
   // the marker.
   u32 mox_host_kid = 0;
-  // Phase C slice 7: when program[] is freed post-lift the legacy
-  // store_extra_plus_one signature is gone; identify the merged
-  // host by `n_extra_outputs == 1` directly (the kernel_merge
-  // planner sets this on the host kernel only) and trust earlier
-  // synthetic-extra cleanup not to leave stale entries beyond this
-  // boundary in the test's KERNELS_NEXT window.
-  char const *mox_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-  int mox_free_on = (mox_free_e != NULL) && (mox_free_e[0] == '1');
+  // The kernel_merge planner sets n_extra_outputs > 0 only on the
+  // host kernel; the per-op program[] array (and its
+  // store_extra_plus_one signature) is gone, so identify the
+  // merged host by n_extra_outputs directly.  Pick the most recent
+  // matching kernel so earlier tests' synthetic-extra fixtures
+  // don't shadow this materialize's emission.
   for (u32 k = 1; k < KERNELS_NEXT; k++) {
     if (KERNELS[k].n_extra_outputs != 1) continue;
-    if (mox_free_on) {
-      // Single-write mode: program[] freed; pick the most recent
-      // n_extra_outputs==1 kernel (the merged host emitted by this
-      // materialize call).
-      mox_host_kid = k;
-      continue;
-    }
-    int has_store_extra = 0;
-    for (u32 op = 0; op < KERNELS[k].n_ops; op++) {
-      if (KERNELS[k].program[op].store_extra_plus_one > 0) {
-        has_store_extra = 1; break;
-      }
-    }
-    if (has_store_extra) { mox_host_kid = k; break; }
+    mox_host_kid = k;
   }
   CHECK(mox_host_kid != 0);
   if (mox_host_kid != 0) {

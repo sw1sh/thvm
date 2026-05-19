@@ -308,8 +308,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // Only the structural-lift path is wired: the CUDA renderer entry
   // (cg_render_uop_kernel_cuda_root) consumes a lifted UOp DAG root.
   // A kernel the lifter declined (store_root == 0) has no DAG to
-  // render -- there is no CUDA equivalent of the legacy KProgOp loop,
-  // so bail.
+  // render, so bail.
   if (!cg_supports(ke) || ke->cached_lift.store_root == 0) return -1;
   Term store_root = ke->cached_lift.store_root;
 

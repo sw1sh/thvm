@@ -5,7 +5,7 @@
 //
 // Buffer-binding convention (set by metal_dispatch_kernel):
 //     buffer(0)  : output
-//     buffer(1)  : KProgOp.arg              (unused for unary)
+//     buffer(1)  : per-op arg                (unused for unary)
 //     buffer(2)  : input a
 //     buffer(3)  : src_numels[0]            (uint; 1 -> broadcast)
 //

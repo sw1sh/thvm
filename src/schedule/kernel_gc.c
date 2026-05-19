@@ -1,18 +1,17 @@
 // schedule/kernel_gc.c -- buffer-liveness sweep over the KernelEntry
-// arena.  Frees the per-kernel heap arrays (input_*, program) for
-// every kernel whose output buffer was released by cpu_buf_pool's
-// rollback at end of realize.  Bounds the per-kernel program/input
-// memory growth across long training loops -- without this each
-// Adam step adds ~2.5K kernels' worth of program/input arrays
-// (KProgOp[]) which never shrink.
+// arena.  Frees the per-kernel input_* heap arrays for every kernel
+// whose output buffer was released by cpu_buf_pool's rollback at end
+// of realize.  Bounds the per-kernel input memory growth across long
+// training loops -- without this each Adam step adds ~2.5K kernels'
+// worth of input arrays which never shrink.
 //
 // We do NOT release the output TenDesc itself (no tensor_release)
 // and we do NOT recycle slot ids (no freelist pop in kernel_alloc):
 // kid references survive in heap UOP_KERNEL terms, and a future
 // realize that touches a still-pinned TenDesc could DFS-fire its
-// producer kid.  Freeing only the program arrays keeps that path
-// safe -- a re-fire of a stripped kernel just no-ops (n_inputs=0,
-// n_ops=0) and doesn't corrupt buffers.  See M4 in
+// producer kid.  Freeing only the input arrays keeps that path
+// safe -- a re-fire of a stripped kernel just no-ops (n_inputs=0)
+// and doesn't corrupt buffers.  See M4 in
 // docs/plans/beautiful_mnist_parity.md for the architectural
 // trade-offs and the orphan-kernel-emission issue that blocks the
 // more ambitious slot-reuse design.
@@ -41,8 +40,7 @@ fn u32 kernel_gc_sweep(Term result) {
   for (u32 kid = 1; kid < KERNELS_NEXT; kid++) {
     KernelEntry *ke = &KERNELS[kid];
     // Already-stripped slot (idempotent across multiple sweeps).
-    if (ke->n_inputs == 0 && ke->n_ops == 0 && ke->program == NULL
-        && ke->input_tids == NULL) continue;
+    if (ke->n_inputs == 0 && ke->input_tids == NULL) continue;
     if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) continue;
     u32 buf_id = TENS[ke->output_tid].buf_id;
     // buf_id == 0 means the TenDesc was already released; treat as
@@ -59,9 +57,9 @@ fn u32 kernel_gc_sweep(Term result) {
     if (TENS[ke->output_tid].backend != &CPU_BACKEND) {
       continue;
     }
-    // Buffer is dead.  Strip the program/input arrays; leave
-    // output_tid pointing at the (now-empty) TenDesc so existing
-    // kid references on the heap can resolve without faulting.
+    // Buffer is dead.  Strip the input arrays; leave output_tid
+    // pointing at the (now-empty) TenDesc so existing kid
+    // references on the heap can resolve without faulting.
     kernel_free_arrays(ke);
     freed++;
   }

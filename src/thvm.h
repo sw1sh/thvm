@@ -465,17 +465,12 @@ int             dtype_is_packed   (u32 dt);
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
 #define ALO_STATE_CAP (1ULL << 22)  // ALO substitution-chain entries.
 #define MAX_DIM      8              // max tensor rank
-#define KPROG_INIT_OPS   8          // initial program capacity (grows on demand)
-#define KPROG_MAX_OPS    (1ULL<<20) // hard sanity bound (1M ops/kernel)
-                                    // (Conv2D Fold-add chains run ~5 ops
-                                    // per partial * kh*kw partials + adds;
-                                    // 5x5 conv backward = ~150 ops)
 #define KERNEL_INIT_INPUT 8         // initial input-arrays capacity (grows on demand)
 #define KERNEL_MAX_INPUT  (1ULL<<20) // hard sanity bound (1M inputs/kernel)
                                     // (Conv2D fuses 2*kh*kw input/weight
                                     // tids into one kernel; 64 covers up
                                     // to 5x5 with headroom)
-#define MAX_UOP_SRC  3              // max source slots per KProgOp (CONV2D needs 3: input/weights/bias)
+#define MAX_UOP_SRC  3              // max source slots per UOP node (CONV2D needs 3: input/weights/bias)
 
 // === Tensor descriptor + backend ===
 
@@ -702,78 +697,23 @@ static inline u64 thvm_live_byte_ceiling(void) {
 }
 
 // === KernelEntry ===
-// A linearized compute program produced by materialize; consumed by
-// the backend's dispatch_kernel (cpu_interpret for the CPU backend).
-// Each program slot is an SSA-style op whose sources reference
-// either an earlier slot (by index) or a kernel input tensor
-// (high bit set).  Matches tinygrad's pickled UOp list that
-// `tinygrad/runtime/ops_python.py` interprets.
+// A unit of compute produced by materialize; consumed by the
+// backend's dispatch_kernel.  The kernel body lives on the lifted
+// UOp DAG rooted at `cached_lift.store_root`; visit() walks the
+// pre-bufferize UOp graph and records input bindings on the entry,
+// then kernel_lift_to_uop produces the canonical post-lift DAG that
+// the renderers / DAG-side encoder / cpu_uop_walk all consume.
 
 #define KSRC_INPUT_FLAG  0x80000000u
 #define KSRC_AS_INPUT(n) (KSRC_INPUT_FLAG | (u32)(n))
 #define KSRC_IS_INPUT(s) (((s) & KSRC_INPUT_FLAG) != 0)
 #define KSRC_INDEX(s)    ((s) & 0x7FFFFFFFu)
 
-typedef struct {
-  u8    opcode;                    // UOP_* opcode
-  u8    dtype;                     // DT_*
-  u8    n_src;                     // 0..MAX_UOP_SRC
-  u8    src0_ndim;                 // ndim of source slot 0; 0 = unknown
-                                   // (movement ops: EXPAND uses this to
-                                   // distinguish leading-axis vs
-                                   // trailing-axis broadcasts; other
-                                   // ops ignore the src_dims block)
-  u8    out_ndim;                  // ndim of this op's output;
-                                   //   0 = unknown / unused
-  u32   src[MAX_UOP_SRC];          // KSRC_AS_INPUT(n) or program index
-  u32   arg;                       // CONST bits, REDUCE kind+axis, ...
-  u64   numel;                     // output numel (for broadcast detection).
-                                   // Widened from u32 to u64 so kernel
-                                   // shapes whose product exceeds 2^32
-                                   // (e.g. BS=512 conv-bwd dInput at
-                                   // [32,800,204800] = 5.24e9 elements)
-                                   // store the correct count instead of
-                                   // overflowing (5.24e9 mod 2^32 =
-                                   // 947912704), which broke the reduce-
-                                   // shape divisibility check in rangeify.
-  u32   src0_dims[MAX_DIM];        // per-axis dims of source slot 0
-                                   // (only meaningful when src0_ndim > 0;
-                                   // used by axis-aware EXPAND in v1, can
-                                   // generalise to RESHAPE/PERMUTE later)
-  u32   out_dims [MAX_DIM];        // per-axis dims of this op's output;
-                                   //   only meaningful when out_ndim > 0
-  u8    pad_widths[2 * MAX_DIM];   // PAD only: interleaved per-axis
-                                   //   {b0, e0, b1, e1, ...} pad widths
-                                   //   (u8 caps each width at 255 -- plenty
-                                   //   for transposed-conv kh/kw - 1)
-  u8    axis_perm [MAX_DIM];       // PERMUTE only: out_axis i comes from
-                                   //   src axis axis_perm[i].  u8 fits
-                                   //   since MAX_DIM=8.
-  u8    n_reduce_axes;             // REDUCE only: number of original
-                                   //   source axes fused into this op.
-  u8    reduce_axes[MAX_DIM];      // REDUCE only: original source axis
-                                   //   ids, in source-axis order.
-  // Multi-output kernel splice (Step 6 of multi-output groundwork).
-  // 0 (default, memset(0)-friendly) = "no extra store" -- this op's
-  // value lives in regs[step] only.  Single-output kernels never set
-  // this; cpu_interpret falls back to "last op writes to out_buf_id"
-  // for them so legacy emit paths stay untouched.
-  // 1..N = "this op's value ALSO writes to extra output slot N-1"
-  // (i.e. extra index 0..N-1 as accepted by kernel_entry_set_extra_output).
-  // Set by materialize's splice action when fusing two boundaries
-  // into one multi-output kernel; cpu_interpret reads it post-step
-  // and copies regs[step] into the extra output buffer.
-  u8    store_extra_plus_one;
-} KProgOp;
-
 // === scalar UOp lowering ===
-// Tinygrad-style scalar-level UOps for the new schedule lowering
-// pass.  Each ScalarUop is one node in a per-kernel scalar-level
-// dataflow graph: explicit RANGE iterators, INDEX pointer arith,
-// LOAD/STORE memory access, and ALU ops on scalar values.  The
-// graph is transient infrastructure -- the realize pipeline
-// linearizes it down to KProgOp[] (the existing kernel-program
-// dispatch format) before kernel_fire_by_id runs.
+// Tinygrad-style scalar-level UOps for the schedule lowering pass.
+// Each ScalarUop is one node in a per-kernel scalar-level dataflow
+// graph: explicit RANGE iterators, INDEX pointer arith, LOAD/STORE
+// memory access, and ALU ops on scalar values.
 //
 // Stored on the KernelEntry as an introspectable snapshot
 // (`ke->scalar_uops`, NULL when the kernel was emitted via the
@@ -1046,19 +986,17 @@ typedef struct KernelEntry {
   // store the symbolic Term value here.  kernel_fire_by_id resolves
   // each non-zero entry through term_resolve before reading buffers.
   Term     *input_terms;
-  // per-input-slot
-  // bufferize source-buffer id.  visit() populates this whenever
-  // the input slot was created for another realized boundary, so
-  // rangeify and other consumers can call bufferize_edge_summary
-  // with `(this kernel's loc, source loc)` to read the canonical
-  // edge-local chain instead of recovering it from KProgOp.  0
-  // means "leaf input or unknown source" and the per-USE KProgOp
-  // chain remains the only source of truth for that slot.
+  // per-input-slot bufferize source-buffer id.  visit() populates
+  // this whenever the input slot was created for another realized
+  // boundary, so rangeify and other consumers can call
+  // bufferize_edge_summary with `(this kernel's loc, source loc)`
+  // to read the canonical edge-local chain.  0 means "leaf input
+  // or unknown source".
   u32      *input_source_buffer_ids;
   // Per-slot visit count - incremented every time visit() resolves
-  // this input.  Used by prog_chain_propagate to set
-  // KProgOp.chain_edge_idx so multiple paths from the same
-  // consumer to the same source pick distinct BIndex records.
+  // this input.  Lets prog_chain_propagate distinguish multiple
+  // paths from the same consumer to the same source so each one
+  // picks a distinct BIndex record.
   u32      *input_visit_counts;
   // Per-slot flag (heap array, parallel to input_visit_counts): 1 iff
   // rangeify folded this input's ShapeTracker prior_views chain into
@@ -1090,13 +1028,6 @@ typedef struct KernelEntry {
   u32       extra_output_dtypes [KERNEL_MAX_EXTRA_OUTPUTS];
   Shape     extra_output_shapes [KERNEL_MAX_EXTRA_OUTPUTS];
   u32       extra_output_numels [KERNEL_MAX_EXTRA_OUTPUTS];
-
-  // Program: dynamically grown.  ops_cap is the allocated length;
-  // n_ops is the count actually used.  Use kernel_program_reserve()
-  // before writing past n_ops.
-  u32       n_ops;
-  u32       ops_cap;
-  KProgOp  *program;
 
   // Original root UOP term that this kernel was built from.  The
   // walker rewrites parent cells to UOP_KERNEL but leaves the
@@ -1134,16 +1065,15 @@ typedef struct KernelEntry {
   // Snapshot of cached_lift.store_root at materialize time, before any
   // kernel_apply_opt DAG mutations.  axes_reset_to_default restores
   // cached_lift.store_root from this so autotune's bench-each-variant
-  // flow can rewind DAG state after each candidate.
-  // 0 when the lift declined; that case keeps the legacy program[]-
-  // driven reset path which is naturally idempotent.
+  // flow can rewind DAG state after each candidate.  0 when the lift
+  // declined.
   Term      cached_lift_init_root;
 
-  u8        spliced;               // 1 if the kernel's program was inlined
-                                   // into a parent via
-                                   // materialize_splice_into; kernel_fire_by_id
-                                   // skips dispatch (the parent now produces
-                                   // this kernel's output buffer too).
+  u8        spliced;               // 1 if the kernel was inlined into a
+                                   // parent via materialize_splice_into;
+                                   // kernel_fire_by_id skips dispatch (the
+                                   // parent now produces this kernel's
+                                   // output buffer too).
   u32       consumer_count;        // # of OTHER kernels whose input_tids
                                    // trace back (via TENS[tid].producer_kid)
                                    // to this kernel.  Populated by
@@ -1826,13 +1756,9 @@ typedef struct {
 // them.  has_* flags are independent: a chain can have multiple
 // movement ops of different kinds.
 //
-// Each chain entry now carries enough per-op
-// data (op, src_dims, out_dims) for rangeify to drive RngsCtx
-// from the bufferize edge graph.  Pad widths, axis permutations,
-// and flip masks are deferred to a later iteration; for now their
-// values live only in the originating UOp heap cells and rangeify
-// continues to recover them via its existing KProgOp walk for
-// those op kinds.
+// Each chain entry carries enough per-op data (op, src_dims,
+// out_dims, pad_widths, axis_perm, flip_mask) for rangeify to
+// drive RngsCtx from the bufferize edge graph.
 #define BUFFERIZE_INDEX_CHAIN_MAX 8
 typedef struct {
   u8  op;                        // UOP_RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP
@@ -1999,21 +1925,6 @@ fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
 // fewer than `edge_idx + 1` matching records.
 fn int  kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
                                    BIndex *out);
-
-// Map a movement-op KProgOp at (kid, prog_idx) to
-// the corresponding BIndexChainOp on the originating B_INDEX edge.
-// Returns 1 and copies the chain entry into *out when:
-//   - prog_idx is in range,
-//   - the KProgOp's chain_input_slot is a valid input slot,
-//   - that slot has a B_INDEX with chain_op_count covering
-//     chain_op_idx + 1.
-// Returns 0 in every other case (chain breaks, leaf input, missing
-// edge data) and leaves *out unchanged.  When this returns 1 the
-// out fields fully describe the movement transform that the
-// matching KProgOp implements.  Future rangeify rerouting will
-// consume this in place of the per-KProgOp src0_dims/out_dims/
-// pad_widths/axis_perm fields.
-fn int  kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out);
 
 // Leaf utilities other compilation units (realize_classify,
 // gc_mark, wnf/redex, interact/uop_kernel) reference.
@@ -2520,8 +2431,8 @@ fn u32  uop_buffer_inst_get(Term t);       // 0 if not UOP_BUFFER
 // Helpers used by metal_kernel_supported / propose.c to derive
 // per-kernel facts from a lifted UOp DAG without re-running the
 // lifter.  Every helper returns a safe default (0 / "uniform") on
-// `root == 0` so callers can chain them with a `cached_lift.store
-// _root != 0` gate and fall back to the legacy program[] path.
+// `root == 0` so callers can chain them with a
+// `cached_lift.store_root != 0` gate.
 
 // 1 iff every dtype-carrying node (BUFFER, CONST, CAST/BITCAST dst)
 // reachable from `root` has dtype `dt`.  Treats RANGE / I* / INVALID
@@ -2535,7 +2446,7 @@ u32 uop_dag_reduce_axis_extent(Term root);
 
 // 1 iff at least one UOP_REDUCE is reachable from `root` AND every
 // reachable op is in the metal reduce-unroll accepted set (mirrors
-// propose_metal_reduce_unroll_kernel's KProgOp gate).
+// propose_metal_reduce_unroll_kernel's UOp-DAG gate).
 int uop_dag_is_reduce_unroll_kernel(Term root);
 
 // Enumerate the distinct UOP_RANGE leaves of the DAG rooted at `root`,
@@ -3004,7 +2915,7 @@ typedef enum {
   KDISPATCH_JIT         = 4,   // CPU JIT (clang -shared)
   KDISPATCH_INTERPRETER = 5,   // CPU interpreter
   KDISPATCH_METAL_JIT   = 6,   // [retired in 88f536c3 -- metal_jit_encode deleted]
-  KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (one encoder per KProgOp)
+  KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (DAG-side encoder over cached_lift)
   KDISPATCH_CPU_TILE    = 8,   // [retired -- cpu_dispatch_tile deleted; slot reserved]
   KDISPATCH_METAL_TILE  = 9,   // Metal: render_uop UOp-DAG -> MSL -> single-encoder dispatch
   KDISPATCH_METAL_GEMM  = 10,  // [retired in 4e30432b -- metal_try_gemm deleted]

@@ -9,9 +9,9 @@
 //                                            a new trailing axis
 //                                            (REGRESSION case)
 // Pre-fix the kernel cycled in_numel for cases 3/4 alike, which is
-// correct for 3 and wrong for 4.  Now src0_dims / out_dims live on
-// KProgOp (populated by the materializer for UOP_EXPAND); the
-// kernel walks per-axis coords and zeros the broadcast strides.
+// correct for 3 and wrong for 4.  The lifted UOp_EXPAND carries
+// per-axis src/out dims; the kernel walks per-axis coords and
+// zeros the broadcast strides.
 
 #include "../src/thvm.c"
 #include "test.h"

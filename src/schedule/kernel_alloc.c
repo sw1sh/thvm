@@ -5,12 +5,11 @@
 // slot regardless of structural duplication; a future content-
 // addressed cache could dedup but doesn't yet.
 //
-// KernelEntry's input arrays and program array are heap-allocated
-// pointers that grow on demand via kernel_inputs_reserve /
-// kernel_program_reserve.  This was originally a fixed [64]/[256]
-// inline layout; deeply-nested chain-rule output (e.g. nth-order
-// TGrad) blew past those caps and bailed materialize.  Heap
-// arrays grow geometrically, free on dealloc.
+// KernelEntry's input arrays are heap-allocated pointers that grow
+// on demand via kernel_inputs_reserve.  This was originally a fixed
+// [64] inline layout; deeply-nested chain-rule output (e.g.
+// nth-order TGrad) blew past that cap and bailed materialize.
+// Heap arrays grow geometrically, free on dealloc.
 
 fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
   if (needed <= ke->inputs_cap) return;
@@ -51,22 +50,6 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
   ke->inputs_cap = new_cap;
 }
 
-fn void kernel_program_reserve(KernelEntry *ke, u32 needed) {
-  if (needed <= ke->ops_cap) return;
-  if (needed > KPROG_MAX_OPS) {
-    fprintf(stderr, "kernel_program_reserve: needed=%u exceeds sanity bound %llu\n",
-            needed, (unsigned long long)KPROG_MAX_OPS);
-    exit(1);
-  }
-  u32 new_cap = ke->ops_cap == 0 ? KPROG_INIT_OPS : ke->ops_cap * 2;
-  while (new_cap < needed) new_cap *= 2;
-  ke->program = (KProgOp *)realloc(ke->program, (size_t)new_cap * sizeof(KProgOp));
-  // Zero new tail (memset(0)-initialized KProgOps are valid no-ops
-  // until fully populated by visit()).
-  memset(ke->program + ke->ops_cap, 0, (size_t)(new_cap - ke->ops_cap) * sizeof(KProgOp));
-  ke->ops_cap = new_cap;
-}
-
 // Free the heap-allocated arrays in a KernelEntry; reset counts and
 // caps to zero.  Call when releasing a kernel slot or resetting the
 // runtime context.  Safe to call repeatedly (NULL-tolerant).
@@ -79,12 +62,8 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_source_buffer_ids); ke->input_source_buffer_ids = NULL;
   free(ke->input_visit_counts);      ke->input_visit_counts      = NULL;
   free(ke->input_chain_composed);    ke->input_chain_composed    = NULL;
-  free(ke->program);
-  ke->program        = NULL;
   ke->n_inputs   = 0;
   ke->inputs_cap = 0;
-  ke->n_ops      = 0;
-  ke->ops_cap    = 0;
   rangeify_free(ke);
 }
 
