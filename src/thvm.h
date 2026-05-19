@@ -1709,10 +1709,6 @@ fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
 fn Term interact_kernel (Term kernel);
 
 // === codegen/ axis ===
-// Predicate: does this kernel's lifted DAG carry a REDUCE-class
-// axis (KAX_REDUCE or KAX_GROUP_REDUCE)?  Reads cached_lift.store_root.
-fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
-
 // Derive per-axis KAX_ types from the higher-level signals
 // (output shape + tail-reduce + scalar-reduce + applied_opts log).
 // Mirrors the writer trio (axes_default_for +

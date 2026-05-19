@@ -55,24 +55,6 @@ static u32 axes_dag_collect(KernelEntry const *ke, u8 *kax_out,
   return n;
 }
 
-// Predicate: "does this kernel's lifted DAG carry a REDUCE-class
-// axis (KAX_REDUCE or KAX_GROUP_REDUCE)?".  axes_dag_collect reads
-// the final post-opt RANGE leaves out of cached_lift.store_root,
-// which is already mutated in place by every split-class opt.
-fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
-  if (ke == NULL) {
-    return 0;
-  }
-  if (ke->cached_lift.store_root == 0) return 0;
-  u8 kax[MAX_AXES] = {0};
-  u32 ext[MAX_AXES] = {0};
-  u32 n = axes_dag_collect(ke, kax, ext, MAX_AXES);
-  for (u32 i = 0; i < n; i++) {
-    if (kax[i] == KAX_REDUCE || kax[i] == KAX_GROUP_REDUCE) return 1;
-  }
-  return 0;
-}
-
 // Read per-axis kax_type[] from the lifted UOp DAG.  The DAG's
 // post-opt RANGE leaves carry the final axis layout (uop_dag_apply_kopt
 // mutates them in place for every split-class opt).
