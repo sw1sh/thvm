@@ -3416,7 +3416,16 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 #endif
 #define MNF_MAX_NODES  400000u
 #define MNF_SUCC_CAP   2048u
-#define MNF_BUDGET     192u
+// First-expansion nodes per goal_check.  The collision step is gated
+// by completion (the fronts cannot join before completion derives the
+// enabling rule), NOT by this budget: an A/B sweep 8..384 on wolfram
+// moved the proving step only 363..377 while wall time scaled
+// linearly with the budget.  A large budget is therefore pure wasted
+// MNF work -- it just grows the front (and the cost of re-expanding
+// it against every new rule) faster than completion can use it.  16
+// keeps the front growth proportional to completion's pace; wolfram
+// 15.2 s -> 1.8 s.
+#define MNF_BUDGET     16u
 #define MNF_N_BUCKETS  (1u << 21)        // 2097152, power of two
 #define MNF_ROOT_PARENT 0xFFFFFFFFu      // mnf_insert: this term is a seed
 

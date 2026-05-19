@@ -2138,3 +2138,29 @@ still proves (368 steps vs 363 -- the children-first reorder shifts
 MNF's exploration order slightly, immaterial).  `test_atp` 8567/8567
 (default and MNF builds), `thm` + the ladder prove.  The default
 build is untouched -- all of this is under `-DATP_MNF`.
+
+### 32 -- MNF_BUDGET: a large budget is wasted work
+
+`mnf_step` part (a) re-expands the whole front against each new rule;
+its cost grows with the front, and the front grows at `MNF_BUDGET`
+nodes per goal_check.  An A/B sweep of `MNF_BUDGET` over 8..384 on
+`wolfram` was decisive: wall time scaled almost linearly with the
+budget (8 -> 1.3 s, 16 -> 1.8 s, 48 -> 3.6 s, 192 -> 15.2 s, 384 ->
+26 s) while the proving STEP barely moved (363..377).
+
+That is the whole story: the collision step is gated by completion --
+the fronts cannot join until completion has derived the enabling rule
+-- so any MNF front built faster than that is just re-expanded,
+against every subsequent new rule, for no benefit.  A large budget
+buys nothing and costs quadratically.
+
+`MNF_BUDGET` cut 192 -> 16: **`wolfram` 15.2 s -> 1.9 s** (~8x), still
+363 steps; `test_atp` 8567/8567, `thm` + the ladder prove.  Across the
+session the `-DATP_MNF` proof of NAND commutativity has gone 363
+steps / 22 s -> 363 steps / 1.9 s.
+
+Side effect worth a future look: the smaller budget also shrinks the
+MNF-augmentation overhead that section 30 measured (a 50x `thm`
+regression).  With `MNF_BUDGET` 16 that overhead is ~12x smaller --
+`thm` under `-DATP_MNF` is 0.7 s, not 11 s.  Defaulting MNF on may now
+be worth re-measuring.
