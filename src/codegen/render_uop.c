@@ -44,7 +44,7 @@ static cg_target RMU_TARGET = CG_TARGET_METAL;
 // clang accept `#pragma clang loop unroll_count(N)`; MSL / GPU targets
 // use the GCC-style `#pragma unroll(N)`.  factor==0 means "full".
 static void rmu_emit_unroll_pragma(FILE *fp, u32 factor) {
-  if (RMU_TARGET_C) {
+  if (RMU_TARGET == CG_TARGET_C) {
     if (factor > 0) fprintf(fp, "#pragma clang loop unroll_count(%u)\n", factor);
     else            fputs("#pragma clang loop unroll(full)\n", fp);
   } else {
@@ -227,12 +227,14 @@ static void rmu_emit_term(Term t, FILE *fp) {
       u32 dtype = term_ext(heap_read(loc));
       u32 bits  = (u32)term_val(heap_read(loc));
       if (dtype == DT_FP32) {
-        // Both targets: emit f32 as a bit-exact bitcast so the
-        // constant survives decimal round-trip without any
-        // compiler-side fp formatting drift.  C target uses the
-        // THVM_BITCAST macro from the prologue; Metal target uses
-        // MSL's `as_type<float>` reinterpreter.
-        if (RMU_TARGET_C) {
+        // Emit f32 as a bit-exact bitcast so the constant survives
+        // decimal round-trip without compiler-side fp formatting
+        // drift.  C target uses the THVM_BITCAST macro from the
+        // prologue; the Metal target uses MSL's `as_type<float>`.
+        // CUDA bitcast (`__uint_as_float`) is a Stage-2 item -- see
+        // docs/plans/cuda_backend.md; the CUDA path is render-only
+        // and not yet nvrtc-compiled.
+        if (RMU_TARGET == CG_TARGET_C) {
           fprintf(fp, "THVM_BITCAST(float, 0x%08xu)", bits);
         } else {
           fprintf(fp, "as_type<float>(0x%08xu)", bits);
@@ -2314,7 +2316,8 @@ static int rmu_emit_chain_reduce(Term store, FILE *fp, u32 depth) {
     fprintf(fp, "float %s = ", acc_names[i]);
     rmu_emit_reduce_init(red_kinds[i], fp);
     fputs(";\n", fp);
-    if (red_kind_opt_per_chain[i] == RMU_NO_OPT && !RMU_TARGET_C) {
+    // GPU-generic: small-extent reduce unroll for Metal AND CUDA.
+    if (red_kind_opt_per_chain[i] == RMU_NO_OPT && RMU_TARGET != CG_TARGET_C) {
       u32 red_extent = uop_range_extent(red_range_per_chain[i]);
       if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
         for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
