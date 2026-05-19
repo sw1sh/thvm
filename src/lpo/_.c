@@ -67,6 +67,90 @@ static u8 lpo_var_occurs_in(Term t, u32 var_id) {
   }
 }
 
+// === pretests (Waldmeister `LPOVortests`) ============================
+// Fast pre-checks run before the full recursive descent.  Ported from
+// Waldmeister's `LPOVortests` module ("Vortests" = pretests): the
+// variable-set comparison ("Variablenmengenvergleich") that cheaply
+// rules out incomparable pairs.
+//
+// Soundness: LPO is a simplification ordering, so `s >lpo t` requires
+// every variable occurring in `t` to also occur in `s` (the standard
+// LPO variable condition: a variable in t but not s could be
+// instantiated to make t arbitrarily large).  Hence if neither
+// vars(s) contains vars(t) nor vice versa, the terms are LPO_UN, and
+// if one set is a strict superset only that direction can be GT/LT.
+// This is a pure optimization: the full recursion reaches the same
+// verdict, only slower.
+
+#define LPO_MAX_VAR 64
+
+// OR-accumulate a presence bit per variable id into `seen`.
+static void lpo_var_set_acc(Term t, u32 *seen) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id < LPO_MAX_VAR) seen[id] = 1;
+      return;
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) lpo_var_set_acc(term_ctr_at(t, i), seen);
+      return;
+    }
+    default: return;
+  }
+}
+
+// True iff `var_id < LPO_MAX_VAR` for every FVR reachable in `t`.
+// The pretest is only sound when both terms' variable ids are
+// bitset-representable; out-of-range ids fall back to the full
+// recursion.
+static u8 lpo_vars_in_range(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) < LPO_MAX_VAR;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!lpo_vars_in_range(term_ctr_at(t, i))) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// Variable-set pretest.  Writes one of LPO_GT / LPO_LT / LPO_EQ /
+// LPO_UN into `*out` and returns 1 iff the pretest is conclusive
+// enough to skip the full comparison; returns 0 when the full
+// recursion is still required.
+//
+// Returns conclusive 1 only when the verdict is forced:
+//   - vars(s) and vars(t) incomparable  -> LPO_UN forced.
+// Returns 0 (full recursion needed) for the equal / subset / superset
+// cases, because set inclusion alone does not pin down GT vs UN; it
+// only rules the opposite direction out, which the full recursion
+// then resolves quickly.
+static u8 lpo_pretest_varset(Term s, Term t, LpoCmp *out) {
+  if (!lpo_vars_in_range(s) || !lpo_vars_in_range(t)) return 0;
+  u32 vs[LPO_MAX_VAR] = {0};
+  u32 vt[LPO_MAX_VAR] = {0};
+  lpo_var_set_acc(s, vs);
+  lpo_var_set_acc(t, vt);
+  u8 s_has_extra = 0;   // some var in s not in t
+  u8 t_has_extra = 0;   // some var in t not in s
+  for (u32 i = 0; i < LPO_MAX_VAR; i++) {
+    if (vs[i] && !vt[i]) s_has_extra = 1;
+    if (vt[i] && !vs[i]) t_has_extra = 1;
+  }
+  if (s_has_extra && t_has_extra) {
+    // Incomparable variable sets: neither s >lpo t nor t >lpo s can
+    // hold, and s != t -- so the pair is definitively LPO_UN.
+    *out = LPO_UN;
+    return 1;
+  }
+  return 0;
+}
+
 // === main comparator =================================================
 
 static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg);
@@ -110,6 +194,13 @@ static LpoCmp lpo_lex(Term s_parent, Term t_parent,
 }
 
 fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
+  if (lpo_eq(s, t)) return LPO_EQ;
+  // Variable-set pretest (Waldmeister `LPOVortests`): a single
+  // bitset pass over both terms rules out the incomparable-var-set
+  // case before the recursive descent.  Conclusive only for the
+  // forced LPO_UN verdict; otherwise the full recursion runs.
+  LpoCmp pre;
+  if (lpo_pretest_varset(s, t, &pre)) return pre;
   return lpo_rec(s, t, cfg);
 }
 
