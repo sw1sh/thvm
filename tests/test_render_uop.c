@@ -99,8 +99,11 @@ int main(void) {
   fp = fmemopen(buf4, sizeof(buf4), "w");
   cg_render_uop_kernel(st_idx, "k_idx", out, NULL, 0, fp);
   fclose(fp);
-  CHECK(contains(buf4, "(a0 * 2)"));
-  CHECK(contains(buf4, " + a1)"));
+  // Integer arithmetic is emitted signed: each UOP_I* operand is cast
+  // to `int` so a UOP_ISUB result is signed-correct (see the signed-
+  // ISUB fix in render_uop.c's UOP_I* emission).
+  CHECK(contains(buf4, "(int)(a0) * (int)(2)"));
+  CHECK(contains(buf4, " + (int)(a1)"));
 
   TEST_BEGIN("render-uop/after-chain-emits-barrier-on-local-store");
   // LOCAL store followed by GLOBAL store -> barrier between.
@@ -130,7 +133,37 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf6, " ? "));
   CHECK(contains(buf6, " : "));
-  CHECK(contains(buf6, "(a0 < 4)"));
+  // ILT is a signed comparison: `(int)(a0) < (int)(4)`.
+  CHECK(contains(buf6, "(int)(a0) < (int)(4)"));
+
+  TEST_BEGIN("render-uop/isub-is-signed");
+  // STORE(out, RANGE(0), IWHERE(ILT(-1, RANGE(0)-1), ..., 0)).
+  // UOP_ISUB is a SIGNED subtract (thvm.h).  RANGE vars are declared
+  // `uint`, so `a0 - 1` at a0==0 wraps to ~UINT_MAX in unsigned space;
+  // a guard `-1 < (a0-1)` then promotes -1 to UINT_MAX and is always
+  // false -- masking every element that should be live.  The renderer
+  // must emit the integer expression signed.  Each UOP_I* operand is
+  // cast to `int`, so `-1 < (a0-1)` is a true signed comparison.
+  {
+    Term r_s   = uop_range(0, 0 /*LOOP*/, 8);
+    Term km1   = uop_const(DT_INT32, 1);
+    Term sub_s = uop_int_binary(UOP_ISUB, r_s, km1);          // a0 - 1
+    Term neg1  = uop_const(DT_INT32, 0xFFFFFFFFu);            // -1
+    Term grd   = uop_int_binary(UOP_ILT, neg1, sub_s);        // -1 < a0-1
+    Term zerof = uop_const(DT_FP32, 0u);
+    Term selv  = uop_iwhere(grd, one, zerof);
+    Term st_s  = uop_store(out, r_s, selv);
+    char bufs[2048];
+    fp = fmemopen(bufs, sizeof(bufs), "w");
+    cg_render_uop_kernel(st_s, "k_isub", out, NULL, 0, fp);
+    fclose(fp);
+    // ISUB operands cast to int -> signed subtraction.
+    CHECK(contains(bufs, "(int)(a0) - (int)(1)"));
+    // The -1 literal compares in signed `int`, not promoted to UINT_MAX.
+    CHECK(contains(bufs, "(int)(-1) < "));
+    // No bare unsigned `a0 - 1` (the wraparound-prone form).
+    CHECK(!contains(bufs, "(a0 - 1)"));
+  }
 
   TEST_BEGIN("render-uop/dtype-mapping-fp16-half");
   Term out16 = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP16, 1, dims);
@@ -343,7 +376,8 @@ int main(void) {
     // inside the a2 loop; the store references a2 in scope.
     CHECK(contains(bufmu, "float _acc3 = 0.0f"));
     CHECK(contains(bufmu, "for (uint a3 = 0; a3 < 8"));
-    CHECK(contains(bufmu, "((a1 * 4) + a2)"));
+    CHECK(contains(bufmu, "(int)(a1) * (int)(4)"));
+    CHECK(contains(bufmu, "+ (int)(a2)"));
     CHECK(contains(bufmu, "= _acc3;"));
     // No serial output-axis loop (the regression's symptom).
     CHECK(!contains(bufmu, "for (uint a0 ="));

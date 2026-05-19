@@ -259,13 +259,29 @@ static void rmu_emit_term(Term t, FILE *fp) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
     case UOP_IAND: {
+      // Signed integer arithmetic.  RANGE loop vars are declared `uint`
+      // (loop counters, always non-negative), but UOP_ISUB is a SIGNED
+      // subtract (thvm.h:368) and may legitimately go negative -- e.g.
+      // a conv/attention shifted index `r - k` or a guard `-1 < x`.
+      // In unsigned space a negative ISUB wraps to ~UINT_MAX, so an
+      // `ILT` against it (`-1 < x` promotes -1 to UINT_MAX) is always
+      // false and a negative array index wraps far out of bounds.
+      // Casting each operand to `int` makes the whole integer-expression
+      // subtree signed: subtraction, comparison and idiv/imod are all
+      // signed-correct, and a signed index used in `buf[expr]` is fine
+      // on every target (the IWHERE/ILT bounds guard masks it).  This
+      // matches tinygrad, which renders RANGE/index dtype as signed
+      // `int` (tinygrad/renderer/cstyle.py:18-19,150).  Nested int
+      // binaries already yield `int`; the extra `(int)` cast on them is
+      // harmless.  Float ops are untouched -- this case only covers the
+      // UOP_I* family.
       Term a = heap_read(loc + 0);
       Term b = heap_read(loc + 1);
-      fputs("(", fp);
+      fputs("((int)(", fp);
       rmu_emit_term(a, fp);
-      fprintf(fp, " %s ", rmu_int_op_name(op));
+      fprintf(fp, ") %s (int)(", rmu_int_op_name(op));
       rmu_emit_term(b, fp);
-      fputs(")", fp);
+      fputs("))", fp);
       return;
     }
     // Float elementwise binary ops.  Same parenthesised shape as

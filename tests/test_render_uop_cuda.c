@@ -102,6 +102,32 @@ int main(void) {
     free(cu);
   }
 
+  // === signed integer subtraction =================================
+  TEST_BEGIN("render-uop-cuda/isub-is-signed");
+  {
+    // STORE(out[i], IWHERE(ILT(-1, i-1), 1.0f, 0.0f)).  UOP_ISUB is a
+    // SIGNED subtract; RANGE vars are `uint`, so `a0 - 1` at a0==0
+    // wraps to ~UINT_MAX and the guard `-1 < (a0-1)` (with -1 promoted
+    // to UINT_MAX) is always false on the CUDA target -- nvrtc applies
+    // the same unsigned-promotion rule.  The renderer casts each
+    // UOP_I* operand to `int` so the comparison is signed-correct.
+    u32 dimsOut[1] = { 8 };
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsOut, 0);
+    Term r0  = uop_range(0, KAX_LOOP, 8);
+    Term sub = uop_int_binary(UOP_ISUB, r0, uop_const(DT_INT32, 1));
+    Term grd = uop_int_binary(UOP_ILT, uop_const(DT_INT32, 0xFFFFFFFFu),
+                              sub);
+    Term sel = uop_iwhere(grd, uop_const(DT_FP32, 0x3F800000u),
+                          uop_const(DT_FP32, 0u));
+    Term st  = uop_store(out, r0, sel);
+    char *cu = render_cuda(st, "k_isub");
+    CHECK(cu != NULL);
+    CHECK(contains(cu, "(int)(a0) - (int)(1)"));
+    CHECK(contains(cu, "(int)(-1) < "));
+    CHECK(!contains(cu, "(a0 - 1)"));
+    free(cu);
+  }
+
   // === nested reduce: inner reduce uses outer reduce's axis var =====
   TEST_BEGIN("render-uop-cuda/nested-reduce-axis-dep-nests-loops");
   {
