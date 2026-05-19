@@ -130,6 +130,15 @@ have no peer-reviewed paper.
 - "Is Sora a World Simulator? A Comprehensive Survey on General World
   Models and Beyond", arXiv:2405.03520 (2024).
   <https://arxiv.org/abs/2405.03520>
+- NVIDIA, "SANA-WM: Efficient Minute-Scale World Modeling with Hybrid
+  Linear Diffusion Transformer", arXiv:2605.15178 (May 2026).
+  <https://arxiv.org/abs/2605.15178> · page
+  <https://nvlabs.github.io/Sana/WM/>
+- Yifan Wang & Tong He, "Warp-as-History: Generalizable
+  Camera-Controlled Video Generation from One Training Video",
+  arXiv:2605.15182 (May 2026). <https://arxiv.org/abs/2605.15182> ·
+  page <https://yyfz.github.io/warp-as-history/> · code
+  <https://github.com/yyfz/Warp-as-History>
 
 ## NeuroAI, predictive coding, active inference (page 4)
 
@@ -662,6 +671,183 @@ auto-curriculum / LLM-outer-loop literature.
 - Repo-local: the [ralph-loop skill](../../.claude/skills/ralph-loop/SKILL.md)
   is the minimum-viable LLM outer loop already wired into this
   workspace.
+
+## Generative video and game world models (page 7)
+
+Survey companion to [07-video-world-models-survey.md](07-video-world-models-survey.md).
+Fast-moving area, May 2026 snapshot; 2601-2605 arXiv IDs are recent
+preprints, some not independently verified.
+
+### The SANA efficiency lineage
+
+- Junyu Chen et al., "Deep Compression Autoencoder for Efficient
+  High-Resolution Diffusion Models" (DC-AE), arXiv:2410.10733 (2024).
+  <https://arxiv.org/abs/2410.10733>
+- Enze Xie et al., "SANA: Efficient High-Resolution Image Synthesis
+  with Linear Diffusion Transformers", arXiv:2410.10629 (2024); ICLR
+  2025. <https://arxiv.org/abs/2410.10629>
+- Enze Xie et al., "SANA 1.5: Efficient Scaling of Training-Time and
+  Inference-Time Compute in Linear Diffusion Transformer",
+  arXiv:2501.18427 (2025). <https://arxiv.org/abs/2501.18427>
+- "SANA-Sprint: One-Step Diffusion with Continuous-Time Consistency
+  Distillation", arXiv:2503.09641 (2025).
+  <https://arxiv.org/abs/2503.09641>
+- "SANA-Video: Efficient Video Generation with Block Linear Diffusion
+  Transformer", arXiv:2509.24695 (2025).
+  <https://arxiv.org/abs/2509.24695>
+- Muyang Li et al., "SVDQuant: Absorbing Outliers by Low-Rank
+  Components for 4-Bit Diffusion Models", arXiv:2411.05007 (2024);
+  ICLR 2025. <https://arxiv.org/abs/2411.05007>
+- NVIDIA, "SANA-WM: Efficient Minute-Scale World Modeling with Hybrid
+  Linear Diffusion Transformer", arXiv:2605.15178 (2026).
+  <https://arxiv.org/abs/2605.15178> ·
+  page <https://nvlabs.github.io/Sana/WM/>
+
+### Efficient long-context backbones
+
+- Angelos Katharopoulos et al., "Transformers are RNNs: Fast
+  Autoregressive Transformers with Linear Attention", ICML 2020;
+  arXiv:2006.16236. <https://arxiv.org/abs/2006.16236>
+- Songlin Yang et al., "Gated Linear Attention Transformers with
+  Hardware-Efficient Training", arXiv:2312.06635 (2023); ICML 2024.
+  <https://arxiv.org/abs/2312.06635>
+- Albert Gu & Tri Dao, "Mamba: Linear-Time Sequence Modeling with
+  Selective State Spaces", arXiv:2312.00752 (2023).
+  <https://arxiv.org/abs/2312.00752>
+- Tri Dao & Albert Gu, "Transformers are SSMs: Generalized Models and
+  Efficient Algorithms Through Structured State Space Duality"
+  (Mamba-2), arXiv:2405.21060 (2024); ICML 2024.
+  <https://arxiv.org/abs/2405.21060>
+- Songlin Yang, Jan Kautz & Ali Hatamizadeh, "Gated Delta Networks:
+  Improving Mamba2 with Delta Rule", arXiv:2412.06464 (2024); ICLR
+  2025. <https://arxiv.org/abs/2412.06464>
+- Bo Peng et al., "RWKV-7 'Goose' with Expressive Dynamic State
+  Evolution", arXiv:2503.14456 (2025).
+  <https://arxiv.org/abs/2503.14456>
+- Opher Lieber et al., "Jamba: A Hybrid Transformer-Mamba Language
+  Model", arXiv:2403.19887 (2024). <https://arxiv.org/abs/2403.19887>
+- Yu Sun et al., "Learning to (Learn at Test Time): RNNs with
+  Expressive Hidden States" (TTT layers), arXiv:2407.04620 (2024).
+  <https://arxiv.org/abs/2407.04620>
+
+### Autoregressive long-video generation and drift
+
+- Boyuan Chen et al., "Diffusion Forcing: Next-Token Prediction Meets
+  Full-Sequence Diffusion", arXiv:2407.01392 (2024); NeurIPS 2024.
+  <https://arxiv.org/abs/2407.01392>
+- Xun Huang et al., "Self Forcing: Bridging the Train-Test Gap in
+  Autoregressive Video Diffusion", arXiv:2506.08009 (2025).
+  <https://arxiv.org/abs/2506.08009>
+- Tianwei Yin et al., "From Slow Bidirectional to Fast Autoregressive
+  Video Diffusion Models" (CausVid), arXiv:2412.07772 (2024); CVPR
+  2025. <https://arxiv.org/abs/2412.07772>
+- Sand AI, "MAGI-1: Autoregressive Video Generation at Scale",
+  arXiv:2505.13211 (2025). <https://arxiv.org/abs/2505.13211>
+- Skywork, "SkyReels-V2: Infinite-Length Film Generative Model",
+  arXiv:2504.13074 (2025). <https://arxiv.org/abs/2504.13074>
+- "LongLive: Real-time Interactive Long Video Generation",
+  arXiv:2509.22622 (2025). <https://arxiv.org/abs/2509.22622>
+- Lvmin Zhang & Maneesh Agrawala, "Packing Input Frame Context in
+  Next-Frame Prediction Models for Video Generation" (FramePack),
+  arXiv:2504.12626 (2025). <https://arxiv.org/abs/2504.12626>
+
+### Interactive and playable world models
+
+- Dani Valevski et al., "Diffusion Models Are Real-Time Game Engines"
+  (GameNGen), arXiv:2408.14837 (2024).
+  <https://arxiv.org/abs/2408.14837>
+- Jake Bruce et al., "Genie: Generative Interactive Environments",
+  arXiv:2402.15391 (2024); ICML 2024.
+  <https://arxiv.org/abs/2402.15391>
+- DeepMind, "Genie 2: A large-scale foundation world model" (Dec
+  2024) and "Genie 3: A new frontier for world models" (Aug 2025),
+  blog/tech-report releases.
+- Decart & Etched, "Oasis: A Universe in a Transformer" (open-source
+  Minecraft diffusion world model, 2024).
+- Eloi Alonso et al., "Diffusion for World Modeling: Visual Details
+  Matter in Atari" (DIAMOND), arXiv:2405.12399 (2024); NeurIPS 2024
+  spotlight. <https://arxiv.org/abs/2405.12399>
+- "Matrix-Game: Interactive World Foundation Model",
+  arXiv:2506.18701 (2025). <https://arxiv.org/abs/2506.18701> ·
+  Matrix-Game 2.0 arXiv:2508.13009 · 3.0 arXiv:2604.08995
+- Haoxuan Che et al., "GameGen-X: Interactive Open-world Game Video
+  Generation", arXiv:2411.00769 (2024); ICLR 2025.
+  <https://arxiv.org/abs/2411.00769>
+- Tencent, "Hunyuan-GameCraft: High-dynamic Interactive Game Video
+  Generation", arXiv:2506.17201 (2025).
+  <https://arxiv.org/abs/2506.17201>
+- Microsoft Research & Ninja Theory, "World and Human Action Models
+  towards gameplay ideation" (Muse / WHAM), *Nature* 638 (2025).
+  <https://doi.org/10.1038/s41586-025-08600-3>
+
+### Control, memory, and geometric grounding
+
+- Hao He et al., "CameraCtrl: Enabling Camera Control for
+  Text-to-Video Generation", arXiv:2404.02101 (2024).
+  <https://arxiv.org/abs/2404.02101>
+- Zhouxia Wang et al., "MotionCtrl: A Unified and Flexible Motion
+  Controller for Video Generation", arXiv:2312.03641 (2023).
+  <https://arxiv.org/abs/2312.03641>
+- Dejia Xu et al., "CamCo: Camera-Controllable 3D-Consistent
+  Image-to-Video Generation", arXiv:2406.02509 (2024).
+  <https://arxiv.org/abs/2406.02509>
+- Wangbo Yu et al., "ViewCrafter: Taming Video Diffusion Models for
+  High-fidelity Novel View Synthesis", arXiv:2409.02048 (2024).
+  <https://arxiv.org/abs/2409.02048>
+- Stability AI, "Stable Virtual Camera: Generative View Synthesis
+  with Diffusion Models" (SEVA), arXiv:2503.14489 (2025).
+  <https://arxiv.org/abs/2503.14489>
+- Sherwin Bahmani et al., "AC3D: Analyzing and Improving 3D Camera
+  Control in Video Diffusion Transformers", arXiv:2411.18673 (2024);
+  CVPR 2025. <https://arxiv.org/abs/2411.18673>
+- "GS-DiT: Advancing Video Generation with Pseudo 4D Gaussian Fields",
+  arXiv:2501.02690 (2025). <https://arxiv.org/abs/2501.02690>
+- Yifan Wang & Tong He, "Warp-as-History: Generalizable
+  Camera-Controlled Video Generation from One Training Video",
+  arXiv:2605.15182 (2026). <https://arxiv.org/abs/2605.15182> ·
+  page <https://yyfz.github.io/warp-as-history/>
+- Zeqi Xiao et al., "WorldMem: Long-term Consistent World Simulation
+  with Memory", arXiv:2504.12369 (2025).
+  <https://arxiv.org/abs/2504.12369>
+- "Video World Models with Long-term Spatial Memory",
+  arXiv:2506.05284 (2025). <https://arxiv.org/abs/2506.05284>
+- "WorldWarp: Asynchronous 3D Video Diffusion", arXiv:2512.19678
+  (2025). <https://arxiv.org/abs/2512.19678>
+- Haoyi Zhu et al., "Aether: Geometric-Aware Unified World Modeling",
+  arXiv:2503.18945 (2025); ICCV 2025.
+  <https://arxiv.org/abs/2503.18945>
+
+### Embodied and predictive world models
+
+- Niket Agarwal et al. (NVIDIA), "Cosmos World Foundation Model
+  Platform for Physical AI", arXiv:2501.03575 (2025).
+  <https://arxiv.org/abs/2501.03575>
+- Meta FAIR, "V-JEPA 2: Self-Supervised Video Models Enable
+  Understanding, Prediction and Planning", arXiv:2506.09985 (2025).
+  <https://arxiv.org/abs/2506.09985>
+- Amir Bar et al., "Navigation World Models", arXiv:2412.03572
+  (2024); CVPR 2025. <https://arxiv.org/abs/2412.03572>
+- Shenyuan Gao et al. (NVIDIA), "DreamDojo: A Generalist Robot World
+  Model", arXiv:2602.06949 (2026).
+  <https://arxiv.org/abs/2602.06949>
+- Anthony Hu et al. (Wayve), "GAIA-1: A Generative World Model for
+  Autonomous Driving", arXiv:2309.17080 (2023).
+  <https://arxiv.org/abs/2309.17080> · GAIA-2 arXiv:2503.20523
+- Shenyuan Gao et al., "Vista: A Generalizable Driving World Model
+  with High Fidelity and Versatile Controllability", arXiv:2405.17398
+  (2024); NeurIPS 2024. <https://arxiv.org/abs/2405.17398>
+
+### SANA-WM competitor world models
+
+- "LingBot-World: Advancing Open-source World Models",
+  arXiv:2601.20540 (2026).
+- "HY-WorldPlay: Towards Long-Term Geometric Consistency for
+  Real-Time Interactive World Modeling", arXiv:2512.14614 (2025).
+- "Infinite-World: Scaling Interactive World Models to 1000-Frame
+  Horizons via Pose-Free Hierarchical Memory", arXiv:2602.02393
+  (2026).
+- "Matrix-Game 3.0: Real-time Streaming World Model",
+  arXiv:2604.08995 (2026).
 
 ## thvm internal docs referenced
 

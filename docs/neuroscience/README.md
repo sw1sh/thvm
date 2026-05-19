@@ -186,7 +186,14 @@ IJCAI, etc. -- are left as is.)
    last one), and the modern alignment / reasoning-model wave on top
    of LLMs (RLHF, DPO, GRPO, RLVR, KTO/ORPO/SimPO/RLOO, RLAIF,
    process reward models, DeepSeek-R1).
-7. [references.md](references.md) -- consolidated bibliography with
+7. [07-video-world-models-survey.md](07-video-world-models-survey.md)
+   -- a standalone technique survey of the generative video and game
+   world-model field (the SANA-WM neighbourhood): compression
+   lineages, efficient long-context backbones, autoregressive rollout
+   and drift, interactive game engines, camera/action control,
+   long-horizon memory, and the embodied/predictive world models. The
+   engineering companion to page 3's paradigm argument.
+8. [references.md](references.md) -- consolidated bibliography with
    links.
 
 ## How to use this with thvm

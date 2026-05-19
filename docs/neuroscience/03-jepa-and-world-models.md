@@ -186,6 +186,26 @@ see [05-toy-problems-with-thvm.md](05-toy-problems-with-thvm.md).
   variants) plus tokenizers and post-training recipes, aimed at
   robotics / autonomous vehicles -- "digital twins" of the physical
   world.
+- **SANA-WM** (NVIDIA, arXiv:2605.15178, May 2026): a 2.6B-parameter
+  diffusion transformer that generates minute-scale 720p video with
+  6-DoF camera control on a single GPU. A pixel-space generator (the
+  camp this page argues against), but two engineering ideas are
+  paradigm-independent: *hybrid linear attention* -- a frame-wise
+  Gated DeltaNet linear recurrence carries the compressed long
+  history cheaply, softmax attention does the sharp local work -- and
+  a coarse-then-refiner two-stage pipeline. ~36x the throughput of
+  comparable baselines.
+- **Warp-as-History** (Wang & He, arXiv:2605.15182, May 2026):
+  camera-controlled video from *one* training video. Adds no camera
+  encoder and no control branch -- it renders the frames it already
+  has under the target camera path (a geometric *warp*) and feeds
+  those as "pseudo-history" through the model's *existing*
+  history-conditioning pathway, dropping disoccluded tokens so the
+  model inpaints them. Two transferable principles: route a new
+  capability through an interface the model already has rather than
+  bolting on a module, and hand the model the cheap deterministic
+  part (the warp) for free so it only learns the hard residual (the
+  disocclusions).
 - **The Sora "world simulator" debate** (2024): OpenAI introduced
   Sora claiming scaled video generation is "a promising path toward
   general-purpose simulators of the physical world". LeCun rejected
@@ -209,6 +229,33 @@ and you have a planning agent. Combined with breakthrough 2's
 actor-critic for the *cost/critic* side, that is a complete (toy)
 autonomous agent -- and every piece of it is differentiable, which is
 exactly what thvm is good at.
+
+**Note (2026-05-18), reader's question -- what the `brain/`
+quasimetric arc can take from SANA-WM and Warp-as-History.** Both are
+pixel-space generators, so the *paradigm* is the wrong one for us;
+the *architecture* lessons are not. (1) SANA-WM's hybrid linear +
+softmax attention is the arc's own recurring finding made structural
+-- "a reliable local map, depth eats it" (experiments 144-155) is
+answered by giving the long horizon its own cheap linear-recurrent
+state instead of one attention doing both jobs; the learned dynamics
+model of stage 3 should carry a compact recurrent state, not attend
+over all history. (2) Warp-as-History's "route it through the
+existing interface, do not add a module" is something the arc proved
+three times independently: experiment 153's privileged passive
+channel specialised while the structureless agency heads smeared;
+156/157 bolted expert-iteration and hierarchical planning *on top*
+and both failed; 158's win was reshaping the *existing* loss. (3) Its
+"deterministic prior for free, learn only the residual" matches the
+quasimetric's `sym + asym` split and resolves the
+no-hand-coded-simulator tension correctly -- a cheap deterministic
+*prior* the learned model only corrects is legitimate, a hand-coded
+*simulator* as the deliverable is not.
+
+For the deep companion survey of the *generative* video and game
+world-model field -- the SANA-WM neighbourhood, its compression
+lineages, long-context backbones, autoregressive-rollout drift fixes,
+interactive game engines, camera control and memory mechanisms -- see
+[07-video-world-models-survey.md](07-video-world-models-survey.md).
 
 Next: [04-brain-inspired-ai.md](04-brain-inspired-ai.md) -- the
 other research bet (reverse-engineer the brain's learning rules and
