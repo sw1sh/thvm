@@ -3400,7 +3400,14 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
     fputs("#include <cuda_fp16.h>\n", fp);
     fputs("using namespace nvcuda;\n", fp);
   }
-  fputs("typedef unsigned int uint;\n\n", fp);
+  fputs("typedef unsigned int uint;\n", fp);
+  // nvrtc device compilation predefines no <math.h> macros; the
+  // REDUCE_MAX accumulator init (-INFINITY) and any +INFINITY guard
+  // need a definition.  __int_as_float of the fp32 +inf bit pattern is
+  // a device-side constant -- same idiom as the fp32 bitcast else-arm.
+  fputs("#ifndef INFINITY\n"
+        "#define INFINITY __int_as_float(0x7f800000)\n"
+        "#endif\n\n", fp);
   fprintf(fp, "extern \"C\" __global__ void %s(\n", kernel_name);
   u32 out_dtype = uop_buffer_dtype(out_buf);
   fprintf(fp, "    %s *out", rmu_cuda_type_name(out_dtype));
