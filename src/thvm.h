@@ -12,11 +12,25 @@
 #ifndef THVM_H
 #define THVM_H
 
+// glibc gates POSIX symbols (CLOCK_MONOTONIC, popen/pclose, fileno,
+// strdup) behind a feature-test macro when the TU is compiled with a
+// strict `-std=c11`.  Request the POSIX.1-2008 surface before any
+// system header is pulled in -- must precede the #includes below.
+//
+// Linux only: on macOS, defining _POSIX_C_SOURCE *hides* the BSD /
+// Darwin extensions (e.g. _SC_NPROCESSORS_ONLN in aot/worker.c), and
+// macOS libc already exposes the POSIX symbols unconditionally.  So
+// gate the define on __linux__.
+#if defined(__linux__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <math.h>        // INFINITY / fabsf etc. (uop_walk reduce init)
 #include <stdatomic.h>   // _Atomic typing for the per-context counters
 
 // === Types ===

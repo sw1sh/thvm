@@ -245,7 +245,9 @@ $(METAL_LIBPATH): $(METAL_AIRS) | $(BUILD)
 # test_metal_real opts into the dual-TU build: -DTHVM_HAS_METAL
 # tells src/thvm.c to skip the C stub and instead link the .o.
 # Depends on the metallib so metal_init can find it at runtime.
-TEST_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,)
+# Darwin folds libm into libSystem; Linux needs an explicit -lm (the
+# UOp walker / renderer call exp2/log2/sqrt).
+TEST_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm)
 TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,)
 
 # === Embedded thvm runtime source ==================================
