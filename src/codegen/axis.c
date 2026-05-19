@@ -73,29 +73,13 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
   return 0;
 }
 
-// Derive per-axis kax_type[] from the higher-level signals
-// (output_shape + tail-reduce + scalar-reduce + applied_opts).
-// Mirrors the writer trio (axes_default_for +
-// axes_ensure_scalar_reduce + axes_apply_opt) exactly:
+// Read per-axis kax_type[] from the lifted UOp DAG.  The DAG's
+// post-opt RANGE leaves carry the final axis layout (uop_dag_apply_kopt
+// mutates them in place for every split-class opt).
 //
-//   1. Initial state: `nd = output_shape.ndim` LOOPs (clipped to
-//      MAX_AXES-1), optionally followed by a single trailing REDUCE.
-//      The trailing-REDUCE is present iff the kernel program ends in
-//      UOP_REDUCE (axes_default_for appends it).
-//   2. Replay applied_opts in order using the same structural logic
-//      as axes_apply_opt: KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP
-//      split the indicated axis and insert a new inner axis with the
-//      opt's KAX_ type; KOP_GLOBAL stamps the indicated axis as
-//      KAX_GLOBAL; KOP_SWAP exchanges two positions; KOP_TC carries
-//      no axis-structure mutation in axes_apply_opt (rejected there;
-//      kernel_apply_opt handles it as metadata).
-//
-// Returns the number of axes written to `out` (matches the post-replay
-// `n_axes` derived from initial_n_axes + count(split-class opts)).
-// On overflow, returns 0.
-//
-// Used by axes_resolve_kax_type as the single kax_type read point
-// outside the writer trio.
+// Returns the number of axes written to `out`; 0 on overflow / empty
+// DAG.  Used by axes_resolve_kax_type as the single kax_type read
+// point.
 fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                u32 cap) {
   if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
@@ -114,16 +98,9 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
   return n_dag;
 }
 
-// Single kax_type read point outside the writer trio.  Returns the
-// simulator output -- signal-derived from (output_shape + tail-reduce
-// + scalar-reduce + applied_opts), which mirrors the writer trio
-// (axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt) by
-// construction.
-//
-// Returns the resolved kax_type (KAX_*) for axis `d`.  When ke /
-// axes are NULL, `d >= n_axes`, or the simulator can't speak
-// (overflow / unknown opt -- bug in the writer trio's applied_opts
-// log), returns KAX_LOOP as a safe default.
+// Single kax_type read point.  Returns the resolved kax_type (KAX_*)
+// for axis `d`.  When ke / axes are NULL, `d >= n_axes`, or the DAG
+// is empty / overflows, returns KAX_LOOP as a safe default.
 fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
   if (ke == NULL || ke->schedule == NULL) {
     return KAX_LOOP;
@@ -136,28 +113,11 @@ fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
   return types[d];
 }
 
-// Derive per-axis full_shape extents from the higher-level signals
-// (output_shape + tail-reduce + scalar-reduce + applied_opts).
-// Mirrors the writer trio (axes_default_for +
-// axes_ensure_scalar_reduce + axes_apply_opt) exactly:
+// Read per-axis full_shape extents from the lifted UOp DAG's
+// post-opt RANGE leaves.
 //
-//   1. Initial state: extents[i] = output_shape.dims[i] for i < nd
-//      (clipped to MAX_AXES-1), optionally followed by a trailing
-//      REDUCE extent (= source-numel / output-numel for tail-REDUCE
-//      programs, or `axes_scalar_reduce_extent(ke)` for scalar-arena
-//      reductions).
-//   2. Replay applied_opts in order using the same structural logic
-//      as kernel_apply_opt: split-class opts (UPCAST/UNROLL/LOCAL/
-//      GROUP/GROUPTOP) divide the indicated extent by opt.arg and
-//      insert opt.arg as the inner extent at axis+1; KOP_SWAP
-//      exchanges two extents in place; KOP_GLOBAL/TC/PADTO/NOLOCALS
-//      carry no shape mutation.
-//
-// Returns the number of extents written to `out`; 0 on overflow,
-// unknown opt, or invalid replay (axis out of range, arg doesn't
-// divide).  By construction, the value matches `ke->schedule->full_shape`
-// + `ke->schedule->n_axes` after the writer trio has produced the same
-// applied_opts log.
+// Returns the number of extents written to `out`; 0 on overflow /
+// empty DAG.
 fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
                                u32 cap) {
   if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
@@ -172,11 +132,9 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
   return n_dag;
 }
 
-// Per-axis full_shape resolver.  Returns the derived extent for
-// axis `d` (signal-replay over output_shape + applied_opts); 0 when
-// ke/axes are NULL, d is out of range, or the simulator can't speak.
-// This is the only authoritative source -- nothing left to
-// cross-check against.
+// Per-axis full_shape resolver.  Returns the extent for axis `d` from
+// the lifted DAG's post-opt RANGE leaves; 0 when ke/axes are NULL,
+// `d` is out of range, or the DAG is empty.
 fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                u32 *out_extent) {
   if (ke == NULL || ke->schedule == NULL) {
