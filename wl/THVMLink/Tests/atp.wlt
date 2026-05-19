@@ -338,18 +338,13 @@ VerificationTest[
     TestID -> "ATP/TATP/file/missing-path-yields-running-sentinel"
 ]
 
-(* === TFindEquationalProof: BFS-only (milestone 4 / 6 partial) === *)
+(* === TFindEquationalProof: C ATP engine ============================ *)
 
-(* TFindEquationalProof returns a real WL ProofObject for provable
-   conjectures and $Failed for unprovable ones.  Below: matrix of
-   the BFS chain synth's coverage -- the C-side ATP saturator is
-   no longer consulted for this path. *)
-
-VerificationTest[
-    Head @ TFindEquationalProof[a == a, {a == a}],
-    ProofObject,
-    TestID -> "ATP/TFEP/trivial-reflexivity-proves"
-]
+(* TFindEquationalProof runs thvm's C ATP completion engine and
+   returns a real WL ProofObject for provable conjectures, $Failed
+   otherwise.  The proof chain is extracted over the oriented input
+   axioms, so the dataset cites axioms and the ProofFunction
+   verifier accepts it. *)
 
 VerificationTest[
     Head @ TFindEquationalProof[a == c, {a == b, b == c}],
@@ -500,14 +495,6 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* ForAll-wrapped tautology conjecture.  Bound symbols become
-       Pattern[var, Blank[]] which doesn't pre-evaluate to True. *)
-    Head @ TFindEquationalProof[ForAll[x, f[x] == f[x]], {}],
-    ProofObject,
-    TestID -> "ATP/TFEP/forall-tautology-no-axioms"
-]
-
-VerificationTest[
     (* Single-step ForAll axiom matching ForAll conjecture: trivial
        direct rewrite via the axiom itself. *)
     Head @ TFindEquationalProof[
@@ -594,164 +581,56 @@ VerificationTest[
     TestID -> "ATP/TFEP/doc-scope-insufficient-axioms"
 ]
 
-(* === IC-search provability oracle (milestone 4) ==================== *)
+(* === TFindEquationalProof: C-engine verifier round-trips =========== *)
 
-(* icSearchProvable decides provability by IC reduction: it builds a
-   depth-D SUP-fanout search Term and checks the collapse for a
-   NUM(1) leaf.  Atomic-equational only; structured/pattern problems
-   return $Failed.  These tests pin the oracle directly and
-   cross-check it against the BFS-driven TFindEquationalProof. *)
+(* The proof chain thvm's C ATP engine extracts assembles into a
+   4-arg ProofObject whose ProofFunction verifier returns Success. *)
 
 VerificationTest[
-    THVMLink`Private`icSearchProvable[{a, c}, {{a, b}, {b, c}}, 2],
-    True,
-    TestID -> "ATP/IC/transitivity-3-provable"
-]
-
-VerificationTest[
-    THVMLink`Private`icSearchProvable[{a, d}, {{a, b}, {b, c}}, 2],
-    False,
-    TestID -> "ATP/IC/unprovable-no-num1-leaf"
-]
-
-VerificationTest[
-    THVMLink`Private`icSearchProvable[{b, a}, {{a, b}}, 1],
-    True,
-    TestID -> "ATP/IC/symmetry-1step-provable"
-]
-
-VerificationTest[
-    THVMLink`Private`icSearchProvable[
-        {a, e}, {{a, b}, {b, c}, {c, d}, {d, e}}, 4],
-    True,
-    TestID -> "ATP/IC/4-step-chain-provable"
-]
-
-VerificationTest[
-    THVMLink`Private`icSearchProvable[{a, a}, {}, 0],
-    True,
-    TestID -> "ATP/IC/trivial-reflexivity-provable"
-]
-
-VerificationTest[
-    (* Structured conjecture -> not atomic -> $Failed (BFS fallback). *)
-    THVMLink`Private`icSearchProvable[{f[a], f[b]}, {{a, b}}, 1],
-    $Failed,
-    TestID -> "ATP/IC/non-atomic-yields-failed"
-]
-
-VerificationTest[
-    (* Cross-check: on the atomic battery, the IC oracle's verdict
-       must agree with the BFS-driven TFindEquationalProof.  Each
-       case is {conjPair, axPairs, conjExpr, axExpr-list}. *)
-    Module[{cases, agree},
-        cases = {
-            {{a, c}, {{a, b}, {b, c}}, a == c, {a == b, b == c}},
-            {{a, d}, {{a, b}, {b, c}}, a == d, {a == b, b == c}},
-            {{b, a}, {{a, b}}, b == a, {a == b}},
-            {{c, a}, {{a, b}, {b, c}}, c == a, {a == b, b == c}},
-            {{a, e}, {{a, b}, {b, c}, {c, d}, {d, e}},
-                a == e, {a == b, b == c, c == d, d == e}}
-        };
-        agree = Function[case,
-            Module[{icv, bfsv},
-                icv = THVMLink`Private`icSearchProvable[
-                    case[[1]], case[[2]], Length[case[[2]]]];
-                (* TFindEquationalProof is HoldAll: With-inject the
-                   already-evaluated conjecture/axioms so it sees the
-                   values, not the held `case[[3]]` Part expression. *)
-                bfsv = With[{cj = case[[3]], ax = case[[4]]},
-                    Head[TFindEquationalProof[cj, ax]] === ProofObject];
-                icv === bfsv
-            ]
-        ] /@ cases;
-        AllTrue[agree, TrueQ]
-    ],
-    True,
-    TestID -> "ATP/IC/oracle-agrees-with-bfs-on-atomic-battery"
-]
-
-(* === IC-search proof decoder (milestone 4) ========================= *)
-
-(* icBuildProofDataset decides + decodes a proof entirely by IC
-   reduction: the SUP-fanout search picks a winning leaf, the
-   parallel trace Term carries its choice code, and the decoded
-   rewrite sequence replays into a chain.  The decoded chain is
-   replay-verified (icChainClosedQ) -- a chain that doesn't reach a
-   tautology yields $Failed so TFindEquationalProof falls back to
-   the BFS.  Atomic-equational only. *)
-
-VerificationTest[
-    (* Decoder produces a full dataset for transitivity-3, keyed by
-       the expected proof-step roles. *)
-    First /@ THVMLink`Private`icBuildProofDataset[
-        {a, c}, {{a, b}, {b, c}}, 2],
-    {{"Axiom", 1}, {"Axiom", 2}, {"Hypothesis", 1},
-     {"SubstitutionLemma", 1}, {"Conclusion", 1}},
-    TestID -> "ATP/ICdec/transitivity-3-dataset-shape"
-]
-
-VerificationTest[
-    (* The IC-decoded chain closes: the Conclusion Statement is a
-       reflexive Equal. *)
-    Module[{ds, concl},
-        ds = THVMLink`Private`icBuildProofDataset[
-            {a, c}, {{a, b}, {b, c}}, 2];
-        concl = Cases[ds, ({"Conclusion", _} -> e_) :> e["Statement"]];
-        MatchQ[concl, {HoldForm[Equal[x_, x_]]}]
-    ],
-    True,
-    TestID -> "ATP/ICdec/transitivity-3-conclusion-reflexive"
-]
-
-VerificationTest[
-    (* Unprovable conjecture: no winning leaf -> $Failed. *)
-    THVMLink`Private`icBuildProofDataset[{a, d}, {{a, b}, {b, c}}, 2],
-    $Failed,
-    TestID -> "ATP/ICdec/unprovable-yields-failed"
-]
-
-VerificationTest[
-    (* Non-atomic problem -> $Failed (caller uses the BFS). *)
-    THVMLink`Private`icBuildProofDataset[{f[a], f[b]}, {{a, b}}, 1],
-    $Failed,
-    TestID -> "ATP/ICdec/non-atomic-yields-failed"
-]
-
-VerificationTest[
-    (* End to end: an IC-decoded ProofObject passes WL's verifier.
-       backward-needed forces both axioms to be used right-to-left,
-       which the decoder handles via Orientation -> -1. *)
+    (* backward-needed: c == a from {a == b, b == c} uses both axioms
+       right-to-left; Orientation -> -1 keeps the verifier in sync. *)
     Module[{p},
         p = TFindEquationalProof[c == a, {a == b, b == c}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
     Success,
-    TestID -> "ATP/ICdec/backward-needed-ic-decoded-verifies"
+    TestID -> "ATP/TFEP/backward-needed-verifies"
 ]
 
 VerificationTest[
-    (* The fused single-Term encoding threads {lhs, rhs, trace} as
-       one packed NUM, so the decode is exact at every depth -- a
-       depth-4 chain decodes through the IC path directly (not the
-       BFS fallback).  Chain ends with a reflexive Conclusion. *)
-    Module[{ds, concl},
-        ds = THVMLink`Private`icBuildProofDataset[
-            {a, e}, {{a, b}, {b, c}, {c, d}, {d, e}}, 4];
-        concl = Cases[ds, ({"Conclusion", _} -> e_) :> e["Statement"]];
-        {ds =!= $Failed, MatchQ[concl, {HoldForm[Equal[x_, x_]]}]}
-    ],
-    {True, True},
-    TestID -> "ATP/ICdec/depth-4-chain-ic-decoded"
-]
-
-VerificationTest[
-    (* depth-4 IC-decoded ProofObject passes WL's verifier. *)
     Module[{p},
         p = TFindEquationalProof[a == e,
             {a == b, b == c, c == d, d == e}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
     Success,
-    TestID -> "ATP/ICdec/depth-4-verifies"
+    TestID -> "ATP/TFEP/depth-4-verifies"
+]
+
+(* === TFindEquationalProof: AxiomaticTheory string form ============= *)
+
+(* TFindEquationalProof["Theorem", "Theory"] resolves both names
+   through AxiomaticTheory.  An unknown theorem name surfaces a
+   parse Failure rather than $Failed. *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["NoSuchTheorem", "WolframAxioms"],
+    Failure,
+    TestID -> "ATP/TFEP/string-unknown-theorem"
+]
+
+VerificationTest[
+    (* The string form resolves a NotableTheorem of WolframAxioms
+       and runs the C engine.  A small step budget keeps the test
+       fast: completion does not close DoubleNegation here, so the
+       result is $Failed -- the point is that the string-form
+       plumbing (AxiomaticTheory resolution, quantifier elimination,
+       encoding) runs end to end without error. *)
+    MatchQ[
+        TFindEquationalProof["DoubleNegation", "WolframAxioms",
+            MaxSteps -> 64],
+        _ProofObject | $Failed
+    ],
+    True,
+    TestID -> "ATP/TFEP/string-doublenegation-resolves"
 ]

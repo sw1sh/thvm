@@ -3282,11 +3282,17 @@ fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
 // object: the equational rewrite chain that joins the two conjecture
 // sides.  thvm_atp_proof_extract reconstructs it for a goal closed by
 // the single-normal-form check (thvm_atp_goal_check's `kbo_eq(l, r)`
-// path): it re-normalizes goal_lhs and goal_rhs under the final rule
-// set R, recording every leftmost-outermost forward rewrite.  The
-// proof is the goal_lhs chain followed by the goal_rhs chain reversed,
-// the two meeting at the shared normal form -- a chain
-//   goal_lhs = e_1 = ... = NF = ... = e_k = goal_rhs.
+// path): it re-normalizes goal_lhs and goal_rhs under the rule set R,
+// recording every leftmost-outermost forward rewrite.  The proof is
+// the goal_lhs chain (side 0) then the goal_rhs chain (side 1), both
+// forward -- it rewrites L down to its normal form, then R down to
+// the same normal form, so the assembled equation L == R reaches the
+// tautology NF == NF.
+//
+// Extraction normalizes against whatever rule set the passed AtpState
+// holds.  For an axiom-cited (verifier-friendly) chain, pass a state
+// whose R is the oriented input axioms only; a completion-saturated R
+// yields a chain over derived rules instead.
 //
 // A goal closed only by the MNF bidirectional search (a symmetric
 // conjecture whose two sides share no normal form) is NOT single-NF

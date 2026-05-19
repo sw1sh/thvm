@@ -3437,32 +3437,18 @@ fn u32 thvm_atp_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
   // goal, has no two-sided rewrite chain to reconstruct here.
   if (s->goal_lhs == 0 || s->goal_existential) return 0;
 
-  u32  n_lhs = 0;
-  Term nf_lhs = atp_proof_record_side(s, s->goal_lhs, 0u, out, cap, &n_lhs);
-
-  // The goal_rhs chain is recorded into scratch, then appended in
-  // reverse so the assembled proof reads goal_lhs -> NF <- goal_rhs.
-  static AtpProofStep rhs_steps[ATP_PROOF_MAX_STEPS];
-  u32  n_rhs = 0;
-  Term nf_rhs = atp_proof_record_side(s, s->goal_rhs, 1u, rhs_steps,
-                                      ATP_PROOF_MAX_STEPS, &n_rhs);
+  // Record the goal_lhs chain (side 0) then the goal_rhs chain
+  // (side 1), both forward, appended into out[].  The assembled
+  // proof rewrites the equation L == R: first L down to its normal
+  // form, then R down to the same normal form, ending at NF == NF.
+  u32  n = 0;
+  Term nf_lhs = atp_proof_record_side(s, s->goal_lhs, 0u, out, cap, &n);
+  Term nf_rhs = atp_proof_record_side(s, s->goal_rhs, 1u, out, cap, &n);
 
   // Not single-NF provable -- the two sides never meet under R.  A
   // symmetric goal closed only by the MNF search lands here.
   if (!kbo_eq(nf_lhs, nf_rhs)) return 0;
 
-  u32 n = n_lhs;
-  for (u32 k = n_rhs; k-- > 0u && n < cap; ) {
-    const AtpProofStep *src = &rhs_steps[k];
-    AtpProofStep *dst = &out[n++];
-    dst->side    = 1u;
-    dst->rule    = src->rule;
-    dst->fwd     = (u8)(1u - src->fwd);   // the step runs in reverse
-    dst->pos_len = src->pos_len;
-    for (u8 j = 0; j < src->pos_len; j++) dst->pos[j] = src->pos[j];
-    dst->before  = src->after;            // (before, after) swapped
-    dst->after   = src->before;
-  }
   return n;
 }
 

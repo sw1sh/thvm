@@ -247,20 +247,25 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
 //
 // Mirrors thvm_wl_atp_run, but on a goal closed by the single-NF
 // check it also extracts the equational rewrite chain via
-// thvm_atp_proof_extract and ships it to WL.
+// thvm_atp_proof_extract, and ships the whole derivation DAG to WL:
+// the final rule set R, the completion trace[] (which critical pairs
+// birthed which rules), the rule -> trace map, and the proof chain.
 //
 // Inputs: identical to thvm_wl_atp_run
 //   args[0] = packed_terms NumericArray (Int64).
 //   args[1] = max_steps  (mint).
 //   args[2] = max_label  (mint).
 //
-// Output: a single self-describing Int64 NumericArray.
-//   [0] status   [1] n_rules   [2] n_trace   [3] n_cps
-//   [4] n_steps  -- proof chain length (0 if not single-NF extractable)
-//   then n_steps step records, each variable-length:
-//     side, rule, fwd, pos_len, pos[0..pos_len), before, after
-//   where `before` / `after` are raw packed Term values.  WL walks
-//   the block with a cursor (pos_len drives the variable stride).
+// Output: one self-describing Int64 NumericArray.
+//   [0] status  [1] n_rules  [2] n_trace  [3] n_cps  [4] n_steps
+//   then four blocks, sizes derived from the header:
+//     rules    -- 2*n_rules ints: lhs_i, rhs_i (packed Terms)
+//     r_trace  -- n_rules ints:   trace index that birthed rule i
+//     trace    -- 5*n_trace ints: reason, parent_a, parent_b,
+//                                 lhs, rhs (lhs/rhs packed Terms)
+//     steps    -- variable: per step  side, rule, fwd, pos_len,
+//                 pos[0..pos_len), before, after (packed Terms).
+//   WL walks the steps block with a cursor (pos_len drives stride).
 EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                              mint argc, MArgument *args,
                                              MArgument res) {
@@ -316,12 +321,31 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   AtpStatus st = thvm_atp_run(atp);
 
-  // Extract the proof chain (empty unless PROVED via single-NF).
+  // Proof extraction runs against a SEPARATE state whose rule set is
+  // the input axioms oriented once -- no completion, no inter-
+  // reduction.  A completion-saturated R yields a chain over derived
+  // rules (interreduction folds rule rhs's together) that the
+  // verifier-shaped, axiom-citing dataset cannot express; the
+  // un-saturated axiom set keeps the chain over the axioms
+  // themselves whenever they are confluent enough to close the goal.
+  // The main `atp` run above still owns the sound PROVED decision.
   static AtpProofStep proof[ATP_PROOF_MAX_STEPS];
-  u32 n_steps = thvm_atp_proof_extract(atp, proof, ATP_PROOF_MAX_STEPS);
+  u32 n_steps = 0, n_rules = 0, n_trace = 0;
+  AtpState *ext = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
+  if (ext != NULL) {
+    for (u32 i = 0; i < n_ax; i++) {
+      thvm_atp_orient_and_add(ext, (Term)data[1 + 2 * i + 0],
+                                   (Term)data[1 + 2 * i + 1]);
+    }
+    thvm_atp_set_goal(ext, goal_lhs, goal_rhs);
+    n_steps = thvm_atp_proof_extract(ext, proof, ATP_PROOF_MAX_STEPS);
+    n_rules = ext->n_rules;
+    n_trace = ext->n_trace;
+  }
 
-  // Size the output: 5-int header + per-step (4 + pos_len + 2).
-  mint out_len = 5;
+  // Size the output: 5-int header + rules (2*n_rules) + r_trace
+  // (n_rules) + trace (5*n_trace) + steps (per step 4 + pos_len + 2).
+  mint out_len = 5 + 2 * (mint)n_rules + (mint)n_rules + 5 * (mint)n_trace;
   for (u32 i = 0; i < n_steps; i++) out_len += 6 + (mint)proof[i].pos_len;
 
   mint dims[1] = {out_len};
@@ -329,11 +353,33 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out);
   int64_t *odata = (int64_t *)naf->MNumericArray_getData(out);
   odata[0] = (int64_t)st;
-  odata[1] = (int64_t)atp->n_rules;
-  odata[2] = (int64_t)atp->n_trace;
+  odata[1] = (int64_t)n_rules;
+  odata[2] = (int64_t)n_trace;
   odata[3] = (int64_t)atp->n_cps;
   odata[4] = (int64_t)n_steps;
   mint w = 5;
+
+  if (ext != NULL) {
+    // rules block: lhs_i, rhs_i (the oriented axioms).
+    for (u32 i = 0; i < n_rules; i++) {
+      odata[w++] = (int64_t)ext->lhs[i];
+      odata[w++] = (int64_t)ext->rhs[i];
+    }
+    // r_trace block: the trace index that birthed each rule.
+    for (u32 i = 0; i < n_rules; i++) odata[w++] = (int64_t)ext->r_trace[i];
+
+    // trace block: each entry is a TAG_CTR(reason)[NUM(pa), NUM(pb),
+    // lhs, rhs] -- see atp_trace_push.
+    for (u32 i = 0; i < n_trace; i++) {
+      Term e = ext->trace[i];
+      odata[w++] = (int64_t)term_ext(e);                       // reason
+      odata[w++] = (int64_t)term_val(term_ctr_at(e, 0));       // parent_a
+      odata[w++] = (int64_t)term_val(term_ctr_at(e, 1));       // parent_b
+      odata[w++] = (int64_t)term_ctr_at(e, 2);                 // lhs Term
+      odata[w++] = (int64_t)term_ctr_at(e, 3);                 // rhs Term
+    }
+  }
+  // steps block.
   for (u32 i = 0; i < n_steps; i++) {
     const AtpProofStep *p = &proof[i];
     odata[w++] = (int64_t)p->side;
@@ -345,6 +391,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     odata[w++] = (int64_t)p->after;
   }
 
+  if (ext != NULL) thvm_atp_free(ext);
   thvm_atp_free(atp);
   MArgument_setMNumericArray(res, out);
   return LIBRARY_NO_ERROR;

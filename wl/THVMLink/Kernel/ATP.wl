@@ -14,20 +14,23 @@
          Association (no witnesses).
 
      TFindEquationalProof[conjecture, axioms, opts]
-         Run the WL-side BFS chain synth and return a real WL
-         ProofObject -- the same head FindEquationalProof returns,
-         supporting the property interface (p["ProofDataset"],
-         p["ProofGraph"], p["ProofFunction"], p["ProofLength"], etc.).
-         Returns $Failed if the conjecture isn't reached within
-         MaxSteps rewrites.  The C-side ATP saturator is no longer
-         consulted (milestone 6 of the IC-native ATP arc).
+     TFindEquationalProof["Theorem", "Theory", opts]
+         Run thvm's C ATP completion engine on the conjecture +
+         axioms and return a real WL ProofObject -- the same head
+         FindEquationalProof returns, supporting the property
+         interface (p["ProofDataset"], p["ProofGraph"],
+         p["ProofFunction"], p["ProofLength"], ...).  The string
+         form resolves theorem + theory names through
+         AxiomaticTheory.  Returns $Failed when the conjecture is
+         not proved.
 
    Options
-     MaxSteps       (TATP, TFindEquationalProof) -> 64
-     Witness        (TATP)                       -> {}    list of x_
-     AllWitnesses   (TATP)                       -> False
-     MaxDepth       (TATP / AllWitnesses)        -> 8
-     MaxWitnesses   (TATP / AllWitnesses)        -> 16
+     MaxSteps       (TATP)                  -> 64
+     MaxSteps       (TFindEquationalProof)  -> 200000
+     Witness        (TATP)                  -> {}    list of x_
+     AllWitnesses   (TATP)                  -> False
+     MaxDepth       (TATP / AllWitnesses)   -> 8
+     MaxWitnesses   (TATP / AllWitnesses)   -> 16
 
    See docs/plans/waldmeister_ic_atp.md for the algorithmic intent. *)
 
@@ -35,7 +38,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the WL-side BFS chain synth and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  The 4th-arg Association is built to satisfy ProofObjectQ, which causes WL to skip its auto-dispatch back to FindEquationalProof and preserve thvm's data.  ProofDataset entries are keyed by {\"Axiom\" | \"Hypothesis\" | \"SubstitutionLemma\" | \"Conclusion\", k} with Statement and Proof sub-fields.  Returns $Failed when the BFS doesn't close the conjecture within its budget.";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.";
 
 (* Forward-declare symbols owned by sibling files (Switch.wl owns
    the IC term constructors) so bare references inside
@@ -44,7 +47,8 @@ TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the
    order, so these public names don't yet exist when this file's
    body runs.  Mirrors the same guard in Lazy.wl. *)
 {TDef, TRef, TIfZero, TOp2, TNum, TSup, TApp, TLam,
- TCollapse, TCnf, TTermTag, TTermVal, FromTTerm, TTerm};
+ TCollapse, TCnf, TTermTag, TTermVal, TTermExt, THeapRead,
+ FromTTerm, TTerm};
 
 Begin["`Private`"];
 
@@ -56,6 +60,16 @@ Begin["`Private`"];
    NumericArray [status, n_rules, n_trace, n_cps]. *)
 $atpRunFn := $atpRunFn = load[
     "thvm_wl_atp_run",
+    {{"NumericArray", "Shared"}, Integer, Integer},
+    "NumericArray"
+]
+
+(* Proof runner: $atpRunFn + proof extraction.  Returns one
+   self-describing Int64 NumericArray -- a 5-int header
+   [status, n_rules, n_trace, n_cps, n_steps] followed by the
+   rules / r_trace / trace / steps blocks (see thvmlink_atp.c). *)
+$atpRunProofFn := $atpRunProofFn = load[
+    "thvm_wl_atp_run_proof",
     {{"NumericArray", "Shared"}, Integer, Integer},
     "NumericArray"
 ]
@@ -200,13 +214,6 @@ atpStatsAssoc[stats_List] := <|
 
 (* === Shared problem encoder ======================================= *)
 
-(* Strip the outermost ForAll wrapper from a held equation, replacing
-   each bound bare-symbol occurrence inside the body with
-   Pattern[var, Blank[]].  Pass-through when there's no ForAll.  WL's
-   FindEquationalProof accepts both `a == b` and
-   `ForAll[x, lhs[x] == rhs[x]]`; we want the same surface.  Built
-   as a Replace over the held form so the bound symbols never leak
-   into the surrounding evaluation. *)
 (* Apply Pattern[v, Blank[]] substitution for each bound symbol to
    a held body, returning HoldComplete[body-with-patterns].  Building
    the substitution rules via Function with HoldFirst keeps each
@@ -282,8 +289,7 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
     axHCsRaw = HoldComplete /@ Unevaluated[axioms];
     (* Normalize each axiom: strip the outermost ForAll wrapper (if
        present) and rewrite bound bare-symbol occurrences as
-       Pattern[var, Blank[]].  Downstream pairing + BFS work
-       uniformly on the stripped form. *)
+       Pattern[var, Blank[]]. *)
     axHCs = forAllToPattern /@ axHCsRaw;
     axTermsAndState = Fold[encodeAxiomFold, {{}, encodeAtpTermInit[], 1}, axHCs];
     axTerms = axTermsAndState[[1]];
@@ -451,115 +457,67 @@ $ConclusionSym = "Conclusion";
    Inactive[Equal], ReleaseHold strips HoldForm. *)
 toHoldEq[expr_] := HoldForm[expr] /. Inactive[Equal] -> Equal
 
-(* === BFS chain synthesizer ======================================= *)
+(* === axiom / hypothesis preprocessing ============================= *)
 
-(* Term size used to break ties in BFS priority.  LeafCount counts
-   atoms; smaller is "simpler" by KBO's first lexicographic key. *)
-termSize[expr_] := LeafCount[expr]
+(* Ported from the UnfailingKnuthBendixCompletion resource-function
+   notebook: quantifier elimination (ForAll -> Pattern,
+   Exists -> Skolem) and canonical pattern-variable naming.  Used by
+   the string form of TFindEquationalProof to normalize the
+   AxiomaticTheory-resolved formulas. *)
 
-(* Match an Inactive[Equal][x, x] tautology in HoldForm-free
-   internal form.  Used both by the chain loop's stop condition
-   and by the Conclusion-detection at dataset-build time. *)
-tautologyQ[expr_] := MatchQ[expr, Inactive[Equal][x_, x_]]
+wrap[expr_, head_: List] := Replace[expr, x : Except[_head] :> head[x]]
 
-(* All single-step rewrites that produce a NEW state at any
-   matching position.  Build via Table+Flatten; one inner Block
-   per rule index isolates rule + position list. *)
-ruleRewrites[currentExpr_, ruleList_, i_] := Block[{
-    rule = ruleList[[i]]["Rule"],
-    allPos
+(* Rename every Pattern variable in `expr` to a canonical short name
+   (a, b, c, ..., then a1, b1, ... if more are needed). *)
+CanonicalizePatterns[expr_] := Module[{
+    chars = CharacterRange["a", "z"],
+    patts = DeleteDuplicates[Cases[expr, _Pattern, All, Heads -> True]]
 },
-    allPos = Position[currentExpr, rule[[1]],
-        {1, Infinity}, Heads -> False];
-    Table[
-        <|
-            "NewExpr" -> ReplaceAt[currentExpr, rule, p],
-            "Position" -> p,
-            "RuleIdx" -> i,
-            "Rule" -> rule
-        |>,
-        {p, allPos}
-    ]
+    chars = First @ NestWhile[
+        Apply[Function[{cs, k},
+            {Join[cs, (StringJoin[#, ToString[k]] &) /@ cs], k + 1}]],
+        {chars, 1}, Length[First[#]] < Length[patts] &];
+    expr /. MapIndexed[
+        With[{canonical = Pattern @@ {Symbol[Extract[chars, #2]], Last[#1]}},
+            Verbatim[#1] :> canonical] &,
+        patts]
 ]
 
-allRewriteSteps[currentExpr_, ruleList_, seen_Association] := Block[{
-    cands
-},
-    cands = Flatten[
-        Table[
-            ruleRewrites[currentExpr, ruleList, i],
-            {i, Length[ruleList]}
-        ],
-        1
-    ];
-    Select[cands,
-        #["NewExpr"] =!= currentExpr &&
-        ! KeyExistsQ[seen, #["NewExpr"]] &
-    ]
-]
+(* Forward ref: skolemPatterns calls universalPatterns. *)
+skolemPatterns[expr_ /; ! FreeQ[expr, _Exists], bound_: {}] :=
+    expr //. HoldPattern[Exists[var_, cond___, sub_]] :> With[{
+        vars = wrap[var]
+    },
+        With[{repl = Thread[vars -> (
+            If[Length[bound] > 0, Unique[#] @@ bound, Unique[#]] &) /@ vars]},
+            If[ Length[{cond}] > 0,
+                universalPatterns[sub, bound] && cond /. repl,
+                universalPatterns[sub, bound] /. repl]]]
+skolemPatterns[expr_, ___] := expr
 
-(* One BFS step.  state = <|Expr, Hist, Seen, Done|>.  Returns the
-   next state (Done -> True when a tautology is reached or no
-   progress is possible). *)
-chainStep[ruleList_][state_Association] := Block[{
-    expr = state["Expr"],
-    candidates, tautRec, picked
-},
-    Which[
-        tautologyQ[expr],
-            Append[state, "Done" -> True],
-        True,
-            candidates = allRewriteSteps[expr, ruleList, state["Seen"]];
-            If[ Length[candidates] === 0,
-                Append[state, "Done" -> True],
-                tautRec = SelectFirst[candidates,
-                    tautologyQ[#["NewExpr"]] &, None];
-                picked = If[ tautRec =!= None,
-                    tautRec,
-                    First @ SortBy[candidates,
-                        termSize[#["NewExpr"]] &]
-                ];
-                <|
-                    "Expr" -> picked["NewExpr"],
-                    "Hist" -> Append[state["Hist"], picked],
-                    "Seen" -> Append[state["Seen"],
-                        picked["NewExpr"] -> True],
-                    "Done" -> False
-                |>
-            ]
-    ]
-]
+universalPatterns[expr_ /; ! FreeQ[expr, _ForAll], bound_: {}] :=
+    expr //. HoldPattern[
+        ForAll[var_, cond___, ForAll[var2_, cond2___, sub_]]] :>
+        ForAll[Join[wrap[var], wrap[var2]], cond && cond2, sub] //.
+    HoldPattern[ForAll[var_, cond___, sub_]] :> With[{vars = wrap[var]},
+        With[{repl = Thread[vars -> Unique /@ vars]},
+            With[{patternRepl = MapAt[Pattern[#, _] &, repl, {All, 2}]},
+                With[{res = skolemPatterns[sub, Join[vars, bound]] /. patternRepl},
+                    If[ Length[{cond}] > 0,
+                        With[{newCond = cond /. repl}, res /; newCond],
+                        res]]]]]
+universalPatterns[expr_, ___] := expr
 
-(* BFS chain synthesizer.  At each step expand all single-rewrite
-   successors of the current expression and pick the one that
-   either (a) reaches a tautology immediately, or (b) has the
-   smallest LeafCount.  Stops when a tautology is reached or no
-   progress is possible.  Returns <|Expr, Hist, Closed|> where
-   Closed is True iff Expr is a tautology (i.e. the conjecture
-   was actually proven). *)
-synthesizeChain[hypothesis_, ruleList_, maxSteps_: 30] := Block[{
-    init, final
-},
-    init = <|
-        "Expr" -> hypothesis,
-        "Hist" -> {},
-        "Seen" -> <|hypothesis -> True|>,
-        "Done" -> False
-    |>;
-    final = NestWhile[chainStep[ruleList],
-        init, ! #["Done"] &, 1, maxSteps];
-    <|
-        "Expr" -> final["Expr"],
-        "Hist" -> final["Hist"],
-        "Closed" -> tautologyQ[final["Expr"]]
-    |>
-]
+unquantifyFormula[expr_] := expr /. {
+    universal_ForAll :> universalPatterns[universal],
+    existential_Exists :> skolemPatterns[existential]}
+
+(* === rewrite-rule list ============================================ *)
 
 (* Strip Pattern[s, Blank[]] wrappers down to the bare symbol s.
    Used to convert an axiom rhs (which has Pattern[s, _] in the same
    shape as the lhs) into a Rule rhs that substitutes the bound
-   value back instead of leaking the pattern variable.  Matches both
-   `_x` and `Pattern[x, _Blank]` shapes; pass-through otherwise. *)
+   value back instead of leaking the pattern variable. *)
 stripPatterns[expr_] := expr /.
     Verbatim[Pattern][s_Symbol, _Blank] :> s
 
@@ -595,209 +553,7 @@ buildRuleList[axioms_, axiomKeys_] := Flatten[
     1
 ]
 
-(* === IC-search provability oracle ================================ *)
-
-(* Milestone 4: decide AND decode a proof by IC reduction instead of
-   the WL-side BFS.
-
-   The search Term threads a single packed-Int state through D
-   depth steps.  The state encodes the whole proof position in one
-   NUM:
-     state = trace*(m*m) + rhs*m + lhs
-   where lhs/rhs are atom ids (< m) and trace is the running
-   base-(nAct) choice code.  Each step fans over nAct = 4*|axioms|
-   "actions" via one SUP; an action (s, r) rewrites side s of the
-   conjecture with rewrite r AND folds the choice code into trace.
-   Because the trace rides the SAME state through the SAME SUP
-   fan-out as the atoms, every collapse leaf intrinsically carries
-   both the proven bit and its exact choice code -- no separate
-   trace Term, no skeleton-matching, exact at every depth.
-
-   The final `finalize` lambda turns the leaf state into
-     proven*big + trace      (big = nAct^depth)
-   so a leaf >= big means proven, and (leaf mod big) is the
-   base-nAct choice code -- IntegerDigits splits it into per-step
-   (side, rewriteIdx).
-
-   Atomic-equational only (axioms + conjecture must be bare
-   symbols); structured / pattern problems fall back to the BFS. *)
-
-(* Fixed def-name prefix.  Each icBuildFusedTerm call re-registers
-   the action / finalize defs under these names; TDefName interns a
-   string to a STABLE slot (Ref.wl), so re-registration overwrites
-   in place rather than leaking a fresh slot per call.  Each call
-   collapses its term before returning, so the previous call's defs
-   are never needed once overwritten. *)
-$icDefPfx  = "atp_ic_";
-$icSupBase = 100;
-
-(* True iff every axiom side + both conjecture sides are bare
-   symbols -- the shape the atomic IC search handles. *)
-icAtomicProblemQ[axPairs_, conjPair_] :=
-    AllTrue[Flatten[{axPairs, conjPair}], MatchQ[#, _Symbol] &]
-
-(* atom -> positive Int id over axioms + conjecture. *)
-icCollectAtoms[axPairs_, conjPair_] := Block[{atoms},
-    atoms = DeleteDuplicates @ Flatten[{axPairs, conjPair}];
-    AssociationThread[atoms -> Range[Length[atoms]]]
-]
-
-(* Right-associated nested SUP over a flat value list; each nested
-   SUP gets a distinct label so DUP-SUP labels don't collide. *)
-icNestedSup[baseLab_Integer, ts_List] := Which[
-    Length[ts] === 1, ts[[1]],
-    Length[ts] === 2, TSup[baseLab, ts[[1]], ts[[2]]],
-    True, TSup[baseLab, ts[[1]], icNestedSup[baseLab + 1, Rest[ts]]]
-]
-
-(* Packed-state field extractors, written in terms of the bound var
-   `st` of an action / finalize lambda.  SetDelayed so each use
-   rebuilds a fresh OP2 cell -- the var `st` is what gets shared
-   (auto-dup handles that), never an OP2 cell. *)
-icLhsOf[st_]   := TOp2["%", st, TNum[$icM]]
-icRhsOf[st_]   := TOp2["%", TOp2["/", st, TNum[$icM]], TNum[$icM]]
-icTraceOf[st_] := TOp2["/", st, TNum[$icMM]]
-
-(* Body of one action lambda.  c = s*nRw + r is the choice code;
-   the action rewrites side s with (rwOld -> rwNew) and folds c
-   into the running trace.  Repacks trace*(m*m) + rhs*m + lhs. *)
-icActionBody[st_, s_, rwOld_, rwNew_, c_, nAct_] := Block[{
-    newL, newR, newT
-},
-    newL = If[ s === 0,
-        TIfZero[TOp2["==", icLhsOf[st], TNum[rwOld]],
-            icLhsOf[st], TNum[rwNew]],
-        icLhsOf[st]];
-    newR = If[ s === 1,
-        TIfZero[TOp2["==", icRhsOf[st], TNum[rwOld]],
-            icRhsOf[st], TNum[rwNew]],
-        icRhsOf[st]];
-    newT = TOp2["+", TOp2["*", icTraceOf[st], TNum[nAct]], TNum[c]];
-    TOp2["+",
-        TOp2["+", TOp2["*", newT, TNum[$icMM]], TOp2["*", newR, TNum[$icM]]],
-        newL]
-]
-
-(* Body of the finalize lambda: leaf state -> proven*big + trace. *)
-icFinalizeBody[st_, big_] := TOp2["+",
-    TOp2["*", TOp2["==", icLhsOf[st], icRhsOf[st]], TNum[big]],
-    icTraceOf[st]]
-
-(* Register the nAct action lambdas as TDefs (one per (side,
-   rewrite) choice) and return the flat list of TRef.  Action index
-   c in [0, nAct): s = c / nRw, r = c % nRw; r selects axiom
-   r/2 (0-based) forward (r even) or backward (r odd). *)
-icActionDefs[pfx_String, axPairs_, atomMap_, nRw_, nAct_] := Table[
-    Block[{c = cc - 1, s, r, ax, oldId, newId, rwOld, rwNew, nm},
-        s = Quotient[c, nRw];
-        r = Mod[c, nRw];
-        ax = axPairs[[Quotient[r, 2] + 1]];
-        oldId = atomMap[ax[[1]]];
-        newId = atomMap[ax[[2]]];
-        {rwOld, rwNew} = If[ Mod[r, 2] === 0,
-            {oldId, newId}, {newId, oldId}];
-        nm = pfx <> "act" <> ToString[c];
-        With[{v = Module[{vs}, vs]},
-            TDef[nm, TLam[v, icActionBody[v, s, rwOld, rwNew, c, nAct]]]];
-        TRef[nm]
-    ],
-    {cc, 1, nAct}
-]
-
-icFinalizeDef[pfx_String, big_] := Block[{nm = pfx <> "finalize"},
-    With[{v = Module[{vs}, vs]},
-        TDef[nm, TLam[v, icFinalizeBody[v, big]]]];
-    TRef[nm]
-]
-
-(* Build the depth-D fused search Term.  Sets the package-scoped
-   $icM / $icMM (the packing radix) for the field extractors, then
-   threads state0 through D action-SUP applications and finalize. *)
-icBuildFusedTerm[conjPair_, axPairs_, depth_Integer] := Block[{
-    pfx = $icDefPfx, atomMap, nRw, nAct, big,
-    actionRefs, finalizeRef, state0
-},
-    atomMap = icCollectAtoms[axPairs, conjPair];
-    $icM = Length[atomMap] + 1;
-    $icMM = $icM * $icM;
-    nRw = 2 * Length[axPairs];
-    nAct = 2 * nRw;
-    big = If[ depth === 0, 1, nAct^depth];
-    actionRefs = icActionDefs[pfx, axPairs, atomMap, nRw, nAct];
-    finalizeRef = icFinalizeDef[pfx, big];
-    state0 = TNum[atomMap[conjPair[[2]]] * $icM + atomMap[conjPair[[1]]]];
-    TApp[finalizeRef,
-        Fold[
-            Function[{st, k},
-                TApp[icNestedSup[$icSupBase + (k - 1) * nAct, actionRefs],
-                    st]],
-            state0, Range[depth]
-        ]
-    ]
-]
-
-(* === Lazy proven-leaf finder ===================================== *)
-
-(* Node-visit budget for the lazy DFS.  A provable conjecture with
-   good rewrite ordering finds its leaf well inside this; hitting
-   the cap (deep / badly-ordered search) throws "icCap" and the
-   caller falls back to the BFS. *)
-$icLeafCap = 200000;
-
-(* Lazily walk the fused search Term's SUP-tree, returning the first
-   leaf NUM >= big (a proven leaf) as a plain integer, or Missing[]
-   when the tree holds no proven leaf.
-
-   This is the IC-native pruner: TCnf forces only the head of each
-   visited node, so descending one child leaves the sibling subtree
-   an unforced redex.  Short-circuiting at the first proven leaf
-   means every branch to its right is never TCnf'd -- never reduced,
-   never enumerated.  No eager TCollapse, no runtime-side walker;
-   pruning falls straight out of IC's demand-driven reduction.
-   `TWnf`-style laziness, the way TLazyTake leaves its tail
-   unforced. *)
-icFindLeafRec[t_, big_] := (
-    If[ ++$icVisits > $icLeafCap, Throw[$Failed, "icCap"] ];
-    Block[{w = TCnf[t], tag, loc, lft},
-        tag = TTermTag[w];
-        Which[
-            tag === $TagSUP,
-                loc = TTermVal[w];
-                lft = icFindLeafRec[TTerm[$heapReadFn[loc]], big];
-                If[ lft =!= Missing[],
-                    lft,
-                    icFindLeafRec[TTerm[$heapReadFn[loc + 1]], big]
-                ],
-            tag === $TagNUM,
-                With[{v = FromTTerm[w]},
-                    If[ IntegerQ[v] && v >= big, v, Missing[]]],
-            True, Missing[]   (* ERA / stuck: dead branch *)
-        ]
-    ]
-)
-
-(* Entry point: integer leaf value when a proof is found, Missing[]
-   when none exists within `depth`, $Failed when the visit cap is
-   hit (caller treats both non-integers as "use the BFS"). *)
-icFindProvenLeaf[t_, big_] := Block[{$icVisits = 0},
-    Catch[icFindLeafRec[t, big], "icCap"]
-]
-
-(* True iff the conjecture is provable from the axioms in <= depth
-   rewrite steps, decided by lazy IC reduction.  Returns $Failed
-   when the problem isn't atomic (caller falls back to the BFS). *)
-icSearchProvable[conjPair_, axPairs_, depth_Integer] := If[
-    ! icAtomicProblemQ[axPairs, conjPair],
-    $Failed,
-    Block[{nAct, big},
-        nAct = 4 * Length[axPairs];
-        big = If[ depth === 0, 1, nAct^depth];
-        IntegerQ @ icFindProvenLeaf[
-            icBuildFusedTerm[conjPair, axPairs, depth], big]
-    ]
-]
-
-(* === ProofDataset builder ======================================== *)
+(* === ProofDataset builder ========================================= *)
 
 (* Build one chain-step entry for the dataset.  Splits the absolute
    FirstPosition into {Side, RelativePos}.  Returns a Rule
@@ -810,8 +566,7 @@ icSearchProvable[conjPair_, axPairs_, depth_Integer] := If[
    then reverses the construct's Statement iff orientation === -1, so
    a Direction-2 step makes the verifier read the axiom's `lhs ==
    rhs` Statement as the rule `rhs -> lhs` -- exactly the backward
-   rewrite the BFS applied.  This keeps the axiom Statement in its
-   original orientation even when the chain uses it both ways. *)
+   rewrite the chain applied. *)
 chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_] := Block[{
     stepKey, absPos, side, relPos, statement
 },
@@ -840,21 +595,9 @@ chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_] := Block[{
     |>
 ]
 
-(* Strategy:
-     1. Emit Axiom entries (always in their original orientation).
-     2. Emit Hypothesis from the conjecture.
-     3. Build candidate rule list (forward + backward of each axiom).
-     4. Synthesize a rewrite chain from Hypothesis to a tautology.
-     5. Emit each chain step as a SubstitutionLemma; the last step
-        becomes the Conclusion.  Backward-axiom steps carry
-        Orientation -> -1 so the verifier reads the axiom Statement
-        in reverse for that step.
-   All Statements are HoldForm[Equal[lhs, rhs]]; toHoldEq is the
-   helper that gets us there from Inactive[Equal][...]. *)
 (* Degenerate "Conclusion" entry for the trivial-tautology case
    (the conjecture was already x == x).  Points back to the
-   Hypothesis with no rule applied.  WL's verifier accepts this
-   as a zero-step proof. *)
+   Hypothesis with no rule applied. *)
 trivialConclusionEntry[hypInactive_] := {$ConclusionSym, 1} -> <|
     "Statement" -> toHoldEq[hypInactive],
     "Proof" -> <|
@@ -874,9 +617,7 @@ trivialConclusionEntry[hypInactive_] := {$ConclusionSym, 1} -> <|
 (* Assemble the sorted ProofDataset from a finished rewrite chain.
    `chain` is a list of step records (<|NewExpr, Position, RuleIdx,
    Rule|>); `ruleList` is the forward+backward rule table the
-   RuleIdx fields index into.  Shared by the BFS path
-   (buildProofDataset) and the IC-search path (icBuildProofDataset)
-   so both emit byte-identical dataset shape. *)
+   RuleIdx fields index into. *)
 assembleDataset[axioms_, conjecture_, chain_, ruleList_] := Block[{
     axCount = Length[axioms], axiomKeys, hypInactive,
     axiomEntries, chainEntries, allEntries
@@ -917,143 +658,143 @@ assembleDataset[axioms_, conjecture_, chain_, ruleList_] := Block[{
     SortBy[allEntries, $ProofKeyOrder[First[#]] &]
 ]
 
-buildProofDataset[axioms_, conjecture_] := Block[{
-    axiomKeys, ruleList, chainRes
-},
-    ruleList = buildRuleList[axioms, axiomKeys = Table[{$AxiomSym, k},
-        {k, Length[axioms]}]];
-    chainRes = synthesizeChain[Inactive[Equal] @@ conjecture, ruleList];
-    If[ ! chainRes["Closed"], Return[$Failed] ];
-    assembleDataset[axioms, conjecture, chainRes["Hist"], ruleList]
-]
-
-(* === IC-search proof decoder (milestone 4) ======================== *)
-
-(* One replay step.  acc = {state, stepRecs}.  `step` is a decoded
-   {side, ruleIdx0} pair.  Applies ruleList[[ruleIdx0+1]]'s rewrite
-   to the chosen side of the Inactive[Equal] state; emits a step
-   record only when the rewrite actually fired (atoms that don't
-   match the rule's lhs leave the state unchanged -- the IC search
-   freely picks such no-op steps, and they're dropped here).  Once
-   the state is a tautology the proof is closed; further steps are
-   ignored. *)
-icReplayStep[ruleList_][acc_, step_] := Block[{
-    state = acc[[1]], recs = acc[[2]],
-    side = step[[1]], r = step[[2]], rule, newState
-},
-    If[ tautologyQ[state],
-        acc,
-        rule = ruleList[[r + 1]]["Rule"];
-        newState = ReplaceAt[state, rule, {side + 1}];
-        If[ newState === state,
-            acc,
-            {newState, Append[recs, <|
-                "NewExpr" -> newState,
-                "Position" -> {side + 1},
-                "RuleIdx" -> r + 1,
-                "Rule" -> rule
-            |>]}
-        ]
-    ]
-]
-
-(* Replay a decoded choice sequence into a chain of step records.
-   Atomic problems only -- each rewrite targets a whole side of the
-   Inactive[Equal], so Position is {1} (lhs) or {2} (rhs). *)
-icReplayChain[conjPair_, decoded_, ruleList_] := Last @ Fold[
-    icReplayStep[ruleList],
-    {Inactive[Equal] @@ conjPair, {}},
-    decoded
-]
-
-(* True iff `chain` (a list of replay step records) actually closes
-   the conjecture: empty chain is valid only for an already-reflexive
-   conjecture, otherwise the last step's NewExpr must be a tautology. *)
-icChainClosedQ[chain_, conjPair_] := If[
-    chain === {},
-    conjPair[[1]] === conjPair[[2]],
-    tautologyQ[Last[chain]["NewExpr"]]
-]
-
-(* Decode the IC search's winning leaf into a rewrite chain.  Builds
-   the depth-D fused search Term and lazily walks its SUP-tree
-   (icFindProvenLeaf) for the first leaf >= big -- pruning every
-   branch past it.  That leaf's value is proven*big + trace; (leaf
-   mod big) is the base-(nAct) choice code, which IntegerDigits
-   splits into per-step codes c = side*nRw + rewIdx.  icReplayChain
-   turns the decoded (side, rewIdx) sequence into step records.
-   Because the trace rides the same packed state through the same
-   SUP fan-out as the atoms, leaf code <-> proven bit are
-   intrinsically paired -- exact at every depth.  icChainClosedQ
-   still replay-verifies as a defensive check.  Returns $Failed when
-   no leaf is proven, the visit cap is hit, or the decoded chain
-   doesn't replay-close. *)
-icDecodeChain[conjPair_, axPairs_, depth_Integer, ruleList_] := Block[{
-    nRw, nAct, big, provenLeaf, traceVal, stepCodes, decoded, chain
-},
-    nRw  = 2 * Length[axPairs];
-    nAct = 2 * nRw;
-    big  = If[ depth === 0, 1, nAct^depth];
-    provenLeaf = icFindProvenLeaf[
-        icBuildFusedTerm[conjPair, axPairs, depth], big];
-    If[ ! IntegerQ[provenLeaf], Return[$Failed] ];
-    traceVal = Mod[provenLeaf, big];
-    (* trace was folded newT = trace*nAct + c, so step 1 ends up the
-       most-significant digit -- IntegerDigits is MSD-first already. *)
-    stepCodes = If[ depth === 0 || nAct === 0,
-        {},
-        IntegerDigits[traceVal, nAct, depth]
-    ];
-    decoded = Function[c, {Quotient[c, nRw], Mod[c, nRw]}] /@ stepCodes;
-    chain = icReplayChain[conjPair, decoded, ruleList];
-    If[ icChainClosedQ[chain, conjPair], chain, $Failed ]
-]
-
-(* IC-search counterpart of buildProofDataset: decide + decode the
-   proof by IC reduction, then assemble the same dataset shape.
-   Atomic-equational only; returns $Failed otherwise (or when the
-   conjecture isn't provable within `depth`). *)
-icBuildProofDataset[conjPair_, axPairs_, depth_Integer] := Block[{
-    axiomKeys, ruleList, chain
-},
-    If[ ! icAtomicProblemQ[axPairs, conjPair], Return[$Failed] ];
-    ruleList = buildRuleList[axPairs, axiomKeys = Table[{$AxiomSym, k},
-        {k, Length[axPairs]}]];
-    chain = icDecodeChain[conjPair, axPairs, depth, ruleList];
-    If[ chain === $Failed, Return[$Failed] ];
-    assembleDataset[axPairs, conjPair, chain, ruleList]
-]
-
 $ProofKeyOrder[{"Axiom", k_}] := {1, k}
 $ProofKeyOrder[{"Hypothesis", k_}] := {2, k}
 $ProofKeyOrder[{"SubstitutionLemma", k_}] := {3, k}
 $ProofKeyOrder[{"Conclusion", k_}] := {4, k}
 $ProofKeyOrder[_] := {5, 0}
 
-(* === TFindEquationalProof ======================================== *)
+(* === C-engine proof decoder ======================================= *)
 
-(* Build a verifier-ready ProofDataset and wrap it in a real WL
-   ProofObject.
+(* ATP terms use two tags: TAG_CTR (20) for labelled constructors
+   (a function head or, nullary, a constant symbol) and TAG_FVR (22)
+   for first-order variables. *)
+$AtpTagCTR = 20;
+$AtpTagFVR = 22;
 
-   Atomic-equational problems take the IC-search path
-   (icBuildProofDataset): the proof is decided AND decoded by IC
-   reduction -- a depth-D SUP-fanout search Term collapses to
-   NUM(0)/NUM(1) leaves, the winning leaf's choice code is read
-   off the parallel trace Term, and the decoded rewrite sequence
-   replays into the chain.  Structured / pattern problems (and any
-   atomic case the IC search can't close within its depth bound)
-   fall back to the WL-side BFS chain synth (buildProofDataset).
-   Both paths funnel through assembleDataset, so the ProofObject
-   shape is identical and the WL verifier accepts either.
+(* Decode a raw packed ATP Term back to a WL expression.  CTR ->
+   head[children...] (arity 0 -> bare symbol); FVR -> the bound
+   variable's bare symbol.  labelToName / idToName invert the
+   encoder state's `sym` / `var` maps. *)
+decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
+    tag = THVMLink`Private`$termTagFn[raw]
+},
+    Which[
+        tag === $AtpTagFVR,
+            Symbol @ Lookup[idToName, THVMLink`Private`$termExtFn[raw],
+                "x" <> ToString[THVMLink`Private`$termExtFn[raw]]],
+        tag === $AtpTagCTR,
+            Block[{
+                label = THVMLink`Private`$termExtFn[raw],
+                loc = THVMLink`Private`$termValFn[raw],
+                arity, name
+            },
+                arity = THVMLink`Private`$termValFn[
+                    THVMLink`Private`$heapReadFn[loc]];
+                name = Lookup[labelToName, label, "C" <> ToString[label]];
+                If[ arity === 0,
+                    Symbol[name],
+                    Symbol[name] @@ Table[
+                        decodeAtpTerm[
+                            THVMLink`Private`$heapReadFn[loc + k],
+                            labelToName, idToName],
+                        {k, arity}]
+                ]
+            ],
+        True, Missing["UndecodableTerm", tag]
+    ]
+]
 
-   Returns $Failed when neither path closes the conjecture.  The
-   C-side ATP saturator is no longer consulted (milestone 6 of
-   the IC-native ATP arc).
+(* Run the C ATP completion engine + proof extraction.  Returns
+   {steps, status}, where `steps` is the decoded proof chain -- a
+   list of <|"Side", "PosPath", "Before", "After"|> records -- or
+   $Failed when the goal was not proved by the single-NF check. *)
+cEngineProof[enc_, maxSteps_] := Block[{
+    raw, status, nRules, nTrace, nSteps, cur,
+    labelToName, idToName, steps
+},
+    raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"]];
+    status = raw[[1]];
+    nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
+    If[ status =!= 1, Return[{$Failed, status}] ];
+    If[ nSteps === 0, Return[{{}, status}] ];
+    (* Header (5) + rules (2*nRules) + r_trace (nRules) + trace
+       (5*nTrace); the steps block follows. *)
+    cur = 5 + 2 nRules + nRules + 5 nTrace;
+    labelToName = Association[Reverse /@ Normal[enc["State"]["sym"]]];
+    idToName = Association[Reverse /@ Normal[enc["State"]["var"]]];
+    steps = Table[
+        Block[{side, posLen, posPath, beforeRaw, afterRaw, rec},
+            side = raw[[cur + 1]];
+            posLen = raw[[cur + 4]];
+            posPath = If[ posLen === 0, {},
+                raw[[cur + 5 ;; cur + 4 + posLen]]];
+            beforeRaw = raw[[cur + 5 + posLen]];
+            afterRaw = raw[[cur + 6 + posLen]];
+            cur = cur + 6 + posLen;
+            rec = <|
+                "Side" -> side,
+                (* C child indices are 0-based; WL part positions
+                   are 1-based. *)
+                "PosPath" -> (posPath + 1),
+                "Before" -> decodeAtpTerm[beforeRaw, labelToName, idToName],
+                "After" -> decodeAtpTerm[afterRaw, labelToName, idToName]
+            |>;
+            rec
+        ],
+        {nSteps}
+    ];
+    {steps, status}
+]
 
-   atpEncodeProblem still validates axiom/conjecture shape
-   (HoldAll + MatchQ HoldComplete[Equal[_,_]]) and surfaces the
-   encoder state for the Variables list; its Packed / MaxLab
-   fields go unused here but feed TATP. *)
+(* Identify which buildRuleList entry reproduces one rewrite step:
+   rewriting `before` at `relPos` with the entry's Rule must yield
+   `after`.  Returns the 1-based ruleList index, or Missing[] for a
+   step that used a derived (completion) rule no axiom reproduces. *)
+identifyRule[before_, relPos_, after_, ruleList_] := Block[{idx},
+    idx = FirstPosition[ruleList,
+        re_ /; Quiet[ReplaceAt[before, re["Rule"], relPos]] === after,
+        Missing[], {1}, Heads -> False];
+    If[ MissingQ[idx], Missing[], First[idx] ]
+]
+
+(* Turn the C engine's decoded step list into assembleDataset's
+   `chain` shape: reconstruct the running Inactive[Equal][L, R],
+   the absolute rewrite position, and the citing rule.  Returns
+   $Failed if any step used a rule no axiom reproduces (a
+   completion-derived rule -- not expressible in the axiom-citing
+   dataset; that proof needs the critical-pair lemma DAG). *)
+buildCEngineChain[steps_, conjPair_, ruleList_] := Catch[
+    Block[{lhs, rhs, chain = {}},
+        {lhs, rhs} = conjPair;
+        Do[
+            Block[{
+                s = step["Side"], relPos = step["PosPath"],
+                before = step["Before"], after = step["After"],
+                ruleIx, newL, newR
+            },
+                ruleIx = identifyRule[before, relPos, after, ruleList];
+                If[ MissingQ[ruleIx], Throw[$Failed] ];
+                If[ s === 0,
+                    newL = after; newR = rhs,
+                    newL = lhs; newR = after
+                ];
+                AppendTo[chain, <|
+                    "NewExpr" -> Inactive[Equal][newL, newR],
+                    "Position" -> Prepend[relPos, s + 1],
+                    "RuleIdx" -> ruleIx,
+                    "Rule" -> ruleList[[ruleIx]]["Rule"]
+                |>];
+                lhs = newL; rhs = newR;
+            ],
+            {step, steps}
+        ];
+        chain
+    ]
+]
+
+(* === TFindEquationalProof ========================================= *)
+
 (* Render a held expression in the form WL's ProofObject expects
    for its top-level Axioms list / ConjectureStatement: keep the
    ForAll wrapper if present, but rewrite every nested `Equal[lhs,
@@ -1062,35 +803,78 @@ $ProofKeyOrder[_] := {5, 0}
 holdToInactive[axHC_HoldComplete] :=
     ReleaseHold[axHC /. Equal -> Inactive[Equal]]
 
-SetAttributes[TFindEquationalProof, HoldAll];
-Options[TFindEquationalProof] = {MaxSteps -> 64};
-TFindEquationalProof[conjecture_, axioms_, OptionsPattern[]] := Catch[
+Options[TFindEquationalProof] = {MaxSteps -> 200000};
+
+(* String form: resolve theorem + theory names through
+   AxiomaticTheory, then run the expression form.  The conjecture
+   is the named NotableTheorem; the axioms are the theory's axiom
+   list.  unquantifyFormula / CanonicalizePatterns normalize the
+   quantified formulas (ForAll -> Pattern, Exists -> Skolem, then
+   canonical variable names). *)
+TFindEquationalProof[thm_String, theory_String, opts:OptionsPattern[]] := Catch[
+    Block[{axRaw, cjRaw, axioms, conjecture},
+        axRaw = AxiomaticTheory[theory];
+        cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
+        If[ ! ListQ[axRaw],
+            Throw[Failure["TATPParseError",
+                <|"Reason" -> "AxiomaticTheory[\"" <> theory <>
+                    "\"] did not resolve to an axiom list"|>],
+                "TATPError"]
+        ];
+        If[ MissingQ[cjRaw],
+            Throw[Failure["TATPParseError",
+                <|"Reason" -> "theorem \"" <> thm <>
+                    "\" not in AxiomaticTheory[\"" <> theory <>
+                    "\", \"NotableTheorems\"]"|>],
+                "TATPError"]
+        ];
+        (* A NotableTheorem resolves to a one-element list holding
+           the theorem formula. *)
+        cjRaw = If[ ListQ[cjRaw] && Length[cjRaw] === 1,
+            First[cjRaw], cjRaw];
+        axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
+        conjecture = CanonicalizePatterns @ unquantifyFormula @ cjRaw;
+        TFindEquationalProof[conjecture, axioms, opts]
+    ],
+    "TATPError"
+]
+
+(* Expression form: run thvm's C ATP completion engine on the
+   conjecture + axioms, decode the equational rewrite chain, and
+   wrap it in a verifier-shaped WL ProofObject.  Returns $Failed
+   when the goal is not proved (or the proof is not expressible in
+   the axiom-citing dataset -- a completion-derived chain).
+
+   atpEncodeProblem validates axiom/conjecture shape and surfaces
+   the encoder state (the Variables list + the Term decoder maps). *)
+TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
     Block[{
-        enc = atpEncodeProblem[axioms, conjecture],
-        dataset, varNames, axEq, conjStmt, conjPair
+        enc, conjPair, axiomKeys, ruleList, cRes, steps, status,
+        chain, dataset, varNames, axEq, conjStmt
     },
+        enc = atpEncodeProblem[axioms, conjecture];
         conjPair = enc["ConjPair"];
+        axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
+        ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
+        {cRes, status} = cEngineProof[enc, OptionValue[MaxSteps]];
+        (* status 1 == PROVED. *)
+        If[ status =!= 1, Return[$Failed] ];
+        Which[
+            cRes === {},
+                (* No rewrite steps: a reflexive conjecture, proved
+                   trivially -- only valid when both sides agree. *)
+                If[ conjPair[[1]] =!= conjPair[[2]], Return[$Failed] ];
+                chain = {},
+            cRes === $Failed,
+                Return[$Failed],
+            True,
+                chain = buildCEngineChain[cRes, conjPair, ruleList];
+                If[ chain === $Failed, Return[$Failed] ]
+        ];
+        dataset = assembleDataset[enc["AxPairs"], conjPair, chain, ruleList];
+        varNames = Symbol /@ Keys[enc["State"]["var"]];
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         conjStmt = holdToInactive[enc["ConjHCRaw"]];
-        (* Atomic problems: decide + decode via IC reduction.  Depth
-           bound = axiom count (a minimal atomic proof uses each
-           directed edge at most once).  Fall back to the BFS when
-           the IC search doesn't close it, or for non-atomic
-           (structured / pattern) problems. *)
-        dataset = If[ icAtomicProblemQ[enc["AxPairs"], conjPair],
-            With[{
-                icd = icBuildProofDataset[conjPair, enc["AxPairs"],
-                    Length[enc["AxPairs"]]]
-            },
-                If[ icd === $Failed,
-                    buildProofDataset[enc["AxPairs"], conjPair],
-                    icd
-                ]
-            ],
-            buildProofDataset[enc["AxPairs"], conjPair]
-        ];
-        If[ dataset === $Failed, Return[$Failed] ];
-        varNames = Symbol /@ Keys[enc["State"]["var"]];
         ProofObject[
             "EquationalLogic",
             conjStmt,

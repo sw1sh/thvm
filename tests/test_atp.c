@@ -941,8 +941,9 @@ int main(void) {
   TEST_BEGIN("atp/proof-extract-headline-group-chain");
   {
     // Same headline demo (prove f(a, i(a)) == e from the group
-    // axioms); after PROVED, extract the equational rewrite chain
-    // and verify it is a contiguous goal_lhs -> ... -> goal_rhs walk.
+    // axioms); after PROVED, extract the equational rewrite chain.
+    // The chain is the goal_lhs walk (side 0) then the goal_rhs walk
+    // (side 1), both forward, meeting at a common normal form.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
     Term goal_l = mk_f(mk_a(), mk_i(mk_a()));
     Term goal_r = mk_e();
@@ -959,16 +960,25 @@ int main(void) {
     u32 n = thvm_atp_proof_extract(s, steps, ATP_PROOF_MAX_STEPS);
     CHECK(n >= 1u);                         // a non-trivial proof
 
-    // Endpoints: the chain starts at goal_lhs and ends at goal_rhs.
-    CHECK(kbo_eq(steps[0].before, goal_l));
-    CHECK(kbo_eq(steps[n - 1].after, goal_r));
-
-    // Contiguity: each step hands its result to the next.
-    for (u32 i = 0; i + 1u < n; i++) {
-      CHECK(kbo_eq(steps[i].after, steps[i + 1].before));
+    // Per-side contiguity: each step hands its result to the next
+    // within the same side; the two sides start at goal_lhs /
+    // goal_rhs and end at a common normal form.
+    Term lhs_end = goal_l, rhs_end = goal_r;
+    u8   seen_lhs = 0, seen_rhs = 0;
+    for (u32 i = 0; i < n; i++) {
+      CHECK(steps[i].rule < s->n_rules);    // cited rule in range
+      if (steps[i].side == 0u) {
+        CHECK(kbo_eq(steps[i].before, lhs_end));
+        lhs_end = steps[i].after;
+        seen_lhs = 1;
+      } else {
+        CHECK(kbo_eq(steps[i].before, rhs_end));
+        rhs_end = steps[i].after;
+        seen_rhs = 1;
+      }
     }
-    // Every cited rule index is in range.
-    for (u32 i = 0; i < n; i++) CHECK(steps[i].rule < s->n_rules);
+    (void)seen_lhs; (void)seen_rhs;
+    CHECK(kbo_eq(lhs_end, rhs_end));         // the two sides meet
 
     // The serializer renders non-empty, null-terminated text.
     char buf[2048] = {0};
