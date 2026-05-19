@@ -178,6 +178,88 @@ fn int cuda_jit_launch(CUfunction func,
   return 0;
 }
 
+// DAG-mode dispatch geometry: derive (grid_x, block_x) from the lifted
+// UOp DAG's RANGE-leaf axis types/extents, the CUDA counterpart of
+// render_metal.c's rmt_dag_dispatch_shape.  The CUDA structural
+// renderer decodes axes from the SAME tg/tt convention as Metal
+// (cg_render_uop_kernel_cuda_root: tg = blockIdx.x, tt = threadIdx.x):
+//   - promoted output axes  (KAX_LOOP)         -> the `tg` grid range
+//   - in-thread loops       (KAX_UPCAST / KAX_UNROLL / KAX_REDUCE)
+//                                              -> do NOT contribute
+//   - threadgroup-local     (KAX_LOCAL)        -> the `tt` block size
+//   - threadgroup-collective(KAX_GROUP_REDUCE) -> the `tt` block size
+// so a LOCAL-split kernel launches grid = prod(LOOP extents),
+// block = prod(LOCAL extents) -- the flat one-thread-per-output shape
+// in cuda_dispatch_kernel cannot express that (it has no LOCAL notion)
+// and would mis-launch a LOCAL-split kernel.
+//
+// Returns 1 with (grid_x, block_x) on success; 0 if the DAG has no
+// axes / overflows 32 bits / a block dim exceeds the V100 cap (1024
+// threads/block on sm_70).
+fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
+                               u32 *block_x) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                               exts, MAX_AXES);
+  if (n == 0) return 0;
+  u64 total = 1;            // product of promoted-LOOP output extents
+  u64 local_total = 1;      // product of KAX_LOCAL extents
+  u32 group_reduce_extent = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (exts[i] == 0) return 0;
+    switch (types[i]) {
+      case KAX_LOOP:         total       *= (u64)exts[i]; break;
+      case KAX_LOCAL:        local_total *= (u64)exts[i]; break;
+      case KAX_GROUP_REDUCE: group_reduce_extent = exts[i]; break;
+      // KAX_UPCAST / KAX_UNROLL / KAX_REDUCE: in-thread, not in tid.
+      default: break;
+    }
+  }
+  if (total == 0 || total > 0xFFFFFFFFu) return 0;
+  u32 grid, block;
+  if (group_reduce_extent != 0) {
+    if (group_reduce_extent > 1024) return 0;   // V100 maxThreadsPerBlock
+    grid  = (u32)total;
+    block = group_reduce_extent;
+  } else if (local_total > 1) {
+    if (local_total > 1024) return 0;           // V100 maxThreadsPerBlock
+    // tg/tt split: GLOBAL/LOOP extents -> grid (one block per LOOP
+    // tuple, decoded from `tg`); LOCAL extents -> block (decoded from
+    // `tt`).  Mirrors rmu_compute_global_decode_ctx.
+    block = (u32)local_total;
+    grid  = (u32)total;
+  } else {
+    // No LOCAL split: flat one-thread-per-output, block capped at 256
+    // and kept a warp multiple (matches cuda_dispatch_kernel's flat
+    // path so the two agree when no OPT axes are present).
+    block = total < 256 ? (u32)total : 256u;
+    if (block < 32) block = (u32)total;         // tiny kernels: exact
+    grid  = (u32)((total + (u64)block - 1) / (u64)block);
+  }
+  if (grid == 0 || block == 0) return 0;
+  if (grid_x  != NULL) *grid_x  = grid;
+  if (block_x != NULL) *block_x = block;
+  return 1;
+}
+
+// True iff the lifted DAG carries any per-axis OPT-class axis
+// (UPCAST / UNROLL / LOCAL / GROUP_REDUCE) -- i.e. kernel_apply_opt
+// (DAG mode) ran and the flat output_numel geometry would mis-launch.
+fn int cuda_dag_has_opt_axes(struct KernelEntry const *ke) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                               exts, MAX_AXES);
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] == KAX_UPCAST || types[i] == KAX_UNROLL
+        || types[i] == KAX_LOCAL || types[i] == KAX_GROUP_REDUCE) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // Backend-vtable dispatch_kernel.  Mirrors cpu_jit_dispatch's
 // structural-lift path for the CUDA target:
 //
@@ -263,20 +345,30 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     args[1 + n_in + i] = &kvar_val[i];
   }
 
-  // Launch geometry: total threads = output_numel (one promoted
-  // output element per thread; the renderer's `tid >= total` guard
-  // makes a slightly-over-sized grid safe).  A scalar-output kernel
-  // (output_numel <= 1, e.g. a full reduce) launches a single thread.
-  u64 total = ke->output_numel;
-  if (total == 0) total = 1;
-  u32 block_x = 256;
-  if ((u64)block_x > total) {
-    // Round the block down to the nearest warp multiple that still
-    // covers `total`, never below 32 (warp granularity).
-    block_x = (u32)((total + 31) / 32 * 32);
-    if (block_x < 32) block_x = 32;
+  // Launch geometry.  When the lifted DAG carries per-axis OPT axes
+  // (a LOCAL split from propose.c / the autotune sweep), the flat
+  // output_numel shape cannot express the tg/tt block geometry the
+  // renderer decodes -- derive (grid, block) from the DAG's axis
+  // types instead (cuda_dag_dispatch_shape).  Otherwise fall back to
+  // the flat one-thread-per-output shape.
+  u32 grid_x = 0, block_x = 0;
+  if (!(cuda_dag_has_opt_axes(ke)
+        && cuda_dag_dispatch_shape(ke, &grid_x, &block_x))) {
+    // Flat: total threads = output_numel (one promoted output element
+    // per thread; the renderer's `tid >= total` guard makes a
+    // slightly-over-sized grid safe).  A scalar-output kernel
+    // (output_numel <= 1, e.g. a full reduce) launches a single thread.
+    u64 total = ke->output_numel;
+    if (total == 0) total = 1;
+    block_x = 256;
+    if ((u64)block_x > total) {
+      // Round the block down to the nearest warp multiple that still
+      // covers `total`, never below 32 (warp granularity).
+      block_x = (u32)((total + 31) / 32 * 32);
+      if (block_x < 32) block_x = 32;
+    }
+    grid_x = (u32)((total + block_x - 1) / block_x);
   }
-  u32 grid_x = (u32)((total + block_x - 1) / block_x);
 
   return cuda_jit_launch(func, grid_x, block_x, args);
 }

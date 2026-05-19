@@ -217,6 +217,64 @@ EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
   return uop_dag_apply_kopt(root, opt);
 }
 
+// DAG-derived CUDA launch geometry.  The Python `Cuda.dispatch` takes
+// an explicit flat grid/block and so cannot launch a LOCAL-split
+// kernel: a KOP_LOCAL split moves the inner tile onto `tt`
+// (threadIdx.x), which the flat one-thread-per-output shape does not
+// express.  The CUDA autotune sweep calls this on the KOpt-rewritten
+// root to recover the tg/tt geometry the structural renderer decodes
+// (cg_render_uop_kernel_cuda_root).  Mirrors src/backend/cuda/jit.c's
+// cuda_dag_dispatch_shape, but operates on a free-standing root term
+// (the py CUDA bridge has no KernelEntry).
+//
+//   - KAX_LOOP   axes -> grid  (one block per LOOP tuple, `tg` decode)
+//   - KAX_LOCAL  axes -> block (threads per block, `tt` decode)
+//   - KAX_GROUP_REDUCE -> block (warp-collective reduce width)
+//   - KAX_UPCAST / KAX_UNROLL / KAX_REDUCE: in-thread, not in tid.
+//
+// Writes (*grid_x, *block_x) and returns 1 on success; 0 if the DAG
+// has no axes / overflows 32 bits / a block dim exceeds the 1024
+// threads/block hardware cap (sm_70 V100).
+EXPORT uint32_t py_cuda_dag_dispatch_shape(uint64_t root,
+                                           uint32_t *grid_x,
+                                           uint32_t *block_x) {
+  if (root == 0) return 0;
+  uint32_t ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  uint32_t n = uop_dag_collect_axes(root, ids, types, exts, MAX_AXES);
+  if (n == 0) return 0;
+  uint64_t total = 1;            // product of promoted-LOOP output extents
+  uint64_t local_total = 1;      // product of KAX_LOCAL extents
+  uint32_t group_reduce_extent = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    if (exts[i] == 0) return 0;
+    switch (types[i]) {
+      case KAX_LOOP:         total       *= (uint64_t)exts[i]; break;
+      case KAX_LOCAL:        local_total *= (uint64_t)exts[i]; break;
+      case KAX_GROUP_REDUCE: group_reduce_extent = exts[i]; break;
+      default: break;
+    }
+  }
+  if (total == 0 || total > 0xFFFFFFFFu) return 0;
+  uint32_t grid, block;
+  if (group_reduce_extent != 0) {
+    if (group_reduce_extent > 1024) return 0;
+    grid  = (uint32_t)total;
+    block = group_reduce_extent;
+  } else if (local_total > 1) {
+    if (local_total > 1024) return 0;
+    block = (uint32_t)local_total;
+    grid  = (uint32_t)total;
+  } else {
+    block = total < 256 ? (uint32_t)total : 256u;
+    if (block < 32) block = (uint32_t)total;
+    grid  = (uint32_t)((total + (uint64_t)block - 1) / (uint64_t)block);
+  }
+  if (grid == 0 || block == 0) return 0;
+  if (grid_x  != NULL) *grid_x  = grid;
+  if (block_x != NULL) *block_x = block;
+  return 1;
+}
+
 EXPORT uint32_t py_const_KOP_NONE(void)     { return KOP_NONE; }
 EXPORT uint32_t py_const_KOP_UPCAST(void)   { return KOP_UPCAST; }
 EXPORT uint32_t py_const_KOP_UNROLL(void)   { return KOP_UNROLL; }

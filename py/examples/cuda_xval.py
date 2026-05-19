@@ -242,6 +242,157 @@ def run_thvm(h, c, op, shape):
 
 
 # ====================================================================
+# thvm-CUDA autotune sweep -- consume propose.c's CUDA candidates
+# ====================================================================
+# propose.c's CUDA block (gated on THVM_BACKEND=cuda) offers KOP_LOCAL
+# / KOP_UPCAST candidates.  This sweep applies each, renders + compiles
+# the variant, dispatches it with the *DAG-derived* launch geometry
+# (cuda_dag_dispatch_shape via Thvm.cuda_dag_dispatch_shape -- the flat
+# grid/block Cuda.dispatch takes cannot launch a LOCAL-split kernel),
+# times it, verifies it, and picks the fastest correct variant.  The
+# baseline (no opt) is always included as candidate 0 so the sweep can
+# only ever match or beat it.
+def _build_root(h, op, shape):
+    """Re-build the op's UOp DAG (a fresh DAG per autotune trial so
+    KOpt rewrites never alias)."""
+    if op == "matmul":
+        M, N, Kd = shape
+        return build_matmul(h, M, N, Kd)
+    if op == "row_reduce":
+        R, C = shape
+        return build_row_reduce(h, R, C)
+    if op == "softmax":
+        R, C = shape
+        return build_softmax(h, R, C)
+    raise ValueError(op)
+
+
+def _propose_cuda(h, op, shape, out_buf_t, in_buf_ts, root):
+    """Allocate a synthetic KernelEntry, populate its cached lift, and
+    ask propose.c for the CUDA KOpt candidates.  Returns the list of
+    (op, axis, arg) triples; empty if THVM_BACKEND != cuda.
+    """
+    kid = h.kernel_alloc()
+    h.kernel_set_cached_lift(kid, root, out_buf_t, in_buf_ts)
+    return h.kernel_opts_propose(kid)
+
+
+def run_thvm_autotuned(h, c, op, shape):
+    """Sweep propose.c's CUDA KOpt candidates for one op+shape.
+    Returns dict: best variant's GPU p50/p10 (us), the winning opt,
+    the number of candidates tried, and correctness.
+    """
+    M = N = Kd = R = C = 0
+    if op == "matmul":
+        M, N, Kd = shape
+        out_shape, width = (M, N), Kd
+        flops = 2.0 * M * N * Kd
+    elif op == "row_reduce":
+        R, C = shape
+        out_shape, width = (R,), C
+        flops = float(R * C)
+    elif op == "softmax":
+        R, C = shape
+        out_shape, width = (R, C), C
+        flops = float(R * C * 5)
+    else:
+        raise ValueError(op)
+
+    arrs, ref, tol_abs, tol_rel = make_inputs(op, shape, width)
+
+    # Buffer terms for the propose call: out (instance 0), inputs 1..n.
+    out_t = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32,
+                     dims=out_shape, instance=0)
+    in_ts = [h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32,
+                      dims=arr.shape, instance=i + 1)
+             for i, arr in enumerate(arrs)]
+
+    base_root = _build_root(h, op, shape)
+    cands = _propose_cuda(h, op, shape, out_t, in_ts, base_root)
+
+    # Candidate 0 = baseline (no opt); then each proposed KOpt.
+    trials = [None] + list(cands)
+
+    # Stage device buffers once: out + each input (inputs reused across
+    # trials; the kernel only writes `out`).
+    out_buf = c.buf_alloc(int(np.prod(out_shape)) * 4)
+    in_bufs = []
+    for arr in arrs:
+        b = c.buf_alloc(arr.nbytes)
+        c.buf_write_array(b, arr)
+        in_bufs.append(b)
+    bufs = [out_buf] + in_bufs
+
+    best = None
+    n_ok = 0
+    for opt in trials:
+        root = _build_root(h, op, shape)
+        if opt is not None:
+            new_root = h.uop_dag_apply_kopt(root, opt)
+            if new_root is None:
+                continue          # KOpt bailed -- skip this candidate
+            root = new_root
+        cu = h.render_cuda(root, name="k")
+        if not cu:
+            continue
+        try:
+            fn = c.compile(cu, fn="k")
+        except RuntimeError:
+            continue               # variant did not nvrtc-compile
+
+        # DAG-derived launch geometry: a KOP_LOCAL split needs the
+        # tg/tt block shape, which the flat grid cannot express.
+        shp = h.cuda_dag_dispatch_shape(root)
+        if shp is None:
+            grid, block = _grid_block(int(np.prod(out_shape)))
+        else:
+            grid, block = shp
+
+        for _ in range(WARMUP):
+            c.dispatch(fn, bufs, grid=grid, block=block)
+        got = c.buf_read_array(out_buf, out_shape,
+                               np.float32).astype(np.float64)
+        diff = np.abs(got - ref)
+        max_abs = float(diff.max())
+        max_rel = float((diff / (np.abs(ref) + 1e-30)).max())
+        correct = (max_abs <= tol_abs) or (max_rel <= tol_rel)
+        if not correct:
+            c.fn_release(fn)
+            continue
+        n_ok += 1
+
+        gpu = []
+        for _ in range(REPS):
+            _, g = c.dispatch_timed(fn, bufs, grid=grid, block=block)
+            gpu.append(g / 1e3)
+        c.fn_release(fn)
+        p50 = pctl(gpu, 0.50)
+        if best is None or p50 < best["gpu_p50_us"]:
+            best = dict(
+                gpu_p50_us=p50, gpu_p10_us=pctl(gpu, 0.10),
+                opt=opt, grid=grid, block=block,
+                max_abs=max_abs, max_rel=max_rel,
+            )
+
+    c.buf_release(out_buf)
+    for b in in_bufs:
+        c.buf_release(b)
+
+    if best is None:
+        return dict(status="no_correct_variant", op=op, shape=shape,
+                    n_candidates=len(cands))
+    return dict(
+        status="ok", op=op, shape=shape,
+        n_candidates=len(cands), n_ok=n_ok,
+        gpu_p50_us=best["gpu_p50_us"], gpu_p10_us=best["gpu_p10_us"],
+        gflops_p50=(flops / (best["gpu_p50_us"] * 1e-6) / 1e9)
+                   if best["gpu_p50_us"] else 0.0,
+        best_opt=best["opt"], grid=best["grid"], block=best["block"],
+        max_abs=best["max_abs"], max_rel=best["max_rel"],
+    )
+
+
+# ====================================================================
 # tinygrad-CUDA runner -- a fresh subprocess per config so CUDA= /
 # BEAM= env, the JIT cache and the device are clean.  DEBUG=2 prints a
 # per-kernel `tm` (GPU time, CUDA events); we parse the relevant line.
@@ -407,12 +558,19 @@ def main():
     ap.add_argument("--json", default="", help="dump raw results as JSON")
     ap.add_argument("--no-tinygrad", action="store_true",
                     help="skip the tinygrad baseline (thvm-only)")
+    ap.add_argument("--no-autotune", action="store_true",
+                    help="skip the propose.c CUDA KOpt sweep")
     args = ap.parse_args()
 
     if not Cuda.available():
         print("SKIP: this libthvm_py build has no CUDA bridge "
               "(build `make py` on a Linux+CUDA host).")
         return 0
+
+    # propose.c's CUDA KOpt block (src/codegen/propose.c) is gated on
+    # THVM_BACKEND=cuda; set it in-process so the autotune sweep's
+    # kernel_opts_propose call actually yields CUDA candidates.
+    os.environ["THVM_BACKEND"] = "cuda"
 
     h = Thvm()
     c = Cuda()
@@ -454,6 +612,26 @@ def main():
                   f"p10={fmt_us(tv['gpu_p10_us'])}us  "
                   f"({tv['gflops_p50']:.1f} GFLOP/s, {tv['cu_lines']}-line .cu)")
 
+            # Autotune sweep: consume propose.c's CUDA KOpt candidates,
+            # pick the fastest correct variant.  Compared against the
+            # un-tuned baseline above so the gap-closing is measurable.
+            at = None
+            if not args.no_autotune:
+                at = run_thvm_autotuned(h, c, op, shape)
+                if at["status"] == "ok":
+                    speedup = (tv["gpu_p50_us"] / at["gpu_p50_us"]
+                               if at["gpu_p50_us"] else 0.0)
+                    print(f"  thvm tuned: gpu p50={fmt_us(at['gpu_p50_us'])}us "
+                          f"p10={fmt_us(at['gpu_p10_us'])}us  "
+                          f"({at['gflops_p50']:.1f} GFLOP/s)  "
+                          f"best_opt={at['best_opt']} "
+                          f"grid={at['grid']} block={at['block']}  "
+                          f"[{at['n_ok']}/{at['n_candidates']+1} variants OK, "
+                          f"{speedup:.2f}x vs baseline]")
+                else:
+                    print(f"  thvm tuned: {at['status']} "
+                          f"({at.get('n_candidates', 0)} candidates)")
+
             tg0 = tg2 = None
             if not args.no_tinygrad:
                 tg0 = run_tinygrad(op, shape, beam=0,
@@ -480,20 +658,29 @@ def main():
                     print(f"  tinygrad B2: {tg2.get('status')} "
                           f"{tg2.get('log','')}")
 
-            ratio0 = ratio2 = None
+            # The "thvm" time used for the gap is the tuned time when
+            # the sweep produced a correct variant, else the baseline.
+            thvm_t = tv["gpu_p50_us"]
+            if at and at.get("status") == "ok" and at["gpu_p50_us"]:
+                thvm_t = min(thvm_t, at["gpu_p50_us"])
+            ratio0 = ratio2 = ratio0_base = None
             if tg0 and tg0.get("status") == "ok" and tg0["gpu_p50_us"]:
-                ratio0 = tv["gpu_p50_us"] / tg0["gpu_p50_us"]
+                ratio0 = thvm_t / tg0["gpu_p50_us"]
+                ratio0_base = tv["gpu_p50_us"] / tg0["gpu_p50_us"]
             if tg2 and tg2.get("status") == "ok" and tg2["gpu_p50_us"]:
-                ratio2 = tv["gpu_p50_us"] / tg2["gpu_p50_us"]
+                ratio2 = thvm_t / tg2["gpu_p50_us"]
             if ratio0:
-                print(f"  GAP       : thvm is {ratio0:.1f}x tinygrad-default, "
-                      f"{ratio2:.1f}x tinygrad-BEAM2"
+                base_note = (f" (baseline {ratio0_base:.1f}x)"
+                             if ratio0_base and ratio0_base != ratio0 else "")
+                print(f"  GAP       : thvm is {ratio0:.1f}x tinygrad-default"
+                      f"{base_note}, {ratio2:.1f}x tinygrad-BEAM2"
                       if ratio2 else
-                      f"  GAP       : thvm is {ratio0:.1f}x tinygrad-default")
+                      f"  GAP       : thvm is {ratio0:.1f}x "
+                      f"tinygrad-default{base_note}")
             rows.append(dict(label=label, op=op, shape=shape,
-                             thvm=tv, tg0=tg0, tg2=tg2,
-                             ratio0=ratio0, ratio2=ratio2,
-                             thvm_ok=thvm_ok))
+                             thvm=tv, autotune=at, tg0=tg0, tg2=tg2,
+                             ratio0=ratio0, ratio0_base=ratio0_base,
+                             ratio2=ratio2, thvm_ok=thvm_ok))
 
     print("\n" + "=" * 100)
     print("PASS: thvm-CUDA matches numpy everywhere"
@@ -510,8 +697,11 @@ def main():
             tv = r["thvm"]
             tv2 = {k: v for k, v in tv.items() if k != "cu"}
             slim.append(dict(label=r["label"], op=r["op"], shape=r["shape"],
-                             thvm=tv2, tg0=r.get("tg0"), tg2=r.get("tg2"),
-                             ratio0=r.get("ratio0"), ratio2=r.get("ratio2")))
+                             thvm=tv2, autotune=r.get("autotune"),
+                             tg0=r.get("tg0"), tg2=r.get("tg2"),
+                             ratio0=r.get("ratio0"),
+                             ratio0_base=r.get("ratio0_base"),
+                             ratio2=r.get("ratio2")))
         Path(args.json).write_text(json.dumps(
             dict(sm=sm, reps=REPS, tg_reps=TG_REPS, rows=slim), indent=1))
         print(f"wrote {args.json}")
@@ -529,25 +719,33 @@ def write_md(path, sm, rows, all_correct):
              "gpu ns; tinygrad: parsed DEBUG=2 per-kernel `tm`).")
     L.append("")
     L.append("| op + shape | thvm correct | thvm GPU p50/p10 (us) | "
-             "tinygrad p50/p10 (us) | tinygrad BEAM2 p50/p10 (us) | "
+             "thvm tuned p50 (us) | tinygrad p50/p10 (us) | "
+             "tinygrad BEAM2 p50/p10 (us) | "
              "gap (thvm / tg-default) | gap (thvm / tg-BEAM2) |")
-    L.append("|---|---|---|---|---|---|---|")
+    L.append("|---|---|---|---|---|---|---|---|")
     for r in rows:
         tv = r["thvm"]
         if tv.get("status") != "ok":
-            L.append(f"| {r['label']} | {tv.get('status')} | - | - | - | - | - |")
+            L.append(f"| {r['label']} | {tv.get('status')} | - | - | "
+                     f"- | - | - | - |")
             continue
         tg0, tg2 = r.get("tg0"), r.get("tg2")
+        at = r.get("autotune")
         corr = (f"abs={tv['max_abs']:.1e} rel={tv['max_rel']:.1e} "
                 f"{'OK' if r.get('thvm_ok') else 'FAIL'}")
         thvm_t = f"{tv['gpu_p50_us']:.2f} / {tv['gpu_p10_us']:.2f}"
+        at_t = (f"{at['gpu_p50_us']:.2f}"
+                if at and at.get("status") == "ok" else "-")
         tg0_t = (f"{tg0['gpu_p50_us']:.2f} / {tg0['gpu_p10_us']:.2f}"
                  if tg0 and tg0.get("status") == "ok" else "-")
         tg2_t = (f"{tg2['gpu_p50_us']:.2f} / {tg2['gpu_p10_us']:.2f}"
                  if tg2 and tg2.get("status") == "ok" else "-")
         g0 = f"{r['ratio0']:.1f}x" if r.get("ratio0") else "-"
+        if r.get("ratio0_base") and r.get("ratio0") \
+                and r["ratio0_base"] != r["ratio0"]:
+            g0 += f" (base {r['ratio0_base']:.1f}x)"
         g2 = f"{r['ratio2']:.1f}x" if r.get("ratio2") else "-"
-        L.append(f"| {r['label']} | {corr} | {thvm_t} | {tg0_t} | "
+        L.append(f"| {r['label']} | {corr} | {thvm_t} | {at_t} | {tg0_t} | "
                  f"{tg2_t} | {g0} | {g2} |")
     L.append("")
     L.append("PASS: thvm-CUDA matches numpy everywhere."
