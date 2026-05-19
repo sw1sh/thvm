@@ -28,24 +28,10 @@
 // the autotune loop first applies each one against the baseline and
 // can then expand the best variants into short opt sequences.
 
-// Reduce-axis size for a tail-REDUCE kernel, or 0 if not reduce-tail
-// (or if shape inference fails).  Mirrors the same calc that
-// axes_default_for + render_uop's accumulator hoist do.
-static u32 propose_kprog_reduce_axis_size(KernelEntry const *ke) {
-  if (ke->n_ops == 0) return 0;
-  KProgOp const *rd = &ke->program[ke->n_ops - 1];
-  if (rd->opcode != UOP_REDUCE) return 0;
-  u32 src_numel;
-  if (KSRC_IS_INPUT(rd->src[0])) src_numel = ke->input_numels[KSRC_INDEX(rd->src[0])];
-  else                           src_numel = ke->program[KSRC_INDEX(rd->src[0])].numel;
-  u32 out_numel = ke->output_numel ? ke->output_numel : 1;
-  return src_numel / out_numel;
-}
-
 // Walk the lifted UOp DAG for the reduce axis extent when
 // cached_lift.store_root is populated (the autotune-time path
 // pays the lift cost at materialize-time).
-static u32 propose_uop_reduce_axis_size(KernelEntry const *ke) {
+static u32 propose_reduce_axis_size_from_dag(KernelEntry const *ke) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   return uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
 }
@@ -76,9 +62,7 @@ static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
 }
 
 static u32 propose_reduce_axis_size(KernelEntry const *ke) {
-  u32 size = propose_uop_reduce_axis_size(ke);
-  if (size != 0) return size;
-  return propose_kprog_reduce_axis_size(ke);
+  return propose_reduce_axis_size_from_dag(ke);
 }
 
 // Index of the reduce axis -- the last axis of type KAX_REDUCE.
@@ -232,51 +216,19 @@ static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
   if (!propose_metal_backend_enabled()) {
     return 1;
   }
-  // When cached_lift.store_root is populated, mirror the per-op
-  // KProgOp gate via the lifted UOp DAG: every dtype-carrying node
-  // is FP32 AND at least one UOP_REDUCE is reachable.  Lifted
-  // kernels skip the per-op walk entirely.
+  // FP32-only: every input dtype must be FP32, every dtype-carrying
+  // node in the lifted DAG must be FP32, and at least one UOP_REDUCE
+  // must be reachable.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (ke->input_dtypes[i] != DT_FP32) {
       return 0;
     }
   }
-  if (ke->cached_lift.store_root != 0) {
-    if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, DT_FP32)) {
-      return 0;
-    }
-    return uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root);
-  }
-  if (ke->n_ops == 0 || ke->program[ke->n_ops - 1].opcode != UOP_REDUCE) {
+  if (ke->cached_lift.store_root == 0) return 0;
+  if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, DT_FP32)) {
     return 0;
   }
-  for (u32 i = 0; i < ke->n_ops; i++) {
-    KProgOp const *op = &ke->program[i];
-    if (op->dtype != DT_FP32) {
-      return 0;
-    }
-    switch (op->opcode) {
-      case UOP_CONST:
-      case UOP_ADD:
-      case UOP_MUL:
-      case UOP_NEG:
-      case UOP_RECIP:
-      case UOP_SQRT:
-      case UOP_EXP2:
-      case UOP_LOG2:
-      case UOP_CMPLT:
-      case UOP_CMPEQ:
-        break;
-      case UOP_REDUCE:
-        if (i + 1 != ke->n_ops) {
-          return 0;
-        }
-        break;
-      default:
-        return 0;
-    }
-  }
-  return 1;
+  return uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root);
 }
 
 fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
