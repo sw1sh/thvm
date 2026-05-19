@@ -113,11 +113,14 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
 # and the rewrite step tries every rule in BOTH directions, applying a
 # direction only when it strictly decreases the redex in the reduction
 # order.  An oriented rule fires forward only; an unorientable equation
-# fires whichever direction decreases.  Terminating.  Off by default;
-# independent of every other ATP flag.  CHANGES BEHAVIOR (a different,
-# sound rewrite relation).  Bypasses the rule-LHS index for now (a
-# first cut -- correctness + queue measurement before re-indexing).
-ATP_ORDERED_REWRITE ?=
+# fires whichever direction decreases.  Terminating.  On by default:
+# the all-oriented rule set (the common case) still takes the indexed
+# normalizer -- atp_rewrite_normalize_ordered drops to the linear scan
+# only while n_unorient > 0 -- so it is perf-neutral on orientable
+# problems and is the only path that closes a symmetric goal (a
+# commutativity equation normalizes a ground/skolemized goal to a
+# canonical face).  `make ATP_ORDERED_REWRITE=0` restores the hack.
+ATP_ORDERED_REWRITE ?= 1
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRITE,)
 
 # Milestone 10: -DATP_MNF builds the MNF goal-directed search (a port

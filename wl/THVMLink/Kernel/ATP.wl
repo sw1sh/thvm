@@ -275,7 +275,9 @@ encodeAxiomFold[{terms_, state_, idx_}, axHC_] := Block[{
    mismatch.  HoldComplete is used throughout so `a == a` doesn't
    pre-evaluate to True. *)
 SetAttributes[atpEncodeProblem, HoldAll];
-atpEncodeProblem[axioms_, conjecture_] := Block[{
+atpEncodeProblem[axioms_, conjecture_] :=
+    atpEncodeProblem[axioms, conjecture, False];
+atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
     axHCsRaw, axHCs, cjHC, axTermsAndState, axTerms, st,
     goalRes, goalLhs, goalRhs, axPairs, conjPair, n
 },
@@ -295,6 +297,15 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
     axTerms = axTermsAndState[[1]];
     st = axTermsAndState[[2]];
     cjHC = forAllToPattern[HoldComplete[conjecture]];
+    (* Skolemize: a universal conjecture is proved for an arbitrary
+       fixed instance, so strip the bound variables' Pattern wrappers
+       to bare constants.  KBO totally orders constants, so an
+       unorientable equation (commutativity-style) becomes ordered-
+       applicable to the goal -- the single-NF check then closes a
+       symmetric goal the variable-keyed goal could not.  Done inside
+       HoldComplete so a reflexive `f[x] == f[x]` does not collapse to
+       True before encoding. *)
+    If[ skolemize, cjHC = cjHC /. Verbatim[Pattern][v_, _] :> v ];
     goalRes = encodeEquation[cjHC, st, "conjecture"];
     goalLhs = goalRes[[1]];
     goalRhs = goalRes[[2]];
@@ -317,7 +328,7 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
         "AxPairs" -> axPairs,
         "ConjPair" -> conjPair,
         "AxHCsRaw" -> axHCsRaw,
-        "ConjHCRaw" -> HoldComplete[conjecture]
+        "ConjHCRaw" -> If[skolemize, cjHC, HoldComplete[conjecture]]
     |>
 ]
 
@@ -1330,7 +1341,7 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
         enc, conjPair, axiomKeys, ruleList, cRes, extSteps,
         chain, dataset, varNames, axEq, conjStmt, po
     },
-        enc = atpEncodeProblem[axioms, conjecture];
+        enc = atpEncodeProblem[axioms, conjecture, True];
         conjPair = enc["ConjPair"];
         axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];

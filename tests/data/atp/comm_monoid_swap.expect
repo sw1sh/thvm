@@ -1,9 +1,15 @@
-% Stage 9.4b finding: predicted PROVED 0-1 but observed
-% QUEUE_EMPTY @ 2 steps under all 4 (cp-gen x rewrite) modes.
-% The commutativity axiom is unorientable; unfailing adds it
-% in both directions and the resulting rewrite cycles between
-% f(a, b) and f(b, a) without ever producing a canonical form.
-% This is a known limitation of unfailing KB without AC-aware
-% normalization -- a clean motivation for AC redundancy
-% criteria (out of scope for stage 9).
-status=QUEUE_EMPTY
+% Stage 9.4b GRP fixture: commutative-monoid axioms (right-identity
+% plus commutativity); the conjecture asks swap-equivalence of two
+% distinct constants, f(a, b) = f(b, a).
+%
+% Commutativity is unorientable.  Ordered rewriting (ATP_ORDERED_REWRITE,
+% default-on) stores the equation once and fires whichever direction
+% strictly decreases the redex: under the LPO precedence `f > e > a > b`
+% the term f(a, b) outranks f(b, a), so f(a, b) normalizes to f(b, a)
+% and the single-normal-form goal check closes the conjecture in one
+% step.  The pre-ordered-rewriting engine QUEUE_EMPTY'd here -- the
+% 2-way unfailing fallback stored u->v and v->u and cycled between the
+% two faces without ever reaching a canonical form.
+status=PROVED
+max_step=1
+max_rules=2

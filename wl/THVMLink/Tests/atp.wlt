@@ -543,6 +543,23 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* A symmetric goal: neither side rewrites to the other, so the
+       variable-keyed goal has no shared normal form.  Skolemizing the
+       conjecture's variables to constants lets KBO totally order them,
+       so the unorientable commutativity axiom ordered-rewrites the
+       larger face down to the smaller -- the single-NF check then
+       closes it, and the proof cites the axiom directly. *)
+    Module[{p},
+        p = TFindEquationalProof[
+            ForAll[{x, y}, f[x, y] == f[y, x]],
+            {ForAll[{a, b}, f[a, b] == f[b, a]]}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/forall-multi-symmetric-verifies"
+]
+
+VerificationTest[
     Module[{p},
         p = TFindEquationalProof[
             f[f[u, f[v, w]], u] == f[u, f[f[v, w], u]],

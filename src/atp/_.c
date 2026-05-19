@@ -3406,26 +3406,59 @@ fn u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap) {
 // chain of rewrites taking each conjecture side to the shared normal
 // form.
 //
-// The recording rewriter mirrors `thvm_rewrite_step` exactly --
-// leftmost-outermost, lowest-index rule, forward (lhs->rhs) only --
-// which is the redex choice the WL-driven engine's normalizer
-// (atp_rewrite_normalize_indexed / the linear scan) makes, so the
-// recorded chain reproduces goal_check's single-NF result.
+// The recording rewriter mirrors the WL-driven engine's normalizer so
+// the recorded chain reproduces goal_check's single-NF result:
+// leftmost-outermost, lowest-index rule.  An oriented rule fires
+// forward (lhs->rhs); under ordered rewriting an unorientable equation
+// fires whichever direction strictly decreases the redex -- so the
+// recorded chain descends a well-founded order and cannot bounce
+// between the two faces of a symmetric equation.
 
-// One leftmost-outermost forward rewrite of `t`, recording the redex
-// path and the rule index.  `pos` is caller-owned scratch holding the
-// path so far in pos[0..depth); on a hit the full path is left in
-// pos[0..*out_pos_len).  Returns the rewritten term; *fired = 1 on a
-// hit, 0 at a fixpoint.
+// One leftmost-outermost rewrite of `t`, recording the redex path and
+// the rule index.  `pos` is caller-owned scratch holding the path so
+// far in pos[0..depth); on a hit the full path is left in
+// pos[0..*out_pos_len).  *out_fwd is 1 when the rule fired lhs->rhs, 0
+// when an unorientable equation fired rhs->lhs.  Returns the rewritten
+// term; *fired = 1 on a hit, 0 at a fixpoint.
 static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
                                    u32 *out_rule, u8 *out_pos_len,
-                                   u8 *fired) {
+                                   u8 *out_fwd, u8 *fired) {
   for (u32 i = 0; i < s->n_rules; i++) {
+#ifdef ATP_ORDERED_REWRITE
+    // An unorientable equation (r_orient[i] == 0) is stored once and
+    // rewrites in whichever direction is order-decreasing for the
+    // redex at hand -- the same both-directions, order-gated rule as
+    // atp_ordered_try_top, so the recorded step matches the normalizer.
+    if (!s->r_orient[i]) {
+      if (atp_vars_contained(s->rhs[i], s->lhs[i])) {       // l -> r
+        RewriteSubst sub = {{0}};
+        if (thvm_match(s->lhs[i], t, &sub)) {
+          Term repl = thvm_subst_apply(s->rhs[i], &sub);
+          if (atp_compare(s, t, repl) == KBO_GT) {
+            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
+            return repl;
+          }
+        }
+      }
+      if (atp_vars_contained(s->lhs[i], s->rhs[i])) {       // r -> l
+        RewriteSubst sub = {{0}};
+        if (thvm_match(s->rhs[i], t, &sub)) {
+          Term repl = thvm_subst_apply(s->lhs[i], &sub);
+          if (atp_compare(s, t, repl) == KBO_GT) {
+            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
+            return repl;
+          }
+        }
+      }
+      continue;
+    }
+#endif
     RewriteSubst sub = {{0}};
     if (thvm_match(s->lhs[i], t, &sub)) {
       *fired = 1;
       *out_rule = i;
       *out_pos_len = depth;
+      *out_fwd = 1;
       return thvm_subst_apply(s->rhs[i], &sub);
     }
   }
@@ -3437,7 +3470,7 @@ static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
       u8 cf = 0;
       Term nch = atp_proof_rewrite_step(s, term_ctr_at(t, i), pos,
                                         (u8)(depth + 1u), out_rule,
-                                        out_pos_len, &cf);
+                                        out_pos_len, out_fwd, &cf);
       if (cf) {
         Term children[REWRITE_MAX_ARITY];
         for (u32 j = 0; j < n; j++) {
@@ -3459,14 +3492,15 @@ static Term atp_proof_record_side(AtpState *s, Term t, u32 side,
   for (u32 it = 0; it < ATP_PROOF_MAX_STEPS; it++) {
     u8  pos[ATP_PROOF_MAX_DEPTH];
     u32 rule = 0;
-    u8  pos_len = 0, fired = 0;
-    Term t2 = atp_proof_rewrite_step(s, t, pos, 0u, &rule, &pos_len, &fired);
+    u8  pos_len = 0, fwd = 1u, fired = 0;
+    Term t2 = atp_proof_rewrite_step(s, t, pos, 0u, &rule, &pos_len,
+                                     &fwd, &fired);
     if (!fired || kbo_eq(t, t2)) return t;
     if (*n < cap) {
       AtpProofStep *st = &out[*n];
       st->side    = side;
       st->rule    = rule;
-      st->fwd     = 1u;
+      st->fwd     = fwd;
       st->pos_len = pos_len;
       for (u8 k = 0; k < pos_len; k++) st->pos[k] = pos[k];
       st->before  = t;
