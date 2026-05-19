@@ -153,23 +153,11 @@ static void jit_capture_retain_dispatch_bufs(JitCapture *c,
     return;
   }
   KernelEntry *ke = &KERNELS[op->kid];
-  // Multi-output kernels: walk every output slot via the canonical
-  // accessor rather than reading the legacy output_tid only.  Slot 0
-  // owns the captured op->out_buf_id; slots 1..n_extra_outputs reach
-  // their TenDesc's backend via TENS[extra_tid].buf_id (the merge
-  // pass populated those at materialize time, see step 2).
   Backend *out_backend = NULL;
   if (ke->output_tid != 0 && ke->output_tid < TENS_NEXT) {
     out_backend = TENS[ke->output_tid].backend;
   }
   jit_capture_retain_buf(c, out_backend, op->out_buf_id);
-  u32 n_outputs = kernel_entry_output_count(op->kid);
-  for (u32 ox = 1; ox < n_outputs; ox++) {
-    u32 extra_tid = kernel_entry_output_tid_at(op->kid, ox);
-    if (extra_tid == 0 || extra_tid >= TENS_NEXT) continue;
-    Backend *eb = TENS[extra_tid].backend;
-    jit_capture_retain_buf(c, eb, TENS[extra_tid].buf_id);
-  }
 
   u32 const *ids = op->heap_in_buf_ids != NULL
                  ? op->heap_in_buf_ids

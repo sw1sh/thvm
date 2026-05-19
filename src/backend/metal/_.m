@@ -1346,10 +1346,6 @@ static int metal_tile_jit_encode(KernelEntry *ke,
                                  u32 groups_x,
                                  u32 threads_x) {
   if (groups_x == 0 || threads_x == 0) return 0;
-  // Multi-output kernels need N output buffers bound to indices
-  // 0..N-1; the tile encoder binds a single outBuf at index 0.
-  // Bail until step 4+ wires the multi-output dispatch.
-  if (cg_kernel_has_extra_outputs(ke)) return 0;
   id<MTLComputePipelineState> pso = metal_tile_jit_pipeline(ke);
   if (pso == nil) return 0;
   if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) {
@@ -1913,21 +1909,15 @@ static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
 
 // === DAG-side per-op encoder ========================================
 //
-// Walks ke->cached_lift.store_root (a UOP_STORE / UOP_AFTER chain
-// produced by kernel_lift_to_uop) and emits one
-// MTLComputeCommandEncoder per UOp tree node so Metal hazard-tracks
-// reads/writes across encoders.  Fires when the lift succeeded
-// (cached_lift.store_root != 0) AND metal_tile_jit_encode declined
-// (typically multi-output kernels that bail at the
-// cg_kernel_has_extra_outputs gate).
+// Walks ke->cached_lift.store_root (a UOP_STORE produced by
+// kernel_lift_to_uop) and emits one MTLComputeCommandEncoder per
+// UOp tree node so Metal hazard-tracks reads/writes across encoders.
+// Fires when the lift succeeded (cached_lift.store_root != 0) AND
+// metal_tile_jit_encode declined.
 //
 // metal_pipeline_for(opcode, dtype) -- the table that resolves a
 // (UOP_*, dtype) pair to an MTLComputePipelineState -- handles the
-// shader lookup.  The shapes the lifter produces for multi-output
-// kernels are elementwise + UOP_CONST + UOP_INDEX_E(input_buf,
-// range_addr) only.  REDUCE / movement ops never appear in
-// lift-eligible multi-output programs because
-// merge_boundary_is_elementwise filters them out at splice time.
+// shader lookup.
 
 #define DAG_ENCODE_MAX_VISITED 256u
 #define DAG_ENCODE_MAX_INTERMS  64u
@@ -2124,13 +2114,13 @@ static u32 dag_enc_value(DagEncCtx *c, Term v, u32 dst_buf_id) {
   return 0;
 }
 
-// Resolve the destination Metal buf id for a UOP_STORE based on its
-// destination UOP_BUFFER's instance: instance==0 = primary outBuf;
-// instance == KERNEL_LIFT_EXTRA_INST_BASE + ei = extra output ei.
-// Returns 0 if the buffer slot can't be resolved (callee bails).
-#define DAG_LIFT_EXTRA_INST_BASE (1u + KERNEL_LIFT_MAX_INPUT)
+// Resolve the destination Metal buf id for a UOP_STORE.  Every
+// emitted kernel writes its single output via the UOP_BUFFER with
+// instance==0; any other instance is an input slot, which is not a
+// valid STORE destination.  Returns 0 to bail.
 static u32 dag_enc_resolve_store_dst(DagEncCtx *c, Term store_buf,
                                      u32 primary_out_buf_id) {
+  (void)c;
   u32 buf_op = 0; u64 buf_loc = 0;
   if (!uop_dag_decode_uop(store_buf, &buf_op, &buf_loc)
       || buf_op != UOP_BUFFER) {
@@ -2140,18 +2130,6 @@ static u32 dag_enc_resolve_store_dst(DagEncCtx *c, Term store_buf,
   if (inst == 0) {
     return primary_out_buf_id;
   }
-  if (inst >= DAG_LIFT_EXTRA_INST_BASE) {
-    u32 ei = inst - DAG_LIFT_EXTRA_INST_BASE;
-    if (ei >= (u32)c->ke->n_extra_outputs) return 0;
-    u32 extra_tid = c->ke->extra_output_tids[ei];
-    if (extra_tid == 0 || extra_tid >= TENS_NEXT) return 0;
-    u32 extra_buf_id = TENS[extra_tid].buf_id;
-    if (extra_buf_id == 0 || extra_buf_id >= METAL_BUFS_NEXT
-        || METAL_BUFS[extra_buf_id].buf == nil) return 0;
-    return extra_buf_id;
-  }
-  // Input buffer instance (1..KERNEL_LIFT_MAX_INPUT) is not a valid
-  // STORE destination in the lift's contract -- bail.
   return 0;
 }
 
@@ -2208,12 +2186,6 @@ static int dag_metal_encode_kernel(KernelEntry *ke,
   Term root = ke->cached_lift.store_root;
   if (root == 0) return 0;
   if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return 0;
-  // Single-output kernels are already handled by metal_tile_jit_encode
-  // via cg_emit_via_uop; only multi-output kernels (which tile_jit
-  // rejects via cg_kernel_has_extra_outputs) reach here.  Guard against
-  // accidental misroutes.
-  // The encoder works for single-output too -- just falls through to a
-  // single STORE walk -- so don't gate on n_extra_outputs.
   DagEncCtx ctx = {0};
   ctx.ke                 = ke;
   ctx.effective_buf_ids  = effective_buf_ids;

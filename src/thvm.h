@@ -763,32 +763,13 @@ typedef struct {
 // fan-in.  Real workloads max out at ~30 inputs (Conv2D fuses
 // kh*kw input/weight tids per kernel).
 #define KERNEL_LIFT_MAX_INPUT 64
-// Defined here (rather than inside KernelEntry below) because
-// KernelUopLift uses it for the static out_bufs[] cap.  Mirrored from
-// the multi-output groundwork comment block on KernelEntry.
-#define KERNEL_MAX_EXTRA_OUTPUTS 7
-// Total outputs the lift can describe (primary + extras).  Sized to
-// match KERNEL_MAX_EXTRA_OUTPUTS so any kernel the splice action
-// produces fits.
-#define KERNEL_LIFT_MAX_OUTPUT (1 + KERNEL_MAX_EXTRA_OUTPUTS)
 typedef struct {
-  // store_root is the topmost UOP_STORE (single-output) or the
-  // outermost UOP_AFTER chaining all per-output stores (multi-output).
+  // Topmost UOP_STORE for the kernel's single output.
   Term store_root;
-  // Primary output buffer Term (== out_bufs[0] when n_outputs >= 1).
-  // Kept as a named field so single-output consumers don't need to
-  // touch the array.
+  // Output buffer Term (the UOP_BUFFER the STORE writes to).
   Term out_buf;
   Term in_bufs[KERNEL_LIFT_MAX_INPUT];
   u32  n_inputs;
-  // Multi-output extension (F6 multi-output walker).  n_outputs == 1
-  // for single-output lifts; > 1 reserves a STORE-AFTER chain shape
-  // that test scaffolding (test_metal_real, test_apply_opt_dag) still
-  // constructs directly.  Slot 0 mirrors `out_buf`; slots 1..n_outputs-1
-  // hold the extra-output UOP_BUFFER Terms in the order
-  // extra_output_tids[] declared them.
-  u32  n_outputs;
-  Term out_bufs[KERNEL_LIFT_MAX_OUTPUT];
 } KernelUopLift;
 
 typedef struct KernelEntry {
@@ -839,25 +820,10 @@ typedef struct KernelEntry {
   // kernel_alloc.c next to input_visit_counts.
   u8       *input_chain_composed;
 
-  u32       output_tid;            // TenDesc id we write to (slot 0)
+  u32       output_tid;            // TenDesc id we write to
   u32       output_dtype;
   Shape     output_shape;
   u32       output_numel;
-  // Multi-output kernel infrastructure ().
-  // n_extra_outputs == 0 for the legacy single-output path; output
-  // index 0 maps to output_tid above, indices 1..n_extra_outputs
-  // map to the extras arrays below.  Total outputs in the kernel
-  // = 1 + n_extra_outputs.  The infrastructure that actually
-  // emits multi-output kernels (visit() + codegen + dispatch) is
-  // not yet in place; this schema reserves the slots so future
-  // commits can land each layer independently.  See
-  // KERNEL_MAX_EXTRA_OUTPUTS for the cap (sized small to keep
-  // KernelEntry compact; bump if real workloads need more).
-  u8        n_extra_outputs;
-  u32       extra_output_tids   [KERNEL_MAX_EXTRA_OUTPUTS];
-  u32       extra_output_dtypes [KERNEL_MAX_EXTRA_OUTPUTS];
-  Shape     extra_output_shapes [KERNEL_MAX_EXTRA_OUTPUTS];
-  u32       extra_output_numels [KERNEL_MAX_EXTRA_OUTPUTS];
 
   // Original root UOP term that this kernel was built from.  The
   // walker rewrites parent cells to UOP_KERNEL but leaves the
@@ -886,10 +852,10 @@ typedef struct KernelEntry {
   // Cached output of kernel_lift_to_uop, populated by
   // emit_kernel_for_boundary.  When the lift declines,
   // cached_lift.store_root stays 0.  All Term-typed fields
-  // (store_root, out_buf, in_bufs[0..n_inputs), out_bufs[0..n_outputs))
-  // are heap-resident and walked by gc_evacuate_side_tables across
-  // collections.  Embedded by-value (~528 B per slot, KERNELS_CAP-
-  // bounded) so there's no extra allocation / lifetime management.
+  // (store_root, out_buf, in_bufs[0..n_inputs)) are heap-resident
+  // and walked by gc_evacuate_side_tables across collections.
+  // Embedded by-value (~528 B per slot, KERNELS_CAP-bounded) so
+  // there's no extra allocation / lifetime management.
   KernelUopLift cached_lift;
 
   // Snapshot of cached_lift.store_root at materialize time, before any
@@ -1703,17 +1669,6 @@ fn u64  materialize_boundary_at(u32 i);
 fn u32  materialize_boundary_depth_at(u32 i);
 fn u32  materialize_boundary_last_use_at(u32 i);
 
-// Multi-output kernel-merge planning accessors (Step 2 of multi-output
-// groundwork).  `materialize_kernel_merge_candidate_count` returns the
-// number of (host, child) pairs the most recent thvm_materialize pass
-// flagged as fusion candidates.  `materialize_kernel_merge_into(bi)`
-// returns BOUNDARY_MERGE_NONE (0xFFFFFFFFu) when boundary `bi` is its
-// own host (no merge), or the host's boundary-order index otherwise.
-// Both accessors are read-only and reflect the most recent materialize
-// pass; the planning runs every materialize call and resets state.
-fn u32  materialize_kernel_merge_candidate_count(void);
-fn u32  materialize_kernel_merge_into(u32 bi);
-
 // Per-input-slot bufferize source id read from a
 // materialized KernelEntry.  Returns the 1-based buffer id stored
 // during visit() (0 when the slot's source is a leaf or was not
@@ -1723,22 +1678,14 @@ fn u32  materialize_kernel_merge_into(u32 bi);
 // for that slot via bufferize_edge_summary, looking up the
 // consumer loc from the kernel's source_uop.
 fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
-// Multi-output kernel accessors ().  Output
-// index 0 reads from the legacy `output_tid` family, indices
-// 1..n_extra_outputs from the extras arrays.  `kernel_entry_output_count`
-// returns 1 + n_extra_outputs.  Returns 0 / sentinels for invalid
-// (kid, idx) pairs.  Callers that emit multi-output programs should
-// populate via `kernel_entry_set_extra_output(kid, idx, tid, dtype,
-// shape, numel)` so future codegen passes have a single canonical
-// access path.
+// Single-output kernel accessors.  Slot 0 returns the legacy
+// `output_tid` family; other slots return 0 / sentinels.
+// `kernel_entry_output_count` returns 1 for every live kernel.
 fn u32  kernel_entry_output_count(u32 kid);
 fn u32  kernel_entry_output_tid_at(u32 kid, u32 idx);
 fn u32  kernel_entry_output_dtype_at(u32 kid, u32 idx);
 fn u32  kernel_entry_output_numel_at(u32 kid, u32 idx);
 fn int  kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out);
-fn int  kernel_entry_set_extra_output(u32 kid, u32 idx,
-                                       u32 tid, u32 dtype,
-                                       Shape const *shape, u32 numel);
 fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
 // Per-USE variant: select the `edge_idx`-th BIndex record whose
 // (consumer, source) pair matches the kernel's source_uop and the
@@ -2280,8 +2227,8 @@ fn int kernel_should_hand_code_opts(struct KernelEntry const *ke);
 // when `t` is a TAG_UOP; 0 otherwise.
 int uop_dag_decode_uop    (Term t, u32 *out_op, u64 *out_loc);
 
-// UOP_BUFFER's instance disambiguator (0 = default; 1.. = input slot
-// + extras; see kernel_lift_to_uop's KERNEL_LIFT_EXTRA_INST_BASE).
+// UOP_BUFFER's instance disambiguator (0 = output buffer; 1..N =
+// input slot N-1).
 u32 uop_dag_buffer_instance(Term t);
 
 // UOP_CONST payload decode: dtype + raw bits.  Returns 1 on success.
@@ -2729,14 +2676,6 @@ typedef enum {
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
-// Multi-output kernel guard (Step 3): returns 1 iff the kernel
-// writes more than one output buffer (i.e. n_extra_outputs > 0).
-// Renderer entry points and dispatch paths bail when this returns 1
-// until the per-output emit / dispatch wiring lands; the runtime
-// then falls back to the interpreter (which itself bails on
-// multi-output today, see backend/cpu/interpret.c).
-// External linkage (not `fn`) so the Metal .m TU can call it.
-int   cg_kernel_has_extra_outputs(KernelEntry const *ke);
 char *cg_emit_metal(KernelEntry const *ke);   // caller frees
 char *cg_emit_tile_metal(KernelEntry const *ke);   // caller frees
 int   cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x, u32 *threads_x);

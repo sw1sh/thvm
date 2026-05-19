@@ -200,10 +200,6 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 // / BLAS_GEMM) so the profiler can record the route, or 0 on no-match
 // (caller falls through to JIT / interpreter).
 fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  // BLAS routines write a single output (sgemm/sgemv/sdot all
-  // expect one C buffer).  Multi-output kernels must skip BLAS
-  // until the dispatch wiring lands.
-  if (cg_kernel_has_extra_outputs(ke)) return 0;
   // Bisection knob: THVM_CPU_BLAS_DISABLE=1 forces every kernel past
   // the BLAS try-ladder so the walker / JIT path runs instead.  Used
   // for isolating BLAS-classifier bugs (mis-mapped A/B operand order,

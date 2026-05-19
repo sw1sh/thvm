@@ -154,8 +154,6 @@ EXPORT void py_kernel_set_cached_lift(uint32_t kid, uint64_t store_root,
   for (uint32_t i = 0; i < n_inputs; i++) {
     ke->cached_lift.in_bufs[i] = in_bufs[i];
   }
-  ke->cached_lift.n_outputs = 1;
-  ke->cached_lift.out_bufs[0] = out_buf;
   // Also set the KernelEntry's own n_inputs -- DAG classifiers read
   // ke->n_inputs (not cached_lift.n_inputs) when validating the
   // BUFFER.instance->slot mapping (uop_dag_classify_matmul_shape:507).

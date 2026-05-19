@@ -224,12 +224,6 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
 }
 
 char *cg_emit_tile_metal(KernelEntry const *ke) {
-  // Multi-output kernels are not yet renderable through the tile
-  // metal path (single `device float *out` arg + single S_STORE).
-  // Bail until step 4 wires the multi-output dispatch.
-  if (cg_kernel_has_extra_outputs(ke)) {
-    return NULL;
-  }
   // Render through the UOp-DAG renderer.  The lifter handles every
   // kernel shape (matmul / conv2d / elementwise / reduce / movement-
   // fused / im2col multi-input).  Returns NULL when the lifter

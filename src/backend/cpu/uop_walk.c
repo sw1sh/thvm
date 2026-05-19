@@ -27,7 +27,6 @@
 #define UWALK_MAX_RANGES   16
 #define UWALK_MAX_REDUCES  8
 #define UWALK_MAX_INPUTS KERNEL_LIFT_MAX_INPUT
-#define UWALK_MAX_OUTPUTS KERNEL_LIFT_MAX_OUTPUT
 
 // THVM_TRACE_UOP_WALK_DECLINE=1 emits one stderr line per decline
 // site, classified by short tag + detail. Off by default; one cached
@@ -69,13 +68,10 @@ typedef struct {
   void *in_ptrs  [UWALK_MAX_INPUTS];
   u32   in_dtypes[UWALK_MAX_INPUTS];
   u32   n_inputs;
-  // Output buffer table.  Slot 0 is the primary; slots 1..n_outputs-1
-  // are extras (multi-output kernel-merge support).  Single-output
-  // kernels populate slot 0 only and leave n_outputs == 1.
-  Term  out_terms [UWALK_MAX_OUTPUTS];
-  void *out_ptrs  [UWALK_MAX_OUTPUTS];
-  u32   out_dtypes[UWALK_MAX_OUTPUTS];
-  u32   n_outputs;
+  // Single output buffer (every emitted kernel writes one buffer).
+  Term  out_term;
+  void *out_ptr;
+  u32   out_dtype;
   // Kid (index into KERNELS[]) of the currently-walking entry, used
   // only for THVM_TRACE_UOP_WALK_DECLINE telemetry. Set by
   // cpu_uop_walk before any uwalk_emit_* helper runs.
@@ -85,15 +81,10 @@ typedef struct {
 // Resolve a UOP_BUFFER term to (ptr, dtype). Returns 1 on hit.
 static int uwalk_resolve_buf(UWalkCtx const *c, Term buf, void **out_ptr,
                              u32 *out_dt) {
-  // Primary + extra outputs match by Term identity.  Multi-output
-  // kernels need this scan to dispatch each STORE to the right
-  // backing buffer.
-  for (u32 i = 0; i < c->n_outputs; i++) {
-    if (c->out_terms[i] == buf) {
-      *out_ptr = c->out_ptrs  [i];
-      *out_dt  = c->out_dtypes[i];
-      return 1;
-    }
+  if (c->out_term == buf) {
+    *out_ptr = c->out_ptr;
+    *out_dt  = c->out_dtype;
+    return 1;
   }
   for (u32 i = 0; i < c->n_inputs; i++) {
     if (c->in_terms[i] == buf) {
@@ -106,20 +97,9 @@ static int uwalk_resolve_buf(UWalkCtx const *c, Term buf, void **out_ptr,
   // make the term identity unreliable across kernel rebuilds).
   u32 inst = uop_buffer_inst_get(buf);
   if (inst == 0) {
-    *out_ptr = c->out_ptrs  [0];
-    *out_dt  = c->out_dtypes[0];
+    *out_ptr = c->out_ptr;
+    *out_dt  = c->out_dtype;
     return 1;
-  }
-  // Extras live in the inst range [KERNEL_LIFT_EXTRA_INST_BASE,
-  // KERNEL_LIFT_EXTRA_INST_BASE + KERNEL_MAX_EXTRA_OUTPUTS).
-  if (inst >= (1u + KERNEL_LIFT_MAX_INPUT)) {
-    u32 ei = inst - (1u + KERNEL_LIFT_MAX_INPUT);
-    if (1u + ei < c->n_outputs) {
-      *out_ptr = c->out_ptrs  [1 + ei];
-      *out_dt  = c->out_dtypes[1 + ei];
-      return 1;
-    }
-    return 0;
   }
   u32 slot = inst - 1;
   if (slot < c->n_inputs) {
@@ -982,13 +962,11 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // store_root==0 means the lift declined; the walker can't help in
   // that case (legacy fallback runs).
   if (ke->cached_lift.store_root == 0) {
-    if (trace_on) fprintf(stderr, "uop_walk: lift declined n_inputs=%u "
-                          "n_extra=%u\n",
-                          ke->n_inputs, (u32)ke->n_extra_outputs);
+    if (trace_on) fprintf(stderr, "uop_walk: lift declined n_inputs=%u\n",
+                          ke->n_inputs);
     UWALK_DECLINE(kid, "lift_declined",
-                  "n_inputs=%u n_extra=%u",
-                  (unsigned)ke->n_inputs,
-                  (unsigned)ke->n_extra_outputs);
+                  "n_inputs=%u",
+                  (unsigned)ke->n_inputs);
     return 0;
   }
   KernelUopLift const *lift = &ke->cached_lift;
@@ -1001,59 +979,11 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   UWalkCtx ctx = {0};
   ctx.kid       = kid;
   ctx.n_inputs  = lift->n_inputs;
-  // Populate primary output (slot 0).
-  ctx.out_terms [0] = lift->out_buf;
-  ctx.out_ptrs  [0] = CPU_BUFS[out_buf_id].data;
-  ctx.out_dtypes[0] = uop_buffer_dtype(lift->out_buf);
-  if (ctx.out_dtypes[0] == 0) ctx.out_dtypes[0] = ke->output_dtype;
-  ctx.n_outputs = 1;
-  // Populate extras: each extra_output_tids[ei] resolves to a CpuBuf
-  // via the producer-kid wiring set up by splice_child_into_host.
-  // The lift records out_bufs[1+ei] (UOP_BUFFER Term) so STOREs in the
-  // AFTER chain dispatch correctly via uwalk_resolve_buf's identity
-  // match on the Term.
-  if (lift->n_outputs > 1) {
-    if (lift->n_outputs > UWALK_MAX_OUTPUTS) {
-      UWALK_DECLINE(kid, "lift_n_outputs_over_cap",
-                    "n_outputs=%u cap=%u",
-                    (unsigned)lift->n_outputs,
-                    (unsigned)UWALK_MAX_OUTPUTS);
-      return 0;
-    }
-    for (u32 ei = 0; ei < lift->n_outputs - 1; ei++) {
-      if (ei >= ke->n_extra_outputs) {
-        UWALK_DECLINE(kid, "extra_output_count_mismatch",
-                      "ei=%u n_extra=%u lift_n_outputs=%u",
-                      (unsigned)ei,
-                      (unsigned)ke->n_extra_outputs,
-                      (unsigned)lift->n_outputs);
-        return 0;
-      }
-      u32 extra_tid = ke->extra_output_tids[ei];
-      if (extra_tid == 0 || extra_tid >= TENS_NEXT) {
-        UWALK_DECLINE(kid, "extra_output_bad_tid",
-                      "ei=%u tid=%u TENS_NEXT=%u",
-                      (unsigned)ei, (unsigned)extra_tid,
-                      (unsigned)TENS_NEXT);
-        return 0;
-      }
-      u32 buf_id = TENS[extra_tid].buf_id;
-      if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) {
-        UWALK_DECLINE(kid, "extra_output_bad_buf_id",
-                      "ei=%u buf_id=%u CPU_BUFS_NEXT=%u",
-                      (unsigned)ei, (unsigned)buf_id,
-                      (unsigned)CPU_BUFS_NEXT);
-        return 0;
-      }
-      ctx.out_terms [1 + ei] = lift->out_bufs[1 + ei];
-      ctx.out_ptrs  [1 + ei] = CPU_BUFS[buf_id].data;
-      ctx.out_dtypes[1 + ei] = ke->extra_output_dtypes[ei];
-      if (ctx.out_dtypes[1 + ei] == 0) {
-        ctx.out_dtypes[1 + ei] = uop_buffer_dtype(lift->out_bufs[1 + ei]);
-      }
-      ctx.n_outputs++;
-    }
-  }
+  // Output buffer (single).
+  ctx.out_term  = lift->out_buf;
+  ctx.out_ptr   = CPU_BUFS[out_buf_id].data;
+  ctx.out_dtype = uop_buffer_dtype(lift->out_buf);
+  if (ctx.out_dtype == 0) ctx.out_dtype = ke->output_dtype;
   // Resolve raw pointers (no pre-mat -- the lifter's view-stride
   // addressing reads the underlying buffer directly).
   for (u32 i = 0; i < lift->n_inputs; i++) {

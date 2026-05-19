@@ -206,8 +206,6 @@ static void test_kernel_apply_opt_dag_path(void) {
   ke->cached_lift.in_bufs[0] = A;
   ke->cached_lift.in_bufs[1] = B;
   ke->cached_lift.n_inputs   = 2;
-  ke->cached_lift.n_outputs  = 1;
-  ke->cached_lift.out_bufs[0] = C;
   ke->n_inputs = 2;
 
   KOpt opt = { KOP_TC, 0, 32 };

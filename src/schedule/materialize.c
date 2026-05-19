@@ -39,44 +39,13 @@ fn void bypass_kernel_counters_reset    (void) {
 }
 // Per-BOUNDARY_ORDER slot, the UOP_BUFFERIZE Term the unified
 // rangeify pass emitted at this boundary (0 when the boundary has
-// no unified-pass record).  Mirror: tinygrad/schedule/indexing.py:77
-// lands a UOp(Ops.BUFFERIZE, ...) per realize boundary; the
-// scheduler downstream walks those.  thvm projects the term onto a
-// per-boundary slot so emit_kernel_for_boundary can read it without
-// re-doing the bufferize_info_find lookup.
+// no unified-pass record).  Populated by topo_sort_boundaries when
+// the unified pass produced a non-zero RU_BUFFERIZE_TERM;
+// emit_kernel_for_boundary stashes this onto ke->compute_bufferize.
+// Mirror: tinygrad/schedule/indexing.py:77 lands a UOp(Ops.BUFFERIZE,
+// ...) per realize boundary; the scheduler downstream walks those.
 static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_ORDER_LEN = 0;
-// Parallel UOP_BUFFERIZE Term per slot in BOUNDARY_ORDER, populated
-// by topo_sort_boundaries when the unified pass produced a non-zero
-// RU_BUFFERIZE_TERM for that boundary. emit_kernel_for_boundary
-// stashes this onto ke->compute_bufferize after kernel_alloc.
-// 0 = "no UOP_BUFFERIZE term for this boundary" (realized boundary
-// the unified pass didn't surface).
-static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
-
-// Multi-output kernel merge planning (Step 2 of multi-output groundwork).
-// After topo_sort_boundaries fills BOUNDARY_ORDER, plan_kernel_merges
-// scans for pairs (A, B) where:
-//   - same output shape (same iter rank+dims),
-//   - both pure-elementwise (no UOP_REDUCE, by BUFFERIZE_NODES walk),
-//   - no data-flow dependency between them,
-//   - input set overlap (shared parents, after dedup),
-//   - merged fingerprint stays within tile-feasibility op budget.
-// When the merge is enabled (env THVM_KERNEL_MERGE=1, default OFF),
-// emit_kernel_for_boundary walks each candidate B with merge_into_idx[B] = A
-// and emits B's program ops as part of A's KernelEntry, then assigns
-// B's output as a kernel_entry_set_extra_output(A) entry.  When the
-// merge is OFF (default), the planning still runs and counts candidates
-// for diagnostic visibility -- BOUNDARY_MERGE_INTO stays at sentinel
-// 0xFFFFFFFFu and emit_kernel_for_boundary follows the legacy single-
-// output path for every boundary.
-//
-// 0xFFFFFFFFu  = "this boundary is its own host (no merge)" or "no plan".
-// other index  = "this boundary should be merged into BOUNDARY_ORDER[m]".
-#define BOUNDARY_MERGE_NONE 0xFFFFFFFFu
-static u32  BOUNDARY_MERGE_INTO  [BOUNDARY_ORDER_CAP];
-static u32  KERNEL_MERGE_CANDIDATES = 0;   // count of pairs flagged by the
-                                            // last plan_kernel_merges run
 
 // Open-addressed loc -> BOUNDARY_ORDER index hash.  Without it,
 // boundary_index_for_loc was an O(BOUNDARY_ORDER_LEN) scan per
@@ -2074,380 +2043,35 @@ static void topo_sort_buffers_unified(Term root) {
   }
 }
 
-// === Step 2: kernel-merging plan ====================================
-// Walks BOUNDARY_ORDER pairwise looking for boundaries that could be
-// fused into one multi-output kernel.  See the BOUNDARY_MERGE_INTO
-// comment block above for the predicate semantics and the env-flag
-// gating.
-//
-// Predicates (kept narrow on first landing):
-//   - boundary's UOP is elementwise (uop_is_unary_elementwise OR
-//     uop_is_binary_elementwise).  Movement-op roots and REDUCE
-//     roots are excluded -- merging across reductions or shape-
-//     reinterpret is harder and lands later.
-//   - both boundaries' iter shapes match exactly.  We use Shape
-//     inferred via term_shape_in.
-//   - inputs of A and B overlap by at least one TenDesc (otherwise
-//     fusing them just spreads cache pressure).  Identical input
-//     sets is the strict subset; we currently require non-empty
-//     intersection only.
-//   - no data-flow dependency: B's UOP subgraph (via heap walk of
-//     children) does not reach A's loc, and vice versa.
-//
-// The plan stops at one merge per host (1->1 fusion, no chains),
-// which keeps the surface area of the codegen change in step 3
-// bounded.  If a host A merges with B, the same A cannot merge
-// with C in the same pass; A's slot 1 is filled, slot 2 stays open
-// for a future relaxation.
-//
-// Programs are NOT mutated here -- only metadata.  The actual merge
-// (program splice + kernel_entry_set_extra_output) runs in
-// emit_kernel_for_boundary when THVM_KERNEL_MERGE=1.
-static int kernel_merge_enabled(void) {
-  char const *e = getenv("THVM_KERNEL_MERGE");
-  return e != NULL && e[0] != '0';
-}
-static int kernel_merge_dump_enabled(void) {
-  char const *e = getenv("DUMP_KERNEL_MERGE");
-  return e != NULL && e[0] != '0';
-}
-
-// Pure-elementwise predicate at boundary granularity.  Reads the
-// boundary's UOP opcode from BUFFERIZE_NODES and returns 1 only for
-// unary/binary elementwise roots.  Movement / REDUCE / KERNEL roots
-// return 0.  CONST/LOAD also return 0 (those are leaves, not fusable
-// hosts in the merge sense).
-static u8 merge_boundary_is_elementwise(u64 loc) {
-  u32 idx = bufferize_info_find(loc);
-  if (idx == 0xFFFFFFFFu) return 0;
-  u8 op = BUFFERIZE_NODES[idx].op;
-  return uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op);
-}
-
-// Quick `from` -> `target` reachability test.  Walks the UOP DAG
-// under heap[from + 0..arity-1] looking for `target_loc`.  Stops at
-// realized boundaries other than `from` itself (those are kernel
-// inputs, so anything past them is consumed via TenDesc, not via
-// re-traversal).  Used to detect data-flow dependency between two
-// boundary candidates.
-//
-// Returns 1 iff `from`'s subtree reaches `target_loc`.
-static u8 merge_subtree_reaches_loc(u64 from_loc, u64 target_loc,
-                                    u8 *visited) {
-  if (from_loc == target_loc) return 1;
-  if (from_loc >= HEAP_NEXT) return 0;
-  if (visited[from_loc]) return 0;
-  visited[from_loc] = 1;
-  u32 idx = bufferize_info_find(from_loc);
-  if (idx == 0xFFFFFFFFu) return 0;
-  // Stop at any realized boundary that isn't the starting one;
-  // its children are reached via the kernel's input slots, not
-  // directly via heap traversal.  (We pass from_loc as the start
-  // marker by not setting a boundary check on the very first call.)
-  // The realized check kicks in for descendants below.
-  u8 ar = uop_arity(BUFFERIZE_NODES[idx].op);
-  for (u8 c = 0; c < ar; c++) {
-    Term child = term_resolve(heap_read(from_loc + c));
-    if (term_tag(child) != TAG_UOP) continue;
-    if (term_ext(child) == UOP_KERNEL) continue;
-    u64 cloc = term_val(child);
-    u32 cidx = bufferize_info_find(cloc);
-    if (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized
-        && cloc != target_loc) {
-      // Boundary -- stop walking; if it's the target, we'd have
-      // matched the early return above.
-      continue;
-    }
-    if (merge_subtree_reaches_loc(cloc, target_loc, visited)) return 1;
-  }
-  return 0;
-}
-
-// Collect the set of TenDesc-input ids reachable from a boundary's
-// subtree.  Stops at realized boundaries (their output TenDescs are
-// what fed into the kernel as inputs).  Returns count.
-//
-// `out_tids` is sized to `cap`; overflow returns cap (we treat that
-// as "too many inputs, reject the merge for safety").
-static u32 merge_collect_input_tids(u64 from_loc, u32 *out_tids, u32 cap,
-                                    u8 *visited) {
-  if (from_loc >= HEAP_NEXT) return 0;
-  if (visited[from_loc]) return 0;
-  visited[from_loc] = 1;
-  u32 idx = bufferize_info_find(from_loc);
-  if (idx == 0xFFFFFFFFu) return 0;
-  u8 ar = uop_arity(BUFFERIZE_NODES[idx].op);
-  u32 n = 0;
-  for (u8 c = 0; c < ar; c++) {
-    Term child = term_resolve(heap_read(from_loc + c));
-    u8 ctag = term_tag(child);
-    if (ctag == TAG_TEN) {
-      u32 tid = (u32)term_val(child);
-      // Linear dedup -- input sets are tiny (typically 2-8 entries).
-      u8 seen = 0;
-      for (u32 i = 0; i < n; i++) if (out_tids[i] == tid) { seen = 1; break; }
-      if (!seen) {
-        if (n >= cap) return cap;
-        out_tids[n++] = tid;
-      }
-      continue;
-    }
-    if (ctag != TAG_UOP) continue;
-    if (term_ext(child) == UOP_KERNEL) {
-      Term outbuf = heap_read(term_val(child));
-      if (term_tag(outbuf) == TAG_TEN) {
-        u32 tid = (u32)term_val(outbuf);
-        u8 seen = 0;
-        for (u32 i = 0; i < n; i++) if (out_tids[i] == tid) { seen = 1; break; }
-        if (!seen) {
-          if (n >= cap) return cap;
-          out_tids[n++] = tid;
-        }
-      }
-      continue;
-    }
-    u64 cloc = term_val(child);
-    u32 cidx = bufferize_info_find(cloc);
-    if (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized) {
-      // Realized boundary: it produces a TenDesc the consumer kernel
-      // reads.  We can't pull that tid out of BUFFERIZE_NODES yet (the
-      // boundary may not have emitted), so we record the loc as a
-      // pseudo-tid using a high bit.  For the merge predicate we
-      // just need a stable identifier; we hash loc into the upper
-      // 31 bits.
-      u32 pseudo = 0x80000000u | (u32)(cloc & 0x7FFFFFFFu);
-      u8 seen = 0;
-      for (u32 i = 0; i < n; i++) if (out_tids[i] == pseudo) { seen = 1; break; }
-      if (!seen) {
-        if (n >= cap) return cap;
-        out_tids[n++] = pseudo;
-      }
-      continue;
-    }
-    // Recurse into non-realized intermediate.
-    u32 sub = merge_collect_input_tids(cloc, out_tids + n, cap - n, visited);
-    n += sub;
-    if (n >= cap) return cap;
-  }
-  return n;
-}
-
-// Number of input ids in `a` that also appear in `b`.
-static u32 merge_input_overlap(u32 const *a, u32 na,
-                               u32 const *b, u32 nb) {
-  u32 hit = 0;
-  for (u32 i = 0; i < na; i++) {
-    for (u32 j = 0; j < nb; j++) {
-      if (a[i] == b[j]) { hit++; break; }
-    }
-  }
-  return hit;
-}
-
-// Get the boundary's output Shape via term_shape_in on the UOP_<op>
-// term we'd construct from BUFFERIZE_NODES.  Returns 1 on success.
-static int merge_boundary_shape(u64 loc, Shape *out) {
-  u32 idx = bufferize_info_find(loc);
-  if (idx == 0xFFFFFFFFu) return 0;
-  Term t = term_new(0, TAG_UOP, BUFFERIZE_NODES[idx].op, loc);
-  return term_shape_in(t, 0, out);
-}
-
-static int merge_shapes_equal(Shape const *a, Shape const *b) {
-  if (a->ndim != b->ndim) return 0;
-  for (u32 i = 0; i < a->ndim; i++) {
-    if (a->dims[i] != b->dims[i]) return 0;
-  }
-  return 1;
-}
-
-// Mirrors THVM_BUFFERIZE_REMOVE_SCORE_CONSUMER_OPS_BUDGET as the
-// initial cap; merging fewer-but-larger kernels is fine but only
-// up to the tile path's op budget.
-#define KERNEL_MERGE_OP_BUDGET 64
-
-// Consumer-op count proxy: count UOP children reachable from a
-// boundary's subtree (stopping at realized boundaries).  Cheap
-// pre-emit estimate of how many ops the lifter would emit;
-// merged total must stay below KERNEL_MERGE_OP_BUDGET to keep
-// the kernel tile-feasible.
-static u32 merge_op_count_estimate(u64 from_loc, u8 *visited) {
-  if (from_loc >= HEAP_NEXT) return 0;
-  if (visited[from_loc]) return 0;
-  visited[from_loc] = 1;
-  u32 idx = bufferize_info_find(from_loc);
-  if (idx == 0xFFFFFFFFu) return 0;
-  u8 ar = uop_arity(BUFFERIZE_NODES[idx].op);
-  u32 n = 1;     // self
-  for (u8 c = 0; c < ar; c++) {
-    Term child = term_resolve(heap_read(from_loc + c));
-    if (term_tag(child) != TAG_UOP) continue;
-    if (term_ext(child) == UOP_KERNEL) continue;
-    u64 cloc = term_val(child);
-    u32 cidx = bufferize_info_find(cloc);
-    if (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized) continue;
-    n += merge_op_count_estimate(cloc, visited);
-  }
-  return n;
-}
-
-static void plan_kernel_merges(void) {
-  KERNEL_MERGE_CANDIDATES = 0;
-  for (u32 i = 0; i < BOUNDARY_ORDER_CAP; i++) {
-    BOUNDARY_MERGE_INTO[i] = BOUNDARY_MERGE_NONE;
-  }
-  if (BOUNDARY_ORDER_LEN < 2) return;
-  if (HEAP_NEXT == 0) return;
-
-  // Reusable scratch buffers (sized once, reused across pairs).
-  u8 *visited = (u8 *)calloc(HEAP_NEXT, 1);
-  if (visited == NULL) return;
-
-  for (u32 a = 0; a < BOUNDARY_ORDER_LEN; a++) {
-    u64 a_loc = BOUNDARY_ORDER[a];
-    if (!merge_boundary_is_elementwise(a_loc)) continue;
-    Shape a_shape = {0};
-    if (!merge_boundary_shape(a_loc, &a_shape)) continue;
-    if (a_shape.ndim == 0) continue;
-
-    // Already a host with a child -- skip (1->1 fusion only).
-    u8 a_already_host = 0;
-    for (u32 j = 0; j < a; j++) {
-      if (BOUNDARY_MERGE_INTO[j] == a) { a_already_host = 1; break; }
-    }
-    if (a_already_host) continue;
-
-    // Skip boundaries already merged into someone else.
-    if (BOUNDARY_MERGE_INTO[a] != BOUNDARY_MERGE_NONE) continue;
-
-    u32 a_inputs[16];
-    memset(visited, 0, HEAP_NEXT);
-    u32 na = merge_collect_input_tids(a_loc, a_inputs, 16, visited);
-    if (na == 0 || na >= 16) continue;
-
-    memset(visited, 0, HEAP_NEXT);
-    u32 a_ops = merge_op_count_estimate(a_loc, visited);
-    if (a_ops == 0 || a_ops > KERNEL_MERGE_OP_BUDGET) continue;
-
-    for (u32 b = a + 1; b < BOUNDARY_ORDER_LEN; b++) {
-      if (BOUNDARY_MERGE_INTO[b] != BOUNDARY_MERGE_NONE) continue;
-      u64 b_loc = BOUNDARY_ORDER[b];
-      if (!merge_boundary_is_elementwise(b_loc)) continue;
-      Shape b_shape = {0};
-      if (!merge_boundary_shape(b_loc, &b_shape)) continue;
-      if (!merge_shapes_equal(&a_shape, &b_shape)) continue;
-
-      // Data-flow dependency check, both directions.
-      memset(visited, 0, HEAP_NEXT);
-      if (merge_subtree_reaches_loc(b_loc, a_loc, visited)) continue;
-      memset(visited, 0, HEAP_NEXT);
-      if (merge_subtree_reaches_loc(a_loc, b_loc, visited)) continue;
-
-      u32 b_inputs[16];
-      memset(visited, 0, HEAP_NEXT);
-      u32 nb = merge_collect_input_tids(b_loc, b_inputs, 16, visited);
-      if (nb == 0 || nb >= 16) continue;
-      if (merge_input_overlap(a_inputs, na, b_inputs, nb) == 0) continue;
-
-      memset(visited, 0, HEAP_NEXT);
-      u32 b_ops = merge_op_count_estimate(b_loc, visited);
-      if (b_ops == 0) continue;
-      if (a_ops + b_ops > KERNEL_MERGE_OP_BUDGET) continue;
-
-      // Mark and stop at one merge per host.
-      BOUNDARY_MERGE_INTO[b] = a;
-      KERNEL_MERGE_CANDIDATES++;
-
-      if (kernel_merge_dump_enabled()) {
-        fprintf(stderr,
-                "thvm: kernel-merge candidate: A[%u]@loc=%llu (ops=%u) "
-                "<- B[%u]@loc=%llu (ops=%u) shape.ndim=%u\n",
-                a, (unsigned long long)a_loc, a_ops,
-                b, (unsigned long long)b_loc, b_ops,
-                a_shape.ndim);
-      }
-      break;
-    }
-  }
-  free(visited);
-}
-
-// Public accessor: number of (host, child) pairs the last plan
-// flagged.  Used by tests (and `DUMP_KERNEL_MERGE=1` diagnostics).
-fn u32 materialize_kernel_merge_candidate_count(void) {
-  return KERNEL_MERGE_CANDIDATES;
-}
-
-// Public accessor: BOUNDARY_MERGE_INTO[bi].  Returns BOUNDARY_MERGE_NONE
-// (0xFFFFFFFFu) when bi is a host or has no plan, otherwise the host's
-// boundary index.
-fn u32 materialize_kernel_merge_into(u32 bi) {
-  if (bi >= BOUNDARY_ORDER_LEN) return BOUNDARY_MERGE_NONE;
-  return BOUNDARY_MERGE_INTO[bi];
-}
-
 fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
 fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
 
-// Multi-output kernel accessors.  Output index 0 reads the legacy
-// single-output fields; 1..n_extra_outputs from extras arrays.
+// Single-output kernel accessors.  Every kernel writes exactly one
+// output buffer (output_tid family); slot 0 maps to the legacy
+// fields, all other slots return 0 / sentinels.
 fn u32 kernel_entry_output_count(u32 kid) {
   if (kid >= KERNELS_NEXT) return 0;
-  return 1u + (u32)KERNELS[kid].n_extra_outputs;
+  return 1u;
 }
 
 fn u32 kernel_entry_output_tid_at(u32 kid, u32 idx) {
-  if (kid >= KERNELS_NEXT) return 0;
-  KernelEntry const *ke = &KERNELS[kid];
-  if (idx == 0) return ke->output_tid;
-  u32 ei = idx - 1;
-  if (ei >= ke->n_extra_outputs) return 0;
-  return ke->extra_output_tids[ei];
+  if (kid >= KERNELS_NEXT || idx != 0) return 0;
+  return KERNELS[kid].output_tid;
 }
 
 fn u32 kernel_entry_output_dtype_at(u32 kid, u32 idx) {
-  if (kid >= KERNELS_NEXT) return 0;
-  KernelEntry const *ke = &KERNELS[kid];
-  if (idx == 0) return ke->output_dtype;
-  u32 ei = idx - 1;
-  if (ei >= ke->n_extra_outputs) return 0;
-  return ke->extra_output_dtypes[ei];
+  if (kid >= KERNELS_NEXT || idx != 0) return 0;
+  return KERNELS[kid].output_dtype;
 }
 
 fn u32 kernel_entry_output_numel_at(u32 kid, u32 idx) {
-  if (kid >= KERNELS_NEXT) return 0;
-  KernelEntry const *ke = &KERNELS[kid];
-  if (idx == 0) return ke->output_numel;
-  u32 ei = idx - 1;
-  if (ei >= ke->n_extra_outputs) return 0;
-  return ke->extra_output_numels[ei];
+  if (kid >= KERNELS_NEXT || idx != 0) return 0;
+  return KERNELS[kid].output_numel;
 }
 
 fn int kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out) {
-  if (kid >= KERNELS_NEXT || out == NULL) return 0;
-  KernelEntry const *ke = &KERNELS[kid];
-  if (idx == 0) { *out = ke->output_shape; return 1; }
-  u32 ei = idx - 1;
-  if (ei >= ke->n_extra_outputs) return 0;
-  *out = ke->extra_output_shapes[ei];
-  return 1;
-}
-
-fn int kernel_entry_set_extra_output(u32 kid, u32 idx,
-                                     u32 tid, u32 dtype,
-                                     Shape const *shape, u32 numel) {
-  if (kid >= KERNELS_NEXT || shape == NULL) return 0;
-  if (idx == 0) return 0;     // slot 0 is the legacy output_tid path
-  u32 ei = idx - 1;
-  if (ei >= KERNEL_MAX_EXTRA_OUTPUTS) return 0;
-  KernelEntry *ke = &KERNELS[kid];
-  ke->extra_output_tids   [ei] = tid;
-  ke->extra_output_dtypes [ei] = dtype;
-  ke->extra_output_shapes [ei] = *shape;
-  ke->extra_output_numels [ei] = numel;
-  if (ei + 1 > (u32)ke->n_extra_outputs) {
-    ke->n_extra_outputs = (u8)(ei + 1);
-  }
+  if (kid >= KERNELS_NEXT || out == NULL || idx != 0) return 0;
+  *out = KERNELS[kid].output_shape;
   return 1;
 }
 
@@ -3449,64 +3073,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   return VISIT_BAIL;
 }
 
-// === Multi-output kernel splice (Step 6 of multi-output groundwork) ===
-//
-// When THVM_KERNEL_MERGE=1, emit_kernel_for_boundary calls the
-// per-host splice on every host A whose plan flagged a child B
-// with merge_into[B]=A.  Today the splice no-ops because visit()
-// no longer populates a per-op program: the kernel body lives on
-// the lifted UOp DAG (cached_lift.store_root) and the lifter
-// hasn't grown a multi-STORE entry path that mirrors the legacy
-// "B's last op writes to extra output, A's last op writes to
-// primary" routing.  Until that lands the child boundary just
-// emits separately later in the BOUNDARY_ORDER walk.
-static int splice_child_into_host_premerge(KernelEntry *ke,
-                                            u32 host_bi,
-                                            u32 child_bi) {
-  (void)host_bi;
-  if (child_bi >= BOUNDARY_ORDER_LEN) return 0;
-  if (ke->n_extra_outputs >= KERNEL_MAX_EXTRA_OUTPUTS) return 0;
-
-  u64 child_loc = BOUNDARY_ORDER[child_bi];
-  u32 child_ridx = bufferize_info_find(child_loc);
-  if (child_ridx == 0xFFFFFFFFu) return 0;
-
-  Shape child_shape = {0};
-  u8    child_op    = BUFFERIZE_NODES[child_ridx].op;
-  Term  child_term  = term_new(0, TAG_UOP, child_op, child_loc);
-  if (!term_shape_in(child_term, 0, &child_shape)) return 0;
-  u32 child_dtype = DT_FP32;
-  term_dtype_in(child_term, 0, &child_dtype);
-
-  // Run B's visit against the shared KernelEntry so input slot
-  // dedup carries across A and B's subgraphs; the per-op output of
-  // visit is dropped because there is no per-op program any more.
-  VisitMemo b_memo = {0};
-  (void)visit(child_term, ke, child_loc, &b_memo);
-  visit_memo_free(&b_memo);
-  return 0;
-}
-
-// Find the (single) child boundary B such that BOUNDARY_MERGE_INTO[B]
-// = host_bi, returning B's index or BOUNDARY_MERGE_NONE.  The
-// planner stops at one merge per host (1->1 fusion), so the linear
-// scan is O(N) but typically returns early.
-static u32 find_merge_child(u32 host_bi) {
-  for (u32 b = host_bi + 1; b < BOUNDARY_ORDER_LEN; b++) {
-    if (BOUNDARY_MERGE_INTO[b] == host_bi) return b;
-  }
-  return BOUNDARY_MERGE_NONE;
-}
-
-// Predicate: does the active backend's dispatcher honor
-// kernel_entry_set_extra_output?  Today every backend reaches the
-// extras via cached_lift.out_bufs[] when the lifter produces a
-// multi-STORE chain, so the splice is gated only on having a
-// backend at all.
-static int splice_target_backend_supports_multi_output(void) {
-  return CURRENT_BACKEND != NULL;
-}
-
 // Build one kernel rooted at the boundary at index bi.  Returns
 // the emitted UOP_KERNEL term, or 0 on bail.
 static Term emit_kernel_for_boundary(u32 bi) {
@@ -3514,13 +3080,10 @@ static Term emit_kernel_for_boundary(u32 bi) {
   u32 idx = bufferize_info_find(boundary_loc);
   if (idx == 0xFFFFFFFFu) return 0;
 
-  // Multi-output kernel splice (Step 6): if this boundary is a
-  // child that an earlier-emitted host already absorbed via
-  // splice_child_into_host, BOUNDARY_TID/BOUNDARY_TERM are already
-  // populated.  Skip emission and re-return the alias Term so the
-  // emit-loop sees a non-zero result and so a sink-as-child case
-  // (the realize root being merged into a sibling) returns the
-  // right surface Term to wnf.
+  // If this boundary was already aliased to an earlier kernel's
+  // output (degenerate movement-op chain producing the same
+  // TenDesc), BOUNDARY_TID/BOUNDARY_TERM are populated -- re-return
+  // the alias so the emit loop sees a non-zero result.
   if (BOUNDARY_TID[bi] != 0 && BOUNDARY_TERM[bi] != 0) {
     return BOUNDARY_TERM[bi];
   }
@@ -3555,21 +3118,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // subtree via uop_bufferize_value(b).
   ke->compute_bufferize = BOUNDARY_BUFFERIZE_TERM[bi];
   TENS[out_tid].producer_kid = kid;
-
-  // Multi-output kernel splice (Step 6 of multi-output groundwork).
-  // When THVM_KERNEL_MERGE=1 and the planner flagged a child
-  // boundary B with merge_into[B]=bi, run B's visit against the
-  // shared KernelEntry so input slot dedup carries.  The splice
-  // currently no-ops at the body level (see
-  // splice_child_into_host_premerge); the child emits its own
-  // boundary later in the BOUNDARY_ORDER walk.
-  if (kernel_merge_enabled()
-      && splice_target_backend_supports_multi_output()) {
-    u32 child_bi = find_merge_child(bi);
-    if (child_bi != BOUNDARY_MERGE_NONE) {
-      (void)splice_child_into_host_premerge(ke, bi, child_bi);
-    }
-  }
 
   VisitMemo memo = {0};
   u32 result = visit(root_term, ke, boundary_loc, &memo);
@@ -4012,7 +3560,6 @@ fn Term thvm_materialize(Term term) {
   // BOUNDARY_BUFFERIZE_TERM[] here.  Mirror: tinygrad walks the
   // lowered tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py).
   topo_sort_buffers_unified(term);
-  plan_kernel_merges();
   mem_plan_reset();
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     BOUNDARY_TID [i] = 0;
