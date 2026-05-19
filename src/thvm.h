@@ -790,12 +790,6 @@ typedef struct {
   // into one multi-output kernel; cpu_interpret reads it post-step
   // and copies regs[step] into the extra output buffer.
   u8    store_extra_plus_one;
-  // Back-pointer to the originating UOp DAG Term.  Set by visit()
-  // in materialize.c at the moment each KProgOp slot is emitted;
-  // consumed by rangeify when calling `uop_resolve_movement_chain`
-  // so the per-USE INDEX resolver can walk the original UOp chain
-  // instead of the per-op metadata.  Default 0 = "not populated".
-  Term  source_uop;
 } KProgOp;
 
 // === scalar UOp lowering ===

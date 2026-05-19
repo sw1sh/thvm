@@ -3456,7 +3456,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     Term num = heap_read(loc);
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
-    p->source_uop = t;
     p->opcode = UOP_CONST;
     p->dtype  = term_ext(num);            // dtype on the NUM cell
     p->arg    = (u32)term_val(num);
@@ -3474,7 +3473,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     kernel_program_reserve(ke, ke->n_ops + 1);
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
-    p->source_uop = t;
     p->opcode = (u8)op;
     p->dtype  = src_dtype(ke, src_idx);
     p->numel  = src_numel(ke, src_idx);
@@ -3495,7 +3493,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     kernel_program_reserve(ke, ke->n_ops + 1);
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
-    p->source_uop = t;
     p->opcode = (u8)op;
     p->dtype  = dst_dtype;
     // arg carries the source dtype so the kernel can route through
@@ -3518,7 +3515,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     kernel_program_reserve(ke, ke->n_ops + 1);
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
-    p->source_uop = t;
     p->opcode = (u8)op;
     // p->numel is the op's *output* element count.  Compute it from
     // the term's broadcast output shape as a u64 product -- NOT as
@@ -3590,7 +3586,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= (u64)out_shape.dims[i];
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
-    p->source_uop = t;
     p->opcode    = op;
     p->dtype     = src_dtype(ke, src_idx);
     p->numel     = out_numel;
@@ -3650,7 +3645,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     }
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
-    p->source_uop = t;
     p->opcode    = UOP_PAD;
     p->dtype     = src_dtype(ke, src_idx);
     p->numel     = out_numel;
@@ -3700,8 +3694,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       kernel_program_reserve(ke, ke->n_ops + 1);
       KProgOp *p = &ke->program[ke->n_ops++];
       memset(p, 0, sizeof(*p));
-      p->source_uop = t;
-      p->opcode = UOP_REDUCE;
+        p->opcode = UOP_REDUCE;
       p->dtype  = src_dtype(ke, src_idx);
       p->arg    = (rc.kind << 24) | (rc.inner & 0x00FFFFFFu);
       p->numel  = rc.out_numel;
@@ -3782,7 +3775,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     }
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
-    p->source_uop = t;
     p->opcode = UOP_REDUCE;
     p->dtype  = src_dtype(ke, src_idx);
     p->arg    = (kind << 24) | (inner & 0x00FFFFFFu);
