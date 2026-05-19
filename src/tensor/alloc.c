@@ -18,6 +18,7 @@ fn u32 tensor_alloc(Backend *b, Shape shape, u32 dtype) {
   d->view         = view_create(shape);
   d->prior_views  = NULL;       // ShapeTracker: simple-single-view default
   d->nviews       = 0;
+  d->requires_grad = 0;          // promoted to 1 via set_requires_grad
   d->backend      = b;
   d->producer_kid = 0;
   d->buf_id       = b->buf_alloc(dtype_storage_bytes(dtype, (u64)d->view.numel));

@@ -516,6 +516,10 @@ typedef struct {
   View     view;                // primary (outermost, public-facing)
   View    *prior_views;         // NULL when nviews == 0; else heap array of nviews entries
   u8       nviews;              // 0 = simple single view, >0 = chain depth
+  u8       requires_grad;       // canonical "this tensor is a parameter" flag,
+                                // consulted by uop_grad's leaf rule and by the
+                                // Python frontend's backward() to enumerate
+                                // parameters.  Set via py_ten_set_requires_grad.
   u32      buf_id;              // backend buffer handle (0 = no buffer yet)
   u32      producer_kid;        // kernel id that produces this tensor, 0 = external
   Backend *backend;             // vtable

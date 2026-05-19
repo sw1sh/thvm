@@ -1128,6 +1128,37 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_refcount(WolframLibraryData libData, mint 
   return LIBRARY_NO_ERROR;
 }
 
+// requires_grad: canonical "parameter" flag in TenDesc, set by the WL
+// frontend (TRequiresGrad) or the Python frontend.  Consulted by
+// uop_grad's leaf rule and by the autograd enumeration in either
+// frontend's backward().
+EXTERN_C DLLEXPORT int thvm_wl_tensor_set_requires_grad(WolframLibraryData libData,
+                                                         mint argc,
+                                                         MArgument *args,
+                                                         MArgument res) {
+  (void)libData; (void)argc;
+  mint id = MArgument_getInteger(args[0]);
+  mint on = MArgument_getInteger(args[1]);
+  if (id <= 0 || (u32)id >= TENS_NEXT) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_NO_ERROR;
+  }
+  TENS[id].requires_grad = on ? 1 : 0;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_tensor_requires_grad(WolframLibraryData libData,
+                                                     mint argc,
+                                                     MArgument *args,
+                                                     MArgument res) {
+  (void)libData; (void)argc;
+  mint id = MArgument_getInteger(args[0]);
+  mint v  = (id > 0 && (u32)id < TENS_NEXT) ? (mint)TENS[id].requires_grad : 0;
+  MArgument_setInteger(res, v);
+  return LIBRARY_NO_ERROR;
+}
+
 // Debug-only: dump View internals for a TenDesc as a flat integer
 // MTensor: {ndim, dims..., strides..., offset, contiguous, nviews,
 // buf_id, producer_kid}.  Gated on THVM_WL_TENSOR_VIEW_DEBUG so it

@@ -34,10 +34,13 @@ from .thvm import K, Term, Thvm, _uop_binary
 # Process-global bridge.  All Tensors share one Thvm instance.
 _TH = Thvm()
 
-# Phase 3B: tensors with requires_grad=True register here so backward()
-# can enumerate the leaves to differentiate against.  WeakSet so dead
-# tensors auto-drop -- nn parameters stay alive via their layer object.
-_REQUIRES_GRAD: "weakref.WeakSet[Tensor]" = weakref.WeakSet()
+# Phase 3B: TenDesc.requires_grad is the canonical "this is a
+# parameter" flag (set via py_ten_set_requires_grad).  This dict
+# routes a TAG_TEN's tid back to its originating Python Tensor so
+# backward() can assign each leaf's .grad.  WeakValueDictionary so
+# dead tensors auto-drop -- nn parameters stay alive via their layer.
+_GRAD_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
+    weakref.WeakValueDictionary()
 
 
 def _wrap_other(self_t: "Tensor", other) -> "Tensor":
@@ -168,24 +171,36 @@ class Tensor:
         return self
 
     def requires_grad_(self, requires_grad: bool = True) -> "Tensor":
+        """Set the canonical TenDesc.requires_grad flag (C-side) AND
+        register the Python tensor in the tid->Tensor routing dict so
+        backward() can assign .grad back to this object."""
         self.requires_grad = requires_grad
-        if requires_grad:
-            _REQUIRES_GRAD.add(self)
+        # Sync TenDesc; for graph-result Tensors with non-TAG_TEN term
+        # the C call no-ops (returns 0), which is fine -- backward is
+        # only meaningful for leaves anyway.
+        _TH.ten_set_requires_grad(self.term, requires_grad)
+        tid = int(_TH.term_val(self.term))
+        if requires_grad and tid > 0:
+            _GRAD_TENSORS[tid] = self
+        else:
+            _GRAD_TENSORS.pop(tid, None)
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
         """Build BWD projections via thvm's uop_grad_with_target -- one
-        per requires_grad leaf registered in _REQUIRES_GRAD.  Each leaf's
-        .grad is set to a Tensor wrapping the (unrealized) grad term;
-        the caller realizes them on demand (`Tensor.realize(*grads)`)."""
+        per registered requires_grad leaf.  Each leaf's .grad is set
+        to a Tensor wrapping the (unrealized) grad term; the caller
+        realizes them on demand (`Tensor.realize(*grads)`)."""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
                         else Tensor.ones(*self._shape, dtype=self._dtype))
-        for leaf in list(_REQUIRES_GRAD):
-            if not leaf.requires_grad:
+        for tid, leaf in list(_GRAD_TENSORS.items()):
+            # Re-confirm via the canonical C-side flag (handles cases
+            # where the user toggled the flag directly through the bridge).
+            if not _TH.ten_get_requires_grad(leaf.term):
                 continue
             g = _TH.grad_with_target(self.term, gradient.term, leaf.term)
             leaf.grad = Tensor._from_term(g, leaf._dtype, leaf._shape)

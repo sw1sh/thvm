@@ -232,6 +232,25 @@ EXPORT uint32_t py_kernel_count(void) {
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
 EXPORT uint32_t py_const_MAX_DIM(void) { return MAX_DIM; }
 
+// --- requires_grad: canonical flag in TenDesc (Phase 3B follow-up) ---
+// The Python Tensor.requires_grad_() sets this; backward() filters
+// against it.  Eventually uop_grad's leaf rule can short-circuit at
+// requires_grad==0 leaves -- for now the flag is bookkeeping that
+// keeps the Python frontend honest about which tensors are parameters.
+EXPORT int py_ten_set_requires_grad(uint64_t t, int on) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  TENS[id].requires_grad = on ? 1 : 0;
+  return 1;
+}
+EXPORT int py_ten_get_requires_grad(uint64_t t) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  return (int)TENS[id].requires_grad;
+}
+
 // ---------------- buffer accessors (handy for debug) ----------------
 EXPORT uint32_t py_uop_buffer_scope(uint64_t t) { return uop_buffer_scope(t); }
 EXPORT uint32_t py_uop_buffer_dtype(uint64_t t) { return uop_buffer_dtype(t); }

@@ -122,6 +122,8 @@ TTermShape::usage      = "TTermShape[t] runs the runtime's `term_shape_in` shape
 TTensorDType::usage    = "TTensorDType[t] returns the dtype as a string (\"f32\" / \"i32\").";
 TTensorData::usage     = "TTensorData[t] reads the tensor's buffer as a NumericArray whose type matches the dtype (Real32 for f32, Integer32 for i32).  Wrap in `Normal` to get a plain list.";
 TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TENS[id].refcount).";
+TRequiresGrad::usage   = "TRequiresGrad[t] / TRequiresGrad[t, True|False] sets TenDesc.requires_grad, the canonical \"this tensor is a parameter\" flag consulted by uop_grad's leaf rule.  Mirrors PyTorch / tinygrad .requires_grad_(); returns t for chaining.";
+TRequiresGradQ::usage  = "TRequiresGradQ[t] reads TenDesc.requires_grad (True / False).";
 TRealize::usage        = "TRealize[expr] = TWnf[TMaterialize[expr]].  Fires the whole pipeline: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs) then beta-reduce + dispatch kernels.";
 TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + linearize rewrite directly (no wnf) and returns the scheduled DAG term.  Fires no kernels.  Use to visualize the graph after scheduling but before dispatch.";
 (* TKernelCount / TKernelProgramCacheSize / TKernelInfo  --  declared
@@ -399,6 +401,8 @@ $tensorWriteIFn  := $tensorWriteIFn  = load["thvm_wl_tensor_write",   {Integer, 
 $tensorReadFn    := $tensorReadFn    = load["thvm_wl_tensor_read",    {Integer},               "NumericArray"];
 $tensorShapeFn   := $tensorShapeFn   = load["thvm_wl_tensor_shape",   {Integer},               {Integer, 1}];
 $tensorRcFn      := $tensorRcFn      = load["thvm_wl_tensor_refcount",{Integer},               Integer];
+$tensorSetReqGradFn := $tensorSetReqGradFn = load["thvm_wl_tensor_set_requires_grad", {Integer, Integer}, Integer];
+$tensorReqGradFn := $tensorReqGradFn = load["thvm_wl_tensor_requires_grad",     {Integer},          Integer];
 $tensorViewDbgFn := $tensorViewDbgFn = load["thvm_wl_tensor_view_debug", {Integer}, {Integer, 1}];
 
 (* Zero-copy tensor-from-NumericArray.  The "Shared" passing mode

@@ -174,6 +174,17 @@ TTensorDType[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
 TTensorRefcount[t_ ? tensorIdQ] := $tensorRcFn[TTermVal[t]]
 TTensorRefcount[t_TTerm]        := Missing["NotATensor", TTagName[TTermTag[t]]]
 
+(* TRequiresGrad[t] / TRequiresGrad[t, on]: set the canonical
+   TenDesc.requires_grad flag.  Mirrors PyTorch / tinygrad
+   .requires_grad_().  TRequiresGradQ[t] reads the flag back. *)
+TRequiresGrad[t_ ? tensorIdQ]              := ($tensorSetReqGradFn[TTermVal[t], 1]; t)
+TRequiresGrad[t_ ? tensorIdQ, on:(True|False)] := (
+    $tensorSetReqGradFn[TTermVal[t], If[ on, 1, 0]]; t)
+TRequiresGrad[t_TTerm, ___]                := Missing["NotATensor", TTagName[TTermTag[t]]]
+
+TRequiresGradQ[t_ ? tensorIdQ] := $tensorReqGradFn[TTermVal[t]] === 1
+TRequiresGradQ[t_TTerm]        := False
+
 (* Debug-only: dump View internals as {ndim, dims..., strides..., offset,
    contiguous, nviews, buf_id, producer_kid}.  No-ops (returns {-1}) when
    THVM_WL_TENSOR_VIEW_DEBUG is unset.  Used to isolate output-view
