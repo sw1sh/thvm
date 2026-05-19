@@ -115,45 +115,9 @@ static u64 cg_kernel_flops_dag(Term t, u64 iter_extent, u32 depth) {
 // Returns u64 -- typical kernels stay well below 2^63 even for
 // 4096x4096 GEMV (=33 MFLOP per fire).
 fn u64 cg_kernel_flops(KernelEntry const *ke) {
-  if (ke == NULL) return 0;
-  // Lifted DAG path: walk cached_lift.store_root.  Used when program[]
-  // is freed (THVM_PHASE_C7_FREE_PROGRAM=1) and as the future default
-  // once program[] is fully retired.
-  if (ke->n_ops == 0 && ke->cached_lift.store_root != 0) {
-    u64 iter = ke->output_numel ? (u64)ke->output_numel : 1;
-    return cg_kernel_flops_dag(ke->cached_lift.store_root, iter, 0);
-  }
-  u64 total = 0;
-  for (u32 i = 0; i < ke->n_ops; i++) {
-    KProgOp const *p = &ke->program[i];
-    u64 elem = (u64)(p->numel ? p->numel : 1);
-    switch (p->opcode) {
-      // Elementwise unary: 1 flop / element.
-      case UOP_NEG: case UOP_RECIP: case UOP_SQRT:
-      case UOP_EXP2: case UOP_LOG2:
-        total += elem; break;
-      // Elementwise binary: 1 flop / element.
-      case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
-        total += elem; break;
-      // REDUCE: ~1 flop / element of the SOURCE (we only track output
-      // numel here; the SUM accumulator does ~1 add per source element).
-      // Look up src0 numel via the program.
-      case UOP_REDUCE: {
-        u32 raw = p->src[0];
-        if (KSRC_IS_INPUT(raw)) {
-          u32 idx = KSRC_INDEX(raw);
-          if (idx < ke->n_inputs) total += ke->input_numels[idx];
-        } else {
-          u32 idx = KSRC_INDEX(raw);
-          if (idx < ke->n_ops) total += ke->program[idx].numel;
-        }
-        break;
-      }
-      // CONST / movement / LOAD: 0 flops.
-      default: break;
-    }
-  }
-  return total;
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  u64 iter = ke->output_numel ? (u64)ke->output_numel : 1;
+  return cg_kernel_flops_dag(ke->cached_lift.store_root, iter, 0);
 }
 
 void cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us) {

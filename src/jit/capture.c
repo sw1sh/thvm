@@ -360,12 +360,8 @@ static u32 jit_capture_dag_op_count_walk(Term t, u32 depth) {
 }
 
 static u32 jit_capture_kernel_op_count(KernelEntry const *ke) {
-  if (ke == NULL) return 0;
-  if (ke->n_ops > 0 && ke->program != NULL) return ke->n_ops;
-  if (ke->cached_lift.store_root != 0) {
-    return jit_capture_dag_op_count_walk(ke->cached_lift.store_root, 0);
-  }
-  return 0;
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  return jit_capture_dag_op_count_walk(ke->cached_lift.store_root, 0);
 }
 
 // Export the capture sequence as a flat table for WL-side profiling.
