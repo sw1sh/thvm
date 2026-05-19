@@ -2510,43 +2510,12 @@ fn int kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
   return 0;
 }
 
-// Forward decl: kprog_op_is_identity is file-static and defined
-// later in this file.
-static u8 kprog_op_is_identity(KProgOp const *p);
-
 fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
-  if (kid >= KERNELS_NEXT) return 0;
-  KernelEntry const *ke = &KERNELS[kid];
-  if (prog_idx >= ke->n_ops) return 0;
-  KProgOp const *p = &ke->program[prog_idx];
-  // Only movement ops have a meaningful BIndex chain entry.
-  u8 op = p->opcode;
-  int is_movement = (op == UOP_RESHAPE || op == UOP_EXPAND
-                  || op == UOP_PERMUTE || op == UOP_SHRINK
-                  || op == UOP_FLIP    || op == UOP_PAD);
-  if (!is_movement) return 0;
-  // Identity movement ops are elided from the BIndex chain (see
-  // bufferize_apply_identity_reshape) so their lookup must miss
-  // even though chain_op_idx might fall in range.
-  if (kprog_op_is_identity(p)) return 0;
-
-  // Per-USE: pick the chain_edge_idx-th BIndex record for this
-  // (kernel, source) pair so multiple paths to the same source
-  // resolve to distinct chain entries.
-  if (p->chain_input_slot == 0xFFFFFFFFu) return 0;
-  if (p->chain_input_slot >= ke->n_inputs) return 0;
-  BIndex edge;
-  if (!kernel_entry_input_edge_at(kid, p->chain_input_slot,
-                                  (u32)p->chain_edge_idx, &edge)) {
-    return 0;
-  }
-  if (edge.chain_op_count == 0) return 0;
-  if ((u32)p->chain_op_idx >= edge.chain_op_count) return 0;
-  // KProgOp counts source-to-consumer (0 = bottom of chain), BIndex
-  // stores consumer-to-source (0 = top of chain).
-  u32 b_idx = edge.chain_op_count - 1u - (u32)p->chain_op_idx;
-  if (out != NULL) *out = edge.chain_ops[b_idx];
-  return 1;
+  // visit() no longer populates ke->program[], so there are no
+  // movement-op KProgOps to look up.  Always miss; the per-USE
+  // bufferize chain resolves at the unified-rangeify layer now.
+  (void)kid; (void)prog_idx; (void)out;
+  return 0;
 }
 
 // Diagnostic: print the bufferize edge summary for every input
@@ -3080,25 +3049,6 @@ static u8 op_is_view_movement(u8 op) {
 // KProgOps that bufferize_apply_identity_reshape elided from the
 // B_INDEX chain.  Identity covers RESHAPE/EXPAND with src_dims ==
 // out_dims and PERMUTE with axis_perm[i] == i.
-static u8 kprog_op_is_identity(KProgOp const *p) {
-  if (p->src0_ndim == 0) return 0;
-  if (p->opcode == UOP_RESHAPE || p->opcode == UOP_EXPAND) {
-    if (p->src0_ndim != p->out_ndim) return 0;
-    for (u32 d = 0; d < p->src0_ndim; d++) {
-      if (p->src0_dims[d] != p->out_dims[d]) return 0;
-    }
-    return 1;
-  }
-  if (p->opcode == UOP_PERMUTE) {
-    if (p->src0_ndim != p->out_ndim) return 0;
-    for (u32 d = 0; d < p->src0_ndim; d++) {
-      if (p->axis_perm[d] != d) return 0;
-    }
-    return 1;
-  }
-  return 0;
-}
-
 // Flatten a non-contig TenDesc into a fresh contiguous copy via
 // view_strided_index.  Used by thvm_materialize when the root is a
 // movement-op chain that resolves to a view alias the caller will
@@ -3567,51 +3517,15 @@ static int splice_child_into_host_premerge(KernelEntry *ke,
   u32 child_dtype = DT_FP32;
   term_dtype_in(child_term, 0, &child_dtype);
 
+  // visit() no longer populates program[], so n_ops stays 0 and the
+  // splice can't mark a last-op KProgOp with store_extra_plus_one.
+  // Drop the would-be splice on the floor; the child boundary emits
+  // separately later.
   VisitMemo b_memo = {0};
-  u32 b_result = visit(child_term, ke, child_loc, &b_memo);
+  (void)visit(child_term, ke, child_loc, &b_memo);
   visit_memo_free(&b_memo);
-  if (b_result == VISIT_BAIL) {
-    ke->n_ops = 0;
-    return 0;
-  }
-  if (ke->n_ops == 0 || KSRC_IS_INPUT(b_result)) {
-    // Degenerate movement-op-alias case (child consumed as a
-    // single input slot).  Bail rather than synthesize a store-
-    // only op; the unmerged emit can still produce a valid kernel
-    // for the child later.
-    ke->n_ops = 0;
-    return 0;
-  }
-
-  u32 b_last_op_idx = KSRC_INDEX(b_result);
-  if (b_last_op_idx >= ke->n_ops) {
-    ke->n_ops = 0;
-    return 0;
-  }
-  ke->program[b_last_op_idx].store_extra_plus_one = 1;
-
-  // Allocate B's output TenDesc on the host backend; register it
-  // as the kernel's first extra output.
-  u32 host_kid = (u32)(ke - KERNELS);
-  u32 child_out_tid = tensor_alloc(CURRENT_BACKEND, child_shape, child_dtype);
-  if (child_out_tid == 0) {
-    ke->n_ops = 0;
-    return 0;
-  }
-  u32 child_numel = TENS[child_out_tid].view.numel;
-  if (!kernel_entry_set_extra_output(host_kid, 1, child_out_tid,
-                                     child_dtype, &child_shape, child_numel)) {
-    tensor_release(child_out_tid);
-    ke->n_ops = 0;
-    return 0;
-  }
-  TENS[child_out_tid].producer_kid = host_kid;
-
-  Term child_alias_term = term_new(0, TAG_TEN, child_dtype, child_out_tid);
-  BOUNDARY_TID [child_bi] = child_out_tid;
-  BOUNDARY_TERM[child_bi] = child_alias_term;
-
-  return 1;
+  ke->n_ops = 0;
+  return 0;
 }
 
 // Find the (single) child boundary B such that BOUNDARY_MERGE_INTO[B]

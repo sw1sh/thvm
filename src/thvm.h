@@ -753,32 +753,6 @@ typedef struct {
                                    //   source axes fused into this op.
   u8    reduce_axes[MAX_DIM];      // REDUCE only: original source axis
                                    //   ids, in source-axis order.
-  // Per-USE bufferize chain linkage: maps each movement-op KProgOp
-  // back to a BIndexChainOp on the originating B_INDEX edge.
-  //
-  // chain_op_idx counts movement ops in this op's src subtree along
-  // the single-src path to a leaf input (0 for the bottom-most
-  // movement op, +1 per movement op stacked on top, propagating
-  // through unary non-movement ops).
-  //
-  // chain_input_slot names the kernel input slot the chain ends at
-  // (0xFFFFFFFF when the chain breaks at a binary op or otherwise
-  // can't be resolved to a single leaf input).  Pairing
-  // (chain_input_slot, chain_op_idx) with the input slot's BIndex
-  // identifies the matching `BIndexChainOp` at index
-  // `chain_op_count - 1 - chain_op_idx` (BIndex stores chain ops in
-  // consumer-to-source order; KProgOp counts source-to-consumer).
-  //
-  // chain_edge_idx disambiguates among the BIndex records that
-  // share the same (consumer, source) pair when a producer is
-  // reached via multiple distinct paths in one consumer.  Set at
-  // visit() time as `input_visit_counts[slot] - 1` after the leaf
-  // hit, then propagated up like chain_input_slot.  Together
-  // (chain_input_slot, chain_edge_idx, chain_op_idx) name a unique
-  // BIndexChainOp.
-  u8    chain_op_idx;
-  u8    chain_edge_idx;
-  u32   chain_input_slot;
   // Multi-output kernel splice (Step 6 of multi-output groundwork).
   // 0 (default, memset(0)-friendly) = "no extra store" -- this op's
   // value lives in regs[step] only.  Single-output kernels never set
