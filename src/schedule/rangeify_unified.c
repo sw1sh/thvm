@@ -914,6 +914,70 @@ static Term RU_BUFFERIZE_TERM[RU_SUBST_CAP];
 // materialize.c to bypass the legacy ScalarUop-arena walker.
 static Term RU_STORE_ROOT[RU_SUBST_CAP];
 
+// Side table: per-axis range terms preserved at INDEX_E construction.
+// Mirror: tinygrad's `BUFFERIZE.index(*per_axis_ranges)` carries per-axis
+// range terms directly in the INDEX node's args
+// (tinygrad/schedule/indexing.py:78).  thvm's `uop_index_e(buffer, addr)`
+// is a 2-arg form with a flat addr (sum over stride*range products);
+// the per-axis info is otherwise lost the moment the flat addr is built
+// by `ru_build_input_addr_for`.  Materialize.c's bypass rewriter needs
+// the per-axis info to substitute closed_ranges -> consumer in_rngs
+// (the spec at indexing.py:78 `new_src.index(*[r for i,r in enumerate
+// (ctx.range_map[x][0]) if i in realized_ranges])`); without it the
+// rewriter has to RE-DECOMPOSE the flat addr and fails when the
+// addr contains movement-op swizzlers (IDIV/IMOD/inner-IADD).
+//
+// Key = INDEX_E heap loc (`term_val(index_e_term)`).  Linear-scan
+// lookup, capped at RU_INDEX_AXIS_CAP entries per pass.
+#define RU_INDEX_AXIS_CAP 16384
+static u64  RU_INDEX_AXIS_KEY  [RU_INDEX_AXIS_CAP];
+static u8   RU_INDEX_AXIS_NDIM [RU_INDEX_AXIS_CAP];
+static Term RU_INDEX_AXIS_RNGS [RU_INDEX_AXIS_CAP][RU_MAX_AXES];
+static u32  RU_INDEX_AXIS_N;
+
+static void ru_index_axes_register(Term index_e_term, Term const *rngs,
+                                    u8 ndim) {
+  if (RU_INDEX_AXIS_N >= RU_INDEX_AXIS_CAP) return;
+  if (term_tag(index_e_term) != TAG_UOP) return;
+  u64 loc = term_val(index_e_term);
+  // Dedup: same INDEX_E loc may be constructed multiple times (hash-cons
+  // returns the same term).  Skip if already registered.
+  for (u32 i = 0; i < RU_INDEX_AXIS_N; i++) {
+    if (RU_INDEX_AXIS_KEY[i] == loc) return;
+  }
+  RU_INDEX_AXIS_KEY [RU_INDEX_AXIS_N] = loc;
+  RU_INDEX_AXIS_NDIM[RU_INDEX_AXIS_N] = ndim > RU_MAX_AXES ? RU_MAX_AXES : ndim;
+  for (u8 a = 0; a < RU_INDEX_AXIS_NDIM[RU_INDEX_AXIS_N]; a++) {
+    RU_INDEX_AXIS_RNGS[RU_INDEX_AXIS_N][a] = rngs[a];
+  }
+  RU_INDEX_AXIS_N++;
+}
+
+// Reverse lookup: given a BUFFERIZE Term, find its producer node_idx
+// in RU_BUFFERIZE_TERM[].  Used by materialize.c's bypass rewriter to
+// resolve orphan BUFFERIZEs (those not in BOUNDARY_BUFFERIZE_TERM[]
+// because their node didn't get a boundary kernel).  Returns
+// 0xFFFFFFFFu when no match.
+fn u32 rangeify_unified_node_idx_for_bufferize(Term buf) {
+  if (buf == 0) return 0xFFFFFFFFu;
+  for (u32 i = 0; i < RU_SUBST_CAP; i++) {
+    if (RU_BUFFERIZE_TERM[i] == buf) return i;
+  }
+  return 0xFFFFFFFFu;
+}
+
+fn u8 rangeify_unified_index_axes_lookup(u64 index_loc, Term *out_rngs,
+                                          u8 cap) {
+  for (u32 i = 0; i < RU_INDEX_AXIS_N; i++) {
+    if (RU_INDEX_AXIS_KEY[i] != index_loc) continue;
+    u8 n = RU_INDEX_AXIS_NDIM[i];
+    if (n > cap) n = cap;
+    for (u8 a = 0; a < n; a++) out_rngs[a] = RU_INDEX_AXIS_RNGS[i][a];
+    return n;
+  }
+  return 0;
+}
+
 // Per-tid flag: set to 1 by ru_compose_view_chain when the unified pass
 // folds td->prior_views into the INDEX_E.addr for a TAG_TEN input.
 // materialize.c's input_slot_dedup reads this and sets the matching
@@ -1391,6 +1455,14 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
         // BUFFERIZE substitute (realized producer): re-index at OUR iter.
         if (term_tag(sub) == TAG_UOP && term_ext(sub) == UOP_BUFFERIZE) {
           new_child = uop_index_e(sub, in_addr);
+          // Stash per-axis range terms alongside the flat addr so the
+          // bypass rewriter can substitute closed_ranges directly per
+          // tinygrad's spec (indexing.py:78) rather than re-decomposing
+          // the flat addr (which fails on movement-op swizzlers).
+          if (consumer_rm != NULL) {
+            ru_index_axes_register(new_child, consumer_rm->in_rngs,
+                                   consumer_rm->in_ndim);
+          }
         } else {
           // Non-realized producer: splice in its value subtree, but
           // first rewrite producer-scope RANGE axis_ids to the
@@ -1486,6 +1558,12 @@ fn void pm_apply_rangeify(Term root) {
     RU_TID_CHAIN_COMPOSED[t] = 0;
   }
   RU_LAST_BUFFERIZES_EMITTED = 0;
+  // Reset per-pass per-axis index side table; populated when
+  // pm_apply_rangeify constructs INDEX_E nodes from each consumer's
+  // in_rngs.  Consumed by materialize.c's bypass rewriter to
+  // substitute closed_ranges via per-axis terms (tinygrad spec at
+  // indexing.py:78) instead of re-decomposing the flat addr.
+  RU_INDEX_AXIS_N = 0;
 
   // Walk nodes bottom-up (children-first) so each consumer sees its
   // producers' substitutes.  RU_TOPO_ORDER is consumer-first

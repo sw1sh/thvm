@@ -2410,6 +2410,15 @@ fn u32  rangeify_unified_last_bufferizes_emitted(void);
 // (which collapse to UOP_CONST(0) per `resolve(s!=1)`).
 fn u32  rangeify_unified_reduce_n_ranges_at    (u32 node_idx);
 fn Term rangeify_unified_reduce_range_at       (u32 node_idx, u32 i);
+// Per-axis range terms preserved at INDEX_E construction in
+// pm_apply_rangeify.  Mirror: tinygrad's `BUFFERIZE.index(*per_axis_ranges)`
+// at indexing.py:78.  Returns the number of axes written to out_rngs (0
+// if no per-axis info was recorded for this INDEX_E heap loc).
+fn u8   rangeify_unified_index_axes_lookup(u64 index_loc, Term *out_rngs,
+                                           u8 cap);
+// Reverse lookup: producer node_idx for a BUFFERIZE Term (scans
+// RU_BUFFERIZE_TERM[]).  0xFFFFFFFFu if no match.
+fn u32  rangeify_unified_node_idx_for_bufferize(Term buf);
 
 // === UOP_RANGE field accessors + axis_type rewriter ===
 // Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type
