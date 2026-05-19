@@ -34,11 +34,15 @@ renderer bugs get a normal failing test in
 | conv2d       | fwd     | 4x8x16x16, 16x3x3  | abs 3.7e-6 -- OK | 8.2    | 24 |
 | conv2d       | bwd dW  | 4x8x16x16, 16x3x3  | abs 2.4e-5 -- OK | 23.6   | 24 |
 | conv2d       | bwd dX  | 4x8x16x16, 16x3x3  | abs 5.4e-7 -- OK | 6.1    | 31 |
-| attention    | fwd     | 256x64             | **COMPILE FAIL** | -      | -  |
+| attention    | fwd     | 256x64             | abs 1.0e-7 -- OK | -      | -  |
+| attention    | bwd     | 256x64             | abs 4.3e-8 -- OK | -      | -  |
 
-**11 of 12 layer kernels (24 of 26 forward+backward configs) pass on
-the V100 within the fp32 tolerance.**  Attention forward does not
-lower correctly and is blocked on a renderer change (below).
+**All 12 layer kernels (26 of 26 forward+backward configs) pass on
+the V100 within the fp32 tolerance.**  Attention forward + backward
+were initially COMPILE FAIL, blocked on the `nested_reduce_axis_dep`
+renderer bug (section 2 below); that bug is now fixed -- the reduce
+loops nest at the depth their axis deps require -- and attention
+cross-validates.
 
 tinygrad cross-check (CUDA, same inputs) agrees with thvm-CUDA:
 linear_fwd 512 thvm abs 2.96e-5 vs tinygrad 2.96e-5 (identical fp32
@@ -78,7 +82,7 @@ Both are documented as normal failing tests in
 is open).  Per `feedback_never_hide_bugs` neither is worked around in
 a way that hides it.
 
-### 1. `signed_index_isub` -- ISUB renders as unsigned
+### 1. `signed_index_isub` -- ISUB rendered as unsigned -- FIXED
 
 `UOP_ISUB` is documented "signed integer subtract" (`src/thvm.h:368`),
 but the CUDA renderer (`src/codegen/render_uop.c`) emits every
@@ -89,13 +93,16 @@ it is *always false*.  Any DAG that relies on a genuine signed index
 comparison is silently wrong.
 
 This surfaced in conv2d `dX`: the natural col2im lower-bound check
-`0 <= ih - ki` returns all-zero.  The harness layer is made correct by
-relying on unsigned wraparound instead -- a single `x < hi` rejects
-both the upper bound and the wrapped negative -- so conv2d_bwd_dx
-passes, but a DAG needing an actual signed compare has no correct
-lowering until the renderer types the index layer as signed.
+`0 <= ih - ki` returned all-zero.
 
-### 2. `nested_reduce_axis_dep` -- inner reduce hoisted to wrong nesting -- BLOCKS attention
+**Fixed.**  Each `UOP_I*` binary operand is cast to `int` in
+`rmu_emit_term`, so the whole integer-expression subtree is
+signed-correct (matching tinygrad's signed-`int` index dtype); the
+`tid`/`tg`/`tt` thread-position decode is untouched.  A genuine signed
+index compare now lowers correctly.  See `py/examples/cuda_render_bugs.py`
+`signed_index_isub` (now a passing regression test).
+
+### 2. `nested_reduce_axis_dep` -- inner reduce hoisted to wrong nesting -- FIXED
 
 A `REDUCE` whose body contains another `REDUCE` over a different axis,
 where the inner reduce indexes by the *outer* reduce's axis variable,
@@ -116,10 +123,14 @@ softmax over the j-scores inherently nests a per-j score reduce (over
 the head dim) inside the max/sum reduce over j.  There is no
 single-DAG formulation that avoids the pattern.
 
-**Design decision needed.**  The fix is a renderer change, not a
-harness work-around: port tinygrad's reduce nesting so each reduce is
-emitted at the loop depth its body's axis dependencies require, rather
-than flat-hoisted.  Until then attention does not lower on CUDA.
+**Fixed.**  The renderer now emits each reduce at the loop depth its
+body's axis dependencies require, rather than flat-hoisting -- ported
+from tinygrad's reduce nesting (`rmu_term_uses_axis` + `parent_idx[]`
+record the innermost enclosing reduce a reduce depends on; child
+reduces emit inside their parent's loop).  Attention forward and
+backward now compile on NVRTC and cross-validate (fwd abs 1.0e-7,
+bwd abs 4.3e-8 on the V100).  See `py/examples/cuda_render_bugs.py`
+`nested_reduce_axis_dep` (now a passing regression test).
 
 ## thvm autodiff through CUDA -- not testable from Python
 

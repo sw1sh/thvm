@@ -102,6 +102,80 @@ int main(void) {
     free(cu);
   }
 
+  // === signed integer subtraction =================================
+  TEST_BEGIN("render-uop-cuda/isub-is-signed");
+  {
+    // STORE(out[i], IWHERE(ILT(-1, i-1), 1.0f, 0.0f)).  UOP_ISUB is a
+    // SIGNED subtract; RANGE vars are `uint`, so `a0 - 1` at a0==0
+    // wraps to ~UINT_MAX and the guard `-1 < (a0-1)` (with -1 promoted
+    // to UINT_MAX) is always false on the CUDA target -- nvrtc applies
+    // the same unsigned-promotion rule.  The renderer casts each
+    // UOP_I* operand to `int` so the comparison is signed-correct.
+    u32 dimsOut[1] = { 8 };
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsOut, 0);
+    Term r0  = uop_range(0, KAX_LOOP, 8);
+    Term sub = uop_int_binary(UOP_ISUB, r0, uop_const(DT_INT32, 1));
+    Term grd = uop_int_binary(UOP_ILT, uop_const(DT_INT32, 0xFFFFFFFFu),
+                              sub);
+    Term sel = uop_iwhere(grd, uop_const(DT_FP32, 0x3F800000u),
+                          uop_const(DT_FP32, 0u));
+    Term st  = uop_store(out, r0, sel);
+    char *cu = render_cuda(st, "k_isub");
+    CHECK(cu != NULL);
+    CHECK(contains(cu, "(int)(a0) - (int)(1)"));
+    CHECK(contains(cu, "(int)(-1) < "));
+    CHECK(!contains(cu, "(a0 - 1)"));
+    free(cu);
+  }
+
+  // === nested reduce: inner reduce uses outer reduce's axis var =====
+  TEST_BEGIN("render-uop-cuda/nested-reduce-axis-dep-nests-loops");
+  {
+    // out[i] = sum_j(in[i] * sum_k m[j,k]).  The inner REDUCE over k is
+    // wrapped in an elementwise MUL inside the outer REDUCE over j; its
+    // body m[j,k] indexes by the OUTER reduce's axis var `a1` (j).  The
+    // inner reduce's accumulator loop must emit INSIDE the outer loop --
+    // a flat hoist references `a1` before its declaration, which nvrtc
+    // rejects with `identifier "a1" is undefined`.  This shape underlies
+    // scaled-dot-product attention (softmax-over-scores).
+    u32 dN_i[1] = { 4 };
+    u32 dN_m[2] = { 3, 5 };
+    Term out_n = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dN_i, 0);
+    Term in_n  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dN_i, 1);
+    Term m_n   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dN_m, 2);
+    Term ri_n = uop_range(0, KAX_LOOP,   4);
+    Term rj_n = uop_range(1, KAX_REDUCE, 3);
+    Term rk_n = uop_range(2, KAX_REDUCE, 5);
+    Term jk_n = uop_int_binary(
+        UOP_IADD,
+        uop_int_binary(UOP_IMUL, rj_n, uop_const(DT_INT32, 5)), rk_n);
+    Term inner_n = uop_reduce(REDUCE_SUM, /*axis=*/2,
+                              uop_index_e(m_n, jk_n));
+    Term body_n  = uop_binary(UOP_MUL, uop_index_e(in_n, ri_n), inner_n);
+    Term outer_n = uop_reduce(REDUCE_SUM, /*axis=*/1, body_n);
+    Term st_n    = uop_store(out_n, ri_n, outer_n);
+    char *cu = render_cuda(st_n, "k_nested_red");
+    CHECK(cu != NULL);
+    char *p_a1  = strstr(cu, "for (uint a1 = 0");
+    char *p_a2  = strstr(cu, "for (uint a2 = 0");
+    char *p_ac2 = strstr(cu, "float _acc2");
+    CHECK(p_a1 != NULL);
+    CHECK(p_a2 != NULL);
+    CHECK(p_ac2 != NULL);
+    // Outer loop opens before the inner accumulator is declared, and
+    // the inner accumulator is declared before its own loop opens --
+    // i.e. the inner reduce is nested inside the outer reduce's loop.
+    CHECK(p_a1 < p_ac2);
+    CHECK(p_ac2 < p_a2);
+    // The inner reduce body references the outer reduce's axis var `a1`,
+    // in scope only because the `a2` loop nests inside the `a1` loop.
+    CHECK(contains(cu, "_acc2 = _acc2 + in1["));
+    char *p_inner_body = strstr(cu, "_acc2 = _acc2 + in1[");
+    CHECK(p_inner_body != NULL && strstr(p_inner_body, "a1") != NULL
+          && strstr(p_inner_body, "a1") < strstr(p_inner_body, ";"));
+    free(cu);
+  }
+
   // === SIMD_REDUCE -> __shfl_xor_sync warp all-reduce ================
   TEST_BEGIN("render-uop-cuda/simd-reduce-emits-shfl-xor-sync");
   {

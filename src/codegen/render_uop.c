@@ -259,13 +259,29 @@ static void rmu_emit_term(Term t, FILE *fp) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
     case UOP_IAND: {
+      // Signed integer arithmetic.  RANGE loop vars are declared `uint`
+      // (loop counters, always non-negative), but UOP_ISUB is a SIGNED
+      // subtract (thvm.h:368) and may legitimately go negative -- e.g.
+      // a conv/attention shifted index `r - k` or a guard `-1 < x`.
+      // In unsigned space a negative ISUB wraps to ~UINT_MAX, so an
+      // `ILT` against it (`-1 < x` promotes -1 to UINT_MAX) is always
+      // false and a negative array index wraps far out of bounds.
+      // Casting each operand to `int` makes the whole integer-expression
+      // subtree signed: subtraction, comparison and idiv/imod are all
+      // signed-correct, and a signed index used in `buf[expr]` is fine
+      // on every target (the IWHERE/ILT bounds guard masks it).  This
+      // matches tinygrad, which renders RANGE/index dtype as signed
+      // `int` (tinygrad/renderer/cstyle.py:18-19,150).  Nested int
+      // binaries already yield `int`; the extra `(int)` cast on them is
+      // harmless.  Float ops are untouched -- this case only covers the
+      // UOP_I* family.
       Term a = heap_read(loc + 0);
       Term b = heap_read(loc + 1);
-      fputs("(", fp);
+      fputs("((int)(", fp);
       rmu_emit_term(a, fp);
-      fprintf(fp, " %s ", rmu_int_op_name(op));
+      fprintf(fp, ") %s (int)(", rmu_int_op_name(op));
       rmu_emit_term(b, fp);
-      fputs(")", fp);
+      fputs("))", fp);
       return;
     }
     // Float elementwise binary ops.  Same parenthesised shape as
@@ -633,6 +649,65 @@ static int rmu_term_contains_rec(Term t, Term needle, u32 depth) {
 }
 static int rmu_term_contains(Term t, Term needle) {
   return rmu_term_contains_rec(t, needle, 0);
+}
+
+// Returns 1 if `t`'s subtree references a UOP_RANGE with axis id
+// `axis_id` as a FREE variable -- i.e. not bound by a nested UOP_REDUCE
+// inside `t`.  The walk stops at every UOP_REDUCE boundary: a nested
+// reduce binds its own reduce-axis (and uses its body's other axes
+// privately), so its `_accN` result is an opaque leaf in `t`'s scope.
+// Used to decide reduce-loop nesting: an inner reduce whose body
+// references an OUTER reduce's reduce-axis var must be emitted INSIDE
+// the outer reduce's loop, not hoisted above it (a hoist leaves the
+// outer axis var undeclared at the inner reduce's emission point --
+// nvrtc `identifier "aN" is undefined`, the bug-1 shape).  Descending
+// THROUGH nested reduces would wrongly report a sibling reduce's
+// private axis as "used" -- e.g. softmax's sum-of-exp body references
+// the max reduce's `_accN`, but the max's reduce-axis is bound, not
+// free, so the two reduces are siblings, not nested.  This is the thvm
+// analogue of tinygrad's per-UOp `.ranges` set
+// (tinygrad/uop/ops.py:352-370), where a REDUCE's `ended_ranges` are
+// popped out of its result's range set: the reduce-axis stops flowing
+// at the reduce, exactly this boundary.
+static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
+  if (depth > 256) return 0;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    return (u32)term_val(heap_read(loc + 0)) == axis_id;
+  }
+  if (op == UOP_REDUCE) {
+    // A nested reduce binds its own axis and any other axes its body
+    // uses privately; its `_accN` is an opaque value here.  Do not
+    // descend -- only FREE references in `t`'s own scope count.
+    return 0;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1)
+          || rmu_term_uses_axis_rec(heap_read(loc + 1), axis_id, depth + 1);
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_OPT:
+      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1);
+    case UOP_IWHERE:
+      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1)
+          || rmu_term_uses_axis_rec(heap_read(loc + 1), axis_id, depth + 1)
+          || rmu_term_uses_axis_rec(heap_read(loc + 2), axis_id, depth + 1);
+    case UOP_REDUCE:
+      // Descend into the nested reduce's body: nesting is transitive.
+      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1);
+    default:
+      return 0;
+  }
+}
+static int rmu_term_uses_axis(Term t, u32 axis_id) {
+  return rmu_term_uses_axis_rec(t, axis_id, 0);
 }
 
 // Returns 1 if `t`'s subtree contains a UOP_REDUCE node anywhere.
@@ -2574,6 +2649,131 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   return 1;
 }
 
+// Emit one REDUCE accumulator at `emit_depth`:
+//   float _accN = init;
+//   for (reduce-axis) { <nested reduces using this axis>; _accN = combine; }
+// `is_simd` selects the SIMD-collective shape (simd_sum / __shfl_xor_sync)
+// over the scalar accumulator.  `reduces` / `simd_flags` / `n_reduces` are
+// the full collected-reduce table; `parent_idx[i]` says which reduce (by
+// index, or RMU_REDUCE_NO_PARENT for a root) should emit reduces[i].  When
+// `parent_idx[k]` points at THIS reduce, reduces[k] is a child whose body
+// references this reduce's reduce-axis -- it is emitted recursively INSIDE
+// this reduce's loop so the inner reference to the outer axis var is in
+// scope.  Without that nesting an inner reduce wrapped in an elementwise op
+// hoists above the outer reduce's loop and references `aN` before its
+// declaration (nvrtc `identifier "aN" is undefined`).
+//
+// Ported from tinygrad's reduce-loop placement: tinygrad/uop/ops.py:352-370
+// makes each REDUCE carry every RANGE its body transitively depends on in
+// `.ranges`, and tinygrad/codegen/late/linearizer.py:56-90 schedules each
+// RANGE/END so a RANGE that another RANGE depends on is opened first --
+// i.e. an inner reduce-loop nests inside every reduce-loop it depends on.
+#define RMU_REDUCE_NO_PARENT 0xFFFFFFFFu
+static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
+                                const Term *reduces, const u8 *simd_flags,
+                                const u32 *parent_idx, u32 self_idx,
+                                u32 n_reduces, FILE *fp) {
+  u64  rloc   = term_val(red);
+  u32  r_kind = term_val(heap_read(rloc + 1));
+  u32  r_axis = term_val(heap_read(rloc + 2));
+  Term r_src  = heap_read(rloc + 0);
+  char acc_name[32];
+  snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
+  for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+  fprintf(fp, "float %s = ", acc_name);
+  rmu_emit_reduce_init(r_kind, fp);
+  fputs(";\n", fp);
+  Term r_ranges[MAX_DIM];
+  u32  r_kinds[MAX_DIM]   = {0};
+  u32  r_factors[MAX_DIM] = {0};
+  u32  n_r_ranges = 0;
+  // Descend through nested UOP_REDUCE bodies: the reduce-axis range term
+  // we need to open this reduce's for-loop on may live inside a nested
+  // reduce body.  Without this descent the lookup misses,
+  // `reduce_range_term == 0`, the loop is skipped, and `_accN` is
+  // declared but never updated.
+  rmu_collect_ranges_with_opts_through_reduce(
+      r_src, r_ranges, r_kinds, r_factors, &n_r_ranges);
+  Term reduce_range_term = 0;
+  u32  reduce_extent     = 0;
+  for (u32 j = 0; j < n_r_ranges; j++) {
+    u32 ax = term_val(heap_read(term_val(r_ranges[j]) + 0));
+    if (ax == r_axis) {
+      reduce_range_term = r_ranges[j];
+      reduce_extent     = uop_range_extent(r_ranges[j]);
+      break;
+    }
+  }
+  if (reduce_range_term == 0) return;
+  // GPU-generic gate: the SIMD-collective reduce shape applies to Metal
+  // AND CUDA -- both have a 32-lane warp/simdgroup with a collective
+  // reduce (Metal simd_sum, CUDA __shfl_xor_sync).  The C target keeps
+  // the scalar accumulator.
+  if (is_simd && RMU_TARGET != CG_TARGET_C) {
+    // SIMD-collective shape: each lane processes a 1/32 slice of extent,
+    // then a collective op combines the 32 lane partials.  CUDA: lane
+    // index = threadIdx.x % 32; the cross-lane combine is a 5-step
+    // __shfl_xor_sync butterfly.  Metal: lane index =
+    // thread_index_in_simdgroup; the combine is one simd_<op>.
+    const char *lane = (RMU_TARGET == CG_TARGET_CUDA)
+                         ? "(threadIdx.x % 32u)"
+                         : "thread_index_in_simdgroup";
+    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+    fprintf(fp, "for (uint a%u = %s; a%u < %u; a%u += 32u) {\n",
+            r_axis, lane, r_axis, reduce_extent, r_axis);
+    for (u32 d = 0; d < emit_depth + 1; d++) fputs("  ", fp);
+    rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+    if (RMU_TARGET == CG_TARGET_CUDA) {
+      // Warp butterfly: 5 __shfl_xor_sync steps fold 32 lanes.  xor (not
+      // down) makes this an ALL-reduce -- every lane ends with the full
+      // result, matching Metal simd_sum/simd_max broadcast semantics.
+      const char *op = (r_kind == REDUCE_MAX) ? "fmaxf" : "+";
+      for (u32 s = 16; s >= 1; s >>= 1) {
+        for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+        if (r_kind == REDUCE_MAX) {
+          fprintf(fp, "%s = %s(%s, __shfl_xor_sync(0xffffffffu, %s, %uu));\n",
+                  acc_name, op, acc_name, acc_name, s);
+        } else {
+          fprintf(fp, "%s = %s %s __shfl_xor_sync(0xffffffffu, %s, %uu);\n",
+                  acc_name, acc_name, op, acc_name, s);
+        }
+      }
+    } else {
+      for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+      if (r_kind == REDUCE_MAX) {
+        fprintf(fp, "%s = simd_max(%s);\n", acc_name, acc_name);
+      } else {
+        fprintf(fp, "%s = simd_sum(%s);\n", acc_name, acc_name);
+      }
+    }
+    return;
+  }
+  // GPU-generic: small-extent reduce unroll for Metal AND CUDA.
+  if (RMU_TARGET != CG_TARGET_C && reduce_extent > 0
+      && reduce_extent <= RMU_REDUCE_UNROLL_MAX) {
+    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+    fprintf(fp, "#pragma unroll(%u)\n", reduce_extent);
+  }
+  rmu_emit_range_open(reduce_range_term, fp, emit_depth, 0);
+  // Emit nested reduces that depend on THIS reduce's axis var INSIDE the
+  // loop, before the combine that references their `_accN`.  Each child's
+  // own reduce-axis loop -- and any deeper nesting -- is emitted by the
+  // recursive call.  reduces[] is post-order (inner before outer); a
+  // child therefore always precedes its parent, but we scan the whole
+  // table since `self_idx` may be any position.
+  for (u32 k = 0; k < n_reduces; k++) {
+    if (parent_idx[k] != self_idx) continue;
+    rmu_emit_one_reduce(reduces[k], emit_depth + 1, simd_flags[k],
+                        reduces, simd_flags, parent_idx, k, n_reduces, fp);
+  }
+  for (u32 d = 0; d < emit_depth + 1; d++) fputs("  ", fp);
+  rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+  for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+}
+
 // Emit a single UOP_STORE statement, wrapping with for-loops over
 // every UOP_RANGE that appears in the addr/value tree.  When a range
 // was wrapped in UOP_OPT(_, UNROLL, factor), emit `#pragma unroll(N)`
@@ -2778,113 +2978,41 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     }
   }
 
-  // Helper used by the interleaved emission below: emit one reduce
-  // (`float _accN = init; for (...) _accN = combine(...); }`) at a
-  // given depth.  Pulled into its own block so we can call it both
-  // before any output-axis loops and between successive ones.
-  // When `is_simd` is set (the REDUCE was wrapped in OPT_SIMD_REDUCE),
-  // emits the per-thread-strided form + Apple's simd_<op> intrinsic
-  // (1-instruction simdgroup-collective reduce across 32 lanes)
-  // instead of the scalar for-loop accumulator.
-  #define RMU_EMIT_ONE_REDUCE(red, emit_depth, is_simd) do { \
-    Term _red = (red); \
-    u64  _rloc = term_val(_red); \
-    u32  _r_kind = term_val(heap_read(_rloc + 1)); \
-    u32  _r_axis = term_val(heap_read(_rloc + 2)); \
-    Term _r_src = heap_read(_rloc + 0); \
-    char _acc_name[32]; \
-    snprintf(_acc_name, sizeof(_acc_name), "_acc%u", _r_axis); \
-    for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-    fprintf(fp, "float %s = ", _acc_name); \
-    rmu_emit_reduce_init(_r_kind, fp); \
-    fputs(";\n", fp); \
-    Term _r_ranges[MAX_DIM]; \
-    u32  _r_kinds[MAX_DIM] = {0}; \
-    u32  _r_factors[MAX_DIM] = {0}; \
-    u32  _n_r_ranges = 0; \
-    /* Descend through nested UOP_REDUCE bodies: the reduce-axis */ \
-    /* range term we need to open this reduce's for-loop on may */ \
-    /* live inside a nested reduce body.  Without this descent the */ \
-    /* lookup misses, `_reduce_range_term == 0`, the loop is */ \
-    /* skipped, and `_accN` is declared but never updated. */ \
-    rmu_collect_ranges_with_opts_through_reduce( \
-        _r_src, _r_ranges, _r_kinds, _r_factors, &_n_r_ranges); \
-    Term _reduce_range_term = 0; \
-    u32  _reduce_extent = 0; \
-    for (u32 _j = 0; _j < _n_r_ranges; _j++) { \
-      u32 _ax = term_val(heap_read(term_val(_r_ranges[_j]) + 0)); \
-      if (_ax == _r_axis) { \
-        _reduce_range_term = _r_ranges[_j]; \
-        _reduce_extent     = uop_range_extent(_r_ranges[_j]); \
-        break; \
-      } \
-    } \
-    if (_reduce_range_term != 0) { \
-      /* GPU-generic gate: the SIMD-collective reduce shape applies to */ \
-      /* Metal AND CUDA -- both have a 32-lane warp/simdgroup with a */ \
-      /* collective reduce (Metal simd_sum, CUDA __shfl_down_sync). */ \
-      /* The C target keeps the scalar accumulator.  The emitted body */ \
-      /* inside branches on RMU_TARGET for the per-target intrinsics. */ \
-      if ((is_simd) && RMU_TARGET != CG_TARGET_C) { \
-        /* SIMD-collective shape: each lane processes a 1/32 slice of */ \
-        /* extent, then a collective op combines the 32 lane partials. */ \
-        /* CUDA: lane index = threadIdx.x % 32; the cross-lane combine */ \
-        /* is a 5-step __shfl_down_sync butterfly.  Metal: lane index */ \
-        /* = thread_index_in_simdgroup; the combine is one simd_<op>. */ \
-        const char *_lane = (RMU_TARGET == CG_TARGET_CUDA) \
-                              ? "(threadIdx.x % 32u)" \
-                              : "thread_index_in_simdgroup"; \
-        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-        fprintf(fp, "for (uint a%u = %s; " \
-                "a%u < %u; a%u += 32u) {\n", \
-                _r_axis, _lane, _r_axis, _reduce_extent, _r_axis); \
-        for (u32 _d = 0; _d < (emit_depth) + 1; _d++) fputs("  ", fp); \
-        rmu_emit_reduce_combine(_acc_name, _r_kind, _r_src, fp); \
-        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-        fputs("}\n", fp); \
-        if (RMU_TARGET == CG_TARGET_CUDA) { \
-          /* Warp butterfly: 5 __shfl_xor_sync steps fold 32 lanes. */ \
-          /* xor (not down) makes this an ALL-reduce -- every lane */ \
-          /* ends with the full result, matching Metal simd_sum/ */ \
-          /* simd_max broadcast semantics.  A down-shuffle would */ \
-          /* leave the result in lane 0 only, so the unguarded */ \
-          /* per-lane store of the reduced value would be a race. */ \
-          const char *_op = (_r_kind == REDUCE_MAX) ? "fmaxf" : "+"; \
-          for (u32 _s = 16; _s >= 1; _s >>= 1) { \
-            for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-            if (_r_kind == REDUCE_MAX) { \
-              fprintf(fp, "%s = %s(%s, " \
-                      "__shfl_xor_sync(0xffffffffu, %s, %uu));\n", \
-                      _acc_name, _op, _acc_name, _acc_name, _s); \
-            } else { \
-              fprintf(fp, "%s = %s %s " \
-                      "__shfl_xor_sync(0xffffffffu, %s, %uu);\n", \
-                      _acc_name, _acc_name, _op, _acc_name, _s); \
-            } \
-          } \
-        } else { \
-          for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-          if (_r_kind == REDUCE_MAX) { \
-            fprintf(fp, "%s = simd_max(%s);\n", _acc_name, _acc_name); \
-          } else { \
-            fprintf(fp, "%s = simd_sum(%s);\n", _acc_name, _acc_name); \
-          } \
-        } \
-      } else { \
-        /* GPU-generic: small-extent reduce unroll for Metal AND CUDA. */ \
-        if (RMU_TARGET != CG_TARGET_C && _reduce_extent > 0 \
-            && _reduce_extent <= RMU_REDUCE_UNROLL_MAX) { \
-          for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-          fprintf(fp, "#pragma unroll(%u)\n", _reduce_extent); \
-        } \
-        rmu_emit_range_open(_reduce_range_term, fp, (emit_depth), 0); \
-        for (u32 _d = 0; _d < (emit_depth) + 1; _d++) fputs("  ", fp); \
-        rmu_emit_reduce_combine(_acc_name, _r_kind, _r_src, fp); \
-        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-        fputs("}\n", fp); \
-      } \
-    } \
-  } while (0)
+  // Reduce-loop nesting: a reduce whose body references an OUTER
+  // reduce's reduce-axis var must emit INSIDE that outer reduce's loop
+  // (not hoisted to the output-loop depth -- that leaves the outer axis
+  // var undeclared, the bug-1 shape).  parent_idx[i] = the index of the
+  // innermost enclosing reduce that reduces[i] depends on by axis var,
+  // or RMU_REDUCE_NO_PARENT if reduces[i] is a root (no enclosing-reduce
+  // axis dependence).  Root reduces are emitted by Pass-0 / the output-
+  // loop interleave at their required_pos; non-root reduces are emitted
+  // recursively by rmu_emit_one_reduce inside their parent's loop.  This
+  // is the thvm port of tinygrad's per-RANGE scheduling: a reduce-loop
+  // RANGE nests inside every reduce-loop RANGE it depends on (see
+  // rmu_emit_one_reduce's header for the tinygrad file:line).
+  u32 parent_idx[RMU_MAX_RANGES];
+  for (u32 i = 0; i < n_reduces; i++) parent_idx[i] = RMU_REDUCE_NO_PARENT;
+  for (u32 i = 0; i < n_reduces; i++) {
+    Term r_src_i = heap_read(term_val(reduces[i]) + 0);
+    // Candidate enclosing reduces: those that structurally contain
+    // reduces[i] AND whose reduce-axis var reduces[i]'s body references.
+    u32 best = RMU_REDUCE_NO_PARENT;
+    for (u32 j = 0; j < n_reduces; j++) {
+      if (j == i) continue;
+      Term r_src_j = heap_read(term_val(reduces[j]) + 0);
+      u32  axis_j  = term_val(heap_read(term_val(reduces[j]) + 2));
+      if (!rmu_term_contains(r_src_j, reduces[i])) continue;
+      if (!rmu_term_uses_axis(r_src_i, axis_j))    continue;
+      // reduces[j] is a candidate parent.  Keep the INNERMOST: the
+      // candidate whose body is itself contained in every other
+      // candidate's body (the nesting along i's enclosing chain is a
+      // total order, so the innermost is unambiguous).
+      if (best == RMU_REDUCE_NO_PARENT) { best = j; continue; }
+      Term r_src_best = heap_read(term_val(reduces[best]) + 0);
+      if (rmu_term_contains(r_src_best, reduces[j])) best = j;
+    }
+    parent_idx[i] = best;
+  }
 
   // Bounds guard for promoted-GLOBAL kernels: the dispatcher launches
   // ceil(total/256)*256 threads (one per output element, rounded up to
@@ -2899,11 +3027,17 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
             (unsigned long long)g_decode.total);
   }
 
-  // Pass 0: emit reduces with required_pos == 0 BEFORE any output
+  // Pass 0: emit ROOT reduces with required_pos == 0 BEFORE any output
   // loop.  These are fully hoistable -- their body uses no output axis.
+  // Non-root reduces (parent_idx set: their body references an enclosing
+  // reduce's axis var) are emitted recursively inside that parent's loop
+  // by rmu_emit_one_reduce, never here.
   for (u32 i = 0; i < n_reduces; i++) {
     if (required_pos[i] != 0) continue;
-    RMU_EMIT_ONE_REDUCE(reduces[i], depth, reduce_simd_flag[i]);
+    if (parent_idx[i] != RMU_REDUCE_NO_PARENT) continue;
+    rmu_emit_one_reduce(reduces[i], depth, reduce_simd_flag[i],
+                        reduces, reduce_simd_flag, parent_idx, i,
+                        n_reduces, fp);
   }
 
   // Track which output ranges opened a `{` (thread-bound axes
@@ -2933,16 +3067,20 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       needs_close[i] = 1;
       body_depth++;
     }
-    // After opening output axis at position i, emit any reduces whose
-    // required_pos == i+1.  They depend on the axes opened so far
-    // (and only on those), so emitting them between i and i+1
-    // avoids redundant recompute inside deeper output loops.
+    // After opening output axis at position i, emit any ROOT reduces
+    // whose required_pos == i+1.  They depend on the axes opened so far
+    // (and only on those), so emitting them between i and i+1 avoids
+    // redundant recompute inside deeper output loops.  Non-root reduces
+    // (parent_idx set) are emitted by their parent reduce's loop, not
+    // here -- their required_pos is irrelevant.
     for (u32 r_i = 0; r_i < n_reduces; r_i++) {
       if (required_pos[r_i] != i + 1) continue;
-      RMU_EMIT_ONE_REDUCE(reduces[r_i], body_depth, reduce_simd_flag[r_i]);
+      if (parent_idx[r_i] != RMU_REDUCE_NO_PARENT) continue;
+      rmu_emit_one_reduce(reduces[r_i], body_depth, reduce_simd_flag[r_i],
+                          reduces, reduce_simd_flag, parent_idx, r_i,
+                          n_reduces, fp);
     }
   }
-  #undef RMU_EMIT_ONE_REDUCE
   for (u32 i = 0; i < body_depth; i++) fputs("  ", fp);
   fprintf(fp, "%s[", rmu_buf_name(buf));
   rmu_emit_term(addr, fp);

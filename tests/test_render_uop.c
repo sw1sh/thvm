@@ -99,8 +99,11 @@ int main(void) {
   fp = fmemopen(buf4, sizeof(buf4), "w");
   cg_render_uop_kernel(st_idx, "k_idx", out, NULL, 0, fp);
   fclose(fp);
-  CHECK(contains(buf4, "(a0 * 2)"));
-  CHECK(contains(buf4, " + a1)"));
+  // Integer arithmetic is emitted signed: each UOP_I* operand is cast
+  // to `int` so a UOP_ISUB result is signed-correct (see the signed-
+  // ISUB fix in render_uop.c's UOP_I* emission).
+  CHECK(contains(buf4, "(int)(a0) * (int)(2)"));
+  CHECK(contains(buf4, " + (int)(a1)"));
 
   TEST_BEGIN("render-uop/after-chain-emits-barrier-on-local-store");
   // LOCAL store followed by GLOBAL store -> barrier between.
@@ -130,7 +133,37 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf6, " ? "));
   CHECK(contains(buf6, " : "));
-  CHECK(contains(buf6, "(a0 < 4)"));
+  // ILT is a signed comparison: `(int)(a0) < (int)(4)`.
+  CHECK(contains(buf6, "(int)(a0) < (int)(4)"));
+
+  TEST_BEGIN("render-uop/isub-is-signed");
+  // STORE(out, RANGE(0), IWHERE(ILT(-1, RANGE(0)-1), ..., 0)).
+  // UOP_ISUB is a SIGNED subtract (thvm.h).  RANGE vars are declared
+  // `uint`, so `a0 - 1` at a0==0 wraps to ~UINT_MAX in unsigned space;
+  // a guard `-1 < (a0-1)` then promotes -1 to UINT_MAX and is always
+  // false -- masking every element that should be live.  The renderer
+  // must emit the integer expression signed.  Each UOP_I* operand is
+  // cast to `int`, so `-1 < (a0-1)` is a true signed comparison.
+  {
+    Term r_s   = uop_range(0, 0 /*LOOP*/, 8);
+    Term km1   = uop_const(DT_INT32, 1);
+    Term sub_s = uop_int_binary(UOP_ISUB, r_s, km1);          // a0 - 1
+    Term neg1  = uop_const(DT_INT32, 0xFFFFFFFFu);            // -1
+    Term grd   = uop_int_binary(UOP_ILT, neg1, sub_s);        // -1 < a0-1
+    Term zerof = uop_const(DT_FP32, 0u);
+    Term selv  = uop_iwhere(grd, one, zerof);
+    Term st_s  = uop_store(out, r_s, selv);
+    char bufs[2048];
+    fp = fmemopen(bufs, sizeof(bufs), "w");
+    cg_render_uop_kernel(st_s, "k_isub", out, NULL, 0, fp);
+    fclose(fp);
+    // ISUB operands cast to int -> signed subtraction.
+    CHECK(contains(bufs, "(int)(a0) - (int)(1)"));
+    // The -1 literal compares in signed `int`, not promoted to UINT_MAX.
+    CHECK(contains(bufs, "(int)(-1) < "));
+    // No bare unsigned `a0 - 1` (the wraparound-prone form).
+    CHECK(!contains(bufs, "(a0 - 1)"));
+  }
 
   TEST_BEGIN("render-uop/dtype-mapping-fp16-half");
   Term out16 = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP16, 1, dims);
@@ -343,7 +376,8 @@ int main(void) {
     // inside the a2 loop; the store references a2 in scope.
     CHECK(contains(bufmu, "float _acc3 = 0.0f"));
     CHECK(contains(bufmu, "for (uint a3 = 0; a3 < 8"));
-    CHECK(contains(bufmu, "((a1 * 4) + a2)"));
+    CHECK(contains(bufmu, "(int)(a1) * (int)(4)"));
+    CHECK(contains(bufmu, "+ (int)(a2)"));
     CHECK(contains(bufmu, "= _acc3;"));
     // No serial output-axis loop (the regression's symptom).
     CHECK(!contains(bufmu, "for (uint a0 ="));
@@ -487,6 +521,108 @@ int main(void) {
   fclose(fp);
   CHECK(contains(bufrm, "= -INFINITY"));
   CHECK(contains(bufrm, "fmax(_acc1, "));
+
+  TEST_BEGIN("render-uop/nested-reduce-axis-dep-nests-loops");
+  // out[i] = sum_j(in[i] * sum_k m[j,k]).  The outer REDUCE over j
+  // wraps -- in an elementwise MUL -- an inner REDUCE over k whose
+  // body m[j,k] references the OUTER reduce's axis var `a1` (j).  The
+  // inner reduce's accumulator loop must therefore be emitted INSIDE
+  // the outer reduce's loop, not hoisted above it.  A flat hoist puts
+  // the `a2` loop's body `in1[a1*5 + a2]` before `a1` is declared --
+  // nvrtc/MSL `identifier "a1" is undefined`.  This is the bug-1 shape
+  // (blocks scaled-dot-product attention: softmax-over-scores nests a
+  // per-row reduce inside the row reduce).
+  {
+    u32 dN_i[1] = { 4 };
+    u32 dN_m[2] = { 3, 5 };
+    // Distinct instances: out_n and in_n share dtype/shape, so without an
+    // explicit instance id they hash-cons to the same UOP_BUFFER and the
+    // renderer would alias in_n onto the output slot.
+    Term out_n = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dN_i, 0);
+    Term in_n  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dN_i, 1);
+    Term m_n   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dN_m, 2);
+    Term in_n_bufs[2] = { in_n, m_n };
+    Term ri_n = uop_range(0, 0 /*LOOP*/,   4);
+    Term rj_n = uop_range(1, 1 /*REDUCE*/, 3);
+    Term rk_n = uop_range(2, 1 /*REDUCE*/, 5);
+    Term jk_n = uop_int_binary(
+        UOP_IADD,
+        uop_int_binary(UOP_IMUL, rj_n, uop_const(DT_INT32, 5)), rk_n);
+    Term inner_n = uop_reduce(REDUCE_SUM, /*axis=*/2,
+                              uop_index_e(m_n, jk_n));
+    Term body_n  = uop_binary(UOP_MUL, uop_index_e(in_n, ri_n), inner_n);
+    Term outer_n = uop_reduce(REDUCE_SUM, /*axis=*/1, body_n);
+    Term st_n    = uop_store(out_n, ri_n, outer_n);
+    char bufn[2048];
+    fp = fmemopen(bufn, sizeof(bufn), "w");
+    cg_render_uop_kernel(st_n, "k_nested_red", out_n, in_n_bufs, 2, fp);
+    fclose(fp);
+    // The `a2` loop opens AFTER the `a1` loop opens (nesting), and the
+    // inner reduce's `_acc2` declaration appears AFTER `for (uint a1`.
+    char *p_a1 = strstr(bufn, "for (uint a1 = 0");
+    char *p_a2 = strstr(bufn, "for (uint a2 = 0");
+    char *p_ac2 = strstr(bufn, "float _acc2");
+    CHECK(p_a1 != NULL);
+    CHECK(p_a2 != NULL);
+    CHECK(p_ac2 != NULL);
+    CHECK(p_a1 < p_ac2);   // outer loop opens before inner accumulator
+    CHECK(p_ac2 < p_a2);   // inner accumulator declared before its loop
+    // The inner reduce body references the outer reduce's axis var `a1`
+    // -- which is in scope only because the `a2` loop is nested inside
+    // the `a1` loop.
+    CHECK(contains(bufn, "_acc2 = _acc2 + in1["));
+    char *p_inner_body = strstr(bufn, "_acc2 = _acc2 + in1[");
+    CHECK(p_inner_body != NULL && strstr(p_inner_body, "a1") != NULL
+          && strstr(p_inner_body, "a1") < strstr(p_inner_body, ";"));
+    // The outer combine consumes the inner accumulator.
+    CHECK(contains(bufn, "_acc1 = _acc1 + (in0[a0] * _acc2)"));
+  }
+
+  TEST_BEGIN("render-uop/value-dependent-reduces-stay-siblings");
+  // out[r] = (sum_k x[r,k]) - (max_k x[r,k]).  Two reduces where the
+  // second's RESULT is used by the store -- but neither reduce's body
+  // references the OTHER's reduce-axis var.  They must emit as SIBLING
+  // loops, both inside the output-r loop, NOT nested.  A reduce-loop
+  // placement that descended through a sibling reduce's body when
+  // testing axis use would wrongly nest the sum loop inside the max
+  // loop (the softmax-shape regression: softmax's sum-of-exp body
+  // references the max reduce's `_accN` but the max axis is bound).
+  {
+    u32 dS_i[1] = { 5 };
+    u32 dS_x[2] = { 5, 7 };
+    Term out_s = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dS_i, 0);
+    Term x_s   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dS_x, 1);
+    Term in_s_bufs[1] = { x_s };
+    Term rr   = uop_range(0, 0 /*LOOP*/,   5);
+    Term rk1  = uop_range(1, 1 /*REDUCE*/, 7);
+    Term rk2  = uop_range(2, 1 /*REDUCE*/, 7);
+    Term k7   = uop_const(DT_INT32, 7);
+    Term ad1  = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, rr, k7), rk1);
+    Term ad2  = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, rr, k7), rk2);
+    Term sum_k = uop_reduce(REDUCE_SUM, /*axis=*/1, uop_index_e(x_s, ad1));
+    Term max_k = uop_reduce(REDUCE_MAX, /*axis=*/2, uop_index_e(x_s, ad2));
+    Term diff  = uop_binary(UOP_ADD, sum_k, uop_binary(UOP_NEG, max_k, max_k));
+    Term st_s  = uop_store(out_s, rr, diff);
+    char bufs2[2048];
+    fp = fmemopen(bufs2, sizeof(bufs2), "w");
+    cg_render_uop_kernel(st_s, "k_sib", out_s, in_s_bufs, 1, fp);
+    fclose(fp);
+    // Both reduce loops are present and neither is nested inside the
+    // other: the `_acc2` declaration comes after the `a1` loop's body
+    // closes, not inside it.
+    char *p_a1 = strstr(bufs2, "for (uint a1 = 0");
+    char *p_a2 = strstr(bufs2, "for (uint a2 = 0");
+    char *p_ac1 = strstr(bufs2, "float _acc1");
+    char *p_ac2 = strstr(bufs2, "float _acc2");
+    CHECK(p_a1 != NULL && p_a2 != NULL);
+    CHECK(p_ac1 != NULL && p_ac2 != NULL);
+    // _acc2 declared after the a1 loop opened -- siblings emit in
+    // sequence; if a2 were nested in a1, _acc2 would sit between
+    // `for a1` and the a1 combine.  The a1 combine (`_acc1 = _acc1`)
+    // must precede the _acc2 declaration.
+    char *p_comb1 = strstr(bufs2, "_acc1 = _acc1");
+    CHECK(p_comb1 != NULL && p_comb1 < p_ac2);
+  }
 
   TEST_BEGIN("render-uop/local-upcast-global-decode");
   // matmul-shaped reduce STORE with KOP_UPCAST(N, 4) then

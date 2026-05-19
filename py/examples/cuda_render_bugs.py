@@ -1,44 +1,33 @@
-"""CUDA renderer bugs surfaced by the NN-layer cross-validation.
+"""CUDA renderer bug regression tests -- thvm-CUDA vs numpy.
 
-Per feedback_never_hide_bugs: when a kernel surfaces a renderer or
-lowering bug, it gets a NORMAL failing test here -- not a skip, not a
-work-around buried in the harness.  Each test below builds the minimal
-UOp DAG that exposes the bug, renders it to CUDA, and asserts the
-result is correct.  A test that FAILS is the point: it documents a
-real gap for whoever fixes the renderer.
+Two renderer bugs surfaced by the NN-layer cross-validation arc
+(docs/cuda_nn_xval.md).  Each builds a UOp DAG that exercises the bug,
+renders it for CUDA, nvrtc-compiles, dispatches on the GPU, and checks
+the result against a numpy reference.
 
-Run on the V100 pod:  python3 py/examples/cuda_render_bugs.py
-Exits non-zero while any documented bug is still open.
+  bug 1  nested_reduce_axis_dep
+    out[i] = sum_j(in[i] * sum_k m[j,k]).  The inner REDUCE over k is
+    wrapped in an elementwise MUL inside the outer REDUCE over j, and
+    its body m[j,k] indexes by the OUTER reduce's axis var.  The inner
+    reduce-loop must nest inside the outer reduce-loop; a flat hoist
+    references the outer axis var before its declaration -- nvrtc
+    `identifier "aN" is undefined`.  Blocks scaled-dot-product
+    attention (softmax-over-scores nests a per-row reduce in the row
+    reduce).
 
-  --- open bugs ---
-  signed_index_isub : UOP_ISUB is documented "signed integer subtract"
-    (src/thvm.h:368) but the CUDA renderer emits every UOP_RANGE var,
-    and therefore every ISUB, as `uint`.  An ISUB that goes negative
-    wraps to a huge unsigned value; a comparison against a negative
-    literal (`-1 < x`) is then evaluated with `-1` promoted to
-    UINT_MAX and is always false.  This silently breaks any DAG that
-    relies on signed index arithmetic -- e.g. a col2im lower-bound
-    check `0 <= ih - ki`.  The conv2d_bwd_dx harness layer works
-    around it by relying on unsigned wraparound (`x < hi` rejects both
-    the upper bound and the wrapped negative), but a DAG that needs a
-    genuine signed comparison has no correct lowering today.
+  bug 2  signed_index_isub
+    out[i] = (i-1 >= 0) ? in[i-1] : 0, with the guard built as
+    ILT(-1, i-1).  UOP_ISUB is a signed subtract, but RANGE vars are
+    declared `uint`: `i-1` at i==0 wraps to ~UINT_MAX and the guard
+    `-1 < (i-1)` promotes -1 to UINT_MAX, so it is always false and
+    every live element is masked to 0.  The renderer must emit the
+    integer expression signed.
 
-  nested_reduce_axis_dep : a REDUCE whose body contains ANOTHER REDUCE
-    over a different axis -- where the inner reduce's body indexes by
-    the OUTER reduce's axis variable -- is not kept nested.  The
-    chain-reduce path in render_uop.c (rmu_emit_store_reduce) handles
-    only DIRECTLY nested reduces (REDUCE(REDUCE(...)) with no op
-    between).  When the inner reduce is wrapped in any elementwise op
-    (e.g. MUL), it falls to the generic post-order hoist
-    (rmu_collect_reduces), which emits every reduce loop at the top
-    level.  The inner loop then (a) references the outer reduce's axis
-    var before it is declared -> `undeclared identifier`, and (b) is
-    computed ONCE instead of once per outer-axis value -> wrong result
-    even if it compiled.  This blocks scaled-dot-product attention:
-    softmax over the j-scores inherently nests a per-j score reduce
-    (over the head dim) inside the max/sum reduce over j.  Needs a
-    renderer design change -- port tinygrad's reduce nesting (each
-    reduce emitted at the loop depth its body's axis deps require).
+Both bugs are FIXED -- this script asserts they stay fixed.  Runs only
+on a Linux+CUDA host (V100 / SM70 pod); without the CUDA bridge it
+prints a SKIP line and exits 0.
+
+  python3 py/examples/cuda_render_bugs.py
 """
 from __future__ import annotations
 
@@ -53,146 +42,169 @@ sys.path.insert(0, str(ROOT))
 from py.thvm import Thvm, Cuda, K
 
 
-def _dispatch(c, cu, out_shape, in_arrs, total):
-    fn = c.compile(cu, fn="k")
-    out_buf = c.buf_alloc(int(np.prod(out_shape)) * 4)
-    in_bufs = []
-    for a in in_arrs:
-        b = c.buf_alloc(a.nbytes)
-        c.buf_write_array(b, a)
-        in_bufs.append(b)
-    block = max(32, ((total + 31) // 32) * 32)
-    c.dispatch(fn, [out_buf] + in_bufs, grid=1, block=block)
-    got = c.buf_read_array(out_buf, out_shape, np.float32)
-    for b in [out_buf] + in_bufs:
-        c.buf_release(b)
-    c.fn_release(fn)
-    return got
+def _grid_block(total):
+    """1-D launch: total threads cover the output; block is warp-multiple."""
+    block = 256 if total >= 256 else max(32, ((total + 31) // 32) * 32)
+    grid = (total + block - 1) // block
+    return grid, block
 
 
 # ====================================================================
-# BUG: signed ISUB renders as unsigned -> negative-literal compare
-#      always false.
-#
-# Minimal DAG:  out[i] = (ISUB(i, k) compared to bounds) ? in[clamp] : 0
-# reduced over k.  With i in 0..N and k in 0..N, half the (i,k) pairs
-# have i-k < 0.  A correct signed `-1 < (i-k)` lower-bound check should
-# pass for i-k >= 0 and fail for i-k < 0.  Under the uint renderer it
-# fails for ALL pairs, so the reduce sums nothing and out is all-zero.
+# bug 1 -- nested_reduce_axis_dep
 # ====================================================================
-def test_signed_index_isub(h, c):
-    """out[i] = sum_k [ -1 < (i-k) < N ] * in[i-k clamped].
+def build_nested_reduce(h, I, J, Kd):
+    """out[i] = sum_j(in[i] * sum_k m[j,k]).
 
-    Reference: out[i] = sum_{k : 0 <= i-k} in[i-k] = sum_{j=0..i} in[j].
-    A correct signed renderer gives the prefix sums of `in`.  The
-    current uint renderer makes the `-1 < (i-k)` term always false,
-    so every out[i] comes back 0.0.
+    REDUCE(MUL(in[i], REDUCE(m[j*Kd+k], SUM, k)), SUM, j).  The inner
+    reduce's body indexes m by the outer reduce's axis var `j`.
     """
-    N = 8
-    out = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(N,), instance=0)
-    inb = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(N,), instance=1)
-    i = h.range(axis_id=0, axis_type=K.AXIS_LOOP, extent=N)
-    k = h.range(axis_id=1, axis_type=K.AXIS_REDUCE, extent=N)
-    diff = h.isub(i, k)
-    # signed lower bound: -1 < diff   (i.e. diff >= 0)
-    lo = h.ilt(h.isub(h.iconst(0), h.iconst(1)), diff)
-    hi = h.ilt(diff, h.iconst(N))
-    inb_mask = h.iand(lo, hi)
-    addr = h.iwhere(inb_mask, diff, h.iconst(0))
-    val = h.iwhere(inb_mask, h.index_e(inb, addr), h.fconst(0.0))
-    root = h.store(out, i, h.reduce(K.REDUCE_SUM, axis=1, src=val))
+    out_b = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(I,),
+                     instance=0)
+    in_b = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(I,),
+                    instance=1)
+    m_b = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(J, Kd),
+                   instance=2)
+    i = h.range(axis_id=0, axis_type=K.AXIS_LOOP, extent=I)
+    j = h.range(axis_id=1, axis_type=K.AXIS_REDUCE, extent=J)
+    k = h.range(axis_id=2, axis_type=K.AXIS_REDUCE, extent=Kd)
+    # m[j,k] = m[j*Kd + k]
+    jk = h.iadd(h.imul(j, h.iconst(Kd)), k)
+    inner = h.reduce(K.REDUCE_SUM, axis=2, src=h.index_e(m_b, jk))
+    body = h.mul(h.index_e(in_b, i), inner)
+    outer = h.reduce(K.REDUCE_SUM, axis=1, src=body)
+    return h.store(out_b, i, outer)
 
+
+def run_bug1(h, c):
+    I, J, Kd = 7, 5, 11
+    rng = np.random.default_rng(1)
+    in_a = rng.standard_normal(I).astype(np.float32)
+    m_a = rng.standard_normal((J, Kd)).astype(np.float32)
+    # ref: out[i] = in[i] * sum over all of m
+    ref = (in_a.astype(np.float64)
+           * m_a.astype(np.float64).sum())
+
+    root = build_nested_reduce(h, I, J, Kd)
     cu = h.render_cuda(root, name="k")
-    assert cu, "render returned empty"
-    x = np.arange(1, N + 1, dtype=np.float32)        # in[j] = j+1
-    got = _dispatch(c, cu, (N,), [x], total=N).astype(np.float64)
-    ref = np.cumsum(x.astype(np.float64))            # prefix sums
-
-    max_abs = float(np.abs(got - ref).max())
-    ok = max_abs <= 1e-4
-    print(f"  signed_index_isub : got={got.tolist()}")
-    print(f"                      ref={ref.tolist()}")
-    print(f"                      max_abs={max_abs:.3e}  "
-          f"{'OK' if ok else 'FAIL -- signed ISUB renders as uint'}")
-    return ok
-
-
-# ====================================================================
-# BUG: a REDUCE nested (through an elementwise op) inside another
-#      REDUCE, where the inner reduce's body depends on the outer
-#      reduce's axis var, is emitted at the wrong loop nesting level.
-#
-# Minimal DAG:  out[i] = sum_j ( in[i] * sum_k m[j,k] )
-# The inner reduce (sum_k m[j,k]) indexes m by `j`, the OUTER reduce's
-# axis.  A correct renderer emits the k-loop INSIDE the j-loop, so the
-# inner accumulator is recomputed for each j.  The current renderer
-# hoists the k-loop above the j-loop -- its body then references the
-# not-yet-declared `aj`, and even were it to compile it would compute
-# sum_k m[j,k] exactly once with a stale j.
-# ====================================================================
-def test_nested_reduce_axis_dep(h, c):
-    """out[i] = sum_j ( in[i] * sum_k m[j,k] ).
-
-    Reference: out[i] = in[i] * sum_{j,k} m[j,k]  (the inner sum does
-    NOT depend on i, so it factors -- but it DOES depend on j and must
-    be recomputed per j).  A correct renderer matches numpy; the
-    current one fails to compile (undeclared inner-loop axis var) or,
-    if it compiled, would use a stale j.
-    """
-    N, M = 4, 3
-    out = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(N,), instance=0)
-    inb = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(N,), instance=1)
-    mb = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(N, M), instance=2)
-    i = h.range(axis_id=0, axis_type=K.AXIS_LOOP, extent=N)
-    j = h.range(axis_id=1, axis_type=K.AXIS_REDUCE, extent=N)
-    k = h.range(axis_id=2, axis_type=K.AXIS_REDUCE, extent=M)
-    inner = h.reduce(K.REDUCE_SUM, axis=2,
-                     src=h.index_e(mb, h.iadd(h.imul(j, h.iconst(M)), k)))
-    body = h.mul(h.index_e(inb, i), inner)
-    root = h.store(out, i, h.reduce(K.REDUCE_SUM, axis=1, src=body))
-
-    cu = h.render_cuda(root, name="k")
-    assert cu, "render returned empty"
-    x = np.arange(1, N + 1, dtype=np.float32)
-    m = np.arange(1, N * M + 1, dtype=np.float32).reshape(N, M)
-    ref = x.astype(np.float64) * m.astype(np.float64).sum()
-
+    if not cu:
+        return dict(name="nested_reduce_axis_dep", status="render_err")
     try:
-        got = _dispatch(c, cu, (N,), [x, m], total=N).astype(np.float64)
-    except RuntimeError as ex:
-        print(f"  nested_reduce_axis_dep : COMPILE/DISPATCH FAILED")
-        print(f"                           {str(ex)[:160]}")
-        print(f"                           FAIL -- inner reduce hoisted "
-              f"above outer reduce loop")
-        return False
+        fn = c.compile(cu, fn="k")
+    except RuntimeError as e:
+        return dict(name="nested_reduce_axis_dep", status="compile_err",
+                    detail=str(e), cu=cu)
+
+    out_buf = c.buf_alloc(I * 4)
+    in_buf = c.buf_alloc(in_a.nbytes)
+    m_buf = c.buf_alloc(m_a.nbytes)
+    c.buf_write_array(in_buf, in_a)
+    c.buf_write_array(m_buf, m_a)
+    grid, block = _grid_block(I)
+    c.dispatch(fn, [out_buf, in_buf, m_buf], grid=grid, block=block)
+    got = c.buf_read_array(out_buf, (I,), np.float32).astype(np.float64)
+    c.buf_release(out_buf)
+    c.buf_release(in_buf)
+    c.buf_release(m_buf)
+    c.fn_release(fn)
 
     max_abs = float(np.abs(got - ref).max())
-    ok = max_abs <= 1e-3
-    print(f"  nested_reduce_axis_dep : got={got.tolist()}")
-    print(f"                           ref={ref.tolist()}")
-    print(f"                           max_abs={max_abs:.3e}  "
-          f"{'OK' if ok else 'FAIL -- inner reduce uses stale outer axis'}")
-    return ok
+    tol = 1e-4 * max(1.0, float(np.abs(ref).max()))
+    return dict(name="nested_reduce_axis_dep", status="ok",
+                correct=(max_abs <= tol), max_abs=max_abs, tol=tol)
 
 
+# ====================================================================
+# bug 2 -- signed_index_isub
+# ====================================================================
+def build_signed_isub(h, N):
+    """out[i] = (i-1 >= 0) ? in[i-1] : 0.
+
+    Guard built as ILT(-1, i-1): a signed comparison of -1 against a
+    UOP_ISUB result.  In unsigned space this is always false.
+    """
+    out_b = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(N,),
+                     instance=0)
+    in_b = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(N,),
+                    instance=1)
+    i = h.range(axis_id=0, axis_type=K.AXIS_LOOP, extent=N)
+    im1 = h.isub(i, h.iconst(1))                 # i - 1  (negative at i=0)
+    neg1 = h.iconst(-1)
+    guard = h.ilt(neg1, im1)                     # -1 < (i-1)  <=>  i-1 >= 0
+    ld = h.index_e(in_b, im1)
+    sel = h.iwhere(guard, ld, h.fconst(0.0))
+    return h.store(out_b, i, sel)
+
+
+def run_bug2(h, c):
+    N = 64
+    rng = np.random.default_rng(2)
+    in_a = (rng.standard_normal(N) + 10.0).astype(np.float32)
+    ref = np.zeros(N, dtype=np.float64)
+    ref[1:] = in_a[:-1].astype(np.float64)       # out[i] = in[i-1], out[0]=0
+
+    root = build_signed_isub(h, N)
+    cu = h.render_cuda(root, name="k")
+    if not cu:
+        return dict(name="signed_index_isub", status="render_err")
+    try:
+        fn = c.compile(cu, fn="k")
+    except RuntimeError as e:
+        return dict(name="signed_index_isub", status="compile_err",
+                    detail=str(e), cu=cu)
+
+    out_buf = c.buf_alloc(N * 4)
+    in_buf = c.buf_alloc(in_a.nbytes)
+    c.buf_write_array(in_buf, in_a)
+    grid, block = _grid_block(N)
+    c.dispatch(fn, [out_buf, in_buf], grid=grid, block=block)
+    got = c.buf_read_array(out_buf, (N,), np.float32).astype(np.float64)
+    c.buf_release(out_buf)
+    c.buf_release(in_buf)
+    c.fn_release(fn)
+
+    max_abs = float(np.abs(got - ref).max())
+    return dict(name="signed_index_isub", status="ok",
+                correct=(max_abs <= 1e-5), max_abs=max_abs, tol=1e-5)
+
+
+# ====================================================================
+# driver
+# ====================================================================
 def main():
     if not Cuda.available():
-        print("SKIP: no CUDA bridge in this build.")
+        print("SKIP: this libthvm_py build has no CUDA bridge "
+              "(run on the Linux+CUDA pod)")
         return 0
+
     h = Thvm()
     c = Cuda()
-    print(f"# CUDA renderer-bug tests -- device sm_{c.device_sm()}")
-    print("=" * 70)
-    results = {
-        "signed_index_isub": test_signed_index_isub(h, c),
-        "nested_reduce_axis_dep": test_nested_reduce_axis_dep(h, c),
-    }
-    print("=" * 70)
-    n_fail = sum(1 for v in results.values() if not v)
+    sm = c.device_sm()
+    print(f"CUDA device: SM{sm}")
+    print()
+
+    results = [run_bug1(h, c), run_bug2(h, c)]
+
+    n_fail = 0
+    for r in results:
+        if r["status"] != "ok":
+            n_fail += 1
+            print(f"  FAIL  {r['name']}: {r['status']}")
+            if "detail" in r:
+                print(f"        {r['detail'].strip()}")
+            continue
+        if r["correct"]:
+            print(f"  ok    {r['name']}: "
+                  f"max_abs {r['max_abs']:.2e} <= {r['tol']:.0e}")
+        else:
+            n_fail += 1
+            print(f"  FAIL  {r['name']}: "
+                  f"max_abs {r['max_abs']:.2e} > {r['tol']:.0e}")
+
+    print()
     if n_fail:
-        print(f"FAIL: {n_fail} documented renderer bug(s) still open.")
+        print(f"{n_fail}/{len(results)} renderer-bug tests FAILED")
         return 1
-    print("PASS: all previously-documented renderer bugs are fixed.")
+    print(f"all {len(results)} renderer-bug tests passed")
     return 0
 
 
