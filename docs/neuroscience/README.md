@@ -193,7 +193,16 @@ IJCAI, etc. -- are left as is.)
    and drift, interactive game engines, camera/action control,
    long-horizon memory, and the embodied/predictive world models. The
    engineering companion to page 3's paradigm argument.
-8. [references.md](references.md) -- consolidated bibliography with
+8. [08-reinforcement-learning.md](08-reinforcement-learning.md) -- a
+   detailed history of reinforcement learning as a field: the 1950s
+   optimal-control and animal-learning roots, temporal-difference
+   learning, the deep-RL revolution (DQN, Atari), policy optimization,
+   AlphaZero / MuZero planning, the sample-efficiency push, world
+   models, RL as sequence modelling, the generalist multi-game agents,
+   goal-conditioned RL and quasimetrics, and RL for language models.
+   The field-level companion to page 2's RL-in-the-brain story, and
+   the lineage the thvm experiment arc (155-167) walks.
+9. [references.md](references.md) -- consolidated bibliography with
    links.
 
 ## How to use this with thvm
