@@ -2,8 +2,7 @@
 // (Phase 2 of docs/plans/ideal_pipeline_v2.md).
 //
 // The unified pass is a 1-to-1 port of tinygrad's run_rangeify +
-// pm_apply_rangeify. It is gated behind THVM_UNIFIED_RANGEIFY=1; this
-// test sets the env var, then builds a small UOp graph and inspects
+// pm_apply_rangeify.  This test builds a small UOp graph and inspects
 // the produced range-map + realize-map + substitute table via the
 // rangeify_unified_*_at accessors.
 //

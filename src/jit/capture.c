@@ -324,9 +324,10 @@ static int jit_replay_pack_enabled(void) {
 }
 
 // Count distinct UOP nodes reachable from a lifted-DAG root.  Used by
-// jit_capture_export_ops to expose an "OpCount" surrogate when
-// program[] has been freed (THVM_PHASE_C7_FREE_PROGRAM=1).  Bounded
-// recursion via a small visited stack; the lifted DAG is finite.
+// jit_capture_export_ops to expose an "OpCount" surrogate (program[]
+// has been retired; the DAG is now the only kernel representation).
+// Bounded recursion via a small visited stack; the lifted DAG is
+// finite.
 static u32 jit_capture_dag_op_count_walk(Term t, u32 depth) {
   if (depth > 256 || term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);

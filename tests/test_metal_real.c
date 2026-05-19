@@ -256,8 +256,7 @@ int main(void) {
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 mm_cpu, sizeof(mm_cpu));
     }
-    // Under default THVM_PHASE_C7_FREE_PROGRAM=1 the CPU matmul
-    // kernel must route through cblas_sgemm via the DAG-side
+    // CPU matmul must route through cblas_sgemm via the DAG-side
     // classifier (uop_dag_classify_matmul_shape).  If the dispatch
     // falls through to render_uop_c there is a 30-100x perf cliff,
     // so this counter doubles as a regression guard.
@@ -334,8 +333,7 @@ int main(void) {
     f32 dd = dot_out - dv_ref;
     if (dd < 0) dd = -dd;
     CHECK(dd < 1e-3f);
-    // The DAG-side classifier must fire under default
-    // THVM_PHASE_C7_FREE_PROGRAM=1 (program[] is freed at materialize).
+    // The DAG-side classifier must fire.
     CHECK(cpu_blas_dot_dispatch_dag_count() > 0);
     thvm_free();
   }
