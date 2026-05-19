@@ -2419,6 +2419,7 @@ fn u8   rangeify_unified_index_axes_lookup(u64 index_loc, Term *out_rngs,
 // Reverse lookup: producer node_idx for a BUFFERIZE Term (scans
 // RU_BUFFERIZE_TERM[]).  0xFFFFFFFFu if no match.
 fn u32  rangeify_unified_node_idx_for_bufferize(Term buf);
+fn u8   rangeify_unified_axes_mask_at(u32 node_idx);
 
 // === UOP_RANGE field accessors + axis_type rewriter ===
 // Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type

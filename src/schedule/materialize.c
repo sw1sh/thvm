@@ -666,6 +666,78 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   return unified_rewrite_rec_sub(st, NULL, t, depth);
 }
 
+// Try inlining a BUFFERIZE via the per-axis index side table populated
+// in rangeify_unified.c::ru_index_axes_register.  Mirror: tinygrad's
+// `BUFFERIZE.index(*[r for i,r in enumerate(ctx.range_map[x][0]) if i
+// in realized_ranges])` (indexing.py:78) carries per-axis range terms
+// in the INDEX node's args.  thvm's INDEX_E uses a flat addr; the side
+// table preserves the per-axis info at construction so the inline
+// rewriter can substitute closed_range[i] -> consumer in_rng at the
+// producer's realized_axes[i] WITHOUT decomposing the flat addr (which
+// fails on movement-op swizzlers).
+//
+// Returns the substituted Term on hit (caller short-circuits), or 0
+// to signal "table miss, try other inline strategies".
+static Term try_inline_bufferize_via_axis_table(
+    UnifiedRewriteState *st, UnifiedSubst const *sub,
+    Term resolved, Term inner_buf, Term v, u32 n_ranges, u32 depth) {
+  Term ax_rngs[MAX_DIM];
+  u8 ax_n = rangeify_unified_index_axes_lookup(
+      term_val(resolved), ax_rngs, MAX_DIM);
+  if (ax_n < n_ranges) return 0;
+  // First scan BOUNDARY_BUFFERIZE_TERM[] (the realized-as-kernel
+  // boundaries); fall back to RU_BUFFERIZE_TERM[] for orphan
+  // BUFFERIZEs whose node didn't become a separate kernel.
+  u32 prod_idx = 0xFFFFFFFFu;
+  for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
+    if (BOUNDARY_BUFFERIZE_TERM[bi] == inner_buf) {
+      prod_idx = bufferize_info_find(BOUNDARY_ORDER[bi]);
+      break;
+    }
+  }
+  if (prod_idx == 0xFFFFFFFFu) {
+    prod_idx = rangeify_unified_node_idx_for_bufferize(inner_buf);
+  }
+  if (prod_idx == 0xFFFFFFFFu) return 0;
+  u32 prod_ndim = rangeify_unified_out_ndim_at(prod_idx);
+  // realized_axes[i] = the i-th producer output axis position that
+  // was closed in this BUFFERIZE.  For full-realize the mask is 0 and
+  // prod_ndim == n_ranges (identity).  For partial-realize the mask
+  // marks specific bits.
+  u8 axes_mask = rangeify_unified_axes_mask_at(prod_idx);
+  u32 realized_axes[MAX_DIM] = {0};
+  u32 n_realized = 0;
+  if (axes_mask == 0 && prod_ndim == n_ranges) {
+    for (u32 a = 0; a < prod_ndim; a++) realized_axes[n_realized++] = a;
+  } else {
+    for (u32 a = 0; a < prod_ndim && a < MAX_DIM; a++) {
+      if (axes_mask & (u8)(1u << a)) realized_axes[n_realized++] = a;
+    }
+  }
+  if (n_realized != n_ranges || ax_n < prod_ndim) return 0;
+  UnifiedSubst new_sub;
+  new_sub.n = 0;
+  if (sub != NULL) {
+    for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+      new_sub.from[new_sub.n] = sub->from[i];
+      new_sub.to  [new_sub.n] = sub->to  [i];
+      new_sub.n++;
+    }
+  }
+  for (u32 i = 0; i < n_ranges; i++) {
+    Term cr = uop_bufferize_range_at(inner_buf, i);
+    if (cr == 0 || term_tag(cr) != TAG_UOP
+        || term_ext(cr) != UOP_RANGE) return 0;
+    if (new_sub.n >= UNIFIED_SUBST_CAP) return 0;
+    u32 ax = realized_axes[i];
+    if (ax >= ax_n) return 0;
+    new_sub.from[new_sub.n] = cr;
+    new_sub.to  [new_sub.n] = ax_rngs[ax];
+    new_sub.n++;
+  }
+  return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+}
+
 static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
                                     UnifiedSubst const *sub,
                                     Term t, u32 depth) {
@@ -994,89 +1066,12 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       // consumer's full iter addr but the BUFFERIZE only closes over
       // a subset of axes (softmax denom replicated across cols).
       if (v != 0 && n_ranges >= 2 && n_ranges <= UNIFIED_SUBST_CAP) {
-        // Tinygrad spec (indexing.py:78): the INDEX_E carries per-axis
-        // consumer range terms directly.  thvm's INDEX_E uses a flat
-        // addr; rangeify_unified.c stashes the per-axis terms in a
-        // side table (RU_INDEX_AXIS_*) at construction.  If we find
-        // the entry, substitute each closed_range[i] -> consumer's
-        // in_rng at the matching axis position; the producer's
-        // realize_map says which output axes are realized (closed in
-        // BUFFERIZE), so we pair closed_range[i] with consumer
-        // in_rng at the realized_axes[i] position.
-        //
-        // When the side table doesn't have an entry (the INDEX_E
-        // came from a non-rangeify code path, or a pre-flat-addr
-        // construction), fall through to the legacy stride/extent
-        // match below.
-        {
-          Term ax_rngs[MAX_DIM];
-          u8 ax_n = rangeify_unified_index_axes_lookup(
-              term_val(resolved), ax_rngs, MAX_DIM);
-          if (ax_n >= n_ranges) {
-            // Look up producer's realized_axes (which output axes of
-            // the producer became closed_ranges in the BUFFERIZE).
-            // First scan BOUNDARY_BUFFERIZE_TERM[] (the realized-as-
-            // kernel boundaries); fall back to RU_BUFFERIZE_TERM[]
-            // (the broader rangeify-pass index, includes orphan
-            // BUFFERIZEs whose node didn't become a separate kernel).
-            u32 prod_idx = 0xFFFFFFFFu;
-            for (u32 bi = 0; bi < BOUNDARY_ORDER_LEN; bi++) {
-              if (BOUNDARY_BUFFERIZE_TERM[bi] == inner_buf) {
-                prod_idx = bufferize_info_find(BOUNDARY_ORDER[bi]);
-                break;
-              }
-            }
-            if (prod_idx == 0xFFFFFFFFu) {
-              prod_idx = rangeify_unified_node_idx_for_bufferize(inner_buf);
-            }
-            if (prod_idx != 0xFFFFFFFFu) {
-              // Build substitution: closed_range[i] (the i-th BUFFERIZE
-              // closed-range, which corresponds to the i-th REALIZED
-              // output axis of the producer) -> consumer's in_rng at
-              // the i-th matching position.  Since closed_ranges are
-              // numbered in producer-realized order (the BUFFERIZE was
-              // built from `out_rngs[realized_axes]`), and the
-              // consumer's in_rngs at the same positions are what we
-              // want to bind to, we can use the same realized_axes[]
-              // mapping for both.  Read it from RU_REALIZE_MAP.
-              u8 axes_mask = 0;
-              // rangeify_unified accessor would be cleaner; for now
-              // reconstruct from a public accessor or fall back.
-              // Use rangeify_unified_out_ndim_at + the producer's
-              // realize structure -- we know n_realized = n_ranges.
-              // If the producer's n_realized == its out_ndim, every
-              // axis is realized and realized_axes[i] = i.  Otherwise
-              // we need the mask.  Cheap default: if n_ranges ==
-              // out_ndim_at(prod_idx), assume identity mapping.
-              u32 prod_ndim = rangeify_unified_out_ndim_at(prod_idx);
-              (void)axes_mask;
-              if (prod_ndim == n_ranges && ax_n >= n_ranges) {
-                UnifiedSubst new_sub;
-                new_sub.n = 0;
-                if (sub != NULL) {
-                  for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
-                    new_sub.from[new_sub.n] = sub->from[i];
-                    new_sub.to  [new_sub.n] = sub->to  [i];
-                    new_sub.n++;
-                  }
-                }
-                int ok = 1;
-                for (u32 i = 0; i < n_ranges; i++) {
-                  Term cr = uop_bufferize_range_at(inner_buf, i);
-                  if (cr == 0 || term_tag(cr) != TAG_UOP
-                      || term_ext(cr) != UOP_RANGE) { ok = 0; break; }
-                  if (new_sub.n >= UNIFIED_SUBST_CAP) { ok = 0; break; }
-                  new_sub.from[new_sub.n] = cr;
-                  new_sub.to  [new_sub.n] = ax_rngs[i];
-                  new_sub.n++;
-                }
-                if (ok) {
-                  return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
-                }
-              }
-            }
-          }
-        }
+        // Tinygrad-spec inline first (indexing.py:78 per-axis index);
+        // falls through to legacy stride/extent decomposition when the
+        // side table has no entry for this INDEX_E.
+        Term axis_hit = try_inline_bufferize_via_axis_table(
+            st, sub, resolved, inner_buf, v, n_ranges, depth);
+        if (axis_hit != 0) return axis_hit;
         u32 dims[UNIFIED_SUBST_CAP] = {0};
         Term old_ranges[UNIFIED_SUBST_CAP] = {0};
         int extents_ok = 1;

@@ -958,6 +958,14 @@ static void ru_index_axes_register(Term index_e_term, Term const *rngs,
 // resolve orphan BUFFERIZEs (those not in BOUNDARY_BUFFERIZE_TERM[]
 // because their node didn't get a boundary kernel).  Returns
 // 0xFFFFFFFFu when no match.
+// Per-axis realize mask from RU_REALIZE_MAP.  Bit i set iff axis i
+// is in the realized set (closed in BUFFERIZE).  Returns 0 for nodes
+// out of bounds.
+fn u8 rangeify_unified_axes_mask_at(u32 node_idx) {
+  if (node_idx >= RU_MAX_NODES) return 0;
+  return RU_REALIZE_MAP[node_idx].axes_mask;
+}
+
 fn u32 rangeify_unified_node_idx_for_bufferize(Term buf) {
   if (buf == 0) return 0xFFFFFFFFu;
   for (u32 i = 0; i < RU_SUBST_CAP; i++) {
