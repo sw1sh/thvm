@@ -26,9 +26,9 @@
 
 // CP-weight mode for this bench run -- read once from the
 // `THVM_ATP_CP_WEIGHT` env var (an `AtpCpWeightMode` integer).
-// Unset / out-of-range -> ATP_CP_WEIGHT_ADD (0), the default
-// heuristic, so an un-exported environment reproduces pre-port
-// numbers exactly.
+// Unset / out-of-range -> ATP_CP_WEIGHT_ADD (0): the harness pins
+// ADD when the env var is absent so the `.expect` status gate
+// runs against a fixed heuristic regardless of the engine default.
 static u32 bench_cp_weight_mode(void) {
   const char *e = getenv("THVM_ATP_CP_WEIGHT");
   if (e == NULL || *e == 0) return ATP_CP_WEIGHT_ADD;

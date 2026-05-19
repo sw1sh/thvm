@@ -2325,6 +2325,13 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   if (s == NULL) return NULL;
   s->kbo      = cfg;
   s->step_cap = step_cap;
+  // CP-priority weight: the ordering-directed GT heuristic is the
+  // engine default -- it cuts the corpus saturation step count and
+  // proves the distance-1 CriticalPairLemma cpl1 in a single step
+  // (the symbol-count ADD heuristic took 21).  ADD stays reachable
+  // via thvm_atp_set_cp_weight_mode for callers that want the bare
+  // symbol-count sum.
+  s->cp_weight_mode = ATP_CP_WEIGHT_GT;
   atp_register_primitives();
   acp_selftest();   // verify the Stringterms pack/unpack round-trip
   // Allocate the growable rule / CP arrays at their initial
@@ -2664,8 +2671,8 @@ fn void thvm_atp_set_lpo(AtpState *s, const LpoConfig *lpo) {
 }
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
-// Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so an unset
-// or garbage mode reproduces the default `--add` heuristic.
+// Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so a garbage
+// mode falls back to the bare symbol-count heuristic.
 fn void thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode) {
   if (s == NULL) return;
   s->cp_weight_mode = (mode < ATP_CP_WEIGHT_LAST)
@@ -3120,10 +3127,10 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
 // added (Waldmeister lever 1, above).
 //
 // `s->cp_weight_mode` selects among the ported `ClasHeuristics`
-// weight functions (see the `AtpCpWeightMode` enum).  Mode 0
-// (ATP_CP_WEIGHT_ADD) is the default and -- with use_mix_heuristic
-// unset and no goal -- keeps this function byte-identical to the
-// pre-port `--add` behavior.
+// weight functions (see the `AtpCpWeightMode` enum); the engine
+// default is ATP_CP_WEIGHT_GT.  Selecting ATP_CP_WEIGHT_ADD with
+// use_mix_heuristic unset and no goal makes this function the
+// bare symbol-count sum.
 #define MIX_UNORIENTED_PENALTY 4u
 // Priority weight for a CP whose symbol-count sum is already known
 // (`base`) -- e.g. counted for free during acp_pack.  Identical

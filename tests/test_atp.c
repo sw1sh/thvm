@@ -2045,13 +2045,15 @@ int main(void) {
   // weights[a=4]=1, var_weight=1, precedence={_,e:2,i:4,f:3,a:1}.
   // symbol_count counts every node as 1.
 
-  TEST_BEGIN("atp/cp-weight-mode-default-is-add");
+  TEST_BEGIN("atp/cp-weight-mode-default-is-gt");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_ADD);
-    // Mode 0 must reproduce the bare symbol-count sum.
+    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_GT);
+    // ADD stays reachable: selecting it reproduces the bare
+    // symbol-count sum.
     Term lhs = mk_f(mk_v(VAR_x), mk_e());   // symbol_count 3
     Term rhs = mk_v(VAR_x);                 // symbol_count 1
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ADD);
     CHECK_EQ(atp_cp_priority(s, lhs, rhs), 4u);
     thvm_atp_free(s);
   }
@@ -2072,6 +2074,7 @@ int main(void) {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_f(mk_v(VAR_x), mk_e());   // symbol_count 3
     Term rhs = mk_v(VAR_x);                 // symbol_count 1
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ADD);
     CHECK_EQ(atp_cp_priority(s, lhs, rhs), 4u);   // add
     thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
     CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // max(3,1)
@@ -2087,6 +2090,7 @@ int main(void) {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_i(mk_v(VAR_x));
     Term rhs = mk_e();
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ADD);
     CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // add: symbol count
     thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ORD);
     CHECK_EQ(atp_cp_priority(s, lhs, rhs), 2u);   // KBO-weight sum

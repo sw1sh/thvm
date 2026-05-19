@@ -2976,13 +2976,16 @@ fn const KboConfig   *kbo_cfg_get     (u32 cfg_id);
 // cheapest CP wins, so a lower number is selected first.
 //
 //   ADD    -- CH_AddWeight  : symbol_count(lhs) + symbol_count(rhs).
-//             The pre-port default; mode 0 keeps atp_cp_priority
-//             byte-identical when cp_weight_mode is left zeroed.
+//             The bare symbol-count sum; reachable via
+//             thvm_atp_set_cp_weight_mode for callers that want it.
 //   MAX    -- CH_MaxWeight  : max(symbol_count(lhs), symbol_count(rhs)).
 //   ORD    -- CH_OrdWeight  : KBO-weight sum (CF_Phi_KBO) -- the
 //             ordering's own weight function rather than raw count.
 //   GT     -- CH_GtWeight   : ordering-directed -- GT picks the
-//             lhs size, LT the rhs size, otherwise the sum.
+//             lhs size, LT the rhs size, otherwise the sum.  The
+//             engine default (thvm_atp_init): it cuts the corpus
+//             saturation step count vs ADD and proves the
+//             distance-1 CriticalPairLemma cpl1 in one step.
 //   MIX    -- CH_MixWeight  : (wl+wr)*g + g + (wl+wr), where g is
 //             the GtWeight value -- a graded blend.
 //   MIX2   -- CH_MixWeight2 : g*10 + (wl+wr).
@@ -3217,10 +3220,10 @@ typedef struct {
   // CP-priority weight mode -- a port of the weight functions in
   // Waldmeister's `ClasHeuristics` module ("classification
   // heuristics", sources/CLAS/ClasHeuristics.c).  See the
-  // `AtpCpWeightMode` enum for the per-mode formula.  Mode 0
-  // (ATP_CP_WEIGHT_ADD) is the default `--add` heuristic and
-  // keeps `atp_cp_priority` byte-identical to pre-port behavior
-  // when this field is left zeroed.  Set via
+  // `AtpCpWeightMode` enum for the per-mode formula.
+  // `thvm_atp_init` sets this to ATP_CP_WEIGHT_GT, the
+  // ordering-directed heuristic; ATP_CP_WEIGHT_ADD (the bare
+  // symbol-count sum) stays reachable via
   // `thvm_atp_set_cp_weight_mode`.
   u8   cp_weight_mode;
 
@@ -3269,9 +3272,10 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
-// Mode ATP_CP_WEIGHT_ADD (0) is the default; out-of-range values
-// are clamped to ADD.  See `AtpCpWeightMode` for the per-mode
-// formula, all ports of Waldmeister's `ClasHeuristics` module.
+// `thvm_atp_init` defaults to ATP_CP_WEIGHT_GT; out-of-range
+// values are clamped to ATP_CP_WEIGHT_ADD.  See `AtpCpWeightMode`
+// for the per-mode formula, all ports of Waldmeister's
+// `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 
 // === atp/precedence -- algebraic-structure detection =================

@@ -204,10 +204,9 @@ int main(int argc, char **argv) {
 
   AtpState *s = thvm_atp_init(&cfg, step_cap);
   if (use_lpo) thvm_atp_set_lpo(s, &lpo);
-  // CP-weight mode: read from `THVM_ATP_CP_WEIGHT` (an
-  // `AtpCpWeightMode` integer).  Unset / out-of-range keeps the
-  // default `--add` heuristic, so pre-port numbers are reproduced
-  // when the env var is not exported.
+  // CP-weight mode: when `THVM_ATP_CP_WEIGHT` (an `AtpCpWeightMode`
+  // integer) is exported, override the mode for the experiment;
+  // otherwise leave the engine default (ATP_CP_WEIGHT_GT) in place.
   {
     const char *cw = getenv("THVM_ATP_CP_WEIGHT");
     if (cw != NULL && *cw != 0) {
