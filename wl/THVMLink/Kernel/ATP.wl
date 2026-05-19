@@ -863,34 +863,300 @@ buildCEngineChain[steps_, conjPair_, ruleList_] := Catch[
 (* === critical-pair lemma DAG ====================================== *)
 
 (* Trace-entry reasons (src/thvm.h): an input / re-queued equation,
-   a CP oriented into a rule, a critical pair. *)
+   a CP oriented into a rule, a critical pair, an interreduce
+   re-queue carrying the dropped rule's lineage. *)
 $TraceAxiom = 1;
 $TraceOrient = 2;
 $TraceCp = 3;
+$TraceSimplify = 4;
 $AtpTraceNone = 4294967295;
 
 (* Assemble a verifier-shaped ProofObject dataset for a
    completion-derived proof, walking the MAIN-state trace DAG the C
    glue ships (cEngineProof's MainSteps / MainRules / RTrace /
-   Trace fields).  Emits Axiom entries for TRACE_AXIOM lineage,
-   CriticalPairLemma entries for TRACE_CP lineage, and
-   SubstitutionLemma steps for the rewrite chain.
+   Trace fields).
 
-   BLOCKER (reported, not worked around): thvm_atp_interreduce
-   re-queues a simplified older rule through thvm_atp_add_equation,
-   which records a fresh TRACE_AXIOM entry -- severing the
-   derivation lineage of every rule born from such a re-queued
-   equation.  DoubleNegation's closing rule descends from one of
-   these severed TRACE_AXIOM entries (its content is the conjecture
-   itself), so the trace DAG holds no valid derivation for it.  A
-   verifier-passing CriticalPairLemma DAG is therefore not
-   constructible until the C engine records interreduction as a
-   reduction chain (a TRACE_SIMPLIFY entry carrying the parent
-   rule's trace + the rewrite geometry), the way Waldmeister's PCL
-   `Reduktion` events do.  See the handoff report.  Until then this
-   returns $Failed so a completion-only goal degrades gracefully
-   rather than emitting an unsound (self-citing) proof. *)
-buildCplDataset[enc_, conjPair_, cRes_] := $Failed
+   The trace DAG is now fully connected: TRACE_SIMPLIFY (added with
+   the C engine's interreduce-lineage fix) keeps every re-queued
+   rule parented on the rule it descended from, so DoubleNegation's
+   closing rule traces back through CP / ORIENT / SIMPLIFY nodes to
+   the single input axiom.
+
+   The remaining work to emit a verifier-passing dataset, fully
+   de-risked against the kernel (a hand-rebuilt FindEquationalProof
+   dataset verifies; the CriticalPairLemma field semantics are
+   known):
+     - TRACE_AXIOM   -> an "Axiom" entry.
+     - TRACE_CP      -> a "CriticalPairLemma" entry: Construct /
+                        MatchingConstruct are the two parent rules'
+                        dataset keys, Position is the recorded
+                        superposition path, Subpattern is the
+                        Construct rule's lhs at that position,
+                        Statement is the raw CP.
+     - TRACE_ORIENT / TRACE_SIMPLIFY -> the parent equation
+                        normalized to the rule: a "SubstitutionLemma"
+                        chain, each step's rewrite re-derived by
+                        replaying the rule set (the trace does not
+                        store the normalization steps themselves).
+     - the goal chain (MainSteps) -> "SubstitutionLemma" / final
+                        "Conclusion" entries.
+   Each Construct / MatchingConstruct / Input cites another entry's
+   key; thvm rules map to keys via RTrace.  Variable-bearing rules
+   need their FVRs rendered as Pattern[v, Blank[]] on rule lhs's.
+
+   A goal whose lineage needs a TRACE_CP (genuine superposition)
+   throws to $Failed for now -- the CriticalPairLemma branch is the
+   next increment; the TRACE_ORIENT / TRACE_SIMPLIFY normalization
+   path below already covers completion proofs whose derived rules
+   come from rule normalization alone. *)
+
+(* True iff the two 2-element equation lists are equal up to a
+   swap of sides. *)
+cplEqSetQ[a_List, b_List] := (a === b) || (a === Reverse[b])
+
+(* A completion rule {lhs, rhs} as a WL rewrite rule, with the
+   first-order variables (members of varSyms) patternized on the
+   lhs so the rule actually fires.  The var -> var_ rules are built
+   with MapThread so no Pattern lands on a RuleDelayed rhs. *)
+cplAsRule[eq_List, varSyms_] := Block[{
+    vrules = MapThread[Rule,
+        {varSyms, Map[Pattern[#, Blank[]] &, varSyms]}]
+},
+    (eq[[1]] /. vrules) -> eq[[2]]
+]
+
+(* Assemble a verifier-shaped ProofObject dataset from the MAIN
+   completion trace DAG.  Walks rules cited by the goal chain back
+   through TRACE_ORIENT / TRACE_SIMPLIFY normalization to the input
+   axioms, emitting one SubstitutionLemma per re-derived rewrite.
+   Returns $Failed if any lineage needs a (not-yet-handled) TRACE_CP
+   or if a normalization cannot be replayed -- callers degrade to
+   $Failed, never to an unsound proof. *)
+buildCplDataset[enc_, conjPair_, cRes_] := Catch[
+    Module[{
+        trace = cRes["Trace"], mainRules = cRes["MainRules"],
+        rTrace = cRes["RTrace"], mainSteps = cRes["MainSteps"],
+        axPairs = enc["AxPairs"], varSyms, entries, ruleInfo, slN,
+        axiomKeyFor, rewriteOnce, emitNorm, resolveRule,
+        axiomEntries, cjp, hypEq, hypKey, chainEntries, runEq,
+        prevChainKey, allEntries
+    },
+        varSyms = Symbol /@ Keys[enc["State"]["var"]];
+        (* the trace-decoded terms carry bare variable symbols;
+           atpEncodeProblem's AxPairs / ConjPair carry Pattern[v, _]
+           wrappers -- strip them so every comparison is bare-to-bare
+           (cplAsRule re-patternizes when building rewrite rules). *)
+        axPairs = axPairs /. Verbatim[Pattern][s_Symbol, _] :> s;
+        cjp = conjPair /. Verbatim[Pattern][s_Symbol, _] :> s;
+        entries = {};       (* lemma key -> assoc, accumulated *)
+        ruleInfo = <||>;    (* C rule index -> <|"Key", "Eq"|> *)
+        slN = 0;
+
+        (* axiom key whose {lhs,rhs} matches eq up to a side swap *)
+        axiomKeyFor[eq_] := Block[{
+            i = FirstPosition[axPairs, p_ /; cplEqSetQ[p, eq],
+                Missing[], {1}, Heads -> False]
+        },
+            If[ MissingQ[i], Throw[$Failed], {$AxiomSym, First[i]}]
+        ];
+
+        (* one-step rewrites of equation `eq` by any rule j != exclK:
+           returns {newEq, j, side, relPos} tuples. *)
+        rewriteOnce[eq_, exclK_] := Block[{out = {}},
+            Do[
+                If[ j =!= exclK,
+                    Block[{rl = cplAsRule[mainRules[[j + 1]], varSyms],
+                           sub, new},
+                        Do[
+                            sub = eq[[side + 1]];
+                            Do[
+                                new = Quiet @ ReplaceAt[sub, rl, pos];
+                                If[ new =!= sub && FreeQ[new, ReplaceAt],
+                                    AppendTo[out, {
+                                        ReplacePart[eq, side + 1 -> new],
+                                        j, side, pos}]
+                                ],
+                                {pos, Position[sub, rl[[1]],
+                                    {0, Infinity}, Heads -> False]}
+                            ],
+                            {side, 0, 1}
+                        ]
+                    ]
+                ],
+                {j, 0, Length[mainRules] - 1}
+            ];
+            out
+        ];
+
+        (* re-derive startEq ->* targetEq by rewrites with rules
+           != exclK; emit a SubstitutionLemma per step; return the
+           final entry's {key, eq}.  inKey is the dataset key of the
+           starting equation. *)
+        emitNorm[inKey_, startEq_, targetEq_, exclK_] :=
+            Block[{
+                queue, seen, found, path, curKey, curEq, st, cKey,
+                cInfo, ori
+            },
+                queue = {{startEq, {}}};
+                seen = {startEq};
+                found = Missing[];
+                While[ queue =!= {} && MissingQ[found],
+                    Block[{node = First[queue], eq, hist, nbrs},
+                        queue = Rest[queue];
+                        {eq, hist} = node;
+                        If[ cplEqSetQ[eq, targetEq],
+                            found = hist,
+                            nbrs = rewriteOnce[eq, exclK];
+                            Do[
+                                If[ ! MemberQ[seen, nb[[1]]],
+                                    AppendTo[seen, nb[[1]]];
+                                    AppendTo[queue,
+                                        {nb[[1]], Append[hist, nb]}]
+                                ],
+                                {nb, nbrs}
+                            ]
+                        ]
+                    ]
+                ];
+                If[ MissingQ[found], Throw[$Failed] ];
+                curKey = inKey;
+                curEq = startEq;
+                Do[
+                    cInfo = resolveRule[step[[2]]];
+                    cKey = cInfo["Key"];
+                    ori = Which[
+                        cInfo["Eq"] === mainRules[[step[[2]] + 1]], 1,
+                        cInfo["Eq"] === Reverse[mainRules[[step[[2]] + 1]]],
+                            -1,
+                        True, Throw[$Failed]
+                    ];
+                    slN++;
+                    st = toHoldEq[Inactive[Equal] @@ step[[1]]];
+                    AppendTo[entries, {$SubstitutionLemmaSym, slN} -> <|
+                        "Statement" -> st,
+                        "Proof" -> <|
+                            "Input" -> curKey,
+                            "Construct" -> cKey,
+                            "Position" -> step[[4]],
+                            "Rule" -> cplAsRule[
+                                mainRules[[step[[2]] + 1]], varSyms],
+                            "Orientation" -> ori,
+                            "ConstructSide" -> 1,
+                            "InputOrientation" -> 1,
+                            "Side" -> step[[3]] + 1,
+                            "OutputExpression" -> st,
+                            "Source" -> "cpl"
+                        |>
+                    |>];
+                    curKey = {$SubstitutionLemmaSym, slN};
+                    curEq = step[[1]];
+                    ,
+                    {step, found}
+                ];
+                <|"Key" -> curKey, "Eq" -> curEq|>
+            ];
+
+        (* resolve C rule index k to <|Key, Eq|>, emitting lemma
+           entries for its derivation; memoized. *)
+        resolveRule[k_] := Block[{ti, te, ruleEq, pte, parentEq,
+            parentKey, info},
+            If[ KeyExistsQ[ruleInfo, k], Return[ruleInfo[k]] ];
+            ti = rTrace[[k + 1]];
+            te = trace[[ti + 1]];
+            ruleEq = mainRules[[k + 1]];
+            Which[
+                te["Reason"] === $TraceCp,
+                    Throw[$Failed],
+                te["Reason"] === $TraceAxiom,
+                    info = <|"Key" -> axiomKeyFor[ruleEq], "Eq" -> ruleEq|>,
+                te["Reason"] === $TraceOrient ||
+                  te["Reason"] === $TraceSimplify,
+                    pte = trace[[te["ParentA"] + 1]];
+                    parentEq = {pte["Lhs"], pte["Rhs"]};
+                    Which[
+                        pte["Reason"] === $TraceCp, Throw[$Failed],
+                        pte["Reason"] === $TraceAxiom,
+                            parentKey = axiomKeyFor[parentEq],
+                        True, Throw[$Failed]
+                    ];
+                    If[ cplEqSetQ[ruleEq, parentEq],
+                        info = <|"Key" -> parentKey, "Eq" -> parentEq|>,
+                        info = emitNorm[parentKey, parentEq, ruleEq, k]
+                    ],
+                True, Throw[$Failed]
+            ];
+            ruleInfo[k] = info;
+            info
+        ];
+
+        (* axiom entries *)
+        axiomEntries = Table[
+            {$AxiomSym, n} -> <|
+                "Statement" -> toHoldEq[Inactive[Equal] @@ axPairs[[n]]],
+                "Proof" -> <||>
+            |>,
+            {n, Length[axPairs]}
+        ];
+        hypEq = cjp;
+        hypKey = {$HypothesisSym, 1};
+
+        (* the goal chain: each MainStep rewrites one side of the
+           running equation, citing its (resolved) rule. *)
+        If[ mainSteps === {}, Throw[$Failed] ];
+        runEq = cjp;
+        prevChainKey = hypKey;
+        chainEntries = Table[
+            Block[{step = mainSteps[[s]], cInfo, cKey, ori, newEq,
+                   st, isLast, key, inKey},
+                cInfo = resolveRule[step["RuleC"]];
+                cKey = cInfo["Key"];
+                ori = Which[
+                    cInfo["Eq"] === mainRules[[step["RuleC"] + 1]], 1,
+                    cInfo["Eq"] ===
+                        Reverse[mainRules[[step["RuleC"] + 1]]], -1,
+                    True, Throw[$Failed]
+                ];
+                newEq = ReplacePart[runEq,
+                    step["Side"] + 1 -> step["After"]];
+                runEq = newEq;
+                isLast = s === Length[mainSteps];
+                key = If[ isLast, {$ConclusionSym, 1},
+                    {$SubstitutionLemmaSym, ++slN}];
+                inKey = prevChainKey;
+                prevChainKey = key;
+                st = toHoldEq[Inactive[Equal] @@ newEq];
+                key -> <|
+                    "Statement" -> st,
+                    "Proof" -> <|
+                        "Input" -> inKey,
+                        "Construct" -> cKey,
+                        "Position" -> step["PosPath"],
+                        "Rule" -> cplAsRule[
+                            mainRules[[step["RuleC"] + 1]], varSyms],
+                        "Orientation" -> ori,
+                        "ConstructSide" -> 1,
+                        "InputOrientation" -> 1,
+                        "Side" -> step["Side"] + 1,
+                        "OutputExpression" -> st,
+                        "Source" -> "cpl"
+                    |>
+                |>
+            ],
+            {s, Length[mainSteps]}
+        ];
+
+        allEntries = Join[
+            axiomEntries,
+            {hypKey -> <|
+                "Statement" -> toHoldEq[Inactive[Equal] @@ hypEq],
+                "Proof" -> <||>
+            |>},
+            entries,
+            chainEntries
+        ];
+        SortBy[allEntries, $ProofKeyOrder[First[#]] &]
+    ]
+]
 
 (* === TFindEquationalProof ========================================= *)
 

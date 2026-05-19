@@ -634,3 +634,35 @@ VerificationTest[
     True,
     TestID -> "ATP/TFEP/string-doublenegation-resolves"
 ]
+
+(* === TFindEquationalProof: completion-derived proofs =============== *)
+
+(* Goals the input axioms do not close directly (the EXT axiom-only
+   path returns nothing) but completion does: buildCplDataset walks
+   the MAIN trace DAG and emits a SubstitutionLemma per re-derived
+   rewrite.  The resulting ProofObject passes WL's verifier. *)
+
+VerificationTest[
+    Head @ TFindEquationalProof[b == c, {f[a] == b, f[a] == c}],
+    ProofObject,
+    TestID -> "ATP/TFEP/completion-ground-proves"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof[b == c, {f[a] == b, f[a] == c}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/completion-ground-verifies"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof[b == a,
+            {ForAll[x, f[g[x]] == x], f[g[a]] == b}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/completion-variable-verifies"
+]
