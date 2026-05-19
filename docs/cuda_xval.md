@@ -205,3 +205,54 @@ DAG actually reached nvrtc.
 WMMA is fp16-only, marginal for this fp32 corpus.  The prioritized list
 above (shared-reduce hoist, warp reduce, scalar tiling) is the fp32
 path and is where the measured gap actually lives.
+
+## Gap-closing loop results
+
+The four-priority list above was then implemented as a gap-closing
+loop.  The harness gained an autotune sweep (`run_thvm_autotuned`):
+it consumes `propose.c`'s CUDA `KOpt` candidates, applies each, renders
++ compiles + dispatches the variant with the DAG-derived launch
+geometry (`cuda_dag_dispatch_shape` -- the flat grid the Python
+`Cuda.dispatch` takes cannot launch a `LOCAL`-split or warp-per-row
+kernel), times it, and picks the fastest correct variant.
+
+What landed, per priority:
+
+1. **Shared-reduce hoist (softmax).**  `rmu_emit_store` now does a
+   reduce-feeding-broadcast analysis: a pure-broadcast output axis
+   (softmax's column) is no longer promoted to a grid thread -- it
+   stays a loop inside the reduce-dependent thread, so the row max+sum
+   run once per row, not once per output element.  Work drops from
+   O(R*C^2) to O(R*C).
+2. **Warp reduce (`KOP_SIMD_REDUCE` for CUDA).**  `propose.c` offers
+   `KOP_SIMD_REDUCE` on a reduce-tail CUDA kernel; the renderer's
+   warp butterfly switched from `__shfl_down_sync` (result in lane 0
+   only -- the unguarded per-lane store was a race) to
+   `__shfl_xor_sync` (an all-reduce, every lane ends with the full
+   result, matching Metal `simd_sum`).  Combined with the hoist, each
+   softmax/row-reduce row is a 32-lane warp; the broadcast column is
+   distributed across the lanes.  `cuda_dag_dispatch_shape` launches
+   grid = reduce-dependent output rows, block = 32.
+3. **Outputs-per-thread tiling (`KOP_UPCAST` for CUDA matmul).**
+   `propose.c` offers `KOP_LOCAL` + `KOP_UPCAST` for CUDA; the sweep
+   picks the best per shape.
+4. **Autotune.**  The sweep is the BEAM-style search over the
+   `propose.c` candidates.
+
+Results after the loop (V100 sm_70, `cuda_xval --quick`/full, GPU p50;
+gap = tuned thvm / tinygrad-default):
+
+| op + shape | baseline gap | tuned thvm p50 | tuned gap | winning opt |
+|---|---:|---:|---:|---|
+| matmul 256   | 0.7x  | 28.7us    | **0.7x** | (none -- already fast) |
+| matmul 512   | 1.7x  | 153.6us   | 1.4x | `UPCAST` |
+| matmul 1024  | 2.2x  | 1122.3us  | 1.6x | `UPCAST` |
+| softmax 4096 | 82.4x | 376.8us   | **0.5x** | `SIMD_REDUCE` |
+| row_reduce 4096 | 3.3x | 80.9us | **0.3x** | `SIMD_REDUCE` |
+
+Every op is within ~2x of tinygrad-default; softmax and row-reduce are
+now faster than tinygrad-default (and softmax beats tinygrad-BEAM2 at
+the 1024 shape).  The 82x softmax gap closed to 0.5x -- the
+shared-reduce hoist plus warp reduce removed the O(R*C^2) blowup and
+the parallelism deficit together.  Correctness held for every variant
+of every op throughout the sweep.
