@@ -121,14 +121,17 @@ ATP_ORDERED_REWRITE ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRITE,)
 
 # Milestone 10: -DATP_MNF builds the MNF goal-directed search (a port
-# of Waldmeister's "MultipleNormalFormen" module).  Instead of the
-# passive single-normal-form goal_check, the goal becomes a bidirec-
-# tional rewrite search: goal_lhs seeds a GREEN front, goal_rhs a RED
-# one; each front rewrites with R; a hash table holds every reached
-# term; an opposite-colour collision (a red term equals a green term)
-# is the join -- the goal is proved.  Fed incrementally by completion's
-# new rules.  Off by default; the universal-goal path is otherwise the
-# milestone-7 single-NF check.
+# of Waldmeister's "MultipleNormalFormen" module).  It AUGMENTS the
+# single-normal-form goal check: goal_lhs seeds a GREEN front, goal_rhs
+# a RED one; each front rewrites with R (forward, and -- up to
+# MNF_MAX_ANTI backward steps per lineage -- through unorientable
+# equations); an opposite-colour collision is the join.  With the
+# backward steps `make ATP_MNF=1` PROVES NAND commutativity from the
+# single Wolfram axiom (wolfram.pr) and comm_monoid_swap -- goals the
+# single-NF check structurally cannot close.  Off by default still:
+# the MNF front search runs every goal_check, which is pure overhead
+# on a goal the single-NF check will close on its own (it regresses
+# thm ~50x).  Making MNF cheap enough to default on is open work.
 ATP_MNF ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF)),-DATP_MNF,)
 # ATP_MNF_DIAG: stderr trace of the MNF set (node count, queue sizes,

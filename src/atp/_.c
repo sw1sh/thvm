@@ -3399,17 +3399,20 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // to breadth-first (oldest node) the moment the last node expanded was
 // irreducible -- a normal form, a dead end (see mnf_pop / mnf_step).
 //
-// Backward "anti" steps (r->l) are OFF by default -- see MNF_MAX_ANTI.
+// Backward "anti" steps (r->l): see MNF_MAX_ANTI.
 
 #define MNF_RED        0u
 #define MNF_GREEN      1u
-// Backward "anti" steps (r->l) are OFF by default: Waldmeister's MNF
-// defaults to noAnti -- forward normalisation only -- and relies on
-// completion to grow R until the fronts' forward reducts coincide.  A
-// non-zero cap opts into variable-safe backward steps, capped per
-// lineage (Waldmeister's antiWOVar).  Overridable with -DMNF_MAX_ANTI=N.
+// Backward "anti" steps (r->l) -- a port of Waldmeister's antiWOVar:
+// variable-safe backward rewriting through unorientable equations,
+// capped at MNF_MAX_ANTI per lineage.  Forward-only fronts (anti=0)
+// cannot close a symmetric goal and rely on completion alone, which
+// for NAND commutativity from the single Wolfram axiom diverges.
+// anti=2 is the minimum that closes wolfram.pr (anti=1 does not;
+// anti>=2 does), and is the default.  Overridable with
+// -DMNF_MAX_ANTI=N.
 #ifndef MNF_MAX_ANTI
-#define MNF_MAX_ANTI   0u
+#define MNF_MAX_ANTI   2u
 #endif
 #define MNF_MAX_NODES  400000u
 #define MNF_SUCC_CAP   2048u

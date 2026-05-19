@@ -2048,3 +2048,33 @@ needs the front search to run far deeper, or MNF itself tuned.  The
 A further finding for the next tick: by step 43 k the dominant cost
 has shifted from the rule index to the FV subsumption index --
 546 discrimination-tree nodes per query as the CP queue passes 1 M.
+
+### 29 -- thvm proves NAND commutativity: MNF backward steps
+
+The loop's standing frontier -- `wolfram.pr`, NAND commutativity from
+the single Sheffer-stroke axiom -- is cracked.  **`ATP_MNF=1` proves
+it: 363 steps, 19 rules, ~22 s.**
+
+The missing piece was `MNF_MAX_ANTI`.  MNF's fronts rewrite with R;
+`MNF_MAX_ANTI` caps how many BACKWARD steps (a port of Waldmeister's
+antiWOVar -- variable-safe r->l rewriting through unorientable
+equations) a lineage may take.  It was 0 -- forward-only.  Forward-only
+fronts are just two normalisations and cannot close a symmetric goal
+any better than the single-NF check.  Measured: anti=0 and anti=1
+diverge on `wolfram`; **anti=2 proves it in 363 steps**, anti=3 in 410.
+2 is the new default for the MNF build.  The same lever closes
+`comm_monoid_swap` (`f(a,b)=f(b,a)`, a direct instance of an
+unorientable commutativity axiom -- the single-NF check provably
+cycles on it; section 28's note called it a "known limitation").
+
+MNF stays OFF by default, though.  The MNF front search runs on every
+`goal_check`; on a goal the single-NF check will close on its own it
+is pure overhead, and it regressed `thm` from 0.2 s to 11 s (~50x).
+The obvious gate -- "run MNF only for an unorientable goal" -- fails:
+`comm_monoid_swap`'s goal `f(a,b)=f(b,a)` IS orientable (a>b), yet it
+still needs MNF (the unorientable axiom, not the goal, is what defeats
+single-NF).  No cheap structural test separates "MNF needed" (`wolfram`,
+`comm_monoid_swap`) from "MNF wasteful" (`thm`).  So `ATP_MNF=1` is the
+real, validated proof of NAND commutativity; making MNF cheap or
+lazy enough to default on -- without the `thm` tax -- is the next
+target.
