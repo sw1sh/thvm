@@ -3536,12 +3536,17 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti, u32 parent) {
   return 0;
 }
 
-// Per-rule "vars(lhs) subset of vars(rhs)" flag -- the precondition
-// for a variable-safe backward step.  It is a constant of rule j, but
-// mnf_successors checks it at every node and position; cached here
-// once per mnf_step over the whole rule set so the recursion reads a
-// byte instead of re-walking two terms.
+// Per-rule caches, refreshed once per mnf_step over the whole rule
+// set so the successor recursion reads them instead of recomputing:
+//   g_mnf_vc   -- vars(lhs) subset of vars(rhs) (variable-safe backward)
+//   g_mnf_ln   -- nodes(lhs[j]) -- the forward-match size pre-filter
+//   g_mnf_rn   -- nodes(rhs[j]) -- the backward-match size pre-filter
+// A one-way match needs nodes(pattern) <= nodes(subject), so a rule
+// whose matched side outsizes the term cannot fire -- the integer
+// compare skips the thvm_match entirely.
 static u8  *g_mnf_vc     = NULL;
+static u32 *g_mnf_ln     = NULL;
+static u32 *g_mnf_rn     = NULL;
 static u32  g_mnf_vc_cap = 0u;
 
 // One-step rewrites of `t` (all positions, rules [rule_lo, rule_hi),
@@ -3550,35 +3555,22 @@ static u32  g_mnf_vc_cap = 0u;
 static Term mnf_succ_buf[MNF_SUCC_CAP];
 static u8   mnf_succ_anti[MNF_SUCC_CAP];
 
-static void mnf_successors(AtpState *s, Term t, u8 allow_anti,
-                           u32 rule_lo, u32 rule_hi, u32 *n) {
-  for (u32 j = rule_lo; j < rule_hi; j++) {
-    if (*n >= MNF_SUCC_CAP) return;
-    {
-      RewriteSubst sub = {{0}};
-      if (thvm_match(s->lhs[j], t, &sub)) {
-        mnf_succ_buf[*n]  = thvm_subst_apply(s->rhs[j], &sub);
-        mnf_succ_anti[*n] = 0u;
-        (*n)++;
-        if (*n >= MNF_SUCC_CAP) return;
-      }
-    }
-    if (allow_anti && g_mnf_vc[j]) {
-      RewriteSubst sb = {{0}};
-      if (thvm_match(s->rhs[j], t, &sb)) {
-        mnf_succ_buf[*n]  = thvm_subst_apply(s->lhs[j], &sb);
-        mnf_succ_anti[*n] = 1u;
-        (*n)++;
-        if (*n >= MNF_SUCC_CAP) return;
-      }
-    }
-  }
+// Returns nodes(t).  Children are expanded first so the size is known
+// when rules are tried at t -- the size pre-filter then skips a rule
+// whose matched side has more nodes than t (a one-way match needs
+// nodes(pattern) <= nodes(subject), so such a rule provably fails).
+// Successor order in the buffer differs from a rules-first walk, but
+// every successor is still inserted, so the MNF set is unchanged.
+static u32 mnf_successors(AtpState *s, Term t, u8 allow_anti,
+                          u32 rule_lo, u32 rule_hi, u32 *n) {
+  u32 size = 1u;
   if (term_tag(t) == TAG_CTR) {
     u32 m = term_ctr_n(t);
-    if (m > REWRITE_MAX_ARITY) return;
+    if (m > REWRITE_MAX_ARITY) return 0xFFFFFFu;  // unreachable; disable filter
     for (u32 i = 0; i < m; i++) {
       u32 base = *n;
-      mnf_successors(s, term_ctr_at(t, i), allow_anti, rule_lo, rule_hi, n);
+      size += mnf_successors(s, term_ctr_at(t, i), allow_anti,
+                             rule_lo, rule_hi, n);
       for (u32 k = base; k < *n; k++) {
         Term ch[REWRITE_MAX_ARITY];
         for (u32 c = 0; c < m; c++) {
@@ -3588,6 +3580,27 @@ static void mnf_successors(AtpState *s, Term t, u8 allow_anti,
       }
     }
   }
+  // `size` is now nodes(t) -- try every rule at t, size-filtered.
+  for (u32 j = rule_lo; j < rule_hi && *n < MNF_SUCC_CAP; j++) {
+    if (g_mnf_ln[j] <= size) {
+      RewriteSubst sub = {{0}};
+      if (thvm_match(s->lhs[j], t, &sub)) {
+        mnf_succ_buf[*n]  = thvm_subst_apply(s->rhs[j], &sub);
+        mnf_succ_anti[*n] = 0u;
+        (*n)++;
+        if (*n >= MNF_SUCC_CAP) return size;
+      }
+    }
+    if (allow_anti && g_mnf_vc[j] && g_mnf_rn[j] <= size) {
+      RewriteSubst sb = {{0}};
+      if (thvm_match(s->rhs[j], t, &sb)) {
+        mnf_succ_buf[*n]  = thvm_subst_apply(s->lhs[j], &sb);
+        mnf_succ_anti[*n] = 1u;
+        (*n)++;
+      }
+    }
+  }
+  return size;
 }
 
 // Generate node `ni`'s successors against rules [rule_lo, rule_hi) and
@@ -3601,7 +3614,7 @@ static void mnf_expand_node(AtpState *s, AtpMnf *m, u32 ni,
   u8   anti = m->nodes[ni].anti;
   Term t    = m->nodes[ni].term;
   u32  n    = 0u;
-  mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
+  (void)mnf_successors(s, t, (u8)(anti < MNF_MAX_ANTI), rule_lo, rule_hi, &n);
   if (n >= MNF_SUCC_CAP) m->n_trunc++;   // successor buffer overflowed
   for (u32 k = 0; k < n && !m->joined; k++) {
     if (mnf_succ_anti[k] == 0u) m->nodes[ni].irred = 0u;   // forward redex
@@ -3733,18 +3746,24 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
 // the fronts have joined.
 static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   if (m->joined) return 1;
-  // Refresh the per-rule vars-contained cache for the whole current
-  // rule set -- mnf_successors reads it instead of recomputing the
-  // flag at every node it expands this call.
+  // Refresh the per-rule caches (vars-contained flag + lhs/rhs node
+  // counts) for the whole current rule set -- mnf_successors reads
+  // them instead of recomputing at every node it expands this call.
   if (s->n_rules > g_mnf_vc_cap) {
     u32 cap = g_mnf_vc_cap ? g_mnf_vc_cap : 256u;
     while (cap < s->n_rules) cap *= 2u;
-    u8 *nv = (u8 *)realloc(g_mnf_vc, cap);
-    if (nv == NULL) { fprintf(stderr, "mnf_step: vc cache OOM\n"); exit(1); }
-    g_mnf_vc = nv; g_mnf_vc_cap = cap;
+    u8  *nv = (u8  *)realloc(g_mnf_vc, cap);
+    u32 *nl = (u32 *)realloc(g_mnf_ln, cap * sizeof(u32));
+    u32 *nr = (u32 *)realloc(g_mnf_rn, cap * sizeof(u32));
+    if (nv == NULL || nl == NULL || nr == NULL) {
+      fprintf(stderr, "mnf_step: rule cache OOM\n"); exit(1);
+    }
+    g_mnf_vc = nv; g_mnf_ln = nl; g_mnf_rn = nr; g_mnf_vc_cap = cap;
   }
   for (u32 j = 0; j < s->n_rules; j++) {
     g_mnf_vc[j] = (u8)atp_vars_contained(s->lhs[j], s->rhs[j]);
+    g_mnf_ln[j] = atp_symbol_count(s->lhs[j]);
+    g_mnf_rn[j] = atp_symbol_count(s->rhs[j]);
   }
 #ifdef ATP_MNF_DIAG
   { static u32 c = 0;

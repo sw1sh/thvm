@@ -2112,3 +2112,29 @@ node (neutral at `wolfram`'s 19 rules, scales with R).  The real MNF
 speedup -- routing forward successor generation through the rule-LHS
 discrimination index instead of the linear per-rule `thvm_match` scan
 -- is the standing next target.
+
+### 31 -- a size pre-filter for MNF successor generation
+
+Counting node-expansions split the MNF cost: `mnf_step` part (a) --
+re-expanding every already-expanded front node against each rule
+completion derives -- did 4.2M expansions on `wolfram`; part (b), the
+budgeted first-expansions, only 190k.  So the cost is the growing
+front re-scanned against a stream of new rules.  The rule-LHS index
+would not help: part (a) feeds few rules at a time, so its per-scan
+rule count is already tiny -- the index speeds up many-rules scans.
+
+What does help is a sound size pre-filter.  A one-way match needs
+`nodes(pattern) <= nodes(subject)`: every pattern CTR maps to one
+subject node and every pattern variable to a >=1-node subtree, so a
+rule whose matched side outsizes the term provably cannot fire.
+`mnf_successors` now expands children first (so `nodes(t)` is known --
+returned up the recursion at no extra traversal) and, before each
+forward / backward `thvm_match`, skips the rule when its lhs / rhs
+node count exceeds `nodes(t)`.  Rule node counts are cached per
+`mnf_step` alongside the vars-contained flags.
+
+Measured: `wolfram` with `-DATP_MNF` 22.4 s -> 15.5 s (~31 %); it
+still proves (368 steps vs 363 -- the children-first reorder shifts
+MNF's exploration order slightly, immaterial).  `test_atp` 8567/8567
+(default and MNF builds), `thm` + the ladder prove.  The default
+build is untouched -- all of this is under `-DATP_MNF`.
