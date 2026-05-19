@@ -1861,8 +1861,6 @@ int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
 // Reset axes to the default LOOP/REDUCE shape (autotune between-
 // candidates baseline; preserves autotuned + version).
 void       tile_anno_axes_reset(struct KernelEntry *ke);
-// No-op stub kept for API stability.
-int        tile_anno_axis_append(struct KernelEntry *ke, TileAxisInfo info);
 // Recognize the im2col-fused Conv2D reduce template produced by the
 // lowered UOp graph.  Renderers use this as a tile template instead
 // of carrying backend-private conv pattern matchers.

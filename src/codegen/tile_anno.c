@@ -79,11 +79,3 @@ void tile_anno_axes_reset(KernelEntry *ke) {
   ke->schedule->autotuned = autotuned;
 }
 
-// No-op kept for API stability; axis structure is signal-derived
-// from (output_shape + tail-reduce + scalar-reduce + applied_opts)
-// on read.
-int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
-  if (ke == NULL || ke->schedule == NULL) return 0;
-  (void)info;
-  return 1;
-}
