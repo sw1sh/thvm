@@ -2039,6 +2039,166 @@ int main(void) {
     thvm_atp_free(s_mix);
   }
 
+  // === CP-weight modes: ports of Waldmeister ClasHeuristics =========
+  //
+  // DUMMY_CFG: weights[e=1]=1, weights[i=2]=0, weights[f=3]=1,
+  // weights[a=4]=1, var_weight=1, precedence={_,e:2,i:4,f:3,a:1}.
+  // symbol_count counts every node as 1.
+
+  TEST_BEGIN("atp/cp-weight-mode-default-is-add");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_ADD);
+    // Mode 0 must reproduce the bare symbol-count sum.
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());   // symbol_count 3
+    Term rhs = mk_v(VAR_x);                 // symbol_count 1
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 4u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-mode-clamps-out-of-range");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_cp_weight_mode(s, 999u);
+    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_ADD);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
+    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_MAX);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-maxweight");
+  {
+    // CH_MaxWeight: max of the two side symbol-counts.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());   // symbol_count 3
+    Term rhs = mk_v(VAR_x);                 // symbol_count 1
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 4u);   // add
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // max(3,1)
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-ordweight");
+  {
+    // CH_OrdWeight: KBO-weight sum (CF_Phi_KBO).  i(x) has KBO
+    // weight 0 (i) + 1 (x) = 1, e has 1; sum 2.  Its symbol-count
+    // sum (the --add value) is 2 (i,x) + 1 (e) = 3 -- so the two
+    // modes genuinely diverge here.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_i(mk_v(VAR_x));
+    Term rhs = mk_e();
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // add: symbol count
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ORD);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 2u);   // KBO-weight sum
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-gtweight-orients");
+  {
+    // CH_GtWeight: f(x,e) > x under KBO -> picks the lhs KBO
+    // weight (1+1+1 = 3), not the sum (3 + 1 = 4).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_GT);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_GT);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // lhs KBO weight
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-gtweight-unoriented-sums");
+  {
+    // CH_GtWeight on a KBO_UN pair falls through to the sum.
+    // f(x,y) and f(y,x): each KBO weight 1+1+1 = 3 -> sum 6.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_v(1u));
+    Term rhs = mk_f(mk_v(1u), mk_v(VAR_x));
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_UN);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_GT);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 6u);   // wl + wr
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-mixweight");
+  {
+    // CH_MixWeight on the oriented pair f(x,e) > x:
+    //   wl = 3, wr = 1, sum = 4, g (GtWeight) = wl = 3.
+    //   mix = sum*g + g + sum = 12 + 3 + 4 = 19.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_GT);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MIX);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 19u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-mixweight2");
+  {
+    // CH_MixWeight2 on the same oriented pair:
+    //   g = 3, sum = 4 -> mix2 = g*10 + sum = 34.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MIX2);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 34u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-unif-measure-zero-on-unifiable");
+  {
+    // CH_Unifikationsmass: f(x,e) and f(a,e) are unifiable
+    // (x := a), so the unification measure is 0 -> weight 0.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_f(mk_a(), mk_e());
+    CHECK_EQ(atp_unif_measure(lhs, rhs), 0u);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_UNIF);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-unif-measure-clash");
+  {
+    // f(a,e) vs f(a,a): top f matches, child (a,a) matches,
+    // child (e,a) is a function-symbol clash at depth d=1 -> the
+    // measure is 1.  KBO weights are 3 and 3, so the UNIF weight
+    // is (3+3)*1 = 6.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_a(), mk_e());
+    Term rhs = mk_f(mk_a(), mk_a());
+    CHECK_EQ(atp_unif_measure(lhs, rhs), 1u);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_UNIF);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 6u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-modes-change-pop-order");
+  {
+    // Two CPs, both KBO-oriented:
+    //   CP_BIG: f(f(x,e),e) = x   -- symbol_count 5 + 1 = 6
+    //   CP_SML: i(x)         = e  -- symbol_count 2 + 1 = 3
+    // Under MAX, CP_SML max(2,1)=2 pops before CP_BIG max(5,1)=5.
+    // The CPs are seeded via thvm_atp_cp_set + reheapify (m8's
+    // packed-byte-string queue API) so the mode is exercised
+    // end-to-end through the heap.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
+    Term big_l = mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e());
+    Term big_r = mk_v(VAR_x);
+    Term sml_l = mk_i(mk_v(VAR_x));
+    Term sml_r = mk_e();
+    thvm_atp_cp_set(s, 0u, big_l, big_r);
+    thvm_atp_cp_set(s, 1u, sml_l, sml_r);
+    s->n_cps = 2;
+    thvm_atp_cp_reheapify(s);
+    Term out_l = 0, out_r = 0;
+    CHECK(thvm_atp_select_cp(s, &out_l, &out_r));
+    // Cheapest first: CP_SML (max weight 2) before CP_BIG (5).
+    CHECK(term_tag(out_l) == TAG_CTR && term_ext(out_l) == LAB_i);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/lpo-vs-kbo-parity-on-group-axioms");
   {
     // Run the group-axiom saturation under both KBO and LPO.

@@ -2970,6 +2970,35 @@ typedef enum {
 fn u32                kbo_cfg_register(u32 cfg_id, const KboConfig *cfg);
 fn const KboConfig   *kbo_cfg_get     (u32 cfg_id);
 
+// CP-priority weight modes -- ports of Waldmeister's `ClasHeuristics`
+// module ("classification heuristics"; sources/CLAS/ClasHeuristics.c).
+// Each names the Waldmeister `CH_*Weight` function it mirrors.  The
+// cheapest CP wins, so a lower number is selected first.
+//
+//   ADD    -- CH_AddWeight  : symbol_count(lhs) + symbol_count(rhs).
+//             The pre-port default; mode 0 keeps atp_cp_priority
+//             byte-identical when cp_weight_mode is left zeroed.
+//   MAX    -- CH_MaxWeight  : max(symbol_count(lhs), symbol_count(rhs)).
+//   ORD    -- CH_OrdWeight  : KBO-weight sum (CF_Phi_KBO) -- the
+//             ordering's own weight function rather than raw count.
+//   GT     -- CH_GtWeight   : ordering-directed -- GT picks the
+//             lhs size, LT the rhs size, otherwise the sum.
+//   MIX    -- CH_MixWeight  : (wl+wr)*g + g + (wl+wr), where g is
+//             the GtWeight value -- a graded blend.
+//   MIX2   -- CH_MixWeight2 : g*10 + (wl+wr).
+//   UNIF   -- CH_Unifikationsmass ("unification measure") :
+//             (wl+wr) * depth-weighted term-disagreement count.
+typedef enum {
+  ATP_CP_WEIGHT_ADD  = 0,
+  ATP_CP_WEIGHT_MAX  = 1,
+  ATP_CP_WEIGHT_ORD  = 2,
+  ATP_CP_WEIGHT_GT   = 3,
+  ATP_CP_WEIGHT_MIX  = 4,
+  ATP_CP_WEIGHT_MIX2 = 5,
+  ATP_CP_WEIGHT_UNIF = 6,
+  ATP_CP_WEIGHT_LAST = 7,
+} AtpCpWeightMode;
+
 typedef struct {
   // Rule set R: growable parallel arrays sized for
   // thvm_rewrite_normalize / thvm_critical_pairs to consume
@@ -3178,7 +3207,22 @@ typedef struct {
   // would land in unfailing-fallback).  The penalty makes the
   // saturator prefer CPs whose orientation is unambiguous --
   // typically a small win on hard problems.
+  //
+  // Retained for backward compatibility: when `use_mix_heuristic`
+  // is set, `atp_cp_priority` applies the +penalty regardless of
+  // `cp_weight_mode`.  New code should prefer `cp_weight_mode`
+  // (mode ATP_CP_WEIGHT_MIX subsumes this flag).
   u8   use_mix_heuristic;
+
+  // CP-priority weight mode -- a port of the weight functions in
+  // Waldmeister's `ClasHeuristics` module ("classification
+  // heuristics", sources/CLAS/ClasHeuristics.c).  See the
+  // `AtpCpWeightMode` enum for the per-mode formula.  Mode 0
+  // (ATP_CP_WEIGHT_ADD) is the default `--add` heuristic and
+  // keeps `atp_cp_priority` byte-identical to pre-port behavior
+  // when this field is left zeroed.  Set via
+  // `thvm_atp_set_cp_weight_mode`.
+  u8   cp_weight_mode;
 
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
@@ -3223,6 +3267,12 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 // uses LPO instead of KBO.  Pass NULL to revert to KBO (the
 // default).
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
+
+// Select the CP-priority weight mode (an `AtpCpWeightMode` value).
+// Mode ATP_CP_WEIGHT_ADD (0) is the default; out-of-range values
+// are clamped to ADD.  See `AtpCpWeightMode` for the per-mode
+// formula, all ports of Waldmeister's `ClasHeuristics` module.
+fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 
 // 8.10b: top-K peek into the CP queue.  Reuses the existing
 // INC-priority + collapse_ordered pipeline from

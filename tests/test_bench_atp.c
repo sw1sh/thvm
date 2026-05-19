@@ -24,6 +24,18 @@
 #define BENCH_MAX_FILES   64
 #define BENCH_PATH_LEN    256
 
+// CP-weight mode for this bench run -- read once from the
+// `THVM_ATP_CP_WEIGHT` env var (an `AtpCpWeightMode` integer).
+// Unset / out-of-range -> ATP_CP_WEIGHT_ADD (0), the default
+// heuristic, so an un-exported environment reproduces pre-port
+// numbers exactly.
+static u32 bench_cp_weight_mode(void) {
+  const char *e = getenv("THVM_ATP_CP_WEIGHT");
+  if (e == NULL || *e == 0) return ATP_CP_WEIGHT_ADD;
+  u32 m = (u32)strtoul(e, NULL, 10);
+  return (m < ATP_CP_WEIGHT_LAST) ? m : ATP_CP_WEIGHT_ADD;
+}
+
 static const char *atp_status_str(AtpStatus st) {
   switch (st) {
     case ATP_RUNNING:     return "RUNNING";
@@ -108,6 +120,7 @@ static AtpStatus run_one(const char *pr_path,
   AtpState *atp = thvm_atp_init(&cfg, BENCH_STEP_BUDGET);
   atp->use_ic_cp_gen  = use_ic_cp_gen;
   atp->use_ic_rewrite = use_ic_rewrite;
+  thvm_atp_set_cp_weight_mode(atp, bench_cp_weight_mode());
   if (spec->ordering_kind == WALD_ORDER_LPO) {
     thvm_atp_set_lpo(atp, &lpo_cfg);
   }
@@ -141,7 +154,7 @@ int main(void) {
   FILE *csv = fopen("build/bench-atp.csv", "w");
   CHECK(csv != NULL);
   if (csv == NULL) { thvm_free(); return 1; }
-  fprintf(csv, "file,mode,status,wall_ms,step,n_rules,n_trace,"
+  fprintf(csv, "file,mode,cp_weight,status,wall_ms,step,n_rules,n_trace,"
                "drop_joinable,drop_connected,drop_rule_subsumed,"
                "drop_queue_subsumed,drop_classified\n");
 
@@ -218,8 +231,9 @@ int main(void) {
         mode_label[0] = path_names[mc][0];
         mode_label[1] = path_names[mr][0];
         mode_label[2] = 0;
-        fprintf(csv, "%s,%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u,%u\n",
-                files[i], mode_label, st_str, wall_ms,
+        fprintf(csv, "%s,%s,%u,%s,%.3f,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                files[i], mode_label, bench_cp_weight_mode(),
+                st_str, wall_ms,
                 atp->step, atp->n_rules, atp->n_trace,
                 atp->n_cps_dropped_joinable,
                 atp->n_cps_dropped_connected,
@@ -227,7 +241,14 @@ int main(void) {
                 atp->n_cps_dropped_queue_subsumed,
                 atp->n_cps_dropped_classified);
 
-        if (er == 0 && expected[0] != 0) {
+        // The `.expect` status encodes the default-mode (ADD)
+        // outcome.  A non-default CP-weight mode reorders the CP
+        // queue and may reach a different terminal status within
+        // the fixed step budget -- that reordering is the point of
+        // the heuristic, not a regression.  Gate the status
+        // assertion to ADD; all modes still write CSV rows.
+        if (er == 0 && expected[0] != 0
+            && bench_cp_weight_mode() == ATP_CP_WEIGHT_ADD) {
           CHECK_EQ((int)strcmp(st_str, expected), 0);
         }
 

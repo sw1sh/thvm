@@ -2663,6 +2663,16 @@ fn void thvm_atp_set_lpo(AtpState *s, const LpoConfig *lpo) {
   s->lpo = lpo;
 }
 
+// Select the CP-priority weight mode (an `AtpCpWeightMode` value).
+// Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so an unset
+// or garbage mode reproduces the default `--add` heuristic.
+fn void thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode) {
+  if (s == NULL) return;
+  s->cp_weight_mode = (mode < ATP_CP_WEIGHT_LAST)
+                    ? (u8)mode
+                    : (u8)ATP_CP_WEIGHT_ADD;
+}
+
 // 8.5c: order-aware compare.  Picks LPO (if attached) or KBO,
 // returning a unified KboCmp-shaped result.  The two enums share
 // numeric values (EQ=0, GT=1, LT=-1, UN=2), so the cast is safe.
@@ -2852,6 +2862,162 @@ static u32 atp_symbol_count(Term t) {
   }
 }
 
+// === ClasHeuristics: advanced CP-weight term measures ===============
+// Helpers feeding the non-default `AtpCpWeightMode` weight modes --
+// ports of measures from Waldmeister's `ClasHeuristics`,
+// `ClasFunctions` and `Unifikation1` ("unification 1") modules.
+
+// Term depth: a leaf (FVR / atom / nullary CTR) has depth 0; a
+// CTR has 1 + max child depth.  Used by the unification-measure
+// weight, mirroring Waldmeister's `TO_Termtiefe` ("term depth").
+static u32 atp_term_depth(Term t) {
+  if (term_tag(t) != TAG_CTR) return 0;
+  u32 n = term_ctr_n(t);
+  u32 d = 0;
+  for (u32 i = 0; i < n; i++) {
+    u32 cd = atp_term_depth(term_ctr_at(t, i));
+    if (cd > d) d = cd;
+  }
+  return n == 0 ? 0 : d + 1;
+}
+
+// Does variable `var_id` (a TAG_FVR id) occur anywhere in `t`?
+// The occur-check used by the unification-measure weight.
+static int atp_var_occurs(Term t, u32 var_id) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == var_id;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (atp_var_occurs(term_ctr_at(t, i), var_id)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// Depth-weighted term-disagreement count -- a port of Waldmeister's
+// `U1_Unifikationsmass` ("unification measure"; sources/INF/
+// Unifikation1.c).  Walks `a` and `b` in parallel: equal top
+// symbols recurse into children; a variable on either side that
+// fails the occur-check binds for free (cost 0) and otherwise costs
+// `2*d`; a function-symbol clash costs `d`.  `d` is the working
+// depth, clamped at 1 as the recursion descends -- mirroring
+// Waldmeister's `if (!(--d)) d = 1;` step-down.  Result is 0 iff
+// the terms are syntactically unifiable.
+static u32 atp_unif_measure_rec(Term a, Term b, u32 d) {
+  u8 ta = term_tag(a), tb = term_tag(b);
+  if (ta == TAG_CTR && tb == TAG_CTR
+      && term_ext(a) == term_ext(b)
+      && term_ctr_n(a) == term_ctr_n(b)) {
+    u32 nd = d > 1 ? d - 1 : 1;
+    u32 n = term_ctr_n(a);
+    u32 mass = 0;
+    for (u32 i = 0; i < n; i++) {
+      mass += atp_unif_measure_rec(term_ctr_at(a, i),
+                                   term_ctr_at(b, i), nd);
+    }
+    return mass;
+  }
+  if (ta == TAG_FVR) {
+    return atp_var_occurs(b, term_ext(a)) ? 2u * d : 0u;
+  }
+  if (tb == TAG_FVR) {
+    return atp_var_occurs(a, term_ext(b)) ? 2u * d : 0u;
+  }
+  // Function-symbol (or non-CTR) clash.
+  return d;
+}
+
+static u32 atp_unif_measure(Term lhs, Term rhs) {
+  u32 dl = atp_term_depth(lhs);
+  u32 dr = atp_term_depth(rhs);
+  u32 d  = dl > dr ? dl : dr;
+  if (d == 0) d = 1;
+  return atp_unif_measure_rec(lhs, rhs, d);
+}
+
+// Per-term KBO weight feeding the ORD / GT / MIX modes.  Ports
+// Waldmeister's `CF_Phi_KBO` ("KBO weight"; sources/CLAS/
+// ClasFunctions.c): sum the active signature's per-symbol weights
+// (`cfg->weights[label]` for a function symbol, `cfg->var_weight`
+// for a variable).  m8's KBO module only exposes the single-pass
+// differential balance, so the standalone single-term walk is
+// inlined here.  With no KboConfig attached the raw symbol count
+// is the fallback.
+static u32 atp_kbo_weight(AtpState *s, Term t) {
+  const KboConfig *cfg = (s != NULL) ? s->kbo : NULL;
+  if (cfg == NULL) return atp_symbol_count(t);
+  switch (term_tag(t)) {
+    case TAG_FVR: return cfg->var_weight;
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      u32 w   = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
+      u32 n   = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        w += atp_kbo_weight(s, term_ctr_at(t, i));
+      }
+      return w;
+    }
+    default: return cfg->var_weight;
+  }
+}
+
+// CP-weight base for one weight mode -- ports of the `CH_*Weight`
+// functions in Waldmeister's `ClasHeuristics` module.  Mode
+// ATP_CP_WEIGHT_ADD reproduces the pre-port symbol-count sum.
+static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
+  switch (mode) {
+    case ATP_CP_WEIGHT_MAX: {
+      // CH_MaxWeight: max(|lhs|, |rhs|).
+      u32 wl = atp_symbol_count(lhs), wr = atp_symbol_count(rhs);
+      return wl > wr ? wl : wr;
+    }
+    case ATP_CP_WEIGHT_ORD: {
+      // CH_OrdWeight: KBO-weight sum (CF_Phi_KBO over both sides).
+      return atp_kbo_weight(s, lhs) + atp_kbo_weight(s, rhs);
+    }
+    case ATP_CP_WEIGHT_GT: {
+      // CH_GtWeight: ordering-directed -- the greater side's
+      // weight when the CP orients, the sum otherwise.
+      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      KboCmp c = atp_compare(s, lhs, rhs);
+      return (c == KBO_GT) ? wl
+           : (c == KBO_LT) ? wr
+           : wl + wr;
+    }
+    case ATP_CP_WEIGHT_MIX: {
+      // CH_MixWeight: (wl+wr)*g + g + (wl+wr), g = GtWeight value.
+      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      KboCmp c = atp_compare(s, lhs, rhs);
+      u32 g = (c == KBO_GT) ? wl
+            : (c == KBO_LT) ? wr
+            : wl + wr;
+      u32 sum = wl + wr;
+      return sum * g + g + sum;
+    }
+    case ATP_CP_WEIGHT_MIX2: {
+      // CH_MixWeight2: g*10 + (wl+wr).
+      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      KboCmp c = atp_compare(s, lhs, rhs);
+      u32 g = (c == KBO_GT) ? wl
+            : (c == KBO_LT) ? wr
+            : wl + wr;
+      return g * 10u + (wl + wr);
+    }
+    case ATP_CP_WEIGHT_UNIF: {
+      // CH_Unifikationsmass: (wl+wr) * unification-measure.
+      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      return (wl + wr) * atp_unif_measure(lhs, rhs);
+    }
+    case ATP_CP_WEIGHT_ADD:
+    default:
+      // CH_AddWeight: symbol-count sum -- the pre-port default.
+      return atp_symbol_count(lhs) + atp_symbol_count(rhs);
+  }
+}
+
 #ifdef ATP_GOAL_HEURISTIC
 // === Waldmeister lever 1: goal-directed CP selection ================
 //
@@ -2952,10 +3118,18 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
 // is conservative; experiments may want to tune it.  Under
 // -DATP_GOAL_HEURISTIC a bounded goal-directed penalty is then
 // added (Waldmeister lever 1, above).
+//
+// `s->cp_weight_mode` selects among the ported `ClasHeuristics`
+// weight functions (see the `AtpCpWeightMode` enum).  Mode 0
+// (ATP_CP_WEIGHT_ADD) is the default and -- with use_mix_heuristic
+// unset and no goal -- keeps this function byte-identical to the
+// pre-port `--add` behavior.
 #define MIX_UNORIENTED_PENALTY 4u
 // Priority weight for a CP whose symbol-count sum is already known
 // (`base`) -- e.g. counted for free during acp_pack.  Identical
-// verdict to atp_cp_priority; only the redundant size walk is skipped.
+// verdict to atp_cp_priority; only the redundant size walk is
+// skipped.  The precomputed `base` is the ADD-mode value; a
+// non-default cp_weight_mode recomputes the base from the terms.
 static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
 #ifdef ATP_GOAL_HEURISTIC
   // Goal-directed run: Waldmeister uses CPinGoal as THE classifier --
@@ -2964,6 +3138,12 @@ static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
   // size/mix heuristic below.
   if (s != NULL && s->goal_lhs != 0) return atp_goal_weight(s, lhs, rhs);
 #endif
+  u32 mode = (s != NULL) ? s->cp_weight_mode : ATP_CP_WEIGHT_ADD;
+  if (mode != ATP_CP_WEIGHT_ADD) {
+    // The caller's `base` is the ADD-mode symbol-count sum; for any
+    // other mode it must be recomputed from the CP terms.
+    base = atp_cp_weight_base(s, lhs, rhs, mode);
+  }
   if (s != NULL && s->use_mix_heuristic) {
     KboCmp c = atp_compare(s, lhs, rhs);
     if (c != KBO_GT && c != KBO_LT) {

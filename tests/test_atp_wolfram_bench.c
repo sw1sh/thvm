@@ -204,6 +204,16 @@ int main(int argc, char **argv) {
 
   AtpState *s = thvm_atp_init(&cfg, step_cap);
   if (use_lpo) thvm_atp_set_lpo(s, &lpo);
+  // CP-weight mode: read from `THVM_ATP_CP_WEIGHT` (an
+  // `AtpCpWeightMode` integer).  Unset / out-of-range keeps the
+  // default `--add` heuristic, so pre-port numbers are reproduced
+  // when the env var is not exported.
+  {
+    const char *cw = getenv("THVM_ATP_CP_WEIGHT");
+    if (cw != NULL && *cw != 0) {
+      thvm_atp_set_cp_weight_mode(s, (u32)strtoul(cw, NULL, 10));
+    }
+  }
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
   Term gl = 0, gr = 0;
@@ -219,8 +229,9 @@ int main(int argc, char **argv) {
   thvm_atp_set_goal(s, gl, gr);
 
   printf("=== Wolfram-axiom completion : goal=%s ===\n", goal);
-  printf("ordering=%s  step_cap=%u  wall_cap=%.0fs\n",
-         use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"), step_cap, wall_cap);
+  printf("ordering=%s  step_cap=%u  wall_cap=%.0fs  cp_weight_mode=%u\n",
+         use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"),
+         step_cap, wall_cap, (u32)s->cp_weight_mode);
 
   clock_t   t0  = clock();
   AtpStatus st  = ATP_RUNNING;
