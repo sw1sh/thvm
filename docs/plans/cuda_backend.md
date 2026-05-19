@@ -73,6 +73,27 @@ foundational and ships first.
 Tests: render the canonical matmul / softmax / reduce DAGs to `.cu`
 strings and string-check structure.  No GPU needed.
 
+### Stage 0-1 status (landed) + caveats for Stage 2
+
+Stages 0-1 landed on main (`53fbdc24`, `12cd8344`, `0b80dea9`):
+`cg_target` enum, `cg_render_uop_kernel_cuda_root`, render-only tests
+`test_render_uop_cuda` 63/63.  Four render-side issues surfaced that
+Stage 2 must close once the rendered `.cu` actually hits nvrtc:
+
+1. **WMMA dtype.** `wmma::fragment` matrix_a/b need `half` source; the
+   emit reads `const float*`.  The pod is a **V100 (Volta SM70)** --
+   pre-Ampere, so `wmma::precision::tf32` is NOT available.  On Volta
+   WMMA is fp16-only.  Decision: the WMMA `OPT_TC` path applies only
+   to fp16-typed buffers; fp32 matmul uses the scalar tiled-accumulator
+   fallback.  nvrtc target is `--gpu-architecture=compute_70`.
+2. **`float4` has no `operator[]`** in CUDA -- the VEC_LOAD emit copied
+   Metal's `[i][j]` shape; CUDA needs `.x/.y/.z/.w` member access.
+3. **WMMA dispatch shape** -- the emit assumes one warp per 16x16
+   output tile; `cuLaunchKernel` must size grid `= tiles*32`, blockDim
+   a multiple of 32.
+4. **bitcast** -- the fp32-const bitcast else-arm emits Metal's
+   `as_type<float>`; CUDA needs `__uint_as_float`.
+
 ### Stage 2 -- `src/backend/cuda/` runtime (needs the pod)
 
 Mirror `cpu/` and `metal/`:
@@ -80,11 +101,19 @@ Mirror `cpu/` and `metal/`:
 - `init.c` -- `cuInit`, `cuDeviceGet`, `cuCtxCreate`.
 - `buf_*.c` -- `cuMemAlloc` / `cuMemcpyHtoD` / `cuMemcpyDtoH` /
   `cuMemFree`, plus the buffer pool/refcount mirroring `cpu/buf_pool.c`.
-- `jit.c` -- nvrtc compiles the rendered `.cu` string to PTX,
-  `cuModuleLoadData`, `cuModuleGetFunction`, `cuLaunchKernel`.
+- `jit.c` -- nvrtc compiles the rendered `.cu` string to PTX
+  (`--gpu-architecture=compute_70` for the V100), `cuModuleLoadData`,
+  `cuModuleGetFunction`, `cuLaunchKernel`.
 - `Makefile`: a Linux-and-CUDA-present section mirroring the Darwin
   Metal block; link `-lcuda -lnvrtc`; guard so the Mac build is
   untouched.
+- Fix render caveats 2-4 above in `render_uop.c` as they surface at
+  nvrtc compile.
+
+Build/test loop: thvm is developed on macOS; the CUDA backend builds
+and runs only on the pod.  rsync the thvm tree to `thvm-pod:~/thvm/`
+(exclude `.git`, `build/`), `make` there (Linux builds CPU + CUDA, no
+Metal), iterate.
 
 ### Stage 3 -- bridge + dispatch integration (needs the pod)
 
@@ -100,27 +129,29 @@ Mirror `cpu/` and `metal/`:
 ### Stage 4 -- cross-validation vs tinygrad (needs the pod)
 
 - Run matmul / softmax / reduce through thvm-CUDA and tinygrad-CUDA on
-  the same A6000; compare correctness and speed.  This is the "close
+  the same V100; compare correctness and speed.  This is the "close
   the gap to tinygrad" measurement.
 - Wire CUDA-appropriate `KOP_TC` tile proposals (WMMA 16x16x16) into
   `src/codegen/propose.c`.
 
 ## Test machine
 
-Prime Intellect pod, RTX A6000 48 GB, `ubuntu_22_cuda_12` image.
-`ssh thvm-pod` (ControlMaster; IP changes per pod -- update the
-`Hostname` in `~/.ssh/config`).  Provision under the Wolfram Institute
-team.  Bills ~$0.54/hr while ACTIVE; `prime pods terminate` to stop.
+Prime Intellect pod, currently a **Tesla V100-SXM2-16GB** (Volta
+SM70), `ubuntu_22_cuda_12` image, gcc 11.4.  `ssh thvm-pod`
+(ControlMaster; IP changes per pod -- update the `Hostname` in
+`~/.ssh/config`).  Provision under the Wolfram Institute team.
 
-**The image is driver-only -- no `nvcc`, no `libnvrtc`.**  Before
-Stage 2 can be tested, install nvrtc: `uv pip install
-nvidia-cuda-nvrtc-cu12`, symlink `libnvrtc.so.12` +
-`libnvrtc-builtins.so.*` into `/usr/lib/x86_64-linux-gnu/`, `sudo
-ldconfig` (or set `NVRTC_PATH`).  See the `reference_tinygrad_cuda_pod`
-memory note.
+**The image is driver-only -- no `nvcc`, no `libnvrtc`** (the driver
+does provide `libcuda.so`, so the CUDA driver API links fine).
+`brain/experiments/setup_pod.sh` already installs nvrtc: it
+`uv pip install`s `nvidia-cuda-nvrtc-cu12` and symlinks `libnvrtc*.so*`
+into `/usr/lib/x86_64-linux-gnu/` + `ldconfig`.  Reuse that path for
+thvm's `jit.c`.  See the `reference_tinygrad_cuda_pod` memory note.
 
-Stages 0-1 are local (Mac); 2-4 need the pod.  Provision the pod when
-Stage 2 starts; terminate between sessions.
+The pod is shared with the `brain/` experiments -- work in a separate
+dir (`~/thvm/`), do not disturb `~/brain/`, do not terminate the pod.
+
+Stages 0-1 done locally (Mac); 2-4 need the pod.
 
 ## Non-goals / risks
 
