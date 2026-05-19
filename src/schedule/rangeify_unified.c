@@ -953,6 +953,15 @@ static void ru_index_axes_register(Term index_e_term, Term const *rngs,
   RU_INDEX_AXIS_N++;
 }
 
+// Public wrapper for ru_index_axes_register.  Used by materialize.c's
+// bypass rewriter to propagate per-axis info when it rebuilds an
+// INDEX_E (e.g. BUFFERIZE->BUFFER promotion).  Without this the
+// rebuilt INDEX_E loses its side-table entry.
+fn void rangeify_unified_index_axes_register(Term index_e_term,
+                                             Term const *rngs, u8 ndim) {
+  ru_index_axes_register(index_e_term, rngs, ndim);
+}
+
 // Reverse lookup: given a BUFFERIZE Term, find its producer node_idx
 // in RU_BUFFERIZE_TERM[].  Used by materialize.c's bypass rewriter to
 // resolve orphan BUFFERIZEs (those not in BOUNDARY_BUFFERIZE_TERM[]

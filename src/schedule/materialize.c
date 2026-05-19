@@ -1302,7 +1302,23 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
           && uop_buffer_numel(buf_rw) == 1) {
         addr_term = uop_const(DT_INT32, 0);
       }
-      return uop_index_e(buf_rw, addr_term);
+      Term new_index = uop_index_e(buf_rw, addr_term);
+      // Propagate per-axis side-table info from old INDEX_E to new.
+      // The rebuilt INDEX_E has substituted buf+addr but the per-axis
+      // info (consumer's in_rngs) carries through unchanged at THIS
+      // boundary -- consumer doesn't reshape just because we promoted
+      // BUFFERIZE to BUFFER.  Without this, the rebuilt INDEX_E loses
+      // its side-table entry and any further inline attempts can't
+      // find per-axis info.
+      if (new_index != resolved) {
+        Term old_ax[MAX_DIM];
+        u8 old_n = rangeify_unified_index_axes_lookup(
+            term_val(resolved), old_ax, MAX_DIM);
+        if (old_n > 0) {
+          rangeify_unified_index_axes_register(new_index, old_ax, old_n);
+        }
+      }
+      return new_index;
     }
   }
 
