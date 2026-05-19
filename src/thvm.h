@@ -1803,8 +1803,6 @@ KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
 u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
 // Writer-side facade: thin wrapper over kernel_apply_opt.
 int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
-// Record an opt as applied without changing axis structure (KOP_TC).
-int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
 // Reset axes to the default LOOP/REDUCE shape (autotune between-
 // candidates baseline; preserves autotuned + version).
 void       tile_anno_axes_reset(struct KernelEntry *ke);
@@ -1829,9 +1827,14 @@ fn int kernel_autotune(u32 kid);
 fn u64 kautotune_structural_key(struct KernelEntry const *ke);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True
-// iff (env opt-in `THVM_AUTOTUNE=1`) AND (this KpSchedule hasn't
-// been autotuned yet) AND (proposer has at least one candidate).
+// iff (env opt-in `AUTOTUNE=1` or `BEAM>0`) AND (this KpSchedule
+// hasn't been autotuned yet) AND (proposer has at least one
+// candidate).
 fn int kernel_should_autotune(struct KernelEntry const *ke);
+
+// Case-insensitive match of a DEV env string against a backend name
+// ("cpu"/"metal"/"cuda"); a trailing ":renderer" suffix is ignored.
+int thvm_dev_name_is(char const *want, char const *name);
 
 // Temporarily suppress TJit capture recording while internal
 // benchmark fires run.  The surrounding user kernel still gets
@@ -2209,13 +2212,13 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
 // kernel: inspects shape/dtype and applies a sensible sequence of
 // KOpts via kernel_apply_opt (TC -> UPCAST -> LOCAL -> GROUP ->
 // UNROLL).  Idempotent: marks ke->schedule->autotuned so it doesn't
-// re-run.  Gated behind THVM_HAND_CODED_OPTS (see hand_opts.c).
+// re-run.  Gated behind HAND_CODED_OPTS (see hand_opts.c).
 // Returns the number of opts successfully applied.
 fn u32 kernel_hand_coded_opts(struct KernelEntry *ke);
 
 // Should this kernel get the hand-coded opt heuristic on its next
-// fire?  True iff the env opt-in is on (default ON; THVM_HAND_CODED
-// _OPTS=0 disables) AND the per-shape autotuned flag is still 0.
+// fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
+// or NOOPT=1 disables) AND the per-shape autotuned flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke);
 
 // === Slice 5 decode shims (Metal-TU-callable) =========================

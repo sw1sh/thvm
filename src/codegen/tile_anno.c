@@ -59,16 +59,6 @@ int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
   return kernel_apply_opt(ke, opt);
 }
 
-// Record an opt as applied without mutating axis structure.  Used
-// for metadata-only opts (KOP_TC) that downstream consumers read
-// from applied_opts but that don't change axis types/extents.
-int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
-  if (ke == NULL || ke->schedule == NULL) return 0;
-  if (ke->schedule->n_applied >= MAX_OPTS) return 0;
-  ke->schedule->applied_opts[ke->schedule->n_applied++] = opt;
-  return 1;
-}
-
 // Reset the axes back to the default LOOP/REDUCE shape (used between
 // autotune bench candidates so each candidate starts from a fresh
 // baseline).  Preserves the autotuned flag.
