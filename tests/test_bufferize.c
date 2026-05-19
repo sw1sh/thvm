@@ -493,7 +493,6 @@ int main(void) {
   if (ds_idx != 0xFFFFFFFFu) {
     BBufferize const *bd = bufferize_buffer_at(ds_idx);
     CHECK_EQ(bd->realized, 1);
-    CHECK_EQ(bufferize_rewrite_stat_hits("remove-by-cost-score"), 0);
   }
 
   TEST_BEGIN("bufferize/remove-by-cost-score-respects-reduce-gate");

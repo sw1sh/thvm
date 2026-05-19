@@ -1462,9 +1462,6 @@ extern u32      CMAP_LL_LEN;
 // Fill up to `cap` consumer_locs for `producer_loc`. Returns true count
 // (may exceed cap; caller is responsible for sizing).
 fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
-fn void bufferize_rewrite_stats_clear(void);
-fn u32  bufferize_rewrite_stats_len(void);
-fn u32  bufferize_rewrite_stat_hits(char const *name);
 
 // === bufferize schedule IR ===
 // Explicit B_BUFFERIZE/B_STORE/B_INDEX graph that future phases of

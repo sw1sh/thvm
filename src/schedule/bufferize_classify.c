@@ -741,7 +741,6 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
 
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
-  bufferize_rewrite_stats_clear();
   // Always touch the bufferize graph so its state stays in sync with
   // BUFFERIZE_NODES.  Both seed/finalize short-circuit on non-UOp roots
   // after zeroing their own tables.
