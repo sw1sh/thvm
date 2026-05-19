@@ -2604,6 +2604,48 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
                  : 0xFFFFFFFFu;
   }
 
+  // Reduce-feeding-broadcast hoist: collect the set of output-axis ids
+  // that any reduce in the store value structurally depends on.  An
+  // output axis NOT in this set (but a reduce-dependent axis IS) is a
+  // pure broadcast axis -- e.g. softmax's column `c`: the row max/sum
+  // reduce uses only the row axis `r`, and `c` just selects an output
+  // column.  Promoting `c` to a grid thread makes every one of the C
+  // column threads recompute the full row reduction (the 82x-slower
+  // one-thread-per-output shape).  Keeping `c` a serial loop INSIDE
+  // the row thread instead lets the row reduction run ONCE per row and
+  // the column loop reuse `_accN` -- O(R*C) work, not O(R*C^2).
+  u8  reduce_dep_axis[256] = {0};
+  int any_reduce_dep = 0;
+  {
+    Term hoist_reduces[RMU_MAX_RANGES];
+    u8   hoist_simd[RMU_MAX_RANGES] = {0};
+    u32  n_hoist = 0;
+    rmu_collect_reduces_with_simd(value, 0, hoist_reduces, hoist_simd,
+                                  &n_hoist);
+    for (u32 i = 0; i < n_hoist; i++) {
+      Term r_src = heap_read(term_val(hoist_reduces[i]) + 0);
+      Term r_ranges[MAX_DIM];
+      u32  r_n = 0;
+      rmu_collect_ranges_through_reduce(r_src, r_ranges, &r_n);
+      for (u32 j = 0; j < r_n; j++) {
+        if (term_tag(r_ranges[j]) != TAG_UOP
+            || term_ext(r_ranges[j]) != UOP_RANGE) continue;
+        u32 ax = (u32)term_val(heap_read(term_val(r_ranges[j]) + 0));
+        if (ax >= 256) continue;
+        // Only output axes count: the reduce's own reduce-axis is not
+        // a broadcast lever.  An axis is an output axis iff it indexes
+        // the store position.
+        for (u32 k = 0; k < addr_n; k++) {
+          if (addr_axes[k] == ax) {
+            reduce_dep_axis[ax] = 1;
+            any_reduce_dep = 1;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // Default-parallelise: every output axis (axis_id in addr_axes)
   // that's still a plain KAX_LOOP with no OPT wrap becomes a GLOBAL
   // grid axis.  Without this the renderer emits a serial for-loop
@@ -2632,7 +2674,17 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       if (axis_type != 0 /* KAX_LOOP */) continue;
       int is_output = 0;
       for (u32 j = 0; j < addr_n; j++) if (addr_axes[j] == axis_id) { is_output = 1; break; }
-      if (is_output) promote_global[i] = 1;
+      if (!is_output) continue;
+      // Reduce-feeding-broadcast hoist: when the kernel has a reduce
+      // that depends on a DIFFERENT output axis, a pure-broadcast
+      // output axis (one no reduce depends on) stays a serial loop so
+      // the reduce runs once per reduce-axis tuple, not once per
+      // broadcast element.  Pure-elementwise kernels (no reduce, or
+      // reduces with no output-axis dependence) keep full promotion.
+      if (any_reduce_dep && axis_id < 256 && !reduce_dep_axis[axis_id]) {
+        continue;
+      }
+      promote_global[i] = 1;
     }
   }
 
