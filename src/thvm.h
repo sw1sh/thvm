@@ -1489,6 +1489,7 @@ typedef struct TContext {
 #define THVM_MAX_BACKENDS 4
 #define THVM_DEV_CPU      0
 #define THVM_DEV_METAL    1
+#define THVM_DEV_CUDA     2
 
 #define CONTEXTS_CAP 16
 extern TContext *CURRENT_CTX;
@@ -3085,6 +3086,12 @@ u32   cg_kernel_dispatch_kind(u32 kid);
 // Metal lands in step 14 behind the same Backend struct.
 extern Backend CPU_BACKEND;
 extern Backend METAL_BACKEND;
+// CUDA backend -- defined only in the Linux+CUDA build (THVM_HAS_CUDA).
+// Plain C99 (driver API + nvrtc are C), so it lives in this single-TU
+// build rather than a separate object like the Objective-C Metal one.
+#ifdef THVM_HAS_CUDA
+extern Backend CUDA_BACKEND;
+#endif
 #ifdef THVM_HAS_METAL
 int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *op);
 int thvm_metal_jit_replay_run(u32 slot, u32 start_op,

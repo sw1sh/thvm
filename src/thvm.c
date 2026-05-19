@@ -217,6 +217,33 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #ifndef THVM_HAS_METAL
 #include "backend/metal/_.c"
 #endif
+
+// === backend/cuda/ ===
+// Unlike the Objective-C Metal backend (a separate .m TU), the CUDA
+// backend is plain C99 -- the CUDA driver API and nvrtc are C headers
+// -- so it is #included straight into this single-TU build, exactly
+// like backend/cpu/.  Guarded by THVM_HAS_CUDA: only the Linux+CUDA
+// build (see the Makefile CUDA block) defines it and links -lcuda
+// -lnvrtc.  Mac / plain-Linux builds skip the whole subtree.  Order
+// mirrors backend/cpu/: init defines CUDA_BUFS first, the buf_*
+// helpers reference it, jit.c depends on cg_render_uop_kernel_cuda_root
+// (already included via codegen/render_uop.c above), and _.c assembles
+// the vtable + thvm_cuda_* entry points last.
+#ifdef THVM_HAS_CUDA
+#include "backend/cuda/init.c"           // cuda.h/nvrtc.h, CudaBuf, state
+#include "backend/cuda/buf_freelist.c"
+#include "backend/cuda/buf_alloc.c"
+#include "backend/cuda/buf_free.c"
+#include "backend/cuda/buf_incref.c"
+#include "backend/cuda/buf_decref.c"
+#include "backend/cuda/buf_read.c"
+#include "backend/cuda/buf_write.c"
+#include "backend/cuda/buf_copy.c"
+#include "backend/cuda/buf_pool.c"
+#include "backend/cuda/jit.c"
+#include "backend/cuda/_.c"
+#endif
+
 #include "backend/dispatch/begin_all.c"
 #include "backend/dispatch/flush_all.c"
 #include "backend/dispatch/end_all.c"
@@ -493,6 +520,19 @@ static void install_ctx_backends(TContext *ctx, const char *want) {
         ctx->n_backends               = 2;
         ctx->default_device           = THVM_DEV_METAL;
     }
+#ifdef THVM_HAS_CUDA
+    // THVM_BACKEND=cuda registers the CUDA backend in the vtable
+    // slot.  Stage 2 only lands the runtime + standalone thvm_cuda_*
+    // entry points; the schedule's KernelEntry dispatch path is not
+    // routed through cuda_dispatch_kernel until Stage 3 (the py
+    // bridge), so selecting it here mainly makes CUDA_BACKEND
+    // reachable for the e2e test's backend-table assertions.
+    if (want && strcmp(want, "cuda") == 0) {
+        ctx->backends[THVM_DEV_CUDA] = &CUDA_BACKEND;
+        ctx->n_backends              = THVM_DEV_CUDA + 1;
+        ctx->default_device          = THVM_DEV_CUDA;
+    }
+#endif
 }
 
 void thvm_init(void) {
