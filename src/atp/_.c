@@ -4418,6 +4418,17 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   for (u32 i = 0; i < ncps; i++) {
     Term cp_lhs = cps[i].lhs;
     Term cp_rhs = cps[i].rhs;
+    // Snapshot the RAW superposition result -- the un-reduced
+    // `(σ(l_i[p←r_j]), σ(r_i))` -- var-normalized for clean
+    // alpha-canonical ids.  The trace records this (not the reduced
+    // CP queued below): a Waldmeister-PCL CriticalPairLemma's
+    // Statement is the raw overlap, which the proof verifier
+    // re-derives from the two parent rules at the recorded position.
+    Term raw_lhs = cp_lhs;
+    Term raw_rhs = cp_rhs;
+#ifdef ATP_VAR_NORM
+    thvm_normalize_vars(&raw_lhs, &raw_rhs);
+#endif
     // Reduce the CP w.r.t. R before it lands in the queue: standard
     // completion adds the NORMALIZED critical pair.  atp_cp_trivially_-
     // joinable writes the two normal forms back through cp_lhs/cp_rhs
@@ -4456,7 +4467,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_queue_subsumed++;
       continue;
     }
-    u32 t = atp_trace_push_cp(s, parent_a, parent_b, cp_lhs, cp_rhs,
+    u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len);
     atp_cp_heap_push(s, cp_lhs, cp_rhs, t);
     pushed++;
