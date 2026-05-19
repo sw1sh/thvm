@@ -578,9 +578,6 @@ static void kernel_bench_fire(u32 kid) {
     return;
   }
   KernelEntry *ke = &KERNELS[kid];
-  if (ke->spliced) {
-    return;
-  }
   u32 resolved_tids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];

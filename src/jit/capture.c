@@ -836,7 +836,7 @@ static int jit_capture_replay_packable_output(JitCaptureOp const *op,
     return 0;
   }
   KernelEntry const *ke = &KERNELS[op->kid];
-  if (ke->spliced || ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
+  if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
     return 0;
   }
   TenDesc const *td = &TENS[ke->output_tid];
@@ -1073,7 +1073,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
       break;
     }
     KernelEntry *ke = &KERNELS[op->kid];
-    if (ke->spliced || ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
+    if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
       break;
     }
     Backend *b = TENS[ke->output_tid].backend;
@@ -1156,10 +1156,6 @@ fn u32 jit_replay(u32 slot) {
           continue;
         }
         KernelEntry *ke = &KERNELS[op->kid];
-        if (ke->spliced) {
-          i++;
-          continue;
-        }
         Backend *b = TENS[ke->output_tid].backend;
         if (b == NULL || b->dispatch_kernel == NULL) {
           i++;

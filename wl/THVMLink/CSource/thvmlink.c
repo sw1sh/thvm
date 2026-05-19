@@ -2039,7 +2039,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_table(WolframLibraryData libData, mint arg
     dst[k * nCols + 0] = (mint)ke->n_inputs;
     dst[k * nCols + 1] = (mint)ke->output_tid;
     dst[k * nCols + 2] = 0;        /* reserved (was `fired`) */
-    dst[k * nCols + 3] = (mint)ke->spliced;
+    dst[k * nCols + 3] = 0;        /* reserved (was `spliced`) */
     dst[k * nCols + 4] = (mint)ke->consumer_count;
     dst[k * nCols + 5] = (mint)ke->output_numel;
     dst[k * nCols + 6] = (mint)ke->output_dtype;

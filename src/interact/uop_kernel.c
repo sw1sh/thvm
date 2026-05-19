@@ -44,11 +44,6 @@ fn void kernel_fire_by_id(u32 kid) {
   KernelEntry *ke = &KERNELS[kid];
   if (ke->fire_gen == KERNEL_FIRE_GEN) return;     // already fired this pass
   ke->fire_gen = KERNEL_FIRE_GEN;
-  // Spliced kernels (sub-item f1a of the kernel-fusion arc) had
-  // their program ops absorbed into a consumer; the consumer
-  // produces this kernel's output buffer too, so dispatching here
-  // would just compute the same thing twice.
-  if (ke->spliced) return;
 
   // Resolve any symbolic input slots first (input_tids[i] == 0 +
   // input_terms[i] != 0).  These come from materialize_uop_in_env

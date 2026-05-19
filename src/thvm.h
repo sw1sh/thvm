@@ -865,11 +865,6 @@ typedef struct KernelEntry {
   // declined.
   Term      cached_lift_init_root;
 
-  u8        spliced;               // 1 if the kernel was inlined into a
-                                   // parent via materialize_splice_into;
-                                   // kernel_fire_by_id skips dispatch (the
-                                   // parent now produces this kernel's
-                                   // output buffer too).
   u32       consumer_count;        // # of OTHER kernels whose input_tids
                                    // trace back (via TENS[tid].producer_kid)
                                    // to this kernel.  Populated by
