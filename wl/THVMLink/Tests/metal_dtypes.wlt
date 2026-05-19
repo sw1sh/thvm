@@ -105,17 +105,17 @@ VerificationTest[
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result, oldBackend,
             oldSpecialized, restore},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldSpecialized],
                 SetEnvironment["THVM_METAL_SPECIALIZED" -> oldSpecialized],
                 SetEnvironment["THVM_METAL_SPECIALIZED" -> ""]]
         );
-        SetEnvironment["THVM_BACKEND" -> "metal"];
+        SetEnvironment["DEV" -> "metal"];
         SetEnvironment["THVM_METAL_SPECIALIZED" -> "0"];
         If[ ctx === 0, restore[]; Return[True]];
         result = TInContext[ctx,
@@ -171,11 +171,11 @@ VerificationTest[
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result, oldBackend, restore,
             aData, bData, ref},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         restore[] := If[StringQ[oldBackend],
-            SetEnvironment["THVM_BACKEND" -> oldBackend],
-            SetEnvironment["THVM_BACKEND" -> ""]];
-        SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> oldBackend],
+            SetEnvironment["DEV" -> ""]];
+        SetEnvironment["DEV" -> "metal"];
         If[ ctx === 0, restore[]; Return[True]];
         aData = ArrayReshape[N[Mod[Range[17 * 23], 7] - 3], {17, 23}];
         bData = ArrayReshape[N[Mod[Range[23 * 19], 5] - 2], {23, 19}];
@@ -209,18 +209,18 @@ VerificationTest[
        full producer chain instead of reusing benchmark intermediates. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result, oldAuto, oldRuns, restore},
-        oldAuto = Environment["THVM_AUTOTUNE"];
-        oldRuns = Environment["THVM_AUTOTUNE_RUNS"];
+        oldAuto = Environment["AUTOTUNE"];
+        oldRuns = Environment["BEAM_RUNS"];
         restore[] := (
             If[StringQ[oldAuto],
-                SetEnvironment["THVM_AUTOTUNE" -> oldAuto],
-                SetEnvironment["THVM_AUTOTUNE" -> ""]];
+                SetEnvironment["AUTOTUNE" -> oldAuto],
+                SetEnvironment["AUTOTUNE" -> ""]];
             If[StringQ[oldRuns],
-                SetEnvironment["THVM_AUTOTUNE_RUNS" -> oldRuns],
-                SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""]]
+                SetEnvironment["BEAM_RUNS" -> oldRuns],
+                SetEnvironment["BEAM_RUNS" -> ""]]
         );
-        SetEnvironment["THVM_AUTOTUNE" -> "1"];
-        SetEnvironment["THVM_AUTOTUNE_RUNS" -> "1"];
+        SetEnvironment["AUTOTUNE" -> "1"];
+        SetEnvironment["BEAM_RUNS" -> "1"];
         If[ ctx === 0, restore[]; Return[True]];
         result = TInContext[ctx,
             x = TZeros[{1, 8, 8}];

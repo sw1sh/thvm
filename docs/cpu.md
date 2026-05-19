@@ -137,8 +137,8 @@ renderer.
   leaves the kernel mutated to the winner. Winners are cached per
   program shape in memory via the `autotuned` flag on `KernelAxes`
   and on disk under `$XDG_CACHE_HOME/thvm/autotune` (or
-  `$HOME/.cache/thvm/autotune`, or `THVM_AUTOTUNE_CACHE_DIR`).  Set
-  `THVM_AUTOTUNE_CACHE=0` or `THVM_AUTOTUNE_DISABLE_CACHE=1` to force
+  `$HOME/.cache/thvm/autotune`, or `AUTOTUNE_CACHE_DIR`).  Set
+  `AUTOTUNE_CACHE=0` or `AUTOTUNE_DISABLE=1` to force
   fresh benchmarking.
 - [hand_opts.c](../src/codegen/hand_opts.c): handcrafted opt
   templates for recognized GEMM / conv shapes. Bypasses the propose

@@ -502,9 +502,8 @@ static int bufferize_softmax_reduce_tile_cap_enabled(void) {
 // Iterates until either the boundary fits under cap or no eligible
 // child remains.
 static int bufferize_metal_tile_fanin_cap_enabled(void) {
-  char const *backend = getenv("THVM_BACKEND");
-  char const *tile    = getenv("THVM_TILE");
-  return backend != NULL && strcmp(backend, "metal") == 0
+  char const *tile = getenv("THVM_TILE");
+  return thvm_dev_name_is(getenv("DEV"), "metal")
       && tile != NULL && tile[0] == '1';
 }
 

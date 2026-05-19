@@ -6,7 +6,7 @@
 
    Run from the repo root:
        wolframscript -f wl/Examples/mlp-mnist/forward.wls
-       THVM_BACKEND=metal wolframscript -f wl/Examples/mlp-mnist/forward.wls
+       DEV=metal wolframscript -f wl/Examples/mlp-mnist/forward.wls
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];

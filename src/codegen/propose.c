@@ -7,16 +7,16 @@
 //   reduce-tail kernel + axis_size % factor == 0 -> propose UNROLL
 //   factor for factor in {2, 4, 8, 16}.
 //
-//   THVM_BACKEND=metal + THVM_TILE=1 + rank-1 f32 scalar/tile kernel
+//   DEV=metal + THVM_TILE=1 + rank-1 f32 scalar/tile kernel
 //   -> propose LOCAL tile factors.  The autotune loop applies the
 //   matching outer GLOBAL mark when benchmarking these candidates.
 //
-//   THVM_BACKEND=metal + f32 GEMM kernel
+//   DEV=metal + f32 GEMM kernel
 //   -> propose TC tile sizes.  The first implementation uses TC as
 //   metadata for the fixed direct Metal GEMM renderer; later it maps
 //   to simdgroup MMA variants.
 //
-//   THVM_BACKEND=metal + THVM_TILE=1 + im2col-fused Conv2D template
+//   DEV=metal + THVM_TILE=1 + im2col-fused Conv2D template
 //   -> propose LOCAL threadgroup-size factors over a loop axis,
 //   UPCAST output-per-thread factors, and UNROLL factors over the
 //   reduce axis.  The generated tile renderer reads those as SIMT
@@ -198,13 +198,11 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
 }
 
 static int propose_metal_backend_enabled(void) {
-  char const *backend = getenv("THVM_BACKEND");
-  return backend != NULL && strcmp(backend, "metal") == 0;
+  return thvm_dev_name_is(getenv("DEV"), "metal");
 }
 
 static int propose_cuda_backend_enabled(void) {
-  char const *backend = getenv("THVM_BACKEND");
-  return backend != NULL && strcmp(backend, "cuda") == 0;
+  return thvm_dev_name_is(getenv("DEV"), "cuda");
 }
 
 static int propose_metal_tile_enabled(void) {

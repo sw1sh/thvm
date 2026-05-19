@@ -15,7 +15,7 @@
 
    Run from the repo root:
        wolframscript -f wl/Examples/beautiful-mnist/train.wls
-       THVM_BACKEND=metal THVM_TILE=1 N_STEPS=70 TEST_EVERY=10 BS=512 MNIST_LIMIT=All wolframscript -f wl/Examples/beautiful-mnist/train.wls
+       DEV=metal THVM_TILE=1 N_STEPS=70 TEST_EVERY=10 BS=512 MNIST_LIMIT=All wolframscript -f wl/Examples/beautiful-mnist/train.wls
 
    Env:
      BS          (default 512)  -- batch size
@@ -51,7 +51,7 @@ TInit[];
 print["beautiful_mnist full-training (cold + warm JIT smoke test)"];
 print["  BS=", bs, "  N_STEPS=", nSteps, "  TEST_EVERY=", testEvery,
       "  MNIST_LIMIT=", mnistLim];
-print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
+print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"]];
 
 (* === Load MNIST once, materialise to host arrays for fast slicing.

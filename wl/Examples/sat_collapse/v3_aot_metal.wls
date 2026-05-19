@@ -13,7 +13,7 @@
    layer comes when iter Z+1 lands the parallel cnf+collapse shader,
    which walks the SUP-tree's N independent leaves on N GPU threads.
 
-   Usage: THVM_BACKEND=metal wolframscript -f v3_aot_metal.wls
+   Usage: DEV=metal wolframscript -f v3_aot_metal.wls
 *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];

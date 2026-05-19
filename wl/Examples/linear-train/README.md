@@ -17,7 +17,7 @@ have that lifetime-aware scheduling has room to win.
 ```bash
 wolframscript -f wl/Examples/linear-train/train.wls
 wolframscript -f wl/Examples/linear-train/memory-probe.wls
-THVM_BACKEND=metal wolframscript -f wl/Examples/linear-train/memory-probe.wls
+DEV=metal wolframscript -f wl/Examples/linear-train/memory-probe.wls
 ```
 
 `train.wls` runs 20 Adam steps on synthetic data (3 fixed input

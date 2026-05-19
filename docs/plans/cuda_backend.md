@@ -117,7 +117,7 @@ Metal), iterate.
 
 ### Stage 3 -- bridge + dispatch integration (needs the pod)
 
-- `src/backend/dispatch/` backend selection so `THVM_BACKEND=cuda`
+- `src/backend/dispatch/` backend selection so `DEV=cuda`
   routes here.
 - `py/csource/thvm_py_cuda.c` -- mirror of `thvm_py_metal.m`:
   `compile_cuda`, buffer alloc/write/read, `dispatch_timed` (CUDA

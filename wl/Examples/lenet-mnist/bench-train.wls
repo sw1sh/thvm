@@ -226,7 +226,7 @@ maxTune = parseLimit["MAX_TUNE_KERNELS", 32];
 benchMode = ToLowerCase @ envValue["TRAIN_BENCH_MODE", "both"];
 
 print["LeNet training benchmark"];
-print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
+print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"]];
 print["  TRAIN_BENCH_MODE=", benchMode,
       "  N_STEPS=", nSteps,

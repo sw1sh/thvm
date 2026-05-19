@@ -225,7 +225,7 @@ Metal on Apple Silicon; CPU-only parity isn't really parity.
 
 ### M6. Autotune across the per-program-shape kernel cache
 
-Phase 16's autotune infrastructure (`THVM_AUTOTUNE=1`,
+Phase 16's autotune infrastructure (`AUTOTUNE=1`,
 `TKernelAutotuneAll[]`) exists.  Run it across beautiful-mnist's
 distinct kernel program shapes, materialize the winning opts in
 the kernel-program cache, and capture a baseline of opts that

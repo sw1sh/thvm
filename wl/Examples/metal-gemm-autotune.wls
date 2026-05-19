@@ -14,9 +14,9 @@
    Environment knobs:
        M, K, N          GEMM shape: {M,K} . {K,N}
                         defaults: M=64, K=64, N=64
-       THVM_BACKEND     defaulted to metal if unset
+       DEV     defaulted to metal if unset
        THVM_TILE        defaulted to 1 if unset
-       THVM_AUTOTUNE_RUNS
+       BEAM_RUNS
                         defaulted to 9 if unset
 *)
 
@@ -43,12 +43,12 @@ formatOpts[opts_List] := "{" <> StringRiffle[formatOpt /@ opts, ", "] <> "}"
 
 variantRow[v_TKernelVariant] := First[v]
 
-If[envValue["THVM_BACKEND", ""] === "",
-    SetEnvironment["THVM_BACKEND" -> "metal"]];
+If[envValue["DEV", ""] === "",
+    SetEnvironment["DEV" -> "metal"]];
 If[envValue["THVM_TILE", ""] === "",
     SetEnvironment["THVM_TILE" -> "1"]];
-If[envValue["THVM_AUTOTUNE_RUNS", ""] === "",
-    SetEnvironment["THVM_AUTOTUNE_RUNS" -> "9"]];
+If[envValue["BEAM_RUNS", ""] === "",
+    SetEnvironment["BEAM_RUNS" -> "9"]];
 
 m = parseInt["M", 64];
 k = parseInt["K", 64];
@@ -62,9 +62,9 @@ TInit[];
 TReset[];
 
 print["Metal GEMM autotune"];
-print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
+print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"],
-      "  THVM_AUTOTUNE_RUNS=", envValue["THVM_AUTOTUNE_RUNS", "5"]];
+      "  BEAM_RUNS=", envValue["BEAM_RUNS", "5"]];
 print["  shape: {", m, ", ", k, "} . {", k, ", ", n, "}"];
 
 ctx = TContextNew["metal"];

@@ -1,4 +1,4 @@
-// test_metal_stub.c -- THVM_BACKEND env-var swap selects METAL_BACKEND.
+// test_metal_stub.c -- DEV env-var swap selects METAL_BACKEND.
 //
 // The Metal implementation itself is a stub today (returns errors
 // for everything that touches compute).  This test only verifies
@@ -10,14 +10,14 @@
 
 int main(void) {
   TEST_BEGIN("metal/default-backend-is-cpu");
-  unsetenv("THVM_BACKEND");
+  unsetenv("DEV");
   thvm_init();
   CHECK(CURRENT_BACKEND == &CPU_BACKEND);
   CHECK_EQ(CURRENT_BACKEND->id, 1);
   thvm_free();
 
-  TEST_BEGIN("metal/THVM_BACKEND-metal-selects-metal-stub");
-  setenv("THVM_BACKEND", "metal", 1);
+  TEST_BEGIN("metal/DEV-metal-selects-metal-stub");
+  setenv("DEV", "metal", 1);
   thvm_init();
   CHECK(CURRENT_BACKEND == &METAL_BACKEND);
   CHECK_EQ(CURRENT_BACKEND->id, 2);
@@ -26,11 +26,11 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal/unknown-value-falls-back-to-cpu");
-  setenv("THVM_BACKEND", "vulkan", 1);
+  setenv("DEV", "vulkan", 1);
   thvm_init();
   CHECK(CURRENT_BACKEND == &CPU_BACKEND);
   thvm_free();
 
-  unsetenv("THVM_BACKEND");
+  unsetenv("DEV");
   TEST_REPORT();
 }

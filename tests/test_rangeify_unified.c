@@ -201,7 +201,7 @@ int main(void) {
   // compute_bufferize field points at a UOP_BUFFERIZE Term whose
   // value is the boundary's UOP root.
   TEST_BEGIN("unified-rangeify/compute-bufferize-wired");
-  unsetenv("THVM_BACKEND");
+  unsetenv("DEV");
   thvm_init();
   Shape sd = {0}; sd.ndim = 1; sd.dims[0] = 4;
   f32 srcda[4] = {1.0f, 2.0f, 3.0f, 4.0f};

@@ -11,9 +11,9 @@
    The first capture/autotune cost is deliberately outside the timed
    metric.  Run from the repo root:
 
-       THVM_BACKEND=metal THVM_TILE=1 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
-       BENCH_MODE=forward BS=512 THVM_BACKEND=metal THVM_TILE=1 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
-       BS=512 WARMUP_STEPS=2 N_STEPS=5 THVM_BACKEND=metal THVM_TILE=1 THVM_AUTOTUNE=1 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
+       DEV=metal THVM_TILE=1 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
+       BENCH_MODE=forward BS=512 DEV=metal THVM_TILE=1 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
+       BS=512 WARMUP_STEPS=2 N_STEPS=5 DEV=metal THVM_TILE=1 AUTOTUNE=1 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 
    BENCH_MODE:
        train    forward + TGradMany + Adam assignments (default)
@@ -196,9 +196,9 @@ dumpMemoryIR = envValue["DUMP_MEMORY_IR", "0"] === "1";
 dumpGroupConsumers = envValue["DUMP_GROUP_CONSUMERS", "0"] === "1";
 
 print["beautiful_mnist training benchmark"];
-print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
+print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"],
-      "  THVM_AUTOTUNE=", envValue["THVM_AUTOTUNE", "off"],
+      "  AUTOTUNE=", envValue["AUTOTUNE", "off"],
       "  THVM_METAL_GRAPH_REPLAY=", envValue["THVM_METAL_GRAPH_REPLAY", "default-on"],
       "  THVM_METAL_GRAPH_MAX_DISPATCHES=", envValue["THVM_METAL_GRAPH_MAX_DISPATCHES", "256"],
       "  THVM_METAL_DEFER_BYTES=", envValue["THVM_METAL_DEFER_BYTES", "1073741824"],

@@ -11,18 +11,18 @@ CPU (default backend):
 
 Metal (Apple Silicon):
 
-    THVM_BACKEND=metal wolframscript -f wl/Examples/lenet-mnist/forward.wls
-    THVM_BACKEND=metal THVM_TILE=1 N_STEPS=4 wolframscript -f wl/Examples/lenet-mnist/train.wls
+    DEV=metal wolframscript -f wl/Examples/lenet-mnist/forward.wls
+    DEV=metal THVM_TILE=1 N_STEPS=4 wolframscript -f wl/Examples/lenet-mnist/train.wls
 
 Autotune a bounded sample of LeNet kernels:
 
     THVM_TILE=1 wolframscript -f wl/Examples/lenet-mnist/autotune.wls
-    THVM_BACKEND=metal THVM_TILE=1 THVM_AUTOTUNE=1 N_STEPS=1 wolframscript -f wl/Examples/lenet-mnist/train.wls
+    DEV=metal THVM_TILE=1 AUTOTUNE=1 N_STEPS=1 wolframscript -f wl/Examples/lenet-mnist/train.wls
 
 Full LeNet autotune sweep:
 
     THVM_TILE=1 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
-    THVM_BACKEND=metal THVM_TILE=1 THVM_KGC=0 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
+    DEV=metal THVM_TILE=1 THVM_KGC=0 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
 
 Benchmark single-sample LeNet training with baseline vs bounded
 autotune:
@@ -56,7 +56,7 @@ within tolerance.  Zero-key kernels are kept separate because they do
 not share a `KernelAxes` slot.  The default tunes the first 16
 representative candidates so the script remains interactive; set
 `MAX_TUNE_KERNELS=All` for the full representative sweep.  On Metal,
-fire-time autotune via `THVM_AUTOTUNE=1` is the normal training path
+fire-time autotune via `AUTOTUNE=1` is the normal training path
 because it tunes while program arrays are still live.  Use `THVM_KGC=0`
 with `autotune.wls` when you want post-hoc variant tables after an
 already-realized forward pass.
@@ -75,7 +75,7 @@ benchmark is intentionally single-sample for now so kernel generation,
 autotune, and dispatch timing stay visible while the wider tiling
 pipeline is still evolving.  CPU training is the current performance
 baseline.  Metal forward, grad-check, and 4-step Adam training pass
-with `THVM_TILE=1`; `THVM_AUTOTUNE=1` exercises the supported
+with `THVM_TILE=1`; `AUTOTUNE=1` exercises the supported
 Metal-tile candidates during dispatch.
 
 ## Files
@@ -109,7 +109,7 @@ Metal-tile candidates during dispatch.
                              (roughly ln(10) = uniform softmax);
                              Metal training follows the same loss
                              curve as CPU on the fixed sample when
-                             run with `THVM_BACKEND=metal`.
+                             run with `DEV=metal`.
   - `verify.wls`          -- end-to-end correctness check: trains
                              on one sample (4 Adam steps), then
                              asserts the trained model predicts

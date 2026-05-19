@@ -353,7 +353,7 @@ possible AttentionLayer net.
   `bench/autotune-ladder/<level>.py` (tinygrad).
 - Captured stdout goes to `bench/autotune-ladder/<level>.txt`
   (thvm) and `<level>.tinygrad.txt`.
-- Default env: `THVM_BACKEND=metal THVM_TILE=1 THVM_KGC=0
+- Default env: `DEV=metal THVM_TILE=1 THVM_KGC=0
   THVM_METAL_JIT_STATS=1` for thvm; `DEV=METAL BEAM=N` for tinygrad.
 - Headline columns to capture for each level: baseline_us,
   autotune_us, speedup, variants_tried, jit_compile_us,

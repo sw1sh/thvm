@@ -6,15 +6,14 @@
 // its shape/dtype and apply a sensible sequence of KOpts via the
 // existing `kernel_apply_opt`.  This is the cheap-by-default analogue
 // of tinygrad's hand-coded catalogue (no benchmarking, unlike BEAM
-// autotune which stays gated on THVM_AUTOTUNE).  It is wired into
-// kernel_fire_by_id and runs before dispatch, NOT gated on
-// THVM_AUTOTUNE -- BUT see "DEFAULT STATE: OFF" below: in this v1 the
-// THVM_HAND_CODED_OPTS env knob defaults to OFF, so absent that flag
-// the function is a no-op (it still marks ke->schedule->autotuned so
-// re-dispatch is cheap).
+// autotune, which stays gated on AUTOTUNE).  It is wired into
+// kernel_fire_by_id and runs before dispatch -- but see "DEFAULT
+// STATE" below: the HAND_CODED_OPTS knob defaults to opts-ON.  When
+// disabled the function is a no-op (it still marks
+// ke->schedule->autotuned so re-dispatch is cheap).
 //
 // === DEFAULT STATE: ON (v2) ========================================
-// THVM_HAND_CODED_OPTS defaults to ON.  THVM_HAND_CODED_OPTS=0
+// HAND_CODED_OPTS defaults to ON.  HAND_CODED_OPTS=0 or NOOPT=1
 // disables.  Earlier (v1) it was OFF because the DAG-mode renderer
 // gated its default-parallelise pass off the moment ANY per-axis OPT
 // wrapper was present, so a UPCAST on a multi-output-axis kernel
@@ -76,14 +75,20 @@
 // time.
 
 // --- env knob ------------------------------------------------------
-// Default ON (v2; see header).  THVM_HAND_CODED_OPTS=0 disables.
+// Default ON (v2; see header).  HAND_CODED_OPTS=0 disables; NOOPT=1
+// (tinygrad's inverse-sense knob) also disables and wins if both set.
 // Memoised: -1 = uninitialised, 0 = off, 1 = on.
 static int HAND_CODED_OPTS_ENABLED = -1;
 static int hand_coded_opts_enabled(void) {
   if (HAND_CODED_OPTS_ENABLED < 0) {
-    char const *e = getenv("THVM_HAND_CODED_OPTS");
-    // Default ON.  Only an explicit "0" disables.
-    HAND_CODED_OPTS_ENABLED = (e != NULL && e[0] == '0') ? 0 : 1;
+    char const *noopt = getenv("NOOPT");
+    if (noopt != NULL && noopt[0] != '\0' && noopt[0] != '0') {
+      HAND_CODED_OPTS_ENABLED = 0;            // tinygrad NOOPT=1
+    } else {
+      char const *e = getenv("HAND_CODED_OPTS");
+      // Default ON.  Only an explicit "0" disables.
+      HAND_CODED_OPTS_ENABLED = (e != NULL && e[0] == '0') ? 0 : 1;
+    }
   }
   return HAND_CODED_OPTS_ENABLED;
 }

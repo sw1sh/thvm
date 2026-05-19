@@ -2,7 +2,7 @@
 //
 // Placeholder while the real Objective-C backend (per docs/metal.md)
 // gets built up kernel-by-kernel.  All entries return error sentinels
-// so a runtime that gets switched here via `THVM_BACKEND=metal`
+// so a runtime that gets switched here via `DEV=metal`
 // fails LOUDLY at any compute-touching call -- much better than
 // silently returning zeros.
 //

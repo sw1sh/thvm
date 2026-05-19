@@ -30,15 +30,15 @@
    Kernel-fusion across elementwise chains (the autotune-ladder
    campaign in bench/autotune-ladder/) would close most of that gap.
 
-   Usage: THVM_BACKEND=metal wolframscript -f v2_kernel_graph.wls
+   Usage: DEV=metal wolframscript -f v2_kernel_graph.wls
 *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
 
-If[ Environment["THVM_BACKEND"] === $Failed || Environment["THVM_BACKEND"] === "",
-    SetEnvironment["THVM_BACKEND" -> "metal"]];
+If[ Environment["DEV"] === $Failed || Environment["DEV"] === "",
+    SetEnvironment["DEV" -> "metal"]];
 
 ctx = TContextNew["metal"];
 If[ ctx === 0,

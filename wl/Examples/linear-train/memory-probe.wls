@@ -17,7 +17,7 @@
 
    Run from the repo root:
        wolframscript -f wl/Examples/linear-train/memory-probe.wls
-       THVM_BACKEND=metal wolframscript -f wl/Examples/linear-train/memory-probe.wls
+       DEV=metal wolframscript -f wl/Examples/linear-train/memory-probe.wls
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
@@ -34,7 +34,7 @@ $renderBudget = 90;
    it doesn't finish in any reasonable budget, but the default
    layout still produces a usable (if uglier) diagram. *)
 renderHeapDiagram[seed_, label_] := Module[{backend, path, gridOk},
-    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    backend = If[ Environment["DEV"] === "metal", "metal", "cpu"];
     path    = "wl/Examples/linear-train/heap-diagram-" <> label
                 <> "-" <> backend <> ".svg";
     gridOk = TimeConstrained[
@@ -119,7 +119,7 @@ debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
    side-by-side with the gantt: gantt shows when bufs live, this
    shows who feeds whom. *)
 Module[{backend, gPath, gPathNoExt},
-    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    backend = If[ Environment["DEV"] === "metal", "metal", "cpu"];
     gPath      = "wl/Examples/linear-train/schedule-graph-" <> backend <> ".svg";
     gPathNoExt = "wl/Examples/linear-train/schedule-graph-no-ext-" <> backend <> ".svg";
     Export[gPath,      TScheduleGraph[],                                Background -> White];
@@ -129,7 +129,7 @@ Module[{backend, gPath, gPathNoExt},
 ];
 
 Module[{plan = TMemoryPlan[], backend, path},
-    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    backend = If[ Environment["DEV"] === "metal", "metal", "cpu"];
     path    = "wl/Examples/linear-train/memory-plan-" <> backend <> ".svg";
     Export[path, TMemoryPlanGantt[plan], Background -> White];
     debugPrint[""];

@@ -120,7 +120,7 @@ debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
    Filename encodes the active backend so CPU + Metal runs land
    at distinct paths. *)
 Module[{plan = TMemoryPlan[], backend, path},
-    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    backend = If[ Environment["DEV"] === "metal", "metal", "cpu"];
     path    = "wl/Examples/lenet-mnist/memory-plan-" <> backend <> ".svg";
     Export[path, TMemoryPlanGantt[plan], Background -> White];
     debugPrint[""];

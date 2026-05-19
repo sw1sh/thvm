@@ -64,7 +64,7 @@ compile with `clang` (no `cc`-vs-clang distinction on macOS):
 ```makefile
 THVM_PLATFORM := $(shell uname -s)
 ifeq ($(THVM_PLATFORM),Darwin)
-  THVM_BACKEND_OBJS += build/backend_metal.o build/default.metallib
+  DEV_OBJS += build/backend_metal.o build/default.metallib
   LDFLAGS_METAL := -framework Metal -framework Foundation
 endif
 
@@ -84,7 +84,7 @@ The `_.m` file `#include`s every other `.m` sibling (same pattern as
 `thvm_init()` picks a backend at process start:
 
 ```c
-const char *want = getenv("THVM_BACKEND");
+const char *want = getenv("DEV");
 if (want && strcmp(want, "metal") == 0) {
   CURRENT_BACKEND = &METAL_BACKEND;
 } else {

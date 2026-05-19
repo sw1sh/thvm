@@ -12,7 +12,7 @@
 
    Run from the repo root:
        wolframscript -f wl/Examples/mlp-mnist/grad-check.wls
-       THVM_BACKEND=metal wolframscript -f wl/Examples/mlp-mnist/grad-check.wls
+       DEV=metal wolframscript -f wl/Examples/mlp-mnist/grad-check.wls
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];

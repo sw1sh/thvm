@@ -9,7 +9,7 @@
    Run from the repo root:
 
        wolframscript -f wl/Examples/lenet-mnist/forward.wls
-       THVM_BACKEND=metal wolframscript -f wl/Examples/lenet-mnist/forward.wls
+       DEV=metal wolframscript -f wl/Examples/lenet-mnist/forward.wls
 
    The Metal path looks for build/default.metallib relative to
    cwd; running from elsewhere needs THVM_METAL_METALLIB= override

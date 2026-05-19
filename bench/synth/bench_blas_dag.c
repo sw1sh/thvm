@@ -36,7 +36,7 @@ static double now_sec(void) {
 
 static double bench_gemm_one(u32 M, u32 K, u32 N, u32 iters,
                              u64 *out_dag) {
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   cpu_blas_gemm_dispatch_counters_reset();
 
   Shape sa = {0}; sa.ndim = 2; sa.dims[0] = M; sa.dims[1] = K;
@@ -84,7 +84,7 @@ static double bench_gemm_one(u32 M, u32 K, u32 N, u32 iters,
 
 static double bench_gemv_one(u32 M, u32 K, u32 iters,
                              u64 *out_dag) {
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   cpu_blas_gemm_dispatch_counters_reset();
 
   Shape sw = {0}; sw.ndim = 2; sw.dims[0] = M; sw.dims[1] = K;
@@ -127,7 +127,7 @@ static double bench_gemv_one(u32 M, u32 K, u32 iters,
 
 static double bench_dot_one(u32 K, u32 iters,
                             u64 *out_dag) {
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   cpu_blas_gemm_dispatch_counters_reset();
 
   Shape sd = {0}; sd.ndim = 1; sd.dims[0] = K;

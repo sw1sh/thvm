@@ -40,7 +40,7 @@ typedef struct {
 static u32 kautotune_backend_id(KernelEntry const *ke);
 
 static u32 kautotune_n_runs(void) {
-  char const *e = getenv("THVM_AUTOTUNE_RUNS");
+  char const *e = getenv("BEAM_RUNS");
   if (e == NULL || e[0] == '\0') {
     return KAUTOTUNE_N_RUNS;
   }
@@ -85,21 +85,21 @@ static u32 kautotune_default_depth(KernelEntry const *ke) {
 }
 
 static u32 kautotune_depth(KernelEntry const *ke) {
-  return kautotune_env_u32("THVM_AUTOTUNE_DEPTH",
+  return kautotune_env_u32("AUTOTUNE_DEPTH",
                            kautotune_default_depth(ke),
                            KAUTOTUNE_SEQ_MAX);
 }
 
 static u32 kautotune_beam_width(void) {
-  return kautotune_env_u32("THVM_AUTOTUNE_BEAM", 2, 16);
+  return kautotune_env_u32("BEAM", 2, 16);
 }
 
 static int kautotune_cache_disabled(void) {
-  char const *disable = getenv("THVM_AUTOTUNE_DISABLE_CACHE");
+  char const *disable = getenv("AUTOTUNE_DISABLE");
   if (disable != NULL && disable[0] == '1') {
     return 1;
   }
-  char const *cache = getenv("THVM_AUTOTUNE_CACHE");
+  char const *cache = getenv("AUTOTUNE_CACHE");
   if (cache != NULL && cache[0] == '0' && cache[1] == '\0') {
     return 1;
   }
@@ -257,7 +257,7 @@ static int kautotune_cache_base_dir(char *out, size_t cap) {
   if (out == NULL || cap == 0 || kautotune_cache_disabled()) {
     return 0;
   }
-  char const *custom = getenv("THVM_AUTOTUNE_CACHE_DIR");
+  char const *custom = getenv("AUTOTUNE_CACHE_DIR");
   if (custom != NULL && custom[0] != '\0') {
     int n = snprintf(out, cap, "%s", custom);
     return n > 0 && (size_t)n < cap;
@@ -835,8 +835,14 @@ fn int kernel_autotune(u32 kid) {
 // memoizes; the propose call returns quickly when the kernel
 // shape doesn't trigger any rules.
 static int autotune_env_enabled(void) {
-  char const *e = getenv("THVM_AUTOTUNE");
-  return e != NULL && e[0] == '1';
+  char const *e = getenv("AUTOTUNE");
+  if (e != NULL && e[0] == '1') {
+    return 1;
+  }
+  // tinygrad folds the autotune on/off switch into BEAM: any positive
+  // BEAM width runs beam search.
+  char const *beam = getenv("BEAM");
+  return beam != NULL && atoi(beam) > 0;
 }
 
 fn int kernel_should_autotune(KernelEntry const *ke) {

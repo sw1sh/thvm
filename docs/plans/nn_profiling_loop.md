@@ -1,7 +1,7 @@
 # NN Profiling Iteration Loop
 
 Goal: profile the NN examples (mlp-mnist, lenet-mnist) under
-THVM_BACKEND=metal + THVM_TILE=1 and improve compile-time / runtime
+DEV=metal + THVM_TILE=1 and improve compile-time / runtime
 behaviour using the autotune-via-UOP_OPT path now wired in
 [src/schedule/kernel_lift.c](../../src/schedule/kernel_lift.c).
 
@@ -15,7 +15,7 @@ every minute.
 - `bench/<example>/<phase>.txt` holds the raw stdout for
   reproducibility; commit those too.
 - Use `wolframscript -f wl/Examples/...` from the repo root.
-- `THVM_BACKEND=metal THVM_TILE=1 THVM_KGC=0` is the default env;
+- `DEV=metal THVM_TILE=1 THVM_KGC=0` is the default env;
   document deviations.
 - Each commit has a tight scope: one item per commit ideal.
 
@@ -31,7 +31,7 @@ every minute.
 
 ### MLP-MNIST baseline
 - [x] (2026-05-06) Run `wl/Examples/mlp-mnist/forward.wls` under
-  `THVM_BACKEND=metal THVM_TILE=1`; capture wall time, kernel count,
+  `DEV=metal THVM_TILE=1`; capture wall time, kernel count,
   dispatch-kind histogram. Save to `bench/mlp-mnist/forward.txt`.
   **warmup 10.5 ms, steady 8.0 ms (avg/5), 30 kernels, dispatch:
   metal-tile=24, metal-gemm=6.** (forward.wls itself fails the
@@ -303,7 +303,7 @@ every minute.
   kernel with `n_axes=2 (LOOP+REDUCE)` and `n_buf=1`, the test-seam
   would otherwise treat both axes as contributing to origin 0,
   producing a broken address.  Smoke-test: `TUOpReduce[Range[12], 0,
-  "SUM"]` under `THVM_BACKEND=metal THVM_TILE=1` produces the
+  "SUM"]` under `DEV=metal THVM_TILE=1` produces the
   correct `78.0` result via metal-tile dispatch with a clean
   rendered MSL (single accumulator, single reduce-axis for-loop).
   No code change needed; the guard already does what Phase 1 wants.

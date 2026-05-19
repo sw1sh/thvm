@@ -14,7 +14,7 @@
 
    Run from the repo root:
        wolframscript -f wl/Examples/lenet-mnist/grad-check.wls
-       THVM_BACKEND=metal wolframscript -f wl/Examples/lenet-mnist/grad-check.wls
+       DEV=metal wolframscript -f wl/Examples/lenet-mnist/grad-check.wls
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];

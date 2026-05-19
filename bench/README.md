@@ -26,7 +26,7 @@ The thvm equivalent is the canary at
 [wl/Examples/beautiful-mnist/bench-train.wls]:
 
 ```bash
-BS=512 WARMUP_STEPS=5 N_STEPS=20 THVM_BACKEND=metal THVM_TILE=1 \
+BS=512 WARMUP_STEPS=5 N_STEPS=20 DEV=metal THVM_TILE=1 \
   wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 ```
 

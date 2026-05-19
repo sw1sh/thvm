@@ -64,7 +64,7 @@ make wl/THVMLink/LibraryResources/MacOSX-ARM64/THVMLink.dylib
 
 # Canary
 BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6 \
-  THVM_BACKEND=metal THVM_TILE=1 \
+  DEV=metal THVM_TILE=1 \
   wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 ```
 
@@ -118,7 +118,7 @@ after.
 | Peak retained memory | `peak_retained=N` from same line | not exposed natively (would need backend probe) |
 | Buffer count | `buffers=A/B/C` (total/live/peak from same line) | not exposed natively |
 | First-step compile + JIT trace time | `warmup step 1: wall=%.1fms` | step 0 wall (when `JIT=2`) |
-| Autotune / BEAM time | included in warmup wall when `THVM_AUTOTUNE=1` | env-gated (`BEAM=2`); reported separately by `Timing` |
+| Autotune / BEAM time | included in warmup wall when `AUTOTUNE=1` | env-gated (`BEAM=2`); reported separately by `Timing` |
 | Per-rule fusion stats | `realize_rewrite_summary` (when `DUMP_REWRITE=1`) — `<rule_name> hits=N` | not exposed; requires `DEBUG_RANGEIFY=1` and parsing |
 | Bufferize candidates not removed | `DUMP_BUFFERIZE_CANDIDATES=1` lists top-N by removal score | not exposed (rangeify decisions are internal) |
 | Schedule key | `bufferize_schedule_key()` stable hash (when `DUMP_BUFFERIZE=1`) | not exposed |

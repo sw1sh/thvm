@@ -23,7 +23,7 @@
      "NumSteps" -- Integer count of steps to execute.
 
    The InitFn is responsible for backend selection (TInit picks up
-   THVM_BACKEND); the bench reads the active backend from
+   DEV); the bench reads the active backend from
    CURRENT_BACKEND for the report.
 
    TBenchReport[bench]      -- formats the Association as a Column

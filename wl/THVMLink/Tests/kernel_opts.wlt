@@ -317,12 +317,12 @@ VerificationTest[
        running benchmark dispatches. *)
     Module[{oldCache, oldDisable, oldDir, oldBackend, oldTile, oldRuns,
             dir, restore, files, before, after},
-        oldCache   = Environment["THVM_AUTOTUNE_CACHE"];
-        oldDisable = Environment["THVM_AUTOTUNE_DISABLE_CACHE"];
-        oldDir     = Environment["THVM_AUTOTUNE_CACHE_DIR"];
-        oldBackend = Environment["THVM_BACKEND"];
+        oldCache   = Environment["AUTOTUNE_CACHE"];
+        oldDisable = Environment["AUTOTUNE_DISABLE"];
+        oldDir     = Environment["AUTOTUNE_CACHE_DIR"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
-        oldRuns    = Environment["THVM_AUTOTUNE_RUNS"];
+        oldRuns    = Environment["BEAM_RUNS"];
         dir = CreateDirectory @ FileNameJoin[{
             $TemporaryDirectory,
             "thvm-autotune-cache-" <> ToString[$ProcessID] <> "-" <>
@@ -330,31 +330,31 @@ VerificationTest[
         }];
         restore[] := (
             If[StringQ[oldCache],
-                SetEnvironment["THVM_AUTOTUNE_CACHE" -> oldCache],
-                SetEnvironment["THVM_AUTOTUNE_CACHE" -> ""]];
+                SetEnvironment["AUTOTUNE_CACHE" -> oldCache],
+                SetEnvironment["AUTOTUNE_CACHE" -> ""]];
             If[StringQ[oldDisable],
-                SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> oldDisable],
-                SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> ""]];
+                SetEnvironment["AUTOTUNE_DISABLE" -> oldDisable],
+                SetEnvironment["AUTOTUNE_DISABLE" -> ""]];
             If[StringQ[oldDir],
-                SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> oldDir],
-                SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> ""]];
+                SetEnvironment["AUTOTUNE_CACHE_DIR" -> oldDir],
+                SetEnvironment["AUTOTUNE_CACHE_DIR" -> ""]];
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]];
             If[StringQ[oldRuns],
-                SetEnvironment["THVM_AUTOTUNE_RUNS" -> oldRuns],
-                SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""]]
+                SetEnvironment["BEAM_RUNS" -> oldRuns],
+                SetEnvironment["BEAM_RUNS" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_AUTOTUNE_CACHE" -> "1"];
-            SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> ""];
-            SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> dir];
-            SetEnvironment["THVM_BACKEND" -> ""];
+            SetEnvironment["AUTOTUNE_CACHE" -> "1"];
+            SetEnvironment["AUTOTUNE_DISABLE" -> ""];
+            SetEnvironment["AUTOTUNE_CACHE_DIR" -> dir];
+            SetEnvironment["DEV" -> ""];
             SetEnvironment["THVM_TILE" -> ""];
-            SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""],
+            SetEnvironment["BEAM_RUNS" -> ""],
 
             TInit[];
             xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
@@ -416,18 +416,18 @@ VerificationTest[
        LOCAL/GLOBAL split is present, so proposer coverage should not
        be restricted to rank-1 outputs. *)
     Module[{oldBackend, oldTile, restore, kid, props},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"],
             TInit[];
             a = TTensorCreate @ NumericArray[ConstantArray[1., {4, 4}], "Real32"];
@@ -448,18 +448,18 @@ VerificationTest[
        divisible middle axes.  The proposer should skip those and
        offer LOCAL candidates on a later splittable loop axis. *)
     Module[{oldBackend, oldTile, restore, kid, props},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"],
             TInit[];
             a = TTensorCreate @ NumericArray[
@@ -484,18 +484,18 @@ VerificationTest[
        shape mirrors the beautiful_mnist elementwise kernels that carry
        one bound threadgroup axis plus extra serial tensor axes. *)
     Module[{oldBackend, oldTile, restore, a, b, out, kid, opts, kind, data},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"],
             TInit[];
             a = TTensorCreate @ NumericArray[ConstantArray[1., {2, 4, 3}], "Real32"];
@@ -522,13 +522,13 @@ VerificationTest[
        the per-op Metal interpreter even though each split subtree is
        tile-renderable. *)
     Module[{oldBackend, oldTile, oldCap, restore, xs, out, rows, kinds},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         oldCap     = Environment["THVM_METAL_FUSION_MAX_INPUTS"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]];
@@ -537,7 +537,7 @@ VerificationTest[
                 SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"];
             SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> "30"],
             TInit[];
@@ -565,13 +565,13 @@ VerificationTest[
        only ADD/MUL children leaves a >30-input tile graph that falls
        through to metal-op. *)
     Module[{oldBackend, oldTile, oldCap, restore, xs, ys, out, rows, kinds},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         oldCap     = Environment["THVM_METAL_FUSION_MAX_INPUTS"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]];
@@ -580,7 +580,7 @@ VerificationTest[
                 SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"];
             SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> "30"],
             TInit[];
@@ -609,13 +609,13 @@ VerificationTest[
        inline the EXPAND address expression. *)
     Module[{oldBackend, oldTile, oldInline, restore, base, shared,
             out, data, hasExpandKernel},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         oldInline  = Environment["THVM_INLINE_MULTI_CONSUMER_EXPAND"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]];
@@ -624,7 +624,7 @@ VerificationTest[
                 SetEnvironment["THVM_INLINE_MULTI_CONSUMER_EXPAND" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"];
             SetEnvironment["THVM_INLINE_MULTI_CONSUMER_EXPAND" -> ""],
             TInit[];
@@ -699,7 +699,7 @@ VerificationTest[
     TestID -> "kernel-opts/autotune-all-sweeps-every-kid"
 ]
 
-(* === fire-time autotune trigger: env opt-in via THVM_AUTOTUNE.
+(* === fire-time autotune trigger: env opt-in via AUTOTUNE.
        Default off so existing users don't pay surprise bench costs;
        on, every new program shape gets autotuned at first fire. *)
 
@@ -723,24 +723,24 @@ VerificationTest[
        replay sequence.  Only the user's actual reduce dispatch
        belongs in the capture. *)
     Module[{oldAuto, oldRuns, oldBackend, restore, f, opCount},
-        oldAuto    = Environment["THVM_AUTOTUNE"];
-        oldRuns    = Environment["THVM_AUTOTUNE_RUNS"];
-        oldBackend = Environment["THVM_BACKEND"];
+        oldAuto    = Environment["AUTOTUNE"];
+        oldRuns    = Environment["BEAM_RUNS"];
+        oldBackend = Environment["DEV"];
         restore[] := (
             If[StringQ[oldAuto],
-                SetEnvironment["THVM_AUTOTUNE" -> oldAuto],
-                SetEnvironment["THVM_AUTOTUNE" -> ""]];
+                SetEnvironment["AUTOTUNE" -> oldAuto],
+                SetEnvironment["AUTOTUNE" -> ""]];
             If[StringQ[oldRuns],
-                SetEnvironment["THVM_AUTOTUNE_RUNS" -> oldRuns],
-                SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""]];
+                SetEnvironment["BEAM_RUNS" -> oldRuns],
+                SetEnvironment["BEAM_RUNS" -> ""]];
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]]
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_AUTOTUNE" -> "1"];
-            SetEnvironment["THVM_AUTOTUNE_RUNS" -> "1"];
-            SetEnvironment["THVM_BACKEND" -> ""],
+            SetEnvironment["AUTOTUNE" -> "1"];
+            SetEnvironment["BEAM_RUNS" -> "1"];
+            SetEnvironment["DEV" -> ""],
             TInit[];
             xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
             f = TJit[Function[{}, TRealize @ TUOpReduce[xT, 0, "SUM"]]];
@@ -804,18 +804,18 @@ VerificationTest[
        mutate the destination buffers correctly. *)
     Module[{oldBackend, oldTile, restore, w, x, y, f, summary, counters,
             wData, yData},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"],
             TInit[];
             w = TTensorCreate @ NumericArray[N @ Range[4], "Real32"];
@@ -857,18 +857,18 @@ VerificationTest[
        destination. *)
     Module[{oldBackend, oldTile, restore, x, y, one, w, z, f, ops,
             dispatches, summary, counters, wData, zData},
-        oldBackend = Environment["THVM_BACKEND"];
+        oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
         restore[] := (
             If[StringQ[oldBackend],
-                SetEnvironment["THVM_BACKEND" -> oldBackend],
-                SetEnvironment["THVM_BACKEND" -> ""]];
+                SetEnvironment["DEV" -> oldBackend],
+                SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
                 SetEnvironment["THVM_TILE" -> ""]]
         );
         Internal`WithLocalSettings[
-            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["DEV" -> "metal"];
             SetEnvironment["THVM_TILE" -> "1"],
             TInit[];
             x   = TTensorCreate @ NumericArray[N @ Range[4], "Real32"];

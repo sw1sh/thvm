@@ -244,7 +244,7 @@ def run_thvm(h, c, op, shape):
 # ====================================================================
 # thvm-CUDA autotune sweep -- consume propose.c's CUDA candidates
 # ====================================================================
-# propose.c's CUDA block (gated on THVM_BACKEND=cuda) offers KOP_LOCAL
+# propose.c's CUDA block (gated on DEV=cuda) offers KOP_LOCAL
 # / KOP_UPCAST candidates.  This sweep applies each, renders + compiles
 # the variant, dispatches it with the *DAG-derived* launch geometry
 # (cuda_dag_dispatch_shape via Thvm.cuda_dag_dispatch_shape -- the flat
@@ -270,7 +270,7 @@ def _build_root(h, op, shape):
 def _propose_cuda(h, op, shape, out_buf_t, in_buf_ts, root):
     """Allocate a synthetic KernelEntry, populate its cached lift, and
     ask propose.c for the CUDA KOpt candidates.  Returns the list of
-    (op, axis, arg) triples; empty if THVM_BACKEND != cuda.
+    (op, axis, arg) triples; empty if DEV != cuda.
     """
     kid = h.kernel_alloc()
     h.kernel_set_cached_lift(kid, root, out_buf_t, in_buf_ts)
@@ -568,9 +568,9 @@ def main():
         return 0
 
     # propose.c's CUDA KOpt block (src/codegen/propose.c) is gated on
-    # THVM_BACKEND=cuda; set it in-process so the autotune sweep's
+    # DEV=cuda; set it in-process so the autotune sweep's
     # kernel_opts_propose call actually yields CUDA candidates.
-    os.environ["THVM_BACKEND"] = "cuda"
+    os.environ["DEV"] = "cuda"
 
     h = Thvm()
     c = Cuda()

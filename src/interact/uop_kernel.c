@@ -93,11 +93,11 @@ fn void kernel_fire_by_id(u32 kid) {
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
 
   // First-fire opt decisions.  Two layers:
-  //   - hand-coded heuristic (THVM_HAND_CODED_OPTS, default OFF in v1):
+  //   - hand-coded heuristic (HAND_CODED_OPTS, default ON; NOOPT=1 off):
   //     apply tinygrad-style UPCAST/LOCAL/GROUP/UNROLL/TC by default,
   //     no benchmarking.  Runs first so BEAM (if enabled) can search
   //     beyond the heuristic baseline.
-  //   - BEAM autotune (THVM_AUTOTUNE=1): benchmark proposer candidates.
+  //   - BEAM autotune (AUTOTUNE=1 or BEAM>0): benchmark proposer candidates.
   // Both run after producers are populated so a direct dispatch sees
   // ready input buffers; neither perturbs the fire-generation memo or
   // TJit capture.

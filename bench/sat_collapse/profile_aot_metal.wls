@@ -16,7 +16,7 @@
    stuck shape that CNF_DIVERGENCE.md describes; the per-thread wnf
    state machine inherits the limitation.
 
-   Run: THVM_BACKEND=metal wolframscript -f bench/sat_collapse/profile_aot_metal.wls *)
+   Run: DEV=metal wolframscript -f bench/sat_collapse/profile_aot_metal.wls *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];

@@ -200,7 +200,7 @@ int main(void) {
 
   // === vtable dispatch: CUDA_BACKEND.dispatch_kernel end to end ======
   // Stage 3: a KernelEntry routed through cuda_dispatch_kernel (the
-  // backend-vtable entry THVM_BACKEND=cuda selects) renders the lifted
+  // backend-vtable entry DEV=cuda selects) renders the lifted
   // DAG, nvrtc-compiles it, packs the cuLaunchKernel args and launches.
   // Build the matmul DAG, populate a synthetic KernelEntry's
   // cached_lift exactly as the schedule's materialize lift would, and

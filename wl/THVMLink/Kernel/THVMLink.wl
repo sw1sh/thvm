@@ -116,7 +116,7 @@ $UopScopeGlobal::usage = $UopScopeLocal::usage = $UopScopeReg::usage =
 
 (* === tensors === *)
 TTensor::usage         = "TTensor[shape, dtype] allocates a tensor and returns a TTerm wrapping a TAG_TEN handle.  TTensor[shape, data_List] also writes initial values.  dtype defaults to \"f32\".";
-TTensorCreate::usage   = "TTensorCreate[data] / TTensorCreate[data, dtype] builds a TTerm tensor whose shape and dtype are inferred from `data` (or coerced to the supplied dtype = \"f32\" / \"i32\").  On the active backend the buffer is shared with the input NumericArray (zero copy on CPU).  PackedArrays and nested lists are first lifted to a NumericArray (one copy) then shared.  Backend selection is global (TBackend / THVM_BACKEND env var); per-tensor backend is a Phase 14+ extension.";
+TTensorCreate::usage   = "TTensorCreate[data] / TTensorCreate[data, dtype] builds a TTerm tensor whose shape and dtype are inferred from `data` (or coerced to the supplied dtype = \"f32\" / \"i32\").  On the active backend the buffer is shared with the input NumericArray (zero copy on CPU).  PackedArrays and nested lists are first lifted to a NumericArray (one copy) then shared.  Backend selection is global (TBackend / DEV env var); per-tensor backend is a Phase 14+ extension.";
 TTensorShape::usage    = "TTensorShape[t] returns the tensor's shape as a list of integers.";
 TTermShape::usage      = "TTermShape[t] runs the runtime's `term_shape_in` shape inference: returns a list of dim extents for a TEN, a shape-inferable UOP, or a TVAR with a registered shape annotation (TLamShape).  Returns {} when the shape cannot be determined.";
 TTensorDType::usage    = "TTensorDType[t] returns the dtype as a string (\"f32\" / \"i32\").";

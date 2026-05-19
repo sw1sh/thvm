@@ -22,7 +22,7 @@ CPU (default backend):
 
 Metal (Apple Silicon):
 
-    THVM_BACKEND=metal wolframscript -f wl/Examples/mlp-mnist/forward.wls
+    DEV=metal wolframscript -f wl/Examples/mlp-mnist/forward.wls
 
 The Metal path looks for `build/default.metallib` relative to the
 current working directory, so run from the repo root.

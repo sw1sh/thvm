@@ -210,7 +210,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // === backend/metal/ ===
 // On non-Apple builds (and Apple builds that DON'T compile the .m
 // glue separately), include the C stub so METAL_BACKEND still
-// resolves -- THVM_BACKEND=metal selects it but every compute call
+// resolves -- DEV=metal selects it but every compute call
 // returns an error.  Apple builds that link build/backend_metal.o
 // (the dual-TU Metal path) define THVM_HAS_METAL to skip this
 // include and use the .m-defined symbols instead.
@@ -504,23 +504,35 @@ static void init_ctx_arrays(TContext *ctx) {
     memset(ctx->book_ref_visited, 0, sizeof(ctx->book_ref_visited));
 }
 
+// Case-insensitive match of a DEV string against a backend name
+// ("cpu"/"metal"/"cuda").  A trailing ":renderer" suffix (tinygrad's
+// DEV=CUDA:rdna form) is ignored.  Returns 0 for a NULL `want`.
+int thvm_dev_name_is(char const *want, char const *name) {
+  if (want == NULL) return 0;
+  for (; *want != '\0' && *want != ':' && *name != '\0'; want++, name++) {
+    char c = (*want >= 'A' && *want <= 'Z') ? (char)(*want + 32) : *want;
+    if (c != *name) return 0;
+  }
+  return (*want == '\0' || *want == ':') && *name == '\0';
+}
+
 static void install_ctx_backends(TContext *ctx, const char *want) {
     for (u32 i = 0; i < THVM_MAX_BACKENDS; i++) ctx->backends[i] = NULL;
     ctx->backends[THVM_DEV_CPU] = &CPU_BACKEND;
     ctx->n_backends             = 1;
     ctx->default_device         = THVM_DEV_CPU;
-    if (want && strcmp(want, "metal") == 0) {
+    if (thvm_dev_name_is(want, "metal")) {
         ctx->backends[THVM_DEV_METAL] = &METAL_BACKEND;
         ctx->n_backends               = 2;
         ctx->default_device           = THVM_DEV_METAL;
     }
 #ifdef THVM_HAS_CUDA
-    // THVM_BACKEND=cuda registers the CUDA backend in the vtable
+    // DEV=cuda registers the CUDA backend in the vtable
     // slot and makes it the default device.  cuda_dispatch_kernel
     // (Stage 3) routes a scheduled KernelEntry through the
     // structural-lift CUDA path, so a kernel built + scheduled with
-    // THVM_BACKEND=cuda runs end to end on the GPU.
-    if (want && strcmp(want, "cuda") == 0) {
+    // DEV=cuda runs end to end on the GPU.
+    if (thvm_dev_name_is(want, "cuda")) {
         ctx->backends[THVM_DEV_CUDA] = &CUDA_BACKEND;
         ctx->n_backends              = THVM_DEV_CUDA + 1;
         ctx->default_device          = THVM_DEV_CUDA;
@@ -562,11 +574,11 @@ void thvm_init(void) {
   // within the active from-space; gc_collect evacuates live cells
   // into to-space and swaps when triggered from thvm_realize.
   gc_init(HEAP_CAP / 2);
-  // Backend selection: THVM_BACKEND=metal picks Metal as the default
+  // Backend selection: DEV=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still
   // stored on TenDesc.backend, so tensors created in a future session
   // could in principle live on a different backend than the default.
-  install_ctx_backends(CURRENT_CTX, getenv("THVM_BACKEND"));
+  install_ctx_backends(CURRENT_CTX, getenv("DEV"));
   DEFAULT_BACKEND->init();
   // Register core PRI primitives (SEQ + LOG) -- idempotent overwrite,
   // safe across re-init.  ATP registers its own block separately on

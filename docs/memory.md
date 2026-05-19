@@ -355,7 +355,7 @@ Use `DUMP_FUSION_REWRITE_CANDIDATES=1` to print accepted and rejected
 fusion candidates during focused classifier work.
 
 Metal direct MSL kernels can bind at most 30 input buffers without
-argument buffers.  With `THVM_BACKEND=metal THVM_TILE=1`,
+argument buffers.  With `DEV=metal THVM_TILE=1`,
 `realize_classify` therefore splits over-wide ADD/MUL expression
 trees before materialization.  The default cap is:
 
@@ -409,7 +409,7 @@ small until retained memory is proven bounded:
 
 ```bash
 BS=32 WARMUP_STEPS=1 N_STEPS=2 \
-THVM_BACKEND=metal THVM_TILE=1 \
+DEV=metal THVM_TILE=1 \
 THVM_METAL_DEFER_BYTES=134217728 \
 THVM_METAL_FREELIST_BYTES=1073741824 \
 SHOW_MEMORY_PROFILE=1 SHOW_PROGRAM_PROFILE=1 SHOW_FUSION_GAPS=1 \
@@ -422,7 +422,7 @@ comma-separated kid list:
 ```bash
 POST_AUTOTUNE_KIDS=1 \
 BS=32 WARMUP_STEPS=1 N_STEPS=1 \
-THVM_BACKEND=metal THVM_TILE=1 \
+DEV=metal THVM_TILE=1 \
 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 ```
 

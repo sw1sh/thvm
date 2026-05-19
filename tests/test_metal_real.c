@@ -32,7 +32,7 @@ extern void thvm_metal_buf_clear_preserved(u32 wm);
 extern void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
 
 static int metal_available(void) {
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   thvm_init();
   int ok = 0;
   if (CURRENT_BACKEND == &METAL_BACKEND) {
@@ -52,13 +52,13 @@ int main(void) {
   }
 
   TEST_BEGIN("metal-real/dual-tu-build-links");
-  unsetenv("THVM_BACKEND");
+  unsetenv("DEV");
   thvm_init();
   CHECK(CURRENT_BACKEND == &CPU_BACKEND);
   thvm_free();
 
-  TEST_BEGIN("metal-real/THVM_BACKEND-metal-selects-m-backend");
-  setenv("THVM_BACKEND", "metal", 1);
+  TEST_BEGIN("metal-real/DEV-metal-selects-m-backend");
+  setenv("DEV", "metal", 1);
   thvm_init();
   CHECK(CURRENT_BACKEND == &METAL_BACKEND);
   CHECK_EQ(CURRENT_BACKEND->id, 2);
@@ -71,7 +71,7 @@ int main(void) {
   TEST_BEGIN("metal-real/init-shutdown-cycle-survives");
   // metal_init opens MTLDevice + MTLCommandQueue; metal_shutdown
   // nils the references.  Verify a second cycle re-opens cleanly.
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   thvm_init();
   thvm_free();
   thvm_init();
@@ -79,7 +79,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/buf-write-read-roundtrip");
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   thvm_init();
   // Allocate a 16-element f32 buffer on Metal, write a known
   // sequence via shared-storage memcpy, read it back, compare.
@@ -94,7 +94,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/buf-copy-roundtrip");
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   thvm_init();
   float copy_src[8], copy_dst[8] = {0};
   for (int i = 0; i < 8; i++) copy_src[i] = (float)(i + 1);
@@ -111,7 +111,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/buf-refcount-shared-storage");
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   thvm_init();
   u32 bid2 = CURRENT_BACKEND->buf_alloc(64);
   CHECK(bid2 != 0);
@@ -132,7 +132,7 @@ int main(void) {
   TEST_BEGIN("metal-real/const-kernel-parity-with-cpu");
   // Run UOP_CONST(3.14f) through the CPU backend, capture output.
   union { f32 f; u32 u; } cu; cu.f = 3.14f;
-  unsetenv("THVM_BACKEND");
+  unsetenv("DEV");
   thvm_init();
   Term cpu_kern = thvm_materialize(uop_const(DT_FP32, cu.u));
   Term cpu_done = wnf(cpu_kern);
@@ -143,7 +143,7 @@ int main(void) {
   thvm_free();
 
   // Same graph under Metal; output should match bit-for-bit.
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   thvm_init();
   Term gpu_kern = thvm_materialize(uop_const(DT_FP32, cu.u));
   Term gpu_done = wnf(gpu_kern);
@@ -170,7 +170,7 @@ int main(void) {
              (op_idx == 2) ? UOP_CMPLT : UOP_CMPEQ;
     f32 cpu_buf[4], gpu_buf[4];
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     {
       u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
       u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
@@ -184,7 +184,7 @@ int main(void) {
     }
     thvm_free();
 
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     {
       u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
       u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
@@ -232,7 +232,7 @@ int main(void) {
     }
 
     // CPU backend through the schedule (TMatMul-equivalent).
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     cpu_blas_gemm_dispatch_counters_reset();
     {
       u32 ta = tensor_alloc(CURRENT_BACKEND, sa, DT_FP32);
@@ -270,7 +270,7 @@ int main(void) {
     // encoder) must produce values that match the CPU reference
     // bit-for-bit modulo fma rounding.  This catches simdgroup
     // template stride bugs that compile-only fixtures can miss.
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     {
       u32 ta = tensor_alloc(CURRENT_BACKEND, sa, DT_FP32);
       u32 tb = tensor_alloc(CURRENT_BACKEND, sb, DT_FP32);
@@ -315,7 +315,7 @@ int main(void) {
       dv_ref += dv_a[i] * dv_b[i];
     }
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     cpu_blas_gemm_dispatch_counters_reset();
     f32 dot_out = 0.0f;
     {
@@ -357,7 +357,7 @@ int main(void) {
       yref[m] = acc;
     }
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     cpu_blas_gemm_dispatch_counters_reset();
     f32 yout[GM] = {0};
     {
@@ -397,7 +397,7 @@ int main(void) {
     u32 op = unary_ops[i];
     f32 cpu_buf[4], gpu_buf[4];
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     {
       u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_u, sizeof(src_u));
@@ -408,7 +408,7 @@ int main(void) {
     }
     thvm_free();
 
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     {
       u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_u, sizeof(src_u));
@@ -445,7 +445,7 @@ int main(void) {
     u32 kind = reduce_kinds[i];
     f32 cpu_buf[4], gpu_buf[4];
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     {
       u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_r, sizeof(src_r));
@@ -456,7 +456,7 @@ int main(void) {
     }
     thvm_free();
 
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     {
       u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_r, sizeof(src_r));
@@ -502,7 +502,7 @@ int main(void) {
     f32 uc_cpu[4 * 64] = {0};
     f32 uc_gpu[4 * 64] = {0};
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     {
       u32 tt = tensor_alloc(CURRENT_BACKEND, suc, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tt].buf_id, uc_src, sizeof(uc_src));
@@ -513,7 +513,7 @@ int main(void) {
     }
     thvm_free();
 
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     {
       u32 tt = tensor_alloc(CURRENT_BACKEND, suc, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tt].buf_id, uc_src, sizeof(uc_src));
@@ -563,7 +563,7 @@ int main(void) {
     f32 *dt_cpu = calloc(DT_OUT, sizeof(f32));
     f32 *dt_gpu = calloc(DT_OUT, sizeof(f32));
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     {
       u32 tt = tensor_alloc(CURRENT_BACKEND, sdt, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tt].buf_id, dt_src,
@@ -575,7 +575,7 @@ int main(void) {
     }
     thvm_free();
 
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     {
       u32 tt = tensor_alloc(CURRENT_BACKEND, sdt, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tt].buf_id, dt_src,
@@ -636,11 +636,11 @@ int main(void) {
     // Build the conv DAG and materialize it on a given backend.
     #define CONV_BUILD_AND_RUN(out_buf)                                             do {                                                                            Shape sx = {0}; sx.ndim = 4; sx.dims[0] = CB; sx.dims[1] = CCIN;              sx.dims[2] = CH; sx.dims[3] = CW;                                             Shape sw = {0}; sw.ndim = 4; sw.dims[0] = CCOUT; sw.dims[1] = CCIN;           sw.dims[2] = CKH; sw.dims[3] = CKW;                                           u32 txid = tensor_alloc(CURRENT_BACKEND, sx, DT_FP32);                        u32 twid = tensor_alloc(CURRENT_BACKEND, sw, DT_FP32);                        CURRENT_BACKEND->buf_write(TENS[txid].buf_id, cx,                                                        (size_t)CXN * sizeof(f32));                        CURRENT_BACKEND->buf_write(TENS[twid].buf_id, cw,                                                        (size_t)CWN * sizeof(f32));                        Term xin = term_new(0, TAG_TEN, DT_FP32, txid);                               Term win = term_new(0, TAG_TEN, DT_FP32, twid);                               u32 rh = (CKH * (CH + 1) + CH - 1) / CH;                                      u32 rw = (CKW * (CW + 1) + CW - 1) / CW;                                      u32 d6a[6] = { CB, CCIN, 1, CH, 1, CW };                                      u32 d6b[6] = { CB, CCIN, rh, CH, rw, CW };                                    u32 d4a[4] = { CB, CCIN, rh*CH, rw*CW };                                      Term x1 = uop_reshape(uop_expand(uop_reshape(xin, 6, d6a), 6, d6b),                                 4, d4a);                                                u32 be4[8] = { 0,CB, 0,CCIN, 0,CKH*(CH+1), 0,CKW*(CW+1) };                    Term x2 = uop_shrink(x1, 4, be4);                                             u32 d6c[6] = { CB, CCIN, CKH, CH+1, CKW, CW+1 };                              Term x3 = uop_reshape(x2, 6, d6c);                                            u32 be6[12] = { 0,CB, 0,CCIN, 0,CKH, 0,CHO, 0,CKW, 0,CWO };                   Term x4 = uop_shrink(x3, 6, be6);                                             u32 prm[6] = { 1, 2, 4, 0, 3, 5 }; /* {cIn,kh,kw,B,hOut,wOut} */              Term xc6 = uop_permute(x4, 6, prm);                                           u32 d4x[4] = { CK, CB, CHO, CWO };                                            Term xc4 = uop_reshape(xc6, 4, d4x);                                          u32 d2w[2] = { CCOUT, CK };                                                   Term wf  = uop_reshape(win, 2, d2w);                                          u32 d5w[5] = { CCOUT, CK, 1, 1, 1 };                                          u32 d5e[5] = { CCOUT, CK, CB, CHO, CWO };                                     Term wexp = uop_expand(uop_reshape(wf, 5, d5w), 5, d5e);                      u32 d5x[5] = { 1, CK, CB, CHO, CWO };                                         Term xexp = uop_expand(uop_reshape(xc4, 5, d5x), 5, d5e);                     Term out4 = uop_reduce(REDUCE_SUM, 1, uop_binary(UOP_MUL, wexp, xexp));                   Term done = wnf(thvm_materialize(out4));                                      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,                                             (out_buf), (size_t)CON * sizeof(f32));            } while (0)
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     CONV_BUILD_AND_RUN(ccpu);
     thvm_free();
 
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     CONV_BUILD_AND_RUN(cgpu);
     thvm_free();
     #undef CONV_BUILD_AND_RUN
@@ -688,11 +688,11 @@ int main(void) {
 
     #define DUAL_CONV_BUILD_AND_RUN(out_buf)                                        do {                                                                            Shape sx_ = {0}; sx_.ndim = 4; sx_.dims[0] = DB; sx_.dims[1] = DCIN;           sx_.dims[2] = DH; sx_.dims[3] = DW;                                           Shape sw_ = {0}; sw_.ndim = 4; sw_.dims[0] = DCOUT; sw_.dims[1] = DCIN;        sw_.dims[2] = DKH; sw_.dims[3] = DKW;                                         u32 txid = tensor_alloc(CURRENT_BACKEND, sx_, DT_FP32);                       u32 twid = tensor_alloc(CURRENT_BACKEND, sw_, DT_FP32);                       CURRENT_BACKEND->buf_write(TENS[txid].buf_id, dx,                                                        (size_t)DXN * sizeof(f32));                        CURRENT_BACKEND->buf_write(TENS[twid].buf_id, dw,                                                        (size_t)DWN * sizeof(f32));                        Term xin = term_new(0, TAG_TEN, DT_FP32, txid);                               Term win = term_new(0, TAG_TEN, DT_FP32, twid);                               u32 rh = (DKH * (DH + 1) + DH - 1) / DH;                                      u32 rw = (DKW * (DW + 1) + DW - 1) / DW;                                      u32 d6a[6] = { DB, DCIN, 1, DH, 1, DW };                                      u32 d6b[6] = { DB, DCIN, rh, DH, rw, DW };                                    u32 d4a[4] = { DB, DCIN, rh*DH, rw*DW };                                      Term x1 = uop_reshape(uop_expand(uop_reshape(xin, 6, d6a), 6, d6b),                                 4, d4a);                                                u32 be4[8] = { 0,DB, 0,DCIN, 0,DKH*(DH+1), 0,DKW*(DW+1) };                    Term x2 = uop_shrink(x1, 4, be4);                                             u32 d6c[6] = { DB, DCIN, DKH, DH+1, DKW, DW+1 };                              Term x3 = uop_reshape(x2, 6, d6c);                                            u32 be6[12] = { 0,DB, 0,DCIN, 0,DKH, 0,DHO, 0,DKW, 0,DWO };                   Term x4 = uop_shrink(x3, 6, be6);                                             u32 prm[6] = { 1, 2, 4, 0, 3, 5 }; /* {cIn,kh,kw,B,hOut,wOut} */              Term xc6 = uop_permute(x4, 6, prm);                                           u32 d4x[4] = { DK, DB, DHO, DWO };                                            Term xc4 = uop_reshape(xc6, 4, d4x);                                          u32 d2w[2] = { DCOUT, DK };                                                   Term wf  = uop_reshape(win, 2, d2w);                                          u32 d5w[5] = { DCOUT, DK, 1, 1, 1 };                                          u32 d5e[5] = { DCOUT, DK, DB, DHO, DWO };                                     Term wexp = uop_expand(uop_reshape(wf, 5, d5w), 5, d5e);                      u32 d5x[5] = { 1, DK, DB, DHO, DWO };                                         Term xexp = uop_expand(uop_reshape(xc4, 5, d5x), 5, d5e);                     Term out4 = uop_reduce(REDUCE_SUM, 1, uop_binary(UOP_MUL, wexp, xexp));                   Term done = wnf(thvm_materialize(out4));                                      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,                                             (out_buf), (size_t)DON * sizeof(f32));            } while (0)
 
-    unsetenv("THVM_BACKEND"); thvm_init();
+    unsetenv("DEV"); thvm_init();
     DUAL_CONV_BUILD_AND_RUN(dcpu);
     thvm_free();
 
-    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    setenv("DEV", "metal", 1); thvm_init();
     DUAL_CONV_BUILD_AND_RUN(dgpu);
     thvm_free();
     #undef DUAL_CONV_BUILD_AND_RUN
@@ -711,7 +711,7 @@ int main(void) {
   f32 src_x[1] = {7.5f};
   f32 cpu_e[5], gpu_e[5];
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_x, sizeof(src_x));
@@ -723,7 +723,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_x, sizeof(src_x));
@@ -743,7 +743,7 @@ int main(void) {
   f32 src_m[6] = {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f};
   f32 cpu_m[6], gpu_m[6];
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_m, sizeof(src_m));
@@ -755,7 +755,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_m, sizeof(src_m));
@@ -779,7 +779,7 @@ int main(void) {
   f32 cpu_la[6], gpu_la[6];
   u32 to_la[2] = {2, 3};
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_la, sizeof(src_la));
@@ -790,7 +790,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_la, sizeof(src_la));
@@ -813,7 +813,7 @@ int main(void) {
   f32 cpu_ta[6], gpu_ta[6];
   u32 to_ta[2] = {2, 3};
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_ta, sizeof(src_ta));
@@ -824,7 +824,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_ta, sizeof(src_ta));
@@ -846,7 +846,7 @@ int main(void) {
   f32 src_fl[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   f32 cpu_fl[6], gpu_fl[6];
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_fl, sizeof(src_fl));
@@ -857,7 +857,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_fl, sizeof(src_fl));
@@ -882,7 +882,7 @@ int main(void) {
   f32 cpu_pad[16], gpu_pad[16];
   u32 be[4] = {1, 1, 1, 1};   // axis 0: (1,1); axis 1: (1,1)
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pad, sizeof(src_pad));
@@ -893,7 +893,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pad, sizeof(src_pad));
@@ -919,7 +919,7 @@ int main(void) {
   f32 cpu_sh[4], gpu_sh[4];
   u32 sh_be[4] = {1, 3, 1, 3};
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_sh, sizeof(src_sh));
@@ -930,7 +930,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_sh, sizeof(src_sh));
@@ -954,7 +954,7 @@ int main(void) {
   f32 cpu_pe[6], gpu_pe[6];
   u32 perm[2] = {1, 0};
 
-  unsetenv("THVM_BACKEND"); thvm_init();
+  unsetenv("DEV"); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pe, sizeof(src_pe));
@@ -965,7 +965,7 @@ int main(void) {
   }
   thvm_free();
 
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pe, sizeof(src_pe));
@@ -985,7 +985,7 @@ int main(void) {
   // === bm4c: Metal freelist primitives -- alloc, push, realloc
   // recycles same buf_id (mirrors test_cpu_free_list patterns). ===
   TEST_BEGIN("metal-real/freelist-push-then-alloc-recycles-slot");
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 a = METAL_BACKEND.buf_alloc(64);
     CHECK(a > 0);
@@ -1003,7 +1003,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/freelist-size-mismatch-misses");
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 a = METAL_BACKEND.buf_alloc(64);
     CHECK(a > 0);
@@ -1015,7 +1015,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/decref-then-alloc-recycles-slot");
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 a = METAL_BACKEND.buf_alloc(128);
     CHECK(a > 0);
@@ -1027,7 +1027,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/free-then-alloc-reuses-empty-table-slot");
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     u32 a = METAL_BACKEND.buf_alloc(64);
     CHECK(a > 0);
@@ -1038,7 +1038,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/buf-summary-tracks-live-retained-freelist");
-  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  setenv("DEV", "metal", 1); thvm_init();
   {
     CHECK_EQ(thvm_metal_live_bytes(), 0);
     CHECK_EQ(thvm_metal_retained_bytes(), 0);
@@ -1076,7 +1076,7 @@ int main(void) {
   thvm_free();
 
   TEST_BEGIN("metal-real/freelist-byte-cap-zero-drops-dead-storage");
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   setenv("THVM_METAL_FREELIST_BYTES", "0", 1);
   thvm_init();
   {
@@ -1092,7 +1092,7 @@ int main(void) {
   unsetenv("THVM_METAL_FREELIST_BYTES");
 
   TEST_BEGIN("metal-real/pool-rollback-preserves-marked-root");
-  setenv("THVM_BACKEND", "metal", 1);
+  setenv("DEV", "metal", 1);
   setenv("THVM_METAL_FREELIST_BYTES", "0", 1);
   thvm_init();
   {
@@ -1120,6 +1120,6 @@ int main(void) {
   thvm_free();
   unsetenv("THVM_METAL_FREELIST_BYTES");
 
-  unsetenv("THVM_BACKEND");
+  unsetenv("DEV");
   TEST_REPORT();
 }

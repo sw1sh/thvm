@@ -12,7 +12,7 @@
      CPU = pure CPU IC: build formula via TLam etc., TCollapse.
            Reference correctness for small V.
 
-   Run: THVM_BACKEND=metal wolframscript -f bench/sat_collapse/profile_breakdown.wls *)
+   Run: DEV=metal wolframscript -f bench/sat_collapse/profile_breakdown.wls *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];

@@ -41,7 +41,7 @@ sanity-checking what the WL evaluator returns.
 term-rendering example: it builds one f32 GEMM on Metal, prints
 baseline plus `TC` tile-size variant timings, applies
 `TKernelAutotune`, and checks the result against a host reference.
-Use `M`, `K`, `N`, and `THVM_AUTOTUNE_RUNS` to size the benchmark and
+Use `M`, `K`, `N`, and `BEAM_RUNS` to size the benchmark and
 stabilize noisier Metal measurements.
 
 ## Catalogue

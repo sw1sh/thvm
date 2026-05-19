@@ -66,7 +66,7 @@ make clean      # remove bin/
 
 Requires a C11 compiler (`clang` by default) and Wolfram 13+.
 On macOS the Metal backend is built automatically; pass
-`THVM_BACKEND=metal` at runtime to dispatch through it.
+`DEV=metal` at runtime to dispatch through it.
 
 The WL paclet auto-detects the newest `/Applications/Wolfram*.app`;
 override with `make WOLFRAM_APP="/Applications/Wolfram 14.0.app" wl`.
@@ -92,7 +92,7 @@ TTensorData @ TRealize @ g
 End-to-end LeNet training (Metal):
 
 ```bash
-THVM_BACKEND=metal wolframscript -f wl/Examples/lenet-mnist/verify.wls
+DEV=metal wolframscript -f wl/Examples/lenet-mnist/verify.wls
 ```
 
 ## Examples
