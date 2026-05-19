@@ -2881,7 +2881,17 @@ typedef enum {
 // a long completion run grows them as far as host memory allows.
 #define ATP_INIT_RULES 256
 #define ATP_INIT_CPS   4096
-#define ATP_MAX_TRACE  4096
+// The completion trace records one TAG_CTR entry per input axiom,
+// per oriented rule, and per critical pair that survives the
+// joinable / subsumption filters.  A hard single-axiom completion
+// (the Wolfram NAND axiom) generates tens of thousands of surviving
+// CPs; the proof-DAG export (thvm_wl_atp_run_proof) needs the WHOLE
+// trace so every rule cited in the extracted chain still has a live
+// r_trace[] lineage back to its birthing TRACE_CP.  Sized to hold a
+// DoubleNegation completion run with headroom; entries past the cap
+// are dropped (atp_trace_push returns ATP_TRACE_NONE) and their
+// rules lose their derivation history.
+#define ATP_MAX_TRACE  131072
 
 // Sentinel for "no rule excluded" in the connectedness check
 // (atp_cp_source_disjoint_connected): any value >= n_rules works,
@@ -2891,10 +2901,19 @@ typedef enum {
 // Reason labels for trace entries (used as the CTR label).
 // Each TraceEntry is a TAG_CTR with label = reason and children =
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Parent index sentinel
-// ATP_TRACE_NONE means "no parent" (e.g., for axioms).
-#define TRACE_AXIOM    1u   // initial equation pushed via add_equation
+// ATP_TRACE_NONE means "no parent" (e.g., for input axioms).
+#define TRACE_AXIOM    1u   // initial input equation pushed via add_equation
 #define TRACE_ORIENT   2u   // CP normalized + KBO-oriented into a rule
 #define TRACE_CP       3u   // critical pair generated from two rules
+// TRACE_SIMPLIFY: an older rule whose lhs simplified under newer
+// rules was dropped by thvm_atp_interreduce and re-queued as the
+// equation (reduced_lhs == old_rhs).  parent_a is the trace index
+// of the dropped rule; the reduction is a forward-rewrite chain on
+// the old lhs that a proof consumer replays under the final R.
+// Recording this (instead of a fresh TRACE_AXIOM) keeps the proof
+// DAG connected through interreduction -- mirrors Waldmeister PCL's
+// `Reduktion` events.
+#define TRACE_SIMPLIFY 4u
 #define ATP_TRACE_NONE 0xFFFFFFFFu
 
 // 8a: CTR labels for the IC-native CP-set graph (-DATP_CP_GRAPH).

@@ -2578,7 +2578,13 @@ static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
 // origin downstream.  The CP queue is growable, so this never
 // rejects for being full; returns 1 on success, 0 only on NULL
 // state or a sort-check rejection.
-fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
+// Shared body: sort-check, var-normalize, push a trace entry with
+// the given `reason` / `parent_a`, and enqueue the equation as a CP.
+// thvm_atp_add_equation enqueues an input axiom (TRACE_AXIOM, no
+// parent); the interreduce re-queue path uses TRACE_SIMPLIFY with
+// the dropped rule's trace index so the proof DAG stays connected.
+static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
+                               u32 reason, u32 parent_a) {
   if (s == NULL) return 0;
   // 8.4d: when a WaldSpec is attached, reject ill-sorted inputs
   // before mutating state.  Each side must be well-sorted AND
@@ -2594,16 +2600,28 @@ fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
     }
   }
 #ifdef ATP_VAR_NORM
-  // 7c: an axiom enters the engine as a queued CP.  Canonicalize its
-  // variables here so the very first CP, like every later-derived
-  // one, carries a dense [0, k) variable set.
+  // 7c: an equation enters the engine as a queued CP.  Canonicalize
+  // its variables here so the very first CP, like every later-
+  // derived one, carries a dense [0, k) variable set.
   thvm_normalize_vars(&lhs, &rhs);
 #endif
-  u32 trace_idx = atp_trace_push(s, TRACE_AXIOM,
-                                 ATP_TRACE_NONE, ATP_TRACE_NONE,
-                                 lhs, rhs);
+  u32 trace_idx = atp_trace_push(s, reason, parent_a,
+                                 ATP_TRACE_NONE, lhs, rhs);
   atp_cp_heap_push(s, lhs, rhs, trace_idx);
   return 1;
+}
+
+fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
+  return atp_enqueue_equation(s, lhs, rhs, TRACE_AXIOM, ATP_TRACE_NONE);
+}
+
+// Re-queue a simplified older rule (interreduce path).  Records a
+// TRACE_SIMPLIFY entry whose parent_a is the dropped rule's trace
+// index, so a proof consumer can replay the reduction chain instead
+// of treating the equation as an unjustified axiom.
+static u8 atp_add_equation_simplified(AtpState *s, Term lhs, Term rhs,
+                                      u32 parent_trace) {
+  return atp_enqueue_equation(s, lhs, rhs, TRACE_SIMPLIFY, parent_trace);
 }
 
 // Set the conjecture (single equation goal_lhs == goal_rhs).
@@ -3348,9 +3366,10 @@ fn u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap) {
 
     const char *type_str = "?";
     switch (reason) {
-      case TRACE_AXIOM:  type_str = "axiom";  break;
-      case TRACE_ORIENT: type_str = "orient"; break;
-      case TRACE_CP:     type_str = "cp";     break;
+      case TRACE_AXIOM:    type_str = "axiom";    break;
+      case TRACE_ORIENT:   type_str = "orient";   break;
+      case TRACE_CP:       type_str = "cp";       break;
+      case TRACE_SIMPLIFY: type_str = "simplify"; break;
     }
 
     int n;
@@ -4161,8 +4180,11 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
     Term reduced = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs, n_new, 16);
     if (!kbo_eq(reduced, old_lhs)) {
       // The older rule's LHS simplified -- drop it and requeue
-      // (reduced, old_rhs) for re-orientation.
-      thvm_atp_add_equation(s, reduced, old_rhs);
+      // (reduced, old_rhs) for re-orientation.  Record the re-queue
+      // as a TRACE_SIMPLIFY entry parented on the dropped rule's
+      // trace index so the proof DAG stays connected through
+      // interreduction (a fresh TRACE_AXIOM would sever it).
+      atp_add_equation_simplified(s, reduced, old_rhs, s->r_trace[i]);
 #ifdef ATP_ORPHAN_KILL
       // Capture the dropped rule's trace id before the shift below
       // overwrites r_trace[i].  Its descendant CPs are now orphans.

@@ -705,46 +705,113 @@ decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
     ]
 ]
 
-(* Run the C ATP completion engine + proof extraction.  Returns
-   {steps, status}, where `steps` is the decoded proof chain -- a
-   list of <|"Side", "PosPath", "Before", "After"|> records -- or
-   $Failed when the goal was not proved by the single-NF check. *)
-cEngineProof[enc_, maxSteps_] := Block[{
-    raw, status, nRules, nTrace, nSteps, cur,
-    labelToName, idToName, steps
+(* Decode one variable-width steps block starting at cursor `c0`
+   (1-based, points one BEFORE the first int of the block).  Reads
+   `n` step records; returns {records, cursorAfter}.  Each step is
+   side, rule, fwd, pos_len, pos[0..pos_len), before, after. *)
+decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
+    cur = c0, recs
 },
-    raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"]];
-    status = raw[[1]];
-    nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
-    If[ status =!= 1, Return[{$Failed, status}] ];
-    If[ nSteps === 0, Return[{{}, status}] ];
-    (* Header (5) + rules (2*nRules) + r_trace (nRules) + trace
-       (5*nTrace); the steps block follows. *)
-    cur = 5 + 2 nRules + nRules + 5 nTrace;
-    labelToName = Association[Reverse /@ Normal[enc["State"]["sym"]]];
-    idToName = Association[Reverse /@ Normal[enc["State"]["var"]]];
-    steps = Table[
-        Block[{side, posLen, posPath, beforeRaw, afterRaw, rec},
+    recs = Table[
+        Block[{side, ruleIx, posLen, posPath, beforeRaw, afterRaw},
             side = raw[[cur + 1]];
+            ruleIx = raw[[cur + 2]];
             posLen = raw[[cur + 4]];
             posPath = If[ posLen === 0, {},
                 raw[[cur + 5 ;; cur + 4 + posLen]]];
             beforeRaw = raw[[cur + 5 + posLen]];
             afterRaw = raw[[cur + 6 + posLen]];
             cur = cur + 6 + posLen;
-            rec = <|
+            <|
                 "Side" -> side,
+                "RuleC" -> ruleIx,
                 (* C child indices are 0-based; WL part positions
                    are 1-based. *)
                 "PosPath" -> (posPath + 1),
                 "Before" -> decodeAtpTerm[beforeRaw, labelToName, idToName],
                 "After" -> decodeAtpTerm[afterRaw, labelToName, idToName]
-            |>;
-            rec
+            |>
         ],
-        {nSteps}
+        {n}
     ];
-    {steps, status}
+    {recs, cur}
+]
+
+(* Run the C ATP completion engine + proof extraction.  The C glue
+   ships two derivations: the completion-saturated MAIN state's full
+   trace DAG, and a no-completion EXT state whose chain (when it
+   exists) is over the input axioms directly.  Returns an
+   Association
+     <|"Status", "ExtSteps", "MainSteps", "MainRules", "RTrace",
+       "Trace"|>
+   where ExtSteps is the axiom-cited chain (preferred by the simple
+   path) and the Main* fields carry the completion DAG for the
+   critical-pair lemma path.  ExtSteps / MainSteps are $Failed when
+   the corresponding extraction produced nothing. *)
+cEngineProof[enc_, maxSteps_] := Block[{
+    raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
+    cur, labelToName, idToName, mainSteps, extSteps, mainRules,
+    rTrace, traceEntries
+},
+    raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"]];
+    status = raw[[1]];
+    nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
+    extNRules = raw[[6]]; extNSteps = raw[[7]];
+    labelToName = Association[Reverse /@ Normal[enc["State"]["sym"]]];
+    idToName = Association[Reverse /@ Normal[enc["State"]["var"]]];
+    If[ status =!= 1,
+        Return[<|"Status" -> status, "ExtSteps" -> $Failed,
+            "MainSteps" -> $Failed|>]
+    ];
+    (* MAIN rules block: 2*nRules packed Terms. *)
+    cur = 7;
+    mainRules = Table[
+        Block[{l = raw[[cur + 1]], r = raw[[cur + 2]]},
+            cur = cur + 2;
+            {decodeAtpTerm[l, labelToName, idToName],
+             decodeAtpTerm[r, labelToName, idToName]}
+        ],
+        {nRules}
+    ];
+    (* MAIN r_trace block: nRules ints. *)
+    rTrace = raw[[cur + 1 ;; cur + nRules]];
+    cur = cur + nRules;
+    (* MAIN trace block: variable width reason, pa, pb, lhs, rhs,
+       pos_len, pos[..]. *)
+    traceEntries = Table[
+        Block[{reason, pa, pb, l, r, posLen, pos},
+            reason = raw[[cur + 1]]; pa = raw[[cur + 2]];
+            pb = raw[[cur + 3]]; l = raw[[cur + 4]];
+            r = raw[[cur + 5]]; posLen = raw[[cur + 6]];
+            pos = If[ posLen === 0, {},
+                raw[[cur + 7 ;; cur + 6 + posLen]]];
+            cur = cur + 6 + posLen;
+            <|
+                "Reason" -> reason, "ParentA" -> pa, "ParentB" -> pb,
+                "Lhs" -> decodeAtpTerm[l, labelToName, idToName],
+                "Rhs" -> decodeAtpTerm[r, labelToName, idToName],
+                "Pos" -> (pos + 1)
+            |>
+        ],
+        {nTrace}
+    ];
+    (* MAIN steps block. *)
+    {mainSteps, cur} =
+        decodeStepsBlock[raw, cur, nSteps, labelToName, idToName];
+    (* EXT rules block (2*extNRules) -- skipped, the simple path
+       re-derives rules from the axiom list. *)
+    cur = cur + 2 extNRules;
+    (* EXT steps block. *)
+    {extSteps, cur} =
+        decodeStepsBlock[raw, cur, extNSteps, labelToName, idToName];
+    <|
+        "Status" -> status,
+        "ExtSteps" -> If[ extNSteps === 0, {}, extSteps],
+        "MainSteps" -> If[ nSteps === 0, {}, mainSteps],
+        "MainRules" -> mainRules,
+        "RTrace" -> rTrace,
+        "Trace" -> traceEntries
+    |>
 ]
 
 (* Identify which buildRuleList entry reproduces one rewrite step:
@@ -792,6 +859,38 @@ buildCEngineChain[steps_, conjPair_, ruleList_] := Catch[
         chain
     ]
 ]
+
+(* === critical-pair lemma DAG ====================================== *)
+
+(* Trace-entry reasons (src/thvm.h): an input / re-queued equation,
+   a CP oriented into a rule, a critical pair. *)
+$TraceAxiom = 1;
+$TraceOrient = 2;
+$TraceCp = 3;
+$AtpTraceNone = 4294967295;
+
+(* Assemble a verifier-shaped ProofObject dataset for a
+   completion-derived proof, walking the MAIN-state trace DAG the C
+   glue ships (cEngineProof's MainSteps / MainRules / RTrace /
+   Trace fields).  Emits Axiom entries for TRACE_AXIOM lineage,
+   CriticalPairLemma entries for TRACE_CP lineage, and
+   SubstitutionLemma steps for the rewrite chain.
+
+   BLOCKER (reported, not worked around): thvm_atp_interreduce
+   re-queues a simplified older rule through thvm_atp_add_equation,
+   which records a fresh TRACE_AXIOM entry -- severing the
+   derivation lineage of every rule born from such a re-queued
+   equation.  DoubleNegation's closing rule descends from one of
+   these severed TRACE_AXIOM entries (its content is the conjecture
+   itself), so the trace DAG holds no valid derivation for it.  A
+   verifier-passing CriticalPairLemma DAG is therefore not
+   constructible until the C engine records interreduction as a
+   reduction chain (a TRACE_SIMPLIFY entry carrying the parent
+   rule's trace + the rewrite geometry), the way Waldmeister's PCL
+   `Reduktion` events do.  See the handoff report.  Until then this
+   returns $Failed so a completion-only goal degrades gracefully
+   rather than emitting an unsound (self-citing) proof. *)
+buildCplDataset[enc_, conjPair_, cRes_] := $Failed
 
 (* === TFindEquationalProof ========================================= *)
 
@@ -849,29 +948,43 @@ TFindEquationalProof[thm_String, theory_String, opts:OptionsPattern[]] := Catch[
    the encoder state (the Variables list + the Term decoder maps). *)
 TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
     Block[{
-        enc, conjPair, axiomKeys, ruleList, cRes, steps, status,
+        enc, conjPair, axiomKeys, ruleList, cRes, extSteps,
         chain, dataset, varNames, axEq, conjStmt
     },
         enc = atpEncodeProblem[axioms, conjecture];
         conjPair = enc["ConjPair"];
         axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
-        {cRes, status} = cEngineProof[enc, OptionValue[MaxSteps]];
+        cRes = cEngineProof[enc, OptionValue[MaxSteps]];
         (* status 1 == PROVED. *)
-        If[ status =!= 1, Return[$Failed] ];
-        Which[
-            cRes === {},
-                (* No rewrite steps: a reflexive conjecture, proved
-                   trivially -- only valid when both sides agree. *)
-                If[ conjPair[[1]] =!= conjPair[[2]], Return[$Failed] ];
-                chain = {},
-            cRes === $Failed,
-                Return[$Failed],
-            True,
-                chain = buildCEngineChain[cRes, conjPair, ruleList];
-                If[ chain === $Failed, Return[$Failed] ]
+        If[ cRes["Status"] =!= 1, Return[$Failed] ];
+        extSteps = cRes["ExtSteps"];
+        (* Preferred path: the no-completion EXT chain cites the
+           input axioms directly, so assembleDataset's axiom-cited
+           SubstitutionLemma / Conclusion entries verify. *)
+        dataset = $Failed;
+        If[ extSteps =!= $Failed,
+            Which[
+                extSteps === {},
+                    If[ conjPair[[1]] === conjPair[[2]],
+                        dataset = assembleDataset[enc["AxPairs"],
+                            conjPair, {}, ruleList]
+                    ],
+                True,
+                    chain = buildCEngineChain[extSteps, conjPair, ruleList];
+                    If[ chain =!= $Failed,
+                        dataset = assembleDataset[enc["AxPairs"],
+                            conjPair, chain, ruleList]
+                    ]
+            ]
         ];
-        dataset = assembleDataset[enc["AxPairs"], conjPair, chain, ruleList];
+        (* Fallback: the EXT chain could not close (or could not be
+           expressed over the axioms) -- assemble the critical-pair
+           lemma DAG from the completion trace. *)
+        If[ dataset === $Failed,
+            dataset = buildCplDataset[enc, conjPair, cRes]
+        ];
+        If[ dataset === $Failed, Return[$Failed] ];
         varNames = Symbol /@ Keys[enc["State"]["var"]];
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         conjStmt = holdToInactive[enc["ConjHCRaw"]];

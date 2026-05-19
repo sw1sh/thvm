@@ -356,6 +356,7 @@ $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/th
 	$(CC) $(CFLAGS) -fPIC $(WL_DYLIB_FLAGS) \
 	  -DACCELERATE_NEW_LAPACK \
 	  $(WL_TRACE_DEF) \
+	  $(ATP_DEFINES) \
 	  -I"$(WL_INCLUDE)" \
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
 	  -o $@ $(WL_SRC) build/thvm_runtime_blob.c $(METAL_OBJ) $(METAL_LDFLAGS) \
