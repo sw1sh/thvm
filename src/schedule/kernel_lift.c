@@ -1,30 +1,24 @@
-// Coverage counters for kernel_lift_to_uop.  Read via
-// kernel_lift_attempts() / kernel_lift_successes().  Counters are
-// global (single-threaded scheduling).  Reset by thvm_init / thvm_free.
+// schedule/kernel_lift.c -- look up the unified rangeify pass's
+// UOP_STORE root for a scheduled kernel's boundary and package it as
+// KernelUopLift for the renderer / dispatcher.  KernelUopLift is
+// declared in thvm.h.
+//
+// Coverage counters track how many cg_emit_via_uop attempts the lift
+// fielded vs how many produced a usable store_root.  Bumped from
+// render_metal.c (which is #include'd before this TU in the unity
+// build and reaches the static globals via the count_attempt /
+// count_success accessors); read from thvm.c's lift-coverage dump.
 static u64 KERNEL_LIFT_ATTEMPTS;
 static u64 KERNEL_LIFT_SUCCESSES;
 
 fn u64 kernel_lift_attempts(void)        { return KERNEL_LIFT_ATTEMPTS; }
 fn u64 kernel_lift_successes(void)       { return KERNEL_LIFT_SUCCESSES; }
-
 fn void kernel_lift_counters_reset(void) {
   KERNEL_LIFT_ATTEMPTS = 0;
   KERNEL_LIFT_SUCCESSES = 0;
 }
-
-// Increment helpers for callers that precede this TU in the unity
-// build (codegen/render_metal.c is #include'd first and can't reach
-// the static globals directly).
 fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
 fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
-
-// schedule/kernel_lift.c -- hand a scheduled kernel back to the
-// renderer as a UOp DAG root suitable for cg_render_uop_kernel.
-//
-// kernel_lift_to_uop looks up the UOP_STORE root the unified rangeify
-// pass emitted for this kernel's boundary (via bufferize_info_find +
-// rangeify_unified_store_root_at) and packages it as KernelUopLift
-// for the renderer / dispatcher.  KernelUopLift is declared in thvm.h.
 
 static void lift_reject_log(KernelEntry const *ke, u32 sid,
                             const char *where) {
