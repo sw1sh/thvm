@@ -110,6 +110,9 @@ _kernel_apply_opt = _bind(
 _uop_dag_apply_kopt = _bind(
     "py_uop_dag_apply_kopt", c_uint64,
     c_uint64, ctypes.c_uint8, ctypes.c_uint8, c_uint32)
+_cuda_dag_dispatch_shape = _bind(
+    "py_cuda_dag_dispatch_shape", c_uint32,
+    c_uint64, ctypes.POINTER(c_uint32), ctypes.POINTER(c_uint32))
 
 
 # ---------------- in-process Metal compile + dispatch ----------------
@@ -471,6 +474,26 @@ class Thvm:
         if new_root == 0:
             return None
         return Term(int(new_root))
+
+    def cuda_dag_dispatch_shape(self, root: Term) -> tuple[int, int] | None:
+        """DAG-derived CUDA launch geometry for `root`.
+
+        Returns (grid, block) -- the 1-D launch shape the structural
+        CUDA renderer decodes from the DAG's axis types (KAX_LOOP ->
+        grid via `tg`, KAX_LOCAL -> block via `tt`).  The autotune
+        sweep needs this for a KOP_LOCAL-split kernel: a flat
+        one-thread-per-output grid cannot express the threadblock
+        tile.  Returns None if the DAG has no axes / overflows / a
+        block dim exceeds the 1024-thread hardware cap.
+        """
+        grid = c_uint32(0)
+        block = c_uint32(0)
+        ok = _cuda_dag_dispatch_shape(c_uint64(int(root)),
+                                      ctypes.byref(grid),
+                                      ctypes.byref(block))
+        if not ok:
+            return None
+        return int(grid.value), int(block.value)
 
     # ---------------- renderer ----------------
     def render(self, root: Term, name: str = "k") -> str:

@@ -116,6 +116,35 @@ static u8 propose_loop_axis_for_factor(KernelEntry const *ke, u8 start,
   return 0xFF;
 }
 
+// DAG-axis counterpart of propose_loop_axis_for_factor: find the
+// first KAX_LOOP axis (by axis id, scanning ids >= `start`) in the
+// lifted DAG that `factor` divides, returning its axis id or 0xFF.
+//
+// propose_loop_axis_for_factor reads tile_anno / axes_resolve_n_axes,
+// which returns 0 when ke->schedule == NULL -- the case for a
+// synthetic KernelEntry built by the py bridge (kernel_alloc +
+// kernel_set_cached_lift, no materialize / schedule).  The CUDA
+// autotune sweep drives propose exactly that way, so the CUDA block
+// must derive its loop axes straight from cached_lift.store_root's
+// RANGE leaves instead.  uop_dag_collect_axes returns the same
+// (id, type, extent) the renderer decodes, so the resulting KOpt
+// axis id is directly applicable via uop_dag_apply_kopt.
+static u8 propose_dag_loop_axis_for_factor(KernelEntry const *ke,
+                                           u8 start, u32 factor) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0xFF;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                               exts, MAX_AXES);
+  u8 best = 0xFF;
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] != KAX_LOOP) continue;
+    if (ids[i] < start) continue;
+    if (factor > exts[i] || exts[i] % factor != 0) continue;
+    if (best == 0xFF || ids[i] < best) best = (u8)ids[i];
+  }
+  return best;
+}
+
 static u32 propose_conv2d_local_opts(KernelEntry const *ke, KOpt *out,
                                      u32 n, u32 cap) {
   static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
@@ -370,14 +399,59 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // included -- the output LOOP axes tile independently of the
   // in-thread reduce axis, so this fires whether axis_size is 0 or not.
   if (propose_cuda_backend_enabled()) {
+    // Loop-axis lookup: the schedule-reading propose_loop_axis_for_factor
+    // returns 0xFF for a synthetic (no-schedule) KernelEntry, which is
+    // exactly how the py-driven CUDA autotune sweep builds the kernel.
+    // Fall back to the DAG-axis reader so the sweep actually gets
+    // candidates; a production kernel with a schedule still resolves
+    // through the schedule path first.
     static const u32 cuda_local[] = {256, 128, 64, 32};
     u32 n_cuda_local = sizeof(cuda_local) / sizeof(*cuda_local);
     for (u32 i = 0; i < n_cuda_local && n < cap; i++) {
       u8 loop_axis = propose_loop_axis_for_factor(ke, 0, cuda_local[i]);
+      if (loop_axis == 0xFF) {
+        loop_axis = propose_dag_loop_axis_for_factor(ke, 0, cuda_local[i]);
+      }
       if (loop_axis == 0xFF) continue;
       out[n].op   = KOP_LOCAL;
       out[n].axis = loop_axis;
       out[n].arg  = cuda_local[i];
+      n++;
+    }
+    // KOP_UPCAST: each thread computes `factor` output rows -- the
+    // outputs-per-thread tiling lever (raises arithmetic intensity,
+    // shrinks the launched thread count).  UPCAST is in-thread, so
+    // cuda_dag_dispatch_shape leaves it out of the grid/block and the
+    // flat geometry already covers it -- no dispatch change needed.
+    // Gated on axis_size > 0 (reduce-tail kernels -- matmul): the
+    // elementwise block above already proposes UPCAST when axis_size
+    // is 0, so this only fills the matmul gap it leaves.
+    if (axis_size > 0) {
+      static const u32 cuda_upcast[] = {8, 4, 2};
+      u32 n_cuda_upcast = sizeof(cuda_upcast) / sizeof(*cuda_upcast);
+      for (u32 i = 0; i < n_cuda_upcast && n < cap; i++) {
+        u8 loop_axis = propose_loop_axis_for_factor(ke, 0, cuda_upcast[i]);
+        if (loop_axis == 0xFF) {
+          loop_axis = propose_dag_loop_axis_for_factor(ke, 0, cuda_upcast[i]);
+        }
+        if (loop_axis == 0xFF) continue;
+        out[n].op   = KOP_UPCAST;
+        out[n].axis = loop_axis;
+        out[n].arg  = cuda_upcast[i];
+        n++;
+      }
+    }
+    // KOP_SIMD_REDUCE: replace each scalar reduce-axis accumulator with
+    // a warp-collective reduce -- the 32 lanes of a warp each take a
+    // 1/32 stripe of the reduce extent, then a 5-step __shfl_xor_sync
+    // butterfly folds the lane partials.  Offered only on a reduce-tail
+    // kernel (axis_size > 0); the apply pass wraps every UOP_REDUCE, so
+    // axis/arg are unused.  cuda_dag_dispatch_shape launches it
+    // grid = output rows, block = 32 (one warp per row).
+    if (axis_size > 0 && n < cap) {
+      out[n].op   = KOP_SIMD_REDUCE;
+      out[n].axis = 0;
+      out[n].arg  = 0;
       n++;
     }
   }

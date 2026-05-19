@@ -102,8 +102,8 @@ int main(void) {
     free(cu);
   }
 
-  // === SIMD_REDUCE -> __shfl_down_sync warp butterfly ================
-  TEST_BEGIN("render-uop-cuda/simd-reduce-emits-shfl-down-sync");
+  // === SIMD_REDUCE -> __shfl_xor_sync warp all-reduce ================
+  TEST_BEGIN("render-uop-cuda/simd-reduce-emits-shfl-xor-sync");
   {
     // Same vector-sum DAG, wrapped in OPT(_, SIMD_REDUCE, _).
     u32 dimsIn[1]  = { 64 };
@@ -123,12 +123,17 @@ int main(void) {
     // Per-lane strided loop: lane index = threadIdx.x % 32, stride 32.
     CHECK(contains(cu, "(threadIdx.x % 32u)"));
     CHECK(contains(cu, "+= 32u"));
-    // 5-step warp butterfly: __shfl_down_sync at offsets 16..1.
-    CHECK(contains(cu, "__shfl_down_sync(0xffffffffu, _acc0, 16u)"));
-    CHECK(contains(cu, "__shfl_down_sync(0xffffffffu, _acc0, 8u)"));
-    CHECK(contains(cu, "__shfl_down_sync(0xffffffffu, _acc0, 4u)"));
-    CHECK(contains(cu, "__shfl_down_sync(0xffffffffu, _acc0, 2u)"));
-    CHECK(contains(cu, "__shfl_down_sync(0xffffffffu, _acc0, 1u)"));
+    // 5-step warp butterfly: __shfl_xor_sync at offsets 16..1.  xor
+    // (not down) is an all-reduce -- every lane ends with the full
+    // result, matching Metal simd_sum's broadcast, so the unguarded
+    // per-lane store of the reduced value is race-free.
+    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 16u)"));
+    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 8u)"));
+    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 4u)"));
+    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 2u)"));
+    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 1u)"));
+    // A down-shuffle would leave the result in lane 0 only.
+    CHECK(!contains(cu, "__shfl_down_sync"));
     // No Metal simd_sum on the CUDA path.
     CHECK(!contains(cu, "simd_sum"));
     CHECK(!contains(cu, "thread_index_in_simdgroup"));

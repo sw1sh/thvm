@@ -357,6 +357,157 @@ int main(void) {
     thvm_cuda_buf_free(bB);
   }
 
+  // === vtable dispatch of a KOP_UPCAST-split kernel ==================
+  // KOP_UPCAST splits the M output axis RANGE(0,LOOP,8) into an outer
+  // LOOP(2) + an inner UPCAST(4): each thread now computes 4 M-rows.
+  // UPCAST is in-thread, so cuda_dag_dispatch_shape leaves it out of
+  // the grid/block -- the launch stays the flat LOOP-product shape and
+  // the renderer's UPCAST loop covers the 4 rows per thread.  Result
+  // must still match the CPU reference.
+  TEST_BEGIN("cuda-backend/vtable-dispatch-kop-upcast");
+  {
+    enum { M = 8, K = 4, N = 8 };
+    u32 dC[2] = { M, N }, dA[2] = { M, K }, dB[2] = { K, N };
+    Term C = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dC, 0);
+    Term A = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dA, 1);
+    Term B = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dB, 2);
+    Term r_m = uop_range(0, KAX_LOOP, M);
+    Term r_n = uop_range(1, KAX_LOOP, N);
+    Term r_k = uop_range(2, KAX_REDUCE, K);
+    Term kK = uop_const(DT_INT32, K), kN = uop_const(DT_INT32, N);
+    Term addrA = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_m, kK), r_k);
+    Term addrB = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_k, kN), r_n);
+    Term mul = uop_binary(UOP_MUL, uop_index_e(A, addrA), uop_index_e(B, addrB));
+    Term red = uop_reduce(REDUCE_SUM, 2, mul);
+    Term addrC = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_m, kN), r_n);
+    Term st = uop_store(C, addrC, red);
+
+    KOpt opt = { .op = KOP_UPCAST, .axis = 0, .arg = 4 };
+    Term st_up = uop_dag_apply_kopt(st, opt);
+    CHECK(st_up != 0);
+
+    u32 kid = kernel_alloc();
+    KernelEntry *ke = &KERNELS[kid];
+    ke->cached_lift.store_root = st_up;
+    ke->cached_lift.n_inputs = 2;
+    ke->compute_root = st_up;
+    ke->n_inputs = 2;
+    ke->output_numel = M * N;
+
+    float hA[M * K], hB[K * N], hC_ref[M * N], hC_gpu[M * N];
+    for (int i = 0; i < M * K; i++) hA[i] = (float)(i % 7) * 0.5f - 1.0f;
+    for (int i = 0; i < K * N; i++) hB[i] = (float)(i % 5) * 0.25f + 0.3f;
+    for (int m = 0; m < M; m++)
+      for (int n = 0; n < N; n++) {
+        float acc = 0.0f;
+        for (int k = 0; k < K; k++) acc += hA[m * K + k] * hB[k * N + n];
+        hC_ref[m * N + n] = acc;
+      }
+
+    u32 bC = thvm_cuda_buf_alloc((u64)M * N * sizeof(float));
+    u32 bA = thvm_cuda_buf_alloc((u64)M * K * sizeof(float));
+    u32 bB = thvm_cuda_buf_alloc((u64)K * N * sizeof(float));
+    CHECK(thvm_cuda_buf_write(bA, hA, sizeof hA) == 0);
+    CHECK(thvm_cuda_buf_write(bB, hB, sizeof hB) == 0);
+
+    u32 in_buf_ids[2] = { bA, bB };
+    int rc = CUDA_BACKEND.dispatch_kernel(ke, in_buf_ids, bC);
+    if (rc != 0) {
+      fprintf(stderr, "  vtable UPCAST dispatch failed: %s\n",
+              thvm_cuda_last_error());
+    }
+    CHECK(rc == 0);
+
+    CHECK(thvm_cuda_buf_read(bC, hC_gpu, sizeof hC_gpu) == 0);
+    int all_ok = 1;
+    for (int i = 0; i < M * N; i++) {
+      if (!approx_eq(hC_gpu[i], hC_ref[i])) {
+        all_ok = 0;
+        fprintf(stderr, "  UPCAST-split matmul mismatch at %d: gpu=%f ref=%f\n",
+                i, hC_gpu[i], hC_ref[i]);
+      }
+    }
+    CHECK(all_ok);
+
+    thvm_cuda_buf_free(bC);
+    thvm_cuda_buf_free(bA);
+    thvm_cuda_buf_free(bB);
+  }
+
+  // === vtable dispatch of a KOP_SIMD_REDUCE multi-row reduce =========
+  // out[r] = sum_c in[r,c] for R rows of width C.  KOP_SIMD_REDUCE
+  // wraps the reduce in OPT(_, SIMD_REDUCE, _): each row's reduction is
+  // a warp-collective __shfl_xor_sync butterfly.  The 32 lanes of a
+  // warp cooperate on ONE row, so cuda_dag_dispatch_shape must launch
+  // grid = R blocks, block = 32 -- and the renderer (RMU_SIMD_WARP)
+  // must decode the row axis from `tg`, not `tid` (a `tid` decode
+  // would scatter a warp across 32 distinct rows).  Result must match
+  // the per-row CPU reference.
+  TEST_BEGIN("cuda-backend/vtable-dispatch-kop-simd-reduce");
+  {
+    enum { R = 12, C = 96 };
+    u32 dOut[1] = { R }, dIn[2] = { R, C };
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dOut, 0);
+    Term in  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dIn,  1);
+    Term r_r = uop_range(0, KAX_LOOP, R);
+    Term r_c = uop_range(1, KAX_REDUCE, C);
+    Term kC  = uop_const(DT_INT32, C);
+    Term addrIn = uop_int_binary(UOP_IADD,
+                                 uop_int_binary(UOP_IMUL, r_r, kC), r_c);
+    Term red = uop_reduce(REDUCE_SUM, 1, uop_index_e(in, addrIn));
+    Term st  = uop_store(out, r_r, red);
+
+    KOpt opt = { .op = KOP_SIMD_REDUCE, .axis = 0, .arg = 0 };
+    Term st_sr = uop_dag_apply_kopt(st, opt);
+    CHECK(st_sr != 0);
+    CHECK(st_sr != st);    // the wrapper actually rewrote the DAG
+
+    u32 kid = kernel_alloc();
+    KernelEntry *ke = &KERNELS[kid];
+    ke->cached_lift.store_root = st_sr;
+    ke->cached_lift.n_inputs = 1;
+    ke->compute_root = st_sr;
+    ke->n_inputs = 1;
+    ke->output_numel = R;
+
+    float hIn[R * C], hOut_ref[R], hOut_gpu[R];
+    for (int i = 0; i < R * C; i++) hIn[i] = (float)(i % 13) * 0.1f - 0.6f;
+    for (int r = 0; r < R; r++) {
+      float acc = 0.0f;
+      for (int c = 0; c < C; c++) acc += hIn[r * C + c];
+      hOut_ref[r] = acc;
+    }
+
+    u32 bOut = thvm_cuda_buf_alloc((u64)R * sizeof(float));
+    u32 bIn  = thvm_cuda_buf_alloc((u64)R * C * sizeof(float));
+    CHECK(thvm_cuda_buf_write(bIn, hIn, sizeof hIn) == 0);
+
+    u32 in_buf_ids[1] = { bIn };
+    int rc = CUDA_BACKEND.dispatch_kernel(ke, in_buf_ids, bOut);
+    if (rc != 0) {
+      fprintf(stderr, "  vtable SIMD_REDUCE dispatch failed: %s\n",
+              thvm_cuda_last_error());
+    }
+    CHECK(rc == 0);
+
+    CHECK(thvm_cuda_buf_read(bOut, hOut_gpu, sizeof hOut_gpu) == 0);
+    int all_ok = 1;
+    for (int r = 0; r < R; r++) {
+      if (!approx_eq(hOut_gpu[r], hOut_ref[r])) {
+        all_ok = 0;
+        fprintf(stderr, "  SIMD_REDUCE row %d mismatch: gpu=%f ref=%f\n",
+                r, hOut_gpu[r], hOut_ref[r]);
+      }
+    }
+    CHECK(all_ok);
+
+    thvm_cuda_buf_free(bOut);
+    thvm_cuda_buf_free(bIn);
+  }
+
   // === jit cache: second compile of the same source is a hit ========
   TEST_BEGIN("cuda-backend/jit-cache-hit-on-identical-source");
   {

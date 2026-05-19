@@ -75,6 +75,17 @@ fn int thvm_cuda_launch(CUfunction func, u32 grid_x, u32 block_x,
   return cuda_jit_launch(func, grid_x, block_x, args);
 }
 
+// DAG-derived launch geometry.  The Python Cuda.dispatch takes an
+// explicit flat grid/block and so cannot correctly launch a
+// LOCAL-split kernel; the autotune sweep calls this to get the
+// tg/tt geometry the structural renderer actually decodes.  Writes
+// (grid_x, block_x) and returns 1 on success, 0 if the kernel has no
+// lifted DAG / overflows / exceeds the block cap.
+fn int thvm_cuda_dag_dispatch_shape(struct KernelEntry const *ke,
+                                    u32 *grid_x, u32 *block_x) {
+  return cuda_dag_dispatch_shape(ke, grid_x, block_x);
+}
+
 // Convenience: build the cuLaunchKernel arg array from a list of
 // buffer ids.  The caller still owns the CUdeviceptr storage (it lives
 // in CUDA_BUFS) -- `dptr_out` must outlive the launch.  Returns the
