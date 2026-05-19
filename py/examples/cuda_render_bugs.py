@@ -138,7 +138,7 @@ def build_signed_isub(h, N):
 def run_bug2(h, c):
     N = 64
     rng = np.random.default_rng(2)
-    in_a = (rng.standard_normal(N).astype(np.float32) + 10.0)
+    in_a = (rng.standard_normal(N) + 10.0).astype(np.float32)
     ref = np.zeros(N, dtype=np.float64)
     ref[1:] = in_a[:-1].astype(np.float64)       # out[i] = in[i-1], out[0]=0
 

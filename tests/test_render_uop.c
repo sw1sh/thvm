@@ -578,6 +578,52 @@ int main(void) {
     CHECK(contains(bufn, "_acc1 = _acc1 + (in0[a0] * _acc2)"));
   }
 
+  TEST_BEGIN("render-uop/value-dependent-reduces-stay-siblings");
+  // out[r] = (sum_k x[r,k]) - (max_k x[r,k]).  Two reduces where the
+  // second's RESULT is used by the store -- but neither reduce's body
+  // references the OTHER's reduce-axis var.  They must emit as SIBLING
+  // loops, both inside the output-r loop, NOT nested.  A reduce-loop
+  // placement that descended through a sibling reduce's body when
+  // testing axis use would wrongly nest the sum loop inside the max
+  // loop (the softmax-shape regression: softmax's sum-of-exp body
+  // references the max reduce's `_accN` but the max axis is bound).
+  {
+    u32 dS_i[1] = { 5 };
+    u32 dS_x[2] = { 5, 7 };
+    Term out_s = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dS_i, 0);
+    Term x_s   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dS_x, 1);
+    Term in_s_bufs[1] = { x_s };
+    Term rr   = uop_range(0, 0 /*LOOP*/,   5);
+    Term rk1  = uop_range(1, 1 /*REDUCE*/, 7);
+    Term rk2  = uop_range(2, 1 /*REDUCE*/, 7);
+    Term k7   = uop_const(DT_INT32, 7);
+    Term ad1  = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, rr, k7), rk1);
+    Term ad2  = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, rr, k7), rk2);
+    Term sum_k = uop_reduce(REDUCE_SUM, /*axis=*/1, uop_index_e(x_s, ad1));
+    Term max_k = uop_reduce(REDUCE_MAX, /*axis=*/2, uop_index_e(x_s, ad2));
+    Term diff  = uop_binary(UOP_ADD, sum_k, uop_binary(UOP_NEG, max_k, max_k));
+    Term st_s  = uop_store(out_s, rr, diff);
+    char bufs2[2048];
+    fp = fmemopen(bufs2, sizeof(bufs2), "w");
+    cg_render_uop_kernel(st_s, "k_sib", out_s, in_s_bufs, 1, fp);
+    fclose(fp);
+    // Both reduce loops are present and neither is nested inside the
+    // other: the `_acc2` declaration comes after the `a1` loop's body
+    // closes, not inside it.
+    char *p_a1 = strstr(bufs2, "for (uint a1 = 0");
+    char *p_a2 = strstr(bufs2, "for (uint a2 = 0");
+    char *p_ac1 = strstr(bufs2, "float _acc1");
+    char *p_ac2 = strstr(bufs2, "float _acc2");
+    CHECK(p_a1 != NULL && p_a2 != NULL);
+    CHECK(p_ac1 != NULL && p_ac2 != NULL);
+    // _acc2 declared after the a1 loop opened -- siblings emit in
+    // sequence; if a2 were nested in a1, _acc2 would sit between
+    // `for a1` and the a1 combine.  The a1 combine (`_acc1 = _acc1`)
+    // must precede the _acc2 declaration.
+    char *p_comb1 = strstr(bufs2, "_acc1 = _acc1");
+    CHECK(p_comb1 != NULL && p_comb1 < p_ac2);
+  }
+
   TEST_BEGIN("render-uop/local-upcast-global-decode");
   // matmul-shaped reduce STORE with KOP_UPCAST(N, 4) then
   // KOP_LOCAL(N_outer, 4).  After the two DAG splits the N axis-line is

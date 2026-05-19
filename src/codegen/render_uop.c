@@ -652,17 +652,23 @@ static int rmu_term_contains(Term t, Term needle) {
 }
 
 // Returns 1 if `t`'s subtree references a UOP_RANGE with axis id
-// `axis_id` anywhere (descending through nested UOP_REDUCE bodies).
+// `axis_id` as a FREE variable -- i.e. not bound by a nested UOP_REDUCE
+// inside `t`.  The walk stops at every UOP_REDUCE boundary: a nested
+// reduce binds its own reduce-axis (and uses its body's other axes
+// privately), so its `_accN` result is an opaque leaf in `t`'s scope.
 // Used to decide reduce-loop nesting: an inner reduce whose body
 // references an OUTER reduce's reduce-axis var must be emitted INSIDE
 // the outer reduce's loop, not hoisted above it (a hoist leaves the
 // outer axis var undeclared at the inner reduce's emission point --
-// nvrtc `identifier "aN" is undefined`, the bug-1 shape).  This is the
-// thvm analogue of tinygrad's per-UOp `.ranges` dependency set
-// (tinygrad/uop/ops.py:352-370): a REDUCE there carries every RANGE
-// its body transitively depends on, and the linearizer
-// (tinygrad/codegen/late/linearizer.py:56-90) nests each RANGE inside
-// every RANGE it depends on.
+// nvrtc `identifier "aN" is undefined`, the bug-1 shape).  Descending
+// THROUGH nested reduces would wrongly report a sibling reduce's
+// private axis as "used" -- e.g. softmax's sum-of-exp body references
+// the max reduce's `_accN`, but the max's reduce-axis is bound, not
+// free, so the two reduces are siblings, not nested.  This is the thvm
+// analogue of tinygrad's per-UOp `.ranges` set
+// (tinygrad/uop/ops.py:352-370), where a REDUCE's `ended_ranges` are
+// popped out of its result's range set: the reduce-axis stops flowing
+// at the reduce, exactly this boundary.
 static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
   if (depth > 256) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
@@ -670,6 +676,12 @@ static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
   u64 loc = term_val(t);
   if (op == UOP_RANGE) {
     return (u32)term_val(heap_read(loc + 0)) == axis_id;
+  }
+  if (op == UOP_REDUCE) {
+    // A nested reduce binds its own axis and any other axes its body
+    // uses privately; its `_accN` is an opaque value here.  Do not
+    // descend -- only FREE references in `t`'s own scope count.
+    return 0;
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
