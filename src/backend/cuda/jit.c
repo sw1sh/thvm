@@ -218,17 +218,22 @@ fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
   }
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 grid, block;
-  // SIMD_REDUCE: a warp-collective reduce gives each output element one
-  // full warp (the __shfl_xor_sync butterfly only folds within a
-  // warp), so one threadblock = one warp = 32 threads, and the grid is
-  // exactly the promoted-output-LOOP product.  The renderer
-  // (RMU_SIMD_WARP) decodes the output axis from `tg` to match.
+  // SIMD_REDUCE: a warp-collective reduce gives each reduce-axis tuple
+  // one full warp (the __shfl_xor_sync butterfly only folds within a
+  // warp), so one threadblock = one warp = 32 threads.  The grid is
+  // the product of the output axes a reduce DEPENDS on
+  // (rmu_dag_simd_warp_grid) -- a pure-broadcast output axis is
+  // distributed across the 32 lanes by the renderer, so it must not
+  // multiply the warp count.  Falls back to the full LOOP product
+  // when no reduce-dependent output axis exists (a scalar-output
+  // reduce -- grid 1).
   if (rmu_dag_has_simd_reduce(ke->cached_lift.store_root)
       && local_total <= 1 && group_reduce_extent == 0) {
-    grid  = (u32)total;
-    block = 32;
-    if (grid_x  != NULL) *grid_x  = grid;
-    if (block_x != NULL) *block_x = block;
+    u64 sg = rmu_dag_simd_warp_grid(ke->cached_lift.store_root);
+    if (sg == 0) sg = total;
+    if (sg > 0xFFFFFFFFu) return 0;
+    if (grid_x  != NULL) *grid_x  = (u32)sg;
+    if (block_x != NULL) *block_x = 32;
     return 1;
   }
   if (group_reduce_extent != 0) {

@@ -1130,6 +1130,19 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   if (axis_type == 1 /*REDUCE*/) {
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) /*reduce*/ {\n",
             axis_id, axis_id, bound, axis_id);
+  } else if (RMU_SIMD_WARP && axis_type == 0 /* KAX_LOOP */
+             && gctx != NULL && axis_id < 256
+             && gctx->modulus_of_axis[axis_id] == 0) {
+    // SIMD_REDUCE warp-per-row kernel: a reduce-independent broadcast
+    // output axis (the unpromoted column) is distributed across the 32
+    // warp lanes -- each lane writes a 1/32 stripe of the columns.
+    // After the warp butterfly all lanes hold the full reduce result,
+    // so the per-lane stripes are independent and race-free; without
+    // the stride every lane would redundantly recompute (and re-store)
+    // the whole row.
+    fprintf(fp, "for (uint a%u = (threadIdx.x %% 32u); "
+            "a%u < %s; a%u += 32u) {\n",
+            axis_id, axis_id, bound, axis_id);
   } else {
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) {\n",
             axis_id, axis_id, bound, axis_id);
@@ -3434,6 +3447,57 @@ static int rmu_dag_has_simd_reduce(Term t) {
     default:
       return 0;
   }
+}
+
+// Grid size (warp count) for a SIMD_REDUCE warp-per-row CUDA kernel:
+// the product of the extents of output axes that some reduce in the
+// store value depends on.  That is exactly the set rmu_emit_store
+// promotes onto `tg` -- one threadblock (= one warp) per reduce-axis
+// tuple.  A pure-broadcast output axis (softmax's column) is NOT in
+// the product: rmu_emit_range_open_ctx distributes it across the 32
+// warp lanes, so it must not also multiply the warp count.  Returns 0
+// if `root` is not a STORE / has no reduce-dependent output axis (the
+// caller then falls back to the plain LOOP-product geometry).
+static u64 rmu_dag_simd_warp_grid(Term root) {
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+  Term addr  = heap_read(term_val(root) + 1);
+  Term value = heap_read(term_val(root) + 2);
+  // Output axes: the RANGE leaves that index the store position.
+  Term addr_ranges[MAX_DIM];
+  u32  addr_n = 0;
+  rmu_collect_ranges(addr, addr_ranges, &addr_n);
+  // Reduce-dependent axes: every RANGE leaf reachable from any reduce
+  // body in the store value.
+  Term reduces[RMU_MAX_RANGES];
+  u8   simd_flags[RMU_MAX_RANGES] = {0};
+  u32  n_reduces = 0;
+  rmu_collect_reduces_with_simd(value, 0, reduces, simd_flags, &n_reduces);
+  u64 grid = 1;
+  int found = 0;
+  for (u32 i = 0; i < addr_n; i++) {
+    if (term_tag(addr_ranges[i]) != TAG_UOP
+        || term_ext(addr_ranges[i]) != UOP_RANGE) continue;
+    u32 oax = (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0));
+    u32 oext = (u32)term_val(heap_read(term_val(addr_ranges[i]) + 2));
+    if (oext == 0) continue;
+    int dep = 0;
+    for (u32 r = 0; r < n_reduces && !dep; r++) {
+      Term r_src = heap_read(term_val(reduces[r]) + 0);
+      Term r_ranges[MAX_DIM];
+      u32  r_n = 0;
+      rmu_collect_ranges_through_reduce(r_src, r_ranges, &r_n);
+      for (u32 j = 0; j < r_n; j++) {
+        if (term_tag(r_ranges[j]) != TAG_UOP
+            || term_ext(r_ranges[j]) != UOP_RANGE) continue;
+        if ((u32)term_val(heap_read(term_val(r_ranges[j]) + 0)) == oax) {
+          dep = 1;
+          break;
+        }
+      }
+    }
+    if (dep) { grid *= (u64)oext; found = 1; }
+  }
+  return found ? grid : 0;
 }
 
 // Walk the DAG for a UOP_OPT(_, TC, _) annotation -- the tell that the

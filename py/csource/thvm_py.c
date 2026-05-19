@@ -256,11 +256,16 @@ EXPORT uint32_t py_cuda_dag_dispatch_shape(uint64_t root,
   }
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   uint32_t grid, block;
-  // SIMD_REDUCE: one warp per output row -- grid = output rows,
-  // block = 32 (mirrors src/backend/cuda/jit.c's cuda_dag_dispatch_shape).
+  // SIMD_REDUCE: one warp per reduce-axis tuple -- grid = product of
+  // reduce-dependent output axes (a pure-broadcast axis is spread over
+  // the 32 lanes), block = 32.  Mirrors src/backend/cuda/jit.c's
+  // cuda_dag_dispatch_shape.
   if (rmu_dag_has_simd_reduce(root)
       && local_total <= 1 && group_reduce_extent == 0) {
-    if (grid_x  != NULL) *grid_x  = (uint32_t)total;
+    uint64_t sg = rmu_dag_simd_warp_grid(root);
+    if (sg == 0) sg = total;
+    if (sg > 0xFFFFFFFFu) return 0;
+    if (grid_x  != NULL) *grid_x  = (uint32_t)sg;
     if (block_x != NULL) *block_x = 32u;
     return 1;
   }
