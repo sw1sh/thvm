@@ -230,12 +230,12 @@ static void rmu_emit_term(Term t, FILE *fp) {
         // Emit f32 as a bit-exact bitcast so the constant survives
         // decimal round-trip without compiler-side fp formatting
         // drift.  C target uses the THVM_BITCAST macro from the
-        // prologue; the Metal target uses MSL's `as_type<float>`.
-        // CUDA bitcast (`__uint_as_float`) is a Stage-2 item -- see
-        // docs/plans/cuda_backend.md; the CUDA path is render-only
-        // and not yet nvrtc-compiled.
+        // prologue; Metal uses MSL's `as_type<float>`; CUDA uses the
+        // `__uint_as_float` device intrinsic (nvrtc has no `as_type`).
         if (RMU_TARGET == CG_TARGET_C) {
           fprintf(fp, "THVM_BITCAST(float, 0x%08xu)", bits);
+        } else if (RMU_TARGET == CG_TARGET_CUDA) {
+          fprintf(fp, "__uint_as_float(0x%08xu)", bits);
         } else {
           fprintf(fp, "as_type<float>(0x%08xu)", bits);
         }
@@ -318,6 +318,25 @@ static void rmu_emit_term(Term t, FILE *fp) {
           fprintf(fp, "THVM_BITCAST(%s, ", type_name);
           rmu_emit_term(src, fp);
           fputs(")", fp);
+        } else if (RMU_TARGET == CG_TARGET_CUDA) {
+          // CUDA has no MSL `as_type<T>`: a 32-bit reinterpret uses
+          // the `__*_as_*` device intrinsics.  Pick by dst dtype --
+          // int<->float is the case the renderer actually emits (the
+          // fp32-const bitcast above + integer-bit tricks); anything
+          // wider falls back to a value cast (best effort -- the
+          // renderer never bitcasts 64-bit types today).
+          const char *intrin =
+              (dst_dt == DT_FP32)  ? "__uint_as_float" :
+              (dst_dt == DT_INT32) ? "__float_as_int"  : NULL;
+          if (intrin != NULL) {
+            fprintf(fp, "%s(", intrin);
+            rmu_emit_term(src, fp);
+            fputs(")", fp);
+          } else {
+            fprintf(fp, "((%s)", type_name);
+            rmu_emit_term(src, fp);
+            fputs(")", fp);
+          }
         } else {
           fprintf(fp, "as_type<%s>(", type_name);
           rmu_emit_term(src, fp);
@@ -408,16 +427,25 @@ static void rmu_emit_term(Term t, FILE *fp) {
         }
       }
       // VEC_LOAD peel: wrap UOP_INDEX_E with a floatN reinterpret_cast
-      // at the load site.  Pattern (correctness-preserving slice):
-      //   ((device const floatN*)(buf))[(addr) / N][(addr) % N]   (MSL)
-      //   ((const floatN*)(buf))[(addr) / N][(addr) % N]          (CUDA)
-      // Semantically identical to buf[addr]; lets the GPU coalesce N
-      // consecutive scalar loads into one vector load when the address
-      // is contiguous.  See docs/plans/mlx_features_to_port.md (4) +
+      // at the load site.  Semantically identical to buf[addr]; lets
+      // the GPU coalesce N consecutive scalar loads into one vector
+      // load when the address is contiguous.  See
+      // docs/plans/mlx_features_to_port.md (4) +
       // mlx/backend/metal/kernels/softmax.h.  factor = 2/4/8/16.
+      //
+      // Metal's `floatN` supports a runtime `operator[]`, so the lane
+      // is picked with a second subscript:
+      //   ((device const floatN*)(buf))[(addr)/N][(addr)%N]
+      // CUDA's `float4` etc. have NO `operator[]` -- only .x/.y/.z/.w
+      // members, and the lane index `(addr)%N` is generally a runtime
+      // value so a member cannot be named statically.  The
+      // correctness-preserving CUDA form reinterprets the floatN slot
+      // back to a scalar pointer for the lane subscript:
+      //   ((const float*)&((const floatN*)(buf))[(addr)/N])[(addr)%N]
+      // This keeps the floatN-aligned access (the coalescing hint)
+      // while staying valid CUDA.
       // GPU-generic: both Metal and CUDA have floatN vector types; the
-      // C target keeps the plain scalar load.  Only the address-space
-      // qualifier (`device ` on Metal, none on CUDA) differs.
+      // C target keeps the plain scalar load.
       if (opt_kind == UOP_OPT_VEC_LOAD && RMU_TARGET != CG_TARGET_C
           && term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_INDEX_E) {
         u32 width = (u32)term_val(heap_read(loc + 2));
@@ -427,14 +455,21 @@ static void rmu_emit_term(Term t, FILE *fp) {
         const char *base = rmu_gpu_type_name(dt);
         if ((dt == DT_FP32 || dt == DT_FP16)
             && (width == 2 || width == 4 || width == 8 || width == 16)) {
-          const char *addr_space =
-              (RMU_TARGET == CG_TARGET_METAL) ? "device const " : "const ";
-          fprintf(fp, "((%s%s%u*)(%s))[(",
-                  addr_space, base, width, rmu_buf_name(buf));
-          rmu_emit_term(addr, fp);
-          fprintf(fp, ") / %u][(", width);
-          rmu_emit_term(addr, fp);
-          fprintf(fp, ") %% %u]", width);
+          if (RMU_TARGET == CG_TARGET_CUDA) {
+            fprintf(fp, "((const %s*)&((const %s%u*)(%s))[(",
+                    base, base, width, rmu_buf_name(buf));
+            rmu_emit_term(addr, fp);
+            fprintf(fp, ") / %u])[(", width);
+            rmu_emit_term(addr, fp);
+            fprintf(fp, ") %% %u]", width);
+          } else {
+            fprintf(fp, "((device const %s%u*)(%s))[(",
+                    base, width, rmu_buf_name(buf));
+            rmu_emit_term(addr, fp);
+            fprintf(fp, ") / %u][(", width);
+            rmu_emit_term(addr, fp);
+            fprintf(fp, ") %% %u]", width);
+          }
           return;
         }
       }
@@ -1603,6 +1638,21 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
         || (k_extent % 16) != 0) {
       // Non-conforming shape: scalar-accumulator fallback.
       return 0;
+    }
+    // WMMA matrix_a / matrix_b fragments need a `half` source.  The
+    // pod is a Volta V100 (SM70) -- pre-Ampere, so wmma::precision::tf32
+    // is unavailable and WMMA is fp16-only.  Gate the tensor-core
+    // template to fp16-typed A/B buffers; an fp32 matmul takes the
+    // scalar tiled-accumulator fallback (return 0) -- the
+    // load_matrix_sync(half-frag, const float*) the old emit produced
+    // is a hard nvrtc type error.  C is left fp32 (the accumulator
+    // fragment is always fp32, which is correct on Volta).
+    {
+      u32 dt_a = uop_buffer_dtype(buf_a);
+      u32 dt_b = uop_buffer_dtype(buf_b);
+      if (dt_a != DT_FP16 || dt_b != DT_FP16) {
+        return 0;
+      }
     }
     u32 n_tiles_n_w = n_extent / 16;
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);

@@ -194,12 +194,17 @@ int main(void) {
   {
     // STORE(C[m*N+n], OPT(REDUCE(MUL(A[m*K+k], B[k*N+n]), SUM, k), TC, 0))
     // M=16, N=16, K=32 -- all multiples of 16 -> WMMA fires.
+    // A/B are fp16: on the Volta V100 target WMMA matrix fragments are
+    // fp16-only (no tf32), so the tensor-core template is gated to
+    // fp16-typed A/B buffers; C accumulates in fp32 (the accumulator
+    // fragment dtype, correct on Volta).  An fp32 A/B matmul takes the
+    // scalar fallback -- see the next test.
     u32 dimsC[2] = { 16, 16 };
     u32 dimsA[2] = { 16, 32 };
     u32 dimsB[2] = { 32, 16 };
     Term C = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsC, 0);
-    Term A = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsA, 1);
-    Term B = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsB, 2);
+    Term A = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP16, 2, dimsA, 1);
+    Term B = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP16, 2, dimsB, 2);
     Term r_m = uop_range(0, KAX_LOOP, 16);
     Term r_n = uop_range(1, KAX_LOOP, 16);
     Term r_k = uop_range(2, KAX_REDUCE, 32);
@@ -277,6 +282,65 @@ int main(void) {
     CHECK(contains(cu, "/* TC tile mismatch"));
     CHECK(!contains(cu, "wmma::"));
     CHECK(contains(cu, "float _acc2 = "));
+    free(cu);
+  }
+
+  // === OPT_TC fp32 buffers -> scalar fallback (Volta WMMA is fp16) ===
+  TEST_BEGIN("render-uop-cuda/tc-fp32-buffers-fall-back-to-scalar");
+  {
+    // Conforming 16x16x16 shape, but A/B are fp32.  On the Volta V100
+    // target WMMA matrix fragments are fp16-only -- so even a clean
+    // 16-multiple shape declines the tensor-core template when the
+    // source buffers are fp32, and the scalar accumulator emits.
+    u32 dimsC[2] = { 16, 16 };
+    u32 dimsA[2] = { 16, 32 };
+    u32 dimsB[2] = { 32, 16 };
+    Term C = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsC, 0);
+    Term A = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsA, 1);
+    Term B = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsB, 2);
+    Term r_m = uop_range(0, KAX_LOOP, 16);
+    Term r_n = uop_range(1, KAX_LOOP, 16);
+    Term r_k = uop_range(2, KAX_REDUCE, 32);
+    Term k16 = uop_const(DT_INT32, 16);
+    Term k32 = uop_const(DT_INT32, 32);
+    Term addrA = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_m, k32), r_k);
+    Term ldA   = uop_index_e(A, addrA);
+    Term addrB = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_k, k16), r_n);
+    Term ldB   = uop_index_e(B, addrB);
+    Term mul   = uop_binary(UOP_MUL, ldA, ldB);
+    Term red   = uop_reduce(REDUCE_SUM, /*axis=*/2, mul);
+    Term tc    = uop_opt(red, UOP_OPT_TC, 0);
+    Term addrC = uop_int_binary(UOP_IADD,
+                                uop_int_binary(UOP_IMUL, r_m, k16), r_n);
+    Term st    = uop_store(C, addrC, tc);
+    char *cu = render_cuda(st, "k_gemm_fp32");
+    CHECK(cu != NULL);
+    CHECK(contains(cu, "/* TC tile mismatch"));
+    CHECK(!contains(cu, "wmma::"));
+    CHECK(contains(cu, "float _acc2 = "));
+    free(cu);
+  }
+
+  // === bitcast -> __uint_as_float (CUDA, not Metal as_type) ==========
+  TEST_BEGIN("render-uop-cuda/fp32-const-emits-uint-as-float");
+  {
+    // STORE(out[r], ADD(in0[r], 1.0f)) -- the 1.0f const renders as a
+    // bit-exact bitcast.  CUDA spells it __uint_as_float (Metal uses
+    // as_type<float>, nvrtc has neither as_type nor that spelling).
+    u32 dims[1] = { 8 };
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
+    Term r0  = uop_range(0, KAX_LOOP, 8);
+    Term ld  = uop_index_e(in0, r0);
+    Term one = uop_const(DT_FP32, 0x3F800000u);
+    Term add = uop_binary(UOP_ADD, ld, one);
+    Term st  = uop_store(out, r0, add);
+    char *cu = render_cuda(st, "k_bc");
+    CHECK(cu != NULL);
+    CHECK(contains(cu, "__uint_as_float(0x3f800000u)"));
+    CHECK(!contains(cu, "as_type<float>"));
     free(cu);
   }
 
