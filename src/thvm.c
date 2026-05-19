@@ -522,11 +522,10 @@ static void install_ctx_backends(TContext *ctx, const char *want) {
     }
 #ifdef THVM_HAS_CUDA
     // THVM_BACKEND=cuda registers the CUDA backend in the vtable
-    // slot.  Stage 2 only lands the runtime + standalone thvm_cuda_*
-    // entry points; the schedule's KernelEntry dispatch path is not
-    // routed through cuda_dispatch_kernel until Stage 3 (the py
-    // bridge), so selecting it here mainly makes CUDA_BACKEND
-    // reachable for the e2e test's backend-table assertions.
+    // slot and makes it the default device.  cuda_dispatch_kernel
+    // (Stage 3) routes a scheduled KernelEntry through the
+    // structural-lift CUDA path, so a kernel built + scheduled with
+    // THVM_BACKEND=cuda runs end to end on the GPU.
     if (want && strcmp(want, "cuda") == 0) {
         ctx->backends[THVM_DEV_CUDA] = &CUDA_BACKEND;
         ctx->n_backends              = THVM_DEV_CUDA + 1;

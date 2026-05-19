@@ -3,10 +3,11 @@
 //
 // Defined last so every cuda_* helper above is in scope.  The single
 // instance CUDA_BACKEND mirrors CPU_BACKEND / METAL_BACKEND.  Its
-// dispatch_kernel is the Stage-3 stub (returns the loud error); Stage 2
-// exercises the runtime through the thvm_cuda_* helpers below instead,
-// the same way test_metal_real drives the Metal backend through
-// thvm_metal_* helpers.
+// dispatch_kernel (Stage 3) routes a scheduled KernelEntry through the
+// structural-lift CUDA path -- render -> nvrtc -> cuLaunchKernel.  The
+// standalone thvm_cuda_* helpers below give a caller the same render +
+// run path without the KernelEntry machinery, the way test_metal_real
+// drives the Metal backend through thvm_metal_* helpers.
 
 Backend CUDA_BACKEND = {
   .id              = 3,
