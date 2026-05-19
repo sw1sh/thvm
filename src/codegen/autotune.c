@@ -146,16 +146,6 @@ static char const *kautotune_backend_name(u32 backend_id) {
   }
 }
 
-static u64 kautotune_program_key(KProgOp const *prog, u32 n_ops) {
-  if (prog == NULL || n_ops == 0) {
-    return 0;
-  }
-  u64 h = 0xcbf29ce484222325ULL;
-  h = kautotune_hash_u64(h, (u64)n_ops);
-  h = kautotune_hash_bytes(h, prog, (size_t)n_ops * sizeof(KProgOp));
-  return h | (1ULL << 63);
-}
-
 static u64 kautotune_rangeified_key(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
@@ -185,9 +175,6 @@ static u64 kautotune_rangeified_key(KernelEntry const *ke) {
 fn u64 kautotune_structural_key(KernelEntry const *ke) {
   if (ke == NULL) {
     return 0;
-  }
-  if (ke->program != NULL && ke->n_ops > 0) {
-    return kautotune_program_key(ke->program, ke->n_ops);
   }
   return kautotune_rangeified_key(ke);
 }
