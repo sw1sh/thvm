@@ -3536,6 +3536,14 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti, u32 parent) {
   return 0;
 }
 
+// Per-rule "vars(lhs) subset of vars(rhs)" flag -- the precondition
+// for a variable-safe backward step.  It is a constant of rule j, but
+// mnf_successors checks it at every node and position; cached here
+// once per mnf_step over the whole rule set so the recursion reads a
+// byte instead of re-walking two terms.
+static u8  *g_mnf_vc     = NULL;
+static u32  g_mnf_vc_cap = 0u;
+
 // One-step rewrites of `t` (all positions, rules [rule_lo, rule_hi),
 // forward + -- when allow_anti -- variable-safe backward) collected
 // into mnf_succ_buf / mnf_succ_anti.
@@ -3555,7 +3563,7 @@ static void mnf_successors(AtpState *s, Term t, u8 allow_anti,
         if (*n >= MNF_SUCC_CAP) return;
       }
     }
-    if (allow_anti && atp_vars_contained(s->lhs[j], s->rhs[j])) {
+    if (allow_anti && g_mnf_vc[j]) {
       RewriteSubst sb = {{0}};
       if (thvm_match(s->rhs[j], t, &sb)) {
         mnf_succ_buf[*n]  = thvm_subst_apply(s->lhs[j], &sb);
@@ -3725,6 +3733,19 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
 // the fronts have joined.
 static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   if (m->joined) return 1;
+  // Refresh the per-rule vars-contained cache for the whole current
+  // rule set -- mnf_successors reads it instead of recomputing the
+  // flag at every node it expands this call.
+  if (s->n_rules > g_mnf_vc_cap) {
+    u32 cap = g_mnf_vc_cap ? g_mnf_vc_cap : 256u;
+    while (cap < s->n_rules) cap *= 2u;
+    u8 *nv = (u8 *)realloc(g_mnf_vc, cap);
+    if (nv == NULL) { fprintf(stderr, "mnf_step: vc cache OOM\n"); exit(1); }
+    g_mnf_vc = nv; g_mnf_vc_cap = cap;
+  }
+  for (u32 j = 0; j < s->n_rules; j++) {
+    g_mnf_vc[j] = (u8)atp_vars_contained(s->lhs[j], s->rhs[j]);
+  }
 #ifdef ATP_MNF_DIAG
   { static u32 c = 0;
     if (c++ % 16u == 0u) {

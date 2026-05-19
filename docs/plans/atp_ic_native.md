@@ -2078,3 +2078,37 @@ single-NF).  No cheap structural test separates "MNF needed" (`wolfram`,
 real, validated proof of NAND commutativity; making MNF cheap or
 lazy enough to default on -- without the `thm` tax -- is the next
 target.
+
+### 30 -- MNF defaultability is structurally blocked; where the cost is
+
+Chasing "default MNF on" produced a firm negative result worth
+recording so no later tick re-treads it.
+
+There is no cheap PROSPECTIVE gate that separates "MNF needed" from
+"MNF wasteful".  `thm` needs zero MNF (the single-NF check proves it);
+`wolfram` and `comm_monoid_swap` need a lot.  Every candidate gate
+fails:
+
+  - "MNF only for an unorientable goal" -- `comm_monoid_swap`'s goal
+    `f(a,b)=f(b,a)` IS orientable (a>b), yet still needs MNF; the
+    unorientable AXIOM, not the goal, is what defeats single-NF.
+  - "MNF after step K" -- `comm_monoid_swap` saturates (QUEUE_EMPTY)
+    at step 2, long before any useful K.
+  - "MNF when completion stalls" -- `wolfram`'s completion never
+    stalls (the queue churns indefinitely).
+  - "MNF when the goal NFs stop changing" -- `wolfram`'s goal normal
+    forms keep changing (R rewrites `nand(x,y)`) yet never converge.
+
+You only learn `thm` did not need MNF when the single-NF check finally
+fires -- too late to have skipped the MNF work.  So MNF stays opt-in
+(`-DATP_MNF`): a powerful detector for symmetric goals, not a default.
+
+A profile of the MNF run (`wolfram`, 22 s) puts the cost squarely in
+successor generation: `thvm_match` 55 %, `mnf_successors` 30 % --
+matching every rule at every position of every front node, forward and
+backward, with no index.  The per-rule `vars(lhs) subset of vars(rhs)`
+flag is now cached once per `mnf_step` rather than recomputed at every
+node (neutral at `wolfram`'s 19 rules, scales with R).  The real MNF
+speedup -- routing forward successor generation through the rule-LHS
+discrimination index instead of the linear per-rule `thvm_match` scan
+-- is the standing next target.
