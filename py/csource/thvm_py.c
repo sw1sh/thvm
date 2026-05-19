@@ -156,8 +156,6 @@ EXPORT void py_kernel_set_cached_lift(uint32_t kid, uint64_t store_root,
   }
   ke->cached_lift.n_outputs = 1;
   ke->cached_lift.out_bufs[0] = out_buf;
-  // Mirror in compute_root for the legacy view.
-  ke->compute_root = store_root;
   // Also set the KernelEntry's own n_inputs -- DAG classifiers read
   // ke->n_inputs (not cached_lift.n_inputs) when validating the
   // BUFFER.instance->slot mapping (uop_dag_classify_matmul_shape:507).
@@ -194,8 +192,8 @@ EXPORT void py_propose_tc_counters_reset(void) {
 }
 
 // Apply a KOpt to the kernel's UOp DAG (Phase E DAG-mode path).
-// Returns the new store_root term (also already mirrored into
-// ke->cached_lift.store_root and ke->compute_root); 0 on bail.  Use
+// Returns the new store_root term (already stored into
+// ke->cached_lift.store_root); 0 on bail.  Use
 // alongside the propose surface to compose the tinygrad-style BEAM
 // autotune loop in Python.
 EXPORT uint64_t py_kernel_apply_opt(uint32_t kid, uint8_t op,

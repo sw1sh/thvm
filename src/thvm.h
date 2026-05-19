@@ -1147,14 +1147,6 @@ typedef struct KernelEntry {
   // alongside cached_lift below.  Heap-resident terms are evacuated by
   // gc_evacuate_side_tables (heap/collect.c).
   //
-  // `compute_root` is a redundant view of `cached_lift.store_root`
-  // (kept populated for consumers that only need the root); the full
-  // lift output (in_bufs[], out_buf, n_inputs) lives in `cached_lift`
-  // so dispatch-time consumers (cpu_jit_build, cg_emit_via_uop,
-  // cpu_uop_walk) read it directly instead of re-running
-  // kernel_lift_to_uop.
-  Term      compute_root;
-
   // The topo walker selects this kernel's boundary from
   // RU_BUFFERIZE_TERM[] (the unified-pass main-heap UOP_BUFFERIZE node)
   // and stashes it here. Mirror source: tinygrad/schedule/indexing.py:77
@@ -1163,20 +1155,18 @@ typedef struct KernelEntry {
   Term      compute_bufferize;
 
   // Cached output of kernel_lift_to_uop, populated by
-  // emit_kernel_for_boundary alongside compute_root.  When the lift
-  // declines, cached_lift.store_root stays 0 (matches the compute_root
-  // convention).  All five Term-typed fields (store_root, out_buf,
-  // in_bufs[0..n_inputs)) are heap-resident and walked by
-  // gc_evacuate_side_tables across collections.  Embedded by-value
-  // (~528 B per slot, KERNELS_CAP-bounded) so there's no extra
-  // allocation / lifetime management; the kernel entry already
-  // memset-zeroes on alloc.
+  // emit_kernel_for_boundary.  When the lift declines,
+  // cached_lift.store_root stays 0.  All Term-typed fields
+  // (store_root, out_buf, in_bufs[0..n_inputs), out_bufs[0..n_outputs))
+  // are heap-resident and walked by gc_evacuate_side_tables across
+  // collections.  Embedded by-value (~528 B per slot, KERNELS_CAP-
+  // bounded) so there's no extra allocation / lifetime management.
   KernelUopLift cached_lift;
 
   // Snapshot of cached_lift.store_root at materialize time, before any
   // kernel_apply_opt DAG mutations.  axes_reset_to_default restores
-  // cached_lift.store_root + compute_root from this so autotune's
-  // bench-each-variant flow can rewind DAG state after each candidate.
+  // cached_lift.store_root from this so autotune's bench-each-variant
+  // flow can rewind DAG state after each candidate.
   // 0 when the lift declined; that case keeps the legacy program[]-
   // driven reset path which is naturally idempotent.
   Term      cached_lift_init_root;
@@ -2883,8 +2873,8 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
 // from the DAG itself via UOP_BUFFER.instance (kernel_lift.c sets
 // instance=0 on the output and instance=slot+1 on input slot k).
 // Production callers (cg_emit_via_uop, cpu_jit_build) pass
-// ke->compute_root / ke->cached_lift.store_root directly; no
-// out_buf/in_bufs[] tuple needed.
+// ke->cached_lift.store_root directly; no out_buf/in_bufs[] tuple
+// needed.
 fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
                                   FILE *fp);
 fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,

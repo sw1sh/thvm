@@ -252,30 +252,18 @@ static void gc_evacuate_side_tables(u64 *alloc) {
   for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {
     WNF_LAST_STACK[i] = gc_evacuate(WNF_LAST_STACK[i], alloc);
   }
-  // KernelEntry: source_uop + compute_root + cached_lift +
-  // symbolic input_terms[].  output_tid and input_tids[] are TenDesc
-  // ids, not Terms.  The Phase C compute_root field carries the
-  // post-lift UOp DAG root; it shares heap-resident UOP_BUFFER /
-  // UOP_STORE / UOP_INDEX_E cells with source_uop's subgraph in the
-  // common case but also holds freshly-allocated arithmetic spine
-  // cells (uop_int_binary etc.) produced by the lifter.  Evacuating
-  // it here keeps those cells alive across collections while the
-  // kernel is still in KERNELS[].
-  //
-  // `cached_lift` carries the same store_root plus out_buf and
-  // in_bufs[0..n_inputs).  out_buf is a UOP_BUFFER cell (heap-
-  // resident), each in_bufs[i] is either a UOP_BUFFER cell or a
-  // UOP_NUM literal (when the lifter reads a const input).  All are
-  // heap-walkable Terms; evacuating them keeps the renderer's
-  // identity-based buffer-name resolution stable across collections
-  // since rmu_buf_names_set compares by Term equality.
+  // KernelEntry: source_uop + cached_lift + symbolic input_terms[].
+  // output_tid and input_tids[] are TenDesc ids, not Terms.
+  // cached_lift.store_root carries the post-lift UOp DAG root + the
+  // heap-resident UOP_BUFFER / UOP_STORE / UOP_INDEX_E spine; out_buf
+  // and in_bufs[0..n_inputs) are UOP_BUFFER cells (or UOP_NUM literals
+  // when the lifter reads a const input).  Evacuating them keeps the
+  // renderer's identity-based buffer-name resolution stable across
+  // collections since rmu_buf_names_set compares by Term equality.
   for (u32 k = 0; k < KERNELS_NEXT; k++) {
     KernelEntry *ke = &KERNELS[k];
     if (ke->source_uop != 0) {
       ke->source_uop = gc_evacuate(ke->source_uop, alloc);
-    }
-    if (ke->compute_root != 0) {
-      ke->compute_root = gc_evacuate(ke->compute_root, alloc);
     }
     if (ke->compute_bufferize != 0) {
       ke->compute_bufferize = gc_evacuate(ke->compute_bufferize, alloc);

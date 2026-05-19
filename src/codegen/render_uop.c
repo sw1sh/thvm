@@ -3212,9 +3212,8 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
 // Structural-mode MSL renderer.  Walks `root` to discover every
 // UOP_BUFFER node by `instance` (output at slot 0, input at
 // slot k+1).  No out_buf/in_bufs[] parameters: the caller passes
-// the post-lift root (e.g. ke->compute_root /
-// ke->cached_lift.store_root) and the renderer derives the kernel
-// signature from the DAG itself.
+// the post-lift root (ke->cached_lift.store_root) and the renderer
+// derives the kernel signature from the DAG itself.
 //
 // Production callers (cg_emit_via_uop in render_metal.c) use this
 // entry; it produces output bit-equal with the legacy entry point

@@ -99,7 +99,6 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     Term new_root = uop_dag_apply_kopt(ke->cached_lift.store_root, opt);
     if (new_root == 0 || new_root == ke->cached_lift.store_root) return 0;
     ke->cached_lift.store_root = new_root;
-    ke->compute_root = new_root;
     if (opt.op == KOP_TC) APPLY_OPT_TC_GATE_DAG++;
     // Mirror the mutation into schedule->applied_opts so WL
     // introspection (TKernelOpts["Applied"]) and the axis-type

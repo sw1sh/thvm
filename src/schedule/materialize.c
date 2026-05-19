@@ -4065,10 +4065,8 @@ static Term emit_kernel_for_boundary(u32 bi) {
   //
   // Dispatch-time consumers (cpu_jit_build, cg_emit_via_uop,
   // cpu_uop_walk) read store_root / out_buf / in_bufs[] from
-  // cached_lift without re-running the lifter.  compute_root is
-  // kept populated as a redundant view of cached_lift.store_root.
+  // cached_lift without re-running the lifter.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
-    ke->compute_root = ke->cached_lift.store_root;
     // Substitute the lifter's store_root with the unified-pass
     // output where available.  The lifter's other cached_lift
     // fields (in_bufs[], n_inputs) stay populated from the legacy
@@ -4155,7 +4153,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
         // those with proper UOP_BUFFER terms carrying input-slot
         // instance, which is benign regardless of gate outcome.
         ke->cached_lift.store_root = ru_rewritten;
-        ke->compute_root           = ru_rewritten;
         if (!has_resid && !has_stranded && !has_bcast) {
           BYPASS_KERNEL_USED_UNIFIED++;
           unified_fold_chain_commit_flags(ke, &_cf_marks);
@@ -4232,7 +4229,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
                                                   m_opts, m_n_app);
       Term post = uop_apply_kernel_opts(root_after_split, m_opts, m_n_app);
       ke->cached_lift.store_root = post;
-      ke->compute_root           = post;
     }
     // Dual-write: when the lift succeeds, cached_lift.store_root is
     // the canonical UOp DAG and program[] is the legacy KProgOp side

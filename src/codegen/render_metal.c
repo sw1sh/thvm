@@ -172,7 +172,7 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 // Bumps KERNEL_LIFT_ATTEMPTS / SUCCESSES counters as it goes; readable
 // via kernel_lift_attempts() / kernel_lift_successes() for diagnostics.
 //
-// Passes compute_root (= cached_lift.store_root) directly into
+// Passes cached_lift.store_root directly into
 // cg_render_uop_kernel_root, which discovers buffer slots structurally
 // from the DAG via UOP_BUFFER.instance.  No in_bufs[] dependency:
 // kernel_lift.c stamps instance=slot+1 on each input BUFFER, so the

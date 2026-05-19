@@ -63,7 +63,6 @@ TESTS := \
   $(BIN)/test_render_uop_cuda \
   $(BIN)/test_kernel_lift \
   $(BIN)/test_kernel_lift_coverage \
-  $(BIN)/test_compute_root_dual_write \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \
   $(BIN)/test_cnf \

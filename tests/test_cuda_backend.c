@@ -232,7 +232,6 @@ int main(void) {
     KernelEntry *ke = &KERNELS[kid];
     ke->cached_lift.store_root = st;
     ke->cached_lift.n_inputs = 2;
-    ke->compute_root = st;
     ke->n_inputs = 2;
     ke->output_numel = M * N;
 
@@ -313,7 +312,6 @@ int main(void) {
     KernelEntry *ke = &KERNELS[kid];
     ke->cached_lift.store_root = st_local;
     ke->cached_lift.n_inputs = 2;
-    ke->compute_root = st_local;
     ke->n_inputs = 2;
     ke->output_numel = M * N;
 
@@ -393,7 +391,6 @@ int main(void) {
     KernelEntry *ke = &KERNELS[kid];
     ke->cached_lift.store_root = st_up;
     ke->cached_lift.n_inputs = 2;
-    ke->compute_root = st_up;
     ke->n_inputs = 2;
     ke->output_numel = M * N;
 
@@ -469,7 +466,6 @@ int main(void) {
     KernelEntry *ke = &KERNELS[kid];
     ke->cached_lift.store_root = st_sr;
     ke->cached_lift.n_inputs = 1;
-    ke->compute_root = st_sr;
     ke->n_inputs = 1;
     ke->output_numel = R;
 

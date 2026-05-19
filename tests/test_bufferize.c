@@ -873,8 +873,6 @@ int main(void) {
   // program[] is freed post-lift; the program-side comparison no
   // longer applies (the bufferize edge table is still populated, but
   // the program rows that referenced its chain entries are gone).
-  // The relevant invariant for that mode is exercised by the
-  // dispatch-side tests in test_compute_root_dual_write.
   KernelEntry const *cm_ke = &KERNELS[cm_kid];
   char const *cm_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
   int cm_free_on = (cm_free_e != NULL) && (cm_free_e[0] == '1');

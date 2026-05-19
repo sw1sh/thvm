@@ -208,7 +208,6 @@ static void test_kernel_apply_opt_dag_path(void) {
   ke->cached_lift.n_inputs   = 2;
   ke->cached_lift.n_outputs  = 1;
   ke->cached_lift.out_bufs[0] = C;
-  ke->compute_root = root;
   ke->n_inputs = 2;
 
   KOpt opt = { KOP_TC, 0, 32 };
@@ -219,7 +218,6 @@ static void test_kernel_apply_opt_dag_path(void) {
   CHECK(term_ext(new_value) == UOP_OPT);
   CHECK(uop_opt_kind(new_value) == UOP_OPT_TC);
   CHECK(uop_opt_factor(new_value) == 32);
-  CHECK(ke->compute_root == ke->cached_lift.store_root);
 }
 
 static void test_kernel_apply_opt_unsupported_op_bails(void) {
@@ -230,7 +228,6 @@ static void test_kernel_apply_opt_unsupported_op_bails(void) {
   u32 kid = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
   ke->cached_lift.store_root = root;
-  ke->compute_root = root;
 
   // KOP_PADTO is reserved; unsupported.
   KOpt opt = { KOP_PADTO, 0, 8 };
