@@ -340,11 +340,19 @@ $(BIN)/test_multi_trace_on: tests/test_multi_trace.c $(SRC) | $(BIN)
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
-# === py/ ctypes bindings (libthvm_py.dylib) ==========================
+# === py/ ctypes bindings (libthvm_py.{dylib,so}) =====================
 # Single-TU build of src/thvm.c + extern-C wrapper that re-exports the
-# static-inline UOp constructors. Lets ctypes drive thvm from Python.
-# No Metal -- the "build IR + render to MSL string" path; the rendered
-# MSL goes through xcrun -> metallib -> bench/metal-problems harness.
+# static-inline UOp constructors, so ctypes can drive thvm from Python.
+# Two platform variants, both producing one `py` target:
+#
+#   macOS:  libthvm_py.dylib  =  thvm_py.c (.o) + thvm_py_metal.m (.o)
+#                                + Accelerate/Metal/Foundation frameworks
+#   Linux:  libthvm_py.so     =  thvm_py.c (.o) + thvm_py_cuda.c (.o)
+#                                + -lcuda -lnvrtc   (when CUDA present)
+#
+# The macOS block is guarded by `uname -s == Darwin` and is untouched
+# by the Linux addition below; the Linux block only emits a CUDA bridge
+# when the CUDA headers were found (HAVE_CUDA from the block above).
 ifeq ($(shell uname -s),Darwin)
 PY_DYLIB        := py/thvm/libthvm_py.dylib
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
@@ -360,6 +368,33 @@ $(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ)
 	    -o $@ $^
 .PHONY: py
 py: $(PY_DYLIB)
+endif
+
+# Linux py build: libthvm_py.so.  thvm_py.c carries the UOp builder +
+# both render entry points (the CUDA renderer is plain C, always
+# compiled in); thvm_py_cuda.c is the in-process nvrtc + driver bridge,
+# linked only when HAVE_CUDA.  Without CUDA the .so still builds (UOp
+# construction + render-to-string), the `Cuda` class just stays
+# unavailable -- mirroring how the macOS .dylib needs no GPU to render.
+ifeq ($(shell uname -s),Linux)
+PY_SO           := py/thvm/libthvm_py.so
+PY_THVM_OBJ     := $(BUILD)/py_thvm.o
+$(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
+	$(CC) -fPIC -O2 \
+	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
+	    -c -o $@ $<
+ifdef HAVE_CUDA
+PY_CUDA_OBJ     := $(BUILD)/py_thvm_cuda.o
+$(PY_CUDA_OBJ): py/csource/thvm_py_cuda.c | $(BUILD)
+	$(CC) -fPIC -O2 $(CUDA_DEFINES) -c -o $@ $<
+$(PY_SO): $(PY_THVM_OBJ) $(PY_CUDA_OBJ)
+	$(CC) -shared -o $@ $^ $(CUDA_LDFLAGS) -lm
+else
+$(PY_SO): $(PY_THVM_OBJ)
+	$(CC) -shared -o $@ $^ -lm
+endif
+.PHONY: py
+py: $(PY_SO)
 endif
 
 test: $(TESTS)

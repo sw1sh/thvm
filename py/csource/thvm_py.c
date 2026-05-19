@@ -111,6 +111,21 @@ EXPORT char *py_render_uop_kernel(uint64_t root, const char *name) {
   return buf;
 }
 
+// CUDA structural renderer.  Returns a heap-allocated null-terminated
+// .cu source string (`extern "C" __global__ void k(...)`).  Caller
+// frees via py_string_free.  The CUDA-target counterpart of
+// py_render_uop_kernel; the Python `Thvm.render_cuda` wraps it.
+EXPORT char *py_render_uop_kernel_cuda(uint64_t root, const char *name) {
+  char *buf = NULL;
+  size_t sz = 0;
+  FILE *fp = open_memstream(&buf, &sz);
+  if (fp == NULL) return NULL;
+  cg_render_uop_kernel_cuda_root(root, name ? name : "k", fp);
+  fflush(fp);
+  fclose(fp);
+  return buf;
+}
+
 EXPORT void py_string_free(char *s) { free(s); }
 
 // ---------------- BEAM / autotune surface ----------------
