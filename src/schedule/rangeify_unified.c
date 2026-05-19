@@ -1864,6 +1864,10 @@ fn void pm_apply_rangeify(Term root) {
               if (psub_is_bufferize) {
                 Term in_addr = ru_build_input_addr_for(rm, info->loc);
                 fwd = uop_index_e(psub, in_addr);
+                // Stash per-axis range terms for the bypass rewriter's
+                // axis-table inline.  Mirror: tinygrad's BUFFERIZE.index
+                // (indexing.py:78) at the PAD-wrap path.
+                ru_index_axes_register(fwd, rm->in_rngs, rm->in_ndim);
               }
               fwd = ru_pad_wrap_where(info->loc, rm, fwd);
             }
