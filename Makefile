@@ -134,6 +134,34 @@ else
   METAL_DEFINES  :=
 endif
 
+# === CUDA backend (Linux + CUDA present) =============================
+# Mirror of the Darwin Metal block above.  Unlike Metal (a separate
+# Objective-C .o), the CUDA backend is plain C99 -- the driver API and
+# nvrtc are C -- so it is #included straight into src/thvm.c, gated by
+# -DTHVM_HAS_CUDA.  This block enables it ONLY on Linux with the CUDA
+# headers found; the macOS build never sees -DTHVM_HAS_CUDA and is left
+# completely untouched.
+#
+# CUDA_HOME is auto-detected (override on the make line if elsewhere).
+# The CUDA driver lib (libcuda) ships with the GPU driver and lives in
+# the system lib dir; libnvrtc lives in the toolkit.  Both -L paths are
+# passed so a driver-only image (libcuda in /usr/lib, nvrtc symlinked
+# there per docs/plans/cuda_backend.md) and a full-toolkit image both
+# link.
+# NB: uname is queried inline via $(shell ...) -- the same idiom the
+# Metal block uses -- because the shared UNAME_S variable is not
+# assigned until further down the file.
+CUDA_HOME ?= $(firstword $(wildcard /usr/local/cuda /usr/local/cuda-12.4 /usr/local/cuda-12) /usr/local/cuda)
+ifeq ($(shell uname -s),Linux)
+  ifneq ($(wildcard $(CUDA_HOME)/include/cuda.h),)
+    HAVE_CUDA      := 1
+    CUDA_DEFINES   := -DTHVM_HAS_CUDA -I$(CUDA_HOME)/include
+    CUDA_LDFLAGS   := -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib64/stubs \
+                      -L/usr/lib/x86_64-linux-gnu -lcuda -lnvrtc
+    TESTS          += $(BIN)/test_cuda_backend
+  endif
+endif
+
 # Every C and header file under src/, plus the test harness header.
 # Used as a prerequisite by both the C tests and the WL bridge so any
 # runtime change retriggers a rebuild.
@@ -292,6 +320,12 @@ $(BIN)/test_aot_metal: tests/test_aot_metal.c $(SRC) $(METAL_OBJ) $(METAL_LIBPAT
 
 $(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+# CUDA end-to-end test: -DTHVM_HAS_CUDA pulls backend/cuda/ into the
+# single-TU build; -lcuda -lnvrtc link the driver + nvrtc.  Only
+# reachable when the CUDA block above added it to TESTS (Linux+CUDA).
+$(BIN)/test_cuda_backend: tests/test_cuda_backend.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
 # Multicomputation trace -- built TWICE from the same source so we
 # can verify both halves of the gating discipline.  test_multi_trace
