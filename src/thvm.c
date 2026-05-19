@@ -298,9 +298,9 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "codegen/hand_opts.c"
 
 // === schedule/ ===
-// Materialize pipeline: schedule + kernelize + linearize + splice.
-// Produces the scheduled DAG of UOP_KERNEL terms that
-// interact_kernel fires bottom-up.
+// Materialize pipeline: schedule + kernelize + lift.  Produces the
+// scheduled DAG of UOP_KERNEL terms that interact_kernel fires
+// bottom-up.
 #include "schedule/indexing.c"
 #include "schedule/kernel_lift.c"
 #include "schedule/tile.c"

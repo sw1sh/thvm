@@ -11,15 +11,6 @@
 // Aliasing-aware: a view-only TenDesc (RESHAPE / EXPAND alias) keeps
 // its source tensor's producer_kid via tensor_view_of, so an alias
 // consumer is correctly attributed to the original producer.
-//
-// Spliced kernels: their output is produced by a parent kernel
-// (the splicer), but the splice infrastructure does NOT rewrite
-// downstream consumers' input_tids; consumers still reference the
-// spliced kernel's output_tid, whose producer_kid still points at
-// the spliced kernel.  So spliced kernels accumulate the same
-// consumer_count they would have without splicing -- correct, since
-// "logical consumers of this output" is what matters for the free
-// decision.
 
 fn void kernel_compute_consumer_counts(void) {
   for (u32 k = 1; k < KERNELS_NEXT; k++) {
