@@ -15,7 +15,7 @@ int main(void) {
 
   // === UOP_RANGE: leaf ===
   TEST_BEGIN("uop-index/range-heap-layout");
-  Term r0 = uop_range(/*axis_id=*/0, /*axis_type=*/S_AXIS_LOOP, /*extent=*/32);
+  Term r0 = uop_range(/*axis_id=*/0, /*axis_type=*/KAX_LOOP, /*extent=*/32);
   CHECK_EQ(term_tag(r0), TAG_UOP);
   CHECK_EQ(term_ext(r0), UOP_RANGE);
   Term r0_axis  = heap_read(term_val(r0) + 0);
@@ -23,20 +23,20 @@ int main(void) {
   Term r0_ext   = heap_read(term_val(r0) + 2);
   CHECK_EQ(term_tag(r0_axis), TAG_NUM);
   CHECK_EQ(term_val(r0_axis), 0);
-  CHECK_EQ(term_val(r0_type), S_AXIS_LOOP);
+  CHECK_EQ(term_val(r0_type), KAX_LOOP);
   CHECK_EQ(term_val(r0_ext),  32);
 
   TEST_BEGIN("uop-index/range-hash-cons");
-  Term r0_again = uop_range(0, S_AXIS_LOOP, 32);
+  Term r0_again = uop_range(0, KAX_LOOP, 32);
   CHECK_EQ(r0_again, r0);
   // Different axis_id -> different Term.
-  Term r1 = uop_range(1, S_AXIS_LOOP, 32);
+  Term r1 = uop_range(1, KAX_LOOP, 32);
   CHECK(r1 != r0);
   // Different axis_type -> different Term.
-  Term r0_red = uop_range(0, S_AXIS_REDUCE, 32);
+  Term r0_red = uop_range(0, KAX_REDUCE, 32);
   CHECK(r0_red != r0);
   // Different extent -> different Term.
-  Term r0_ext64 = uop_range(0, S_AXIS_LOOP, 64);
+  Term r0_ext64 = uop_range(0, KAX_LOOP, 64);
   CHECK(r0_ext64 != r0);
 
   // === UOP_INVALID: singleton ===
@@ -115,7 +115,7 @@ int main(void) {
   // === Compose: PAD-style guard expression mirroring tinygrad ===
   // ((r >= K) & (r < shape+K)).where(r-K, INVALID)
   TEST_BEGIN("uop-index/pad-style-composition");
-  Term r       = uop_range(0, S_AXIS_LOOP, 36);   // padded shape
+  Term r       = uop_range(0, KAX_LOOP, 36);   // padded shape
   Term K       = uop_const(DT_INT32, 2);          // pad start
   Term sh_pK   = uop_const(DT_INT32, 34);         // shape + K (precomputed)
   Term lo_ok   = uop_int_binary(UOP_ILT, K, r);              // K < r  -> r >= K+1; close enough

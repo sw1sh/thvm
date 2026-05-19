@@ -674,7 +674,7 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
         // Cap was originally 1 per absorbing boundary to dodge the
         // materializer's "one REDUCE per kernel" gate (now removed).
         // With multi-REDUCE permitted in a single kernel
-        // (materialize.c, rangeify scalar_uops), the cap is obsolete:
+        // (materialize.c walks the unified-rangeify lowered DAG), the cap is obsolete:
         // any number of broadcast-fed REDUCE chains in the same
         // absorbing-boundary root can fuse.  Default to UINT32_MAX
         // (effectively unlimited); THVM_REDUCE_UNMARK_CAP=0..9 caps it

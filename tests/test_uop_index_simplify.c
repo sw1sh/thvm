@@ -13,8 +13,8 @@
 int main(void) {
   thvm_init();
 
-  Term r = uop_range(0, S_AXIS_LOOP, 8);
-  Term r2 = uop_range(1, S_AXIS_LOOP, 100);
+  Term r = uop_range(0, KAX_LOOP, 8);
+  Term r2 = uop_range(1, KAX_LOOP, 100);
   Term zero = uop_const(DT_INT32, 0);
   Term one  = uop_const(DT_INT32, 1);
   Term two  = uop_const(DT_INT32, 2);
@@ -163,7 +163,7 @@ int main(void) {
 
   TEST_BEGIN("simplify/divmod-affine-c-mul-x-plus-y-divides-when-y-in-range");
   // (3*r2 + ya) / 3 -> r2 when ya in [0, 3).  Use a RANGE with extent 3.
-  Term ya = uop_range(99, S_AXIS_LOOP, 3);
+  Term ya = uop_range(99, KAX_LOOP, 3);
   Term mix3 = uop_int_binary(UOP_IADD, mul3, ya);
   CHECK_EQ(uop_int_binary(UOP_IDIV, mix3, three), r2);
   // (3*r2 + ya) % 3 -> ya.
@@ -331,8 +331,8 @@ int main(void) {
   // in_iters[1] = flat % 3 (for the 2-axis output side; 1-axis input
   // bottom).  We test the fold path directly here: with i0 ext>=, i1 ext=3,
   // (i0*3 + i1) / 3 -> i0 and (i0*3 + i1) % 3 -> i1.
-  Term i0 = uop_range(200, S_AXIS_LOOP, 2);
-  Term i1 = uop_range(201, S_AXIS_LOOP, 3);
+  Term i0 = uop_range(200, KAX_LOOP, 2);
+  Term i1 = uop_range(201, KAX_LOOP, 3);
   Term reshape_flat = uop_int_binary(UOP_IADD,
                        uop_int_binary(UOP_IMUL, i0, three), i1);
   CHECK_EQ(uop_int_binary(UOP_IDIV, reshape_flat, three), i0);

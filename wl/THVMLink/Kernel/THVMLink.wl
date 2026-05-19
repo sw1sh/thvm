@@ -460,7 +460,6 @@ $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},   
 $realizeFn     := $realizeFn     = load["thvm_wl_realize",         {Integer},                        Integer];
 $realizeManyFn := $realizeManyFn = load["thvm_wl_realize_many",    {{Integer, 1}},                   Integer];
 $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},                               Integer];
-$kernelScalarUopsFn := $kernelScalarUopsFn = load["thvm_wl_kernel_scalar_uops", {Integer}, {Integer, 1}];
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
 $kernelProgramKeyFn       := $kernelProgramKeyFn       = load["thvm_wl_kernel_program_key",        {Integer}, Integer];
 $kernelAxesGetFn          := $kernelAxesGetFn          = load["thvm_wl_kernel_axes_get",            {Integer}, {Integer, 1}];

@@ -99,8 +99,8 @@ int uop_dag_dtype_uniform(Term t, u32 dt) {
 
 // Walk the DAG rooted at `t` and find the first UOP_RANGE leaf whose
 // axis_type == 1 (KAX_REDUCE).  Returns the extent (NUM at slot 1) if
-// found, else 0.  Used by propose's reduce-axis-size heuristic when
-// program[] / scalar_uops aren't available.
+// found, else 0.  Used by propose's reduce-axis-size heuristic over
+// the lifted UOp DAG.
 u32 uop_dag_reduce_axis_extent(Term t) {
   if (t == 0 || term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);

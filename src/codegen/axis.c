@@ -80,11 +80,8 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
 //
 //   1. Initial state: `nd = output_shape.ndim` LOOPs (clipped to
 //      MAX_AXES-1), optionally followed by a single trailing REDUCE.
-//      The trailing-REDUCE is present iff
-//        - the kernel program ends in UOP_REDUCE (axes_default_for
-//          appends it), OR
-//        - the scalar arena carries an S_REDUCE_* over an
-//          S_AXIS_REDUCE range (axes_ensure_scalar_reduce appends it).
+//      The trailing-REDUCE is present iff the kernel program ends in
+//      UOP_REDUCE (axes_default_for appends it).
 //   2. Replay applied_opts in order using the same structural logic
 //      as axes_apply_opt: KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP
 //      split the indicated axis and insert a new inner axis with the

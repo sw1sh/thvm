@@ -2290,56 +2290,6 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc
   return LIBRARY_NO_ERROR;
 }
 
-// thvm_wl_kernel_scalar_uops(kid)  -- Phase A introspection of the
-// rangeify lowering snapshot retained on KERNELS[kid].  Returns:
-//   - empty MTensor (length 0) when ke->scalar_uops is NULL (legacy
-//     visit() path emitted this kernel; WL-side reads as Missing[]).
-//   - flat Integer MTensor encoding [n_scalar_uops, src_width,
-//     op0_op, op0_dtype, op0_src_count, op0_src..., op0_extra_lo,
-//     op0_extra_hi, pad, ... per op ...].  The per-op row is
-//     6 + src_width integers; extra is u64 split into two i32 halves
-//     to fit MType_Integer.
-//   Slot 0 (S_NONE sentinel) IS included so caller-side indices
-//   match the C-side ScalarUop[] indexing.
-EXTERN_C DLLEXPORT int thvm_wl_kernel_scalar_uops(WolframLibraryData libData,
-                                                  mint argc, MArgument *args,
-                                                  MArgument res) {
-  (void)argc;
-  mint kid = MArgument_getInteger(args[0]);
-  if (kid < 0 || (u32)kid >= KERNELS_NEXT) {
-    MArgument_setMTensor(res, NULL);
-    return LIBRARY_FUNCTION_ERROR;
-  }
-  KernelEntry *ke = &KERNELS[kid];
-  mint n = (ke->scalar_uops == NULL) ? 0 : (mint)ke->n_scalar_uops;
-  // Header is 2 ints (n_scalar_uops, src_width); body is
-  // (6 + SCALAR_MAX_SRC) ints per op.
-  mint srcWidth = SCALAR_MAX_SRC;
-  mint rowWidth = 6 + srcWidth;
-  mint nFields = 2 + n * rowWidth;
-  mint dims[1] = {nFields};
-  MTensor out;
-  libData->MTensor_new(MType_Integer, 1, dims, &out);
-  mint *dst = libData->MTensor_getIntegerData(out);
-  mint idx  = 0;
-  dst[idx++] = n;
-  dst[idx++] = srcWidth;
-  for (mint i = 0; i < n; i++) {
-    ScalarUop *u = &ke->scalar_uops[i];
-    dst[idx++] = (mint)u->op;
-    dst[idx++] = (mint)u->dtype;
-    dst[idx++] = (mint)u->src_count;
-    for (mint s = 0; s < srcWidth; s++) {
-      dst[idx++] = (mint)u->src[s];
-    }
-    dst[idx++] = (mint)(u->extra & 0xFFFFFFFFu);
-    dst[idx++] = (mint)((u->extra >> 32) & 0xFFFFFFFFu);
-    dst[idx++] = 0;   // padding to keep alignment + future use
-  }
-  MArgument_setMTensor(res, out);
-  return LIBRARY_NO_ERROR;
-}
-
 // === REF / ALO surface ===
 
 EXTERN_C DLLEXPORT int thvm_wl_def_register(WolframLibraryData libData, mint argc,

@@ -14,8 +14,8 @@
 // === UOP_RANGE: axis-iter leaf ===
 //
 // Heap layout: [NUM(axis_id), NUM(axis_type), NUM(extent)].
-// axis_type uses the same S_AXIS_LOOP/REDUCE/UNROLL/GLOBAL/VIRT
-// encoding so a downstream lowering can reuse the constants.
+// axis_type uses the KAX_LOOP/REDUCE/UPCAST/UNROLL/LOCAL/GLOBAL/
+// GROUP_REDUCE encoding from the KAX_* defines.
 
 fn Term uop_range(u32 axis_id, u32 axis_type, u32 extent) {
   u32 args[3] = { axis_id, axis_type, extent };

@@ -14,7 +14,7 @@ int main(void) {
   // Build a synthetic buffer + address tree to feed to STORE.
   u32 dims[1] = { 32 };
   Term buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims);
-  Term r    = uop_range(0, 0 /*S_AXIS_LOOP*/, 32);
+  Term r    = uop_range(0, KAX_LOOP, 32);
   Term val  = uop_const(DT_FP32, 0x40490FDBu); // ~3.14159
 
   TEST_BEGIN("uop-store/heap-layout");

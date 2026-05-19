@@ -46,8 +46,7 @@ TKernelDispatch::usage = "TKernelDispatch[k] dispatches the kernel by TWnf-firin
 TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
 TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns 0 (the kernel-program hash-cons cache is gone; the kernel body lives on the lifted UOp DAG, which is hash-consed by the heap itself).  Kept on the surface as a no-op for legacy callers.";
 TKernelProgramKey::usage = "TKernelProgramKey[kid] returns the structural key for the kernel's shared schedule slot, or 0 when the kernel has no shared axes entry.  Kernels with the same nonzero key share one C-side KpSchedule schedule slot, so autotuning one representative applies to the whole program shape.";
-TKernelInfo::usage     = "TKernelInfo[kid] returns an Association with the shape header for KERNELS[kid]: \"n_inputs\", \"n_ops\" (always 0; the per-op program array is gone), \"output_numel\", \"output_dtype\".  \"program\" is always {} -- use TKernelSource / TKernelScalarUops for the lifted UOp DAG.";
-TKernelScalarUops::usage = "TKernelScalarUops[kid] returns the post-lowering scalar-UOp graph snapshot stored at KERNELS[kid].scalar_uops, as a List of Associations (one per scalar op, with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\", and -- for S_RANGE -- \"axis_type\" and \"extent\").  Returns Missing[\"NotLowered\"] when the kernel was emitted via the legacy per-tensor-UOp visit() path (i.e. rangeify lowering was off or didn't apply).  Slot 0 (S_NONE sentinel) is included so list indices match C-side ScalarUop[] indices; live ops occupy positions [2..].";
+TKernelInfo::usage     = "TKernelInfo[kid] returns an Association with the shape header for KERNELS[kid]: \"n_inputs\", \"n_ops\" (always 0; the per-op program array is gone), \"output_numel\", \"output_dtype\".  \"program\" is always {} -- use TKernelSource for the lifted UOp DAG.";
 TKernelTileUops::usage = "TKernelTileUops[kid] returns the tile-UOp plan snapshot stored at KERNELS[kid].tile_uops, as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", and \"extra\".  TILE_AXIS entries also expose \"axis_type\" and \"extent\".  Returns Missing[\"NotLowered\"] when no rangeify tile plan exists.  Slot 0 (TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.";
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
@@ -778,8 +777,7 @@ TProfileProgramGroups[profile_Association] := Module[{groups},
             {group, groups}],
         Lookup[#, "TotalUs", 0] &]]
 
-tFusionStatus[scalarQ_, tileQ_, proposalCount_Integer] := Which[
-    !scalarQ, "not-rangeified",
+tFusionStatus[tileQ_, proposalCount_Integer] := Which[
     !tileQ, "scalar-only",
     proposalCount <= 0, "tile-no-proposals",
     True, "tile-tunable"
@@ -787,16 +785,14 @@ tFusionStatus[scalarQ_, tileQ_, proposalCount_Integer] := Which[
 
 TProfileFusionGaps[profile_Association] := Module[{rows},
     rows = Table[
-        Module[{kid, scalar, tile, proposed, scalarQ, tileQ, status},
+        Module[{kid, tile, proposed, tileQ, status},
             kid = row["RepKid"];
-            scalar = TKernelScalarUops[kid];
             tile = TKernelTileUops[kid];
             proposed = TKernelProposed[kid];
-            scalarQ = Head[scalar] =!= Missing;
             tileQ = Head[tile] =!= Missing;
-            status = tFusionStatus[scalarQ, tileQ, Length[proposed]];
+            status = tFusionStatus[tileQ, Length[proposed]];
             Join[row, <|
-                "ScalarLowered" -> scalarQ,
+                "ScalarLowered" -> True,
                 "TileLowered" -> tileQ,
                 "ProposalCount" -> Length[proposed],
                 "FusionStatus" -> status
@@ -816,9 +812,9 @@ TKernelProgramCacheSize[] := (ensureInit[]; $kernelProgramCacheSizeFn[])
 
 (* TKernelInfo[kid] returns a flat Association with the kernel's
    shape metadata.  The per-op program array is gone (the kernel
-   body lives on the lifted UOp DAG, accessed via TKernelSource /
-   TKernelScalarUops); "n_ops" stays in the surface for backward
-   compat but is always 0, and "program" is always {}. *)
+   body lives on the lifted UOp DAG, accessed via TKernelSource);
+   "n_ops" stays in the surface for backward compat but is always 0,
+   and "program" is always {}. *)
 TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid]},
     <|
       "n_inputs"     -> raw[[1]],
@@ -827,83 +823,6 @@ TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid]},
       "output_dtype" -> dtypeName[raw[[4]]],
       "program"      -> {}
     |>
-]
-
-(* Scalar-UOp introspection (Phase A of scalar_uops_lowering).
-   Decodes the flat Integer MTensor from thvm_wl_kernel_scalar_uops
-   into a List of Associations.  Returns Missing["NotLowered"] when
-   the kernel didn't go through the rangeify path. *)
-$scalarOpNames = <|
-    0 -> "S_NONE",          1 -> "S_RANGE",         2 -> "S_DEFINE_PARAM",
-    3 -> "S_DEFINE_OUTPUT", 4 -> "S_INDEX",         5 -> "S_LOAD",
-    6 -> "S_STORE",         7 -> "S_BUFFERIZE",     8 -> "S_CONST",
-    9 -> "S_ADD",          10 -> "S_MUL",          11 -> "S_NEG",
-   12 -> "S_RECIP",        13 -> "S_EXP2",         14 -> "S_LOG2",
-   15 -> "S_SQRT",         16 -> "S_CMPLT",        17 -> "S_CMPEQ",
-   18 -> "S_REDUCE_SUM",   19 -> "S_REDUCE_MAX",   20 -> "S_CAST",
-   21 -> "S_SHRINK",       22 -> "S_PAD",          23 -> "S_LOAD_RAW",
-   24 -> "S_FLIP",         25 -> "S_RESHAPE",      26 -> "S_RESHAPE_V",
-   27 -> "S_ICONST",       28 -> "S_IADD",         29 -> "S_ISUB",
-   30 -> "S_IMUL",         31 -> "S_IDIV",         32 -> "S_IMOD",
-   33 -> "S_ILT",          34 -> "S_IAND",         35 -> "S_IWHERE",
-   36 -> "S_INDEX_E"
-|>;
-
-$scalarAxisNames = <|
-    0 -> "LOOP", 1 -> "REDUCE", 2 -> "UNROLL", 3 -> "GLOBAL",
-    4 -> "VIRT"
-|>;
-
-TKernelScalarUops[kid_Integer] := Module[{raw, n, srcWidth, headerWidth,
-        rowWidth, decoded},
-    raw = Normal @ $kernelScalarUopsFn[kid];
-    If[ raw === {} || First[raw] == 0,
-      Return @ Missing["NotLowered"] ];
-    n = First[raw];
-    If[ Length[raw] == 1 + n * 10,
-        srcWidth = 4;
-        headerWidth = 1,
-        srcWidth = raw[[2]];
-        headerWidth = 2
-    ];
-    rowWidth = 6 + srcWidth;
-    decoded = Table[
-      With[{base = headerWidth + (i - 1) * rowWidth,
-            opCode = raw[[headerWidth + (i - 1) * rowWidth + 1]],
-            extra  = BitOr[
-              raw[[headerWidth + (i - 1) * rowWidth + 4 + srcWidth]],
-              BitShiftLeft[
-                raw[[headerWidth + (i - 1) * rowWidth + 5 + srcWidth]],
-                32]]},
-        With[{
-          opName    = Lookup[$scalarOpNames, opCode, "S_?"],
-          srcCount  = raw[[base + 3]],
-          src       = raw[[base + 4 ;; base + 3 + srcWidth]]
-        },
-          (* S_RANGE special-case: split extra into (extent, axis_type)
-             so callers don't have to redo the bit math. *)
-          If[ opName === "S_RANGE",
-            <|
-              "id"        -> i - 1,
-              "op"        -> opName,
-              "dtype"     -> dtypeName[raw[[base + 2]]],
-              "src"       -> Take[src, srcCount],
-              "extent"    -> BitAnd[extra, 16^^FFFFFFFF],
-              "axis_type" -> Lookup[$scalarAxisNames,
-                               BitShiftRight[extra, 32], "?"]
-            |>,
-            <|
-              "id"     -> i - 1,
-              "op"     -> opName,
-              "dtype"  -> dtypeName[raw[[base + 2]]],
-              "src"    -> Take[src, srcCount],
-              "extra"  -> extra
-            |>
-          ]
-        ]
-      ],
-      {i, n}];
-    decoded
 ]
 
 $tileAxisNames = <|

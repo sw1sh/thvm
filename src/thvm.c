@@ -297,16 +297,10 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // scanners (uop/dag_scan.c) above, so it lands here.
 #include "codegen/hand_opts.c"
 
-// === scalar/ ===
-// Per-kernel ScalarUop[] simplification harness (Phase 2 of the
-// tinygrad symbolic/index rule port).  Runs over rangeify's flat
-// slot-id arena; rules land in subsequent phases.
-
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.
 // Produces the scheduled DAG of UOP_KERNEL terms that
 // interact_kernel fires bottom-up.
-#include "schedule/rangeify.c"
 #include "schedule/indexing.c"
 #include "schedule/kernel_lift.c"
 #include "schedule/tile.c"

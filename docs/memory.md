@@ -378,7 +378,6 @@ Memory diagnostics should be read with fusion diagnostics:
   consumer kernels for those rows.
 - `TProfileFusionGaps[TProfileDelta[before, after]]` filters those
   groups to hot shapes that are not yet tile-tunable.
-- `TKernelScalarUops[kid]` shows whether rangeify fused the boundary.
 - `TKernelTileUops[kid]` and `TKernelTilePlan[kid]` show whether the
   tile path can consume it.
 - `TMetalMemoryProfile[]` shows whether that fused/tiled path keeps

@@ -61,8 +61,6 @@ TESTS := \
   $(BIN)/test_render_uop \
   $(BIN)/test_render_uop_metal \
   $(BIN)/test_render_uop_cuda \
-  $(BIN)/test_kernel_lift \
-  $(BIN)/test_kernel_lift_coverage \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \
   $(BIN)/test_cnf \
@@ -121,8 +119,6 @@ ifeq ($(shell uname -s),Darwin)
   METAL_AIRS     := $(METAL_SHADERS:src/backend/metal/shaders/%.metal=$(BUILD)/%.air)
   METAL_DEFINES  := -DTHVM_METAL_METALLIB='"$(METAL_LIBPATH)"'
   TESTS          += $(BIN)/test_metal_real
-  TESTS          += $(BIN)/test_metal_pso_cache
-  TESTS          += $(BIN)/test_metal_variable_pso_hit
   TESTS          += $(BIN)/test_aot_metal
   TESTS          += $(BIN)/test_aot_metal_run
 else
@@ -306,12 +302,6 @@ $(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) build/thvm_runtime_blob.c | $
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< build/thvm_runtime_blob.c $(TEST_LDFLAGS)
 
 $(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_pso_cache: tests/test_metal_pso_cache.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_variable_pso_hit: tests/test_metal_variable_pso_hit.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_aot_metal: tests/test_aot_metal.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)

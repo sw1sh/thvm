@@ -65,10 +65,8 @@ VerificationTest[
     before = TKernelCount[];
     r = TRealize @ TUOpReduce[TUOpReduce[x, 2, "SUM"], 1, "SUM"];
     after = TKernelCount[];
-    (* The fourth slot in the expected list was Length[First[red]["src"]]
-       on the legacy ScalarUop arena -- retired with rangeify.c.
-       The structural invariants (shape, values, one-kernel fusion)
-       still verify the chain-trailing-sum collapses correctly. *)
+    (* Structural invariants (shape, values, one-kernel fusion)
+       verify the chain-trailing-sum collapses correctly. *)
     {
         TTensorShape[r],
         Normal @ TTensorData[r],

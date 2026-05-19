@@ -29,9 +29,9 @@ int main(void) {
   u32 perm[3] = {2, 0, 1};
   Term p = uop_permute(buf3, 3, perm);
   Term out_iters[3] = {
-    uop_range(0, S_AXIS_LOOP, 32),  // perm output axis 0 (was input axis 2)
-    uop_range(1, S_AXIS_LOOP, 8),   // perm output axis 1 (was input axis 0)
-    uop_range(2, S_AXIS_LOOP, 16),  // perm output axis 2 (was input axis 1)
+    uop_range(0, KAX_LOOP, 32),  // perm output axis 0 (was input axis 2)
+    uop_range(1, KAX_LOOP, 8),   // perm output axis 1 (was input axis 0)
+    uop_range(2, KAX_LOOP, 16),  // perm output axis 2 (was input axis 1)
   };
   Term resolved[MAX_DIM] = {out_iters[0], out_iters[1], out_iters[2]};
   u32 ndim = 3;
@@ -68,8 +68,8 @@ int main(void) {
   u32 exp_dims[2] = {3, 4};
   Term ex = uop_expand(src_small, 2, exp_dims);
   Term ex_iters[MAX_DIM] = {
-    uop_range(10, S_AXIS_LOOP, 3),
-    uop_range(11, S_AXIS_LOOP, 4),
+    uop_range(10, KAX_LOOP, 3),
+    uop_range(11, KAX_LOOP, 4),
   };
   Term ex_resolved[MAX_DIM] = {ex_iters[0], ex_iters[1]};
   u32 ex_ndim = 2;
@@ -92,8 +92,8 @@ int main(void) {
   u32 rs_dims[2] = {2, 3};
   Term rs = uop_reshape(src_flat, 2, rs_dims);
   Term rs_iters[MAX_DIM] = {
-    uop_range(20, S_AXIS_LOOP, 2),
-    uop_range(21, S_AXIS_LOOP, 3),
+    uop_range(20, KAX_LOOP, 2),
+    uop_range(21, KAX_LOOP, 3),
   };
   Term rs_resolved[MAX_DIM] = {rs_iters[0], rs_iters[1]};
   u32 rs_ndim = 2;
@@ -120,7 +120,7 @@ int main(void) {
   Term src_pad = make_tensor(1, pad_dims);
   u32 pad_widths[2] = {1, 1};
   Term pd = uop_pad(src_pad, 1, pad_widths);
-  Term pd_iter = uop_range(30, S_AXIS_LOOP, 6);
+  Term pd_iter = uop_range(30, KAX_LOOP, 6);
   Term pd_resolved[MAX_DIM] = {pd_iter};
   u32 pd_ndim = 1;
   Term pd_mask = 0;
@@ -135,7 +135,7 @@ int main(void) {
   CHECK_EQ(term_ext(pd_mask), UOP_IAND);
 
   TEST_BEGIN("movement-index/pad-with-null-mask-bails");
-  Term pd_iter_null = uop_range(31, S_AXIS_LOOP, 6);
+  Term pd_iter_null = uop_range(31, KAX_LOOP, 6);
   Term pd_resolved_null[MAX_DIM] = {pd_iter_null};
   u32 pd_ndim_null = 1;
   Term pd_bottom_null = uop_resolve_movement_chain(pd, pd_resolved_null,
@@ -149,7 +149,7 @@ int main(void) {
   Term src_sh = make_tensor(1, sh_dims);
   u32 sh_widths[2] = {4, 7};
   Term shr = uop_shrink(src_sh, 1, sh_widths);
-  Term sh_iter = uop_range(40, S_AXIS_LOOP, 3);
+  Term sh_iter = uop_range(40, KAX_LOOP, 3);
   Term sh_resolved[MAX_DIM] = {sh_iter};
   u32 sh_ndim = 1;
   Term sh_mask = 0;
@@ -165,7 +165,7 @@ int main(void) {
   TEST_BEGIN("movement-index/shrink-zero-begin-iter-unchanged");
   u32 sh_widths_zero[2] = {0, 5};
   Term shr_zero = uop_shrink(src_sh, 1, sh_widths_zero);
-  Term sh_iter_zero = uop_range(41, S_AXIS_LOOP, 5);
+  Term sh_iter_zero = uop_range(41, KAX_LOOP, 5);
   Term sh_resolved_zero[MAX_DIM] = {sh_iter_zero};
   u32 sh_ndim_zero = 1;
   Term sh_mask_zero = 0;
@@ -180,7 +180,7 @@ int main(void) {
   u32 fl_dims[1] = {5};
   Term src_fl = make_tensor(1, fl_dims);
   Term fl = uop_flip(src_fl, /*mask=*/0x1u);
-  Term fl_iter = uop_range(50, S_AXIS_LOOP, 5);
+  Term fl_iter = uop_range(50, KAX_LOOP, 5);
   Term fl_resolved[MAX_DIM] = {fl_iter};
   u32 fl_ndim = 1;
   Term fl_mask = 0;
@@ -202,8 +202,8 @@ int main(void) {
   Term src_rt = make_tensor(2, rt_dims);
   Term rt = uop_reshape(src_rt, 2, rt_dims);
   Term rt_iters[MAX_DIM] = {
-    uop_range(300, S_AXIS_LOOP, 2),
-    uop_range(301, S_AXIS_LOOP, 3),
+    uop_range(300, KAX_LOOP, 2),
+    uop_range(301, KAX_LOOP, 3),
   };
   Term rt_resolved[MAX_DIM] = {rt_iters[0], rt_iters[1]};
   u32 rt_ndim = 2;
@@ -227,8 +227,8 @@ int main(void) {
   u32 chain_perm[2] = {1, 0};
   Term chain_top = uop_permute(shrunk, 2, chain_perm);
   Term ch_iters[MAX_DIM] = {
-    uop_range(60, S_AXIS_LOOP, 15),
-    uop_range(61, S_AXIS_LOOP, 4),
+    uop_range(60, KAX_LOOP, 15),
+    uop_range(61, KAX_LOOP, 4),
   };
   Term ch_resolved[MAX_DIM] = {ch_iters[0], ch_iters[1]};
   u32 ch_ndim = 2;

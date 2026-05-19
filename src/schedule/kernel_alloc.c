@@ -64,7 +64,6 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_chain_composed);    ke->input_chain_composed    = NULL;
   ke->n_inputs   = 0;
   ke->inputs_cap = 0;
-  rangeify_free(ke);
 }
 
 fn u32 kernel_alloc(void) {

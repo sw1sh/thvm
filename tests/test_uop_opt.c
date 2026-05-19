@@ -13,7 +13,7 @@
 int main(void) {
   thvm_init();
 
-  Term r = uop_range(0, 1 /*S_AXIS_REDUCE*/, 16);
+  Term r = uop_range(0, KAX_REDUCE, 16);
 
   TEST_BEGIN("uop-opt/unroll-with-factor");
   Term unr = uop_opt(r, UOP_OPT_UNROLL, 4);

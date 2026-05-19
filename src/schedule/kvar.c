@@ -86,8 +86,8 @@ void kvar_reset(void) {
 }
 
 // ---- RANGE-extent encoding helpers ---------------------------------
-// A RANGE leaf packs its extent in the low 32 bits of S_RANGE.extra
-// (and as NUM(extent) in the UOP_RANGE heap layout).  When the
+// A RANGE leaf packs its extent as NUM(extent) in the UOP_RANGE
+// heap layout.  When the
 // KVAR_FLAG bit (bit 31) is set, the remaining 31 bits hold the kvar
 // id; the static numeric extent is kvar_hi(id) (the upper bound --
 // BS=512 covers BS=4 and BS=32 in the symbolic regime, so buffers /

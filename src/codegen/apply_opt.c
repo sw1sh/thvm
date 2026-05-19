@@ -39,11 +39,11 @@
 //   TC
 //     Kernel-aware metadata (matmul-shape gate).  Reads
 //     ke->cached_lift.store_root via uop_dag_classify_matmul_shape
-//     (DAG-side matmul classifier).  Rangeify produces the canonical
-//     MUL+REDUCE+OPT_TC scalar_uops pattern for every matmul-shaped
-//     kernel, which the lifter (kernel_lift_to_uop) turns into the
-//     UOp DAG this gate inspects.  Does not mutate axis structure;
-//     routes to tile_anno_record_opt.
+//     (DAG-side matmul classifier).  The unified rangeify pass produces
+//     the canonical MUL+REDUCE+OPT_TC UOp DAG pattern for every
+//     matmul-shaped kernel, which the lifter (kernel_lift_to_uop)
+//     packages as the per-kernel root this gate inspects.  Does not
+//     mutate axis structure; routes to tile_anno_record_opt.
 //
 // Returns 1 on success, 0 on validation failure (axis out of range,
 // arg doesn't divide, applied_opts full, MAX_AXES exceeded).

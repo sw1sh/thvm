@@ -356,10 +356,10 @@ int             dtype_is_packed   (u32 dt);
 // sentinel for PAD masks, INDEX_E nodes pairing a buffer with a
 // symbolic offset expression).
 #define UOP_RANGE       25   // heap = [NUM(axis_type), NUM(extent)]; ext = axis_id.
-                             //   Symbolic axis-iter leaf.  axis_type uses
-                             //   the same encoding as S_AXIS_LOOP/REDUCE/
-                             //   UNROLL/GLOBAL/VIRT so the lowering keeps
-                             //   semantic alignment.
+                             //   Symbolic axis-iter leaf.  axis_type
+                             //   uses the KAX_LOOP/REDUCE/UPCAST/UNROLL/
+                             //   LOCAL/GLOBAL/GROUP_REDUCE encoding from
+                             //   the KAX_* defines.
 #define UOP_INDEX_E     26   // heap = [buffer_src, addr_expr]; symbolic INDEX.
                              //   buffer_src is a UOp tensor source; addr_expr
                              //   is a tree of UOP_I*/UOP_RANGE giving the
@@ -709,176 +709,6 @@ static inline u64 thvm_live_byte_ceiling(void) {
 #define KSRC_IS_INPUT(s) (((s) & KSRC_INPUT_FLAG) != 0)
 #define KSRC_INDEX(s)    ((s) & 0x7FFFFFFFu)
 
-// === scalar UOp lowering ===
-// Tinygrad-style scalar-level UOps for the schedule lowering pass.
-// Each ScalarUop is one node in a per-kernel scalar-level dataflow
-// graph: explicit RANGE iterators, INDEX pointer arith, LOAD/STORE
-// memory access, and ALU ops on scalar values.
-//
-// Stored on the KernelEntry as an introspectable snapshot
-// (`ke->scalar_uops`, NULL when the kernel was emitted via the
-// legacy per-tensor-UOp visit() path).  WL-side surface:
-// `TKernelScalarUops[kid]`.
-//
-// Slot 0 is reserved as the NONE sentinel; callers check
-// `src[i] == 0` to test "no source".
-typedef enum {
-  S_NONE = 0,
-  // Loop iterators + memory addressing.
-  S_RANGE,         // extra = (axis_type << 32) | extent
-                   //   axis_type: 0 = LOOP (default), 1 = REDUCE,
-                   //              2 = UNROLL (fallback prep), 3 = GLOBAL (fallback prep)
-                   //   src: none (RANGE is a leaf).
-  S_DEFINE_PARAM,  // extra = input slot index into ke->input_*.  Leaf
-                   //   that names a buffer pointer for INDEX/LOAD/STORE.
-  S_DEFINE_OUTPUT, // marker for the kernel's output buffer.  Leaf.
-  S_INDEX,         // src[0] = buffer (DEFINE_PARAM/OUTPUT), src[1..] = ranges
-  S_LOAD,          // src[0] = INDEX
-  S_STORE,         // src[0] = INDEX dest, src[1] = value
-  S_BUFFERIZE,     // arena root: src[0] = body STORE, src[1..] = ranges.
-                   //   One per kernel; identifies the root output binding.
-  // Constants.
-  S_CONST,         // extra = raw bits (f32 in low 32, or int).  dtype set.
-  // ALU (mirror tinygrad's GroupOp.ALU subset we'll lower to first).
-  S_ADD, S_MUL, S_NEG, S_RECIP, S_EXP2, S_LOG2, S_SQRT,
-  S_CMPLT, S_CMPEQ,
-  // Reductions.  src[0] = body; src[1..] = REDUCE/UNROLL ranges
-  // nested around that body.  Multiple explicit ranges let a later
-  // lowering represent non-contiguous tensor reductions without
-  // flattening away the index structure.
-  S_REDUCE_SUM, S_REDUCE_MAX,
-  // Type conversion.  src[0] = source value; dispatcher reads the
-  // source op's dtype, decodes, converts to u->dtype, re-encodes.
-  // (BITCAST is identity at the scalar level -- same bits, downstream
-  // dtype interpretation flows through u->dtype, so it does NOT
-  // need a separate opcode.)
-  S_CAST,
-  // SHRINK / PAD index transforms.  src[0] = body to evaluate
-  // under shifted ranges.  src[1..ndim] = the ranges to shift.
-  // S_SHRINK: extra packs per-axis begin offsets (u16 each, up
-  //           to 3 axes).  Body sees range_iter[d] += begin[d];
-  //           dispatcher save/restores around the body eval.
-  // S_PAD:   like S_SHRINK but the body is gated -- the output
-  //           is the source value at (iter - begin) IFF the
-  //           shifted iter is in [0, src_dim); otherwise 0.
-  //           extra packs (begin u8, src_dim u8) per axis (up to
-  //           4 axes).
-  S_SHRINK,
-  S_PAD,
-  // Bit-pattern-preserving load.  Like S_LOAD but never widens
-  // narrow FPs (fp16/bf16/fp8) to f32 -- returns the raw nibble/
-  // byte/halfword bits in the low bits of the u64 register.  Emitted
-  // by BITCAST(narrow-FP -> int) so the original bit pattern survives
-  // to the STORE.  src[0] = INDEX, dtype = source dtype (informational).
-  S_LOAD_RAW,
-  // Per-axis index reversal (UOP_FLIP).  src[0] = body, src[1..ndim] =
-  // LOOP ranges to potentially flip; extra holds a u8 bitmask -- bit d
-  // set means flip axis d (replace iter with extent-1-iter for the
-  // body eval, restore after).
-  S_FLIP,
-  // Iter-coord shape reinterpret (UOP_RESHAPE when src0_dims !=
-  // out_dims AND a downstream PAD/SHRINK consumes the new shape).
-  // Legacy "shared LOOP refs" form: src[1..nrng) are LOOP ranges
-  // used as both input and output via in-place iter shift.  extra
-  // packs out_dims (low 32, 4xu8) and in_dims (high 32, 4xu8).
-  // Body S_LOAD's strides match in_dims (caller's responsibility).
-  S_RESHAPE,
-  // Iter-coord shape reinterpret (split-src form).  Mirrors
-  // tinygrad's RESHAPE-as-flat-roundtrip in apply_movement_op.
-  //
-  // Encoding:
-  //   src[0]                       = body (the wrapped expression)
-  //   extra[bits 0..7]             = N_out (number of output range refs)
-  //   src[1 .. 1+N_out)            = output iter refs (iters drive
-  //                                   flat_idx; typically LOOP type,
-  //                                   but may be an expression)
-  //   src[1+N_out .. src_count)    = input range refs (S_RESHAPE_V
-  //                                   writes their iters from the
-  //                                   flat_idx decomposition; typically
-  //                                   VIRT type when ranks differ from
-  //                                   the kernel's LOOP nest)
-  //
-  // Each extent is read from the underlying S_RANGE.extra, or from
-  // S_IMOD(expr, extent) for edge-local refs whose value range is
-  // narrowed by a bounds mask.  This supports arbitrary u32 extents
-  // (legacy S_RESHAPE packs dims as u8s and is capped at 255 per axis).
-  // At eval:
-  //   flat_idx = sum_d(iter[out_d] * out_stride[d])  -- row-major over output extents
-  //   for d in 0..N_in:
-  //     iter[in_d] = (flat_idx / in_stride[d]) % in_extent[d]
-  //   v = eval body
-  //   restore in iters
-  //   return v
-  // Used for rank-mismatch RESHAPE (input rank != output rank or !=
-  // kernel LOOP rank); input refs point to fresh S_AXIS_VIRT ranges.
-  S_RESHAPE_V,
-  // ===========================================================
-  // Integer iter-arithmetic ops -- the backbone for porting
-  // tinygrad's apply_movement_op (indexing.py:128-145).  Each
-  // returns an i64 value (in the low bits of u64) computed from
-  // its sources.  All sources must themselves return integer
-  // values (S_RANGE iter, S_ICONST, or other S_I* ops).  Used to
-  // build address expressions for S_INDEX_E.
-  //
-  // Examples:
-  //   SHRINK adds a per-axis begin to an iter:
-  //     S_IADD(iter, S_ICONST(begin))
-  //   FLIP negates: S_ISUB(S_ICONST(extent-1), iter)
-  //   RESHAPE flat-roundtrip: S_IMOD(S_IDIV(flat, S_ICONST(s)), S_ICONST(d))
-  //   PAD bounds-checked load: S_IWHERE(S_IAND(S_ILT(begin, iter),
-  //                                            S_ILT(iter, begin+sd)),
-  //                                     S_LOAD(...), S_ICONST(0))
-  S_ICONST,    // extra = signed integer literal (i64 reinterpret)
-  S_IADD,      // src[0] + src[1]
-  S_ISUB,      // src[0] - src[1]
-  S_IMUL,      // src[0] * src[1]
-  S_IDIV,      // src[0] / src[1] (integer truncating divide)
-  S_IMOD,      // src[0] % src[1]
-  S_ILT,       // src[0] < src[1] -> 0 or 1
-  S_IAND,      // src[0] & src[1] (bitwise; used for boolean AND of 0/1 values)
-  S_IWHERE,    // src[0] ? src[1] : src[2]
-  // Expression-based INDEX.  src[0] = buffer (DEFINE_PARAM/OUTPUT),
-  // src[1] = integer expression giving the byte/element offset.  No
-  // per-axis stride packing -- the caller builds the address as a
-  // tree of S_I* ops over S_RANGE iters.  Mirrors tinygrad's INDEX
-  // (a BinaryOp on a pointer + an arbitrary symbolic offset).
-  // The output of S_LOAD/S_STORE on this INDEX behaves identically
-  // to the legacy S_INDEX form -- only the address computation
-  // differs.
-  S_INDEX_E,
-  S__COUNT
-} ScalarOp;
-
-// Axis types for S_RANGE.extra high 32 bits.
-#define S_AXIS_LOOP    0
-#define S_AXIS_REDUCE  1
-#define S_AXIS_UNROLL  2
-#define S_AXIS_GLOBAL  3
-// Virtual / placeholder range (mirrors tinygrad's AxisType.PLACEHOLDER).
-// Owns a slot in the dispatcher's range_iter[] array but is NOT iterated
-// by the outer LOOP nest.  An S_RESHAPE wrapper writes its iter at body
-// eval time (decomposed from output ranges' flat_idx) and restores after.
-// Lets a sub-expression at a different rank than the kernel's LOOP nest
-// flow through the same scalar-uop graph.
-#define S_AXIS_VIRT    4
-
-// SCALAR_MAX_SRC covers both ordinary 1+rank ops (S_INDEX,
-// S_BUFFERIZE) and split reshape wrappers.  S_RESHAPE_V carries
-// src[0] plus output-range refs and input-range refs, so it needs
-// room for 1 + 2 * MAX_DIM in the worst case.
-#define SCALAR_MAX_SRC (1 + 2 * MAX_DIM)
-
-typedef struct {
-  u8  op;                    // ScalarOp
-  u8  src_count;             // number of valid src[] entries
-  u32 dtype;                 // DT_*
-  u32 src[SCALAR_MAX_SRC];   // indices into the same ScalarUop[]; 0 = unused
-  u64 extra;                 // op-specific payload (CONST bits, RANGE extent + type, ...)
-} ScalarUop;
-
-#define SUOP_INIT_CAP   16
-#define SUOP_MAX_CAP    (1u << 20)
-
 // === axis annotation type =============================================
 // Per-axis info returned by tile_anno_axis_or_kernelaxes.  memory_scope
 // and vector_width are 0-valued today; reserved for future use.
@@ -1095,23 +925,14 @@ typedef struct KernelEntry {
   KpSchedule  *schedule;
   KpSchedule   _local_schedule;
 
-  // Scalar-UOp lowering snapshot.
-  // NULL when the kernel was emitted via the legacy per-tensor-UOp
-  // visit() path; non-NULL when rangeify lowered it.  Slot 0 is the
-  // S_NONE sentinel; live ops occupy [1, n_scalar_uops).
-  // Owned by the KernelEntry; freed by kernel_free_arrays.
-  ScalarUop *scalar_uops;
-  u32        n_scalar_uops;
-  u32        scalar_uops_cap;
-
   // kvar wedge: per-dispatch runtime values for any symbolic-shape
   // Variables bound to RANGE leaves in this kernel.  Sparse: each
   // slot (kvar_runtime_ids[i], kvar_runtime_vals[i]) binds one var
   // id to its current runtime value (e.g. BS=4 or BS=32).  The Metal
-  // encoder iterates over the kvars referenced by this kernel's
-  // scalar_uops in sorted-id order and looks up each id here; missing
-  // entries fall back to kvar_hi(id) so legacy / non-symbolic kernels
-  // keep working.  Caller stamps these before each dispatch.
+  // encoder iterates over the kvars referenced by this kernel in
+  // sorted-id order and looks up each id here; missing entries fall
+  // back to kvar_hi(id) so non-symbolic kernels keep working.
+  // Caller stamps these before each dispatch.
   u8         n_kvar_runtime;
   u32        kvar_runtime_ids [KVAR_USED_CAP];
   u32        kvar_runtime_vals[KVAR_USED_CAP];
@@ -2019,24 +1840,6 @@ fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
 // header for why slot ids are intentionally NOT recycled.
 fn u32  kernel_gc_sweep(Term result);
 
-// === scalar UOp arena ops (schedule/rangeify.c) ===
-// Append a new scalar UOp; returns its slot id (>= 1).  Slot 0
-// is the S_NONE sentinel and never returned.  Initializes scalar_uops
-// on first call.  src[] entries that are 0 mean "unused".
-fn u32  rangeify_emit(struct KernelEntry *ke, u8 op, u32 dtype,
-                      u8 src_count, const u32 *src, u64 extra);
-// Convenience: emit a leaf (no sources).
-fn u32  rangeify_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
-// Convenience: emit a unary / binary op.
-fn u32  rangeify_emit_unary (struct KernelEntry *ke, u8 op, u32 dtype, u32 a);
-fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u32 b);
-// Free the per-kernel scalar arena.  Called from kernel_free_arrays.
-fn void rangeify_free(struct KernelEntry *ke);
-
-// Look up a scalar opname / axis-type name as a const C string for
-// introspection / debug printing.
-fn const char *scalar_op_name (u8 op);
-
 // === axis annotation read API (codegen/tile_anno.c) ===
 // Resolves axis count + per-axis TileAxisInfo from the KpSchedule
 // signal trio (output_shape + tail-reduce + scalar-reduce + applied_opts).
@@ -2698,9 +2501,11 @@ fn Term uop_recognise_conv(Term root);
 fn int uop_classify_conv2d(Term root, u32 *out_kred);
 
 // === Kernel lift to UOp DAG ===
-// Translate a fully-scheduled kernel's ScalarUop arena to a UOp DAG
-// root suitable for cg_render_uop_kernel.  Bridges the migration
-// bridge between scalar_uops[] and the renderer.
+// Package the unified-rangeify pass's store_root for a kernel entry
+// into a UOp DAG root suitable for cg_render_uop_kernel.  The lifter
+// today is a thin short-circuit -- it looks up the unified pass's
+// per-kernel output and wraps it as a KernelUopLift; the renderer /
+// DAG-side encoder / cpu_uop_walk all consume the result.
 //
 // `KernelUopLift` + `KERNEL_LIFT_MAX_INPUT` are forward-defined above
 // (right before `KernelEntry`) so the kernel entry can embed the lift
@@ -2844,10 +2649,6 @@ fn u32  uop_graph_rewrite_stat_hits(char const *name);
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);
 fn Term uop_graph_simplify_materialize(Term root, u32 env_id);
-
-// === scalar UOp simplification harness (src/scalar/simplify.c) ===
-// Bottom-up rewrite pass over the per-kernel ScalarUop[] arena.   
-// (ScalarSimplify harness deleted with src/scalar/simplify.c.)
 
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is

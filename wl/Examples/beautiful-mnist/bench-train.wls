@@ -68,10 +68,9 @@ formatKernelProgram[kid_Integer] := Module[{info = TKernelInfo[kid]},
 
 formatKernelLoweredCounts[kid_Integer] /; kid <= 0 :=
     <|"scalar" -> Missing["NotLowered"], "tile" -> Missing["NotLowered"]|>
-formatKernelLoweredCounts[kid_Integer] := Module[{su, tu},
-    su = TKernelScalarUops[kid];
+formatKernelLoweredCounts[kid_Integer] := Module[{tu},
     tu = TKernelTileUops[kid];
-    <|"scalar" -> If[Head[su] === Missing, su, Counts[su[[All, "op"]]]],
+    <|"scalar" -> Missing["Removed"],
       "tile"   -> If[Head[tu] === Missing, tu, Counts[tu[[All, "op"]]]]|>
 ]
 
@@ -456,13 +455,9 @@ If[showProgramProfile,
             If[dumpTopProgram,
                 print["    program=", TKernelInfo[row["RepKid"]]["program"]]];
             If[dumpTopLowered,
-                Module[{kid = row["RepKid"], su, tu},
-                    su = TKernelScalarUops[kid];
+                Module[{kid = row["RepKid"], tu},
                     tu = TKernelTileUops[kid];
                     print["    proposed=", TKernelProposed[kid]];
-                    print["    scalar=", If[Head[su] === Missing,
-                        su,
-                        Counts[su[[All, "op"]]]]];
                     print["    tile=", If[Head[tu] === Missing,
                         tu,
                         Counts[tu[[All, "op"]]]]];

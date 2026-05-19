@@ -298,10 +298,10 @@ static int kop_is_split(u8 op) {
 static u32 sim_kop_history(KOpt const *applied_opts, u32 n_applied,
                            u8 *desired_out) {
   for (u32 i = 0; i < MAX_AXES; i++) desired_out[i] = (u8)KAX_LOOP;
-  // The lifter seeds cur[] from the BUFFERIZE S_RANGE.src list, whose
-  // count isn't visible here; for the stamp port we treat any axis
-  // referenced by an opt (or matched against a UOP_RANGE leaf) as a
-  // valid initial position.  n_cur tracks the highest live position.
+  // The lifter seeds cur[] from the BUFFERIZE UOP_RANGE source list,
+  // whose count isn't visible here; for the stamp port we treat any
+  // axis referenced by an opt (or matched against a UOP_RANGE leaf) as
+  // a valid initial position.  n_cur tracks the highest live position.
   u32 n_cur = 0;
   for (u32 i = 0; i < n_applied; i++) {
     KOpt const *o = &applied_opts[i];
@@ -838,7 +838,7 @@ static Term rw_split_dag_range(Term const *bindings, void *ctx_in) {
   if (uop_range_extent(range) != ctx->origin_extent[axis_id]) return 0;
   // axis_type must also match the captured pre-replay type, otherwise
   // an already-stamped leaf (e.g. from the lifter pre-stamping
-  // axis_types from S_RANGE.extra) wouldn't equal the seed leaf.
+  // axis_types on UOP_RANGE) wouldn't equal the seed leaf.
   if (uop_range_axis_type(range) != ctx->origin_axis_type[axis_id]) return 0;
   // Idempotence: if the matched leaf IS the replacement (origin_expr
   // happens to resolve to the same leaf because no split fired on it),

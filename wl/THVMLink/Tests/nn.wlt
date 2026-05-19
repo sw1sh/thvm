@@ -712,15 +712,7 @@ VerificationTest[
     TestID -> "nn/conv2d-rank4-batch-matches-rank3-slices"
 ]
 
-(* Conv weight-gradient FD-parity guard.  The rank-changing reshape
-   inside TConv2DIm2ColBatchedPool's matmul lowering used to silently
-   drop cOut differentiation: gW[cOut=1] came back identical to
-   gW[cOut=0].  Root cause was in kernel_lift's S_RESHAPE_V flat-idx
-   builder, which read out_ext = 0 for expression-emitted size-1
-   axis refs (S_IMOD(0,1)) and let that 0 poison every UPSTREAM
-   axis's stride product (stride = product of out_ext[e] for e > d),
-   silently dropping those axes' contributions from flat_idx.  Fixed
-   by falling back to scalar_ref_extent on non-S_RANGE out refs. *)
+(* Conv weight-gradient FD-parity guard. *)
 VerificationTest[
     TInit[];
     SeedRandom[42];

@@ -1165,7 +1165,7 @@ static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
 
 static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL ^ 0x4D54494C45554F50ULL;
-  // kvar wedge: if any S_RANGE in the arena is variable-bound, the
+  // kvar wedge: if any UOP_RANGE in the kernel is variable-bound, the
   // emitted MSL uses `V_<name>` for that extent and the per-dispatch
   // numel comes through setBytes:; the kernel's input_numels[] /
   // output_numel CHANGE per BS but the MSL string does not.  We must
@@ -1175,7 +1175,7 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   //
   // Input/output numels are excluded for symbolic kernels (below) for
   // the same reason.  The UOp DAG (cached_lift.store_root) Term hash
-  // captures S_RANGE var_ids via kvar_collect_from_dag, so symbolic
+  // captures UOP_RANGE var_ids via kvar_collect_from_dag, so symbolic
   // kernels at different BS values still share the same UOp identity.
   u32 used_vars[KVAR_USED_CAP];
   u32 n_vars = kvar_collect_from_dag(ke->cached_lift.store_root,

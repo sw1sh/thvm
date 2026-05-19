@@ -7,9 +7,10 @@
 // Every dispatcher reads M/N/K + dtype + slot mapping from
 // ke->cached_lift.store_root via uop_dag_classify_matmul_shape /
 // uop_dag_classify_dot_shape / uop_dag_classify_gemv_shape.
-// Rangeify produces the canonical MUL+REDUCE+OPT_TC scalar_uops
-// pattern for every matmul-shaped kernel, which kernel_lift_to_uop
-// turns into the UOp DAG these dispatchers inspect.
+// The unified rangeify pass produces the canonical MUL+REDUCE+OPT_TC
+// UOp DAG pattern for every matmul-shaped kernel, which
+// kernel_lift_to_uop packages as the per-kernel root these dispatchers
+// inspect.
 
 #ifdef __APPLE__
 #define ACCELERATE_NEW_LAPACK
