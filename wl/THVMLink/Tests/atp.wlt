@@ -693,3 +693,26 @@ VerificationTest[
     Success,
     TestID -> "ATP/TFEP/completion-variable-verifies"
 ]
+
+(* === TFindEquationalProof: numeric-literal constants =============== *)
+
+(* AbelianGroupAxioms (and the McCune / Tarski theories) write the
+   identity element as OverTilde[1] -- a function applied to the
+   integer literal 1.  The encoder must treat a numeric atom as a
+   0-arity constant; without that rule it folds over a non-list and
+   diverges. *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms"],
+    ProofObject,
+    TestID -> "ATP/TFEP/numeric-literal-constant-proves"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms"];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/numeric-literal-constant-verifies"
+]

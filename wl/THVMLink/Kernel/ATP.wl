@@ -173,6 +173,19 @@ encodeAtpTerm[s_Symbol, state_Association] := Block[{
     {THVMLink`Private`$termNewCtrFn[lab, {}], st}
 ]
 
+(* A numeric literal (e.g. the `1` in OverTilde[1], the identity-
+   element marker AbelianGroup / McCune / Tarski axiom sets use) is a
+   0-arity constant: encode it by value.  Without this rule the
+   general clause below folds over List @@ n -- a non-list for an
+   atom -- and the encoder diverges. *)
+encodeAtpTerm[n:(_Integer | _Real | _Rational), state_Association] := Block[{
+    sym = ToString[n, InputForm],
+    lab, st
+},
+    {lab, st} = ensureSym[sym, state];
+    {THVMLink`Private`$termNewCtrFn[lab, {}], st}
+]
+
 (* Fold step that threads the encoder state through a list of
    children: accumulator is {encoded_terms_so_far, state}. *)
 encodeChildStep[{terms_, state_}, child_] := Block[{
@@ -705,7 +718,11 @@ decodeAtpTerm[raw_Integer, labelToName_, idToName_] := Block[{
                     THVMLink`Private`$heapReadFn[loc]];
                 name = Lookup[labelToName, label, "C" <> ToString[label]];
                 If[ arity === 0,
-                    Symbol[name],
+                    (* a numeric-literal constant round-trips back to
+                       its value; every other 0-arity label is a
+                       symbol. *)
+                    If[ StringMatchQ[name, NumberString],
+                        ToExpression[name], Symbol[name]],
                     Symbol[name] @@ Table[
                         decodeAtpTerm[
                             THVMLink`Private`$heapReadFn[loc + k],
