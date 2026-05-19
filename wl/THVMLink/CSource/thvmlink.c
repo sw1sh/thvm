@@ -2023,11 +2023,13 @@ EXTERN_C DLLEXPORT int thvm_wl_total_buf_bytes(WolframLibraryData libData, mint 
 EXTERN_C DLLEXPORT int thvm_wl_kernel_table(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)argc; (void)args;
-  // Cols per kernel: [n_inputs, output_tid, _reserved0, spliced,
+  // Cols per kernel: [n_inputs, output_tid, _reserved0, _reserved1,
   //                   consumer_count, output_numel, output_dtype].
-  // Slot 2 was `fired`; removed (kernels re-fire on every redex,
-  // OP2-style).  Kept as a 0 placeholder so the existing 7-col
-  // schema and TMemoryPlan column indexing stay stable.
+  // Slot 2 was `fired` (removed since kernels re-fire on every redex,
+  // OP2-style); slot 3 was `spliced` (removed with the multi-output
+  // splice infrastructure).  Both kept as 0 placeholders so the
+  // existing 7-col schema and TMemoryPlan column indexing stay
+  // stable.
   mint nRows = (mint)(KERNELS_NEXT > 0 ? KERNELS_NEXT - 1 : 0);
   mint nCols = 7;
   mint dims[1] = {nRows * nCols};
