@@ -115,6 +115,23 @@ have no peer-reviewed paper.
   arXiv:2301.04104 (2023); published as "Mastering diverse control
   tasks through world models", *Nature* (2025).
   <https://arxiv.org/abs/2301.04104> · code <https://github.com/danijar/dreamerv3>
+- Danijar Hafner, Timothy Lillicrap, Mohammad Norouzi & Jimmy Ba,
+  "Mastering Atari with Discrete World Models" (DreamerV2), ICLR
+  2021; arXiv:2010.02193. <https://arxiv.org/abs/2010.02193> -- the
+  discrete (categorical) latent the multi-game world models below
+  inherit.
+- Kuang-Huei Lee, Ofir Nachum, Mengjiao Yang et al., "Multi-Game
+  Decision Transformers", NeurIPS 2022; arXiv:2205.15241.
+  <https://arxiv.org/abs/2205.15241> -- one return-conditioned
+  transformer across 41 Atari games.
+- "Scaling Offline Model-Based RL via Jointly-Optimized World-Action
+  Model Pretraining" (JOWA), arXiv:2410.00564 (2024).
+  <https://arxiv.org/abs/2410.00564> -- a single VQ-tokenised
+  world-action model trained jointly across Atari games.
+- "Mixture-of-World Models: Scaling Multi-Task Reinforcement Learning
+  with Modular Latent Dynamics", arXiv:2602.01270 (2026).
+  <https://arxiv.org/abs/2602.01270> -- one agent over 26 Atari
+  games via task-conditioned dynamics experts on a shared backbone.
 - Jake Bruce et al., "Genie: Generative Interactive Environments",
   ICML 2024; arXiv:2402.15391. <https://arxiv.org/abs/2402.15391>
 - DeepMind, "Genie 2: A large-scale foundation world model" (blog/tech
