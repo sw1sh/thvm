@@ -82,6 +82,32 @@ int main(void) {
     CHECK(has_assoc_leftid_cp(cps, n));
   }
 
+  TEST_BEGIN("cp/superposition-position-recorded");
+  {
+    // The non-trivial assoc x left-id CP overlaps R1 into R2's lhs
+    // f(f(x, y), z) at child position [0]; its recorded pos is {0}.
+    // Outermost (top) overlaps record pos_len == 0.
+    Term lhs[2] = {
+      mk_f(mk_e(), mk_v(VAR_x)),
+      mk_f(mk_f(mk_v(VAR_x), mk_v(VAR_y)), mk_v(VAR_z)),
+    };
+    Term rhs[2] = {
+      mk_v(VAR_x),
+      mk_f(mk_v(VAR_x), mk_f(mk_v(VAR_y), mk_v(VAR_z))),
+    };
+    CriticalPair cps[32] = {{0}};
+    u32 n = thvm_critical_pairs(lhs, rhs, 2, cps, 32);
+    CHECK(n > 0u);
+    u8 saw_top = 0, saw_sub0 = 0;
+    for (u32 i = 0; i < n; i++) {
+      CHECK(cps[i].pos_len <= CP_MAX_DEPTH);
+      if (cps[i].pos_len == 0u) saw_top = 1;
+      if (cps[i].pos_len == 1u && cps[i].pos[0] == 0u) saw_sub0 = 1;
+    }
+    CHECK(saw_top  == 1u);   // outermost overlaps exist
+    CHECK(saw_sub0 == 1u);   // the [0]-position assoc/left-id overlap
+  }
+
   TEST_BEGIN("cp/no-overlap-yields-only-trivial");
   {
     // R1: f(x, e) -> x   -- arity 2 with constant e

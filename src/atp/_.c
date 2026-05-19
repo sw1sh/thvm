@@ -2543,6 +2543,34 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
   return idx;
 }
 
+// Push a TRACE_CP entry that also carries the superposition position
+// -- pos[0..pos_len) is the path into parent_a's rule lhs where
+// parent_b's rule lhs overlapped (CriticalPair.pos).  The entry is a
+// TAG_CTR(TRACE_CP) with children
+//   [NUM(p_a), NUM(p_b), lhs, rhs, NUM(pos_len), NUM(pos_0), ...].
+// Children 0..3 match a plain atp_trace_push entry, so the trace
+// serializer, GC root walk, and orphan-kill scan -- all of which
+// touch only the first four children -- are unaffected; the proof
+// DAG reads the overlap geometry off children 4+.
+static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
+                             Term lhs, Term rhs,
+                             const u8 *pos, u8 pos_len) {
+  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  Term children[5 + CP_MAX_DEPTH];
+  children[0] = term_new(0, TAG_NUM, 0, p_a);
+  children[1] = term_new(0, TAG_NUM, 0, p_b);
+  children[2] = lhs;
+  children[3] = rhs;
+  children[4] = term_new(0, TAG_NUM, 0, pos_len);
+  for (u8 k = 0; k < pos_len; k++) {
+    children[5 + k] = term_new(0, TAG_NUM, 0, pos[k]);
+  }
+  s->trace[s->n_trace] = term_new_ctr(TRACE_CP, children, 5u + pos_len);
+  u32 idx = s->n_trace;
+  s->n_trace++;
+  return idx;
+}
+
 // Push an axiom / pending equation onto the CP queue.  The
 // saturation loop's orient + generate machinery processes it
 // uniformly with later-derived CPs.  Also records a TRACE_AXIOM
@@ -4428,8 +4456,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_queue_subsumed++;
       continue;
     }
-    u32 t = atp_trace_push(s, TRACE_CP, parent_a, parent_b,
-                           cp_lhs, cp_rhs);
+    u32 t = atp_trace_push_cp(s, parent_a, parent_b, cp_lhs, cp_rhs,
+                              cps[i].pos, cps[i].pos_len);
     atp_cp_heap_push(s, cp_lhs, cp_rhs, t);
     pushed++;
   }
@@ -4547,8 +4575,11 @@ static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
   Term cp_rhs = ic_unify_apply3(sub, ctx->lj, ctx->ri);
   if (term_tag(cp_rhs) == TAG_ERA) return ctx->count;
 
-  ctx->out[ctx->count].lhs = cp_lhs;
-  ctx->out[ctx->count].rhs = cp_rhs;
+  CriticalPair *slot = &ctx->out[ctx->count];
+  slot->lhs = cp_lhs;
+  slot->rhs = cp_rhs;
+  slot->pos_len = (u8)p_len;
+  for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p[d];
   ctx->count++;
   return ctx->count;
 }

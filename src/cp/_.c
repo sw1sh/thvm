@@ -76,7 +76,9 @@ static u32 cp_walk_positions(Term t, u32 *path, u32 depth, u32 max_depth,
   return count;
 }
 
-#define CP_MAX_DEPTH 8
+// CP_MAX_DEPTH is declared in src/thvm.h alongside CriticalPair --
+// cp_walk_positions caps the path depth at it, so a recorded
+// CriticalPair.pos always fits.
 
 // Visitor closure: at the current position p, try unifying
 // rule_i.lhs|p with rule_j_renamed.lhs.  On success, push the CP
@@ -105,8 +107,14 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   Term cp_lhs   = thvm_unify_apply(replaced, &subst);
   Term cp_rhs   = thvm_unify_apply(ctx->ri,  &subst);
 
-  ctx->out[ctx->count].lhs = cp_lhs;
-  ctx->out[ctx->count].rhs = cp_rhs;
+  CriticalPair *slot = &ctx->out[ctx->count];
+  slot->lhs = cp_lhs;
+  slot->rhs = cp_rhs;
+  // Record the superposition position -- the path into rule i's lhs
+  // where rule j overlapped.  cp_walk_positions caps depth at
+  // CP_MAX_DEPTH, so p_len never exceeds the pos[] array.
+  slot->pos_len = (u8)p_len;
+  for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p[d];
   ctx->count++;
   return ctx->count;
 }

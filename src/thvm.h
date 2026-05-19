@@ -2836,9 +2836,18 @@ fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 // CriticalPair holds the two terms produced by overlapping rules
 // at a non-variable position; both sides should be joinable for the
 // system to be locally confluent.
+//
+// pos[0..pos_len) records the superposition geometry: the child-index
+// path to the non-variable subterm of rule i's lhs that rule j's lhs
+// unified with.  pos_len == 0 is a top (outermost) overlap.  This is
+// the provenance a Waldmeister-PCL-shaped proof needs to present the
+// CP as a CriticalPairLemma.
+#define CP_MAX_DEPTH 8
 typedef struct {
   Term lhs;
   Term rhs;
+  u8   pos[CP_MAX_DEPTH];
+  u8   pos_len;
 } CriticalPair;
 
 fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,

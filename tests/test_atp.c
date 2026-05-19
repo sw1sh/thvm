@@ -929,6 +929,35 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/trace-cp-carries-superposition-position");
+  {
+    // A TRACE_CP entry is a wider CTR: children 0..3 are the base
+    // [NUM(pa), NUM(pb), lhs, rhs], child 4 is NUM(pos_len),
+    // children 5.. are the superposition path.  Push a surviving CP
+    // carrying pos {0} and verify atp_push_cps_traced records it.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    s->n_rules = 0;   // empty R -> the CP is not trivially joinable
+    CriticalPair batch[1] = {{0}};
+    batch[0].lhs     = mk_f(mk_a(), mk_e());   // f(a, e) != a under {}
+    batch[0].rhs     = mk_a();
+    batch[0].pos[0]  = 0u;
+    batch[0].pos_len = 1u;
+    u32 before = s->n_trace;
+    u32 pushed = atp_push_cps_traced(s, batch, 1,
+                                     ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                     ATP_RULE_NONE, ATP_RULE_NONE);
+    CHECK_EQ(pushed, 1u);
+    CHECK_EQ(s->n_trace, before + 1u);
+    Term e = s->trace[s->n_trace - 1u];
+    CHECK_EQ((int)term_ext(e), (int)TRACE_CP);
+    CHECK_EQ(term_ctr_n(e), 6u);                       // 4 base + len + 1
+    Term plen = term_ctr_at(e, 4);
+    CHECK_EQ((int)term_tag(plen), (int)TAG_NUM);
+    CHECK_EQ((u32)term_val(plen), 1u);                 // pos_len
+    CHECK_EQ((u32)term_val(term_ctr_at(e, 5)), 0u);    // pos[0]
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/proof-extract-no-goal-returns-zero");
   {
     // No goal set -> nothing to extract.
@@ -1294,7 +1323,7 @@ int main(void) {
     // cp_graph; resync it from the hand-populated cp_packed[]/n_cps.
     thvm_atp_cp_reheapify(s);
 
-    CriticalPair batch[1];
+    CriticalPair batch[1] = {{0}};
     batch[0].lhs = mk_f(mk_a(), mk_e());
     batch[0].rhs = mk_a();
     u32 before_cnt = s->n_cps;
