@@ -4012,12 +4012,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
   //   - the splice itself bails (visit on B returned VISIT_BAIL,
   //     cap full, or extra output slot exhausted) -- the kernel
   //     stays single-output and B emits separately later.
-  int spliced_ok = 0;
   if (kernel_merge_enabled()
       && splice_target_backend_supports_multi_output()) {
     u32 child_bi = find_merge_child(bi);
     if (child_bi != BOUNDARY_MERGE_NONE) {
-      spliced_ok = splice_child_into_host_premerge(ke, bi, child_bi);
+      (void)splice_child_into_host_premerge(ke, bi, child_bi);
     }
   }
 
