@@ -186,8 +186,11 @@ else
   WL_DYLIB_FLAGS := -shared
 endif
 
-# Pick the newest /Applications/Wolfram*.app unless WOLFRAM_APP is set.
-WOLFRAM_APP ?= $(shell ls -d "/Applications/Wolfram"*.app 2>/dev/null | sort -V | tail -1)
+# Pick the newest /Applications/Wolfram*.app that ships the LibraryLink
+# C headers, unless WOLFRAM_APP is set.  Filtering on IncludeFiles/C
+# skips co-installed non-kernel apps (Wolfram VPN.app, WolframScript.app)
+# that would otherwise win `sort -V | tail -1` and break `make wl`.
+WOLFRAM_APP ?= $(shell ls -d "/Applications/Wolfram"*.app 2>/dev/null | sort -V | while IFS= read -r d; do [ -d "$$d/Contents/SystemFiles/IncludeFiles/C" ] && printf '%s\n' "$$d"; done | tail -1)
 WL_INCLUDE   := $(WOLFRAM_APP)/Contents/SystemFiles/IncludeFiles/C
 
 WL_PACLET   := wl/THVMLink
