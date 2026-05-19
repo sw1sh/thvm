@@ -866,6 +866,125 @@ preprints, some not independently verified.
 - "Matrix-Game 3.0: Real-time Streaming World Model",
   arXiv:2604.08995 (2026).
 
+## ARC-AGI-3 and the exploration / goal-inference literature (page 9)
+
+Survey companion to
+[09-arc-agi3-exploration-survey.md](09-arc-agi3-exploration-survey.md).
+ARC-AGI-3 launched March 2026; the benchmark-specific literature is
+thin (one challenge paper, one prior prize report, one preview
+competition, one method preprint). The exploration / meta-RL items
+are mostly mature pre-2022 work the thvm arc would port.
+
+### ARC-AGI-3 and the ARC Prize
+
+- Francois Chollet, Mike Knoop et al., "ARC-AGI-3: A New Challenge
+  for Frontier Agentic Intelligence", arXiv:2603.24621 (Mar 2026).
+  <https://arxiv.org/abs/2603.24621> · technical report
+  <https://arcprize.org/media/ARC_AGI_3_Technical_Report.pdf> ·
+  benchmark page <https://arcprize.org/arc-agi/3>
+- ARC Prize Foundation, "ARC Prize 2025: Technical Report",
+  arXiv:2601.10904 (Jan 2026). <https://arxiv.org/abs/2601.10904>
+- ARC Prize Foundation, "ARC-AGI-3 Preview: 30-Day Learnings"
+  (blog/tech report, 2025).
+  <https://arcprize.org/blog/arc-agi-3-preview-30-day-learnings>
+- Dries Smit (Tufa Labs), "StochasticGoose" -- 1st place in the
+  ARC-AGI-3 Preview Agent Competition; CNN action-affordance
+  predictor (12.58% preview, 0.25% full benchmark). Write-up
+  <https://medium.com/@dries.epos/1st-place-in-the-arc-agi-3-agent-preview-competition-49263f6287db> ·
+  code <https://github.com/DriesSmit/ARC3-solution>
+- Evgenii Rudakov, Jonathan Shock & Benjamin Ultan Cowley,
+  "Graph-Based Exploration for ARC-AGI-3 Interactive Reasoning
+  Tasks", arXiv:2512.24156 (2025).
+  <https://arxiv.org/abs/2512.24156>
+
+### Exploration under sparse or absent reward
+
+- Deepak Pathak, Pulkit Agrawal, Alexei A. Efros & Trevor Darrell,
+  "Curiosity-driven Exploration by Self-supervised Prediction" (ICM),
+  ICML 2017; arXiv:1705.05363. <https://arxiv.org/abs/1705.05363>
+  (also cited in the breakthrough-2 block above.)
+- Yuri Burda, Harrison Edwards, Amos Storkey & Oleg Klimov,
+  "Exploration by Random Network Distillation" (RND),
+  arXiv:1810.12894 (2018). <https://arxiv.org/abs/1810.12894>
+- Marc G. Bellemare, Sriram Srinivasan, Georg Ostrovski, Tom Schaul,
+  David Saxton & Remi Munos, "Unifying Count-Based Exploration and
+  Intrinsic Motivation", NeurIPS 2016; arXiv:1606.01868.
+  <https://arxiv.org/abs/1606.01868>
+- Adrien Ecoffet, Joost Huizinga, Joel Lehman, Kenneth O. Stanley &
+  Jeff Clune, "First return, then explore" (Go-Explore), *Nature*
+  590:580-586 (2021); arXiv:1901.10995.
+  <https://doi.org/10.1038/s41586-020-03157-9> ·
+  <https://arxiv.org/abs/1901.10995>
+- Adria Puigdomenech Badia, Pablo Sprechmann, Alex Vitvitskyi et al.,
+  "Never Give Up: Learning Directed Exploration Strategies" (NGU),
+  ICLR 2020; arXiv:2002.06038. <https://arxiv.org/abs/2002.06038>
+- Adria Puigdomenech Badia et al., "Agent57: Outperforming the Atari
+  Human Benchmark", arXiv:2003.13350 (2020).
+  <https://arxiv.org/abs/2003.13350> (also cited for page 8.)
+
+### Goal inference, skill discovery, empowerment
+
+- Andrew Y. Ng & Stuart Russell, "Algorithms for Inverse
+  Reinforcement Learning", ICML 2000.
+  <https://ai.stanford.edu/~ang/papers/icml00-irl.pdf> (also cited
+  in the mentalizing block above.)
+- Brian D. Ziebart, Andrew Maas, J. Andrew Bagnell & Anind K. Dey,
+  "Maximum Entropy Inverse Reinforcement Learning", AAAI 2008.
+  <https://www.aaai.org/Papers/AAAI/2008/AAAI08-227.pdf> (also cited
+  in the mentalizing block above.)
+- Karl Gregor, Danilo Jimenez Rezende & Daan Wierstra, "Variational
+  Intrinsic Control" (VIC), arXiv:1611.07507 (2016).
+  <https://arxiv.org/abs/1611.07507>
+- Benjamin Eysenbach, Abhishek Gupta, Julian Ibarz & Sergey Levine,
+  "Diversity is All You Need: Learning Skills without a Reward
+  Function" (DIAYN), arXiv:1802.06070 (2018).
+  <https://arxiv.org/abs/1802.06070>
+- Jiaheng Hu, Zizhao Wang, Peter Stone & Roberto Martin-Martin,
+  "Disentangled Unsupervised Skill Discovery for Efficient
+  Hierarchical Reinforcement Learning" (DUSDi), NeurIPS 2024;
+  arXiv:2410.11251. <https://arxiv.org/abs/2410.11251>
+- Alexander S. Klyubin, Daniel Polani & Chrystopher L. Nehaniv,
+  "Empowerment: A Universal Agent-Centric Measure of Control", IEEE
+  Congress on Evolutionary Computation, 2005.
+  <https://doi.org/10.1109/CEC.2005.1554676>
+- "A Unified Bellman Optimality Principle Combining Reward
+  Maximization and Empowerment", arXiv:1907.12392 (2019).
+  <https://arxiv.org/abs/1907.12392>
+- "Towards Empowerment Gain through Causal Structure Learning in
+  Model-Based RL", arXiv:2502.10077 (2025).
+  <https://arxiv.org/abs/2502.10077>
+
+### Few-shot transfer, meta-RL, in-context RL
+
+- Jane X. Wang et al., "Learning to Reinforcement Learn",
+  arXiv:1611.05763 (2016). <https://arxiv.org/abs/1611.05763>
+  (also cited in the meta-RL block above.)
+- Yan Duan, John Schulman, Xi Chen, Peter L. Bartlett, Ilya
+  Sutskever & Pieter Abbeel, "RL^2: Fast Reinforcement Learning via
+  Slow Reinforcement Learning", arXiv:1611.02779 (2016).
+  <https://arxiv.org/abs/1611.02779>
+- Chelsea Finn, Pieter Abbeel & Sergey Levine, "Model-Agnostic
+  Meta-Learning for Fast Adaptation of Deep Networks" (MAML), ICML
+  2017; arXiv:1703.03400. <https://arxiv.org/abs/1703.03400>
+- Michael Laskin, Luyu Wang, Junhyuk Oh et al., "In-context
+  Reinforcement Learning with Algorithm Distillation",
+  arXiv:2210.14215 (2022). <https://arxiv.org/abs/2210.14215>
+- Jonathan N. Lee, Annie Xie, Aldo Pacchiano, Yash Chandak, Chelsea
+  Finn, Ofir Nachum & Emma Brunskill, "Supervised Pretraining Can
+  Learn In-Context Reinforcement Learning" (Decision-Pretrained
+  Transformer), NeurIPS 2023; arXiv:2306.14892.
+  <https://arxiv.org/abs/2306.14892>
+- "Towards Large-Scale In-Context Reinforcement Learning by
+  Meta-Training in Randomized Worlds", arXiv:2502.02869 (2025).
+  <https://arxiv.org/abs/2502.02869>
+- "Distilling Reinforcement Learning Algorithms for In-Context
+  Model-Based Planning" (DICP), arXiv:2502.19009 (2025).
+  <https://arxiv.org/abs/2502.19009>
+- Open-Ended Learning Team (DeepMind), "Open-Ended Learning Leads
+  to Generally Capable Agents" (XLand), arXiv:2107.12808 (2021).
+  <https://arxiv.org/abs/2107.12808> (also cited in the
+  auto-curriculum block above.)
+
 ## thvm internal docs referenced
 
 - [../grad.md](../grad.md) -- autodiff.

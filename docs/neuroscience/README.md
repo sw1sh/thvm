@@ -202,7 +202,18 @@ IJCAI, etc. -- are left as is.)
    goal-conditioned RL and quasimetrics, and RL for language models.
    The field-level companion to page 2's RL-in-the-brain story, and
    the lineage the thvm experiment arc (155-167) walks.
-9. [references.md](references.md) -- consolidated bibliography with
+9. [09-arc-agi3-exploration-survey.md](09-arc-agi3-exploration-survey.md)
+   -- a standalone survey of ARC-AGI-3 (the agentic rung of the
+   ARC-AGI ladder, launched March 2026) and the exploration /
+   goal-inference literature it demands: the structure of the
+   benchmark and what little has been tried on it, exploration under
+   sparse or absent reward (ICM, RND, count-based, Go-Explore,
+   Never-Give-Up, Agent57), goal and objective inference (inverse RL,
+   skill discovery, empowerment), and few-shot transfer to novel
+   mechanics (meta-RL, in-context RL). Closes with an honest
+   assessment of what the thvm arc should harvest as it pivots to
+   ARC-AGI-3. The agentic-exploration companion to page 8.
+10. [references.md](references.md) -- consolidated bibliography with
    links.
 
 ## How to use this with thvm
