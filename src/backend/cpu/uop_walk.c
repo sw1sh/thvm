@@ -979,10 +979,8 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     trace_known = 1;
   }
   u32 kid = (u32)(ke - KERNELS);
-  // F6 multi-output: walker now handles n_extra_outputs > 0 kernels
-  // when the lifter (kernel_lift_from_kprog) emitted a STORE-AFTER
-  // chain for them.  store_root==0 means the lift declined; the
-  // walker can't help in that case (legacy fallback runs).
+  // store_root==0 means the lift declined; the walker can't help in
+  // that case (legacy fallback runs).
   if (ke->cached_lift.store_root == 0) {
     if (trace_on) fprintf(stderr, "uop_walk: lift declined n_inputs=%u n_ops=%u "
                           "n_extra=%u\n",

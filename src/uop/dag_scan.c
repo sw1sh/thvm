@@ -878,11 +878,9 @@ int uop_dag_classify_conv2d_flat_shape(Term root,
   if (root == 0) return 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
   Term value = heap_read(term_val(root) + 2);
-  // Peel an optional UOP_OPT(_, CONV, 0) wrapper.  F4's
-  // uop_recognise_conv installs this when the conv2d shape is detected;
-  // the bare-REDUCE case fires when the recogniser hasn't run (e.g. the
-  // dedicated `kernel_lift_from_conv2d` path that synthesises the DAG
-  // directly, without going through rangeify+recognise_conv).
+  // Peel an optional UOP_OPT(_, CONV, 0) wrapper.  uop_recognise_conv
+  // installs this when the conv2d shape is detected; the bare-REDUCE
+  // case fires when the recogniser hasn't run yet on this root.
   if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT) {
     if (uop_opt_kind(value) != UOP_OPT_CONV) return 0;
     value = uop_opt_target(value);
@@ -897,8 +895,9 @@ int uop_dag_classify_conv2d_flat_shape(Term root,
 
 // === DAG-side full-shape extractor (conv2d-flat) ======================
 //
-// Inverts `kernel_lift_from_conv2d` (src/schedule/kernel_lift.c:981-1108)
-// for the single-input non-degenerate conv2d case so the conv shape facts
+// Inverts the conv2d-flat address tree shape (IDIV/IMOD decomposition of
+// r_out + r_q into batch/output-spatial/channel/kernel-spatial axes) so
+// the conv shape facts
 // (c_out, c_in, kh, kw, batch, h_out, w_out, w_offset, w_stride0/1,
 // x_offset, x_stride_b/0/1/2) flow from the lifted UOp DAG instead of
 // from `ke->input_views[]`.  The IDIV/IMOD decomposition is deterministic

@@ -4064,19 +4064,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // survive across new kid emissions.
   axes_default_for(ke);
 
-  // The legacy rangeify_try_lower_elementwise pass + its CSE/DCE
-  // helpers were retired once the unified-rangeify pass covered every
-  // in-tree kernel (input_chain_composed bookkeeping ported to the
-  // unified pass in commit 32a7e4e4).  Materialize now goes straight
-  // from KProgOp[] to kernel_lift_to_uop / the unified store_root.
-
-  // Cache the full kernel_lift_to_uop output on the KernelEntry
-  // alongside the program[] output.  The lifter handles two shapes:
-  // (a) conv2d-only kernels (kernel_lift_from_conv2d) and (b) every
-  // other kernel via the unified store_root short-circuit.  When the
-  // lift declines (multi-output spliced, unsupported shape, n_inputs >
-  // KERNEL_LIFT_MAX_INPUT), cached_lift stays zero-initialized and
-  // the program[] path remains primary.
+  // Cache kernel_lift_to_uop output on the KernelEntry: the lifter
+  // resolves the unified-pass store_root and packages it as
+  // KernelUopLift.  When the lift declines (no source_uop /
+  // bufferize_info miss / n_inputs > KERNEL_LIFT_MAX_INPUT)
+  // cached_lift stays zero-initialized and the program[] path
+  // remains primary.
   //
   // Dispatch-time consumers (cpu_jit_build, cg_emit_via_uop,
   // cpu_uop_walk) read store_root / out_buf / in_bufs[] from

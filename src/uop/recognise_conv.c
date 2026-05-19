@@ -1,8 +1,7 @@
 // uop/recognise_conv.c - pre-render pass that wraps the conv2d_flat
 // shape with UOP_OPT(_, CONV, 0).
 //
-// The conv2d_flat UOp DAG produced by kernel_lift_from_conv2d has the
-// shape:
+// The conv2d_flat UOp DAG that triggers this recogniser has the shape:
 //
 //   STORE(C, r_out, REDUCE(MUL(INDEX_E(W, wi), X_VAL), SUM, q_axis))
 //

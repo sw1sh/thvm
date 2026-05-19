@@ -21,15 +21,10 @@ fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
 // schedule/kernel_lift.c -- hand a scheduled kernel back to the
 // renderer as a UOp DAG root suitable for cg_render_uop_kernel.
 //
-// kernel_lift_to_uop consumes the UOP_STORE root produced by the
-// unified rangeify pass (rangeify_unified_store_root_at).  Phase 4d
-// (ideal_pipeline_v2.md) deleted the historic multi-output (KProgOp)
-// and conv2d-direct branches; counter trace under
-// THVM_DUMP_LIFT_DISPATCH proved both fired 0 times across the 8-test
-// suite (177 tests) AND the bench-train BS=15 14-param backward
-// (2885 kernels) -- every kernel goes through the unified path.
-//
-// KernelUopLift is declared in thvm.h.
+// kernel_lift_to_uop looks up the UOP_STORE root the unified rangeify
+// pass emitted for this kernel's boundary (via bufferize_info_find +
+// rangeify_unified_store_root_at) and packages it as KernelUopLift
+// for the renderer / dispatcher.  KernelUopLift is declared in thvm.h.
 
 static void lift_reject_log(KernelEntry const *ke, u32 sid,
                             const char *where) {

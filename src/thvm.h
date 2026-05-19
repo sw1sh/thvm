@@ -1044,11 +1044,11 @@ typedef struct {
   Term in_bufs[KERNEL_LIFT_MAX_INPUT];
   u32  n_inputs;
   // Multi-output extension (F6 multi-output walker).  n_outputs == 1
-  // for the legacy single-output lift; > 1 when kernel_lift_from_kprog
-  // (or a future multi-output rangeify path) emitted a STORE-AFTER
-  // chain.  Slot 0 mirrors `out_buf`; slots 1..n_outputs-1 hold the
-  // extra-output UOP_BUFFER Terms in the order extra_output_tids[]
-  // declared them.
+  // for single-output lifts; > 1 reserves a STORE-AFTER chain shape
+  // that test scaffolding (test_metal_real, test_apply_opt_dag) still
+  // constructs directly.  Slot 0 mirrors `out_buf`; slots 1..n_outputs-1
+  // hold the extra-output UOP_BUFFER Terms in the order
+  // extra_output_tids[] declared them.
   u32  n_outputs;
   Term out_bufs[KERNEL_LIFT_MAX_OUTPUT];
 } KernelUopLift;
@@ -2468,10 +2468,9 @@ fn UopRangeSplit uop_range_split(Term old_range, u32 k, u32 inner_axis_type);
 // axis_id matches a KOP_GLOBAL entry in `applied_opts` (with arg ==
 // extent and current axis_type == KAX_LOOP) to a fresh UOP_RANGE
 // with axis_type=KAX_GLOBAL.  Mirrors codegen/apply_opt.c's
-// KpSchedule write + kernel_lift.c's structural-replay stamp; both
-// representations stay live.  Idempotent: re-running the rule on a
-// previously-stamped DAG is a no-op (the LOOP guard rejects
-// KAX_GLOBAL leaves).
+// KpSchedule write; both representations stay live.  Idempotent:
+// re-running the rule on a previously-stamped DAG is a no-op (the
+// LOOP guard rejects KAX_GLOBAL leaves).
 fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
                              u32 n_applied);
 
@@ -2480,9 +2479,9 @@ fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
 // with the axis_type produced by simulating the KOP_GLOBAL +
 // KOP_SWAP history in `applied_opts` (initial state KAX_LOOP for
 // all positions).  Mirrors codegen/apply_opt.c's pairwise axis_type
-// swap + kernel_lift.c's structural-replay swap.  Composes
-// KOP_GLOBAL stamps and KOP_SWAPs in order so SWAP-after-GLOBAL
-// produces the relabelled axis_type at the destination position.
+// swap.  Composes KOP_GLOBAL stamps and KOP_SWAPs in order so
+// SWAP-after-GLOBAL produces the relabelled axis_type at the
+// destination position.
 // Split-class opts and KOP_TC are ignored here (axis-insertion
 // drift is handled by uop_apply_split_dag).  Idempotent: the
 // simulated desired state is a pure function of applied_opts.
@@ -2526,18 +2525,16 @@ fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
 // Walks the DAG rooted at `root`, applies every split-class entry in
 // `applied_opts` (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG
 // level via the uop_range_split primitive, and returns the rewritten
-// root.  Mirrors kernel_lift.c:1561-1604's structural-replay split
-// block but operates on EMITTED UOp DAGs: replaces each pre-replay
+// root.  Operates on EMITTED UOp DAGs: replaces each pre-split
 // UOP_RANGE leaf at axis A with the (outer * k + inner) sub-expression
 // uop_range_split returns, and propagates the change through every
 // IADD/IMUL chain that consumed the original leaf (E8's
 // uop_arity / uop_graph_rebuild_with_srcs descent makes the rewriter
 // reach the leaves nested inside INDEX_E.addr trees).
 //
-// Pre-condition: the input DAG is the lifter output WITHOUT the
-// structural-replay split block applied -- i.e. each pre-replay axis
-// position N appears as a UOP_RANGE leaf with axis_id=N and the
-// pre-replay extent.  GLOBAL / SWAP / TC stamping is the job of
+// Pre-condition: the input DAG has no split block applied yet -- each
+// pre-split axis position N appears as a UOP_RANGE leaf with axis_id=N
+// and the pre-split extent.  GLOBAL / SWAP / TC stamping is the job of
 // uop_apply_kernel_opts (which composes via the same simulator);
 // this rule deliberately ignores those classes.
 //
@@ -2736,9 +2733,9 @@ int uop_dag_classify_conv2d_flat_shape(Term root,
                                        struct KernelEntry const *ke);
 
 // === conv2d-flat full-shape extractor ==================================
-// Inverts kernel_lift_from_conv2d's IDIV/IMOD address decomposition
-// so the conv2d shape facts can flow from the lifted DAG instead of
-// from ke->input_views[].
+// Inverts the conv2d-flat IDIV/IMOD address decomposition so the
+// conv2d shape facts can flow from the lifted DAG instead of from
+// ke->input_views[].
 //
 // In-scope: single-input non-degenerate conv2d (c_in*kh*kw > 1, kh>=1,
 // kw>=1; multi-input IWHERE chain handled by the caller via the
