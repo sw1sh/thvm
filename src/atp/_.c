@@ -3351,6 +3351,157 @@ fn u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap) {
   return w;
 }
 
+// === proof extraction =================================================
+//
+// Reconstruct the equational rewrite chain that closes a single-NF
+// goal.  thvm_atp_trace_serialize (above) emits the COMPLETION trace
+// -- the CP/rule derivation DAG; this emits the orthogonal object: the
+// chain of rewrites taking each conjecture side to the shared normal
+// form.
+//
+// The recording rewriter mirrors `thvm_rewrite_step` exactly --
+// leftmost-outermost, lowest-index rule, forward (lhs->rhs) only --
+// which is the redex choice the WL-driven engine's normalizer
+// (atp_rewrite_normalize_indexed / the linear scan) makes, so the
+// recorded chain reproduces goal_check's single-NF result.
+
+// One leftmost-outermost forward rewrite of `t`, recording the redex
+// path and the rule index.  `pos` is caller-owned scratch holding the
+// path so far in pos[0..depth); on a hit the full path is left in
+// pos[0..*out_pos_len).  Returns the rewritten term; *fired = 1 on a
+// hit, 0 at a fixpoint.
+static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
+                                   u32 *out_rule, u8 *out_pos_len,
+                                   u8 *fired) {
+  for (u32 i = 0; i < s->n_rules; i++) {
+    RewriteSubst sub = {{0}};
+    if (thvm_match(s->lhs[i], t, &sub)) {
+      *fired = 1;
+      *out_rule = i;
+      *out_pos_len = depth;
+      return thvm_subst_apply(s->rhs[i], &sub);
+    }
+  }
+  if (term_tag(t) == TAG_CTR && depth < ATP_PROOF_MAX_DEPTH) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    for (u32 i = 0; i < n; i++) {
+      pos[depth] = (u8)i;
+      u8 cf = 0;
+      Term nch = atp_proof_rewrite_step(s, term_ctr_at(t, i), pos,
+                                        (u8)(depth + 1u), out_rule,
+                                        out_pos_len, &cf);
+      if (cf) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 j = 0; j < n; j++) {
+          children[j] = (j == i) ? nch : term_ctr_at(t, j);
+        }
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// Normalize one conjecture side, appending each rewrite to out[*n).
+// `side` tags every recorded step; returns the side's normal form.
+static Term atp_proof_record_side(AtpState *s, Term t, u32 side,
+                                  AtpProofStep *out, u32 cap, u32 *n) {
+  for (u32 it = 0; it < ATP_PROOF_MAX_STEPS; it++) {
+    u8  pos[ATP_PROOF_MAX_DEPTH];
+    u32 rule = 0;
+    u8  pos_len = 0, fired = 0;
+    Term t2 = atp_proof_rewrite_step(s, t, pos, 0u, &rule, &pos_len, &fired);
+    if (!fired || kbo_eq(t, t2)) return t;
+    if (*n < cap) {
+      AtpProofStep *st = &out[*n];
+      st->side    = side;
+      st->rule    = rule;
+      st->fwd     = 1u;
+      st->pos_len = pos_len;
+      for (u8 k = 0; k < pos_len; k++) st->pos[k] = pos[k];
+      st->before  = t;
+      st->after   = t2;
+      (*n)++;
+    }
+    t = t2;
+  }
+  return t;
+}
+
+fn u32 thvm_atp_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
+  if (s == NULL || out == NULL || cap == 0u) return 0;
+  // Single-NF extraction only: no goal, or an existential (narrowing)
+  // goal, has no two-sided rewrite chain to reconstruct here.
+  if (s->goal_lhs == 0 || s->goal_existential) return 0;
+
+  u32  n_lhs = 0;
+  Term nf_lhs = atp_proof_record_side(s, s->goal_lhs, 0u, out, cap, &n_lhs);
+
+  // The goal_rhs chain is recorded into scratch, then appended in
+  // reverse so the assembled proof reads goal_lhs -> NF <- goal_rhs.
+  static AtpProofStep rhs_steps[ATP_PROOF_MAX_STEPS];
+  u32  n_rhs = 0;
+  Term nf_rhs = atp_proof_record_side(s, s->goal_rhs, 1u, rhs_steps,
+                                      ATP_PROOF_MAX_STEPS, &n_rhs);
+
+  // Not single-NF provable -- the two sides never meet under R.  A
+  // symmetric goal closed only by the MNF search lands here.
+  if (!kbo_eq(nf_lhs, nf_rhs)) return 0;
+
+  u32 n = n_lhs;
+  for (u32 k = n_rhs; k-- > 0u && n < cap; ) {
+    const AtpProofStep *src = &rhs_steps[k];
+    AtpProofStep *dst = &out[n++];
+    dst->side    = 1u;
+    dst->rule    = src->rule;
+    dst->fwd     = (u8)(1u - src->fwd);   // the step runs in reverse
+    dst->pos_len = src->pos_len;
+    for (u8 j = 0; j < src->pos_len; j++) dst->pos[j] = src->pos[j];
+    dst->before  = src->after;            // (before, after) swapped
+    dst->after   = src->before;
+  }
+  return n;
+}
+
+fn u32 thvm_atp_proof_serialize(const AtpProofStep *steps, u32 n_steps,
+                                char *buf, u32 cap) {
+  if (steps == NULL || buf == NULL || cap == 0u) return 0;
+  buf[0] = '\0';
+  u32 w = 0;
+  for (u32 i = 0; i < n_steps; i++) {
+    if (w + 1u >= cap) break;
+    const AtpProofStep *st = &steps[i];
+    int nw = snprintf(buf + w, cap - w, "%c rule %u %s @",
+                      st->side == 0u ? 'L' : 'R', st->rule,
+                      st->fwd ? "fwd" : "rev");
+    if (nw < 0) break;
+    w += (u32)nw;
+    if (w + 1u >= cap) break;
+    if (st->pos_len == 0u) {
+      w += (u32)snprintf(buf + w, cap - w, "top");
+    } else {
+      for (u8 k = 0; k < st->pos_len && w + 2u < cap; k++) {
+        w += (u32)snprintf(buf + w, cap - w, "%s%u",
+                           k == 0 ? "" : ".", st->pos[k]);
+      }
+    }
+    if (w + 3u >= cap) break;
+    w += (u32)snprintf(buf + w, cap - w, ": ");
+    w += atp_pretty_term(st->before, buf + w, cap - w);
+    if (w + 5u >= cap) break;
+    w += (u32)snprintf(buf + w, cap - w, " => ");
+    w += atp_pretty_term(st->after, buf + w, cap - w);
+    if (w + 1u >= cap) break;
+    w += (u32)snprintf(buf + w, cap - w, "\n");
+  }
+  if (w >= cap) w = cap - 1;
+  buf[w] = '\0';
+  return w;
+}
+
 // Drive thvm_atp_step until it returns a non-RUNNING status.
 fn AtpStatus thvm_atp_run(AtpState *s) {
   AtpStatus st;

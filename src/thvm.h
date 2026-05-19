@@ -3276,6 +3276,48 @@ fn u8        thvm_atp_set_goal_existential(AtpState *s,
 // returned byte count against `cap - 1` to detect that case.
 fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
 
+// === proof extraction ================================================
+// The trace[] array (above) records the COMPLETION derivation -- which
+// critical pairs birthed which rules.  A *proof* is the orthogonal
+// object: the equational rewrite chain that joins the two conjecture
+// sides.  thvm_atp_proof_extract reconstructs it for a goal closed by
+// the single-normal-form check (thvm_atp_goal_check's `kbo_eq(l, r)`
+// path): it re-normalizes goal_lhs and goal_rhs under the final rule
+// set R, recording every leftmost-outermost forward rewrite.  The
+// proof is the goal_lhs chain followed by the goal_rhs chain reversed,
+// the two meeting at the shared normal form -- a chain
+//   goal_lhs = e_1 = ... = NF = ... = e_k = goal_rhs.
+//
+// A goal closed only by the MNF bidirectional search (a symmetric
+// conjecture whose two sides share no normal form) is NOT single-NF
+// extractable; thvm_atp_proof_extract returns 0 for it.
+#define ATP_PROOF_MAX_DEPTH 32   // redex-path depth cap per step
+#define ATP_PROOF_MAX_STEPS 512  // chain-length cap, each side
+
+typedef struct {
+  u32  side;       // 0: a step on goal_lhs's chain; 1: on goal_rhs's
+  u32  rule;       // index into s->lhs / s->rhs -- the rule applied
+  u8   fwd;        // 1: rule fired lhs->rhs; 0: rhs->lhs (reversed)
+  u8   pos_len;    // length of the redex path within the side's term
+  u8   pos[ATP_PROOF_MAX_DEPTH];   // child-index path to the redex
+  Term before;     // the rewritten side, immediately before the step
+  Term after;      // the rewritten side, immediately after the step
+} AtpProofStep;
+
+// Fill out[0..cap) with the extracted proof steps; returns the step
+// count, or 0 when the goal is not single-NF provable under the
+// current R (no goal set, an existential goal, or an MNF-only join).
+// The before/after Terms reference live heap cells -- consume them
+// (or copy them out) before the next allocation, like witnesses.
+fn u32       thvm_atp_proof_extract(AtpState *s, AtpProofStep *out,
+                                    u32 cap);
+
+// Serialize an extracted proof to human-readable text into `buf`.
+// Each line: "<L|R> rule <i> <fwd|rev> @<path>: <before> => <after>".
+// Truncates silently on overflow.  Returns the byte count written.
+fn u32       thvm_atp_proof_serialize(const AtpProofStep *steps,
+                                      u32 n_steps, char *buf, u32 cap);
+
 // === wald/ ===
 // Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
 // docs/plans/waldmeister_ic_atp_tasks.md.  WaldSpec holds the

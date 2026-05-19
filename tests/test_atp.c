@@ -929,6 +929,57 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/proof-extract-no-goal-returns-zero");
+  {
+    // No goal set -> nothing to extract.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    AtpProofStep steps[8];
+    CHECK_EQ(thvm_atp_proof_extract(s, steps, 8u), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/proof-extract-headline-group-chain");
+  {
+    // Same headline demo (prove f(a, i(a)) == e from the group
+    // axioms); after PROVED, extract the equational rewrite chain
+    // and verify it is a contiguous goal_lhs -> ... -> goal_rhs walk.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    Term goal_l = mk_f(mk_a(), mk_i(mk_a()));
+    Term goal_r = mk_e();
+    thvm_atp_set_goal(s, goal_l, goal_r);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+
+    AtpStatus st = thvm_atp_run(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+
+    AtpProofStep steps[ATP_PROOF_MAX_STEPS];
+    u32 n = thvm_atp_proof_extract(s, steps, ATP_PROOF_MAX_STEPS);
+    CHECK(n >= 1u);                         // a non-trivial proof
+
+    // Endpoints: the chain starts at goal_lhs and ends at goal_rhs.
+    CHECK(kbo_eq(steps[0].before, goal_l));
+    CHECK(kbo_eq(steps[n - 1].after, goal_r));
+
+    // Contiguity: each step hands its result to the next.
+    for (u32 i = 0; i + 1u < n; i++) {
+      CHECK(kbo_eq(steps[i].after, steps[i + 1].before));
+    }
+    // Every cited rule index is in range.
+    for (u32 i = 0; i < n; i++) CHECK(steps[i].rule < s->n_rules);
+
+    // The serializer renders non-empty, null-terminated text.
+    char buf[2048] = {0};
+    u32 w = thvm_atp_proof_serialize(steps, n, buf, sizeof(buf));
+    CHECK(w > 0u);
+    CHECK_EQ((int)buf[w], 0);
+    CHECK(strstr(buf, "rule ") != NULL);
+
+    thvm_atp_free(s);
+  }
+
   // === Stage 7.1: trivial-joinability filter ==========================
 
   TEST_BEGIN("atp/cp-joinability-filter-self-overlap-counter");
