@@ -518,6 +518,43 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/interreduce-requeue-records-simplify-lineage");
+  {
+    // Regression guard for the trace-DAG severance fix: a rule
+    // dropped by interreduce is re-queued as the equation
+    // (reduced, old_rhs).  That re-queue must record a
+    // TRACE_SIMPLIFY entry parented on the dropped rule's trace
+    // index -- a fresh TRACE_AXIOM would disconnect the proof DAG.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    // R[0] enters through the saturation path so it carries a real
+    // trace lineage: add_equation queues it (TRACE_AXIOM at idx 0),
+    // a step orients it (TRACE_ORIENT, r_trace[0] -> that ORIENT).
+    thvm_atp_add_equation(s, mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_a()));
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 1u);
+    u32 old_trace = s->r_trace[0];
+    CHECK(old_trace != ATP_TRACE_NONE);
+
+    u32 trace_before = s->n_trace;
+
+    // The more-general rule subsumes R[0]'s lhs at top.
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(added.count, 1u);
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 1u);
+
+    // The interreduce re-queue pushed exactly one new trace entry:
+    // a TRACE_SIMPLIFY whose parent_a is the dropped rule's trace.
+    CHECK_EQ(s->n_trace, trace_before + 1u);
+    Term simp = s->trace[trace_before];
+    CHECK_EQ(term_ext(simp), TRACE_SIMPLIFY);
+    CHECK_EQ((u32)term_val(term_ctr_at(simp, 0)), old_trace);
+    CHECK_EQ((u32)term_val(term_ctr_at(simp, 1)), ATP_TRACE_NONE);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/interreduce-keeps-irreducible-rules");
   {
     // R[0]: i(a) -> i(a)         (degenerate; just to fill a slot)
