@@ -595,6 +595,9 @@ void thvm_free(void) {
             (unsigned long long)kernel_lift_attempts(),
             (unsigned long long)kernel_lift_successes());
     fprintf(stderr,
+            "thvm: tile_conv2d_flat -- dag=%llu\n",
+            (unsigned long long)tile_conv2d_flat_dag_count());
+    fprintf(stderr,
             "thvm: bypass coverage -- total=%llu used_unified=%llu "
             "(resid=%llu stranded=%llu bcast=%llu)\n",
             (unsigned long long)bypass_kernel_total_count(),

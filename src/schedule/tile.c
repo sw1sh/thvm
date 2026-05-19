@@ -61,20 +61,14 @@ static u32 tile_conv2d_reduce_unroll_from_opts(KernelEntry const *ke,
   return unroll;
 }
 
-// Counters for the conv2d-flat DAG migration.  DAG path fires when
+// Coverage counter for the conv2d-flat DAG classifier.  Fires when
 // `cached_lift.store_root != 0` AND
-// `uop_dag_classify_conv2d_flat_shape` accepts.  LEGACY path fires
-// when the lifter declined (store_root == 0) and we fall back to the
-// program[]-side last-op check.  Tests assert both counters increment
-// for their respective fixtures (production vs hand-built KProgOp).
+// `uop_dag_classify_conv2d_flat_shape` accepts.
 static u64 TILE_CONV2D_FLAT_DAG    = 0;
-static u64 TILE_CONV2D_FLAT_LEGACY = 0;
 
-fn u64 tile_conv2d_flat_dag_count   (void) { return TILE_CONV2D_FLAT_DAG;    }
-fn u64 tile_conv2d_flat_legacy_count(void) { return TILE_CONV2D_FLAT_LEGACY; }
+fn u64 tile_conv2d_flat_dag_count   (void) { return TILE_CONV2D_FLAT_DAG; }
 fn void tile_conv2d_flat_counters_reset(void) {
-  TILE_CONV2D_FLAT_DAG    = 0;
-  TILE_CONV2D_FLAT_LEGACY = 0;
+  TILE_CONV2D_FLAT_DAG = 0;
 }
 
 static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
@@ -92,27 +86,13 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
     }
   }
 
-  // Prefer the DAG-side structural gate when the lifter has
-  // populated cached_lift.store_root.  Under default
-  // THVM_PHASE_C7_FREE_PROGRAM=1 program[] is freed post-materialize,
-  // so the program[] reader would early-bail (program == NULL) for
-  // production conv kernels.  The program[] fallback covers the
-  // lift-decline path AND test_tile_graph fixtures that hand-build
-  // KProgOp without running the lifter.
-  if (ke->cached_lift.store_root != 0) {
-    if (!uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root, ke)) {
-      return 0;
-    }
-    TILE_CONV2D_FLAT_DAG++;
-  } else {
-    if (ke->n_ops == 0 || ke->program == NULL) return 0;
-    KProgOp const *last = &ke->program[ke->n_ops - 1];
-    if (last->opcode != UOP_REDUCE || last->n_src != 1
-        || TILE_REDUCE_KIND(last->arg) != REDUCE_SUM) {
-      return 0;
-    }
-    TILE_CONV2D_FLAT_LEGACY++;
+  // DAG-side structural gate: classify the lifted UOp DAG.  Materialize
+  // always populates cached_lift.store_root on emitted kernels.
+  if (ke->cached_lift.store_root == 0) return 0;
+  if (!uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root, ke)) {
+    return 0;
   }
+  TILE_CONV2D_FLAT_DAG++;
 
   // Try the DAG-side full-shape extractor first.  When the lift
   // took the single-input path AND the address tree wasn't
