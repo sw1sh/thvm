@@ -1129,45 +1129,6 @@ static u32 metal_jit_lookup_idx(u64 key) {
 
 static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 
-static int metal_try_alias_reshape(KernelEntry *ke,
-                                   u32 *in_buf_ids,
-                                   u32 out_buf_id) {
-  if (ke == NULL || ke->n_ops != 1 || ke->output_tid == 0
-      || ke->output_tid >= TENS_NEXT) {
-    return 0;
-  }
-  KProgOp const *p = &ke->program[0];
-  if (p->opcode != UOP_RESHAPE || p->n_src != 1
-      || !KSRC_IS_INPUT(p->src[0])) {
-    return 0;
-  }
-  u32 slot = KSRC_INDEX(p->src[0]);
-  if (slot >= ke->n_inputs || p->numel != ke->output_numel
-      || ke->input_numels[slot] != ke->output_numel) {
-    return 0;
-  }
-  u32 in_buf_id = in_buf_ids[slot];
-  if (in_buf_id == 0 || in_buf_id >= METAL_BUFS_NEXT
-      || METAL_BUFS[in_buf_id].buf == nil) {
-    return 0;
-  }
-  u32 cur_out_buf_id = TENS[ke->output_tid].buf_id;
-  if (cur_out_buf_id == in_buf_id && METAL_BUFS[in_buf_id].refcount > 0) {
-    return 1;
-  }
-  if (cur_out_buf_id == 0 || cur_out_buf_id >= METAL_BUFS_NEXT
-      || METAL_BUFS[cur_out_buf_id].buf == nil) {
-    return 0;
-  }
-  (void)out_buf_id;
-  metal_buf_incref(in_buf_id);
-  TENS[ke->output_tid].buf_id = in_buf_id;
-  if (!metal_buf_freelist_push_impl(cur_out_buf_id)) {
-    metal_buf_free(cur_out_buf_id);
-  }
-  return 1;
-}
-
 static int metal_tile_enabled(void) {
   // Default ON: render_uop is the primary Metal MSL emit path. Set
   // THVM_TILE=0 to opt back into the legacy KProgOp-flat shader and
@@ -1999,28 +1960,14 @@ static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
 // equal `dt` -- but the read goes through cached_lift, keeping
 // program[] off the hot path for kernels that lift.  Lift declines
 // (multi-output spliced, n_inputs > KERNEL_LIFT_MAX_INPUT, gemm/conv2d
-// shape miss) keep the legacy program[] walk.
 static int metal_kernel_supported(struct KernelEntry const *ke) {
-  // When the lift succeeded use the lifted DAG to decide eligibility
-  // (kernel may have program == NULL under THVM_PHASE_C7_FREE_PROGRAM
-  // =1).  When the lift declined fall back to the legacy program[]
-  // walk.
-  u32 dt;
-  if (ke->cached_lift.store_root != 0) {
-    if (ke->n_inputs == 0) return 0;
-    dt = ke->input_dtypes[0];
-    if (dt != DT_FP32 && dt != DT_INT32) return 0;
-    if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, dt)) return 0;
-  } else {
-    if (ke->n_ops == 0) return 0;
-    dt = ke->program[0].dtype;
-    // v1: only the dtypes that have shader variants in the metallib.
-    // f32 always; i32 added in Phase I.  f16 / bf16 / fp8 / int4 fall
-    // back to CPU until per-dtype shader variants land for them.
-    if (dt != DT_FP32 && dt != DT_INT32) return 0;
-    for (u32 i = 0; i < ke->n_ops; i++)
-      if (ke->program[i].dtype != dt) return 0;
-  }
+  // Materialize populates cached_lift.store_root on every emitted
+  // kernel; eligibility is uniform-dtype over the lifted DAG.
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  if (ke->n_inputs == 0) return 0;
+  u32 dt = ke->input_dtypes[0];
+  if (dt != DT_FP32 && dt != DT_INT32) return 0;
+  if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, dt)) return 0;
   for (u32 i = 0; i < ke->n_inputs; i++)
     if (ke->input_dtypes[i] != dt) return 0;
   return 1;
@@ -2467,11 +2414,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
         fprintf(stderr, "]\n");
       }
     }
-  }
-
-  if (kprog_supported && metal_try_alias_reshape(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_METAL_ALIAS, cg_now_us() - t0);
-    return 0;
   }
 
   if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
