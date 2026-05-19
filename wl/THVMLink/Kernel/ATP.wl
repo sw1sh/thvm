@@ -811,7 +811,20 @@ cEngineProof[enc_, maxSteps_] := Block[{
         "MainSteps" -> If[ nSteps === 0, {}, mainSteps],
         "MainRules" -> mainRules,
         "RTrace" -> rTrace,
-        "Trace" -> traceEntries
+        "Trace" -> traceEntries,
+        (* every variable symbol the decode produced: the named
+           encoder vars plus any "x<id>" fallbacks for FVR ids
+           completion introduced past the original signature.  Both
+           the dataset builder and the ProofObject "Variables" list
+           need the complete set, or the verifier reads a stray
+           completion variable as a constant. *)
+        "VarSyms" -> Union[
+            Symbol /@ Values[idToName],
+            Cases[{traceEntries, mainRules, mainSteps, extSteps},
+                s_Symbol /; StringMatchQ[SymbolName[s],
+                    "x" ~~ DigitCharacter ..],
+                {0, Infinity}]
+        ]
     |>
 ]
 
@@ -981,7 +994,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         cjp, hypKey, chainEntries, runEq, prevChainKey, allEntries,
         stmt
     },
-        varSyms = Symbol /@ Keys[enc["State"]["var"]];
+        varSyms = cRes["VarSyms"];
         (* the trace-decoded terms carry bare variable symbols;
            atpEncodeProblem's AxPairs / ConjPair carry Pattern[v, _]
            wrappers -- strip them so every comparison is bare-to-bare
@@ -1120,7 +1133,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             key, st
         },
             cte = trace[[ti + 1]];
-            cpEq = {cte["Lhs"], cte["Rhs"]};
+            (* WL's verifier builds the CP as
+               (Construct's non-overlap side, overlap side rewritten)
+               -- the reverse of thvm's recorded (rewritten-lhs, rhs)
+               critical pair -- so the CriticalPairLemma Statement
+               takes the sides swapped. *)
+            cpEq = {cte["Rhs"], cte["Lhs"]};
             pos = cte["Pos"];
             aTe = trace[[cte["ParentA"] + 1]];
             bTe = trace[[cte["ParentB"] + 1]];
@@ -1234,6 +1252,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             {s, Length[mainSteps]}
         ];
 
+        (* Order is axioms, hypothesis, then `entries` in emission
+           order -- resolveTrace is depth-first, so a lemma is
+           always emitted after the entries it cites -- then the
+           goal chain.  The verifier replays entries in order and
+           needs every Construct / Input already defined, so this
+           dependency order must NOT be re-sorted. *)
         allEntries = Join[
             axiomEntries,
             {hypKey -> <|
@@ -1243,7 +1267,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             entries,
             chainEntries
         ];
-        SortBy[allEntries, $ProofKeyOrder[First[#]] &]
+        allEntries
     ]
 ]
 
@@ -1340,7 +1364,7 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
             dataset = buildCplDataset[enc, conjPair, cRes]
         ];
         If[ dataset === $Failed, Return[$Failed] ];
-        varNames = Symbol /@ Keys[enc["State"]["var"]];
+        varNames = cRes["VarSyms"];
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         conjStmt = holdToInactive[enc["ConjHCRaw"]];
         po = ProofObject[

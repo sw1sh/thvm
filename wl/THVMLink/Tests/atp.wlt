@@ -620,19 +620,29 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* The string form resolves a NotableTheorem of WolframAxioms
-       and runs the C engine.  A small step budget keeps the test
-       fast: completion does not close DoubleNegation here, so the
-       result is $Failed -- the point is that the string-form
-       plumbing (AxiomaticTheory resolution, quantifier elimination,
-       encoding) runs end to end without error. *)
-    MatchQ[
-        TFindEquationalProof["DoubleNegation", "WolframAxioms",
-            MaxSteps -> 64],
-        _ProofObject | $Failed
-    ],
-    True,
+    (* The string form resolves a NotableTheorem of WolframAxioms,
+       saturates with the C engine, and assembles the critical-pair
+       lemma DAG.  DoubleNegation is a genuine superposition proof:
+       the trace carries TRACE_CP entries, so buildCplDataset emits
+       CriticalPairLemma steps. *)
+    Head @ TFindEquationalProof["DoubleNegation", "WolframAxioms"],
+    ProofObject,
     TestID -> "ATP/TFEP/string-doublenegation-resolves"
+]
+
+VerificationTest[
+    (* The DoubleNegation ProofObject passes WL's own equational
+       proof verifier -- the CriticalPairLemma field encoding
+       (Construct / MatchingConstruct parents, superposition
+       Position / Subpattern, completion-introduced variables in
+       the ProofObject "Variables" list) matches what the verifier
+       replays. *)
+    Module[{p},
+        p = TFindEquationalProof["DoubleNegation", "WolframAxioms"];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/string-doublenegation-verifies"
 ]
 
 (* === TFindEquationalProof: completion-derived proofs =============== *)
