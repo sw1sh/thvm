@@ -1,31 +1,181 @@
-"""tinygrad-compatible nn module.
+"""Phase 3A of py_tensor_frontend.md -- tinygrad-shaped nn layers.
 
-Phase 3 deliverable: nn.Conv2d / Linear / BatchNorm / ... ported as
-thvm Tensor compositions.  Phase-2A stub: importing works but every
-layer raises NotImplementedError on construction so tests that need
-nn fail loudly at the use site, not the import.
+Each layer is a composition of Tensor ops + factories (weight init via
+Tensor.uniform / .ones / .zeros).  Phase 3A scope:
+
+  Linear     -- y = x @ W^T + b
+  BatchNorm  -- (x - mean) * invstd; running stats in inference mode
+  LayerNorm  -- normalize over last `normalized_shape` dims
+  Conv2d     -- delegates to Tensor.conv2d (Phase-3A host-side cheat)
+
+state.get_parameters(obj) walks lists/tuples/dicts/objects, collecting
+every Tensor attribute (incl. requires_grad=False running stats, as
+tinygrad does -- tests replace ALL params via .replace).
+
+Phase 3B will:
+  - move conv2d / max_pool2d onto the composed reshape+expand+mul+sum
+    unfold path (so they fuse into thvm kernels);
+  - wire backward() through requires_grad bookkeeping;
+  - add optim.SGD + optim.Adam.
 """
 from __future__ import annotations
 
+import math
+from typing import Any
 
-def _missing(layer_name: str):
-    def _raise(*args, **kwargs):
-        raise NotImplementedError(
-            f"thvm.nn.{layer_name}: Phase 3 (nn layers) not yet implemented")
-    return _raise
+from .tensor import Tensor
 
 
-Conv2d    = _missing("Conv2d")
-Linear    = _missing("Linear")
-BatchNorm = _missing("BatchNorm")
-LayerNorm = _missing("LayerNorm")
+# ---------------- layers --------------------------------------------------
+
+
+class Linear:
+    """y = x @ W^T + b.  Mirrors tinygrad's nn.Linear (weight stored as
+    (out, in); transposed at call time)."""
+
+    def __init__(self, in_features: int, out_features: int,
+                 bias: bool = True):
+        bound = 1.0 / math.sqrt(in_features)
+        self.weight = Tensor.uniform(out_features, in_features,
+                                     low=-bound, high=bound)
+        self.bias = (Tensor.uniform(out_features, low=-bound, high=bound)
+                     if bias else None)
+
+    def __call__(self, x: Tensor) -> Tensor:
+        return x.linear(self.weight.transpose(), self.bias)
+
+
+class Conv2d:
+    """2D convolution over (B, C_in, H, W) -> (B, C_out, H', W').
+
+    Phase 3A delegates to Tensor.conv2d, which currently runs on the
+    host via numpy.  The forward results are correct; gradient flow
+    waits on the composed Phase-3B path.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernel_size, stride=1, padding=0, dilation=1,
+                 groups: int = 1, bias: bool = True):
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+        self.kernel_size = tuple(kernel_size)
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        scale = 1.0 / math.sqrt(in_channels * self.kernel_size[0]
+                                * self.kernel_size[1])
+        self.weight = Tensor.uniform(out_channels, in_channels // groups,
+                                     *self.kernel_size,
+                                     low=-scale, high=scale)
+        self.bias = (Tensor.uniform(out_channels, low=-scale, high=scale)
+                     if bias else None)
+
+    def __call__(self, x: Tensor) -> Tensor:
+        return x.conv2d(self.weight, self.bias, self.groups,
+                        self.stride, self.dilation, self.padding)
+
+
+class BatchNorm:
+    """Batch normalization (2D / 3D / 4D input)."""
+
+    def __init__(self, sz: int, eps: float = 1e-5, affine: bool = True,
+                 track_running_stats: bool = True,
+                 momentum: float = 0.1):
+        self.eps = eps
+        self.track_running_stats = track_running_stats
+        self.momentum = momentum
+        self.weight = Tensor.ones(sz) if affine else None
+        self.bias = Tensor.zeros(sz) if affine else None
+        if track_running_stats:
+            self.running_mean = Tensor.zeros(sz, requires_grad=False)
+            self.running_var = Tensor.ones(sz, requires_grad=False)
+        self.num_batches_tracked = Tensor.zeros(requires_grad=False)
+
+    def calc_stats(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        if self.track_running_stats and not Tensor.training:
+            return self.running_mean, self.running_var
+        # batch mean over all axes except feature axis (axis 1).
+        reduce_axes = tuple(i for i in range(x.ndim) if i != 1)
+        batch_mean = x.mean(axis=reduce_axes)
+        shape_mask = [1, -1] + [1] * (x.ndim - 2)
+        y = x - batch_mean.reshape(*shape_mask)
+        batch_var = (y * y).mean(axis=reduce_axes)
+        return batch_mean, batch_var
+
+    def __call__(self, x: Tensor) -> Tensor:
+        mean, var = self.calc_stats(x)
+        invstd = (var + self.eps).rsqrt()
+        return x.batchnorm(self.weight, self.bias, mean, invstd)
+
+
+# tinygrad-style aliases
+BatchNorm2d = BatchNorm
+BatchNorm3d = BatchNorm
+
+
+class LayerNorm:
+    """Normalize over the last `normalized_shape` dims."""
+
+    def __init__(self, normalized_shape,
+                 eps: float = 1e-5,
+                 elementwise_affine: bool = True):
+        if isinstance(normalized_shape, int):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = tuple(normalized_shape)
+        self.axis = tuple(-1 - i for i in range(len(self.normalized_shape)))
+        self.eps = eps
+        if elementwise_affine:
+            self.weight = Tensor.ones(*self.normalized_shape)
+            self.bias = Tensor.zeros(*self.normalized_shape)
+        else:
+            self.weight = None
+            self.bias = None
+
+    def __call__(self, x: Tensor) -> Tensor:
+        x = x.layernorm(axis=self.axis, eps=self.eps)
+        if self.weight is None or self.bias is None:
+            return x
+        return x * self.weight + self.bias
+
+
+class LayerNorm2d(LayerNorm):
+    """LayerNorm over channel-last with channels-first storage."""
+    def __call__(self, x: Tensor) -> Tensor:
+        # (B, C, H, W) -> permute to (B, H, W, C) for layernorm, then back
+        return super().__call__(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+
+# ---------------- state helpers (port of tinygrad/nn/state.get_parameters)
+
+
+def _get_state_dict(obj, prefix: str = "") -> dict[str, Tensor]:
+    """Recursively walk an object, collecting Tensors keyed by dotted path."""
+    out: dict[str, Tensor] = {}
+    if isinstance(obj, Tensor):
+        out[prefix.rstrip(".")] = obj
+    elif isinstance(obj, (list, tuple)):
+        for i, x in enumerate(obj):
+            out.update(_get_state_dict(x, f"{prefix}{i}."))
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            out.update(_get_state_dict(v, f"{prefix}{k}."))
+    elif hasattr(obj, "__dict__"):
+        for k, v in obj.__dict__.items():
+            out.update(_get_state_dict(v, f"{prefix}{k}."))
+    return out
 
 
 class _State:
     @staticmethod
-    def get_parameters(layers):
-        raise NotImplementedError(
-            "thvm.nn.state.get_parameters: Phase 3 pending")
+    def get_parameters(obj) -> list[Tensor]:
+        """tinygrad-compatible: returns ALL Tensors in the object tree
+        (incl. requires_grad=False BN running stats)."""
+        return list(_get_state_dict(obj).values())
+
+    @staticmethod
+    def get_state_dict(obj) -> dict[str, Tensor]:
+        return _get_state_dict(obj)
 
 
 state = _State()
