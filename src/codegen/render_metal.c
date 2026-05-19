@@ -148,15 +148,10 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   // can specialize when M/N-axes get bound to thread positions via
   // UOP_OPT_LOCAL annotations.
   //
-  // Prefer the cached lift outcome as the "would the lifter succeed?"
-  // oracle when populated.  When 0, fall back to a fresh
-  // kernel_lift_to_uop -- test infra builds kernels via rangeify_emit()
-  // bypassing materialize, so cached_lift stays 0 even though the lift
-  // would succeed.
-  if (ke->cached_lift.store_root == 0) {
-    KernelUopLift fresh = {0};
-    if (!kernel_lift_to_uop(ke, &fresh)) return 0;
-  }
+  // cached_lift.store_root == 0 means the materialize-time lift
+  // declined (no source_uop / no unified store_root); the renderer
+  // can't emit a valid kernel.
+  if (ke->cached_lift.store_root == 0) return 0;
   u64 total = ke->output_numel ? (u64)ke->output_numel : 1;
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 threads = total < 256 ? (u32)total : 256u;
@@ -168,18 +163,14 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 }
 
 
-// Render through kernel_lift_to_uop + cg_render_uop_kernel_root.
+// Render through cached KernelUopLift + cg_render_uop_kernel_root.
 // This is the primary (and only) Metal MSL emit path: the lifter
-// handles every kernel shape (matmul, conv2d_flat including
-// multi-input X im2col, elementwise, reduce, movement-fused
-// subtrees).
+// (materialize-time) handles every kernel shape (matmul, conv2d_flat
+// including multi-input X im2col, elementwise, reduce,
+// movement-fused subtrees).
 //
 // Bumps KERNEL_LIFT_ATTEMPTS / SUCCESSES counters as it goes; readable
 // via kernel_lift_attempts() / kernel_lift_successes() for diagnostics.
-// (KERNEL_LIFT_COMPILES / _COMPILE_FAILS were populated by an earlier
-// shadow-compile path that shell-exec'd xcrun metal; that was deleted
-// when render_uop became the sole emit path -- the actual MTLLibrary
-// PSO build downstream is now the source of truth for compilability.)
 //
 // Passes compute_root (= cached_lift.store_root) directly into
 // cg_render_uop_kernel_root, which discovers buffer slots structurally
@@ -191,23 +182,12 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // Metal hardware caps buffer attributes at index 30 (31 slots total
   // including output).  Reject kernels with too many inputs.
   if (ke->n_inputs > 30) return NULL;
-  // Prefer the cached KernelUopLift populated by
-  // emit_kernel_for_boundary.  When the cache is populated
-  // (cached_lift.store_root != 0) we read it directly and skip the
-  // redundant kernel_lift_to_uop call.  When the cache is 0 there are
-  // two possibilities: materialize-time lift declined (the common case
-  // in the materialize pipeline), OR the kernel was constructed by
-  // test infra via rangeify_emit() bypassing materialize entirely
-  // (test_kernel_lift_coverage, test_tile_graph, test_metal_real cover
-  // this).  We can't tell them apart so we fall back to a fresh
-  // on-demand lift; it will succeed on rangeify-built kernels and
-  // decline on truly unsupported ones.
+  // Read the cached KernelUopLift populated by emit_kernel_for_boundary.
+  // cached_root==0 means the materialize-time lift declined (no
+  // source_uop / no unified store_root / n_inputs over cap) -- no
+  // amount of re-running will help.
   Term cached_root = ke->cached_lift.store_root;
-  KernelUopLift fresh = {0};
-  if (cached_root == 0) {
-    if (!kernel_lift_to_uop(ke, &fresh)) return NULL;
-    cached_root = fresh.store_root;
-  }
+  if (cached_root == 0) return NULL;
   kernel_lift_count_success();
   // Render to a malloc'd string, matching cg_emit_tile_metal's
   // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
