@@ -52,6 +52,14 @@ TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thv
 
 Begin["`Private`"];
 
+(* Diagnostic: when True, every Throw[$Failed] inside the ProofObject
+   dataset assembly (buildCplDataset / buildCEngineChain / cplOrient)
+   logs a tag to stderr first.  Off by default; flip from a probe to
+   pinpoint which assembly invariant fails on a given trace. *)
+$AtpDebugDataset = False;
+atpDbgFail[tag_] := If[ TrueQ[$AtpDebugDataset],
+    WriteString["stderr", "atp-fail @ ", tag, "\n"]];
+
 (* === LibraryLink loaders =========================================== *)
 
 (* ATP runner.  Takes a packed Int64 NumericArray
@@ -742,9 +750,10 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
     cur = c0, recs
 },
     recs = Table[
-        Block[{side, ruleIx, posLen, posPath, beforeRaw, afterRaw},
+        Block[{side, ruleIx, fwd, posLen, posPath, beforeRaw, afterRaw},
             side = raw[[cur + 1]];
             ruleIx = raw[[cur + 2]];
+            fwd = raw[[cur + 3]];
             posLen = raw[[cur + 4]];
             posPath = If[ posLen === 0, {},
                 raw[[cur + 5 ;; cur + 4 + posLen]]];
@@ -754,6 +763,12 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
             <|
                 "Side" -> side,
                 "RuleC" -> ruleIx,
+                (* C engine's proof_extract records 1 for an lhs->rhs
+                   rewrite, 0 for an unorientable equation fired
+                   rhs->lhs by ordered rewriting.  The goal chain emit
+                   reads this to flip the SubstitutionLemma's
+                   Orientation when a step used the rule reversed. *)
+                "Fwd" -> fwd,
                 (* C child indices are 0-based; WL part positions
                    are 1-based. *)
                 "PosPath" -> (posPath + 1),
@@ -883,7 +898,8 @@ buildCEngineChain[steps_, conjPair_, ruleList_] := Catch[
                 ruleIx, newL, newR
             },
                 ruleIx = identifyRule[before, relPos, after, ruleList];
-                If[ MissingQ[ruleIx], Throw[$Failed] ];
+                If[ MissingQ[ruleIx],
+                    atpDbgFail["buildCEngineChain.identifyRule"]; Throw[$Failed]];
                 If[ s === 0,
                     newL = after; newR = rhs,
                     newL = lhs; newR = after
@@ -997,7 +1013,7 @@ cplOrient[entryEq_, ruleEq_, varSyms_] := With[{
     Which[
         ce === cplCanonVars[ruleEq, varSyms], 1,
         ce === cplCanonVars[Reverse[ruleEq], varSyms], -1,
-        True, Throw[$Failed]
+        True, atpDbgFail["cplOrient.no-match"]; Throw[$Failed]
     ]
 ]
 
@@ -1063,7 +1079,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             i = FirstPosition[axPairs, p_ /; cplEqSetQ[p, eq, varSyms],
                 Missing[], {1}, Heads -> False]
         },
-            If[ MissingQ[i], Throw[$Failed], {$AxiomSym, First[i]}]
+            If[ MissingQ[i],
+                atpDbgFail["axiomKeyFor.missing"]; Throw[$Failed],
+                {$AxiomSym, First[i]}]
         ];
 
         (* one-step rewrites of equation `eq` by the alive rules
@@ -1121,7 +1139,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         ]
                     ]
                 ];
-                If[ MissingQ[found], Throw[$Failed] ];
+                If[ MissingQ[found],
+                    atpDbgFail["emitNorm.no-rewrite-path"]; Throw[$Failed]];
                 curKey = inKey;
                 curEq = startEq;
                 Do[
@@ -1202,7 +1221,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            entries its derivation needs; memoized, cycle-guarded. *)
         resolveTrace[ti_] := Block[{te, ruleEq, pInfo, pEq, info},
             If[ KeyExistsQ[traceInfo, ti], Return[traceInfo[ti]] ];
-            If[ TrueQ[inProgress[ti]], Throw[$Failed] ];
+            If[ TrueQ[inProgress[ti]],
+                atpDbgFail["resolveTrace.cycle@" <> ToString[ti]];
+                Throw[$Failed]];
             inProgress[ti] = True;
             te = trace[[ti + 1]];
             ruleEq = {te["Lhs"], te["Rhs"]};
@@ -1219,7 +1240,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         <|"Key" -> pInfo["Key"], "Eq" -> pEq|>,
                         emitNorm[pInfo["Key"], pEq, ruleEq, ti]
                     ],
-                True, Throw[$Failed]
+                True, atpDbgFail["resolveTrace.unknown-reason@" <> ToString[ti]];
+                Throw[$Failed]
             ];
             inProgress[ti] = False;
             traceInfo[ti] = info;
@@ -1241,16 +1263,26 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 
         (* the goal chain: each MainStep rewrites one side of the
            running equation, citing its (resolved) rule. *)
-        If[ mainSteps === {}, Throw[$Failed] ];
+        If[ mainSteps === {},
+            atpDbgFail["buildCplDataset.empty-mainSteps"]; Throw[$Failed]];
         runEq = cjp;
         prevChainKey = hypKey;
         chainEntries = Table[
-            Block[{step = mainSteps[[s]], cInfo, cKey, ori, newEq,
-                   st, isLast, key, inKey},
+            Block[{step = mainSteps[[s]], cInfo, cKey, mr, dir, ori,
+                   ruleEq, newEq, st, isLast, key, inKey},
                 cInfo = resolveRule[step["RuleC"]];
                 cKey = cInfo["Key"];
-                ori = cplOrient[cInfo["Eq"],
-                    mainRules[[step["RuleC"] + 1]], varSyms];
+                mr = mainRules[[step["RuleC"] + 1]];
+                (* Ordered rewriting in the C engine fires whichever
+                   direction strictly decreases the redex.  Fwd = 1
+                   for an lhs->rhs application, 0 for rhs->lhs.  The
+                   verifier reads the Construct's Statement direction
+                   determined by Orientation = step-direction * entry-
+                   vs-rule alignment, so the SubstitutionLemma replays
+                   the same rewrite. *)
+                dir = If[ step["Fwd"] === 1, 1, -1];
+                ori = dir * cplOrient[cInfo["Eq"], mr, varSyms];
+                ruleEq = If[ dir === -1, Reverse[mr], mr];
                 newEq = ReplacePart[runEq,
                     step["Side"] + 1 -> step["After"]];
                 runEq = newEq;
@@ -1266,8 +1298,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         "Input" -> inKey,
                         "Construct" -> cKey,
                         "Position" -> step["PosPath"],
-                        "Rule" -> cplAsRule[
-                            mainRules[[step["RuleC"] + 1]], varSyms],
+                        "Rule" -> cplAsRule[ruleEq, varSyms],
                         "Orientation" -> ori,
                         "ConstructSide" -> 1,
                         "InputOrientation" -> 1,

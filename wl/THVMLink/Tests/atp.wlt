@@ -744,3 +744,22 @@ VerificationTest[
     True,
     TestID -> "ATP/TFEP/multi-eq-demorgan-verifies"
 ]
+
+(* === TFindEquationalProof: ordered-rewriting goal chain ============ *)
+
+(* AbelianGroupAxioms' `ImpliesMcCuneAxioms` is a single-equation
+   theorem whose proof chain includes steps where the C engine's
+   ordered rewriting fires a rule in the rhs->lhs direction.  The
+   verifier needs the SubstitutionLemma's Orientation flipped to read
+   the cited entry's Statement reversed for those steps -- the goal
+   chain emit threads the C engine's Fwd flag into the Orientation
+   computation. *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["ImpliesMcCuneAxioms", "AbelianGroupAxioms"];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/ordered-rewrite-fwd-flag-verifies"
+]
