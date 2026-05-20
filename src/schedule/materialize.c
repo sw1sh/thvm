@@ -692,6 +692,39 @@ static Term try_inline_bufferize_1axis_via_decomp(
     if (dn >= UNIFIED_SUBST_CAP) { decomp_ok = 0; break; }
     decomp_exprs[dn++] = e;
   }
+  // Sub-case 0: dn == 1 -- the addr is one bare RANGE (possibly with a
+  // stride coeff) plus broadcast/swizzler components the BUFFERIZE
+  // doesn't close over.  When that single RANGE's extent matches the
+  // closed_range extent and it's a regular (non-reduce) axis, bind
+  // closed_range[0] to it.  The consumer's other addr components index
+  // axes this 1-range BUFFERIZE replicates over (the producer's value
+  // only references its own closed_range), so dropping them is sound.
+  // This is the conv2d input-gradient / PAD-over-compute reverse: the
+  // cotangent BUFFERIZE closed over one axis, read at a compound
+  // (axis*stride + WHERE-shifted-other-axis) addr.  Without this case
+  // the residual BUFFERIZE leaks and cpu_uop_walk reads zeros
+  // (project_thvm_mul_shared_subgraph_zero_grad).
+  if (decomp_ok && dn == 1) {
+    u32 e_ext = (u32)term_val(heap_read(term_val(decomp_exprs[0]) + 2));
+    u32 atype = (u32)term_val(heap_read(term_val(decomp_exprs[0]) + 1));
+    if (e_ext == want_ext && atype == 0) {
+      UnifiedSubst new_sub;
+      new_sub.n = 0;
+      if (sub != NULL) {
+        for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+          new_sub.from[new_sub.n] = sub->from[i];
+          new_sub.to  [new_sub.n] = sub->to  [i];
+          new_sub.n++;
+        }
+      }
+      if (new_sub.n < UNIFIED_SUBST_CAP) {
+        new_sub.from[new_sub.n] = old_r;
+        new_sub.to  [new_sub.n] = decomp_exprs[0];
+        new_sub.n++;
+      }
+      return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+    }
+  }
   // Sub-case 1: dn >= 2 stride-match by extent.
   if (decomp_ok && !has_unknown_extent && dn >= 2) {
     int found = -1;
