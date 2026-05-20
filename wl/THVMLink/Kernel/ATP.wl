@@ -1638,10 +1638,11 @@ TFindEquationalProof::badmethod =
     "Unrecognized Method `1`; using Automatic (completion).";
 TFindEquationalProof::badcpw =
     "Unrecognized \"CriticalPairWeight\" `1`; using engine default.";
-TFindEquationalProof::lpo =
-    "\"Ordering\" -> \"LPO\" is not yet stable through the \
-ProofObject extractor (the per-step NORM_STEP recorder assumes KBO \
-orientation invariants); using KBO.";
+TFindEquationalProof::dropax =
+    "Dropped self-embedding axiom(s) `1` whose defined symbol does \
+not occur in the conjecture -- they cause unbounded critical-pair \
+fan-out under completion (e.g. the Y combinator Y x == x (Y x)).  \
+Set \"DropDivergentAxioms\" -> False in Method to keep them.";
 
 (* parse a Method spec into {cpWeight, ordering, autoPrec} ints for
    cEngineProof.  Automatic = the engine's proven default config:
@@ -1657,8 +1658,7 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
         If[ cw === $Failed,
             Message[TFindEquationalProof::badcpw, cwRaw]; cw = -1];
         ord = Switch[Lookup[o, "Ordering", Automatic],
-            "LPO", Message[TFindEquationalProof::lpo]; 0,
-            "KBO" | Automatic, 0, _, 0];
+            "LPO", 1, "KBO" | Automatic, 0, _, 0];
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
             True, 1, False | Automatic, 0, _, 0];
         {cw, ord, ap}
@@ -1667,6 +1667,51 @@ atpParseMethod[m : ("GoalDirected" | "MNF")] := (
     Message[TFindEquationalProof::mnf]; {-1, 0, 1});
 atpParseMethod[m_] := (
     Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1});
+
+(* whether to drop self-embedding (divergent) axioms; default yes. *)
+atpDropDivergentQ[Automatic] := True;
+atpDropDivergentQ["Completion"] := True;
+atpDropDivergentQ[{"Completion", subopts___Rule}] :=
+    Lookup[Association[subopts], "DropDivergentAxioms", Automatic] =!= False;
+atpDropDivergentQ[_] := True;
+
+(* An axiom is self-embedding when its lhs occurs as a proper subterm
+   of its rhs -- the Y-combinator signature `Y x == x (Y x)`.  Such an
+   axiom is non-orientable AND generates unbounded critical-pair
+   fan-out under completion (overlapping it with itself grows the term
+   without bound), so a completion proof that does not need it never
+   terminates with it present. *)
+atpSelfEmbeddingQ[axForm_] := Block[{eq, lhs, rhs},
+    eq = axForm /. ForAll[_, e_] :> e;
+    If[ Head[eq] =!= Equal, Return[False]];
+    {lhs, rhs} = List @@ eq;
+    lhs =!= rhs && ! FreeQ[rhs, lhs]
+];
+
+(* the defined symbol of an axiom: the leftmost atom of its lhs (the
+   head combinator / operator). *)
+atpDefinedSymbol[axForm_] := Block[{eq, lhs},
+    eq = axForm /. ForAll[_, e_] :> e;
+    lhs = First[List @@ eq];
+    FixedPoint[If[AtomQ[#] || Length[#] === 0, #, First[#]] &, lhs]
+];
+
+(* Drop self-embedding axioms whose defined symbol does not occur in
+   the conjecture: they cannot contribute to a proof of that
+   conjecture (sound -- a proof found over the kept axioms is valid)
+   but would diverge completion.  Messages the dropped axioms. *)
+atpDropDivergentAxioms[axFormList_, conjRaw_] := Block[{dropQ, drop},
+    dropQ[ax_] := atpSelfEmbeddingQ[ax] &&
+        FreeQ[conjRaw, atpDefinedSymbol[ax]];
+    drop = Select[axFormList, dropQ];
+    If[ drop =!= {},
+        Message[TFindEquationalProof::dropax,
+            atpDefinedSymbol /@ drop]];
+    (* order-preserving: auto-precedence keys off axiom/label order,
+       so Complement (which canonically re-sorts) would change the
+       LPO orientation and break the proof. *)
+    Select[axFormList, ! dropQ[#] &]
+];
 
 (* Render a held expression in the form WL's ProofObject expects
    for its top-level Axioms list / ConjectureStatement: keep the
@@ -1702,6 +1747,13 @@ TFindEquationalProof[thm_String, theory_String, opts:OptionsPattern[]] := Catch[
                     "\", \"NotableTheorems\"]"|>],
                 "TATPError"]
         ];
+        (* Drop divergent (self-embedding) axioms irrelevant to the
+           goal -- e.g. CombinatorAxioms' Y x == x (Y x) when proving
+           a B/C/W <-> S/K identity that never mentions Y.  Keeps
+           completion terminating.  Disable with Method ->
+           {"Completion", "DropDivergentAxioms" -> False}. *)
+        If[ atpDropDivergentQ[OptionValue[Method]],
+            axRaw = atpDropDivergentAxioms[axRaw, cjRaw]];
         axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
         (* A NotableTheorem resolves to a list of equation formulas:
            a one-element list holds a single theorem, a longer list

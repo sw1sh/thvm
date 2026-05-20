@@ -20,15 +20,25 @@ Get["THVMLink`"];
 print[args___] := WriteString["stdout",
     StringJoin @@ Map[ToString, {args}], "\n"];
 
-(* {theory, theorem, Method, MaxWallSeconds} *)
+(* {theory, theorem, Method, MaxWallSeconds}
+
+   The combinator case shows the non-default knobs: BCKWToSKI proves
+   the B/C/W combinators in terms of S/K.  Completion needs LPO (KBO
+   cannot orient the variable-duplicating S/W rules in the reduction
+   direction) with structure-driven AutoPrecedence, and the divergent
+   Y axiom (Y x == x (Y x), absent from the goal) is auto-dropped so
+   completion terminates. *)
 $cases = {
-    {"BooleanAxioms",  "DeMorgan",                       Automatic, 30},
-    {"MeredithAxioms", "ImpliesWolframAxioms",            Automatic, 30},
-    {"MeredithAxioms", "ImpliesWolframAlternateAxioms",   Automatic, 30},
-    {"MeredithAxioms", "ImpliesWolframCommutativeAxioms", Automatic, 30},
-    {"MeredithAxioms", "AndAssociativity",                Automatic, 120},
-    {"MeredithAxioms", "OrAssociativity",                 Automatic, 120},
-    {"MeredithAxioms", "ImpliesHillmanAxioms",            Automatic, 120}
+    {"BooleanAxioms",   "DeMorgan",                        Automatic, 30},
+    {"MeredithAxioms",  "ImpliesWolframAxioms",            Automatic, 30},
+    {"MeredithAxioms",  "ImpliesWolframAlternateAxioms",   Automatic, 30},
+    {"MeredithAxioms",  "ImpliesWolframCommutativeAxioms", Automatic, 30},
+    {"MeredithAxioms",  "AndAssociativity",                Automatic, 120},
+    {"MeredithAxioms",  "OrAssociativity",                 Automatic, 120},
+    {"MeredithAxioms",  "ImpliesHillmanAxioms",            Automatic, 120},
+    {"CombinatorAxioms", "BCKWToSKI",
+        {"Completion", "Ordering" -> "LPO",
+         "AutoPrecedence" -> True}, 30}
 };
 
 (* run one case; return {head, verifyHeads, seconds}. *)
