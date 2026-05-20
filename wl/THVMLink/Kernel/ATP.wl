@@ -1639,10 +1639,13 @@ TFindEquationalProof::badmethod =
 TFindEquationalProof::badcpw =
     "Unrecognized \"CriticalPairWeight\" `1`; using engine default.";
 TFindEquationalProof::dropax =
-    "Dropped self-embedding axiom(s) `1` whose defined symbol does \
-not occur in the conjecture -- they cause unbounded critical-pair \
-fan-out under completion (e.g. the Y combinator Y x == x (Y x)).  \
-Set \"DropDivergentAxioms\" -> False in Method to keep them.";
+    "Dropped self-embedding axiom(s) `1` whose defined symbol is \
+confined to that axiom alone (absent from the conjecture and every \
+other axiom) -- they cause unbounded critical-pair fan-out under \
+completion (e.g. the Y combinator Y x == x (Y x)) and cannot \
+participate in a proof of this goal, so dropping is both sound and \
+completeness-preserving.  Set \"DropDivergentAxioms\" -> False in \
+Method to keep them.";
 
 (* parse a Method spec into {cpWeight, ordering, autoPrec} ints for
    cEngineProof.  Automatic = the engine's proven default config:
@@ -1696,13 +1699,25 @@ atpDefinedSymbol[axForm_] := Block[{eq, lhs},
     FixedPoint[If[AtomQ[#] || Length[#] === 0, #, First[#]] &, lhs]
 ];
 
-(* Drop self-embedding axioms whose defined symbol does not occur in
-   the conjecture: they cannot contribute to a proof of that
-   conjecture (sound -- a proof found over the kept axioms is valid)
-   but would diverge completion.  Messages the dropped axioms. *)
+(* Drop a self-embedding axiom only when its defined symbol s is
+   CONFINED to that axiom alone: absent from the conjecture AND from
+   every other axiom.  Then s can never enter a derivation of the
+   goal -- the only rule that could introduce s is this axiom, and
+   applying it (either direction) already requires s to be present
+   (lhs `s ...` to match l->r, or rhs `... (s ...) ...` to match
+   r->l).  So a goal reachable from s-free axioms + s-free start
+   stays s-free, the axiom is never applicable, and dropping it
+   removes the source of unbounded critical-pair fan-out WITHOUT
+   losing any proof: dropping is always sound (a proof over a subset
+   is valid for the full theory), and confinement makes it complete
+   too (no proof of an s-free goal can route through s).  An axiom
+   whose symbol DOES appear elsewhere is kept -- there a proof might
+   genuinely need it.  Messages the dropped axioms. *)
 atpDropDivergentAxioms[axFormList_, conjRaw_] := Block[{dropQ, drop},
-    dropQ[ax_] := atpSelfEmbeddingQ[ax] &&
-        FreeQ[conjRaw, atpDefinedSymbol[ax]];
+    dropQ[ax_] := With[{s = atpDefinedSymbol[ax]},
+        atpSelfEmbeddingQ[ax] &&
+        FreeQ[conjRaw, s] &&
+        FreeQ[DeleteCases[axFormList, ax], s]];
     drop = Select[axFormList, dropQ];
     If[ drop =!= {},
         Message[TFindEquationalProof::dropax,
