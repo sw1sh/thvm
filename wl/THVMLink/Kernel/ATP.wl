@@ -1442,15 +1442,16 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         ];
                         wlSide = If[ te["Side"] === 0,
                             cSide0WlPos, 3 - cSide0WlPos];
-                        (* Build Statement by replacing WL position
-                           wlSide of pInfo.Eq with the post-rewrite
-                           value (te.Lhs for C side=0, te.Rhs for
-                           side=1). *)
-                        wlEq = If[ wlSide === 1,
-                            {If[te["Side"]===0, te["Lhs"], te["Rhs"]],
-                             pInfo["Eq"][[2]]},
-                            {pInfo["Eq"][[1]],
-                             If[te["Side"]===0, te["Lhs"], te["Rhs"]]}];
+                        (* te records BOTH post-step sides (te.Lhs =
+                           C-lhs, te.Rhs = C-rhs), so build the full
+                           Statement directly from them mapped through
+                           the swap convention -- don't splice
+                           pInfo.Eq's unchanged side, which can diverge
+                           from C's actual other side once the chain
+                           switches which C side it rewrites. *)
+                        wlEq = If[ cSide0WlPos === 1,
+                            {te["Lhs"], te["Rhs"]},
+                            {te["Rhs"], te["Lhs"]}];
                         newCSide0WlPos = cSide0WlPos;
                         slN++;
                         sl = {$SubstitutionLemmaSym, slN};
