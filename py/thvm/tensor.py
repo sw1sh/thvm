@@ -513,6 +513,94 @@ class Tensor:
             flat *= d
         return self.reshape(*before, flat)
 
+    def repeat(self, *repeats) -> "Tensor":
+        """Repeat each axis by `repeats[i]` (tinygrad-style: pads shape
+        left with 1s when repeats is longer than ndim)."""
+        if len(repeats) == 1 and isinstance(repeats[0], (tuple, list)):
+            repeats = tuple(repeats[0])
+        repeats = tuple(int(r) for r in repeats)
+        base = list(self._shape)
+        if len(repeats) > len(base):
+            base = [1] * (len(repeats) - len(base)) + base
+        if len(repeats) < len(base):
+            repeats = (1,) * (len(base) - len(repeats)) + repeats
+        unsqueezed: list[int] = []
+        expanded: list[int] = []
+        for r, s in zip(repeats, base):
+            if r == 1:
+                unsqueezed.append(s); expanded.append(s)
+            else:
+                unsqueezed.extend([1, s]); expanded.extend([r, s])
+        final = [r * s for r, s in zip(repeats, base)]
+        t = self if list(self._shape) == base else self.reshape(*base)
+        return t.reshape(*unsqueezed).expand(*expanded).reshape(*final)
+
+    def shrink_to(self, *shape) -> "Tensor":
+        """tinygrad-style: shrink to target dims from offset 0."""
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        begin_end: list[int] = []
+        for i, s in enumerate(shape):
+            if s is None:
+                begin_end.extend([0, self._shape[i]])
+            else:
+                begin_end.extend([0, int(s)])
+        return self.shrink(begin_end)
+
+    def _pool(self, k_, stride=1, dilation=1) -> "Tensor":
+        """tinygrad's _pool unfold via repeat+shrink+reshape (port of
+        tinygrad/mixin/movement.py:_pool).  Produces a single tensor
+        of shape (..., *o_, *k_) where each (o, k) slice is the
+        sliding window at output position o.  Powers conv2d / pool
+        without N separate shrink iterations."""
+        if isinstance(k_, int):
+            k_ = (k_,)
+        k_ = tuple(int(k) for k in k_)
+        s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
+        d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
+        assert len(k_) == len(s_) == len(d_)
+        noop_ndim = self.ndim - len(k_)
+        i_ = self._shape[-len(k_):]
+        o_ = tuple((i - d * (k - 1) + s - 1) // s
+                   for i, d, k, s in zip(i_, d_, k_, s_))   # ceildiv
+        f_ = tuple(max(1, (o * s - d + i - 1) // i)
+                   for o, s, i, d in zip(o_, s_, i_, d_))
+        reps = [1] * noop_ndim + [(k * (i * f + d) + i - 1) // i
+                                  for k, i, d, f in zip(k_, i_, d_, f_)]
+        x = self.repeat(reps)
+        prefix = list(self._shape[:noop_ndim])
+        x = x.shrink_to(prefix + [k * (i * f + d)
+                                  for k, i, d, f in zip(k_, i_, d_, f_)])
+        reshape1 = list(prefix)
+        for k, i, d, f in zip(k_, i_, d_, f_):
+            reshape1.extend([k, i * f + d])
+        x = x.reshape(*reshape1)
+        target2 = list(prefix)
+        for k, o, s in zip(k_, o_, s_):
+            target2.extend([k, o * s])
+        x = x.shrink_to(target2)
+        reshape2 = list(prefix)
+        for k, o, s in zip(k_, o_, s_):
+            reshape2.extend([k, o, s])
+        x = x.reshape(*reshape2)
+        target3 = list(prefix)
+        for k, o in zip(k_, o_):
+            target3.extend([k, o, 1])
+        x = x.shrink_to(target3)
+        reshape3 = list(prefix)
+        for k, o in zip(k_, o_):
+            reshape3.extend([k, o])
+        x = x.reshape(*reshape3)
+        # permute: move k axes after o axes.
+        # current after reshape3: prefix, k_0, o_0, k_1, o_1, ...
+        # want: prefix, o_0, o_1, ..., k_0, k_1, ...
+        perm = list(range(noop_ndim))
+        for i in range(len(i_)):
+            perm.append(noop_ndim + i * 2 + 1)   # o_i
+        for i in range(len(i_)):
+            perm.append(noop_ndim + i * 2)       # k_i
+        return x.permute(*perm)
+
     def pad(self, begin_end) -> "Tensor":
         """Pad each axis with zeros.  begin_end has 2*ndim entries:
         [b0, e0, b1, e1, ...]."""
@@ -592,25 +680,18 @@ class Tensor:
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
                groups: int = 1, stride=1, dilation=1, padding=0) -> "Tensor":
-        """Phase 3B: composed conv2d -- pad + per-(h,w,c_in)
-        shrink-multiply-accumulate.  No host cheat -- the entire
-        forward lives in thvm's graph and uop_grad traces it for
-        .backward().  Slow (kH*kW*C_in graph branches) vs a fused
-        kernel, but real.
+        """tinygrad-faithful conv2d: pad + _pool unfold + single
+        broadcast-mul + sum over (C_in, kH, kW).  Produces a small
+        graph (O(1) ops vs the previous O(kH*kW*C_in) per-(h,w,c)
+        composition) so thvm's hand-coded opts can recognize it as
+        the matmul-shaped conv-reduce kernel.
 
-        NOTE: avoids the (xs * ws).sum(axis=size-1-C_in) accumulator
-        pattern, which currently mis-materializes in thvm when many
-        such size-1 reduce contributions are summed; the explicit
-        per-C_in slice path sidesteps that and is numerically exact.
-        Stride/dilation > 1 and groups > 1 are Phase 3C.
+        Port of tinygrad/mixin/__init__.py:conv2d (line ~1235).
         """
         if groups != 1:
             raise NotImplementedError("conv2d groups != 1: Phase 3C")
         sH, sW = (stride, stride) if isinstance(stride, int) else stride
-        if sH != 1 or sW != 1:
-            raise NotImplementedError("conv2d stride != 1: Phase 3C")
-        if dilation not in (1, (1, 1)):
-            raise NotImplementedError("conv2d dilation != 1: Phase 3C")
+        dH, dW = (dilation, dilation) if isinstance(dilation, int) else dilation
         if isinstance(padding, int):
             pH = pW = padding
         else:
@@ -619,27 +700,24 @@ class Tensor:
         x = self
         if pH or pW:
             x = x.pad([0, 0, 0, 0, pH, pH, pW, pW])
-        B, C_in, H, W = x.shape
-        C_out, _, kH, kW = weight.shape
-        H_out = H - kH + 1
-        W_out = W - kW + 1
 
-        acc: "Tensor | None" = None
-        for h in range(kH):
-            for w in range(kW):
-                for c in range(C_in):
-                    # x[:, c, h:h+H_out, w:w+W_out] -- (B, 1, H_out, W_out)
-                    xs = x.shrink([0, B, c, c + 1,
-                                   h, h + H_out, w, w + W_out])
-                    xs_b = xs.expand(B, C_out, H_out, W_out)
-                    # weight[:, c, h, w] -- (C_out, 1, 1, 1) -> broadcast
-                    ws = weight.shrink([0, C_out, c, c + 1,
-                                        h, h + 1, w, w + 1])
-                    ws_b = (ws.reshape(1, C_out, 1, 1)
-                            .expand(B, C_out, H_out, W_out))
-                    contrib = xs_b * ws_b
-                    acc = contrib if acc is None else acc + contrib
-        assert acc is not None
+        B, C_in = x._shape[:2]
+        kH, kW = weight._shape[2:]
+        C_out = weight._shape[0]
+        # _pool: (B, C_in, H, W) -> (B, C_in, H_out, W_out, kH, kW)
+        x = x._pool((kH, kW), stride=(sH, sW), dilation=(dH, dW))
+        H_out, W_out = x._shape[2:4]
+
+        # Broadcast over C_out and weight over (B, H_out, W_out).
+        # x:      (B, 1,     C_in, H_out, W_out, kH, kW)
+        # weight: (1, C_out, C_in,     1,     1, kH, kW)
+        x_b = (x.reshape(B, 1, C_in, H_out, W_out, kH, kW)
+                .expand(B, C_out, C_in, H_out, W_out, kH, kW))
+        w_b = (weight.reshape(1, C_out, C_in, 1, 1, kH, kW)
+                     .expand(B, C_out, C_in, H_out, W_out, kH, kW))
+        # Sum over C_in (axis 2), kH (axis 5), kW (axis 6); one fused
+        # matmul-shaped reduce that the materializer can recognize.
+        out = (x_b * w_b).sum(axis=(2, 5, 6))
         if bias is not None:
-            acc = acc + bias.reshape(1, C_out, 1, 1)
-        return acc
+            out = out + bias.reshape(1, -1, 1, 1)
+        return out
