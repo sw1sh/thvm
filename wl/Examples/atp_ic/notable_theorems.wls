@@ -49,7 +49,8 @@ $cases = {
     {"BooleanAxioms",    "Noncontradiction",                "GoalDirected", 30},
     {"BooleanAxioms",    "ExcludedMiddle",                  "GoalDirected", 30},
     {"BooleanAxioms",    "DoubleNegation",                  "GoalDirected", 30},
-    {"ShefferAxioms",    "Commutativity",                   "GoalDirected", 30}
+    {"ShefferAxioms",    "Commutativity",                   "GoalDirected", 30},
+    {"CombinatorAxioms", "SKIToBCKW",                       "GoalDirected", 30}
 };
 
 (* run one case; return {head, verifyHeads, seconds}. *)
