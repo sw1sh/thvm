@@ -1143,7 +1143,11 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_set_requires_grad(WolframLibraryData libDa
     MArgument_setInteger(res, 0);
     return LIBRARY_NO_ERROR;
   }
-  TENS[id].requires_grad = on ? 1 : 0;
+  int was = (int)TENS[id].requires_grad;
+  int now = on ? 1 : 0;
+  TENS[id].requires_grad = (u8)now;
+  if (now && !was) grad_req_ncount_inc();
+  else if (was && !now) grad_req_ncount_dec();
   MArgument_setInteger(res, 1);
   return LIBRARY_NO_ERROR;
 }

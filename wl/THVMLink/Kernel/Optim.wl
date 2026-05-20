@@ -142,13 +142,16 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
                 = lrHat * m_new / (sqrt(v_new) * invSqrtB2cor + eps)
        so lrHat and invSqrtB2cor are precomputed scalars.
 
-       Grads come from TGradMany (one realize, shared forward DAG)
-       so per-target kernels go through the same materialize-pass
-       memo and forward intermediates dedup across targets.
+       Grads come from TGradMany; forward kernels reused across the
+       per-target realizes via TenDesc.producer_kid (kernel dispatched
+       on first realize, subsequent realizes see it as a TAG_TEN leaf).
+       The chain-rule walk itself is per-target work (grad_memo keys
+       on target so it doesn't cross-share).
 
-       Per-param ASSIGNs are bundled into one TRealize so the entire
-       Adam step (forward + backward + 24 ASSIGNs) materializes in a
-       single pass.  Tinygrad analogue: loss.realize splatted with
+       Per-param ASSIGNs are bundled into one TRealize so the Adam
+       step's mutations land in one pool boundary -- this IS the
+       real win of multi-root realize (no kernel slot blowup vs N
+       separate TRealize calls).  Tinygrad analogue: loss.realize
        opt.schedule_step -- one scheduler pass over the whole step.
        The earlier Do[..., TRealize @ assign] form re-walked the
        gradient chain for every param, emitting ~5K kernel slots/step

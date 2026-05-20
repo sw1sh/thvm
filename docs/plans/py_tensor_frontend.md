@@ -115,8 +115,12 @@ The surface to mirror:
   DAG).
 - autodiff -- `uop_grad`, `uop_grad_with_target`, `uop_fwd` ->
   `py_grad`.  Routes `Tensor.backward()` to thvm's real `uop_grad`.
-- reduce + dispatch -- `wnf` (reduce to weak normal form),
-  `realize` / `realize_many` -> `py_wnf` / `py_realize`.
+- reduce + dispatch -- `wnf` (reduce to weak normal form) and
+  `realize` -> `py_wnf` / `py_realize`.  (`realize_many` was
+  briefly exposed as a Python bridge for a dedup experiment;
+  removed -- see `project_thvm_realize_many_dead`.  The C-side
+  `thvm_realize_many` stays as the multi-root pool-boundary
+  primitive used by `TAdam`'s batched ASSIGNs.)
 - introspection -- `tens_count`, `tens_table`, `uop_leaf_tids`, plus
   the kernel list/count, memory plan, schedule, and rendered
   MSL/CUDA, so the Phase-4 cross-check list is observable from

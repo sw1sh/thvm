@@ -2,9 +2,11 @@
 (* train.wls -- LeNet on a fixed MNIST sample, K Adam steps in
    the in-backend lazy surface.  Every weight stays a TTerm
    handle from init through the loop; gradients come from
-   TGradMany (one realize, shared forward DAG); the Adam update
-   is TAdam (lazy TAssign per buffer).  No host-side NumericArray
-   round-trip per step.
+   TGradMany (per-target VJP, forward kernels shared across
+   targets via TenDesc.producer_kid); the Adam update is TAdam
+   (lazy TAssign per buffer, bundled into one TRealize so the
+   step's mutations land in a single pool boundary).  No host-
+   side NumericArray round-trip per step.
 
    Run from the repo root:
        wolframscript wl/Examples/lenet-mnist/train.wls

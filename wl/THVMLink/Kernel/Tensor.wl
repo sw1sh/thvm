@@ -376,10 +376,18 @@ tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
 )
 
 (* Multi-target VJP: build n unary TGrads sharing the y subgraph (and
-   the gy seed) by heap-loc identity.  materialize's per-realize memo
-   dedups every forward kernel emitted from those shared UOps across
-   all n targets.  Returns a List of n TTerms in the same order as
-   `targets`. *)
+   the gy seed) by heap-loc identity.  Forward kernels dedup across
+   targets via TenDesc.producer_kid (once a forward TAG_TEN's first
+   realize fires its kernel, the kernel is reused on subsequent
+   realizes regardless of how they were batched).  Returns a List of
+   n TTerms in the same order as `targets`.
+
+   NOTE: the per-realize grad_memo (interact/uop_grad.c) keys on
+   (child, gy, target) -- it doesn't share across targets.  An
+   experiment in py/csource (May 20) confirmed thvm_realize_many
+   gives 0 kernel / fire / memo savings vs separate realize for
+   grad terms.  realize_many is still useful for ASSIGN batching
+   (TAdam) and pool-boundary sharing, but not for grad dedup. *)
 TGradMany[y_, {target_}]    := {TGrad[y, target]}
 TGradMany[y_, targets_List] := With[{
     seed     = gradOnesSeed[y],
