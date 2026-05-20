@@ -38,7 +38,9 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); Method (Automatic, or {\"Completion\", \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\", \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False}), exposing the saturator's CP-selection heuristic, reduction ordering, and Waldmeister structure-driven precedence.";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); Method (Automatic, or {\"Completion\", \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\", \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"}), exposing the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, and the axiom-relevance filter (inspect with TRelevantAxioms).";
+
+TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (SInE-style symbol-connectivity pruning -- heuristic, may drop a needed axiom).";
 
 (* Forward-declare symbols owned by sibling files (Switch.wl owns
    the IC term constructors) so bare references inside
@@ -1639,13 +1641,15 @@ TFindEquationalProof::badmethod =
 TFindEquationalProof::badcpw =
     "Unrecognized \"CriticalPairWeight\" `1`; using engine default.";
 TFindEquationalProof::dropax =
-    "Dropped self-embedding axiom(s) `1` whose defined symbol is \
-confined to that axiom alone (absent from the conjecture and every \
-other axiom) -- they cause unbounded critical-pair fan-out under \
-completion (e.g. the Y combinator Y x == x (Y x)) and cannot \
-participate in a proof of this goal, so dropping is both sound and \
-completeness-preserving.  Set \"DropDivergentAxioms\" -> False in \
-Method to keep them.";
+    "Axiom-relevance filter (mode `2`) dropped axiom(s) keyed on \
+symbol set(s) `1` as irrelevant to the conjecture.  Mode \"Safe\" is \
+sound and completeness-preserving (the symbols are private to the \
+dropped axiom and occur on both sides, so it cannot enter a proof of \
+this goal); mode \"Connected\" is a heuristic and may drop a needed \
+axiom.  Inspect with TRelevantAxioms, or set \"AxiomRelevance\" -> \
+None in Method to keep every axiom.";
+TFindEquationalProof::badrel =
+    "Unrecognized \"AxiomRelevance\" `1`; using \"Safe\".";
 
 (* parse a Method spec into {cpWeight, ordering, autoPrec} ints for
    cEngineProof.  Automatic = the engine's proven default config:
@@ -1671,62 +1675,179 @@ atpParseMethod[m : ("GoalDirected" | "MNF")] := (
 atpParseMethod[m_] := (
     Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1});
 
-(* whether to drop self-embedding (divergent) axioms; default yes. *)
-atpDropDivergentQ[Automatic] := True;
-atpDropDivergentQ["Completion"] := True;
-atpDropDivergentQ[{"Completion", subopts___Rule}] :=
-    Lookup[Association[subopts], "DropDivergentAxioms", Automatic] =!= False;
-atpDropDivergentQ[_] := True;
+(* === Axiom-relevance filter ======================================
 
-(* An axiom is self-embedding when its lhs occurs as a proper subterm
-   of its rhs -- the Y-combinator signature `Y x == x (Y x)`.  Such an
-   axiom is non-orientable AND generates unbounded critical-pair
-   fan-out under completion (overlapping it with itself grows the term
-   without bound), so a completion proof that does not need it never
-   terminates with it present. *)
-atpSelfEmbeddingQ[axForm_] := Block[{eq, lhs, rhs},
-    eq = axForm /. ForAll[_, e_] :> e;
-    If[ Head[eq] =!= Equal, Return[False]];
-    {lhs, rhs} = List @@ eq;
-    lhs =!= rhs && ! FreeQ[rhs, lhs]
+   Prunes axioms that cannot (or, in the heuristic mode, are unlikely
+   to) contribute to a proof of the conjecture, so completion does not
+   waste effort -- or diverge -- on them.  Configurable via the Method
+   suboption "AxiomRelevance" (back-compat alias: "DropDivergentAxioms"):
+
+     None | All | False    -- keep every axiom.
+     Automatic | "Safe"     -- DEFAULT.  Drop only axioms that are
+       PROVABLY dead weight for this goal: a "confined" axiom carrying
+       a private symbol on BOTH sides (see atpConfinedSymbols).  Sound
+       AND completeness-preserving.
+     "Connected" | {"Connected", "FrequencyCutoff" -> f,
+                    "MaxGenerations" -> n}
+       -- SInE-style symbol-connectivity pruning: keep only axioms
+       reachable from the goal's symbols (ignoring ubiquitous symbols
+       that occur in >= f of the axioms; f defaults to 1, i.e. ignore
+       only symbols common to ALL axioms).  HEURISTIC: may drop a
+       needed axiom, so it is opt-in, not the default.
+
+   The decision is inspectable without proving via TRelevantAxioms. *)
+
+(* function symbols of an axiom/conjecture (raw ForAll form, a list of
+   them, or an unquantified equation): non-variable atoms, minus the
+   ForAll-bound variables and the structural heads. *)
+atpFnSyms[expr_] := Block[{vars, body},
+    (* ForAll is HoldAll, so a `ForAll[v_, _] :> v` rule does NOT bind
+       v -- extract the bound-variable spec by Part instead. *)
+    vars = Flatten @ Map[#[[1]] &, Cases[expr, _ForAll, {0, Infinity}]];
+    body = expr /. ForAll[_, e_] :> e;
+    (* Heads -> True is essential here: the discriminating function
+       symbol is usually an operator (CenterDot, OverTilde, ...)
+       appearing as a HEAD, which Cases skips by default. *)
+    DeleteDuplicates @ DeleteCases[
+        Cases[body, s_Symbol, {0, Infinity}, Heads -> True],
+        Alternatives @@ Join[vars,
+            {Equal, Inactive, ForAll, Exists, List, And, Or, Not,
+             Implies, Pattern, Blank, HoldPattern, Verbatim, Rule}]]
 ];
 
-(* the defined symbol of an axiom: the leftmost atom of its lhs (the
-   head combinator / operator). *)
-atpDefinedSymbol[axForm_] := Block[{eq, lhs},
+(* {lhs, rhs} symbol form of an axiom (raw or unquantified). *)
+atpAxSides[axForm_] := Block[{eq},
     eq = axForm /. ForAll[_, e_] :> e;
-    lhs = First[List @@ eq];
-    FixedPoint[If[AtomQ[#] || Length[#] === 0, #, First[#]] &, lhs]
+    If[ Head[eq] === Equal, List @@ eq, {eq, eq}]
 ];
 
-(* Drop a self-embedding axiom only when its defined symbol s is
-   CONFINED to that axiom alone: absent from the conjecture AND from
-   every other axiom.  Then s can never enter a derivation of the
-   goal -- the only rule that could introduce s is this axiom, and
-   applying it (either direction) already requires s to be present
-   (lhs `s ...` to match l->r, or rhs `... (s ...) ...` to match
-   r->l).  So a goal reachable from s-free axioms + s-free start
-   stays s-free, the axiom is never applicable, and dropping it
-   removes the source of unbounded critical-pair fan-out WITHOUT
-   losing any proof: dropping is always sound (a proof over a subset
-   is valid for the full theory), and confinement makes it complete
-   too (no proof of an s-free goal can route through s).  An axiom
-   whose symbol DOES appear elsewhere is kept -- there a proof might
-   genuinely need it.  Messages the dropped axioms. *)
-atpDropDivergentAxioms[axFormList_, conjRaw_] := Block[{dropQ, drop},
-    dropQ[ax_] := With[{s = atpDefinedSymbol[ax]},
-        atpSelfEmbeddingQ[ax] &&
-        FreeQ[conjRaw, s] &&
-        FreeQ[DeleteCases[axFormList, ax], s]];
-    drop = Select[axFormList, dropQ];
-    If[ drop =!= {},
+(* private symbols of `ax` (relative to the conjecture + other
+   axioms): function symbols of ax that occur nowhere else. *)
+atpConfinedSymbols[ax_, others_, conjRaw_] :=
+    Complement[atpFnSyms[ax],
+        If[others === {}, {}, Union @@ (atpFnSyms /@ others)],
+        atpFnSyms[conjRaw]];
+
+(* Does ax carry a private symbol on BOTH sides?  Then neither rewrite
+   direction can fire without that symbol already present, so ax can
+   never enter (or be introduced into) a derivation of a goal free of
+   it -- dropping ax is sound (proof over a subset is valid) AND
+   completeness-preserving.  The Y combinator Y x == x (Y x) is the
+   canonical case: Y is private and on both sides.  Returns the
+   witnessing symbols, or {}. *)
+atpSafeDropSymbols[ax_, others_, conjRaw_] := Block[{priv, sides},
+    priv = atpConfinedSymbols[ax, others, conjRaw];
+    If[ priv === {}, Return[{}]];
+    sides = atpAxSides[ax];
+    Intersection[priv, atpFnSyms[sides[[1]]], atpFnSyms[sides[[2]]]]
+];
+
+(* normalize a Method spec / option value into a relevance spec:
+   None | "Safe" | {"Connected", <|opts|>}. *)
+atpRelevanceSpec[Automatic] := "Safe";
+atpRelevanceSpec["Completion"] := "Safe";
+atpRelevanceSpec[{"Completion", subopts___Rule}] := Block[{o, r, dd},
+    o = Association[subopts];
+    r = Lookup[o, "AxiomRelevance", Automatic];
+    dd = Lookup[o, "DropDivergentAxioms", Automatic];  (* back-compat *)
+    Which[
+        r =!= Automatic, atpNormRelevance[r],
+        dd === False, None,
+        True, "Safe"]
+];
+atpRelevanceSpec[_] := "Safe";
+
+atpNormRelevance[None | All | False] := None;
+atpNormRelevance[Automatic | True | "Safe"] := "Safe";
+atpNormRelevance["Connected"] := {"Connected", <||>};
+atpNormRelevance[{"Connected", a_Association}] := {"Connected", a};
+atpNormRelevance[{"Connected", o___Rule}] := {"Connected", Association[o]};
+atpNormRelevance[other_] := (
+    Message[TFindEquationalProof::badrel, other]; "Safe");
+
+(* Partition `axFormList` into kept / dropped (with reasons) under a
+   relevance spec.  Returns <|"Kept" -> {...}, "Dropped" -> {<|"Axiom",
+   "Symbols", "Reason"|>...}, "Mode" -> ...|>.  Order-preserving:
+   auto-precedence keys off axiom/label order, so re-sorting would
+   change the LPO orientation. *)
+atpRelevancePartition[axFormList_, conjRaw_, specRaw_] :=
+    Block[{spec = atpNormRelevance[specRaw], dropAssoc},
+        Switch[spec,
+            None,
+                <|"Kept" -> axFormList, "Dropped" -> {}, "Mode" -> None|>,
+            "Safe",
+                dropAssoc = DeleteMissing @ Map[
+                    Function[ax, Block[{syms},
+                        syms = atpSafeDropSymbols[ax,
+                            DeleteCases[axFormList, ax], conjRaw];
+                        If[ syms === {}, Missing[],
+                            <|"Axiom" -> ax, "Symbols" -> syms,
+                              "Reason" -> "ConfinedBothSides"|>]]],
+                    axFormList];
+                <|"Kept" -> Select[axFormList,
+                        FreeQ[#["Axiom"] & /@ dropAssoc, #] &],
+                  "Dropped" -> dropAssoc, "Mode" -> "Safe"|>,
+            {"Connected", _},
+                atpConnectedPartition[axFormList, conjRaw, Last[spec]]
+        ]
+    ];
+
+(* SInE-style connectivity partition. *)
+atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{
+    symLists, nAx, freq, cutoff, ignored, relevant, keep, changed, gen,
+    maxGen, dropAssoc},
+    nAx = Length[axFormList];
+    symLists = atpFnSyms /@ axFormList;
+    freq = Counts[Flatten[symLists]];
+    cutoff = Lookup[opts, "FrequencyCutoff", 1];
+    maxGen = Lookup[opts, "MaxGenerations", nAx];
+    (* ignore symbols occurring in >= cutoff fraction of the axioms *)
+    ignored = Keys @ Select[freq, # >= Ceiling[cutoff * nAx] &];
+    relevant = Complement[atpFnSyms[conjRaw], ignored];
+    keep = ConstantArray[False, nAx];
+    changed = True; gen = 0;
+    While[ changed && gen < maxGen,
+        changed = False;
+        Do[ If[ ! keep[[i]] &&
+                IntersectingQ[Complement[symLists[[i]], ignored], relevant],
+                keep[[i]] = True;
+                relevant = Union[relevant,
+                    Complement[symLists[[i]], ignored]];
+                changed = True],
+            {i, nAx}];
+        gen++];
+    dropAssoc = Table[
+        If[ ! keep[[i]],
+            <|"Axiom" -> axFormList[[i]],
+              "Symbols" -> Complement[symLists[[i]], ignored],
+              "Reason" -> "Disconnected"|>, Nothing],
+        {i, nAx}];
+    <|"Kept" -> Pick[axFormList, keep],
+      "Dropped" -> dropAssoc, "Mode" -> "Connected"|>
+];
+
+(* Apply the relevance filter, Message the dropped axioms, return the
+   kept list (order-preserving). *)
+atpApplyRelevance[axFormList_, conjRaw_, specRaw_] := Block[{part},
+    part = atpRelevancePartition[axFormList, conjRaw, specRaw];
+    If[ part["Dropped"] =!= {},
         Message[TFindEquationalProof::dropax,
-            atpDefinedSymbol /@ drop]];
-    (* order-preserving: auto-precedence keys off axiom/label order,
-       so Complement (which canonically re-sorts) would change the
-       LPO orientation and break the proof. *)
-    Select[axFormList, ! dropQ[#] &]
+            #["Symbols"] & /@ part["Dropped"], part["Mode"]]];
+    part["Kept"]
 ];
+
+(* Public: inspect the relevance decision without proving. *)
+Options[TRelevantAxioms] = {Method -> Automatic};
+TRelevantAxioms[thm_String, theory_String, opts:OptionsPattern[]] :=
+    Block[{axRaw, cjRaw},
+        axRaw = AxiomaticTheory[theory];
+        cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
+        If[ ! ListQ[axRaw] || MissingQ[cjRaw], Return[$Failed]];
+        TRelevantAxioms[cjRaw, axRaw, opts]
+    ];
+TRelevantAxioms[conjRaw_, axRaw_List, opts:OptionsPattern[]] :=
+    atpRelevancePartition[axRaw, conjRaw,
+        atpRelevanceSpec[OptionValue[Method]]];
 
 (* Render a held expression in the form WL's ProofObject expects
    for its top-level Axioms list / ConjectureStatement: keep the
@@ -1762,13 +1883,14 @@ TFindEquationalProof[thm_String, theory_String, opts:OptionsPattern[]] := Catch[
                     "\", \"NotableTheorems\"]"|>],
                 "TATPError"]
         ];
-        (* Drop divergent (self-embedding) axioms irrelevant to the
-           goal -- e.g. CombinatorAxioms' Y x == x (Y x) when proving
-           a B/C/W <-> S/K identity that never mentions Y.  Keeps
-           completion terminating.  Disable with Method ->
-           {"Completion", "DropDivergentAxioms" -> False}. *)
-        If[ atpDropDivergentQ[OptionValue[Method]],
-            axRaw = atpDropDivergentAxioms[axRaw, cjRaw]];
+        (* Axiom-relevance filter (see atpRelevancePartition): drops
+           axioms irrelevant to the goal -- e.g. CombinatorAxioms'
+           Y x == x (Y x) when proving a B/C/W <-> S/K identity that
+           never mentions Y -- keeping completion terminating.
+           Configure via Method "AxiomRelevance"; inspect via
+           TRelevantAxioms. *)
+        axRaw = atpApplyRelevance[axRaw, cjRaw,
+            atpRelevanceSpec[OptionValue[Method]]];
         axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
         (* A NotableTheorem resolves to a list of equation formulas:
            a one-element list holds a single theorem, a longer list
