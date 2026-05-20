@@ -22,23 +22,22 @@ print[args___] := WriteString["stdout",
 
 (* {theory, theorem, Method, MaxWallSeconds}
 
-   The combinator case shows the non-default knobs: BCKWToSKI proves
-   the B/C/W combinators in terms of S/K.  Completion needs LPO (KBO
-   cannot orient the variable-duplicating S/W rules in the reduction
-   direction) with structure-driven AutoPrecedence, and the divergent
-   Y axiom (Y x == x (Y x), absent from the goal) is auto-dropped so
-   completion terminates. *)
+   Automatic is a strategy schedule (Waldmeister-style portfolio): it
+   tries Mix2 weight, then LPO + structure-driven AutoPrecedence, then
+   GT weight, returning the first that proves+verifies.  So the
+   combinator case BCKWToSKI -- which needs LPO (KBO cannot orient the
+   variable-duplicating S/W rules) -- proves under plain Automatic;
+   the divergent Y axiom (Y x == x (Y x), absent from the goal) is
+   auto-dropped by the relevance filter so completion terminates. *)
 $cases = {
-    {"BooleanAxioms",   "DeMorgan",                        Automatic, 30},
-    {"MeredithAxioms",  "ImpliesWolframAxioms",            Automatic, 30},
-    {"MeredithAxioms",  "ImpliesWolframAlternateAxioms",   Automatic, 30},
-    {"MeredithAxioms",  "ImpliesWolframCommutativeAxioms", Automatic, 30},
-    {"MeredithAxioms",  "AndAssociativity",                Automatic, 30},
-    {"MeredithAxioms",  "OrAssociativity",                 Automatic, 30},
-    {"MeredithAxioms",  "ImpliesHillmanAxioms",            Automatic, 30},
-    {"CombinatorAxioms", "BCKWToSKI",
-        {"Completion", "Ordering" -> "LPO",
-         "AutoPrecedence" -> True}, 30}
+    {"BooleanAxioms",    "DeMorgan",                        Automatic, 30},
+    {"MeredithAxioms",   "ImpliesWolframAxioms",            Automatic, 30},
+    {"MeredithAxioms",   "ImpliesWolframAlternateAxioms",   Automatic, 30},
+    {"MeredithAxioms",   "ImpliesWolframCommutativeAxioms", Automatic, 30},
+    {"MeredithAxioms",   "AndAssociativity",                Automatic, 30},
+    {"MeredithAxioms",   "OrAssociativity",                 Automatic, 30},
+    {"MeredithAxioms",   "ImpliesHillmanAxioms",            Automatic, 30},
+    {"CombinatorAxioms", "BCKWToSKI",                       Automatic, 30}
 };
 
 (* run one case; return {head, verifyHeads, seconds}. *)

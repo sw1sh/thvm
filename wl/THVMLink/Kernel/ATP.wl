@@ -38,7 +38,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); Method (Automatic, or {\"Completion\", \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\", \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"}), exposing the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, and the axiom-relevance filter (inspect with TRelevantAxioms).";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); Method (Automatic | \"Portfolio\" -- a Waldmeister-style strategy schedule that tries Mix2 weight, then LPO+AutoPrecedence, then GT weight, returning the first that proves+verifies; or a single explicit config {\"Completion\", \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\", \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"}), exposing the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, and the axiom-relevance filter (inspect with TRelevantAxioms).  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (SInE-style symbol-connectivity pruning -- heuristic, may drop a needed axiom).";
 
@@ -1679,6 +1679,25 @@ atpParseMethod[m : ("GoalDirected" | "MNF")] := (
 atpParseMethod[m_] := (
     Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1});
 
+(* Strategy schedule (Waldmeister-style portfolio).  Automatic and
+   "Portfolio" expand to an ORDERED list of concrete Method configs
+   tried in turn until one proves+verifies; a concrete Method is its
+   own one-element schedule (no portfolio).  Ordering matters: cheap,
+   broadly-effective configs first so easy goals close immediately and
+   only hard goals pay for the later ordering/weight variants.
+     1. Mix2 weight   -- the single best general weight (default).
+     2. LPO + auto-precedence -- structural / combinator reductions
+        KBO cannot orient (variable-duplicating rules).
+     3. GT weight     -- the engine's bare default; occasionally
+        reaches a proof the others' CP order misses. *)
+$AtpSchedule = {
+    {"Completion", "CriticalPairWeight" -> "Mix2"},
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True},
+    {"Completion", "CriticalPairWeight" -> "Gt"}
+};
+atpScheduleFor[Automatic | "Portfolio"] := $AtpSchedule;
+atpScheduleFor[m_] := {m};
+
 (* === Axiom-relevance filter ======================================
 
    Prunes axioms that cannot (or, in the heuristic mode, are unlikely
@@ -1748,7 +1767,7 @@ atpSafeDropSymbols[ax_, others_, conjRaw_] := Block[{priv, sides},
 
 (* normalize a Method spec / option value into a relevance spec:
    None | "Safe" | {"Connected", <|opts|>}. *)
-atpRelevanceSpec[Automatic] := "Safe";
+atpRelevanceSpec[Automatic | "Portfolio"] := "Safe";
 atpRelevanceSpec["Completion"] := "Safe";
 atpRelevanceSpec[{"Completion", subopts___Rule}] := Block[{o, r, dd},
     o = Association[subopts];
@@ -1936,6 +1955,22 @@ TFindEquationalProof[thm_String, theory_String, opts:OptionsPattern[]] := Catch[
    atpEncodeProblem validates axiom/conjecture shape and surfaces
    the encoder state (the Variables list + the Term decoder maps). *)
 TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
+    Module[{atpSched = atpScheduleFor[OptionValue[Method]]},
+    If[ Length[atpSched] > 1,
+    (* Portfolio: try each scheduled config under a per-config wall
+       budget; return the first verifying ProofObject.  Each config is
+       a concrete Method (one-element schedule), so the recursive call
+       takes the single-config path below -- no further nesting. *)
+    Module[{atpSub, atpR = $Failed},
+        atpSub = If[ OptionValue[MaxWallSeconds] > 0,
+            OptionValue[MaxWallSeconds], 60.];
+        Do[ atpR = TFindEquationalProof[conjecture, axioms,
+                Method -> cfg, MaxWallSeconds -> atpSub,
+                MaxSteps -> OptionValue[MaxSteps]];
+            If[ Head[atpR] === ProofObject, Break[]],
+            {cfg, atpSched}];
+        atpR],
+    (* Single config. *)
     Block[{
         enc, conjPair, axiomKeys, ruleList, cRes, extSteps,
         chain, dataset, varNames, axEq, conjStmt, po
@@ -2008,7 +2043,7 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
                 If[ Head[poB] === ProofObject, poB, $Failed]
             ]
         ]
-    ],
+    ]]],
     "TATPError"
 ]
 
