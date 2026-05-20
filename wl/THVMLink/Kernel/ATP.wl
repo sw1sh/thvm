@@ -1727,11 +1727,19 @@ atpParseMethod[m_] := (
      2. LPO + auto-precedence -- structural / combinator reductions
         KBO cannot orient (variable-duplicating rules).
      3. GT weight     -- the engine's bare default; occasionally
-        reaches a proof the others' CP order misses. *)
+        reaches a proof the others' CP order misses.
+     4. GoalDirected  -- the MNF bidirectional front search, the only
+        config that closes a symmetric goal whose two sides never meet
+        at a single normal form (Boolean Noncontradiction /
+        ExcludedMiddle / DoubleNegation, Sheffer Commutativity).  Last
+        because it runs the front search alongside completion on every
+        step, so a goal the cheaper completion configs already close
+        never pays for it. *)
 $AtpSchedule = {
     {"Completion", "CriticalPairWeight" -> "Mix2"},
     {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True},
-    {"Completion", "CriticalPairWeight" -> "Gt"}
+    {"Completion", "CriticalPairWeight" -> "Gt"},
+    "GoalDirected"
 };
 atpScheduleFor[Automatic | "Portfolio"] := $AtpSchedule;
 atpScheduleFor[m_] := {m};

@@ -24,11 +24,13 @@ print[args___] := WriteString["stdout",
 
    Automatic is a strategy schedule (Waldmeister-style portfolio): it
    tries Mix2 weight, then LPO + structure-driven AutoPrecedence, then
-   GT weight, returning the first that proves+verifies.  So the
-   combinator case BCKWToSKI -- which needs LPO (KBO cannot orient the
-   variable-duplicating S/W rules) -- proves under plain Automatic;
-   the divergent Y axiom (Y x == x (Y x), absent from the goal) is
-   auto-dropped by the relevance filter so completion terminates. *)
+   GT weight, then the MNF goal-directed front search, returning the
+   first that proves+verifies.  So the combinator case BCKWToSKI --
+   which needs LPO (KBO cannot orient the variable-duplicating S/W
+   rules) -- proves under plain Automatic; the divergent Y axiom
+   (Y x == x (Y x), absent from the goal) is auto-dropped by the
+   relevance filter so completion terminates; and a symmetric goal
+   that no completion config can close falls through to GoalDirected. *)
 $cases = {
     {"BooleanAxioms",    "DeMorgan",                        Automatic, 30},
     {"MeredithAxioms",   "ImpliesWolframAxioms",            Automatic, 30},
@@ -37,7 +39,17 @@ $cases = {
     {"MeredithAxioms",   "AndAssociativity",                Automatic, 30},
     {"MeredithAxioms",   "OrAssociativity",                 Automatic, 30},
     {"MeredithAxioms",   "ImpliesHillmanAxioms",            Automatic, 30},
-    {"CombinatorAxioms", "BCKWToSKI",                       Automatic, 30}
+    {"CombinatorAxioms", "BCKWToSKI",                       Automatic, 30},
+    (* Symmetric goals: the two sides never share a single normal
+       form, so completion alone cannot close them.  "GoalDirected"
+       runs the MNF bidirectional front search, whose collision chain
+       now resolves into a verifying critical-pair-lemma proof.  These
+       also prove under plain Automatic (the schedule falls through to
+       GoalDirected after the completion configs), just slower. *)
+    {"BooleanAxioms",    "Noncontradiction",                "GoalDirected", 30},
+    {"BooleanAxioms",    "ExcludedMiddle",                  "GoalDirected", 30},
+    {"BooleanAxioms",    "DoubleNegation",                  "GoalDirected", 30},
+    {"ShefferAxioms",    "Commutativity",                   "GoalDirected", 30}
 };
 
 (* run one case; return {head, verifyHeads, seconds}. *)
