@@ -8,17 +8,6 @@
 // Returns 1 on success, 0 on bail (declined kernel, validation
 // failure inside uop_dag_apply_kopt, applied_opts full).
 
-// KOP_TC gate counter -- exposes dispatch coverage of the DAG
-// classifier to the surgical suite.
-static u64 APPLY_OPT_TC_GATE_DAG = 0;
-
-fn u64 kernel_apply_opt_tc_dag_count(void) {
-  return APPLY_OPT_TC_GATE_DAG;
-}
-fn void kernel_apply_opt_tc_counters_reset(void) {
-  APPLY_OPT_TC_GATE_DAG = 0;
-}
-
 // Forward decl: defined in uop/apply_opt_dag.c, included after this file
 // in thvm.c.  The forward decl matches `fn` (static inline) so the
 // generated symbols stay private to the TU.
@@ -39,7 +28,6 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     Term new_root = uop_dag_apply_kopt(ke->cached_lift.store_root, opt);
     if (new_root == 0 || new_root == ke->cached_lift.store_root) return 0;
     ke->cached_lift.store_root = new_root;
-    if (opt.op == KOP_TC) APPLY_OPT_TC_GATE_DAG++;
     // Mirror the mutation into schedule->applied_opts so WL
     // introspection (TKernelOpts["Applied"]) and the axis-type
     // resolver see the post-opt state.  Skip when the schedule slot
