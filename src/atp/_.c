@@ -4600,11 +4600,11 @@ static u32 mnf_historical_rules(AtpState *s, Term *out_l, Term *out_r,
 // root..ni into buf[0..*len) (root first).  Returns the root index.
 static u32 mnf_collect_lineage(AtpMnf *m, u32 ni, u32 *buf, u32 *len,
                                u32 cap) {
-  u32 tmp_cap = cap;
   u32 stack[ATP_PROOF_MAX_STEPS + 2u];
   u32 sp = 0u;
   u32 guard = 0u;
-  while (sp < tmp_cap && guard++ < m->n_nodes + 1u) {
+  while (sp < cap && sp < (ATP_PROOF_MAX_STEPS + 2u) &&
+         guard++ < m->n_nodes + 1u) {
     stack[sp++] = ni;
     if (m->nodes[ni].parent == ni) break;
     ni = m->nodes[ni].parent;
@@ -4615,11 +4615,11 @@ static u32 mnf_collect_lineage(AtpMnf *m, u32 ni, u32 *buf, u32 *len,
   return ni;
 }
 
-// Emit the steps along a lineage (terms[0..n_terms), root first) into
-// out[], tagged with `side`.  Each consecutive pair is one rewrite,
-// reconstructed by mnf_edge_step.  When `reverse` is set the lineage is
-// walked meet->seed (terms reversed) so a RED chain reads as goal_rhs
-// rewriting toward meet.  Returns 1 if every edge reconstructed.
+// Emit the steps along a lineage (terms[0..n_terms), seed/root first)
+// into out[], tagged with `side`.  Each consecutive pair is one
+// rewrite, reconstructed by mnf_edge_step against the (rl, rr, nr)
+// rule slice.  Both fronts are emitted seed -> meet, so the GREEN and
+// RED chains meet at the join term.  Returns 1 if every edge replayed.
 static int mnf_emit_lineage(AtpMnf *m, const u32 *terms,
                             u32 n_terms, u32 side,
                             const Term *rl, const Term *rr, u32 nr,
