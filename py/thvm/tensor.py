@@ -708,16 +708,27 @@ class Tensor:
         x = x._pool((kH, kW), stride=(sH, sW), dilation=(dH, dW))
         H_out, W_out = x._shape[2:4]
 
-        # Broadcast over C_out and weight over (B, H_out, W_out).
-        # x:      (B, 1,     C_in, H_out, W_out, kH, kW)
-        # weight: (1, C_out, C_in,     1,     1, kH, kW)
-        x_b = (x.reshape(B, 1, C_in, H_out, W_out, kH, kW)
-                .expand(B, C_out, C_in, H_out, W_out, kH, kW))
-        w_b = (weight.reshape(1, C_out, C_in, 1, 1, kH, kW)
-                     .expand(B, C_out, C_in, H_out, W_out, kH, kW))
-        # Sum over C_in (axis 2), kH (axis 5), kW (axis 6); one fused
-        # matmul-shaped reduce that the materializer can recognize.
-        out = (x_b * w_b).sum(axis=(2, 5, 6))
+        # Broadcast x and weight over (B, C_out, H_out, W_out), placing
+        # the reduce axes (C_in, kH, kW) as the TRAILING three so
+        # reduce_chain_collect in src/schedule/uop_meta.c fuses the
+        # three .sum() calls into one contiguous-axis REDUCE (it only
+        # fuses contiguous trailing axes).  Without this the walker
+        # hits triply-nested REDUCEs in the backward and explodes by
+        # ~25x per output element.
+        # Move x's C_in axis from position 1 to position 3 (between
+        # W_out and kH).  Then add the broadcast C_out axis at 1.
+        # x:      (B, C_in, H_out, W_out, kH, kW)
+        #      -> (B, H_out, W_out, C_in, kH, kW)         via permute
+        #      -> (B, 1, H_out, W_out, C_in, kH, kW)      via reshape
+        #      -> (B, C_out, H_out, W_out, C_in, kH, kW)  via expand
+        x_b = (x.permute(0, 2, 3, 1, 4, 5)
+                .reshape(B, 1, H_out, W_out, C_in, kH, kW)
+                .expand(B, C_out, H_out, W_out, C_in, kH, kW))
+        w_b = (weight.reshape(1, C_out, 1, 1, C_in, kH, kW)
+                     .expand(B, C_out, H_out, W_out, C_in, kH, kW))
+        # Sum over the TRAILING three (C_in, kH, kW).  reduce_chain_collect
+        # fuses these into a single REDUCE of extent C_in*kH*kW.
+        out = (x_b * w_b).sum(axis=(4, 5, 6))
         if bias is not None:
             out = out + bias.reshape(1, -1, 1, 1)
         return out
