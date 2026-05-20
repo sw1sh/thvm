@@ -124,6 +124,8 @@ TTensorData::usage     = "TTensorData[t] reads the tensor's buffer as a NumericA
 TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TENS[id].refcount).";
 TRequiresGrad::usage   = "TRequiresGrad[t] / TRequiresGrad[t, True|False] sets TenDesc.requires_grad, the canonical \"this tensor is a parameter\" flag consulted by uop_grad's leaf rule.  Mirrors PyTorch / tinygrad .requires_grad_(); returns t for chaining.";
 TRequiresGradQ::usage  = "TRequiresGradQ[t] reads TenDesc.requires_grad (True / False).";
+TGradOf::usage         = "TGradOf[t] returns the lazy TenDesc.grad term (the chain-rule accumulator populated by a walk-once `TGrad[loss]` / `TUOpGrad[y, gy]` realize).  Returns Missing[\"NoGrad\"] when no grad has been accumulated.  Wrap with TRealize to materialize.";
+TClearGrad::usage      = "TClearGrad[t] zeros TenDesc.grad (PyTorch zero_grad analogue).  Returns t.";
 TRealize::usage        = "TRealize[expr] = TWnf[TMaterialize[expr]].  Fires the whole pipeline: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs) then beta-reduce + dispatch kernels.";
 TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + linearize rewrite directly (no wnf) and returns the scheduled DAG term.  Fires no kernels.  Use to visualize the graph after scheduling but before dispatch.";
 (* TKernelCount / TKernelProgramCacheSize / TKernelInfo  --  declared
@@ -403,6 +405,8 @@ $tensorShapeFn   := $tensorShapeFn   = load["thvm_wl_tensor_shape",   {Integer},
 $tensorRcFn      := $tensorRcFn      = load["thvm_wl_tensor_refcount",{Integer},               Integer];
 $tensorSetReqGradFn := $tensorSetReqGradFn = load["thvm_wl_tensor_set_requires_grad", {Integer, Integer}, Integer];
 $tensorReqGradFn := $tensorReqGradFn = load["thvm_wl_tensor_requires_grad",     {Integer},          Integer];
+$tensorGradFn       := $tensorGradFn       = load["thvm_wl_tensor_grad",       {Integer},          Integer];
+$tensorClearGradFn  := $tensorClearGradFn  = load["thvm_wl_tensor_clear_grad", {Integer},          Integer];
 $tensorViewDbgFn := $tensorViewDbgFn = load["thvm_wl_tensor_view_debug", {Integer}, {Integer, 1}];
 
 (* Zero-copy tensor-from-NumericArray.  The "Shared" passing mode

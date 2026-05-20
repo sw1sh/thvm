@@ -234,13 +234,26 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
   u32 tid = (u32)term_val(ten_r);
   u32 leaf_dt = DT_FP32;
   term_dtype_in(ten_r, 0, &leaf_dt);
-  // requires_grad filter (target-free path / SUP scaffolding): when
-  // the flag is in use, non-required leaves emit scalar zero so the
-  // outer DUP^t.tid projection never has to walk them.
-  if (GRAD_REQ_NCOUNT > 0 && tid > 0 && tid < TENS_NEXT
-      && TENS[tid].requires_grad == 0) {
+  // Target-free path: when requires_grad is in use, accumulate the
+  // contribution directly onto TENS[tid].grad and short the outer
+  // chain with CONST(0).  This is the "walk-once, emit-many" path --
+  // ONE uop_grad walk visits every leaf and each requires_grad leaf
+  // ends up holding its summed cotangent in TenDesc.grad.  No SUP /
+  // DUP^t.tid projection needed; caller reads TENS[tid].grad after
+  // realize.  Non-requires_grad leaves also emit CONST(0) so the
+  // root BWD term collapses into a discardable constant.
+  if (GRAD_REQ_NCOUNT > 0 && tid > 0 && tid < TENS_NEXT) {
+    if (TENS[tid].requires_grad == 0) {
+      return uop_const(leaf_dt, 0);
+    }
+    Term prev = TENS[tid].grad;
+    TENS[tid].grad = (prev == 0)
+                   ? gy_for_leaf
+                   : uop_binary(UOP_ADD, prev, gy_for_leaf);
     return uop_const(leaf_dt, 0);
   }
+  // Legacy SUP scaffolding for callers that opted in to the old
+  // DUP^t.tid projection path (no requires_grad set anywhere).
   u64 sloc = heap_alloc(2);
   heap_set(sloc + 0, uop_const(leaf_dt, 0));
   heap_set(sloc + 1, gy_for_leaf);

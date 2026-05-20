@@ -185,6 +185,17 @@ TRequiresGrad[t_TTerm, ___]                := Missing["NotATensor", TTagName[TTe
 TRequiresGradQ[t_ ? tensorIdQ] := $tensorReqGradFn[TTermVal[t]] === 1
 TRequiresGradQ[t_TTerm]        := False
 
+(* TGradOf[t]: read TenDesc.grad (the walk-once chain-rule
+   accumulator).  Returns a TTerm wrapping the lazy grad term, or
+   Missing["NoGrad"] when nothing has accumulated.  TClearGrad[t]
+   zeros it (PyTorch zero_grad). *)
+TGradOf[t_ ? tensorIdQ] := With[{g = $tensorGradFn[TTermVal[t]]},
+    If[ g === 0, Missing["NoGrad"], TTerm[g]]]
+TGradOf[t_TTerm]        := Missing["NotATensor", TTagName[TTermTag[t]]]
+
+TClearGrad[t_ ? tensorIdQ] := ($tensorClearGradFn[TTermVal[t]]; t)
+TClearGrad[t_TTerm]        := Missing["NotATensor", TTagName[TTermTag[t]]]
+
 (* Debug-only: dump View internals as {ndim, dims..., strides..., offset,
    contiguous, nviews, buf_id, producer_kid}.  No-ops (returns {-1}) when
    THVM_WL_TENSOR_VIEW_DEBUG is unset.  Used to isolate output-view

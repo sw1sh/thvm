@@ -116,6 +116,8 @@ _ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
 _grad_memo_hits   = _bind("py_grad_memo_hits",   c_uint64)
 _grad_memo_misses = _bind("py_grad_memo_misses", c_uint64)
 _grad_fires       = _bind("py_grad_fires",       c_uint64)
+_ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
+_ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 
 # ---------------- buffer accessors ----------------
 _uop_buffer_scope = _bind("py_uop_buffer_scope", c_uint32, c_uint64)
@@ -546,6 +548,15 @@ class Thvm:
     def grad_memo_hits   (self) -> int: return int(_grad_memo_hits())
     def grad_memo_misses (self) -> int: return int(_grad_memo_misses())
     def grad_fires       (self) -> int: return int(_grad_fires())
+
+    def ten_get_grad(self, t: Term) -> int:
+        """Read TENS[tid].grad (the chain-rule accumulator).
+        Returns 0 if no grad has been accumulated yet."""
+        return int(_ten_get_grad(c_uint64(int(t))))
+
+    def ten_clear_grad(self, t: Term) -> bool:
+        """Zero out TENS[tid].grad (PyTorch's zero_grad analogue)."""
+        return bool(_ten_clear_grad(c_uint64(int(t))))
 
     # ---------------- buffer accessors ----------------
     def buffer_scope(self, t: Term) -> int:

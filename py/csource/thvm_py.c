@@ -261,6 +261,25 @@ EXPORT uint64_t py_grad_memo_hits  (void) { return grad_memo_hits_get();   }
 EXPORT uint64_t py_grad_memo_misses(void) { return grad_memo_misses_get(); }
 EXPORT uint64_t py_grad_fires      (void) { return HOT_GRAD_FIRES;         }
 
+// Walk-once backward readback: the canonical "this tensor's grad"
+// after a uop_grad-driven realize.  grad_leaf_sup's target==0 path
+// accumulates contributions into TENS[tid].grad; this returns the
+// lazy grad term (callers realize it).  set / clear let the frontend
+// reset between backward calls (PyTorch zero_grad analogue).
+EXPORT uint64_t py_ten_get_grad(uint64_t t) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  return (uint64_t)TENS[id].grad;
+}
+EXPORT int py_ten_clear_grad(uint64_t t) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  TENS[id].grad = 0;
+  return 1;
+}
+
 // ---------------- buffer accessors (handy for debug) ----------------
 EXPORT uint32_t py_uop_buffer_scope(uint64_t t) { return uop_buffer_scope(t); }
 EXPORT uint32_t py_uop_buffer_dtype(uint64_t t) { return uop_buffer_dtype(t); }

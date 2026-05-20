@@ -523,6 +523,10 @@ typedef struct {
   u32      buf_id;              // backend buffer handle (0 = no buffer yet)
   u32      producer_kid;        // kernel id that produces this tensor, 0 = external
   Backend *backend;             // vtable
+  Term     grad;                // accumulated lazy gradient term; populated by
+                                // grad_leaf_sup (target==0 path, requires_grad)
+                                // as the chain rule walks; 0 = no grad yet.
+                                // Python/WL backward reads this after realize.
 } TenDesc;
 
 // Forward declaration for the dispatch callback.

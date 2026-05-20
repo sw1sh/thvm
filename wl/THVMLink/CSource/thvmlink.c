@@ -1163,6 +1163,34 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_requires_grad(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// TenDesc.grad accessors: read the chain-rule accumulator (populated
+// by grad_leaf_sup's target==0 path when requires_grad==1) and clear
+// it.  Returned Term is lazy -- caller wraps with TTerm and realizes.
+EXTERN_C DLLEXPORT int thvm_wl_tensor_grad(WolframLibraryData libData,
+                                            mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  mint id = MArgument_getInteger(args[0]);
+  mint v  = (id > 0 && (u32)id < TENS_NEXT) ? (mint)TENS[id].grad : 0;
+  MArgument_setInteger(res, v);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_tensor_clear_grad(WolframLibraryData libData,
+                                                  mint argc,
+                                                  MArgument *args,
+                                                  MArgument res) {
+  (void)libData; (void)argc;
+  mint id = MArgument_getInteger(args[0]);
+  if (id <= 0 || (u32)id >= TENS_NEXT) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_NO_ERROR;
+  }
+  TENS[id].grad = 0;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
 // Debug-only: dump View internals for a TenDesc as a flat integer
 // MTensor: {ndim, dims..., strides..., offset, contiguous, nviews,
 // buf_id, producer_kid}.  Gated on THVM_WL_TENSOR_VIEW_DEBUG so it

@@ -187,23 +187,32 @@ class Tensor:
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Build BWD projections via thvm's uop_grad_with_target -- one
-        per registered requires_grad leaf.  Each leaf's .grad is set
-        to a Tensor wrapping the (unrealized) grad term; the caller
-        realizes them on demand (`Tensor.realize(*grads)`)."""
+        """Walk-once backward: build ONE BWD term via uop_grad
+        (target=0) and realize it.  grad_leaf_sup's target==0 path
+        accumulates each requires_grad leaf's cotangent into
+        TENS[tid].grad as the chain rule walks; we then read it back
+        into each Python Tensor's .grad.
+
+        One chain-rule walk emits all parameters' grads, instead of
+        N separate uop_grad_with_target calls."""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
                         else Tensor.ones(*self._shape, dtype=self._dtype))
+        # Walk-once chain rule: build uop_grad(target=0), realize to
+        # trigger interact_grad + the leaf-sup accumulator.
+        bwd = _TH.grad(self.term, gradient.term)
+        _TH.realize(bwd)
+        # Read accumulated grad terms back from TenDesc.grad.
         for tid, leaf in list(_GRAD_TENSORS.items()):
-            # Re-confirm via the canonical C-side flag (handles cases
-            # where the user toggled the flag directly through the bridge).
             if not _TH.ten_get_requires_grad(leaf.term):
                 continue
-            g = _TH.grad_with_target(self.term, gradient.term, leaf.term)
-            leaf.grad = Tensor._from_term(g, leaf._dtype, leaf._shape)
+            g_term = _TH.ten_get_grad(leaf.term)
+            if g_term != 0:
+                leaf.grad = Tensor._from_term(Term(g_term), leaf._dtype,
+                                              leaf._shape)
         return self
 
     def sequential(self, layers) -> "Tensor":
