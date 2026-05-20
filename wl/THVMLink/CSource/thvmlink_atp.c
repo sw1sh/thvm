@@ -379,6 +379,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   AtpState *atp = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  // Record per-step normalization chains so the WL ProofObject
+  // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
+  // reconstructing it by search.
+  thvm_atp_set_record_norm_steps(atp, 1u);
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];
@@ -459,18 +463,27 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // atp_trace_push / atp_trace_push_cp.  TRACE_CP entries carry the
   // superposition path in children 4+; AXIOM / ORIENT / SIMPLIFY
   // entries have arity 4 and we emit pos_len 0 for them.
+  // TRACE_NORM_STEP entries (atp_trace_push_norm_step) layer two
+  // extra NUMs after pos[] -- side (0 / 1) and fwd (0 / 1) -- so the
+  // WL extractor can re-emit the SubstitutionLemma's Side and
+  // Orientation without re-deriving them.
   for (u32 i = 0; i < n_trace; i++) {
-    Term e     = atp->trace[i];
-    u32  arity = term_ctr_n(e);
+    Term e      = atp->trace[i];
+    u32  reason = term_ext(e);
+    u32  arity  = term_ctr_n(e);
     u32  pos_len = (arity > 5u) ? (u32)term_val(term_ctr_at(e, 4)) : 0u;
-    odata[w++] = (int64_t)term_ext(e);                       // reason
+    odata[w++] = (int64_t)reason;                            // reason
     odata[w++] = (int64_t)term_val(term_ctr_at(e, 0));       // parent_a
-    odata[w++] = (int64_t)term_val(term_ctr_at(e, 1));       // parent_b
+    odata[w++] = (int64_t)term_val(term_ctr_at(e, 1));       // parent_b / rule_idx
     odata[w++] = (int64_t)term_ctr_at(e, 2);                 // lhs Term
     odata[w++] = (int64_t)term_ctr_at(e, 3);                 // rhs Term
     odata[w++] = (int64_t)pos_len;                           // pos_len
     for (u32 k = 0; k < pos_len; k++) {
       odata[w++] = (int64_t)term_val(term_ctr_at(e, 5u + k));
+    }
+    if (reason == TRACE_NORM_STEP) {
+      odata[w++] = (int64_t)term_val(term_ctr_at(e, 5u + pos_len));      // side
+      odata[w++] = (int64_t)term_val(term_ctr_at(e, 5u + pos_len + 1u)); // fwd
     }
   }
   // MAIN steps block.

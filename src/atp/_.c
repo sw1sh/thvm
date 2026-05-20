@@ -3402,6 +3402,83 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
 // Returns one of: ATP_RUNNING (continue), ATP_PROVED (goal hit),
 // ATP_TIMEOUT (step cap), ATP_QUEUE_EMPTY (saturation reached
 // without proving the goal).
+
+fn void thvm_atp_set_record_norm_steps(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->record_norm_steps = on ? 1u : 0u;
+}
+
+// Forward decl: defined after the proof-extract machinery further
+// down; atp_rewrite_normalize_record below reuses it as the one-step
+// metadata-recording rewriter.
+static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
+                                   u32 *out_rule, u8 *out_pos_len,
+                                   u8 *out_fwd, u8 *fired);
+
+// Push a TRACE_NORM_STEP entry recording one rewrite step the CP-
+// normalize loop just applied.  Children layout (see thvm.h for the
+// schema mirrored by the WL decoder):
+//   [NUM(parent_a), NUM(rule_idx), lhs (after step), rhs (after step),
+//    NUM(pos_len), NUM(pos_0), ..., NUM(side), NUM(fwd)]
+static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
+                                    Term lhs, Term rhs,
+                                    u8 side, u8 fwd,
+                                    const u8 *pos, u8 pos_len) {
+  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  Term children[7 + ATP_PROOF_MAX_DEPTH];
+  children[0] = term_new(0, TAG_NUM, 0, p_a);
+  children[1] = term_new(0, TAG_NUM, 0, rule_idx);
+  children[2] = lhs;
+  children[3] = rhs;
+  children[4] = term_new(0, TAG_NUM, 0, pos_len);
+  for (u8 k = 0; k < pos_len; k++) {
+    children[5u + k] = term_new(0, TAG_NUM, 0, pos[k]);
+  }
+  children[5u + pos_len]      = term_new(0, TAG_NUM, 0, side);
+  children[5u + pos_len + 1u] = term_new(0, TAG_NUM, 0, fwd);
+  s->trace[s->n_trace] = term_new_ctr(TRACE_NORM_STEP, children,
+                                      7u + pos_len);
+  u32 idx = s->n_trace;
+  s->n_trace++;
+  return idx;
+}
+
+// CP-normalize chain recorder: iterate one rewrite step at a time
+// via the proof-extracter (atp_proof_rewrite_step), pushing a
+// TRACE_NORM_STEP per fire so the WL extractor walks the chain
+// linearly.  `eq_other` is the equation's other side (unchanged
+// during this side's normalization) -- recorded in each step's
+// (lhs, rhs) tuple per `side` (0 lhs / 1 rhs).  Returns the final
+// term and updates *chain_tail to the last pushed step's trace
+// index (or leaves it at the caller's prev_trace if no step fires).
+static Term atp_rewrite_normalize_record(AtpState *s,
+                                         Term t, Term eq_other, u8 side,
+                                         u32 *chain_tail, u32 step_cap) {
+  for (u32 it = 0; it < step_cap; it++) {
+    u8  pos[ATP_PROOF_MAX_DEPTH];
+    u32 rule = 0;
+    u8  pos_len = 0, fwd = 1u, fired = 0;
+    Term t2 = atp_proof_rewrite_step(s, t, pos, 0u, &rule, &pos_len,
+                                     &fwd, &fired);
+    if (!fired) break;
+    Term step_lhs = (side == 0u) ? t2 : eq_other;
+    Term step_rhs = (side == 0u) ? eq_other : t2;
+    // Store the rule's TRACE_ORIENT trace index (not mainRules
+    // position): mainRules shifts as interreduction drops rules, but
+    // each TRACE_ORIENT entry stays at a fixed trace index for the
+    // life of the run, so WL can read the rule's stored sides off
+    // trace[] regardless of later interreduction.
+    u32 rule_trace = (rule < s->n_rules) ? s->r_trace[rule]
+                                         : ATP_TRACE_NONE;
+    u32 ti = atp_trace_push_norm_step(s, *chain_tail, rule_trace,
+                                      step_lhs, step_rhs, side, fwd,
+                                      pos, pos_len);
+    if (ti != ATP_TRACE_NONE) *chain_tail = ti;
+    t = t2;
+  }
+  return t;
+}
+
 fn AtpStatus thvm_atp_step(AtpState *s) {
   if (s == NULL) return ATP_QUEUE_EMPTY;
 
@@ -3434,16 +3511,35 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   u64 hcp_norm = thvm_atp_heap_checkpoint();
 
   const u32 NORM_CAP = 64;
-  Term l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-  Term r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  u32 src_trace  = s->last_popped_trace;
+  u32 chain_tail = src_trace;
+  Term l, r;
+  if (s->record_norm_steps) {
+    // Record each CP-normalize rewrite as a TRACE_NORM_STEP, chained
+    // from the CP -- WL walks the chain linearly when extracting the
+    // ProofObject.  lhs side first (rhs is `cp_rhs` for those steps),
+    // then rhs side (lhs is the lhs-normalized `l`).
+    l = atp_rewrite_normalize_record(s, cp_lhs, cp_rhs, 0u,
+                                     &chain_tail, NORM_CAP);
+    r = atp_rewrite_normalize_record(s, cp_rhs, l, 1u,
+                                     &chain_tail, NORM_CAP);
+  } else {
+    l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  }
 
   if (kbo_eq(l, r)) {
-    thvm_atp_heap_reset(hcp_norm);
+    // Skipping the heap reset when norm-step recording is on: the
+    // TRACE_NORM_STEP entries just pushed reference the intermediate
+    // Terms allocated during the normalize, and rewinding the heap
+    // would leave their children dangling.
+    if (!s->record_norm_steps) {
+      thvm_atp_heap_reset(hcp_norm);
+    }
     s->step++;
     return ATP_RUNNING;
   }
 
-  u32 src_trace = s->last_popped_trace;
   AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
   if (added.count == 0) {
     // R full, or some other refusal.  Count the work and continue.
@@ -3451,15 +3547,17 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     return ATP_RUNNING;
   }
 
-  // Trace each newly-added rule with its source CP as parent_a.
-  // For unfailing 2-way fallback both directions get separate
-  // entries so PCL output can identify each rule individually.
-  // Stash the trace index in r_trace[] so generate_cps can
-  // record TRACE_CP parents for any CP born from this rule.
+  // Trace each newly-added rule with its source CP as parent_a (or
+  // the chain tail when norm-step recording is on: the chain ends at
+  // the last NORM_STEP, which the ORIENT inherits from).  For
+  // unfailing 2-way fallback both directions get separate entries so
+  // PCL output can identify each rule individually.  Stash the trace
+  // index in r_trace[] so generate_cps can record TRACE_CP parents
+  // for any CP born from this rule.
   for (u32 k = 0; k < added.count; k++) {
     Term rl = s->lhs[added.first + k];
     Term rr = s->rhs[added.first + k];
-    u32  t  = atp_trace_push(s, TRACE_ORIENT, src_trace,
+    u32  t  = atp_trace_push(s, TRACE_ORIENT, chain_tail,
                              ATP_TRACE_NONE, rl, rr);
     s->r_trace[added.first + k] = t;
   }

@@ -2914,6 +2914,19 @@ typedef enum {
 // DAG connected through interreduction -- mirrors Waldmeister PCL's
 // `Reduktion` events.
 #define TRACE_SIMPLIFY 4u
+// TRACE_NORM_STEP: one rewrite step the C engine applied while
+// normalizing a CP equation toward its oriented rule.  Pushed by
+// thvm_atp_step when AtpState.record_norm_steps is set, so a proof
+// consumer walks (TRACE_CP) -> (TRACE_NORM_STEP){0,1,...,N} ->
+// (TRACE_ORIENT) linearly instead of re-deriving the chain by search.
+// Children:
+//   [NUM(parent_a), NUM(rule_idx), lhs (after step), rhs (after step),
+//    NUM(pos_len), NUM(pos_0), ..., NUM(side), NUM(fwd)]
+// rule_idx is the alive-rule index used; side is 0 for an lhs-of-
+// equation rewrite, 1 for an rhs-of-equation rewrite; fwd is 1 for an
+// lhs->rhs rule application, 0 for an unorientable rule fired
+// reversed under ordered rewriting.
+#define TRACE_NORM_STEP 5u
 #define ATP_TRACE_NONE 0xFFFFFFFFu
 
 // 8a: CTR labels for the IC-native CP-set graph (-DATP_CP_GRAPH).
@@ -3227,6 +3240,15 @@ typedef struct {
   // `thvm_atp_set_cp_weight_mode`.
   u8   cp_weight_mode;
 
+  // When set (via thvm_atp_set_record_norm_steps), thvm_atp_step
+  // pushes a TRACE_NORM_STEP per rewrite the CP-normalize loop
+  // applies, so a proof consumer can walk the chain CP ->
+  // NORM_STEP* -> ORIENT linearly instead of reconstructing it by
+  // search.  Off by default: per-step trace recording inflates the
+  // trace by up to 2 * NORM_CAP entries per CP, which only matters
+  // for runs whose caller will extract a ProofObject.
+  u8   record_norm_steps;
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3277,6 +3299,7 @@ fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 // for the per-mode formula, all ports of Waldmeister's
 // `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
+fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 
 // === atp/precedence -- algebraic-structure detection =================
 // Ported from Waldmeister's `PhilMarlow` (algebraic-structure

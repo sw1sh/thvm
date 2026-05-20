@@ -821,20 +821,27 @@ cEngineProof[enc_, maxSteps_] := Block[{
     rTrace = raw[[cur + 1 ;; cur + nRules]];
     cur = cur + nRules;
     (* MAIN trace block: variable width reason, pa, pb, lhs, rhs,
-       pos_len, pos[..]. *)
+       pos_len, pos[..].  TRACE_NORM_STEP carries two extra NUMs
+       (side, fwd) after pos[] so the WL extractor can re-emit the
+       SubstitutionLemma directly from the C engine's recorded chain
+       instead of re-deriving the rewrite path by search. *)
     traceEntries = Table[
-        Block[{reason, pa, pb, l, r, posLen, pos},
+        Block[{reason, pa, pb, l, r, posLen, pos, side, fwd},
             reason = raw[[cur + 1]]; pa = raw[[cur + 2]];
             pb = raw[[cur + 3]]; l = raw[[cur + 4]];
             r = raw[[cur + 5]]; posLen = raw[[cur + 6]];
             pos = If[ posLen === 0, {},
                 raw[[cur + 7 ;; cur + 6 + posLen]]];
             cur = cur + 6 + posLen;
+            side = If[ reason === $TraceNormStep, raw[[cur + 1]], 0];
+            fwd  = If[ reason === $TraceNormStep, raw[[cur + 2]], 1];
+            If[ reason === $TraceNormStep, cur = cur + 2 ];
             <|
                 "Reason" -> reason, "ParentA" -> pa, "ParentB" -> pb,
                 "Lhs" -> decodeAtpTerm[l, labelToName, idToName],
                 "Rhs" -> decodeAtpTerm[r, labelToName, idToName],
-                "Pos" -> (pos + 1)
+                "Pos" -> (pos + 1),
+                "Side" -> side, "Fwd" -> fwd
             |>
         ],
         {nTrace}
@@ -927,6 +934,7 @@ $TraceAxiom = 1;
 $TraceOrient = 2;
 $TraceCp = 3;
 $TraceSimplify = 4;
+$TraceNormStep = 5;
 $AtpTraceNone = 4294967295;
 
 (* Assemble a verifier-shaped ProofObject dataset for a
@@ -1230,7 +1238,11 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     ,
                     {step, found}
                 ];
-                <|"Key" -> curKey, "Eq" -> curEq|>
+                (* emitNorm's bridging chain inherits the source CP's
+                   Swapped convention (the BFS is structural, not
+                   convention-aware), so subsequent NORM_STEPs that
+                   descend from this chain pick up the right side. *)
+                <|"Key" -> curKey, "Eq" -> curEq, "Swapped" -> True|>
             ];
 
         (* emit a CriticalPairLemma for the TRACE_CP at trace index
@@ -1274,11 +1286,16 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     "Position" -> pos
                 |>
             |>];
-            <|"Key" -> key, "Eq" -> cpEq|>
+            <|"Key" -> key, "Eq" -> cpEq, "Swapped" -> True|>
         ];
 
-        (* resolve trace index ti to <|Key, Eq|>, emitting the lemma
-           entries its derivation needs; memoized, cycle-guarded. *)
+        (* resolve trace index ti to <|Key, Eq, Swapped|>, emitting
+           the lemma entries its derivation needs; memoized, cycle-
+           guarded.  `Swapped` tracks whether the entry's Eq is in
+           the verifier's (non-overlap, overlap-rewritten) CP order
+           (True) or the C engine's native (lhs, rhs) order (False).
+           NORM_STEP propagates this through the chain so its Side /
+           equation order match the chain root's convention. *)
         resolveTrace[ti_] := Block[{te, ruleEq, pInfo, pEq, info},
             If[ KeyExistsQ[traceInfo, ti], Return[traceInfo[ti]] ];
             If[ TrueQ[inProgress[ti]],
@@ -1291,13 +1308,69 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 te["Reason"] === $TraceCp,
                     resolveCp[ti],
                 te["Reason"] === $TraceAxiom,
-                    <|"Key" -> axiomKeyFor[ruleEq], "Eq" -> ruleEq|>,
+                    <|"Key" -> axiomKeyFor[ruleEq], "Eq" -> ruleEq,
+                      "Swapped" -> False|>,
+                te["Reason"] === $TraceNormStep,
+                    (* The C engine recorded this rewrite step
+                       directly: emit one SubstitutionLemma citing the
+                       rule the engine used, no search.  ParentA is
+                       the previous chain link (NORM_STEP, CP, or
+                       AXIOM); ParentB is the rule's TRACE_ORIENT
+                       trace index (interreduction-stable).
+                       The C engine records te.Lhs / te.Rhs and side
+                       in its own (lhs / rhs) convention.  resolveCp
+                       swaps a CP so CriticalPairLemma's Statement
+                       matches the verifier's (non-overlap, overlap-
+                       rewritten) order; an AXIOM is in C-engine
+                       order unchanged.  Detect the parent's
+                       convention by comparing pInfo's Eq to its
+                       trace entry's stored Lhs / Rhs, and mirror the
+                       swap (or not) on this NORM_STEP so the chain
+                       stays in ONE convention end-to-end. *)
+                    Module[{pInfo, rInfo, rTe, rEq, swapped,
+                            wlEq, wlSide, sl, st, dir},
+                        pInfo = resolveTrace[te["ParentA"]];
+                        rInfo = resolveTrace[te["ParentB"]];
+                        rTe = trace[[te["ParentB"] + 1]];
+                        rEq = {rTe["Lhs"], rTe["Rhs"]};
+                        swapped = TrueQ[pInfo["Swapped"]];
+                        wlEq = If[ swapped,
+                            {te["Rhs"], te["Lhs"]},
+                            {te["Lhs"], te["Rhs"]}];
+                        wlSide = If[ swapped,
+                            If[ te["Side"] === 0, 2, 1],
+                            te["Side"] + 1];
+                        slN++;
+                        sl = {$SubstitutionLemmaSym, slN};
+                        st = stmt[wlEq];
+                        dir = If[ te["Fwd"] === 1, 1, -1];
+                        AppendTo[entries, sl -> <|
+                            "Statement" -> st,
+                            "Proof" -> <|
+                                "Input" -> pInfo["Key"],
+                                "Construct" -> rInfo["Key"],
+                                "Position" -> te["Pos"],
+                                "Rule" -> cplAsRule[
+                                    If[ dir === -1, Reverse[rEq], rEq],
+                                    varSyms],
+                                "Orientation" -> dir *
+                                    cplOrient[rInfo["Eq"], rEq, varSyms],
+                                "ConstructSide" -> 1,
+                                "InputOrientation" -> 1,
+                                "Side" -> wlSide,
+                                "OutputExpression" -> st,
+                                "Source" -> "norm"
+                            |>
+                        |>];
+                        <|"Key" -> sl, "Eq" -> wlEq, "Swapped" -> swapped|>
+                    ],
                 te["Reason"] === $TraceOrient ||
                   te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];
                     If[ cplEqSetQ[ruleEq, pEq, varSyms],
-                        <|"Key" -> pInfo["Key"], "Eq" -> pEq|>,
+                        <|"Key" -> pInfo["Key"], "Eq" -> pEq,
+                          "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
                         emitNorm[pInfo["Key"], pEq, ruleEq, ti]
                     ],
                 True, atpDbgFail["resolveTrace.unknown-reason@" <> ToString[ti]];
