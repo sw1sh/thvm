@@ -253,10 +253,17 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   if (op == UOP_REDUCE) {
     Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
     u32 axis = (u32)term_val(heap_read(loc + 2));
-    if (cs.ndim <= 1) {
-      out->ndim = 1; out->dims[0] = 1;
-      for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0; return 1;
-    }
+    // Drop the reduced axis -- output ndim is src ndim minus one.  For
+    // a 1-D source this gives a 0-D scalar; for 0-D inputs (degenerate;
+    // the SHRINK/EXPAND chains never produce them) we bail.
+    //
+    // The earlier branch returned `ndim=1, dims=[1]` for cs.ndim<=1
+    // unconditionally, which made the downstream "size-1 axis short-
+    // circuit" in src/schedule/materialize.c (treats REDUCE as no-op
+    // when src.ndim == out.ndim AND src.dims[axis]==1) fire on the
+    // outer REDUCE of a (1,)-input chain -- the reduce never executed
+    // and the result buffer read zeros (project_thvm_mul_reduce_leading_one_zero).
+    if (cs.ndim == 0) return 0;
     u32 dst = 0;
     for (u32 i = 0; i < cs.ndim; i++) { if (i == axis) continue; out->dims[dst++] = cs.dims[i]; }
     out->ndim = dst;
