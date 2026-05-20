@@ -698,8 +698,50 @@ fn void run_rangeify_unified(Term root) {
     } else if (n_crngs == 1) {
       // *** Mirror indexing.py:193-195 ***
       // "if this has one consumer, it inherits the ranges from it."
-      for (u8 a = 0; a < my_ndim; a++) {
-        out_rngs[a] = consumer_rngs[0].rngs[a];
+      //
+      // EXCEPTION: when the sole consumer is a PAD over a non-leaf
+      // compute, inheriting the PAD's shifted/WHERE-INVALID in_rngs
+      // leaves this node as an in-kernel BUFFERIZE intermediate that
+      // the cpu_uop_walk can't bind (multi-range BUFFERIZE inline is
+      // unimplemented -- materialize.c:1087).  The PAD body's INDEX_E
+      // then reads the OUTPUT buffer (zeros).  Force-realize this node
+      // at its own (unshifted) shape so the PAD reads it via a clean
+      // UOP_BUFFER input slot.  (project_thvm_mul_shared_subgraph_zero_grad
+      // -- conv2d input gradient = 0; SHRINK backward = PAD over the
+      // cotangent compute.)  Leaf / movement sources don't need this:
+      // a leaf is already a BUFFER, and movement-only chains compose
+      // as views.
+      int consumer_is_pad = 0;
+      {
+        u32 cidxs[RU_MAX_CONSUMERS];
+        u32 nc = ru_consumers_for_node(node_idx, cidxs, RU_MAX_CONSUMERS);
+        for (u32 c = 0; c < nc; c++) {
+          if (BUFFERIZE_NODES[cidxs[c]].op == UOP_PAD) { consumer_is_pad = 1; break; }
+        }
+      }
+      int self_is_compute = uop_is_unary_elementwise(info->op)
+                         || uop_is_binary_elementwise(info->op)
+                         || info->op == UOP_REDUCE;
+      // Only the MULTI-axis case is broken: the 1-range BUFFERIZE inline
+      // (materialize.c:1119) handles a single closed-range over a fresh
+      // RANGE addr, so 1-D pad-over-compute already works.  Restricting
+      // the force-realize to my_ndim >= 2 keeps the extra kernel boundary
+      // off the cases that already lower correctly.
+      if (consumer_is_pad && self_is_compute && my_ndim >= 2) {
+        for (u8 a = 0; a < my_ndim; a++) {
+          out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
+        }
+        RU_REALIZE_MAP[node_idx].realized_full = 1;
+        RU_REALIZE_MAP[node_idx].axes_mask =
+            (my_ndim < 8) ? (u8)((1u << my_ndim) - 1u) : 0xFFu;
+        RU_REALIZE_MAP[node_idx].n_realized_axes = my_ndim;
+        RU_ENDING_RANGES[node_idx].n = 0;
+        RU_LAST_NEW_REALIZES++;
+        RU_LAST_FULL_REALIZES++;
+      } else {
+        for (u8 a = 0; a < my_ndim; a++) {
+          out_rngs[a] = consumer_rngs[0].rngs[a];
+        }
       }
     } else {
       // *** Mirror indexing.py:196-220 ***
