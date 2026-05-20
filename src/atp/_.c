@@ -3408,6 +3408,23 @@ fn void thvm_atp_set_record_norm_steps(AtpState *s, u8 on) {
   s->record_norm_steps = on ? 1u : 0u;
 }
 
+// Read wall-clock microseconds from CLOCK_REALTIME -- portable
+// across linux / macOS / freebsd and good enough for a >=1 second
+// deadline budget.
+static u64 atp_now_us(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
+  return (u64)ts.tv_sec * 1000000ull + (u64)(ts.tv_nsec / 1000);
+}
+
+fn void thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now) {
+  if (s == NULL) return;
+  if (seconds_from_now <= 0.0) { s->wall_deadline_us = 0u; return; }
+  u64 now = atp_now_us();
+  if (now == 0u) return;  // clock_gettime failed; leave deadline off
+  s->wall_deadline_us = now + (u64)(seconds_from_now * 1e6);
+}
+
 // Forward decl: defined after the proof-extract machinery further
 // down; atp_rewrite_normalize_record below reuses it as the one-step
 // metadata-recording rewriter.
@@ -3538,6 +3555,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   if (goal != ATP_RUNNING) return goal;
 
   if (s->step >= s->step_cap) return ATP_TIMEOUT;
+
+  // Wall-clock deadline check.  Polled per outer step; fine grain
+  // enough to defend against runaway recursive-axiom expansions
+  // (Y combinator's `Y x == x (Y x)` saturates with unbounded CP
+  // fan-out) without showing up in the hot loop's profile.
+  if (s->wall_deadline_us != 0u) {
+    u64 now = atp_now_us();
+    if (now != 0u && now >= s->wall_deadline_us) return ATP_TIMEOUT;
+  }
 
   // 7a: in-loop GC.  When the dyn heap has crossed the half-full
   // mark, run a Cheney collection BEFORE allocating this step's

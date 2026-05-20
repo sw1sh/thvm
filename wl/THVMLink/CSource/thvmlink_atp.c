@@ -299,10 +299,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
 // dataset) and falls back to the main DAG only when `ext` cannot
 // close the goal.
 //
-// Inputs: identical to thvm_wl_atp_run
+// Inputs: identical to thvm_wl_atp_run plus a wall-seconds arg
 //   args[0] = packed_terms NumericArray (Int64).
 //   args[1] = max_steps  (mint).
 //   args[2] = max_label  (mint).
+//   args[3] = wall_seconds (Real, 0.0 = unbounded).  The saturator
+//             bails with ATP_TIMEOUT once the deadline passes -- the
+//             only defense against recursively-defined axioms like
+//             CombinatorAxioms' `Y x == x (Y x)` whose CP fan-out
+//             is unbounded.
 //
 // Output: one self-describing Int64 NumericArray.
 //   header (7 ints):
@@ -331,6 +336,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   MNumericArray na = MArgument_getMNumericArray(args[0]);
   mint max_steps   = MArgument_getInteger(args[1]);
   mint max_label   = MArgument_getInteger(args[2]);
+  double wall_seconds = MArgument_getReal(args[3]);
 
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
@@ -383,6 +389,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.
   thvm_atp_set_record_norm_steps(atp, 1u);
+  // Optional wall deadline: 0 leaves the saturator unbounded.
+  if (wall_seconds > 0.0) {
+    thvm_atp_set_wall_deadline(atp, wall_seconds);
+  }
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

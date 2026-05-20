@@ -88,7 +88,7 @@ $atpRunFn := $atpRunFn = load[
    rules / r_trace / trace / steps blocks (see thvmlink_atp.c). *)
 $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
-    {{"NumericArray", "Shared"}, Integer, Integer},
+    {{"NumericArray", "Shared"}, Integer, Integer, Real},
     "NumericArray"
 ]
 
@@ -802,12 +802,13 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
    path) and the Main* fields carry the completion DAG for the
    critical-pair lemma path.  ExtSteps / MainSteps are $Failed when
    the corresponding extraction produced nothing. *)
-cEngineProof[enc_, maxSteps_] := Block[{
+cEngineProof[enc_, maxSteps_, wallSeconds_:0.0] := Block[{
     raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
     cur, labelToName, idToName, mainSteps, extSteps, mainRules,
     rTrace, traceEntries
 },
-    raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"]];
+    raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
+        N[wallSeconds]];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
     extNRules = raw[[6]]; extNSteps = raw[[7]];
@@ -1605,7 +1606,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 holdToInactive[axHC_HoldComplete] :=
     ReleaseHold[axHC /. Equal -> Inactive[Equal]]
 
-Options[TFindEquationalProof] = {MaxSteps -> 200000};
+Options[TFindEquationalProof] = {MaxSteps -> 200000, MaxWallSeconds -> 0.};
 
 (* String form: resolve theorem + theory names through
    AxiomaticTheory, then run the expression form.  The conjecture
@@ -1679,7 +1680,8 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
         conjPair = enc["ConjPair"];
         axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
-        cRes = cEngineProof[enc, OptionValue[MaxSteps]];
+        cRes = cEngineProof[enc, OptionValue[MaxSteps],
+            OptionValue[MaxWallSeconds]];
         (* status 1 == PROVED. *)
         If[ cRes["Status"] =!= 1, Return[$Failed] ];
         extSteps = cRes["ExtSteps"];

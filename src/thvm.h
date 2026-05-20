@@ -3274,6 +3274,17 @@ typedef struct {
   // structurally equal (after sigma-application accumulated in
   // `witness_subst`).
   u8   goal_existential;
+
+  // Optional wall-clock deadline (microseconds since the Unix
+  // epoch as monotonic-from-CLOCK_MONOTONIC isn't portable
+  // through `time.h` alone, so we use clock_gettime CLOCK_REALTIME
+  // returned us-since-epoch).  0 means no deadline (default).
+  // When non-zero, `thvm_atp_step` returns `ATP_TIMEOUT` once the
+  // current time crosses this value -- lets the saturator bail
+  // on recursively-defined axioms (Y combinator's `Y x == x (Y x)`
+  // generates infinite CP fan-out and would otherwise spin until
+  // the OS sends SIGKILL).
+  u64  wall_deadline_us;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
@@ -3300,6 +3311,14 @@ fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 // `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
+
+// Set a wall-clock deadline.  `seconds_from_now` is a float duration
+// (e.g. 5.0 = 5 seconds); pass 0.0 to clear the deadline.  The
+// saturator periodically checks the deadline in `thvm_atp_step` and
+// returns `ATP_TIMEOUT` once it's crossed -- the primary defense
+// against recursively-defined axioms (Y combinator) that generate
+// unbounded CP fan-out and would otherwise run forever.
+fn void      thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now);
 
 // === atp/precedence -- algebraic-structure detection =================
 // Ported from Waldmeister's `PhilMarlow` (algebraic-structure
