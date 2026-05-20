@@ -2106,11 +2106,6 @@ fn u32 kernel_entry_output_dtype_at(u32 kid, u32 idx) {
   return KERNELS[kid].output_dtype;
 }
 
-fn u32 kernel_entry_output_numel_at(u32 kid, u32 idx) {
-  if (kid >= KERNELS_NEXT || idx != 0) return 0;
-  return KERNELS[kid].output_numel;
-}
-
 fn int kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out) {
   if (kid >= KERNELS_NEXT || out == NULL || idx != 0) return 0;
   *out = KERNELS[kid].output_shape;

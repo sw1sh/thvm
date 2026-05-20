@@ -1684,7 +1684,6 @@ fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
 fn u32  kernel_entry_output_count(u32 kid);
 fn u32  kernel_entry_output_tid_at(u32 kid, u32 idx);
 fn u32  kernel_entry_output_dtype_at(u32 kid, u32 idx);
-fn u32  kernel_entry_output_numel_at(u32 kid, u32 idx);
 fn int  kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out);
 fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
 // Per-USE variant: select the `edge_idx`-th BIndex record whose
