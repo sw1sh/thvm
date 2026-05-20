@@ -187,32 +187,32 @@ class Tensor:
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Walk-once backward: build ONE BWD term via uop_grad
-        (target=0) and realize it.  grad_leaf_sup's target==0 path
-        accumulates each requires_grad leaf's cotangent into
-        TENS[tid].grad as the chain rule walks; we then read it back
-        into each Python Tensor's .grad.
+        """Pure construction (tinygrad semantics): assign each
+        requires_grad leaf a LAZY grad term -- no chain-rule firing,
+        no materialize, no dispatch.  The caller drives the pipeline
+        with `Tensor.realize(*grads)` / `g.numpy()`, which triggers
+        the chain-rule walk + kernel emission for each grad.
 
-        One chain-rule walk emits all parameters' grads, instead of
-        N separate uop_grad_with_target calls."""
+        Each leaf.grad = uop_grad_with_target(y, gy, leaf.term):
+        a TAG_DP1+grad_flag cell whose interact_grad fire (deferred
+        to realize) emits gy at the matching tid and scalar zero
+        elsewhere.
+
+        (The TenDesc.grad accumulator path remains available C-side
+        for callers that prefer the walk-once side-effecting model --
+        drive a `uop_grad(y, gy)` via wnf and read TENS[tid].grad --
+        but the default Python backward stays pure.)"""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
                         else Tensor.ones(*self._shape, dtype=self._dtype))
-        # Walk-once chain rule: build uop_grad(target=0), realize to
-        # trigger interact_grad + the leaf-sup accumulator.
-        bwd = _TH.grad(self.term, gradient.term)
-        _TH.realize(bwd)
-        # Read accumulated grad terms back from TenDesc.grad.
         for tid, leaf in list(_GRAD_TENSORS.items()):
             if not _TH.ten_get_requires_grad(leaf.term):
                 continue
-            g_term = _TH.ten_get_grad(leaf.term)
-            if g_term != 0:
-                leaf.grad = Tensor._from_term(Term(g_term), leaf._dtype,
-                                              leaf._shape)
+            g = _TH.grad_with_target(self.term, gradient.term, leaf.term)
+            leaf.grad = Tensor._from_term(g, leaf._dtype, leaf._shape)
         return self
 
     def sequential(self, layers) -> "Tensor":
