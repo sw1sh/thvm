@@ -4431,6 +4431,21 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
 // call to every already-expanded node; (b) expand up to `budget` queued
 // (first-expansion) nodes against the full current R.  Returns 1 once
 // the fronts have joined.
+// Heap guard for the MNF expansion loops.  Between node expansions every
+// live MNF term is parked in m->nodes (rooted by thvm_atp_gc_collect) and
+// no expand-local term is allocated yet, so a Cheney collection here is
+// safe.  Returns 1 if the front must stop growing: heap is still under
+// pressure after a collection (the live working set alone exceeds the
+// half-space), so further expansion would exhaust from-space and abort
+// the process.  The caller sets m->full and breaks; completion keeps
+// running and the goal still closes by single-NF or a later collision.
+static int mnf_heap_guard(AtpState *s, AtpMnf *m) {
+  if (!atp_heap_under_pressure()) return 0;
+  thvm_atp_gc_collect(s);
+  if (atp_heap_under_pressure()) { m->full = 1u; return 1; }
+  return 0;
+}
+
 static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   if (m->joined) return 1;
   // Refresh the per-rule caches (vars-contained flag + lhs/rhs node
@@ -4467,7 +4482,10 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   if (s->n_rules > m->n_rules_seen) {
     u32 lo = m->n_rules_seen, hi = s->n_rules, upto = m->n_nodes;
     for (u32 ni = 0; ni < upto && !m->joined; ni++) {
-      if (m->nodes[ni].expanded) mnf_expand_node(s, m, ni, lo, hi);
+      if (m->nodes[ni].expanded) {
+        if (mnf_heap_guard(s, m)) break;
+        mnf_expand_node(s, m, ni, lo, hi);
+      }
     }
     m->n_rules_seen = hi;
   }
@@ -4476,6 +4494,7 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   // policy (mnf_pop).  A node's `irred` is settled by mnf_expand_node;
   // it feeds the next pop of the same colour.
   for (u32 b = 0; b < budget && !m->joined; b++) {
+    if (mnf_heap_guard(s, m)) break;
     int did = 0;
     if (m->qred_head < m->qred_tail) {
       u32 ni = mnf_pop(m->qred, &m->qred_head, &m->qred_tail,
