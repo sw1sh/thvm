@@ -1652,11 +1652,15 @@ TFindEquationalProof::badrel =
     "Unrecognized \"AxiomRelevance\" `1`; using \"Safe\".";
 
 (* parse a Method spec into {cpWeight, ordering, autoPrec} ints for
-   cEngineProof.  Automatic = the engine's proven default config:
-   GT critical-pair weight, KBO, identity precedence.  Auto-precedence
-   and LPO change the orientation trajectory globally, so they are
-   opt-in via explicit Method suboptions rather than the default. *)
-atpParseMethod[Automatic] := {-1, 0, 0};
+   cEngineProof.  Automatic = Mix2 critical-pair weight (CH_MixWeight2,
+   g*10 + (wl+wr)), KBO, identity precedence.  Mix2 reaches the proof
+   far sooner than the engine's bare GT default on the harder
+   associativity / cross-axiom Boolean theorems (e.g. MeredithAxioms
+   AndAssociativity: ~7s under Mix2 vs ~60s under GT) while leaving the
+   easy cases and atp.wlt unchanged.  Auto-precedence and LPO change
+   the orientation trajectory globally, so they stay opt-in via
+   explicit Method suboptions. *)
+atpParseMethod[Automatic] := {5, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     Block[{o = Association[subopts], cw, ord, ap, cwRaw},

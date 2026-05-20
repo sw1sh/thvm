@@ -33,9 +33,9 @@ $cases = {
     {"MeredithAxioms",  "ImpliesWolframAxioms",            Automatic, 30},
     {"MeredithAxioms",  "ImpliesWolframAlternateAxioms",   Automatic, 30},
     {"MeredithAxioms",  "ImpliesWolframCommutativeAxioms", Automatic, 30},
-    {"MeredithAxioms",  "AndAssociativity",                Automatic, 120},
-    {"MeredithAxioms",  "OrAssociativity",                 Automatic, 120},
-    {"MeredithAxioms",  "ImpliesHillmanAxioms",            Automatic, 120},
+    {"MeredithAxioms",  "AndAssociativity",                Automatic, 30},
+    {"MeredithAxioms",  "OrAssociativity",                 Automatic, 30},
+    {"MeredithAxioms",  "ImpliesHillmanAxioms",            Automatic, 30},
     {"CombinatorAxioms", "BCKWToSKI",
         {"Completion", "Ordering" -> "LPO",
          "AutoPrecedence" -> True}, 30}
