@@ -1066,7 +1066,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         rTrace = cRes["RTrace"], mainSteps = cRes["MainSteps"],
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
-        emitNorm, resolveCp, resolveTrace, resolveRule, axiomEntries,
+        prepareRules, runBfs, emitNorm, resolveCp, resolveTrace,
+        resolveRule, axiomEntries,
         cjp, hypKey, chainEntries, runEq, prevChainKey, allEntries,
         stmt
     },
@@ -1130,16 +1131,28 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            in the C engine, so a completion-oriented rule -- whose
            reverse would introduce unbound variables -- never fires
            reversed. *)
-        rewriteOnce[eq_, aliveList_, tryReverse_] := Block[{out = {}},
-            Do[
-                Block[{eqA = ar[[2]],
-                       rlF = cplAsRule[ar[[2]], varSyms],
-                       rlR, revSafe, sub, new},
-                    revSafe = tryReverse && SubsetQ[
+        (* Precompute the rule data once per emitNorm call: cplAsRule
+           is O(term-size) and was previously rebuilt for every BFS
+           node, dominating cost on large alive sets.  Returns a list
+           of {traceIdx, fwdRule, revSafe, revRule|Null}. *)
+        prepareRules[aliveList_] := Block[{},
+            Table[
+                Block[{eqA = ar[[2]], rlF, revSafe, rlR},
+                    rlF = cplAsRule[eqA, varSyms];
+                    revSafe = SubsetQ[
                         cplVarsIn[eqA[[2]], varSyms],
                         cplVarsIn[eqA[[1]], varSyms]];
                     rlR = If[ revSafe,
                         cplAsRule[Reverse[eqA], varSyms], Null];
+                    {ar[[1]], rlF, revSafe, rlR}],
+                {ar, aliveList}
+            ]
+        ];
+
+        rewriteOnce[eq_, preRules_, tryReverse_] := Block[{out = {}},
+            Do[
+                Block[{traceIdx = pr[[1]], rlF = pr[[2]],
+                       revSafe = pr[[3]], rlR = pr[[4]], sub, new},
                     Do[
                         sub = eq[[side + 1]];
                         Do[
@@ -1147,18 +1160,18 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                             If[ new =!= sub && FreeQ[new, ReplaceAt],
                                 AppendTo[out, {
                                     ReplacePart[eq, side + 1 -> new],
-                                    ar[[1]], side, pos, 1}]
+                                    traceIdx, side, pos, 1}]
                             ],
                             {pos, Position[sub, rlF[[1]],
                                 {0, Infinity}, Heads -> False]}
                         ];
-                        If[ revSafe,
+                        If[ tryReverse && revSafe,
                             Do[
                                 new = Quiet @ ReplaceAt[sub, rlR, pos];
                                 If[ new =!= sub && FreeQ[new, ReplaceAt],
                                     AppendTo[out, {
                                         ReplacePart[eq, side + 1 -> new],
-                                        ar[[1]], side, pos, -1}]
+                                        traceIdx, side, pos, -1}]
                                 ],
                                 {pos, Position[sub, rlR[[1]],
                                     {0, Infinity}, Heads -> False]}
@@ -1167,31 +1180,39 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         {side, 0, 1}
                     ]
                 ],
-                {ar, aliveList}
+                {pr, preRules}
             ];
             out
         ];
 
         (* BFS one phase: explore from `start` looking for a rewrite
            path to anything cplEqSetQ-equal to `target`.  Returns the
-           hist on success, Missing[] on cap exhaustion or queue
-           emptiness. *)
-        runBfs[start_, target_, aliveList_, tryReverse_, cap_] :=
-            Block[{queue, seenA, found = Missing[], explored = 0, nbrs},
-                queue = {{start, {}}};
+           hist on success, Missing[] on cap / wall exhaustion or
+           queue emptiness.  Uses a CreateDataStructure["Queue"] for
+           O(1) push/pop -- the prior AppendTo/Rest was O(n) per step
+           and dominated cost on long BFS runs.  `wallSec` bounds the
+           single-BFS wall time (Infinity == no bound). *)
+        runBfs[start_, target_, preRules_, tryReverse_, cap_,
+               wallSec_:Infinity] :=
+            Block[{queue, seenA, found = Missing[], explored = 0,
+                   nbrs, t0 = AbsoluteTime[]},
+                queue = CreateDataStructure["Queue"];
+                queue["Push", {start, {}}];
                 seenA = <|start -> True|>;
-                While[ queue =!= {} && MissingQ[found] && explored < cap,
-                    Block[{node = First[queue], eq, hist},
-                        queue = Rest[queue];
+                While[ queue["Length"] > 0 && MissingQ[found]
+                       && explored < cap
+                       && (wallSec === Infinity ||
+                           AbsoluteTime[] - t0 < wallSec),
+                    Block[{node = queue["Pop"], eq, hist},
                         explored++;
                         {eq, hist} = node;
                         If[ cplEqSetQ[eq, target, varSyms],
                             found = hist,
-                            nbrs = rewriteOnce[eq, aliveList, tryReverse];
+                            nbrs = rewriteOnce[eq, preRules, tryReverse];
                             Do[
                                 If[ ! KeyExistsQ[seenA, nb[[1]]],
                                     AssociateTo[seenA, nb[[1]] -> True];
-                                    AppendTo[queue,
+                                    queue["Push",
                                         {nb[[1]], Append[hist, nb]}]
                                 ],
                                 {nb, nbrs}
@@ -1207,8 +1228,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            SubstitutionLemma per step; return the final entry's
            {key, eq}.  inKey is the dataset key of startEq. *)
         emitNorm[inKey_, startEq_, targetEq_, ti_] :=
-            Block[{aliveList, found, curKey, curEq, st, cInfo, rEq},
+            Block[{aliveList, preRules, found, curKey, curEq, st,
+                   cInfo, rEq},
                 aliveList = aliveRulesAt[ti];
+                (* Precompute rule data once, share across both BFS
+                   phases -- cplAsRule was previously the dominant per-
+                   node cost. *)
+                preRules = prepareRules[aliveList];
                 (* Two-phase BFS.  Phase 1 is forward-only with a large
                    cap -- preserves the pre-reverse behavior on every
                    case the original engine handled (no behavior change
@@ -1216,10 +1242,14 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                    Phase 1 exhausts: it re-explores with reverse
                    direction enabled (variable-safe rules only) and a
                    tight cap, which unlocks ordered-rewriting paths
-                   the forward-only BFS could not reach. *)
-                found = runBfs[startEq, targetEq, aliveList, False, 50000];
+                   the forward-only BFS could not reach.  A per-BFS
+                   wall budget (2 seconds) keeps a single pathological
+                   normalization from monopolizing the wrapper's time
+                   budget; we throw $Failed and let the outer two-
+                   phase retry / FindEquationalProof fall through. *)
+                found = runBfs[startEq, targetEq, preRules, False, 50000, 2];
                 If[ MissingQ[found],
-                    found = runBfs[startEq, targetEq, aliveList, True, 600]];
+                    found = runBfs[startEq, targetEq, preRules, True, 600, 2]];
                 If[ MissingQ[found],
                     atpDbgFail["emitNorm.no-rewrite-path"]; Throw[$Failed]];
                 curKey = inKey;
