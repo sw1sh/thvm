@@ -1419,21 +1419,28 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         parentTe = trace[[te["ParentA"] + 1]];
                         parentReason = parentTe["Reason"];
                         cSide0WlPos = Which[
-                            (* inherit propagated mapping from parent
-                               NORM_STEP / SIMPLIFY (which already
-                               computed its own mapping); fall back to
-                               swap-only default if pInfo has none. *)
-                            KeyExistsQ[pInfo, "CSide0WlPos"],
-                                pInfo["CSide0WlPos"],
-                            (* fresh ORIENT child: check whether the
-                               dropped rule's Lhs (parentTe["Lhs"]) ==
-                               pInfo.Eq[[1]] (= the WL pos 1) -- if
-                               so, rule.Lhs sits at WL pos 1, so C
-                               side 0 -> WL pos 1.  Else WL pos 2. *)
+                            (* fresh interreduce NORM_STEP: parent is the
+                               dropped rule's ORIENT/SIMPLIFY entry.  The
+                               rule's Lhs (C side 0) sits at the WL
+                               position where it appears in pInfo.Eq --
+                               compute it fresh.  This MUST take
+                               precedence over the inherited-mapping
+                               branch below: the parent ORIENT carries a
+                               CSide0WlPos inherited from its source CP,
+                               but that mapping is for the CP's sides,
+                               not the rule's post-orient sides, so
+                               inheriting it flips the mapping when
+                               atp_orient_and_add swapped the CP. *)
                             parentReason === $TraceOrient ||
                               parentReason === $TraceSimplify,
                                 If[ parentTe["Lhs"] === pInfo["Eq"][[1]],
                                     1, 2],
+                            (* chained NORM_STEP: parent is itself a
+                               NORM_STEP that already computed its
+                               mapping -- the rewrite preserves which
+                               side is 'side 0', so inherit verbatim. *)
+                            KeyExistsQ[pInfo, "CSide0WlPos"],
+                                pInfo["CSide0WlPos"],
                             (* fresh CP child: WL stores cpEq =
                                {cte.Rhs, cte.Lhs}, so cte.Lhs (C side
                                0) sits at WL pos 2. *)
