@@ -425,6 +425,16 @@ class Tensor:
             axes = [axis if axis >= 0 else axis + self.ndim]
         else:
             axes = sorted(set(a if a >= 0 else a + self.ndim for a in axis))
+        # Workaround: reducing ALL axes of a multi-D tensor through the
+        # axis-by-axis chain hits a thvm materializer bug when the source
+        # graph is MUL of a (1, N)-shaped pair -- the fused mul+reduce
+        # kernel is emitted but never fired and the output reads as zero
+        # (project_thvm_mul_reduce_leading_one_zero).  Flattening via
+        # reshape first sidesteps the buggy fuse path; correct in every
+        # tested shape and slightly more cache-friendly anyway.
+        if not keepdim and axis is None and self.ndim > 1:
+            return (self.reshape(self.numel())
+                    ._reduce(kind, 0, keepdim=False))
         # Reduce innermost-first so the outer-axis indices stay valid.
         t = self.term
         new_shape = list(self._shape)
