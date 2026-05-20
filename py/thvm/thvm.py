@@ -113,6 +113,9 @@ _kernel_count = _bind("py_kernel_count", c_uint32)
 _ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
                                c_uint64, c_int32)
 _ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
+_grad_memo_hits   = _bind("py_grad_memo_hits",   c_uint64)
+_grad_memo_misses = _bind("py_grad_memo_misses", c_uint64)
+_grad_fires       = _bind("py_grad_fires",       c_uint64)
 
 # ---------------- buffer accessors ----------------
 _uop_buffer_scope = _bind("py_uop_buffer_scope", c_uint32, c_uint64)
@@ -539,6 +542,10 @@ class Thvm:
 
     def ten_get_requires_grad(self, t: Term) -> bool:
         return bool(_ten_get_requires_grad(c_uint64(int(t))))
+
+    def grad_memo_hits   (self) -> int: return int(_grad_memo_hits())
+    def grad_memo_misses (self) -> int: return int(_grad_memo_misses())
+    def grad_fires       (self) -> int: return int(_grad_fires())
 
     # ---------------- buffer accessors ----------------
     def buffer_scope(self, t: Term) -> int:

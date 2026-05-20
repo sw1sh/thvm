@@ -107,6 +107,19 @@ static inline Term grad_current_target(void) {
        : 0;
 }
 
+// Count of TENS slots with TenDesc.requires_grad == 1.  Bumped by the
+// WL setter (thvm_wl_tensor_set_requires_grad) and the Python bridge
+// (py_ten_set_requires_grad).  When > 0, grad_leaf_sup filters non-
+// required leaves to a scalar zero -- killing dead SUP scaffolding and
+// dead target-match contributions before they enter the chain rule.
+// When 0, legacy behavior: every leaf participates (back-compat for
+// tests that predate the requires_grad flag).
+u32 GRAD_REQ_NCOUNT = 0;
+fn void grad_req_ncount_inc(void) { GRAD_REQ_NCOUNT++; }
+fn void grad_req_ncount_dec(void) {
+  if (GRAD_REQ_NCOUNT > 0) GRAD_REQ_NCOUNT--;
+}
+
 // Pick the dtype to materialize chain-rule scalars at.  Returns the
 // current target's dtype (term_dtype_in walks the graph) so scalar
 // zeros and bookkeeping consts (ln2, half, ...) line up with the
@@ -195,11 +208,25 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
     // gradient regardless of what SUB has substituted.
     Term ty = grad_alo_resolve(target);
     Term tn = grad_alo_resolve(ten);
-    if (ty == tn) return gy_for_leaf;
+    int matched = (ty == tn);
     // Concrete-tid match: target resolved through SUB to a TEN
     // (iter-1 case where w0 is concrete).
     Term tr = term_resolve(target);
-    if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(ten_r)) {
+    if (!matched && term_tag(tr) == TAG_TEN
+        && term_val(tr) == term_val(ten_r)) {
+      matched = 1;
+    }
+    if (matched) {
+      // requires_grad filter (target-aware path): if the canonical
+      // C-side flag is in use AND the target tensor isn't marked,
+      // suppress the contribution -- the caller asked grads for a
+      // non-parameter, which is a no-op by definition.
+      if (GRAD_REQ_NCOUNT > 0 && term_tag(tr) == TAG_TEN) {
+        u32 tt = (u32)term_val(tr);
+        if (tt > 0 && tt < TENS_NEXT && TENS[tt].requires_grad == 0) {
+          return uop_const(grad_target_dtype(), 0);
+        }
+      }
       return gy_for_leaf;
     }
     return uop_const(grad_target_dtype(), 0);   // mismatch -> scalar zero
@@ -207,6 +234,13 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
   u32 tid = (u32)term_val(ten_r);
   u32 leaf_dt = DT_FP32;
   term_dtype_in(ten_r, 0, &leaf_dt);
+  // requires_grad filter (target-free path / SUP scaffolding): when
+  // the flag is in use, non-required leaves emit scalar zero so the
+  // outer DUP^t.tid projection never has to walk them.
+  if (GRAD_REQ_NCOUNT > 0 && tid > 0 && tid < TENS_NEXT
+      && TENS[tid].requires_grad == 0) {
+    return uop_const(leaf_dt, 0);
+  }
   u64 sloc = heap_alloc(2);
   heap_set(sloc + 0, uop_const(leaf_dt, 0));
   heap_set(sloc + 1, gy_for_leaf);
@@ -253,6 +287,12 @@ static inline u32 grad_memo_hash(Term child, Term gy, Term target) {
 
 static u64 GRAD_MEMO_HITS  = 0;
 static u64 GRAD_MEMO_MISSES = 0;
+
+// Read-only accessors so the Python / WL bridges (and the dedup
+// experiment script) can compare the chain-rule walk's memo behavior
+// across single-realize vs realize-many call patterns.
+fn u64 grad_memo_hits_get  (void) { return GRAD_MEMO_HITS;   }
+fn u64 grad_memo_misses_get(void) { return GRAD_MEMO_MISSES; }
 
 static int grad_memo_lookup(Term child, Term gy, Term target, Term *out) {
   u32 base = grad_memo_hash(child, gy, target);

@@ -241,7 +241,11 @@ EXPORT int py_ten_set_requires_grad(uint64_t t, int on) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
   if (id == 0 || id >= TENS_NEXT) return 0;
-  TENS[id].requires_grad = on ? 1 : 0;
+  int was = (int)TENS[id].requires_grad;
+  int now = on ? 1 : 0;
+  TENS[id].requires_grad = (u8)now;
+  if (now && !was) grad_req_ncount_inc();
+  else if (was && !now) grad_req_ncount_dec();
   return 1;
 }
 EXPORT int py_ten_get_requires_grad(uint64_t t) {
@@ -250,6 +254,12 @@ EXPORT int py_ten_get_requires_grad(uint64_t t) {
   if (id == 0 || id >= TENS_NEXT) return 0;
   return (int)TENS[id].requires_grad;
 }
+
+// Hot-path snapshots for the dedup-verification experiment.  Returns
+// per-realize chain-rule memo stats and the global grad-fires counter.
+EXPORT uint64_t py_grad_memo_hits  (void) { return grad_memo_hits_get();   }
+EXPORT uint64_t py_grad_memo_misses(void) { return grad_memo_misses_get(); }
+EXPORT uint64_t py_grad_fires      (void) { return HOT_GRAD_FIRES;         }
 
 // ---------------- buffer accessors (handy for debug) ----------------
 EXPORT uint32_t py_uop_buffer_scope(uint64_t t) { return uop_buffer_scope(t); }
