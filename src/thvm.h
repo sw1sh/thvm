@@ -3527,6 +3527,19 @@ typedef struct {
 fn u32       thvm_atp_proof_extract(AtpState *s, AtpProofStep *out,
                                     u32 cap);
 
+// Milestone 10: extract a proof for a goal closed by the MNF
+// bidirectional front search (a symmetric conjecture the single-NF
+// path cannot close).  Walks the two parent chains up from the join
+// term `meet`: GREEN (goal_lhs's front) emitted as side 0, RED
+// (goal_rhs's front) as side 1, both running seed -> meet, so the
+// assembled chain reaches `meet == meet`.  Each step's rule / position
+// / direction is reconstructed by replaying a one-step rewrite under
+// the final rule set.  Returns the step count, or 0 when there is no
+// join, the dylib lacks -DATP_MNF, or an edge no longer replays.  Like
+// thvm_atp_proof_extract the before/after Terms are live heap cells.
+fn u32       thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out,
+                                        u32 cap);
+
 // Serialize an extracted proof to human-readable text into `buf`.
 // Each line: "<L|R> rule <i> <fwd|rev> @<path>: <before> => <after>".
 // Truncates silently on overflow.  Returns the byte count written.

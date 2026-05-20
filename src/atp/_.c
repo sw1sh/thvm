@@ -4141,12 +4141,15 @@ typedef struct AtpMnf {
   u32      n_trunc;          // node expansions that hit MNF_SUCC_CAP
   u8       full;             // node table reached MNF_MAX_NODES
   u8       joined;
-#ifdef ATP_MNF_DIAG
+  // The join witness (also used by the proof extractor, so always
+  // present, not behind ATP_MNF_DIAG).  Side A is the existing table
+  // node a fresh reduct collided with; side B is that fresh reduct --
+  // never created as a node, so it is identified by its parent and the
+  // colliding term.  meet_term == nodes[meet_a].term == the reduct.
   u32      meet_a;           // existing table node the join collided with
   u32      meet_b_parent;    // parent of the colliding (uncreated) node
   Term     meet_term;        // the term both fronts reached
   u8       meet_b_col;       // colour of the colliding (uncreated) node
-#endif
 } AtpMnf;
 
 // Structural hash of a term (FNV-ish mix over the preorder).
@@ -4189,12 +4192,10 @@ static int mnf_insert(AtpMnf *m, Term t, u8 col, u8 anti, u32 parent) {
   u32 idx = mnf_lookup(m, t, h);
   if (idx != MNF_MAX_NODES) {
     if (m->nodes[idx].colour != col) {
-#ifdef ATP_MNF_DIAG
       m->meet_a        = idx;
       m->meet_b_parent = parent;
       m->meet_term     = t;
       m->meet_b_col    = col;
-#endif
       m->joined = 1u;
       return 1;
     }
@@ -4502,6 +4503,237 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   if (m->joined) mnf_verify(s, m);
 #endif
   return m->joined;
+}
+
+// === MNF proof extraction ============================================
+//
+// A join is goal_lhs ->* meet <-* goal_rhs: every MNF node is a one-step
+// equational rewrite of its parent (forward l->r, or variable-safe
+// backward r->l), so walking the two parent chains up from `meet` to the
+// two seeds reconstructs a closed equational chain.  This is the
+// goal-directed analog of atp_proof_record_side: it fills AtpProofStep[]
+// with the same {side, rule, fwd, pos, before, after} shape the WL
+// ProofObject builder already consumes, so the symmetric goal joins the
+// same dataset machinery as a single-NF proof.
+//
+// GREEN side terms are emitted as side 0 (the goal_lhs chain), RED as
+// side 1 (the goal_rhs chain); both chains run goal -> meet, so the
+// assembled equation reaches `meet == meet` -- exactly the NF == NF
+// tautology the single-NF path reaches, with `meet` as the common form.
+
+// Find the one-step rewrite of `before` that yields `after` using the
+// rule slice (rl[j] -> rr[j], j in [0,nr)): try every rule (forward
+// l->r, and -- gated by vars-contained -- backward r->l) at every
+// position, returning the redex path / rule / direction of the first
+// match.  Mirrors mnf_successors' search but stops at the edge whose
+// result is kbo_eq to `after`.  `out_rule` indexes into the slice.
+// Returns 1 on success.
+static int mnf_edge_step(Term before, Term after,
+                         const Term *rl, const Term *rr, u32 nr,
+                         u8 *pos, u8 depth,
+                         u32 *out_rule, u8 *out_pos_len, u8 *out_fwd) {
+  for (u32 j = 0; j < nr; j++) {
+    RewriteSubst sub = {{0}};
+    if (thvm_match(rl[j], before, &sub)) {                     // forward l->r
+      Term repl = thvm_subst_apply(rr[j], &sub);
+      if (kbo_eq(repl, after)) {
+        *out_rule = j; *out_pos_len = depth; *out_fwd = 1u; return 1;
+      }
+    }
+    if (atp_vars_contained(rl[j], rr[j])) {                    // backward r->l
+      RewriteSubst sb = {{0}};
+      if (thvm_match(rr[j], before, &sb)) {
+        Term repl = thvm_subst_apply(rl[j], &sb);
+        if (kbo_eq(repl, after)) {
+          *out_rule = j; *out_pos_len = depth; *out_fwd = 0u; return 1;
+        }
+      }
+    }
+  }
+  // Descend: the rewrite was below the top.  `before` and `after` agree
+  // everywhere except the one child holding the redex.
+  if (term_tag(before) == TAG_CTR && term_tag(after) == TAG_CTR &&
+      term_ext(before) == term_ext(after) &&
+      term_ctr_n(before) == term_ctr_n(after) &&
+      depth < ATP_PROOF_MAX_DEPTH) {
+    u32 nc = term_ctr_n(before);
+    for (u32 i = 0; i < nc; i++) {
+      Term cb = term_ctr_at(before, i);
+      Term ca = term_ctr_at(after, i);
+      if (kbo_eq(cb, ca)) continue;     // unchanged child: not the redex
+      pos[depth] = (u8)i;
+      if (mnf_edge_step(cb, ca, rl, rr, nr, pos, (u8)(depth + 1u),
+                        out_rule, out_pos_len, out_fwd)) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+// Build the HISTORICAL rule set: every equation that ever entered R,
+// not just the rules surviving in s->lhs/s->rhs after interreduction.
+// An MNF path step taken with a rule interreduction later retired only
+// replays against this superset.  Sources: the live rules plus every
+// TRACE_ORIENT / TRACE_AXIOM / TRACE_SIMPLIFY trace entry's (lhs, rhs).
+// Caller-owned out_l / out_r arrays of capacity `cap`; returns count.
+static u32 mnf_historical_rules(AtpState *s, Term *out_l, Term *out_r,
+                                u32 cap) {
+  u32 n = 0u;
+  for (u32 i = 0; i < s->n_rules && n < cap; i++) {
+    out_l[n] = s->lhs[i]; out_r[n] = s->rhs[i]; n++;
+  }
+  for (u32 i = 0; i < s->n_trace && n < cap; i++) {
+    Term e = s->trace[i];
+    u32  reason = term_ext(e);
+    if (reason == TRACE_ORIENT || reason == TRACE_AXIOM ||
+        reason == TRACE_SIMPLIFY) {
+      out_l[n] = term_ctr_at(e, 2);
+      out_r[n] = term_ctr_at(e, 3);
+      n++;
+    }
+  }
+  return n;
+}
+
+// Walk node `ni` up to its seed, collecting the chain of terms
+// root..ni into buf[0..*len) (root first).  Returns the root index.
+static u32 mnf_collect_lineage(AtpMnf *m, u32 ni, u32 *buf, u32 *len,
+                               u32 cap) {
+  u32 tmp_cap = cap;
+  u32 stack[ATP_PROOF_MAX_STEPS + 2u];
+  u32 sp = 0u;
+  u32 guard = 0u;
+  while (sp < tmp_cap && guard++ < m->n_nodes + 1u) {
+    stack[sp++] = ni;
+    if (m->nodes[ni].parent == ni) break;
+    ni = m->nodes[ni].parent;
+  }
+  // stack holds ni..root (leaf first); reverse into buf (root first).
+  for (u32 i = 0; i < sp; i++) buf[i] = stack[sp - 1u - i];
+  *len = sp;
+  return ni;
+}
+
+// Emit the steps along a lineage (terms[0..n_terms), root first) into
+// out[], tagged with `side`.  Each consecutive pair is one rewrite,
+// reconstructed by mnf_edge_step.  When `reverse` is set the lineage is
+// walked meet->seed (terms reversed) so a RED chain reads as goal_rhs
+// rewriting toward meet.  Returns 1 if every edge reconstructed.
+static int mnf_emit_lineage(AtpMnf *m, const u32 *terms,
+                            u32 n_terms, u32 side,
+                            const Term *rl, const Term *rr, u32 nr,
+                            AtpProofStep *out, u32 cap, u32 *n) {
+  for (u32 k = 0; k + 1u < n_terms; k++) {
+    Term before = m->nodes[terms[k]].term;
+    Term after  = m->nodes[terms[k + 1u]].term;
+    u8  pos[ATP_PROOF_MAX_DEPTH];
+    u32 rule = 0u; u8 pos_len = 0u, fwd = 1u;
+    if (!mnf_edge_step(before, after, rl, rr, nr,
+                       pos, 0u, &rule, &pos_len, &fwd)) {
+      return 0;   // an edge replays against no historical rule
+    }
+    if (*n >= cap) return 0;
+    AtpProofStep *st = &out[*n];
+    st->side    = side;
+    st->rule    = rule;
+    st->fwd     = fwd;
+    st->pos_len = pos_len;
+    for (u8 p = 0; p < pos_len; p++) st->pos[p] = pos[p];
+    st->before  = before;
+    st->after   = after;
+    (*n)++;
+  }
+  return 1;
+}
+
+// Reconstruct the MNF join as a two-sided AtpProofStep chain.  Side A is
+// the existing table node meet_a; side B is the fresh reduct (meet_term)
+// of meet_b_parent that collided with it.  Both A and B equal meet_term,
+// so each chain runs seed -> meet.  GREEN -> side 0, RED -> side 1.
+// Returns the step count, 0 if no join / not reconstructable.
+fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
+  if (s == NULL || out == NULL || cap == 0u) return 0;
+  AtpMnf *m = s->mnf;
+  if (m == NULL || !m->joined) return 0;
+
+  // Lineage A: meet_a up to its seed.
+  static u32 lin_a[ATP_PROOF_MAX_STEPS + 2u];
+  static u32 lin_b[ATP_PROOF_MAX_STEPS + 2u];
+  u32 len_a = 0u, len_b = 0u;
+  mnf_collect_lineage(m, m->meet_a, lin_a, &len_a, ATP_PROOF_MAX_STEPS + 2u);
+
+  // Lineage B: the colliding reduct was never created as a node.  Walk
+  // its PARENT to the seed, then append a synthetic final node holding
+  // meet_term.  We reuse meet_b_parent's node slot terms; the final
+  // edge (meet_b_parent.term -> meet_term) is emitted explicitly.
+  mnf_collect_lineage(m, m->meet_b_parent, lin_b, &len_b,
+                      ATP_PROOF_MAX_STEPS + 1u);
+
+  u8 col_a = m->nodes[m->meet_a].colour;     // colour that owns lineage A
+  // meet_b_col is the opposite colour (the fresh reduct's colour).
+  u32 side_a = (col_a == MNF_GREEN) ? 0u : 1u;
+  u32 side_b = (m->meet_b_col == MNF_GREEN) ? 0u : 1u;
+
+  // Reconstruct each edge against the HISTORICAL rule set (live rules +
+  // every equation that ever entered R via the trace DAG), so an edge
+  // taken with a since-retired rule still replays.
+  u32 hist_cap = s->n_rules + s->n_trace;
+  Term *hist_l = (Term *)malloc((size_t)hist_cap * sizeof(Term));
+  Term *hist_r = (Term *)malloc((size_t)hist_cap * sizeof(Term));
+  if (hist_l == NULL || hist_r == NULL) { free(hist_l); free(hist_r); return 0; }
+  u32 nr = mnf_historical_rules(s, hist_l, hist_r, hist_cap);
+
+  u32 n = 0u;
+#ifdef ATP_MNF_DIAG
+  fprintf(stderr, "[mnf-extract] meet_a=%u len_a=%u meet_b_parent=%u "
+          "len_b=%u col_a=%u meet_b_col=%u hist_rules=%u\n",
+          m->meet_a, len_a, m->meet_b_parent, len_b, col_a, m->meet_b_col,
+          nr);
+#endif
+  // An edge that replays against no historical rule leaves the lineage
+  // not reconstructable as a forward/backward chain.  Return 0 (no
+  // extractable proof) rather than emit a partial, unsound chain.
+  if (!mnf_emit_lineage(m, lin_a, len_a, side_a, hist_l, hist_r, nr,
+                        out, cap, &n)) {
+#ifdef ATP_MNF_DIAG
+    fprintf(stderr, "[mnf-extract] lineage A unreplayable at step %u/%u\n",
+            n, len_a > 0u ? len_a - 1u : 0u);
+#endif
+    free(hist_l); free(hist_r); return 0;
+  }
+  if (!mnf_emit_lineage(m, lin_b, len_b, side_b, hist_l, hist_r, nr,
+                        out, cap, &n)) {
+#ifdef ATP_MNF_DIAG
+    fprintf(stderr, "[mnf-extract] lineage B unreplayable at step %u\n", n);
+#endif
+    free(hist_l); free(hist_r); return 0;
+  }
+  // Final B edge: meet_b_parent.term -> meet_term (the collision).
+  {
+    Term before = m->nodes[m->meet_b_parent].term;
+    Term after  = m->meet_term;
+    if (!kbo_eq(before, after)) {
+      u8  pos[ATP_PROOF_MAX_DEPTH];
+      u32 rule = 0u; u8 pos_len = 0u, fwd = 1u;
+      if (!mnf_edge_step(before, after, hist_l, hist_r, nr,
+                         pos, 0u, &rule, &pos_len, &fwd)) {
+        free(hist_l); free(hist_r); return 0;
+      }
+      if (n >= cap) return 0;
+      AtpProofStep *st = &out[n];
+      st->side    = side_b;
+      st->rule    = rule;
+      st->fwd     = fwd;
+      st->pos_len = pos_len;
+      for (u8 p = 0; p < pos_len; p++) st->pos[p] = pos[p];
+      st->before  = before;
+      st->after   = after;
+      n++;
+    }
+  }
+  free(hist_l); free(hist_r);
+  return n;
 }
 #endif /* ATP_MNF */
 

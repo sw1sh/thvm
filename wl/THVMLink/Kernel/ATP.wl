@@ -808,22 +808,22 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
 cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     cpWeight_:-1, ordering_:0, autoPrec_:0, useMnf_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
-    cur, labelToName, idToName, mainSteps, extSteps, mainRules,
-    rTrace, traceEntries
+    mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
+    mnfSteps, mainRules, rTrace, traceEntries
 },
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
-    extNRules = raw[[6]]; extNSteps = raw[[7]];
+    extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
     labelToName = Association[Reverse /@ Normal[enc["State"]["sym"]]];
     idToName = Association[Reverse /@ Normal[enc["State"]["var"]]];
     If[ status =!= 1,
         Return[<|"Status" -> status, "ExtSteps" -> $Failed,
-            "MainSteps" -> $Failed|>]
+            "MainSteps" -> $Failed, "MnfSteps" -> $Failed|>]
     ];
     (* MAIN rules block: 2*nRules packed Terms. *)
-    cur = 7;
+    cur = 8;
     mainRules = Table[
         Block[{l = raw[[cur + 1]], r = raw[[cur + 2]]},
             cur = cur + 2;
@@ -870,10 +870,15 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     (* EXT steps block. *)
     {extSteps, cur} =
         decodeStepsBlock[raw, cur, extNSteps, labelToName, idToName];
+    (* MNF steps block: the GREEN/RED front chains for a goal closed
+       by the MNF bidirectional search.  Same per-step layout. *)
+    {mnfSteps, cur} =
+        decodeStepsBlock[raw, cur, mnfNSteps, labelToName, idToName];
     <|
         "Status" -> status,
         "ExtSteps" -> If[ extNSteps === 0, {}, extSteps],
         "MainSteps" -> If[ nSteps === 0, {}, mainSteps],
+        "MnfSteps" -> If[ mnfNSteps === 0, {}, mnfSteps],
         "MainRules" -> mainRules,
         "RTrace" -> rTrace,
         "Trace" -> traceEntries,
@@ -885,7 +890,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
            completion variable as a constant. *)
         "VarSyms" -> Union[
             Symbol /@ Values[idToName],
-            Cases[{traceEntries, mainRules, mainSteps, extSteps},
+            Cases[{traceEntries, mainRules, mainSteps, extSteps, mnfSteps},
                 s_Symbol /; StringMatchQ[SymbolName[s],
                     "x" ~~ DigitCharacter ..],
                 {0, Infinity}]

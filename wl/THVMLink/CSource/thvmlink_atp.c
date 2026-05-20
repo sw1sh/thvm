@@ -319,9 +319,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
 //             with -DATP_MNF (the paclet always is).
 //
 // Output: one self-describing Int64 NumericArray.
-//   header (7 ints):
+//   header (8 ints):
 //     [0] status  [1] n_rules  [2] n_trace  [3] n_cps  [4] n_steps
-//     [5] ext_n_rules  [6] ext_n_steps
+//     [5] ext_n_rules  [6] ext_n_steps  [7] mnf_n_steps
 //   then the MAIN-state blocks, sizes derived from the header:
 //     rules    -- 2*n_rules ints: lhs_i, rhs_i (packed Terms)
 //     r_trace  -- n_rules ints:   trace index that birthed rule i
@@ -336,6 +336,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
 //     ext_rules -- 2*ext_n_rules ints
 //     ext_steps -- variable: per step  side, rule, fwd, pos_len,
 //                  pos[0..pos_len), before, after.
+//     mnf_steps -- variable: same per-step layout; the GREEN/RED
+//                  front chains for a goal closed by the MNF search.
 //   WL walks the variable-width blocks with a cursor (pos_len
 //   drives the stride).
 EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
@@ -456,6 +458,19 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // input axioms oriented once -- no completion, no interreduction.
   // An axiom-confluent goal closes here over the axioms themselves,
   // giving a verifier-friendly axiom-cited chain.
+  // (1b) MNF proof extraction: a symmetric goal closed by the MNF
+  // front search has no single-NF chain (n_steps == 0) -- the GREEN
+  // and RED parent chains up from the join term carry the proof
+  // instead.  Extracted against the same completion-saturated R.
+  static AtpProofStep mnf_proof[ATP_PROOF_MAX_STEPS];
+  u32 mnf_n_steps = 0;
+#ifdef ATP_MNF
+  if (use_mnf && st == ATP_PROVED && n_steps == 0) {
+    mnf_n_steps = thvm_atp_mnf_proof_extract(atp, mnf_proof,
+                                             ATP_PROOF_MAX_STEPS);
+  }
+#endif
+
   static AtpProofStep ext_proof[ATP_PROOF_MAX_STEPS];
   u32 ext_n_steps = 0, ext_n_rules = 0;
   AtpState *ext = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
@@ -469,10 +484,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     ext_n_rules = ext->n_rules;
   }
 
-  // Size the output: 7-int header + main blocks + ext blocks.
-  // A trace entry's pos_len is its TRACE_CP superposition-path
-  // length (0 for AXIOM / ORIENT / SIMPLIFY entries).
-  mint out_len = 7 + 2 * (mint)n_rules + (mint)n_rules
+  // Size the output: 8-int header + main blocks + ext blocks + the
+  // MNF steps block.  A trace entry's pos_len is its TRACE_CP
+  // superposition-path length (0 for AXIOM / ORIENT / SIMPLIFY).
+  mint out_len = 8 + 2 * (mint)n_rules + (mint)n_rules
                + 2 * (mint)ext_n_rules;
   for (u32 i = 0; i < n_trace; i++) {
     Term e = atp->trace[i];
@@ -481,6 +496,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
   for (u32 i = 0; i < n_steps; i++)     out_len += 6 + (mint)proof[i].pos_len;
   for (u32 i = 0; i < ext_n_steps; i++) out_len += 6 + (mint)ext_proof[i].pos_len;
+  for (u32 i = 0; i < mnf_n_steps; i++) out_len += 6 + (mint)mnf_proof[i].pos_len;
 
   mint dims[1] = {out_len};
   MNumericArray out;
@@ -493,7 +509,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   odata[4] = (int64_t)n_steps;
   odata[5] = (int64_t)ext_n_rules;
   odata[6] = (int64_t)ext_n_steps;
-  mint w = 7;
+  odata[7] = (int64_t)mnf_n_steps;
+  mint w = 8;
 
   // MAIN rules block: lhs_i, rhs_i (the completed rule set R).
   for (u32 i = 0; i < n_rules; i++) {
@@ -550,6 +567,19 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // EXT steps block.
   for (u32 i = 0; i < ext_n_steps; i++) {
     const AtpProofStep *p = &ext_proof[i];
+    odata[w++] = (int64_t)p->side;
+    odata[w++] = (int64_t)p->rule;
+    odata[w++] = (int64_t)p->fwd;
+    odata[w++] = (int64_t)p->pos_len;
+    for (u8 k = 0; k < p->pos_len; k++) odata[w++] = (int64_t)p->pos[k];
+    odata[w++] = (int64_t)p->before;
+    odata[w++] = (int64_t)p->after;
+  }
+  // MNF steps block: same per-step layout as MAIN / EXT.  Side 0 is
+  // the goal_lhs (GREEN) front chain, side 1 the goal_rhs (RED) chain;
+  // both run from the goal side to the join term.
+  for (u32 i = 0; i < mnf_n_steps; i++) {
+    const AtpProofStep *p = &mnf_proof[i];
     odata[w++] = (int64_t)p->side;
     odata[w++] = (int64_t)p->rule;
     odata[w++] = (int64_t)p->fwd;
