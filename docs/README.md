@@ -86,6 +86,16 @@ already exists; design memos for not-yet-built layers live under
   LLM alignment (RLHF / DPO / GRPO / DeepSeek-R1), with a closing
   menu of thvm-sized experiments.  Reading and orientation only --
   nothing here is implemented in the repo yet.
+- [symbolic/README.md](symbolic/README.md): a research orientation on
+  symbolic and neuro-symbolic AI -- the symbolist/connectionist
+  divide and the Symbolica cautionary tale, Kautz's integration
+  taxonomy and the systems that work (neural-proposes /
+  symbolic-verifies; program synthesis a la DreamCoder), the geometry
+  of learning (geometric and categorical deep learning, quasimetric
+  planning and the IQE upgrade to our metric head), and a closing page
+  tying it to the `brain/experiments/` arc (rule induction as the
+  missing ingredient; waldmeister as the program-synthesis engine).
+  Motivated by, and linked to, live experiments (200 onward).
 
 ## Conventions
 
