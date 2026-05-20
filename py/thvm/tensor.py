@@ -187,32 +187,35 @@ class Tensor:
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Pure construction (tinygrad semantics): assign each
-        requires_grad leaf a LAZY grad term -- no chain-rule firing,
-        no materialize, no dispatch.  The caller drives the pipeline
-        with `Tensor.realize(*grads)` / `g.numpy()`, which triggers
-        the chain-rule walk + kernel emission for each grad.
+        """Walk-once backward (no grad_with_target).  Builds ONE
+        uop_grad(y, gy) root and drives wnf so the chain rule visits
+        every requires_grad leaf once and accumulates its cotangent
+        into TENS[tid].grad (the canonical TenDesc.grad accumulator,
+        populated by grad_leaf_sup's target==0 path).  We then wrap
+        each leaf's TenDesc.grad into a Tensor for caller consumption.
 
-        Each leaf.grad = uop_grad_with_target(y, gy, leaf.term):
-        a TAG_DP1+grad_flag cell whose interact_grad fire (deferred
-        to realize) emits gy at the matching tid and scalar zero
-        elsewhere.
-
-        (The TenDesc.grad accumulator path remains available C-side
-        for callers that prefer the walk-once side-effecting model --
-        drive a `uop_grad(y, gy)` via wnf and read TENS[tid].grad --
-        but the default Python backward stays pure.)"""
+        wnf only drives the term-level chain-rule rewrite -- no
+        kernels, no materialize, no dispatch.  The actual gradient
+        values stay lazy inside TenDesc.grad; Tensor.realize(*grads)
+        drives the pipeline downstream just like tinygrad."""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
                         else Tensor.ones(*self._shape, dtype=self._dtype))
+        # Build the walk-once BWD root and drive wnf to fire the
+        # chain rule (interact_grad -> grad_leaf_sup accumulator).
+        bwd = _TH.grad(self.term, gradient.term)
+        _TH.wnf(bwd)
+        # Wrap each leaf's TenDesc.grad term.
         for tid, leaf in list(_GRAD_TENSORS.items()):
             if not _TH.ten_get_requires_grad(leaf.term):
                 continue
-            g = _TH.grad_with_target(self.term, gradient.term, leaf.term)
-            leaf.grad = Tensor._from_term(g, leaf._dtype, leaf._shape)
+            g_term = _TH.ten_get_grad(leaf.term)
+            if g_term != 0:
+                leaf.grad = Tensor._from_term(Term(g_term),
+                                              leaf._dtype, leaf._shape)
         return self
 
     def sequential(self, layers) -> "Tensor":
@@ -416,14 +419,6 @@ class Tensor:
     # ---- reductions ---------------------------------------------------
 
     def _reduce(self, kind: int, axis, keepdim: bool) -> "Tensor":
-        # Workaround for project_thvm_composed_grad_bug: REDUCE over an
-        # unrealized UOP_SHRINK mis-indexes (column begin shifted by
-        # +1 per axis with begin > 0).  Force a realize boundary so the
-        # SHRINK materializes into a TAG_TEN before the reduce fuses.
-        # PAD/PERMUTE/EXPAND fuse correctly -- this is SHRINK-specific.
-        if (_TH.term_tag(self.term) == K.TAG_UOP
-                and _TH.term_ext(self.term) == K.UOP_SHRINK):
-            self.realize()
         if axis is None:
             axes = list(range(self.ndim))
         elif isinstance(axis, int):
