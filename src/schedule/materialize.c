@@ -2385,7 +2385,15 @@ static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
   out->offset = src->offset + add_off;
   for (u32 i = 0; i < src->shape.ndim; i++) out->strides[i] = src->strides[i];
   for (u32 i = src->shape.ndim; i < MAX_DIM; i++) out->strides[i] = 0;
-  out->contiguous = (t_numel == src->numel) ? 1 : 0;
+  // An identity SHRINK (t_numel == src->numel; only possible when every
+  // axis kept its full extent) inherits the source's contig flag.  A
+  // real SHRINK drops elements, so the kept slice has non-canonical
+  // strides for its new shape and is never contig.  The earlier
+  // `contiguous = 1` blanket flipped non-contig identity shrinks to
+  // contig and let materialize_root_alias skip the strided gather,
+  // returning the raw underlying buffer (project_thvm_composed_grad_bug
+  // -- May 20 follow-up; surfaced by tinygrad-port _pool chain).
+  out->contiguous = (t_numel == src->numel) ? src->contiguous : 0;
   return 1;
 }
 
