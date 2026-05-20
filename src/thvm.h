@@ -1713,18 +1713,9 @@ fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
 fn Term interact_kernel (Term kernel);
 
 // === codegen/ axis ===
-// Derive per-axis KAX_ types from the higher-level signals
-// (output shape + tail-reduce + scalar-reduce + applied_opts log).
-// Mirrors the writer trio (axes_default_for +
-// axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
-// number of axes written; 0 on overflow / unknown opt class.  Used
-// by axes_resolve_kax_type as the single read point.
-fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
-                                u32 cap);
-
-// Resolve a single axis's KAX_ type via the axis-types simulator.
-// Returns KAX_LOOP when the simulator can't speak (NULL ke/axes,
-// d >= n_axes, simulator overflow / unknown opt).  Used by
+// Resolve a single axis's KAX_ type from the lifted DAG's post-opt
+// RANGE leaves.  Returns KAX_LOOP when ke/axes are NULL,
+// d >= n_axes, or the DAG is empty / overflows.  Used by
 // tile_anno.c readers as the only axis-type read source -- no
 // direct axis_types[i] reads remain in codegen/tile_anno.c.
 fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);

@@ -59,40 +59,19 @@ static u32 axes_dag_collect(KernelEntry const *ke, u8 *kax_out,
 // post-opt RANGE leaves carry the final axis layout (uop_dag_apply_kopt
 // mutates them in place for every split-class opt).
 //
-// Returns the number of axes written to `out`; 0 on overflow / empty
-// DAG.  Used by axes_resolve_kax_type as the single kax_type read
-// point.
-fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
-                               u32 cap) {
-  if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
-    return 0;
-  }
-  // uop_dag_apply_kopt mutates RANGE leaves in place for every
-  // split-class opt, so the DAG's post-opt RANGE set encodes the
-  // final axis layout.  axes_reset_to_default reverts
-  // cached_lift.store_root from cached_lift_init_root so autotune's
-  // bench loop is consistent.
+// Read the resolved kax_type (KAX_*) for axis `d` from the lifted
+// DAG's post-opt RANGE leaves (uop_dag_apply_kopt mutates them in
+// place for every split-class opt; axes_reset_to_default reverts
+// cached_lift.store_root from cached_lift_init_root so autotune's
+// bench loop is consistent).  Returns KAX_LOOP when ke/axes are
+// NULL, `d >= n_axes`, or the DAG is empty / overflows.
+fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
+  if (ke == NULL || ke->schedule == NULL) return KAX_LOOP;
   u8 kax_dag[MAX_AXES] = {0};
   u32 ext_dag[MAX_AXES] = {0};
   u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
-  if (n_dag == 0 || n_dag > cap) return 0;
-  for (u32 i = 0; i < n_dag; i++) out[i] = kax_dag[i];
-  return n_dag;
-}
-
-// Single kax_type read point.  Returns the resolved kax_type (KAX_*)
-// for axis `d`.  When ke / axes are NULL, `d >= n_axes`, or the DAG
-// is empty / overflows, returns KAX_LOOP as a safe default.
-fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
-  if (ke == NULL || ke->schedule == NULL) {
-    return KAX_LOOP;
-  }
-  u8 types[MAX_AXES] = {0};
-  u32 n = axes_compute_axis_types(ke, types, MAX_AXES);
-  if (n == 0 || d >= n) {
-    return KAX_LOOP;
-  }
-  return types[d];
+  if (n_dag == 0 || d >= n_dag) return KAX_LOOP;
+  return kax_dag[d];
 }
 
 // Read per-axis full_shape extents from the lifted UOp DAG's
