@@ -248,6 +248,8 @@ class _Constants:
     FP32 = _read_uint32_const("py_const_DT_FP32")
     # tensor term tag + max rank
     TAG_TEN = _read_uint32_const("py_const_TAG_TEN")
+    TAG_UOP = _read_uint32_const("py_const_TAG_UOP")
+    UOP_SHRINK = _read_uint32_const("py_const_UOP_SHRINK")
     MAX_DIM = _read_uint32_const("py_const_MAX_DIM")
     # buffer scopes
     SCOPE_GLOBAL = _read_uint32_const("py_const_UOP_SCOPE_GLOBAL")

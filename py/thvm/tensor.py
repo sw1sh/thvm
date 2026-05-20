@@ -416,6 +416,14 @@ class Tensor:
     # ---- reductions ---------------------------------------------------
 
     def _reduce(self, kind: int, axis, keepdim: bool) -> "Tensor":
+        # Workaround for project_thvm_composed_grad_bug: REDUCE over an
+        # unrealized UOP_SHRINK mis-indexes (column begin shifted by
+        # +1 per axis with begin > 0).  Force a realize boundary so the
+        # SHRINK materializes into a TAG_TEN before the reduce fuses.
+        # PAD/PERMUTE/EXPAND fuse correctly -- this is SHRINK-specific.
+        if (_TH.term_tag(self.term) == K.TAG_UOP
+                and _TH.term_ext(self.term) == K.UOP_SHRINK):
+            self.realize()
         if axis is None:
             axes = list(range(self.ndim))
         elif isinstance(axis, int):

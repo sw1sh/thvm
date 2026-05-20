@@ -230,6 +230,8 @@ EXPORT uint32_t py_kernel_count(void) {
   return KERNELS_NEXT > 1 ? KERNELS_NEXT - 1 : 0;
 }
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
+EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
+EXPORT uint32_t py_const_UOP_SHRINK(void) { return UOP_SHRINK; }
 EXPORT uint32_t py_const_MAX_DIM(void) { return MAX_DIM; }
 
 // --- requires_grad: canonical flag in TenDesc (Phase 3B follow-up) ---
