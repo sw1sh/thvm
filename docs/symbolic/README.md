@@ -45,6 +45,33 @@ program-synthesis substrate already in the tree.
    program synthesis (not an LLM oracle) as the in-house answer,
    waldmeister as the engine, and a free win (MRN -> IQE) sitting in
    `qm_harness.py`.
+5. [Reasoning engines and rule/program
+   induction](05-reasoning-and-rule-induction.md) -- automated
+   theorem proving (resolution, superposition, SAT/SMT), term
+   rewriting and Knuth-Bendix completion (the repo's own
+   `waldmeister`), E-graphs / equality saturation, and the fields the
+   ARC rule-induction problem actually lives in: inductive logic
+   programming, Bayesian program induction, and analogy /
+   structure-mapping (which experiments 205/206 reinvented).
+6. [Classical foundations: the GOFAI floor](06-classical-foundations.md)
+   -- the Physical Symbol System Hypothesis, expert systems and the
+   knowledge-acquisition bottleneck, cognitive architectures (SOAR,
+   ACT-R), knowledge representation (description logics, knowledge
+   graphs), logic programming (Prolog, Datalog, ASP), and the
+   systematicity/compositionality debate (Fodor-Pylyshyn, SCAN/COGS)
+   -- the actual reason symbols matter.
+7. [The geometry of learned representations and the loss
+   landscape](07-representation-geometry.md) -- the complement to page
+   3: linear-representation hypothesis, superposition and sparse
+   autoencoders (mechanistic interpretability), spline theory, the
+   neural tangent kernel and loss-landscape geometry, the contested
+   Information Bottleneck, information geometry, and tropical geometry.
+8. [The other neuro-symbolic methods](08-other-neurosymbolic-methods.md)
+   -- knowledge-graph embeddings, differentiable solvers as layers
+   (SATNet/OptNet), Markov logic and Domingos's Tensor Logic (tensor
+   equation = logic rule, the bullseye for a tensor VM), neural
+   algorithmic reasoning, vector symbolic architectures, and LLM
+   tool-use / program-aided reasoning.
 
 ## Conventions
 
@@ -87,3 +114,22 @@ program-synthesis substrate already in the tree.
 | MRN | Metric Residual Network |
 | QRL | Quasimetric Reinforcement Learning |
 | LLM | large language model |
+| ATP | automated theorem proving |
+| SAT / SMT | Boolean satisfiability / satisfiability modulo theories |
+| ILP | inductive logic programming |
+| BPL | Bayesian program learning |
+| PPL | probabilistic programming language |
+| SME | Structure-Mapping Engine |
+| PSSH | physical symbol system hypothesis |
+| KRR | knowledge representation and reasoning |
+| ASP | answer set programming |
+| RDF / OWL | Resource Description Framework / Web Ontology Language |
+| LRH | linear representation hypothesis |
+| SAE | sparse autoencoder |
+| NTK | neural tangent kernel |
+| IB | information bottleneck |
+| KG | knowledge graph |
+| MLN | Markov logic network |
+| NAR | neural algorithmic reasoning |
+| VSA / HDC | vector symbolic architecture / hyperdimensional computing |
+| PAL | program-aided language model |

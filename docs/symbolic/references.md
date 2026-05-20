@@ -142,3 +142,117 @@ confirmed against a primary source at the time of writing.
   <https://arxiv.org/abs/2506.18847>
 - *Offline Goal-conditioned RL with Quasimetric Representations*,
   arXiv:2509.20478, NeurIPS 2025.
+
+## Reasoning engines and rule/program induction (page 05)
+
+- Robinson, *A Machine-Oriented Logic Based on the Resolution
+  Principle*, J. ACM 12 (1965), doi:10.1145/321250.321253.
+- Bachmair & Ganzinger, *Rewrite-Based Equational Theorem Proving with
+  Selection and Simplification*, J. Logic and Computation 4(3) (1994).
+- Kovacs & Voronkov, *First-Order Theorem Proving and Vampire*, CAV
+  2013, doi:10.1007/978-3-642-39799-8_1.
+- de Moura & Bjorner, *Z3: An Efficient SMT Solver*, TACAS 2008,
+  doi:10.1007/978-3-540-78800-3_24.
+- Knuth & Bendix, *Simple Word Problems in Universal Algebras* (1970).
+- waldmeister, in-tree *Short Documentation*
+  ([../../waldmeister/documents/ShortDocumentation.txt](../../waldmeister/documents/ShortDocumentation.txt));
+  unfailing Knuth-Bendix completion, CASC UEQ division.
+- Willsey et al., *egg: Fast and Extensible Equality Saturation*,
+  PACMPL 5 (POPL) 2021, arXiv:2004.03082.
+  <https://arxiv.org/abs/2004.03082>
+- Muggleton, *Inverse Entailment and Progol*, New Generation Computing
+  13 (1995), doi:10.1007/BF03037227.
+- Muggleton et al., *Meta-interpretive learning ... predicate
+  invention revisited* (Metagol), Machine Learning 100 (2015).
+- Cropper & Morel, *Learning programs by learning from failures*
+  (Popper), Machine Learning 110 (2021), arXiv:2005.02259.
+  <https://arxiv.org/abs/2005.02259>
+- Evans & Grefenstette, *Learning Explanatory Rules from Noisy Data*
+  (dILP), JAIR 61 (2018), arXiv:1711.04574.
+  <https://arxiv.org/abs/1711.04574>
+- Lake, Salakhutdinov, Tenenbaum, *Human-level concept learning
+  through probabilistic program induction* (BPL), Science 350 (2015),
+  doi:10.1126/science.aab3050.
+- Goodman et al., *Church: a language for generative models*, UAI
+  2008, arXiv:1206.3255. <https://arxiv.org/abs/1206.3255>
+- Cusumano-Towner, Saad, Lew, Mansinghka, *Gen*, PLDI 2019,
+  doi:10.1145/3314221.3314642.
+- Falkenhainer, Forbus, Gentner, *The Structure-Mapping Engine*,
+  Artificial Intelligence 41 (1989), doi:10.1016/0004-3702(89)90077-5.
+- Mitchell, *Analogy-Making as Perception* (1993); Hofstadter &
+  Mitchell, *The Copycat Project* (1995).
+
+## Classical foundations (page 06)
+
+- Newell & Simon, *Computer Science as Empirical Inquiry: Symbols and
+  Search*, CACM 19(3) (1976), doi:10.1145/360018.360022.
+- Buchanan & Shortliffe, *Rule-Based Expert Systems* (MYCIN) (1984);
+  DENDRAL (Feigenbaum, Lederberg, Djerassi, from 1965).
+- Laird, Newell, Rosenbloom, *SOAR: An Architecture for General
+  Intelligence*, Artificial Intelligence 33(1) (1987).
+- Anderson et al., *An Integrated Theory of the Mind* (ACT-R), Psych.
+  Review 111(4) (2004).
+- Minsky, *A Framework for Representing Knowledge*, MIT-AI Memo 306
+  (1974). Berners-Lee, Hendler, Lassila, *The Semantic Web*, Sci. Am.
+  (2001); OWL W3C Recommendation (2004).
+- Gelfond & Lifschitz, *The Stable Model Semantics for Logic
+  Programming* (ASP), ICLP 1988. Potassco/clingo
+  <https://potassco.org/>.
+- Fodor & Pylyshyn, *Connectionism and Cognitive Architecture: A
+  Critical Analysis*, Cognition 28 (1988).
+- Lake & Baroni, *Generalization without Systematicity* (SCAN), ICML
+  2018, arXiv:1711.00350. Kim & Linzen, *COGS*, EMNLP 2020,
+  arXiv:2010.05465. Ruis et al., *gSCAN*, NeurIPS 2020. Lake & Baroni,
+  *Human-like systematic generalization through a meta-learning neural
+  network*, Nature 623 (2023).
+
+## Representation geometry and interpretability (page 07)
+
+- Park, Choe, Veitch, *The Linear Representation Hypothesis and the
+  Geometry of LLMs*, arXiv:2311.03658, ICML 2024.
+- Elhage et al., *Toy Models of Superposition*, Transformer Circuits
+  (2022), arXiv:2209.10652.
+- Bricken et al., *Towards Monosemanticity* (2023); Cunningham et al.,
+  *Sparse Autoencoders Find Highly Interpretable Features*,
+  arXiv:2309.08600 (2023); Templeton et al., *Scaling Monosemanticity*
+  (2024).
+- Balestriero & Baraniuk, *A Spline Theory of Deep Networks*, ICML
+  2018; *Mad Max*, arXiv:1805.06576.
+- Jacot, Gabriel, Hongler, *Neural Tangent Kernel*, NeurIPS 2018,
+  arXiv:1806.07572. Garipov et al., *Mode Connectivity*, NeurIPS 2018,
+  arXiv:1802.10026. Frankle & Carbin, *Lottery Ticket Hypothesis*,
+  ICLR 2019, arXiv:1803.03635.
+- Tishby & Zaslavsky, *Deep Learning and the Information Bottleneck
+  Principle*, arXiv:1503.02406; Shwartz-Ziv & Tishby, arXiv:1703.00810;
+  Saxe et al. (rebuttal), ICLR 2018.
+- Amari, *Natural Gradient Works Efficiently in Learning*, Neural
+  Computation 10(2) (1998); Martens & Grosse, *K-FAC*, ICML 2015,
+  arXiv:1503.05671.
+- Zhang, Naitzat, Lim, *Tropical Geometry of Deep Neural Networks*,
+  ICML 2018, arXiv:1805.07091.
+
+## Other neuro-symbolic methods (page 08)
+
+- Bordes et al., *TransE*, NIPS 2013. Trouillon et al., *ComplEx*, ICML
+  2016, arXiv:1606.06357. Sun et al., *RotatE*, ICLR 2019,
+  arXiv:1902.10197.
+- Amos & Kolter, *OptNet*, ICML 2017, arXiv:1703.00443. Agrawal et al.,
+  *Differentiable Convex Optimization Layers* (cvxpylayers), NeurIPS
+  2019, arXiv:1910.12430. Wang et al., *SATNet*, ICML 2019,
+  arXiv:1905.12149.
+- Richardson & Domingos, *Markov Logic Networks*, Machine Learning 62
+  (2006), doi:10.1007/s10994-006-5833-1. Domingos, *Tensor Logic: The
+  Language of AI*, arXiv:2510.12269 (2025) [and follow-up
+  arXiv:2601.17188, 2026 -- carried from the neuroscience track].
+- Velickovic & Blundell, *Neural Algorithmic Reasoning*, Patterns 2(7)
+  (2021), arXiv:2105.02761. Velickovic et al., *CLRS Benchmark*, ICML
+  2022, arXiv:2205.15659.
+- Plate, *Holographic Reduced Representations*, IEEE TNN 6(3) (1995).
+  Kanerva, *Hyperdimensional Computing*, Cognitive Computation 1
+  (2009). Gayler, *VSA answer Jackendoff's challenges*,
+  arXiv:cs/0412059 (2003). VSA-for-ARC: arXiv:2405.14436 (2024),
+  arXiv:2511.08747 (2025).
+- Gao et al., *PAL*, arXiv:2211.10435 (2022). Chen et al., *Program of
+  Thoughts*, arXiv:2211.12588 (2022). Yao et al., *ReAct*,
+  arXiv:2210.03629 (2022). Schick et al., *Toolformer*,
+  arXiv:2302.04761 (2023).
