@@ -25,7 +25,7 @@
 // computations promote to double / i64.
 
 #define UWALK_MAX_RANGES   16
-#define UWALK_MAX_REDUCES  8
+#define UWALK_MAX_REDUCES  64
 #define UWALK_MAX_INPUTS KERNEL_LIFT_MAX_INPUT
 
 // THVM_TRACE_UOP_WALK_DECLINE=1 emits one stderr line per decline
@@ -62,6 +62,16 @@ typedef struct {
   // Reduce accumulators: indexed by reduce slot. Float-only for now.
   Term  red_term[UWALK_MAX_REDUCES];   // identity term that selects this acc
   double red_acc[UWALK_MAX_REDUCES];
+  // Iter-aware cache validation: each cached REDUCE result carries the
+  // FREE-axis iter snapshot at the moment of compute.  A subsequent
+  // eval_float of the same REDUCE term reuses the cached value iff the
+  // current iter for every free axis matches the snapshot.  Without
+  // this, an inner REDUCE inside another REDUCE's body is recomputed
+  // on every outer iteration even when its body doesn't depend on the
+  // outer axis -- explodes the per-output cost by ~Π(outer extents).
+  u8    red_n_free   [UWALK_MAX_REDUCES];                       // valid axes in snapshot
+  u32   red_free_ids [UWALK_MAX_REDUCES][UWALK_MAX_RANGES];     // axis_id per snapshot slot
+  u32   red_free_iter[UWALK_MAX_REDUCES][UWALK_MAX_RANGES];     // iter value at cache time
   u32   n_reduces;
   // Input/output buffer pointers + dtypes, indexed by slot.
   Term  in_terms [UWALK_MAX_INPUTS];   // UOP_BUFFER terms (for slot match)
@@ -268,6 +278,9 @@ static int uwalk_term_is_int(UWalkCtx *c, Term t) {
 }
 
 // Look up a hoisted reduce accumulator by REDUCE term identity.
+// NOTE: callers that get a non-negative idx must verify the iter
+// snapshot via uwalk_reduce_snapshot_matches before using *out --
+// the cache may be stale if a relevant free axis has advanced.
 static int uwalk_reduce_lookup(UWalkCtx const *c, Term red, double *out) {
   for (u32 i = 0; i < c->n_reduces; i++) {
     if (c->red_term[i] == red) {
@@ -276,6 +289,53 @@ static int uwalk_reduce_lookup(UWalkCtx const *c, Term red, double *out) {
     }
   }
   return -1;
+}
+
+// Forward decl -- uwalk_collect_ranges is defined later (in the block
+// that handles the inner-reduce range collection); free-axis discovery
+// for the iter-aware reduce cache uses it from here.
+static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out);
+
+// Walk a REDUCE's body and collect axis_ids the body references,
+// excluding the REDUCE's own axis (it's bound inside the reduce loop,
+// not by the enclosing iter state).  Caller passes red_term; we read
+// loc+0 (body) and loc+2 (own axis).  Returns the count, writes ids
+// into out[] up to cap.
+static u8 uwalk_reduce_free_axes(Term red, u32 *out, u8 cap) {
+  u64 rloc       = term_val(red);
+  Term body      = heap_read(rloc + 0);
+  u32  own_axis  = (u32)term_val(heap_read(rloc + 2));
+  Term ranges_buf[UWALK_MAX_RANGES];
+  u32 n_r = 0;
+  uwalk_collect_ranges(body, ranges_buf, &n_r);
+  u8 n_free = 0;
+  for (u32 i = 0; i < n_r; i++) {
+    u32 ax = (u32)term_val(heap_read(term_val(ranges_buf[i]) + 0));
+    if (ax == own_axis) continue;
+    if (n_free >= cap) break;
+    out[n_free++] = ax;
+  }
+  return n_free;
+}
+
+// Check whether the cached entry's free-axis snapshot matches the
+// CURRENT iter values.  Returns 1 if all free axes are still at
+// their cached iter, 0 if any has advanced (cache stale).
+static int uwalk_reduce_snapshot_matches(UWalkCtx const *c, u32 slot) {
+  for (u32 i = 0; i < c->red_n_free[slot]; i++) {
+    u32 ax  = c->red_free_ids[slot][i];
+    u32 saved = c->red_free_iter[slot][i];
+    if (uwalk_lookup_iter(c, ax) != saved) return 0;
+  }
+  return 1;
+}
+
+// Refresh the cached entry's snapshot to current iter values.  Called
+// right after a (re)compute so the next lookup is keyed correctly.
+static void uwalk_reduce_snapshot_save(UWalkCtx *c, u32 slot) {
+  for (u32 i = 0; i < c->red_n_free[slot]; i++) {
+    c->red_free_iter[slot][i] = uwalk_lookup_iter(c, c->red_free_ids[slot][i]);
+  }
 }
 
 static double uwalk_eval_float(UWalkCtx *c, Term t) {
@@ -368,16 +428,33 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       return uwalk_eval_float(c, heap_read(loc + 2));
     }
     case UOP_REDUCE: {
-      double v = 0.0;
-      if (uwalk_reduce_lookup(c, t, &v) >= 0) return v;
-      // Cache miss: this REDUCE wasn't pre-registered as
-      // hoistable/non-hoistable (e.g. an inner reduce inside another
-      // reduce's body that wasn't collected via uwalk_collect_reduces
-      // at the STORE level OR was collected but not yet evaluated for
-      // this iteration of the enclosing reduce).  Run it inline so the
-      // chain produces correct values; the result is iteration-local
-      // and not cached.
-      return uwalk_run_reduce(c, t);
+      // Iter-aware cache: if this REDUCE term has a slot AND the
+      // snapshot still matches the current iter for its free axes,
+      // return the cached value.  Otherwise (slot exists but stale,
+      // or no slot) recompute and refresh / register.  Without this,
+      // an inner REDUCE inside another REDUCE's body is recomputed
+      // every outer iteration even when its body is invariant to
+      // the outer's axis (e.g. conv-backward x-grad has reduces over
+      // (Cout,kH,kW) nested with the unfold sub-reduces; ~25x speedup
+      // for the inner Conv2d weight/input grad kernels).
+      int idx = uwalk_reduce_lookup(c, t, NULL);
+      if (idx >= 0 && uwalk_reduce_snapshot_matches(c, (u32)idx)) {
+        return c->red_acc[idx];
+      }
+      double v = uwalk_run_reduce(c, t);
+      if (idx >= 0) {
+        c->red_acc[idx] = v;
+        uwalk_reduce_snapshot_save(c, (u32)idx);
+        return v;
+      }
+      if (c->n_reduces >= UWALK_MAX_REDUCES) return v;     // cache full
+      u32 slot = c->n_reduces++;
+      c->red_term[slot]   = t;
+      c->red_acc[slot]    = v;
+      c->red_n_free[slot] = uwalk_reduce_free_axes(t,
+                              c->red_free_ids[slot], UWALK_MAX_RANGES);
+      uwalk_reduce_snapshot_save(c, slot);
+      return v;
     }
     case UOP_OPT:
       return uwalk_eval_float(c, heap_read(loc + 0));
@@ -489,9 +566,25 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     case UOP_OPT:
       return uwalk_eval_int(c, heap_read(loc + 0));
     case UOP_REDUCE: {
-      double v = 0.0;
-      if (uwalk_reduce_lookup(c, t, &v) >= 0) return (i64)v;
-      return (i64)uwalk_run_reduce(c, t);
+      // Same iter-aware cache logic as eval_float's UOP_REDUCE.
+      int idx = uwalk_reduce_lookup(c, t, NULL);
+      if (idx >= 0 && uwalk_reduce_snapshot_matches(c, (u32)idx)) {
+        return (i64)c->red_acc[idx];
+      }
+      double v = uwalk_run_reduce(c, t);
+      if (idx >= 0) {
+        c->red_acc[idx] = v;
+        uwalk_reduce_snapshot_save(c, (u32)idx);
+        return (i64)v;
+      }
+      if (c->n_reduces >= UWALK_MAX_REDUCES) return (i64)v;
+      u32 slot = c->n_reduces++;
+      c->red_term[slot]   = t;
+      c->red_acc[slot]    = v;
+      c->red_n_free[slot] = uwalk_reduce_free_axes(t,
+                              c->red_free_ids[slot], UWALK_MAX_RANGES);
+      uwalk_reduce_snapshot_save(c, slot);
+      return (i64)v;
     }
     // UOP_ADD / MUL / CMPLT / CMPEQ / NEG over integer-typed operands.
     // The high-level WL Plus / Times / etc. emit these generic ALU ops
@@ -704,12 +797,16 @@ static void uwalk_loop_and_store(UWalkCtx *c,
       if (hoistable[i]) continue;
       int idx = uwalk_reduce_lookup(c, value_reduces[i], NULL);
       if (idx < 0) {
-        // First time: register slot.
+        // First time: register slot + free-axis snapshot fields so
+        // the iter-aware cache check in eval_float can validate it.
         if (c->n_reduces >= UWALK_MAX_REDUCES) return;
         idx = (int)c->n_reduces++;
-        c->red_term[idx] = value_reduces[i];
+        c->red_term[idx]   = value_reduces[i];
+        c->red_n_free[idx] = uwalk_reduce_free_axes(value_reduces[i],
+                                c->red_free_ids[idx], UWALK_MAX_RANGES);
       }
       c->red_acc[idx] = uwalk_run_reduce(c, value_reduces[i]);
+      uwalk_reduce_snapshot_save(c, (u32)idx);
     }
     // Evaluate address (always integer).
     i64 addr_v = uwalk_eval_int(c, store_addr);
@@ -846,8 +943,11 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
       return 0;
     }
     u32 idx = c->n_reduces++;
-    c->red_term[idx] = value_reduces[i];
-    c->red_acc [idx] = uwalk_run_reduce(c, value_reduces[i]);
+    c->red_term[idx]   = value_reduces[i];
+    c->red_n_free[idx] = uwalk_reduce_free_axes(value_reduces[i],
+                            c->red_free_ids[idx], UWALK_MAX_RANGES);
+    c->red_acc[idx]    = uwalk_run_reduce(c, value_reduces[i]);
+    uwalk_reduce_snapshot_save(c, idx);
   }
   // Run nested for-loops over out_ranges.
   uwalk_loop_and_store(c, out_ranges, range_extents, range_slots,
