@@ -3415,6 +3415,21 @@ static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
                                    u32 *out_rule, u8 *out_pos_len,
                                    u8 *out_fwd, u8 *fired);
 
+// Slice-aware companion: same one-step metadata-recording shape as
+// atp_proof_rewrite_step but the rule set is a passed-in slice
+// (lhs_arr / rhs_arr / n) rather than the live R.  Used by the
+// interreduce path so the NORM_STEPs it records cite the (slice-)
+// local rule that fired -- the dropped rule's normalization through
+// the just-added rules.  `out_rule` is the slice index; the caller
+// maps it to a TRACE_ORIENT trace id via its own trace-id array.
+static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
+                                         u8 *pos, u8 depth,
+                                         const Term *lhs_arr,
+                                         const Term *rhs_arr,
+                                         u32 n,
+                                         u32 *out_rule, u8 *out_pos_len,
+                                         u8 *out_fwd, u8 *fired);
+
 // Push a TRACE_NORM_STEP entry recording one rewrite step the CP-
 // normalize loop just applied.  Children layout (see thvm.h for the
 // schema mirrored by the WL decoder):
@@ -3470,6 +3485,43 @@ static Term atp_rewrite_normalize_record(AtpState *s,
     // trace[] regardless of later interreduction.
     u32 rule_trace = (rule < s->n_rules) ? s->r_trace[rule]
                                          : ATP_TRACE_NONE;
+    u32 ti = atp_trace_push_norm_step(s, *chain_tail, rule_trace,
+                                      step_lhs, step_rhs, side, fwd,
+                                      pos, pos_len);
+    if (ti != ATP_TRACE_NONE) *chain_tail = ti;
+    t = t2;
+  }
+  return t;
+}
+
+// Slice-based companion to atp_rewrite_normalize_record: rewrites
+// `t` against the (lhs_arr / rhs_arr / n) slice, pushing one
+// TRACE_NORM_STEP per fire.  `trace_arr[i]` is the TRACE_ORIENT
+// trace id for slice rule i (so WL can locate the rule entry
+// regardless of later compaction).  Used by interreduce so the
+// dropped rule's normalization through the just-added rules is
+// recorded as a chain of NORM_STEPs -- the resulting TRACE_SIMPLIFY
+// parents on the last NORM_STEP, and WL's chain extractor emits
+// each step as a SubstitutionLemma directly (no emitNorm BFS).
+static Term atp_rewrite_normalize_slice_record(AtpState *s, Term t,
+                                               const Term *lhs_arr,
+                                               const Term *rhs_arr,
+                                               const u32  *trace_arr,
+                                               u32 n,
+                                               u32 step_cap,
+                                               u32 *chain_tail,
+                                               u8 side, Term eq_other) {
+  for (u32 it = 0; it < step_cap; it++) {
+    u8  pos[ATP_PROOF_MAX_DEPTH];
+    u32 rule = 0;
+    u8  pos_len = 0, fwd = 1u, fired = 0;
+    Term t2 = atp_proof_rewrite_step_slice(s, t, pos, 0u,
+                                           lhs_arr, rhs_arr, n,
+                                           &rule, &pos_len, &fwd, &fired);
+    if (!fired) break;
+    Term step_lhs = (side == 0u) ? t2 : eq_other;
+    Term step_rhs = (side == 0u) ? eq_other : t2;
+    u32 rule_trace = (rule < n) ? trace_arr[rule] : ATP_TRACE_NONE;
     u32 ti = atp_trace_push_norm_step(s, *chain_tail, rule_trace,
                                       step_lhs, step_rhs, side, fwd,
                                       pos, pos_len);
@@ -3763,6 +3815,79 @@ static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
         }
         *fired = 1;
         return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// Slice-aware port of atp_proof_rewrite_step above: same outermost-
+// leftmost rule pick (with the ORDERED_REWRITE both-directions/order-
+// gated branch for unorientable equations), but the candidate rule
+// list is the (lhs_arr / rhs_arr / n) slice rather than s->lhs.  The
+// per-rule cached orientation s->r_orient does not apply to a custom
+// slice, so the unorientable / orientable split falls back to a per-
+// rule atp_compare here -- in the interreduce caller's case n <= 2 so
+// the cost is trivial.
+static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
+                                         u8 *pos, u8 depth,
+                                         const Term *lhs_arr,
+                                         const Term *rhs_arr,
+                                         u32 n,
+                                         u32 *out_rule, u8 *out_pos_len,
+                                         u8 *out_fwd, u8 *fired) {
+  for (u32 i = 0; i < n; i++) {
+#ifdef ATP_ORDERED_REWRITE
+    u8 oriented = (u8)(atp_compare(s, lhs_arr[i], rhs_arr[i]) == KBO_GT);
+    if (!oriented) {
+      if (atp_vars_contained(rhs_arr[i], lhs_arr[i])) {       // l -> r
+        RewriteSubst sub = {{0}};
+        if (thvm_match(lhs_arr[i], t, &sub)) {
+          Term repl = thvm_subst_apply(rhs_arr[i], &sub);
+          if (atp_compare(s, t, repl) == KBO_GT) {
+            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
+            return repl;
+          }
+        }
+      }
+      if (atp_vars_contained(lhs_arr[i], rhs_arr[i])) {       // r -> l
+        RewriteSubst sub = {{0}};
+        if (thvm_match(rhs_arr[i], t, &sub)) {
+          Term repl = thvm_subst_apply(lhs_arr[i], &sub);
+          if (atp_compare(s, t, repl) == KBO_GT) {
+            *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 0;
+            return repl;
+          }
+        }
+      }
+      continue;
+    }
+#endif
+    RewriteSubst sub = {{0}};
+    if (thvm_match(lhs_arr[i], t, &sub)) {
+      *fired = 1; *out_rule = i; *out_pos_len = depth; *out_fwd = 1;
+      return thvm_subst_apply(rhs_arr[i], &sub);
+    }
+  }
+  if (term_tag(t) == TAG_CTR && depth < ATP_PROOF_MAX_DEPTH) {
+    u32 n_ctr = term_ctr_n(t);
+    if (n_ctr > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    for (u32 i = 0; i < n_ctr; i++) {
+      pos[depth] = (u8)i;
+      u8 cf = 0;
+      Term nch = atp_proof_rewrite_step_slice(s, term_ctr_at(t, i), pos,
+                                              (u8)(depth + 1u),
+                                              lhs_arr, rhs_arr, n,
+                                              out_rule, out_pos_len,
+                                              out_fwd, &cf);
+      if (cf) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 j = 0; j < n_ctr; j++) {
+          children[j] = (j == i) ? nch : term_ctr_at(t, j);
+        }
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n_ctr);
       }
     }
   }
@@ -4484,11 +4609,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   // to don't move.
   Term new_lhs[2];
   Term new_rhs[2];
+  u32  new_traces[2];
   u32  n_new = added.count;
   if (n_new > 2) n_new = 2;
   for (u32 k = 0; k < n_new; k++) {
     new_lhs[k] = s->lhs[added.first + k];
     new_rhs[k] = s->rhs[added.first + k];
+    new_traces[k] = s->r_trace[added.first + k];
   }
 
   u32 dropped = 0;
@@ -4496,14 +4623,32 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   while (i < added.first - dropped) {
     Term old_lhs = s->lhs[i];
     Term old_rhs = s->rhs[i];
-    Term reduced = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs, n_new, 16);
+    Term reduced;
+    // When NORM_STEP recording is on (WL chain extraction needs it),
+    // walk the LHS normalization step-by-step and push a TRACE_NORM_
+    // STEP per fire chained from the dropped rule's trace.  The
+    // TRACE_SIMPLIFY then parents on the chain tail, so its WL info
+    // inherits from the last NORM_STEP whose recorded {lhs, rhs} is
+    // exactly the simplified equation -- the cplEqSetQ check at the
+    // ORIENT/SIMPLIFY resolveTrace branch passes directly and no
+    // emitNorm BFS is needed to bridge the simplification gap.
+    u32 simplify_parent = s->r_trace[i];
+    if (s->record_norm_steps) {
+      reduced = atp_rewrite_normalize_slice_record(
+          s, old_lhs, new_lhs, new_rhs, new_traces, n_new, 16,
+          &simplify_parent, 0u, old_rhs);
+    } else {
+      reduced = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs,
+                                      n_new, 16);
+    }
     if (!kbo_eq(reduced, old_lhs)) {
       // The older rule's LHS simplified -- drop it and requeue
       // (reduced, old_rhs) for re-orientation.  Record the re-queue
       // as a TRACE_SIMPLIFY entry parented on the dropped rule's
-      // trace index so the proof DAG stays connected through
-      // interreduction (a fresh TRACE_AXIOM would sever it).
-      atp_add_equation_simplified(s, reduced, old_rhs, s->r_trace[i]);
+      // trace index (or the NORM_STEP chain tail when recording is
+      // on) so the proof DAG stays connected through interreduction
+      // (a fresh TRACE_AXIOM would sever it).
+      atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
 #ifdef ATP_ORPHAN_KILL
       // Capture the dropped rule's trace id before the shift below
       // overwrites r_trace[i].  Its descendant CPs are now orphans.
