@@ -67,9 +67,6 @@ static u32 tile_conv2d_reduce_unroll_from_opts(KernelEntry const *ke,
 static u64 TILE_CONV2D_FLAT_DAG    = 0;
 
 fn u64 tile_conv2d_flat_dag_count   (void) { return TILE_CONV2D_FLAT_DAG; }
-fn void tile_conv2d_flat_counters_reset(void) {
-  TILE_CONV2D_FLAT_DAG = 0;
-}
 
 static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
                                          TileConv2DInfo *out,

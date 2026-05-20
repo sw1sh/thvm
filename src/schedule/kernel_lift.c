@@ -13,10 +13,6 @@ static u64 KERNEL_LIFT_SUCCESSES;
 
 fn u64 kernel_lift_attempts(void)        { return KERNEL_LIFT_ATTEMPTS; }
 fn u64 kernel_lift_successes(void)       { return KERNEL_LIFT_SUCCESSES; }
-fn void kernel_lift_counters_reset(void) {
-  KERNEL_LIFT_ATTEMPTS = 0;
-  KERNEL_LIFT_SUCCESSES = 0;
-}
 fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
 fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
 
