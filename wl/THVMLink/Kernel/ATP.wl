@@ -980,13 +980,19 @@ $AtpTraceNone = 4294967295;
    to canonical names in first-occurrence order, so two alpha-
    equivalent terms compare equal under SameQ.  Trace entries decode
    FVRs to per-entry symbol names, so equations from different rules
-   are alpha-variants that must be compared up to renaming. *)
-cplCanonVars[expr_, varSyms_] := Block[{occ},
-    occ = DeleteDuplicates @ Cases[expr,
-        v_Symbol /; MemberQ[varSyms, v], {0, Infinity}, Heads -> True];
-    expr /. MapThread[Rule,
-        {occ, Table[Symbol["cplV" <> ToString[i]], {i, Length[occ]}]}]
-]
+   are alpha-variants that must be compared up to renaming.
+   Memoized: a large completion trace (Meredith ~28k) calls cplEqSetQ
+   thousands of times on the same equation shapes; the unmemoized
+   Cases scan plus ReplaceAll per call was the dominant cost. *)
+cplCanonVars[expr_, varSyms_] := cplCanonVars[expr, varSyms] =
+    Block[{occ},
+        occ = DeleteDuplicates @ Cases[expr,
+            v_Symbol /; MemberQ[varSyms, v], {0, Infinity},
+            Heads -> True];
+        expr /. MapThread[Rule,
+            {occ, Table[Symbol["cplV" <> ToString[i]],
+                {i, Length[occ]}]}]
+    ]
 
 (* True iff the two equation lists are equal up to a side swap and
    variable renaming. *)
@@ -1044,6 +1050,7 @@ cplOrient[entryEq_, ruleEq_, varSyms_] := With[{
    lineage cannot be assembled -- callers degrade to $Failed, never
    to an unsound proof. *)
 buildCplDataset[enc_, conjPair_, cRes_] := Catch[
+    Block[{$RecursionLimit = 100000, $IterationLimit = 1000000},
     Module[{
         trace = cRes["Trace"], mainRules = cRes["MainRules"],
         rTrace = cRes["RTrace"], mainSteps = cRes["MainSteps"],
@@ -1061,8 +1068,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         axPairs = axPairs /. Verbatim[Pattern][s_Symbol, _] :> s;
         cjp = conjPair /. Verbatim[Pattern][s_Symbol, _] :> s;
         entries = {};         (* lemma key -> assoc, accumulated *)
-        traceInfo = <||>;     (* trace index -> <|"Key", "Eq"|> *)
-        inProgress = <||>;    (* trace index -> True while resolving *)
+        (* traceInfo / inProgress use DownValues on the Module-renamed
+           symbols (not Associations): single-arg DownValues are hashed,
+           so cache lookup stays O(1) on large traces.  A Module-renamed
+           symbol's DownValues vanish when the Module exits, so the next
+           buildCplDataset call starts with a clean slate. *)
+        Clear[traceInfo, inProgress];
         slN = 0; cpN = 0;
         (* a dataset Statement: the equation in the verifier's
            HoldForm[Equal[...]] shape, variables left bare (only the
@@ -1297,7 +1308,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            NORM_STEP propagates this through the chain so its Side /
            equation order match the chain root's convention. *)
         resolveTrace[ti_] := Block[{te, ruleEq, pInfo, pEq, info},
-            If[ KeyExistsQ[traceInfo, ti], Return[traceInfo[ti]] ];
+            (* Cache check: an unset DownValue leaves traceInfo[ti]
+               unevaluated (Head == the symbol traceInfo itself).
+               A set DownValue evaluates to its stored Association,
+               whose Head is Association, not traceInfo. *)
+            If[ Head[traceInfo[ti]] =!= traceInfo,
+                Return[traceInfo[ti]] ];
             If[ TrueQ[inProgress[ti]],
                 atpDbgFail["resolveTrace.cycle@" <> ToString[ti]];
                 Throw[$Failed]];
@@ -1368,7 +1384,15 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                   te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];
-                    If[ cplEqSetQ[ruleEq, pEq, varSyms],
+                    (* When the parent is a NORM_STEP, the chain
+                       already terminates at the equation that gets
+                       oriented -- the cplEqSetQ check (which
+                       alpha-canonicalizes both sides and is O(term-
+                       size)) is redundant and dominates the cost on
+                       large traces.  Inherit directly. *)
+                    If[ trace[[te["ParentA"] + 1]]["Reason"] ===
+                            $TraceNormStep
+                          || cplEqSetQ[ruleEq, pEq, varSyms],
                         <|"Key" -> pInfo["Key"], "Eq" -> pEq,
                           "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
                         emitNorm[pInfo["Key"], pEq, ruleEq, ti]
@@ -1460,7 +1484,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             chainEntries
         ];
         allEntries
-    ]
+    ]]
 ]
 
 (* === TFindEquationalProof ========================================= *)
