@@ -99,14 +99,8 @@ static u32             RU_TOPO_REMAINING[RU_MAX_NODES];  // unprocessed-consumer
 
 // Stats / introspection accessors for the new test.
 static u32 RU_LAST_NODES_WALKED;
-static u32 RU_LAST_NEW_REALIZES;       // realize decisions made by THIS pass
-static u32 RU_LAST_FULL_REALIZES;
-static u32 RU_LAST_PARTIAL_REALIZES;
 
 fn u32 rangeify_unified_last_nodes_walked   (void) { return RU_LAST_NODES_WALKED;   }
-fn u32 rangeify_unified_last_new_realizes   (void) { return RU_LAST_NEW_REALIZES;   }
-fn u32 rangeify_unified_last_full_realizes  (void) { return RU_LAST_FULL_REALIZES;  }
-fn u32 rangeify_unified_last_partial_realizes(void) { return RU_LAST_PARTIAL_REALIZES;}
 fn u32 rangeify_unified_range_idx_counter   (void) { return RU_RANGE_IDX_COUNTER;   }
 
 // Was this node assigned ranges? (For test introspection.)
@@ -607,9 +601,6 @@ fn void run_rangeify_unified(Term root) {
   }
   RU_RANGE_IDX_COUNTER    = 0;
   RU_LAST_NODES_WALKED    = 0;
-  RU_LAST_NEW_REALIZES    = 0;
-  RU_LAST_FULL_REALIZES   = 0;
-  RU_LAST_PARTIAL_REALIZES= 0;
 
   if (term_tag(root) != TAG_UOP) return;
   if (term_ext(root) == UOP_KERNEL) return;
@@ -689,7 +680,6 @@ fn void run_rangeify_unified(Term root) {
       RU_REALIZE_MAP[node_idx].axes_mask = (my_ndim < 8) ? ((1u << my_ndim) - 1u) : 0xFFu;
       RU_REALIZE_MAP[node_idx].n_realized_axes = my_ndim;
       RU_ENDING_RANGES[node_idx].n = 0;
-      RU_LAST_FULL_REALIZES++;
     } else if (n_crngs == 0) {
       // *** Mirror indexing.py:190-192 ***
       // "if no consumers have ranges and this isn't realized, this
@@ -738,8 +728,6 @@ fn void run_rangeify_unified(Term root) {
           RU_REALIZE_MAP[node_idx].realized_partial = 1;
           RU_REALIZE_MAP[node_idx].axes_mask        = partial_mask;
           RU_REALIZE_MAP[node_idx].n_realized_axes  = n_realized;
-          RU_LAST_PARTIAL_REALIZES++;
-          RU_LAST_NEW_REALIZES++;
         }
       }
     }
@@ -765,7 +753,6 @@ fn void run_rangeify_unified(Term root) {
         RU_REALIZE_MAP[node_idx].realized_partial = 1;
         RU_REALIZE_MAP[node_idx].axes_mask = mask;
         RU_REALIZE_MAP[node_idx].n_realized_axes += added;
-        RU_LAST_NEW_REALIZES++;
       }
       RU_ENDING_RANGES[node_idx].n = 0;
     }
@@ -1745,8 +1732,6 @@ fn void pm_apply_rangeify(Term root) {
         RU_REALIZE_MAP[i].n_realized_axes = rm->out_ndim;
         RU_REALIZE_MAP[i].axes_mask =
             (rm->out_ndim < 8) ? (u8)((1u << rm->out_ndim) - 1u) : 0xFFu;
-        RU_LAST_NEW_REALIZES++;
-        RU_LAST_FULL_REALIZES++;
         realized = 1;
       }
     }
