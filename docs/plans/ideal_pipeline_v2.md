@@ -51,7 +51,7 @@ LOWERED UOP DAG  (boundaries are BUFFERIZE; addresses are INDEX of RANGE)
 KERNEL DISPATCH
 ```
 
-No intermediate `KProgOp[]`. No `scalar_uops[]`. No `kernel_program_cache`. No 11 named bufferize rules. `KernelEntry` collapses to `{compute_root, output_tid, n_inputs, input_*, view info}`. `materialize.c` walks the lowered UOp DAG and emits one KernelEntry per BUFFERIZE; `kernel_lift.c` deletes (its job is folded into the unified rangeify pass).
+No intermediate `KProgOp[]`. No `scalar_uops[]`. No `kernel_program_cache`. No 11 named bufferize rules. `KernelEntry` collapses to `{cached_lift.store_root, output_tid, n_inputs, input_*, view info}` (the redundant `compute_root` view of the same Term was retired post-Phase 4b).  `materialize.c` walks the lowered UOp DAG and emits one KernelEntry per BUFFERIZE; `kernel_lift.c` shrinks to a thin store-root lookup + KernelUopLift packager.
 
 ## Phases (no time bounds, dependencies only)
 
