@@ -620,7 +620,18 @@ static Term unified_rewrite_buffer_for_var(KernelEntry const *ke,
 // axes) get re-bound to the consumer's INDEX_E.addr components so the
 // rewritten subtree iterates in the consumer's range scope.  The TAG_TEN
 // / TAG_VAR / kernel-input-BUFFERIZE rewrites still apply on the way down.
-#define UNIFIED_SUBST_CAP MAX_DIM
+//
+// Capacity is NOT MAX_DIM: a single BUFFERIZE closes over at most MAX_DIM
+// axes, but the substitution table ACCUMULATES across a nested-BUFFERIZE
+// chain (each level appends its closed_ranges to the parent's table).  A
+// stacked-conv backward inlines BUFFERIZE(3)->BUFFERIZE(3)->BUFFERIZE(4)
+// = 10 entries; sizing this at MAX_DIM==8 silently dropped the last two
+// (the append guards stop at the cap), leaving those closed_ranges
+// unbound -> stranded RANGE leaves -> the walker read iter=0 and the
+// gradient came out zero.  Sized to hold several conv levels of nesting;
+// overflow now bails the inline (returns to the legacy lifter) rather
+// than truncating to a wrong result.
+#define UNIFIED_SUBST_CAP 64
 typedef struct {
   Term from[UNIFIED_SUBST_CAP];
   Term to  [UNIFIED_SUBST_CAP];
@@ -941,16 +952,20 @@ static Term try_inline_bufferize_multi_via_stride_match(
     if (match_ok) matched = 1;
   }
   if (!matched) return 0;
+  // Bail (decline the inline) rather than silently truncate: dropping a
+  // closed_range substitution leaves that RANGE unbound in the body,
+  // which surfaces as a stranded-range gate trip downstream.
+  if ((sub ? sub->n : 0) + n_ranges > UNIFIED_SUBST_CAP) return 0;
   UnifiedSubst new_sub;
   new_sub.n = 0;
   if (sub != NULL) {
-    for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+    for (u32 i = 0; i < sub->n; i++) {
       new_sub.from[new_sub.n] = sub->from[i];
       new_sub.to  [new_sub.n] = sub->to  [i];
       new_sub.n++;
     }
   }
-  for (u32 i = 0; i < n_ranges && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+  for (u32 i = 0; i < n_ranges; i++) {
     new_sub.from[new_sub.n] = old_ranges[i];
     new_sub.to  [new_sub.n] = to_terms[i];
     new_sub.n++;
@@ -1007,10 +1022,13 @@ static Term try_inline_bufferize_via_axis_table(
     }
   }
   if (n_realized != n_ranges || ax_n < prod_ndim) return 0;
+  // Bail rather than truncate (see stride_match note): every closed_range
+  // must get a binding or the body strands an unbound RANGE.
+  if ((sub ? sub->n : 0) + n_ranges > UNIFIED_SUBST_CAP) return 0;
   UnifiedSubst new_sub;
   new_sub.n = 0;
   if (sub != NULL) {
-    for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+    for (u32 i = 0; i < sub->n; i++) {
       new_sub.from[new_sub.n] = sub->from[i];
       new_sub.to  [new_sub.n] = sub->to  [i];
       new_sub.n++;
@@ -1020,7 +1038,6 @@ static Term try_inline_bufferize_via_axis_table(
     Term cr = uop_bufferize_range_at(inner_buf, i);
     if (cr == 0 || term_tag(cr) != TAG_UOP
         || term_ext(cr) != UOP_RANGE) return 0;
-    if (new_sub.n >= UNIFIED_SUBST_CAP) return 0;
     u32 ax = realized_axes[i];
     if (ax >= ax_n) return 0;
     new_sub.from[new_sub.n] = cr;
