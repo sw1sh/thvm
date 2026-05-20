@@ -2465,7 +2465,6 @@ fn u64  bypass_kernel_used_unified_count(void);
 fn u64  bypass_gate_resid_count         (void);
 fn u64  bypass_gate_stranded_count      (void);
 fn u64  bypass_gate_bcast_count         (void);
-fn void bypass_kernel_counters_reset    (void);
 
 // === UOp DAG renderer ===
 // Walks the UOp DAG rooted at `root` and emits pseudo-MSL.  Replaces

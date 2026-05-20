@@ -18,8 +18,7 @@ static u32  BOUNDARY_TID  [BOUNDARY_ORDER_CAP];   // emitted output TenDesc id
 static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
 
 // Bypass-substitution telemetry: per-kernel counts for each safety
-// gate.  Read via bypass_kernel_*_count(); reset by
-// bypass_kernel_counters_reset() (called from thvm_init).
+// gate.  Read via bypass_kernel_*_count() from thvm.c's coverage dump.
 static u64 BYPASS_KERNEL_TOTAL         = 0;
 static u64 BYPASS_KERNEL_USED_UNIFIED  = 0;
 static u64 BYPASS_GATE_RESID           = 0;
@@ -30,13 +29,6 @@ fn u64  bypass_kernel_used_unified_count(void) { return BYPASS_KERNEL_USED_UNIFI
 fn u64  bypass_gate_resid_count         (void) { return BYPASS_GATE_RESID;          }
 fn u64  bypass_gate_stranded_count      (void) { return BYPASS_GATE_STRANDED;       }
 fn u64  bypass_gate_bcast_count         (void) { return BYPASS_GATE_BCAST;          }
-fn void bypass_kernel_counters_reset    (void) {
-  BYPASS_KERNEL_TOTAL = 0;
-  BYPASS_KERNEL_USED_UNIFIED = 0;
-  BYPASS_GATE_RESID = 0;
-  BYPASS_GATE_STRANDED = 0;
-  BYPASS_GATE_BCAST = 0;
-}
 // Per-BOUNDARY_ORDER slot, the UOP_BUFFERIZE Term the unified
 // rangeify pass emitted at this boundary (0 when the boundary has
 // no unified-pass record).  Populated by topo_sort_boundaries when
