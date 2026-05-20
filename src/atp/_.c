@@ -4498,7 +4498,19 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
 
 fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   if (s == NULL || s->goal_lhs == 0) return ATP_RUNNING;
-  const u32 NORM_CAP = 64;
+  // Goal-side normalization cap.  Generous (not the per-step CP cap
+  // of 64): a goal can close purely by normalization when the axioms
+  // generate no critical pairs -- e.g. combinatory-logic identities
+  // (B/C/W <-> S/K), whose rules are non-overlapping, so completion's
+  // CP queue is empty and the ONLY way the goal joins is by reducing
+  // both sides to a common normal form.  Deep combinator terms like
+  // S(S(K(S(KS)K))S)(KK) x y z take many hundreds of rewrites to
+  // normalize; a cap of 64 left them un-joined (reported QUEUE_EMPTY
+  // with the goal actually provable).  A terminating rewrite system
+  // reaches fixpoint and returns early regardless of the bound, so
+  // the only risk is a non-terminating R (e.g. the Y axiom in scope),
+  // which the wall deadline already bounds.
+  const u32 NORM_CAP = 1u << 16;
 
   // 8.9c: existential goals use narrowing; universal goals stay
   // on the rewrite-and-compare path.
