@@ -763,3 +763,22 @@ VerificationTest[
     Success,
     TestID -> "ATP/TFEP/ordered-rewrite-fwd-flag-verifies"
 ]
+
+(* === emitNorm: two-phase BFS rewrite-chain reconstruction ========== *)
+
+(* HillmanAxioms / AndAssociativity is a single-equation theorem
+   whose completion-derived proof chain runs through TRACE_ORIENT /
+   TRACE_SIMPLIFY rules whose normalization from the parent CP needs
+   ordered rewriting in the reverse direction.  Phase-1 (forward-only)
+   BFS in emitNorm exhausts without finding the chain; Phase 2 retries
+   with reverse direction enabled (variable-safe rules only) and a
+   tight cap, which closes this class of fast-failures. *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["AndAssociativity", "HillmanAxioms"];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/emitNorm-phase2-reverse-direction-verifies"
+]

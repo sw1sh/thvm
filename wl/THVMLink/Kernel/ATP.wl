@@ -989,6 +989,13 @@ cplEqSetQ[a_List, b_List, varSyms_] := With[{
     ca === cplCanonVars[Reverse[b], varSyms]
 ]
 
+(* The set of first-order variables (members of varSyms) occurring in
+   `expr`.  Used to gate reverse-direction rewriting on whether the
+   rule's lhs vars are a subset of its rhs vars -- the same
+   atp_vars_contained guard ordered rewriting uses in the C engine. *)
+cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr,
+    v_Symbol /; MemberQ[varSyms, v], {0, Infinity}, Heads -> True]
+
 (* Rewrite each first-order variable occurrence (members of
    varSyms) in `term` as Pattern[v, Blank[]].  The var -> var_ rules
    are built with MapThread so no Pattern lands on a RuleDelayed
@@ -1086,21 +1093,47 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 
         (* one-step rewrites of equation `eq` by the alive rules
            (each {traceIdx, ruleEq}); returns {newEq, traceIdx,
-           side, relPos} tuples. *)
-        rewriteOnce[eq_, aliveList_] := Block[{out = {}},
+           side, relPos, dir} tuples where dir is +1 for an lhs->rhs
+           application of the rule and -1 for rhs->lhs.  Reverse-
+           direction is tried only when tryReverse is True AND the
+           rule is variable-safe (vars(lhs) subset-of vars(rhs)) --
+           the same atp_vars_contained guard ordered rewriting uses
+           in the C engine, so a completion-oriented rule -- whose
+           reverse would introduce unbound variables -- never fires
+           reversed. *)
+        rewriteOnce[eq_, aliveList_, tryReverse_] := Block[{out = {}},
             Do[
-                Block[{rl = cplAsRule[ar[[2]], varSyms], sub, new},
+                Block[{eqA = ar[[2]],
+                       rlF = cplAsRule[ar[[2]], varSyms],
+                       rlR, revSafe, sub, new},
+                    revSafe = tryReverse && SubsetQ[
+                        cplVarsIn[eqA[[2]], varSyms],
+                        cplVarsIn[eqA[[1]], varSyms]];
+                    rlR = If[ revSafe,
+                        cplAsRule[Reverse[eqA], varSyms], Null];
                     Do[
                         sub = eq[[side + 1]];
                         Do[
-                            new = Quiet @ ReplaceAt[sub, rl, pos];
+                            new = Quiet @ ReplaceAt[sub, rlF, pos];
                             If[ new =!= sub && FreeQ[new, ReplaceAt],
                                 AppendTo[out, {
                                     ReplacePart[eq, side + 1 -> new],
-                                    ar[[1]], side, pos}]
+                                    ar[[1]], side, pos, 1}]
                             ],
-                            {pos, Position[sub, rl[[1]],
+                            {pos, Position[sub, rlF[[1]],
                                 {0, Infinity}, Heads -> False]}
+                        ];
+                        If[ revSafe,
+                            Do[
+                                new = Quiet @ ReplaceAt[sub, rlR, pos];
+                                If[ new =!= sub && FreeQ[new, ReplaceAt],
+                                    AppendTo[out, {
+                                        ReplacePart[eq, side + 1 -> new],
+                                        ar[[1]], side, pos, -1}]
+                                ],
+                                {pos, Position[sub, rlR[[1]],
+                                    {0, Infinity}, Heads -> False]}
+                            ]
                         ],
                         {side, 0, 1}
                     ]
@@ -1110,27 +1143,25 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             out
         ];
 
-        (* re-derive startEq ->* targetEq, replaying with the rules
-           alive when the rule at trace `ti` was oriented; emit a
-           SubstitutionLemma per step; return the final entry's
-           {key, eq}.  inKey is the dataset key of startEq. *)
-        emitNorm[inKey_, startEq_, targetEq_, ti_] :=
-            Block[{aliveList, queue, seen, found, curKey, curEq, st,
-                   cInfo, rEq},
-                aliveList = aliveRulesAt[ti];
-                queue = {{startEq, {}}};
-                seen = {startEq};
-                found = Missing[];
-                While[ queue =!= {} && MissingQ[found],
-                    Block[{node = First[queue], eq, hist, nbrs},
+        (* BFS one phase: explore from `start` looking for a rewrite
+           path to anything cplEqSetQ-equal to `target`.  Returns the
+           hist on success, Missing[] on cap exhaustion or queue
+           emptiness. *)
+        runBfs[start_, target_, aliveList_, tryReverse_, cap_] :=
+            Block[{queue, seenA, found = Missing[], explored = 0, nbrs},
+                queue = {{start, {}}};
+                seenA = <|start -> True|>;
+                While[ queue =!= {} && MissingQ[found] && explored < cap,
+                    Block[{node = First[queue], eq, hist},
                         queue = Rest[queue];
+                        explored++;
                         {eq, hist} = node;
-                        If[ cplEqSetQ[eq, targetEq, varSyms],
+                        If[ cplEqSetQ[eq, target, varSyms],
                             found = hist,
-                            nbrs = rewriteOnce[eq, aliveList];
+                            nbrs = rewriteOnce[eq, aliveList, tryReverse];
                             Do[
-                                If[ ! MemberQ[seen, nb[[1]]],
-                                    AppendTo[seen, nb[[1]]];
+                                If[ ! KeyExistsQ[seenA, nb[[1]]],
+                                    AssociateTo[seenA, nb[[1]] -> True];
                                     AppendTo[queue,
                                         {nb[[1]], Append[hist, nb]}]
                                 ],
@@ -1139,6 +1170,27 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         ]
                     ]
                 ];
+                found
+            ];
+
+        (* re-derive startEq ->* targetEq, replaying with the rules
+           alive when the rule at trace `ti` was oriented; emit a
+           SubstitutionLemma per step; return the final entry's
+           {key, eq}.  inKey is the dataset key of startEq. *)
+        emitNorm[inKey_, startEq_, targetEq_, ti_] :=
+            Block[{aliveList, found, curKey, curEq, st, cInfo, rEq},
+                aliveList = aliveRulesAt[ti];
+                (* Two-phase BFS.  Phase 1 is forward-only with a large
+                   cap -- preserves the pre-reverse behavior on every
+                   case the original engine handled (no behavior change
+                   to byte-identical proofs).  Phase 2 only runs when
+                   Phase 1 exhausts: it re-explores with reverse
+                   direction enabled (variable-safe rules only) and a
+                   tight cap, which unlocks ordered-rewriting paths
+                   the forward-only BFS could not reach. *)
+                found = runBfs[startEq, targetEq, aliveList, False, 50000];
+                If[ MissingQ[found],
+                    found = runBfs[startEq, targetEq, aliveList, True, 600]];
                 If[ MissingQ[found],
                     atpDbgFail["emitNorm.no-rewrite-path"]; Throw[$Failed]];
                 curKey = inKey;
@@ -1155,8 +1207,16 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                             "Input" -> curKey,
                             "Construct" -> cInfo["Key"],
                             "Position" -> step[[4]],
-                            "Rule" -> cplAsRule[rEq, varSyms],
-                            "Orientation" ->
+                            (* step[[5]] is +1 for an lhs->rhs rewrite,
+                               -1 for the reverse direction taken by an
+                               unorientable equation; combined with the
+                               entry-vs-rule alignment, this is the
+                               Orientation the verifier needs to read
+                               the cited Statement the same way. *)
+                            "Rule" -> cplAsRule[
+                                If[ step[[5]] === -1,
+                                    Reverse[rEq], rEq], varSyms],
+                            "Orientation" -> step[[5]] *
                                 cplOrient[cInfo["Eq"], rEq, varSyms],
                             "ConstructSide" -> 1,
                             "InputOrientation" -> 1,
