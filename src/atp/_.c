@@ -3569,11 +3569,25 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   if (s->record_norm_steps) {
     // Record each CP-normalize rewrite as a TRACE_NORM_STEP, chained
     // from the CP -- WL walks the chain linearly when extracting the
-    // ProofObject.  lhs side first (rhs is `cp_rhs` for those steps),
-    // then rhs side (lhs is the lhs-normalized `l`).
-    l = atp_rewrite_normalize_record(s, cp_lhs, cp_rhs, 0u,
+    // ProofObject.  Start from the trace entry's RAW (un-reduced)
+    // CP form, not select_cp's already-queue-reduced form: queue-
+    // time reduction (atp_cp_trivially_joinable) was previously off-
+    // trace, so the resulting NORM_STEPs reach from the literal CP
+    // the verifier expects all the way to the form orient sees --
+    // no chain gap.
+    Term raw_lhs = cp_lhs;
+    Term raw_rhs = cp_rhs;
+    if (src_trace != ATP_TRACE_NONE && src_trace < s->n_trace) {
+      Term cp_te = s->trace[src_trace];
+      if (term_tag(cp_te) == TAG_CTR && term_ext(cp_te) == TRACE_CP &&
+          term_ctr_n(cp_te) >= 4u) {
+        raw_lhs = term_ctr_at(cp_te, 2);
+        raw_rhs = term_ctr_at(cp_te, 3);
+      }
+    }
+    l = atp_rewrite_normalize_record(s, raw_lhs, raw_rhs, 0u,
                                      &chain_tail, NORM_CAP);
-    r = atp_rewrite_normalize_record(s, cp_rhs, l, 1u,
+    r = atp_rewrite_normalize_record(s, raw_rhs, l, 1u,
                                      &chain_tail, NORM_CAP);
   } else {
     l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);

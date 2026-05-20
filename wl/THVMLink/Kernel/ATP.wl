@@ -1391,18 +1391,66 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                        swap (or not) on this NORM_STEP so the chain
                        stays in ONE convention end-to-end. *)
                     Module[{pInfo, rInfo, rTe, rEq, swapped,
-                            wlEq, wlSide, sl, st, dir},
+                            parentTe, parentReason, cSide0WlPos,
+                            wlEq, wlSide, newCSide0WlPos,
+                            sl, st, dir, newSide},
                         pInfo = resolveTrace[te["ParentA"]];
                         rInfo = resolveTrace[te["ParentB"]];
                         rTe = trace[[te["ParentB"] + 1]];
                         rEq = {rTe["Lhs"], rTe["Rhs"]};
                         swapped = TrueQ[pInfo["Swapped"]];
-                        wlEq = If[ swapped,
-                            {te["Rhs"], te["Lhs"]},
-                            {te["Lhs"], te["Rhs"]}];
-                        wlSide = If[ swapped,
-                            If[ te["Side"] === 0, 2, 1],
-                            te["Side"] + 1];
+                        (* cSide0WlPos: WL position (1 or 2) that
+                           corresponds to C engine's side=0.  Tracks
+                           the swap convention through the chain.
+                           CP-normalize NORM_STEPs (parent is CP or
+                           inherited from CP): C side 0 maps to WL
+                           position 2 if swapped (CP storage swap),
+                           else WL position 1.  Interreduce NORM_STEPs
+                           (parent is ORIENT/SIMPLIFY = the dropped
+                           rule's trace entry): the rule's Lhs may be
+                           at WL pos 1 or 2 depending on whether
+                           atp_orient_and_add swapped the CP's sides
+                           (KBO_LT case).  Subsequent NORM_STEPs
+                           descending from a NORM_STEP/SIMPLIFY
+                           inherit the parent's stored mapping
+                           verbatim -- the rewrite preserves which
+                           side is "side 0". *)
+                        parentTe = trace[[te["ParentA"] + 1]];
+                        parentReason = parentTe["Reason"];
+                        cSide0WlPos = Which[
+                            (* inherit propagated mapping from parent
+                               NORM_STEP / SIMPLIFY (which already
+                               computed its own mapping); fall back to
+                               swap-only default if pInfo has none. *)
+                            KeyExistsQ[pInfo, "CSide0WlPos"],
+                                pInfo["CSide0WlPos"],
+                            (* fresh ORIENT child: check whether the
+                               dropped rule's Lhs (parentTe["Lhs"]) ==
+                               pInfo.Eq[[1]] (= the WL pos 1) -- if
+                               so, rule.Lhs sits at WL pos 1, so C
+                               side 0 -> WL pos 1.  Else WL pos 2. *)
+                            parentReason === $TraceOrient ||
+                              parentReason === $TraceSimplify,
+                                If[ parentTe["Lhs"] === pInfo["Eq"][[1]],
+                                    1, 2],
+                            (* fresh CP child: WL stores cpEq =
+                               {cte.Rhs, cte.Lhs}, so cte.Lhs (C side
+                               0) sits at WL pos 2. *)
+                            True,
+                                If[ swapped, 2, 1]
+                        ];
+                        wlSide = If[ te["Side"] === 0,
+                            cSide0WlPos, 3 - cSide0WlPos];
+                        (* Build Statement by replacing WL position
+                           wlSide of pInfo.Eq with the post-rewrite
+                           value (te.Lhs for C side=0, te.Rhs for
+                           side=1). *)
+                        wlEq = If[ wlSide === 1,
+                            {If[te["Side"]===0, te["Lhs"], te["Rhs"]],
+                             pInfo["Eq"][[2]]},
+                            {pInfo["Eq"][[1]],
+                             If[te["Side"]===0, te["Lhs"], te["Rhs"]]}];
+                        newCSide0WlPos = cSide0WlPos;
                         slN++;
                         sl = {$SubstitutionLemmaSym, slN};
                         st = stmt[wlEq];
@@ -1425,7 +1473,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                 "Source" -> "norm"
                             |>
                         |>];
-                        <|"Key" -> sl, "Eq" -> wlEq, "Swapped" -> swapped|>
+                        <|"Key" -> sl, "Eq" -> wlEq,
+                          "Swapped" -> swapped,
+                          "CSide0WlPos" -> newCSide0WlPos|>
                     ],
                 te["Reason"] === $TraceOrient ||
                   te["Reason"] === $TraceSimplify,
@@ -1442,8 +1492,17 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                           trace[[te["ParentA"] + 1]]["Reason"] ===
                             $TraceNormStep)
                           || cplEqSetQ[ruleEq, pEq, varSyms],
-                        <|"Key" -> pInfo["Key"], "Eq" -> pEq,
-                          "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
+                        Join[
+                            <|"Key" -> pInfo["Key"], "Eq" -> pEq,
+                              "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
+                            (* propagate CSide0WlPos when inherited
+                               from a NORM_STEP (chained interreduce
+                               etc.) so downstream NORM_STEPs find the
+                               right side-to-position mapping. *)
+                            If[ KeyExistsQ[pInfo, "CSide0WlPos"],
+                                <|"CSide0WlPos" -> pInfo["CSide0WlPos"]|>,
+                                <||>]
+                        ],
                         emitNorm[pInfo["Key"], pEq, ruleEq, ti]
                     ],
                 True, atpDbgFail["resolveTrace.unknown-reason@" <> ToString[ti]];
