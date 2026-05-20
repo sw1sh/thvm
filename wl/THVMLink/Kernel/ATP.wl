@@ -91,7 +91,7 @@ $atpRunFn := $atpRunFn = load[
 $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
-     Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -806,13 +806,13 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
    critical-pair lemma path.  ExtSteps / MainSteps are $Failed when
    the corresponding extraction produced nothing. *)
 cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
-    cpWeight_:-1, ordering_:0, autoPrec_:0] := Block[{
+    cpWeight_:-1, ordering_:0, autoPrec_:0, useMnf_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
     cur, labelToName, idToName, mainSteps, extSteps, mainRules,
     rTrace, traceEntries
 },
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
-        N[wallSeconds], cpWeight, ordering, autoPrec];
+        N[wallSeconds], cpWeight, ordering, autoPrec, useMnf];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
     extNRules = raw[[6]]; extNSteps = raw[[7]];
@@ -1612,8 +1612,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 
 (* Method-option vocabulary.  The completion suboptions map onto the
    C engine's runtime knobs (thvm_atp_set_cp_weight_mode /
-   thvm_atp_set_lpo / atp_auto_precedence), threaded through
-   cEngineProof as the {cpWeight, ordering, autoPrec} triple.
+   thvm_atp_set_lpo / atp_auto_precedence / thvm_atp_set_use_mnf),
+   threaded through cEngineProof as the
+   {cpWeight, ordering, autoPrec, useMnf} tuple.
 
    "CriticalPairWeight" -- Waldmeister ClasHeuristics CP-selection
      weight (which pending critical pair to process next):
@@ -1633,9 +1634,6 @@ $AtpCpWeightCodes = <|
     "Mix" -> 4, "Mix2" -> 5, "Unif" -> 6, Automatic -> -1
 |>;
 
-TFindEquationalProof::mnf =
-    "Method \"GoalDirected\" (MNF) needs a paclet built with \
--DATP_MNF; falling back to completion.";
 TFindEquationalProof::badmethod =
     "Unrecognized Method `1`; using Automatic (completion).";
 TFindEquationalProof::badcpw =
@@ -1651,16 +1649,23 @@ None in Method to keep every axiom.";
 TFindEquationalProof::badrel =
     "Unrecognized \"AxiomRelevance\" `1`; using \"Safe\".";
 
-(* parse a Method spec into {cpWeight, ordering, autoPrec} ints for
-   cEngineProof.  Automatic = Mix2 critical-pair weight (CH_MixWeight2,
-   g*10 + (wl+wr)), KBO, identity precedence.  Mix2 reaches the proof
-   far sooner than the engine's bare GT default on the harder
-   associativity / cross-axiom Boolean theorems (e.g. MeredithAxioms
-   AndAssociativity: ~7s under Mix2 vs ~60s under GT) while leaving the
-   easy cases and atp.wlt unchanged.  Auto-precedence and LPO change
-   the orientation trajectory globally, so they stay opt-in via
-   explicit Method suboptions. *)
-atpParseMethod[Automatic] := {5, 0, 0};
+(* parse a Method spec into {cpWeight, ordering, autoPrec, useMnf} ints
+   for cEngineProof.  Automatic = Mix2 critical-pair weight
+   (CH_MixWeight2, g*10 + (wl+wr)), KBO, identity precedence, MNF off.
+   Mix2 reaches the proof far sooner than the engine's bare GT default
+   on the harder associativity / cross-axiom Boolean theorems (e.g.
+   MeredithAxioms AndAssociativity: ~7s under Mix2 vs ~60s under GT)
+   while leaving the easy cases and atp.wlt unchanged.  Auto-precedence,
+   LPO, and MNF change the search globally, so they stay opt-in via
+   explicit Method suboptions / "GoalDirected".
+
+   useMnf = the 4th element flips the runtime MNF goal-directed front
+   search (thvm_atp_set_use_mnf).  The paclet dylib always compiles MNF
+   in (WL_ATP_MNF), so "GoalDirected" no longer falls back -- it asks
+   the engine to run the bidirectional collision search alongside
+   completion, the only detector that closes a symmetric goal whose two
+   sides never share a single normal form. *)
+atpParseMethod[Automatic] := {5, 0, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     Block[{o = Association[subopts], cw, ord, ap, cwRaw},
@@ -1672,12 +1677,15 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
             "LPO", 1, "KBO" | Automatic, 0, _, 0];
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
             True, 1, False | Automatic, 0, _, 0];
-        {cw, ord, ap}
+        {cw, ord, ap, 0}
     ];
-atpParseMethod[m : ("GoalDirected" | "MNF")] := (
-    Message[TFindEquationalProof::mnf]; {-1, 0, 1});
+(* "GoalDirected" / "MNF": enable the front search.  Defaults to Mix2
+   weight (like Automatic) so completion still drives R forward while
+   MNF watches for a front collision; the front search needs the rules
+   completion derives. *)
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1};
 atpParseMethod[m_] := (
-    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1});
+    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
@@ -1982,7 +1990,8 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
         Block[{atpMethodCfg = atpParseMethod[OptionValue[Method]]},
             cRes = cEngineProof[enc, OptionValue[MaxSteps],
                 OptionValue[MaxWallSeconds],
-                atpMethodCfg[[1]], atpMethodCfg[[2]], atpMethodCfg[[3]]]];
+                atpMethodCfg[[1]], atpMethodCfg[[2]], atpMethodCfg[[3]],
+                atpMethodCfg[[4]]]];
         (* status 1 == PROVED. *)
         If[ cRes["Status"] =!= 1, Return[$Failed] ];
         extSteps = cRes["ExtSteps"];

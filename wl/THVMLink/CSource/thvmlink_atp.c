@@ -313,6 +313,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
 //   args[5] = ordering  (Integer): 0 = KBO, 1 = LPO.
 //   args[6] = auto_prec (Integer): 1 = Waldmeister auto-precedence
 //             from axiom analysis, 0 = identity precedence.
+//   args[7] = use_mnf (Integer): 1 = enable the MNF goal-directed
+//             front search (Method -> "GoalDirected"), 0 = single-NF
+//             completion only.  No effect unless the dylib was built
+//             with -DATP_MNF (the paclet always is).
 //
 // Output: one self-describing Int64 NumericArray.
 //   header (7 ints):
@@ -351,6 +355,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   mint cp_weight = MArgument_getInteger(args[4]);
   mint ordering  = MArgument_getInteger(args[5]);
   mint auto_prec = MArgument_getInteger(args[6]);
+  mint use_mnf   = MArgument_getInteger(args[7]);
 
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
@@ -420,6 +425,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   if (wall_seconds > 0.0) {
     thvm_atp_set_wall_deadline(atp, wall_seconds);
   }
+  // Method -> "GoalDirected": augment the single-NF goal check with the
+  // MNF bidirectional front search.  No-op unless built with -DATP_MNF.
+  thvm_atp_set_use_mnf(atp, (u8)(use_mnf != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];
