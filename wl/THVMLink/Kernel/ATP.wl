@@ -60,6 +60,16 @@ $AtpDebugDataset = False;
 atpDbgFail[tag_] := If[ TrueQ[$AtpDebugDataset],
     WriteString["stderr", "atp-fail @ ", tag, "\n"]];
 
+(* When True (default), resolveTrace emits a SubstitutionLemma per
+   TRACE_NORM_STEP -- linear chain extraction.  When False,
+   NORM_STEP entries are transparent (pass through their parent's
+   resolved info), so resolveTrace's ORIENT/SIMPLIFY branch reaches
+   the CP directly and the older emitNorm BFS bridges the chain.
+   TFindEquationalProof flips this for a fallback retry when chain
+   extraction produces a Statement the verifier rejects (e.g. the
+   Boolean ⊕ Orderless interaction on DeMorgan). *)
+$AtpUseChain = True;
+
 (* === LibraryLink loaders =========================================== *)
 
 (* ATP runner.  Takes a packed Int64 NumericArray
@@ -1326,6 +1336,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 te["Reason"] === $TraceAxiom,
                     <|"Key" -> axiomKeyFor[ruleEq], "Eq" -> ruleEq,
                       "Swapped" -> False|>,
+                te["Reason"] === $TraceNormStep && ! TrueQ[$AtpUseChain],
+                    (* Chain-off retry path: NORM_STEP entries pass
+                       through transparently so ORIENT/SIMPLIFY land
+                       on the CP via the chain and emitNorm bridges
+                       via BFS, recovering the pre-chain extraction
+                       behavior verbatim. *)
+                    resolveTrace[te["ParentA"]],
                 te["Reason"] === $TraceNormStep,
                     (* The C engine recorded this rewrite step
                        directly: emit one SubstitutionLemma citing the
@@ -1384,14 +1401,16 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                   te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];
-                    (* When the parent is a NORM_STEP, the chain
-                       already terminates at the equation that gets
-                       oriented -- the cplEqSetQ check (which
-                       alpha-canonicalizes both sides and is O(term-
-                       size)) is redundant and dominates the cost on
-                       large traces.  Inherit directly. *)
-                    If[ trace[[te["ParentA"] + 1]]["Reason"] ===
-                            $TraceNormStep
+                    (* When chain extraction is on AND the parent is a
+                       NORM_STEP, the chain already terminates at the
+                       equation that gets oriented -- the cplEqSetQ
+                       check is redundant and dominates cost on large
+                       traces.  Inherit directly.  When chain is off,
+                       fall through to cplEqSetQ / emitNorm so the
+                       BFS bridges the rule's normalization. *)
+                    If[ (TrueQ[$AtpUseChain] &&
+                          trace[[te["ParentA"] + 1]]["Reason"] ===
+                            $TraceNormStep)
                           || cplEqSetQ[ruleEq, pEq, varSyms],
                         <|"Key" -> pInfo["Key"], "Eq" -> pEq,
                           "Swapped" -> TrueQ[pInfo["Swapped"]]|>,
@@ -1596,34 +1615,41 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
         ];
         (* Fallback: the EXT chain could not close (or could not be
            expressed over the axioms) -- assemble the critical-pair
-           lemma DAG from the completion trace. *)
-        If[ dataset === $Failed,
-            dataset = buildCplDataset[enc, conjPair, cRes]
-        ];
-        If[ dataset === $Failed, Return[$Failed] ];
+           lemma DAG from the completion trace.  Two-phase extraction:
+             1. chain ON (TRACE_NORM_STEP entries become Substitution-
+                Lemmas directly).
+             2. chain OFF (NORM_STEP transparent, emitNorm BFS bridges
+                the chain) -- recovers cases the chain-extracted
+                Statement misses the verifier on (the Boolean ⊕
+                Orderless interaction on DeMorgan, etc).
+           Each attempt is built into a ProofObject and run through
+           WL's verifier; only a verifying proof is returned. *)
         varNames = cRes["VarSyms"];
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         conjStmt = holdToInactive[enc["ConjHCRaw"]];
-        po = ProofObject[
-            "EquationalLogic",
-            conjStmt,
-            axEq,
-            <|
-                "Variables" -> varNames,
-                "Constants" -> {},
-                "Proof" -> dataset
-            |>
-        ];
-        (* Soundness guard: only return a ProofObject that WL's own
-           verifier accepts.  A completion-derived dataset that does
-           not check (e.g. an unresolved variable-naming mismatch in
-           a CriticalPairLemma) degrades to $Failed rather than
-           handing back a proof that fails verification. *)
-        If[ Head[po] === ProofObject &&
-            Head @ Quiet @ Check[
-                po["ProofFunction"][po["Theorems"]], $Failed] === Success,
-            po,
-            $Failed
+        Module[{tryBuild, poA, poB},
+            tryBuild[chainOn_, baseDataset_] := Module[{ds, p, v},
+                ds = If[ baseDataset =!= $Failed, baseDataset,
+                    Block[{$AtpUseChain = chainOn},
+                        Quiet @ Check[
+                            buildCplDataset[enc, conjPair, cRes],
+                            $Failed]]];
+                If[ ds === $Failed, $Failed,
+                    p = ProofObject["EquationalLogic", conjStmt, axEq,
+                        <|"Variables" -> varNames,
+                          "Constants" -> {}, "Proof" -> ds|>];
+                    v = Quiet @ Check[
+                        p["ProofFunction"][p["Theorems"]], $Failed];
+                    If[ Head[p] === ProofObject && Head[v] === Success,
+                        p, $Failed]
+                ]
+            ];
+            poA = tryBuild[True, dataset];
+            If[ Head[poA] === ProofObject,
+                poA,
+                poB = tryBuild[False, $Failed];
+                If[ Head[poB] === ProofObject, poB, $Failed]
+            ]
         ]
     ],
     "TATPError"
