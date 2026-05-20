@@ -38,7 +38,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); Method (Automatic, or {\"Completion\", \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\", \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False}), exposing the saturator's CP-selection heuristic, reduction ordering, and Waldmeister structure-driven precedence.";
 
 (* Forward-declare symbols owned by sibling files (Switch.wl owns
    the IC term constructors) so bare references inside
@@ -88,7 +88,8 @@ $atpRunFn := $atpRunFn = load[
    rules / r_trace / trace / steps blocks (see thvmlink_atp.c). *)
 $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
-    {{"NumericArray", "Shared"}, Integer, Integer, Real},
+    {{"NumericArray", "Shared"}, Integer, Integer, Real,
+     Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -802,13 +803,14 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
    path) and the Main* fields carry the completion DAG for the
    critical-pair lemma path.  ExtSteps / MainSteps are $Failed when
    the corresponding extraction produced nothing. *)
-cEngineProof[enc_, maxSteps_, wallSeconds_:0.0] := Block[{
+cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
+    cpWeight_:-1, ordering_:0, autoPrec_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
     cur, labelToName, idToName, mainSteps, extSteps, mainRules,
     rTrace, traceEntries
 },
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
-        N[wallSeconds]];
+        N[wallSeconds], cpWeight, ordering, autoPrec];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
     extNRules = raw[[6]]; extNSteps = raw[[7]];
@@ -1606,6 +1608,66 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 
 (* === TFindEquationalProof ========================================= *)
 
+(* Method-option vocabulary.  The completion suboptions map onto the
+   C engine's runtime knobs (thvm_atp_set_cp_weight_mode /
+   thvm_atp_set_lpo / atp_auto_precedence), threaded through
+   cEngineProof as the {cpWeight, ordering, autoPrec} triple.
+
+   "CriticalPairWeight" -- Waldmeister ClasHeuristics CP-selection
+     weight (which pending critical pair to process next):
+       "Add"  CH_AddWeight  (bare wl+wr symbol-count sum)
+       "Max"  CH_MaxWeight
+       "Ord"  CH_OrdWeight
+       "Gt"   CH_GtWeight    (ordering-directed; engine default)
+       "Mix"  CH_MixWeight   "Mix2" CH_MixWeight2
+       "Unif" CH_Unifikationsmass
+       Automatic -> engine default (Gt).
+   "Ordering" -- reduction ordering: "KBO" (default) | "LPO" |
+     Automatic (-> KBO).
+   "AutoPrecedence" -- True/Automatic = Waldmeister structure-driven
+     precedence (PhilMarlow port), False = identity precedence. *)
+$AtpCpWeightCodes = <|
+    "Add" -> 0, "Max" -> 1, "Ord" -> 2, "Gt" -> 3,
+    "Mix" -> 4, "Mix2" -> 5, "Unif" -> 6, Automatic -> -1
+|>;
+
+TFindEquationalProof::mnf =
+    "Method \"GoalDirected\" (MNF) needs a paclet built with \
+-DATP_MNF; falling back to completion.";
+TFindEquationalProof::badmethod =
+    "Unrecognized Method `1`; using Automatic (completion).";
+TFindEquationalProof::badcpw =
+    "Unrecognized \"CriticalPairWeight\" `1`; using engine default.";
+TFindEquationalProof::lpo =
+    "\"Ordering\" -> \"LPO\" is not yet stable through the \
+ProofObject extractor (the per-step NORM_STEP recorder assumes KBO \
+orientation invariants); using KBO.";
+
+(* parse a Method spec into {cpWeight, ordering, autoPrec} ints for
+   cEngineProof.  Automatic = the engine's proven default config:
+   GT critical-pair weight, KBO, identity precedence.  Auto-precedence
+   and LPO change the orientation trajectory globally, so they are
+   opt-in via explicit Method suboptions rather than the default. *)
+atpParseMethod[Automatic] := {-1, 0, 0};
+atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
+atpParseMethod[{"Completion", subopts___Rule}] :=
+    Block[{o = Association[subopts], cw, ord, ap, cwRaw},
+        cwRaw = Lookup[o, "CriticalPairWeight", Automatic];
+        cw = Lookup[$AtpCpWeightCodes, cwRaw, $Failed];
+        If[ cw === $Failed,
+            Message[TFindEquationalProof::badcpw, cwRaw]; cw = -1];
+        ord = Switch[Lookup[o, "Ordering", Automatic],
+            "LPO", Message[TFindEquationalProof::lpo]; 0,
+            "KBO" | Automatic, 0, _, 0];
+        ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
+            True, 1, False | Automatic, 0, _, 0];
+        {cw, ord, ap}
+    ];
+atpParseMethod[m : ("GoalDirected" | "MNF")] := (
+    Message[TFindEquationalProof::mnf]; {-1, 0, 1});
+atpParseMethod[m_] := (
+    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1});
+
 (* Render a held expression in the form WL's ProofObject expects
    for its top-level Axioms list / ConjectureStatement: keep the
    ForAll wrapper if present, but rewrite every nested `Equal[lhs,
@@ -1614,7 +1676,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 holdToInactive[axHC_HoldComplete] :=
     ReleaseHold[axHC /. Equal -> Inactive[Equal]]
 
-Options[TFindEquationalProof] = {MaxSteps -> 200000, MaxWallSeconds -> 0.};
+Options[TFindEquationalProof] = {
+    MaxSteps -> 200000, MaxWallSeconds -> 0., Method -> Automatic};
 
 (* String form: resolve theorem + theory names through
    AxiomaticTheory, then run the expression form.  The conjecture
@@ -1688,8 +1751,10 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
         conjPair = enc["ConjPair"];
         axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
-        cRes = cEngineProof[enc, OptionValue[MaxSteps],
-            OptionValue[MaxWallSeconds]];
+        Block[{atpMethodCfg = atpParseMethod[OptionValue[Method]]},
+            cRes = cEngineProof[enc, OptionValue[MaxSteps],
+                OptionValue[MaxWallSeconds],
+                atpMethodCfg[[1]], atpMethodCfg[[2]], atpMethodCfg[[3]]]];
         (* status 1 == PROVED. *)
         If[ cRes["Status"] =!= 1, Return[$Failed] ];
         extSteps = cRes["ExtSteps"];

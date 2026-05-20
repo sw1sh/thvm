@@ -308,6 +308,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
 //             only defense against recursively-defined axioms like
 //             CombinatorAxioms' `Y x == x (Y x)` whose CP fan-out
 //             is unbounded.
+//   args[4] = cp_weight (Integer): AtpCpWeightMode, or -1 to keep
+//             thvm_atp_init's default (ATP_CP_WEIGHT_GT).
+//   args[5] = ordering  (Integer): 0 = KBO, 1 = LPO.
+//   args[6] = auto_prec (Integer): 1 = Waldmeister auto-precedence
+//             from axiom analysis, 0 = identity precedence.
 //
 // Output: one self-describing Int64 NumericArray.
 //   header (7 ints):
@@ -337,6 +342,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   mint max_steps   = MArgument_getInteger(args[1]);
   mint max_label   = MArgument_getInteger(args[2]);
   double wall_seconds = MArgument_getReal(args[3]);
+  // Method knobs (see TFindEquationalProof's Method option):
+  //   args[4] cp_weight : -1 = leave thvm_atp_init's default
+  //                       (ATP_CP_WEIGHT_GT), else an AtpCpWeightMode.
+  //   args[5] ordering  : 0 = KBO (default), 1 = LPO.
+  //   args[6] auto_prec : 0 = identity precedence, 1 = Waldmeister-
+  //                       style auto-precedence from axiom analysis.
+  mint cp_weight = MArgument_getInteger(args[4]);
+  mint ordering  = MArgument_getInteger(args[5]);
+  mint auto_prec = MArgument_getInteger(args[6]);
 
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
@@ -362,9 +376,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     wl_weights_p[i]    = 1;
     wl_precedence_p[i] = i + 1;
   }
-#ifdef ATP_AUTO_PREC
-  // Waldmeister-style auto-precedence from axiom-set analysis.
-  {
+  // Waldmeister-style auto-precedence from axiom-set analysis, gated
+  // at runtime by the Method "AutoPrecedence" suboption (was a
+  // compile-time -DATP_AUTO_PREC switch).
+  if (auto_prec != 0) {
     static Term ax_lhs[ATP_WL_CFG_MAX_LABELS];
     static Term ax_rhs[ATP_WL_CFG_MAX_LABELS];
     u32 n_ax_use = n_ax < ATP_WL_CFG_MAX_LABELS ? n_ax
@@ -376,7 +391,6 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     atp_auto_precedence(ax_lhs, ax_rhs, n_ax_use,
                         (u32)max_label + 1, wl_precedence_p);
   }
-#endif
   static KboConfig wl_kbo_p;
   wl_kbo_p.weights    = wl_weights_p;
   wl_kbo_p.precedence = wl_precedence_p;
@@ -385,6 +399,19 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   AtpState *atp = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  // LPO ordering: drives orientation purely by symbol precedence
+  // (same precedence array as KBO).  Attached after init so it
+  // overrides the KBO config in thvm_atp_orient_and_add / compare.
+  static LpoConfig wl_lpo_p;
+  if (ordering == 1) {
+    wl_lpo_p.precedence = wl_precedence_p;
+    wl_lpo_p.n_labels   = (u32)max_label + 1;
+    thvm_atp_set_lpo(atp, &wl_lpo_p);
+  }
+  // CP-selection weight heuristic (Waldmeister's ClasHeuristics).
+  if (cp_weight >= 0) {
+    thvm_atp_set_cp_weight_mode(atp, (u32)cp_weight);
+  }
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.
