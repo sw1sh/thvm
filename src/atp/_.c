@@ -2670,6 +2670,15 @@ fn void thvm_atp_set_lpo(AtpState *s, const LpoConfig *lpo) {
   s->lpo = lpo;
 }
 
+// Milestone 10: runtime gate for the MNF goal-directed front search.
+// No-op effect unless the dylib was compiled with -DATP_MNF -- the
+// field is always present, but goal_check only reads it inside its
+// `#ifdef ATP_MNF` block.
+fn void thvm_atp_set_use_mnf(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_mnf = on ? 1u : 0u;
+}
+
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so a garbage
 // mode falls back to the bare symbol-count heuristic.
@@ -4561,8 +4570,15 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   // cannot fire.  (An earlier revision had MNF REPLACE the single-NF
   // check; that regressed thm, which MNF's front search did not close
   // but the single-NF check does.  Both are sound -- run both.)
-  if (s->mnf == NULL) s->mnf = mnf_create(s);
-  if (s->mnf != NULL && mnf_step(s, s->mnf, MNF_BUDGET)) return ATP_PROVED;
+  //
+  // Gated on s->use_mnf so the dylib can be COMPILED with -DATP_MNF
+  // (MNF linked in) yet stay completion-only by default: the front
+  // search runs only when the WL surface flips the flag for
+  // Method -> "GoalDirected".  Off, this block is a single branch test.
+  if (s->use_mnf) {
+    if (s->mnf == NULL) s->mnf = mnf_create(s);
+    if (s->mnf != NULL && mnf_step(s, s->mnf, MNF_BUDGET)) return ATP_PROVED;
+  }
 #endif
   return ATP_RUNNING;
 }

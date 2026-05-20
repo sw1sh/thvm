@@ -137,6 +137,17 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRIT
 # thm ~50x).  Making MNF cheap enough to default on is open work.
 ATP_MNF ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF)),-DATP_MNF,)
+# The paclet dylib (wl/THVMLink) ALWAYS compiles MNF in: the front
+# search is runtime-gated by AtpState.use_mnf (set via
+# thvm_atp_set_use_mnf / Method -> "GoalDirected"), so a compiled-in
+# MNF stays inert -- and free except one branch test -- on
+# completion-only goals.  This lets the shipped dylib prove symmetric
+# goals on demand without a separate build.  C test binaries do NOT
+# get this (they key off ATP_MNF above), so `make ATP_MNF=1` is still
+# the way to exercise MNF from the C tests.  Override with
+# `WL_ATP_MNF=0 make wl` to omit it from the dylib.
+WL_ATP_MNF      ?= 1
+WL_ATP_DEFINES  := $(if $(filter-out 0,$(WL_ATP_MNF)),-DATP_MNF,)
 # ATP_MNF_DIAG: stderr trace of the MNF set (node count, queue sizes,
 # rules fed) -- a bring-up diagnostic, implies -DATP_MNF.
 ATP_MNF_DIAG ?=
@@ -383,6 +394,7 @@ $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/th
 	  -DACCELERATE_NEW_LAPACK \
 	  $(WL_TRACE_DEF) \
 	  $(ATP_DEFINES) \
+	  $(WL_ATP_DEFINES) \
 	  -I"$(WL_INCLUDE)" \
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
 	  -o $@ $(WL_SRC) build/thvm_runtime_blob.c $(METAL_OBJ) $(METAL_LDFLAGS) \

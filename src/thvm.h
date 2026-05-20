@@ -3107,6 +3107,17 @@ typedef struct {
   struct AtpMnf *mnf;
 #endif
 
+  // Milestone 10: runtime gate for the MNF goal-directed search.  The
+  // dylib is COMPILED with -DATP_MNF so MNF is linked in, but the front
+  // search stays inert unless this flag is set -- goal_check runs the
+  // single-normal-form check alone when 0 (default), preserving
+  // completion-only behaviour and timing.  Set via
+  // `thvm_atp_set_use_mnf`; the WL surface flips it for
+  // `Method -> "GoalDirected"`.  The field is always present (not behind
+  // -DATP_MNF) so callers can set it unconditionally; goal_check only
+  // consults it inside the `#ifdef ATP_MNF` block.
+  u8 use_mnf;
+
   // 7e (lever 2): discrimination tree over the rule LHS terms.  Behind
   // -DATP_RULE_INDEX, the ATP-side normalizer's per-position redex
   // search consults this instead of `rewrite_try_top`'s O(n_rules)
@@ -3303,6 +3314,14 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 // uses LPO instead of KBO.  Pass NULL to revert to KBO (the
 // default).
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
+
+// Milestone 10: enable/disable the MNF goal-directed front search at
+// runtime.  No-op unless the dylib was compiled with -DATP_MNF.  When
+// 1, goal_check augments the single-normal-form check with the
+// bidirectional MNF collision search; when 0 (default) the single-NF
+// check runs alone.  Lets one dylib carry MNF without paying for it
+// on completion-only goals.
+fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // `thvm_atp_init` defaults to ATP_CP_WEIGHT_GT; out-of-range
