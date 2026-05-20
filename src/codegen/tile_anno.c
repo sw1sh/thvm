@@ -1,8 +1,6 @@
-// codegen/tile_anno.c - axis annotation read API atop KpSchedule.
-//
-// Resolves axis count + per-axis TileAxisInfo from the KpSchedule
-// signal trio (output_shape + tail-reduce + scalar-reduce + applied_opts).
-// Thin wrappers over the axes_resolve_* family.
+// codegen/tile_anno.c - axis annotation read API.  Thin wrappers
+// over the axes_resolve_* family that read from the lifted UOp
+// DAG's post-opt RANGE leaves.
 
 fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,
                                     TileAxisInfo *out) {
