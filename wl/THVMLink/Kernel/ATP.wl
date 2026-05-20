@@ -1073,7 +1073,22 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
     Block[{$RecursionLimit = 100000, $IterationLimit = 1000000},
     Module[{
         trace = cRes["Trace"], mainRules = cRes["MainRules"],
-        rTrace = cRes["RTrace"], mainSteps = cRes["MainSteps"],
+        rTrace = cRes["RTrace"],
+        (* Goal chain: the MNF front chain when the goal was closed by
+           the bidirectional MNF search (GREEN side-0 + RED side-1
+           rewrites driving the conjecture to meet == meet), else the
+           completion single-NF MainSteps.  Both are decodeStepsBlock
+           output (same {Side, RuleC, Fwd, PosPath, Before, After}
+           shape).  RuleC carries a live-rule index for a completion
+           step (resolved via resolveRule -> rTrace) and a TRACE index
+           for an MNF step (resolved via resolveTrace directly, see the
+           chain build below); either way the cited rule -- axiom or
+           completion-derived -- resolves through the trace DAG into an
+           Axiom / CriticalPairLemma entry, so an MNF front-collision
+           proof verifies the same way a completion proof does. *)
+        usingMnf = (ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}),
+        mainSteps = If[ ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {},
+            cRes["MnfSteps"], cRes["MainSteps"]],
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, emitNorm, resolveCp, resolveTrace,
@@ -1553,9 +1568,19 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         chainEntries = Table[
             Block[{step = mainSteps[[s]], cInfo, cKey, mr, dir, ori,
                    ruleEq, newEq, st, isLast, key, inKey},
-                cInfo = resolveRule[step["RuleC"]];
+                (* MNF cites its rule by TRACE index (resolveTrace),
+                   completion cites by live-rule index (resolveRule ->
+                   rTrace -> resolveTrace).  Both land on the same
+                   Axiom / CriticalPairLemma key; mr is the rule's
+                   oriented equation, read off mainRules for a live
+                   rule or the trace node for an MNF citation. *)
+                cInfo = If[ usingMnf, resolveTrace[step["RuleC"]],
+                    resolveRule[step["RuleC"]]];
                 cKey = cInfo["Key"];
-                mr = mainRules[[step["RuleC"] + 1]];
+                mr = If[ usingMnf,
+                    With[{te = trace[[step["RuleC"] + 1]]},
+                        {te["Lhs"], te["Rhs"]}],
+                    mainRules[[step["RuleC"] + 1]]];
                 (* Ordered rewriting in the C engine fires whichever
                    direction strictly decreases the redex.  Fwd = 1
                    for an lhs->rhs application, 0 for rhs->lhs.  The

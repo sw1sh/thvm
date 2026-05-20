@@ -4577,11 +4577,19 @@ static int mnf_edge_step(Term before, Term after,
 // replays against this superset.  Sources: the live rules plus every
 // TRACE_ORIENT / TRACE_AXIOM / TRACE_SIMPLIFY trace entry's (lhs, rhs).
 // Caller-owned out_l / out_r arrays of capacity `cap`; returns count.
+// Build the historical rule set (live rules + every ORIENT/AXIOM/
+// SIMPLIFY equation that ever entered R via the trace).  out_trace[i]
+// records the TRACE index that resolves slot i, so the WL extractor can
+// resolve an MNF step's cited rule through resolveTrace exactly as it
+// resolves a completion MainStep: a live derived rule lands on its
+// critical-pair lemma, a retired rule on its own trace node.
 static u32 mnf_historical_rules(AtpState *s, Term *out_l, Term *out_r,
-                                u32 cap) {
+                                u32 *out_trace, u32 cap) {
   u32 n = 0u;
   for (u32 i = 0; i < s->n_rules && n < cap; i++) {
-    out_l[n] = s->lhs[i]; out_r[n] = s->rhs[i]; n++;
+    out_l[n] = s->lhs[i]; out_r[n] = s->rhs[i];
+    out_trace[n] = s->r_trace[i];
+    n++;
   }
   for (u32 i = 0; i < s->n_trace && n < cap; i++) {
     Term e = s->trace[i];
@@ -4590,6 +4598,7 @@ static u32 mnf_historical_rules(AtpState *s, Term *out_l, Term *out_r,
         reason == TRACE_SIMPLIFY) {
       out_l[n] = term_ctr_at(e, 2);
       out_r[n] = term_ctr_at(e, 3);
+      out_trace[n] = i;
       n++;
     }
   }
@@ -4622,7 +4631,8 @@ static u32 mnf_collect_lineage(AtpMnf *m, u32 ni, u32 *buf, u32 *len,
 // RED chains meet at the join term.  Returns 1 if every edge replayed.
 static int mnf_emit_lineage(AtpMnf *m, const u32 *terms,
                             u32 n_terms, u32 side,
-                            const Term *rl, const Term *rr, u32 nr,
+                            const Term *rl, const Term *rr,
+                            const u32 *rtr, u32 nr,
                             AtpProofStep *out, u32 cap, u32 *n) {
   for (u32 k = 0; k + 1u < n_terms; k++) {
     Term before = m->nodes[terms[k]].term;
@@ -4636,7 +4646,9 @@ static int mnf_emit_lineage(AtpMnf *m, const u32 *terms,
     if (*n >= cap) return 0;
     AtpProofStep *st = &out[*n];
     st->side    = side;
-    st->rule    = rule;
+    // rtr[rule] is the TRACE index of the cited historical rule, so WL
+    // resolves it via resolveTrace just like a completion MainStep.
+    st->rule    = rtr[rule];
     st->fwd     = fwd;
     st->pos_len = pos_len;
     for (u8 p = 0; p < pos_len; p++) st->pos[p] = pos[p];
@@ -4681,8 +4693,10 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
   u32 hist_cap = s->n_rules + s->n_trace;
   Term *hist_l = (Term *)malloc((size_t)hist_cap * sizeof(Term));
   Term *hist_r = (Term *)malloc((size_t)hist_cap * sizeof(Term));
-  if (hist_l == NULL || hist_r == NULL) { free(hist_l); free(hist_r); return 0; }
-  u32 nr = mnf_historical_rules(s, hist_l, hist_r, hist_cap);
+  u32  *hist_t = (u32  *)malloc((size_t)hist_cap * sizeof(u32));
+  if (hist_l == NULL || hist_r == NULL || hist_t == NULL) {
+    free(hist_l); free(hist_r); free(hist_t); return 0; }
+  u32 nr = mnf_historical_rules(s, hist_l, hist_r, hist_t, hist_cap);
 
   u32 n = 0u;
 #ifdef ATP_MNF_DIAG
@@ -4694,20 +4708,20 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
   // An edge that replays against no historical rule leaves the lineage
   // not reconstructable as a forward/backward chain.  Return 0 (no
   // extractable proof) rather than emit a partial, unsound chain.
-  if (!mnf_emit_lineage(m, lin_a, len_a, side_a, hist_l, hist_r, nr,
+  if (!mnf_emit_lineage(m, lin_a, len_a, side_a, hist_l, hist_r, hist_t, nr,
                         out, cap, &n)) {
 #ifdef ATP_MNF_DIAG
     fprintf(stderr, "[mnf-extract] lineage A unreplayable at step %u/%u\n",
             n, len_a > 0u ? len_a - 1u : 0u);
 #endif
-    free(hist_l); free(hist_r); return 0;
+    free(hist_l); free(hist_r); free(hist_t); return 0;
   }
-  if (!mnf_emit_lineage(m, lin_b, len_b, side_b, hist_l, hist_r, nr,
+  if (!mnf_emit_lineage(m, lin_b, len_b, side_b, hist_l, hist_r, hist_t, nr,
                         out, cap, &n)) {
 #ifdef ATP_MNF_DIAG
     fprintf(stderr, "[mnf-extract] lineage B unreplayable at step %u\n", n);
 #endif
-    free(hist_l); free(hist_r); return 0;
+    free(hist_l); free(hist_r); free(hist_t); return 0;
   }
   // Final B edge: meet_b_parent.term -> meet_term (the collision).
   {
@@ -4718,12 +4732,12 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
       u32 rule = 0u; u8 pos_len = 0u, fwd = 1u;
       if (!mnf_edge_step(before, after, hist_l, hist_r, nr,
                          pos, 0u, &rule, &pos_len, &fwd)) {
-        free(hist_l); free(hist_r); return 0;
+        free(hist_l); free(hist_r); free(hist_t); return 0;
       }
       if (n >= cap) return 0;
       AtpProofStep *st = &out[n];
       st->side    = side_b;
-      st->rule    = rule;
+      st->rule    = hist_t[rule];   // TRACE index, see mnf_emit_lineage
       st->fwd     = fwd;
       st->pos_len = pos_len;
       for (u8 p = 0; p < pos_len; p++) st->pos[p] = pos[p];
@@ -4732,7 +4746,7 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
       n++;
     }
   }
-  free(hist_l); free(hist_r);
+  free(hist_l); free(hist_r); free(hist_t);
   return n;
 }
 #endif /* ATP_MNF */
