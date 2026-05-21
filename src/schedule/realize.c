@@ -63,8 +63,8 @@ fn Term thvm_realize(Term expr) {
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
 
-  // realize loop (wnf is the only reducer -- `nf` is the inspector
-  // primitive, see wnf/nf.c, NOT in this hot path).
+  // wnf is the only reducer -- `nf` is the inspector primitive (see
+  // wnf/nf.c), NOT in this hot path.
   //   - wnf walks the head to WHNF using local SUB-bit substitution
   //     (heap_subst_var) -- O(1) per fire, no global heap_replace
   //     cascade.  TAG_REF / TAG_ALO unfold lazily.
@@ -78,23 +78,24 @@ fn Term thvm_realize(Term expr) {
   //   - materialize compiles whatever lazy UOP compute survived.
   //     Materialize is graph -> kernel compile, NEVER fires
   //     interactions.
-  // Fixed point: a pass where materialize emits no fresh kernel AND
-  // wnf fires no interactions.  Safety cap (THVM_REALIZE_MAX_ITERS,
-  // hoisted to file scope above so thvm_realize_many shares it).
-  // Loop converges in 2-3 iterations in practice.
+  // Three phases, NO loop:
+  //   1. wnf drives every interaction -- including the FULL chain-rule
+  //      backward -- on the tensor-level UOP graph.  No kernels exist
+  //      yet, so grad never descends into a kernel's source_uop (that
+  //      path is for the explicit materialize-then-grad case only).
+  //      The complete forward+backward graph emerges as ONE shared
+  //      sink, so an activation consumed by both the forward and a
+  //      backward adjoint is a single hash-consed node.
+  //   2. ONE materialize pass classifies that whole sink.
+  //   3. wnf fires the emitted kernels (interact_kernel -> backend
+  //      dispatch) to land the result TENs.
   Term res = expr;
   u32 kn_at_call_start = KERNELS_NEXT;
-  int iters_used = 0;
-  for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
-    u32 kn0   = KERNELS_NEXT;
-    u64 itrs0 = ITRS;
-    res = wnf(res);
-    Term mat = thvm_materialize(res);
-    iters_used = iter + 1;
-    if (KERNELS_NEXT == kn0 && ITRS == itrs0) { res = mat; break; }
-    kernel_compute_consumer_counts();
-    res = mat;
-  }
+  int iters_used = 1;
+  res = wnf(res);
+  res = thvm_materialize(res);
+  kernel_compute_consumer_counts();
+  res = wnf(res);
   if (getenv("THVM_KCNT")) {
     fprintf(stderr, "DBG realize emit: %u kernels in %d iters\n",
             KERNELS_NEXT - kn_at_call_start, iters_used);
