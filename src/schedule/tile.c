@@ -86,7 +86,7 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
   // DAG-side structural gate: classify the lifted UOp DAG.  Materialize
   // always populates cached_lift.store_root on emitted kernels.
   if (ke->cached_lift.store_root == 0) return 0;
-  if (!uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root, ke)) {
+  if (!uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root)) {
     return 0;
   }
   TILE_CONV2D_FLAT_DAG++;

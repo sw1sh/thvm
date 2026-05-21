@@ -2303,8 +2303,7 @@ int uop_dag_classify_gemv_shape(Term root,
 //
 // Returns 1 on match.  No extents-out parameter -- conv2d_flat's
 // shape lives in input_views, not in the lifted DAG.
-int uop_dag_classify_conv2d_flat_shape(Term root,
-                                       struct KernelEntry const *ke);
+int uop_dag_classify_conv2d_flat_shape(Term root);
 
 // === conv2d-flat full-shape extractor ==================================
 // Inverts the conv2d-flat IDIV/IMOD address decomposition so the

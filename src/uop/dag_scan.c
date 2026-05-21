@@ -857,9 +857,7 @@ int uop_dag_classify_gemv_shape(Term root,
 // tile_analyze_conv2d_flat -- it reads `ke->input_views[]` /
 // `ke->output_shape` / opt-derived counters, none of which need the
 // DAG.  So this classifier returns just 1/0 with no out struct.
-int uop_dag_classify_conv2d_flat_shape(Term root,
-                                       struct KernelEntry const *ke) {
-  (void)ke;  // unused -- view/shape extraction stays in the caller
+int uop_dag_classify_conv2d_flat_shape(Term root) {
   if (root == 0) return 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
   Term value = heap_read(term_val(root) + 2);
