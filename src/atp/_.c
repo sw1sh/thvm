@@ -4431,15 +4431,30 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
 // call to every already-expanded node; (b) expand up to `budget` queued
 // (first-expansion) nodes against the full current R.  Returns 1 once
 // the fronts have joined.
-// Heap guard for the MNF expansion loops.  Between node expansions every
-// live MNF term is parked in m->nodes (rooted by thvm_atp_gc_collect) and
-// no expand-local term is allocated yet, so a Cheney collection here is
-// safe.  Returns 1 if the front must stop growing: heap is still under
-// pressure after a collection (the live working set alone exceeds the
-// half-space), so further expansion would exhaust from-space and abort
-// the process.  The caller sets m->full and breaks; completion keeps
-// running and the goal still closes by single-NF or a later collision.
-static int mnf_heap_guard(AtpState *s, AtpMnf *m) {
+// Per-node guard for the MNF expansion loops.  Returns 1 when the loop
+// must stop, for either of two reasons:
+//
+//  - Wall deadline.  A single mnf_step can re-expand a large node table
+//    against many newly-derived rules without ever returning to
+//    thvm_atp_step's per-step wall check, so a hard goal can run far
+//    past MaxWallSeconds inside one mnf_step.  Poll the deadline here
+//    (throttled to every 256th call, since clock_gettime per node over
+//    a 400k-node table is pure overhead) and bail; goal_check returns
+//    and the next step iteration reports ATP_TIMEOUT.
+//  - Heap pressure.  Between node expansions every live MNF term is
+//    parked in m->nodes (rooted by thvm_atp_gc_collect) and no
+//    expand-local term is allocated yet, so a Cheney collection here is
+//    safe.  If heap is still under pressure after a collection -- the
+//    live working set alone exceeds the half-space -- the front must
+//    stop growing or it would exhaust from-space and abort the process;
+//    set m->full so the caller stops.  Completion keeps running and the
+//    goal still closes by single-NF or a later collision.
+static int mnf_loop_guard(AtpState *s, AtpMnf *m) {
+  static u32 tick = 0u;
+  if ((++tick & 0xFFu) == 0u && s->wall_deadline_us != 0u) {
+    u64 now = atp_now_us();
+    if (now != 0u && now >= s->wall_deadline_us) return 1;
+  }
   if (!atp_heap_under_pressure()) return 0;
   thvm_atp_gc_collect(s);
   if (atp_heap_under_pressure()) { m->full = 1u; return 1; }
@@ -4483,7 +4498,7 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     u32 lo = m->n_rules_seen, hi = s->n_rules, upto = m->n_nodes;
     for (u32 ni = 0; ni < upto && !m->joined; ni++) {
       if (m->nodes[ni].expanded) {
-        if (mnf_heap_guard(s, m)) break;
+        if (mnf_loop_guard(s, m)) break;
         mnf_expand_node(s, m, ni, lo, hi);
       }
     }
@@ -4494,7 +4509,7 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
   // policy (mnf_pop).  A node's `irred` is settled by mnf_expand_node;
   // it feeds the next pop of the same colour.
   for (u32 b = 0; b < budget && !m->joined; b++) {
-    if (mnf_heap_guard(s, m)) break;
+    if (mnf_loop_guard(s, m)) break;
     int did = 0;
     if (m->qred_head < m->qred_tail) {
       u32 ni = mnf_pop(m->qred, &m->qred_head, &m->qred_tail,
