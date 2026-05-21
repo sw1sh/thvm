@@ -628,20 +628,31 @@ broadcastScalar[t_TTerm, targetShape_List] := With[{s = tUopShape[t]},
         t]]
 broadcastScalar[other_, _] := other
 
-TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] := With[{
-    targetShape = tUopShape[t],
-    lifted = liftNumeric[#, broadcastDType[t, #]] & /@ {rest}
-},
-    pairFold[TUOpAdd,
-        Prepend[broadcastScalar[#, targetShape] & /@ lifted, t]]
+(* numpy-style broadcast of a set of shapes: right-align, pad missing
+   leading axes with 1, take the per-axis max.  The common shape of an
+   elementwise binop -- using the FIRST operand's shape is wrong when a
+   later operand outranks it (e.g. a rank-0 scalar reduce result like
+   TDot combined with a shape-{1} target). *)
+broadcastShapes[shapes : {___List}] := Module[{maxr, padded},
+    maxr = Max[Append[Length /@ shapes, 0]];
+    If[ maxr === 0,
+        {},
+        padded = (s |-> PadLeft[s, maxr, 1]) /@ shapes;
+        MapThread[Max, padded]]
 ]
 
-TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := With[{
-    targetShape = tUopShape[t],
-    lifted = liftNumeric[#, broadcastDType[t, #]] & /@ {rest}
-},
-    pairFold[TUOpMul,
-        Prepend[broadcastScalar[#, targetShape] & /@ lifted, t]]
+TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targetShape},
+    lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
+    allTerms = Prepend[lifted, t];
+    targetShape = broadcastShapes[tUopShape /@ allTerms];
+    pairFold[TUOpAdd, (x |-> broadcastScalar[x, targetShape]) /@ allTerms]
+]
+
+TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targetShape},
+    lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
+    allTerms = Prepend[lifted, t];
+    targetShape = broadcastShapes[tUopShape /@ allTerms];
+    pairFold[TUOpMul, (x |-> broadcastScalar[x, targetShape]) /@ allTerms]
 ]
 
 TTerm /: Minus[t_TTerm ? tensorTermQ] := TUOpNeg[t]

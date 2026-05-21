@@ -59,13 +59,16 @@ shapeText[_]          := ""
 broadcastShape[s1_List, s2_List] := If[(Times @@ s1) === 1, s2, s1]
 broadcastShape[s1_,    _]        := s1
 
-(* Reduction along an axis: drop that axis (collapse to {1} for
-   rank<=1 inputs to mirror the C-side fallback). *)
+(* Reduction along an axis: drop that axis.  A rank-1 reduce collapses
+   to rank-0 {} (a genuine scalar), mirroring the C-side REDUCE shape
+   inference (uop_meta.c since e3a5082f drops the reduced axis even for
+   a 1-D source).  An out-of-range axis / rank-0 source stays scalar. *)
 dropAxis[shape_List, axis_Integer] := If[
-    Length[shape] <= 1, {1},
-    Delete[shape, axis + 1]
+    0 <= axis < Length[shape],
+    Delete[shape, axis + 1],
+    {}
 ]
-dropAxis[_, _] := {1}
+dropAxis[_, _] := {}
 
 (* TenDesc shape lookup -- TENS[id].view.shape via the loaded
    library function $tensorShapeFn (defined in THVMLink.wl).
