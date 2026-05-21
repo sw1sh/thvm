@@ -1954,6 +1954,14 @@ static void atp_ri_rebuild(AtpState *s) {
   ix->any_folded = 0;
   ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
   for (u32 i = 0; i < s->n_rules; i++) {
+    // When unorientable equations are present, index only the
+    // orientable rules (always forward-decreasing, applied without an
+    // order check); the few unorientable ones go to the linear
+    // KBO-gated pass.  When n_unorient == 0 every rule is orientable, so
+    // index all -- and r_orient[] may be a stale default for rules a
+    // caller installed by hand, which is fine in that all-orientable
+    // regime.
+    if (s->n_unorient > 0u && !s->r_orient[i]) continue;
     AtpRiVarMap vm;
     atp_ri_varmap_reset(&vm);
     u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
@@ -2763,6 +2771,11 @@ static int atp_vars_contained(Term a, Term b) {
 // only when variable-safe and applied only when it strictly decreases
 // `t`.  This fast path matters: without it, building a `repl` per
 // failed order-check on every rule churns the heap catastrophically.
+// Set by the mixed normalize loop: after the indexed (orientable)
+// fixpoint, oriented rules cannot fire, so the linear step skips them
+// and only tries the unorientable equations.
+static u8 g_atp_skip_oriented = 0u;
+
 static Term atp_ordered_try_top(AtpState *s, Term t,
                                 const Term *lhs, const Term *rhs,
                                 u32 n_rules, u8 *fired) {
@@ -2776,6 +2789,7 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
     u8 oriented = orient ? orient[i]
                          : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
     if (oriented) {
+      if (g_atp_skip_oriented) continue;   // already at indexed fixpoint
       // oriented rule -- forward only, no order check, no waste.
       RewriteSubst subst = {{0}};
       if (thvm_match(lhs[i], t, &subst)) {
@@ -2848,9 +2862,28 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
   // is a live COUNT, not a sticky flag: a transient unorientable rule
   // -- interreduced away or re-oriented after reduction -- restores the
   // indexed path the moment R is orientable again.
-  if (s->n_unorient == 0u && lhs == s->lhs && rhs == s->rhs &&
-      n_rules == s->n_rules) {
-    return atp_rewrite_normalize_indexed(s, t, step_cap);
+  if (lhs == s->lhs && rhs == s->rhs && n_rules == s->n_rules) {
+    if (s->n_unorient == 0u) {
+      return atp_rewrite_normalize_indexed(s, t, step_cap);
+    }
+    // Mixed rule set: the discrimination tree (orientable rules only)
+    // normalizes every orientable rewrite in one fast descent; the few
+    // unorientable equations are then applied one outermost, KBO-gated
+    // step at a time, re-running the indexed pass between.  After an
+    // indexed fixpoint no orientable rule fires, so the linear step
+    // finds an unorientable rewrite (or none = done).  Replaces the
+    // O(n_rules) linear scan per rewrite that dominated completion on a
+    // self-overlapping axiom.
+    for (u32 i = 0; i < step_cap; i++) {
+      t = atp_rewrite_normalize_indexed(s, t, step_cap);
+      u8 fired = 0;
+      g_atp_skip_oriented = 1u;
+      Term t2 = atp_ordered_rewrite_step(s, t, lhs, rhs, n_rules, &fired);
+      g_atp_skip_oriented = 0u;
+      if (!fired) break;
+      t = t2;
+    }
+    return t;
   }
 #endif
   for (u32 i = 0; i < step_cap; i++) {
