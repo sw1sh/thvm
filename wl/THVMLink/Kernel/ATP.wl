@@ -38,7 +38,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindEquationalProof[axioms] (a list of axiom equations) or TFindEquationalProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindEquationalProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- a Waldmeister-style strategy schedule that tries Mix2 weight, then LPO+AutoPrecedence, then GT weight, returning the first that proves+verifies; or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\", \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11)}), exposing the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindEquationalProof[axioms] (a list of axiom equations) or TFindEquationalProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindEquationalProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\", \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11)}), exposing the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (SInE-style symbol-connectivity pruning -- heuristic, may drop a needed axiom).";
 
@@ -1806,8 +1806,346 @@ $AtpSchedule = {
     {"Completion", "CriticalPairWeight" -> "Gt"},
     "GoalDirected"
 };
-atpScheduleFor[Automatic | "Portfolio"] := $AtpSchedule;
+(* "Portfolio" is the FIXED schedule above (prior behavior, kept
+   reachable verbatim).  Automatic is now PROBLEM-AWARE: it front-loads
+   a tailored config for the detected algebraic structure, then APPENDS
+   $AtpSchedule as a fallback tail so it can never prove less than the
+   fixed portfolio (see atpAutoTune).  atpScheduleFor's two-arg form
+   threads the axioms+conjecture so Automatic can analyze them. *)
+atpScheduleFor["Portfolio"] := $AtpSchedule;
+atpScheduleFor["Portfolio", _, _] := $AtpSchedule;
+atpScheduleFor[Automatic, axioms_, conjecture_] :=
+    atpTunedSchedule[axioms, conjecture];
+atpScheduleFor[Automatic] := $AtpSchedule;          (* no problem in hand *)
+atpScheduleFor[m_, _, _] := {m};
 atpScheduleFor[m_] := {m};
+
+(* ====================================================================
+   Problem-analysis auto-tuner  (port of Waldmeister's PhilMarlow /
+   XFiles "structure recognition -> strategy database").
+
+   PORTED EXACTLY (cited per function):
+     - The law detectors (commutativity / associativity / idempotence /
+       left+right unit / left+right inverse / distributivity) are a
+       faithful WL re-statement of the C predicates in
+       src/atp/precedence.c (prec_is_commutativity etc.), which are
+       themselves ports of waldmeister TermOperationen.c's
+       TO_IstKommutativitaet / TO_IstAssoziativitaet /
+       TO_IstDistribution and the Sinai.h Tafel1 law equations
+       (Sinai.h:54-101).  The arg-order and orientation handling match
+       precedence.c:51-189 line for line.
+     - The structure -> strategy assignments reproduce the relevant
+       rows of waldmeister Tafel2 (Sinai.h:113-131), decoded through
+       YFiles.c into thvm Method knobs:
+         StdS  = kbo(std),itl(mi),zb(mnf)        (Sinai.h:109)
+                 -> KBO, GoalInterleave 50, GoalDirected(mnf front)
+         GtS   = kbo(std),cph(gt),itl(mi)        (Sinai.h:110)
+                 -> KBO, CriticalPairWeight Gt, GoalInterleave 50
+         KombS = rose(),kbo(std),cph(add),...    (Sinai.h:111)
+                 -> KBO, CriticalPairWeight Add (combinator logic)
+       The Tafel2 assignments used: Gruppe / BoolescheAlgebra ->
+       GtS (Sinai.h:114-116); WajsbergAlgebra / LDAlgebra -> StdS
+       (Sinai.h:118,124); Ring -> kbo(Std) (Sinai.h:122);
+       Kombinatorlogik* -> KombS (Sinai.h:125-128); itl/cph/zb decoded
+       via YFiles.c:78-122 (itl(mi) = -pq interleave=1.50;
+       cph(gt) = gtweight; cph(add) = addweight; zb(mnf) = MNF goal
+       normal-form front search; kbo = -ord kbo).
+
+   APPROXIMATED-IN-SPIRIT (NOT a literal port):
+     - Structure RECOGNITION.  Waldmeister's XFiles.c builds Komprimate
+       and runs the Tafel3 premise-matching subsumption engine
+       (PhilMarlow.c PraemissenDurchgenudelt / ZuordnungQuasiSpezieller)
+       to pick the most-specific structure.  We do NOT port that table
+       machinery; instead we classify directly from the per-operator law
+       flags into a coarse class (AC / Group / AbelianGroup / Monoid /
+       Ring / Sheffer / Combinatory / Lattice / General).  Faithful in
+       intent, not in mechanism.
+     - The exact YFiles parametrizations (mnfanalysis tuples, DEF/VAR
+       weights, the 400/6000/14000 bis() step bounds) are NOT carried
+       across; thvm's knobs are coarser (a single GoalInterleave int, a
+       weight name, KBO/LPO, GroundJoin).  We pick the closest knob.
+   ==================================================================== *)
+
+(* {boundVars, lhs, rhs} of an axiom.  Handles ForAll[vars, l == r]
+   (vars a single symbol or a List), a bare l == r, and an Inactive
+   Equal.  Returns $Failed for a non-equation. *)
+atpAxiomParts[ax_] := Block[{vars, eq, l, r},
+    vars = Switch[ax,
+        _ForAll, Flatten[{ax[[1]]}],
+        _, {}];
+    eq = ax /. ForAll[_, e_] :> e;
+    eq = eq /. Inactive[Equal] -> Equal;
+    If[ Head[eq] =!= Equal || Length[eq] =!= 2, Return[$Failed]];
+    {l, r} = List @@ eq;
+    {vars, l, r}
+];
+
+(* a term is the i-th bound variable. *)
+atpIsVar[t_, vars_] := MemberQ[vars, t];
+
+(* a binary application op[_, _] with op a non-variable head.  Returns
+   the head, or $Failed.  Mirrors prec_is_binop (precedence.c:43). *)
+atpBinHead[t_, vars_] := If[
+    MatchQ[t, _[_, _]] && ! atpIsVar[Head[t], vars] && Head[t] =!= List,
+    Head[t], $Failed];
+
+(* Commutativity  f[x,y] == f[y,x].  Port of prec_is_commutativity
+   (precedence.c:51) / TO_IstKommutativitaet. *)
+atpLawCommutative[l_, r_, vars_] := Block[{f},
+    f = atpBinHead[l, vars];
+    f =!= $Failed && atpBinHead[r, vars] === f &&
+        MatchQ[{l, r}, {f[a_, b_], f[b_, a_]}] &&
+        atpIsVar[l[[1]], vars] && atpIsVar[l[[2]], vars] &&
+        l[[1]] =!= l[[2]]
+];
+
+(* one orientation of associativity: a = f[f[x,y],z], b = f[x,f[y,z]].
+   Port of prec_assoc_dir (precedence.c:65). *)
+atpAssocDir[a_, b_, f_, vars_] :=
+    MatchQ[a, f[f[x_, y_], z_] /;
+        atpIsVar[x, vars] && atpIsVar[y, vars] && atpIsVar[z, vars] &&
+        MatchQ[b, f[x, f[y, z]]]];
+
+(* Associativity (either side flattened).  Port of
+   prec_is_associativity (precedence.c:90). *)
+atpLawAssociative[l_, r_, vars_] := Block[{f},
+    f = atpBinHead[l, vars];
+    If[ f === $Failed, f = atpBinHead[r, vars]];
+    f =!= $Failed &&
+        (atpAssocDir[l, r, f, vars] || atpAssocDir[r, l, f, vars])
+];
+
+(* Idempotence  f[x,x] == x.  Port of prec_is_idempotence
+   (precedence.c:104) / Sinai Idempotenz. *)
+atpLawIdempotent[l_, r_, vars_] := Block[{f},
+    f = atpBinHead[l, vars];
+    f =!= $Failed && atpIsVar[l[[1]], vars] && l[[1]] === l[[2]] &&
+        r === l[[1]]
+];
+
+(* a constant (a nullary CTR): an atom that is not a bound variable, or
+   a unit-wrapper like OverTilde[1] / OverBar[0] / a CircleTimes-free
+   integer.  Waldmeister's prec_is_identity wants the unit slot to be a
+   nullary CTR (precedence.c:126); in WL the "unit" is a ground term
+   with no bound variable. *)
+atpIsConstTerm[t_, vars_] := FreeQ[t, Alternatives @@ vars] &&
+    ! atpIsVar[t, vars];
+
+(* Left/right identity  f[e,x]==x  /  f[x,e]==x, e a constant.  Port of
+   prec_is_identity (precedence.c:118).  side 0 = left, 1 = right. *)
+atpLawIdentity[l_, r_, vars_, side_] := Block[{f, unit, var},
+    f = atpBinHead[l, vars];
+    If[ f === $Failed || ! atpIsVar[r, vars], Return[False]];
+    unit = l[[side + 1]];
+    var = l[[2 - side]];
+    atpIsVar[var, vars] && var === r && atpIsConstTerm[unit, vars]
+];
+
+(* Left/right inverse  f[i[x],x]==e  /  f[x,i[x]]==e, i unary, e const.
+   Port of prec_is_inverse (precedence.c:136).  side 0 = left. *)
+atpLawInverse[l_, r_, vars_, side_] := Block[{f, inv, var},
+    f = atpBinHead[l, vars];
+    If[ f === $Failed || ! atpIsConstTerm[r, vars], Return[False]];
+    inv = l[[side + 1]];
+    var = l[[2 - side]];
+    atpIsVar[var, vars] && MatchQ[inv, _[_]] && ! atpIsVar[Head[inv], vars] &&
+        atpIsVar[inv[[1]], vars] && inv[[1]] === var
+];
+
+(* one orientation of left distributivity: a = f[x,g[y,z]],
+   b = g[f[x,y],f[x,z]], f != g.  Port of prec_distrib_dir
+   (precedence.c:155). *)
+atpDistribDir[a_, b_, vars_] := Block[{f, g, x, inner},
+    f = atpBinHead[a, vars];
+    If[ f === $Failed || ! atpIsVar[a[[1]], vars], Return[$Failed]];
+    x = a[[1]];
+    inner = a[[2]];
+    g = atpBinHead[inner, vars];
+    If[ g === $Failed || g === f, Return[$Failed]];
+    If[ ! atpIsVar[inner[[1]], vars] || ! atpIsVar[inner[[2]], vars] ||
+        inner[[1]] === inner[[2]], Return[$Failed]];
+    If[ MatchQ[b, g[f[x, inner[[1]]], f[x, inner[[2]]]]],
+        {f, g}, $Failed]
+];
+
+(* Distributivity f over g (either orientation).  Port of
+   prec_is_distributivity (precedence.c:186). *)
+atpLawDistributes[l_, r_, vars_] := Block[{d},
+    d = atpDistribDir[l, r, vars];
+    If[ d === $Failed, d = atpDistribDir[r, l, vars]];
+    d
+];
+
+(* === atpAnalyzeStructure ===========================================
+   Walk the axiom list once, tag each operator with its laws, then
+   classify into a coarse structure class.  Returns an Association:
+     "Operators"      <|head -> <|"Commutative", "Associative",
+                                   "Idempotent", "HasUnit", "HasInverse",
+                                   "Distributes", "Arity"|> ...|>
+     "ACOperators"    {heads that are commutative AND associative}
+     "Class"          "AC" | "Group" | "AbelianGroup" | "Monoid" |
+                      "Ring" | "Sheffer" | "Combinatory" | "Lattice" |
+                      "General"
+     "NOperators", "MaxArity", "NAxioms"
+   conjecture is accepted for symmetry with atpAutoTune but does not
+   change the class (Waldmeister classifies from the equation set;
+   PhilMarlow.c:1422-1429). *)
+atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
+    parts, vars, ops, allHeads, combinatorConsts, isSheffer, isComb,
+    acOps, hasAssoc, hasComm, hasInv, hasUnit, hasIdem, hasDistrib,
+    class, maxArity, arities},
+    parts = DeleteCases[atpAxiomParts /@ axioms, $Failed];
+    (* per-operator law flags *)
+    ops = <||>;
+    Module[{tag},
+        tag[h_, key_] := ops[h] = Append[Lookup[ops, h, <|
+            "Commutative" -> False, "Associative" -> False,
+            "Idempotent" -> False, "HasUnit" -> False,
+            "HasInverse" -> False, "Distributes" -> False,
+            "Arity" -> 0|>], key -> True];
+        Do[ Block[{vs = p[[1]], l = p[[2]], r = p[[3]], f, d},
+            (* record arity of every applied non-variable head *)
+            Scan[Function[t,
+                If[ MatchQ[t, _[___]] && ! atpIsVar[Head[t], vs] &&
+                    Head[t] =!= List && Head[t] =!= Equal,
+                    ops[Head[t]] = Append[
+                        Lookup[ops, Head[t], <|
+                            "Commutative" -> False, "Associative" -> False,
+                            "Idempotent" -> False, "HasUnit" -> False,
+                            "HasInverse" -> False, "Distributes" -> False,
+                            "Arity" -> 0|>],
+                        "Arity" -> Length[t]]]],
+                {l, r}, {0, Infinity}, Heads -> False];
+            If[ atpLawCommutative[l, r, vs], tag[atpBinHead[l, vs], "Commutative"]];
+            If[ atpLawAssociative[l, r, vs],
+                f = atpBinHead[l, vs]; If[ f === $Failed, f = atpBinHead[r, vs]];
+                tag[f, "Associative"]];
+            If[ atpLawIdempotent[l, r, vs], tag[atpBinHead[l, vs], "Idempotent"]];
+            Do[ Block[{a = If[sw == 1, r, l], b = If[sw == 1, l, r]},
+                If[ atpLawIdentity[a, b, vs, 0], tag[atpBinHead[a, vs], "HasUnit"]];
+                If[ atpLawIdentity[a, b, vs, 1], tag[atpBinHead[a, vs], "HasUnit"]];
+                If[ atpLawInverse[a, b, vs, 0], tag[atpBinHead[a, vs], "HasInverse"]];
+                If[ atpLawInverse[a, b, vs, 1], tag[atpBinHead[a, vs], "HasInverse"]]],
+                {sw, 0, 1}];
+            d = atpLawDistributes[l, r, vs];
+            If[ d =!= $Failed, tag[First[d], "Distributes"]]],
+            {p, parts}]
+    ];
+    acOps = Keys @ Select[ops, #["Commutative"] && #["Associative"] &];
+    hasAssoc = AnyTrue[Values[ops], #["Associative"] &];
+    hasComm = AnyTrue[Values[ops], #["Commutative"] &];
+    hasInv = AnyTrue[Values[ops], #["HasInverse"] &];
+    hasUnit = AnyTrue[Values[ops], #["HasUnit"] &];
+    hasIdem = AnyTrue[Values[ops], #["Idempotent"] &];
+    hasDistrib = AnyTrue[Values[ops], #["Distributes"] &];
+    arities = #["Arity"] & /@ Values[ops];
+    maxArity = If[arities === {}, 0, Max[arities]];
+    (* Combinatory logic: a single binary "application" operator and the
+       rest of the heads are nullary combinator CONSTANTS (S,K,B,...).
+       Sinai Tafel3 Kombinatorlogik* use the "_" application op
+       (Sinai.h:95-102, 348-362).  Heuristic: one binary op, >= 1
+       nullary head, no commutativity/unit/inverse. *)
+    allHeads = Keys[ops];
+    isComb = Length[Select[Values[ops], #["Arity"] == 2 &]] == 1 &&
+        AnyTrue[Values[ops], #["Arity"] == 0 &] &&
+        ! hasComm && ! hasUnit && ! hasInv && Length[parts] <= 4;
+    (* Sheffer / Nand: a single binary operator, no other structure
+       (no associativity, commutativity is the GOAL not an axiom).
+       WolframAxioms is the canonical case (one CenterDot axiom). *)
+    isSheffer = Length[allHeads] == 1 && First[Values[ops]]["Arity"] == 2 &&
+        ! hasAssoc && ! hasComm && ! hasUnit && ! hasInv && ! hasDistrib;
+    class = Which[
+        isComb, "Combinatory",
+        isSheffer, "Sheffer",
+        hasDistrib && hasInv, "Ring",
+        hasInv && hasUnit && hasAssoc && hasComm, "AbelianGroup",
+        hasInv && hasUnit && hasAssoc, "Group",
+        hasIdem && hasComm && hasAssoc && ! hasInv, "Lattice",
+        hasUnit && hasAssoc, "Monoid",
+        hasComm && hasAssoc, "AC",
+        True, "General"];
+    <|"Operators" -> ops, "ACOperators" -> acOps, "Class" -> class,
+      "NOperators" -> Length[ops], "MaxArity" -> maxArity,
+      "NAxioms" -> Length[parts]|>
+];
+(* the named-theory / single-arg conveniences resolve through
+   AxiomaticTheory like the rest of the surface. *)
+atpAnalyzeStructure[theory_String] :=
+    atpAnalyzeStructure[AxiomaticTheory[theory]];
+
+(* === atpAutoTune ===================================================
+   Map the detected structure class to an ORDERED list of tailored
+   Method configs, FRONT of the schedule.  The mappings reproduce
+   waldmeister Tafel2 (Sinai.h:113-131) decoded into thvm knobs (see
+   the citation block above atpAxiomParts).  These are best-GUESS
+   front-loads only -- the safety tail in atpTunedSchedule guarantees
+   the fixed portfolio still runs if none close. *)
+atpAutoTune[axioms_List, conjecture_ : Null] := Block[{prof = atpAnalyzeStructure[axioms, conjecture]},
+    atpAutoTuneForClass[prof["Class"]]
+];
+atpAutoTune[theory_String, conjecture_ : Null] :=
+    atpAutoTune[AxiomaticTheory[theory], conjecture];
+
+(* Tafel2 row -> thvm config list.  Decoding key:
+   GtS  -> Gt weight, KBO, GoalInterleave 50  (Sinai.h:110)
+   StdS -> KBO, GoalInterleave 50, GoalDirected MNF front (Sinai.h:109)
+   KombS-> Add weight, KBO                    (Sinai.h:111) *)
+atpGtS = {"Completion", "CriticalPairWeight" -> "Gt",
+    "GoalInterleave" -> 50};
+atpStdS = {"Completion", "GoalInterleave" -> 50};
+atpKombS = {"Completion", "CriticalPairWeight" -> "Add",
+    "Ordering" -> "LPO", "AutoPrecedence" -> True};
+
+atpAutoTuneForClass["AbelianGroup" | "Group"] := {
+    (* Tafel2: Gruppe -> GtS (Sinai.h:115).  AutoPrecedence puts the
+       unary inverse on top (Sinai Group precedence "+-0", Sinai.h:117/
+       precedence.c:329) so i(i(x)) -> x orients cleanly. *)
+    {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50,
+        "AutoPrecedence" -> True},
+    atpGtS};
+atpAutoTuneForClass["Ring"] := {
+    (* Tafel2: Ring -> kbo(Std) (Sinai.h:122); structure precedence
+       puts the distributor "*" above "+" (Tafel3 Ring "*+",
+       Sinai.h:243 / precedence.c:331). *)
+    {"Completion", "Ordering" -> "KBO", "AutoPrecedence" -> True},
+    atpGtS};
+atpAutoTuneForClass["AC"] := {
+    (* AC theories: GtS family -- a KBO with ordering-directed (gt) CP
+       weight handles commutative+associative operators (Sinai Verband /
+       group rows all use GtS / kbo, Sinai.h:114-122). *)
+    atpGtS,
+    {"Completion", "CriticalPairWeight" -> "Mix2", "GoalInterleave" -> 50}};
+atpAutoTuneForClass["Lattice"] := {
+    (* Tafel2: Verband -> kbo(Std),cph(gt),gj() ... lpo(std),itl(re)
+       (Sinai.h:120) -- GroundJoin on, then an LPO pass. *)
+    {"Completion", "CriticalPairWeight" -> "Gt", "GroundJoin" -> True,
+        "GoalInterleave" -> 50},
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "GoalInterleave" -> 100}};
+atpAutoTuneForClass["Monoid"] := {atpGtS, atpStdS};
+atpAutoTuneForClass["Combinatory"] := {
+    (* Tafel2: Kombinatorlogik* -> KombS = cph(add) (Sinai.h:111,125).
+       Variable-duplicating combinator rules (S,W,M) need LPO. *)
+    atpKombS,
+    {"Completion", "CriticalPairWeight" -> "Add"}};
+atpAutoTuneForClass["Sheffer"] := {
+    (* No Tafel2 Sheffer row.  Sheffer/Nand goals (WolframAxioms) are
+       symmetric and never share a normal form, so the MNF front search
+       (StdS's zb(mnf), Sinai.h:109) is the closer; pair it with the
+       Mix2 weight that thvm finds best on the hard cross-axiom Sheffer
+       theorems. *)
+    {"GoalDirected", "CriticalPairWeight" -> "Mix2"},
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True}};
+atpAutoTuneForClass[_] := {};   (* "General": no front-load, just tail *)
+
+(* Front-load the tuned configs, then APPEND the full fixed portfolio
+   as a fallback tail and DeleteDuplicates.  This is the safety
+   constraint: Automatic only REORDERS -- every config the fixed
+   portfolio runs is still present, so the tuned schedule can never
+   prove strictly less than "Portfolio". *)
+atpTunedSchedule[axioms_, conjecture_] := DeleteDuplicates @ Join[
+    Quiet @ Check[atpAutoTune[axioms, conjecture], {}],
+    $AtpSchedule];
 
 (* === Axiom-relevance filter ======================================
 
@@ -2227,7 +2565,7 @@ TFindEquationalProof[conjecture_, axioms_List,
    encoder state (the Variables list + the Term decoder maps). *)
 atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :=
     Catch[
-    Module[{atpSched = atpScheduleFor[OptionValue[Method]],
+    Module[{atpSched = atpScheduleFor[OptionValue[Method], axioms, conjecture],
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], OptionValue[MaxWallSeconds]]},
     If[ Length[atpSched] > 1,

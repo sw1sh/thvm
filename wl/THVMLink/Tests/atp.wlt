@@ -1152,6 +1152,138 @@ VerificationTest[
     TestID -> "ATP/returnspec/backcompat-expr-pair-bare-proofobject"
 ]
 
+(* ================================================================== *)
+(* Auto-tuner: atpAnalyzeStructure / atpAutoTune (Waldmeister          *)
+(* PhilMarlow/XFiles structure recognition -> strategy database).      *)
+(* ================================================================== *)
+
+(* AC theory: commutativity + associativity for one operator. *)
+VerificationTest[
+    Module[{f, prof},
+        f = CircleDot;
+        prof = THVMLink`Private`atpAnalyzeStructure[{
+            ForAll[{x, y}, f[x, y] == f[y, x]],
+            ForAll[{x, y, z}, f[f[x, y], z] == f[x, f[y, z]]]}];
+        {prof["Operators"][f]["Commutative"],
+         prof["Operators"][f]["Associative"],
+         MemberQ[prof["ACOperators"], f],
+         prof["Class"]}
+    ],
+    {True, True, True, "AC"},
+    TestID -> "ATP/autotune/analyze-AC-theory"
+]
+
+(* AbelianGroupAxioms: commutative+associative product, unit, inverse
+   -> AbelianGroup, has-inverse + has-unit set on the product op. *)
+VerificationTest[
+    Module[{prof, op},
+        prof = THVMLink`Private`atpAnalyzeStructure["AbelianGroupAxioms"];
+        op = CircleTimes;
+        {prof["Class"],
+         prof["Operators"][op]["HasInverse"],
+         prof["Operators"][op]["HasUnit"],
+         prof["Operators"][op]["Commutative"],
+         prof["Operators"][op]["Associative"]}
+    ],
+    {"AbelianGroup", True, True, True, True},
+    TestID -> "ATP/autotune/analyze-AbelianGroupAxioms"
+]
+
+(* GroupAxioms (no commutativity axiom) -> Group, has-inverse+has-unit. *)
+VerificationTest[
+    Module[{prof, op},
+        prof = THVMLink`Private`atpAnalyzeStructure["GroupAxioms"];
+        op = CircleTimes;
+        {prof["Class"],
+         prof["Operators"][op]["HasInverse"],
+         prof["Operators"][op]["HasUnit"]}
+    ],
+    {"Group", True, True},
+    TestID -> "ATP/autotune/analyze-GroupAxioms"
+]
+
+(* WolframAxioms: a single binary Sheffer/Nand operator, no other
+   structure -> "Sheffer". *)
+VerificationTest[
+    THVMLink`Private`atpAnalyzeStructure["WolframAxioms"]["Class"],
+    "Sheffer",
+    TestID -> "ATP/autotune/analyze-Sheffer-WolframAxioms"
+]
+
+(* CommutativeRingAxioms: + and *, distributivity, inverse -> Ring. *)
+VerificationTest[
+    THVMLink`Private`atpAnalyzeStructure["CommutativeRingAxioms"]["Class"],
+    "Ring",
+    TestID -> "ATP/autotune/analyze-Ring"
+]
+
+(* atpAutoTune returns a non-empty list of valid Method configs. *)
+VerificationTest[
+    Module[{sched},
+        sched = THVMLink`Private`atpAutoTune["AbelianGroupAxioms"];
+        And[Length[sched] > 0,
+            AllTrue[sched, MatchQ[#,
+                (_String | {_String, ___Rule})] &]]
+    ],
+    True,
+    TestID -> "ATP/autotune/autotune-returns-valid-configs"
+]
+
+(* SAFETY CONSTRAINT: the tuned Automatic schedule must contain every
+   config of the fixed $AtpSchedule (the appended fallback tail), so it
+   can never prove less than "Portfolio". *)
+VerificationTest[
+    Module[{tuned, fixed},
+        tuned = THVMLink`Private`atpScheduleFor[Automatic,
+            AxiomaticTheory["AbelianGroupAxioms"],
+            AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"][
+                "InverseOfInverse"]];
+        fixed = THVMLink`Private`$AtpSchedule;
+        (* every fixed config is present in the tuned schedule *)
+        And @@ (MemberQ[tuned, #] & /@ fixed)
+    ],
+    True,
+    TestID -> "ATP/autotune/safety-tail-contains-fixed-schedule"
+]
+
+(* The tuned Automatic schedule front-loads the structure config BEFORE
+   the fixed tail (a Group config with AutoPrecedence comes first). *)
+VerificationTest[
+    Module[{tuned},
+        tuned = THVMLink`Private`atpScheduleFor[Automatic,
+            AxiomaticTheory["AbelianGroupAxioms"],
+            AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"][
+                "InverseOfInverse"]];
+        First[tuned]
+    ],
+    {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50,
+        "AutoPrecedence" -> True},
+    TestID -> "ATP/autotune/front-loads-group-config"
+]
+
+(* "Portfolio" stays the FIXED schedule (prior behavior reachable). *)
+VerificationTest[
+    THVMLink`Private`atpScheduleFor["Portfolio",
+        AxiomaticTheory["AbelianGroupAxioms"], Null] ===
+        THVMLink`Private`$AtpSchedule,
+    True,
+    TestID -> "ATP/autotune/portfolio-stays-fixed"
+]
+
+(* Regression: existing theorems still prove under Method -> Automatic
+   (now problem-aware) -- the safety tail guarantees this. *)
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms"],
+    ProofObject,
+    TestID -> "ATP/autotune/regression-InverseOfInverse-default-Automatic"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["DoubleNegation", "WolframAxioms"],
+    ProofObject,
+    TestID -> "ATP/autotune/regression-DoubleNegation-default-Automatic"
+]
+
 (* --- TimeConstraint + Abort: effective abort inside the LibraryLink.
    Both forms must INTERRUPT the running C engine at the budget rather
    than hang: the TimeConstraint option returns $Failed, and a
