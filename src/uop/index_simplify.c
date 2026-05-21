@@ -366,13 +366,13 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         // Either operand of the IADD can be the IMUL.  Helps
         // RESHAPE-roundtrip chains where the consumer's flat-
         // decompose-recompose composes back to the source iter.
-        Term mul_term, mod_term;
+        Term mod_term;
         if (uop_match_const_mul(a, &c1, &x1)
             && term_tag(b) == TAG_UOP && term_ext(b) == UOP_IMOD) {
-          mul_term = a; mod_term = b; (void)mul_term;
+          mod_term = b;
         } else if (uop_match_const_mul(b, &c1, &x1)
                    && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IMOD) {
-          mul_term = b; mod_term = a; (void)mul_term;
+          mod_term = a;
         } else {
           mod_term = 0;
         }
