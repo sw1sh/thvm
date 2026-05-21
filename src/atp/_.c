@@ -268,6 +268,17 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
 static u32 atp_symbol_count(Term t);
 #endif
 
+// Throttled wall-deadline / host-abort poll for the inner rewrite
+// loops.  goal-check normalizes with a 65536 step cap, and the mixed
+// ordered path nests an indexed normalize inside its own 65536-step
+// loop, so a single normalize can run far past MaxWallSeconds (or a
+// host Abort[] / TimeConstrained[]) before thvm_atp_step's per-step
+// check is ever reached again.  Defined after the wall-deadline
+// machinery; forward-declared here for the normalizers above.  On a
+// fire the caller returns the partial term and the next thvm_atp_step
+// turns it into ATP_TIMEOUT / ATP_ABORTED.
+static int atp_norm_deadline_fired(AtpState *s);
+
 #ifdef ATP_ORDERED_REWRITE
 // 9c-foundation: forward declaration -- the ordered normalizer is
 // defined after atp_compare (it needs the reduction-order compare).
@@ -2278,6 +2289,7 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
                                    ATP_RI_FLAT_CAP, &flatlen);
   u32 prev_redex  = 0u;                 // 0 on the first step -> full scan
   for (u32 i = 0; i < step_cap; i++) {
+    if (atp_norm_deadline_fired(s)) return t;
     if (!flattened) {
       // Over-deep: one linear rewrite, then retry the flatten.
       Term t2 = thvm_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
@@ -2885,6 +2897,7 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
     // O(n_rules) linear scan per rewrite that dominated completion on a
     // self-overlapping axiom.
     for (u32 i = 0; i < step_cap; i++) {
+      if (atp_norm_deadline_fired(s)) return t;
       t = atp_rewrite_normalize_indexed(s, t, step_cap);
       u8 fired = 0;
       g_atp_skip_oriented = 1u;
@@ -2897,6 +2910,7 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
   }
 #endif
   for (u32 i = 0; i < step_cap; i++) {
+    if (atp_norm_deadline_fired(s)) return t;
     u8 fired = 0;
     Term t2 = atp_ordered_rewrite_step(s, t, lhs, rhs, n_rules, &fired);
     if (!fired) break;
@@ -3497,6 +3511,22 @@ static u64 atp_now_us(void) {
   struct timespec ts;
   if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
   return (u64)ts.tv_sec * 1000000ull + (u64)(ts.tv_nsec / 1000);
+}
+
+// Throttled poll (every 256 calls) of the wall deadline + host abort,
+// for the inner rewrite loops.  atp_now_us is a clock_gettime syscall,
+// so it is gated behind the tick mask to stay off the hot path.  Only
+// fires once the deadline has actually passed or a host Abort[] is
+// pending, so a normal (non-aborting) normalize is never cut short.
+static int atp_norm_deadline_fired(AtpState *s) {
+  static u32 tick = 0u;
+  if ((++tick & 0xFFu) != 0u) return 0;
+  if (s->wall_deadline_us != 0u) {
+    u64 now = atp_now_us();
+    if (now != 0u && now >= s->wall_deadline_us) return 1;
+  }
+  if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return 1;
+  return 0;
 }
 
 fn void thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now) {
