@@ -400,11 +400,39 @@ tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
    grad terms.  realize_many is still useful for ASSIGN batching
    (TAdam) and pool-boundary sharing, but not for grad dedup. *)
 TGradMany[y_, {target_}]    := {TGrad[y, target]}
-TGradMany[y_, targets_List] := With[{
-    seed     = gradOnesSeed[y],
-    leafTids = uopLeafTids[y]
-},
-    tGradWithLeaves[y, #, seed, leafTids] & /@ targets
+
+(* Multi-target VJP via the requires_grad single walk.  Mark every
+   target as a parameter, fire ONE target-free backward (TUOpGrad, the
+   target==0 cell), and let interact_grad's leaf rule accumulate each
+   requires_grad leaf's summed cotangent into TenDesc.grad
+   (uop_grad.c grad_leaf_sup target==0 path).  Read the per-target
+   accumulator back via TGradOf.
+
+   This replaces the old per-target loop (n separate target-aware grad
+   builds, each re-running the whole backward filtered to one leaf).
+   The single walk computes every shared intermediate cotangent ONCE and
+   threads it to all leaves -- a forward value reached by multiple
+   backward consumers is one node (grad_fwd_of shares it in non-SUP/DUP
+   mode), so the backward stops re-deriving the upstream stack per
+   consumer.
+
+   Targets we newly mark are unmarked afterward so the global
+   GRAD_REQ_NCOUNT / requires_grad state (which gates the target-aware
+   leaf filter) is restored for any later plain TGrad. *)
+TGradMany[y_, targets_List] := Module[{newlyMarked, bwd, grads},
+    newlyMarked = Select[targets, tensorIdQ[#] && ! TRequiresGradQ[#] &];
+    TRequiresGrad /@ newlyMarked;
+    TClearGrad /@ Select[targets, tensorIdQ];
+    bwd = TUOpGrad[y, gradOnesSeed[y]];
+    TWnf[bwd];                                  (* single backward walk *)
+    grads = Map[
+        With[{g = TGradOf[#]},
+             If[ MissingQ[g],
+                 TZeros[TTensorShape[#], TTensorDType[#]],
+                 g]] &,
+        targets];
+    TRequiresGrad[#, False] & /@ newlyMarked;   (* restore global state *)
+    grads
 ]
 
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)

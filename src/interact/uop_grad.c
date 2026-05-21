@@ -145,7 +145,16 @@ static Term grad_fwd_of(u64 cell) {
   // beautiful_mnist backward kernel-count blowup, 1236 kernels at BS=8).
   // Sharing the node makes it one multi-consumer boundary the scheduler
   // realizes once; the value (and thus the gradient) is identical.
-  if (grad_current_target() != 0) return term_resolve(heap_read(cell + 0));
+  // Two non-SUP/DUP-projection paths share the forward node directly:
+  //   - target-aware fire (grad_current_target() != 0): TGrad/TGradMany
+  //     with a concrete target.
+  //   - requires_grad single walk (GRAD_REQ_NCOUNT > 0, target == 0): one
+  //     backward pass that accumulates each leaf's cotangent into
+  //     TENS[tid].grad (grad_leaf_sup target==0 path).
+  // Only the legacy SUP/DUP-projection fire (target == 0 AND no
+  // requires_grad) needs the linearity-preserving DP0 copy.
+  if (grad_current_target() != 0 || GRAD_REQ_NCOUNT > 0)
+    return term_resolve(heap_read(cell + 0));
   return term_new(0, TAG_DP0, DUP_GRAD_FLAG, cell);
 }
 static Term grad_bwd_of(u64 cell) {
