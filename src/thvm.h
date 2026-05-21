@@ -1927,8 +1927,7 @@ fn Term uop_bufferize_range_at  (Term b, u32 i);
 // 1-to-1 port of tinygrad/schedule/indexing.py:apply_movement_op (line 129)
 // per-op cases. Each rewrites the consumer's per-axis range expressions
 // (`out_rngs`) into the producer's per-axis expressions (`in_rngs`).
-// All variants hash-cons through uop_mov_cache. RESHAPE handled inside
-// the unified rangeify pass (needs pm_simplify_valid). `ndim` bounded by
+// All variants hash-cons through uop_mov_cache.  `ndim` bounded by
 // MAX_DIM. In-place (in_rngs == out_rngs) is unsafe (PERMUTE).
 fn void apply_movement_op_shrink (u32 ndim, u32 const *begin_end,
                                   Term const *out_rngs, Term *in_rngs);
@@ -1949,17 +1948,10 @@ fn void apply_movement_op_pad    (u32 ndim, u32 const *in_shape,
 // Returns 1 when the alignment succeeds (covers the common "merge contiguous
 // axes" and "split one axis" cases); 0 when the shapes don't decompose into
 // matching groups (e.g. a stride-trick rank-merge that needs tinygrad's
-// `_apply_reshape`/`pm_simplify_valid` and falls back to the identity stub).
+// `_apply_reshape` / `pm_simplify_valid` post-rewrite, not yet ported).
 fn int  apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
                                   u32 in_ndim,  u32 const *in_shape,
                                   Term const *out_rngs, Term *in_rngs);
-
-// === pm_simplify_valid + pm_drop_and_clauses ===
-// 1-to-1 port surface of tinygrad/uop/symbolic.py:423 / 385.  Identity
-// stubs today; sharpen with targeted rewrites as concrete RESHAPE-output
-// regressions vs tinygrad parity surface.
-fn Term pm_simplify_valid_apply   (Term t);
-fn Term pm_drop_and_clauses_apply (Term t);
 
 // === Unified rangeify pass ===
 // 1-to-1 port of tinygrad/schedule/indexing.py:148-269 (run_rangeify)

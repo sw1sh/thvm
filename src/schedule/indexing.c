@@ -1,11 +1,14 @@
-// schedule/indexing.c - movement-op range swizzler + symbolic-valid simplifier.
+// schedule/indexing.c - movement-op range swizzler.
 //
 // Mirrors tinygrad/schedule/indexing.py.  Each movement op rewrites the
 // per-axis index expression (RANGE Term or arithmetic over RANGE leaves)
 // that a downstream consumer uses when indexing into the producer.
 //
-// SHRINK / PERMUTE / FLIP / EXPAND / PAD swizzles are implemented here;
-// RESHAPE is handled in the unified rangeify pass via pm_simplify_valid.
+// SHRINK / PERMUTE / FLIP / EXPAND / PAD swizzles + the group-aligning
+// RESHAPE handler live here.  Stride-trick rank-merge reshapes that
+// would need tinygrad's pm_simplify_valid rewrite aren't ported yet --
+// apply_movement_op_reshape returns 0 in that case and the unified
+// rangeify pass declines the fold.
 //
 // Mirror source: tinygrad/schedule/indexing.py:129  apply_movement_op
 //
@@ -130,7 +133,7 @@ fn void apply_movement_op_pad(u32 ndim,
 // When the shapes do not decompose into matching groups (a stride-trick
 // reshape that mixes split-and-merge inside a single block, the case
 // tinygrad's `_apply_reshape` defers to `pm_simplify_valid`), returns 0
-// so the caller can fall back to the identity stub.
+// so the caller can decline the fold (pm_simplify_valid not yet ported).
 //
 // Size-1 axes on either side contribute extent 1 and a CONST(0) range;
 // they're folded into the surrounding group without disturbing the
@@ -223,23 +226,3 @@ fn int apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
   return 1;
 }
 
-// === Symbolic-valid simplifiers ===
-//
-// Mirror source: tinygrad/uop/symbolic.py:423 pm_simplify_valid +
-//                tinygrad/uop/symbolic.py:385 pm_drop_and_clauses.
-//
-// Both consume a Term that may contain UOP_IAND chains gating a
-// UOP_IWHERE-INVALID expression (the standard PAD/RESHAPE output shape)
-// and rewrite the gate into a smaller equivalent form.
-//
-// Identity stubs for now. Sharpen with targeted rewrites driven by
-// concrete RESHAPE-output regressions vs tinygrad parity; the call
-// seam is what callers in the unified rangeify pass depend on.
-
-fn Term pm_simplify_valid_apply(Term t) {
-  return t;
-}
-
-fn Term pm_drop_and_clauses_apply(Term t) {
-  return t;
-}

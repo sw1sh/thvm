@@ -372,17 +372,17 @@ static int ru_all_same_axis(RuConsumerRangs const *rs, u32 n, u8 axis) {
 // We call into the Phase-1c apply_movement_op_* family in indexing.c.
 //
 // Returns 1 if a swizzle was applied (in_rngs/in_ndim filled), 0 if
-// the op isn't a movement op the swizzler handles.  RESHAPE is parked
-// until pm_simplify_valid_apply is sharpened beyond its identity stub.
+// the op isn't a movement op the swizzler handles, or if the RESHAPE
+// shape pair needs pm_simplify_valid (not yet ported).
 static int ru_apply_movement(u64 loc, u8 op,
                               Term const *out_rngs, u32 out_ndim,
                               Term *in_rngs, u32 *in_ndim) {
   if (op == UOP_RESHAPE) {
     // Decompose the reshape into matching axis groups and swizzle the
     // consumer's flat ranges into producer-axis-aligned IDIV/IMOD
-    // expressions.  Falls back to the identity stub when the shapes
-    // don't decompose cleanly (the stride-trick rank-merge tinygrad
-    // routes through `pm_simplify_valid`).
+    // expressions.  Declines the fold when the shapes don't decompose
+    // cleanly (the stride-trick rank-merge tinygrad routes through
+    // `pm_simplify_valid`, not yet ported).
     Shape src_shape;
     if (!ru_node_src_shape(loc, &src_shape)) {
       *in_ndim = 0;
