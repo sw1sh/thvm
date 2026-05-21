@@ -1604,6 +1604,85 @@ static int stranded_range_check_value(RangeAxisSet const *iter_axes,
   return 0;
 }
 
+// Deep strand check: unlike stranded_range_check_value (which stops at
+// any BUFFERIZE), this DESCENDS into nested bufferizes that would be
+// inlined, accumulating each one's closed_ranges into the bound set
+// (the inline substitutes those by the consumer's addr, so they are NOT
+// stranded).  A UOP_RANGE that survives -- not a closed_range of any
+// inlined bufferize on the path, nor an enclosing REDUCE axis -- is the
+// stranding leak.  Used only to DECIDE realization (promote a partial
+// bufferize to a boundary); the over-approximation of treating every
+// nested bufferize as inlined is safe here (worst case: realize one
+// extra buffer that could have inlined).
+static int bufferize_strand_check_deep(RangeAxisSet const *iter,
+                                       BufferizeScanVisited *v, Term t,
+                                       u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  if (bufferize_scan_seen(v, r)) return 0;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(loc + 0));
+    return range_axis_has(iter, aid) ? 0 : 1;
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFER) return 0;
+  if (op == UOP_BUFFERIZE) {
+    // Treat as inlined: add its closed_ranges to the bound set and
+    // descend into its value.
+    RangeAxisSet inner = *iter;
+    u32 nr = uop_bufferize_n_ranges(r);
+    for (u32 i = 0; i < nr; i++) {
+      Term cr = uop_bufferize_range_at(r, i);
+      if (term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE)
+        range_axis_add(&inner, (u32)term_val(heap_read(term_val(cr) + 0)));
+    }
+    Term val = uop_bufferize_value(r);
+    if (val == 0) return 0;
+    BufferizeScanVisited iv;
+    iv.n = 0;
+    return bufferize_strand_check_deep(&inner, &iv, val, depth + 1);
+  }
+  if (op == UOP_REDUCE) {
+    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    RangeAxisSet inner = *iter;
+    range_axis_add(&inner, r_aid);
+    BufferizeScanVisited iv;
+    iv.n = 0;
+    return bufferize_strand_check_deep(&inner, &iv, heap_read(loc + 0),
+                                       depth + 1);
+  }
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (bufferize_strand_check_deep(iter, v, heap_read(loc + i), depth + 1))
+      return 1;
+  }
+  return 0;
+}
+
+// Would INLINING this BUFFERIZE strand a range in its consumer?  If the
+// stored value has a free UOP_RANGE leaf that is neither a closed_range
+// nor bound by an enclosing REDUCE, the inline leaves it free in the
+// consumer (the partial conv _pool reshapes).  Such a bufferize must be
+// REALIZED (computed once, read via INDEX_E(BUFFER)) rather than inlined.
+static int bufferize_value_would_strand(Term buf) {
+  if (term_tag(buf) != TAG_UOP || term_ext(buf) != UOP_BUFFERIZE) return 0;
+  Term v = uop_bufferize_value(buf);
+  if (v == 0) return 0;
+  RangeAxisSet iter_axes;
+  iter_axes.n = 0;
+  u32 nr = uop_bufferize_n_ranges(buf);
+  for (u32 i = 0; i < nr; i++) {
+    Term cr = uop_bufferize_range_at(buf, i);
+    if (term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE)
+      range_axis_add(&iter_axes, (u32)term_val(heap_read(term_val(cr) + 0)));
+  }
+  BufferizeScanVisited vv;
+  vv.n = 0;
+  return bufferize_strand_check_deep(&iter_axes, &vv, v, 0);
+}
+
 // Returns 1 when `store_root` has a UOP_RANGE leaf in its value
 // subtree whose axis_id is neither in the STORE's addr nor inside the
 // scope of an enclosing UOP_REDUCE.  cpu_uop_walk's loop scaffolding
@@ -2019,7 +2098,27 @@ static void topo_sort_boundaries(Term root) {
     // fusion.
     Term buf = rangeify_unified_bufferize_at(i);
     if (buf == 0) continue;
-    if (!BUFFERIZE_NODES[i].realized) continue;
+    // A node escapes into its own kernel when it's a full realize, OR
+    // when it's a partial-realize (LOCAL via the unified pass) that must
+    // be READ rather than inlined:
+    //   - effectively-full: all of the node's axes are closed_ranges
+    //     (n_ranges == out_ndim).  Such a "partial" is a full realize
+    //     mis-tagged LOCAL by the consumer-divergence walk; inlining it
+    //     re-derives the producer (the conv2 backward's inter-layer
+    //     activation h1 = relu(conv1)) and lets the bypass value-match
+    //     drag in the realized _pool EXPAND's window ranges -> strand.
+    //   - would-strand: its inlined value carries a free RANGE not
+    //     covered by its closed_ranges (the partial _pool reshapes).
+    // Partial realizes that genuinely drop axes and inline cleanly
+    // (softmax denom / layer-norm mean broadcasts) are NOT promoted, so
+    // their fusion is preserved.
+    if (!BUFFERIZE_NODES[i].realized) {
+      u32 nr  = uop_bufferize_n_ranges(buf);
+      u32 ond = rangeify_unified_out_ndim_at(i);
+      int effectively_full = (ond > 0 && nr == ond);
+      if (!rangeify_unified_is_realized(i)) continue;
+      if (!effectively_full && !bufferize_value_would_strand(buf)) continue;
+    }
     items[n].loc   = BUFFERIZE_NODES[i].loc;
     items[n].depth = BOUNDARY_DEPTH[i];
     items[n].buf   = buf;
@@ -2473,8 +2572,9 @@ static int view_apply_flip(View const *src, u64 expr_loc, View *out) {
 
 // Materialize a UOP_CONST to a 1-element TenDesc filled with the
 // const value.  Used by view_resolve when a movement-op chain
-// (typically EXPAND from interact_grad's expand_to_target leaf
-// rule) bottoms out at a CONST instead of a TenDesc.
+// (typically EXPAND from interact_grad's leaf rule that lifts a
+// scalar cotangent to the target's shape) bottoms out at a CONST
+// instead of a TenDesc.
 static u32 const_to_tendesc(u64 const_loc) {
   Term num   = heap_read(const_loc);
   u32  dtype = term_ext(num);
@@ -2617,9 +2717,9 @@ static u32 view_resolve_inner(Term t, int boundary_base) {
   }
 
   // CONST source: materialize to a fresh 1-element TenDesc.
-  // interact_grad's expand_to_target leaf rule produces
-  // EXPAND(CONST(0|1)) -> target.shape; without this branch the
-  // grad chain stalls as a UOP that never fires.
+  // interact_grad's leaf cotangent lift produces EXPAND(CONST(0|1))
+  // -> target.shape; without this branch the grad chain stalls as
+  // a UOP that never fires.
   if (op == UOP_CONST) return const_to_tendesc(loc);
 
   // A movement-op chain bottoming out at an ALREADY-EMITTED bufferize
