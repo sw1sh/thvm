@@ -2575,6 +2575,12 @@ TFindEquationalProof[conjecture_, axioms_List,
    encoder state (the Variables list + the Term decoder maps). *)
 atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :=
     Catch[
+    (* Raise $RecursionLimit for the whole bundle: a deep Sheffer/Wolfram
+       proof (~300+ steps) walks long trace DAGs in buildCEngineChain /
+       buildCplDataset and the WL verifier, any of which can trip the
+       default 1024 limit and abort the run (and, in a portfolio sweep,
+       terminate the enclosing evaluation). *)
+    Block[{$RecursionLimit = Max[$RecursionLimit, 1048576]},
     Module[{atpSched = atpScheduleFor[OptionValue[Method], axioms, conjecture],
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], OptionValue[MaxWallSeconds]]},
@@ -2699,7 +2705,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
             <|"enc" -> enc, "cRes" -> cRes,
                 "ProofObject" -> poFinal, "RelevantAxioms" -> relAx|>
         ]
-    ]]],
+    ]]]],
     "TATPError"
 ]
 
