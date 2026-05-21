@@ -2580,7 +2580,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
        buildCplDataset and the WL verifier, any of which can trip the
        default 1024 limit and abort the run (and, in a portfolio sweep,
        terminate the enclosing evaluation). *)
-    Block[{$RecursionLimit = Max[$RecursionLimit, 1048576]},
+    Block[{$RecursionLimit = Max[$RecursionLimit, 16384]},
     Module[{atpSched = atpScheduleFor[OptionValue[Method], axioms, conjecture],
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], OptionValue[MaxWallSeconds]]},
@@ -2677,7 +2677,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
                trip the default 1024 recursion limit and abort the whole
                attempt.  Guard it locally. *)
             tryBuild[chainOn_, baseDataset_] := Block[{
-                    $RecursionLimit = Max[$RecursionLimit, 1048576]},
+                    $RecursionLimit = Max[$RecursionLimit, 16384]},
                 Module[{ds, p, v},
                 ds = If[ baseDataset =!= $Failed, baseDataset,
                     Block[{$AtpUseChain = chainOn},
