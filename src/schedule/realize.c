@@ -78,23 +78,37 @@ fn Term thvm_realize(Term expr) {
   //   - materialize compiles whatever lazy UOP compute survived.
   //     Materialize is graph -> kernel compile, NEVER fires
   //     interactions.
-  // Three phases, NO loop:
-  //   1. wnf drives every interaction -- including the FULL chain-rule
-  //      backward -- on the tensor-level UOP graph.  No kernels exist
-  //      yet, so grad never descends into a kernel's source_uop (that
-  //      path is for the explicit materialize-then-grad case only).
-  //      The complete forward+backward graph emerges as ONE shared
-  //      sink, so an activation consumed by both the forward and a
-  //      backward adjoint is a single hash-consed node.
-  //   2. ONE materialize pass classifies that whole sink.
-  //   3. wnf fires the emitted kernels (interact_kernel -> backend
-  //      dispatch) to land the result TENs.
+  // Bounded wnf<->materialize fixpoint loop (same shape + guard as
+  // thvm_realize_many).  Iteration 0's wnf drives every interaction --
+  // including the FULL chain-rule backward -- on the kernel-free tensor
+  // graph, so the complete forward+backward sink emerges before any
+  // kernel exists (an activation shared by forward and a backward
+  // adjoint stays a single hash-consed node, and grad never descends
+  // into a kernel's source_uop).  Materialize then compiles that sink
+  // and the next iteration's wnf fires it.
+  //
+  // The loop (vs the old fire-once three phases) is required for the
+  // assign->compute->assign chain: an ASSIGN whose src is a compute
+  // reading a PRIOR assign's mutated buffer (e.g. y := (w := w+x) * x)
+  // cannot materialize until that prior assign has fired, which needs
+  // its own materialize+wnf first.  One pass left the outer compute
+  // stranded as a live UOP (the assign's dst never updated).  The
+  // fixpoint guard -- no new kernel emitted AND no interaction fired --
+  // bounds the loop and keeps a converged forward/backward graph at the
+  // same two effective passes it always took.
   Term res = expr;
   u32 kn_at_call_start = KERNELS_NEXT;
-  int iters_used = 1;
-  res = wnf(res);
-  res = thvm_materialize(res);
-  kernel_compute_consumer_counts();
+  int iters_used = 0;
+  for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
+    u32 kn0   = KERNELS_NEXT;
+    u64 itrs0 = ITRS;
+    res = wnf(res);
+    Term mat = thvm_materialize(res);
+    iters_used = iter + 1;
+    if (KERNELS_NEXT == kn0 && ITRS == itrs0) { res = mat; break; }
+    kernel_compute_consumer_counts();
+    res = mat;
+  }
   res = wnf(res);
   if (getenv("THVM_KCNT")) {
     fprintf(stderr, "DBG realize emit: %u kernels in %d iters\n",
