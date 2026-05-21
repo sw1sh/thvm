@@ -711,11 +711,9 @@ fn int kernel_autotune(u32 kid) {
                                           &cache_key, depth, beam_width);
   if (cache_ready) {
     KOptSeq cached_seq = {0};
-    u64     cached_us  = 0;
     if (kautotune_cache_load(cache_path, cache_key, backend_id, n_runs,
-                             depth, beam_width, &cached_seq, &cached_us)
+                             depth, beam_width, &cached_seq, NULL)
         && kautotune_cached_seq_allowed(&cached_seq, candidates, n_cand)) {
-      (void)cached_us;
       ke->schedule->autotuned = 1;
       axes_reset_to_default(ke);
       if (cached_seq.n != 0) {
