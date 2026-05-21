@@ -2428,6 +2428,104 @@ int main(void) {
   }
 #endif  // ATP_CP_CLASSIFY
 
+#ifdef ATP_CP_GROUND_JOIN
+  // ==================================================================
+  // Ground-joinability redundancy criterion (Section F of the spec).
+  // These call the static `atp_cp_ground_joinable` directly (same TU
+  // via the `#include "../src/thvm.c"` above).  Verdict 1 = provably
+  // ground-joinable (would-DELETE); 0 = not shown (would-KEEP).
+  // ==================================================================
+  {
+    enum { GJ_PLUS = 1u };
+    static u32 ac_weights   [2] = {0, 1};
+    static u32 ac_precedence[2] = {0, 1};
+    static const KboConfig AC_CFG = {
+      .weights = ac_weights, .precedence = ac_precedence,
+      .n_labels = 2, .var_weight = 1,
+    };
+    #define MK_PLUS(a, b) ({ Term _cs[2] = {(a), (b)}; term_new_ctr(GJ_PLUS, _cs, 2); })
+
+    // F.1: AC critical pair x+(y+z) vs z+(x+y) under {assoc, comm}.
+    // The MINIMAL version KEEPS it (verdict 0): with only {assoc,comm}
+    // the ground system is not ground-confluent, and joining needs the
+    // symbolic >=_C no-op steps the minimal version omits.  KEEP is
+    // always sound (incompleteness, not a soundness bug).
+    TEST_BEGIN("atp/ground-join/F1-AC-pair-minimal-keeps");
+    {
+      AtpState *s = thvm_atp_init(&AC_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(s, MK_PLUS(MK_PLUS(x, y), z), MK_PLUS(x, MK_PLUS(y, z)));
+      atp_push_rule(s, MK_PLUS(x, y), MK_PLUS(y, x));
+      atp_push_rule(s, MK_PLUS(y, x), MK_PLUS(x, y));
+      Term cp_l = MK_PLUS(x, MK_PLUS(y, z));
+      Term cp_r = MK_PLUS(z, MK_PLUS(x, y));
+      CHECK_EQ(atp_cp_ground_joinable(s, cp_l, cp_r), 0);
+      thvm_atp_free(s);
+    }
+
+    // F.1b: same AC pair WITH the left-comm completion rule -> the
+    // system is ground-confluent and the minimal version DELETES (1).
+    TEST_BEGIN("atp/ground-join/F1b-AC-pair-complete-deletes");
+    {
+      AtpState *s = thvm_atp_init(&AC_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(s, MK_PLUS(MK_PLUS(x, y), z), MK_PLUS(x, MK_PLUS(y, z)));
+      atp_push_rule(s, MK_PLUS(x, y), MK_PLUS(y, x));
+      atp_push_rule(s, MK_PLUS(y, x), MK_PLUS(x, y));
+      atp_push_rule(s, MK_PLUS(x, MK_PLUS(y, z)), MK_PLUS(y, MK_PLUS(x, z)));
+      atp_push_rule(s, MK_PLUS(y, MK_PLUS(x, z)), MK_PLUS(x, MK_PLUS(y, z)));
+      Term cp_l = MK_PLUS(x, MK_PLUS(y, z));
+      Term cp_r = MK_PLUS(z, MK_PLUS(x, y));
+      CHECK_EQ(atp_cp_ground_joinable(s, cp_l, cp_r), 1);
+      thvm_atp_free(s);
+    }
+
+    // F.2.A: ground CP b = f(b) (no vars) -> KEEP.
+    TEST_BEGIN("atp/ground-join/F2A-b-eq-fb-KEEP");
+    {
+      enum { GJ_F = 2u, GJ_A = 3u, GJ_B = 4u };
+      static u32 w2[5] = {0, 0, 1, 1, 1};
+      static u32 p2[5] = {0, 0, 3, 2, 1};        // f > a > b
+      static const KboConfig C2 = {
+        .weights = w2, .precedence = p2, .n_labels = 5, .var_weight = 1,
+      };
+      AtpState *s = thvm_atp_init(&C2, 64);
+      Term xx = mk_v(0u);
+      Term a  = term_new_ctr(GJ_A, NULL, 0);
+      Term b  = term_new_ctr(GJ_B, NULL, 0);
+      #define MK_F(t) ({ Term _c[1] = {(t)}; term_new_ctr(GJ_F, _c, 1); })
+      atp_push_rule(s, MK_F(MK_F(xx)), MK_F(xx));
+      atp_push_rule(s, MK_F(a), b);
+      CHECK_EQ(atp_cp_ground_joinable(s, b, MK_F(b)), 0);
+      thvm_atp_free(s);
+      #undef MK_F
+    }
+
+    // F.2.B / tie-guard: x = y -> KEEP (must hold for any sound impl).
+    TEST_BEGIN("atp/ground-join/F2B-x-eq-y-KEEP");
+    {
+      enum { GJ_G = 2u, GJ_H = 3u };
+      static u32 w3[4] = {0, 0, 1, 1};
+      static u32 p3[4] = {0, 0, 2, 3};
+      static const KboConfig C3 = {
+        .weights = w3, .precedence = p3, .n_labels = 4, .var_weight = 1,
+      };
+      AtpState *s = thvm_atp_init(&C3, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      #define MK_G(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(GJ_G, _c, 2); })
+      #define MK_H(t)    ({ Term _c[1] = {(t)};      term_new_ctr(GJ_H, _c, 1); })
+      atp_push_rule(s, MK_G(x, y), MK_G(y, x));
+      atp_push_rule(s, MK_G(y, x), MK_G(x, y));
+      atp_push_rule(s, MK_H(MK_G(x, y)), x);
+      CHECK_EQ(atp_cp_ground_joinable(s, x, y), 0);
+      thvm_atp_free(s);
+      #undef MK_G
+      #undef MK_H
+    }
+    #undef MK_PLUS
+  }
+#endif  // ATP_CP_GROUND_JOIN
+
   thvm_free();
   TEST_REPORT();
 }

@@ -153,6 +153,18 @@ WL_ATP_DEFINES  := $(if $(filter-out 0,$(WL_ATP_MNF)),-DATP_MNF,)
 ATP_MNF_DIAG ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF_DIAG)),-DATP_MNF -DATP_MNF_DIAG,)
 
+# Ground-joinability redundancy criterion (Martin-Nipkow / Twee CADE
+# 2021 sec 3.1; AHL 2003) in src/atp/_.c.  -DATP_CP_GROUND_JOIN compiles
+# in atp_cp_ground_joinable; the n_cps_ground_joinable counter always
+# ticks, and DELETION of a ground-joinable CP is runtime-gated by
+# AtpState.use_ground_join (set via thvm_atp_set_use_ground_join /
+# Method -> {... "GroundJoin" -> True}).  ON for C tests (so test_atp
+# exercises it) and ALWAYS compiled into the paclet dylib (like MNF):
+# inert until the WL surface opts in, costing only one branch per CP.
+ATP_CP_GROUND_JOIN ?= 1
+ATP_DEFINES     += $(if $(filter-out 0,$(ATP_CP_GROUND_JOIN)),-DATP_CP_GROUND_JOIN,)
+WL_ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_GROUND_JOIN)),-DATP_CP_GROUND_JOIN,)
+
 # Waldmeister-style critical-pair classification: -DATP_CP_CLASSIFY
 # ports Waldmeister's `NewClassification` ("new classification") and
 # `ClasFunctions` ("classification functions") killer predicates

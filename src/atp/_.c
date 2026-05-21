@@ -2705,6 +2705,11 @@ fn void thvm_atp_set_use_mnf(AtpState *s, u8 on) {
   s->use_mnf = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_ground_join = on ? 1u : 0u;
+}
+
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so a garbage
 // mode falls back to the bare symbol-count heuristic.
@@ -5555,6 +5560,283 @@ static void atp_cp_heap_push_pri(AtpState *s, Term lhs, Term rhs,
 
 #endif  // ATP_CP_CLASSIFY
 
+// === Ground-joinability redundancy criterion ========================
+// Martin-Nipkow (1990) / Twee (CADE 2021 sec 3.1) / Avenhaus-Hillen-
+// brand-Loechner (2003).  A critical pair is GROUND-JOINABLE if every
+// ground instance of it joins; such a CP is redundant and may be
+// deleted without losing refutational completeness.  We test the
+// minimal sound-but-incomplete version: enumerate every total preorder
+// of the CP's variables (ordered set partitions -- ties INCLUDED, the
+// load-bearing soundness condition), substitute fresh MINIMAL constants
+// ordered per the preorder, and check both sides reach a common ground
+// normal form under the rules rewritten with an EXTENDED, ground-total
+// ordering.  If ALL partitions join, the CP is ground-joinable; if ANY
+// fails or we exceed a budget, it is NOT shown ground-joinable.  Keeping
+// is always sound, so all fallbacks bail to "keep" (return 0).
+//
+// Deletion is gated at the call site behind the runtime flag
+// s->use_ground_join (Method -> {... "GroundJoin" -> True}); the
+// n_cps_ground_joinable counter ticks regardless for measurement.  The
+// whole region compiles out unless ATP_CP_GROUND_JOIN is defined (the
+// shipped paclet defines it; see WL_ATP_DEFINES).
+#ifdef ATP_CP_GROUND_JOIN
+
+// Cap on distinct variables.  The number of ordered set partitions is
+// the Fubini (ordered Bell) number: 1,1,3,13,75,541 for n=0..5.  Beyond
+// 5 the count explodes, so we bail to "keep" (sound).
+#define ATP_GJ_MAX_VARS 5
+// Ground-normalization step cap, matching the other CP filters.
+#define ATP_GJ_NORM_CAP 64
+
+// Collect distinct TAG_FVR var ids appearing in `t` into ids[] (size
+// cap).  *n is the running count; returns 0 if it would overflow `cap`
+// (caller treats overflow as "too many vars -> keep").
+static u8 atp_gj_collect_vars(Term t, u32 *ids, u32 *n, u32 cap) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      for (u32 i = 0; i < *n; i++) {
+        if (ids[i] == id) return 1;       // already seen
+      }
+      if (*n >= cap) return 0;            // too many distinct vars
+      ids[*n] = id;
+      (*n)++;
+      return 1;
+    }
+    case TAG_CTR: {
+      u32 k = term_ctr_n(t);
+      for (u32 i = 0; i < k; i++) {
+        if (!atp_gj_collect_vars(term_ctr_at(t, i), ids, n, cap)) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// One ground-rewrite step under an EXTENDED, ground-total ordering
+// `cfg`.  Like thvm_rewrite_step, but a rule fires at a position ONLY
+// if it strictly DECREASES the (fully ground) subterm under `cfg`.  This
+// is the order-respecting rewrite the spec requires (Section A's `->_G`):
+// an unorientable equation -- stored in the rule arrays in BOTH
+// directions by orient_and_add -- thus fires only in the direction that
+// is smaller for THIS ground ordering.  Because every fired step is a
+// strict ground decrease and `cfg` is a ground-total simplification
+// ordering, normalization terminates (E4).
+//
+// `is_lpo` selects the LPO config (`lcfg`) over the KBO config (`kcfg`).
+// Returns the rewritten term; sets *fired iff a step was taken.
+static Term atp_gj_rewrite_step(Term t, const Term *lhs, const Term *rhs,
+                                u32 n_rules, u8 is_lpo,
+                                const KboConfig *kcfg, const LpoConfig *lcfg,
+                                u8 *fired) {
+  for (u32 i = 0; i < n_rules; i++) {
+    RewriteSubst subst = {{0}};
+    if (thvm_match(lhs[i], t, &subst)) {
+      Term reduct = thvm_subst_apply(rhs[i], &subst);
+      // Both t and reduct are ground here (the CP was ground-substituted
+      // before normalization, and rule RHS vars are a subset of LHS vars
+      // which `subst` binds to ground subterms of t).
+      int dec = is_lpo ? (thvm_lpo(t, reduct, lcfg) == LPO_GT)
+                       : (thvm_kbo(t, reduct, kcfg) == KBO_GT);
+      if (dec) {
+        *fired = 1;
+        return reduct;
+      }
+    }
+  }
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    Term children[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      u8 sub_fired = 0;
+      Term r = atp_gj_rewrite_step(children[i], lhs, rhs, n_rules,
+                                   is_lpo, kcfg, lcfg, &sub_fired);
+      if (sub_fired) {
+        children[i] = r;
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// Iterate atp_gj_rewrite_step to a ground normal form (or step_cap).
+static Term atp_gj_normalize(Term t, const Term *lhs, const Term *rhs,
+                             u32 n_rules, u8 is_lpo,
+                             const KboConfig *kcfg, const LpoConfig *lcfg,
+                             u32 step_cap) {
+  for (u32 i = 0; i < step_cap; i++) {
+    u8 fired = 0;
+    Term t2 = atp_gj_rewrite_step(t, lhs, rhs, n_rules, is_lpo, kcfg, lcfg,
+                                  &fired);
+    if (!fired) return t;
+    t = t2;
+  }
+  return t;
+}
+
+// Test joinability of (lhs, rhs) under ONE ordered set partition of the
+// `n_vars` variables `var_ids`.  `cls[i]` is the 0-based class of
+// var_ids[i]; classes are numbered in ascending order (class 0 is the
+// SMALLEST in the ordering).  `n_cls` is the number of classes.
+//
+// Builds fresh constants: var in class c maps to a nullary CTR with
+// label `n_labels + c` (same constant within a class, distinct across
+// classes -- E1).  The extended ordering config is built so the fresh
+// constants are MINIMAL and ordered by class (E2): every real symbol's
+// precedence is shifted up by n_cls, leaving precedence slots 0..n_cls-1
+// for the fresh classes (class c gets precedence c, so all fresh < all
+// real and ordered c0 < c1 < ...).  Fresh weight = var_weight, the
+// minimal admissible weight (E2).  Real existing constants keep their
+// relative order and stay above the fresh constants, so they correctly
+// participate in the ordering (E5).
+//
+// Returns 1 iff both sides reach the same ground normal form.
+static u8 atp_gj_partition_joins(AtpState *s, Term lhs, Term rhs,
+                                 const u32 *var_ids, u32 n_vars,
+                                 const u32 *cls, u32 n_cls) {
+  u8 is_lpo = (s->lpo != NULL);
+  u32 base_labels = is_lpo ? s->lpo->n_labels : s->kbo->n_labels;
+  u32 ext_labels  = base_labels + n_cls;
+
+  u32 *ext_prec = (u32 *)malloc((size_t)ext_labels * sizeof(u32));
+  u32 *ext_wt   = NULL;
+  if (ext_prec == NULL) return 0;          // OOM -> keep (sound)
+  if (!is_lpo) {
+    ext_wt = (u32 *)malloc((size_t)ext_labels * sizeof(u32));
+    if (ext_wt == NULL) { free(ext_prec); return 0; }
+  }
+  for (u32 l = 0; l < base_labels; l++) {
+    u32 p = is_lpo ? s->lpo->precedence[l] : s->kbo->precedence[l];
+    ext_prec[l] = p + n_cls;               // shift real symbols up
+    if (!is_lpo) ext_wt[l] = s->kbo->weights[l];
+  }
+  for (u32 c = 0; c < n_cls; c++) {
+    ext_prec[base_labels + c] = c;          // fresh class c: minimal, ordered
+    if (!is_lpo) ext_wt[base_labels + c] = s->kbo->var_weight;
+  }
+
+  KboConfig ekbo = {0};
+  LpoConfig elpo = {0};
+  if (is_lpo) {
+    elpo.precedence = ext_prec;
+    elpo.n_labels   = ext_labels;
+  } else {
+    ekbo.weights    = ext_wt;
+    ekbo.precedence = ext_prec;
+    ekbo.n_labels   = ext_labels;
+    ekbo.var_weight = s->kbo->var_weight;
+  }
+
+  RewriteSubst subst = {{0}};
+  u8 ok = 1;
+  for (u32 i = 0; i < n_vars; i++) {
+    u32 id = var_ids[i];
+    if (id >= REWRITE_MAX_VAR) { ok = 0; break; }
+    Term k = term_new_ctr(base_labels + cls[i], NULL, 0);
+    subst.bindings[id] = k;
+  }
+
+  u8 joined = 0;
+  if (ok) {
+    Term gl = thvm_subst_apply(lhs, &subst);
+    Term gr = thvm_subst_apply(rhs, &subst);
+    Term nl = atp_gj_normalize(gl, s->lhs, s->rhs, s->n_rules, is_lpo,
+                               &ekbo, &elpo, ATP_GJ_NORM_CAP);
+    Term nr = atp_gj_normalize(gr, s->lhs, s->rhs, s->n_rules, is_lpo,
+                               &ekbo, &elpo, ATP_GJ_NORM_CAP);
+    joined = kbo_eq(nl, nr);
+  }
+
+  free(ext_prec);
+  free(ext_wt);
+  return joined;
+}
+
+// Enumerate every total PREORDER of {0..n_vars-1} and test each with
+// atp_gj_partition_joins.  A total preorder = a set partition into blocks
+// PLUS a linear order on those blocks.  We enumerate it as a product:
+//   (a) every set partition, via restricted-growth strings cls[]
+//       (cls[0]=0; cls[i] <= 1+max(cls[0..i-1])) -- each partition once;
+//   (b) for each partition, every linear order on its n_cls blocks, via
+//       all permutations perm[] of {0..n_cls-1} mapping block label ->
+//       rank.
+// The product (a) x (b) hits every total preorder exactly once, which is
+// exactly the Fubini-number-many cases (1,1,3,13,75,541 for n=0..5).
+// This is the full tie coverage soundness condition E1 demands.
+//
+// Returns 1 iff EVERY enumerated preorder joins.
+static u8 atp_gj_enumerate(AtpState *s, Term lhs, Term rhs,
+                           const u32 *var_ids, u32 n_vars) {
+  if (n_vars == 0) {
+    return atp_gj_partition_joins(s, lhs, rhs, var_ids, 0, NULL, 0);
+  }
+
+  u32 cls[ATP_GJ_MAX_VARS];
+  u32 perm[ATP_GJ_MAX_VARS];
+  for (u32 i = 0; i < n_vars; i++) cls[i] = 0;
+
+  for (;;) {
+    u32 n_cls = 0;
+    for (u32 i = 0; i < n_vars; i++) if (cls[i] + 1 > n_cls) n_cls = cls[i] + 1;
+
+    for (u32 i = 0; i < n_cls; i++) perm[i] = i;
+    for (;;) {
+      u32 ocls[ATP_GJ_MAX_VARS];
+      for (u32 i = 0; i < n_vars; i++) ocls[i] = perm[cls[i]];
+      if (!atp_gj_partition_joins(s, lhs, rhs, var_ids, n_vars, ocls, n_cls)) {
+        return 0;                          // a preorder fails -> keep
+      }
+      if (n_cls < 2) break;
+      u32 a = n_cls - 1;
+      while (a > 0 && perm[a - 1] >= perm[a]) a--;
+      if (a == 0) break;
+      u32 b = n_cls - 1;
+      while (perm[b] <= perm[a - 1]) b--;
+      u32 tmp = perm[a - 1]; perm[a - 1] = perm[b]; perm[b] = tmp;
+      u32 lo = a, hi = n_cls - 1;
+      while (lo < hi) { tmp = perm[lo]; perm[lo] = perm[hi]; perm[hi] = tmp; lo++; hi--; }
+    }
+
+    u32 i = n_vars;
+    while (i > 0) {
+      i--;
+      u32 max_prefix = 0;
+      for (u32 j = 0; j < i; j++) if (cls[j] + 1 > max_prefix) max_prefix = cls[j] + 1;
+      if (cls[i] < max_prefix) {
+        cls[i]++;
+        for (u32 j = i + 1; j < n_vars; j++) cls[j] = 0;
+        break;
+      }
+      if (i == 0) return 1;                // exhausted all partitions
+      cls[i] = 0;
+    }
+  }
+}
+
+// Top-level: return 1 iff (lhs, rhs) is PROVABLY ground-joinable
+// (would-delete), 0 otherwise (would-keep).  Sound (no false DELETE)
+// given the fresh-minimal constants and full tie coverage above; may KEEP
+// genuinely-joinable CPs (incomplete) -- that only costs performance.
+static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL) return 0;
+  if (s->kbo == NULL && s->lpo == NULL) return 0;   // no ordering -> keep
+
+  u32 var_ids[ATP_GJ_MAX_VARS];
+  u32 n_vars = 0;
+  if (!atp_gj_collect_vars(lhs, var_ids, &n_vars, ATP_GJ_MAX_VARS)) return 0;
+  if (!atp_gj_collect_vars(rhs, var_ids, &n_vars, ATP_GJ_MAX_VARS)) return 0;
+
+  return atp_gj_enumerate(s, lhs, rhs, var_ids, n_vars) ? 1 : 0;
+}
+
+#endif  // ATP_CP_GROUND_JOIN
+
 // Helper: push a batch of CPs onto the queue with TRACE_CP entries
 // pointing at the two source rules' trace indices.  Drops overflow
 // silently.  Filters and counters fire on each CP:
@@ -5645,6 +5927,18 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     u8  classified_drop = atp_classify_cp(s, cp_lhs, cp_rhs,
                                           rule_a, rule_b, &clas_pri);
     if (classified_drop) s->n_cps_dropped_classified++;
+#endif
+#ifdef ATP_CP_GROUND_JOIN
+    // Ground-joinability redundancy.  The check is expensive (ordered-
+    // set-partition enumeration + ground normalization per CP), so it
+    // runs ONLY when the run opted in via s->use_ground_join -- a single
+    // branch test otherwise, free for the default/shipped path.  When
+    // opted in, a ground-joinable CP is counted and dropped; deletion is
+    // sound (a ground-joinable CP is redundant -- Martin-Nipkow / Twee).
+    if (s->use_ground_join && atp_cp_ground_joinable(s, cp_lhs, cp_rhs)) {
+      s->n_cps_ground_joinable++;
+      continue;
+    }
 #endif
     if (joinable) {
       s->n_cps_dropped_joinable++;

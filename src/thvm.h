@@ -3221,6 +3221,18 @@ typedef struct {
   // also rule-subsumed, a sound subset of the joinable drops.
   // Always 0 when the engine is built without -DATP_CP_CLASSIFY.
   u32  n_cps_dropped_classified;
+  // Ground-joinability redundancy criterion (Martin-Nipkow / Twee CADE
+  // 2021 sec 3.1; AHL 2003).  Ticked when a CP is provably ground-
+  // joinable under EVERY total preorder of its variables (ordered set
+  // partitions, ties included).  When `use_ground_join` is set the CP
+  // is dropped (sound: ground-joinable CPs are redundant); otherwise it
+  // is a counter-only measurement.  Only computed when the build defines
+  // ATP_CP_GROUND_JOIN (the shipped paclet does; default C build off).
+  u32  n_cps_ground_joinable;
+  // Runtime gate for ground-joinability DELETION.  0 (default) = the
+  // criterion only counts; 1 = drop ground-joinable CPs.  Set via
+  // thvm_atp_set_use_ground_join (Method -> {... "GroundJoin" -> True}).
+  u8   use_ground_join;
 
   // Stage 8.1e-i: feature flag.  When 0 (default), `thvm_atp_
   // generate_cps` runs the C-side critical-pair enumerator
@@ -3344,6 +3356,10 @@ fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 // check runs alone.  Lets one dylib carry MNF without paying for it
 // on completion-only goals.
 fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
+// Opt in to ground-joinability CP deletion (no effect unless the dylib
+// is built with ATP_CP_GROUND_JOIN).  Sound: ground-joinable CPs are
+// redundant.  Off by default (the criterion only counts).
+fn void      thvm_atp_set_use_ground_join(AtpState *s, u8 on);
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // `thvm_atp_init` defaults to ATP_CP_WEIGHT_GT; out-of-range
