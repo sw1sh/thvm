@@ -265,7 +265,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
   // Set goal (allow 0/0 to mean "completion mode").
   Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
   Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
-  thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
+  // Completion mode: a (0, 0) conjecture pair means "no goal" -- the
+  // engine then saturates the axioms until the queue empties (a finite
+  // complete system) or the step/wall budget is hit, and the caller
+  // reads the derived rule set (MainRules) as the completion lemmas.
+  // goal_check returns ATP_RUNNING whenever no goal is set, so the run
+  // is bounded only by MaxSteps / MaxWallSeconds / TimeConstraint.
+  if (goal_lhs != 0u || goal_rhs != 0u) {
+    thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
+  }
 
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
@@ -468,7 +476,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
   Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
   Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
-  thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
+  // Completion mode: a (0, 0) conjecture pair means "no goal" -- the
+  // engine then saturates the axioms until the queue empties (a finite
+  // complete system) or the step/wall budget is hit, and the caller
+  // reads the derived rule set (MainRules) as the completion lemmas.
+  // goal_check returns ATP_RUNNING whenever no goal is set, so the run
+  // is bounded only by MaxSteps / MaxWallSeconds / TimeConstraint.
+  if (goal_lhs != 0u || goal_rhs != 0u) {
+    thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
+  }
 
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
