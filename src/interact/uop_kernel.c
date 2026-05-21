@@ -114,15 +114,7 @@ fn void kernel_fire_by_id(u32 kid) {
       jit_capture_record((u32)(ke - KERNELS),
                          in_buf_ids, ke->n_inputs, out_buf_id);
     }
-    // Codegen-only prescreen (THVM_NO_DISPATCH=1): the kernel has already
-    // been materialised + counted; skip the actual backend execution so
-    // the kernel COUNT and memory plan can be inspected without any GPU
-    // dispatch (or the slow CPU walk).  Output buffers are left
-    // uninitialised -- this is for schedule inspection, NOT correct
-    // results.
-    static int nodisp = -1;
-    if (nodisp < 0) { const char *e = getenv("THVM_NO_DISPATCH"); nodisp = (e && e[0] == '1'); }
-    if (!nodisp) b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
+    b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   }
 
   // Per-fire consumer-count decref removed alongside `fired`: the
