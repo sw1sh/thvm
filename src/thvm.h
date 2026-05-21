@@ -3151,6 +3151,12 @@ typedef struct {
   // means "no goal set; run as completion".
   Term goal_lhs;
   Term goal_rhs;
+  // Live goal normalized under the current R, refreshed by goal_check.
+  // The goal-directed CP heuristic (CPinGoal) matches against this
+  // shrinking form, not the original goal, so direction tracks progress
+  // as Waldmeister's does.  0 until the first goal_check.
+  Term goal_lhs_nf;
+  Term goal_rhs_nf;
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of

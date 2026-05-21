@@ -2455,7 +2455,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   if (s == NULL || !gc_enabled()) return 0;
 
   // Count the root slots so we can size the array exactly.
-  u32 n_roots = 2u * s->n_rules + 2u /* goal */
+  u32 n_roots = 2u * s->n_rules + 4u /* goal + goal_nf */
               + s->n_trace + REWRITE_MAX_VAR;
 #ifdef ATP_CP_GRAPH
   // 8b: cp_graph is now a thing reductions act on (atp_normalize_graph
@@ -2479,6 +2479,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   }
   roots[w++] = s->goal_lhs;
   roots[w++] = s->goal_rhs;
+  roots[w++] = s->goal_lhs_nf;
+  roots[w++] = s->goal_rhs_nf;
   for (u32 i = 0; i < s->n_trace; i++) roots[w++] = s->trace[i];
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     roots[w++] = s->witness_subst.bindings[i];
@@ -2503,6 +2505,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   }
   s->goal_lhs = roots[w++];
   s->goal_rhs = roots[w++];
+  s->goal_lhs_nf = roots[w++];
+  s->goal_rhs_nf = roots[w++];
   for (u32 i = 0; i < s->n_trace; i++) s->trace[i] = roots[w++];
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     s->witness_subst.bindings[i] = roots[w++];
@@ -3143,7 +3147,8 @@ static u32 atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
 // (completion mode) -> 0.  See the block comment above.
 static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
   if (s == NULL || s->goal_lhs == 0) return 0u;
-  Term gl = s->goal_lhs, gr = s->goal_rhs;
+  Term gl = s->goal_lhs_nf ? s->goal_lhs_nf : s->goal_lhs;
+  Term gr = s->goal_rhs_nf ? s->goal_rhs_nf : s->goal_rhs;
   u32 phi_g = atp_symbol_count(gl) + atp_symbol_count(gr);
   RewriteSubst e = {{0}};
   // Doppelmatch over both pairings (cl->gl & cr->gr, cl->gr & cr->gl).
@@ -4911,6 +4916,9 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
                                  s->n_rules, NORM_CAP);
   Term r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
+  // Cache the live (normalized) goal for the CPinGoal heuristic.
+  s->goal_lhs_nf = l;
+  s->goal_rhs_nf = r;
   if (kbo_eq(l, r)) return ATP_PROVED;
 #ifdef ATP_MNF
   // Milestone 10: the MNF bidirectional search AUGMENTS the single-NF
