@@ -149,13 +149,13 @@ static int ru_extent_is_one(u32 extent) {
 //   -- already covered by hash-cons via uop_range
 // `if resolve(s != 1)`: build a fresh RANGE; else CONST(0).
 static Term ru_new_range(u32 extent, u32 axistype) {
-  // Always bump RU_RANGE_IDX_COUNTER so the axis_id space matches the
-  // legacy lifter's (which assigns an axis to every output dim,
-  // including size-1).  Downstream consumers - kernel_apply_opt's
-  // apply_opt_dag_find_range, tile/codegen axis lookup, etc. - index
-  // into this space by user-facing axis number; collapsing size-1
-  // axes to CONST(0) without bumping the counter would shift every
-  // subsequent axis_id down by one.
+  // Always bump RU_RANGE_IDX_COUNTER so the axis_id space mirrors
+  // tinygrad's (one axis per output dim, including size-1).
+  // Downstream consumers - kernel_apply_opt's apply_opt_dag_find_range,
+  // tile/codegen axis lookup, etc. - index into this space by
+  // user-facing axis number; collapsing size-1 axes to CONST(0)
+  // without bumping the counter would shift every subsequent axis_id
+  // down by one.
   u32 axis_id = RU_RANGE_IDX_COUNTER++;
   if (ru_extent_is_one(extent)) {
     // Mirror tinygrad: UOp.const(dtypes.weakint, 0).  The collapsed
@@ -202,9 +202,9 @@ static u32 ru_f32_bits(f32 v) {
 // cpu_uop_walk's uwalk_run_reduce walks the body for a UOP_RANGE with
 // axis_id == r_aid to recover the loop extent; without one it falls back
 // to the reduce identity (0 for SUM, -INF for MAX) and the kernel writes
-// zeros.  Mirror the legacy kernel_lift behavior: the reduce of a
-// body that's constant along the reduce axis equals `body * extent` for
-// SUM (and just `body` for MAX/MIN).
+// zeros.  Repair: the reduce of a body that's constant along the
+// reduce axis equals `body * extent` for SUM (and just `body` for
+// MAX/MIN).
 static Term ru_reduce_repair_broadcast_body(Term reduce_t, Term reduce_range) {
   if (term_tag(reduce_t) != TAG_UOP || term_ext(reduce_t) != UOP_REDUCE) {
     return reduce_t;
@@ -1493,11 +1493,11 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
       }
     } else if (ctag == TAG_TEN || ctag == TAG_VAR) {
       // TAG_VAR (shape-annotated TLam-bound variable): treated as a
-      // symbolic input slot just like TAG_TEN. The legacy lifter's
-      // visit() maps it to KSRC_AS_INPUT via input_slot_dedup_var;
-      // the bypass rewriter (unified_rewrite_buffer_for_var in
-      // materialize.c) substitutes it with the matching UOP_BUFFER
-      // before cpu_uop_walk binds runtime input pointers.
+      // symbolic input slot just like TAG_TEN.  visit() maps it to
+      // KSRC_AS_INPUT via input_slot_dedup_var; the bypass rewriter
+      // (unified_rewrite_buffer_for_var in materialize.c) substitutes
+      // it with the matching UOP_BUFFER before cpu_uop_walk binds
+      // runtime input pointers.
       //
       // For TAG_TEN whose TenDesc carries a non-trivial prior_views
       // chain we fold the ShapeTracker decompose-by-shape into the
@@ -1634,8 +1634,8 @@ fn void pm_apply_rangeify(Term root) {
     // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
     // == 0.  cpu_uop_walk's uwalk_run_reduce would find no UOP_RANGE
     // in the body and return 0 (the r_extent==0 fallback at uop_walk.c
-    // line 567).  Mirror the legacy lifter's behavior and unwrap the
-    // REDUCE shell to its source: sum_{i in [0,1)} f(i) == f(0).
+    // line 567).  Unwrap the REDUCE shell to its source:
+    // sum_{i in [0,1)} f(i) == f(0).
     if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 0
         && term_tag(rewritten) == TAG_UOP
         && term_ext(rewritten) == UOP_REDUCE) {
@@ -1774,15 +1774,16 @@ fn void pm_apply_rangeify(Term root) {
                                  n_closed, closed_ranges);
       RU_BUFFERIZE_TERM[i] = b;
       RU_LAST_BUFFERIZES_EMITTED++;
-      // Mirror kernel_lift_to_uop's `out->store_root`: assemble a
-      // UOP_STORE(out_buf, addr, value) where out_buf is shaped by
-      // the n_closed RANGE extents and dtype comes from the
-      // rewritten value.  Only emit if dtype is recoverable; the
-      // legacy lifter remains the fallback otherwise.  Note: DT_BOOL
-      // == 0 is a valid dtype, so we MUST use term_dtype_in's return
-      // value rather than gating on `store_dtype != 0` -- the latter
-      // would silently drop every cast-to-bool kernel and leave its
-      // output buffer at the init zeros.
+      // Assemble UOP_STORE(out_buf, addr, value) for the lifter's
+      // `out->store_root`: out_buf is shaped by the n_closed RANGE
+      // extents, dtype comes from the rewritten value.  Only emit if
+      // dtype is recoverable; without a recoverable dtype this slot's
+      // store_root stays 0 and kernel_lift_to_uop will reject the
+      // kernel.  Note: DT_BOOL == 0 is a valid dtype, so we MUST use
+      // term_dtype_in's return value rather than gating on
+      // `store_dtype != 0` -- the latter would silently drop every
+      // cast-to-bool kernel and leave its output buffer at the init
+      // zeros.
       u32 store_dtype = 0;
       if (term_dtype_in(self, 0, &store_dtype)) {
         Shape out_shape = {0};

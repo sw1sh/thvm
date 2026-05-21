@@ -792,9 +792,9 @@ fn void bufferize_classify(Term root) {
       // this inner UOP after DUP traversal.  The CPU walker handles
       // DUP-traversed addr / body expressions correctly because
       // term_resolve in uwalk_eval_* unwraps SUB-marked cells; the
-      // chain-guard's old cmap-BFS limitation no longer applies once
-      // execution is via uwalk_run_reduce (which re-runs the inner per
-      // outer iteration) rather than the legacy hoist-cache lookup.
+      // chain-guard's cmap-BFS limitation only mattered for the
+      // hoist-cache execution model; uwalk_run_reduce re-runs the
+      // inner per outer iteration and handles the chain directly.
       u64 visited[8];
       u32 n_visited = 0;
       Term outer_src = bufferize_unwrap_dp(heap_read(consumer_locs[0] + 0),

@@ -389,13 +389,12 @@ static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term);
 
 // The unified-pass store_root carries TAG_TEN leaves (wrapped inside
 // UOP_INDEX_E.buffer slots; see ru_rewrite_subtree in
-// rangeify_unified.c).  The legacy kernel_lift path replaces those
-// tensor handles with hash-consed UOP_BUFFER nodes keyed by (slot+1)
-// instance disambiguator, and cpu_uop_walk binds the kernel's runtime
-// input table to UOP_BUFFER leaves matched by that same instance
-// number.  Substitute every TAG_TEN whose tid appears in
-// ke->input_tids[] with the matching UOP_BUFFER so the unified subtree
-// becomes structurally compatible with the walker's identity binding.
+// rangeify_unified.c).  cpu_uop_walk binds the kernel's runtime input
+// table to UOP_BUFFER leaves matched by the (slot+1) instance
+// disambiguator, so substitute every TAG_TEN whose tid appears in
+// ke->input_tids[] with the matching UOP_BUFFER -- the rewritten
+// subtree becomes structurally compatible with the walker's identity
+// binding.
 
 #define UNIFIED_REWRITE_MEMO_CAP 4096
 typedef struct {
@@ -453,11 +452,11 @@ static void unified_rewrite_memo_insert(UnifiedRewriteState *st, Term key,
 // aren't kernel inputs, e.g. constants or output backrefs).
 //
 // View-aliased fallback: when the rewriter sees a TAG_TEN whose tid
-// predates the legacy visit()'s view_resolve aliasing (e.g. matmul's
-// inner W reference, before EXPAND folded into an alias tid), the
-// initial exact-tid scan misses. tensor_view_of clones share buf_id,
-// so a second pass matches by underlying buffer -- the consumer reads
-// the same bytes regardless of which alias-tid the input slot tracks.
+// predates the consumer's view_resolve aliasing (e.g. matmul's inner W
+// reference, before EXPAND folded into an alias tid), the initial
+// exact-tid scan misses. tensor_view_of clones share buf_id, so a
+// second pass matches by underlying buffer -- the consumer reads the
+// same bytes regardless of which alias-tid the input slot tracks.
 static Term unified_rewrite_buffer_for_tid(KernelEntry const *ke, u32 tid) {
   if (tid == 0 || tid >= TENS_NEXT) return 0;
   if (ke->input_tids == NULL) return 0;
@@ -488,14 +487,13 @@ static Term unified_rewrite_buffer_for_tid(KernelEntry const *ke, u32 tid) {
 
 // Same lookup as unified_rewrite_buffer_for_tid, but when no slot
 // matches, dynamically extend ke->input_tids[] with the new tid and
-// mirror the slot into cached_lift.in_bufs[] so cpu_uop_walk binds
-// a runtime buffer for it.  Mirrors the legacy kernel_lift_to_uop's
-// per-kernel realize-projection that synthesizes an input slot for
-// every TAG_TEN referenced inside the lifted value subtree.  Used by
-// the TAG_TEN handler in unified_rewrite_rec_sub when the consumer's
-// input_tids[] doesn't carry the tid (the unified pass inlined a
-// producer BUFFERIZE whose value subtree references a TAG_TEN that's
-// not in the consumer's iter scope).
+// mirror the slot into cached_lift.in_bufs[] so cpu_uop_walk binds a
+// runtime buffer for it.  Synthesizes an input slot for every TAG_TEN
+// referenced inside the lifted value subtree.  Used by the TAG_TEN
+// handler in unified_rewrite_rec_sub when the consumer's input_tids[]
+// doesn't carry the tid (the unified pass inlined a producer BUFFERIZE
+// whose value subtree references a TAG_TEN that's not in the consumer's
+// iter scope).
 static Term unified_rewrite_buffer_for_tid_extend(KernelEntry *ke, u32 tid) {
   Term repl = unified_rewrite_buffer_for_tid(ke, tid);
   if (repl != 0) return repl;
@@ -512,9 +510,9 @@ static Term unified_rewrite_buffer_for_tid_extend(KernelEntry *ke, u32 tid) {
   // Mirror into cached_lift.in_bufs[] / n_inputs so cpu_uop_walk's
   // ctx.in_terms[slot] resolves to the same BUFFER inst we just
   // emitted into the rewritten value tree.  in_chain_composed defaults
-  // to 0 for the new slot (kernel_inputs_reserve zero-pads), matching
-  // the legacy lifter's per-slot view-aware addressing for tids that
-  // weren't wired through ru_pass's input_chain logic.
+  // to 0 for the new slot (kernel_inputs_reserve zero-pads); per-slot
+  // view-aware addressing kicks in only for tids wired through
+  // ru_pass's input_chain logic.
   if (slot < KERNEL_LIFT_MAX_INPUT) {
     ke->cached_lift.in_bufs[slot] = buf;
     if (ke->cached_lift.n_inputs < ke->n_inputs) {
@@ -593,13 +591,12 @@ static Term unified_rewrite_buffer_for_bufferize_extend(KernelEntry *ke,
   return unified_rewrite_buffer_for_tid_extend(ke, tid);
 }
 
-// TAG_VAR substitute: the legacy visit() registers a TLam-bound TVAR
-// (with a shape annotation in the lam_shape side table) as an input
-// slot with input_tids[slot]==0 and input_terms[slot]==var_term.
-// Match that slot here and synthesize the corresponding UOP_BUFFER
-// so cpu_uop_walk binds the runtime buffer (which gets resolved at
-// fire time through term_resolve on the symbolic var) to the same
-// inst that the legacy lifter would have emitted.
+// TAG_VAR substitute: visit() registers a TLam-bound TVAR (with a
+// shape annotation in the lam_shape side table) as an input slot with
+// input_tids[slot]==0 and input_terms[slot]==var_term.  Match that
+// slot here and synthesize the corresponding UOP_BUFFER so cpu_uop_walk
+// binds the runtime buffer (resolved at fire time through term_resolve
+// on the symbolic var) to the (slot+1) inst the walker expects.
 static Term unified_rewrite_buffer_for_var(KernelEntry const *ke,
                                            Term var_term) {
   if (ke->input_tids == NULL || ke->input_terms == NULL) return 0;
@@ -629,8 +626,7 @@ static Term unified_rewrite_buffer_for_var(KernelEntry const *ke,
 // (the append guards stop at the cap), leaving those closed_ranges
 // unbound -> stranded RANGE leaves -> the walker read iter=0 and the
 // gradient came out zero.  Sized to hold several conv levels of nesting;
-// overflow now bails the inline (returns to the legacy lifter) rather
-// than truncating to a wrong result.
+// overflow now bails the inline rather than truncating to a wrong result.
 #define UNIFIED_SUBST_CAP 64
 typedef struct {
   Term from[UNIFIED_SUBST_CAP];
@@ -1087,8 +1083,8 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     // Use the extend variant: when boundary lookup finds a producer tid
     // but the consumer's static input_tids[] doesn't carry it (common
     // in TGrad backward kernels where ru_pass emits BUFFERIZE refs to
-    // tids the legacy lifter never registered), dynamically extend
-    // input_tids[] and mint a UOP_BUFFER for the new slot.  Without
+    // tids that weren't pre-registered as kernel inputs), dynamically
+    // extend input_tids[] and mint a UOP_BUFFER for the new slot.  Without
     // this the BUFFERIZE leaks to the Metal renderer's rmu_buf_name
     // fallback (`buf{loc}`) and MSL compile fails on the undeclared
     // identifier, which was what blocked beautiful_mnist bench-train
@@ -1103,10 +1099,9 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   // component of `addr`.  Some unified-pass BUFFERIZE wraps an
   // in-kernel intermediate (a constant scalar, a reduce-to-scalar,
   // a product of reduced scalars, a per-row softmax denominator)
-  // that isn't a realize boundary.  The legacy kernel_lift_to_uop
-  // inlines such producers into their consumer; the cpu_uop_walk
-  // value dispatcher has no BUFFERIZE handler and would read 0 if
-  // left in place.
+  // that isn't a realize boundary.  Such producers must be inlined into
+  // their consumer; cpu_uop_walk's value dispatcher has no BUFFERIZE
+  // handler and would read 0 if left in place.
   //
   // Inline cases handled here:
   //
@@ -1122,7 +1117,7 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   // Multi-range BUFFERIZE intermediates with compound addrs (IADD/IMUL
   // strides over multiple consumer ranges) still need an addr-folding
   // rewrite that splits addr into per-axis indices; until that lands
-  // the resid gate keeps those kernels on the legacy lifter.
+  // the resid gate leaves the BUFFERIZE node in place for those kernels.
   if (term_ext(resolved) == UOP_INDEX_E) {
     Term inner_buf = term_resolve(heap_read(term_val(resolved) + 0));
     Term addr_term = term_resolve(heap_read(term_val(resolved) + 1));
@@ -1249,8 +1244,8 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       // a subset of axes (softmax denom replicated across cols).
       if (v != 0 && n_ranges >= 2 && n_ranges <= UNIFIED_SUBST_CAP) {
         // Tinygrad-spec inline first (indexing.py:78 per-axis index);
-        // falls through to legacy stride/extent decomposition when the
-        // side table has no entry for this INDEX_E.
+        // falls through to stride/extent decomposition when the side
+        // table has no entry for this INDEX_E.
         Term axis_hit = try_inline_bufferize_via_axis_table(
             st, sub, resolved, inner_buf, v, n_ranges, depth);
         if (axis_hit != 0) return axis_hit;
@@ -1265,12 +1260,10 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       Term buf_rw = unified_rewrite_rec_sub(st, sub, heap_read(term_val(resolved) + 0),
                                             depth + 1);
       // numel-1 BUFFER: reading at any addr other than 0 is OOB.  The
-      // legacy lifter encodes broadcast-from-scalar via stride=0 in
-      // input_views and folds the addr to CONST(0); the unified pass
-      // builds addr from raw consumer ranges and leaks the multi-axis
-      // expression through.  Substitute CONST(0) here so the rewritten
-      // INDEX_E reads in-bounds regardless of the addr the substitution
-      // produced.
+      // unified pass builds addr from raw consumer ranges and leaks
+      // the multi-axis expression through; substitute CONST(0) here so
+      // the rewritten INDEX_E reads in-bounds regardless of the addr
+      // the substitution produced.
       if (term_tag(buf_rw) == TAG_UOP && term_ext(buf_rw) == UOP_BUFFER
           && uop_buffer_numel(buf_rw) == 1) {
         addr_term = uop_const(DT_INT32, 0);
@@ -1312,8 +1305,8 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   // value tree never wraps an INDEX_E/CONST/etc. inside a LOAD.
   // cpu_uop_walk's value dispatcher has no UOP_LOAD case,
   // so a stray LOAD wrapping an INDEX_E reads as 0 and the kernel zeroes
-  // its output.  Strip it here so the rewritten subtree is structurally
-  // identical to the legacy lifter's output.
+  // its output.  Strip it here so the rewritten subtree feeds the walker
+  // directly.
   if (op == UOP_LOAD) {
     Term inner = unified_rewrite_rec_sub(st, sub, heap_read(loc), depth + 1);
     if (sub == NULL) unified_rewrite_memo_insert(st, resolved, inner);
@@ -1327,12 +1320,11 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   // the value layer they're identities around their single src: the
   // surrounding INDEX_E.addr already encodes the linear read, and any
   // RANGE leaves inside use axis_ids that map to ctx slots regardless
-  // of the producer's shape annotation.  The legacy kernel_lift folds
-  // movement ops into the addr expression via S_RESHAPE_V / movement
-  // handling in kernel_lift.c; the unified pass leaves them in place.
-  // Strip them so the rewritten subtree is walkable.  Pool-style
-  // reshape-MAX gradients reach this when an n_r=1 BUFFERIZE inline
-  // produces RESHAPE(INDEX_E(...)) around the LHS of a CMPEQ.
+  // of the producer's shape annotation.  The unified pass leaves
+  // movement ops in place; strip them here so the rewritten subtree
+  // is walkable.  Pool-style reshape-MAX gradients reach this when an
+  // n_r=1 BUFFERIZE inline produces RESHAPE(INDEX_E(...)) around the
+  // LHS of a CMPEQ.
   if (op == UOP_RESHAPE || op == UOP_PERMUTE
       || op == UOP_EXPAND  || op == UOP_PAD
       || op == UOP_SHRINK  || op == UOP_FLIP) {
@@ -1708,13 +1700,12 @@ static int uop_subtree_has_stranded_range(Term store_root) {
 // Safety gate: scan the rewritten subtree for any UOP_INDEX_E reading
 // from a UOP_BUFFER input slot whose static numel is smaller than the
 // consumer's iter footprint (output STORE numel + any enclosing REDUCE
-// extents).  This indicates a stride-0 broadcast view: the legacy
-// kernel_lift consults ke->input_views[slot].strides and emits CONST(0)
-// for the broadcast axis; the unified bypass builds addr expressions from
-// per-axis ranges without consulting strides and reads out-of-bounds on
-// the 1-element backing store.  Until ru_pass threads view strides
-// through INDEX_E address construction, decline the bypass for these
-// inputs.
+// extents).  This indicates a stride-0 broadcast view where the
+// per-slot input_views[slot].strides would fold the broadcast axis to
+// CONST(0).  The unified bypass builds addr expressions from per-axis
+// ranges without consulting strides and reads out-of-bounds on the
+// 1-element backing store.  Until ru_pass threads view strides through
+// INDEX_E address construction, decline the bypass for these inputs.
 //
 // Compute the static numel of a UOP_BUFFER (product of dims).  Returns
 // 0 if t is not a UOP_BUFFER.
@@ -1802,7 +1793,7 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
   u8  op  = term_ext(r);
   u64 loc = term_val(r);
   // INDEX_E(BUFFER, addr): the read is safe iff the addr expression's
-  // statically-bounded max value is < BUFFER.numel.  The legacy
+  // statically-bounded max value is < BUFFER.numel.  A bare
   // numel-vs-iter-footprint check fires false positives on
   //   - INDEX_E inside a REDUCE body whose addr is a bare reduce-axis
   //     RANGE (max addr = extent-1, fully in-bounds of dims=[extent])
@@ -1810,7 +1801,7 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
   //     cube (broadcast over the missing axes -- addr stays small)
   // When `addr_max_value` returns UINT64_MAX (estimator doesn't model
   // some op in the addr tree), fall back to the conservative
-  // numel-vs-footprint check that was the original gate.
+  // numel-vs-footprint check.
   //
   // INDEX_E(TAG_TEN, addr): the unified pass inlines a producer
   // BUFFERIZE's value subtree into the consumer.  When that subtree
@@ -1818,9 +1809,7 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
   // carry, materialize.c's unified_rewrite_buffer_for_tid returns 0
   // and the TAG_TEN is left in the rewritten tree -- cpu_uop_walk
   // can't bind a runtime buffer for it and the kernel reads garbage.
-  // Decline; legacy kernel_lift_to_uop's per-kernel realize-projection
-  // ensures every TAG_TEN referenced inside the lifted value has a
-  // matching input slot.
+  // Decline so the bypass substitution skips this kernel.
   if (op == UOP_INDEX_E) {
     Term buf_t = term_resolve(heap_read(loc + 0));
     if (term_tag(buf_t) == TAG_TEN) {
@@ -1943,7 +1932,7 @@ static int uop_subtree_has_broadcast_input(KernelEntry const *ke,
 
 // === Debug dumper for THVM_DEBUG_BYPASS_LAST=1 ===
 // Pretty-prints a UOp subtree with indent + opcode name + key fields.
-// Used to bisect bypass divergences against the legacy lifter root.
+// Used to bisect bypass-substitution divergences when a gate trips.
 static char const *bypass_dbg_op_name(u8 op) {
   switch (op) {
     case UOP_CONST:       return "CONST";
@@ -2177,8 +2166,8 @@ static void topo_sort_boundaries(Term root) {
 // the unified rangeify pass emitted at each boundary into
 // BOUNDARY_BUFFERIZE_TERM[].  Mirror: tinygrad's scheduler walks
 // BUFFERIZE+STORE pairs in the lowered tsink
-// (tinygrad/engine/realize.py); thvm reuses the legacy topo and
-// attaches the unified-pass Term per slot for KernelEntry wiring.
+// (tinygrad/engine/realize.py); thvm reuses the boundary-order topo
+// and attaches the unified-pass Term per slot for KernelEntry wiring.
 //
 // Does NOT mutate BUFFERIZE_NODES.realized -- bufferize_classify's
 // pre-seed pass (including the inline softmax-broadcast-reduce unmark)
@@ -2200,7 +2189,7 @@ fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
 fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
 
 // Single-output kernel accessors.  Every kernel writes exactly one
-// output buffer (output_tid family); slot 0 maps to the legacy
+// output buffer (output_tid family); slot 0 maps to the per-kernel
 // fields, all other slots return 0 / sentinels.
 fn u32 kernel_entry_output_count(u32 kid) {
   if (kid >= KERNELS_NEXT) return 0;
@@ -2811,7 +2800,7 @@ static u32 view_resolve_inner(Term t, int boundary_base) {
     }
   }
   // Malformed reshape, chain wraparound, or non-RESHAPE absorb
-  // failure: fall back to emitting a kernel op (the legacy path).
+  // failure: fall back to emitting a kernel op.
   return 0;
 }
 
@@ -3325,15 +3314,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // cpu_uop_walk) read store_root / out_buf / in_bufs[] from
   // cached_lift without re-running the lifter.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
-    // Substitute the lifter's store_root with the unified-pass
-    // output where available.  The lifter's other cached_lift
-    // fields (in_bufs[], n_inputs) stay populated from the legacy
-    // path, so downstream CPU walker / Metal renderer use the
-    // unified root for compute but the legacy buffer table for I/O
-    // binding.  Three per-kernel safety gates (residual-BUFFERIZE,
-    // stranded-RANGE, broadcast-input) leave store_root on the
-    // legacy lifter's output for kernels the unified pass can't
-    // fully lower; the rest of the schedule still gets the bypass.
+    // Rewrite the unified store_root for the walker (substitute
+    // TAG_TEN/BUFFERIZE leaves with UOP_BUFFER input slots).  The
+    // cached_lift.in_bufs[] / n_inputs / out_buf fields from
+    // kernel_lift_to_uop bind the runtime input/output tables; the
+    // rewritten store_root drives compute.  Three per-kernel safety
+    // gates (residual-BUFFERIZE, stranded-RANGE, broadcast-input)
+    // decide whether the chain-fold flag commits are saved.
     {
       Term ru_root = rangeify_unified_store_root_at(idx);
       if (ru_root != 0) {
@@ -3342,8 +3329,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
         // whose tid carries non-trivial layout (chain or non-contig
         // view).  The flag commit is deferred until the bypass-succeeded
         // branch below so a gate-declined kernel doesn't get its pre-mat
-        // skipped while still reading via the legacy unfolded
-        // store_root.
+        // skipped while still reading via the unfolded store_root.
         ChainFoldMarks _cf_marks;
         _cf_marks.slot_mask_lo = 0;
         _cf_marks.slot_mask_hi = 0;
@@ -3377,19 +3363,20 @@ static Term emit_kernel_for_boundary(u32 bi) {
         //                (broadcast) axis, negative stride (FLIP) or
         //                a non-row-major stride pattern (PERMUTE /
         //                SHRINK view).  ru_pass builds addresses from
-        //                per-axis ranges without consulting strides;
-        //                the legacy kernel_lift consults
-        //                ke->input_views[slot].strides and emits
-        //                CONST(0) for broadcast axes.  Until ru_pass
-        //                threads view strides through INDEX_E address
+        //                per-axis ranges without consulting strides,
+        //                and the input_views[slot].strides per-slot
+        //                stride table that would fold the broadcast
+        //                axis to CONST(0) isn't reflected in the
+        //                rewritten subtree.  Until ru_pass threads
+        //                view strides through INDEX_E address
         //                construction, decline the bypass for these
         //                inputs.  Softmax-CE backward hits this where
         //                a 1-element scalar feeds a 3-element consumer
         //                via stride-0 broadcast.
         //
-        // When any gate trips, leave store_root as the legacy
-        // lifter's output for this kernel; the rest of the schedule
-        // still gets the bypass.
+        // When any gate trips, skip the chain-fold commit; store_root
+        // still gets the rewritten subtree (the renderer can't name
+        // raw TAG_TEN / BUFFERIZE leaves regardless of gate outcome).
         int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
         int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
         int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
