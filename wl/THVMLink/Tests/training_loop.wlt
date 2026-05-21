@@ -67,9 +67,12 @@ VerificationTest[
         {Round[Normal @ TTensorData[w], 0.0001],
          profile["Kernels"]}
     ],
-    (* Re-baselined 1 -> 2 in Phase 16 leak fix: same TODO as
-       200-iters-bounded-kernels-under-5s. *)
-    {Round[(1 - 0.8^10) * {1., 2., 3.}, 0.0001], 2},
+    (* 1 kernel: the target-aware chain rule now shares the L2 forward
+       value (w-tgt) with the SGD step instead of DUP-copying it, so the
+       grad fuses back into the step kernel.  Was 2 after Phase 16's leak
+       fix (the DP0-copy split them); the 434bdeeb grad_fwd_of share
+       recovers the 1-kernel fusion the old TODO called for. *)
+    {Round[(1 - 0.8^10) * {1., 2., 3.}, 0.0001], 1},
     TestID -> "training-loop/vector-tgrad-l2-10iters-bounded-kernels"
 ]
 
@@ -119,16 +122,16 @@ VerificationTest[
         TWnf @ TApp[TRef["sgd_long_loop"], TNum[200]];
         dt = AbsoluteTime[] - t0;
         profile = TProfile[];
-        (* w should converge to tgt; bounded kernels (re-baselined
-           1 -> 2 in Phase 16's leak fix: target-aware chain rule
-           emits the L2 grad as a separate kernel from the SGD step
-           rather than fusing via the old DUP-nest projection.
-           TODO: fold via uop_rewrite to recover 1-kernel fusion. *)
+        (* w should converge to tgt; bounded at 1 kernel.  Was 2 after
+           Phase 16's leak fix (the target-aware chain rule DP0-copied
+           the L2 forward value, splitting the grad into its own kernel);
+           434bdeeb's grad_fwd_of share folds it back into the SGD step --
+           recovering the 1-kernel fusion the old TODO asked for. *)
         {Round[Normal @ TTensorData[w], 0.0001],
          profile["Kernels"],
          dt < 5.0}
     ],
-    {{1., 2., 3.}, 2, True},
+    {{1., 2., 3.}, 1, True},
     TestID -> "training-loop/200-iters-bounded-kernels-under-5s"
 ]
 
