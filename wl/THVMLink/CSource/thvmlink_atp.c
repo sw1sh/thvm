@@ -465,6 +465,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Method -> {... "SelectionRatio" -> n}: Waldmeister CPdimension
   // fairness ratio (1 FIFO pick per n selections).  0 keeps the default.
   thvm_atp_set_selection_ratio(atp, sel_ratio > 0 ? (u32)sel_ratio : 0u);
+  // Method -> {... "AutoMaxWeight" -> b}: growing CP-weight bound
+  // (base b + 2*deepest-rule-weight) that defers over-weight CPs to a
+  // stash and force-drains them when the queue empties -- keeps the CP
+  // queue small without losing completeness.  0 = off.
+  mint auto_maxw = MArgument_getInteger(args[12]);
+  thvm_atp_set_auto_max_cp_weight(atp, auto_maxw > 0 ? (u32)auto_maxw : 0u);
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

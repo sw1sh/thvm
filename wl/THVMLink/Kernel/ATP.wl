@@ -91,7 +91,8 @@ $atpRunFn := $atpRunFn = load[
 $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
-     Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
+     Integer},
     "NumericArray"
 ]
 
@@ -816,14 +817,15 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
    the corresponding extraction produced nothing. *)
 cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     cpWeight_:-1, ordering_:0, autoPrec_:0, useMnf_:0,
-    maxCpWeight_:0, goalInterleave_:0, groundJoin_:0, selRatio_:0] := Block[{
+    maxCpWeight_:0, goalInterleave_:0, groundJoin_:0, selRatio_:0,
+    autoMaxWeight_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries
 },
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
-        goalInterleave, groundJoin, selRatio];
+        goalInterleave, groundJoin, selRatio, autoMaxWeight];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -1747,7 +1749,14 @@ atpGroundJoinOpt[o_Association] := Switch[Lookup[o, "GroundJoin", Automatic],
    the engine default (11); Waldmeister also uses 50/100/200. *)
 atpSelectionRatioOpt[o_Association] := With[{n = Lookup[o, "SelectionRatio", 0]},
     If[ IntegerQ[n] && n > 0, n, 0]];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0};
+(* "AutoMaxWeight" -> b: a growing CP-weight bound (base b + 2*deepest-
+   rule-weight) that defers over-weight critical pairs to a stash and
+   force-drains them when the active queue empties.  Keeps the CP queue
+   small (measured ~3.5x) WITHOUT losing completeness (nothing is dropped).
+   0/Automatic = off. *)
+atpAutoMaxWeightOpt[o_Association] := With[{b = Lookup[o, "AutoMaxWeight", 0]},
+    If[ IntegerQ[b] && b > 0, b, 0]];
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -1765,7 +1774,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
             True, 1, False | Automatic, 0, _, 0];
         {cw, ord, ap, mnf, atpMaxWeightOpt[o], atpGoalInterleaveOpt[o],
-         atpGroundJoinOpt[o], atpSelectionRatioOpt[o]}
+         atpGroundJoinOpt[o], atpSelectionRatioOpt[o], atpAutoMaxWeightOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -1776,11 +1785,11 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0};
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 atpParseMethod[m_] := (
-    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0});
+    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
@@ -2134,8 +2143,9 @@ atpAutoTuneForClass["Sheffer"] := {
        (StdS's zb(mnf), Sinai.h:109) is the closer; pair it with the
        Mix2 weight that thvm finds best on the hard cross-axiom Sheffer
        theorems. *)
-    {"GoalDirected", "CriticalPairWeight" -> "Mix2"},
-    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True}};
+    {"GoalDirected", "CriticalPairWeight" -> "Mix2", "AutoMaxWeight" -> 20},
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "AutoMaxWeight" -> 20}};
 atpAutoTuneForClass[_] := {};   (* "General": no front-load, just tail *)
 
 (* Front-load the tuned configs, then APPEND the full fixed portfolio
@@ -2613,7 +2623,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
                 atpWall,
                 atpMethodCfg[[1]], atpMethodCfg[[2]], atpMethodCfg[[3]],
                 atpMethodCfg[[4]], atpMethodCfg[[5]], atpMethodCfg[[6]],
-                atpMethodCfg[[7]], atpMethodCfg[[8]]]];
+                atpMethodCfg[[7]], atpMethodCfg[[8]], atpMethodCfg[[9]]]];
         (* status 1 == PROVED.  A non-PROVED run still returns a bundle
            (the ProofObject is $Failed) so the introspectives reflect it. *)
         If[ cRes["Status"] =!= 1,
@@ -2655,7 +2665,14 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         conjStmt = holdToInactive[enc["ConjHCRaw"]];
         Module[{tryBuild, poA, poB, poFinal},
-            tryBuild[chainOn_, baseDataset_] := Module[{ds, p, v},
+            (* Raise $RecursionLimit: a long completion proof (the deep
+               Sheffer/Wolfram theorems run to ~300+ steps) walks a deep
+               trace DAG in buildCplDataset and the WL verifier, which can
+               trip the default 1024 recursion limit and abort the whole
+               attempt.  Guard it locally. *)
+            tryBuild[chainOn_, baseDataset_] := Block[{
+                    $RecursionLimit = Max[$RecursionLimit, 1048576]},
+                Module[{ds, p, v},
                 ds = If[ baseDataset =!= $Failed, baseDataset,
                     Block[{$AtpUseChain = chainOn},
                         Check[
@@ -2671,7 +2688,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
                         p["ProofFunction"][p["Theorems"]], $Failed];
                     If[ Head[p] === ProofObject && Head[v] === Success,
                         p, $Failed]
-                ]
+                ]]
             ];
             poA = tryBuild[True, dataset];
             poFinal = If[ Head[poA] === ProofObject,
@@ -2708,7 +2725,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindEquationalProof]] :=
         cRes = cEngineProof[enc, OptionValue[MaxSteps], atpWall,
             atpMethodCfg[[1]], atpMethodCfg[[2]], atpMethodCfg[[3]],
             atpMethodCfg[[4]], atpMethodCfg[[5]], atpMethodCfg[[6]],
-            atpMethodCfg[[7]], atpMethodCfg[[8]]];
+            atpMethodCfg[[7]], atpMethodCfg[[8]], atpMethodCfg[[9]]];
         (* No goal, so no ProofObject; Mode None means all axioms kept. *)
         <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> $Failed,
           "RelevantAxioms" -> <|"Mode" -> None,
