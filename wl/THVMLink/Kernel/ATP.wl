@@ -2063,9 +2063,20 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
        budget; return the first verifying ProofObject.  Each config is
        a concrete Method (one-element schedule), so the recursive call
        takes the single-config path below -- no further nesting. *)
-    Module[{atpSub, atpR = $Failed},
-        atpSub = If[ atpWall > 0, atpWall, 60.];
-        Do[ atpR = TFindEquationalProof[conjecture, axioms,
+    Module[{atpSub, atpR = $Failed, atpEnd},
+        (* TimeConstraint is a TOTAL budget across the schedule (like the
+           built-in FindEquationalProof): each config gets the time
+           remaining to the deadline, and the loop stops when it is
+           spent.  MaxWallSeconds (no TimeConstraint) stays per-config,
+           as documented. *)
+        atpEnd = If[ OptionValue[TimeConstraint] =!= Infinity,
+            AbsoluteTime[] + N[OptionValue[TimeConstraint]], Infinity];
+        Do[ atpSub = Which[
+                atpEnd =!= Infinity, atpEnd - AbsoluteTime[],
+                OptionValue[MaxWallSeconds] > 0, OptionValue[MaxWallSeconds],
+                True, 60.];
+            If[ atpSub <= 0., Break[]];
+            atpR = TFindEquationalProof[conjecture, axioms,
                 Method -> cfg, MaxWallSeconds -> atpSub,
                 MaxSteps -> OptionValue[MaxSteps]];
             If[ Head[atpR] === ProofObject, Break[]],
