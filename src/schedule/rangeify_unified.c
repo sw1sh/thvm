@@ -167,11 +167,6 @@ static Term ru_new_range(u32 extent, u32 axistype) {
   return uop_range(axis_id, axistype, extent);
 }
 
-// Returns 1 if `t` is a UOp_RANGE leaf.
-static int ru_is_range(Term t) {
-  return term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE;
-}
-
 // Walk a UOp subtree and return 1 if any UOP_RANGE leaf has axis_id == aid.
 // Used after ru_rewrite_subtree to detect when a REDUCE's body lost the
 // reduce-axis range (e.g. a CONST broadcast collapsed past the rewrite,
@@ -1112,10 +1107,6 @@ static Term ru_build_index_addr_for(RuRangeMap const *rm, Term self_term) {
   return ru_build_addr_from_ranges(rm->out_rngs, rm->out_ndim);
 }
 
-static Term ru_build_index_addr(RuRangeMap const *rm) {
-  return ru_build_index_addr_for(rm, 0);
-}
-
 // Body/input addr: includes the reduce range (and any movement-op
 // swizzle). For non-REDUCE nodes this is identical to the output addr
 // because in_rngs == out_rngs; for REDUCE the reduce range was injected
@@ -1138,10 +1129,6 @@ static Term ru_build_input_addr_for(RuRangeMap const *rm, u64 loc) {
     return ru_build_addr_with_dims(rm->in_rngs, rm->in_ndim, dims);
   }
   return ru_build_addr_from_ranges(rm->in_rngs, rm->in_ndim);
-}
-
-static Term ru_build_input_addr(RuRangeMap const *rm) {
-  return ru_build_input_addr_for(rm, RU_NO_LOC);
 }
 
 // === prior_views chain composition into INDEX_E.addr ===
