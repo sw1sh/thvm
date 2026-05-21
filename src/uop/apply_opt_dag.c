@@ -128,14 +128,6 @@ typedef struct {
   u32 n;
 } ApplyOptDagSplitCtx;
 
-static Term apply_opt_dag_split_rewrite(Term t, void *user) {
-  ApplyOptDagSplitCtx const *ctx = (ApplyOptDagSplitCtx const *)user;
-  for (u32 i = 0; i < ctx->n; i++) {
-    if (ctx->entries[i].key == t) return ctx->entries[i].val;
-  }
-  return t;
-}
-
 // Manual single-pass substitution walker.  Avoids uop_graph_rewrite's
 // recurse-on-rule-output semantics which causes infinite recursion when
 // substitution targets are bidirectional (e.g. SWAP swaps A and B,

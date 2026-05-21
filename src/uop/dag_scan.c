@@ -1208,44 +1208,6 @@ static int udg_decode_h_arm(Term t, u32 axis_r_out, u32 axis_r_q,
   return 0;
 }
 
-// Decode the W-axis arm: `IMUL(IADD(ow, kw_v), x_s1)` OR bare
-// `IADD(ow, kw_v)` when x_s1==1.  Recovers x_s1, w_out, kw.
-static int udg_decode_w_arm(Term t, u32 axis_r_out, u32 axis_r_q,
-                            u32 *out_x_s1, u32 *out_w_out, u32 *out_kw) {
-  // x_s1==1 case: bare IADD(ow, kw_v).
-  if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_IADD) {
-    Term lhs = heap_read(term_val(t) + 0);
-    Term rhs = heap_read(term_val(t) + 1);
-    u32 wo = 0, kw1 = 0;
-    if (udg_match_ow(lhs, axis_r_out, &wo)
-        && udg_match_kw_v(rhs, axis_r_q, &kw1)) {
-      *out_x_s1 = 1; *out_w_out = wo; *out_kw = kw1; return 1;
-    }
-    if (udg_match_ow(rhs, axis_r_out, &wo)
-        && udg_match_kw_v(lhs, axis_r_q, &kw1)) {
-      *out_x_s1 = 1; *out_w_out = wo; *out_kw = kw1; return 1;
-    }
-    return 0;
-  }
-  // x_s1>1 case: IMUL(IADD(ow, kw_v), x_s1).
-  Term inner = 0; u32 coeff = 0;
-  if (!udg_match_imul_const(t, &inner, &coeff)) return 0;
-  if (coeff == 0) return 0;
-  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_IADD) return 0;
-  Term lhs = heap_read(term_val(inner) + 0);
-  Term rhs = heap_read(term_val(inner) + 1);
-  u32 wo = 0, kw1 = 0;
-  if (udg_match_ow(lhs, axis_r_out, &wo)
-      && udg_match_kw_v(rhs, axis_r_q, &kw1)) {
-    *out_x_s1 = coeff; *out_w_out = wo; *out_kw = kw1; return 1;
-  }
-  if (udg_match_ow(rhs, axis_r_out, &wo)
-      && udg_match_kw_v(lhs, axis_r_q, &kw1)) {
-    *out_x_s1 = coeff; *out_w_out = wo; *out_kw = kw1; return 1;
-  }
-  return 0;
-}
-
 // Decode the CI-axis arm: `IMUL(ci, x_s2)` OR bare `ci` when x_s2==1.
 static int udg_decode_ci_arm(Term t, u32 axis_r_q,
                              u32 *out_x_s2, u32 *out_kw, u32 *out_kh) {
