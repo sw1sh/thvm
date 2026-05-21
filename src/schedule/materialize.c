@@ -2997,7 +2997,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     u32 tid  = (u32)term_val(t);
     u32 slot = input_slot_dedup(ke, tid, t);
     if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-    if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
     return KSRC_AS_INPUT(slot);
   }
   // Shape-annotated TVAR: bound by a TLamShape whose annotation
@@ -3017,7 +3016,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       for (u32 i = 0; i < s.ndim; i++) numel *= s.dims[i];
       u32 slot = input_slot_dedup_var(ke, t, DT_FP32, numel);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-      if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
       return KSRC_AS_INPUT(slot);
     }
     return VISIT_BAIL;          // no shape annotation -- can't compile
@@ -3028,15 +3026,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   u64 loc = term_val(t);
   u32 memo_ref = visit_memo_lookup(memo, loc);
   if (memo_ref != VISIT_BAIL) {
-    // If the memo cached an input slot, bump the per-slot visit
-    // counter so each path through this UOp loc still gets its own
-    // chain_edge_idx.  Without this, two distinct movement chains
-    // that both bottom out at the same boundary would receive the
-    // same chain_edge_idx and pick the same BIndex record.
-    if (KSRC_IS_INPUT(memo_ref) && ke->input_visit_counts != NULL) {
-      u32 slot = KSRC_INDEX(memo_ref);
-      if (slot < ke->n_inputs) ke->input_visit_counts[slot]++;
-    }
     return memo_ref;
   }
 
@@ -3049,7 +3038,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     // No bufferize source id: UOP_KERNEL is post-materialize and
     // the bufferize graph operates on pre-kernel locs, so we leave
     // this slot's source_buffer_id at 0 (the leaf-input sentinel).
-    if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
     u32 ref = KSRC_AS_INPUT(slot);
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -3079,16 +3067,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
           ke->input_source_buffer_ids[slot] = src_buf->buffer_id;
         }
       }
-      // Increment the per-slot visit counter so the next
-      // prog_chain_propagate call (for whatever movement op sits
-      // immediately above this leaf) gets a unique chain_edge_idx.
-      // Note: visit_memo_store below caches the ksrc_idx at this
-      // loc, so a subsequent visit() to the SAME boundary loc via
-      // a different path won't reach this code; the memo cache is
-      // an artifact of the current dedup model and a known
-      // limitation for the multi-path case.  See the
-      // bufferize.md plan for the per-USE rerouting follow-up.
-      if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
       u32 ref = KSRC_AS_INPUT(slot);
       visit_memo_store(memo, loc, ref);
       return ref;
