@@ -2815,15 +2815,27 @@ fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
 fn u8   thvm_unify        (Term s, Term t, RewriteSubst *subst);
 fn Term thvm_rename_vars  (Term t, u32 offset);
 fn Term thvm_unify_apply  (Term t, const RewriteSubst *subst);
+// 7c: canonically renumber a stored equation/rule's variables to a
+// dense [0, k) set shared across both sides (alpha-renaming).
+fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 
 // === cp/ ===
 // Critical-pair enumeration for an oriented rule set (stage 4).
 // CriticalPair holds the two terms produced by overlapping rules
 // at a non-variable position; both sides should be joinable for the
 // system to be locally confluent.
+//
+// pos[0..pos_len) records the superposition geometry: the child-index
+// path to the non-variable subterm of rule i's lhs that rule j's lhs
+// unified with.  pos_len == 0 is a top (outermost) overlap.  This is
+// the provenance a Waldmeister-PCL-shaped proof needs to present the
+// CP as a CriticalPairLemma.
+#define CP_MAX_DEPTH 8
 typedef struct {
   Term lhs;
   Term rhs;
+  u8   pos[CP_MAX_DEPTH];
+  u8   pos_len;
 } CriticalPair;
 
 fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
@@ -2849,6 +2861,7 @@ typedef enum {
   ATP_REFUTED     = 2,
   ATP_TIMEOUT     = 3,
   ATP_QUEUE_EMPTY = 4,
+  ATP_ABORTED     = 5,   // host abort hook fired (e.g. WL Abort/TimeConstrained)
 } AtpStatus;
 
 // Initial heap capacities for the growable rule / CP arrays in
@@ -2857,7 +2870,17 @@ typedef enum {
 // a long completion run grows them as far as host memory allows.
 #define ATP_INIT_RULES 256
 #define ATP_INIT_CPS   4096
-#define ATP_MAX_TRACE  4096
+// The completion trace records one TAG_CTR entry per input axiom,
+// per oriented rule, and per critical pair that survives the
+// joinable / subsumption filters.  A hard single-axiom completion
+// (the Wolfram NAND axiom) generates tens of thousands of surviving
+// CPs; the proof-DAG export (thvm_wl_atp_run_proof) needs the WHOLE
+// trace so every rule cited in the extracted chain still has a live
+// r_trace[] lineage back to its birthing TRACE_CP.  Sized to hold a
+// DoubleNegation completion run with headroom; entries past the cap
+// are dropped (atp_trace_push returns ATP_TRACE_NONE) and their
+// rules lose their derivation history.
+#define ATP_MAX_TRACE  131072
 
 // Sentinel for "no rule excluded" in the connectedness check
 // (atp_cp_source_disjoint_connected): any value >= n_rules works,
@@ -2867,11 +2890,41 @@ typedef enum {
 // Reason labels for trace entries (used as the CTR label).
 // Each TraceEntry is a TAG_CTR with label = reason and children =
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Parent index sentinel
-// ATP_TRACE_NONE means "no parent" (e.g., for axioms).
-#define TRACE_AXIOM    1u   // initial equation pushed via add_equation
+// ATP_TRACE_NONE means "no parent" (e.g., for input axioms).
+#define TRACE_AXIOM    1u   // initial input equation pushed via add_equation
 #define TRACE_ORIENT   2u   // CP normalized + KBO-oriented into a rule
 #define TRACE_CP       3u   // critical pair generated from two rules
+// TRACE_SIMPLIFY: an older rule whose lhs simplified under newer
+// rules was dropped by thvm_atp_interreduce and re-queued as the
+// equation (reduced_lhs == old_rhs).  parent_a is the trace index
+// of the dropped rule; the reduction is a forward-rewrite chain on
+// the old lhs that a proof consumer replays under the final R.
+// Recording this (instead of a fresh TRACE_AXIOM) keeps the proof
+// DAG connected through interreduction -- mirrors Waldmeister PCL's
+// `Reduktion` events.
+#define TRACE_SIMPLIFY 4u
+// TRACE_NORM_STEP: one rewrite step the C engine applied while
+// normalizing a CP equation toward its oriented rule.  Pushed by
+// thvm_atp_step when AtpState.record_norm_steps is set, so a proof
+// consumer walks (TRACE_CP) -> (TRACE_NORM_STEP){0,1,...,N} ->
+// (TRACE_ORIENT) linearly instead of re-deriving the chain by search.
+// Children:
+//   [NUM(parent_a), NUM(rule_idx), lhs (after step), rhs (after step),
+//    NUM(pos_len), NUM(pos_0), ..., NUM(side), NUM(fwd)]
+// rule_idx is the alive-rule index used; side is 0 for an lhs-of-
+// equation rewrite, 1 for an rhs-of-equation rewrite; fwd is 1 for an
+// lhs->rhs rule application, 0 for an unorientable rule fired
+// reversed under ordered rewriting.
+#define TRACE_NORM_STEP 5u
 #define ATP_TRACE_NONE 0xFFFFFFFFu
+
+// 8a: CTR labels for the IC-native CP-set graph (-DATP_CP_GRAPH).
+// ATP_CP_LABEL labels a 2-child `Cp[lhs,rhs]` leaf; ATP_CPSET_LABEL
+// labels the `CpSet[...]` container whose children are those leaves
+// in cp_lhs[] / cp_rhs[] slot order.  Distinct from the TRACE_*
+// labels so a leaf is never confused with a trace entry.
+#define ATP_CP_LABEL    16u  // Cp[lhs, rhs]
+#define ATP_CPSET_LABEL 17u  // CpSet[Cp, Cp, ...]
 
 // 8.1c: ATP primitives registered into the TAG_PRI table by
 // thvm_atp_init.  Tests registers them once; the saturation loop
@@ -2919,6 +2972,40 @@ typedef enum {
 fn u32                kbo_cfg_register(u32 cfg_id, const KboConfig *cfg);
 fn const KboConfig   *kbo_cfg_get     (u32 cfg_id);
 
+// CP-priority weight modes -- ports of Waldmeister's `ClasHeuristics`
+// module ("classification heuristics"; sources/CLAS/ClasHeuristics.c).
+// Each names the Waldmeister `CH_*Weight` function it mirrors.  The
+// cheapest CP wins, so a lower number is selected first.
+//
+//   ADD    -- CH_AddWeight  : symbol_count(lhs) + symbol_count(rhs).
+//             The bare symbol-count sum; reachable via
+//             thvm_atp_set_cp_weight_mode for callers that want it.
+//   MAX    -- CH_MaxWeight  : max(symbol_count(lhs), symbol_count(rhs)).
+//   ORD    -- CH_OrdWeight  : KBO-weight sum (CF_Phi_KBO) -- the
+//             ordering's own weight function rather than raw count.
+//   GT     -- CH_GtWeight   : ordering-directed -- GT picks the
+//             lhs size, LT the rhs size, otherwise the sum.  The
+//             engine default (thvm_atp_init): it cuts the corpus
+//             saturation step count vs ADD and proves the
+//             distance-1 CriticalPairLemma cpl1 in one step.
+//   MIX    -- CH_MixWeight  : (wl+wr)*g + g + (wl+wr), where g is
+//             the GtWeight value -- a graded blend.
+//   MIX2   -- CH_MixWeight2 : g*10 + (wl+wr).
+//   UNIF   -- CH_Unifikationsmass ("unification measure") :
+//             (wl+wr) * depth-weighted term-disagreement count.
+typedef enum {
+  ATP_CP_WEIGHT_ADD  = 0,
+  ATP_CP_WEIGHT_MAX  = 1,
+  ATP_CP_WEIGHT_ORD  = 2,
+  ATP_CP_WEIGHT_GT   = 3,
+  ATP_CP_WEIGHT_MIX  = 4,
+  ATP_CP_WEIGHT_MIX2 = 5,
+  ATP_CP_WEIGHT_UNIF = 6,
+  ATP_CP_WEIGHT_GOAL = 7,   // Waldmeister CPinGoal: weight a CP by its
+                            // structural match to the goal (Clas_CP_Goal.c)
+  ATP_CP_WEIGHT_LAST = 8,
+} AtpCpWeightMode;
+
 typedef struct {
   // Rule set R: growable parallel arrays sized for
   // thvm_rewrite_normalize / thvm_critical_pairs to consume
@@ -2931,8 +3018,10 @@ typedef struct {
   Term *lhs;
   Term *rhs;
   u32  *r_trace;
+  u8   *r_orient;            // r_orient[i]=1 iff rule i is KBO-oriented (lhs>rhs)
   u32   n_rules;
   u32   r_cap;
+  u32   n_unorient;          // count of unorientable rules currently in R
 
   // CP queue (open-form: not INC-wrapped here; the priority encoding
   // happens at selection time in thvm_atp_select).  cp_trace[i]
@@ -2941,8 +3030,16 @@ typedef struct {
   // ATP_TRACE_NONE if tracing is disabled / unavailable).  Growable
   // like the rule arrays: heap-allocated at ATP_INIT_CPS,
   // atp_ensure_cp_cap doubles on demand.
-  Term *cp_lhs;
-  Term *cp_rhs;
+  //
+  // Waldmeister Stringterms port: a queued CP is NOT held as a pair
+  // of IC heap term-graphs but as one packed preorder byte string
+  // (acp_pack / acp_unpack in src/atp/_.c) -- `cp_packed[i]` is a
+  // malloc'd `u8 *` outside the managed heap, so the Cheney collector
+  // never copies it.  This is the structural fix for the late-game GC
+  // wall (the CP queue was a ~62M-cell live set re-copied every
+  // collection).  cp_packed[i] is owned by the queue: allocated on
+  // push, freed on pop / drop.
+  u8  **cp_packed;
   u32  *cp_trace;
   u32   n_cps;
   // 7c': the CP queue is a binary min-heap keyed on
@@ -2952,8 +3049,85 @@ typedef struct {
   // rebuild-an-INC-SUP-tree-every-step O(n) scan.
   u32  *cp_pri;
   u32  *cp_seq;
+  // Goal-interleave: per-CP goal-directed weight (CPinGoal), parallel to
+  // cp_pri.  Filled at push only when use_goal_interleave > 0; the
+  // selection then takes a goal-min pick every use_goal_interleave-th
+  // step (E-style ratio: size-based system-building + goal steering).
+  u32  *cp_goal;
   u32   cp_seq_next;
   u32   cp_cap;
+  // Waldmeister CP-queue interleaving: selection alternates between
+  // the weight key (cp_pri) and the FIFO key (cp_seq, oldest first).
+  // cp_select_count is the running selection counter that drives the
+  // ratio -- see thvm_atp_select_cp / ATP_CP_FIFO_MODULO.
+  u32   cp_select_count;
+
+  // 8a: IC-native CP-set representation.  Behind -DATP_CP_GRAPH the
+  // CP queue is also held as ONE shared Term: a CTR `CpSet[...]`
+  // whose children are 2-child `Cp[lhs,rhs]` CTR leaves, one per
+  // queued CP, in the same slot order as cp_lhs[] / cp_rhs[].
+  // Because thvm hash-conses every cell, two CPs sharing a subterm
+  // share its heap cells -- cp_graph is a maximally-shared DAG.
+  // Every CP mutation rebuilds cp_graph from the (still-maintained)
+  // arrays so it stays in lockstep; the arrays are the synced
+  // mirror tests/test_atp.c reads directly.  Selection stays the
+  // 7c' heap over cp_pri / cp_seq -- INC-priority is 8d.  Flag OFF
+  // this field is absent and the engine is byte-for-byte the
+  // milestone-7 array engine.
+#ifdef ATP_CP_GRAPH
+  Term cp_graph;
+#endif
+
+  // 7d: feature-vector subsumption index over the CP queue.  Behind
+  // -DATP_FV_INDEX, `atp_cp_queue_subsumed` consults this instead of
+  // the O(n_cps) thvm_match scan: each queued CP carries a vector of
+  // cheap integer features where a more-general (subsuming) term is
+  // componentwise <= the candidate's, so retrieval = "find stored
+  // FVs dominated by the query FV" via an FV-trie, then thvm_match
+  // runs only on the retrieved candidates.  The index stores plain
+  // ints (feature values, CP seq ids) plus mirror Term pairs that
+  // ride the GC alongside cp_lhs[]/cp_rhs[].  Maintained
+  // incrementally: insert on CP enqueue, mark-dead on dequeue.  Flag
+  // OFF this field is absent and the engine is the milestone-7 array
+  // scan, byte-for-byte.  Independent of -DATP_CP_GRAPH.  Opaque
+  // pointer so the struct layout does not leak the index internals.
+#ifdef ATP_FV_INDEX
+  struct AtpFvIndex *fv_index;
+#endif
+
+  // Milestone 10: MNF goal-directed search state (opaque pointer).
+  // Behind -DATP_MNF; created lazily on the first goal_check, then
+  // drives a bidirectional rewrite search from the conjecture instead
+  // of the passive single-normal-form check.
+#ifdef ATP_MNF
+  struct AtpMnf *mnf;
+#endif
+
+  // Milestone 10: runtime gate for the MNF goal-directed search.  The
+  // dylib is COMPILED with -DATP_MNF so MNF is linked in, but the front
+  // search stays inert unless this flag is set -- goal_check runs the
+  // single-normal-form check alone when 0 (default), preserving
+  // completion-only behaviour and timing.  Set via
+  // `thvm_atp_set_use_mnf`; the WL surface flips it for
+  // `Method -> "GoalDirected"`.  The field is always present (not behind
+  // -DATP_MNF) so callers can set it unconditionally; goal_check only
+  // consults it inside the `#ifdef ATP_MNF` block.
+  u8 use_mnf;
+
+  // 7e (lever 2): discrimination tree over the rule LHS terms.  Behind
+  // -DATP_RULE_INDEX, the ATP-side normalizer's per-position redex
+  // search consults this instead of `rewrite_try_top`'s O(n_rules)
+  // linear LHS scan: it retrieves, for a subject subterm, the LOWEST
+  // rule index whose LHS one-way matches there -- exactly the rule the
+  // linear scan's first-match would pick.  Built lazily over
+  // `lhs[0..n_rules)`; `rule_index_dirty` is set on every rule-set
+  // mutation (orient_and_add append, interreduce drop) so the next
+  // indexed normalize rebuilds.  Opaque pointer; flag OFF this field
+  // is absent and the engine uses the linear scan, byte-for-byte.
+#ifdef ATP_RULE_INDEX
+  struct AtpRuleIndex *rule_index;
+  u8                   rule_index_dirty;
+#endif
 
   // Transient: set by thvm_atp_select_cp to the trace-entry index
   // of the popped CP; consumed by thvm_atp_step right after the
@@ -2965,6 +3139,12 @@ typedef struct {
   // means "no goal set; run as completion".
   Term goal_lhs;
   Term goal_rhs;
+  // Live goal normalized under the current R, refreshed by goal_check.
+  // The goal-directed CP heuristic (CPinGoal) matches against this
+  // shrinking form, not the original goal, so direction tracks progress
+  // as Waldmeister's does.  0 until the first goal_check.
+  Term goal_lhs_nf;
+  Term goal_rhs_nf;
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of
@@ -3020,6 +3200,16 @@ typedef struct {
   // discarded.
   u32  n_cps_dropped_queue_subsumed;
 
+  // ATP_CP_CLASSIFY: count of CPs dropped by the Waldmeister-style
+  // critical-pair classifier (ported from `NewClassification` /
+  // `ClasFunctions`, "new classification" / "classification
+  // functions").  A CP is dropped when its killer-predicate
+  // classification carries an `Act_never`-equivalent action --
+  // the default config does this only for killer CPs that are
+  // also rule-subsumed, a sound subset of the joinable drops.
+  // Always 0 when the engine is built without -DATP_CP_CLASSIFY.
+  u32  n_cps_dropped_classified;
+
   // Stage 8.1e-i: feature flag.  When 0 (default), `thvm_atp_
   // generate_cps` runs the C-side critical-pair enumerator
   // directly.  When 1, it dispatches to `thvm_atp_generate_cps_ic`,
@@ -3046,7 +3236,39 @@ typedef struct {
   // would land in unfailing-fallback).  The penalty makes the
   // saturator prefer CPs whose orientation is unambiguous --
   // typically a small win on hard problems.
+  //
+  // Retained for backward compatibility: when `use_mix_heuristic`
+  // is set, `atp_cp_priority` applies the +penalty regardless of
+  // `cp_weight_mode`.  New code should prefer `cp_weight_mode`
+  // (mode ATP_CP_WEIGHT_MIX subsumes this flag).
   u8   use_mix_heuristic;
+
+  // CP-priority weight mode -- a port of the weight functions in
+  // Waldmeister's `ClasHeuristics` module ("classification
+  // heuristics", sources/CLAS/ClasHeuristics.c).  See the
+  // `AtpCpWeightMode` enum for the per-mode formula.
+  // `thvm_atp_init` sets this to ATP_CP_WEIGHT_GT, the
+  // ordering-directed heuristic; ATP_CP_WEIGHT_ADD (the bare
+  // symbol-count sum) stays reachable via
+  // `thvm_atp_set_cp_weight_mode`.
+  u8   cp_weight_mode;
+  // 0 = off; N>0 = every N-th CP selection is a goal-directed (min
+  // cp_goal) pick instead of the weight pick.  Pairs with max_cp_weight.
+  u32  use_goal_interleave;
+  // Waldmeister MaxWeight: discard a critical pair whose combined term
+  // weight exceeds this (0 = unbounded).  Bounds the search on
+  // self-overlapping axioms (the single Wolfram NAND axiom) so the
+  // goal-directed selector is not starved by runaway pairs.
+  u32  max_cp_weight;
+
+  // When set (via thvm_atp_set_record_norm_steps), thvm_atp_step
+  // pushes a TRACE_NORM_STEP per rewrite the CP-normalize loop
+  // applies, so a proof consumer can walk the chain CP ->
+  // NORM_STEP* -> ORIENT linearly instead of reconstructing it by
+  // search.  Off by default: per-step trace recording inflates the
+  // trace by up to 2 * NORM_CAP entries per CP, which only matters
+  // for runs whose caller will extract a ProofObject.
+  u8   record_norm_steps;
 
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
@@ -3073,6 +3295,17 @@ typedef struct {
   // structurally equal (after sigma-application accumulated in
   // `witness_subst`).
   u8   goal_existential;
+
+  // Optional wall-clock deadline (microseconds since the Unix
+  // epoch as monotonic-from-CLOCK_MONOTONIC isn't portable
+  // through `time.h` alone, so we use clock_gettime CLOCK_REALTIME
+  // returned us-since-epoch).  0 means no deadline (default).
+  // When non-zero, `thvm_atp_step` returns `ATP_TIMEOUT` once the
+  // current time crosses this value -- lets the saturator bail
+  // on recursively-defined axioms (Y combinator's `Y x == x (Y x)`
+  // generates infinite CP fan-out and would otherwise spin until
+  // the OS sends SIGKILL).
+  u64  wall_deadline_us;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
@@ -3091,6 +3324,95 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 // uses LPO instead of KBO.  Pass NULL to revert to KBO (the
 // default).
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
+
+// Milestone 10: enable/disable the MNF goal-directed front search at
+// runtime.  No-op unless the dylib was compiled with -DATP_MNF.  When
+// 1, goal_check augments the single-normal-form check with the
+// bidirectional MNF collision search; when 0 (default) the single-NF
+// check runs alone.  Lets one dylib carry MNF without paying for it
+// on completion-only goals.
+fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
+
+// Select the CP-priority weight mode (an `AtpCpWeightMode` value).
+// `thvm_atp_init` defaults to ATP_CP_WEIGHT_GT; out-of-range
+// values are clamped to ATP_CP_WEIGHT_ADD.  See `AtpCpWeightMode`
+// for the per-mode formula, all ports of Waldmeister's
+// `ClasHeuristics` module.
+fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
+fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
+fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
+fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
+
+// Set a wall-clock deadline.  `seconds_from_now` is a float duration
+// (e.g. 5.0 = 5 seconds); pass 0.0 to clear the deadline.  The
+// saturator periodically checks the deadline in `thvm_atp_step` and
+// returns `ATP_TIMEOUT` once it's crossed -- the primary defense
+// against recursively-defined axioms (Y combinator) that generate
+// unbounded CP fan-out and would otherwise run forever.
+fn void      thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now);
+
+// Host abort hook.  When set, the saturation loop polls it and returns
+// ATP_ABORTED as soon as it returns nonzero -- letting a host like the
+// WL LibraryLink glue forward Abort[] / TimeConstrained[] into the C
+// engine (which otherwise runs uninterruptible to completion).  NULL =
+// no host abort source (the default).
+extern int (*thvm_atp_abort_hook)(void);
+
+// === atp/precedence -- algebraic-structure detection =================
+// Ported from Waldmeister's `PhilMarlow` (algebraic-structure
+// recognition; "Erkennung algebraischer Strukturen") and
+// `Praezedenzgenerator` (precedence generator).  Given an axiom
+// set, classify each function symbol's algebraic properties and
+// auto-tune the KBO/LPO precedence so completion converges better.
+//
+// `atp_analyze_axioms` mirrors PhilMarlow's `ACSymboleSuchen`
+// ("search for AC symbols") + `DistributivgesetzeSuchen` ("search
+// for distributive laws"), plus the Sinai law table's idempotence
+// / identity / inverse patterns.  Detection predicates port
+// Waldmeister's `TO_IstKommutativitaet` / `TO_IstAssoziativitaet`
+// / `TO_IstDistribution` (`WASIC/TermOperationen.c`).
+//
+// `atp_generate_precedence` ports `Praezedenzgenerator`'s
+// `FuchsPraezedenz` ordering rule: equation symbols ranked by
+// arity (n-ary > ... > unary > constant), with structurally
+// "defining" symbols (units, inverses, distributors) promoted.
+
+// Per-symbol algebraic-property record.  One entry per CTR label;
+// `seen` is 0 for labels with no occurrence in the axiom set.
+typedef struct {
+  u8  seen;             // 1 if this label appears in the axiom set
+  u32 arity;            // observed function-symbol arity
+  u8  is_commutative;   // some axiom is f(x,y) = f(y,x)
+  u8  is_associative;   // some axiom is f(f(x,y),z) = f(x,f(y,z))
+  u8  is_idempotent;    // some axiom is f(x,x) = x
+  u8  has_left_unit;    // some axiom is f(e,x) = x
+  u8  has_right_unit;   // some axiom is f(x,e) = x
+  u8  has_inverse;      // some axiom is f(i(x),x)=e or f(x,i(x))=e
+  u8  is_unit_symbol;   // this label is the unit constant `e`
+  u8  is_inverse_symbol;// this label is the inverse operator `i`
+  u8  distributes;      // f distributes over some other operator
+  u32 distributes_over; // label of the operator f distributes over
+} AtpSymProps;
+
+// Analyze `n_eqns` equation pairs (parallel `lhs[]` / `rhs[]`
+// arrays of TAG_CTR + TAG_FVR terms).  Fills `out[0..n_labels)`
+// with one AtpSymProps per CTR label.  `out` must hold at least
+// `n_labels` entries; caller zero-inits not required (the routine
+// clears it).
+fn void atp_analyze_axioms(const Term *lhs, const Term *rhs, u32 n_eqns,
+                           AtpSymProps *out, u32 n_labels);
+
+// Generate a precedence array from a completed analysis.  Writes
+// `prec[0..n_labels)`; higher value = greater symbol.  Labels not
+// `seen` get rank 0.  Returns the number of distinct ranks used.
+fn u32  atp_generate_precedence(const AtpSymProps *props, u32 n_labels,
+                                u32 *prec);
+
+// Convenience: analyze then generate in one call.  Equivalent to
+// atp_analyze_axioms followed by atp_generate_precedence on a
+// scratch AtpSymProps array (capped at WALD_MAX_SYMBOLS labels).
+fn u32  atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
+                            u32 n_labels, u32 *prec);
 
 // 8.10b: top-K peek into the CP queue.  Reuses the existing
 // INC-priority + collapse_ordered pipeline from
@@ -3181,6 +3503,67 @@ fn u8        thvm_atp_set_goal_existential(AtpState *s,
 // Truncates silently on buffer overflow; caller can compare the
 // returned byte count against `cap - 1` to detect that case.
 fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
+
+// === proof extraction ================================================
+// The trace[] array (above) records the COMPLETION derivation -- which
+// critical pairs birthed which rules.  A *proof* is the orthogonal
+// object: the equational rewrite chain that joins the two conjecture
+// sides.  thvm_atp_proof_extract reconstructs it for a goal closed by
+// the single-normal-form check (thvm_atp_goal_check's `kbo_eq(l, r)`
+// path): it re-normalizes goal_lhs and goal_rhs under the rule set R,
+// recording every leftmost-outermost forward rewrite.  The proof is
+// the goal_lhs chain (side 0) then the goal_rhs chain (side 1), both
+// forward -- it rewrites L down to its normal form, then R down to
+// the same normal form, so the assembled equation L == R reaches the
+// tautology NF == NF.
+//
+// Extraction normalizes against whatever rule set the passed AtpState
+// holds.  For an axiom-cited (verifier-friendly) chain, pass a state
+// whose R is the oriented input axioms only; a completion-saturated R
+// yields a chain over derived rules instead.
+//
+// A goal closed only by the MNF bidirectional search (a symmetric
+// conjecture whose two sides share no normal form) is NOT single-NF
+// extractable; thvm_atp_proof_extract returns 0 for it.
+#define ATP_PROOF_MAX_DEPTH 32   // redex-path depth cap per step
+#define ATP_PROOF_MAX_STEPS 512  // chain-length cap, each side
+
+typedef struct {
+  u32  side;       // 0: a step on goal_lhs's chain; 1: on goal_rhs's
+  u32  rule;       // index into s->lhs / s->rhs -- the rule applied
+  u8   fwd;        // 1: rule fired lhs->rhs; 0: rhs->lhs (reversed)
+  u8   pos_len;    // length of the redex path within the side's term
+  u8   pos[ATP_PROOF_MAX_DEPTH];   // child-index path to the redex
+  Term before;     // the rewritten side, immediately before the step
+  Term after;      // the rewritten side, immediately after the step
+} AtpProofStep;
+
+// Fill out[0..cap) with the extracted proof steps; returns the step
+// count, or 0 when the goal is not single-NF provable under the
+// current R (no goal set, an existential goal, or an MNF-only join).
+// The before/after Terms reference live heap cells -- consume them
+// (or copy them out) before the next allocation, like witnesses.
+fn u32       thvm_atp_proof_extract(AtpState *s, AtpProofStep *out,
+                                    u32 cap);
+
+// Milestone 10: extract a proof for a goal closed by the MNF
+// bidirectional front search (a symmetric conjecture the single-NF
+// path cannot close).  Walks the two parent chains up from the join
+// term `meet`: GREEN (goal_lhs's front) emitted as side 0, RED
+// (goal_rhs's front) as side 1, both running seed -> meet, so the
+// assembled chain reaches `meet == meet`.  Each step's rule / position
+// / direction is reconstructed by replaying a one-step rewrite under
+// the final rule set.  Returns the step count, or 0 when there is no
+// join, the dylib lacks -DATP_MNF, or an edge no longer replays.  Like
+// thvm_atp_proof_extract the before/after Terms are live heap cells.
+fn u32       thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out,
+                                        u32 cap);
+
+// Serialize an extracted proof to human-readable text into `buf`.
+// Each line: "<L|R> rule <i> <fwd|rev> @<path>: <before> => <after>".
+// Truncates silently on overflow.  Returns the byte count written.
+fn u32       thvm_atp_proof_serialize(const AtpProofStep *steps,
+                                      u32 n_steps, char *buf, u32 cap);
 
 // === wald/ ===
 // Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
@@ -3403,10 +3786,19 @@ fn WaldErr wald_parse_file(const char *path, WaldSpec *spec);
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.
 fn u8        thvm_atp_select_cp   (AtpState *s, Term *lhs_out, Term *rhs_out);
-// 7c': re-heapify the CP queue after a caller populated cp_lhs /
-// cp_rhs / n_cps directly (the normal path uses the internal
+// 7c': re-heapify the CP queue after a caller populated the queue
+// slots / n_cps directly (the normal path uses the internal
 // heap-push).  Required before select / peek on a hand-built queue.
 fn void      thvm_atp_cp_reheapify(AtpState *s);
+
+// Stringterms port: queue slot i holds a packed byte string, not a
+// pair of heap Terms.  Callers that build the queue directly (chiefly
+// tests) go through these accessors -- `cp_set` packs (lhs, rhs) into
+// slot i (freeing any prior buffer there), `cp_get` unpacks it back to
+// two fresh transient heap Terms.
+fn void      thvm_atp_cp_set      (AtpState *s, u32 i, Term lhs, Term rhs);
+fn void      thvm_atp_cp_get      (const AtpState *s, u32 i,
+                                   Term *lhs, Term *rhs);
 
 // Index range of rules just added by orient_and_add.
 //   {first: 0, count: 0}     -> nothing added (KBO_EQ, or R full)

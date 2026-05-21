@@ -112,6 +112,51 @@ int main(void) {
     CHECK_EQ((int)thvm_kbo(s, t, &GROUP_CFG), KBO_GT);
   }
 
+  // === LPO pretest fast-path agreement =================================
+  // `thvm_lpo` runs the Waldmeister `LPOVortests` variable-set pretest
+  // before the full recursion (`lpo_rec`).  The pretest must be a pure
+  // optimization: assert it agrees with the un-pretested `lpo_rec` on a
+  // spread of term pairs spanning the variable-set cases (disjoint vars,
+  // shared vars, subset, superset, no vars).
+  TEST_BEGIN("lpo/pretest-agrees-with-full-recursion");
+  {
+    static u32 lpo_prec[LAB_MAX] = {0, 2, 4, 3, 1};   // e<a<f<i style
+    const LpoConfig LPO_CFG = {
+      .precedence = lpo_prec,
+      .n_labels   = LAB_MAX,
+    };
+    // A pool of terms covering every variable-set shape:
+    //   - constants (empty var set)
+    //   - single-var terms (x, y, z)
+    //   - multi-var terms with shared / disjoint / nested var sets
+    Term x = term_new_fvr(0u);
+    Term y = term_new_fvr(1u);
+    Term z = term_new_fvr(2u);
+    Term pool[14];
+    u32 np = 0;
+    pool[np++] = mk_e();                                  // {}
+    pool[np++] = mk_a();                                  // {}
+    pool[np++] = x;                                       // {x}
+    pool[np++] = y;                                       // {y}
+    pool[np++] = mk_i(x);                                 // {x}
+    pool[np++] = mk_i(y);                                 // {y}
+    pool[np++] = mk_f(x, mk_e());                         // {x}
+    pool[np++] = mk_f(x, y);                              // {x,y}
+    pool[np++] = mk_f(y, x);                              // {x,y}
+    pool[np++] = mk_f(x, mk_i(y));                        // {x,y}
+    pool[np++] = mk_f(mk_f(x, y), z);                     // {x,y,z}
+    pool[np++] = mk_f(mk_i(x), mk_a());                   // {x}
+    pool[np++] = mk_f(z, z);                              // {z}
+    pool[np++] = mk_f(mk_f(x, x), mk_i(y));               // {x,y}
+    for (u32 i = 0; i < np; i++) {
+      for (u32 j = 0; j < np; j++) {
+        LpoCmp full = lpo_rec(pool[i], pool[j], &LPO_CFG);
+        LpoCmp fast = thvm_lpo(pool[i], pool[j], &LPO_CFG);
+        CHECK_EQ((int)fast, (int)full);
+      }
+    }
+  }
+
   thvm_free();
   TEST_REPORT();
 }

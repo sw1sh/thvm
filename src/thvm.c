@@ -438,6 +438,10 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // add_equation / set_goal.  Step + run drivers land in 5.2.
 #include "atp/_.c"
 
+// Algebraic-structure detection + precedence generation, ported
+// from Waldmeister's PhilMarlow + Praezedenzgenerator.
+#include "atp/precedence.c"
+
 // === wald/ ===
 // Waldmeister .pr spec parser (stage 6.3).  Data model only at
 // 6.3a; lexer / section drivers / term parser / equations land

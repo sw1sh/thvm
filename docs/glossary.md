@@ -144,6 +144,30 @@ file paths, and other docs.
 | **saturation** | A clause/rule set is saturated under an inference calculus iff every conclusion of every applicable inference is already in the set (or redundant).  Saturation = proof if `false` is derived, refutation otherwise. | logic / ATP |
 | **subsumption** | One clause/rule is subsumed by another iff the second is more general.  Subsumed clauses are deleted as redundant. | logic / ATP |
 | **PCL** | Proof-Construction Language: Schulz/Waldmeister's stepwise proof object format.  One entry per rewrite, citing parent steps + applied substitution. | logic / ATP |
+| **MNF (Multiple Normal Forms)** | Goal-directed bidirectional search that *augments* completion: the goal's two sides seed opposite-coloured fronts (GREEN from the lhs, RED from the rhs) that rewrite under `R` until an opposite-colour collision joins them.  The only detector that closes a *symmetric* goal whose two sides never share a single normal form (Boolean commutativity / `Noncontradiction` / `ExcludedMiddle`, `SKIToBCKW`).  thvm: `mnf_step` ([src/atp/_.c](../src/atp/_.c)), gated on `use_mnf`; ported from Waldmeister's MNF.  Reached via `Method -> "GoalDirected"`. | logic / ATP |
+| **strategy schedule / portfolio** | An ordered list of saturator configs tried in turn until one proves + verifies (E / Vampire style).  thvm's `Automatic` schedule: Mix2 weight -> LPO + auto-precedence -> GT weight -> GoalDirected (MNF).  Cheap, broadly-effective configs first, so an easy goal closes immediately and only a hard goal pays for the later variants. | logic / ATP |
+| **CP-selection weight** | The heuristic that picks which pending critical pair to process next (Waldmeister `ClasHeuristics`).  thvm exposes Add / Max / Ord / Gt / Mix / Mix2 / Unif via `Method -> {"Completion", "CriticalPairWeight" -> ...}`; `Mix2` is the `Automatic` default. | logic / ATP |
+| **auto-precedence** | Structure-driven symbol precedence for the reduction ordering, detecting algebraic structure to orient rules a fixed precedence cannot (Waldmeister PhilMarlow).  thvm: `atp_auto_precedence` ([src/atp/precedence.c](../src/atp/precedence.c)); `Method -> {..., "AutoPrecedence" -> True}`. | logic / ATP |
+| **relevance filter** | SInE-style axiom pruning: drop axioms whose symbols cannot reach the goal.  thvm's `"Safe"` mode is sound *and* completeness-preserving (drops only a symbol private to one axiom and occurring on both of its sides, so it cannot enter a proof of this goal); `"Connected"` is a heuristic that may over-drop.  WL: `TRelevantAxioms`, `Method -> {..., "AxiomRelevance" -> ...}`. | logic / ATP |
+| **ProofObject / critical-pair lemma** | The verifiable WL proof the engine emits: a chain of `CriticalPairLemma` / `SubstitutionLemma` entries resolved from the completion (or MNF front-collision) trace DAG, checked by `ProofObject["ProofFunction"]`.  Built by `buildCplDataset` ([wl/THVMLink/Kernel/ATP.wl](../wl/THVMLink/Kernel/ATP.wl)). | logic / ATP |
+
+### The shipped engine vs. the SUP-encoded plan
+
+Two distinct things wear the "IC-native ATP" name, and the table above
+spans both:
+
+- **The shipped engine** ([src/atp/_.c](../src/atp/_.c)) is a direct
+  port of Waldmeister-style **unfailing completion** -- a conventional
+  `lhs`/`rhs` rule array, a trace DAG, KBO/LPO orderings, the MNF front
+  search, and a `ProofObject` extractor.  It does *not* encode its
+  search-space as HVM-SUPs; it is the working prover behind
+  `TFindEquationalProof` today.
+- **The SUP-encoded plan** (below) is the aspirational reformulation
+  that would represent that same search-space *inside* the interaction
+  net.  It is not what runs today.
+
+Keep them apart: the rows tagged "logic / ATP" describe the shipped
+completion engine's vocabulary; the subsection below describes the plan.
 
 ### How the layers connect (in the IC-native ATP plan)
 

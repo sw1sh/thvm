@@ -67,9 +67,131 @@ static u8 lpo_var_occurs_in(Term t, u32 var_id) {
   }
 }
 
+// === pretests (Waldmeister `LPOVortests`) ============================
+// Fast pre-checks run before the full recursive descent.  Ported from
+// Waldmeister's `LPOVortests` module ("Vortests" = pretests): the
+// variable-set comparison ("Variablenmengenvergleich") that cheaply
+// rules out incomparable pairs.
+//
+// Soundness: LPO is a simplification ordering, so `s >lpo t` requires
+// every variable occurring in `t` to also occur in `s` (the standard
+// LPO variable condition: a variable in t but not s could be
+// instantiated to make t arbitrarily large).  Hence if neither
+// vars(s) contains vars(t) nor vice versa, the terms are LPO_UN, and
+// if one set is a strict superset only that direction can be GT/LT.
+// This is a pure optimization: the full recursion reaches the same
+// verdict, only slower.
+
+#define LPO_MAX_VAR 64
+
+// OR-accumulate a presence bit per variable id into `seen`.
+static void lpo_var_set_acc(Term t, u32 *seen) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id < LPO_MAX_VAR) seen[id] = 1;
+      return;
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) lpo_var_set_acc(term_ctr_at(t, i), seen);
+      return;
+    }
+    default: return;
+  }
+}
+
+// True iff `var_id < LPO_MAX_VAR` for every FVR reachable in `t`.
+// The pretest is only sound when both terms' variable ids are
+// bitset-representable; out-of-range ids fall back to the full
+// recursion.
+static u8 lpo_vars_in_range(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) < LPO_MAX_VAR;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!lpo_vars_in_range(term_ctr_at(t, i))) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// Variable-set pretest.  Writes one of LPO_GT / LPO_LT / LPO_EQ /
+// LPO_UN into `*out` and returns 1 iff the pretest is conclusive
+// enough to skip the full comparison; returns 0 when the full
+// recursion is still required.
+//
+// Returns conclusive 1 only when the verdict is forced:
+//   - vars(s) and vars(t) incomparable  -> LPO_UN forced.
+// Returns 0 (full recursion needed) for the equal / subset / superset
+// cases, because set inclusion alone does not pin down GT vs UN; it
+// only rules the opposite direction out, which the full recursion
+// then resolves quickly.
+static u8 lpo_pretest_varset(Term s, Term t, LpoCmp *out) {
+  if (!lpo_vars_in_range(s) || !lpo_vars_in_range(t)) return 0;
+  u32 vs[LPO_MAX_VAR] = {0};
+  u32 vt[LPO_MAX_VAR] = {0};
+  lpo_var_set_acc(s, vs);
+  lpo_var_set_acc(t, vt);
+  u8 s_has_extra = 0;   // some var in s not in t
+  u8 t_has_extra = 0;   // some var in t not in s
+  for (u32 i = 0; i < LPO_MAX_VAR; i++) {
+    if (vs[i] && !vt[i]) s_has_extra = 1;
+    if (vt[i] && !vs[i]) t_has_extra = 1;
+  }
+  if (s_has_extra && t_has_extra) {
+    // Incomparable variable sets: neither s >lpo t nor t >lpo s can
+    // hold, and s != t -- so the pair is definitively LPO_UN.
+    *out = LPO_UN;
+    return 1;
+  }
+  return 0;
+}
+
 // === main comparator =================================================
 
 static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg);
+static LpoCmp lpo_rec_compute(Term s, Term t, const LpoConfig *cfg);
+
+// Memoization of lpo_rec.  The naive LPO recursion is worst-case
+// exponential: lpo_some_arg_dominates(s,t), lpo_some_arg_dominates(t,s),
+// lpo_dominates_all_args and lpo_lex all recurse on overlapping
+// subterm pairs, so the same (s,t) gets recompared up to ~10^5 times
+// for the deeply-nested terms that arise on the Sheffer/Nand axioms.
+// lpo_rec depends only on (s, t, cfg); cfg is fixed within one
+// thvm_lpo call, so caching the verdict per (s,t) pair collapses the
+// blow-up to O(|s|*|t|) distinct pairs.  The table is direct-mapped
+// and epoch-stamped: thvm_lpo bumps g_lpo_epoch on entry, so stale
+// entries from a previous (possibly different-cfg) call are simply not
+// matched -- no clearing.  Term cells are pointer-stable within a
+// call, so the (s,t) value pair is a sound key.  Hash collisions just
+// overwrite, costing a recomputation, never a wrong verdict.
+#define LPO_MEMO_BITS 16
+#define LPO_MEMO_SIZE (1u << LPO_MEMO_BITS)
+#define LPO_MEMO_MASK (LPO_MEMO_SIZE - 1u)
+typedef struct { Term s, t; u32 epoch; u8 cmp; } LpoMemoEnt;
+static LpoMemoEnt g_lpo_memo[LPO_MEMO_SIZE];
+static u32 g_lpo_epoch = 0;
+
+static inline u32 lpo_memo_hash(Term s, Term t) {
+  u64 h = (s * 0x9E3779B97F4A7C15ull) ^ (t * 0xBF58476D1CE4E5B9ull);
+  h ^= h >> 29;
+  return (u32)h & LPO_MEMO_MASK;
+}
+
+static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg) {
+  if (s == t) return LPO_EQ;            // pointer-identical, no memo
+  u32 idx = lpo_memo_hash(s, t);
+  LpoMemoEnt *e = &g_lpo_memo[idx];
+  if (e->epoch == g_lpo_epoch && e->s == s && e->t == t)
+    return (LpoCmp)e->cmp;
+  LpoCmp c = lpo_rec_compute(s, t, cfg);
+  e->s = s; e->t = t; e->epoch = g_lpo_epoch; e->cmp = (u8)c;
+  return c;
+}
 
 // True iff every t_j satisfies s >_lpo t_j (case (2) and (3) condition).
 static u8 lpo_dominates_all_args(Term s, Term t_parent,
@@ -110,10 +232,23 @@ static LpoCmp lpo_lex(Term s_parent, Term t_parent,
 }
 
 fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
+  // New epoch invalidates the whole memo in O(1); wrap-around (every
+  // 2^32 comparisons) clears it explicitly to avoid stale matches.
+  if (++g_lpo_epoch == 0) {
+    for (u32 i = 0; i < LPO_MEMO_SIZE; i++) g_lpo_memo[i].epoch = 0;
+    g_lpo_epoch = 1;
+  }
+  if (lpo_eq(s, t)) return LPO_EQ;
+  // Variable-set pretest (Waldmeister `LPOVortests`): a single
+  // bitset pass over both terms rules out the incomparable-var-set
+  // case before the recursive descent.  Conclusive only for the
+  // forced LPO_UN verdict; otherwise the full recursion runs.
+  LpoCmp pre;
+  if (lpo_pretest_varset(s, t, &pre)) return pre;
   return lpo_rec(s, t, cfg);
 }
 
-static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg) {
+static LpoCmp lpo_rec_compute(Term s, Term t, const LpoConfig *cfg) {
   if (lpo_eq(s, t)) return LPO_EQ;
 
   u8 s_is_fvr = (term_tag(s) == TAG_FVR);

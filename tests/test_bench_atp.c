@@ -1,7 +1,7 @@
 // test_bench_atp.c -- stage 7.4c bench harness for the IC-native ATP.
 //
 // Walks `tests/data/atp/*.pr`, runs our ATP on each (with a fixed
-// step budget), records 8 metrics per run into `build/bench-atp.csv`,
+// step budget), records per-run metrics into `build/bench-atp.csv`,
 // and soft-checks each result against the matching `.expect`:
 // only the final ATP status (PROVED / TIMEOUT / QUEUE_EMPTY) is
 // asserted; step/rule counts are written to the CSV but not gated
@@ -23,6 +23,18 @@
 #define BENCH_STEP_BUDGET 32
 #define BENCH_MAX_FILES   64
 #define BENCH_PATH_LEN    256
+
+// CP-weight mode for this bench run -- read once from the
+// `THVM_ATP_CP_WEIGHT` env var (an `AtpCpWeightMode` integer).
+// Unset / out-of-range -> ATP_CP_WEIGHT_ADD (0): the harness pins
+// ADD when the env var is absent so the `.expect` status gate
+// runs against a fixed heuristic regardless of the engine default.
+static u32 bench_cp_weight_mode(void) {
+  const char *e = getenv("THVM_ATP_CP_WEIGHT");
+  if (e == NULL || *e == 0) return ATP_CP_WEIGHT_ADD;
+  u32 m = (u32)strtoul(e, NULL, 10);
+  return (m < ATP_CP_WEIGHT_LAST) ? m : ATP_CP_WEIGHT_ADD;
+}
 
 static const char *atp_status_str(AtpStatus st) {
   switch (st) {
@@ -90,8 +102,18 @@ static AtpStatus run_one(const char *pr_path,
   }
   for (u32 i = 0; i < spec->n_symbols; i++) {
     weights[spec->symbols[i].label] = 1;
-    prec[spec->symbols[i].label]    = spec->symbols[i].prec_rank + 1;
   }
+#ifdef ATP_AUTO_PREC
+  // Waldmeister-style auto-precedence: derive the symbol order
+  // from per-operator algebraic-property analysis of the axiom
+  // set, instead of the .pr-file ORDERING declaration.
+  atp_auto_precedence(spec->eqn_lhs, spec->eqn_rhs, spec->n_eqns,
+                      max_label + 1, prec);
+#else
+  for (u32 i = 0; i < spec->n_symbols; i++) {
+    prec[spec->symbols[i].label] = spec->symbols[i].prec_rank + 1;
+  }
+#endif
   static KboConfig cfg;
   cfg.weights    = weights;
   cfg.precedence = prec;
@@ -108,6 +130,7 @@ static AtpStatus run_one(const char *pr_path,
   AtpState *atp = thvm_atp_init(&cfg, BENCH_STEP_BUDGET);
   atp->use_ic_cp_gen  = use_ic_cp_gen;
   atp->use_ic_rewrite = use_ic_rewrite;
+  thvm_atp_set_cp_weight_mode(atp, bench_cp_weight_mode());
   if (spec->ordering_kind == WALD_ORDER_LPO) {
     thvm_atp_set_lpo(atp, &lpo_cfg);
   }
@@ -141,9 +164,9 @@ int main(void) {
   FILE *csv = fopen("build/bench-atp.csv", "w");
   CHECK(csv != NULL);
   if (csv == NULL) { thvm_free(); return 1; }
-  fprintf(csv, "file,mode,status,wall_ms,step,n_rules,n_trace,"
+  fprintf(csv, "file,mode,cp_weight,status,wall_ms,step,n_rules,n_trace,"
                "drop_joinable,drop_connected,drop_rule_subsumed,"
-               "drop_queue_subsumed\n");
+               "drop_queue_subsumed,drop_classified\n");
 
   // Collect .pr file names from tests/data/atp/.
   DIR *dir = opendir("tests/data/atp");
@@ -218,15 +241,24 @@ int main(void) {
         mode_label[0] = path_names[mc][0];
         mode_label[1] = path_names[mr][0];
         mode_label[2] = 0;
-        fprintf(csv, "%s,%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u\n",
-                files[i], mode_label, st_str, wall_ms,
+        fprintf(csv, "%s,%s,%u,%s,%.3f,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                files[i], mode_label, bench_cp_weight_mode(),
+                st_str, wall_ms,
                 atp->step, atp->n_rules, atp->n_trace,
                 atp->n_cps_dropped_joinable,
                 atp->n_cps_dropped_connected,
                 atp->n_cps_dropped_rule_subsumed,
-                atp->n_cps_dropped_queue_subsumed);
+                atp->n_cps_dropped_queue_subsumed,
+                atp->n_cps_dropped_classified);
 
-        if (er == 0 && expected[0] != 0) {
+        // The `.expect` status encodes the default-mode (ADD)
+        // outcome.  A non-default CP-weight mode reorders the CP
+        // queue and may reach a different terminal status within
+        // the fixed step budget -- that reordering is the point of
+        // the heuristic, not a regression.  Gate the status
+        // assertion to ADD; all modes still write CSV rows.
+        if (er == 0 && expected[0] != 0
+            && bench_cp_weight_mode() == ATP_CP_WEIGHT_ADD) {
           CHECK_EQ((int)strcmp(st_str, expected), 0);
         }
 

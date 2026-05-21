@@ -8,6 +8,173 @@ CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-unused-function
 BIN     := bin
 BUILD   := build
 
+# Milestone 8a: -DATP_CP_GRAPH switches the ATP CP set onto the
+# IC-native shared SUP-graph representation (src/atp/_.c).  Off by
+# default -- the milestone-7 array engine is the regression oracle
+# and ships byte-for-byte.  `make ATP_CP_GRAPH=1 bin/test_atp`
+# builds the graph path; both flag states must compile and, for 8a,
+# produce bit-identical proofs.
+ATP_CP_GRAPH ?=
+ATP_DEFINES  := $(if $(filter-out 0,$(ATP_CP_GRAPH)),-DATP_CP_GRAPH,)
+
+# Milestone 8b/8e instrumentation.  ATP_NORM_STATS reports the 8b
+# normalization-memo sharing ratio; ATP_MATCH_STATS reports the 8e
+# shared-traversal multi-match memo sharing ratio + sweep cost.
+# Both imply -DATP_CP_GRAPH (the graph path they instrument).
+ATP_NORM_STATS  ?=
+ATP_MATCH_STATS ?=
+ATP_DEFINES     += $(if $(filter-out 0,$(ATP_NORM_STATS)),-DATP_CP_GRAPH -DATP_NORM_STATS,)
+ATP_DEFINES     += $(if $(filter-out 0,$(ATP_MATCH_STATS)),-DATP_CP_GRAPH -DATP_MATCH_STATS,)
+
+# Milestone 7d: -DATP_FV_INDEX adds a feature-vector subsumption index
+# over the CP queue (and rule set) -- a sound over-approximation that
+# turns the O(n_cps) thvm_match scan in atp_cp_queue_subsumed into an
+# O(retrieval) candidate lookup + match on the survivors.  ON by
+# default: it is part of the canonical engine and ships byte-for-byte
+# (same verdict as the array scan, just faster).  Independent of
+# -DATP_CP_GRAPH.  `make ATP_FV_INDEX=0 bin/test_atp` builds the
+# milestone-7 array scan -- the regression oracle.
+ATP_FV_INDEX ?= 1
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FV_INDEX)),-DATP_FV_INDEX,)
+
+# Milestone 7e (normalization wall, lever 1): -DATP_CP_DIAG re-enables
+# the two COUNTER-ONLY CP filters in `atp_push_cps_traced` --
+# `atp_cp_source_disjoint_connected` (7.2b) and `atp_cp_rule_subsumed`
+# (7.3a).  Their verdicts feed only `n_cps_dropped_connected` /
+# `n_cps_dropped_rule_subsumed`; neither ever drops a CP, so the
+# default build skips both calls (each is two full
+# `atp_rewrite_normalize` passes + an O(n_rules) match scan -- ~half
+# the per-CP filter cost).  Skipping them is behavior-identical: same
+# CPs queued, same proof.  Set ATP_CP_DIAG=1 to recover the
+# measurement counters.  The functions stay defined either way (the
+# test_atp unit tests call them directly).
+ATP_CP_DIAG ?=
+ATP_DEFINES += $(if $(filter-out 0,$(ATP_CP_DIAG)),-DATP_CP_DIAG,)
+
+# Milestone 7e (normalization wall, lever 2): -DATP_RULE_INDEX builds a
+# discrimination tree over rule LHS terms and routes the ATP-side
+# normalizer's redex search through it instead of the O(n_rules)
+# linear LHS scan in `rewrite_try_top`.  ON by default: part of the
+# canonical engine and behavior-identical -- among the indexed
+# candidates matching a position the lowest rule index wins, exactly
+# replicating the linear scan's first-match choice.  Independent of
+# every other ATP flag.  `make ATP_RULE_INDEX=0` recovers the linear
+# scan -- the regression oracle.
+ATP_RULE_INDEX ?= 1
+ATP_DEFINES    += $(if $(filter-out 0,$(ATP_RULE_INDEX)),-DATP_RULE_INDEX,)
+
+# Milestone 7c (convergence fix): -DATP_VAR_NORM canonically renumbers
+# the variables of every stored rule and queued CP to a dense [0, k)
+# set shared across both sides (alpha-renaming).  This keeps every
+# stored variable below the REWRITE_MAX_VAR (=64) matcher cliff -- the
+# CP enumerator bakes CP_RENAME_OFFSET into stored terms, so deep
+# overlaps otherwise carry ids past 64 where thvm_match goes dead and
+# all redundancy (joinability / subsumption / interreduction) dies.
+# Renumbering also makes alpha-equivalent rules/CPs byte-identical so
+# the dedup + duplicate-rule guard fire.  ON by default: it is the
+# convergence fix -- without it the engine diverges and never proves
+# `thm` (with it `thm` proves in ~0.2s).  `make ATP_VAR_NORM=0`
+# recovers the milestone-7 (buggy, divergent) engine for A/B.
+# Independent of every other ATP flag.
+ATP_VAR_NORM ?= 1
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_VAR_NORM)),-DATP_VAR_NORM,)
+
+# thm convergence (Waldmeister lever 1): -DATP_GOAL_HEURISTIC adds
+# goal-directed CP selection (Waldmeister CPinGoal / GoalinCP, see
+# waldmeister/sources/CLAS/Clas_CP_Goal.c).  A CP whose subterms
+# structurally match the conjecture is preferred; one unrelated to the
+# goal has its priority scaled up so it sinks in the selection heap.
+# This steers saturation toward the goal instead of blindly enumerating
+# -- without it cpl1 / subl2 / thm trace identical trajectories because
+# the goal only gates the goal-check.  Off by default; independent of
+# every other ATP flag.  CHANGES BEHAVIOR (a heuristic -- the search
+# trajectory moves, completion stays sound).  No effect in completion
+# mode (no goal).
+ATP_GOAL_HEURISTIC ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_GOAL_HEURISTIC)),-DATP_GOAL_HEURISTIC,)
+
+# thm convergence (Waldmeister lever 2): -DATP_ORPHAN_KILL adds orphan
+# deletion (Waldmeister's "Waisenmord").  When interreduction drops a
+# rule, the queued critical pairs descended from it are redundant --
+# the re-queued reduced equation regenerates whatever they contribute
+# -- so they are compacted out of the CP queue.  ON by default: it is
+# a sound completion criterion (a relative of Waldmeister's
+# selectNonOrphan) and a measured win -- on the deep wolfram benchmark
+# it halves the per-step cost and keeps the CP queue from filling with
+# CPs of churned-away rules.  `make ATP_ORPHAN_KILL=0` recovers the
+# legacy path.  Independent of every other ATP flag.
+ATP_ORPHAN_KILL ?= 1
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
+
+# thm convergence (9c foundation): -DATP_ORDERED_REWRITE replaces the
+# KBO_UN both-ways hack (which stored an unorientable equation u=v as
+# two looping rules u->v and v->u, a queue-blowup source) with proper
+# unfailing-completion ordered rewriting: the equation is stored once,
+# and the rewrite step tries every rule in BOTH directions, applying a
+# direction only when it strictly decreases the redex in the reduction
+# order.  An oriented rule fires forward only; an unorientable equation
+# fires whichever direction decreases.  Terminating.  On by default:
+# the all-oriented rule set (the common case) still takes the indexed
+# normalizer -- atp_rewrite_normalize_ordered drops to the linear scan
+# only while n_unorient > 0 -- so it is perf-neutral on orientable
+# problems and is the only path that closes a symmetric goal (a
+# commutativity equation normalizes a ground/skolemized goal to a
+# canonical face).  `make ATP_ORDERED_REWRITE=0` restores the hack.
+ATP_ORDERED_REWRITE ?= 1
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRITE,)
+
+# Milestone 10: -DATP_MNF builds the MNF goal-directed search (a port
+# of Waldmeister's "MultipleNormalFormen" module).  It AUGMENTS the
+# single-normal-form goal check: goal_lhs seeds a GREEN front, goal_rhs
+# a RED one; each front rewrites with R (forward, and -- up to
+# MNF_MAX_ANTI backward steps per lineage -- through unorientable
+# equations); an opposite-colour collision is the join.  With the
+# backward steps `make ATP_MNF=1` PROVES NAND commutativity from the
+# single Wolfram axiom (wolfram.pr) and comm_monoid_swap -- goals the
+# single-NF check structurally cannot close.  Off by default still:
+# the MNF front search runs every goal_check, which is pure overhead
+# on a goal the single-NF check will close on its own (it regresses
+# thm ~50x).  Making MNF cheap enough to default on is open work.
+ATP_MNF ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF)),-DATP_MNF,)
+# The paclet dylib (wl/THVMLink) ALWAYS compiles MNF in: the front
+# search is runtime-gated by AtpState.use_mnf (set via
+# thvm_atp_set_use_mnf / Method -> "GoalDirected"), so a compiled-in
+# MNF stays inert -- and free except one branch test -- on
+# completion-only goals.  This lets the shipped dylib prove symmetric
+# goals on demand without a separate build.  C test binaries do NOT
+# get this (they key off ATP_MNF above), so `make ATP_MNF=1` is still
+# the way to exercise MNF from the C tests.  Override with
+# `WL_ATP_MNF=0 make wl` to omit it from the dylib.
+WL_ATP_MNF      ?= 1
+WL_ATP_DEFINES  := $(if $(filter-out 0,$(WL_ATP_MNF)),-DATP_MNF,)
+# ATP_MNF_DIAG: stderr trace of the MNF set (node count, queue sizes,
+# rules fed) -- a bring-up diagnostic, implies -DATP_MNF.
+ATP_MNF_DIAG ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_MNF_DIAG)),-DATP_MNF -DATP_MNF_DIAG,)
+
+# Waldmeister-style critical-pair classification: -DATP_CP_CLASSIFY
+# ports Waldmeister's `NewClassification` ("new classification") and
+# `ClasFunctions` ("classification functions") killer predicates
+# (KillerR / KillerE / KillerRE / EChild).  Each CP is classified at
+# insertion time; a killer CP that is also rule-subsumed is dropped,
+# an EChild CP is deprioritized.  The drop is a sound subset of the
+# trivially-joinable filter, so saturation status is identical with
+# the flag on or off.  OFF by default until benchmarked: build with
+# `make ATP_CP_CLASSIFY=1` to opt in.
+ATP_CP_CLASSIFY ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_CLASSIFY)),-DATP_CP_CLASSIFY,)
+
+# ATP auto-precedence (Waldmeister PhilMarlow / Praezedenzgenerator
+# port): -DATP_AUTO_PREC makes the ATP bench harness + WL glue
+# replace the syntactic `precedence[i]=i+1` default with a
+# precedence derived from per-operator algebraic-property analysis
+# (commutativity / associativity / idempotence / units / inverses /
+# distributivity).  OFF by default until benchmarked: build with
+# `make ATP_AUTO_PREC=1` to opt in.  See src/atp/precedence.c.
+ATP_AUTO_PREC ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_AUTO_PREC)),-DATP_AUTO_PREC,)
+
 TESTS := \
   $(BIN)/test_term \
   $(BIN)/test_heap \
@@ -79,6 +246,7 @@ TESTS := \
   $(BIN)/test_icc \
   $(BIN)/test_wald \
   $(BIN)/test_atp \
+  $(BIN)/test_atp_analysis \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
   $(BIN)/test_app_sup \
@@ -225,6 +393,8 @@ $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/th
 	$(CC) $(CFLAGS) -fPIC $(WL_DYLIB_FLAGS) \
 	  -DACCELERATE_NEW_LAPACK \
 	  $(WL_TRACE_DEF) \
+	  $(ATP_DEFINES) \
+	  $(WL_ATP_DEFINES) \
 	  -I"$(WL_INCLUDE)" \
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
 	  -o $@ $(WL_SRC) build/thvm_runtime_blob.c $(METAL_OBJ) $(METAL_LDFLAGS) \
@@ -415,7 +585,7 @@ $(BIN)/test_multi_trace_on: tests/test_multi_trace.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_TRACE -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(TEST_LDFLAGS)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
 # === py/ ctypes bindings (libthvm_py.{dylib,so}) =====================
 # Single-TU build of src/thvm.c + extern-C wrapper that re-exports the

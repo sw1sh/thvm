@@ -26,6 +26,47 @@ static const KboConfig DUMMY_CFG = {
   .var_weight  = 1,
 };
 
+// Test wrapper for atp_cp_queue_subsumed.  These tests populate
+// the queue (thvm_atp_cp_set) / s->n_cps directly, so with -DATP_CP_GRAPH the
+// IC-native cp_graph is stale until thvm_atp_cp_reheapify resyncs
+// it -- 8e routes queue subsumption through cp_graph (one
+// thvm_match_multi traversal), so the resync must happen before the
+// check.  7d's -DATP_FV_INDEX is the same story: the FV index is
+// maintained incrementally on heap push/pop, so a test that pokes
+// the arrays directly must reheapify to rebuild it.  Off both flags
+// this is a thin pass-through to the array scan.
+static int tt_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
+#if defined(ATP_CP_GRAPH) || defined(ATP_FV_INDEX)
+  thvm_atp_cp_reheapify(s);
+#endif
+  return (int)atp_cp_queue_subsumed(s, lhs, rhs);
+}
+
+// 7c: a stored rule / CP equals its input term-for-term off
+// -DATP_VAR_NORM, but ON the storage path canonically renumbers the
+// (lhs, rhs) pair -- it is a freshly-rebuilt, alpha-renamed term, so
+// raw Term-pointer equality no longer holds.  `tt_norm_lhs` /
+// `tt_norm_rhs` return the side of the EXPECTED (lhs, rhs) pair as
+// the storage path would have stored it: off the flag the input
+// term unchanged, on the flag the canonically renumbered side.  The
+// caller then asserts structural equality (kbo_eq) against the
+// stored term -- an alpha-equivalence check, one assertion per side
+// (so the assertion count is identical with the flag on or off).
+static Term tt_norm_lhs(Term exp_l, Term exp_r) {
+#ifdef ATP_VAR_NORM
+  thvm_normalize_vars(&exp_l, &exp_r);
+#endif
+  (void)exp_r;
+  return exp_l;
+}
+static Term tt_norm_rhs(Term exp_l, Term exp_r) {
+#ifdef ATP_VAR_NORM
+  thvm_normalize_vars(&exp_l, &exp_r);
+#endif
+  (void)exp_l;
+  return exp_r;
+}
+
 int main(void) {
   thvm_init();
 
@@ -125,8 +166,12 @@ int main(void) {
     Term rhs = mk_v(VAR_x);
     CHECK(thvm_atp_add_equation(s, lhs, rhs));
     CHECK_EQ(s->n_cps,      1u);
-    CHECK_EQ(s->cp_lhs[0], lhs);
-    CHECK_EQ(s->cp_rhs[0], rhs);
+    // 7c: under -DATP_VAR_NORM the queued CP is the canonically
+    // renumbered (alpha-renamed) input -- compare up to that.
+    Term q_lhs = 0, q_rhs = 0;
+    thvm_atp_cp_get(s, 0, &q_lhs, &q_rhs);
+    CHECK(kbo_eq(q_lhs, tt_norm_lhs(lhs, rhs)));
+    CHECK(kbo_eq(q_rhs, tt_norm_rhs(lhs, rhs)));
     thvm_atp_free(s);
   }
 
@@ -195,24 +240,60 @@ int main(void) {
     thvm_atp_add_equation(s, l3, r3);
     CHECK_EQ(s->n_cps, 3u);
 
+    // 7c: select_cp returns the stored (canonically renumbered) CP;
+    // compare up to that alpha-renaming.  The priority ORDER (which
+    // CP pops when) is unchanged -- renumbering preserves symbol
+    // counts, so the heap key is identical.
     Term lo = 0, ro = 0;
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(lo, l2);
-    CHECK_EQ(ro, r2);
+    CHECK(kbo_eq(lo, tt_norm_lhs(l2, r2)));
+    CHECK(kbo_eq(ro, tt_norm_rhs(l2, r2)));
     CHECK_EQ(s->n_cps, 2u);
 
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(lo, l3);
-    CHECK_EQ(ro, r3);
+    CHECK(kbo_eq(lo, tt_norm_lhs(l3, r3)));
+    CHECK(kbo_eq(ro, tt_norm_rhs(l3, r3)));
     CHECK_EQ(s->n_cps, 1u);
 
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(lo, l1);
-    CHECK_EQ(ro, r1);
+    CHECK(kbo_eq(lo, tt_norm_lhs(l1, r1)));
+    CHECK(kbo_eq(ro, tt_norm_rhs(l1, r1)));
     CHECK_EQ(s->n_cps, 0u);
 
     // Now empty.
     CHECK_EQ(thvm_atp_select_cp(s, &lo, &ro), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/select-cp-fifo-interleave");
+  {
+    // Waldmeister CP-queue interleaving (port of KPVerwaltung.c
+    // CPdimension): 1 FIFO pick per ATP_CP_FIFO_MODULO (=11)
+    // selections.  CP 0 is the oldest (lowest cp_seq) AND the
+    // heaviest; CPs 1..11 are 11 identical light CPs.  The first 10
+    // selections take the weight min -> light CPs; selection 11 is
+    // the FIFO dimension -> the oldest CP (CP 0), which pure weight
+    // would defer to last.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term heavy = mk_f(mk_f(mk_a(), mk_a()), mk_f(mk_a(), mk_a()));
+    thvm_atp_cp_set(s, 0, heavy, mk_a());          // oldest + heaviest
+    for (u32 i = 1; i <= 11; i++) {
+      thvm_atp_cp_set(s, i, mk_a(), mk_a());       // light
+      s->cp_trace[i] = ATP_TRACE_NONE;
+    }
+    s->cp_trace[0] = ATP_TRACE_NONE;
+    s->n_cps = 12;
+    thvm_atp_cp_reheapify(s);
+
+    Term lo = 0, ro = 0;
+    for (u32 i = 0; i < 10; i++) {
+      CHECK(thvm_atp_select_cp(s, &lo, &ro));
+      CHECK_EQ(term_ext(lo), LAB_a);               // weight picks: light
+    }
+    // Selection 11 (cp_select_count == 10) -- the FIFO dimension.
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(term_tag(lo), TAG_CTR);
+    CHECK_EQ(term_ext(lo), LAB_f);                 // the heavy oldest CP
     thvm_atp_free(s);
   }
 
@@ -227,8 +308,10 @@ int main(void) {
     thvm_atp_select_cp(s, &lo, &ro);
     CHECK_EQ(s->n_cps, 1u);
     // The remaining equation is now at slot 0.
-    CHECK(s->cp_lhs[0] != 0);
-    CHECK_EQ(term_ext(s->cp_lhs[0]), LAB_a);
+    Term q_lhs = 0, q_rhs = 0;
+    thvm_atp_cp_get(s, 0, &q_lhs, &q_rhs);
+    CHECK(q_lhs != 0);
+    CHECK_EQ(term_ext(q_lhs), LAB_a);
     thvm_atp_free(s);
   }
 
@@ -242,8 +325,9 @@ int main(void) {
     CHECK_EQ(r.first, 0u);
     CHECK_EQ(r.count, 1u);
     CHECK_EQ(s->n_rules, 1u);
-    CHECK_EQ(s->lhs[0], lhs);
-    CHECK_EQ(s->rhs[0], rhs);
+    // 7c: the stored rule is the canonically renumbered input.
+    CHECK(kbo_eq(s->lhs[0], tt_norm_lhs(lhs, rhs)));
+    CHECK(kbo_eq(s->rhs[0], tt_norm_rhs(lhs, rhs)));
     thvm_atp_free(s);
   }
 
@@ -256,27 +340,52 @@ int main(void) {
     AtpAddedRange r = thvm_atp_orient_and_add(s, lhs, rhs);
     CHECK_EQ(r.count, 1u);
     CHECK_EQ(s->n_rules, 1u);
-    // Stored as rhs -> lhs (the swap).
-    CHECK_EQ(s->lhs[0], rhs);
-    CHECK_EQ(s->rhs[0], lhs);
+    // Stored as rhs -> lhs (the swap); 7c renumbers it canonically.
+    CHECK(kbo_eq(s->lhs[0], tt_norm_lhs(rhs, lhs)));
+    CHECK(kbo_eq(s->rhs[0], tt_norm_rhs(rhs, lhs)));
     thvm_atp_free(s);
   }
 
   TEST_BEGIN("atp/orient-and-add-kbo-un-pushes-both");
   {
     // Two distinct FVRs: x and y.  Neither dominates the other on
-    // var counts, so KBO returns UN -- unfailing fallback adds both.
+    // var counts, so KBO returns UN -- unfailing fallback adds both
+    // orientations.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_v(VAR_x);
     Term rhs = mk_v(1u);   // VAR_y
     AtpAddedRange r = thvm_atp_orient_and_add(s, lhs, rhs);
     CHECK_EQ(r.first, 0u);
+#ifdef ATP_VAR_NORM
+    // 7c: canonical renumbering numbers by first occurrence shared
+    // across both sides.  The forward leg (x, y) renumbers to
+    // (v0, v1); the reverse leg (y, x) ALSO renumbers to (v0, v1) --
+    // the two orientations of `x = y` are alpha-equivalent.  The 7c
+    // duplicate-rule guard therefore rejects the reverse leg as a
+    // byte-identical duplicate, so exactly one rule is stored.  This
+    // is a genuine behavior change, not a hidden regression: two
+    // byte-identical rules are indistinguishable to the rewriter, so
+    // collapsing them is behavior-neutral for rewriting -- only
+    // n_rules changes.  The 2-leg unfailing path is still exercised
+    // wherever the two orientations are NOT alpha-equivalent.
+    CHECK_EQ(r.count, 1u);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK(kbo_eq(s->lhs[0], tt_norm_lhs(lhs, rhs)));
+    CHECK(kbo_eq(s->rhs[0], tt_norm_rhs(lhs, rhs)));
+    // 7c: re-adding the same unorientable equation stores nothing --
+    // both legs renumber to the rule already in R, so the
+    // duplicate-rule guard rejects both.  R stays at one rule.
+    AtpAddedRange r2 = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(r2.count, 0u);
+    CHECK_EQ(s->n_rules, 1u);
+#else
     CHECK_EQ(r.count, 2u);
     CHECK_EQ(s->n_rules, 2u);
     CHECK_EQ(s->lhs[0], lhs);
     CHECK_EQ(s->rhs[0], rhs);
     CHECK_EQ(s->lhs[1], rhs);
     CHECK_EQ(s->rhs[1], lhs);
+#endif
     thvm_atp_free(s);
   }
 
@@ -406,6 +515,43 @@ int main(void) {
     CHECK_EQ(term_ext(s->lhs[0]), LAB_f);
     // CP queue grew by one: the requeued (reduced, old_rhs).
     CHECK_EQ(s->n_cps, n_cps_before + 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/interreduce-requeue-records-simplify-lineage");
+  {
+    // Regression guard for the trace-DAG severance fix: a rule
+    // dropped by interreduce is re-queued as the equation
+    // (reduced, old_rhs).  That re-queue must record a
+    // TRACE_SIMPLIFY entry parented on the dropped rule's trace
+    // index -- a fresh TRACE_AXIOM would disconnect the proof DAG.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    // R[0] enters through the saturation path so it carries a real
+    // trace lineage: add_equation queues it (TRACE_AXIOM at idx 0),
+    // a step orients it (TRACE_ORIENT, r_trace[0] -> that ORIENT).
+    thvm_atp_add_equation(s, mk_f(mk_a(), mk_e()), mk_f(mk_a(), mk_a()));
+    thvm_atp_step(s);
+    CHECK_EQ(s->n_rules, 1u);
+    u32 old_trace = s->r_trace[0];
+    CHECK(old_trace != ATP_TRACE_NONE);
+
+    u32 trace_before = s->n_trace;
+
+    // The more-general rule subsumes R[0]'s lhs at top.
+    AtpAddedRange added = thvm_atp_orient_and_add(
+        s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    CHECK_EQ(added.count, 1u);
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 1u);
+
+    // The interreduce re-queue pushed exactly one new trace entry:
+    // a TRACE_SIMPLIFY whose parent_a is the dropped rule's trace.
+    CHECK_EQ(s->n_trace, trace_before + 1u);
+    Term simp = s->trace[trace_before];
+    CHECK_EQ(term_ext(simp), TRACE_SIMPLIFY);
+    CHECK_EQ((u32)term_val(term_ctr_at(simp, 0)), old_trace);
+    CHECK_EQ((u32)term_val(term_ctr_at(simp, 1)), ATP_TRACE_NONE);
     thvm_atp_free(s);
   }
 
@@ -820,6 +966,96 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/trace-cp-carries-superposition-position");
+  {
+    // A TRACE_CP entry is a wider CTR: children 0..3 are the base
+    // [NUM(pa), NUM(pb), lhs, rhs], child 4 is NUM(pos_len),
+    // children 5.. are the superposition path.  Push a surviving CP
+    // carrying pos {0} and verify atp_push_cps_traced records it.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    s->n_rules = 0;   // empty R -> the CP is not trivially joinable
+    CriticalPair batch[1] = {{0}};
+    batch[0].lhs     = mk_f(mk_a(), mk_e());   // f(a, e) != a under {}
+    batch[0].rhs     = mk_a();
+    batch[0].pos[0]  = 0u;
+    batch[0].pos_len = 1u;
+    u32 before = s->n_trace;
+    u32 pushed = atp_push_cps_traced(s, batch, 1,
+                                     ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                     ATP_RULE_NONE, ATP_RULE_NONE);
+    CHECK_EQ(pushed, 1u);
+    CHECK_EQ(s->n_trace, before + 1u);
+    Term e = s->trace[s->n_trace - 1u];
+    CHECK_EQ((int)term_ext(e), (int)TRACE_CP);
+    CHECK_EQ(term_ctr_n(e), 6u);                       // 4 base + len + 1
+    Term plen = term_ctr_at(e, 4);
+    CHECK_EQ((int)term_tag(plen), (int)TAG_NUM);
+    CHECK_EQ((u32)term_val(plen), 1u);                 // pos_len
+    CHECK_EQ((u32)term_val(term_ctr_at(e, 5)), 0u);    // pos[0]
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/proof-extract-no-goal-returns-zero");
+  {
+    // No goal set -> nothing to extract.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    AtpProofStep steps[8];
+    CHECK_EQ(thvm_atp_proof_extract(s, steps, 8u), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/proof-extract-headline-group-chain");
+  {
+    // Same headline demo (prove f(a, i(a)) == e from the group
+    // axioms); after PROVED, extract the equational rewrite chain.
+    // The chain is the goal_lhs walk (side 0) then the goal_rhs walk
+    // (side 1), both forward, meeting at a common normal form.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    Term goal_l = mk_f(mk_a(), mk_i(mk_a()));
+    Term goal_r = mk_e();
+    thvm_atp_set_goal(s, goal_l, goal_r);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+
+    AtpStatus st = thvm_atp_run(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+
+    AtpProofStep steps[ATP_PROOF_MAX_STEPS];
+    u32 n = thvm_atp_proof_extract(s, steps, ATP_PROOF_MAX_STEPS);
+    CHECK(n >= 1u);                         // a non-trivial proof
+
+    // Per-side contiguity: each step hands its result to the next
+    // within the same side; the two sides start at goal_lhs /
+    // goal_rhs and end at a common normal form.
+    Term lhs_end = goal_l, rhs_end = goal_r;
+    u8   seen_lhs = 0, seen_rhs = 0;
+    for (u32 i = 0; i < n; i++) {
+      CHECK(steps[i].rule < s->n_rules);    // cited rule in range
+      if (steps[i].side == 0u) {
+        CHECK(kbo_eq(steps[i].before, lhs_end));
+        lhs_end = steps[i].after;
+        seen_lhs = 1;
+      } else {
+        CHECK(kbo_eq(steps[i].before, rhs_end));
+        rhs_end = steps[i].after;
+        seen_rhs = 1;
+      }
+    }
+    (void)seen_lhs; (void)seen_rhs;
+    CHECK(kbo_eq(lhs_end, rhs_end));         // the two sides meet
+
+    // The serializer renders non-empty, null-terminated text.
+    char buf[2048] = {0};
+    u32 w = thvm_atp_proof_serialize(steps, n, buf, sizeof(buf));
+    CHECK(w > 0u);
+    CHECK_EQ((int)buf[w], 0);
+    CHECK(strstr(buf, "rule ") != NULL);
+
+    thvm_atp_free(s);
+  }
+
   // === Stage 7.1: trivial-joinability filter ==========================
 
   TEST_BEGIN("atp/cp-joinability-filter-self-overlap-counter");
@@ -942,7 +1178,8 @@ int main(void) {
     // connected (with sentinel exclusion).
     Term l = mk_f(mk_a(), mk_e());
     Term r = mk_a();
-    u8 join = atp_cp_trivially_joinable(s, l, r);
+    Term jl = l, jr = r;          // joinability reduces its args in place
+    u8 join = atp_cp_trivially_joinable(s, &jl, &jr);
     u8 conn = atp_cp_source_disjoint_connected(s, l, r,
                                                ATP_RULE_NONE,
                                                ATP_RULE_NONE);
@@ -982,8 +1219,9 @@ int main(void) {
 
     Term lhs = mk_f(mk_a(), mk_e());
     Term rhs = mk_a();
+    Term jl = lhs, jr = rhs;      // joinability reduces its args in place
     CHECK_EQ((int)atp_cp_rule_subsumed(s, lhs, rhs),       1);
-    CHECK_EQ((int)atp_cp_trivially_joinable(s, lhs, rhs), 1);
+    CHECK_EQ((int)atp_cp_trivially_joinable(s, &jl, &jr), 1);
     thvm_atp_free(s);
   }
 
@@ -1043,14 +1281,13 @@ int main(void) {
     // (f(x, e), x).  A candidate (f(a, e), a) is its instance
     // under σ = {x -> a}; queue-subsumed should fire.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->cp_trace[0] = ATP_TRACE_NONE;
     s->n_cps = 1;
 
     Term lhs = mk_f(mk_a(), mk_e());
     Term rhs = mk_a();
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 1);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 1);
     thvm_atp_free(s);
   }
 
@@ -1058,14 +1295,13 @@ int main(void) {
   {
     // Same setup but candidate sides swapped.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->cp_trace[0] = ATP_TRACE_NONE;
     s->n_cps = 1;
 
     Term lhs = mk_a();
     Term rhs = mk_f(mk_a(), mk_e());
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 1);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 1);
     thvm_atp_free(s);
   }
 
@@ -1075,7 +1311,7 @@ int main(void) {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_f(mk_a(), mk_e());
     Term rhs = mk_a();
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 0);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 0);
     thvm_atp_free(s);
   }
 
@@ -1084,13 +1320,12 @@ int main(void) {
     // Queue has (f(x, e), x).  Candidate (g(a), a) does not
     // unify with the queued LHS (different head symbol).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->n_cps = 1;
 
     Term lhs = mk_a();         // not a CTR with the f label
     Term rhs = mk_e();
-    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 0);
+    CHECK_EQ(tt_queue_subsumed(s, lhs, rhs), 0);
     thvm_atp_free(s);
   }
 
@@ -1104,8 +1339,7 @@ int main(void) {
     //
     // Pre-queue the more-general (f(x, e), x).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     s->cp_trace[0] = ATP_TRACE_NONE;
     s->n_cps = 1;
 
@@ -1122,7 +1356,11 @@ int main(void) {
     // batch.
     s->n_rules = 0;   // no rules so trivially-joinable doesn't fire spuriously
 
-    CriticalPair batch[1];
+    // 8e: atp_push_cps_traced routes queue subsumption through
+    // cp_graph; resync it from the hand-populated cp_packed[]/n_cps.
+    thvm_atp_cp_reheapify(s);
+
+    CriticalPair batch[1] = {{0}};
     batch[0].lhs = mk_f(mk_a(), mk_e());
     batch[0].rhs = mk_a();
     u32 before_cnt = s->n_cps;
@@ -1280,8 +1518,7 @@ int main(void) {
   TEST_BEGIN("atp/peek/k-zero-returns-zero");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_a();
-    s->cp_rhs[0] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_a(), mk_e());
     s->n_cps = 1;
     Term o_lhs[1], o_rhs[1];
     CHECK_EQ(thvm_atp_peek_top_k(s, 0u, o_lhs, o_rhs), 0u);
@@ -1293,8 +1530,7 @@ int main(void) {
   TEST_BEGIN("atp/peek/singleton");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_a();
-    s->cp_rhs[0] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_a(), mk_e());
     s->n_cps = 1;
     Term o_lhs[2] = {0, 0}, o_rhs[2] = {0, 0};
     u32 n = thvm_atp_peek_top_k(s, 2u, o_lhs, o_rhs);
@@ -1313,12 +1549,10 @@ int main(void) {
     // CP_BIG = (f(f(x, e), e), x), size 5+1=6
     // CP_MID = (f(x, e), x),         size 3+1=4
     // CP_SML = (a, e),               size 1+1=2
-    s->cp_lhs[0] = mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
-    s->cp_lhs[1] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[1] = mk_v(VAR_x);
-    s->cp_lhs[2] = mk_a();
-    s->cp_rhs[2] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e()),
+                    mk_v(VAR_x));
+    thvm_atp_cp_set(s, 1, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_cp_set(s, 2, mk_a(), mk_e());
     s->n_cps = 3;
     thvm_atp_cp_reheapify(s);  // 7c': hand-built queue -> heap
 
@@ -1339,8 +1573,8 @@ int main(void) {
   TEST_BEGIN("atp/peek/k-greater-than-n-clamps");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_a(); s->cp_rhs[0] = mk_e();
-    s->cp_lhs[1] = mk_e(); s->cp_rhs[1] = mk_a();
+    thvm_atp_cp_set(s, 0, mk_a(), mk_e());
+    thvm_atp_cp_set(s, 1, mk_e(), mk_a());
     s->n_cps = 2;
     thvm_atp_cp_reheapify(s);  // 7c': hand-built queue -> heap
     Term o_lhs[10], o_rhs[10];
@@ -1354,10 +1588,8 @@ int main(void) {
     // Peek shows cheapest first; subsequent select_cp should pop
     // the same CP that peek's [0] revealed.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
-    s->cp_rhs[0] = mk_v(VAR_x);
-    s->cp_lhs[1] = mk_a();
-    s->cp_rhs[1] = mk_e();
+    thvm_atp_cp_set(s, 0, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_cp_set(s, 1, mk_a(), mk_e());
     s->n_cps = 2;
     s->cp_trace[0] = 100;
     s->cp_trace[1] = 200;
@@ -1807,6 +2039,170 @@ int main(void) {
     thvm_atp_free(s_mix);
   }
 
+  // === CP-weight modes: ports of Waldmeister ClasHeuristics =========
+  //
+  // DUMMY_CFG: weights[e=1]=1, weights[i=2]=0, weights[f=3]=1,
+  // weights[a=4]=1, var_weight=1, precedence={_,e:2,i:4,f:3,a:1}.
+  // symbol_count counts every node as 1.
+
+  TEST_BEGIN("atp/cp-weight-mode-default-is-gt");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_GT);
+    // ADD stays reachable: selecting it reproduces the bare
+    // symbol-count sum.
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());   // symbol_count 3
+    Term rhs = mk_v(VAR_x);                 // symbol_count 1
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ADD);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 4u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-mode-clamps-out-of-range");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_cp_weight_mode(s, 999u);
+    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_ADD);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
+    CHECK_EQ(s->cp_weight_mode, (u8)ATP_CP_WEIGHT_MAX);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-maxweight");
+  {
+    // CH_MaxWeight: max of the two side symbol-counts.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());   // symbol_count 3
+    Term rhs = mk_v(VAR_x);                 // symbol_count 1
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ADD);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 4u);   // add
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // max(3,1)
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-ordweight");
+  {
+    // CH_OrdWeight: KBO-weight sum (CF_Phi_KBO).  i(x) has KBO
+    // weight 0 (i) + 1 (x) = 1, e has 1; sum 2.  Its symbol-count
+    // sum (the --add value) is 2 (i,x) + 1 (e) = 3 -- so the two
+    // modes genuinely diverge here.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_i(mk_v(VAR_x));
+    Term rhs = mk_e();
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ADD);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // add: symbol count
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_ORD);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 2u);   // KBO-weight sum
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-gtweight-orients");
+  {
+    // CH_GtWeight: f(x,e) > x under KBO -> picks the lhs KBO
+    // weight (1+1+1 = 3), not the sum (3 + 1 = 4).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_GT);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_GT);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 3u);   // lhs KBO weight
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-gtweight-unoriented-sums");
+  {
+    // CH_GtWeight on a KBO_UN pair falls through to the sum.
+    // f(x,y) and f(y,x): each KBO weight 1+1+1 = 3 -> sum 6.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_v(1u));
+    Term rhs = mk_f(mk_v(1u), mk_v(VAR_x));
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_UN);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_GT);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 6u);   // wl + wr
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-mixweight");
+  {
+    // CH_MixWeight on the oriented pair f(x,e) > x:
+    //   wl = 3, wr = 1, sum = 4, g (GtWeight) = wl = 3.
+    //   mix = sum*g + g + sum = 12 + 3 + 4 = 19.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_GT);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MIX);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 19u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-mixweight2");
+  {
+    // CH_MixWeight2 on the same oriented pair:
+    //   g = 3, sum = 4 -> mix2 = g*10 + sum = 34.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MIX2);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 34u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-unif-measure-zero-on-unifiable");
+  {
+    // CH_Unifikationsmass: f(x,e) and f(a,e) are unifiable
+    // (x := a), so the unification measure is 0 -> weight 0.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_f(mk_a(), mk_e());
+    CHECK_EQ(atp_unif_measure(lhs, rhs), 0u);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_UNIF);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-unif-measure-clash");
+  {
+    // f(a,e) vs f(a,a): top f matches, child (a,a) matches,
+    // child (e,a) is a function-symbol clash at depth d=1 -> the
+    // measure is 1.  KBO weights are 3 and 3, so the UNIF weight
+    // is (3+3)*1 = 6.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_a(), mk_e());
+    Term rhs = mk_f(mk_a(), mk_a());
+    CHECK_EQ(atp_unif_measure(lhs, rhs), 1u);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_UNIF);
+    CHECK_EQ(atp_cp_priority(s, lhs, rhs), 6u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-weight-modes-change-pop-order");
+  {
+    // Two CPs, both KBO-oriented:
+    //   CP_BIG: f(f(x,e),e) = x   -- symbol_count 5 + 1 = 6
+    //   CP_SML: i(x)         = e  -- symbol_count 2 + 1 = 3
+    // Under MAX, CP_SML max(2,1)=2 pops before CP_BIG max(5,1)=5.
+    // The CPs are seeded via thvm_atp_cp_set + reheapify (m8's
+    // packed-byte-string queue API) so the mode is exercised
+    // end-to-end through the heap.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
+    Term big_l = mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e());
+    Term big_r = mk_v(VAR_x);
+    Term sml_l = mk_i(mk_v(VAR_x));
+    Term sml_r = mk_e();
+    thvm_atp_cp_set(s, 0u, big_l, big_r);
+    thvm_atp_cp_set(s, 1u, sml_l, sml_r);
+    s->n_cps = 2;
+    thvm_atp_cp_reheapify(s);
+    Term out_l = 0, out_r = 0;
+    CHECK(thvm_atp_select_cp(s, &out_l, &out_r));
+    // Cheapest first: CP_SML (max weight 2) before CP_BIG (5).
+    CHECK(term_tag(out_l) == TAG_CTR && term_ext(out_l) == LAB_i);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/lpo-vs-kbo-parity-on-group-axioms");
   {
     // Run the group-axiom saturation under both KBO and LPO.
@@ -1909,6 +2305,128 @@ int main(void) {
     CHECK(after <= before + 8u);
     thvm_atp_free(s);
   }
+
+  // === ATP_CP_CLASSIFY: Waldmeister CP classification ==============
+  // The `n_cps_dropped_classified` counter exists in AtpState in
+  // both build modes.  With the flag OFF the classifier is compiled
+  // out, so the counter must stay 0 even after a full run.
+
+  TEST_BEGIN("atp/classify/counter-zero-when-flag-off");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 8);
+    // f(x, e) = x : a clean oriented rule that saturates fast.
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_run(s);
+#ifndef ATP_CP_CLASSIFY
+    CHECK_EQ(s->n_cps_dropped_classified, 0u);
+#endif
+    thvm_atp_free(s);
+  }
+
+#ifdef ATP_CP_CLASSIFY
+  TEST_BEGIN("atp/classify/killer-r-fires-when-cp-reduces-a-rule");
+  {
+    // R holds an oriented rule  f(a, a) -> a.  The CP  (f(a, a), a)
+    // -- the same pair -- oriented big->small reduces that rule's
+    // LHS, so KillerR must fire.  An unrelated CP  (i(b), b)  whose
+    // LHS matches nothing in R must not.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    CHECK_EQ(s->n_rules, 1u);
+
+    CHECK(atp_clas_killer_r(s, mk_f(mk_a(), mk_a()), mk_a()) == 1u);
+    // i(a) -> a : LHS i(a) matches no subterm of f(a,a), so no kill.
+    CHECK(atp_clas_killer_r(s, mk_i(mk_a()), mk_a()) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/killer-e-needs-unorientable-cp");
+  {
+    // KillerE only fires for an unorientable CP.  An orientable CP
+    // that reduces a rule is a KillerR case, not KillerE.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+
+    // (f(a,a), a) is orientable (KBO_GT) -> KillerE must be 0.
+    CHECK(atp_clas_killer_e(s, mk_f(mk_a(), mk_a()), mk_a()) == 0u);
+    // (x, y) -- two distinct vars -- is unorientable; but its LHS
+    // is a bare variable that matches no rule LHS, so still 0.
+    CHECK(atp_clas_killer_e(s, mk_v(VAR_x), mk_v(1u)) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/killer-re-is-union-of-r-and-e");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    // KillerRE fires because KillerR fires.
+    CHECK(atp_clas_killer_re(s, mk_f(mk_a(), mk_a()), mk_a()) == 1u);
+    // Neither R nor E -- no rule LHS is reducible.
+    CHECK(atp_clas_killer_re(s, mk_i(mk_a()), mk_a()) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/echild-detects-unorientable-parent");
+  {
+    // Rule 0 oriented (f(a,a) -> a).  Rule 1 born unorientable
+    // (x = y -> orient_and_add stores both directions / fallback).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    AtpAddedRange un = thvm_atp_orient_and_add(s, mk_v(VAR_x), mk_v(1u));
+    CHECK(un.count >= 1u);
+    u32 un_idx = un.first;
+    // A CP whose parent un_idx is unorientable -> EChild fires.
+    CHECK(atp_clas_echild(s, 0u, un_idx) == 1u);
+    // Both parents the oriented rule 0 -> EChild does not fire.
+    CHECK(atp_clas_echild(s, 0u, 0u) == 0u);
+    // Out-of-range "no parent" indices -> EChild does not fire.
+    CHECK(atp_clas_echild(s, s->n_rules, s->n_rules) == 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/classify-cp-drops-rule-subsumed-killer");
+  {
+    // The CP  (f(a, a), a)  is rule-subsumed by  f(a, a) -> a  AND a
+    // KillerRE.  The default config maps KillerRE -> Act_never, and
+    // the rule-subsumption soundness guard holds, so atp_classify_cp
+    // signals a drop.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    u32 pri = 99u;
+    u8 drop = atp_classify_cp(s, mk_f(mk_a(), mk_a()), mk_a(),
+                              0u, 0u, &pri);
+    CHECK_EQ((int)drop, 1);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/classify-cp-keeps-non-killer");
+  {
+    // (i(a), a) is neither a killer nor EChild for this R, so the
+    // classifier keeps it and leaves the priority unscaled.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_orient_and_add(s, mk_f(mk_a(), mk_a()), mk_a());
+    u32 base = atp_cp_priority(s, mk_i(mk_a()), mk_a());
+    u32 pri  = base;
+    u8 drop  = atp_classify_cp(s, mk_i(mk_a()), mk_a(), 0u, 0u, &pri);
+    CHECK_EQ((int)drop, 0);
+    CHECK_EQ(pri, base);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/classify/generate-cps-counter-resolves-status");
+  {
+    // End-to-end through atp_push_cps_traced: run a full saturation
+    // and confirm the run still resolves to a normal terminal
+    // status with the classifier wired into the CP-insertion path.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 32);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_i(mk_v(VAR_x)), mk_v(VAR_x)), mk_e());
+    AtpStatus st = thvm_atp_run(s);
+    CHECK(st == ATP_QUEUE_EMPTY || st == ATP_TIMEOUT ||
+          st == ATP_PROVED);
+    thvm_atp_free(s);
+  }
+#endif  // ATP_CP_CLASSIFY
 
   thvm_free();
   TEST_REPORT();
