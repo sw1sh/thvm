@@ -392,6 +392,18 @@ $(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(META
 $(BIN)/test_cuda_backend: tests/test_cuda_backend.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
+# Cross-backend dispatch microbench.  One binary; the backend is chosen
+# at runtime via DEV={cpu,metal,cuda}.  On macOS it links the Metal
+# backend (so DEV=cpu and DEV=metal both work); on Linux+CUDA it links
+# the CUDA backend (DEV=cpu and DEV=cuda).
+ifeq ($(UNAME_S),Darwin)
+$(BIN)/xbackend_bench: tools/xbackend_bench.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+else
+$(BIN)/xbackend_bench: tools/xbackend_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
+endif
+
 # Multicomputation trace -- built TWICE from the same source so we
 # can verify both halves of the gating discipline.  test_multi_trace
 # uses default CFLAGS (no -DTHVM_TRACE), so the multi_emit() call sites
