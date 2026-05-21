@@ -2710,6 +2710,11 @@ fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
   s->use_ground_join = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_selection_ratio(AtpState *s, u32 modulo) {
+  if (s == NULL) return;
+  s->fifo_modulo = modulo;   // 0 -> default (11) at selection time
+}
+
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so a garbage
 // mode falls back to the bare symbol-count heuristic.
@@ -3369,10 +3374,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       if (s->cp_goal[i] < s->cp_goal[best]) best = i;
     }
     j = best;
-  } else if (s->cp_select_count % ATP_CP_FIFO_MODULO
-        >= ATP_CP_FIFO_MODULO - ATP_CP_FIFO_THRESHOLD) {
+  } else if (((s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO)
+              - ATP_CP_FIFO_THRESHOLD)
+             <= s->cp_select_count
+                  % (s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO)) {
     // FIFO dimension: the oldest queued CP is the lowest cp_seq.
-    // O(n_cps) scan, but only 1 call in MODULO takes this branch.
+    // O(n_cps) scan, but only 1 call in `fifo_modulo` takes this branch.
     u32 best = 0;
     for (u32 i = 1; i < s->n_cps; i++) {
       if (s->cp_seq[i] < s->cp_seq[best]) best = i;

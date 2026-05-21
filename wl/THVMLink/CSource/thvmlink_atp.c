@@ -375,6 +375,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   mint max_cp_w  = MArgument_getInteger(args[8]);   // Waldmeister MaxWeight (0 = unbounded)
   mint goal_intl = MArgument_getInteger(args[9]);   // goal-interleave ratio (0 = off)
   mint gnd_join  = MArgument_getInteger(args[10]);  // ground-joinability deletion (0 = off)
+  mint sel_ratio = MArgument_getInteger(args[11]);  // CPdimension FIFO ratio (0 = default 11)
 
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
@@ -453,6 +454,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // pairs (sound redundancy criterion).  No-op unless built with
   // -DATP_CP_GROUND_JOIN (the shipped paclet is).
   thvm_atp_set_use_ground_join(atp, (u8)(gnd_join != 0));
+  // Method -> {... "SelectionRatio" -> n}: Waldmeister CPdimension
+  // fairness ratio (1 FIFO pick per n selections).  0 keeps the default.
+  thvm_atp_set_selection_ratio(atp, sel_ratio > 0 ? (u32)sel_ratio : 0u);
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];
