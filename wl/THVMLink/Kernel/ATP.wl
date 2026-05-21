@@ -1697,7 +1697,12 @@ TFindEquationalProof::badrel =
    sides never share a single normal form. *)
 atpParseMethod[Automatic] := {5, 0, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
-atpParseMethod[{"Completion", subopts___Rule}] :=
+
+(* Shared suboption decoder for the completion-family methods.  Returns
+   {cpWeight, ordering, autoPrec, useMnf}; `mnf` is fixed by the head
+   ("Completion" -> 0, "GoalDirected"/"MNF" -> 1) so every method takes
+   the same CriticalPairWeight / Ordering / AutoPrecedence knobs. *)
+atpParseCompletionOpts[subopts_List, mnf_] :=
     Block[{o = Association[subopts], cw, ord, ap, cwRaw},
         cwRaw = Lookup[o, "CriticalPairWeight", Automatic];
         cw = Lookup[$AtpCpWeightCodes, cwRaw, $Failed];
@@ -1707,13 +1712,20 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
             "LPO", 1, "KBO" | Automatic, 0, _, 0];
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
             True, 1, False | Automatic, 0, _, 0];
-        {cw, ord, ap, 0}
+        {cw, ord, ap, mnf}
     ];
-(* "GoalDirected" / "MNF": enable the front search.  Defaults to Mix2
-   weight (like Automatic) so completion still drives R forward while
-   MNF watches for a front collision; the front search needs the rules
-   completion derives. *)
+atpParseMethod[{"Completion", subopts___Rule}] :=
+    atpParseCompletionOpts[{subopts}, 0];
+
+(* "GoalDirected" / "MNF": enable the front search.  Bare form defaults
+   to Mix2 weight (like Automatic) so completion still drives R forward
+   while MNF watches for a front collision; the list form takes the same
+   Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
+   so the front search can run over an LPO-oriented, structure-precedence
+   rule set -- the combination the hard Sheffer cross-axiom goals need. *)
 atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1};
+atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
+    atpParseCompletionOpts[{subopts}, 1];
 atpParseMethod[m_] := (
     Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0});
 
