@@ -51,7 +51,18 @@ fn u32 kernel_gc_sweep(Term result) {
     if (buf_id != 0 && buf_id < CPU_BUFS_NEXT) {
       alive = (CPU_BUFS[buf_id].refcount > 0);
     }
-    if (alive) continue;
+    if (alive) {
+      // The output buffer survived this realize's pool rollback, so it
+      // is a committed leaf for subsequent passes.  Detach its producer
+      // kid: a later reuse must read the preserved buffer directly, not
+      // re-fire (recompute) the producer chain.  The chain's dead
+      // intermediates are stripped by this same sweep, so a re-fire
+      // would recompute from freed buffers and yield wrong values.
+      // Mirrors tinygrad replacing a realized tensor's lazydata with a
+      // BUFFER leaf.
+      TENS[ke->output_tid].producer_kid = 0;
+      continue;
+    }
     // This sweep keys liveness off CPU_BUFS; non-CPU backends have
     // their own buffer tables, so leave their kernels inspectable.
     if (TENS[ke->output_tid].backend != &CPU_BACKEND) {

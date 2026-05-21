@@ -64,6 +64,15 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_chain_composed);    ke->input_chain_composed    = NULL;
   ke->n_inputs   = 0;
   ke->inputs_cap = 0;
+  // Invalidate the cached lift so a later re-fire of this stripped slot
+  // no-ops cleanly.  cpu_uop_walk keys its input count off
+  // cached_lift.n_inputs (not ke->n_inputs) and declines when
+  // store_root==0; without this a GC-stripped kernel reached via a
+  // stale TenDesc.producer_kid would walk the dangling lift with
+  // freed input arrays and read uninitialised buffer ids.
+  ke->cached_lift.store_root = 0;
+  ke->cached_lift.out_buf    = 0;
+  ke->cached_lift.n_inputs   = 0;
 }
 
 fn u32 kernel_alloc(void) {
