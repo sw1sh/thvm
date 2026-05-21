@@ -131,6 +131,21 @@ static u64 grad_cell_alloc(Term child) {
   return c;
 }
 static Term grad_fwd_of(u64 cell) {
+  // The forward value of the cell's child, used to BUILD a sibling
+  // cotangent (e.g. RECIP(a) for d(sqrt a)).  In the SUP/DUP-projection
+  // path this must be a DP0 grad-projection so the value stays linear.
+  // In the target-aware path (the production TGrad/TGradMany flow --
+  // TUOpGradWithTarget, no SUP/DUP nest) there is no linearity
+  // constraint, so reference the forward child DIRECTLY (shared) instead
+  // of a DP0 that DUP-COPIES the whole forward subtree.  Without this a
+  // forward value reached by N backward cells (e.g. a conv/relu
+  // activation feeding a BatchNorm's mean + centered + var) is copied N
+  // times -- the merged fwd+bwd graph becomes a near-pure tree and a deep
+  // gradient re-derives the entire upstream stack per consumer (the
+  // beautiful_mnist backward kernel-count blowup, 1236 kernels at BS=8).
+  // Sharing the node makes it one multi-consumer boundary the scheduler
+  // realizes once; the value (and thus the gradient) is identical.
+  if (grad_current_target() != 0) return term_resolve(heap_read(cell + 0));
   return term_new(0, TAG_DP0, DUP_GRAD_FLAG, cell);
 }
 static Term grad_bwd_of(u64 cell) {
