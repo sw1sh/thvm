@@ -1346,7 +1346,6 @@ static int udg_match_imod_range(Term t, u32 axis_r_out, u32 *out_div) {
 //      must witness c_in via r_q.extent (since kh*kw=1, c_in=KRED).
 static int uop_dag_extract_conv2d_flat_shape_1x1(
     Term addr_w, Term addr_x,
-    struct KernelEntry const *ke,
     UopDagConv2dFlatShape *out) {
   // --- W decode (same as standard parser) ---
   u32 axis_r_out = 0, axis_r_q = 0;
@@ -1541,7 +1540,6 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
   out->x_stride2  = (i32)x_s2;
   out->axis_r_out = axis_r_out;
   out->axis_r_q   = axis_r_q;
-  (void)ke;
   (void)got_bi;
   return 1;
 }
@@ -1553,7 +1551,6 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
 // / W).  Out-of-scope: x_offset==0 is fine (just no const arm); but
 // degenerate `kh==kw==1` collapses ci to bare RANGE -- not handled yet.
 int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
-                                      struct KernelEntry const *ke,
                                       UopDagConv2dFlatShape *out) {
   if (out == NULL) return 0;
   memset(out, 0, sizeof(*out));
@@ -1572,7 +1569,7 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   // (which uses divisor-value disambiguation since the H and BI arms are
   // structurally identical).
   if (udg_x_addr_is_1x1(addr_x, axis_r_q)) {
-    return uop_dag_extract_conv2d_flat_shape_1x1(addr_w, addr_x, ke, out);
+    return uop_dag_extract_conv2d_flat_shape_1x1(addr_w, addr_x, out);
   }
 
   // --- X decode ---
@@ -1734,7 +1731,6 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   out->x_stride2  = (i32)x_s2;
   out->axis_r_out = axis_r_out;
   out->axis_r_q   = axis_r_q;
-  (void)ke;
   return 1;
 }
 

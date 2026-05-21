@@ -2339,7 +2339,6 @@ typedef struct {
 } UopDagConv2dFlatShape;
 
 int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
-                                      struct KernelEntry const *ke,
                                       UopDagConv2dFlatShape *out);
 
 // === Store + After ===

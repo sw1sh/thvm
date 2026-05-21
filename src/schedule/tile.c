@@ -114,10 +114,11 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
             Term addr_w = heap_read(term_val(ldW) + 1);
             Term addr_x = heap_read(term_val(ldX) + 1);
             UopDagConv2dFlatShape ds = {0};
-            if (uop_dag_extract_conv2d_flat_shape(addr_w, addr_x, ke, &ds)
+            if (uop_dag_extract_conv2d_flat_shape(addr_w, addr_x, &ds)
                 && (ds.c_in > 1 || allow_cin1)
                 && ds.c_out * ds.patches == ke->output_numel) {
-              // Cross-check output_shape too -- legacy did this gate.
+              // Cross-check output_shape too -- belt-and-braces on the
+              // c_out * patches == output_numel check above.
               int out_flat = ke->output_shape.ndim == 2
                           && ke->output_shape.dims[0] == ds.c_out
                           && ke->output_shape.dims[1] == ds.patches;
