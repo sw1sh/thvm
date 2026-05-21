@@ -3386,56 +3386,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
         }
       }
     }
-    // Identity check: rangeify_unified_store_root_at(idx) is the
-    // unified-pass UOP_STORE for this boundary (when dtype inference
-    // succeeded).  Under THVM_LIFT_BUFFERIZE_TRACE=1 emit a stderr
-    // line on every mismatch so the eventual lifter bypass has a
-    // clear bisect signal for which kernel shapes still diverge.
-    if (getenv("THVM_LIFT_BUFFERIZE_TRACE")) {
-      Term ru_root = rangeify_unified_store_root_at(idx);
-      Term l_root  = ke->cached_lift.store_root;
-      // Under THVM_LIFT_BUFFERIZE_SIMPLIFY=1, run uop_graph_simplify
-      // on both before comparing.  Catches canonicalization-only
-      // divergences (IADD/IMUL nesting order, identity folds, etc.).
-      if (getenv("THVM_LIFT_BUFFERIZE_SIMPLIFY")) {
-        if (l_root != 0)  l_root  = uop_graph_simplify(l_root);
-        if (ru_root != 0) ru_root = uop_graph_simplify(ru_root);
-      }
-      if (ru_root != 0 && ru_root != l_root) {
-        Term l_buf   = uop_store_buf  (l_root);
-        Term l_addr  = uop_store_addr (l_root);
-        Term l_value = uop_store_value(l_root);
-        Term r_buf   = uop_store_buf  (ru_root);
-        Term r_addr  = uop_store_addr (ru_root);
-        Term r_value = uop_store_value(ru_root);
-        char const *which =
-            (l_buf   != r_buf)   ? "buf"   :
-            (l_addr  != r_addr)  ? "addr"  :
-            (l_value != r_value) ? "value" : "shape";
-        if (l_buf != r_buf) {
-          u32 l_nd = uop_buffer_ndim(l_buf);
-          u32 r_nd = uop_buffer_ndim(r_buf);
-          u32 l_dt = uop_buffer_dtype(l_buf);
-          u32 r_dt = uop_buffer_dtype(r_buf);
-          fprintf(stderr,
-                  "THVM_LIFT_BUFFERIZE_MISMATCH kid=%u diverges=buf "
-                  "lift_dtype=%u unified_dtype=%u lift_ndim=%u unified_ndim=%u "
-                  "lift_dims=[", kid, l_dt, r_dt, l_nd, r_nd);
-          for (u32 d = 0; d < l_nd; d++) fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(l_buf, d));
-          fputs("] unified_dims=[", stderr);
-          for (u32 d = 0; d < r_nd; d++) fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(r_buf, d));
-          fputs("]\n", stderr);
-        } else {
-          fprintf(stderr,
-                  "THVM_LIFT_BUFFERIZE_MISMATCH kid=%u diverges=%s "
-                  "lift_addr=%016llx unified_addr=%016llx "
-                  "lift_value=%016llx unified_value=%016llx\n",
-                  kid, which,
-                  (unsigned long long)l_addr, (unsigned long long)r_addr,
-                  (unsigned long long)l_value, (unsigned long long)r_value);
-        }
-      }
-    }
     // Post-lift UPatRule pass.  Reads applied_opts via the tile_anno
     // facade (single read site so the eventual KpSchedule -> KernelEntry
     // ownership move is a one-file change).
