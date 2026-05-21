@@ -373,6 +373,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   mint auto_prec = MArgument_getInteger(args[6]);
   mint use_mnf   = MArgument_getInteger(args[7]);
   mint max_cp_w  = MArgument_getInteger(args[8]);   // Waldmeister MaxWeight (0 = unbounded)
+  mint goal_intl = MArgument_getInteger(args[9]);   // goal-interleave ratio (0 = off)
 
   const struct st_WolframNumericArrayLibrary_Functions *naf
     = libData->numericarrayLibraryFunctions;
@@ -446,6 +447,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // MNF bidirectional front search.  No-op unless built with -DATP_MNF.
   thvm_atp_set_use_mnf(atp, (u8)(use_mnf != 0));
   thvm_atp_set_max_cp_weight(atp, max_cp_w > 0 ? (u32)max_cp_w : 0u);
+  thvm_atp_set_goal_interleave(atp, goal_intl > 0 ? (u32)goal_intl : 0u);
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

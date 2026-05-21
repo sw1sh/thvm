@@ -351,12 +351,13 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *nt = (u32  *)realloc(s->cp_trace, cap * sizeof(u32));
   u32  *np = (u32  *)realloc(s->cp_pri,   cap * sizeof(u32));
   u32  *nq = (u32  *)realloc(s->cp_seq,   cap * sizeof(u32));
-  if (nc == NULL || nt == NULL || np == NULL || nq == NULL) {
+  u32  *ng = (u32  *)realloc(s->cp_goal,  cap * sizeof(u32));
+  if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
   s->cp_packed = nc; s->cp_trace = nt;
-  s->cp_pri = np; s->cp_seq = nq;
+  s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng;
   for (u32 i = s->cp_cap; i < cap; i++) {
     s->cp_packed[i] = NULL;
     s->cp_trace[i]  = ATP_TRACE_NONE;
@@ -2393,6 +2394,7 @@ fn void thvm_atp_free(AtpState *s) {
   }
   free(s->cp_trace);
   free(s->cp_pri);
+  free(s->cp_goal);
   free(s->cp_seq);
 #ifdef ATP_FV_INDEX
   atp_fv_index_free(s->fv_index);
@@ -2699,6 +2701,10 @@ fn void thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode) {
 
 fn void thvm_atp_set_max_cp_weight(AtpState *s, u32 w) {
   if (s != NULL) s->max_cp_weight = w;
+}
+
+fn void thvm_atp_set_goal_interleave(AtpState *s, u32 ratio) {
+  if (s != NULL) s->use_goal_interleave = ratio;
 }
 
 // 8.5c: order-aware compare.  Picks LPO (if attached) or KBO,
@@ -3224,11 +3230,14 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
 // Swap all four parallel CP arrays at slots i, j.  cp_packed swaps the
 // pointer only -- the byte string itself does not move, so a
 // subsumption-index record still borrows a valid buffer after a sift.
+static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr);
+
 static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
   u8  *tc = s->cp_packed[i];s->cp_packed[i]= s->cp_packed[j];s->cp_packed[j]= tc;
   u32  tt = s->cp_trace[i]; s->cp_trace[i] = s->cp_trace[j]; s->cp_trace[j] = tt;
   u32  tp = s->cp_pri[i];   s->cp_pri[i]   = s->cp_pri[j];   s->cp_pri[j]   = tp;
   u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
+  u32  tg = s->cp_goal[i];  s->cp_goal[i]  = s->cp_goal[j];  s->cp_goal[j]  = tg;
 }
 
 static void atp_cp_sift_up(AtpState *s, u32 i) {
@@ -3276,6 +3285,8 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   // acp_pack already counted every node -- reuse it as the CP weight
   // instead of paying atp_symbol_count a second pair of traversals.
   s->cp_pri[i]   = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
+  s->cp_goal[i]  = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
+                     ? atp_goal_weight(s, lhs, rhs) : 0u;
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
   s->n_cps++;
@@ -3324,7 +3335,17 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
   // selections, weight pick (heap root) otherwise.
   u32 j = 0;
-  if (s->cp_select_count % ATP_CP_FIFO_MODULO
+  if (s->use_goal_interleave > 0u &&
+      (s->cp_select_count % s->use_goal_interleave) == 0u) {
+    // Goal-directed pick: the most goal-relevant queued CP (min
+    // cp_goal).  E-style ratio -- the other picks are weight-based,
+    // building the system; this steers toward the goal.
+    u32 best = 0;
+    for (u32 i = 1; i < s->n_cps; i++) {
+      if (s->cp_goal[i] < s->cp_goal[best]) best = i;
+    }
+    j = best;
+  } else if (s->cp_select_count % ATP_CP_FIFO_MODULO
         >= ATP_CP_FIFO_MODULO - ATP_CP_FIFO_THRESHOLD) {
     // FIFO dimension: the oldest queued CP is the lowest cp_seq.
     // O(n_cps) scan, but only 1 call in MODULO takes this branch.
@@ -3359,6 +3380,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_trace[j] = s->cp_trace[last];
     s->cp_pri[j]   = s->cp_pri[last];
     s->cp_seq[j]   = s->cp_seq[last];
+    s->cp_goal[j]  = s->cp_goal[last];
     atp_cp_sift_up(s, j);
     atp_cp_sift_down(s, j);
   }
@@ -3379,6 +3401,8 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     Term l = 0, r = 0;
     acp_unpack(s->cp_packed[i], &l, &r);
     s->cp_pri[i] = atp_cp_priority(s, l, r);
+    s->cp_goal[i] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
+                      ? atp_goal_weight(s, l, r) : 0u;
     s->cp_seq[i] = s->cp_seq_next++;
   }
   // Floyd build-heap: sift down every internal node, last to first.
@@ -4982,6 +5006,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       s->cp_trace[w]  = s->cp_trace[i];
       s->cp_pri[w]    = s->cp_pri[i];
       s->cp_seq[w]    = s->cp_seq[i];
+      s->cp_goal[w]   = s->cp_goal[i];
     }
     w++;
   }

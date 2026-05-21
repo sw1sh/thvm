@@ -3061,6 +3061,11 @@ typedef struct {
   // rebuild-an-INC-SUP-tree-every-step O(n) scan.
   u32  *cp_pri;
   u32  *cp_seq;
+  // Goal-interleave: per-CP goal-directed weight (CPinGoal), parallel to
+  // cp_pri.  Filled at push only when use_goal_interleave > 0; the
+  // selection then takes a goal-min pick every use_goal_interleave-th
+  // step (E-style ratio: size-based system-building + goal steering).
+  u32  *cp_goal;
   u32   cp_seq_next;
   u32   cp_cap;
   // Waldmeister CP-queue interleaving: selection alternates between
@@ -3253,6 +3258,9 @@ typedef struct {
   // symbol-count sum) stays reachable via
   // `thvm_atp_set_cp_weight_mode`.
   u8   cp_weight_mode;
+  // 0 = off; N>0 = every N-th CP selection is a goal-directed (min
+  // cp_goal) pick instead of the weight pick.  Pairs with max_cp_weight.
+  u32  use_goal_interleave;
   // Waldmeister MaxWeight: discard a critical pair whose combined term
   // weight exceeds this (0 = unbounded).  Bounds the search on
   // self-overlapping axioms (the single Wolfram NAND axiom) so the
@@ -3338,6 +3346,7 @@ fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 // `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
+fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 
 // Set a wall-clock deadline.  `seconds_from_now` is a float duration
