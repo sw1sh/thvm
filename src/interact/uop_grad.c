@@ -51,16 +51,6 @@
 //   SHRINK(a, b/e)   gy_for_a = PAD(gy, [b_i, src.dim_i - e_i])
 //   CONST/LOAD/CMP   no children to differentiate (leaf cotangent dies)
 
-// Lift `src` to `target_term`'s shape via UOP_EXPAND.  Works for
-// both TAG_TEN (look up TENS[tid].view.shape) and TAG_UOP (use
-// term_shape_in to compute the result shape statically).  No-op
-// when shape can't be determined or the rank is zero.
-fn Term expand_to_target(Term src, Term target_term) {
-  Shape s;
-  if (!term_shape_in(target_term, 0, &s) || s.ndim == 0) return src;
-  return uop_expand(src, s.ndim, s.dims);
-}
-
 // Forward decl: grad_target_dtype reads the target stack defined
 // alongside grad_current_target below.
 fn u32 grad_target_dtype(void);
