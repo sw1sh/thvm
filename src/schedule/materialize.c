@@ -3574,11 +3574,9 @@ fn Term thvm_materialize(Term term) {
   // memcpys it into dst.buf.
   if (term_ext(term) == UOP_ASSIGN) {
     u64  loc        = term_val(term);
-    Term dst_cell   = heap_read(loc + 0);
     Term src_cell   = heap_read(loc + 1);
     Term src_mat    = thvm_materialize(src_cell);
     if (src_mat != src_cell) heap_set(loc + 1, src_mat);
-    (void)dst_cell;
     return term;
   }
   // Pre-walk: recursively scan the UOP DAG for NESTED ASSIGNs and
