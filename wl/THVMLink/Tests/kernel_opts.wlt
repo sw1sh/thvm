@@ -48,7 +48,7 @@ VerificationTest[
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid = TKernelCount[] - 1;
     {First[TKernelOpts[kid]]["AxisTypes"], First[TKernelOpts[kid]]["FullShape"]},
-    {{"LOOP", "REDUCE"}, {1, 12}},
+    {{"REDUCE"}, {12}},
     TestID -> "kernel-opts/default-axes-reduce"
 ]
 
@@ -59,10 +59,10 @@ VerificationTest[
     xT = TTensorCreate @ N @ Range[12];
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid = TKernelCount[] - 1;
-    res = TKernelApplyOpt[kid, TOpt["UNROLL", 1, 4]];
+    res = TKernelApplyOpt[kid, TOpt["UNROLL", 0, 4]];
     a = First[res];
     {a["AxisTypes"], a["FullShape"], a["Applied"]},
-    {{"LOOP", "REDUCE", "UNROLL"}, {1, 3, 4}, {TOpt["UNROLL", 1, 4]}},
+    {{"REDUCE", "UNROLL"}, {3, 4}, {TOpt["UNROLL", 0, 4]}},
     TestID -> "kernel-opts/apply-unroll-splits-reduce"
 ]
 
@@ -173,7 +173,7 @@ VerificationTest[
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid = TKernelCount[] - 1;
     pre  = TKernelSource[kid, "C"];
-    TKernelApplyOpt[kid, TOpt["UNROLL", 1, 4]];
+    TKernelApplyOpt[kid, TOpt["UNROLL", 0, 4]];
     post = TKernelSource[kid, "C"];
     {StringContainsQ[pre,  "#pragma clang loop unroll_count"],
      StringContainsQ[post, "#pragma clang loop unroll_count(4)"]},
@@ -189,7 +189,7 @@ VerificationTest[
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid = TKernelCount[] - 1;
     pre  = TKernelJitDylibPath[kid];
-    TKernelApplyOpt[kid, TOpt["UNROLL", 1, 4]];
+    TKernelApplyOpt[kid, TOpt["UNROLL", 0, 4]];
     TRealize @ TUOpReduce[xT, 0, "SUM"];          (* re-fire to rebuild *)
     post = TKernelJitDylibPath[kid];
     pre =!= post,
@@ -238,8 +238,8 @@ VerificationTest[
     xT = TTensorCreate @ N @ Range[32];        (* divisible by 16/8/4/2 *)
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     TKernelProposed[TKernelCount[] - 1],
-    {TOpt["UNROLL", 1, 16], TOpt["UNROLL", 1, 8],
-     TOpt["UNROLL", 1, 4],  TOpt["UNROLL", 1, 2]},
+    {TOpt["UNROLL", 0, 16], TOpt["UNROLL", 0, 8],
+     TOpt["UNROLL", 0, 4],  TOpt["UNROLL", 0, 2]},
     TestID -> "kernel-opts/propose-reduce-unroll-divisors"
 ]
 
@@ -248,7 +248,7 @@ VerificationTest[
     xT = TTensorCreate @ N @ Range[12];        (* divisible by 4, 2 only *)
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     TKernelProposed[TKernelCount[] - 1],
-    {TOpt["UNROLL", 1, 4], TOpt["UNROLL", 1, 2]},
+    {TOpt["UNROLL", 0, 4], TOpt["UNROLL", 0, 2]},
     TestID -> "kernel-opts/propose-reduce-unroll-partial-divisors"
 ]
 
@@ -930,13 +930,13 @@ VerificationTest[
     kid2 = TKernelCount[] - 1;
     key1 = TKernelProgramKey[kid1];
     key2 = TKernelProgramKey[kid2];
-    TKernelApplyOpt[kid1, TOpt["UNROLL", 1, 4]];
+    TKernelApplyOpt[kid1, TOpt["UNROLL", 0, 4]];
     {kid1 =!= kid2,
      key1 === key2,
      key1 =!= 0,
      First[TKernelOpts[kid1]]["Applied"],
      First[TKernelOpts[kid2]]["Applied"]},
-    {True, True, True, {TOpt["UNROLL", 1, 4]}, {}},
+    {True, True, True, {TOpt["UNROLL", 0, 4]}, {}},
     TestID -> "kernel-opts/per-program-shape-sharing"
 ]
 
@@ -976,9 +976,9 @@ VerificationTest[
     xT = TTensorCreate @ N @ Range[24];
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid = TKernelCount[] - 1;
-    TKernelApplyOpt[kid, TOpt["UNROLL", 1, 4]];   (* 24 / 4 = 6 *)
-    TKernelApplyOpt[kid, TOpt["UNROLL", 1, 3]];   (* outer 6 / 3 = 2 *)
+    TKernelApplyOpt[kid, TOpt["UNROLL", 0, 4]];   (* 24 / 4 = 6 *)
+    TKernelApplyOpt[kid, TOpt["UNROLL", 0, 3]];   (* outer 6 / 3 = 2 *)
     First[TKernelOpts[kid]]["Applied"],
-    {TOpt["UNROLL", 1, 4], TOpt["UNROLL", 1, 3]},
+    {TOpt["UNROLL", 0, 4], TOpt["UNROLL", 0, 3]},
     TestID -> "kernel-opts/applied-log-chronological"
 ]
