@@ -373,8 +373,7 @@ static Term rw_kop_split_stamp(Term const *bindings, void *ctx_in) {
   }
 
   u8 desired[MAX_AXES];
-  u32 n_cur = sim_kop_history(ctx->applied_opts, ctx->n_applied, desired);
-  (void)n_cur;
+  (void)sim_kop_history(ctx->applied_opts, ctx->n_applied, desired);
 
   u32 axis_id = uop_range_axis_id(range);
   if (axis_id >= MAX_AXES) return 0;
@@ -461,8 +460,7 @@ static Term rw_kop_tc_stamp(Term const *bindings, void *ctx_in) {
   }
 
   u8 desired[MAX_AXES];
-  u32 n_cur = sim_kop_history(ctx->applied_opts, ctx->n_applied, desired);
-  (void)n_cur;
+  (void)sim_kop_history(ctx->applied_opts, ctx->n_applied, desired);
 
   u32 axis_id = uop_range_axis_id(range);
   if (axis_id >= MAX_AXES) return 0;
