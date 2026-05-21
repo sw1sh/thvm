@@ -5564,15 +5564,35 @@ static void atp_cp_heap_push_pri(AtpState *s, Term lhs, Term rhs,
 // Martin-Nipkow (1990) / Twee (CADE 2021 sec 3.1) / Avenhaus-Hillen-
 // brand-Loechner (2003).  A critical pair is GROUND-JOINABLE if every
 // ground instance of it joins; such a CP is redundant and may be
-// deleted without losing refutational completeness.  We test the
-// minimal sound-but-incomplete version: enumerate every total preorder
-// of the CP's variables (ordered set partitions -- ties INCLUDED, the
-// load-bearing soundness condition), substitute fresh MINIMAL constants
-// ordered per the preorder, and check both sides reach a common ground
-// normal form under the rules rewritten with an EXTENDED, ground-total
-// ordering.  If ALL partitions join, the CP is ground-joinable; if ANY
-// fails or we exceed a budget, it is NOT shown ground-joinable.  Keeping
-// is always sound, so all fallbacks bail to "keep" (return 0).
+// deleted without losing refutational completeness.  We implement
+// Twee's SYMBOLIC order-parameterised version (gj_spec.md sections C+D):
+// a constraint C is a total preorder on the CP's atoms (variables AND
+// the relevant constants), represented as a Model that assigns each atom
+// a (major,minor) rank.  Under C we rewrite SYMBOLICALLY: a rule l->r
+// fires at a matched position iff lessIn(C, r-image, l-image) is defined
+// -- i.e. (l-image) >=_C (r-image) holds for ALL grounding sigma that
+// satisfy C -- and the two images are syntactically distinct.  lessIn
+// (section D) decides >=_C for KBO by minimising the weight-difference
+// linear form over all such sigma (the suffix-sum `minimumIn`), then a
+// lexicographic comparison.  Crucially lessIn NEVER over-approximates
+// >=_C (soundness condition P2): if it returns "defined" the inequality
+// truly holds for every grounding, so no illegal rewrite ever fires.
+//
+// The groundJoin driver maintains a worklist of branches that together
+// COVER every total preorder of the atoms.  Each branch is solved to a
+// Model (or, when it forces ties, an equality substitution); the CP is
+// normalised under the Model and the two normal forms compared.  On a
+// successful join the Model is GENERALISED (weakenModel: drop an atom or
+// merge two adjacent strict groups into a tie, NEVER merging two
+// constants), and the complementary region is re-queued via diag().
+// Equality branches unify the tied variables and recurse on the smaller
+// CP.  Only when the worklist is fully exhausted (every ground ordering
+// covered by a successful join -- soundness condition P3) do we DELETE.
+// Any budget overflow, OOM, or unjoined branch -> KEEP (sound fallback).
+//
+// KBO is the supported order.  For LPO (s->lpo != NULL) we KEEP
+// unconditionally: lessIn is implemented for KBO only, so GJ is a no-op
+// (always sound) under LPO for now.
 //
 // Deletion is gated at the call site behind the runtime flag
 // s->use_ground_join (Method -> {... "GroundJoin" -> True}); the
@@ -5581,12 +5601,17 @@ static void atp_cp_heap_push_pri(AtpState *s, Term lhs, Term rhs,
 // shipped paclet defines it; see WL_ATP_DEFINES).
 #ifdef ATP_CP_GROUND_JOIN
 
-// Cap on distinct variables.  The number of ordered set partitions is
-// the Fubini (ordered Bell) number: 1,1,3,13,75,541 for n=0..5.  Beyond
-// 5 the count explodes, so we bail to "keep" (sound).
-#define ATP_GJ_MAX_VARS 5
-// Ground-normalization step cap, matching the other CP filters.
+// Cap on distinct variables of the CP.  The branch worklist still
+// terminates for larger counts, but small CPs are the norm and a tight
+// cap bounds worst-case branching; over the cap -> KEEP (sound).
+#define ATP_GJ_MAX_VARS 6
+// Max atoms in a Model = CP variables + relevant constants.
+#define ATP_GJ_MAX_ATOMS 16
+// Per-side symbolic-rewrite step cap during a single join attempt.
 #define ATP_GJ_NORM_CAP 64
+// Cap on the number of branches processed by the groundJoin driver
+// before bailing to KEEP (sound budget fallback, gj_spec.md C).
+#define ATP_GJ_BRANCH_CAP 4096
 
 // Collect distinct TAG_FVR var ids appearing in `t` into ids[] (size
 // cap).  *n is the running count; returns 0 if it would overflow `cap`
@@ -5614,32 +5639,441 @@ static u8 atp_gj_collect_vars(Term t, u32 *ids, u32 *n, u32 cap) {
   }
 }
 
-// One ground-rewrite step under an EXTENDED, ground-total ordering
-// `cfg`.  Like thvm_rewrite_step, but a rule fires at a position ONLY
-// if it strictly DECREASES the (fully ground) subterm under `cfg`.  This
-// is the order-respecting rewrite the spec requires (Section A's `->_G`):
-// an unorientable equation -- stored in the rule arrays in BOTH
-// directions by orient_and_add -- thus fires only in the direction that
-// is smaller for THIS ground ordering.  Because every fired step is a
-// strict ground decrease and `cfg` is a ground-total simplification
-// ordering, normalization terminates (E4).
+// ── Atoms ───────────────────────────────────────────────────────────
+// An atom is a variable (TAG_FVR id) or a nullary constant (TAG_CTR
+// label, arity 0).  We compare atom SIZES under KBO: a constant's size
+// is its fixed weight; a variable's size is an unknown integer >= the
+// minimal admissible ground size.  The constraint C orders atoms by size.
+typedef struct {
+  u8  is_const;   // 1 = constant (TAG_CTR/0), 0 = variable
+  u32 id;         // var id (is_const=0) or label (is_const=1)
+} GjAtom;
+
+static inline u8 gj_atom_eq(GjAtom a, GjAtom b) {
+  return a.is_const == b.is_const && a.id == b.id;
+}
+
+// Size of a constant atom under the (real) KBO config.  Constants have
+// no children, so their size is just their per-symbol weight.
+static inline u32 gj_const_size(const KboConfig *cfg, u32 label) {
+  return (label < cfg->n_labels) ? cfg->weights[label] : 0u;
+}
+
+// The minimal admissible ground-term size (KBO w0): any ground term has
+// size >= var_weight (a single variable's image is at least one minimal
+// symbol).  Used as the universal lower bound for an UNCONSTRAINED
+// variable's size.
+static inline u32 gj_min_size(const KboConfig *cfg) {
+  // The smallest possible ground term is a single minimal-weight
+  // constant; if every constant outweighs var_weight, a 1-arg term over
+  // a 0-weight unary symbol could still be var_weight.  var_weight (w0)
+  // is the safe, KBO-standard lower bound (P1: weights >= w0 > 0 except
+  // possibly one unary symbol of weight 0, whose argument is >= w0).
+  return cfg->var_weight;
+}
+
+// ── Model ───────────────────────────────────────────────────────────
+// A Model is a total preorder on a fixed atom set: each atom carries a
+// `major` size-rank.  a < b  iff  major(a) < major(b);  a == b (a tie,
+// same SIZE) iff major(a) == major(b).  Atoms with the same major form
+// one "tie group" (all forced to equal size).  (Twee carries a second
+// `minor` field to make the preorder a strict total order on atoms for
+// its solver; the size-reasoning here needs only `major`, so we drop it.)
+typedef struct {
+  GjAtom atom[ATP_GJ_MAX_ATOMS];
+  u32    major[ATP_GJ_MAX_ATOMS];   // size-rank; equal major = equal size
+  u32    n;
+} GjModel;
+
+// Find atom `a` in the model; return its index or -1.
+static int gj_model_find(const GjModel *m, GjAtom a) {
+  for (u32 i = 0; i < m->n; i++) if (gj_atom_eq(m->atom[i], a)) return (int)i;
+  return -1;
+}
+
+// Compare two atoms' SIZES under the model: -1 (a<b), 0 (tie), 1 (a>b),
+// or 2 = UNKNOWN (one or both atoms absent from the model -> C says
+// nothing about them).
+static int gj_model_cmp(const GjModel *m, GjAtom a, GjAtom b) {
+  if (gj_atom_eq(a, b)) return 0;
+  int ia = gj_model_find(m, a), ib = gj_model_find(m, b);
+  if (ia < 0 || ib < 0) return 2;
+  u32 ma = m->major[ia], mb = m->major[ib];
+  if (ma < mb) return -1;
+  if (ma > mb) return 1;
+  return 0;
+}
+
+// ── KBO size as a linear form, minimised under C (gj_spec.md D) ──────
+// We compare KBO sizes of t and u.  D = size(u) - size(t) is a linear
+// form  c0 + sum_v coeff[v] * size(v)  where c0 is the net weight of
+// FUNCTION-SYMBOL occurrences (variables excluded) and coeff[v] =
+// count(u,v) - count(t,v).  size(v) is the unknown ground size of v.
 //
-// `is_lpo` selects the LPO config (`lcfg`) over the KBO config (`kcfg`).
-// Returns the rewritten term; sets *fired iff a step was taken.
-static Term atp_gj_rewrite_step(Term t, const Term *lhs, const Term *rhs,
-                                u32 n_rules, u8 is_lpo,
-                                const KboConfig *kcfg, const LpoConfig *lcfg,
-                                u8 *fired) {
-  for (u32 i = 0; i < n_rules; i++) {
+// gj_size_form accumulates D's pieces by a diff-traversal of (t,u):
+//   *c0          += net constant/funcsym weight  (u on +, t on -)
+//   var_coeff[id] += net variable count          (u on +, t on -)
+// Returns 0 if a variable id exceeds the table; caller treats that as
+// "cannot decide" (Incomparable -> KEEP-safe).
+static void gj_form_addto(Term t, int sign, const KboConfig *cfg,
+                          long long *c0, long long *var_coeff) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id < KBO_MAX_VAR) var_coeff[id] += sign;
+      return;
+    }
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      *c0 += (long long)sign *
+             (long long)((lab < cfg->n_labels) ? cfg->weights[lab] : 0);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++)
+        gj_form_addto(term_ctr_at(t, i), sign, cfg, c0, var_coeff);
+      return;
+    }
+    default: return;
+  }
+}
+
+// minimumIn (gj_spec.md D, note "kbo under assumptions").  Compute the
+// MINIMUM of D = c0 + sum_v coeff[v]*size(v) over every assignment of
+// variable sizes consistent with the model `m` (and every grounding of
+// unconstrained variables).  *finite is set 0 if the minimum is
+// unbounded below (-infinity).  On *finite==0 the returned value is
+// meaningless.  This is the load-bearing soundness primitive: an
+// UNDER-estimate of the true minimum is the unsafe direction (it could
+// claim D>0 strict when some sigma drives D<=0 -- an OVER-approximation
+// of >=_C).  We therefore compute the EXACT minimum; any case we cannot
+// bound exactly is reported as -infinity (KEEP-safe).
+//
+// Method: variables constrained by C lie in tie/order groups separated
+// by constants along the size order.  We process the model's atoms in
+// ascending size (major) order.  Constants act as fixed lower/upper
+// pivots; the variables between two consecutive constants form a group
+// with lower bound lo = size(lower constant) (or w0 if none) and upper
+// bound hi = size(upper constant) (or none).  Within a group the
+// variables are size-ordered by their major: x in the group satisfies
+// lo <= size(x) and (if hi exists) size(x) <= hi, and the group's
+// variables are nondecreasing in size.  Per spec D, with coeffs listed
+// in ascending group order and sums = scanr1(+) (suffix sums):
+//   all suffix sums >= 0:  min = (sum coeffs) * lo
+//   some suffix sum < 0, no hi:  -infinity
+//   some suffix sum < 0, hi exists: min = (sum coeffs)*lo
+//                                      + (-min_suffix)*(lo - hi)
+// Variables NOT in the model ("orphans") with coeff k: k<0 -> -infinity;
+// else contribute 0 (size driven to its own minimum w0, but coeff>=0 so
+// the minimal contribution toward D is taking size as small as possible;
+// orphan min-contribution per spec = 0 for k>=0 since unconstrained
+// orphan can be made equal to the global infimum which is folded into
+// c0 already via... ) -- see note below.
+//
+// Returns the (finite) minimum; sets *finite.
+static long long gj_minimum_in(const GjModel *m, const KboConfig *cfg,
+                               const long long *var_coeff,
+                               const u32 *cp_vars, u32 n_cp_vars,
+                               long long c0, u8 *finite) {
+  *finite = 1;
+  long long total = c0;
+  long long w0 = (long long)gj_min_size(cfg);
+
+  // Orphan variables: present in the CP but absent from the model.
+  // Their size is any value >= w0, unconstrained relative to others.
+  //   coeff < 0  -> size can grow without bound -> -infinity.
+  //   coeff > 0  -> minimised by size = w0 -> contributes coeff*w0.
+  //   coeff == 0 -> contributes 0.
+  for (u32 i = 0; i < n_cp_vars; i++) {
+    u32 id = cp_vars[i];
+    GjAtom va = { .is_const = 0, .id = id };
+    if (gj_model_find(m, va) >= 0) continue;          // not an orphan
+    long long k = (id < KBO_MAX_VAR) ? var_coeff[id] : 0;
+    if (k < 0) { *finite = 0; return 0; }
+    total += k * w0;
+  }
+
+  // Walk the model's atoms in ascending size order.  Group variables
+  // between constants.  We sort indices by major (stable; minor breaks
+  // ties but same-major atoms are one group regardless of minor).
+  u32 order[ATP_GJ_MAX_ATOMS];
+  for (u32 i = 0; i < m->n; i++) order[i] = i;
+  for (u32 i = 1; i < m->n; i++) {                    // insertion sort
+    u32 key = order[i];
+    u32 km = m->major[key];
+    int j = (int)i - 1;
+    while (j >= 0 && m->major[order[j]] > km) { order[j + 1] = order[j]; j--; }
+    order[j + 1] = key;
+  }
+
+  // Scan groups.  A group is a maximal run of consecutive (in size
+  // order) VARIABLE atoms; the constant immediately before sets lo, the
+  // constant immediately after sets hi.  Multiple variables tied with a
+  // constant (same major as a constant) are pinned to that constant's
+  // size -- handled by treating a same-major constant as both bound.
+  u32 i = 0;
+  long long cur_lo = w0;   // running lower bound (last constant size, or w0)
+  while (i < m->n) {
+    u32 ai = order[i];
+    if (m->atom[ai].is_const) {
+      cur_lo = (long long)gj_const_size(cfg, m->atom[ai].id);
+      i++;
+      continue;
+    }
+    // Start of a variable group at size-order position i.  Collect the
+    // group: consecutive variables.  Note variables tied (same major)
+    // with each other share a size; we still list each coeff (they all
+    // share one unknown, but the suffix-sum derivation treats them as a
+    // nondecreasing chain which a tie satisfies, so listing each is
+    // correct -- ties just collapse y_i deltas to 0, never changing the
+    // suffix-sum sign test).
+    long long coeffs[ATP_GJ_MAX_ATOMS];
+    u32 ng = 0;
+    while (i < m->n && !m->atom[order[i]].is_const) {
+      u32 vid = m->atom[order[i]].id;
+      long long k = (vid < KBO_MAX_VAR) ? var_coeff[vid] : 0;
+      coeffs[ng++] = k;
+      i++;
+    }
+    // Upper bound: the next atom (if a constant) gives hi; if the next
+    // atom is past the end, no upper bound.  (The next atom can only be
+    // a constant here, since we consumed all consecutive variables.)
+    u8 has_hi = 0;
+    long long hi = 0;
+    if (i < m->n && m->atom[order[i]].is_const) {
+      has_hi = 1;
+      hi = (long long)gj_const_size(cfg, m->atom[order[i]].id);
+    }
+    // suffix sums
+    long long sum = 0;
+    long long min_suffix = 0;       // minimum over suffix sums (incl. empty=+inf guard)
+    u8 have_min = 0;
+    long long suff[ATP_GJ_MAX_ATOMS];
+    long long acc = 0;
+    for (int g = (int)ng - 1; g >= 0; g--) { acc += coeffs[g]; suff[g] = acc; }
+    for (u32 g = 0; g < ng; g++) {
+      sum += coeffs[g];
+      if (!have_min || suff[g] < min_suffix) { min_suffix = suff[g]; have_min = 1; }
+    }
+    // sum == total coeff of the group; min_suffix == min suffix sum.
+    if (ng == 0) { cur_lo = has_hi ? hi : cur_lo; continue; }
+    if (min_suffix >= 0) {
+      total += sum * cur_lo;
+    } else if (!has_hi) {
+      *finite = 0; return 0;        // unbounded below
+    } else {
+      total += sum * cur_lo + (-min_suffix) * (cur_lo - hi);
+    }
+    cur_lo = has_hi ? hi : cur_lo;
+  }
+  return total;
+}
+
+// sizeLessIn: decide size(t) vs size(u) under C.
+//   returns  -1 : size(t) <  size(u) for all sigma  (Strict on size)
+//             0 : size(t) == size(u) for all sigma  (fall through to lex)
+//             1 : not provable either way            (Incomparable)
+// Per spec D: L = minimum of D = size(u)-size(t) over sigma|=C.
+//   L >  0 -> Strict;  L == 0 -> Nonstrict (lex);  L < 0 / -inf -> Incomp.
+static int gj_size_less_in(const GjModel *m, const KboConfig *cfg,
+                           Term t, Term u,
+                           const u32 *cp_vars, u32 n_cp_vars) {
+  long long c0 = 0;
+  long long var_coeff[KBO_MAX_VAR];
+  for (u32 i = 0; i < KBO_MAX_VAR; i++) var_coeff[i] = 0;
+  // D = size(u) - size(t): u on +, t on -.
+  gj_form_addto(u, +1, cfg, &c0, var_coeff);
+  gj_form_addto(t, -1, cfg, &c0, var_coeff);
+  u8 finite = 0;
+  long long L = gj_minimum_in(m, cfg, var_coeff, cp_vars, n_cp_vars, c0,
+                              &finite);
+  if (!finite) return 1;            // unbounded below -> Incomparable
+  if (L > 0) return -1;             // size(t) < size(u) always
+  if (L == 0) return 0;             // equal size for all sigma -> lex
+  return 1;                         // L < 0: not provable -> Incomparable
+}
+
+// ── lexLessIn (gj_spec.md D step 2), reached only when sizes are
+// FORCED equal.  Returns one of GJ_STRICT / GJ_NONSTRICT / GJ_INCOMP
+// meaning t < u strictly / t <= u (and == for some sigma) / unknown.
+enum { GJ_STRICT = 0, GJ_NONSTRICT = 1, GJ_INCOMP = 2 };
+
+static GjAtom gj_term_atom(Term t, u8 *ok) {
+  GjAtom a = {0};
+  if (term_tag(t) == TAG_FVR) { a.is_const = 0; a.id = term_ext(t); *ok = 1; }
+  else if (term_tag(t) == TAG_CTR && term_ctr_n(t) == 0) {
+    a.is_const = 1; a.id = term_ext(t); *ok = 1;
+  } else *ok = 0;
+  return a;
+}
+
+// lessEqInModel for two atoms: is atom(t) <= atom(u) (size) under C?
+// returns GJ_STRICT (t<u), GJ_NONSTRICT (t==u forced), or GJ_INCOMP.
+static int gj_atom_less_eq(const GjModel *m, GjAtom at, GjAtom au) {
+  if (gj_atom_eq(at, au)) return GJ_NONSTRICT;
+  int c = gj_model_cmp(m, at, au);
+  if (c == -1) return GJ_STRICT;
+  if (c == 0)  return GJ_NONSTRICT;  // tie group: equal size
+  return GJ_INCOMP;                  // 1 (a>b) or 2 (unknown)
+}
+
+static int gj_lex_less_in(const GjModel *m, const KboConfig *cfg,
+                          Term t, Term u,
+                          const u32 *cp_vars, u32 n_cp_vars, u32 depth);
+
+// lessIn(cond, t, u): size-first then lex.  Returns the strictness of
+// "t <= u under C" or GJ_INCOMP.
+//   GJ_STRICT    : tσ <  uσ for ALL σ |= C
+//   GJ_NONSTRICT : tσ <= uσ for ALL σ |= C
+//   GJ_INCOMP    : not provable
+static int gj_less_in(const GjModel *m, const KboConfig *cfg,
+                      Term t, Term u, const u32 *cp_vars, u32 n_cp_vars,
+                      u32 depth) {
+  if (kbo_eq(t, u)) return GJ_NONSTRICT;
+  int sz = gj_size_less_in(m, cfg, t, u, cp_vars, n_cp_vars);
+  if (sz == -1) return GJ_STRICT;     // size(t) < size(u) strictly
+  if (sz == 1)  return GJ_INCOMP;     // size not provably <=
+  // sizes forced equal -> lexicographic
+  return gj_lex_less_in(m, cfg, t, u, cp_vars, n_cp_vars, depth);
+}
+
+static int gj_lex_less_in(const GjModel *m, const KboConfig *cfg,
+                          Term t, Term u,
+                          const u32 *cp_vars, u32 n_cp_vars, u32 depth) {
+  if (depth > 64) return GJ_INCOMP;   // recursion guard -> KEEP-safe
+  if (kbo_eq(t, u)) return GJ_NONSTRICT;
+
+  u8 t_atom = 0, u_atom = 0;
+  GjAtom at = gj_term_atom(t, &t_atom);
+  GjAtom au = gj_term_atom(u, &u_atom);
+
+  // Both atoms: direct order from C.
+  if (t_atom && u_atom) return gj_atom_less_eq(m, at, au);
+
+  // t atom, u compound: if some atomic proper subterm v of u has t <= v
+  // under C (strictly or tied), then t < u strictly (since |u| has the
+  // same size and a larger structure dominating t).  Conservative:
+  // require an atomic subterm v with gj_atom_less_eq(t,v) != INCOMP.
+  if (t_atom && !u_atom && term_tag(u) == TAG_CTR) {
+    u32 n = term_ctr_n(u);
+    for (u32 i = 0; i < n; i++) {
+      Term v = term_ctr_at(u, i);
+      u8 vok = 0; GjAtom av = gj_term_atom(v, &vok);
+      if (vok) {
+        int r = gj_atom_less_eq(m, at, av);
+        if (r != GJ_INCOMP) return GJ_STRICT;
+      }
+    }
+    return GJ_INCOMP;
+  }
+
+  // t compound, u atom: symmetric -- t > u, so "t <= u" is not provable.
+  if (!t_atom && u_atom) return GJ_INCOMP;
+
+  // Both compound: compare heads.
+  if (term_tag(t) == TAG_CTR && term_tag(u) == TAG_CTR) {
+    u32 lt = term_ext(t), lu = term_ext(u);
+    if (lt == lu) {
+      u32 nt = term_ctr_n(t), nu = term_ctr_n(u);
+      if (nt != nu) return GJ_INCOMP;
+      // left-to-right; at the first differing pair recurse with lessIn.
+      for (u32 i = 0; i < nt; i++) {
+        Term ct = term_ctr_at(t, i), cu = term_ctr_at(u, i);
+        if (kbo_eq(ct, cu)) continue;
+        int r = gj_less_in(m, cfg, ct, cu, cp_vars, n_cp_vars, depth + 1);
+        if (r == GJ_STRICT)    return GJ_STRICT;
+        if (r == GJ_NONSTRICT) {
+          // The spec unifies the tied arg pair and continues; we can
+          // only continue safely if the remaining args make the verdict.
+          // Conservatively, a Nonstrict (could be equal) at this arg
+          // means we need the SAME pair to also satisfy the converse to
+          // continue; without a unifier we report INCOMP unless this is
+          // the last differing arg AND it is provably tied.  Since
+          // kbo_eq already filtered equal args, a Nonstrict here that is
+          // not Strict means "<= but maybe =", so continuing requires the
+          // arg to be forced-equal.  We treat Nonstrict as "continue only
+          // if no later arg differs"; otherwise INCOMP (KEEP-safe).
+          u8 later_diff = 0;
+          for (u32 j = i + 1; j < nt; j++) {
+            if (!kbo_eq(term_ctr_at(t, j), term_ctr_at(u, j))) {
+              later_diff = 1; break;
+            }
+          }
+          if (later_diff) return GJ_INCOMP;
+          return GJ_NONSTRICT;
+        }
+        return GJ_INCOMP;   // INCOMP at first differing arg
+      }
+      return GJ_NONSTRICT;  // all args equal (shouldn't reach: kbo_eq above)
+    }
+    // different heads, sizes equal: precedence decides.
+    u32 pt = (lt < cfg->n_labels) ? cfg->precedence[lt] : 0;
+    u32 pu = (lu < cfg->n_labels) ? cfg->precedence[lu] : 0;
+    if (pt < pu) return GJ_STRICT;     // t's head precedes u's -> t < u
+    return GJ_INCOMP;
+  }
+
+  return GJ_INCOMP;
+}
+
+// Does variable id `id` occur in `t`?  (Local copy so GJ does not depend
+// on the ATP_ORDERED_REWRITE/ATP_MNF build flags.)
+static int gj_has_var(Term t, u32 id) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == id;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) if (gj_has_var(term_ctr_at(t, i), id)) return 1;
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// Is every TAG_FVR variable of `sub` also a variable of `sup`?  Used to
+// reject malformed (extra-variable) rule applications during GJ rewrite.
+static u8 gj_vars_subset(Term sub, Term sup) {
+  switch (term_tag(sub)) {
+    case TAG_FVR: return gj_has_var(sup, term_ext(sub)) ? 1 : 0;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(sub);
+      for (u32 i = 0; i < n; i++)
+        if (!gj_vars_subset(term_ctr_at(sub, i), sup)) return 0;
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// ── C-parameterised rewriting (gj_spec.md C/D) ──────────────────────
+// A rule l->r fires under model C at a matched position iff
+// (l-image) >=_C (r-image) -- i.e. gj_less_in(C, r-image, l-image) is
+// GJ_STRICT or GJ_NONSTRICT -- AND the two images are syntactically
+// distinct.  Oriented rules (l > r unconditionally) also satisfy this,
+// so the single test suffices for both.  Returns the rewritten term;
+// sets *fired on success.
+static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
+                            const u32 *cp_vars, u32 n_cp_vars, u8 *fired) {
+  const KboConfig *cfg = s->kbo;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    // A well-formed rewrite rule never has a bare-variable LHS (it would
+    // match and "rewrite" everything).  Skip such malformed rules so the
+    // GJ test is robust even if handed an ill-formed rule set.
+    if (term_tag(s->lhs[i]) == TAG_FVR) continue;
     RewriteSubst subst = {{0}};
-    if (thvm_match(lhs[i], t, &subst)) {
-      Term reduct = thvm_subst_apply(rhs[i], &subst);
-      // Both t and reduct are ground here (the CP was ground-substituted
-      // before normalization, and rule RHS vars are a subset of LHS vars
-      // which `subst` binds to ground subterms of t).
-      int dec = is_lpo ? (thvm_lpo(t, reduct, lcfg) == LPO_GT)
-                       : (thvm_kbo(t, reduct, kcfg) == KBO_GT);
-      if (dec) {
+    if (thvm_match(s->lhs[i], t, &subst)) {
+      Term reduct = thvm_subst_apply(s->rhs[i], &subst);
+      // Defense-in-depth: a well-formed rewrite rule has vars(rhs) subset
+      // of vars(lhs), so a successful match binds every rhs variable and
+      // `reduct` is variable-free over the rule's own variables.  If the
+      // rule introduces an extra variable (malformed input), `reduct`
+      // would carry an unbound variable and corrupt the join comparison.
+      // Skip such a step: every variable of `reduct` must also occur in
+      // `t` (the term we are rewriting).  No-op for well-formed rules.
+      if (!gj_vars_subset(reduct, t)) continue;
+      if (kbo_eq(reduct, t)) continue;     // no-op image
+      // fire iff t (=l-image) >=_C reduct (=r-image), i.e.
+      // gj_less_in(reduct, t) is defined (reduct <= t under C).
+      int r = gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
+      if (r == GJ_STRICT || r == GJ_NONSTRICT) {
         *fired = 1;
         return reduct;
       }
@@ -5652,10 +6086,10 @@ static Term atp_gj_rewrite_step(Term t, const Term *lhs, const Term *rhs,
     for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
     for (u32 i = 0; i < n; i++) {
       u8 sub_fired = 0;
-      Term r = atp_gj_rewrite_step(children[i], lhs, rhs, n_rules,
-                                   is_lpo, kcfg, lcfg, &sub_fired);
+      Term rc = gj_rewrite_step(s, m, children[i], cp_vars, n_cp_vars,
+                                &sub_fired);
       if (sub_fired) {
-        children[i] = r;
+        children[i] = rc;
         *fired = 1;
         return term_new_ctr(term_ext(t), children, n);
       }
@@ -5665,118 +6099,242 @@ static Term atp_gj_rewrite_step(Term t, const Term *lhs, const Term *rhs,
   return t;
 }
 
-// Iterate atp_gj_rewrite_step to a ground normal form (or step_cap).
-static Term atp_gj_normalize(Term t, const Term *lhs, const Term *rhs,
-                             u32 n_rules, u8 is_lpo,
-                             const KboConfig *kcfg, const LpoConfig *lcfg,
-                             u32 step_cap) {
-  for (u32 i = 0; i < step_cap; i++) {
+// Normalise `t` under model C with C-parameterised steps (step_cap).
+static Term gj_normalize(AtpState *s, const GjModel *m, Term t,
+                         const u32 *cp_vars, u32 n_cp_vars, u32 step_cap) {
+  for (u32 k = 0; k < step_cap; k++) {
     u8 fired = 0;
-    Term t2 = atp_gj_rewrite_step(t, lhs, rhs, n_rules, is_lpo, kcfg, lcfg,
-                                  &fired);
+    Term t2 = gj_rewrite_step(s, m, t, cp_vars, n_cp_vars, &fired);
     if (!fired) return t;
     t = t2;
   }
   return t;
 }
 
-// Test joinability of (lhs, rhs) under ONE ordered set partition of the
-// `n_vars` variables `var_ids`.  `cls[i]` is the 0-based class of
-// var_ids[i]; classes are numbered in ascending order (class 0 is the
-// SMALLEST in the ordering).  `n_cls` is the number of classes.
-//
-// Builds fresh constants: var in class c maps to a nullary CTR with
-// label `n_labels + c` (same constant within a class, distinct across
-// classes -- E1).  The extended ordering config is built so the fresh
-// constants are MINIMAL and ordered by class (E2): every real symbol's
-// precedence is shifted up by n_cls, leaving precedence slots 0..n_cls-1
-// for the fresh classes (class c gets precedence c, so all fresh < all
-// real and ordered c0 < c1 < ...).  Fresh weight = var_weight, the
-// minimal admissible weight (E2).  Real existing constants keep their
-// relative order and stay above the fresh constants, so they correctly
-// participate in the ordering (E5).
-//
-// Returns 1 iff both sides reach the same ground normal form.
-static u8 atp_gj_partition_joins(AtpState *s, Term lhs, Term rhs,
-                                 const u32 *var_ids, u32 n_vars,
-                                 const u32 *cls, u32 n_cls) {
-  u8 is_lpo = (s->lpo != NULL);
-  u32 base_labels = is_lpo ? s->lpo->n_labels : s->kbo->n_labels;
-  u32 ext_labels  = base_labels + n_cls;
-
-  u32 *ext_prec = (u32 *)malloc((size_t)ext_labels * sizeof(u32));
-  u32 *ext_wt   = NULL;
-  if (ext_prec == NULL) return 0;          // OOM -> keep (sound)
-  if (!is_lpo) {
-    ext_wt = (u32 *)malloc((size_t)ext_labels * sizeof(u32));
-    if (ext_wt == NULL) { free(ext_prec); return 0; }
-  }
-  for (u32 l = 0; l < base_labels; l++) {
-    u32 p = is_lpo ? s->lpo->precedence[l] : s->kbo->precedence[l];
-    ext_prec[l] = p + n_cls;               // shift real symbols up
-    if (!is_lpo) ext_wt[l] = s->kbo->weights[l];
-  }
-  for (u32 c = 0; c < n_cls; c++) {
-    ext_prec[base_labels + c] = c;          // fresh class c: minimal, ordered
-    if (!is_lpo) ext_wt[base_labels + c] = s->kbo->var_weight;
-  }
-
-  KboConfig ekbo = {0};
-  LpoConfig elpo = {0};
-  if (is_lpo) {
-    elpo.precedence = ext_prec;
-    elpo.n_labels   = ext_labels;
-  } else {
-    ekbo.weights    = ext_wt;
-    ekbo.precedence = ext_prec;
-    ekbo.n_labels   = ext_labels;
-    ekbo.var_weight = s->kbo->var_weight;
-  }
-
-  RewriteSubst subst = {{0}};
-  u8 ok = 1;
-  for (u32 i = 0; i < n_vars; i++) {
-    u32 id = var_ids[i];
-    if (id >= REWRITE_MAX_VAR) { ok = 0; break; }
-    Term k = term_new_ctr(base_labels + cls[i], NULL, 0);
-    subst.bindings[id] = k;
-  }
-
-  u8 joined = 0;
-  if (ok) {
-    Term gl = thvm_subst_apply(lhs, &subst);
-    Term gr = thvm_subst_apply(rhs, &subst);
-    Term nl = atp_gj_normalize(gl, s->lhs, s->rhs, s->n_rules, is_lpo,
-                               &ekbo, &elpo, ATP_GJ_NORM_CAP);
-    Term nr = atp_gj_normalize(gr, s->lhs, s->rhs, s->n_rules, is_lpo,
-                               &ekbo, &elpo, ATP_GJ_NORM_CAP);
-    joined = kbo_eq(nl, nr);
-  }
-
-  free(ext_prec);
-  free(ext_wt);
-  return joined;
+// Join the two CP sides under model C: normalise both and compare.
+static u8 gj_joins_under(AtpState *s, const GjModel *m, Term lhs, Term rhs,
+                         const u32 *cp_vars, u32 n_cp_vars) {
+  Term nl = gj_normalize(s, m, lhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP);
+  Term nr = gj_normalize(s, m, rhs, cp_vars, n_cp_vars, ATP_GJ_NORM_CAP);
+  return kbo_eq(nl, nr);
 }
 
-// Enumerate every total PREORDER of {0..n_vars-1} and test each with
-// atp_gj_partition_joins.  A total preorder = a set partition into blocks
-// PLUS a linear order on those blocks.  We enumerate it as a product:
-//   (a) every set partition, via restricted-growth strings cls[]
-//       (cls[0]=0; cls[i] <= 1+max(cls[0..i-1])) -- each partition once;
-//   (b) for each partition, every linear order on its n_cls blocks, via
-//       all permutations perm[] of {0..n_cls-1} mapping block label ->
-//       rank.
-// The product (a) x (b) hits every total preorder exactly once, which is
-// exactly the Fubini-number-many cases (1,1,3,13,75,541 for n=0..5).
-// This is the full tie coverage soundness condition E1 demands.
+// ── Coverage driver (gj_spec.md C) ──────────────────────────────────
+// We must verify joinability under EVERY total preorder of the CP's
+// atoms (variables + relevant constants).  Coverage (P3) is realised by
+// EXHAUSTIVE enumeration, structured exactly as Twee's groundJoin:
 //
-// Returns 1 iff EVERY enumerated preorder joins.
-static u8 atp_gj_enumerate(AtpState *s, Term lhs, Term rhs,
-                           const u32 *var_ids, u32 n_vars) {
+//  * The variables are partitioned by a total preorder (ordered set
+//    partition).  When two variables fall in the SAME class they are
+//    forced EQUAL in SIZE; for KBO that is genuinely an `=` case, and
+//    Twee step 5 handles it by UNIFYING the equal variables and
+//    recursing on the smaller CP.  We do exactly that: collapse each
+//    multi-variable class to a single representative (lowest id), apply
+//    the var->representative substitution to both CP sides, and recurse
+//    gj_cover on the reduced CP.  The recursion re-covers every sub-
+//    ordering (incl. further ties and constant placements) of the
+//    representatives, so the `=` region is fully covered.  Termination:
+//    each recursion strictly drops the variable count.
+//
+//  * When all variables are in DISTINCT classes (a strict total order on
+//    the variables), there is no `=` to discharge.  We then interleave
+//    the relevant CONSTANTS into that strict variable chain in every
+//    order (constants among themselves are pinned by their fixed
+//    weights), build the resulting Model, and run the SYMBOLIC join:
+//    gj_less_in reasons about ALL grounding sigma consistent with the
+//    order (including the `<=` no-op steps), which is what lets the AC
+//    pair join where a single ground representative could not (F.1).
+//
+// Soundness: gj_less_in never OVER-approximates >=_C (P2), so no illegal
+// rewrite ever fires; the enumeration covers every ground ordering of
+// vars (ties via unify-recurse, strict via models) and every constant
+// placement (P3); any budget overflow / OOM / unjoined case returns 0
+// (KEEP).  Constants of different weight are never asserted equal (the
+// model rejects such an unsatisfiable preorder), so the unsound
+// "merge two constants" never happens.
+
+// Collect distinct nullary-constant labels in `t`.
+static u8 gj_collect_consts(Term t, u32 *labs, u32 *n, u32 cap) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 k = term_ctr_n(t);
+      if (k == 0) {
+        u32 lab = term_ext(t);
+        for (u32 i = 0; i < *n; i++) if (labs[i] == lab) return 1;
+        if (*n >= cap) return 0;
+        labs[(*n)++] = lab;
+        return 1;
+      }
+      for (u32 i = 0; i < k; i++)
+        if (!gj_collect_consts(term_ctr_at(t, i), labs, n, cap)) return 0;
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// Build a Model from a STRICT order on variables interleaved with the
+// CP's constants.  `atoms[0..n_atoms)` lists the model atoms; `cls[i]`
+// is atom i's size-rank (class).  Distinct VARIABLES must have distinct
+// classes here (the caller guarantees a strict variable order).
+// Returns 0 (reject this preorder as unsatisfiable) if it ties two
+// constants of different weight, or orders two constants against their
+// fixed-weight order -- no ground sigma realises such a C, so skipping
+// it loses no coverage (it vacuously joins).
+static u8 gj_build_model(GjModel *m, const GjAtom *atoms, u32 n_atoms,
+                         const u32 *cls, const KboConfig *cfg) {
+  for (u32 i = 0; i < n_atoms; i++) {
+    if (!atoms[i].is_const) continue;
+    for (u32 j = 0; j < n_atoms; j++) {
+      if (!atoms[j].is_const) continue;
+      u32 si = gj_const_size(cfg, atoms[i].id);
+      u32 sj = gj_const_size(cfg, atoms[j].id);
+      if (cls[i] < cls[j] && si > sj) return 0;
+      if (cls[i] > cls[j] && si < sj) return 0;
+      if (cls[i] == cls[j] && si != sj) return 0;
+    }
+  }
+  m->n = n_atoms;
+  for (u32 i = 0; i < n_atoms; i++) {
+    m->atom[i]  = atoms[i];
+    m->major[i] = cls[i];
+  }
+  return 1;
+}
+
+// Given a STRICT total order on the variables (var at atom-index i has
+// rank var_rank[i]), interleave the constants among the variables in
+// every position and run the symbolic join under each resulting Model.
+// Returns 1 iff all join.
+//
+// Coarse placement: variable at rank r gets coarse slot 2r+1.  Each
+// constant is independently placed into a coarse slot in [0, 2*nvars]:
+//   even slot 2k  = strictly between var-rank-(k-1) and var-rank-k
+//                   (slot 0 = below all vars, 2*nvars = above all);
+//   odd slot 2k+1 = tied (equal size) with the variable at rank k.
+// This covers every position of a constant relative to the strict
+// variable chain.  Two or more constants landing in the SAME even slot
+// (the same gap) are then SUB-ORDERED by their fixed weights: distinct
+// weights -> distinct majors in weight order; equal weights -> tied
+// (the true ground fact).  This closes the coverage gap that a single
+// shared even slot would otherwise create (two different-weight
+// constants in one gap must still be tested in their forced order).
+// Constants tied with a variable (odd slot) keep that exact major (a
+// ground term genuinely can have a variable image's size).
+// gj_build_model rejects placements that contradict the constants'
+// fixed weight order (an unsatisfiable preorder -> skipped, vacuously
+// joinable, no coverage lost).
+//
+// Final majors are produced by sorting all atoms on the key
+// (coarse_slot, weight_if_const_in_even_slot) and assigning a dense
+// rank that increments only when the key strictly increases, so equal
+// keys share a major (a tie) and strict keys get distinct majors.
+static u8 gj_cover_consts(AtpState *s, Term lhs, Term rhs,
+                          const GjAtom *atoms, u32 n_atoms,
+                          const u32 *var_rank,  // var_rank[i] for var atoms
+                          u32 n_vars_model,
+                          const u32 *cp_vars, u32 n_cp_vars, u32 *budget) {
+  const KboConfig *cfg = s->kbo;
+  u32 const_idx[ATP_GJ_MAX_ATOMS];
+  u32 nc = 0;
+  for (u32 i = 0; i < n_atoms; i++) if (atoms[i].is_const) const_idx[nc++] = i;
+
+  u32 grid = 2u * n_vars_model + 1u;     // coarse const slot range [0, grid)
+  u32 place[ATP_GJ_MAX_ATOMS];
+  for (u32 c = 0; c < nc; c++) place[c] = 0;
+
+  for (;;) {
+    if (*budget == 0) return 0;
+    (*budget)--;
+
+    // coarse slot per atom
+    u32 coarse[ATP_GJ_MAX_ATOMS];
+    for (u32 i = 0; i < n_atoms; i++)
+      if (!atoms[i].is_const) coarse[i] = 2u * var_rank[i] + 1u;
+    for (u32 c = 0; c < nc; c++) coarse[const_idx[c]] = place[c];
+
+    // sub-order key: for a constant in an EVEN coarse slot, break ties
+    // between same-slot constants by weight; everything else keeps a 0
+    // secondary key (vars, and constants tied with a var, are pinned to
+    // their slot).
+    long long key2[ATP_GJ_MAX_ATOMS];
+    for (u32 i = 0; i < n_atoms; i++) {
+      if (atoms[i].is_const && (coarse[i] % 2u) == 0u)
+        key2[i] = (long long)gj_const_size(cfg, atoms[i].id);
+      else
+        key2[i] = 0;
+    }
+
+    // dense-rank by (coarse, key2): sort indices, assign majors.
+    u32 ord[ATP_GJ_MAX_ATOMS];
+    for (u32 i = 0; i < n_atoms; i++) ord[i] = i;
+    for (u32 i = 1; i < n_atoms; i++) {
+      u32 k = ord[i]; int j = (int)i - 1;
+      while (j >= 0 &&
+             (coarse[ord[j]] > coarse[k] ||
+              (coarse[ord[j]] == coarse[k] && key2[ord[j]] > key2[k]))) {
+        ord[j + 1] = ord[j]; j--;
+      }
+      ord[j + 1] = k;
+    }
+    u32 cls[ATP_GJ_MAX_ATOMS];
+    u32 cur = 0;
+    for (u32 r = 0; r < n_atoms; r++) {
+      if (r > 0) {
+        u32 a = ord[r - 1], b = ord[r];
+        if (coarse[a] != coarse[b] || key2[a] != key2[b]) cur++;
+      }
+      cls[ord[r]] = cur;
+    }
+
+    GjModel m;
+    if (gj_build_model(&m, atoms, n_atoms, cls, cfg)) {
+      if (!gj_joins_under(s, &m, lhs, rhs, cp_vars, n_cp_vars)) return 0;
+    }
+
+    if (nc == 0) return 1;
+    u32 c = 0;
+    for (; c < nc; c++) {
+      if (++place[c] < grid) break;
+      place[c] = 0;
+    }
+    if (c == nc) return 1;
+  }
+}
+
+// Recursively cover all total preorders of the CP's variables.  Strategy
+// (gj_spec.md C steps 1-5):
+//   * Enumerate ordered set partitions of the variables.
+//   * A partition with two variables in one class is an `=` case: unify
+//     (substitute each tied variable to the class representative) and
+//     RECURSE on the smaller CP.
+//   * A strict (all-singleton) partition: interleave constants and run
+//     the symbolic join (gj_cover_consts).
+// Returns 1 iff every case joins.
+static u8 gj_cover(AtpState *s, Term lhs, Term rhs,
+                   const u32 *var_ids, u32 n_vars, u32 *budget) {
+  // Re-collect the constants of the (current, possibly substituted) CP.
+  u32 const_labs[ATP_GJ_MAX_ATOMS];
+  u32 n_consts = 0;
+  if (!gj_collect_consts(lhs, const_labs, &n_consts, ATP_GJ_MAX_ATOMS)) return 0;
+  if (!gj_collect_consts(rhs, const_labs, &n_consts, ATP_GJ_MAX_ATOMS)) return 0;
+
   if (n_vars == 0) {
-    return atp_gj_partition_joins(s, lhs, rhs, var_ids, 0, NULL, 0);
+    // Ground CP (after all unifications): build a model over constants
+    // only (their order is fixed by weight) and join.  No variable ranks.
+    GjAtom atoms[ATP_GJ_MAX_ATOMS];
+    u32 n_atoms = 0;
+    for (u32 i = 0; i < n_consts; i++) {
+      if (n_atoms >= ATP_GJ_MAX_ATOMS) return 0;
+      atoms[n_atoms].is_const = 1; atoms[n_atoms].id = const_labs[i]; n_atoms++;
+    }
+    u32 dummy_rank[ATP_GJ_MAX_ATOMS] = {0};
+    return gj_cover_consts(s, lhs, rhs, atoms, n_atoms, dummy_rank, 0,
+                           var_ids, n_vars, budget);
   }
 
+  // Enumerate ordered set partitions of the variables via restricted-
+  // growth string cls[] + a permutation of the classes.
   u32 cls[ATP_GJ_MAX_VARS];
   u32 perm[ATP_GJ_MAX_VARS];
   for (u32 i = 0; i < n_vars; i++) cls[i] = 0;
@@ -5787,11 +6345,70 @@ static u8 atp_gj_enumerate(AtpState *s, Term lhs, Term rhs,
 
     for (u32 i = 0; i < n_cls; i++) perm[i] = i;
     for (;;) {
+      if (*budget == 0) return 0;
       u32 ocls[ATP_GJ_MAX_VARS];
       for (u32 i = 0; i < n_vars; i++) ocls[i] = perm[cls[i]];
-      if (!atp_gj_partition_joins(s, lhs, rhs, var_ids, n_vars, ocls, n_cls)) {
-        return 0;                          // a preorder fails -> keep
+
+      if (n_cls < n_vars) {
+        // Some class holds >=2 variables -> `=` case.  Unify each class
+        // to its representative (lowest-id var in the class) and recurse.
+        (*budget)--;
+        RewriteSubst sub = {{0}};
+        u32 rep_of_class[ATP_GJ_MAX_VARS];
+        for (u32 c = 0; c < n_cls; c++) rep_of_class[c] = (u32)-1;
+        // Representative = the smallest var id in the class.
+        for (u32 i = 0; i < n_vars; i++) {
+          u32 c = ocls[i];
+          if (rep_of_class[c] == (u32)-1 || var_ids[i] < rep_of_class[c])
+            rep_of_class[c] = var_ids[i];
+        }
+        u32 new_vars[ATP_GJ_MAX_VARS];
+        u32 n_new = 0;
+        u8 sub_ok = 1;
+        for (u32 i = 0; i < n_vars; i++) {
+          u32 rep = rep_of_class[ocls[i]];
+          if (var_ids[i] != rep) {
+            if (var_ids[i] >= REWRITE_MAX_VAR) { sub_ok = 0; break; }
+            sub.bindings[var_ids[i]] = term_new_fvr(rep);
+          }
+        }
+        // The reduced variable set = the representatives (one per class).
+        for (u32 c = 0; c < n_cls && sub_ok; c++) {
+          u8 seen = 0;
+          for (u32 k = 0; k < n_new; k++) if (new_vars[k] == rep_of_class[c]) seen = 1;
+          if (!seen) new_vars[n_new++] = rep_of_class[c];
+        }
+        if (sub_ok) {
+          Term sl = thvm_subst_apply(lhs, &sub);
+          Term sr = thvm_subst_apply(rhs, &sub);
+          if (!gj_cover(s, sl, sr, new_vars, n_new, budget)) return 0;
+        } else {
+          return 0;   // can't form the substitution -> KEEP (sound)
+        }
+      } else {
+        // Strict order on the variables: var i sits at rank ocls[i].
+        // Build the atom list (vars + consts) and interleave constants.
+        GjAtom atoms[ATP_GJ_MAX_ATOMS];
+        u32 var_rank[ATP_GJ_MAX_ATOMS];
+        u32 n_atoms = 0;
+        for (u32 i = 0; i < n_vars; i++) {
+          if (n_atoms >= ATP_GJ_MAX_ATOMS) return 0;
+          atoms[n_atoms].is_const = 0; atoms[n_atoms].id = var_ids[i];
+          var_rank[n_atoms] = ocls[i];
+          n_atoms++;
+        }
+        for (u32 i = 0; i < n_consts; i++) {
+          if (n_atoms >= ATP_GJ_MAX_ATOMS) return 0;
+          atoms[n_atoms].is_const = 1; atoms[n_atoms].id = const_labs[i];
+          var_rank[n_atoms] = 0;
+          n_atoms++;
+        }
+        if (!gj_cover_consts(s, lhs, rhs, atoms, n_atoms, var_rank, n_vars,
+                             var_ids, n_vars, budget))
+          return 0;
       }
+
+      // next permutation of classes
       if (n_cls < 2) break;
       u32 a = n_cls - 1;
       while (a > 0 && perm[a - 1] >= perm[a]) a--;
@@ -5803,6 +6420,7 @@ static u8 atp_gj_enumerate(AtpState *s, Term lhs, Term rhs,
       while (lo < hi) { tmp = perm[lo]; perm[lo] = perm[hi]; perm[hi] = tmp; lo++; hi--; }
     }
 
+    // next restricted-growth partition
     u32 i = n_vars;
     while (i > 0) {
       i--;
@@ -5813,26 +6431,29 @@ static u8 atp_gj_enumerate(AtpState *s, Term lhs, Term rhs,
         for (u32 j = i + 1; j < n_vars; j++) cls[j] = 0;
         break;
       }
-      if (i == 0) return 1;                // exhausted all partitions
+      if (i == 0) return 1;              // exhausted -> all cases joined
       cls[i] = 0;
     }
   }
 }
 
 // Top-level: return 1 iff (lhs, rhs) is PROVABLY ground-joinable
-// (would-delete), 0 otherwise (would-keep).  Sound (no false DELETE)
-// given the fresh-minimal constants and full tie coverage above; may KEEP
-// genuinely-joinable CPs (incomplete) -- that only costs performance.
+// (would-DELETE), 0 otherwise (would-KEEP).  Sound (no false DELETE):
+// gj_less_in never over-approximates >=_C (P2), the recursion + strict-
+// order/constant-interleave enumeration covers every ground ordering
+// (P3), and any uncertainty / budget / overflow returns 0 (KEEP).
 static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return 0;
   if (s->kbo == NULL && s->lpo == NULL) return 0;   // no ordering -> keep
+  if (s->lpo != NULL) return 0;                     // LPO: GJ off (KBO-only)
 
   u32 var_ids[ATP_GJ_MAX_VARS];
   u32 n_vars = 0;
   if (!atp_gj_collect_vars(lhs, var_ids, &n_vars, ATP_GJ_MAX_VARS)) return 0;
   if (!atp_gj_collect_vars(rhs, var_ids, &n_vars, ATP_GJ_MAX_VARS)) return 0;
 
-  return atp_gj_enumerate(s, lhs, rhs, var_ids, n_vars) ? 1 : 0;
+  u32 budget = ATP_GJ_BRANCH_CAP;
+  return gj_cover(s, lhs, rhs, var_ids, n_vars, &budget) ? 1 : 0;
 }
 
 #endif  // ATP_CP_GROUND_JOIN

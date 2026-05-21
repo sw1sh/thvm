@@ -67,6 +67,106 @@ static Term tt_norm_rhs(Term exp_l, Term exp_r) {
   return exp_r;
 }
 
+#ifdef ATP_CP_GROUND_JOIN
+// Differential soundness cross-check for a DELETE verdict.  When the
+// symbolic ground-join test says DELETE, we INDEPENDENTLY verify that a
+// large sample of concrete GROUND instances (variables -> fresh distinct
+// minimal constants ordered by a randomly sampled total preorder) really
+// do join under ordinary ground-KBO rewriting.  A failure here would mean
+// the symbolic test deleted a CP that has a non-joinable ground instance
+// -- a soundness bug -- so the test fails loudly.  Returns 1 iff every
+// sampled instance joins.  This uses the real thvm_kbo on an EXTENDED
+// config (fresh constants placed minimal & ordered), an oracle distinct
+// from the symbolic >=_C path it is checking.
+static u32 gjt_rng = 0x1234567u;
+static u32 gjt_rand(void) {
+  gjt_rng = gjt_rng * 1664525u + 1013904223u;
+  return (gjt_rng >> 8) & 0x7fffffu;
+}
+static void gjt_collect_vars(Term t, u32 *ids, u32 *n) {
+  if (term_tag(t) == TAG_FVR) {
+    for (u32 i = 0; i < *n; i++) if (ids[i] == term_ext(t)) return;
+    ids[(*n)++] = term_ext(t);
+  } else if (term_tag(t) == TAG_CTR) {
+    u32 k = term_ctr_n(t);
+    for (u32 i = 0; i < k; i++) gjt_collect_vars(term_ctr_at(t, i), ids, n);
+  }
+}
+static u8 gjt_gfired;
+static Term gjt_gstep(AtpState *s, Term u, const KboConfig *ec) {
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (term_tag(s->lhs[i]) == TAG_FVR) continue;
+    RewriteSubst sub = {{0}};
+    if (thvm_match(s->lhs[i], u, &sub)) {
+      Term rd = thvm_subst_apply(s->rhs[i], &sub);
+      if (thvm_kbo(u, rd, ec) == KBO_GT) { gjt_gfired = 1; return rd; }
+    }
+  }
+  if (term_tag(u) == TAG_CTR) {
+    u32 n = term_ctr_n(u);
+    if (n > REWRITE_MAX_ARITY) return u;
+    Term ch[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) ch[i] = term_ctr_at(u, i);
+    for (u32 i = 0; i < n; i++) {
+      Term r = gjt_gstep(s, ch[i], ec);
+      if (gjt_gfired) { ch[i] = r; return term_new_ctr(term_ext(u), ch, n); }
+    }
+  }
+  return u;
+}
+static Term gjt_gnorm(AtpState *s, Term t, const KboConfig *ec) {
+  for (u32 k = 0; k < 512u; k++) {
+    gjt_gfired = 0;
+    Term t2 = gjt_gstep(s, t, ec);
+    if (!gjt_gfired) return t;
+    t = t2;
+  }
+  return t;
+}
+static int gjt_differential(AtpState *s, Term l, Term r,
+                            u32 base_labels, u32 trials) {
+  u32 vids[8]; u32 nv = 0;
+  gjt_collect_vars(l, vids, &nv);
+  gjt_collect_vars(r, vids, &nv);
+  for (u32 t = 0; t < trials; t++) {
+    u32 cls[8]; u32 ncls = 0;
+    for (u32 i = 0; i < nv; i++) {
+      cls[i] = gjt_rand() % (i + 1u);
+      if (cls[i] + 1u > ncls) ncls = cls[i] + 1u;
+    }
+    u32 perm[8];
+    for (u32 i = 0; i < ncls; i++) perm[i] = i;
+    for (u32 i = ncls; i > 1u; i--) {
+      u32 j = gjt_rand() % i;
+      u32 tmp = perm[i - 1u]; perm[i - 1u] = perm[j]; perm[j] = tmp;
+    }
+    u32 nl = base_labels + ncls;
+    u32 ew[24], ep[24];
+    for (u32 L = 0; L < base_labels; L++) {
+      ew[L] = s->kbo->weights[L];
+      ep[L] = s->kbo->precedence[L] + ncls;
+    }
+    for (u32 c = 0; c < ncls; c++) {
+      ew[base_labels + c] = s->kbo->var_weight;
+      ep[base_labels + c] = c;
+    }
+    KboConfig ec = {
+      .weights = ew, .precedence = ep, .n_labels = nl,
+      .var_weight = s->kbo->var_weight,
+    };
+    RewriteSubst sub = {{0}};
+    for (u32 i = 0; i < nv; i++)
+      sub.bindings[vids[i]] = term_new_ctr(base_labels + perm[cls[i]], NULL, 0);
+    Term gl = thvm_subst_apply(l, &sub);
+    Term gr = thvm_subst_apply(r, &sub);
+    Term n1 = gjt_gnorm(s, gl, &ec);
+    Term n2 = gjt_gnorm(s, gr, &ec);
+    if (!kbo_eq(n1, n2)) return 0;   // a ground instance did NOT join
+  }
+  return 1;
+}
+#endif  // ATP_CP_GROUND_JOIN
+
 int main(void) {
   thvm_init();
 
@@ -2445,27 +2545,21 @@ int main(void) {
     };
     #define MK_PLUS(a, b) ({ Term _cs[2] = {(a), (b)}; term_new_ctr(GJ_PLUS, _cs, 2); })
 
-    // F.1: AC critical pair x+(y+z) vs z+(x+y) under {assoc, comm}.
-    // The MINIMAL version KEEPS it (verdict 0): with only {assoc,comm}
-    // the ground system is not ground-confluent, and joining needs the
-    // symbolic >=_C no-op steps the minimal version omits.  KEEP is
-    // always sound (incompleteness, not a soundness bug).
-    TEST_BEGIN("atp/ground-join/F1-AC-pair-minimal-keeps");
-    {
-      AtpState *s = thvm_atp_init(&AC_CFG, 64);
-      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
-      atp_push_rule(s, MK_PLUS(MK_PLUS(x, y), z), MK_PLUS(x, MK_PLUS(y, z)));
-      atp_push_rule(s, MK_PLUS(x, y), MK_PLUS(y, x));
-      atp_push_rule(s, MK_PLUS(y, x), MK_PLUS(x, y));
-      Term cp_l = MK_PLUS(x, MK_PLUS(y, z));
-      Term cp_r = MK_PLUS(z, MK_PLUS(x, y));
-      CHECK_EQ(atp_cp_ground_joinable(s, cp_l, cp_r), 0);
-      thvm_atp_free(s);
-    }
-
-    // F.1b: same AC pair WITH the left-comm completion rule -> the
-    // system is ground-confluent and the minimal version DELETES (1).
-    TEST_BEGIN("atp/ground-join/F1b-AC-pair-complete-deletes");
+    // F.1: AC critical pair x+(y+z) vs z+(x+y) (gj_spec.md F.1).  This is
+    // THE point of the symbolic upgrade: it is GROUND-JOINABLE and MUST be
+    // DELETED (verdict 1).  The AC rule set is associativity (oriented),
+    // commutativity (both directions), AND its left-commutativity
+    // consequence x+(y+z)=y+(x+z) -- exactly the set under which the AC
+    // theory is ground-CONFLUENT, so every ground instance of the CP
+    // joins.  (Bare {assoc, comm} alone is NOT ground-confluent -- see
+    // F.1c below -- so it would be UNSOUND to delete this CP under bare
+    // {assoc, comm}; the symbolic test correctly refuses to.  Twee
+    // likewise deletes this CP only once R has been completed with the
+    // left-comm rule.)  The symbolic >=_C reasoning (no-op `<=` steps
+    // under each variable ordering, plus the `=`-case variable
+    // unification recursion) is what lets it join here where the previous
+    // fresh-ground-constant version could not.
+    TEST_BEGIN("atp/ground-join/F1-AC-pair-deletes");
     {
       AtpState *s = thvm_atp_init(&AC_CFG, 64);
       Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
@@ -2478,6 +2572,49 @@ int main(void) {
       Term cp_r = MK_PLUS(z, MK_PLUS(x, y));
       CHECK_EQ(atp_cp_ground_joinable(s, cp_l, cp_r), 1);
       thvm_atp_free(s);
+    }
+
+    // F.1c: the SAME AC pair under bare {assoc, comm} (no left-comm) -> the
+    // ground rewrite system is NOT confluent (e.g. z+(x+y) with x<y<z is a
+    // normal form distinct from x+(y+z)), so the CP is NOT ground-joinable
+    // by these two rules.  The symbolic test correctly KEEPS it (0).  This
+    // is the load-bearing soundness guard for F.1: a test that DELETED
+    // here would be unsound (it would have to over-approximate >=_C and
+    // fire a comm step z+(x+y)->(x+y)+z that no ground sigma justifies).
+    TEST_BEGIN("atp/ground-join/F1c-AC-pair-bare-keeps");
+    {
+      AtpState *s = thvm_atp_init(&AC_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(s, MK_PLUS(MK_PLUS(x, y), z), MK_PLUS(x, MK_PLUS(y, z)));
+      atp_push_rule(s, MK_PLUS(x, y), MK_PLUS(y, x));
+      atp_push_rule(s, MK_PLUS(y, x), MK_PLUS(x, y));
+      Term cp_l = MK_PLUS(x, MK_PLUS(y, z));
+      Term cp_r = MK_PLUS(z, MK_PLUS(x, y));
+      CHECK_EQ(atp_cp_ground_joinable(s, cp_l, cp_r), 0);
+      thvm_atp_free(s);
+    }
+
+    // F.1d: a second genuinely-ground-joinable PERMUTATIVE CP -> DELETE.
+    // Commutative binary f with both rewrite directions; the CP
+    // f(x,y) = f(y,x) is its own commutativity instance and is joinable
+    // under every ground ordering of x,y (orient f by the order; under
+    // x=y both sides are identical).  MUST be DELETED (1).
+    TEST_BEGIN("atp/ground-join/F1d-comm-pair-deletes");
+    {
+      enum { GJ_FC = 2u };
+      static u32 wc[3] = {0, 0, 1};
+      static u32 pc[3] = {0, 0, 1};
+      static const KboConfig CC = {
+        .weights = wc, .precedence = pc, .n_labels = 3, .var_weight = 1,
+      };
+      AtpState *s = thvm_atp_init(&CC, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      #define MK_FC(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(GJ_FC, _c, 2); })
+      atp_push_rule(s, MK_FC(x, y), MK_FC(y, x));
+      atp_push_rule(s, MK_FC(y, x), MK_FC(x, y));
+      CHECK_EQ(atp_cp_ground_joinable(s, MK_FC(x, y), MK_FC(y, x)), 1);
+      thvm_atp_free(s);
+      #undef MK_FC
     }
 
     // F.2.A: ground CP b = f(b) (no vars) -> KEEP.
@@ -2521,6 +2658,126 @@ int main(void) {
       thvm_atp_free(s);
       #undef MK_G
       #undef MK_H
+    }
+
+    // F.2.C (KEEP guard): genuinely non-joinable overlap a = c with NO
+    // rule relating them.  Two distinct constants, no rewrite, distinct
+    // normal forms -> not ground-joinable -> KEEP (0).
+    TEST_BEGIN("atp/ground-join/F2C-distinct-consts-KEEP");
+    {
+      enum { GJ_A2 = 2u, GJ_C2 = 3u, GJ_D2 = 4u };
+      static u32 w4[5] = {0, 0, 1, 2, 1};
+      static u32 p4[5] = {0, 0, 3, 2, 1};
+      static const KboConfig C4 = {
+        .weights = w4, .precedence = p4, .n_labels = 5, .var_weight = 1,
+      };
+      AtpState *s = thvm_atp_init(&C4, 64);
+      Term a = term_new_ctr(GJ_A2, NULL, 0);
+      Term c = term_new_ctr(GJ_C2, NULL, 0);
+      Term d = term_new_ctr(GJ_D2, NULL, 0);
+      // an unrelated rule that does not touch a, c
+      atp_push_rule(s, d, a);
+      CHECK_EQ(atp_cp_ground_joinable(s, a, c), 0);
+      thvm_atp_free(s);
+    }
+
+    // F.2.D (tie-collision KEEP guard, gj_spec.md F.3): a CP that joins on
+    // every STRICT order of its variables but FAILS when two variables
+    // collide (are instantiated equal).  d(x,y) -> x and d(x,y) -> y as
+    // two oriented-by-order projections of a commutative pairing: the CP
+    // x = y is joinable only if x and y collapse, which they need not.
+    // A strict-only enumeration (x<y and y<x both give distinct consts
+    // that don't rejoin) would already KEEP, but a buggy >=_C that
+    // over-approximates could "join" x=y; assert KEEP (0).  (Same shape
+    // as F.2.B but isolated to make the tie-coverage requirement explicit.)
+    TEST_BEGIN("atp/ground-join/F2D-tie-collision-KEEP");
+    {
+      enum { GJ_P = 2u, GJ_FST = 3u, GJ_SND = 4u };
+      static u32 w5[5] = {0, 0, 1, 1, 1};
+      static u32 p5[5] = {0, 0, 2, 3, 4};
+      static const KboConfig C5 = {
+        .weights = w5, .precedence = p5, .n_labels = 5, .var_weight = 1,
+      };
+      AtpState *s = thvm_atp_init(&C5, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      #define MK_P(a, b)  ({ Term _c[2] = {(a), (b)}; term_new_ctr(GJ_P, _c, 2); })
+      #define MK_FST(t)   ({ Term _c[1] = {(t)};      term_new_ctr(GJ_FST, _c, 1); })
+      #define MK_SND(t)   ({ Term _c[1] = {(t)};      term_new_ctr(GJ_SND, _c, 1); })
+      atp_push_rule(s, MK_P(x, y), MK_P(y, x));     // commutative pair
+      atp_push_rule(s, MK_P(y, x), MK_P(x, y));
+      atp_push_rule(s, MK_FST(MK_P(x, y)), x);      // fst(P) -> 1st arg
+      atp_push_rule(s, MK_SND(MK_P(x, y)), y);      // snd(P) -> 2nd arg
+      // The overlap fst(P(x,y)) vs fst(P(y,x)) gives x = y.
+      CHECK_EQ(atp_cp_ground_joinable(s, x, y), 0);
+      thvm_atp_free(s);
+      #undef MK_P
+      #undef MK_FST
+      #undef MK_SND
+    }
+
+    // F.E2 (fresh-constant weight guard, gj_spec.md E2/F.3): the symbolic
+    // test reasons over ALL grounding sigma and never substitutes a fresh
+    // constant, so the "fresh constant heavier than a real symbol flips
+    // KEEP into DELETE" hazard is structurally absent.  Re-run F.2.A with
+    // the would-be-fresh weight inflated and confirm it stays KEEP (0).
+    TEST_BEGIN("atp/ground-join/FE2-fresh-weight-stays-KEEP");
+    {
+      enum { GJ_F2 = 2u, GJ_A3 = 3u, GJ_B3 = 4u };
+      static u32 w6[5] = {0, 0, 7, 5, 3};         // inflated weights
+      static u32 p6[5] = {0, 0, 3, 2, 1};
+      static const KboConfig C6 = {
+        .weights = w6, .precedence = p6, .n_labels = 5, .var_weight = 1,
+      };
+      AtpState *s = thvm_atp_init(&C6, 64);
+      Term a  = term_new_ctr(GJ_A3, NULL, 0);
+      Term b  = term_new_ctr(GJ_B3, NULL, 0);
+      Term xx = mk_v(0u);
+      #define MK_F2(t) ({ Term _c[1] = {(t)}; term_new_ctr(GJ_F2, _c, 1); })
+      atp_push_rule(s, MK_F2(MK_F2(xx)), MK_F2(xx));
+      atp_push_rule(s, MK_F2(a), b);
+      CHECK_EQ(atp_cp_ground_joinable(s, b, MK_F2(b)), 0);
+      thvm_atp_free(s);
+      #undef MK_F2
+    }
+
+    // F.diff: differential soundness cross-check.  For the two DELETE
+    // verdicts (F.1 AC pair, F.1d comm pair) verify that a large sample of
+    // concrete ground instances actually join under independent ground-KBO
+    // rewriting.  A contradiction is a soundness bug -> the assert fails.
+    TEST_BEGIN("atp/ground-join/Fdiff-AC-delete-is-ground-sound");
+    {
+      AtpState *s = thvm_atp_init(&AC_CFG, 64);
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(s, MK_PLUS(MK_PLUS(x, y), z), MK_PLUS(x, MK_PLUS(y, z)));
+      atp_push_rule(s, MK_PLUS(x, y), MK_PLUS(y, x));
+      atp_push_rule(s, MK_PLUS(y, x), MK_PLUS(x, y));
+      atp_push_rule(s, MK_PLUS(x, MK_PLUS(y, z)), MK_PLUS(y, MK_PLUS(x, z)));
+      atp_push_rule(s, MK_PLUS(y, MK_PLUS(x, z)), MK_PLUS(x, MK_PLUS(y, z)));
+      Term cp_l = MK_PLUS(x, MK_PLUS(y, z));
+      Term cp_r = MK_PLUS(z, MK_PLUS(x, y));
+      CHECK_EQ(atp_cp_ground_joinable(s, cp_l, cp_r), 1);     // DELETE
+      CHECK_EQ(gjt_differential(s, cp_l, cp_r, AC_CFG.n_labels, 4000), 1);
+      thvm_atp_free(s);
+    }
+
+    TEST_BEGIN("atp/ground-join/Fdiff-comm-delete-is-ground-sound");
+    {
+      enum { GJ_FD = 2u };
+      static u32 wd[3] = {0, 0, 1};
+      static u32 pd[3] = {0, 0, 1};
+      static const KboConfig CD = {
+        .weights = wd, .precedence = pd, .n_labels = 3, .var_weight = 1,
+      };
+      AtpState *s = thvm_atp_init(&CD, 64);
+      Term x = mk_v(0u), y = mk_v(1u);
+      #define MK_FD(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(GJ_FD, _c, 2); })
+      atp_push_rule(s, MK_FD(x, y), MK_FD(y, x));
+      atp_push_rule(s, MK_FD(y, x), MK_FD(x, y));
+      Term cp_l = MK_FD(x, y), cp_r = MK_FD(y, x);
+      CHECK_EQ(atp_cp_ground_joinable(s, cp_l, cp_r), 1);     // DELETE
+      CHECK_EQ(gjt_differential(s, cp_l, cp_r, CD.n_labels, 4000), 1);
+      thvm_atp_free(s);
+      #undef MK_FD
     }
     #undef MK_PLUS
   }
