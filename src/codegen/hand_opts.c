@@ -351,6 +351,28 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         KOpt opt = { KOP_TC, 0, tile };
         if (kernel_apply_opt(ke, opt)) { n_applied++; break; }
       }
+      // Parallel TC: promote the matmul's output (M/N) axes from LOOP to
+      // GLOBAL so the renderer's simdgroup_matrix template binds one
+      // simdgroup per 8x8 output tile across the grid, instead of running
+      // every tile serially in a single guarded simdgroup (~75x slower --
+      // see docs/perf_cross_backend.md).  An output axis qualifies when
+      // its extent is a multiple of 8 (the simdgroup_matrix<8,8> tile);
+      // the K reduce axis is KAX_REDUCE so it is never touched, and a
+      // non-8-multiple output axis stays a LOOP (the template keeps it as
+      // an in-kernel serial loop, still correct).  Only meaningful on
+      // Metal; the dispatch-shape reader (cg_tile_metal_dispatch_shape)
+      // sizes grid = product(extent/8) threadgroups x 32 threads.
+      if (n_applied > 0) {
+        u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+        u32 na = uop_dag_collect_axes(ke->cached_lift.store_root, ids,
+                                      types, exts, MAX_AXES);
+        for (u32 i = 0; i < na; i++) {
+          if (types[i] == KAX_LOOP && exts[i] != 0 && (exts[i] % 8u) == 0) {
+            KOpt g = { KOP_GLOBAL, ids[i], exts[i] };
+            if (kernel_apply_opt(ke, g)) n_applied++;
+          }
+        }
+      }
       return n_applied;
     }
   }

@@ -118,6 +118,33 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_OPT
           && uop_opt_kind(v) == UOP_OPT_TC) tc_template = 1;
     }
+    // Parallel TC: the simdgroup_matrix template binds each GLOBAL output
+    // axis to the threadgroup grid, one simdgroup (32 threads) per 8x8
+    // output tile (render_uop.c rmu_emit_matmul_tc parallel_tc branch).
+    // grid = product(GLOBAL_extent / 8) threadgroups, 32 threads each.
+    // Only the GLOBAL-promoted axes parallelise; a non-promoted output
+    // axis stays an in-kernel for-loop (still correct, just serial).
+    // Without this the TC kernel would take the output_numel default
+    // grid below, racing many simdgroups onto the same tiles.
+    if (tc_template) {
+      u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+      u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                                   exts, MAX_AXES);
+      u64 tiles = 1;
+      int any_global = 0;
+      for (u32 i = 0; i < n; i++) {
+        if (types[i] == KAX_GLOBAL) {
+          if (exts[i] == 0 || (exts[i] % 8u) != 0) { any_global = 0; break; }
+          tiles *= (u64)(exts[i] / 8u);
+          any_global = 1;
+        }
+      }
+      if (any_global && tiles > 0 && tiles <= 0xFFFFFFFFu) {
+        if (groups_x  != NULL) *groups_x  = (u32)tiles;
+        if (threads_x != NULL) *threads_x = 32u;
+        return 1;
+      }
+    }
     if (!tc_template && rmt_dag_has_opt_axes(ke)
         && rmt_dag_dispatch_shape(ke, groups_x, threads_x)) {
       return 1;

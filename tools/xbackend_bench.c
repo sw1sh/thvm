@@ -106,6 +106,19 @@ int main(int argc, char **argv) {
   ke->n_inputs    = B ? 2 : 1;
   ke->output_numel = (u32)cN;
 
+  // Optionally apply the matmul tensor-core opts the production hand-opts
+  // path applies (THVM_BENCH_OPT=1): TC marker + GLOBAL on the 8-multiple
+  // output axes, so the bench measures the parallel simdgroup_matrix
+  // kernel rather than the un-optimised default.
+  if (!strcmp(which, "matmul") && getenv("THVM_BENCH_OPT") && (n % 8) == 0) {
+    KOpt tc = { KOP_TC, 0, 8 };
+    kernel_apply_opt(ke, tc);
+    KOpt g0 = { KOP_GLOBAL, 0, (u32)n };
+    kernel_apply_opt(ke, g0);
+    KOpt g1 = { KOP_GLOBAL, 1, (u32)n };
+    kernel_apply_opt(ke, g1);
+  }
+
   u32 in_buf_ids[2] = { bA, bB };
   float *hC = malloc(cN * 4);
 

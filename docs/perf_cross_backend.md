@@ -20,27 +20,35 @@ Prime Intellect pod, sm_70).
 | n    | backend | ms/iter | GFLOPS | out[0] |
 |------|---------|---------|--------|--------|
 | 512  | CPU (Accelerate) | 0.125  | 2147 | 202.475 |
-| 512  | Metal (thvm naive) | 30.03  | 8.9  | 202.475 |
+| 512  | Metal (pre-fix)  | 30.03  | 8.9  | 202.475 |
+| 512  | Metal (parallel TC) | 0.339 | 793 | 202.475 |
 | 512  | CUDA (thvm naive)  | 0.225  | 1195 | 202.475 |
 | 1024 | CPU (Accelerate) | 0.745  | 2883 | 407.601 |
-| 1024 | Metal (thvm naive) | 137.6  | 15.6 | 407.601 |
+| 1024 | Metal (pre-fix)  | 137.6  | 15.6 | 407.601 |
+| 1024 | Metal (parallel TC) | 1.05 | 2053 | 407.601 |
 | 1024 | CUDA (thvm naive)  | 1.81   | 1187 | 407.601 |
 
-All three backends produce identical results (correctness confirmed).
+All backends produce identical results (correctness confirmed).
 
-Key finding: for the SAME thvm-generated naive matmul kernel, the V100
-CUDA path reaches ~1190 GFLOPS while the M3 Max Metal path manages only
-9-16 GFLOPS, a ~75-130x gap. The Metal time scales linearly with n^3
-(512->1024 is 8x compute for ~4.6x time), so it is compute-bound in the
-kernel, not dispatch-overhead-bound: the Metal matmul codegen emits a
-naive per-thread scalar K-loop with no threadgroup-memory tiling, while
-the CUDA naive kernel coalesces acceptably on the V100's wide memory bus.
-The CPU number is Accelerate BLAS, not thvm codegen, so it is not directly
-comparable to the two GPU naive kernels.
+Original finding (pre-fix): the Metal matmul reached only 9-16 GFLOPS vs
+the V100's ~1190. The kernel DID emit Apple `simdgroup_matrix` (8x8
+tensor-core) ops, but the entire computation ran in a SINGLE simdgroup of
+a single threadgroup (`if (sgi == 0u && tg == 0u)`), looping over every
+output tile serially while the rest of the GPU idled.
 
-Optimization target: thvm's Metal matmul codegen (threadgroup tiling /
-SIMD-group cooperation) is the largest single cross-backend performance
-gap.
+Fix (parallel TC): hand_opts now promotes the matmul's 8-multiple output
+(M/N) axes from LOOP to GLOBAL after applying the TC marker, and
+cg_tile_metal_dispatch_shape sizes the grid as product(extent/8)
+threadgroups x 32 threads -- one simdgroup per 8x8 output tile, across the
+whole GPU (render_uop.c's parallel_tc branch). Metal matmul-1024 goes
+15.6 -> 2053 GFLOPS (~130x), now ahead of the V100 CUDA path and
+approaching CPU Accelerate. Non-8-multiple shapes keep the guarded serial
+path (correct, slow); only Metal is affected (hand_opts is Metal-gated,
+CPU matmul uses Accelerate).
+
+Remaining: the CUDA fp32 matmul still renders the tiled-scalar fallback
+(V100 WMMA is fp16-only); a CUDA-side parallelisation of its output tiles
+is the next gap.
 
 ## row-reduce out[r] = sum_c in[r,c]  (n x n)
 
