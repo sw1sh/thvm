@@ -2577,22 +2577,26 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
        introspectives ("Lemmas"/"RawTrace"/...) still reflect a real run. *)
     Module[{atpSub, atpR = $Failed, atpEnd},
         (* TimeConstraint is a TOTAL budget across the schedule (like the
-           built-in FindEquationalProof): each config gets the time
-           remaining to the deadline, and the loop stops when it is
-           spent.  MaxWallSeconds (no TimeConstraint) stays per-config,
-           as documented. *)
+           built-in FindEquationalProof).  Divide the REMAINING time
+           FAIRLY among the REMAINING configs (recomputed each step) so a
+           late-but-winning strategy -- typically GoalDirected/MNF, which
+           closes goal-shaped theorems plain completion misses -- is never
+           starved by an earlier config that fails slowly.  A config that
+           returns early rolls its unused time forward to the rest.
+           MaxWallSeconds (no TimeConstraint) stays per-config. *)
         atpEnd = If[ OptionValue[TimeConstraint] =!= Infinity,
             AbsoluteTime[] + N[OptionValue[TimeConstraint]], Infinity];
+        Module[{n = Length[atpSched]},
         Do[ atpSub = Which[
-                atpEnd =!= Infinity, atpEnd - AbsoluteTime[],
+                atpEnd =!= Infinity, (atpEnd - AbsoluteTime[]) / (n - i + 1),
                 OptionValue[MaxWallSeconds] > 0, OptionValue[MaxWallSeconds],
                 True, 60.];
             If[ atpSub <= 0., Break[]];
             atpR = atpProveBundle[conjecture, axioms,
-                Method -> cfg, MaxWallSeconds -> atpSub,
+                Method -> atpSched[[i]], MaxWallSeconds -> atpSub,
                 MaxSteps -> OptionValue[MaxSteps]];
             If[ Head[atpR["ProofObject"]] === ProofObject, Break[]],
-            {cfg, atpSched}];
+            {i, n}]];
         atpR],
     (* Single config. *)
     Block[{
