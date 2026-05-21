@@ -38,7 +38,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- a Waldmeister-style strategy schedule that tries Mix2 weight, then LPO+AutoPrecedence, then GT weight, returning the first that proves+verifies; or a single explicit config {\"Completion\", \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\", \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"}), exposing the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, and the axiom-relevance filter (inspect with TRelevantAxioms).  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- a Waldmeister-style strategy schedule that tries Mix2 weight, then LPO+AutoPrecedence, then GT weight, returning the first that proves+verifies; or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\", \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11)}), exposing the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (SInE-style symbol-connectivity pruning -- heuristic, may drop a needed axiom).";
 
@@ -91,7 +91,7 @@ $atpRunFn := $atpRunFn = load[
 $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
-     Integer, Integer, Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -807,13 +807,14 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
    the corresponding extraction produced nothing. *)
 cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     cpWeight_:-1, ordering_:0, autoPrec_:0, useMnf_:0,
-    maxCpWeight_:0, goalInterleave_:0] := Block[{
+    maxCpWeight_:0, goalInterleave_:0, groundJoin_:0, selRatio_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries
 },
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
-        N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight, goalInterleave];
+        N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
+        goalInterleave, groundJoin, selRatio];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -1724,7 +1725,18 @@ atpMaxWeightOpt[o_Association] := With[{w = Lookup[o, "MaxWeight", 0]},
    (CPinGoal) pick; the rest use the chosen weight.  0/Automatic = off. *)
 atpGoalInterleaveOpt[o_Association] := With[{n = Lookup[o, "GoalInterleave", 0]},
     If[ IntegerQ[n] && n > 0, n, 0]];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0};
+(* "GroundJoin" -> True: drop ground-joinable critical pairs (a sound
+   Martin-Nipkow / Twee redundancy criterion -- every ground instance of
+   the CP joins, so it adds nothing).  False/Automatic = off. *)
+atpGroundJoinOpt[o_Association] := Switch[Lookup[o, "GroundJoin", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
+(* "SelectionRatio" -> n (Waldmeister CPdimension / YFiles Schrittweiten):
+   1 FIFO (oldest-CP) pick per n CP selections, the rest by weight.  The
+   fairness lever against smallest-weight starvation.  0/Automatic keeps
+   the engine default (11); Waldmeister also uses 50/100/200. *)
+atpSelectionRatioOpt[o_Association] := With[{n = Lookup[o, "SelectionRatio", 0]},
+    If[ IntegerQ[n] && n > 0, n, 0]];
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -1741,7 +1753,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
             "LPO", 1, "KBO" | Automatic, 0, _, 0];
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
             True, 1, False | Automatic, 0, _, 0];
-        {cw, ord, ap, mnf, atpMaxWeightOpt[o], atpGoalInterleaveOpt[o]}
+        {cw, ord, ap, mnf, atpMaxWeightOpt[o], atpGoalInterleaveOpt[o],
+         atpGroundJoinOpt[o], atpSelectionRatioOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -1752,11 +1765,11 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0};
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 atpParseMethod[m_] := (
-    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0});
+    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
@@ -2109,7 +2122,8 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
             cRes = cEngineProof[enc, OptionValue[MaxSteps],
                 atpWall,
                 atpMethodCfg[[1]], atpMethodCfg[[2]], atpMethodCfg[[3]],
-                atpMethodCfg[[4]], atpMethodCfg[[5]], atpMethodCfg[[6]]]];
+                atpMethodCfg[[4]], atpMethodCfg[[5]], atpMethodCfg[[6]],
+                atpMethodCfg[[7]], atpMethodCfg[[8]]]];
         (* status 1 == PROVED. *)
         If[ cRes["Status"] =!= 1, Return[$Failed] ];
         extSteps = cRes["ExtSteps"];
