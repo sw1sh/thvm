@@ -935,6 +935,14 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
   mint dims[MAX_DIM];
   mint rank = (mint)d->view.shape.ndim;
   for (mint i = 0; i < rank; i++) dims[i] = (mint)d->view.shape.dims[i];
+  // A rank-0 (scalar) result -- e.g. a full reduce like TDot -- has
+  // numel 1.  WL's MNumericArray_new mishandles rank 0, so emit a
+  // rank-1 length-1 array; the logical scalar shape is recovered via
+  // TTensorShape[] and Normal yields a 1-element list.
+  if (rank == 0) {
+    rank = 1;
+    dims[0] = 1;
+  }
   // Packed nibble dtypes: collapse to a flat byte count for the
   // NumericArray.  WL reconstructs the logical shape via
   // TTensorShape[]; the byte count = ceil(numel/2).
