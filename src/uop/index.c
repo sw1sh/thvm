@@ -301,11 +301,6 @@ fn u32 uop_bufferize_addrspace(Term b) {
   return (u32)term_val(heap_read(term_val(b) + 1));
 }
 
-fn u32 uop_bufferize_removable(Term b) {
-  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE) return 0;
-  return (u32)term_val(heap_read(term_val(b) + 2));
-}
-
 fn u32 uop_bufferize_n_ranges(Term b) {
   if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE) return 0;
   return (u32)term_val(heap_read(term_val(b) + 3));

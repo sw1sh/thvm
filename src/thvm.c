@@ -81,7 +81,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "term/new_ctr.c"
 #include "term/new_when.c"
 #include "term/new_fvr.c"
-#include "term/new_bri.c"
 #include "term/new_ann.c"
 #include "term/new_pri.c"
 #include "term/new_dsu.c"
@@ -251,7 +250,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // === tensor/ ===
 #include "tensor/alloc.c"
 #include "tensor/incref.c"
-#include "tensor/decref.c"
 #include "tensor/release.c"
 #include "tensor/mark_buf_preserved.c"
 #include "tensor/view_of.c"

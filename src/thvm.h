@@ -1352,7 +1352,6 @@ fn Term term_new_any (void);
 fn Term term_new_inc (Term body);
 fn Term term_new_when(Term cond, Term body);
 fn Term term_new_fvr (u32 var_id);
-fn Term term_new_bri (Term body);
 fn Term term_new_ann (Term val, Term typ);
 
 // 8.1b: TAG_PRI ("primitive function call") -- a thin port of HVM4's
@@ -1849,7 +1848,6 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap);
 // refcount + backend-level buffer refcount govern the buffer lifetime.
 fn u32  tensor_alloc  (Backend *b, Shape shape, u32 dtype);
 fn void tensor_incref (u32 id);
-fn void tensor_decref (u32 id);
 fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
 fn void tensor_mark_buf_preserved(u32 id);
 fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
@@ -1919,7 +1917,6 @@ fn Term uop_bufferize_new(Term value, u32 addrspace, u32 removable,
                           u32 n_ranges, Term const *ranges);
 fn Term uop_bufferize_value     (Term b);
 fn u32  uop_bufferize_addrspace (Term b);
-fn u32  uop_bufferize_removable (Term b);
 fn u32  uop_bufferize_n_ranges  (Term b);
 fn Term uop_bufferize_range_at  (Term b, u32 i);
 
@@ -1979,11 +1976,6 @@ fn Term rangeify_unified_bufferize_at          (u32 node_idx);
 // to `cached_lift.store_root` from kernel_lift_to_uop; serves as the
 // substrate for the lifter-bypass cutover.
 fn Term rangeify_unified_store_root_at         (u32 node_idx);
-// Re-seed RU_REALIZE_MAP[i].realized_full from BUFFERIZE_NODES[i].realized.
-// Call after bufferize_classify's prune rules so a follow-up
-// pm_apply_rangeify invocation observes the same realize set the boundary
-// walker uses.
-fn void rangeify_unified_resync_realize_from_nodes(void);
 fn u32  rangeify_unified_last_bufferizes_emitted(void);
 // Reduce-ranges attached to a UOP_REDUCE node by the unified pass.
 // Mirrors tinygrad's `src=(value,)+tuple(new_ranges)` from

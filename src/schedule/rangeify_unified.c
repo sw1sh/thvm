@@ -1012,22 +1012,6 @@ fn Term rangeify_unified_store_root_at(u32 node_idx) {
   return RU_STORE_ROOT[node_idx];
 }
 
-// Resync RU_REALIZE_MAP[i].realized_full from BUFFERIZE_NODES[i].realized.
-// bufferize_classify's prune rules (inline-softmax-broadcast-reduce et al.)
-// mutate BUFFERIZE_NODES.realized after run_rangeify_unified has populated
-// RU_REALIZE_MAP. Without this resync a re-invocation of pm_apply_rangeify
-// would emit BUFFERIZE Terms for stale-realized nodes whose realized bit
-// has since been cleared. Partial-realize state is left untouched.
-fn void rangeify_unified_resync_realize_from_nodes(void) {
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    if (BUFFERIZE_NODES[i].realized) {
-      RU_REALIZE_MAP[i].realized_full = 1;
-    } else {
-      RU_REALIZE_MAP[i].realized_full = 0;
-    }
-  }
-}
-
 // Build a row-major linear addr Term from an array of per-axis range
 // expressions and the producing tensor's shape.  Each range may be a
 // bare UOP_RANGE leaf (the elementwise case) or an arithmetic
