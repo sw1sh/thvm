@@ -853,8 +853,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
             If[ reason === $TraceNormStep, cur = cur + 2 ];
             <|
                 "Reason" -> reason, "ParentA" -> pa, "ParentB" -> pb,
-                "Lhs" -> decodeAtpTerm[l, labelToName, idToName],
-                "Rhs" -> decodeAtpTerm[r, labelToName, idToName],
+                "LhsRaw" -> l, "RhsRaw" -> r,
                 "Pos" -> (pos + 1),
                 "Side" -> side, "Fwd" -> fwd
             |>
@@ -882,6 +881,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
         "MainRules" -> mainRules,
         "RTrace" -> rTrace,
         "Trace" -> traceEntries,
+        "L2N" -> labelToName, "I2N" -> idToName,
         (* every variable symbol the decode produced: the named
            encoder vars plus any "x<id>" fallbacks for FVR ids
            completion introduced past the original signature.  Both
@@ -890,7 +890,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
            completion variable as a constant. *)
         "VarSyms" -> Union[
             Symbol /@ Values[idToName],
-            Cases[{traceEntries, mainRules, mainSteps, extSteps, mnfSteps},
+            Cases[{mainRules, mainSteps, extSteps, mnfSteps},
                 s_Symbol /; StringMatchQ[SymbolName[s],
                     "x" ~~ DigitCharacter ..],
                 {0, Infinity}]
@@ -1007,7 +1007,7 @@ $AtpTraceNone = 4294967295;
 cplCanonVars[expr_, varSyms_] := cplCanonVars[expr, varSyms] =
     Block[{occ},
         occ = DeleteDuplicates @ Cases[expr,
-            v_Symbol /; MemberQ[varSyms, v], {0, Infinity},
+            v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity},
             Heads -> True];
         expr /. MapThread[Rule,
             {occ, Table[Symbol["cplV" <> ToString[i]],
@@ -1028,7 +1028,7 @@ cplEqSetQ[a_List, b_List, varSyms_] := With[{
    rule's lhs vars are a subset of its rhs vars -- the same
    atp_vars_contained guard ordered rewriting uses in the C engine. *)
 cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr,
-    v_Symbol /; MemberQ[varSyms, v], {0, Infinity}, Heads -> True]
+    v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity}, Heads -> True]
 
 (* Rewrite each first-order variable occurrence (members of
    varSyms) in `term` as Pattern[v, Blank[]].  The var -> var_ rules
@@ -1036,8 +1036,16 @@ cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr,
    rhs.  The verifier computes a step's expected result from the
    cited rules' patterned lhs's, so every dataset Statement that
    carries variables must be patternized to match. *)
-cplPatternize[term_, varSyms_] := term /. MapThread[Rule,
-    {varSyms, Map[Pattern[#, Blank[]] &, varSyms]}]
+atpXVarQ[s_Symbol] := StringMatchQ[SymbolName[s], "x" ~~ DigitCharacter ..];
+atpXVarQ[_] := False;
+
+(* Patternize the completion variables in `term`: the named vars in
+   varSyms plus any "x<id>" symbol decodeAtpTerm minted for a fresh
+   FVR completion introduced past the signature.  Recognizing the
+   x-pattern here means varSyms need only carry the named vars, so the
+   trace need not be eagerly scanned for completion vars. *)
+cplPatternize[term_, varSyms_] := term /.
+    (v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v])) :> Pattern[v, Blank[]]
 
 (* A completion rule {lhs, rhs} as a WL rewrite rule, with the lhs
    variables patternized so the rule actually fires. *)
@@ -1094,9 +1102,20 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         prepareRules, runBfs, emitNorm, resolveCp, resolveTrace,
         resolveRule, axiomEntries,
         cjp, hypKey, chainEntries, runEq, prevChainKey, allEntries,
-        stmt
+        stmt, l2n, i2n, dterm, tL, tR
     },
         varSyms = cRes["VarSyms"];
+        (* Lazy, memoized trace-term decode: trace entries ship raw Term
+           ints (LhsRaw/RhsRaw); decodeAtpTerm walks the C heap per cell,
+           so eagerly decoding all ~15k saturation entries cost seconds.
+           Decode on demand -- only the few hundred entries the proof
+           actually reaches (resolveTrace DAG + aliveRulesAt ORIENTs)
+           get decoded, each once. *)
+        l2n = cRes["L2N"]; i2n = cRes["I2N"];
+        Clear[dterm];
+        dterm[ri_] := dterm[ri] = decodeAtpTerm[ri, l2n, i2n];
+        tL[e_] := dterm[e["LhsRaw"]];
+        tR[e_] := dterm[e["RhsRaw"]];
         (* the trace-decoded terms carry bare variable symbols;
            atpEncodeProblem's AxPairs / ConjPair carry Pattern[v, _]
            wrappers -- strip them so every comparison is bare-to-bare
@@ -1129,7 +1148,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 s_ /; trace[[s + 1]]["Reason"] === $TraceSimplify :>
                     trace[[s + 1]]["ParentA"]];
             Table[
-                {t, {trace[[t + 1]]["Lhs"], trace[[t + 1]]["Rhs"]}},
+                {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
                 {t, Select[Range[0, ti - 1],
                     trace[[# + 1]]["Reason"] === $TraceOrient &&
                     ! MemberQ[dropped, #] &]}
@@ -1281,8 +1300,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 curEq = startEq;
                 Do[
                     cInfo = resolveTrace[step[[2]]];
-                    rEq = {trace[[step[[2]] + 1]]["Lhs"],
-                           trace[[step[[2]] + 1]]["Rhs"]};
+                    rEq = {tL[trace[[step[[2]] + 1]]],
+                           tR[trace[[step[[2]] + 1]]]};
                     slN++;
                     st = stmt[step[[1]]];
                     AppendTo[entries, {$SubstitutionLemmaSym, slN} -> <|
@@ -1333,12 +1352,12 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                -- the reverse of thvm's recorded (rewritten-lhs, rhs)
                critical pair -- so the CriticalPairLemma Statement
                takes the sides swapped. *)
-            cpEq = {cte["Rhs"], cte["Lhs"]};
+            cpEq = {tR[cte], tL[cte]};
             pos = cte["Pos"];
             aTe = trace[[cte["ParentA"] + 1]];
             bTe = trace[[cte["ParentB"] + 1]];
-            ruleAEq = {aTe["Lhs"], aTe["Rhs"]};
-            ruleBEq = {bTe["Lhs"], bTe["Rhs"]};
+            ruleAEq = {tL[aTe], tR[aTe]};
+            ruleBEq = {tL[bTe], tR[bTe]};
             aInfo = resolveTrace[cte["ParentA"]];
             bInfo = resolveTrace[cte["ParentB"]];
             cpN++;
@@ -1384,7 +1403,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 Throw[$Failed]];
             inProgress[ti] = True;
             te = trace[[ti + 1]];
-            ruleEq = {te["Lhs"], te["Rhs"]};
+            ruleEq = {tL[te], tR[te]};
             info = Which[
                 te["Reason"] === $TraceCp,
                     resolveCp[ti],
@@ -1422,7 +1441,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         pInfo = resolveTrace[te["ParentA"]];
                         rInfo = resolveTrace[te["ParentB"]];
                         rTe = trace[[te["ParentB"] + 1]];
-                        rEq = {rTe["Lhs"], rTe["Rhs"]};
+                        rEq = {tL[rTe], tR[rTe]};
                         swapped = TrueQ[pInfo["Swapped"]];
                         (* cSide0WlPos: WL position (1 or 2) that
                            corresponds to C engine's side=0.  Tracks
@@ -1457,7 +1476,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                atp_orient_and_add swapped the CP. *)
                             parentReason === $TraceOrient ||
                               parentReason === $TraceSimplify,
-                                If[ parentTe["Lhs"] === pInfo["Eq"][[1]],
+                                If[ tL[parentTe] === pInfo["Eq"][[1]],
                                     1, 2],
                             (* chained NORM_STEP: parent is itself a
                                NORM_STEP that already computed its
@@ -1481,8 +1500,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                            from C's actual other side once the chain
                            switches which C side it rewrites. *)
                         wlEq = If[ cSide0WlPos === 1,
-                            {te["Lhs"], te["Rhs"]},
-                            {te["Rhs"], te["Lhs"]}];
+                            {tL[te], tR[te]},
+                            {tR[te], tL[te]}];
                         newCSide0WlPos = cSide0WlPos;
                         slN++;
                         sl = {$SubstitutionLemmaSym, slN};
@@ -1579,7 +1598,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 cKey = cInfo["Key"];
                 mr = If[ usingMnf,
                     With[{te = trace[[step["RuleC"] + 1]]},
-                        {te["Lhs"], te["Rhs"]}],
+                        {tL[te], tR[te]}],
                     mainRules[[step["RuleC"] + 1]]];
                 (* Ordered rewriting in the C engine fires whichever
                    direction strictly decreases the redex.  Fwd = 1
@@ -2082,12 +2101,14 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] := Catch[
             tryBuild[chainOn_, baseDataset_] := Module[{ds, p, v},
                 ds = If[ baseDataset =!= $Failed, baseDataset,
                     Block[{$AtpUseChain = chainOn},
-                        Quiet @ Check[
-                            buildCplDataset[enc, conjPair, cRes],
+                        Check[
+                            Quiet[buildCplDataset[enc, conjPair, cRes],
+                                {General::newsym, RuleDelayed::rhs}],
                             $Failed]]];
                 If[ ds === $Failed, $Failed,
                     p = ProofObject["EquationalLogic", conjStmt, axEq,
-                        <|"Variables" -> varNames,
+                        <|"Variables" -> Union[varNames,
+                            Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
                           "Constants" -> {}, "Proof" -> ds|>];
                     v = Quiet @ Check[
                         p["ProofFunction"][p["Theorems"]], $Failed];
