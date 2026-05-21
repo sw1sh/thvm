@@ -778,17 +778,15 @@ int uop_dag_classify_gemv_shape(Term root,
 
   u32 ldW = 0;
   u32 transW = 0;
-  u32 w_red_coeff = 0, w_other_coeff = 0, axis_m = 0;
+  u32 w_red_coeff = 0, w_other_coeff = 0;
   // x's bare RANGE leaf carries the reduce axis (classifier invariant).
   u32 red_axis_id = uop_range_axis_id(addr_x);
   int dag_w_ok = uop_dag_extract_matmul_strides_from_addr(
-      addr_w, red_axis_id, &w_red_coeff, &w_other_coeff, &axis_m);
-  (void)axis_m;
+      addr_w, red_axis_id, &w_red_coeff, &w_other_coeff, NULL);
 
   if (!dag_w_ok) {
-    // Hybrid fallback to legacy view reader.  Same shape validations as
-    // the original implementation; retained until every lift output
-    // decodes via the DAG path.
+    // Fallback to view-stride reader for lift outputs the DAG addr-arm
+    // extractor can't decode (e.g. non-IADD or non-RANGE addr leaves).
     if (ke->input_views == NULL) return 0;
     View const *vw = &ke->input_views[w_input];
     View const *vx = &ke->input_views[x_input];
