@@ -2408,6 +2408,14 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_pri);
   free(s->cp_goal);
   free(s->cp_seq);
+  // Auto-MaxWeight overflow stash: each packed byte string is owned
+  // here too (free(NULL) is a no-op for slots already drained).
+  if (s->cp_stash_packed != NULL) {
+    for (u32 i = 0; i < s->n_cp_stash; i++) free(s->cp_stash_packed[i]);
+    free(s->cp_stash_packed);
+  }
+  free(s->cp_stash_trace);
+  free(s->cp_stash_nodes);
 #ifdef ATP_FV_INDEX
   atp_fv_index_free(s->fv_index);
 #endif
@@ -2729,6 +2737,17 @@ fn void thvm_atp_set_max_cp_weight(AtpState *s, u32 w) {
   if (s != NULL) s->max_cp_weight = w;
 }
 
+// Enable the automatic, completeness-preserving growing CP-weight
+// bound.  `base` seeds the bound; slope (default 2) scales it by the
+// deepest current rule LHS so the bound tracks how complex the rule
+// set has become.  base==0 disables (the historical unbounded engine).
+fn void thvm_atp_set_auto_max_cp_weight(AtpState *s, u32 base) {
+  if (s == NULL) return;
+  s->auto_max_cp_weight_base  = base;
+  s->auto_max_cp_weight_slope = 2u;
+  s->auto_max_cp_weight_cur   = base;   // grown lazily as rules deepen
+}
+
 fn void thvm_atp_set_goal_interleave(AtpState *s, u32 ratio) {
   if (s != NULL) s->use_goal_interleave = ratio;
 }
@@ -2830,17 +2849,25 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
       }
       continue;
     }
-    // unorientable equation -- both directions, variable-safe + order-gated.
-    if (atp_vars_contained(rhs[i], lhs[i])) {       // l -> r
+    // Unorientable equation -- both directions, variable-safe + order-
+    // gated.  Match FIRST, then check the variable-containment guard:
+    // at most positions the rule has no redex, so the cheap fail-fast
+    // thvm_match avoids the full-term atp_vars_contained walk (a
+    // measured hot leaf).  Behaviour-identical -- both the match and
+    // the guard must hold for the rule to fire, and the guard does not
+    // depend on the redex.
+    {
       RewriteSubst subst = {{0}};
-      if (thvm_match(lhs[i], t, &subst)) {
+      if (thvm_match(lhs[i], t, &subst) &&                 // l -> r
+          atp_vars_contained(rhs[i], lhs[i])) {
         Term repl = thvm_subst_apply(rhs[i], &subst);
         if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
       }
     }
-    if (atp_vars_contained(lhs[i], rhs[i])) {       // r -> l
+    {
       RewriteSubst subst = {{0}};
-      if (thvm_match(rhs[i], t, &subst)) {
+      if (thvm_match(rhs[i], t, &subst) &&                 // r -> l
+          atp_vars_contained(lhs[i], rhs[i])) {
         Term repl = thvm_subst_apply(lhs[i], &subst);
         if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
       }
@@ -3289,30 +3316,17 @@ static void atp_cp_sift_down(AtpState *s, u32 i) {
   }
 }
 
-// Push one CP onto the heap.  Computes its priority once (the cost
-// the old select_cp paid n times per step) and sifts up.  O(log n).
-static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
+// Insert an already-packed CP byte string onto the heap.  Takes
+// ownership of `packed` (the queue frees it on pop/drop).  `lhs`/`rhs`
+// are the live Terms (for the FV index + goal weight); `cp_nodes` is
+// the precomputed node count.  Shared by atp_cp_heap_push (fresh CP)
+// and the auto-MaxWeight stash drain (re-admitting a deferred CP).
+static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
+                                      Term lhs, Term rhs, u32 trace) {
   atp_ensure_cp_cap(s, s->n_cps + 1);
   u32 i = s->n_cps;
-  // Pack the CP into a byte string outside the managed heap.  Slot i
-  // (== n_cps) is always NULL here -- atp_ensure_cp_cap NULL-inits new
-  // slots and every pop / drop NULLs the slot it vacates.  `packed`
-  // is the buffer's identity; a later sift only moves the pointer
-  // between slots, so it stays valid for the index borrow below.
-  u32  cp_nodes  = 0u;
-  u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
-  // Waldmeister MaxWeight: drop an over-weight critical pair before it
-  // enters the queue, so a self-overlapping axiom cannot flood the
-  // search with runaway pairs (and the goal-directed selector is not
-  // starved).  0 = unbounded.
-  if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
-    free(packed);
-    return;
-  }
   s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
-  // acp_pack already counted every node -- reuse it as the CP weight
-  // instead of paying atp_symbol_count a second pair of traversals.
   s->cp_pri[i]   = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
   s->cp_goal[i]  = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                      ? atp_goal_weight(s, lhs, rhs) : 0u;
@@ -3320,14 +3334,131 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   s->cp_seq[i]   = seq;
   s->n_cps++;
   atp_cp_sift_up(s, i);
-  // 8a: keep cp_graph in lockstep with the array mirror.
   atp_cp_graph_sync(s);
 #ifdef ATP_FV_INDEX
-  // 7d: index the new CP under its (GC-stable) seq id.  The record
-  // borrows `packed`; the trie keys on the FV, not the heap slot, so
-  // the sift-up above does not touch the index.
   atp_fv_index_insert(s->fv_index, lhs, rhs, packed, seq);
 #endif
+}
+
+// The LIVE auto-MaxWeight bound: base + slope * (deepest rule-LHS
+// weight).  Recomputed against the current rule set so the bound grows
+// as completion deepens R -- a CP deferred now becomes admissible once
+// the rules it would interact with have themselves entered R.  Returns
+// 0 (== unbounded) when the auto bound is disabled.
+// Recompute the deepest CURRENT rule LHS and cache the auto bound.
+// Called once per step (at the drain), NOT per CP push -- rescanning R
+// on every push was a measured throughput sink.  The bound tracks the
+// live rule set (it can fall as deep rules are interreduced away),
+// which keeps it tight; completeness does NOT rest on bound
+// monotonicity but on the overflow stash + force-drain in select_cp,
+// so a tighter, fluctuating bound is still complete.
+static void atp_auto_maxw_recompute(AtpState *s) {
+  if (s->auto_max_cp_weight_base == 0u) { s->auto_max_cp_weight_cur = 0u; return; }
+  u32 deepest = 0u;
+  for (u32 k = 0; k < s->n_rules; k++) {
+    u32 w = atp_symbol_count(s->lhs[k]);
+    if (w > deepest) deepest = w;
+  }
+  s->max_rule_lhs_weight = deepest;
+  u32 slope = s->auto_max_cp_weight_slope ? s->auto_max_cp_weight_slope : 2u;
+  s->auto_max_cp_weight_cur = s->auto_max_cp_weight_base + slope * deepest;
+}
+
+static u32 atp_auto_maxw_bound(AtpState *s) {
+  if (s->auto_max_cp_weight_base == 0u) return 0u;
+  // Return the cached bound (refreshed once per step at the drain).
+  return s->auto_max_cp_weight_cur;
+}
+
+// Park an over-bound CP on the overflow stash (auto-MaxWeight).  Takes
+// ownership of `packed`.  Drained back into the heap by
+// atp_auto_maxw_drain once the bound grows past its weight, so the CP
+// is deferred, NEVER discarded -- completeness preserved.
+static void atp_cp_stash_push(AtpState *s, u8 *packed, u32 cp_nodes,
+                              u32 trace) {
+  if (s->n_cp_stash >= s->cp_stash_cap) {
+    u32 ncap = s->cp_stash_cap ? s->cp_stash_cap * 2u : 256u;
+    u8 **np  = (u8 **)realloc(s->cp_stash_packed, ncap * sizeof(u8 *));
+    u32 *nt  = (u32 *)realloc(s->cp_stash_trace,  ncap * sizeof(u32));
+    u32 *nn  = (u32 *)realloc(s->cp_stash_nodes,  ncap * sizeof(u32));
+    if (np == NULL || nt == NULL || nn == NULL) {
+      // Allocation failure: rather than leak or lose the CP, admit it
+      // directly (slow path, but sound -- never drops a proof CP).
+      free(np); free(nt); free(nn);
+      Term l = 0, r = 0;
+      acp_unpack(packed, &l, &r);
+      atp_cp_heap_insert_packed(s, packed, cp_nodes, l, r, trace);
+      return;
+    }
+    s->cp_stash_packed = np; s->cp_stash_trace = nt; s->cp_stash_nodes = nn;
+    s->cp_stash_cap = ncap;
+  }
+  s->cp_stash_packed[s->n_cp_stash] = packed;
+  s->cp_stash_trace[s->n_cp_stash]  = trace;
+  s->cp_stash_nodes[s->n_cp_stash]  = cp_nodes;
+  s->n_cp_stash++;
+}
+
+// Re-admit every stashed CP now within the (recomputed, possibly
+// grown) bound.  Compacts the stash in place.  Called after a rule is
+// added (the bound may have grown) and whenever the live queue empties
+// (force=1 admits the lightest stashed CP regardless, so selection
+// never starves while CPs remain).
+static void atp_auto_maxw_drain(AtpState *s, u8 force) {
+  if (s->auto_max_cp_weight_base == 0u || s->n_cp_stash == 0u) return;
+  u32 bound = atp_auto_maxw_bound(s);
+  // When forced and nothing is within bound, raise the working bound to
+  // the lightest stashed CP so at least one re-enters -- a monotone
+  // growth that guarantees every stashed CP is eventually selected.
+  if (force && s->n_cps == 0u) {
+    u32 lightest = 0xffffffffu;
+    for (u32 k = 0; k < s->n_cp_stash; k++) {
+      if (s->cp_stash_nodes[k] < lightest) lightest = s->cp_stash_nodes[k];
+    }
+    if (lightest != 0xffffffffu && lightest > bound) bound = lightest;
+  }
+  u32 w = 0;
+  for (u32 r = 0; r < s->n_cp_stash; r++) {
+    if (s->cp_stash_nodes[r] <= bound) {
+      Term l = 0, rr = 0;
+      acp_unpack(s->cp_stash_packed[r], &l, &rr);
+      atp_cp_heap_insert_packed(s, s->cp_stash_packed[r],
+                                s->cp_stash_nodes[r], l, rr,
+                                s->cp_stash_trace[r]);
+    } else {
+      s->cp_stash_packed[w] = s->cp_stash_packed[r];
+      s->cp_stash_trace[w]  = s->cp_stash_trace[r];
+      s->cp_stash_nodes[w]  = s->cp_stash_nodes[r];
+      w++;
+    }
+  }
+  s->n_cp_stash = w;
+}
+
+// Push one CP onto the heap.  Computes its priority once (the cost
+// the old select_cp paid n times per step) and sifts up.  O(log n).
+static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
+  // Pack the CP into a byte string outside the managed heap.
+  u32  cp_nodes  = 0u;
+  u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
+  // Waldmeister MaxWeight (hard cap): drop an over-weight critical pair
+  // before it enters the queue.  0 = unbounded.  This is the LOSSY
+  // bound (flag-gated by the caller setting max_cp_weight); the default
+  // engine leaves it 0.
+  if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
+    free(packed);
+    return;
+  }
+  // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
+  // the overflow stash rather than dropping it.  Disabled when base==0.
+  if (s->auto_max_cp_weight_base > 0u) {
+    u32 bound = atp_auto_maxw_bound(s);
+    if (bound > 0u && cp_nodes > bound) {
+      atp_cp_stash_push(s, packed, cp_nodes, trace);
+      return;
+    }
+  }
+  atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace);
 }
 
 // Waldmeister CP-queue interleaving (a port of KPVerwaltung.c's
@@ -3359,7 +3490,15 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
 //
 // Returns 1 on success (out-params populated), 0 on empty queue.
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
-  if (s == NULL || s->n_cps == 0) return 0;
+  if (s == NULL) return 0;
+  // Auto-MaxWeight: if the active queue is empty but CPs are deferred
+  // on the overflow stash, force-drain the lightest back in -- the
+  // search continues on the deferred CPs (raising the bound monotone),
+  // so no proof CP is lost.  This is what makes the bound complete.
+  if (s->n_cps == 0u && s->n_cp_stash > 0u && s->auto_max_cp_weight_base > 0u) {
+    atp_auto_maxw_drain(s, 1u);
+  }
+  if (s->n_cps == 0) return 0;
 
   // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
   // selections, weight pick (heap root) otherwise.
@@ -3450,6 +3589,45 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
   // rebuild the index wholesale from the live CP arrays.
   atp_fv_index_rebuild(s);
 #endif
+}
+
+// Measurement-only: walk the live CP queue, reporting min/max/mean
+// node count (the acp_pack symbol count) and a coarse size histogram
+// into the caller's `bins` array (bins[k] counts CPs with node-count
+// in [k*bucket, (k+1)*bucket); the last bin is the overflow tail).
+// `nbins`/`bucket` are caller-chosen.  Pure read of cp_packed; no
+// engine state mutated.  Returns the queue length.
+fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
+                              double *mean_out, u32 *bins, u32 nbins,
+                              u32 bucket) {
+  if (bins != NULL && nbins > 0) {
+    for (u32 k = 0; k < nbins; k++) bins[k] = 0u;
+  }
+  if (s == NULL || s->n_cps == 0) {
+    if (min_out)  *min_out  = 0u;
+    if (max_out)  *max_out  = 0u;
+    if (mean_out) *mean_out = 0.0;
+    return 0u;
+  }
+  u32 mn = 0xffffffffu, mx = 0u;
+  u64 sum = 0u;
+  for (u32 i = 0; i < s->n_cps; i++) {
+    Term l = 0, r = 0;
+    acp_unpack(s->cp_packed[i], &l, &r);
+    u32 nodes = atp_symbol_count(l) + atp_symbol_count(r);
+    if (nodes < mn) mn = nodes;
+    if (nodes > mx) mx = nodes;
+    sum += nodes;
+    if (bins != NULL && nbins > 0 && bucket > 0) {
+      u32 b = nodes / bucket;
+      if (b >= nbins) b = nbins - 1u;
+      bins[b]++;
+    }
+  }
+  if (min_out)  *min_out  = mn;
+  if (max_out)  *max_out  = mx;
+  if (mean_out) *mean_out = (double)sum / (double)s->n_cps;
+  return s->n_cps;
 }
 
 // Push one rule onto R; the rule array is growable, so this always
@@ -3703,6 +3881,11 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     thvm_atp_gc_collect(s);
   }
 
+  // Auto-MaxWeight: refresh the bound against the current rule set at
+  // the top of the step so this step's first pushes (and the empty-
+  // queue force-drain inside select_cp) see a bound consistent with R.
+  if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_recompute(s);
+
   Term cp_lhs = 0, cp_rhs = 0;
   if (!thvm_atp_select_cp(s, &cp_lhs, &cp_rhs)) {
     return ATP_QUEUE_EMPTY;
@@ -3785,7 +3968,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   AtpAddedRange post = added;
   post.first = (dropped > post.first) ? 0 : (post.first - dropped);
 
+  // Auto-MaxWeight: refresh the bound against the now-current rule set
+  // before this step's CPs are generated/pushed (the just-oriented rule
+  // may have deepened or, via interreduce, shrunk R).
+  if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_recompute(s);
+
   thvm_atp_generate_cps(s, post);
+
+  // Re-admit any stashed CP now within the refreshed bound.
+  if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_drain(s, 0u);
 
 #ifdef ATP_CP_GRAPH
   // 8b: a rule was oriented (R changed), so every queued CP may now

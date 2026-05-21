@@ -2139,6 +2139,42 @@ int main(void) {
     thvm_atp_free(s_mix);
   }
 
+  TEST_BEGIN("atp/auto-maxweight-preserves-completeness");
+  {
+    // The automatic growing CP-weight bound (Waldmeister MaxWeight, but
+    // never lossy) defers over-bound critical pairs onto an overflow
+    // stash instead of dropping them; the stash is force-drained when
+    // the active queue empties.  With a TIGHT bound (base 1) most CPs
+    // are deferred -- so the group inverse goal proves ONLY IF the
+    // stash + drain re-admit them.  Same verdict as the unbounded
+    // engine: the bound changes search order, never reachability.
+    AtpState *s_unb = thvm_atp_init(&DUMMY_CFG, 64);
+    thvm_atp_set_goal(s_unb, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_unb, mk_f(mk_v(VAR_x), mk_e()),            mk_v(VAR_x));
+    thvm_atp_add_equation(s_unb, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+    thvm_atp_add_equation(s_unb,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_unb = thvm_atp_run(s_unb);
+
+    AtpState *s_aut = thvm_atp_init(&DUMMY_CFG, 64);
+    thvm_atp_set_auto_max_cp_weight(s_aut, 1u);    // tightest bound
+    thvm_atp_set_goal(s_aut, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_aut, mk_f(mk_v(VAR_x), mk_e()),            mk_v(VAR_x));
+    thvm_atp_add_equation(s_aut, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+    thvm_atp_add_equation(s_aut,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_aut = thvm_atp_run(s_aut);
+
+    // Both must reach the same verdict; the unbounded run proves it,
+    // so the auto-bounded run must prove it too (completeness).
+    CHECK_EQ((int)rst_unb, (int)ATP_PROVED);
+    CHECK_EQ((int)rst_aut, (int)rst_unb);
+    thvm_atp_free(s_unb);
+    thvm_atp_free(s_aut);
+  }
+
   // === CP-weight modes: ports of Waldmeister ClasHeuristics =========
   //
   // DUMMY_CFG: weights[e=1]=1, weights[i=2]=0, weights[f=3]=1,
