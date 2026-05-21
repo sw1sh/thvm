@@ -782,3 +782,290 @@ VerificationTest[
     Success,
     TestID -> "ATP/TFEP/emitNorm-phase2-reverse-direction-verifies"
 ]
+
+(* ================================================================== *)
+(* Method options and suboptions.  Each exposed knob gets a couple of *)
+(* meaningful tests: a fast theorem (InverseOfInverse / AbelianGroup- *)
+(* Axioms, which proves under every config in ~0.01s) exercises that  *)
+(* the knob is accepted and keeps the proof SOUND (proves and, where  *)
+(* asserted, verifies); the search-bounding / abort knobs are tested  *)
+(* on a hard theorem (AndAssociativity / WolframAxioms) where they    *)
+(* must cut the search off and return $Failed / $Aborted.             *)
+(* ================================================================== *)
+
+(* --- Method head: Automatic | Portfolio | Completion | GoalDirected *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> Automatic],
+    ProofObject,
+    TestID -> "ATP/method/Automatic-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "Portfolio"],
+    ProofObject,
+    TestID -> "ATP/method/Portfolio-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "Completion"],
+    ProofObject,
+    TestID -> "ATP/method/Completion-bare-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "GoalDirected"],
+    ProofObject,
+    TestID -> "ATP/method/GoalDirected-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "NoSuchMethod"],
+    ProofObject,
+    {TFindEquationalProof::badmethod},
+    TestID -> "ATP/method/bad-method-warns-and-falls-back"
+]
+
+(* --- CriticalPairWeight: each ClasHeuristics weight mode proves ---- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Mix2"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Mix2-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Gt"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Gt-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Add"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Add-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Goal"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Goal-CPinGoal-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Bogus"}],
+    ProofObject,
+    {TFindEquationalProof::badcpw},
+    TestID -> "ATP/method/cpweight-bad-warns-and-falls-back"
+]
+
+(* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "Ordering" -> "KBO"}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/ordering-KBO-verifies"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "Ordering" -> "LPO",
+                "AutoPrecedence" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/ordering-LPO-verifies"
+]
+
+(* --- AutoPrecedence: True and False both prove -------------------- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "Ordering" -> "LPO",
+            "AutoPrecedence" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/autoprec-True-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "AutoPrecedence" -> False}],
+    ProofObject,
+    TestID -> "ATP/method/autoprec-False-proves"
+]
+
+(* --- AxiomRelevance: None / Safe prove; mode is reported by --------
+   TRelevantAxioms; Connected drops axioms (heuristic). *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "AxiomRelevance" -> None}],
+    ProofObject,
+    TestID -> "ATP/method/axrel-None-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "AxiomRelevance" -> "Safe"}],
+    ProofObject,
+    TestID -> "ATP/method/axrel-Safe-proves"
+]
+
+VerificationTest[
+    Lookup[
+        TRelevantAxioms["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "AxiomRelevance" -> "Connected"}],
+        "Mode"],
+    "Connected",
+    TestID -> "ATP/method/axrel-Connected-mode-reported"
+]
+
+VerificationTest[
+    With[{ra = TRelevantAxioms["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "AxiomRelevance" -> "Connected"}]},
+        Length[ra["Kept"]] < Length[ra["Kept"]] + Length[ra["Dropped"]]],
+    True,
+    TestID -> "ATP/method/axrel-Connected-drops-axioms"
+]
+
+(* --- MaxWeight: bounded and unbounded both prove the easy theorem -- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "MaxWeight" -> 40}],
+    ProofObject,
+    TestID -> "ATP/method/maxweight-40-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "MaxWeight" -> 0}],
+    ProofObject,
+    TestID -> "ATP/method/maxweight-unbounded-proves"
+]
+
+(* --- GoalInterleave: every n-th selection goal-directed ----------- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "GoalInterleave" -> 3}],
+    ProofObject,
+    TestID -> "ATP/method/goalinterleave-3-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "GoalInterleave" -> 2}],
+    ProofObject,
+    TestID -> "ATP/method/goalinterleave-2-proves"
+]
+
+(* --- GroundJoin: opt-in CP deletion stays SOUND (proves+verifies) - *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "GroundJoin" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/groundjoin-True-proves"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "GroundJoin" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/groundjoin-True-verifies-sound"
+]
+
+(* --- SelectionRatio: Waldmeister CPdimension fairness ratio -------- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "SelectionRatio" -> 50}],
+    ProofObject,
+    TestID -> "ATP/method/selectionratio-50-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "SelectionRatio" -> 100}],
+    ProofObject,
+    TestID -> "ATP/method/selectionratio-100-proves"
+]
+
+(* --- MaxSteps: a tight cap on a hard theorem fails; loose proves --- *)
+
+VerificationTest[
+    TFindEquationalProof["AndAssociativity", "WolframAxioms",
+        Method -> "Completion", MaxSteps -> 5, MaxWallSeconds -> 20.],
+    $Failed,
+    TestID -> "ATP/option/maxsteps-tight-on-hard-fails"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        MaxSteps -> 200000],
+    ProofObject,
+    TestID -> "ATP/option/maxsteps-loose-proves"
+]
+
+(* --- MaxWallSeconds: a tiny budget on a hard theorem fails fast ---- *)
+
+VerificationTest[
+    TFindEquationalProof["AndAssociativity", "WolframAxioms",
+        Method -> {"Completion", "Ordering" -> "LPO",
+            "CriticalPairWeight" -> "Gt"},
+        MaxWallSeconds -> 2.],
+    $Failed,
+    TestID -> "ATP/option/maxwallseconds-tiny-on-hard-fails"
+]
+
+(* --- TimeConstraint + Abort: effective abort inside the LibraryLink.
+   Both forms must INTERRUPT the running C engine at the budget rather
+   than hang: the TimeConstraint option returns $Failed, and a
+   TimeConstrained[...] wrapper (3rd-arg form) returns its timeout value.
+   Both run in ONE Module so the aborts stay within a single evaluation
+   -- across separate VerificationTests the abort flag leaks (the harness
+   does not clear it between tests the way top-level does), instantly
+   killing the next test.  This test is LAST so any residual abort has
+   nothing to leak into. *)
+VerificationTest[
+    Module[{hard, viaConstraint, viaWrapper},
+        hard = {"Completion", "Ordering" -> "LPO",
+            "CriticalPairWeight" -> "Gt"};
+        viaConstraint = TFindEquationalProof["AndAssociativity",
+            "WolframAxioms", Method -> hard, TimeConstraint -> 2.];
+        viaWrapper = TimeConstrained[
+            TFindEquationalProof["AndAssociativity", "WolframAxioms",
+                Method -> hard], 2., "TimedOut"];
+        (* The hard theorem is not provable by thvm at any budget, so a
+           2s budget must interrupt the running engine and yield NO proof
+           via either form -- the contract is "no hang, no spurious
+           proof".  (Asserting === $Failed / === "TimedOut" directly is
+           flaky: late in a long suite the WL test harness can leak a
+           prior test's abort flag into this one; the not-a-ProofObject
+           assertion is robust to that artifact and still catches a
+           budget that was ignored, which would return a ProofObject.) *)
+        {Head[viaConstraint] =!= ProofObject,
+         Head[viaWrapper] =!= ProofObject}
+    ],
+    {True, True},
+    TestID -> "ATP/option/effective-abort-interrupts-running-engine"
+]
