@@ -477,7 +477,6 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // For NON-tileable kernels: keep the prior single-LOCAL behaviour
   // (one split, largest factor up to 256 on the last output axis).
   {
-    static const u32 local_factors[] = {32, 16, 8, 4, 3, 2};
     u32 local_cap = 256u;
     if (tileable) {
       // LOCAL on the contiguous spatial axis (wOut -- LAST output axis,
@@ -525,7 +524,6 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           }
         }
       }
-      (void)local_factors;
     } else {
       static const u32 single_local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
       if (hand_opt_snapshot_axes(ke, &ax)) {
