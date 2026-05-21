@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <dlfcn.h>      // dladdr: locate default.metallib next to the dylib
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -98,6 +99,30 @@ static void metal_freelist_trim(void);
 #ifndef THVM_METAL_METALLIB
 #define THVM_METAL_METALLIB "build/default.metallib"
 #endif
+
+// Resolve the metallib to load.  THVM_METAL_METALLIB is a CWD-relative
+// dev path ("build/default.metallib") that works when running from the
+// repo root.  In an installed paclet the CWD is arbitrary, so fall back
+// to a "default.metallib" sitting next to this dylib -- `make wl-mac`
+// ships one there.  dladdr on this very function yields the dylib path.
+// Returns a pointer to a static buffer (single-threaded init path).
+static const char *metal_metallib_path(void) {
+  if (access(THVM_METAL_METALLIB, R_OK) == 0) return THVM_METAL_METALLIB;
+  Dl_info info;
+  static char sibling[1024];
+  if (dladdr((const void *)&metal_metallib_path, &info) && info.dli_fname) {
+    const char *slash = strrchr(info.dli_fname, '/');
+    if (slash) {
+      size_t dirlen = (size_t)(slash - info.dli_fname) + 1;
+      if (dirlen + sizeof("default.metallib") <= sizeof(sibling)) {
+        memcpy(sibling, info.dli_fname, dirlen);
+        strcpy(sibling + dirlen, "default.metallib");
+        if (access(sibling, R_OK) == 0) return sibling;
+      }
+    }
+  }
+  return THVM_METAL_METALLIB;  // last resort: let newLibraryWithURL report it
+}
 
 // Forward-declared here so metal_init can reset the length on
 // repeated lifecycle cycles; the actual table + length live
@@ -235,12 +260,13 @@ static int metal_init(void) {
     return -1;
   }
   NSError *err = nil;
+  const char *metallib_path = metal_metallib_path();
   NSURL    *libURL = [NSURL fileURLWithPath:
-      [NSString stringWithUTF8String:THVM_METAL_METALLIB]];
+      [NSString stringWithUTF8String:metallib_path]];
   METAL_LIB = [METAL_DEVICE newLibraryWithURL:libURL error:&err];
   if (METAL_LIB == nil) {
     fprintf(stderr, "thvm: metal_init -- failed to load metallib at %s: %s\n",
-            THVM_METAL_METALLIB,
+            metallib_path,
             err ? [[err localizedDescription] UTF8String] : "(no error)");
     METAL_QUEUE  = nil;
     METAL_DEVICE = nil;
@@ -248,7 +274,7 @@ static int metal_init(void) {
   }
   fprintf(stderr, "thvm: metal_init -- device: %s; metallib: %s (%lu function%s)\n",
           [[METAL_DEVICE name] UTF8String],
-          THVM_METAL_METALLIB,
+          metallib_path,
           (unsigned long)[[METAL_LIB functionNames] count],
           [[METAL_LIB functionNames] count] == 1 ? "" : "s");
   METAL_FREELIST_LEN = 0;

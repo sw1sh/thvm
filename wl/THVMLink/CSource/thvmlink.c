@@ -1682,8 +1682,9 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
   Term store_root = (KERNELS[kid].cached_lift.store_root != 0)
                   ? KERNELS[kid].cached_lift.store_root
                   : lift.store_root;
-  char buf[16384];
-  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  // Render into a temp file (portable across macOS/Linux/Windows) and
+  // read it back, rather than a fixed stack buffer -- no length cap.
+  FILE *fp = tmpfile();
   if (fp == NULL) {
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
@@ -1691,18 +1692,21 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
   cg_render_uop_kernel_c(store_root, "k", lift.out_buf,
                          lift.in_bufs, lift.n_inputs, fp);
   long n = ftell(fp);
-  fclose(fp);
   if (n <= 0) {
+    fclose(fp);
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
   char *src = (char *)malloc((size_t)n + 1);
   if (src == NULL) {
+    fclose(fp);
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
-  memcpy(src, buf, (size_t)n);
-  src[n] = '\0';
+  rewind(fp);
+  size_t got = fread(src, 1, (size_t)n, fp);
+  fclose(fp);
+  src[got] = '\0';
   // libData->UTF8String_disown is the matching free; WL retains the
   // pointer until that's called.  Caller (WL side) holds it long
   // enough to pull the string contents and then it gets reaped.

@@ -48,7 +48,9 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <dlfcn.h>
+#ifndef _WIN32
+#include <dlfcn.h>  // Windows: dlopen family shimmed in util/portable_win.h
+#endif
 
 // Embedded thvm.c source (flattened: all our `#include "..."`
 // directives resolved, system `<...>` headers preserved).  Defined

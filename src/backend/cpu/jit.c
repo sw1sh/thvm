@@ -18,7 +18,9 @@
 // (numel==1) at emit time, so a program with the same lifted DAG
 // but different input numels needs a fresh build.
 
-#include <dlfcn.h>
+#ifndef _WIN32
+#include <dlfcn.h>  // Windows: dlopen family shimmed in util/portable_win.h
+#endif
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -157,17 +159,19 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // consult it.
   if (ke->cached_lift.store_root == 0) return NULL;
   Term store_root = ke->cached_lift.store_root;
-  char buf[16384];
-  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  // Render into a temp file (portable across macOS/Linux/Windows) and
+  // read it back, rather than a fixed stack buffer -- no length cap.
+  FILE *fp = tmpfile();
   if (fp == NULL) return NULL;
   cg_render_uop_kernel_c_root(store_root, "k", fp);
   long n = ftell(fp);
-  fclose(fp);
-  if (n <= 0) return NULL;
+  if (n <= 0) { fclose(fp); return NULL; }
   char *src = (char *)malloc((size_t)n + 1);
-  if (src == NULL) return NULL;
-  memcpy(src, buf, (size_t)n);
-  src[n] = '\0';
+  if (src == NULL) { fclose(fp); return NULL; }
+  rewind(fp);
+  size_t got = fread(src, 1, (size_t)n, fp);
+  fclose(fp);
+  src[got] = '\0';
 
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_%016llx.c",

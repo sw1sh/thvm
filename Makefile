@@ -248,6 +248,82 @@ wl-examples: $(WL_LIB)
 wl-examples-test: $(WL_LIB)
 	wolframscript -f wl/Examples/test_reductions.wls
 
+# === Cross-compiled paclet libraries (all five Wolfram platforms) ====
+# `make wl-cross` populates wl/THVMLink/LibraryResources/<SystemID>/ for
+# every typical Wolfram $SystemID, so PacletPack bundles one paclet that
+# installs everywhere.  Then publish + round-trip:
+#     wolframscript -f tools/publish_paclet.wls    # -> public CloudObject
+#     wolframscript -f tools/verify_install.wls    # PacletInstall + Needs
+#
+#   MacOSX-ARM64 + MacOSX-x86-64   native clang, full Metal GPU
+#                                  (one universal2 dylib in both dirs)
+#   Linux-x86-64 + Linux-ARM64     zig cc, CPU-only .so
+#   Windows-x86-64                 zig cc, CPU-only .dll
+#
+# Off-Apple builds are CPU-only: Metal is Apple Objective-C and CUDA is
+# Linux+toolkit-gated, neither cross-compiles from a Mac.  The WL
+# LibraryLink C headers are platform-independent, so $(WL_INCLUDE) is
+# reused for every target.  -D_GNU_SOURCE is passed on the command line
+# (not left to thvm.h) because WolframLibrary.h is included before
+# thvm.h sets its POSIX feature-test macro, so the macro would land too
+# late for the Linux glibc headers.
+ZIG          ?= zig
+WL_RES       := $(WL_PACLET)/LibraryResources
+WL_XCC_FLAGS := -std=c11 -O2 -w -D_GNU_SOURCE -I"$(WL_INCLUDE)"
+
+# Per-format runtime blobs: the embedded thvm source is .incbin'd into
+# every per-platform library, and the host object must match the
+# linker's format (Mach-O native, ELF Linux, COFF Windows).
+build/thvm_runtime_blob_elf.c: build/thvm_inline.c tools/embed_blob.py
+	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src elf > $@
+build/thvm_runtime_blob_coff.c: build/thvm_inline.c tools/embed_blob.py
+	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src coff > $@
+
+.PHONY: wl-cross wl-mac wl-linux-x64 wl-linux-arm64 wl-win-x64
+
+wl-cross: wl-mac wl-linux-x64 wl-linux-arm64 wl-win-x64
+	@echo "[wl-cross] all five platform libraries are under $(WL_RES)/"
+
+# macOS: one universal2 (arm64 + x86_64) dylib with Metal, placed in
+# both MacOSX SystemID dirs.  Must run on a Mac (xcrun metal toolchain).
+# Mirrors the $(WL_LIB) recipe but dual-arch; ships default.metallib
+# alongside so the GPU path (DEV=metal) works post-install -- metal_init
+# resolves it relative to the loaded dylib (see backend/metal/_.m).
+wl-mac: $(WL_SRC) $(SRC) $(METAL_LIBPATH) build/thvm_runtime_blob.c
+	@if [ -z "$(WOLFRAM_APP)" ] || [ ! -d "$(WL_INCLUDE)" ]; then \
+	  echo "ERROR: Wolfram install not found.  Set WOLFRAM_APP=/Applications/Wolfram*.app"; exit 1; fi
+	@mkdir -p $(WL_RES)/MacOSX-ARM64 $(WL_RES)/MacOSX-x86-64
+	clang -fobjc-arc -O2 -arch arm64 -arch x86_64 $(METAL_DEFINES) \
+	  -c -o build/backend_metal_univ.o src/backend/metal/_.m
+	$(CC) -std=c11 -O2 -w -fPIC -dynamiclib -arch arm64 -arch x86_64 \
+	  -DACCELERATE_NEW_LAPACK $(WL_TRACE_DEF) -DTHVM_HAS_METAL \
+	  -I"$(WL_INCLUDE)" \
+	  -o $(WL_RES)/MacOSX-ARM64/THVMLink.dylib \
+	  $(WL_SRC) build/thvm_runtime_blob.c build/backend_metal_univ.o \
+	  -framework Metal -framework Foundation -framework Accelerate
+	codesign --force --sign - $(WL_RES)/MacOSX-ARM64/THVMLink.dylib
+	cp $(WL_RES)/MacOSX-ARM64/THVMLink.dylib $(WL_RES)/MacOSX-x86-64/THVMLink.dylib
+	cp $(METAL_LIBPATH) $(WL_RES)/MacOSX-ARM64/default.metallib
+	cp $(METAL_LIBPATH) $(WL_RES)/MacOSX-x86-64/default.metallib
+
+wl-linux-x64: build/thvm_runtime_blob_elf.c $(WL_SRC) $(SRC)
+	@mkdir -p $(WL_RES)/Linux-x86-64
+	$(ZIG) cc -target x86_64-linux-gnu $(WL_XCC_FLAGS) -fPIC -shared \
+	  -o $(WL_RES)/Linux-x86-64/THVMLink.so \
+	  $(WL_SRC) build/thvm_runtime_blob_elf.c -lm
+
+wl-linux-arm64: build/thvm_runtime_blob_elf.c $(WL_SRC) $(SRC)
+	@mkdir -p $(WL_RES)/Linux-ARM64
+	$(ZIG) cc -target aarch64-linux-gnu $(WL_XCC_FLAGS) -fPIC -shared \
+	  -o $(WL_RES)/Linux-ARM64/THVMLink.so \
+	  $(WL_SRC) build/thvm_runtime_blob_elf.c -lm
+
+wl-win-x64: build/thvm_runtime_blob_coff.c $(WL_SRC) $(SRC)
+	@mkdir -p $(WL_RES)/Windows-x86-64
+	$(ZIG) cc -target x86_64-windows-gnu $(WL_XCC_FLAGS) -shared \
+	  -o $(WL_RES)/Windows-x86-64/THVMLink.dll \
+	  $(WL_SRC) build/thvm_runtime_blob_coff.c
+
 
 $(BIN):
 	@mkdir -p $@
@@ -287,14 +363,11 @@ TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,)
 # Per-call compile is ~3-4 sec the first time per def-shape;
 # cache-by-content (build.c FNV hash on the wrapped source) catches
 # repeat calls so subsequent TAOTCompile is instant.
-build:
-	@mkdir -p build
-
-build/thvm_inline.c: $(SRC) tools/inline_includes.py | build
+build/thvm_inline.c: $(SRC) tools/inline_includes.py | $(BUILD)
 	python3 tools/inline_includes.py src/thvm.c > $@
 
 build/thvm_runtime_blob.c: build/thvm_inline.c tools/embed_blob.py
-	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src > $@
+	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src macho > $@
 
 # AOT-using test binaries link build/thvm_runtime_blob.c so the
 # extern thvm_runtime_src symbol resolves.

@@ -33,6 +33,10 @@
 #include <math.h>        // INFINITY / fabsf etc. (uop_walk reduce init)
 #include <stdatomic.h>   // _Atomic typing for the per-context counters
 
+// Windows (CPU-only mingw cross-build) lacks the POSIX/glibc functions
+// the runtime uses; map them to Win32 equivalents.  No-op elsewhere.
+#include "util/portable_win.h"
+
 // === Types ===
 typedef uint8_t  u8;
 typedef uint16_t u16;

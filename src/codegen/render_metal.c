@@ -206,20 +206,22 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // `tid` instead of looped serially.  We do NOT rewrite the DAG's
   // axis_type here -- a KAX_GLOBAL rewrite would make the renderer's
   // legacy single-`tg` branch fire and collide multiple grid axes.
-  char buf[16384];
-  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  // Render into a temp file (portable across macOS/Linux/Windows) and
+  // read it back, rather than a fixed stack buffer -- no length cap.
+  FILE *fp = tmpfile();
   if (fp == NULL) return NULL;
   // Structural entry: derive kernel signature (output dtype + per-
   // input dtype) from the BUFFER nodes in the DAG via slot index;
   // names ("out", "in0", "in1", ...) are decoded structurally too.
   cg_render_uop_kernel_root(store_root, "k", fp);
   long n = ftell(fp);
-  fclose(fp);
-  if (n <= 0) return NULL;
+  if (n <= 0) { fclose(fp); return NULL; }
   char *out = (char *)malloc((size_t)n + 1);
-  if (out == NULL) return NULL;
-  memcpy(out, buf, (size_t)n);
-  out[n] = '\0';
+  if (out == NULL) { fclose(fp); return NULL; }
+  rewind(fp);
+  size_t got = fread(out, 1, (size_t)n, fp);
+  fclose(fp);
+  out[got] = '\0';
   return out;
 }
 
