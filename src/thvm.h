@@ -3013,7 +3013,9 @@ typedef enum {
   ATP_CP_WEIGHT_MIX  = 4,
   ATP_CP_WEIGHT_MIX2 = 5,
   ATP_CP_WEIGHT_UNIF = 6,
-  ATP_CP_WEIGHT_LAST = 7,
+  ATP_CP_WEIGHT_GOAL = 7,   // Waldmeister CPinGoal: weight a CP by its
+                            // structural match to the goal (Clas_CP_Goal.c)
+  ATP_CP_WEIGHT_LAST = 8,
 } AtpCpWeightMode;
 
 typedef struct {
@@ -3251,6 +3253,11 @@ typedef struct {
   // symbol-count sum) stays reachable via
   // `thvm_atp_set_cp_weight_mode`.
   u8   cp_weight_mode;
+  // Waldmeister MaxWeight: discard a critical pair whose combined term
+  // weight exceeds this (0 = unbounded).  Bounds the search on
+  // self-overlapping axioms (the single Wolfram NAND axiom) so the
+  // goal-directed selector is not starved by runaway pairs.
+  u32  max_cp_weight;
 
   // When set (via thvm_atp_set_record_norm_steps), thvm_atp_step
   // pushes a TRACE_NORM_STEP per rewrite the CP-normalize loop
@@ -3330,6 +3337,7 @@ fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 // for the per-mode formula, all ports of Waldmeister's
 // `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
+fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 
 // Set a wall-clock deadline.  `seconds_from_now` is a float duration

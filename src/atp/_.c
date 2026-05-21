@@ -2689,6 +2689,10 @@ fn void thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode) {
                     : (u8)ATP_CP_WEIGHT_ADD;
 }
 
+fn void thvm_atp_set_max_cp_weight(AtpState *s, u32 w) {
+  if (s != NULL) s->max_cp_weight = w;
+}
+
 // 8.5c: order-aware compare.  Picks LPO (if attached) or KBO,
 // returning a unified KboCmp-shaped result.  The two enums share
 // numeric values (EQ=0, GT=1, LT=-1, UN=2), so the cast is safe.
@@ -3034,98 +3038,93 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
   }
 }
 
-#ifdef ATP_GOAL_HEURISTIC
-// === Waldmeister lever 1: goal-directed CP selection ================
-//
-// Waldmeister's CPinGoal / GoalinCP heuristics (Clas_CP_Goal.c) weight
-// a critical pair by its structural relationship to the conjecture: a
-// CP whose subterms match the goal is selected first, a CP unrelated
-// to the goal is pushed far down the queue.  Without this the engine
-// saturates blindly -- cpl1 / subl2 / thm trace identical trajectories
-// because the goal only gates the goal-check, never CP selection.
-//
-// This is a port of Waldmeister's CPinGoal classifier (Clas_CP_Goal.c).
-// A CP (cl,cr) is weighted by its structural match to the conjecture,
-// graded into three levels:
-//
-//   Doppelmatch  -- one CP side generalises a subterm of one goal side
-//                   AND the other CP side generalises a subterm of the
-//                   other goal side, under one consistent substitution.
-//                   Weight = the goal's RESIDUAL mass: phi(goal) minus
-//                   what the match covered.  Small when the CP closely
-//                   resembles the goal.
-//   Einfachmatch -- only one CP side matches.  Weight = residual mass
-//                   x SINGLE_FACTOR.
-//   Nullmatch    -- neither matches.  Weight = the CP's own mass
-//                   x NONE_FACTOR.
-//
-// The key (vs the earlier additive penalty): a matched CP is scored by
-// the goal residual, NOT its own size -- so a large goal-resembling CP
-// still scores small and is selected early, while a flat multiplicative
-// factor on a binary relate/not signal let large CPs leapfrog.
-// SINGLE_FACTOR / NONE_FACTOR are Waldmeister's CIGICInit defaults.
-#define ATP_GOAL_MIN_STRUCT    4u
+// === Waldmeister goal-directed CP selection (Clas_CP_Goal.c) ========
+// Weight a critical pair by how its two sides structurally match the
+// goal (the CPinGoal classifier).  A CP side that is a generalization
+// of -- i.e. matches into -- a goal subterm "covers" that subterm.
+//   Doppelmatch  : both CP sides match goal subterms under ONE
+//                  consistent substitution.  Weight = the goal residual
+//                  phi(goal) - covered (minimized over match positions).
+//   Einfachmatch : one CP side matches.  Weight = residual x 5.
+//   Nullmatch    : neither.  Weight = the CP's own size x 50.
+// A goal-resembling CP thus scores small and is selected first,
+// steering completion at the goal -- Waldmeister's key to fast proofs.
 #define ATP_GOAL_SINGLE_FACTOR 5u
 #define ATP_GOAL_NONE_FACTOR   50u
 
-// Match pattern `pat` against `subj` or any subterm of it, extending
-// `sub` (a later match against the same sub stays consistent -- the
-// Sigma-matching of CPinGoal).  Returns the symbol count of the matched
-// subterm, 0 if none.  Patterns below MIN_STRUCT are ignored: a bare
-// nand(x,y) shell matches everything and carries no signal.
-static u32 atp_goal_match_into(Term pat, Term subj, RewriteSubst *sub) {
-  if (atp_symbol_count(pat) >= ATP_GOAL_MIN_STRUCT) {
-    RewriteSubst save = *sub;
-    if (thvm_match(pat, subj, sub)) return atp_symbol_count(subj);
-    *sub = save;
+// Best coverage of `pat` matched into `subj` or any subterm, extending
+// the (consistent) substitution `base`: returns the largest matched
+// subterm's symbol count, 0 if none.  `pat` must be a CTR -- a bare
+// variable generalizes everything and carries no goal signal (the
+// MinStruct spirit of Clas_CP_Goal).
+static u32 atp_goal_match_cov(Term pat, Term subj, RewriteSubst base) {
+  if (term_tag(pat) != TAG_CTR) return 0u;
+  u32 best = 0u;
+  RewriteSubst t = base;
+  if (thvm_match(pat, subj, &t)) {
+    u32 c = atp_symbol_count(subj);
+    if (c > best) best = c;
   }
   if (term_tag(subj) == TAG_CTR) {
     u32 n = term_ctr_n(subj);
     for (u32 i = 0; i < n; i++) {
-      u32 c = atp_goal_match_into(pat, term_ctr_at(subj, i), sub);
-      if (c) return c;
-    }
-  }
-  return 0;
-}
-
-// CPinGoal weight of CP (cl,cr) against the conjecture.  No goal set
-// (completion mode) -> 0.  See the block comment above.
-static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
-  if (s == NULL || s->goal_lhs == 0) return 0u;
-  Term gl = s->goal_lhs, gr = s->goal_rhs;
-  u32  phi_g = atp_symbol_count(gl) + atp_symbol_count(gr);
-  u32  phi_c = atp_symbol_count(cl) + atp_symbol_count(cr);
-  u32  best  = phi_c * ATP_GOAL_NONE_FACTOR;       // Nullmatch fallback
-  // Two pairings: (cl into gl, cr into gr) and (cl into gr, cr into gl).
-  for (u32 swap = 0; swap < 2u; swap++) {
-    Term ga = swap ? gr : gl;
-    Term gb = swap ? gl : gr;
-    RewriteSubst sub = {{0}};
-    u32 ca = atp_goal_match_into(cl, ga, &sub);
-    u32 cb = ca ? atp_goal_match_into(cr, gb, &sub) : 0u;
-    if (ca && cb) {                                // Doppelmatch
-      u32 cov = ca + cb;
-      u32 res = (cov < phi_g) ? phi_g - cov : 0u;
-      if (res < best) best = res;
-    }
-    if (ca) {                                      // Einfachmatch via cl
-      u32 res = (ca < phi_g) ? phi_g - ca : 0u;
-      u32 w   = res * ATP_GOAL_SINGLE_FACTOR;
-      if (w < best) best = w;
-    }
-    RewriteSubst s2 = {{0}};                       // Einfachmatch via cr
-    u32 cc = atp_goal_match_into(cr, gb, &s2);
-    if (cc) {
-      u32 res = (cc < phi_g) ? phi_g - cc : 0u;
-      u32 w   = res * ATP_GOAL_SINGLE_FACTOR;
-      if (w < best) best = w;
+      u32 c = atp_goal_match_cov(pat, term_ctr_at(subj, i), base);
+      if (c > best) best = c;
     }
   }
   return best;
 }
-#endif /* ATP_GOAL_HEURISTIC */
 
+// Best (cov_cl + cov_cr) for a Doppelmatch: cl matches a subterm of sx
+// (substitution sigma), cr matches a subterm of gy extending sigma.
+// Walks every cl-match position so the cr-match is gated by a
+// consistent sigma, maximizing total coverage (= minimal residual).
+static u32 atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
+                           RewriteSubst base) {
+  u32 best = 0u;
+  if (term_tag(cl) == TAG_CTR) {
+    RewriteSubst t1 = base;
+    if (thvm_match(cl, sx, &t1)) {
+      u32 cov_a = atp_symbol_count(sx);
+      u32 cov_b = atp_goal_match_cov(cr, gy, t1);
+      if (cov_b && cov_a + cov_b > best) best = cov_a + cov_b;
+    }
+  }
+  if (term_tag(sx) == TAG_CTR) {
+    u32 n = term_ctr_n(sx);
+    for (u32 i = 0; i < n; i++) {
+      u32 c = atp_goal_doppel(cl, cr, term_ctr_at(sx, i), gy, base);
+      if (c > best) best = c;
+    }
+  }
+  return best;
+}
+
+// CPinGoal weight of CP (cl, cr) against the conjecture.  No goal
+// (completion mode) -> 0.  See the block comment above.
+static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
+  if (s == NULL || s->goal_lhs == 0) return 0u;
+  Term gl = s->goal_lhs, gr = s->goal_rhs;
+  u32 phi_g = atp_symbol_count(gl) + atp_symbol_count(gr);
+  RewriteSubst e = {{0}};
+  // Doppelmatch over both pairings (cl->gl & cr->gr, cl->gr & cr->gl).
+  u32 d1 = atp_goal_doppel(cl, cr, gl, gr, e);
+  u32 d2 = atp_goal_doppel(cl, cr, gr, gl, e);
+  u32 dcov = d1 > d2 ? d1 : d2;
+  if (dcov) return (dcov < phi_g) ? (phi_g - dcov) : 0u;
+  // Einfachmatch: best single coverage of either CP side into either
+  // goal side.
+  u32 ec = atp_goal_match_cov(cl, gl, e);
+  { u32 x = atp_goal_match_cov(cl, gr, e); if (x > ec) ec = x; }
+  { u32 x = atp_goal_match_cov(cr, gl, e); if (x > ec) ec = x; }
+  { u32 x = atp_goal_match_cov(cr, gr, e); if (x > ec) ec = x; }
+  if (ec) {
+    u32 res = (ec < phi_g) ? (phi_g - ec) : 0u;
+    return res * ATP_GOAL_SINGLE_FACTOR;
+  }
+  // Nullmatch.
+  return (atp_symbol_count(cl) + atp_symbol_count(cr)) * ATP_GOAL_NONE_FACTOR;
+}
 // 8.8: priority weight for a CP.  Default `--add` heuristic is
 // the symbol-count sum.  When `s->use_mix_heuristic` is set, add
 // a penalty for CPs that fail to orient cleanly (KBO_UN or
@@ -3147,13 +3146,13 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
 // skipped.  The precomputed `base` is the ADD-mode value; a
 // non-default cp_weight_mode recomputes the base from the terms.
 static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
-#ifdef ATP_GOAL_HEURISTIC
-  // Goal-directed run: Waldmeister uses CPinGoal as THE classifier --
-  // the weight is the CP's graded structural distance to the goal, not
-  // its size.  Completion-mode runs (no goal) fall through to the
-  // size/mix heuristic below.
-  if (s != NULL && s->goal_lhs != 0) return atp_goal_weight(s, lhs, rhs);
-#endif
+  // Goal-directed mode (Waldmeister CPinGoal): weight by structural
+  // match to the goal.  Opt-in via cp_weight_mode so completion-mode
+  // and the other weights are unaffected.
+  if (s != NULL && s->cp_weight_mode == ATP_CP_WEIGHT_GOAL &&
+      s->goal_lhs != 0) {
+    return atp_goal_weight(s, lhs, rhs);
+  }
   u32 mode = (s != NULL) ? s->cp_weight_mode : ATP_CP_WEIGHT_ADD;
   if (mode != ATP_CP_WEIGHT_ADD) {
     // The caller's `base` is the ADD-mode symbol-count sum; for any
@@ -3231,6 +3230,14 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   // between slots, so it stays valid for the index borrow below.
   u32  cp_nodes  = 0u;
   u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
+  // Waldmeister MaxWeight: drop an over-weight critical pair before it
+  // enters the queue, so a self-overlapping axiom cannot flood the
+  // search with runaway pairs (and the goal-directed selector is not
+  // starved).  0 = unbounded.
+  if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
+    free(packed);
+    return;
+  }
   s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
   // acp_pack already counted every node -- reuse it as the CP weight
