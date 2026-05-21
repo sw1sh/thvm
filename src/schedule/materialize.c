@@ -3299,9 +3299,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // rewritten store_root drives compute.  Three per-kernel safety
     // gates (residual-BUFFERIZE, stranded-RANGE, broadcast-input)
     // decide whether the chain-fold flag commits are saved.
+    //
+    // kernel_lift_to_uop sets cached_lift.store_root = ru_root and
+    // returns 0 if ru_root is 0 -- so inside this branch we already
+    // know cached_lift.store_root holds the unified pass's root.
     {
-      Term ru_root = rangeify_unified_store_root_at(idx);
-      if (ru_root != 0) {
+      Term ru_root = ke->cached_lift.store_root;
+      {
         Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
         // Scan the rewritten store_root for INDEX_E reads against slots
         // whose tid carries non-trivial layout (chain or non-contig

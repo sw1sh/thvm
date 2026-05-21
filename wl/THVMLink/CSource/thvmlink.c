@@ -1684,9 +1684,9 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
     return LIBRARY_NO_ERROR;
   }
   // Prefer the cached lift's mutated store_root when apply_opt has
-  // updated it post-realize.  kernel_lift_to_uop re-runs from scratch
-  // and reproduces the pre-opt DAG; cached_lift.store_root reflects
-  // TKernelApplyOpt mutations.
+  // updated it post-realize.  kernel_lift_to_uop reads the unified
+  // pass's pre-opt root from the rangeify side table; cached_lift's
+  // store_root reflects subsequent TKernelApplyOpt mutations.
   Term store_root = (KERNELS[kid].cached_lift.store_root != 0)
                   ? KERNELS[kid].cached_lift.store_root
                   : lift.store_root;
