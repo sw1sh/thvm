@@ -1135,9 +1135,19 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     if (sub != NULL) {
       addr_term = unified_rewrite_rec_sub(st, sub, addr_term, depth + 1);
     }
+    // Use the _extend lookup (boundary-tid + value-match fallback), not
+    // the bare one: an INDEX_E reading a REALIZED boundary's BUFFERIZE
+    // must read that boundary's buffer (wire it as a kernel input), NOT
+    // inline + recompute the producer.  The bare lookup only sees
+    // already-registered direct inputs, so a boundary reached through an
+    // inlined intermediate (e.g. a stacked conv's relu(conv1) feeding
+    // dw2: relu is non-realized so it inlines, dragging conv1's
+    // BUFFERIZE in) fell through to the inline block and re-derived the
+    // whole producer.  Gating on _extend lets the fall-through read path
+    // (leaf-BUFFERIZE -> INDEX_E(BUFFER)) fire for realized boundaries.
     if (term_tag(inner_buf) == TAG_UOP
         && term_ext(inner_buf) == UOP_BUFFERIZE
-        && unified_rewrite_buffer_for_bufferize(st->ke, inner_buf) == 0) {
+        && unified_rewrite_buffer_for_bufferize_extend(st->ke, inner_buf) == 0) {
       Term v = uop_bufferize_value(inner_buf);
       // Fast path for CONST: bypass the recursive rewrite (the
       // inner is a literal scalar with no children).
@@ -2041,6 +2051,8 @@ static void topo_sort_boundaries(Term root) {
                 idx, (unsigned long long)items[i].loc,
                 (unsigned)op, reasons,
                 (unsigned long long)items[i].buf);
+        if (getenv("THVM_DUMP_STORE_TREE"))
+          bypass_dbg_dump("boundary-value", idx, items[i].buf);
       }
     }
   }
