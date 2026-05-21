@@ -884,8 +884,6 @@ typedef struct KernelEntry {
                                    // kernel referenced by N consumers in one
                                    // realize fires once instead of N times.
                                    // Bumped per top-level interact_kernel.
-  void     *compiled;              // backend-specific; NULL for interpreter
-
   // Axis-typed scheduling plan.  `schedule` is a pointer for
   // historical reasons; today it always aims at `_local_schedule`
   // below (each kernel owns its own plan).
