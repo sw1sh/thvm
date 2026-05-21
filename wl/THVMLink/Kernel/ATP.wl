@@ -1979,7 +1979,6 @@ Options[TFindEquationalProof] = {
    flattened down to single ForAll / Equal formulas.  Equational
    provability distributes over the conjunction, so each is proved
    independently. *)
-atpConjList[cj_Association] := Catenate[atpConjList /@ Values[cj]];
 atpConjList[cj_List] := Catenate[atpConjList /@ cj];
 atpConjList[cj_] := {cj};
 
@@ -2044,9 +2043,14 @@ TFindEquationalProof[thm_String, theory_String,
        AxiomaticTheory["WolframAxioms", "NotableTheorems"], "WolframAxioms"]
    work. *)
 TFindEquationalProof[
-        cj : (_List | _Association | _ForAll | _Equal | _Inactive),
+        cj : (_List | _ForAll | _Equal | _Inactive),
         theory_String, opts:OptionsPattern[]] :=
-    atpProveFromTheory[cj, theory, opts];(* Expression form: run thvm's C ATP completion engine on the
+    atpProveFromTheory[cj, theory, opts];
+(* An Association (e.g. the whole NotableTheorems table) "just does
+   Values": each value is proved on its own, so a theorem that fails to
+   prove is $Failed in its slot rather than failing the whole call. *)
+TFindEquationalProof[thms_Association, theory_String, opts:OptionsPattern[]] :=
+    atpProveFromTheory[#, theory, opts] & /@ Values[thms];(* Expression form: run thvm's C ATP completion engine on the
    conjecture + axioms, decode the equational rewrite chain, and
    wrap it in a verifier-shaped WL ProofObject.  Returns $Failed
    when the goal is not proved (or the proof is not expressible in
