@@ -3269,6 +3269,30 @@ typedef struct {
   // goal-directed selector is not starved by runaway pairs.
   u32  max_cp_weight;
 
+  // Automatic, COMPLETENESS-PRESERVING growing CP-weight bound
+  // (Waldmeister MaxWeight, but never permanently lossy).  When
+  // `auto_max_cp_weight_base` > 0, atp_cp_heap_push compares a CP's
+  // node count against the LIVE bound; over-bound CPs are NOT dropped
+  // but parked on the `cp_stash_*` overflow list.  When the active
+  // queue empties (or after a growth tick) the stash is drained back
+  // in under the raised bound, so every CP is eventually selected and
+  // no proof is lost.  0 = disabled (the default unbounded engine).
+  u32  auto_max_cp_weight_base;     // bound = base + slope*max_rule_weight
+  u32  auto_max_cp_weight_slope;    // multiplier on the deepest rule LHS
+  u32  auto_max_cp_weight_cur;      // the live bound (recomputed on growth)
+  u32  max_rule_lhs_weight;         // deepest rule LHS symbol count seen
+                                    // (monotone; feeds the auto bound so it
+                                    // need not rescan R on every CP push)
+  // Overflow stash for CPs deferred by the growing bound.  Parallel to
+  // the cp_* arrays but unordered (a plain growable list): a packed
+  // byte string + trace id + node count.  Drained into the heap when
+  // the bound grows past their weight.
+  u8 **cp_stash_packed;
+  u32 *cp_stash_trace;
+  u32 *cp_stash_nodes;
+  u32  n_cp_stash;
+  u32  cp_stash_cap;
+
   // When set (via thvm_atp_set_record_norm_steps), thvm_atp_step
   // pushes a TRACE_NORM_STEP per rewrite the CP-normalize loop
   // applies, so a proof consumer can walk the chain CP ->
@@ -3356,6 +3380,13 @@ fn void      thvm_atp_set_selection_ratio(AtpState *s, u32 modulo);
 // `ClasHeuristics` module.
 fn void      thvm_atp_set_cp_weight_mode(AtpState *s, u32 mode);
 fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
+// Enable the automatic, completeness-preserving growing CP-weight
+// bound (Waldmeister MaxWeight, but the deferred CPs are stashed and
+// re-admitted, never dropped).  `base` seeds the bound (bound = base +
+// 2 * deepest-current-rule-LHS-weight); base == 0 disables it (the
+// default unbounded engine).  On the deep Sheffer benchmarks this
+// shrinks the peak CP queue ~3-4x and cuts the step count to a goal.
+fn void      thvm_atp_set_auto_max_cp_weight(AtpState *s, u32 base);
 fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 

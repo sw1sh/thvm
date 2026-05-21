@@ -1010,6 +1010,24 @@ VerificationTest[
     TestID -> "ATP/method/selectionratio-100-proves"
 ]
 
+(* --- AutoMaxWeight: completeness-preserving growing CP-weight bound --- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "AutoMaxWeight" -> 20}],
+    ProofObject,
+    TestID -> "ATP/method/automaxweight-20-proves"
+]
+
+VerificationTest[
+    (* A tight base still proves (stash + force-drain preserves
+       completeness -- nothing is dropped). *)
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "AutoMaxWeight" -> 1}],
+    ProofObject,
+    TestID -> "ATP/method/automaxweight-tight-still-proves"
+]
+
 (* --- MaxSteps: a tight cap on a hard theorem fails; loose proves --- *)
 
 VerificationTest[

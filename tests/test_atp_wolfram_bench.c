@@ -215,6 +215,12 @@ int main(int argc, char **argv) {
   }
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
+  // "sat" mode: pure completion, NO goal -- run to the step/wall cap
+  // and watch the CP queue grow.  This is the explosion probe (a deep
+  // goal that never closes would do the same, but `sat` is unambiguous
+  // about what is being measured).
+  int saturate = (strcmp(goal, "sat") == 0);
+
   Term gl = 0, gr = 0;
   if      (strcmp(goal, "cpl1")   == 0) goal_cpl1(&gl, &gr);
   else if (strcmp(goal, "cpl2")   == 0) goal_cpl2(&gl, &gr);
@@ -224,8 +230,29 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "chain6") == 0) goal_chain(&gl, &gr, 6u);
   else if (strcmp(goal, "deep5")  == 0) goal_deep(&gl, &gr, 5u);
   else if (strcmp(goal, "wolfram")== 0) goal_wolfram(&gl, &gr);
-  else                                  goal_thm(&gl, &gr);
-  thvm_atp_set_goal(s, gl, gr);
+  else if (!saturate)                   goal_thm(&gl, &gr);
+  if (!saturate) thvm_atp_set_goal(s, gl, gr);
+
+  // THVM_ATP_MNF=1 activates the MNF goal-directed (two-coloured front)
+  // search -- the only path that closes a symmetric goal like wolfram
+  // commutativity.  Requires the binary be built with `make ATP_MNF=1`
+  // (otherwise the setter is a no-op).
+  {
+    const char *mnf = getenv("THVM_ATP_MNF");
+    if (mnf != NULL && *mnf == '1') thvm_atp_set_use_mnf(s, 1u);
+  }
+
+  // Optional automatic growing CP-weight bound (Waldmeister MaxWeight).
+  // THVM_ATP_AUTO_MAXW=<base> enables it; the engine grows the bound as
+  // the rule set deepens so it never permanently discards a CP the
+  // proof needs (completeness preserved).  0 / unset = unbounded (the
+  // historical default).
+  {
+    const char *amw = getenv("THVM_ATP_AUTO_MAXW");
+    if (amw != NULL && *amw != 0) {
+      thvm_atp_set_auto_max_cp_weight(s, (u32)strtoul(amw, NULL, 10));
+    }
+  }
 
   printf("=== Wolfram-axiom completion : goal=%s ===\n", goal);
   printf("ordering=%s  step_cap=%u  wall_cap=%.0fs  cp_weight_mode=%u\n",
@@ -269,6 +296,17 @@ int main(int argc, char **argv) {
   { u32 unor = 0;
     for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;
     printf("   unorientable rules: %u / %u\n", unor, s->n_rules); }
+  printf("   steps/sec=%.1f  cps/step=%.1f\n",
+         (el > 0.0) ? (double)i / el : 0.0,
+         (i > 0) ? (double)max_cps / (double)i : 0.0);
+  { u32 mn = 0, mx = 0, bins[12];
+    double mean = 0.0;
+    u32 qlen = thvm_atp_cp_size_stats(s, &mn, &mx, &mean, bins, 12u, 10u);
+    printf("   cp-size: live=%u  min=%u  mean=%.1f  max=%u\n",
+           qlen, mn, mean, mx);
+    printf("   cp-size histogram (bucket=10 symbols):\n     ");
+    for (u32 b = 0; b < 12u; b++) printf("[%u-%u)=%u ", b*10u, (b+1u)*10u, bins[b]);
+    printf("\n"); }
 
 #ifdef ATP_NORM_STATS
   // 8b: optimal-sharing ratio of the cross-CP normalization memo.
