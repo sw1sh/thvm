@@ -114,12 +114,17 @@ int main(void) {
   // The 2D ADD-root should create at least 2 fresh ranges.
   CHECK(counter_after >= 2);
 
-  // (f) The substitute Term is a UOp INDEX_E (non-zero, non-passthrough).
-  TEST_BEGIN("unified-rangeify/substitute-is-index-e");
+  // (f) For a realized boundary, RU_SUBST holds the bare UOP_BUFFERIZE
+  // Term (non-zero, non-passthrough).  ru_rewrite_subtree wraps each
+  // downstream consumer with uop_index_e(BUFFERIZE, consumer_in_addr)
+  // (see rangeify_unified.c:~1796); that wrapping happens per-consumer,
+  // not in RU_SUBST itself.  Mirror: tinygrad/schedule/indexing.py:78
+  // (`BUFFERIZE.index(*consumer_ranges)`).
+  TEST_BEGIN("unified-rangeify/substitute-is-bufferize");
   Term s = rangeify_unified_subst_at(bufferize_info_find(term_val(sum2)));
   CHECK(s != 0);
   CHECK_EQ(term_tag(s), TAG_UOP);
-  CHECK_EQ(term_ext(s), UOP_INDEX_E);
+  CHECK_EQ(term_ext(s), UOP_BUFFERIZE);
 
   // (g) Skip path: with the gate off, the pass clears the side table.
   // We still call run_rangeify_unified directly to exercise the
@@ -185,13 +190,12 @@ int main(void) {
   CHECK_EQ(term_ext(r1), UOP_RANGE);
   // The stats counter ticks: at least one BUFFERIZE emitted.
   CHECK(rangeify_unified_last_bufferizes_emitted() >= 1);
-  // The substitute is INDEX_E over the BUFFERIZE Term (not the raw node).
+  // The substitute IS the BUFFERIZE term (consumers wrap with INDEX_E
+  // per-use in ru_rewrite_subtree).
   Term hsub = rangeify_unified_subst_at(hsum_idx);
   CHECK_EQ(term_tag(hsub), TAG_UOP);
-  CHECK_EQ(term_ext(hsub), UOP_INDEX_E);
-  // INDEX_E.buffer = the BUFFERIZE term.
-  Term hsub_buf = heap_read(term_val(hsub));
-  CHECK_EQ(hsub_buf, bz);
+  CHECK_EQ(term_ext(hsub), UOP_BUFFERIZE);
+  CHECK_EQ(hsub, bz);
 
   thvm_free();
 
