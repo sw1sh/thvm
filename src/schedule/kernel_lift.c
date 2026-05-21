@@ -16,8 +16,7 @@ fn u64 kernel_lift_successes(void)       { return KERNEL_LIFT_SUCCESSES; }
 fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
 fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
 
-static void lift_reject_log(KernelEntry const *ke, u32 sid,
-                            const char *where) {
+static void lift_reject_log(u32 sid, const char *where) {
   static int reject_log_inited = 0;
   static int reject_log_on     = 0;
   if (!reject_log_inited) {
@@ -26,7 +25,6 @@ static void lift_reject_log(KernelEntry const *ke, u32 sid,
     reject_log_inited = 1;
   }
   if (!reject_log_on) return;
-  (void)ke;
   fprintf(stderr, "lift reject: %s sid=%u\n", where, sid);
 }
 
@@ -53,33 +51,33 @@ static Term lift_input_buffer(KernelEntry const *ke, u32 slot) {
 
 fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   if (ke == NULL || out == NULL) return 0;
-  // Unified-pass short-circuit: when the rangeify_unified pass emitted
-  // a UOP_STORE for this kernel's boundary, build only the buffer
-  // fields the bypass-substitution site reads (in_bufs[], n_inputs,
-  // out_buf) and hand back the unified root as store_root.
+  // Look up the UOP_STORE the rangeify_unified pass emitted for this
+  // kernel's boundary and build the buffer fields the bypass-substitution
+  // site reads (in_bufs[], n_inputs, out_buf).  store_root is the raw
+  // unified root; the caller in materialize.c rewrites it for the walker.
   if (ke->source_uop == 0) {
-    lift_reject_log(ke, 0, "entry/no-source-uop");
+    lift_reject_log(0, "entry/no-source-uop");
     return 0;
   }
   u32 ru_idx = bufferize_info_find(term_val(ke->source_uop));
   if (ru_idx == 0xFFFFFFFFu) {
-    lift_reject_log(ke, 0, "entry/no-bufferize-info");
+    lift_reject_log(0, "entry/no-bufferize-info");
     return 0;
   }
   Term ru_root = rangeify_unified_store_root_at(ru_idx);
   if (ru_root == 0) {
-    lift_reject_log(ke, 0, "entry/no-unified-store-root");
+    lift_reject_log(0, "entry/no-unified-store-root");
     return 0;
   }
   if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
-    lift_reject_log(ke, 0, "entry/n-inputs-over-cap");
+    lift_reject_log(0, "entry/n-inputs-over-cap");
     return 0;
   }
   out->n_inputs = ke->n_inputs;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     Term in_buf = lift_input_buffer(ke, i);
     if (in_buf == 0) {
-      lift_reject_log(ke, 0, "entry/in-buf-build-fail");
+      lift_reject_log(0, "entry/in-buf-build-fail");
       return 0;
     }
     out->in_bufs[i] = in_buf;
