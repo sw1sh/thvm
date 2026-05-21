@@ -3303,88 +3303,83 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // kernel_lift_to_uop sets cached_lift.store_root = ru_root and
     // returns 0 if ru_root is 0 -- so inside this branch we already
     // know cached_lift.store_root holds the unified pass's root.
-    {
-      Term ru_root = ke->cached_lift.store_root;
-      {
-        Term ru_rewritten = unified_store_root_for_walker(ke, ru_root);
-        // Scan the rewritten store_root for INDEX_E reads against slots
-        // whose tid carries non-trivial layout (chain or non-contig
-        // view).  The flag commit is deferred until the bypass-succeeded
-        // branch below so a gate-declined kernel doesn't get its pre-mat
-        // skipped while still reading via the unfolded store_root.
-        ChainFoldMarks _cf_marks;
-        _cf_marks.slot_mask_lo = 0;
-        _cf_marks.slot_mask_hi = 0;
-        ru_rewritten = unified_fold_chain(ke, ru_rewritten, &_cf_marks);
-        // Per-kernel safety gates for the unified-bypass:
-        //
-        //   has_resid:   the cpu_uop_walk INDEX_E handler only resolves
-        //                UOP_BUFFER leaves; a residual UOP_BUFFERIZE in
-        //                the value tree (an in-kernel intermediate the
-        //                rangeify_unified pass didn't realize) reads as
-        //                0.0 default and the kernel zeroes its output.
-        //
-        //   has_stranded: the value subtree references a UOP_RANGE
-        //                whose axis_id is neither in the STORE addr nor
-        //                in scope of an enclosing UOP_REDUCE.  The
-        //                walker sets up loop slots only for addr ranges
-        //                + REDUCE axes, so any other RANGE leaf reads
-        //                iter=0 forever -- producing only the slice-0
-        //                result.  This happens when ru_rewrite_subtree
-        //                splices a non-realized producer's RU_SUBST
-        //                verbatim into a consumer whose iter space has
-        //                different RANGE.axis_ids (the producer's
-        //                ru_build_input_addr_for ranges leak through
-        //                into the consumer's value tree).  Conv2d
-        //                grad-w hits this in the dY*X matmul-back
-        //                kernel where one INDEX_E feeds from a non-
-        //                realized PERMUTE/RESHAPE chain.
-        //
-        //   has_bcast:   the rewritten subtree reads from a UOP_BUFFER
-        //                input slot whose backing View has a stride-0
-        //                (broadcast) axis, negative stride (FLIP) or
-        //                a non-row-major stride pattern (PERMUTE /
-        //                SHRINK view).  ru_pass builds addresses from
-        //                per-axis ranges without consulting strides,
-        //                and the input_views[slot].strides per-slot
-        //                stride table that would fold the broadcast
-        //                axis to CONST(0) isn't reflected in the
-        //                rewritten subtree.  Until ru_pass threads
-        //                view strides through INDEX_E address
-        //                construction, decline the bypass for these
-        //                inputs.  Softmax-CE backward hits this where
-        //                a 1-element scalar feeds a 3-element consumer
-        //                via stride-0 broadcast.
-        //
-        // When any gate trips, skip the chain-fold commit; store_root
-        // still gets the rewritten subtree (the renderer can't name
-        // raw TAG_TEN / BUFFERIZE leaves regardless of gate outcome).
-        int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
-        int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
-        int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
-        if (getenv("THVM_DEBUG_BYPASS_LAST")) {
-          fprintf(stderr,
-                  "BYPASS_DBG kid=%u resid=%d stranded=%d bcast=%d\n",
-                  kid, has_resid, has_stranded, has_bcast);
-          bypass_dbg_dump("lift_root", kid, ke->cached_lift.store_root);
-          bypass_dbg_dump("ru_rewrit", kid, ru_rewritten);
-        }
-        BYPASS_KERNEL_TOTAL++;
-        if (has_resid)    BYPASS_GATE_RESID++;
-        if (has_stranded) BYPASS_GATE_STRANDED++;
-        if (has_bcast)    BYPASS_GATE_BCAST++;
-        // Always substitute the rewritten store_root.  The raw unified
-        // ru_root carries TAG_TEN / UOP_BUFFERIZE leaves that the
-        // renderer can't name (falls through to the buf%llu fallback
-        // -> undeclared identifier in MSL).  The rewriter replaces
-        // those with proper UOP_BUFFER terms carrying input-slot
-        // instance, which is benign regardless of gate outcome.
-        ke->cached_lift.store_root = ru_rewritten;
-        if (!has_resid && !has_stranded && !has_bcast) {
-          BYPASS_KERNEL_USED_UNIFIED++;
-          unified_fold_chain_commit_flags(ke, &_cf_marks);
-        }
-      }
+    Term ru_rewritten = unified_store_root_for_walker(ke, ke->cached_lift.store_root);
+    // Scan the rewritten store_root for INDEX_E reads against slots
+    // whose tid carries non-trivial layout (chain or non-contig
+    // view).  The flag commit is deferred until the bypass-succeeded
+    // branch below so a gate-declined kernel doesn't get its pre-mat
+    // skipped while still reading via the unfolded store_root.
+    ChainFoldMarks _cf_marks;
+    _cf_marks.slot_mask_lo = 0;
+    _cf_marks.slot_mask_hi = 0;
+    ru_rewritten = unified_fold_chain(ke, ru_rewritten, &_cf_marks);
+    // Per-kernel safety gates for the unified-bypass:
+    //
+    //   has_resid:   the cpu_uop_walk INDEX_E handler only resolves
+    //                UOP_BUFFER leaves; a residual UOP_BUFFERIZE in
+    //                the value tree (an in-kernel intermediate the
+    //                rangeify_unified pass didn't realize) reads as
+    //                0.0 default and the kernel zeroes its output.
+    //
+    //   has_stranded: the value subtree references a UOP_RANGE
+    //                whose axis_id is neither in the STORE addr nor
+    //                in scope of an enclosing UOP_REDUCE.  The
+    //                walker sets up loop slots only for addr ranges
+    //                + REDUCE axes, so any other RANGE leaf reads
+    //                iter=0 forever -- producing only the slice-0
+    //                result.  This happens when ru_rewrite_subtree
+    //                splices a non-realized producer's RU_SUBST
+    //                verbatim into a consumer whose iter space has
+    //                different RANGE.axis_ids (the producer's
+    //                ru_build_input_addr_for ranges leak through
+    //                into the consumer's value tree).  Conv2d
+    //                grad-w hits this in the dY*X matmul-back
+    //                kernel where one INDEX_E feeds from a non-
+    //                realized PERMUTE/RESHAPE chain.
+    //
+    //   has_bcast:   the rewritten subtree reads from a UOP_BUFFER
+    //                input slot whose backing View has a stride-0
+    //                (broadcast) axis, negative stride (FLIP) or
+    //                a non-row-major stride pattern (PERMUTE /
+    //                SHRINK view).  ru_pass builds addresses from
+    //                per-axis ranges without consulting strides,
+    //                and the input_views[slot].strides per-slot
+    //                stride table that would fold the broadcast
+    //                axis to CONST(0) isn't reflected in the
+    //                rewritten subtree.  Until ru_pass threads
+    //                view strides through INDEX_E address
+    //                construction, decline the bypass for these
+    //                inputs.  Softmax-CE backward hits this where
+    //                a 1-element scalar feeds a 3-element consumer
+    //                via stride-0 broadcast.
+    //
+    // When any gate trips, skip the chain-fold commit; store_root
+    // still gets the rewritten subtree (the renderer can't name
+    // raw TAG_TEN / BUFFERIZE leaves regardless of gate outcome).
+    int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
+    int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
+    int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
+    if (getenv("THVM_DEBUG_BYPASS_LAST")) {
+      fprintf(stderr,
+              "BYPASS_DBG kid=%u resid=%d stranded=%d bcast=%d\n",
+              kid, has_resid, has_stranded, has_bcast);
+      bypass_dbg_dump("lift_root", kid, ke->cached_lift.store_root);
+      bypass_dbg_dump("ru_rewrit", kid, ru_rewritten);
+    }
+    BYPASS_KERNEL_TOTAL++;
+    if (has_resid)    BYPASS_GATE_RESID++;
+    if (has_stranded) BYPASS_GATE_STRANDED++;
+    if (has_bcast)    BYPASS_GATE_BCAST++;
+    // Always substitute the rewritten store_root.  The raw unified
+    // ru_root carries TAG_TEN / UOP_BUFFERIZE leaves that the
+    // renderer can't name (falls through to the buf%llu fallback
+    // -> undeclared identifier in MSL).  The rewriter replaces
+    // those with proper UOP_BUFFER terms carrying input-slot
+    // instance, which is benign regardless of gate outcome.
+    ke->cached_lift.store_root = ru_rewritten;
+    if (!has_resid && !has_stranded && !has_bcast) {
+      BYPASS_KERNEL_USED_UNIFIED++;
+      unified_fold_chain_commit_flags(ke, &_cf_marks);
     }
     // Post-lift UPatRule pass.  Reads applied_opts via the tile_anno
     // facade (single read site so the eventual KpSchedule -> KernelEntry
