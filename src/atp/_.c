@@ -3420,6 +3420,10 @@ fn void thvm_atp_set_record_norm_steps(AtpState *s, u8 on) {
 // Read wall-clock microseconds from CLOCK_REALTIME -- portable
 // across linux / macOS / freebsd and good enough for a >=1 second
 // deadline budget.
+// Host abort hook (see thvm.h): NULL unless a host (e.g. the WL glue)
+// installs a poll into Abort[] / TimeConstrained[].
+int (*thvm_atp_abort_hook)(void) = NULL;
+
 static u64 atp_now_us(void) {
   struct timespec ts;
   if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
@@ -3573,6 +3577,8 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     u64 now = atp_now_us();
     if (now != 0u && now >= s->wall_deadline_us) return ATP_TIMEOUT;
   }
+  // Host abort (WL Abort[] / TimeConstrained[]): polled per outer step.
+  if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return ATP_ABORTED;
 
   // 7a: in-loop GC.  When the dyn heap has crossed the half-full
   // mark, run a Cheney collection BEFORE allocating this step's
@@ -4451,9 +4457,12 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
 //    goal still closes by single-NF or a later collision.
 static int mnf_loop_guard(AtpState *s, AtpMnf *m) {
   static u32 tick = 0u;
-  if ((++tick & 0xFFu) == 0u && s->wall_deadline_us != 0u) {
-    u64 now = atp_now_us();
-    if (now != 0u && now >= s->wall_deadline_us) return 1;
+  if ((++tick & 0xFFu) == 0u) {
+    if (s->wall_deadline_us != 0u) {
+      u64 now = atp_now_us();
+      if (now != 0u && now >= s->wall_deadline_us) return 1;
+    }
+    if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return 1;
   }
   if (!atp_heap_under_pressure()) return 0;
   thvm_atp_gc_collect(s);

@@ -2873,6 +2873,7 @@ typedef enum {
   ATP_REFUTED     = 2,
   ATP_TIMEOUT     = 3,
   ATP_QUEUE_EMPTY = 4,
+  ATP_ABORTED     = 5,   // host abort hook fired (e.g. WL Abort/TimeConstrained)
 } AtpStatus;
 
 // Initial heap capacities for the growable rule / CP arrays in
@@ -3338,6 +3339,13 @@ fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 // against recursively-defined axioms (Y combinator) that generate
 // unbounded CP fan-out and would otherwise run forever.
 fn void      thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now);
+
+// Host abort hook.  When set, the saturation loop polls it and returns
+// ATP_ABORTED as soon as it returns nonzero -- letting a host like the
+// WL LibraryLink glue forward Abort[] / TimeConstrained[] into the C
+// engine (which otherwise runs uninterruptible to completion).  NULL =
+// no host abort source (the default).
+extern int (*thvm_atp_abort_hook)(void);
 
 // === atp/precedence -- algebraic-structure detection =================
 // Ported from Waldmeister's `PhilMarlow` (algebraic-structure

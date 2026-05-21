@@ -15,6 +15,15 @@
 // `../../../src/thvm.c` (so `Term`, `AtpState`, KBO/LPO, etc., are
 // in scope).
 
+// Forward WL Abort[] / TimeConstrained[] into the ATP engine.  The C
+// saturation loop is otherwise uninterruptible; it polls
+// thvm_atp_abort_hook, which we point at the current evaluation's
+// AbortQ for the duration of a run so a host abort returns promptly.
+static WolframLibraryData g_atp_abort_libData = NULL;
+static int atp_abort_cb(void) {
+  return (g_atp_abort_libData != NULL) ? g_atp_abort_libData->AbortQ() : 0;
+}
+
 // === 8.7c: CTR-builder helper for the WL-side ATP encoder ========
 //
 // Builds a TAG_CTR Term whose children come from a list of
@@ -258,7 +267,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
   Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
   thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
 
+  g_atp_abort_libData = libData;
+  thvm_atp_abort_hook = atp_abort_cb;
   AtpStatus st = thvm_atp_run(atp);
+  thvm_atp_abort_hook = NULL;
+  g_atp_abort_libData = NULL;
+  if (st == ATP_ABORTED) { thvm_atp_free(atp); return LIBRARY_FUNCTION_ERROR; }
 
   // Pack stats into a 4-element Int64 NumericArray.
   mint dims[1] = {4};
@@ -443,7 +457,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
   thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
 
+  g_atp_abort_libData = libData;
+  thvm_atp_abort_hook = atp_abort_cb;
   AtpStatus st = thvm_atp_run(atp);
+  thvm_atp_abort_hook = NULL;
+  g_atp_abort_libData = NULL;
+  if (st == ATP_ABORTED) { thvm_atp_free(atp); return LIBRARY_FUNCTION_ERROR; }
 
   // (1) MAIN-state proof extraction: re-normalize both goal sides
   // under the completion-saturated R, recording every forward
