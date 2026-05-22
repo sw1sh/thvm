@@ -374,6 +374,7 @@ class Tensor:
 
     def neg(self) -> "Tensor":   return self.__neg__()
     def recip(self) -> "Tensor": return self._unary(K.RECIP)
+    def reciprocal(self) -> "Tensor": return self._unary(K.RECIP)  # tinygrad alias
     def exp2(self) -> "Tensor":  return self._unary(K.EXP2)
     def log2(self) -> "Tensor":  return self._unary(K.LOG2)
     def sqrt(self) -> "Tensor":  return self._unary(K.SQRT)
@@ -383,6 +384,17 @@ class Tensor:
         return (self * 1.4426950408889634).exp2()  # exp2(x*log2(e))
     def log(self) -> "Tensor":
         return self.log2() * 0.6931471805599453  # ln(x) = log2(x)*ln(2)
+    def abs(self) -> "Tensor":
+        return (self * self).sqrt()
+    def sigmoid(self) -> "Tensor":
+        return (1.0 + self.neg().exp()).reciprocal()
+    def tanh(self) -> "Tensor":
+        return 2.0 * (2.0 * self).sigmoid() - 1.0
+    def softmax(self, axis: int = -1) -> "Tensor":
+        # numerically-stable: exp(x - max) / sum(exp(x - max)) along axis.
+        m = self.max(axis=axis, keepdim=True)
+        e = (self - m).exp()
+        return e * e.sum(axis=axis, keepdim=True).reciprocal()
 
     def relu(self) -> "Tensor":
         # relu(x) = (0 < x) * x
@@ -434,6 +446,12 @@ class Tensor:
                 new_shape[ax] = 1
             else:
                 new_shape.pop(ax)
+        # thvm's UOP_REDUCE DROPS the reduced axis (output ndim = src-1).
+        # For keepdim we must reshape the term to re-insert the size-1 axes,
+        # else the Python shape says (.,1,.) while the term is rank-reduced --
+        # and any later broadcast against it reads out of bounds (garbage).
+        if keepdim:
+            t = _TH.reshape(t, list(new_shape))
         return Tensor._from_term(t, self._dtype, tuple(new_shape))
 
     def sum(self, axis=None, keepdim: bool = False) -> "Tensor":

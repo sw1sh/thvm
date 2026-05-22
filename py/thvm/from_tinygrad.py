@@ -351,10 +351,14 @@ def _emit(u, memo: dict[int, int]) -> int:
             raise NotImplementedError(f"unmapped REDUCE op {rop}")
         src = _emit(u.src[0], memo)
         # thvm reduces one axis at a time; reduce innermost-first so the
-        # outer axis indices stay valid (thvm REDUCE keeps the axis as a
-        # length-1 dim, matching tinygrad's REDUCE output shape).
+        # outer axis indices stay valid.
         for ax in sorted((int(a) for a in axes), reverse=True):
             src = _reduce(kind, ax, src)
+        # thvm's UOP_REDUCE DROPS the reduced axis, but tinygrad's REDUCE
+        # KEEPS it as size 1 (e.g. (3,8) reduce axis1 -> (3,1)).  Reshape to
+        # tinygrad's output shape so downstream broadcasts line up -- without
+        # this the softmax max-subtract reads a rank-reduced max and overflows.
+        src = _reshape(src, _shape_of(u))
         memo[key] = src
         return src
 
