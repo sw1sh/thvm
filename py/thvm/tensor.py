@@ -635,6 +635,39 @@ class Tensor:
         t = _TH.shrink(self.term, list(begin_end))
         return Tensor._from_term(t, self._dtype, new_shape)
 
+    def __getitem__(self, idx):
+        """Basic indexing: int / slice (per leading dim), via shrink.
+
+        An int index shrinks the axis to width 1 then drops it (squeeze);
+        a slice shrinks to [start:stop].  Trailing dims default to full.
+        Tensor / fancy (gather) indexing is not handled here -- that lives
+        at the lowered/gather level."""
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+        if len(idx) > self.ndim:
+            raise IndexError(f"too many indices for ndim {self.ndim}")
+        begin_end = []
+        squeeze = []
+        for d in range(self.ndim):
+            n = self._shape[d]
+            ix = idx[d] if d < len(idx) else slice(None)
+            if isinstance(ix, slice):
+                start, stop, step = ix.indices(n)
+                if step != 1:
+                    raise NotImplementedError("strided slice")
+                begin_end += [start, stop]
+            elif isinstance(ix, int):
+                i = ix if ix >= 0 else ix + n
+                begin_end += [i, i + 1]
+                squeeze.append(d)
+            else:
+                raise NotImplementedError(f"index type {type(ix).__name__}")
+        out = self.shrink(begin_end)
+        if squeeze:
+            keep = [out._shape[d] for d in range(out.ndim) if d not in squeeze]
+            out = out.reshape(tuple(keep))
+        return out
+
     # ---- nn-flavoured helpers (compose Tensor ops) --------------------
 
     def linear(self, weight: "Tensor", bias: "Tensor | None" = None
