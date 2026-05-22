@@ -2613,14 +2613,21 @@ static Term   atp_ordered_rewrite_step(AtpState *s, Term t,
 // orientable rewrite fired.
 static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
                                   u32 *flatsym, u32 *flatlen, u8 *folded,
-                                  u32 step_cap) {
+                                  u32 step_cap, u32 *min_pos) {
   u8  any = 0u;
   u32 prev_redex = 0u;
+  // Lowest preorder position any orientable splice touched this call.  A
+  // splice at p modifies p and its subtree, shifts the tail, and grows
+  // the ancestor spans -- the leftmost position whose normal-form status
+  // could change is p itself.  Track the minimum across the fixpoint so
+  // the caller can advance the unorientable resume watermark conservatively.
+  u32 lo = *min_pos;
   for (u32 i = 0; i < step_cap; i++) {
-    if (atp_norm_deadline_fired(s)) return any;
+    if (atp_norm_deadline_fired(s)) { *min_pos = lo; return any; }
     g_atp_ri_query_folded = *folded;
     u32 redex_pos = 0u, redex_rule = 0u;
     if (!atp_ri_find_redex(*flatlen, prev_redex, &redex_pos, &redex_rule)) {
+      *min_pos = lo;
       return any;                                   // orientable fixpoint
     }
     RewriteSubst subst = {{0}};
@@ -2636,12 +2643,15 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
     Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
     if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
                       redex_pos, repl, ATP_RI_FLAT_CAP)) {
+      if (redex_pos < lo) lo = redex_pos;
       prev_redex = redex_pos;
       any = 1u;
     } else {
+      *min_pos = lo;
       return any;                                   // overrun: caller bails
     }
   }
+  *min_pos = lo;
   return any;
 }
 
@@ -2698,11 +2708,32 @@ static u8 atp_ft_unorient_at_linear(AtpState *s, Term *flat, u32 *subsz,
 // more matching faces than it holds, OR the index is absent, this falls
 // back to the exact linear scan at that position (atp_ft_unorient_at_
 // linear) so the verdict is never weakened.
+// `resume` is the leftmost preorder position whose unorientable-NF status
+// may have changed (or was never examined) since the previous unorient
+// scan -- every position q strictly before it that is not one of its
+// ancestors (q + subsz[q] <= resume) was examined-and-rejected last scan
+// and unchanged since, so it cannot host a firable face and is skipped.
+// `fire_pos` (out) reports the preorder position where a face fired, so
+// the caller can fold it into the next resume watermark; left untouched
+// when nothing fires.  Mirrors atp_ri_find_redex's `clean_before`.
 static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
-                               u32 *flatsym, u32 *flatlen, u8 *folded) {
+                               u32 *flatsym, u32 *flatlen, u8 *folded,
+                               u32 resume, u32 *fire_pos) {
   AtpRuleIndex *ux = s->unorient_index;
   AtpRuleIndex *saved_ix = g_atp_ri_ix;
+  // The KBO weight memo (g_kbo_wmemo) persists across compares and is
+  // keyed by Term cell integer.  The flatterm path splices in place and
+  // atp_ri_build returns the original (now content-stale) cell for a
+  // subtree it judges unchanged, so a cell integer can carry NEW logical
+  // content with no heap move -- silently re-using a stale memo entry and
+  // returning a WRONG verdict.  Invalidate once here so every order-gate
+  // in this scan weighs the CURRENT term; entries built within the scan
+  // are valid (no splice fires until a redex is found, then we return).
+  thvm_kbo_invalidate();
   for (u32 p = 0; p < *flatlen; p++) {
+    if (p < resume && p + subsz[p] <= resume) {
+      continue;                              // unchanged, known non-redex
+    }
     // A leaf position (variable / NUM -- flatsym below CTR_BASE) can
     // never head a rule LHS that is a non-trivial term, so the only
     // unorientable equation that could fire is a bare `x = y`-style one,
@@ -2719,7 +2750,7 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
     if (ux == NULL) {
       u8 r = atp_ft_unorient_at_linear(s, flat, subsz, flatsym, flatlen,
                                        folded, p, sub);
-      if (r == 2u) return 1u;
+      if (r == 2u) { *fire_pos = p; return 1u; }
       if (r == 1u) return 0u;                       // overrun: caller bails
       continue;
     }
@@ -2732,7 +2763,7 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
       // with the exact linear scan so no candidate is missed.
       u8 r = atp_ft_unorient_at_linear(s, flat, subsz, flatsym, flatlen,
                                        folded, p, sub);
-      if (r == 2u) return 1u;
+      if (r == 2u) { *fire_pos = p; return 1u; }
       if (r == 1u) return 0u;
       continue;
     }
@@ -2771,7 +2802,7 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
       Term repl = thvm_subst_apply(other, &subst);
       if (atp_compare(s, sub, repl) == KBO_GT) {
         if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                          p, repl, ATP_RI_FLAT_CAP)) return 1u;
+                          p, repl, ATP_RI_FLAT_CAP)) { *fire_pos = p; return 1u; }
         return 0u;                                  // overrun: caller bails
       }
     }
@@ -2826,17 +2857,40 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
     return t;
   }
 
+  // Incremental resume watermark for the unorientable preorder scan,
+  // mirroring atp_ri_find_redex's `clean_before` for the orientable side.
+  // It is the leftmost position whose unorientable-NF status may have
+  // changed since the previous unorient scan: the min of (a) the position
+  // the previous unorient step fired at and (b) the leftmost orientable
+  // splice the interleaved indexed fixpoint then made.  Positions whose
+  // whole subtree lies before it were examined-and-rejected last scan and
+  // are untouched, so they cannot host a firable face.  Reset to 0 (full
+  // scan) when resume is disabled.  A rewrite from either pass can only
+  // enable a new redex at or after its own (leftmost) site, never to the
+  // left in an untouched sibling -- so the min watermark is sound.
+  u32 un_resume = 0u;
   for (u32 i = 0; i < step_cap; i++) {
     if (atp_norm_deadline_fired(s)) break;
     // The indexed fixpoint may overrun on a splice; on overrun it stops
     // having done partial work, the unorientable pass would too, so we
     // materialise and hand the rest to the tree loop.  Detect overrun by
     // re-checking after: a clean fixpoint leaves no orientable redex.
+    u32 or_min = flatlen;                       // sentinel: no orientable change
     atp_ft_indexed_fixpoint(s, flat, subsz, flatsym, &flatlen, &folded,
-                            step_cap);
+                            step_cap, &or_min);
+    // The orientable splices since the last unorient scan also invalidate
+    // positions from or_min onward; fold them into the watermark.  (On the
+    // first iteration un_resume is still 0, so the first scan is full.)
+    if (or_min < un_resume) un_resume = or_min;     // iter 0: un_resume==0
+    if (!s->ft_unorient_resume) un_resume = 0u;
+    u32 fire_pos = flatlen;
     u8 fired = atp_ft_unorient_step(s, flat, subsz, flatsym, &flatlen,
-                                    &folded);
+                                    &folded, un_resume, &fire_pos);
     if (!fired) break;          // joint fixpoint (or splice overrun: rare)
+    // Next scan may resume past everything before this fire site (it was
+    // examined-and-rejected); the interleaved indexed fixpoint's or_min is
+    // folded in at the top of the next iteration.
+    un_resume = fire_pos;
   }
   return atp_ri_build(flat, subsz, flatsym, 0u);
 }
@@ -3218,6 +3272,13 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   {
     const char *ft = getenv("THVM_ATP_FLATTERM");
     s->use_flatterm = (ft != NULL && ft[0] != '\0' && ft[0] != '0') ? 1u : 0u;
+  }
+  // Incremental resume for the flatterm unorientable scan.  ON by default
+  // (mirrors the orientable `clean_before` resume); cleared only by setting
+  // THVM_ATP_UNORIENT_RESUME=0, used by the resume-ON==OFF differential.
+  {
+    const char *ur = getenv("THVM_ATP_UNORIENT_RESUME");
+    s->ft_unorient_resume = (ur != NULL && (ur[0] == '0' && ur[1] == '\0')) ? 0u : 1u;
   }
 #endif
   return s;

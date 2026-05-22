@@ -2873,6 +2873,7 @@ int main(void) {
     u32 rng = 0x1234567u;
     #define FT_RND() (rng = rng * 1103515245u + 12345u, rng >> 8)
     u32 mism = 0u, total = 0u;
+    u32 resume_mism = 0u;     // flatterm resume-ON vs resume-OFF normal form
     for (u32 t = 0; t < 4000u; t++) {
       AtpState *s = (t % 3u == 0u) ? sc : ((t & 1u) ? sb : sa);
       // Build a random subject bottom-up: start with `budget` random
@@ -2905,7 +2906,24 @@ int main(void) {
       s->use_flatterm = 1u;
       Term nf_flat = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
                                            s->n_rules, 4096u);
+      // Resume-ON (the default) vs resume-OFF unorientable scan: the
+      // incremental-resume watermark must not change the normal form.
+      s->ft_unorient_resume = 0u;
+      Term nf_noresume = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                               s->n_rules, 4096u);
+      s->ft_unorient_resume = 1u;
       s->use_flatterm = 0u;
+      if (!kbo_eq(nf_flat, nf_noresume)) {
+        resume_mism++;
+        if (resume_mism <= 3u) {
+          char a[512], b[512], c[512];
+          atp_pretty_term(subj, a, sizeof a);
+          atp_pretty_term(nf_flat, b, sizeof b);
+          atp_pretty_term(nf_noresume, c, sizeof c);
+          fprintf(stderr, "FLATTERM RESUME DIFF: subj=%s on=%s off=%s\n",
+                  a, b, c);
+        }
+      }
       if (!kbo_eq(nf_tree, nf_flat)) {
         mism++;
         if (mism <= 3u) {
@@ -2917,10 +2935,16 @@ int main(void) {
         }
       }
       thvm_atp_heap_reset(cp);
+      // heap_reset recycles cell integers across subjects; the persistent
+      // KBO weight memo is keyed by cell integer, so a recycled integer
+      // would alias a stale entry.  The live engine bumps the epoch on GC;
+      // this differential never GCs, so invalidate explicitly here.
+      thvm_kbo_invalidate();
     }
     TEST_BEGIN("atp/flatterm-mixed-normalize-differential");
     {
       CHECK_EQ(mism, 0u);
+      CHECK_EQ(resume_mism, 0u);
       CHECK(total >= 4000u);
     }
     thvm_atp_free(sa);

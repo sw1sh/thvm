@@ -123,6 +123,14 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
 ATP_ORDERED_REWRITE ?= 1
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRITE,)
 
+# -DATP_FLATTERM_DIFF compiles the test_atp flatterm differential block
+# (tree mixed NF == flatterm mixed NF, AND flatterm resume-ON == resume-OFF
+# NF) over 4000 random mixed-rule subjects.  Off by default (the default
+# test_atp run is the 135603-assertion suite); `make ATP_FLATTERM_DIFF=1
+# bin/test_atp` adds the differential.
+ATP_FLATTERM_DIFF ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FLATTERM_DIFF)),-DATP_FLATTERM_DIFF,)
+
 # Milestone 10: -DATP_MNF builds the MNF goal-directed search (a port
 # of Waldmeister's "MultipleNormalFormen" module).  It AUGMENTS the
 # single-normal-form goal check: goal_lhs seeds a GREEN front, goal_rhs

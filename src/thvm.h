@@ -3204,6 +3204,12 @@ typedef struct {
   // THVM_ATP_FLATTERM=1 at init, or via thvm_atp_set_use_flatterm.  Same
   // normal forms as the tree path (asserted by ATP_FLATTERM_DIFF).
   u8                   use_flatterm;
+  // Incremental-resume watermark for the flatterm unorientable preorder
+  // scan (atp_ft_unorient_step).  ON by default: the scan resumes past the
+  // prefix proven clean since the last scan instead of restarting from
+  // p=0, mirroring the orientable side's `clean_before` resume.  Cleared
+  // (THVM_ATP_UNORIENT_RESUME=0) only for the resume-ON==OFF differential.
+  u8                   ft_unorient_resume;
   // Opt-in CP-generation overlap-partner index.  OFF by default: the
   // engine scans all n_rules per new rule (O(n_rules) overlap attempts).
   // When set, thvm_atp_generate_cps_c queries cp_index -- a unification
