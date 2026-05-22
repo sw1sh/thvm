@@ -640,7 +640,7 @@ ifeq ($(shell uname -s),Linux)
 PY_SO           := py/thvm/libthvm_py.so
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
-	$(CC) -fPIC -O2 \
+	$(CC) -fPIC -O2 $(CUDA_DEFINES) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
 ifdef HAVE_CUDA
