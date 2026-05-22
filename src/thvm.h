@@ -2999,7 +2999,10 @@ typedef enum {
   ATP_CP_WEIGHT_UNIF = 6,
   ATP_CP_WEIGHT_GOAL = 7,   // Waldmeister CPinGoal: weight a CP by its
                             // structural match to the goal (Clas_CP_Goal.c)
-  ATP_CP_WEIGHT_LAST = 8,
+  ATP_CP_WEIGHT_LEARNED = 8, // ENIGMA-style learned scorer: a trained
+                            // logistic regression over CP features ranks
+                            // CPs by predicted proof-relevance.
+  ATP_CP_WEIGHT_LAST = 9,
 } AtpCpWeightMode;
 
 typedef struct {

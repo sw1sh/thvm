@@ -1696,7 +1696,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 $AtpCpWeightCodes = <|
     "Add" -> 0, "Max" -> 1, "Ord" -> 2, "Gt" -> 3,
     "Mix" -> 4, "Mix2" -> 5, "Unif" -> 6,
-    "Goal" -> 7, "CPinGoal" -> 7, Automatic -> -1
+    "Goal" -> 7, "CPinGoal" -> 7, "Learned" -> 8, Automatic -> -1
 |>;
 
 TFindEquationalProof::badmethod =

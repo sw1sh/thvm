@@ -3275,7 +3275,38 @@ static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
   }
   return base;
 }
+// Learned CP-selection scorer (ENIGMA-style).  Logistic-regression
+// weights trained on the labelled corpus exported by THVM_ATP_CP_DATASET
+// (per-selected-CP features, labelled by trace-DAG reachability from the
+// goal-closing step over the 83 provable AxiomaticTheory notable
+// theorems; held-out test AUC ~0.85).  score = W.features + B, in the
+// RAW feature space (the standardization is folded into W,B).  A higher
+// score means more proof-relevant, so it maps to a LOWER heap priority
+// (selected sooner).  Completeness is preserved by select_cp's periodic
+// FIFO (CPdimension) pick, which fires regardless of the weight mode.
+static const float ATP_LEARNED_W[ATP_CP_FEATURE_DIM] = {
+  0.003216f, -0.271657f, 0.460614f, -0.096104f, 0.003216f, 0.042247f,
+  0.003216f, -0.000402f, -0.005740f, -0.156174f, -0.023514f, 1.121586f,
+  1.999360f, -0.012683f};
+static const float ATP_LEARNED_B = -1.598045f;
+
+static u32 atp_cp_learned_priority(AtpState *s, Term lhs, Term rhs) {
+  float feat[ATP_CP_FEATURE_DIM];
+  thvm_atp_cp_features(s, lhs, rhs, s->cp_seq_next, feat);
+  float score = ATP_LEARNED_B;
+  for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) score += ATP_LEARNED_W[i] * feat[i];
+  // Map score (typically ~[-6, 4]) to a u32 priority, higher score ->
+  // lower priority.  Clamp into a safe positive band.
+  float pr = 1.0e6f - 1.0e4f * score;
+  if (pr < 0.0f) pr = 0.0f;
+  if (pr > 2.0e9f) pr = 2.0e9f;
+  return (u32)pr;
+}
+
 static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
+  if (s->cp_weight_mode == ATP_CP_WEIGHT_LEARNED) {
+    return atp_cp_learned_priority(s, lhs, rhs);
+  }
   return atp_cp_priority_sized(s, lhs, rhs,
                                atp_symbol_count(lhs) + atp_symbol_count(rhs));
 }
