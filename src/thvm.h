@@ -2846,6 +2846,13 @@ fn u32 thvm_critical_pairs_range(const Term *lhs, const Term *rhs, u32 n_rules,
                                  u32 start_j, u32 end_j,
                                  CriticalPair *out, u32 cap);
 
+// Single-pair superposition core: overlap the (lj -> rj) face into
+// (li -> ri), appending CPs from `count`.  Variables of (lj, rj) must
+// be renamed apart from (li, ri).  See the definition for why the
+// saturator drives both faces of an unorientable equation through it.
+fn u32 thvm_critical_pairs_pair(Term li, Term ri, Term lj, Term rj,
+                                CriticalPair *out, u32 cap, u32 count);
+
 // === atp/ ===
 // Saturation loop state (stage 5).  See
 // docs/plans/waldmeister_ic_atp.md section 7.1 for the design.  AtpState is heap-
@@ -3109,6 +3116,36 @@ typedef struct {
   // -DATP_MNF) so callers can set it unconditionally; goal_check only
   // consults it inside the `#ifdef ATP_MNF` block.
   u8 use_mnf;
+
+  // Waldmeister-faithful RHS interreduction (IR_InterreduktionRechts /
+  // RMRechtsInterred, Interreduktion.c:329).  When set, after a new rule
+  // is oriented thvm_atp_interreduce also normalizes the RIGHT-HAND side
+  // of every other rule against the current rule set; a rule whose RHS
+  // shrinks is dropped and re-queued as the simplified equation
+  // (old_lhs, reduced_rhs) via TRACE_SIMPLIFY (the same connected-DAG
+  // path the LHS-collapse already uses).  Keeps R interreduced (= the
+  // canonical/reduced rewrite system Waldmeister maintains) so the CP
+  // set stays small and the goal's normal form is actually reached.
+  // 0 (default) leaves the engine's prior LHS-only interreduction
+  // untouched, so test_atp / atp.wlt behaviour is unchanged; the WL
+  // surface flips it for Method -> "Waldmeister".  Set via
+  // thvm_atp_set_use_rhs_interreduce.
+  u8 use_rhs_interreduce;
+
+  // Unfailing-completion BOTH-FACES superposition.  The default CP
+  // enumerator overlaps a rule's STORED lhs only -- complete for an
+  // oriented rule (l > r for every instance) but INCOMPLETE for an
+  // unorientable equation u = v: unfailing completion must superpose
+  // BOTH faces (u into the peer AND v into the peer), since either side
+  // can be the larger/contracted side for some ground instance.  Set,
+  // the saturator additionally overlaps the rhs-face of every
+  // unorientable equation (cp/_.c thvm_critical_pairs_pair).  This is
+  // the divergence that left the deep Sheffer/Wolfram theorems
+  // UNREACHABLE at any budget: their proofs superpose the big RHS of an
+  // incomparable equation, a CP the lhs-only enumerator never emits.
+  // 0 (default) preserves the prior CP set exactly (test_atp / atp.wlt
+  // unchanged); the WL surface flips it for Method -> "Waldmeister".
+  u8 use_unfailing_cp;
 
   // 7e (lever 2): discrimination tree over the rule LHS terms.  Behind
   // -DATP_RULE_INDEX, the ATP-side normalizer's per-position redex

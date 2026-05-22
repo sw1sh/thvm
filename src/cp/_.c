@@ -156,3 +156,31 @@ fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
                                    0, n_rules, 0, n_rules,
                                    out, cap);
 }
+
+// Superpose ONE equation (lj face -> rj face) into ONE equation
+// (li -> ri): walk every non-variable position of `li`, unify `lj`
+// there, and emit the CP ( sigma(li[p <- rj]) , sigma(ri) ).  `out`
+// is appended starting at index `count`; the new count is returned
+// (capped at `cap`).  This is the single-pair core the rule-set
+// enumerators are built from.  Exposing it lets the saturator drive
+// the BOTH-FACES superposition unfailing completion requires for an
+// unorientable equation: an equation u = v incomparable in the
+// reduction order must be overlapped in BOTH orientations (u into the
+// peer AND v into the peer), since either face can be the contracted
+// side for some ground instance.  The oriented-only enumerators above
+// overlap a rule's STORED lhs only -- correct for an oriented rule
+// (l > r for every instance), incomplete for an equation.  Variables
+// of the (lj, rj) face must already be renamed apart from li/ri.
+fn u32 thvm_critical_pairs_pair(Term li, Term ri, Term lj, Term rj,
+                                CriticalPair *out, u32 cap, u32 count) {
+  CpCtx ctx;
+  ctx.li    = li;
+  ctx.ri    = ri;
+  ctx.lj    = lj;
+  ctx.rj    = rj;
+  ctx.out   = out;
+  ctx.cap   = cap;
+  ctx.count = count;
+  u32 path[CP_MAX_DEPTH];
+  return cp_walk_positions(li, path, 0, CP_MAX_DEPTH, cp_visit, &ctx, count);
+}
