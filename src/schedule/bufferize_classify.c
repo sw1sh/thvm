@@ -458,6 +458,31 @@ static u64 bufferize_absorbing_boundary(u64 start_loc, u32 hops_left) {
   return 0;
 }
 
+// A REDUCE at `loc` (the consumer of an inner reduce) belongs to a
+// reduce chain whose kernel root is a realized REDUCE iff following its
+// unique-consumer reduce links upward eventually reaches a still-realized
+// REDUCE.  The outermost reduce of a chain keeps its realized flag (its
+// consumer is not a reduce, or it is the graph root), so the walk
+// terminates.  The reduce-chain unmark pass uses this instead of testing
+// the immediate consumer's current `realized` flag: in a 3+ reduce chain
+// a mid-chain reduce is unmarked before the inner one is visited, so the
+// flag would race and the inner reduce would wrongly stay a boundary
+// (splitting an N-axis trailing reduce into 2 kernels for N>=3).
+static int bufferize_reduce_consumer_in_realized_chain(u64 loc, u32 hops_left) {
+  while (hops_left-- > 0) {
+    u32 idx = bufferize_info_find(loc);
+    if (idx == 0xFFFFFFFFu) return 0;
+    if (BUFFERIZE_NODES[idx].op != UOP_REDUCE) return 0;
+    if (BUFFERIZE_NODES[idx].reasons & BUFFERIZE_REASON_MATMUL) return 0;
+    if (BUFFERIZE_NODES[idx].realized) return 1;        // reached chain root
+    if (BUFFERIZE_NODES[idx].consumer_count != 1) return 0;
+    u64 cons[1];
+    if (bufferize_consumers_for_loc(loc, cons, 1) != 1) return 0;
+    loc = cons[0];                                      // mid-chain: keep walking
+  }
+  return 0;
+}
+
 // Gate the softmax-broadcast-reduce / scalar-tail rules' multi-reduce
 // generalization.  Each REDUCE is checked independently by
 // bufferize_reduce_consumer_is_broadcast_chain, so removing the
@@ -787,7 +812,13 @@ fn void bufferize_classify(Term root) {
       u32 cidx = bufferize_info_find(consumer_locs[0]);
       if (cidx == 0xFFFFFFFFu) continue;
       if (BUFFERIZE_NODES[cidx].op != UOP_REDUCE) continue;
-      if (!BUFFERIZE_NODES[cidx].realized) continue;
+      // Accept a consumer reduce that is either still a realized boundary
+      // or a mid-chain reduce whose own consumer chain reaches a realized
+      // reduce root.  Testing only the immediate `realized` flag races the
+      // unmark of a mid-chain reduce (3+ axis trailing reduce -> 2 kernels).
+      if (!BUFFERIZE_NODES[cidx].realized
+          && !bufferize_reduce_consumer_in_realized_chain(consumer_locs[0], 16))
+        continue;
       // bufferize_unwrap_dp follows DP cells across SUB-marked fired
       // dups too -- accept any chain whose outer.src[0] resolves to
       // this inner UOP after DUP traversal.  The CPU walker handles
