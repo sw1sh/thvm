@@ -234,6 +234,14 @@ int main(int argc, char **argv) {
     }
   }
 
+  // THVM_ATP_RECORD_NORM=1 turns on per-step normalize-trace recording
+  // (the WL ProofObject path's setting) so a C bench can A/B the cost of
+  // record_norm_steps -- the suspected paclet-vs-C overhead.
+  {
+    const char *rn = getenv("THVM_ATP_RECORD_NORM");
+    if (rn != NULL && rn[0] == '1') thvm_atp_set_record_norm_steps(s, 1u);
+  }
+
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
   // "sat" mode: pure completion, NO goal -- run to the step/wall cap
