@@ -2590,6 +2590,10 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // via thvm_atp_set_cp_weight_mode for callers that want the bare
   // symbol-count sum.
   s->cp_weight_mode = ATP_CP_WEIGHT_GT;
+  // Right-reduction (DISCOUNT-loop composition) is on by default:
+  // interreduce keeps surviving rules' RHSs in normal form so the
+  // CPs born from them stay small.  calloc zeroed it; set explicitly.
+  s->right_reduce = 1u;
   atp_register_primitives();
   acp_selftest();   // verify the Stringterms pack/unpack round-trip
   // Allocate the growable rule / CP arrays at their initial
@@ -4039,6 +4043,14 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
 fn void thvm_atp_set_record_norm_steps(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->record_norm_steps = on ? 1u : 0u;
+}
+
+// Toggle interreduction right-reduction (RHS composition).  On by
+// default (see thvm_atp_init); set 0 to recover left-reduction-only
+// interreduction for A/B measurement or proof-extraction fallback.
+fn void thvm_atp_set_right_reduce(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->right_reduce = on ? 1u : 0u;
 }
 
 // Read wall-clock microseconds from CLOCK_REALTIME -- portable
@@ -5924,6 +5936,73 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       dropped++;
       // Don't increment i; the next older rule shifted down to slot i.
     } else {
+      // === RIGHT-REDUCTION (composition) ============================
+      // The older rule i's LHS did NOT collapse, so the rule stays in
+      // R as `l -> old_rhs`.  Now try to reduce its RHS against the
+      // just-added rules: rewrite old_rhs to its normal form r'.  If it
+      // changes (and l > r' still holds for the reduction order), update
+      // s->rhs[i] in place -- l = r' is still an equational consequence
+      // (l = old_rhs ->* r'), r' is no larger than old_rhs, and the CPs
+      // born from rule i now use the smaller RHS.  This is the
+      // DISCOUNT-loop right-reduction / composition step; without it the
+      // RHSs (and every CP overlapping them) bloat across the run.
+      if (s->right_reduce) {
+        Term r_reduced;
+        // Thread the proof DAG: record each RHS rewrite as a NORM_STEP
+        // chained off rule i's own TRACE_ORIENT (parent), side = 1
+        // (the RHS), with the LHS as the unchanged other side.  The
+        // chain tail then carries the equation {l, r'} exactly, so a
+        // new TRACE_ORIENT parented on it inherits directly under chain
+        // extraction, and emitNorm bridges it under chain-off.
+        u32 rr_parent = s->r_trace[i];
+        if (s->record_norm_steps) {
+          r_reduced = atp_rewrite_normalize_slice_record(
+              s, old_rhs, new_lhs, new_rhs, new_traces, n_new, 16,
+              &rr_parent, 1u, old_lhs);
+        } else {
+          r_reduced = atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs,
+                                            n_new, 16);
+        }
+        if (!kbo_eq(r_reduced, old_rhs)) {
+          // Orientation guard: l -> r' must remain a valid reduction
+          // rule (l strictly greater than r').  r' is a reduct of
+          // old_rhs <= l, so this holds in the standard case; verify it
+          // and skip the in-place update if some pathological order
+          // makes l NOT > r' (keep the rule as `l -> old_rhs`).
+          // Size guard: a reduction order (KBO/LPO) guarantees r' is
+          // smaller than old_rhs in the ORDER but not necessarily in
+          // raw symbol count -- a rule a -> g(b,c) rewrites a constant
+          // into a deeper term.  Since the point of right-reduction is
+          // to keep RHSs (and the CPs overlapping them) SMALL, skip the
+          // in-place update when r' has more symbols than old_rhs; the
+          // rule keeps its compact RHS and the larger form never feeds
+          // a critical pair.  (Soundness is unaffected either way.)
+          if (atp_compare(s, old_lhs, r_reduced) == KBO_GT &&
+              atp_symbol_count(r_reduced) <= atp_symbol_count(old_rhs)) {
+            // Record the post-reduction rule as a fresh TRACE_ORIENT
+            // parented on the NORM_STEP chain tail (or directly on the
+            // old ORIENT when norm-step recording is off).  Repointing
+            // r_trace[i] keeps resolveRule(i) -> the entry whose stored
+            // (lhs, rhs) equals the live (l, r') pair.
+            u32 new_t = atp_trace_push(s, TRACE_ORIENT, rr_parent,
+                                       ATP_TRACE_NONE, old_lhs, r_reduced);
+            // Retire the old `l -> old_rhs` ORIENT for the chain-off
+            // aliveRulesAt model: a TRACE_SIMPLIFY whose ParentA names
+            // the old trace marks it inactive from this point forward,
+            // so emitNorm replays against `l -> r'`.  Push the marker
+            // straight onto the trace (NOT atp_add_equation_simplified,
+            // which would also enqueue a redundant CP -- the rule is
+            // already live in R as l -> r').
+            atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
+                           ATP_TRACE_NONE, old_lhs, r_reduced);
+            s->rhs[i]     = r_reduced;
+            s->r_trace[i] = new_t;
+            s->n_right_reduced++;
+            // RHS does not feed the LHS discrimination tree, so the
+            // rule-LHS index stays valid; no dirty flag needed.
+          }
+        }
+      }
       i++;
     }
   }

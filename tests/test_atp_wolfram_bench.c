@@ -213,6 +213,14 @@ int main(int argc, char **argv) {
       thvm_atp_set_cp_weight_mode(s, (u32)strtoul(cw, NULL, 10));
     }
   }
+  // THVM_ATP_RIGHT_REDUCE=0 disables interreduction right-reduction
+  // (RHS composition) for A/B measurement; default (unset/1) keeps the
+  // DISCOUNT-loop right-reduction on.
+  {
+    const char *rr = getenv("THVM_ATP_RIGHT_REDUCE");
+    if (rr != NULL && *rr == '0') thvm_atp_set_right_reduce(s, 0u);
+  }
+
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
   // "sat" mode: pure completion, NO goal -- run to the step/wall cap
@@ -293,6 +301,7 @@ int main(int argc, char **argv) {
          "rule-subsumed=%u connected=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
          s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected);
+  printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);
   { u32 unor = 0;
     for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;
     printf("   unorientable rules: %u / %u\n", unor, s->n_rules); }
