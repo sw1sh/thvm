@@ -3167,6 +3167,14 @@ typedef struct {
 #ifdef ATP_RULE_INDEX
   struct AtpRuleIndex *rule_index;
   u8                   rule_index_dirty;
+  // Companion redex index over the UNORIENTABLE equations' faces (both
+  // l->r and r->l, each indexed only when its replacement's vars are
+  // contained in its matched face -- a face that cannot fire is not
+  // indexed).  The flatterm unorientable pass (atp_ft_unorient_step)
+  // descends this instead of the O(n_rules) linear scan, applying the
+  // LPO order-gate to candidate faces only.  Rebuilt with rule_index
+  // whenever R mutates (shares rule_index_dirty / n_rules_built).
+  struct AtpRuleIndex *unorient_index;
   // Opt-in flatterm fast-path for the MIXED (orientable + unorientable)
   // normalize loop.  OFF by default: the engine is byte-identical to the
   // tree mixed loop.  When set, atp_rewrite_normalize_ordered's mixed

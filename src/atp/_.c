@@ -1802,6 +1802,11 @@ fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
 
 #ifdef ATP_RULE_INDEX
 
+// The unorientable-faces index inserts a face only when its replacement
+// side's variables are contained in the matched side (else the face can
+// never fire); declared here, defined with the ordered-rewrite helpers.
+static int atp_vars_contained(Term a, Term b);
+
 // Flat-symbol alphabet -- same scheme as 7d's atp_dt_*: NUM < every
 // STAR(k) < every CTR(lab) so a sym-ascending child list lets the
 // descent stop scanning early.
@@ -1902,7 +1907,15 @@ struct AtpRuleIndex {
   u32        root;
   u32        n_rules_built;     // R size the tree currently reflects
   u8         any_folded;        // some rule LHS folded a var -> imperfect
+  // 1 for the unorientable-faces index: a leaf rec's `rule` field then
+  // carries the direction in its high bit (ATP_RI_DIR_BIT) -- bit set =
+  // r->l (matched face is rhs[i], replacement is lhs[i]); clear = l->r.
+  u8         is_unorient;
 };
+// Direction bit packed into a leaf rec's `rule` field for the
+// unorientable index.  Rule indices never approach 2^31 in completion,
+// so the top bit is free as a per-face direction tag.
+#define ATP_RI_DIR_BIT  0x80000000u
 typedef struct AtpRuleIndex AtpRuleIndex;
 
 static u32 atp_ri_node_new(AtpRuleIndex *ix, u32 sym) {
@@ -2007,6 +2020,53 @@ static void atp_ri_rebuild(AtpState *s) {
     ix->nodes[node].rec_head = rec;
   }
   ix->n_rules_built = s->n_rules;
+
+  // Companion index over the UNORIENTABLE equations' faces.  For each
+  // unorientable rule i, the matched side may be either face; index a
+  // face only when its replacement side's variables are contained in it
+  // (else the face can never produce a well-formed instance and the
+  // linear scan's atp_vars_contained guard would reject it).  The leaf
+  // rec's `rule` field carries the direction in ATP_RI_DIR_BIT: clear =
+  // l->r (match lhs[i], replace by rhs[i]); set = r->l (match rhs[i],
+  // replace by lhs[i]).  Faces are inserted in (rule asc, l->r before
+  // r->l) order so the retrieval's candidate list is built deterministic.
+  AtpRuleIndex *ux = s->unorient_index;
+  if (ux != NULL) {
+    ux->n_nodes = 0;
+    ux->n_recs  = 0;
+    ux->any_folded = 0;
+    ux->is_unorient = 1u;
+    ux->root    = atp_ri_node_new(ux, ATP_RI_NIL);
+    if (s->n_unorient > 0u) {
+      for (u32 i = 0; i < s->n_rules; i++) {
+        if (s->r_orient[i]) continue;                 // oriented: rule_index
+        // l->r face: match lhs[i], replace by rhs[i].
+        if (atp_vars_contained(s->rhs[i], s->lhs[i])) {
+          AtpRiVarMap vm;
+          atp_ri_varmap_reset(&vm);
+          u32 node = atp_ri_insert_term(ux, ux->root, s->lhs[i], &vm);
+          if (vm.folded) ux->any_folded = 1u;
+          u32 rec  = atp_ri_rec_new(ux);
+          ux->recs[rec].rule = i;                     // dir bit clear
+          ux->recs[rec].next = ux->nodes[node].rec_head;
+          ux->nodes[node].rec_head = rec;
+        }
+        // r->l face: match rhs[i], replace by lhs[i].
+        if (atp_vars_contained(s->lhs[i], s->rhs[i])) {
+          AtpRiVarMap vm;
+          atp_ri_varmap_reset(&vm);
+          u32 node = atp_ri_insert_term(ux, ux->root, s->rhs[i], &vm);
+          if (vm.folded) ux->any_folded = 1u;
+          u32 rec  = atp_ri_rec_new(ux);
+          ux->recs[rec].rule = i | ATP_RI_DIR_BIT;
+          ux->recs[rec].next = ux->nodes[node].rec_head;
+          ux->nodes[node].rec_head = rec;
+        }
+      }
+    }
+    ux->n_rules_built = s->n_rules;
+  }
+
   s->rule_index_dirty = 0u;
 }
 
@@ -2046,6 +2106,7 @@ static const Term   *g_atp_ri_flat    = NULL;
 static const u32    *g_atp_ri_subsz   = NULL;
 static const u32    *g_atp_ri_flatsym = NULL;  // per-position flat-symbol code
 static const Term   *g_atp_ri_lhs     = NULL;  // s->lhs[] for the leaf guard
+static const Term   *g_atp_ri_rhs     = NULL;  // s->rhs[] for r->l face guards
 static u32           g_atp_ri_qend    = 0;     // end of the queried slice
 static u32           g_atp_ri_star[ATP_RI_MAXVARS];  // first-bind positions
 static u32           g_atp_ri_best    = ATP_RI_NIL;
@@ -2155,6 +2216,107 @@ static u32 atp_ri_query_pos(u32 qpos) {
   // descent.  The one reset is done once per normalize.
   atp_ri_descend(g_atp_ri_ix->root, qpos);
   return g_atp_ri_best;
+}
+
+// --- unorientable-faces retrieval (candidate collection) -----------
+//
+// The orientable retrieval above tracks a single MINIMUM rule index: the
+// linear scan it replaces always fires the lowest-index rule with no
+// order check, so the structural match alone names the winner.  The
+// unorientable pass cannot collapse to a min: at a position, the linear
+// scan tries each unorientable equation (rule asc; l->r then r->l) and
+// the FIRST direction that is strictly order-DECREASING for the matched
+// instance wins -- the structurally-lowest face may be order-rejected.
+// So this descent COLLECTS every structurally matching face (rule, dir)
+// at the position; the caller applies the LPO gate in (rule asc, l->r
+// before r->l) order and fires the first that passes -- identical to the
+// linear scan, but the LPO compare runs only on candidates.
+// Candidate buffer cap.  At a position, the matching unorientable faces
+// are bounded by the count of indexed faces (<= 2 * n_unorient); a deep
+// completion's unorientable subset runs to a few hundred, and a shallow
+// face (e.g. a commutativity-style nand(x,y)=nand(y,x)) matches every
+// nand-headed subterm, so size generously to keep the indexed path live
+// (overflow only forces the exact linear fallback at that position --
+// correct, just slow).
+#define ATP_RI_MAXCAND 8192u
+static u32 g_atp_ri_cand[ATP_RI_MAXCAND];   // rule | dir-bit, structural hits
+static u32 g_atp_ri_ncand = 0;
+
+// Leaf action for the unorientable index: append each face whose stored
+// pattern one-way matches the query subject.  Same match proof as the
+// orientable leaf (perfect descent OR thvm_match on a fold) -- only the
+// stored side (lhs[i] for l->r, rhs[i] for r->l) is the match pattern.
+static void atp_ri_leaf_collect_unorient(u32 node) {
+  AtpRuleIndex *ix = g_atp_ri_ix;
+  u8 perfect = !ix->any_folded && !g_atp_ri_query_folded;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+       r = ix->recs[r].next) {
+    u32 packed = ix->recs[r].rule;
+    if (g_atp_ri_ncand >= ATP_RI_MAXCAND) return;   // buffer full: caller bails
+    if (perfect) {
+      g_atp_ri_cand[g_atp_ri_ncand++] = packed;
+      continue;
+    }
+    u32 rule = packed & ~ATP_RI_DIR_BIT;
+    Term pat = (packed & ATP_RI_DIR_BIT) ? g_atp_ri_rhs[rule]
+                                         : g_atp_ri_lhs[rule];
+    RewriteSubst subst = {{0}};
+    if (thvm_match(pat, g_atp_ri_qsubj, &subst)) {
+      g_atp_ri_cand[g_atp_ri_ncand++] = packed;
+    }
+  }
+}
+
+// Candidate-collecting twin of atp_ri_descend.  Identical traversal,
+// different leaf action (collect every face, not the min).  Kept
+// separate so the hot orientable descent stays a tight single-callback
+// loop with no per-node branch on index kind.
+static void atp_ri_descend_unorient(u32 node, u32 pos) {
+  AtpRuleIndex *ix = g_atp_ri_ix;
+  for (;;) {
+    if (pos == g_atp_ri_qend) {
+      atp_ri_leaf_collect_unorient(node);
+      return;
+    }
+    u32 sz         = g_atp_ri_subsz[pos];
+    u32 csym_exact = g_atp_ri_flatsym[pos];
+    u32 ctr_next   = ATP_RI_NIL;
+    for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+         c = ix->nodes[c].sibling) {
+      u32 csym = ix->nodes[c].sym;
+      if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+        u32 k = csym - ATP_RI_STAR_BASE;
+        u32 bound = g_atp_ri_star[k];
+        if (bound == ATP_RI_NIL) {
+          g_atp_ri_star[k] = pos;
+          atp_ri_descend_unorient(c, pos + sz);
+          g_atp_ri_star[k] = ATP_RI_NIL;
+        } else if (g_atp_ri_subsz[bound] == sz &&
+                   memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
+                          (size_t)sz * sizeof(u32)) == 0) {
+          atp_ri_descend_unorient(c, pos + sz);
+        }
+      } else if (csym == csym_exact) {
+        ctr_next = c;
+      }
+    }
+    if (ctr_next == ATP_RI_NIL) return;
+    node = ctr_next;
+    pos  = pos + 1u;
+  }
+}
+
+// Collect into g_atp_ri_cand[] every unorientable face whose stored
+// pattern one-way matches the subject subterm at preorder position
+// `qpos`.  Returns the candidate count (g_atp_ri_ncand).  Order within
+// the buffer is leaf-list / tree order -- NOT priority -- so the caller
+// must apply the (rule asc, l->r before r->l) priority itself.
+static u32 atp_ri_query_pos_unorient(u32 qpos) {
+  g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
+  g_atp_ri_qsubj = g_atp_ri_flat[qpos];
+  g_atp_ri_ncand = 0;
+  atp_ri_descend_unorient(g_atp_ri_ix->root, qpos);
+  return g_atp_ri_ncand;
 }
 
 // Find the FIRST preorder position of the shared subject that is a
@@ -2453,61 +2615,134 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
   return any;
 }
 
+// Linear-scan unorientable step at a single rebuilt subterm `sub` at
+// preorder position `p`: tries each unorientable equation (rule asc,
+// l->r then r->l), fires the first strictly order-decreasing instance.
+// Returns 2 = fired (spliced), 1 = matched-firable but splice overran
+// (caller bails), 0 = nothing fired here.  This is the exact fallback
+// the indexed path defers to when the candidate buffer overflows or the
+// index is unavailable -- byte-identical verdicts to atp_ordered_try_top.
+static u8 atp_ft_unorient_at_linear(AtpState *s, Term *flat, u32 *subsz,
+                                    u32 *flatsym, u32 *flatlen, u8 *folded,
+                                    u32 p, Term sub) {
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (s->r_orient[i]) continue;                 // oriented: indexed pass
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(s->lhs[i], sub, &subst) &&
+          atp_vars_contained(s->rhs[i], s->lhs[i])) {
+        Term repl = thvm_subst_apply(s->rhs[i], &subst);
+        if (atp_compare(s, sub, repl) == KBO_GT) {
+          return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                               p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+        }
+      }
+    }
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(s->rhs[i], sub, &subst) &&
+          atp_vars_contained(s->lhs[i], s->rhs[i])) {
+        Term repl = thvm_subst_apply(s->lhs[i], &subst);
+        if (atp_compare(s, sub, repl) == KBO_GT) {
+          return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                               p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+        }
+      }
+    }
+  }
+  return 0u;
+}
+
 // Scan the shared flat array preorder for the leftmost-outermost
 // position where some UNORIENTABLE equation fires (either direction,
-// variable-safe + strictly order-decreasing for the instance).  This is
-// the flatterm analog of atp_ordered_try_top's both-directions branch,
-// but driven by a linear walk of the flat array (subsz[] skips are O(1))
-// instead of a pointer-tree recursion.  The order check / thvm_match run
-// against the live tree cell flat[pos] -- identical verdicts to the tree
-// path.  On a hit, splices the replacement in place and returns 1.
+// variable-safe + strictly order-decreasing for the instance).  At each
+// CTR position the candidate faces are retrieved from the unorientable
+// discrimination index (atp_ri_query_pos_unorient) instead of an
+// O(n_rules) linear scan; the LPO order-gate (atp_compare) then runs
+// ONLY on those structurally-matching candidates, in the linear scan's
+// own priority (rule asc, l->r before r->l).  The first order-decreasing
+// face fires -- byte-identical redex/rule/direction to the linear scan.
+// On a hit, splices the replacement in place and returns 1.
+//
+// The candidate buffer (g_atp_ri_cand) is bounded; if a position has
+// more matching faces than it holds, OR the index is absent, this falls
+// back to the exact linear scan at that position (atp_ft_unorient_at_
+// linear) so the verdict is never weakened.
 static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
                                u32 *flatsym, u32 *flatlen, u8 *folded) {
+  AtpRuleIndex *ux = s->unorient_index;
+  AtpRuleIndex *saved_ix = g_atp_ri_ix;
   for (u32 p = 0; p < *flatlen; p++) {
     // A leaf position (variable / NUM -- flatsym below CTR_BASE) can
     // never head a rule LHS that is a non-trivial term, so the only
     // unorientable equation that could fire is a bare `x = y`-style one,
     // which is never order-decreasing (and the orient check would have
-    // dropped it).  Skip the atp_ri_build + per-rule thvm_match on every
-    // leaf -- the flat array makes "is this a CTR head" an O(1) lookup.
+    // dropped it).  Skip on every leaf -- O(1) flat lookup.
     if (flatsym[p] < ATP_RI_CTR_BASE) continue;
     // Materialise the subterm at preorder position p from the flat
     // arrays.  flat[p] alone is STALE once a descendant was spliced (a
     // splice rewrites the child cells + subsz/flatsym, never the
-    // ancestor's flat[] tree cell -- atp_ri_build is what reconstructs
-    // it), so the match/order check must run against the rebuilt
-    // subtree.  An untouched subtree rebuilds to its shared original at
-    // zero allocation.
+    // ancestor's flat[] tree cell), so the match/order check must run
+    // against the rebuilt subtree.  An untouched subtree rebuilds to its
+    // shared original at zero allocation.
     Term sub = atp_ri_build(flat, subsz, flatsym, p);
-    // Same rule order as atp_ordered_try_top: ascending rule index,
-    // each unorientable equation tried l->r then r->l, first decreasing
-    // direction wins.  Orientable rules are skipped (already at indexed
-    // fixpoint -- g_atp_skip_oriented semantics).
-    for (u32 i = 0; i < s->n_rules; i++) {
-      if (s->r_orient[i]) continue;                 // oriented: indexed pass
-      {
-        RewriteSubst subst = {{0}};
-        if (thvm_match(s->lhs[i], sub, &subst) &&
-            atp_vars_contained(s->rhs[i], s->lhs[i])) {
-          Term repl = thvm_subst_apply(s->rhs[i], &subst);
-          if (atp_compare(s, sub, repl) == KBO_GT) {
-            if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                              p, repl, ATP_RI_FLAT_CAP)) return 1u;
-            return 0u;                              // overrun: caller bails
-          }
-        }
-      }
-      {
-        RewriteSubst subst = {{0}};
-        if (thvm_match(s->rhs[i], sub, &subst) &&
-            atp_vars_contained(s->lhs[i], s->rhs[i])) {
-          Term repl = thvm_subst_apply(s->lhs[i], &subst);
-          if (atp_compare(s, sub, repl) == KBO_GT) {
-            if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                              p, repl, ATP_RI_FLAT_CAP)) return 1u;
-            return 0u;
-          }
-        }
+    if (ux == NULL) {
+      u8 r = atp_ft_unorient_at_linear(s, flat, subsz, flatsym, flatlen,
+                                       folded, p, sub);
+      if (r == 2u) return 1u;
+      if (r == 1u) return 0u;                       // overrun: caller bails
+      continue;
+    }
+    g_atp_ri_ix = ux;
+    g_atp_ri_query_folded = *folded;  // leaf-collect's perfect-match guard
+    u32 ncand = atp_ri_query_pos_unorient(p);
+    g_atp_ri_ix = saved_ix;
+    if (ncand >= ATP_RI_MAXCAND) {
+      // Buffer saturated -- the index dropped faces; redo this position
+      // with the exact linear scan so no candidate is missed.
+      u8 r = atp_ft_unorient_at_linear(s, flat, subsz, flatsym, flatlen,
+                                       folded, p, sub);
+      if (r == 2u) return 1u;
+      if (r == 1u) return 0u;
+      continue;
+    }
+    if (ncand == 0u) continue;                      // no firable face here
+    // Sort the candidates into the linear scan's priority order.  The
+    // linear scan tries each rule ascending, l->r before r->l, and fires
+    // the first order-decreasing instance, so the priority key is
+    // (rule << 1) | dir (dir: l->r = 0, r->l = 1) -- ascending in this
+    // key reproduces (rule asc, l->r first) EXACTLY.  (The leaf rec packs
+    // dir in the high bit, which is a fine encoding but the WRONG sort
+    // order across rules -- r->l of rule i must precede l->r of rule i+1,
+    // which the high-bit packing inverts -- so re-key here.)  N is tiny
+    // (faces matching one subterm); insertion sort, stable on equal keys
+    // (duplicates cannot occur -- one rec per (rule, dir)).
+    static u32 cand[ATP_RI_MAXCAND];
+    for (u32 k = 0; k < ncand; k++) {
+      u32 packed = g_atp_ri_cand[k];
+      u32 rule   = packed & ~ATP_RI_DIR_BIT;
+      u32 rl     = (packed & ATP_RI_DIR_BIT) ? 1u : 0u;
+      cand[k]    = (rule << 1) | rl;
+    }
+    for (u32 a = 1u; a < ncand; a++) {
+      u32 v = cand[a];
+      u32 b = a;
+      while (b > 0u && cand[b - 1u] > v) { cand[b] = cand[b - 1u]; b--; }
+      cand[b] = v;
+    }
+    for (u32 k = 0; k < ncand; k++) {
+      u32 key    = cand[k];
+      u32 rule   = key >> 1;
+      u8  rl     = (u8)(key & 1u);
+      Term pat   = rl ? s->rhs[rule] : s->lhs[rule];
+      Term other = rl ? s->lhs[rule] : s->rhs[rule];
+      RewriteSubst subst = {{0}};
+      if (!thvm_match(pat, sub, &subst)) continue;  // index over-approx
+      Term repl = thvm_subst_apply(other, &subst);
+      if (atp_compare(s, sub, repl) == KBO_GT) {
+        if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                          p, repl, ATP_RI_FLAT_CAP)) return 1u;
+        return 0u;                                  // overrun: caller bails
       }
     }
   }
@@ -2522,7 +2757,12 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
 static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
                                                  u32 step_cap) {
   if (s->rule_index == NULL) s->rule_index = atp_ri_new();
-  if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
+  // The unorientable-faces index is needed only on this (flatterm) path;
+  // allocate it lazily here so the default engine never carries it.
+  // atp_ri_rebuild populates it when it (re)builds rule_index.
+  if (s->unorient_index == NULL) s->unorient_index = atp_ri_new();
+  if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules ||
+      s->unorient_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
   }
   static Term flat[ATP_RI_FLAT_CAP];
@@ -2533,6 +2773,7 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
   g_atp_ri_subsz   = subsz;
   g_atp_ri_flatsym = flatsym;
   g_atp_ri_lhs     = s->lhs;
+  g_atp_ri_rhs     = s->rhs;
   for (u32 k = 0; k < ATP_RI_MAXVARS; k++) g_atp_ri_star[k] = ATP_RI_NIL;
 
   u32 flatlen = 0u;
@@ -2640,6 +2881,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // fires.  (calloc already zeroed both, the explicit set documents
   // intent.)
   s->rule_index       = NULL;
+  s->unorient_index   = NULL;     // lazily built on the flatterm path
   s->rule_index_dirty = 1u;
   // Opt-in flatterm fast-path for the mixed normalize loop.  OFF unless
   // THVM_ATP_FLATTERM is set to a non-"0" value -- the default engine
@@ -2695,6 +2937,7 @@ fn void thvm_atp_free(AtpState *s) {
 #endif
 #ifdef ATP_RULE_INDEX
   atp_ri_free(s->rule_index);
+  atp_ri_free(s->unorient_index);
 #endif
 #ifdef ATP_MNF
   mnf_destroy(s->mnf);

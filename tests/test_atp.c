@@ -2853,6 +2853,20 @@ int main(void) {
       atp_push_rule(sb, FT_F(x, y), FT_F(y, x));                   // unorient
       atp_push_rule(sb, FT_F(FT_F(x, x), x), x);                   // orient
     }
+    // set 2: TWO unorientable equations whose LHS faces overlap (both
+    // f(_, _) heads), so several unorientable faces are candidates at one
+    // position -- exercises the indexed unorientable path's candidate
+    // priority (rule asc, l->r before r->l) against the linear scan.  An
+    // index that mis-orders r->l-of-rule-i vs l->r-of-rule-(i+1) diverges
+    // here even though every set-0/1 position has at most one such face.
+    AtpState *sc = thvm_atp_init(&FT_CFG, 256u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(sc, FT_F(x, y), FT_F(y, x));                   // unorient
+      atp_push_rule(sc, FT_F(FT_F(x, y), z), FT_F(FT_F(y, x), z)); // unorient
+      atp_push_rule(sc, FT_F(x, FT_F(y, z)), FT_F(y, FT_F(x, z))); // unorient
+      atp_push_rule(sc, FT_F(x, x), x);                            // orient
+    }
 
     // Deterministic random subject generator: variables fv(0..2) and
     // binary f, capped depth so terms stay under the flat cap.
@@ -2860,7 +2874,7 @@ int main(void) {
     #define FT_RND() (rng = rng * 1103515245u + 12345u, rng >> 8)
     u32 mism = 0u, total = 0u;
     for (u32 t = 0; t < 4000u; t++) {
-      AtpState *s = (t & 1u) ? sb : sa;
+      AtpState *s = (t % 3u == 0u) ? sc : ((t & 1u) ? sb : sa);
       // Build a random subject bottom-up: start with `budget` random
       // variable leaves over fv(0..2), then repeatedly combine two pool
       // entries under f until one term remains.
@@ -2911,6 +2925,7 @@ int main(void) {
     }
     thvm_atp_free(sa);
     thvm_atp_free(sb);
+    thvm_atp_free(sc);
     #undef FT_F
     #undef FT_RND
   }
