@@ -2369,9 +2369,18 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
 static int    atp_vars_contained(Term a, Term b);
 static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs);
 static u8     g_atp_skip_oriented;   // tentative def; initialised below
-#ifdef ATP_FLATTERM_SELFCHECK
 static u32    atp_pretty_term(Term t, char *buf, u32 cap);
-#endif
+
+// Env-gated derivation trace (THVM_ATP_RULE_TRACE=1).  Probes the env
+// once; default builds are silent and behaviorally byte-identical.
+static int atp_rule_trace_on(void) {
+  static int trace_on = -1;
+  if (trace_on < 0) {
+    const char *e = getenv("THVM_ATP_RULE_TRACE");
+    trace_on = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return trace_on;
+}
 static Term   atp_ordered_rewrite_step(AtpState *s, Term t,
                                        const Term *lhs, const Term *rhs,
                                        u32 n_rules, u8 *fired);
@@ -4046,6 +4055,16 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
   if (!s->r_orient[s->n_rules]) s->n_unorient++;
   s->n_rules++;
+  // Env-gated derivation trace.  Prints each rule at orientation time
+  // in derivation order, mirroring Waldmeister's `-a 4` "... added as
+  // new rule N:" output.
+  if (atp_rule_trace_on()) {
+    char la[2048], ra[2048];
+    atp_pretty_term(lhs, la, sizeof la);
+    atp_pretty_term(rhs, ra, sizeof ra);
+    fprintf(stderr, "RULE %u: %s -> %s%s\n", s->n_rules - 1u, la, ra,
+            s->r_orient[s->n_rules - 1u] ? "" : "  (unorientable)");
+  }
 #ifdef ATP_RULE_INDEX
   // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.
   s->rule_index_dirty = 1u;
@@ -6025,6 +6044,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // on) so the proof DAG stays connected through interreduction
       // (a fresh TRACE_AXIOM would sever it).
       atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
+      if (atp_rule_trace_on()) {
+        char la[2048];
+        atp_pretty_term(s->lhs[i], la, sizeof la);
+        fprintf(stderr, "  RETIRE rule (slot %u): LHS %s collapsed; "
+                "re-queued for re-orientation\n", i, la);
+      }
 #ifdef ATP_ORPHAN_KILL
       // Capture the dropped rule's trace id before the shift below
       // overwrites r_trace[i].  Its descendant CPs are now orphans.
