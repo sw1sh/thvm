@@ -102,14 +102,19 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   RewriteSubst subst = {{0}};
   if (!thvm_unify(sub, ctx->lj, &subst)) return ctx->count;
 
-  // CP = (σ(l_i[p ← r_j]), σ(r_i))
+  // CP = (σ(l_i[p ← r_j]), σ(r_i)); the peak is σ(l_i) -- both CP
+  // sides are one-step reducts of it (rule j rewrites the lhs, rule i
+  // the rhs), so a join through terms strictly below the peak proves
+  // the CP redundant (Bachmair-Dershowitz connectedness).
   Term replaced = cp_replace_at(ctx->li, p, p_len, ctx->rj);
   Term cp_lhs   = thvm_unify_apply(replaced, &subst);
   Term cp_rhs   = thvm_unify_apply(ctx->ri,  &subst);
+  Term cp_peak  = thvm_unify_apply(ctx->li,  &subst);
 
   CriticalPair *slot = &ctx->out[ctx->count];
   slot->lhs = cp_lhs;
   slot->rhs = cp_rhs;
+  slot->peak = cp_peak;
   // Record the superposition position -- the path into rule i's lhs
   // where rule j overlapped.  cp_walk_positions caps depth at
   // CP_MAX_DEPTH, so p_len never exceeds the pos[] array.

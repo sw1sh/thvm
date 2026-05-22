@@ -2833,6 +2833,7 @@ fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 typedef struct {
   Term lhs;
   Term rhs;
+  Term peak;            // sigma(li): the overlapped term both CP sides descend from
   u8   pos[CP_MAX_DEPTH];
   u8   pos_len;
 } CriticalPair;
@@ -3276,6 +3277,18 @@ typedef struct {
   // thvm_atp_set_use_ground_join (Method -> {... "GroundJoin" -> True}).
   u8   use_ground_join;
 
+  // Runtime gate for Bachmair-Dershowitz connectedness DELETION (Twee
+  // section 6.2).  0 (default) = off; 1 = drop a CP whose two sides
+  // join through terms STRICTLY BELOW the peak sigma(li) under the
+  // reduction order.  Sound: such a CP is a redundant consequence of
+  // smaller overlaps, so removing it preserves the completion's
+  // confluence target.  Set via thvm_atp_set_use_connectedness
+  // (Method -> {... "Connectedness" -> True}).
+  u8   use_connectedness;
+  // Count of CPs the connectedness criterion deleted (measurement; ticks
+  // only when use_connectedness drops a CP).
+  u32  n_cps_dropped_connected_below_peak;
+
   // Stage 8.1e-i: feature flag.  When 0 (default), `thvm_atp_
   // generate_cps` runs the C-side critical-pair enumerator
   // directly.  When 1, it dispatches to `thvm_atp_generate_cps_ic`,
@@ -3482,6 +3495,7 @@ fn void      thvm_atp_set_use_flatterm(AtpState *s, u8 on);
 // is built with ATP_CP_GROUND_JOIN).  Sound: ground-joinable CPs are
 // redundant.  Off by default (the criterion only counts).
 fn void      thvm_atp_set_use_ground_join(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_connectedness(AtpState *s, u8 on);
 // Waldmeister CPdimension fairness ratio: 1 FIFO (oldest) pick per
 // `modulo` CP selections.  0 = default (11).  Larger = more weight-
 // greedy; Waldmeister uses 11/50/100/200 per problem analysis.

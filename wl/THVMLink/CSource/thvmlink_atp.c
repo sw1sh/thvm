@@ -493,6 +493,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // tracks live, irreducible CPs.  0 = off (default), engine byte-identical.
   mint cp_set_ir = MArgument_getInteger(args[15]);
   thvm_atp_set_cp_set_interreduce(atp, (u8)(cp_set_ir != 0));
+  // Bachmair-Dershowitz connectedness CP deletion (Twee section 6.2):
+  // drop a CP whose two sides join through terms strictly below the
+  // peak.  0 = off (default), engine byte-identical.
+  mint conn = MArgument_getInteger(args[16]);
+  thvm_atp_set_use_connectedness(atp, (u8)(conn != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

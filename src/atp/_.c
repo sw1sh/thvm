@@ -2981,6 +2981,14 @@ fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
   s->use_ground_join = on ? 1u : 0u;
 }
 
+// Bachmair-Dershowitz connectedness CP deletion (Twee section 6.2).
+// Default OFF -> the engine is byte-identical; the WL surface flips it
+// for Method -> {... "Connectedness" -> True} and the Waldmeister preset.
+fn void thvm_atp_set_use_connectedness(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_connectedness = on ? 1u : 0u;
+}
+
 // Waldmeister-faithful RHS interreduction (Interreduktion.c
 // RMRechtsInterred).  See the AtpState.use_rhs_interreduce comment.
 fn void thvm_atp_set_use_rhs_interreduce(AtpState *s, u8 on) {
@@ -6247,6 +6255,139 @@ static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
   return kbo_eq(l, r);
 }
 
+// Bachmair-Dershowitz connectedness (Twee section 6.2): a critical
+// pair (s, t) born from the peak `p = sigma(li)` is REDUNDANT if s and
+// t can be joined through a rewrite proof in which every term is
+// STRICTLY BELOW the peak in the reduction order.  Soundness: such a
+// proof witnesses that the local confluence of `p` follows from
+// strictly smaller overlaps already (or to be) handled, so dropping
+// the CP cannot lose a needed consequence -- this is the standard
+// connectedness redundancy of unfailing completion.
+//
+// This is STRONGER than trivial-joinability (7.1): plain normalization
+// only follows order-DECREASING steps to a normal form, so two sides
+// with distinct normal forms are kept; connectedness additionally
+// admits an unorientable equation applied in its non-reducing local
+// direction, PROVIDED the result stays strictly below the peak.  Such a
+// "detour below the peak" joins CPs that 7.1 misses, which is where the
+// extra pruning comes from.
+//
+// Implementation: a bounded forward reachability below `peak`.  Seed a
+// small hash set with s and t's ordered normal forms (always < peak
+// since they are proper reducts).  Repeatedly expand a frontier term by
+// every one-step rewrite -- both rule directions, variable-safe -- whose
+// RESULT u satisfies peak >_C u; insert u, tagged by which seed it
+// descends from (s-side / t-side / both).  A term reached from BOTH
+// sides is the join point -> redundant.  Bounded by ATP_CONN_MAX_NODES
+// (return 0 = KEEP on overflow, so the criterion never wrongly deletes).
+#define ATP_CONN_MAX_NODES 256u
+#define ATP_CONN_SIDE_S 1u
+#define ATP_CONN_SIDE_T 2u
+
+// Structural hash over the preorder (FNV-ish): structurally-equal terms
+// with distinct heap cells hash identically.  Fast pre-filter before a
+// kbo_eq in the connectedness reachability set.
+static u32 atp_struct_hash(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        h = (h ^ atp_struct_hash(term_ctr_at(t, i))) * 0x01000193u;
+      }
+      return h ^ (n + 0x9e3779b9u);
+    }
+    case TAG_FVR:
+      return (0x2545f491u ^ term_ext(t)) * 0x01000193u;
+    default:
+      return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
+  }
+}
+
+// Collect every one-step rewrite of `t` (all positions, both
+// variable-safe directions of each rule) whose result is strictly
+// below `peak`, into out_buf[*n .. ).  Mirrors mnf_successors' shape
+// but order-gated against the peak rather than the redex.
+static u32 atp_conn_successors(AtpState *s, Term t, Term peak,
+                               Term *out_buf, u32 *n, u32 cap) {
+  u32 size = 1u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 m = term_ctr_n(t);
+    if (m > REWRITE_MAX_ARITY) return size;
+    for (u32 i = 0; i < m; i++) {
+      u32 base = *n;
+      (void)atp_conn_successors(s, term_ctr_at(t, i), peak, out_buf, n, cap);
+      for (u32 k = base; k < *n; k++) {
+        Term ch[REWRITE_MAX_ARITY];
+        for (u32 c = 0; c < m; c++) {
+          ch[c] = (c == i) ? out_buf[k] : term_ctr_at(t, c);
+        }
+        out_buf[k] = term_new_ctr(term_ext(t), ch, m);
+      }
+    }
+  }
+  for (u32 j = 0; j < s->n_rules && *n < cap; j++) {
+    RewriteSubst sub = {{0}};
+    if (thvm_match(s->lhs[j], t, &sub)) {                 // l -> r
+      Term repl = thvm_subst_apply(s->rhs[j], &sub);
+      if (atp_compare(s, peak, repl) == KBO_GT) out_buf[(*n)++] = repl;
+    }
+    if (*n >= cap) break;
+    if (atp_vars_contained(s->lhs[j], s->rhs[j])) {       // r -> l (var-safe)
+      RewriteSubst sb = {{0}};
+      if (thvm_match(s->rhs[j], t, &sb)) {
+        Term repl = thvm_subst_apply(s->lhs[j], &sb);
+        if (atp_compare(s, peak, repl) == KBO_GT) out_buf[(*n)++] = repl;
+      }
+    }
+  }
+  return size;
+}
+
+static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,
+                                      Term peak) {
+  if (s == NULL || peak == 0) return 0;
+  // The ordered normal forms of both sides are proper reducts of the
+  // peak, hence strictly below it; they are the natural seeds.
+  Term l = atp_rewrite_normalize(s, lhs, s->lhs, s->rhs, s->n_rules, 64u);
+  Term r = atp_rewrite_normalize(s, rhs, s->lhs, s->rhs, s->n_rules, 64u);
+  if (kbo_eq(l, r)) return 1;                 // trivially joined below peak
+  // A seed equal to the peak (no decreasing step taken) cannot stay
+  // strictly below it -- bail (KEEP) to preserve soundness.
+  if (atp_compare(s, peak, l) != KBO_GT || atp_compare(s, peak, r) != KBO_GT) {
+    return 0;
+  }
+  Term  terms[ATP_CONN_MAX_NODES];
+  u32   hash [ATP_CONN_MAX_NODES];
+  u8    side [ATP_CONN_MAX_NODES];
+  u32   n = 0u;
+  terms[n] = l; hash[n] = atp_struct_hash(l); side[n] = ATP_CONN_SIDE_S; n++;
+  terms[n] = r; hash[n] = atp_struct_hash(r); side[n] = ATP_CONN_SIDE_T; n++;
+  Term succ[64];
+  for (u32 cur = 0; cur < n; cur++) {
+    u32 ns = 0u;
+    (void)atp_conn_successors(s, terms[cur], peak, succ, &ns, 64u);
+    for (u32 k = 0; k < ns; k++) {
+      Term u  = succ[k];
+      u32  hu = atp_struct_hash(u);
+      u32  found = ATP_CONN_MAX_NODES;
+      for (u32 i = 0; i < n; i++) {
+        if (hash[i] == hu && kbo_eq(terms[i], u)) { found = i; break; }
+      }
+      if (found != ATP_CONN_MAX_NODES) {
+        if ((side[found] | side[cur]) == (ATP_CONN_SIDE_S | ATP_CONN_SIDE_T)) {
+          return 1;                          // join point reached from both
+        }
+        side[found] = (u8)(side[found] | side[cur]);
+        continue;
+      }
+      if (n >= ATP_CONN_MAX_NODES) return 0;  // overflow -> KEEP (sound)
+      terms[n] = u; hash[n] = hu; side[n] = side[cur]; n++;
+    }
+  }
+  return 0;
+}
+
 // Stage 7.3a: rule subsumption check.  Returns 1 if there exist a
 // rule `(l_k, r_k) ∈ R` and a substitution σ such that
 // `(lhs, rhs) = (σ l_k, σ r_k)` (forward) or `(lhs, rhs) =
@@ -7568,6 +7709,16 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       continue;
     }
 #endif
+    // Bachmair-Dershowitz connectedness (Twee section 6.2): drop a CP
+    // whose sides join through terms strictly below the peak.  Gated on
+    // use_connectedness so the default engine is byte-identical.  The
+    // peak rides on the CriticalPair; the reduced cp_lhs/cp_rhs are the
+    // CP sides.  Run before the trivial-join check so it can subsume it.
+    if (s->use_connectedness && cps[i].peak != 0 &&
+        atp_cp_connected_below_peak(s, cp_lhs, cp_rhs, cps[i].peak)) {
+      s->n_cps_dropped_connected_below_peak++;
+      continue;
+    }
     if (joinable) {
       s->n_cps_dropped_joinable++;
       continue;
@@ -7741,10 +7892,13 @@ static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
   if (term_tag(cp_lhs) == TAG_ERA) return ctx->count;
   Term cp_rhs = ic_unify_apply3(sub, ctx->lj, ctx->ri);
   if (term_tag(cp_rhs) == TAG_ERA) return ctx->count;
+  Term cp_peak = ic_unify_apply3(sub, ctx->lj, ctx->li);
+  if (term_tag(cp_peak) == TAG_ERA) return ctx->count;
 
   CriticalPair *slot = &ctx->out[ctx->count];
   slot->lhs = cp_lhs;
   slot->rhs = cp_rhs;
+  slot->peak = cp_peak;
   slot->pos_len = (u8)p_len;
   for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p[d];
   ctx->count++;

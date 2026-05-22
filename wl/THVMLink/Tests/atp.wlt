@@ -1060,6 +1060,25 @@ VerificationTest[
     TestID -> "ATP/method/unfailingcp-rhsinterreduce-combined-proves"
 ]
 
+(* --- Connectedness: Bachmair-Dershowitz CP deletion stays sound ---- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "Connectedness" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/connectedness-proves"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "Connectedness" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/connectedness-verifies-sound"
+]
+
 (* --- Method -> "Waldmeister": faithful default-strategy preset ----- *)
 
 VerificationTest[
