@@ -3118,6 +3118,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // (a static LpoConfig pointer may be reused with new precedence).
   thvm_lpo_set_persist(1u);
   thvm_lpo_invalidate();
+  // Persistent per-term KBO weight memo: kbo_lin_addto re-walks the same
+  // divergent subtrees millions of times during a completion.  Opt in and
+  // drop any entries from a prior run (cfg pointer may be reused).
+  thvm_kbo_set_persist(1u);
+  thvm_kbo_invalidate();
   s->kbo      = cfg;
   s->step_cap = step_cap;
   // CP-priority weight: the ordering-directed GT heuristic is the
@@ -3362,9 +3367,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 
   free(roots);
 
-  // Cells moved: the persistent LPO (s,t)->verdict memo is keyed on cell
-  // addresses, now stale -- drop it.
+  // Cells moved: the persistent LPO (s,t)->verdict memo and the per-term
+  // KBO weight memo are both keyed on cell addresses, now stale -- drop them.
   thvm_lpo_invalidate();
+  thvm_kbo_invalidate();
   return 1;
 }
 
@@ -4014,19 +4020,11 @@ static u32 atp_unif_measure(Term lhs, Term rhs) {
 static u32 atp_kbo_weight(AtpState *s, Term t) {
   const KboConfig *cfg = (s != NULL) ? s->kbo : NULL;
   if (cfg == NULL) return atp_symbol_count(t);
-  switch (term_tag(t)) {
-    case TAG_FVR: return cfg->var_weight;
-    case TAG_CTR: {
-      u32 lab = term_ext(t);
-      u32 w   = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
-      u32 n   = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        w += atp_kbo_weight(s, term_ctr_at(t, i));
-      }
-      return w;
-    }
-    default: return cfg->var_weight;
-  }
+  // Served from the per-term KBO weight memo (thvm_kbo_term_weight): the
+  // CP-weight heuristics weigh both faces of every critical pair, so the
+  // same terms are summed repeatedly within an epoch.  Byte-identical to
+  // the inlined recursion (same cfg weights), just memoized.
+  return (u32)thvm_kbo_term_weight(cfg, t);
 }
 
 // CP-weight base for one weight mode -- ports of the `CH_*Weight`

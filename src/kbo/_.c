@@ -214,8 +214,164 @@ static inline void kbo_bump(KboLin *st, u32 id, int delta) {
   st->bal[id] = prev + delta;
 }
 
+// === per-term weight + variable-profile memo ========================
+//
+// kbo_lin_addto re-walks a whole divergent subtree on EVERY compare to
+// accumulate its total KBO weight (Σ symbol-weight) into phidiff and its
+// per-variable occurrence counts into bal[].  The profile puts that walk
+// at ~half the comparator self-time on the single-symbol Sheffer
+// signature, where the same subterm cells recur across millions of
+// compares.  Memoize, per CTR subtree, BOTH its total weight AND a compact
+// (var_id, count) profile, so applying the subtree to a balance scope is
+// O(#distinct vars) -- a handful on Sheffer terms -- instead of
+// O(|subtree|).  A ground subtree (no in-range variable) is a single
+// phidiff add.  The profile is what makes the memo a net win: the terms
+// here are variable-bearing, so caching ONLY the weight (and still walking
+// for the var bumps) is no faster than the original single combined pass.
+//
+// Direct-mapped, epoch-stamped exactly like the LPO (s,t)->verdict memo:
+// the ATP engine bumps the epoch (thvm_kbo_invalidate) on every GC, so
+// stale entries from before a cell relocation are simply not matched -- no
+// clearing.  Term cells are pointer-stable between GCs, so the cell value
+// is a sound key.  Weight + var profile depend only on the term structure
+// (and cfg->weights / var_weight, fixed within a run; a config change
+// re-bumps the epoch).  Collisions overwrite, paying a recompute, never a
+// wrong value.  A subtree with more than KBO_VPROF_CAP distinct in-range
+// variables is NOT profile-cached (vc == KBO_VPROF_OVF); its weight is
+// still cached and the var bumps fall back to a recursive walk.
+#define KBO_WMEMO_BITS 16
+#define KBO_WMEMO_SIZE (1u << KBO_WMEMO_BITS)
+#define KBO_WMEMO_MASK (KBO_WMEMO_SIZE - 1u)
+#define KBO_VPROF_CAP  6u           // distinct vars cached inline per node
+#define KBO_VPROF_OVF  0xFFu        // sentinel: too many distinct vars
+typedef struct {
+  Term      t;
+  u32       epoch;
+  long long w;                      // total KBO weight of the subtree
+  u8        vc;                     // #distinct in-range vars, or _OVF
+  u8        vid[KBO_VPROF_CAP];     // variable ids
+  i16       vcnt[KBO_VPROF_CAP];    // occurrence counts (signed for bump)
+} KboWMemoEnt;
+static KboWMemoEnt g_kbo_wmemo[KBO_WMEMO_SIZE];
+static u32 g_kbo_epoch = 1;
+static const KboConfig *g_kbo_last_cfg = NULL;
+
+static inline u32 kbo_wmemo_hash(Term t) {
+  u64 h = t * 0x9E3779B97F4A7C15ull;
+  h ^= h >> 29;
+  return (u32)h & KBO_WMEMO_MASK;
+}
+
+// Invalidate the whole per-term memo in O(1) by bumping the epoch.
+fn void thvm_kbo_invalidate(void) {
+  if (++g_kbo_epoch == 0u) {
+    for (u32 i = 0; i < KBO_WMEMO_SIZE; i++) g_kbo_wmemo[i].epoch = 0u;
+    g_kbo_epoch = 1u;
+  }
+}
+
+// Accumulate var id `id`'s count by `delta` into a small (id,count) list
+// being built for the memo.  Returns 1 on success, 0 if the list would
+// exceed KBO_VPROF_CAP distinct ids (caller marks the node overflowed).
+static inline int kbo_vprof_add(u8 *vid, i16 *vcnt, u8 *vc, u32 id, int delta) {
+  for (u8 k = 0; k < *vc; k++) {
+    if (vid[k] == (u8)id) {
+      int sum = (int)vcnt[k] + delta;
+      if (sum > 32767 || sum < -32768) return 0;   // i16 range guard
+      vcnt[k] = (i16)sum;
+      return 1;
+    }
+  }
+  if (*vc >= KBO_VPROF_CAP) return 0;
+  if (delta > 32767 || delta < -32768) return 0;
+  vid[*vc] = (u8)id; vcnt[*vc] = (i16)delta; (*vc)++;
+  return 1;
+}
+
+// Compute (and cache) the weight + variable profile of subtree `t`.
+// Recurses, memoizing every CTR node, so a node already seen this epoch
+// is O(1).  Variable ids >= KBO_MAX_VAR are out of balance range and are
+// counted only toward the weight (matching kbo_bump's id guard).
+static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
+  u32 idx = kbo_wmemo_hash(t);
+  KboWMemoEnt *e = &g_kbo_wmemo[idx];
+  if (e->epoch == g_kbo_epoch && e->t == t) return e;
+
+  long long w = (long long)kbo_weight(cfg, t);
+  u8 vc = 0u;
+  u8 vid[KBO_VPROF_CAP];
+  i16 vcnt[KBO_VPROF_CAP];
+  int ovf = 0;
+  u64 base; u32 n = kbo_ctr_children(t, &base);
+  for (u32 i = 0; i < n; i++) {
+    Term c = heap_read(base + i);
+    if (term_tag(c) == TAG_FVR) {
+      w += (long long)cfg->var_weight;
+      u32 id = term_ext(c);
+      if (id < KBO_MAX_VAR && !ovf) {
+        if (!kbo_vprof_add(vid, vcnt, &vc, id, +1)) ovf = 1;
+      }
+    } else if (term_tag(c) == TAG_CTR) {
+      KboWMemoEnt *ce = kbo_subtree_memo(cfg, c);
+      w += ce->w;
+      if (ce->vc == KBO_VPROF_OVF) ovf = 1;
+      else if (!ovf) {
+        for (u8 k = 0; k < ce->vc; k++) {
+          if (!kbo_vprof_add(vid, vcnt, &vc, ce->vid[k], ce->vcnt[k])) {
+            ovf = 1; break;
+          }
+        }
+      }
+    }
+    // a non-CTR/non-FVR child contributes 0 weight, no vars.
+  }
+  // recurse may have overwritten this slot (collision); re-fetch + rewrite.
+  e = &g_kbo_wmemo[idx];
+  e->t = t; e->epoch = g_kbo_epoch; e->w = w;
+  if (ovf) {
+    e->vc = KBO_VPROF_OVF;
+  } else {
+    e->vc = vc;
+    for (u8 k = 0; k < vc; k++) { e->vid[k] = vid[k]; e->vcnt[k] = vcnt[k]; }
+  }
+  return e;
+}
+
+// Total KBO weight of a single term (Σ symbol-weight), served from the
+// per-term memo.  The ATP CP-weight heuristics (CH_Ord/Gt/Mix) weigh both
+// faces of EVERY critical pair, a full-term re-traversal each; routing
+// them through this memo makes a repeat O(1).  Same epoch lifecycle as the
+// comparator memo (invalidated on GC / config change).  FVR / atom roots
+// are O(1) directly; a CTR root reuses or fills the memo.
+fn long long thvm_kbo_term_weight(const KboConfig *cfg, Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return (long long)cfg->var_weight;
+    case TAG_CTR: return kbo_subtree_memo(cfg, t)->w;
+    default:      return (long long)cfg->var_weight;
+  }
+}
+
+// Fallback: apply ALL variable bumps of subtree `t` by a full walk (used
+// when the node's distinct-var count overflowed the inline profile).
+static void kbo_addvars_walk(KboLin *st, Term t, int sign) {
+  switch (term_tag(t)) {
+    case TAG_FVR:
+      kbo_bump(st, term_ext(t), sign);
+      return;
+    case TAG_CTR: {
+      u64 base; u32 n = kbo_ctr_children(t, &base);
+      for (u32 i = 0; i < n; i++)
+        kbo_addvars_walk(st, heap_read(base + i), sign);
+      return;
+    }
+    default: return;
+  }
+}
+
 // Add the whole subtree `t` to one side of the current balance scope:
-// weight*sign into *phidiff, var occurrences*sign into bal[].
+// weight*sign into *phidiff, var occurrences*sign into bal[].  A CTR
+// subtree applies its memoized weight in O(1) and its variable profile in
+// O(#distinct vars); only an overflowed profile falls back to a full walk.
 static void kbo_lin_addto(KboLin *st, Term t, int sign,
                           long long *phidiff) {
   switch (term_tag(t)) {
@@ -224,10 +380,14 @@ static void kbo_lin_addto(KboLin *st, Term t, int sign,
       *phidiff += (long long)sign * (long long)st->cfg->var_weight;
       return;
     case TAG_CTR: {
-      *phidiff += (long long)sign * (long long)kbo_weight(st->cfg, t);
-      u64 base; u32 n = kbo_ctr_children(t, &base);
-      for (u32 i = 0; i < n; i++)
-        kbo_lin_addto(st, heap_read(base + i), sign, phidiff);
+      KboWMemoEnt *e = kbo_subtree_memo(st->cfg, t);
+      *phidiff += (long long)sign * e->w;
+      if (e->vc == KBO_VPROF_OVF) {
+        kbo_addvars_walk(st, t, sign);
+      } else {
+        for (u8 k = 0; k < e->vc; k++)
+          kbo_bump(st, e->vid[k], sign * (int)e->vcnt[k]);
+      }
       return;
     }
     default: return;
@@ -382,18 +542,58 @@ static KboCmp kbo_lin_lex(KboLin *st, Term s, Term t) {
 // 64-int memset dominated the comparator.  Single-threaded saturation, so
 // the shared scope is safe.  Behavior-identical to the per-call version.
 static KboLin g_kbo_st;   // bal[]/touched[] zero by static-storage init
+
+// Persistence mode for the per-term weight memo, mirroring the LPO memo.
+// OFF (default): every thvm_kbo call invalidates, so the memo is fresh per
+// call -- always sound for arbitrary direct callers (tests) that may reuse
+// cell addresses for a different term without telling us.  ON: the memo
+// persists across calls (the whole point on a completion: the same
+// subterms are weighed millions of times) and the caller PROMISES to
+// invalidate on cell movement; the ATP engine turns this on at
+// thvm_atp_init and invalidates on every GC.
+static u8 g_kbo_persist = 0;
+fn void thvm_kbo_set_persist(u8 on) { g_kbo_persist = on ? 1u : 0u; }
+
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
+  if (g_kbo_persist) {
+    // Persist across calls; a distinct cfg pointer means distinct weights,
+    // so re-bump the epoch on a config change (the caller handles cell
+    // moves via thvm_kbo_invalidate on GC).
+    if (cfg != g_kbo_last_cfg) { g_kbo_last_cfg = cfg; thvm_kbo_invalidate(); }
+  } else {
+    thvm_kbo_invalidate();   // safe default: fresh memo every call
+  }
   KboLin *st = &g_kbo_st;
   st->cfg = cfg;
   st->n_touched = 0;
 
   long long phidiff = 0;
+  KboCmp erg;
   if (kbo_vortest(st, s, t, &phidiff)) {
     kbo_lin_clear(st);
-    return KBO_EQ;
+    erg = KBO_EQ;
+  } else {
+    KboCmp varcmp = kbo_lin_decide_clear(st);
+    erg = kbo_lin_rek(st, s, t, phidiff, varcmp);
   }
-  KboCmp varcmp = kbo_lin_decide_clear(st);
-  return kbo_lin_rek(st, s, t, phidiff, varcmp);
+#ifdef KBO_WMEMO_SELFCHECK
+  // Differential: the per-term weight memo must NEVER change the verdict.
+  // thvm_kbo_naive is the memo-free Baader-Nipkow oracle (its own stack
+  // arrays, no g_kbo_wmemo).  Run it on every live pair during bring-up
+  // and abort on any divergence -- a wrong KBO verdict is a silent
+  // soundness bug.  Defeats the speedup (runs both); compile OUT for the
+  // measured runs.
+  {
+    KboCmp ref = thvm_kbo_naive(s, t, cfg);
+    if (ref != erg) {
+      fprintf(stderr, "KBO WMEMO SELFCHECK MISMATCH memo=%d naive=%d "
+                      "(s=%llu t=%llu)\n", (int)erg, (int)ref,
+                      (unsigned long long)s, (unsigned long long)t);
+      abort();
+    }
+  }
+#endif
+  return erg;
 }
 
 // === flatterm comparator (thvm_kbo_flat) ============================

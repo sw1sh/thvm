@@ -2756,6 +2756,18 @@ typedef struct {
 } KboConfig;
 
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
+// Invalidate thvm_kbo's persistent per-term weight memo.  Call when term
+// cells move (GC) or the config changes (new run / new weights).
+fn void   thvm_kbo_invalidate(void);
+// Opt in to persistent KBO weight memoization (default off = fresh per
+// call).  The caller then MUST invalidate on cell movement (the ATP does,
+// on GC).  Keeps thvm_kbo sound for any direct caller that does not opt in.
+fn void   thvm_kbo_set_persist(u8 on);
+// Total KBO weight (Σ symbol-weight) of a single term, served from the
+// per-term memo.  Same lifecycle as thvm_kbo's memo (invalidate on GC /
+// config change).  Lets the CP-weight heuristics weigh terms in O(1) on a
+// repeat instead of a fresh full traversal.
+fn long long thvm_kbo_term_weight(const KboConfig *cfg, Term t);
 
 // Flatterm KBO: same verdict as thvm_kbo, but flattens each operand into
 // a contiguous pre-order node array so the comparison reads cache-dense
