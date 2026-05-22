@@ -266,6 +266,16 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap);
 // Preorder node count -- defined after atp_compare; the indexed
 // normalizer needs it up here to size an incremental-flatten splice.
 static u32 atp_symbol_count(Term t);
+#ifdef ATP_ORDERED_REWRITE
+// Opt-in flatterm fast-path for the mixed normalize loop; defined after
+// the indexed normalizer + ordered helpers it builds on.
+static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
+                                                 u32 step_cap);
+#ifdef ATP_FLATTERM_SELFCHECK
+static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
+                                                          u32 step_cap);
+#endif
+#endif
 #endif
 
 // Throttled wall-deadline / host-abort poll for the inner rewrite
@@ -2339,6 +2349,228 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   return flattened ? atp_ri_build(flat, subsz, flatsym, 0u) : t;
 }
 
+#ifdef ATP_ORDERED_REWRITE
+// The flatterm mixed path builds on the ordered-rewrite helpers + the
+// reduction-order compare, all defined further down (after atp_compare);
+// forward-declare them here so the flat fast-path can call them.
+static int    atp_vars_contained(Term a, Term b);
+static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs);
+static u8     g_atp_skip_oriented;   // tentative def; initialised below
+#ifdef ATP_FLATTERM_SELFCHECK
+static u32    atp_pretty_term(Term t, char *buf, u32 cap);
+#endif
+static Term   atp_ordered_rewrite_step(AtpState *s, Term t,
+                                       const Term *lhs, const Term *rhs,
+                                       u32 n_rules, u8 *fired);
+// === flatterm fast-path for the MIXED (orientable + unorientable)
+// normalize loop (opt-in, THVM_ATP_FLATTERM=1, default OFF) ===========
+//
+// The default mixed path (atp_rewrite_normalize_ordered) alternates a
+// flat indexed fixpoint (orientable rules) with ONE pointer-tree
+// outermost-leftmost unorientable step (atp_ordered_rewrite_step),
+// MATERIALISING a tree and RE-FLATTENING the whole subject on every
+// unorientable rewrite.  On a self-overlapping axiom with ~10% of R
+// unorientable, the per-step tree walk + re-flatten dominates (profiled
+// at ~70% of the completion wall in atp_ordered_rewrite_step/_try_top).
+//
+// This variant keeps the subject in the SAME flat arrays across BOTH
+// passes.  The orientable redexes are found+spliced by the existing
+// discrimination-tree descent (atp_ri_find_redex / atp_ri_splice); the
+// unorientable redex is found by a LINEAR PREORDER SCAN of the flat
+// array (flatterm.TO_Schwanz-style next-pointer walk via subsz[]),
+// rebuilding the subterm at each CTR position (atp_ri_build at pos) for
+// the order-gated thvm_match.  The replacement is spliced in place --
+// no per-step re-flatten of the whole subject.  The full tree is built
+// ONCE, at the global fixpoint.
+//
+// Semantics are byte-identical to the default mixed loop:
+//   * orientable fixpoint first (lowest-index rule, outermost-leftmost),
+//   * then ONE unorientable step (lowest-index equation, outermost-
+//     leftmost position, both directions order-gated + variable-safe),
+//   * repeat to a joint fixpoint.
+// The differential test (tests/test_atp.c, ATP_FLATTERM_DIFF) asserts
+// equality against the tree path over random terms + rule sets.
+
+// Run the orientable indexed fixpoint over the ALREADY-FLATTENED shared
+// arrays (g_atp_ri_*), leaving the subject flat.  Mirrors the inner loop
+// of atp_rewrite_normalize_indexed but takes/returns the flat state by
+// reference so the unorientable pass can resume on the same array.
+// `*flatlen` / `*folded` are updated in place.  Returns 1 if any
+// orientable rewrite fired.
+static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
+                                  u32 *flatsym, u32 *flatlen, u8 *folded,
+                                  u32 step_cap) {
+  u8  any = 0u;
+  u32 prev_redex = 0u;
+  for (u32 i = 0; i < step_cap; i++) {
+    if (atp_norm_deadline_fired(s)) return any;
+    g_atp_ri_query_folded = *folded;
+    u32 redex_pos = 0u, redex_rule = 0u;
+    if (!atp_ri_find_redex(*flatlen, prev_redex, &redex_pos, &redex_rule)) {
+      return any;                                   // orientable fixpoint
+    }
+    RewriteSubst subst = {{0}};
+    if (!g_atp_ri_ix->any_folded && !*folded) {
+      for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
+        if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
+          subst.bindings[k] = flat[g_atp_ri_best_star[k]];
+        }
+      }
+    } else if (!thvm_match(s->lhs[redex_rule], flat[redex_pos], &subst)) {
+      return any;                                   // unreachable: confirmed
+    }
+    Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
+    if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                      redex_pos, repl, ATP_RI_FLAT_CAP)) {
+      prev_redex = redex_pos;
+      any = 1u;
+    } else {
+      return any;                                   // overrun: caller bails
+    }
+  }
+  return any;
+}
+
+// Scan the shared flat array preorder for the leftmost-outermost
+// position where some UNORIENTABLE equation fires (either direction,
+// variable-safe + strictly order-decreasing for the instance).  This is
+// the flatterm analog of atp_ordered_try_top's both-directions branch,
+// but driven by a linear walk of the flat array (subsz[] skips are O(1))
+// instead of a pointer-tree recursion.  The order check / thvm_match run
+// against the live tree cell flat[pos] -- identical verdicts to the tree
+// path.  On a hit, splices the replacement in place and returns 1.
+static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
+                               u32 *flatsym, u32 *flatlen, u8 *folded) {
+  for (u32 p = 0; p < *flatlen; p++) {
+    // A leaf position (variable / NUM -- flatsym below CTR_BASE) can
+    // never head a rule LHS that is a non-trivial term, so the only
+    // unorientable equation that could fire is a bare `x = y`-style one,
+    // which is never order-decreasing (and the orient check would have
+    // dropped it).  Skip the atp_ri_build + per-rule thvm_match on every
+    // leaf -- the flat array makes "is this a CTR head" an O(1) lookup.
+    if (flatsym[p] < ATP_RI_CTR_BASE) continue;
+    // Materialise the subterm at preorder position p from the flat
+    // arrays.  flat[p] alone is STALE once a descendant was spliced (a
+    // splice rewrites the child cells + subsz/flatsym, never the
+    // ancestor's flat[] tree cell -- atp_ri_build is what reconstructs
+    // it), so the match/order check must run against the rebuilt
+    // subtree.  An untouched subtree rebuilds to its shared original at
+    // zero allocation.
+    Term sub = atp_ri_build(flat, subsz, flatsym, p);
+    // Same rule order as atp_ordered_try_top: ascending rule index,
+    // each unorientable equation tried l->r then r->l, first decreasing
+    // direction wins.  Orientable rules are skipped (already at indexed
+    // fixpoint -- g_atp_skip_oriented semantics).
+    for (u32 i = 0; i < s->n_rules; i++) {
+      if (s->r_orient[i]) continue;                 // oriented: indexed pass
+      {
+        RewriteSubst subst = {{0}};
+        if (thvm_match(s->lhs[i], sub, &subst) &&
+            atp_vars_contained(s->rhs[i], s->lhs[i])) {
+          Term repl = thvm_subst_apply(s->rhs[i], &subst);
+          if (atp_compare(s, sub, repl) == KBO_GT) {
+            if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                              p, repl, ATP_RI_FLAT_CAP)) return 1u;
+            return 0u;                              // overrun: caller bails
+          }
+        }
+      }
+      {
+        RewriteSubst subst = {{0}};
+        if (thvm_match(s->rhs[i], sub, &subst) &&
+            atp_vars_contained(s->lhs[i], s->rhs[i])) {
+          Term repl = thvm_subst_apply(s->lhs[i], &subst);
+          if (atp_compare(s, sub, repl) == KBO_GT) {
+            if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                              p, repl, ATP_RI_FLAT_CAP)) return 1u;
+            return 0u;
+          }
+        }
+      }
+    }
+  }
+  return 0u;
+}
+
+// Flatterm mixed normalizer (opt-in).  Keeps the subject flat across the
+// orientable indexed fixpoint AND the unorientable pass, splicing every
+// rewrite in place; the tree is built ONCE at the joint fixpoint.
+// Equivalent to atp_rewrite_normalize_ordered's mixed branch.  Returns
+// the SAME normal form (asserted by ATP_FLATTERM_DIFF).
+static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
+                                                 u32 step_cap) {
+  if (s->rule_index == NULL) s->rule_index = atp_ri_new();
+  if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
+    atp_ri_rebuild(s);
+  }
+  static Term flat[ATP_RI_FLAT_CAP];
+  static u32  subsz[ATP_RI_FLAT_CAP];
+  static u32  flatsym[ATP_RI_FLAT_CAP];
+  g_atp_ri_ix      = s->rule_index;
+  g_atp_ri_flat    = flat;
+  g_atp_ri_subsz   = subsz;
+  g_atp_ri_flatsym = flatsym;
+  g_atp_ri_lhs     = s->lhs;
+  for (u32 k = 0; k < ATP_RI_MAXVARS; k++) g_atp_ri_star[k] = ATP_RI_NIL;
+
+  u32 flatlen = 0u;
+  u8  folded  = 0u;
+  if (!atp_ri_flatten(t, flat, subsz, flatsym, &folded,
+                      ATP_RI_FLAT_CAP, &flatlen)) {
+    // Over-deep subject: cannot flatten -- fall back to the proven tree
+    // mixed loop for this call (no semantic difference, just slower).
+    for (u32 i = 0; i < step_cap; i++) {
+      if (atp_norm_deadline_fired(s)) return t;
+      t = atp_rewrite_normalize_indexed(s, t, step_cap);
+      u8 fired = 0;
+      g_atp_skip_oriented = 1u;
+      Term t2 = atp_ordered_rewrite_step(s, t, s->lhs, s->rhs,
+                                         s->n_rules, &fired);
+      g_atp_skip_oriented = 0u;
+      if (!fired) break;
+      t = t2;
+    }
+    return t;
+  }
+
+  for (u32 i = 0; i < step_cap; i++) {
+    if (atp_norm_deadline_fired(s)) break;
+    // The indexed fixpoint may overrun on a splice; on overrun it stops
+    // having done partial work, the unorientable pass would too, so we
+    // materialise and hand the rest to the tree loop.  Detect overrun by
+    // re-checking after: a clean fixpoint leaves no orientable redex.
+    atp_ft_indexed_fixpoint(s, flat, subsz, flatsym, &flatlen, &folded,
+                            step_cap);
+    u8 fired = atp_ft_unorient_step(s, flat, subsz, flatsym, &flatlen,
+                                    &folded);
+    if (!fired) break;          // joint fixpoint (or splice overrun: rare)
+  }
+  return atp_ri_build(flat, subsz, flatsym, 0u);
+}
+
+#ifdef ATP_FLATTERM_SELFCHECK
+// The exact tree mixed loop (a copy of atp_rewrite_normalize_ordered's
+// mixed branch), used only by the build-time self-check to confirm the
+// flatterm path's normal form matches.  Defeats the speedup; never
+// compiled into a release build.
+static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
+                                                          u32 step_cap) {
+  for (u32 i = 0; i < step_cap; i++) {
+    if (atp_norm_deadline_fired(s)) return t;
+    t = atp_rewrite_normalize_indexed(s, t, step_cap);
+    u8 fired = 0;
+    g_atp_skip_oriented = 1u;
+    Term t2 = atp_ordered_rewrite_step(s, t, s->lhs, s->rhs,
+                                       s->n_rules, &fired);
+    g_atp_skip_oriented = 0u;
+    if (!fired) break;
+    t = t2;
+  }
+  return t;
+}
+#endif
+#endif // ATP_ORDERED_REWRITE
+
 #endif // ATP_RULE_INDEX
 
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
@@ -2383,6 +2615,13 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // intent.)
   s->rule_index       = NULL;
   s->rule_index_dirty = 1u;
+  // Opt-in flatterm fast-path for the mixed normalize loop.  OFF unless
+  // THVM_ATP_FLATTERM is set to a non-"0" value -- the default engine
+  // stays byte-identical (the tree mixed loop).
+  {
+    const char *ft = getenv("THVM_ATP_FLATTERM");
+    s->use_flatterm = (ft != NULL && ft[0] != '\0' && ft[0] != '0') ? 1u : 0u;
+  }
 #endif
   return s;
 }
@@ -2726,6 +2965,15 @@ fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
   s->use_ground_join = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_flatterm(AtpState *s, u8 on) {
+  if (s == NULL) return;
+#ifdef ATP_RULE_INDEX
+  s->use_flatterm = on ? 1u : 0u;
+#else
+  (void)on;   // no flat machinery without the rule index
+#endif
+}
+
 fn void thvm_atp_set_selection_ratio(AtpState *s, u32 modulo) {
   if (s == NULL) return;
   s->fifo_modulo = modulo;   // 0 -> default (11) at selection time
@@ -2932,6 +3180,41 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
   if (lhs == s->lhs && rhs == s->rhs && n_rules == s->n_rules) {
     if (s->n_unorient == 0u) {
       return atp_rewrite_normalize_indexed(s, t, step_cap);
+    }
+    // Opt-in flatterm fast-path: keep the subject flat across both the
+    // orientable indexed fixpoint and the unorientable pass (no per-step
+    // re-flatten / tree rebuild).  Same normal form as the tree loop
+    // below; default OFF so the engine is byte-identical.
+    if (s->use_flatterm) {
+#ifdef ATP_FLATTERM_SELFCHECK
+      // In-engine differential: also run the tree path and abort on any
+      // mismatch.  Build-only (defeats the speedup) -- proves the
+      // flatterm normal form equals the tree one on the LIVE saturation
+      // workload, not just the offline random test.
+      {
+        Term ref = atp_rewrite_normalize_flatterm_selfcheck_tree(s, t, step_cap);
+        Term got = atp_rewrite_normalize_flatterm_mixed(s, t, step_cap);
+        if (!kbo_eq(ref, got)) {
+          char ib[2048], rb[2048], gb[2048];
+          atp_pretty_term(t, ib, sizeof ib);
+          atp_pretty_term(ref, rb, sizeof rb);
+          atp_pretty_term(got, gb, sizeof gb);
+          fprintf(stderr, "FLATTERM SELFCHECK MISMATCH\n in=%s\n tree=%s\n flat=%s\n",
+                  ib, rb, gb);
+          fprintf(stderr, " n_rules=%u n_unorient=%u\n", s->n_rules, s->n_unorient);
+          for (u32 ri = 0; ri < s->n_rules; ri++) {
+            char la[1024], ra[1024];
+            atp_pretty_term(s->lhs[ri], la, sizeof la);
+            atp_pretty_term(s->rhs[ri], ra, sizeof ra);
+            fprintf(stderr, "  R%u%s: %s = %s\n", ri,
+                    s->r_orient[ri] ? "" : "(un)", la, ra);
+          }
+          abort();   // build-time invariant: flatterm NF == tree NF
+        }
+        return got;
+      }
+#endif
+      return atp_rewrite_normalize_flatterm_mixed(s, t, step_cap);
     }
     // Mixed rule set: the discrimination tree (orientable rules only)
     // normalizes every orientable rewrite in one fast descent; the few

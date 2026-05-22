@@ -2819,6 +2819,103 @@ int main(void) {
   }
 #endif  // ATP_CP_GROUND_JOIN
 
+#ifdef ATP_FLATTERM_DIFF
+  // === flatterm mixed-normalizer differential ========================
+  // For many random subjects against several mixed (orientable +
+  // unorientable) rule sets, the opt-in flatterm mixed path
+  // (use_flatterm=1) must produce the SAME normal form as the default
+  // tree mixed path (use_flatterm=0).  The flatterm path is a speed
+  // optimization, not a semantics change.
+  {
+    // One binary symbol `f` (label 1) over which both orientable and
+    // unorientable equations live; KBO with f-weight 1.
+    static u32 ftw[2] = {0u, 1u};
+    static u32 ftp[2] = {0u, 1u};
+    static const KboConfig FT_CFG = {
+      .weights = ftw, .precedence = ftp, .n_labels = 2u, .var_weight = 1u,
+    };
+    #define FT_F(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(1u, _c, 2); })
+
+    // Build a couple of mixed rule sets.  set 0: a commutativity-style
+    // unorientable equation f(x,y)=f(y,x) PLUS an orientable collapse
+    // f(f(x,y),z) -> f(x,z) and f(x,x) -> x.  set 1: associativity-ish.
+    AtpState *sa = thvm_atp_init(&FT_CFG, 256u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(sa, FT_F(x, y), FT_F(y, x));               // unorientable
+      atp_push_rule(sa, FT_F(FT_F(x, y), z), FT_F(x, z));      // orientable
+      atp_push_rule(sa, FT_F(x, x), x);                        // orientable
+    }
+    AtpState *sb = thvm_atp_init(&FT_CFG, 256u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(sb, FT_F(FT_F(x, y), z), FT_F(x, FT_F(y, z))); // orient
+      atp_push_rule(sb, FT_F(x, y), FT_F(y, x));                   // unorient
+      atp_push_rule(sb, FT_F(FT_F(x, x), x), x);                   // orient
+    }
+
+    // Deterministic random subject generator: variables fv(0..2) and
+    // binary f, capped depth so terms stay under the flat cap.
+    u32 rng = 0x1234567u;
+    #define FT_RND() (rng = rng * 1103515245u + 12345u, rng >> 8)
+    u32 mism = 0u, total = 0u;
+    for (u32 t = 0; t < 4000u; t++) {
+      AtpState *s = (t & 1u) ? sb : sa;
+      // Build a random subject bottom-up: start with `budget` random
+      // variable leaves over fv(0..2), then repeatedly combine two pool
+      // entries under f until one term remains.
+      u32  budget = 3u + (FT_RND() % 8u);
+      Term subj;
+      {
+        Term pool[32]; u32 np = 0u;
+        for (u32 k = 0; k < budget && np < 32u; k++) {
+          pool[np++] = mk_v(FT_RND() % 3u);
+        }
+        while (np > 1u) {
+          u32 i = FT_RND() % np;
+          u32 j = FT_RND() % np;
+          if (i == j) j = (j + 1u) % np;
+          Term f = FT_F(pool[i], pool[j]);
+          u32 lo = i < j ? i : j, hi = i < j ? j : i;
+          pool[hi] = pool[np - 1u]; np--;
+          pool[lo] = pool[np - 1u]; np--;
+          pool[np++] = f;
+        }
+        subj = pool[0];
+      }
+      total++;
+      u64 cp = thvm_atp_heap_checkpoint();
+      s->use_flatterm = 0u;
+      Term nf_tree = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                           s->n_rules, 4096u);
+      s->use_flatterm = 1u;
+      Term nf_flat = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                           s->n_rules, 4096u);
+      s->use_flatterm = 0u;
+      if (!kbo_eq(nf_tree, nf_flat)) {
+        mism++;
+        if (mism <= 3u) {
+          char a[512], b[512], c[512];
+          atp_pretty_term(subj, a, sizeof a);
+          atp_pretty_term(nf_tree, b, sizeof b);
+          atp_pretty_term(nf_flat, c, sizeof c);
+          fprintf(stderr, "FLATTERM DIFF: subj=%s tree=%s flat=%s\n", a, b, c);
+        }
+      }
+      thvm_atp_heap_reset(cp);
+    }
+    TEST_BEGIN("atp/flatterm-mixed-normalize-differential");
+    {
+      CHECK_EQ(mism, 0u);
+      CHECK(total >= 4000u);
+    }
+    thvm_atp_free(sa);
+    thvm_atp_free(sb);
+    #undef FT_F
+    #undef FT_RND
+  }
+#endif  // ATP_FLATTERM_DIFF
+
   thvm_free();
   TEST_REPORT();
 }
