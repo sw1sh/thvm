@@ -107,6 +107,16 @@ class _Lowerer:
             t = h.range(axis_id=int(u.arg[0]), axis_type=at, extent=extent)
         elif op is Ops.INDEX:
             t = h.index_e(self.emit(u.src[0]), self.emit(u.src[1]))
+        elif op is Ops.REDUCE:
+            # REDUCE(value, reduce_range...) -- arg[0] is the reduce op.
+            # thvm reduces by a single AXIS_REDUCE range id; nest for
+            # multi-axis reduces (src[1:] are the reduce RANGEs).
+            kind = (K.REDUCE_MAX if u.arg[0] is getattr(Ops, "MAX", None)
+                    else K.REDUCE_SUM)
+            t = self.emit(u.src[0])
+            for rng in u.src[1:]:
+                self.emit(rng)               # build the AXIS_REDUCE range
+                t = h.reduce(kind, int(rng.arg[0]), t)
         elif op is Ops.STORE:
             idx = u.src[0]                    # INDEX(buf, addr)
             buf = self.emit(idx.src[0])
@@ -223,6 +233,10 @@ def cross_validate(build_fn, *, backend: str = "metal"):
     """
     Ops = _ops()
 
+    # NOTE: tinygrad's lowered IR is target-dependent (a REDUCE lowers
+    # differently for CPU vs GPU), so tinygrad must lower for the SAME
+    # backend thvm renders -- do NOT force a different tinygrad device here.
+
     # 1) Reference, on an independent graph.
     ref = np.asarray(build_fn().numpy(), dtype=np.float32)
 
@@ -284,4 +298,24 @@ def _run_metal(h, root, low, grid_n, ref, inputs):
     tg = min(grid_n, 256)
     m.dispatch(pso, ordered, grid=(grid_n, 1, 1), threadgroup=(tg, 1, 1))
     got = m.buf_read_array(out_buf, ref.shape if ref.shape else (1,), np.float32)
+    return got, ref, float(np.abs(got - ref).max())
+
+
+def _run_cuda(h, root, low, grid_n, ref, inputs):
+    from .thvm import Cuda
+    c = Cuda()
+    src = h.render_cuda(root, name="k")
+    fn = c.compile(src, fn="k")
+    out_n = int(np.prod(ref.shape)) or 1
+    out_buf = c.buf_alloc(out_n * 4)
+    handles = {0: out_buf}
+    for slot in sorted(inputs):
+        b = c.buf_alloc(inputs[slot].nbytes)
+        c.buf_write_array(b, inputs[slot].ravel())
+        handles[slot] = b
+    ordered = [handles[s] for s in sorted(handles)]
+    block = min(grid_n, 256) or 1
+    blocks = (grid_n + block - 1) // block
+    c.dispatch(fn, ordered, grid=blocks, block=block)
+    got = c.buf_read_array(out_buf, ref.shape if ref.shape else (1,), np.float32)
     return got, ref, float(np.abs(got - ref).max())

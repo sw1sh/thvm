@@ -31,8 +31,9 @@ class TestFromTinygradLowered(unittest.TestCase):
         np.random.seed(0)
         self.A = np.random.randn(8).astype(np.float32)
         self.B = np.random.randn(8).astype(np.float32)
-        self.A2 = np.random.randn(3, 4).astype(np.float32)
-        self.B2 = np.random.randn(3, 4).astype(np.float32)
+        self.A2 = np.random.randn(4, 8).astype(np.float32)
+        self.B2 = np.random.randn(4, 8).astype(np.float32)
+        self.C = np.random.randn(16).astype(np.float32)
 
     def test_add(self):
         T = _tg(); self._chk(lambda: T(self.A) + T(self.B))
@@ -57,6 +58,18 @@ class TestFromTinygradLowered(unittest.TestCase):
 
     def test_add_2d(self):
         T = _tg(); self._chk(lambda: T(self.A2) + T(self.B2))
+
+    def test_sum(self):
+        T = _tg(); self._chk(lambda: T(self.C).sum())
+
+    def test_sum_axis1(self):
+        T = _tg(); self._chk(lambda: T(self.A2).sum(axis=1))
+
+    def test_sum_axis0(self):
+        T = _tg(); self._chk(lambda: T(self.A2).sum(axis=0))
+
+    def test_max(self):
+        T = _tg(); self._chk(lambda: T(self.C).max())
 
 
 if __name__ == "__main__":
