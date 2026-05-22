@@ -133,7 +133,7 @@ EXPORT uint32_t py_cuda_compile(const char *src, const char *fn_name,
     return 0;
   }
   // --gpu-architecture tracks the device (V100 -> compute_70).
-  char arch_opt[32];
+  char arch_opt[48];
   int sm = g_sm > 0 ? g_sm : 70;
   snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
   const char *opts[] = { arch_opt };
