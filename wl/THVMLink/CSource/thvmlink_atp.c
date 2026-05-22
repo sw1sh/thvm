@@ -471,6 +471,18 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // queue small without losing completeness.  0 = off.
   mint auto_maxw = MArgument_getInteger(args[12]);
   thvm_atp_set_auto_max_cp_weight(atp, auto_maxw > 0 ? (u32)auto_maxw : 0u);
+  // Method -> "Waldmeister" / {... "RHSInterreduce" -> True}: Waldmeister-
+  // faithful right-hand-side interreduction (IR_InterreduktionRechts).
+  // Keeps the rule set fully reduced so the CP queue stays small -- the
+  // lever the deep Sheffer/Wolfram theorems need.  0 = off (default).
+  mint rhs_ir = MArgument_getInteger(args[13]);
+  thvm_atp_set_use_rhs_interreduce(atp, (u8)(rhs_ir != 0));
+  // Method -> "Waldmeister" / {... "UnfailingCP" -> True}: both-faces
+  // superposition of unorientable equations (unfailing completion's
+  // completeness requirement).  THE lever that makes the deep Sheffer /
+  // Wolfram theorems reachable.  0 = off (default lhs-only overlap).
+  mint unf_cp = MArgument_getInteger(args[14]);
+  thvm_atp_set_use_unfailing_cp(atp, (u8)(unf_cp != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

@@ -2726,6 +2726,20 @@ fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
   s->use_ground_join = on ? 1u : 0u;
 }
 
+// Waldmeister-faithful RHS interreduction (Interreduktion.c
+// RMRechtsInterred).  See the AtpState.use_rhs_interreduce comment.
+fn void thvm_atp_set_use_rhs_interreduce(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_rhs_interreduce = on ? 1u : 0u;
+}
+
+// Unfailing-completion both-faces superposition.  See the
+// AtpState.use_unfailing_cp comment.
+fn void thvm_atp_set_use_unfailing_cp(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_unfailing_cp = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_selection_ratio(AtpState *s, u32 modulo) {
   if (s == NULL) return;
   s->fifo_modulo = modulo;   // 0 -> default (11) at selection time
@@ -5350,6 +5364,58 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       i++;
     }
   }
+
+  // === Waldmeister IR_InterreduktionRechts (RMRechtsInterred,
+  // Interreduktion.c:329): normalize the RIGHT-HAND side of every
+  // surviving older rule against the freshly-added rules.  A rule whose
+  // RHS reduces is dropped and re-queued as the simplified equation
+  // (old_lhs, reduced_rhs) so the same TRACE_SIMPLIFY connected-DAG path
+  // the LHS collapse uses justifies the RHS edit.  This keeps R reduced
+  // -- the prior LHS-only interreduction left stale (non-normal) rule
+  // RHSs in R, so the system never became canonical and the CP set
+  // exploded (the Sheffer/Wolfram divergence).  Runtime-gated: the
+  // default engine (use_rhs_interreduce == 0) skips this entirely.
+  if (s->use_rhs_interreduce) {
+    u32 j = 0;
+    while (j < added.first - dropped) {
+      Term old_lhs = s->lhs[j];
+      Term old_rhs = s->rhs[j];
+      // Normalize the RHS against only the new rule(s) -- the rest of R
+      // already had its chance to reduce this RHS when those rules were
+      // added.  (Matches Waldmeister: a new object reduces existing
+      // rules' RHSs; full re-normalization is unnecessary.)
+      Term reduced = atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs,
+                                           n_new, 16);
+      if (!kbo_eq(reduced, old_rhs)) {
+        u32 simplify_parent = s->r_trace[j];
+        // Drop the rule with the stale RHS and re-queue the simplified
+        // equation; orient will re-admit it (its RHS now in normal form)
+        // -- or join it away if it became trivial.
+        atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
+#ifdef ATP_ORPHAN_KILL
+        if (atp_dead != NULL && s->r_trace[j] != ATP_TRACE_NONE) {
+          atp_dead[atp_n_dead++] = s->r_trace[j];
+        }
+#endif
+        if (!s->r_orient[j]) s->n_unorient--;
+        for (u32 k = j + 1; k < s->n_rules; k++) {
+          s->lhs[k - 1]      = s->lhs[k];
+          s->rhs[k - 1]      = s->rhs[k];
+          s->r_trace[k - 1]  = s->r_trace[k];
+          s->r_orient[k - 1] = s->r_orient[k];
+        }
+        s->n_rules--;
+#ifdef ATP_RULE_INDEX
+        s->rule_index_dirty = 1u;
+#endif
+        dropped++;
+        // The next older rule shifted down to slot j; don't advance.
+      } else {
+        j++;
+      }
+    }
+  }
+
 #ifdef ATP_ORPHAN_KILL
   if (atp_dead != NULL) {
     if (atp_n_dead > 0) atp_cp_kill_orphans(s, atp_dead, atp_n_dead);
@@ -6801,6 +6867,47 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
 // (the default).  Bulk of the work happens in
 // `thvm_critical_pairs_range`; this function just plumbs the
 // (i, j) iteration and trace bookkeeping.
+// Overlap rule j into rule i, emitting every CP face the active
+// completion variant requires.  Default (use_unfailing_cp == 0): the
+// single (i-face = li, j = lj->rj) overlap -- byte-for-byte the prior
+// thvm_critical_pairs_range(i,i+1,j,j+1) behaviour.  Unfailing
+// (use_unfailing_cp == 1): when rule j is an unorientable equation,
+// ALSO overlap its rhs-face (rj->lj); when rule i is unorientable, ALSO
+// walk the positions of its rhs-face (so a redex inside ri is found,
+// the CP's other component then being li).  Both-faces superposition is
+// what unfailing completion needs to be COMPLETE on incomparable
+// equations (Bachmair-Dershowitz-Plaisted; Waldmeister's default mode).
+static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
+                          CriticalPair *buf, u32 cap) {
+  u32 cnt = 0;
+  // Variables of j must be renamed apart from i's -- the SAME offset
+  // thvm_critical_pairs_range uses internally (REWRITE_MAX_VAR / 2).
+  Term lj = thvm_rename_vars(s->lhs[j], REWRITE_MAX_VAR / 2);
+  Term rj = thvm_rename_vars(s->rhs[j], REWRITE_MAX_VAR / 2);
+  Term li = s->lhs[i], ri = s->rhs[i];
+
+  // Face combinations.  i_face in {li (always), ri (if i unorientable)};
+  // j as the from->to pair {(lj,rj) always, (rj,lj) if j unorientable}.
+  u8 i_un = s->use_unfailing_cp && !s->r_orient[i];
+  u8 j_un = s->use_unfailing_cp && !s->r_orient[j];
+
+  // (i-face li) x (j: lj->rj)  -- the standard overlap.
+  cnt = thvm_critical_pairs_pair(li, ri, lj, rj, buf, cap, cnt);
+  if (j_un) {
+    // (i-face li) x (j: rj->lj)
+    cnt = thvm_critical_pairs_pair(li, ri, rj, lj, buf, cap, cnt);
+  }
+  if (i_un) {
+    // (i-face ri) x (j: lj->rj)
+    cnt = thvm_critical_pairs_pair(ri, li, lj, rj, buf, cap, cnt);
+    if (j_un) {
+      // (i-face ri) x (j: rj->lj)
+      cnt = thvm_critical_pairs_pair(ri, li, rj, lj, buf, cap, cnt);
+    }
+  }
+  return cnt;
+}
+
 static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   u32 first = added.first;
   u32 last  = added.first + added.count;
@@ -6815,9 +6922,7 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   // existing rules (including the new ones for new x new self-overlap).
   for (u32 i = first; i < last; i++) {
     for (u32 j = 0; j < n; j++) {
-      u32 nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
-                                           i, i + 1, j, j + 1,
-                                           buf, ATP_CP_BATCH);
+      u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
       pushed += atp_push_cps_traced(s, buf, nbuf,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
@@ -6833,9 +6938,7 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   // (old x new): old rule on the outside, new rule fed as inner.
   for (u32 i = 0; i < first; i++) {
     for (u32 j = first; j < last; j++) {
-      u32 nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
-                                           i, i + 1, j, j + 1,
-                                           buf, ATP_CP_BATCH);
+      u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
       pushed += atp_push_cps_traced(s, buf, nbuf,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
