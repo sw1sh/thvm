@@ -2344,6 +2344,11 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
+  // Persistent LPO memo: a completion compares the same subterm pairs
+  // millions of times.  Opt in, and drop any entries from a prior run
+  // (a static LpoConfig pointer may be reused with new precedence).
+  thvm_lpo_set_persist(1u);
+  thvm_lpo_invalidate();
   s->kbo      = cfg;
   s->step_cap = step_cap;
   // CP-priority weight: the ordering-directed GT heuristic is the
@@ -2548,6 +2553,9 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 
   free(roots);
 
+  // Cells moved: the persistent LPO (s,t)->verdict memo is keyed on cell
+  // addresses, now stale -- drop it.
+  thvm_lpo_invalidate();
   return 1;
 }
 
