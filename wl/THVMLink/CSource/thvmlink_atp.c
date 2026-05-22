@@ -449,6 +449,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.
   thvm_atp_set_record_norm_steps(atp, 1u);
+  // ENIGMA dataset capture: when THVM_ATP_CP_DATASET names a file, record
+  // per-selected-CP features so a PROVED run can label + append them.
+  const char *g_cp_dataset = getenv("THVM_ATP_CP_DATASET");
+  if (g_cp_dataset != NULL) thvm_atp_set_record_cp_features(atp, 1u);
   // Optional wall deadline: 0 leaves the saturator unbounded.
   if (wall_seconds > 0.0) {
     thvm_atp_set_wall_deadline(atp, wall_seconds);
@@ -507,6 +511,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   u32 n_steps  = thvm_atp_proof_extract(atp, proof, ATP_PROOF_MAX_STEPS);
   u32 n_rules  = atp->n_rules;
   u32 n_trace  = atp->n_trace;
+
+  // ENIGMA dataset: a PROVED run labels its selected CPs by trace-DAG
+  // reachability from the goal-closing step, then appends them to the
+  // dataset file (header written only if the file is new).
+  if (g_cp_dataset != NULL && st == ATP_PROVED) {
+    thvm_atp_cp_label(atp);
+    static int g_cp_header_done = 0;
+    thvm_atp_cp_dataset_append(atp, g_cp_dataset, !g_cp_header_done);
+    g_cp_header_done = 1;
+  }
 
   // (2) EXT-state proof extraction: a separate state whose R is the
   // input axioms oriented once -- no completion, no interreduction.
