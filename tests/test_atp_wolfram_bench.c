@@ -220,6 +220,16 @@ int main(int argc, char **argv) {
     const char *rr = getenv("THVM_ATP_RIGHT_REDUCE");
     if (rr != NULL && *rr == '0') thvm_atp_set_right_reduce(s, 0u);
   }
+  // THVM_ATP_CP_SET_IR=1 enables periodic full-rule-set CP-queue
+  // interreduction (a port of KPV_KPMengeInterreduzieren) -- deletes
+  // queued CPs that became joinable through any rule, keeping the queue
+  // (the dominant memory consumer at depth) small.
+  {
+    const char *ci = getenv("THVM_ATP_CP_SET_IR");
+    if (ci != NULL && ci[0] != '\0' && ci[0] != '0') {
+      thvm_atp_set_cp_set_interreduce(s, 1u);
+    }
+  }
   // THVM_ATP_WALDMEISTER=1 replicates the WL Method->"Waldmeister"
   // preset's runtime knobs (SelectionRatio 51, RHSInterreduce,
   // UnfailingCP) so a profiling run follows the same trajectory the
@@ -288,6 +298,16 @@ int main(int argc, char **argv) {
          use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"),
          step_cap, wall_cap, (u32)s->cp_weight_mode);
 
+  // THVM_ATP_DIAG=<period>: every <period> steps, measure the
+  // interreduction deficit (rules with a side reducible by another
+  // rule) and the max/total symbol footprint of R.  Confirms whether R
+  // is genuinely under-interreduced as it grows.
+  u32 diag_period = 0;
+  {
+    const char *dg = getenv("THVM_ATP_DIAG");
+    if (dg != NULL && dg[0] != '\0') diag_period = (u32)strtoul(dg, NULL, 10);
+  }
+
   clock_t   t0  = clock();
   AtpStatus st  = ATP_RUNNING;
   u32       i   = 0;
@@ -300,6 +320,16 @@ int main(int argc, char **argv) {
     if (i > 0 && i % 250u == 0u) {
       printf("  step %7u  rules=%-6u cps=%-8u %.1fs\n",
              i, s->n_rules, s->n_cps, el);
+      fflush(stdout);
+    }
+    if (diag_period > 0 && i > 0 && i % diag_period == 0u) {
+      u32 nl = 0, nr = 0, na = 0, maxside = 0; u64 tot = 0;
+      thvm_atp_interreduce_deficit(s, &nl, &nr, &na, &maxside, &tot);
+      printf("  DIAG step %7u  rules=%u  deficit: lhs-red=%u rhs-red=%u "
+             "any-red=%u (%.1f%%)  max-side=%u  total-syms=%llu\n",
+             i, s->n_rules, nl, nr, na,
+             (s->n_rules > 0) ? (100.0 * (double)na / (double)s->n_rules) : 0.0,
+             maxside, (unsigned long long)tot);
       fflush(stdout);
     }
     if (el > wall_cap) {

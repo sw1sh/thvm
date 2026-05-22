@@ -7181,6 +7181,81 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   return dropped;
 }
 
+// === DIAGNOSTIC (Step 1) ============================================
+// Measure the interreduction deficit and term-size growth of R.  For
+// each rule i, normalize lhs[i] / rhs[i] against R \ {i} (linear
+// oracle, full re-scan).  A side that changes is reducible by another
+// rule -- the rule is NOT interreduced.  Reports counts + max/total
+// symbol footprint.  Read-only; no engine state mutated.  Used by the
+// bench to confirm whether R is genuinely under-interreduced.
+fn void thvm_atp_interreduce_deficit(AtpState *s,
+                                     u32 *n_lhs_reducible,
+                                     u32 *n_rhs_reducible,
+                                     u32 *n_any_reducible,
+                                     u32 *max_side_symbols,
+                                     u64 *total_symbols) {
+  u32 nl = 0, nr = 0, na = 0, maxside = 0;
+  u32 n_red_unorient = 0;
+  u64 total = 0;
+  if (s == NULL || s->n_rules == 0) goto done;
+  u32 n = s->n_rules;
+  Term *tl = (Term *)malloc((size_t)n * sizeof(Term));
+  Term *tr = (Term *)malloc((size_t)n * sizeof(Term));
+  if (tl == NULL || tr == NULL) { free(tl); free(tr); goto done; }
+  for (u32 i = 0; i < n; i++) {
+    u32 ls = atp_symbol_count(s->lhs[i]);
+    u32 rs = atp_symbol_count(s->rhs[i]);
+    if (ls > maxside) maxside = ls;
+    if (rs > maxside) maxside = rs;
+    total += (u64)ls + (u64)rs;
+    // Build R \ {i}.
+    u32 m = 0;
+    for (u32 j = 0; j < n; j++) {
+      if (j == i) continue;
+      tl[m] = s->lhs[j];
+      tr[m] = s->rhs[j];
+      m++;
+    }
+    Term ln = thvm_rewrite_normalize(s->lhs[i], tl, tr, m, 256);
+    Term rn = thvm_rewrite_normalize(s->rhs[i], tl, tr, m, 256);
+    int lred = !kbo_eq(ln, s->lhs[i]);
+    int rred = !kbo_eq(rn, s->rhs[i]);
+    if (lred) nl++;
+    if (rred) nr++;
+    if (lred || rred) {
+      na++;
+      if (!s->r_orient[i]) n_red_unorient++;
+      if (getenv("THVM_ATP_DIAG_DUMP") != NULL) {
+        char la[1024], ra[1024], na_[1024];
+        atp_pretty_term(s->lhs[i], la, sizeof la);
+        atp_pretty_term(s->rhs[i], ra, sizeof ra);
+        atp_pretty_term(lred ? ln : rn, na_, sizeof na_);
+        // Which single rule reduces side i at the top?  (single-rule
+        // collapse vs multi-rule chain.)
+        int single = -1;
+        Term side = lred ? s->lhs[i] : s->rhs[i];
+        for (u32 j = 0; j < n; j++) {
+          if (j == i) continue;
+          Term one = thvm_rewrite_normalize(side, &s->lhs[j], &s->rhs[j], 1u, 4u);
+          if (!kbo_eq(one, side)) { single = (int)j; break; }
+        }
+        fprintf(stderr, "    REDUCIBLE rule %u%s: %s -> %s   [%s side -> %s] "
+                "(single-rule reducer: %d, orient_unred=%u)\n",
+                i, s->r_orient[i] ? "" : "(un)", la, ra,
+                lred ? "lhs" : "rhs", na_, single, n_red_unorient);
+      }
+    }
+  }
+  free(tl);
+  free(tr);
+done:
+  if (n_lhs_reducible)  *n_lhs_reducible  = nl;
+  if (n_rhs_reducible)  *n_rhs_reducible  = nr;
+  if (n_any_reducible)  *n_any_reducible  = na;
+  if (max_side_symbols) *max_side_symbols = maxside;
+  if (total_symbols)    *total_symbols    = total;
+}
+
 // Generate fresh CPs from the freshly-added rules `added` against
 // the current rule set R, push survivors onto the CP queue.
 // Drops overflow silently (queue cap or temp-buffer cap).  Returns
