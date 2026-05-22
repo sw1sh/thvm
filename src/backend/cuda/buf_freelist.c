@@ -15,20 +15,26 @@ fn void cuda_buf_freelist_push(u32 buf_id) {
 }
 
 fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
+  // Best-fit: reuse the smallest parked device buffer >= nbytes (see
+  // cpu_buf_freelist_try_pop -- exact-match barely recycles a net's
+  // varied activation sizes, so peak device memory ~= sum-of-activations
+  // instead of the live set; best-fit fixes that).  cuMemFree/Alloc are
+  // costly so recycling matters even more here.
+  u32 best_i = 0; u64 best_nb = (u64)-1;
   for (u32 i = 0; i < CUDA_FREELIST_LEN; i++) {
     u32 bid = CUDA_FREELIST[i];
     if (bid == 0 || bid >= CUDA_BUFS_NEXT) continue;
     CudaBuf *b = &CUDA_BUFS[bid];
-    if (b->nbytes != nbytes || b->dptr == 0) continue;
-    CUDA_FREELIST[i] = CUDA_FREELIST[CUDA_FREELIST_LEN - 1];
-    CUDA_FREELIST_LEN--;
-    // Zero the recycled storage so it matches a fresh cuMemAlloc that
-    // cuda_buf_alloc clears.
-    cuMemsetD8(b->dptr, 0, (size_t)nbytes);
-    b->refcount = 1;
-    return bid;
+    if (b->dptr == 0 || b->nbytes < nbytes) continue;
+    if (b->nbytes < best_nb) { best_nb = b->nbytes; best_i = i; }
   }
-  return 0;
+  if (best_nb == (u64)-1) return 0;
+  u32 bid = CUDA_FREELIST[best_i];
+  CUDA_FREELIST[best_i] = CUDA_FREELIST[CUDA_FREELIST_LEN - 1];
+  CUDA_FREELIST_LEN--;
+  cuMemsetD8(CUDA_BUFS[bid].dptr, 0, (size_t)nbytes);
+  CUDA_BUFS[bid].refcount = 1;
+  return bid;
 }
 
 fn void cuda_buf_freelist_remove(u32 buf_id) {

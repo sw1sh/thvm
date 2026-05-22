@@ -103,6 +103,11 @@ static void jit_capture_mark_buf(Backend *b, u32 buf_id) {
     case 2:
       thvm_metal_buf_mark_preserved(buf_id);
       break;
+#ifdef THVM_HAS_CUDA
+    case 3:
+      cuda_buf_mark_preserved(buf_id);
+      break;
+#endif
     default:
       break;
   }

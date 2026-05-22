@@ -197,11 +197,29 @@ static int mem_plan_metal_enabled(void) {
   return enabled;
 }
 
+// CUDA per-realize buffer reuse: default ON (mirrors Metal).  Without it
+// every kernel output in a realize stays live to end-of-pass -- the full
+// beautiful_mnist forward+backward keeps ~all activations resident (GBs)
+// vs tinygrad's flat working set, because each buffer is freed only by the
+// post-realize rollback, never recycled mid-pass.  The synchronous CUDA
+// dispatch (cuCtxSynchronize after each launch) means a buffer freed after
+// its last consumer can't race in-flight work, so recycling is safe.
+static int mem_plan_cuda_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_CUDA_REUSE_BUFS");
+    enabled       = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
+    known         = 1;
+  }
+  return enabled;
+}
+
 // Per-backend gate the recorded buf actually obeys.
 static int mem_plan_backend_enabled(Backend const *b) {
   if (b == NULL) return 0;
   if (b->id == 1) return mem_plan_cpu_enabled();
   if (b->id == 2) return mem_plan_metal_enabled();
+  if (b->id == 3) return mem_plan_cuda_enabled();
   return 0;
 }
 

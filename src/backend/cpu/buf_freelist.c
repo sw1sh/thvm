@@ -46,23 +46,31 @@ fn void cpu_buf_freelist_push(u32 buf_id) {
 
 fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   if (CPU_BUFS == NULL) return 0;
+  // Best-fit: reuse the smallest parked buffer whose storage is >=
+  // nbytes.  Exact-match-only barely recycled across a net's varied
+  // activation sizes (peak memory ~= sum of all activations); best-fit
+  // lets a freed 10MB activation back a later 8MB one, so the live set
+  // (not the sum) bounds memory -- tinygrad's reuse behaviour.  The
+  // kernel only touches [0,nbytes); the slot keeps its larger nbytes.
+  u32 best = 0; u64 best_nb = (u64)-1;
   for (u32 i = 0; i < CPU_FREELIST_LEN; i++) {
     u32 bid = CPU_FREELIST[i];
     if (bid == 0 || bid >= CPU_BUFS_NEXT) continue;
     CpuBuf *b = &CPU_BUFS[bid];
-    if (b->nbytes != nbytes) continue;
     if (!b->owns_data || b->data == NULL) continue;  // skip externals
-    // Pop: swap with last + shrink.
-    CPU_FREELIST[i] = CPU_FREELIST[CPU_FREELIST_LEN - 1];
-    CPU_FREELIST_LEN--;
-    // Reset bookkeeping so the recycled buf looks freshly alloc'd.
-    memset(b->data, 0, (size_t)nbytes);
-    b->refcount  = 1;
-    b->preserved = 0;
-    b->freeable  = 0;
-    return bid;
+    if (b->nbytes < nbytes) continue;
+    if (b->nbytes < best_nb) { best_nb = b->nbytes; best = i; }
   }
-  return 0;   // miss
+  if (best_nb == (u64)-1) return 0;   // miss
+  u32 bid = CPU_FREELIST[best];
+  CPU_FREELIST[best] = CPU_FREELIST[CPU_FREELIST_LEN - 1];
+  CPU_FREELIST_LEN--;
+  CpuBuf *b = &CPU_BUFS[bid];
+  memset(b->data, 0, (size_t)nbytes);
+  b->refcount  = 1;
+  b->preserved = 0;
+  b->freeable  = 0;
+  return bid;
 }
 
 // Undo a cpu_buf_freelist_push: if `buf_id` is still parked on the
