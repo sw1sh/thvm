@@ -34,6 +34,7 @@ class TestFromTinygradLowered(unittest.TestCase):
         self.A2 = np.random.randn(4, 8).astype(np.float32)
         self.B2 = np.random.randn(4, 8).astype(np.float32)
         self.C = np.random.randn(16).astype(np.float32)
+        self.C2 = np.random.randn(16).astype(np.float32)
 
     def test_add(self):
         T = _tg(); self._chk(lambda: T(self.A) + T(self.B))
@@ -70,6 +71,28 @@ class TestFromTinygradLowered(unittest.TestCase):
 
     def test_max(self):
         T = _tg(); self._chk(lambda: T(self.C).max())
+
+    # --- KOpt level: apply a thvm KOpt to the imported kernel; the
+    #     OPTIMIZED kernel must still match tinygrad's result. ---
+    def _chk_opt(self, build_fn, opts):
+        got, ref, err = cross_validate(build_fn, backend=_BACKEND, opts=opts)
+        self.assertLess(err, 1e-3, f"got {got.ravel()[:6]} ref {ref.ravel()[:6]}")
+
+    def test_upcast_add(self):
+        from thvm import K
+        T = _tg(); self._chk_opt(lambda: T(self.C) + T(self.C2),
+                                 [(K.KOP_UPCAST, 0, 4)])
+
+    def test_upcast_mul(self):
+        from thvm import K
+        T = _tg(); self._chk_opt(lambda: T(self.C) * T(self.C2),
+                                 [(K.KOP_UPCAST, 0, 8)])
+
+    def test_upcast_noncommutative(self):
+        from thvm import K
+        T = _tg(); self._chk_opt(
+            lambda: (lambda a, b: a * b + a)(T(self.C), T(self.C2)),
+            [(K.KOP_UPCAST, 0, 4)])
 
 
 if __name__ == "__main__":

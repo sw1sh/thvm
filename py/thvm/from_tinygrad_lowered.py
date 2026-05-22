@@ -219,7 +219,7 @@ def _slot_inputs(sink, params, py_data):
     return inputs
 
 
-def cross_validate(build_fn, *, backend: str = "metal"):
+def cross_validate(build_fn, *, backend: str = "metal", opts=None):
     """Cross-validate thvm's codegen against tinygrad's lowered kernel.
 
     `build_fn` is a 0-arg callable returning a FRESH tinygrad Tensor (the
@@ -228,6 +228,12 @@ def cross_validate(build_fn, *, backend: str = "metal"):
     tinygrad's schedule_linear() is destructive (it consumes the input
     buffers), so the two graphs must be independent and the input data
     must be read BEFORE scheduling.
+
+    `opts`, if given, is a list of (KOP, axis, factor) thvm KOpts (e.g.
+    [(K.KOP_UPCAST, 0, 4)]) applied to the imported ranged-IR root before
+    render -- this cross-validates thvm's KOpt transforms (UPCAST / UNROLL
+    / LOCAL / ...) on a real tinygrad kernel: the OPTIMIZED kernel must
+    still match tinygrad's (unoptimized) result.
 
     Single-kernel only.  Returns (got, ref, max_abs_err).
     """
@@ -263,57 +269,71 @@ def cross_validate(build_fn, *, backend: str = "metal"):
     low = _Lowerer(h)
     root = low.emit(stores[0])
 
+    # Apply any thvm KOpts to the ranged-IR root (UPCAST/UNROLL/LOCAL/...).
+    for opt in (opts or []):
+        new_root = h.uop_dag_apply_kopt(root, tuple(int(x) for x in opt))
+        if new_root is None:
+            raise RuntimeError(f"KOpt {opt} bailed")
+        root = new_root
+
     # Authoritative PARAM-slot -> buffer mapping: the kernel CALL (arg0 is the
     # SINK ast) lists its buffers in slot order; COPY calls link a device
     # buffer's uniq to its source python uniq (which py_data is keyed on).
     inputs = _slot_inputs(sink, low.params, py_data)
 
-    grid_n = 1
+    grid_fallback = 1
     for e in low.grid_axes:
-        grid_n *= e
-    if grid_n == 0:
-        grid_n = max(1, int(np.prod(ref.shape)))
+        grid_fallback *= e
+    if grid_fallback == 0:
+        grid_fallback = max(1, int(np.prod(ref.shape)))
 
     if backend == "metal":
-        return _run_metal(h, root, low, grid_n, ref, inputs)
+        return _run_metal(h, root, ref, inputs, grid_fallback)
     if backend == "cuda":
-        return _run_cuda(h, root, low, grid_n, ref, inputs)
+        return _run_cuda(h, root, ref, inputs, grid_fallback)
     raise ValueError(f"backend {backend!r}")
 
 
-def _run_metal(h, root, low, grid_n, ref, inputs):
+def _grid_from_guard(src: str, fallback: int) -> int:
+    """The dispatch grid (total threads) the rendered kernel expects, read
+    from its `tid >= Nu` bound guard.  Robust after KOpts change the axis
+    structure; falls back to the LOOP/GLOBAL extent product."""
+    import re
+    m = re.search(r"tid\s*>=\s*(\d+)u", src)
+    return int(m.group(1)) if m else fallback
+
+
+def _alloc_io(dev, ref, inputs):
+    out_buf = dev.buf_alloc((int(np.prod(ref.shape)) or 1) * 4)
+    handles = {0: out_buf}
+    for slot in sorted(inputs):
+        b = dev.buf_alloc(inputs[slot].nbytes)
+        dev.buf_write_array(b, inputs[slot].ravel())
+        handles[slot] = b
+    ordered = [handles[s] for s in sorted(handles)]
+    return out_buf, ordered
+
+
+def _run_metal(h, root, ref, inputs, grid_fallback):
     from .thvm import Metal
     m = Metal()
     msl = h.render(root, name="k")
     pso = m.compile_msl(msl, fn="k")
-    out_n = int(np.prod(ref.shape)) or 1
-    out_buf = m.buf_alloc(out_n * 4)
-    bufs = [out_buf]
-    handles = {0: out_buf}
-    for slot in sorted(inputs):
-        b = m.buf_alloc(inputs[slot].nbytes)
-        m.buf_write_array(b, inputs[slot].ravel())
-        handles[slot] = b
-    ordered = [handles[s] for s in sorted(handles)]
+    out_buf, ordered = _alloc_io(m, ref, inputs)
+    grid_n = _grid_from_guard(msl, grid_fallback)
     tg = min(grid_n, 256)
     m.dispatch(pso, ordered, grid=(grid_n, 1, 1), threadgroup=(tg, 1, 1))
     got = m.buf_read_array(out_buf, ref.shape if ref.shape else (1,), np.float32)
     return got, ref, float(np.abs(got - ref).max())
 
 
-def _run_cuda(h, root, low, grid_n, ref, inputs):
+def _run_cuda(h, root, ref, inputs, grid_fallback):
     from .thvm import Cuda
     c = Cuda()
     src = h.render_cuda(root, name="k")
     fn = c.compile(src, fn="k")
-    out_n = int(np.prod(ref.shape)) or 1
-    out_buf = c.buf_alloc(out_n * 4)
-    handles = {0: out_buf}
-    for slot in sorted(inputs):
-        b = c.buf_alloc(inputs[slot].nbytes)
-        c.buf_write_array(b, inputs[slot].ravel())
-        handles[slot] = b
-    ordered = [handles[s] for s in sorted(handles)]
+    out_buf, ordered = _alloc_io(c, ref, inputs)
+    grid_n = _grid_from_guard(src, grid_fallback)
     block = min(grid_n, 256) or 1
     blocks = (grid_n + block - 1) // block
     c.dispatch(fn, ordered, grid=blocks, block=block)
