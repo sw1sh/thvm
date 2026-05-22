@@ -3163,6 +3163,15 @@ typedef struct {
 #ifdef ATP_RULE_INDEX
   struct AtpRuleIndex *rule_index;
   u8                   rule_index_dirty;
+  // Opt-in flatterm fast-path for the MIXED (orientable + unorientable)
+  // normalize loop.  OFF by default: the engine is byte-identical to the
+  // tree mixed loop.  When set, atp_rewrite_normalize_ordered's mixed
+  // branch keeps the subject in the shared flat arrays across BOTH the
+  // orientable indexed fixpoint and the unorientable pass, splicing every
+  // rewrite in place (no per-step re-flatten / tree rebuild).  Set from
+  // THVM_ATP_FLATTERM=1 at init, or via thvm_atp_set_use_flatterm.  Same
+  // normal forms as the tree path (asserted by ATP_FLATTERM_DIFF).
+  u8                   use_flatterm;
 #endif
 
   // Transient: set by thvm_atp_select_cp to the trace-entry index
@@ -3428,6 +3437,11 @@ fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 // check runs alone.  Lets one dylib carry MNF without paying for it
 // on completion-only goals.
 fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
+// Opt in to the flatterm fast-path for the mixed normalize loop (no
+// effect unless the dylib is built with ATP_RULE_INDEX).  Same normal
+// forms as the default tree mixed loop; a per-step speedup on rule sets
+// with unorientable equations.  Off by default.
+fn void      thvm_atp_set_use_flatterm(AtpState *s, u8 on);
 // Opt in to ground-joinability CP deletion (no effect unless the dylib
 // is built with ATP_CP_GROUND_JOIN).  Sound: ground-joinable CPs are
 // redundant.  Off by default (the criterion only counts).
