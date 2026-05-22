@@ -3344,6 +3344,24 @@ typedef struct {
   // generates infinite CP fan-out and would otherwise spin until
   // the OS sends SIGKILL).
   u64  wall_deadline_us;
+
+  // === ENIGMA-style learned CP-selector training data ===============
+  // When `record_cp_features` is set (via thvm_atp_set_record_cp_
+  // features; DEFAULT 0), thvm_atp_select_cp appends one row per
+  // PROCESSED critical pair to the growable arrays below: a fixed-
+  // length feature vector (ATP_CP_FEATURE_DIM f32s) plus the CP's
+  // trace-entry index (cp_feat_trace[]).  After a SUCCESSFUL proof
+  // the trainer calls thvm_atp_cp_label (which walks the trace DAG
+  // back from the proof's rules) to fill cp_feat_label[i] with 1 if
+  // that selected CP is an ancestor of the goal-closing step, else 0.
+  // OFF (the default) every field stays NULL/0 and select_cp does no
+  // extra work -- the engine is byte-identical to the untracked run.
+  u8     record_cp_features;
+  float *cp_feat_rows;     // n_cp_feat * ATP_CP_FEATURE_DIM, row-major
+  u32   *cp_feat_trace;    // trace id of the i-th recorded selected CP
+  u8    *cp_feat_label;    // 0/1 proof-relevance label (filled post-hoc)
+  u32    n_cp_feat;        // number of recorded rows
+  u32    cp_feat_cap;      // capacity of the three parallel arrays
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
@@ -3617,6 +3635,67 @@ fn u32       thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out,
 // Truncates silently on overflow.  Returns the byte count written.
 fn u32       thvm_atp_proof_serialize(const AtpProofStep *steps,
                                       u32 n_steps, char *buf, u32 cap);
+
+// === ENIGMA-style critical-pair feature extraction + dataset ========
+// A LEARNED CP selector (Jakubuv-Urban ENIGMA, adapted to equational
+// completion) needs labelled training data: for every CP the engine
+// PROCESSED in a SUCCESSFUL proof, a fixed-length numeric feature
+// vector + a binary label "did this CP contribute to the proof?".
+// This block produces that dataset; training (logistic regression /
+// GBDT) and the resulting fast C scorer are a separate later step.
+//
+// Feature layout (all f32; see thvm_atp_cp_features for the exact
+// computation).  Index -> meaning:
+//   0  size_sum        symbol_count(l) + symbol_count(r)
+//   1  max_depth       max(term_depth(l), term_depth(r))
+//   2  n_distinct_vars distinct FVR ids across l and r
+//   3  n_var_occ       total FVR occurrences across l and r
+//   4  weight_add      ADD-mode priority (symbol-count sum)
+//   5  weight_gt       GT-mode priority (ordering-directed KBO weight)
+//   6  weight_mix2     MIX2-mode priority (g*10 + (wl+wr))
+//   7  goal_weight     CPinGoal weight (0 in completion mode)
+//   8  age             cp_seq-style birth order == the row index
+//   9  top_symbol_l    CTR label at l's root (0 if l is a var/atom)
+//   10 top_symbol_r    CTR label at r's root
+//   11 shares_goal_sub 1 if l or r shares a top-symbol subterm with
+//                      the (normalized) goal, else 0
+//   12 orientable      1 if the CP orients (KBO_GT/KBO_LT), else 0
+//   13 unif_measure    depth-weighted l/r disagreement (U1 measure)
+// ATP_CP_FEATURE_DIM is the vector length; bump it if you add features.
+#define ATP_CP_FEATURE_DIM 14u
+
+// Compute the feature vector for a CP (lhs, rhs) into out[0..DIM).
+// `age` is the row's birth order (caller passes the running count).
+// Pure read of `s` (uses the rule set / goal / KBO config for the
+// weight + goal features); never mutates engine state.  Safe to call
+// standalone (e.g. from a scorer) independent of the recording flag.
+fn void      thvm_atp_cp_features(const AtpState *s, Term lhs, Term rhs,
+                                  u32 age, float *out);
+
+// Enable/disable recording of processed-CP feature rows.  OFF (0) by
+// default: select_cp records nothing and the engine is byte-identical.
+// ON (1): every CP returned by thvm_atp_select_cp appends a row
+// (features + trace id, label initialized 0).  Toggle before running.
+fn void      thvm_atp_set_record_cp_features(AtpState *s, u8 on);
+
+// After a SUCCESSFUL proof, label each recorded row: 1 if the CP's
+// trace id is an ancestor (in the trace DAG) of the goal-closing
+// step, else 0.  The proof set is computed from thvm_atp_proof_extract
+// (which RULES join the goal) -> those rules' r_trace[] TRACE_ORIENT
+// ids -> transitive parent closure over trace[].  Returns the proof-
+// set size (count of distinct selected-CP trace ids labelled 1), or 0
+// if the goal is not single-NF extractable / nothing was recorded.
+fn u32       thvm_atp_cp_label(AtpState *s);
+
+// Append the labelled dataset to a TSV file at `path` (created if
+// absent; `header` writes a column-name line first -- pass 1 only for
+// the first proof in an accumulating run).  One row per recorded CP:
+//   label \t f0 \t f1 \t ... \t f<DIM-1>
+// Returns the number of rows written, or 0 on a NULL/empty/IO failure.
+// Caller normally runs thvm_atp_cp_label first; unlabelled rows export
+// with label 0.
+fn u32       thvm_atp_cp_dataset_append(const AtpState *s,
+                                        const char *path, u8 header);
 
 // === wald/ ===
 // Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
