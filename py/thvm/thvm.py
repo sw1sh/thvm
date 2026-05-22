@@ -108,6 +108,9 @@ _fwd = _bind("py_fwd", c_uint64, c_uint64, c_uint64)
 _wnf = _bind("py_wnf", c_uint64, c_uint64)
 _nf = _bind("py_nf", c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
+_pin_set = _bind("py_pin_set", None, c_uint64, c_uint64)
+_pin_drop = _bind("py_pin_drop", None, c_uint64)
+_reclaim = _bind("py_reclaim", None)
 _tens_count = _bind("py_tens_count", c_uint32)
 _kernel_count = _bind("py_kernel_count", c_uint32)
 _ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
@@ -533,6 +536,18 @@ class Thvm:
     def realize(self, t: Term) -> Term:
         """Drive wnf -> materialize -> kernelize -> schedule -> dispatch."""
         return Term(_realize(c_uint64(int(t))))
+
+    # ---- live-tensor pinning + cross-step buffer reclaim ----
+    def pin_set(self, handle: int, t: Term) -> None:
+        _pin_set(c_uint64(handle), c_uint64(int(t)))
+
+    def pin_drop(self, handle: int) -> None:
+        _pin_drop(c_uint64(handle))
+
+    def reclaim(self) -> None:
+        """Free every backend buffer not reachable from a pinned tensor.
+        Call between training steps to keep device memory flat."""
+        _reclaim()
 
     # ---- introspection (Phase-4 cross-check surface) ----
     def tens_count(self) -> int:

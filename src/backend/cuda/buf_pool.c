@@ -34,7 +34,27 @@ fn void cuda_buf_pool_rollback_with_preserve(u32 wm) {
   for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) {
     if (CUDA_BUFS[i].preserved) continue;
     if (CUDA_BUFS[i].dptr == 0) continue;
+    // Skip buffers already on the freelist (refcount==0): a global
+    // reclaim (wm=1) re-scans prior realizes' freed slots; re-pushing
+    // would double-list them -> two allocations alias one buffer.
+    if (CUDA_BUFS[i].refcount == 0) continue;
     cuda_buf_freelist_push((u32)i);
+  }
+}
+
+// Cross-step global reclaim: plain cuMemFree (NOT freelist-recycle)
+// every live, non-preserved device buffer.  Recycling a globally-
+// reclaimed buffer risks aliasing it into a new allocation while a stale
+// TenDesc still names the slot; plain free returns the device storage.
+// Used by py_reclaim between training steps.
+fn void cuda_buf_pool_free_unpreserved(u32 wm) {
+  if (wm < 1) wm = 1;
+  if (wm > CUDA_BUFS_NEXT) return;
+  for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) {
+    if (CUDA_BUFS[i].preserved) continue;
+    if (CUDA_BUFS[i].refcount == 0) continue;
+    if (CUDA_BUFS[i].dptr == 0) continue;
+    cuda_buf_free((u32)i);
   }
 }
 

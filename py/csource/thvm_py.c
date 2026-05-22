@@ -222,6 +222,35 @@ EXPORT uint64_t py_wnf(uint64_t t)     { return wnf(t); }
 EXPORT uint64_t py_nf(uint64_t t)      { return nf(t); }
 EXPORT uint64_t py_realize(uint64_t t) { return thvm_realize(t); }
 
+// --- live-tensor pinning + cross-step buffer reclaim ---
+// The eager py path realizes a fresh forward/backward/optimizer graph
+// every step; the per-realize pool only recycles THAT realize's scratch,
+// so each step's result-chain buffers (activations, grads) survive below
+// the next watermark and accumulate -> the GPU saturates.  Fix: every
+// live Python Tensor pins its realized term (so it's a GC/preserve root);
+// py_reclaim then marks everything reachable from the pinned set live and
+// frees ALL other backend buffers globally (watermark 1).  Run with
+// THVM_GC=0 so the Cheney heap-Term collector stays off and raw term
+// integers held in Python never move (no handle-refresh needed).
+EXPORT void py_pin_set(uint64_t handle, uint64_t term) {
+  extern_pin_handle_set(handle, term);
+}
+EXPORT void py_pin_drop(uint64_t handle) {
+  extern_pin_handle_drop(handle);
+}
+EXPORT void py_reclaim(void) {
+  mark_gc_preserve(0);   // preserve chains reachable from EXTERN_PINNED + WNF stack + DEFS
+  cpu_buf_pool_free_unpreserved(1);
+#ifdef THVM_HAS_CUDA
+  cuda_buf_pool_free_unpreserved(1);
+#endif
+  cpu_buf_clear_preserved(1);
+  thvm_metal_buf_clear_preserved(1);
+#ifdef THVM_HAS_CUDA
+  cuda_buf_clear_preserved(1);
+#endif
+}
+
 // --- introspection (Phase-4 cross-check surface) ---
 EXPORT uint32_t py_tens_count(void) {
   return TENS_NEXT > 1 ? TENS_NEXT - 1 : 0;

@@ -33,6 +33,7 @@ from .thvm import K, Term, Thvm, _uop_binary
 
 # Process-global bridge.  All Tensors share one Thvm instance.
 _TH = Thvm()
+_TAG_TEN = K.TAG_TEN
 
 # Phase 3B: TenDesc.requires_grad is the canonical "this is a
 # parameter" flag (set via py_ten_set_requires_grad).  This dict
@@ -41,6 +42,16 @@ _TH = Thvm()
 # dead tensors auto-drop -- nn parameters stay alive via their layer.
 _GRAD_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
     weakref.WeakValueDictionary()
+
+# Monotonic handle ids for live-tensor pinning.  Each realized Tensor
+# pins its term via _TH.pin_set(handle, term) so it is a GC/preserve
+# root; __del__ drops the handle.  _TH.reclaim() (driven once per
+# training step via GlobalCounters.reset) then frees every backend
+# buffer NOT reachable from a pinned tensor -- the cross-step buffer
+# reclaim that keeps device memory flat in the eager (no-JIT) loop.
+# Requires THVM_GC=0 (no copying heap GC) so the raw term integers
+# Python caches never move.
+_PIN_NEXT = 1
 
 
 def _wrap_other(self_t: "Tensor", other) -> "Tensor":
@@ -56,7 +67,7 @@ class Tensor:
     """thvm tensor: TAG_TEN handle + Python-tracked dtype + shape."""
 
     __slots__ = ("term", "_dtype", "_shape", "requires_grad", "grad",
-                 "__weakref__")
+                 "_pin_id", "__weakref__")
 
     # tinygrad's class-level `Tensor.training` flag; BatchNorm reads it.
     training: bool = False
@@ -130,6 +141,8 @@ class Tensor:
         # nn.optim pick exactly the trainable parameters.
         self.requires_grad = requires_grad
         self.grad: Tensor | None = None
+        self._pin_id = 0
+        self._pin()
 
     @classmethod
     def _from_term(cls, term: Term, dtype: DType,
@@ -140,7 +153,33 @@ class Tensor:
         t._shape = tuple(int(d) for d in shape)
         t.requires_grad = None
         t.grad = None
+        t._pin_id = 0
+        t._pin()
         return t
+
+    # ---- live-tensor pinning (cross-step buffer reclaim) --------------
+
+    def _pin(self) -> None:
+        """Pin the current term if it is a realized TAG_TEN, so reclaim()
+        keeps its buffer.  Re-pinning (term changed via realize/assign)
+        drops the stale handle entry first to avoid leaking pin slots."""
+        global _PIN_NEXT
+        if int(_TH.term_tag(self.term)) != _TAG_TEN:
+            return
+        if self._pin_id == 0:
+            self._pin_id = _PIN_NEXT
+            _PIN_NEXT += 1
+        else:
+            _TH.pin_drop(self._pin_id)
+        _TH.pin_set(self._pin_id, self.term)
+
+    def __del__(self):
+        pid = getattr(self, "_pin_id", 0)
+        if pid:
+            try:
+                _TH.pin_drop(pid)
+            except Exception:
+                pass
 
     # ---- properties ----------------------------------------------------
 
@@ -162,6 +201,7 @@ class Tensor:
         """Drive thvm's pipeline; mutates `term` to the resulting
         TAG_TEN.  Extra tensors realize too (tinygrad pattern)."""
         self.term = _TH.realize(self.term)
+        self._pin()
         for x in lst:
             x.realize()
         return self
@@ -198,6 +238,7 @@ class Tensor:
         x = x if isinstance(x, Tensor) else Tensor(x, dtype=self._dtype)
         x.realize()
         self.term = x.term
+        self._pin()
         return self
 
     def replace(self, x: "Tensor") -> "Tensor":
@@ -206,6 +247,7 @@ class Tensor:
         self.term = x.term
         self._dtype = x._dtype
         self._shape = x._shape
+        self._pin()
         return self
 
     def requires_grad_(self, requires_grad: bool = True) -> "Tensor":

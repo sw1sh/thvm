@@ -57,6 +57,12 @@ fn void cpu_buf_pool_rollback_with_preserve(u32 wm) {
   for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
     if (CPU_BUFS[i].preserved) continue;
     if (CPU_BUFS[i].data == NULL && CPU_BUFS[i].handle == NULL) continue;
+    // Skip buffers already released to the freelist (refcount==0): a
+    // global reclaim (wm=1) re-scans prior realizes' freed slots, and
+    // re-pushing would double-list them -> two allocations alias one
+    // buffer.  Fresh scratch in a watermark scope is refcount>=1, so
+    // this gate doesn't change the per-realize path.
+    if (CPU_BUFS[i].refcount == 0) continue;
     if (CPU_BUFS[i].owns_data) {
       cpu_buf_freelist_push((u32)i);
     } else {
@@ -64,6 +70,24 @@ fn void cpu_buf_pool_rollback_with_preserve(u32 wm) {
     }
   }
   // No CPU_BUFS_NEXT reset; preserved bufs would block it anyway.
+}
+
+// Cross-step global reclaim: plain-free (NOT freelist-recycle) every
+// live, non-preserved buffer.  Recycling a globally-reclaimed buffer
+// risks handing it to a new allocation while a stale TenDesc still names
+// the slot; plain free returns the storage and leaves the slot
+// data==NULL so the next try_pop skips it and allocates fresh.  Used by
+// py_reclaim between training steps.  refcount==0 (already freelisted)
+// is skipped so we never double-free.
+fn void cpu_buf_pool_free_unpreserved(u32 wm) {
+  if (wm < 1) wm = 1;
+  if (wm > CPU_BUFS_NEXT) return;
+  for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
+    if (CPU_BUFS[i].preserved) continue;
+    if (CPU_BUFS[i].refcount == 0) continue;
+    if (CPU_BUFS[i].data == NULL && CPU_BUFS[i].handle == NULL) continue;
+    cpu_buf_free((u32)i);
+  }
 }
 
 fn void cpu_buf_mark_preserved(u32 buf_id) {
