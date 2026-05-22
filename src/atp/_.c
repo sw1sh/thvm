@@ -3637,6 +3637,45 @@ static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
   if (s->lpo != NULL) {
     return (KboCmp)thvm_lpo(lhs, rhs, s->lpo);
   }
+#ifdef ATP_RULE_INDEX
+  // Optional flatterm KBO: thvm_kbo_flat runs the identical Loechner
+  // decision over a cache-dense pre-order node array.  Measured net-
+  // NEGATIVE on this engine: thvm's CTR cells already store their
+  // children contiguously (term_ctr_at = heap_read(base + i)), so the
+  // IC traversal is itself cache-friendly and the flatten-both-operands
+  // pass is pure overhead.  The win that DID land is in thvm_kbo's
+  // traversal (one child-base read per node instead of a redundant
+  // term_ctr_n per child access), so the IC comparator is the default
+  // fast path.  thvm_kbo_flat stays opt-in (THVM_ATP_KBO_FLAT=1) behind
+  // use_flatterm for A/B and the differential self-check; unset / "0" =
+  // the optimized IC KBO.  Cached once; -1 = unread.
+  static int kbo_flat_gate = -1;
+  if (kbo_flat_gate < 0) {
+    const char *e = getenv("THVM_ATP_KBO_FLAT");
+    kbo_flat_gate = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  if (s->use_flatterm && kbo_flat_gate) {
+#ifdef ATP_KBO_FLAT_SELFCHECK
+    // Build-time differential: a wrong KBO verdict silently breaks
+    // soundness/completeness, so during bring-up assert flat == IC on
+    // every live pair before trusting the fast path.  Defeats the
+    // speedup (runs both) -- compile it OUT for the measured runs.
+    KboCmp ic   = thvm_kbo(lhs, rhs, s->kbo);
+    KboCmp flat = thvm_kbo_flat(lhs, rhs, s->kbo);
+    if (ic != flat) {
+      char lb[2048], rb[2048];
+      atp_pretty_term(lhs, lb, sizeof lb);
+      atp_pretty_term(rhs, rb, sizeof rb);
+      fprintf(stderr, "KBO FLAT SELFCHECK MISMATCH ic=%d flat=%d\n"
+                      " lhs=%s\n rhs=%s\n", (int)ic, (int)flat, lb, rb);
+      abort();
+    }
+    return flat;
+#else
+    return thvm_kbo_flat(lhs, rhs, s->kbo);
+#endif
+  }
+#endif
   return thvm_kbo(lhs, rhs, s->kbo);
 }
 

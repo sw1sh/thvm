@@ -220,6 +220,19 @@ int main(int argc, char **argv) {
     const char *rr = getenv("THVM_ATP_RIGHT_REDUCE");
     if (rr != NULL && *rr == '0') thvm_atp_set_right_reduce(s, 0u);
   }
+  // THVM_ATP_WALDMEISTER=1 replicates the WL Method->"Waldmeister"
+  // preset's runtime knobs (SelectionRatio 51, RHSInterreduce,
+  // UnfailingCP) so a profiling run follows the same trajectory the
+  // proof harness does.  AutoPrecedence on the single nand symbol is
+  // the identity precedence already in `cfg`, so it needs no setter.
+  {
+    const char *wm = getenv("THVM_ATP_WALDMEISTER");
+    if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
+      thvm_atp_set_selection_ratio(s, 51u);
+      thvm_atp_set_use_rhs_interreduce(s, 1u);
+      thvm_atp_set_use_unfailing_cp(s, 1u);
+    }
+  }
 
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 

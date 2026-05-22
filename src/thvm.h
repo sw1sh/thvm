@@ -2757,6 +2757,14 @@ typedef struct {
 
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
 
+// Flatterm KBO: same verdict as thvm_kbo, but flattens each operand into
+// a contiguous pre-order node array so the comparison reads cache-dense
+// sequential memory instead of chasing the IC term's pointer graph.  The
+// ATP order-gate routes through this on the flatterm path (use_flatterm);
+// falls back to thvm_kbo for terms deeper than its flat buffer or with a
+// non-CTR/non-FVR head.  Byte-identical verdict (ATP_KBO_FLAT_SELFCHECK).
+fn KboCmp thvm_kbo_flat(Term s, Term t, const KboConfig *cfg);
+
 // === lpo/ ===
 // Lexicographic Path Ordering (LPO; Waldmeister's
 // `Lexikografische-Pfad-Ordnung`, Dershowitz 1982).  An
