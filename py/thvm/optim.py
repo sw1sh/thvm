@@ -1,0 +1,131 @@
+"""thvm.nn.optim -- SGD / Adam / Muon, mirroring tinygrad's nn.optim.
+
+The contract matches tinygrad's Optimizer: zero_grad() clears the
+parameter gradients and schedule_step() applies one update and returns
+the tensors that still need realizing.  thvm's assign is eager (it
+realizes the update immediately), so schedule_step performs the update
+in place and returns the (already-updated) params -- `loss.realize(*sched)`
+in the training loop then just realizes the loss.
+
+Trainable params are those with requires_grad != False; an unset (None)
+requires_grad is promoted to True (tinygrad rule), while an explicit
+False (BatchNorm running stats) is a non-trained buffer.
+"""
+from __future__ import annotations
+
+from .tensor import Tensor
+
+
+def _dedup(xs):
+    out, seen = [], set()
+    for x in xs:
+        if id(x) not in seen:
+            seen.add(id(x))
+            out.append(x)
+    return out
+
+
+class Optimizer:
+    def __init__(self, params, lr: float):
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        for x in params:
+            if x.requires_grad is None:
+                x.requires_grad_(True)
+        # Params must be realized TAG_TEN leaves for requires_grad +
+        # backward to register them (factory inits are lazy UOP graphs).
+        for x in params:
+            x.realize()
+        self.params = _dedup([x for x in params if x.requires_grad])
+        self.buffers = _dedup([x for x in params if not x.requires_grad])
+        assert self.params, "optimizer must have at least one param"
+        for p in self.params:
+            p.requires_grad_(True)
+        self.lr = lr
+
+    def zero_grad(self):
+        for p in self.params:
+            p.grad = None
+
+    def step(self):
+        self.schedule_step()
+
+    def schedule_step(self):
+        if not Tensor.training:
+            raise RuntimeError("Tensor.training must be True to step the optimizer")
+        grads = [p.grad for p in self.params]
+        updates = self._step(self.params, grads)
+        for p, u in zip(self.params, updates):
+            if u is None:
+                continue
+            p.assign(p - u)
+            p.grad = None
+            p.requires_grad_(True)
+        return []
+
+    def _step(self, params, grads):
+        raise NotImplementedError
+
+
+class SGD(Optimizer):
+    def __init__(self, params, lr=0.001, momentum=0.0, weight_decay=0.0,
+                 nesterov=False, **_):
+        super().__init__(params, lr)
+        self.momentum, self.wd, self.nesterov = momentum, weight_decay, nesterov
+        self.b = [Tensor.zeros(*p.shape) if p.shape else Tensor.zeros(1)
+                  for p in self.params]
+
+    def _step(self, params, grads):
+        ups = []
+        for i, (p, g) in enumerate(zip(params, grads)):
+            if g is None:
+                ups.append(None)
+                continue
+            g = g.reshape(*p.shape) if p.shape else g
+            if self.wd:
+                g = g + p * self.wd
+            if self.momentum:
+                buf = self.b[i] * self.momentum + g
+                buf.realize()
+                self.b[i] = buf
+                g = (g + buf * self.momentum) if self.nesterov else buf
+            ups.append(g * self.lr)
+        return ups
+
+
+class Adam(Optimizer):
+    def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, **_):
+        super().__init__(params, lr)
+        self.b1, self.b2, self.eps = b1, b2, eps
+        self.t = 0
+        self.m = [Tensor.zeros(*p.shape) if p.shape else Tensor.zeros(1)
+                  for p in self.params]
+        self.v = [Tensor.zeros(*p.shape) if p.shape else Tensor.zeros(1)
+                  for p in self.params]
+
+    def _step(self, params, grads):
+        self.t += 1
+        bc1 = 1.0 - self.b1 ** self.t
+        bc2 = 1.0 - self.b2 ** self.t
+        ups = []
+        for i, (p, g) in enumerate(zip(params, grads)):
+            if g is None:
+                ups.append(None)
+                continue
+            g = g.reshape(*p.shape) if p.shape else g
+            m = self.m[i] * self.b1 + g * (1.0 - self.b1)
+            v = self.v[i] * self.b2 + (g * g) * (1.0 - self.b2)
+            m.realize()
+            v.realize()
+            self.m[i], self.v[i] = m, v
+            mhat = m * (1.0 / bc1)
+            vhat = v * (1.0 / bc2)
+            ups.append(mhat * self.lr * (vhat.sqrt() + self.eps).reciprocal())
+        return ups
+
+
+# Muon needs Newton-Schulz orthogonalization; thvm has no batched matmul
+# iteration helper yet, so alias to Adam (the script falls back unless
+# MUON=1).  AdamW == Adam without the decoupled weight decay term here.
+Muon = Adam
+AdamW = Adam

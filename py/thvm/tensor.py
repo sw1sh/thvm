@@ -61,6 +61,40 @@ class Tensor:
     # tinygrad's class-level `Tensor.training` flag; BatchNorm reads it.
     training: bool = False
 
+    # Identity hashing: __eq__ is overridden to build an elementwise mask
+    # (tinygrad semantics), which would otherwise make Tensor unhashable.
+    def __hash__(self):
+        return id(self)
+
+    class _TrainCtx:
+        """Context manager + decorator: `with Tensor.train():` or
+        `@Tensor.train()` flips Tensor.training for the dynamic extent."""
+        def __init__(self, mode: bool):
+            self.mode = mode
+            self.prev = None
+
+        def __enter__(self):
+            self.prev = Tensor.training
+            Tensor.training = self.mode
+            return self
+
+        def __exit__(self, *exc):
+            Tensor.training = self.prev
+            return False
+
+        def __call__(self, fn):
+            import functools
+
+            @functools.wraps(fn)
+            def wrapped(*a, **k):
+                with Tensor._TrainCtx(self.mode):
+                    return fn(*a, **k)
+            return wrapped
+
+    @classmethod
+    def train(cls, mode: bool = True) -> "Tensor._TrainCtx":
+        return cls._TrainCtx(mode)
+
     # ---- construction --------------------------------------------------
 
     def __init__(self, data=None, dtype: DType | None = None,
@@ -90,7 +124,11 @@ class Tensor:
             self.term = _TH.ten_create(dtype.thvm_id, list(self._shape))
             if arr.size > 0:
                 _TH.ten_write(self.term, arr.tobytes())
-        self.requires_grad = bool(requires_grad) if requires_grad else False
+        # None == "unset" (tinygrad semantics): an optimizer promotes it
+        # to True; an explicit False (BatchNorm running stats) stays a
+        # non-trained buffer.  Distinguishing the two is what lets
+        # nn.optim pick exactly the trainable parameters.
+        self.requires_grad = requires_grad
         self.grad: Tensor | None = None
 
     @classmethod
@@ -100,7 +138,7 @@ class Tensor:
         t.term = term
         t._dtype = dtype
         t._shape = tuple(int(d) for d in shape)
-        t.requires_grad = False
+        t.requires_grad = None
         t.grad = None
         return t
 
@@ -262,6 +300,13 @@ class Tensor:
         return cls._from_numpy(arr, dt)
 
     @classmethod
+    def randint(cls, *shape, low: int = 0, high: int = 10,
+                dtype: DType | None = None, **kw) -> "Tensor":
+        dt = dtype or dtypes.default_int
+        arr = np.random.randint(low, high, size=shape or (1,))
+        return cls._from_numpy(arr.astype(dt.np_dtype, copy=False), dt)
+
+    @classmethod
     def empty(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
         dt = dtype or dtypes.default_float
         return cls._from_numpy(np.empty(shape, dtype=dt.np_dtype), dt)
@@ -395,6 +440,47 @@ class Tensor:
         m = self.max(axis=axis, keepdim=True)
         e = (self - m).exp()
         return e * e.sum(axis=axis, keepdim=True).reciprocal()
+
+    def log_softmax(self, axis: int = -1) -> "Tensor":
+        # x - max, then subtract logsumexp; REDUCE_MAX backward (mask at
+        # argmax) makes the max-subtract differentiable.
+        m = self.max(axis=axis, keepdim=True)
+        shifted = self - m
+        return shifted - shifted.exp().sum(axis=axis, keepdim=True).log()
+
+    def sparse_categorical_crossentropy(self, Y: "Tensor",
+                                        axis: int = -1) -> "Tensor":
+        """Mean NLL of log_softmax(self) at the integer class labels Y.
+
+        Y holds class indices (a gathered batch / dataset slice -- data,
+        not on the autograd path), so it is one-hot'd host-side and the
+        gradient flows only through `self` (the logits)."""
+        ax = axis if axis >= 0 else axis + self.ndim
+        n_classes = self._shape[ax]
+        labels = Y.numpy().astype(np.int64).reshape(-1)
+        oh = np.zeros((labels.shape[0], n_classes), dtype=np.float32)
+        oh[np.arange(labels.shape[0]), labels] = 1.0
+        ls = self.log_softmax(axis=ax)
+        return (ls * Tensor(oh.reshape(self._shape))).sum(axis=ax).mean() * -1.0
+
+    def argmax(self, axis: int = -1) -> "Tensor":
+        """Index of the max along `axis`.  Host-side (used for eval
+        accuracy, off the autograd path); returns an int Tensor."""
+        ax = axis if axis >= 0 else axis + self.ndim
+        return Tensor(np.argmax(self.numpy(), axis=ax).astype(np.int32),
+                      dtype=dtypes.default_int)
+
+    def __eq__(self, other) -> "Tensor":
+        """Elementwise equality mask (1.0/0.0) -- tinygrad semantics, so
+        `(pred == labels).mean()` reads as an accuracy."""
+        a = self.numpy()
+        b = other.numpy() if isinstance(other, Tensor) else np.asarray(other)
+        return Tensor((a == b).astype(np.float32))
+
+    def __ne__(self, other) -> "Tensor":
+        return Tensor((self.numpy() != (
+            other.numpy() if isinstance(other, Tensor) else np.asarray(other))
+        ).astype(np.float32))
 
     def relu(self) -> "Tensor":
         # relu(x) = (0 < x) * x
@@ -642,6 +728,13 @@ class Tensor:
         a slice shrinks to [start:stop].  Trailing dims default to full.
         Tensor / fancy (gather) indexing is not handled here -- that lives
         at the lowered/gather level."""
+        # Fancy / gather indexing: a Tensor or array of indices selects
+        # rows along axis 0.  Done host-side -- the index source is data
+        # (the dataset / a randint batch), never on the autograd path.
+        if isinstance(idx, (Tensor, np.ndarray, list)):
+            sel = idx.numpy() if isinstance(idx, Tensor) else np.asarray(idx)
+            gathered = self.numpy()[sel.astype(np.int64)]
+            return Tensor(gathered, dtype=self._dtype)
         if not isinstance(idx, tuple):
             idx = (idx,)
         if len(idx) > self.ndim:

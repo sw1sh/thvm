@@ -105,6 +105,18 @@ class BatchNorm:
 
     def __call__(self, x: Tensor) -> Tensor:
         mean, var = self.calc_stats(x)
+        # Update running stats in training (mirrors tinygrad) so eval --
+        # which reads running_mean/var with Tensor.training=False -- is
+        # correct.  detach() keeps the update off the autograd path.
+        if self.track_running_stats and Tensor.training:
+            n = x.numel()
+            corr = n / (n - x.shape[1]) if n > x.shape[1] else 1.0
+            self.running_mean.assign(
+                self.running_mean * (1.0 - self.momentum)
+                + mean.detach() * self.momentum)
+            self.running_var.assign(
+                self.running_var * (1.0 - self.momentum)
+                + var.detach() * (self.momentum * corr))
         invstd = (var + self.eps).rsqrt()
         return x.batchnorm(self.weight, self.bias, mean, invstd)
 
@@ -179,3 +191,13 @@ class _State:
 
 
 state = _State()
+
+# tinygrad-shaped submodules: nn.optim.Adam / nn.datasets.mnist.
+# Register under the dotted nn.* names too so `from thvm.nn.datasets
+# import mnist` resolves even though nn is a module (not a package).
+import sys as _sys   # noqa: E402
+from . import optim   # noqa: E402
+from . import datasets   # noqa: E402
+
+_sys.modules[__name__ + ".optim"] = optim
+_sys.modules[__name__ + ".datasets"] = datasets

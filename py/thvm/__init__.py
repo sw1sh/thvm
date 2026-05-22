@@ -12,18 +12,19 @@ Two layers:
     low-level autotune / kernel work.
 """
 from .thvm import Thvm, Metal, Cuda, K, Term, DEFAULT_HEADER
-from . import templates, nn
+from . import templates, nn, helpers
 from .tensor import Tensor
 from .dtypes import dtypes, DType
 from .device import Device
 from .context import Context
 from ._misc import Variable, TinyJit
+from .helpers import GlobalCounters, function
 from .from_tinygrad import from_tinygrad
 
 __all__ = [
     # tinygrad-shaped surface
     "Tensor", "dtypes", "DType", "Device", "Context",
-    "Variable", "TinyJit", "nn",
+    "Variable", "TinyJit", "nn", "helpers", "GlobalCounters", "function",
     # cross-validation: ingest a tinygrad lazy UOp graph
     "from_tinygrad",
     # bridge handles
