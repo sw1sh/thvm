@@ -455,6 +455,24 @@ TRealize[exprs_List] := (
 )
 TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
 
+(* TRealizeList: same one-pass bundled materialize+wnf as the multi-root
+   TRealize[list] (shared kernels dedup across roots -- thvm_realize_many
+   walks the whole bundle in one thvm_materialize call), but returns the
+   list of N realized roots as pinned TEN handles instead of the bundle
+   CTR.  TGradMany does a single shared backward walk, so realizing the N
+   param gradients TOGETHER lets bufferize_classify see the shared upstream
+   cotangents (dL/dh1 etc.) as multi-consumer and emit them ONCE; the
+   per-root TRealize /@ form re-emits the shared chain for every root
+   (~N x the kernels).  Each returned handle is a concrete realized root,
+   safe to thread into downstream expressions (e.g. TAdam's per-param
+   update reads each gradient three times). *)
+TRealizeList[exprs_List] := Module[{raw, n},
+    ensureInit[];
+    raw = $realizeManyFn[Developer`ToPackedArray[ttermRaw /@ exprs, Integer]];
+    n   = $termCtrNFn[raw];
+    Table[TTerm[$termCtrAtFn[raw, i]], {i, 0, n - 1}]
+]
+
 (* TMaterialize = direct schedule + kernelize + linearize rewrite,
    no firing.  Useful for inspection (visualize the scheduled DAG
    before dispatch).  The return value is a UOP_KERNEL term whose

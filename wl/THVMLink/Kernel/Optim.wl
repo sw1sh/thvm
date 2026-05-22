@@ -167,20 +167,21 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
         invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
         lossK        = TMaterialize[loss];
         grads        = TGradMany[lossK, params];
-        (* Force each gradient to a TEN before threading it into the
-           Adam expressions.  The DP1 chain-rule cell returned by
-           TGradMany recomputes the gradient on each read inside a
-           bundled TRealize; later reads land in a state where
-           downstream kernel programs have been rewritten by earlier
-           reads' materialization, and the re-walk produces wrong
-           values (gradient shrinks ~5x at the 2nd conv layer).  With
-           the DP1 still wrapping each gTen, vAfter's `gTen * gTen`
-           reads land on those re-walked values, vAfter collapses,
-           denom -> eps, and the Adam update explodes by ~1e6 per
-           weight.  TRealize'ing once up front pins each gradient to a
-           concrete TEN buffer so all three downstream reads see the
-           same correct values. *)
-        gradsRealized = TRealize /@ grads;
+        (* Realize all gradients in ONE bundled materialize pass.
+           TGradMany now does a single requires_grad backward walk, so the
+           N grads share one backward DAG; bundling the realize lets
+           bufferize_classify see the shared upstream cotangents (dL/dh1
+           etc.) as multi-consumer and emit them ONCE.  The per-param
+           `TRealize /@` form re-emits the shared chain for every param --
+           each isolated pass sees its upstream as single-consumer and
+           inlines it -- so it pays ~N x the kernels (beautiful_mnist BS=8
+           backward: 1583 vs ~216 bundled).  TRealizeList returns the N
+           realized roots as pinned TEN handles, so the three downstream
+           Adam reads (m, g*g, w) all see the same concrete gradient buffer.
+           (The earlier per-param form predates the single-walk: back then
+           each target was a separate target-aware DP1 walk that recomputed
+           on each read, so per-param realize was the only safe form.) *)
+        gradsRealized = TRealizeList[grads];
         paramAssigns = Table[
             Block[{
                 wTen = params[[i]], gTen = gradsRealized[[i]],
