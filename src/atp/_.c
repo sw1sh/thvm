@@ -3562,6 +3562,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->rhs);
   free(s->r_trace);
   free(s->r_orient);
+  free(s->r_trace_dead);
   free(s->trace);
   // Each cp_packed[] slot is a malloc'd byte string the queue owns;
   // free every non-NULL slot (free(NULL) is a no-op) then the array.
@@ -4836,6 +4837,8 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
 // forward-declared here for the gated hook at the end of this function.
 static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
                                u32 trace_id);
+// Lazy orphan murder: defined with the orphan-murder setters below.
+static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace);
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL) return 0;
   // Auto-MaxWeight: if the active queue is empty but CPs are deferred
@@ -4847,6 +4850,14 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
   if (s->n_cps == 0) return 0;
 
+  // WM selectNonOrphan (KPVerwaltung.c:535): loop deleteMin until a
+  // non-orphan CP surfaces.  An orphan (a parent rule was interreduced
+  // away) is extracted and discarded FOR FREE -- the simplified
+  // equation that replaced the dead rule regenerates its contribution,
+  // so dropping it preserves completeness.  With use_orphan_murder off
+  // the body runs exactly once (the orphan test is a cheap predictable
+  // branch) and the engine is byte-identical.
+  for (;;) {
   // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
   // selections, weight pick (heap root) otherwise.
   u32 j = 0;
@@ -4872,7 +4883,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     }
     j = best;
   }
-  s->cp_select_count++;
+
+  // Lazy orphan check.  If the chosen CP descends from an interreduced-
+  // away rule, extract+discard it without counting a selection and
+  // re-pick.  WM IncAnzKPEntfernt ticks per discard (KPVerwaltung.c:539).
+  int orphan = s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[j]);
+  if (!orphan) s->cp_select_count++;
 
   // Unpack the chosen CP from its byte string into two fresh heap
   // Terms for the caller to normalize.
@@ -4903,6 +4919,16 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
   // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
   atp_cp_graph_sync(s);
+
+  if (orphan) {
+    s->n_cps_dropped_orphan++;
+    if (s->n_cps == 0u && s->n_cp_stash > 0u
+        && s->auto_max_cp_weight_base > 0u) {
+      atp_auto_maxw_drain(s, 1u);
+    }
+    if (s->n_cps == 0) return 0;  // queue drained to orphans only
+    continue;                     // re-pick the next heap-min
+  }
   // ENIGMA training-data hook: record the processed CP's feature
   // vector + trace id.  Gated -- with the flag off (the default) this
   // is a single predictable-branch test and the engine is byte-
@@ -4911,6 +4937,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     atp_cp_feat_record(s, *lhs_out, *rhs_out, s->last_popped_trace);
   }
   return 1;
+  }  // end selectNonOrphan loop
 }
 
 // 7c': re-establish the CP-queue heap invariant over cp_packed[0..n_cps).
@@ -5074,6 +5101,54 @@ fn void thvm_atp_set_right_reduce(AtpState *s, u8 on) {
 fn void thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->cp_set_interreduce = on ? 1u : 0u;
+}
+
+// Toggle lazy orphan murder (Waldmeister "Waisenmord",
+// KPVerwaltung.c:535 selectNonOrphan + the per-rule `lebtNoch` bit).
+// When a rule is interreduced away its descendant queued CPs are
+// redundant; with this on they are discarded FOR FREE at pop time
+// (no queue sweep / reheapify).  Default OFF -> byte-identical engine.
+fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_orphan_murder = on ? 1u : 0u;
+}
+
+// Mark a rule's birthing trace id as dead so descendant CPs are skipped
+// at pop time.  Grows the bitset on demand (8 trace ids per byte).
+static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
+  if (trace_id == ATP_TRACE_NONE) return;
+  u32 byte = trace_id >> 3;
+  if (byte >= s->r_trace_dead_cap >> 3) {
+    u32 new_bits = (trace_id + 1u + 4096u) & ~4095u;  // round up
+    u32 new_bytes = (new_bits + 7u) >> 3;
+    u8 *grown = (u8 *)realloc(s->r_trace_dead, new_bytes);
+    if (grown == NULL) return;  // out of memory: skip the mark (still sound)
+    u32 old_bytes = s->r_trace_dead_cap >> 3;
+    memset(grown + old_bytes, 0, new_bytes - old_bytes);
+    s->r_trace_dead = grown;
+    s->r_trace_dead_cap = new_bytes << 3;
+  }
+  s->r_trace_dead[trace_id >> 3] |= (u8)(1u << (trace_id & 7u));
+}
+
+// Is a rule's birthing trace id marked dead?
+static int atp_trace_is_dead(const AtpState *s, u32 trace_id) {
+  if (trace_id == ATP_TRACE_NONE || trace_id >= s->r_trace_dead_cap) return 0;
+  return (s->r_trace_dead[trace_id >> 3] >> (trace_id & 7u)) & 1u;
+}
+
+// Is a queued CP an orphan?  Its TRACE_CP entry names its two parent
+// rules' trace ids in children 0/1; the CP is an orphan iff either is
+// dead.  CPs whose trace entry is not a TRACE_CP (axioms, simplifies)
+// are never orphaned.  Mirrors WM selectNonOrphan's
+// `aP->lebtNoch && oP->lebtNoch` test (KPVerwaltung.c:540).
+static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace) {
+  if (cp_trace == ATP_TRACE_NONE || cp_trace >= s->n_trace) return 0;
+  Term te = s->trace[cp_trace];
+  if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_CP) return 0;
+  u32 pa = (u32)term_val(term_ctr_at(te, 0));
+  u32 pb = (u32)term_val(term_ctr_at(te, 1));
+  return atp_trace_is_dead(s, pa) || atp_trace_is_dead(s, pb);
 }
 
 // Read wall-clock microseconds from CLOCK_REALTIME -- portable
@@ -7021,6 +7096,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         atp_dead[atp_n_dead++] = s->r_trace[i];
       }
 #endif
+      // Lazy orphan murder: mark the dropped rule's birthing trace id
+      // dead so its descendant CPs are skipped at pop time (WM
+      // selectNonOrphan).  No queue sweep here.
+      if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
       // Keep the unorientable-rule count live: the dropped rule leaves
       // R here (it re-enters as a queued equation, re-counted only if
       // re-oriented unorientable at its next atp_push_rule).
@@ -7153,6 +7232,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_dead[atp_n_dead++] = s->r_trace[j];
         }
 #endif
+        if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]      = s->lhs[k];

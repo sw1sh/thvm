@@ -274,7 +274,31 @@ int main(int argc, char **argv) {
       thvm_atp_set_selection_ratio(s, 51u);
       thvm_atp_set_use_rhs_interreduce(s, 1u);
       thvm_atp_set_use_unfailing_cp(s, 1u);
+      thvm_atp_set_use_orphan_murder(s, 1u);
     }
+  }
+
+  // THVM_ATP_ORPHAN=1 toggles lazy orphan murder independently of the
+  // WM preset, so a run can A/B its effect on the CP queue.
+  {
+    const char *om = getenv("THVM_ATP_ORPHAN");
+    if (om != NULL && om[0] != '\0')
+      thvm_atp_set_use_orphan_murder(s, (om[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_GROUND_JOIN=1 / THVM_ATP_CONNECT=1: sound CP-volume
+  // reducers (Waldmeister Grundzusammenfuehrbar / Bachmair-Dershowitz
+  // connectedness).  Compiled in by default (Makefile ATP_CP_GROUND_JOIN
+  // ?= 1); these flip the runtime gate so a CP that is ground-joinable /
+  // connected-below-peak is dropped at generate time, shrinking the live
+  // queue.
+  {
+    const char *gj = getenv("THVM_ATP_GROUND_JOIN");
+    if (gj != NULL && gj[0] != '\0')
+      thvm_atp_set_use_ground_join(s, (gj[0] != '0') ? 1u : 0u);
+    const char *cn = getenv("THVM_ATP_CONNECT");
+    if (cn != NULL && cn[0] != '\0')
+      thvm_atp_set_use_connectedness(s, (cn[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_RECORD_NORM=1 turns on per-step normalize-trace recording
@@ -390,9 +414,12 @@ int main(int argc, char **argv) {
   printf("   goal=%s  steps=%u  rules=%u  cps=%u  max_cps=%u  %.1fs\n",
          goal, i, s->n_rules, s->n_cps, max_cps, el);
   printf("   dropped: joinable=%u queue-subsumed=%u "
-         "rule-subsumed=%u connected=%u\n",
+         "rule-subsumed=%u connected=%u orphan=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
-         s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected);
+         s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected,
+         s->n_cps_dropped_orphan);
+  printf("   dropped: ground-joinable=%u connected-below-peak=%u\n",
+         s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak);
   printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);
   { u32 unor = 0;
     for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;

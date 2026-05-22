@@ -3497,6 +3497,23 @@ typedef struct {
   u32  n_cp_set_ir_deleted;       // diagnostics: CPs deleted (joinable)
   u32  n_cp_set_ir_reweighted;    // diagnostics: CPs reweighted
 
+  // Lazy orphan murder (Waldmeister "Waisenmord", KPVerwaltung.c:535
+  // selectNonOrphan + the per-rule `lebtNoch` liveness bit).  When a
+  // rule is interreduced away, the queued CPs it birthed are redundant:
+  // the simplified equation that replaces the rule regenerates whatever
+  // those CPs would contribute.  WM does NOT sweep the queue on the drop;
+  // it marks the dead parent rule and discards descendant CPs FOR FREE at
+  // selection time -- the heap-min CP is skipped if either parent is dead.
+  // `r_trace_dead` is a bitset keyed on a rule's birthing trace id (the
+  // value stored in r_trace[]/cp parents); set when a rule is dropped,
+  // tested at pop.  Default OFF (use_orphan_murder == 0) -> the engine is
+  // byte-identical.  On for Method->"Waldmeister" via
+  // thvm_atp_set_use_orphan_murder.
+  u8   use_orphan_murder;
+  u8  *r_trace_dead;              // bitset over trace ids (8 ids / byte)
+  u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
+  u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3620,6 +3637,7 @@ fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 
 // Set a wall-clock deadline.  `seconds_from_now` is a float duration
 // (e.g. 5.0 = 5 seconds); pass 0.0 to clear the deadline.  The
