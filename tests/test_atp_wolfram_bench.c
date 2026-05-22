@@ -38,6 +38,16 @@ static Term nand2(Term x, Term y) {
 }
 static Term fv(u32 id) { return term_new_fvr(id); }
 
+// Ground skolem constants: nullary CTRs with their own labels (p=2,
+// q=3, r=4).  Distinct from the axiom variables a,b,c (TAG_FVR) so a
+// rule lhs over a,b,c can match a ground subterm but the goal sides
+// stay rigid -- a genuine ground equation, not a schema.  Labels are
+// inside n_labels (see cfg below) so KBO gives each a positive weight.
+#define L_P 2u
+#define L_Q 3u
+#define L_R 4u
+static Term konst(u32 label) { return term_new_ctr(label, NULL, 0); }
+
 // Wolfram axiom:
 //   nand(nand(nand(a,b),c), nand(a,nand(nand(a,c),a))) == c
 // axiom_inst(a,b,c) is the LHS with its three variables free: for ANY
@@ -139,6 +149,24 @@ static void goal_deep(Term *l, Term *r, u32 k) {
   *r = m;
 }
 
+// andassoc = AndAssociativity over the single Sheffer/nand axiom --
+// the Waldmeister landmark (WM: KBO+MixWeight, 1601 rules, 14.3s).
+// And is defined via nand:  And(x,y) = nand(nand(x,y), nand(x,y)).
+// The conjecture And(p, And(q,r)) == And(And(p,q), r) with p,q,r
+// distinct GROUND constants, fully expanded in nand.  This is the
+// exact form thvm's paclet uses (verified against WM's andassoc.pr).
+static Term and2(Term x, Term y) {
+  Term inner = nand2(x, y);
+  return nand2(inner, inner);
+}
+static void goal_andassoc(Term *l, Term *r) {
+  Term p = konst(L_P), q = konst(L_Q), rr = konst(L_R);
+  // LHS = And(p, And(q,r))
+  *l = and2(p, and2(q, rr));
+  // RHS = And(And(p,q), r)
+  *r = and2(and2(p, q), rr);
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -155,16 +183,21 @@ int main(int argc, char **argv) {
   const char *ord_env = getenv("ATP_BENCH_ORD");
   int use_lpo  = (ord_env != NULL && strcmp(ord_env, "lpo")  == 0);
   int use_kbo0 = (ord_env != NULL && strcmp(ord_env, "kbo0") == 0);
-  static u32 weights[2]    = { 0u, 1u };
-  static u32 precedence[2] = { 0u, 1u };
+  // Labels: 0 unused, 1=nand, 2=p, 3=q, 4=r (the andassoc constants).
+  // Each gets weight 1.  Precedence: nand highest, constants below it
+  // (p>q>r) -- matches Waldmeister's AutoPrecedence on the function
+  // symbol over skolem constants.  Goals that use only nand (thm,
+  // wolfram, ...) are unaffected: their terms never touch labels 2-4.
+  static u32 weights[5]    = { 0u, 1u, 1u, 1u, 1u };
+  static u32 precedence[5] = { 0u, 4u, 3u, 2u, 1u };
   KboConfig cfg = {
     .weights    = weights,
     .precedence = precedence,
-    .n_labels   = 2u,
+    .n_labels   = 5u,
     .var_weight = use_kbo0 ? 0u : 1u,
   };
-  static u32 lpo_prec[2] = { 0u, 1u };
-  static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 2u };
+  static u32 lpo_prec[5] = { 0u, 4u, 3u, 2u, 1u };
+  static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 5u };
 
   // cpgen mode: generate the critical pairs of the axiom with
   // itself -- the distance-1 lemmas -- in ONE CP-generation call,
@@ -269,6 +302,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "chain6") == 0) goal_chain(&gl, &gr, 6u);
   else if (strcmp(goal, "deep5")  == 0) goal_deep(&gl, &gr, 5u);
   else if (strcmp(goal, "wolfram")== 0) goal_wolfram(&gl, &gr);
+  else if (strcmp(goal, "andassoc")==0) goal_andassoc(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
@@ -297,6 +331,13 @@ int main(int argc, char **argv) {
   printf("ordering=%s  step_cap=%u  wall_cap=%.0fs  cp_weight_mode=%u\n",
          use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"),
          step_cap, wall_cap, (u32)s->cp_weight_mode);
+  if (!saturate) {
+    char glb[2048], grb[2048];
+    atp_pretty_term(gl, glb, sizeof glb);
+    atp_pretty_term(gr, grb, sizeof grb);
+    printf("goal-lhs = %s\n", glb);
+    printf("goal-rhs = %s\n", grb);
+  }
 
   // THVM_ATP_DIAG=<period>: every <period> steps, measure the
   // interreduction deficit (rules with a side reducible by another
