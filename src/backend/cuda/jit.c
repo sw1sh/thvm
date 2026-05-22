@@ -23,7 +23,14 @@
 // rendered source so a repeat launch of the same kernel skips both
 // the nvrtc compile and the module load.
 
-#define CUDA_JIT_CACHE_CAP 128
+// Direct-mapped, evicting module cache.  Sized to comfortably hold one
+// training step's stable forward/backward kernels (~120) while the
+// step-varying kernels (Adam bakes the bias-correction 1-b1^t / lr as
+// CONST literals, so its source changes every step) evict cleanly.
+// Without eviction those step-unique modules leaked to end-of-session
+// (cuModuleLoadData reserves GPU code memory), saturating the device
+// after a handful of no-JIT steps -- the dominant CUDA training leak.
+#define CUDA_JIT_CACHE_CAP 512
 
 typedef struct {
   u64        key;        // 0 = empty slot; FNV hash of the .cu source
@@ -54,15 +61,14 @@ static u64 cuda_jit_hash(const char *src) {
   return h | (1ULL << 63);   // never 0 (the empty-slot sentinel)
 }
 
-static CudaJitSlot *cuda_jit_lookup_slot(u64 key) {
+// Direct-mapped: each key has exactly one home slot.  Lookup and insert
+// agree on the slot, so eviction (on collision) is consistent -- unlike
+// open addressing, where evicting a probed slot would strand both the
+// evicted key and the newly inserted one off their probe chains.
+static CudaJitSlot *cuda_jit_home_slot(u64 key) {
   u32 h = (u32)(key ^ (key >> 32));
   h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
-  for (u32 probe = 0; probe < CUDA_JIT_CACHE_CAP; probe++) {
-    u32 i = (h + probe) & (CUDA_JIT_CACHE_CAP - 1);
-    if (CUDA_JIT_CACHE[i].key == key) return &CUDA_JIT_CACHE[i];
-    if (CUDA_JIT_CACHE[i].key == 0)   return &CUDA_JIT_CACHE[i];
-  }
-  return NULL;
+  return &CUDA_JIT_CACHE[h & (CUDA_JIT_CACHE_CAP - 1)];
 }
 
 // Compile a .cu source string with nvrtc and load it as a module.
@@ -75,8 +81,8 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     return NULL;
   }
   u64 key = cuda_jit_hash(cu_src);
-  CudaJitSlot *slot = cuda_jit_lookup_slot(key);
-  if (slot != NULL && slot->key == key && slot->func != NULL) {
+  CudaJitSlot *slot = cuda_jit_home_slot(key);
+  if (slot->key == key && slot->func != NULL) {
     return slot->func;   // cache hit -- skip nvrtc + module load
   }
 
@@ -138,15 +144,19 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     cuModuleUnload(module);
     return NULL;
   }
-  if (slot != NULL) {
-    slot->key    = key;
-    slot->module = module;
-    slot->func   = func;
-  } else {
-    // Cache full -- the kernel still works, it just won't be cached.
-    // cuModuleUnload would invalidate `func`, so leak the module to
-    // end-of-session (cuCtxDestroy reclaims it).
+  // Evict the prior occupant of this home slot (a different key) and
+  // unload its module so GPU code memory stays bounded at CACHE_CAP
+  // modules.  Safe in the synchronous dispatch model: every launch
+  // cuCtxSynchronize's before the next compile, so an evicted module's
+  // CUfunction is never in flight.  jit_replay re-dispatches through
+  // this cache, so an evicted kernel simply recompiles -- never a stale
+  // func pointer.
+  if (slot->module != NULL && slot->key != key) {
+    cuModuleUnload(slot->module);
   }
+  slot->key    = key;
+  slot->module = module;
+  slot->func   = func;
   return func;
 }
 
