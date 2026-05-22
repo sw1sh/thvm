@@ -392,6 +392,29 @@ int main(int argc, char **argv) {
   }
 #endif
 
+#ifdef ATP_RULE_INDEX
+  // 7e: rule-LHS redex-index retrieval stats -- THE Sheffer-pruning
+  // measurement.  candidates/query is the candidates-returned-per-query:
+  // a linear scan would touch n_rules records per position-query.  If
+  // candidates/query tracks n_rules the discrimination tree does NOT
+  // prune on single-symbol Sheffer; if it stays bounded it does.
+  {
+    u64 queries = 0, cands = 0, matchcalls = 0, nodevisits = 0;
+    u32 nodes = 0, rbuilt = 0;
+    thvm_atp_ri_stats(s, &queries, &cands, &matchcalls, &nodevisits,
+                      &nodes, &rbuilt);
+    double avg_cand = (queries > 0) ? ((double)cands / (double)queries) : 0.0;
+    double avg_node = (queries > 0) ? ((double)nodevisits / (double)queries) : 0.0;
+    double avg_mc   = (queries > 0) ? ((double)matchcalls / (double)queries) : 0.0;
+    printf("   ri-index: %llu queries  %u tree-nodes  %u rules-built\n",
+           (unsigned long long)queries, nodes, rbuilt);
+    printf("   ri-retrieval: %.3f candidates/query  %.3f tree-nodes/query  %.4f thvm_match/query\n",
+           avg_cand, avg_node, avg_mc);
+    printf("   ri-cmp: candidates/query vs n_rules=%u  ->  prune-ratio %.4f\n",
+           rbuilt, (rbuilt > 0) ? (avg_cand / (double)rbuilt) : 0.0);
+  }
+#endif
+
   thvm_atp_free(s);
   return (st == ATP_PROVED) ? 0 : 1;
 }

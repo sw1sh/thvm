@@ -1906,6 +1906,14 @@ struct AtpRuleIndex {
   u32        n_recs, cap_recs;
   u32        root;
   u32        n_rules_built;     // R size the tree currently reflects
+  // Retrieval instrumentation (cheap counters, always compiled).  The
+  // decisive Sheffer measurement: q_candidates / q_queries is the
+  // candidates-returned-per-query -- if it tracks n_rules the tree does
+  // not prune; if bounded it does.
+  u64        q_queries;         // atp_ri_query_pos calls
+  u64        q_candidates;      // leaf records reached by retrieval
+  u64        q_matchcalls;      // thvm_match calls issued on candidates
+  u64        q_nodevisits;      // discrimination-tree nodes touched
   u8         any_folded;        // some rule LHS folded a var -> imperfect
   // 1 for the unorientable-faces index: a leaf rec's `rule` field then
   // carries the direction in its high bit (ATP_RI_DIR_BIT) -- bit set =
@@ -2132,6 +2140,7 @@ static void atp_ri_leaf_collect(u32 node) {
   u8 perfect = !ix->any_folded && !g_atp_ri_query_folded;
   for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
        r = ix->recs[r].next) {
+    ix->q_candidates++;
     u32 rule = ix->recs[r].rule;
     if (rule >= g_atp_ri_best) continue;          // cannot lower the min
     if (perfect) {
@@ -2145,6 +2154,7 @@ static void atp_ri_leaf_collect(u32 node) {
       continue;
     }
     RewriteSubst subst = {{0}};
+    ix->q_matchcalls++;
     if (thvm_match(g_atp_ri_lhs[rule], g_atp_ri_qsubj, &subst)) {
       g_atp_ri_best = rule;
     }
@@ -2166,6 +2176,7 @@ static void atp_ri_leaf_collect(u32 node) {
 static void atp_ri_descend(u32 node, u32 pos) {
   AtpRuleIndex *ix = g_atp_ri_ix;
   for (;;) {
+    ix->q_nodevisits++;
     if (pos == g_atp_ri_qend) {
       atp_ri_leaf_collect(node);
       return;
@@ -2207,6 +2218,7 @@ static void atp_ri_descend(u32 node, u32 pos) {
 // subterm at preorder position `qpos` of the shared flat array.
 // Returns ATP_RI_NIL if no rule LHS matches there.
 static u32 atp_ri_query_pos(u32 qpos) {
+  g_atp_ri_ix->q_queries++;
   g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
   g_atp_ri_qsubj = g_atp_ri_flat[qpos];
   g_atp_ri_best  = ATP_RI_NIL;
@@ -2522,6 +2534,24 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
     }
   }
   return flattened ? atp_ri_build(flat, subsz, flatsym, 0u) : t;
+}
+
+// Rule-index retrieval stats accessor (the Sheffer-pruning measurement).
+// `queries` is the number of atp_ri_query_pos calls; `candidates` the
+// leaf records reached; `matchcalls` the thvm_match calls those records
+// triggered; `node_visits` the tree nodes touched.  candidates/queries
+// is the candidates-returned-per-query: if it tracks n_rules the tree
+// does NOT prune on single-symbol Sheffer; if bounded it does.
+fn void thvm_atp_ri_stats(const AtpState *s, u64 *queries, u64 *candidates,
+                          u64 *matchcalls, u64 *node_visits, u32 *nodes,
+                          u32 *n_rules_built) {
+  AtpRuleIndex *ix = (s != NULL) ? s->rule_index : NULL;
+  if (queries       != NULL) *queries       = (ix != NULL) ? ix->q_queries : 0;
+  if (candidates    != NULL) *candidates    = (ix != NULL) ? ix->q_candidates : 0;
+  if (matchcalls    != NULL) *matchcalls    = (ix != NULL) ? ix->q_matchcalls : 0;
+  if (node_visits   != NULL) *node_visits   = (ix != NULL) ? ix->q_nodevisits : 0;
+  if (nodes         != NULL) *nodes         = (ix != NULL) ? ix->n_nodes : 0;
+  if (n_rules_built != NULL) *n_rules_built = (ix != NULL) ? ix->n_rules_built : 0;
 }
 
 #ifdef ATP_ORDERED_REWRITE
