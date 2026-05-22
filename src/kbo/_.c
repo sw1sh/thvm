@@ -354,20 +354,26 @@ static KboCmp kbo_lin_lex(KboLin *st, Term s, Term t) {
 }
 
 // Production comparator: Loechner's linear-time KBO.
+//
+// bal[] is only ever written via kbo_bump (which records the id in the
+// touched list) and cleared via that list before every return, so it is
+// all-zero on entry AND exit of each call.  The scope is therefore kept
+// in ONE file-static KboLin zeroed once (calloc-equivalent), instead of a
+// fresh stack KboLin with a KBO_MAX_VAR-int zeroing loop on every call --
+// KBO is in the saturation hot path (millions of calls), and the per-call
+// 64-int memset dominated the comparator.  Single-threaded saturation, so
+// the shared scope is safe.  Behavior-identical to the per-call version.
+static KboLin g_kbo_st;   // bal[]/touched[] zero by static-storage init
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
-  KboLin st;
-  st.cfg = cfg;
-  st.n_touched = 0;
-  // bal[] is only ever written via kbo_bump (which records the id) and
-  // cleared via the touched list, so it stays all-zero between scopes;
-  // initialise once for the first use.
-  for (u32 i = 0; i < KBO_MAX_VAR; i++) st.bal[i] = 0;
+  KboLin *st = &g_kbo_st;
+  st->cfg = cfg;
+  st->n_touched = 0;
 
   long long phidiff = 0;
-  if (kbo_vortest(&st, s, t, &phidiff)) {
-    kbo_lin_clear(&st);
+  if (kbo_vortest(st, s, t, &phidiff)) {
+    kbo_lin_clear(st);
     return KBO_EQ;
   }
-  KboCmp varcmp = kbo_lin_decide_clear(&st);
-  return kbo_lin_rek(&st, s, t, phidiff, varcmp);
+  KboCmp varcmp = kbo_lin_decide_clear(st);
+  return kbo_lin_rek(st, s, t, phidiff, varcmp);
 }
