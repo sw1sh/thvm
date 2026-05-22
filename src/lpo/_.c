@@ -175,6 +175,15 @@ static LpoCmp lpo_rec_compute(Term s, Term t, const LpoConfig *cfg);
 typedef struct { Term s, t; u32 epoch; u8 cmp; } LpoMemoEnt;
 static LpoMemoEnt g_lpo_memo[LPO_MEMO_SIZE];
 static u32 g_lpo_epoch = 0;
+static const LpoConfig *g_lpo_last_cfg = NULL;
+// Persistence mode.  OFF (default): thvm_lpo bumps the epoch every call,
+// so the memo is fresh per call -- always sound, the right default for
+// arbitrary direct callers (tests) that may reuse cell addresses without
+// telling us.  ON: the memo persists across calls (huge hit rate on a
+// completion) and the caller PROMISES to invalidate on cell movement;
+// the ATP engine turns this on at thvm_atp_init and invalidates on every
+// GC.  A non-ATP caller never flips it, so it stays sound for them.
+static u8 g_lpo_persist = 0;
 
 static inline u32 lpo_memo_hash(Term s, Term t) {
   u64 h = (s * 0x9E3779B97F4A7C15ull) ^ (t * 0xBF58476D1CE4E5B9ull);
@@ -231,12 +240,33 @@ static LpoCmp lpo_lex(Term s_parent, Term t_parent,
   return LPO_EQ;
 }
 
-fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
-  // New epoch invalidates the whole memo in O(1); wrap-around (every
-  // 2^32 comparisons) clears it explicitly to avoid stale matches.
+// Invalidate the whole (s,t)->verdict memo in O(1) by bumping the epoch.
+// The verdict depends only on (s, t, precedence); both s,t cells (until
+// the GC moves them) and the precedence (within one run) are stable, so
+// the memo may PERSIST across thvm_lpo calls -- which is the whole point:
+// on a completion the same subterm pairs are compared millions of times.
+// Callers must invalidate when those invariants break: the ATP engine
+// calls this on every GC (cells move) and at thvm_atp_init (a new run may
+// reuse a static LpoConfig pointer with different precedence content).
+fn void thvm_lpo_invalidate(void) {
   if (++g_lpo_epoch == 0) {
     for (u32 i = 0; i < LPO_MEMO_SIZE; i++) g_lpo_memo[i].epoch = 0;
     g_lpo_epoch = 1;
+  }
+}
+
+// The ATP engine opts in to persistent memoization (and promises to
+// invalidate on GC).  Default off keeps thvm_lpo sound for any caller.
+fn void thvm_lpo_set_persist(u8 on) { g_lpo_persist = on ? 1u : 0u; }
+
+fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
+  if (g_lpo_persist) {
+    // Persist across calls; invalidate only on a config change (distinct
+    // precedence -> distinct verdicts) -- the caller handles cell moves.
+    if (cfg != g_lpo_last_cfg) { g_lpo_last_cfg = cfg; thvm_lpo_invalidate(); }
+  } else {
+    // Safe default: fresh memo every call.
+    thvm_lpo_invalidate();
   }
   if (lpo_eq(s, t)) return LPO_EQ;
   // Variable-set pretest (Waldmeister `LPOVortests`): a single

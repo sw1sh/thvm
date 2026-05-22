@@ -2775,6 +2775,12 @@ typedef struct {
 } LpoConfig;
 
 fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg);
+// Invalidate thvm_lpo's persistent (s,t)->verdict memo.  Call when term
+// cells move (GC) or the precedence changes (new run).
+fn void   thvm_lpo_invalidate(void);
+// Opt in to persistent LPO memoization (default off = fresh per call).
+// The caller then MUST invalidate on cell movement (the ATP does, on GC).
+fn void   thvm_lpo_set_persist(u8 on);
 
 // === rewrite/ ===
 // One-shot equational rewriter on TAG_CTR + TAG_FVR (stage 3 of
