@@ -680,3 +680,14 @@ $(BUILD)/bench_twee: tools/bench_twee.c $(SRC) | $(BUILD)
 bench-twee: $(BUILD)/bench_twee
 	$(BUILD)/bench_twee
 	@echo "Wrote build/bench-twee.csv"
+
+# === Flatterm inner-loop spike + A/B microbench ====================
+# Standalone measured spike (atp-wm-perstep): a purpose-built flatterm
+# core (match / rewrite-normalize / KBO over contiguous pre-order node
+# arrays, no IC traversal) A/B'd against thvm's IC inner loop on the REAL
+# harvested Sheffer / AndAssociativity rule set + subject corpus. Asserts
+# identical normal-form + KBO verdict on every input, reports IC/flat
+# wall-time ratio. Additive; not part of `make test`. Built with the same
+# ATP defines as the engine so the harvested rules match the live path.
+$(BIN)/bench_flatcore: tools/bench_flatcore.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
