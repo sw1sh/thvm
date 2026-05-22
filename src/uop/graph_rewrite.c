@@ -233,7 +233,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     // axis_type-stamping rule needs to rewrite.
 
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
       return uop_int_binary(op, srcs[0], srcs[1]);
 
     case UOP_IWHERE:

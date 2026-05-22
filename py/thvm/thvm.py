@@ -273,6 +273,8 @@ class _Constants:
     IMOD = _read_uint32_const("py_const_UOP_IMOD")
     ILT = _read_uint32_const("py_const_UOP_ILT")
     IAND = _read_uint32_const("py_const_UOP_IAND")
+    IOR = _read_uint32_const("py_const_UOP_IOR")
+    IXOR = _read_uint32_const("py_const_UOP_IXOR")
     # Reduce kinds
     REDUCE_SUM = _read_uint32_const("py_const_REDUCE_SUM")
     REDUCE_MAX = _read_uint32_const("py_const_REDUCE_MAX")

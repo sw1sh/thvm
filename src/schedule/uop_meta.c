@@ -41,7 +41,7 @@ fn u8 uop_arity(u8 op) {
     // to reach UOP_RANGE leaves nested inside production lifter
     // output (UOP_INDEX_E.addr -> IADD/IMUL chain -> UOP_RANGE).
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_INDEX_E:
       return 2;
     // Ternary symbolic ops.  IWHERE = [cond, then, else];

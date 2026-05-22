@@ -191,7 +191,7 @@ static void kvar_scan_rec(Term t, u32 *out_ids, u32 *n_out, u32 cap) {
       break;
     }
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: {
       kvar_scan_rec(heap_read(loc + 0), out_ids, n_out, cap);
       kvar_scan_rec(heap_read(loc + 1), out_ids, n_out, cap);

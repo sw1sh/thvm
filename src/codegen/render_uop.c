@@ -211,6 +211,8 @@ static const char *rmu_int_op_name(u32 op) {
     case UOP_IMOD: return "%";
     case UOP_ILT:  return "<";
     case UOP_IAND: return "&";
+    case UOP_IOR:  return "|";
+    case UOP_IXOR: return "^";
     default:       return "?";
   }
 }
@@ -258,7 +260,7 @@ static void rmu_emit_term(Term t, FILE *fp) {
     }
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
-    case UOP_IAND: {
+    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: {
       // Signed integer arithmetic.  RANGE loop vars are declared `uint`
       // (loop counters, always non-negative), but UOP_ISUB is a SIGNED
       // subtract (thvm.h:368) and may legitimately go negative -- e.g.
@@ -558,7 +560,7 @@ static void rmu_collect_ranges_rec_cap(Term t, Term *ranges,
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
@@ -626,7 +628,7 @@ static int rmu_term_contains_rec(Term t, Term needle, u32 depth) {
   u64 loc = term_val(t);
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1)
@@ -685,7 +687,7 @@ static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1)
@@ -727,7 +729,7 @@ static int rmu_term_has_reduce(Term t, u32 depth) {
   if (op == UOP_REDUCE) return 1;
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return rmu_term_has_reduce(heap_read(loc + 0), depth + 1)
@@ -778,7 +780,7 @@ static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
@@ -841,7 +843,7 @@ static void rmu_collect_reduces_with_simd(Term t, int parent_is_simd,
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
@@ -961,7 +963,7 @@ static void rmu_collect_ranges_rec_through_reduce_cap(
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_ranges_rec_through_reduce_cap(
@@ -1513,6 +1515,7 @@ static void rmu_collect_divmod_consts(Term t, u32 want_axis,
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_ILT: case UOP_IAND:
+    case UOP_IOR:  case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
@@ -3238,7 +3241,7 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
   // slots, never in header NUM slots.
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
@@ -3566,7 +3569,7 @@ static int rmu_dag_has_simd_reduce(Term t) {
       if ((u32)term_val(heap_read(loc + 1)) == UOP_OPT_SIMD_REDUCE) return 1;
       return rmu_dag_has_simd_reduce(heap_read(loc + 0));
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER:
       return rmu_dag_has_simd_reduce(heap_read(loc + 0))
@@ -3650,7 +3653,7 @@ static int rmu_dag_has_tc(Term t) {
       if ((u32)term_val(heap_read(loc + 1)) == UOP_OPT_TC) return 1;
       return rmu_dag_has_tc(heap_read(loc + 0));
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER:
       return rmu_dag_has_tc(heap_read(loc + 0))

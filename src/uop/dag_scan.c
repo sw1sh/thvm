@@ -62,7 +62,7 @@ int uop_dag_dtype_uniform(Term t, u32 dt) {
     // === integer-address arithmetic (skip; they're index-domain) ====
     case UOP_RANGE: case UOP_INVALID:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
       return 1;
     // === one-operand recursion ======================================
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
@@ -114,7 +114,7 @@ u32 uop_dag_reduce_axis_extent(Term t) {
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER: {
       u32 a = uop_dag_reduce_axis_extent(heap_read(loc + 0));
@@ -203,7 +203,7 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
     case UOP_BUFFER: case UOP_CONST:
     case UOP_RANGE: case UOP_INVALID:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
       // Leaves / index-domain: no-op.
       return;
     case UOP_CAST: case UOP_BITCAST:
@@ -1283,7 +1283,8 @@ static int udg_x_has_rq_divmod(Term t, u32 axis_r_q, int depth) {
   // Defensive: read 2 children.  Walking pure-leaf ops (CONST/RANGE)
   // already returned 0 above.
   if (op == UOP_IADD || op == UOP_IMUL || op == UOP_ISUB || op == UOP_IDIV
-      || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND) {
+      || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND
+      || op == UOP_IOR  || op == UOP_IXOR) {
     Term a = heap_read(term_val(t) + 0);
     Term b = heap_read(term_val(t) + 1);
     if (udg_x_has_rq_divmod(a, axis_r_q, depth + 1)) return 1;

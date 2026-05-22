@@ -375,6 +375,8 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_IMOD        31   // heap = [a, b]; signed modulo.
 #define UOP_ILT         32   // heap = [a, b]; less-than -> 0/1.
 #define UOP_IAND        33   // heap = [a, b]; bitwise AND (boolean conjunction on 0/1).
+#define UOP_IOR         41   // heap = [a, b]; bitwise OR.
+#define UOP_IXOR        42   // heap = [a, b]; bitwise XOR.
 #define UOP_IWHERE      34   // heap = [cond, then_v, else_v]; ternary select.
 #define UOP_INVALID     35   // heap = [NUM(0)]; sentinel for PAD masking.
                              //   `IWHERE(in_bounds, load(...), INVALID)` is
@@ -454,7 +456,8 @@ int             dtype_is_packed   (u32 dt);
 // onto the main heap at the same boundaries so materialize.c can read a
 // single source of truth.
 #define UOP_BUFFERIZE   40
-#define UOP_COUNT       41
+// 41, 42 = UOP_IOR / UOP_IXOR (declared in the Symbolic INDEX layer above).
+#define UOP_COUNT       43
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -1903,7 +1906,7 @@ fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsiz
 // Hash-cons via uop_mov_cache like the movement opcodes.
 fn Term uop_range    (u32 axis_id, u32 axis_type, u32 extent);
 fn Term uop_index_e  (Term buffer, Term addr);
-fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND
+fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND/IOR/IXOR
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
 

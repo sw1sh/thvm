@@ -71,7 +71,7 @@ static u32 rec_tc_count_distinct_ranges(Term t, u32 *seen, u32 cap,
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
       n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 0),
                                             seen, cap, n_seen, depth + 1);
       n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 1),
@@ -106,7 +106,7 @@ static int rec_tc_addr_has_divmod(Term t, int depth) {
   u64 loc = term_val(t);
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
-    case UOP_ILT:  case UOP_IAND:
+    case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
       if (rec_tc_addr_has_divmod(heap_read(loc + 0), depth + 1)) return 1;
       return rec_tc_addr_has_divmod(heap_read(loc + 1), depth + 1);
     case UOP_IWHERE:
@@ -136,7 +136,7 @@ static u32 rec_tc_find_range_extent(Term t, u32 want_axis_id, int depth) {
   // Recurse through known-arity-Term opcodes used in INDEX expressions.
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: {
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR: {
       u32 e = rec_tc_find_range_extent(heap_read(loc + 0), want_axis_id, depth + 1);
       if (e != 0) return e;
       return rec_tc_find_range_extent(heap_read(loc + 1), want_axis_id, depth + 1);

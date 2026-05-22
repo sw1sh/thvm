@@ -7,7 +7,7 @@
 // allocates result accumulators and writes the output buffer directly.
 //
 // Op coverage: UOP_BUFFER, UOP_INDEX_E, UOP_STORE, UOP_AFTER, UOP_RANGE,
-// UOP_OPT, UOP_CONST, UOP_IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND, UOP_IWHERE,
+// UOP_OPT, UOP_CONST, UOP_IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND/IOR/IXOR, UOP_IWHERE,
 // UOP_INVALID, UOP_ADD/MUL/CMPLT/CMPEQ/NEG/RECIP/EXP2/LOG2/SQRT,
 // UOP_CAST, UOP_BITCAST, UOP_REDUCE (SUM/MAX) -- the same set the
 // renderer emits.
@@ -247,6 +247,7 @@ static int uwalk_term_is_int(UWalkCtx *c, Term t) {
     case UOP_RANGE:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT: case UOP_IAND:
+    case UOP_IOR: case UOP_IXOR:
     case UOP_IWHERE: case UOP_INVALID:
       return 1;
     case UOP_CONST: {
@@ -434,6 +435,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       if (term_tag(cr) == TAG_UOP) {
         u8 cop = term_ext(cr);
         int_cond = (cop == UOP_ILT  || cop == UOP_IAND || cop == UOP_IADD
+                 || cop == UOP_IOR  || cop == UOP_IXOR
                  || cop == UOP_ISUB || cop == UOP_IMUL || cop == UOP_IDIV
                  || cop == UOP_IMOD || cop == UOP_IWHERE
                  || cop == UOP_INVALID || cop == UOP_RANGE
@@ -523,6 +525,10 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
                         <  uwalk_eval_int(c, heap_read(loc+1))) ? 1 : 0;
     case UOP_IAND: return uwalk_eval_int(c, heap_read(loc+0))
                         & uwalk_eval_int(c, heap_read(loc+1));
+    case UOP_IOR:  return uwalk_eval_int(c, heap_read(loc+0))
+                        | uwalk_eval_int(c, heap_read(loc+1));
+    case UOP_IXOR: return uwalk_eval_int(c, heap_read(loc+0))
+                        ^ uwalk_eval_int(c, heap_read(loc+1));
     case UOP_IWHERE: {
       i64 cond = uwalk_eval_int(c, heap_read(loc+0));
       return cond ? uwalk_eval_int(c, heap_read(loc+1))
@@ -647,7 +653,7 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       uwalk_collect_ranges(heap_read(loc + 0), ranges, n_out);
@@ -701,7 +707,7 @@ static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       uwalk_collect_reduces(heap_read(loc + 0), reduces, n_out);

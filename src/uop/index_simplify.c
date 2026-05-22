@@ -311,6 +311,8 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         return uop_iconst(av % bv);
       case UOP_ILT:  return uop_iconst(av < bv ? 1 : 0);
       case UOP_IAND: return uop_iconst(av & bv);
+      case UOP_IOR:  return uop_iconst(av | bv);
+      case UOP_IXOR: return uop_iconst(av ^ bv);
       default: break;
     }
   }
