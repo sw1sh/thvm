@@ -1028,6 +1028,76 @@ VerificationTest[
     TestID -> "ATP/method/automaxweight-tight-still-proves"
 ]
 
+(* --- UnfailingCP: both-faces superposition (completeness) stays sound *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "UnfailingCP" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/unfailingcp-verifies-sound"
+]
+
+(* --- RHSInterreduce: Waldmeister IR_InterreduktionRechts stays sound *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "RHSInterreduce" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/rhsinterreduce-verifies-sound"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "UnfailingCP" -> True,
+            "RHSInterreduce" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/unfailingcp-rhsinterreduce-combined-proves"
+]
+
+(* --- Method -> "Waldmeister": faithful default-strategy preset ----- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "Waldmeister"],
+    ProofObject,
+    TestID -> "ATP/method/waldmeister-preset-proves"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> "Waldmeister"];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/waldmeister-preset-verifies-sound"
+]
+
+(* --- CriticalPairWeight -> "Learned": ENIGMA-style scorer ---------- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Learned"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Learned-proves"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "CriticalPairWeight" -> "Learned"}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/cpweight-Learned-verifies-sound"
+]
+
 (* --- MaxSteps: a tight cap on a hard theorem fails; loose proves --- *)
 
 VerificationTest[
