@@ -3227,6 +3227,12 @@ typedef struct {
   // also rule-subsumed, a sound subset of the joinable drops.
   // Always 0 when the engine is built without -DATP_CP_CLASSIFY.
   u32  n_cps_dropped_classified;
+
+  // Count of rules whose RHS was right-reduced (composition) in place
+  // by thvm_atp_interreduce.  Diagnostic for the DISCOUNT-loop
+  // right-reduction lever.
+  u32  n_right_reduced;
+
   // Ground-joinability redundancy criterion (Martin-Nipkow / Twee CADE
   // 2021 sec 3.1; AHL 2003).  Ticked when a CP is provably ground-
   // joinable under EVERY total preorder of its variables (ordered set
@@ -3330,6 +3336,16 @@ typedef struct {
   // for runs whose caller will extract a ProofObject.
   u8   record_norm_steps;
 
+  // Right-reduction (composition) toggle for interreduction.  When
+  // set (default), thvm_atp_interreduce also rewrites a surviving
+  // rule's RHS to its normal form under the just-added rules
+  // (l -> r becomes l -> r' where r ->* r'), keeping RHSs canonical
+  // so the critical pairs born from them stay small.  This is the
+  // DISCOUNT-loop right-reduction step.  Defaults ON; can be
+  // disabled via thvm_atp_set_right_reduce for A/B measurement or
+  // if a proof-extraction regression is found.
+  u8   right_reduce;
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3417,6 +3433,7 @@ fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
 fn void      thvm_atp_set_auto_max_cp_weight(AtpState *s, u32 base);
 fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
+fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 
 // Set a wall-clock deadline.  `seconds_from_now` is a float duration
 // (e.g. 5.0 = 5 seconds); pass 0.0 to clear the deadline.  The
