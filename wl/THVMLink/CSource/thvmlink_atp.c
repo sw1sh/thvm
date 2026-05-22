@@ -376,6 +376,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   //   args[5] ordering  : 0 = KBO (default), 1 = LPO.
   //   args[6] auto_prec : 0 = identity precedence, 1 = Waldmeister-
   //                       style auto-precedence from axiom analysis.
+  //   args[17] precedence : explicit per-label precedence (Int64, 1).
+  //                       Length 0 = inactive (use identity / auto_prec).
+  //                       When non-empty, prec[label] gives the LPO/KBO
+  //                       precedence rank of that label (higher = greater),
+  //                       overriding both identity and auto_prec.  This is
+  //                       the Method "Precedence"/"SkolemHighest" suboption,
+  //                       mirroring Waldmeister's `p > q > nand` ORDERING.
   mint cp_weight = MArgument_getInteger(args[4]);
   mint ordering  = MArgument_getInteger(args[5]);
   mint auto_prec = MArgument_getInteger(args[6]);
@@ -423,6 +430,24 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     }
     atp_auto_precedence(ax_lhs, ax_rhs, n_ax_use,
                         (u32)max_label + 1, wl_precedence_p);
+  }
+  // Method "Precedence"/"SkolemHighest": an explicit per-label precedence
+  // array overrides identity / auto_prec.  args[17] is a label-indexed
+  // Int64 NumericArray; a 0-length array leaves the chosen default in
+  // place, so the engine is byte-identical unless precedence is supplied.
+  {
+    MTensor prec_t = MArgument_getMTensor(args[17]);
+    if (prec_t != NULL) {
+      mint prec_len = libData->MTensor_getFlattenedLength(prec_t);
+      if (prec_len > 0) {
+        const mint *prec_data = libData->MTensor_getIntegerData(prec_t);
+        u32 n_copy = (u32)prec_len <= (u32)max_label + 1 ? (u32)prec_len
+                                                         : (u32)max_label + 1;
+        for (u32 i = 0; i < n_copy; i++) {
+          wl_precedence_p[i] = (u32)prec_data[i];
+        }
+      }
+    }
   }
   static KboConfig wl_kbo_p;
   wl_kbo_p.weights    = wl_weights_p;

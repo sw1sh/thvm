@@ -909,6 +909,33 @@ VerificationTest[
     TestID -> "ATP/method/autoprec-False-proves"
 ]
 
+(* --- explicit "Precedence" / "SkolemHighest" reduction-ordering ----
+   precedence (Waldmeister's `p > q > nand` ORDERING block).  The
+   symbol list is highest-to-lowest; "SkolemHighest" ranks the goal's
+   ground (skolemized) constants above the operators.  Both prove +
+   verify InverseOfInverse, and the proof matches the AutoPrecedence
+   path -- the option only takes effect when supplied (default engine
+   byte-identical, asserted by the unchanged tests above + test_atp). *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "Ordering" -> "LPO",
+                "Precedence" -> {"OverBar", "CircleTimes", "1"}}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/precedence-explicit-verifies"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "Ordering" -> "LPO",
+            "SkolemHighest" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/precedence-skolemhighest-proves"
+]
+
 (* --- AxiomRelevance: None / Safe prove; mode is reported by --------
    TRelevantAxioms; Connected drops axioms (heuristic). *)
 
