@@ -18,11 +18,14 @@ from .dtypes import dtypes, DType
 from .device import Device
 from .context import Context
 from ._misc import Variable, TinyJit
+from .from_tinygrad import from_tinygrad
 
 __all__ = [
     # tinygrad-shaped surface
     "Tensor", "dtypes", "DType", "Device", "Context",
     "Variable", "TinyJit", "nn",
+    # cross-validation: ingest a tinygrad lazy UOp graph
+    "from_tinygrad",
     # bridge handles
     "Thvm", "Metal", "Cuda", "K", "Term", "DEFAULT_HEADER", "templates",
 ]
