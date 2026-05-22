@@ -2548,6 +2548,8 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
 // == 0), exactly like the indexed path.
 #include "../wmfpa/wmfpa.h"
 
+static u32 atp_pretty_term(Term t, char *buf, u32 cap);   // defined in 5.x
+
 // IC Term -> wmfpa flatterm boundary adapters.
 static int wf_eng_is_var(WfTermH t, u32 *id) {
   if (term_tag((Term)t) == TAG_FVR) { *id = term_ext((Term)t); return 1; }
@@ -2629,18 +2631,117 @@ static void wf_eng_cache_rebuild(AtpState *s) {
   s->wmfpa_built = s->n_rules;
 }
 
+// Incrementally bring the cached tree from `wmfpa_built` rules up to the
+// current `n_rules` by encoding and inserting ONLY the appended rules
+// [wmfpa_built, n_rules) -- O(sum of new-rule sizes), not O(R).  This is
+// the dominant completion mutation (atp_push_rule appends one rule per
+// step), so an O(rule) insert here is exactly what lets the per-op
+// normalize win flow through instead of being swamped by O(R) rebuilds.
+// Mirrors a loop of BO_ObjektEinfuegen over the new objects.  Returns 0
+// (signalling "fall back to a full rebuild") when the append would exceed
+// the cached buffer capacity -- the WfRule pointers index into lhs_buf/
+// rhs_buf, so a realloc there would dangle every existing rule pointer;
+// the full rebuild re-points them all.
+static int wf_eng_cache_append(AtpState *s) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  u32 nr = s->n_rules;
+  if (nr > wc->cap_rules || wc->cap_buf < WF_ENG_RULE_NODES) return 0;
+  for (u32 r = s->wmfpa_built; r < nr; r++) {
+    WfNode *lb = wc->lhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    WfNode *rb = wc->rhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    u32 ll = wf_encode((WfTermH)s->lhs[r], lb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    u32 rl = wf_encode((WfTermH)s->rhs[r], rb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    if (rl == 0u) ll = 0u;                  // over-deep RHS: drop the rule
+    wc->rules[r].lhs = lb; wc->rules[r].llen = ll;
+    wc->rules[r].rhs = rb; wc->rules[r].rlen = rl;
+    wc->tree.rules    = wc->rules;          // keep the alias live across grows
+    wc->tree.n_rules  = r + 1u;
+    wf_tree_insert(&wc->tree, r);           // BO_ObjektEinfuegen for rule r
+  }
+  s->wmfpa_built = nr;
+  return 1;
+}
+
+// Update the cached flat RHS of rule `r` in place after an interreduction
+// right-reduction edited s->rhs[r] (composition: l -> r becomes l -> r').
+// The DSBaum keys only on the LHS and rule indices are unchanged, so the
+// tree spine stays valid -- only the splice template the leaf points at
+// needs re-encoding.  This keeps the right-reduction path O(rule) instead
+// of forcing a full O(R) tree rebuild (right-reduction fires often on the
+// Mix workload, so a rebuild there reintroduces the very O(R^2) swamp this
+// package removes).  Returns 0 (caller marks wmfpa_dirty for a rebuild) if
+// the cache is absent, not yet built up to r, or the new RHS overflows the
+// per-rule buffer -- correctness via rebuild over an in-place fast path.
+static int wf_eng_cache_update_rhs(AtpState *s, u32 r) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  if (wc == NULL || r >= s->wmfpa_built || wc->cap_buf < WF_ENG_RULE_NODES) {
+    return 0;
+  }
+  WfNode *rb = wc->rhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+  u32 rl = wf_encode((WfTermH)s->rhs[r], rb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+  if (rl == 0u) return 0;       // over-deep new RHS: rebuild drops the rule
+  wc->rules[r].rhs = rb; wc->rules[r].rlen = rl;
+  return 1;
+}
+
 #define WF_ENG_SUBJ_CAP 8192u
 
+// Gated correctness probe: assert the incrementally-maintained tree is
+// byte-identical to a tree freshly rebuilt from the current rule set, by
+// comparing the lowest-index applicable rule at every preorder position of
+// the subject `a` (the exact retrieval wf_step consumes).  ON only when
+// THVM_ATP_WMFPA_CHECK is set non-"0".  Aborts on the first divergence so a
+// stale/inconsistent tree (== a wrong normal form == a silent soundness
+// bug) is caught at the mutation that introduced it, not laundered into a
+// proof.
+static void wf_eng_check_incremental(AtpState *s, const WfNode *a, u32 alen) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  // Build a throwaway reference tree over the SAME WfRule array (same
+  // lhs/rhs buffers, same indices) -- only the node/rec spine differs.
+  WfTree ref;
+  wf_tree_init(&ref);
+  wf_tree_build(&ref, wc->rules, s->n_rules);
+  for (u32 p = 0; p < alen; p++) {
+    if (WF_IS_VAR(a[p].sym)) continue;
+    WfBind bi[WF_MAX_VARS], br[WF_MAX_VARS];
+    u32 ri = WF_NIL, rr = WF_NIL;
+    int ie = 0, ir = 0;
+    u32 hi = wf_descend(&wc->tree, a, p, bi, &ri, &ie) ? ri : WF_NIL;
+    u32 hr = wf_descend(&ref,      a, p, br, &rr, &ir) ? rr : WF_NIL;
+    // An inexact descent on either tree makes the comparison meaningless
+    // (both fall back to the indexed path in the real loop); skip it.
+    if (ie || ir) continue;
+    if (hi != hr) {
+      fprintf(stderr,
+              "WMFPA INCREMENTAL-TREE MISMATCH at pos %u: incremental rule "
+              "%u vs rebuilt %u (n_rules=%u, built=%u)\n",
+              p, hi, hr, s->n_rules, s->wmfpa_built);
+      abort();
+    }
+  }
+  wf_tree_free(&ref);
+}
+
 static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
-  // Rebuild on any R mutation: n_rules change OR rule_index_dirty (set
-  // when a rule's lhs/rhs is edited in place, e.g. interreduction --
-  // which need not change n_rules).  On the gated path the indexed
-  // rebuild that normally clears the dirty flag never runs, so we clear
-  // it here.  Mirrors atp_rewrite_normalize_indexed's invalidation.
-  if (s->wmfpa_tree == NULL || s->wmfpa_built != s->n_rules ||
-      s->wmfpa_dirty) {
+  // Bring the cached tree in sync with the current rule set.  The common
+  // completion mutation is a single rule APPEND (atp_push_rule); maintain
+  // the tree incrementally for that -- encode + BO_ObjektEinfuegen the new
+  // rules into the existing spine in O(rule), the win this package unlocks.
+  // Fall back to a full rebuild for every case the incremental path cannot
+  // safely handle (correctness over speed, never the reverse):
+  //   - wmfpa_dirty: an in-place rule edit (interreduction right-reduction)
+  //     or an array compaction (a dropped rule renumbers every later index,
+  //     which the index-keyed leaf recs and the lowest-index NF policy
+  //     cannot absorb in place) -- those sites set wmfpa_dirty.
+  //   - wmfpa_built > n_rules: rules vanished without the dirty bit (defensive).
+  //   - an append that would outgrow the cached buffers (would dangle the
+  //     WfRule pointers): wf_eng_cache_append returns 0 and we rebuild.
+  if (s->wmfpa_tree == NULL || s->wmfpa_dirty ||
+      s->wmfpa_built > s->n_rules) {
     wf_eng_cache_rebuild(s);
     s->wmfpa_dirty = 0u;
+  } else if (s->wmfpa_built < s->n_rules) {
+    if (!wf_eng_cache_append(s)) wf_eng_cache_rebuild(s);
   }
   WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
   static WfNode a[WF_ENG_SUBJ_CAP], b[WF_ENG_SUBJ_CAP];
@@ -2649,6 +2750,7 @@ static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
     // over-deep subject: fall back to the indexed path (correctness > speed).
     return atp_rewrite_normalize_indexed(s, t, step_cap);
   }
+  if (s->wmfpa_check) wf_eng_check_incremental(s, a, alen);
   WfNode *nfp = NULL;
   int overflow = 0;
   wf_normalize(&wc->tree, a, alen, b, WF_ENG_SUBJ_CAP, step_cap, &nfp,
@@ -2662,7 +2764,29 @@ static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
     return atp_rewrite_normalize_indexed(s, partial, step_cap);
   }
   u32 p = 0u;
-  return wf_eng_decode_rec(nfp, &p);
+  Term got = wf_eng_decode_rec(nfp, &p);
+  if (s->wmfpa_check) {
+    // Live NF differential against the ground-truth linear normalizer
+    // (repeated thvm_rewrite_step -- leftmost-outermost, lowest-index rule,
+    // the definition of the IC normal form).  The WM-FPA path is also
+    // leftmost-outermost from scratch, so it must equal it on every
+    // subject; a divergence is the silent soundness bug this probe exists
+    // to catch.  NB: this deliberately does NOT compare against the indexed
+    // path -- that path's prev_redex resume can return a DIFFERENT (under-
+    // reduced) reduct than a full re-scan on a non-confluent (mid-
+    // completion) R, so it is not a sound reference for the true NF.
+    Term lin = thvm_rewrite_normalize(t, s->lhs, s->rhs, s->n_rules, step_cap);
+    if (!kbo_eq(got, lin)) {
+      char ib[4096], gb[4096], lb[4096];
+      atp_pretty_term(t, ib, sizeof ib);
+      atp_pretty_term(got, gb, sizeof gb);
+      atp_pretty_term(lin, lb, sizeof lb);
+      fprintf(stderr, "WMFPA NF MISMATCH vs linear (n_rules=%u)\n in=%s\n"
+              " wmfpa=%s\n linear=%s\n", s->n_rules, ib, gb, lb);
+      abort();
+    }
+  }
+  return got;
 }
 
 // Rule-index retrieval stats accessor (the Sheffer-pruning measurement).
@@ -3408,6 +3532,8 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   {
     const char *wf = getenv("THVM_ATP_WMFPA");
     s->use_wmfpa = (wf != NULL && wf[0] != '\0' && wf[0] != '0') ? 1u : 0u;
+    const char *wc = getenv("THVM_ATP_WMFPA_CHECK");
+    s->wmfpa_check = (wc != NULL && wc[0] != '\0' && wc[0] != '0') ? 1u : 0u;
   }
   // Incremental resume for the flatterm unorientable scan.  ON by default
   // (mirrors the orientable `clean_before` resume); cleared only by setting
@@ -6979,6 +7105,15 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             s->n_right_reduced++;
             // RHS does not feed the LHS discrimination tree, so the
             // rule-LHS index stays valid; no dirty flag needed.
+#ifdef ATP_RULE_INDEX
+            // The WM-FPA cache, by contrast, holds a flat COPY of each
+            // rule's RHS (wf_step reads it for the splice), so an in-place
+            // RHS edit must update it -- otherwise the cached tree would
+            // splice the stale, larger RHS and diverge from the IC normal
+            // form.  Re-encode just this rule's RHS in O(rule); only when
+            // that in-place update can't be done do we force a full rebuild.
+            if (!wf_eng_cache_update_rhs(s, i)) s->wmfpa_dirty = 1u;
+#endif
           }
         }
       }

@@ -228,6 +228,42 @@ static void wf_tree_insert(WfTree *ix, uint32_t rule) {
   ix->nodes[node].rule_head = r;
 }
 
+// Remove the leaf record for `rule` from the tree without touching the
+// flat lhs/rhs buffers it points at.  Mirrors BO_ObjektEntfernen
+// (DSBaumOperationen.c:991): WM stores rules as a list hung at a Blatt and
+// deletion just unlinks one Regel from that list, leaving the tree spine
+// intact unless the leaf empties.  Here the leaf is reached by descending
+// the SAME pre-order edge string the insert used (so we find the exact
+// rule-list head), then the matching WfTreeRec is spliced out.  The freed
+// node/rec slots are NOT reclaimed (the pool only grows); an emptied leaf
+// path is harmless to retrieval -- wf_descend simply finds no rec there,
+// exactly as a WM Blatt with an empty Regeln list yields no match.
+// Returns 1 if the rule was found and removed, 0 otherwise.
+static int wf_tree_remove(WfTree *ix, uint32_t rule) {
+  const WfNode *pat = ix->rules[rule].lhs;
+  uint32_t plen = ix->rules[rule].llen;
+  if (plen == 0u) return 0;       // never inserted (over-deep): nothing to do
+  uint32_t node = ix->root;
+  for (uint32_t i = 0; i < plen; i++) {
+    uint32_t c = ix->nodes[node].child;
+    uint32_t want = wf_pat_edge(pat[i].sym);
+    while (c != WF_NIL && ix->nodes[c].sym != want) c = ix->nodes[c].sibling;
+    if (c == WF_NIL) return 0;    // path absent: rule not in tree
+    node = c;
+  }
+  uint32_t r = ix->nodes[node].rule_head, prev = WF_NIL;
+  while (r != WF_NIL) {
+    if (ix->recs[r].rule == rule) {
+      if (prev == WF_NIL) ix->nodes[node].rule_head = ix->recs[r].next;
+      else                ix->recs[prev].next = ix->recs[r].next;
+      return 1;
+    }
+    prev = r;
+    r = ix->recs[r].next;
+  }
+  return 0;
+}
+
 static void wf_tree_init(WfTree *ix) {
   memset(ix, 0, sizeof *ix);
   ix->root = WF_NIL;
@@ -318,14 +354,24 @@ static int wf_leaf_confirm(const WfNode *pat, uint32_t plen,
 // leaf disambiguates.  We do NOT early-return at the first matching leaf:
 // a lower-index rule may live on a different (e.g. more CTR-specific)
 // path that DFS reaches later.
+// `*inexact` is set to 1 iff the backtrack stack overflowed -- a star
+// alternative could not be recorded, so the descent may have MISSED the
+// lowest-index (or any) applicable rule.  A missed redex would silently
+// return a non-normal term as a normal form (the engine then orients that
+// over-large term into a rule, whose deep critical pairs overflow the KBO
+// weight recursion).  The caller MUST treat an inexact result as "cannot
+// use the fast path here" and fall back to the unbounded indexed
+// normalize, never as "no redex".
+#define WF_BT_CAP 4096u
 static uint32_t wf_descend(WfTree *ix, const WfNode *subj, uint32_t sp,
-                           WfBind *bind, uint32_t *out_rule) {
+                           WfBind *bind, uint32_t *out_rule, int *inexact) {
   ix->q_queries++;
-  WfBT stack[256];
+  WfBT stack[WF_BT_CAP];
   uint32_t top = 0u;
   uint32_t node = ix->root;
   uint32_t si   = sp;
   uint32_t best = WF_NIL;
+  *inexact = 0;
 
   for (;;) {
     ix->q_nodevisits++;
@@ -355,7 +401,8 @@ static uint32_t wf_descend(WfTree *ix, const WfNode *subj, uint32_t sp,
         else if (!WF_IS_VAR(subj_sym) && es == subj_sym) ctr_child = c;
       }
       if (ctr_child != WF_NIL) {
-        if (star_child != WF_NIL && top < 256u) {
+        if (star_child != WF_NIL) {
+          if (top >= WF_BT_CAP) { *inexact = 1; return 0u; }
           stack[top].node = star_child;
           stack[top].sp = si;
           top++;
@@ -449,14 +496,20 @@ static uint32_t wf_subst_len(const WfNode *rhs, uint32_t rlen,
 }
 
 // Returns 1 on a fired rewrite, 0 on normal form, 2 on arena overflow
-// (the rewritten term would exceed `out_cap`; caller must fall back).
+// (the rewritten term would exceed `out_cap`; caller must fall back), 3 on
+// an inexact descent (backtrack-stack overflow: the tree may have missed a
+// redex, so the caller must fall back rather than trust this as a normal
+// form).
 static int wf_step(WfTree *ix, const WfNode *subj, uint32_t slen,
                    WfNode *out, uint32_t out_cap, uint32_t *outlen) {
   for (uint32_t p = 0; p < slen; p++) {
     if (WF_IS_VAR(subj[p].sym)) continue;
     WfBind bind[WF_MAX_VARS];
     uint32_t rule;
-    if (wf_descend(ix, subj, p, bind, &rule)) {
+    int inexact = 0;
+    int hit = wf_descend(ix, subj, p, bind, &rule, &inexact);
+    if (inexact) return 3;
+    if (hit) {
       uint32_t skip = subj[p].size;
       uint32_t sublen = wf_subst_len(ix->rules[rule].rhs,
                                      ix->rules[rule].rlen, bind);
@@ -488,7 +541,12 @@ static uint32_t wf_normalize(WfTree *ix, WfNode *a, uint32_t alen,
     uint32_t nlen = 0u;
     int st = wf_step(ix, cur, alen, nxt, cap, &nlen);
     if (st == 0) { *result = cur; return alen; }
-    if (st == 2) { *result = cur; *overflow = 1; return alen; }
+    // st 2 (arena overflow) and st 3 (inexact descent: a backtrack-stack
+    // overflow may have missed a redex) both mean "this fast path cannot
+    // be trusted here": return the current partial term and signal the
+    // caller to finish on the unbounded indexed normalize.  Treating an
+    // inexact result as a normal form would orient an under-reduced term.
+    if (st == 2 || st == 3) { *result = cur; *overflow = 1; return alen; }
     WfNode *tmp = cur; cur = nxt; nxt = tmp;
     alen = nlen;
   }

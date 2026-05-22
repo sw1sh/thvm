@@ -3223,6 +3223,11 @@ typedef struct {
   // n_rules).  A private bit avoids fighting the indexed path over the
   // shared rule_index_dirty clear.
   u8                   wmfpa_dirty;
+  // Gated correctness probe: when set (THVM_ATP_WMFPA_CHECK!=0) every
+  // gated normalize first asserts the incrementally-maintained tree returns
+  // the same lowest-index rule at every subject position as a tree freshly
+  // rebuilt from the current rule set, aborting on the first divergence.
+  u8                   wmfpa_check;
   // Incremental-resume watermark for the flatterm unorientable preorder
   // scan (atp_ft_unorient_step).  ON by default: the scan resumes past the
   // prefix proven clean since the last scan instead of restarting from
