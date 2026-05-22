@@ -699,3 +699,10 @@ bench-twee: $(BUILD)/bench_twee
 # ATP defines as the engine so the harvested rules match the live path.
 $(BIN)/bench_flatcore: tools/bench_flatcore.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
+
+# WM-FPA microbench: the faithful Waldmeister flatterm + discrimination-
+# tree (DSBaum) + NormalformInnermost substrate (src/wmfpa/wmfpa.h) A/B'd
+# against thvm's IC normalize on the REAL harvested rule set, at several
+# |R| sizes.  Asserts identical normal form on every subject. Additive.
+$(BIN)/bench_wmfpa: tools/bench_wmfpa.c src/wmfpa/wmfpa.h $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)

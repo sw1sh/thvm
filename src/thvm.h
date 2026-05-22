@@ -3204,6 +3204,25 @@ typedef struct {
   // THVM_ATP_FLATTERM=1 at init, or via thvm_atp_set_use_flatterm.  Same
   // normal forms as the tree path (asserted by ATP_FLATTERM_DIFF).
   u8                   use_flatterm;
+  // Opt-in faithful Waldmeister-FPA normalize path (src/wmfpa/wmfpa.h:
+  // flatterm rep + DSBaum discrimination tree + NormalformInnermost).
+  // OFF by default (THVM_ATP_WMFPA=1 to enable); when set, the orientable
+  // normalize fixpoint encodes the subject to a flatterm once, retrieves
+  // redexes by descending a discrimination tree built from s->lhs[], and
+  // decodes back -- byte-identical normal form to the IC path (asserted
+  // by the bench differential and the in-engine self-check).
+  u8                   use_wmfpa;
+  // Cached WM-FPA discrimination tree (opaque; void* to keep wmfpa.h out
+  // of the public header) and the R size it reflects.  Rebuilt lazily
+  // when n_rules changes, like rule_index.  Only touched on the gated
+  // path (use_wmfpa); NULL otherwise.
+  void                *wmfpa_tree;
+  u32                  wmfpa_built;
+  // Private staleness bit for the WM-FPA tree, set at the same sites that
+  // set rule_index_dirty (an in-place rule edit that need not change
+  // n_rules).  A private bit avoids fighting the indexed path over the
+  // shared rule_index_dirty clear.
+  u8                   wmfpa_dirty;
   // Incremental-resume watermark for the flatterm unorientable preorder
   // scan (atp_ft_unorient_step).  ON by default: the scan resumes past the
   // prefix proven clean since the last scan instead of restarting from

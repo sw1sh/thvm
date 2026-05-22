@@ -2536,6 +2536,135 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   return flattened ? atp_ri_build(flat, subsz, flatsym, 0u) : t;
 }
 
+// === Faithful Waldmeister-FPA normalize path (gated, default OFF) =====
+//
+// Wires src/wmfpa/wmfpa.h (flatterm rep + DSBaum discrimination tree +
+// NormalformInnermost retrieval) into the orientable normalize fixpoint
+// behind s->use_wmfpa.  The subject is encoded to a flatterm once, the
+// redex-retrieving tree is built from s->lhs[] (orientable rules) and
+// cached on AtpState, and the normal form is decoded back.  Byte-
+// identical to atp_rewrite_normalize_indexed (asserted by the bench
+// differential).  Used only when EVERY rule is orientable (n_unorient
+// == 0), exactly like the indexed path.
+#include "../wmfpa/wmfpa.h"
+
+// IC Term -> wmfpa flatterm boundary adapters.
+static int wf_eng_is_var(WfTermH t, u32 *id) {
+  if (term_tag((Term)t) == TAG_FVR) { *id = term_ext((Term)t); return 1; }
+  return 0;
+}
+static u32     wf_eng_ctr_label(WfTermH t) { return term_ext((Term)t); }
+static u32     wf_eng_ctr_arity(WfTermH t) { return term_ctr_n((Term)t); }
+static WfTermH wf_eng_ctr_child(WfTermH t, u32 i) {
+  return (WfTermH)term_ctr_at((Term)t, i);
+}
+static const WfEnc g_wf_eng_enc = {
+  wf_eng_is_var, wf_eng_ctr_label, wf_eng_ctr_arity, wf_eng_ctr_child
+};
+
+// Decode a flatterm subtree rooted at `p` back to an IC Term.
+static Term wf_eng_decode_rec(const WfNode *a, u32 *p) {
+  u32 self = (*p)++;
+  if (WF_IS_VAR(a[self].sym)) return term_new_fvr(WF_VAR_ID(a[self].sym));
+  u32 n = a[self].arity;
+  if (n == 0u) { Term none[1]; return term_new_ctr(a[self].sym, none, 0); }
+  Term kids[REWRITE_MAX_ARITY];
+  for (u32 i = 0; i < n; i++) kids[i] = wf_eng_decode_rec(a, p);
+  return term_new_ctr(a[self].sym, kids, n);
+}
+
+// Per-rule flat-buffer storage for the cached tree.  Rebuilt whenever R
+// changes; bounded by the live orientable rule count.
+typedef struct {
+  WfTree   tree;
+  WfNode  *lhs_buf;    // packed flat LHS arenas
+  WfNode  *rhs_buf;    // packed flat RHS arenas
+  WfRule  *rules;
+  u32      cap_rules;
+  u32      cap_buf;    // node capacity of each of lhs_buf / rhs_buf
+} WfEngCache;
+
+#define WF_ENG_RULE_NODES 1024u    // per-side flat node cap (rule sides
+                                   // are small; a Sheffer LHS is < 64)
+
+static void wf_eng_cache_rebuild(AtpState *s) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  if (wc == NULL) {
+    wc = (WfEngCache *)calloc(1, sizeof(WfEngCache));
+    s->wmfpa_tree = wc;
+  } else {
+    wf_tree_free(&wc->tree);
+  }
+  u32 nr = s->n_rules;
+  if (nr > wc->cap_rules) {
+    wc->cap_rules = nr;
+    wc->rules   = (WfRule *)realloc(wc->rules, nr * sizeof(WfRule));
+    wc->lhs_buf = (WfNode *)realloc(wc->lhs_buf,
+                                    (size_t)nr * WF_ENG_RULE_NODES * sizeof(WfNode));
+    wc->rhs_buf = (WfNode *)realloc(wc->rhs_buf,
+                                    (size_t)nr * WF_ENG_RULE_NODES * sizeof(WfNode));
+    wc->cap_buf = WF_ENG_RULE_NODES;
+  }
+  // Include EVERY rule in [0, n_rules), exactly as the indexed path
+  // (atp_ri_rebuild) does: this path engages only when n_unorient == 0,
+  // so the caller already guarantees R is orientable.  Filtering on
+  // r_orient[] here would silently drop rules a caller set directly
+  // (tests set s->lhs[i] + s->n_rules without r_orient[]), giving a
+  // wrong -- too-large -- normal form.  The WfRule array index IS the
+  // rule index (the tree's lowest-index-rule policy depends on it), so
+  // keep a 1:1 mapping: an over-deep rule side gets llen 0 and simply
+  // never inserts (absent from the tree), the same as the indexed path
+  // which cannot flatten it either.
+  for (u32 r = 0; r < nr; r++) {
+    WfNode *lb = wc->lhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    WfNode *rb = wc->rhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    u32 ll = wf_encode((WfTermH)s->lhs[r], lb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    u32 rl = wf_encode((WfTermH)s->rhs[r], rb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    if (rl == 0u) ll = 0u;                  // over-deep RHS: drop the rule
+    wc->rules[r].lhs = lb; wc->rules[r].llen = ll;
+    wc->rules[r].rhs = rb; wc->rules[r].rlen = rl;
+  }
+  wf_tree_init(&wc->tree);
+  wf_tree_build(&wc->tree, wc->rules, nr);
+  s->wmfpa_built = s->n_rules;
+}
+
+#define WF_ENG_SUBJ_CAP 8192u
+
+static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
+  // Rebuild on any R mutation: n_rules change OR rule_index_dirty (set
+  // when a rule's lhs/rhs is edited in place, e.g. interreduction --
+  // which need not change n_rules).  On the gated path the indexed
+  // rebuild that normally clears the dirty flag never runs, so we clear
+  // it here.  Mirrors atp_rewrite_normalize_indexed's invalidation.
+  if (s->wmfpa_tree == NULL || s->wmfpa_built != s->n_rules ||
+      s->wmfpa_dirty) {
+    wf_eng_cache_rebuild(s);
+    s->wmfpa_dirty = 0u;
+  }
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  static WfNode a[WF_ENG_SUBJ_CAP], b[WF_ENG_SUBJ_CAP];
+  u32 alen = wf_encode((WfTermH)t, a, WF_ENG_SUBJ_CAP, &g_wf_eng_enc);
+  if (alen == 0u) {
+    // over-deep subject: fall back to the indexed path (correctness > speed).
+    return atp_rewrite_normalize_indexed(s, t, step_cap);
+  }
+  WfNode *nfp = NULL;
+  int overflow = 0;
+  wf_normalize(&wc->tree, a, alen, b, WF_ENG_SUBJ_CAP, step_cap, &nfp,
+               &overflow);
+  if (overflow) {
+    // A rewrite would grow the subject past the flat arena: decode the
+    // partial form and finish on the unbounded indexed path (correctness
+    // over speed; rare on the AndAssociativity workload).
+    u32 pp = 0u;
+    Term partial = wf_eng_decode_rec(nfp, &pp);
+    return atp_rewrite_normalize_indexed(s, partial, step_cap);
+  }
+  u32 p = 0u;
+  return wf_eng_decode_rec(nfp, &p);
+}
+
 // Rule-index retrieval stats accessor (the Sheffer-pruning measurement).
 // `queries` is the number of atp_ri_query_pos calls; `candidates` the
 // leaf records reached; `matchcalls` the thvm_match calls those records
@@ -3258,7 +3387,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   s->unorient_index   = NULL;     // lazily built on the flatterm path
   s->cp_index         = NULL;     // lazily built on the first indexed CP gen
   s->cp_subindex      = NULL;     // companion subterm index (old i x new j)
-  s->rule_index_dirty = 1u;
+  s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
   // Opt-in CP-generation overlap-partner index.  OFF unless
   // THVM_ATP_CP_INDEX is set non-"0"; the default engine scans all
   // n_rules per new rule (byte-identical CP set either way).
@@ -3272,6 +3401,13 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   {
     const char *ft = getenv("THVM_ATP_FLATTERM");
     s->use_flatterm = (ft != NULL && ft[0] != '\0' && ft[0] != '0') ? 1u : 0u;
+  }
+  // Opt-in faithful Waldmeister-FPA normalize path.  OFF unless
+  // THVM_ATP_WMFPA is set to a non-"0" value -- default stays byte-
+  // identical to the discrimination-tree indexed path.
+  {
+    const char *wf = getenv("THVM_ATP_WMFPA");
+    s->use_wmfpa = (wf != NULL && wf[0] != '\0' && wf[0] != '0') ? 1u : 0u;
   }
   // Incremental resume for the flatterm unorientable scan.  ON by default
   // (mirrors the orientable `clean_before` resume); cleared only by setting
@@ -3331,6 +3467,13 @@ fn void thvm_atp_free(AtpState *s) {
   atp_ri_free(s->unorient_index);
   atp_ri_free(s->cp_index);
   atp_ri_free(s->cp_subindex);
+  if (s->wmfpa_tree != NULL) {
+    WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+    wf_tree_free(&wc->tree);
+    free(wc->rules); free(wc->lhs_buf); free(wc->rhs_buf);
+    free(wc);
+    s->wmfpa_tree = NULL;
+  }
 #endif
 #ifdef ATP_MNF
   mnf_destroy(s->mnf);
@@ -3936,6 +4079,9 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
   // indexed path the moment R is orientable again.
   if (lhs == s->lhs && rhs == s->rhs && n_rules == s->n_rules) {
     if (s->n_unorient == 0u) {
+      // Gated faithful WM-FPA path (flatterm + DSBaum + NormalformInner-
+      // most).  Byte-identical NF to the indexed path; OFF by default.
+      if (s->use_wmfpa) return atp_rewrite_normalize_wmfpa(s, t, step_cap);
       return atp_rewrite_normalize_indexed(s, t, step_cap);
     }
     // Opt-in flatterm fast-path: keep the subject flat across both the
@@ -4759,7 +4905,7 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   }
 #ifdef ATP_RULE_INDEX
   // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.
-  s->rule_index_dirty = 1u;
+  s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
   return 1;
 }
@@ -6764,7 +6910,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // 7e lever 2: a rule was dropped and the array compacted -- the
       // rule-LHS index's index->LHS mapping is stale even if a later
       // re-add restores n_rules.  Force a rebuild on the next query.
-      s->rule_index_dirty = 1u;
+      s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
       dropped++;
       // Don't increment i; the next older rule shifted down to slot i.
@@ -6881,7 +7027,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         }
         s->n_rules--;
 #ifdef ATP_RULE_INDEX
-        s->rule_index_dirty = 1u;
+        s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
         dropped++;
         // The next older rule shifted down to slot j; don't advance.
