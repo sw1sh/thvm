@@ -1821,12 +1821,19 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
 atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
     Block[{o = Association[{subopts}], merged},
+        (* Waldmeister's Orkus default for an unrecognized (single-
+           operator nand) problem is StdS = kbo(std), itl(mi), zb(mnf)
+           (Sinai.h:109,131): KBO ordering, the interleaved CPdimension
+           (itl(mi) -> SelectionRatio 51), the DEFAULT weight (StdS has
+           no cph(...) -- so the bare size/Add measure, NOT Mix/Gt), and
+           MNF goal-direction (zb(mnf) -> mnf=1, the GoalDirected front
+           search).  RHSInterreduce + UnfailingCP are part of faithful
+           unfailing completion.  StdS has no gj(), so GroundJoin is off. *)
         merged = Join[<|
-            "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
+            "CriticalPairWeight" -> "Add", "Ordering" -> "KBO",
             "AutoPrecedence" -> True, "SelectionRatio" -> 51,
-            "RHSInterreduce" -> True, "GroundJoin" -> True,
-            "UnfailingCP" -> True|>, o];
-        atpParseCompletionOpts[Normal[merged], 0]
+            "RHSInterreduce" -> True, "UnfailingCP" -> True|>, o];
+        atpParseCompletionOpts[Normal[merged], 1]
     ];
 
 atpParseMethod[m_] := (
