@@ -520,6 +520,7 @@ static u32 bufferize_metal_tile_fanin_cap(void) {
 
 static int bufferize_fanin_split_child_op(u8 op) {
   return uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
+      || uop_is_ternary_elementwise(op)
       || op == UOP_CAST    || op == UOP_BITCAST
       || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
       || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;

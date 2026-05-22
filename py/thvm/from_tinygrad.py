@@ -46,6 +46,7 @@ from .thvm import (
     _uop_cast,
     _uop_expand,
     _uop_flip,
+    _uop_iwhere,
     _uop_pad,
     _uop_permute,
     _uop_reduce,
@@ -71,6 +72,11 @@ def _binary(opcode: int, a: int, b: int) -> int:
                            _ct.c_uint64(int(a)), _ct.c_uint64(int(b))))
 
 
+def _iwhere(cond: int, a: int, b: int) -> int:
+    return int(_uop_iwhere(_ct.c_uint64(int(cond)),
+                           _ct.c_uint64(int(a)), _ct.c_uint64(int(b))))
+
+
 def _unary(opcode: int, src: int) -> int:
     return int(_uop_unary(_ct.c_uint32(int(opcode)), _ct.c_uint64(int(src))))
 
@@ -85,19 +91,7 @@ def _cast(src: int, dtype_id: int) -> int:
 
 
 def _fconst(value: float) -> int:
-    v = float(value)
-    # thvm has no float WHERE/MAX -- tinygrad's WHERE lowers to the
-    # arithmetic select cond*a + (1-cond)*b, where 0 * (+/-inf) = NaN.
-    # tinygrad uses +/-inf only as a masking sentinel (e.g. max_pool2d
-    # masks out-of-window elements with -inf before REDUCE_MAX), so
-    # clamping to the f32 extremum keeps the select finite and the
-    # downstream max/min identical (a real value always beats +/-3.4e38).
-    F32_MAX = 3.4028234663852886e38
-    if v == float("inf"):
-        v = F32_MAX
-    elif v == float("-inf"):
-        v = -F32_MAX
-    return int(_term_fconst(_ct.c_float(v)))
+    return int(_term_fconst(_ct.c_float(float(value))))
 
 
 def _iconst(value: int) -> int:
@@ -334,16 +328,15 @@ def _emit(u, memo: dict[int, int]) -> int:
         memo[key] = term
         return term
 
-    # ---- ternary: WHERE(cond, a, b) -----------------------------------
+    # ---- ternary: WHERE(cond, a, b) -> thvm IWHERE (true select) ------
+    # IWHERE renders/realizes as `cond ? a : b`, correct for non-finite
+    # branches (tinygrad max_pool2d masks with -inf; an arithmetic select
+    # cond*a+(1-cond)*b would hit 0*-inf=NaN).
     if op == Ops.WHERE:
-        cond = _emit(u.src[0], memo)   # 0/1 mask (CMP result)
+        cond = _emit(u.src[0], memo)
         a = _emit(u.src[1], memo)
         b = _emit(u.src[2], memo)
-        # cond*a + (1-cond)*b
-        one = _fconst(1.0)
-        not_cond = _binary(K.ADD, one, _unary(K.NEG, cond))
-        term = _binary(K.ADD, _binary(K.MUL, cond, a),
-                       _binary(K.MUL, not_cond, b))
+        term = _iwhere(cond, a, b)
         memo[key] = term
         return term
 

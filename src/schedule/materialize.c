@@ -3103,6 +3103,19 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     return VISIT_OK;
   }
 
+  if (uop_is_ternary_elementwise(op)) {
+    // IWHERE(cond, then, else): float ternary select.  Visit all three
+    // value srcs (the renderer emits `cond ? then : else`).
+    u32 ci = visit(heap_read(loc + 0), ke, root_loc, memo);
+    if (ci == VISIT_BAIL) return VISIT_BAIL;
+    u32 ti = visit(heap_read(loc + 1), ke, root_loc, memo);
+    if (ti == VISIT_BAIL) return VISIT_BAIL;
+    u32 ei = visit(heap_read(loc + 2), ke, root_loc, memo);
+    if (ei == VISIT_BAIL) return VISIT_BAIL;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
+  }
+
   // GRAD is a stop point in materialize -- the architecture is
   // wnf-fires-grad + materialize-compiles-uops, with thvm_realize
   // looping the pair until no fresh kernels are emitted.  Bailing

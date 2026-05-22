@@ -731,7 +731,8 @@ fn void run_rangeify_unified(Term root) {
     // "if this element is a reduce and there's ended ranges, we might
     //  have to end some other ranges (...)"
     int is_elementwise = uop_is_unary_elementwise(info->op)
-                      || uop_is_binary_elementwise(info->op);
+                      || uop_is_binary_elementwise(info->op)
+                      || uop_is_ternary_elementwise(info->op);
     if (RU_ENDING_RANGES[node_idx].n
         && (is_elementwise || info->op == UOP_REDUCE)) {
       // Mark every non-realized axis as realized (without PCONTIG > 1

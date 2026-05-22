@@ -65,6 +65,15 @@ fn u8 uop_is_binary_elementwise(u8 op) {
   return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
 }
 
+// IWHERE(cond, then, else) is an elementwise ternary select on float
+// values (tinygrad's Ops.WHERE).  Distinct from its index-layer use
+// inside INDEX_E address expressions: those live in the addr subtree the
+// index machinery walks, never as a scheduled value node, so classifying
+// the value-graph IWHERE as elementwise here does not affect them.
+fn u8 uop_is_ternary_elementwise(u8 op) {
+  return op == UOP_IWHERE;
+}
+
 // Per-call memoization for term_shape_in.  Without it, recursive
 // shape inference re-walked shared subgraphs exponentially -- the
 // dominant cost of materialize for the bound-w SGD pattern (where
@@ -215,6 +224,19 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     for (u32 i = 0; i < lb.ndim; i++) nb *= lb.dims[i];
     *out = (na >= nb) ? la : lb; return 1;
   }
+  if (uop_is_ternary_elementwise(op)) {
+    // Output shape = broadcast (largest-numel) of cond/then/else.
+    Shape best; int have = 0; u32 best_n = 0;
+    for (u32 k = 0; k < 3; k++) {
+      Shape s;
+      if (!term_shape_in(heap_read(loc + k), 0, &s)) continue;
+      u32 n = 1;
+      for (u32 i = 0; i < s.ndim; i++) n *= s.dims[i];
+      if (!have || n > best_n) { best = s; best_n = n; have = 1; }
+    }
+    if (!have) return 0;
+    *out = best; return 1;
+  }
   if (op == UOP_CONST) {
     out->ndim = 1; out->dims[0] = 1;
     for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0;
@@ -298,6 +320,11 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       // dtype lives in the second heap cell as NUM(dst_dtype).
       Term num = heap_read(loc + 1);
       if (term_tag(num) == TAG_NUM) { *out = (u32)term_val(num); return 1; }
+    }
+    // IWHERE(cond, then, else): the result dtype is the selected value's
+    // dtype (then-branch), NOT cond's (which is a bool/float mask).
+    if (uop_is_ternary_elementwise(op)) {
+      return term_dtype_in(heap_read(loc + 1), env_id, out);
     }
     // Elementwise + reduce + movement ops inherit dtype from src[0]
     // (and binary ops require both srcs share a dtype -- the strict

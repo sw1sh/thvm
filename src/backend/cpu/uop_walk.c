@@ -423,8 +423,25 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       return (double)uwalk_eval_int(c, src);
     }
     case UOP_IWHERE: {
-      i64 cond = uwalk_eval_int(c, heap_read(loc + 0));
-      if (cond) return uwalk_eval_float(c, heap_read(loc + 1));
+      // The cond may be an integer predicate (index-layer ILT/IAND/PAD
+      // bounds) OR a float comparison mask (value-layer WHERE, e.g. relu's
+      // CMPLT producing 0.0/1.0).  Evaluate it in the right domain: the int
+      // evaluator doesn't handle CMPLT/CMPEQ, so a float cond walked as int
+      // returns garbage.  Dispatch on the cond's op domain.
+      Term cterm = heap_read(loc + 0);
+      Term cr    = term_resolve(cterm);
+      int int_cond = 0;
+      if (term_tag(cr) == TAG_UOP) {
+        u8 cop = term_ext(cr);
+        int_cond = (cop == UOP_ILT  || cop == UOP_IAND || cop == UOP_IADD
+                 || cop == UOP_ISUB || cop == UOP_IMUL || cop == UOP_IDIV
+                 || cop == UOP_IMOD || cop == UOP_IWHERE
+                 || cop == UOP_INVALID || cop == UOP_RANGE
+                 || cop == UOP_INDEX_E);
+      }
+      int truth = int_cond ? (uwalk_eval_int(c, cterm)   != 0)
+                           : (uwalk_eval_float(c, cterm) != 0.0);
+      if (truth) return uwalk_eval_float(c, heap_read(loc + 1));
       return uwalk_eval_float(c, heap_read(loc + 2));
     }
     case UOP_REDUCE: {
