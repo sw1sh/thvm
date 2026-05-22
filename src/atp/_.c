@@ -391,6 +391,14 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
 // earlier add_equation push site can call it.
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace);
 
+// Periodic full-rule-set CP-queue interreduction (Waldmeister
+// KPV_KPMengeInterreduzieren).  Defined far below (it needs the
+// normalizer + reheapify); forward-declared for the thvm_atp_step call.
+// The period (run every Nth rule addition) lives here so the call site
+// can name it.
+#define ATP_CP_SET_IR_PERIOD 16u
+static void atp_cp_set_interreduce(AtpState *s);
+
 // === Waldmeister Stringterms: packed byte-string critical pairs =====
 //
 // A direct port of Waldmeister's `Stringterms` module (sources/TPR/
@@ -4053,6 +4061,15 @@ fn void thvm_atp_set_right_reduce(AtpState *s, u8 on) {
   s->right_reduce = on ? 1u : 0u;
 }
 
+// Toggle periodic critical-pair-set interreduction (a port of
+// Waldmeister KPV_KPMengeInterreduzieren, KPVerwaltung.c:1032, whose
+// per-CP AP_generic callback re-normalizes / joinable-deletes / reweights
+// each queued CP).  Default OFF; flipped on by Method->"Waldmeister".
+fn void thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->cp_set_interreduce = on ? 1u : 0u;
+}
+
 // Read wall-clock microseconds from CLOCK_REALTIME -- portable
 // across linux / macOS / freebsd and good enough for a >=1 second
 // deadline budget.
@@ -4352,6 +4369,19 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // simplified under every rule oriented since it was queued.
   atp_normalize_graph(s, post);
 #endif
+
+  // Periodic full-rule-set CP-queue interreduction (Waldmeister
+  // KPV_KPMengeInterreduzieren).  Gated behind cp_set_interreduce and run
+  // every cp_set_ir_period-th rule addition so the per-CP full-R sweep's
+  // cost is amortized.  Default off -> the call is skipped and the engine
+  // is byte-identical.
+  if (s->cp_set_interreduce && added.count > 0u) {
+    u32 period = s->cp_set_ir_period ? s->cp_set_ir_period
+                                     : ATP_CP_SET_IR_PERIOD;
+    if (s->n_rules % period == 0u) {
+      atp_cp_set_interreduce(s);
+    }
+  }
 
   goal = thvm_atp_goal_check(s);
   if (goal != ATP_RUNNING) return goal;
@@ -5854,6 +5884,69 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
   }
 }
 #endif /* ATP_ORPHAN_KILL */
+
+// Periodic critical-pair-set interreduction against the FULL rule set --
+// a port of Waldmeister's KPV_KPMengeInterreduzieren (KPVerwaltung.c:1032)
+// and its per-CP AP_generic callback (KPVerwaltung.c, the doR/doE branch).
+// The per-step atp_normalize_graph sweep only applies the 1-2 just-added
+// rules; a queued CP that became joinable through an OLDER rule (e.g. an
+// interreduce cascade) stays on the heap until it is finally popped and
+// dies in thvm_atp_step's pop-time normalize.  Until then it pollutes the
+// heap-min selection -- the engine keeps picking light CPs that normalize
+// to nothing while the heavier proof-relevant overlaps wait.  Waldmeister
+// purges those dead CPs from the queue eagerly, so its heap-min always
+// reflects a live, irreducible CP.  This pass reproduces that: walk the
+// whole queue, normalize each CP against the full current rule set, DELETE
+// the joinable ones, repack the reduced ones, then reheapify (which
+// recomputes every priority -- the AP_generic C_ReClassify reweight).
+// Default OFF; the engine is byte-identical unless cp_set_interreduce is
+// set (Method->"Waldmeister").
+static void atp_cp_set_interreduce(AtpState *s) {
+  if (s == NULL || s->n_cps == 0u || s->n_rules == 0u) return;
+  const u32 NORM_CAP = 64u;
+  u32 w = 0u;
+  int touched = 0;
+  for (u32 i = 0; i < s->n_cps; i++) {
+    // Per-CP heap checkpoint: the normalize allocates scratch cells; the
+    // reduced terms are copied out by acp_pack, so the scratch is dead
+    // after the (re)pack.  Reset each iteration so a long queue cannot
+    // exhaust the dyn heap.
+    u64 hcp = thvm_atp_heap_checkpoint();
+    Term ol = 0, orr = 0;
+    acp_unpack(s->cp_packed[i], &ol, &orr);
+    Term l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    Term r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    if (kbo_eq(l, r)) {
+      // Joinable under R -- the CP adds no equational consequence.  Drop
+      // it (WM AP_generic returns WTI_Delete).
+      s->n_cps_dropped_joinable++;
+      s->n_cp_set_ir_deleted++;
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      touched = 1;
+      thvm_atp_heap_reset(hcp);
+      continue;
+    }
+    if (l != ol || r != orr) {
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
+      s->n_cp_set_ir_reweighted++;
+      touched = 1;
+    } else if (w != i) {
+      s->cp_packed[w] = s->cp_packed[i];
+      s->cp_packed[i] = NULL;
+    }
+    s->cp_trace[w] = s->cp_trace[i];
+    w++;
+    thvm_atp_heap_reset(hcp);
+  }
+  s->n_cps = w;
+  if (touched) {
+    s->n_cp_set_ir_passes++;
+    thvm_atp_cp_reheapify(s);   // recompute every cp_pri + rebuild index
+  }
+}
 
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;

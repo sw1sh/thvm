@@ -3376,6 +3376,23 @@ typedef struct {
   // if a proof-extraction regression is found.
   u8   right_reduce;
 
+  // Periodic critical-pair-set interreduction (Waldmeister
+  // KPV_KPMengeInterreduzieren / AP_generic, KPVerwaltung.c:1032).
+  // When set, every `cp_set_ir_period`-th rule addition walks the whole
+  // CP queue and, per queued CP: re-normalizes both sides against the
+  // current rule set, DELETES it if it became joinable, and recomputes
+  // its priority (reweight) so the heap order tracks the growing system.
+  // This is what keeps Waldmeister's queue from drowning in CPs a later
+  // rule would collapse.  Default OFF (cp_set_interreduce == 0): the
+  // engine keeps its lazy pop-time normalization, so the default
+  // trajectory is byte-identical.  Flipped on by Method->"Waldmeister"
+  // via thvm_atp_set_cp_set_interreduce.
+  u8   cp_set_interreduce;
+  u32  cp_set_ir_period;          // 0 -> default period at run time
+  u32  n_cp_set_ir_passes;        // diagnostics: passes run
+  u32  n_cp_set_ir_deleted;       // diagnostics: CPs deleted (joinable)
+  u32  n_cp_set_ir_reweighted;    // diagnostics: CPs reweighted
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3487,6 +3504,7 @@ fn void      thvm_atp_set_auto_max_cp_weight(AtpState *s, u32 base);
 fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
+fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 
 // Set a wall-clock deadline.  `seconds_from_now` is a float duration
 // (e.g. 5.0 = 5 seconds); pass 0.0 to clear the deadline.  The

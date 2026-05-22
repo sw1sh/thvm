@@ -487,6 +487,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Wolfram theorems reachable.  0 = off (default lhs-only overlap).
   mint unf_cp = MArgument_getInteger(args[14]);
   thvm_atp_set_use_unfailing_cp(atp, (u8)(unf_cp != 0));
+  // Method -> "Waldmeister": periodic full-rule-set CP-queue interreduction
+  // (Waldmeister KPV_KPMengeInterreduzieren) -- purges queued CPs that have
+  // become joinable through the growing rule set so the heap-min selection
+  // tracks live, irreducible CPs.  0 = off (default), engine byte-identical.
+  mint cp_set_ir = MArgument_getInteger(args[15]);
+  thvm_atp_set_cp_set_interreduce(atp, (u8)(cp_set_ir != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];
