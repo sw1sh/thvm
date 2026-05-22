@@ -3184,6 +3184,23 @@ typedef struct {
   // THVM_ATP_FLATTERM=1 at init, or via thvm_atp_set_use_flatterm.  Same
   // normal forms as the tree path (asserted by ATP_FLATTERM_DIFF).
   u8                   use_flatterm;
+  // Opt-in CP-generation overlap-partner index.  OFF by default: the
+  // engine scans all n_rules per new rule (O(n_rules) overlap attempts).
+  // When set, thvm_atp_generate_cps_c queries cp_index -- a unification
+  // discrimination tree over rule-LHS terms -- for the candidate partners
+  // whose LHS could unify with a subterm of the new rule's LHS, running
+  // the exact atp_overlap_ij only on those candidates.  The CP SET is
+  // identical (the index returns a superset of true partners; the exact
+  // unify in cp_visit still gates emission).  Set from THVM_ATP_CP_INDEX=1
+  // at init, or via thvm_atp_set_use_cp_index.
+  struct AtpRuleIndex *cp_index;
+  // Companion to cp_index for the (old i x new j) overlap direction: a
+  // discrimination tree over every NON-VAR SUBTERM of every rule LHS,
+  // keyed by rule.  Querying it with the new rule's whole LHS lj returns
+  // the old rules i whose li has a subterm unifiable with lj -- the dual
+  // of cp_index's (new i x all j) whole-LHS query.
+  struct AtpRuleIndex *cp_subindex;
+  u8                   use_cp_index;
 #endif
 
   // Transient: set by thvm_atp_select_cp to the trace-entry index
@@ -3515,6 +3532,11 @@ fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 // forms as the default tree mixed loop; a per-step speedup on rule sets
 // with unorientable equations.  Off by default.
 fn void      thvm_atp_set_use_flatterm(AtpState *s, u8 on);
+// Opt in to the CP-generation overlap-partner index (no effect unless
+// built with ATP_RULE_INDEX).  Same CP set as the unindexed n_rules scan
+// (the index returns a superset of partners; the exact unify gates
+// emission).  A per-step speedup as R deepens.  Off by default.
+fn void      thvm_atp_set_use_cp_index(AtpState *s, u8 on);
 // Opt in to ground-joinability CP deletion (no effect unless the dylib
 // is built with ATP_CP_GROUND_JOIN).  Sound: ground-joinable CPs are
 // redundant.  Off by default (the criterion only counts).

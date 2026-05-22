@@ -2834,6 +2834,280 @@ static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
 #endif
 #endif // ATP_ORDERED_REWRITE
 
+// === CP-generation overlap-partner index (WM U1_KPsBildenZuRegel) ===
+//
+// THE CP-GEN CROSS-PRODUCT.  thvm_atp_generate_cps_c overlaps a new rule
+// i into every existing rule j -- for j over ALL n_rules it calls
+// atp_overlap_ij -> thvm_critical_pairs_pair, which walks the positions
+// of li and thvm_unify's rule-j's lhs lj there.  A CP is emitted only
+// when lj unifies with a non-variable subterm of li, but the scan PAYS
+// for every j whether or not any overlap exists -- an O(n_rules)-per-rule
+// scan.  Waldmeister avoids it via the discrimination tree: for a new
+// rule it forms overlaps only against the rules the tree retrieves as
+// unifiable (sources/INF/Unifikation1.c:1480 U1_KPsBildenZuRegel ->
+// TermMitDSBaumUnifizieren / TermMitDSBaumTeiltermenUnifizieren on
+// RE_Regelbaum).
+//
+// MEASURED SCOPE -- single-symbol theories defeat the filter.  On the
+// Sheffer-stroke axiom set (one binary symbol `nand`; AndAssociativity /
+// DoubleNegation over WolframAxioms) EVERY rule LHS is nand-headed and
+// every overlap subterm is nand-headed, so the discrimination tree cannot
+// discriminate at the shallow positions -- the candidate set equals the
+// full rule set (cand == n, measured) and the filter saves nothing.  The
+// profiled cost on that problem is NOT the cross-product scan but the
+// per-generated-CP work: CP reduction (atp_rewrite_normalize) plus the
+// KBO atp_compare in the ordered-rewrite order-gate, both proportional to
+// CPs GENERATED, which an overlap filter cannot reduce while preserving
+// the CP set.  The index is therefore a no-op-cost, CP-set-identical
+// speedup ONLY for MULTI-symbol theories, where distinct LHS heads let
+// the tree prune the cross-product.  Kept gated off; reported honestly.
+//
+// THE PORT -- a candidate FILTER, CP-set-preserving.  cp_index is a
+// discrimination tree over the WHOLE rule-LHS terms (reusing atp_ri_*'s
+// node/rec pools, atp_ri_flatsym first-appearance scheme, atp_ri_child
+// insert).  For the new rule i, the partners j the cross-product can
+// emit a CP for are exactly { j : lj unifies with some non-var subterm
+// of li }.  atp_cp_index_collect descends cp_index in UNIFICATION mode
+// against a query subterm and gathers every rule whose stored LHS could
+// unify -- a SUPERSET of the true partners (a discrimination tree on the
+// flat symbol string cannot decide unifiability exactly, only filter).
+// thvm_atp_generate_cps_c then runs the EXACT atp_overlap_ij on each
+// candidate; cp_visit's thvm_unify is the authoritative gate, so the CP
+// set is byte-identical to the unindexed scan -- the index only skips
+// the j's that provably cannot overlap.
+//
+// UNIFICATION DESCENT (vs atp_ri_descend's one-way match).  Both the
+// stored LHS and the query subterm carry variables, so at each position:
+//   - stored STAR (rule var): unifies with the whole query subterm ->
+//     descend the STAR child, skipping the query subterm.
+//   - query STAR (subject var): unifies with anything stored -> the
+//     query consumed one position; the stored side may be ANY subtree,
+//     so descend EVERY child (CTR children with their subtree skipped,
+//     and the STAR child).
+//   - stored CTR == query CTR: descend (head consumed on both sides).
+// No variable-consistency check is applied (that would need an occurs-
+// /binding-aware unify; the filter stays a sound superset without it).
+
+#define ATP_CP_MAXCAND 65536u
+static u32 g_atp_cp_cand[ATP_CP_MAXCAND];
+static u32 g_atp_cp_ncand     = 0;
+static u8  g_atp_cp_overflow  = 0;     // candidate buffer overflowed -> full scan
+// De-dup: a rule reached via several positions/branches is collected once.
+// g_atp_cp_seen[rule] == g_atp_cp_epoch marks "already in g_atp_cp_cand".
+static u32 *g_atp_cp_seen   = NULL;
+static u32  g_atp_cp_seencap = 0;
+static u32  g_atp_cp_epoch  = 0;
+
+static AtpRuleIndex *g_atp_cp_ix      = NULL;
+static const Term   *g_atp_cp_qflat   = NULL;
+static const u32    *g_atp_cp_qsubsz  = NULL;
+static const u32    *g_atp_cp_qflatsym = NULL;
+
+static void atp_cp_cand_add(u32 rule) {
+  if (rule < g_atp_cp_seencap && g_atp_cp_seen[rule] == g_atp_cp_epoch) return;
+  if (rule < g_atp_cp_seencap) g_atp_cp_seen[rule] = g_atp_cp_epoch;
+  if (g_atp_cp_ncand >= ATP_CP_MAXCAND) { g_atp_cp_overflow = 1u; return; }
+  g_atp_cp_cand[g_atp_cp_ncand++] = rule;
+}
+
+static int atp_cp_cand_cmp(const void *a, const void *b) {
+  u32 x = *(const u32 *)a, y = *(const u32 *)b;
+  return (x > y) - (x < y);
+}
+
+// Sort the collected candidates ascending so the indexed generator
+// processes overlap pairs in the SAME (j ascending) order the unindexed
+// n_rules scan did -- a CP's FIFO trace tiebreak then matches, keeping
+// the derived-rule sequence byte-identical.
+static void atp_cp_cand_sort(void) {
+  qsort(g_atp_cp_cand, g_atp_cp_ncand, sizeof(u32), atp_cp_cand_cmp);
+}
+
+static void atp_cp_index_leaf(u32 node) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+       r = ix->recs[r].next) {
+    atp_cp_cand_add(ix->recs[r].rule);
+  }
+}
+
+// Collect EVERY rule in the whole subtree rooted at `node` -- the action
+// when a query variable consumes the corresponding stored subtree (a var
+// unifies with anything, so any stored continuation is a candidate).
+static void atp_cp_index_collect_subtree(u32 node) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  atp_cp_index_leaf(node);
+  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+       c = ix->nodes[c].sibling) {
+    if (g_atp_cp_overflow) return;
+    atp_cp_index_collect_subtree(c);
+  }
+}
+
+// Descend cp_index from `node` against the flat query subject slice
+// starting at preorder position `pos` (which spans the query subterm).
+// Collects every reachable leaf's rules (unification-compatible filter).
+static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  if (pos == qend) { atp_cp_index_leaf(node); return; }
+  u32 qsym = g_atp_cp_qflatsym[pos];
+  u8  q_is_star = (qsym >= ATP_RI_STAR_BASE && qsym < ATP_RI_CTR_BASE);
+  u32 sz   = g_atp_cp_qsubsz[pos];
+  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+       c = ix->nodes[c].sibling) {
+    if (g_atp_cp_overflow) return;
+    u32 csym = ix->nodes[c].sym;
+    if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+      // Stored rule var unifies with the whole query subterm at `pos`:
+      // the stored side consumed one tree edge (the STAR), the query
+      // consumed its whole subterm (sz positions).
+      atp_cp_index_descend(c, pos + sz, qend);
+    } else if (csym == qsym) {
+      // Stored CTR/NUM head equals the query head: consume both heads
+      // (one tree edge, one query position).
+      atp_cp_index_descend(c, pos + 1u, qend);
+    }
+    // A non-matching stored CTR vs a concrete query CTR cannot unify --
+    // pruned (the discrimination-tree win).
+  }
+  if (q_is_star) {
+    // Query var unifies with ANY stored subtree at this node: collect
+    // every rule reachable below `node` (var-vs-anything).  The query
+    // already advanced past the var (a single position) at the caller's
+    // continuation; here we simply harvest the whole stored remainder.
+    atp_cp_index_collect_subtree(node);
+  }
+}
+
+// Build cp_index from s->lhs[0..n_rules): one whole-LHS term per rule,
+// keyed by the atp_ri_flatsym first-appearance symbol string.  Rebuilt
+// (like rule_index) whenever R mutates.
+static void atp_cp_index_rebuild(AtpState *s) {
+  AtpRuleIndex *ix = s->cp_index;
+  ix->n_nodes = 0;
+  ix->n_recs  = 0;
+  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
+  AtpRiVarMap vm;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    atp_ri_varmap_reset(&vm);
+    u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
+    u32 rec  = atp_ri_rec_new(ix);
+    ix->recs[rec].rule    = i;
+    ix->recs[rec].next    = ix->nodes[node].rec_head;
+    ix->nodes[node].rec_head = rec;
+  }
+  ix->n_rules_built = s->n_rules;
+  if (g_atp_cp_seencap < s->n_rules) {
+    u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
+    while (cap < s->n_rules) cap *= 2u;
+    u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
+    if (p == NULL) { fprintf(stderr, "atp_cp_index: seen OOM\n"); exit(1); }
+    g_atp_cp_seen   = p;
+    for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
+    g_atp_cp_seencap = cap;
+  }
+}
+
+// Collect the candidate partner rules for overlapping a new rule whose
+// LHS is `li`: every rule j with lj unifiable with a non-var subterm of
+// li.  `li` is flattened once; each non-var position queries cp_index.
+// Returns the count (in g_atp_cp_cand) or sets g_atp_cp_overflow.
+static u32 atp_cp_index_collect(AtpState *s, Term li) {
+  static Term qflat[ATP_RI_FLAT_CAP];
+  static u32  qsubsz[ATP_RI_FLAT_CAP];
+  static u32  qflatsym[ATP_RI_FLAT_CAP];
+  u8  folded = 0;
+  u32 pos    = 0;
+  if (!atp_ri_flatten(li, qflat, qsubsz, qflatsym, &folded,
+                      ATP_RI_FLAT_CAP, &pos)) {
+    g_atp_cp_overflow = 1u;            // subject too deep -> exact scan
+    return 0;
+  }
+  g_atp_cp_ix       = s->cp_index;
+  g_atp_cp_qflat    = qflat;
+  g_atp_cp_qsubsz   = qsubsz;
+  g_atp_cp_qflatsym = qflatsym;
+  g_atp_cp_ncand    = 0;
+  g_atp_cp_overflow = 0;
+  if (++g_atp_cp_epoch == 0u) {        // wrapped: clear so stale != epoch
+    for (u32 k = 0; k < g_atp_cp_seencap; k++) g_atp_cp_seen[k] = 0u;
+    g_atp_cp_epoch = 1u;
+  }
+  // Every non-variable subterm position of li is a candidate overlap
+  // site -- cp_visit walks exactly these (it skips TAG_FVR).  Querying
+  // each gathers the rules whose lhs could unify there.
+  for (u32 p = 0; p < pos; p++) {
+    u32 qsym = qflatsym[p];
+    if (qsym >= ATP_RI_STAR_BASE && qsym < ATP_RI_CTR_BASE) continue; // var
+    u32 qend = p + qsubsz[p];
+    atp_cp_index_descend(s->cp_index->root, p, qend);
+    if (g_atp_cp_overflow) return 0;
+  }
+  return g_atp_cp_ncand;
+}
+
+// Insert every NON-VAR subterm position of `t` (under one shared
+// first-appearance varmap, so a rule's repeated var is consistent across
+// its subterms) as a separate tree path keyed to `rule`.  A var-headed
+// subterm is skipped (cp_visit never overlaps at a variable position).
+static void atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
+                                   AtpRiVarMap *vm) {
+  if (term_tag(t) == TAG_CTR) {
+    u32 node = atp_ri_insert_term(ix, ix->root, t, vm);
+    u32 rec  = atp_ri_rec_new(ix);
+    ix->recs[rec].rule       = rule;
+    ix->recs[rec].next       = ix->nodes[node].rec_head;
+    ix->nodes[node].rec_head = rec;
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      atp_cp_subindex_insert(ix, term_ctr_at(t, i), rule, vm);
+    }
+  }
+}
+
+// Build cp_subindex: every non-var subterm of every rule LHS -> rule.
+static void atp_cp_subindex_rebuild(AtpState *s) {
+  AtpRuleIndex *ix = s->cp_subindex;
+  ix->n_nodes = 0;
+  ix->n_recs  = 0;
+  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
+  AtpRiVarMap vm;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    atp_ri_varmap_reset(&vm);
+    atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
+  }
+  ix->n_rules_built = s->n_rules;
+}
+
+// Collect candidate partner rules for the (old i x new j) direction:
+// every rule i whose LHS li has a NON-VAR subterm unifiable with the new
+// rule's whole LHS `lj`.  Query the subterm index once with `lj`.
+static u32 atp_cp_subindex_collect(AtpState *s, Term lj) {
+  static Term qflat[ATP_RI_FLAT_CAP];
+  static u32  qsubsz[ATP_RI_FLAT_CAP];
+  static u32  qflatsym[ATP_RI_FLAT_CAP];
+  u8  folded = 0;
+  u32 pos    = 0;
+  if (!atp_ri_flatten(lj, qflat, qsubsz, qflatsym, &folded,
+                      ATP_RI_FLAT_CAP, &pos)) {
+    g_atp_cp_overflow = 1u;
+    return 0;
+  }
+  g_atp_cp_ix       = s->cp_subindex;
+  g_atp_cp_qflat    = qflat;
+  g_atp_cp_qsubsz   = qsubsz;
+  g_atp_cp_qflatsym = qflatsym;
+  g_atp_cp_ncand    = 0;
+  g_atp_cp_overflow = 0;
+  if (++g_atp_cp_epoch == 0u) {
+    for (u32 k = 0; k < g_atp_cp_seencap; k++) g_atp_cp_seen[k] = 0u;
+    g_atp_cp_epoch = 1u;
+  }
+  atp_cp_index_descend(s->cp_subindex->root, 0u, pos);
+  if (g_atp_cp_overflow) return 0;
+  return g_atp_cp_ncand;
+}
+
 #endif // ATP_RULE_INDEX
 
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
@@ -2893,7 +3167,16 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // intent.)
   s->rule_index       = NULL;
   s->unorient_index   = NULL;     // lazily built on the flatterm path
+  s->cp_index         = NULL;     // lazily built on the first indexed CP gen
+  s->cp_subindex      = NULL;     // companion subterm index (old i x new j)
   s->rule_index_dirty = 1u;
+  // Opt-in CP-generation overlap-partner index.  OFF unless
+  // THVM_ATP_CP_INDEX is set non-"0"; the default engine scans all
+  // n_rules per new rule (byte-identical CP set either way).
+  {
+    const char *ci = getenv("THVM_ATP_CP_INDEX");
+    s->use_cp_index = (ci != NULL && ci[0] != '\0' && ci[0] != '0') ? 1u : 0u;
+  }
   // Opt-in flatterm fast-path for the mixed normalize loop.  OFF unless
   // THVM_ATP_FLATTERM is set to a non-"0" value -- the default engine
   // stays byte-identical (the tree mixed loop).
@@ -2950,6 +3233,8 @@ fn void thvm_atp_free(AtpState *s) {
 #ifdef ATP_RULE_INDEX
   atp_ri_free(s->rule_index);
   atp_ri_free(s->unorient_index);
+  atp_ri_free(s->cp_index);
+  atp_ri_free(s->cp_subindex);
 #endif
 #ifdef ATP_MNF
   mnf_destroy(s->mnf);
@@ -3293,6 +3578,15 @@ fn void thvm_atp_set_use_flatterm(AtpState *s, u8 on) {
   s->use_flatterm = on ? 1u : 0u;
 #else
   (void)on;   // no flat machinery without the rule index
+#endif
+}
+
+fn void thvm_atp_set_use_cp_index(AtpState *s, u8 on) {
+  if (s == NULL) return;
+#ifdef ATP_RULE_INDEX
+  s->use_cp_index = on ? 1u : 0u;
+#else
+  (void)on;   // no index machinery without the rule index
 #endif
 }
 
@@ -8104,6 +8398,20 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   return cnt;
 }
 
+// Run one overlap pair and push its CPs (the body shared by the indexed
+// and unindexed generator loops).
+static u32 atp_gen_one(AtpState *s, u32 i, u32 j, CriticalPair *buf) {
+  u32 nbuf   = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
+  u32 pushed = atp_push_cps_traced(s, buf, nbuf,
+                                   s->r_trace[i], s->r_trace[j], i, j);
+  // A single saturation step can out-allocate a whole GC semi-space in
+  // raw critical-pair + normalisation scratch.  Collect between overlap
+  // pairs -- `buf` is fully processed here, so no in-flight CP needs
+  // rooting -- to bound the transient working set instead of crashing.
+  if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+  return pushed;
+}
+
 static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   u32 first = added.first;
   u32 last  = added.first + added.count;
@@ -8114,31 +8422,64 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   CriticalPair buf[ATP_CP_BATCH];
   u32 pushed = 0;
 
+#ifdef ATP_RULE_INDEX
+  // Indexed overlap-partner retrieval (opt-in, byte-identical CP set).
+  // Rebuild both overlap indices over the post-add rule set, then for
+  // each new rule overlap only the candidate partners the index returns.
+  // On a candidate-buffer / subject-depth OVERFLOW the call falls back to
+  // the exact n_rules scan for that rule, so the CP set is preserved even
+  // when the index over-runs its scratch.
+  if (s->use_cp_index) {
+    if (s->cp_index == NULL)    s->cp_index    = atp_ri_new();
+    if (s->cp_subindex == NULL) s->cp_subindex = atp_ri_new();
+    if (s->cp_index->n_rules_built != n) {
+      atp_cp_index_rebuild(s);          // grows g_atp_cp_seen to cover n
+      atp_cp_subindex_rebuild(s);
+    }
+    // (new x all_R): for each new rule i, candidates j are rules whose lj
+    // unifies with a non-var subterm of li -- the whole-LHS index query.
+    for (u32 i = first; i < last; i++) {
+      u32 nc = atp_cp_index_collect(s, s->lhs[i]);
+      if (g_atp_cp_overflow) {
+        for (u32 j = 0; j < n; j++) pushed += atp_gen_one(s, i, j, buf);
+      } else {
+        atp_cp_cand_sort();
+        for (u32 c = 0; c < nc; c++) {
+          pushed += atp_gen_one(s, i, g_atp_cp_cand[c], buf);
+        }
+      }
+    }
+    // (old x new): for each new rule j, candidates i are OLD rules whose
+    // li has a non-var subterm unifiable with the new lj -- the subterm
+    // index query.  Only i < first (old) are this loop's partners.
+    for (u32 j = first; j < last; j++) {
+      u32 nc = atp_cp_subindex_collect(s, s->lhs[j]);
+      if (g_atp_cp_overflow) {
+        for (u32 i = 0; i < first; i++) pushed += atp_gen_one(s, i, j, buf);
+      } else {
+        atp_cp_cand_sort();
+        for (u32 c = 0; c < nc; c++) {
+          u32 i = g_atp_cp_cand[c];
+          if (i < first) pushed += atp_gen_one(s, i, j, buf);
+        }
+      }
+    }
+    return pushed;
+  }
+#endif
+
   // (new x all_R): the new rule is i (outer), j ranges over all
   // existing rules (including the new ones for new x new self-overlap).
   for (u32 i = first; i < last; i++) {
     for (u32 j = 0; j < n; j++) {
-      u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
-      pushed += atp_push_cps_traced(s, buf, nbuf,
-                                    s->r_trace[i], s->r_trace[j],
-                                    i, j);
-      // A single saturation step can out-allocate a whole GC
-      // semi-space in raw critical-pair + normalisation scratch.
-      // Collect between overlap pairs -- `buf` is fully processed
-      // here, so no in-flight CP needs rooting -- to bound the
-      // transient working set instead of crashing mid-step.
-      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+      pushed += atp_gen_one(s, i, j, buf);
     }
   }
 
   // (old x new): old rule on the outside, new rule fed as inner.
   for (u32 i = 0; i < first; i++) {
     for (u32 j = first; j < last; j++) {
-      u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
-      pushed += atp_push_cps_traced(s, buf, nbuf,
-                                    s->r_trace[i], s->r_trace[j],
-                                    i, j);
-      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);   // see above
+      pushed += atp_gen_one(s, i, j, buf);
     }
   }
 
