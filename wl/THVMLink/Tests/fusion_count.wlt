@@ -153,7 +153,7 @@ VerificationTest[
     out = TDot[b, TReLU @ TDot[a, x]] + c;
     loss = TSum @ (out * out);
     before = TKernelCount[];
-    TRealize /@ TGradMany[loss, {x, a, b, c}];
+    TRealize /@ TGrad[loss, {x, a, b, c}];
     kernelDelta[before, TKernelCount[]] <= 24,
     True,
     TestID -> "fusion-count/gradmany-4-targets-le-24"

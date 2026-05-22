@@ -20,7 +20,7 @@ BeginPackage["THVMLink`"];
 
 TOptim::usage = "TOptim[\"SGD\", lr] returns a function {gradFn, w0, n} -> TTerm that, when realised, performs n SGD steps from w0 with learning rate `lr`.  TOptim[\"Adam\", lr, beta1, beta2, eps] likewise for Adam.  gradFn is a host-side function w_TTerm -> TTerm carrying the gradient w.r.t. w.";
 
-TAdam::usage = "TAdam[loss, params, m, v, t, opts] applies one Adam step in tensor-land.\n\nArguments:\n    loss    -- TTerm scalar; the value being minimised.  Grads w.r.t.\n               every entry of `params` are computed internally via\n               TGradMany (one realize, shared forward DAG, per-target\n               kernel-emit memo dedup).\n    params  -- List of TTerm tensor handles (TAG_TEN) to update.\n    m, v    -- Same-shape running first/second moment buffers (TTerm\n               tensors); seed with `TZerosLike /@ params`.\n    t       -- Integer step index (host-side).  Bias-correction\n               constants 1/(1-beta1^t) and 1/sqrt(1-beta2^t) are\n               precomputed at emit time so the kernel program stays\n               POW-free.\n    opts    -- Hyperparameters as Wolfram options.  Defaults:\n                   \"lr\"    -> 0.001\n                   \"beta1\" -> 0.9\n                   \"beta2\" -> 0.999\n                   \"eps\"   -> 1.0*^-8\n\nThe per-param body is the textbook Adam update built as a lazy\nUOP_ASSIGN chain:\n    m := beta1*m + (1-beta1)*grad\n    v := beta2*v + (1-beta2)*grad*grad\n    w := w - lrHat*m / (sqrt(v)*invSqrtB2cor + eps)\nReturns `params` for chainability.";
+TAdam::usage = "TAdam[loss, params, m, v, t, opts] applies one Adam step in tensor-land.\n\nArguments:\n    loss    -- TTerm scalar; the value being minimised.  Grads w.r.t.\n               every entry of `params` are computed internally via\n               TGrad[loss, params] (one shared requires_grad backward\n               walk) and realized together via TRealize[grads].\n    params  -- List of TTerm tensor handles (TAG_TEN) to update.\n    m, v    -- Same-shape running first/second moment buffers (TTerm\n               tensors); seed with `TZerosLike /@ params`.\n    t       -- Integer step index (host-side).  Bias-correction\n               constants 1/(1-beta1^t) and 1/sqrt(1-beta2^t) are\n               precomputed at emit time so the kernel program stays\n               POW-free.\n    opts    -- Hyperparameters as Wolfram options.  Defaults:\n                   \"lr\"    -> 0.001\n                   \"beta1\" -> 0.9\n                   \"beta2\" -> 0.999\n                   \"eps\"   -> 1.0*^-8\n\nThe per-param body is the textbook Adam update built as a lazy\nUOP_ASSIGN chain:\n    m := beta1*m + (1-beta1)*grad\n    v := beta2*v + (1-beta2)*grad*grad\n    w := w - lrHat*m / (sqrt(v)*invSqrtB2cor + eps)\nReturns `params` for chainability.";
 
 (* Forward-declare symbols owned by later-loading siblings (Ref.wl,
    Switch.wl, Tensor.wl).  Without this, bare references to TDef /
@@ -142,11 +142,10 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
                 = lrHat * m_new / (sqrt(v_new) * invSqrtB2cor + eps)
        so lrHat and invSqrtB2cor are precomputed scalars.
 
-       Grads come from TGradMany; forward kernels reused across the
-       per-target realizes via TenDesc.producer_kid (kernel dispatched
-       on first realize, subsequent realizes see it as a TAG_TEN leaf).
-       The chain-rule walk itself is per-target work (grad_memo keys
-       on target so it doesn't cross-share).
+       Grads come from TGrad[loss, params] -- one shared requires_grad
+       backward walk -- and are realized together via TRealize[grads]
+       (one bundled materialize pass; the shared upstream cotangent
+       chain is emitted once, see the note below).
 
        Per-param ASSIGNs are bundled into one TRealize so the Adam
        step's mutations land in one pool boundary -- this IS the
@@ -166,22 +165,22 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
         lrHat        = lr  / (1.0 - beta1^t);
         invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
         lossK        = TMaterialize[loss];
-        grads        = TGradMany[lossK, params];
+        grads        = TGrad[lossK, params];
         (* Realize all gradients in ONE bundled materialize pass.
-           TGradMany now does a single requires_grad backward walk, so the
+           TGrad[loss, params] does a single requires_grad backward walk, so the
            N grads share one backward DAG; bundling the realize lets
            bufferize_classify see the shared upstream cotangents (dL/dh1
            etc.) as multi-consumer and emit them ONCE.  The per-param
            `TRealize /@` form re-emits the shared chain for every param --
            each isolated pass sees its upstream as single-consumer and
            inlines it -- so it pays ~N x the kernels (beautiful_mnist BS=8
-           backward: 1583 vs ~216 bundled).  TRealizeList returns the N
-           realized roots as pinned TEN handles, so the three downstream
+           backward: 1583 vs ~216 bundled).  The list form of TRealize
+           returns the N realized roots as pinned TEN handles, so the three downstream
            Adam reads (m, g*g, w) all see the same concrete gradient buffer.
            (The earlier per-param form predates the single-walk: back then
            each target was a separate target-aware DP1 walk that recomputed
            on each read, so per-param realize was the only safe form.) *)
-        gradsRealized = TRealizeList[grads];
+        gradsRealized = TRealize[grads];
         paramAssigns = Table[
             Block[{
                 wTen = params[[i]], gTen = gradsRealized[[i]],

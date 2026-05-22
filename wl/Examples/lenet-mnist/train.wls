@@ -2,7 +2,7 @@
 (* train.wls -- LeNet on a fixed MNIST sample, K Adam steps in
    the in-backend lazy surface.  Every weight stays a TTerm
    handle from init through the loop; gradients come from
-   TGradMany (per-target VJP, forward kernels shared across
+   TGrad list form (multi-target VJP, forward kernels shared across
    targets via TenDesc.producer_kid); the Adam update is TAdam
    (lazy TAssign per buffer, bundled into one TRealize so the
    step's mutations land in a single pool boundary).  No host-
@@ -69,7 +69,7 @@ forwardLoss[x_TTerm, target_TTerm] := Module[{
     TCrossEntropyLoss[probs, target]
 ]
 
-(* === One step: realize loss, hand to TAdam (TGradMany internal) *)
+(* === One step: realize loss, hand to TAdam (TGrad[loss, params] internal) *)
 
 trainStep[step_Integer] := Module[{loss, lossVal},
     loss    = forwardLoss[imgT, tgtT];

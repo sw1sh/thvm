@@ -16,7 +16,7 @@
        BS=512 WARMUP_STEPS=2 N_STEPS=5 DEV=metal THVM_TILE=1 AUTOTUNE=1 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 
    BENCH_MODE:
-       train    forward + TGradMany + Adam assignments (default)
+       train    forward + TGrad[loss,params] + Adam assignments (default)
        forward  forward loss only, useful for separating kernel quality
        grad-w5  one realized gradient for the final linear weight
        grad-N   one realized gradient for params[[N]]

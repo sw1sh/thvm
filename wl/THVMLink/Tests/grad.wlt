@@ -598,7 +598,7 @@ VerificationTest[
     b = TTensorCreate @ NumericArray[{0.5, 0.5, 0.5}, "Real32"];
     (* loss = sum( a * b ); d/da = b, d/db = a *)
     loss = TUOpReduce[TUOpMul[a, b], 0, "SUM"];
-    With[{grads = TGradMany[loss, {a, b}]},
+    With[{grads = TGrad[loss, {a, b}]},
         Normal @ TTensorData @ TRealize @ # & /@ grads],
     {{0.5, 0.5, 0.5}, {1.0, 2.0, 3.0}},
     TestID -> "grad/many-pair-matches-separate-grads"
@@ -610,7 +610,7 @@ VerificationTest[
     b = TTensorCreate @ NumericArray[{3.0}, "Real32"];
     c = TTensorCreate @ NumericArray[{4.0}, "Real32"];
     expr = TUOpAdd[TUOpMul[a, b], c];
-    With[{grads = TGradMany[expr, {a, b, c}]},
+    With[{grads = TGrad[expr, {a, b, c}]},
         Normal @ TTensorData @ TRealize @ # & /@ grads],
     {{3.0}, {2.0}, {1.0}},
     TestID -> "grad/many-three-targets"
@@ -623,7 +623,7 @@ VerificationTest[
     loss = TUOpReduce[TUOpMul[a, b], 0, "SUM"];
     {Normal @ TTensorData @ TRealize @ TGrad[loss, a],
      Normal @ TTensorData @ TRealize @ TGrad[loss, b]} ===
-    With[{grads = TGradMany[loss, {a, b}]},
+    With[{grads = TGrad[loss, {a, b}]},
         Normal @ TTensorData @ TRealize @ # & /@ grads],
     True,
     TestID -> "grad/many-equal-to-separate-grads"

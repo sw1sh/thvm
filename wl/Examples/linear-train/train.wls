@@ -24,7 +24,7 @@ lr     = TUOpConst[0.1, "f32"]
        destructures the CTR into the body's bound names via N nested
        APP-LAM betas.  No projection opcode -- pure IC primitives. == *)
 loss      = TMSELoss[TMatVec[w, x] + b, target]
-{gW, gB}  = TGradMany[loss, {w, b}];
+{gW, gB}  = TGrad[loss, {w, b}];
 trainStep = TPri[
     Function[lt, WriteString["stdout",
         "loss=", CForm @ TTensorData[lt][[1]], "\n"]],

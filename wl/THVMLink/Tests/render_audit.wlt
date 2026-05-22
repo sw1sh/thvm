@@ -48,7 +48,7 @@ auditCounts = Module[{bs = 3, W1, b1, gamma, beta, W2, b2, x, tgt,
     loss   = TSparseCategoricalCrossEntropy[logits, tgt];
     params = {W1, gamma, W2};
     TMaterialize @ TWnf @ loss;
-    TMaterialize /@ (TWnf /@ TGradMany[loss, params]);
+    TMaterialize /@ (TWnf /@ TGrad[loss, params]);
     n = TKernelCount[] - 1;
     fallbacks = Length @ Select[Range[1, n],
         Length[DeleteDuplicates @ StringCases[

@@ -368,8 +368,8 @@ TGrad[y_, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
 TGrad[y_, target_TTerm, gy_TTerm] :=
     tGradWithLeaves[y, target, gy, uopLeafTids[y]]
 
-(* Shared-leaves form: caller supplies leafTids so TGradMany can
-   compute them ONCE per forward graph instead of once per target.
+(* Shared-leaves form: caller supplies leafTids so the list-form TGrad
+   can compute them ONCE per forward graph instead of once per target.
    uopLeafTids walks the full UOP DAG; for an 8-weight LeNet
    that's the dominant per-step cost (13s -> sub-second). *)
 tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
@@ -382,24 +382,15 @@ tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
        result) lives in C-side interact_grad so the EXPAND+ADD
        wrap is elided when the result already matches target.shape.
        leafTids retained in the signature for caller compatibility
-       (TGradMany) but no longer consulted. *)
+       (the list-form TGrad) but no longer consulted. *)
     TUOpGradWithTarget[y, gy, target]
 )
 
-(* Multi-target VJP: build n unary TGrads sharing the y subgraph (and
-   the gy seed) by heap-loc identity.  Forward kernels dedup across
-   targets via TenDesc.producer_kid (once a forward TAG_TEN's first
-   realize fires its kernel, the kernel is reused on subsequent
-   realizes regardless of how they were batched).  Returns a List of
-   n TTerms in the same order as `targets`.
-
-   NOTE: the per-realize grad_memo (interact/uop_grad.c) keys on
-   (child, gy, target) -- it doesn't share across targets.  An
-   experiment in py/csource (May 20) confirmed thvm_realize_many
-   gives 0 kernel / fire / memo savings vs separate realize for
-   grad terms.  realize_many is still useful for ASSIGN batching
-   (TAdam) and pool-boundary sharing, but not for grad dedup. *)
-TGradMany[y_, {target_}]    := {TGrad[y, target]}
+(* List form: d(y)/d(target_i) for every target, returned as a List of
+   TTerms in `targets` order.  A single-element list delegates to the
+   target-aware unary TGrad; the multi-element form below is the
+   requires_grad single walk. *)
+TGrad[y_, {target_}]    := {TGrad[y, target]}
 
 (* Multi-target VJP via the requires_grad single walk.  Mark every
    target as a parameter, fire ONE target-free backward (TUOpGrad, the
@@ -419,7 +410,7 @@ TGradMany[y_, {target_}]    := {TGrad[y, target]}
    Targets we newly mark are unmarked afterward so the global
    GRAD_REQ_NCOUNT / requires_grad state (which gates the target-aware
    leaf filter) is restored for any later plain TGrad. *)
-TGradMany[y_, targets_List] := Module[{newlyMarked, bwd, grads},
+TGrad[y_, targets_List] := Module[{newlyMarked, bwd, grads},
     newlyMarked = Select[targets, tensorIdQ[#] && ! TRequiresGradQ[#] &];
     TRequiresGrad /@ newlyMarked;
     TClearGrad /@ Select[targets, tensorIdQ];
@@ -443,35 +434,25 @@ TGradMany[y_, targets_List] := Module[{newlyMarked, bwd, grads},
    arc).  Equivalent to TWnf[TMaterialize[expr]] except every CPU
    buffer alloc'd during materialize+wnf that ISN'T reachable from
    the result tensor's producer chain gets freed at exit. *)
-(* TRealize -- single root: TRealize[expr]
-                multi-root:  TRealize[{t1, t2, ...}]
-   The list form bundles every root into one materialize+wnf pass so
-   shared forward kernels dedup across roots; without it, callers
-   that loop TRealize per param (TAdam) emit ~N x the kernel count
-   they need.  Both forms return a TTerm. *)
-TRealize[exprs_List] := (
-    ensureInit[];
-    TTerm[$realizeManyFn[Developer`ToPackedArray[ttermRaw /@ exprs, Integer]]]
-)
-TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
-
-(* TRealizeList: same one-pass bundled materialize+wnf as the multi-root
-   TRealize[list] (shared kernels dedup across roots -- thvm_realize_many
-   walks the whole bundle in one thvm_materialize call), but returns the
-   list of N realized roots as pinned TEN handles instead of the bundle
-   CTR.  TGradMany does a single shared backward walk, so realizing the N
-   param gradients TOGETHER lets bufferize_classify see the shared upstream
-   cotangents (dL/dh1 etc.) as multi-consumer and emit them ONCE; the
-   per-root TRealize /@ form re-emits the shared chain for every root
-   (~N x the kernels).  Each returned handle is a concrete realized root,
-   safe to thread into downstream expressions (e.g. TAdam's per-param
-   update reads each gradient three times). *)
-TRealizeList[exprs_List] := Module[{raw, n},
+(* TRealize -- single root: TRealize[expr]      -> one realized TTerm
+                multi-root:  TRealize[{t1, ...}] -> List of realized TTerms
+   The list form bundles every root into ONE materialize+wnf pass
+   (thvm_realize_many walks the whole bundle in a single thvm_materialize),
+   so kernels shared across roots dedup -- bufferize_classify sees a node
+   reached by multiple roots as multi-consumer and emits it ONCE.  It
+   returns the list of N realized roots (pinned TEN handles, via
+   term_ctr_n/at), so callers can thread each into downstream expressions.
+   Looping TRealize per root instead (TRealize /@) re-emits every shared
+   sub-DAG per root: each isolated pass sees its upstream as single-
+   consumer and inlines it, paying ~N x the kernels (e.g. the N param
+   gradients of one backward, which share the upstream cotangent chain). *)
+TRealize[exprs_List] := Module[{raw, n},
     ensureInit[];
     raw = $realizeManyFn[Developer`ToPackedArray[ttermRaw /@ exprs, Integer]];
     n   = $termCtrNFn[raw];
     Table[TTerm[$termCtrAtFn[raw, i]], {i, 0, n - 1}]
 ]
+TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
 
 (* TMaterialize = direct schedule + kernelize + linearize rewrite,
    no firing.  Useful for inspection (visualize the scheduled DAG
