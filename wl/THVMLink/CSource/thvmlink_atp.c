@@ -523,6 +523,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // peak.  0 = off (default), engine byte-identical.
   mint conn = MArgument_getInteger(args[16]);
   thvm_atp_set_use_connectedness(atp, (u8)(conn != 0));
+  // Method -> {... "FifoTiebreak" -> True}: Waldmeister `-:w1=fifo`
+  // secondary key.  Preserve each surviving CP's insertion age across the
+  // post-orient normalize sweep so equal-weight ties resolve oldest-first
+  // run-wide.  args[18] (after the args[17] precedence MTensor).  0 = off,
+  // engine byte-identical.
+  mint fifo_tb = MArgument_getInteger(args[18]);
+  thvm_atp_set_cp_fifo_tiebreak(atp, (u8)(fifo_tb != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

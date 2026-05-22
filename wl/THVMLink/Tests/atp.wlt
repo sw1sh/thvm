@@ -1037,6 +1037,29 @@ VerificationTest[
     TestID -> "ATP/method/selectionratio-100-proves"
 ]
 
+(* --- FifoTiebreak: Waldmeister `-:w1=fifo` secondary CP key -------- *)
+
+VerificationTest[
+    (* Preserving each surviving CP's insertion age across the post-orient
+       normalize sweep (so equal-weight ties resolve oldest-first) is a
+       reordering of the queue, not a soundness change: the proof still
+       lands and verifies. *)
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "FifoTiebreak" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/fifotiebreak-verifies"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "FifoTiebreak" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/fifotiebreak-proves"
+]
+
 (* --- AutoMaxWeight: completeness-preserving growing CP-weight bound --- *)
 
 VerificationTest[
@@ -1169,6 +1192,38 @@ VerificationTest[
         MaxWallSeconds -> 2.],
     $Failed,
     TestID -> "ATP/option/maxwallseconds-tiny-on-hard-fails"
+]
+
+(* --- the deep Sheffer/Wolfram single-NAND commutativity theorem ----
+   nand(p,q) == nand(q,p) over the single WolframAxioms NAND axiom is
+   Waldmeister's canonical hard target (LPO, skolem-highest precedence
+   p > q > nand).  The goal is unorientable, so the bidirectional MNF
+   front search ("GoalDirected") closes it where pure orientation cannot;
+   under the Waldmeister-faithful ordering it proves + verifies in a few
+   seconds.  FifoTiebreak (the `-:w1=fifo` secondary CP key) is supplied
+   here as part of the faithful config. *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["Commutativity", "WolframAxioms",
+            Method -> {"GoalDirected", "Ordering" -> "LPO",
+                "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
+                "FifoTiebreak" -> True, "UnfailingCP" -> True},
+            MaxSteps -> 5000, MaxWallSeconds -> 60.];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/wolfram/nand-commutativity-goaldirected-verifies"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["Commutativity", "WolframAxioms",
+        Method -> {"GoalDirected", "Ordering" -> "LPO",
+            "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
+            "FifoTiebreak" -> True, "UnfailingCP" -> True},
+        MaxSteps -> 5000, MaxWallSeconds -> 60.],
+    ProofObject,
+    TestID -> "ATP/wolfram/nand-commutativity-goaldirected-proves"
 ]
 
 (* === Completion mode + introspective return-type argument ========

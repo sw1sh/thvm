@@ -954,6 +954,11 @@ static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
       s->cp_packed[i] = NULL;
     }
     s->cp_trace[w] = s->cp_trace[i];
+    // Carry the insertion age down to the compacted slot so a
+    // cp_fifo_tiebreak reheapify can preserve it (Waldmeister w1=fifo);
+    // harmless otherwise (reheapify overwrites cp_seq when the flag
+    // is off).
+    s->cp_seq[w] = s->cp_seq[i];
     w++;
   }
   s->n_cps = w;
@@ -3017,6 +3022,11 @@ fn void thvm_atp_set_selection_ratio(AtpState *s, u32 modulo) {
   s->fifo_modulo = modulo;   // 0 -> default (11) at selection time
 }
 
+fn void thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->cp_fifo_tiebreak = on ? 1u : 0u;
+}
+
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // Out-of-range values clamp to ATP_CP_WEIGHT_ADD (0) so a garbage
 // mode falls back to the bare symbol-count heuristic.
@@ -3944,7 +3954,12 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     s->cp_pri[i] = atp_cp_priority(s, l, r);
     s->cp_goal[i] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
-    s->cp_seq[i] = s->cp_seq_next++;
+    // Waldmeister `-:w1=fifo`: keep each surviving CP's original
+    // insertion age so equal-weight ties stay oldest-first run-wide.
+    // The post-orient compaction (atp_normalize_graph) already carried
+    // cp_seq[] down to its packed slot, so leave it untouched here.
+    // Default: reassign a fresh monotone seq (engine byte-identical).
+    if (!s->cp_fifo_tiebreak) s->cp_seq[i] = s->cp_seq_next++;
   }
   // Floyd build-heap: sift down every internal node, last to first.
   for (u32 i = s->n_cps / 2; i > 0; ) {

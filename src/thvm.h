@@ -3340,6 +3340,15 @@ typedef struct {
   // heavy CP.  Default 11 (1:10, the most-fair Waldmeister setting);
   // Waldmeister also uses 50/100/200.  0 is treated as the default.
   u32  fifo_modulo;
+  // Waldmeister `-:w1=fifo` secondary CP key.  The heap already breaks
+  // equal-weight ties by cp_seq (insertion age), but the post-orient
+  // CP-normalize sweep (atp_normalize_graph) reheapifies and reassigns
+  // every cp_seq in heap-array order, scrambling the true insertion age.
+  // When set, the sweep PRESERVES each surviving CP's original cp_seq, so
+  // equal-weight ties resolve oldest-first across the whole run -- the
+  // stable FIFO secondary sort key Waldmeister's selection uses.  Default
+  // 0: reheapify reassigns cp_seq as before, engine byte-identical.
+  u8   cp_fifo_tiebreak;
   // Waldmeister MaxWeight: discard a critical pair whose combined term
   // weight exceeds this (0 = unbounded).  Bounds the search on
   // self-overlapping axioms (the single Wolfram NAND axiom) so the
@@ -3500,6 +3509,11 @@ fn void      thvm_atp_set_use_connectedness(AtpState *s, u8 on);
 // `modulo` CP selections.  0 = default (11).  Larger = more weight-
 // greedy; Waldmeister uses 11/50/100/200 per problem analysis.
 fn void      thvm_atp_set_selection_ratio(AtpState *s, u32 modulo);
+// Waldmeister `-:w1=fifo` secondary key: preserve each surviving CP's
+// original insertion age (cp_seq) across the post-orient normalize
+// sweep, so equal-weight ties resolve oldest-first run-wide.  0 = off
+// (reheapify reassigns cp_seq; engine byte-identical).
+fn void      thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on);
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // `thvm_atp_init` defaults to ATP_CP_WEIGHT_GT; out-of-range
