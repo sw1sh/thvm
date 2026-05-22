@@ -2866,6 +2866,17 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // helper treats the whole span as new.
   atp_ensure_rule_cap(s, ATP_INIT_RULES);
   atp_ensure_cp_cap(s, ATP_INIT_CPS);
+  // Proof-trace soft cap.  Default ATP_MAX_TRACE keeps the drop
+  // behavior byte-identical; THVM_ATP_TRACE_MAX raises it so a deep
+  // (1601-rule) completion can still record every rule's lineage.
+  s->t_max = ATP_MAX_TRACE;
+  {
+    const char *tm = getenv("THVM_ATP_TRACE_MAX");
+    if (tm != NULL && tm[0] != '\0') {
+      long v = strtol(tm, NULL, 10);
+      if (v > 0) s->t_max = (u32)v;
+    }
+  }
 #ifdef ATP_CP_GRAPH
   // 8a: start cp_graph as the empty CpSet[] -- n_cps is 0 here, so
   // the array mirror and the graph agree from the first instant.
@@ -2910,6 +2921,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->rhs);
   free(s->r_trace);
   free(s->r_orient);
+  free(s->trace);
   // Each cp_packed[] slot is a malloc'd byte string the queue owns;
   // free every non-NULL slot (free(NULL) is a no-op) then the array.
   if (s->cp_packed != NULL) {
@@ -3082,6 +3094,21 @@ static u8 atp_heap_under_pressure(void) {
   return HEAP_NEXT > half;
 }
 
+// Grow the heap-allocated trace[] to hold at least one more entry,
+// honoring the s->t_max soft cap.  Returns 1 if there is room for the
+// next push, 0 if the cap is hit (caller returns ATP_TRACE_NONE).
+static int atp_trace_ensure(AtpState *s) {
+  if (s->n_trace >= s->t_max) return 0;
+  if (s->n_trace < s->t_cap) return 1;
+  u32 cap = s->t_cap ? s->t_cap * 2u : 4096u;
+  if (cap > s->t_max) cap = s->t_max;
+  Term *nt = (Term *)realloc(s->trace, (size_t)cap * sizeof(Term));
+  if (nt == NULL) return 0;
+  s->trace = nt;
+  s->t_cap = cap;
+  return 1;
+}
+
 // Push a trace entry as a TAG_CTR with label = reason and children
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Returns the entry's
 // index in s->trace, or ATP_TRACE_NONE if the buffer is full.
@@ -3091,7 +3118,7 @@ static u8 atp_heap_under_pressure(void) {
 // init'd to zero by thvm_atp_init's calloc.
 static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
                           Term lhs, Term rhs) {
-  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
   Term children[4] = {
     term_new(0, TAG_NUM, 0, p_a),
     term_new(0, TAG_NUM, 0, p_b),
@@ -3116,7 +3143,7 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
                              Term lhs, Term rhs,
                              const u8 *pos, u8 pos_len) {
-  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
   Term children[5 + CP_MAX_DEPTH];
   children[0] = term_new(0, TAG_NUM, 0, p_a);
   children[1] = term_new(0, TAG_NUM, 0, p_b);
@@ -4423,7 +4450,7 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
                                     Term lhs, Term rhs,
                                     u8 side, u8 fwd,
                                     const u8 *pos, u8 pos_len) {
-  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
   Term children[7 + ATP_PROOF_MAX_DEPTH];
   children[0] = term_new(0, TAG_NUM, 0, p_a);
   children[1] = term_new(0, TAG_NUM, 0, rule_idx);

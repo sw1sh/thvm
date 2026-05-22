@@ -3219,9 +3219,16 @@ typedef struct {
   // Proof trace.  Stage 6.1: each entry is a TAG_CTR (see the
   // TRACE_* labels above).  6.1b/c wire this into add_equation,
   // orient_and_add, and generate_cps; 6.2 walks it to emit a
-  // PCL-shaped serialization.
-  Term trace[ATP_MAX_TRACE];
-  u32  n_trace;
+  // PCL-shaped serialization.  Heap-allocated and grown on demand
+  // (atp_trace_ensure) up to t_max entries; a fixed embedded array
+  // would both bloat sizeof(AtpState) and hard-cap the proof DAG at a
+  // depth a 1601-rule completion exceeds.  t_max defaults to
+  // ATP_MAX_TRACE (env THVM_ATP_TRACE_MAX raises it); entries past
+  // t_max are dropped (atp_trace_push returns ATP_TRACE_NONE).
+  Term *trace;
+  u32   n_trace;
+  u32   t_cap;
+  u32   t_max;
 
   // Stage 7.1: count of CPs dropped at generate-time because both
   // sides normalize to the same term under current R (trivial

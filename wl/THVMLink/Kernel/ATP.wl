@@ -1935,25 +1935,39 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
      - RHSInterreduce -> True  (IR_InterreduktionRechts -- the
        divergence that made the deep theorems unreachable)
      - UnfailingCP -> True  (faithful unfailing completion)
-   List form takes the same suboptions, overriding any default. *)
+   List form takes the same suboptions, overriding any default.  Pass
+   "GoalDirected" -> True to add the MNF bidirectional front on top of
+   the completion path for a symmetric goal that never meets at one
+   normal form. *)
 atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
-    Block[{o = Association[{subopts}], merged},
+    Block[{o = Association[{subopts}], merged, mnf},
         (* Waldmeister's Orkus default for an unrecognized (single-
            operator nand) problem is StdS = kbo(std), itl(mi), zb(mnf)
            (Sinai.h:109,131): KBO ordering, the interleaved CPdimension
            (itl(mi) -> SelectionRatio 51), the MixWeight classification
            (no cph(...) -> Heu_MixWeight, NewClassification.c:850), and
-           MNF goal-direction (zb(mnf) -> mnf=1).  With Mix the engine
-           follows WM's exact selection trajectory; Add diverges at
-           rule 10.  RHSInterreduce + UnfailingCP are part of faithful
-           unfailing completion.  StdS has no gj(), so GroundJoin is off. *)
+           goal normalization (zb(mnf)).  With Mix the engine follows
+           WM's exact selection trajectory; Add diverges at rule 10.
+           RHSInterreduce + UnfailingCP are part of faithful unfailing
+           completion.  StdS has no gj(), so GroundJoin is off.
+
+           WM's zb(mnf) is goal normalization, not a separate exhaustive
+           bidirectional front; thvm's MNF front search re-expands its
+           whole node table every time a rule is added (O(n_nodes) per
+           selection), which dominates a deep completion.  The preset
+           runs the completion path -- whose single-normal-form goal
+           check closes every goal WM's StdS closes -- and only adds
+           the MNF front when "GoalDirected" -> True is requested for a
+           symmetric goal the single-NF check cannot reach. *)
+        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", False], 1, 0];
+        o = KeyDrop[o, "GoalDirected"];
         merged = Join[<|
             "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
             "AutoPrecedence" -> True, "SelectionRatio" -> 51,
             "RHSInterreduce" -> True, "UnfailingCP" -> True,
             "CPSetInterreduce" -> True|>, o];
-        atpParseCompletionOpts[Normal[merged], 1]
+        atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
 atpParseMethod[m_] := (
