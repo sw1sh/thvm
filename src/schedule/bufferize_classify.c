@@ -635,11 +635,48 @@ static UPat const bufferize_upat_mul = {
 // (UOP_MUL with 2 children) goes through the declarative UPat layer;
 // the distinctness check remains a post-match guard so the
 // diagnostic can keep its prior structure.
+// True iff the movement-op chain rooted at `t` carries the tinygrad-`_pool`
+// im2col unfold signature -- a rank-reducing RESHAPE sitting directly over
+// an EXPAND (the `repeat`-collapse that materializes the sliding window).
+// A conv contraction REDUCE(SUM, MUL(unfold, weight)) has this on the
+// unfold operand; a true matmul (Linear) does not.  Matching tinygrad,
+// conv contractions are NOT routed to the contiguous-im2col GEMM path
+// (that materialization is the dominant peak-memory cost); they fuse as
+// a regular reduce indexing the strided unfold view in-kernel.
+static int bufferize_chain_has_pool_merge(Term t) {
+  Term cur = term_resolve(t);
+  for (u32 hops = 0; hops < 64; hops++) {
+    if (term_tag(cur) != TAG_UOP) return 0;
+    u8 op = term_ext(cur);
+    if (!uop_is_movement(op)) return 0;
+    u64 loc = term_val(cur);
+    Term src = term_resolve(heap_read(loc + 0));
+    if (op == UOP_RESHAPE && term_tag(src) == TAG_UOP
+        && term_ext(src) == UOP_EXPAND) {
+      Shape rs_out, ex_out;
+      if (term_shape_in(cur, 0, &rs_out) && term_shape_in(src, 0, &ex_out)
+          && rs_out.ndim < ex_out.ndim) {
+        return 1;
+      }
+    }
+    cur = src;
+  }
+  return 0;
+}
+
 static int bufferize_uop_is_matmul(u64 reduce_loc) {
   Term mul = term_resolve(heap_read(reduce_loc + 0));
   Term bindings[UPAT_NUM_BINDINGS] = {0};
   int is_mul   = upat_match(&bufferize_upat_mul, mul, bindings);
   int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
+  // Conv contraction: one MUL operand is the `_pool` unfold.  Decline
+  // matmul-protect so it fuses instead of materializing a contiguous
+  // im2col operand for GEMM.
+  if (is_mul && distinct
+      && (bufferize_chain_has_pool_merge(bindings[0])
+          || bufferize_chain_has_pool_merge(bindings[1]))) {
+    return 0;
+  }
 
   char const *e = getenv("THVM_DUMP_MATMUL_DETECT");
   if (e != NULL && e[0] == '1') {
