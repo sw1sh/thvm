@@ -364,6 +364,15 @@ gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
     ]
 ]
 
+(* TGrad[y]: PyTorch loss.backward().  Fire ONE requires_grad backward
+   walk seeded with ones-at-y, with no explicit target -- the C leaf rule
+   (grad_leaf_sup, target == 0 path) accumulates each reachable
+   requires_grad leaf's summed cotangent into its TenDesc.grad.  Reads
+   back per-tensor with TGradOf (the param.grad analogue).  Differentiates
+   w.r.t. every tensor the caller marked via TRequiresGrad; with nothing
+   marked it is a no-op.  Returns y for chaining. *)
+TGrad[y_TTerm] := (TWnf[TUOpGrad[y, gradOnesSeed[y]]]; y)
+
 TGrad[y_, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
 TGrad[y_, target_TTerm, gy_TTerm] :=
     tGradWithLeaves[y, target, gy, uopLeafTids[y]]

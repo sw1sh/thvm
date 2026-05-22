@@ -176,7 +176,7 @@ TAssign::usage       = "TAssign[dst, src] builds a UOP_ASSIGN node.  Wnf-fired i
 (* TConv2D / TConv2D / TConv2D all live in NN.wl now. *)
 
 (* (see above) *)
-TGrad::usage         = "TGrad[y, target] computes d(y)/d(target) via VJP (target-aware single walk).  Default cotangent seed = ones-at-y.shape (CONST(1.0) optionally expanded); for non-default seeds use TGrad[y, target, gy].\nTGrad[y, {x_1, ..., x_n}] computes d(y)/d(x_i) for every target in ONE shared requires_grad backward walk (each shared intermediate cotangent computed once and threaded to all leaves) and returns a List of n TTerm wrappers in target order.  Realize them together with TRealize[grads] so the shared upstream emits once.";
+TGrad::usage         = "TGrad[y] is loss.backward(): one requires_grad backward walk seeded with ones-at-y that accumulates each reachable requires_grad leaf's gradient into its TenDesc.grad (read back per tensor with TGradOf).  Differentiates w.r.t. every tensor marked via TRequiresGrad; returns y for chaining.\nTGrad[y, target] computes d(y)/d(target) via VJP (target-aware single walk).  Default cotangent seed = ones-at-y.shape; for non-default seeds use TGrad[y, target, gy].\nTGrad[y, {x_1, ..., x_n}] computes d(y)/d(x_i) for every target in ONE shared requires_grad backward walk and returns a List of n TTerm wrappers in target order.  Realize them together with TRealize[grads] so the shared upstream emits once.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
 (* TATP::usage and TATP[] live in Kernel/ATP.wl (loaded via the
