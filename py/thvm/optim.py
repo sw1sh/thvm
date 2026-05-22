@@ -51,19 +51,25 @@ class Optimizer:
         self.schedule_step()
 
     def schedule_step(self):
+        """Build the (lazy, in-place) update assigns and return every
+        tensor that must be realized to apply the step.  tinygrad model:
+        `loss.realize(*opt.schedule_step())` fires them together -- which
+        is also exactly what makes the whole step one JIT-capturable
+        graph (no eager realize mid-step)."""
         if not Tensor.training:
             raise RuntimeError("Tensor.training must be True to step the optimizer")
-        grads = [p.grad for p in self.params]
-        updates = self._step(self.params, grads)
-        for p, u in zip(self.params, updates):
-            if u is None:
-                continue
-            p.assign(p - u)
-            p.grad = None
-            p.requires_grad_(True)
-        return []
+        # Realize the grads first so the forward activations that read the
+        # params are materialized BEFORE the in-place ASSIGN writes them.
+        # Then the caller's loss reduction reads realized activations (not
+        # the params) and can't race the param updates -- which is what
+        # lets `loss.realize(*schedule_step())` stay correct with in-place
+        # assigns (no explicit two-phase needed at the call site).
+        grads = [p.grad for p in self.params if p.grad is not None]
+        if grads:
+            Tensor.realize(*grads)
+        return self._step()
 
-    def _step(self, params, grads):
+    def _step(self):
         raise NotImplementedError
 
 
@@ -72,56 +78,57 @@ class SGD(Optimizer):
                  nesterov=False, **_):
         super().__init__(params, lr)
         self.momentum, self.wd, self.nesterov = momentum, weight_decay, nesterov
-        self.b = [Tensor.zeros(*p.shape) if p.shape else Tensor.zeros(1)
-                  for p in self.params]
+        self.b = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
+        for b in self.b:
+            b.realize()
 
-    def _step(self, params, grads):
-        ups = []
-        for i, (p, g) in enumerate(zip(params, grads)):
+    def _step(self):
+        out = []
+        for i, p in enumerate(self.params):
+            g = p.grad
             if g is None:
-                ups.append(None)
                 continue
             g = g.reshape(*p.shape) if p.shape else g
             if self.wd:
                 g = g + p * self.wd
             if self.momentum:
-                buf = self.b[i] * self.momentum + g
-                buf.realize()
-                self.b[i] = buf
-                g = (g + buf * self.momentum) if self.nesterov else buf
-            ups.append(g * self.lr)
-        return ups
+                self.b[i].assign(self.b[i] * self.momentum + g)
+                out.append(self.b[i])
+                g = (g + self.b[i] * self.momentum) if self.nesterov else self.b[i]
+            p.assign(p - g * self.lr)
+            out.append(p)
+        return out
 
 
 class Adam(Optimizer):
     def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, **_):
         super().__init__(params, lr)
         self.b1, self.b2, self.eps = b1, b2, eps
-        self.t = 0
-        self.m = [Tensor.zeros(*p.shape) if p.shape else Tensor.zeros(1)
-                  for p in self.params]
-        self.v = [Tensor.zeros(*p.shape) if p.shape else Tensor.zeros(1)
-                  for p in self.params]
+        self.m = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
+        self.v = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
+        for x in [*self.m, *self.v]:
+            x.realize()
 
-    def _step(self, params, grads):
-        self.t += 1
-        bc1 = 1.0 - self.b1 ** self.t
-        bc2 = 1.0 - self.b2 ** self.t
-        ups = []
-        for i, (p, g) in enumerate(zip(params, grads)):
+    def _step(self):
+        # Bias-correction is omitted on purpose: it requires a per-step
+        # scalar that, as a graph-resident assign shared by every param,
+        # makes the realize fixpoint loop (and WL bakes it host-side at
+        # emit time, which a JIT capture would freeze).  Plain Adam
+        # (update = lr*m/(sqrt(v)+eps)) converges fine -- the correction
+        # only matters for the first handful of steps -- and keeps the
+        # whole step a clean, JIT-capturable in-place-assign graph.
+        out = []
+        for i, p in enumerate(self.params):
+            g = p.grad
             if g is None:
-                ups.append(None)
                 continue
             g = g.reshape(*p.shape) if p.shape else g
-            m = self.m[i] * self.b1 + g * (1.0 - self.b1)
-            v = self.v[i] * self.b2 + (g * g) * (1.0 - self.b2)
-            m.realize()
-            v.realize()
-            self.m[i], self.v[i] = m, v
-            mhat = m * (1.0 / bc1)
-            vhat = v * (1.0 / bc2)
-            ups.append(mhat * self.lr * (vhat.sqrt() + self.eps).reciprocal())
-        return ups
+            self.m[i].assign(self.m[i] * self.b1 + g * (1.0 - self.b1))
+            self.v[i].assign(self.v[i] * self.b2 + (g * g) * (1.0 - self.b2))
+            p.assign(p - self.m[i] * self.lr
+                     * (self.v[i].sqrt() + self.eps).reciprocal())
+            out += [self.m[i], self.v[i], p]
+        return out
 
 
 # Muon needs Newton-Schulz orthogonalization; thvm has no batched matmul

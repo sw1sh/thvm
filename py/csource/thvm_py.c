@@ -251,6 +251,19 @@ EXPORT void py_reclaim(void) {
 #endif
 }
 
+// --- JIT capture / replay (TinyJit) ---
+// jit_capture_begin arms recording; kernel dispatches + in-place ASSIGNs
+// during the realize land in the active slot.  jit_replay re-dispatches
+// the SAME kernel sequence against the SAME buffers -- no re-render, no
+// nvrtc, no fresh allocs (so per-step time + arena growth stay flat).
+// Records GPU work only; the wrapped step must read its changing inputs
+// from stable slots written (py_ten_write) before each replay.
+EXPORT uint32_t py_jit_begin(void)          { return jit_capture_begin(); }
+EXPORT void     py_jit_end(void)            { jit_capture_end(); }
+EXPORT uint32_t py_jit_replay(uint32_t s)   { return jit_replay(s); }
+EXPORT uint32_t py_jit_op_count(uint32_t s) { return jit_capture_op_count(s); }
+EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
+
 // --- introspection (Phase-4 cross-check surface) ---
 EXPORT uint32_t py_tens_count(void) {
   return TENS_NEXT > 1 ? TENS_NEXT - 1 : 0;
@@ -531,6 +544,7 @@ EXPORT uint32_t py_const_UOP_SCOPE_REG(void)    { return UOP_SCOPE_REG; }
 EXPORT uint32_t py_const_UOP_ADD(void)   { return UOP_ADD; }
 EXPORT uint32_t py_const_UOP_MUL(void)   { return UOP_MUL; }
 EXPORT uint32_t py_const_UOP_NEG(void)   { return UOP_NEG; }
+EXPORT uint32_t py_const_UOP_ASSIGN(void){ return UOP_ASSIGN; }
 EXPORT uint32_t py_const_UOP_CMPLT(void) { return UOP_CMPLT; }
 EXPORT uint32_t py_const_UOP_CMPEQ(void) { return UOP_CMPEQ; }
 EXPORT uint32_t py_const_UOP_RECIP(void) { return UOP_RECIP; }

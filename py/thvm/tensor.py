@@ -232,13 +232,13 @@ class Tensor:
         return Tensor._from_term(self.term, self._dtype, self._shape)
 
     def assign(self, x: "Tensor") -> "Tensor":
-        """tinygrad assign -- in-place replace.  Phase 3A: realize the
-        rhs and reuse its term (sufficient for BatchNorm running-stats
-        in training, which test_mnist doesn't exercise)."""
+        """tinygrad assign -- lazy IN-PLACE update.  Builds UOP_ASSIGN(self,
+        x); realizing it copies x's buffer into self's (the dst tid/buffer
+        stay stable) and returns self.  In-place + lazy is what makes the
+        optimizer step JIT-capturable (jit_capture_record_assign) and keeps
+        param buffers stable across replays -- exactly tinygrad/WL TAssign."""
         x = x if isinstance(x, Tensor) else Tensor(x, dtype=self._dtype)
-        x.realize()
-        self.term = x.term
-        self._pin()
+        self.term = Term(_uop_binary(K.ASSIGN, self.term, x.term))
         return self
 
     def replace(self, x: "Tensor") -> "Tensor":

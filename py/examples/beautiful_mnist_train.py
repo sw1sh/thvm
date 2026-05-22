@@ -101,7 +101,14 @@ def main():
         loss = (model(Tensor(Xtr[idx]))
                 .sparse_categorical_crossentropy(Tensor(Ytr[idx]))
                 .backward())
-        loss.realize(*opt.schedule_step())
+        # Realize loss + ALL grads in ONE pass so the memory planner sees
+        # the full forward+backward lifetime and frees each activation
+        # after backward consumes it (peak ~ live set, not sum-of-all).
+        # THEN the in-place optimizer ASSIGNs (writes) -- separate pass so
+        # they don't race the param reads above.
+        grads = [p.grad for p in opt.params if p.grad is not None]
+        Tensor.realize(loss, *grads)
+        Tensor.realize(*opt.schedule_step())
         lv = loss.item()
         dt = (time.time() - t0) * 1e3
         wall.append(dt)

@@ -111,6 +111,11 @@ _realize = _bind("py_realize", c_uint64, c_uint64)
 _pin_set = _bind("py_pin_set", None, c_uint64, c_uint64)
 _pin_drop = _bind("py_pin_drop", None, c_uint64)
 _reclaim = _bind("py_reclaim", None)
+_jit_begin = _bind("py_jit_begin", c_uint32)
+_jit_end = _bind("py_jit_end", None)
+_jit_replay = _bind("py_jit_replay", c_uint32, c_uint32)
+_jit_op_count = _bind("py_jit_op_count", c_uint32, c_uint32)
+_jit_drop = _bind("py_jit_drop", None, c_uint32)
 _tens_count = _bind("py_tens_count", c_uint32)
 _kernel_count = _bind("py_kernel_count", c_uint32)
 _ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
@@ -262,6 +267,7 @@ class _Constants:
     ADD = _read_uint32_const("py_const_UOP_ADD")
     MUL = _read_uint32_const("py_const_UOP_MUL")
     NEG = _read_uint32_const("py_const_UOP_NEG")
+    ASSIGN = _read_uint32_const("py_const_UOP_ASSIGN")
     CMPLT = _read_uint32_const("py_const_UOP_CMPLT")
     CMPEQ = _read_uint32_const("py_const_UOP_CMPEQ")
     RECIP = _read_uint32_const("py_const_UOP_RECIP")
@@ -548,6 +554,13 @@ class Thvm:
         """Free every backend buffer not reachable from a pinned tensor.
         Call between training steps to keep device memory flat."""
         _reclaim()
+
+    # ---- JIT capture / replay (TinyJit) ----
+    def jit_begin(self) -> int:       return int(_jit_begin())
+    def jit_end(self) -> None:        _jit_end()
+    def jit_replay(self, s: int) -> int: return int(_jit_replay(c_uint32(s)))
+    def jit_op_count(self, s: int) -> int: return int(_jit_op_count(c_uint32(s)))
+    def jit_drop(self, s: int) -> None: _jit_drop(c_uint32(s))
 
     # ---- introspection (Phase-4 cross-check surface) ----
     def tens_count(self) -> int:
