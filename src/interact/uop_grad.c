@@ -364,12 +364,39 @@ typedef struct {
 } GradDepEntry;
 static GradDepEntry GRAD_DEP[GRAD_DEP_CAP];
 
+// Per-forward-node cotangent accumulator ("the .grad slot is a graph").
+// Keyed on (forward-node heap loc, target).  The dup machinery shares a
+// fan-out forward node as ONE heap loc, so every backward arrival at that
+// node hashes here.  The FIRST arrival allocates the node's chain-rule cell
+// and stores its cotangent gy DIRECTLY (no wrapper -- the fan-out-1 majority
+// pays nothing).  A LATER arrival, if that cell has NOT fired yet, folds its
+// gy into the cell's gy slot via uop_binary(ADD,...) (a real ADD only for
+// genuine fan-out) and returns a discardable CONST(0): the chain rule reads
+// cell+1 lazily at fire time (see interact_grad_dispatch), so it sees the
+// summed cotangent and walks the subtree ONCE.  If the cell already fired
+// (a cross-parent arrival that lost the race), we fall back to a fresh cell
+// for that edge -- a baseline re-walk, still correct (leaves accumulate both
+// contributions).  `fired` is set by grad_slot_mark_fired when the cell's
+// chain rule runs.  No global dependency count: the graph-valued cotangent
+// makes correctness count-free; the per-slot fired flag is a local, best-
+// effort single-walk optimization.
+#define GRAD_SLOT_CAP (1u << 15)
+typedef struct {
+  u32  gen;
+  u64  loc;       // forward-node heap loc (dedup key)
+  Term target;    // dedup key
+  u64  cell;      // current accumulation cell (loc); cell+1 holds running gy
+  u8   fired;     // 1 once `cell`'s chain rule has fired
+} GradSlotEntry;
+static GradSlotEntry GRAD_SLOT[GRAD_SLOT_CAP];
+
 fn void grad_memo_begin_realize(void) {
   GRAD_MEMO_GEN++;
   if (GRAD_MEMO_GEN == 0) {
     GRAD_MEMO_GEN = 1;
     memset(GRAD_MEMO, 0, sizeof(GRAD_MEMO));
     memset(GRAD_DEP,  0, sizeof(GRAD_DEP));
+    memset(GRAD_SLOT, 0, sizeof(GRAD_SLOT));
   }
   GRAD_MEMO_HITS   = 0;
   GRAD_MEMO_MISSES = 0;
@@ -465,13 +492,99 @@ static int grad_depends_on_target(Term t, Term target) {
   return 1;
 }
 
+// Emit the BWD projection for a non-TEN child `child` given incoming
+// cotangent `gy`.  In the requires_grad single walk (GRAD_REQ_NCOUNT > 0,
+// target == 0) this routes through the per-node slot so a forward node
+// reached by N consumers fires its chain rule ONCE -- the remaining N-1
+// arrivals fold their cotangent into the slot and return a discardable
+// CONST(0).  Every other mode (target-aware fire, or the legacy SUP/DUP
+// projection) keeps one fresh cell per arrival: the target-aware path
+// returns the grad as a value (not a leaf side-effect) so it cannot discard
+// arrivals, and the legacy path needs the DUP nest's linearity.
+static Term grad_bwd_emit_uop(Term child, Term gy) {
+  Term cr = term_resolve(child);
+  if (term_tag(cr) == TAG_TEN) return grad_leaf_sup(cr, gy);
+  int shared = (GRAD_REQ_NCOUNT > 0 && grad_current_target() == 0);
+  if (!shared || term_tag(cr) != TAG_UOP) {
+    u64 c = grad_cell_alloc(child);
+    heap_set(c + 1, gy);
+    return grad_bwd_of(c);
+  }
+  u64  loc    = term_val(cr);
+  Term target = grad_current_target();
+  u32  idx    = grad_dep_hash(loc, target);
+  u32  dt      = grad_target_dtype();
+  for (u32 probe = 0; probe < GRAD_SLOT_CAP; probe++) {
+    GradSlotEntry *e = &GRAD_SLOT[(idx + probe) & (GRAD_SLOT_CAP - 1)];
+    if (e->gen == GRAD_MEMO_GEN && e->loc == loc && e->target == target) {
+      if (!e->fired) {
+        // Later arrival, cell not yet fired: fold gy into its running
+        // cotangent.  uop_binary applies x+0->x, so no spurious node; the
+        // cell reads cell+1 lazily at fire time and walks the subtree once.
+        u64 c = e->cell;
+        heap_set(c + 1, uop_binary(UOP_ADD, heap_read(c + 1), gy));
+        return uop_const(dt, 0);
+      }
+      // Current cell already fired: open a fresh accumulation cell for this
+      // edge (a baseline re-walk, correct -- leaves sum both fires).
+      u64 c = grad_cell_alloc(child);
+      heap_set(c + 1, gy);
+      e->cell  = c;
+      e->fired = 0;
+      return grad_bwd_of(c);
+    }
+    if (e->gen != GRAD_MEMO_GEN) {
+      // First arrival: store gy directly (no wrapper).
+      u64 c = grad_cell_alloc(child);
+      heap_set(c + 1, gy);
+      e->gen    = GRAD_MEMO_GEN;
+      e->loc    = loc;
+      e->target = target;
+      e->cell   = c;
+      e->fired  = 0;
+      return grad_bwd_of(c);
+    }
+  }
+  // Table full: fall back to a fresh per-arrival cell (correctness intact).
+  u64 c = grad_cell_alloc(child);
+  heap_set(c + 1, gy);
+  return grad_bwd_of(c);
+}
+
+// Mark the slot for forward node `y` (loc) as fired once its chain-rule cell
+// `cell_loc` runs, so later arrivals fall back instead of folding into a cell
+// that already consumed its cotangent.  No-op outside the requires_grad walk.
+static void grad_slot_mark_fired(u64 cell_loc, Term y, Term target) {
+  if (!(GRAD_REQ_NCOUNT > 0 && target == 0)) return;
+  if (term_tag(y) != TAG_UOP) return;
+  u64 loc = term_val(y);
+  u32 idx = grad_dep_hash(loc, target);
+  for (u32 probe = 0; probe < GRAD_SLOT_CAP; probe++) {
+    GradSlotEntry *e = &GRAD_SLOT[(idx + probe) & (GRAD_SLOT_CAP - 1)];
+    if (e->gen == GRAD_MEMO_GEN && e->loc == loc && e->target == target) {
+      if (e->cell == cell_loc) e->fired = 1;
+      return;
+    }
+    if (e->gen != GRAD_MEMO_GEN) return;
+  }
+}
+
 static Term grad_bwd_for_child(Term child, Term gy_for_child) {
   Term target = grad_current_target();
   if (target != 0 && !grad_depends_on_target(child, target)) {
     return uop_const(grad_target_dtype(), 0);
   }
+  // In the requires_grad single walk the per-node slot (grad_bwd_emit_uop)
+  // is the authoritative dedup: a forward node fires its chain rule on the
+  // FIRST arrival and merely grows its slot on later ones.  That makes the
+  // emit STATEFUL, so the (child, gy, target) memo -- which assumes a pure
+  // function of its keys -- must not cache it (a stale hit would re-fire a
+  // node or drop a contribution; this is the multi-layer NaN/zero bug).
+  int shared = (GRAD_REQ_NCOUNT > 0 && target == 0);
   Term cached;
-  if (grad_memo_lookup(child, gy_for_child, target, &cached)) return cached;
+  if (!shared && grad_memo_lookup(child, gy_for_child, target, &cached)) {
+    return cached;
+  }
 
   Term result;
   if (target != 0) {
@@ -483,13 +596,9 @@ static Term grad_bwd_for_child(Term child, Term gy_for_child) {
     result = grad_leaf_sup(child, gy_for_child);
     goto done;
   }
-  {
-    u64 c = grad_cell_alloc(child);
-    heap_set(c + 1, gy_for_child);
-    result = grad_bwd_of(c);
-  }
+  result = grad_bwd_emit_uop(child, gy_for_child);
 done:
-  grad_memo_insert(child, gy_for_child, target, result);
+  if (!shared) grad_memo_insert(child, gy_for_child, target, result);
   return result;
 }
 
@@ -552,6 +661,11 @@ static Term interact_grad_dispatch(Term grad_term) {
   // kernels into one.
   Term gy        = term_resolve(heap_read(cell_orig + 1));
   Term target    = heap_read(cell_orig + 2);
+
+  // This cell is now consuming its cotangent: later arrivals at the same
+  // forward node must fall back rather than fold into cell+1 (which we just
+  // read).  No-op outside the requires_grad walk.
+  grad_slot_mark_fired(cell_orig, y, target);
 
   u8 y_tag = term_tag(y);
 
@@ -649,21 +763,12 @@ static Term interact_grad_dispatch(Term grad_term) {
       if (!b_is_ten) { cb = grad_cell_alloc(b); b_fwd = grad_fwd_of(cb); }
       Term gy_a = uop_binary(UOP_MUL, b_fwd, gy);
       Term gy_b = uop_binary(UOP_MUL, a_fwd, gy);
-      // BWD references.  TEN children short-circuit to leaf SUPs;
-      // others use the cells above (whose gy slot we patch now).
-      Term a_bwd, b_bwd;
-      if (a_is_ten) {
-        a_bwd = grad_leaf_sup(a_resolved, gy_a);
-      } else {
-        heap_set(ca + 1, gy_a);
-        a_bwd = grad_bwd_of(ca);
-      }
-      if (b_is_ten) {
-        b_bwd = grad_leaf_sup(b_resolved, gy_b);
-      } else {
-        heap_set(cb + 1, gy_b);
-        b_bwd = grad_bwd_of(cb);
-      }
+      // BWD references.  ca/cb above carry only the FWD cross-projections
+      // (a_fwd/b_fwd); the BWD side goes through grad_bwd_for_child so a
+      // shared child fires once and accumulates via its slot.
+      (void)ca; (void)cb;
+      Term a_bwd = grad_bwd_emit_uop(a_resolved, gy_a);
+      Term b_bwd = grad_bwd_emit_uop(b_resolved, gy_b);
       return uop_binary(UOP_ADD, a_bwd, b_bwd);
     }
 
@@ -691,9 +796,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       Term k      = grad_inv_ln2_const();
       Term factor = uop_binary(UOP_MUL, ra, k);
       Term gy_a   = uop_binary(UOP_MUL, gy, factor);
-      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
-      heap_set(ca + 1, gy_a);
-      return grad_bwd_of(ca);
+      (void)ca;
+      return grad_bwd_emit_uop(a_resolved, gy_a);
     }
 
     case UOP_EXP2: {
@@ -708,9 +812,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       Term k      = grad_ln2_const();
       Term factor = uop_binary(UOP_MUL, ea, k);
       Term gy_a   = uop_binary(UOP_MUL, gy, factor);
-      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
-      heap_set(ca + 1, gy_a);
-      return grad_bwd_of(ca);
+      (void)ca;
+      return grad_bwd_emit_uop(a_resolved, gy_a);
     }
 
     case UOP_RECIP: {
@@ -728,9 +831,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       Term sq = uop_binary(UOP_MUL, r1, r2);
       Term ns = uop_unary(UOP_NEG, sq);
       Term gy_a = uop_binary(UOP_MUL, gy, ns);
-      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
-      heap_set(ca + 1, gy_a);
-      return grad_bwd_of(ca);
+      (void)ca;
+      return grad_bwd_emit_uop(a_resolved, gy_a);
     }
 
     case UOP_SQRT: {
@@ -746,9 +848,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       Term k      = grad_half_const();
       Term factor = uop_binary(UOP_MUL, k, inv_sa);
       Term gy_a   = uop_binary(UOP_MUL, gy, factor);
-      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
-      heap_set(ca + 1, gy_a);
-      return grad_bwd_of(ca);
+      (void)ca;
+      return grad_bwd_emit_uop(a_resolved, gy_a);
     }
 
     // === REDUCE ===
@@ -796,8 +897,8 @@ static Term interact_grad_dispatch(Term grad_term) {
         // Unknown reduce kind: pass gy through unchanged (best effort).
         gy_a = gy_lifted;
       }
-      heap_set(ca + 1, gy_a);
-      return grad_bwd_of(ca);
+      (void)ca;
+      return grad_bwd_emit_uop(a, gy_a);
     }
 
     // === Movement ops ===
