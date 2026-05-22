@@ -8,6 +8,9 @@ fn void tensor_mark_buf_preserved(u32 id) {
   switch (d->backend->id) {
     case 1: cpu_buf_mark_preserved(d->buf_id); break;
     case 2: thvm_metal_buf_mark_preserved(d->buf_id); break;
+#ifdef THVM_HAS_CUDA
+    case 3: cuda_buf_mark_preserved(d->buf_id); break;
+#endif
     default: break;
   }
 }

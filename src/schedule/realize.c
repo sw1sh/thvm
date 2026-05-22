@@ -60,6 +60,9 @@ fn Term thvm_realize(Term expr) {
   grad_memo_begin_realize();
   u32 cpu_wm   = cpu_buf_pool_begin();
   u32 metal_wm = thvm_metal_buf_pool_begin();
+#ifdef THVM_HAS_CUDA
+  u32 cuda_wm  = cuda_buf_pool_begin();
+#endif
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
 
@@ -136,6 +139,10 @@ fn Term thvm_realize(Term expr) {
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
+#ifdef THVM_HAS_CUDA
+  cuda_buf_pool_rollback_with_preserve(cuda_wm);
+  cuda_buf_clear_preserved(cuda_wm);
+#endif
 
   // Auto-trigger Cheney collection once the dyn heap crosses a
   // configurable fraction of from-space.  The result Term is added
@@ -204,6 +211,9 @@ fn Term thvm_realize_many(Term ctr_term) {
   grad_memo_begin_realize();
   u32 cpu_wm   = cpu_buf_pool_begin();
   u32 metal_wm = thvm_metal_buf_pool_begin();
+#ifdef THVM_HAS_CUDA
+  u32 cuda_wm  = cuda_buf_pool_begin();
+#endif
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
   u32 kn_at_call_start = KERNELS_NEXT;
@@ -251,6 +261,10 @@ fn Term thvm_realize_many(Term ctr_term) {
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
+#ifdef THVM_HAS_CUDA
+  cuda_buf_pool_rollback_with_preserve(cuda_wm);
+  cuda_buf_clear_preserved(cuda_wm);
+#endif
 
   if (gc_enabled()) {
     static int gc_disabled_env = -1;

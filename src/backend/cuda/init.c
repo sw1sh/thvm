@@ -32,6 +32,7 @@ typedef struct {
   CUdeviceptr dptr;       // device allocation; 0 = free slot
   u64         nbytes;
   u32         refcount;
+  u8          preserved;  // per-realize pool keep-flag (see buf_pool.c)
 } CudaBuf;
 
 #define CUDA_BUFS_CAP       (1u << 16)
