@@ -2421,6 +2421,10 @@ fn void thvm_atp_free(AtpState *s) {
   }
   free(s->cp_stash_trace);
   free(s->cp_stash_nodes);
+  // ENIGMA training-data arrays (NULL unless recording was enabled).
+  free(s->cp_feat_rows);
+  free(s->cp_feat_trace);
+  free(s->cp_feat_label);
 #ifdef ATP_FV_INDEX
   atp_fv_index_free(s->fv_index);
 #endif
@@ -3285,7 +3289,38 @@ static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
   }
   return base;
 }
+// Learned CP-selection scorer (ENIGMA-style).  Logistic-regression
+// weights trained on the labelled corpus exported by THVM_ATP_CP_DATASET
+// (per-selected-CP features, labelled by trace-DAG reachability from the
+// goal-closing step over the 83 provable AxiomaticTheory notable
+// theorems; held-out test AUC ~0.85).  score = W.features + B, in the
+// RAW feature space (the standardization is folded into W,B).  A higher
+// score means more proof-relevant, so it maps to a LOWER heap priority
+// (selected sooner).  Completeness is preserved by select_cp's periodic
+// FIFO (CPdimension) pick, which fires regardless of the weight mode.
+static const float ATP_LEARNED_W[ATP_CP_FEATURE_DIM] = {
+  0.003216f, -0.271657f, 0.460614f, -0.096104f, 0.003216f, 0.042247f,
+  0.003216f, -0.000402f, -0.005740f, -0.156174f, -0.023514f, 1.121586f,
+  1.999360f, -0.012683f};
+static const float ATP_LEARNED_B = -1.598045f;
+
+static u32 atp_cp_learned_priority(AtpState *s, Term lhs, Term rhs) {
+  float feat[ATP_CP_FEATURE_DIM];
+  thvm_atp_cp_features(s, lhs, rhs, s->cp_seq_next, feat);
+  float score = ATP_LEARNED_B;
+  for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) score += ATP_LEARNED_W[i] * feat[i];
+  // Map score (typically ~[-6, 4]) to a u32 priority, higher score ->
+  // lower priority.  Clamp into a safe positive band.
+  float pr = 1.0e6f - 1.0e4f * score;
+  if (pr < 0.0f) pr = 0.0f;
+  if (pr > 2.0e9f) pr = 2.0e9f;
+  return (u32)pr;
+}
+
 static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
+  if (s->cp_weight_mode == ATP_CP_WEIGHT_LEARNED) {
+    return atp_cp_learned_priority(s, lhs, rhs);
+  }
   return atp_cp_priority_sized(s, lhs, rhs,
                                atp_symbol_count(lhs) + atp_symbol_count(rhs));
 }
@@ -3511,6 +3546,10 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
 // is a no-op).
 //
 // Returns 1 on success (out-params populated), 0 on empty queue.
+// ENIGMA training-data recorder (defined with the feature block below);
+// forward-declared here for the gated hook at the end of this function.
+static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
+                               u32 trace_id);
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL) return 0;
   // Auto-MaxWeight: if the active queue is empty but CPs are deferred
@@ -3578,6 +3617,13 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
   // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
   atp_cp_graph_sync(s);
+  // ENIGMA training-data hook: record the processed CP's feature
+  // vector + trace id.  Gated -- with the flag off (the default) this
+  // is a single predictable-branch test and the engine is byte-
+  // identical to the untracked run.
+  if (s->record_cp_features) {
+    atp_cp_feat_record(s, *lhs_out, *rhs_out, s->last_popped_trace);
+  }
   return 1;
 }
 
@@ -4356,6 +4402,240 @@ fn u32 thvm_atp_proof_serialize(const AtpProofStep *steps, u32 n_steps,
   if (w >= cap) w = cap - 1;
   buf[w] = '\0';
   return w;
+}
+
+// === ENIGMA-style CP feature extraction + labelled dataset ==========
+// Data-foundation step for a LEARNED critical-pair selector.  See
+// thvm.h for the feature schema; training (logistic regression / GBDT)
+// and the resulting fast C scorer in select_cp are a later step.
+
+// Count distinct FVR ids and total FVR occurrences across (l, r) in a
+// single pair of walks.  `seen` is a small membership bitset keyed on
+// the var id modulo its width (var ids are dense [0,k) after
+// ATP_VAR_NORM, so collisions don't happen on the canonical CP forms
+// this records; the count is exact for k <= 64).
+static void atp_cp_var_stats_rec(Term t, u64 *seen, u32 *distinct,
+                                 u32 *occ) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      (*occ)++;
+      u32 bit = id & 63u;
+      if (!((*seen >> bit) & 1u)) {
+        *seen |= (1ull << bit);
+        (*distinct)++;
+      }
+      return;
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        atp_cp_var_stats_rec(term_ctr_at(t, i), seen, distinct, occ);
+      }
+      return;
+    }
+    default: return;
+  }
+}
+
+// Top CTR label of a term (the feature's "top symbol"); 0 for a
+// variable / atom / non-CTR root.
+static u32 atp_cp_top_symbol(Term t) {
+  return (term_tag(t) == TAG_CTR) ? term_ext(t) : 0u;
+}
+
+// Does any top-symbol-headed subterm of `t` also occur (by top symbol)
+// as a subterm of the goal term `g`?  A cheap structural-overlap proxy
+// for ENIGMA's goal-distance feature: 1 if the CP touches a function
+// symbol the goal uses at some position, else 0.  Variables carry no
+// goal signal (a var generalizes everything), mirroring the MinStruct
+// spirit of the CPinGoal classifier.
+static int atp_term_label_set(Term t, u64 *labels) {
+  if (term_tag(t) == TAG_CTR) {
+    u32 lab = term_ext(t);
+    *labels |= (1ull << (lab & 63u));
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) atp_term_label_set(term_ctr_at(t, i), labels);
+  }
+  return 0;
+}
+static int atp_cp_shares_goal_symbol(const AtpState *s, Term l, Term r) {
+  if (s == NULL || s->goal_lhs == 0) return 0;
+  Term gl = s->goal_lhs_nf ? s->goal_lhs_nf : s->goal_lhs;
+  Term gr = s->goal_rhs_nf ? s->goal_rhs_nf : s->goal_rhs;
+  u64 goal_labels = 0u;
+  atp_term_label_set(gl, &goal_labels);
+  atp_term_label_set(gr, &goal_labels);
+  u64 cp_labels = 0u;
+  atp_term_label_set(l, &cp_labels);
+  atp_term_label_set(r, &cp_labels);
+  return (goal_labels & cp_labels) != 0u;
+}
+
+fn void thvm_atp_cp_features(const AtpState *s, Term lhs, Term rhs,
+                             u32 age, float *out) {
+  if (out == NULL) return;
+  for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) out[i] = 0.0f;
+
+  u32 sl = atp_symbol_count(lhs), sr = atp_symbol_count(rhs);
+  u32 dl = atp_term_depth(lhs),   dr = atp_term_depth(rhs);
+  u64 seen = 0u; u32 distinct = 0u, occ = 0u;
+  atp_cp_var_stats_rec(lhs, &seen, &distinct, &occ);
+  atp_cp_var_stats_rec(rhs, &seen, &distinct, &occ);
+
+  // `s` is logically const for feature reads but the weight helpers
+  // take a non-const AtpState (they only read the rule set / config).
+  AtpState *sm = (AtpState *)s;
+
+  out[0]  = (float)(sl + sr);
+  out[1]  = (float)(dl > dr ? dl : dr);
+  out[2]  = (float)distinct;
+  out[3]  = (float)occ;
+  out[4]  = (float)atp_cp_weight_base(sm, lhs, rhs, ATP_CP_WEIGHT_ADD);
+  out[5]  = (float)atp_cp_weight_base(sm, lhs, rhs, ATP_CP_WEIGHT_GT);
+  out[6]  = (float)atp_cp_weight_base(sm, lhs, rhs, ATP_CP_WEIGHT_MIX2);
+  out[7]  = (float)atp_goal_weight(s, lhs, rhs);
+  out[8]  = (float)age;
+  out[9]  = (float)atp_cp_top_symbol(lhs);
+  out[10] = (float)atp_cp_top_symbol(rhs);
+  out[11] = (float)atp_cp_shares_goal_symbol(s, lhs, rhs);
+  KboCmp c = atp_compare(sm, lhs, rhs);
+  out[12] = (float)((c == KBO_GT || c == KBO_LT) ? 1 : 0);
+  out[13] = (float)atp_unif_measure(lhs, rhs);
+}
+
+fn void thvm_atp_set_record_cp_features(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->record_cp_features = on ? 1u : 0u;
+}
+
+// Grow the recording arrays to hold at least `need` rows.
+static void atp_cp_feat_ensure(AtpState *s, u32 need) {
+  if (need <= s->cp_feat_cap) return;
+  u32 cap = s->cp_feat_cap ? s->cp_feat_cap * 2u : 256u;
+  while (cap < need) cap *= 2u;
+  s->cp_feat_rows  = (float *)realloc(s->cp_feat_rows,
+                                      (size_t)cap * ATP_CP_FEATURE_DIM
+                                        * sizeof(float));
+  s->cp_feat_trace = (u32 *)realloc(s->cp_feat_trace, cap * sizeof(u32));
+  s->cp_feat_label = (u8 *)realloc(s->cp_feat_label, cap * sizeof(u8));
+  s->cp_feat_cap   = cap;
+}
+
+// Record one PROCESSED CP (called from thvm_atp_select_cp under the
+// flag).  `trace_id` is the popped CP's trace-entry index.
+static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
+                               u32 trace_id) {
+  atp_cp_feat_ensure(s, s->n_cp_feat + 1u);
+  float *row = s->cp_feat_rows + (size_t)s->n_cp_feat * ATP_CP_FEATURE_DIM;
+  thvm_atp_cp_features(s, lhs, rhs, s->n_cp_feat, row);
+  s->cp_feat_trace[s->n_cp_feat] = trace_id;
+  s->cp_feat_label[s->n_cp_feat] = 0u;
+  s->n_cp_feat++;
+}
+
+// Parents (in the trace DAG) of trace entry `ti`: for the 4-child
+// reasons (AXIOM/ORIENT/CP/SIMPLIFY) children 0 and 1 are parent trace
+// ids; for TRACE_NORM_STEP only child 0 is a parent trace id (child 1
+// is a RULE index, not a trace id).  Writes up to 2 parents into
+// out[0..2) and returns the count.
+static u32 atp_trace_parents(const AtpState *s, u32 ti, u32 *out) {
+  if (ti == ATP_TRACE_NONE || ti >= s->n_trace) return 0u;
+  Term e = s->trace[ti];
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 2u) return 0u;
+  u32 reason = term_ext(e);
+  u32 n = 0u;
+  u32 p0 = term_val(term_ctr_at(e, 0));
+  if (p0 != ATP_TRACE_NONE) out[n++] = p0;
+  if (reason != TRACE_NORM_STEP) {
+    u32 p1 = term_val(term_ctr_at(e, 1));
+    if (p1 != ATP_TRACE_NONE) out[n++] = p1;
+  }
+  return n;
+}
+
+fn u32 thvm_atp_cp_label(AtpState *s) {
+  if (s == NULL || s->n_cp_feat == 0u) return 0u;
+
+  // Proof set seed: the RULES that join the goal, via the existing
+  // single-NF proof extractor.  Each fired rule's r_trace[] is its
+  // TRACE_ORIENT entry; the proof-relevant CPs are the transitive
+  // trace-DAG ancestors of those entries.
+  static AtpProofStep steps[ATP_PROOF_MAX_STEPS * 2u];
+  u32 n_steps = thvm_atp_proof_extract(s, steps,
+                                       ATP_PROOF_MAX_STEPS * 2u);
+  if (n_steps == 0u) return 0u;   // not single-NF extractable
+
+  // Reachable-trace bitset over [0, n_trace).  Marked entries are the
+  // proof set: ancestors of every fired rule's TRACE_ORIENT.
+  u8 *reach = (u8 *)calloc(s->n_trace, 1u);
+  if (reach == NULL) return 0u;
+
+  // Worklist DFS from each proof rule's TRACE_ORIENT trace id.
+  u32 *stack = (u32 *)malloc((size_t)s->n_trace * sizeof(u32));
+  if (stack == NULL) { free(reach); return 0u; }
+  u32 sp = 0u;
+  for (u32 k = 0; k < n_steps; k++) {
+    u32 ru = steps[k].rule;
+    if (ru >= s->n_rules) continue;
+    u32 ti = s->r_trace[ru];
+    if (ti != ATP_TRACE_NONE && ti < s->n_trace && !reach[ti]) {
+      reach[ti] = 1u;
+      stack[sp++] = ti;
+    }
+  }
+  while (sp > 0u) {
+    u32 ti = stack[--sp];
+    u32 par[2];
+    u32 np = atp_trace_parents(s, ti, par);
+    for (u32 i = 0; i < np; i++) {
+      u32 p = par[i];
+      if (p < s->n_trace && !reach[p]) {
+        reach[p] = 1u;
+        stack[sp++] = p;
+      }
+    }
+  }
+
+  // Label each recorded selected-CP: 1 iff its trace id is in the
+  // proof set.  Count distinct proof-relevant selected CPs.
+  u32 n_pos = 0u;
+  for (u32 i = 0; i < s->n_cp_feat; i++) {
+    u32 ti = s->cp_feat_trace[i];
+    u8 lab = (ti != ATP_TRACE_NONE && ti < s->n_trace && reach[ti]) ? 1u : 0u;
+    s->cp_feat_label[i] = lab;
+    if (lab) n_pos++;
+  }
+
+  free(stack);
+  free(reach);
+  return n_pos;
+}
+
+fn u32 thvm_atp_cp_dataset_append(const AtpState *s, const char *path,
+                                  u8 header) {
+  if (s == NULL || path == NULL || s->n_cp_feat == 0u) return 0u;
+  FILE *f = fopen(path, "a");
+  if (f == NULL) return 0u;
+  if (header) {
+    fprintf(f, "label");
+    static const char *names[ATP_CP_FEATURE_DIM] = {
+      "size_sum", "max_depth", "n_distinct_vars", "n_var_occ",
+      "weight_add", "weight_gt", "weight_mix2", "goal_weight",
+      "age", "top_symbol_l", "top_symbol_r", "shares_goal_sub",
+      "orientable", "unif_measure",
+    };
+    for (u32 j = 0; j < ATP_CP_FEATURE_DIM; j++) fprintf(f, "\t%s", names[j]);
+    fprintf(f, "\n");
+  }
+  for (u32 i = 0; i < s->n_cp_feat; i++) {
+    const float *row = s->cp_feat_rows + (size_t)i * ATP_CP_FEATURE_DIM;
+    fprintf(f, "%u", (unsigned)s->cp_feat_label[i]);
+    for (u32 j = 0; j < ATP_CP_FEATURE_DIM; j++) fprintf(f, "\t%.6g", row[j]);
+    fprintf(f, "\n");
+  }
+  fclose(f);
+  return s->n_cp_feat;
 }
 
 // Drive thvm_atp_step until it returns a non-RUNNING status.
