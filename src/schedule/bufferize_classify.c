@@ -669,10 +669,16 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
   Term bindings[UPAT_NUM_BINDINGS] = {0};
   int is_mul   = upat_match(&bufferize_upat_mul, mul, bindings);
   int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
-  // Conv contraction: one MUL operand is the `_pool` unfold.  Decline
-  // matmul-protect so it fuses instead of materializing a contiguous
-  // im2col operand for GEMM.
-  if (is_mul && distinct
+  // Conv contraction: one MUL operand is the `_pool` unfold.  On GPU,
+  // decline matmul-protect so it fuses (the fused reduce is fast and
+  // avoids the large contiguous im2col that OOMs the device).  On CPU,
+  // KEEP protecting: BLAS (Accelerate) GEMM over a materialized im2col
+  // is ~1000x faster than the fused windowed reduce in the UOp walker
+  // (a single conv2 forward is 9s interpreted vs ms via cblas), and the
+  // im2col lives in plentiful host RAM.  Backend id: 1=CPU, 2=Metal,
+  // 3=CUDA.
+  int gpu_backend = (CURRENT_BACKEND != NULL && CURRENT_BACKEND->id != 1);
+  if (gpu_backend && is_mul && distinct
       && (bufferize_chain_has_pool_merge(bindings[0])
           || bufferize_chain_has_pool_merge(bindings[1]))) {
     return 0;
