@@ -1511,27 +1511,53 @@ VerificationTest[
 ]
 
 (* The deep landmark -- AndAssociativity over the single Sheffer/nand
-   axiom (Waldmeister's andassoc, ~677 rules) -- is NOT in the default
-   suite: even the lean C bench needs ~345s under Mix (~119s under GT,
-   but GT's ~300k-CP queue exhausts the paclet's non-GC heap), so the
-   paclet does not reach the goal-join inside a practical wall budget.
-   To probe it manually, set THVM_ATP_ANDASSOC_TEST=1 and a generous
-   MaxWallSeconds, with THVM_ATP_TRACE_MAX=400000 in the environment and
-   an external RSS guard (a long completion can climb past 12GB):
+   axiom -- is NOT in the default suite: the goal-join lies far past a
+   practical wall budget for the paclet's UNIVERSAL conjecture form.
+   The conjecture is ForAll[{p,q,r}, And(p,And(q,r)) == And(And(p,q),r)]
+   with p,q,r universally quantified.  This is strictly harder than the
+   ground instance the C bench's `andassoc` goal uses (rigid skolem
+   constants p,q,r): the universal goal-check only fires once R reduces
+   BOTH schematic sides to a common normal form, which needs deeper
+   completion.  Measured (tests/test_atp_wolfram_bench): the ground
+   `andassoc` PROVES under GT at ~6300 steps / ~116s; the universal
+   `andassocu` is still RUNNING at 200s (~7800 steps, ~444k live CPs)
+   under the same GT config -- the ground bench's 116s does NOT transfer.
+
+   The CP heap is GC-bounded in BOTH paths: thvm_init calls gc_init, and
+   thvm_atp_step runs thvm_atp_gc_collect at the half-space mark, so the
+   C bench holds ~3.5-4 GB even at 273k-444k live CPs.  The paclet shares
+   that engine via thvm_atp_run.  The historical >12 GB climb came from
+   RecordNorm->True: every CP-normalize rewrite pushes a GC-rooted
+   TRACE_NORM_STEP, and a long unterminated completion accumulates them
+   (the joined-CP rewind only reclaims trivially-joined chains).
+   RecordNorm->False routes through the fast indexed normalize (no
+   per-step trace push) and lets the WL builder reconstruct the chain via
+   the emitNorm BFS over the CP/ORIENT/SIMPLIFY DAG -- so the run stays
+   memory-flat (verified: swap flat / >80% free RAM across 250-420s
+   paclet runs).  Neither GT nor Mix closes the universal form inside a
+   practical wall budget: under Mix the C bench is still RUNNING at 420s
+   (~11900 steps, ~331k live CPs, ~3.5 GB), so the ground bench's ~116s
+   GT proof is no guide to the universal-conjecture cost.
+
+   To probe manually, set THVM_ATP_ANDASSOC_TEST=1 with a generous
+   MaxWallSeconds and THVM_ATP_TRACE_MAX raised; RecordNorm->False keeps
+   it memory-flat:
      TFindEquationalProof["AndAssociativity", "WolframAxioms",
-       Method -> {"Waldmeister", "CriticalPairWeight" -> "Mix"},
+       Method -> {"Waldmeister", "CriticalPairWeight" -> "Mix",
+         "RecordNorm" -> False},
        MaxWallSeconds -> 600]
    The VerificationTest below only runs when that env var is set; it
    asserts the returned ProofObject VERIFIES (Head ... === Success), so a
-   $Failed / Symbol head -- the current behavior at <= 600s -- is NOT a
-   pass.  Left here as the executable spec for closing the remaining
-   search-rate / heap-residency gap (the paclet needs CP-queue GC to run
-   the fast GT config that the C bench proves at 119s). *)
+   $Failed / Symbol head is NOT a pass.  Left as the executable spec for
+   closing the remaining search-RATE gap (memory is no longer the
+   blocker): the universal conjecture needs more completion than a
+   practical paclet wall budget reaches. *)
 VerificationTest[
     If[ Environment["THVM_ATP_ANDASSOC_TEST"] === "1",
         Module[{p},
             p = TFindEquationalProof["AndAssociativity", "WolframAxioms",
-                Method -> {"Waldmeister", "CriticalPairWeight" -> "Mix"},
+                Method -> {"Waldmeister", "CriticalPairWeight" -> "Mix",
+                    "RecordNorm" -> False},
                 MaxWallSeconds -> 600];
             Head @ Quiet @ p["ProofFunction"][p["Theorems"]]
         ],

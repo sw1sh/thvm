@@ -166,6 +166,18 @@ static void goal_andassoc(Term *l, Term *r) {
   // RHS = And(And(p,q), r)
   *r = and2(and2(p, q), rr);
 }
+// andassocu = AndAssociativity with p,q,r as UNIVERSAL variables
+// (TAG_FVR) rather than ground skolem constants -- the form the paclet's
+// AxiomaticTheory["WolframAxioms","NotableTheorems"]["AndAssociativity"]
+// conjecture actually carries (ForAll[{p,q,r}, ...]).  The ground form
+// (goal_andassoc) is a rigid instance; this is the schema, so it
+// exercises the same trajectory the user-facing TFindEquationalProof
+// drives -- the matched-config comparison point for the paclet.
+static void goal_andassocu(Term *l, Term *r) {
+  Term p = fv(0), q = fv(1), rr = fv(2);
+  *l = and2(p, and2(q, rr));
+  *r = and2(and2(p, q), rr);
+}
 
 int main(int argc, char **argv) {
   thvm_init();
@@ -327,6 +339,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "deep5")  == 0) goal_deep(&gl, &gr, 5u);
   else if (strcmp(goal, "wolfram")== 0) goal_wolfram(&gl, &gr);
   else if (strcmp(goal, "andassoc")==0) goal_andassoc(&gl, &gr);
+  else if (strcmp(goal, "andassocu")==0) goal_andassocu(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
@@ -413,6 +426,8 @@ int main(int argc, char **argv) {
   printf("=> %s\n", sn);
   printf("   goal=%s  steps=%u  rules=%u  cps=%u  max_cps=%u  %.1fs\n",
          goal, i, s->n_rules, s->n_cps, max_cps, el);
+  printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
+         s->n_trace, s->t_max, s->record_norm_steps);
   printf("   dropped: joinable=%u queue-subsumed=%u "
          "rule-subsumed=%u connected=%u orphan=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
