@@ -295,10 +295,17 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Render_uop_c (post-F6) handles non-contig views correctly via
   // kernel_lift's view.strides path -- the gate is purely a perf
   // knob, not a correctness one.
-  static int strided_jit_known = 0, strided_jit_enabled = 0;
+  // Strided/chained-input kernels (the conv im2col unfold reads the
+  // _pool view) are now DEFAULT-JIT'd: the source-keyed cache amortizes
+  // the compile across the whole training run (the old "doubles LeNet
+  // wall" concern assumed the term-loc key never reused the dylib, so
+  // every step recompiled).  THVM_JIT_STRIDED=0 reverts to the walker
+  // for these.  A single conv2 unfold STORE drops from ~1s interpreted
+  // to a compiled strided loop.
+  static int strided_jit_known = 0, strided_jit_enabled = 1;
   if (!strided_jit_known) {
     char const *e = getenv("THVM_JIT_STRIDED");
-    strided_jit_enabled = (e && e[0] == '1');
+    if (e != NULL) strided_jit_enabled = (e[0] != '0');
     strided_jit_known = 1;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
