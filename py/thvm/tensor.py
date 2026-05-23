@@ -868,8 +868,29 @@ class Tensor:
             # rather than silently zero-pad (which would corrupt the max).
             raise NotImplementedError(
                 "max_pool2d padding != 0 needs a -inf pad (not yet wired)")
-        # (B, C, H, W) -> (B, C, H_out, W_out, kH, kW); reduce the last
-        # len(k_) (window) axes.
+        s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
+        d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
+        spatial = self._shape[-len(k_):]
+        # Fast path: non-overlapping window (stride == kernel, no dilation,
+        # divides evenly).  Pooling is then a pure CONTIGUOUS reshape that
+        # splits each spatial axis into (out, k) -- a stride view that fuses
+        # straight into the max-reduce.  The general _pool below builds an
+        # overlap unfold via repeat/expand whose reshape-of-broadcast can't
+        # stay a view in thvm yet, so it MATERIALIZES a huge intermediate
+        # (a (B,C,20,20) pool blows up multi-GB at BS=128); the reshape path
+        # sidesteps that entirely for the common stride==kernel pool.
+        if (all(s == k for s, k in zip(s_, k_)) and all(d == 1 for d in d_)
+                and all(i % k == 0 for i, k in zip(spatial, k_))):
+            prefix = list(self._shape[:-len(k_)])
+            split = []
+            for i, k in zip(spatial, k_):
+                split.extend([i // k, k])
+            x = self.reshape(*prefix, *split)
+            # window (k) axes are the odd trailing positions; reduce them.
+            base = len(prefix)
+            kaxes = tuple(base + 2 * j + 1 for j in range(len(k_)))
+            return x.max(axis=kaxes)
+        # General overlapping/strided/dilated case: _pool unfold + window max.
         x = self._pool(k_, stride=stride, dilation=dilation)
         return x.max(axis=tuple(range(-len(k_), 0)))
 
