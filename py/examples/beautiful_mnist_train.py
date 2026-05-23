@@ -122,7 +122,8 @@ def main():
             acc = test_acc()
         print(f"step {i+1:3d}: loss={lv:6.3f} wall={dt:8.1f}ms "
               f"mem={_gpu_mb()}MB peak={_TH.cpu_peak_bytes()/1048576:.1f}MB "
-              f"live={_TH.cpu_live_bytes()/1048576:.1f}MB"
+              f"live={_TH.cpu_live_bytes()/1048576:.1f}MB "
+              f"compiles={_TH.cuda_jit_compiles()} evict={_TH.cuda_jit_evictions()}"
               + (f" test_acc={acc:5.2f}%" if test_every and (i+1) % test_every == 0 else ""),
               flush=True)
 
