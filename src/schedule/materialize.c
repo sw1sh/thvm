@@ -1676,12 +1676,27 @@ static int bufferize_strand_check_deep(RangeAxisSet const *iter,
 // nor bound by an enclosing REDUCE, the inline leaves it free in the
 // consumer (the partial conv _pool reshapes).  Such a bufferize must be
 // REALIZED (computed once, read via INDEX_E(BUFFER)) rather than inlined.
-static int bufferize_value_would_strand(Term buf) {
+static int bufferize_value_would_strand(Term buf, u32 node_idx) {
   if (term_tag(buf) != TAG_UOP || term_ext(buf) != UOP_BUFFERIZE) return 0;
   Term v = uop_bufferize_value(buf);
   if (v == 0) return 0;
   RangeAxisSet iter_axes;
   iter_axes.n = 0;
+  // Bound set = the iteration the CONSUMER threads in when this node
+  // inlines: every RANGE leaf across the node's full out_rngs (not just
+  // its realized closed_ranges).  The `_pool` reshape's value carries the
+  // consumer's output-position ranges (oh/ow) free; the consuming conv
+  // reduce kernel iterates exactly those, so they are not stranded.  Only
+  // a free range OUTSIDE the consumer iteration and not bound by a nested
+  // REDUCE is a true strand that forces realization.
+  u32 ond = rangeify_unified_out_ndim_at(node_idx);
+  for (u32 a = 0; a < ond; a++) {
+    Term r = rangeify_unified_out_rng_at(node_idx, a);
+    if (r == 0) continue;
+    BufferizeScanVisited av;
+    av.n = 0;
+    stranded_range_collect_addr(&iter_axes, &av, r, 0);
+  }
   u32 nr = uop_bufferize_n_ranges(buf);
   for (u32 i = 0; i < nr; i++) {
     Term cr = uop_bufferize_range_at(buf, i);
@@ -2124,7 +2139,7 @@ static void topo_sort_boundaries(Term root) {
       u32 ond = rangeify_unified_out_ndim_at(i);
       int effectively_full = (ond > 0 && nr == ond);
       if (!rangeify_unified_is_realized(i)) continue;
-      if (!effectively_full && !bufferize_value_would_strand(buf)) continue;
+      if (!effectively_full && !bufferize_value_would_strand(buf, i)) continue;
     }
     items[n].loc   = BUFFERIZE_NODES[i].loc;
     items[n].depth = BOUNDARY_DEPTH[i];
