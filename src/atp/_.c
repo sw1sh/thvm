@@ -5361,6 +5361,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   const u32 NORM_CAP = 64;
   u32 src_trace  = s->last_popped_trace;
   u32 chain_tail = src_trace;
+  // Trace high-water mark before this CP's normalize chain is recorded.
+  // A trivially-joined CP (kbo_eq(l, r) below) adds no rule and feeds no
+  // proof, so its TRACE_NORM_STEP entries -- and the intermediate Terms
+  // they reference -- are dead weight.  Joined CPs dominate a deep
+  // completion (hundreds of thousands dropped), so retaining their
+  // chains is what made record_norm_steps blow the heap.  Rewinding the
+  // trace to here on a join lets the heap reset run too (nothing live
+  // points past hcp_norm), keeping recording memory-bounded.
+  u32 trace_mark = s->n_trace;
   Term l, r;
   if (s->record_norm_steps) {
     // Record each CP-normalize rewrite as a TRACE_NORM_STEP, chained
@@ -5391,13 +5400,18 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   }
 
   if (kbo_eq(l, r)) {
-    // Skipping the heap reset when norm-step recording is on: the
-    // TRACE_NORM_STEP entries just pushed reference the intermediate
-    // Terms allocated during the normalize, and rewinding the heap
-    // would leave their children dangling.
-    if (!s->record_norm_steps) {
-      thvm_atp_heap_reset(hcp_norm);
+    // Trivially joined: this CP adds no rule.  Drop the NORM_STEP
+    // entries just recorded for it (rewind the trace to trace_mark) so
+    // no surviving trace entry references a Term past hcp_norm, then
+    // reset the heap.  Without the trace rewind the heap reset would
+    // dangle the dropped chain's intermediate Terms; with it, recording
+    // a joined CP costs nothing -- the lever that keeps record_norm_steps
+    // memory-bounded over a deep saturation.  The rules that DO get
+    // added (the else-branch below) keep their full chains.
+    if (s->record_norm_steps) {
+      s->n_trace = trace_mark;
     }
+    thvm_atp_heap_reset(hcp_norm);
     s->step++;
     return ATP_RUNNING;
   }

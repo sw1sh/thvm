@@ -92,7 +92,8 @@ $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
-     Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer},
+     Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
+     Integer},
     "NumericArray"
 ]
 
@@ -894,7 +895,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     maxCpWeight_:0, goalInterleave_:0, groundJoin_:0,
     selRatio_, autoMaxWeight_, rhsInterreduce_, unfailingCP_,
     cpSetInterreduce_, connectedness_, precedenceSpec_:None,
-    fifoTiebreak_:0] := Block[{
+    fifoTiebreak_:0, recordNorm_:1] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray
@@ -903,7 +904,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
-        unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak];
+        unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
+        recordNorm];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -975,6 +977,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
         "RTrace" -> rTrace,
         "Trace" -> traceEntries,
         "NCps" -> nCps,
+        "RecordNorm" -> recordNorm,
         "L2N" -> labelToName, "I2N" -> idToName,
         (* every variable symbol the decode produced: the named
            encoder vars plus any "x<id>" fallbacks for FVR ids
@@ -1883,7 +1886,15 @@ atpPrecedenceOpt[o_Association] := Block[{p, sk},
    True = on; False/Automatic = off (engine byte-identical). *)
 atpFifoTiebreakOpt[o_Association] := Switch[Lookup[o, "FifoTiebreak", Automatic],
     True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0};
+(* "RecordNorm" -> True/False: per-step normalize-trace recording for the
+   ProofObject builder.  Default True (engine byte-identical, the
+   historical path: WL walks CP -> NORM_STEP* -> ORIENT linearly).  False
+   routes the search through the fast indexed/flatterm normalize so a long
+   completion saturates at the C-bench rate; WL then reconstructs the
+   chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG. *)
+atpRecordNormOpt[o_Association] := Switch[Lookup[o, "RecordNorm", Automatic],
+    False, 0, True | Automatic, 1, _, 1];
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -1904,7 +1915,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpGroundJoinOpt[o], atpSelectionRatioOpt[o], atpAutoMaxWeightOpt[o],
          atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o],
          atpCPSetInterreduceOpt[o], atpConnectednessOpt[o],
-         atpPrecedenceOpt[o], atpFifoTiebreakOpt[o]}
+         atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -1915,7 +1926,7 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1};
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 
@@ -1971,7 +1982,7 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
     ];
 
 atpParseMethod[m_] := (
-    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0});
+    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
@@ -2876,7 +2887,16 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
                         p, $Failed]
                 ]]
             ];
-            poA = tryBuild[True, dataset];
+            (* When the C engine ran with per-step recording OFF
+               (cRes["RecordNorm"] === 0 -- Method "RecordNorm" -> False,
+               the fast-search path), no TRACE_NORM_STEP entries exist, so
+               the chain-ON extraction has nothing to walk: go straight to
+               the chain-OFF emitNorm BFS, which bridges the CP/ORIENT/
+               SIMPLIFY trace DAG.  A pre-built axiom-cited EXT dataset
+               (when present) still wins regardless. *)
+            poA = If[ Lookup[cRes, "RecordNorm", 1] === 0 && dataset === $Failed,
+                tryBuild[False, $Failed],
+                tryBuild[True, dataset]];
             poFinal = If[ Head[poA] === ProofObject,
                 poA,
                 poB = tryBuild[False, $Failed];

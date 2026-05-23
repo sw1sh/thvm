@@ -472,8 +472,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
-  // reconstructing it by search.
-  thvm_atp_set_record_norm_steps(atp, 1u);
+  // reconstructing it by search.  args[19] gates it: the default (any
+  // value but 0, including the historical implicit 1) keeps recording
+  // on; 0 routes the search through the fast indexed/flatterm normalize
+  // (no per-step TRACE_NORM_STEP push, no skipped heap reset) so a long
+  // completion -- the deep Sheffer/Wolfram theorems -- saturates at the
+  // C-bench rate.  With recording off the WL builder reconstructs the
+  // chain through the emitNorm BFS ($AtpUseChain -> False) using the
+  // CP/ORIENT/SIMPLIFY trace DAG, which is recorded regardless.
+  mint record_norm = MArgument_getInteger(args[19]);
+  thvm_atp_set_record_norm_steps(atp, (u8)(record_norm != 0));
   // ENIGMA dataset capture: when THVM_ATP_CP_DATASET names a file, record
   // per-selected-CP features so a PROVED run can label + append them.
   const char *g_cp_dataset = getenv("THVM_ATP_CP_DATASET");

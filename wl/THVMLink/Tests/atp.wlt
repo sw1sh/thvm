@@ -1473,6 +1473,73 @@ VerificationTest[
     TestID -> "ATP/autotune/regression-DoubleNegation-default-Automatic"
 ]
 
+(* === Method "RecordNorm" knob ====================================== *)
+
+(* "RecordNorm" gates the C engine's per-step normalize-trace recording.
+   The default (True / unset) keeps the linear CP -> NORM_STEP* -> ORIENT
+   chain so the ProofObject builder walks it directly; on a trivially-
+   joined CP the engine now rewinds the just-pushed NORM_STEP entries and
+   resets the heap (src/atp/_.c thvm_atp_step), so recording stays memory-
+   bounded over a long completion (previously the skipped reset blew RSS
+   past 12GB on a deep Sheffer/Wolfram saturation).  False routes the
+   search through the fast indexed/flatterm normalizer (no per-step push)
+   and reconstructs the chain through the emitNorm BFS over the
+   CP/ORIENT/SIMPLIFY trace DAG.  BOTH paths must yield a VERIFYING
+   ProofObject; DoubleNegation over the single Sheffer/nand axiom is a
+   genuine completion proof (not an axiom-confluent chain) that exercises
+   the trace-DAG reconstruction. *)
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["DoubleNegation", "WolframAxioms",
+            Method -> {"Completion", "RecordNorm" -> True},
+            MaxWallSeconds -> 60];
+        {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
+    ],
+    {ProofObject, Success},
+    TestID -> "ATP/option/recordnorm-on-verifies-DoubleNegation"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["DoubleNegation", "WolframAxioms",
+            Method -> {"Completion", "RecordNorm" -> False},
+            MaxWallSeconds -> 60];
+        {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
+    ],
+    {ProofObject, Success},
+    TestID -> "ATP/option/recordnorm-off-verifies-DoubleNegation"
+]
+
+(* The deep landmark -- AndAssociativity over the single Sheffer/nand
+   axiom (Waldmeister's andassoc, ~677 rules) -- is NOT in the default
+   suite: even the lean C bench needs ~345s under Mix (~119s under GT,
+   but GT's ~300k-CP queue exhausts the paclet's non-GC heap), so the
+   paclet does not reach the goal-join inside a practical wall budget.
+   To probe it manually, set THVM_ATP_ANDASSOC_TEST=1 and a generous
+   MaxWallSeconds, with THVM_ATP_TRACE_MAX=400000 in the environment and
+   an external RSS guard (a long completion can climb past 12GB):
+     TFindEquationalProof["AndAssociativity", "WolframAxioms",
+       Method -> {"Waldmeister", "CriticalPairWeight" -> "Mix"},
+       MaxWallSeconds -> 600]
+   The VerificationTest below only runs when that env var is set; it
+   asserts the returned ProofObject VERIFIES (Head ... === Success), so a
+   $Failed / Symbol head -- the current behavior at <= 600s -- is NOT a
+   pass.  Left here as the executable spec for closing the remaining
+   search-rate / heap-residency gap (the paclet needs CP-queue GC to run
+   the fast GT config that the C bench proves at 119s). *)
+VerificationTest[
+    If[ Environment["THVM_ATP_ANDASSOC_TEST"] === "1",
+        Module[{p},
+            p = TFindEquationalProof["AndAssociativity", "WolframAxioms",
+                Method -> {"Waldmeister", "CriticalPairWeight" -> "Mix"},
+                MaxWallSeconds -> 600];
+            Head @ Quiet @ p["ProofFunction"][p["Theorems"]]
+        ],
+        Success],
+    Success,
+    TestID -> "ATP/option/andassoc-WolframAxioms-verifies-when-enabled"
+]
+
 (* --- TimeConstraint + Abort: effective abort inside the LibraryLink.
    Both forms must INTERRUPT the running C engine at the budget rather
    than hang: the TimeConstraint option returns $Failed, and a
@@ -1491,9 +1558,11 @@ VerificationTest[
         viaWrapper = TimeConstrained[
             TFindEquationalProof["AndAssociativity", "WolframAxioms",
                 Method -> hard], 2., "TimedOut"];
-        (* The hard theorem is not provable by thvm at any budget, so a
-           2s budget must interrupt the running engine and yield NO proof
-           via either form -- the contract is "no hang, no spurious
+        (* AndAssociativity over the single Sheffer/nand axiom is a deep
+           completion (the C bench closes it at ~560 rules / ~119s under
+           GT, ~677 rules / ~345s under Mix), far beyond a 2s budget, so
+           a 2s budget must interrupt the running engine and yield NO
+           proof via either form -- the contract is "no hang, no spurious
            proof".  (Asserting === $Failed / === "TimedOut" directly is
            flaky: late in a long suite the WL test harness can leak a
            prior test's abort flag into this one; the not-a-ProofObject
