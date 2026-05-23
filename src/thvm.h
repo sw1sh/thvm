@@ -2690,6 +2690,10 @@ fn void backend_dispatch_end_all(void);
 fn void kernel_fire_gen_bump(void);
 fn void kernel_fire_scope_begin(void);
 fn void kernel_fire_scope_end(void);
+// Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns
+// 1 the first time the loc is seen in the current fire-gen, 0 on every
+// re-visit (so a multiply-reachable ASSIGN writes its buffer once).
+fn int assign_fire_claim(u64 loc);
 
 // Allocate a borrowed buffer: we don't own `data`, and on release we
 // call `on_release(handle)` instead of free().  Used by the WL bridge

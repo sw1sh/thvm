@@ -81,11 +81,12 @@ fn Term interact_assign(Term assign_term) {
   u64  loc = term_val(assign_term);
   Term dst = term_resolve(heap_read(loc + 0));
   Term src = term_resolve(heap_read(loc + 1));
-  Term r = interact_assign_with(dst, src);
-  // Stuck if interact_assign_with returned dst directly without firing
-  // (the !TEN guard at the top), or if the backend mismatch failed.
-  // The redex.c caller bails on result == assign_term; we return the
-  // unchanged ASSIGN term in that case.
+  // Stuck if either side isn't a TEN yet (the redex.c caller bails on
+  // result == assign_term and re-drives once the src kernel chain has
+  // landed a TEN).
   if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) return assign_term;
-  return r;
+  // Fire the buffer write at most once per pass (see assign_fire_claim):
+  // a multiply-reachable ASSIGN cell must not re-apply its update.
+  if (!assign_fire_claim(loc)) return dst;
+  return interact_assign_with(dst, src);
 }

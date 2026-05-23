@@ -108,6 +108,8 @@ _fwd = _bind("py_fwd", c_uint64, c_uint64, c_uint64)
 _wnf = _bind("py_wnf", c_uint64, c_uint64)
 _nf = _bind("py_nf", c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
+_realize_many = _bind("py_realize_many", c_uint64,
+                      ctypes.POINTER(c_uint64), c_uint32)
 _pin_set = _bind("py_pin_set", None, c_uint64, c_uint64)
 _pin_drop = _bind("py_pin_drop", None, c_uint64)
 _reclaim = _bind("py_reclaim", None)
@@ -547,6 +549,16 @@ class Thvm:
     def realize(self, t: Term) -> Term:
         """Drive wnf -> materialize -> kernelize -> schedule -> dispatch."""
         return Term(_realize(c_uint64(int(t))))
+
+    def realize_many(self, terms: "list[Term]") -> "list[Term]":
+        """Realize several terms in ONE scheduler pass (tinygrad
+        `loss.realize(*sched)`).  Returns the resolved terms in order."""
+        n = len(terms)
+        if n == 0:
+            return []
+        arr = (c_uint64 * n)(*[int(t) for t in terms])
+        _realize_many(arr, c_uint32(n))
+        return [Term(arr[i]) for i in range(n)]
 
     # ---- live-tensor pinning + cross-step buffer reclaim ----
     def pin_set(self, handle: int, t: Term) -> None:
