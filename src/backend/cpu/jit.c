@@ -28,16 +28,14 @@ typedef void (*CpuJitFn)(void *out, const void *const *ins,
                          unsigned n, const unsigned *in_numels);
 
 #define CPU_JIT_CACHE_CAP 256
-// JIT warmup gate.  When a kernel hash hasn't been compiled yet
-// (no in-memory `func`, no /tmp dylib on disk), the FIRST few
-// fires use the interpreter and bump `fire_count`.  Once the
-// counter hits CPU_JIT_WARMUP, the next fire commits to a clang
-// compile.  Mirrors tinygrad's approach of NOT JIT-compiling
-// rarely-fired kernels: a one-shot kernel pays no compile cost,
-// while a kernel inside a training loop crosses the threshold
-// almost immediately and amortizes the compile across the rest
-// of the run.
-#define CPU_JIT_WARMUP 5
+// JIT warmup gate: a kernel hash must fire CPU_JIT_WARMUP times before
+// committing to a clang compile (interpreted until then).  Default 0 =
+// compile on first fire (tinygrad always compiles).  At BS=128 an
+// interpreted conv step is ~100s, so any warmup>0 makes the first few
+// steps catastrophically slow; compiling immediately pays one clang
+// pass (~ms/kernel) and every subsequent step is fast.  The source-keyed
+// cache + on-disk /tmp dylib reuse make repeat compiles free.
+#define CPU_JIT_WARMUP 0
 // Override the warmup threshold via THVM_CPU_JIT_WARMUP (0 = compile on
 // first fire).  Lets a training loop with large one-shot-feeling kernels
 // (e.g. the conv im2col STORE) commit to a compile sooner.
