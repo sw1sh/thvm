@@ -146,17 +146,6 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
     cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
     return 0;
   }
-  // 2. UOp DAG walker.  Lifts the kernel via
-  //    kernel_lift_to_uop and evaluates the resulting UOp DAG
-  //    directly. Mirrors cpu_jit_dispatch's lifter call but skips the
-  //    clang-compile + dlopen step, so it amortises faster on
-  //    one-shot kernels (no JIT warmup gate). The primary CPU
-  //    fallback path now that cpu_interpret + cpu/op/*.c are gone.
-  //
-  //    Order: AHEAD of cpu_jit_dispatch when THVM_CPU_UOP_WALK=1, so
-  //    the walker is exercised for steady-state kernels too. The JIT
-  //    path is still reachable when the walker declines (e.g. the
-  //    lifter takes a kernel but the walker hits an unsupported op).
   // 2. CPU JIT: clang-compiled fused kernel, keyed by the canonicalized
   //    rendered source so a hot training-loop kernel crosses the warmup
   //    gate and runs compiled (10-50x faster than the walker).  During

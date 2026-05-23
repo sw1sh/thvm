@@ -38,6 +38,14 @@ typedef void (*CpuJitFn)(void *out, const void *const *ins,
 // almost immediately and amortizes the compile across the rest
 // of the run.
 #define CPU_JIT_WARMUP 5
+// Override the warmup threshold via THVM_CPU_JIT_WARMUP (0 = compile on
+// first fire).  Lets a training loop with large one-shot-feeling kernels
+// (e.g. the conv im2col STORE) commit to a compile sooner.
+static u32 cpu_jit_warmup(void) {
+  static int v = -1;
+  if (v < 0) { const char *e = getenv("THVM_CPU_JIT_WARMUP"); v = e ? atoi(e) : CPU_JIT_WARMUP; }
+  return (u32)v;
+}
 typedef struct {
   u64       key;          // 0 = empty
   CpuJitFn  func;         // NULL until compile completes
@@ -255,18 +263,18 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     int dl_exists = (stat(dl_path, &st) == 0);
     if (!dl_exists) {
       if (s != NULL) {
+        u32 warmup = cpu_jit_warmup();
         if (s->key == 0) {                 // claim a fresh slot for tracking
           s->key = key;
           s->func = NULL;
           s->dl_handle = NULL;
           s->n_inputs = ke->n_inputs;
           s->fire_count = 1;
-          free(src);
-          return 0;
-        }
-        if (s->key == key && s->func == NULL) {
+          if (warmup > 1) { free(src); return 0; }
+          // warmup<=1: fall through to compile on first fire.
+        } else if (s->key == key && s->func == NULL) {
           s->fire_count++;
-          if (s->fire_count < CPU_JIT_WARMUP) { free(src); return 0; }
+          if (s->fire_count < warmup) { free(src); return 0; }
           // Crossed warmup threshold: fall through to compile.
         }
       } else {
