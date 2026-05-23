@@ -851,30 +851,27 @@ class Tensor:
 
     def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1,
                    padding=0, ceil_mode=False) -> "Tensor":
-        del dilation, ceil_mode  # not used in the Phase-3A path
+        """tinygrad-faithful max_pool2d: _pool unfold then a max-reduce
+        over the trailing window axes.  Stays on the autograd graph (the
+        old Phase-3A path realized to numpy and returned a fresh tensor,
+        which severed backward -- so every conv UPSTREAM of a pool got
+        no gradient).  Port of tinygrad/mixin/__init__.py:max_pool2d."""
+        del ceil_mode  # ceildiv output sizing is a Phase-later path
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
-        kH, kW = kernel_size
+        k_ = tuple(int(k) for k in kernel_size)
         if stride is None:
-            stride = kernel_size
-        if isinstance(stride, int):
-            stride = (stride, stride)
-        sH, sW = stride
-        arr = self.realize().numpy()
+            stride = k_
         if padding:
-            pH = padding if isinstance(padding, int) else padding[0]
-            pW = padding if isinstance(padding, int) else padding[1]
-            arr = np.pad(arr, ((0, 0), (0, 0), (pH, pH), (pW, pW)),
-                         constant_values=-np.inf)
-        B, C, H, W = arr.shape
-        out_h = (H - kH) // sH + 1
-        out_w = (W - kW) // sW + 1
-        out = np.zeros((B, C, out_h, out_w), dtype=arr.dtype)
-        for h in range(out_h):
-            for w in range(out_w):
-                patch = arr[:, :, h*sH:h*sH+kH, w*sW:w*sW+kW]
-                out[:, :, h, w] = patch.max(axis=(2, 3))
-        return Tensor(out, dtype=self._dtype)
+            # max-pool padding must fill with -inf so a padded cell never
+            # wins the window max; thvm's pad is zero-only, so refuse
+            # rather than silently zero-pad (which would corrupt the max).
+            raise NotImplementedError(
+                "max_pool2d padding != 0 needs a -inf pad (not yet wired)")
+        # (B, C, H, W) -> (B, C, H_out, W_out, kH, kW); reduce the last
+        # len(k_) (window) axes.
+        x = self._pool(k_, stride=stride, dilation=dilation)
+        return x.max(axis=tuple(range(-len(k_), 0)))
 
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
