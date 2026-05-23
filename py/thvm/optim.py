@@ -104,19 +104,24 @@ class Adam(Optimizer):
     def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, **_):
         super().__init__(params, lr)
         self.b1, self.b2, self.eps = b1, b2, eps
+        self.t = 0
         self.m = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         self.v = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         for x in [*self.m, *self.v]:
             x.realize()
 
     def _step(self):
-        # Bias-correction is omitted on purpose: it requires a per-step
-        # scalar that, as a graph-resident assign shared by every param,
-        # makes the realize fixpoint loop (and WL bakes it host-side at
-        # emit time, which a JIT capture would freeze).  Plain Adam
-        # (update = lr*m/(sqrt(v)+eps)) converges fine -- the correction
-        # only matters for the first handful of steps -- and keeps the
-        # whole step a clean, JIT-capturable in-place-assign graph.
+        # Bias correction is baked HOST-SIDE: the step count t lives in
+        # Python (not the graph), so the per-step factors 1/(1-b1^t) and
+        # 1/(1-b2^t) are plain float scalars folded into the in-place
+        # assign -- no graph-resident counter (which would make the
+        # realize fixpoint loop), and JIT-capturable since each step's
+        # constants are baked at emit time exactly like WL does.  Without
+        # this the early v is under-corrected (b2>b1) -> updates inflate
+        # ~5x -> divergence/nan within a few steps.
+        self.t += 1
+        bc1 = 1.0 - self.b1 ** self.t
+        bc2 = 1.0 - self.b2 ** self.t
         out = []
         for i, p in enumerate(self.params):
             g = p.grad
@@ -125,8 +130,10 @@ class Adam(Optimizer):
             g = g.reshape(*p.shape) if p.shape else g
             self.m[i].assign(self.m[i] * self.b1 + g * (1.0 - self.b1))
             self.v[i].assign(self.v[i] * self.b2 + (g * g) * (1.0 - self.b2))
-            p.assign(p - self.m[i] * self.lr
-                     * (self.v[i].sqrt() + self.eps).reciprocal())
+            m_hat = self.m[i] * (1.0 / bc1)
+            v_hat = self.v[i] * (1.0 / bc2)
+            p.assign(p - m_hat * self.lr
+                     * (v_hat.sqrt() + self.eps).reciprocal())
             out += [self.m[i], self.v[i], p]
         return out
 
