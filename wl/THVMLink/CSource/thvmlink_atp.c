@@ -376,6 +376,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   //   args[5] ordering  : 0 = KBO (default), 1 = LPO.
   //   args[6] auto_prec : 0 = identity precedence, 1 = Waldmeister-
   //                       style auto-precedence from axiom analysis.
+  //   args[17] precedence : explicit per-label precedence (Int64, 1).
+  //                       Length 0 = inactive (use identity / auto_prec).
+  //                       When non-empty, prec[label] gives the LPO/KBO
+  //                       precedence rank of that label (higher = greater),
+  //                       overriding both identity and auto_prec.  This is
+  //                       the Method "Precedence"/"SkolemHighest" suboption,
+  //                       mirroring Waldmeister's `p > q > nand` ORDERING.
   mint cp_weight = MArgument_getInteger(args[4]);
   mint ordering  = MArgument_getInteger(args[5]);
   mint auto_prec = MArgument_getInteger(args[6]);
@@ -424,6 +431,24 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     atp_auto_precedence(ax_lhs, ax_rhs, n_ax_use,
                         (u32)max_label + 1, wl_precedence_p);
   }
+  // Method "Precedence"/"SkolemHighest": an explicit per-label precedence
+  // array overrides identity / auto_prec.  args[17] is a label-indexed
+  // Int64 NumericArray; a 0-length array leaves the chosen default in
+  // place, so the engine is byte-identical unless precedence is supplied.
+  {
+    MTensor prec_t = MArgument_getMTensor(args[17]);
+    if (prec_t != NULL) {
+      mint prec_len = libData->MTensor_getFlattenedLength(prec_t);
+      if (prec_len > 0) {
+        const mint *prec_data = libData->MTensor_getIntegerData(prec_t);
+        u32 n_copy = (u32)prec_len <= (u32)max_label + 1 ? (u32)prec_len
+                                                         : (u32)max_label + 1;
+        for (u32 i = 0; i < n_copy; i++) {
+          wl_precedence_p[i] = (u32)prec_data[i];
+        }
+      }
+    }
+  }
   static KboConfig wl_kbo_p;
   wl_kbo_p.weights    = wl_weights_p;
   wl_kbo_p.precedence = wl_precedence_p;
@@ -447,8 +472,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
-  // reconstructing it by search.
-  thvm_atp_set_record_norm_steps(atp, 1u);
+  // reconstructing it by search.  args[19] gates it: the default (any
+  // value but 0, including the historical implicit 1) keeps recording
+  // on; 0 routes the search through the fast indexed/flatterm normalize
+  // (no per-step TRACE_NORM_STEP push, no skipped heap reset) so a long
+  // completion -- the deep Sheffer/Wolfram theorems -- saturates at the
+  // C-bench rate.  With recording off the WL builder reconstructs the
+  // chain through the emitNorm BFS ($AtpUseChain -> False) using the
+  // CP/ORIENT/SIMPLIFY trace DAG, which is recorded regardless.
+  mint record_norm = MArgument_getInteger(args[19]);
+  thvm_atp_set_record_norm_steps(atp, (u8)(record_norm != 0));
   // ENIGMA dataset capture: when THVM_ATP_CP_DATASET names a file, record
   // per-selected-CP features so a PROVED run can label + append them.
   const char *g_cp_dataset = getenv("THVM_ATP_CP_DATASET");
@@ -487,6 +520,24 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Wolfram theorems reachable.  0 = off (default lhs-only overlap).
   mint unf_cp = MArgument_getInteger(args[14]);
   thvm_atp_set_use_unfailing_cp(atp, (u8)(unf_cp != 0));
+  // Method -> "Waldmeister": periodic full-rule-set CP-queue interreduction
+  // (Waldmeister KPV_KPMengeInterreduzieren) -- purges queued CPs that have
+  // become joinable through the growing rule set so the heap-min selection
+  // tracks live, irreducible CPs.  0 = off (default), engine byte-identical.
+  mint cp_set_ir = MArgument_getInteger(args[15]);
+  thvm_atp_set_cp_set_interreduce(atp, (u8)(cp_set_ir != 0));
+  // Bachmair-Dershowitz connectedness CP deletion (Twee section 6.2):
+  // drop a CP whose two sides join through terms strictly below the
+  // peak.  0 = off (default), engine byte-identical.
+  mint conn = MArgument_getInteger(args[16]);
+  thvm_atp_set_use_connectedness(atp, (u8)(conn != 0));
+  // Method -> {... "FifoTiebreak" -> True}: Waldmeister `-:w1=fifo`
+  // secondary key.  Preserve each surviving CP's insertion age across the
+  // post-orient normalize sweep so equal-weight ties resolve oldest-first
+  // run-wide.  args[18] (after the args[17] precedence MTensor).  0 = off,
+  // engine byte-identical.
+  mint fifo_tb = MArgument_getInteger(args[18]);
+  thvm_atp_set_cp_fifo_tiebreak(atp, (u8)(fifo_tb != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

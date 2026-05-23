@@ -191,6 +191,21 @@ static inline u32 kbo_prec(const KboConfig *cfg, Term t) {
   return (lab < cfg->n_labels) ? cfg->precedence[lab] : 0;
 }
 
+// Read a CTR node's child count + child-cell base in ONE pair of heap
+// reads, so the per-child traversal in the KBO hot loops indexes the
+// contiguous child cells directly (heap_read(base + i)) instead of
+// re-deriving the count through term_ctr_n on every term_ctr_at call.
+// thvm's CTR stores [count, child0, child1, ...] contiguously, so the
+// children base is term_val(t)+1.  KBO is ~half the saturation wall on
+// the single-symbol Sheffer signature and its recursion node count
+// equals the term size, so dropping one redundant header read per child
+// access is a measurable inner-loop win.
+static inline u32 kbo_ctr_children(Term t, u64 *base) {
+  u64 loc = term_val(t);
+  *base = loc + 1u;
+  return (u32)term_val(heap_read(loc));
+}
+
 // Bump variable `id`'s balance by `delta`, recording first touch.
 static inline void kbo_bump(KboLin *st, u32 id, int delta) {
   if (id >= KBO_MAX_VAR) return;
@@ -199,8 +214,272 @@ static inline void kbo_bump(KboLin *st, u32 id, int delta) {
   st->bal[id] = prev + delta;
 }
 
+// === per-term weight + variable-profile memo ========================
+//
+// kbo_lin_addto re-walks a whole divergent subtree on EVERY compare to
+// accumulate its total KBO weight (Σ symbol-weight) into phidiff and its
+// per-variable occurrence counts into bal[].  The profile puts that walk
+// at ~half the comparator self-time on the single-symbol Sheffer
+// signature, where the same subterm cells recur across millions of
+// compares.  Memoize, per CTR subtree, BOTH its total weight AND a compact
+// (var_id, count) profile, so applying the subtree to a balance scope is
+// O(#distinct vars) -- a handful on Sheffer terms -- instead of
+// O(|subtree|).  A ground subtree (no in-range variable) is a single
+// phidiff add.  The profile is what makes the memo a net win: the terms
+// here are variable-bearing, so caching ONLY the weight (and still walking
+// for the var bumps) is no faster than the original single combined pass.
+//
+// Direct-mapped, epoch-stamped exactly like the LPO (s,t)->verdict memo:
+// the ATP engine bumps the epoch (thvm_kbo_invalidate) on every GC, so
+// stale entries from before a cell relocation are simply not matched -- no
+// clearing.  Term cells are pointer-stable between GCs, so the cell value
+// is a sound key.  Weight + var profile depend only on the term structure
+// (and cfg->weights / var_weight, fixed within a run; a config change
+// re-bumps the epoch).  Collisions overwrite, paying a recompute, never a
+// wrong value.  A subtree with more than KBO_VPROF_CAP distinct in-range
+// variables is NOT profile-cached (vc == KBO_VPROF_OVF); its weight is
+// still cached and the var bumps fall back to a recursive walk.
+#define KBO_WMEMO_BITS 16
+#define KBO_WMEMO_SIZE (1u << KBO_WMEMO_BITS)
+#define KBO_WMEMO_MASK (KBO_WMEMO_SIZE - 1u)
+#define KBO_VPROF_CAP  6u           // distinct vars cached inline per node
+#define KBO_VPROF_OVF  0xFFu        // sentinel: too many distinct vars
+typedef struct {
+  Term      t;
+  u32       epoch;
+  long long w;                      // total KBO weight of the subtree
+  u8        vc;                     // #distinct in-range vars, or _OVF
+  u8        vid[KBO_VPROF_CAP];     // variable ids
+  i16       vcnt[KBO_VPROF_CAP];    // occurrence counts (signed for bump)
+} KboWMemoEnt;
+static KboWMemoEnt g_kbo_wmemo[KBO_WMEMO_SIZE];
+static u32 g_kbo_epoch = 1;
+static const KboConfig *g_kbo_last_cfg = NULL;
+
+static inline u32 kbo_wmemo_hash(Term t) {
+  u64 h = t * 0x9E3779B97F4A7C15ull;
+  h ^= h >> 29;
+  return (u32)h & KBO_WMEMO_MASK;
+}
+
+// Invalidate the whole per-term memo in O(1) by bumping the epoch.
+fn void thvm_kbo_invalidate(void) {
+  if (++g_kbo_epoch == 0u) {
+    for (u32 i = 0; i < KBO_WMEMO_SIZE; i++) g_kbo_wmemo[i].epoch = 0u;
+    g_kbo_epoch = 1u;
+  }
+}
+
+// Accumulate var id `id`'s count by `delta` into a small (id,count) list
+// being built for the memo.  Returns 1 on success, 0 if the list would
+// exceed KBO_VPROF_CAP distinct ids (caller marks the node overflowed).
+static inline int kbo_vprof_add(u8 *vid, i16 *vcnt, u8 *vc, u32 id, int delta) {
+  for (u8 k = 0; k < *vc; k++) {
+    if (vid[k] == (u8)id) {
+      int sum = (int)vcnt[k] + delta;
+      if (sum > 32767 || sum < -32768) return 0;   // i16 range guard
+      vcnt[k] = (i16)sum;
+      return 1;
+    }
+  }
+  if (*vc >= KBO_VPROF_CAP) return 0;
+  if (delta > 32767 || delta < -32768) return 0;
+  vid[*vc] = (u8)id; vcnt[*vc] = (i16)delta; (*vc)++;
+  return 1;
+}
+
+static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t);
+
+// Combine one CTR node's own weight + the profiles of its children into the
+// memo slot for `t`.  Each CTR child's profile is read from its memo slot;
+// if a sibling's subtree evicted that slot via a hash collision since it was
+// computed, kbo_subtree_memo recomputes it -- exactly matching the original
+// recursion's per-child memo lookup.  Factored out so both the post-order
+// driver and the root re-fetch write an entry identically.
+static KboWMemoEnt *kbo_memo_combine(const KboConfig *cfg, Term t) {
+  u32 idx = kbo_wmemo_hash(t);
+  long long w = (long long)kbo_weight(cfg, t);
+  u8 vc = 0u;
+  u8 vid[KBO_VPROF_CAP];
+  i16 vcnt[KBO_VPROF_CAP];
+  int ovf = 0;
+  u64 base; u32 n = kbo_ctr_children(t, &base);
+  for (u32 i = 0; i < n; i++) {
+    Term c = heap_read(base + i);
+    if (term_tag(c) == TAG_FVR) {
+      w += (long long)cfg->var_weight;
+      u32 id = term_ext(c);
+      if (id < KBO_MAX_VAR && !ovf) {
+        if (!kbo_vprof_add(vid, vcnt, &vc, id, +1)) ovf = 1;
+      }
+    } else if (term_tag(c) == TAG_CTR) {
+      u32 cidx = kbo_wmemo_hash(c);
+      KboWMemoEnt *ce = &g_kbo_wmemo[cidx];
+      if (!(ce->epoch == g_kbo_epoch && ce->t == c)) ce = kbo_subtree_memo(cfg, c);
+      w += ce->w;
+      if (ce->vc == KBO_VPROF_OVF) ovf = 1;
+      else if (!ovf) {
+        for (u8 k = 0; k < ce->vc; k++) {
+          if (!kbo_vprof_add(vid, vcnt, &vc, ce->vid[k], ce->vcnt[k])) {
+            ovf = 1; break;
+          }
+        }
+      }
+    }
+    // a non-CTR/non-FVR child contributes 0 weight, no vars.
+  }
+  KboWMemoEnt *e = &g_kbo_wmemo[idx];
+  e->t = t; e->epoch = g_kbo_epoch; e->w = w;
+  if (ovf) {
+    e->vc = KBO_VPROF_OVF;
+  } else {
+    e->vc = vc;
+    for (u8 k = 0; k < vc; k++) { e->vid[k] = vid[k]; e->vcnt[k] = vcnt[k]; }
+  }
+  return e;
+}
+
+// Explicit-stack post-order traversal used to fill the per-subtree memo
+// without native C recursion, so an arbitrarily deep term cannot overflow
+// the stack.  Each frame holds the CTR node and a cursor over its children;
+// a child CTR not yet memoized this epoch is pushed and processing of the
+// parent suspends until it returns.  When a node's children are exhausted it
+// is combined (kbo_memo_combine) into its slot.  The recursive version this
+// replaces was the diagnosed SIGSEGV site on the deeper WM-FPA normal forms.
+typedef struct {
+  Term t;
+  u64  base;
+  u32  n;
+  u32  i;
+} KboMemoFrame;
+// A worklist stack of CTR frames.  Starts in a generous static buffer and,
+// only if a term is deeper than that, grows onto the heap -- so depth is
+// unbounded yet the common case never allocates.
+#define KBO_MEMO_STACK_CAP 8192
+static KboMemoFrame g_kbo_memo_stack[KBO_MEMO_STACK_CAP];
+// Re-entrancy guard: kbo_memo_combine recomputes a child whose memo slot a
+// sibling's subtree evicted via a hash collision by calling back into
+// kbo_subtree_memo (matching the original recursion's per-child lookup).  The
+// outer call still owns g_kbo_memo_stack, so the nested call must NOT reuse
+// it -- it allocates its own heap worklist instead.  Collisions are rare, so
+// the static buffer is the common (non-reentrant) case.
+static u8 g_kbo_memo_active = 0u;
+
+// Compute (and cache) the weight + variable profile of subtree `t`.
+// Memoizes every CTR node, so a node already seen this epoch is O(1).
+// Variable ids >= KBO_MAX_VAR are out of balance range and are counted only
+// toward the weight (matching kbo_bump's id guard).  Iterative post-order
+// over an explicit worklist stack so an arbitrarily deep term cannot
+// overflow the C stack (the diagnosed SIGSEGV site under WM-FPA).
+static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
+  u32 idx = kbo_wmemo_hash(t);
+  KboWMemoEnt *e = &g_kbo_wmemo[idx];
+  if (e->epoch == g_kbo_epoch && e->t == t) return e;
+
+  u8 reentrant = g_kbo_memo_active;
+  g_kbo_memo_active = 1u;
+  KboMemoFrame *heap_stack = NULL;
+  KboMemoFrame *stack;
+  u32 cap = KBO_MEMO_STACK_CAP;
+  if (reentrant) {
+    heap_stack = (KboMemoFrame *)malloc((size_t)cap * sizeof *heap_stack);
+    stack = heap_stack;
+  } else {
+    stack = g_kbo_memo_stack;
+  }
+  u32 sp = 0u;
+  KboMemoFrame *f = &stack[sp++];
+  f->t = t; f->n = kbo_ctr_children(t, &f->base); f->i = 0u;
+  while (sp > 0u) {
+    f = &stack[sp - 1u];
+    // Advance over children that are leaves or already memoized; push the
+    // first CTR child still needing computation.
+    int descended = 0;
+    while (f->i < f->n) {
+      Term c = heap_read(f->base + f->i);
+      f->i++;
+      if (term_tag(c) != TAG_CTR) continue;          // FVR/atom: combined later
+      u32 cidx = kbo_wmemo_hash(c);
+      KboWMemoEnt *ce = &g_kbo_wmemo[cidx];
+      if (ce->epoch == g_kbo_epoch && ce->t == c) continue;  // already memoized
+      if (sp >= cap) {
+        u32 ncap = cap * 2u;
+        KboMemoFrame *nh = (KboMemoFrame *)malloc((size_t)ncap * sizeof *nh);
+        for (u32 k = 0; k < sp; k++) nh[k] = stack[k];
+        if (heap_stack) free(heap_stack);
+        heap_stack = nh; stack = nh; cap = ncap;
+        f = &stack[sp - 1u];
+      }
+      KboMemoFrame *nf = &stack[sp++];
+      nf->t = c; nf->n = kbo_ctr_children(c, &nf->base); nf->i = 0u;
+      descended = 1;
+      break;
+    }
+    if (descended) continue;
+    // children exhausted: combine this node, pop.
+    kbo_memo_combine(cfg, f->t);
+    sp--;
+  }
+  if (heap_stack) free(heap_stack);
+  // A collision during the walk may have evicted the root slot; re-fetch and
+  // re-combine if so (children entries are still live this epoch).
+  e = &g_kbo_wmemo[idx];
+  if (!(e->epoch == g_kbo_epoch && e->t == t)) e = kbo_memo_combine(cfg, t);
+  if (!reentrant) g_kbo_memo_active = 0u;
+  return e;
+}
+
+// Total KBO weight of a single term (Σ symbol-weight), served from the
+// per-term memo.  The ATP CP-weight heuristics (CH_Ord/Gt/Mix) weigh both
+// faces of EVERY critical pair, a full-term re-traversal each; routing
+// them through this memo makes a repeat O(1).  Same epoch lifecycle as the
+// comparator memo (invalidated on GC / config change).  FVR / atom roots
+// are O(1) directly; a CTR root reuses or fills the memo.
+fn long long thvm_kbo_term_weight(const KboConfig *cfg, Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return (long long)cfg->var_weight;
+    case TAG_CTR: return kbo_subtree_memo(cfg, t)->w;
+    default:      return (long long)cfg->var_weight;
+  }
+}
+
+// Fallback: apply ALL variable bumps of subtree `t` by a full walk (used
+// when the node's distinct-var count overflowed the inline profile).
+// Iterative pre-order over an explicit worklist of child cells, growing onto
+// the heap only if a term is deeper than the static buffer, so a deep OVF
+// subtree cannot overflow the C stack.
+static Term g_kbo_addvars_stack[KBO_MEMO_STACK_CAP];
+static void kbo_addvars_walk(KboLin *st, Term t, int sign) {
+  Term *stack = g_kbo_addvars_stack;
+  u32 cap = KBO_MEMO_STACK_CAP;
+  Term *heap_stack = NULL;
+  u32 sp = 0u;
+  stack[sp++] = t;
+  while (sp > 0u) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) == TAG_FVR) {
+      kbo_bump(st, term_ext(cur), sign);
+    } else if (term_tag(cur) == TAG_CTR) {
+      u64 base; u32 n = kbo_ctr_children(cur, &base);
+      if (sp + n > cap) {
+        u32 ncap = cap * 2u;
+        while (sp + n > ncap) ncap *= 2u;
+        Term *nh = (Term *)malloc((size_t)ncap * sizeof *nh);
+        for (u32 k = 0; k < sp; k++) nh[k] = stack[k];
+        if (heap_stack) free(heap_stack);
+        heap_stack = nh; stack = nh; cap = ncap;
+      }
+      for (u32 i = 0; i < n; i++) stack[sp++] = heap_read(base + i);
+    }
+    // a non-CTR/non-FVR cell contributes no var bumps.
+  }
+  if (heap_stack) free(heap_stack);
+}
+
 // Add the whole subtree `t` to one side of the current balance scope:
-// weight*sign into *phidiff, var occurrences*sign into bal[].
+// weight*sign into *phidiff, var occurrences*sign into bal[].  A CTR
+// subtree applies its memoized weight in O(1) and its variable profile in
+// O(#distinct vars); only an overflowed profile falls back to a full walk.
 static void kbo_lin_addto(KboLin *st, Term t, int sign,
                           long long *phidiff) {
   switch (term_tag(t)) {
@@ -209,10 +488,14 @@ static void kbo_lin_addto(KboLin *st, Term t, int sign,
       *phidiff += (long long)sign * (long long)st->cfg->var_weight;
       return;
     case TAG_CTR: {
-      *phidiff += (long long)sign * (long long)kbo_weight(st->cfg, t);
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++)
-        kbo_lin_addto(st, term_ctr_at(t, i), sign, phidiff);
+      KboWMemoEnt *e = kbo_subtree_memo(st->cfg, t);
+      *phidiff += (long long)sign * e->w;
+      if (e->vc == KBO_VPROF_OVF) {
+        kbo_addvars_walk(st, t, sign);
+      } else {
+        for (u8 k = 0; k < e->vc; k++)
+          kbo_bump(st, e->vid[k], sign * (int)e->vcnt[k]);
+      }
       return;
     }
     default: return;
@@ -225,28 +508,61 @@ static void kbo_lin_addto(KboLin *st, Term t, int sign,
 // cancel and are skipped.  Returns 1 iff s and t are structurally
 // identical.  The caller is responsible for clearing the balance
 // (kbo_lin_clear) once it has read the decision out.
-static int kbo_vortest(KboLin *st, Term s, Term t, long long *phidiff) {
-  if (s == t) return 1;                              // identical subtree
-  u32 tg = term_tag(s);
-  if (tg == term_tag(t) && term_ext(s) == term_ext(t)) {
-    if (tg == TAG_FVR) return 1;                     // same variable
-    if (tg == TAG_CTR) {
-      u32 ns = term_ctr_n(s), nt = term_ctr_n(t);
-      if (ns == nt) {
-        int ident = 1;
-        for (u32 i = 0; i < ns; i++)
-          ident &= kbo_vortest(st, term_ctr_at(s, i),
-                               term_ctr_at(t, i), phidiff);
-        return ident;
+//
+// Iterative over an explicit worklist of (s,t) pairs (growing onto the heap
+// only past the static buffer), so two deeply nested terms cannot overflow
+// the C stack.  The weight/var accumulation is commutative, so the order in
+// which divergent subtrees are visited does not change phidiff or the
+// balance -- the verdict is byte-identical to the recursive version.
+typedef struct { Term s; Term t; } KboPair;
+// Single-threaded saturation scratch for the iterative Vortest worklist (the
+// whole KBO path already keeps its scope in the file-static g_kbo_st).  A
+// stack-array would put a multi-KB frame on every one of millions of compares.
+static KboPair g_kbo_vortest_stack[KBO_MEMO_STACK_CAP];
+static int kbo_vortest(KboLin *st, Term s0, Term t0, long long *phidiff) {
+  KboPair *stack = g_kbo_vortest_stack;
+  u32 cap = KBO_MEMO_STACK_CAP;
+  KboPair *heap_stack = NULL;
+  u32 sp = 0u;
+  int ident = 1;
+  stack[sp].s = s0; stack[sp].t = t0; sp++;
+  while (sp > 0u) {
+    KboPair pr = stack[--sp];
+    Term s = pr.s, t = pr.t;
+    if (s == t) continue;                            // identical subtree
+    u32 tg = term_tag(s);
+    if (tg == term_tag(t) && term_ext(s) == term_ext(t)) {
+      if (tg == TAG_FVR) continue;                   // same variable
+      if (tg == TAG_CTR) {
+        u64 sb, tb;
+        u32 ns = kbo_ctr_children(s, &sb), nt = kbo_ctr_children(t, &tb);
+        if (ns == nt) {
+          if (sp + ns > cap) {
+            u32 ncap = cap * 2u;
+            while (sp + ns > ncap) ncap *= 2u;
+            KboPair *nh = (KboPair *)malloc((size_t)ncap * sizeof *nh);
+            for (u32 k = 0; k < sp; k++) nh[k] = stack[k];
+            if (heap_stack) free(heap_stack);
+            heap_stack = nh; stack = nh; cap = ncap;
+          }
+          for (u32 i = 0; i < ns; i++) {
+            stack[sp].s = heap_read(sb + i);
+            stack[sp].t = heap_read(tb + i);
+            sp++;
+          }
+          continue;
+        }
+      } else if (term_val(s) == term_val(t)) {
+        continue;                                    // equal atom
       }
-    } else if (term_val(s) == term_val(t)) {
-      return 1;                                      // equal atom
     }
+    // diverge: s wholly on +, t wholly on -.
+    kbo_lin_addto(st, s, +1, phidiff);
+    kbo_lin_addto(st, t, -1, phidiff);
+    ident = 0;
   }
-  // diverge: s wholly on +, t wholly on -.
-  kbo_lin_addto(st, s, +1, phidiff);
-  kbo_lin_addto(st, t, -1, phidiff);
-  return 0;
+  if (heap_stack) free(heap_stack);
+  return ident;
 }
 
 // Read the variable-balance verdict and clear the touched entries.
@@ -281,93 +597,404 @@ static void kbo_lin_clear(KboLin *st) {
   st->n_touched = 0;
 }
 
-static KboCmp kbo_lin_rek(KboLin *st, Term s, Term t, long long phidiff,
-                          KboCmp varcmp);
-static KboCmp kbo_lin_lex(KboLin *st, Term s, Term t);
+// Map a deeper comparison result `inner` through one level's variable
+// domination `varcmp` (Waldmeister's KBOEntscheidungRek result mapping).
+// EQ stays EQ; a GT under a t-dominant level (or LT under an s-dominant
+// level) collapses to UN; otherwise the direction is preserved.
+static inline KboCmp kbo_map_through(KboCmp varcmp, KboCmp inner) {
+  if (inner == KBO_EQ) return KBO_EQ;
+  if (inner == KBO_GT) return (varcmp == KBO_LT) ? KBO_UN : KBO_GT;
+  if (inner == KBO_LT) return (varcmp == KBO_GT) ? KBO_UN : KBO_LT;
+  return KBO_UN;
+}
 
 // Decision after Vortest: given the weight balance phidiff and the
 // variable-set verdict varcmp, decide s vs t (Waldmeister's
-// KBOEntscheidungRek).  Precondition: s,t are not structurally
-// identical and the balance table is already cleared.
+// KBOEntscheidungRek + KBOEntscheidungLex).  Precondition: s,t are not
+// structurally identical and the balance table is already cleared.
+//
+// The recursive form descended a SINGLE spine: at each level, on a phi tie
+// with equal top symbols, KBOEntscheidungLex finds the first non-identical
+// child pair and recurses into KBOEntscheidungRek on it, mapping the deeper
+// result back through this level's varcmp.  Only the first differing child
+// ever recurses, so the recursion is a chain whose depth equals the term
+// depth -- on the deep WM-FPA normal forms that overflowed the C stack.
+// Made iterative here: descend the spine collecting each level's varcmp on
+// an explicit stack, then fold the terminal verdict back up through them.
+// Byte-identical to the recursive composition of kbo_map_through.
+static KboCmp g_kbo_rek_vstack[KBO_MEMO_STACK_CAP];
 static KboCmp kbo_lin_rek(KboLin *st, Term s, Term t, long long phidiff,
                           KboCmp varcmp) {
+  KboCmp *vstack = g_kbo_rek_vstack;
+  u32 cap = KBO_MEMO_STACK_CAP;
+  KboCmp *heap_stack = NULL;
+  u32 sp = 0u;
+  KboCmp terminal;
+
+  for (;;) {
+    // --- one KBOEntscheidungRek level on (s,t,phidiff,varcmp) ---
+    KboCmp here = KBO_UN;
+    int descend = 0;
+    int phi_tie = 0;            // weight balance ties at this level
+    Term ds = 0, dt = 0;        // first differing child pair, if we descend
+    switch (varcmp) {
+      case KBO_GT:                                   // s dominates t
+        if (phidiff < 0) here = KBO_UN;
+        else if (phidiff > 0) here = KBO_GT;
+        else phi_tie = 1;
+        break;
+      case KBO_LT:                                   // t dominates s
+        if (phidiff < 0) here = KBO_LT;
+        else if (phidiff > 0) here = KBO_UN;
+        else phi_tie = 1;
+        break;
+      case KBO_EQ:                                   // same variables
+        if (phidiff < 0) here = KBO_LT;
+        else if (phidiff > 0) here = KBO_GT;
+        else phi_tie = 1;
+        break;
+      default: here = KBO_UN; break;                 // incomparable var sets
+    }
+    if (phi_tie) {
+      // phi tie: compare top symbols by precedence.
+      u8 s_fvr = (term_tag(s) == TAG_FVR);
+      u8 t_fvr = (term_tag(t) == TAG_FVR);
+      if (s_fvr || t_fvr) { here = KBO_UN; }
+      else if (term_tag(s) != TAG_CTR || term_tag(t) != TAG_CTR) {
+        here = KBO_UN;
+      } else {
+        u32 ps = kbo_prec(st->cfg, s), pt = kbo_prec(st->cfg, t);
+        if (ps > pt) here = (varcmp == KBO_LT) ? KBO_UN : KBO_GT;
+        else if (ps < pt) here = (varcmp == KBO_GT) ? KBO_UN : KBO_LT;
+        else if (term_ext(s) != term_ext(t)) here = KBO_UN;
+        else {
+          u32 ns = term_ctr_n(s), nt = term_ctr_n(t);
+          if (ns != nt) here = KBO_UN;
+          else {
+            // KBOEntscheidungLex: first non-identical child pair decides.
+            u64 sb, tb;
+            u32 n = kbo_ctr_children(s, &sb);
+            (void)kbo_ctr_children(t, &tb);
+            KboCmp lexres = KBO_EQ;     // all children identical -> EQ
+            int found = 0;
+            for (u32 i = 0; i < n; i++) {
+              Term cs = heap_read(sb + i), ct = heap_read(tb + i);
+              long long phi = 0;
+              int ident = kbo_vortest(st, cs, ct, &phi);
+              if (ident) { kbo_lin_clear(st); continue; }
+              // descend into this child pair next iteration.
+              ds = cs; dt = ct;
+              KboCmp cvar = kbo_lin_decide_clear(st);
+              // push this level's varcmp; the deeper result is mapped
+              // back through it on unwind.
+              if (sp >= cap) {
+                u32 ncap = cap * 2u;
+                KboCmp *nh = (KboCmp *)malloc((size_t)ncap * sizeof *nh);
+                for (u32 k = 0; k < sp; k++) nh[k] = vstack[k];
+                if (heap_stack) free(heap_stack);
+                heap_stack = nh; vstack = nh; cap = ncap;
+              }
+              vstack[sp++] = varcmp;
+              phidiff = phi; varcmp = cvar; descend = 1; found = 1;
+              break;
+            }
+            if (!found) here = lexres;  // KBO_EQ
+          }
+        }
+      }
+    }
+    if (descend) { s = ds; t = dt; continue; }
+    terminal = here;
+    break;
+  }
+
+  // fold the terminal verdict up through the recorded varcmps.
+  while (sp > 0u) terminal = kbo_map_through(vstack[--sp], terminal);
+  if (heap_stack) free(heap_stack);
+  return terminal;
+}
+
+// Production comparator: Loechner's linear-time KBO.
+//
+// bal[] is only ever written via kbo_bump (which records the id in the
+// touched list) and cleared via that list before every return, so it is
+// all-zero on entry AND exit of each call.  The scope is therefore kept
+// in ONE file-static KboLin zeroed once (calloc-equivalent), instead of a
+// fresh stack KboLin with a KBO_MAX_VAR-int zeroing loop on every call --
+// KBO is in the saturation hot path (millions of calls), and the per-call
+// 64-int memset dominated the comparator.  Single-threaded saturation, so
+// the shared scope is safe.  Behavior-identical to the per-call version.
+static KboLin g_kbo_st;   // bal[]/touched[] zero by static-storage init
+
+// Persistence mode for the per-term weight memo, mirroring the LPO memo.
+// OFF (default): every thvm_kbo call invalidates, so the memo is fresh per
+// call -- always sound for arbitrary direct callers (tests) that may reuse
+// cell addresses for a different term without telling us.  ON: the memo
+// persists across calls (the whole point on a completion: the same
+// subterms are weighed millions of times) and the caller PROMISES to
+// invalidate on cell movement; the ATP engine turns this on at
+// thvm_atp_init and invalidates on every GC.
+static u8 g_kbo_persist = 0;
+fn void thvm_kbo_set_persist(u8 on) { g_kbo_persist = on ? 1u : 0u; }
+
+fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
+  if (g_kbo_persist) {
+    // Persist across calls; a distinct cfg pointer means distinct weights,
+    // so re-bump the epoch on a config change (the caller handles cell
+    // moves via thvm_kbo_invalidate on GC).
+    if (cfg != g_kbo_last_cfg) { g_kbo_last_cfg = cfg; thvm_kbo_invalidate(); }
+  } else {
+    thvm_kbo_invalidate();   // safe default: fresh memo every call
+  }
+  KboLin *st = &g_kbo_st;
+  st->cfg = cfg;
+  st->n_touched = 0;
+
+  long long phidiff = 0;
+  KboCmp erg;
+  if (kbo_vortest(st, s, t, &phidiff)) {
+    kbo_lin_clear(st);
+    erg = KBO_EQ;
+  } else {
+    KboCmp varcmp = kbo_lin_decide_clear(st);
+    erg = kbo_lin_rek(st, s, t, phidiff, varcmp);
+  }
+#ifdef KBO_WMEMO_SELFCHECK
+  // Differential: the per-term weight memo must NEVER change the verdict.
+  // thvm_kbo_naive is the memo-free Baader-Nipkow oracle (its own stack
+  // arrays, no g_kbo_wmemo).  Run it on every live pair during bring-up
+  // and abort on any divergence -- a wrong KBO verdict is a silent
+  // soundness bug.  Defeats the speedup (runs both); compile OUT for the
+  // measured runs.
+  {
+    KboCmp ref = thvm_kbo_naive(s, t, cfg);
+    if (ref != erg) {
+      fprintf(stderr, "KBO WMEMO SELFCHECK MISMATCH memo=%d naive=%d "
+                      "(s=%llu t=%llu)\n", (int)erg, (int)ref,
+                      (unsigned long long)s, (unsigned long long)t);
+      abort();
+    }
+  }
+#endif
+  return erg;
+}
+
+// === flatterm comparator (thvm_kbo_flat) ============================
+//
+// Same Loechner linear-time decision as thvm_kbo, but each operand is
+// flattened ONCE into a contiguous pre-order node array so the whole
+// comparison reads cache-dense sequential memory instead of walking the
+// IC term through term_ctr_at / term_tag / term_ext.
+//
+// Opt-in (THVM_ATP_KBO_FLAT=1 behind use_flatterm), NOT the default:
+// thvm's CTR cells already store their children contiguously
+// (term_ctr_at = heap_read(base + i)), so the IC traversal is itself
+// cache-friendly and the flatten-both-operands pass measured net-
+// negative against the in-place kbo_ctr_children traversal above on the
+// Sheffer workload (the operand terms are shallow).  Kept for A/B and
+// the differential self-check, and as the basis for a future path that
+// reuses the subject array the flat normalizer already maintains
+// (avoiding the per-call flatten).
+//
+// This is NOT a port: Waldmeister's KBO walks its own pointer term
+// (sources/ORD/KBO.c, TermzellenZeigerT), so there is no flatterm KBO
+// upstream.  The DECISION logic (Vortest / KBOEntscheidungRek /
+// KBOEntscheidungLex) is identical to the kbo_lin_* path above -- the
+// only change is the term-access layer.  A differential self-check
+// (ATP_KBO_FLAT_SELFCHECK) asserts thvm_kbo_flat == thvm_kbo on every
+// live pair during bring-up.
+//
+// Node encoding: sym >= 0 is a function label (CTR); sym < 0 encodes a
+// variable id as -(id+1).  w is the node's OWN weight (cfg weight for a
+// CTR, var_weight for a variable); sz is the subtree span in nodes
+// (>= 1).  The lex tie-break compares matching-label children, so equal
+// symbols recurse -- the array layout makes child i of a node at p start
+// at the cursor advanced past its left siblings, exactly like preorder.
+
+typedef struct {
+  i32 sym;   // >= 0 : CTR label;  < 0 : -(varid+1) for a variable
+  i32 w;     // own weight (cfg->weights[label] or cfg->var_weight)
+  u32 sz;    // subtree span in nodes (this node + all descendants)
+} KboFlatNode;
+
+#define KBO_FLAT_CAP 4096
+
+static KboFlatNode g_kbo_flat_a[KBO_FLAT_CAP];
+static KboFlatNode g_kbo_flat_b[KBO_FLAT_CAP];
+
+// Pre-order flatten of `t` into `out` from `*pos`.  Returns 1 on
+// success, 0 on cap overrun (caller falls back to thvm_kbo).  Mirrors
+// atp_ri_flatten's structure but stores the KBO weight per node so the
+// comparison never re-reads cfg in the inner loop.
+static u8 kbo_flat_encode(Term t, const KboConfig *cfg, KboFlatNode *out,
+                          u32 *pos) {
+  u32 here = *pos;
+  if (here >= KBO_FLAT_CAP) return 0;
+  *pos = here + 1u;
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      out[here].sym = -(i32)(term_ext(t) + 1u);
+      out[here].w   = (i32)cfg->var_weight;
+      out[here].sz  = 1u;
+      return 1;
+    }
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      out[here].sym = (i32)lab;
+      out[here].w   = (lab < cfg->n_labels) ? (i32)cfg->weights[lab] : 0;
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!kbo_flat_encode(term_ctr_at(t, i), cfg, out, pos)) return 0;
+      }
+      out[here].sz = *pos - here;
+      return 1;
+    }
+    default:
+      // A non-CTR / non-FVR head (NUM atom etc.) needs term_val identity
+      // to compare correctly, which the flat node does not carry; bail
+      // so thvm_kbo_flat falls back to the IC-term comparator.  The
+      // single-symbol Sheffer ATP signature never hits this.
+      return 0;
+  }
+}
+
+// Add the subtree at `a[pos]` to one side of the balance scope.  The
+// flat layout means the whole subtree is the contiguous slice
+// [pos, pos+a[pos].sz); one linear sweep, no recursion.
+static void kbo_flat_addto(KboLin *st, const KboFlatNode *a, u32 pos,
+                           int sign, long long *phidiff) {
+  u32 end = pos + a[pos].sz;
+  for (u32 i = pos; i < end; i++) {
+    *phidiff += (long long)sign * (long long)a[i].w;
+    if (a[i].sym < 0) {
+      u32 id = (u32)(-a[i].sym) - 1u;
+      kbo_bump(st, id, sign);
+    }
+  }
+}
+
+// Combined single-pass Vortest over the two flat arrays at positions
+// pa, pb.  Identical decision logic to kbo_vortest -- matching subtrees
+// cancel and are skipped, divergent subtrees go wholly onto + / -.
+// Returns 1 iff the two subtrees are structurally identical.
+static int kbo_flat_vortest(KboLin *st, const KboFlatNode *a, u32 pa,
+                            const KboFlatNode *b, u32 pb,
+                            long long *phidiff) {
+  if (a[pa].sym == b[pb].sym) {
+    if (a[pa].sym < 0) return 1;                       // same variable
+    // same CTR label (children count is implied by the signature, and
+    // equal labels share arity) -- recurse over the children slices.
+    if (a[pa].sz == b[pb].sz) {
+      // exact byte-identical subtree: a fast structural check avoids the
+      // per-child recursion in the common "untouched subterm" case.
+      // Children begin right after the head; advance both cursors in
+      // lockstep over each child pair.
+      u32 ca = pa + 1u, cb = pb + 1u;
+      u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
+      int ident = 1;
+      while (ca < ea && cb < eb) {
+        ident &= kbo_flat_vortest(st, a, ca, b, cb, phidiff);
+        ca += a[ca].sz;
+        cb += b[cb].sz;
+      }
+      return ident;
+    }
+  }
+  // diverge: a[pa] wholly on +, b[pb] wholly on -.
+  kbo_flat_addto(st, a, pa, +1, phidiff);
+  kbo_flat_addto(st, b, pb, -1, phidiff);
+  return 0;
+}
+
+static KboCmp kbo_flat_rek(KboLin *st, const KboFlatNode *a, u32 pa,
+                           const KboFlatNode *b, u32 pb,
+                           long long phidiff, KboCmp varcmp);
+
+// Lexicographic compare of the children of a[pa], b[pb] (same label,
+// same arity).  Mirrors kbo_lin_lex over the flat slices.
+static KboCmp kbo_flat_lex(KboLin *st, const KboFlatNode *a, u32 pa,
+                           const KboFlatNode *b, u32 pb) {
+  u32 ca = pa + 1u, cb = pb + 1u;
+  u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
+  while (ca < ea && cb < eb) {
+    long long phi = 0;
+    int ident = kbo_flat_vortest(st, a, ca, b, cb, &phi);
+    if (ident) {
+      kbo_lin_clear(st);
+      ca += a[ca].sz;
+      cb += b[cb].sz;
+      continue;
+    }
+    KboCmp varcmp = kbo_lin_decide_clear(st);
+    return kbo_flat_rek(st, a, ca, b, cb, phi, varcmp);
+  }
+  return KBO_EQ;
+}
+
+// Decision after Vortest -- mirror of kbo_lin_rek.  Precondition: the
+// subtrees are not identical and the balance table is cleared.
+static KboCmp kbo_flat_rek(KboLin *st, const KboFlatNode *a, u32 pa,
+                           const KboFlatNode *b, u32 pb,
+                           long long phidiff, KboCmp varcmp) {
   switch (varcmp) {
-    case KBO_GT:                                     // s dominates t
+    case KBO_GT:
       if (phidiff < 0) return KBO_UN;
       if (phidiff > 0) return KBO_GT;
-      break;                                          // phi tie -> top symbols
-    case KBO_LT:                                     // t dominates s
+      break;
+    case KBO_LT:
       if (phidiff < 0) return KBO_LT;
       if (phidiff > 0) return KBO_UN;
       break;
-    case KBO_EQ:                                     // same variables
+    case KBO_EQ:
       if (phidiff < 0) return KBO_LT;
       if (phidiff > 0) return KBO_GT;
       break;
-    default: return KBO_UN;                          // incomparable var sets
+    default: return KBO_UN;
   }
 
   // phi tie: compare top symbols by precedence.
-  u8 s_fvr = (term_tag(s) == TAG_FVR);
-  u8 t_fvr = (term_tag(t) == TAG_FVR);
+  u8 s_fvr = (a[pa].sym < 0);
+  u8 t_fvr = (b[pb].sym < 0);
   if (s_fvr || t_fvr) return KBO_UN;
-  if (term_tag(s) != TAG_CTR || term_tag(t) != TAG_CTR) return KBO_UN;
 
-  u32 ps = kbo_prec(st->cfg, s), pt = kbo_prec(st->cfg, t);
+  const KboConfig *cfg = st->cfg;
+  u32 la = (u32)a[pa].sym, lb = (u32)b[pb].sym;
+  u32 ps = (la < cfg->n_labels) ? cfg->precedence[la] : 0;
+  u32 pt = (lb < cfg->n_labels) ? cfg->precedence[lb] : 0;
   if (ps > pt) return (varcmp == KBO_LT) ? KBO_UN : KBO_GT;
   if (ps < pt) return (varcmp == KBO_GT) ? KBO_UN : KBO_LT;
 
-  // equal precedence: only same label with matching arity recurses
-  // lexicographically; anything else is incomparable.
-  if (term_ext(s) != term_ext(t)) return KBO_UN;
-  u32 ns = term_ctr_n(s), nt = term_ctr_n(t);
-  if (ns != nt) return KBO_UN;
+  // equal precedence: only the same label (=> matching arity for a fixed
+  // signature) recurses lexicographically; anything else is incomparable.
+  if (la != lb) return KBO_UN;
 
-  KboCmp lex = kbo_lin_lex(st, s, t);
+  KboCmp lex = kbo_flat_lex(st, a, pa, b, pb);
   if (lex == KBO_EQ) return KBO_EQ;
-  // map the lex outcome through the (global) variable domination.
   if (lex == KBO_GT) return (varcmp == KBO_LT) ? KBO_UN : KBO_GT;
   if (lex == KBO_LT) return (varcmp == KBO_GT) ? KBO_UN : KBO_LT;
   return KBO_UN;
 }
 
-// Lexicographic comparison of the argument lists of s,t (same head,
-// same arity).  Walks children left to right; the first non-identical
-// child pair decides via a fresh Vortest + kbo_lin_rek over just that
-// pair (Waldmeister's KBOEntscheidungLex).  Balance is local to each
-// child pair, matching the naive recursion's per-call zeroed array.
-static KboCmp kbo_lin_lex(KboLin *st, Term s, Term t) {
-  u32 n = term_ctr_n(s);
-  for (u32 i = 0; i < n; i++) {
-    Term cs = term_ctr_at(s, i), ct = term_ctr_at(t, i);
-    long long phi = 0;
-    int ident = kbo_vortest(st, cs, ct, &phi);
-    if (ident) {
-      // identical child: balance untouched/zero, just reset and go on.
-      kbo_lin_clear(st);
-      continue;
-    }
-    KboCmp varcmp = kbo_lin_decide_clear(st);
-    return kbo_lin_rek(st, cs, ct, phi, varcmp);
+// Flatterm production comparator.  Flattens s,t once each, then runs the
+// linear-KBO decision over the contiguous node arrays.  On a flatten
+// overrun (a term deeper than KBO_FLAT_CAP) it falls back to thvm_kbo so
+// the verdict is never weakened.  Byte-identical verdict to thvm_kbo
+// (asserted under ATP_KBO_FLAT_SELFCHECK).
+fn KboCmp thvm_kbo_flat(Term s, Term t, const KboConfig *cfg) {
+  u32 na = 0, nb = 0;
+  if (!kbo_flat_encode(s, cfg, g_kbo_flat_a, &na) ||
+      !kbo_flat_encode(t, cfg, g_kbo_flat_b, &nb)) {
+    return thvm_kbo(s, t, cfg);
   }
-  return KBO_EQ;   // all children identical
-}
-
-// Production comparator: Loechner's linear-time KBO.
-fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
-  KboLin st;
-  st.cfg = cfg;
-  st.n_touched = 0;
-  // bal[] is only ever written via kbo_bump (which records the id) and
-  // cleared via the touched list, so it stays all-zero between scopes;
-  // initialise once for the first use.
-  for (u32 i = 0; i < KBO_MAX_VAR; i++) st.bal[i] = 0;
+  KboLin *st = &g_kbo_st;
+  st->cfg = cfg;
+  st->n_touched = 0;
 
   long long phidiff = 0;
-  if (kbo_vortest(&st, s, t, &phidiff)) {
-    kbo_lin_clear(&st);
+  if (kbo_flat_vortest(st, g_kbo_flat_a, 0u, g_kbo_flat_b, 0u, &phidiff)) {
+    kbo_lin_clear(st);
     return KBO_EQ;
   }
-  KboCmp varcmp = kbo_lin_decide_clear(&st);
-  return kbo_lin_rek(&st, s, t, phidiff, varcmp);
+  KboCmp varcmp = kbo_lin_decide_clear(st);
+  return kbo_flat_rek(st, g_kbo_flat_a, 0u, g_kbo_flat_b, 0u, phidiff, varcmp);
 }

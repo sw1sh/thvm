@@ -2760,6 +2760,26 @@ typedef struct {
 } KboConfig;
 
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
+// Invalidate thvm_kbo's persistent per-term weight memo.  Call when term
+// cells move (GC) or the config changes (new run / new weights).
+fn void   thvm_kbo_invalidate(void);
+// Opt in to persistent KBO weight memoization (default off = fresh per
+// call).  The caller then MUST invalidate on cell movement (the ATP does,
+// on GC).  Keeps thvm_kbo sound for any direct caller that does not opt in.
+fn void   thvm_kbo_set_persist(u8 on);
+// Total KBO weight (Σ symbol-weight) of a single term, served from the
+// per-term memo.  Same lifecycle as thvm_kbo's memo (invalidate on GC /
+// config change).  Lets the CP-weight heuristics weigh terms in O(1) on a
+// repeat instead of a fresh full traversal.
+fn long long thvm_kbo_term_weight(const KboConfig *cfg, Term t);
+
+// Flatterm KBO: same verdict as thvm_kbo, but flattens each operand into
+// a contiguous pre-order node array so the comparison reads cache-dense
+// sequential memory instead of chasing the IC term's pointer graph.  The
+// ATP order-gate routes through this on the flatterm path (use_flatterm);
+// falls back to thvm_kbo for terms deeper than its flat buffer or with a
+// non-CTR/non-FVR head.  Byte-identical verdict (ATP_KBO_FLAT_SELFCHECK).
+fn KboCmp thvm_kbo_flat(Term s, Term t, const KboConfig *cfg);
 
 // === lpo/ ===
 // Lexicographic Path Ordering (LPO; Waldmeister's
@@ -2837,6 +2857,7 @@ fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 typedef struct {
   Term lhs;
   Term rhs;
+  Term peak;            // sigma(li): the overlapped term both CP sides descend from
   u8   pos[CP_MAX_DEPTH];
   u8   pos_len;
 } CriticalPair;
@@ -3170,6 +3191,14 @@ typedef struct {
 #ifdef ATP_RULE_INDEX
   struct AtpRuleIndex *rule_index;
   u8                   rule_index_dirty;
+  // Companion redex index over the UNORIENTABLE equations' faces (both
+  // l->r and r->l, each indexed only when its replacement's vars are
+  // contained in its matched face -- a face that cannot fire is not
+  // indexed).  The flatterm unorientable pass (atp_ft_unorient_step)
+  // descends this instead of the O(n_rules) linear scan, applying the
+  // LPO order-gate to candidate faces only.  Rebuilt with rule_index
+  // whenever R mutates (shares rule_index_dirty / n_rules_built).
+  struct AtpRuleIndex *unorient_index;
   // Opt-in flatterm fast-path for the MIXED (orientable + unorientable)
   // normalize loop.  OFF by default: the engine is byte-identical to the
   // tree mixed loop.  When set, atp_rewrite_normalize_ordered's mixed
@@ -3179,6 +3208,53 @@ typedef struct {
   // THVM_ATP_FLATTERM=1 at init, or via thvm_atp_set_use_flatterm.  Same
   // normal forms as the tree path (asserted by ATP_FLATTERM_DIFF).
   u8                   use_flatterm;
+  // Opt-in faithful Waldmeister-FPA normalize path (src/wmfpa/wmfpa.h:
+  // flatterm rep + DSBaum discrimination tree + NormalformInnermost).
+  // OFF by default (THVM_ATP_WMFPA=1 to enable); when set, the orientable
+  // normalize fixpoint encodes the subject to a flatterm once, retrieves
+  // redexes by descending a discrimination tree built from s->lhs[], and
+  // decodes back -- byte-identical normal form to the IC path (asserted
+  // by the bench differential and the in-engine self-check).
+  u8                   use_wmfpa;
+  // Cached WM-FPA discrimination tree (opaque; void* to keep wmfpa.h out
+  // of the public header) and the R size it reflects.  Rebuilt lazily
+  // when n_rules changes, like rule_index.  Only touched on the gated
+  // path (use_wmfpa); NULL otherwise.
+  void                *wmfpa_tree;
+  u32                  wmfpa_built;
+  // Private staleness bit for the WM-FPA tree, set at the same sites that
+  // set rule_index_dirty (an in-place rule edit that need not change
+  // n_rules).  A private bit avoids fighting the indexed path over the
+  // shared rule_index_dirty clear.
+  u8                   wmfpa_dirty;
+  // Gated correctness probe: when set (THVM_ATP_WMFPA_CHECK!=0) every
+  // gated normalize first asserts the incrementally-maintained tree returns
+  // the same lowest-index rule at every subject position as a tree freshly
+  // rebuilt from the current rule set, aborting on the first divergence.
+  u8                   wmfpa_check;
+  // Incremental-resume watermark for the flatterm unorientable preorder
+  // scan (atp_ft_unorient_step).  ON by default: the scan resumes past the
+  // prefix proven clean since the last scan instead of restarting from
+  // p=0, mirroring the orientable side's `clean_before` resume.  Cleared
+  // (THVM_ATP_UNORIENT_RESUME=0) only for the resume-ON==OFF differential.
+  u8                   ft_unorient_resume;
+  // Opt-in CP-generation overlap-partner index.  OFF by default: the
+  // engine scans all n_rules per new rule (O(n_rules) overlap attempts).
+  // When set, thvm_atp_generate_cps_c queries cp_index -- a unification
+  // discrimination tree over rule-LHS terms -- for the candidate partners
+  // whose LHS could unify with a subterm of the new rule's LHS, running
+  // the exact atp_overlap_ij only on those candidates.  The CP SET is
+  // identical (the index returns a superset of true partners; the exact
+  // unify in cp_visit still gates emission).  Set from THVM_ATP_CP_INDEX=1
+  // at init, or via thvm_atp_set_use_cp_index.
+  struct AtpRuleIndex *cp_index;
+  // Companion to cp_index for the (old i x new j) overlap direction: a
+  // discrimination tree over every NON-VAR SUBTERM of every rule LHS,
+  // keyed by rule.  Querying it with the new rule's whole LHS lj returns
+  // the old rules i whose li has a subterm unifiable with lj -- the dual
+  // of cp_index's (new i x all j) whole-LHS query.
+  struct AtpRuleIndex *cp_subindex;
+  u8                   use_cp_index;
 #endif
 
   // Transient: set by thvm_atp_select_cp to the trace-entry index
@@ -3214,14 +3290,16 @@ typedef struct {
   // Proof trace.  Stage 6.1: each entry is a TAG_CTR (see the
   // TRACE_* labels above).  6.1b/c wire this into add_equation,
   // orient_and_add, and generate_cps; 6.2 walks it to emit a
-  // PCL-shaped serialization.
-  // Runtime-sized (thvm_atp_trace_cap, default ATP_MAX_TRACE; raise via
-  // THVM_ATP_TRACE_MAX for a deep completion whose CP/ORIENT/NORM trace
-  // outgrows the default).  Allocated in thvm_atp_init, freed in
-  // thvm_atp_free; indexing is identical to the former fixed array.
+  // PCL-shaped serialization.  Heap-allocated and grown on demand
+  // (atp_trace_ensure) up to t_max entries; a fixed embedded array
+  // would both bloat sizeof(AtpState) and hard-cap the proof DAG at a
+  // depth a 1601-rule completion exceeds.  t_max defaults to
+  // ATP_MAX_TRACE (env THVM_ATP_TRACE_MAX raises it); entries past
+  // t_max are dropped (atp_trace_push returns ATP_TRACE_NONE).
   Term *trace;
-  u32   trace_cap;
-  u32  n_trace;
+  u32   n_trace;
+  u32   t_cap;
+  u32   t_max;
 
   // Stage 7.1: count of CPs dropped at generate-time because both
   // sides normalize to the same term under current R (trivial
@@ -3266,6 +3344,12 @@ typedef struct {
   // also rule-subsumed, a sound subset of the joinable drops.
   // Always 0 when the engine is built without -DATP_CP_CLASSIFY.
   u32  n_cps_dropped_classified;
+
+  // Count of rules whose RHS was right-reduced (composition) in place
+  // by thvm_atp_interreduce.  Diagnostic for the DISCOUNT-loop
+  // right-reduction lever.
+  u32  n_right_reduced;
+
   // Ground-joinability redundancy criterion (Martin-Nipkow / Twee CADE
   // 2021 sec 3.1; AHL 2003).  Ticked when a CP is provably ground-
   // joinable under EVERY total preorder of its variables (ordered set
@@ -3278,6 +3362,18 @@ typedef struct {
   // criterion only counts; 1 = drop ground-joinable CPs.  Set via
   // thvm_atp_set_use_ground_join (Method -> {... "GroundJoin" -> True}).
   u8   use_ground_join;
+
+  // Runtime gate for Bachmair-Dershowitz connectedness DELETION (Twee
+  // section 6.2).  0 (default) = off; 1 = drop a CP whose two sides
+  // join through terms STRICTLY BELOW the peak sigma(li) under the
+  // reduction order.  Sound: such a CP is a redundant consequence of
+  // smaller overlaps, so removing it preserves the completion's
+  // confluence target.  Set via thvm_atp_set_use_connectedness
+  // (Method -> {... "Connectedness" -> True}).
+  u8   use_connectedness;
+  // Count of CPs the connectedness criterion deleted (measurement; ticks
+  // only when use_connectedness drops a CP).
+  u32  n_cps_dropped_connected_below_peak;
 
   // Stage 8.1e-i: feature flag.  When 0 (default), `thvm_atp_
   // generate_cps` runs the C-side critical-pair enumerator
@@ -3330,6 +3426,15 @@ typedef struct {
   // heavy CP.  Default 11 (1:10, the most-fair Waldmeister setting);
   // Waldmeister also uses 50/100/200.  0 is treated as the default.
   u32  fifo_modulo;
+  // Waldmeister `-:w1=fifo` secondary CP key.  The heap already breaks
+  // equal-weight ties by cp_seq (insertion age), but the post-orient
+  // CP-normalize sweep (atp_normalize_graph) reheapifies and reassigns
+  // every cp_seq in heap-array order, scrambling the true insertion age.
+  // When set, the sweep PRESERVES each surviving CP's original cp_seq, so
+  // equal-weight ties resolve oldest-first across the whole run -- the
+  // stable FIFO secondary sort key Waldmeister's selection uses.  Default
+  // 0: reheapify reassigns cp_seq as before, engine byte-identical.
+  u8   cp_fifo_tiebreak;
   // Waldmeister MaxWeight: discard a critical pair whose combined term
   // weight exceeds this (0 = unbounded).  Bounds the search on
   // self-overlapping axioms (the single Wolfram NAND axiom) so the
@@ -3368,6 +3473,50 @@ typedef struct {
   // trace by up to 2 * NORM_CAP entries per CP, which only matters
   // for runs whose caller will extract a ProofObject.
   u8   record_norm_steps;
+
+  // Right-reduction (composition) toggle for interreduction.  When
+  // set (default), thvm_atp_interreduce also rewrites a surviving
+  // rule's RHS to its normal form under the just-added rules
+  // (l -> r becomes l -> r' where r ->* r'), keeping RHSs canonical
+  // so the critical pairs born from them stay small.  This is the
+  // DISCOUNT-loop right-reduction step.  Defaults ON; can be
+  // disabled via thvm_atp_set_right_reduce for A/B measurement or
+  // if a proof-extraction regression is found.
+  u8   right_reduce;
+
+  // Periodic critical-pair-set interreduction (Waldmeister
+  // KPV_KPMengeInterreduzieren / AP_generic, KPVerwaltung.c:1032).
+  // When set, every `cp_set_ir_period`-th rule addition walks the whole
+  // CP queue and, per queued CP: re-normalizes both sides against the
+  // current rule set, DELETES it if it became joinable, and recomputes
+  // its priority (reweight) so the heap order tracks the growing system.
+  // This is what keeps Waldmeister's queue from drowning in CPs a later
+  // rule would collapse.  Default OFF (cp_set_interreduce == 0): the
+  // engine keeps its lazy pop-time normalization, so the default
+  // trajectory is byte-identical.  Flipped on by Method->"Waldmeister"
+  // via thvm_atp_set_cp_set_interreduce.
+  u8   cp_set_interreduce;
+  u32  cp_set_ir_period;          // 0 -> default period at run time
+  u32  n_cp_set_ir_passes;        // diagnostics: passes run
+  u32  n_cp_set_ir_deleted;       // diagnostics: CPs deleted (joinable)
+  u32  n_cp_set_ir_reweighted;    // diagnostics: CPs reweighted
+
+  // Lazy orphan murder (Waldmeister "Waisenmord", KPVerwaltung.c:535
+  // selectNonOrphan + the per-rule `lebtNoch` liveness bit).  When a
+  // rule is interreduced away, the queued CPs it birthed are redundant:
+  // the simplified equation that replaces the rule regenerates whatever
+  // those CPs would contribute.  WM does NOT sweep the queue on the drop;
+  // it marks the dead parent rule and discards descendant CPs FOR FREE at
+  // selection time -- the heap-min CP is skipped if either parent is dead.
+  // `r_trace_dead` is a bitset keyed on a rule's birthing trace id (the
+  // value stored in r_trace[]/cp parents); set when a rule is dropped,
+  // tested at pop.  Default OFF (use_orphan_murder == 0) -> the engine is
+  // byte-identical.  On for Method->"Waldmeister" via
+  // thvm_atp_set_use_orphan_murder.
+  u8   use_orphan_murder;
+  u8  *r_trace_dead;              // bitset over trace ids (8 ids / byte)
+  u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
+  u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
 
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
@@ -3454,14 +3603,25 @@ fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 // forms as the default tree mixed loop; a per-step speedup on rule sets
 // with unorientable equations.  Off by default.
 fn void      thvm_atp_set_use_flatterm(AtpState *s, u8 on);
+// Opt in to the CP-generation overlap-partner index (no effect unless
+// built with ATP_RULE_INDEX).  Same CP set as the unindexed n_rules scan
+// (the index returns a superset of partners; the exact unify gates
+// emission).  A per-step speedup as R deepens.  Off by default.
+fn void      thvm_atp_set_use_cp_index(AtpState *s, u8 on);
 // Opt in to ground-joinability CP deletion (no effect unless the dylib
 // is built with ATP_CP_GROUND_JOIN).  Sound: ground-joinable CPs are
 // redundant.  Off by default (the criterion only counts).
 fn void      thvm_atp_set_use_ground_join(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_connectedness(AtpState *s, u8 on);
 // Waldmeister CPdimension fairness ratio: 1 FIFO (oldest) pick per
 // `modulo` CP selections.  0 = default (11).  Larger = more weight-
 // greedy; Waldmeister uses 11/50/100/200 per problem analysis.
 fn void      thvm_atp_set_selection_ratio(AtpState *s, u32 modulo);
+// Waldmeister `-:w1=fifo` secondary key: preserve each surviving CP's
+// original insertion age (cp_seq) across the post-orient normalize
+// sweep, so equal-weight ties resolve oldest-first run-wide.  0 = off
+// (reheapify reassigns cp_seq; engine byte-identical).
+fn void      thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on);
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
 // `thvm_atp_init` defaults to ATP_CP_WEIGHT_GT; out-of-range
@@ -3479,6 +3639,9 @@ fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
 fn void      thvm_atp_set_auto_max_cp_weight(AtpState *s, u32 base);
 fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
+fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
+fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset

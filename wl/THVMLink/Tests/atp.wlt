@@ -909,6 +909,33 @@ VerificationTest[
     TestID -> "ATP/method/autoprec-False-proves"
 ]
 
+(* --- explicit "Precedence" / "SkolemHighest" reduction-ordering ----
+   precedence (Waldmeister's `p > q > nand` ORDERING block).  The
+   symbol list is highest-to-lowest; "SkolemHighest" ranks the goal's
+   ground (skolemized) constants above the operators.  Both prove +
+   verify InverseOfInverse, and the proof matches the AutoPrecedence
+   path -- the option only takes effect when supplied (default engine
+   byte-identical, asserted by the unchanged tests above + test_atp). *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "Ordering" -> "LPO",
+                "Precedence" -> {"OverBar", "CircleTimes", "1"}}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/precedence-explicit-verifies"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "Ordering" -> "LPO",
+            "SkolemHighest" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/precedence-skolemhighest-proves"
+]
+
 (* --- AxiomRelevance: None / Safe prove; mode is reported by --------
    TRelevantAxioms; Connected drops axioms (heuristic). *)
 
@@ -1010,6 +1037,29 @@ VerificationTest[
     TestID -> "ATP/method/selectionratio-100-proves"
 ]
 
+(* --- FifoTiebreak: Waldmeister `-:w1=fifo` secondary CP key -------- *)
+
+VerificationTest[
+    (* Preserving each surviving CP's insertion age across the post-orient
+       normalize sweep (so equal-weight ties resolve oldest-first) is a
+       reordering of the queue, not a soundness change: the proof still
+       lands and verifies. *)
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "FifoTiebreak" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/fifotiebreak-verifies"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "FifoTiebreak" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/fifotiebreak-proves"
+]
+
 (* --- AutoMaxWeight: completeness-preserving growing CP-weight bound --- *)
 
 VerificationTest[
@@ -1058,6 +1108,25 @@ VerificationTest[
             "RHSInterreduce" -> True}],
     ProofObject,
     TestID -> "ATP/method/unfailingcp-rhsinterreduce-combined-proves"
+]
+
+(* --- Connectedness: Bachmair-Dershowitz CP deletion stays sound ---- *)
+
+VerificationTest[
+    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "Connectedness" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/connectedness-proves"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "Connectedness" -> True}];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/method/connectedness-verifies-sound"
 ]
 
 (* --- Method -> "Waldmeister": faithful default-strategy preset ----- *)
@@ -1123,6 +1192,38 @@ VerificationTest[
         MaxWallSeconds -> 2.],
     $Failed,
     TestID -> "ATP/option/maxwallseconds-tiny-on-hard-fails"
+]
+
+(* --- the deep Sheffer/Wolfram single-NAND commutativity theorem ----
+   nand(p,q) == nand(q,p) over the single WolframAxioms NAND axiom is
+   Waldmeister's canonical hard target (LPO, skolem-highest precedence
+   p > q > nand).  The goal is unorientable, so the bidirectional MNF
+   front search ("GoalDirected") closes it where pure orientation cannot;
+   under the Waldmeister-faithful ordering it proves + verifies in a few
+   seconds.  FifoTiebreak (the `-:w1=fifo` secondary CP key) is supplied
+   here as part of the faithful config. *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["Commutativity", "WolframAxioms",
+            Method -> {"GoalDirected", "Ordering" -> "LPO",
+                "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
+                "FifoTiebreak" -> True, "UnfailingCP" -> True},
+            MaxSteps -> 5000, MaxWallSeconds -> 60.];
+        Head @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/wolfram/nand-commutativity-goaldirected-verifies"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof["Commutativity", "WolframAxioms",
+        Method -> {"GoalDirected", "Ordering" -> "LPO",
+            "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
+            "FifoTiebreak" -> True, "UnfailingCP" -> True},
+        MaxSteps -> 5000, MaxWallSeconds -> 60.],
+    ProofObject,
+    TestID -> "ATP/wolfram/nand-commutativity-goaldirected-proves"
 ]
 
 (* === Completion mode + introspective return-type argument ========
@@ -1414,6 +1515,125 @@ VerificationTest[
     TestID -> "ATP/option/andassoc-WolframAxioms-engine-proves-when-enabled"
 ]
 
+(* === Method "RecordNorm" knob ====================================== *)
+
+(* "RecordNorm" gates the C engine's per-step normalize-trace recording.
+   The default (True / unset) keeps the linear CP -> NORM_STEP* -> ORIENT
+   chain so the ProofObject builder walks it directly; on a trivially-
+   joined CP the engine now rewinds the just-pushed NORM_STEP entries and
+   resets the heap (src/atp/_.c thvm_atp_step), so recording stays memory-
+   bounded over a long completion (previously the skipped reset blew RSS
+   past 12GB on a deep Sheffer/Wolfram saturation).  False routes the
+   search through the fast indexed/flatterm normalizer (no per-step push)
+   and reconstructs the chain through the emitNorm BFS over the
+   CP/ORIENT/SIMPLIFY trace DAG.  BOTH paths must yield a VERIFYING
+   ProofObject; DoubleNegation over the single Sheffer/nand axiom is a
+   genuine completion proof (not an axiom-confluent chain) that exercises
+   the trace-DAG reconstruction. *)
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["DoubleNegation", "WolframAxioms",
+            Method -> {"Completion", "RecordNorm" -> True},
+            MaxWallSeconds -> 60];
+        {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
+    ],
+    {ProofObject, Success},
+    TestID -> "ATP/option/recordnorm-on-verifies-DoubleNegation"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof["DoubleNegation", "WolframAxioms",
+            Method -> {"Completion", "RecordNorm" -> False},
+            MaxWallSeconds -> 60];
+        {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
+    ],
+    {ProofObject, Success},
+    TestID -> "ATP/option/recordnorm-off-verifies-DoubleNegation"
+]
+
+(* The deep landmark -- AndAssociativity over the single Sheffer/nand
+   axiom -- is NOT in the default suite: the goal-join lies past a wall
+   budget too long for the always-on regression suite (minutes, not the
+   sub-second the rest of atp.wlt holds to).
+
+   GOAL FORM (settled empirically -- the encoded ConjPair the engine
+   actually receives, walked cell-by-cell): the paclet feeds the engine
+   the GROUND instance, NOT a universal schema.  AxiomaticTheory resolves
+   the conjecture to ForAll[{p,q,r}, And(p,And(q,r)) == And(And(p,q),r)];
+   unquantifyFormula + CanonicalizePatterns turn the bound vars into
+   Pattern[a,_]/Pattern[b,_]/Pattern[c,_]; then atpProveBundle calls
+   atpEncodeProblem[..., skolemize -> True] (ATP.wl), whose skolemize
+   rewrite (cjHC /. Pattern[v,_] :> v) strips them to bare symbols a,b,c.
+   encodeAtpTerm encodes a bare symbol as a 0-arity TAG_CTR constant (the
+   Pattern clause -- the only TAG_FVR producer -- no longer matches), so
+   the encoded goal is all TAG_CTR: nand (label 1, arity 2) over the
+   nullary constants a/b/c (labels 2/3/4).  This is BYTE-IDENTICAL to the
+   C bench's goal_andassoc (constants C2/C3/C4 = p/q/r).  There is no
+   universal-vs-ground gap; the earlier note claiming the paclet carried
+   the harder ForAll schema was a misdiagnosis.
+
+   CONFIG.  Two levers, both decided against the C bench's proving
+   THVM_ATP_WALDMEISTER preset:
+     1. WEIGHT.  The C preset leaves cp_weight_mode at the engine default
+        GT (ATP_CP_WEIGHT_GT, src/atp/_.c) and PROVES; the WL
+        Method -> "Waldmeister" preset overrides CriticalPairWeight ->
+        "Mix" (ATP.wl atpParseMethod[{"Waldmeister"}]), which does not
+        close in budget -- so override it back to "Gt".
+     2. CPSetInterreduce.  The WL "Waldmeister" preset forces
+        CPSetInterreduce -> True (the KPV_KPMengeInterreduzieren full-
+        queue sweep), which the C preset does NOT enable.  At ~500k live
+        CPs that sweep is O(queue x rules) per period and roughly halves
+        the step rate -- override it OFF to match the C trajectory.
+   So the proving config is:
+     Method -> {"Waldmeister", "CriticalPairWeight" -> "Gt",
+                "CPSetInterreduce" -> False}
+   -- GT weight, KBO, AutoPrecedence, SelectionRatio 51, RHSInterreduce,
+   UnfailingCP, no full-queue interreduction; matching the C preset.
+
+   COST.  Measured C bench (THVM_ATP_WALDMEISTER=1, GT): PROVED at
+   steps=9278, rules=704, ~370s on a memory-loaded box (max ~503k live
+   CPs, ~3-4 GB).  The paclet shares the same engine over the FFI; with
+   CPSetInterreduce OFF it tracks the C step rate, so the gate below
+   uses a 600s budget.  This is a deep saturation, NOT a sub-second
+   regression test; it stays env-gated out of the default suite.
+
+   MEMORY.  The CP heap is GC-bounded: thvm_init calls gc_init and
+   thvm_atp_step runs thvm_atp_gc_collect at the half-space mark, so the
+   SATURATION holds ~3-4 GB even at ~500k live CPs (RecordNorm -> False
+   keeps it flat -- the indexed normalize pushes no per-step
+   TRACE_NORM_STEP; the WL builder later reconstructs the chain via the
+   emitNorm BFS over the CP/ORIENT/SIMPLIFY DAG).  The REMAINING blocker
+   is the WL POST-PROOF ASSEMBLY: once the engine closes (verified: at
+   ~570s the CP heap frees and swap drops), buildCEngineChain /
+   assembleDataset / the WL verifier walk the full 9278-step trace DAG,
+   and on a memory-loaded box (this run started with ~19 GB swap already
+   in use from other processes) that assembly spiked swap by ~9 GB
+   (to ~28 GB) and tripped the swap guard before the ProofObject
+   verified.  The engine FINDS the proof under the config below; closing
+   the verifying-ProofObject delivery needs either an unloaded box (the
+   ~9 GB assembly headroom) or a lower-footprint trace-DAG reconstruction
+   for proofs this deep.
+
+   To run, set THVM_ATP_ANDASSOC_TEST=1 (the VerificationTest below is
+   gated on it) with THVM_ATP_TRACE_MAX raised, on a box with the RAM/swap
+   headroom for the assembly.  It asserts the returned ProofObject
+   VERIFIES (Head ... === Success), so a $Failed / Symbol head is NOT a
+   pass. *)
+VerificationTest[
+    If[ Environment["THVM_ATP_ANDASSOC_TEST"] === "1",
+        Module[{p},
+            p = TFindEquationalProof["AndAssociativity", "WolframAxioms",
+                Method -> {"Waldmeister", "CriticalPairWeight" -> "Gt",
+                    "CPSetInterreduce" -> False, "RecordNorm" -> False},
+                MaxWallSeconds -> 600];
+            Head @ Quiet @ p["ProofFunction"][p["Theorems"]]
+        ],
+        Success],
+    Success,
+    TestID -> "ATP/option/andassoc-WolframAxioms-verifies-when-enabled"
+]
+
 (* --- TimeConstraint + Abort: effective abort inside the LibraryLink.
    Both forms must INTERRUPT the running C engine at the budget rather
    than hang: the TimeConstraint option returns $Failed, and a
@@ -1432,9 +1652,11 @@ VerificationTest[
         viaWrapper = TimeConstrained[
             TFindEquationalProof["AndAssociativity", "WolframAxioms",
                 Method -> hard], 2., "TimedOut"];
-        (* The hard theorem is not provable by thvm at any budget, so a
-           2s budget must interrupt the running engine and yield NO proof
-           via either form -- the contract is "no hang, no spurious
+        (* AndAssociativity over the single Sheffer/nand axiom is a deep
+           completion (the C bench closes it at ~560 rules / ~119s under
+           GT, ~677 rules / ~345s under Mix), far beyond a 2s budget, so
+           a 2s budget must interrupt the running engine and yield NO
+           proof via either form -- the contract is "no hang, no spurious
            proof".  (Asserting === $Failed / === "TimedOut" directly is
            flaky: late in a long suite the WL test harness can leak a
            prior test's abort flag into this one; the not-a-ProofObject

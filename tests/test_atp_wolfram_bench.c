@@ -38,6 +38,16 @@ static Term nand2(Term x, Term y) {
 }
 static Term fv(u32 id) { return term_new_fvr(id); }
 
+// Ground skolem constants: nullary CTRs with their own labels (p=2,
+// q=3, r=4).  Distinct from the axiom variables a,b,c (TAG_FVR) so a
+// rule lhs over a,b,c can match a ground subterm but the goal sides
+// stay rigid -- a genuine ground equation, not a schema.  Labels are
+// inside n_labels (see cfg below) so KBO gives each a positive weight.
+#define L_P 2u
+#define L_Q 3u
+#define L_R 4u
+static Term konst(u32 label) { return term_new_ctr(label, NULL, 0); }
+
 // Wolfram axiom:
 //   nand(nand(nand(a,b),c), nand(a,nand(nand(a,c),a))) == c
 // axiom_inst(a,b,c) is the LHS with its three variables free: for ANY
@@ -139,6 +149,36 @@ static void goal_deep(Term *l, Term *r, u32 k) {
   *r = m;
 }
 
+// andassoc = AndAssociativity over the single Sheffer/nand axiom --
+// the Waldmeister landmark (WM: KBO+MixWeight, 1601 rules, 14.3s).
+// And is defined via nand:  And(x,y) = nand(nand(x,y), nand(x,y)).
+// The conjecture And(p, And(q,r)) == And(And(p,q), r) with p,q,r
+// distinct GROUND constants, fully expanded in nand.  This is the
+// exact form thvm's paclet uses (verified against WM's andassoc.pr).
+static Term and2(Term x, Term y) {
+  Term inner = nand2(x, y);
+  return nand2(inner, inner);
+}
+static void goal_andassoc(Term *l, Term *r) {
+  Term p = konst(L_P), q = konst(L_Q), rr = konst(L_R);
+  // LHS = And(p, And(q,r))
+  *l = and2(p, and2(q, rr));
+  // RHS = And(And(p,q), r)
+  *r = and2(and2(p, q), rr);
+}
+// andassocu = AndAssociativity with p,q,r as UNIVERSAL variables
+// (TAG_FVR) rather than ground skolem constants -- the form the paclet's
+// AxiomaticTheory["WolframAxioms","NotableTheorems"]["AndAssociativity"]
+// conjecture actually carries (ForAll[{p,q,r}, ...]).  The ground form
+// (goal_andassoc) is a rigid instance; this is the schema, so it
+// exercises the same trajectory the user-facing TFindEquationalProof
+// drives -- the matched-config comparison point for the paclet.
+static void goal_andassocu(Term *l, Term *r) {
+  Term p = fv(0), q = fv(1), rr = fv(2);
+  *l = and2(p, and2(q, rr));
+  *r = and2(and2(p, q), rr);
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -155,16 +195,21 @@ int main(int argc, char **argv) {
   const char *ord_env = getenv("ATP_BENCH_ORD");
   int use_lpo  = (ord_env != NULL && strcmp(ord_env, "lpo")  == 0);
   int use_kbo0 = (ord_env != NULL && strcmp(ord_env, "kbo0") == 0);
-  static u32 weights[2]    = { 0u, 1u };
-  static u32 precedence[2] = { 0u, 1u };
+  // Labels: 0 unused, 1=nand, 2=p, 3=q, 4=r (the andassoc constants).
+  // Each gets weight 1.  Precedence: nand highest, constants below it
+  // (p>q>r) -- matches Waldmeister's AutoPrecedence on the function
+  // symbol over skolem constants.  Goals that use only nand (thm,
+  // wolfram, ...) are unaffected: their terms never touch labels 2-4.
+  static u32 weights[5]    = { 0u, 1u, 1u, 1u, 1u };
+  static u32 precedence[5] = { 0u, 4u, 3u, 2u, 1u };
   KboConfig cfg = {
     .weights    = weights,
     .precedence = precedence,
-    .n_labels   = 2u,
+    .n_labels   = 5u,
     .var_weight = use_kbo0 ? 0u : 1u,
   };
-  static u32 lpo_prec[2] = { 0u, 1u };
-  static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 2u };
+  static u32 lpo_prec[5] = { 0u, 4u, 3u, 2u, 1u };
+  static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 5u };
 
   // cpgen mode: generate the critical pairs of the axiom with
   // itself -- the distance-1 lemmas -- in ONE CP-generation call,
@@ -213,6 +258,69 @@ int main(int argc, char **argv) {
       thvm_atp_set_cp_weight_mode(s, (u32)strtoul(cw, NULL, 10));
     }
   }
+  // THVM_ATP_RIGHT_REDUCE=0 disables interreduction right-reduction
+  // (RHS composition) for A/B measurement; default (unset/1) keeps the
+  // DISCOUNT-loop right-reduction on.
+  {
+    const char *rr = getenv("THVM_ATP_RIGHT_REDUCE");
+    if (rr != NULL && *rr == '0') thvm_atp_set_right_reduce(s, 0u);
+  }
+  // THVM_ATP_CP_SET_IR=1 enables periodic full-rule-set CP-queue
+  // interreduction (a port of KPV_KPMengeInterreduzieren) -- deletes
+  // queued CPs that became joinable through any rule, keeping the queue
+  // (the dominant memory consumer at depth) small.
+  {
+    const char *ci = getenv("THVM_ATP_CP_SET_IR");
+    if (ci != NULL && ci[0] != '\0' && ci[0] != '0') {
+      thvm_atp_set_cp_set_interreduce(s, 1u);
+    }
+  }
+  // THVM_ATP_WALDMEISTER=1 replicates the WL Method->"Waldmeister"
+  // preset's runtime knobs (SelectionRatio 51, RHSInterreduce,
+  // UnfailingCP) so a profiling run follows the same trajectory the
+  // proof harness does.  AutoPrecedence on the single nand symbol is
+  // the identity precedence already in `cfg`, so it needs no setter.
+  {
+    const char *wm = getenv("THVM_ATP_WALDMEISTER");
+    if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
+      thvm_atp_set_selection_ratio(s, 51u);
+      thvm_atp_set_use_rhs_interreduce(s, 1u);
+      thvm_atp_set_use_unfailing_cp(s, 1u);
+      thvm_atp_set_use_orphan_murder(s, 1u);
+    }
+  }
+
+  // THVM_ATP_ORPHAN=1 toggles lazy orphan murder independently of the
+  // WM preset, so a run can A/B its effect on the CP queue.
+  {
+    const char *om = getenv("THVM_ATP_ORPHAN");
+    if (om != NULL && om[0] != '\0')
+      thvm_atp_set_use_orphan_murder(s, (om[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_GROUND_JOIN=1 / THVM_ATP_CONNECT=1: sound CP-volume
+  // reducers (Waldmeister Grundzusammenfuehrbar / Bachmair-Dershowitz
+  // connectedness).  Compiled in by default (Makefile ATP_CP_GROUND_JOIN
+  // ?= 1); these flip the runtime gate so a CP that is ground-joinable /
+  // connected-below-peak is dropped at generate time, shrinking the live
+  // queue.
+  {
+    const char *gj = getenv("THVM_ATP_GROUND_JOIN");
+    if (gj != NULL && gj[0] != '\0')
+      thvm_atp_set_use_ground_join(s, (gj[0] != '0') ? 1u : 0u);
+    const char *cn = getenv("THVM_ATP_CONNECT");
+    if (cn != NULL && cn[0] != '\0')
+      thvm_atp_set_use_connectedness(s, (cn[0] != '0') ? 1u : 0u);
+  }
+
+  // THVM_ATP_RECORD_NORM=1 turns on per-step normalize-trace recording
+  // (the WL ProofObject path's setting) so a C bench can A/B the cost of
+  // record_norm_steps -- the suspected paclet-vs-C overhead.
+  {
+    const char *rn = getenv("THVM_ATP_RECORD_NORM");
+    if (rn != NULL && rn[0] == '1') thvm_atp_set_record_norm_steps(s, 1u);
+  }
+
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
   // "sat" mode: pure completion, NO goal -- run to the step/wall cap
@@ -230,6 +338,8 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "chain6") == 0) goal_chain(&gl, &gr, 6u);
   else if (strcmp(goal, "deep5")  == 0) goal_deep(&gl, &gr, 5u);
   else if (strcmp(goal, "wolfram")== 0) goal_wolfram(&gl, &gr);
+  else if (strcmp(goal, "andassoc")==0) goal_andassoc(&gl, &gr);
+  else if (strcmp(goal, "andassocu")==0) goal_andassocu(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
@@ -258,6 +368,23 @@ int main(int argc, char **argv) {
   printf("ordering=%s  step_cap=%u  wall_cap=%.0fs  cp_weight_mode=%u\n",
          use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"),
          step_cap, wall_cap, (u32)s->cp_weight_mode);
+  if (!saturate) {
+    char glb[2048], grb[2048];
+    atp_pretty_term(gl, glb, sizeof glb);
+    atp_pretty_term(gr, grb, sizeof grb);
+    printf("goal-lhs = %s\n", glb);
+    printf("goal-rhs = %s\n", grb);
+  }
+
+  // THVM_ATP_DIAG=<period>: every <period> steps, measure the
+  // interreduction deficit (rules with a side reducible by another
+  // rule) and the max/total symbol footprint of R.  Confirms whether R
+  // is genuinely under-interreduced as it grows.
+  u32 diag_period = 0;
+  {
+    const char *dg = getenv("THVM_ATP_DIAG");
+    if (dg != NULL && dg[0] != '\0') diag_period = (u32)strtoul(dg, NULL, 10);
+  }
 
   clock_t   t0  = clock();
   AtpStatus st  = ATP_RUNNING;
@@ -271,6 +398,16 @@ int main(int argc, char **argv) {
     if (i > 0 && i % 250u == 0u) {
       printf("  step %7u  rules=%-6u cps=%-8u %.1fs\n",
              i, s->n_rules, s->n_cps, el);
+      fflush(stdout);
+    }
+    if (diag_period > 0 && i > 0 && i % diag_period == 0u) {
+      u32 nl = 0, nr = 0, na = 0, maxside = 0; u64 tot = 0;
+      thvm_atp_interreduce_deficit(s, &nl, &nr, &na, &maxside, &tot);
+      printf("  DIAG step %7u  rules=%u  deficit: lhs-red=%u rhs-red=%u "
+             "any-red=%u (%.1f%%)  max-side=%u  total-syms=%llu\n",
+             i, s->n_rules, nl, nr, na,
+             (s->n_rules > 0) ? (100.0 * (double)na / (double)s->n_rules) : 0.0,
+             maxside, (unsigned long long)tot);
       fflush(stdout);
     }
     if (el > wall_cap) {
@@ -289,10 +426,16 @@ int main(int argc, char **argv) {
   printf("=> %s\n", sn);
   printf("   goal=%s  steps=%u  rules=%u  cps=%u  max_cps=%u  %.1fs\n",
          goal, i, s->n_rules, s->n_cps, max_cps, el);
+  printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
+         s->n_trace, s->t_max, s->record_norm_steps);
   printf("   dropped: joinable=%u queue-subsumed=%u "
-         "rule-subsumed=%u connected=%u\n",
+         "rule-subsumed=%u connected=%u orphan=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
-         s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected);
+         s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected,
+         s->n_cps_dropped_orphan);
+  printf("   dropped: ground-joinable=%u connected-below-peak=%u\n",
+         s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak);
+  printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);
   { u32 unor = 0;
     for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;
     printf("   unorientable rules: %u / %u\n", unor, s->n_rules); }
@@ -367,6 +510,29 @@ int main(int argc, char **argv) {
            avg_cand, avg_node);
     printf("   fv-match: %llu thvm_match calls on survivors\n",
            (unsigned long long)matchcalls);
+  }
+#endif
+
+#ifdef ATP_RULE_INDEX
+  // 7e: rule-LHS redex-index retrieval stats -- THE Sheffer-pruning
+  // measurement.  candidates/query is the candidates-returned-per-query:
+  // a linear scan would touch n_rules records per position-query.  If
+  // candidates/query tracks n_rules the discrimination tree does NOT
+  // prune on single-symbol Sheffer; if it stays bounded it does.
+  {
+    u64 queries = 0, cands = 0, matchcalls = 0, nodevisits = 0;
+    u32 nodes = 0, rbuilt = 0;
+    thvm_atp_ri_stats(s, &queries, &cands, &matchcalls, &nodevisits,
+                      &nodes, &rbuilt);
+    double avg_cand = (queries > 0) ? ((double)cands / (double)queries) : 0.0;
+    double avg_node = (queries > 0) ? ((double)nodevisits / (double)queries) : 0.0;
+    double avg_mc   = (queries > 0) ? ((double)matchcalls / (double)queries) : 0.0;
+    printf("   ri-index: %llu queries  %u tree-nodes  %u rules-built\n",
+           (unsigned long long)queries, nodes, rbuilt);
+    printf("   ri-retrieval: %.3f candidates/query  %.3f tree-nodes/query  %.4f thvm_match/query\n",
+           avg_cand, avg_node, avg_mc);
+    printf("   ri-cmp: candidates/query vs n_rules=%u  ->  prune-ratio %.4f\n",
+           rbuilt, (rbuilt > 0) ? (avg_cand / (double)rbuilt) : 0.0);
   }
 #endif
 

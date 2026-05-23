@@ -2853,14 +2853,29 @@ int main(void) {
       atp_push_rule(sb, FT_F(x, y), FT_F(y, x));                   // unorient
       atp_push_rule(sb, FT_F(FT_F(x, x), x), x);                   // orient
     }
+    // set 2: TWO unorientable equations whose LHS faces overlap (both
+    // f(_, _) heads), so several unorientable faces are candidates at one
+    // position -- exercises the indexed unorientable path's candidate
+    // priority (rule asc, l->r before r->l) against the linear scan.  An
+    // index that mis-orders r->l-of-rule-i vs l->r-of-rule-(i+1) diverges
+    // here even though every set-0/1 position has at most one such face.
+    AtpState *sc = thvm_atp_init(&FT_CFG, 256u);
+    {
+      Term x = mk_v(0u), y = mk_v(1u), z = mk_v(2u);
+      atp_push_rule(sc, FT_F(x, y), FT_F(y, x));                   // unorient
+      atp_push_rule(sc, FT_F(FT_F(x, y), z), FT_F(FT_F(y, x), z)); // unorient
+      atp_push_rule(sc, FT_F(x, FT_F(y, z)), FT_F(y, FT_F(x, z))); // unorient
+      atp_push_rule(sc, FT_F(x, x), x);                            // orient
+    }
 
     // Deterministic random subject generator: variables fv(0..2) and
     // binary f, capped depth so terms stay under the flat cap.
     u32 rng = 0x1234567u;
     #define FT_RND() (rng = rng * 1103515245u + 12345u, rng >> 8)
     u32 mism = 0u, total = 0u;
+    u32 resume_mism = 0u;     // flatterm resume-ON vs resume-OFF normal form
     for (u32 t = 0; t < 4000u; t++) {
-      AtpState *s = (t & 1u) ? sb : sa;
+      AtpState *s = (t % 3u == 0u) ? sc : ((t & 1u) ? sb : sa);
       // Build a random subject bottom-up: start with `budget` random
       // variable leaves over fv(0..2), then repeatedly combine two pool
       // entries under f until one term remains.
@@ -2891,7 +2906,24 @@ int main(void) {
       s->use_flatterm = 1u;
       Term nf_flat = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
                                            s->n_rules, 4096u);
+      // Resume-ON (the default) vs resume-OFF unorientable scan: the
+      // incremental-resume watermark must not change the normal form.
+      s->ft_unorient_resume = 0u;
+      Term nf_noresume = atp_rewrite_normalize(s, subj, s->lhs, s->rhs,
+                                               s->n_rules, 4096u);
+      s->ft_unorient_resume = 1u;
       s->use_flatterm = 0u;
+      if (!kbo_eq(nf_flat, nf_noresume)) {
+        resume_mism++;
+        if (resume_mism <= 3u) {
+          char a[512], b[512], c[512];
+          atp_pretty_term(subj, a, sizeof a);
+          atp_pretty_term(nf_flat, b, sizeof b);
+          atp_pretty_term(nf_noresume, c, sizeof c);
+          fprintf(stderr, "FLATTERM RESUME DIFF: subj=%s on=%s off=%s\n",
+                  a, b, c);
+        }
+      }
       if (!kbo_eq(nf_tree, nf_flat)) {
         mism++;
         if (mism <= 3u) {
@@ -2903,14 +2935,21 @@ int main(void) {
         }
       }
       thvm_atp_heap_reset(cp);
+      // heap_reset recycles cell integers across subjects; the persistent
+      // KBO weight memo is keyed by cell integer, so a recycled integer
+      // would alias a stale entry.  The live engine bumps the epoch on GC;
+      // this differential never GCs, so invalidate explicitly here.
+      thvm_kbo_invalidate();
     }
     TEST_BEGIN("atp/flatterm-mixed-normalize-differential");
     {
       CHECK_EQ(mism, 0u);
+      CHECK_EQ(resume_mism, 0u);
       CHECK(total >= 4000u);
     }
     thvm_atp_free(sa);
     thvm_atp_free(sb);
+    thvm_atp_free(sc);
     #undef FT_F
     #undef FT_RND
   }

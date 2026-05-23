@@ -123,6 +123,14 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORPHAN_KILL)),-DATP_ORPHAN_KILL,)
 ATP_ORDERED_REWRITE ?= 1
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRITE,)
 
+# -DATP_FLATTERM_DIFF compiles the test_atp flatterm differential block
+# (tree mixed NF == flatterm mixed NF, AND flatterm resume-ON == resume-OFF
+# NF) over 4000 random mixed-rule subjects.  Off by default (the default
+# test_atp run is the 135603-assertion suite); `make ATP_FLATTERM_DIFF=1
+# bin/test_atp` adds the differential.
+ATP_FLATTERM_DIFF ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FLATTERM_DIFF)),-DATP_FLATTERM_DIFF,)
+
 # Milestone 10: -DATP_MNF builds the MNF goal-directed search (a port
 # of Waldmeister's "MultipleNormalFormen" module).  It AUGMENTS the
 # single-normal-form goal check: goal_lhs seeds a GREEN front, goal_rhs
@@ -680,3 +688,21 @@ $(BUILD)/bench_twee: tools/bench_twee.c $(SRC) | $(BUILD)
 bench-twee: $(BUILD)/bench_twee
 	$(BUILD)/bench_twee
 	@echo "Wrote build/bench-twee.csv"
+
+# === Flatterm inner-loop spike + A/B microbench ====================
+# Standalone measured spike (atp-wm-perstep): a purpose-built flatterm
+# core (match / rewrite-normalize / KBO over contiguous pre-order node
+# arrays, no IC traversal) A/B'd against thvm's IC inner loop on the REAL
+# harvested Sheffer / AndAssociativity rule set + subject corpus. Asserts
+# identical normal-form + KBO verdict on every input, reports IC/flat
+# wall-time ratio. Additive; not part of `make test`. Built with the same
+# ATP defines as the engine so the harvested rules match the live path.
+$(BIN)/bench_flatcore: tools/bench_flatcore.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
+
+# WM-FPA microbench: the faithful Waldmeister flatterm + discrimination-
+# tree (DSBaum) + NormalformInnermost substrate (src/wmfpa/wmfpa.h) A/B'd
+# against thvm's IC normalize on the REAL harvested rule set, at several
+# |R| sizes.  Asserts identical normal form on every subject. Additive.
+$(BIN)/bench_wmfpa: tools/bench_wmfpa.c src/wmfpa/wmfpa.h $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)

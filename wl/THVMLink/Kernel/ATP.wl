@@ -38,7 +38,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindEquationalProof[axioms] (a list of axiom equations) or TFindEquationalProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindEquationalProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\", \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + GroundJoin.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindEquationalProof[axioms] (a list of axiom equations) or TFindEquationalProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindEquationalProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\", \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (SInE-style symbol-connectivity pruning -- heuristic, may drop a needed axiom).";
 
@@ -92,7 +92,8 @@ $atpRunProofFn := $atpRunProofFn = load[
     "thvm_wl_atp_run_proof",
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
-     Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
+     Integer},
     "NumericArray"
 ]
 
@@ -804,6 +805,80 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
     {recs, cur}
 ]
 
+(* Method "Precedence" / "SkolemHighest": resolve a precedence spec to
+   the label-indexed Int64 array thvm_wl_atp_run_proof's args[17]
+   expects.  prec[label] is the LPO/KBO precedence rank of that label
+   (higher = greater; mirrors Waldmeister's `p > q > nand` ORDERING).
+   None -> an empty array (the C side leaves identity / auto-precedence
+   in place, so the engine is byte-identical unless precedence is set).
+
+   The spec is one of:
+     None
+         inactive (empty array).
+     {sym1, sym2, ...}  (Strings or Symbols, highest-to-lowest)
+         sym1 gets the largest rank, the last the smallest; any symbol
+         the goal/axioms use but the list omits keeps rank 0 (lowest).
+     "SkolemHighest"
+         the structural rule WM's `p > q > nand` precedence encodes:
+         rank every ground (0-arity) constant the goal skolemized into
+         ABOVE every other symbol (the operators).  Among the skolem
+         constants, order is by label (stable, matches encode order). *)
+atpSymName[s_String] := s;
+atpSymName[s_Symbol] := SymbolName[Unevaluated[s]];
+SetAttributes[atpSymName, HoldFirst];
+atpSymName[s_] := ToString[s];
+
+(* The 0-arity (ground constant) symbol names occurring in a held
+   conjecture pair -- these are the goal's skolem constants. *)
+atpGroundConstNames[enc_] := Block[{names},
+    names = Cases[
+        Hold @@ {enc["ConjPair"]},
+        s_Symbol /; AtomQ[Unevaluated[s]] :>
+            SymbolName[Unevaluated[s]],
+        {0, Infinity}, Heads -> False];
+    DeleteDuplicates[names]
+];
+
+(* The result is a plain Int64 List the FFI reads label-indexed
+   (element i = precedence rank of label i; element 0 is the unused
+   label-0 placeholder).  An empty List leaves the C default in place. *)
+atpPrecedenceArray[None, enc_] := {};
+atpPrecedenceArray[order_List, enc_] := Block[{
+    sym = enc["State"]["sym"], maxLab = enc["MaxLab"], names, ranks, arr
+},
+    names = atpSymName /@ order;
+    (* Highest-to-lowest: first name gets the largest rank.  Unlisted
+       symbols stay 0. *)
+    ranks = AssociationThread[names -> Range[Length[names], 1, -1]];
+    arr = ConstantArray[0, maxLab + 1];
+    KeyValueMap[
+        Function[{nm, lab},
+            If[ KeyExistsQ[ranks, nm] && lab >= 1 && lab <= maxLab,
+                arr[[lab + 1]] = ranks[nm]]],
+        sym];
+    arr
+];
+atpPrecedenceArray["SkolemHighest", enc_] := Block[{
+    sym = enc["State"]["sym"], maxLab = enc["MaxLab"], skNames, arr,
+    nNonSk
+},
+    skNames = atpGroundConstNames[enc];
+    arr = ConstantArray[0, maxLab + 1];
+    (* Non-skolem symbols get ranks 1..k by label order; skolem
+       constants get ranks strictly above all of them. *)
+    nNonSk = Count[Keys[sym], nm_ /; ! MemberQ[skNames, nm]];
+    Block[{nonSkRank = 0},
+        KeyValueMap[
+            Function[{nm, lab},
+                If[ lab >= 1 && lab <= maxLab,
+                    arr[[lab + 1]] = If[ MemberQ[skNames, nm],
+                        nNonSk + 1,
+                        nonSkRank = nonSkRank + 1; nonSkRank]]],
+            sym]];
+    arr
+];
+atpPrecedenceArray[_, enc_] := {};
+
 (* Run the C ATP completion engine + proof extraction.  The C glue
    ships two derivations: the completion-saturated MAIN state's full
    trace DAG, and a no-completion EXT state whose chain (when it
@@ -817,18 +892,22 @@ decodeStepsBlock[raw_, c0_, n_, labelToName_, idToName_] := Block[{
    the corresponding extraction produced nothing. *)
 cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     cpWeight_:-1, ordering_:0, autoPrec_:0, useMnf_:0,
-    maxCpWeight_:0, goalInterleave_:0, groundJoin_:0, selRatio_:0,
-    autoMaxWeight_:0, rhsInterreduce_:0, unfailingCP_:0] := Block[{
-    raw, status, nRules, nTrace, nSteps, extNRules, extNSteps,
+    maxCpWeight_:0, goalInterleave_:0, groundJoin_:0,
+    selRatio_, autoMaxWeight_, rhsInterreduce_, unfailingCP_,
+    cpSetInterreduce_, connectedness_, precedenceSpec_:None,
+    fifoTiebreak_:0, recordNorm_:1] := Block[{
+    raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
-    mnfSteps, mainRules, rTrace, traceEntries
+    mnfSteps, mainRules, rTrace, traceEntries, precArray
 },
+    precArray = atpPrecedenceArray[precedenceSpec, enc];
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
-        unfailingCP];
+        unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
+        recordNorm];
     status = raw[[1]];
-    nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]];
+    nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
     labelToName = Association[Reverse /@ Normal[enc["State"]["sym"]]];
     idToName = Association[Reverse /@ Normal[enc["State"]["var"]]];
@@ -897,6 +976,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
         "MainRules" -> mainRules,
         "RTrace" -> rTrace,
         "Trace" -> traceEntries,
+        "NCps" -> nCps,
+        "RecordNorm" -> recordNorm,
         "L2N" -> labelToName, "I2N" -> idToName,
         (* every variable symbol the decode produced: the named
            encoder vars plus any "x<id>" fallbacks for FVR ids
@@ -1769,7 +1850,51 @@ atpRHSInterreduceOpt[o_Association] := Switch[Lookup[o, "RHSInterreduce", Automa
    on; False/Automatic = off (the default lhs-only overlap). *)
 atpUnfailingCPOpt[o_Association] := Switch[Lookup[o, "UnfailingCP", Automatic],
     True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+(* "CPSetInterreduce" -> True: Waldmeister KPV_KPMengeInterreduzieren --
+   periodically re-normalize the whole CP queue against the full rule set,
+   deleting CPs that became joinable and reweighting the rest, so the
+   heap-min selection tracks live, irreducible CPs.  True = on; the engine
+   default (and other methods) leave it off. *)
+atpCPSetInterreduceOpt[o_Association] := Switch[Lookup[o, "CPSetInterreduce", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
+(* "Connectedness" -> True: Bachmair-Dershowitz connectedness CP deletion
+   (Twee section 6.2) -- drop a critical pair whose two sides join through
+   intermediate terms STRICTLY BELOW the peak in the reduction order.  A
+   sound generation-cut redundancy criterion (stronger than trivial
+   joinability): such a CP is a consequence of smaller overlaps, so it adds
+   nothing.  True = on; False/Automatic = off (engine byte-identical). *)
+atpConnectednessOpt[o_Association] := Switch[Lookup[o, "Connectedness", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
+(* "Precedence" -> {sym1, sym2, ...} (highest-to-lowest symbol names) or
+   "SkolemHighest" -> True: an explicit reduction-ordering precedence,
+   resolved against the engine's symbol labels in cEngineProof
+   (atpPrecedenceArray).  Mirrors Waldmeister's `p > q > nand` ORDERING
+   block.  None/Automatic/absent = the chosen default (identity or
+   AutoPrecedence), keeping the engine byte-identical. *)
+atpPrecedenceOpt[o_Association] := Block[{p, sk},
+    sk = Lookup[o, "SkolemHighest", Automatic];
+    If[ sk === True, Return["SkolemHighest"]];
+    p = Lookup[o, "Precedence", Automatic];
+    Which[
+        ListQ[p], p,
+        p === "SkolemHighest", "SkolemHighest",
+        True, None]];
+(* "FifoTiebreak" -> True: Waldmeister `-:w1=fifo` secondary key.  Preserve
+   each surviving CP's insertion age across the post-orient CP-normalize
+   sweep, so equal-weight ties resolve oldest-first run-wide (the heap
+   reheapify otherwise reassigns the age, scrambling the FIFO tie order).
+   True = on; False/Automatic = off (engine byte-identical). *)
+atpFifoTiebreakOpt[o_Association] := Switch[Lookup[o, "FifoTiebreak", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
+(* "RecordNorm" -> True/False: per-step normalize-trace recording for the
+   ProofObject builder.  Default True (engine byte-identical, the
+   historical path: WL walks CP -> NORM_STEP* -> ORIENT linearly).  False
+   routes the search through the fast indexed/flatterm normalize so a long
+   completion saturates at the C-bench rate; WL then reconstructs the
+   chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG. *)
+atpRecordNormOpt[o_Association] := Switch[Lookup[o, "RecordNorm", Automatic],
+    False, 0, True | Automatic, 1, _, 1];
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -1788,7 +1913,9 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
             True, 1, False | Automatic, 0, _, 0];
         {cw, ord, ap, mnf, atpMaxWeightOpt[o], atpGoalInterleaveOpt[o],
          atpGroundJoinOpt[o], atpSelectionRatioOpt[o], atpAutoMaxWeightOpt[o],
-         atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o]}
+         atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o],
+         atpCPSetInterreduceOpt[o], atpConnectednessOpt[o],
+         atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -1799,14 +1926,16 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1};
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 
 (* Method -> "Waldmeister": the faithful Waldmeister DEFAULT strategy for
    an unrecognized (single-operator nand / Sheffer / Wolfram) problem --
    the "Orkus" fallback StdS = kbo(std), itl(mi), zb(mnf) (Sinai.h:109,
-   :131) plus the default mixweight classification (Parameter.c:165).
+   :131).  StdS carries no cph(...) clause, so the classification
+   defaults to Heu_MixWeight (NewClassification.c:850); the itl(mi)
+   token is the interleave RATIO (CPdimension fairness), NOT a weight.
    Decoded into thvm knobs:
      - CriticalPairWeight -> "Mix"  (default heuristic=mixweight, the
        CH_MixWeight formula, ClasHeuristics.c:130)
@@ -1816,28 +1945,44 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
        YFiles.c:114-122; CPdimension fairness, KPVerwaltung.c:582)
      - RHSInterreduce -> True  (IR_InterreduktionRechts -- the
        divergence that made the deep theorems unreachable)
-     - GroundJoin -> True  (sound CP redundancy, keeps the queue lean)
-   List form takes the same suboptions, overriding any default. *)
+     - UnfailingCP -> True  (faithful unfailing completion)
+   List form takes the same suboptions, overriding any default.  Pass
+   "GoalDirected" -> True to add the MNF bidirectional front on top of
+   the completion path for a symmetric goal that never meets at one
+   normal form. *)
 atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
-    Block[{o = Association[{subopts}], merged},
+    Block[{o = Association[{subopts}], merged, mnf},
         (* Waldmeister's Orkus default for an unrecognized (single-
            operator nand) problem is StdS = kbo(std), itl(mi), zb(mnf)
            (Sinai.h:109,131): KBO ordering, the interleaved CPdimension
-           (itl(mi) -> SelectionRatio 51), the DEFAULT weight (StdS has
-           no cph(...) -- so the bare size/Add measure, NOT Mix/Gt), and
-           MNF goal-direction (zb(mnf) -> mnf=1, the GoalDirected front
-           search).  RHSInterreduce + UnfailingCP are part of faithful
-           unfailing completion.  StdS has no gj(), so GroundJoin is off. *)
+           (itl(mi) -> SelectionRatio 51), the MixWeight classification
+           (no cph(...) -> Heu_MixWeight, NewClassification.c:850), and
+           goal normalization (zb(mnf)).  With Mix the engine follows
+           WM's exact selection trajectory; Add diverges at rule 10.
+           RHSInterreduce + UnfailingCP are part of faithful unfailing
+           completion.  StdS has no gj(), so GroundJoin is off.
+
+           WM's zb(mnf) is goal normalization, not a separate exhaustive
+           bidirectional front; thvm's MNF front search re-expands its
+           whole node table every time a rule is added (O(n_nodes) per
+           selection), which dominates a deep completion.  The preset
+           runs the completion path -- whose single-normal-form goal
+           check closes every goal WM's StdS closes -- and only adds
+           the MNF front when "GoalDirected" -> True is requested for a
+           symmetric goal the single-NF check cannot reach. *)
+        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", False], 1, 0];
+        o = KeyDrop[o, "GoalDirected"];
         merged = Join[<|
-            "CriticalPairWeight" -> "Add", "Ordering" -> "KBO",
+            "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
             "AutoPrecedence" -> True, "SelectionRatio" -> 51,
-            "RHSInterreduce" -> True, "UnfailingCP" -> True|>, o];
-        atpParseCompletionOpts[Normal[merged], 1]
+            "RHSInterreduce" -> True, "UnfailingCP" -> True,
+            "CPSetInterreduce" -> True|>, o];
+        atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
 atpParseMethod[m_] := (
-    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0});
+    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
@@ -2426,7 +2571,8 @@ atpStatisticsAssoc[cRes_] := <|
     "Status" -> atpReturnStatus[cRes["Status"]],
     "Steps" -> If[ ListQ[cRes["MainSteps"]], Length[cRes["MainSteps"]], 0],
     "Rules" -> If[ ListQ[cRes["MainRules"]], Length[cRes["MainRules"]], 0],
-    "Trace" -> If[ ListQ[cRes["Trace"]], Length[cRes["Trace"]], 0]
+    "Trace" -> If[ ListQ[cRes["Trace"]], Length[cRes["Trace"]], 0],
+    "QueueSize" -> Replace[cRes["NCps"], Except[_Integer] -> 0]
 |>;
 
 (* Project a finished run (the prove/completion bundle) onto a return
@@ -2741,7 +2887,16 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
                         p, $Failed]
                 ]]
             ];
-            poA = tryBuild[True, dataset];
+            (* When the C engine ran with per-step recording OFF
+               (cRes["RecordNorm"] === 0 -- Method "RecordNorm" -> False,
+               the fast-search path), no TRACE_NORM_STEP entries exist, so
+               the chain-ON extraction has nothing to walk: go straight to
+               the chain-OFF emitNorm BFS, which bridges the CP/ORIENT/
+               SIMPLIFY trace DAG.  A pre-built axiom-cited EXT dataset
+               (when present) still wins regardless. *)
+            poA = If[ Lookup[cRes, "RecordNorm", 1] === 0 && dataset === $Failed,
+                tryBuild[False, $Failed],
+                tryBuild[True, dataset]];
             poFinal = If[ Head[poA] === ProofObject,
                 poA,
                 poB = tryBuild[False, $Failed];

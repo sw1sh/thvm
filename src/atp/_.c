@@ -391,6 +391,14 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
 // earlier add_equation push site can call it.
 static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace);
 
+// Periodic full-rule-set CP-queue interreduction (Waldmeister
+// KPV_KPMengeInterreduzieren).  Defined far below (it needs the
+// normalizer + reheapify); forward-declared for the thvm_atp_step call.
+// The period (run every Nth rule addition) lives here so the call site
+// can name it.
+#define ATP_CP_SET_IR_PERIOD 16u
+static void atp_cp_set_interreduce(AtpState *s);
+
 // === Waldmeister Stringterms: packed byte-string critical pairs =====
 //
 // A direct port of Waldmeister's `Stringterms` module (sources/TPR/
@@ -946,6 +954,11 @@ static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
       s->cp_packed[i] = NULL;
     }
     s->cp_trace[w] = s->cp_trace[i];
+    // Carry the insertion age down to the compacted slot so a
+    // cp_fifo_tiebreak reheapify can preserve it (Waldmeister w1=fifo);
+    // harmless otherwise (reheapify overwrites cp_seq when the flag
+    // is off).
+    s->cp_seq[w] = s->cp_seq[i];
     w++;
   }
   s->n_cps = w;
@@ -1789,6 +1802,11 @@ fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
 
 #ifdef ATP_RULE_INDEX
 
+// The unorientable-faces index inserts a face only when its replacement
+// side's variables are contained in the matched side (else the face can
+// never fire); declared here, defined with the ordered-rewrite helpers.
+static int atp_vars_contained(Term a, Term b);
+
 // Flat-symbol alphabet -- same scheme as 7d's atp_dt_*: NUM < every
 // STAR(k) < every CTR(lab) so a sym-ascending child list lets the
 // descent stop scanning early.
@@ -1888,8 +1906,24 @@ struct AtpRuleIndex {
   u32        n_recs, cap_recs;
   u32        root;
   u32        n_rules_built;     // R size the tree currently reflects
+  // Retrieval instrumentation (cheap counters, always compiled).  The
+  // decisive Sheffer measurement: q_candidates / q_queries is the
+  // candidates-returned-per-query -- if it tracks n_rules the tree does
+  // not prune; if bounded it does.
+  u64        q_queries;         // atp_ri_query_pos calls
+  u64        q_candidates;      // leaf records reached by retrieval
+  u64        q_matchcalls;      // thvm_match calls issued on candidates
+  u64        q_nodevisits;      // discrimination-tree nodes touched
   u8         any_folded;        // some rule LHS folded a var -> imperfect
+  // 1 for the unorientable-faces index: a leaf rec's `rule` field then
+  // carries the direction in its high bit (ATP_RI_DIR_BIT) -- bit set =
+  // r->l (matched face is rhs[i], replacement is lhs[i]); clear = l->r.
+  u8         is_unorient;
 };
+// Direction bit packed into a leaf rec's `rule` field for the
+// unorientable index.  Rule indices never approach 2^31 in completion,
+// so the top bit is free as a per-face direction tag.
+#define ATP_RI_DIR_BIT  0x80000000u
 typedef struct AtpRuleIndex AtpRuleIndex;
 
 static u32 atp_ri_node_new(AtpRuleIndex *ix, u32 sym) {
@@ -1994,6 +2028,53 @@ static void atp_ri_rebuild(AtpState *s) {
     ix->nodes[node].rec_head = rec;
   }
   ix->n_rules_built = s->n_rules;
+
+  // Companion index over the UNORIENTABLE equations' faces.  For each
+  // unorientable rule i, the matched side may be either face; index a
+  // face only when its replacement side's variables are contained in it
+  // (else the face can never produce a well-formed instance and the
+  // linear scan's atp_vars_contained guard would reject it).  The leaf
+  // rec's `rule` field carries the direction in ATP_RI_DIR_BIT: clear =
+  // l->r (match lhs[i], replace by rhs[i]); set = r->l (match rhs[i],
+  // replace by lhs[i]).  Faces are inserted in (rule asc, l->r before
+  // r->l) order so the retrieval's candidate list is built deterministic.
+  AtpRuleIndex *ux = s->unorient_index;
+  if (ux != NULL) {
+    ux->n_nodes = 0;
+    ux->n_recs  = 0;
+    ux->any_folded = 0;
+    ux->is_unorient = 1u;
+    ux->root    = atp_ri_node_new(ux, ATP_RI_NIL);
+    if (s->n_unorient > 0u) {
+      for (u32 i = 0; i < s->n_rules; i++) {
+        if (s->r_orient[i]) continue;                 // oriented: rule_index
+        // l->r face: match lhs[i], replace by rhs[i].
+        if (atp_vars_contained(s->rhs[i], s->lhs[i])) {
+          AtpRiVarMap vm;
+          atp_ri_varmap_reset(&vm);
+          u32 node = atp_ri_insert_term(ux, ux->root, s->lhs[i], &vm);
+          if (vm.folded) ux->any_folded = 1u;
+          u32 rec  = atp_ri_rec_new(ux);
+          ux->recs[rec].rule = i;                     // dir bit clear
+          ux->recs[rec].next = ux->nodes[node].rec_head;
+          ux->nodes[node].rec_head = rec;
+        }
+        // r->l face: match rhs[i], replace by lhs[i].
+        if (atp_vars_contained(s->lhs[i], s->rhs[i])) {
+          AtpRiVarMap vm;
+          atp_ri_varmap_reset(&vm);
+          u32 node = atp_ri_insert_term(ux, ux->root, s->rhs[i], &vm);
+          if (vm.folded) ux->any_folded = 1u;
+          u32 rec  = atp_ri_rec_new(ux);
+          ux->recs[rec].rule = i | ATP_RI_DIR_BIT;
+          ux->recs[rec].next = ux->nodes[node].rec_head;
+          ux->nodes[node].rec_head = rec;
+        }
+      }
+    }
+    ux->n_rules_built = s->n_rules;
+  }
+
   s->rule_index_dirty = 0u;
 }
 
@@ -2033,6 +2114,7 @@ static const Term   *g_atp_ri_flat    = NULL;
 static const u32    *g_atp_ri_subsz   = NULL;
 static const u32    *g_atp_ri_flatsym = NULL;  // per-position flat-symbol code
 static const Term   *g_atp_ri_lhs     = NULL;  // s->lhs[] for the leaf guard
+static const Term   *g_atp_ri_rhs     = NULL;  // s->rhs[] for r->l face guards
 static u32           g_atp_ri_qend    = 0;     // end of the queried slice
 static u32           g_atp_ri_star[ATP_RI_MAXVARS];  // first-bind positions
 static u32           g_atp_ri_best    = ATP_RI_NIL;
@@ -2058,6 +2140,7 @@ static void atp_ri_leaf_collect(u32 node) {
   u8 perfect = !ix->any_folded && !g_atp_ri_query_folded;
   for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
        r = ix->recs[r].next) {
+    ix->q_candidates++;
     u32 rule = ix->recs[r].rule;
     if (rule >= g_atp_ri_best) continue;          // cannot lower the min
     if (perfect) {
@@ -2071,6 +2154,7 @@ static void atp_ri_leaf_collect(u32 node) {
       continue;
     }
     RewriteSubst subst = {{0}};
+    ix->q_matchcalls++;
     if (thvm_match(g_atp_ri_lhs[rule], g_atp_ri_qsubj, &subst)) {
       g_atp_ri_best = rule;
     }
@@ -2092,6 +2176,7 @@ static void atp_ri_leaf_collect(u32 node) {
 static void atp_ri_descend(u32 node, u32 pos) {
   AtpRuleIndex *ix = g_atp_ri_ix;
   for (;;) {
+    ix->q_nodevisits++;
     if (pos == g_atp_ri_qend) {
       atp_ri_leaf_collect(node);
       return;
@@ -2133,6 +2218,7 @@ static void atp_ri_descend(u32 node, u32 pos) {
 // subterm at preorder position `qpos` of the shared flat array.
 // Returns ATP_RI_NIL if no rule LHS matches there.
 static u32 atp_ri_query_pos(u32 qpos) {
+  g_atp_ri_ix->q_queries++;
   g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
   g_atp_ri_qsubj = g_atp_ri_flat[qpos];
   g_atp_ri_best  = ATP_RI_NIL;
@@ -2142,6 +2228,107 @@ static u32 atp_ri_query_pos(u32 qpos) {
   // descent.  The one reset is done once per normalize.
   atp_ri_descend(g_atp_ri_ix->root, qpos);
   return g_atp_ri_best;
+}
+
+// --- unorientable-faces retrieval (candidate collection) -----------
+//
+// The orientable retrieval above tracks a single MINIMUM rule index: the
+// linear scan it replaces always fires the lowest-index rule with no
+// order check, so the structural match alone names the winner.  The
+// unorientable pass cannot collapse to a min: at a position, the linear
+// scan tries each unorientable equation (rule asc; l->r then r->l) and
+// the FIRST direction that is strictly order-DECREASING for the matched
+// instance wins -- the structurally-lowest face may be order-rejected.
+// So this descent COLLECTS every structurally matching face (rule, dir)
+// at the position; the caller applies the LPO gate in (rule asc, l->r
+// before r->l) order and fires the first that passes -- identical to the
+// linear scan, but the LPO compare runs only on candidates.
+// Candidate buffer cap.  At a position, the matching unorientable faces
+// are bounded by the count of indexed faces (<= 2 * n_unorient); a deep
+// completion's unorientable subset runs to a few hundred, and a shallow
+// face (e.g. a commutativity-style nand(x,y)=nand(y,x)) matches every
+// nand-headed subterm, so size generously to keep the indexed path live
+// (overflow only forces the exact linear fallback at that position --
+// correct, just slow).
+#define ATP_RI_MAXCAND 8192u
+static u32 g_atp_ri_cand[ATP_RI_MAXCAND];   // rule | dir-bit, structural hits
+static u32 g_atp_ri_ncand = 0;
+
+// Leaf action for the unorientable index: append each face whose stored
+// pattern one-way matches the query subject.  Same match proof as the
+// orientable leaf (perfect descent OR thvm_match on a fold) -- only the
+// stored side (lhs[i] for l->r, rhs[i] for r->l) is the match pattern.
+static void atp_ri_leaf_collect_unorient(u32 node) {
+  AtpRuleIndex *ix = g_atp_ri_ix;
+  u8 perfect = !ix->any_folded && !g_atp_ri_query_folded;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+       r = ix->recs[r].next) {
+    u32 packed = ix->recs[r].rule;
+    if (g_atp_ri_ncand >= ATP_RI_MAXCAND) return;   // buffer full: caller bails
+    if (perfect) {
+      g_atp_ri_cand[g_atp_ri_ncand++] = packed;
+      continue;
+    }
+    u32 rule = packed & ~ATP_RI_DIR_BIT;
+    Term pat = (packed & ATP_RI_DIR_BIT) ? g_atp_ri_rhs[rule]
+                                         : g_atp_ri_lhs[rule];
+    RewriteSubst subst = {{0}};
+    if (thvm_match(pat, g_atp_ri_qsubj, &subst)) {
+      g_atp_ri_cand[g_atp_ri_ncand++] = packed;
+    }
+  }
+}
+
+// Candidate-collecting twin of atp_ri_descend.  Identical traversal,
+// different leaf action (collect every face, not the min).  Kept
+// separate so the hot orientable descent stays a tight single-callback
+// loop with no per-node branch on index kind.
+static void atp_ri_descend_unorient(u32 node, u32 pos) {
+  AtpRuleIndex *ix = g_atp_ri_ix;
+  for (;;) {
+    if (pos == g_atp_ri_qend) {
+      atp_ri_leaf_collect_unorient(node);
+      return;
+    }
+    u32 sz         = g_atp_ri_subsz[pos];
+    u32 csym_exact = g_atp_ri_flatsym[pos];
+    u32 ctr_next   = ATP_RI_NIL;
+    for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+         c = ix->nodes[c].sibling) {
+      u32 csym = ix->nodes[c].sym;
+      if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+        u32 k = csym - ATP_RI_STAR_BASE;
+        u32 bound = g_atp_ri_star[k];
+        if (bound == ATP_RI_NIL) {
+          g_atp_ri_star[k] = pos;
+          atp_ri_descend_unorient(c, pos + sz);
+          g_atp_ri_star[k] = ATP_RI_NIL;
+        } else if (g_atp_ri_subsz[bound] == sz &&
+                   memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
+                          (size_t)sz * sizeof(u32)) == 0) {
+          atp_ri_descend_unorient(c, pos + sz);
+        }
+      } else if (csym == csym_exact) {
+        ctr_next = c;
+      }
+    }
+    if (ctr_next == ATP_RI_NIL) return;
+    node = ctr_next;
+    pos  = pos + 1u;
+  }
+}
+
+// Collect into g_atp_ri_cand[] every unorientable face whose stored
+// pattern one-way matches the subject subterm at preorder position
+// `qpos`.  Returns the candidate count (g_atp_ri_ncand).  Order within
+// the buffer is leaf-list / tree order -- NOT priority -- so the caller
+// must apply the (rule asc, l->r before r->l) priority itself.
+static u32 atp_ri_query_pos_unorient(u32 qpos) {
+  g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
+  g_atp_ri_qsubj = g_atp_ri_flat[qpos];
+  g_atp_ri_ncand = 0;
+  atp_ri_descend_unorient(g_atp_ri_ix->root, qpos);
+  return g_atp_ri_ncand;
 }
 
 // Find the FIRST preorder position of the shared subject that is a
@@ -2349,6 +2536,277 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   return flattened ? atp_ri_build(flat, subsz, flatsym, 0u) : t;
 }
 
+// === Faithful Waldmeister-FPA normalize path (gated, default OFF) =====
+//
+// Wires src/wmfpa/wmfpa.h (flatterm rep + DSBaum discrimination tree +
+// NormalformInnermost retrieval) into the orientable normalize fixpoint
+// behind s->use_wmfpa.  The subject is encoded to a flatterm once, the
+// redex-retrieving tree is built from s->lhs[] (orientable rules) and
+// cached on AtpState, and the normal form is decoded back.  Byte-
+// identical to atp_rewrite_normalize_indexed (asserted by the bench
+// differential).  Used only when EVERY rule is orientable (n_unorient
+// == 0), exactly like the indexed path.
+#include "../wmfpa/wmfpa.h"
+
+static u32 atp_pretty_term(Term t, char *buf, u32 cap);   // defined in 5.x
+
+// IC Term -> wmfpa flatterm boundary adapters.
+static int wf_eng_is_var(WfTermH t, u32 *id) {
+  if (term_tag((Term)t) == TAG_FVR) { *id = term_ext((Term)t); return 1; }
+  return 0;
+}
+static u32     wf_eng_ctr_label(WfTermH t) { return term_ext((Term)t); }
+static u32     wf_eng_ctr_arity(WfTermH t) { return term_ctr_n((Term)t); }
+static WfTermH wf_eng_ctr_child(WfTermH t, u32 i) {
+  return (WfTermH)term_ctr_at((Term)t, i);
+}
+static const WfEnc g_wf_eng_enc = {
+  wf_eng_is_var, wf_eng_ctr_label, wf_eng_ctr_arity, wf_eng_ctr_child
+};
+
+// Decode a flatterm subtree rooted at `p` back to an IC Term.
+static Term wf_eng_decode_rec(const WfNode *a, u32 *p) {
+  u32 self = (*p)++;
+  if (WF_IS_VAR(a[self].sym)) return term_new_fvr(WF_VAR_ID(a[self].sym));
+  u32 n = a[self].arity;
+  if (n == 0u) { Term none[1]; return term_new_ctr(a[self].sym, none, 0); }
+  Term kids[REWRITE_MAX_ARITY];
+  for (u32 i = 0; i < n; i++) kids[i] = wf_eng_decode_rec(a, p);
+  return term_new_ctr(a[self].sym, kids, n);
+}
+
+// Per-rule flat-buffer storage for the cached tree.  Rebuilt whenever R
+// changes; bounded by the live orientable rule count.
+typedef struct {
+  WfTree   tree;
+  WfNode  *lhs_buf;    // packed flat LHS arenas
+  WfNode  *rhs_buf;    // packed flat RHS arenas
+  WfRule  *rules;
+  u32      cap_rules;
+  u32      cap_buf;    // node capacity of each of lhs_buf / rhs_buf
+} WfEngCache;
+
+#define WF_ENG_RULE_NODES 1024u    // per-side flat node cap (rule sides
+                                   // are small; a Sheffer LHS is < 64)
+
+static void wf_eng_cache_rebuild(AtpState *s) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  if (wc == NULL) {
+    wc = (WfEngCache *)calloc(1, sizeof(WfEngCache));
+    s->wmfpa_tree = wc;
+  } else {
+    wf_tree_free(&wc->tree);
+  }
+  u32 nr = s->n_rules;
+  if (nr > wc->cap_rules) {
+    wc->cap_rules = nr;
+    wc->rules   = (WfRule *)realloc(wc->rules, nr * sizeof(WfRule));
+    wc->lhs_buf = (WfNode *)realloc(wc->lhs_buf,
+                                    (size_t)nr * WF_ENG_RULE_NODES * sizeof(WfNode));
+    wc->rhs_buf = (WfNode *)realloc(wc->rhs_buf,
+                                    (size_t)nr * WF_ENG_RULE_NODES * sizeof(WfNode));
+    wc->cap_buf = WF_ENG_RULE_NODES;
+  }
+  // Include EVERY rule in [0, n_rules), exactly as the indexed path
+  // (atp_ri_rebuild) does: this path engages only when n_unorient == 0,
+  // so the caller already guarantees R is orientable.  Filtering on
+  // r_orient[] here would silently drop rules a caller set directly
+  // (tests set s->lhs[i] + s->n_rules without r_orient[]), giving a
+  // wrong -- too-large -- normal form.  The WfRule array index IS the
+  // rule index (the tree's lowest-index-rule policy depends on it), so
+  // keep a 1:1 mapping: an over-deep rule side gets llen 0 and simply
+  // never inserts (absent from the tree), the same as the indexed path
+  // which cannot flatten it either.
+  for (u32 r = 0; r < nr; r++) {
+    WfNode *lb = wc->lhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    WfNode *rb = wc->rhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    u32 ll = wf_encode((WfTermH)s->lhs[r], lb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    u32 rl = wf_encode((WfTermH)s->rhs[r], rb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    if (rl == 0u) ll = 0u;                  // over-deep RHS: drop the rule
+    wc->rules[r].lhs = lb; wc->rules[r].llen = ll;
+    wc->rules[r].rhs = rb; wc->rules[r].rlen = rl;
+  }
+  wf_tree_init(&wc->tree);
+  wf_tree_build(&wc->tree, wc->rules, nr);
+  s->wmfpa_built = s->n_rules;
+}
+
+// Incrementally bring the cached tree from `wmfpa_built` rules up to the
+// current `n_rules` by encoding and inserting ONLY the appended rules
+// [wmfpa_built, n_rules) -- O(sum of new-rule sizes), not O(R).  This is
+// the dominant completion mutation (atp_push_rule appends one rule per
+// step), so an O(rule) insert here is exactly what lets the per-op
+// normalize win flow through instead of being swamped by O(R) rebuilds.
+// Mirrors a loop of BO_ObjektEinfuegen over the new objects.  Returns 0
+// (signalling "fall back to a full rebuild") when the append would exceed
+// the cached buffer capacity -- the WfRule pointers index into lhs_buf/
+// rhs_buf, so a realloc there would dangle every existing rule pointer;
+// the full rebuild re-points them all.
+static int wf_eng_cache_append(AtpState *s) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  u32 nr = s->n_rules;
+  if (nr > wc->cap_rules || wc->cap_buf < WF_ENG_RULE_NODES) return 0;
+  for (u32 r = s->wmfpa_built; r < nr; r++) {
+    WfNode *lb = wc->lhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    WfNode *rb = wc->rhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+    u32 ll = wf_encode((WfTermH)s->lhs[r], lb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    u32 rl = wf_encode((WfTermH)s->rhs[r], rb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+    if (rl == 0u) ll = 0u;                  // over-deep RHS: drop the rule
+    wc->rules[r].lhs = lb; wc->rules[r].llen = ll;
+    wc->rules[r].rhs = rb; wc->rules[r].rlen = rl;
+    wc->tree.rules    = wc->rules;          // keep the alias live across grows
+    wc->tree.n_rules  = r + 1u;
+    wf_tree_insert(&wc->tree, r);           // BO_ObjektEinfuegen for rule r
+  }
+  s->wmfpa_built = nr;
+  return 1;
+}
+
+// Update the cached flat RHS of rule `r` in place after an interreduction
+// right-reduction edited s->rhs[r] (composition: l -> r becomes l -> r').
+// The DSBaum keys only on the LHS and rule indices are unchanged, so the
+// tree spine stays valid -- only the splice template the leaf points at
+// needs re-encoding.  This keeps the right-reduction path O(rule) instead
+// of forcing a full O(R) tree rebuild (right-reduction fires often on the
+// Mix workload, so a rebuild there reintroduces the very O(R^2) swamp this
+// package removes).  Returns 0 (caller marks wmfpa_dirty for a rebuild) if
+// the cache is absent, not yet built up to r, or the new RHS overflows the
+// per-rule buffer -- correctness via rebuild over an in-place fast path.
+static int wf_eng_cache_update_rhs(AtpState *s, u32 r) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  if (wc == NULL || r >= s->wmfpa_built || wc->cap_buf < WF_ENG_RULE_NODES) {
+    return 0;
+  }
+  WfNode *rb = wc->rhs_buf + (size_t)r * WF_ENG_RULE_NODES;
+  u32 rl = wf_encode((WfTermH)s->rhs[r], rb, WF_ENG_RULE_NODES, &g_wf_eng_enc);
+  if (rl == 0u) return 0;       // over-deep new RHS: rebuild drops the rule
+  wc->rules[r].rhs = rb; wc->rules[r].rlen = rl;
+  return 1;
+}
+
+#define WF_ENG_SUBJ_CAP 8192u
+
+// Gated correctness probe: assert the incrementally-maintained tree is
+// byte-identical to a tree freshly rebuilt from the current rule set, by
+// comparing the lowest-index applicable rule at every preorder position of
+// the subject `a` (the exact retrieval wf_step consumes).  ON only when
+// THVM_ATP_WMFPA_CHECK is set non-"0".  Aborts on the first divergence so a
+// stale/inconsistent tree (== a wrong normal form == a silent soundness
+// bug) is caught at the mutation that introduced it, not laundered into a
+// proof.
+static void wf_eng_check_incremental(AtpState *s, const WfNode *a, u32 alen) {
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  // Build a throwaway reference tree over the SAME WfRule array (same
+  // lhs/rhs buffers, same indices) -- only the node/rec spine differs.
+  WfTree ref;
+  wf_tree_init(&ref);
+  wf_tree_build(&ref, wc->rules, s->n_rules);
+  for (u32 p = 0; p < alen; p++) {
+    if (WF_IS_VAR(a[p].sym)) continue;
+    WfBind bi[WF_MAX_VARS], br[WF_MAX_VARS];
+    u32 ri = WF_NIL, rr = WF_NIL;
+    int ie = 0, ir = 0;
+    u32 hi = wf_descend(&wc->tree, a, p, bi, &ri, &ie) ? ri : WF_NIL;
+    u32 hr = wf_descend(&ref,      a, p, br, &rr, &ir) ? rr : WF_NIL;
+    // An inexact descent on either tree makes the comparison meaningless
+    // (both fall back to the indexed path in the real loop); skip it.
+    if (ie || ir) continue;
+    if (hi != hr) {
+      fprintf(stderr,
+              "WMFPA INCREMENTAL-TREE MISMATCH at pos %u: incremental rule "
+              "%u vs rebuilt %u (n_rules=%u, built=%u)\n",
+              p, hi, hr, s->n_rules, s->wmfpa_built);
+      abort();
+    }
+  }
+  wf_tree_free(&ref);
+}
+
+static Term atp_rewrite_normalize_wmfpa(AtpState *s, Term t, u32 step_cap) {
+  // Bring the cached tree in sync with the current rule set.  The common
+  // completion mutation is a single rule APPEND (atp_push_rule); maintain
+  // the tree incrementally for that -- encode + BO_ObjektEinfuegen the new
+  // rules into the existing spine in O(rule), the win this package unlocks.
+  // Fall back to a full rebuild for every case the incremental path cannot
+  // safely handle (correctness over speed, never the reverse):
+  //   - wmfpa_dirty: an in-place rule edit (interreduction right-reduction)
+  //     or an array compaction (a dropped rule renumbers every later index,
+  //     which the index-keyed leaf recs and the lowest-index NF policy
+  //     cannot absorb in place) -- those sites set wmfpa_dirty.
+  //   - wmfpa_built > n_rules: rules vanished without the dirty bit (defensive).
+  //   - an append that would outgrow the cached buffers (would dangle the
+  //     WfRule pointers): wf_eng_cache_append returns 0 and we rebuild.
+  if (s->wmfpa_tree == NULL || s->wmfpa_dirty ||
+      s->wmfpa_built > s->n_rules) {
+    wf_eng_cache_rebuild(s);
+    s->wmfpa_dirty = 0u;
+  } else if (s->wmfpa_built < s->n_rules) {
+    if (!wf_eng_cache_append(s)) wf_eng_cache_rebuild(s);
+  }
+  WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+  static WfNode a[WF_ENG_SUBJ_CAP], b[WF_ENG_SUBJ_CAP];
+  u32 alen = wf_encode((WfTermH)t, a, WF_ENG_SUBJ_CAP, &g_wf_eng_enc);
+  if (alen == 0u) {
+    // over-deep subject: fall back to the indexed path (correctness > speed).
+    return atp_rewrite_normalize_indexed(s, t, step_cap);
+  }
+  if (s->wmfpa_check) wf_eng_check_incremental(s, a, alen);
+  WfNode *nfp = NULL;
+  int overflow = 0;
+  wf_normalize(&wc->tree, a, alen, b, WF_ENG_SUBJ_CAP, step_cap, &nfp,
+               &overflow);
+  if (overflow) {
+    // A rewrite would grow the subject past the flat arena: decode the
+    // partial form and finish on the unbounded indexed path (correctness
+    // over speed; rare on the AndAssociativity workload).
+    u32 pp = 0u;
+    Term partial = wf_eng_decode_rec(nfp, &pp);
+    return atp_rewrite_normalize_indexed(s, partial, step_cap);
+  }
+  u32 p = 0u;
+  Term got = wf_eng_decode_rec(nfp, &p);
+  if (s->wmfpa_check) {
+    // Live NF differential against the ground-truth linear normalizer
+    // (repeated thvm_rewrite_step -- leftmost-outermost, lowest-index rule,
+    // the definition of the IC normal form).  The WM-FPA path is also
+    // leftmost-outermost from scratch, so it must equal it on every
+    // subject; a divergence is the silent soundness bug this probe exists
+    // to catch.  NB: this deliberately does NOT compare against the indexed
+    // path -- that path's prev_redex resume can return a DIFFERENT (under-
+    // reduced) reduct than a full re-scan on a non-confluent (mid-
+    // completion) R, so it is not a sound reference for the true NF.
+    Term lin = thvm_rewrite_normalize(t, s->lhs, s->rhs, s->n_rules, step_cap);
+    if (!kbo_eq(got, lin)) {
+      char ib[4096], gb[4096], lb[4096];
+      atp_pretty_term(t, ib, sizeof ib);
+      atp_pretty_term(got, gb, sizeof gb);
+      atp_pretty_term(lin, lb, sizeof lb);
+      fprintf(stderr, "WMFPA NF MISMATCH vs linear (n_rules=%u)\n in=%s\n"
+              " wmfpa=%s\n linear=%s\n", s->n_rules, ib, gb, lb);
+      abort();
+    }
+  }
+  return got;
+}
+
+// Rule-index retrieval stats accessor (the Sheffer-pruning measurement).
+// `queries` is the number of atp_ri_query_pos calls; `candidates` the
+// leaf records reached; `matchcalls` the thvm_match calls those records
+// triggered; `node_visits` the tree nodes touched.  candidates/queries
+// is the candidates-returned-per-query: if it tracks n_rules the tree
+// does NOT prune on single-symbol Sheffer; if bounded it does.
+fn void thvm_atp_ri_stats(const AtpState *s, u64 *queries, u64 *candidates,
+                          u64 *matchcalls, u64 *node_visits, u32 *nodes,
+                          u32 *n_rules_built) {
+  AtpRuleIndex *ix = (s != NULL) ? s->rule_index : NULL;
+  if (queries       != NULL) *queries       = (ix != NULL) ? ix->q_queries : 0;
+  if (candidates    != NULL) *candidates    = (ix != NULL) ? ix->q_candidates : 0;
+  if (matchcalls    != NULL) *matchcalls    = (ix != NULL) ? ix->q_matchcalls : 0;
+  if (node_visits   != NULL) *node_visits   = (ix != NULL) ? ix->q_nodevisits : 0;
+  if (nodes         != NULL) *nodes         = (ix != NULL) ? ix->n_nodes : 0;
+  if (n_rules_built != NULL) *n_rules_built = (ix != NULL) ? ix->n_rules_built : 0;
+}
+
 #ifdef ATP_ORDERED_REWRITE
 // The flatterm mixed path builds on the ordered-rewrite helpers + the
 // reduction-order compare, all defined further down (after atp_compare);
@@ -2356,9 +2814,18 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
 static int    atp_vars_contained(Term a, Term b);
 static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs);
 static u8     g_atp_skip_oriented;   // tentative def; initialised below
-#ifdef ATP_FLATTERM_SELFCHECK
 static u32    atp_pretty_term(Term t, char *buf, u32 cap);
-#endif
+
+// Env-gated derivation trace (THVM_ATP_RULE_TRACE=1).  Probes the env
+// once; default builds are silent and behaviorally byte-identical.
+static int atp_rule_trace_on(void) {
+  static int trace_on = -1;
+  if (trace_on < 0) {
+    const char *e = getenv("THVM_ATP_RULE_TRACE");
+    trace_on = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return trace_on;
+}
 static Term   atp_ordered_rewrite_step(AtpState *s, Term t,
                                        const Term *lhs, const Term *rhs,
                                        u32 n_rules, u8 *fired);
@@ -2399,14 +2866,21 @@ static Term   atp_ordered_rewrite_step(AtpState *s, Term t,
 // orientable rewrite fired.
 static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
                                   u32 *flatsym, u32 *flatlen, u8 *folded,
-                                  u32 step_cap) {
+                                  u32 step_cap, u32 *min_pos) {
   u8  any = 0u;
   u32 prev_redex = 0u;
+  // Lowest preorder position any orientable splice touched this call.  A
+  // splice at p modifies p and its subtree, shifts the tail, and grows
+  // the ancestor spans -- the leftmost position whose normal-form status
+  // could change is p itself.  Track the minimum across the fixpoint so
+  // the caller can advance the unorientable resume watermark conservatively.
+  u32 lo = *min_pos;
   for (u32 i = 0; i < step_cap; i++) {
-    if (atp_norm_deadline_fired(s)) return any;
+    if (atp_norm_deadline_fired(s)) { *min_pos = lo; return any; }
     g_atp_ri_query_folded = *folded;
     u32 redex_pos = 0u, redex_rule = 0u;
     if (!atp_ri_find_redex(*flatlen, prev_redex, &redex_pos, &redex_rule)) {
+      *min_pos = lo;
       return any;                                   // orientable fixpoint
     }
     RewriteSubst subst = {{0}};
@@ -2422,70 +2896,167 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
     Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
     if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
                       redex_pos, repl, ATP_RI_FLAT_CAP)) {
+      if (redex_pos < lo) lo = redex_pos;
       prev_redex = redex_pos;
       any = 1u;
     } else {
+      *min_pos = lo;
       return any;                                   // overrun: caller bails
     }
   }
+  *min_pos = lo;
   return any;
+}
+
+// Linear-scan unorientable step at a single rebuilt subterm `sub` at
+// preorder position `p`: tries each unorientable equation (rule asc,
+// l->r then r->l), fires the first strictly order-decreasing instance.
+// Returns 2 = fired (spliced), 1 = matched-firable but splice overran
+// (caller bails), 0 = nothing fired here.  This is the exact fallback
+// the indexed path defers to when the candidate buffer overflows or the
+// index is unavailable -- byte-identical verdicts to atp_ordered_try_top.
+static u8 atp_ft_unorient_at_linear(AtpState *s, Term *flat, u32 *subsz,
+                                    u32 *flatsym, u32 *flatlen, u8 *folded,
+                                    u32 p, Term sub) {
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (s->r_orient[i]) continue;                 // oriented: indexed pass
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(s->lhs[i], sub, &subst) &&
+          atp_vars_contained(s->rhs[i], s->lhs[i])) {
+        Term repl = thvm_subst_apply(s->rhs[i], &subst);
+        if (atp_compare(s, sub, repl) == KBO_GT) {
+          return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                               p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+        }
+      }
+    }
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(s->rhs[i], sub, &subst) &&
+          atp_vars_contained(s->lhs[i], s->rhs[i])) {
+        Term repl = thvm_subst_apply(s->lhs[i], &subst);
+        if (atp_compare(s, sub, repl) == KBO_GT) {
+          return atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                               p, repl, ATP_RI_FLAT_CAP) ? 2u : 1u;
+        }
+      }
+    }
+  }
+  return 0u;
 }
 
 // Scan the shared flat array preorder for the leftmost-outermost
 // position where some UNORIENTABLE equation fires (either direction,
-// variable-safe + strictly order-decreasing for the instance).  This is
-// the flatterm analog of atp_ordered_try_top's both-directions branch,
-// but driven by a linear walk of the flat array (subsz[] skips are O(1))
-// instead of a pointer-tree recursion.  The order check / thvm_match run
-// against the live tree cell flat[pos] -- identical verdicts to the tree
-// path.  On a hit, splices the replacement in place and returns 1.
+// variable-safe + strictly order-decreasing for the instance).  At each
+// CTR position the candidate faces are retrieved from the unorientable
+// discrimination index (atp_ri_query_pos_unorient) instead of an
+// O(n_rules) linear scan; the LPO order-gate (atp_compare) then runs
+// ONLY on those structurally-matching candidates, in the linear scan's
+// own priority (rule asc, l->r before r->l).  The first order-decreasing
+// face fires -- byte-identical redex/rule/direction to the linear scan.
+// On a hit, splices the replacement in place and returns 1.
+//
+// The candidate buffer (g_atp_ri_cand) is bounded; if a position has
+// more matching faces than it holds, OR the index is absent, this falls
+// back to the exact linear scan at that position (atp_ft_unorient_at_
+// linear) so the verdict is never weakened.
+// `resume` is the leftmost preorder position whose unorientable-NF status
+// may have changed (or was never examined) since the previous unorient
+// scan -- every position q strictly before it that is not one of its
+// ancestors (q + subsz[q] <= resume) was examined-and-rejected last scan
+// and unchanged since, so it cannot host a firable face and is skipped.
+// `fire_pos` (out) reports the preorder position where a face fired, so
+// the caller can fold it into the next resume watermark; left untouched
+// when nothing fires.  Mirrors atp_ri_find_redex's `clean_before`.
 static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
-                               u32 *flatsym, u32 *flatlen, u8 *folded) {
+                               u32 *flatsym, u32 *flatlen, u8 *folded,
+                               u32 resume, u32 *fire_pos) {
+  AtpRuleIndex *ux = s->unorient_index;
+  AtpRuleIndex *saved_ix = g_atp_ri_ix;
+  // The KBO weight memo (g_kbo_wmemo) persists across compares and is
+  // keyed by Term cell integer.  The flatterm path splices in place and
+  // atp_ri_build returns the original (now content-stale) cell for a
+  // subtree it judges unchanged, so a cell integer can carry NEW logical
+  // content with no heap move -- silently re-using a stale memo entry and
+  // returning a WRONG verdict.  Invalidate once here so every order-gate
+  // in this scan weighs the CURRENT term; entries built within the scan
+  // are valid (no splice fires until a redex is found, then we return).
+  thvm_kbo_invalidate();
   for (u32 p = 0; p < *flatlen; p++) {
+    if (p < resume && p + subsz[p] <= resume) {
+      continue;                              // unchanged, known non-redex
+    }
     // A leaf position (variable / NUM -- flatsym below CTR_BASE) can
     // never head a rule LHS that is a non-trivial term, so the only
     // unorientable equation that could fire is a bare `x = y`-style one,
     // which is never order-decreasing (and the orient check would have
-    // dropped it).  Skip the atp_ri_build + per-rule thvm_match on every
-    // leaf -- the flat array makes "is this a CTR head" an O(1) lookup.
+    // dropped it).  Skip on every leaf -- O(1) flat lookup.
     if (flatsym[p] < ATP_RI_CTR_BASE) continue;
     // Materialise the subterm at preorder position p from the flat
     // arrays.  flat[p] alone is STALE once a descendant was spliced (a
     // splice rewrites the child cells + subsz/flatsym, never the
-    // ancestor's flat[] tree cell -- atp_ri_build is what reconstructs
-    // it), so the match/order check must run against the rebuilt
-    // subtree.  An untouched subtree rebuilds to its shared original at
-    // zero allocation.
+    // ancestor's flat[] tree cell), so the match/order check must run
+    // against the rebuilt subtree.  An untouched subtree rebuilds to its
+    // shared original at zero allocation.
     Term sub = atp_ri_build(flat, subsz, flatsym, p);
-    // Same rule order as atp_ordered_try_top: ascending rule index,
-    // each unorientable equation tried l->r then r->l, first decreasing
-    // direction wins.  Orientable rules are skipped (already at indexed
-    // fixpoint -- g_atp_skip_oriented semantics).
-    for (u32 i = 0; i < s->n_rules; i++) {
-      if (s->r_orient[i]) continue;                 // oriented: indexed pass
-      {
-        RewriteSubst subst = {{0}};
-        if (thvm_match(s->lhs[i], sub, &subst) &&
-            atp_vars_contained(s->rhs[i], s->lhs[i])) {
-          Term repl = thvm_subst_apply(s->rhs[i], &subst);
-          if (atp_compare(s, sub, repl) == KBO_GT) {
-            if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                              p, repl, ATP_RI_FLAT_CAP)) return 1u;
-            return 0u;                              // overrun: caller bails
-          }
-        }
-      }
-      {
-        RewriteSubst subst = {{0}};
-        if (thvm_match(s->rhs[i], sub, &subst) &&
-            atp_vars_contained(s->lhs[i], s->rhs[i])) {
-          Term repl = thvm_subst_apply(s->lhs[i], &subst);
-          if (atp_compare(s, sub, repl) == KBO_GT) {
-            if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                              p, repl, ATP_RI_FLAT_CAP)) return 1u;
-            return 0u;
-          }
-        }
+    if (ux == NULL) {
+      u8 r = atp_ft_unorient_at_linear(s, flat, subsz, flatsym, flatlen,
+                                       folded, p, sub);
+      if (r == 2u) { *fire_pos = p; return 1u; }
+      if (r == 1u) return 0u;                       // overrun: caller bails
+      continue;
+    }
+    g_atp_ri_ix = ux;
+    g_atp_ri_query_folded = *folded;  // leaf-collect's perfect-match guard
+    u32 ncand = atp_ri_query_pos_unorient(p);
+    g_atp_ri_ix = saved_ix;
+    if (ncand >= ATP_RI_MAXCAND) {
+      // Buffer saturated -- the index dropped faces; redo this position
+      // with the exact linear scan so no candidate is missed.
+      u8 r = atp_ft_unorient_at_linear(s, flat, subsz, flatsym, flatlen,
+                                       folded, p, sub);
+      if (r == 2u) { *fire_pos = p; return 1u; }
+      if (r == 1u) return 0u;
+      continue;
+    }
+    if (ncand == 0u) continue;                      // no firable face here
+    // Sort the candidates into the linear scan's priority order.  The
+    // linear scan tries each rule ascending, l->r before r->l, and fires
+    // the first order-decreasing instance, so the priority key is
+    // (rule << 1) | dir (dir: l->r = 0, r->l = 1) -- ascending in this
+    // key reproduces (rule asc, l->r first) EXACTLY.  (The leaf rec packs
+    // dir in the high bit, which is a fine encoding but the WRONG sort
+    // order across rules -- r->l of rule i must precede l->r of rule i+1,
+    // which the high-bit packing inverts -- so re-key here.)  N is tiny
+    // (faces matching one subterm); insertion sort, stable on equal keys
+    // (duplicates cannot occur -- one rec per (rule, dir)).
+    static u32 cand[ATP_RI_MAXCAND];
+    for (u32 k = 0; k < ncand; k++) {
+      u32 packed = g_atp_ri_cand[k];
+      u32 rule   = packed & ~ATP_RI_DIR_BIT;
+      u32 rl     = (packed & ATP_RI_DIR_BIT) ? 1u : 0u;
+      cand[k]    = (rule << 1) | rl;
+    }
+    for (u32 a = 1u; a < ncand; a++) {
+      u32 v = cand[a];
+      u32 b = a;
+      while (b > 0u && cand[b - 1u] > v) { cand[b] = cand[b - 1u]; b--; }
+      cand[b] = v;
+    }
+    for (u32 k = 0; k < ncand; k++) {
+      u32 key    = cand[k];
+      u32 rule   = key >> 1;
+      u8  rl     = (u8)(key & 1u);
+      Term pat   = rl ? s->rhs[rule] : s->lhs[rule];
+      Term other = rl ? s->lhs[rule] : s->rhs[rule];
+      RewriteSubst subst = {{0}};
+      if (!thvm_match(pat, sub, &subst)) continue;  // index over-approx
+      Term repl = thvm_subst_apply(other, &subst);
+      if (atp_compare(s, sub, repl) == KBO_GT) {
+        if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                          p, repl, ATP_RI_FLAT_CAP)) { *fire_pos = p; return 1u; }
+        return 0u;                                  // overrun: caller bails
       }
     }
   }
@@ -2500,7 +3071,12 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
 static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
                                                  u32 step_cap) {
   if (s->rule_index == NULL) s->rule_index = atp_ri_new();
-  if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
+  // The unorientable-faces index is needed only on this (flatterm) path;
+  // allocate it lazily here so the default engine never carries it.
+  // atp_ri_rebuild populates it when it (re)builds rule_index.
+  if (s->unorient_index == NULL) s->unorient_index = atp_ri_new();
+  if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules ||
+      s->unorient_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
   }
   static Term flat[ATP_RI_FLAT_CAP];
@@ -2511,6 +3087,7 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
   g_atp_ri_subsz   = subsz;
   g_atp_ri_flatsym = flatsym;
   g_atp_ri_lhs     = s->lhs;
+  g_atp_ri_rhs     = s->rhs;
   for (u32 k = 0; k < ATP_RI_MAXVARS; k++) g_atp_ri_star[k] = ATP_RI_NIL;
 
   u32 flatlen = 0u;
@@ -2533,17 +3110,40 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
     return t;
   }
 
+  // Incremental resume watermark for the unorientable preorder scan,
+  // mirroring atp_ri_find_redex's `clean_before` for the orientable side.
+  // It is the leftmost position whose unorientable-NF status may have
+  // changed since the previous unorient scan: the min of (a) the position
+  // the previous unorient step fired at and (b) the leftmost orientable
+  // splice the interleaved indexed fixpoint then made.  Positions whose
+  // whole subtree lies before it were examined-and-rejected last scan and
+  // are untouched, so they cannot host a firable face.  Reset to 0 (full
+  // scan) when resume is disabled.  A rewrite from either pass can only
+  // enable a new redex at or after its own (leftmost) site, never to the
+  // left in an untouched sibling -- so the min watermark is sound.
+  u32 un_resume = 0u;
   for (u32 i = 0; i < step_cap; i++) {
     if (atp_norm_deadline_fired(s)) break;
     // The indexed fixpoint may overrun on a splice; on overrun it stops
     // having done partial work, the unorientable pass would too, so we
     // materialise and hand the rest to the tree loop.  Detect overrun by
     // re-checking after: a clean fixpoint leaves no orientable redex.
+    u32 or_min = flatlen;                       // sentinel: no orientable change
     atp_ft_indexed_fixpoint(s, flat, subsz, flatsym, &flatlen, &folded,
-                            step_cap);
+                            step_cap, &or_min);
+    // The orientable splices since the last unorient scan also invalidate
+    // positions from or_min onward; fold them into the watermark.  (On the
+    // first iteration un_resume is still 0, so the first scan is full.)
+    if (or_min < un_resume) un_resume = or_min;     // iter 0: un_resume==0
+    if (!s->ft_unorient_resume) un_resume = 0u;
+    u32 fire_pos = flatlen;
     u8 fired = atp_ft_unorient_step(s, flat, subsz, flatsym, &flatlen,
-                                    &folded);
+                                    &folded, un_resume, &fire_pos);
     if (!fired) break;          // joint fixpoint (or splice overrun: rare)
+    // Next scan may resume past everything before this fire site (it was
+    // examined-and-rejected); the interleaved indexed fixpoint's or_min is
+    // folded in at the top of the next iteration.
+    un_resume = fire_pos;
   }
   return atp_ri_build(flat, subsz, flatsym, 0u);
 }
@@ -2571,12 +3171,286 @@ static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
 #endif
 #endif // ATP_ORDERED_REWRITE
 
+// === CP-generation overlap-partner index (WM U1_KPsBildenZuRegel) ===
+//
+// THE CP-GEN CROSS-PRODUCT.  thvm_atp_generate_cps_c overlaps a new rule
+// i into every existing rule j -- for j over ALL n_rules it calls
+// atp_overlap_ij -> thvm_critical_pairs_pair, which walks the positions
+// of li and thvm_unify's rule-j's lhs lj there.  A CP is emitted only
+// when lj unifies with a non-variable subterm of li, but the scan PAYS
+// for every j whether or not any overlap exists -- an O(n_rules)-per-rule
+// scan.  Waldmeister avoids it via the discrimination tree: for a new
+// rule it forms overlaps only against the rules the tree retrieves as
+// unifiable (sources/INF/Unifikation1.c:1480 U1_KPsBildenZuRegel ->
+// TermMitDSBaumUnifizieren / TermMitDSBaumTeiltermenUnifizieren on
+// RE_Regelbaum).
+//
+// MEASURED SCOPE -- single-symbol theories defeat the filter.  On the
+// Sheffer-stroke axiom set (one binary symbol `nand`; AndAssociativity /
+// DoubleNegation over WolframAxioms) EVERY rule LHS is nand-headed and
+// every overlap subterm is nand-headed, so the discrimination tree cannot
+// discriminate at the shallow positions -- the candidate set equals the
+// full rule set (cand == n, measured) and the filter saves nothing.  The
+// profiled cost on that problem is NOT the cross-product scan but the
+// per-generated-CP work: CP reduction (atp_rewrite_normalize) plus the
+// KBO atp_compare in the ordered-rewrite order-gate, both proportional to
+// CPs GENERATED, which an overlap filter cannot reduce while preserving
+// the CP set.  The index is therefore a no-op-cost, CP-set-identical
+// speedup ONLY for MULTI-symbol theories, where distinct LHS heads let
+// the tree prune the cross-product.  Kept gated off; reported honestly.
+//
+// THE PORT -- a candidate FILTER, CP-set-preserving.  cp_index is a
+// discrimination tree over the WHOLE rule-LHS terms (reusing atp_ri_*'s
+// node/rec pools, atp_ri_flatsym first-appearance scheme, atp_ri_child
+// insert).  For the new rule i, the partners j the cross-product can
+// emit a CP for are exactly { j : lj unifies with some non-var subterm
+// of li }.  atp_cp_index_collect descends cp_index in UNIFICATION mode
+// against a query subterm and gathers every rule whose stored LHS could
+// unify -- a SUPERSET of the true partners (a discrimination tree on the
+// flat symbol string cannot decide unifiability exactly, only filter).
+// thvm_atp_generate_cps_c then runs the EXACT atp_overlap_ij on each
+// candidate; cp_visit's thvm_unify is the authoritative gate, so the CP
+// set is byte-identical to the unindexed scan -- the index only skips
+// the j's that provably cannot overlap.
+//
+// UNIFICATION DESCENT (vs atp_ri_descend's one-way match).  Both the
+// stored LHS and the query subterm carry variables, so at each position:
+//   - stored STAR (rule var): unifies with the whole query subterm ->
+//     descend the STAR child, skipping the query subterm.
+//   - query STAR (subject var): unifies with anything stored -> the
+//     query consumed one position; the stored side may be ANY subtree,
+//     so descend EVERY child (CTR children with their subtree skipped,
+//     and the STAR child).
+//   - stored CTR == query CTR: descend (head consumed on both sides).
+// No variable-consistency check is applied (that would need an occurs-
+// /binding-aware unify; the filter stays a sound superset without it).
+
+#define ATP_CP_MAXCAND 65536u
+static u32 g_atp_cp_cand[ATP_CP_MAXCAND];
+static u32 g_atp_cp_ncand     = 0;
+static u8  g_atp_cp_overflow  = 0;     // candidate buffer overflowed -> full scan
+// De-dup: a rule reached via several positions/branches is collected once.
+// g_atp_cp_seen[rule] == g_atp_cp_epoch marks "already in g_atp_cp_cand".
+static u32 *g_atp_cp_seen   = NULL;
+static u32  g_atp_cp_seencap = 0;
+static u32  g_atp_cp_epoch  = 0;
+
+static AtpRuleIndex *g_atp_cp_ix      = NULL;
+static const Term   *g_atp_cp_qflat   = NULL;
+static const u32    *g_atp_cp_qsubsz  = NULL;
+static const u32    *g_atp_cp_qflatsym = NULL;
+
+static void atp_cp_cand_add(u32 rule) {
+  if (rule < g_atp_cp_seencap && g_atp_cp_seen[rule] == g_atp_cp_epoch) return;
+  if (rule < g_atp_cp_seencap) g_atp_cp_seen[rule] = g_atp_cp_epoch;
+  if (g_atp_cp_ncand >= ATP_CP_MAXCAND) { g_atp_cp_overflow = 1u; return; }
+  g_atp_cp_cand[g_atp_cp_ncand++] = rule;
+}
+
+static int atp_cp_cand_cmp(const void *a, const void *b) {
+  u32 x = *(const u32 *)a, y = *(const u32 *)b;
+  return (x > y) - (x < y);
+}
+
+// Sort the collected candidates ascending so the indexed generator
+// processes overlap pairs in the SAME (j ascending) order the unindexed
+// n_rules scan did -- a CP's FIFO trace tiebreak then matches, keeping
+// the derived-rule sequence byte-identical.
+static void atp_cp_cand_sort(void) {
+  qsort(g_atp_cp_cand, g_atp_cp_ncand, sizeof(u32), atp_cp_cand_cmp);
+}
+
+static void atp_cp_index_leaf(u32 node) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+       r = ix->recs[r].next) {
+    atp_cp_cand_add(ix->recs[r].rule);
+  }
+}
+
+// Collect EVERY rule in the whole subtree rooted at `node` -- the action
+// when a query variable consumes the corresponding stored subtree (a var
+// unifies with anything, so any stored continuation is a candidate).
+static void atp_cp_index_collect_subtree(u32 node) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  atp_cp_index_leaf(node);
+  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+       c = ix->nodes[c].sibling) {
+    if (g_atp_cp_overflow) return;
+    atp_cp_index_collect_subtree(c);
+  }
+}
+
+// Descend cp_index from `node` against the flat query subject slice
+// starting at preorder position `pos` (which spans the query subterm).
+// Collects every reachable leaf's rules (unification-compatible filter).
+static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  if (pos == qend) { atp_cp_index_leaf(node); return; }
+  u32 qsym = g_atp_cp_qflatsym[pos];
+  u8  q_is_star = (qsym >= ATP_RI_STAR_BASE && qsym < ATP_RI_CTR_BASE);
+  u32 sz   = g_atp_cp_qsubsz[pos];
+  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+       c = ix->nodes[c].sibling) {
+    if (g_atp_cp_overflow) return;
+    u32 csym = ix->nodes[c].sym;
+    if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+      // Stored rule var unifies with the whole query subterm at `pos`:
+      // the stored side consumed one tree edge (the STAR), the query
+      // consumed its whole subterm (sz positions).
+      atp_cp_index_descend(c, pos + sz, qend);
+    } else if (csym == qsym) {
+      // Stored CTR/NUM head equals the query head: consume both heads
+      // (one tree edge, one query position).
+      atp_cp_index_descend(c, pos + 1u, qend);
+    }
+    // A non-matching stored CTR vs a concrete query CTR cannot unify --
+    // pruned (the discrimination-tree win).
+  }
+  if (q_is_star) {
+    // Query var unifies with ANY stored subtree at this node: collect
+    // every rule reachable below `node` (var-vs-anything).  The query
+    // already advanced past the var (a single position) at the caller's
+    // continuation; here we simply harvest the whole stored remainder.
+    atp_cp_index_collect_subtree(node);
+  }
+}
+
+// Build cp_index from s->lhs[0..n_rules): one whole-LHS term per rule,
+// keyed by the atp_ri_flatsym first-appearance symbol string.  Rebuilt
+// (like rule_index) whenever R mutates.
+static void atp_cp_index_rebuild(AtpState *s) {
+  AtpRuleIndex *ix = s->cp_index;
+  ix->n_nodes = 0;
+  ix->n_recs  = 0;
+  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
+  AtpRiVarMap vm;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    atp_ri_varmap_reset(&vm);
+    u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
+    u32 rec  = atp_ri_rec_new(ix);
+    ix->recs[rec].rule    = i;
+    ix->recs[rec].next    = ix->nodes[node].rec_head;
+    ix->nodes[node].rec_head = rec;
+  }
+  ix->n_rules_built = s->n_rules;
+  if (g_atp_cp_seencap < s->n_rules) {
+    u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
+    while (cap < s->n_rules) cap *= 2u;
+    u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
+    if (p == NULL) { fprintf(stderr, "atp_cp_index: seen OOM\n"); exit(1); }
+    g_atp_cp_seen   = p;
+    for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
+    g_atp_cp_seencap = cap;
+  }
+}
+
+// Collect the candidate partner rules for overlapping a new rule whose
+// LHS is `li`: every rule j with lj unifiable with a non-var subterm of
+// li.  `li` is flattened once; each non-var position queries cp_index.
+// Returns the count (in g_atp_cp_cand) or sets g_atp_cp_overflow.
+static u32 atp_cp_index_collect(AtpState *s, Term li) {
+  static Term qflat[ATP_RI_FLAT_CAP];
+  static u32  qsubsz[ATP_RI_FLAT_CAP];
+  static u32  qflatsym[ATP_RI_FLAT_CAP];
+  u8  folded = 0;
+  u32 pos    = 0;
+  if (!atp_ri_flatten(li, qflat, qsubsz, qflatsym, &folded,
+                      ATP_RI_FLAT_CAP, &pos)) {
+    g_atp_cp_overflow = 1u;            // subject too deep -> exact scan
+    return 0;
+  }
+  g_atp_cp_ix       = s->cp_index;
+  g_atp_cp_qflat    = qflat;
+  g_atp_cp_qsubsz   = qsubsz;
+  g_atp_cp_qflatsym = qflatsym;
+  g_atp_cp_ncand    = 0;
+  g_atp_cp_overflow = 0;
+  if (++g_atp_cp_epoch == 0u) {        // wrapped: clear so stale != epoch
+    for (u32 k = 0; k < g_atp_cp_seencap; k++) g_atp_cp_seen[k] = 0u;
+    g_atp_cp_epoch = 1u;
+  }
+  // Every non-variable subterm position of li is a candidate overlap
+  // site -- cp_visit walks exactly these (it skips TAG_FVR).  Querying
+  // each gathers the rules whose lhs could unify there.
+  for (u32 p = 0; p < pos; p++) {
+    u32 qsym = qflatsym[p];
+    if (qsym >= ATP_RI_STAR_BASE && qsym < ATP_RI_CTR_BASE) continue; // var
+    u32 qend = p + qsubsz[p];
+    atp_cp_index_descend(s->cp_index->root, p, qend);
+    if (g_atp_cp_overflow) return 0;
+  }
+  return g_atp_cp_ncand;
+}
+
+// Insert every NON-VAR subterm position of `t` (under one shared
+// first-appearance varmap, so a rule's repeated var is consistent across
+// its subterms) as a separate tree path keyed to `rule`.  A var-headed
+// subterm is skipped (cp_visit never overlaps at a variable position).
+static void atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
+                                   AtpRiVarMap *vm) {
+  if (term_tag(t) == TAG_CTR) {
+    u32 node = atp_ri_insert_term(ix, ix->root, t, vm);
+    u32 rec  = atp_ri_rec_new(ix);
+    ix->recs[rec].rule       = rule;
+    ix->recs[rec].next       = ix->nodes[node].rec_head;
+    ix->nodes[node].rec_head = rec;
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      atp_cp_subindex_insert(ix, term_ctr_at(t, i), rule, vm);
+    }
+  }
+}
+
+// Build cp_subindex: every non-var subterm of every rule LHS -> rule.
+static void atp_cp_subindex_rebuild(AtpState *s) {
+  AtpRuleIndex *ix = s->cp_subindex;
+  ix->n_nodes = 0;
+  ix->n_recs  = 0;
+  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
+  AtpRiVarMap vm;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    atp_ri_varmap_reset(&vm);
+    atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
+  }
+  ix->n_rules_built = s->n_rules;
+}
+
+// Collect candidate partner rules for the (old i x new j) direction:
+// every rule i whose LHS li has a NON-VAR subterm unifiable with the new
+// rule's whole LHS `lj`.  Query the subterm index once with `lj`.
+static u32 atp_cp_subindex_collect(AtpState *s, Term lj) {
+  static Term qflat[ATP_RI_FLAT_CAP];
+  static u32  qsubsz[ATP_RI_FLAT_CAP];
+  static u32  qflatsym[ATP_RI_FLAT_CAP];
+  u8  folded = 0;
+  u32 pos    = 0;
+  if (!atp_ri_flatten(lj, qflat, qsubsz, qflatsym, &folded,
+                      ATP_RI_FLAT_CAP, &pos)) {
+    g_atp_cp_overflow = 1u;
+    return 0;
+  }
+  g_atp_cp_ix       = s->cp_subindex;
+  g_atp_cp_qflat    = qflat;
+  g_atp_cp_qsubsz   = qsubsz;
+  g_atp_cp_qflatsym = qflatsym;
+  g_atp_cp_ncand    = 0;
+  g_atp_cp_overflow = 0;
+  if (++g_atp_cp_epoch == 0u) {
+    for (u32 k = 0; k < g_atp_cp_seencap; k++) g_atp_cp_seen[k] = 0u;
+    g_atp_cp_epoch = 1u;
+  }
+  atp_cp_index_descend(s->cp_subindex->root, 0u, pos);
+  if (g_atp_cp_overflow) return 0;
+  return g_atp_cp_ncand;
+}
+
 #endif // ATP_RULE_INDEX
 
-// Proof-trace capacity (entries).  Resolved once from THVM_ATP_TRACE_MAX,
-// falling back to ATP_MAX_TRACE so an unset env is byte-identical to the
-// historical fixed trace.  A bad/zero/oversize value falls back to the
-// default.
+// Proof-trace soft cap (entries).  Resolved once from THVM_ATP_TRACE_MAX,
+// falling back to ATP_MAX_TRACE so an unset env keeps the historical drop
+// point.  A bad/zero/oversize value falls back to the default.  The trace
+// buffer grows on demand (atp_trace_ensure) until this cap is reached.
 fn u32 thvm_atp_trace_cap(void) {
   static u32 cap = 0;
   if (cap == 0) {
@@ -2596,14 +3470,16 @@ fn u32 thvm_atp_trace_cap(void) {
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
-  s->trace_cap = thvm_atp_trace_cap();
-  s->trace     = (Term *)calloc(s->trace_cap, sizeof(Term));
-  if (s->trace == NULL) { free(s); return NULL; }
   // Persistent LPO memo: a completion compares the same subterm pairs
   // millions of times.  Opt in, and drop any entries from a prior run
   // (a static LpoConfig pointer may be reused with new precedence).
   thvm_lpo_set_persist(1u);
   thvm_lpo_invalidate();
+  // Persistent per-term KBO weight memo: kbo_lin_addto re-walks the same
+  // divergent subtrees millions of times during a completion.  Opt in and
+  // drop any entries from a prior run (cfg pointer may be reused).
+  thvm_kbo_set_persist(1u);
+  thvm_kbo_invalidate();
   s->kbo      = cfg;
   s->step_cap = step_cap;
   // CP-priority weight: the ordering-directed GT heuristic is the
@@ -2613,6 +3489,10 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // via thvm_atp_set_cp_weight_mode for callers that want the bare
   // symbol-count sum.
   s->cp_weight_mode = ATP_CP_WEIGHT_GT;
+  // Right-reduction (DISCOUNT-loop composition) is on by default:
+  // interreduce keeps surviving rules' RHSs in normal form so the
+  // CPs born from them stay small.  calloc zeroed it; set explicitly.
+  s->right_reduce = 1u;
   atp_register_primitives();
   acp_selftest();   // verify the Stringterms pack/unpack round-trip
   // Allocate the growable rule / CP arrays at their initial
@@ -2622,6 +3502,12 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // helper treats the whole span as new.
   atp_ensure_rule_cap(s, ATP_INIT_RULES);
   atp_ensure_cp_cap(s, ATP_INIT_CPS);
+  // Proof-trace soft cap.  Default ATP_MAX_TRACE keeps the drop
+  // behavior byte-identical; THVM_ATP_TRACE_MAX raises it so a deep
+  // (1601-rule) completion can still record every rule's lineage.  The
+  // trace buffer itself starts NULL and grows on demand (atp_trace_ensure)
+  // up to t_max; thvm_atp_trace_cap resolves and bounds the env value.
+  s->t_max = thvm_atp_trace_cap();
 #ifdef ATP_CP_GRAPH
   // 8a: start cp_graph as the empty CpSet[] -- n_cps is 0 here, so
   // the array mirror and the graph agree from the first instant.
@@ -2637,13 +3523,39 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // fires.  (calloc already zeroed both, the explicit set documents
   // intent.)
   s->rule_index       = NULL;
-  s->rule_index_dirty = 1u;
+  s->unorient_index   = NULL;     // lazily built on the flatterm path
+  s->cp_index         = NULL;     // lazily built on the first indexed CP gen
+  s->cp_subindex      = NULL;     // companion subterm index (old i x new j)
+  s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
+  // Opt-in CP-generation overlap-partner index.  OFF unless
+  // THVM_ATP_CP_INDEX is set non-"0"; the default engine scans all
+  // n_rules per new rule (byte-identical CP set either way).
+  {
+    const char *ci = getenv("THVM_ATP_CP_INDEX");
+    s->use_cp_index = (ci != NULL && ci[0] != '\0' && ci[0] != '0') ? 1u : 0u;
+  }
   // Opt-in flatterm fast-path for the mixed normalize loop.  OFF unless
   // THVM_ATP_FLATTERM is set to a non-"0" value -- the default engine
   // stays byte-identical (the tree mixed loop).
   {
     const char *ft = getenv("THVM_ATP_FLATTERM");
     s->use_flatterm = (ft != NULL && ft[0] != '\0' && ft[0] != '0') ? 1u : 0u;
+  }
+  // Opt-in faithful Waldmeister-FPA normalize path.  OFF unless
+  // THVM_ATP_WMFPA is set to a non-"0" value -- default stays byte-
+  // identical to the discrimination-tree indexed path.
+  {
+    const char *wf = getenv("THVM_ATP_WMFPA");
+    s->use_wmfpa = (wf != NULL && wf[0] != '\0' && wf[0] != '0') ? 1u : 0u;
+    const char *wc = getenv("THVM_ATP_WMFPA_CHECK");
+    s->wmfpa_check = (wc != NULL && wc[0] != '\0' && wc[0] != '0') ? 1u : 0u;
+  }
+  // Incremental resume for the flatterm unorientable scan.  ON by default
+  // (mirrors the orientable `clean_before` resume); cleared only by setting
+  // THVM_ATP_UNORIENT_RESUME=0, used by the resume-ON==OFF differential.
+  {
+    const char *ur = getenv("THVM_ATP_UNORIENT_RESUME");
+    s->ft_unorient_resume = (ur != NULL && (ur[0] == '0' && ur[1] == '\0')) ? 0u : 1u;
   }
 #endif
   return s;
@@ -2666,6 +3578,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->rhs);
   free(s->r_trace);
   free(s->r_orient);
+  free(s->r_trace_dead);
   // Each cp_packed[] slot is a malloc'd byte string the queue owns;
   // free every non-NULL slot (free(NULL) is a no-op) then the array.
   if (s->cp_packed != NULL) {
@@ -2693,6 +3606,16 @@ fn void thvm_atp_free(AtpState *s) {
 #endif
 #ifdef ATP_RULE_INDEX
   atp_ri_free(s->rule_index);
+  atp_ri_free(s->unorient_index);
+  atp_ri_free(s->cp_index);
+  atp_ri_free(s->cp_subindex);
+  if (s->wmfpa_tree != NULL) {
+    WfEngCache *wc = (WfEngCache *)s->wmfpa_tree;
+    wf_tree_free(&wc->tree);
+    free(wc->rules); free(wc->lhs_buf); free(wc->rhs_buf);
+    free(wc);
+    s->wmfpa_tree = NULL;
+  }
 #endif
 #ifdef ATP_MNF
   mnf_destroy(s->mnf);
@@ -2820,9 +3743,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 
   free(roots);
 
-  // Cells moved: the persistent LPO (s,t)->verdict memo is keyed on cell
-  // addresses, now stale -- drop it.
+  // Cells moved: the persistent LPO (s,t)->verdict memo and the per-term
+  // KBO weight memo are both keyed on cell addresses, now stale -- drop them.
   thvm_lpo_invalidate();
+  thvm_kbo_invalidate();
   return 1;
 }
 
@@ -2837,6 +3761,21 @@ static u8 atp_heap_under_pressure(void) {
   return HEAP_NEXT > half;
 }
 
+// Grow the heap-allocated trace[] to hold at least one more entry,
+// honoring the s->t_max soft cap.  Returns 1 if there is room for the
+// next push, 0 if the cap is hit (caller returns ATP_TRACE_NONE).
+static int atp_trace_ensure(AtpState *s) {
+  if (s->n_trace >= s->t_max) return 0;
+  if (s->n_trace < s->t_cap) return 1;
+  u32 cap = s->t_cap ? s->t_cap * 2u : 4096u;
+  if (cap > s->t_max) cap = s->t_max;
+  Term *nt = (Term *)realloc(s->trace, (size_t)cap * sizeof(Term));
+  if (nt == NULL) return 0;
+  s->trace = nt;
+  s->t_cap = cap;
+  return 1;
+}
+
 // Push a trace entry as a TAG_CTR with label = reason and children
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Returns the entry's
 // index in s->trace, or ATP_TRACE_NONE if the buffer is full.
@@ -2846,7 +3785,7 @@ static u8 atp_heap_under_pressure(void) {
 // init'd to zero by thvm_atp_init's calloc.
 static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
                           Term lhs, Term rhs) {
-  if (s == NULL || s->n_trace >= s->trace_cap) return ATP_TRACE_NONE;
+  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
   Term children[4] = {
     term_new(0, TAG_NUM, 0, p_a),
     term_new(0, TAG_NUM, 0, p_b),
@@ -2871,7 +3810,7 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
                              Term lhs, Term rhs,
                              const u8 *pos, u8 pos_len) {
-  if (s == NULL || s->n_trace >= s->trace_cap) return ATP_TRACE_NONE;
+  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
   Term children[5 + CP_MAX_DEPTH];
   children[0] = term_new(0, TAG_NUM, 0, p_a);
   children[1] = term_new(0, TAG_NUM, 0, p_b);
@@ -2993,6 +3932,14 @@ fn void thvm_atp_set_use_ground_join(AtpState *s, u8 on) {
   s->use_ground_join = on ? 1u : 0u;
 }
 
+// Bachmair-Dershowitz connectedness CP deletion (Twee section 6.2).
+// Default OFF -> the engine is byte-identical; the WL surface flips it
+// for Method -> {... "Connectedness" -> True} and the Waldmeister preset.
+fn void thvm_atp_set_use_connectedness(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_connectedness = on ? 1u : 0u;
+}
+
 // Waldmeister-faithful RHS interreduction (Interreduktion.c
 // RMRechtsInterred).  See the AtpState.use_rhs_interreduce comment.
 fn void thvm_atp_set_use_rhs_interreduce(AtpState *s, u8 on) {
@@ -3016,9 +3963,23 @@ fn void thvm_atp_set_use_flatterm(AtpState *s, u8 on) {
 #endif
 }
 
+fn void thvm_atp_set_use_cp_index(AtpState *s, u8 on) {
+  if (s == NULL) return;
+#ifdef ATP_RULE_INDEX
+  s->use_cp_index = on ? 1u : 0u;
+#else
+  (void)on;   // no index machinery without the rule index
+#endif
+}
+
 fn void thvm_atp_set_selection_ratio(AtpState *s, u32 modulo) {
   if (s == NULL) return;
   s->fifo_modulo = modulo;   // 0 -> default (11) at selection time
+}
+
+fn void thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->cp_fifo_tiebreak = on ? 1u : 0u;
 }
 
 // Select the CP-priority weight mode (an `AtpCpWeightMode` value).
@@ -3058,6 +4019,45 @@ static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
   if (s->lpo != NULL) {
     return (KboCmp)thvm_lpo(lhs, rhs, s->lpo);
   }
+#ifdef ATP_RULE_INDEX
+  // Optional flatterm KBO: thvm_kbo_flat runs the identical Loechner
+  // decision over a cache-dense pre-order node array.  Measured net-
+  // NEGATIVE on this engine: thvm's CTR cells already store their
+  // children contiguously (term_ctr_at = heap_read(base + i)), so the
+  // IC traversal is itself cache-friendly and the flatten-both-operands
+  // pass is pure overhead.  The win that DID land is in thvm_kbo's
+  // traversal (one child-base read per node instead of a redundant
+  // term_ctr_n per child access), so the IC comparator is the default
+  // fast path.  thvm_kbo_flat stays opt-in (THVM_ATP_KBO_FLAT=1) behind
+  // use_flatterm for A/B and the differential self-check; unset / "0" =
+  // the optimized IC KBO.  Cached once; -1 = unread.
+  static int kbo_flat_gate = -1;
+  if (kbo_flat_gate < 0) {
+    const char *e = getenv("THVM_ATP_KBO_FLAT");
+    kbo_flat_gate = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  if (s->use_flatterm && kbo_flat_gate) {
+#ifdef ATP_KBO_FLAT_SELFCHECK
+    // Build-time differential: a wrong KBO verdict silently breaks
+    // soundness/completeness, so during bring-up assert flat == IC on
+    // every live pair before trusting the fast path.  Defeats the
+    // speedup (runs both) -- compile it OUT for the measured runs.
+    KboCmp ic   = thvm_kbo(lhs, rhs, s->kbo);
+    KboCmp flat = thvm_kbo_flat(lhs, rhs, s->kbo);
+    if (ic != flat) {
+      char lb[2048], rb[2048];
+      atp_pretty_term(lhs, lb, sizeof lb);
+      atp_pretty_term(rhs, rb, sizeof rb);
+      fprintf(stderr, "KBO FLAT SELFCHECK MISMATCH ic=%d flat=%d\n"
+                      " lhs=%s\n rhs=%s\n", (int)ic, (int)flat, lb, rb);
+      abort();
+    }
+    return flat;
+#else
+    return thvm_kbo_flat(lhs, rhs, s->kbo);
+#endif
+  }
+#endif
   return thvm_kbo(lhs, rhs, s->kbo);
 }
 
@@ -3221,6 +4221,9 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
   // indexed path the moment R is orientable again.
   if (lhs == s->lhs && rhs == s->rhs && n_rules == s->n_rules) {
     if (s->n_unorient == 0u) {
+      // Gated faithful WM-FPA path (flatterm + DSBaum + NormalformInner-
+      // most).  Byte-identical NF to the indexed path; OFF by default.
+      if (s->use_wmfpa) return atp_rewrite_normalize_wmfpa(s, t, step_cap);
       return atp_rewrite_normalize_indexed(s, t, step_cap);
     }
     // Opt-in flatterm fast-path: keep the subject flat across both the
@@ -3396,19 +4399,11 @@ static u32 atp_unif_measure(Term lhs, Term rhs) {
 static u32 atp_kbo_weight(AtpState *s, Term t) {
   const KboConfig *cfg = (s != NULL) ? s->kbo : NULL;
   if (cfg == NULL) return atp_symbol_count(t);
-  switch (term_tag(t)) {
-    case TAG_FVR: return cfg->var_weight;
-    case TAG_CTR: {
-      u32 lab = term_ext(t);
-      u32 w   = (lab < cfg->n_labels) ? cfg->weights[lab] : 0u;
-      u32 n   = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        w += atp_kbo_weight(s, term_ctr_at(t, i));
-      }
-      return w;
-    }
-    default: return cfg->var_weight;
-  }
+  // Served from the per-term KBO weight memo (thvm_kbo_term_weight): the
+  // CP-weight heuristics weigh both faces of every critical pair, so the
+  // same terms are summed repeatedly within an epoch.  Byte-identical to
+  // the inlined recursion (same cfg weights), just memoized.
+  return (u32)thvm_kbo_term_weight(cfg, t);
 }
 
 // CP-weight base for one weight mode -- ports of the `CH_*Weight`
@@ -3857,6 +4852,8 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
 // forward-declared here for the gated hook at the end of this function.
 static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
                                u32 trace_id);
+// Lazy orphan murder: defined with the orphan-murder setters below.
+static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace);
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL) return 0;
   // Auto-MaxWeight: if the active queue is empty but CPs are deferred
@@ -3868,6 +4865,14 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
   if (s->n_cps == 0) return 0;
 
+  // WM selectNonOrphan (KPVerwaltung.c:535): loop deleteMin until a
+  // non-orphan CP surfaces.  An orphan (a parent rule was interreduced
+  // away) is extracted and discarded FOR FREE -- the simplified
+  // equation that replaced the dead rule regenerates its contribution,
+  // so dropping it preserves completeness.  With use_orphan_murder off
+  // the body runs exactly once (the orphan test is a cheap predictable
+  // branch) and the engine is byte-identical.
+  for (;;) {
   // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
   // selections, weight pick (heap root) otherwise.
   u32 j = 0;
@@ -3893,7 +4898,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     }
     j = best;
   }
-  s->cp_select_count++;
+
+  // Lazy orphan check.  If the chosen CP descends from an interreduced-
+  // away rule, extract+discard it without counting a selection and
+  // re-pick.  WM IncAnzKPEntfernt ticks per discard (KPVerwaltung.c:539).
+  int orphan = s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[j]);
+  if (!orphan) s->cp_select_count++;
 
   // Unpack the chosen CP from its byte string into two fresh heap
   // Terms for the caller to normalize.
@@ -3924,6 +4934,16 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
   // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
   atp_cp_graph_sync(s);
+
+  if (orphan) {
+    s->n_cps_dropped_orphan++;
+    if (s->n_cps == 0u && s->n_cp_stash > 0u
+        && s->auto_max_cp_weight_base > 0u) {
+      atp_auto_maxw_drain(s, 1u);
+    }
+    if (s->n_cps == 0) return 0;  // queue drained to orphans only
+    continue;                     // re-pick the next heap-min
+  }
   // ENIGMA training-data hook: record the processed CP's feature
   // vector + trace id.  Gated -- with the flag off (the default) this
   // is a single predictable-branch test and the engine is byte-
@@ -3932,6 +4952,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     atp_cp_feat_record(s, *lhs_out, *rhs_out, s->last_popped_trace);
   }
   return 1;
+  }  // end selectNonOrphan loop
 }
 
 // 7c': re-establish the CP-queue heap invariant over cp_packed[0..n_cps).
@@ -3948,7 +4969,12 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     s->cp_pri[i] = atp_cp_priority(s, l, r);
     s->cp_goal[i] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
-    s->cp_seq[i] = s->cp_seq_next++;
+    // Waldmeister `-:w1=fifo`: keep each surviving CP's original
+    // insertion age so equal-weight ties stay oldest-first run-wide.
+    // The post-orient compaction (atp_normalize_graph) already carried
+    // cp_seq[] down to its packed slot, so leave it untouched here.
+    // Default: reassign a fresh monotone seq (engine byte-identical).
+    if (!s->cp_fifo_tiebreak) s->cp_seq[i] = s->cp_seq_next++;
   }
   // Floyd build-heap: sift down every internal node, last to first.
   for (u32 i = s->n_cps / 2; i > 0; ) {
@@ -4035,9 +5061,19 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
   if (!s->r_orient[s->n_rules]) s->n_unorient++;
   s->n_rules++;
+  // Env-gated derivation trace.  Prints each rule at orientation time
+  // in derivation order, mirroring Waldmeister's `-a 4` "... added as
+  // new rule N:" output.
+  if (atp_rule_trace_on()) {
+    char la[2048], ra[2048];
+    atp_pretty_term(lhs, la, sizeof la);
+    atp_pretty_term(rhs, ra, sizeof ra);
+    fprintf(stderr, "RULE %u: %s -> %s%s\n", s->n_rules - 1u, la, ra,
+            s->r_orient[s->n_rules - 1u] ? "" : "  (unorientable)");
+  }
 #ifdef ATP_RULE_INDEX
   // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.
-  s->rule_index_dirty = 1u;
+  s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
   return 1;
 }
@@ -4063,6 +5099,71 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
 fn void thvm_atp_set_record_norm_steps(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->record_norm_steps = on ? 1u : 0u;
+}
+
+// Toggle interreduction right-reduction (RHS composition).  On by
+// default (see thvm_atp_init); set 0 to recover left-reduction-only
+// interreduction for A/B measurement or proof-extraction fallback.
+fn void thvm_atp_set_right_reduce(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->right_reduce = on ? 1u : 0u;
+}
+
+// Toggle periodic critical-pair-set interreduction (a port of
+// Waldmeister KPV_KPMengeInterreduzieren, KPVerwaltung.c:1032, whose
+// per-CP AP_generic callback re-normalizes / joinable-deletes / reweights
+// each queued CP).  Default OFF; flipped on by Method->"Waldmeister".
+fn void thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->cp_set_interreduce = on ? 1u : 0u;
+}
+
+// Toggle lazy orphan murder (Waldmeister "Waisenmord",
+// KPVerwaltung.c:535 selectNonOrphan + the per-rule `lebtNoch` bit).
+// When a rule is interreduced away its descendant queued CPs are
+// redundant; with this on they are discarded FOR FREE at pop time
+// (no queue sweep / reheapify).  Default OFF -> byte-identical engine.
+fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_orphan_murder = on ? 1u : 0u;
+}
+
+// Mark a rule's birthing trace id as dead so descendant CPs are skipped
+// at pop time.  Grows the bitset on demand (8 trace ids per byte).
+static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
+  if (trace_id == ATP_TRACE_NONE) return;
+  u32 byte = trace_id >> 3;
+  if (byte >= s->r_trace_dead_cap >> 3) {
+    u32 new_bits = (trace_id + 1u + 4096u) & ~4095u;  // round up
+    u32 new_bytes = (new_bits + 7u) >> 3;
+    u8 *grown = (u8 *)realloc(s->r_trace_dead, new_bytes);
+    if (grown == NULL) return;  // out of memory: skip the mark (still sound)
+    u32 old_bytes = s->r_trace_dead_cap >> 3;
+    memset(grown + old_bytes, 0, new_bytes - old_bytes);
+    s->r_trace_dead = grown;
+    s->r_trace_dead_cap = new_bytes << 3;
+  }
+  s->r_trace_dead[trace_id >> 3] |= (u8)(1u << (trace_id & 7u));
+}
+
+// Is a rule's birthing trace id marked dead?
+static int atp_trace_is_dead(const AtpState *s, u32 trace_id) {
+  if (trace_id == ATP_TRACE_NONE || trace_id >= s->r_trace_dead_cap) return 0;
+  return (s->r_trace_dead[trace_id >> 3] >> (trace_id & 7u)) & 1u;
+}
+
+// Is a queued CP an orphan?  Its TRACE_CP entry names its two parent
+// rules' trace ids in children 0/1; the CP is an orphan iff either is
+// dead.  CPs whose trace entry is not a TRACE_CP (axioms, simplifies)
+// are never orphaned.  Mirrors WM selectNonOrphan's
+// `aP->lebtNoch && oP->lebtNoch` test (KPVerwaltung.c:540).
+static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace) {
+  if (cp_trace == ATP_TRACE_NONE || cp_trace >= s->n_trace) return 0;
+  Term te = s->trace[cp_trace];
+  if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_CP) return 0;
+  u32 pa = (u32)term_val(term_ctr_at(te, 0));
+  u32 pb = (u32)term_val(term_ctr_at(te, 1));
+  return atp_trace_is_dead(s, pa) || atp_trace_is_dead(s, pb);
 }
 
 // Read wall-clock microseconds from CLOCK_REALTIME -- portable
@@ -4133,7 +5234,7 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
                                     Term lhs, Term rhs,
                                     u8 side, u8 fwd,
                                     const u8 *pos, u8 pos_len) {
-  if (s == NULL || s->n_trace >= s->trace_cap) return ATP_TRACE_NONE;
+  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
   Term children[7 + ATP_PROOF_MAX_DEPTH];
   children[0] = term_new(0, TAG_NUM, 0, p_a);
   children[1] = term_new(0, TAG_NUM, 0, rule_idx);
@@ -4275,6 +5376,15 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   const u32 NORM_CAP = 64;
   u32 src_trace  = s->last_popped_trace;
   u32 chain_tail = src_trace;
+  // Trace high-water mark before this CP's normalize chain is recorded.
+  // A trivially-joined CP (kbo_eq(l, r) below) adds no rule and feeds no
+  // proof, so its TRACE_NORM_STEP entries -- and the intermediate Terms
+  // they reference -- are dead weight.  Joined CPs dominate a deep
+  // completion (hundreds of thousands dropped), so retaining their
+  // chains is what made record_norm_steps blow the heap.  Rewinding the
+  // trace to here on a join lets the heap reset run too (nothing live
+  // points past hcp_norm), keeping recording memory-bounded.
+  u32 trace_mark = s->n_trace;
   Term l, r;
   if (s->record_norm_steps) {
     // Record each CP-normalize rewrite as a TRACE_NORM_STEP, chained
@@ -4305,13 +5415,18 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   }
 
   if (kbo_eq(l, r)) {
-    // Skipping the heap reset when norm-step recording is on: the
-    // TRACE_NORM_STEP entries just pushed reference the intermediate
-    // Terms allocated during the normalize, and rewinding the heap
-    // would leave their children dangling.
-    if (!s->record_norm_steps) {
-      thvm_atp_heap_reset(hcp_norm);
+    // Trivially joined: this CP adds no rule.  Drop the NORM_STEP
+    // entries just recorded for it (rewind the trace to trace_mark) so
+    // no surviving trace entry references a Term past hcp_norm, then
+    // reset the heap.  Without the trace rewind the heap reset would
+    // dangle the dropped chain's intermediate Terms; with it, recording
+    // a joined CP costs nothing -- the lever that keeps record_norm_steps
+    // memory-bounded over a deep saturation.  The rules that DO get
+    // added (the else-branch below) keep their full chains.
+    if (s->record_norm_steps) {
+      s->n_trace = trace_mark;
     }
+    thvm_atp_heap_reset(hcp_norm);
     s->step++;
     return ATP_RUNNING;
   }
@@ -4364,6 +5479,19 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // simplified under every rule oriented since it was queued.
   atp_normalize_graph(s, post);
 #endif
+
+  // Periodic full-rule-set CP-queue interreduction (Waldmeister
+  // KPV_KPMengeInterreduzieren).  Gated behind cp_set_interreduce and run
+  // every cp_set_ir_period-th rule addition so the per-CP full-R sweep's
+  // cost is amortized.  Default off -> the call is skipped and the engine
+  // is byte-identical.
+  if (s->cp_set_interreduce && added.count > 0u) {
+    u32 period = s->cp_set_ir_period ? s->cp_set_ir_period
+                                     : ATP_CP_SET_IR_PERIOD;
+    if (s->n_rules % period == 0u) {
+      atp_cp_set_interreduce(s);
+    }
+  }
 
   goal = thvm_atp_goal_check(s);
   if (goal != ATP_RUNNING) return goal;
@@ -5911,6 +7039,69 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
 }
 #endif /* ATP_ORPHAN_KILL */
 
+// Periodic critical-pair-set interreduction against the FULL rule set --
+// a port of Waldmeister's KPV_KPMengeInterreduzieren (KPVerwaltung.c:1032)
+// and its per-CP AP_generic callback (KPVerwaltung.c, the doR/doE branch).
+// The per-step atp_normalize_graph sweep only applies the 1-2 just-added
+// rules; a queued CP that became joinable through an OLDER rule (e.g. an
+// interreduce cascade) stays on the heap until it is finally popped and
+// dies in thvm_atp_step's pop-time normalize.  Until then it pollutes the
+// heap-min selection -- the engine keeps picking light CPs that normalize
+// to nothing while the heavier proof-relevant overlaps wait.  Waldmeister
+// purges those dead CPs from the queue eagerly, so its heap-min always
+// reflects a live, irreducible CP.  This pass reproduces that: walk the
+// whole queue, normalize each CP against the full current rule set, DELETE
+// the joinable ones, repack the reduced ones, then reheapify (which
+// recomputes every priority -- the AP_generic C_ReClassify reweight).
+// Default OFF; the engine is byte-identical unless cp_set_interreduce is
+// set (Method->"Waldmeister").
+static void atp_cp_set_interreduce(AtpState *s) {
+  if (s == NULL || s->n_cps == 0u || s->n_rules == 0u) return;
+  const u32 NORM_CAP = 64u;
+  u32 w = 0u;
+  int touched = 0;
+  for (u32 i = 0; i < s->n_cps; i++) {
+    // Per-CP heap checkpoint: the normalize allocates scratch cells; the
+    // reduced terms are copied out by acp_pack, so the scratch is dead
+    // after the (re)pack.  Reset each iteration so a long queue cannot
+    // exhaust the dyn heap.
+    u64 hcp = thvm_atp_heap_checkpoint();
+    Term ol = 0, orr = 0;
+    acp_unpack(s->cp_packed[i], &ol, &orr);
+    Term l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    Term r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    if (kbo_eq(l, r)) {
+      // Joinable under R -- the CP adds no equational consequence.  Drop
+      // it (WM AP_generic returns WTI_Delete).
+      s->n_cps_dropped_joinable++;
+      s->n_cp_set_ir_deleted++;
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      touched = 1;
+      thvm_atp_heap_reset(hcp);
+      continue;
+    }
+    if (l != ol || r != orr) {
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
+      s->n_cp_set_ir_reweighted++;
+      touched = 1;
+    } else if (w != i) {
+      s->cp_packed[w] = s->cp_packed[i];
+      s->cp_packed[i] = NULL;
+    }
+    s->cp_trace[w] = s->cp_trace[i];
+    w++;
+    thvm_atp_heap_reset(hcp);
+  }
+  s->n_cps = w;
+  if (touched) {
+    s->n_cp_set_ir_passes++;
+    thvm_atp_cp_reheapify(s);   // recompute every cp_pri + rebuild index
+  }
+}
+
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
 #ifdef ATP_ORPHAN_KILL
@@ -5965,6 +7156,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // on) so the proof DAG stays connected through interreduction
       // (a fresh TRACE_AXIOM would sever it).
       atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
+      if (atp_rule_trace_on()) {
+        char la[2048];
+        atp_pretty_term(s->lhs[i], la, sizeof la);
+        fprintf(stderr, "  RETIRE rule (slot %u): LHS %s collapsed; "
+                "re-queued for re-orientation\n", i, la);
+      }
 #ifdef ATP_ORPHAN_KILL
       // Capture the dropped rule's trace id before the shift below
       // overwrites r_trace[i].  Its descendant CPs are now orphans.
@@ -5972,6 +7169,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         atp_dead[atp_n_dead++] = s->r_trace[i];
       }
 #endif
+      // Lazy orphan murder: mark the dropped rule's birthing trace id
+      // dead so its descendant CPs are skipped at pop time (WM
+      // selectNonOrphan).  No queue sweep here.
+      if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[i]);
       // Keep the unorientable-rule count live: the dropped rule leaves
       // R here (it re-enters as a queued equation, re-counted only if
       // re-oriented unorientable at its next atp_push_rule).
@@ -5987,11 +7188,87 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // 7e lever 2: a rule was dropped and the array compacted -- the
       // rule-LHS index's index->LHS mapping is stale even if a later
       // re-add restores n_rules.  Force a rebuild on the next query.
-      s->rule_index_dirty = 1u;
+      s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
       dropped++;
       // Don't increment i; the next older rule shifted down to slot i.
     } else {
+      // === RIGHT-REDUCTION (composition) ============================
+      // The older rule i's LHS did NOT collapse, so the rule stays in
+      // R as `l -> old_rhs`.  Now try to reduce its RHS against the
+      // just-added rules: rewrite old_rhs to its normal form r'.  If it
+      // changes (and l > r' still holds for the reduction order), update
+      // s->rhs[i] in place -- l = r' is still an equational consequence
+      // (l = old_rhs ->* r'), r' is no larger than old_rhs, and the CPs
+      // born from rule i now use the smaller RHS.  This is the
+      // DISCOUNT-loop right-reduction / composition step; without it the
+      // RHSs (and every CP overlapping them) bloat across the run.
+      if (s->right_reduce) {
+        Term r_reduced;
+        // Thread the proof DAG: record each RHS rewrite as a NORM_STEP
+        // chained off rule i's own TRACE_ORIENT (parent), side = 1
+        // (the RHS), with the LHS as the unchanged other side.  The
+        // chain tail then carries the equation {l, r'} exactly, so a
+        // new TRACE_ORIENT parented on it inherits directly under chain
+        // extraction, and emitNorm bridges it under chain-off.
+        u32 rr_parent = s->r_trace[i];
+        if (s->record_norm_steps) {
+          r_reduced = atp_rewrite_normalize_slice_record(
+              s, old_rhs, new_lhs, new_rhs, new_traces, n_new, 16,
+              &rr_parent, 1u, old_lhs);
+        } else {
+          r_reduced = atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs,
+                                            n_new, 16);
+        }
+        if (!kbo_eq(r_reduced, old_rhs)) {
+          // Orientation guard: l -> r' must remain a valid reduction
+          // rule (l strictly greater than r').  r' is a reduct of
+          // old_rhs <= l, so this holds in the standard case; verify it
+          // and skip the in-place update if some pathological order
+          // makes l NOT > r' (keep the rule as `l -> old_rhs`).
+          // Size guard: a reduction order (KBO/LPO) guarantees r' is
+          // smaller than old_rhs in the ORDER but not necessarily in
+          // raw symbol count -- a rule a -> g(b,c) rewrites a constant
+          // into a deeper term.  Since the point of right-reduction is
+          // to keep RHSs (and the CPs overlapping them) SMALL, skip the
+          // in-place update when r' has more symbols than old_rhs; the
+          // rule keeps its compact RHS and the larger form never feeds
+          // a critical pair.  (Soundness is unaffected either way.)
+          if (atp_compare(s, old_lhs, r_reduced) == KBO_GT &&
+              atp_symbol_count(r_reduced) <= atp_symbol_count(old_rhs)) {
+            // Record the post-reduction rule as a fresh TRACE_ORIENT
+            // parented on the NORM_STEP chain tail (or directly on the
+            // old ORIENT when norm-step recording is off).  Repointing
+            // r_trace[i] keeps resolveRule(i) -> the entry whose stored
+            // (lhs, rhs) equals the live (l, r') pair.
+            u32 new_t = atp_trace_push(s, TRACE_ORIENT, rr_parent,
+                                       ATP_TRACE_NONE, old_lhs, r_reduced);
+            // Retire the old `l -> old_rhs` ORIENT for the chain-off
+            // aliveRulesAt model: a TRACE_SIMPLIFY whose ParentA names
+            // the old trace marks it inactive from this point forward,
+            // so emitNorm replays against `l -> r'`.  Push the marker
+            // straight onto the trace (NOT atp_add_equation_simplified,
+            // which would also enqueue a redundant CP -- the rule is
+            // already live in R as l -> r').
+            atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
+                           ATP_TRACE_NONE, old_lhs, r_reduced);
+            s->rhs[i]     = r_reduced;
+            s->r_trace[i] = new_t;
+            s->n_right_reduced++;
+            // RHS does not feed the LHS discrimination tree, so the
+            // rule-LHS index stays valid; no dirty flag needed.
+#ifdef ATP_RULE_INDEX
+            // The WM-FPA cache, by contrast, holds a flat COPY of each
+            // rule's RHS (wf_step reads it for the splice), so an in-place
+            // RHS edit must update it -- otherwise the cached tree would
+            // splice the stale, larger RHS and diverge from the IC normal
+            // form.  Re-encode just this rule's RHS in O(rule); only when
+            // that in-place update can't be done do we force a full rebuild.
+            if (!wf_eng_cache_update_rhs(s, i)) s->wmfpa_dirty = 1u;
+#endif
+          }
+        }
+      }
       i++;
     }
   }
@@ -6028,6 +7305,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_dead[atp_n_dead++] = s->r_trace[j];
         }
 #endif
+        if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]      = s->lhs[k];
@@ -6037,7 +7315,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         }
         s->n_rules--;
 #ifdef ATP_RULE_INDEX
-        s->rule_index_dirty = 1u;
+        s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
 #endif
         dropped++;
         // The next older rule shifted down to slot j; don't advance.
@@ -6054,6 +7332,81 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   }
 #endif
   return dropped;
+}
+
+// === DIAGNOSTIC (Step 1) ============================================
+// Measure the interreduction deficit and term-size growth of R.  For
+// each rule i, normalize lhs[i] / rhs[i] against R \ {i} (linear
+// oracle, full re-scan).  A side that changes is reducible by another
+// rule -- the rule is NOT interreduced.  Reports counts + max/total
+// symbol footprint.  Read-only; no engine state mutated.  Used by the
+// bench to confirm whether R is genuinely under-interreduced.
+fn void thvm_atp_interreduce_deficit(AtpState *s,
+                                     u32 *n_lhs_reducible,
+                                     u32 *n_rhs_reducible,
+                                     u32 *n_any_reducible,
+                                     u32 *max_side_symbols,
+                                     u64 *total_symbols) {
+  u32 nl = 0, nr = 0, na = 0, maxside = 0;
+  u32 n_red_unorient = 0;
+  u64 total = 0;
+  if (s == NULL || s->n_rules == 0) goto done;
+  u32 n = s->n_rules;
+  Term *tl = (Term *)malloc((size_t)n * sizeof(Term));
+  Term *tr = (Term *)malloc((size_t)n * sizeof(Term));
+  if (tl == NULL || tr == NULL) { free(tl); free(tr); goto done; }
+  for (u32 i = 0; i < n; i++) {
+    u32 ls = atp_symbol_count(s->lhs[i]);
+    u32 rs = atp_symbol_count(s->rhs[i]);
+    if (ls > maxside) maxside = ls;
+    if (rs > maxside) maxside = rs;
+    total += (u64)ls + (u64)rs;
+    // Build R \ {i}.
+    u32 m = 0;
+    for (u32 j = 0; j < n; j++) {
+      if (j == i) continue;
+      tl[m] = s->lhs[j];
+      tr[m] = s->rhs[j];
+      m++;
+    }
+    Term ln = thvm_rewrite_normalize(s->lhs[i], tl, tr, m, 256);
+    Term rn = thvm_rewrite_normalize(s->rhs[i], tl, tr, m, 256);
+    int lred = !kbo_eq(ln, s->lhs[i]);
+    int rred = !kbo_eq(rn, s->rhs[i]);
+    if (lred) nl++;
+    if (rred) nr++;
+    if (lred || rred) {
+      na++;
+      if (!s->r_orient[i]) n_red_unorient++;
+      if (getenv("THVM_ATP_DIAG_DUMP") != NULL) {
+        char la[1024], ra[1024], na_[1024];
+        atp_pretty_term(s->lhs[i], la, sizeof la);
+        atp_pretty_term(s->rhs[i], ra, sizeof ra);
+        atp_pretty_term(lred ? ln : rn, na_, sizeof na_);
+        // Which single rule reduces side i at the top?  (single-rule
+        // collapse vs multi-rule chain.)
+        int single = -1;
+        Term side = lred ? s->lhs[i] : s->rhs[i];
+        for (u32 j = 0; j < n; j++) {
+          if (j == i) continue;
+          Term one = thvm_rewrite_normalize(side, &s->lhs[j], &s->rhs[j], 1u, 4u);
+          if (!kbo_eq(one, side)) { single = (int)j; break; }
+        }
+        fprintf(stderr, "    REDUCIBLE rule %u%s: %s -> %s   [%s side -> %s] "
+                "(single-rule reducer: %d, orient_unred=%u)\n",
+                i, s->r_orient[i] ? "" : "(un)", la, ra,
+                lred ? "lhs" : "rhs", na_, single, n_red_unorient);
+      }
+    }
+  }
+  free(tl);
+  free(tr);
+done:
+  if (n_lhs_reducible)  *n_lhs_reducible  = nl;
+  if (n_rhs_reducible)  *n_rhs_reducible  = nr;
+  if (n_any_reducible)  *n_any_reducible  = na;
+  if (max_side_symbols) *max_side_symbols = maxside;
+  if (total_symbols)    *total_symbols    = total;
 }
 
 // Generate fresh CPs from the freshly-added rules `added` against
@@ -6141,6 +7494,139 @@ static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
   free(filt_l);
   free(filt_r);
   return kbo_eq(l, r);
+}
+
+// Bachmair-Dershowitz connectedness (Twee section 6.2): a critical
+// pair (s, t) born from the peak `p = sigma(li)` is REDUNDANT if s and
+// t can be joined through a rewrite proof in which every term is
+// STRICTLY BELOW the peak in the reduction order.  Soundness: such a
+// proof witnesses that the local confluence of `p` follows from
+// strictly smaller overlaps already (or to be) handled, so dropping
+// the CP cannot lose a needed consequence -- this is the standard
+// connectedness redundancy of unfailing completion.
+//
+// This is STRONGER than trivial-joinability (7.1): plain normalization
+// only follows order-DECREASING steps to a normal form, so two sides
+// with distinct normal forms are kept; connectedness additionally
+// admits an unorientable equation applied in its non-reducing local
+// direction, PROVIDED the result stays strictly below the peak.  Such a
+// "detour below the peak" joins CPs that 7.1 misses, which is where the
+// extra pruning comes from.
+//
+// Implementation: a bounded forward reachability below `peak`.  Seed a
+// small hash set with s and t's ordered normal forms (always < peak
+// since they are proper reducts).  Repeatedly expand a frontier term by
+// every one-step rewrite -- both rule directions, variable-safe -- whose
+// RESULT u satisfies peak >_C u; insert u, tagged by which seed it
+// descends from (s-side / t-side / both).  A term reached from BOTH
+// sides is the join point -> redundant.  Bounded by ATP_CONN_MAX_NODES
+// (return 0 = KEEP on overflow, so the criterion never wrongly deletes).
+#define ATP_CONN_MAX_NODES 256u
+#define ATP_CONN_SIDE_S 1u
+#define ATP_CONN_SIDE_T 2u
+
+// Structural hash over the preorder (FNV-ish): structurally-equal terms
+// with distinct heap cells hash identically.  Fast pre-filter before a
+// kbo_eq in the connectedness reachability set.
+static u32 atp_struct_hash(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        h = (h ^ atp_struct_hash(term_ctr_at(t, i))) * 0x01000193u;
+      }
+      return h ^ (n + 0x9e3779b9u);
+    }
+    case TAG_FVR:
+      return (0x2545f491u ^ term_ext(t)) * 0x01000193u;
+    default:
+      return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
+  }
+}
+
+// Collect every one-step rewrite of `t` (all positions, both
+// variable-safe directions of each rule) whose result is strictly
+// below `peak`, into out_buf[*n .. ).  Mirrors mnf_successors' shape
+// but order-gated against the peak rather than the redex.
+static u32 atp_conn_successors(AtpState *s, Term t, Term peak,
+                               Term *out_buf, u32 *n, u32 cap) {
+  u32 size = 1u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 m = term_ctr_n(t);
+    if (m > REWRITE_MAX_ARITY) return size;
+    for (u32 i = 0; i < m; i++) {
+      u32 base = *n;
+      (void)atp_conn_successors(s, term_ctr_at(t, i), peak, out_buf, n, cap);
+      for (u32 k = base; k < *n; k++) {
+        Term ch[REWRITE_MAX_ARITY];
+        for (u32 c = 0; c < m; c++) {
+          ch[c] = (c == i) ? out_buf[k] : term_ctr_at(t, c);
+        }
+        out_buf[k] = term_new_ctr(term_ext(t), ch, m);
+      }
+    }
+  }
+  for (u32 j = 0; j < s->n_rules && *n < cap; j++) {
+    RewriteSubst sub = {{0}};
+    if (thvm_match(s->lhs[j], t, &sub)) {                 // l -> r
+      Term repl = thvm_subst_apply(s->rhs[j], &sub);
+      if (atp_compare(s, peak, repl) == KBO_GT) out_buf[(*n)++] = repl;
+    }
+    if (*n >= cap) break;
+    if (atp_vars_contained(s->lhs[j], s->rhs[j])) {       // r -> l (var-safe)
+      RewriteSubst sb = {{0}};
+      if (thvm_match(s->rhs[j], t, &sb)) {
+        Term repl = thvm_subst_apply(s->lhs[j], &sb);
+        if (atp_compare(s, peak, repl) == KBO_GT) out_buf[(*n)++] = repl;
+      }
+    }
+  }
+  return size;
+}
+
+static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,
+                                      Term peak) {
+  if (s == NULL || peak == 0) return 0;
+  // The ordered normal forms of both sides are proper reducts of the
+  // peak, hence strictly below it; they are the natural seeds.
+  Term l = atp_rewrite_normalize(s, lhs, s->lhs, s->rhs, s->n_rules, 64u);
+  Term r = atp_rewrite_normalize(s, rhs, s->lhs, s->rhs, s->n_rules, 64u);
+  if (kbo_eq(l, r)) return 1;                 // trivially joined below peak
+  // A seed equal to the peak (no decreasing step taken) cannot stay
+  // strictly below it -- bail (KEEP) to preserve soundness.
+  if (atp_compare(s, peak, l) != KBO_GT || atp_compare(s, peak, r) != KBO_GT) {
+    return 0;
+  }
+  Term  terms[ATP_CONN_MAX_NODES];
+  u32   hash [ATP_CONN_MAX_NODES];
+  u8    side [ATP_CONN_MAX_NODES];
+  u32   n = 0u;
+  terms[n] = l; hash[n] = atp_struct_hash(l); side[n] = ATP_CONN_SIDE_S; n++;
+  terms[n] = r; hash[n] = atp_struct_hash(r); side[n] = ATP_CONN_SIDE_T; n++;
+  Term succ[64];
+  for (u32 cur = 0; cur < n; cur++) {
+    u32 ns = 0u;
+    (void)atp_conn_successors(s, terms[cur], peak, succ, &ns, 64u);
+    for (u32 k = 0; k < ns; k++) {
+      Term u  = succ[k];
+      u32  hu = atp_struct_hash(u);
+      u32  found = ATP_CONN_MAX_NODES;
+      for (u32 i = 0; i < n; i++) {
+        if (hash[i] == hu && kbo_eq(terms[i], u)) { found = i; break; }
+      }
+      if (found != ATP_CONN_MAX_NODES) {
+        if ((side[found] | side[cur]) == (ATP_CONN_SIDE_S | ATP_CONN_SIDE_T)) {
+          return 1;                          // join point reached from both
+        }
+        side[found] = (u8)(side[found] | side[cur]);
+        continue;
+      }
+      if (n >= ATP_CONN_MAX_NODES) return 0;  // overflow -> KEEP (sound)
+      terms[n] = u; hash[n] = hu; side[n] = side[cur]; n++;
+    }
+  }
+  return 0;
 }
 
 // Stage 7.3a: rule subsumption check.  Returns 1 if there exist a
@@ -7464,6 +8950,16 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       continue;
     }
 #endif
+    // Bachmair-Dershowitz connectedness (Twee section 6.2): drop a CP
+    // whose sides join through terms strictly below the peak.  Gated on
+    // use_connectedness so the default engine is byte-identical.  The
+    // peak rides on the CriticalPair; the reduced cp_lhs/cp_rhs are the
+    // CP sides.  Run before the trivial-join check so it can subsume it.
+    if (s->use_connectedness && cps[i].peak != 0 &&
+        atp_cp_connected_below_peak(s, cp_lhs, cp_rhs, cps[i].peak)) {
+      s->n_cps_dropped_connected_below_peak++;
+      continue;
+    }
     if (joinable) {
       s->n_cps_dropped_joinable++;
       continue;
@@ -7539,6 +9035,20 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   return cnt;
 }
 
+// Run one overlap pair and push its CPs (the body shared by the indexed
+// and unindexed generator loops).
+static u32 atp_gen_one(AtpState *s, u32 i, u32 j, CriticalPair *buf) {
+  u32 nbuf   = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
+  u32 pushed = atp_push_cps_traced(s, buf, nbuf,
+                                   s->r_trace[i], s->r_trace[j], i, j);
+  // A single saturation step can out-allocate a whole GC semi-space in
+  // raw critical-pair + normalisation scratch.  Collect between overlap
+  // pairs -- `buf` is fully processed here, so no in-flight CP needs
+  // rooting -- to bound the transient working set instead of crashing.
+  if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+  return pushed;
+}
+
 static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   u32 first = added.first;
   u32 last  = added.first + added.count;
@@ -7549,31 +9059,64 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   CriticalPair buf[ATP_CP_BATCH];
   u32 pushed = 0;
 
+#ifdef ATP_RULE_INDEX
+  // Indexed overlap-partner retrieval (opt-in, byte-identical CP set).
+  // Rebuild both overlap indices over the post-add rule set, then for
+  // each new rule overlap only the candidate partners the index returns.
+  // On a candidate-buffer / subject-depth OVERFLOW the call falls back to
+  // the exact n_rules scan for that rule, so the CP set is preserved even
+  // when the index over-runs its scratch.
+  if (s->use_cp_index) {
+    if (s->cp_index == NULL)    s->cp_index    = atp_ri_new();
+    if (s->cp_subindex == NULL) s->cp_subindex = atp_ri_new();
+    if (s->cp_index->n_rules_built != n) {
+      atp_cp_index_rebuild(s);          // grows g_atp_cp_seen to cover n
+      atp_cp_subindex_rebuild(s);
+    }
+    // (new x all_R): for each new rule i, candidates j are rules whose lj
+    // unifies with a non-var subterm of li -- the whole-LHS index query.
+    for (u32 i = first; i < last; i++) {
+      u32 nc = atp_cp_index_collect(s, s->lhs[i]);
+      if (g_atp_cp_overflow) {
+        for (u32 j = 0; j < n; j++) pushed += atp_gen_one(s, i, j, buf);
+      } else {
+        atp_cp_cand_sort();
+        for (u32 c = 0; c < nc; c++) {
+          pushed += atp_gen_one(s, i, g_atp_cp_cand[c], buf);
+        }
+      }
+    }
+    // (old x new): for each new rule j, candidates i are OLD rules whose
+    // li has a non-var subterm unifiable with the new lj -- the subterm
+    // index query.  Only i < first (old) are this loop's partners.
+    for (u32 j = first; j < last; j++) {
+      u32 nc = atp_cp_subindex_collect(s, s->lhs[j]);
+      if (g_atp_cp_overflow) {
+        for (u32 i = 0; i < first; i++) pushed += atp_gen_one(s, i, j, buf);
+      } else {
+        atp_cp_cand_sort();
+        for (u32 c = 0; c < nc; c++) {
+          u32 i = g_atp_cp_cand[c];
+          if (i < first) pushed += atp_gen_one(s, i, j, buf);
+        }
+      }
+    }
+    return pushed;
+  }
+#endif
+
   // (new x all_R): the new rule is i (outer), j ranges over all
   // existing rules (including the new ones for new x new self-overlap).
   for (u32 i = first; i < last; i++) {
     for (u32 j = 0; j < n; j++) {
-      u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
-      pushed += atp_push_cps_traced(s, buf, nbuf,
-                                    s->r_trace[i], s->r_trace[j],
-                                    i, j);
-      // A single saturation step can out-allocate a whole GC
-      // semi-space in raw critical-pair + normalisation scratch.
-      // Collect between overlap pairs -- `buf` is fully processed
-      // here, so no in-flight CP needs rooting -- to bound the
-      // transient working set instead of crashing mid-step.
-      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+      pushed += atp_gen_one(s, i, j, buf);
     }
   }
 
   // (old x new): old rule on the outside, new rule fed as inner.
   for (u32 i = 0; i < first; i++) {
     for (u32 j = first; j < last; j++) {
-      u32 nbuf = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH);
-      pushed += atp_push_cps_traced(s, buf, nbuf,
-                                    s->r_trace[i], s->r_trace[j],
-                                    i, j);
-      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);   // see above
+      pushed += atp_gen_one(s, i, j, buf);
     }
   }
 
@@ -7637,10 +9180,13 @@ static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
   if (term_tag(cp_lhs) == TAG_ERA) return ctx->count;
   Term cp_rhs = ic_unify_apply3(sub, ctx->lj, ctx->ri);
   if (term_tag(cp_rhs) == TAG_ERA) return ctx->count;
+  Term cp_peak = ic_unify_apply3(sub, ctx->lj, ctx->li);
+  if (term_tag(cp_peak) == TAG_ERA) return ctx->count;
 
   CriticalPair *slot = &ctx->out[ctx->count];
   slot->lhs = cp_lhs;
   slot->rhs = cp_rhs;
+  slot->peak = cp_peak;
   slot->pos_len = (u8)p_len;
   for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p[d];
   ctx->count++;
