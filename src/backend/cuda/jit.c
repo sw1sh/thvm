@@ -39,6 +39,15 @@ typedef struct {
 } CudaJitSlot;
 static CudaJitSlot CUDA_JIT_CACHE[CUDA_JIT_CACHE_CAP];
 
+// Instrumentation: count nvrtc compiles (cache misses) and evictions
+// (a home-slot collision unloading a still-cached different-key module).
+// Exposed to Python to test whether the eager train's step-N nan
+// correlates with cache thrashing.
+u64 CUDA_JIT_COMPILES = 0;
+u64 CUDA_JIT_EVICTIONS = 0;
+fn u64 cuda_jit_compiles(void)  { return CUDA_JIT_COMPILES; }
+fn u64 cuda_jit_evictions(void) { return CUDA_JIT_EVICTIONS; }
+
 // Forward-declared in init.c so cuda_shutdown can unload every cached
 // module before the context is destroyed.
 fn void cuda_jit_cache_reset(void) {
@@ -85,6 +94,8 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
   if (slot->key == key && slot->func != NULL) {
     return slot->func;   // cache hit -- skip nvrtc + module load
   }
+  CUDA_JIT_COMPILES++;
+  if (slot->module != NULL && slot->key != key) CUDA_JIT_EVICTIONS++;
 
   // --- nvrtc compile ------------------------------------------------
   nvrtcProgram prog;

@@ -121,6 +121,8 @@ _kernel_count = _bind("py_kernel_count", c_uint32)
 _cpu_peak_bytes = _bind("py_cpu_peak_bytes", c_uint64)
 _cpu_live_bytes = _bind("py_cpu_live_bytes", c_uint64)
 _cpu_peak_reset = _bind("py_cpu_peak_reset", None)
+_cuda_jit_compiles = _bind("py_cuda_jit_compiles", c_uint64)
+_cuda_jit_evictions = _bind("py_cuda_jit_evictions", c_uint64)
 _ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
                                c_uint64, c_int32)
 _ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
@@ -580,6 +582,12 @@ class Thvm:
 
     def cpu_peak_reset(self) -> None:
         _cpu_peak_reset()
+
+    def cuda_jit_compiles(self) -> int:
+        return int(_cuda_jit_compiles())
+
+    def cuda_jit_evictions(self) -> int:
+        return int(_cuda_jit_evictions())
 
     # ---- requires_grad (canonical on TenDesc.requires_grad) ----
     def ten_set_requires_grad(self, t: Term, on: bool) -> bool:

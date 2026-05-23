@@ -294,6 +294,20 @@ EXPORT void py_cpu_peak_reset(void) {
   cuda_buf_peak_reset();
 #endif
 }
+EXPORT uint64_t py_cuda_jit_compiles(void) {
+#ifdef THVM_HAS_CUDA
+  return cuda_jit_compiles();
+#else
+  return 0;
+#endif
+}
+EXPORT uint64_t py_cuda_jit_evictions(void) {
+#ifdef THVM_HAS_CUDA
+  return cuda_jit_evictions();
+#else
+  return 0;
+#endif
+}
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
 EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
 EXPORT uint32_t py_const_UOP_SHRINK(void) { return UOP_SHRINK; }
