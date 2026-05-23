@@ -662,34 +662,27 @@ fn void run_rangeify_unified(Term root) {
 
     Term out_rngs[RU_MAX_AXES] = {0};
 
-    // A RESHAPE that SPLITS an axis (output ndim > source ndim) feeding a
-    // REDUCE -- the max/avg-pool `x.reshape(B,C,Ho,k,Wo,k).max(window)`
-    // pattern -- must read its SOURCE from a materialized buffer, not a
-    // fused/inlined producer.  Otherwise the partial-realize inline of
-    // the reshape-split source into the reduce strands the split
-    // sub-axes: the reduce ends up reading a [B,C]-only scalar instead of
-    // the windowed values and the result (and its gradient) is wrong/0.
-    // So force-realize the reshape's SOURCE node (e.g. relu(conv)); the
-    // reshape then views a complete buffer and the reduce indexes it
-    // correctly (matches the working `pool input is a plain buffer`
-    // case).  Narrowed to REDUCE consumers so non-reduce splits (e.g. the
-    // conv _pool reshape-over-expand im2col chain) still fuse.
+    // A RESHAPE that changes rank -- SPLITS an axis (the pool windowing
+    // `x.reshape(B,C,Ho,k,Wo,k)`) or MERGES split axes back (the pool
+    // gradient's `reshape((B,C,Ho,k,Wo,k)->(B,C,Ho,Wo))`) -- over a REAL
+    // VALUE source must read that source from a materialized buffer.
+    // Otherwise the partial-realize inline strands the split/merged
+    // sub-axes: the consuming reduce / argmax-mask CMPEQ / merge reads a
+    // rank-deficient view (a [B,C,Ho]-only value missing Wo) and the
+    // result and its gradient come out wrong/0.  Force-realize the
+    // reshape's SOURCE; the reshape then views a complete buffer and
+    // indexes correctly (matches the working "pool input is a plain
+    // buffer" case).  Gated on a NON-MOVEMENT source so the conv `_pool`
+    // im2col -- whose splits sit over RESHAPE/EXPAND (the repeat trick) --
+    // still fuses untouched.
     if (info->op == UOP_RESHAPE) {
       Shape rsrc;
-      if (ru_node_src_shape(info->loc, &rsrc) && my_ndim > rsrc.ndim) {
-        u32 cidxs[RU_MAX_CONSUMERS];
-        u32 nc = ru_consumers_for_node(node_idx, cidxs, RU_MAX_CONSUMERS);
-        int feeds_reduce = 0;
-        for (u32 c = 0; c < nc; c++) {
-          if (BUFFERIZE_NODES[cidxs[c]].op == UOP_REDUCE) { feeds_reduce = 1; break; }
-        }
-        if (feeds_reduce) {
-          Term src = term_resolve(heap_read(info->loc + 0));
-          if (term_tag(src) == TAG_UOP) {
-            u32 sidx = bufferize_info_find(term_val(src));
-            if (sidx != 0xFFFFFFFFu)
-              RU_REALIZE_MAP[sidx].realized_full = 1;
-          }
+      if (ru_node_src_shape(info->loc, &rsrc) && my_ndim != rsrc.ndim) {
+        Term src = term_resolve(heap_read(info->loc + 0));
+        if (term_tag(src) == TAG_UOP && !uop_is_movement(term_ext(src))) {
+          u32 sidx = bufferize_info_find(term_val(src));
+          if (sidx != 0xFFFFFFFFu)
+            RU_REALIZE_MAP[sidx].realized_full = 1;
         }
       }
     }
