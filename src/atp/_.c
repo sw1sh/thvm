@@ -3085,6 +3085,53 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
   return 0u;
 }
 
+// Indexed single unorientable-rewrite step on a TREE subject (default
+// engine).  Flattens `t` once, runs the indexed unorient retrieval
+// (atp_ft_unorient_step) to find AND splice the first outermost-leftmost
+// strictly-order-decreasing unorientable face, then rebuilds the tree.
+// This replaces the mixed loop's `atp_ordered_rewrite_step` with
+// g_atp_skip_oriented -- an O(n_rules) linear scan over every unorientable
+// equation at every position, the measured normalize hotspot.  The redex
+// chosen is byte-identical (atp_ft_unorient_step mirrors the linear scan's
+// preorder + (rule asc, l->r then r->l) priority + KBO gate), so the
+// normal form -- and the whole saturation trajectory -- is unchanged.
+// `*fired` reports whether a rewrite happened.  On an index-absent / over-
+// deep / candidate-overflow / splice-overrun fallback it returns `t`
+// with `*fired` per the linear-scan verdict so completeness is preserved.
+static Term atp_unorient_step_indexed(AtpState *s, Term t, u8 *fired) {
+  *fired = 0;
+  if (s->rule_index == NULL) s->rule_index = atp_ri_new();
+  if (s->unorient_index == NULL) s->unorient_index = atp_ri_new();
+  if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules ||
+      s->unorient_index->n_rules_built != s->n_rules) {
+    atp_ri_rebuild(s);
+  }
+  static Term uflat[ATP_RI_FLAT_CAP];
+  static u32  usubsz[ATP_RI_FLAT_CAP];
+  static u32  uflatsym[ATP_RI_FLAT_CAP];
+  u32 flatlen = 0u;
+  u8  folded  = 0u;
+  if (!atp_ri_flatten(t, uflat, usubsz, uflatsym, &folded,
+                      ATP_RI_FLAT_CAP, &flatlen)) {
+    // Over-deep subject: the index cannot represent it.  Fall back to the
+    // proven linear KBO-gated step for this one step (same verdict).
+    g_atp_skip_oriented = 1u;
+    Term t2 = atp_ordered_rewrite_step(s, t, s->lhs, s->rhs, s->n_rules, fired);
+    g_atp_skip_oriented = 0u;
+    return t2;
+  }
+  g_atp_ri_flat    = uflat;
+  g_atp_ri_subsz   = usubsz;
+  g_atp_ri_flatsym = uflatsym;
+  g_atp_ri_lhs     = s->lhs;
+  u32 fire_pos = 0u;
+  u8  hit = atp_ft_unorient_step(s, uflat, usubsz, uflatsym, &flatlen,
+                                 &folded, 0u, &fire_pos);
+  if (!hit) return t;            // no firable unorientable face: caller stops
+  *fired = 1;
+  return atp_ri_build(uflat, usubsz, uflatsym, 0u);
+}
+
 // Flatterm mixed normalizer (opt-in).  Keeps the subject flat across the
 // orientable indexed fixpoint AND the unorientable pass, splicing every
 // rewrite in place; the tree is built ONCE at the joint fixpoint.
@@ -4327,9 +4374,17 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
       if (atp_norm_deadline_fired(s)) return t;
       t = atp_rewrite_normalize_indexed(s, t, step_cap);
       u8 fired = 0;
-      g_atp_skip_oriented = 1u;
-      Term t2 = atp_ordered_rewrite_step(s, t, lhs, rhs, n_rules, &fired);
-      g_atp_skip_oriented = 0u;
+      Term t2;
+      if (s->use_unorient_index) {
+        // Indexed unorientable step: a discrimination-tree retrieval over
+        // both faces of every unorientable equation replaces the O(n_rules)
+        // linear KBO-gated scan.  Byte-identical redex -> identical NF.
+        t2 = atp_unorient_step_indexed(s, t, &fired);
+      } else {
+        g_atp_skip_oriented = 1u;
+        t2 = atp_ordered_rewrite_step(s, t, lhs, rhs, n_rules, &fired);
+        g_atp_skip_oriented = 0u;
+      }
       if (!fired) break;
       t = t2;
     }
@@ -5180,6 +5235,11 @@ fn void thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_orphan_murder = on ? 1u : 0u;
+}
+
+fn void thvm_atp_set_use_unorient_index(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_unorient_index = on ? 1u : 0u;
 }
 
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped

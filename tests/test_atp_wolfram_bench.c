@@ -287,8 +287,18 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_rhs_interreduce(s, 1u);
       thvm_atp_set_use_unfailing_cp(s, 1u);
       thvm_atp_set_use_orphan_murder(s, 1u);
+      thvm_atp_set_use_unorient_index(s, 1u);
     }
   }
+
+  // THVM_ATP_UNORIDX=0/1: toggle the indexed unorientable-rewrite pass
+  // independently of the WM preset (A/B vs the linear KBO-gated scan).
+  {
+    const char *ui = getenv("THVM_ATP_UNORIDX");
+    if (ui != NULL && ui[0] != '\0')
+      thvm_atp_set_use_unorient_index(s, (ui[0] != '0') ? 1u : 0u);
+  }
+
 
   // THVM_ATP_ORPHAN=1 toggles lazy orphan murder independently of the
   // WM preset, so a run can A/B its effect on the CP queue.

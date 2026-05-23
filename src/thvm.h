@@ -3518,6 +3518,18 @@ typedef struct {
   u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
   u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
 
+  // Indexed unorientable-rewrite pass.  When set, the default tree mixed
+  // normalizer replaces its O(n_rules) linear KBO-gated unorientable step
+  // (atp_ordered_rewrite_step with the skip-oriented flag) with a
+  // discrimination-tree retrieval over both faces of every unorientable
+  // equation (atp_unorient_step_indexed -> atp_ft_unorient_step).  The
+  // redex chosen is byte-identical (same outermost-leftmost preorder,
+  // (rule asc, l->r then r->l) priority, KBO gate), so the normal form
+  // and the whole saturation trajectory are unchanged.  Default OFF
+  // (engine byte-identical).  On for Method->"Waldmeister" via
+  // thvm_atp_set_use_unorient_index.
+  u8   use_unorient_index;
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3642,6 +3654,7 @@ fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset
