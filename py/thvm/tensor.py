@@ -199,11 +199,24 @@ class Tensor:
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
         """Drive thvm's pipeline; mutates `term` to the resulting
-        TAG_TEN.  Extra tensors realize too (tinygrad pattern)."""
-        self.term = _TH.realize(self.term)
-        self._pin()
-        for x in lst:
-            x.realize()
+        TAG_TEN.  Extra tensors realize too (tinygrad pattern).
+
+        With extra tensors this bundles self+lst into ONE scheduler pass
+        (tinygrad `loss.realize(*opt.schedule_step())`): the assigns and
+        their consumers are materialized together so an in-place ASSIGN
+        that another assign reads (Adam's m feeding the param update)
+        fires exactly once.  Per-tensor sequential realize would re-fire
+        such an embedded ASSIGN against the already-updated buffer and
+        corrupt it.  Single-tensor realize keeps the plain fast path."""
+        if not lst:
+            self.term = _TH.realize(self.term)
+            self._pin()
+            return self
+        group = [self, *lst]
+        resolved = _TH.realize_many([t.term for t in group])
+        for t, r in zip(group, resolved):
+            t.term = r
+            t._pin()
         return self
 
     def contiguous(self) -> "Tensor":
