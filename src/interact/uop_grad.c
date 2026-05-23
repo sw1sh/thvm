@@ -933,14 +933,44 @@ static Term interact_grad_dispatch(Term grad_term) {
         for (u32 i = 0; i < pad; i++) a_padded[i] = 1;
         for (u32 i = 0; i < a_shape.ndim; i++) a_padded[pad + i] = a_shape.dims[i];
 
-        // Walk axes high-to-low; each REDUCE_SUM drops that axis.
-        // After all reduces, cur has rank a_shape.ndim and matches
-        // a.shape (no reshape needed -- reduces preserve non-broadcast
-        // dims and drop broadcast ones).
+        // Reduce the broadcast axes (a_padded==1 && out>1).  Mirror
+        // tinygrad's EXPAND grad (gradient.py:68 -- one _rop(ADD, axes)
+        // over ALL broadcast axes).  thvm's UOP_REDUCE is single-axis,
+        // so a chain of single-axis reduces is built; reduce_chain_collect
+        // (uop_meta.c) fuses a chain into ONE kernel ONLY when the reduced
+        // axes are the CONTIGUOUS TRAILING axes of the input.  The conv
+        // weight-grad and BatchNorm backward broadcast LEADING / sandwiched
+        // axes (e.g. {0,2,3} of {B,C,H,W}), so the naive high-to-low chain
+        // can't fuse -> one kernel per axis (the backward kernel-count
+        // blowup).  Permute the broadcast axes to be trailing first, so
+        // the chain IS contiguous-trailing and fuses; the surviving kept
+        // axes stay in their original relative order (== a_shape), so a
+        // single reshape lands the result.
+        u32 bcast_axes[MAX_DIM]; u32 n_bcast = 0;
+        for (u32 i = 0; i < ndim; i++) {
+          if (a_padded[i] == 1 && out_dims[i] > 1) bcast_axes[n_bcast++] = i;
+        }
         Term cur = gy;
-        for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-          if (a_padded[axis] == 1 && out_dims[axis] > 1) {
+        int already_trailing = (n_bcast == 0)
+            || (bcast_axes[n_bcast - 1] == ndim - 1
+                && bcast_axes[0] == ndim - n_bcast);
+        if (n_bcast >= 2 && !already_trailing) {
+          // Build perm = (kept axes in order) ++ (broadcast axes in order).
+          u32 perm[MAX_DIM]; u32 pn = 0;
+          u8  is_bcast[MAX_DIM] = {0};
+          for (u32 i = 0; i < n_bcast; i++) is_bcast[bcast_axes[i]] = 1;
+          for (u32 i = 0; i < ndim; i++) if (!is_bcast[i]) perm[pn++] = i;
+          for (u32 i = 0; i < n_bcast; i++) perm[pn++] = bcast_axes[i];
+          cur = uop_permute(cur, ndim, perm);
+          // Reduce the now-trailing broadcast axes high-to-low.
+          for (i32 axis = (i32)ndim - 1; axis >= (i32)(ndim - n_bcast); axis--)
             cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
+        } else {
+          // Already trailing-contiguous (or <2 axes): reduce in place.
+          for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
+            if (a_padded[axis] == 1 && out_dims[axis] > 1) {
+              cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
+            }
           }
         }
         // If a had explicit dim==1 axes that we DIDN'T reduce (because
