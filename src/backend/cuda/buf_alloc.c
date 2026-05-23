@@ -5,6 +5,18 @@
 // calls cuMemAlloc + cuMemsetD8(0) so a new buffer reads as zeros,
 // matching cpu_buf_alloc's calloc.
 
+// Process-global resident device-buffer-byte accounting (mirrors the
+// CPU counters in backend/cpu/buf_alloc.c).  Incremented only on a fresh
+// cuMemAlloc and decremented only on a real cuMemFree; freelist reuse is
+// invisible (recycled storage was already counted and never freed while
+// parked).
+u64 CUDA_MEM_LIVE = 0;
+u64 CUDA_MEM_PEAK = 0;
+
+fn u64 cuda_buf_peak_bytes(void) { return CUDA_MEM_PEAK; }
+fn u64 cuda_buf_live_bytes(void) { return CUDA_MEM_LIVE; }
+fn void cuda_buf_peak_reset(void) { CUDA_MEM_PEAK = CUDA_MEM_LIVE; }
+
 fn u32 cuda_buf_alloc(u64 nbytes) {
   if (!CUDA_READY) {
     fprintf(stderr, "cuda_buf_alloc: backend not initialised\n");
@@ -41,6 +53,8 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   b->dptr     = dptr;
   b->nbytes   = nbytes;
   b->refcount = 1;
+  CUDA_MEM_LIVE += nbytes;
+  if (CUDA_MEM_LIVE > CUDA_MEM_PEAK) CUDA_MEM_PEAK = CUDA_MEM_LIVE;
   return id;
 }
 

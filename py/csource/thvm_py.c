@@ -271,6 +271,29 @@ EXPORT uint32_t py_tens_count(void) {
 EXPORT uint32_t py_kernel_count(void) {
   return KERNELS_NEXT > 1 ? KERNELS_NEXT - 1 : 0;
 }
+// Device-agnostic resident buffer-byte counters, the analog of
+// tinygrad's GlobalCounters live mem.  Sums the CPU and (when built with
+// CUDA) CUDA counters; only the active backend's is nonzero.
+EXPORT uint64_t py_cpu_peak_bytes(void) {
+#ifdef THVM_HAS_CUDA
+  return cpu_buf_peak_bytes() + cuda_buf_peak_bytes();
+#else
+  return cpu_buf_peak_bytes();
+#endif
+}
+EXPORT uint64_t py_cpu_live_bytes(void) {
+#ifdef THVM_HAS_CUDA
+  return cpu_buf_live_bytes() + cuda_buf_live_bytes();
+#else
+  return cpu_buf_live_bytes();
+#endif
+}
+EXPORT void py_cpu_peak_reset(void) {
+  cpu_buf_peak_reset();
+#ifdef THVM_HAS_CUDA
+  cuda_buf_peak_reset();
+#endif
+}
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
 EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
 EXPORT uint32_t py_const_UOP_SHRINK(void) { return UOP_SHRINK; }

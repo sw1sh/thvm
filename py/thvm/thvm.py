@@ -118,6 +118,9 @@ _jit_op_count = _bind("py_jit_op_count", c_uint32, c_uint32)
 _jit_drop = _bind("py_jit_drop", None, c_uint32)
 _tens_count = _bind("py_tens_count", c_uint32)
 _kernel_count = _bind("py_kernel_count", c_uint32)
+_cpu_peak_bytes = _bind("py_cpu_peak_bytes", c_uint64)
+_cpu_live_bytes = _bind("py_cpu_live_bytes", c_uint64)
+_cpu_peak_reset = _bind("py_cpu_peak_reset", None)
 _ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
                                c_uint64, c_int32)
 _ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
@@ -568,6 +571,15 @@ class Thvm:
 
     def kernel_count(self) -> int:
         return int(_kernel_count())
+
+    def cpu_peak_bytes(self) -> int:
+        return int(_cpu_peak_bytes())
+
+    def cpu_live_bytes(self) -> int:
+        return int(_cpu_live_bytes())
+
+    def cpu_peak_reset(self) -> None:
+        _cpu_peak_reset()
 
     # ---- requires_grad (canonical on TenDesc.requires_grad) ----
     def ten_set_requires_grad(self, t: Term, on: bool) -> bool:

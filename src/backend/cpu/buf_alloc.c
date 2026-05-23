@@ -5,6 +5,18 @@
 // backend init code, which pairs each allocation with a refcount so the
 // same buffer can be shared across multiple TenDesc aliases.
 
+// Process-global resident buffer-byte accounting (device-agnostic
+// memory metric, the analog of tinygrad's GlobalCounters live mem).
+// Incremented only on a fresh calloc and decremented only on a real
+// free(); free-list reuse is invisible because the recycled storage was
+// already counted at its original calloc and never freed while parked.
+u64 CPU_MEM_LIVE = 0;
+u64 CPU_MEM_PEAK = 0;
+
+fn u64 cpu_buf_peak_bytes(void) { return CPU_MEM_PEAK; }
+fn u64 cpu_buf_live_bytes(void) { return CPU_MEM_LIVE; }
+fn void cpu_buf_peak_reset(void) { CPU_MEM_PEAK = CPU_MEM_LIVE; }
+
 fn u32 cpu_buf_alloc(u64 nbytes) {
   // Refuse a pathologically large single allocation rather than
   // calloc() it and thrash the host.  See thvm_buf_byte_ceiling.
@@ -42,6 +54,8 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
   b->owns_data  = 1;
   b->handle     = NULL;
   b->on_release = NULL;
+  CPU_MEM_LIVE += nbytes;
+  if (CPU_MEM_LIVE > CPU_MEM_PEAK) CPU_MEM_PEAK = CPU_MEM_LIVE;
   return id;
 }
 

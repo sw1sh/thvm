@@ -7,6 +7,8 @@ fn void cpu_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
   CpuBuf *b = &CPU_BUFS[buf_id];
   if (b->owns_data) {
+    extern u64 CPU_MEM_LIVE;
+    if (CPU_MEM_LIVE >= b->nbytes) CPU_MEM_LIVE -= b->nbytes; else CPU_MEM_LIVE = 0;
     free(b->data);
   } else if (b->on_release) {
     b->on_release(b->handle);
