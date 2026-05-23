@@ -3668,7 +3668,15 @@ fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
 // conjecture whose two sides share no normal form) is NOT single-NF
 // extractable; thvm_atp_proof_extract returns 0 for it.
 #define ATP_PROOF_MAX_DEPTH 32   // redex-path depth cap per step
-#define ATP_PROOF_MAX_STEPS 512  // chain-length cap, each side
+// Goal-rewrite chain-length cap, each side.  Must track thvm_atp_goal_check's
+// NORM_CAP (1<<16): goal_check proves a goal by normalizing each side up to
+// NORM_CAP rewrites, so the proof extractor that REPLAYS that normalization
+// to build the closing chain needs at least the same reach -- a smaller cap
+// stopped the replay short of the shared normal form on a deep completion
+// (e.g. AndAssociativity over the single Sheffer/nand axiom), so
+// thvm_atp_proof_extract returned 0 (empty MainSteps) and the ProofObject
+// reconstruction failed even though the engine reported PROVED.
+#define ATP_PROOF_MAX_STEPS (1u << 16)
 
 typedef struct {
   u32  side;       // 0: a step on goal_lhs's chain; 1: on goal_rhs's

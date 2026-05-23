@@ -4483,6 +4483,15 @@ fn u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap) {
 // recorded chain descends a well-founded order and cannot bounce
 // between the two faces of a symmetric equation.
 
+// When set, atp_proof_rewrite_step considers ONLY oriented rules
+// (skips unorientable equations) -- the recording analog of the
+// orientable indexed fixpoint that atp_rewrite_normalize_ordered runs
+// before each unorientable step.  atp_proof_record_side phases the two
+// passes so the recorded chain reaches the SAME normal form the
+// goal-check normalizer reached on a non-confluent (goal-join-stopped)
+// rule set; a single interleaved pass diverges there.
+static u8 g_atp_proof_oriented_only;
+
 // One leftmost-outermost rewrite of `t`, recording the redex path and
 // the rule index.  `pos` is caller-owned scratch holding the path so
 // far in pos[0..depth); on a hit the full path is left in
@@ -4499,6 +4508,7 @@ static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
     // redex at hand -- the same both-directions, order-gated rule as
     // atp_ordered_try_top, so the recorded step matches the normalizer.
     if (!s->r_orient[i]) {
+      if (g_atp_proof_oriented_only) continue;   // oriented-fixpoint phase
       if (atp_vars_contained(s->rhs[i], s->lhs[i])) {       // l -> r
         RewriteSubst sub = {{0}};
         if (thvm_match(s->lhs[i], t, &sub)) {
@@ -4627,29 +4637,63 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
   return t;
 }
 
+// Append one recorded rewrite of `t` to out[*n) and return the result;
+// `*progressed` is set when a step fired.  `oriented_only` selects the
+// orientable-fixpoint phase (skip unorientable equations).
+static Term atp_proof_record_one(AtpState *s, Term t, u32 side,
+                                 u8 oriented_only,
+                                 AtpProofStep *out, u32 cap, u32 *n,
+                                 u8 *progressed) {
+  u8  pos[ATP_PROOF_MAX_DEPTH];
+  u32 rule = 0;
+  u8  pos_len = 0, fwd = 1u, fired = 0;
+  g_atp_proof_oriented_only = oriented_only;
+  Term t2 = atp_proof_rewrite_step(s, t, pos, 0u, &rule, &pos_len,
+                                   &fwd, &fired);
+  g_atp_proof_oriented_only = 0u;
+  if (!fired || kbo_eq(t, t2)) { *progressed = 0u; return t; }
+  if (*n < cap) {
+    AtpProofStep *st = &out[*n];
+    st->side    = side;
+    st->rule    = rule;
+    st->fwd     = fwd;
+    st->pos_len = pos_len;
+    for (u8 k = 0; k < pos_len; k++) st->pos[k] = pos[k];
+    st->before  = t;
+    st->after   = t2;
+    (*n)++;
+  }
+  *progressed = 1u;
+  return t2;
+}
+
 // Normalize one conjecture side, appending each rewrite to out[*n).
 // `side` tags every recorded step; returns the side's normal form.
+//
+// Mirrors atp_rewrite_normalize_ordered (the goal-check normalizer):
+// run the orientable rules to a fixpoint, then take ONE unorientable
+// (both-directions, order-gated) step, and repeat to a joint fixpoint.
+// A single interleaved pass reaches a DIFFERENT normal form on a
+// non-confluent rule set (completion stopped at the goal-join), so the
+// recorded chain would not meet the other side -- thvm_atp_proof_extract
+// would then return 0 and the ProofObject reconstruction fail even
+// though the engine proved the goal.
 static Term atp_proof_record_side(AtpState *s, Term t, u32 side,
                                   AtpProofStep *out, u32 cap, u32 *n) {
   for (u32 it = 0; it < ATP_PROOF_MAX_STEPS; it++) {
-    u8  pos[ATP_PROOF_MAX_DEPTH];
-    u32 rule = 0;
-    u8  pos_len = 0, fwd = 1u, fired = 0;
-    Term t2 = atp_proof_rewrite_step(s, t, pos, 0u, &rule, &pos_len,
-                                     &fwd, &fired);
-    if (!fired || kbo_eq(t, t2)) return t;
-    if (*n < cap) {
-      AtpProofStep *st = &out[*n];
-      st->side    = side;
-      st->rule    = rule;
-      st->fwd     = fwd;
-      st->pos_len = pos_len;
-      for (u8 k = 0; k < pos_len; k++) st->pos[k] = pos[k];
-      st->before  = t;
-      st->after   = t2;
-      (*n)++;
+    u8 progressed = 0u;
+    // Orientable indexed-fixpoint phase: drain every oriented rewrite.
+    for (u32 j = 0; j < ATP_PROOF_MAX_STEPS; j++) {
+      u8 ofired = 0u;
+      t = atp_proof_record_one(s, t, side, 1u, out, cap, n, &ofired);
+      if (!ofired) break;
+      progressed = 1u;
     }
-    t = t2;
+    // One unorientable step (skipped when n_unorient == 0).
+    u8 ufired = 0u;
+    t = atp_proof_record_one(s, t, side, 0u, out, cap, n, &ufired);
+    if (ufired) progressed = 1u;
+    if (!progressed) return t;            // joint fixpoint
   }
   return t;
 }
