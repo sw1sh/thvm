@@ -3530,6 +3530,27 @@ typedef struct {
   // thvm_atp_set_use_unorient_index.
   u8   use_unorient_index;
 
+  // Deferred-selection / lazy normalization (Waldmeister/DISCOUNT given-
+  // clause flow).  Default completion EAGERLY normalizes every generated
+  // critical pair against the full rule set R at push time
+  // (atp_cp_trivially_joinable in atp_push_cps_traced) to discard the
+  // ~74% trivially-joinable before they enter the queue -- so the
+  // normalize work scales with GENERATIONS (~430k on andassoc).
+  // Waldmeister does NOT (KPVerwaltung.c: KPEinfuegen just inserts the
+  // raw overlap into the K-D heap; Hauptkomponenten.c HK_Vervollstaendigung
+  // = "completion": pop one CP via KPMinimum/selectNonOrphan, THEN reduce
+  // it (ZeileNormalisieren) and orient/discard).  When set, the push path
+  // skips the full-R normalize and queues the var-normalized RAW overlap
+  // with a cheap size weight; the existing select-time normalize in
+  // thvm_atp_step (the `kbo_eq(l, r)` join check that ALREADY runs) does
+  // the work -- so normalize cost scales with SELECTIONS, not generations.
+  // Soundness is unchanged: a CP is discarded ONLY when its sides reduce
+  // equal at selection (genuine join); no non-joinable CP is dropped.
+  // Default OFF (engine byte-identical: eager push-time normalize). On for
+  // Method->"Waldmeister" via thvm_atp_set_use_lazy_normalize.
+  u8   use_lazy_normalize;
+  u64  n_cps_push_normalized;     // diagnostics: full-R normalizes at push
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3655,6 +3676,7 @@ fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset

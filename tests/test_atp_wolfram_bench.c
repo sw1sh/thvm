@@ -288,7 +288,16 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_unfailing_cp(s, 1u);
       thvm_atp_set_use_orphan_murder(s, 1u);
       thvm_atp_set_use_unorient_index(s, 1u);
+      thvm_atp_set_use_lazy_normalize(s, 1u);
     }
+  }
+
+  // THVM_ATP_LAZY_NORM=0/1: toggle deferred-selection / lazy normalization
+  // independently of the WM preset (A/B vs eager push-time normalize).
+  {
+    const char *ln = getenv("THVM_ATP_LAZY_NORM");
+    if (ln != NULL && ln[0] != '\0')
+      thvm_atp_set_use_lazy_normalize(s, (ln[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_UNORIDX=0/1: toggle the indexed unorientable-rewrite pass
@@ -446,6 +455,9 @@ int main(int argc, char **argv) {
   printf("   dropped: ground-joinable=%u connected-below-peak=%u\n",
          s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak);
   printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);
+  printf("   lazy-normalize=%u  push-time full-R normalizes=%llu\n",
+         s->use_lazy_normalize,
+         (unsigned long long)s->n_cps_push_normalized);
   { u32 unor = 0;
     for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;
     printf("   unorientable rules: %u / %u\n", unor, s->n_rules); }

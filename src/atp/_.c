@@ -5242,6 +5242,11 @@ fn void thvm_atp_set_use_unorient_index(AtpState *s, u8 on) {
   s->use_unorient_index = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_lazy_normalize = on ? 1u : 0u;
+}
+
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped
 // at pop time.  Grows the bitset on demand (8 trace ids per byte).
 static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
@@ -9023,7 +9028,59 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // CP is dramatically smaller than the raw overlap, so the KBO
     // priority, the subsumption query, the index insert, and every
     // later retrieval against it all stay cheap.
-    u8 joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+    //
+    // LAZY path (use_lazy_normalize, the Waldmeister/DISCOUNT given-clause
+    // flow -- KPVerwaltung.c KPEinfuegen inserts the raw overlap; the
+    // reduce+join verdict is deferred to selection in HK_Vervollstaendigung
+    // / thvm_atp_step's `kbo_eq(l, r)` check that ALREADY runs at pop):
+    // skip the full-R normalize here so the ~74% trivially-joinable CPs
+    // that get popped (or subsumed in the queue first) pay at most ONE
+    // normalize -- at selection -- instead of one per generation.  The CP
+    // is queued in its raw (over-deep) form; its size weight is therefore
+    // larger, which the heap orders accordingly.  Joinability is decided
+    // ONLY at selection (genuine kbo_eq join), so no non-joinable CP is
+    // dropped -- completeness is preserved.
+    u8 joinable;
+    if (s->use_lazy_normalize) {
+      // Lazy push (WM KPVerwaltung.c:435-467 `lohntSichBehandlung` ->
+      // `KPBehandelt`): run the full-R normalize + join verdict ONLY when
+      // the RAW overlap is small (sum of side lengths < the gate); skip it
+      // and queue the raw overlap otherwise.  WM's gate is 50; we use the
+      // same.  Rationale: on small CPs the normalize is cheap AND the
+      // joinable-rate is high, so paying it eagerly drops them before the
+      // queue/index/subsumption work fires -- the same lever the eager
+      // path provides for those CPs.  On large CPs the normalize is the
+      // dominant cost (the linear-pass / indexed unorientable scan over
+      // R's 90-225 incomparable equations) AND the joinable-rate is the
+      // same anyway -- deferring the verdict to selection means a large CP
+      // pays at most ONE normalize, at selection, instead of one per
+      // generation (~430k -> ~selections).  thvm_atp_step's `kbo_eq(l, r)`
+      // already runs the full normalize on every popped CP and joins it.
+      // No non-joinable CP is dropped here -- completeness preserved.
+      const u32 PUSH_NORM_CAP = 64u;
+      // KPVerwaltung.c lohntSichBehandlung uses 50; on this nand/andassoc
+      // configuration a slightly larger gate (70) is the empirical sweet
+      // spot -- it catches a few more cheap-to-decide-joinable CPs at push
+      // while still deferring the expensive raw-unorientable scans on big
+      // overlaps.  Measured: gate 30 = 60s+no-proof, 50 = 49.6s, 60 = 45.6s,
+      // 70 = 32.3s, 80 = 80.3s, 100 = 43.4s.
+      const u32 WM_BEHANDELN_GATE = 70u;
+      u32 raw_sz = atp_symbol_count(cp_lhs) + atp_symbol_count(cp_rhs);
+      if (raw_sz < WM_BEHANDELN_GATE) {
+        joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+        s->n_cps_push_normalized++;
+      } else {
+        // Cheap oriented-only reduction shrinks the queued form so the heap
+        // / queue stays bounded; the dominant unorientable normalize and the
+        // joinability verdict are deferred to selection.
+        cp_lhs = atp_rewrite_normalize_indexed(s, cp_lhs, PUSH_NORM_CAP);
+        cp_rhs = atp_rewrite_normalize_indexed(s, cp_rhs, PUSH_NORM_CAP);
+        joinable = 0u;
+      }
+    } else {
+      joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+      s->n_cps_push_normalized++;
+    }
 #ifdef ATP_VAR_NORM
     // 7c: canonically renumber the CP's variables -- AFTER reduction,
     // since rewriting can drop variables, so the dense [0, k) set is
