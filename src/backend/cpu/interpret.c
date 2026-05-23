@@ -157,18 +157,23 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
   //    the walker is exercised for steady-state kernels too. The JIT
   //    path is still reachable when the walker declines (e.g. the
   //    lifter takes a kernel but the walker hits an unsupported op).
+  // 2. CPU JIT: clang-compiled fused kernel, keyed by the canonicalized
+  //    rendered source so a hot training-loop kernel crosses the warmup
+  //    gate and runs compiled (10-50x faster than the walker).  During
+  //    warmup (and for kernels the JIT declines) it returns 0 and the
+  //    walker below handles the fire -- so one-shot kernels still pay no
+  //    compile cost.  (Was AFTER the walker, which meant the walker
+  //    handled every steady-state kernel and the JIT never ran.)
+  if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
+    return 0;
+  }
+  // 3. UOp DAG walker (interpreter): warmup + JIT-declined kernels.
   if (cpu_uop_walk_enabled()) {
     if (cpu_uop_walk(ke, in_buf_ids, out_buf_id)) {
       cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
       return 0;
     }
-  }
-  // 3. CPU JIT: clang-compiled fused inner loop for elementwise
-  //    chains (cached by lifted-DAG hash).  Faster than the walker
-  //    for the patterns it covers (no REDUCE > 1, etc.).
-  if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
-    return 0;
   }
   cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
   return 0;

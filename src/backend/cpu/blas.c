@@ -104,6 +104,11 @@ static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   u32 x_elems = (u32)(CPU_BUFS[x_buf].nbytes / elem_bytes);
   if (w_elems < gemv.M * gemv.K) return 0;
   if (x_elems < gemv.K) return 0;
+  // cblas_*gemv (CblasRowMajor) requires lda >= max(1, N) where the
+  // matrix is passed as (M, N) == (M, K) here -- i.e. ldW >= K.  A
+  // misclassified shape with ldW < K trips an "invalid parameter 7"
+  // abort; decline so the (correct) walker/JIT path handles it instead.
+  if (gemv.ldW < gemv.K || gemv.M == 0 || gemv.K == 0) return 0;
   blas_emit_gemv(gemv.dtype, gemv.M, gemv.K, gemv.ldW, gemv.flags & 1u,
                  w_buf, x_buf, out_buf_id);
   BLAS_GEMV_DISPATCH_DAG++;

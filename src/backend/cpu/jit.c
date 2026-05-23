@@ -134,7 +134,7 @@ static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
 
 // Compile + load.  Returns the resolved `k` function pointer or NULL
 // on any failure (caller falls back to interpreter).
-static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
+static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   // Render the kernel as C99 by lifting to the UOp DAG and walking
   // it via cg_render_uop_kernel_c. Output signature matches the
   // existing CPU-JIT contract (void k(out_v, ins_v, n, in_numels))
@@ -157,21 +157,7 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // inputs, 0 on the output).  in_bufs[] is kept as a GC root and a
   // per-slot identity cache for cpu_uop_walk; the renderer doesn't
   // consult it.
-  if (ke->cached_lift.store_root == 0) return NULL;
-  Term store_root = ke->cached_lift.store_root;
-  // Render into a temp file (portable across macOS/Linux/Windows) and
-  // read it back, rather than a fixed stack buffer -- no length cap.
-  FILE *fp = tmpfile();
-  if (fp == NULL) return NULL;
-  cg_render_uop_kernel_c_root(store_root, "k", fp);
-  long n = ftell(fp);
-  if (n <= 0) { fclose(fp); return NULL; }
-  char *src = (char *)malloc((size_t)n + 1);
-  if (src == NULL) { fclose(fp); return NULL; }
-  rewind(fp);
-  size_t got = fread(src, 1, (size_t)n, fp);
-  fclose(fp);
-  src[got] = '\0';
+  if (ke->cached_lift.store_root == 0 || src == NULL) return NULL;
 
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_%016llx.c",
@@ -184,7 +170,6 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // verify cache freshness against the current source.
   struct stat st;
   if (stat(dl_path, &st) == 0) {
-    free(src);
     void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
     if (!h) return NULL;
     CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
@@ -195,10 +180,9 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   }
 
   FILE *f = fopen(src_path, "w");
-  if (!f) { free(src); return NULL; }
+  if (!f) return NULL;
   fputs(src, f);
   fclose(f);
-  free(src);
 
   char cmd[768];
   snprintf(cmd, sizeof cmd,
@@ -216,11 +200,43 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   return jfn;
 }
 
+// Render the kernel C source and canonicalize its a<N>/_acc<N> ids so
+// structurally-identical kernels are byte-identical across steps.  The
+// JIT key is the hash of THIS source (not the lifted-DAG term loc, which
+// is a fresh heap cell every realize and so never repeats -> the kernel
+// never crossed the warmup gate and stayed on the interpreter forever).
+// Caller frees the returned string.
+static char *cpu_jit_render_canon(KernelEntry const *ke) {
+  if (ke->cached_lift.store_root == 0) return NULL;
+  FILE *fp = tmpfile();
+  if (fp == NULL) return NULL;
+  cg_render_uop_kernel_c_root(ke->cached_lift.store_root, "k", fp);
+  long n = ftell(fp);
+  if (n <= 0) { fclose(fp); return NULL; }
+  char *raw = (char *)malloc((size_t)n + 1);
+  if (raw == NULL) { fclose(fp); return NULL; }
+  rewind(fp);
+  size_t got = fread(raw, 1, (size_t)n, fp);
+  fclose(fp);
+  raw[got] = '\0';
+  char *canon = cg_canonicalize_axis_ids(raw);
+  if (canon != NULL) { free(raw); return canon; }
+  return raw;
+}
+
+static u64 cpu_src_hash(const char *src) {
+  u64 h = 0xcbf29ce484222325ULL;
+  for (const char *p = src; *p; p++) { h ^= (u64)(unsigned char)*p; h *= 0x100000001b3ULL; }
+  return h | (1ULL << 63);
+}
+
 // Try the JIT path; returns 1 on success, 0 if the kernel can't be
 // JITted (caller dispatches via the interpreter).
 fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (!cg_supports(ke)) return 0;
-  u64 key = cpu_jit_hash(ke);
+  char *src = cpu_jit_render_canon(ke);
+  if (src == NULL) return 0;
+  u64 key = cpu_src_hash(src);
   CpuJitSlot *s = cpu_jit_lookup_slot(key);
   CpuJitFn jfn = (s && s->key == key) ? s->func : NULL;
 
@@ -245,20 +261,23 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
           s->dl_handle = NULL;
           s->n_inputs = ke->n_inputs;
           s->fire_count = 1;
+          free(src);
           return 0;
         }
         if (s->key == key && s->func == NULL) {
           s->fire_count++;
-          if (s->fire_count < CPU_JIT_WARMUP) return 0;
+          if (s->fire_count < CPU_JIT_WARMUP) { free(src); return 0; }
           // Crossed warmup threshold: fall through to compile.
         }
       } else {
+        free(src);
         return 0;                          // table full; stay on interpreter
       }
     }
-    jfn = cpu_jit_build(ke, key);
-    if (!jfn) return 0;
+    jfn = cpu_jit_build(ke, key, src);
+    if (!jfn) { free(src); return 0; }
   }
+  free(src);                               // source no longer needed (hit or compiled)
 
   // Skip the JIT path if any input is a non-contiguous view --
   // gated behind THVM_JIT_STRIDED=1.  Each unique stride pattern
