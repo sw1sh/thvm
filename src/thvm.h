@@ -2483,6 +2483,9 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
 // passes the post-lift store root, same as the MSL/C99 entries.
 fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
                                        FILE *fp);
+// Renumber a<N>/_acc<N> ids to a dense per-kernel sequence so identical
+// kernels render byte-identically across steps (JIT cache hit).
+fn char *cg_canonicalize_axis_ids(const char *src);
 
 // === Per-USE movement-chain resolver ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,

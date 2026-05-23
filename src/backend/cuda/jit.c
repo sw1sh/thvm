@@ -30,7 +30,7 @@
 // Without eviction those step-unique modules leaked to end-of-session
 // (cuModuleLoadData reserves GPU code memory), saturating the device
 // after a handful of no-JIT steps -- the dominant CUDA training leak.
-#define CUDA_JIT_CACHE_CAP 512
+#define CUDA_JIT_CACHE_CAP 4096
 
 typedef struct {
   u64        key;        // 0 = empty slot; FNV hash of the .cu source
@@ -70,14 +70,36 @@ static u64 cuda_jit_hash(const char *src) {
   return h | (1ULL << 63);   // never 0 (the empty-slot sentinel)
 }
 
-// Direct-mapped: each key has exactly one home slot.  Lookup and insert
-// agree on the slot, so eviction (on collision) is consistent -- unlike
-// open addressing, where evicting a probed slot would strand both the
-// evicted key and the newly inserted one off their probe chains.
+// Open-addressed (linear probe).  A training run's kernel set is stable
+// and bounded (~140 distinct sources for beautiful_mnist), so with a
+// 4096-slot table they all coexist and every step after the first HITS
+// -- no recompile, no module thrash.  The OLD direct-mapped cache
+// evicted on every home-slot collision, so ~14 collision pairs among
+// 121 kernels (birthday) ping-pong-evicted under interleaved dispatch
+// -> ~140 spurious recompiles/step -> the eviction nan + the ~10s/step
+// wall.  Eviction now happens only when the table is genuinely full
+// (a degenerate workload), via cuda_jit_probe returning a full marker.
 static CudaJitSlot *cuda_jit_home_slot(u64 key) {
   u32 h = (u32)(key ^ (key >> 32));
   h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
   return &CUDA_JIT_CACHE[h & (CUDA_JIT_CACHE_CAP - 1)];
+}
+
+// Linear-probe lookup.  Returns the slot holding `key` (a hit, *found=1),
+// or the first empty slot on its probe chain (a miss to insert into,
+// *found=0), or -- only when the whole table is occupied -- the home slot
+// to evict (*found=-1).
+static CudaJitSlot *cuda_jit_probe(u64 key, int *found) {
+  u32 h0 = (u32)(key ^ (key >> 32));
+  h0 ^= h0 >> 13; h0 *= 0x5bd1e995u; h0 ^= h0 >> 15;
+  h0 &= (CUDA_JIT_CACHE_CAP - 1);
+  for (u32 i = 0; i < CUDA_JIT_CACHE_CAP; i++) {
+    CudaJitSlot *s = &CUDA_JIT_CACHE[(h0 + i) & (CUDA_JIT_CACHE_CAP - 1)];
+    if (s->key == key && s->func != NULL) { *found = 1; return s; }
+    if (s->key == 0) { *found = 0; return s; }   // empty -> insert here
+  }
+  *found = -1;
+  return &CUDA_JIT_CACHE[h0];   // table full -> evict home (degenerate)
 }
 
 // Compile a .cu source string with nvrtc and load it as a module.
@@ -90,12 +112,13 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     return NULL;
   }
   u64 key = cuda_jit_hash(cu_src);
-  CudaJitSlot *slot = cuda_jit_home_slot(key);
-  if (slot->key == key && slot->func != NULL) {
+  int found = 0;
+  CudaJitSlot *slot = cuda_jit_probe(key, &found);
+  if (found == 1) {
     return slot->func;   // cache hit -- skip nvrtc + module load
   }
   CUDA_JIT_COMPILES++;
-  if (slot->module != NULL && slot->key != key) CUDA_JIT_EVICTIONS++;
+  if (found == -1 && slot->module != NULL) CUDA_JIT_EVICTIONS++;
 
   // --- nvrtc compile ------------------------------------------------
   nvrtcProgram prog;
@@ -349,6 +372,13 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   if (cu == NULL) {
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- render produced no source\n");
     return -1;
+  }
+  {
+    // Canonicalize a<N>/_acc<N> ids so structurally-identical kernels
+    // produce byte-identical source across steps -> JIT cache HIT
+    // (compile once), instead of fresh global axis ids every step.
+    char *canon = cg_canonicalize_axis_ids(cu);
+    if (canon != NULL) { free(cu); cu = canon; }
   }
   CUfunction func = cuda_jit_compile(cu, "k");
   free(cu);
