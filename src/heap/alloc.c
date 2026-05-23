@@ -9,7 +9,7 @@
 // always-correct fallback so the rest of the parallel runtime can
 // land without arena bookkeeping.
 fn u64 heap_alloc(u64 size) {
-  u64 cap = gc_enabled() ? gc_from_end() : HEAP_CAP;
+  u64 cap = gc_enabled() ? gc_from_end() : thvm_heap_cells();
   u64 at  = (u64)__atomic_fetch_add(&CURRENT_CTX->heap_next, size,
                                     __ATOMIC_RELAXED);
   if (at + size > cap) {

@@ -485,7 +485,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // thvm_init AND thvm_context_create.  Picks default_device by name
 // ("cpu" / "metal" / NULL).
 static void init_ctx_arrays(TContext *ctx) {
-    ctx->heap             = (Term *)calloc(HEAP_CAP,     sizeof(Term));
+    ctx->heap             = (Term *)calloc(thvm_heap_cells(), sizeof(Term));
     ctx->wnf_state.stack  = (Term *)calloc(WNF_CAP,      sizeof(Term));
     ctx->wnf_last_stack   = (Term *)calloc(WNF_CAP,      sizeof(Term));
     ctx->tens           = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
@@ -573,7 +573,7 @@ void thvm_init(void) {
   // Cheney semi-spaces: split HEAP_CAP in half.  heap_alloc bumps
   // within the active from-space; gc_collect evacuates live cells
   // into to-space and swaps when triggered from thvm_realize.
-  gc_init(HEAP_CAP / 2);
+  gc_init(thvm_heap_cells() / 2);
   // Backend selection: DEV=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still
   // stored on TenDesc.backend, so tensors created in a future session

@@ -33,6 +33,27 @@ static u64 GC_TO_START   = 0;
 static u64 GC_TO_END     = 0;
 static u64 GC_COUNT      = 0;
 
+// Runtime heap allowance (cells).  Resolved once from THVM_HEAP_CELLS,
+// falling back to the HEAP_CAP compile-time default so an unset env is
+// byte-identical to the historical fixed heap.  A bad/zero/oversize
+// value falls back to HEAP_CAP.
+fn u64 thvm_heap_cells(void) {
+  static u64 cells = 0;
+  if (cells == 0) {
+    cells = HEAP_CAP;
+    const char *e = getenv("THVM_HEAP_CELLS");
+    if (e != NULL && *e != '\0') {
+      char *end = NULL;
+      unsigned long long v = strtoull(e, &end, 0);
+      // VAL_BITS=38 bounds an addressable loc; keep a margin below 2^38.
+      if (end != NULL && *end == '\0' && v >= (1ULL << 20) && v <= (1ULL << 37)) {
+        cells = (u64)v;
+      }
+    }
+  }
+  return cells;
+}
+
 fn void gc_reset(void) {
   GC_ENABLED    = 0;
   GC_SPACE_SZ   = 0;
@@ -47,9 +68,10 @@ fn void gc_reset(void) {
 // space gets `space_words` cells; total addressable = 2*space_words
 // (must be <= HEAP_CAP).
 fn void gc_init(u64 space_words) {
-  if (2 * space_words > HEAP_CAP) {
-    fprintf(stderr, "gc_init: %llu cells x 2 exceeds HEAP_CAP=%llu\n",
-            (unsigned long long)space_words, (unsigned long long)HEAP_CAP);
+  if (2 * space_words > thvm_heap_cells()) {
+    fprintf(stderr, "gc_init: %llu cells x 2 exceeds heap=%llu\n",
+            (unsigned long long)space_words,
+            (unsigned long long)thvm_heap_cells());
     exit(1);
   }
   GC_ENABLED    = 1;

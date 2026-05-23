@@ -78,7 +78,7 @@ fn void mark_gc_preserve(Term result) {
   Term roots[GC_ROOTS_CAP];
   u32  n_roots = 0;
   gc_collect_roots(result, roots, GC_ROOTS_CAP, &n_roots);
-  u8 *visited = (u8 *)calloc(HEAP_CAP, 1);
+  u8 *visited = (u8 *)calloc(thvm_heap_cells(), 1);
   if (visited != NULL) {
     for (u32 i = 0; i < n_roots; i++) {
       gc_mark_term(roots[i], visited);

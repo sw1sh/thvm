@@ -2573,9 +2573,32 @@ static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
 
 #endif // ATP_RULE_INDEX
 
+// Proof-trace capacity (entries).  Resolved once from THVM_ATP_TRACE_MAX,
+// falling back to ATP_MAX_TRACE so an unset env is byte-identical to the
+// historical fixed trace.  A bad/zero/oversize value falls back to the
+// default.
+fn u32 thvm_atp_trace_cap(void) {
+  static u32 cap = 0;
+  if (cap == 0) {
+    cap = ATP_MAX_TRACE;
+    const char *e = getenv("THVM_ATP_TRACE_MAX");
+    if (e != NULL && *e != '\0') {
+      char *end = NULL;
+      unsigned long long v = strtoull(e, &end, 0);
+      if (end != NULL && *end == '\0' && v >= ATP_MAX_TRACE && v <= (1ULL << 28)) {
+        cap = (u32)v;
+      }
+    }
+  }
+  return cap;
+}
+
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
+  s->trace_cap = thvm_atp_trace_cap();
+  s->trace     = (Term *)calloc(s->trace_cap, sizeof(Term));
+  if (s->trace == NULL) { free(s); return NULL; }
   // Persistent LPO memo: a completion compares the same subterm pairs
   // millions of times.  Opt in, and drop any entries from a prior run
   // (a static LpoConfig pointer may be reused with new precedence).
@@ -2638,6 +2661,7 @@ static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base);
 
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
+  free(s->trace);
   free(s->lhs);
   free(s->rhs);
   free(s->r_trace);
@@ -2822,7 +2846,7 @@ static u8 atp_heap_under_pressure(void) {
 // init'd to zero by thvm_atp_init's calloc.
 static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
                           Term lhs, Term rhs) {
-  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  if (s == NULL || s->n_trace >= s->trace_cap) return ATP_TRACE_NONE;
   Term children[4] = {
     term_new(0, TAG_NUM, 0, p_a),
     term_new(0, TAG_NUM, 0, p_b),
@@ -2847,7 +2871,7 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
                              Term lhs, Term rhs,
                              const u8 *pos, u8 pos_len) {
-  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  if (s == NULL || s->n_trace >= s->trace_cap) return ATP_TRACE_NONE;
   Term children[5 + CP_MAX_DEPTH];
   children[0] = term_new(0, TAG_NUM, 0, p_a);
   children[1] = term_new(0, TAG_NUM, 0, p_b);
@@ -4109,7 +4133,7 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
                                     Term lhs, Term rhs,
                                     u8 side, u8 fwd,
                                     const u8 *pos, u8 pos_len) {
-  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  if (s == NULL || s->n_trace >= s->trace_cap) return ATP_TRACE_NONE;
   Term children[7 + ATP_PROOF_MAX_DEPTH];
   children[0] = term_new(0, TAG_NUM, 0, p_a);
   children[1] = term_new(0, TAG_NUM, 0, rule_idx);

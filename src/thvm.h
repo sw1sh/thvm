@@ -1304,6 +1304,10 @@ fn void heap_subst_var(u64 loc, Term value);
 fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1); // pair subst
 
 // === gc/ === (Cheney semi-space copying GC; defined in heap/collect.c)
+// Runtime heap allowance in cells.  Defaults to HEAP_CAP; overridable
+// once per process via the THVM_HEAP_CELLS env var (read at first call).
+// Drives the calloc size, gc_init split, and the gc_mark visited bitmap.
+fn u64  thvm_heap_cells(void);
 fn void gc_init(u64 space_words);
 fn void gc_reset(void);
 fn int  gc_enabled(void);
@@ -3211,7 +3215,12 @@ typedef struct {
   // TRACE_* labels above).  6.1b/c wire this into add_equation,
   // orient_and_add, and generate_cps; 6.2 walks it to emit a
   // PCL-shaped serialization.
-  Term trace[ATP_MAX_TRACE];
+  // Runtime-sized (thvm_atp_trace_cap, default ATP_MAX_TRACE; raise via
+  // THVM_ATP_TRACE_MAX for a deep completion whose CP/ORIENT/NORM trace
+  // outgrows the default).  Allocated in thvm_atp_init, freed in
+  // thvm_atp_free; indexing is identical to the former fixed array.
+  Term *trace;
+  u32   trace_cap;
   u32  n_trace;
 
   // Stage 7.1: count of CPs dropped at generate-time because both
@@ -3470,6 +3479,11 @@ fn void      thvm_atp_set_max_cp_weight(AtpState *s, u32 w);
 fn void      thvm_atp_set_auto_max_cp_weight(AtpState *s, u32 base);
 fn void      thvm_atp_set_goal_interleave(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
+
+// Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
+// once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset
+// env is byte-identical to the historical fixed 131072-entry trace.
+fn u32       thvm_atp_trace_cap(void);
 
 // Set a wall-clock deadline.  `seconds_from_now` is a float duration
 // (e.g. 5.0 = 5 seconds); pass 0.0 to clear the deadline.  The
