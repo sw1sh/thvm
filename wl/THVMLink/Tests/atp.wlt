@@ -1372,6 +1372,48 @@ VerificationTest[
     TestID -> "ATP/autotune/regression-DoubleNegation-default-Automatic"
 ]
 
+(* === AndAssociativity / WolframAxioms landmark (env-gated) =========
+
+   The deep landmark -- AndAssociativity over the single Sheffer/Wolfram
+   nand axiom (Waldmeister's andassoc) -- is NOT in the default suite: the
+   completion runs ~150s and exhausts two fixed engine bounds at their
+   defaults (the 256M-cell IC heap and the 131072-entry proof trace).  Run
+   it manually with THVM_ATP_ANDASSOC_TEST=1 plus a larger heap + trace and
+   an external free-RAM guard (the search peaks ~8GB resident):
+
+     THVM_HEAP_CELLS=$((1<<30)) THVM_ATP_TRACE_MAX=4000000 \
+       wolframscript -code 'TFindEquationalProof["AndAssociativity",
+         "WolframAxioms", {"Statistics", "ProofObject"},
+         Method -> {"Completion", "CriticalPairWeight" -> "Gt"},
+         MaxWallSeconds -> 400]'
+
+   With those env knobs the C ENGINE PROVES the goal: Statistics reports
+   Status "Proved" at ~706 rules (matching the C bench's andassoc rule
+   count), and -- after the ordered-rewrite goal-chain extraction fix
+   (src/atp/_.c thvm_atp_proof_extract) -- a populated MainSteps chain.
+   The test below asserts that proved-at-rule-count milestone.
+
+   The verifying ProofObject is NOT yet produced: the WL chain
+   reconstruction's emitNorm BFS (THVMLink`Private`, "emitNorm.no-rewrite-
+   path") cannot bridge one SubstitutionLemma sub-derivation of this proof
+   over aliveRulesAt[] -- a remaining reconstruction-modeling gap,
+   independent of the (now-fixed) heap / trace / MainSteps blockers.  When
+   that is closed, tighten the assertion to Head[ProofObject] === Success
+   on p["ProofFunction"][p["Theorems"]]. *)
+VerificationTest[
+    If[ Environment["THVM_ATP_ANDASSOC_TEST"] === "1",
+        Module[{r},
+            r = TFindEquationalProof["AndAssociativity", "WolframAxioms",
+                {"Statistics", "ProofObject"},
+                Method -> {"Completion", "CriticalPairWeight" -> "Gt"},
+                MaxWallSeconds -> 400];
+            {r["Statistics"]["Status"], r["Statistics"]["Rules"] > 600}
+        ],
+        {"Proved", True}],
+    {"Proved", True},
+    TestID -> "ATP/option/andassoc-WolframAxioms-engine-proves-when-enabled"
+]
+
 (* --- TimeConstraint + Abort: effective abort inside the LibraryLink.
    Both forms must INTERRUPT the running C engine at the budget rather
    than hang: the TimeConstraint option returns $Failed, and a
