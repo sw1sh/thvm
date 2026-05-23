@@ -1127,6 +1127,32 @@ cplEqSetQ[a_List, b_List, varSyms_] := With[{
 cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr,
     v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity}, Heads -> True]
 
+(* True iff overlapping ParentB's rule `ruleBEq` onto ParentA's rule
+   `ruleAEq` at superposition position `pos` is DEGENERATE for the WL
+   verifier: ParentB's rule actually MATCHES the subterm of ParentA's
+   lhs at `pos` (so the verifier's unification fires there) yet
+   rewriting it is a NO-OP -- the subterm is invariant under ParentB's
+   permutation (e.g. commutativity x.y -> y.x applied to a square b.b
+   yields b.b unchanged).  A matching no-op is exactly the case where
+   the verifier's unification of ParentB into ParentA forces two
+   distinct ParentB variables together, collapsing ParentB's
+   instantiated Statement to a trivial t == t, which the verifier
+   auto-evaluates to True and then crashes folding the next step over
+   (MapAt[..., True]).  Such an overlap is really a single ParentB
+   rewrite of ParentA's equation, so it is bridged with emitNorm
+   instead.  When ParentB does NOT match the subterm the recorded
+   superposition unifies elsewhere -- an ordinary CP the verifier
+   reconstructs fine -- so it keeps its CriticalPairLemma entry and
+   proofs that never hit a permutative self-overlap are untouched. *)
+cplDegenerateOverlapQ[ruleAEq_List, ruleBEq_List, pos_, varSyms_] :=
+    Block[{sub, rl, res},
+        sub = Quiet @ Extract[ruleAEq[[1]], pos];
+        If[ Head[sub] === Extract || MissingQ[sub], Return[False]];
+        rl = cplAsRule[ruleBEq, varSyms];
+        MatchQ[sub, First[rl]] &&
+            (res = Quiet @ Replace[sub, rl]; res === sub)
+    ]
+
 (* Rewrite each first-order variable occurrence (members of
    varSyms) in `term` as Pattern[v, Blank[]].  The var -> var_ rules
    are built with MapThread so no Pattern lands on a RuleDelayed
@@ -1196,8 +1222,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             cRes["MnfSteps"], cRes["MainSteps"]],
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
         inProgress, aliveRulesAt, slN, cpN, axiomKeyFor, rewriteOnce,
-        prepareRules, runBfs, emitNorm, resolveCp, resolveTrace,
-        resolveRule, axiomEntries,
+        prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
+        resolveTrace, resolveRule, axiomEntries,
         cjp, hypKey, chainEntries, runEq, prevChainKey, allEntries,
         stmt, l2n, i2n, dterm, tL, tR
     },
@@ -1364,6 +1390,29 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 found
             ];
 
+        (* Turn a target ->* start BFS path `rev` (each step
+           {resultEq, traceIdx, side, relPos, dir}, the eq sequence
+           being target, rev[1].eq, ..., start) into the equivalent
+           start ->* target forward path: the forward eq sequence is
+           that list reversed, and each forward step rewrites one eq
+           into the next using the SAME rule / side / position as the
+           reverse step that produced the boundary, with its direction
+           FLIPPED (a rewrite and its inverse share rule, side and
+           position; only the orientation differs).  Each emitted
+           forward step carries the forward RESULT eq in slot 1 so the
+           emitNorm loop emits the right intermediate Statements. *)
+        reverseBfsPath[rev_List, startEq_] :=
+            Block[{eqs, k = Length[rev]},
+                (* eqs[[1]] == startEq, eqs[[k+1]] == targetEq *)
+                eqs = Reverse @ Prepend[rev[[All, 1]], startEq];
+                Table[
+                    With[{rstep = rev[[k - j + 1]]},
+                        {eqs[[j + 1]], rstep[[2]], rstep[[3]],
+                         rstep[[4]], -rstep[[5]]}],
+                    {j, k}
+                ]
+            ];
+
         (* re-derive startEq ->* targetEq, replaying with the rules
            alive when the rule at trace `ti` was oriented; emit a
            SubstitutionLemma per step; return the final entry's
@@ -1391,6 +1440,27 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 found = runBfs[startEq, targetEq, preRules, False, 50000, 2];
                 If[ MissingQ[found],
                     found = runBfs[startEq, targetEq, preRules, True, 600, 2]];
+                (* Phase 3: bidirectional fallback.  A start ->* target
+                   bridge whose net direction INCREASES term size (a CP
+                   that expands the equation, or a derivation that must
+                   apply a contracting rule in its variable-introducing
+                   reverse) is unreachable by the forward / variable-safe
+                   reverse BFS above.  Search the REVERSE problem
+                   target ->* start instead -- which runs in the
+                   size-DECREASING (normalizing) direction the forward
+                   BFS handles -- then flip the found path into a
+                   start -> target emission: walk it forwards, emitting
+                   each rewrite with its direction reversed.  Sound: a
+                   rewrite t1 -> t2 by a rule at a position is exactly an
+                   inverse rewrite t2 -> t1 by the same rule at the same
+                   position with the opposite orientation, which the
+                   verifier replays via the step's emitted dir / the
+                   cited rule's Statement orientation. *)
+                If[ MissingQ[found],
+                    Block[{rev = runBfs[targetEq, startEq, preRules, True,
+                            50000, 3]},
+                        If[ ! MissingQ[rev],
+                            found = reverseBfsPath[rev, startEq]]]];
                 If[ MissingQ[found],
                     atpDbgFail["emitNorm.no-rewrite-path"]; Throw[$Failed]];
                 curKey = inKey;
@@ -1457,6 +1527,25 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             ruleBEq = {tL[bTe], tR[bTe]};
             aInfo = resolveTrace[cte["ParentA"]];
             bInfo = resolveTrace[cte["ParentB"]];
+            (* The WL verifier reconstructs a CriticalPairLemma by
+               unifying the MatchingRule (ParentB) lhs into the Construct
+               rule (ParentA) lhs at the recorded superposition position
+               and instantiating ParentB's Statement under that unifier.
+               A permutative self-overlap -- ParentB commutativity-style
+               (x.y -> y.x) superposed onto a square subterm b.b -- forces
+               two of ParentB's variables together, so the instantiated
+               Statement collapses to a trivial t == t, which the verifier
+               auto-evaluates to True and then crashes folding the next
+               step over (MapAt[..., True]).  Such an overlap is really a
+               single ParentB rewrite of ParentA's equation, so bridge it
+               with emitNorm (a real rewrite path over the rules alive at
+               ti) instead of emitting a CriticalPairLemma the verifier
+               crashes on.  Sound: emitNorm only emits real oriented /
+               ordered rewrites that the verifier replays; every overlap
+               that is not a permutative no-op keeps its CriticalPairLemma
+               entry, so ordinary proofs are untouched. *)
+            If[ cplDegenerateOverlapQ[ruleAEq, ruleBEq, pos, varSyms],
+                Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
             cpN++;
             key = {"CriticalPairLemma", cpN};
             st = stmt[cpEq];
