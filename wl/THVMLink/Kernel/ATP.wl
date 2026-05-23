@@ -1093,6 +1093,16 @@ $AtpTraceNone = 4294967295;
    path below already covers completion proofs whose derived rules
    come from rule normalization alone. *)
 
+(* True iff `v` is a completion variable: a named rule variable (member
+   of varSyms), an "x<id>" symbol decodeAtpTerm minted for a fresh FVR,
+   or a "cplU<n>" symbol cplFreshen introduced when re-deriving a CP's
+   superposition.  The single variable predicate every cpl-* helper
+   shares so canonicalization, unification, and patternization agree on
+   what is a variable. *)
+cplVarQ[v_, varSyms_] := MatchQ[v, _Symbol] &&
+    (MemberQ[varSyms, v] || atpXVarQ[v] ||
+        StringMatchQ[SymbolName[v], "cplU" ~~ DigitCharacter ..]);
+
 (* Rename the first-order variables (members of varSyms) of `expr`
    to canonical names in first-occurrence order, so two alpha-
    equivalent terms compare equal under SameQ.  Trace entries decode
@@ -1104,7 +1114,7 @@ $AtpTraceNone = 4294967295;
 cplCanonVars[expr_, varSyms_] := cplCanonVars[expr, varSyms] =
     Block[{occ},
         occ = DeleteDuplicates @ Cases[expr,
-            v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity},
+            v_Symbol /; cplVarQ[v, varSyms], {0, Infinity},
             Heads -> True];
         expr /. MapThread[Rule,
             {occ, Table[Symbol["cplV" <> ToString[i]],
@@ -1125,7 +1135,7 @@ cplEqSetQ[a_List, b_List, varSyms_] := With[{
    rule's lhs vars are a subset of its rhs vars -- the same
    atp_vars_contained guard ordered rewriting uses in the C engine. *)
 cplVarsIn[expr_, varSyms_] := DeleteDuplicates @ Cases[expr,
-    v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity}, Heads -> True]
+    v_Symbol /; cplVarQ[v, varSyms], {0, Infinity}, Heads -> True]
 
 (* True iff overlapping ParentB's rule `ruleBEq` onto ParentA's rule
    `ruleAEq` at superposition position `pos` is DEGENERATE for the WL
@@ -1187,6 +1197,68 @@ cplOrient[entryEq_, ruleEq_, varSyms_] := With[{
         ce === cplCanonVars[Reverse[ruleEq], varSyms], -1,
         True, atpDbgFail["cplOrient.no-match"]; Throw[$Failed]
     ]
+]
+
+(* Rename every variable of `expr` (members of varSyms / x-FVR vars) to a
+   batch of fresh "cplU<n>" symbols, so two rules superposed together do
+   not share variable names.  Returns {renamedExpr, freshVars}. *)
+cplFreshen[expr_, varSyms_] := Block[{occ, ren},
+    occ = cplVarsIn[expr, varSyms];
+    ren = AssociationThread[occ, Table[Unique["cplU"], {Length[occ]}]];
+    {expr /. ren, Values[ren]}
+];
+
+(* Robinson syntactic unification over the head/argument tree.  `vars`
+   is the set of unifiable variable symbols; every other symbol is a
+   constant.  Returns an Association substitution, or $Failed when the
+   two terms do not unify.  Used to reconstruct a CriticalPairLemma's
+   superposition the way WL's verifier does: unify the matching rule's
+   lhs into the construct rule's lhs at the recorded position. *)
+cplUnify[s_, t_, vars_] := cplUnifyLoop[{{s, t}}, <||>, vars];
+cplUnifyLoop[$Failed, _, _] := $Failed;
+cplUnifyLoop[{}, sub_, _] := sub;
+cplUnifyLoop[lst_List, sub_, vars_] := Block[{s, t, ss, tt, rest},
+    {s, t} = First[lst];
+    rest = Rest[lst];
+    ss = s //. Normal[sub];
+    tt = t //. Normal[sub];
+    Which[
+        ss === tt, cplUnifyLoop[rest, sub, vars],
+        cplVarQ[ss, vars], If[ ! FreeQ[tt, ss], $Failed,
+            cplUnifyLoop[rest, Append[sub, ss -> tt], vars]],
+        cplVarQ[tt, vars], If[ ! FreeQ[ss, tt], $Failed,
+            cplUnifyLoop[rest, Append[sub, tt -> ss], vars]],
+        AtomQ[ss] || AtomQ[tt], $Failed,
+        Head[ss] =!= Head[tt] || Length[ss] =!= Length[tt], $Failed,
+        True, cplUnifyLoop[
+            Join[Thread[{List @@ ss, List @@ tt}], rest], sub, vars]
+    ]
+];
+
+(* Reconstruct the equation WL's verifier computes for a CriticalPairLemma
+   whose Construct rule is `cEq` ({lhs, rhs}), MatchingConstruct rule is
+   `mEq` ({lhs, rhs}), and superposition position is `pos`.  Convention
+   (reverse-engineered from FindEquationalProof output): the PEAK is the
+   Construct rule's lhs; the subterm at `pos` is unified with the Matching
+   rule's lhs; the CP's LHS is the Construct rule's rhs and its RHS is the
+   peak with the subterm at `pos` rewritten to the Matching rule's rhs,
+   both under the unifier.  Returns {lhs, rhs}, or $Failed when the
+   geometry does not unify (a wrong face / truncated position). *)
+cplReconCp[cEq_, mEq_, pos_, varSyms_] := Block[{
+    cf, cv, mf, mv, peak, subt, sub
+},
+    {cf, cv} = cplFreshen[cEq, varSyms];
+    {mf, mv} = cplFreshen[mEq, varSyms];
+    peak = cf[[1]];
+    subt = If[ pos === {}, peak, Quiet @ Extract[peak, pos]];
+    If[ Head[subt] === Extract || MissingQ[subt], Return[$Failed]];
+    sub = cplUnify[subt, mf[[1]], Join[cv, mv]];
+    If[ sub === $Failed, Return[$Failed]];
+    {
+        cf[[2]] //. Normal[sub],
+        (If[ pos === {}, mf[[2]], ReplacePart[peak, pos -> mf[[2]]]]) //.
+            Normal[sub]
+    }
 ]
 
 (* Assemble a verifier-shaped ProofObject dataset from the MAIN
@@ -1514,11 +1586,51 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 <|"Key" -> curKey, "Eq" -> curEq, "Swapped" -> True|>
             ];
 
+        (* Pick the (construct rule face, matching rule face, role
+           assignment) whose superposition reproduces the stored CP under
+           the verifier's convention (cplReconCp).  The C saturator may
+           have overlapped EITHER face of an unorientable parent (unfailing
+           completion superposes both faces of an incomparable equation),
+           so the peak the verifier reconstructs is not always ParentA's
+           stored lhs.  The recorded position `pos` is exact and the stored
+           CP `cpEq` is exact, so trying the (up to) two-by-two-by-two face
+           and role combinations and keeping the one whose reconstruction
+           equals `cpEq` recovers the real overlap geometry for ANY CP.
+           Returns <|Construct, ConstructEq, Matching, MatchingEq|> (each
+           *Eq the chosen oriented {lhs, rhs} face), or Missing[] when no
+           combination reproduces `cpEq` (e.g. a position truncated past
+           CP_MAX_DEPTH), in which case the caller bridges with emitNorm. *)
+        chooseCpGeometry[aInfo_, ruleAEq_, bInfo_, ruleBEq_, pos_, cpEq_] :=
+            Block[{cands, hit},
+                cands = Flatten[
+                    Table[
+                        {role[[1]], role[[2]], role[[3]], role[[4]],
+                         cFace, mFace},
+                        {role, {
+                            {aInfo, ruleAEq, bInfo, ruleBEq},
+                            {bInfo, ruleBEq, aInfo, ruleAEq}}},
+                        {cFace, {Identity, Reverse}},
+                        {mFace, {Identity, Reverse}}],
+                    2];
+                hit = SelectFirst[cands,
+                    Function[c,
+                        With[{r = cplReconCp[c[[5]][c[[2]]],
+                                c[[6]][c[[4]]], pos, varSyms]},
+                            ListQ[r] && cplEqSetQ[r, cpEq, varSyms]]]];
+                If[ MissingQ[hit], Return[Missing[]]];
+                <|"Construct" -> hit[[1]]["Key"],
+                  "ConstructInfo" -> hit[[1]],
+                  "ConstructEq" -> hit[[5]][hit[[2]]],
+                  "Matching" -> hit[[3]]["Key"],
+                  "MatchingInfo" -> hit[[3]],
+                  "MatchingEq" -> hit[[6]][hit[[4]]]|>
+            ];
+
         (* emit a CriticalPairLemma for the TRACE_CP at trace index
            ti; return its <|Key, Eq|>. *)
         resolveCp[ti_] := Block[{
             cte, cpEq, pos, aTe, bTe, ruleAEq, ruleBEq, aInfo, bInfo,
-            key, st
+            geom, key, st, cEq, mEq
         },
             cte = trace[[ti + 1]];
             (* WL's verifier builds the CP as
@@ -1535,41 +1647,53 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             aInfo = resolveTrace[cte["ParentA"]];
             bInfo = resolveTrace[cte["ParentB"]];
             (* The WL verifier reconstructs a CriticalPairLemma by
-               unifying the MatchingRule (ParentB) lhs into the Construct
-               rule (ParentA) lhs at the recorded superposition position
-               and instantiating ParentB's Statement under that unifier.
-               A permutative self-overlap -- ParentB commutativity-style
-               (x.y -> y.x) superposed onto a square subterm b.b -- forces
-               two of ParentB's variables together, so the instantiated
-               Statement collapses to a trivial t == t, which the verifier
-               auto-evaluates to True and then crashes folding the next
-               step over (MapAt[..., True]).  Such an overlap is really a
-               single ParentB rewrite of ParentA's equation, so bridge it
+               unifying the MatchingRule (Matching parent) lhs into the
+               Construct rule (Construct parent) lhs at the recorded
+               superposition position and instantiating the matching
+               Statement under that unifier.  A permutative self-overlap --
+               a commutativity-style (x.y -> y.x) face superposed onto a
+               square subterm b.b -- forces two of the matching face's
+               variables together, so the instantiated Statement collapses
+               to a trivial t == t, which the verifier auto-evaluates to
+               True and then crashes folding the next step over
+               (MapAt[..., True]).  Such an overlap is really a single
+               rewrite of the construct parent's equation, so bridge it
                with emitNorm (a real rewrite path over the rules alive at
                ti) instead of emitting a CriticalPairLemma the verifier
                crashes on.  Sound: emitNorm only emits real oriented /
-               ordered rewrites that the verifier replays; every overlap
-               that is not a permutative no-op keeps its CriticalPairLemma
-               entry, so ordinary proofs are untouched. *)
+               ordered rewrites that the verifier replays. *)
             If[ cplDegenerateOverlapQ[ruleAEq, ruleBEq, pos, varSyms],
                 Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
+            (* Select the face/role geometry that reproduces the stored CP
+               under the verifier's convention.  When no combination does
+               (a position truncated past CP_MAX_DEPTH, say), fall back to
+               the sound emitNorm bridge instead of emitting a Critical-
+               PairLemma whose geometry the verifier would replay into a
+               different equation. *)
+            geom = chooseCpGeometry[aInfo, ruleAEq, bInfo, ruleBEq,
+                pos, cpEq];
+            If[ MissingQ[geom],
+                atpDbgFail["resolveCp.no-geometry@" <> ToString[ti]];
+                Return[emitNorm[aInfo["Key"], aInfo["Eq"], cpEq, ti]]];
+            cEq = geom["ConstructEq"];
+            mEq = geom["MatchingEq"];
             cpN++;
             key = {"CriticalPairLemma", cpN};
             st = stmt[cpEq];
             AppendTo[entries, key -> <|
                 "Statement" -> st,
                 "Proof" -> <|
-                    "Construct" -> aInfo["Key"],
+                    "Construct" -> geom["Construct"],
                     "Orientation" ->
-                        cplOrient[aInfo["Eq"], ruleAEq, varSyms],
-                    "Rule" -> cplAsRule[ruleAEq, varSyms],
+                        cplOrient[geom["ConstructInfo"]["Eq"], cEq, varSyms],
+                    "Rule" -> cplAsRule[cEq, varSyms],
                     "Side" -> 1,
                     "Subpattern" -> Extract[
-                        cplAsRule[ruleAEq, varSyms][[1]], pos],
-                    "MatchingConstruct" -> bInfo["Key"],
+                        cplAsRule[cEq, varSyms][[1]], pos],
+                    "MatchingConstruct" -> geom["Matching"],
                     "MatchingOrientation" ->
-                        cplOrient[bInfo["Eq"], ruleBEq, varSyms],
-                    "MatchingRule" -> cplAsRule[ruleBEq, varSyms],
+                        cplOrient[geom["MatchingInfo"]["Eq"], mEq, varSyms],
+                    "MatchingRule" -> cplAsRule[mEq, varSyms],
                     "MatchingSide" -> 1,
                     "Position" -> pos
                 |>
