@@ -99,7 +99,12 @@ class BatchNorm:
         reduce_axes = tuple(i for i in range(x.ndim) if i != 1)
         batch_mean = x.mean(axis=reduce_axes)
         shape_mask = [1, -1] + [1] * (x.ndim - 2)
-        y = x - batch_mean.reshape(*shape_mask)
+        # detach the mean here: d(var)/d(mean) == 0 at mean == E[x], so
+        # detaching gives the identical gradient with a far smaller
+        # backward graph (otherwise the variance grad flows back through
+        # the mean, compounding through every upstream layer).  Mirrors
+        # tinygrad BatchNorm.calc_stats.
+        y = x - batch_mean.detach().reshape(*shape_mask)
         batch_var = (y * y).mean(axis=reduce_axes)
         return batch_mean, batch_var
 

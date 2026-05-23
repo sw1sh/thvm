@@ -273,6 +273,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/grad.c"
 #include "uop/leaf_tids.c"
 #include "uop/load.c"
+#include "uop/detach.c"
 #include "uop/cast.c"
 #include "uop/bitcast.c"
 #include "uop/index_simplify.c"

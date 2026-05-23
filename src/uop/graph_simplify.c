@@ -9,6 +9,16 @@ static Term uop_graph_simplify_unary(Term t, void *user) {
   return uop_rewrite_unary(v.op, v.src[0]);
 }
 
+// Unwrap UOP_DETACH(x) -> x.  Detach is a backward-only marker (grad
+// stops at it); by the time the graph is simplified for materialize the
+// backward is built, so it is pure identity at the value level and must
+// not survive into the kernel lifter / renderer.
+static Term uop_graph_simplify_detach(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_DETACH) return 0;
+  return heap_read(term_val(t) + 0);
+}
+
 static Term uop_graph_simplify_binary(Term t, void *user) {
   (void)user;
   UOpView v;
@@ -498,6 +508,7 @@ static Term uop_graph_simplify_cast(Term t, void *user) {
 
 fn Term uop_graph_simplify(Term root) {
   UOpGraphRewriteRule rules[] = {
+    {"detach-unwrap",           uop_graph_simplify_detach},
     {"symbolic-unary",          uop_graph_simplify_unary},
     {"symbolic-binary",         uop_graph_simplify_binary},
     {"symbolic-cast",           uop_graph_simplify_cast},
@@ -515,6 +526,7 @@ fn Term uop_graph_simplify(Term root) {
 
 static Term uop_graph_simplify_materialize_subset(Term root) {
   UOpGraphRewriteRule rules[] = {
+    {"detach-unwrap",           uop_graph_simplify_detach},
     {"symbolic-unary",          uop_graph_simplify_unary},
     {"symbolic-binary",         uop_graph_simplify_binary},
     {"symbolic-cast",           uop_graph_simplify_cast},

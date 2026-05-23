@@ -3545,7 +3545,31 @@ static void materialize_inner_assigns(Term term) {
   }
 }
 
+// Recursively strip UOP_DETACH(x) -> x in place across a UOP DAG, so the
+// stop-gradient marker never reaches kernel lifting / render / the walker
+// (the gated uop_graph_simplify can't be relied on).  Detach is identity
+// at the value level; the backward was already built before materialize.
+// Resolves chains of DETACH and rewrites each parent slot in place.
+static Term materialize_strip_detach(Term term) {
+  for (int hops = 0; hops < 64 && term_tag(term) == TAG_UOP
+                     && term_ext(term) == UOP_DETACH; hops++) {
+    term = heap_read(term_val(term) + 0);
+  }
+  if (term_tag(term) != TAG_UOP) return term;
+  u32 op = term_ext(term);
+  if (op == UOP_KERNEL) return term;
+  u8 ar = uop_arity((u8)op);
+  u64 loc = term_val(term);
+  for (u8 i = 0; i < ar; i++) {
+    Term child = heap_read(loc + i);
+    Term stripped = materialize_strip_detach(child);
+    if (stripped != child) heap_set(loc + i, stripped);
+  }
+  return term;
+}
+
 fn Term thvm_materialize(Term term) {
+  term = materialize_strip_detach(term);
   HOT_MATERIALIZE_CALLS++;
   // REF / ALO transparency: jump (don't unfold) into the body cell.
   // term_resolve walks VAR-SUB and ALO chains -- pure pointer hops,
@@ -3611,6 +3635,12 @@ fn Term thvm_materialize(Term term) {
   }
   if (term_tag(term) != TAG_UOP)        return term;
   if (term_ext(term) == UOP_KERNEL)     return term;
+  // DETACH is a stop-gradient marker with identity runtime semantics;
+  // by materialize time the backward is already built, so unwrap it to
+  // its src (no kernel/render/walker path ever needs to know about it).
+  if (term_ext(term) == UOP_DETACH) {
+    return thvm_materialize(heap_read(term_val(term) + 0));
+  }
   // GRAD is a stop point in materialize -- wnf fires interact_grad,
   // then thvm_realize loops back here to compile the unrolled UOps.
   // ASSIGN is a wnf-fired primitive (interact_assign) -- not a kernel.

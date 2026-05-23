@@ -1057,6 +1057,11 @@ static Term interact_grad_dispatch(Term grad_term) {
       // Not differentiable -- bw is zero.
       return grad_zero_at(y);
 
+    case UOP_DETACH:
+      // Stop-gradient: the cotangent reaching a detach dies (its child
+      // is treated as a constant).  Matches tinygrad `x.detach()`.
+      return grad_zero_at(y);
+
     default:
       return grad_term;
   }

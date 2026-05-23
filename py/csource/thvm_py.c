@@ -88,6 +88,7 @@ EXPORT uint64_t py_uop_after(uint64_t node, uint64_t after_node) {
 }
 
 EXPORT uint64_t py_uop_load(uint64_t src) { return uop_load(src); }
+EXPORT uint64_t py_uop_detach(uint64_t src) { return uop_detach(src); }
 
 // ============== high-level tensor surface (TAG_TEN) ==================
 // Phase 1 of the Python Tensor frontend (docs/plans/py_tensor_frontend

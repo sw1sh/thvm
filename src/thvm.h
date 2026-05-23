@@ -457,7 +457,15 @@ int             dtype_is_packed   (u32 dt);
 // single source of truth.
 #define UOP_BUFFERIZE   40
 // 41, 42 = UOP_IOR / UOP_IXOR (declared in the Symbolic INDEX layer above).
-#define UOP_COUNT       43
+// Identity-forward, STOP-backward marker (tinygrad UOp detach / stop-grad).
+// uop_grad treats it as a leaf w.r.t. its child (the cotangent dies), and
+// uop_graph_simplify unwraps it to its src BEFORE materialize, so no
+// kernel/render/walker path ever sees it.  Used by BatchNorm.calc_stats
+// (`y = x - mean.detach()`) so the variance gradient does not flow back
+// through the mean -- mathematically d(var)/d(mean)=0, so the result is
+// identical but the backward graph is far smaller.
+#define UOP_DETACH      43
+#define UOP_COUNT       44
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2586,6 +2594,9 @@ fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out);
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in
 // the cpu kernel).  Output shape == src shape; arity 1.
 fn Term uop_load(Term src);
+
+// Build a UOP_DETACH node wrapping `src` (stop-gradient; see UOP_DETACH).
+fn Term uop_detach(Term src);
 
 
 // === schedule/ ===

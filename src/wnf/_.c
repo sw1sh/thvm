@@ -170,6 +170,13 @@ enter:
         whnf = interact_kernel(next);
         goto apply;
       }
+      if (op == UOP_DETACH) {
+        // Stop-gradient marker: identity at runtime.  The backward was
+        // already built (grad treats it as a leaf), so unwrap to the
+        // child and re-enter -- it never reaches a kernel/TEN read.
+        next = heap_read(term_val(next) + 0);
+        goto enter;
+      }
       // (slots UOP_GRAD/UOP_FWD have moved to TAG_DP0/DP1+DUP_GRAD_FLAG;
       // see the TAG_DP{0,1} branch above.)
       if (op == UOP_ASSIGN) {

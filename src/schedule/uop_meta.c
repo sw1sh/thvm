@@ -23,7 +23,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_LOG2: case UOP_SQRT:
     case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
-    case UOP_REDUCE:  case UOP_LOAD:
+    case UOP_REDUCE:  case UOP_LOAD:    case UOP_DETACH:
     case UOP_CAST:    case UOP_BITCAST:
     // UOP_BUFFERIZE heap: [value, NUM(addrspace), NUM(removable),
     // NUM(n_ranges), range_0, ...].  Only slot 0 (value) is a
@@ -203,7 +203,7 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     return 0;
   }
   if (uop_is_unary_elementwise(op) || op == UOP_LOAD || op == UOP_FLIP
-      || op == UOP_CAST || op == UOP_BITCAST) {
+      || op == UOP_CAST || op == UOP_BITCAST || op == UOP_DETACH) {
     return term_shape_in(heap_read(loc), 0, out);
   }
   // UOP_BUFFERIZE is a realize-boundary marker; its shape == value.shape.

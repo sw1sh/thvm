@@ -236,9 +236,12 @@ class Tensor:
     # ---- bookkeeping helpers (forward-only stubs for Phase 3A) --------
 
     def detach(self) -> "Tensor":
-        """tinygrad detach -- stops gradient.  Phase 3A: no autograd
-        graph yet, so it's just a shallow alias (same term)."""
-        return Tensor._from_term(self.term, self._dtype, self._shape)
+        """tinygrad detach -- stop-gradient.  Wraps in UOP_DETACH:
+        identity forward (unwrapped before materialize), zero backward
+        (the cotangent dies at the detach).  Used e.g. by BatchNorm to
+        keep the variance gradient from flowing through the mean."""
+        return Tensor._from_term(_TH.detach(self.term), self._dtype,
+                                 self._shape)
 
     def assign(self, x: "Tensor") -> "Tensor":
         """tinygrad assign -- lazy IN-PLACE update.  Builds UOP_ASSIGN(self,

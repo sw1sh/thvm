@@ -78,6 +78,7 @@ _uop_opt = _bind("py_uop_opt", c_uint64, c_uint64, c_uint32, c_uint32)
 _uop_store = _bind("py_uop_store", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_after = _bind("py_uop_after", c_uint64, c_uint64, c_uint64)
 _uop_load = _bind("py_uop_load", c_uint64, c_uint64)
+_uop_detach = _bind("py_uop_detach", c_uint64, c_uint64)
 
 # ---------------- high-level tensor surface (TAG_TEN) ----------------
 _ten_create = _bind("py_ten_create", c_uint64,
@@ -458,6 +459,9 @@ class Thvm:
 
     def load(self, src: Term) -> Term:
         return Term(_uop_load(c_uint64(int(src))))
+
+    def detach(self, src: Term) -> Term:
+        return Term(_uop_detach(c_uint64(int(src))))
 
     # ============ high-level tensor surface (TAG_TEN) ============
     # Phase 1 of the Python Tensor frontend.  add / mul / cmplt /
