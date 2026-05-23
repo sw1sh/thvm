@@ -271,9 +271,14 @@ static u32 atp_symbol_count(Term t);
 // the indexed normalizer + ordered helpers it builds on.
 static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
                                                  u32 step_cap);
-#ifdef ATP_FLATTERM_SELFCHECK
+#if defined(ATP_FLATTERM_SELFCHECK) || defined(ATP_FLATTERM_DIFF)
 static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
                                                           u32 step_cap);
+#endif
+#ifdef ATP_FLATTERM_DIFF
+// DIFF test build: live-normalize flat-vs-tree mismatch counter (see the
+// in-dispatch check in atp_rewrite_normalize_ordered).  A test CHECKs ==0.
+u32 g_atp_ft_diff_mism = 0u;
 #endif
 #endif
 #endif
@@ -2513,10 +2518,18 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
     if (!g_atp_ri_ix->any_folded && !folded) {
       for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
         if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
-          subst.bindings[k] = flat[g_atp_ri_best_star[k]];
+          // See atp_ft_indexed_fixpoint: a star at an INTERIOR position has
+          // a STALE cached flat[] cell after an in-place splice rewrote a
+          // descendant, so rebuild the bound subtree rather than read the
+          // stale cell.  Untouched subtrees rebuild to their shared
+          // original at zero allocation.
+          subst.bindings[k] =
+              atp_ri_build(flat, subsz, flatsym, g_atp_ri_best_star[k]);
         }
       }
-    } else if (!thvm_match(s->lhs[redex_rule], flat[redex_pos], &subst)) {
+    } else if (!thvm_match(s->lhs[redex_rule],
+                           atp_ri_build(flat, subsz, flatsym, redex_pos),
+                           &subst)) {
       return atp_ri_build(flat, subsz, flatsym, 0u);   // unreachable: confirmed
     }
     Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
@@ -2887,10 +2900,19 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
     if (!g_atp_ri_ix->any_folded && !*folded) {
       for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
         if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
-          subst.bindings[k] = flat[g_atp_ri_best_star[k]];
+          // The star position may be an INTERIOR node (a rule var binds a
+          // whole subtree, not just a leaf).  An earlier in-place splice
+          // updates that subtree's child cells + subsz/flatsym but NOT the
+          // ancestor's cached flat[] tree cell, so flat[star] can be STALE.
+          // Rebuild the bound subtree from the flat arrays (an untouched
+          // subtree rebuilds to its shared original at zero allocation).
+          subst.bindings[k] =
+              atp_ri_build(flat, subsz, flatsym, g_atp_ri_best_star[k]);
         }
       }
-    } else if (!thvm_match(s->lhs[redex_rule], flat[redex_pos], &subst)) {
+    } else if (!thvm_match(s->lhs[redex_rule],
+                           atp_ri_build(flat, subsz, flatsym, redex_pos),
+                           &subst)) {
       return any;                                   // unreachable: confirmed
     }
     Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
@@ -3148,11 +3170,11 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
   return atp_ri_build(flat, subsz, flatsym, 0u);
 }
 
-#ifdef ATP_FLATTERM_SELFCHECK
+#if defined(ATP_FLATTERM_SELFCHECK) || defined(ATP_FLATTERM_DIFF)
 // The exact tree mixed loop (a copy of atp_rewrite_normalize_ordered's
-// mixed branch), used only by the build-time self-check to confirm the
-// flatterm path's normal form matches.  Defeats the speedup; never
-// compiled into a release build.
+// mixed branch), used only by the build-time self-check / DIFF test to
+// confirm the flatterm path's normal form matches.  Defeats the speedup;
+// never compiled into a release build.
 static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
                                                           u32 step_cap) {
   for (u32 i = 0; i < step_cap; i++) {
@@ -3632,7 +3654,25 @@ fn void thvm_atp_heap_reset(u64 checkpoint) {
   // Only allow popping back; never advance (callers should use
   // term_new_* for that).  Silent no-op on out-of-range to make
   // the API safe to sprinkle in step paths.
-  if (checkpoint <= HEAP_NEXT) HEAP_NEXT = checkpoint;
+  if (checkpoint <= HEAP_NEXT) {
+    if (checkpoint < HEAP_NEXT) {
+      // Popping the bump pointer recycles every heap loc in
+      // [checkpoint, HEAP_NEXT): the next allocation reuses those loc
+      // integers for new content.  The KBO weight memo (g_kbo_wmemo) is
+      // keyed by (epoch, Term loc) and assumes a loc denotes one logical
+      // term per epoch -- exactly the invariant a GC relocation breaks,
+      // which is why thvm_atp_gc_collect invalidates the memo.  A reset
+      // recycles locs the same way WITHOUT moving cells, so a memo entry
+      // for a popped loc would survive and return the OLD term's weight
+      // for the NEW term reallocated at that loc -- a wrong KBO verdict
+      // that flips an order-gated rewrite (observed: the flatterm mixed
+      // path's unorientable order-gate firing a non-decreasing step,
+      // diverging from the tree NF).  Bump the epoch so every entry for a
+      // recycled loc is stale and recomputed.
+      thvm_kbo_invalidate();
+    }
+    HEAP_NEXT = checkpoint;
+  }
 }
 
 // === 7a: in-loop GC for the saturation engine ======================
@@ -4231,11 +4271,14 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
     // re-flatten / tree rebuild).  Same normal form as the tree loop
     // below; default OFF so the engine is byte-identical.
     if (s->use_flatterm) {
-#ifdef ATP_FLATTERM_SELFCHECK
-      // In-engine differential: also run the tree path and abort on any
-      // mismatch.  Build-only (defeats the speedup) -- proves the
-      // flatterm normal form equals the tree one on the LIVE saturation
-      // workload, not just the offline random test.
+#if defined(ATP_FLATTERM_SELFCHECK) || defined(ATP_FLATTERM_DIFF)
+      // In-engine differential: also run the tree path and check every
+      // LIVE-saturation normalize for flat-NF == tree-NF.  Build-only
+      // (defeats the speedup).  Under SELFCHECK a mismatch aborts (the
+      // build-time soundness invariant); under the DIFF test build it
+      // bumps g_atp_ft_diff_mism so a test can CHECK it == 0.  This fires
+      // on the REAL subjects saturation reduces -- the deep critical-pair
+      // terms the offline random battery never constructs.
       {
         Term ref = atp_rewrite_normalize_flatterm_selfcheck_tree(s, t, step_cap);
         Term got = atp_rewrite_normalize_flatterm_mixed(s, t, step_cap);
@@ -4247,6 +4290,7 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
           fprintf(stderr, "FLATTERM SELFCHECK MISMATCH\n in=%s\n tree=%s\n flat=%s\n",
                   ib, rb, gb);
           fprintf(stderr, " n_rules=%u n_unorient=%u\n", s->n_rules, s->n_unorient);
+#ifdef ATP_FLATTERM_SELFCHECK
           for (u32 ri = 0; ri < s->n_rules; ri++) {
             char la[1024], ra[1024];
             atp_pretty_term(s->lhs[ri], la, sizeof la);
@@ -4255,6 +4299,16 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
                     s->r_orient[ri] ? "" : "(un)", la, ra);
           }
           abort();   // build-time invariant: flatterm NF == tree NF
+#else
+          // DIFF test build: record the divergence.  Return the FLAT result
+          // (got) -- the same value the un-instrumented engine uses -- so
+          // saturation follows the EXACT trajectory the live engine does,
+          // reaching the same deep critical pairs where the staleness bites.
+          // A correct flat path has got == ref, so the trajectory is the
+          // tree-correct one and g_atp_ft_diff_mism stays 0.  The test
+          // CHECKs g_atp_ft_diff_mism == 0.
+          g_atp_ft_diff_mism++;
+#endif
         }
         return got;
       }

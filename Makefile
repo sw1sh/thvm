@@ -131,6 +131,14 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_ORDERED_REWRITE)),-DATP_ORDERED_REWRIT
 ATP_FLATTERM_DIFF ?=
 ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FLATTERM_DIFF)),-DATP_FLATTERM_DIFF,)
 
+# -DATP_FLATTERM_SELFCHECK runs the flatterm mixed normalizer ALONGSIDE the
+# tree mixed normalizer on every live normalize and aborts on any NF
+# mismatch (proves flatterm NF == tree NF on the saturation workload, not
+# just the offline random differential).  Defeats the speedup; never in a
+# release build.  `make ATP_FLATTERM_SELFCHECK=1 bin/test_atp`.
+ATP_FLATTERM_SELFCHECK ?=
+ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FLATTERM_SELFCHECK)),-DATP_FLATTERM_SELFCHECK,)
+
 # Milestone 10: -DATP_MNF builds the MNF goal-directed search (a port
 # of Waldmeister's "MultipleNormalFormen" module).  It AUGMENTS the
 # single-normal-form goal check: goal_lhs seeds a GREEN front, goal_rhs

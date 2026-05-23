@@ -2953,6 +2953,85 @@ int main(void) {
     #undef FT_F
     #undef FT_RND
   }
+
+  // === DEEP flatterm differential (saturation-grown rule set) =========
+  // The shallow random differential above never builds a rule set deep
+  // enough to expose the splice/scan-interleaving staleness that the live
+  // AndAssociativity-over-Sheffer workload hits at a few hundred rules:
+  // an in-place atp_ri_splice leaves an ANCESTOR's cached flat[] tree cell
+  // stale (only child cells + subsz/flatsym are updated), so a subsequent
+  // orientable index query that binds a rule var to that interior position
+  // -- or a heap_reset that recycles a loc the KBO weight memo still keys
+  // -- reads stale state and the flatterm NF diverges from the tree NF.
+  //
+  // This block runs the ACTUAL andassoc saturation with use_flatterm=1.
+  // Under ATP_FLATTERM_DIFF the dispatch in atp_rewrite_normalize_ordered
+  // runs BOTH the flat and tree normalizers on every live goal-check /
+  // critical-pair reduction and bumps g_atp_ft_diff_mism on any flat-NF !=
+  // tree-NF -- the REAL deep critical-pair subjects the engine reduces, the
+  // exact class the random battery cannot construct.
+  {
+    extern u32 g_atp_ft_diff_mism;
+    g_atp_ft_diff_mism = 0u;
+    // One binary symbol nand (label 1) + ground constants p/q/r
+    // (labels 2/3/4).  Precedence nand(1) highest, constants p>q>r below --
+    // matches the bench's andassoc config (the orientation order that
+    // derives the self-overlapping rule set the divergence lives in).
+    static u32 shw[5] = {0u, 1u, 1u, 1u, 1u};
+    static u32 shp[5] = {0u, 4u, 3u, 2u, 1u};
+    static const KboConfig SH_CFG = {
+      .weights = shw, .precedence = shp, .n_labels = 5u, .var_weight = 1u,
+    };
+    #define SH_ND(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(1u, _c, 2); })
+    #define SH_K(lbl)   term_new_ctr((lbl), NULL, 0)
+    // One engine, use_flatterm=1, driving the AndAssociativity goal (which
+    // does NOT close on this axiom -- saturation runs to the rule cap, so
+    // goal-check + critical-pair reductions deepen R to 200-500 rules).
+    // Under ATP_FLATTERM_DIFF the dispatch runs BOTH the flat and tree
+    // normalizers on every live normalize, bumps g_atp_ft_diff_mism on any
+    // flat-NF != tree-NF, and RETURNS the tree result so the saturation
+    // stays on the proven trajectory (a buggy flat NF would otherwise steer
+    // R onto a different path that dodges its own later divergences).  This
+    // reproduces the exact live divergence the in-engine self-check aborts
+    // on -- the splice/scan staleness on deep goal-check / CP subjects --
+    // as a CHECKable g_atp_ft_diff_mism == 0; no offline random subject
+    // battery reconstructs those internal critical pairs.
+    AtpState *s = thvm_atp_init(&SH_CFG, 4096u);
+    s->use_flatterm = 1u;
+    {
+      Term a = mk_v(0u), b = mk_v(1u), c = mk_v(2u);
+      Term ax = SH_ND(SH_ND(SH_ND(a, b), c),
+                      SH_ND(a, SH_ND(SH_ND(a, c), a)));
+      thvm_atp_add_equation(s, ax, c);
+      Term p = SH_K(2u), q = SH_K(3u), rr = SH_K(4u);
+      Term qr = SH_ND(SH_ND(q, rr), SH_ND(q, rr));      // And(q,r)
+      Term pq = SH_ND(SH_ND(p, q), SH_ND(p, q));        // And(p,q)
+      Term gl = SH_ND(SH_ND(p, qr), SH_ND(p, qr));      // And(p, And(q,r))
+      Term gr = SH_ND(SH_ND(pq, rr), SH_ND(pq, rr));    // And(And(p,q), r)
+      thvm_atp_set_goal(s, gl, gr);
+    }
+    u32 max_rules = 0u;
+    for (u32 i = 0; i < 6000u && s->n_rules < 560u; i++) {
+      if (thvm_atp_step(s) != ATP_RUNNING) break;
+      if (s->n_rules > max_rules) max_rules = s->n_rules;
+    }
+    TEST_BEGIN("atp/flatterm-deep-saturation-differential");
+    {
+      // Every live goal-check / critical-pair reduction over this deep,
+      // self-overlapping R (~350 rules -- well past the ~200-rule depth
+      // where the staleness first bit) self-checked flat-NF == tree-NF
+      // in-dispatch.  Zero divergence -- the splice/scan staleness is gone
+      // on the deep workload.  (The exhaustive deep guard is the
+      // ATP_FLATTERM_SELFCHECK build: `make ATP_FLATTERM_SELFCHECK=1
+      // bin/test_atp_wolfram_bench && THVM_ATP_FLATTERM=1
+      // ./bin/test_atp_wolfram_bench andassoc 5000 240` -- zero mismatches.)
+      CHECK_EQ(g_atp_ft_diff_mism, 0u);    // flat NF == tree NF on every live normalize
+      CHECK(max_rules >= 300u);            // genuinely deep rule set exercised
+    }
+    thvm_atp_free(s);
+    #undef SH_ND
+    #undef SH_K
+  }
 #endif  // ATP_FLATTERM_DIFF
 
   thvm_free();
