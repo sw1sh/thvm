@@ -1494,13 +1494,16 @@ VerificationTest[
    (src/atp/_.c thvm_atp_proof_extract) -- a populated MainSteps chain.
    The test below asserts that proved-at-rule-count milestone.
 
-   The verifying ProofObject is NOT yet produced: the WL chain
-   reconstruction's emitNorm BFS (THVMLink`Private`, "emitNorm.no-rewrite-
-   path") cannot bridge one SubstitutionLemma sub-derivation of this proof
-   over aliveRulesAt[] -- a remaining reconstruction-modeling gap,
-   independent of the (now-fixed) heap / trace / MainSteps blockers.  When
-   that is closed, tighten the assertion to Head[ProofObject] === Success
-   on p["ProofFunction"][p["Theorems"]]. *)
+   The critical-pair reconstruction gap is closed: resolveCp now selects
+   the superposition geometry (parent face / role) that reproduces each
+   stored CP under the verifier's convention (chooseCpGeometry), so the
+   Sheffer/Wolfram CP proofs (e.g. ImpliesShefferAxioms conjunct 2)
+   reconstruct into verifying ProofObjects.  AndAssociativity's own
+   verifying ProofObject is still unconfirmed on a memory-loaded box: the
+   ~9278-step saturation plus the deep trace-DAG assembly exhaust the wall
+   budget here.  The verifying assertion lives in the separate env-gated
+   test below ("andassoc-WolframAxioms-verifies-when-enabled"); run it on a
+   box with the saturation + assembly headroom to confirm Success. *)
 VerificationTest[
     If[ Environment["THVM_ATP_ANDASSOC_TEST"] === "1",
         Module[{r},
