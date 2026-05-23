@@ -199,24 +199,20 @@ class Tensor:
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
         """Drive thvm's pipeline; mutates `term` to the resulting
-        TAG_TEN.  Extra tensors realize too (tinygrad pattern).
+        TAG_TEN.  Extra tensors realize too (tinygrad pattern), each in
+        its own pass.
 
-        With extra tensors this bundles self+lst into ONE scheduler pass
-        (tinygrad `loss.realize(*opt.schedule_step())`): the assigns and
-        their consumers are materialized together so an in-place ASSIGN
-        that another assign reads (Adam's m feeding the param update)
-        fires exactly once.  Per-tensor sequential realize would re-fire
-        such an embedded ASSIGN against the already-updated buffer and
-        corrupt it.  Single-tensor realize keeps the plain fast path."""
-        if not lst:
-            self.term = _TH.realize(self.term)
-            self._pin()
-            return self
-        group = [self, *lst]
-        resolved = _TH.realize_many([t.term for t in group])
-        for t, r in zip(group, resolved):
-            t.term = r
-            t._pin()
+        NOTE: do NOT bundle self+lst into one realize_many pass here.
+        Bundling fixed a CPU Adam corruption (an in-place ASSIGN read by
+        another assign re-firing) but REGRESSED CUDA to NaN (CUDA's
+        default-on per-realize buffer reuse races the bundled in-place
+        assigns).  The Adam corruption is instead fixed at the source in
+        optim.Adam._step (m,v realized before the param update reads
+        them), so per-tensor realize is correct on every backend."""
+        self.term = _TH.realize(self.term)
+        self._pin()
+        for x in lst:
+            x.realize()
         return self
 
     def contiguous(self) -> "Tensor":
