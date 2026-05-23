@@ -44,8 +44,18 @@ class Optimizer:
         self.lr = lr
 
     def zero_grad(self):
+        # Clear BOTH the Python .grad handle AND the canonical C-side
+        # TENS[tid].grad accumulator -- thvm's backward() *accumulates*
+        # into that accumulator (tinygrad semantics), so without clearing
+        # it each step the gradients pile up across steps and blow up to
+        # nan within a few iterations.
+        from .tensor import _TH
         for p in self.params:
             p.grad = None
+            try:
+                _TH.ten_clear_grad(p.term)
+            except Exception:
+                pass
 
     def step(self):
         self.schedule_step()

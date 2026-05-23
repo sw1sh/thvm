@@ -98,8 +98,11 @@ def main():
     Tensor.training = True
     wall, peak = [], 0
     acc = float("nan")
+    _noreclaim = os.environ.get("NORECLAIM") == "1"
     for i in range(steps):
-        GlobalCounters.reset()             # triggers cross-step reclaim
+        opt.zero_grad()                    # clear grad accumulators (tinygrad pattern)
+        if not _noreclaim:
+            GlobalCounters.reset()         # triggers cross-step reclaim
         _TH.cpu_peak_reset()               # within-step peak from here
         t0 = time.time()
         idx = np.random.randint(0, len(Xtr), size=bs)
