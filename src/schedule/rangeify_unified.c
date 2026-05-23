@@ -662,30 +662,19 @@ fn void run_rangeify_unified(Term root) {
 
     Term out_rngs[RU_MAX_AXES] = {0};
 
-    // A RESHAPE that changes rank -- SPLITS an axis (the pool windowing
-    // `x.reshape(B,C,Ho,k,Wo,k)`) or MERGES split axes back (the pool
-    // gradient's `reshape((B,C,Ho,k,Wo,k)->(B,C,Ho,Wo))`) -- over a REAL
-    // VALUE source must read that source from a materialized buffer.
-    // Otherwise the partial-realize inline strands the split/merged
-    // sub-axes: the consuming reduce / argmax-mask CMPEQ / merge reads a
-    // rank-deficient view (a [B,C,Ho]-only value missing Wo) and the
-    // result and its gradient come out wrong/0.  Force-realize the
-    // reshape's SOURCE; the reshape then views a complete buffer and
-    // indexes correctly (matches the working "pool input is a plain
-    // buffer" case).  Gated on a NON-MOVEMENT source so the conv `_pool`
-    // im2col -- whose splits sit over RESHAPE/EXPAND (the repeat trick) --
-    // still fuses untouched.
-    if (info->op == UOP_RESHAPE) {
-      Shape rsrc;
-      if (ru_node_src_shape(info->loc, &rsrc) && my_ndim != rsrc.ndim) {
-        Term src = term_resolve(heap_read(info->loc + 0));
-        if (term_tag(src) == TAG_UOP && !uop_is_movement(term_ext(src))) {
-          u32 sidx = bufferize_info_find(term_val(src));
-          if (sidx != 0xFFFFFFFFu)
-            RU_REALIZE_MAP[sidx].realized_full = 1;
-        }
-      }
-    }
+    // A rank-changing RESHAPE -- the pool windowing
+    // `x.reshape(B,C,Ho,k,Wo,k)` (split) and the pool-gradient merge
+    // `reshape((B,C,Ho,k,Wo,k)->(B,C,Ho,Wo))` -- swizzles the consumer's
+    // ranges into compound IDIV/IMOD/affine index expressions
+    // (apply_movement_op_reshape) that flow into the reshape SOURCE's
+    // out_rngs.  The source no longer needs a force-realize band-aid: the
+    // general strand covered-check below (ru_expr_references_aid) now
+    // recognises the swizzled leaf axes inside those compound out_rngs as
+    // covered, so the source FUSES into the consuming reduce/elementwise
+    // kernel instead of materializing.  Mirrors tinygrad, which lowers
+    // relu->max_pool2d->sum to a single fused reduce kernel
+    // (schedule/indexing.py `_apply_reshape` + symbolic simplify +
+    // `remove_movement_op_after_rangeify`).
 
     if (RU_REALIZE_MAP[node_idx].realized_full
         || RU_REALIZE_MAP[node_idx].realized_partial) {
@@ -1305,6 +1294,28 @@ typedef struct {
   u8  n_free;
 } RuFreeAxisSet;
 
+// Does expression `t` reference a UOP_RANGE leaf with axis_id == aid
+// anywhere in its DAG?  Stops at BUFFER/BUFFERIZE/KERNEL boundaries
+// (their internal ranges are scoped separately).  Used by the strand
+// covered-check so a free axis that appears inside a COMPOUND out_rngs
+// entry (the IDIV/IMOD/affine swizzle a rank-changing RESHAPE builds,
+// `aid_hi*k + aid_lo`) counts as covered: the consumer iterates those
+// leaf axes in its own scope and substitutes the whole compound
+// expression on splice (ru_subtree_rewrite_ranges via in_rngs).
+static int ru_expr_references_aid(Term t, u32 aid, u32 depth) {
+  if (depth > 64) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) return uop_range_axis_id(r) == aid;
+  if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return 0;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++)
+    if (ru_expr_references_aid(heap_read(loc + i), aid, depth + 1)) return 1;
+  return 0;
+}
+
 static int ru_free_axis_bound_has(RuFreeAxisSet const *s, u32 aid) {
   for (u8 i = 0; i < s->n_bound; i++) if (s->bound_aids[i] == aid) return 1;
   return 0;
@@ -1712,12 +1723,16 @@ fn void pm_apply_rangeify(Term root) {
       for (u8 fi = 0; fi < fs.n_free; fi++) {
         u32 aid = fs.free_aids[fi];
         int covered = 0;
+        // An axis is covered when it appears ANYWHERE inside one of the
+        // producer's out_rngs expressions -- not only as a top-level plain
+        // RANGE.  A rank-changing RESHAPE swizzles the consumer ranges into
+        // compound IDIV/IMOD/affine out_rngs (`aid_hi*k + aid_lo`); the leaf
+        // axes inside those expressions are iterated by the consumer and
+        // substituted as a whole on splice (ru_subtree_rewrite_ranges via
+        // the consumer's in_rngs).  Treating them as stranded force-realized
+        // the reshape source unnecessarily (the old reshape-source band-aid).
         for (u8 a = 0; a < rm->out_ndim && !covered; a++) {
-          Term pr = rm->out_rngs[a];
-          if (term_tag(pr) == TAG_UOP && term_ext(pr) == UOP_RANGE
-              && uop_range_axis_id(pr) == aid) {
-            covered = 1;
-          }
+          if (ru_expr_references_aid(rm->out_rngs[a], aid, 0)) covered = 1;
         }
         if (!covered) { stranded = 1; break; }
       }
