@@ -1401,10 +1401,17 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            position; only the orientation differs).  Each emitted
            forward step carries the forward RESULT eq in slot 1 so the
            emitNorm loop emits the right intermediate Statements. *)
-        reverseBfsPath[rev_List, startEq_] :=
+        reverseBfsPath[rev_List, targetEq_] :=
             Block[{eqs, k = Length[rev]},
-                (* eqs[[1]] == startEq, eqs[[k+1]] == targetEq *)
-                eqs = Reverse @ Prepend[rev[[All, 1]], startEq];
+                (* The reverse search visits target, rev[1].eq, ...,
+                   rev[k].eq == start.  Prepending target and reversing
+                   gives the forward sequence eqs with eqs[[1]] == start
+                   and eqs[[k+1]] == target.  Forward step j rewrites
+                   eqs[[j]] into eqs[[j+1]] using the reverse step that
+                   crossed that same boundary (rev[[k-j+1]]) with its
+                   direction flipped; relPos / side are shared by a
+                   rewrite and its inverse (same redex location). *)
+                eqs = Reverse @ Prepend[rev[[All, 1]], targetEq];
                 Table[
                     With[{rstep = rev[[k - j + 1]]},
                         {eqs[[j + 1]], rstep[[2]], rstep[[3]],
@@ -1460,7 +1467,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                     Block[{rev = runBfs[targetEq, startEq, preRules, True,
                             50000, 3]},
                         If[ ! MissingQ[rev],
-                            found = reverseBfsPath[rev, startEq]]]];
+                            found = reverseBfsPath[rev, targetEq]]]];
                 If[ MissingQ[found],
                     atpDbgFail["emitNorm.no-rewrite-path"]; Throw[$Failed]];
                 curKey = inKey;
