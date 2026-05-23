@@ -283,7 +283,7 @@ int main(void) {
     int ok = uop_dag_extract_conv2d_flat_shape(
         heap_read(term_val(ldW_a) + 1),
         heap_read(term_val(ldX_a) + 1),
-        NULL, &s);
+        &s);
     CHECK(ok);
     CHECK_EQ(s.c_out,    c_out_a);
     CHECK_EQ(s.c_in,     c_in_a);
@@ -362,7 +362,7 @@ int main(void) {
     int ok = uop_dag_extract_conv2d_flat_shape(
         heap_read(term_val(ldW_b) + 1),
         heap_read(term_val(ldX_b) + 1),
-        NULL, &s);
+        &s);
     CHECK(ok);
     CHECK_EQ(s.c_out, c_out_b);
     CHECK_EQ(s.c_in,  c_in_b);
@@ -428,7 +428,7 @@ int main(void) {
     int ok = uop_dag_extract_conv2d_flat_shape(
         heap_read(term_val(ldW_c) + 1),
         heap_read(term_val(ldX_c) + 1),
-        NULL, &s);
+        &s);
     CHECK(ok);
     CHECK_EQ(s.w_offset, 100);
     CHECK_EQ(s.x_offset, 256);
@@ -486,7 +486,7 @@ int main(void) {
     int ok = uop_dag_extract_conv2d_flat_shape(
         heap_read(term_val(ldW_d) + 1),
         heap_read(term_val(ldX_d) + 1),
-        NULL, &s);
+        &s);
     CHECK(ok);
     CHECK_EQ(s.c_out,    c_out_d);
     CHECK_EQ(s.c_in,     c_in_d);
@@ -565,7 +565,7 @@ int main(void) {
     int ok = uop_dag_extract_conv2d_flat_shape(
         heap_read(term_val(ldW_e) + 1),
         heap_read(term_val(ldX_e) + 1),
-        NULL, &s);
+        &s);
     CHECK(ok);
     CHECK_EQ(s.c_out,    c_out_e);
     CHECK_EQ(s.c_in,     c_in_e);
@@ -649,7 +649,7 @@ int main(void) {
     int ok = uop_dag_extract_conv2d_flat_shape(
         heap_read(term_val(ldW_f) + 1),
         heap_read(term_val(ldX_f) + 1),
-        NULL, &s);
+        &s);
     CHECK(ok);
     CHECK_EQ(s.c_out,    c_out_f);
     CHECK_EQ(s.c_in,     c_in_f);
@@ -671,7 +671,7 @@ int main(void) {
     // W addr not an IADD (just a bare RANGE) -- extractor must bail.
     Term r_lone = uop_range(2, 0, 64);
     UopDagConv2dFlatShape s = {0};
-    int ok = uop_dag_extract_conv2d_flat_shape(r_lone, r_lone, NULL, &s);
+    int ok = uop_dag_extract_conv2d_flat_shape(r_lone, r_lone, &s);
     CHECK_EQ(ok, 0);
   }
 
