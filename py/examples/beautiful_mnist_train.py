@@ -76,7 +76,11 @@ def main():
           f"train={len(Xtr)} test={len(Xte)}")
 
     model = Model()
-    opt = nn.optim.Adam(nn.state.get_parameters(model.layers), lr=1e-3)
+    _lr = float(os.environ.get("LR", "1e-3"))
+    _params = nn.state.get_parameters(model.layers)
+    opt = (nn.optim.SGD(_params, lr=_lr) if os.environ.get("OPT") == "sgd"
+           else nn.optim.Adam(_params, lr=_lr))
+    print(f"OPT={os.environ.get('OPT','adam')} LR={_lr}")
 
     def test_acc():
         Tensor.training = False
@@ -96,6 +100,7 @@ def main():
     acc = float("nan")
     for i in range(steps):
         GlobalCounters.reset()             # triggers cross-step reclaim
+        _TH.cpu_peak_reset()               # within-step peak from here
         t0 = time.time()
         idx = np.random.randint(0, len(Xtr), size=bs)
         loss = (model(Tensor(Xtr[idx]))
@@ -116,7 +121,8 @@ def main():
         if test_every and (i + 1) % test_every == 0:
             acc = test_acc()
         print(f"step {i+1:3d}: loss={lv:6.3f} wall={dt:8.1f}ms "
-              f"mem={_gpu_mb()}MB"
+              f"mem={_gpu_mb()}MB peak={_TH.cpu_peak_bytes()/1048576:.1f}MB "
+              f"live={_TH.cpu_live_bytes()/1048576:.1f}MB"
               + (f" test_acc={acc:5.2f}%" if test_every and (i+1) % test_every == 0 else ""),
               flush=True)
 
