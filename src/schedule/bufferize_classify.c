@@ -698,6 +698,44 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
   return is_mul && distinct;
 }
 
+// True when the recompute subtree feeding elementwise node at `loc` reaches
+// a UOP_REDUCE without first crossing a realized boundary.  Such a node is
+// a reduce EPILOGUE: tinygrad fuses it into the reduce's consumer kernel
+// (recompute) rather than materializing it, so it does NOT get the blanket
+// MULTI realize seed.  The walk descends only through elementwise + movement
+// ops (the recompute-cheap prologue between a reduce and its readers) and
+// stops at REDUCE (found), realized boundaries, KERNEL/TEN leaves, or any
+// other op -- so a reduce-FREE shared subexpression (the multi-consumer
+// elementwise the bufferize-telemetry tests assert IS realized) is left
+// untouched.
+static int bufferize_elementwise_src_has_reduce(u64 loc, u32 depth) {
+  if (depth > 32) return 0;
+  if (loc >= HEAP_NEXT) return 0;
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  u8 op = BUFFERIZE_NODES[idx].op;
+  u8 ar = uop_arity(op);
+  for (u8 s = 0; s < ar; s++) {
+    Term ch = term_resolve(heap_read(loc + s));
+    if (term_tag(ch) != TAG_UOP) continue;
+    u8 cop = term_ext(ch);
+    if (cop == UOP_KERNEL) continue;
+    u64 cloc = term_val(ch);
+    if (cop == UOP_REDUCE) return 1;
+    // Stop descending at an already-realized boundary -- it's a separate
+    // kernel whose output this node READS, not a fusable recompute source.
+    u32 cidx = bufferize_info_find(cloc);
+    if (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized) continue;
+    int child_ew = uop_is_unary_elementwise(cop)
+                || uop_is_binary_elementwise(cop)
+                || uop_is_ternary_elementwise(cop);
+    if (child_ew || uop_is_movement(cop)) {
+      if (bufferize_elementwise_src_has_reduce(cloc, depth + 1)) return 1;
+    }
+  }
+  return 0;
+}
+
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   // Always touch the bufferize graph so its state stays in sync with
@@ -754,7 +792,27 @@ fn void bufferize_classify(Term root) {
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->consumer_count >= 2) {
-        bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+        // Mirror tinygrad: a multi-consumer REDUCE-EPILOGUE elementwise is
+        // NOT pre-realized.  tinygrad's pm_generate_realize_map seeds only
+        // COPY/CONTIGUOUS/STORE (indexing.py:28-35); a multi-consumer
+        // elementwise that consumes a reduce fuses (recomputes) into each
+        // consumer's kernel rather than materializing.  thvm's blanket MULTI
+        // seed force-realized every such epilogue, emitting an extra kernel
+        // per reduce.  Skip the seed only when the node is elementwise AND
+        // its recompute source reaches a REDUCE (the epilogue case) -- the
+        // unified consumer-divergence walk then realizes it only on genuine
+        // range divergence and otherwise recomputes, matching tinygrad
+        // (verified: tinygrad fuses such chains into one kernel).  A reduce-
+        // FREE shared subexpression keeps the MULTI seed so the existing
+        // bufferize-telemetry / diamond-fanout tests stay green.
+        int ew = uop_is_unary_elementwise(info->op)
+              || uop_is_binary_elementwise(info->op)
+              || uop_is_ternary_elementwise(info->op);
+        int src_has_reduce = ew
+            && bufferize_elementwise_src_has_reduce(info->loc, 0);
+        if (!(ew && src_has_reduce)) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+        }
       }
       if (info->op == UOP_REDUCE) {
         // Only MATMUL REDUCEs stay as boundaries (mirrors tinygrad's
