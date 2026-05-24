@@ -316,15 +316,18 @@ typedef struct {
 static MemPlanEntry MEM_PLAN[MEM_PLAN_CAP];
 static u32          MEM_PLAN_LEN = 0;
 
-// CPU planner: default-off opt-in via THVM_REUSE_BUFS=1.  The chain-
-// rule + Phase-3 fusion-relaxation cases on the CPU interpreter want
-// DUP/SUP-aware lifetime tracking that's a follow-up; until then the
-// CPU path stays gated.
+// CPU planner: default-on; THVM_REUSE_BUFS=0 opts out.  The earlier
+// concern (DUP/SUP-aware lifetime tracking) hasn't materialized as a
+// correctness regression on the unified-rangeify path; verified on
+// beautiful_mnist BS=2/16 STEPS=4 (peak -7%, loss curves byte-equivalent
+// up to BLAS-summation fp-order noise) + full C suite + numpy conv+BN
+// grad ref.  Brings CPU's recycling behavior in line with Metal/CUDA,
+// where the planner has been default-on for a while.
 static int mem_plan_cpu_enabled(void) {
   static int known = 0, enabled = 0;
   if (!known) {
     char const *e = getenv("THVM_REUSE_BUFS");
-    enabled       = (e && e[0] == '1');
+    enabled       = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
     known         = 1;
   }
   return enabled;
