@@ -54,6 +54,17 @@ _GRAD_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
 _PIN_NEXT = 1
 
 
+def _term_is_assign(t: int) -> bool:
+    """True iff term `t` is a TAG_UOP whose opcode is UOP_ASSIGN.  Used
+    by Tensor.realize to gate the realize_many bundle: pure-elementwise
+    bundles share forward intermediates via the cross-realize loc->tid
+    cache (schedule/materialize.c), but ASSIGN bundles must run
+    one-at-a-time to avoid in-place buffer aliasing across siblings."""
+    if _TH.term_tag(t) != K.TAG_UOP:
+        return False
+    return _TH.term_ext(t) == K.ASSIGN
+
+
 def _wrap_other(self_t: "Tensor", other) -> "Tensor":
     """Coerce a Python scalar (or Tensor) into a Tensor matching self's
     dtype.  Broadcasts to self.shape when other is a scalar."""
@@ -199,20 +210,39 @@ class Tensor:
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
         """Drive thvm's pipeline; mutates `term` to the resulting
-        TAG_TEN.  Extra tensors realize too (tinygrad pattern), each in
-        its own pass.
+        TAG_TEN.  When the input set is ASSIGN-free we bundle through
+        realize_many so the shared forward intermediates inside
+        backward grad chains get emitted once per pass (the
+        cross-realize loc -> tid cache in schedule/materialize.c lives
+        for one realize call's scope -- mirrors tinygrad's
+        per-schedule _realize_cache).
 
-        NOTE: do NOT bundle self+lst into one realize_many pass here.
-        Bundling fixed a CPU Adam corruption (an in-place ASSIGN read by
-        another assign re-firing) but REGRESSED CUDA to NaN (CUDA's
-        default-on per-realize buffer reuse races the bundled in-place
-        assigns).  The Adam corruption is instead fixed at the source in
-        optim.Adam._step (m,v realized before the param update reads
-        them), so per-tensor realize is correct on every backend."""
-        self.term = _TH.realize(self.term)
+        ASSIGN-bearing bundles still go per-tensor: a bundled
+        realize_many of multiple in-place ASSIGNs lets the buffer
+        planner alias across siblings, which racing reads can corrupt
+        (the previous "CUDA NaN under bundling" failure mode -- still
+        latent on CPU when an ASSIGN's src reads a sibling's already-
+        written buffer).  Adam/SGD _step build pure-ASSIGN bundles, so
+        their realize(*mv) and realize(*out) paths stay one-at-a-time;
+        loss.realize(*grads) is ASSIGN-free and bundles."""
+        if not lst:
+            self.term = _TH.realize(self.term)
+            self._pin()
+            return self
+        terms_all = [self.term] + [x.term for x in lst]
+        has_assign = any(_term_is_assign(t) for t in terms_all)
+        if has_assign:
+            self.term = _TH.realize(self.term)
+            self._pin()
+            for x in lst:
+                x.realize()
+            return self
+        out = _TH.realize_many(terms_all)
+        self.term = out[0]
         self._pin()
-        for x in lst:
-            x.realize()
+        for x, r in zip(lst, out[1:]):
+            x.term = r
+            x._pin()
         return self
 
     def contiguous(self) -> "Tensor":
