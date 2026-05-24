@@ -349,6 +349,13 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   //    to rebuild on next allocation.
   uop_const_cache_reset();
   uop_mov_cache_reset();
+  // The cross-realize loc -> tid cache (schedule/materialize.c) keys
+  // off heap loc; after Cheney compacts the heap those locs name
+  // entirely different cells (or fall outside HEAP_NEXT).  Clear so
+  // a stale loc never resolves to an unrelated tid.  Cost: lose the
+  // cross-realize sharing on the first realize after a GC; the next
+  // emit_kernel_for_boundary repopulates it.
+  materialized_loc_clear();
 
   // 5. Swap from / to.
   u64 swap_start = GC_FROM_START, swap_end = GC_FROM_END;

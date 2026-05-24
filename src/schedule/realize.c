@@ -65,6 +65,14 @@ fn Term thvm_realize(Term expr) {
 #endif
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
+  // Start with a clean cross-realize loc -> tid cache so a prior
+  // realize's intermediate (whose buffer may have been pool-rolled-
+  // back) cannot alias a later realize's input.  Tests that call
+  // bufferize_classify / thvm_materialize directly bypass realize
+  // entirely and so never see a populated cache (gated by the scope
+  // counter below).
+  materialized_loc_clear();
+  materialized_loc_scope_enter();
 
   // wnf is the only reducer -- `nf` is the inspector primitive (see
   // wnf/nf.c), NOT in this hot path.
@@ -187,6 +195,18 @@ fn Term thvm_realize(Term expr) {
   }
   if (!kgc_disabled_env) kernel_gc_sweep(res);
 
+  // Cross-realize loc -> tid cache: scoped to ONE realize call so a
+  // forward intermediate emitted as a kernel mid-pass stays reachable
+  // for sibling children inside the same materialize loop (the
+  // multi-root grad share that drove the cache addition), but does
+  // NOT survive the pool-rollback -- whose freelist push would alias
+  // a future allocation to the cached tid and corrupt subsequent
+  // grad reads (BN-grad NaN repro).  Mirrors tinygrad's per-schedule
+  // _realize_cache lifetime: the cache lives only inside one
+  // run_rangeify call.
+  materialized_loc_clear();
+  materialized_loc_scope_leave();
+
   return res;
 }
 
@@ -216,6 +236,9 @@ fn Term thvm_realize_many(Term ctr_term) {
 #endif
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
+  // Start with a clean cross-realize loc -> tid cache (see thvm_realize).
+  materialized_loc_clear();
+  materialized_loc_scope_enter();
   u32 kn_at_call_start = KERNELS_NEXT;
 
   Term res = ctr_term;
@@ -293,5 +316,11 @@ fn Term thvm_realize_many(Term ctr_term) {
     kgc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
   }
   if (!kgc_disabled_env) kernel_gc_sweep(res);
+
+  // Same lifetime as thvm_realize: drop the loc -> tid cache before
+  // returning so non-preserved bufs (pool-rollback-recycled) can't be
+  // re-handed-out under the same cached tid in a future realize call.
+  materialized_loc_clear();
+  materialized_loc_scope_leave();
   return res;
 }

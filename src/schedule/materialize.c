@@ -70,6 +70,157 @@ static void boundary_hash_insert(u64 loc, u32 idx) {
   }
 }
 
+// Persistent loc -> tid cache: once emit_kernel_for_boundary realizes
+// a UOP at heap address `loc` into a kernel whose output is TENS[tid],
+// remember the mapping so a subsequent realize call hitting the same
+// UOP loc (typical for forward intermediates shared across multiple
+// backward grad targets) short-circuits to TAG_TEN(tid) instead of
+// re-bufferizing + re-emitting the same kernel.  Mirror context:
+// tinygrad/schedule/indexing.py:pm_generate_realize_map memoizes
+// realized UOps via the per-UOp .buffer attribute on the lazy graph
+// (engine/realize.py:lower_uop -> sched.metadata['_realize_cache']);
+// once a UOp is scheduled, downstream schedules read its assigned
+// Buffer instead of re-lowering.  thvm has no per-UOp .buffer field --
+// the source UOPs live in the read-only dyn heap -- so we keep the
+// mapping in a side hash keyed by heap loc.
+//
+// Bounded scan; the cap above absorbs hash collisions.  Cleared on
+// kernel-GC sweep (kernel_gc.c) so a recycled tid never aliases an
+// orphaned UOP loc, and on tens-arena rewind (gc_collect) so a
+// reclaimed loc never lives in the table referencing a stale tid.
+#define MATERIALIZED_LOC_CAP    (1u << 17)        // 128K slots
+#define MATERIALIZED_LOC_EMPTY  0
+typedef struct {
+  u64 loc;
+  u32 tid;
+} MaterializedLocEntry;
+static MaterializedLocEntry MATERIALIZED_LOC_TABLE[MATERIALIZED_LOC_CAP];
+static u32                  MATERIALIZED_LOC_LEN = 0;
+
+// In-realize scope counter: thvm_realize / thvm_realize_many bracket
+// their bodies with materialized_loc_scope_{enter,leave}.  The cache
+// is consulted by thvm_materialize ONLY when depth > 0 -- tests that
+// call thvm_materialize / bufferize_classify directly (without going
+// through a realize wrapper) skip the cross-realize substitution so
+// their fresh terms aren't unexpectedly rewritten by stale cache
+// entries left over from earlier tests in the same binary.
+static u32 MATERIALIZE_SCOPE_DEPTH = 0;
+fn void materialized_loc_scope_enter(void) { MATERIALIZE_SCOPE_DEPTH++; }
+fn void materialized_loc_scope_leave(void) {
+  if (MATERIALIZE_SCOPE_DEPTH > 0) MATERIALIZE_SCOPE_DEPTH--;
+}
+fn u32  materialized_loc_scope_depth(void) { return MATERIALIZE_SCOPE_DEPTH; }
+
+static inline u32 materialized_loc_hash(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (MATERIALIZED_LOC_CAP - 1);
+}
+
+fn void materialized_loc_clear(void) {
+  for (u32 i = 0; i < MATERIALIZED_LOC_CAP; i++) {
+    MATERIALIZED_LOC_TABLE[i].loc = MATERIALIZED_LOC_EMPTY;
+    MATERIALIZED_LOC_TABLE[i].tid = 0;
+  }
+  MATERIALIZED_LOC_LEN = 0;
+}
+
+fn u32 materialized_loc_lookup(u64 loc) {
+  if (loc == 0) return 0;
+  u32 h = materialized_loc_hash(loc);
+  for (u32 probe = 0; probe < MATERIALIZED_LOC_CAP; probe++) {
+    u32 i = (h + probe) & (MATERIALIZED_LOC_CAP - 1);
+    if (MATERIALIZED_LOC_TABLE[i].loc == MATERIALIZED_LOC_EMPTY) return 0;
+    if (MATERIALIZED_LOC_TABLE[i].loc == loc) {
+      u32 tid = MATERIALIZED_LOC_TABLE[i].tid;
+      // Defensive: a cleared/recycled tid (TENS_NEXT shrank past it)
+      // must not be returned -- caller would build a dangling TAG_TEN.
+      if (tid == 0 || tid >= TENS_NEXT) return 0;
+      return tid;
+    }
+  }
+  return 0;
+}
+
+fn void materialized_loc_insert(u64 loc, u32 tid) {
+  if (loc == 0 || tid == 0) return;
+  // Bail when the table is mostly full; the lookup degrades to a long
+  // miss probe otherwise.  Caller falls back to re-emit (correctness
+  // intact, just no cross-realize savings).
+  if (MATERIALIZED_LOC_LEN * 2 > MATERIALIZED_LOC_CAP) return;
+  u32 h = materialized_loc_hash(loc);
+  for (u32 probe = 0; probe < MATERIALIZED_LOC_CAP; probe++) {
+    u32 i = (h + probe) & (MATERIALIZED_LOC_CAP - 1);
+    if (MATERIALIZED_LOC_TABLE[i].loc == MATERIALIZED_LOC_EMPTY) {
+      MATERIALIZED_LOC_TABLE[i].loc = loc;
+      MATERIALIZED_LOC_TABLE[i].tid = tid;
+      MATERIALIZED_LOC_LEN++;
+      return;
+    }
+    if (MATERIALIZED_LOC_TABLE[i].loc == loc) {
+      // Already present: update tid (a re-emit in the same pass replaced
+      // the prior kernel; keep the newer mapping).
+      MATERIALIZED_LOC_TABLE[i].tid = tid;
+      return;
+    }
+  }
+}
+
+// Recursive in-place substitution of cached UOP descendants with
+// TAG_TEN leaves.  Walks parent UOPs (NEVER UOP_KERNEL, NEVER
+// UOP_ASSIGN -- those are stop points for the materialize entry
+// path) and for each child cell, if the child is a UOP at a cached
+// loc, heap_set the parent cell to TAG_TEN.  Otherwise recurse.
+// Visited bitmap bounds revisits per call.
+static void materialize_subst_cached_rec(Term term, u8 *visited, u64 cap) {
+  if (term_tag(term) != TAG_UOP) return;
+  u32 op = term_ext(term);
+  if (op == UOP_KERNEL) return;
+  if (op == UOP_ASSIGN) {
+    // ASSIGN(dst, src): walk only the src; dst is a TAG_TEN reference
+    // and shouldn't be substituted.  ASSIGN's own loc isn't subject
+    // to the cache (we don't cache ASSIGN emits).
+    u64 loc = term_val(term);
+    if (loc >= cap || visited[loc]) return;
+    visited[loc] = 1;
+    Term src = heap_read(loc + 1);
+    if (term_tag(src) == TAG_UOP) {
+      u32 cached_tid = materialized_loc_lookup(term_val(src));
+      if (cached_tid != 0) {
+        heap_set(loc + 1, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
+      } else {
+        materialize_subst_cached_rec(src, visited, cap);
+      }
+    }
+    return;
+  }
+  u64 loc = term_val(term);
+  if (loc >= cap || visited[loc]) return;
+  visited[loc] = 1;
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    Term child = heap_read(loc + i);
+    if (term_tag(child) != TAG_UOP) continue;
+    if (term_ext(child) == UOP_KERNEL) continue;
+    u32 cached_tid = materialized_loc_lookup(term_val(child));
+    if (cached_tid != 0) {
+      heap_set(loc + i, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
+    } else {
+      materialize_subst_cached_rec(child, visited, cap);
+    }
+  }
+}
+
+static void materialize_subst_cached_inplace(Term root) {
+  if (term_tag(root) != TAG_UOP) return;
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
+  if (visited == NULL) return;
+  materialize_subst_cached_rec(root, visited, cap);
+  free(visited);
+}
+
 #define BOUNDARY_DEPTH_INVALID 0xFFFFFFFFu
 static u32 BOUNDARY_DEPTH    [BUFFERIZE_NODES_CAP];
 // Per-boundary maximum-consumer depth.  Filled after topo by
@@ -2034,9 +2185,20 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_PAD:         return "PAD";
     case UOP_SHRINK:      return "SHRINK";
     case UOP_FLIP:        return "FLIP";
+    case UOP_ADD:         return "ADD";
+    case UOP_MUL:         return "MUL";
+    case UOP_NEG:         return "NEG";
+    case UOP_RECIP:       return "RECIP";
+    case UOP_EXP2:        return "EXP2";
+    case UOP_LOG2:        return "LOG2";
+    case UOP_SQRT:        return "SQRT";
     case UOP_CMPLT:       return "CMPLT";
+    case UOP_CMPEQ:       return "CMPEQ";
     case UOP_REDUCE:      return "REDUCE";
     case UOP_LOAD:        return "LOAD";
+    case UOP_ASSIGN:      return "ASSIGN";
+    case UOP_CAST:        return "CAST";
+    case UOP_BITCAST:     return "BITCAST";
     case UOP_RANGE:       return "RANGE";
     case UOP_INDEX_E:     return "INDEX_E";
     case UOP_IADD:        return "IADD";
@@ -2047,6 +2209,7 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_BUFFER:      return "BUFFER";
     case UOP_STORE:       return "STORE";
     case UOP_BUFFERIZE:   return "BUFFERIZE";
+    case UOP_DETACH:      return "DETACH";
     default:              return "?";
   }
 }
@@ -3135,6 +3298,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     return ref;
   }
 
+  // Cross-realize alias: if a previous realize pass already produced
+  // a TenDesc for this UOP loc, plug it in as an input slot here too.
+  // Matches the materialize-entry short-circuit so a forward
+  // intermediate realized in pass N stays reachable in pass N+1's
+  // kernels (and is never re-emitted).  Mirror: tinygrad's
+  // pm_generate_realize_map memoizes UOp -> Buffer on the lazy graph;
+  // each subsequent schedule sees the prior Buffer attached.
   // Boundary that isn't this kernel's root: become an input.  The
   // upstream boundary was emitted earlier in topo order, so its
   // BOUNDARY_TID slot is populated.
@@ -3556,6 +3726,21 @@ static Term emit_kernel_for_boundary(u32 bi) {
                     CURRENT_BACKEND);
   }
 
+  if (getenv("THVM_DUMP_KERNEL_SHAPE")) {
+    fprintf(stderr, "KSHAPE kid=%u op=%s shape=[", kid, bypass_dbg_op_name(op));
+    for (u32 i = 0; i < out_shape.ndim; i++) {
+      fprintf(stderr, "%s%u", i ? "," : "", out_shape.dims[i]);
+    }
+    fprintf(stderr, "] depth=%u\n", this_depth);
+  }
+
+  // Persist loc -> tid so a later realize pass that walks the same
+  // UOP loc (a shared forward intermediate referenced by multiple
+  // grad targets) substitutes to a TAG_TEN leaf instead of
+  // re-emitting an identical kernel.  See MATERIALIZED_LOC_TABLE
+  // comment above for full rationale.
+  materialized_loc_insert(boundary_loc, out_tid);
+
   return kernel_term;
 }
 
@@ -3694,6 +3879,33 @@ fn Term thvm_materialize(Term term) {
   }
   if (term_tag(term) != TAG_UOP)        return term;
   if (term_ext(term) == UOP_KERNEL)     return term;
+
+  // Cross-realize alias short-circuit.  If a previous realize pass
+  // already emitted a kernel for the UOP at this heap loc (a shared
+  // forward intermediate referenced by multiple grad targets, the
+  // dominant cross-realize over-emission pattern), return the prior
+  // kernel's output as a TAG_TEN leaf so we don't re-bufferize or
+  // re-emit an identical kernel.  See MATERIALIZED_LOC_TABLE.
+  // Cross-realize cache short-circuits only fire when called from
+  // inside a realize wrapper (thvm_realize / thvm_realize_many).
+  // Tests that drive thvm_materialize directly want the unsubstituted
+  // path; the scope counter gates this.
+  if (materialized_loc_scope_depth() > 0) {
+    u32 cached_tid = materialized_loc_lookup(term_val(term));
+    if (cached_tid != 0) {
+      return term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid);
+    }
+    // Pre-substitute cached UOP descendants with TAG_TEN leaves so
+    // the bufferize_classify walk that follows sees an "external"
+    // tensor wherever a previous realize pass produced one.  Without
+    // this, an interior UOP at a cached loc would otherwise be
+    // re-classified / re-emitted as a fresh boundary even though its
+    // kernel and output buffer already exist from the prior pass.
+    // Mirror: tinygrad's pm_generate_realize_map memoizes UOp ->
+    // Buffer on the lazy graph and downstream schedules read the
+    // prior Buffer.
+    materialize_subst_cached_inplace(term);
+  }
   // DETACH is a stop-gradient marker with identity runtime semantics;
   // by materialize time the backward is already built, so unwrap it to
   // its src (no kernel/render/walker path ever needs to know about it).

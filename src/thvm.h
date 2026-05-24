@@ -1881,6 +1881,24 @@ fn u32 view_strided_index(View const *v, u32 flat_idx);
 // nviews == 0, equivalent to view_strided_index(&t->view, ...).
 fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 
+// Cross-realize loc -> tid cache (defined in schedule/materialize.c).
+// Records the TenDesc tid produced by each emitted kernel's source UOP
+// heap loc.  Consulted by:
+//   - thvm_materialize entry, to short-circuit a UOP whose previous
+//     realize pass already produced a TenDesc;
+//   - bufferize_walk_rec (schedule/bufferize_classify.c), to stop the
+//     classify walk at a cached UOP so subsequent passes do not
+//     re-bufferize+re-emit a shared forward intermediate the first
+//     pass already realized.
+// Cleared by tracing GC + kernel GC sweeps when their respective IDs
+// move/recycle.
+fn u32  materialized_loc_lookup       (u64 loc);
+fn void materialized_loc_insert       (u64 loc, u32 tid);
+fn void materialized_loc_clear        (void);
+fn void materialized_loc_scope_enter  (void);
+fn void materialized_loc_scope_leave  (void);
+fn u32  materialized_loc_scope_depth  (void);
+
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).
 fn View view_create(Shape shape);
