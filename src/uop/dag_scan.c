@@ -1805,3 +1805,419 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
   }
   return n;
 }
+
+// === DAG-side generalized-contraction extractor =======================
+//
+// Walks an INDEX_E's symbolic address and, for every distinct UOP_RANGE
+// axis_id it references, accumulates the linear coefficient that range
+// contributes to the address.  Supports the lift_scalar_index shape
+// where the address is a left-leaning IADD chain whose leaves are one
+// of {RANGE, IMUL(RANGE, ICONST), IMUL(ICONST, RANGE), ICONST}.  Bare
+// ICONST leaves are accumulated as an absolute offset.
+//
+// On success:
+//   *n_out                = number of distinct axes (0..cap)
+//   out_axis_ids[k]       = axis_id of the k-th distinct axis
+//   out_coeffs[k]         = total linear coefficient (sum of arms with
+//                           that axis_id; typically 1 arm per axis)
+//   *out_offset           = sum of bare ICONST leaves (signed-safe via i32 cast)
+//   *out_ok = 1 on full decode; 0 on bail (unrecognized leaf shape).
+//
+// Used by the contraction classifier to map per-operand address shapes
+// to (M, N, K)-axis classification + stride extraction.
+#define UDG_CONTRACT_MAX_AXES 8
+typedef struct {
+  u32 axis_ids[UDG_CONTRACT_MAX_AXES];
+  u32 coeffs  [UDG_CONTRACT_MAX_AXES];
+  u32 n_axes;
+  i32 offset;
+  int ok;
+} UdgAddrCoeffs;
+
+static int udg_addr_accumulate(UdgAddrCoeffs *a, u32 axis_id, u32 coeff) {
+  for (u32 i = 0; i < a->n_axes; i++) {
+    if (a->axis_ids[i] == axis_id) {
+      // Same axis appearing twice in the address (e.g. lifter merged two
+      // arms): accumulate coefficients.
+      a->coeffs[i] += coeff;
+      return 1;
+    }
+  }
+  if (a->n_axes >= UDG_CONTRACT_MAX_AXES) return 0;
+  a->axis_ids[a->n_axes] = axis_id;
+  a->coeffs  [a->n_axes] = coeff;
+  a->n_axes++;
+  return 1;
+}
+
+static void udg_decode_addr_coeffs(Term addr, UdgAddrCoeffs *out) {
+  out->n_axes = 0;
+  out->offset = 0;
+  out->ok     = 0;
+
+  // Bare RANGE (single-axis address): coeff = 1.
+  if (term_tag(addr) == TAG_UOP && term_ext(addr) == UOP_RANGE) {
+    if (!udg_addr_accumulate(out, uop_range_axis_id(addr), 1)) return;
+    out->ok = 1;
+    return;
+  }
+  // Bare CONST (degenerate, no ranges).
+  i32 cv = 0;
+  if (udg_match_iconst_signed(addr, &cv)) {
+    out->offset = cv;
+    out->ok = 1;
+    return;
+  }
+  // IMUL(RANGE, CONST) leaf at top level (single non-unit-coeff axis).
+  Term mul_inner = 0; u32 mul_coeff = 0;
+  if (udg_match_imul_const(addr, &mul_inner, &mul_coeff)) {
+    if (term_tag(mul_inner) != TAG_UOP || term_ext(mul_inner) != UOP_RANGE) return;
+    if (!udg_addr_accumulate(out, uop_range_axis_id(mul_inner), mul_coeff)) return;
+    out->ok = 1;
+    return;
+  }
+  // IADD chain.  Flatten and decode every leaf.
+  Term leaves[UDG_CONV_ADDR_MAX_LEAVES] = {0};
+  u32  n_leaves = udg_flatten_iadd(addr, leaves, UDG_CONV_ADDR_MAX_LEAVES);
+  if (n_leaves == 0) return;
+  for (u32 i = 0; i < n_leaves; i++) {
+    Term t = leaves[i];
+    if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE) {
+      if (!udg_addr_accumulate(out, uop_range_axis_id(t), 1)) return;
+      continue;
+    }
+    i32 ival = 0;
+    if (udg_match_iconst_signed(t, &ival)) {
+      out->offset += ival;
+      continue;
+    }
+    Term m_inner = 0; u32 m_coeff = 0;
+    if (udg_match_imul_const(t, &m_inner, &m_coeff)
+        && term_tag(m_inner) == TAG_UOP && term_ext(m_inner) == UOP_RANGE) {
+      if (!udg_addr_accumulate(out, uop_range_axis_id(m_inner), m_coeff)) return;
+      continue;
+    }
+    // Unrecognized arm (IDIV/IMOD/IWHERE for conv2d-flat).  Bail.
+    return;
+  }
+  out->ok = 1;
+}
+
+// Look up the coefficient for an axis_id in a decoded address.  Returns
+// 0 if the axis isn't referenced.
+static u32 udg_addr_lookup(UdgAddrCoeffs const *a, u32 axis_id) {
+  for (u32 i = 0; i < a->n_axes; i++) {
+    if (a->axis_ids[i] == axis_id) return a->coeffs[i];
+  }
+  return 0;
+}
+
+// Find the UOP_RANGE leaf in the kernel DAG with the requested axis_id
+// and return its extent (statically resolved if a literal; max upper
+// bound if a kvar).  0 if not found.
+static u32 udg_axis_extent(Term root, u32 want_axis_id) {
+  if (root == 0 || term_tag(root) != TAG_UOP) return 0;
+  Term stack[256];
+  u32 sp = 0;
+  stack[sp++] = root;
+  while (sp > 0) {
+    Term t = stack[--sp];
+    if (term_tag(t) != TAG_UOP) continue;
+    u32 op = term_ext(t);
+    if (op == UOP_RANGE) {
+      if (uop_range_axis_id(t) == want_axis_id) return uop_range_static_extent(t);
+      continue;
+    }
+    if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
+    if (op == UOP_OPT) {
+      Term tgt = uop_opt_target(t);
+      if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
+      continue;
+    }
+    u8 ar = uop_arity(op);
+    u64 loc = term_val(t);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
+      Term child = heap_read(loc + i);
+      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    }
+  }
+  return 0;
+}
+
+// Public entry: classify the kernel as a generalized tensor contraction
+// (M-axes, N-axes, single K-axis) and recover the batched-GEMM dispatch
+// shape.  See thvm.h for the contract.
+//
+// Strategy:
+//   1. Peel optional UOP_OPT(_, TC) wrapper from STORE.value.
+//   2. Verify STORE.value is REDUCE(MUL(INDEX_E(A, addr_a),
+//                                       INDEX_E(B, addr_b))) with
+//      A != B and kind == REDUCE_SUM.
+//   3. Decode addr_a, addr_b, addr_out via udg_decode_addr_coeffs.
+//   4. Reduce axis must reference exactly ONE axis (single K), and that
+//      axis must appear in BOTH addr_a and addr_b but NOT in addr_out.
+//   5. Partition: M_axes = (addr_b minus K, must equal addr_out minus N_axes).
+//                 N_axes = (addr_a minus K, must equal addr_out minus M_axes).
+//   6. Verify the N-axis composition in addr_a (= addr_out) is contiguous
+//      with stride product N_total, matching K's stride in A == N_total.
+//   7. Identify the "batch" M-axis as the M-axis with the LARGEST stride
+//      in B, and verify its stride == K_extent * inner_M_total.
+//      Remaining M-axes (inner_M) must be contiguous in B with strides
+//      matching their composition (stride product == inner_M_total).
+//   8. Verify the output's M-axis strides match (batch outer stride =
+//      inner_M_total * N_total; inner M strides = N_total * inner stride).
+int uop_dag_classify_contraction_shape(Term root,
+                                       struct KernelEntry const *ke,
+                                       UopDagContractionShape *out) {
+  if (root == 0 || ke == NULL || out == NULL) return 0;
+  if (ke->n_inputs < 2) return 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+
+  // Peel optional UOP_OPT(_, TC) wrapper, structurally validate.
+  Term buf_out  = heap_read(term_val(root) + 0);
+  Term addr_out = heap_read(term_val(root) + 1);
+  Term value    = heap_read(term_val(root) + 2);
+  Term peeled   = udg_peel_tc_opt(value);
+  Term reduce   = peeled;
+  if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
+  u64 rloc = term_val(reduce);
+  u32 rkind = (u32)term_val(heap_read(rloc + 1));
+  if (rkind != REDUCE_SUM) return 0;
+  u32 red_axis_id = (u32)term_val(heap_read(rloc + 2));
+  Term mul = heap_read(rloc + 0);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term a_idx = heap_read(term_val(mul) + 0);
+  Term b_idx = heap_read(term_val(mul) + 1);
+  if (term_tag(a_idx) != TAG_UOP || term_ext(a_idx) != UOP_INDEX_E) return 0;
+  if (term_tag(b_idx) != TAG_UOP || term_ext(b_idx) != UOP_INDEX_E) return 0;
+
+  Term buf_a = heap_read(term_val(a_idx) + 0);
+  Term buf_b = heap_read(term_val(b_idx) + 0);
+  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
+  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
+  if (term_val(buf_a) == term_val(buf_b)) return 0;
+  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
+  u32 inst_a = uop_buffer_inst_get(buf_a);
+  u32 inst_b = uop_buffer_inst_get(buf_b);
+  if (inst_a == 0 || inst_b == 0) return 0;
+  u32 a_input = inst_a - 1;
+  u32 b_input = inst_b - 1;
+  if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) return 0;
+
+  Term addr_a = heap_read(term_val(a_idx) + 1);
+  Term addr_b = heap_read(term_val(b_idx) + 1);
+
+  UdgAddrCoeffs ca = {0}, cb = {0}, co = {0};
+  udg_decode_addr_coeffs(addr_a,  &ca);
+  udg_decode_addr_coeffs(addr_b,  &cb);
+  udg_decode_addr_coeffs(addr_out,&co);
+  if (!ca.ok || !cb.ok || !co.ok) return 0;
+  // Any non-zero address offsets => non-contiguous storage we don't
+  // currently route.  Bail.
+  if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) return 0;
+
+  // K axis: in A, in B, not in output.
+  u32 K_in_a = udg_addr_lookup(&ca, red_axis_id);
+  u32 K_in_b = udg_addr_lookup(&cb, red_axis_id);
+  u32 K_in_o = udg_addr_lookup(&co, red_axis_id);
+  if (K_in_a == 0 || K_in_b == 0 || K_in_o != 0) return 0;
+  u32 K_extent = udg_axis_extent(root, red_axis_id);
+  if (K_extent == 0) return 0;
+
+  // Output axes: every output axis must appear in EITHER A or B (not
+  // both) -- if in A only it's an N-axis; if in B only it's an M-axis.
+  // Build M_axes (axis_id, extent, B_coeff, OUT_coeff) and N_axes
+  // (axis_id, extent, A_coeff, OUT_coeff).
+  typedef struct { u32 axis_id; u32 extent; u32 b_coeff; u32 out_coeff; } UdgMAxis;
+  typedef struct { u32 axis_id; u32 extent; u32 a_coeff; u32 out_coeff; } UdgNAxis;
+  UdgMAxis M_axes[UDG_CONTRACT_MAX_AXES];
+  UdgNAxis N_axes[UDG_CONTRACT_MAX_AXES];
+  u32 n_M = 0, n_N = 0;
+  for (u32 i = 0; i < co.n_axes; i++) {
+    u32 aid = co.axis_ids[i];
+    u32 oc  = co.coeffs  [i];
+    if (oc == 0) return 0;
+    u32 a_c = udg_addr_lookup(&ca, aid);
+    u32 b_c = udg_addr_lookup(&cb, aid);
+    u32 ext = udg_axis_extent(root, aid);
+    if (ext == 0) return 0;
+    if (a_c != 0 && b_c == 0) {
+      if (n_N >= UDG_CONTRACT_MAX_AXES) return 0;
+      N_axes[n_N].axis_id   = aid;
+      N_axes[n_N].extent    = ext;
+      N_axes[n_N].a_coeff   = a_c;
+      N_axes[n_N].out_coeff = oc;
+      n_N++;
+    } else if (b_c != 0 && a_c == 0) {
+      if (n_M >= UDG_CONTRACT_MAX_AXES) return 0;
+      M_axes[n_M].axis_id   = aid;
+      M_axes[n_M].extent    = ext;
+      M_axes[n_M].b_coeff   = b_c;
+      M_axes[n_M].out_coeff = oc;
+      n_M++;
+    } else {
+      // Either in both inputs (would-be K, but already excluded), or in
+      // neither, or in output only -- not a clean contraction.
+      return 0;
+    }
+  }
+  if (n_M == 0 || n_N == 0) return 0;
+
+  // Every axis referenced by A must be K or one of the N_axes, and
+  // every axis referenced by B must be K or one of the M_axes.  This
+  // guarantees we've found the FULL contraction shape.
+  for (u32 i = 0; i < ca.n_axes; i++) {
+    u32 aid = ca.axis_ids[i];
+    if (aid == red_axis_id) continue;
+    int found = 0;
+    for (u32 j = 0; j < n_N; j++) if (N_axes[j].axis_id == aid) { found = 1; break; }
+    if (!found) return 0;
+  }
+  for (u32 i = 0; i < cb.n_axes; i++) {
+    u32 aid = cb.axis_ids[i];
+    if (aid == red_axis_id) continue;
+    int found = 0;
+    for (u32 j = 0; j < n_M; j++) if (M_axes[j].axis_id == aid) { found = 1; break; }
+    if (!found) return 0;
+  }
+
+  // Compute N_total = product of N_axes extents.
+  u64 N_total = 1;
+  for (u32 i = 0; i < n_N; i++) N_total *= N_axes[i].extent;
+  if (N_total == 0 || N_total > 0x7fffffffULL) return 0;
+
+  // A operand: must be a clean (K, N) row-major slice.
+  //   Sort N_axes by descending a_coeff.  Expected layout: largest
+  //   a_coeff first, each subsequent coeff = prev_coeff / prev_extent,
+  //   smallest coeff == 1, and K_in_a == N_total.
+  if ((u32)N_total != K_in_a) return 0;
+  // Sort N_axes by descending a_coeff (insertion sort, n_N tiny).
+  for (u32 i = 1; i < n_N; i++) {
+    UdgNAxis tmp = N_axes[i];
+    i32 j = (i32)i - 1;
+    while (j >= 0 && N_axes[j].a_coeff < tmp.a_coeff) {
+      N_axes[j + 1] = N_axes[j];
+      j--;
+    }
+    N_axes[j + 1] = tmp;
+  }
+  // For sorted N_axes (descending stride), stride[n-1] == 1 and
+  // stride[i] * extent[i] == stride[i-1], with stride[0] * extent[0]
+  // == N_total.  Output address's coefficient for each N-axis must
+  // match the A operand's coefficient (since N-stride is identical in
+  // both A and output for a contiguous (M, N) output layout).
+  {
+    u64 acc = 1;
+    for (i32 i = (i32)n_N - 1; i >= 0; i--) {
+      if (N_axes[i].a_coeff != (u32)acc) return 0;
+      // Output address must match A's N-coefficient.
+      if (N_axes[i].out_coeff != (u32)acc) return 0;
+      acc *= N_axes[i].extent;
+    }
+    if (acc != N_total) return 0;
+  }
+
+  // M operand (B): identify batch axis as the M-axis with the LARGEST
+  // b_coeff.  Sort M_axes by descending b_coeff.
+  for (u32 i = 1; i < n_M; i++) {
+    UdgMAxis tmp = M_axes[i];
+    i32 j = (i32)i - 1;
+    while (j >= 0 && M_axes[j].b_coeff < tmp.b_coeff) {
+      M_axes[j + 1] = M_axes[j];
+      j--;
+    }
+    M_axes[j + 1] = tmp;
+  }
+  // For the simple batched-GEMM dispatch, decompose M as (batch =
+  // M_axes[0], inner_M = M_axes[1..n_M-1]).  Inner M axes must be
+  // contiguous in B with stride = product of extents to the right
+  // ending at 1.  Batch axis must have b_coeff = K_extent * inner_M_total.
+  // (When n_M == 1, batch == 1 and inner_M == M_axes[0].)
+  u64 inner_M_total = 1;
+  u32 batch         = 1;
+  if (n_M == 1) {
+    // Single M-axis: no batching needed (treat all of M as inner_M).
+    inner_M_total = M_axes[0].extent;
+    batch         = 1;
+    // For the inner_M block to be contiguous in B, b_coeff must equal 1,
+    // and K_in_b must equal inner_M_total (K stride == inner_M_total)
+    // OR b_coeff == K_extent and K_in_b == 1 (would be transposed; not
+    // currently routed -- bail).
+    if (M_axes[0].b_coeff != 1) return 0;
+    if (K_in_b != inner_M_total) return 0;
+  } else {
+    // batch = M_axes[0].extent, inner_M = remaining.
+    batch = M_axes[0].extent;
+    for (u32 i = 1; i < n_M; i++) inner_M_total *= M_axes[i].extent;
+    // Inner M axes contig in B.
+    u64 acc = 1;
+    for (i32 i = (i32)n_M - 1; i >= 1; i--) {
+      if (M_axes[i].b_coeff != (u32)acc) return 0;
+      acc *= M_axes[i].extent;
+    }
+    if (acc != inner_M_total) return 0;
+    // K's stride in B must equal inner_M_total (K immediately wraps
+    // inner_M in B's memory).
+    if (K_in_b != inner_M_total) return 0;
+    // Batch axis's stride in B must equal K_extent * inner_M_total
+    // (batch wraps the [K, inner_M] block).
+    u64 expect_batch_stride_b = (u64)K_extent * inner_M_total;
+    if (M_axes[0].b_coeff != (u32)expect_batch_stride_b) return 0;
+  }
+  if (inner_M_total == 0 || inner_M_total > 0x7fffffffULL) return 0;
+  u64 M_total = (u64)batch * inner_M_total;
+  if (M_total > 0x7fffffffULL) return 0;
+
+  // Verify OUTPUT M-axis strides.  M_axes is sorted by descending
+  // b_coeff which equals descending out_coeff (for a contiguous output
+  // layout where M comes before N).  Output layout: [batch, inner_M,
+  // N], strides [inner_M_total*N_total, N_total*(...), N_total].
+  // For n_M == 1: out_coeff of M_axes[0] should equal N_total.
+  // For n_M > 1: batch out_coeff = inner_M_total*N_total; subsequent
+  // inner-M out_coeff = N_total * (prefix of inner-M extents to the
+  // right).
+  {
+    u64 acc = N_total;
+    for (i32 i = (i32)n_M - 1; i >= 0; i--) {
+      if (M_axes[i].out_coeff != (u32)acc) return 0;
+      acc *= M_axes[i].extent;
+    }
+  }
+
+  // Verify per-buffer storage sizes.
+  u64 a_needed = (u64)K_extent * N_total;
+  u64 b_needed = (u64)batch * K_extent * inner_M_total;
+  u64 c_needed = (u64)batch * inner_M_total * N_total;
+  (void)c_needed;
+  if (uop_buffer_ndim(buf_a) == 0 || uop_buffer_ndim(buf_b) == 0) return 0;
+  // Storage-size cross-check on buffer dims:
+  u64 a_buf_prod = 1, b_buf_prod = 1;
+  for (u32 d = 0; d < uop_buffer_ndim(buf_a); d++)
+    a_buf_prod *= uop_buffer_dim(buf_a, d);
+  for (u32 d = 0; d < uop_buffer_ndim(buf_b); d++)
+    b_buf_prod *= uop_buffer_dim(buf_b, d);
+  if (a_buf_prod < a_needed) return 0;
+  if (b_buf_prod < b_needed) return 0;
+
+  // Uniform dtype check (matches uop_dag_classify_matmul_shape).
+  u32 dt = uop_buffer_dtype(buf_out);
+  if (dt != DT_FP32) return 0;       // only fp32 routed for now
+  if (uop_buffer_dtype(buf_a) != dt) return 0;
+  if (uop_buffer_dtype(buf_b) != dt) return 0;
+
+  out->dtype          = dt;
+  out->a_input        = a_input;
+  out->b_input        = b_input;
+  out->K              = K_extent;
+  out->N              = (u32)N_total;
+  out->inner_M        = (u32)inner_M_total;
+  out->batch          = batch;
+  out->ldA            = (u32)N_total;          // A's row stride in (K, N)
+  out->ldB            = (u32)inner_M_total;    // B's row stride in (K, inner_M)
+  out->ldC            = (u32)N_total;          // C's row stride in (inner_M, N)
+  out->batch_stride_a = 0;                     // A has no batch axis
+  out->batch_stride_b = (batch == 1) ? 0 : (u32)((u64)K_extent * inner_M_total);
+  out->batch_stride_c = (batch == 1) ? 0 : (u32)(inner_M_total * N_total);
+  out->flags          = 0;
+  return 1;
+}

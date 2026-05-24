@@ -2338,6 +2338,48 @@ int uop_dag_classify_gemv_shape(Term root,
 // shape lives in input_views, not in the lifted DAG.
 int uop_dag_classify_conv2d_flat_shape(Term root);
 
+// === Generalized contraction-shape extractor ==========================
+//
+// Covers a generalized tensor contraction of the form
+//
+//   out[M_axes, N_axes] = sum_{K} A[K_axis, N_axes] * B[M_axes, K_axis]
+//
+// (with M_axes and N_axes being compound, axis ordering arbitrary on
+// each operand).  The conv-backward x-gradient kernel
+// `out[a0,a1,a2,a3,a4,a5] = sum_{a6} W[a6,a3,a4,a5] * G[a0,a6,a1,a2]`
+// is the canonical instance: M=(a0,a1,a2), N=(a3,a4,a5), K=a6.  When
+// the strides on each side compose as a contiguous nest with at most
+// ONE outer "batch" M-axis (whose stride in B is K*inner_M, separating
+// the inner-M block from K), this dispatches as a batched cblas_sgemm
+// without materializing any permuted operand.
+//
+// Per-call GEMM layout (after batching over `batch`):
+//   sub_A : shape (K, N)                stride (ldA, 1)   -- W slice
+//   sub_B : shape (K, inner_M)          stride (ldB, 1)   -- G slice
+//   sub_C : shape (inner_M, N)          stride (ldC, 1)   -- out slice
+//   cblas_sgemm(RowMajor, Trans, NoTrans, inner_M, N, K,
+//               1, sub_B, ldB, sub_A, ldA, 0, sub_C, ldC)
+typedef struct {
+  u32 dtype;
+  u32 a_input;            // L (typically weights / "(K, N)")
+  u32 b_input;            // R (typically activations / "(M, K)" possibly batched)
+  u32 K;                  // reduce extent
+  u32 N;                  // product of N-axis extents (axes in A only)
+  u32 inner_M;            // product of M-axis extents excluding the batch axis
+  u32 batch;              // outer-loop iteration count (1 when no batch axis)
+  u32 ldA;                // leading dim for A's (K, N) slice    (== N here)
+  u32 ldB;                // leading dim for B's (K, inner_M) slice (== inner_M)
+  u32 ldC;                // leading dim for C's (inner_M, N) slice (== N)
+  u32 batch_stride_a;     // element-stride between A batches (0 if A has no batch axis)
+  u32 batch_stride_b;     // element-stride between B batches
+  u32 batch_stride_c;     // element-stride between C batches
+  u32 flags;              // reserved
+} UopDagContractionShape;
+
+int uop_dag_classify_contraction_shape(Term root,
+                                       struct KernelEntry const *ke,
+                                       UopDagContractionShape *out);
+
 // === conv2d-flat full-shape extractor ==================================
 // Inverts the conv2d-flat IDIV/IMOD address decomposition so the
 // conv2d shape facts can flow from the lifted DAG instead of from

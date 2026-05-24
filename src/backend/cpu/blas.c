@@ -28,6 +28,7 @@
 static u64 BLAS_GEMM_DISPATCH_DAG = 0;
 static u64 BLAS_DOT_DISPATCH_DAG  = 0;
 static u64 BLAS_GEMV_DISPATCH_DAG = 0;
+static u64 BLAS_CONTRACTION_DISPATCH_DAG = 0;
 
 // Issue cblas_{s,d}dot.  Single dispatch site (the DAG GEMM/DOT/GEMV
 // dispatchers all funnel through it).
@@ -125,10 +126,14 @@ fn u64 cpu_blas_dot_dispatch_dag_count(void) {
 fn u64 cpu_blas_gemv_dispatch_dag_count(void) {
   return BLAS_GEMV_DISPATCH_DAG;
 }
+fn u64 cpu_blas_contraction_dispatch_dag_count(void) {
+  return BLAS_CONTRACTION_DISPATCH_DAG;
+}
 fn void cpu_blas_gemm_dispatch_counters_reset(void) {
   BLAS_GEMM_DISPATCH_DAG = 0;
   BLAS_DOT_DISPATCH_DAG  = 0;
   BLAS_GEMV_DISPATCH_DAG = 0;
+  BLAS_CONTRACTION_DISPATCH_DAG = 0;
 }
 
 // Try GEMM.  A:{M,K} @ B:{K,N} -> {M,N}.  TMatMul materializes the
@@ -201,6 +206,79 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 1;
 }
 
+// DAG-side generalized-contraction dispatcher.  Recognises a kernel
+// shape `out[M_axes, N_axes] = sum_{K} A[K, N_axes] * B[M_outer, K,
+// M_inner]` and routes it to a batched cblas_sgemm over M_outer (or
+// a single sgemm when n_M == 1).
+//
+// In contraction-space: the W operand is the (K, N) factor (= a_input)
+// and the G operand is the (M_outer, K, M_inner) factor (= b_input).
+// Per-batch BLAS arguments:
+//   sub_A_blas = G_slice (K, inner_M)  -- transposed in BLAS to (inner_M, K)
+//   sub_B_blas = W       (K, N)        -- as-is
+//   sub_C_blas = out_slice (inner_M, N)
+//   cblas_sgemm(RowMajor, Trans, NoTrans,
+//               M=inner_M, N=N, K=K,
+//               1.0, sub_A_blas, ldB,
+//                    sub_B_blas, ldA,
+//               0.0, sub_C_blas, ldC)
+//
+// The conv-backward x-grad kernel `out[a0,a1,a2,a3,a4,a5] =
+// sum_{a6} W[a6,a3,a4,a5] * G[a0,a6,a1,a2]` is the canonical instance:
+// inner_M = (OH*OW), N = (C_in*KH*KW), K = C_out, batch = B.
+static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
+                                u32 out_buf_id) {
+  if (ke->cached_lift.store_root == 0) return 0;
+  UopDagContractionShape c;
+  if (!uop_dag_classify_contraction_shape(ke->cached_lift.store_root, ke, &c)) {
+    return 0;
+  }
+  static int trace_known = 0, trace_on = 0;
+  if (!trace_known) {
+    char const *e = getenv("THVM_BLAS_CONTRACTION_TRACE");
+    trace_on = (e != NULL && e[0] == '1');
+    trace_known = 1;
+  }
+  if (trace_on) {
+    fprintf(stderr, "blas_try_contraction: K=%u N=%u inner_M=%u batch=%u "
+            "ldA=%u ldB=%u ldC=%u bsa=%u bsb=%u bsc=%u\n",
+            c.K, c.N, c.inner_M, c.batch, c.ldA, c.ldB, c.ldC,
+            c.batch_stride_a, c.batch_stride_b, c.batch_stride_c);
+  }
+  // Skip degenerate shapes a simpler classifier handles better.
+  if (c.K < 2) return 0;
+  if (c.inner_M < 2 && c.N < 2) return 0;
+  u32 a_buf = in_buf_ids[c.a_input];
+  u32 b_buf = in_buf_ids[c.b_input];
+  if (a_buf == 0 || b_buf == 0) return 0;
+  if (c.dtype != DT_FP32) return 0;
+  u32 esz = sizeof(float);
+  u64 a_elems = (u64)(CPU_BUFS[a_buf].nbytes / esz);
+  u64 b_elems = (u64)(CPU_BUFS[b_buf].nbytes / esz);
+  u64 o_elems = (u64)(CPU_BUFS[out_buf_id].nbytes / esz);
+  u64 a_need = (u64)c.K * c.N;
+  u64 b_need = (u64)c.batch * c.K * c.inner_M;
+  u64 o_need = (u64)c.batch * c.inner_M * c.N;
+  if (a_elems < a_need) return 0;
+  if (b_elems < b_need) return 0;
+  if (o_elems < o_need) return 0;
+
+  float const *W_base   = (float const *)CPU_BUFS[a_buf].data;
+  float const *G_base   = (float const *)CPU_BUFS[b_buf].data;
+  float       *OUT_base = (float       *)CPU_BUFS[out_buf_id].data;
+  for (u32 bi = 0; bi < c.batch; bi++) {
+    float const *G_slice = G_base + (u64)bi * c.batch_stride_b;
+    float       *C_slice = OUT_base + (u64)bi * c.batch_stride_c;
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                (int)c.inner_M, (int)c.N, (int)c.K,
+                1.0f, G_slice, (int)c.ldB,
+                      W_base,  (int)c.ldA,
+                0.0f, C_slice, (int)c.ldC);
+  }
+  BLAS_CONTRACTION_DISPATCH_DAG++;
+  return 1;
+}
+
 // Returns the specific KDispatchKind that fired (BLAS_DOT / BLAS_GEMV
 // / BLAS_GEMM) so the profiler can record the route, or 0 on no-match
 // (caller falls through to JIT / interpreter).
@@ -219,6 +297,11 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
   if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
+  // Generalized contraction (compound M/N axes; conv-backward x-grad
+  // is the canonical instance).  Routed as KDISPATCH_BLAS_GEMM so the
+  // profiler aggregates it with the simple-matmul route.
+  if (blas_try_contraction(ke, in_buf_ids, out_buf_id))
+    return KDISPATCH_BLAS_GEMM;
   return 0;
 }
 
@@ -232,6 +315,7 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 fn u64  cpu_blas_gemm_dispatch_dag_count   (void) { return 0; }
 fn u64  cpu_blas_dot_dispatch_dag_count    (void) { return 0; }
 fn u64  cpu_blas_gemv_dispatch_dag_count   (void) { return 0; }
+fn u64  cpu_blas_contraction_dispatch_dag_count (void) { return 0; }
 fn void cpu_blas_gemm_dispatch_counters_reset(void) {}
 
 #endif

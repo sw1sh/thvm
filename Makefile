@@ -618,7 +618,7 @@ PY_DYLIB        := py/thvm/libthvm_py.dylib
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
 PY_METAL_OBJ    := $(BUILD)/py_thvm_metal.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
-	clang -fPIC -O2 -DACCELERATE_NEW_LAPACK \
+	clang -fPIC -O2 -DACCELERATE_NEW_LAPACK $(ATP_DEFINES) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
 $(PY_METAL_OBJ): py/csource/thvm_py_metal.m | $(BUILD)
