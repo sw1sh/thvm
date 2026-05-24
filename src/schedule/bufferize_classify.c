@@ -832,7 +832,31 @@ fn void bufferize_classify(Term root) {
           bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
         } else {
-          bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+          // Env-toggle: THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE=0 skips
+          // the seed for REDUCEs whose consumer chain bottoms out at
+          // EXPAND (the broadcast-back-to-vector pattern used by
+          // softmax/BN/mean reduction).  These are exactly the REDUCEs
+          // the softmax-style unmark loop below would have unmarked
+          // anyway -- skipping the seed up front saves the round trip
+          // and lets the materialize.c orphan-BUFFERIZE path
+          // (try_inline_bufferize_1axis_via_decomp with the mask-free
+          // relaxation) fuse them inline.  REDUCEs whose chain does
+          // NOT bottom out at EXPAND (softmax-CE diamond: conv-REDUCE
+          // -> max + sub, where the sub branch reads conv-REDUCE
+          // directly without an EXPAND) stay seeded because inlining
+          // them recomputes the producer N times in the consumer
+          // kernel (cpu_uop_walk slowdown >> kernel-launch overhead).
+          // Default (env unset or != "0") keeps the conservative
+          // blanket seed and lets the unmark loop do the work.
+          char const *_red_e =
+              getenv("THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE");
+          int skip_seed = 0;
+          if (_red_e != NULL && _red_e[0] == '0') {
+            skip_seed = bufferize_reduce_consumer_is_broadcast_chain(info->loc);
+          }
+          if (!skip_seed) {
+            bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+          }
         }
       }
     }
