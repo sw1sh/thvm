@@ -121,8 +121,39 @@ fn u64 cg_kernel_flops(KernelEntry const *ke) {
   return cg_kernel_flops_dag(ke->cached_lift.store_root, iter, 0);
 }
 
+// THVM_KERNEL_PROFILE=N: arm an atexit handler the first time any
+// kernel dispatch records itself.  Independent of thvm_free (which py
+// only calls on explicit Thvm.close()) so a Ctrl-C / sys.exit path
+// still prints the table.  atexit handlers run in LIFO order; the
+// dispatch table the dumper reads (K_PROFILE + KERNELS[]) is process-
+// global side data, valid right up to libc teardown.
+static int  PROFILE_ATEXIT_ARMED = 0;
+static u32  PROFILE_ATEXIT_TOP_N = 0;
+static void cg_profile_atexit(void) {
+  // Skip when the table is empty (e.g. thvm_free already ran and reset
+  // K_PROFILE).  Avoids a duplicate "0 kernels" footer when both the
+  // explicit thvm_free dump AND the atexit handler fire.
+  for (u32 i = 1; i < KPROFILE_CAP; i++) {
+    if (K_PROFILE[i].dispatch_count != 0) {
+      cg_profile_dump(stderr, PROFILE_ATEXIT_TOP_N);
+      return;
+    }
+  }
+}
+static void cg_profile_arm_atexit_once(void) {
+  if (PROFILE_ATEXIT_ARMED) return;
+  PROFILE_ATEXIT_ARMED = 1;
+  char const *e = getenv("THVM_KERNEL_PROFILE");
+  if (e == NULL || e[0] == '\0' || (e[0] == '0' && e[1] == '\0')) return;
+  u32 n = (u32)atoi(e);
+  if (n == 0) n = 20;
+  PROFILE_ATEXIT_TOP_N = n;
+  atexit(cg_profile_atexit);
+}
+
 void cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us) {
   if (kid == 0 || kid >= KPROFILE_CAP) return;
+  cg_profile_arm_atexit_once();
   KProfileSlot *s = &K_PROFILE[kid];
   s->kind            = kind;
   s->dispatch_count += 1;
@@ -170,4 +201,77 @@ u64 cg_now_us(void) {
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (u64)tv.tv_sec * 1000000 + (u64)tv.tv_usec;
+}
+
+// THVM_KERNEL_PROFILE=N dump: print the top-N kernels by total
+// wall-time at thvm_free. Each line is one kid: total_us, fires,
+// avg_us, dispatch route, output shape, FLOPS-per-fire estimate.
+// Routed through cg_profile_dump so the .c TU calls a single hook;
+// implementation lives next to the per-kid table.
+//
+// Route id -> short tag (mirrors KDispatchKind in thvm.h).
+static char const *kdispatch_tag(KDispatchKind k) {
+  switch (k) {
+    case KDISPATCH_BLAS_GEMM:  return "blas_gemm";
+    case KDISPATCH_BLAS_GEMV:  return "blas_gemv";
+    case KDISPATCH_BLAS_DOT:   return "blas_dot";
+    case KDISPATCH_JIT:        return "cpu_jit";
+    case KDISPATCH_INTERPRETER:return "uop_walk";
+    case KDISPATCH_METAL_TILE: return "metal";
+    case KDISPATCH_METAL_OP:   return "metal_op";
+    default:                   return "none";
+  }
+}
+
+void cg_profile_dump(FILE *fp, u32 top_n) {
+  if (fp == NULL) return;
+  if (top_n == 0) top_n = 20;
+  // Build kid-index array sorted by total_us desc. Skip kid==0.
+  u32 kids[KPROFILE_CAP];
+  u32 nkids = 0;
+  u64 total_all = 0;
+  for (u32 i = 1; i < KPROFILE_CAP; i++) {
+    if (K_PROFILE[i].dispatch_count == 0) continue;
+    kids[nkids++] = i;
+    total_all += K_PROFILE[i].total_us;
+  }
+  // Simple selection sort over top_n (nkids tends to be <2000; this is
+  // a one-shot at shutdown, no point pulling in qsort).
+  if (top_n > nkids) top_n = nkids;
+  for (u32 i = 0; i < top_n; i++) {
+    u32 best = i;
+    for (u32 j = i + 1; j < nkids; j++) {
+      if (K_PROFILE[kids[j]].total_us > K_PROFILE[kids[best]].total_us) best = j;
+    }
+    u32 tmp = kids[i]; kids[i] = kids[best]; kids[best] = tmp;
+  }
+  fprintf(fp, "\n[thvm prof] %u kernels with samples, total_wall=%llu us\n",
+          nkids, (unsigned long long)total_all);
+  fprintf(fp, "[thvm prof]  kid    fires       total_us       avg_us  pct  route       flops/fire  shape\n");
+  for (u32 i = 0; i < top_n; i++) {
+    u32 kid = kids[i];
+    KProfileSlot const *s = &K_PROFILE[kid];
+    KernelEntry const *ke = &KERNELS[kid];
+    u64 avg = s->dispatch_count ? (s->total_us / s->dispatch_count) : 0;
+    double pct = total_all ? (100.0 * (double)s->total_us / (double)total_all) : 0.0;
+    char shape_buf[96];
+    int n = 0;
+    n += snprintf(shape_buf + n, (int)sizeof(shape_buf) - n, "[");
+    for (u32 d = 0; d < ke->output_shape.ndim && d < MAX_DIM; d++) {
+      n += snprintf(shape_buf + n, (int)sizeof(shape_buf) - n,
+                    "%s%u", d ? "," : "", ke->output_shape.dims[d]);
+    }
+    snprintf(shape_buf + n, (int)sizeof(shape_buf) - n, "]");
+    u64 flops = cg_kernel_flops(ke);
+    fprintf(fp, "[thvm prof] %4u %8llu %14llu %12llu %4.1f%% %-10s %11llu  %s\n",
+            kid,
+            (unsigned long long)s->dispatch_count,
+            (unsigned long long)s->total_us,
+            (unsigned long long)avg,
+            pct,
+            kdispatch_tag(s->kind),
+            (unsigned long long)flops,
+            shape_buf);
+  }
+  fflush(fp);
 }

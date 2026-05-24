@@ -613,6 +613,16 @@ void thvm_free(void) {
             (unsigned long long)bypass_gate_stranded_count(),
             (unsigned long long)bypass_gate_bcast_count());
   }
+  // Per-kernel wall-time profile. THVM_KERNEL_PROFILE=N -> top N rows
+  // (N=0 / unset disables; setting "" or "1" defaults to 20).
+  {
+    char const *e = getenv("THVM_KERNEL_PROFILE");
+    if (e != NULL && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0')) {
+      u32 n = (u32)atoi(e);
+      if (n == 0) n = 20;
+      cg_profile_dump(stderr, n);
+    }
+  }
   if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
   // Wipe every file-static cache / side table that thvm_init seeds.
   // These hold Terms / heap pointers; once the heap below is freed,

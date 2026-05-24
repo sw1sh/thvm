@@ -2686,6 +2686,9 @@ void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
 // THVM_METAL_PROFILE_PEROP=1.  External linkage so the .m TU can call it.
 void  cg_profile_record_gpu(u32 kid, u64 gpu_us);
 u32   cg_kernel_dispatch_kind(u32 kid);
+// THVM_KERNEL_PROFILE=N: dump top-N kernels by cumulative wall time
+// at thvm_free. N=0 -> default 20. Uses K_PROFILE + KERNELS[kid].output_shape.
+void  cg_profile_dump(FILE *fp, u32 top_n);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.
