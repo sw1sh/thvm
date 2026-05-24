@@ -9201,15 +9201,10 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       // joinability drops at all -> heap exhaustion on andassoc by step
       // ~25k); WM's gate caps that.
       const u32 PUSH_NORM_CAP = 64u;
-      // KPVerwaltung.c:437 lohntSichBehandlung uses 50; on the thvm
-      // discrimination-tree / IC-heap normalize implementation the
-      // unorientable scan is relatively cheaper than WM's flatterm-walk
-      // and the queue grows more (smaller oriented-only-shrunk form than
-      // WM's stringterm), so a slightly higher gate (70) preserves the
-      // joinability-drop rate without paying a queue-growth tax.  TODO:
-      // replace this hardcoded threshold with a profile-driven auto-tune
-      // (measured push-norm cost vs queue-bloat cost per step).
-      const u32 WM_BEHANDELN_GATE = 70u;
+      // Literal port of WM KPVerwaltung.c:437 lohntSichBehandlung gate
+      // (raw sum-of-sides < 50 -> run the full-R normalize + joinability
+      // check; else queue an oriented-only-shrunk form).
+      const u32 WM_BEHANDELN_GATE = 50u;
       u32 raw_sz = atp_symbol_count(cp_lhs) + atp_symbol_count(cp_rhs);
       if (raw_sz < WM_BEHANDELN_GATE) {
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
