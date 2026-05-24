@@ -3117,24 +3117,32 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
     // which is never order-decreasing (and the orient check would have
     // dropped it).  Skip on every leaf -- O(1) flat lookup.
     if (flatsym[p] < ATP_RI_CTR_BASE) continue;
-    // Materialise the subterm at preorder position p from the flat
-    // arrays.  flat[p] alone is STALE once a descendant was spliced (a
-    // splice rewrites the child cells + subsz/flatsym, never the
-    // ancestor's flat[] tree cell), so the match/order check must run
-    // against the rebuilt subtree.  An untouched subtree rebuilds to its
-    // shared original at zero allocation.
-    Term sub = atp_ri_build(flat, subsz, flatsym, p);
     if (ux == NULL) {
+      // No unorient index -- the linear scan needs the materialised
+      // subterm.  Rebuild it from the flat arrays (the un-spliced
+      // ancestor cell at flat[p] may be stale).
+      Term sub = atp_ri_build(flat, subsz, flatsym, p);
       u8 r = atp_ft_unorient_at_linear(s, flat, subsz, flatsym, flatlen,
                                        folded, p, sub);
       if (r == 2u) { *fire_pos = p; return 1u; }
       if (r == 1u) return 0u;                       // overrun: caller bails
       continue;
     }
+    // Query the unorient discrimination tree FIRST, against the flat
+    // arrays directly -- no per-position subtree materialisation.  Only
+    // when the index returns at least one candidate (the rare case --
+    // ~0.06 candidates/query on Sheffer) do we pay for atp_ri_build
+    // below.  This drops the "rebuild for every CTR position" cost on
+    // the dominant NO-CANDIDATE path that the no-fire memo can't catch
+    // (e.g. the first call on a freshly-constructed subject).
     g_atp_ri_ix = ux;
     g_atp_ri_query_folded = *folded;  // leaf-collect's perfect-match guard
     u32 ncand = atp_ri_query_pos_unorient(p);
     g_atp_ri_ix = saved_ix;
+    if (ncand == 0u) continue;                      // no firable face here
+    // Now we have candidate face(s) -- materialise the subterm for the
+    // match/order checks below.
+    Term sub = atp_ri_build(flat, subsz, flatsym, p);
     if (ncand >= ATP_RI_MAXCAND) {
       // Buffer saturated -- the index dropped faces; redo this position
       // with the exact linear scan so no candidate is missed.
@@ -3144,7 +3152,6 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
       if (r == 1u) return 0u;
       continue;
     }
-    if (ncand == 0u) continue;                      // no firable face here
     // Sort the candidates into the linear scan's priority order.  The
     // linear scan tries each rule ascending, l->r before r->l, and fires
     // the first order-decreasing instance, so the priority key is
