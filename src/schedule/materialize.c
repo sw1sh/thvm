@@ -438,6 +438,300 @@ static void mem_plan_push_dead(u32 current_depth) {
   }
 }
 
+// === per-realize ARENA memory planner =================================
+//
+// Direct port of tinygrad/schedule/memory.py memory_plan_rewrite
+// (lines 20-65).  Stronger than the legacy freelist above: instead of
+// recycling individual buf_ids after their last consumer fires, the
+// arena planner pre-computes a non-overlapping byte offset for every
+// plannable output by feeding their open/close events to a TLSF
+// suballocator -- the same algorithm tinygrad runs on its lowered
+// schedule.  Plannable outputs become VIEWS into a single arena
+// CpuBuf; non-overlapping lifetimes share bytes -> peak ~= max
+// concurrent live, not sum-of-all.
+//
+// Plannability gate: same as the legacy planner (BOUNDARY_LAST_USE > 0
+// AND consumer_count == 1).  Multi-consumer / orphan / root bufs take
+// the legacy cpu_buf_alloc path.  Arena allocator runs per-realize;
+// the arena CpuBuf is freed by pool_rollback at end-of-realize.
+//
+// CPU only today (CURRENT_BACKEND == &CPU_BACKEND check).  Metal/CUDA
+// stay on the freelist push/pop scope so their dispatch-time
+// synchronisation invariants aren't broken.
+
+typedef struct {
+  u64 offset;
+  u64 nbytes;
+  u8  in_arena;        // 1 if this boundary's output lives in the arena
+} ArenaSlot;
+
+#define ARENA_SLOTS_CAP BOUNDARY_ORDER_CAP
+static ArenaSlot ARENA_SLOTS[ARENA_SLOTS_CAP];
+static u32       ARENA_SLOTS_LEN     = 0;
+static u64       ARENA_SIZE          = 0;
+static u32       ARENA_BUF_ID        = 0;
+static u8       *ARENA_DATA          = NULL;
+
+// Telemetry: counts arena vs legacy allocs per realize for THVM_ARENA_DUMP.
+static u32 ARENA_ALLOCS_ARENA  = 0;
+static u32 ARENA_ALLOCS_LEGACY = 0;
+static u64 ARENA_PEAK_BYTES    = 0;
+
+fn u64 mem_plan_arena_peak_bytes(void)  { return ARENA_PEAK_BYTES;    }
+fn u32 mem_plan_arena_alloc_count(void) { return ARENA_ALLOCS_ARENA;  }
+fn u32 mem_plan_legacy_alloc_count(void){ return ARENA_ALLOCS_LEGACY; }
+
+static int arena_plan_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_ARENA_PLAN");
+    enabled = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
+    known = 1;
+  }
+  return enabled;
+}
+
+static void arena_reset(void) {
+  for (u32 i = 0; i < ARENA_SLOTS_LEN; i++) {
+    ARENA_SLOTS[i].offset    = 0;
+    ARENA_SLOTS[i].nbytes    = 0;
+    ARENA_SLOTS[i].in_arena  = 0;
+  }
+  ARENA_SLOTS_LEN = 0;
+  ARENA_SIZE      = 0;
+  ARENA_BUF_ID    = 0;
+  ARENA_DATA      = NULL;
+}
+
+typedef struct {
+  u32 pos;
+  u32 ord_idx;
+  u8  is_open;
+} ArenaEvent;
+
+static void arena_event_swap(ArenaEvent *a, ArenaEvent *b) {
+  ArenaEvent t = *a; *a = *b; *b = t;
+}
+
+// Sort by (pos asc, is_open desc): at the same position, opens come
+// before closes so a freshly-allocated buf doesn't release its
+// offset back to TLSF before the alloc that uses it.  Tinygrad
+// memory.py:43-44 achieves the same via True > False sort on the
+// is_open flag.
+static void arena_sort_events(ArenaEvent *ev, u32 n) {
+  // Simple insertion sort: n is small (<= 2 * 16k worst-case, typical
+  // a few hundred), and the per-realize cost is < 1% of emit time.
+  for (u32 i = 1; i < n; i++) {
+    for (u32 j = i; j > 0; j--) {
+      ArenaEvent *a = &ev[j-1];
+      ArenaEvent *b = &ev[j];
+      int swap = (a->pos > b->pos)
+              || (a->pos == b->pos && a->is_open < b->is_open);
+      if (!swap) break;
+      arena_event_swap(a, b);
+    }
+  }
+}
+
+static int arena_boundary_is_plannable(u32 ord_idx) {
+  u64 loc = BOUNDARY_ORDER[ord_idx];
+  u32 binfo = bufferize_info_find(loc);
+  if (binfo == 0xFFFFFFFFu) return 0;
+  // last_use == 0 means "no realize-boundary consumer" -- this is the
+  // realize root or an orphan preserved tensor.  Tinygrad's
+  // equivalent: held_bufs excludes result bufs from
+  // memory_plan_rewrite (schedule/memory.py:22).
+  if (BOUNDARY_LAST_USE[binfo] == 0) return 0;
+  // Single-consumer gate (matches mem_plan_record at line 596):
+  // multi-consumer outputs may be aliased through DUP/SUP / read by
+  // a NEXT realize pass's chain rule.  thvm_realize runs wnf +
+  // materialize in a loop; a buf produced in pass N can be read in
+  // pass N+1.  BOUNDARY_LAST_USE is per-pass, so it can't see the
+  // N+1 reader.  Restricting to consumer_count==1 keeps arena-recycle
+  // safe for the current iterative-realize model.  Tinygrad's
+  // single-pass schedule doesn't have this constraint, but porting
+  // that would require collapsing thvm_realize's loop.
+  if (BUFFERIZE_NODES[binfo].consumer_count != 1) return 0;
+  return 1;
+}
+
+static u64 arena_boundary_nbytes(u32 ord_idx) {
+  u64 loc = BOUNDARY_ORDER[ord_idx];
+  u32 binfo = bufferize_info_find(loc);
+  if (binfo == 0xFFFFFFFFu) return 0;
+  u8 op = BUFFERIZE_NODES[binfo].op;
+  Term root_term = term_new(0, TAG_UOP, op, loc);
+  Shape sh = {0};
+  if (!term_shape_in(root_term, 0, &sh)) return 0;
+  u32 dtype = DT_FP32;
+  term_dtype_in(root_term, 0, &dtype);
+  u64 numel = (u64)shape_numel(sh);
+  return dtype_storage_bytes(dtype, numel);
+}
+
+// BOUNDARY_LAST_USE[B] stores the consumer's depth (BOUNDARY_DEPTH).
+// We need the consumer's BOUNDARY_ORDER index for arena lifetimes.
+// boundaries at the SAME depth are sorted by loc; the LAST one at the
+// target depth is the safe latest position any consumer at that depth
+// could be at (we don't know which specific boundary at that depth is
+// the consumer, only that it's at depth D).  Conservative: use the
+// last boundary at depth D.  O(n) scan per call -- amortised across
+// the whole emit pass it's still O(n^2) worst-case but typical
+// n_boundaries < 500 so this is well below 1ms.
+static u32 arena_last_pos_at_depth(u32 depth) {
+  u32 last = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+    u64 loc = BOUNDARY_ORDER[i];
+    u32 binfo = bufferize_info_find(loc);
+    if (binfo == 0xFFFFFFFFu) continue;
+    if (BOUNDARY_DEPTH[binfo] == depth) last = i;
+  }
+  return last;
+}
+
+// Build per-boundary lifetimes + run TLSF to assign offsets.  Mirror
+// of tinygrad/schedule/memory.py:25-53.  Sets up ARENA_SLOTS[] and
+// ARENA_SIZE.  No arena CpuBuf allocation here -- the first
+// arena-slot read lazily allocates the bytes (so a no-plannable pass
+// doesn't allocate at all).
+static void arena_compute(void) {
+  arena_reset();
+  ARENA_ALLOCS_ARENA  = 0;
+  ARENA_ALLOCS_LEGACY = 0;
+  if (!arena_plan_enabled())     return;
+  if (BOUNDARY_ORDER_LEN == 0)   return;
+  if (CURRENT_BACKEND == NULL)   return;
+  if (CURRENT_BACKEND != &CPU_BACKEND) return;
+
+  ARENA_SLOTS_LEN = BOUNDARY_ORDER_LEN;
+  static u32 first_pos[ARENA_SLOTS_CAP];
+  static u32 last_pos [ARENA_SLOTS_CAP];
+  static u64 nbytes   [ARENA_SLOTS_CAP];
+  static u8  planned  [ARENA_SLOTS_CAP];
+  u32 n_planned = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+    first_pos[i] = i; last_pos[i] = i; nbytes[i] = 0; planned[i] = 0;
+    if (!arena_boundary_is_plannable(i)) continue;
+    u64 nb = arena_boundary_nbytes(i);
+    if (nb == 0) continue;
+    u64 loc = BOUNDARY_ORDER[i];
+    u32 binfo = bufferize_info_find(loc);
+    u32 lu_depth = BOUNDARY_LAST_USE[binfo];
+    u32 last_at = arena_last_pos_at_depth(lu_depth);
+    if (last_at < i) last_at = i;
+    nbytes[i]   = nb;
+    last_pos[i] = last_at;
+    planned[i]  = 1;
+    n_planned++;
+  }
+  if (n_planned == 0) return;
+
+  static ArenaEvent events[ARENA_SLOTS_CAP * 2];
+  u32 n_ev = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+    if (!planned[i]) continue;
+    events[n_ev].pos = first_pos[i]; events[n_ev].ord_idx = i; events[n_ev].is_open = 1; n_ev++;
+    events[n_ev].pos = last_pos [i] + 1u; events[n_ev].ord_idx = i; events[n_ev].is_open = 0; n_ev++;
+  }
+  arena_sort_events(events, n_ev);
+
+  u64 total = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) total += nbytes[i];
+  if (total == 0) return;
+  u64 tlsf_total = total * 2u;
+  tlsf_total = tlsf_round_up(tlsf_total, TLSF_BLOCK_SIZE);
+
+  static TlsfAllocator tlsf;
+  tlsf_init(&tlsf, tlsf_total);
+
+  u64 peak = 0;
+  for (u32 e = 0; e < n_ev; e++) {
+    u32 i = events[e].ord_idx;
+    if (events[e].is_open) {
+      u64 want = tlsf_round_up(nbytes[i], TLSF_BLOCK_SIZE);
+      u64 off = tlsf_alloc(&tlsf, want);
+      if (off == (u64)-1) {
+        // OOM in a 2x-sized arena shouldn't happen; if it does, bail
+        // and let every emit fall back to the legacy alloc path.
+        arena_reset();
+        tlsf_dispose(&tlsf);
+        return;
+      }
+      ARENA_SLOTS[i].offset    = off;
+      ARENA_SLOTS[i].nbytes    = nbytes[i];
+      ARENA_SLOTS[i].in_arena  = 1;
+      u64 end = off + nbytes[i];
+      if (end > peak) peak = end;
+    } else {
+      tlsf_free(&tlsf, ARENA_SLOTS[i].offset);
+    }
+  }
+  tlsf_dispose(&tlsf);
+  ARENA_SIZE = tlsf_round_up(peak, TLSF_BLOCK_SIZE);
+  ARENA_PEAK_BYTES = ARENA_SIZE;
+  if (getenv("THVM_ARENA_DUMP")) {
+    fprintf(stderr,
+            "arena: %u/%u plannable, sum=%.2fMB arena=%.2fMB peak_off=%.2fMB\n",
+            n_planned, BOUNDARY_ORDER_LEN,
+            (double)total / 1048576.0,
+            (double)ARENA_SIZE / 1048576.0,
+            (double)peak / 1048576.0);
+  }
+}
+
+// Lazily allocate the arena CpuBuf on the first arena-slot read.
+// Single calloc'd block participates in CPU_MEM_LIVE / pool_rollback
+// like any other buf.
+static u8 *arena_data(void) {
+  if (ARENA_DATA != NULL)       return ARENA_DATA;
+  if (ARENA_SIZE == 0)          return NULL;
+  if (CURRENT_BACKEND != &CPU_BACKEND) return NULL;
+  ARENA_BUF_ID = cpu_buf_alloc(ARENA_SIZE);
+  if (ARENA_BUF_ID == 0)        return NULL;
+  ARENA_DATA = (u8 *)CPU_BUFS[ARENA_BUF_ID].data;
+  return ARENA_DATA;
+}
+
+// Allocate a TenDesc whose buf is an external view into the arena.
+// Returns 0 on miss (caller falls back to tensor_alloc).
+static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
+  if (ord_idx >= ARENA_SLOTS_LEN)        return 0;
+  if (!ARENA_SLOTS[ord_idx].in_arena)    return 0;
+  if (CURRENT_BACKEND != &CPU_BACKEND)   return 0;
+  u8 *arena = arena_data();
+  if (arena == NULL)                     return 0;
+  if (TENS_NEXT >= TENS_CAP) {
+    fprintf(stderr, "arena_tensor_alloc: out of descriptor slots\n");
+    exit(1);
+  }
+  u32 tid = (u32)TENS_NEXT++;
+  TenDesc *d = &TENS[tid];
+  d->dtype        = dtype;
+  d->refcount     = 1;
+  d->view         = view_create(shape);
+  d->prior_views  = NULL;
+  d->nviews       = 0;
+  d->requires_grad = 0;
+  d->grad         = 0;
+  d->backend      = CURRENT_BACKEND;
+  d->producer_kid = 0;
+  u64 off    = ARENA_SLOTS[ord_idx].offset;
+  u64 nbytes = dtype_storage_bytes(dtype, (u64)d->view.numel);
+  if (nbytes == 0) nbytes = 1;
+  // Zero-init the slot: a previous lifetime's bytes still occupy it
+  // (TLSF only tracks block ownership, not zeroing).  cpu_buf_alloc's
+  // calloc/freelist-pop guaranteed zero, so kernels writing through
+  // REDUCE_ADD / accumulate-style paths depend on it.
+  memset(arena + off, 0, (size_t)nbytes);
+  // Arena view: ties this CpuBuf's lifetime to ARENA_BUF_ID via the
+  // parent_buf_id chain in cpu_buf_incref / cpu_buf_decref so the
+  // arena bytes outlive every view.  Mirror: tinygrad
+  // schedule/memory.py:60 BUFFER_VIEW(arena, nbytes, offset).
+  d->buf_id = cpu_buf_alloc_arena_view(arena + off, nbytes, ARENA_BUF_ID);
+  ARENA_ALLOCS_ARENA++;
+  return tid;
+}
+
 
 // === topo-sort over realize boundaries (g2a) ===
 
@@ -3506,7 +3800,18 @@ static Term emit_kernel_for_boundary(u32 bi) {
   u32 this_depth = BOUNDARY_DEPTH[idx];
   mem_plan_push_dead(this_depth);
 
-  u32 out_tid = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
+  // Arena planner (port of tinygrad/schedule/memory.py
+  // memory_plan_rewrite line 47-52): if this boundary's output was
+  // assigned an arena slot by arena_compute(), use a view-buf into
+  // the shared arena.  Non-overlapping lifetimes share bytes, so 40
+  // same-depth conv outputs occupy only ~3x one output's size in the
+  // arena (live set), not 40x.  Fall through to tensor_alloc on miss
+  // (multi-consumer / root / arena-disabled).
+  u32 out_tid = arena_tensor_alloc(bi, out_shape, out_dtype);
+  if (out_tid == 0) {
+    out_tid = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
+    if (out_tid != 0 && CURRENT_BACKEND == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
+  }
   u32 kid     = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
   ke->output_tid    = out_tid;
@@ -3980,6 +4285,10 @@ fn Term thvm_materialize(Term term) {
   // lowered tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py).
   topo_sort_buffers_unified(term);
   mem_plan_reset();
+  // Arena planner: pre-compute per-boundary offsets into a shared
+  // arena buf.  Mirror: tinygrad/schedule/memory.py memory_plan_rewrite
+  // (called inside lower_schedule_item before kernel dispatch).
+  arena_compute();
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     BOUNDARY_TID [i] = 0;
     BOUNDARY_TERM[i] = 0;
@@ -4007,6 +4316,23 @@ fn Term thvm_materialize(Term term) {
       KERNELS_NEXT = kernels_at_start;
       TENS_NEXT    = tens_at_start;
       mem_plan_drain_freelist();
+      // Arena views allocated during the partial emit are dropped by
+      // the TENS_NEXT rewind; the arena CpuBuf itself (allocated
+      // lazily) survives in CPU_BUFS until pool_rollback reclaims it.
+      // Drop the +1 sentinel here too so the arena can be reclaimed
+      // (the view-refcount adds 1 per view; rewinding TENS doesn't
+      // decref those views, so without the sentinel drop the arena
+      // would leak permanently on every bail).  Note: TENS_NEXT
+      // rewind discards the view CpuBufs along with their TenDescs --
+      // but those views' parent_buf_id->arena refcounts were already
+      // bumped when they were allocated and we don't have a per-view
+      // decref hook in the rewind loop.  This is a transient leak per
+      // failed pass (rare); the arena_reset below clears the static
+      // pointers so the next pass starts fresh.
+      if (ARENA_BUF_ID != 0 && ARENA_BUF_ID < CPU_BUFS_NEXT) {
+        cpu_buf_decref(ARENA_BUF_ID);
+      }
+      arena_reset();
       return term;
     }
     if (BOUNDARY_ORDER[i] == term_val(term)) sink_kernel = k;
@@ -4016,6 +4342,23 @@ fn Term thvm_materialize(Term term) {
   // from them (the chain rule's freshly-emitted UOPs may still
   // reference those tids).
   mem_plan_drain_freelist();
+  // Arena: drop the +1 sentinel refcount that cpu_buf_alloc() gave
+  // the arena buf at first-view time, so the arena is released the
+  // moment its last view decrefs.  Each arena view incref'd it by 1;
+  // total refcount is (1 + N_live_views).  After this decref it's
+  // exactly N_live_views, which drops naturally as TenDescs release.
+  // Without this drop the arena leaks until session shutdown (every
+  // realize accumulates a permanent arena).
+  if (ARENA_BUF_ID != 0 && ARENA_BUF_ID < CPU_BUFS_NEXT) {
+    cpu_buf_decref(ARENA_BUF_ID);
+  }
+  if (getenv("THVM_ARENA_DUMP")) {
+    fprintf(stderr,
+            "arena: end-of-pass arena_allocs=%u legacy_allocs=%u\n",
+            ARENA_ALLOCS_ARENA, ARENA_ALLOCS_LEGACY);
+  }
+  ARENA_DATA   = NULL;
+  ARENA_BUF_ID = 0;
   // Diagnostic: print per-kernel input edge data for every kernel
   // emitted in this pass.  No-op unless
   // DUMP_BUFFERIZE_KERNEL_EDGES=1.

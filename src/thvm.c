@@ -312,6 +312,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // bufferize_classify.c (uses BUFFERIZE_NODES + CMAP_LL +
 // bufferize_consumers_for_loc) and indexing.c (apply_movement_op_*).
 #include "schedule/rangeify_unified.c"
+// Per-realize arena memory planner uses a TLSF suballocator.  tlsf.c
+// is standalone (no thvm globals); materialize.c uses tlsf_init /
+// tlsf_alloc / tlsf_free at the start of every emit pass.  Port of
+// tinygrad/runtime/support/memory.py TLSFAllocator.
+#include "schedule/tlsf.c"
 #include "schedule/materialize.c"
 
 // === jit/ ===

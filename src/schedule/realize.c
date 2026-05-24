@@ -25,7 +25,18 @@
 static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
   if (tid == 0 || tid >= TENS_NEXT) return;
   TenDesc *d = &TENS[tid];
-  if (d->buf_id != 0) cpu_buf_mark_preserved(d->buf_id);
+  if (d->buf_id != 0) {
+    cpu_buf_mark_preserved(d->buf_id);
+    // Arena view: the parent arena CpuBuf isn't reachable through any
+    // TenDesc.buf_id chain, but the view's bytes live inside it -- so
+    // we also mark the parent preserved.  Without this, pool_rollback
+    // would freelist-push the arena while a view still names its
+    // bytes via its data pointer (dangling read).
+    if (CPU_BUFS != NULL && d->buf_id < CPU_BUFS_NEXT) {
+      u32 parent = CPU_BUFS[d->buf_id].parent_buf_id;
+      if (parent != 0) cpu_buf_mark_preserved(parent);
+    }
+  }
   u32 kid = d->producer_kid;
   if (kid == 0 || kid >= KERNELS_NEXT) return;
   if (visited_kids[kid]) return;

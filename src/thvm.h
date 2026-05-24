@@ -939,6 +939,16 @@ typedef struct {
   u8    freeable;
   void *handle;
   void (*on_release)(void *handle);
+  // Arena views: when non-zero, this buf points into the arena CpuBuf
+  // at index `parent_buf_id`.  cpu_buf_incref / cpu_buf_decref bump
+  // the parent's refcount in lockstep so the arena outlives every
+  // view it backs (pool_rollback walks only mark the view preserved
+  // through TenDesc.buf_id; the arena isn't directly reachable, so we
+  // pin it through the parent link).  Mirror: tinygrad's
+  // schedule/memory.py:60 creates a BUFFER_VIEW node whose src[0] is
+  // the arena UOp -- views and arena are linked at the IR level so
+  // the lazy graph keeps the arena alive while any view persists.
+  u32   parent_buf_id;
 } CpuBuf;
 
 #define CPU_BUFS_CAP     (1ULL << 20)

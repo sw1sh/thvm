@@ -21,4 +21,5 @@ fn void cpu_buf_free(u32 buf_id) {
   b->owns_data  = 0;
   b->preserved  = 0;
   b->freeable   = 0;
+  b->parent_buf_id = 0;
 }

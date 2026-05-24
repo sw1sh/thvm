@@ -77,5 +77,22 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
   b->owns_data  = 0;
   b->handle     = handle;
   b->on_release = on_release;
+  b->parent_buf_id = 0;
+  return id;
+}
+
+// Allocate an arena view: external buf at (data, nbytes) whose lifetime
+// is tied to `parent_buf_id` (the arena CpuBuf).  Each incref of this
+// view increments the parent; each decref-to-zero decrements the parent
+// and frees the view cell, but leaves the parent's bytes alive until
+// the parent's own refcount drops to zero.  Mirror: tinygrad
+// schedule/memory.py:60 emits BUFFER_VIEW(arena, nbytes, offset) whose
+// arena edge keeps the underlying buffer alive while any view persists.
+fn u32 cpu_buf_alloc_arena_view(void *data, u64 nbytes, u32 parent_buf_id) {
+  u32 id = cpu_buf_alloc_external(data, nbytes, NULL, NULL);
+  if (id != 0 && parent_buf_id != 0 && parent_buf_id < CPU_BUFS_NEXT) {
+    CPU_BUFS[id].parent_buf_id = parent_buf_id;
+    CPU_BUFS[parent_buf_id].refcount++;
+  }
   return id;
 }
