@@ -3774,6 +3774,25 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
     s->ft_unorient_resume = (ur != NULL && (ur[0] == '0' && ur[1] == '\0')) ? 0u : 1u;
   }
 #endif
+  // Opt-in Vampire Limited Resource Strategy.  OFF unless THVM_ATP_LRS is
+  // set to a non-"0" value, or thvm_atp_set_use_lrs flips it on later (the
+  // WL Method -> {... "LRS" -> True} surface does the latter).  Sound only
+  // when a wall deadline is also set; select_cp checks both gates.
+  {
+    const char *lrs = getenv("THVM_ATP_LRS");
+    s->use_lrs = (lrs != NULL && lrs[0] != '\0' && lrs[0] != '0') ? 1u : 0u;
+  }
+  // LRS knobs (named so the code is auditable, not magic numbers):
+  //   warmup  = 256 selections before the first horizon is computed
+  //             (Riazanov & Voronkov suggest a brief warmup so the
+  //             selection rate stabilizes before the predicted-remaining
+  //             count drives a horizon).
+  //   period  = 128 selections between horizon recomputes (amortizes the
+  //             O(n_queue) heap walk -- about one recompute per ~1ms on
+  //             andassoc-scale runs, two orders of magnitude under the
+  //             default deadline).
+  s->lrs_warmup_selections = 256u;
+  s->lrs_recompute_period  = 128u;
   return s;
 }
 
@@ -5138,6 +5157,121 @@ static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
                                u32 trace_id);
 // Lazy orphan murder: defined with the orphan-murder setters below.
 static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace);
+
+// LRS horizon recomputation (Riazanov & Voronkov, JSC 36, 2003).  Given
+// the observed selection rate and the remaining wall budget, predict how
+// many MORE CPs the saturator will pop, then take the `k`-th smallest
+// cp_pri in the queue as the weight horizon: any CP with cp_pri >
+// horizon is provably unreachable in budget (the saturator will pop
+// `k` CPs and those `k` are the lightest, by the heap order) and is
+// pruned.  O(n_queue) selection + O(n_queue) sweep; the period gate in
+// the caller amortizes this across thousands of selections.
+//
+// Soundness: a discarded CP is not in the reach window; the proof, if it
+// exists in budget, does not depend on it (same "incomplete in principle,
+// complete in budget" tradeoff Vampire ships).  When the deadline has
+// already passed `remaining_us` <= 0, leave the horizon untouched -- the
+// next deadline check in atp_norm_deadline_fired will trip ATP_TIMEOUT.
+static void atp_lrs_recompute_horizon(AtpState *s) {
+  if (!s->use_lrs) return;
+  if (s->wall_deadline_us == 0u) return;
+  if (s->n_cps == 0u) return;
+  u64 now = atp_now_us();
+  if (now == 0u) return;
+  if (s->lrs_start_us == 0u) {
+    // first call: latch the start, run the warmup before any horizon
+    s->lrs_start_us = now;
+    return;
+  }
+  if (now >= s->wall_deadline_us) return;
+  if (now <= s->lrs_start_us) return;
+  if (s->cp_select_count < s->lrs_warmup_selections) return;
+  u64 elapsed = now - s->lrs_start_us;
+  u64 remaining = s->wall_deadline_us - now;
+  // predicted_remaining = remaining * (selections_done / elapsed)
+  // computed as (sel * remaining) / elapsed to keep the divide last.
+  u64 predicted = ((u64)s->cp_select_count * remaining) / elapsed;
+  if (predicted == 0u) predicted = 1u;
+  // If the predicted-remaining reach window already covers the whole
+  // queue, no CP is unreachable yet -- clear the horizon (no prune).
+  if (predicted >= (u64)s->n_cps) {
+    s->lrs_horizon = 0u;
+    s->lrs_last_recompute_at = s->cp_select_count;
+    s->n_lrs_recomputes++;
+    return;
+  }
+  // Find the k-th smallest cp_pri.  k == predicted (1-indexed) -- the
+  // saturator will pop `predicted` more CPs and those are the lightest
+  // `predicted` in the queue under the heap order.  Quickselect over a
+  // scratch copy of cp_pri keeps it O(n_queue) average without touching
+  // the live heap.
+  u32 n = s->n_cps;
+  u32 *scratch = (u32 *)malloc((size_t)n * sizeof(u32));
+  if (scratch == NULL) return;  // out of memory: skip the recompute (sound)
+  for (u32 i = 0; i < n; i++) scratch[i] = s->cp_pri[i];
+  u32 k = (u32)predicted - 1u;  // 0-indexed k-th smallest
+  // Hoare partition / quickselect loop.
+  u32 lo = 0, hi = n - 1u;
+  while (lo < hi) {
+    u32 pivot = scratch[(lo + hi) >> 1];
+    u32 i = lo, j = hi;
+    for (;;) {
+      while (scratch[i] < pivot) i++;
+      while (scratch[j] > pivot) j--;
+      if (i >= j) break;
+      u32 t = scratch[i]; scratch[i] = scratch[j]; scratch[j] = t;
+      i++; if (j == 0u) break; j--;
+    }
+    if (j < k) lo = j + 1u;
+    else       hi = j;
+  }
+  u32 horizon = scratch[k];
+  free(scratch);
+  s->lrs_horizon = horizon;
+  s->lrs_last_recompute_at = s->cp_select_count;
+  s->n_lrs_recomputes++;
+  // Prune the queue of CPs above the horizon.  Walk from the tail and
+  // backfill from the live last slot; defer sifting until the end so the
+  // prune is O(n_queue) instead of O(n_queue * log n_queue).  After
+  // pruning, Floyd-build the remaining slots into a heap in one pass.
+  if (horizon == UINT32_MAX) return;  // sentinel: never prune everything
+  u32 i = s->n_cps;
+  while (i > 0u) {
+    i--;
+    if (s->cp_pri[i] <= horizon) continue;
+    free(s->cp_packed[i]);
+    s->cp_packed[i] = NULL;
+#ifdef ATP_FV_INDEX
+    atp_fv_index_remove(s->fv_index, s->cp_seq[i]);
+#endif
+    u32 last = s->n_cps - 1u;
+    if (i != last) {
+      s->cp_packed[i] = s->cp_packed[last];
+      s->cp_packed[last] = NULL;
+      s->cp_trace[i] = s->cp_trace[last];
+      s->cp_pri[i]   = s->cp_pri[last];
+      s->cp_seq[i]   = s->cp_seq[last];
+      s->cp_goal[i]  = s->cp_goal[last];
+    }
+    s->n_cps--;
+    s->n_cps_dropped_lrs++;
+    // The backfilled element at slot i might itself be above horizon;
+    // re-check it on the next iteration (compensate the i-- at the
+    // top of the loop).  Bound by i < s->n_cps to skip the no-op
+    // tail-drop case.
+    if (i < s->n_cps) i++;
+  }
+  // Re-establish the heap order via Floyd build-heap: O(n_queue) sift-
+  // downs over internal nodes, last to first.
+  if (s->n_cps > 1u) {
+    for (u32 k = s->n_cps / 2u; k > 0u; ) {
+      k--;
+      atp_cp_sift_down(s, k);
+    }
+  }
+  // The wholesale mutate invalidates the cp_graph mirror (if enabled).
+  atp_cp_graph_sync(s);
+}
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL) return 0;
   // Auto-MaxWeight: if the active queue is empty but CPs are deferred
@@ -5148,6 +5282,22 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     atp_auto_maxw_drain(s, 1u);
   }
   if (s->n_cps == 0) return 0;
+  // LRS horizon: latch the start clock on the first call; recompute the
+  // horizon + prune at most every lrs_recompute_period selections.
+  // With use_lrs off, both branches predict false on the first test so
+  // the engine is byte-identical to the historical path.
+  if (s->use_lrs && s->wall_deadline_us != 0u) {
+    if (s->lrs_start_us == 0u
+        || (s->cp_select_count - s->lrs_last_recompute_at)
+             >= (s->lrs_recompute_period ? s->lrs_recompute_period : 128u)) {
+      atp_lrs_recompute_horizon(s);
+      if (s->n_cps == 0u && s->n_cp_stash > 0u
+          && s->auto_max_cp_weight_base > 0u) {
+        atp_auto_maxw_drain(s, 1u);
+      }
+      if (s->n_cps == 0u) return 0;
+    }
+  }
 
   // WM selectNonOrphan (KPVerwaltung.c:535): loop deleteMin until a
   // non-orphan CP surfaces.  An orphan (a parent rule was interreduced
@@ -5420,6 +5570,19 @@ fn void thvm_atp_set_use_unorient_index(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_lazy_normalize = on ? 1u : 0u;
+}
+
+// Vampire-style Limited Resource Strategy (Riazanov & Voronkov, JSC 36,
+// 2003).  See AtpState.use_lrs / thvm_atp_select_cp / atp_lrs_recompute_
+// horizon for the algorithm.  Resets the per-run horizon state so a
+// fresh saturation starts in warmup (no horizon yet); leaves the start
+// timestamp NULL so the first selection latches it.
+fn void thvm_atp_set_use_lrs(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_lrs = on ? 1u : 0u;
+  s->lrs_start_us = 0u;
+  s->lrs_last_recompute_at = 0u;
+  s->lrs_horizon = 0u;
 }
 
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped

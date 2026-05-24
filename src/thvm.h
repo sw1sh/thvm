@@ -3518,6 +3518,28 @@ typedef struct {
   u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
   u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
 
+  // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
+  // a wall-clock budget is set, LRS estimates from the observed selection
+  // rate how many MORE CPs the saturator will pop before the deadline,
+  // then prunes the queue of CPs heavier than the predicted-reachable
+  // weight -- the saturator only ever reaches the lightest
+  // `predicted_remaining_selections` CPs, so the heavy tail wastes index
+  // / normalize / heap effort it never spends.  Soundness: discarded CPs
+  // are unreachable in budget, so the proof (if found) does not depend on
+  // them -- the same "incomplete in principle, complete in budget"
+  // tradeoff Vampire ships.  Default OFF: every field stays 0 and
+  // thvm_atp_select_cp is byte-identical to the milestone-9 path.
+  // Flipped on by Method -> {... "LRS" -> True} via
+  // thvm_atp_set_use_lrs, or by setting THVM_ATP_LRS=1 at init.
+  u8   use_lrs;
+  u64  lrs_start_us;              // run start (atp_now_us at first select)
+  u32  lrs_recompute_period;      // selections between horizon recomputes
+  u32  lrs_warmup_selections;     // selections before the first horizon
+  u32  lrs_last_recompute_at;     // cp_select_count at the last recompute
+  u32  lrs_horizon;               // current weight cutoff (0 == no cutoff)
+  u32  n_cps_dropped_lrs;         // diagnostics: CPs pruned by horizon
+  u32  n_lrs_recomputes;          // diagnostics: horizon recomputations
+
   // Indexed unorientable-rewrite pass.  When set, the default tree mixed
   // normalizer replaces its O(n_rules) linear KBO-gated unorientable step
   // (atp_ordered_rewrite_step with the skip-oriented flag) with a
@@ -3677,6 +3699,13 @@ fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
+// Vampire-style Limited Resource Strategy.  When set together with a
+// wall-clock deadline (thvm_atp_set_wall_deadline), thvm_atp_select_cp
+// periodically prunes the CP queue of CPs above a budget-derived weight
+// horizon -- the saturator concentrates effort on the proof-tractable
+// subset it can actually reach.  Sound (incomplete in principle, complete
+// in budget); 0 = off (default) -> engine byte-identical.
+fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset

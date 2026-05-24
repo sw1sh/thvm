@@ -347,6 +347,19 @@ int main(int argc, char **argv) {
     if (rn != NULL && rn[0] == '1') thvm_atp_set_record_norm_steps(s, 1u);
   }
 
+  // THVM_ATP_LRS=1 turns on the Vampire Limited Resource Strategy.  Also
+  // wires the user-loop `wall_cap` into thvm_atp_set_wall_deadline so the
+  // LRS horizon has a budget to plan against -- the engine's saturation
+  // is still bounded by the same wall_cap, so the timing is comparable
+  // to LRS=0.
+  {
+    const char *lrs = getenv("THVM_ATP_LRS");
+    if (lrs != NULL && lrs[0] != '\0' && lrs[0] != '0') {
+      thvm_atp_set_use_lrs(s, 1u);
+      if (wall_cap > 0.0) thvm_atp_set_wall_deadline(s, wall_cap);
+    }
+  }
+
   thvm_atp_add_equation(s, axiom_lhs(), fv(2));
 
   // "sat" mode: pure completion, NO goal -- run to the step/wall cap
@@ -464,10 +477,15 @@ int main(int argc, char **argv) {
   printf("   trace: n_trace=%u  t_max=%u  record_norm=%u\n",
          s->n_trace, s->t_max, s->record_norm_steps);
   printf("   dropped: joinable=%u queue-subsumed=%u "
-         "rule-subsumed=%u connected=%u orphan=%u\n",
+         "rule-subsumed=%u connected=%u orphan=%u lrs=%u\n",
          s->n_cps_dropped_joinable, s->n_cps_dropped_queue_subsumed,
          s->n_cps_dropped_rule_subsumed, s->n_cps_dropped_connected,
-         s->n_cps_dropped_orphan);
+         s->n_cps_dropped_orphan, s->n_cps_dropped_lrs);
+  if (s->use_lrs) {
+    printf("   lrs: recomputes=%u  horizon=%u  warmup=%u  period=%u\n",
+           s->n_lrs_recomputes, s->lrs_horizon,
+           s->lrs_warmup_selections, s->lrs_recompute_period);
+  }
   printf("   dropped: ground-joinable=%u connected-below-peak=%u\n",
          s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak);
   printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);

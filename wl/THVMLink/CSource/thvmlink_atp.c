@@ -538,6 +538,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // engine byte-identical.
   mint fifo_tb = MArgument_getInteger(args[18]);
   thvm_atp_set_cp_fifo_tiebreak(atp, (u8)(fifo_tb != 0));
+  // Method -> {... "LRS" -> True}: Vampire Limited Resource Strategy
+  // (Riazanov & Voronkov, JSC 36, 2003).  When a wall deadline is set,
+  // periodically prune CPs above the predicted-reachable weight horizon
+  // so the saturator concentrates effort on the budget-tractable subset.
+  // args[20].  0 = off, engine byte-identical.
+  mint use_lrs = MArgument_getInteger(args[20]);
+  thvm_atp_set_use_lrs(atp, (u8)(use_lrs != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];
