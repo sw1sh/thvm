@@ -56,7 +56,7 @@ $cases = {
 (* run one case; return {head, verifyHeads, seconds}. *)
 runCase[theory_, thm_, method_, wall_] := Module[{t, r, verify},
     {t, r} = AbsoluteTiming @ TimeConstrained[
-        TFindEquationalProof[thm, theory,
+        TFindProof[thm, theory,
             Method -> method, MaxWallSeconds -> N[wall]],
         wall + 30, $TimedOut];
     verify = Which[

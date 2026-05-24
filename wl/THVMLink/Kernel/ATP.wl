@@ -13,8 +13,8 @@
          on the C side, run the saturator, return the same kind of
          Association (no witnesses).
 
-     TFindEquationalProof[conjecture, axioms, opts]
-     TFindEquationalProof["Theorem", "Theory", opts]
+     TFindProof[conjecture, axioms, opts]
+     TFindProof["Theorem", "Theory", opts]
          Run thvm's C ATP completion engine on the conjecture +
          axioms and return a real WL ProofObject -- the same head
          FindEquationalProof returns, supporting the property
@@ -24,9 +24,13 @@
          AxiomaticTheory.  Returns $Failed when the conjecture is
          not proved.
 
+         The legacy spelling TFindProof is kept as a
+         back-compat alias (deprecated) and forwards every call
+         to TFindProof.
+
    Options
      MaxSteps       (TATP)                  -> 64
-     MaxSteps       (TFindEquationalProof)  -> 200000
+     MaxSteps       (TFindProof)            -> 200000
      Witness        (TATP)                  -> {}    list of x_
      AllWitnesses   (TATP)                  -> False
      MaxDepth       (TATP / AllWitnesses)   -> 8
@@ -38,7 +42,9 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindEquationalProof[axioms] (a list of axiom equations) or TFindEquationalProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindEquationalProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
+TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
+
+TFindEquationalProof::usage = "TFindEquationalProof is a deprecated alias for TFindProof; every call forwards to TFindProof.  Kept for back-compat with notebooks and downstream code that already use the name.  New code should call TFindProof.";
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning -- a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire -- D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
 
@@ -67,7 +73,7 @@ atpDbgFail[tag_] := If[ TrueQ[$AtpDebugDataset],
    NORM_STEP entries are transparent (pass through their parent's
    resolved info), so resolveTrace's ORIENT/SIMPLIFY branch reaches
    the CP directly and the older emitNorm BFS bridges the chain.
-   TFindEquationalProof flips this for a fallback retry when chain
+   TFindProof flips this for a fallback retry when chain
    extraction produces a Statement the verifier rejects (e.g. the
    Boolean XOR Orderless interaction on DeMorgan). *)
 $AtpUseChain = True;
@@ -518,7 +524,7 @@ toHoldEq[expr_] := HoldForm[expr] /. Inactive[Equal] -> Equal
 (* Ported from the UnfailingKnuthBendixCompletion resource-function
    notebook: quantifier elimination (ForAll -> Pattern,
    Exists -> Skolem) and canonical pattern-variable naming.  Used by
-   the string form of TFindEquationalProof to normalize the
+   the string form of TFindProof to normalize the
    AxiomaticTheory-resolved formulas. *)
 
 wrap[expr_, head_: List] := Replace[expr, x : Except[_head] :> head[x]]
@@ -1974,7 +1980,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
     ]]
 ]
 
-(* === TFindEquationalProof ========================================= *)
+(* === TFindProof ========================================= *)
 
 (* Method-option vocabulary.  The completion suboptions map onto the
    C engine's runtime knobs (thvm_atp_set_cp_weight_mode /
@@ -2001,11 +2007,11 @@ $AtpCpWeightCodes = <|
     "Goal" -> 7, "CPinGoal" -> 7, "Learned" -> 8, Automatic -> -1
 |>;
 
-TFindEquationalProof::badmethod =
+TFindProof::badmethod =
     "Unrecognized Method `1`; using Automatic (completion).";
-TFindEquationalProof::badcpw =
+TFindProof::badcpw =
     "Unrecognized \"CriticalPairWeight\" `1`; using engine default.";
-TFindEquationalProof::dropax =
+TFindProof::dropax =
     "Axiom-relevance filter (mode `2`) dropped axiom(s) keyed on \
 symbol set(s) `1` as irrelevant to the conjecture.  Mode \"Safe\" is \
 sound and completeness-preserving (the symbols are private to the \
@@ -2013,7 +2019,7 @@ dropped axiom and occur on both sides, so it cannot enter a proof of \
 this goal); modes \"Connected\" and \"SInE\" are heuristics and may \
 drop a needed axiom.  Inspect with TRelevantAxioms, or set \
 \"AxiomRelevance\" -> None in Method to keep every axiom.";
-TFindEquationalProof::badrel =
+TFindProof::badrel =
     "Unrecognized \"AxiomRelevance\" `1`; using \"Safe\".";
 
 (* parse a Method spec into {cpWeight, ordering, autoPrec, useMnf} ints
@@ -2126,7 +2132,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
         cwRaw = Lookup[o, "CriticalPairWeight", Automatic];
         cw = Lookup[$AtpCpWeightCodes, cwRaw, $Failed];
         If[ cw === $Failed,
-            Message[TFindEquationalProof::badcpw, cwRaw]; cw = -1];
+            Message[TFindProof::badcpw, cwRaw]; cw = -1];
         ord = Switch[Lookup[o, "Ordering", Automatic],
             "LPO", 1, "KBO" | Automatic, 0, _, 0];
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
@@ -2202,7 +2208,7 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
     ];
 
 atpParseMethod[m_] := (
-    Message[TFindEquationalProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1});
+    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
@@ -2697,7 +2703,7 @@ atpNormRelevance[{"SInE", st_?NumericQ, sd_Integer, sgt_Integer}] :=
     {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd,
                "SineGenerality" -> sgt|>};
 atpNormRelevance[other_] := (
-    Message[TFindEquationalProof::badrel, other]; "Safe");
+    Message[TFindProof::badrel, other]; "Safe");
 
 (* Partition `axFormList` into kept / dropped (with reasons) under a
    relevance spec.  Returns <|"Kept" -> {...}, "Dropped" -> {<|"Axiom",
@@ -2855,7 +2861,7 @@ atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{
 atpApplyRelevance[axFormList_, conjRaw_, specRaw_] := Block[{part},
     part = atpRelevancePartition[axFormList, conjRaw, specRaw];
     If[ part["Dropped"] =!= {},
-        Message[TFindEquationalProof::dropax,
+        Message[TFindProof::dropax,
             #["Symbols"] & /@ part["Dropped"], part["Mode"]]];
     part["Kept"]
 ];
@@ -2883,7 +2889,7 @@ holdToInactive[axHC_HoldComplete] :=
 
 (* === Introspective return-type machinery =========================
 
-   TFindEquationalProof's optional LAST positional argument selects what
+   TFindProof's optional LAST positional argument selects what
    the call returns instead of (or alongside) the heavy ProofObject.  A
    single String returns that one value bare; a list of Strings returns
    an Association keyed by the requested names; All returns an
@@ -2945,7 +2951,7 @@ atpProjectReturn[bundle_, All] :=
 atpProjectReturn[bundle_, spec_List] :=
     Association[# -> atpReturnValue[bundle, #] & /@ spec];
 
-Options[TFindEquationalProof] = {
+Options[TFindProof] = {
     MaxSteps -> 200000, MaxWallSeconds -> 0., Method -> Automatic,
     TimeConstraint -> Infinity};
 
@@ -2975,7 +2981,7 @@ atpConjList[cj_] := {cj};
    conjunct via the expression form.  One conjunct returns a single
    ProofObject; several return a list ($Failed if any fails). *)
 atpProveFromTheory[cjArg_, theory_String,
-        opts:OptionsPattern[TFindEquationalProof]] :=
+        opts:OptionsPattern[TFindProof]] :=
     atpProveFromTheory[cjArg, theory, "ProofObject", opts];
 (* The returnSpec threads through to each conjunct's expression-form
    call: a single-conjunct theorem returns that conjunct's projection;
@@ -2983,7 +2989,7 @@ atpProveFromTheory[cjArg_, theory_String,
    default "ProofObject" multi-conjunct case keeps the all-or-$Failed
    contract). *)
 atpProveFromTheory[cjArg_, theory_String, returnSpec_,
-        opts:OptionsPattern[TFindEquationalProof]] := Catch[
+        opts:OptionsPattern[TFindProof]] := Catch[
     Block[{axRaw, axioms, cjList = atpConjList[cjArg]},
         axRaw = AxiomaticTheory[theory];
         If[ ! ListQ[axRaw],
@@ -2994,15 +3000,15 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
         ];
         axRaw = atpApplyRelevance[axRaw, cjList,
             atpRelevanceSpec[
-                OptionValue[TFindEquationalProof, {opts}, Method]]];
+                OptionValue[TFindProof, {opts}, Method]]];
         axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
         If[ Length[cjList] === 1,
-            TFindEquationalProof[
+            TFindProof[
                 CanonicalizePatterns @ unquantifyFormula @ First[cjList],
                 axioms, returnSpec, opts],
             Module[{proofs},
                 proofs = Table[
-                    TFindEquationalProof[
+                    TFindProof[
                         CanonicalizePatterns @ unquantifyFormula @ c,
                         axioms, returnSpec, opts],
                     {c, cjList}];
@@ -3016,15 +3022,15 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
 
 (* Named NotableTheorem of a named theory.  DISAMBIGUATION: a 2-string
    call whose SECOND string is a return spec (e.g.
-   TFindEquationalProof["AbelianGroupAxioms", "Lemmas"]) is the named-
+   TFindProof["AbelianGroupAxioms", "Lemmas"]) is the named-
    theory COMPLETION form, NOT a (theorem, theory) prove -- the prove
    form would otherwise read the spec as a theorem name.  The /; guard
    on the prove form (theory =!= a return spec) sends it to the
    completion form below. *)
-TFindEquationalProof[theory_String, returnSpec_String,
+TFindProof[theory_String, returnSpec_String,
         opts:OptionsPattern[]] /; atpReturnSpecQ[returnSpec] :=
     atpTheoryCompletion[theory, returnSpec, opts];
-TFindEquationalProof[thm_String, theory_String,
+TFindProof[thm_String, theory_String,
         opts:OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
     Block[{cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm]},
         If[ MissingQ[cjRaw],
@@ -3039,7 +3045,7 @@ TFindEquationalProof[thm_String, theory_String,
     "TATPError"
 ]
 (* (theorem, theory, returnSpec): prove the named theorem, projected. *)
-TFindEquationalProof[thm_String, theory_String,
+TFindProof[thm_String, theory_String,
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] := Catch[
     Block[{cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm]},
         If[ MissingQ[cjRaw],
@@ -3057,28 +3063,28 @@ TFindEquationalProof[thm_String, theory_String,
 (* A conjecture against a NAMED theory's axioms.  conjecture may be a
    single equation, a list of equations, or an Association whose Values
    are taken (e.g. the NotableTheorems table) -- so both
-     TFindEquationalProof[#, "WolframAxioms"] & /@
+     TFindProof[#, "WolframAxioms"] & /@
        AxiomaticTheory["WolframAxioms", "NotableTheorems"]
    and
-     TFindEquationalProof[
+     TFindProof[
        AxiomaticTheory["WolframAxioms", "NotableTheorems"], "WolframAxioms"]
    work.  The /; guard keeps a (axioms, returnSpec) COMPLETION call --
    whose 2nd arg is a return-spec String, not a theory name -- from
    matching here. *)
-TFindEquationalProof[
+TFindProof[
         cj : (_List | _ForAll | _Equal | _Inactive),
         theory_String, opts:OptionsPattern[]] /; ! atpReturnSpecQ[theory] :=
     atpProveFromTheory[cj, theory, opts];
-TFindEquationalProof[
+TFindProof[
         cj : (_List | _ForAll | _Equal | _Inactive),
         theory_String, returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     atpProveFromTheory[cj, theory, returnSpec, opts];
 (* An Association (e.g. the whole NotableTheorems table) "just does
    Values": each value is proved on its own, so a theorem that fails to
    prove is $Failed in its slot rather than failing the whole call. *)
-TFindEquationalProof[thms_Association, theory_String, opts:OptionsPattern[]] :=
+TFindProof[thms_Association, theory_String, opts:OptionsPattern[]] :=
     atpProveFromTheory[#, theory, opts] & /@ Values[thms];
-TFindEquationalProof[thms_Association, theory_String,
+TFindProof[thms_Association, theory_String,
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     atpProveFromTheory[#, theory, returnSpec, opts] & /@ Values[thms];(* Expression form: run thvm's C ATP completion engine on the
    conjecture + axioms, decode the equational rewrite chain, and
@@ -3091,7 +3097,7 @@ TFindEquationalProof[thms_Association, theory_String,
 (* The proving entry: optional LAST positional returnSpec.  Without it,
    the bare ProofObject is returned (backward compatible); with it, the
    run is projected onto the requested introspectives. *)
-TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] :=
+TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[conjecture, axioms,
             MaxSteps -> OptionValue[MaxSteps],
@@ -3099,7 +3105,7 @@ TFindEquationalProof[conjecture_, axioms_List, OptionsPattern[]] :=
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
         "ProofObject"];
-TFindEquationalProof[conjecture_, axioms_List,
+TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[conjecture, axioms,
@@ -3116,7 +3122,7 @@ TFindEquationalProof[conjecture_, axioms_List,
    eagerly off the same conjecture+axioms+Method as TRelevantAxioms.
    atpEncodeProblem validates axiom/conjecture shape and surfaces the
    encoder state (the Variables list + the Term decoder maps). *)
-atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :=
+atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     (* Raise $RecursionLimit for the whole bundle: a deep Sheffer/Wolfram
        proof (~300+ steps) walks long trace DAGs in buildCEngineChain /
@@ -3260,7 +3266,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
 
 (* === Single-argument completion mode =============================
 
-   TFindEquationalProof[axioms] (no conjecture) runs a time-constrained
+   TFindProof[axioms] (no conjecture) runs a time-constrained
    completion of the axiom equations and returns the derived lemmas (the
    completed rule set).  Implementation: encode with a dummy conjecture,
    then overwrite the goal pair in the packed array to (0, 0) -- the C
@@ -3268,7 +3274,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindEquationalProof]] :
    empties (a finite complete system) or the step/wall budget is hit.
    The default return for completion mode is "Lemmas" (there is no goal,
    so no ProofObject). *)
-atpCompletionBundle[axioms_List, OptionsPattern[TFindEquationalProof]] :=
+atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     Module[{enc, cRes, atpWall, atpMethodCfg},
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
@@ -3288,7 +3294,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindEquationalProof]] :=
 ];
 
 (* Completion of an explicit axiom list. *)
-TFindEquationalProof[axioms_List, OptionsPattern[]] :=
+TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpCompletionBundle[axioms,
             MaxSteps -> OptionValue[MaxSteps],
@@ -3296,7 +3302,7 @@ TFindEquationalProof[axioms_List, OptionsPattern[]] :=
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
         "Lemmas"];
-TFindEquationalProof[axioms_List, returnSpec_?atpReturnSpecQ,
+TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
         OptionsPattern[]] :=
     atpProjectReturn[
         atpCompletionBundle[axioms,
@@ -3309,7 +3315,7 @@ TFindEquationalProof[axioms_List, returnSpec_?atpReturnSpecQ,
 (* Completion of a named theory: resolve its axioms the same way the
    theory-prove forms do (unquantify + canonicalize), then complete. *)
 atpTheoryCompletion[theory_String, returnSpec_,
-        opts:OptionsPattern[TFindEquationalProof]] := Catch[
+        opts:OptionsPattern[TFindProof]] := Catch[
     Block[{axRaw, axioms},
         axRaw = AxiomaticTheory[theory];
         If[ ! ListQ[axRaw],
@@ -3333,12 +3339,24 @@ atpTheoryCompletion[theory_String, returnSpec_,
    form -- theory + return spec -- lives with the other String forms
    above, guarded by atpReturnSpecQ to disambiguate from a
    (theorem, theory) prove.) *)
-TFindEquationalProof[theory_String, OptionsPattern[]] :=
+TFindProof[theory_String, OptionsPattern[]] :=
     atpTheoryCompletion[theory, "Lemmas",
         MaxSteps -> OptionValue[MaxSteps],
         MaxWallSeconds -> OptionValue[MaxWallSeconds],
         Method -> OptionValue[Method],
         TimeConstraint -> OptionValue[TimeConstraint]];
+
+(* === Back-compat alias =============================================
+   TFindEquationalProof is the legacy name; every call forwards to
+   TFindProof.  Mirror the Options + Messages so OptionsPattern[
+   TFindEquationalProof] and Quiet[..., TFindEquationalProof::badmethod]
+   in user code keep working byte-identically. *)
+Options[TFindEquationalProof] = Options[TFindProof];
+TFindEquationalProof::badmethod = TFindProof::badmethod;
+TFindEquationalProof::badcpw    = TFindProof::badcpw;
+TFindEquationalProof::dropax    = TFindProof::dropax;
+TFindEquationalProof::badrel    = TFindProof::badrel;
+TFindEquationalProof[args___] := TFindProof[args];
 
 End[];
 EndPackage[];

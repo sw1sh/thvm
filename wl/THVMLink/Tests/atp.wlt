@@ -338,66 +338,66 @@ VerificationTest[
     TestID -> "ATP/TATP/file/missing-path-yields-running-sentinel"
 ]
 
-(* === TFindEquationalProof: C ATP engine ============================ *)
+(* === TFindProof: C ATP engine ============================ *)
 
-(* TFindEquationalProof runs thvm's C ATP completion engine and
+(* TFindProof runs thvm's C ATP completion engine and
    returns a real WL ProofObject for provable conjectures, $Failed
    otherwise.  The proof chain is extracted over the oriented input
    axioms, so the dataset cites axioms and the ProofFunction
    verifier accepts it. *)
 
 VerificationTest[
-    Head @ TFindEquationalProof[a == c, {a == b, b == c}],
+    Head @ TFindProof[a == c, {a == b, b == c}],
     ProofObject,
     TestID -> "ATP/TFEP/transitivity-3-proves"
 ]
 
 VerificationTest[
-    TFindEquationalProof[a == d, {a == b, b == c}],
+    TFindProof[a == d, {a == b, b == c}],
     $Failed,
     TestID -> "ATP/TFEP/unprovable-yields-failed"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof[a == e,
+    Head @ TFindProof[a == e,
         {a == b, b == c, c == d, d == e}],
     ProofObject,
     TestID -> "ATP/TFEP/4-step-chain-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof[f[a] == f[b], {a == b}],
+    Head @ TFindProof[f[a] == f[b], {a == b}],
     ProofObject,
     TestID -> "ATP/TFEP/subst-1pos-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof[f[a, b] == f[c, d],
+    Head @ TFindProof[f[a, b] == f[c, d],
         {a == c, b == d}],
     ProofObject,
     TestID -> "ATP/TFEP/subst-2pos-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof[f[a] == f[c], {a == b, b == c}],
+    Head @ TFindProof[f[a] == f[c], {a == b, b == c}],
     ProofObject,
     TestID -> "ATP/TFEP/subst-via-trans-proves"
 ]
 
 VerificationTest[
-    TFindEquationalProof[f[a] == g[a], {a == b}],
+    TFindProof[f[a] == g[a], {a == b}],
     $Failed,
     TestID -> "ATP/TFEP/head-mismatch-yields-failed"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof[c == a, {a == b, b == c}],
+    Head @ TFindProof[c == a, {a == b, b == c}],
     ProofObject,
     TestID -> "ATP/TFEP/backward-needed-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof[b == a, {a == b}],
+    Head @ TFindProof[b == a, {a == b}],
     ProofObject,
     TestID -> "ATP/TFEP/symmetry-1step-proves"
 ]
@@ -406,7 +406,7 @@ VerificationTest[
    Success when applied to the conjecture statement. *)
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[a == c, {a == b, b == c}];
+        p = TFindProof[a == c, {a == b, b == c}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
     Success,
@@ -415,14 +415,14 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[f[a] == f[c], {a == b, b == c}];
+        p = TFindProof[f[a] == f[c], {a == b, b == c}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
     Success,
     TestID -> "ATP/TFEP/proof-function-verifies-subst-via-trans"
 ]
 
-(* === TFindEquationalProof: pattern axioms (milestone 5) ============= *)
+(* === TFindProof: pattern axioms (milestone 5) ============= *)
 
 (* Axioms with `Pattern[x, Blank[]]` (= x_) variables.  WL's normal
    surface uses the underscore shorthand, which TFEP's HoldAll
@@ -431,7 +431,7 @@ VerificationTest[
 VerificationTest[
     (* Direct pattern axiom: f[x_, e] == x_ as a right-identity
        rewrite, applied once. *)
-    Head @ TFindEquationalProof[f[a, e] == a,
+    Head @ TFindProof[f[a, e] == a,
         {f[Pattern[x, Blank[]], e] == Pattern[x, Blank[]]}],
     ProofObject,
     TestID -> "ATP/TFEP/pattern-rightId-1use"
@@ -439,7 +439,7 @@ VerificationTest[
 
 VerificationTest[
     (* Same axiom, two applications nested. *)
-    Head @ TFindEquationalProof[f[f[b, e], e] == b,
+    Head @ TFindProof[f[f[b, e], e] == b,
         {f[Pattern[x, Blank[]], e] == Pattern[x, Blank[]]}],
     ProofObject,
     TestID -> "ATP/TFEP/pattern-rightId-2uses"
@@ -448,7 +448,7 @@ VerificationTest[
 VerificationTest[
     (* Pattern-axiom proof verifier round-trip. *)
     Module[{p},
-        p = TFindEquationalProof[f[a, e] == a,
+        p = TFindProof[f[a, e] == a,
             {f[Pattern[x, Blank[]], e] == Pattern[x, Blank[]]}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
@@ -456,7 +456,7 @@ VerificationTest[
     TestID -> "ATP/TFEP/pattern-rightId-verifies"
 ]
 
-(* === TFindEquationalProof: ForAll-wrapped axioms (m5 doc shape) ===== *)
+(* === TFindProof: ForAll-wrapped axioms (m5 doc shape) ===== *)
 
 (* The standard FindEquationalProof surface uses
    ForAll[var, lhs == rhs] or ForAll[{vars}, lhs == rhs] for
@@ -467,7 +467,7 @@ VerificationTest[
 VerificationTest[
     (* Doc example: prove ForAll[x, f[g[x]] == g[f[x]]] from
        ForAll[x, f[x] == g[x]]. *)
-    Head @ TFindEquationalProof[
+    Head @ TFindProof[
         ForAll[x, f[g[x]] == g[f[x]]],
         {ForAll[x, f[x] == g[x]]}],
     ProofObject,
@@ -477,7 +477,7 @@ VerificationTest[
 VerificationTest[
     (* Multi-var ForAll axiom: f[g[a], g[b]] == g[f[a, b]] from
        ForAll[{x, y}, f[g[x], g[y]] == g[f[x, y]]]. *)
-    Head @ TFindEquationalProof[
+    Head @ TFindProof[
         f[g[a], g[b]] == g[f[a, b]],
         {ForAll[{x, y}, f[g[x], g[y]] == g[f[x, y]]]}],
     ProofObject,
@@ -487,7 +487,7 @@ VerificationTest[
 VerificationTest[
     (* WL doc Properties&Relations example: associativity rewrite
        on a ground-instantiated 4-LHS / 4-RHS form. *)
-    Head @ TFindEquationalProof[
+    Head @ TFindProof[
         f[f[u, f[v, w]], u] == f[u, f[f[v, w], u]],
         {ForAll[{a, b, c}, f[a, f[b, c]] == f[f[a, b], c]]}],
     ProofObject,
@@ -497,7 +497,7 @@ VerificationTest[
 VerificationTest[
     (* Single-step ForAll axiom matching ForAll conjecture: trivial
        direct rewrite via the axiom itself. *)
-    Head @ TFindEquationalProof[
+    Head @ TFindProof[
         ForAll[x, f[x] == g[x]],
         {ForAll[x, f[x] == g[x]]}],
     ProofObject,
@@ -507,7 +507,7 @@ VerificationTest[
 VerificationTest[
     (* Multi-var ForAll on both conjecture and axiom (commutativity-
        style; here it's identity since axiom IS the conjecture). *)
-    Head @ TFindEquationalProof[
+    Head @ TFindProof[
         ForAll[{x, y}, f[x, y] == f[y, x]],
         {ForAll[{a, b}, f[a, b] == f[b, a]]}],
     ProofObject,
@@ -522,7 +522,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[
+        p = TFindProof[
             ForAll[x, f[g[x]] == g[f[x]]],
             {ForAll[x, f[x] == g[x]]}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
@@ -533,7 +533,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[
+        p = TFindProof[
             f[g[a], g[b]] == g[f[a, b]],
             {ForAll[{x, y}, f[g[x], g[y]] == g[f[x, y]]]}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
@@ -550,7 +550,7 @@ VerificationTest[
        larger face down to the smaller -- the single-NF check then
        closes it, and the proof cites the axiom directly. *)
     Module[{p},
-        p = TFindEquationalProof[
+        p = TFindProof[
             ForAll[{x, y}, f[x, y] == f[y, x]],
             {ForAll[{a, b}, f[a, b] == f[b, a]]}];
         Head @ p["ProofFunction"][p["Theorems"]]
@@ -561,7 +561,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[
+        p = TFindProof[
             f[f[u, f[v, w]], u] == f[u, f[f[v, w], u]],
             {ForAll[{a, b, c}, f[a, f[b, c]] == f[f[a, b], c]]}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
@@ -575,30 +575,30 @@ VerificationTest[
        both axioms to be applied right-to-left.  Orientation -> -1
        on each step keeps the verifier in sync. *)
     Module[{p},
-        p = TFindEquationalProof[c == a, {a == b, b == c}];
+        p = TFindProof[c == a, {a == b, b == c}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
     Success,
     TestID -> "ATP/TFEP/backward-axiom-verifies"
 ]
 
-(* === TFindEquationalProof: doc-shape negative cases ================= *)
+(* === TFindProof: doc-shape negative cases ================= *)
 
 VerificationTest[
     (* WL doc Scope example: prove a == d from {a == b, b == c, c == d}. *)
-    Head @ TFindEquationalProof[a == d, {a == b, b == c, c == d}],
+    Head @ TFindProof[a == d, {a == b, b == c, c == d}],
     ProofObject,
     TestID -> "ATP/TFEP/doc-scope-3step-chain"
 ]
 
 VerificationTest[
     (* WL doc Scope example: a == c from a == b alone -> unprovable. *)
-    TFindEquationalProof[a == c, {a == b}],
+    TFindProof[a == c, {a == b}],
     $Failed,
     TestID -> "ATP/TFEP/doc-scope-insufficient-axioms"
 ]
 
-(* === TFindEquationalProof: C-engine verifier round-trips =========== *)
+(* === TFindProof: C-engine verifier round-trips =========== *)
 
 (* The proof chain thvm's C ATP engine extracts assembles into a
    4-arg ProofObject whose ProofFunction verifier returns Success. *)
@@ -607,7 +607,7 @@ VerificationTest[
     (* backward-needed: c == a from {a == b, b == c} uses both axioms
        right-to-left; Orientation -> -1 keeps the verifier in sync. *)
     Module[{p},
-        p = TFindEquationalProof[c == a, {a == b, b == c}];
+        p = TFindProof[c == a, {a == b, b == c}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
     Success,
@@ -616,7 +616,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[a == e,
+        p = TFindProof[a == e,
             {a == b, b == c, c == d, d == e}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
@@ -624,14 +624,14 @@ VerificationTest[
     TestID -> "ATP/TFEP/depth-4-verifies"
 ]
 
-(* === TFindEquationalProof: AxiomaticTheory string form ============= *)
+(* === TFindProof: AxiomaticTheory string form ============= *)
 
-(* TFindEquationalProof["Theorem", "Theory"] resolves both names
+(* TFindProof["Theorem", "Theory"] resolves both names
    through AxiomaticTheory.  An unknown theorem name surfaces a
    parse Failure rather than $Failed. *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["NoSuchTheorem", "WolframAxioms"],
+    Head @ TFindProof["NoSuchTheorem", "WolframAxioms"],
     Failure,
     TestID -> "ATP/TFEP/string-unknown-theorem"
 ]
@@ -642,7 +642,7 @@ VerificationTest[
        lemma DAG.  DoubleNegation is a genuine superposition proof:
        the trace carries TRACE_CP entries, so buildCplDataset emits
        CriticalPairLemma steps. *)
-    Head @ TFindEquationalProof["DoubleNegation", "WolframAxioms"],
+    Head @ TFindProof["DoubleNegation", "WolframAxioms"],
     ProofObject,
     TestID -> "ATP/TFEP/string-doublenegation-resolves"
 ]
@@ -655,14 +655,14 @@ VerificationTest[
        the ProofObject "Variables" list) matches what the verifier
        replays. *)
     Module[{p},
-        p = TFindEquationalProof["DoubleNegation", "WolframAxioms"];
+        p = TFindProof["DoubleNegation", "WolframAxioms"];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
     Success,
     TestID -> "ATP/TFEP/string-doublenegation-verifies"
 ]
 
-(* === TFindEquationalProof: completion-derived proofs =============== *)
+(* === TFindProof: completion-derived proofs =============== *)
 
 (* Goals the input axioms do not close directly (the EXT axiom-only
    path returns nothing) but completion does: buildCplDataset walks
@@ -670,14 +670,14 @@ VerificationTest[
    rewrite.  The resulting ProofObject passes WL's verifier. *)
 
 VerificationTest[
-    Head @ TFindEquationalProof[b == c, {f[a] == b, f[a] == c}],
+    Head @ TFindProof[b == c, {f[a] == b, f[a] == c}],
     ProofObject,
     TestID -> "ATP/TFEP/completion-ground-proves"
 ]
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[b == c, {f[a] == b, f[a] == c}];
+        p = TFindProof[b == c, {f[a] == b, f[a] == c}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
     Success,
@@ -686,7 +686,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof[b == a,
+        p = TFindProof[b == a,
             {ForAll[x, f[g[x]] == x], f[g[a]] == b}];
         Head @ p["ProofFunction"][p["ConjectureStatement"]]
     ],
@@ -694,7 +694,7 @@ VerificationTest[
     TestID -> "ATP/TFEP/completion-variable-verifies"
 ]
 
-(* === TFindEquationalProof: numeric-literal constants =============== *)
+(* === TFindProof: numeric-literal constants =============== *)
 
 (* AbelianGroupAxioms (and the McCune / Tarski theories) write the
    identity element as OverTilde[1] -- a function applied to the
@@ -703,21 +703,21 @@ VerificationTest[
    diverges. *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms"],
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms"],
     ProofObject,
     TestID -> "ATP/TFEP/numeric-literal-constant-proves"
 ]
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms"];
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms"];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
     Success,
     TestID -> "ATP/TFEP/numeric-literal-constant-verifies"
 ]
 
-(* === TFindEquationalProof: multi-equation conjectures ============== *)
+(* === TFindProof: multi-equation conjectures ============== *)
 
 (* AxiomaticTheory ships some NotableTheorems as a multi-element list
    of equations -- e.g. BooleanAxioms `DeMorgan` is the pair of De
@@ -727,7 +727,7 @@ VerificationTest[
 
 VerificationTest[
     MatchQ[
-        TFindEquationalProof["DeMorgan", "BooleanAxioms"],
+        TFindProof["DeMorgan", "BooleanAxioms"],
         {_ProofObject, _ProofObject}
     ],
     True,
@@ -736,7 +736,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{ps},
-        ps = TFindEquationalProof["DeMorgan", "BooleanAxioms"];
+        ps = TFindProof["DeMorgan", "BooleanAxioms"];
         AllTrue[ps,
             Head @ Quiet @ Check[
                 #["ProofFunction"][#["Theorems"]], $Failed] === Success &]
@@ -745,7 +745,7 @@ VerificationTest[
     TestID -> "ATP/TFEP/multi-eq-demorgan-verifies"
 ]
 
-(* === TFindEquationalProof: ordered-rewriting goal chain ============ *)
+(* === TFindProof: ordered-rewriting goal chain ============ *)
 
 (* AbelianGroupAxioms' `ImpliesMcCuneAxioms` is a single-equation
    theorem whose proof chain includes steps where the C engine's
@@ -757,7 +757,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["ImpliesMcCuneAxioms", "AbelianGroupAxioms"];
+        p = TFindProof["ImpliesMcCuneAxioms", "AbelianGroupAxioms"];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
     Success,
@@ -776,7 +776,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["AndAssociativity", "HillmanAxioms"];
+        p = TFindProof["AndAssociativity", "HillmanAxioms"];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
     Success,
@@ -796,76 +796,76 @@ VerificationTest[
 (* --- Method head: Automatic | Portfolio | Completion | GoalDirected *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> Automatic],
     ProofObject,
     TestID -> "ATP/method/Automatic-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> "Portfolio"],
     ProofObject,
     TestID -> "ATP/method/Portfolio-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> "Completion"],
     ProofObject,
     TestID -> "ATP/method/Completion-bare-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> "GoalDirected"],
     ProofObject,
     TestID -> "ATP/method/GoalDirected-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> "NoSuchMethod"],
     ProofObject,
-    {TFindEquationalProof::badmethod},
+    {TFindProof::badmethod},
     TestID -> "ATP/method/bad-method-warns-and-falls-back"
 ]
 
 (* --- CriticalPairWeight: each ClasHeuristics weight mode proves ---- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "CriticalPairWeight" -> "Mix2"}],
     ProofObject,
     TestID -> "ATP/method/cpweight-Mix2-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "CriticalPairWeight" -> "Gt"}],
     ProofObject,
     TestID -> "ATP/method/cpweight-Gt-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "CriticalPairWeight" -> "Add"}],
     ProofObject,
     TestID -> "ATP/method/cpweight-Add-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "CriticalPairWeight" -> "Goal"}],
     ProofObject,
     TestID -> "ATP/method/cpweight-Goal-CPinGoal-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "CriticalPairWeight" -> "Bogus"}],
     ProofObject,
-    {TFindEquationalProof::badcpw},
+    {TFindProof::badcpw},
     TestID -> "ATP/method/cpweight-bad-warns-and-falls-back"
 ]
 
@@ -873,7 +873,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "Ordering" -> "KBO"}];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -883,7 +883,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "Ordering" -> "LPO",
                 "AutoPrecedence" -> True}];
         Head @ p["ProofFunction"][p["Theorems"]]
@@ -895,7 +895,7 @@ VerificationTest[
 (* --- AutoPrecedence: True and False both prove -------------------- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "Ordering" -> "LPO",
             "AutoPrecedence" -> True}],
     ProofObject,
@@ -903,7 +903,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "AutoPrecedence" -> False}],
     ProofObject,
     TestID -> "ATP/method/autoprec-False-proves"
@@ -919,7 +919,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "Ordering" -> "LPO",
                 "Precedence" -> {"OverBar", "CircleTimes", "1"}}];
         Head @ p["ProofFunction"][p["Theorems"]]
@@ -929,7 +929,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "Ordering" -> "LPO",
             "SkolemHighest" -> True}],
     ProofObject,
@@ -940,14 +940,14 @@ VerificationTest[
    TRelevantAxioms; Connected drops axioms (heuristic). *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "AxiomRelevance" -> None}],
     ProofObject,
     TestID -> "ATP/method/axrel-None-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "AxiomRelevance" -> "Safe"}],
     ProofObject,
     TestID -> "ATP/method/axrel-Safe-proves"
@@ -973,14 +973,14 @@ VerificationTest[
 (* --- MaxWeight: bounded and unbounded both prove the easy theorem -- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "MaxWeight" -> 40}],
     ProofObject,
     TestID -> "ATP/method/maxweight-40-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "MaxWeight" -> 0}],
     ProofObject,
     TestID -> "ATP/method/maxweight-unbounded-proves"
@@ -989,14 +989,14 @@ VerificationTest[
 (* --- GoalInterleave: every n-th selection goal-directed ----------- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "GoalInterleave" -> 3}],
     ProofObject,
     TestID -> "ATP/method/goalinterleave-3-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "GoalInterleave" -> 2}],
     ProofObject,
     TestID -> "ATP/method/goalinterleave-2-proves"
@@ -1005,7 +1005,7 @@ VerificationTest[
 (* --- GroundJoin: opt-in CP deletion stays SOUND (proves+verifies) - *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "GroundJoin" -> True}],
     ProofObject,
     TestID -> "ATP/method/groundjoin-True-proves"
@@ -1013,7 +1013,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "GroundJoin" -> True}];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1024,14 +1024,14 @@ VerificationTest[
 (* --- SelectionRatio: Waldmeister CPdimension fairness ratio -------- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "SelectionRatio" -> 50}],
     ProofObject,
     TestID -> "ATP/method/selectionratio-50-proves"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "SelectionRatio" -> 100}],
     ProofObject,
     TestID -> "ATP/method/selectionratio-100-proves"
@@ -1045,7 +1045,7 @@ VerificationTest[
        reordering of the queue, not a soundness change: the proof still
        lands and verifies. *)
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "FifoTiebreak" -> True}];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1054,7 +1054,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "FifoTiebreak" -> True}],
     ProofObject,
     TestID -> "ATP/method/fifotiebreak-proves"
@@ -1063,7 +1063,7 @@ VerificationTest[
 (* --- AutoMaxWeight: completeness-preserving growing CP-weight bound --- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "AutoMaxWeight" -> 20}],
     ProofObject,
     TestID -> "ATP/method/automaxweight-20-proves"
@@ -1072,7 +1072,7 @@ VerificationTest[
 VerificationTest[
     (* A tight base still proves (stash + force-drain preserves
        completeness -- nothing is dropped). *)
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "AutoMaxWeight" -> 1}],
     ProofObject,
     TestID -> "ATP/method/automaxweight-tight-still-proves"
@@ -1082,7 +1082,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "UnfailingCP" -> True}];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1094,7 +1094,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "RHSInterreduce" -> True}];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1103,7 +1103,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "UnfailingCP" -> True,
             "RHSInterreduce" -> True}],
     ProofObject,
@@ -1113,7 +1113,7 @@ VerificationTest[
 (* --- Connectedness: Bachmair-Dershowitz CP deletion stays sound ---- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "Connectedness" -> True}],
     ProofObject,
     TestID -> "ATP/method/connectedness-proves"
@@ -1121,7 +1121,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "Connectedness" -> True}];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1132,7 +1132,7 @@ VerificationTest[
 (* --- Method -> "Waldmeister": faithful default-strategy preset ----- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> "Waldmeister"],
     ProofObject,
     TestID -> "ATP/method/waldmeister-preset-proves"
@@ -1140,7 +1140,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> "Waldmeister"];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1151,7 +1151,7 @@ VerificationTest[
 (* --- CriticalPairWeight -> "Learned": ENIGMA-style scorer ---------- *)
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "CriticalPairWeight" -> "Learned"}],
     ProofObject,
     TestID -> "ATP/method/cpweight-Learned-proves"
@@ -1159,7 +1159,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             Method -> {"Completion", "CriticalPairWeight" -> "Learned"}];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
@@ -1170,14 +1170,14 @@ VerificationTest[
 (* --- MaxSteps: a tight cap on a hard theorem fails; loose proves --- *)
 
 VerificationTest[
-    TFindEquationalProof["AndAssociativity", "WolframAxioms",
+    TFindProof["AndAssociativity", "WolframAxioms",
         Method -> "Completion", MaxSteps -> 5, MaxWallSeconds -> 20.],
     $Failed,
     TestID -> "ATP/option/maxsteps-tight-on-hard-fails"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         MaxSteps -> 200000],
     ProofObject,
     TestID -> "ATP/option/maxsteps-loose-proves"
@@ -1186,7 +1186,7 @@ VerificationTest[
 (* --- MaxWallSeconds: a tiny budget on a hard theorem fails fast ---- *)
 
 VerificationTest[
-    TFindEquationalProof["AndAssociativity", "WolframAxioms",
+    TFindProof["AndAssociativity", "WolframAxioms",
         Method -> {"Completion", "Ordering" -> "LPO",
             "CriticalPairWeight" -> "Gt"},
         MaxWallSeconds -> 2.],
@@ -1205,7 +1205,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["Commutativity", "WolframAxioms",
+        p = TFindProof["Commutativity", "WolframAxioms",
             Method -> {"GoalDirected", "Ordering" -> "LPO",
                 "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
                 "FifoTiebreak" -> True, "UnfailingCP" -> True},
@@ -1217,7 +1217,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["Commutativity", "WolframAxioms",
+    Head @ TFindProof["Commutativity", "WolframAxioms",
         Method -> {"GoalDirected", "Ordering" -> "LPO",
             "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
             "FifoTiebreak" -> True, "UnfailingCP" -> True},
@@ -1228,7 +1228,7 @@ VerificationTest[
 
 (* === Completion mode + introspective return-type argument ========
 
-   TFindEquationalProof[axioms] (no conjecture) runs a time-constrained
+   TFindProof[axioms] (no conjecture) runs a time-constrained
    completion and returns the derived lemmas; an optional last positional
    return-spec argument projects any prove/completion run onto the
    introspectives. *)
@@ -1238,7 +1238,7 @@ VerificationTest[
    list of inert Equal lemmas. *)
 VerificationTest[
     Module[{res},
-        res = TFindEquationalProof[
+        res = TFindProof[
             {f[f[x, y], z] == f[x, f[y, z]], f[x, y] == f[y, x]},
             MaxWallSeconds -> 10];
         {MatchQ[res, {__}],
@@ -1251,7 +1251,7 @@ VerificationTest[
 (* Completion of a theory by name. *)
 VerificationTest[
     MatchQ[
-        TFindEquationalProof["AbelianGroupAxioms", MaxWallSeconds -> 10],
+        TFindProof["AbelianGroupAxioms", MaxWallSeconds -> 10],
         {__}],
     True,
     TestID -> "ATP/completion/theory-by-name-returns-lemmas"
@@ -1261,7 +1261,7 @@ VerificationTest[
    value bare (here "Statistics", a small run-stats Association). *)
 VerificationTest[
     KeyExistsQ[
-        TFindEquationalProof[
+        TFindProof[
             {f[f[x, y], z] == f[x, f[y, z]], f[x, y] == f[y, x]},
             "Statistics", MaxWallSeconds -> 10],
         "Status"],
@@ -1271,14 +1271,14 @@ VerificationTest[
 
 (* Return specs on a normal (fast) proof. *)
 VerificationTest[
-    Head[TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    Head[TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         "ProofObject"]],
     ProofObject,
     TestID -> "ATP/returnspec/proofobject"
 ]
 VerificationTest[
     MatchQ[
-        TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             "Lemmas"],
         {___}],
     True,
@@ -1286,7 +1286,7 @@ VerificationTest[
 ]
 VerificationTest[
     Module[{pa},
-        pa = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        pa = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             "PreprocessedAxioms"];
         {MatchQ[pa, {__}],
          AllTrue[pa, MatchQ[#, Inactive[Equal][_, _]] &]}
@@ -1296,7 +1296,7 @@ VerificationTest[
 ]
 VerificationTest[
     Module[{ra},
-        ra = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        ra = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             "RelevantAxioms"];
         {AssociationQ[ra], Sort[Keys[ra]]}
     ],
@@ -1304,14 +1304,14 @@ VerificationTest[
     TestID -> "ATP/returnspec/relevantaxioms-assoc"
 ]
 VerificationTest[
-    ListQ[TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+    ListQ[TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         "RawTrace"]],
     True,
     TestID -> "ATP/returnspec/rawtrace-is-list"
 ]
 VerificationTest[
     Module[{r},
-        r = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        r = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             {"ProofObject", "Statistics"}];
         {AssociationQ[r], Sort[Keys[r]], Head[r["ProofObject"]]}
     ],
@@ -1320,7 +1320,7 @@ VerificationTest[
 ]
 VerificationTest[
     Module[{r},
-        r = TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms",
+        r = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             All];
         {AssociationQ[r],
          Sort[Keys[r]] === Sort[THVMLink`Private`$AtpReturnSpecs]}
@@ -1331,12 +1331,12 @@ VerificationTest[
 
 (* Backward compatibility: no return spec returns the bare ProofObject. *)
 VerificationTest[
-    Head[TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms"]],
+    Head[TFindProof["InverseOfInverse", "AbelianGroupAxioms"]],
     ProofObject,
     TestID -> "ATP/returnspec/backcompat-string-pair-bare-proofobject"
 ]
 VerificationTest[
-    Head[TFindEquationalProof[a == c, {a == b, b == c}]],
+    Head[TFindProof[a == c, {a == b, b == c}]],
     ProofObject,
     TestID -> "ATP/returnspec/backcompat-expr-pair-bare-proofobject"
 ]
@@ -1462,13 +1462,13 @@ VerificationTest[
 (* Regression: existing theorems still prove under Method -> Automatic
    (now problem-aware) -- the safety tail guarantees this. *)
 VerificationTest[
-    Head @ TFindEquationalProof["InverseOfInverse", "AbelianGroupAxioms"],
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms"],
     ProofObject,
     TestID -> "ATP/autotune/regression-InverseOfInverse-default-Automatic"
 ]
 
 VerificationTest[
-    Head @ TFindEquationalProof["DoubleNegation", "WolframAxioms"],
+    Head @ TFindProof["DoubleNegation", "WolframAxioms"],
     ProofObject,
     TestID -> "ATP/autotune/regression-DoubleNegation-default-Automatic"
 ]
@@ -1483,7 +1483,7 @@ VerificationTest[
    an external free-RAM guard (the search peaks ~8GB resident):
 
      THVM_HEAP_CELLS=$((1<<30)) THVM_ATP_TRACE_MAX=4000000 \
-       wolframscript -code 'TFindEquationalProof["AndAssociativity",
+       wolframscript -code 'TFindProof["AndAssociativity",
          "WolframAxioms", {"Statistics", "ProofObject"},
          Method -> {"Completion", "CriticalPairWeight" -> "Gt"},
          MaxWallSeconds -> 400]'
@@ -1507,7 +1507,7 @@ VerificationTest[
 VerificationTest[
     If[ Environment["THVM_ATP_ANDASSOC_TEST"] === "1",
         Module[{r},
-            r = TFindEquationalProof["AndAssociativity", "WolframAxioms",
+            r = TFindProof["AndAssociativity", "WolframAxioms",
                 {"Statistics", "ProofObject"},
                 Method -> {"Completion", "CriticalPairWeight" -> "Gt"},
                 MaxWallSeconds -> 400];
@@ -1535,7 +1535,7 @@ VerificationTest[
    the trace-DAG reconstruction. *)
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["DoubleNegation", "WolframAxioms",
+        p = TFindProof["DoubleNegation", "WolframAxioms",
             Method -> {"Completion", "RecordNorm" -> True},
             MaxWallSeconds -> 60];
         {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
@@ -1546,7 +1546,7 @@ VerificationTest[
 
 VerificationTest[
     Module[{p},
-        p = TFindEquationalProof["DoubleNegation", "WolframAxioms",
+        p = TFindProof["DoubleNegation", "WolframAxioms",
             Method -> {"Completion", "RecordNorm" -> False},
             MaxWallSeconds -> 60];
         {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
@@ -1626,7 +1626,7 @@ VerificationTest[
 VerificationTest[
     If[ Environment["THVM_ATP_ANDASSOC_TEST"] === "1",
         Module[{p},
-            p = TFindEquationalProof["AndAssociativity", "WolframAxioms",
+            p = TFindProof["AndAssociativity", "WolframAxioms",
                 Method -> {"Waldmeister", "CriticalPairWeight" -> "Gt",
                     "CPSetInterreduce" -> False, "RecordNorm" -> False},
                 MaxWallSeconds -> 600];
@@ -1650,10 +1650,10 @@ VerificationTest[
     Module[{hard, viaConstraint, viaWrapper},
         hard = {"Completion", "Ordering" -> "LPO",
             "CriticalPairWeight" -> "Gt"};
-        viaConstraint = TFindEquationalProof["AndAssociativity",
+        viaConstraint = TFindProof["AndAssociativity",
             "WolframAxioms", Method -> hard, TimeConstraint -> 2.];
         viaWrapper = TimeConstrained[
-            TFindEquationalProof["AndAssociativity", "WolframAxioms",
+            TFindProof["AndAssociativity", "WolframAxioms",
                 Method -> hard], 2., "TimedOut"];
         (* AndAssociativity over the single Sheffer/nand axiom is a deep
            completion (the C bench closes it at ~560 rules / ~119s under
@@ -1670,4 +1670,17 @@ VerificationTest[
     ],
     {True, True},
     TestID -> "ATP/option/effective-abort-interrupts-running-engine"
+]
+
+(* === Back-compat alias: TFindEquationalProof still forwards ======== *)
+
+(* The primary name is TFindProof; TFindEquationalProof is kept as a
+   deprecated alias.  Verify the alias still produces a verifying
+   ProofObject for a goal that the primary name also proves, so old
+   notebooks and downstream callers using the legacy spelling keep
+   working byte-identically. *)
+VerificationTest[
+    Head @ TFindEquationalProof[a == c, {a == b, b == c}],
+    ProofObject,
+    TestID -> "ATP/alias/TFindEquationalProof-still-works"
 ]
