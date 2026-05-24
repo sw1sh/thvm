@@ -213,7 +213,35 @@ IJCAI, etc. -- are left as is.)
    mechanics (meta-RL, in-context RL). Closes with an honest
    assessment of what the thvm arc should harvest as it pivots to
    ARC-AGI-3. The agentic-exploration companion to page 8.
-10. [references.md](references.md) -- consolidated bibliography with
+10. [10-intrinsic-goal-experiments-synthesis.md](10-intrinsic-goal-experiments-synthesis.md)
+   -- the synthesis page for the brain/experiments ARC-AGI-3
+   intrinsic-goal arc (209+). Stuck-game setup, the diversity lever
+   (the one robust positive), the wall of clean negatives (rule
+   induction, recurrent world model, curriculum reward transfer,
+   directed-as-general, ensemble allocation, MCTS), the representation
+   win (object_key novelty, 222) and ladder (223-225), and the live
+   updates as the skill chapter (226-238) closed at a 12/15 ceiling
+   (including the missing null-check correction in 234 that rewrote
+   half the chapter narrative).
+11. [11-skill-learning-survey.md](11-skill-learning-survey.md) -- the
+   connectionist skill-learning survey for the chapter (226-238):
+   options framework, unsupervised skill discovery (DIAYN/DADS),
+   manager-worker (FeUdal/HIRO/HAC), goal-conditioned + hindsight
+   (HER), skill chaining + Deep Skill Graphs, object-centric frontier.
+   Includes the two follow-up sections folded mid-chapter: the
+   end-to-end variant (soft DAG over latent partition, refined to
+   skill-coarsened MCTS where the traversal IS the algorithm) and the
+   attention-derived-subgoals direction.
+12. [12-modern-robotics-survey.md](12-modern-robotics-survey.md) --
+   what modern robotics research (2022-present) has converged on, read
+   for brain-arc importable mechanisms: world models that learn and
+   deploy (Dreamer V3, DayDreamer), diffusion / flow action policies
+   (the structural fix for the deterministic-argmax pathology that
+   killed several chapter workers), action chunking (ACT, RoboCat),
+   latent action pretraining (LAPA, Genie), and online distillation.
+   Closes with five concrete leads for chapter 12-and-beyond, ranked
+   by signal-per-effort on the cached substrate harness.
+13. [references.md](references.md) -- consolidated bibliography with
    links.
 
 ## How to use this with thvm

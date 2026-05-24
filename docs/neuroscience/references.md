@@ -985,6 +985,114 @@ are mostly mature pre-2022 work the thvm arc would port.
   <https://arxiv.org/abs/2107.12808> (also cited in the
   auto-curriculum block above.)
 
+## Modern robotics research (page 12)
+
+The 2022-present robotics surge, surveyed for brain-arc importable
+mechanisms (page 12, 12-modern-robotics-survey.md).
+
+World models that learn and deploy:
+
+- Danijar Hafner et al., "Mastering Diverse Domains through World
+  Models" (Dreamer V3), arXiv:2301.04104 (2023).
+  <https://arxiv.org/abs/2301.04104>
+- Philipp Wu et al., "DayDreamer: World Models for Physical Robot
+  Learning", arXiv:2206.14176 (2022). <https://arxiv.org/abs/2206.14176>
+- Jake Bruce et al., "Genie: Generative Interactive Environments", ICML
+  2024; arXiv:2402.15391. <https://arxiv.org/abs/2402.15391>
+  (Genie 2 followup, DeepMind blog 2024.)
+- Vincent Micheli et al., "Transformers are Sample-Efficient World
+  Models" (IRIS), ICLR 2023; arXiv:2209.00588 (also cited in page 11).
+  <https://arxiv.org/abs/2209.00588>
+
+Diffusion / flow action policies:
+
+- Cheng Chi et al., "Diffusion Policy: Visuomotor Policy Learning via
+  Action Diffusion", RSS 2023; arXiv:2303.04137.
+  <https://arxiv.org/abs/2303.04137>
+- Anurag Ajay et al., "Is Conditional Generative Modeling all you need
+  for Decision-Making?" (Decision Diffuser), arXiv:2211.15657 (2023).
+  <https://arxiv.org/abs/2211.15657>
+- Jacob Austin et al., "Structured Denoising Diffusion Models in
+  Discrete State-Spaces" (D3PM, the discrete-diffusion substrate for
+  tokenized action spaces), NeurIPS 2021; arXiv:2107.03006.
+  <https://arxiv.org/abs/2107.03006>
+
+Action chunking and temporal abstraction:
+
+- Tony Z. Zhao et al., "Learning Fine-Grained Bimanual Manipulation
+  with Low-Cost Hardware" (ACT, ALOHA), RSS 2023; arXiv:2304.13705.
+  <https://arxiv.org/abs/2304.13705>
+- Konstantinos Bousmalis et al., "RoboCat: A Self-Improving Foundation
+  Agent for Robotic Manipulation", arXiv:2306.11706 (2023).
+  <https://arxiv.org/abs/2306.11706>
+- Zipeng Fu et al., "Mobile ALOHA: Learning Bimanual Mobile
+  Manipulation with Low-Cost Whole-Body Teleoperation", arXiv:2401.02117
+  (2024). <https://arxiv.org/abs/2401.02117>
+
+Latent action pretraining (the closest cousin to the page-11 attention
+follow-up):
+
+- Seonghyeon Ye et al., "Latent Action Pretraining from Videos" (LAPA),
+  arXiv:2410.11758 (2024). <https://arxiv.org/abs/2410.11758>
+- Jake Bruce et al., Genie (cited above).
+
+Vision-language-action / cross-embodiment foundation models (LANDSCAPE
+ONLY, OUT OF SCOPE for the brain-arc per project constraint):
+
+- Anthony Brohan et al., "RT-1: Robotics Transformer for Real-World
+  Control at Scale", arXiv:2212.06817 (2022).
+  <https://arxiv.org/abs/2212.06817>
+- Anthony Brohan et al., "RT-2: Vision-Language-Action Models Transfer
+  Web Knowledge to Robotic Control", arXiv:2307.15818 (2023).
+  <https://arxiv.org/abs/2307.15818>
+- Abhishek Padalkar et al., "Open X-Embodiment: Robotic Learning
+  Datasets and RT-X Models", arXiv:2310.08864 (2024).
+  <https://arxiv.org/abs/2310.08864>
+- Moo Jin Kim et al., "OpenVLA: An Open-Source Vision-Language-Action
+  Model", arXiv:2406.09246 (2024). <https://arxiv.org/abs/2406.09246>
+- Kevin Black et al., "pi0: A Vision-Language-Action Flow Model for
+  General Robot Control", arXiv:2410.24164 (2024).
+  <https://arxiv.org/abs/2410.24164>
+
+Visual representations for action:
+
+- Suraj Nair et al., "R3M: A Universal Visual Representation for Robot
+  Manipulation", arXiv:2203.12601 (2023).
+  <https://arxiv.org/abs/2203.12601>
+- Arjun Majumdar et al., "Where are we in the search for an Artificial
+  Visual Cortex for Embodied Intelligence?" (VC-1), NeurIPS 2023;
+  arXiv:2303.18240. <https://arxiv.org/abs/2303.18240>
+- Tete Xiao et al., "Masked Visual Pre-training for Motor Control"
+  (MVP), arXiv:2210.03109 (2022). <https://arxiv.org/abs/2210.03109>
+
+Skill / option pretraining (closest cousin to page 11):
+
+- Avi Singh et al., "PARROT: Data-Driven Behavioral Priors for
+  Reinforcement Learning", ICLR 2021; arXiv:2011.10024.
+  <https://arxiv.org/abs/2011.10024>
+- Eric Jang et al., "BC-Z: Zero-Shot Task Generalization with Robotic
+  Imitation Learning", arXiv:2202.02005 (2022).
+  <https://arxiv.org/abs/2202.02005>
+
+Neuroscience grounding (page 12 connections):
+
+- Karl Friston, "The free-energy principle: a unified brain theory?",
+  Nature Reviews Neuroscience 2010; predictive coding.
+  <https://www.nature.com/articles/nrn2787>
+- Andre M. Bastos et al., "Canonical Microcircuits for Predictive
+  Coding", Neuron 76(4), 2012.
+  <https://www.cell.com/neuron/fulltext/S0896-6273(12)00892-1>
+- Mark M. Churchland et al., "Neural population dynamics during
+  reaching" (motor cortex as a dynamical system; action-distribution
+  view relevant to diffusion policies), Nature 487, 2012.
+  <https://www.nature.com/articles/nature11129>
+- Emilio Bizzi & Andrea d'Avella, "Modular organization of the spinal
+  motor system" (motor primitives / muscle synergies relevant to
+  latent action pretraining).
+- Daniel M. Wolpert et al., "Principles of sensorimotor learning"
+  (cerebellar adaptation), Nature Reviews Neuroscience 12, 2011.
+  <https://www.nature.com/articles/nrn3112>
+
 ## thvm internal docs referenced
 
 - [../grad.md](../grad.md) -- autodiff.
