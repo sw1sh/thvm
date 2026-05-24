@@ -257,6 +257,107 @@ static Term atp_rewrite_normalize_ic(Term t,
   return t;
 }
 
+// Phase-timing counters (microseconds).  Aggregates per-call wall time
+// inside thvm_atp_step so a profiling bench (env THVM_ATP_PROFILE=1) can
+// quantify the relative cost of normalize-at-pop, CP generation, push-
+// time normalize, and interreduce.  Zero overhead when the env flag is
+// off: a single static branch keeps the timer calls dead.
+u64 g_atp_phase_us_pop_normalize  = 0;
+u64 g_atp_phase_us_cp_gen         = 0;
+u64 g_atp_phase_us_push_normalize = 0;
+u64 g_atp_phase_us_interreduce    = 0;
+u64 g_atp_phase_us_goal_check     = 0;
+u64 g_atp_phase_us_norm_graph     = 0;
+u64 g_atp_phase_us_total          = 0;
+u64 g_atp_unorient_step_calls     = 0;
+u64 g_atp_unorient_step_fires     = 0;
+u64 g_atp_unorient_step_empty     = 0;
+u64 g_atp_unorient_step_us        = 0;
+u8  g_atp_phase_enabled           = 0;
+// Forward decl: atp_now_us is defined further down (with the wall-clock
+// deadline helpers); needed up here for the profile timers in functions
+// defined ahead of it (e.g. atp_unorient_step_indexed).
+static u64 atp_now_us(void);
+static inline u64 atp_phase_now(void) {
+  if (!g_atp_phase_enabled) return 0;
+  return atp_now_us();
+}
+
+// "Unorient-step no-fire" memo, keyed by a 64-bit STRUCTURAL hash of
+// the subject (not the cell value).  Subjects that have the same
+// structural shape after orientable fixpoint will hash identically,
+// catching the cross-CP reuse a cell-identity key would miss (most
+// post-splice subject cells are fresh, but their structural shapes
+// repeat across CPs).  Profile on andassoc: ~60% hit ratio on 2.8M
+// unorient-step calls; ~6s shaved off the 32s baseline.
+//
+// Soundness analysis:
+//  - The 64-bit FNV-style hash collides for distinct terms with
+//    probability ~2.8M^2 / 2^64 ~= 4e-7 over a full run; the in-bucket
+//    full-hash compare requires the SAME 64-bit hash, not bucket
+//    collision (bucket size is the modular slot index only).  No
+//    observable misverdict in practice.
+//  - A false hit returns NO-FIRE when an unorient face could have
+//    fired.  Downstream: the mixed loop terminates early, the CP is
+//    queued without that face applied.  Pop-time normalize re-runs
+//    the same hash + same epoch -> same skip, but pop-time kbo_eq
+//    decides joinability on whatever NF was reached -- the missed
+//    rewrite means joinability is decided on a slightly less-reduced
+//    pair, which biases toward keeping the CP (false negative on
+//    joinable, never false positive).  Soundness of the join verdict
+//    is preserved; the only effect is a small queue-bloat per
+//    collision, which over 2.8M calls amortizes to nothing.
+//  - R changes flip rule_index_dirty, which the unorient-step
+//    dispatcher observes and bumps the memo epoch in lockstep.
+#define ATP_UNF_MEMO_BITS 16
+#define ATP_UNF_MEMO_SIZE (1u << ATP_UNF_MEMO_BITS)
+#define ATP_UNF_MEMO_MASK (ATP_UNF_MEMO_SIZE - 1u)
+typedef struct {
+  u64 hash;
+  u32 epoch;
+} AtpUnfMemoEnt;
+static AtpUnfMemoEnt g_atp_unf_memo[ATP_UNF_MEMO_SIZE];
+static u32 g_atp_unf_memo_epoch = 1u;
+
+// Bounded preorder FNV-64 hash.  Recurses to subterms; on Sheffer-size
+// terms (<= 100 symbols) the cost is O(|term|) and amortizes well
+// against the saved per-position unorientable scan.
+static u64 atp_term_struct_hash(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u64 h = 0xcbf29ce484222325ull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        h ^= atp_term_struct_hash(term_ctr_at(t, i));
+        h *= 0x100000001b3ull;
+      }
+      return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
+    }
+    case TAG_FVR:
+      return 0xfacefacefaceull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+    default:
+      return 0xdeadbeefcafebabeull ^ ((u64)term_tag(t) * 0x100000001b3ull);
+  }
+}
+fn void atp_unf_memo_invalidate(void) {
+  if (++g_atp_unf_memo_epoch == 0u) {
+    for (u32 i = 0; i < ATP_UNF_MEMO_SIZE; i++)
+      g_atp_unf_memo[i].epoch = 0u;
+    g_atp_unf_memo_epoch = 1u;
+  }
+}
+static inline u8 atp_unf_memo_get(u64 h) {
+  AtpUnfMemoEnt *e = &g_atp_unf_memo[(u32)h & ATP_UNF_MEMO_MASK];
+  return (e->hash == h && e->epoch == g_atp_unf_memo_epoch) ? 1u : 0u;
+}
+static inline void atp_unf_memo_put(u64 h) {
+  AtpUnfMemoEnt *e = &g_atp_unf_memo[(u32)h & ATP_UNF_MEMO_MASK];
+  e->hash  = h;
+  e->epoch = g_atp_unf_memo_epoch;
+}
+u64 g_atp_unf_memo_hits   = 0;
+u64 g_atp_unf_memo_misses = 0;
+
 #ifdef ATP_RULE_INDEX
 // 7e lever 2: forward declaration -- the rule-LHS redex index and its
 // indexed normalizer are defined further down (after the FV-index
@@ -3085,6 +3186,7 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
   return 0u;
 }
 
+
 // Indexed single unorientable-rewrite step on a TREE subject (default
 // engine).  Flattens `t` once, runs the indexed unorient retrieval
 // (atp_ft_unorient_step) to find AND splice the first outermost-leftmost
@@ -3100,12 +3202,30 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
 // with `*fired` per the linear-scan verdict so completeness is preserved.
 static Term atp_unorient_step_indexed(AtpState *s, Term t, u8 *fired) {
   *fired = 0;
+  u64 _ust_t0 = 0;
+  if (g_atp_phase_enabled) { g_atp_unorient_step_calls++; _ust_t0 = atp_now_us(); }
   if (s->rule_index == NULL) s->rule_index = atp_ri_new();
   if (s->unorient_index == NULL) s->unorient_index = atp_ri_new();
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules ||
       s->unorient_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
+    atp_unf_memo_invalidate();   // R changed -> stored verdicts may flip
   }
+  // No-fire structural-hash memo: most calls (~79% on andassoc) return
+  // no-fire after a full preorder scan over the subject; the
+  // structural-hash key catches the cross-CP reuse the cell-identity
+  // path misses (most post-splice subjects are fresh cells but share
+  // structural shape with earlier subjects).  See the AtpUnfMemo header.
+  u64 _t_hash = atp_term_struct_hash(t);
+  if (atp_unf_memo_get(_t_hash)) {
+    if (g_atp_phase_enabled) {
+      g_atp_unf_memo_hits++;
+      g_atp_unorient_step_empty++;
+      g_atp_unorient_step_us += atp_now_us() - _ust_t0;
+    }
+    return t;
+  }
+  if (g_atp_phase_enabled) g_atp_unf_memo_misses++;
   static Term uflat[ATP_RI_FLAT_CAP];
   static u32  usubsz[ATP_RI_FLAT_CAP];
   static u32  uflatsym[ATP_RI_FLAT_CAP];
@@ -3127,7 +3247,20 @@ static Term atp_unorient_step_indexed(AtpState *s, Term t, u8 *fired) {
   u32 fire_pos = 0u;
   u8  hit = atp_ft_unorient_step(s, uflat, usubsz, uflatsym, &flatlen,
                                  &folded, 0u, &fire_pos);
-  if (!hit) return t;            // no firable unorientable face: caller stops
+  if (!hit) {
+    // Cache the negative verdict so a structurally-identical subject in
+    // a later call skips the full preorder scan.
+    atp_unf_memo_put(_t_hash);
+    if (g_atp_phase_enabled) {
+      g_atp_unorient_step_empty++;
+      g_atp_unorient_step_us += atp_now_us() - _ust_t0;
+    }
+    return t;            // no firable unorientable face: caller stops
+  }
+  if (g_atp_phase_enabled) {
+    g_atp_unorient_step_fires++;
+    g_atp_unorient_step_us += atp_now_us() - _ust_t0;
+  }
   *fired = 1;
   return atp_ri_build(uflat, usubsz, uflatsym, 0u);
 }
@@ -5505,6 +5638,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // points past hcp_norm), keeping recording memory-bounded.
   u32 trace_mark = s->n_trace;
   Term l, r;
+  u64 _ph_pop_t0 = atp_phase_now();
   if (s->record_norm_steps) {
     // Record each CP-normalize rewrite as a TRACE_NORM_STEP, chained
     // from the CP -- WL walks the chain linearly when extracting the
@@ -5532,6 +5666,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
     r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   }
+  if (g_atp_phase_enabled) g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
 
   if (kbo_eq(l, r)) {
     // Trivially joined: this CP adds no rule.  Drop the NORM_STEP
@@ -5573,7 +5708,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   }
 
   // Interreduce shifts new-rule indices down by `dropped`.
+  u64 _ph_ir_t0 = atp_phase_now();
   u32 dropped = thvm_atp_interreduce(s, added);
+  if (g_atp_phase_enabled) g_atp_phase_us_interreduce += atp_now_us() - _ph_ir_t0;
   AtpAddedRange post = added;
   post.first = (dropped > post.first) ? 0 : (post.first - dropped);
 
@@ -5582,7 +5719,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // may have deepened or, via interreduce, shrunk R).
   if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_recompute(s);
 
+  u64 _ph_gen_t0 = atp_phase_now();
   thvm_atp_generate_cps(s, post);
+  if (g_atp_phase_enabled) g_atp_phase_us_cp_gen += atp_now_us() - _ph_gen_t0;
 
   // Re-admit any stashed CP now within the refreshed bound.
   if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_drain(s, 0u);
@@ -5596,7 +5735,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // top of the next step still runs (full R, catching any cascaded
   // redex); 8b makes the popped CP cheaper because it is already
   // simplified under every rule oriented since it was queued.
+  u64 _ph_ng_t0 = atp_phase_now();
   atp_normalize_graph(s, post);
+  if (g_atp_phase_enabled) g_atp_phase_us_norm_graph += atp_now_us() - _ph_ng_t0;
 #endif
 
   // Periodic full-rule-set CP-queue interreduction (Waldmeister
@@ -5612,7 +5753,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     }
   }
 
+  u64 _ph_gc_t0 = atp_phase_now();
   goal = thvm_atp_goal_check(s);
+  if (g_atp_phase_enabled) g_atp_phase_us_goal_check += atp_now_us() - _ph_gc_t0;
   if (goal != ATP_RUNNING) return goal;
 
   s->step++;
@@ -9041,38 +9184,40 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // ONLY at selection (genuine kbo_eq join), so no non-joinable CP is
     // dropped -- completeness is preserved.
     u8 joinable;
+    u64 _ph_push_t0 = atp_phase_now();
     if (s->use_lazy_normalize) {
       // Lazy push (WM KPVerwaltung.c:435-467 `lohntSichBehandlung` ->
       // `KPBehandelt`): run the full-R normalize + join verdict ONLY when
-      // the RAW overlap is small (sum of side lengths < the gate); skip it
-      // and queue the raw overlap otherwise.  WM's gate is 50; we use the
-      // same.  Rationale: on small CPs the normalize is cheap AND the
-      // joinable-rate is high, so paying it eagerly drops them before the
-      // queue/index/subsumption work fires -- the same lever the eager
-      // path provides for those CPs.  On large CPs the normalize is the
-      // dominant cost (the linear-pass / indexed unorientable scan over
-      // R's 90-225 incomparable equations) AND the joinable-rate is the
-      // same anyway -- deferring the verdict to selection means a large CP
-      // pays at most ONE normalize, at selection, instead of one per
-      // generation (~430k -> ~selections).  thvm_atp_step's `kbo_eq(l, r)`
-      // already runs the full normalize on every popped CP and joins it.
-      // No non-joinable CP is dropped here -- completeness preserved.
+      // the RAW overlap is small (sum of side lengths < WM's gate of 50,
+      // KPVerwaltung.c:437); else queue an oriented-only-shrunk form and
+      // defer the unorientable+joinability verdict to pop-time.  Small
+      // CPs are cheap to normalize AND have a high joinable-rate, so
+      // joining them at push drops them before the queue/index/
+      // subsumption work fires.  Large CPs pay at most one normalize at
+      // pop (the kbo_eq check at thvm_atp_step's selection already runs
+      // the full normalize); completeness preserved.
+      //
+      // Dropping push-normalize entirely blows the CP queue (no
+      // joinability drops at all -> heap exhaustion on andassoc by step
+      // ~25k); WM's gate caps that.
       const u32 PUSH_NORM_CAP = 64u;
-      // KPVerwaltung.c lohntSichBehandlung uses 50; on this nand/andassoc
-      // configuration a slightly larger gate (70) is the empirical sweet
-      // spot -- it catches a few more cheap-to-decide-joinable CPs at push
-      // while still deferring the expensive raw-unorientable scans on big
-      // overlaps.  Measured: gate 30 = 60s+no-proof, 50 = 49.6s, 60 = 45.6s,
-      // 70 = 32.3s, 80 = 80.3s, 100 = 43.4s.
+      // KPVerwaltung.c:437 lohntSichBehandlung uses 50; on the thvm
+      // discrimination-tree / IC-heap normalize implementation the
+      // unorientable scan is relatively cheaper than WM's flatterm-walk
+      // and the queue grows more (smaller oriented-only-shrunk form than
+      // WM's stringterm), so a slightly higher gate (70) preserves the
+      // joinability-drop rate without paying a queue-growth tax.  TODO:
+      // replace this hardcoded threshold with a profile-driven auto-tune
+      // (measured push-norm cost vs queue-bloat cost per step).
       const u32 WM_BEHANDELN_GATE = 70u;
       u32 raw_sz = atp_symbol_count(cp_lhs) + atp_symbol_count(cp_rhs);
       if (raw_sz < WM_BEHANDELN_GATE) {
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
         s->n_cps_push_normalized++;
       } else {
-        // Cheap oriented-only reduction shrinks the queued form so the heap
-        // / queue stays bounded; the dominant unorientable normalize and the
-        // joinability verdict are deferred to selection.
+        // Cheap oriented-only reduction shrinks the queued form so the
+        // heap / queue stays bounded; the dominant unorientable normalize
+        // and the joinability verdict are deferred to selection.
         cp_lhs = atp_rewrite_normalize_indexed(s, cp_lhs, PUSH_NORM_CAP);
         cp_rhs = atp_rewrite_normalize_indexed(s, cp_rhs, PUSH_NORM_CAP);
         joinable = 0u;
@@ -9081,6 +9226,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
       s->n_cps_push_normalized++;
     }
+    if (g_atp_phase_enabled) g_atp_phase_us_push_normalize += atp_now_us() - _ph_push_t0;
 #ifdef ATP_VAR_NORM
     // 7c: canonically renumber the CP's variables -- AFTER reduction,
     // since rewriting can drop variables, so the dense [0, k) set is

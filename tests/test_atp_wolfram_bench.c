@@ -291,6 +291,13 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_lazy_normalize(s, 1u);
     }
   }
+  // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
+  // interreduce sweep (already-redundant with right_reduce inline path).
+  {
+    const char *ri = getenv("THVM_ATP_RHS_IR");
+    if (ri != NULL && ri[0] != '\0')
+      thvm_atp_set_use_rhs_interreduce(s, (ri[0] != '0') ? 1u : 0u);
+  }
 
   // THVM_ATP_LAZY_NORM=0/1: toggle deferred-selection / lazy normalization
   // independently of the WM preset (A/B vs eager push-time normalize).
@@ -405,6 +412,15 @@ int main(int argc, char **argv) {
     if (dg != NULL && dg[0] != '\0') diag_period = (u32)strtoul(dg, NULL, 10);
   }
 
+  // Phase timing: THVM_ATP_PROFILE=1 wires up the per-phase wall-clock
+  // counters inside thvm_atp_step (pop-normalize, CP-gen, push-normalize,
+  // interreduce, goal-check, normalize-graph) so the headline output
+  // reports the dominant cost slice.
+  {
+    const char *pr = getenv("THVM_ATP_PROFILE");
+    if (pr != NULL && pr[0] == '1') g_atp_phase_enabled = 1u;
+  }
+
   clock_t   t0  = clock();
   AtpStatus st  = ATP_RUNNING;
   u32       i   = 0;
@@ -458,6 +474,48 @@ int main(int argc, char **argv) {
   printf("   lazy-normalize=%u  push-time full-R normalizes=%llu\n",
          s->use_lazy_normalize,
          (unsigned long long)s->n_cps_push_normalized);
+  if (g_atp_phase_enabled) {
+    double w = (el > 0.0) ? el : 1.0;
+    u64 sumus = g_atp_phase_us_pop_normalize + g_atp_phase_us_cp_gen +
+                g_atp_phase_us_push_normalize + g_atp_phase_us_interreduce +
+                g_atp_phase_us_goal_check + g_atp_phase_us_norm_graph;
+    printf("   phase: pop-norm=%.2fs (%.0f%%) cp-gen=%.2fs (%.0f%%)\n"
+           "          push-norm=%.2fs (%.0f%%) interreduce=%.2fs (%.0f%%)\n"
+           "          goal-check=%.2fs (%.0f%%) norm-graph=%.2fs (%.0f%%)\n"
+           "          sum=%.2fs / wall=%.2fs (%.0f%%)\n",
+           g_atp_phase_us_pop_normalize / 1e6,
+           100.0 * (g_atp_phase_us_pop_normalize / 1e6) / w,
+           g_atp_phase_us_cp_gen / 1e6,
+           100.0 * (g_atp_phase_us_cp_gen / 1e6) / w,
+           g_atp_phase_us_push_normalize / 1e6,
+           100.0 * (g_atp_phase_us_push_normalize / 1e6) / w,
+           g_atp_phase_us_interreduce / 1e6,
+           100.0 * (g_atp_phase_us_interreduce / 1e6) / w,
+           g_atp_phase_us_goal_check / 1e6,
+           100.0 * (g_atp_phase_us_goal_check / 1e6) / w,
+           g_atp_phase_us_norm_graph / 1e6,
+           100.0 * (g_atp_phase_us_norm_graph / 1e6) / w,
+           sumus / 1e6, w,
+           100.0 * (sumus / 1e6) / w);
+    if (g_atp_unorient_step_calls > 0) {
+      printf("   unorient-step: %llu calls  %llu fires  %llu empty (%.0f%% wasted)  %.2fs total\n",
+             (unsigned long long)g_atp_unorient_step_calls,
+             (unsigned long long)g_atp_unorient_step_fires,
+             (unsigned long long)g_atp_unorient_step_empty,
+             100.0 * (double)g_atp_unorient_step_empty /
+                     (double)g_atp_unorient_step_calls,
+             g_atp_unorient_step_us / 1e6);
+    }
+    {
+      u64 unf_total = g_atp_unf_memo_hits + g_atp_unf_memo_misses;
+      if (unf_total > 0) {
+        printf("   unf-memo: %llu hits / %llu queries (%.0f%% hit-ratio)\n",
+               (unsigned long long)g_atp_unf_memo_hits,
+               (unsigned long long)unf_total,
+               100.0 * (double)g_atp_unf_memo_hits / (double)unf_total);
+      }
+    }
+  }
   { u32 unor = 0;
     for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;
     printf("   unorientable rules: %u / %u\n", unor, s->n_rules); }
