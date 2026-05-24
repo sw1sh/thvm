@@ -38,9 +38,9 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindEquationalProof[axioms] (a list of axiom equations) or TFindEquationalProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindEquationalProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\", \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  TFindEquationalProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindEquationalProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindEquationalProof[axioms] (a list of axiom equations) or TFindEquationalProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindEquationalProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
 
-TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (SInE-style symbol-connectivity pruning -- heuristic, may drop a needed axiom).";
+TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning -- a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire -- D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
 
 (* Forward-declare symbols owned by sibling files (Switch.wl owns
    the IC term constructors) so bare references inside
@@ -2010,9 +2010,9 @@ TFindEquationalProof::dropax =
 symbol set(s) `1` as irrelevant to the conjecture.  Mode \"Safe\" is \
 sound and completeness-preserving (the symbols are private to the \
 dropped axiom and occur on both sides, so it cannot enter a proof of \
-this goal); mode \"Connected\" is a heuristic and may drop a needed \
-axiom.  Inspect with TRelevantAxioms, or set \"AxiomRelevance\" -> \
-None in Method to keep every axiom.";
+this goal); modes \"Connected\" and \"SInE\" are heuristics and may \
+drop a needed axiom.  Inspect with TRelevantAxioms, or set \
+\"AxiomRelevance\" -> None in Method to keep every axiom.";
 TFindEquationalProof::badrel =
     "Unrecognized \"AxiomRelevance\" `1`; using \"Safe\".";
 
@@ -2565,10 +2565,26 @@ atpAutoTuneForClass[_] := {};   (* "General": no front-load, just tail *)
    as a fallback tail and DeleteDuplicates.  This is the safety
    constraint: Automatic only REORDERS -- every config the fixed
    portfolio runs is still present, so the tuned schedule can never
-   prove strictly less than "Portfolio". *)
-atpTunedSchedule[axioms_, conjecture_] := DeleteDuplicates @ Join[
-    Quiet @ Check[atpAutoTune[axioms, conjecture], {}],
-    $AtpSchedule];
+   prove strictly less than "Portfolio".
+
+   Many-axiom tail: when the input is sufficiently large (>=8 axioms),
+   ALSO append a SInE-pruned variant of the broadest weight (Mix2) and
+   the goal-directed config.  SInE is Vampire's single most successful
+   premise-selection technique for the parallel benchmark of thvm's
+   uncrackable cross-system Implies* theorems (35/74 wins under the
+   strategy lrs+10_1 st=3:sd=2:ss=axioms:sgt=8).  Since SInE may drop
+   needed axioms, it runs LAST -- only after the un-pruned portfolio
+   has been exhausted -- so a proof reachable without pruning is never
+   missed. *)
+atpTunedSchedule[axioms_, conjecture_] := Block[{base, sineTail},
+    base = DeleteDuplicates @ Join[
+        Quiet @ Check[atpAutoTune[axioms, conjecture], {}],
+        $AtpSchedule];
+    sineTail = If[ Length[axioms] >= 8,
+        {{"Completion", "CriticalPairWeight" -> "Mix2",
+            "AxiomRelevance" -> "SInE"},
+         {"GoalDirected", "AxiomRelevance" -> "SInE"}}, {}];
+    DeleteDuplicates @ Join[base, sineTail]];
 
 (* === Axiom-relevance filter ======================================
 
@@ -2638,10 +2654,15 @@ atpSafeDropSymbols[ax_, others_, conjRaw_] := Block[{priv, sides},
 ];
 
 (* normalize a Method spec / option value into a relevance spec:
-   None | "Safe" | {"Connected", <|opts|>}. *)
+   None | "Safe" | {"Connected", <|opts|>} | {"SInE", <|opts|>}.  The
+   "AxiomRelevance" suboption is accepted on every completion-family
+   method head, so portfolio entries like {"GoalDirected",
+   "AxiomRelevance" -> "SInE"} are honored the same as
+   {"Completion", "AxiomRelevance" -> "SInE"}. *)
 atpRelevanceSpec[Automatic | "Portfolio"] := "Safe";
-atpRelevanceSpec["Completion"] := "Safe";
-atpRelevanceSpec[{"Completion", subopts___Rule}] := Block[{o, r, dd},
+atpRelevanceSpec["Completion" | "GoalDirected" | "MNF" | "Waldmeister"] := "Safe";
+atpRelevanceSpec[{("Completion" | "GoalDirected" | "MNF" | "Waldmeister"),
+        subopts___Rule}] := Block[{o, r, dd},
     o = Association[subopts];
     r = Lookup[o, "AxiomRelevance", Automatic];
     dd = Lookup[o, "DropDivergentAxioms", Automatic];  (* back-compat *)
@@ -2657,6 +2678,24 @@ atpNormRelevance[Automatic | True | "Safe"] := "Safe";
 atpNormRelevance["Connected"] := {"Connected", <||>};
 atpNormRelevance[{"Connected", a_Association}] := {"Connected", a};
 atpNormRelevance[{"Connected", o___Rule}] := {"Connected", Association[o]};
+(* SInE: the Hoder-Voronkov premise-selection algorithm (IJCAR 2011) as
+   shipped in Vampire (Shell/SineUtils.cpp).  Knob names mirror
+   Vampire's option flags --sine_tolerance (st), --sine_depth (sd),
+   --sine_generality_threshold (sgt).  Defaults 3 / 2 / 8 reproduce
+   the winning portfolio strategy lrs+10_1 st=3:sd=2:ss=axioms:sgt=8
+   identified by the Vampire benchmark of thvm's 40 uncrackable
+   theorems (Track B). *)
+atpNormRelevance["SInE"] := {"SInE", <||>};
+atpNormRelevance[{"SInE", a_Association}] := {"SInE", a};
+atpNormRelevance[{"SInE", o___Rule}] := {"SInE", Association[o]};
+(* Numeric/symbolic shorthand: {"SInE", st, sd, sgt}. *)
+atpNormRelevance[{"SInE", st_?NumericQ}] :=
+    {"SInE", <|"SineTolerance" -> st|>};
+atpNormRelevance[{"SInE", st_?NumericQ, sd_Integer}] :=
+    {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd|>};
+atpNormRelevance[{"SInE", st_?NumericQ, sd_Integer, sgt_Integer}] :=
+    {"SInE", <|"SineTolerance" -> st, "SineDepth" -> sd,
+               "SineGenerality" -> sgt|>};
 atpNormRelevance[other_] := (
     Message[TFindEquationalProof::badrel, other]; "Safe");
 
@@ -2683,7 +2722,9 @@ atpRelevancePartition[axFormList_, conjRaw_, specRaw_] :=
                         FreeQ[#["Axiom"] & /@ dropAssoc, #] &],
                   "Dropped" -> dropAssoc, "Mode" -> "Safe"|>,
             {"Connected", _},
-                atpConnectedPartition[axFormList, conjRaw, Last[spec]]
+                atpConnectedPartition[axFormList, conjRaw, Last[spec]],
+            {"SInE", _},
+                atpSinePartition[axFormList, conjRaw, Last[spec]]
         ]
     ];
 
@@ -2719,6 +2760,94 @@ atpConnectedPartition[axFormList_, conjRaw_, opts_Association] := Block[{
         {i, nAx}];
     <|"Kept" -> Pick[axFormList, keep],
       "Dropped" -> dropAssoc, "Mode" -> "Connected"|>
+];
+
+(* Vampire-faithful SInE (Sumo-Inspired premise selection, Hoder &
+   Voronkov, IJCAR 2011) port.  Reference impl: vprover/vampire,
+   Shell/SineUtils.cpp -- the canonical D-relation + bounded BFS that
+   the Vampire option block --sine_selection axioms / --sine_tolerance
+   st / --sine_depth sd / --sine_generality_threshold sgt drives.
+
+   Algorithm:
+     1. Count occ(s) = number of axioms containing function symbol s.
+     2. For each axiom A, minOcc(A) = min_{s in A} occ(s).
+     3. D-relation: axiom A is D-related to symbol s iff
+          s in A  AND  occ(s) <= st * minOcc(A).
+        ("s is among the rarest symbols of A, up to tolerance st.")
+     4. BFS from the conjecture's symbols (S_0) to depth sd:
+        for each new symbol added at step k-1, pull in every axiom
+        D-related to it; those axioms contribute their symbols to S_k.
+        Stop at depth sd (Vampire default 2).
+     5. Generality threshold sgt: a symbol with occ(s) > sgt is "too
+        general" and is NOT used as a trigger (it neither seeds from
+        the goal nor propagates through newly-pulled axioms), even if
+        it would be the rarest in some axiom.  Drops the very common
+        symbols (the operator that appears in every axiom of the
+        theory) from D-relation triggering.
+
+   Knobs (Method "AxiomRelevance" -> {"SInE", <|...|>} or "SInE" with
+   Vampire defaults):
+     "SineTolerance"  st, real, default 3.   (Vampire --sine_tolerance)
+     "SineDepth"      sd, int,  default 2.   (Vampire --sine_depth)
+     "SineGenerality" sgt, int, default 8.   (Vampire --sine_generality_threshold)
+
+   Tolerance st=1 is strictest (only the strictly-rarest symbol(s) of
+   an axiom can trigger it); st=Infinity collapses to plain
+   symbol-reachability (any shared symbol triggers).  Depth sd=0 keeps
+   no axiom; sd large saturates to the full connected component. *)
+atpSinePartition[axFormList_, conjRaw_, opts_Association] := Block[{
+    symLists, nAx, occ, minOccA, st, sd, sgt, conjSyms, frontier,
+    visited, axTaken, keep, gen, newFrontier, dropAssoc, generalQ},
+    nAx = Length[axFormList];
+    If[ nAx === 0,
+        Return[<|"Kept" -> {}, "Dropped" -> {}, "Mode" -> "SInE"|>]];
+    symLists = atpFnSyms /@ axFormList;
+    occ = Counts[Flatten[symLists]];
+    st  = N @ Lookup[opts, "SineTolerance",  3.];
+    sd  =     Lookup[opts, "SineDepth",      2 ];
+    sgt =     Lookup[opts, "SineGenerality", 8 ];
+    (* Per-axiom minOcc.  An axiom with no function symbols (e.g.
+       a == a -- vacuously true) has no minOcc; we never D-relate
+       any symbol to it, so it stays dropped unless seeded directly,
+       matching Vampire's behavior of skipping empty-signature units. *)
+    minOccA = Table[
+        If[ symLists[[i]] === {}, Infinity,
+            Min[Lookup[occ, #, Infinity] & /@ symLists[[i]]]],
+        {i, nAx}];
+    (* "Too-general" predicate: a symbol with occ(s) > sgt is not used
+       as a trigger.  sgt <= 0 disables the cutoff (mirrors Vampire's
+       --sine_generality_threshold 0 = off). *)
+    generalQ = If[ IntegerQ[sgt] && sgt > 0,
+        Function[s, Lookup[occ, s, 0] > sgt],
+        Function[s, False]];
+    (* Seed: conjecture's symbols, minus the too-general ones. *)
+    conjSyms = atpFnSyms[conjRaw];
+    frontier = Select[conjSyms, ! generalQ[#] &];
+    visited = frontier;
+    axTaken = ConstantArray[False, nAx];
+    Do[ newFrontier = {};
+        Do[ If[ ! axTaken[[i]] && symLists[[i]] =!= {} &&
+                AnyTrue[frontier, Function[s,
+                    MemberQ[symLists[[i]], s] &&
+                    Lookup[occ, s, 0] <= st * minOccA[[i]]]],
+                axTaken[[i]] = True;
+                newFrontier = Union[newFrontier,
+                    Select[symLists[[i]],
+                        ! MemberQ[visited, #] && ! generalQ[#] &]]],
+            {i, nAx}];
+        If[ newFrontier === {}, Break[]];
+        visited = Union[visited, newFrontier];
+        frontier = newFrontier,
+        {gen, sd}];
+    keep = axTaken;
+    dropAssoc = Table[
+        If[ ! keep[[i]],
+            <|"Axiom" -> axFormList[[i]],
+              "Symbols" -> symLists[[i]],
+              "Reason" -> "SInEUnreachable"|>, Nothing],
+        {i, nAx}];
+    <|"Kept" -> Pick[axFormList, keep],
+      "Dropped" -> dropAssoc, "Mode" -> "SInE"|>
 ];
 
 (* Apply the relevance filter, Message the dropped axioms, return the
