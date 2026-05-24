@@ -937,17 +937,26 @@ typedef struct {
   u8    owns_data;
   u8    preserved;
   u8    freeable;
+  // skip_freelist: when set, cpu_buf_pool_rollback_with_preserve
+  // real-frees this buf via cpu_buf_free instead of parking it on
+  // CPU_FREELIST.  Set on per-realize arena CpuBufs (each one is a
+  // 100-700MB one-shot block, sized to that pass's max-live working
+  // set; recycling it via best-fit try_pop would either snag it for
+  // smaller requests in the next realize -- wasting most of the
+  // bytes -- or leave it parked indefinitely while a fresh arena is
+  // calloc'd, which is exactly the cross-step leak that motivated
+  // this flag.  Mirror: tinygrad allocates a fresh arena per
+  // memory_plan_rewrite call and lets Python GC reclaim the previous
+  // arena's BUFFER_VIEW chain.)
+  u8    skip_freelist;
   void *handle;
   void (*on_release)(void *handle);
-  // Arena views: when non-zero, this buf points into the arena CpuBuf
-  // at index `parent_buf_id`.  cpu_buf_incref / cpu_buf_decref bump
-  // the parent's refcount in lockstep so the arena outlives every
-  // view it backs (pool_rollback walks only mark the view preserved
-  // through TenDesc.buf_id; the arena isn't directly reachable, so we
-  // pin it through the parent link).  Mirror: tinygrad's
-  // schedule/memory.py:60 creates a BUFFER_VIEW node whose src[0] is
-  // the arena UOp -- views and arena are linked at the IR level so
-  // the lazy graph keeps the arena alive while any view persists.
+  // Arena views: when non-zero, this buf is an external view into
+  // parent_buf_id's data.  cpu_buf_free decrements the parent's
+  // refcount so the arena dies once its last view is freed.  Mirror:
+  // tinygrad/schedule/memory.py:60 BUFFER_VIEW(arena, nbytes, offset)
+  // -- the arena UOp src keeps the underlying buffer alive while any
+  // BUFFER_VIEW persists.
   u32   parent_buf_id;
 } CpuBuf;
 

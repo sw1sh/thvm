@@ -689,6 +689,14 @@ static u8 *arena_data(void) {
   ARENA_BUF_ID = cpu_buf_alloc(ARENA_SIZE);
   if (ARENA_BUF_ID == 0)        return NULL;
   ARENA_DATA = (u8 *)CPU_BUFS[ARENA_BUF_ID].data;
+  // Per-realize arena: this block is sized to fit this pass's max-live
+  // working set (computed by arena_compute via TLSF events).  At end of
+  // realize the entire arena is released; we want pool_rollback to
+  // real-free it, NOT park it on the freelist where best-fit might
+  // snag a 646MB slot for a 16MB request (or, worse, leave it parked
+  // while every subsequent realize calloc's a fresh arena -- the
+  // cross-step leak this flag fixes).
+  CPU_BUFS[ARENA_BUF_ID].skip_freelist = 1;
   return ARENA_DATA;
 }
 

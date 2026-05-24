@@ -153,6 +153,22 @@ fn Term thvm_realize(Term expr) {
   mark_gc_preserve(res);
   jit_capture_mark_preserved();
 
+  // Arena planner cross-step leak fix: drop the preserved bit on
+  // every arena view CpuBuf (and its parent arena) so pool_rollback
+  // reclaims the entire arena cohort.  By construction arena views
+  // hold internal forward intermediates of THIS realize (the
+  // last_use>0 + consumer_count==1 gate in
+  // arena_boundary_is_plannable excludes sinks/roots), so dropping
+  // them is safe: the SINK lives in a standalone (non-arena)
+  // CpuBuf and keeps its preserve flag.  Without this clear, the
+  // gc-mark walk over the SINK result reaches view-tids embedded in
+  // KERNELS[].input_tids chains, marks the views preserved, and the
+  // parent-arena link in tensor_mark_buf_preserved keeps the entire
+  // 600MB arena alive across the rollback (the symptom: peak grows
+  // ~1.4GB -> 2.1GB by step 4 of BS=16 MNIST).  Tinygrad mirror:
+  // tinygrad/schedule/memory.py:13-16 _can_plan excludes held_bufs
+  // from the arena, so planned bufs naturally die at end-of-schedule.
+  cpu_buf_clear_preserved_arena_views(cpu_wm);
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
   cpu_buf_clear_preserved(cpu_wm);
@@ -290,6 +306,12 @@ fn Term thvm_realize_many(Term ctr_term) {
   for (u32 i = 0; i < cn && i < 256; i++) mark_gc_preserve(term_ctr_at(res, i));
   jit_capture_mark_preserved();
 
+  // Arena planner cross-step leak fix (see thvm_realize for full
+  // rationale).  Drop preserve on arena views + parent arenas so
+  // pool_rollback reclaims them; sink CpuBufs are standalone (not
+  // arena) and keep their preserve flag.  Tinygrad mirror:
+  // tinygrad/schedule/memory.py:13-16.
+  cpu_buf_clear_preserved_arena_views(cpu_wm);
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
   cpu_buf_clear_preserved(cpu_wm);

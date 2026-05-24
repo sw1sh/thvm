@@ -24,11 +24,6 @@
 // free-list operates at finer grain (per-buffer) and is driven
 // by the consumer_count + freeable signals from kernel_fire_by_id.
 
-// Forward decl: cpu_buf_free is defined in buf_free.c (included later
-// in src/thvm.c; this file lives BEFORE it because buf_alloc.c reads
-// the freelist).  Arena views' parent decref path needs it.
-fn void cpu_buf_free(u32 buf_id);
-
 fn void cpu_buf_freelist_push(u32 buf_id) {
   if (CPU_BUFS == NULL) return;   // Metal-active: no CPU bufs.
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
@@ -43,16 +38,11 @@ fn void cpu_buf_freelist_push(u32 buf_id) {
   // doesn't keep counting toward TTotalBufBytes / the
   // memory-probe sums.  cpu_buf_freelist_try_pop resets
   // refcount = 1 on the next allocation.
+  // Note: arena views are external (owns_data=0); cpu_buf_freelist_try_pop
+  // explicitly skips externals so they never get recycled through here.
+  // Their parent_buf_id link is dropped through cpu_buf_free() when the
+  // rollback path retires them, NOT here.
   CpuBuf *b = &CPU_BUFS[buf_id];
-  // Arena view: also drop the parent's refcount.  Otherwise an arena
-  // CpuBuf parked here without its tied parent decref leaks the arena
-  // bytes until end-of-session.
-  u32 parent = b->parent_buf_id;
-  if (parent != 0 && parent < CPU_BUFS_NEXT
-      && CPU_BUFS[parent].refcount > 0) {
-    if (--CPU_BUFS[parent].refcount == 0) cpu_buf_free(parent);
-  }
-  b->parent_buf_id = 0;
   b->refcount  = 0;
   b->preserved = 0;
   b->freeable  = 0;
