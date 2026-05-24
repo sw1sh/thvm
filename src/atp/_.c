@@ -283,32 +283,33 @@ static inline u64 atp_phase_now(void) {
   return atp_now_us();
 }
 
-// "Unorient-step no-fire" memo, keyed by a 64-bit STRUCTURAL hash of
-// the subject (not the cell value).  Subjects that have the same
-// structural shape after orientable fixpoint will hash identically,
-// catching the cross-CP reuse a cell-identity key would miss (most
-// post-splice subject cells are fresh, but their structural shapes
-// repeat across CPs).  Profile on andassoc: ~60% hit ratio on 2.8M
-// unorient-step calls; ~6s shaved off the 32s baseline.
+// "Unorient-step no-fire" memo.  Most calls (~78% on andassoc) return
+// no-fire after a full O(|term|) preorder scan over the subject -- the
+// mandatory "fixpoint reached" call at the end of every mixed-loop
+// normalize.  Cache the no-fire verdict so a re-call on the same
+// shape skips the whole scan.
+//
+// Key: 64-bit FNV-style STRUCTURAL hash of the subject (not the cell
+// value).  Cell-identity keying alone catches only ~10% of calls (most
+// post-splice cells are fresh); structural-hash keying catches the
+// cross-call reuse and pushes the hit ratio to ~60%.
 //
 // Soundness analysis:
-//  - The 64-bit FNV-style hash collides for distinct terms with
-//    probability ~2.8M^2 / 2^64 ~= 4e-7 over a full run; the in-bucket
-//    full-hash compare requires the SAME 64-bit hash, not bucket
-//    collision (bucket size is the modular slot index only).  No
-//    observable misverdict in practice.
-//  - A false hit returns NO-FIRE when an unorient face could have
-//    fired.  Downstream: the mixed loop terminates early, the CP is
-//    queued without that face applied.  Pop-time normalize re-runs
-//    the same hash + same epoch -> same skip, but pop-time kbo_eq
-//    decides joinability on whatever NF was reached -- the missed
-//    rewrite means joinability is decided on a slightly less-reduced
-//    pair, which biases toward keeping the CP (false negative on
-//    joinable, never false positive).  Soundness of the join verdict
-//    is preserved; the only effect is a small queue-bloat per
-//    collision, which over 2.8M calls amortizes to nothing.
-//  - R changes flip rule_index_dirty, which the unorient-step
-//    dispatcher observes and bumps the memo epoch in lockstep.
+//  - A hash collision can mislabel a different subject as no-fire and
+//    skip a possible unorient rewrite.  Downstream the CP is queued
+//    with a less-reduced form; pop-time normalize re-runs (same hash,
+//    same epoch) but the JOIN VERDICT only fires under kbo_eq on the
+//    NF reached, so a missed rewrite biases toward keeping the CP
+//    (false negative on joinable, never false positive) -- the engine
+//    over-orients but the proof itself remains sound (every recorded
+//    rule is a valid equational consequence).
+//  - Trajectory drift IS observable: on andassoc the run terminates
+//    in 4150-4219 steps vs 4649 with no memo, but PROVED status and
+//    the test_atp 135603 byte-identical fingerprint (gate off path) are
+//    preserved.
+//  - Epoch follows rule_index_dirty so R-changes flush verdicts; cell
+//    motion / heap recycle don't matter because the hash is structural,
+//    not cell-keyed.
 #define ATP_UNF_MEMO_BITS 16
 #define ATP_UNF_MEMO_SIZE (1u << ATP_UNF_MEMO_BITS)
 #define ATP_UNF_MEMO_MASK (ATP_UNF_MEMO_SIZE - 1u)
@@ -3211,11 +3212,10 @@ static Term atp_unorient_step_indexed(AtpState *s, Term t, u8 *fired) {
     atp_ri_rebuild(s);
     atp_unf_memo_invalidate();   // R changed -> stored verdicts may flip
   }
-  // No-fire structural-hash memo: most calls (~79% on andassoc) return
-  // no-fire after a full preorder scan over the subject; the
-  // structural-hash key catches the cross-CP reuse the cell-identity
-  // path misses (most post-splice subjects are fresh cells but share
-  // structural shape with earlier subjects).  See the AtpUnfMemo header.
+  // No-fire structural-hash memo: catches the mandatory "fixpoint
+  // reached, no more unorient redex" call at the end of every mixed-
+  // loop normalize.  See the AtpUnfMemo header for the soundness
+  // contract.
   u64 _t_hash = atp_term_struct_hash(t);
   if (atp_unf_memo_get(_t_hash)) {
     if (g_atp_phase_enabled) {
@@ -4354,14 +4354,30 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
   // A custom rule array (interreduction's 2-rule set) is not the live
   // set, so it falls back to the direct compare.
   const u8 *orient = (lhs == s->lhs && rhs == s->rhs) ? s->r_orient : NULL;
+  // Top-symbol fast-fail: a CTR pattern cannot match a non-CTR subject
+  // (FVR / atom).  Saves the function-call + 16-binding stack-init cost
+  // of thvm_match on the common non-matching case.
+  u32 t_tag = term_tag(t);
+  u32 t_sym = (t_tag == TAG_CTR) ? term_ext(t) : 0u;
+  u32 t_n   = (t_tag == TAG_CTR) ? term_ctr_n(t) : 0u;
   for (u32 i = 0; i < n_rules; i++) {
     u8 oriented = orient ? orient[i]
                          : (u8)(atp_compare(s, lhs[i], rhs[i]) == KBO_GT);
     if (oriented) {
       if (g_atp_skip_oriented) continue;   // already at indexed fixpoint
+      // Top-symbol pre-filter: rule lhs must agree on tag, label, arity
+      // for thvm_match to succeed.  FVR pattern can match anything --
+      // skip the filter then.  Eliminates the recursive entry on the
+      // hot fail-fast path; the descent into children fires only on
+      // genuine top matches.
+      Term li = lhs[i];
+      if (term_tag(li) == TAG_CTR) {
+        if (t_tag != TAG_CTR || term_ext(li) != t_sym ||
+            term_ctr_n(li) != t_n) continue;
+      }
       // oriented rule -- forward only, no order check, no waste.
       RewriteSubst subst = {{0}};
-      if (thvm_match(lhs[i], t, &subst)) {
+      if (thvm_match(li, t, &subst)) {
         *fired = 1;
         return thvm_subst_apply(rhs[i], &subst);
       }
@@ -4374,19 +4390,31 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
     // measured hot leaf).  Behaviour-identical -- both the match and
     // the guard must hold for the rule to fire, and the guard does not
     // depend on the redex.
-    {
+    Term li = lhs[i];
+    Term ri = rhs[i];
+    if (term_tag(li) == TAG_CTR &&
+        (t_tag != TAG_CTR || term_ext(li) != t_sym ||
+         term_ctr_n(li) != t_n)) {
+      // l side cannot match -- skip both directions' l->r path; the
+      // r->l path may still apply if its top (term_tag(ri)) matches.
+    } else {
       RewriteSubst subst = {{0}};
-      if (thvm_match(lhs[i], t, &subst) &&                 // l -> r
-          atp_vars_contained(rhs[i], lhs[i])) {
-        Term repl = thvm_subst_apply(rhs[i], &subst);
+      if (thvm_match(li, t, &subst) &&                     // l -> r
+          atp_vars_contained(ri, li)) {
+        Term repl = thvm_subst_apply(ri, &subst);
         if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
       }
     }
+    if (term_tag(ri) == TAG_CTR &&
+        (t_tag != TAG_CTR || term_ext(ri) != t_sym ||
+         term_ctr_n(ri) != t_n)) {
+      continue;
+    }
     {
       RewriteSubst subst = {{0}};
-      if (thvm_match(rhs[i], t, &subst) &&                 // r -> l
-          atp_vars_contained(lhs[i], rhs[i])) {
-        Term repl = thvm_subst_apply(lhs[i], &subst);
+      if (thvm_match(ri, t, &subst) &&                     // r -> l
+          atp_vars_contained(li, ri)) {
+        Term repl = thvm_subst_apply(li, &subst);
         if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
       }
     }
