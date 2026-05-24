@@ -661,6 +661,55 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   return unified_rewrite_rec_sub(st, NULL, t, depth);
 }
 
+// Walk a producer value subtree and return 1 if it contains any
+// CMPEQ / CMPLT / IWHERE / INVALID op -- the family whose semantics
+// depend on which consumer axis the producer's closed_range gets
+// bound to.  When a producer's value is mask-free, binding its
+// closed_range to a consumer REDUCE-type RANGE is safe: the value is
+// the same numeric expression regardless of whether the axis is
+// looped over or reduce-accumulated.  When a CMPEQ/IWHERE is present
+// (pool/reshape-MAX gradient one-hot indicator), pairing the wrong
+// axis routes the mask through the reduce iter and decodes wrong.
+// Used to relax the type=0 gate in try_inline_bufferize_1axis_via_decomp
+// for plain-arithmetic producers such as BN's vector broadcast or the
+// non-matmul-REDUCE-feed broadcast subtract.
+#define MASK_SCAN_VISITED_CAP 256
+typedef struct {
+  Term keys[MASK_SCAN_VISITED_CAP];
+  u32  n;
+} MaskScanVisited;
+static int mask_scan_seen(MaskScanVisited *v, Term t) {
+  for (u32 i = 0; i < v->n; i++) if (v->keys[i] == t) return 1;
+  if (v->n < MASK_SCAN_VISITED_CAP) v->keys[v->n++] = t;
+  return 0;
+}
+static int uop_value_subtree_has_mask_op_rec(MaskScanVisited *v,
+                                              Term t, u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  if (mask_scan_seen(v, r)) return 0;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_CMPEQ || op == UOP_CMPLT || op == UOP_IWHERE
+      || op == UOP_INVALID) return 1;
+  // Stop at boundaries: a nested BUFFERIZE is opaque (its value subtree
+  // gets evaluated under its OWN closed_ranges, independent of the
+  // outer producer's axis bindings).  Same for KERNEL/BUFFER leaves.
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (uop_value_subtree_has_mask_op_rec(v, heap_read(loc + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+static int uop_value_subtree_has_mask_op(Term root) {
+  if (root == 0) return 0;
+  MaskScanVisited v;
+  v.n = 0;
+  return uop_value_subtree_has_mask_op_rec(&v, root, 0);
+}
+
 // Try inlining a 1-axis BUFFERIZE by decomposing the consumer's flat
 // addr expression into (stride, iter_expr) leaves and binding the
 // closed_range to the unique iter_expr whose extent matches.  Two
@@ -751,6 +800,16 @@ static Term try_inline_bufferize_1axis_via_decomp(
     }
   }
   // Sub-case 1: dn >= 2 stride-match by extent.
+  // When the producer's value subtree is mask-free (no CMPEQ/CMPLT/
+  // IWHERE/INVALID), pairing with a type=1 (reduce) RANGE is safe --
+  // the producer's value is the same numeric expression regardless of
+  // whether the consumer treats the axis as a loop iter or a reduce
+  // accumulator.  This covers BN's vector broadcast and the non-matmul-
+  // REDUCE-feed broadcast subtract that hangs beautiful_mnist when the
+  // conservative REDUCE-as-boundary seed is dropped (env-toggle
+  // THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE=0).  Pool/reshape-MAX
+  // gradient's CMPEQ one-hot indicator keeps the strict gate.
+  int producer_mask_free = !uop_value_subtree_has_mask_op(v);
   if (decomp_ok && !has_unknown_extent && dn >= 2) {
     int found = -1;
     for (u32 j = 0; j < dn; j++) {
@@ -758,7 +817,7 @@ static Term try_inline_bufferize_1axis_via_decomp(
       u32 e_ext = (u32)term_val(heap_read(term_val(e) + 2));
       if (e_ext != want_ext) continue;
       u32 atype = (u32)term_val(heap_read(term_val(e) + 1));
-      if (atype != 0) { found = -1; break; }
+      if (atype != 0 && !producer_mask_free) { found = -1; break; }
       if (found >= 0) { found = -1; break; }
       found = (i32)j;
     }
