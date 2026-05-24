@@ -1684,3 +1684,59 @@ VerificationTest[
     ProofObject,
     TestID -> "ATP/alias/TFindEquationalProof-still-works"
 ]
+
+(* === SInE premise selection: Method "AxiomRelevance" -> "SInE" ===== *)
+
+(* SInE (Sumo-Inspired premise selection, Hoder & Voronkov IJCAR 2011)
+   is implemented WL-side via atpSinePartition; it pre-filters the
+   axiom list before the C engine sees it.  With Vampire defaults
+   (st=3, sd=2, sgt=8) the InverseOfInverse goal of AbelianGroupAxioms
+   still has its supporting axioms reachable, so the proof closes. *)
+VerificationTest[
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "AxiomRelevance" -> "SInE"}],
+    ProofObject,
+    TestID -> "ATP/method/axiom-relevance-SInE-default-proves"
+]
+
+(* Explicit {"SInE", suboptions...} form: Vampire's defaults threaded
+   directly through the tolerance/depth/generality knobs. *)
+VerificationTest[
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion",
+            "AxiomRelevance" -> {"SInE",
+                "SineTolerance" -> 3, "SineDepth" -> 2,
+                "SineGenerality" -> 8}}],
+    ProofObject,
+    TestID -> "ATP/method/axiom-relevance-SInE-tuple-proves"
+]
+
+(* TRelevantAxioms exposes the SInE partition without proving: at
+   sufficient depth and tolerance the supporting axioms of
+   AbelianGroupAxioms are reachable from the conjecture's symbols, so
+   the Kept list is non-empty and the Mode tag is "SInE". *)
+VerificationTest[
+    With[{ra = TRelevantAxioms["InverseOfInverse", "AbelianGroupAxioms",
+            Method -> {"Completion", "AxiomRelevance" -> "SInE"}]},
+        {ra["Mode"], Length[ra["Kept"]] >= 1}
+    ],
+    {"SInE", True},
+    TestID -> "ATP/relevant/SInE-mode-reports-partition"
+]
+
+(* === Return spec: All returns every introspective ================== *)
+
+(* TFindProof[..., All] returns an Association keyed by every name in
+   $AtpReturnSpecs.  Confirm the shape: the keys are the full spec
+   list and "ProofObject" is a real ProofObject. *)
+VerificationTest[
+    With[{r = TFindProof["InverseOfInverse", "AbelianGroupAxioms", All]},
+        {AssociationQ[r],
+         Sort[Keys[r]] === Sort[{"ProofObject", "Lemmas",
+            "PreprocessedAxioms", "RelevantAxioms",
+            "RawTrace", "Statistics", "Status"}],
+         Head[r["ProofObject"]]}
+    ],
+    {True, True, ProofObject},
+    TestID -> "ATP/returnspec/All-returns-every-introspective"
+]
