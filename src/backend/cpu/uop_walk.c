@@ -104,18 +104,31 @@ static int uwalk_resolve_buf(UWalkCtx const *c, Term buf, void **out_ptr,
     }
   }
   // Fallback: instance-based lookup (needed when hash-cons collisions
-  // make the term identity unreliable across kernel rebuilds).
-  u32 inst = uop_buffer_inst_get(buf);
-  if (inst == 0) {
-    *out_ptr = c->out_ptr;
-    *out_dt  = c->out_dtype;
-    return 1;
-  }
-  u32 slot = inst - 1;
-  if (slot < c->n_inputs) {
-    *out_ptr = c->in_ptrs[slot];
-    *out_dt  = c->in_dtypes[slot];
-    return 1;
+  // make the term identity unreliable across kernel rebuilds).  This
+  // path is ONLY valid for UOP_BUFFER terms -- uop_buffer_inst_get
+  // returns 0 for any non-UOP_BUFFER tag (UOP_BUFFERIZE, TAG_TEN), and
+  // routing those through the inst==0 -> out_ptr branch silently aliases
+  // the (typically large) BUFFERIZE-shaped read to the (typically scalar)
+  // output buffer, producing out-of-bounds reads of adjacent heap memory
+  // -- the BN-fused-reduce kernel's mean BUFFERIZE hits this exact case
+  // and the chain-fusion walker amplifies the garbage into per-step
+  // divergence (beautiful_mnist step 2 diverges).  Restrict the fallback
+  // to genuine UOP_BUFFER terms so a BUFFERIZE left inlined in the
+  // kernel body causes the dispatcher to bail (INDEX_E sees a 0 ptr and
+  // returns 0.0) rather than reading wherever out_ptr happens to live.
+  if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFER) {
+    u32 inst = uop_buffer_inst_get(buf);
+    if (inst == 0) {
+      *out_ptr = c->out_ptr;
+      *out_dt  = c->out_dtype;
+      return 1;
+    }
+    u32 slot = inst - 1;
+    if (slot < c->n_inputs) {
+      *out_ptr = c->in_ptrs[slot];
+      *out_dt  = c->in_dtypes[slot];
+      return 1;
+    }
   }
   return 0;
 }
@@ -730,40 +743,96 @@ static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
 }
 
 // Compute one reduce accumulator over its axis range.
+// Run a (possibly multi-axis) REDUCE by chaining through nested
+// same-kind UOP_REDUCE shells.  Mirrors tinygrad's lowered form
+// `UOp(Ops.REDUCE, (body,) + tuple(reduce_range), alu_op)` where one
+// REDUCE node iterates over MULTIPLE range axes simultaneously
+// (tinygrad/codegen/lowerer.py:100, tinygrad/schedule/indexing.py:94).
+//
+// thvm's UOP_REDUCE encodes a single axis per node, so the Python
+// `sum(axis=(4,5,6))` lowers to three nested REDUCE shells.  Without
+// chain-fusion the walker re-evaluates the inner REDUCE on every
+// outer iteration: even with the iter-aware cache that's still
+// recursive-recompute O(prod(axes)) per output position, vs the
+// flat O(prod(axes)) we get from one nested loop.  For a Conv2d
+// (C_in*kH*kW = 32*5*5 = 800) at 2*32*20*20 = 25600 outputs that's
+// the difference between seconds and "doesn't terminate".
+//
+// Both SUM and MAX are commutative+associative, so fusing axes into
+// one nested loop preserves the value.  Chain only follows direct
+// `r_src == UOP_REDUCE(same_kind)` shells; if the body branches into
+// elementwise ops over multiple sibling REDUCEs, those siblings stay
+// as separate uwalk_eval_float entries (handled via the iter-cache).
 static double uwalk_run_reduce(UWalkCtx *c, Term red) {
-  u64 rloc      = term_val(red);
-  Term r_src    = heap_read(rloc + 0);
-  u32  r_kind   = term_val(heap_read(rloc + 1));
-  u32  r_axis   = term_val(heap_read(rloc + 2));
-  // Find the RANGE term for this axis in the body (extent).
-  Term src_ranges[UWALK_MAX_RANGES];
-  u32  n_src_r = 0;
-  uwalk_collect_ranges(r_src, src_ranges, &n_src_r);
-  u32 r_extent = 0;
-  for (u32 i = 0; i < n_src_r; i++) {
-    u32 axis = term_val(heap_read(term_val(src_ranges[i]) + 0));
-    if (axis == r_axis) {
-      r_extent = term_val(heap_read(term_val(src_ranges[i]) + 2));
-      break;
+  u32  axes  [UWALK_MAX_RANGES];
+  u32  extents[UWALK_MAX_RANGES];
+  u32  chain_len = 0;
+  Term cur   = red;
+  u32  kind  = term_val(heap_read(term_val(red) + 1));
+  Term body  = cur;
+  // Walk down the chain of same-kind UOP_REDUCE shells.
+  while (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_REDUCE
+         && chain_len < UWALK_MAX_RANGES) {
+    u64 cloc = term_val(cur);
+    u32 ckind = term_val(heap_read(cloc + 1));
+    if (ckind != kind) break;
+    u32 caxis = term_val(heap_read(cloc + 2));
+    Term csrc = heap_read(cloc + 0);
+    // Find the RANGE term for this axis in the (deepest) body's
+    // range set.  collect_ranges crosses REDUCE boundaries (so the
+    // outer axis's RANGE leaf living deep under inner REDUCE shells
+    // is still found).
+    Term src_ranges[UWALK_MAX_RANGES];
+    u32  n_src_r = 0;
+    uwalk_collect_ranges(csrc, src_ranges, &n_src_r);
+    u32 cext = 0;
+    for (u32 i = 0; i < n_src_r; i++) {
+      u32 ax = term_val(heap_read(term_val(src_ranges[i]) + 0));
+      if (ax == caxis) {
+        cext = term_val(heap_read(term_val(src_ranges[i]) + 2));
+        break;
+      }
+    }
+    if (cext == 0) {
+      // No contributions on this axis -> the whole chain yields
+      // identity.  (Identity-or-bail matches the old single-axis
+      // r_extent==0 short-circuit.)
+      return (kind == REDUCE_MAX) ? -INFINITY : 0.0;
+    }
+    axes[chain_len]    = caxis;
+    extents[chain_len] = cext;
+    chain_len++;
+    body = csrc;
+    cur  = csrc;
+  }
+  if (chain_len == 0) {
+    // Caller passed a non-REDUCE (defensive).
+    return (kind == REDUCE_MAX) ? -INFINITY : 0.0;
+  }
+  // Push one range slot per chained axis.
+  if (c->n_ranges + chain_len > UWALK_MAX_RANGES) return 0.0;
+  u32 slot0 = c->n_ranges;
+  for (u32 i = 0; i < chain_len; i++) {
+    c->axis_id[slot0 + i] = axes[i];
+    c->iter   [slot0 + i] = 0;
+  }
+  c->n_ranges += chain_len;
+  double acc = (kind == REDUCE_MAX) ? -INFINITY : 0.0;
+  // Iterate the full Cartesian product of axes via odometer.
+  for (;;) {
+    double v = uwalk_eval_float(c, body);
+    if (kind == REDUCE_MAX) acc = (v > acc) ? v : acc;
+    else                    acc = acc + v;
+    // Advance the odometer (innermost = chain_len-1).
+    u32 d = chain_len;
+    while (d > 0) {
+      d--;
+      c->iter[slot0 + d]++;
+      if (c->iter[slot0 + d] < extents[d]) break;
+      c->iter[slot0 + d] = 0;
+      if (d == 0) { c->n_ranges -= chain_len; return acc; }
     }
   }
-  if (r_extent == 0) {
-    // Match render_uop init: SUM=0, MAX=-INFINITY (no contributions).
-    return (r_kind == REDUCE_MAX) ? -INFINITY : 0.0;
-  }
-  // Push a fresh range slot for the reduce axis.
-  if (c->n_ranges >= UWALK_MAX_RANGES) return 0.0;
-  u32 slot = c->n_ranges++;
-  c->axis_id[slot] = r_axis;
-  double acc = (r_kind == REDUCE_MAX) ? -INFINITY : 0.0;
-  for (u32 k = 0; k < r_extent; k++) {
-    c->iter[slot] = k;
-    double v = uwalk_eval_float(c, r_src);
-    if (r_kind == REDUCE_MAX) acc = (v > acc) ? v : acc;
-    else                      acc = acc + v;
-  }
-  c->n_ranges--;
-  return acc;
 }
 
 // Find the output-axis ranges (those that appear in addr) vs reduce

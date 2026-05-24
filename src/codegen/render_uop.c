@@ -98,7 +98,23 @@ static void rmu_emit_unroll_pragma(FILE *fp, u32 factor) {
 //
 // Static globals are fine; the renderer isn't re-entrant in practice
 // and the map is cleared at the start of each render.
-#define RMU_BUF_MAX 32
+// RMU_BUF_MAX bounds the number of distinct BUFFER / BUFFERIZE Terms
+// rmu_discover_bufs_rec can promote to input slots in one kernel.
+// Metal caps kernel-argument buffers at 31; the lift / Metal codegen
+// gate that elsewhere.  On CPU / CUDA there is no hard limit, but the
+// renderer's static slot table needs a fixed cap; 64 matches
+// KERNEL_LIFT_MAX_INPUT (the kernel_lift cap on n_inputs) so the
+// discover walk never spills on a kernel the lift accepted.
+//
+// Going below the lift cap was a real bug: when no REDUCE is force-
+// realized, the BN-train mean/var/inv broadcast graphs fuse into the
+// downstream MaxPool kernel and pull the BN params (mean, var, scale,
+// shift, eps, plus the BUFFERIZE handles for the inner reduces) past
+// the 32-slot ceiling -- the overflow BUFFERIZEs then hit
+// rmu_buf_name's `buf<term_val>` fallback and the JIT'd C source
+// references undeclared identifiers (build fails, dispatch falls to
+// the walker, walker doesn't terminate at BS=2 on MNIST).
+#define RMU_BUF_MAX 64
 static struct { Term term; char name[16]; } RMU_BUF_NAMES[RMU_BUF_MAX];
 static u32 RMU_BUF_NAMES_N;
 
@@ -743,10 +759,29 @@ static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
     return (u32)term_val(heap_read(loc + 0)) == axis_id;
   }
   if (op == UOP_REDUCE) {
-    // A nested reduce binds its own axis and any other axes its body
-    // uses privately; its `_accN` is an opaque value here.  Do not
-    // descend -- only FREE references in `t`'s own scope count.
-    return 0;
+    // A nested reduce binds its OWN axis (closing free references to
+    // that axis_id below).  Other axes used inside its body remain FREE
+    // in the enclosing scope: a nested reduce is NOT an opaque-value
+    // leaf for those.  Descend, but treat the inner reduce's own axis
+    // as bound.
+    //
+    // Soft-max correctness (sum-of-exp(x - max_acc)): when querying
+    // axis_id == max.axis, this REDUCE's own_axis matches and we
+    // return 0 -- sum_reduce's "uses" of max_reduce.axis are bound
+    // privately inside max, sum stays sibling (mirrors the 63d390f9
+    // bugfix, preserved by the own-axis bound check below).
+    //
+    // Chain-of-reduces (sum(axis=(a,b,c)) -> REDUCE_a(REDUCE_b(
+    //   REDUCE_c(body)))): each inner reduce's body uses every outer
+    // axis.  Without descending past the inner UOP_REDUCE shell, the
+    // outer's body (which IS the inner reduce) looks like it doesn't
+    // use the outer's axis, parent_idx misfires, and the inner reduce
+    // hoists above the outer's loop -- rendering inner ref to outer's
+    // axis var before declaration (the bug that orphaned the
+    // a6/_acc6 loop in the multi-axis conv reduce).
+    u32 own_axis = (u32)term_val(heap_read(loc + 2));
+    if (own_axis == axis_id) return 0;
+    return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1);
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
@@ -764,9 +799,6 @@ static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
       return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1)
           || rmu_term_uses_axis_rec(heap_read(loc + 1), axis_id, depth + 1)
           || rmu_term_uses_axis_rec(heap_read(loc + 2), axis_id, depth + 1);
-    case UOP_REDUCE:
-      // Descend into the nested reduce's body: nesting is transitive.
-      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1);
     default:
       return 0;
   }
