@@ -530,10 +530,14 @@ int uop_dag_classify_matmul_shape(Term root,
 
   // Recover the reduce axis id from the (possibly-OPT-wrapped) REDUCE
   // node so the stride extractor can identify the k-arm of each addr.
+  // Multi-axis REDUCE: this single-K matmul classifier expects exactly
+  // one reduce axis; the multi-axis K compound case is handled by
+  // uop_dag_classify_contraction_shape (C6).
   Term value = heap_read(term_val(root) + 2);
   Term reduce = udg_peel_tc_opt(value);
   if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
-  u32 red_axis_id = (u32)term_val(heap_read(term_val(reduce) + 2));
+  if (uop_reduce_n_axes(reduce) != 1) return 0;
+  u32 red_axis_id = uop_reduce_axis(reduce, 0);
 
   // INDEX_E.addr lives at heap_read(term_val(idx_term) + 1).
   Term addr_a = heap_read(term_val(a_idx) + 1);
@@ -1980,11 +1984,13 @@ int uop_dag_classify_contraction_shape(Term root,
   Term peeled   = udg_peel_tc_opt(value);
   Term reduce   = peeled;
   if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
-  u64 rloc = term_val(reduce);
-  u32 rkind = (u32)term_val(heap_read(rloc + 1));
+  u32 rkind = uop_reduce_kind(reduce);
   if (rkind != REDUCE_SUM) return 0;
-  u32 red_axis_id = (u32)term_val(heap_read(rloc + 2));
-  Term mul = heap_read(rloc + 0);
+  // C1: still single-K dispatch.  Multi-K compound (n_axes > 1, every
+  // axis appearing in both A and B) is the C6/C7 extension.
+  if (uop_reduce_n_axes(reduce) != 1) return 0;
+  u32 red_axis_id = uop_reduce_axis(reduce, 0);
+  Term mul = uop_reduce_src(reduce);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
   Term a_idx = heap_read(term_val(mul) + 0);
   Term b_idx = heap_read(term_val(mul) + 1);

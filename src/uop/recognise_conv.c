@@ -94,12 +94,13 @@ fn int uop_classify_conv2d(Term root, u32 *out_kred) {
 
   u64 sloc = term_val(root);
   Term reduce = heap_read(sloc + 2);
-  u64 rloc = term_val(reduce);
-  u32 kind = (u32)term_val(heap_read(rloc + 1));
+  u32 kind = uop_reduce_kind(reduce);
   if (kind != REDUCE_SUM) return 0;
-  u32 red_axis = (u32)term_val(heap_read(rloc + 2));
+  // Conv recogniser expects a single reduce axis (K = Cin*kH*kW flat).
+  if (uop_reduce_n_axes(reduce) != 1) return 0;
+  u32 red_axis = uop_reduce_axis(reduce, 0);
 
-  Term mul = heap_read(rloc + 0);
+  Term mul = uop_reduce_src(reduce);
   Term rhs = heap_read(term_val(mul) + 1);
   if (term_tag(rhs) != TAG_UOP) return 0;
 

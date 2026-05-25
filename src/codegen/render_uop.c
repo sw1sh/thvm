@@ -583,11 +583,14 @@ static void rmu_emit_term(Term t, FILE *fp) {
     case UOP_REDUCE: {
       // When REDUCE appears in an expression context (not directly as
       // STORE.value), the caller has hoisted an accumulator outside.
-      // We emit the placeholder name `_acc<axis>`; the caller emits
+      // We emit the placeholder name `_acc<axis_0>`; the caller emits
       // the init / reduce-axis loop / combine code before the
-      // expression and just substitutes here.
-      u32 axis = term_val(heap_read(loc + 2));
-      fprintf(fp, "_acc%u", axis);
+      // expression and just substitutes here.  Multi-axis REDUCE uses
+      // its first axis as the accumulator name suffix (the hoisted
+      // accumulator is shared across all axes of one REDUCE node).
+      Term tred = term_new(0, TAG_UOP, op, loc);
+      u32 axis0 = uop_reduce_axis(tred, 0);
+      fprintf(fp, "_acc%u", axis0);
       return;
     }
     default:
@@ -779,9 +782,15 @@ static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
     // hoists above the outer's loop -- rendering inner ref to outer's
     // axis var before declaration (the bug that orphaned the
     // a6/_acc6 loop in the multi-axis conv reduce).
-    u32 own_axis = (u32)term_val(heap_read(loc + 2));
-    if (own_axis == axis_id) return 0;
-    return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1);
+    // Multi-axis: any of the REDUCE's own axes shadows axis_id (it's
+    // bound, not free).  Mirrors tinygrad's per-REDUCE ranges-set
+    // boundary (uop/ops.py:352-370).
+    Term tred = term_new(0, TAG_UOP, op, loc);
+    u32 n_axes = uop_reduce_n_axes(tred);
+    for (u32 i = 0; i < n_axes; i++) {
+      if (uop_reduce_axis(tred, i) == axis_id) return 0;
+    }
+    return rmu_term_uses_axis_rec(uop_reduce_src(tred), axis_id, depth + 1);
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
@@ -1024,23 +1033,26 @@ static void rmu_collect_ranges_rec_through_reduce_cap(
   u32 op  = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_REDUCE) {
-    // Push the reduce-axis id onto the bound set, descend into body,
-    // then pop.  Without this push the reduce-axis's UOP_RANGE leaf
-    // inside the body would land in ranges[] and either consume slots
-    // (MAX_DIM=8 cap) needed for genuine free aux LOOP axes, or
-    // double-emit a for-loop conflicting with RMU_EMIT_ONE_REDUCE.
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
-    int pushed = 0;
-    if (!rmu_axis_is_bound(bound_axes, *n_bound, r_aid)
-        && *n_bound < RMU_BOUND_AXIS_CAP) {
-      bound_axes[*n_bound] = r_aid;
-      (*n_bound)++;
-      pushed = 1;
+    // Push EVERY reduce-axis id onto the bound set, descend into body,
+    // then pop.  Multi-axis port: the REDUCE node binds all axes
+    // simultaneously (mirrors tinygrad's per-REDUCE ranges-set boundary
+    // in uop/ops.py:352-370).
+    Term tred = term_new(0, TAG_UOP, op, loc);
+    u32 n_axes = uop_reduce_n_axes(tred);
+    u32 pushed = 0;
+    for (u32 i = 0; i < n_axes; i++) {
+      u32 r_aid = uop_reduce_axis(tred, i);
+      if (!rmu_axis_is_bound(bound_axes, *n_bound, r_aid)
+          && *n_bound < RMU_BOUND_AXIS_CAP) {
+        bound_axes[*n_bound] = r_aid;
+        (*n_bound)++;
+        pushed++;
+      }
     }
     rmu_collect_ranges_rec_through_reduce_cap(
-        heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
+        uop_reduce_src(tred), ranges, opt_kinds, opt_factors, n_out, cap,
         RMU_NO_OPT, 0, bound_axes, n_bound);
-    if (pushed) (*n_bound)--;
+    *n_bound -= pushed;
     return;
   }
   if (op == UOP_RANGE) {
@@ -1760,9 +1772,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   u64 sloc = term_val(store);
   Term addr_c = heap_read(sloc + 1);
   Term buf_c  = heap_read(sloc + 0);
-  u64 rloc      = term_val(tc_red);
-  u32 red_axis  = term_val(heap_read(rloc + 2));
-  Term mul      = heap_read(rloc + 0);
+  // TC matmul shape assumes a single reduce axis (K).  Multi-axis
+  // REDUCE inputs would need a separate dispatch path.
+  if (uop_reduce_n_axes(tc_red) != 1) return 0;
+  u32 red_axis  = uop_reduce_axis(tc_red, 0);
+  Term mul      = uop_reduce_src(tc_red);
   Term lhs      = heap_read(term_val(mul) + 0);
   Term rhs      = heap_read(term_val(mul) + 1);
   Term buf_a    = heap_read(term_val(lhs) + 0);
@@ -2201,10 +2215,12 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   u64 sloc = term_val(store);
   Term buf  = heap_read(sloc + 0);
   Term addr = heap_read(sloc + 1);
-  u64 rloc = term_val(conv_red);
-  Term red_src  = heap_read(rloc + 0);
-  u32  red_kind = term_val(heap_read(rloc + 1));
-  u32  red_axis = term_val(heap_read(rloc + 2));
+  // Conv specialisation expects single-axis K -- multi-axis REDUCE
+  // inputs fall through to the generic emit path.
+  if (uop_reduce_n_axes(conv_red) != 1) return 0;
+  Term red_src  = uop_reduce_src(conv_red);
+  u32  red_kind = uop_reduce_kind(conv_red);
+  u32  red_axis = uop_reduce_axis(conv_red, 0);
 
   // Collect ranges from addr + red_src; split into output vs reduce.
   Term ranges[MAX_DIM];
@@ -2659,8 +2675,12 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     if (rmu_emit_chain_reduce(store, fp, depth)) return 1;
   }
   if (rmu_term_has_reduce(red_src, 0)) return 0;
-  u32  red_kind = term_val(heap_read(rloc + 1));
-  u32  red_axis = term_val(heap_read(rloc + 2));
+  // Single-axis specialisation: multi-axis REDUCE falls through to the
+  // generic post-order hoist path (rmu_emit_store) which already handles
+  // arbitrary axis counts via rmu_emit_one_reduce nested loops.
+  if (uop_reduce_n_axes(value) != 1) return 0;
+  u32  red_kind = uop_reduce_kind(value);
+  u32  red_axis = uop_reduce_axis(value, 0);
 
   // Collect ranges from addr + red_src; split into output vs reduce.
   Term ranges[MAX_DIM];
@@ -2771,10 +2791,12 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
                                 const Term *reduces, const u8 *simd_flags,
                                 const u32 *parent_idx, u32 self_idx,
                                 u32 n_reduces, FILE *fp) {
-  u64  rloc   = term_val(red);
-  u32  r_kind = term_val(heap_read(rloc + 1));
-  u32  r_axis = term_val(heap_read(rloc + 2));
-  Term r_src  = heap_read(rloc + 0);
+  u32  r_kind = uop_reduce_kind(red);
+  // C1: still single-axis emit per shell; multi-axis emit lands in C3.
+  // We read axis_0 here, and rely on chain-fuse (C4) to either keep
+  // n_axes==1 (no-op) or for the multi-axis path to be implemented.
+  u32  r_axis = uop_reduce_axis(red, 0);
+  Term r_src  = uop_reduce_src(red);
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
   for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
@@ -3091,22 +3113,30 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   u32 parent_idx[RMU_MAX_RANGES];
   for (u32 i = 0; i < n_reduces; i++) parent_idx[i] = RMU_REDUCE_NO_PARENT;
   for (u32 i = 0; i < n_reduces; i++) {
-    Term r_src_i = heap_read(term_val(reduces[i]) + 0);
+    Term r_src_i = uop_reduce_src(reduces[i]);
     // Candidate enclosing reduces: those that structurally contain
-    // reduces[i] AND whose reduce-axis var reduces[i]'s body references.
+    // reduces[i] AND ANY of whose reduce-axis vars reduces[i]'s body
+    // references.  Multi-axis: parent qualifies if it shares any axis
+    // with the inner.
     u32 best = RMU_REDUCE_NO_PARENT;
     for (u32 j = 0; j < n_reduces; j++) {
       if (j == i) continue;
-      Term r_src_j = heap_read(term_val(reduces[j]) + 0);
-      u32  axis_j  = term_val(heap_read(term_val(reduces[j]) + 2));
+      Term r_src_j = uop_reduce_src(reduces[j]);
       if (!rmu_term_contains(r_src_j, reduces[i])) continue;
-      if (!rmu_term_uses_axis(r_src_i, axis_j))    continue;
+      u32 nj = uop_reduce_n_axes(reduces[j]);
+      int uses_any = 0;
+      for (u32 ai = 0; ai < nj; ai++) {
+        if (rmu_term_uses_axis(r_src_i, uop_reduce_axis(reduces[j], ai))) {
+          uses_any = 1; break;
+        }
+      }
+      if (!uses_any) continue;
       // reduces[j] is a candidate parent.  Keep the INNERMOST: the
       // candidate whose body is itself contained in every other
       // candidate's body (the nesting along i's enclosing chain is a
       // total order, so the innermost is unambiguous).
       if (best == RMU_REDUCE_NO_PARENT) { best = j; continue; }
-      Term r_src_best = heap_read(term_val(reduces[best]) + 0);
+      Term r_src_best = uop_reduce_src(reduces[best]);
       if (rmu_term_contains(r_src_best, reduces[j])) best = j;
     }
     parent_idx[i] = best;

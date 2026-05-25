@@ -213,10 +213,14 @@ static Term ru_reduce_repair_broadcast_body(Term reduce_t, Term reduce_range) {
       || term_ext(reduce_range) != UOP_RANGE) {
     return reduce_t;
   }
-  u64 rloc  = term_val(reduce_t);
-  u32 kind  = (u32)term_val(heap_read(rloc + 1));
-  u32 r_aid = (u32)term_val(heap_read(rloc + 2));
-  Term body = heap_read(rloc + 0);
+  // Multi-axis REDUCE: only the single-axis case admits the constant-body
+  // simplification cleanly (extent-multiply lifted out).  Multi-axis paths
+  // route through ru_subtree_uses_axis per-axis; for now we bail on
+  // n_axes!=1 and let the body be reduced as-is.
+  if (uop_reduce_n_axes(reduce_t) != 1) return reduce_t;
+  u32 kind  = uop_reduce_kind(reduce_t);
+  u32 r_aid = uop_reduce_axis(reduce_t, 0);
+  Term body = uop_reduce_src(reduce_t);
   if (ru_subtree_uses_axis(body, r_aid, 0)) return reduce_t;
   u32 extent = uop_range_extent(reduce_range);
   if (extent == 0) return reduce_t;
@@ -818,29 +822,31 @@ fn void run_rangeify_unified(Term root) {
     } else if (info->op == UOP_REDUCE) {
       // Mirror indexing.py:253-254
       //   `tuple(rctx.new_range(s, axistype=AxisType.REDUCE) if i in arg[1] else r ...`
-      // thvm UOP_REDUCE stores a single axis at heap[loc + 2].
+      // Multi-axis REDUCE: every axis in the node's axes-list gets a
+      // fresh KAX_REDUCE range; non-reduce dims thread out_rngs through.
       //
-      // We also record the fresh REDUCE range Term in
-      // RU_REDUCE_RANGES[node_idx] so materialize.c can enumerate the
-      // reduce-axes via accessor without re-deriving them from the
-      // heap. This is the thvm-side equivalent of
-      // tinygrad's `convert_reduce_to_reduce_with_ranges` storing the
-      // ranges in `src=(value,) + tuple(new_ranges)` at indexing.py:94.
+      // RU_REDUCE_RANGES[node_idx] records every fresh REDUCE range
+      // Term so materialize.c can enumerate them via accessor without
+      // re-deriving from the heap (thvm equivalent of tinygrad's
+      // convert_reduce_to_reduce_with_ranges packing them into
+      // src=(value,)+tuple(new_ranges) at indexing.py:94).
       Shape src_shape;
+      Term red_t = term_new(0, TAG_UOP, info->op, info->loc);
+      u32 n_axes = uop_reduce_n_axes(red_t);
       if (!ru_node_src_shape(info->loc, &src_shape)) {
         for (u8 a = 0; a < my_ndim; a++) in_rngs[a] = out_rngs[a];
       } else {
-        u32 raxis = (u32)term_val(heap_read(info->loc + 2));
-        // tinygrad keeps the input rank == producer.shape rank; with
-        // a single axis collapse, src_shape == out_shape with raxis
-        // expanded. Re-thread out_rngs and inject a fresh REDUCE range
-        // at raxis.
+        u8 is_reduce_axis[RU_MAX_AXES] = {0};
+        for (u32 ai = 0; ai < n_axes; ai++) {
+          u32 ax = uop_reduce_axis(red_t, ai);
+          if (ax < RU_MAX_AXES) is_reduce_axis[ax] = 1;
+        }
         u8 dst_ndim = (u8)src_shape.ndim;
         if (dst_ndim > RU_MAX_AXES) dst_ndim = RU_MAX_AXES;
         u8 src_cursor = 0;
         RU_REDUCE_RANGES[node_idx].n = 0;
         for (u8 a = 0; a < dst_ndim; a++) {
-          if (a == raxis) {
+          if (is_reduce_axis[a]) {
             Term rng = ru_new_range(src_shape.dims[a], KAX_REDUCE);
             in_rngs[a] = rng;
             // Record only true UOP_RANGE leaves (extent-1 reduce axes
@@ -1348,18 +1354,22 @@ static void ru_collect_free_axes_rec(Term t, RuFreeAxisSet *s, u32 depth) {
   if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return;
   u64 loc = term_val(r);
   if (op == UOP_REDUCE) {
-    // The REDUCE's axis cell at heap[loc + 2] is the axis_id (a raw u32
-    // stored as a TAG_NUM Term).  Push it onto the bound set, recurse
-    // into the body, then pop.
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
-    int pushed = 0;
-    if (!ru_free_axis_bound_has(s, r_aid)
-        && s->n_bound < RU_AXIS_SUBST_CAP) {
-      s->bound_aids[s->n_bound++] = r_aid;
-      pushed = 1;
+    // Push EVERY reduce axis onto the bound set, recurse into the body,
+    // then pop them all.  Multi-axis support: a REDUCE binds all its
+    // axes simultaneously (mirrors tinygrad's per-REDUCE .ranges set;
+    // uop/ops.py: ended_ranges contain every axis in src[1:]).
+    u32 n_axes = uop_reduce_n_axes(r);
+    u32 pushed_count = 0;
+    for (u32 i = 0; i < n_axes; i++) {
+      u32 r_aid = uop_reduce_axis(r, i);
+      if (!ru_free_axis_bound_has(s, r_aid)
+          && s->n_bound < RU_AXIS_SUBST_CAP) {
+        s->bound_aids[s->n_bound++] = r_aid;
+        pushed_count++;
+      }
     }
-    ru_collect_free_axes_rec(heap_read(loc + 0), s, depth + 1);
-    if (pushed) s->n_bound--;
+    ru_collect_free_axes_rec(uop_reduce_src(r), s, depth + 1);
+    s->n_bound -= pushed_count;
     return;
   }
   u8 ar = uop_arity(op);

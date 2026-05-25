@@ -323,7 +323,14 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_LOG2        14   // heap = [src]
 #define UOP_SQRT        15   // heap = [src]
 #define UOP_CMPLT       16   // heap = [a, b]
-#define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(axis)]
+#define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(n_axes), NUM(axis_0), ..., NUM(axis_{n-1})]
+                             // Multi-axis REDUCE: src reduces over ALL n_axes
+                             // simultaneously (matches tinygrad uop/ops.py
+                             // Ops.REDUCE with arg=(op,()) + ranges in src[1:]
+                             // and schedule/indexing.py:90 convert_reduce_to_reduce_with_ranges).
+                             // n_axes==1 case retains 4-cell layout
+                             // [src, kind, n_axes=1, axis_0] -- builder
+                             // uop_reduce(kind, axis, src) wraps n=1.
 // (slots 18, 19 were UOP_GRAD / UOP_FWD -- folded into TAG_DP0 /
 // TAG_DP1 with the DUP_GRAD_FLAG bit set on the ext (label) field.
 // A grad cell is just a regular dup-style cell holding [y]; its two
@@ -1941,6 +1948,17 @@ fn Term uop_const  (u32 dtype, u32 bits);
 fn Term uop_unary  (u32 opcode, Term src);                       // NEG/RECIP/EXP2/LOG2/SQRT
 fn Term uop_binary (u32 opcode, Term a, Term b);                 // ADD/MUL/CMPLT
 fn Term uop_reduce (u32 kind, u32 axis, Term src);
+// Multi-axis REDUCE: reduces over all `n_axes` axes simultaneously.
+// Mirrors tinygrad uop/ops.py Ops.REDUCE with multiple range srcs.
+// `uop_reduce(kind, axis, src)` is the n_axes==1 convenience.
+fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src);
+// REDUCE-node accessors (centralised so the heap layout can evolve
+// without touching every call site).  Caller passes a TAG_UOP cell with
+// op==UOP_REDUCE.
+fn u32  uop_reduce_kind   (Term red);
+fn u32  uop_reduce_n_axes (Term red);
+fn u32  uop_reduce_axis   (Term red, u32 i);   // i in [0..n_axes)
+fn Term uop_reduce_src    (Term red);
 fn Term uop_reshape(Term src, u32 ndim, const u32 *dims);
 fn Term uop_permute(Term src, u32 ndim, const u32 *perm);
 fn Term uop_expand (Term src, u32 ndim, const u32 *dims);

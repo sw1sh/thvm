@@ -51,33 +51,38 @@ static u64 cg_kernel_flops_dag(Term t, u64 iter_extent, u32 depth) {
     return cg_kernel_flops_dag(uop_opt_target(t), iter_extent, depth + 1);
   }
   if (op == UOP_REDUCE) {
-    // Find the reduce-axis RANGE extent by walking the body.
-    u32 red_axis = (u32)term_val(heap_read(loc + 2));
-    Term src = heap_read(loc + 0);
-    u32 red_ext = 0;
-    Term stack[64];
-    u32 sp = 0;
-    if (term_tag(src) == TAG_UOP) stack[sp++] = src;
-    while (sp > 0 && red_ext == 0) {
-      Term n = stack[--sp];
-      if (term_tag(n) != TAG_UOP) continue;
-      u32 nop = term_ext(n);
-      if (nop == UOP_RANGE && uop_range_axis_id(n) == red_axis) {
-        red_ext = uop_range_extent(n);
-        break;
+    // Multi-axis REDUCE: multiply EVERY reduce-axis extent into body_iter.
+    Term tred = term_new(0, TAG_UOP, op, loc);
+    Term src = uop_reduce_src(tred);
+    u32 n_axes = uop_reduce_n_axes(tred);
+    u64 body_iter = iter_extent;
+    for (u32 ai = 0; ai < n_axes; ai++) {
+      u32 red_axis = uop_reduce_axis(tred, ai);
+      u32 red_ext = 0;
+      Term stack[64];
+      u32 sp = 0;
+      if (term_tag(src) == TAG_UOP) stack[sp++] = src;
+      while (sp > 0 && red_ext == 0) {
+        Term n = stack[--sp];
+        if (term_tag(n) != TAG_UOP) continue;
+        u32 nop = term_ext(n);
+        if (nop == UOP_RANGE && uop_range_axis_id(n) == red_axis) {
+          red_ext = uop_range_extent(n);
+          break;
+        }
+        if (nop == UOP_BUFFER || nop == UOP_CONST || nop == UOP_INVALID) continue;
+        u8 ar = uop_arity((u8)nop);
+        u64 nloc = term_val(n);
+        for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 64; i++) {
+          Term c = heap_read(nloc + i);
+          if (term_tag(c) == TAG_UOP) stack[sp++] = c;
+        }
       }
-      if (nop == UOP_BUFFER || nop == UOP_CONST || nop == UOP_INVALID) continue;
-      u8 ar = uop_arity((u8)nop);
-      u64 nloc = term_val(n);
-      for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 64; i++) {
-        Term c = heap_read(nloc + i);
-        if (term_tag(c) == TAG_UOP) stack[sp++] = c;
-      }
+      if (red_ext == 0) red_ext = 1;
+      body_iter *= (u64)red_ext;
     }
-    if (red_ext == 0) red_ext = 1;
     // The REDUCE itself contributes one accumulator-combine op per
     // source element (the implicit SUM/MAX/MIN over the body's value).
-    u64 body_iter = iter_extent * (u64)red_ext;
     total += body_iter;
     // Recurse into body with multiplied iter_extent.
     total += cg_kernel_flops_dag(src, body_iter, depth + 1);

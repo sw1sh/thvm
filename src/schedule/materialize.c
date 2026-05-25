@@ -2112,13 +2112,14 @@ static int stranded_range_check_value(RangeAxisSet const *iter_axes,
   // RANGE leaves -- entirely unobservable from the walker's perspective.
   if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
   if (op == UOP_REDUCE) {
-    // Enter the reduce's axis into the iterated set for the body walk.
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    // Enter every reduce axis into the iterated set for the body walk.
+    Term t = term_new(0, TAG_UOP, op, loc);
+    u32 n_axes = uop_reduce_n_axes(t);
     RangeAxisSet inner = *iter_axes;
-    range_axis_add(&inner, r_aid);
+    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(t, i));
     BufferizeScanVisited iv;
     iv.n = 0;
-    return stranded_range_check_value(&inner, &iv, heap_read(loc + 0),
+    return stranded_range_check_value(&inner, &iv, uop_reduce_src(t),
                                       depth + 1);
   }
   u8 ar = uop_arity(op);
@@ -2170,12 +2171,13 @@ static int bufferize_strand_check_deep(RangeAxisSet const *iter,
     return bufferize_strand_check_deep(&inner, &iv, val, depth + 1);
   }
   if (op == UOP_REDUCE) {
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    Term t = term_new(0, TAG_UOP, op, loc);
+    u32 n_axes = uop_reduce_n_axes(t);
     RangeAxisSet inner = *iter;
-    range_axis_add(&inner, r_aid);
+    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(t, i));
     BufferizeScanVisited iv;
     iv.n = 0;
-    return bufferize_strand_check_deep(&inner, &iv, heap_read(loc + 0),
+    return bufferize_strand_check_deep(&inner, &iv, uop_reduce_src(t),
                                        depth + 1);
   }
   u8 ar = uop_arity(op);
@@ -2416,41 +2418,44 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
       return 0;
     }
   }
-  // Multiply REDUCE extent into out_numel when descending into a reduce
-  // body so the broadcast check counts the full iteration footprint.
+  // Multiply REDUCE extent (every reduce axis) into out_numel when
+  // descending into a reduce body so the broadcast check counts the full
+  // iteration footprint.  Multi-axis REDUCE folds N axes simultaneously
+  // (mirrors tinygrad's REDUCE.src[1:] range list).
   if (op == UOP_REDUCE) {
+    Term t = term_new(0, TAG_UOP, op, loc);
     u64 inner_out = out_numel;
-    Term body = heap_read(loc + 0);
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
-    // Find the reduce range's extent by scanning the body for a
-    // UOP_RANGE with this axis_id.
-    u32 r_ext = 0;
-    BufferizeScanVisited iv;
-    iv.n = 0;
-    // small inline scan
-    Term stack[64];
-    u32  top = 0;
-    stack[top++] = body;
-    while (top > 0 && r_ext == 0) {
-      Term cur = term_resolve(stack[--top]);
-      if (term_tag(cur) != TAG_UOP) continue;
-      u8  cop = term_ext(cur);
-      u64 cloc = term_val(cur);
-      if (cop == UOP_RANGE) {
-        u32 aid = (u32)term_val(heap_read(cloc + 0));
-        if (aid == r_aid) {
-          r_ext = (u32)term_val(heap_read(cloc + 2));
-          break;
+    Term body = uop_reduce_src(t);
+    u32 n_axes = uop_reduce_n_axes(t);
+    // Find each reduce range's extent by scanning the body for UOP_RANGE
+    // with each axis_id, then multiply all extents into the footprint.
+    for (u32 ai = 0; ai < n_axes; ai++) {
+      u32 r_aid = uop_reduce_axis(t, ai);
+      u32 r_ext = 0;
+      Term stack[64];
+      u32  top = 0;
+      stack[top++] = body;
+      while (top > 0 && r_ext == 0) {
+        Term cur = term_resolve(stack[--top]);
+        if (term_tag(cur) != TAG_UOP) continue;
+        u8  cop = term_ext(cur);
+        u64 cloc = term_val(cur);
+        if (cop == UOP_RANGE) {
+          u32 aid = (u32)term_val(heap_read(cloc + 0));
+          if (aid == r_aid) {
+            r_ext = (u32)term_val(heap_read(cloc + 2));
+            break;
+          }
+          continue;
         }
-        continue;
+        if (cop == UOP_BUFFER || cop == UOP_BUFFERIZE || cop == UOP_KERNEL) continue;
+        u8 car = uop_arity(cop);
+        for (u8 i = 0; i < car && top < 64; i++) {
+          stack[top++] = heap_read(cloc + i);
+        }
       }
-      if (cop == UOP_BUFFER || cop == UOP_BUFFERIZE || cop == UOP_KERNEL) continue;
-      u8 car = uop_arity(cop);
-      for (u8 i = 0; i < car && top < 64; i++) {
-        stack[top++] = heap_read(cloc + i);
-      }
+      if (r_ext > 0) inner_out *= (u64)r_ext;
     }
-    if (r_ext > 0) inner_out *= (u64)r_ext;
     return broadcast_input_scan_rec(ke, v, body, inner_out, depth + 1);
   }
   u8 ar = uop_arity(op);
@@ -2597,10 +2602,14 @@ static void bypass_dbg_dump_rec(Term t, u32 indent, u32 depth) {
     return;
   }
   if (op == UOP_REDUCE) {
-    u32 kind = (u32)term_val(heap_read(loc + 1));
-    u32 axis = (u32)term_val(heap_read(loc + 2));
-    fprintf(stderr, "REDUCE kind=%u axis=%u\n", kind, axis);
-    bypass_dbg_dump_rec(heap_read(loc + 0), indent + 2, depth + 1);
+    u32 kind = uop_reduce_kind(r);
+    u32 n_axes = uop_reduce_n_axes(r);
+    fprintf(stderr, "REDUCE kind=%u axes=[", kind);
+    for (u32 i = 0; i < n_axes; i++) {
+      fprintf(stderr, "%s%u", i ? "," : "", uop_reduce_axis(r, i));
+    }
+    fputs("]\n", stderr);
+    bypass_dbg_dump_rec(uop_reduce_src(r), indent + 2, depth + 1);
     return;
   }
   fprintf(stderr, "%s (ext=%u, loc=%llx)\n", name, term_ext(r),
@@ -3750,10 +3759,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       // (0 for SUM).  Short-circuit to the source value; the kernel's
       // output_shape (set in emit_kernel_for_boundary) already drops
       // the axis, so the bytes flow through unchanged.
-      u32 axis0 = (u32)term_val(heap_read(loc + 2));
+      // Multi-axis REDUCE: identity-shortcut fires when EVERY reduce
+      // axis is size-1 AND the output shape equals the input shape
+      // (i.e. shape inference dropped no real dims).
+      u32 n_axes = uop_reduce_n_axes(t);
       Shape src_sh0 = {0};
       Shape out_sh0 = {0};
-      int same_shape = term_shape_in(heap_read(loc), 0, &src_sh0)
+      int same_shape = term_shape_in(uop_reduce_src(t), 0, &src_sh0)
                     && term_shape_in(t, 0, &out_sh0)
                     && src_sh0.ndim == out_sh0.ndim;
       if (same_shape) {
@@ -3761,8 +3773,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
           if (src_sh0.dims[d] != out_sh0.dims[d]) { same_shape = 0; break; }
         }
       }
-      if (same_shape && axis0 < src_sh0.ndim && src_sh0.dims[axis0] == 1) {
-        u32 sidx = visit(heap_read(loc), ke, root_loc, memo);
+      int all_size_one = same_shape;
+      for (u32 ai = 0; ai < n_axes && all_size_one; ai++) {
+        u32 ax = uop_reduce_axis(t, ai);
+        if (!(ax < src_sh0.ndim && src_sh0.dims[ax] == 1)) all_size_one = 0;
+      }
+      if (all_size_one) {
+        u32 sidx = visit(uop_reduce_src(t), ke, root_loc, memo);
         if (sidx == VISIT_BAIL) return VISIT_BAIL;
         visit_memo_store(memo, loc, sidx);
         return sidx;

@@ -142,9 +142,13 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       return uop_binary(op, srcs[0], srcs[1]);
 
     case UOP_REDUCE: {
-      u32 kind = (u32)term_val(heap_read(loc + 1));
-      u32 axis = (u32)term_val(heap_read(loc + 2));
-      return uop_reduce(kind, axis, srcs[0]);
+      // Multi-axis REDUCE: copy the full axes array; n_axes==1 case stays
+      // single-axis identical to the old reduce(kind, axis, src).
+      u32 kind   = uop_reduce_kind(t);
+      u32 n_axes = uop_reduce_n_axes(t);
+      u32 axes[MAX_DIM];
+      for (u32 i = 0; i < n_axes; i++) axes[i] = uop_reduce_axis(t, i);
+      return uop_reduce_multi(kind, n_axes, axes, srcs[0]);
     }
 
     case UOP_RESHAPE: {

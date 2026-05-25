@@ -856,27 +856,34 @@ static Term interact_grad_dispatch(Term grad_term) {
     // SUM: gy_for_a = EXPAND(reshape_keepdim(gy), a.shape).
     // MAX: gy_for_a = MUL(mask_at_argmax, EXPAND(reshape_keepdim(gy), a.shape)).
     case UOP_REDUCE: {
-      Term a    = heap_read(y_loc + 0);
-      u32  kind = (u32)term_val(heap_read(y_loc + 1));
-      u32  axis = (u32)term_val(heap_read(y_loc + 2));
+      // Multi-axis REDUCE vjp: gy is broadcast-lifted back to a.shape via
+      // RESHAPE (keepdim=1 on every reduce axis) + EXPAND.  MAX-mask path
+      // re-uses the SAME multi-axis REDUCE to find the argmax positions.
+      // Mirrors tinygrad gradient.py REDUCE branch.
+      u32  kind   = uop_reduce_kind(y);
+      u32  n_axes = uop_reduce_n_axes(y);
+      u32  axes[MAX_DIM];
+      for (u32 i = 0; i < n_axes; i++) axes[i] = uop_reduce_axis(y, i);
+      Term a    = uop_reduce_src(y);
 
       Shape a_shape;
       if (!term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0) {
         return grad_term;   // can't determine src shape; bail
       }
 
-      // Build reshape-keepdim of gy: insert a 1 at `axis` so the
-      // EXPAND back to a.shape is well-formed.  When a.ndim == 1,
-      // the reduce output shape is {1} (per uop_meta), so a
-      // RESHAPE to {1} is identity-ish; we still call it to be
-      // explicit about the intermediate.
+      // Build reshape-keepdim of gy: insert 1 at EVERY reduce axis so
+      // the EXPAND back to a.shape is well-formed.
       u32 keep_dims[MAX_DIM] = {0};
       if (a_shape.ndim == 1) {
         // a.shape = {N}, y.shape = {1}, keepdim = {1}; expand back to {N}.
         keep_dims[0] = 1;
       } else {
+        u8 is_reduce_axis[MAX_DIM] = {0};
+        for (u32 i = 0; i < n_axes; i++) {
+          if (axes[i] < MAX_DIM) is_reduce_axis[axes[i]] = 1;
+        }
         for (u32 i = 0; i < a_shape.ndim; i++)
-          keep_dims[i] = (i == axis) ? 1u : a_shape.dims[i];
+          keep_dims[i] = is_reduce_axis[i] ? 1u : a_shape.dims[i];
       }
       Term gy_keepdim = uop_reshape(gy, a_shape.ndim, keep_dims);
       Term gy_lifted  = uop_expand(gy_keepdim, a_shape.ndim, a_shape.dims);
@@ -887,8 +894,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       if (kind == REDUCE_SUM) {
         gy_a = gy_lifted;
       } else if (kind == REDUCE_MAX) {
-        // mask = (a == lift(MAX(a, axis)))
-        Term mx        = uop_reduce(REDUCE_MAX, axis, a_fwd);
+        // mask = (a == lift(MAX(a, axes)))
+        Term mx        = uop_reduce_multi(REDUCE_MAX, n_axes, axes, a_fwd);
         Term mx_keep   = uop_reshape(mx, a_shape.ndim, keep_dims);
         Term mx_lifted = uop_expand(mx_keep, a_shape.ndim, a_shape.dims);
         Term mask      = uop_binary(UOP_CMPEQ, a_fwd, mx_lifted);

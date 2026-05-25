@@ -311,21 +311,23 @@ static int uwalk_reduce_lookup(UWalkCtx const *c, Term red, double *out) {
 static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out);
 
 // Walk a REDUCE's body and collect axis_ids the body references,
-// excluding the REDUCE's own axis (it's bound inside the reduce loop,
-// not by the enclosing iter state).  Caller passes red_term; we read
-// loc+0 (body) and loc+2 (own axis).  Returns the count, writes ids
-// into out[] up to cap.
+// excluding the REDUCE's OWN axes (all n_axes are bound inside the
+// reduce loops, not by the enclosing iter state).  Returns the count,
+// writes ids into out[] up to cap.
 static u8 uwalk_reduce_free_axes(Term red, u32 *out, u8 cap) {
-  u64 rloc       = term_val(red);
-  Term body      = heap_read(rloc + 0);
-  u32  own_axis  = (u32)term_val(heap_read(rloc + 2));
+  Term body      = uop_reduce_src(red);
+  u32  n_axes    = uop_reduce_n_axes(red);
+  u32  own_axes[MAX_DIM];
+  for (u32 i = 0; i < n_axes; i++) own_axes[i] = uop_reduce_axis(red, i);
   Term ranges_buf[UWALK_MAX_RANGES];
   u32 n_r = 0;
   uwalk_collect_ranges(body, ranges_buf, &n_r);
   u8 n_free = 0;
   for (u32 i = 0; i < n_r; i++) {
     u32 ax = (u32)term_val(heap_read(term_val(ranges_buf[i]) + 0));
-    if (ax == own_axis) continue;
+    int is_own = 0;
+    for (u32 j = 0; j < n_axes; j++) if (own_axes[j] == ax) { is_own = 1; break; }
+    if (is_own) continue;
     if (n_free >= cap) break;
     out[n_free++] = ax;
   }
@@ -770,38 +772,43 @@ static double uwalk_run_reduce(UWalkCtx *c, Term red) {
   Term cur   = red;
   u32  kind  = term_val(heap_read(term_val(red) + 1));
   Term body  = cur;
-  // Walk down the chain of same-kind UOP_REDUCE shells.
+  // Walk down the chain of same-kind UOP_REDUCE shells.  Each shell may
+  // itself be multi-axis (mirrors tinygrad REDUCE with src=(body,
+  // range_0, range_1, ...) -- uop/ops.py + schedule/indexing.py:94).
   while (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_REDUCE
          && chain_len < UWALK_MAX_RANGES) {
-    u64 cloc = term_val(cur);
-    u32 ckind = term_val(heap_read(cloc + 1));
+    u32 ckind = uop_reduce_kind(cur);
     if (ckind != kind) break;
-    u32 caxis = term_val(heap_read(cloc + 2));
-    Term csrc = heap_read(cloc + 0);
-    // Find the RANGE term for this axis in the (deepest) body's
-    // range set.  collect_ranges crosses REDUCE boundaries (so the
-    // outer axis's RANGE leaf living deep under inner REDUCE shells
-    // is still found).
+    u32 cn = uop_reduce_n_axes(cur);
+    Term csrc = uop_reduce_src(cur);
     Term src_ranges[UWALK_MAX_RANGES];
     u32  n_src_r = 0;
     uwalk_collect_ranges(csrc, src_ranges, &n_src_r);
-    u32 cext = 0;
-    for (u32 i = 0; i < n_src_r; i++) {
-      u32 ax = term_val(heap_read(term_val(src_ranges[i]) + 0));
-      if (ax == caxis) {
-        cext = term_val(heap_read(term_val(src_ranges[i]) + 2));
-        break;
+    // Add each axis of THIS shell to the chain.  The order within a
+    // shell follows builder order (same as tinygrad's range order in
+    // src[1:]); across shells we visit outer-shell first so the
+    // innermost shell's axes appear last in the chain (matching the
+    // old single-axis nested REDUCE traversal).
+    for (u32 ai = 0; ai < cn && chain_len < UWALK_MAX_RANGES; ai++) {
+      u32 caxis = uop_reduce_axis(cur, ai);
+      u32 cext = 0;
+      for (u32 i = 0; i < n_src_r; i++) {
+        u32 ax = term_val(heap_read(term_val(src_ranges[i]) + 0));
+        if (ax == caxis) {
+          cext = term_val(heap_read(term_val(src_ranges[i]) + 2));
+          break;
+        }
       }
+      if (cext == 0) {
+        // No contributions on this axis -> the whole chain yields
+        // identity.  (Identity-or-bail matches the old single-axis
+        // r_extent==0 short-circuit.)
+        return (kind == REDUCE_MAX) ? -INFINITY : 0.0;
+      }
+      axes[chain_len]    = caxis;
+      extents[chain_len] = cext;
+      chain_len++;
     }
-    if (cext == 0) {
-      // No contributions on this axis -> the whole chain yields
-      // identity.  (Identity-or-bail matches the old single-axis
-      // r_extent==0 short-circuit.)
-      return (kind == REDUCE_MAX) ? -INFINITY : 0.0;
-    }
-    axes[chain_len]    = caxis;
-    extents[chain_len] = cext;
-    chain_len++;
     body = csrc;
     cur  = csrc;
   }
@@ -838,16 +845,21 @@ static double uwalk_run_reduce(UWalkCtx *c, Term red) {
 // Find the output-axis ranges (those that appear in addr) vs reduce
 // ranges. Mirrors rmu_emit_store / rmu_emit_store_reduce's logic.
 //
-// `reduce_axis` is the axis_id of a REDUCE-as-store-value pattern
-// (UINT32_MAX if not). Output ranges fill out_ranges; the reduce
-// range, if found, is excluded.
+// `reduce_axes` is the list of axis_ids (possibly multiple) of a
+// REDUCE-as-store-value pattern; `n_reduce_axes==0` means "no reduce".
+// Output ranges fill out_ranges; ranges matching any reduce axis are
+// excluded.
 static void uwalk_split_ranges(Term *all_ranges, u32 n_all,
-                               u32 reduce_axis,
+                               u32 const *reduce_axes, u32 n_reduce_axes,
                                Term *out_ranges, u32 *n_out) {
   *n_out = 0;
   for (u32 i = 0; i < n_all; i++) {
     u32 aid = term_val(heap_read(term_val(all_ranges[i]) + 0));
-    if (aid == reduce_axis) continue;
+    int is_reduce = 0;
+    for (u32 j = 0; j < n_reduce_axes; j++) {
+      if (reduce_axes[j] == aid) { is_reduce = 1; break; }
+    }
+    if (is_reduce) continue;
     if (*n_out < UWALK_MAX_RANGES) out_ranges[(*n_out)++] = all_ranges[i];
   }
 }
@@ -964,17 +976,21 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
   uwalk_collect_ranges(value_for_emit, all_ranges, &n_all);
   // For REDUCE-as-value, run reduce body to also pick up ranges in src.
   if (reduce_as_value != 0) {
-    Term r_src = heap_read(term_val(reduce_as_value) + 0);
+    Term r_src = uop_reduce_src(reduce_as_value);
     uwalk_collect_ranges(r_src, all_ranges, &n_all);
   }
-  u32 reduce_axis = 0xFFFFFFFFu;
+  u32 reduce_axes[MAX_DIM];
+  u32 n_reduce_axes = 0;
   if (reduce_as_value != 0) {
-    reduce_axis = term_val(heap_read(term_val(reduce_as_value) + 2));
+    n_reduce_axes = uop_reduce_n_axes(reduce_as_value);
+    for (u32 i = 0; i < n_reduce_axes; i++) {
+      reduce_axes[i] = uop_reduce_axis(reduce_as_value, i);
+    }
   }
-  // Output ranges = all_ranges minus the reduce axis (if any).
+  // Output ranges = all_ranges minus all reduce axes (if any).
   Term out_ranges[UWALK_MAX_RANGES];
   u32 n_out = 0;
-  uwalk_split_ranges(all_ranges, n_all, reduce_axis, out_ranges, &n_out);
+  uwalk_split_ranges(all_ranges, n_all, reduce_axes, n_reduce_axes, out_ranges, &n_out);
   // For each output range push a slot and record extent.
   u32 range_extents[UWALK_MAX_RANGES] = {0};
   u32 range_slots  [UWALK_MAX_RANGES] = {0};
