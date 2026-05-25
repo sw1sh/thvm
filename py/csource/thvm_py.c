@@ -392,6 +392,19 @@ EXPORT int py_ten_clear_grad(uint64_t t) {
 }
 
 // ---------------- buffer accessors (handy for debug) ----------------
+EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  return TENS[id].buf_id;
+}
+EXPORT uint64_t py_cuda_buf_dptr(uint32_t buf_id) {
+#ifdef THVM_HAS_CUDA
+  return (uint64_t)cuda_buf_dptr(buf_id);
+#else
+  (void)buf_id; return 0;
+#endif
+}
 EXPORT uint32_t py_uop_buffer_scope(uint64_t t) { return uop_buffer_scope(t); }
 EXPORT uint32_t py_uop_buffer_dtype(uint64_t t) { return uop_buffer_dtype(t); }
 EXPORT uint32_t py_uop_buffer_ndim(uint64_t t)  { return uop_buffer_ndim(t); }
