@@ -6276,6 +6276,18 @@ static Term atp_proof_record_one(AtpState *s, Term t, u32 side,
 static Term atp_proof_record_side(AtpState *s, Term t, u32 side,
                                   AtpProofStep *out, u32 cap, u32 *n) {
   for (u32 it = 0; it < ATP_PROOF_MAX_STEPS; it++) {
+    // Wall-deadline / host-abort poll.  This routine runs AFTER the
+    // saturation loop returns (called from thvm_wl_atp_run_proof's
+    // post-engine proof-extraction step), so without a poll here a
+    // timed-out saturation followed by a long proof-extract rewrite
+    // ignores TimeConstraint and hangs the kernel past wall_deadline.
+    if ((it & 0x7Fu) == 0u) {
+      if (s->wall_deadline_us != 0u) {
+        u64 now = atp_now_us();
+        if (now != 0u && now >= s->wall_deadline_us) return t;
+      }
+      if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return t;
+    }
     u8 progressed = 0u;
     // Orientable indexed-fixpoint phase: drain every oriented rewrite.
     for (u32 j = 0; j < ATP_PROOF_MAX_STEPS; j++) {
@@ -6283,6 +6295,13 @@ static Term atp_proof_record_side(AtpState *s, Term t, u32 side,
       t = atp_proof_record_one(s, t, side, 1u, out, cap, n, &ofired);
       if (!ofired) break;
       progressed = 1u;
+      if ((j & 0x7Fu) == 0u) {
+        if (s->wall_deadline_us != 0u) {
+          u64 now = atp_now_us();
+          if (now != 0u && now >= s->wall_deadline_us) return t;
+        }
+        if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return t;
+      }
     }
     // One unorientable step (skipped when n_unorient == 0).
     u8 ufired = 0u;
@@ -6587,9 +6606,24 @@ fn u32 thvm_atp_cp_dataset_append(const AtpState *s, const char *path,
 // Drive thvm_atp_step until it returns a non-RUNNING status.
 fn AtpStatus thvm_atp_run(AtpState *s) {
   AtpStatus st;
+  // Emergency-trace: tip every N steps to stderr when env set, so a
+  // signal-deaf hang in some step's inner work is at least visible.
+  const char *trace = getenv("THVM_ATP_TICK_TRACE");
+  u32 trace_every = (trace != NULL && trace[0] != '\0' && trace[0] != '0')
+      ? (u32)atoi(trace) : 0u;
+  u32 tick = 0u;
   do {
+    if (trace_every && (tick % trace_every) == 0u) {
+      fprintf(stderr, "[atp_run] step=%u n_rules=%u n_cps=%u\n",
+              s->step, s->n_rules, s->n_cps);
+    }
+    tick++;
     st = thvm_atp_step(s);
   } while (st == ATP_RUNNING);
+  if (trace_every) {
+    fprintf(stderr, "[atp_run] exit st=%d step=%u n_rules=%u n_cps=%u\n",
+            (int)st, s->step, s->n_rules, s->n_cps);
+  }
   return st;
 }
 

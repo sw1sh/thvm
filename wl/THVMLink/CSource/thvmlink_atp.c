@@ -611,15 +611,26 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   static AtpProofStep ext_proof[ATP_PROOF_MAX_STEPS];
   u32 ext_n_steps = 0, ext_n_rules = 0;
-  AtpState *ext = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
-  if (ext != NULL) {
-    for (u32 i = 0; i < n_ax; i++) {
-      thvm_atp_orient_and_add(ext, (Term)data[1 + 2 * i + 0],
-                                   (Term)data[1 + 2 * i + 1]);
+  AtpState *ext = NULL;
+  // EXT proof extraction is only meaningful for PROVED status -- the
+  // axiom-cited chain reconstruction needs a closed proof to walk back
+  // through.  For TimedOut / Saturated / Aborted runs this block is
+  // wasted work AND a known hang trigger: after the main saturator times
+  // out, the ext state's freshly-init'd KBO state shares the persistent
+  // memo with the timed-out main state and atp_compare on the first
+  // axiom add can spin without polling wall_deadline.  Gate on PROVED.
+  if (st == ATP_PROVED) {
+    ext = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
+    if (ext != NULL) {
+      ext->wall_deadline_us = atp->wall_deadline_us;
+      for (u32 i = 0; i < n_ax; i++) {
+        thvm_atp_orient_and_add(ext, (Term)data[1 + 2 * i + 0],
+                                     (Term)data[1 + 2 * i + 1]);
+      }
+      thvm_atp_set_goal(ext, goal_lhs, goal_rhs);
+      ext_n_steps = thvm_atp_proof_extract(ext, ext_proof, ATP_PROOF_MAX_STEPS);
+      ext_n_rules = ext->n_rules;
     }
-    thvm_atp_set_goal(ext, goal_lhs, goal_rhs);
-    ext_n_steps = thvm_atp_proof_extract(ext, ext_proof, ATP_PROOF_MAX_STEPS);
-    ext_n_rules = ext->n_rules;
   }
 
   // Size the output: 8-int header + main blocks + ext blocks + the
