@@ -42,7 +42,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindProof[axioms, \"RawTrace\"]).  Bound completion with MaxWallSeconds / TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); MaxWallSeconds (wall-clock budget, 0.=unbounded -- bounds non-terminating recursive-axiom saturations); TimeConstraint (wall-clock seconds, default Infinity = fall back to MaxWallSeconds; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, MaxWallSeconds bounds EACH scheduled config (default 60s per config when unset).";
+TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindProof[axioms, \"RawTrace\"]).  Bound completion with TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); TimeConstraint (wall-clock seconds, default Infinity = unbounded -- bounds non-terminating recursive-axiom saturations; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED 4-entry schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, TimeConstraint divides FAIRLY across the schedule (each remaining config gets the remaining-budget/remaining-configs share); default 60s per config when TimeConstraint is Infinity.";
 
 TFindEquationalProof::usage = "TFindEquationalProof is a deprecated alias for TFindProof; every call forwards to TFindProof.  Kept for back-compat with notebooks and downstream code that already use the name.  New code should call TFindProof.";
 
@@ -2227,7 +2227,13 @@ atpParseMethod[m_] := (
         ExcludedMiddle / DoubleNegation, Sheffer Commutativity).  Last
         because it runs the front search alongside completion on every
         step, so a goal the cheaper completion configs already close
-        never pays for it. *)
+        never pays for it.
+
+   THE ZOO IS REACHED THROUGH STRUCTURE-AWARE FRONT-LOADING by
+   atpTunedSchedule (Method -> Automatic), not by extending this
+   sequential schedule -- a 4-entry default keeps Method -> Automatic
+   fast on the easy 95% of inputs and only the matched structure case
+   pays for the specialized preset (Waldmeister / SInE / deep MNF). *)
 $AtpSchedule = {
     {"Completion", "CriticalPairWeight" -> "Mix2"},
     {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True},
@@ -2952,7 +2958,7 @@ atpProjectReturn[bundle_, spec_List] :=
     Association[# -> atpReturnValue[bundle, #] & /@ spec];
 
 Options[TFindProof] = {
-    MaxSteps -> 200000, MaxWallSeconds -> 0., Method -> Automatic,
+    MaxSteps -> 200000, Method -> Automatic,
     TimeConstraint -> Infinity};
 
 (* String form: resolve theorem + theory names through
@@ -3101,7 +3107,6 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[conjecture, axioms,
             MaxSteps -> OptionValue[MaxSteps],
-            MaxWallSeconds -> OptionValue[MaxWallSeconds],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
         "ProofObject"];
@@ -3110,7 +3115,6 @@ TFindProof[conjecture_, axioms_List,
     atpProjectReturn[
         atpProveBundle[conjecture, axioms,
             MaxSteps -> OptionValue[MaxSteps],
-            MaxWallSeconds -> OptionValue[MaxWallSeconds],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
         returnSpec];
@@ -3132,7 +3136,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
     Block[{$RecursionLimit = Max[$RecursionLimit, 16384]},
     Module[{atpSched = atpScheduleFor[OptionValue[Method], axioms, conjecture],
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
-            N[OptionValue[TimeConstraint]], OptionValue[MaxWallSeconds]]},
+            N[OptionValue[TimeConstraint]], 0.]},
     If[ Length[atpSched] > 1,
     (* Portfolio: try each scheduled config under a per-config wall
        budget; return the first bundle whose ProofObject verifies.  Each
@@ -3148,17 +3152,16 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            closes goal-shaped theorems plain completion misses -- is never
            starved by an earlier config that fails slowly.  A config that
            returns early rolls its unused time forward to the rest.
-           MaxWallSeconds (no TimeConstraint) stays per-config. *)
+           Unset TimeConstraint stays at the per-config default 60s. *)
         atpEnd = If[ OptionValue[TimeConstraint] =!= Infinity,
             AbsoluteTime[] + N[OptionValue[TimeConstraint]], Infinity];
         Module[{n = Length[atpSched]},
-        Do[ atpSub = Which[
-                atpEnd =!= Infinity, (atpEnd - AbsoluteTime[]) / (n - i + 1),
-                OptionValue[MaxWallSeconds] > 0, OptionValue[MaxWallSeconds],
-                True, 60.];
+        Do[ atpSub = If[ atpEnd =!= Infinity,
+                (atpEnd - AbsoluteTime[]) / (n - i + 1),
+                60.];
             If[ atpSub <= 0., Break[]];
             atpR = atpProveBundle[conjecture, axioms,
-                Method -> atpSched[[i]], MaxWallSeconds -> atpSub,
+                Method -> atpSched[[i]], TimeConstraint -> atpSub,
                 MaxSteps -> OptionValue[MaxSteps]];
             If[ Head[atpR["ProofObject"]] === ProofObject, Break[]],
             {i, n}]];
@@ -3278,7 +3281,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     Module[{enc, cRes, atpWall, atpMethodCfg},
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
-            N[OptionValue[TimeConstraint]], OptionValue[MaxWallSeconds]];
+            N[OptionValue[TimeConstraint]], 0.];
         (* Encode with a None conjecture: the packed goal pair is (0, 0),
            which the C runner reads as "no goal -> saturate the axioms". *)
         enc = atpEncodeProblem[axioms, None, False];
@@ -3298,7 +3301,6 @@ TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpCompletionBundle[axioms,
             MaxSteps -> OptionValue[MaxSteps],
-            MaxWallSeconds -> OptionValue[MaxWallSeconds],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
         "Lemmas"];
@@ -3307,7 +3309,6 @@ TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
     atpProjectReturn[
         atpCompletionBundle[axioms,
             MaxSteps -> OptionValue[MaxSteps],
-            MaxWallSeconds -> OptionValue[MaxWallSeconds],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
         returnSpec];
@@ -3328,7 +3329,6 @@ atpTheoryCompletion[theory_String, returnSpec_,
         atpProjectReturn[
             atpCompletionBundle[axioms,
                 MaxSteps -> OptionValue[MaxSteps],
-                MaxWallSeconds -> OptionValue[MaxWallSeconds],
                 Method -> OptionValue[Method],
                 TimeConstraint -> OptionValue[TimeConstraint]],
             returnSpec]
@@ -3342,7 +3342,6 @@ atpTheoryCompletion[theory_String, returnSpec_,
 TFindProof[theory_String, OptionsPattern[]] :=
     atpTheoryCompletion[theory, "Lemmas",
         MaxSteps -> OptionValue[MaxSteps],
-        MaxWallSeconds -> OptionValue[MaxWallSeconds],
         Method -> OptionValue[Method],
         TimeConstraint -> OptionValue[TimeConstraint]];
 

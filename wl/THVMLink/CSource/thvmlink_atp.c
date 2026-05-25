@@ -270,7 +270,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
   // complete system) or the step/wall budget is hit, and the caller
   // reads the derived rule set (MainRules) as the completion lemmas.
   // goal_check returns ATP_RUNNING whenever no goal is set, so the run
-  // is bounded only by MaxSteps / MaxWallSeconds / TimeConstraint.
+  // is bounded only by MaxSteps / TimeConstraint.
   if (goal_lhs != 0u || goal_rhs != 0u) {
     thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
   }
@@ -554,7 +554,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // complete system) or the step/wall budget is hit, and the caller
   // reads the derived rule set (MainRules) as the completion lemmas.
   // goal_check returns ATP_RUNNING whenever no goal is set, so the run
-  // is bounded only by MaxSteps / MaxWallSeconds / TimeConstraint.
+  // is bounded only by MaxSteps / TimeConstraint.
   if (goal_lhs != 0u || goal_rhs != 0u) {
     thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
   }

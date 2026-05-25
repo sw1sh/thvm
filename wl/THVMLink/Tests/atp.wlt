@@ -1171,7 +1171,7 @@ VerificationTest[
 
 VerificationTest[
     TFindProof["AndAssociativity", "WolframAxioms",
-        Method -> "Completion", MaxSteps -> 5, MaxWallSeconds -> 20.],
+        Method -> "Completion", MaxSteps -> 5, TimeConstraint -> 20.],
     $Failed,
     TestID -> "ATP/option/maxsteps-tight-on-hard-fails"
 ]
@@ -1183,15 +1183,15 @@ VerificationTest[
     TestID -> "ATP/option/maxsteps-loose-proves"
 ]
 
-(* --- MaxWallSeconds: a tiny budget on a hard theorem fails fast ---- *)
+(* --- TimeConstraint: a tiny budget on a hard theorem fails fast ---- *)
 
 VerificationTest[
     TFindProof["AndAssociativity", "WolframAxioms",
         Method -> {"Completion", "Ordering" -> "LPO",
             "CriticalPairWeight" -> "Gt"},
-        MaxWallSeconds -> 2.],
+        TimeConstraint -> 2.],
     $Failed,
-    TestID -> "ATP/option/maxwallseconds-tiny-on-hard-fails"
+    TestID -> "ATP/option/timeconstraint-tiny-on-hard-fails"
 ]
 
 (* --- the deep Sheffer/Wolfram single-NAND commutativity theorem ----
@@ -1209,7 +1209,7 @@ VerificationTest[
             Method -> {"GoalDirected", "Ordering" -> "LPO",
                 "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
                 "FifoTiebreak" -> True, "UnfailingCP" -> True},
-            MaxSteps -> 5000, MaxWallSeconds -> 60.];
+            MaxSteps -> 5000, TimeConstraint -> 60.];
         Head @ p["ProofFunction"][p["Theorems"]]
     ],
     Success,
@@ -1221,7 +1221,7 @@ VerificationTest[
         Method -> {"GoalDirected", "Ordering" -> "LPO",
             "SkolemHighest" -> True, "CriticalPairWeight" -> "Add",
             "FifoTiebreak" -> True, "UnfailingCP" -> True},
-        MaxSteps -> 5000, MaxWallSeconds -> 60.],
+        MaxSteps -> 5000, TimeConstraint -> 60.],
     ProofObject,
     TestID -> "ATP/wolfram/nand-commutativity-goaldirected-proves"
 ]
@@ -1240,7 +1240,7 @@ VerificationTest[
     Module[{res},
         res = TFindProof[
             {f[f[x, y], z] == f[x, f[y, z]], f[x, y] == f[y, x]},
-            MaxWallSeconds -> 10];
+            TimeConstraint -> 10];
         {MatchQ[res, {__}],
          AllTrue[res, MatchQ[#, Inactive[Equal][_, _]] &]}
     ],
@@ -1251,7 +1251,7 @@ VerificationTest[
 (* Completion of a theory by name. *)
 VerificationTest[
     MatchQ[
-        TFindProof["AbelianGroupAxioms", MaxWallSeconds -> 10],
+        TFindProof["AbelianGroupAxioms", TimeConstraint -> 10],
         {__}],
     True,
     TestID -> "ATP/completion/theory-by-name-returns-lemmas"
@@ -1263,7 +1263,7 @@ VerificationTest[
     KeyExistsQ[
         TFindProof[
             {f[f[x, y], z] == f[x, f[y, z]], f[x, y] == f[y, x]},
-            "Statistics", MaxWallSeconds -> 10],
+            "Statistics", TimeConstraint -> 10],
         "Status"],
     True,
     TestID -> "ATP/completion/explicit-axioms-statistics-spec"
@@ -1486,7 +1486,7 @@ VerificationTest[
        wolframscript -code 'TFindProof["AndAssociativity",
          "WolframAxioms", {"Statistics", "ProofObject"},
          Method -> {"Completion", "CriticalPairWeight" -> "Gt"},
-         MaxWallSeconds -> 400]'
+         TimeConstraint -> 400]'
 
    With those env knobs the C ENGINE PROVES the goal: Statistics reports
    Status "Proved" at ~706 rules (matching the C bench's andassoc rule
@@ -1510,7 +1510,7 @@ VerificationTest[
             r = TFindProof["AndAssociativity", "WolframAxioms",
                 {"Statistics", "ProofObject"},
                 Method -> {"Completion", "CriticalPairWeight" -> "Gt"},
-                MaxWallSeconds -> 400];
+                TimeConstraint -> 400];
             {r["Statistics"]["Status"], r["Statistics"]["Rules"] > 600}
         ],
         {"Proved", True}],
@@ -1537,7 +1537,7 @@ VerificationTest[
     Module[{p},
         p = TFindProof["DoubleNegation", "WolframAxioms",
             Method -> {"Completion", "RecordNorm" -> True},
-            MaxWallSeconds -> 60];
+            TimeConstraint -> 60];
         {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
     ],
     {ProofObject, Success},
@@ -1548,7 +1548,7 @@ VerificationTest[
     Module[{p},
         p = TFindProof["DoubleNegation", "WolframAxioms",
             Method -> {"Completion", "RecordNorm" -> False},
-            MaxWallSeconds -> 60];
+            TimeConstraint -> 60];
         {Head[p], Head @ Quiet @ p["ProofFunction"][p["Theorems"]]}
     ],
     {ProofObject, Success},
@@ -1629,7 +1629,7 @@ VerificationTest[
             p = TFindProof["AndAssociativity", "WolframAxioms",
                 Method -> {"Waldmeister", "CriticalPairWeight" -> "Gt",
                     "CPSetInterreduce" -> False, "RecordNorm" -> False},
-                MaxWallSeconds -> 600];
+                TimeConstraint -> 600];
             Head @ Quiet @ p["ProofFunction"][p["Theorems"]]
         ],
         Success],

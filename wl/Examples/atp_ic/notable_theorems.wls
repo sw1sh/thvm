@@ -6,7 +6,7 @@
 
    The Method column shows the saturator config used.  Automatic is
    the proven default (GT critical-pair weight, KBO, identity
-   precedence).  MaxWallSeconds bounds the completion run so a case
+   precedence).  TimeConstraint bounds the completion run so a case
    that would otherwise saturate forever fails gracefully instead of
    wedging the kernel.
 
@@ -20,7 +20,7 @@ Get["THVMLink`"];
 print[args___] := WriteString["stdout",
     StringJoin @@ Map[ToString, {args}], "\n"];
 
-(* {theory, theorem, Method, MaxWallSeconds}
+(* {theory, theorem, Method, TimeConstraint}
 
    Automatic is a strategy schedule (Waldmeister-style portfolio): it
    tries Mix2 weight, then LPO + structure-driven AutoPrecedence, then
@@ -57,7 +57,7 @@ $cases = {
 runCase[theory_, thm_, method_, wall_] := Module[{t, r, verify},
     {t, r} = AbsoluteTiming @ TimeConstrained[
         TFindProof[thm, theory,
-            Method -> method, MaxWallSeconds -> N[wall]],
+            Method -> method, TimeConstraint -> N[wall]],
         wall + 30, $TimedOut];
     verify = Which[
         Head[r] === ProofObject,

@@ -388,7 +388,7 @@ u32 g_atp_ft_diff_mism = 0u;
 // Throttled wall-deadline / host-abort poll for the inner rewrite
 // loops.  goal-check normalizes with a 65536 step cap, and the mixed
 // ordered path nests an indexed normalize inside its own 65536-step
-// loop, so a single normalize can run far past MaxWallSeconds (or a
+// loop, so a single normalize can run far past TimeConstraint (or a
 // host Abort[] / TimeConstrained[]) before thvm_atp_step's per-step
 // check is ever reached again.  Defined after the wall-deadline
 // machinery; forward-declared here for the normalizers above.  On a
@@ -3702,6 +3702,13 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // interreduce keeps surviving rules' RHSs in normal form so the
   // CPs born from them stay small.  calloc zeroed it; set explicitly.
   s->right_reduce = 1u;
+  // use_lazy_normalize stays OFF by default (calloc zeroed): the deferred-
+  // selection CP normalization is an opt-in via thvm_atp_set_use_lazy_normalize
+  // (Method suboption "LazyNormalize" on the WL side, wired through the
+  // structure-aware tuner where appropriate).  It is a strict throughput win
+  // on the deep Waldmeister/Completion path but an inert/negative shift on
+  // easy proofs (it changes the trajectory whether or not it helps), so
+  // engine-wide default-on caused a measurable atp.wlt slowdown.
   atp_register_primitives();
   acp_selftest();   // verify the Stringterms pack/unpack round-trip
   // Allocate the growable rule / CP arrays at their initial
@@ -6823,7 +6830,7 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
 //  - Wall deadline.  A single mnf_step can re-expand a large node table
 //    against many newly-derived rules without ever returning to
 //    thvm_atp_step's per-step wall check, so a hard goal can run far
-//    past MaxWallSeconds inside one mnf_step.  Poll the deadline here
+//    past TimeConstraint inside one mnf_step.  Poll the deadline here
 //    (throttled to every 256th call, since clock_gettime per node over
 //    a 400k-node table is pure overhead) and bail; goal_check returns
 //    and the next step iteration reports ATP_TIMEOUT.
@@ -9220,7 +9227,11 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // dropped -- completeness is preserved.
     u8 joinable;
     u64 _ph_push_t0 = atp_phase_now();
-    if (s->use_lazy_normalize) {
+    // MNF gate (kept even though lazy defaults to off now): when the WL
+    // surface enables lazy via Method "LazyNormalize" -> True on a config
+    // that also runs MNF, the gate routes around the front search's
+    // direct-cell-reference Bus error.
+    if (s->use_lazy_normalize && !s->use_mnf) {
       // Lazy push (WM KPVerwaltung.c:435-467 `lohntSichBehandlung` ->
       // `KPBehandelt`): run the full-R normalize + join verdict ONLY when
       // the RAW overlap is small (sum of side lengths < WM's gate of 50,

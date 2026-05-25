@@ -68,7 +68,7 @@ rewrite then orients cleanly. Proves in a fraction of a second.
 
 ```wolfram
 TFindProof["DoubleNegation", "BooleanAxioms",
-    Method -> "GoalDirected", MaxWallSeconds -> 10]
+    Method -> "GoalDirected", TimeConstraint -> 10]
 ```
 
 `DoubleNegation` is a symmetric goal whose two sides never share a single
@@ -86,7 +86,7 @@ TFindProof["AndAssociativity", "WolframAxioms",
     Method -> {"Waldmeister",
         "CriticalPairWeight" -> "Gt",
         "CPSetInterreduce" -> True},
-    MaxWallSeconds -> 30]
+    TimeConstraint -> 30]
 ```
 
 `Method -> "Waldmeister"` is a preset for Waldmeister's faithful DEFAULT
@@ -103,7 +103,7 @@ through the Waldmeister structure-precedence rule set.
 TFindProof["ImpliesWolframAxioms", "MeredithAxioms",
     Method -> {"GoalDirected",
         "AxiomRelevance" -> "SInE"},
-    MaxWallSeconds -> 30]
+    TimeConstraint -> 30]
 ```
 
 `MeredithAxioms` is multi-system; the goal cites only a subset of its
@@ -477,10 +477,10 @@ there is no goal:
 
 ```wolfram
 TFindProof[AxiomaticTheory["AbelianGroupAxioms"],
-    MaxWallSeconds -> 10]   (* -> completed lemmas *)
+    TimeConstraint -> 10]   (* -> completed lemmas *)
 ```
 
-Bound completion with `MaxWallSeconds` / `TimeConstraint`, since a
+Bound completion with `TimeConstraint` / `TimeConstraint`, since a
 non-terminating axiom set never saturates.
 
 ## 7. Debugging and introspection
@@ -535,7 +535,7 @@ The `RawTrace` return spec is the raw decoded C-engine trace -- one
 record per CP / ORIENT / SIMPLIFY event:
 
 ```wolfram
-TFindProof[goal, axioms, "RawTrace", MaxWallSeconds -> 5]
+TFindProof[goal, axioms, "RawTrace", TimeConstraint -> 5]
 (* -> {<|"Reason" -> 3, "ParentA" -> 5, ...|>, ...} *)
 ```
 
@@ -545,7 +545,7 @@ to see how much of the trace cap was used.
 ### 7.6 Catching a wedge
 
 A goal that hangs longer than expected almost always either explodes the
-CP queue (visible via `"Statistics"["QueueSize"]` on a `MaxWallSeconds`
+CP queue (visible via `"Statistics"["QueueSize"]` on a `TimeConstraint`
 timeout) or runs the MNF front search on a divergent rule set (visible
 in the same way; `Method -> "Completion"` skips MNF). When the queue
 explodes, the first lever to pull is `"AutoMaxWeight" -> 20` (defers
