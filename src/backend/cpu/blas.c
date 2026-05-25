@@ -30,6 +30,22 @@ static u64 BLAS_DOT_DISPATCH_DAG  = 0;
 static u64 BLAS_GEMV_DISPATCH_DAG = 0;
 static u64 BLAS_CONTRACTION_DISPATCH_DAG = 0;
 
+// Cached "env flag set to '1'" check.  Each dispatcher had its own
+// `static int known; static int on;` block; this collapses them.  The
+// cache is keyed by the static variable's address (one cache slot per
+// call site -- pass a unique &on_flag_var as `slot`).  Returns 1 iff
+// getenv(name)[0] == '1' on first call; subsequent calls return the
+// cached value without touching getenv again.
+static int env_flag_on(int *slot, const char *name) {
+  // -1 = unread, 0 = off, 1 = on.  Single-threaded init is safe for
+  // the dispatch path; the cache hides the getenv after first call.
+  if (*slot == -1) {
+    char const *e = getenv(name);
+    *slot = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  return *slot;
+}
+
 // Issue cblas_{s,d}dot.  Single dispatch site (the DAG GEMM/DOT/GEMV
 // dispatchers all funnel through it).
 static void blas_emit_dot(u32 dt, u32 K,
@@ -233,13 +249,8 @@ static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
   if (!uop_dag_classify_contraction_shape(ke->cached_lift.store_root, ke, &c)) {
     return 0;
   }
-  static int trace_known = 0, trace_on = 0;
-  if (!trace_known) {
-    char const *e = getenv("THVM_BLAS_CONTRACTION_TRACE");
-    trace_on = (e != NULL && e[0] == '1');
-    trace_known = 1;
-  }
-  if (trace_on) {
+  static int trace_slot = -1;
+  if (env_flag_on(&trace_slot, "THVM_BLAS_CONTRACTION_TRACE")) {
     fprintf(stderr, "blas_try_contraction: K=%u N=%u inner_M=%u batch=%u "
             "ldA=%u ldB=%u ldC=%u bsa=%u bsb=%u bsc=%u\n",
             c.K, c.N, c.inner_M, c.batch, c.ldA, c.ldB, c.ldC,
@@ -305,13 +316,8 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   if (!uop_dag_classify_im2col_contraction(ke->cached_lift.store_root, ke, &c)) {
     return 0;
   }
-  static int trace_known = 0, trace_on = 0;
-  if (!trace_known) {
-    char const *e = getenv("THVM_BLAS_CONTRACTION_TRACE");
-    trace_on = (e != NULL && e[0] == '1');
-    trace_known = 1;
-  }
-  if (trace_on) {
+  static int trace_slot = -1;
+  if (env_flag_on(&trace_slot, "THVM_BLAS_CONTRACTION_TRACE")) {
     fprintf(stderr, "blas_try_im2col: M=%u N=%u (=%u*%u) K=%u*%u "
             "K_outer=%u X[H,W]=[%u,%u] X_Cin_stride=%u\n",
             c.M, c.N, c.N_patchless, c.KH_total, c.K_row, c.K_col,
@@ -404,13 +410,8 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // the BLAS try-ladder so the walker / JIT path runs instead.  Used
   // for isolating BLAS-classifier bugs (mis-mapped A/B operand order,
   // bad transA/transB recovery) from kernel-body bugs.
-  static int disable_known = 0, disable_on = 0;
-  if (!disable_known) {
-    char const *e = getenv("THVM_CPU_BLAS_DISABLE");
-    disable_on = (e != NULL && e[0] == '1');
-    disable_known = 1;
-  }
-  if (disable_on) return 0;
+  static int disable_slot = -1;
+  if (env_flag_on(&disable_slot, "THVM_CPU_BLAS_DISABLE")) return 0;
   if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
   if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
