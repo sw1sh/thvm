@@ -31,8 +31,21 @@ fn u64 uop_grad_cell(Term y, Term gy, Term target) {
   return loc;
 }
 
+// Forward decls into interact/uop_grad.c.  Defined `fn` (static inline)
+// there; include order puts uop/grad.c BEFORE interact/uop_grad.c.
+fn void grad_memo_begin_realize(void);
+fn void grad_prewalk_fanin(Term y);
+
 fn Term uop_grad(Term y, Term gy) {
-  return term_new(0, TAG_DP1, DUP_GRAD_FLAG, uop_grad_cell(y, gy, 0));
+  // Pre-walk the forward DAG to count per-node BWD fanin so the chain rule
+  // can defer each node's fire until ALL parents have arrived (tinygrad
+  // gradient.py:91 compute_gradient analogue).  No-op when not in the
+  // requires_grad single walk; the call also bumps the per-realize slot
+  // generation so the counts survive until wnf fires the chain rule.
+  grad_memo_begin_realize();
+  Term bwd = term_new(0, TAG_DP1, DUP_GRAD_FLAG, uop_grad_cell(y, gy, 0));
+  grad_prewalk_fanin(y);
+  return bwd;
 }
 
 fn Term uop_fwd(Term y, Term gy) {

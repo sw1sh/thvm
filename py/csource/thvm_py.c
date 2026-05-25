@@ -364,6 +364,13 @@ EXPORT int py_ten_get_requires_grad(uint64_t t) {
 EXPORT uint64_t py_grad_memo_hits  (void) { return grad_memo_hits_get();   }
 EXPORT uint64_t py_grad_memo_misses(void) { return grad_memo_misses_get(); }
 EXPORT uint64_t py_grad_fires      (void) { return HOT_GRAD_FIRES;         }
+// Per-realize slot-mechanism counters for the topo-deferred-fire diagnosis.
+EXPORT uint64_t py_grad_slot_first  (void) { return grad_slot_first_get();   }
+EXPORT uint64_t py_grad_slot_fold   (void) { return grad_slot_fold_get();    }
+EXPORT uint64_t py_grad_slot_refire (void) { return grad_slot_refire_get();  }
+EXPORT uint64_t py_grad_slot_prewalk(void) { return grad_slot_prewalk_get(); }
+EXPORT uint64_t py_grad_slot_excess (void) { return grad_slot_excess_get();  }
+EXPORT uint64_t py_grad_slot_stuck  (void) { return grad_slot_stuck_get();   }
 
 // Walk-once backward readback: the canonical "this tensor's grad"
 // after a uop_grad-driven realize.  grad_leaf_sup's target==0 path

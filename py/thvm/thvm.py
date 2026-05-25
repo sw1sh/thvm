@@ -132,6 +132,12 @@ _ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
 _grad_memo_hits   = _bind("py_grad_memo_hits",   c_uint64)
 _grad_memo_misses = _bind("py_grad_memo_misses", c_uint64)
 _grad_fires       = _bind("py_grad_fires",       c_uint64)
+_grad_slot_first   = _bind("py_grad_slot_first",   c_uint64)
+_grad_slot_fold    = _bind("py_grad_slot_fold",    c_uint64)
+_grad_slot_refire  = _bind("py_grad_slot_refire",  c_uint64)
+_grad_slot_prewalk = _bind("py_grad_slot_prewalk", c_uint64)
+_grad_slot_excess  = _bind("py_grad_slot_excess",  c_uint64)
+_grad_slot_stuck   = _bind("py_grad_slot_stuck",   c_uint64)
 _ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 
@@ -616,6 +622,12 @@ class Thvm:
     def grad_memo_hits   (self) -> int: return int(_grad_memo_hits())
     def grad_memo_misses (self) -> int: return int(_grad_memo_misses())
     def grad_fires       (self) -> int: return int(_grad_fires())
+    def grad_slot_first  (self) -> int: return int(_grad_slot_first())
+    def grad_slot_fold   (self) -> int: return int(_grad_slot_fold())
+    def grad_slot_refire (self) -> int: return int(_grad_slot_refire())
+    def grad_slot_prewalk(self) -> int: return int(_grad_slot_prewalk())
+    def grad_slot_excess (self) -> int: return int(_grad_slot_excess())
+    def grad_slot_stuck  (self) -> int: return int(_grad_slot_stuck())
 
     def ten_get_grad(self, t: Term) -> int:
         """Read TENS[tid].grad (the chain-rule accumulator).
