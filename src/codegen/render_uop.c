@@ -198,14 +198,17 @@ static void rmu_buf_names_set(Term t, const char *name) {
   RMU_BUF_NAMES_N++;
 }
 
-// Returns the symbolic name for buffer `t`.
+// Returns the symbolic name for buffer `t`, or NULL when unresolved.
 //
 // Resolution order:
 //   1. UOP_BUFFER.instance >= 1 -> "in<instance-1>" (structural).
 //   2. Legacy Term-identity map (the output's "out" entry, plus all
 //      synthetic test kernels).
-//   3. `buf<loc>` fallback (defensive).
-static const char *rmu_buf_name(Term t) {
+//   3. NULL -- caller decides how to handle (rmu_buf_name emits the
+//      `buf<loc>` fallback for back-compat; INDEX_E emit path treats
+//      NULL as "matches cpu_uop_walk's unresolved-load returns 0.0"
+//      semantics and emits a zero constant instead).
+static const char *rmu_buf_name_or_null(Term t) {
   // Structural path: instance>=1 means "input slot (instance-1)".
   // Lifted kernels use this for every input; the output (instance==0)
   // falls through to the legacy map.
@@ -218,6 +221,16 @@ static const char *rmu_buf_name(Term t) {
   for (u32 i = 0; i < RMU_BUF_NAMES_N; i++) {
     if (RMU_BUF_NAMES[i].term == t) return RMU_BUF_NAMES[i].name;
   }
+  return NULL;
+}
+
+// Returns the symbolic name for buffer `t`.  Same as
+// rmu_buf_name_or_null but synthesizes a `buf<loc>` fallback for the
+// legacy callers that don't yet handle NULL.  New emit sites that
+// need to specialise on unresolved should call _or_null directly.
+static const char *rmu_buf_name(Term t) {
+  const char *nm = rmu_buf_name_or_null(t);
+  if (nm != NULL) return nm;
   static char fallback[24];
   snprintf(fallback, sizeof(fallback), "buf%llu",
            (unsigned long long)term_val(t));
@@ -481,11 +494,31 @@ static void rmu_emit_term(Term t, FILE *fp) {
     case UOP_INDEX_E: {
       Term buf  = heap_read(loc + 0);
       Term addr = heap_read(loc + 1);
-      // Buffer is rendered by name; for now we use the heap loc
-      // as the identifier.  F0+ wires names through a BUFFER->id
-      // table so kernel args / local allocs resolve to `inN` /
-      // `_alloc<id>` consistently.
-      fprintf(fp, "%s[", rmu_buf_name(buf));
+      // Buffer is rendered by name via rmu_buf_name_or_null; the
+      // cg_render_uop_kernel_root / _c_root entries wire names through
+      // rmu_discover_bufs_rec so the structural ("in<i-1>") and legacy
+      // map ("out") paths resolve every UOP_BUFFER in the kernel.
+      //
+      // Unresolved buf: BUFFERIZE residue the unified pass declined to
+      // inline (the producer's REDUCE-over-pool-axis whose closed_range
+      // type=1 leaf bails materialize.c's 1-axis decomp).
+      // rmu_discover_bufs_rec treats the BUFFERIZE as an OPAQUE leaf
+      // and does NOT promote it to a slot; cpu_uop_walk's
+      // uwalk_resolve_buf returns 0 for the same case (the BUFFERIZE
+      // Term doesn't match any cached_lift.in_bufs[] entry) and INDEX_E
+      // loads 0.0.  Mirror that semantics here -- emit a 0.0f literal
+      // so the JIT'd C compiles AND produces byte-identical output to
+      // the walker.  Without this the body emits `buf<loc>[addr]`
+      // (undeclared identifier -> clang fails -> dispatch falls back
+      // to the slow walker), and the [16,32,10,10] / [16,64,3,3]
+      // backward kernels in beautiful_mnist stay on uop_walk (~19% of
+      // total wall at BS=16).
+      const char *bn = rmu_buf_name_or_null(buf);
+      if (bn == NULL) {
+        fputs("0.0f", fp);
+        return;
+      }
+      fprintf(fp, "%s[", bn);
       rmu_emit_term(addr, fp);
       fputs("]", fp);
       return;
@@ -3321,35 +3354,34 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
     // Residual UOP_BUFFERIZE that the unified pass / materialize.c
     // BUFFERIZE-inline rewriter declined (e.g. INDEX_E(BUFFERIZE(REDUCE...),
     // IDIV(R, C)) where R is a reduce-axis RANGE -- materialize.c bails on
-    // the type=1 leaf to stay correct on pool-style gradients).  Without
-    // a slot here the body's INDEX_E(BUFFERIZE, addr) emits
-    // `buf{term_val(bufferize)}[addr]` via rmu_buf_name's fallback, and
-    // the resulting MSL references an undeclared identifier.  Promote
-    // the BUFFERIZE term to a fresh input slot just like TAG_TEN above;
-    // the caller's name-registration loop (cg_render_uop_kernel_root)
-    // then maps it to "in<slot-1>" so the emitted reference resolves to
-    // a kernel-arg name.  The kernel signature emits `device const float *`
-    // (uop_buffer_dtype returns 0 -> rmu_msl_type_name default), which is
-    // a structural placeholder: these kernels are already known to be
-    // structurally broken in other ways (the BUFFERIZE wraps an in-kernel
-    // intermediate the renderer can't inline at this layer), but the test
-    // gate audits for the `buf<N>` fallback specifically.  Recurse into
-    // the value subtree first so any UOP_BUFFER leaves it transitively
-    // references still get their own slots.
-    rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
-    // Dedup against ANY filled input slot (the same BUFFERIZE Term may be
-    // visited from multiple INDEX_E sites in the body).  Scan from slot 1
-    // up; only allocate fresh if no match found.
-    for (u32 i = 1; i < RMU_DISCOVER_MAX; i++) {
-      if (slot_bufs[i] == t) return;
-    }
-    for (u32 i = (*n_inputs_out) + 1; i < RMU_DISCOVER_MAX; i++) {
-      if (slot_bufs[i] == 0) {
-        slot_bufs[i] = t;
-        *n_inputs_out = i;
-        return;
-      }
-    }
+    // the type=1 leaf to stay correct on pool-style gradients).
+    //
+    // Treat the BUFFERIZE as an OPAQUE LEAF -- DO NOT recurse into its
+    // value subtree.  The body's INDEX_E(BUFFERIZE, addr) emit reads the
+    // BUFFERIZE Term as a single buffer load (the producer-side
+    // computation does NOT execute in this kernel).  Recursing into the
+    // value subtree pulls in producer-side UOP_BUFFER / TAG_TEN leaves
+    // that are NOT referenced by this kernel's body but consume slots in
+    // slot_bufs[].  When the inner inst=K UOP_BUFFER lands in slot K
+    // before the consumer-side inst=K UOP_BUFFER reaches the walker, the
+    // consumer's inst=K UOP_BUFFER hits the collision path and gets
+    // promoted to a high slot -- the renderer's signature declares
+    // slot_bufs[K] as the inner Term (typically dtype=0 ->
+    // unsigned char) while the body emits `inK-1` via the structural
+    // path expecting the canonical inst=K UOP_BUFFER's float dtype.
+    // Dispatch passes ins_v[K-1] = float buffer, the body declares
+    // const unsigned char *inK-1 = ins_v[K-1], and the loop reads
+    // BN-scale floats as bytes -> garbage *garbage = ~exp10 floats ->
+    // 192M loss on beautiful_mnist BS=16.
+    //
+    // cpu_uop_walk doesn't suffer this: it indexes input slots by Term
+    // identity against cached_lift.in_bufs[] (built from input_tids[],
+    // not from the discover walk), and resolves the residue BUFFERIZE
+    // to 0.0 via uwalk_resolve_buf's fall-through return.  Mirror that
+    // semantics in the INDEX_E emit (rmu_emit_term below): an
+    // unresolved buf -> rmu_buf_name_or_null returns NULL -> emit
+    // 0.0f literal.  Same numerical result as the walker, no dispatch
+    // contract changes.
     return;
   }
   if (op == UOP_BUFFER) {
