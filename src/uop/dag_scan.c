@@ -1986,10 +1986,18 @@ int uop_dag_classify_contraction_shape(Term root,
   if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
   u32 rkind = uop_reduce_kind(reduce);
   if (rkind != REDUCE_SUM) return 0;
-  // C1: still single-K dispatch.  Multi-K compound (n_axes > 1, every
-  // axis appearing in both A and B) is the C6/C7 extension.
-  if (uop_reduce_n_axes(reduce) != 1) return 0;
-  u32 red_axis_id = uop_reduce_axis(reduce, 0);
+  // Multi-K support: collect EVERY reduce axis_id.  Each must appear
+  // in BOTH A and B address coefficients, never in the output, and
+  // they must compose into one flat K dimension for cblas_sgemm.
+  // Mirrors tinygrad's einsum: out[M,N] = sum_{k1, k2, ...} A[K,N] * B[M,K]
+  // collapses to A[K_total, N] @ B[M, K_total].
+  u32 n_K = uop_reduce_n_axes(reduce);
+  if (n_K == 0 || n_K > UDG_CONTRACT_MAX_AXES) return 0;
+  u32 red_axis_ids[UDG_CONTRACT_MAX_AXES];
+  for (u32 i = 0; i < n_K; i++) red_axis_ids[i] = uop_reduce_axis(reduce, i);
+  u32 red_axis_id = red_axis_ids[0];   // legacy single-K alias (still used for
+                                       // single-K storage-stride checks below
+                                       // when n_K == 1).
   Term mul = uop_reduce_src(reduce);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
   Term a_idx = heap_read(term_val(mul) + 0);
@@ -2022,13 +2030,87 @@ int uop_dag_classify_contraction_shape(Term root,
   // currently route.  Bail.
   if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) return 0;
 
-  // K axis: in A, in B, not in output.
-  u32 K_in_a = udg_addr_lookup(&ca, red_axis_id);
-  u32 K_in_b = udg_addr_lookup(&cb, red_axis_id);
-  u32 K_in_o = udg_addr_lookup(&co, red_axis_id);
-  if (K_in_a == 0 || K_in_b == 0 || K_in_o != 0) return 0;
-  u32 K_extent = udg_axis_extent(root, red_axis_id);
-  if (K_extent == 0) return 0;
+  // Per-K-axis check: every K axis must appear in BOTH A and B coeffs,
+  // never in the output.  Collect per-axis extent + per-input coeff so
+  // we can later compose them into one flat K dimension.
+  u32 K_extents[UDG_CONTRACT_MAX_AXES];
+  u32 K_a_coeffs[UDG_CONTRACT_MAX_AXES];
+  u32 K_b_coeffs[UDG_CONTRACT_MAX_AXES];
+  u64 K_total = 1;
+  for (u32 i = 0; i < n_K; i++) {
+    u32 aid = red_axis_ids[i];
+    u32 ac  = udg_addr_lookup(&ca, aid);
+    u32 bc  = udg_addr_lookup(&cb, aid);
+    u32 oc  = udg_addr_lookup(&co, aid);
+    if (ac == 0 || bc == 0 || oc != 0) return 0;
+    u32 ext = udg_axis_extent(root, aid);
+    if (ext == 0) return 0;
+    K_extents [i] = ext;
+    K_a_coeffs[i] = ac;
+    K_b_coeffs[i] = bc;
+    K_total *= ext;
+  }
+  if (K_total == 0 || K_total > 0x7fffffffULL) return 0;
+  // Multi-K compose: A treats the K axes as a [K_0, K_1, ...] row-
+  // major block (descending a_coeff, smallest = the single-K innermost
+  // stride for A).  B likewise treats them as a row-major block
+  // (descending b_coeff, smallest = single-K innermost for B).  When
+  // both inputs agree on the K composition we can collapse to one
+  // flat K for cblas_sgemm without strided dispatch (since the K
+  // strides are dense within each input).
+  u32 K_in_a_single = K_a_coeffs[0];
+  u32 K_in_b_single = K_b_coeffs[0];
+  if (n_K > 1) {
+    // Sort indices by descending a_coeff so the row-major dense check
+    // can verify each subsequent K-coeff = prev * inner extents.
+    u32 ord_a[UDG_CONTRACT_MAX_AXES];
+    for (u32 i = 0; i < n_K; i++) ord_a[i] = i;
+    for (u32 i = 1; i < n_K; i++) {
+      u32 tmp = ord_a[i]; i32 j = (i32)i - 1;
+      while (j >= 0 && K_a_coeffs[ord_a[j]] < K_a_coeffs[tmp]) {
+        ord_a[j + 1] = ord_a[j]; j--;
+      }
+      ord_a[j + 1] = tmp;
+    }
+    // Same sort for B.  For the simple GEMM dispatch we require BOTH
+    // inputs sort K-axes in the SAME order (i.e. K axes are dense in
+    // both A and B with the same nesting).  Different sorts would
+    // require either a transpose or a strided-K dispatch (C7's
+    // strided im2col path); bail for now.
+    u32 ord_b[UDG_CONTRACT_MAX_AXES];
+    for (u32 i = 0; i < n_K; i++) ord_b[i] = i;
+    for (u32 i = 1; i < n_K; i++) {
+      u32 tmp = ord_b[i]; i32 j = (i32)i - 1;
+      while (j >= 0 && K_b_coeffs[ord_b[j]] < K_b_coeffs[tmp]) {
+        ord_b[j + 1] = ord_b[j]; j--;
+      }
+      ord_b[j + 1] = tmp;
+    }
+    for (u32 i = 0; i < n_K; i++) if (ord_a[i] != ord_b[i]) return 0;
+    // K_in_a_single (innermost K stride in A) corresponds to the LAST
+    // entry in the sorted order; ditto for B.  These will be used as
+    // K_in_a / K_in_b lookups below.
+    K_in_a_single = K_a_coeffs[ord_a[n_K - 1]];
+    K_in_b_single = K_b_coeffs[ord_b[n_K - 1]];
+    // Verify the row-major composition: for descending order,
+    // coeff[i] = coeff[i+1] * extent[i+1] (i.e. each outer step covers
+    // the product of all inner K extents at its inner side).
+    u64 acc_a = K_in_a_single;
+    u64 acc_b = K_in_b_single;
+    for (i32 i = (i32)n_K - 2; i >= 0; i--) {
+      acc_a *= K_extents[ord_a[i + 1]];
+      acc_b *= K_extents[ord_b[i + 1]];
+      if (K_a_coeffs[ord_a[i]] != (u32)acc_a) return 0;
+      if (K_b_coeffs[ord_b[i]] != (u32)acc_b) return 0;
+    }
+  }
+  // Legacy aliases for single-K storage-stride checks below.  After
+  // multi-K compose, K_in_a / K_in_b refer to the COMPOSITE K's
+  // innermost (smallest) stride -- equivalent to a single-K of size
+  // K_total at that stride.
+  u32 K_in_a = K_in_a_single;
+  u32 K_in_b = K_in_b_single;
+  u32 K_extent = (u32)K_total;
 
   // Output axes: every output axis must appear in EITHER A or B (not
   // both) -- if in A only it's an N-axis; if in B only it's an M-axis.
@@ -2069,19 +2151,23 @@ int uop_dag_classify_contraction_shape(Term root,
   }
   if (n_M == 0 || n_N == 0) return 0;
 
-  // Every axis referenced by A must be K or one of the N_axes, and
-  // every axis referenced by B must be K or one of the M_axes.  This
-  // guarantees we've found the FULL contraction shape.
+  // Every axis referenced by A must be one of the K_axes or one of the
+  // N_axes, and every axis referenced by B must be K or one of the
+  // M_axes.  Guarantees we've found the FULL contraction shape.
   for (u32 i = 0; i < ca.n_axes; i++) {
     u32 aid = ca.axis_ids[i];
-    if (aid == red_axis_id) continue;
+    int is_K = 0;
+    for (u32 j = 0; j < n_K; j++) if (red_axis_ids[j] == aid) { is_K = 1; break; }
+    if (is_K) continue;
     int found = 0;
     for (u32 j = 0; j < n_N; j++) if (N_axes[j].axis_id == aid) { found = 1; break; }
     if (!found) return 0;
   }
   for (u32 i = 0; i < cb.n_axes; i++) {
     u32 aid = cb.axis_ids[i];
-    if (aid == red_axis_id) continue;
+    int is_K = 0;
+    for (u32 j = 0; j < n_K; j++) if (red_axis_ids[j] == aid) { is_K = 1; break; }
+    if (is_K) continue;
     int found = 0;
     for (u32 j = 0; j < n_M; j++) if (M_axes[j].axis_id == aid) { found = 1; break; }
     if (!found) return 0;
