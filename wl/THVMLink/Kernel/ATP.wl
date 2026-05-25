@@ -2484,28 +2484,51 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
     hasDistrib = AnyTrue[Values[ops], #["Distributes"] &];
     arities = #["Arity"] & /@ Values[ops];
     maxArity = If[arities === {}, 0, Max[arities]];
-    (* Combinatory logic: a single binary "application" operator and the
-       rest of the heads are nullary combinator CONSTANTS (S,K,B,...).
-       Sinai Tafel3 Kombinatorlogik* use the "_" application op
-       (Sinai.h:95-102, 348-362).  Heuristic: one binary op, >= 1
-       nullary head, no commutativity/unit/inverse. *)
+    (* Combinatory logic: a single binary "application" operator
+       (Sinai Tafel3 Kombinatorlogik* use the "_" application op,
+       Sinai.h:95-102, 348-362).  The combinator constants
+       (S,K,B,W,...) appear as atomic SYMBOLS inside axiom subterms
+       (e.g. Application[CombinatorS, x] -- CombinatorS is a leaf, not
+       an operator HEAD with its own arity slot), so the nullary-op
+       check that earlier classifiers used misses them.  Discriminator:
+       one binary op + no commutativity / inverse + >=4 axioms (Sheffer
+       / Wolfram / Meredith / McCune have at most 3, so this cleanly
+       separates).  HasUnit allowed -- some AxiomaticTheory combinator
+       presentations set HasUnit on Application (the Y axiom shape). *)
     allHeads = Keys[ops];
     isComb = Length[Select[Values[ops], #["Arity"] == 2 &]] == 1 &&
-        AnyTrue[Values[ops], #["Arity"] == 0 &] &&
-        ! hasComm && ! hasUnit && ! hasInv && Length[parts] <= 4;
+        ! hasComm && ! hasInv && Length[parts] >= 4;
     (* Sheffer / Nand: a single binary operator, no other structure
        (no associativity, commutativity is the GOAL not an axiom).
        WolframAxioms is the canonical case (one CenterDot axiom). *)
     isSheffer = Length[allHeads] == 1 && First[Values[ops]]["Arity"] == 2 &&
         ! hasAssoc && ! hasComm && ! hasUnit && ! hasInv && ! hasDistrib;
+    (* Boolean lattice presentation: two binary ops that are both
+       commutative AND distribute, plus a unary "complement" head
+       (Huntington-style axioms where associativity is a THEOREM, not
+       an axiom, so the assoc detector does NOT fire; that's the gap
+       AC-class detection misses).  Symmetric goals dominate here
+       (DeMorgan, ExcludedMiddle, Noncontradiction), so GoalDirected
+       must come first in the front-load. *)
+    isBoolean = Length[Select[Values[ops],
+            #["Arity"] == 2 && #["Commutative"] && #["Distributes"] &]] >= 2 &&
+        AnyTrue[Values[ops], #["Arity"] == 1 &];
+    (* AC theory with a unary complement (Huntington, Robbins): the
+       symmetric goals (DoubleNegation, ImpliesRobbins) need MNF/
+       GoalDirected, but the bulk completion still wants the AC weight
+       schedule -- so this is a "GoalDirected first, then AC" variant. *)
+    isACWithComplement = ! isBoolean && hasComm && hasAssoc &&
+        AnyTrue[Values[ops], #["Arity"] == 1 &];
     class = Which[
         isComb, "Combinatory",
         isSheffer, "Sheffer",
+        isBoolean, "Boolean",
         hasDistrib && hasInv, "Ring",
         hasInv && hasUnit && hasAssoc && hasComm, "AbelianGroup",
         hasInv && hasUnit && hasAssoc, "Group",
         hasIdem && hasComm && hasAssoc && ! hasInv, "Lattice",
         hasUnit && hasAssoc, "Monoid",
+        isACWithComplement, "ACWithComplement",
         hasComm && hasAssoc, "AC",
         True, "General"];
     <|"Operators" -> ops, "ACOperators" -> acOps, "Class" -> class,
@@ -2577,10 +2600,29 @@ atpAutoTuneForClass["Sheffer"] := {
        symmetric and never share a normal form, so the MNF front search
        (StdS's zb(mnf), Sinai.h:109) is the closer; pair it with the
        Mix2 weight that thvm finds best on the hard cross-axiom Sheffer
-       theorems. *)
+       theorems.  For the AndAssociativity-class deep saturations, also
+       try the Waldmeister preset (Mix + KBO + AutoPrec + SR51 +
+       RHSInterreduce + UnfailingCP + CPSetInterreduce-off) with GT
+       weight that proves AndAssociativity in the C bench. *)
     {"GoalDirected", "CriticalPairWeight" -> "Mix2", "AutoMaxWeight" -> 20},
     {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "AutoMaxWeight" -> 20}};
+        "AutoMaxWeight" -> 20},
+    {"Waldmeister", "CriticalPairWeight" -> "Gt",
+        "CPSetInterreduce" -> False}};
+atpAutoTuneForClass["Boolean"] := {
+    (* Huntington / DeMorgan / ExcludedMiddle / Noncontradiction are all
+       symmetric goals -- both sides irreducible under the axioms.  The
+       MNF bidirectional front search ("GoalDirected") is the only
+       closer; front-load it.  AC-style completion (Mix2 weight) is the
+       fallback for asymmetric theorems (Absorption, OrAssociativity). *)
+    "GoalDirected",
+    {"Completion", "CriticalPairWeight" -> "Mix2"}};
+atpAutoTuneForClass["ACWithComplement"] := {
+    (* Huntington / Robbins: AC operator + unary complement.  The
+       symmetric goals (DoubleNegation, ImpliesRobbins) need MNF
+       first; bulk completion (GtS) is the fallback. *)
+    "GoalDirected",
+    atpGtS};
 atpAutoTuneForClass[_] := {};   (* "General": no front-load, just tail *)
 
 (* Front-load the tuned configs, then APPEND the full fixed portfolio
