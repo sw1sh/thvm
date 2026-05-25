@@ -3679,6 +3679,18 @@ fn u32 thvm_atp_trace_cap(void) {
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
+  // Cross-call hygiene: a prior thvm_atp_free released the previous
+  // atp's rule_index / cp_index, but the globals g_atp_ri_ix /
+  // g_atp_cp_ix still point at the freed memory.  Reading them before
+  // the new state's lazily-built indexes are installed (which happens
+  // in atp_rewrite_normalize_indexed / generate_cps) returns a stale
+  // pointer; on a TimedOut->next-call sequence that landed reads of
+  // freed AtpRuleIndex memory and a macOS-malloc SIGTRAP.  NULL them
+  // on init so any unguarded read crashes loudly instead of silently.
+#ifdef ATP_RULE_INDEX
+  g_atp_ri_ix = NULL;
+  g_atp_cp_ix = NULL;
+#endif
   // Persistent LPO memo: a completion compares the same subterm pairs
   // millions of times.  Opt in, and drop any entries from a prior run
   // (a static LpoConfig pointer may be reused with new precedence).
