@@ -1854,57 +1854,64 @@ static int udg_addr_accumulate(UdgAddrCoeffs *a, u32 axis_id, u32 coeff) {
   return 1;
 }
 
+// Recursively accumulate `coeff * leaf` into the coeff table.  Supports
+// the leaf shapes that survive thvm's index_simplify pass for conv im2col:
+//   RANGE                                    -> accumulate axis @ coeff
+//   CONST                                    -> add to offset
+//   IADD(L, R)                               -> recurse(L, coeff) + recurse(R, coeff)
+//   IMUL(X, CONST(c)) or IMUL(CONST(c), X)   -> recurse(X, coeff * c)
+//
+// IMUL distribution over IADD mirrors tinygrad symbolic.py:236
+//   (UPat.cvar("y") * (UPat.var("x", weakint) + UPat.cvar("c")),
+//    lambda x,y,c: (y*x)+(y*c))                          # y*(x+c) -> y*x + y*c
+// which is the canonical-form rewrite the index simplifier applies.  thvm's
+// index_simplify doesn't currently push that rule, so we apply the
+// distribution lazily here while walking the symbolic address.  The conv
+// weight-grad im2col fingerprint
+//   in[a4*18432 + a1*576 + (a5+a2)*24 + (a6+a3)]
+// then decodes to coeffs {a4:18432, a1:576, a5:24, a2:24, a6:1, a3:1} with
+// the same coefficient appearing on the K-axis (a5,a6) and the M-axis
+// (a2,a3) -- i.e. the strided-im2col signature the contraction classifier
+// recognises.  Returns 1 on success, 0 on bail.
+static int udg_addr_decode_leaf(Term t, u32 coeff, UdgAddrCoeffs *out) {
+  if (term_tag(t) == TAG_UOP) {
+    u32 op = term_ext(t);
+    if (op == UOP_RANGE) {
+      return udg_addr_accumulate(out, uop_range_axis_id(t), coeff);
+    }
+    if (op == UOP_IADD) {
+      Term a = heap_read(term_val(t) + 0);
+      Term b = heap_read(term_val(t) + 1);
+      if (!udg_addr_decode_leaf(a, coeff, out)) return 0;
+      if (!udg_addr_decode_leaf(b, coeff, out)) return 0;
+      return 1;
+    }
+    Term inner = 0; u32 c = 0;
+    if (udg_match_imul_const(t, &inner, &c)) {
+      // (coeff * c) needs to fit in u32; bail on overflow.
+      u64 prod = (u64)coeff * (u64)c;
+      if (prod > 0xFFFFFFFFu) return 0;
+      return udg_addr_decode_leaf(inner, (u32)prod, out);
+    }
+  }
+  i32 ival = 0;
+  if (udg_match_iconst_signed(t, &ival)) {
+    // CONST contributes coeff * ival to the absolute offset.
+    out->offset += (i32)((i64)ival * (i64)coeff);
+    return 1;
+  }
+  // Unrecognized leaf (IDIV/IMOD/IWHERE for conv2d-flat); bail.
+  return 0;
+}
+
 static void udg_decode_addr_coeffs(Term addr, UdgAddrCoeffs *out) {
   out->n_axes = 0;
   out->offset = 0;
   out->ok     = 0;
-
-  // Bare RANGE (single-axis address): coeff = 1.
-  if (term_tag(addr) == TAG_UOP && term_ext(addr) == UOP_RANGE) {
-    if (!udg_addr_accumulate(out, uop_range_axis_id(addr), 1)) return;
-    out->ok = 1;
-    return;
-  }
-  // Bare CONST (degenerate, no ranges).
-  i32 cv = 0;
-  if (udg_match_iconst_signed(addr, &cv)) {
-    out->offset = cv;
-    out->ok = 1;
-    return;
-  }
-  // IMUL(RANGE, CONST) leaf at top level (single non-unit-coeff axis).
-  Term mul_inner = 0; u32 mul_coeff = 0;
-  if (udg_match_imul_const(addr, &mul_inner, &mul_coeff)) {
-    if (term_tag(mul_inner) != TAG_UOP || term_ext(mul_inner) != UOP_RANGE) return;
-    if (!udg_addr_accumulate(out, uop_range_axis_id(mul_inner), mul_coeff)) return;
-    out->ok = 1;
-    return;
-  }
-  // IADD chain.  Flatten and decode every leaf.
-  Term leaves[UDG_CONV_ADDR_MAX_LEAVES] = {0};
-  u32  n_leaves = udg_flatten_iadd(addr, leaves, UDG_CONV_ADDR_MAX_LEAVES);
-  if (n_leaves == 0) return;
-  for (u32 i = 0; i < n_leaves; i++) {
-    Term t = leaves[i];
-    if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE) {
-      if (!udg_addr_accumulate(out, uop_range_axis_id(t), 1)) return;
-      continue;
-    }
-    i32 ival = 0;
-    if (udg_match_iconst_signed(t, &ival)) {
-      out->offset += ival;
-      continue;
-    }
-    Term m_inner = 0; u32 m_coeff = 0;
-    if (udg_match_imul_const(t, &m_inner, &m_coeff)
-        && term_tag(m_inner) == TAG_UOP && term_ext(m_inner) == UOP_RANGE) {
-      if (!udg_addr_accumulate(out, uop_range_axis_id(m_inner), m_coeff)) return;
-      continue;
-    }
-    // Unrecognized arm (IDIV/IMOD/IWHERE for conv2d-flat).  Bail.
-    return;
-  }
-  out->ok = 1;
+  // Single entry point handles every shape (bare RANGE, bare CONST,
+  // IMUL(RANGE, CONST), IADD chain, IMUL(IADD, CONST) -- the last is
+  // the im2col-fingerprint case C7.1 added).
+  if (udg_addr_decode_leaf(addr, 1, out)) out->ok = 1;
 }
 
 // Look up the coefficient for an axis_id in a decoded address.  Returns
