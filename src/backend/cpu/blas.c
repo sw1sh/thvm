@@ -353,10 +353,13 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   }
   static int trace_slot = -1;
   if (env_flag_on(&trace_slot, "THVM_BLAS_CONTRACTION_TRACE")) {
-    fprintf(stderr, "blas_try_im2col: dir=%s M=%u K_pix=%u*%u K_outer=%u "
-            "N_patchless=%u KH_tot=%u X[H,W]=[%u,%u] X_Cin_stride=%u\n",
+    // K_row/K_col now hold OH/OW (pixel extents) in both directions; the
+    // KH/KW kernel extents live in patch_extent[].
+    fprintf(stderr, "blas_try_im2col: dir=%s Cout=%u OH=%u OW=%u KH=%u KW=%u "
+            "Cin=%u Bouter=%u X[H,W]=[%u,%u]\n",
             c.forward_conv ? "fwd" : "bwd", c.M, c.K_row, c.K_col,
-            c.K_outer, c.N_patchless, c.KH_total, c.X_H, c.X_W, c.X_Cin_stride);
+            c.patch_extent[0], c.patch_extent[1], c.N_patchless,
+            c.N_outer_extent, c.X_H, c.X_W);
   }
   if (c.dtype != DT_FP32) return 0;
   // Sanity bounds (defensive).
@@ -406,33 +409,32 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   for (u32 b = 0; b < c.N_outer_extent; b++) {
     float const *X_b = X_base + (u64)b * X_outer;
     im2col_gather_patches(patches, X_b, N_patch, KH, KW, OH, OW, X_W, X_Cin_str);
+    // The gather wrote patches in (N_total=Cin*KH*KW rows, K_pixels=OH*OW cols)
+    // row-major layout.  Both branches use that same buffer; they only differ
+    // in (a) which axis of patches is the sgemm-K axis vs the sgemm-N axis,
+    // and (b) where the output is written / whether to accumulate.
     if (c.forward_conv) {
-      // FWD: out[b] = W @ patches.
-      //   W       : (M=Cout,        K=N_total=Cin*KH*KW) row-major, ldA = N_total.
-      //   patches : (K=N_total,     N=K_total=OH*OW)     row-major, ldB = K_total
-      //             -- the gather above wrote exactly this layout (channel
-      //             rows, pixel columns).
-      //   out[b]  : (M=Cout,        N=K_total=OH*OW)     row-major, ldC = K_total.
-      // (sgemm-N = OH*OW pixels, sgemm-K = Cin*KH*KW channels for FWD --
-      // mirror image of BWD where sgemm-N = channels and sgemm-K = pixels.)
+      // FWD per-batch: out[b] = W @ patches.  sgemm-K = Cin*KH*KW (channels),
+      // sgemm-N = OH*OW (pixels).  patches is already (K, N)-shaped, so
+      // NoTrans on both.  beta=0 since each batch writes a distinct out slice.
       float *out_b = out_base + (u64)b * c.N_outer_out_stride;
       cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                   (int)c.M, (int)K_total, (int)N_total,
-                  1.0f, B_base, (int)c.Y_M_stride,      // W,       ldA = N_total
+                  1.0f, B_base,  (int)c.Y_M_stride,     // W,       ldA = N_total
                         patches, (int)K_total,          // patches, ldB = K_total
-                  0.0f, out_b, (int)c.out_M_stride);    // out[b],  ldC = K_total
+                  0.0f, out_b,   (int)c.out_M_stride);  // out[b],  ldC = K_total
     } else {
-      // BWD: dW += dY[b] @ patches^T.
-      //   dY[b]   : (M=Cout, K=OH*OW) row-major, ldB = OH*OW (= Y_M_stride).
-      //   patches : (N=Cin*KH*KW, K=OH*OW) row-major (TransB), ldA = K_total.
-      //   dW      : (M=Cout, N=Cin*KH*KW) row-major, ldC = out_M_stride = N.
+      // BWD per-batch: dW += dY[b] @ patches^T.  sgemm-K = OH*OW (pixels),
+      // sgemm-N = Cin*KH*KW (channels).  patches is (N, K)-shaped for this
+      // direction so use TransB.  beta=1 after the first batch to accumulate
+      // dW across the batch dimension.
       float const *dY_b = B_base + (u64)b * c.Y_outer_stride;
       float beta = (b == 0) ? 0.0f : 1.0f;
       cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                   (int)c.M, (int)N_total, (int)K_total,
-                  1.0f, dY_b, (int)c.Y_M_stride,
-                        patches, (int)K_total,
-                  beta, out_base, (int)c.out_M_stride);
+                  1.0f, dY_b,    (int)c.Y_M_stride,     // dY[b],   ldA = K_total
+                        patches, (int)K_total,          // patches, ldB = K_total
+                  beta, out_base, (int)c.out_M_stride); // dW,      ldC = N_total
     }
   }
   free(patches);
