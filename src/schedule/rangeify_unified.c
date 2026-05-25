@@ -1641,25 +1641,34 @@ fn void pm_apply_rangeify(Term root) {
     Term in_addr   = ru_build_input_addr_for(rm, info->loc);
     Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
                                         in_addr, rm);
-    // Rewire UOP_REDUCE's axis field from the original shape-axis index
-    // (e.g. "axis 1 of {3,2}") to the freshly minted UOP_RANGE's axis_id.
-    // uop_graph_rebuild_with_srcs preserves the original axis cell from
-    // info->loc, but downstream walkers (cpu_uop_walk's uwalk_run_reduce,
-    // render_uop's rmu_emit_store_reduce) match the REDUCE's stored axis
-    // against the body's UOP_RANGE.axis_id -- which is now the fresh
-    // RU_REDUCE_RANGES[i].ranges[0]'s axis_id, not the shape-axis index.
-    if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 1
+    // Rewire UOP_REDUCE's axes from the original shape-axis indices
+    // (e.g. "axes (1, 3) of {3,2,4,5}") to the freshly minted
+    // UOP_RANGE.axis_ids.  Multi-axis: one fresh RANGE per axis in
+    // RU_REDUCE_RANGES[i].ranges -- the rewritten REDUCE inherits
+    // every axis_id from those ranges, dropping shape-coord axes.
+    // Downstream walkers (cpu_uop_walk's uwalk_run_reduce, render_uop)
+    // match against RANGE.axis_id, not the shape index.
+    if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n >= 1
         && term_tag(rewritten) == TAG_UOP
         && term_ext(rewritten) == UOP_REDUCE) {
-      Term rng = RU_REDUCE_RANGES[i].ranges[0];
-      u32 r_aid = (u32)term_val(heap_read(term_val(rng) + 0));
-      u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
-      Term src  = heap_read(term_val(rewritten) + 0);
-      rewritten = uop_reduce(kind, r_aid, src);
-      // Repair: if the rewritten body lost the reduce-axis RANGE leaf
+      u32 n_rrng = RU_REDUCE_RANGES[i].n;
+      u32 new_axes[MAX_DIM];
+      for (u32 k = 0; k < n_rrng && k < MAX_DIM; k++) {
+        Term rng = RU_REDUCE_RANGES[i].ranges[k];
+        new_axes[k] = (u32)term_val(heap_read(term_val(rng) + 0));
+      }
+      u32 kind  = uop_reduce_kind(rewritten);
+      Term src  = uop_reduce_src(rewritten);
+      rewritten = uop_reduce_multi(kind, n_rrng, new_axes, src);
+      // Repair: if the rewritten body lost any reduce-axis RANGE leaf
       // (e.g. a stride-0 broadcast collapsed past ru_rewrite_subtree),
       // collapse the REDUCE to `body * extent` (SUM) or `body` (MAX).
-      rewritten = ru_reduce_repair_broadcast_body(rewritten, rng);
+      // Currently only the single-axis broadcast-repair fires; multi-
+      // axis with mid-chain collapse stays as-is (the unmatched axes
+      // still bind in the walker for the surviving ranges).
+      if (n_rrng == 1) {
+        rewritten = ru_reduce_repair_broadcast_body(rewritten, RU_REDUCE_RANGES[i].ranges[0]);
+      }
     }
     // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
     // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n

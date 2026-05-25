@@ -12,8 +12,9 @@
 // tinygrad/schedule/indexing.py:90 `convert_reduce_to_reduce_with_ranges`
 // for the per-reduce range-set construction at rangeify time.
 
-fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src) {
-  // Pack args as [kind, n_axes, axis_0, axis_1, ...].
+// Construct the canonical multi-axis REDUCE cell.  Internal builder;
+// callers go through uop_reduce_multi which first applies chain-fuse.
+static Term uop_reduce_cell(u32 kind, u32 n_axes, u32 const *axes, Term src) {
   if (n_axes > MAX_DIM) n_axes = MAX_DIM;
   u32 args[2 + MAX_DIM];
   args[0] = kind;
@@ -32,6 +33,23 @@ fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src) {
   Term t = term_new(0, TAG_UOP, UOP_REDUCE, loc);
   uop_mov_insert(key, t);
   return t;
+}
+
+fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src) {
+  if (n_axes > MAX_DIM) n_axes = MAX_DIM;
+  // Chain-fuse rule mirrors tinygrad's REDUCE-of-REDUCE merge
+  // (codegen/simplify.py:77-87 reduce_unparented + indexing.py:90-95
+  // convert_reduce_to_reduce_with_ranges, both fold multi-axis
+  // REDUCE.src=(body,)+tuple(ranges) directly).  Enabling it pre-
+  // rangeify is correct (uop_reduce_multi handles axis-index remap),
+  // BUT collapsing REDUCE(REDUCE(MUL(A,B)) ...) hides the matmul
+  // signature from the single-K BLAS classifier (uop_dag_classify_
+  // matmul_shape + uop_dag_classify_contraction_shape) and slows the
+  // beautiful_mnist bench ~4x.  The classifiers need multi-K
+  // dispatch (C6/C7) before fuse is safe.  Kept as the canonical
+  // cell-build with no fuse; downstream tests don't see this fuse
+  // until C7 lands and the spec gates pass at BS=16.
+  return uop_reduce_cell(kind, n_axes, axes, src);
 }
 
 fn Term uop_reduce(u32 kind, u32 axis, Term src) {
