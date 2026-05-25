@@ -290,25 +290,60 @@ static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
   return 1;
 }
 
-// C7.2 dispatcher: conv-bwd weight-grad as a batched im2col GEMM.
+// im2col patch-gather helper.  Materialises a row-major
+// patches[N_total, K_pixels] block from a single batch slice of X.
 //
-// Pattern (from uop_dag_classify_im2col_contraction):
-//   dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
-//                            dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
+//   patches[((cin*KH + kh)*KW + kw) * K_pixels + oh*OW + ow]
+//     = X_b[cin*X_Cin_str + (oh+kh)*X_W + (ow+kw)]
 //
-// Per-batch dispatch:
-//   1. Materialise patches[Cin*KH*KW, OH*OW] from X[b, :, :, :] using the
-//      im2col gather: patches[(cin*KH + kh)*KW + kw, oh*OW + ow] =
-//                     X[b, cin, oh+kh, ow+kw]
-//   2. sub_dY = dY[b, :, :, :]      shape (Cout, OH*OW) row-major, ldB=OH*OW.
-//   3. cblas_sgemm(RowMajor, NoTrans, NoTrans, M=Cout, N=Cin*KH*KW, K=OH*OW,
-//                  1.0, sub_dY, OH*OW, patches, N=Cin*KH*KW,
-//                  beta=(b==0 ? 0.0 : 1.0), out, ldC=N)
+// The innermost OW loop is stride-1 in both source and destination so we
+// fold it into a single memcpy of length OW.  Used by both the BWD
+// weight-grad dispatcher (per K_outer B iter) and the FWD conv dispatcher
+// (per N_outer B iter) -- the gather shape is the same.
+static void im2col_gather_patches(float *patches,
+                                  float const *X_b,
+                                  u32 N_patch, u32 KH, u32 KW,
+                                  u32 OH, u32 OW,
+                                  u32 X_W, u32 X_Cin_str) {
+  u64 K_pixels = (u64)OH * OW;
+  for (u32 cin = 0; cin < N_patch; cin++) {
+    for (u32 kh = 0; kh < KH; kh++) {
+      for (u32 kw = 0; kw < KW; kw++) {
+        float *row = patches + ((u64)((cin * KH + kh) * KW + kw)) * K_pixels;
+        for (u32 oh = 0; oh < OH; oh++) {
+          float const *src = X_b + (u64)cin * X_Cin_str
+                                 + (u64)(oh + kh) * X_W + kw;
+          memcpy(row + (u64)oh * OW, src, (size_t)OW * sizeof(float));
+        }
+      }
+    }
+  }
+}
+
+// C7.2 dispatcher: im2col conv as a batched GEMM.  Handles two duals:
 //
-// One scratch buffer of (Cin*KH*KW * OH*OW) floats is allocated once per
-// dispatch and freed after the loop.  Each gather is O(Cin*KH*KW*OH*OW),
-// done once per B; total memory pressure < 1.5 MB at BS=16 conv2 wgrad
-// (Cin=32, KH=KW=5, OH=OW=20 -> 320 KB scratch).
+//   BWD (forward_conv=0): conv-backward weight-grad
+//     dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
+//                              dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
+//     Per-batch:
+//       patches[Cin*KH*KW, OH*OW] from X[b];   sub_dY = dY[b] (Cout, OH*OW)
+//       cblas_sgemm(NoTrans, Trans, M=Cout, N=Cin*KH*KW, K=OH*OW,
+//                   1.0, sub_dY, ldB=OH*OW, patches, ldA=OH*OW,
+//                   beta=(b==0?0:1), dW, ldC=Cin*KH*KW)
+//
+//   FWD (forward_conv=1): conv forward
+//     out[B, Cout, OH, OW] = sum_{Cin, KH, KW}
+//                              X[B, Cin, OH+KH, OW+KW] * W[Cout, Cin, KH, KW]
+//     Per-batch:
+//       patches[Cin*KH*KW, OH*OW] from X[b];   W is (Cout, Cin*KH*KW)
+//       cblas_sgemm(NoTrans, NoTrans, M=Cout, N=OH*OW, K=Cin*KH*KW,
+//                   1.0, W, ldB=Cin*KH*KW, patches, ldA=OH*OW,
+//                   beta=0, out[b], ldC=OH*OW)
+//
+// Per dispatch one scratch (N_total * K_pixels) float block is allocated
+// once and reused across the B loop.  Reference: tinygrad's `_pool`
+// lowering (mixin/movement.py:569) expresses both directions as the same
+// im2col ShapeTracker view.
 static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
                                        u32 out_buf_id) {
   if (ke->cached_lift.store_root == 0) return 0;
@@ -318,15 +353,18 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   }
   static int trace_slot = -1;
   if (env_flag_on(&trace_slot, "THVM_BLAS_CONTRACTION_TRACE")) {
-    fprintf(stderr, "blas_try_im2col: M=%u N=%u (=%u*%u) K=%u*%u "
-            "K_outer=%u X[H,W]=[%u,%u] X_Cin_stride=%u\n",
-            c.M, c.N, c.N_patchless, c.KH_total, c.K_row, c.K_col,
-            c.K_outer, c.X_H, c.X_W, c.X_Cin_stride);
+    fprintf(stderr, "blas_try_im2col: dir=%s M=%u K_pix=%u*%u K_outer=%u "
+            "N_patchless=%u KH_tot=%u X[H,W]=[%u,%u] X_Cin_stride=%u\n",
+            c.forward_conv ? "fwd" : "bwd", c.M, c.K_row, c.K_col,
+            c.K_outer, c.N_patchless, c.KH_total, c.X_H, c.X_W, c.X_Cin_stride);
   }
   if (c.dtype != DT_FP32) return 0;
   // Sanity bounds (defensive).
-  if (c.M < 2 || c.N < 2 || (u64)c.K_row * c.K_col < 4) return 0;
-  if (c.K_outer < 1) return 0;
+  if (c.M < 2 || (u64)c.K_row * c.K_col < 4) return 0;
+  u64 K_total  = (u64)c.K_row * c.K_col;            // OH*OW (the pixel block)
+  u64 N_total  = (u64)c.N_patchless * c.KH_total;   // Cin*KH*KW (the channel block)
+  if (N_total < 2) return 0;
+  if (c.N_outer_extent < 1) return 0;
   u32 a_buf = in_buf_ids[c.a_input];
   u32 b_buf = in_buf_ids[c.b_input];
   if (a_buf == 0 || b_buf == 0) return 0;
@@ -334,68 +372,68 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   u64 a_elems = (u64)(CPU_BUFS[a_buf].nbytes / esz);
   u64 b_elems = (u64)(CPU_BUFS[b_buf].nbytes / esz);
   u64 o_elems = (u64)(CPU_BUFS[out_buf_id].nbytes / esz);
-  u64 a_need = (u64)c.K_outer * c.X_Cin_stride;
-  u64 b_need = (u64)c.K_outer * c.M * c.K_row * c.K_col;
-  u64 o_need = (u64)c.M * c.N;
+  u64 a_need = (u64)c.N_outer_extent * c.X_Cin_stride;
+  u64 b_need;
+  u64 o_need;
+  if (c.forward_conv) {
+    b_need = (u64)c.M * N_total;                          // W is (Cout, Cin*KH*KW)
+    o_need = (u64)c.N_outer_extent * c.M * K_total;       // out is (B, Cout, OH*OW)
+  } else {
+    b_need = (u64)c.N_outer_extent * c.M * K_total;       // dY is (B, Cout, OH*OW)
+    o_need = (u64)c.M * N_total;                          // dW is (Cout, Cin*KH*KW)
+  }
   if (a_elems < a_need || b_elems < b_need || o_elems < o_need) return 0;
 
-  // Scratch im2col patches buffer: (N = N_patchless * KH_total) x (K_row * K_col).
-  // Allocated once per dispatch, reused across the B loop.
-  u64 K_total  = (u64)c.K_row * c.K_col;
-  u64 N_total  = c.N;
+  // Scratch patches buffer.  Allocated once per dispatch, reused across batches.
   u64 scratch_n = N_total * K_total;
   if (scratch_n == 0 || scratch_n > (u64)1 << 28) return 0;     // <1 GiB cap
   float *patches = (float *)malloc((size_t)(scratch_n * sizeof(float)));
   if (patches == NULL) return 0;
 
   float const *X_base   = (float const *)CPU_BUFS[a_buf].data;
-  float const *dY_base  = (float const *)CPU_BUFS[b_buf].data;
+  float const *B_base   = (float const *)CPU_BUFS[b_buf].data;
   float       *out_base = (float       *)CPU_BUFS[out_buf_id].data;
 
-  u32 KH = c.patch_extent[0];
-  u32 KW = c.patch_extent[1];
-  u32 OH = c.K_row;
-  u32 OW = c.K_col;
+  u32 KH        = c.patch_extent[0];
+  u32 KW        = c.patch_extent[1];
+  u32 OH        = c.K_row;
+  u32 OW        = c.K_col;
   u32 X_W       = c.X_W;
   u32 X_Cin_str = c.X_Cin_stride;
   u32 X_outer   = c.X_outer_stride;
-  u32 Y_outer   = c.Y_outer_stride;
   u32 N_patch   = c.N_patchless;        // Cin
-  u32 ldA_dY    = c.Y_M_stride;         // dY's Cout stride (== OH*OW)
 
-  for (u32 b = 0; b < c.K_outer; b++) {
-    float const *X_b  = X_base  + (u64)b * X_outer;
-    float const *dY_b = dY_base + (u64)b * Y_outer;
-    // Gather im2col patches.  Layout matches dW's (Cin, KH, KW) flat-N:
-    //   patches[((cin * KH + kh) * KW + kw) * K_total + oh * OW + ow]
-    //     = X_b[cin * X_Cin_str + (oh + kh) * X_W + (ow + kw)]
-    // The innermost OW loop has stride 1 in both X and patches; memcpy
-    // covers it (length OW).  Outer loops are stride-tiered.
-    for (u32 cin = 0; cin < N_patch; cin++) {
-      for (u32 kh = 0; kh < KH; kh++) {
-        for (u32 kw = 0; kw < KW; kw++) {
-          float *row = patches + ((u64)((cin * KH + kh) * KW + kw)) * K_total;
-          for (u32 oh = 0; oh < OH; oh++) {
-            float const *src = X_b + (u64)cin * X_Cin_str
-                                   + (u64)(oh + kh) * X_W + kw;
-            memcpy(row + (u64)oh * OW, src, (size_t)OW * sizeof(float));
-          }
-        }
-      }
+  for (u32 b = 0; b < c.N_outer_extent; b++) {
+    float const *X_b = X_base + (u64)b * X_outer;
+    im2col_gather_patches(patches, X_b, N_patch, KH, KW, OH, OW, X_W, X_Cin_str);
+    if (c.forward_conv) {
+      // FWD: out[b] = W @ patches.
+      //   W       : (M=Cout,        K=N_total=Cin*KH*KW) row-major, ldA = N_total.
+      //   patches : (K=N_total,     N=K_total=OH*OW)     row-major, ldB = K_total
+      //             -- the gather above wrote exactly this layout (channel
+      //             rows, pixel columns).
+      //   out[b]  : (M=Cout,        N=K_total=OH*OW)     row-major, ldC = K_total.
+      // (sgemm-N = OH*OW pixels, sgemm-K = Cin*KH*KW channels for FWD --
+      // mirror image of BWD where sgemm-N = channels and sgemm-K = pixels.)
+      float *out_b = out_base + (u64)b * c.N_outer_out_stride;
+      cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                  (int)c.M, (int)K_total, (int)N_total,
+                  1.0f, B_base, (int)c.Y_M_stride,      // W,       ldA = N_total
+                        patches, (int)K_total,          // patches, ldB = K_total
+                  0.0f, out_b, (int)c.out_M_stride);    // out[b],  ldC = K_total
+    } else {
+      // BWD: dW += dY[b] @ patches^T.
+      //   dY[b]   : (M=Cout, K=OH*OW) row-major, ldB = OH*OW (= Y_M_stride).
+      //   patches : (N=Cin*KH*KW, K=OH*OW) row-major (TransB), ldA = K_total.
+      //   dW      : (M=Cout, N=Cin*KH*KW) row-major, ldC = out_M_stride = N.
+      float const *dY_b = B_base + (u64)b * c.Y_outer_stride;
+      float beta = (b == 0) ? 0.0f : 1.0f;
+      cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                  (int)c.M, (int)N_total, (int)K_total,
+                  1.0f, dY_b, (int)c.Y_M_stride,
+                        patches, (int)K_total,
+                  beta, out_base, (int)c.out_M_stride);
     }
-    float beta = (b == 0) ? 0.0f : 1.0f;
-    // M=Cout, N=Cin*KH*KW, K=OH*OW.
-    // dY block: (M, K) row-major, ldA = M's stride in dY = OH*OW (= K).
-    // patches:  (N, K) row-major, but cblas wants (K, N).  Use Trans on
-    //   patches: patches transposed = (K, N), ldB = original-N = K_total.
-    //   Actually our patches layout above is (N, K); cblas with TransB
-    //   reads patches[i, j] but we want patches[j, i] -> use TransB.
-    // out:      (M, N) row-major, ldC = N.
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                (int)c.M, (int)N_total, (int)K_total,
-                1.0f, dY_b, (int)ldA_dY,
-                      patches, (int)K_total,
-                beta, out_base, (int)N_total);
   }
   free(patches);
   BLAS_CONTRACTION_DISPATCH_DAG++;

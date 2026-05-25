@@ -2417,56 +2417,84 @@ int uop_dag_classify_contraction_shape(Term root,
                                        struct KernelEntry const *ke,
                                        UopDagContractionShape *out);
 
-// === im2col conv-backward weight-grad contraction extractor ===========
+// === im2col conv contraction extractor ================================
 //
-// Covers the conv-backward weight-grad contraction
+// Covers two duals of the same im2col fingerprint:
 //
-//   dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
-//                            dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
+//   (A) BACKWARD weight-grad:
+//       dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
+//                                dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
 //
-// where two reduce K-axes (here OH, OW) share their stride coefficient
-// in operand A (X) with a non-reduce output axis (here KH, KW).  C7.1
-// extends udg_decode_addr_coeffs to distribute IMUL over IADD so the
+//   (B) FORWARD conv:
+//       out[B, Cout, OH, OW] = sum_{Cin, KH, KW}
+//                                X[B, Cin, OH+KH, OW+KW] * W[Cout, Cin, KH, KW]
+//
+// In both cases two of the reduce K-axes share their stride coefficient
+// in operand A (X) with a non-reduce output axis.  C7.1 extends
+// udg_decode_addr_coeffs to distribute IMUL over IADD so the
 // `(OH+KH)*W` and `(OW+KW)*1` address arms expand and each axis -- K
-// AND patch-M -- gets its own coefficient entry.  The classifier then
-// picks the patch-M axes out of the output axes (any output axis whose
+// AND patch-M -- gets its own coefficient entry.  The classifier picks
+// the patch-M axes out of the output axes (any output axis whose
 // A-stride matches one of the K-axes is reclassified from N-axis to
-// patch-M).  C7.2 dispatch then materialises the per-batch im2col
-// "patches" buffer and issues one cblas_sgemm per B with beta=1 to
-// accumulate dW.
+// patch-M).
 //
-// Per-call layout (per outer batch iteration `b`):
-//   patches[Cin*KH*KW, OH*OW]   -- materialised from X[b, ..]
-//   sub_dY = dY[b, :, :, :]     -- (Cout, OH*OW) row-major contig (ldB=OH*OW)
-//   sub_C  = dW                 -- (Cout, Cin*KH*KW) row-major contig (ldC=N)
-//   cblas_sgemm(RowMajor, NoTrans, NoTrans, M=Cout, N=Cin*KH*KW, K=OH*OW,
-//               1.0, sub_dY, ldB, patches, ldA=N, beta, sub_C, ldC)
-// beta is 0 on b==0 and 1 on b>0 so the batches accumulate.
+// The two forms differ only in which axis plays the "outer batch" role:
+//   (A) BWD: B is a K-axis (sum over batch), Cin is a clean N axis.
+//            The outer loop walks B and dW accumulates (beta=1 from b>0).
+//   (B) FWD: Cin is a K-axis (sum over channels), B is a clean N axis.
+//            The outer loop walks B and writes a different output slice
+//            each iteration (beta=0).
+//
+// Tinygrad lowers BOTH forms through the same `_pool` ShapeTracker view
+// (mixin/movement.py:569); thvm doesn't have a `_pool` lowering yet, so
+// this classifier-plus-dispatch combo is the equivalent shortcut.
+//
+// Per-call layouts:
+//   BWD: patches[Cin*KH*KW, OH*OW] from X[b]; sub_dY = dY[b] (Cout, OH*OW);
+//        sgemm(NoTrans, Trans, M=Cout, N=Cin*KH*KW, K=OH*OW, dY[b], patches,
+//              beta=(b==0?0:1), dW)  -- dW shape (Cout, Cin*KH*KW).
+//   FWD: patches[OH*OW, Cin*KH*KW] from X[b]; W (Cout, Cin*KH*KW);
+//        sgemm(NoTrans, Trans, M=Cout, N=OH*OW, K=Cin*KH*KW, W, patches,
+//              beta=0, out[b])  -- out[b] shape (Cout, OH*OW).
 typedef struct {
   u32 dtype;
-  u32 a_input;            // X (the im2col operand)
-  u32 b_input;            // dY (the clean operand)
-  u32 M;                  // GEMM M = Cout-style axis (B-only output)
-  u32 N_patchless;        // product of non-patch N-axes (Cin)
+  u32 a_input;            // X (the im2col operand) -- both forms
+  u32 b_input;            // dY (BWD) or W (FWD)    -- the clean operand
+  u32 M;                  // GEMM M = Cout-style axis (output axis with bc!=0)
+  u32 N_patchless;        // BWD: product of non-patch clean-N axes (Cin)
+                          // FWD: product of non-patch unpaired-K axes (Cin)
   u32 KH_total;           // product of patch-M extents (KH*KW)
-  u32 N;                  // N_patchless * KH_total (sgemm N = Cin*KH*KW)
-  u32 K_row;              // OH-style K axis extent
-  u32 K_col;              // OW-style K axis extent (innermost K)
-  u32 K_outer;            // B-style K axis extent (clean batch in both A and B)
-  u32 X_W;                // X width stride (a-stride of K_row, used to gather
-                          // patches[m_patch, OH*OW])
-  u32 X_H;                // X height (= K_row + KH_total_row - 1) -- inferred
-  u32 X_Cin_stride;       // X's Cin stride (= a-stride of the non-patch N-axis)
-  u32 X_outer_stride;     // X's batch stride (a-stride of K_outer)
-  u32 Y_outer_stride;     // dY's batch stride (b-stride of K_outer)
-  u32 Y_M_stride;         // dY's Cout stride (b-stride of M-axis = OH*OW)
-  u32 out_M_stride;       // out's M-axis stride (= N = Cin*KH*KW)
-  u32 patch_n;            // number of patch axes (2 for KH+KW; 1 supported)
+  u32 N;                  // sgemm-N in BWD = N_patchless * KH_total = Cin*KH*KW
+                          // sgemm-N in FWD = K_row * K_col = OH*OW
+                          // (kept for backward-compat: BWD-only field)
+  u32 K_row;              // OH-style patch-paired output axis extent
+  u32 K_col;              // OW-style patch-paired output axis extent (innermost K)
+  u32 K_outer;            // BWD: B-style outer-K extent (loop bound)
+                          // FWD: Cin-style outer-K extent (inner sgemm-K factor)
+  u32 X_W;                // X width stride (a-stride of K_row patch axis)
+  u32 X_H;                // X height (inferred from X_Cin_stride / X_W)
+  u32 X_Cin_stride;       // X's Cin stride (a-stride of the unpaired K axis in FWD
+                          // or of the clean-N axis in BWD; equals H*W either way)
+  u32 X_outer_stride;     // X's batch stride
+                          // BWD: a-stride of K_outer (= N_extent_used * X_Cin_stride)
+                          // FWD: a-stride of N_outer (= K_outer.extent * X_Cin_stride)
+  u32 Y_outer_stride;     // BWD: dY's batch stride (b-stride of K_outer)
+                          // FWD: 0 (W has no batch axis)
+  u32 Y_M_stride;         // b-stride of M-axis in operand B
+                          // BWD: dY's Cout stride = OH*OW
+                          // FWD: W's   Cout stride = Cin*KH*KW
+  u32 out_M_stride;       // out's M-axis stride
+                          // BWD: dW's   Cout stride = Cin*KH*KW (= N)
+                          // FWD: out's Cout stride = OH*OW
+  u32 patch_n;            // number of patch axes (2 for KH+KW)
   u32 patch_extent[8];    // per-patch-axis extent (KH first, then KW)
-  u32 patch_out_coeff[8]; // per-patch-axis out-coeff (so dispatch can recover
-                          // the (kh, kw) -> out offset)
-  u32 patch_a_stride[8];  // per-patch-axis a-stride (= the matched K-axis's
-                          // a-stride; used to gather patches)
+  u32 patch_out_coeff[8]; // per-patch-axis out-coeff
+  u32 patch_a_stride[8];  // per-patch-axis a-stride (gathered into patches)
+  u32 forward_conv;       // 0 = BWD weight-grad (default), 1 = FWD conv
+  u32 N_outer_extent;     // FWD only: B's extent (clean-N axis = outer loop bound)
+                          // BWD: equal to K_outer (B's extent)
+  u32 N_outer_out_stride; // FWD only: B's out-stride (= Cout*OH*OW)
+                          // BWD: 0 (dW has no batch dimension; same slot every iter)
 } UopDagIm2colShape;
 
 int uop_dag_classify_im2col_contraction(Term root,

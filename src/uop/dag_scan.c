@@ -2346,45 +2346,46 @@ int uop_dag_classify_contraction_shape(Term root,
 int uop_dag_classify_im2col_contraction(Term root,
                                         struct KernelEntry const *ke,
                                         UopDagIm2colShape *out) {
+#define IM2COL_REJ(tag) return 0
   if (root == 0 || ke == NULL || out == NULL) return 0;
-  if (ke->n_inputs < 2) return 0;
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+  if (ke->n_inputs < 2) IM2COL_REJ("n_inputs<2");
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) IM2COL_REJ("not-store");
 
   Term buf_out  = heap_read(term_val(root) + 0);
   Term addr_out = heap_read(term_val(root) + 1);
   Term value    = heap_read(term_val(root) + 2);
   Term peeled   = udg_peel_tc_opt(value);
   Term reduce   = peeled;
-  if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
-  if (uop_reduce_kind(reduce) != REDUCE_SUM) return 0;
+  if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) IM2COL_REJ("not-reduce");
+  if (uop_reduce_kind(reduce) != REDUCE_SUM) IM2COL_REJ("not-sum");
 
   // Multi-K reduce required: exactly 3 axes for (B, OH, OW) -- otherwise
   // the im2col fingerprint can't form.  Single-K conv-bwd is handled by
   // the regular contraction classifier.
   u32 n_K = uop_reduce_n_axes(reduce);
-  if (n_K < 2 || n_K > UDG_CONTRACT_MAX_AXES) return 0;
+  if (n_K < 2 || n_K > UDG_CONTRACT_MAX_AXES) IM2COL_REJ("n_K-bounds");
   u32 red_axis_ids[UDG_CONTRACT_MAX_AXES];
   for (u32 i = 0; i < n_K; i++) red_axis_ids[i] = uop_reduce_axis(reduce, i);
 
   Term mul = uop_reduce_src(reduce);
-  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) IM2COL_REJ("not-mul");
   Term a_idx = heap_read(term_val(mul) + 0);
   Term b_idx = heap_read(term_val(mul) + 1);
-  if (term_tag(a_idx) != TAG_UOP || term_ext(a_idx) != UOP_INDEX_E) return 0;
-  if (term_tag(b_idx) != TAG_UOP || term_ext(b_idx) != UOP_INDEX_E) return 0;
+  if (term_tag(a_idx) != TAG_UOP || term_ext(a_idx) != UOP_INDEX_E) IM2COL_REJ("a-not-idx");
+  if (term_tag(b_idx) != TAG_UOP || term_ext(b_idx) != UOP_INDEX_E) IM2COL_REJ("b-not-idx");
 
   Term buf_a = heap_read(term_val(a_idx) + 0);
   Term buf_b = heap_read(term_val(b_idx) + 0);
-  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
-  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
-  if (term_val(buf_a) == term_val(buf_b)) return 0;
-  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
+  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) IM2COL_REJ("a-not-buf");
+  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) IM2COL_REJ("b-not-buf");
+  if (term_val(buf_a) == term_val(buf_b)) IM2COL_REJ("a==b");
+  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) IM2COL_REJ("out-not-buf");
   u32 inst_a = uop_buffer_inst_get(buf_a);
   u32 inst_b = uop_buffer_inst_get(buf_b);
-  if (inst_a == 0 || inst_b == 0) return 0;
+  if (inst_a == 0 || inst_b == 0) IM2COL_REJ("inst-0");
   u32 a_input = inst_a - 1;
   u32 b_input = inst_b - 1;
-  if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) return 0;
+  if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) IM2COL_REJ("input-oob");
 
   Term addr_a = heap_read(term_val(a_idx) + 1);
   Term addr_b = heap_read(term_val(b_idx) + 1);
@@ -2392,8 +2393,8 @@ int uop_dag_classify_im2col_contraction(Term root,
   udg_decode_addr_coeffs(addr_a,  &ca);
   udg_decode_addr_coeffs(addr_b,  &cb);
   udg_decode_addr_coeffs(addr_out,&co);
-  if (!ca.ok || !cb.ok || !co.ok) return 0;
-  if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) return 0;
+  if (!ca.ok || !cb.ok || !co.ok) IM2COL_REJ("addr-decode");
+  if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) IM2COL_REJ("addr-offset");
 
   // For each K-axis (reduce), check whether its A-coefficient is shared
   // with some output axis (im2col patch fingerprint).  Per K-axis we
@@ -2419,9 +2420,9 @@ int uop_dag_classify_im2col_contraction(Term root,
     K[i].a_coeff = udg_addr_lookup(&ca, K[i].aid);
     K[i].b_coeff = udg_addr_lookup(&cb, K[i].aid);
     K[i].extent  = udg_axis_extent(root, K[i].aid);
-    if (K[i].a_coeff == 0 || K[i].b_coeff == 0 || K[i].extent == 0) return 0;
+    if (K[i].a_coeff == 0 || K[i].b_coeff == 0 || K[i].extent == 0) IM2COL_REJ("K-coeff-0");
     // K-axis must not be a direct output axis.
-    if (udg_addr_lookup(&co, K[i].aid) != 0) return 0;
+    if (udg_addr_lookup(&co, K[i].aid) != 0) IM2COL_REJ("K-also-out");
     K[i].has_patch = 0;
   }
 
@@ -2439,11 +2440,11 @@ int uop_dag_classify_im2col_contraction(Term root,
   for (u32 i = 0; i < co.n_axes; i++) {
     u32 aid = co.axis_ids[i];
     u32 oc  = co.coeffs  [i];
-    if (oc == 0) return 0;
+    if (oc == 0) IM2COL_REJ("oc-0");
     u32 ac = udg_addr_lookup(&ca, aid);
     u32 bc = udg_addr_lookup(&cb, aid);
     u32 ext = udg_axis_extent(root, aid);
-    if (ext == 0) return 0;
+    if (ext == 0) IM2COL_REJ("oc-ext-0");
     if (ac != 0 && bc == 0) {
       // Either patch-M or clean N.  Check stride-share with any K-axis.
       int paired = 0;
@@ -2460,7 +2461,7 @@ int uop_dag_classify_im2col_contraction(Term root,
         }
       }
       if (!paired) {
-        if (n_N >= UDG_CONTRACT_MAX_AXES) return 0;
+        if (n_N >= UDG_CONTRACT_MAX_AXES) IM2COL_REJ("n_N-overflow");
         N_axes[n_N].aid       = aid;
         N_axes[n_N].extent    = ext;
         N_axes[n_N].a_coeff   = ac;
@@ -2468,22 +2469,22 @@ int uop_dag_classify_im2col_contraction(Term root,
         n_N++;
       }
     } else if (bc != 0 && ac == 0) {
-      if (n_M >= UDG_CONTRACT_MAX_AXES) return 0;
+      if (n_M >= UDG_CONTRACT_MAX_AXES) IM2COL_REJ("n_M-overflow");
       M_axes[n_M].aid       = aid;
       M_axes[n_M].extent    = ext;
       M_axes[n_M].b_coeff   = bc;
       M_axes[n_M].out_coeff = oc;
       n_M++;
     } else {
-      return 0;  // both or neither -- not a clean im2col contraction
+      IM2COL_REJ("ac-bc-both-or-neither");  // not a clean im2col contraction
     }
   }
   // Need at least one patch-M and one clean M for the dispatch to be
   // useful.  (Pure clean-N case is the regular contraction.)
-  if (n_patch == 0) return 0;
-  if (n_M != 1) return 0;                    // C7.2 scope: single Cout-style M
-  if (n_N > 1) return 0;                     // C7.2 scope: 0 or 1 Cin-style N
-  if (n_patch > 2) return 0;                 // C7.2 scope: KH + KW patches only
+  if (n_patch == 0) IM2COL_REJ("n_patch=0");
+  if (n_M != 1) IM2COL_REJ("n_M!=1");
+  if (n_N > 1) IM2COL_REJ("n_N>1");
+  if (n_patch > 2) IM2COL_REJ("n_patch>2");
 
   // Sort K by descending a_coeff so K[0] is the outermost (batch), K[n_K-1]
   // innermost.  Use insertion sort (n_K tiny, <=4).
@@ -2496,119 +2497,206 @@ int uop_dag_classify_im2col_contraction(Term root,
     K[j+1] = tmp;
   }
   // Innermost K-axis (K_col) must have a-coeff == 1.
-  if (K[n_K-1].a_coeff != 1) return 0;
+  if (K[n_K-1].a_coeff != 1) IM2COL_REJ("K_col.a!=1");
   // Outermost (K_outer) and middle (K_row) when n_K==3 must be unpaired
   // (K_outer) and paired (K_row).  In C7.2 scope: n_K must be 3 (B, OH, OW).
-  if (n_K != 3) return 0;
-  if (K[0].has_patch != 0) return 0;        // K_outer = batch (no patch)
-  if (K[1].has_patch != 1) return 0;        // K_row = OH (paired with KH)
-  if (K[2].has_patch != 1) return 0;        // K_col = OW (paired with KW)
+  if (n_K != 3) IM2COL_REJ("n_K!=3");
+  if (K[0].has_patch != 0) IM2COL_REJ("K0-paired");
+  if (K[1].has_patch != 1) IM2COL_REJ("K1-unpaired");
+  if (K[2].has_patch != 1) IM2COL_REJ("K2-unpaired");
 
-  // Verify the M-axis (Cout) is contiguous in B: M's b_coeff must equal
-  // K_col_extent * K_row_b_coeff or simpler, M.b_coeff = OH*OW = N_dY.
-  // dY layout is (B, Cout, OH, OW) contig.  K_col.b_coeff == 1, K_row.b_coeff
-  // == OW, K_outer.b_coeff == Cout * OH * OW.  M.b_coeff should == OH * OW.
+  // ----- BWD vs FWD discriminator -----
+  // The two duals share the n_K=3, n_patch=2, n_M=1 structural shape but
+  // differ in the b-operand stride of the M (Cout) axis:
+  //
+  //   BWD: M lives in dY at (B, Cout, OH, OW)-contig -> M.b_coeff = OH*OW.
+  //        K_outer (B) stride in dY = Cout*OH*OW.
+  //
+  //   FWD: M lives in W  at (Cout, Cin*KH*KW)-contig -> M.b_coeff = Cin*KH*KW.
+  //        K_outer (Cin) stride in W = KH*KW.  K_outer is INSIDE the
+  //        M axis in W's layout, not above it.
+  //
+  // The innermost KW b_coeff == 1 and middle KH b_coeff == KW_ext checks
+  // hold in BOTH forms (KH/KW span the inner C*K*K block of W or the
+  // inner pixel block of dY identically since strides are normalised by
+  // the patch pairing).
   u32 K_col_ext  = K[2].extent;
   u32 K_row_ext  = K[1].extent;
   u32 K_out_ext  = K[0].extent;
-  if (K[2].b_coeff != 1) return 0;
-  if (K[1].b_coeff != K_col_ext) return 0;
-  if (M_axes[0].b_coeff != (u32)((u64)K_col_ext * K_row_ext)) return 0;
-  if (K[0].b_coeff != (u32)((u64)M_axes[0].extent * K_col_ext * K_row_ext)) return 0;
+  if (K[2].b_coeff != 1) IM2COL_REJ("K2.b!=1");
+  if (K[1].b_coeff != K_col_ext) IM2COL_REJ("K1.b!=KW");
+  u32 m_bcoeff_bwd = (u32)((u64)K_col_ext * K_row_ext);
+  u32 m_bcoeff_fwd = (u32)((u64)K_out_ext * K_col_ext * K_row_ext);
+  int forward_conv;
+  if (M_axes[0].b_coeff == m_bcoeff_bwd) {
+    forward_conv = 0;
+    // K_outer (B) lives ABOVE M in dY: K[0].b_coeff = M.ext * OH * OW.
+    if (K[0].b_coeff !=
+        (u32)((u64)M_axes[0].extent * K_col_ext * K_row_ext)) IM2COL_REJ("bwd:K0.b!=M*OH*OW");
+  } else if (M_axes[0].b_coeff == m_bcoeff_fwd) {
+    forward_conv = 1;
+    // K_outer (Cin) lives INSIDE M in W: K[0].b_coeff = KH*KW.
+    if (K[0].b_coeff != (u32)((u64)K_col_ext * K_row_ext)) IM2COL_REJ("fwd:K0.b!=KH*KW");
+    // FWD requires exactly one clean-N axis (B) -- BWD allows 0 or 1.
+    if (n_N != 1) IM2COL_REJ("fwd:n_N!=1");
+  } else {
+    IM2COL_REJ("M.b-no-match");
+  }
 
   // Verify A operand strides.  X layout is (B, Cin, H, W) where
   // H = K_row + KH - 1, W = K_col + KW - 1 (matching tinygrad's _pool
   // (mixin/movement.py:569) +/- padding semantics).  K_col stride = 1
   // (innermost).  K_row stride = W.  KH stride = W (== K_row stride;
   // im2col shared).  KW stride = 1 (== K_col stride; im2col shared).
-  // N (Cin) stride = H * W.  K_outer (B) stride = Cin * H * W.
+  //   BWD: N (Cin) stride = H*W;        K_outer (B)   stride = Cin*H*W.
+  //   FWD: N (B)   stride = Cin*H*W;    K_outer (Cin) stride = H*W.
   u32 X_W = K[1].a_coeff;          // K_row stride = W (= X width)
-  if (X_W == 0) return 0;
-  // KH (paired with K_row) must have the same stride.
-  if (K[1].patch_extent == 0) return 0;
-  // KW (paired with K_col) must have stride 1.
-  // Already verified by has_patch + a_coeff matching.
-  // X_Cin_stride: when n_N == 0 (Cin=1, no explicit axis), use X_outer (B's
-  // a-stride collapses to H*W).  When n_N == 1, X_Cin_stride = N_axes[0].a_coeff.
+  if (X_W == 0) IM2COL_REJ("X_W=0");
+  if (K[1].patch_extent == 0) IM2COL_REJ("KH=0");
+
+  // X_Cin_stride is always H*W -- the stride of the "Cin" axis in X
+  // regardless of whether Cin shows up as a clean-N (BWD) or K_outer (FWD).
+  // N_extent_used is the extent of the "Cin" axis (== K_outer.extent in FWD,
+  // == N_axes[0].extent in BWD; 1 when no explicit Cin axis exists).
   u32 X_Cin_stride;
   u32 N_extent_used;
-  if (n_N == 1) {
-    X_Cin_stride = N_axes[0].a_coeff;
-    if (X_Cin_stride == 0) return 0;
-    N_extent_used = N_axes[0].extent;
+  u32 X_outer;            // X's stride for the outer-loop axis (B in both forms)
+  u32 N_outer_extent;     // outer-loop bound (B in both forms)
+  if (forward_conv) {
+    // K_outer plays Cin's role.  Clean-N (B) plays the outer batch role.
+    X_Cin_stride   = K[0].a_coeff;
+    N_extent_used  = K_out_ext;
+    X_outer        = N_axes[0].a_coeff;
+    N_outer_extent = N_axes[0].extent;
   } else {
-    X_Cin_stride = K[0].a_coeff;        // Cin=1 -> outer B stride == one H*W slab
-    N_extent_used = 1;
+    // K_outer (B) is the outer batch.  Clean-N (Cin, if present) is INSIDE.
+    if (n_N == 1) {
+      X_Cin_stride  = N_axes[0].a_coeff;
+      N_extent_used = N_axes[0].extent;
+    } else {
+      X_Cin_stride  = K[0].a_coeff;        // Cin=1 -> one H*W slab
+      N_extent_used = 1;
+    }
+    X_outer        = K[0].a_coeff;
+    N_outer_extent = K_out_ext;
   }
-  u32 X_outer = K[0].a_coeff;
-  if (X_outer == 0) return 0;
+  if (X_Cin_stride == 0 || X_outer == 0) IM2COL_REJ("X-stride-0");
   // X_W must evenly divide X_Cin_stride: X_Cin_stride = X_H * X_W.
-  if (X_Cin_stride % X_W != 0) return 0;
+  if (X_Cin_stride % X_W != 0) IM2COL_REJ("X_Cin%X_W");
   u32 X_H = X_Cin_stride / X_W;
-  if (X_H == 0) return 0;
-  if (X_outer % X_Cin_stride != 0) return 0;
-  // Outer Cin block stride should match N_extent.
-  if (X_outer / X_Cin_stride != N_extent_used) return 0;
+  if (X_H == 0) IM2COL_REJ("X_H=0");
+  if (X_outer % X_Cin_stride != 0) IM2COL_REJ("X_outer%X_Cin");
+  // Outer batch stride spans the full per-batch Cin slab: X_outer = Cin*H*W.
+  if (X_outer / X_Cin_stride != N_extent_used) IM2COL_REJ("X_outer/X_Cin!=N");
   // Validate the patch extents: KH <= X_H - K_row_ext + 1, KW <= X_W - K_col_ext + 1.
-  if (K[1].patch_extent + K_row_ext > X_H + 1) return 0;
-  if (K[2].patch_extent + K_col_ext > X_W + 1) return 0;
+  if (K[1].patch_extent + K_row_ext > X_H + 1) IM2COL_REJ("KH+OH>X_H+1");
+  if (K[2].patch_extent + K_col_ext > X_W + 1) IM2COL_REJ("KW+OW>X_W+1");
 
-  // Verify output strides.  Out is (M=Cout, N_patchless=Cin, KH, KW) flat
-  // contig.  Cout stride = Cin * KH * KW = N_total.  Cin stride = KH * KW.
-  // KH stride = KW.  KW stride = 1.  When n_N == 0 (Cin=1) the layout is
-  // just (Cout, KH, KW) with N_total = KH*KW.
+  // Verify output strides.
+  //   BWD: dW is (Cout, Cin, KH, KW) flat -- Cout.oc = Cin*KH*KW = N_total,
+  //        Cin.oc = KH*KW, KH.oc = KW, KW.oc = 1.  (When n_N==0, Cin axis
+  //        is absent and Cout.oc = KH*KW.)
+  //   FWD: out is (B, Cout, OH, OW) flat -- B.oc = Cout*OH*OW, Cout.oc = OH*OW,
+  //        OH (patch-paired KH) oc = OW, OW (patch-paired KW) oc = 1.
   u32 KH_ext = K[1].patch_extent;
   u32 KW_ext = K[2].patch_extent;
-  u64 N_total = (u64)N_extent_used * KH_ext * KW_ext;
-  if (N_total == 0 || N_total > 0x7fffffffULL) return 0;
-  if (M_axes[0].out_coeff != (u32)N_total) return 0;
-  if (n_N == 1) {
-    if (N_axes[0].out_coeff != (u32)((u64)KH_ext * KW_ext)) return 0;
+  // In FWD the K-axes are the kernel (KH, KW) and the patch-axes are the
+  // output pixels (OH, OW); in BWD it's the reverse.  Below KH_ext/KW_ext
+  // and OH_ext/OW_ext always denote the kernel and output-pixel extents
+  // regardless of direction.
+  u32 OH_ext, OW_ext;
+  if (forward_conv) {
+    OH_ext = K[1].patch_extent;          // OH lives as a patch in FWD
+    OW_ext = K[2].patch_extent;
+    // In FWD the actual KH/KW extents are K[1].extent/K[2].extent (kernel).
+    KH_ext = K[1].extent;
+    KW_ext = K[2].extent;
+  } else {
+    OH_ext = K[1].extent;                // OH lives as K in BWD
+    OW_ext = K[2].extent;
+    // KH/KW already set from K[1].patch_extent/K[2].patch_extent above.
   }
-  if (K[1].patch_out_coeff != KW_ext) return 0;
-  if (K[2].patch_out_coeff != 1) return 0;
+  u64 N_total = (u64)N_extent_used * KH_ext * KW_ext;
+  if (N_total == 0 || N_total > 0x7fffffffULL) IM2COL_REJ("N_total-bounds");
+  if (forward_conv) {
+    // M (Cout) out_coeff = OH * OW.
+    if (M_axes[0].out_coeff != (u32)((u64)OH_ext * OW_ext)) IM2COL_REJ("fwd:M.oc!=OH*OW");
+    // N (B)   out_coeff = M_ext * OH * OW.
+    if (N_axes[0].out_coeff !=
+        (u32)((u64)M_axes[0].extent * OH_ext * OW_ext)) IM2COL_REJ("fwd:N.oc!=M*OH*OW");
+    // OH patch out_coeff = OW; OW patch out_coeff = 1.
+    if (K[1].patch_out_coeff != OW_ext) IM2COL_REJ("fwd:OH.oc!=OW");
+    if (K[2].patch_out_coeff != 1) IM2COL_REJ("fwd:OW.oc!=1");
+  } else {
+    if (M_axes[0].out_coeff != (u32)N_total) IM2COL_REJ("bwd:M.oc!=N_total");
+    if (n_N == 1) {
+      if (N_axes[0].out_coeff != (u32)((u64)KH_ext * KW_ext)) IM2COL_REJ("bwd:N.oc!=KH*KW");
+    }
+    if (K[1].patch_out_coeff != KW_ext) IM2COL_REJ("bwd:KH.oc!=KW");
+    if (K[2].patch_out_coeff != 1) IM2COL_REJ("bwd:KW.oc!=1");
+  }
 
   // Verify per-buffer storage sizes.
-  u64 a_need = (u64)K_out_ext * X_Cin_stride;     // B * Cin*H*W = X numel
-  u64 b_need = (u64)K_out_ext * M_axes[0].extent * K_row_ext * K_col_ext;
-  u64 c_need = (u64)M_axes[0].extent * N_total;
+  //   X needs N_outer * Cin * H * W = N_outer_extent * X_Cin_stride.
+  //   BWD: dY needs N_outer * Cout * OH * OW.   dW size = Cout * N_total.
+  //   FWD: W  needs            Cout * Cin * KH * KW = M * N_total.
+  //        out size           = N_outer * Cout * OH * OW.
+  u64 a_need = (u64)N_outer_extent * X_Cin_stride;
+  u64 b_need;
+  u64 c_need;
+  if (forward_conv) {
+    b_need = (u64)M_axes[0].extent * N_total;
+    c_need = (u64)N_outer_extent * M_axes[0].extent * K_row_ext * K_col_ext;
+  } else {
+    b_need = (u64)N_outer_extent * M_axes[0].extent * K_row_ext * K_col_ext;
+    c_need = (u64)M_axes[0].extent * N_total;
+  }
   (void)c_need;
-  if (uop_buffer_ndim(buf_a) == 0 || uop_buffer_ndim(buf_b) == 0) return 0;
+  if (uop_buffer_ndim(buf_a) == 0 || uop_buffer_ndim(buf_b) == 0) IM2COL_REJ("buf-ndim-0");
   u64 a_buf_prod = 1, b_buf_prod = 1;
   for (u32 d = 0; d < uop_buffer_ndim(buf_a); d++) a_buf_prod *= uop_buffer_dim(buf_a, d);
   for (u32 d = 0; d < uop_buffer_ndim(buf_b); d++) b_buf_prod *= uop_buffer_dim(buf_b, d);
-  if (a_buf_prod < a_need) return 0;
-  if (b_buf_prod < b_need) return 0;
+  if (a_buf_prod < a_need) IM2COL_REJ("a-buf-too-small");
+  if (b_buf_prod < b_need) IM2COL_REJ("b-buf-too-small");
 
   // Uniform dtype check.
   u32 dt = uop_buffer_dtype(buf_out);
-  if (dt != DT_FP32) return 0;
-  if (uop_buffer_dtype(buf_a) != dt) return 0;
-  if (uop_buffer_dtype(buf_b) != dt) return 0;
+  if (dt != DT_FP32) IM2COL_REJ("dt!=fp32");
+  if (uop_buffer_dtype(buf_a) != dt) IM2COL_REJ("a-dt");
+  if (uop_buffer_dtype(buf_b) != dt) IM2COL_REJ("b-dt");
 
-  out->dtype           = dt;
-  out->a_input         = a_input;
-  out->b_input         = b_input;
-  out->M               = M_axes[0].extent;
-  out->N_patchless     = N_extent_used;
-  out->KH_total        = (u32)((u64)KH_ext * KW_ext);
-  out->N               = (u32)N_total;
-  out->K_row           = K_row_ext;
-  out->K_col           = K_col_ext;
-  out->K_outer         = K_out_ext;
-  out->X_W             = X_W;
-  out->X_H             = X_H;
-  out->X_Cin_stride    = X_Cin_stride;
-  out->X_outer_stride  = X_outer;
-  out->Y_outer_stride  = K[0].b_coeff;
-  out->Y_M_stride      = M_axes[0].b_coeff;
-  out->out_M_stride    = M_axes[0].out_coeff;
-  out->patch_n         = 2;
-  out->patch_extent[0] = KH_ext;          // KH (paired with K_row)
-  out->patch_extent[1] = KW_ext;          // KW (paired with K_col)
-  out->patch_out_coeff[0] = KW_ext;
+  // Populate the shape struct with semantic OH/OW/KH/KW extents (not
+  // sort-order K[0..2].extent) so the dispatcher's gather + sgemm logic
+  // is identical across BWD and FWD.  In BWD, OH/OW are K-axes and KH/KW
+  // are patches; in FWD it's reversed -- but the gather and matmul still
+  // see "OH = output-pixel rows" and "KH = kernel-window rows".
+  out->dtype              = dt;
+  out->a_input            = a_input;
+  out->b_input            = b_input;
+  out->M                  = M_axes[0].extent;
+  out->N_patchless        = N_extent_used;
+  out->KH_total           = (u32)((u64)KH_ext * KW_ext);
+  out->N                  = (u32)N_total;
+  out->K_row              = OH_ext;          // OH (output-pixel rows)
+  out->K_col              = OW_ext;          // OW (output-pixel cols)
+  out->K_outer            = K_out_ext;
+  out->X_W                = X_W;
+  out->X_H                = X_H;
+  out->X_Cin_stride       = X_Cin_stride;
+  out->X_outer_stride     = X_outer;
+  out->Y_outer_stride     = forward_conv ? 0u : K[0].b_coeff;
+  out->Y_M_stride         = M_axes[0].b_coeff;
+  out->out_M_stride       = M_axes[0].out_coeff;
+  out->patch_n            = 2;
+  out->patch_extent[0]    = KH_ext;          // KH (kernel rows)
+  out->patch_extent[1]    = KW_ext;          // KW (kernel cols)
+  out->patch_out_coeff[0] = forward_conv ? OW_ext : KW_ext;  // OH.oc or KH.oc
   out->patch_out_coeff[1] = 1;
-  out->patch_a_stride[0]  = X_W;          // KH stride in X
-  out->patch_a_stride[1]  = 1;            // KW stride in X
+  out->patch_a_stride[0]  = X_W;             // KH stride in X (= image width)
+  out->patch_a_stride[1]  = 1;               // KW stride in X
+  out->forward_conv       = (u32)forward_conv;
+  out->N_outer_extent     = N_outer_extent;
+  out->N_outer_out_stride = forward_conv ? N_axes[0].out_coeff : 0u;
   return 1;
+#undef IM2COL_REJ
 }
