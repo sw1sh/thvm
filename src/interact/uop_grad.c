@@ -400,7 +400,9 @@ typedef struct {
 } GradSlotEntry;
 static GradSlotEntry GRAD_SLOT[GRAD_SLOT_CAP];
 
-// Per-realize counters for the per-node slot mechanism (env-gated print).
+// Per-realize counters for the per-node slot mechanism, exported to the WL
+// and Python bridges so the dedup-verification probes (py/csource/thvm_py.c
+// py_grad_slot_*) can diagnose pre-walk gaps.  Reset at grad_memo_begin_realize.
 // FIRST   = first arrival at a forward node (cell allocated, cotangent stored).
 // FOLD    = later arrival while the cell hasn't fired yet (gy folded in).
 // REFIRE  = later arrival AFTER the cell already fired (fresh cell, downstream
@@ -639,14 +641,11 @@ static void grad_prewalk_credit_and_descend(Term child, Term target) {
   grad_prewalk_count(cr);                  // descend through this UOP once
 }
 
-static void grad_prewalk_count(Term y) {
-  Term r = term_resolve(y);
-  if (term_tag(r) != TAG_UOP) return;
-  u64 loc = term_val(r);
-  u8  op  = (u8)term_ext(r);
-  Term target = grad_current_target();
-  if (grad_prewalk_visited(loc, target)) return;
-  // KERNEL: chain-rule routes into source_uop, mirrored here.
+// Credit the BWD-arrival children of a UOP node at (loc, op).  The chain
+// rule's dispatch table descends into uop_arity-many slots for normal ops,
+// into KERNELS[kid].source_uop for UOP_KERNEL, and into no slots for
+// grad_zero_at diff-sinks (CMPLT/CMPEQ/BITCAST/CONST/LOAD/ASSIGN).
+static void grad_prewalk_descend_children(u8 op, u64 loc, Term target) {
   if (op == UOP_KERNEL) {
     u32 kid = (u32)term_val(heap_read(loc + 1));
     if (kid != 0 && kid < KERNELS_NEXT) {
@@ -655,6 +654,20 @@ static void grad_prewalk_count(Term y) {
     }
     return;
   }
+  if (grad_op_is_diff_sink(op)) return;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    grad_prewalk_credit_and_descend(heap_read(loc + i), target);
+  }
+}
+
+static void grad_prewalk_count(Term y) {
+  Term r = term_resolve(y);
+  if (term_tag(r) != TAG_UOP) return;
+  u64 loc = term_val(r);
+  u8  op  = (u8)term_ext(r);
+  Term target = grad_current_target();
+  if (grad_prewalk_visited(loc, target)) return;
   // DETACH: wnf unwraps DETACH(child) to child before dispatch, so the grad
   // cell originally for DETACH actually dispatches the CHILD's chain rule
   // (see wnf/_.c UOP_DETACH unwrap).  Pre-walk through the unwrapped child's
@@ -663,28 +676,12 @@ static void grad_prewalk_count(Term y) {
   if (op == UOP_DETACH) {
     Term unwrapped = term_resolve(heap_read(loc + 0));
     if (term_tag(unwrapped) == TAG_UOP) {
-      u8  child_op = (u8)term_ext(unwrapped);
-      u64 child_loc = term_val(unwrapped);
-      if (child_op == UOP_KERNEL) {
-        u32 kid = (u32)term_val(heap_read(child_loc + 1));
-        if (kid != 0 && kid < KERNELS_NEXT) {
-          Term src = KERNELS[kid].source_uop;
-          if (src != 0) grad_prewalk_credit_and_descend(src, target);
-        }
-      } else if (!grad_op_is_diff_sink(child_op)) {
-        u8 car = uop_arity(child_op);
-        for (u8 i = 0; i < car; i++) {
-          grad_prewalk_credit_and_descend(heap_read(child_loc + i), target);
-        }
-      }
+      grad_prewalk_descend_children((u8)term_ext(unwrapped),
+                                    term_val(unwrapped), target);
     }
     return;
   }
-  if (grad_op_is_diff_sink(op)) return;    // CMPLT/CMPEQ/BITCAST/CONST/LOAD/ASSIGN
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++) {
-    grad_prewalk_credit_and_descend(heap_read(loc + i), target);
-  }
+  grad_prewalk_descend_children(op, loc, target);
 }
 
 // Public pre-walk entry: call once per backward seed BEFORE wnf fires the
