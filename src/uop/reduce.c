@@ -37,18 +37,32 @@ static Term uop_reduce_cell(u32 kind, u32 n_axes, u32 const *axes, Term src) {
 
 fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src) {
   if (n_axes > MAX_DIM) n_axes = MAX_DIM;
-  // Chain-fuse rule mirrors tinygrad's REDUCE-of-REDUCE merge
+  // Chain-fuse: collapse REDUCE(REDUCE(body, axes_inner), axes_outer) ->
+  // REDUCE(body, axes_inner ++ axes_outer) when both reduces share the
+  // same kind.  Mirrors tinygrad's REDUCE-of-REDUCE merge
   // (codegen/simplify.py:77-87 reduce_unparented + indexing.py:90-95
   // convert_reduce_to_reduce_with_ranges, both fold multi-axis
-  // REDUCE.src=(body,)+tuple(ranges) directly).  Enabling it pre-
-  // rangeify is correct (uop_reduce_multi handles axis-index remap),
-  // BUT collapsing REDUCE(REDUCE(MUL(A,B)) ...) hides the matmul
-  // signature from the single-K BLAS classifier (uop_dag_classify_
-  // matmul_shape + uop_dag_classify_contraction_shape) and slows the
-  // beautiful_mnist bench ~4x.  The classifiers need multi-K
-  // dispatch (C6/C7) before fuse is safe.  Kept as the canonical
-  // cell-build with no fuse; downstream tests don't see this fuse
-  // until C7 lands and the spec gates pass at BS=16.
+  // REDUCE.src=(body,)+tuple(ranges) directly).
+  //
+  // Activated by C7 after udg_decode_addr_coeffs (dag_scan.c
+  // udg_addr_decode_leaf) handles the strided im2col fingerprint, so
+  // conv-bwd MUL+REDUCE chains can still classify as a multi-K
+  // contraction once collapsed into a single multi-axis REDUCE.  Without
+  // C7.1 + C7.2 the fuse would hide the matmul signature from the BLAS
+  // classifier (single-K dispatch only) and slow the bench ~4x.
+  if (n_axes >= 1 && term_tag(src) == TAG_UOP && term_ext(src) == UOP_REDUCE) {
+    u32 inner_kind = uop_reduce_kind(src);
+    if (inner_kind == kind) {
+      u32 inner_n = uop_reduce_n_axes(src);
+      if (inner_n + n_axes <= MAX_DIM) {
+        u32 merged[MAX_DIM];
+        u32 m = 0;
+        for (u32 i = 0; i < inner_n; i++) merged[m++] = uop_reduce_axis(src, i);
+        for (u32 i = 0; i < n_axes;  i++) merged[m++] = axes[i];
+        return uop_reduce_cell(kind, m, merged, uop_reduce_src(src));
+      }
+    }
+  }
   return uop_reduce_cell(kind, n_axes, axes, src);
 }
 
