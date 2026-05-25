@@ -2417,6 +2417,62 @@ int uop_dag_classify_contraction_shape(Term root,
                                        struct KernelEntry const *ke,
                                        UopDagContractionShape *out);
 
+// === im2col conv-backward weight-grad contraction extractor ===========
+//
+// Covers the conv-backward weight-grad contraction
+//
+//   dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
+//                            dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
+//
+// where two reduce K-axes (here OH, OW) share their stride coefficient
+// in operand A (X) with a non-reduce output axis (here KH, KW).  C7.1
+// extends udg_decode_addr_coeffs to distribute IMUL over IADD so the
+// `(OH+KH)*W` and `(OW+KW)*1` address arms expand and each axis -- K
+// AND patch-M -- gets its own coefficient entry.  The classifier then
+// picks the patch-M axes out of the output axes (any output axis whose
+// A-stride matches one of the K-axes is reclassified from N-axis to
+// patch-M).  C7.2 dispatch then materialises the per-batch im2col
+// "patches" buffer and issues one cblas_sgemm per B with beta=1 to
+// accumulate dW.
+//
+// Per-call layout (per outer batch iteration `b`):
+//   patches[Cin*KH*KW, OH*OW]   -- materialised from X[b, ..]
+//   sub_dY = dY[b, :, :, :]     -- (Cout, OH*OW) row-major contig (ldB=OH*OW)
+//   sub_C  = dW                 -- (Cout, Cin*KH*KW) row-major contig (ldC=N)
+//   cblas_sgemm(RowMajor, NoTrans, NoTrans, M=Cout, N=Cin*KH*KW, K=OH*OW,
+//               1.0, sub_dY, ldB, patches, ldA=N, beta, sub_C, ldC)
+// beta is 0 on b==0 and 1 on b>0 so the batches accumulate.
+typedef struct {
+  u32 dtype;
+  u32 a_input;            // X (the im2col operand)
+  u32 b_input;            // dY (the clean operand)
+  u32 M;                  // GEMM M = Cout-style axis (B-only output)
+  u32 N_patchless;        // product of non-patch N-axes (Cin)
+  u32 KH_total;           // product of patch-M extents (KH*KW)
+  u32 N;                  // N_patchless * KH_total (sgemm N = Cin*KH*KW)
+  u32 K_row;              // OH-style K axis extent
+  u32 K_col;              // OW-style K axis extent (innermost K)
+  u32 K_outer;            // B-style K axis extent (clean batch in both A and B)
+  u32 X_W;                // X width stride (a-stride of K_row, used to gather
+                          // patches[m_patch, OH*OW])
+  u32 X_H;                // X height (= K_row + KH_total_row - 1) -- inferred
+  u32 X_Cin_stride;       // X's Cin stride (= a-stride of the non-patch N-axis)
+  u32 X_outer_stride;     // X's batch stride (a-stride of K_outer)
+  u32 Y_outer_stride;     // dY's batch stride (b-stride of K_outer)
+  u32 Y_M_stride;         // dY's Cout stride (b-stride of M-axis = OH*OW)
+  u32 out_M_stride;       // out's M-axis stride (= N = Cin*KH*KW)
+  u32 patch_n;            // number of patch axes (2 for KH+KW; 1 supported)
+  u32 patch_extent[8];    // per-patch-axis extent (KH first, then KW)
+  u32 patch_out_coeff[8]; // per-patch-axis out-coeff (so dispatch can recover
+                          // the (kh, kw) -> out offset)
+  u32 patch_a_stride[8];  // per-patch-axis a-stride (= the matched K-axis's
+                          // a-stride; used to gather patches)
+} UopDagIm2colShape;
+
+int uop_dag_classify_im2col_contraction(Term root,
+                                        struct KernelEntry const *ke,
+                                        UopDagIm2colShape *out);
+
 // === conv2d-flat full-shape extractor ==================================
 // Inverts the conv2d-flat IDIV/IMOD address decomposition so the
 // conv2d shape facts can flow from the lifted DAG instead of from

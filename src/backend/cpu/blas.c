@@ -279,6 +279,123 @@ static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
   return 1;
 }
 
+// C7.2 dispatcher: conv-bwd weight-grad as a batched im2col GEMM.
+//
+// Pattern (from uop_dag_classify_im2col_contraction):
+//   dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
+//                            dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
+//
+// Per-batch dispatch:
+//   1. Materialise patches[Cin*KH*KW, OH*OW] from X[b, :, :, :] using the
+//      im2col gather: patches[(cin*KH + kh)*KW + kw, oh*OW + ow] =
+//                     X[b, cin, oh+kh, ow+kw]
+//   2. sub_dY = dY[b, :, :, :]      shape (Cout, OH*OW) row-major, ldB=OH*OW.
+//   3. cblas_sgemm(RowMajor, NoTrans, NoTrans, M=Cout, N=Cin*KH*KW, K=OH*OW,
+//                  1.0, sub_dY, OH*OW, patches, N=Cin*KH*KW,
+//                  beta=(b==0 ? 0.0 : 1.0), out, ldC=N)
+//
+// One scratch buffer of (Cin*KH*KW * OH*OW) floats is allocated once per
+// dispatch and freed after the loop.  Each gather is O(Cin*KH*KW*OH*OW),
+// done once per B; total memory pressure < 1.5 MB at BS=16 conv2 wgrad
+// (Cin=32, KH=KW=5, OH=OW=20 -> 320 KB scratch).
+static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
+                                       u32 out_buf_id) {
+  if (ke->cached_lift.store_root == 0) return 0;
+  UopDagIm2colShape c;
+  if (!uop_dag_classify_im2col_contraction(ke->cached_lift.store_root, ke, &c)) {
+    return 0;
+  }
+  static int trace_known = 0, trace_on = 0;
+  if (!trace_known) {
+    char const *e = getenv("THVM_BLAS_CONTRACTION_TRACE");
+    trace_on = (e != NULL && e[0] == '1');
+    trace_known = 1;
+  }
+  if (trace_on) {
+    fprintf(stderr, "blas_try_im2col: M=%u N=%u (=%u*%u) K=%u*%u "
+            "K_outer=%u X[H,W]=[%u,%u] X_Cin_stride=%u\n",
+            c.M, c.N, c.N_patchless, c.KH_total, c.K_row, c.K_col,
+            c.K_outer, c.X_H, c.X_W, c.X_Cin_stride);
+  }
+  if (c.dtype != DT_FP32) return 0;
+  // Sanity bounds (defensive).
+  if (c.M < 2 || c.N < 2 || (u64)c.K_row * c.K_col < 4) return 0;
+  if (c.K_outer < 1) return 0;
+  u32 a_buf = in_buf_ids[c.a_input];
+  u32 b_buf = in_buf_ids[c.b_input];
+  if (a_buf == 0 || b_buf == 0) return 0;
+  u32 esz = sizeof(float);
+  u64 a_elems = (u64)(CPU_BUFS[a_buf].nbytes / esz);
+  u64 b_elems = (u64)(CPU_BUFS[b_buf].nbytes / esz);
+  u64 o_elems = (u64)(CPU_BUFS[out_buf_id].nbytes / esz);
+  u64 a_need = (u64)c.K_outer * c.X_Cin_stride;
+  u64 b_need = (u64)c.K_outer * c.M * c.K_row * c.K_col;
+  u64 o_need = (u64)c.M * c.N;
+  if (a_elems < a_need || b_elems < b_need || o_elems < o_need) return 0;
+
+  // Scratch im2col patches buffer: (N = N_patchless * KH_total) x (K_row * K_col).
+  // Allocated once per dispatch, reused across the B loop.
+  u64 K_total  = (u64)c.K_row * c.K_col;
+  u64 N_total  = c.N;
+  u64 scratch_n = N_total * K_total;
+  if (scratch_n == 0 || scratch_n > (u64)1 << 28) return 0;     // <1 GiB cap
+  float *patches = (float *)malloc((size_t)(scratch_n * sizeof(float)));
+  if (patches == NULL) return 0;
+
+  float const *X_base   = (float const *)CPU_BUFS[a_buf].data;
+  float const *dY_base  = (float const *)CPU_BUFS[b_buf].data;
+  float       *out_base = (float       *)CPU_BUFS[out_buf_id].data;
+
+  u32 KH = c.patch_extent[0];
+  u32 KW = c.patch_extent[1];
+  u32 OH = c.K_row;
+  u32 OW = c.K_col;
+  u32 X_W       = c.X_W;
+  u32 X_Cin_str = c.X_Cin_stride;
+  u32 X_outer   = c.X_outer_stride;
+  u32 Y_outer   = c.Y_outer_stride;
+  u32 N_patch   = c.N_patchless;        // Cin
+  u32 ldA_dY    = c.Y_M_stride;         // dY's Cout stride (== OH*OW)
+
+  for (u32 b = 0; b < c.K_outer; b++) {
+    float const *X_b  = X_base  + (u64)b * X_outer;
+    float const *dY_b = dY_base + (u64)b * Y_outer;
+    // Gather im2col patches.  Layout matches dW's (Cin, KH, KW) flat-N:
+    //   patches[((cin * KH + kh) * KW + kw) * K_total + oh * OW + ow]
+    //     = X_b[cin * X_Cin_str + (oh + kh) * X_W + (ow + kw)]
+    // The innermost OW loop has stride 1 in both X and patches; memcpy
+    // covers it (length OW).  Outer loops are stride-tiered.
+    for (u32 cin = 0; cin < N_patch; cin++) {
+      for (u32 kh = 0; kh < KH; kh++) {
+        for (u32 kw = 0; kw < KW; kw++) {
+          float *row = patches + ((u64)((cin * KH + kh) * KW + kw)) * K_total;
+          for (u32 oh = 0; oh < OH; oh++) {
+            float const *src = X_b + (u64)cin * X_Cin_str
+                                   + (u64)(oh + kh) * X_W + kw;
+            memcpy(row + (u64)oh * OW, src, (size_t)OW * sizeof(float));
+          }
+        }
+      }
+    }
+    float beta = (b == 0) ? 0.0f : 1.0f;
+    // M=Cout, N=Cin*KH*KW, K=OH*OW.
+    // dY block: (M, K) row-major, ldA = M's stride in dY = OH*OW (= K).
+    // patches:  (N, K) row-major, but cblas wants (K, N).  Use Trans on
+    //   patches: patches transposed = (K, N), ldB = original-N = K_total.
+    //   Actually our patches layout above is (N, K); cblas with TransB
+    //   reads patches[i, j] but we want patches[j, i] -> use TransB.
+    // out:      (M, N) row-major, ldC = N.
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                (int)c.M, (int)N_total, (int)K_total,
+                1.0f, dY_b, (int)ldA_dY,
+                      patches, (int)K_total,
+                beta, out_base, (int)N_total);
+  }
+  free(patches);
+  BLAS_CONTRACTION_DISPATCH_DAG++;
+  return 1;
+}
+
 // Returns the specific KDispatchKind that fired (BLAS_DOT / BLAS_GEMV
 // / BLAS_GEMM) so the profiler can record the route, or 0 on no-match
 // (caller falls through to JIT / interpreter).
@@ -301,6 +418,12 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // is the canonical instance).  Routed as KDISPATCH_BLAS_GEMM so the
   // profiler aggregates it with the simple-matmul route.
   if (blas_try_contraction(ke, in_buf_ids, out_buf_id))
+    return KDISPATCH_BLAS_GEMM;
+  // C7.2 im2col conv-bwd weight-grad: per-batch im2col gather + sgemm.
+  // Only matches the multi-K REDUCE shape produced by C7.3 chain-fuse,
+  // so it's a no-op until reduce.c's uop_reduce_multi activates the
+  // REDUCE-of-REDUCE collapse.
+  if (blas_try_im2col_contraction(ke, in_buf_ids, out_buf_id))
     return KDISPATCH_BLAS_GEMM;
   return 0;
 }
