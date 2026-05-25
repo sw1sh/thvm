@@ -2675,9 +2675,11 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     if (rmu_emit_chain_reduce(store, fp, depth)) return 1;
   }
   if (rmu_term_has_reduce(red_src, 0)) return 0;
-  // Single-axis specialisation: multi-axis REDUCE falls through to the
-  // generic post-order hoist path (rmu_emit_store) which already handles
-  // arbitrary axis counts via rmu_emit_one_reduce nested loops.
+  // emit_store_reduce specialisation: only handles SINGLE-axis REDUCE
+  // (its rmu_split_reduce-based output-range derivation assumes one
+  // reduce axis).  Multi-axis falls through to the generic path
+  // (rmu_emit_store -> rmu_emit_one_reduce) which now opens nested
+  // for-loops per axis (C3).
   if (uop_reduce_n_axes(value) != 1) return 0;
   u32  red_kind = uop_reduce_kind(value);
   u32  red_axis = uop_reduce_axis(value, 0);
@@ -2791,11 +2793,16 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
                                 const Term *reduces, const u8 *simd_flags,
                                 const u32 *parent_idx, u32 self_idx,
                                 u32 n_reduces, FILE *fp) {
-  u32  r_kind = uop_reduce_kind(red);
-  // C1: still single-axis emit per shell; multi-axis emit lands in C3.
-  // We read axis_0 here, and rely on chain-fuse (C4) to either keep
-  // n_axes==1 (no-op) or for the multi-axis path to be implemented.
-  u32  r_axis = uop_reduce_axis(red, 0);
+  u32  r_kind   = uop_reduce_kind(red);
+  // Multi-axis REDUCE: one shell, one shared accumulator named after
+  // axis_0; emit a nested for-loop PER reduce axis with the innermost
+  // loop (last axis in the builder list) carrying the combine.
+  // Mirrors tinygrad lowerer.py: REDUCE.src=(body,)+tuple(ranges)
+  // expands into nested DEFINE_ACC/ASSIGN over each range
+  // (uop/ops.py + codegen/late/devectorizer.py:311 reduce_to_acc).
+  u32  r_n_axes = uop_reduce_n_axes(red);
+  if (r_n_axes == 0) return;
+  u32  r_axis = uop_reduce_axis(red, 0);     // accumulator name + SIMD slice axis
   Term r_src  = uop_reduce_src(red);
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
@@ -2807,29 +2814,42 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
   u32  r_kinds[MAX_DIM]   = {0};
   u32  r_factors[MAX_DIM] = {0};
   u32  n_r_ranges = 0;
-  // Descend through nested UOP_REDUCE bodies: the reduce-axis range term
-  // we need to open this reduce's for-loop on may live inside a nested
-  // reduce body.  Without this descent the lookup misses,
-  // `reduce_range_term == 0`, the loop is skipped, and `_accN` is
-  // declared but never updated.
+  // Descend through nested UOP_REDUCE bodies: a reduce-axis RANGE leaf
+  // we need to open a for-loop on may live inside a nested reduce body.
+  // Without this descent the lookup misses, the loop is skipped, and
+  // `_accN` is declared but never updated.
   rmu_collect_ranges_with_opts_through_reduce(
       r_src, r_ranges, r_kinds, r_factors, &n_r_ranges);
-  Term reduce_range_term = 0;
-  u32  reduce_extent     = 0;
-  for (u32 j = 0; j < n_r_ranges; j++) {
-    u32 ax = term_val(heap_read(term_val(r_ranges[j]) + 0));
-    if (ax == r_axis) {
-      reduce_range_term = r_ranges[j];
-      reduce_extent     = uop_range_extent(r_ranges[j]);
-      break;
+  // Look up every reduce-axis's RANGE term + extent.  Order axes per
+  // the builder list (axis_0 outermost; tinygrad lowerer.py opens them
+  // in the same order as REDUCE.src[1:]).
+  Term axis_ranges [MAX_DIM] = {0};
+  u32  axis_extents[MAX_DIM] = {0};
+  u32  axis_ids    [MAX_DIM] = {0};
+  for (u32 ai = 0; ai < r_n_axes; ai++) {
+    u32 want = uop_reduce_axis(red, ai);
+    axis_ids[ai] = want;
+    for (u32 j = 0; j < n_r_ranges; j++) {
+      u32 ax = term_val(heap_read(term_val(r_ranges[j]) + 0));
+      if (ax == want) {
+        axis_ranges [ai] = r_ranges[j];
+        axis_extents[ai] = uop_range_extent(r_ranges[j]);
+        break;
+      }
     }
+    // A missing RANGE leaf for any axis collapses the entire reduce
+    // (no contributions on that axis).  Match the legacy single-axis
+    // bail-and-return-identity behaviour.
+    if (axis_ranges[ai] == 0) return;
   }
-  if (reduce_range_term == 0) return;
+  Term reduce_range_term = axis_ranges[0];
+  u32  reduce_extent     = axis_extents[0];
   // GPU-generic gate: the SIMD-collective reduce shape applies to Metal
   // AND CUDA -- both have a 32-lane warp/simdgroup with a collective
   // reduce (Metal simd_sum, CUDA __shfl_xor_sync).  The C target keeps
-  // the scalar accumulator.
-  if (is_simd && RMU_TARGET != CG_TARGET_C) {
+  // the scalar accumulator.  SIMD-collective only handles single-axis
+  // today; multi-axis falls through to the generic nested-loop path.
+  if (is_simd && RMU_TARGET != CG_TARGET_C && r_n_axes == 1) {
     // SIMD-collective shape: each lane processes a 1/32 slice of extent,
     // then a collective op combines the 32 lane partials.  CUDA: lane
     // index = threadIdx.x % 32; the cross-lane combine is a 5-step
@@ -2870,28 +2890,34 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
     }
     return;
   }
-  // GPU-generic: small-extent reduce unroll for Metal AND CUDA.
+  // Multi-axis nested for-loops: outer = axis_0, innermost = axis_{n-1}.
+  // GPU-generic: small-extent reduce unroll on the outermost.
   if (RMU_TARGET != CG_TARGET_C && reduce_extent > 0
       && reduce_extent <= RMU_REDUCE_UNROLL_MAX) {
     for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
     fprintf(fp, "#pragma unroll(%u)\n", reduce_extent);
   }
-  rmu_emit_range_open(reduce_range_term, fp, emit_depth, 0);
+  for (u32 ai = 0; ai < r_n_axes; ai++) {
+    rmu_emit_range_open(axis_ranges[ai], fp, emit_depth + ai, 0);
+  }
+  u32 inner_depth = emit_depth + r_n_axes;
   // Emit nested reduces that depend on THIS reduce's axis var INSIDE the
-  // loop, before the combine that references their `_accN`.  Each child's
-  // own reduce-axis loop -- and any deeper nesting -- is emitted by the
-  // recursive call.  reduces[] is post-order (inner before outer); a
-  // child therefore always precedes its parent, but we scan the whole
-  // table since `self_idx` may be any position.
+  // innermost loop, before the combine that references their `_accN`.
+  // Each child's own reduce-axis loop -- and any deeper nesting -- is
+  // emitted by the recursive call.  reduces[] is post-order; a child
+  // always precedes its parent.
   for (u32 k = 0; k < n_reduces; k++) {
     if (parent_idx[k] != self_idx) continue;
-    rmu_emit_one_reduce(reduces[k], emit_depth + 1, simd_flags[k],
+    rmu_emit_one_reduce(reduces[k], inner_depth, simd_flags[k],
                         reduces, simd_flags, parent_idx, k, n_reduces, fp);
   }
-  for (u32 d = 0; d < emit_depth + 1; d++) fputs("  ", fp);
+  for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
   rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
-  for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-  fputs("}\n", fp);
+  for (u32 ai = 0; ai < r_n_axes; ai++) {
+    u32 close_depth = inner_depth - 1 - ai;
+    for (u32 d = 0; d < close_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
 }
 
 // Emit a single UOP_STORE statement, wrapping with for-loops over
