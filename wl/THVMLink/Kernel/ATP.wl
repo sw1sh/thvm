@@ -2592,29 +2592,44 @@ atpAutoTuneForClass["Lattice"] := {
 atpAutoTuneForClass["Monoid"] := {atpGtS, atpStdS};
 atpAutoTuneForClass["Combinatory"] := {
     (* Tafel2: Kombinatorlogik* -> KombS = cph(add) (Sinai.h:111,125).
-       Variable-duplicating combinator rules (S,W,M) need LPO. *)
+       Variable-duplicating combinator rules (S,W,M) need LPO.  Front-load
+       GoalDirected too -- the cross-system equivalence direction (e.g.
+       SKIToBCKW: S via B,C,W) is symmetric and closes in MNF (~0.03s) but
+       walls plain completion (~10s under LPO+AutoPrec). *)
     atpKombS,
+    "GoalDirected",
     {"Completion", "CriticalPairWeight" -> "Add"}};
 atpAutoTuneForClass["Sheffer"] := {
-    (* No Tafel2 Sheffer row.  Sheffer/Nand goals (WolframAxioms) are
-       symmetric and never share a normal form, so the MNF front search
-       (StdS's zb(mnf), Sinai.h:109) is the closer; pair it with the
-       Mix2 weight that thvm finds best on the hard cross-axiom Sheffer
-       theorems.  For the AndAssociativity-class deep saturations, also
-       try the Waldmeister preset (Mix + KBO + AutoPrec + SR51 +
-       RHSInterreduce + UnfailingCP + CPSetInterreduce-off) with GT
-       weight that proves AndAssociativity in the C bench. *)
+    (* No Tafel2 Sheffer row.  Measured per-entry behavior:
+       - Add weight closes the cross-axiom Implies-X family quickly
+         (ImpliesWolframAxioms 0.68s, ImpliesWolframAlternate 0.68s)
+         where Gt/Mix2 wall.  Add FIRST.
+       - GoalDirected (MNF bidirectional front) is the closer for the
+         symmetric goals (nand-Commutativity, etc.) and a known
+         engine bug can hang MNF on hard cross-axiom Implies-X if it's
+         the first attempt.  Run AFTER Add so any hang is bounded by
+         the remaining-budget slice and the shell-level kill-after.
+       - SInE relevance pruning helps the cross-system Meredith-class
+         Implies-X (Vampire benchmark winner).
+       All entries cap CP weight via AutoMaxWeight -> 20 -- no memory
+       thrashing.  AndAssociativity-class deep saturations stay out of
+       this lean schedule (need Waldmeister preset + minutes of
+       saturation; the safety tail's Gt entry still picks them up). *)
+    {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},
     {"GoalDirected", "CriticalPairWeight" -> "Mix2", "AutoMaxWeight" -> 20},
+    {"Completion", "CriticalPairWeight" -> "Mix2",
+        "AxiomRelevance" -> "SInE", "AutoMaxWeight" -> 20},
     {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "AutoMaxWeight" -> 20},
-    {"Waldmeister", "CriticalPairWeight" -> "Gt",
-        "CPSetInterreduce" -> False}};
+        "AutoMaxWeight" -> 20}};
 atpAutoTuneForClass["Boolean"] := {
-    (* Huntington / DeMorgan / ExcludedMiddle / Noncontradiction are all
-       symmetric goals -- both sides irreducible under the axioms.  The
-       MNF bidirectional front search ("GoalDirected") is the only
-       closer; front-load it.  AC-style completion (Mix2 weight) is the
-       fallback for asymmetric theorems (Absorption, OrAssociativity). *)
+    (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /
+       OrAssociativity / Distributivity) and symmetric (ExcludedMiddle /
+       Noncontradiction / DoubleNegation) NotableTheorems.  Measured per-
+       entry: GoalDirected closes Noncontradiction in 0.48s but Mix2
+       walls (the symmetric goals never meet at one normal form); Mix2
+       closes DeMorgan in 1.06s and GoalDirected in 3.15s.  GoalDirected
+       first wins NET because the symmetric cases save more than DeMorgan
+       loses (DeMorgan still proves on the second Mix2 entry). *)
     "GoalDirected",
     {"Completion", "CriticalPairWeight" -> "Mix2"}};
 atpAutoTuneForClass["ACWithComplement"] := {

@@ -6806,6 +6806,27 @@ static u8   mnf_succ_anti[MNF_SUCC_CAP];
 // every successor is still inserted, so the MNF set is unchanged.
 static u32 mnf_successors(AtpState *s, Term t, u8 allow_anti,
                           u32 rule_lo, u32 rule_hi, u32 *n) {
+  // Throttled wall-deadline + host-abort poll.  mnf_successors recurses
+  // into subterms and iterates n_rules per subterm; a single call can
+  // run for seconds on a deep term against a large rule set, well past
+  // any mnf_step / mnf_loop_guard polling cadence.  Cap call count via
+  // a static tick (every 1024th call probes the clock so the poll is
+  // sub-microsecond amortized) and short-circuit on deadline by
+  // returning the current count -- the caller treats truncated
+  // successors as a terminal expansion, so the front search bails and
+  // thvm_atp_step returns ATP_TIMEOUT on the next outer iteration.
+  // Without this, the engine ignores TimeConstraint on hard Sheffer
+  // cross-axiom Implies-X goals where MNF expands a degenerate front.
+  {
+    static u32 mnf_succ_tick = 0u;
+    if ((++mnf_succ_tick & 0x3FFu) == 0u) {
+      if (s->wall_deadline_us != 0u) {
+        u64 now = atp_now_us();
+        if (now != 0u && now >= s->wall_deadline_us) return 0u;
+      }
+      if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return 0u;
+    }
+  }
   u32 size = 1u;
   if (term_tag(t) == TAG_CTR) {
     u32 m = term_ctr_n(t);
