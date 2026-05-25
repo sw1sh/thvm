@@ -415,6 +415,19 @@ static void mem_plan_push_dead(u32 current_depth) {
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
     if (e->pushed)                              continue;
+    // last_use_depth == 0 is the "no realize-boundary consumer" sentinel
+    // (see boundary_compute_last_use's comment around line 3478): the
+    // sink / realize root / preserved orphan -- the caller will read this
+    // buf AFTER realize returns.  Don't push it to the freelist or the
+    // next allocate will hand its dptr to a fresh kernel intermediate,
+    // overwriting the caller's content.  CUDA bit: cuda_buf_alloc's
+    // best-fit freelist would hand a 4-byte popper the loss-scalar's
+    // dptr; the caller's later loss.numpy() then reads the popper's
+    // value (the symptom: BS=128 CUDA loss goes 2.76 -> 3.00 across an
+    // opt-step realize call).  CPU was unaffected because the TLSF arena
+    // planner skips sinks via its arena-plannability gate, but the
+    // legacy freelist push path here applied to ALL backends.
+    if (e->last_use_depth == 0)                 continue;
     if (e->last_use_depth >= current_depth)     continue;
     if (e->buf_id == 0)                         continue;
     Backend *b = e->backend;
