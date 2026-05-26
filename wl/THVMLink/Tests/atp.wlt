@@ -1023,6 +1023,15 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* "VarWeight" -> n: per-variable KBO weight override (Waldmeister
+       -w VAR=N).  Baseline still proves under a non-default value. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "VarWeight" -> 3}],
+    ProofObject,
+    TestID -> "ATP/method/VarWeight-proves"
+]
+
+VerificationTest[
     (* "PortfolioTrace" single-config fallback: returns a 1-element list
        whose entry mirrors AppliedMethod / WallTime / Proved. *)
     Module[{t = TFindProof["InverseOfInverse", "AbelianGroupAxioms",

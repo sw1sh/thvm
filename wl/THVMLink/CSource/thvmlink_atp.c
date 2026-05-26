@@ -475,11 +475,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       }
     }
   }
+  // Method "VarWeight" -> n: per-variable KBO weight override (default
+  // 1).  Mirrors Waldmeister `-w VAR=N`.  args[26].  Pass <= 0 (or
+  // omit) to keep the default 1.
+  mint var_weight_in = MArgument_getInteger(args[26]);
   static KboConfig wl_kbo_p;
   wl_kbo_p.weights    = wl_weights_p;
   wl_kbo_p.precedence = wl_precedence_p;
   wl_kbo_p.n_labels   = (u32)max_label + 1;
-  wl_kbo_p.var_weight = 1;
+  wl_kbo_p.var_weight = var_weight_in > 0 ? (u32)var_weight_in : 1u;
 
   AtpState *atp = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;

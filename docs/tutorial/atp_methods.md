@@ -563,6 +563,18 @@ equation. The new rule itself stays in R.
 Default: `False`. The `"VampireUEQ"` preset turns it on alongside
 `"RHSInterreduce" -> True`.
 
+### 5.22 `"VarWeight" -> n`
+
+Per-variable KBO weight override. Default is `1` (every TAG_FVR node
+contributes weight `1` to the KBO sum). Mirrors Waldmeister's
+`-w VAR=N` flag. Useful when a per-symbol weight scheme via
+`"SymbolWeights"` shifts the balance so variables need their own
+counter-weight, or when reducing variable weight to favor more-
+heavily-quantified clauses.
+
+Pass any positive integer to override; a non-positive value (or
+absent) keeps the default `1` (engine byte-identical).
+
 ### 5.21 `"SymbolWeights" -> {sym -> w, ...}`
 
 Per-symbol KBO weight overrides. Default per-symbol weight is `1` (with
