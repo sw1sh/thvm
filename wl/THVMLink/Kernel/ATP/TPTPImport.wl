@@ -133,16 +133,14 @@ scanClauses[text_String, i0_Integer, baseDir_String] :=
                 clauseHeadMatchQ[text, i, "tcf"],
                     i = consumeAnnotated[text, i + 4, "tcf"]
                 ,
-                clauseHeadMatchQ[text, i, "include"],
-                    i = consumeInclude[text, i + 8, baseDir]
-                ,
                 clauseHeadMatchQ[text, i, "thf"],
-                    Message[TPTPImport::skipnoncnf, "thf", i];
-                    i = skipParenthesised[text, i + 4]
+                    i = consumeAnnotated[text, i + 4, "thf"]
                 ,
                 clauseHeadMatchQ[text, i, "ncf"],
-                    Message[TPTPImport::skipnoncnf, "ncf", i];
-                    i = skipParenthesised[text, i + 4]
+                    i = consumeAnnotated[text, i + 4, "ncf"]
+                ,
+                clauseHeadMatchQ[text, i, "include"],
+                    i = consumeInclude[text, i + 8, baseDir]
                 ,
                 clauseHeadMatchQ[text, i, "tpi"],
                     i = skipParenthesised[text, i + 4]
@@ -153,37 +151,45 @@ scanClauses[text_String, i0_Integer, baseDir_String] :=
     ]
 
 (* Reads the cnf(...) / fof(...) / tff(...) / tcf(...) tail:
-   name, role, body.  Body is Sown verbatim along with the clause
-   head; clauseToFormula dispatches on the head.
+   name, role, body.  Sows a 4-tuple {name, head, role, body} so
+   downstream consumers (clauseToFormula for the parser, the
+   include-selector filter for `include(..., [name1, ...])`) can both
+   see the clause name.  clauseToFormula ignores the name; the
+   include filter uses it.
 
-   For tff/tcf, a `type` role is a signature declaration with no
-   semantic content for the untyped saturator -- skip it silently
-   without emitting a {head, role, body} tuple. *)
+   For tff/tcf/thf, a `type` role is a signature declaration with
+   no semantic content for the untyped homogeneous saturator -- skip
+   it silently without emitting a tuple. *)
 consumeAnnotated[text_String, i0_Integer, head_String] :=
-    Block[{i = i0, dummy, role, body, bodyEnd},
-        {dummy, i} = readWord[text, i];   (* clause name; discard *)
+    Block[{i = i0, name, role, body, bodyEnd},
+        {name, i} = readWord[text, i];
         i = skipPast[text, i, ","];
         {role, i} = readWord[text, i];
         i = skipPast[text, i, ","];
         {body, bodyEnd} = readBalanced[text, i];
-        If[ ! ((head === "tff" || head === "tcf") && role === "type"),
-            Sow[{head, role, StringTrim[body]}]
+        If[ ! (MemberQ[{"tff", "tcf", "thf"}, head] && role === "type"),
+            Sow[{name, head, role, StringTrim[body]}]
         ];
         skipPast[text, bodyEnd, "."]
     ]
 
-(* Read a single-quoted include path starting AFTER the open paren of
-   `include(`.  Resolve it relative to baseDir / $TPTP env-var roots,
-   recursively scan the included file, and splice its clauses into
+(* Read an include directive starting AFTER the open paren of
+   `include(`.  The TPTP form is
+
+       include('path').
+       include('path', [name1, name2, ...]).
+
+   The optional 2nd argument is a clause-name selector: when present
+   only clauses whose name appears in the list are admitted.  Resolve
+   the path relative to baseDir / $TPTP env-var roots, recursively
+   scan the included file, splice the (possibly filtered) clauses into
    the enclosing Reap.  On unresolvable path, warn + skip. *)
 consumeInclude[text_String, i0_Integer, baseDir_String] :=
-    Block[{i = i0, len, start, quoted, resolved, subDir, subText, subClauses},
+    Block[{i = i0, len, start, quoted, selector, resolved, subDir,
+           subText, subClauses, filteredClauses},
         len = StringLength[text];
-        While[ i <= len &&
-                StringMatchQ[StringTake[text, {i, i}], Whitespace],
-            i = i + 1
-        ];
-        (* TPTP single-quoted string; scan to the next unescaped `'`. *)
+        i = skipWS[text, i];
+        (* TPTP single-quoted string; scan to the next `'`. *)
         If[ i <= len && StringTake[text, {i, i}] === "'",
             i = i + 1; start = i;
             While[ i <= len && StringTake[text, {i, i}] =!= "'",
@@ -199,6 +205,21 @@ consumeInclude[text_String, i0_Integer, baseDir_String] :=
                 i = i + 1];
             quoted = StringTrim @ StringTake[text, {start, i - 1}]
         ];
+        (* Optional clause-name selector `[name1, name2, ...]` after a
+           comma; `All` (no selector) -> admit every clause. *)
+        i = skipWS[text, i];
+        selector = All;
+        If[ i <= len && StringTake[text, {i, i}] === ",",
+            i = i + 1;
+            i = skipWS[text, i];
+            If[ i <= len && StringTake[text, {i, i}] === "[",
+                Block[{listEnd = matchingBracketPos[text, i, "[", "]"]},
+                    selector = parseQuantVarList @ StringTake[text,
+                        {i + 1, listEnd - 1}];
+                    i = listEnd + 1
+                ]
+            ]
+        ];
         resolved = resolveIncludePath[quoted, baseDir];
         If[ resolved === $Failed,
             Message[TPTPImport::badinclude, quoted, baseDir]
@@ -210,10 +231,11 @@ consumeInclude[text_String, i0_Integer, baseDir_String] :=
                 RegularExpression["/\\*([^*]|\\*[^/])*\\*+/"] -> ""
             }];
             subClauses = parseClauses[subText, subDir];
-            Scan[Sow, subClauses]
+            filteredClauses = If[ selector === All,
+                subClauses,
+                Select[subClauses, MemberQ[selector, #[[1]]] &]];
+            Scan[Sow, filteredClauses]
         ];
-        (* skip the optional `, [selection]` clause-selector and the
-           closing `).` *)
         skipPast[text, i, "."]
     ]
 
@@ -304,12 +326,15 @@ skipParenthesised[text_String, i0_Integer] :=
 
 $tptpVars
 
-clauseToFormula[{head_String, role_String, body_String}] :=
+clauseToFormula[{_String, head_String, role_String, body_String}] :=
     Block[{$tptpVars = <||>, prepared, fmla},
         prepared = preprocessBody[body, head];
-        fmla = If[ head === "cnf" || head === "tcf",
-            parseCnfFormula[prepared],
-            parseFofFormula[prepared]
+        fmla = Which[
+            head === "cnf" || head === "tcf", parseCnfFormula[prepared],
+            (* fof, tff, thf all use the same Boolean grammar; the thf
+               extensions (`^` lambda, `@` application) are recognised
+               by readUnary / readAtomicFormula unconditionally. *)
+            True, parseFofFormula[prepared]
         ];
         Which[
             fmla === $Failed,
@@ -351,6 +376,7 @@ negatedConjectureFlip[fmla_] := Not[fmla]
    no-op. *)
 preprocessBody[body_String, "tff"] := stripTypeAnnotations[body]
 preprocessBody[body_String, "tcf"] := stripTypeAnnotations[body]
+preprocessBody[body_String, "thf"] := stripTypeAnnotations[body]
 preprocessBody[body_String, _]     := body
 
 (* Strip every `:` followed by a sort identifier and optional sort
@@ -433,12 +459,60 @@ negateAtom[atom_]            := Not[atom]
    via Pattern variables in $tptpVars). *)
 parseFofFormula[body_String] := Block[{trimmed, peeled, res, pos},
     trimmed = StringTrim @ stripOuterParens @ StringTrim[body];
+    (* Sequent shape `lhs --> rhs`: comma-separated formula lists on
+       each side, semantically (lhs1 & ... & lhsN) => (rhs1 | ... |
+       rhsM).  Detect and rewrite to the equivalent implication so the
+       standard parser handles it. *)
+    If[ StringContainsQ[trimmed, "-->"],
+        Return @ parseSequent[trimmed]
+    ];
     (* Strip leading universal quantifier(s) -- iterate so
        `! [X] : ! [Y] : phi` collapses to `phi` with both vars
        bound as Patterns via $tptpVars references in atoms. *)
     peeled = peelLeadingUniversals[trimmed];
     {res, pos} = readFofFormula[peeled, 1];
     res
+]
+
+(* Sequent body: `A1, ..., An --> B1, ..., Bm`.  Each side may be
+   wrapped in `[...]` brackets per TPTP fof_tuple syntax.  Returns
+   `Implies[And[A_i], Or[B_j]]`; empty lhs -> Or-side alone;
+   empty rhs -> Not[And-side]. *)
+parseSequent[body_String] := Block[
+    {parts, lhsStr, rhsStr, lhsFmlas, rhsFmlas, lhs, rhs},
+    parts = StringSplit[body, "-->", 2];
+    If[ Length[parts] =!= 2,
+        Message[TPTPImport::badfmla, body];
+        Return[$Failed]
+    ];
+    lhsStr = stripTupleBrackets @ StringTrim @ parts[[1]];
+    rhsStr = stripTupleBrackets @ StringTrim @ parts[[2]];
+    lhsFmlas = If[ lhsStr === "", {},
+        parseFofFormula /@ splitTopLevel[lhsStr, ","]];
+    rhsFmlas = If[ rhsStr === "", {},
+        parseFofFormula /@ splitTopLevel[rhsStr, ","]];
+    lhs = Which[
+        lhsFmlas === {},          True,
+        Length[lhsFmlas] === 1,   lhsFmlas[[1]],
+        True,                     And @@ lhsFmlas
+    ];
+    rhs = Which[
+        rhsFmlas === {},          False,
+        Length[rhsFmlas] === 1,   rhsFmlas[[1]],
+        True,                     Or @@ rhsFmlas
+    ];
+    Implies[lhs, rhs]
+]
+
+(* `[ phi1, phi2, ... ]` -> `phi1, phi2, ...`.  No brackets -> pass
+   through unchanged. *)
+stripTupleBrackets[s_String] := Block[{trim = StringTrim[s], n},
+    n = StringLength[trim];
+    If[ n >= 2 && StringTake[trim, 1] === "[" &&
+            StringTake[trim, {n, n}] === "]",
+        StringTrim @ StringTake[trim, {2, n - 1}],
+        trim
+    ]
 ]
 
 peelLeadingUniversals[body_String] := Block[{trim = StringTrim[body], inner, pos},
@@ -583,6 +657,15 @@ readUnary[text_String, i0_Integer] := Block[
             (* Same as ForAll: Exists is HoldAll. *)
             {With[{bs = boundSyms, bd = body}, Exists[bs, bd]], i}
         ,
+        (* thf `^ [V1, ..., Vn] : body` lambda abstraction.  Bound vars
+           are fresh bare Symbols; body parsed with that scope; emit a
+           WL `Function[{vars}, body]`.  Function is HoldAll, so use
+           `With` to force the local values in (same fix as ForAll /
+           Exists). *)
+        ch === "^" && jOpensBracket,
+            {body, boundSyms, i} = readQuantBody[text, jAfter, ensureFreshSym];
+            {With[{bs = boundSyms, bd = body}, Function[bs, bd]], i}
+        ,
         True, readAtomicFormula[text, i]
     ]
 ]
@@ -638,39 +721,69 @@ matchingBracketPos[text_String, i0_Integer, open_String, close_String] :=
     ]
 
 (* Atomic formula: parenthesised subformula, equation, predicate
-   term, or $true/$false constant. *)
+   term, or $true/$false constant.  In thf mode, `@`-chained
+   application appears at this level (`f @ x @ y` = `f[x][y]`,
+   left-associative).  The `@` chain is parsed unconditionally; fof
+   inputs without `@` aren't affected. *)
 readAtomicFormula[text_String, i0_Integer] := Block[
-    {i = i0, len = StringLength[text], ch, lhs, rhs, sub, op, opLen},
+    {i = i0, len = StringLength[text], ch, lhs, rhs, sub, closePos},
     i = skipWS[text, i];
     If[ i > len, Return[{$Failed, i}]];
     ch = StringTake[text, {i, i}];
     If[ ch === "(",
-        (* parenthesised subformula *)
-        Block[{closePos = matchingBracketPos[text, i, "(", ")"]},
-            sub = First @ readFofFormula[
-                StringTake[text, {i + 1, closePos - 1}], 1];
-            Return[{sub, closePos + 1}]
-        ]
+        (* parenthesised subformula -- but it may be the lhs of `=`
+           / `!=`, so we don't Return here; just bind lhs + cursor
+           and fall through to the equation/@-chain check below. *)
+        closePos = matchingBracketPos[text, i, "(", ")"];
+        lhs = First @ readFofFormula[
+            StringTake[text, {i + 1, closePos - 1}], 1];
+        i = closePos + 1
+        ,
+        (* Read a term (predicate / equation lhs / constant). *)
+        {lhs, i} = readTerm[text, i]
     ];
-    (* Read a term (predicate / equation lhs / constant). *)
-    {lhs, i} = readTerm[text, i];
+    {lhs, i} = readAtChain[text, i, lhs];
     i = skipWS[text, i];
     (* Look for `=` or `!=` *)
     Which[
         i + 1 <= len && StringTake[text, {i, i + 1}] === "!=",
             i = i + 2;
             {rhs, i} = readTerm[text, i];
+            {rhs, i} = readAtChain[text, i, rhs];
             {Unequal[lhs, rhs], i}
         ,
         i <= len && StringTake[text, {i, i}] === "=" &&
                 (i + 1 > len || StringTake[text, {i + 1, i + 1}] =!= ">"),
             i = i + 1;
             {rhs, i} = readTerm[text, i];
+            {rhs, i} = readAtChain[text, i, rhs];
             {Equal[lhs, rhs], i}
         ,
         (* Bare predicate / constant -- promote $true/$false. *)
         True, {liftConstant[lhs], i}
     ]
+]
+
+(* Left-associative `@` application chain.  Given a left-hand atom
+   `head` and a cursor positioned after it, loop while the next
+   non-WS char is `@`, reading the right-hand atom and curry-applying.
+
+   Special case: a 0-arity constant `"name"[]` on the left collapses
+   to the bare String head on the first application, so `f @ x` reads
+   as `"f"[x]` rather than the doubly-nested `"f"[][x]`.  This matches
+   the thf semantic that `f @ x` is the higher-order application
+   `f(x)`. *)
+readAtChain[text_String, i0_Integer, head_] := Block[
+    {i = i0, len = StringLength[text], h = head, rhs},
+    i = skipWS[text, i];
+    While[ i <= len && StringTake[text, {i, i}] === "@",
+        i = i + 1;
+        i = skipWS[text, i];
+        {rhs, i} = readTerm[text, i];
+        h = If[ MatchQ[h, Blank[String][]], Head[h][rhs], h[rhs]];
+        i = skipWS[text, i]
+    ];
+    {h, i}
 ]
 
 liftConstant["$true"[]]  := True
@@ -777,63 +890,154 @@ topLevelEqSplit[body_String] := Block[{i = 1, len, depth = 0, ch, ch2,
 parseTermString[s_String] := readTerm[StringTrim[s], 1][[1]]
 
 readTerm[text_String, i0_Integer] :=
-    Block[{i = i0, len, ch, tok, child, parts},
+    Block[{i = i0, len, ch, ch2, tok, child, parts, numEnd},
         len = StringLength[text];
-        While[ i <= len &&
-            StringMatchQ[StringTake[text, {i, i}], Whitespace],
-            i = i + 1
-        ];
+        i = skipWS[text, i];
         If[ i > len, Return[{$Failed, i}]];
         ch = StringTake[text, {i, i}];
-        If[ ch === "(",
-            {child, i} = readTerm[text, i + 1];
-            i = skipPast[text, i, ")"];
-            Return[{child, i}]
-        ];
-        {tok, i} = readWord[text, i];
-        If[ tok === "", Return[{$Failed, i}]];
-        While[ i <= len &&
-            StringMatchQ[StringTake[text, {i, i}], Whitespace],
-            i = i + 1
-        ];
-        If[ i <= len && StringTake[text, {i, i}] === "(",
-            {parts, i} = readArgs[text, i + 1];
-            (* String-headed term: "and"[x, y] etc.  Strings as Heads
-               sidestep the THVMLink`TPTPImport`Tptp` namespacing dance
-               (no Symbol collisions with user globals because Strings
-               are not bound to anything in any context). *)
-            {tok @@ parts, i}
+        ch2 = If[ i + 1 <= len, StringTake[text, {i + 1, i + 1}], ""];
+        Which[
+            (* '(' subterm ')' *)
+            ch === "(",
+                {child, i} = readTerm[text, i + 1];
+                i = skipPast[text, i, ")"];
+                {child, i}
             ,
-            If[ tptpVarQ[tok],
-                {ensureVar[tok], i},
-                (* Nullary constant: "a"[] (empty argument list) rather
-                   than the bare string "a".  WL evaluates `"a" == "b"`
-                   to False eagerly because Equal short-circuits on
-                   distinct string literals, but Equal on distinct
-                   compound expressions (`"a"[]` vs `"b"[]`) stays
-                   unevaluated -- the form TFindProof and TSatEUF
-                   expect.  Equivalent shape to the n-ary case. *)
-                {tok[], i}
-            ]
+            (* Single-quoted atom: 'foo bar'.  Contents become the
+               String head of a 0-arity compound; an optional argument
+               list is then handled by the post-token path below. *)
+            ch === "'",
+                {tok, i} = readQuoted[text, i, "'"];
+                readTermAfterToken[text, i, tok]
+            ,
+            (* Double-quoted distinct object: "hello world".  TPTP
+               semantics: distinct objects are pairwise non-equal by
+               built-in axiom.  We preserve the literal quote chars in
+               the String head (`"\"hello world\""[]`) so the shape
+               round-trips visually and stays distinguishable from a
+               plain quoted atom -- downstream code that cares about
+               distinct-object semantics can match on the leading `"`
+               in the head. *)
+            ch === "\"",
+                {tok, i} = readQuoted[text, i, "\""];
+                {("\"" <> tok <> "\"")[], i}
+            ,
+            (* Signed / unsigned numeric literal: -?[0-9]+(/[0-9]+)?
+               or -?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?  Returned wrapped
+               as `"<numstr>"[]` to match the existing 0-arity-constant
+               convention (avoids `Equal[42, 43] -> False` eager-eval). *)
+            (ch === "-" && StringMatchQ[ch2, RegularExpression["[0-9]"]]) ||
+                    StringMatchQ[ch, RegularExpression["[0-9]"]],
+                numEnd = readNumericEnd[text, i];
+                tok = StringTake[text, {i, numEnd - 1}];
+                {tok[], numEnd}
+            ,
+            (* Bare identifier / variable / $-defined / unsigned int. *)
+            True,
+                {tok, i} = readWord[text, i];
+                If[ tok === "", Return[{$Failed, i}]];
+                readTermAfterToken[text, i, tok]
         ]
     ]
 
+(* After reading the leading token (bare-word or quoted), check for an
+   optional `(args)` argument list.  A bare token without args is
+   either a variable (uppercase prefix) -> Pattern via $tptpVars, or a
+   0-arity constant -> `tok[]` (String-headed empty-arg compound,
+   sidesteps Equal's eager evaluation on distinct String atoms). *)
+readTermAfterToken[text_String, i0_Integer, tok_String] := Block[
+    {i = i0, len = StringLength[text], parts},
+    i = skipWS[text, i];
+    If[ i <= len && StringTake[text, {i, i}] === "(",
+        {parts, i} = readArgs[text, i + 1];
+        {tok @@ parts, i}
+        ,
+        If[ tptpVarQ[tok],
+            {ensureVar[tok], i},
+            {tok[], i}
+        ]
+    ]
+]
+
+(* Read a quoted string starting AT the opening quote `quote`.  Honours
+   TPTP-style backslash escapes (`\\` -> `\`, `\'` -> `'`, `\"` -> `"`).
+   Returns {contents, cursor-after-closing-quote}. *)
+readQuoted[text_String, i0_Integer, quote_String] := Block[
+    {i = i0 + 1, len = StringLength[text], ch, sb = ""},
+    While[ i <= len && StringTake[text, {i, i}] =!= quote,
+        ch = StringTake[text, {i, i}];
+        If[ ch === "\\" && i + 1 <= len,
+            sb = sb <> StringTake[text, {i + 1, i + 1}];
+            i = i + 2,
+            sb = sb <> ch;
+            i = i + 1
+        ]
+    ];
+    {sb, i + 1}
+]
+
+(* Scan a numeric literal starting at i; return the cursor position
+   one past the last numeric character.  Recognises:
+     -?[0-9]+                        signed/unsigned integer
+     -?[0-9]+/[0-9]+                 signed/unsigned rational
+     -?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?  signed/unsigned real *)
+readNumericEnd[text_String, i0_Integer] := Block[
+    {i = i0, len = StringLength[text], ch},
+    If[ i <= len && StringTake[text, {i, i}] === "-", i = i + 1];
+    While[ i <= len &&
+            StringMatchQ[StringTake[text, {i, i}], RegularExpression["[0-9]"]],
+        i = i + 1];
+    (* rational `/integer` or real `.integer` *)
+    If[ i <= len && StringTake[text, {i, i}] === "/",
+        i = i + 1;
+        While[ i <= len &&
+                StringMatchQ[StringTake[text, {i, i}], RegularExpression["[0-9]"]],
+            i = i + 1]
+    ];
+    If[ i <= len && StringTake[text, {i, i}] === ".",
+        i = i + 1;
+        While[ i <= len &&
+                StringMatchQ[StringTake[text, {i, i}], RegularExpression["[0-9]"]],
+            i = i + 1];
+        (* exponent *)
+        If[ i <= len && StringMatchQ[StringTake[text, {i, i}],
+                RegularExpression["[eE]"]],
+            i = i + 1;
+            If[ i <= len && StringMatchQ[StringTake[text, {i, i}],
+                    RegularExpression["[+-]"]],
+                i = i + 1
+            ];
+            While[ i <= len &&
+                    StringMatchQ[StringTake[text, {i, i}],
+                        RegularExpression["[0-9]"]],
+                i = i + 1]
+        ]
+    ];
+    i
+]
+
 (* Read a comma-separated argument list starting AFTER the open paren.
    Returns {args-list, position-after-close-paren}.  Reap/Sow builds
-   the list -- no AppendTo. *)
-readArgs[text_String, i0_Integer] := Block[{i = i0, sown, child, len},
+   the list -- no AppendTo.
+
+   Anti-loop guard: tracks the cursor at the top of each iteration; if
+   nothing advanced we bail out so malformed input (a Boolean op inside
+   a term position, etc.) can't wedge the parser. *)
+readArgs[text_String, i0_Integer] := Block[
+    {i = i0, sown, child, len, prev},
     len = StringLength[text];
     sown = Reap[
         While[ True,
+            prev = i;
             {child, i} = readTerm[text, i];
             Sow[child];
-            While[ i <= len &&
-                StringMatchQ[StringTake[text, {i, i}], Whitespace],
-                i = i + 1
-            ];
+            i = skipWS[text, i];
             If[ i > len || StringTake[text, {i, i}] === ")",
                 i = i + 1; Break[]];
-            If[ StringTake[text, {i, i}] === ",", i = i + 1]
+            If[ StringTake[text, {i, i}] === ",", i = i + 1];
+            (* If the iteration didn't advance the cursor, bail rather
+               than spin forever. *)
+            If[ i === prev, Break[]]
         ]
     ][[2]];
     {Replace[sown, {{xs_List} :> xs, _ -> {}}], i}

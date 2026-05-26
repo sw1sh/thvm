@@ -215,3 +215,106 @@ VerificationTest[
     1,
     TestID -> "ATP/tptp/tpi-skipped-silently"
 ]
+
+(* Single-quoted atoms: contents become the String head of a 0-arity
+   compound, so atom names with spaces / special chars round-trip. *)
+VerificationTest[
+    TPTPImport["cnf(a, axiom, eq(a, 'hello world'))."]["Axioms"][[1, 2]],
+    "hello world"[],
+    TestID -> "ATP/tptp/single-quoted-atom-with-space"
+]
+
+(* Numeric literals: unsigned, signed, real, rational, scientific. *)
+VerificationTest[
+    {TPTPImport["cnf(a, axiom, foo(42) = bar)."]["Axioms"][[1, 1, 1]],
+     TPTPImport["cnf(a, axiom, foo(-42) = bar)."]["Axioms"][[1, 1, 1]],
+     TPTPImport["cnf(a, axiom, foo(3.14) = bar)."]["Axioms"][[1, 1, 1]],
+     TPTPImport["cnf(a, axiom, foo(3/4) = bar)."]["Axioms"][[1, 1, 1]],
+     TPTPImport["cnf(a, axiom, foo(1.5e-3) = bar)."]["Axioms"][[1, 1, 1]]
+    },
+    {"42"[], "-42"[], "3.14"[], "3/4"[], "1.5e-3"[]},
+    TestID -> "ATP/tptp/numeric-literals"
+]
+
+(* Distinct objects: literal `"` characters in the String head
+   distinguish from plain quoted atoms. *)
+VerificationTest[
+    Module[{r = TPTPImport[
+        "cnf(a, axiom, eq(\"distinct1\", \"distinct2\"))."]},
+        Head @ r["Axioms"][[1, 1]]
+    ],
+    "\"distinct1\"",
+    TestID -> "ATP/tptp/distinct-object-quote-preserved"
+]
+
+(* include selector: only named clauses admitted. *)
+VerificationTest[
+    Module[{tmpdir = CreateDirectory[], r},
+        Export[FileNameJoin[{tmpdir, "ax.ax"}],
+            "cnf(a1, axiom, mul(X, e) = X).\n" <>
+            "cnf(a2, axiom, mul(e, X) = X).\n" <>
+            "cnf(a3, axiom, mul(inv(X), X) = e).\n", "Text"];
+        Export[FileNameJoin[{tmpdir, "main.p"}],
+            "include('ax.ax', [a1, a3]).\n", "Text"];
+        r = TPTPImport[File @ FileNameJoin[{tmpdir, "main.p"}]];
+        Length @ r["Axioms"]
+    ],
+    2,
+    TestID -> "ATP/tptp/include-clause-selector"
+]
+
+(* $-defined predicates / arithmetic functions / $true / $false. *)
+VerificationTest[
+    {Head @ TPTPImport[
+        "fof(a, axiom, $sum(2, 3) = 5)."]["Axioms"][[1, 1]],
+     Head @ TPTPImport[
+        "fof(a, axiom, $distinct(a, b, c))."]["Axioms"][[1]],
+     TPTPImport["fof(a, axiom, $true)."]["Axioms"][[1]],
+     TPTPImport["fof(a, axiom, $false)."]["Axioms"][[1]]
+    },
+    {"$sum", "$distinct", True, False},
+    TestID -> "ATP/tptp/dollar-defined-forms"
+]
+
+(* thf: type decl skipped; lambda + @ application + Boolean combinators. *)
+VerificationTest[
+    {Length @ TPTPImport["thf(p, type, p: $i > $o)."]["Axioms"],
+     MatchQ[TPTPImport["thf(a, axiom, ! [X:$i] : (p @ X))."]["Axioms"][[1]],
+        "p"[_Pattern]],
+     TPTPImport["thf(a, axiom, f @ x @ y)."]["Axioms"][[1]],
+     Head @ TPTPImport[
+        "thf(a, axiom, ^ [X:$i] : (f @ X))."]["Axioms"][[1]]
+    },
+    {0, True, "f"["x"[]]["y"[]], Function},
+    TestID -> "ATP/tptp/thf-lambda-application-types"
+]
+
+(* ncf modal operators: `$box`, `$dia` parse as generic compounds. *)
+VerificationTest[
+    Module[{r = TPTPImport["ncf(a, axiom, $box(p) => $dia(p))."]},
+        {Head @ r["Axioms"][[1]],
+         Head @ r["Axioms"][[1, 1]],
+         Head @ r["Axioms"][[1, 2]]}
+    ],
+    {Implies, "$box", "$dia"},
+    TestID -> "ATP/tptp/ncf-modal-via-dollar-defined"
+]
+
+(* Sequent: `A1, A2 --> B1, B2` rewrites to `Implies[And[..], Or[..]]`. *)
+VerificationTest[
+    Module[{r = TPTPImport["fof(a, axiom, p & q --> r | s)."]},
+        Head @ r["Axioms"][[1]]
+    ],
+    Implies,
+    TestID -> "ATP/tptp/sequent-form-to-implies"
+]
+
+(* Anti-infinite-loop guard: malformed inputs that put a Boolean
+   inside a term-arg position now bail rather than wedge readArgs. *)
+VerificationTest[
+    MatchQ[
+        TPTPImport["ncf(a, axiom, $dia(p & q))."],
+        _Association],
+    True,
+    TestID -> "ATP/tptp/malformed-arg-list-doesnt-hang"
+]

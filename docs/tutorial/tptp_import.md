@@ -247,13 +247,32 @@ status; the importer ignores these (only the clause set is parsed).
 | `fof` (single `! [...] : (l = r)` or bare equation) | YES | YES | Iter 4 (commit 98bf9243). |
 | `fof` (full Boolean combination: `&` / `\|` / `~` / `=>` / `<=` / `<=>` / `<~>` / `~&` / `~\|`) | YES | YES at the SMT layer | Returns nested `And` / `Or` / `Not` / `Implies` / `Equivalent` / `Xor` (with `~&` -> `Not[And[..]]`, `~\|` -> `Not[Or[..]]`). `TSmtDecide` handles ground Boolean combinations of `Equal`/`Unequal` atoms via DPLL(T). |
 | `fof` (existentials) | YES (structural) | NO | Inner `? [V1, ..., Vn] : body` becomes `Exists[{v1, ...}, body]` with bound variables as fresh `Unique[]` symbols (proper scoping via snapshot+restore of the per-clause var map). Leading universals (`! [...]`) are still stripped; inner `! [...]` becomes `ForAll[...]`. Downstream consumers must skolemize for ATP/SMT use. |
-| `fof` (predicate atoms, `$true`/`$false`) | YES | At SMT for ground propositions | Predicates parse as `"p"[args]` terms; `$true` / `$false` lift to `True` / `False`. The SMT path's `collectAtoms` currently only collects `Equal`/`Unequal`; bare predicates ride through Boolean structure but don't participate in T-checking yet. |
+| `fof` (predicate atoms, `$true`/`$false`, `$`-defined functions) | YES | At SMT for ground propositions | Predicates parse as `"p"[args]` terms; `$true` / `$false` lift to `True` / `False`. `$sum`, `$less`, `$distinct`, `$ite`, etc. parse as generic `"$name"[args]` compounds via the `$`-in-identifier-charset path. |
 | `tff` (typed first-order) | YES | YES (when sort distinctions are irrelevant) | `tff(name, type, ...)` signature declarations are silently skipped. Sort annotations (`X:srt`) are stripped from quantifier var lists and atoms, so `! [X:nat] : p(X)` parses identically to its untyped fof equivalent. Sound for homogeneous-untyped use; problems that rely on type distinctions for soundness will mis-prove. |
 | `tcf` (typed cnf) | YES | NO at the UEQ layer | Same as `tff` for typing; same as `cnf` for the body grammar (single literal or `Or` of literals). |
-| `thf` (higher-order) | NO (skipped + warning) | NO | thvm has IC-native higher-order types but no first-order-to-higher-order bridge. |
-| `ncf` (non-classical) | NO (skipped + warning) | NO | Modal / intuitionistic logics are out of scope. |
+| `thf` (higher-order) | YES (structural) | NO | `thf(name, type, ...)` signature declarations skipped. Formula bodies parse with the fof Boolean grammar plus `^ [V1, ..., Vn] : body` lambda (-> WL `Function[{...}, body]`) and `@` left-associative application (`f @ x @ y` -> `f[x][y]`, with a special-case collapse of `"f"[][...]` to `"f"[...]`). Sort annotations stripped. No higher-order semantic engine on the downstream side. |
+| `ncf` (non-classical) | YES (structural) | NO | `ncf(name, role, formula)` parses via the fof Boolean grammar; modal operators like `$box(p)`, `$dia(p)` ride the `$`-defined path as generic compounds. No modal-logic decision procedure on the downstream side. |
 | `tpi` (process instruction) | NO (silently skipped) | n/a | Meta-directive; ignored. |
-| `include('...')` | YES | n/a | Path resolved relative to the importing file's directory; falls back to `$TPTP` and `$TPTP/Problems` env-var roots. Included clauses splice into the enclosing scan. Nested includes work via per-file directory threading. |
+| `include('...')` and `include('...', [name1, ...])` | YES | n/a | Path resolved relative to the importing file's directory; falls back to `$TPTP` and `$TPTP/Problems` env-var roots. Included clauses splice into the enclosing scan; the optional clause-name selector filters which clauses are admitted. Nested includes work via per-file directory threading. |
+
+**Atomic / term-level coverage:**
+
+| Construct | Parser support | Output shape |
+|-|-|-|
+| Bare identifier `foo` | YES | `"foo"[]` |
+| Variable (`X`, `Var2`) | YES | `Pattern[Unique["v"], Blank[]]` |
+| Single-quoted atom `'a b c'` | YES | `"a b c"[]` (contents become the String head; backslash escapes honoured) |
+| Double-quoted distinct object `"foo"` | YES | `"\"foo\""[]` (literal quotes preserved in head to distinguish from plain atom) |
+| Unsigned integer `42` | YES | `"42"[]` |
+| Signed integer `-42` | YES | `"-42"[]` |
+| Rational `3/4` | YES | `"3/4"[]` |
+| Real `3.14` | YES | `"3.14"[]` |
+| Scientific `1.5e-3` | YES | `"1.5e-3"[]` |
+| `$true` / `$false` (formula context) | YES | `True` / `False` (lifted by `liftConstant`) |
+| `$true` / `$false` (term context) | YES | `"$true"[]` / `"$false"[]` (generic constant) |
+| `$sum`, `$less`, etc. ($-defined function) | YES | `"$sum"[args]` (generic compound) |
+| Sequent `lhs1, lhs2 --> rhs1, rhs2` | YES | `Implies[And[lhs1, lhs2], Or[rhs1, rhs2]]` |
+| `$let` / `$ite_f` with formula args | NO (parses but malformed-arg-list guard bails) | Use term-arg variants. |
 
 **Axis B (problem-class divisions):** the saturator decides
 satisfiability of conjunctions of universally-quantified equational
@@ -377,7 +396,28 @@ Typed cnf -- the cnf grammar from §5.1, with `tff`-style sort
 annotations stripped. Same `type` / `axiom` / `conjecture` /
 `negated_conjecture` role handling.
 
-### 5.5 `include('path').`
+### 5.5 `thf(name, role, formula).`
+
+Typed higher-order. Type declarations skipped like `tff`. Formula
+bodies use the fof Boolean grammar plus two thf-specific extensions:
+
+- `^ [V1, ..., Vn] : body` -- lambda abstraction. Produces WL
+  `Function[{v1, ..., vn}, body]` (HoldAll-safe via `With`).
+- `f @ x @ y` -- left-associative explicit application. Produces
+  `f[x][y]` (curried). The first application against a 0-arity
+  constant collapses `"f"[][x]` to `"f"[x]` so the surface shape
+  matches the equivalent `f(x)` term form.
+
+### 5.6 `ncf(name, role, formula).`
+
+Non-classical formulas (modal, intuitionistic). The parser handles
+these identically to `fof` -- the standard `$box` / `$dia` modal
+operators ride the `$`-defined identifier path and come out as
+generic `"$box"[arg]`, `"$dia"[arg]` compounds. There is no modal
+semantic engine on the downstream side; the output shape is for
+downstream consumers that want to do their own translation.
+
+### 5.7 `include('path').` / `include('path', [name1, ...]).`
 
 The included file's clauses splice into the enclosing scan.
 Path resolution order:
@@ -388,24 +428,30 @@ Path resolution order:
 3. Relative to the `$TPTP` environment variable, if set.
 4. Relative to `$TPTP/Problems/`.
 
-The optional selector argument `include('foo.ax', [name1, name2, ...])`
-is currently parsed-and-ignored: all clauses from the included file
-are admitted. Nested includes work via per-file directory threading.
+The optional clause-name selector `[name1, name2, ...]` admits only
+clauses whose name appears in the list; without a selector every
+clause is admitted. Nested includes work via per-file directory
+threading.
 
-### 5.6 Comments
+### 5.8 Sequents
+
+The `lhs1, lhs2, ... --> rhs1, rhs2, ...` sequent form rewrites to
+the equivalent implication `Implies[And[lhs_i], Or[rhs_j]]`. Each
+side may optionally be wrapped in `[...]` (the TPTP `fof_tuple`
+syntax). An empty lhs becomes `True`; an empty rhs becomes `False`.
+
+### 5.9 Comments
 
 Line comments (`% ...`) and block comments (`/* ... */`) are stripped
 before parsing.
 
-### 5.7 What's NOT supported
+### 5.10 What's NOT supported
 
 | Construct | Status |
 |-|-|
 | `cnf` / `fof` with non-equational predicates fed into the UEQ saturator | Parsed (as `"p"[args]` terms / `Or[...]`), but `TFindProof` will reject -- the saturator is unit-equational. Use `TFindProofSMT` for ground Boolean combinations. |
-| `thf` (typed higher-order) | Skipped (`TPTPImport::skipnoncnf`). |
-| `ncf` (non-classical) | Skipped. |
 | `tpi` (process instruction) | Silently skipped. |
-| `include` with clause-name selector | Selector is ignored (all clauses admitted). |
+| `$let` / `$ite_f` with formula args | Mostly parsed via the generic compound path; formulas as term arguments would wedge the parser, so the anti-loop guard in `readArgs` bails out on the first non-comma after a parse step, returning a partial term. |
 | Equational rewriting modulo theory annotations | Not part of UEQ; not supported. |
 | Predicates in Boolean combos at the SMT layer | Parser produces the right shape; `TSmtDecide`'s `collectAtoms` currently only picks up `Equal`/`Unequal` atoms. Bare predicates ride through structure but don't participate in T-checking. |
 
@@ -493,11 +539,13 @@ same `Axioms / Conjecture` pair.
 - `wl/THVMLink/Kernel/ATP/SMT.wl` -- the parallel `TFindProofSMT[File
   | string]` overloads with the ground-input gate (see
   `docs/tutorial/smt.md`).
-- `wl/THVMLink/Tests/atp_tptp.wlt` -- 21 `VerificationTest`s
-  exercising the cnf / fof / tff / tcf / include paths plus the
-  inline-string / file / no-conjecture / negated-conjecture /
-  underscore-name / universal-quantifier / Boolean-connective /
-  existential / multi-literal / tpi-skip paths.
+- `wl/THVMLink/Tests/atp_tptp.wlt` -- 30 `VerificationTest`s
+  exercising the cnf / fof / tff / tcf / thf / ncf / include /
+  sequent paths plus the inline-string / file / no-conjecture /
+  negated-conjecture / underscore-name / universal-quantifier /
+  Boolean-connective / existential / multi-literal / tpi-skip /
+  numeric-literal / quoted-atom / distinct-object / include-selector
+  / $-defined / lambda-application / anti-loop-guard paths.
 - `tools/baselines/vampire_tptp/` -- a collection of TPTP-form
   benchmarks (one per WL `AxiomaticTheory` notable theorem) used by
   the parallel Vampire baseline harness; doubles as a regression
@@ -505,11 +553,12 @@ same `Axioms / Conjecture` pair.
 
 ## 10. Extending coverage
 
-For the standing UEQ benchmark corpus the current `cnf` / `fof` /
-`tff` / `tcf` + `include` subset covers every problem the saturator
-can prove and every Boolean ground fragment the SMT path can decide.
-Remaining gaps toward the full TPTP grammar (the TPTPWorld BNF
-reference):
+The parser now covers every clause head TPTPWorld's BNF defines
+(`cnf` / `fof` / `tff` / `tcf` / `thf` / `ncf` plus `include`),
+the full Boolean / quantifier / lambda / `@`-application grammar,
+sequent rewrites, quoted atoms, distinct objects, signed numeric
+literals, and `$`-defined predicates. Remaining work is downstream
+(the prover and SMT layers), not parser:
 
 - Predicate atoms inside Boolean combinations at the SMT layer. The
   parser already emits `"p"[args]` terms for non-equational atoms;
@@ -517,21 +566,15 @@ reference):
   Extending it to also pick up bare predicate atoms (with
   predicate-Boolean abstraction) opens up non-equality QF_UF ground
   goals.
-- `thf` (typed higher-order). Skipped today. thvm has IC-native
-  higher-order types but no first-order-to-higher-order bridge.
-- `ncf` (non-classical: modal / intuitionistic). Skipped; out of
-  scope for the classical first-order saturator.
-- `include` clause-name selectors (`include('foo.ax', [a1, a2])`).
-  The selector list is currently parsed-and-ignored. Honouring it
-  would just filter the recursed-clause Sow stream.
 - Skolemization of inner `?` quantifiers when the conjecture is a
   positive existential. The parser preserves `Exists` structure; a
   pre-encoder pass would replace existential bound vars with Skolem
   terms before encoding into the C engine.
 - Sort-aware `tff` mode that threads sort signatures through to the
   C engine's sort-check gating, instead of stripping annotations.
+- Higher-order solver for `thf` lambdas / `@` application beyond pure
+  structural parsing.
+- Modal-logic decision procedure for `ncf` modal operators.
 
-Each is a localized change. The parser scanner is structured to
-dispatch new clause heads from `scanClauses`; the formula parser is a
-recursive-descent over Boolean precedence layers that's straightforward
-to extend.
+These are all on the prover / SMT side; the parser's `<|"Axioms",
+"Conjecture"|>` shape is the bridge each will plug into.
