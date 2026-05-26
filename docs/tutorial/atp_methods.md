@@ -219,6 +219,41 @@ meets at one normal form.
 When to use: Sheffer / Wolfram axiom systems and other single-operator
 problems where Waldmeister's empirical default is well-tuned.
 
+### 3.6 `"VampireUEQ"`
+
+Preset modeled on the Vampire 5.0.1 UEQ-portfolio entry that cracks
+`ShefferAxioms/AndAssociativity` in our parallel baseline:
+
+```
+dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
+bd=all:av=off:gtg=exists_sym
+```
+
+Decoded to the thvm knobs we have (Vampire's `bs=unit_only` backward
+subsumption, `bd=all` backward demodulation, and `gtg=exists_sym`
+goal-type-graph premise selection are not yet ported; this preset
+captures the orderable subset):
+
+- `GoalDirected -> True` (Vampire `tgt=full`: MNF front alongside
+  completion).
+- `Ordering -> "LPO"` (`to=lpo`).
+- `AutoPrecedence -> True` (`sp=arity`: our layered AutoPrecedence
+  reduces to the arity ladder for single-operator Sheffer-shape
+  problems; for multi-op problems it adds inverse / distributor
+  structure on top -- a strict superset).
+- `SelectionRatio -> 10` (`dis+10` = age:weight 1:10; thvm's
+  `SelectionRatio` is the inverse FIFO ratio).
+- `UnfailingCP -> True` (completeness over unorientable equations
+  under LPO).
+- `AutoMaxWeight -> True` (closest analog to Vampire's
+  `nwc=1.2` non-goal weight skew).
+
+List form takes the same `Method -> {"VampireUEQ", subopt -> value, ...}`
+override pattern as `"Waldmeister"`.
+
+When to use: hard Sheffer / nand goals where the `"Waldmeister"` default
+walls; experimentally a complement to the Waldmeister-tuned schedule.
+
 ## 4. Suboptions catalog
 
 Every entry in the table below is parsed by `atpParseCompletionOpts` /
@@ -241,6 +276,9 @@ pending CP to process next).
 | `"Mix2"` | `CH_MixWeight2` | `g*10 + (wl+wr)`; best general weight on the harder Boolean / cross-axiom theorems. |
 | `"Unif"` | `CH_Unifikationsmass` | Unifier-measure weight. |
 | `"Goal"` / `"CPinGoal"` | goal-directed | Every selection picks the CP closest to the goal. |
+| `"Twee"` | `ATP_CP_WEIGHT_TWEE` | Twee.CP.score (Smallbone) -- asymmetric: `4*size(larger) + 1*size(smaller) + 2*depth`. Biases toward CPs whose smaller (reduct) side is small, regardless of the peak's size. Strong on Sheffer / nand single-operator saturations where `Mix2` walls. Ported from `src/Twee/CP.hs` line 240. |
+| `"ConjSym"` | `ATP_CP_WEIGHT_CONJSYM` | E `ConjectureSymbolWeight` port (`HEURISTICS/che_funweights.c`): walks both sides, conjecture-symbol CTR nodes weight 1, off-symbol CTR nodes weight 4, variable nodes weight 1. A cheap symbol-set biasing toward goal-relevant CPs -- a poor man's `"Goal"` mode that does not need structural matching. |
+| `"Learned"` | `ATP_CP_WEIGHT_LEARNED` | ENIGMA-style learned scorer over CP features. Requires a trained model file. |
 | `Automatic` | -1 | Falls back to the engine default (`Gt`). |
 
 Default: engine default (`Gt`). `Automatic` for the top-level Method
@@ -248,7 +286,9 @@ front-loads `Mix2` for many goals.
 
 When to set: when the engine default's CP order gets stuck. `Mix2` is
 the most common override; `Add` for combinator-style goals; `Goal` for
-short directly-cited proofs.
+short directly-cited proofs; `Twee` for hard single-operator
+saturations; `ConjSym` for many-axiom problems where the bulk of CPs
+drift away from the conjecture's symbol set.
 
 ```wolfram
 TFindProof[goal, axioms,
