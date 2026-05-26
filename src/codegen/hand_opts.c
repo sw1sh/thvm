@@ -178,18 +178,20 @@ static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   return 1;
 }
 
-// --- Metal-only gate ------------------------------------------------
+// --- GPU gate -------------------------------------------------------
 // CPU kernels route matmul/gemv/dot/conv through cBLAS / the clang-JIT'd
 // interpreter from the bare (un-OPT'd) DAG; applying a hand-coded opt
-// mutates the DAG so those classifiers stop recognising it.  CUDA
-// admission is a separate session.
-static int hand_opt_kernel_on_metal(KernelEntry const *ke) {
+// mutates the DAG so those classifiers stop recognising it.  GPU
+// backends have no BLAS fallback -- the structural-lift JIT is the only
+// path, so the shape-primitive heuristic always helps.  METAL_BACKEND.id
+// == 2, CUDA_BACKEND.id == 3 (cpu == 1) -- see kautotune_backend_id.
+static int hand_opt_kernel_on_gpu(KernelEntry const *ke) {
   Backend *b = NULL;
   if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
     b = TENS[ke->output_tid].backend;
   }
   if (b == NULL) b = DEFAULT_BACKEND;
-  return b != NULL && b->id == 2;
+  return b != NULL && (b->id == 2 || b->id == 3);
 }
 
 // --- matvec detection (heuristic.py 65-82) --------------------------
@@ -303,7 +305,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // ke->schedule->autotuned = 1 at the start.
   if (ke->schedule != NULL) ke->schedule->autotuned = 1;
   if (!hand_coded_opts_enabled()) return 0;
-  if (!hand_opt_kernel_on_metal(ke)) return 0;
+  if (!hand_opt_kernel_on_gpu(ke)) return 0;
 
   u32 n_applied = 0;
   HandOptAxes ax;
