@@ -309,7 +309,21 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // ke->schedule->autotuned = 1 at the start.
   if (ke->schedule != NULL) ke->schedule->autotuned = 1;
   if (!hand_coded_opts_enabled()) return 0;
+  // CUDA gate stays off pending renderer-side load hoisting (per
+  // docs/tinygrad_late_passes.md "path #2" -- load_store_folding /
+  // shared-load CSE inside the parallel-accumulator reduce body).
+  // Without it the parallel-acc emit re-reads the shared K-th input F
+  // times per K iteration, so V100 register pressure + nvrtc compile
+  // time both explode (cold step 1: 349s, warm 3541ms vs 540ms naive).
+  // Once path #2 lands, restore the original `hand_opt_kernel_on_gpu`
+  // call (delete the b->id == 2 narrowing below) and re-measure.
   if (!hand_opt_kernel_on_gpu(ke)) return 0;
+  {
+    Backend *b = NULL;
+    if (ke->output_tid > 0 && ke->output_tid < TENS_NEXT) b = TENS[ke->output_tid].backend;
+    if (b == NULL) b = DEFAULT_BACKEND;
+    if (b == NULL || b->id != 2) return 0;
+  }
 
   u32 n_applied = 0;
   HandOptAxes ax;
