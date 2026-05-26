@@ -6,7 +6,8 @@ dependencies, and chain to solve long-horizon tasks -- in a connectionist
 (neural, gradient-trained) way, and proposes a concrete architecture for
 the next experiment in the `brain/experiments/` ARC-AGI-3 arc (226). It
 was written May 2026 after the arc reached its diversity ceiling
-(experiments 209-225, see [page 10](10-intrinsic-goal-experiments-synthesis.md)).
+(experiments 209-225; the intrinsic-goal experiments synthesis lives
+in the local brain-arc docs).
 
 ## Why skills, why now
 
@@ -171,8 +172,8 @@ becomes necessary.
 
 ## Update (May 2026, follow-up): the end-to-end variant -- a soft, differentiable, jointly-learned skill-dependency DAG over a latent skill partition
 
-After the staged design above was built (experiments 226-229; see
-[page 10 synthesis](10-intrinsic-goal-experiments-synthesis.md)), a
+After the staged design above was built (experiments 226-229; the
+local brain-arc synthesis tracks the run-by-run results), a
 follow-up proposed a more end-to-end architecture and asked which
 literature it best matches: a world model feeding a PARTITIONED
 skill-space encoder where
