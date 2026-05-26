@@ -1,82 +1,37 @@
-// codegen/hand_opts.c -- port of tinygrad's hand_coded_optimizations
-// (tinygrad/codegen/opt/heuristic.py) into thvm.
+// codegen/hand_opts.c -- faithful port of tinygrad's
+// hand_coded_optimizations heuristic (tinygrad/codegen/opt/heuristic.py).
 //
-// Given a finalized kernel (post-rangeify, scalar arena -> lifted UOp
-// DAG in `cached_lift.store_root`, or a schedule-path fixture), inspect
-// its shape/dtype and apply a sensible sequence of KOpts via the
-// existing `kernel_apply_opt`.  This is the cheap-by-default analogue
-// of tinygrad's hand-coded catalogue (no benchmarking, unlike BEAM
-// autotune, which stays gated on AUTOTUNE).  It is wired into
-// kernel_fire_by_id and runs before dispatch -- but see "DEFAULT
-// STATE" below: the HAND_CODED_OPTS knob defaults to opts-ON.  When
-// disabled the function is a no-op (it still marks
-// ke->schedule->autotuned so re-dispatch is cheap).
+// Strategy: mirror tinygrad's `hand_coded_optimizations(k)` line-by-line.
+// The heuristic operates on shape primitives only -- it does NOT know
+// the words "conv", "matmul", "tileable", etc.  This file is therefore
+// shape-primitive only.  Per-section comments cite the upstream
+// heuristic.py line range.
 //
-// === DEFAULT STATE: ON (v2) ========================================
-// HAND_CODED_OPTS defaults to ON.  HAND_CODED_OPTS=0 or NOOPT=1
-// disables.  Earlier (v1) it was OFF because the DAG-mode renderer
-// gated its default-parallelise pass off the moment ANY per-axis OPT
-// wrapper was present, so a UPCAST on a multi-output-axis kernel
-// turned the remaining output axes into serial for-loops with no
-// bounds guard while the dispatch still launched one-thread-per-
-// output-element.  v2 fixed both sides:
-//   - render_uop.c: the default-parallelise pass now promotes each
-//     plain-KAX_LOOP output axis individually (the OUTER half of a
-//     UPCAST split), so it COMPOSES with the OPT'd inner axis (which
-//     emits via its `#pragma unroll` for-loop path).
-//   - render_metal.c: cg_tile_metal_dispatch_shape derives
-//     (groups, threads) from the lifted DAG's RANGE-leaf axis types
-//     for DAG-mode kernels with per-axis OPTs (rmt_dag_dispatch_shape),
-//     so the launched grid covers the renderer's `tid` decode exactly.
-//   - apply_opt_dag.c: an axis split now also shifts the UOP_REDUCE
-//     node's axis field, so the renderer's reduce-range matcher
-//     keeps finding it (otherwise it mistook the UPCAST'd inner axis
-//     for the reduce loop -> "undeclared identifier").
-// v3 wires multi-axis LOCAL: render_uop.c's RmuGlobalDecode now carries
-// a per-LOCAL (stride, modulus) `tt`-decode mirroring its multi-GLOBAL
-// `tg`-decode, and rmt_dag_dispatch_shape's `threads = prod(LOCAL
-// extents)` already supported any axis count.  GROUP is still SKIPPED.
+// Sections ported:
+//   1.  TC  (heuristic.py 27-46)     -- thvm-specific Metal-only marker
+//                                       apply + 8-multiple GLOBAL promote;
+//                                       returns on success
+//   2.  IMAGE float4 (51-62)         -- SKIPPED (thvm has no ImageDType)
+//   3.  MATVEC (65-82)               -- PORTED
+//   4.  GROUPTOP early gate (84-90)  -- PORTED (kernel_apply_opt declines
+//                                       KOP_GROUPTOP today, so the section
+//                                       is structurally faithful but no-op
+//                                       in practice; will fire when the
+//                                       DAG path adds GROUP support)
+//   5.  Mask UPCAST  (97-106)        -- SKIPPED (TODO: detect IWHERE
+//                                       mask axes from the DAG)
+//   6.  Main UPCAST loop (108-134)   -- PORTED (the load-bearing pass)
+//   7.  UNROLL last reduce (138-150) -- PORTED
+//   8.  Easy UPCAST fallback (153-5) -- PORTED
+//   9.  LOCAL (159-176)              -- PORTED
+//   10. THREAD (180-189)             -- SKIPPED (thvm has no KOP_THREAD)
+//   11. NOLOCALS env                 -- PORTED (no-op when backend declines)
 //
-// === Heuristic cases ported (mirrors hand_coded_optimizations) ====
-//   1. TC -- matmul-shaped + f32 + K % tile == 0 -> KOP_TC(tile=8).
-//      (uop_recognise_tc already wraps every matmul STORE in
-//      OPT(_, TC, 0) inside cg_emit_via_uop, so this is mostly a
-//      re-affirm; kept for the explicit `applied_opts` record on the
-//      schedule path + future parallel-TC dispatch work.)
-//   2. UPCAST -- for a TILEABLE reduce kernel (OPT_CONV-marked conv-
-//      matmul kernel with a multi-axis output + a reduce nest -- the
-//      BS=512 beautiful_mnist conv kernels, which lower through
-//      render_uop.c's rmu_emit_conv template), run tinygrad's UPCAST
-//      loop: while output_loop_product >= 1024 and upcast_size < 16,
-//      split the INNERMOST KAX_LOOP axis that divides 4 (then 2) --
-//      repeating naturally spreads the upcast across axes.  Plus the
-//      "if nothing upcasted, do one easy UPCAST 4" fallback.  For a
-//      non-tileable kernel keep the prior conservative one-axis pass
-//      (4 then 2 on the last axis) -- the generic accumulator path
-//      that maxpool / BatchNorm reductions lower through has only been
-//      validated on a one-UPCAST-one-LOCAL output.
-//   3. LOCAL -- for a tileable conv kernel, tinygrad's "local groups"
-//      pass: scan KAX_LOOP axes innermost->outermost, split each by
-//      the largest factor in {32,16,8,4,3,2} that divides and keeps
-//      prod(LOCAL extents) <= 256, up to 3 LOCAL axes (the renderer's
-//      multi-LOCAL `tt`-decode -- piece 1 -- handles >=2).  For a
-//      non-tileable kernel keep the prior single-LOCAL split.
-//   4. GROUP -- SKIPPED for v3: the GROUP_REDUCE renderer + dispatch
-//      readers were validated only on the un-UPCAST'd reduce-tail
-//      shape; re-enable once cross-checked against a UPCAST'd output.
-//   5. UNROLL -- skipped (renderer already `#pragma unroll`s small
-//      reduce axes by default; an explicit full UNROLL still confuses
-//      the reduce-range matcher).
-//
-// Each kernel_apply_opt can fail (axis out of range, factor doesn't
-// divide, validation reject) -- we skip and try the next, exactly as
-// tinygrad's `except KernelOptError: pass`.  After each successful
-// apply the axis indices SHIFT, so we re-query the axis list every
-// time.
+// Backend gate: Metal id=2 only.  CUDA enablement is a separate session.
 
 // --- env knob ------------------------------------------------------
-// Default ON (v2; see header).  HAND_CODED_OPTS=0 disables; NOOPT=1
-// (tinygrad's inverse-sense knob) also disables and wins if both set.
+// Default ON.  HAND_CODED_OPTS=0 disables; NOOPT=1 (tinygrad's
+// inverse-sense knob) also disables and wins if both set.
 // Memoised: -1 = uninitialised, 0 = off, 1 = on.
 static int HAND_CODED_OPTS_ENABLED = -1;
 static int hand_coded_opts_enabled(void) {
@@ -86,21 +41,29 @@ static int hand_coded_opts_enabled(void) {
       HAND_CODED_OPTS_ENABLED = 0;            // tinygrad NOOPT=1
     } else {
       char const *e = getenv("HAND_CODED_OPTS");
-      // Default ON.  Only an explicit "0" disables.
       HAND_CODED_OPTS_ENABLED = (e != NULL && e[0] == '0') ? 0 : 1;
     }
   }
   return HAND_CODED_OPTS_ENABLED;
 }
 
+// Integer env reader; falls back to `dflt` if unset / unparseable.
+// Mirrors tinygrad helpers.getenv for the MV_* + NOLOCALS knobs.
+static int hand_opt_getenv_int(char const *name, int dflt) {
+  char const *e = getenv(name);
+  if (e == NULL || e[0] == '\0') return dflt;
+  int sign = 1, v = 0; char const *p = e;
+  if (*p == '-') { sign = -1; p++; }
+  if (!(*p >= '0' && *p <= '9')) return dflt;
+  while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+  return sign * v;
+}
+
 // --- axis snapshot -------------------------------------------------
-// Unified view of "the kernel's current axis list", whichever backing
-// store applies.  Mirrors tinygrad's k.rngs / k.full_shape / k.axis
-// _types: a flat array of (kax_type, extent), indexed 0..n.  In DAG
-// mode the index IS the RANGE leaf's axis_id (the lifter assigns 0..n
-// in order, and kernel_apply_opt's DAG split shifts axis_ids > target
-// right by one, keeping index == axis_id).  In schedule mode the index
-// is the position in axes_compute_full_shape's derived list.
+// Unified view of "the kernel's current axis list" -- mirrors tinygrad's
+// k.rngs / k.full_shape / k.axis_types.  The slot index IS the RANGE
+// leaf's axis_id (the lifter and kernel_apply_opt's DAG split keep
+// axis_id == ordinal position).
 typedef struct {
   u32 n;
   u8  kax_type[MAX_AXES];
@@ -110,180 +73,99 @@ typedef struct {
 static int hand_opt_snapshot_axes(KernelEntry const *ke, HandOptAxes *out) {
   if (ke == NULL || out == NULL) return 0;
   out->n = 0;
-  if (ke->cached_lift.store_root != 0) {
-    u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
-    u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
-                                 exts, MAX_AXES);
-    if (n == 0) return 0;
-    // ids are sorted ascending; treat the slot index as the axis index
-    // (the lifter / DAG-split keep axis_id == ordinal position).  If a
-    // gap appears (shouldn't, but be defensive), bail rather than mis-
-    // index a subsequent kernel_apply_opt.
-    for (u32 i = 0; i < n; i++) {
-      if (ids[i] != i) return 0;
-      if (types[i] > KAX_GROUP_REDUCE) return 0;
-      out->kax_type[i] = (u8)types[i];
-      out->extent[i]   = exts[i];
-    }
-    out->n = n;
-    return 1;
+  if (ke->cached_lift.store_root == 0) return 0;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
+                               exts, MAX_AXES);
+  if (n == 0) return 0;
+  for (u32 i = 0; i < n; i++) {
+    if (ids[i] != i) return 0;        // axis_id gap -> bail (caller skips)
+    if (types[i] > KAX_GROUP_REDUCE) return 0;
+    out->kax_type[i] = (u8)types[i];
+    out->extent[i]   = exts[i];
   }
-  if (ke->schedule != NULL) {
-    u32 exts[MAX_AXES];
-    u32 n = axes_compute_full_shape(ke, exts, MAX_AXES);
-    if (n == 0) return 0;
-    for (u32 i = 0; i < n; i++) {
-      out->kax_type[i] = axes_resolve_kax_type(ke, i);
-      out->extent[i]   = exts[i];
-    }
-    out->n = n;
-    return 1;
-  }
-  return 0;
-}
-
-// Index of the (last) REDUCE-class axis -- mirrors the way tinygrad
-// uses k.first_reduce / k.unrollable_dims for the "reduce" axis.  We
-// take the LAST KAX_REDUCE (matches propose_reduce_axis_index).
-// Returns 0xFFFFFFFF if none.
-static u32 hand_opt_reduce_axis(HandOptAxes const *ax) {
-  for (i32 i = (i32)ax->n - 1; i >= 0; i--) {
-    if (ax->kax_type[i] == KAX_REDUCE) return (u32)i;
-  }
-  return 0xFFFFFFFFu;
-}
-
-// Index of the innermost (last) "upcastable" output axis -- a KAX_LOOP
-// or KAX_GLOBAL axis (the renderer's default-parallelise turns LOOP
-// output axes into GLOBAL grid axes, so both are candidates).  We scan
-// from the back, skipping the reduce/upcast/unroll/local axes.  Mirrors
-// tinygrad's k.upcastable_dims[-1].  Returns 0xFFFFFFFF if none.
-static u32 hand_opt_last_output_axis(HandOptAxes const *ax) {
-  for (i32 i = (i32)ax->n - 1; i >= 0; i--) {
-    if (ax->kax_type[i] == KAX_LOOP) return (u32)i;
-  }
-  return 0xFFFFFFFFu;
-}
-
-// Same as above but skip axes with extent 1 (degenerate -- already
-// fully consumed by a prior split, can't be split further).  Used by
-// the multi-LOCAL pass to find the next-LOOP axis that's still
-// non-trivial.
-static u32 hand_opt_last_nontriv_output_axis(HandOptAxes const *ax) {
-  for (i32 i = (i32)ax->n - 1; i >= 0; i--) {
-    if (ax->kax_type[i] == KAX_LOOP && ax->extent[i] > 1) return (u32)i;
-  }
-  return 0xFFFFFFFFu;
-}
-
-// Product of every KAX_LOOP output-axis extent (tinygrad's
-// prod(output_shape[i] for i in upcastable_dims)).
-static u64 hand_opt_output_loop_product(HandOptAxes const *ax) {
-  u64 p = 1;
-  for (u32 i = 0; i < ax->n; i++) {
-    if (ax->kax_type[i] == KAX_LOOP) p *= (u64)ax->extent[i];
-  }
-  return p;
-}
-
-// Product of every KAX_UPCAST extent (== floats already upcasted per
-// thread; tinygrad's k.upcast_size()).
-static u64 hand_opt_upcast_size(HandOptAxes const *ax) {
-  u64 p = 1;
-  for (u32 i = 0; i < ax->n; i++) {
-    if (ax->kax_type[i] == KAX_UPCAST) p *= (u64)ax->extent[i];
-  }
-  return p;
-}
-
-// Product of every KAX_LOCAL extent (== threadgroup size; tinygrad's
-// prod(local_dims)).  1 if no LOCAL axes yet.
-static u64 hand_opt_local_size(HandOptAxes const *ax) {
-  u64 p = 1;
-  for (u32 i = 0; i < ax->n; i++) {
-    if (ax->kax_type[i] == KAX_LOCAL) p *= (u64)ax->extent[i];
-  }
-  return p;
-}
-
-// Count of KAX_LOCAL axes (tinygrad caps local-split to <= 3 axes).
-static u32 hand_opt_n_local_axes(HandOptAxes const *ax) {
-  u32 n = 0;
-  for (u32 i = 0; i < ax->n; i++) if (ax->kax_type[i] == KAX_LOCAL) n++;
-  return n;
-}
-
-// Count of KAX_LOOP output axes.
-static u32 hand_opt_n_loop_axes(HandOptAxes const *ax) {
-  u32 n = 0;
-  for (u32 i = 0; i < ax->n; i++) if (ax->kax_type[i] == KAX_LOOP) n++;
-  return n;
-}
-
-// True iff the lifted DAG's STORE value is OPT(_, CONV, _) -- the
-// im2col `_pool` conv-matmul marker installed by uop_recognise_conv.
-// These kernels lower through render_uop.c's rmu_emit_conv template,
-// which handles a multi-UPCAST + multi-LOCAL output tiling correctly
-// (the (cin,kh,kw) reduce nest is recovered + nested, the output axes
-// promoted/threadbound).  Other reduce kernels (maxpool, BatchNorm
-// reductions) lower through the generic accumulator path, which the
-// surgical suite has only validated on a one-UPCAST-one-LOCAL output;
-// deeper tiling there can produce an axis order the generic path
-// emits out of dependency order ("use of undeclared identifier") and
-// the kernel falls to the slow per-element interpreter.  So the deep
-// conv-style tiling (case 2/3's "tileable" arms) is gated on this.
-static int hand_opt_is_conv_kernel(KernelEntry const *ke) {
-  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
-  Term sroot = ke->cached_lift.store_root;
-  if (term_tag(sroot) != TAG_UOP || term_ext(sroot) != UOP_STORE) return 0;
-  Term value = heap_read(term_val(sroot) + 2);
-  // Already wrapped (rare -- recogniser usually runs at render time)?
-  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
-      && uop_opt_kind(value) == UOP_OPT_CONV) return 1;
-  // Otherwise detect the conv2d im2col-matmul SHAPE structurally -- this
-  // is the same predicate uop_recognise_conv uses, so a 1 here means the
-  // kernel WILL render through rmu_emit_conv (which copes with the deep
-  // multi-UPCAST + multi-LOCAL tiling).
-  return uop_classify_conv2d(sroot, NULL);
-}
-
-// True iff this is a conv-matmul kernel we want to tile deeply: the
-// OPT_CONV marker is present AND the output is multi-axis (>=2 KAX_LOOP)
-// AND there's at least one reduce axis -- the shape the BS=512
-// beautiful_mnist conv-matmul kernels take (output {B, cOut, hOut, wOut}
-// or flattened {cOut, B*hOut*wOut}, reduce nest (cin,kh,kw)).  Everything
-// else gets the conservative one-UPCAST-one-LOCAL treatment.
-static int hand_opt_is_tileable_reduce(KernelEntry const *ke,
-                                       HandOptAxes const *ax) {
-  if (!hand_opt_is_conv_kernel(ke)) return 0;
-  u32 r = hand_opt_reduce_axis(ax);
-  if (r == 0xFFFFFFFFu) return 0;
-  if (hand_opt_n_loop_axes(ax) < 2) return 0;
-  // Gate the deep conv tiling on a reasonably large contraction (K >=
-  // 128) AND a non-trivial contiguous spatial axis (>= 4).  The cheap
-  // first conv (K ~ 25) stays excluded.  The late-stage small-spatial
-  // convs (wOut 6, 8) now enter the deep tiling path -- when wOut is
-  // too small for the dual-UPCAST + outer-LOCAL coalescing (wOut/2 < 8
-  // would leave fewer than 8 threads per group), the case-2 UPCAST and
-  // case-3 LOCAL passes pick narrower factors adaptively (single cOut
-  // UPCAST + full-wOut LOCAL).
-  if (ax->extent[r] < 128) return 0;
-  u32 c_axis = hand_opt_last_output_axis(ax);
-  if (c_axis == 0xFFFFFFFFu || ax->extent[c_axis] < 4) return 0;
-  // cOut must be UPCAST-able (>=4) so the case-2 register block has
-  // enough M to amortise the conv-input load.
-  u32 first = 0xFFFFFFFFu;
-  for (u32 i = 0; i < ax->n; i++) {
-    if (ax->kax_type[i] == KAX_LOOP) { first = i; break; }
-  }
-  if (first == 0xFFFFFFFFu || ax->extent[first] < 4) return 0;
+  out->n = n;
   return 1;
 }
 
-// --- matmul classification ----------------------------------------
-// Returns 1 with K_extent in *out_K if the kernel is matmul-shaped
-// f32.  Mirrors tinygrad's "kernel has exactly one reduce axis + the
-// device has tensor cores + dtype matches" gate.
+// --- tinygrad scheduler primitives over HandOptAxes -----------------
+
+// tinygrad: k.upcastable_dims = [i for i in axes_of(GLOBAL, LOCAL, LOOP)
+//                                if full_shape[i] > 1].  thvm's axis types
+// are KAX_LOOP/GLOBAL/LOCAL (no separate WARP); LOOP corresponds to GLOBAL
+// pre-promotion.  Returns count; out[] gets the axis indices.
+static u32 hand_opt_upcastable_dims(HandOptAxes const *ax, u32 *out) {
+  u32 n = 0;
+  for (u32 i = 0; i < ax->n; i++) {
+    u8 t = ax->kax_type[i];
+    if ((t == KAX_LOOP || t == KAX_GLOBAL || t == KAX_LOCAL) && ax->extent[i] > 1) {
+      out[n++] = i;
+    }
+  }
+  return n;
+}
+
+// tinygrad: k.unrollable_dims = [i for i in axes_of(GROUP_REDUCE, REDUCE)
+//                                if full_shape[i] > 1].
+static u32 hand_opt_unrollable_dims(HandOptAxes const *ax, u32 *out) {
+  u32 n = 0;
+  for (u32 i = 0; i < ax->n; i++) {
+    u8 t = ax->kax_type[i];
+    if ((t == KAX_REDUCE || t == KAX_GROUP_REDUCE) && ax->extent[i] > 1) {
+      out[n++] = i;
+    }
+  }
+  return n;
+}
+
+// tinygrad: k.axes_of(*types).
+static u32 hand_opt_axes_of_n(HandOptAxes const *ax, u8 const *types, u32 n_types) {
+  u32 n = 0;
+  for (u32 i = 0; i < ax->n; i++) {
+    for (u32 j = 0; j < n_types; j++) {
+      if (ax->kax_type[i] == types[j]) { n++; break; }
+    }
+  }
+  return n;
+}
+
+// tinygrad: k.upcast_size() = prod(full_shape[a] for a in axes_of(UPCAST, UNROLL)).
+static u64 hand_opt_upcast_size(HandOptAxes const *ax) {
+  u64 p = 1;
+  for (u32 i = 0; i < ax->n; i++) {
+    if (ax->kax_type[i] == KAX_UPCAST || ax->kax_type[i] == KAX_UNROLL) {
+      p *= (u64)ax->extent[i];
+    }
+  }
+  return p;
+}
+
+// tinygrad: prod(output_shape[i] for i in upcastable_dims).
+// output_shape replaces extents on REDUCE/UNROLL/GROUP_REDUCE axes with 1;
+// upcastable_dims is GLOBAL/LOCAL/LOOP only, so equivalently just the
+// product of upcastable extents.
+static u64 hand_opt_output_loop_product(HandOptAxes const *ax) {
+  u32 dims[MAX_AXES];
+  u32 n = hand_opt_upcastable_dims(ax, dims);
+  u64 p = 1;
+  for (u32 i = 0; i < n; i++) p *= (u64)ax->extent[dims[i]];
+  return p;
+}
+
+// tinygrad: k.upcasted = len(axes_of(UPCAST, UNROLL)).
+static u32 hand_opt_upcasted(HandOptAxes const *ax) {
+  u8 t[] = { KAX_UPCAST, KAX_UNROLL };
+  return hand_opt_axes_of_n(ax, t, 2);
+}
+
+// tinygrad: k.group_for_reduces = len(axes_of(GROUP_REDUCE)).
+static u32 hand_opt_group_for_reduces(HandOptAxes const *ax) {
+  u32 n = 0;
+  for (u32 i = 0; i < ax->n; i++) if (ax->kax_type[i] == KAX_GROUP_REDUCE) n++;
+  return n;
+}
+
+// --- matmul classification (for TC kept as-is from prior commit) ----
 static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   if (ke->output_dtype != DT_FP32) return 0;
@@ -296,21 +178,120 @@ static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   return 1;
 }
 
-// True iff the kernel is dispatched on the Metal backend.  CPU kernels
-// route matmul/gemv/dot/conv through cBLAS / the clang-JIT'd
+// --- Metal-only gate ------------------------------------------------
+// CPU kernels route matmul/gemv/dot/conv through cBLAS / the clang-JIT'd
 // interpreter from the bare (un-OPT'd) DAG; applying a hand-coded opt
-// mutates the DAG so those classifiers stop recognising it -> the
-// kernel falls back to the slow per-element interpreter (or, for the
-// BLAS-parity tests, the dispatch-count assertion fails).  So the
-// heuristic only runs for Metal-backed kernels.
+// mutates the DAG so those classifiers stop recognising it.  CUDA
+// admission is a separate session.
 static int hand_opt_kernel_on_metal(KernelEntry const *ke) {
   Backend *b = NULL;
   if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
     b = TENS[ke->output_tid].backend;
   }
   if (b == NULL) b = DEFAULT_BACKEND;
-  // METAL_BACKEND.id == 2 (cpu == 1) -- see kautotune_backend_id.
   return b != NULL && b->id == 2;
+}
+
+// --- matvec detection (heuristic.py 65-82) --------------------------
+// Returns 1 if the kernel matches tinygrad's matvec shape:
+//   STORE.value is REDUCE_SUM of MUL of INDEX_E,INDEX_E
+//   AND first reduce axis appears directly in idx0 as an IADD arm
+//   AND every axis referenced in idx0 is also referenced in idx1.
+// Writes the first reduce axis_id to *out_red_aid + decoded idx1 coeffs
+// into *out_idx1 so the caller can check divisibility.
+static int hand_opt_match_matvec(Term root, u32 *out_red_aid,
+                                 UopDagAddrCoeffsView *out_idx0,
+                                 UopDagAddrCoeffsView *out_idx1) {
+  if (root == 0 || term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) {
+    return 0;
+  }
+  Term value = heap_read(term_val(root) + 2);
+  // Peel a leading OPT(_, _) wrapper if present (uop_recognise_tc /
+  // _conv may have wrapped the REDUCE).
+  while (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT) {
+    value = uop_opt_target(value);
+  }
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
+  if (uop_reduce_kind(value) != REDUCE_SUM) return 0;
+  if (uop_reduce_n_axes(value) < 1) return 0;
+  u32 red_aid = uop_reduce_axis(value, 0);
+  Term mul = uop_reduce_src(value);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term a = heap_read(term_val(mul) + 0);
+  Term b = heap_read(term_val(mul) + 1);
+  if (term_tag(a) != TAG_UOP || term_ext(a) != UOP_INDEX_E) return 0;
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_INDEX_E) return 0;
+  Term addr_a = heap_read(term_val(a) + 1);
+  Term addr_b = heap_read(term_val(b) + 1);
+  UopDagAddrCoeffsView ca, cb;
+  uop_dag_decode_addr_coeffs(addr_a, &ca);
+  uop_dag_decode_addr_coeffs(addr_b, &cb);
+  if (!ca.ok || !cb.ok) return 0;
+  // The first reduce range must appear directly in idx0 (i.e., as an
+  // axis with coeff 1 -- "u is first_reduce_rng" in tinygrad).  Our
+  // decoder normalises a bare RANGE leaf to coeff 1, so check that.
+  if (uop_dag_addr_coeff_lookup(&ca, red_aid) != 1) return 0;
+  // All idx0 axes must also be in idx1.
+  for (u32 i = 0; i < ca.n_axes; i++) {
+    if (uop_dag_addr_coeff_lookup(&cb, ca.axis_ids[i]) == 0) return 0;
+  }
+  if (out_red_aid) *out_red_aid = red_aid;
+  if (out_idx0)    *out_idx0    = ca;
+  if (out_idx1)    *out_idx1    = cb;
+  return 1;
+}
+
+// --- main UPCAST loop's stride-heuristic helper (heuristic.py 115-128).
+// For one candidate axis `rng` (axis_id), with current set of UPCAST/
+// UNROLL axes `upcast_unroll_aids`, walk the kernel's INDEX_E.addrs and
+// compute:
+//   - any_strideless: 1 iff at least one buf has rng absent from its
+//     addr AND every UPCAST/UNROLL axis present in that buf's addr (the
+//     "rng not in b.idx.backward_slice && all(r2 in ...)" test);
+//   - num_strides:    count of bufs whose addr references rng;
+//   - sum_strides:    sum of rng's coefficients across all bufs that
+//     reference it (tinygrad walks split_uop(ADD) and counts bare
+//     RANGE arms as 1 and IMUL(RANGE,CONST) arms as CONST; the decoder
+//     already accumulates that into the per-axis coefficient).
+// Returns any_strideless; the caller uses (num_strides, sum_strides)
+// to sort the candidate list.
+static int hand_opt_upcast_buf_stride(Term root, u32 rng,
+                                      u32 const *upcast_unroll_aids,
+                                      u32 n_uu,
+                                      u32 *out_num_strides,
+                                      u32 *out_sum_strides) {
+  Term addrs[64];
+  u32 n_bufs = uop_dag_collect_index_e_addrs(root, addrs, 64);
+  int any_strideless = 0;
+  u32 num_strides = 0;
+  u32 sum_strides = 0;
+  for (u32 i = 0; i < n_bufs; i++) {
+    UopDagAddrCoeffsView cv;
+    uop_dag_decode_addr_coeffs(addrs[i], &cv);
+    if (!cv.ok) continue;
+    u32 coeff = uop_dag_addr_coeff_lookup(&cv, rng);
+    if (coeff != 0) {
+      num_strides += 1;
+      sum_strides += coeff;
+    } else {
+      // rng absent from this buf.  Check: are all existing UPCAST/UNROLL
+      // axes also absent?  tinygrad's test is "rng not in BS && all(r2 in
+      // BS for r2 in upcast/unroll ranges)" -- i.e., "the candidate axis
+      // is absent but the already-upcasted ones are present".  An UPCAST
+      // axis present in EVERY buf means upcasting on rng will not
+      // conflict (rng's stride-0-on-this-buf vectorizes the load).
+      int all_uu_present = 1;
+      for (u32 j = 0; j < n_uu; j++) {
+        if (uop_dag_addr_coeff_lookup(&cv, upcast_unroll_aids[j]) == 0) {
+          all_uu_present = 0; break;
+        }
+      }
+      if (all_uu_present) any_strideless = 1;
+    }
+  }
+  *out_num_strides = num_strides;
+  *out_sum_strides = sum_strides;
+  return any_strideless;
 }
 
 // --- the heuristic -------------------------------------------------
@@ -319,8 +300,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   if (ke == NULL) return 0;
   // Mark "decided" up front (whether or not anything applies) so a
   // re-dispatch doesn't re-run.  Mirrors kernel_autotune's
-  // ke->schedule->autotuned = 1 at the start.  schedule may be NULL
-  // for some test fixtures; tolerate that.
+  // ke->schedule->autotuned = 1 at the start.
   if (ke->schedule != NULL) ke->schedule->autotuned = 1;
   if (!hand_coded_opts_enabled()) return 0;
   if (!hand_opt_kernel_on_metal(ke)) return 0;
@@ -328,19 +308,12 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   u32 n_applied = 0;
   HandOptAxes ax;
 
-  // ---- 1. tensor cores first ----
-  // tinygrad: if the kernel is matmul-shaped and the device has TCs,
-  // try Opt(OptOps.TC, 0, ...) -- and if it sticks, apply only the TC
-  // hand-coded extras (M/N upcasts) then RETURN; the generic
-  // UPCAST/LOCAL/GROUP/UNROLL catalogue does NOT run on a TC kernel.
-  // thvm: KOP_TC(tile=8/16/32) when K % tile == 0.  thvm's KOP_TC is a
-  // marker (uop_recognise_tc already wraps every matmul STORE in
-  // OPT(_, TC, 0) inside cg_emit_via_uop -- the simdgroup_matrix
-  // template fires off that); splitting M/N/K via UPCAST/UNROLL would
-  // turn their extents into non-8-multiples and force the template to
-  // bail to the scalar accumulator (slower).  So for v1: apply TC,
-  // then RETURN.  (Follow-up: K-padding + a tiled M/N reshape, like
-  // tinygrad, to unlock parallel-TC with sub-tile M/N.)
+  // ---- Section 1: TC (heuristic.py 27-46) ----------------------------
+  // thvm-specific: KOP_TC marker (uop_recognise_tc has usually already
+  // wrapped the matmul STORE in OPT(_, TC, 0); this is the explicit
+  // record on the schedule path) + parallel-TC GLOBAL promote for any
+  // 8-multiple output axis.  Tinygrad RETURNs after TC + M/N UPCAST;
+  // we mirror that.
   {
     u32 K = 0;
     if (hand_opt_classify_matmul(ke, &K)) {
@@ -351,17 +324,6 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         KOpt opt = { KOP_TC, 0, tile };
         if (kernel_apply_opt(ke, opt)) { n_applied++; break; }
       }
-      // Parallel TC: promote the matmul's output (M/N) axes from LOOP to
-      // GLOBAL so the renderer's simdgroup_matrix template binds one
-      // simdgroup per 8x8 output tile across the grid, instead of running
-      // every tile serially in a single guarded simdgroup (~75x slower --
-      // see docs/perf_cross_backend.md).  An output axis qualifies when
-      // its extent is a multiple of 8 (the simdgroup_matrix<8,8> tile);
-      // the K reduce axis is KAX_REDUCE so it is never touched, and a
-      // non-8-multiple output axis stays a LOOP (the template keeps it as
-      // an in-kernel serial loop, still correct).  Only meaningful on
-      // Metal; the dispatch-shape reader (cg_tile_metal_dispatch_shape)
-      // sizes grid = product(extent/8) threadgroups x 32 threads.
       if (n_applied > 0) {
         u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
         u32 na = uop_dag_collect_axes(ke->cached_lift.store_root, ids,
@@ -377,209 +339,364 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     }
   }
 
-  if (!hand_opt_snapshot_axes(ke, &ax)) return n_applied;
-  int tileable = hand_opt_is_tileable_reduce(ke, &ax);
+  // ---- Section 2: IMAGE float4 -- SKIPPED (no ImageDType in thvm) ----
 
-  // ---- 2. UPCAST: pull floats into per-thread registers ----
-  // tinygrad's "potentially do more upcasts" loop (heuristic.py
-  //   while prod(output_loop_dims) >= 1024 and upcast_size() < 32:
-  //     pick an upcastable axis, UPCAST by 3 or 4)
-  // plus its "if nothing upcasted and easy to, do one UPCAST 4" fallback
-  // and the trailing "if not k.upcasted ... UPCAST last by 4".
-  //
-  // For a TILEABLE reduce kernel ({B,cOut,hOut,wOut}-shaped output with
-  // a (cin,kh,kw) reduce nest -- the BS=512 beautiful_mnist conv kernels)
-  // we run the loop: each pass picks the INNERMOST KAX_LOOP axis whose
-  // extent divides 4 (then 2), splits its inner half off as KAX_UPCAST.
-  // Repeating naturally SPREADS the upcast across axes (once an axis's
-  // outer half no longer divides, the scan moves to the next one).  Cap
-  // upcast_size at ~16 floats/thread (each step at most x4, conservative
-  // side of tinygrad's <32 -- the conv2 reference kernel does 16).
-  // For NON-tileable kernels keep the prior conservative one-axis pass
-  // (try 4 then 2 on the last output axis), unchanged.
-  if (tileable) {
-    // Two-axis register-blocking: UPCAST on the M axis (output axis 0 --
-    // the conv-matmul "M" / cOut output axis: the weight read depends on
-    // it, the conv-input read does not) AND on the contiguous spatial axis
-    // (the LAST output axis -- wOut: the conv-input read depends on it,
-    // the weight read does not).  rmu_emit_conv now emits Um*Uw straight-
-    // line accumulators inside the reduce nest; the MSL compiler CSEs the
-    // weight load (cOut-only) across Uw outputs and the conv-input load
-    // (wOut-only) across Um outputs -- the classic 2D register-blocked
-    // matmul inner, with Um+Uw loads sustaining Um*Uw MADs per iter.
-    if (hand_opt_snapshot_axes(ke, &ax)) {
-      u32 m_axis = 0xFFFFFFFFu;
-      for (u32 i = 0; i < ax.n; i++) {
-        if (ax.kax_type[i] == KAX_LOOP) { m_axis = i; break; }
-      }
-      if (m_axis != 0xFFFFFFFFu) {
-        u32 ext = ax.extent[m_axis];
-        static const u32 m_factors[] = {8, 4, 2};
-        for (u32 i = 0; i < 3; i++) {
-          u32 f = m_factors[i];
-          if (ext % f != 0 || ext / f < 1) continue;
-          KOpt opt = { KOP_UPCAST, (u8)m_axis, f };
-          if (kernel_apply_opt(ke, opt)) n_applied++;
-          break;
-        }
-      }
-    }
-    // Second UPCAST on the contiguous spatial axis (wOut) -- the 2D
-    // register-block inner.  Only fires when (a) the M UPCAST product
-    // is modest (<=4) so total live registers stay reasonable, AND (b)
-    // wOut OUTER / 2 >= 32 -- a FULL simdgroup width of threadgroup
-    // lanes is left for the LOCAL pass even after the inner-2 split.
-    // beautiful_mnist's wOut maxes out at 20, so this is dormant on
-    // that workload; large-spatial convs (wOut >= 64) do exercise it.
-    if (hand_opt_snapshot_axes(ke, &ax)
-        && hand_opt_upcast_size(&ax) <= 4) {
-      u32 c_axis = hand_opt_last_output_axis(&ax);
-      if (c_axis != 0xFFFFFFFFu) {
-        u32 ext = ax.extent[c_axis];
-        u32 f = 2;
-        if (ext % f == 0 && ext / f >= 32) {
-          KOpt opt = { KOP_UPCAST, (u8)c_axis, f };
-          if (kernel_apply_opt(ke, opt)) n_applied++;
-        }
-      }
-    }
-  } else {
-    static const u32 upcast_factors[] = {4, 2};
-    for (u32 i = 0; i < 2; i++) {
-      if (!hand_opt_snapshot_axes(ke, &ax)) break;
-      if (hand_opt_upcast_size(&ax) >= 32) break;
-      u32 axis = hand_opt_last_output_axis(&ax);
-      if (axis == 0xFFFFFFFFu) break;
-      u32 f = upcast_factors[i];
-      if (ax.extent[axis] % f != 0 || ax.extent[axis] / f < 1) continue;
-      if (i > 0 && hand_opt_output_loop_product(&ax) < 1024) break;
-      KOpt opt = { KOP_UPCAST, (u8)axis, f };
-      if (kernel_apply_opt(ke, opt)) { n_applied++; }
-    }
-  }
-
-  // ---- 3. LOCAL: fill the threadgroup ----
-  // tinygrad's "local groups" pass (heuristic.py): rank the
-  // GLOBAL/LOOP-class axes, then for each pick the largest local_sz in
-  //   ([32] if axis==0) + [16,8,4,3,2]
-  // with full_shape % local_sz == 0 and (running local product) *
-  // local_sz <= 128, apply LOCAL on up to 3 axes.  We mirror that:
-  // multi-axis LOCAL is now wired in the renderer (RmuGlobalDecode's
-  // per-LOCAL (stride,modulus) tt-decode -- piece 1) and
-  // rmt_dag_dispatch_shape's threads = prod(LOCAL extents).  Cap the
-  // threadgroup product at 256 (Apple's maxTotalThreadsPerThreadgroup
-  // is 1024; 256 matches tinygrad-on-Metal and keeps occupancy high).
-  //
-  // We scan KAX_LOOP axes from innermost to outermost (matches the
-  // renderer's emission/decode order); after each split the outer half
-  // stays KAX_LOOP (-> promoted GLOBAL grid axis) and the inner half
-  // becomes KAX_LOCAL.  Re-snapshot every pass (axis indices shift).
-  // For NON-tileable kernels: keep the prior single-LOCAL behaviour
-  // (one split, largest factor up to 256 on the last output axis).
+  // ---- Section 3: MATVEC (heuristic.py 65-82) -----------------------
+  // SUM-of-MUL-of-INDEX_E,INDEX_E where the first reduce axis appears
+  // directly in idx0 AND every idx0 axis appears in idx1.  Apply
+  // GROUP(reduce, MV_THREADS_PER_ROW), LOCAL(global, MV_BLOCKSIZE),
+  // UPCAST(global, MV_ROWS_PER_THREAD), then RETURN.
   {
-    u32 local_cap = 256u;
-    if (tileable) {
-      // LOCAL on the contiguous spatial axis (wOut -- LAST output axis,
-      // innermost stride 1 in the conv-input read): consecutive threads
-      // land on consecutive conv-input columns (coalesced).  Prefer a
-      // multiple of the simdgroup width (32) when possible.  Cap product
-      // at local_cap (== 256).
-      static const u32 conv_local_factors[] = {32, 64, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2};
-      u32 cur_local_prod = 1;
-      if (hand_opt_snapshot_axes(ke, &ax)) {
-        u32 c_axis = hand_opt_last_output_axis(&ax);
-        if (c_axis != 0xFFFFFFFFu) {
-          u32 ext = ax.extent[c_axis];
-          for (u32 i = 0; i < 12; i++) {
-            u32 f = conv_local_factors[i];
-            if (f > (u32)local_cap) continue;
-            if (ext % f != 0 || ext / f < 1) continue;
-            KOpt opt = { KOP_LOCAL, (u8)c_axis, f };
-            if (kernel_apply_opt(ke, opt)) { n_applied++; cur_local_prod = f; }
-            break;
+    int MV          = hand_opt_getenv_int("MV", 1);
+    int MV_BLOCK    = hand_opt_getenv_int("MV_BLOCKSIZE", 4);
+    int MV_TPR      = hand_opt_getenv_int("MV_THREADS_PER_ROW", 8);
+    int MV_RPT      = hand_opt_getenv_int("MV_ROWS_PER_THREAD", 4);
+    if (MV != 0 && (MV_BLOCK > 1 || MV_TPR > 1 || MV_RPT > 1)) {
+      u32 red_aid = 0;
+      UopDagAddrCoeffsView idx0v, idx1v;
+      (void)idx1v;
+      if (hand_opt_snapshot_axes(ke, &ax)
+          && ax.n >= 2
+          && hand_opt_match_matvec(ke->cached_lift.store_root,
+                                   &red_aid, &idx0v, &idx1v)) {
+        // ax indices are axis_ids (snapshot guarantee).
+        u32 red_ext = (red_aid < ax.n) ? ax.extent[red_aid] : 0;
+        // Find a GLOBAL/LOOP axis (the "global_idx" loop in tinygrad,
+        // which iterates `axes_of(AxisType.GLOBAL)`).
+        for (u32 i = 0; i < ax.n; i++) {
+          u8 t = ax.kax_type[i];
+          if (t != KAX_LOOP && t != KAX_GLOBAL) continue;
+          u32 g_ext = ax.extent[i];
+          if (red_ext == 0 || g_ext == 0) continue;
+          if ((red_ext % (u32)MV_TPR) != 0) continue;
+          if ((g_ext   % (u32)(MV_BLOCK * MV_RPT)) != 0) continue;
+          // Apply GROUP on the FIRST reduce axis (tinygrad uses axis 0
+          // which is the index into axes_of(REDUCE); we use the axis_id).
+          if (MV_TPR > 1) {
+            KOpt o = { KOP_GROUP, (u8)red_aid, (u32)MV_TPR };
+            if (kernel_apply_opt(ke, o)) n_applied++;
+          }
+          if (MV_BLOCK > 1) {
+            // After GROUP-split, axis indices may have shifted; re-snapshot
+            // to find the current global axis position.
+            HandOptAxes ax2;
+            if (hand_opt_snapshot_axes(ke, &ax2)) {
+              // Find an axis with the same extent g_ext that is still LOOP/GLOBAL.
+              for (u32 j = 0; j < ax2.n; j++) {
+                u8 tj = ax2.kax_type[j];
+                if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax2.extent[j] == g_ext) {
+                  KOpt o = { KOP_LOCAL, (u8)j, (u32)MV_BLOCK };
+                  if (kernel_apply_opt(ke, o)) { n_applied++; break; }
+                }
+              }
+            }
+          }
+          if (MV_RPT > 1) {
+            HandOptAxes ax3;
+            if (hand_opt_snapshot_axes(ke, &ax3)) {
+              for (u32 j = 0; j < ax3.n; j++) {
+                u8 tj = ax3.kax_type[j];
+                if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax3.extent[j] == g_ext) {
+                  KOpt o = { KOP_UPCAST, (u8)j, (u32)MV_RPT };
+                  if (kernel_apply_opt(ke, o)) { n_applied++; break; }
+                }
+              }
+            }
+          }
+          return n_applied;
+        }
+      }
+    }
+  }
+
+  // ---- Section 4: GROUPTOP early gate (heuristic.py 84-90) ----------
+  // if prod(output_loop_dims) <= 2048 (240 if NOLOCALS):
+  //   for axis, sz in product((0,1,2), (16,)): try GROUPTOP(axis, sz);
+  //   break on first success.
+  // Then: if group_for_reduces > 0: return.
+  {
+    int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
+    if (hand_opt_snapshot_axes(ke, &ax)) {
+      u64 olp = hand_opt_output_loop_product(&ax);
+      u64 thr = NOLOCALS ? 240 : 2048;
+      if (olp <= thr) {
+        for (u32 axis = 0; axis < 3; axis++) {
+          KOpt opt = { KOP_GROUPTOP, (u8)axis, 16 };
+          if (kernel_apply_opt(ke, opt)) { n_applied++; break; }
+        }
+      }
+    }
+    if (hand_opt_snapshot_axes(ke, &ax)) {
+      if (hand_opt_group_for_reduces(&ax) > 0) return n_applied;
+    }
+  }
+
+  // ---- Section 5: Mask UPCAST -- SKIPPED ----------------------------
+  // TODO: detect IWHERE mask-axis structure from the DAG.
+
+  // ---- Section 6: Main UPCAST loop (heuristic.py 108-134) -----------
+  // while prod(output_loop_dims) >= 1024 AND upcast_size() < 32:
+  //   for axis in upcastable_dims, for amount in (3, 4):
+  //     skip if already upcasted on `axis` this loop, skip if
+  //     full_shape[axis] % amount != 0;
+  //     run the buffer-stride heuristic (any buf with rng absent AND all
+  //     existing UPCAST/UNROLL axes present); collect (num_strides,
+  //     sum_strides, axis, amount); sort; apply best UPCAST.
+  {
+    u32 upcasted_set[MAX_AXES];
+    u32 n_upcasted_set = 0;
+    while (1) {
+      if (!hand_opt_snapshot_axes(ke, &ax)) break;
+      u64 olp = hand_opt_output_loop_product(&ax);
+      u64 us  = hand_opt_upcast_size(&ax);
+      if (olp < 1024 || us >= 32) break;
+
+      // Build list of current UPCAST/UNROLL axis_ids for the stride test.
+      u32 uu_aids[MAX_AXES]; u32 n_uu = 0;
+      for (u32 i = 0; i < ax.n; i++) {
+        if (ax.kax_type[i] == KAX_UPCAST || ax.kax_type[i] == KAX_UNROLL) {
+          uu_aids[n_uu++] = i;
+        }
+      }
+
+      u32 dims[MAX_AXES];
+      u32 n_dims = hand_opt_upcastable_dims(&ax, dims);
+
+      // Best candidate so far (sorted ascending by (num_strides, sum_strides, axis, amount)).
+      int have_best = 0;
+      u32 best_num = 0, best_sum = 0, best_axis = 0, best_amt = 0;
+      for (u32 di = 0; di < n_dims; di++) {
+        u32 axis = dims[di];
+        // Skip if axis was already chosen in a prior iteration of THIS while loop.
+        int already = 0;
+        for (u32 i = 0; i < n_upcasted_set; i++) {
+          if (upcasted_set[i] == axis) { already = 1; break; }
+        }
+        if (already) continue;
+        static const u32 amounts[] = { 3, 4 };
+        for (u32 ai = 0; ai < 2; ai++) {
+          u32 amt = amounts[ai];
+          if (ax.extent[axis] % amt != 0) continue;
+          u32 num = 0, sum = 0;
+          if (!hand_opt_upcast_buf_stride(ke->cached_lift.store_root,
+                                          axis, uu_aids, n_uu, &num, &sum)) {
+            continue;   // no buf strideless on this axis
+          }
+          if (!have_best
+              || num < best_num
+              || (num == best_num && sum < best_sum)
+              || (num == best_num && sum == best_sum && axis < best_axis)
+              || (num == best_num && sum == best_sum && axis == best_axis && amt < best_amt)) {
+            have_best = 1;
+            best_num = num; best_sum = sum; best_axis = axis; best_amt = amt;
           }
         }
       }
-      // Second LOCAL on the next non-degenerate output axis (hOut) when
-      // the wOut LOCAL was below a full simdgroup width (32 threads).
-      // This happens on the small-spatial late convs (wOut 6, 8) --
-      // without a second LOCAL the threadgroup has fewer than a warp's
-      // worth of lanes and the kernel under-utilises the GPU.  hOut
-      // LOCAL lands consecutive simdgroups on consecutive hOut rows
-      // (still coalesced for the conv-input read which is row-major in
-      // (hOut, wOut)).  Skip ext=1 axes (the wOut outer half post-split
-      // is degenerate when LOCAL took the full wOut extent).
-      if (cur_local_prod > 0 && cur_local_prod < 32
-          && hand_opt_snapshot_axes(ke, &ax)) {
-        u32 h_axis = hand_opt_last_nontriv_output_axis(&ax);
-        if (h_axis != 0xFFFFFFFFu) {
-          u32 ext = ax.extent[h_axis];
-          for (u32 i = 0; i < 12; i++) {
-            u32 f = conv_local_factors[i];
-            if ((u64)cur_local_prod * f > (u64)local_cap) continue;
-            if (ext % f != 0 || ext / f < 1) continue;
-            KOpt opt = { KOP_LOCAL, (u8)h_axis, f };
-            if (kernel_apply_opt(ke, opt)) { n_applied++; cur_local_prod *= f; }
-            break;
-          }
-        }
-      }
-    } else {
-      static const u32 single_local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
-      if (hand_opt_snapshot_axes(ke, &ax)) {
-        u32 axis = hand_opt_last_output_axis(&ax);
-        if (axis != 0xFFFFFFFFu) {
-          u32 ext = ax.extent[axis];
-          for (u32 i = 0; i < 8; i++) {
-            u32 f = single_local_factors[i];
-            if (f > 256) continue;
-            if (ext % f != 0 || ext / f < 1) continue;
-            KOpt opt = { KOP_LOCAL, (u8)axis, f };
-            if (kernel_apply_opt(ke, opt)) { n_applied++; }
-            break;  // one LOCAL split only
+      if (!have_best) break;
+      KOpt opt = { KOP_UPCAST, (u8)best_axis, best_amt };
+      if (!kernel_apply_opt(ke, opt)) break;
+      n_applied++;
+      if (n_upcasted_set < MAX_AXES) upcasted_set[n_upcasted_set++] = best_axis;
+    }
+  }
+
+  // ---- Section 7: UNROLL last reduce dim (heuristic.py 138-150) -----
+  // if unrollable_dims AND (upcast_size <= 4 OR no UNROLL axes yet)
+  //                    AND upcast_size < 64:
+  //   if full_shape[last_unrollable] <= 32: UNROLL(last, 0)
+  //     if s <= 3 AND another unrollable AND its extent <= 3: UNROLL again
+  //   else: if full_shape[last_unrollable] % 4 == 0: UNROLL(last, 4)
+  //
+  // thvm's KOP_UNROLL split needs k > 0, so we translate `0` (tinygrad's
+  // "full extent" sentinel) into the actual extent.
+  //
+  // THVM RENDERER LIMIT: a FULL-extent UNROLL (k == extent, leaving the
+  // outer REDUCE axis at extent 1) confuses rmu_emit_store_reduce's
+  // reduce-range matcher: the REDUCE node's axis field no longer names
+  // any live RANGE, so the renderer emits a bare `#pragma unroll` with
+  // no following loop and the kernel produces wrong output.  Until the
+  // renderer's reduce matcher is fixed to follow UNROLL'd reduce axes,
+  // suppress the full-extent UNROLL.  The split-by-4 branch (factor 4 <
+  // extent) is unaffected and still applies.
+  {
+    if (hand_opt_snapshot_axes(ke, &ax)) {
+      u32 unr[MAX_AXES];
+      u32 n_unr = hand_opt_unrollable_dims(&ax, unr);
+      u64 us = hand_opt_upcast_size(&ax);
+      u8 unroll_t[] = { KAX_UNROLL };
+      u32 n_existing_unroll = hand_opt_axes_of_n(&ax, unroll_t, 1);
+      if (n_unr > 0 && (us <= 4 || n_existing_unroll == 0) && us < 64) {
+        u32 last = unr[n_unr - 1];
+        u32 ext  = ax.extent[last];
+        if (ext <= 32) {
+          // tinygrad: UNROLL(last, 0) -- full extent.
+          // thvm: see THVM RENDERER LIMIT in the comment above; skip
+          // full-extent UNROLL.
+          (void)last;
+        } else {
+          if (ext % 4 == 0) {
+            KOpt opt = { KOP_UNROLL, (u8)last, 4 };
+            if (kernel_apply_opt(ke, opt)) n_applied++;
           }
         }
       }
     }
   }
 
-  // ---- 4. GROUP the reduce axis: SKIPPED in v2 ----
-  // KOP_GROUPTOP / KOP_GROUP split the reduce axis for a threadgroup-
-  // collective reduce.  The GROUP_REDUCE renderer + GROUP_REDUCE
-  // dispatch mode were validated on the un-UPCAST'd reduce-tail shape
-  // only; combined with case 2's output UPCAST they haven't been
-  // cross-checked.  Re-enable once a UPCAST+GROUP fixture is in the
-  // surgical suite.
+  // ---- Section 8: Easy UPCAST fallback (heuristic.py 153-155) -------
+  // if not upcasted AND upcastable_dims AND full_shape[last] % 4 == 0:
+  //   UPCAST(last, 4)
+  {
+    if (hand_opt_snapshot_axes(ke, &ax)) {
+      if (hand_opt_upcasted(&ax) == 0) {
+        u32 dims[MAX_AXES];
+        u32 n_dims = hand_opt_upcastable_dims(&ax, dims);
+        if (n_dims > 0) {
+          u32 last = dims[n_dims - 1];
+          if (ax.extent[last] % 4 == 0) {
+            KOpt opt = { KOP_UPCAST, (u8)last, 4 };
+            if (kernel_apply_opt(ke, opt)) n_applied++;
+          }
+        }
+      }
+    }
+  }
 
-  // ---- 5. UNROLL the reduce axis a bit ----
-  // tinygrad applies Opt(OptOps.UNROLL, reduce_axis, factor) here.
-  // thvm SKIPS this in v1: the renderer (render_uop.c) already emits
-  // `#pragma unroll(K)` over small reduce axes by default (commit
-  // dd50948e), so an explicit KOP_UNROLL split is redundant -- and a
-  // *full* unroll (factor == extent -> outer extent 1) currently
-  // confuses rmu_emit_store_reduce's reduce-range matcher (the REDUCE
-  // node's axis field no longer names any live RANGE), producing a
-  // bare `#pragma unroll` with no following loop -> Metal compile
-  // failure.  Re-enable once the renderer's UNROLL-split handling is
-  // hardened.  (No-op here, kept for the explicit "ported but skipped"
-  // record.)
+  // ---- Section 9: LOCAL (heuristic.py 159-176) ----------------------
+  // local_axis_ranking = [(any(rng not in b.idx.backward_slice for b in bufs),
+  //                       axis)
+  //                       for axis in axes_of(GLOBAL, LOOP)
+  //                       if rngs[axis].src[0].op is Ops.CONST]
+  // sort by (-x[0], -x[1]).   For each: pick local_sz from
+  //   ([32] if axis == 0) + [16, 8, 4, 3, 2]
+  // such that full_shape[axis] % local_sz == 0 AND local_size * local_sz <= 128.
+  // Take top 3 (sorted by axis ascending), apply each LOCAL.
+  //
+  // Section 11 NOLOCALS gate runs first: NOLOCALS=1 -> KOP_NOLOCALS instead.
+  {
+    int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
+    if (NOLOCALS) {
+      KOpt opt = { KOP_NOLOCALS, 0, 0 };
+      if (kernel_apply_opt(ke, opt)) n_applied++;
+    } else {
+      if (hand_opt_snapshot_axes(ke, &ax)) {
+        // Build (expand_flag, axis_idx) pairs for GLOBAL/LOOP axes.
+        // expand_flag = 1 iff any INDEX_E.addr does NOT reference axis
+        // (the axis is "expand-like" for that buf).
+        Term addrs[64];
+        u32 n_bufs = uop_dag_collect_index_e_addrs(ke->cached_lift.store_root,
+                                                   addrs, 64);
+        UopDagAddrCoeffsView decoded[64];
+        u32 n_decoded = 0;
+        for (u32 i = 0; i < n_bufs; i++) {
+          uop_dag_decode_addr_coeffs(addrs[i], &decoded[n_decoded]);
+          if (decoded[n_decoded].ok) n_decoded++;
+        }
+
+        typedef struct { u32 axis; int expand; } LocalCand;
+        LocalCand cands[MAX_AXES];
+        u32 n_cands = 0;
+        for (u32 i = 0; i < ax.n; i++) {
+          u8 t = ax.kax_type[i];
+          if (t != KAX_LOOP && t != KAX_GLOBAL) continue;
+          // tinygrad gates on rngs[axis].src[0].op is CONST -- thvm
+          // RANGE extents are all CONST today, so this is always true.
+          int expand = 0;
+          for (u32 j = 0; j < n_decoded; j++) {
+            if (uop_dag_addr_coeff_lookup(&decoded[j], i) == 0) { expand = 1; break; }
+          }
+          cands[n_cands].axis   = i;
+          cands[n_cands].expand = expand;
+          n_cands++;
+        }
+        // Sort by (-expand, -axis): expand=1 first, then highest axis first.
+        for (u32 i = 1; i < n_cands; i++) {
+          LocalCand k = cands[i];
+          i32 j = (i32)i - 1;
+          while (j >= 0) {
+            int ex_j = cands[j].expand, ex_k = k.expand;
+            if (ex_j > ex_k) break;
+            if (ex_j == ex_k && cands[j].axis > k.axis) break;
+            cands[j + 1] = cands[j];
+            j--;
+          }
+          cands[j + 1] = k;
+        }
+
+        // Walk in ranked order, pick the largest local_sz for each axis.
+        typedef struct { u32 axis; u32 sz; } LocalPick;
+        LocalPick picks[MAX_AXES];
+        u32 n_picks = 0;
+        u32 local_running = 1;
+        for (u32 i = 0; i < n_cands; i++) {
+          u32 axis = cands[i].axis;
+          u32 ext  = ax.extent[axis];
+          // Candidate factors: [32] if axis==0 else [], then [16,8,4,3,2].
+          u32 facs[6]; u32 nf = 0;
+          if (axis == 0) facs[nf++] = 32;
+          facs[nf++] = 16; facs[nf++] = 8; facs[nf++] = 4;
+          facs[nf++] = 3;  facs[nf++] = 2;
+          u32 picked = 0;
+          for (u32 fi = 0; fi < nf; fi++) {
+            u32 f = facs[fi];
+            if (ext % f != 0) continue;
+            if ((u64)local_running * (u64)f > 128) continue;
+            picked = f; break;
+          }
+          if (picked > 0) {
+            picks[n_picks].axis = axis;
+            picks[n_picks].sz   = picked;
+            n_picks++;
+            local_running *= picked;
+          }
+        }
+        // Truncate to first 3 picks (tinygrad: to_local[:3]).
+        if (n_picks > 3) n_picks = 3;
+        // Sort the chosen picks by axis ascending.
+        for (u32 i = 1; i < n_picks; i++) {
+          LocalPick k = picks[i]; i32 j = (i32)i - 1;
+          while (j >= 0 && picks[j].axis > k.axis) {
+            picks[j + 1] = picks[j]; j--;
+          }
+          picks[j + 1] = k;
+        }
+        // Apply.  Thvm's uop_dag_apply_split keeps the OUTER range at the
+        // pre-split axis_id and inserts the inner range at axis_id+1
+        // (shifting every subsequent axis up by one).  Tinygrad's
+        // `deleted_shape` accounting decrements the axis index for
+        // subsequent fully-consumed splits because tinygrad collapses
+        // extent-1 axes; thvm keeps them.  Since `picks` is sorted
+        // ascending by original axis_id, the current axis_id for pick i
+        // equals its original axis_id plus the count of prior successful
+        // splits (each inserted one new axis at position < current).
+        u32 shift = 0;
+        for (u32 i = 0; i < n_picks; i++) {
+          u32 current_axis = picks[i].axis + shift;
+          u32 sz = picks[i].sz;
+          HandOptAxes axc;
+          if (!hand_opt_snapshot_axes(ke, &axc)) break;
+          if (current_axis >= axc.n) continue;
+          KOpt opt = { KOP_LOCAL, (u8)current_axis, sz };
+          if (kernel_apply_opt(ke, opt)) {
+            n_applied++;
+            shift++;       // one more axis sitting above subsequent picks
+          }
+        }
+      }
+    }
+  }
+
+  // ---- Section 10: THREAD -- SKIPPED (no KOP_THREAD in thvm) --------
 
   return n_applied;
 }
 
 // Should this kernel get the hand-coded heuristic on its next fire?
-// Mirrors kernel_should_autotune's cheap pre-check: the env opt-in is
-// on AND the per-shape autotuned flag is still 0.  We don't pre-run
-// the heuristic to check "would it apply at least one opt" the way
-// kernel_should_autotune calls kernel_opts_propose -- the heuristic is
-// itself the cheap analysis, so we just run it (it sets the flag
-// regardless, so re-dispatch is a no-op).
+// Mirrors kernel_autotune's cheap pre-check: the env opt-in is on AND
+// the per-shape autotuned flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke) {
   if (!hand_coded_opts_enabled()) return 0;
   if (ke == NULL) return 0;
-  // schedule may be NULL on some fixtures -- if so we can't memoise
-  // the decision, but we still want to run the heuristic once.  Use
-  // the autotuned flag when present; otherwise allow.
   if (ke->schedule != NULL && ke->schedule->autotuned) return 0;
   return 1;
 }
