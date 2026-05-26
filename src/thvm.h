@@ -2605,6 +2605,17 @@ fn Term uop_recognise_conv(Term root);
 // for symmetry with uop_classify_matmul + future tile-size gates.
 fn int uop_classify_conv2d(Term root, u32 *out_kred);
 
+// Direct-multi-axis conv classifier: detects the conv2d shape the
+// multi-axis-REDUCE port (commit 598055ee) emits when shapes stay
+// un-flattened (reduce has separate Cin/kH/kW axes, no IDIV/IMOD).
+// Fills *out_kred with the product of all reduce-axis extents.
+fn int uop_classify_conv2d_direct(Term root, u32 *out_kred);
+
+// "Either form" wrapper.  Used by callers that just need to know if
+// this is a conv kernel (flat OR direct multi-axis), without caring
+// which form -- e.g. hand_opt_is_conv_kernel for LOCAL/UPCAST gating.
+fn int uop_classify_conv2d_any(Term root, u32 *out_kred);
+
 // === Kernel lift to UOp DAG ===
 // Package the unified-rangeify pass's store_root for a kernel entry
 // into a UOp DAG root suitable for cg_render_uop_kernel.  The lifter
@@ -2837,6 +2848,7 @@ typedef enum {
   // KDISPATCH_METAL_ALIAS = 13 stable for any external integer-keyed
   // consumer of dispatch kinds.
   KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
+  KDISPATCH_CUDA_JIT    = 14,  // CUDA: nvrtc-compiled kernel via cuLaunchKernel
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);

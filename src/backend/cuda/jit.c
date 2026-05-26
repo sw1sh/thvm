@@ -381,6 +381,26 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     char *canon = cg_canonicalize_axis_ids(cu);
     if (canon != NULL) { free(cu); cu = canon; }
   }
+  // THVM_CUDA_DUMP_KID=<kid>: print this kid's rendered .cu source once
+  // (mirrors the CPU THVM_DUMP_KERNEL_SRC env).  Used to inspect
+  // hand-coded LOCAL/UPCAST application on a specific hotspot kernel.
+  {
+    static u32 dump_kid = 0;
+    static int dump_kid_known = 0;
+    static u32 dumped_once = 0;
+    if (!dump_kid_known) {
+      char const *e = getenv("THVM_CUDA_DUMP_KID");
+      dump_kid = (e != NULL) ? (u32)atoi(e) : 0;
+      dump_kid_known = 1;
+    }
+    u32 this_kid = (u32)(ke - KERNELS);
+    if (dump_kid != 0 && dump_kid == this_kid && dumped_once != this_kid) {
+      dumped_once = this_kid;
+      fprintf(stderr, "=== CUDA kernel src kid=%u ===\n%s\n=== end kid=%u ===\n",
+              this_kid, cu, this_kid);
+      fflush(stderr);
+    }
+  }
   CUfunction func = cuda_jit_compile(cu, "k");
   free(cu);
   if (func == NULL) {
@@ -445,12 +465,11 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   int rc = cuda_jit_launch(func, grid_x, block_x, args);
   // Per-kid wall-time profile.  cuda_dispatch_kernel includes
   // render + compile (cache-hit fast path) + arg packing +
-  // cuLaunchKernel + cuCtxSynchronize.  Recorded as KDISPATCH_JIT
-  // since CUDA only has the structural-lift JIT route (no
-  // interpreter fallback).  Mirror of cpu_jit's record in
-  // backend/cpu/interpret.c so THVM_KERNEL_PROFILE shows both
-  // backends through the same table.
+  // cuLaunchKernel + cuCtxSynchronize.  CUDA only has the
+  // structural-lift JIT route (no interpreter fallback); mirror of
+  // cpu_jit's record in backend/cpu/interpret.c so THVM_KERNEL_PROFILE
+  // shows both backends through the same table.
   u32 kid = (u32)(ke - KERNELS);
-  cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t_dispatch_start);
+  cg_profile_record(kid, KDISPATCH_CUDA_JIT, cg_now_us() - t_dispatch_start);
   return rc;
 }
