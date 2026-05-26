@@ -3182,7 +3182,7 @@ holdToInactive[axHC_HoldComplete] :=
    bare ProofObject, so existing call shapes are unchanged. *)
 $AtpReturnSpecs = {"ProofObject", "Lemmas", "PreprocessedAxioms",
     "RelevantAxioms", "RawTrace", "Statistics", "Status",
-    "AppliedMethod"};
+    "AppliedMethod", "WallTime"};
 
 atpReturnSpecQ[All] := True;
 atpReturnSpecQ[x_String] := MemberQ[$AtpReturnSpecs, x];
@@ -3237,6 +3237,13 @@ atpReturnValue[bundle_, "Status"] :=
 atpReturnValue[bundle_, "AppliedMethod"] :=
     Replace[Lookup[bundle, "AppliedMethod", Missing["NotAvailable"]],
         Missing[___] :> Automatic];
+(* "WallTime" -> seconds (AbsoluteTiming) the C-engine cEngineProof
+   call took for the SINGLE config that produced this bundle.  For a
+   portfolio run this is the WINNING config's slice only -- earlier
+   non-proving slices are not summed in. *)
+atpReturnValue[bundle_, "WallTime"] :=
+    Replace[Lookup[bundle, "WallTime", Missing["NotAvailable"]],
+        Missing[___] :> Missing["NotAvailable"]];
 
 atpProjectReturn[bundle_, spec_String] := atpReturnValue[bundle, spec];
 atpProjectReturn[bundle_, All] :=
@@ -3492,7 +3499,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
     (* Single config. *)
     Block[{
         enc, conjPair, axiomKeys, ruleList, cRes, extSteps,
-        chain, dataset, varNames, axEq, conjStmt, po, relAx
+        chain, dataset, varNames, axEq, conjStmt, po, relAx, atpWallTime
     },
         enc = atpEncodeProblem[axioms, conjecture, True];
         conjPair = enc["ConjPair"];
@@ -3500,14 +3507,16 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         axiomKeys = Table[{$AxiomSym, k}, {k, Length[enc["AxPairs"]]}];
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
         Block[{atpMethodCfg = atpParseMethod[OptionValue[Method]]},
-            cRes = cEngineProof[enc, OptionValue[MaxSteps],
+            {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
+                enc, OptionValue[MaxSteps],
                 atpWall, Sequence @@ atpMethodCfg]];
         (* status 1 == PROVED.  A non-PROVED run still returns a bundle
            (the ProofObject is $Failed) so the introspectives reflect it. *)
         If[ cRes["Status"] =!= 1,
             Return[<|"enc" -> enc, "cRes" -> cRes,
                 "ProofObject" -> $Failed, "RelevantAxioms" -> relAx,
-                "AppliedMethod" -> OptionValue[Method]|>]
+                "AppliedMethod" -> OptionValue[Method],
+                "WallTime" -> atpWallTime|>]
         ];
         extSteps = cRes["ExtSteps"];
         (* Preferred path: the no-completion EXT chain cites the
@@ -3586,7 +3595,8 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
             ];
             <|"enc" -> enc, "cRes" -> cRes,
                 "ProofObject" -> poFinal, "RelevantAxioms" -> relAx,
-                "AppliedMethod" -> OptionValue[Method]|>
+                "AppliedMethod" -> OptionValue[Method],
+                "WallTime" -> atpWallTime|>
         ]
     ]]]],
     "TATPError"
@@ -3604,20 +3614,22 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
    so no ProofObject). *)
 atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
-    Module[{enc, cRes, atpWall, atpMethodCfg},
+    Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime},
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], 0.];
         (* Encode with a None conjecture: the packed goal pair is (0, 0),
            which the C runner reads as "no goal -> saturate the axioms". *)
         enc = atpEncodeProblem[axioms, None, False];
         atpMethodCfg = atpParseMethod[OptionValue[Method]];
-        cRes = cEngineProof[enc, OptionValue[MaxSteps], atpWall,
+        {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
+            enc, OptionValue[MaxSteps], atpWall,
             Sequence @@ atpMethodCfg];
         (* No goal, so no ProofObject; Mode None means all axioms kept. *)
         <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> $Failed,
           "RelevantAxioms" -> <|"Mode" -> None,
               "Kept" -> axioms, "Dropped" -> {}|>,
-          "AppliedMethod" -> OptionValue[Method]|>
+          "AppliedMethod" -> OptionValue[Method],
+          "WallTime" -> atpWallTime|>
     ],
     "TATPError"
 ];

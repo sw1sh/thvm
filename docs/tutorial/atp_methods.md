@@ -642,6 +642,7 @@ returns the bare `ProofObject`, so existing call shapes are unchanged.
 | `"Statistics"` | A small run-stats `Association` (`Status`, `Steps`, `Rules`, `Trace`, `QueueSize`). |
 | `"Status"` | A `"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"` tag. |
 | `"AppliedMethod"` | The actual `Method` config that produced the bundle. For a portfolio run, the winning schedule entry; for a single-config run, the only entry tried. Useful for inspecting what `Automatic` chose. |
+| `"WallTime"` | Seconds (`AbsoluteTiming`) the C-engine `cEngineProof` call took for the SINGLE config that produced the bundle. For a portfolio run this is the WINNING config's slice only -- earlier non-proving slices are not summed in. |
 | `All` | An `Association` of every spec above. |
 
 Examples:

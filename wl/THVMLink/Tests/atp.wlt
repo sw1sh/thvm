@@ -1013,6 +1013,15 @@ VerificationTest[
     TestID -> "ATP/return/AppliedMethod-portfolio-winner"
 ]
 
+VerificationTest[
+    (* "WallTime" return spec: AbsoluteTiming the C engine call.  Always
+       a non-negative real for any successful run. *)
+    Module[{t = TFindProof["InverseOfInverse", "AbelianGroupAxioms", "WallTime"]},
+        NumericQ[t] && t >= 0],
+    True,
+    TestID -> "ATP/return/WallTime-numeric-non-negative"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[
