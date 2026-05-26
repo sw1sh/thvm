@@ -2249,43 +2249,6 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
 // Returns the number of opts successfully applied.
 fn u32 kernel_hand_coded_opts(struct KernelEntry *ke);
 
-// === Address-coefficient decode (UOP_INDEX_E.addr) ===================
-// Externally-callable wrappers over dag_scan.c's static decoders so the
-// hand_coded_optimizations heuristic (codegen/hand_opts.c) can implement
-// tinygrad's stride heuristic for UPCAST axis selection.
-//
-// UopDagAddrCoeffsView: minimal projection of UdgAddrCoeffs (axis-id +
-// coeff pairs).  HAND_OPT_MAX_AXES bounds n; offsets beyond the count
-// are not initialised.
-#define UOP_DAG_ADDR_MAX_AXES 8
-typedef struct {
-  u32 axis_ids[UOP_DAG_ADDR_MAX_AXES];
-  u32 coeffs  [UOP_DAG_ADDR_MAX_AXES];
-  u32 n_axes;
-  i32 offset;
-  int ok;
-} UopDagAddrCoeffsView;
-
-// Decode an UOP_INDEX_E.addr term into per-axis (axis_id, coeff) pairs
-// and an absolute byte offset.  Mirrors tinygrad's index.backward_slice
-// + IADD/IMUL distribution.  On bail (unrecognized leaf shape, e.g. an
-// IDIV/IMOD/IWHERE remnant from a conv2d-flat index that the simplifier
-// didn't collapse), out->ok stays 0 but out->n_axes carries whatever was
-// decoded so far.
-void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out);
-
-// Look up a coefficient by axis_id.  Returns 0 when absent (which the
-// stride heuristic also treats as "stride 0 on this axis" -- the axis
-// does not contribute to the address).
-u32  uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id);
-
-// Enumerate every distinct UOP_INDEX_E.addr term reachable from `root`
-// (dedup by Term identity).  Writes up to `cap` addresses to out_addrs.
-// Returns the count.  The caller decodes each via
-// uop_dag_decode_addr_coeffs.  Mirrors tinygrad's Scheduler.bufs (the
-// reversed list of Ops.INDEX nodes the heuristic iterates).
-u32  uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap);
-
 // Should this kernel get the hand-coded opt heuristic on its next
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
 // or NOOPT=1 disables) AND the per-shape autotuned flag is still 0.
