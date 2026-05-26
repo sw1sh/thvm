@@ -3204,18 +3204,22 @@ TFindProof[thms_Association, theory_String,
      - File["foo.p"]: read + parse, then prove the Conjecture against
        the Axioms.
      - a string containing "cnf(": parse inline, then prove.
+   If the file has no conjecture (axioms only), dispatch to the
+   single-arg completion form -- saturate the axioms and return the
+   completed rule set as the default "Lemmas" projection.
    The parser handles the TPTP UEQ fragment (one equational literal
    per cnf clause).  fof / tff / thf clauses + include directives are
    skipped with a console warning.  See Kernel/ATP/TPTPImport.wl. *)
-TFindProof[File[path_String], opts:OptionsPattern[]] := Block[{
-        imported = THVMLink`TPTPImport`tptpImport[File[path]]
-    },
+TFindProof[File[path_String], opts:OptionsPattern[]] :=
+    tptpDispatch[THVMLink`TPTPImport`tptpImport[File[path]], opts]
+TFindProof[s_String, opts:OptionsPattern[]] /; StringContainsQ[s, "cnf("] :=
+    tptpDispatch[THVMLink`TPTPImport`tptpImport[s], opts]
+
+tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
+    imported["Conjecture"] === None,
+    TFindProof[imported["Axioms"], opts],
     TFindProof[imported["Conjecture"], imported["Axioms"], opts]
 ]
-TFindProof[s_String, opts:OptionsPattern[]] /; StringContainsQ[s, "cnf("] :=
-    Block[{imported = THVMLink`TPTPImport`tptpImport[s]},
-        TFindProof[imported["Conjecture"], imported["Axioms"], opts]
-    ]
 
 (* The proving entry: optional LAST positional returnSpec.  Without it,
    the bare ProofObject is returned (backward compatible); with it, the

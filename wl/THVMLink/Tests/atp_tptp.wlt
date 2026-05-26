@@ -71,3 +71,17 @@ VerificationTest[
     Success,
     TestID -> "ATP/tptp/findproof-inline-string-overload-proves"
 ]
+
+VerificationTest[
+    (* No conjecture clause -- saturation mode, returns the completed
+       rule set as default "Lemmas" projection. *)
+    MatchQ[
+        TFindProof[
+            "cnf(a1, axiom, mul(X, e) = X).
+             cnf(a2, axiom, mul(e, X) = X).",
+            TimeConstraint -> 5],
+        {__}
+    ],
+    True,
+    TestID -> "ATP/tptp/findproof-no-conjecture-completes"
+]
