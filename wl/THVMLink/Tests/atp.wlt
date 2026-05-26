@@ -897,6 +897,18 @@ VerificationTest[
     TestID -> "ATP/method/cpweight-ConjSym-proves"
 ]
 
+VerificationTest[
+    (* Twee: src/Twee/CP.hs::score with shared-subterm discount
+       (cfg_dupcost=1, cfg_dupfactor=0).  Asymmetric:
+       4*size(larger) + size(smaller) + 2*depth, with repeated
+       subterms in either side counting once.  Proves a baseline
+       theorem end-to-end. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Twee"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Twee-proves"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[

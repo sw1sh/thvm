@@ -4652,6 +4652,54 @@ static u32 atp_symbol_count(Term t) {
   }
 }
 
+// Same node count as atp_symbol_count, but with Twee's shared-subterm
+// discount (src/Twee/CP.hs:259-261, cfg_dupcost=1, cfg_dupfactor=0):
+// each unique Term value counts once at full weight; repeat occurrences
+// count 1 and the recursion stops -- so a term f(g(a), g(a)) counts
+// {f, g(a), a} + 1 for the second g(a) = 4 instead of 5.  An iterative
+// walk with a per-call open-addressed Term hash set (capacity 512 -- a
+// CP face larger than ~500 nodes would have walled the saturation long
+// before reaching this weight).  An overflow into the 513th distinct
+// term falls back to counting that node without dedup.
+static u32 atp_symbol_count_dedup(Term t) {
+  Term stack[256];
+  Term seen[512];
+  for (u32 i = 0; i < 512; i++) seen[i] = 0;
+  u32 sp = 0;
+  if (sp < 256) stack[sp++] = t;
+  u32 count = 0;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    // Probe the seen-set with an inlined splitmix64 finalizer over
+    // the Term's u64 representation (mirrors the ATP_CP_GRAPH-gated
+    // atp_term_hash above; inlined here so this code is reachable
+    // in the default WL build which does not define ATP_CP_GRAPH).
+    u64 x = (u64)cur;
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    u32 h = (u32)x & 511u;
+    u8 dup = 0;
+    for (u32 step = 0; step < 512u; step++) {
+      u32 idx = (h + step) & 511u;
+      if (seen[idx] == 0) { seen[idx] = cur; break; }
+      if (seen[idx] == cur) { dup = 1; break; }
+    }
+    if (dup) {
+      count += 1u;            // cfg_dupcost = 1; do not recurse.
+      continue;
+    }
+    count += 1u;              // this node's own weight.
+    if (term_tag(cur) == TAG_CTR) {
+      u32 n = term_ctr_n(cur);
+      for (u32 i = 0; i < n && sp < 256; i++) {
+        stack[sp++] = term_ctr_at(cur, i);
+      }
+    }
+  }
+  return count;
+}
+
 // (atp_term_depth defined below at line ~4653.)
 
 // === ClasHeuristics: advanced CP-weight term measures ===============
@@ -4802,11 +4850,17 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       // Twee defaults: lhsweight=4, rhsweight=1, depthweight=2.
       // The "larger side" is treated as the peak the CP must
       // reduce away, so making the SMALLER side cheap is what
-      // accelerates the search.  Integer-arithmetic version (we
-      // approximate Twee's varweight 6/7 == 1 since our atp_symbol_-
-      // count already counts every node uniformly).
-      u32 m = atp_symbol_count(lhs);
-      u32 n = atp_symbol_count(rhs);
+      // accelerates the search.
+      //
+      // Twee's per-term size also folds in a shared-subterm
+      // discount (src/Twee/CP.hs:259-261): cfg_dupcost=1,
+      // cfg_dupfactor=0 -- when a subtree has already been seen in
+      // the same termScore walk, count it as 1 instead of its full
+      // size and do not recurse.  atp_symbol_count_dedup mirrors
+      // that with a per-call Term-id hash set.  Integer-arithmetic
+      // version (we approximate Twee's varweight 6/7 == 1).
+      u32 m = atp_symbol_count_dedup(lhs);
+      u32 n = atp_symbol_count_dedup(rhs);
       u32 large = m > n ? m : n;
       u32 small = m + n - large;
       u32 d = atp_term_depth(lhs);
