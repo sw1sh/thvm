@@ -4144,6 +4144,26 @@ static u8 atp_add_equation_simplified(AtpState *s, Term lhs, Term rhs,
   return atp_enqueue_equation(s, lhs, rhs, TRACE_SIMPLIFY, parent_trace);
 }
 
+// Walk `t` and bit-set every TAG_CTR label encountered into `*mask`.
+// Used by thvm_atp_set_goal to populate s->conj_sym_mask for the
+// ATP_CP_WEIGHT_CONJSYM weight mode.
+static void atp_collect_symbols(Term t, u64 *mask) {
+  Term stack[256];
+  u32  sp = 0;
+  if (sp < 256) stack[sp++] = t;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) == TAG_CTR) {
+      u32 lab = term_ext(cur);
+      if (lab < 64u) *mask |= ((u64)1 << lab);
+      u32 n = term_ctr_n(cur);
+      for (u32 i = 0; i < n && sp < 256; i++) {
+        stack[sp++] = term_ctr_at(cur, i);
+      }
+    }
+  }
+}
+
 // Set the conjecture (single equation goal_lhs == goal_rhs).
 // Calling with goal_lhs == 0 clears the goal (completion mode).
 // Returns 1 on success, 0 if 8.4d's sort-check rejected the goal.
@@ -4154,6 +4174,7 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   if (lhs == 0) {
     s->goal_lhs = 0;
     s->goal_rhs = 0;
+    s->conj_sym_mask = 0;
     return 1;
   }
   // 8.4d: gate on sort-check when a spec is attached -- both
@@ -4167,6 +4188,10 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   }
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
+  // Recompute the conjecture symbol mask for ATP_CP_WEIGHT_CONJSYM.
+  s->conj_sym_mask = 0;
+  atp_collect_symbols(lhs, &s->conj_sym_mask);
+  atp_collect_symbols(rhs, &s->conj_sym_mask);
   return 1;
 }
 
@@ -4788,6 +4813,43 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       u32 dr = atp_term_depth(rhs);
       if (dr > d) d = dr;
       return 4u * large + 1u * small + 2u * d;
+    }
+    case ATP_CP_WEIGHT_CONJSYM: {
+      // E ConjectureSymbolWeight (HEURISTICS/che_funweights.c:550).
+      // Walk both sides.  A node whose head symbol appears in the
+      // conjecture gets weight 1 (E's conj_fweight=1); a node whose
+      // head does not appear gets weight 4 (E's fweight=4, the
+      // 4x non-conjecture penalty E defaults to).  Variables count
+      // as 1 (E's vweight=1).  Sum over both sides.
+      //   conj_count = # CTR nodes whose symbol is in conj_sym_mask
+      //   off_count  = # CTR nodes whose symbol is NOT in mask
+      //   var_count  = # FVR nodes
+      //   weight = conj_count + 4*off_count + var_count
+      // When no goal is set (conj_sym_mask == 0), every label misses
+      // and the formula degenerates to 4*ctr_count + var_count -- a
+      // monotonic alias for ADD, so the mode is still well-defined
+      // in pure-completion runs.
+      u64 mask = s->conj_sym_mask;
+      Term stack[256];
+      u32 sp = 0;
+      if (sp < 256) stack[sp++] = lhs;
+      if (sp < 256) stack[sp++] = rhs;
+      u32 conj_count = 0, off_count = 0, var_count = 0;
+      while (sp > 0) {
+        Term cur = stack[--sp];
+        if (term_tag(cur) == TAG_CTR) {
+          u32 lab = term_ext(cur);
+          if (lab < 64u && (mask & ((u64)1 << lab))) conj_count++;
+          else                                       off_count++;
+          u32 n = term_ctr_n(cur);
+          for (u32 i = 0; i < n && sp < 256; i++) {
+            stack[sp++] = term_ctr_at(cur, i);
+          }
+        } else if (term_tag(cur) == TAG_FVR) {
+          var_count++;
+        }
+      }
+      return conj_count + 4u * off_count + var_count;
     }
     case ATP_CP_WEIGHT_ADD:
     default:

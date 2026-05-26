@@ -3049,7 +3049,20 @@ typedef enum {
   ATP_CP_WEIGHT_LEARNED = 9, // ENIGMA-style learned scorer: a trained
                             // logistic regression over CP features ranks
                             // CPs by predicted proof-relevance.
-  ATP_CP_WEIGHT_LAST = 10,
+  ATP_CP_WEIGHT_CONJSYM = 10, // E-style conjecture-symbol weight (port
+                              // of HEURISTICS/che_funweights.c::
+                              // ConjectureSymbolWeightInit).  Walks both
+                              // sides of the CP; nodes whose function
+                              // symbol appears in the conjecture get
+                              // weight 1 (conj_fweight), nodes whose
+                              // symbol does NOT get weight 4
+                              // (fweight=4*conj_fweight): a 4x discount
+                              // biases CP selection toward critical
+                              // pairs structurally similar to the goal,
+                              // similar in spirit to ATP_CP_WEIGHT_GOAL
+                              // but using a cheap symbol-set bitmask
+                              // instead of a full structural match.
+  ATP_CP_WEIGHT_LAST = 11,
 } AtpCpWeightMode;
 
 typedef struct {
@@ -3285,6 +3298,13 @@ typedef struct {
   // as Waldmeister's does.  0 until the first goal_check.
   Term goal_lhs_nf;
   Term goal_rhs_nf;
+
+  // Bitset of TAG_CTR labels appearing in the conjecture (goal_lhs +
+  // goal_rhs).  Recomputed by thvm_atp_set_goal.  Read by the
+  // ATP_CP_WEIGHT_CONJSYM weight mode -- nodes whose symbol bit is set
+  // are weighted 1, nodes whose bit is unset are weighted 4.
+  // WALD_MAX_SYMBOLS == 64 so a u64 covers the whole label space.
+  u64 conj_sym_mask;
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of

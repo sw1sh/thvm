@@ -2008,7 +2008,16 @@ $AtpCpWeightCodes = <|
     "Twee" -> 8,   (* Twee KB-completion asymmetric weight (Smallbone),
                      biases toward CPs whose smaller side is small;
                      ported from src/Twee/CP.hs Twee.CP.score. *)
-    "Learned" -> 9, Automatic -> -1
+    "Learned" -> 9,
+    "ConjSym" -> 10,  (* E ConjectureSymbolWeight (HEURISTICS/
+                         che_funweights.c::ConjectureSymbolWeightInit).
+                         Walks both sides; CTR nodes whose head symbol
+                         appears in the conjecture get weight 1, others
+                         get weight 4 (E's fweight=4 vs conj_fweight=1
+                         penalty).  Cheap symbol-set biasing toward
+                         goal-relevant CPs -- a poor man's "Goal" mode
+                         that does not need structural matching. *)
+    Automatic -> -1
 |>;
 
 TFindProof::badmethod =

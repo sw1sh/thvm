@@ -887,6 +887,16 @@ VerificationTest[
     TestID -> "ATP/method/cpweight-bad-warns-and-falls-back"
 ]
 
+VerificationTest[
+    (* ConjSym: E ConjectureSymbolWeight port -- weight 1 for CTR
+       nodes whose head appears in the conjecture, 4 for off-symbol
+       CTR nodes.  Proves InverseOfInverse end-to-end. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "ConjSym"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-ConjSym-proves"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[
