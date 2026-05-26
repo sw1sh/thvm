@@ -2642,6 +2642,17 @@ atpAutoTuneForClass["Sheffer"] := {
        lean configs above wall, LRS narrows the heap-min selection to
        the budget-tractable subset. *)
     {"Completion", "CriticalPairWeight" -> "Mix2", "LRS" -> True,
+        "AutoMaxWeight" -> 20},
+    (* Twee-style config: Twee's CP weight (asymmetric, biases small
+       reduct) + GroundJoin + Connectedness BOTH on (Twee.Join.Config
+       defaults cfg_ground_join=True, cfg_use_connectedness_standalone=
+       True).  These redundancy criteria delete CPs whose two sides
+       join through a path strictly below the peak; the combination
+       prunes the CP queue without losing completeness.  Both knobs
+       already exist in our engine but were missing from the Sheffer
+       schedule.  Sourced from ~/.twee-src/twee/src/Twee/Join.hs. *)
+    {"Completion", "CriticalPairWeight" -> "Twee",
+        "GroundJoin" -> True, "Connectedness" -> True,
         "AutoMaxWeight" -> 20}};
 atpAutoTuneForClass["Boolean"] := {
     (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /
