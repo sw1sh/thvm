@@ -204,6 +204,7 @@ TESTS := \
   $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_uop_expand \
   $(BIN)/test_uop_devectorize \
+  $(BIN)/test_uop_linearize \
   $(BIN)/test_uop_upat \
   $(BIN)/test_uop_range_axis_type \
   $(BIN)/test_grad \

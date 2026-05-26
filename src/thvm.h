@@ -2899,6 +2899,31 @@ fn Term uop_end_range   (Term t, u32 i);
 fn Term uop_devectorize_graph    (Term root);
 fn Term uop_load_store_fold_graph(Term root);
 
+// === Linearizer (src/uop/linearize.c) ===
+// Port of tinygrad codegen/late/linearizer.py: walks a post-devectorize
+// UOp DAG and produces an ordered list of Terms in emission order.
+// Stage (a) of the architectural piece #3 wiring; consumed by the new
+// renderer in src/codegen/render_linearized.c.  See file header for
+// the priority tuple + heap algorithm.
+#ifndef LIN_KERNEL_CAP
+#define LIN_KERNEL_CAP 4096
+#endif
+typedef struct {
+  Term uops[LIN_KERNEL_CAP];
+  u32  n;
+} LinKernel;
+fn int  uop_linearize   (Term sink, LinKernel *out);
+fn u32  lin_kernel_size (LinKernel const *k);
+fn Term lin_kernel_at   (LinKernel const *k, u32 i);
+
+// === Linearized-list renderer (src/codegen/render_linearized.c) ===
+// Stub renderer that consumes a LinKernel and emits C99 source for a
+// single-store elementwise kernel over one LOOP range.  Stage (b) of
+// the architectural piece #3 wiring; not used by production paths.
+// Returns 1 on success, 0 if the kernel shape is out of scope.
+fn int cg_render_linearized_c(LinKernel const *lk, const char *kernel_name,
+                              FILE *fp);
+
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);
 fn Term uop_graph_simplify_materialize(Term root, u32 env_id);

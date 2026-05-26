@@ -197,6 +197,12 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "codegen/profile.c"
 #include "codegen/render_metal.c"
 #include "codegen/render_uop.c"
+// codegen/render_linearized.c -- new emit walk that consumes a
+// LinKernel (uop_linearize output) instead of walking the legacy
+// DAG.  Test-only stub today (single-store elementwise over one
+// LOOP range); the production renderer entry points still call the
+// legacy emit.  See file header for the architectural rationale.
+#include "codegen/render_linearized.c"
 // CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.
 // cpu_dispatch_kernel composes the three (BLAS first, then JIT, then
 // interpreter); each records its route via cg_profile_record.
@@ -304,6 +310,14 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // uop_load_store_fold_graph(root).  Same disposition as expander: NOT
 // WIRED into render_uop.c -- runs only via test_uop_devectorize for now.
 #include "uop/devectorize.c"
+// uop/linearize.c -- port of tinygrad codegen/late/linearizer.py.
+// Walks a post-devectorize DAG and produces a LinKernel: an ordered
+// list of UOp Terms ready for the new render_linearized.c emit walk.
+// Stage (a) of the architectural piece #3 wiring; runs only via the
+// dedicated tests today (gates 3-5 keep the legacy renderer routed
+// for production paths until the new emit can match it on every
+// test_render_uop case).
+#include "uop/linearize.c"
 // codegen/hand_opts.c -- tinygrad's hand_coded_optimizations port.
 // Needs kernel_apply_opt (codegen/apply_opt.c) + the DAG axis
 // scanners (uop/dag_scan.c) above, so it lands here.
