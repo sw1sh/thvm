@@ -3182,7 +3182,7 @@ holdToInactive[axHC_HoldComplete] :=
    bare ProofObject, so existing call shapes are unchanged. *)
 $AtpReturnSpecs = {"ProofObject", "Lemmas", "PreprocessedAxioms",
     "RelevantAxioms", "RawTrace", "Statistics", "Status",
-    "AppliedMethod", "WallTime"};
+    "AppliedMethod", "WallTime", "PortfolioTrace"};
 
 atpReturnSpecQ[All] := True;
 atpReturnSpecQ[x_String] := MemberQ[$AtpReturnSpecs, x];
@@ -3244,6 +3244,17 @@ atpReturnValue[bundle_, "AppliedMethod"] :=
 atpReturnValue[bundle_, "WallTime"] :=
     Replace[Lookup[bundle, "WallTime", Missing["NotAvailable"]],
         Missing[___] :> Missing["NotAvailable"]];
+(* "PortfolioTrace" -> the full list of {Method, WallTime, Proved}
+   records for every schedule entry the portfolio dispatcher tried,
+   in order.  The last entry is the WINNING slice (Proved -> True);
+   any earlier entries are non-proving slices.  For a single-config
+   call, returns a single-element list with that one config. *)
+atpReturnValue[bundle_, "PortfolioTrace"] :=
+    Replace[Lookup[bundle, "PortfolioTrace", Missing["NotAvailable"]],
+        Missing[___] :> {<|
+            "Method" -> atpReturnValue[bundle, "AppliedMethod"],
+            "WallTime" -> atpReturnValue[bundle, "WallTime"],
+            "Proved" -> (Head[bundle["ProofObject"]] === ProofObject)|>}];
 
 atpProjectReturn[bundle_, spec_String] := atpReturnValue[bundle, spec];
 atpProjectReturn[bundle_, All] :=
@@ -3474,7 +3485,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
        recursive call takes the single-config path below -- no further
        nesting.  When nothing proves, the last bundle is returned so the
        introspectives ("Lemmas"/"RawTrace"/...) still reflect a real run. *)
-    Module[{atpSub, atpR = $Failed, atpEnd},
+    Module[{atpSub, atpR = $Failed, atpEnd, atpTrace = {}},
         (* TimeConstraint is a TOTAL budget across the schedule (like the
            built-in FindEquationalProof).  Divide the REMAINING time
            FAIRLY among the REMAINING configs (recomputed each step) so a
@@ -3493,8 +3504,20 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
             atpR = atpProveBundle[conjecture, axioms,
                 Method -> atpSched[[i]], TimeConstraint -> atpSub,
                 MaxSteps -> OptionValue[MaxSteps]];
+            (* Record this slice's outcome for the "PortfolioTrace"
+               return spec: which Method, how long the C-engine call
+               took, whether it produced a verifying ProofObject. *)
+            AppendTo[atpTrace, <|
+                "Method" -> atpSched[[i]],
+                "WallTime" -> Lookup[atpR, "WallTime", Missing["NotAvailable"]],
+                "Proved" -> (Head[atpR["ProofObject"]] === ProofObject)
+            |>];
             If[ Head[atpR["ProofObject"]] === ProofObject, Break[]],
             {i, n}]];
+        (* Stamp the cumulative trace on the returned bundle.  When only
+           one slice ran (proved immediately), the trace has one entry. *)
+        If[ AssociationQ[atpR],
+            atpR = Append[atpR, "PortfolioTrace" -> atpTrace]];
         atpR],
     (* Single config. *)
     Block[{

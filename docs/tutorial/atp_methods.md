@@ -643,6 +643,7 @@ returns the bare `ProofObject`, so existing call shapes are unchanged.
 | `"Status"` | A `"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"` tag. |
 | `"AppliedMethod"` | The actual `Method` config that produced the bundle. For a portfolio run, the winning schedule entry; for a single-config run, the only entry tried. Useful for inspecting what `Automatic` chose. |
 | `"WallTime"` | Seconds (`AbsoluteTiming`) the C-engine `cEngineProof` call took for the SINGLE config that produced the bundle. For a portfolio run this is the WINNING config's slice only -- earlier non-proving slices are not summed in. |
+| `"PortfolioTrace"` | List of `<|"Method", "WallTime", "Proved"|>` records, one per schedule entry the portfolio dispatcher tried in order. Last entry is the winning slice; earlier entries are non-proving slices and useful for portfolio-budget debugging. For a single-config call, falls back to a 1-element list mirroring `"AppliedMethod"` / `"WallTime"`. |
 | `All` | An `Association` of every spec above. |
 
 Examples:

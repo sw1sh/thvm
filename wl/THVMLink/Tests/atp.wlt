@@ -1022,6 +1022,28 @@ VerificationTest[
     TestID -> "ATP/return/WallTime-numeric-non-negative"
 ]
 
+VerificationTest[
+    (* "PortfolioTrace" single-config fallback: returns a 1-element list
+       whose entry mirrors AppliedMethod / WallTime / Proved. *)
+    Module[{t = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        "PortfolioTrace", Method -> "VampireUEQ"]},
+        ListQ[t] && Length[t] === 1 && t[[1, "Method"]] === "VampireUEQ" &&
+            t[[1, "Proved"]] === True],
+    True,
+    TestID -> "ATP/return/PortfolioTrace-single-config-fallback"
+]
+
+VerificationTest[
+    (* "PortfolioTrace" under Automatic on an easy goal: the first
+       schedule entry (Mix2) closes it, so the trace has exactly one
+       entry. *)
+    Module[{t = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        "PortfolioTrace"]},
+        ListQ[t] && Length[t] === 1 && t[[1, "Proved"]] === True],
+    True,
+    TestID -> "ATP/return/PortfolioTrace-automatic-easy-goal"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[
