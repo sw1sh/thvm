@@ -2837,14 +2837,20 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     if (rmu_emit_chain_reduce(store, fp, depth)) return 1;
   }
   if (rmu_term_has_reduce(red_src, 0)) return 0;
-  // emit_store_reduce specialisation: only handles SINGLE-axis REDUCE
-  // (its rmu_split_reduce-based output-range derivation assumes one
-  // reduce axis).  Multi-axis falls through to the generic path
-  // (rmu_emit_store -> rmu_emit_one_reduce) which now opens nested
-  // for-loops per axis (C3).
-  if (uop_reduce_n_axes(value) != 1) return 0;
-  u32  red_kind = uop_reduce_kind(value);
-  u32  red_axis = uop_reduce_axis(value, 0);
+  // emit_store_reduce now handles SINGLE-axis AND multi-axis REDUCE.
+  // Multi-axis: collect every reduce axis_id; rmu_split_reduce_multi
+  // peels them all out of the range set; the parallel-acc / legacy
+  // emit opens them as nested loops in REDUCE.src[1:] order
+  // (outermost axis_0, innermost axis_{n-1}; mirrors tinygrad
+  // lowerer.py).
+  u32  red_kind   = uop_reduce_kind(value);
+  u32  red_n_axes = uop_reduce_n_axes(value);
+  if (red_n_axes == 0 || red_n_axes > MAX_DIM) return 0;
+  u32  red_axes[MAX_DIM];
+  for (u32 ai = 0; ai < red_n_axes; ai++) {
+    red_axes[ai] = uop_reduce_axis(value, ai);
+  }
+  u32  red_axis = red_axes[0];     // legacy alias used for accumulator name
 
   // Collect ranges from addr + red_src; split into output vs reduce.
   // RMU_MAX_RANGES cap (not MAX_DIM): hand_opts can split BOTH the K
@@ -2862,16 +2868,47 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   rmu_collect_ranges_rec_cap(red_src, ranges, opt_kinds, opt_factors,
                              &n_ranges, RMU_MAX_RANGES, RMU_NO_OPT, 0);
 
+  // Multi-axis split: peel every reduce-axis leaf out of the range
+  // set in REDUCE.src[1:] order; tail of `out_ranges` is the true
+  // output axes (still in their original ordering relative to ranges[]).
   Term out_ranges[RMU_MAX_RANGES];
   u32  out_kinds  [RMU_MAX_RANGES] = {0};
   u32  out_factors[RMU_MAX_RANGES] = {0};
   u32  n_out = 0;
-  u32 reduce_idx = rmu_split_reduce(ranges, opt_kinds, opt_factors,
-                                    n_ranges, red_axis,
-                                    out_ranges, out_kinds, out_factors, &n_out);
-  if (reduce_idx == n_ranges) {
-    // No reduce range in the body -- nothing to accumulate over.
-    return 0;
+  Term red_ranges       [MAX_DIM] = {0};
+  u32  red_kind_opts    [MAX_DIM];
+  u32  red_factor_opts  [MAX_DIM];
+  for (u32 ai = 0; ai < red_n_axes; ai++) {
+    red_kind_opts  [ai] = RMU_NO_OPT;
+    red_factor_opts[ai] = 0;
+  }
+  for (u32 i = 0; i < n_ranges; i++) {
+    if (term_tag(ranges[i]) != TAG_UOP || term_ext(ranges[i]) != UOP_RANGE) {
+      out_ranges [n_out] = ranges[i];
+      out_kinds  [n_out] = opt_kinds  [i];
+      out_factors[n_out] = opt_factors[i];
+      n_out++;
+      continue;
+    }
+    u32 axis_id = (u32)term_val(heap_read(term_val(ranges[i]) + 0));
+    int is_red = -1;
+    for (u32 ai = 0; ai < red_n_axes; ai++) {
+      if (red_axes[ai] == axis_id) { is_red = (int)ai; break; }
+    }
+    if (is_red >= 0) {
+      red_ranges      [is_red] = ranges[i];
+      red_kind_opts   [is_red] = opt_kinds  [i];
+      red_factor_opts [is_red] = opt_factors[i];
+    } else {
+      out_ranges [n_out] = ranges[i];
+      out_kinds  [n_out] = opt_kinds  [i];
+      out_factors[n_out] = opt_factors[i];
+      n_out++;
+    }
+  }
+  for (u32 ai = 0; ai < red_n_axes; ai++) {
+    // Missing reduce-axis leaf for any axis: bail to the generic path.
+    if (red_ranges[ai] == 0) return 0;
   }
 
   // Partition out_ranges: true output axes vs inner-reduce-decomp
@@ -2880,7 +2917,173 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   u32 n_out_true = rmu_partition_out_ranges(out_ranges, out_kinds,
                                             out_factors, n_out, addr);
   u32 n_inner    = n_out - n_out_true;
+  // Legacy aliases for the single-axis-K branches below.
+  Term red_range      = red_ranges[0];
+  u32  red_kind_opt   = red_kind_opts[0];
+  u32  red_factor_opt = red_factor_opts[0];
 
+  // Parallel-accumulator path: when any true-output axis is UPCAST'd,
+  // emit F register-blocked accumulators sharing ONE reduce loop --
+  // the tinygrad expander.py:do_expand + devectorizer.py:reduce_to_acc
+  // (lines 311-328) semantics.  Each UPCAST'd output range becomes F
+  // literal indices substituted into the reduce body / store address,
+  // never opened as a runtime for-loop.  The classic register-blocked
+  // matmul: F MADs per K iter, with the K-iter's shared input load
+  // amortised across all F accumulators (the MSL/nvcc compiler CSEs
+  // the load once it sees F independent accumulators with overlapping
+  // address arithmetic).
+  //
+  // Gates: GPU only (Metal/CUDA -- both honour register-blocking; C
+  // target lacks the ILP machinery to benefit), single-K reduce with
+  // no OPT-K-axis wrap (UNROLL/GROUP_REDUCE), no inner-reduce-decomp
+  // (the inner-axis fold uses the SHARED accumulator and would
+  // conflict with per-element accumulators).  When gated off, fall
+  // through to the legacy single-acc / serial-UPCAST-loop emit.
+  // Multi-axis-K reject: no GROUP_REDUCE on any reduce axis (the
+  // GROUP_REDUCE shape is single-axis only) and the parallel-acc emit
+  // can only open NON-OPT'd reduce loops (UNROLL is honoured; UPCAST
+  // on a reduce axis is the "inner-reduce-decomp" pattern handled via
+  // n_inner != 0, already gated below).
+  int multi_axis_reject = 0;
+  for (u32 ai = 0; ai < red_n_axes; ai++) {
+    if (red_kind_opts[ai] == UOP_OPT_GROUP_REDUCE) {
+      multi_axis_reject = 1; break;
+    }
+  }
+  RmuConvMSubstCtx pa_up = {0};
+  u32 pa_up_exts[RMU_CONV_UPCAST_MAX] = {0};
+  u32 pa_total = 1;
+  if (RMU_TARGET != CG_TARGET_C && n_inner == 0 && !multi_axis_reject) {
+    for (u32 i = 0; i < n_out_true && pa_up.n < RMU_CONV_UPCAST_MAX; i++) {
+      if (out_kinds[i] != UOP_OPT_UPCAST) continue;
+      Term r = out_ranges[i];
+      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+      u32 e  = (u32)term_val(heap_read(term_val(r) + 2));
+      if (e < 2 || e > 16) continue;
+      // Cap straight-line accumulator count at 32 (tinygrad's
+      // upcast_size budget); skip the next UPCAST'd axis if it'd push
+      // total over the cap.
+      if ((u64)pa_total * e > 32) continue;
+      pa_up.up_axes[pa_up.n] = (u32)term_val(heap_read(term_val(r) + 0));
+      pa_up_exts[pa_up.n]    = e;
+      pa_up.n++;
+      pa_total *= e;
+    }
+  }
+  if (pa_up.n > 0) {
+    // Filtered output ranges (UPCAST'd axes removed) drive the runtime
+    // loop / thread-bind emit.  The UPCAST'd axes become straight-line
+    // accumulator indices, NOT for-loops.
+    Term pa_f_ranges[RMU_MAX_RANGES];
+    u32  pa_f_kinds  [RMU_MAX_RANGES] = {0};
+    u32  pa_f_factors[RMU_MAX_RANGES] = {0};
+    u32  pa_f_n = 0;
+    for (u32 i = 0; i < n_out_true; i++) {
+      Term r = out_ranges[i];
+      int skip = 0;
+      if (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE) {
+        u32 ax = (u32)term_val(heap_read(term_val(r) + 0));
+        for (u32 j = 0; j < pa_up.n; j++) {
+          if (pa_up.up_axes[j] == ax) { skip = 1; break; }
+        }
+      }
+      if (skip) continue;
+      pa_f_ranges [pa_f_n] = r;
+      pa_f_kinds  [pa_f_n] = out_kinds  [i];
+      pa_f_factors[pa_f_n] = out_factors[i];
+      pa_f_n++;
+    }
+    int pa_needs_close[RMU_MAX_RANGES] = {0};
+    u32 pa_body_depth = rmu_emit_output_loops(addr, pa_f_ranges, pa_f_kinds,
+                                              pa_f_factors, pa_f_n, depth,
+                                              fp, pa_needs_close);
+    char pa_acc_name[32];
+    snprintf(pa_acc_name, sizeof(pa_acc_name), "_acc%u", red_axis);
+    // F parallel accumulator declarations.
+    for (u32 k = 0; k < pa_total; k++) {
+      for (u32 d = 0; d < pa_body_depth; d++) fputs("  ", fp);
+      fprintf(fp, "float %s_%u = ", pa_acc_name, k);
+      rmu_emit_reduce_init(red_kind, fp);
+      fputs(";\n", fp);
+    }
+    // Reduce loops, nested outermost (axis_0) -> innermost
+    // (axis_{n-1}).  One open per reduce axis; honour OPT(UNROLL)
+    // per-axis, otherwise default-unroll small K.  Mirrors tinygrad
+    // lowerer.py: REDUCE.src=(body,)+tuple(ranges) opens each axis as
+    // its own loop in src order.
+    u32 pa_red_depth = pa_body_depth;
+    for (u32 ai = 0; ai < red_n_axes; ai++) {
+      if (red_kind_opts[ai] == UOP_OPT_UNROLL) {
+        for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
+        rmu_emit_unroll_pragma(fp, red_factor_opts[ai]);
+      } else if (red_kind_opts[ai] == RMU_NO_OPT) {
+        u32 red_extent = uop_range_extent(red_ranges[ai]);
+        if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
+          for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
+          fprintf(fp, "#pragma unroll(%u)\n", red_extent);
+        }
+      }
+      rmu_emit_range_open(red_ranges[ai], fp, pa_red_depth, red_kind_opts[ai]);
+      pa_red_depth++;
+    }
+    // F MAD statements, each with the UPCAST'd RANGE leaves substituted
+    // by a literal CONST in the row-major-decoded position.  Innermost
+    // UPCAST axis (last in pa_up.up_axes[]) varies fastest so adjacent
+    // k indices share outer-axis values -- the compiler CSEs any
+    // outer-axis-only address arithmetic across the rectangle.
+    UOpGraphRewriteRule pa_rules[1] = {
+      { "parallel_acc_subst", rmu_conv_m_subst_rule }
+    };
+    for (u32 k = 0; k < pa_total; k++) {
+      u32 rem = k;
+      for (i32 i = (i32)pa_up.n - 1; i >= 0; i--) {
+        pa_up.up_vals[i] = rem % pa_up_exts[i];
+        rem /= pa_up_exts[i];
+      }
+      Term rk = uop_graph_rewrite(red_src, pa_rules, 1, &pa_up);
+      for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
+      if (red_kind == REDUCE_MAX) {
+        fprintf(fp, "%s_%u = fmax(%s_%u, ", pa_acc_name, k, pa_acc_name, k);
+        rmu_emit_term(rk, fp);
+        fputs(");\n", fp);
+      } else {
+        fprintf(fp, "%s_%u = %s_%u + ", pa_acc_name, k, pa_acc_name, k);
+        rmu_emit_term(rk, fp);
+        fputs(";\n", fp);
+      }
+    }
+    // Close all reduce loops (innermost first).
+    for (i32 ai = (i32)red_n_axes - 1; ai >= 0; ai--) {
+      pa_red_depth--;
+      for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
+    // F final stores.
+    for (u32 k = 0; k < pa_total; k++) {
+      u32 rem = k;
+      for (i32 i = (i32)pa_up.n - 1; i >= 0; i--) {
+        pa_up.up_vals[i] = rem % pa_up_exts[i];
+        rem /= pa_up_exts[i];
+      }
+      Term ak = uop_graph_rewrite(addr, pa_rules, 1, &pa_up);
+      for (u32 d = 0; d < pa_body_depth; d++) fputs("  ", fp);
+      fprintf(fp, "%s[", rmu_buf_name(buf));
+      rmu_emit_term(ak, fp);
+      fprintf(fp, "] = %s_%u;\n", pa_acc_name, k);
+    }
+    // Close runtime output loops in reverse order.
+    for (i32 i = (i32)pa_f_n - 1; i >= 0; i--) {
+      if (!pa_needs_close[i]) continue;
+      pa_body_depth--;
+      for (u32 d = 0; d < pa_body_depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
+    return 1;
+  }
+
+  // Legacy single-accumulator path (no UPCAST'd output axis, or gated
+  // off): one `_accN`, one runtime UPCAST loop per UPCAST'd output
+  // (emitted by rmu_emit_output_loops as `#pragma unroll`).
   // Emit output ranges: promoted-GLOBAL (tid decode) for plain-LOOP
   // output axes, threadbinds for LOCAL/explicit-GLOBAL, serial loops
   // otherwise.  Emits the `if (tid >= total) return;` bounds guard.
@@ -2891,16 +3094,20 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   // GROUP_REDUCE detection has to fire BEFORE we declare the scalar
   // accumulator -- otherwise the rendered MSL would have both decls
   // and the threadgroup-shared `_acc[L]` collides with the prior
-  // `float _acc;`.
-  Term red_range = ranges[reduce_idx];
-  u32  red_kind_opt   = opt_kinds  [reduce_idx];
-  u32  red_factor_opt = opt_factors[reduce_idx];
-  if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_GROUP_REDUCE) {
+  // `float _acc;`.  GROUP_REDUCE is single-axis only.
+  if (red_n_axes == 1 && red_kind_opt != RMU_NO_OPT
+      && red_kind_opt == UOP_OPT_GROUP_REDUCE) {
     // GROUP_REDUCE doesn't handle inner-K decomp yet; pass n_out_true
     // so the close-loop count matches the open-loop count.
     return rmu_emit_group_reduce(buf, addr, red_range, red_src,
                                  red_kind, red_axis, red_factor_opt,
                                  fp, body_depth, n_out_true, needs_close);
+  }
+  // Multi-axis GROUP_REDUCE on any axis: bail to the generic path.
+  if (red_n_axes > 1) {
+    for (u32 ai = 0; ai < red_n_axes; ai++) {
+      if (red_kind_opts[ai] == UOP_OPT_GROUP_REDUCE) return 0;
+    }
   }
   // Emit accumulator decl using the reduce_axis as the unique id.
   char acc_name[32];
@@ -2909,30 +3116,33 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   fprintf(fp, "float %s = ", acc_name);
   rmu_emit_reduce_init(red_kind, fp);
   fputs(";\n", fp);
-  // Reduce-axis loop.  When the autotuner wrapped the axis in
-  // OPT(UNROLL, factor) honour that exactly.  Otherwise, default to a
-  // full unroll when the extent is small (matmul K=25, etc.) so the
-  // MSL compiler can straight-line the contraction MADs.
-  if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
-    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    rmu_emit_unroll_pragma(fp, red_factor_opt);
-  } else if (red_kind_opt == RMU_NO_OPT && RMU_TARGET != CG_TARGET_C) {
-    // GPU-generic: default small-extent reduce unroll for Metal AND
-    // CUDA (`#pragma unroll(N)` compiles on both); C target stays
-    // rolled.
-    u32 red_extent = uop_range_extent(red_range);
-    if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
-      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      fprintf(fp, "#pragma unroll(%u)\n", red_extent);
+  // Reduce-axis loops, nested outermost (axis_0) -> innermost
+  // (axis_{n-1}).  Per-axis: honour OPT(UNROLL) if present, otherwise
+  // default-unroll small extents (matmul K=25, conv kH=5, etc.).
+  u32 red_depth = body_depth;
+  for (u32 ai = 0; ai < red_n_axes; ai++) {
+    if (red_kind_opts[ai] != RMU_NO_OPT
+        && red_kind_opts[ai] == UOP_OPT_UNROLL) {
+      for (u32 d = 0; d < red_depth; d++) fputs("  ", fp);
+      rmu_emit_unroll_pragma(fp, red_factor_opts[ai]);
+    } else if (red_kind_opts[ai] == RMU_NO_OPT
+               && RMU_TARGET != CG_TARGET_C) {
+      u32 red_extent = uop_range_extent(red_ranges[ai]);
+      if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
+        for (u32 d = 0; d < red_depth; d++) fputs("  ", fp);
+        fprintf(fp, "#pragma unroll(%u)\n", red_extent);
+      }
     }
+    rmu_emit_range_open(red_ranges[ai], fp, red_depth, red_kind_opts[ai]);
+    red_depth++;
   }
-  rmu_emit_range_open(red_range, fp, body_depth, red_kind_opt);
-  // Inner-K decomposition: nested unrolled loops INSIDE the reduce
-  // loop, BEFORE the combine, so all inner-axis iterations fold into
-  // the single accumulator (tinygrad expander.py:do_expand semantics).
+  // Inner-K decomposition: nested unrolled loops INSIDE the innermost
+  // reduce loop, BEFORE the combine, so all inner-axis iterations fold
+  // into the single accumulator (tinygrad expander.py:do_expand
+  // semantics).
   u32 reduce_body_depth = rmu_emit_inner_reduce_decomp_loops(
       out_ranges + n_out_true, out_kinds + n_out_true,
-      out_factors + n_out_true, n_inner, fp, body_depth + 1);
+      out_factors + n_out_true, n_inner, fp, red_depth);
   // Combine inside the (innermost) reduce loop.
   for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
   rmu_emit_reduce_combine(acc_name, red_kind, red_src, fp);
@@ -2941,9 +3151,12 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
     fputs("}\n", fp);
   }
-  // Close reduce loop.
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("}\n", fp);
+  // Close reduce loops (innermost first).
+  for (i32 ai = (i32)red_n_axes - 1; ai >= 0; ai--) {
+    red_depth--;
+    for (u32 d = 0; d < red_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
   // Final store.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s[", rmu_buf_name(buf));
