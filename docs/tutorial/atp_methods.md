@@ -133,7 +133,7 @@ Vampire benchmark of thvm's then-uncrackable theorems.
 ## 4. Methods
 
 `Method` selects the saturator's strategy. Every concrete method head
-accepts the same suboption vocabulary (section 4); the head fixes the
+accepts the same suboption vocabulary (section 5); the head fixes the
 broad search shape, the suboptions tune it.
 
 ### 4.1 `Automatic` (the default)
@@ -713,7 +713,7 @@ non-terminating axiom set never saturates.
 
 ## 8. Debugging and introspection
 
-### 9.1 Statistics
+### 8.1 Statistics
 
 ```wolfram
 TFindProof[goal, axioms, "Statistics"]
@@ -725,7 +725,7 @@ Fast first sanity check: a "Proved" with `Steps` in the hundreds and
 `QueueSize` near 0 is a clean saturation; a "TimedOut" with `QueueSize`
 in the millions is CP explosion.
 
-### 9.2 `"PreprocessedAxioms"`
+### 8.2 `"PreprocessedAxioms"`
 
 ```wolfram
 TFindProof[goal, axioms, "PreprocessedAxioms"]
@@ -735,7 +735,7 @@ Returns the axioms after `ForAll -> Pattern` quantifier elimination,
 `Exists -> Skolem`, and canonical pattern-variable naming. The exact
 shape the C engine encodes.
 
-### 9.3 `"RelevantAxioms"` and `TRelevantAxioms`
+### 8.3 `"RelevantAxioms"` and `TRelevantAxioms`
 
 ```wolfram
 TRelevantAxioms["InverseOfInverse", "AbelianGroupAxioms",
@@ -747,7 +747,7 @@ The Mode tag identifies the filter (`None`, `"Safe"`, `"Connected"`,
 `"SInE"`); each entry of `Dropped` carries the witnessing axiom and the
 symbols that triggered the drop reason.
 
-### 9.4 Environment variables
+### 8.4 Environment variables
 
 | Env var | Effect |
 |---------|--------|
@@ -757,7 +757,7 @@ symbols that triggered the drop reason.
 
 All env vars are read once per process at first call.
 
-### 9.5 Tracing a specific Method config
+### 8.5 Tracing a specific Method config
 
 The `RawTrace` return spec is the raw decoded C-engine trace -- one
 record per CP / ORIENT / SIMPLIFY event:
@@ -770,7 +770,7 @@ TFindProof[goal, axioms, "RawTrace", TimeConstraint -> 5]
 Pair with `"Lemmas"` to read the final rule set, or with `"Statistics"`
 to see how much of the trace cap was used.
 
-### 9.6 Catching a wedge
+### 8.6 Catching a wedge
 
 A goal that hangs longer than expected almost always either explodes the
 CP queue (visible via `"Statistics"["QueueSize"]` on a `TimeConstraint`
@@ -780,9 +780,60 @@ explodes, the first lever to pull is `"AutoMaxWeight" -> 20` (defers
 over-weight CPs); if that does not help, switch the weight (`Mix2 ->
 Mix -> Gt`) and bound `MaxWeight` directly.
 
+### 8.7 Which config actually ran -- the introspection trio
+
+When `Method -> Automatic` or `Method -> "VampirePortfolio"` cycles
+through multiple schedule entries, three return specs disclose what
+happened:
+
+```wolfram
+TFindProof[goal, axioms, "AppliedMethod"]
+(* -> {"Completion", "CriticalPairWeight" -> "Mix2"} *)
+```
+
+`"AppliedMethod"` (§7) returns the winning schedule entry -- the
+config the bundle actually ran under. For a single-config call this
+is just the `Method` argument; for portfolio runs it's the entry that
+proved.
+
+```wolfram
+TFindProof[goal, axioms, "WallTime"]
+(* -> 0.0014 *)
+```
+
+`"WallTime"` returns the `AbsoluteTiming` seconds the C-engine
+`cEngineProof` call took for that single (winning, in portfolio
+runs) config. The encode / dispatch overhead is NOT included; this
+is the C side only.
+
+```wolfram
+TFindProof[goal, axioms, "PortfolioTrace"]
+(* -> {
+    <|"Method" -> {"Completion", "CriticalPairWeight" -> "Mix2"},
+      "WallTime" -> 3.22, "Proved" -> False|>,
+    <|"Method" -> {"Completion", "Ordering" -> "LPO", ...},
+      "WallTime" -> 3.00, "Proved" -> False|>,
+    ...
+    <|"Method" -> "GoalDirected", "WallTime" -> 1.20,
+      "Proved" -> True|>
+  } *)
+```
+
+`"PortfolioTrace"` returns the full per-slice record: every schedule
+entry the dispatcher tried in order, the slice's `cEngineProof`
+WallTime, and whether the slice produced a verifying ProofObject.
+The last entry has `Proved -> True` (the winner) when the goal was
+closed; for a single-config call the list has one entry mirroring
+`"AppliedMethod"` / `"WallTime"`.
+
+Useful when a goal "should" be cheap but takes a long time: look at
+which slices ran and how long each took, then either pin the cheap
+config explicitly with `Method -> ...` or feed the slow ones a tighter
+`"AutoMaxWeight"`.
+
 ## 9. Recipes
 
-Combinations of the suboptions in §4 that pair well, organized by what
+Combinations of the suboptions in §5 that pair well, organized by what
 you're trying to attack.
 
 ### 9.1 Throw everything at it
