@@ -547,6 +547,22 @@ equation. The new rule itself stays in R.
 Default: `False`. The `"VampireUEQ"` preset turns it on alongside
 `"RHSInterreduce" -> True`.
 
+### 4.21 `"SymbolWeights" -> {sym -> w, ...}`
+
+Per-symbol KBO weight overrides. Default per-symbol weight is `1` (with
+variable weight `1` too). An association or list of rules
+`{sym -> w, ...}` sets `weight(sym) = w` for each named symbol; unlisted
+symbols keep the default `1`. Sentinel `0` in the input means "leave
+at default" so a partial map is fine.
+
+Waldmeister `SymbolGewichte` port (`CLAS/SymbolGewichte.c::SG_Symb-
+GewichteEintragen`, the `-w DEF=2:VAR=5:f=5:g=0` flag). Useful for
+hand-tuned problem-specific KBO configurations: making a "heavy" symbol
+(e.g. one whose terms tend to blow up) more expensive lets the engine
+preferentially orient away from it.
+
+Default: identity (uniform 1, engine byte-identical).
+
 ## 5. Per-class recommendations
 
 Empirical patterns from the recent benchmark sweep + parallel Vampire

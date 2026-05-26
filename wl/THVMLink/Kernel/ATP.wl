@@ -99,7 +99,7 @@ $atpRunProofFn := $atpRunProofFn = load[
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
-     Integer, Integer, Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer, Integer, {Integer, 1}},
     "NumericArray"
 ]
 
@@ -885,6 +885,30 @@ atpPrecedenceArray["SkolemHighest", enc_] := Block[{
 ];
 atpPrecedenceArray[_, enc_] := {};
 
+(* Method "SymbolWeights" -> {sym -> w, ...}: an explicit per-symbol
+   KBO weight map.  Returns a label-indexed Int64 list (element i = the
+   weight to assign to label i; 0 = leave at default 1, mirroring
+   atpPrecedenceArray's "leave at default" sentinel).  An empty list
+   short-circuits to the engine default (uniform 1).  Waldmeister
+   SymbolGewichte port (CLAS/SymbolGewichte.c::SG_SymbGewichteEintragen,
+   -w DEF=2:VAR=5:f=5:g=0). *)
+atpSymbolWeightsArray[None, enc_] := {};
+atpSymbolWeightsArray[map_Association, enc_] := Block[{
+    sym = enc["State"]["sym"], maxLab = enc["MaxLab"], arr,
+    nameMap = KeyMap[atpSymName, map]
+},
+    arr = ConstantArray[0, maxLab + 1];
+    KeyValueMap[
+        Function[{nm, lab},
+            If[ KeyExistsQ[nameMap, nm] && lab >= 1 && lab <= maxLab,
+                arr[[lab + 1]] = nameMap[nm]]],
+        sym];
+    arr
+];
+atpSymbolWeightsArray[rules_List, enc_] :=
+    atpSymbolWeightsArray[Association[rules], enc];
+atpSymbolWeightsArray[_, enc_] := {};
+
 (* Run the C ATP completion engine + proof extraction.  The C glue
    ships two derivations: the completion-saturated MAIN state's full
    trace DAG, and a no-completion EXT state whose chain (when it
@@ -908,17 +932,19 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     selRatio_, autoMaxWeight_, rhsInterreduce_, unfailingCP_,
     cpSetInterreduce_, connectedness_, precedenceSpec_,
     fifoTiebreak_, recordNorm_, useLRS_, useSOS_,
-    useFwdSub_, useBwdSub_, useBwdDemod_] := Block[{
+    useFwdSub_, useBwdSub_, useBwdDemod_, symbolWeightsSpec_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
-    mnfSteps, mainRules, rTrace, traceEntries, precArray
+    mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
 },
     precArray = atpPrecedenceArray[precedenceSpec, enc];
+    symbolWeightsArr = atpSymbolWeightsArray[symbolWeightsSpec, enc];
     raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
-        recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod];
+        recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod,
+        symbolWeightsArr];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -2143,6 +2169,14 @@ atpPrecedenceOpt[o_Association] := Block[{p, sk},
         ListQ[p], p,
         p === "SkolemHighest", "SkolemHighest",
         True, None]];
+(* "SymbolWeights" -> {sym1 -> w1, ...} | <|sym1 -> w1, ...|>: an
+   explicit per-symbol KBO weight map.  Waldmeister `SymbolGewichte`
+   port (CLAS/SymbolGewichte.c).  Resolved against engine labels in
+   cEngineProof (atpSymbolWeightsArray).  Absent / None / Automatic =
+   the uniform-1 default (engine byte-identical). *)
+atpSymbolWeightsOpt[o_Association] :=
+    Replace[Lookup[o, "SymbolWeights", None],
+        Automatic -> None];
 (* "FifoTiebreak" -> True: Waldmeister `-:w1=fifo` secondary key.  Preserve
    each surviving CP's insertion age across the post-orient CP-normalize
    sweep, so equal-weight ties resolve oldest-first run-wide (the heap
@@ -2208,7 +2242,7 @@ atpBwdSubsumeOpt[o_Association] :=
 atpBwdDemodOpt[o_Association] :=
     Switch[Lookup[o, "BackwardDemod", Automatic],
         True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0};
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -2231,7 +2265,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpCPSetInterreduceOpt[o], atpConnectednessOpt[o],
          atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o],
          atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o],
-         atpBwdDemodOpt[o]}
+         atpBwdDemodOpt[o], atpSymbolWeightsOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -2405,7 +2439,7 @@ atpScheduleFor["VampirePortfolio"] := $VampirePortfolio;
 atpScheduleFor["VampirePortfolio", _, _] := $VampirePortfolio;
 
 atpParseMethod[m_] := (
-    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0});
+    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs

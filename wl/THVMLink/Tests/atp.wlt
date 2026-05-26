@@ -1044,6 +1044,16 @@ VerificationTest[
     TestID -> "ATP/return/PortfolioTrace-automatic-easy-goal"
 ]
 
+VerificationTest[
+    (* "SymbolWeights" -> {sym -> w, ...}: per-symbol KBO weights port
+       of Waldmeister's SymbolGewichte.  Baseline still proves. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion",
+            "SymbolWeights" -> {"CenterDot" -> 5, "OverTilde" -> 3}}],
+    ProofObject,
+    TestID -> "ATP/method/SymbolWeights-proves"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[
