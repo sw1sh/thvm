@@ -264,10 +264,18 @@ fn int uop_classify_conv2d_any(Term root, u32 *out_kred) {
   return uop_classify_conv2d_direct(root, out_kred);
 }
 
-// Wrap the STORE root's value with UOP_OPT(_, CONV, 0) when the conv2d
-// shape matches. Returns the input root unchanged on any non-match.
+// Wrap the STORE root's value with UOP_OPT(_, CONV, 0) when EITHER
+// conv2d shape (flat im2col-matmul or direct multi-axis) matches.
+// Downstream gates (hand_opt_is_conv_kernel, rmu_detect_conv) only
+// need to check the marker; the renderer's rmu_emit_conv template
+// itself bails on multi-axis K (n_axes != 1) and the outer dispatch
+// gracefully falls through to the generic rmu_emit_store path that
+// already handles multi-axis REDUCE, so the wrapping is always safe.
+// Mirrors tinygrad's single-form scheduler (codegen/heuristic.py
+// gates on a single Kernel.is_conv attribute, not two parallel
+// classifier surfaces).
 fn Term uop_recognise_conv(Term root) {
-  if (!uop_classify_conv2d(root, NULL)) return root;
+  if (!uop_classify_conv2d_any(root, NULL)) return root;
 
   // Rebuild: STORE(buf_out, addr_out, OPT(reduce, CONV, 0)).
   u64 sloc = term_val(root);
