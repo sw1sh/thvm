@@ -519,10 +519,11 @@ table is useful when you pin `Method` explicitly.
 These 5 unit-equality goals are known to be cracked by Vampire 5.0.1 (UEQ
 portfolio) within 30 s in our parallel baseline, but neither the
 `Automatic` schedule nor any tried explicit `Method` (including
-`"VampireUEQ"`, `"CriticalPairWeight" -> "ConjSym"`, `"Diversity"`,
-`"Twee"`, `"ForwardSubsume" -> True`, and pairings with `"GroundJoin"
--> True` or `"Connectedness" -> True`) closes them within 25 s on the
-single-config form:
+`"VampireUEQ"` -- which now bundles real `BackwardSubsume` per iter 18 /
+19 -- `"CriticalPairWeight" -> "ConjSym"`, `"Diversity"`, `"Twee"`,
+`"ForwardSubsume" -> True`, and pairings with `"GroundJoin" -> True` or
+`"Connectedness" -> True`) closes them within 25 s on the single-config
+form:
 
 - `McCuneAxioms / EqualityOfInverses`
 - `RobbinsAxioms / DoubleNegation`
@@ -537,13 +538,20 @@ dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
 bd=all:av=off:gtg=exists_sym
 ```
 
-The orderable subset is shipped as `Method -> "VampireUEQ"`. The three
-flags still unported -- backward subsumption (`bs=unit_only` proper:
-delete an EXISTING rule when a new one subsumes it, vs. the current
-forward-only `"ForwardSubsume"` flag which skips the new rule add),
-backward demodulation (`bd=all`), and goal-type-graph premise
-selection (`gtg=exists_sym`) -- look like the missing pieces for at
-least this target.
+The orderable subset is shipped as `Method -> "VampireUEQ"`. After iter
+18 (`bs=unit_only` directly ported as `"BackwardSubsume"`), two flags
+remain unported:
+
+- `bd=all` -- backward demodulation: after a new rule N is added, rewrite
+  every existing rule's LHS / RHS at any position using N, then re-add
+  the rewritten rule (we have `"RHSInterreduce"` for the RHS-only
+  half, but no LHS demodulation).
+- `gtg=exists_sym` -- Vampire's GoalGuessing (`Shell/GoalGuessing.cpp`)
+  flags clauses with conjecture-symbol occurrences as goal-like for
+  premise selection. Less directly applicable to thvm: every problem
+  here has an explicit `negated_conjecture` role, so the conjecture
+  side is already known -- but the same machinery could feed a more
+  selective SInE pass.
 
 ## 6. Return specs
 
