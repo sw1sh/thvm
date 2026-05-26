@@ -1945,3 +1945,28 @@ VerificationTest[
     {True, True, ProofObject},
     TestID -> "ATP/returnspec/All-returns-every-introspective"
 ]
+
+(* === Globals-collision footgun =================================== *)
+
+(* `CanonicalizePatterns` renames axiom-bound variables to canonical
+   short Symbol names a, b, c, ..., which live in Global`.  Pre-fix,
+   a user who had set e.g. `c = "x"` BEFORE calling TFindProof would
+   crash the kernel with a SIGSEGV: the third canonical pattern
+   variable Pattern[c, _] collided with the bound global, the encoder
+   later followed the String head, and the C runtime walked off the
+   term arena.  atpFreshGlobalSymbol now sidesteps any colliding
+   global by suffixing the canonical name with $Atp<k>.  The repro is
+   a top-level `c = "x"`; Block-style dynamic scoping isn't enough to
+   trigger it through the test harness, so we mutate Global`c, run,
+   then Clear.  Quiet swallows the Clear-on-cleared housekeeping
+   message. *)
+VerificationTest[
+    Quiet[
+        Symbol["c"] = "x";
+        With[{p = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+                TimeConstraint -> 3]},
+            Clear[c];
+            Head[p]]],
+    ProofObject,
+    TestID -> "ATP/footgun/canonicalize-survives-global-collision"
+]

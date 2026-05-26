@@ -548,7 +548,16 @@ toHoldEq[expr_] := HoldForm[expr] /. Inactive[Equal] -> Equal
 wrap[expr_, head_: List] := Replace[expr, x : Except[_head] :> head[x]]
 
 (* Rename every Pattern variable in `expr` to a canonical short name
-   (a, b, c, ..., then a1, b1, ... if more are needed). *)
+   (a, b, c, ..., then a1, b1, ... if more are needed).
+   IMPORTANT: the short names live in the user-visible Global` context,
+   so if a user has e.g. `c = "x"` set globally and an axiom binds three
+   variables (renamed a/b/c), the third pattern variable Pattern[c, _]
+   gets caught by the global binding when downstream code touches its
+   bare-c reference -- the encoder later sees "x" where it expected a
+   matched value, Folds over the String head, and SIGSEGVs the kernel.
+   Guard against this by escaping the canonical names if the global
+   binding already exists.  Without the guard, any of c / m / x / a /
+   b / d / f / g / h would be a footgun. *)
 CanonicalizePatterns[expr_] := Module[{
     chars = CharacterRange["a", "z"],
     patts = DeleteDuplicates[Cases[expr, _Pattern, All, Heads -> True]]
@@ -558,9 +567,26 @@ CanonicalizePatterns[expr_] := Module[{
             {Join[cs, (StringJoin[#, ToString[k]] &) /@ cs], k + 1}]],
         {chars, 1}, Length[First[#]] < Length[patts] &];
     expr /. MapIndexed[
-        With[{canonical = Pattern @@ {Symbol[Extract[chars, #2]], Last[#1]}},
+        With[{canonical = Pattern @@ {
+                atpFreshGlobalSymbol[Extract[chars, #2]], Last[#1]}},
             Verbatim[#1] :> canonical] &,
         patts]
+];
+
+(* Return the Symbol for `name` if its OwnValues + DownValues are empty;
+   otherwise suffix with `$Atp<k>` (k bumped per probe) until a fresh
+   Symbol is found.  Keeps the canonical-pattern naming free of
+   user-globals collisions.  OwnValues/DownValues are HoldFirst, so the
+   freshness check threads the candidate name through `With` to force
+   substitution of the actual System symbol before introspection. *)
+atpFreshGlobalSymbol[name_String] := Module[{n = name, k = 0},
+    While[
+        Quiet @ Check[
+            With[{sym = Symbol[n]},
+                OwnValues[sym] =!= {} || DownValues[sym] =!= {}],
+            True (* introspection errored -- treat name as taken *)],
+        k++; n = name <> "$Atp" <> ToString[k]];
+    Symbol[n]
 ]
 
 (* Forward ref: skolemPatterns calls universalPatterns. *)
@@ -1671,9 +1697,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                         {mFace, {Identity, Reverse}}],
                     2];
                 hit = SelectFirst[cands,
-                    Function[c,
-                        With[{r = cplReconCp[c[[5]][c[[2]]],
-                                c[[6]][c[[4]]], pos, varSyms]},
+                    Function[cand,
+                        With[{r = cplReconCp[cand[[5]][cand[[2]]],
+                                cand[[6]][cand[[4]]], pos, varSyms]},
                             ListQ[r] && cplEqSetQ[r, cpEq, varSyms]]]];
                 If[ MissingQ[hit], Return[Missing[]]];
                 <|"Construct" -> hit[[1]]["Key"],
