@@ -54,6 +54,8 @@ TFindEquationalProof::usage = "TFindEquationalProof is a deprecated alias for TF
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning -- a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire -- D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
 
+TAtpSchedule::usage = "TAtpSchedule[Method] returns the schedule (a list of single-config Methods) that TFindProof[..., Method -> spec] would expand to, without running the C engine.  Useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.  TAtpSchedule[Method, conjecture, axioms] threads the conjecture + axioms through Automatic's structure-recognized auto-tune, so the returned schedule matches what TFindProof[conjecture, axioms, Method -> spec] would dispatch.  TAtpSchedule[Method, \"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.";
+
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide / TFindProofSMT; TPTPImport.wl owns
    TPTPImport) so bare references inside this file's Begin[`Private`]
@@ -2591,6 +2593,24 @@ atpScheduleFor[Automatic, axioms_, conjecture_] :=
 atpScheduleFor[Automatic] := $AtpSchedule;          (* no problem in hand *)
 atpScheduleFor[m_, _, _] := {m};
 atpScheduleFor[m_] := {m};
+
+(* === Public schedule introspection ================================
+   TAtpSchedule mirrors what the portfolio dispatcher sees: the list
+   of single-config Methods TFindProof would try, given the same
+   Method spec (and optionally the same conjecture + axioms for
+   structure-recognized Automatic).  Used by callers who want to
+   inspect / count / cherry-pick entries before running.  The
+   underlying atpScheduleFor is private; TAtpSchedule is the public
+   alias. *)
+TAtpSchedule[m_] := atpScheduleFor[m];
+TAtpSchedule[m_, cj_, ax_List] := atpScheduleFor[m, ax, cj];
+TAtpSchedule[m_, thm_String, theory_String] := With[{
+        cj = AxiomaticTheory[theory, "NotableTheorems"][thm],
+        ax = AxiomaticTheory[theory]},
+    If[ MissingQ[cj] || ! ListQ[ax],
+        $Failed,
+        atpScheduleFor[m, ax, cj]]
+];
 
 (* ====================================================================
    Problem-analysis auto-tuner  (port of Waldmeister's PhilMarlow /

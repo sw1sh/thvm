@@ -1966,6 +1966,49 @@ VerificationTest[
     TestID -> "ATP/method/Twee-preset-subopt-override"
 ]
 
+(* === TAtpSchedule public introspection ============================ *)
+
+(* TAtpSchedule[Method] returns the schedule the dispatcher would
+   expand to without running.  "Twee" is a single-config preset, so
+   the returned schedule should be a 1-element list. *)
+VerificationTest[
+    Length @ TAtpSchedule["Twee"],
+    1,
+    TestID -> "ATP/schedule/single-config-preset-len-1"
+]
+
+(* "VampirePortfolio" expands to the 10-entry $VampirePortfolio. *)
+VerificationTest[
+    Length @ TAtpSchedule["VampirePortfolio"],
+    10,
+    TestID -> "ATP/schedule/VampirePortfolio-len-10"
+]
+
+(* Automatic with no problem in hand returns the fixed $AtpSchedule
+   (no structure-recognition tailoring possible without conj+ax). *)
+VerificationTest[
+    TAtpSchedule[Automatic] === THVMLink`ATP`Private`$AtpSchedule,
+    True,
+    TestID -> "ATP/schedule/Automatic-no-problem-falls-back-to-AtpSchedule"
+]
+
+(* Automatic with a Group problem in hand front-loads the Gt+
+   AutoPrecedence config that the auto-tuner picks for groups. *)
+VerificationTest[
+    First @ TAtpSchedule[Automatic,
+        "InverseOfInverse", "AbelianGroupAxioms"],
+    {"Completion", "CriticalPairWeight" -> "Gt",
+        "GoalInterleave" -> 50, "AutoPrecedence" -> True},
+    TestID -> "ATP/schedule/AbelianGroup-front-load-is-Gt+AutoPrec"
+]
+
+(* Unknown theorem name yields $Failed (catch-all path). *)
+VerificationTest[
+    TAtpSchedule[Automatic, "NotAThm", "BooleanAxioms"],
+    $Failed,
+    TestID -> "ATP/schedule/unknown-theorem-name-fails"
+]
+
 (* === $AtpMethodPresets coverage =================================== *)
 
 (* The named-preset registry should be non-empty and include the
