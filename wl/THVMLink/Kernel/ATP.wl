@@ -99,7 +99,7 @@ $atpRunProofFn := $atpRunProofFn = load[
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
-     Integer, Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -902,7 +902,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     selRatio_, autoMaxWeight_, rhsInterreduce_, unfailingCP_,
     cpSetInterreduce_, connectedness_, precedenceSpec_:None,
     fifoTiebreak_:0, recordNorm_:1, useLRS_:0, useSOS_:0,
-    useFwdSub_:0, useBwdSub_:0] := Block[{
+    useFwdSub_:0, useBwdSub_:0, useBwdDemod_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray
@@ -912,7 +912,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
-        recordNorm, useLRS, useSOS, useFwdSub, useBwdSub];
+        recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -2180,7 +2180,18 @@ atpFwdSubsumeOpt[o_Association] :=
 atpBwdSubsumeOpt[o_Association] :=
     Switch[Lookup[o, "BackwardSubsume", Automatic],
         True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0};
+(* "BackwardDemod" -> True: after each newly-added rule batch, also
+   normalize each older rule's LHS against the new rule(s).  If the
+   LHS reduces, drop the rule and re-queue (reduced_lhs, old_rhs)
+   so orient_and_add can re-admit it under the now-canonical R.
+   Vampire's bd=all analog (LHS half; the RHS half is the existing
+   "RHSInterreduce" option).  Sound + completeness-preserving (the
+   rewritten equation is a logical consequence of the original).
+   Default off. *)
+atpBwdDemodOpt[o_Association] :=
+    Switch[Lookup[o, "BackwardDemod", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -2202,7 +2213,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o],
          atpCPSetInterreduceOpt[o], atpConnectednessOpt[o],
          atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o],
-         atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o]}
+         atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o],
+         atpBwdDemodOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -2311,7 +2323,7 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
     ];
 
 atpParseMethod[m_] := (
-    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0});
+    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs

@@ -563,6 +563,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // (engine byte-identical).  Vampire bs=unit_only analog.
   mint use_bwd_sub = MArgument_getInteger(args[23]);
   thvm_atp_set_use_bwd_subsume(atp, (u8)(use_bwd_sub != 0));
+  // Method -> {... "BackwardDemod" -> True}: Vampire bd=all analog
+  // (LHS half).  args[24].  0 = off (engine byte-identical).
+  mint use_bwd_demod = MArgument_getInteger(args[24]);
+  thvm_atp_set_use_bwd_demod(atp, (u8)(use_bwd_demod != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

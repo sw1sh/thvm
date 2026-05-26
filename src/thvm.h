@@ -3663,6 +3663,17 @@ typedef struct {
   Term *r_dead_rhs_save;          // original rhs at time of death
   u64  n_rules_bwd_subsumed;      // diagnostic counter
 
+  // Backward demodulation (Vampire `bd=all` analog, LHS half -- the RHS
+  // half is the existing use_rhs_interreduce option).  After each newly-
+  // added rule batch, also try to normalize each older rule's LHS with
+  // the new rule(s).  When the LHS reduces, drop the rule and re-queue
+  // the simplified equation (reduced_lhs, old_rhs) -- atp_add_equation_-
+  // simplified will re-orient it under the now-updated R.
+  // Default OFF.  Wired to Method "BackwardDemod" -> True via
+  // thvm_atp_set_use_bwd_demod.
+  u8   use_bwd_demod;
+  u64  n_rules_bwd_demodulated;   // diagnostic counter
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3799,6 +3810,7 @@ fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_bwd_demod(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset

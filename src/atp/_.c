@@ -5944,6 +5944,17 @@ fn void thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on) {
   s->use_bwd_subsume = on ? 1u : 0u;
 }
 
+// Backward demodulation (LHS half): after the new-batch interreduce,
+// also normalize each older rule's LHS against the new rule(s); if it
+// reduces, re-queue the simplified equation (reduced_lhs, old_rhs).
+// Vampire's bd=all analog.  Sound + completeness-preserving (the
+// rewritten equation is a logical consequence of the original).
+// Default off.
+fn void thvm_atp_set_use_bwd_demod(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_bwd_demod = on ? 1u : 0u;
+}
+
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped
 // at pop time.  Grows the bitset on demand (8 trace ids per byte).
 static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
@@ -8164,18 +8175,60 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   // RHSs in R, so the system never became canonical and the CP set
   // exploded (the Sheffer/Wolfram divergence).  Runtime-gated: the
   // default engine (use_rhs_interreduce == 0) skips this entirely.
-  if (s->use_rhs_interreduce) {
+  if (s->use_rhs_interreduce || s->use_bwd_demod) {
     u32 j = 0;
     while (j < added.first - dropped) {
       Term old_lhs = s->lhs[j];
       Term old_rhs = s->rhs[j];
+      // Optional LHS demodulation (Vampire bd=all): try normalizing the
+      // LHS first.  When it reduces, the original rule is no longer in
+      // normal form -- drop and re-queue (reduced_lhs, old_rhs).
+      // Skipped when the slot is already dead (BS sentinel) since
+      // atp_rewrite_normalize on a sentinel-LHS would no-op anyway.
+      Term reduced_lhs = old_lhs;
+      if (s->use_bwd_demod && !s->r_dead[j]) {
+        reduced_lhs = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs,
+                                             n_new, 16);
+      }
       // Normalize the RHS against only the new rule(s) -- the rest of R
       // already had its chance to reduce this RHS when those rules were
       // added.  (Matches Waldmeister: a new object reduces existing
       // rules' RHSs; full re-normalization is unnecessary.)
-      Term reduced = atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs,
-                                           n_new, 16);
-      if (!kbo_eq(reduced, old_rhs)) {
+      Term reduced = (s->use_rhs_interreduce && !s->r_dead[j])
+          ? atp_rewrite_normalize(s, old_rhs, new_lhs, new_rhs, n_new, 16)
+          : old_rhs;
+      u8 lhs_changed = (s->use_bwd_demod && !kbo_eq(reduced_lhs, old_lhs));
+      u8 rhs_changed = (s->use_rhs_interreduce && !kbo_eq(reduced, old_rhs));
+      if (lhs_changed) {
+        // LHS reduced -- drop the rule and re-queue with the rewritten
+        // LHS (and possibly-rewritten RHS).  This is the bd=all branch.
+        u32 simplify_parent = s->r_trace[j];
+        atp_add_equation_simplified(s, reduced_lhs, reduced, simplify_parent);
+#ifdef ATP_ORPHAN_KILL
+        if (atp_dead != NULL && s->r_trace[j] != ATP_TRACE_NONE) {
+          atp_dead[atp_n_dead++] = s->r_trace[j];
+        }
+#endif
+        if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
+        if (!s->r_orient[j]) s->n_unorient--;
+        for (u32 k = j + 1; k < s->n_rules; k++) {
+          s->lhs[k - 1]              = s->lhs[k];
+          s->rhs[k - 1]              = s->rhs[k];
+          s->r_trace[k - 1]          = s->r_trace[k];
+          s->r_orient[k - 1]         = s->r_orient[k];
+          s->r_dead[k - 1]           = s->r_dead[k];
+          s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
+          s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
+        }
+        s->n_rules--;
+#ifdef ATP_RULE_INDEX
+        s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
+#endif
+        s->n_rules_bwd_demodulated++;
+        dropped++;
+        continue;
+      }
+      if (rhs_changed) {
         u32 simplify_parent = s->r_trace[j];
         // Drop the rule with the stale RHS and re-queue the simplified
         // equation; orient will re-admit it (its RHS now in normal form)
@@ -8189,10 +8242,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
-          s->lhs[k - 1]      = s->lhs[k];
-          s->rhs[k - 1]      = s->rhs[k];
-          s->r_trace[k - 1]  = s->r_trace[k];
-          s->r_orient[k - 1] = s->r_orient[k];
+          s->lhs[k - 1]              = s->lhs[k];
+          s->rhs[k - 1]              = s->rhs[k];
+          s->r_trace[k - 1]          = s->r_trace[k];
+          s->r_orient[k - 1]         = s->r_orient[k];
+          s->r_dead[k - 1]           = s->r_dead[k];
+          s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
+          s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
         }
         s->n_rules--;
 #ifdef ATP_RULE_INDEX

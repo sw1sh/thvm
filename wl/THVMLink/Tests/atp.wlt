@@ -953,6 +953,27 @@ VerificationTest[
     TestID -> "ATP/method/forward-and-backward-subsume-proves"
 ]
 
+VerificationTest[
+    (* BackwardDemod -> True: Vampire bd=all (LHS half).  After a new
+       rule batch is added, normalize each older rule's LHS with the
+       new rule(s); if it reduces, drop the rule and re-queue the
+       simplified equation.  Sound + completeness-preserving.
+       Baseline still proves. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "BackwardDemod" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/backward-demod-proves"
+]
+
+VerificationTest[
+    (* BackwardDemod + RHSInterreduce together: bd=all both halves. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "BackwardDemod" -> True,
+            "RHSInterreduce" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/backward-demod-plus-rhs-interreduce"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[
