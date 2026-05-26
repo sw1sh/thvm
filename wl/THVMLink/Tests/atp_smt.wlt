@@ -191,3 +191,29 @@ VerificationTest[
     "SAT",
     TestID -> "ATP/smt/dpllt-equivalent-symmetry"
 ]
+
+(* ----- TFindProof[..., Method -> "SMT"] dispatch ----- *)
+
+VerificationTest[
+    (* Method -> "SMT" routes ground equational input to congruence
+       closure instead of the saturator -- returns the SMT
+       Association directly, not a ProofObject. *)
+    TFindProof[a == c, {a == b, b == c}, Method -> "SMT"]["Status"],
+    "Proved",
+    TestID -> "ATP/smt/method-smt-ground-trans"
+]
+
+VerificationTest[
+    TFindProof[Implies[a == b && b == c, a == c], {},
+        Method -> "SMT"]["Status"],
+    "Proved",
+    TestID -> "ATP/smt/method-smt-boolean-implication"
+]
+
+VerificationTest[
+    (* Without Method->"SMT" the saturator path is used; ground
+       inputs still produce a regular ProofObject. *)
+    Head @ TFindProof[a == c, {a == b, b == c}, TimeConstraint -> 5],
+    ProofObject,
+    TestID -> "ATP/smt/default-method-still-saturator"
+]

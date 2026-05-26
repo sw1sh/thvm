@@ -3225,6 +3225,20 @@ tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
 (* The proving entry: optional LAST positional returnSpec.  Without it,
    the bare ProofObject is returned (backward compatible); with it, the
    run is projected onto the requested introspectives. *)
+(* Method -> "SMT" short-circuit: route ground equational inputs to the
+   QF_UF congruence-closure decider in Kernel/ATP/SMT.wl.  Returns the
+   SMT ProofObject-shaped Association directly (Method,Witness,...).
+   The guard form -- OptionValue[TFindProof, {opts}, Method] -- is the
+   reliable WL idiom for option-keyed dispatch: a bare OptionValue
+   inside `/;` does not always see the supplied opts. *)
+TFindProof[conjecture_, axioms_List, opts:OptionsPattern[]] /;
+        ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
+    THVMLink`SMT`TFindProofSMT[conjecture, axioms];
+TFindProof[conjecture_, axioms_List,
+        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] /;
+        ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
+    THVMLink`SMT`TFindProofSMT[conjecture, axioms];
+
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[conjecture, axioms,
