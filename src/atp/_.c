@@ -452,17 +452,27 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   if (need <= s->r_cap) return;
   u32 cap = s->r_cap ? s->r_cap : ATP_INIT_RULES;
   while (cap < need) cap *= 2;
-  Term *nl = (Term *)realloc(s->lhs,      cap * sizeof(Term));
-  Term *nr = (Term *)realloc(s->rhs,      cap * sizeof(Term));
-  u32  *nt = (u32  *)realloc(s->r_trace,  cap * sizeof(u32));
-  u8   *no = (u8   *)realloc(s->r_orient, cap * sizeof(u8));
-  if (nl == NULL || nr == NULL || nt == NULL || no == NULL) {
+  Term *nl  = (Term *)realloc(s->lhs,              cap * sizeof(Term));
+  Term *nr  = (Term *)realloc(s->rhs,              cap * sizeof(Term));
+  u32  *nt  = (u32  *)realloc(s->r_trace,          cap * sizeof(u32));
+  u8   *no  = (u8   *)realloc(s->r_orient,         cap * sizeof(u8));
+  u8   *nd  = (u8   *)realloc(s->r_dead,           cap * sizeof(u8));
+  Term *nls = (Term *)realloc(s->r_dead_lhs_save,  cap * sizeof(Term));
+  Term *nrs = (Term *)realloc(s->r_dead_rhs_save,  cap * sizeof(Term));
+  if (nl == NULL || nr == NULL || nt == NULL || no == NULL ||
+      nd == NULL || nls == NULL || nrs == NULL) {
     fprintf(stderr, "atp_ensure_rule_cap: realloc to %u rules failed\n",
             cap);
     exit(1);
   }
   s->lhs = nl; s->rhs = nr; s->r_trace = nt; s->r_orient = no;
-  for (u32 i = s->r_cap; i < cap; i++) s->r_trace[i] = ATP_TRACE_NONE;
+  s->r_dead = nd; s->r_dead_lhs_save = nls; s->r_dead_rhs_save = nrs;
+  for (u32 i = s->r_cap; i < cap; i++) {
+    s->r_trace[i] = ATP_TRACE_NONE;
+    s->r_dead[i] = 0;
+    s->r_dead_lhs_save[i] = 0;
+    s->r_dead_rhs_save[i] = 0;
+  }
   s->r_cap = cap;
 }
 
@@ -3825,6 +3835,9 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->rhs);
   free(s->r_trace);
   free(s->r_orient);
+  free(s->r_dead);
+  free(s->r_dead_lhs_save);
+  free(s->r_dead_rhs_save);
   free(s->r_trace_dead);
   // Each cp_packed[] slot is a malloc'd byte string the queue owns;
   // free every non-NULL slot (free(NULL) is a no-op) then the array.
@@ -3935,7 +3948,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   if (s == NULL || !gc_enabled()) return 0;
 
   // Count the root slots so we can size the array exactly.
-  u32 n_roots = 2u * s->n_rules + 4u /* goal + goal_nf */
+  // 2 per rule for lhs/rhs, plus 2 per rule for dead-save (originals
+  // are kept live so proof reconstruction can read them when the slot
+  // has been soft-deleted by backward subsumption).
+  u32 n_roots = 4u * s->n_rules + 4u /* goal + goal_nf */
               + s->n_trace + REWRITE_MAX_VAR;
 #ifdef ATP_CP_GRAPH
   // 8b: cp_graph is now a thing reductions act on (atp_normalize_graph
@@ -3956,6 +3972,13 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < s->n_rules; i++) {
     roots[w++] = s->lhs[i];
     roots[w++] = s->rhs[i];
+  }
+  // Dead-rule originals are appended after the live-rule block so the
+  // collector relocates them too.  0 (unused slot for never-dead rules)
+  // is treated as a null root by gc_collect.
+  for (u32 i = 0; i < s->n_rules; i++) {
+    roots[w++] = s->r_dead_lhs_save[i];
+    roots[w++] = s->r_dead_rhs_save[i];
   }
   roots[w++] = s->goal_lhs;
   roots[w++] = s->goal_rhs;
@@ -3982,6 +4005,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < s->n_rules; i++) {
     s->lhs[i] = roots[w++];
     s->rhs[i] = roots[w++];
+  }
+  for (u32 i = 0; i < s->n_rules; i++) {
+    s->r_dead_lhs_save[i] = roots[w++];
+    s->r_dead_rhs_save[i] = roots[w++];
   }
   s->goal_lhs = roots[w++];
   s->goal_rhs = roots[w++];
@@ -5748,6 +5775,32 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
     fprintf(stderr, "RULE %u: %s -> %s%s\n", s->n_rules - 1u, la, ra,
             s->r_orient[s->n_rules - 1u] ? "" : "  (unorientable)");
   }
+  // Backward subsumption (Vampire bs=unit_only analog).  When
+  // use_bwd_subsume is set, scan rules 0..N-1 and soft-delete any rule
+  // subsumed by the newly-added rule at slot N = s->n_rules - 1.  The
+  // sentinel-LHS (TAG_FVR with id 255 -- out of REWRITE_MAX_VAR == 64)
+  // makes thvm_match and thvm_unify return 0 for the slot, so every
+  // rewrite / CP-generation path naturally skips dead rules without
+  // touching the 14+ rule-iteration sites.  Originals are saved in
+  // r_dead_*_save[] so proof reconstruction (which cites rule indices
+  // that may have been killed mid-search) can still read them.
+  if (s->use_bwd_subsume) {
+    u32 new_i = s->n_rules - 1u;
+    Term new_lhs = s->lhs[new_i];
+    Term new_rhs = s->rhs[new_i];
+    Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
+    for (u32 i = 0; i < new_i; i++) {
+      if (s->r_dead[i]) continue;
+      if (atp_rule_subsumes_unit(new_lhs, new_rhs, s->lhs[i], s->rhs[i])) {
+        s->r_dead_lhs_save[i] = s->lhs[i];
+        s->r_dead_rhs_save[i] = s->rhs[i];
+        s->lhs[i] = dead_sentinel;
+        s->rhs[i] = dead_sentinel;
+        s->r_dead[i] = 1;
+        s->n_rules_bwd_subsumed++;
+      }
+    }
+  }
 #ifdef ATP_RULE_INDEX
   // 7e lever 2: R grew -- the rule-LHS index no longer reflects it.
   s->rule_index_dirty = 1u; s->wmfpa_dirty = 1u;
@@ -5881,6 +5934,14 @@ fn void thvm_atp_set_use_sos(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_fwd_subsume = on ? 1u : 0u;
+}
+
+// Backward subsumption: when adding a new rule, soft-delete any
+// existing rule subsumed by it.  Vampire's bs=unit_only analog.
+// Sound + completeness-preserving; default off.
+fn void thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_bwd_subsume = on ? 1u : 0u;
 }
 
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped

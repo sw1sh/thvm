@@ -930,6 +930,29 @@ VerificationTest[
     TestID -> "ATP/method/cpweight-Diversity-proves"
 ]
 
+VerificationTest[
+    (* BackwardSubsume -> True: Vampire bs=unit_only analog.  After
+       a new rule is added, soft-delete any existing rule subsumed
+       by it (sentinel FVR-255 in lhs / rhs makes thvm_match /
+       thvm_unify skip the slot naturally; originals saved for
+       proof reconstruction).  Sound + completeness-preserving.
+       Baseline theorem still proves. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "BackwardSubsume" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/backward-subsume-proves"
+]
+
+VerificationTest[
+    (* BackwardSubsume + ForwardSubsume both on; equivalent to
+       Vampire's bs=unit_only + standard FS.  Baseline still proves. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "ForwardSubsume" -> True,
+            "BackwardSubsume" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/forward-and-backward-subsume-proves"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[

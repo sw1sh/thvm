@@ -3643,6 +3643,26 @@ typedef struct {
   u8   use_fwd_subsume;
   u64  n_rules_fwd_subsumed;      // diagnostic counter
 
+  // Backward subsumption pruning (Vampire `bs=unit_only` analog).  After
+  // atp_push_rule successfully stores rule N at position N, optionally
+  // scan rules 0..N-1; for each existing rule subsumed by N, soft-delete
+  // it by overwriting lhs[i] / rhs[i] with an out-of-range FVR sentinel
+  // (TAG_FVR with id == 255 >= REWRITE_MAX_VAR == 64).  thvm_match and
+  // thvm_unify both return 0 on a sentinel input, so every rewrite /
+  // CP-generation site naturally skips dead rules without per-site
+  // r_dead[] checks.  r_dead[i] = 1 marks the slot, and the original
+  // (lhs, rhs) is preserved in r_dead_lhs_save[i] / r_dead_rhs_save[i]
+  // for proof reconstruction (the trace cites rule indices that may have
+  // since been killed -- the proof builder reads from the save slot when
+  // r_dead[i]).
+  // Default OFF.  Wired to Method "BackwardSubsume" -> True via
+  // thvm_atp_set_use_bwd_subsume.
+  u8   use_bwd_subsume;
+  u8  *r_dead;                    // 1 iff slot soft-deleted
+  Term *r_dead_lhs_save;          // original lhs at time of death
+  Term *r_dead_rhs_save;          // original rhs at time of death
+  u64  n_rules_bwd_subsumed;      // diagnostic counter
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3778,6 +3798,7 @@ fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset

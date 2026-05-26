@@ -558,6 +558,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // 0 = off (engine byte-identical).
   mint use_fwd_sub = MArgument_getInteger(args[22]);
   thvm_atp_set_use_fwd_subsume(atp, (u8)(use_fwd_sub != 0));
+  // Method -> {... "BackwardSubsume" -> True}: soft-delete existing
+  // rules subsumed by the newly-added one.  args[23].  0 = off
+  // (engine byte-identical).  Vampire bs=unit_only analog.
+  mint use_bwd_sub = MArgument_getInteger(args[23]);
+  thvm_atp_set_use_bwd_subsume(atp, (u8)(use_bwd_sub != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

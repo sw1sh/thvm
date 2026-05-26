@@ -99,7 +99,7 @@ $atpRunProofFn := $atpRunProofFn = load[
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
-     Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -902,7 +902,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     selRatio_, autoMaxWeight_, rhsInterreduce_, unfailingCP_,
     cpSetInterreduce_, connectedness_, precedenceSpec_:None,
     fifoTiebreak_:0, recordNorm_:1, useLRS_:0, useSOS_:0,
-    useFwdSub_:0] := Block[{
+    useFwdSub_:0, useBwdSub_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray
@@ -912,7 +912,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
-        recordNorm, useLRS, useSOS, useFwdSub];
+        recordNorm, useLRS, useSOS, useFwdSub, useBwdSub];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -2169,7 +2169,18 @@ atpSOSOpt[o_Association] := Switch[Lookup[o, "SetOfSupport", Automatic],
 atpFwdSubsumeOpt[o_Association] :=
     Switch[Lookup[o, "ForwardSubsume", Automatic],
         True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0};
+(* "BackwardSubsume" -> True: after adding a new rule, soft-delete
+   any existing rule it subsumes.  Vampire's bs=unit_only analog.
+   Soft-delete uses an out-of-range FVR sentinel (id=255 >=
+   REWRITE_MAX_VAR=64) in the slot's lhs/rhs so thvm_match and
+   thvm_unify return 0 naturally on the slot; originals are saved
+   for proof reconstruction.  Sound + completeness-preserving for
+   the same reason as ForwardSubsume (the soft-deleted rule is a
+   substitution instance of the new one).  Default off. *)
+atpBwdSubsumeOpt[o_Association] :=
+    Switch[Lookup[o, "BackwardSubsume", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -2191,7 +2202,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o],
          atpCPSetInterreduceOpt[o], atpConnectednessOpt[o],
          atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o],
-         atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o]}
+         atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -2301,7 +2312,7 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
     ];
 
 atpParseMethod[m_] := (
-    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0});
+    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
