@@ -472,7 +472,38 @@ int             dtype_is_packed   (u32 dt);
 // through the mean -- mathematically d(var)/d(mean)=0, so the result is
 // identical but the backward graph is far smaller.
 #define UOP_DETACH      43
-#define UOP_COUNT       44
+// === Late-pass expander opcodes (mirror tinygrad codegen/late/expander.py) ===
+// Introduced by uop_expand_graph (src/uop/expander.c).  These are
+// structural placeholders the expander pass emits while lowering
+// KAX_UPCAST / KAX_UNROLL ranges from RANGE-leaf form into a vectorized
+// graph that downstream passes (devectorizer + reduce_to_acc, not yet
+// ported) can consume.  The current renderer does NOT walk these
+// opcodes -- the expander runs only when explicitly invoked
+// (uop_expand_graph) and the existing emit path stays on the RANGE-
+// leaf representation.  See docs/tinygrad_late_passes.md "Architectural
+// alternative" section.
+//
+// UOP_VCONST: vector-typed const.  Heap = [NUM(dtype), NUM(n),
+//   NUM(bits_0), ..., NUM(bits_{n-1})].  ext = scalar dtype.  Mirrors
+//   tinygrad's UOp.const(dtype.vec(n), tuple(range(n))) at
+//   expander.py:150.
+// UOP_UNROLL: opaque wrapper around a vector-typed value, carrying
+//   the (axis_id, extent) tuples that record which axes were unrolled.
+//   Heap = [src, NUM(n_args), NUM(axis_0), NUM(F_0), ...,
+//           NUM(axis_{n-1}), NUM(F_{n-1})].  Mirrors Ops.UNROLL at
+//   expander.py:67/75/86/105.
+// UOP_CONTRACT: inverse of UNROLL: collects unrolled lanes back via a
+//   GEP-style swizzle.  Heap = [src, NUM(n_args), NUM(axis_0),
+//   NUM(F_0), ..., NUM(axis_{n-1}), NUM(F_{n-1})].  Emitted by
+//   fix_reduce_unroll / fix_store_unroll (expander.py:116-130).
+// UOP_GEP: vector element extraction.  Heap = [src, NUM(n_idx),
+//   NUM(idx_0), ..., NUM(idx_{n_idx-1})].  Mirrors UOp.gep at
+//   expander.py:44/86.
+#define UOP_VCONST      44
+#define UOP_UNROLL      45
+#define UOP_CONTRACT    46
+#define UOP_GEP         47
+#define UOP_COUNT       48
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2800,6 +2831,30 @@ fn Term uop_graph_rewrite(Term root,
                           u32 n_rules,
                           void *user);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
+
+// === Expander (src/uop/expander.c) ===
+// Port of tinygrad codegen/late/expander.py: lowers KAX_UPCAST /
+// KAX_UNROLL ranges from RANGE-leaf form into a vectorized UOp graph
+// using the structural placeholders UOP_VCONST/UNROLL/CONTRACT/GEP.
+// NOT WIRED INTO render_uop.c -- the renderer still consumes the
+// RANGE-leaf representation directly.  See file header for design
+// notes.
+fn Term uop_expand_graph(Term root);
+fn Term uop_vconst   (u32 dtype, u32 n, u32 const *bits);
+fn u32  uop_vconst_dtype(Term t);
+fn u32  uop_vconst_n    (Term t);
+fn u32  uop_vconst_bits (Term t, u32 i);
+fn Term uop_unroll   (Term src, u32 n_args, u32 const *axis_ids, u32 const *factors);
+fn u32  uop_unroll_n_args (Term t);
+fn u32  uop_unroll_axis_id(Term t, u32 i);
+fn u32  uop_unroll_factor (Term t, u32 i);
+fn Term uop_contract (Term src, u32 n_args, u32 const *axis_ids, u32 const *factors);
+fn u32  uop_contract_n_args (Term t);
+fn u32  uop_contract_axis_id(Term t, u32 i);
+fn u32  uop_contract_factor (Term t, u32 i);
+fn Term uop_gep      (Term src, u32 n_idx, u32 const *indices);
+fn u32  uop_gep_n_idx(Term t);
+fn u32  uop_gep_idx  (Term t, u32 i);
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);
 fn Term uop_graph_simplify_materialize(Term root, u32 env_id);

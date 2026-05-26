@@ -331,6 +331,22 @@ thread) lands.
   narrows to `b->id == 2`). V100 BS=128 STEPS=10 after path #2 +
   gate-widened still runs at 3682 ms warm vs 1464 ms narrow-gate
   baseline. Loss stays monotone 2.81 -> 1.73, correctness preserved.
+- **Architectural alternative piece #1 LANDED** (this commit): port of
+  tinygrad `codegen/late/expander.py` to the thvm UOp graph rewrite
+  layer.  Introduces FOUR structural opcodes (`UOP_VCONST`,
+  `UOP_UNROLL`, `UOP_CONTRACT`, `UOP_GEP`) and one entry point
+  `uop_expand_graph(root) -> Term`.  `pm_pre_expander` rewrites every
+  `UOP_RANGE` with `axis_type in {KAX_UPCAST, KAX_UNROLL}` to
+  `UNROLL(VCONST(0..F-1))`; `do_expand` lifts ALU through UNROLL with
+  GEP swizzles + scalar broadcast via CONTRACT (expander.py:80
+  semantics); `do_contract` collapses `CONTRACT(UNROLL(...))` into a
+  GEP; `fix_reduce_unroll` / `fix_store_unroll` pull unrolled axes out
+  of REDUCE/STORE.  See `src/uop/expander.c` for the full mapping.
+  Eight test cases in `tests/test_uop_expand.c` cover the full
+  pipeline (bare RANGE -> UNROLL, LOOP RANGE untouched, ALU lift,
+  multi-axis UPCAST, REDUCE-over-UPCAST, UPCAST+UNROLL, nested ops,
+  hash-cons).  NOT WIRED INTO `render_uop.c`: see "what's deferred"
+  below.
 
 **Why the V100 gap is still open**: the heuristic also applies
 UNROLL(K, 4) from section 7. With UPCAST=4 + UNROLL=4 the parallel-acc
@@ -469,6 +485,45 @@ This is the "real" port. Path #1 + #2 + #3 are the pragmatic patches
 that buy time. The CUDA wall regression suggests the pragmatic patch
 ceiling is below tinygrad parity; the real port is what unlocks the
 full perf.
+
+### 5a. What landed (architectural alternative piece #1)
+
+The first step of the "real" port is in place: `src/uop/expander.c`
+implements `uop_expand_graph(root)` as a self-contained graph rewrite
+that consumes a `KAX_UPCAST`/`KAX_UNROLL`-tagged DAG and produces a
+vectorized DAG with no UPCAST/UNROLL RANGE leaves.  Validated
+end-to-end in `tests/test_uop_expand.c`.
+
+### 5b. What's deferred (still needed before render-time adoption)
+
+The post-expansion graph contains `UOP_VCONST` / `UOP_UNROLL` /
+`UOP_CONTRACT` / `UOP_GEP` nodes with vector dtypes that
+`render_uop.c` does not know how to emit.  Wiring
+`uop_expand_graph` into `cg_render_uop_kernel_root` /
+`cg_render_uop_kernel_cuda_root` without the companion passes would
+break every kernel that goes through the heuristic.  Required next
+pieces, in port order:
+
+1. **`reduce_to_acc`** (tinygrad devectorizer.py:311-328): rewrites
+   `REDUCE(body, *axes)` into `DEFINE_ACC` + `STORE(acc, alu(acc,
+   body))` + `END(axes)` + `LOAD(acc)`.  This is what turns the
+   post-expander `REDUCE(GEP(IADD(VCONST, ...)))` into F separate
+   accumulator updates the renderer already knows how to emit.
+2. **`devectorize`** (devectorizer.py:267-273): splits vector ALU back
+   into N scalar ALUs through GEP.  The renderer already emits scalar
+   ALU; this pass bridges from the vectorized post-expander shape to
+   the scalar form.
+3. **`load_store_folding`** (devectorizer.py:136-149): re-vectorizes
+   adjacent scalar loads into `float4` etc.  Optional perf bump on top.
+4. **`pm_render`** (devectorizer.py:275-295): final tweaks for the
+   emitter (vector CONST -> STACK, GEP of scalar source -> source,
+   etc.).
+
+Until #1 + #2 are in place, `uop_expand_graph` should be called only
+by tests / off-pipeline tools.  The V100 wall regression remains
+gated on path #1+#2 in `render_uop.c` (the renderer-level patches)
+because the architectural alternative cannot be flipped on without
+the devectorizer companion.
 
 ## References
 

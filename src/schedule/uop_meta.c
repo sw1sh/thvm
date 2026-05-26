@@ -14,6 +14,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_CONST:
     case UOP_RANGE:    // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)]
     case UOP_INVALID:  // heap = [NUM(0)] sentinel
+    case UOP_VCONST:   // heap = [NUM(dtype), NUM(n), NUM(b_0), ...] - all NUMs
       return 0;
     // UOP_OPT carries [target, NUM(kind), NUM(factor)]; only the
     // target slot is a recursable Term child.
@@ -32,6 +33,15 @@ fn u8 uop_arity(u8 op) {
     // payload mirrors RESHAPE/EXPAND's [src, NUM(ndim), NUM(d0)...]
     // convention (arity=1 even though the heap holds more slots).
     case UOP_BUFFERIZE:
+    // Expander-pass wrappers: each carries one recursable child Term
+    // plus a trailing NUM(n_args) header + 2*n_args NUM payload cells.
+    // See UOP_VCONST/UNROLL/CONTRACT/GEP heap layout comments in
+    // src/thvm.h.  Arity-1 matches RESHAPE/EXPAND etc. -- the rewriter
+    // descends into src[0] only; the NUM cells are read directly via
+    // uop_unroll_arg / uop_contract_arg / uop_gep_idx accessors.
+    case UOP_UNROLL:
+    case UOP_CONTRACT:
+    case UOP_GEP:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:

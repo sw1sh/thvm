@@ -271,6 +271,43 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     case UOP_STORE:
       return uop_store(srcs[0], srcs[1], srcs[2]);
 
+    // === Expander structural opcodes (src/uop/expander.c) ===
+    // Arity 1: only src[0] is a recursable child.  The tail NUM cells
+    // (n_args + axis_id/factor pairs, or n_idx + indices) describe the
+    // op's static arg shape and don't change under graph rewrite.
+    case UOP_UNROLL: {
+      u32 n = (u32)term_val(heap_read(loc + 1));
+      if (n > 8) return t;
+      u32 axes[8];
+      u32 facs[8];
+      for (u32 i = 0; i < n; i++) {
+        axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
+        facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
+      }
+      return uop_unroll(srcs[0], n, axes, facs);
+    }
+    case UOP_CONTRACT: {
+      u32 n = (u32)term_val(heap_read(loc + 1));
+      if (n > 8) return t;
+      u32 axes[8];
+      u32 facs[8];
+      for (u32 i = 0; i < n; i++) {
+        axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
+        facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
+      }
+      return uop_contract(srcs[0], n, axes, facs);
+    }
+    case UOP_GEP: {
+      u32 n = (u32)term_val(heap_read(loc + 1));
+      if (n > 256) return t;
+      u32 idxs[256];
+      for (u32 i = 0; i < n; i++) {
+        idxs[i] = (u32)term_val(heap_read(loc + 2 + i));
+      }
+      return uop_gep(srcs[0], n, idxs);
+    }
+    // UOP_VCONST: arity 0, no rebuild path needed.
+
     default:
       return t;
   }
