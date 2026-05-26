@@ -3355,7 +3355,7 @@ atpProjectReturn[bundle_, spec_List] :=
 
 Options[TFindProof] = {
     MaxSteps -> 200000, Method -> Automatic,
-    TimeConstraint -> Infinity};
+    TimeConstraint -> Infinity, PortfolioFrontLoad -> 0};
 
 (* String form: resolve theorem + theory names through
    AxiomaticTheory, then run the expression form.  The conjecture
@@ -3625,9 +3625,20 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            Unset TimeConstraint stays at the per-config default 60s. *)
         atpEnd = If[ OptionValue[TimeConstraint] =!= Infinity,
             AbsoluteTime[] + N[OptionValue[TimeConstraint]], Infinity];
-        Module[{n = Length[atpSched]},
+        Module[{n = Length[atpSched],
+                fl = Min[Max[OptionValue[PortfolioFrontLoad], 0],
+                         Length[atpSched]]},
         Do[ atpSub = If[ atpEnd =!= Infinity,
-                (atpEnd - AbsoluteTime[]) / (n - i + 1),
+                With[{rem = atpEnd - AbsoluteTime[]},
+                    (* PortfolioFrontLoad -> k allocates 2x time to each
+                       of the first k entries (vs an equal-share each).
+                       Remaining entries split the unused remainder fairly
+                       on every step.  k=0 reproduces the fair-share
+                       behavior byte-identical. *)
+                    Which[
+                        fl == 0, rem / (n - i + 1),
+                        i <= fl, 2. * rem / (2. * (fl - i + 1) + (n - fl)),
+                        True,    rem / (n - i + 1)]],
                 60.];
             If[ atpSub <= 0., Break[]];
             atpR = atpProveBundle[conjecture, axioms,

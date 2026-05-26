@@ -1944,6 +1944,37 @@ VerificationTest[
     TestID -> "ATP/returnspec/All-returns-every-introspective"
 ]
 
+(* === PortfolioFrontLoad ============================================ *)
+
+(* PortfolioFrontLoad -> n widens the time slice given to the first n
+   entries of a multi-entry schedule.  At PFL=0 the dispatcher's
+   share matches the historical fair-share (rem / remaining).  At
+   PFL=n the first n entries each get 2x the share that an unweighted
+   recurrence would give them; entries past n revert to fair share.
+   Confirm the option is accepted on the prove path and the run still
+   produces a verifying ProofObject for a trivial goal. *)
+VerificationTest[
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        TimeConstraint -> 4, PortfolioFrontLoad -> 2],
+    ProofObject,
+    TestID -> "ATP/portfolio/frontload-accepts-option"
+]
+
+(* PFL=2 on VampirePortfolio: the first two entries (VampireUEQ +
+   Twee-style) should each get a wider slice than the iter-N fair
+   share.  Trace's WallTime[1] should not be smaller than the
+   nominal-fair share of total / 10.  Cheap goal proves on entry 1,
+   so we only check the option threads through and the schedule's
+   first slice runs.  PortfolioTrace return spec gives WallTime. *)
+VerificationTest[
+    With[{trace = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+            "PortfolioTrace", TimeConstraint -> 4,
+            Method -> "VampirePortfolio", PortfolioFrontLoad -> 2]},
+        {Length[trace] >= 1, trace[[1]]["Proved"]}],
+    {True, True},
+    TestID -> "ATP/portfolio/frontload-runs-vampireportfolio"
+]
+
 (* === Globals-collision footgun =================================== *)
 
 (* `CanonicalizePatterns` renames axiom-bound variables to canonical
