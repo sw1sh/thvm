@@ -330,12 +330,14 @@ int main(void) {
   // with KOP_UPCAST applied to the N output axis (factor 4).  After
   // the DAG split the axes are: M (KAX_LOOP), N_outer (KAX_LOOP),
   // N_inner (KAX_UPCAST, wrapped in OPT), K (KAX_REDUCE).  The
-  // renderer must (a) promote M + N_outer to a flat `tid` decode,
-  // (b) emit N_inner as a `#pragma unroll(4)` for-loop, (c) declare
-  // the reduce accumulator INSIDE that loop and the store reference
-  // it there -- a regression caught a stale REDUCE.axis that made the
-  // matcher mistake N_inner for the reduce loop, leaving the store's
-  // `a<N_inner>` out of scope ("undeclared identifier").
+  // renderer's parallel-accumulator path must (a) promote M + N_outer
+  // to a flat `tid` decode, (b) declare F=4 parallel `_acc3_0.._3` so
+  // each UPCAST'd N-element gets its own register, (c) open ONE
+  // K-loop (NOT four), (d) emit four MAD statements with the UPCAST'd
+  // RANGE substituted by the literals 0..3 -- so the K-iter's shared
+  // B[k*N+n_outer] load amortises across all 4 accumulators (classic
+  // tinygrad expander.py + devectorizer.py:reduce_to_acc register-
+  // blocking semantics).
   {
     u32 dC_uc[2] = { 32, 64 };
     u32 dA_uc[2] = { 32, 8  };
@@ -369,17 +371,37 @@ int main(void) {
     CHECK(contains(bufmu, "if (tid >= 512u) return;"));
     CHECK(contains(bufmu, "uint a0 = (tid / 16u) % 32u;"));
     CHECK(contains(bufmu, "uint a1 = tid % 16u;"));
-    // N_inner (axis 2 after split) is the #pragma-unroll for-loop.
-    CHECK(contains(bufmu, "#pragma unroll(4)"));
-    CHECK(contains(bufmu, "for (uint a2 = 0; a2 < 4; a2++)"));
-    // Accumulator named off the (shifted) reduce axis 3, declared
-    // inside the a2 loop; the store references a2 in scope.
-    CHECK(contains(bufmu, "float _acc3 = 0.0f"));
+    // N_inner (axis 2 after the split) is fully unrolled into 4 parallel
+    // accumulators (NOT a runtime for-loop).
+    CHECK(!contains(bufmu, "for (uint a2 ="));
+    CHECK(contains(bufmu, "float _acc3_0 = 0.0f"));
+    CHECK(contains(bufmu, "float _acc3_1 = 0.0f"));
+    CHECK(contains(bufmu, "float _acc3_2 = 0.0f"));
+    CHECK(contains(bufmu, "float _acc3_3 = 0.0f"));
+    // ONE K-loop (axis 3 = shifted reduce axis), not four.
     CHECK(contains(bufmu, "for (uint a3 = 0; a3 < 8"));
+    {
+      const char *p = bufmu;
+      int n_k_loops = 0;
+      while ((p = strstr(p, "for (uint a3 = 0; a3 < 8")) != NULL) {
+        n_k_loops++; p++;
+      }
+      CHECK_EQ(n_k_loops, 1);
+    }
+    // Four MAD statements inside the K-loop, each with the UPCAST RANGE
+    // substituted by the literal 0/1/2/3.
+    CHECK(contains(bufmu, "_acc3_0 = _acc3_0 + "));
+    CHECK(contains(bufmu, "_acc3_1 = _acc3_1 + "));
+    CHECK(contains(bufmu, "_acc3_2 = _acc3_2 + "));
+    CHECK(contains(bufmu, "_acc3_3 = _acc3_3 + "));
+    // The B address still has the N_outer*4 stride; per-lane offset is
+    // the literal 0/1/2/3 (NOT a2).
     CHECK(contains(bufmu, "(int)(a1) * (int)(4)"));
-    CHECK(contains(bufmu, "+ (int)(a2)"));
-    CHECK(contains(bufmu, "= _acc3;"));
-    // No serial output-axis loop (the regression's symptom).
+    CHECK(!contains(bufmu, "+ (int)(a2)"));
+    // Four parallel stores at the same per-lane offsets.
+    CHECK(contains(bufmu, "= _acc3_0;"));
+    CHECK(contains(bufmu, "= _acc3_3;"));
+    // No serial output-axis loop.
     CHECK(!contains(bufmu, "for (uint a0 ="));
     CHECK(!contains(bufmu, "for (uint a1 ="));
   }
@@ -453,29 +475,200 @@ int main(void) {
     fp = fmemopen(bufma, sizeof(bufma), "w");
     cg_render_uop_kernel(st_up, "k_conv_up", Y, ins, 2, fp);
     fclose(fp);
-    // UPCAST inner axis (a2 after the axis-shift) is the #pragma-
-    // unroll for-loop wrapping the accumulator and store.
-    CHECK(contains(bufma, "#pragma unroll(4)"));
-    CHECK(contains(bufma, "for (uint a2 = 0; a2 < 4"));
-    // Accumulator declared INSIDE the UPCAST loop, so each iteration
-    // gets a fresh _acc.
-    CHECK(contains(bufma, "float _acc5 = 0.0f"));
-    // All three reduce nest loops emit (cin, kh, kw -> a5, a6, a7).
+    // Path #1 (docs/tinygrad_late_passes.md): the UPCAST'd output axis
+    // is fully unrolled at the renderer level into F parallel
+    // accumulators sharing ONE inner reduce nest -- the
+    // register-blocking pattern from tinygrad expander.py:do_expand +
+    // devectorizer.py:reduce_to_acc.  NO runtime `for (a2 ...)` loop
+    // over the UPCAST'd axis; instead F=4 separate _acc5_0..3.
+    CHECK(contains(bufma, "float _acc5_0 = 0.0f"));
+    CHECK(contains(bufma, "float _acc5_1 = 0.0f"));
+    CHECK(contains(bufma, "float _acc5_2 = 0.0f"));
+    CHECK(contains(bufma, "float _acc5_3 = 0.0f"));
+    CHECK(!contains(bufma, "for (uint a2 ="));
+    // All three reduce nest loops emit ONCE (cin, kh, kw -> a5, a6, a7).
     CHECK(contains(bufma, "for (uint a5 = 0; a5 < 8"));
     CHECK(contains(bufma, "for (uint a6 = 0; a6 < 3"));
     CHECK(contains(bufma, "for (uint a7 = 0; a7 < 3"));
-    // MAC is present: _accN = _accN + in0[...] * in1[...].  The reads
-    // resolve to slot names in0/in1 (NOT 0.0f, which would mean the
-    // discover walk lost the input buffers).
-    CHECK(contains(bufma, "_acc5 = _acc5 + (in0["));
-    CHECK(contains(bufma, "* in1["));
-    // The W (in1) address must include the UPCAST inner axis a2,
-    // proving each unrolled iteration reads a distinct slice.
-    CHECK(contains(bufma, "(int)(a1) * (int)(4)"));
-    CHECK(contains(bufma, "+ (int)(a2)"));
-    // The final store references _acc5 and a2 -- the per-iteration
-    // result reaches the output.
-    CHECK(contains(bufma, "= _acc5;"));
+    // F separate MAD statements inside the shared reduce nest.
+    CHECK(contains(bufma, "_acc5_0 = _acc5_0 + "));
+    CHECK(contains(bufma, "_acc5_3 = _acc5_3 + "));
+    CHECK(contains(bufma, "in0["));
+    CHECK(contains(bufma, "in1["));
+    // F separate stores at adjacent offsets after the shared reduce.
+    CHECK(contains(bufma, "= _acc5_0;"));
+    CHECK(contains(bufma, "= _acc5_3;"));
+  }
+
+  TEST_BEGIN("render-uop/parallel-accumulators-on-upcast-output-axis");
+  // The "path #1" of docs/tinygrad_late_passes.md, in isolation.  When
+  // the heuristic UPCASTs an OUTPUT axis enclosing a REDUCE, the
+  // renderer must emit F parallel accumulators sharing ONE inner
+  // reduce loop -- the register-blocking pattern from tinygrad
+  // codegen/late/expander.py:do_expand + devectorizer.py:reduce_to_acc
+  // (lines 311-328).  Before this change the renderer emitted F
+  // structurally-separate K-loops; the compiler couldn't fuse them.
+  //
+  // Shape: conv-flavoured contraction
+  //   out [Cout=4 (UPCAST), B=2, hOut=10, wOut=10]
+  //   in0=W [Cout, K=400]; in1=X [B*hOut*wOut, K]
+  //   out[co,b,h,w] = sum_k W[co,k] * X[((b*hOut+h)*wOut+w), k]
+  // Chosen to NOT match the TC matmul recogniser (4 output axes) nor
+  // the CONV recogniser (no IDIV/IMOD in addresses).
+  {
+    enum { M=2, COUT=4, HW=10, K=400 };
+    u32 dY[4] = { COUT, M, HW, HW };
+    u32 dW[2] = { COUT, K };
+    u32 dX[2] = { M*HW*HW, K };
+    Term Y = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 4, dY, 0);
+    Term W = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dW, 1);
+    Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dX, 2);
+    Term ins[2] = { W, X };
+    Term r_co = uop_range(0, 0, COUT);
+    Term r_b  = uop_range(1, 0, M);
+    Term r_h  = uop_range(2, 0, HW);
+    Term r_w  = uop_range(3, 0, HW);
+    Term r_k  = uop_range(4, 1, K);
+    Term k_HW   = uop_const(DT_INT32, HW);
+    Term k_HWHW = uop_const(DT_INT32, HW*HW);
+    Term k_K    = uop_const(DT_INT32, K);
+    Term x_bhw = uop_int_binary(UOP_IMUL, r_b, k_HWHW);
+    Term x_hw  = uop_int_binary(UOP_IMUL, r_h, k_HW);
+    Term x_a0  = uop_int_binary(UOP_IADD, x_bhw, x_hw);
+    Term x_a1  = uop_int_binary(UOP_IADD, x_a0, r_w);
+    Term x_a2  = uop_int_binary(UOP_IMUL, x_a1, k_K);
+    Term x_a   = uop_int_binary(UOP_IADD, x_a2, r_k);
+    Term xv    = uop_index_e(X, x_a);
+    Term w_co  = uop_int_binary(UOP_IMUL, r_co, k_K);
+    Term w_a   = uop_int_binary(UOP_IADD, w_co, r_k);
+    Term wv    = uop_index_e(W, w_a);
+    Term mul   = uop_binary(UOP_MUL, xv, wv);
+    Term rd    = uop_reduce(REDUCE_SUM, /*axis=*/4, mul);
+    Term y_a0  = uop_int_binary(UOP_IMUL, r_co, uop_const(DT_INT32, M*HW*HW));
+    Term y_a1  = uop_int_binary(UOP_IMUL, r_b,  k_HWHW);
+    Term y_a2  = uop_int_binary(UOP_IADD, y_a0, y_a1);
+    Term y_a3  = uop_int_binary(UOP_IMUL, r_h,  k_HW);
+    Term y_a4  = uop_int_binary(UOP_IADD, y_a2, y_a3);
+    Term y_a   = uop_int_binary(UOP_IADD, y_a4, r_w);
+    Term st_pa = uop_store(Y, y_a, rd);
+    // UPCAST cOut (axis 0, factor 4) -- the UPCAST'd inner half becomes
+    // the new axis 1 (KAX_UPCAST), shifting K from axis 4 to axis 5.
+    KOpt up_pa = { KOP_UPCAST, 0 /*cOut*/, 4 };
+    Term st_pa2 = uop_dag_apply_kopt(st_pa, up_pa);
+    CHECK(st_pa2 != 0 && st_pa2 != st_pa);
+    char bufpa[8192];
+    fp = fmemopen(bufpa, sizeof(bufpa), "w");
+    cg_render_uop_kernel(st_pa2, "k_par_acc", Y, ins, 2, fp);
+    fclose(fp);
+    // F=4 parallel accumulator declarations BEFORE the reduce loop.
+    CHECK(contains(bufpa, "float _acc5_0 = 0.0f"));
+    CHECK(contains(bufpa, "float _acc5_1 = 0.0f"));
+    CHECK(contains(bufpa, "float _acc5_2 = 0.0f"));
+    CHECK(contains(bufpa, "float _acc5_3 = 0.0f"));
+    // ONE K-loop, never four.
+    {
+      const char *p = bufpa;
+      int n = 0;
+      while ((p = strstr(p, "for (uint a5 = 0; a5 < 400")) != NULL) {
+        n++; p++;
+      }
+      CHECK_EQ(n, 1);
+    }
+    // No runtime loop over the UPCAST'd axis (axis 1 after the split).
+    CHECK(!contains(bufpa, "for (uint a1 ="));
+    // F=4 separate MAD statements inside the reduce loop, each writing
+    // to its own _acc5_k.
+    CHECK(contains(bufpa, "_acc5_0 = _acc5_0 + "));
+    CHECK(contains(bufpa, "_acc5_1 = _acc5_1 + "));
+    CHECK(contains(bufpa, "_acc5_2 = _acc5_2 + "));
+    CHECK(contains(bufpa, "_acc5_3 = _acc5_3 + "));
+    // F=4 separate stores, addressed at the literal-substituted cOut
+    // offsets (NOT a runtime axis var).
+    CHECK(contains(bufpa, "] = _acc5_0;"));
+    CHECK(contains(bufpa, "] = _acc5_1;"));
+    CHECK(contains(bufpa, "] = _acc5_2;"));
+    CHECK(contains(bufpa, "] = _acc5_3;"));
+    // The MSL must actually compile through xcrun metal (if available).
+    if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(bufpa), 0);
+  }
+
+  TEST_BEGIN("render-uop/parallel-accumulators-multi-axis-upcast");
+  // Two UPCAST'd output axes (cOut UPCAST=4 AND wOut UPCAST=2) -> F=8
+  // parallel accumulators arranged as a 4x2 register-blocked tile.
+  // The row-major decode in the renderer makes the innermost UPCAST
+  // (wOut) the fast-varying lane so adjacent k indices share weights
+  // (cOut-only) and inputs (wOut-only) get reloaded just enough times
+  // (Um+Uw loads sustaining Um*Uw MADs) -- the classic 2D register
+  // block.
+  {
+    enum { M=2, COUT=4, HW=10, K=20 };
+    u32 dY[4] = { COUT, M, HW, HW };
+    u32 dW[2] = { COUT, K };
+    u32 dX[2] = { M*HW*HW, K };
+    Term Y = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 4, dY, 0);
+    Term W = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dW, 1);
+    Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dX, 2);
+    Term ins[2] = { W, X };
+    Term r_co = uop_range(0, 0, COUT);
+    Term r_b  = uop_range(1, 0, M);
+    Term r_h  = uop_range(2, 0, HW);
+    Term r_w  = uop_range(3, 0, HW);
+    Term r_k  = uop_range(4, 1, K);
+    Term k_HW   = uop_const(DT_INT32, HW);
+    Term k_HWHW = uop_const(DT_INT32, HW*HW);
+    Term k_K    = uop_const(DT_INT32, K);
+    Term x_bhw = uop_int_binary(UOP_IMUL, r_b, k_HWHW);
+    Term x_hw  = uop_int_binary(UOP_IMUL, r_h, k_HW);
+    Term x_a0  = uop_int_binary(UOP_IADD, x_bhw, x_hw);
+    Term x_a1  = uop_int_binary(UOP_IADD, x_a0, r_w);
+    Term x_a2  = uop_int_binary(UOP_IMUL, x_a1, k_K);
+    Term x_a   = uop_int_binary(UOP_IADD, x_a2, r_k);
+    Term xv    = uop_index_e(X, x_a);
+    Term w_co  = uop_int_binary(UOP_IMUL, r_co, k_K);
+    Term w_a   = uop_int_binary(UOP_IADD, w_co, r_k);
+    Term wv    = uop_index_e(W, w_a);
+    Term mul   = uop_binary(UOP_MUL, xv, wv);
+    Term rd    = uop_reduce(REDUCE_SUM, /*axis=*/4, mul);
+    Term y_a0  = uop_int_binary(UOP_IMUL, r_co, uop_const(DT_INT32, M*HW*HW));
+    Term y_a1  = uop_int_binary(UOP_IMUL, r_b,  k_HWHW);
+    Term y_a2  = uop_int_binary(UOP_IADD, y_a0, y_a1);
+    Term y_a3  = uop_int_binary(UOP_IMUL, r_h,  k_HW);
+    Term y_a4  = uop_int_binary(UOP_IADD, y_a2, y_a3);
+    Term y_a   = uop_int_binary(UOP_IADD, y_a4, r_w);
+    Term st_pa = uop_store(Y, y_a, rd);
+    // UPCAST cOut (axis 0, factor 4) -> axes shift: cOut_outer(0,LOOP,1),
+    // cOut_inner(1,UPCAST,4), B(2), hOut(3), wOut(4), K(5,REDUCE).
+    KOpt up_co = { KOP_UPCAST, 0, 4 };
+    Term st1 = uop_dag_apply_kopt(st_pa, up_co);
+    CHECK(st1 != 0 && st1 != st_pa);
+    // UPCAST wOut (now axis 4, factor 2) -> wOut_outer(4,LOOP,5),
+    // wOut_inner(5,UPCAST,2), K shifts to axis 6.
+    KOpt up_w = { KOP_UPCAST, 4, 2 };
+    Term st2 = uop_dag_apply_kopt(st1, up_w);
+    CHECK(st2 != 0 && st2 != st1);
+    char bufmu2[8192];
+    fp = fmemopen(bufmu2, sizeof(bufmu2), "w");
+    cg_render_uop_kernel(st2, "k_par_acc_2d", Y, ins, 2, fp);
+    fclose(fp);
+    // F=4*2=8 parallel accumulators on the (post-split) reduce axis 6.
+    CHECK(contains(bufmu2, "float _acc6_0 = 0.0f"));
+    CHECK(contains(bufmu2, "float _acc6_7 = 0.0f"));
+    // ONE K-loop.
+    {
+      const char *p = bufmu2;
+      int n = 0;
+      while ((p = strstr(p, "for (uint a6 = 0; a6 < 20")) != NULL) {
+        n++; p++;
+      }
+      CHECK_EQ(n, 1);
+    }
+    // Neither UPCAST'd axis becomes a runtime for-loop.
+    CHECK(!contains(bufmu2, "for (uint a1 ="));
+    CHECK(!contains(bufmu2, "for (uint a5 ="));
+    // 8 stores.
+    CHECK(contains(bufmu2, "= _acc6_0;"));
+    CHECK(contains(bufmu2, "= _acc6_7;"));
+    if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(bufmu2), 0);
   }
 
   TEST_BEGIN("render-uop/tc-pattern-match-emits-simdgroup");
@@ -768,9 +961,13 @@ int main(void) {
     CHECK(!contains(buflu, "tid /"));                 // nothing off tid
     // LOCAL axis (axis 2 after the second split) -> `uint a2 = tt;`
     CHECK(contains(buflu, "uint a2 = tt; /* local"));
-    // UPCAST axis (axis 3) -> #pragma unroll(4) for-loop
-    CHECK(contains(buflu, "#pragma unroll(4)"));
-    CHECK(contains(buflu, "for (uint a3 = 0; a3 < 4; a3++)"));
+    // UPCAST axis (axis 3, the inner N split) is fully unrolled into F=4
+    // parallel accumulators by the renderer's reduce_to_acc analog
+    // (NOT a runtime `for (uint a3 ...)`).  Names: _acc4_0.._3 (the
+    // reduce axis shifted to 4 by the two splits).
+    CHECK(!contains(buflu, "for (uint a3 ="));
+    CHECK(contains(buflu, "float _acc4_0 = 0.0f"));
+    CHECK(contains(buflu, "float _acc4_3 = 0.0f"));
     // The MSL must actually compile through xcrun metal (if available).
     if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(buflu), 0);
   }
@@ -828,9 +1025,11 @@ int main(void) {
     CHECK(contains(buf2l, "uint a1 = (tt / 4u) % 4u; /* local"));
     // No bare `uint aN = tt;` (the single-LOCAL form) -- both are decoded.
     CHECK(!contains(buf2l, "= tt; /* local"));
-    // UPCAST axis (a4) -> #pragma unroll(4) for-loop.
-    CHECK(contains(buf2l, "#pragma unroll(4)"));
-    CHECK(contains(buf2l, "for (uint a4 = 0; a4 < 4; a4++)"));
+    // UPCAST axis (a4) is fully unrolled into F=4 parallel accumulators
+    // (NOT a runtime for-loop).
+    CHECK(!contains(buf2l, "for (uint a4 ="));
+    CHECK(contains(buf2l, "float _acc5_0 = 0.0f"));
+    CHECK(contains(buf2l, "float _acc5_3 = 0.0f"));
     // The MSL must actually compile through xcrun metal (if available).
     if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(buf2l), 0);
   }
