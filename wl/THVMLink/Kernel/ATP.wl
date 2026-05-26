@@ -2255,7 +2255,10 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
        dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
        bd=all:av=off:gtg=exists_sym
    Decoded to thvm knobs (best-effort mapping; Vampire's
-   gtg=exists_sym / bs=unit_only / bd=all are not yet ported):
+   gtg=exists_sym / bd=all are not yet ported, and bs=unit_only is
+   approximated by FORWARD subsumption since backward subsumption
+   is not yet ported -- FS catches the same rule shape at add time
+   instead of after the fact):
      - GoalDirected -> True            (Vampire's `tgt=full`: prefer
        goal-aimed expansion across the queue).
      - Ordering -> "LPO"               (`to=lpo`).
@@ -2270,7 +2273,13 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
        unorientable equations under LPO).
      - AutoMaxWeight -> True           (Vampire keeps its CP queue
        small via age-weight balance; the closest analog we have is the
-       growing-bound weight stash). *)
+       growing-bound weight stash).
+     - ForwardSubsume -> True          (closest standing analog to
+       `bs=unit_only`: pre-empts a redundant rule add when an
+       already-stored more-general rule subsumes it, where Vampire
+       deletes the now-redundant existing rule after the fact -- both
+       end with the more-general rule alive and the specific instance
+       gone). *)
 atpParseMethod["VampireUEQ"] := atpParseMethod[{"VampireUEQ"}];
 atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
     Block[{o = Association[{subopts}], merged, mnf},
@@ -2279,7 +2288,8 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
         merged = Join[<|
             "Ordering" -> "LPO", "AutoPrecedence" -> True,
             "SelectionRatio" -> 10, "UnfailingCP" -> True,
-            "AutoMaxWeight" -> True|>, o];
+            "AutoMaxWeight" -> True,
+            "ForwardSubsume" -> True|>, o];
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 

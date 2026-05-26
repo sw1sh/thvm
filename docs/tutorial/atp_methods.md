@@ -229,10 +229,10 @@ dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
 bd=all:av=off:gtg=exists_sym
 ```
 
-Decoded to the thvm knobs we have (Vampire's `bs=unit_only` backward
-subsumption, `bd=all` backward demodulation, and `gtg=exists_sym`
-goal-type-graph premise selection are not yet ported; this preset
-captures the orderable subset):
+Decoded to the thvm knobs we have (Vampire's `bd=all` backward
+demodulation and `gtg=exists_sym` goal-type-graph premise selection
+are not yet ported; `bs=unit_only` is approximated by forward
+subsumption since backward subsumption is not yet ported):
 
 - `GoalDirected -> True` (Vampire `tgt=full`: MNF front alongside
   completion).
@@ -247,6 +247,11 @@ captures the orderable subset):
   under LPO).
 - `AutoMaxWeight -> True` (closest analog to Vampire's
   `nwc=1.2` non-goal weight skew).
+- `ForwardSubsume -> True` (closest standing analog to
+  `bs=unit_only`: pre-empts a redundant rule add when an already-
+  stored more-general rule subsumes it; Vampire deletes the now-
+  redundant existing rule instead, but both end with the more-
+  general rule alive and the specific instance gone).
 
 List form takes the same `Method -> {"VampireUEQ", subopt -> value, ...}`
 override pattern as `"Waldmeister"`.
@@ -465,6 +470,20 @@ over the `CP / ORIENT / SIMPLIFY` trace DAG.
 Default: `True`. When to set `False`: long-running completions where the
 per-step recording overhead dominates and you can pay the BFS
 reconstruction cost.
+
+### 4.18 `"ForwardSubsume" -> True`
+
+When adding a new rule `l' = r'` to R, scan existing rules; if some
+existing rule `l = r` subsumes the new one (`\E sigma`, `l*sigma = l'`
+and `r*sigma = r'`, or the cross-orientation since equations are
+unoriented), skip the add. Sound + completeness-preserving: the new
+equation is a substitution instance of the existing rule, so any
+rewrite step it could fire is already reachable from the more general
+rule. Vampire `--forward_subsumption` analog, unit-only (every UEQ
+equation is a unit clause).
+
+Default: `False`. The `"VampireUEQ"` preset turns it on as the closest
+analog to Vampire's `bs=unit_only` flag.
 
 ## 5. Per-class recommendations
 
