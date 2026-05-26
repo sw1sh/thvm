@@ -285,6 +285,7 @@ pending CP to process next).
 | `"Twee"` | `ATP_CP_WEIGHT_TWEE` | Twee.CP.score (Smallbone) -- asymmetric: `4*size(larger) + 1*size(smaller) + 2*depth`. Biases toward CPs whose smaller (reduct) side is small, regardless of the peak's size. Strong on Sheffer / nand single-operator saturations where `Mix2` walls. Ported from `src/Twee/CP.hs` line 240. |
 | `"ConjSym"` | `ATP_CP_WEIGHT_CONJSYM` | E `ConjectureSymbolWeight` port (`HEURISTICS/che_funweights.c`): walks both sides, conjecture-symbol CTR nodes weight 1, off-symbol CTR nodes weight 4, variable nodes weight 1. A cheap symbol-set biasing toward goal-relevant CPs -- a poor man's `"Goal"` mode that does not need structural matching. |
 | `"Diversity"` | `ATP_CP_WEIGHT_DIVERSITY` | E `DiversityWeight` port (`HEURISTICS/che_diversityweight.c`): `base + #distinct CTR labels + #distinct FVR ids`. Penalizes CPs whose sides drag in many unrelated symbols / variables -- favors structurally compact CPs. Linear shape (E's `fdiff1=1, fdiff2=0, vdiff1=1, vdiff2=0`). |
+| `"RelLevel"` | `ATP_CP_WEIGHT_RELLEVEL` | E `RelevanceLevelWeight` port (`HEURISTICS/che_funweights.c`): 2-level scoring. Symbols in the conjecture weight 1, symbols in axioms that share a symbol with the conjecture weight 2, remote symbols weight 4. Variable nodes weight 1. A deeper goal-relevance bias than `"ConjSym"` (which is the 1-level analog). |
 | `"Learned"` | `ATP_CP_WEIGHT_LEARNED` | ENIGMA-style learned scorer over CP features. Requires a trained model file. |
 | `Automatic` | -1 | Falls back to the engine default (`Gt`). |
 

@@ -3077,7 +3077,22 @@ typedef enum {
                               // surfaces structurally "compact" CPs
                               // first.  Distinct-set tracking uses
                               // u64 bitmasks (WALD_MAX_SYMBOLS=64).
-  ATP_CP_WEIGHT_LAST = 12,
+  ATP_CP_WEIGHT_RELLEVEL = 12, // E-style relevance-level weight (port
+                              // of HEURISTICS/che_funweights.c::
+                              // RelevanceLevelWeight + init_relevance_-
+                              // vector).  Two levels in our port:
+                              //   level 0 = symbol appears in conjecture
+                              //   level 1 = symbol appears in an axiom
+                              //             that itself shares a symbol
+                              //             with the conjecture
+                              //   level 2 = remote symbol (otherwise)
+                              // Per-node weight 1 / 2 / 4 (E's linear
+                              // poly w_0=1, w_1=2, escalating to a 4x
+                              // remote penalty matching ConjSym's off-
+                              // sym multiplier).  Variable nodes weight
+                              // 1.  Cached level masks recomputed when
+                              // the goal is set.
+  ATP_CP_WEIGHT_LAST = 13,
 } AtpCpWeightMode;
 
 typedef struct {
@@ -3320,6 +3335,12 @@ typedef struct {
   // are weighted 1, nodes whose bit is unset are weighted 4.
   // WALD_MAX_SYMBOLS == 64 so a u64 covers the whole label space.
   u64 conj_sym_mask;
+  // Bitset of TAG_CTR labels at relevance level 1: a symbol appears
+  // in some axiom that itself shares a symbol with the conjecture.
+  // Distinct from conj_sym_mask (level 0).  Read by the
+  // ATP_CP_WEIGHT_RELLEVEL weight mode.  Recomputed by
+  // thvm_atp_set_goal alongside conj_sym_mask.
+  u64 rel_lvl1_mask;
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of

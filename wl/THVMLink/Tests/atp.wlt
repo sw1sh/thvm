@@ -974,6 +974,15 @@ VerificationTest[
     TestID -> "ATP/method/backward-demod-plus-rhs-interreduce"
 ]
 
+VerificationTest[
+    (* RelLevel: E RelevanceLevelWeight port -- 2-level scoring on top
+       of the conjecture-symbol mask.  Proves baseline. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "RelLevel"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-RelLevel-proves"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[

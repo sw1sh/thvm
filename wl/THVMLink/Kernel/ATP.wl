@@ -2025,6 +2025,15 @@ $AtpCpWeightCodes = <|
                          unrelated symbols / variables -- favors
                          structurally compact CPs.  Linear shape
                          (E's fdiff1=1, fdiff2=0, vdiff1=1, vdiff2=0). *)
+    "RelLevel" -> 12,  (* E RelevanceLevelWeight (HEURISTICS/
+                         che_funweights.c::RelevanceLevelWeightInit +
+                         init_relevance_vector).  Two-level scoring:
+                         a CTR node's weight is 1 if its head appears
+                         in the conjecture, 2 if it appears in an axiom
+                         that itself shares a symbol with the
+                         conjecture, 4 otherwise.  Variable nodes
+                         weight 1.  A deeper goal-relevance bias than
+                         ConjSym (which is the 1-level analog). *)
     Automatic -> -1
 |>;
 

@@ -4202,6 +4202,7 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
     s->goal_lhs = 0;
     s->goal_rhs = 0;
     s->conj_sym_mask = 0;
+    s->rel_lvl1_mask = 0;
     return 1;
   }
   // 8.4d: gate on sort-check when a spec is attached -- both
@@ -4219,6 +4220,23 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   s->conj_sym_mask = 0;
   atp_collect_symbols(lhs, &s->conj_sym_mask);
   atp_collect_symbols(rhs, &s->conj_sym_mask);
+  // Recompute the level-1 relevance mask for ATP_CP_WEIGHT_RELLEVEL.
+  // An axiom (lhs[i], rhs[i]) is "conjecture-touching" if it has any
+  // CTR label in conj_sym_mask.  The level-1 mask is the union of
+  // every conjecture-touching axiom's symbols MINUS the conjecture
+  // symbols (which are already level 0).  Skips dead rules (BS soft
+  // delete).
+  s->rel_lvl1_mask = 0;
+  for (u32 i = 0; i < s->n_rules; i++) {
+    if (s->r_dead[i]) continue;
+    u64 rule_syms = 0;
+    atp_collect_symbols(s->lhs[i], &rule_syms);
+    atp_collect_symbols(s->rhs[i], &rule_syms);
+    if (rule_syms & s->conj_sym_mask) {
+      s->rel_lvl1_mask |= rule_syms;
+    }
+  }
+  s->rel_lvl1_mask &= ~s->conj_sym_mask;
   return 1;
 }
 
@@ -4894,6 +4912,41 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       u32 dr = atp_term_depth(rhs);
       if (dr > d) d = dr;
       return 4u * large + 1u * small + 2u * d;
+    }
+    case ATP_CP_WEIGHT_RELLEVEL: {
+      // E RelevanceLevelWeight (HEURISTICS/che_funweights.c:610).
+      // Two-level port: nodes at relevance level 0 (in conjecture)
+      // weight 1; level 1 (in a conjecture-touching axiom) weight 2;
+      // level 2 (remote) weight 4.  Variable nodes weight 1.  Sum
+      // over both sides of the CP.  Level masks are precomputed at
+      // thvm_atp_set_goal time so this walk is O(|CP|).
+      u64 m0 = s->conj_sym_mask;
+      u64 m1 = s->rel_lvl1_mask;
+      Term stack[256];
+      u32 sp = 0;
+      if (sp < 256) stack[sp++] = lhs;
+      if (sp < 256) stack[sp++] = rhs;
+      u32 total = 0;
+      while (sp > 0) {
+        Term cur = stack[--sp];
+        if (term_tag(cur) == TAG_CTR) {
+          u32 lab = term_ext(cur);
+          if (lab < 64u && (m0 & ((u64)1 << lab))) {
+            total += 1u;            // level 0 (conjecture symbol)
+          } else if (lab < 64u && (m1 & ((u64)1 << lab))) {
+            total += 2u;            // level 1 (conj-touching axiom)
+          } else {
+            total += 4u;            // level 2 (remote)
+          }
+          u32 n = term_ctr_n(cur);
+          for (u32 i = 0; i < n && sp < 256; i++) {
+            stack[sp++] = term_ctr_at(cur, i);
+          }
+        } else {
+          total += 1u;              // FVR / others: weight 1
+        }
+      }
+      return total;
     }
     case ATP_CP_WEIGHT_DIVERSITY: {
       // E DiversityWeight (HEURISTICS/che_diversityweight.c:161).
