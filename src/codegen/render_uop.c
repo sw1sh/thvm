@@ -2242,6 +2242,102 @@ static Term rmu_conv_m_subst_rule(Term t, void *user) {
   return 0;
 }
 
+// Inner-of-reduce-decomposition detector.  After hand_opts applies
+// KOP_UPCAST/UNROLL to the reduce axis, uop_dag_apply_split rewrites
+// the original K leaf into IADD(IMUL(outer, k), OPT(inner, UPCAST, k))
+// where `outer` keeps the original axis_id and `inner` gets a fresh
+// axis_id (red_axis+1).  The REDUCE node still names only `outer`,
+// so the renderer's rmu_split_reduce pulls `outer` into red_range
+// but leaves `inner` in out_ranges -- where the renderer would
+// (incorrectly) treat it as an output dimension that gets a loop
+// OUTSIDE the reduce, overwriting the per-output accumulator with
+// per-(a8) partial sums (or, worse with MAX_DIM=8 cap, drop `inner`
+// entirely and reference undeclared `a8`).
+//
+// Correct semantics: inner is an UPCAST/UNROLL-flagged extra reduce
+// axis that the REDUCE forgot to list (because hand_opts edits the
+// RANGE leaves but not the REDUCE.axes tuple for the split's inner
+// fresh id).  Tinygrad models this directly via expander.py:do_expand
+// (UNROLL'd RANGE -> CONTRACT(vec) of body, REDUCE then horizontally
+// reduces both the range axis AND the contract vector;
+// codegen/late/expander.py:116-125 fix_reduce_unroll handles it).
+// Our equivalent: emit a nested `#pragma unroll` for-loop over the
+// inner axis INSIDE the reduce-axis loop, before the combine, so all
+// k inner values fold into the same accumulator.
+//
+// Returns 1 if `range_term` is an inner-K-decomp axis (axis NOT in
+// addr) AND was marked UPCAST/UNROLL by hand_opts.
+static int rmu_range_is_inner_reduce_decomp(Term range_term, u32 opt_kind,
+                                            Term addr) {
+  if (term_tag(range_term) != TAG_UOP || term_ext(range_term) != UOP_RANGE) return 0;
+  if (opt_kind != UOP_OPT_UPCAST && opt_kind != UOP_OPT_UNROLL) return 0;
+  u32 axis_id = (u32)term_val(heap_read(term_val(range_term) + 0));
+  // True output axes appear in addr (the store-position index tree).
+  // Reduce-decomp inner axes don't (they only live inside red_src).
+  // Use the RMU_MAX_RANGES-cap variant: a UPCAST/LOCAL split of an
+  // output axis surfaces BOTH the outer (in addr) and the inner (an
+  // OPT-wrapped fresh leaf) so addr range count can exceed MAX_DIM
+  // when several output axes are split.
+  Term addr_ranges[RMU_MAX_RANGES];
+  u32  addr_kinds  [RMU_MAX_RANGES] = {0};
+  u32  addr_factors[RMU_MAX_RANGES] = {0};
+  u32  addr_n = 0;
+  rmu_collect_ranges_rec_cap(addr, addr_ranges, addr_kinds, addr_factors,
+                             &addr_n, RMU_MAX_RANGES, RMU_NO_OPT, 0);
+  for (u32 i = 0; i < addr_n; i++) {
+    if (term_tag(addr_ranges[i]) != TAG_UOP
+        || term_ext(addr_ranges[i]) != UOP_RANGE) continue;
+    u32 aid = (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0));
+    if (aid == axis_id) return 0;  // axis indexes the output -> real output
+  }
+  return 1;
+}
+
+// Partition out_ranges in place: shift inner-reduce-decomposition
+// ranges to the end of the array and report the split point.  Returns
+// the count of TRUE output ranges (axes that index the store
+// position).  The tail (n_out - returned_count) entries are the
+// reduce-decomp inner axes; rmu_emit_conv / rmu_emit_store_reduce
+// open them inside the reduce-axis loop with #pragma unroll.
+static u32 rmu_partition_out_ranges(Term *out_ranges, u32 *out_kinds,
+                                    u32 *out_factors, u32 n_out, Term addr) {
+  u32 head = 0;  // count of true outputs at the front
+  for (u32 i = 0; i < n_out; i++) {
+    if (rmu_range_is_inner_reduce_decomp(out_ranges[i], out_kinds[i], addr)) {
+      continue;  // leave reduce-decomp at slot i; sweep them to tail below
+    }
+    if (head != i) {
+      Term tr = out_ranges[head]; out_ranges[head] = out_ranges[i]; out_ranges[i] = tr;
+      u32  tk = out_kinds  [head]; out_kinds  [head] = out_kinds  [i]; out_kinds  [i] = tk;
+      u32  tf = out_factors[head]; out_factors[head] = out_factors[i]; out_factors[i] = tf;
+    }
+    head++;
+  }
+  return head;
+}
+
+// Emit inner-reduce-decomposition ranges as nested #pragma unroll
+// for-loops at `depth`, returning the new depth (depth + count).
+// Caller closes the loops symmetrically after the combine.
+static u32 rmu_emit_inner_reduce_decomp_loops(Term const *ranges,
+                                              u32 const *kinds,
+                                              u32 const *factors,
+                                              u32 n, FILE *fp, u32 depth) {
+  (void)kinds;  // axis_type carries everything we need; kinds is for symmetry
+  for (u32 i = 0; i < n; i++) {
+    Term r = ranges[i];
+    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+    u32 ext = (u32)term_val(heap_read(term_val(r) + 2));
+    if (RMU_TARGET != CG_TARGET_C && ext <= RMU_REDUCE_UNROLL_MAX) {
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      rmu_emit_unroll_pragma(fp, factors[i] ? factors[i] : ext);
+    }
+    rmu_emit_range_open(r, fp, depth, RMU_NO_OPT);
+    depth++;
+  }
+  return depth;
+}
+
 static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   if (term_tag(conv_red) != TAG_UOP || term_ext(conv_red) != UOP_REDUCE) return 0;
@@ -2256,16 +2352,25 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   u32  red_axis = uop_reduce_axis(conv_red, 0);
 
   // Collect ranges from addr + red_src; split into output vs reduce.
-  Term ranges[MAX_DIM];
-  u32  opt_kinds[MAX_DIM]   = {0};
-  u32  opt_factors[MAX_DIM] = {0};
+  // Use RMU_MAX_RANGES (32) not MAX_DIM (8): hand_opts can apply
+  // UPCAST/LOCAL splits to BOTH the K reduce axis (outer + inner
+  // OPT-UPCAST leaf) AND several output axes, producing 2*rank
+  // worth of leaves -- a 4-D conv with one K-split and three output
+  // splits already exceeds 8.  Silent truncation at MAX_DIM = 8
+  // dropped the inner K leaf and emitted MSL that referenced an
+  // undeclared `a8`, miscompiling silently to a zeroed output buffer.
+  Term ranges[RMU_MAX_RANGES];
+  u32  opt_kinds  [RMU_MAX_RANGES] = {0};
+  u32  opt_factors[RMU_MAX_RANGES] = {0};
   u32  n_ranges = 0;
-  rmu_collect_ranges_with_opts(addr,    ranges, opt_kinds, opt_factors, &n_ranges);
-  rmu_collect_ranges_with_opts(red_src, ranges, opt_kinds, opt_factors, &n_ranges);
+  rmu_collect_ranges_rec_cap(addr,    ranges, opt_kinds, opt_factors,
+                             &n_ranges, RMU_MAX_RANGES, RMU_NO_OPT, 0);
+  rmu_collect_ranges_rec_cap(red_src, ranges, opt_kinds, opt_factors,
+                             &n_ranges, RMU_MAX_RANGES, RMU_NO_OPT, 0);
 
-  Term out_ranges[MAX_DIM];
-  u32  out_kinds[MAX_DIM]   = {0};
-  u32  out_factors[MAX_DIM] = {0};
+  Term out_ranges[RMU_MAX_RANGES];
+  u32  out_kinds  [RMU_MAX_RANGES] = {0};
+  u32  out_factors[RMU_MAX_RANGES] = {0};
   u32  n_out = 0;
   u32 reduce_idx = rmu_split_reduce(ranges, opt_kinds, opt_factors,
                                     n_ranges, red_axis,
@@ -2353,7 +2458,9 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
     // Filtered output ranges (every UPCAST'd axis removed) for the
     // parallel-grid emit.  The UPCAST'd axes become straight-line
     // accumulator indices, NOT for-loops.
-    Term f_ranges[MAX_DIM]; u32 f_kinds[MAX_DIM]; u32 f_factors[MAX_DIM];
+    Term f_ranges[RMU_MAX_RANGES];
+    u32  f_kinds  [RMU_MAX_RANGES] = {0};
+    u32  f_factors[RMU_MAX_RANGES] = {0};
     u32 f_n = 0;
     for (u32 i = 0; i < n_out; i++) {
       Term r = out_ranges[i];
@@ -2371,7 +2478,7 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
       f_n++;
     }
     int vectM = (up.n > 0);
-    int needs_close[MAX_DIM] = {0};
+    int needs_close[RMU_MAX_RANGES] = {0};
     u32 body_depth = rmu_emit_output_loops(addr,
                                            vectM ? f_ranges   : out_ranges,
                                            vectM ? f_kinds    : out_kinds,
@@ -2484,12 +2591,21 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   for (u32 d = 0; d < depth; d++) fputs("  ", fp);
   fprintf(fp, "/* CONV2D template (KRED=%u) */\n", red_extent);
 
+  // Partition out_ranges: true output axes vs inner-reduce-decomp
+  // axes (the UPCAST'd inner half of a K split -- belongs INSIDE the
+  // reduce loop as a nested unrolled fold over a single accumulator).
+  // See rmu_range_is_inner_reduce_decomp banner for the tinygrad
+  // do_expand correspondence.
+  u32 n_out_true = rmu_partition_out_ranges(out_ranges, out_kinds,
+                                            out_factors, n_out, addr);
+  u32 n_inner    = n_out - n_out_true;
+
   // Emit output ranges: promoted-GLOBAL (tid decode) for plain-LOOP
   // output axes, threadbinds for LOCAL/explicit-GLOBAL, serial loops
   // otherwise.  Emits the `if (tid >= total) return;` bounds guard.
-  int needs_close[MAX_DIM] = {0};
+  int needs_close[RMU_MAX_RANGES] = {0};
   u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
-                                         out_factors, n_out, depth, fp,
+                                         out_factors, n_out_true, depth, fp,
                                          needs_close);
   // Accumulator decl; reduce-axis loop with #pragma unroll when KRED
   // is small.  Skip the pragma on the C target -- C99 has no
@@ -2509,8 +2625,21 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
     fprintf(fp, "#pragma unroll(%u)\n", red_extent);
   }
   rmu_emit_range_open(red_range, fp, body_depth, RMU_NO_OPT);
-  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  // Inner-K decomposition: nested unrolled loops INSIDE the reduce
+  // loop, BEFORE the combine, so all inner-axis iterations fold into
+  // the single accumulator.  Mirrors tinygrad expander.py:do_expand
+  // (UNROLL'd RANGE inside a REDUCE expands the body into a CONTRACT
+  // vector that the REDUCE horizontally sums).
+  u32 reduce_body_depth = rmu_emit_inner_reduce_decomp_loops(
+      out_ranges + n_out_true, out_kinds + n_out_true,
+      out_factors + n_out_true, n_inner, fp, body_depth + 1);
+  for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
   rmu_emit_reduce_combine(acc_name, red_kind, red_src, fp);
+  for (u32 i = 0; i < n_inner; i++) {
+    reduce_body_depth--;
+    for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("}\n", fp);
   // Final store.
@@ -2519,7 +2648,7 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   rmu_emit_term(addr, fp);
   fprintf(fp, "] = %s;\n", acc_name);
   // Close output loops.
-  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+  for (i32 i = (i32)n_out_true - 1; i >= 0; i--) {
     if (!needs_close[i]) continue;
     body_depth--;
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
@@ -2718,16 +2847,24 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   u32  red_axis = uop_reduce_axis(value, 0);
 
   // Collect ranges from addr + red_src; split into output vs reduce.
-  Term ranges[MAX_DIM];
-  u32  opt_kinds[MAX_DIM]   = {0};
-  u32  opt_factors[MAX_DIM] = {0};
+  // RMU_MAX_RANGES cap (not MAX_DIM): hand_opts can split BOTH the K
+  // reduce axis and several output axes via UPCAST/LOCAL/UNROLL,
+  // surfacing 2*rank leaves -- the inner half of each split lives as
+  // a fresh RANGE alongside the outer.  Truncating at MAX_DIM=8 drops
+  // late leaves silently and yields MSL with references to undeclared
+  // identifiers.
+  Term ranges[RMU_MAX_RANGES];
+  u32  opt_kinds  [RMU_MAX_RANGES] = {0};
+  u32  opt_factors[RMU_MAX_RANGES] = {0};
   u32  n_ranges = 0;
-  rmu_collect_ranges_with_opts(addr,    ranges, opt_kinds, opt_factors, &n_ranges);
-  rmu_collect_ranges_with_opts(red_src, ranges, opt_kinds, opt_factors, &n_ranges);
+  rmu_collect_ranges_rec_cap(addr,    ranges, opt_kinds, opt_factors,
+                             &n_ranges, RMU_MAX_RANGES, RMU_NO_OPT, 0);
+  rmu_collect_ranges_rec_cap(red_src, ranges, opt_kinds, opt_factors,
+                             &n_ranges, RMU_MAX_RANGES, RMU_NO_OPT, 0);
 
-  Term out_ranges[MAX_DIM];
-  u32  out_kinds[MAX_DIM]   = {0};
-  u32  out_factors[MAX_DIM] = {0};
+  Term out_ranges[RMU_MAX_RANGES];
+  u32  out_kinds  [RMU_MAX_RANGES] = {0};
+  u32  out_factors[RMU_MAX_RANGES] = {0};
   u32  n_out = 0;
   u32 reduce_idx = rmu_split_reduce(ranges, opt_kinds, opt_factors,
                                     n_ranges, red_axis,
@@ -2737,12 +2874,19 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     return 0;
   }
 
+  // Partition out_ranges: true output axes vs inner-reduce-decomp
+  // (UPCAST/UNROLL'd inner half of K split) which belong INSIDE the
+  // reduce loop, NOT around it.  See rmu_range_is_inner_reduce_decomp.
+  u32 n_out_true = rmu_partition_out_ranges(out_ranges, out_kinds,
+                                            out_factors, n_out, addr);
+  u32 n_inner    = n_out - n_out_true;
+
   // Emit output ranges: promoted-GLOBAL (tid decode) for plain-LOOP
   // output axes, threadbinds for LOCAL/explicit-GLOBAL, serial loops
   // otherwise.  Emits the `if (tid >= total) return;` bounds guard.
-  int needs_close[MAX_DIM] = {0};
+  int needs_close[RMU_MAX_RANGES] = {0};
   u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
-                                         out_factors, n_out, depth, fp,
+                                         out_factors, n_out_true, depth, fp,
                                          needs_close);
   // GROUP_REDUCE detection has to fire BEFORE we declare the scalar
   // accumulator -- otherwise the rendered MSL would have both decls
@@ -2752,9 +2896,11 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   u32  red_kind_opt   = opt_kinds  [reduce_idx];
   u32  red_factor_opt = opt_factors[reduce_idx];
   if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_GROUP_REDUCE) {
+    // GROUP_REDUCE doesn't handle inner-K decomp yet; pass n_out_true
+    // so the close-loop count matches the open-loop count.
     return rmu_emit_group_reduce(buf, addr, red_range, red_src,
                                  red_kind, red_axis, red_factor_opt,
-                                 fp, body_depth, n_out, needs_close);
+                                 fp, body_depth, n_out_true, needs_close);
   }
   // Emit accumulator decl using the reduce_axis as the unique id.
   char acc_name[32];
@@ -2781,9 +2927,20 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     }
   }
   rmu_emit_range_open(red_range, fp, body_depth, red_kind_opt);
-  // Combine inside the reduce loop.
-  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  // Inner-K decomposition: nested unrolled loops INSIDE the reduce
+  // loop, BEFORE the combine, so all inner-axis iterations fold into
+  // the single accumulator (tinygrad expander.py:do_expand semantics).
+  u32 reduce_body_depth = rmu_emit_inner_reduce_decomp_loops(
+      out_ranges + n_out_true, out_kinds + n_out_true,
+      out_factors + n_out_true, n_inner, fp, body_depth + 1);
+  // Combine inside the (innermost) reduce loop.
+  for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
   rmu_emit_reduce_combine(acc_name, red_kind, red_src, fp);
+  for (u32 i = 0; i < n_inner; i++) {
+    reduce_body_depth--;
+    for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
   // Close reduce loop.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("}\n", fp);
@@ -2793,7 +2950,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   rmu_emit_term(addr, fp);
   fprintf(fp, "] = %s;\n", acc_name);
   // Close output loops.
-  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+  for (i32 i = (i32)n_out_true - 1; i >= 0; i--) {
     if (!needs_close[i]) continue;
     body_depth--;
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
