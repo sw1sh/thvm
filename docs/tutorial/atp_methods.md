@@ -231,8 +231,7 @@ bd=all:av=off:gtg=exists_sym
 
 Decoded to the thvm knobs we have (Vampire's `bd=all` backward
 demodulation and `gtg=exists_sym` goal-type-graph premise selection
-are not yet ported; `bs=unit_only` is approximated by forward
-subsumption since backward subsumption is not yet ported):
+are not yet ported):
 
 - `GoalDirected -> True` (Vampire `tgt=full`: MNF front alongside
   completion).
@@ -247,11 +246,8 @@ subsumption since backward subsumption is not yet ported):
   under LPO).
 - `AutoMaxWeight -> True` (closest analog to Vampire's
   `nwc=1.2` non-goal weight skew).
-- `ForwardSubsume -> True` (closest standing analog to
-  `bs=unit_only`: pre-empts a redundant rule add when an already-
-  stored more-general rule subsumes it; Vampire deletes the now-
-  redundant existing rule instead, but both end with the more-
-  general rule alive and the specific instance gone).
+- `BackwardSubsume -> True` (direct port of `bs=unit_only`: after
+  adding a new rule, soft-delete any existing rule subsumed by it).
 
 List form takes the same `Method -> {"VampireUEQ", subopt -> value, ...}`
 override pattern as `"Waldmeister"`.
@@ -483,8 +479,23 @@ rewrite step it could fire is already reachable from the more general
 rule. Vampire `--forward_subsumption` analog, unit-only (every UEQ
 equation is a unit clause).
 
-Default: `False`. The `"VampireUEQ"` preset turns it on as the closest
-analog to Vampire's `bs=unit_only` flag.
+Default: `False`. Pair with `"BackwardSubsume" -> True` for the full
+subsumption pruning that classical saturation provers run by default.
+
+### 4.19 `"BackwardSubsume" -> True`
+
+After adding a new rule `l = r` to R, scan existing rules; for each
+existing rule that the new one subsumes, soft-delete it. The
+soft-delete writes an out-of-range FVR sentinel (id=255, beyond
+`REWRITE_MAX_VAR=64`) into the slot's lhs / rhs so `thvm_match` and
+`thvm_unify` return 0 naturally on every rule-firing site without
+threading an explicit `r_dead[]` check through 14 ATP rule-iteration
+loops. The original (lhs, rhs) is preserved in a parallel save array
+(GC-rooted) so proof reconstruction can read the killed rule's content
+when the trace cites it. Sound + completeness-preserving by the same
+argument as `"ForwardSubsume"`. Vampire's `bs=unit_only` direct port.
+
+Default: `False`. The `"VampireUEQ"` preset turns it on.
 
 ## 5. Per-class recommendations
 

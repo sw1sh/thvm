@@ -2292,12 +2292,11 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
      - AutoMaxWeight -> True           (Vampire keeps its CP queue
        small via age-weight balance; the closest analog we have is the
        growing-bound weight stash).
-     - ForwardSubsume -> True          (closest standing analog to
-       `bs=unit_only`: pre-empts a redundant rule add when an
-       already-stored more-general rule subsumes it, where Vampire
-       deletes the now-redundant existing rule after the fact -- both
-       end with the more-general rule alive and the specific instance
-       gone). *)
+     - BackwardSubsume -> True         (direct port of `bs=unit_only`:
+       after adding a new rule, soft-delete any existing rule subsumed
+       by it.  Iter 18 c7c42f3d shipped the C-side implementation;
+       earlier iters used ForwardSubsume as an approximation -- now
+       replaced by the real backward variant). *)
 atpParseMethod["VampireUEQ"] := atpParseMethod[{"VampireUEQ"}];
 atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
     Block[{o = Association[{subopts}], merged, mnf},
@@ -2307,7 +2306,7 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
             "Ordering" -> "LPO", "AutoPrecedence" -> True,
             "SelectionRatio" -> 10, "UnfailingCP" -> True,
             "AutoMaxWeight" -> True,
-            "ForwardSubsume" -> True|>, o];
+            "BackwardSubsume" -> True|>, o];
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
