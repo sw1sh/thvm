@@ -297,6 +297,13 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // when explicitly invoked (test_uop_expand exercises it directly).  See
 // docs/tinygrad_late_passes.md for the architectural alternative.
 #include "uop/expander.c"
+// uop/devectorize.c -- port of tinygrad codegen/late/devectorizer.py
+// (reduce_to_acc + devectorize + pm_render + load_store_folding) to
+// thvm's UOp graph rewrite framework.  Introduces UOP_STACK /
+// UOP_PLACEHOLDER / UOP_END + uop_devectorize_graph(root) +
+// uop_load_store_fold_graph(root).  Same disposition as expander: NOT
+// WIRED into render_uop.c -- runs only via test_uop_devectorize for now.
+#include "uop/devectorize.c"
 // codegen/hand_opts.c -- tinygrad's hand_coded_optimizations port.
 // Needs kernel_apply_opt (codegen/apply_opt.c) + the DAG axis
 // scanners (uop/dag_scan.c) above, so it lands here.

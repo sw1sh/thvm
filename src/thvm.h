@@ -499,11 +499,29 @@ int             dtype_is_packed   (u32 dt);
 // UOP_GEP: vector element extraction.  Heap = [src, NUM(n_idx),
 //   NUM(idx_0), ..., NUM(idx_{n_idx-1})].  Mirrors UOp.gep at
 //   expander.py:44/86.
+// UOP_STACK: variadic vector-construction node.  Heap = [NUM(n), src_0,
+//   ..., src_{n-1}].  Each src is a scalar Term.  The renderer turns
+//   this into per-element scalar emissions (UNROLL is the structural
+//   counterpart on the analysis side; STACK is the lowered scalar list).
+//   Mirrors tinygrad's Ops.STACK (uop/ops.py:215 + devectorizer.py:239).
+// UOP_PLACEHOLDER: a per-thread register accumulator declaration.
+//   Heap = [NUM(dtype), NUM(acc_id)].  Arity 0 -- the renderer emits one
+//   `dtype _accN;` declaration per unique acc_id at the top of the kernel
+//   body.  Mirrors tinygrad's UOp.placeholder + AddrSpace.REG used by
+//   reduce_to_acc (devectorizer.py:321).
+// UOP_END: explicit "close the reduce loops covering these ranges"
+//   marker.  Heap = [NUM(n_ranges), range_0, ..., range_{n-1}].  Each
+//   range_i is a Term referencing a UOP_RANGE (the reduce axis whose
+//   loop body just completed).  Mirrors tinygrad's Ops.END at
+//   uop/ops.py:215 + devectorizer.py:327.
 #define UOP_VCONST      44
 #define UOP_UNROLL      45
 #define UOP_CONTRACT    46
 #define UOP_GEP         47
-#define UOP_COUNT       48
+#define UOP_STACK       48
+#define UOP_PLACEHOLDER 49
+#define UOP_END         50
+#define UOP_COUNT       51
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2855,6 +2873,32 @@ fn u32  uop_contract_factor (Term t, u32 i);
 fn Term uop_gep      (Term src, u32 n_idx, u32 const *indices);
 fn u32  uop_gep_n_idx(Term t);
 fn u32  uop_gep_idx  (Term t, u32 i);
+
+// === Devectorizer (src/uop/devectorize.c) ===
+// Port of tinygrad codegen/late/devectorizer.py to the thvm UOp graph
+// rewrite framework.  Lowers the post-expander DAG (with vector dtypes,
+// VCONST, UNROLL, CONTRACT, GEP) into a renderer-consumable scalar DAG
+// where REDUCE has been replaced by PLACEHOLDER acc + STORE-back-to-acc
+// + END loops, ALU has been split into per-lane scalar ops via STACK,
+// and adjacent scalar LOADs over contiguous addresses have been re-
+// vectorized into wide LOADs.
+//
+// NOT WIRED INTO the renderer in this commit: the existing emit walk
+// in render_uop.c consumes the RANGE-leaf representation directly.
+// uop_devectorize_graph and uop_load_store_fold_graph run only when
+// explicitly invoked (tests).  See docs/tinygrad_late_passes.md.
+fn Term uop_stack       (u32 n, Term const *srcs);
+fn u32  uop_stack_n     (Term t);
+fn Term uop_stack_src   (Term t, u32 i);
+fn Term uop_placeholder (u32 dtype, u32 acc_id);
+fn u32  uop_placeholder_dtype (Term t);
+fn u32  uop_placeholder_acc_id(Term t);
+fn Term uop_end         (u32 n, Term const *ranges);
+fn u32  uop_end_n       (Term t);
+fn Term uop_end_range   (Term t, u32 i);
+fn Term uop_devectorize_graph    (Term root);
+fn Term uop_load_store_fold_graph(Term root);
+
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);
 fn Term uop_graph_simplify_materialize(Term root, u32 env_id);

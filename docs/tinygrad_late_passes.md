@@ -494,36 +494,63 @@ that consumes a `KAX_UPCAST`/`KAX_UNROLL`-tagged DAG and produces a
 vectorized DAG with no UPCAST/UNROLL RANGE leaves.  Validated
 end-to-end in `tests/test_uop_expand.c`.
 
-### 5b. What's deferred (still needed before render-time adoption)
+### 5b. Architectural alternative piece #2 LANDED
 
-The post-expansion graph contains `UOP_VCONST` / `UOP_UNROLL` /
-`UOP_CONTRACT` / `UOP_GEP` nodes with vector dtypes that
-`render_uop.c` does not know how to emit.  Wiring
-`uop_expand_graph` into `cg_render_uop_kernel_root` /
-`cg_render_uop_kernel_cuda_root` without the companion passes would
-break every kernel that goes through the heuristic.  Required next
-pieces, in port order:
+The four pieces flagged as deferred in 5a are now in
+`src/uop/devectorize.c` (port of
+`tinygrad/codegen/late/devectorizer.py`):
 
-1. **`reduce_to_acc`** (tinygrad devectorizer.py:311-328): rewrites
-   `REDUCE(body, *axes)` into `DEFINE_ACC` + `STORE(acc, alu(acc,
-   body))` + `END(axes)` + `LOAD(acc)`.  This is what turns the
-   post-expander `REDUCE(GEP(IADD(VCONST, ...)))` into F separate
-   accumulator updates the renderer already knows how to emit.
-2. **`devectorize`** (devectorizer.py:267-273): splits vector ALU back
-   into N scalar ALUs through GEP.  The renderer already emits scalar
-   ALU; this pass bridges from the vectorized post-expander shape to
-   the scalar form.
-3. **`load_store_folding`** (devectorizer.py:136-149): re-vectorizes
-   adjacent scalar loads into `float4` etc.  Optional perf bump on top.
-4. **`pm_render`** (devectorizer.py:275-295): final tweaks for the
-   emitter (vector CONST -> STACK, GEP of scalar source -> source,
-   etc.).
+1. **`reduce_to_acc`** (devectorizer.py:311-328) -> `devec_pm_reduce`.
+   Rewrites `REDUCE(body, *axes)` into a chain of
+   `STORE(PLACEHOLDER, 0, identity)` (init), `STORE(PLACEHOLDER, 0,
+   alu(LOAD(PLACEHOLDER), body))` (update), `END(axes)` marker, and
+   final `LOAD(PLACEHOLDER)`.  Sequenced via thvm's existing
+   `UOP_AFTER` chain so the renderer's `rmu_emit_after` walker can
+   linearize it without a new traversal.  Each REDUCE gets a unique
+   `acc_id` threaded through the rewrite via a `DevecReduceCtx`.
+2. **`devectorize`** (devectorizer.py:235-273) -> `devec_pm_devectorize`.
+   Detects vector ALU (UOP_ADD / IADD / NEG / CAST / ... whose srcs
+   are `UOP_STACK`s) and rewrites to `STACK(N, [op(gep(s, i)) for i])`.
+   Width detection sources from STACK lanes (post-`pm_render` lowering
+   of VCONST -> STACK).
+3. **`pm_render`** (devectorizer.py:275-295) -> three rules under
+   `devec_pm_*`: VCONST -> STACK of scalar CONST; GEP(STACK, (i,)) ->
+   STACK src[i]; GEP(scalar, (0,)) -> scalar; STACK with single src
+   -> the src.  Run pre- and post-`devectorize` to canonicalize.
+4. **`load_store_folding`** (devectorizer.py:81-149) ->
+   `uop_load_store_fold_graph` (a SEPARATE entry point invoked after
+   `uop_devectorize_graph`).  Detects F=2/4/8 adjacent scalar LOADs
+   in a STACK whose addresses share a base + lane offsets 0..F-1, and
+   collapses them to one wide LOAD wrapped in `UNROLL(axis_id=0xFE,
+   F)` + per-lane GEPs.  Dtype gate: float32 today (matches tinygrad's
+   `supports_float4` initial port; f16/bf16 deferred until the
+   renderer can emit half-width vector loads).
 
-Until #1 + #2 are in place, `uop_expand_graph` should be called only
-by tests / off-pipeline tools.  The V100 wall regression remains
-gated on path #1+#2 in `render_uop.c` (the renderer-level patches)
-because the architectural alternative cannot be flipped on without
-the devectorizer companion.
+Three new opcodes back this:
+
+- `UOP_STACK` (slot 48): variadic scalar-list, arity-0 by walker
+  convention with variadic Term payload at `heap[loc+1..]`.  The
+  renderer can lower to N scalar emissions; the constructor collapses
+  N=1 to a no-op.
+- `UOP_PLACEHOLDER` (slot 49): per-thread REG accumulator
+  declaration, heap = [NUM(dtype), NUM(acc_id)], hash-cons by
+  (dtype, acc_id).
+- `UOP_END` (slot 50): "close these loops here" marker, heap =
+  [NUM(n), range_0, ..., range_{n-1}].  Not hash-cons'd -- two END
+  markers in two different reduces are semantically distinct.
+
+Both `uop_devectorize_graph` and `uop_load_store_fold_graph` are
+exposed via `src/thvm.h` and exercised by `tests/test_uop_devectorize.c`
+(7 cases: reduce_to_acc round-trip, vector ALU split, VCONST -> STACK,
+GEP unwrap, F=4 load fold, end-to-end expander+devectorize on UPCAST'd
+shape, PLACEHOLDER/STACK hash-cons).
+
+**NOT WIRED INTO `render_uop.c`.**  The renderer still walks the
+RANGE-leaf representation directly; teaching it to emit PLACEHOLDER /
+END / STACK / GEP-folded wide LOADs is the remaining work for stage
+(f).  Both `uop_devectorize_graph` and `uop_load_store_fold_graph`
+land as off-pipeline tools today; the V100 wall measurement awaits
+the renderer wiring.
 
 ## References
 

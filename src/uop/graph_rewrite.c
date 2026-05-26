@@ -306,7 +306,11 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       }
       return uop_gep(srcs[0], n, idxs);
     }
-    // UOP_VCONST: arity 0, no rebuild path needed.
+    // UOP_VCONST / UOP_PLACEHOLDER: arity 0, no rebuild path needed.
+    // UOP_STACK / UOP_END: variadic Term payload, arity-0 in the
+    // uop_meta table; nodes are constructed at devectorizer-pass output
+    // and rewrites do not need to descend into them.  If a future pass
+    // needs to recurse, add the rebuild explicitly here.
 
     default:
       return t;

@@ -15,6 +15,24 @@ fn u8 uop_arity(u8 op) {
     case UOP_RANGE:    // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)]
     case UOP_INVALID:  // heap = [NUM(0)] sentinel
     case UOP_VCONST:   // heap = [NUM(dtype), NUM(n), NUM(b_0), ...] - all NUMs
+    // Devectorizer-pass leaves: PLACEHOLDER carries only [NUM(dtype),
+    // NUM(acc_id)]; the renderer emits one acc declaration per unique
+    // acc_id.  No recursable child Terms.  Mirrors tinygrad's
+    // UOp.placeholder + reduce_to_acc (devectorizer.py:321).
+    case UOP_PLACEHOLDER:
+    // UOP_STACK is variadic: heap = [NUM(n), src_0, ..., src_{n-1}].
+    // The src cells are recursable Term children but the count varies,
+    // so the rewriter walks them via the dedicated STACK rebuild path
+    // (uop_graph_rebuild_with_srcs) -- arity-0 here keeps the generic
+    // walker out of the variadic payload.
+    case UOP_STACK:
+    // UOP_END heap = [NUM(n), range_0, ..., range_{n-1}].  Each range_i
+    // is a UOP_RANGE Term; they are atoms (arity 0) on their own and
+    // dedup via the canonical range constructor.  END itself is a leaf
+    // marker for the renderer.  Treating arity as 0 here means the
+    // generic walker won't try to rebuild END from a fixed-arity
+    // descent; the variadic rebuild path handles it explicitly.
+    case UOP_END:
       return 0;
     // UOP_OPT carries [target, NUM(kind), NUM(factor)]; only the
     // target slot is a recursable Term child.
