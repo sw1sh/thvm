@@ -911,3 +911,17 @@ TFindProof[goal, axioms, Method -> {"Completion",
 KBO cannot orient variable-duplicating rules; LPO + the auto-precedence
 puts the relevant heads on top. Bare `"Add"` CP weight matches
 Waldmeister's `KombS` heuristic for combinator logic.
+
+### 9.7 Stagger-bucketed age fairness
+
+```wolfram
+TFindProof[goal, axioms, Method -> {"Completion",
+    "CriticalPairWeight" -> "Staggered",
+    "FifoTiebreak" -> True}]
+```
+
+`"Staggered"` coarse-grains CP weights into buckets of size
+`max_axiom_weight / 2`; within each bucket `"FifoTiebreak"` picks the
+oldest CP first. Use when many CPs share near-identical raw weights
+and the implementation's arbitrary heap order is starving the older
+half. The combination mirrors E's `StaggeredWeight` heuristic family.
