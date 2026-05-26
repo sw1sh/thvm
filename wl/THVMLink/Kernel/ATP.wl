@@ -2342,6 +2342,62 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
+(* Method -> "VampirePortfolio": a 10-entry rotation modeled on the
+   portfolio-cycling shape Vampire 5.0.1 ships for UEQ -- many short
+   strategy slices rather than one tuned config.  With TimeConstraint
+   -> T, each entry runs at T / 10 wall time.  Designed to exercise
+   the full knob surface (CP weight modes, orderings, redundancy
+   criteria) on a single Method invocation.
+
+   Each entry below picks a different combination of the CP-weight /
+   ordering / redundancy levers shipped through iters 10-25, so a goal
+   that walls on one slice has a chance to surface on the next.
+   Returns a SCHEDULE (list of configs) rather than a single config,
+   so the engine's existing portfolio dispatcher fairly divides
+   TimeConstraint across the 10 entries. *)
+atpParseMethod["VampirePortfolio"] :=
+    (* atpScheduleFor pattern-matches a list directly, but
+       atpParseMethod's contract is "single config".  Return a sentinel
+       that atpScheduleFor recognizes for the rotation. *)
+    {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0};
+
+$VampirePortfolio = {
+    (* 1: VampireUEQ-faithful single config (the iter-21 flag-complete
+       preset). *)
+    "VampireUEQ",
+    (* 2: Twee weight + GroundJoin + Connectedness + BS + BD + RHSI. *)
+    {"Completion", "CriticalPairWeight" -> "Twee",
+        "GroundJoin" -> True, "Connectedness" -> True,
+        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "RHSInterreduce" -> True, "AutoMaxWeight" -> 20},
+    (* 3: RelLevel weight + SInE relevance filter for cross-system. *)
+    {"Completion", "CriticalPairWeight" -> "RelLevel",
+        "AxiomRelevance" -> "SInE", "AutoMaxWeight" -> 20},
+    (* 4: ConjSym weight + GoalDirected MNF front. *)
+    {"GoalDirected", "CriticalPairWeight" -> "ConjSym",
+        "AutoMaxWeight" -> 20},
+    (* 5: Diversity weight + UnfailingCP for asymmetric saturation. *)
+    {"Completion", "CriticalPairWeight" -> "Diversity",
+        "UnfailingCP" -> True, "AutoMaxWeight" -> 20},
+    (* 6: Mix2 + LRS + AutoMaxWeight: Vampire age:weight balance. *)
+    {"Completion", "CriticalPairWeight" -> "Mix2", "LRS" -> True,
+        "AutoMaxWeight" -> 20},
+    (* 7: KBO Waldmeister default. *)
+    {"Waldmeister"},
+    (* 8: LPO + GoalInterleave for combinator-shape goals. *)
+    {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "GoalInterleave" -> 50, "AutoMaxWeight" -> 20},
+    (* 9: GoalDirected + SInE for cross-system many-axiom goals. *)
+    {"GoalDirected", "AxiomRelevance" -> "SInE"},
+    (* 10: Add weight, the bare default for combinator / Sheffer-X. *)
+    {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20}
+};
+
+(* Hook VampirePortfolio into atpScheduleFor so the rotation expands
+   into the schedule.  Anything else passes through atpParseMethod. *)
+atpScheduleFor["VampirePortfolio"] := $VampirePortfolio;
+atpScheduleFor["VampirePortfolio", _, _] := $VampirePortfolio;
+
 atpParseMethod[m_] := (
     Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0});
 

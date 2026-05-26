@@ -219,7 +219,35 @@ meets at one normal form.
 When to use: Sheffer / Wolfram axiom systems and other single-operator
 problems where Waldmeister's empirical default is well-tuned.
 
-### 3.6 `"VampireUEQ"`
+### 3.6 `"VampirePortfolio"`
+
+A 10-entry rotation modeled on the portfolio-cycling shape Vampire
+5.0.1 ships for UEQ: many short strategy slices rather than one tuned
+config. With `TimeConstraint -> T`, each entry runs at `T / 10` wall
+time and the first that proves wins (the engine already shares
+`TimeConstraint` fairly across schedule entries).
+
+The 10 entries exercise the full knob surface (CP weight modes,
+orderings, redundancy criteria) shipped through iters 10-25:
+
+1. `"VampireUEQ"` (the flag-complete preset).
+2. Twee weight + GroundJoin + Connectedness + BackwardSubsume +
+   BackwardDemod + RHSInterreduce + AutoMaxWeight.
+3. RelLevel + SInE relevance filter.
+4. ConjSym + GoalDirected MNF.
+5. Diversity + UnfailingCP.
+6. Mix2 + LRS + AutoMaxWeight.
+7. Waldmeister preset.
+8. LPO + AutoPrecedence + GoalInterleave 50.
+9. GoalDirected + SInE.
+10. Add weight + AutoMaxWeight.
+
+When to use: experimental "throw everything at it" mode when the
+default `Automatic` walls on a hard goal. The cost is that each slice
+gets only ~10% of the wall budget; goals that need a long single
+configuration won't benefit.
+
+### 3.7 `"VampireUEQ"`
 
 Preset modeled on the Vampire 5.0.1 UEQ-portfolio entry that cracks
 `ShefferAxioms/AndAssociativity` in our parallel baseline:
@@ -530,7 +558,7 @@ table is useful when you pin `Method` explicitly.
 | Boolean symmetric (`DoubleNegation`, `ExcludedMiddle`, `Noncontradiction`) | `"GoalDirected"` | Two sides never share an NF; MNF closes via front collision. (e.g. `BooleanAxioms::DoubleNegation` proves in seconds via GoalDirected.) |
 | Combinator SKI / BCKW | `{"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True, "CriticalPairWeight" -> "Add"}` | Variable-duplicating S/W rules need LPO; Add weight matches Waldmeister's KombS. |
 | Sheffer / Wolfram single-operator deep (e.g. `AndAssociativity`) | `{"Waldmeister", "CriticalPairWeight" -> "Gt", "CPSetInterreduce" -> True}` | Waldmeister default + CP-set interreduction reaches the deep proofs. |
-| Cross-system many-axiom (e.g. `Implies*Axioms` against `MeredithAxioms`) | `{"GoalDirected", "AxiomRelevance" -> "SInE"}` | SInE prunes the irrelevant cross-system axioms; MNF closes the remaining goal. (BooleanAxioms::DeMorgan proves in 3s via Automatic which front-loads GoalDirected on this class.) |
+| Cross-system many-axiom (e.g. `Implies*Axioms` against `MeredithAxioms`) | `{"GoalDirected", "AxiomRelevance" -> "SInE"}` (or pair with `"CriticalPairWeight" -> "RelLevel"` for a deeper goal-relevance bias on CP selection in addition to axiom pruning) | SInE prunes the irrelevant cross-system axioms; MNF closes the remaining goal. (BooleanAxioms::DeMorgan proves in 3s via Automatic which front-loads GoalDirected on this class.) |
 | Group / AbelianGroup | `{"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50, "AutoPrecedence" -> True}` | Waldmeister `GtS`; AutoPrecedence puts inverse on top. |
 | Ring | `{"Completion", "Ordering" -> "KBO", "AutoPrecedence" -> True}` | Waldmeister `kbo(Std)`; structure-precedence puts `*` above `+`. |
 | AC (commutative+associative, no inverse) | `{"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}` | Waldmeister `GtS` family. |
