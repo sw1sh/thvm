@@ -29,7 +29,7 @@ VerificationTest[
         {1, fvr0, fvr0, fvr0, fvr0},
         "Integer64"
       ];
-      stats = THVMLink`Private`$atpRunFn[packed, 8, 4];
+      stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
       Normal @ stats
     ],
     (* Adding the axiom pushes a TRACE_AXIOM entry; goal_check fires
@@ -48,7 +48,7 @@ VerificationTest[
         {0, fvr0, fvr1},
         "Integer64"
       ];
-      stats = THVMLink`Private`$atpRunFn[packed, 8, 4];
+      stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
       Normal @ stats
     ],
     {4 (* ATP_QUEUE_EMPTY *), 0, 0, 0},
@@ -59,7 +59,7 @@ VerificationTest[
     (* Returned NumericArray has fixed shape [4]. *)
     Module[{packed, stats},
       packed = NumericArray[{1, fvr0, fvr0, fvr0, fvr0}, "Integer64"];
-      stats = THVMLink`Private`$atpRunFn[packed, 8, 4];
+      stats = THVMLink`ATP`Private`$atpRunFn[packed, 8, 4];
       Dimensions @ Normal @ stats
     ],
     {4},
@@ -72,8 +72,8 @@ VerificationTest[
     (* A bare symbol becomes a nullary CTR.  Verify the resulting
        Term has TAG_CTR (20). *)
     Module[{result, t, state},
-      state = THVMLink`Private`encodeAtpTermInit[];
-      result = THVMLink`Private`encodeAtpTerm[zero, state];
+      state = THVMLink`ATP`Private`encodeAtpTermInit[];
+      result = THVMLink`ATP`Private`encodeAtpTerm[zero, state];
       t = result[[1]];
       THVMLink`Private`$termTagFn[t]
     ],
@@ -85,9 +85,9 @@ VerificationTest[
     (* Distinct symbols get distinct labels.  After encoding zero
        and nil, the symbol map should have 2 entries. *)
     Module[{state, r1, r2},
-      state = THVMLink`Private`encodeAtpTermInit[];
-      r1 = THVMLink`Private`encodeAtpTerm[zero, state];
-      r2 = THVMLink`Private`encodeAtpTerm[nil, r1[[2]]];
+      state = THVMLink`ATP`Private`encodeAtpTermInit[];
+      r1 = THVMLink`ATP`Private`encodeAtpTerm[zero, state];
+      r2 = THVMLink`ATP`Private`encodeAtpTerm[nil, r1[[2]]];
       Length[r2[[2]]["sym"]]
     ],
     2,
@@ -99,8 +99,8 @@ VerificationTest[
        children.  Verify the resulting Term's tag and the symbol
        map size. *)
     Module[{state, result, t},
-      state = THVMLink`Private`encodeAtpTermInit[];
-      result = THVMLink`Private`encodeAtpTerm[
+      state = THVMLink`ATP`Private`encodeAtpTermInit[];
+      result = THVMLink`ATP`Private`encodeAtpTerm[
         f[zero, succ[zero]], state
       ];
       t = result[[1]];
@@ -113,8 +113,8 @@ VerificationTest[
 VerificationTest[
     (* Pattern[x, Blank[]] becomes a TAG_FVR. *)
     Module[{state, result, t},
-      state = THVMLink`Private`encodeAtpTermInit[];
-      result = THVMLink`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
+      state = THVMLink`ATP`Private`encodeAtpTermInit[];
+      result = THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
       t = result[[1]];
       {THVMLink`Private`$termTagFn[t], Length[result[[2]]["var"]]}
     ],
@@ -125,9 +125,9 @@ VerificationTest[
 VerificationTest[
     (* Same pattern variable name reused gets the same FVR id. *)
     Module[{state, r1, r2},
-      state = THVMLink`Private`encodeAtpTermInit[];
-      r1 = THVMLink`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
-      r2 = THVMLink`Private`encodeAtpTerm[Pattern[x, Blank[]], r1[[2]]];
+      state = THVMLink`ATP`Private`encodeAtpTermInit[];
+      r1 = THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], state];
+      r2 = THVMLink`ATP`Private`encodeAtpTerm[Pattern[x, Blank[]], r1[[2]]];
       (* Var map should still have 1 entry; both encodes return the
          same Term value. *)
       {Length[r2[[2]]["var"]], r1[[1]] == r2[[1]]}
@@ -1528,7 +1528,7 @@ VerificationTest[
         r = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
             All];
         {AssociationQ[r],
-         Sort[Keys[r]] === Sort[THVMLink`Private`$AtpReturnSpecs]}
+         Sort[Keys[r]] === Sort[THVMLink`ATP`Private`$AtpReturnSpecs]}
     ],
     {True, True},
     TestID -> "ATP/returnspec/all-projects-every-spec"
@@ -1555,7 +1555,7 @@ VerificationTest[
 VerificationTest[
     Module[{f, prof},
         f = CircleDot;
-        prof = THVMLink`Private`atpAnalyzeStructure[{
+        prof = THVMLink`ATP`Private`atpAnalyzeStructure[{
             ForAll[{x, y}, f[x, y] == f[y, x]],
             ForAll[{x, y, z}, f[f[x, y], z] == f[x, f[y, z]]]}];
         {prof["Operators"][f]["Commutative"],
@@ -1571,7 +1571,7 @@ VerificationTest[
    -> AbelianGroup, has-inverse + has-unit set on the product op. *)
 VerificationTest[
     Module[{prof, op},
-        prof = THVMLink`Private`atpAnalyzeStructure["AbelianGroupAxioms"];
+        prof = THVMLink`ATP`Private`atpAnalyzeStructure["AbelianGroupAxioms"];
         op = CircleTimes;
         {prof["Class"],
          prof["Operators"][op]["HasInverse"],
@@ -1586,7 +1586,7 @@ VerificationTest[
 (* GroupAxioms (no commutativity axiom) -> Group, has-inverse+has-unit. *)
 VerificationTest[
     Module[{prof, op},
-        prof = THVMLink`Private`atpAnalyzeStructure["GroupAxioms"];
+        prof = THVMLink`ATP`Private`atpAnalyzeStructure["GroupAxioms"];
         op = CircleTimes;
         {prof["Class"],
          prof["Operators"][op]["HasInverse"],
@@ -1599,14 +1599,14 @@ VerificationTest[
 (* WolframAxioms: a single binary Sheffer/Nand operator, no other
    structure -> "Sheffer". *)
 VerificationTest[
-    THVMLink`Private`atpAnalyzeStructure["WolframAxioms"]["Class"],
+    THVMLink`ATP`Private`atpAnalyzeStructure["WolframAxioms"]["Class"],
     "Sheffer",
     TestID -> "ATP/autotune/analyze-Sheffer-WolframAxioms"
 ]
 
 (* CommutativeRingAxioms: + and *, distributivity, inverse -> Ring. *)
 VerificationTest[
-    THVMLink`Private`atpAnalyzeStructure["CommutativeRingAxioms"]["Class"],
+    THVMLink`ATP`Private`atpAnalyzeStructure["CommutativeRingAxioms"]["Class"],
     "Ring",
     TestID -> "ATP/autotune/analyze-Ring"
 ]
@@ -1614,7 +1614,7 @@ VerificationTest[
 (* atpAutoTune returns a non-empty list of valid Method configs. *)
 VerificationTest[
     Module[{sched},
-        sched = THVMLink`Private`atpAutoTune["AbelianGroupAxioms"];
+        sched = THVMLink`ATP`Private`atpAutoTune["AbelianGroupAxioms"];
         And[Length[sched] > 0,
             AllTrue[sched, MatchQ[#,
                 (_String | {_String, ___Rule})] &]]
@@ -1628,11 +1628,11 @@ VerificationTest[
    can never prove less than "Portfolio". *)
 VerificationTest[
     Module[{tuned, fixed},
-        tuned = THVMLink`Private`atpScheduleFor[Automatic,
+        tuned = THVMLink`ATP`Private`atpScheduleFor[Automatic,
             AxiomaticTheory["AbelianGroupAxioms"],
             AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"][
                 "InverseOfInverse"]];
-        fixed = THVMLink`Private`$AtpSchedule;
+        fixed = THVMLink`ATP`Private`$AtpSchedule;
         (* every fixed config is present in the tuned schedule *)
         And @@ (MemberQ[tuned, #] & /@ fixed)
     ],
@@ -1644,7 +1644,7 @@ VerificationTest[
    the fixed tail (a Group config with AutoPrecedence comes first). *)
 VerificationTest[
     Module[{tuned},
-        tuned = THVMLink`Private`atpScheduleFor[Automatic,
+        tuned = THVMLink`ATP`Private`atpScheduleFor[Automatic,
             AxiomaticTheory["AbelianGroupAxioms"],
             AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"][
                 "InverseOfInverse"]];
@@ -1657,9 +1657,9 @@ VerificationTest[
 
 (* "Portfolio" stays the FIXED schedule (prior behavior reachable). *)
 VerificationTest[
-    THVMLink`Private`atpScheduleFor["Portfolio",
+    THVMLink`ATP`Private`atpScheduleFor["Portfolio",
         AxiomaticTheory["AbelianGroupAxioms"], Null] ===
-        THVMLink`Private`$AtpSchedule,
+        THVMLink`ATP`Private`$AtpSchedule,
     True,
     TestID -> "ATP/autotune/portfolio-stays-fixed"
 ]
@@ -1937,9 +1937,7 @@ VerificationTest[
 VerificationTest[
     With[{r = TFindProof["InverseOfInverse", "AbelianGroupAxioms", All]},
         {AssociationQ[r],
-         Sort[Keys[r]] === Sort[{"ProofObject", "Lemmas",
-            "PreprocessedAxioms", "RelevantAxioms",
-            "RawTrace", "Statistics", "Status"}],
+         Sort[Keys[r]] === Sort[THVMLink`ATP`Private`$AtpReturnSpecs],
          Head[r["ProofObject"]]}
     ],
     {True, True, ProofObject},
