@@ -2439,6 +2439,48 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
+(* Method -> "Twee": a preset modeled on Twee 2.x's defaults --
+       cfg_lhsweight=4, cfg_rhsweight=1, cfg_depthweight=2,
+       cfg_dupcost=1, cfg_ground_join=True,
+       cfg_use_connectedness_standalone=True, and unfailing CP
+       paramodulation always on.
+   Best-effort mapping into thvm's existing knobs:
+     - CriticalPairWeight -> "Twee"   (the shared-subterm-discounted
+       asymmetric weight ported in iter 11).
+     - GroundJoin -> True             (Twee's cfg_ground_join: delete
+       ground-joinable CPs).
+     - Connectedness -> True          (Twee's
+       cfg_use_connectedness_standalone: Bachmair-Dershowitz
+       below-peak redundancy, Twee section 6.2).
+     - UnfailingCP -> True            (Twee always superposes both
+       faces of an unorientable equation).
+     - BackwardSubsume -> True        (Twee's keepRules drops
+       subsumed rules at add time).
+     - BackwardDemod -> True          (Twee's interreduce normalizes
+       older rule LHSs against newly-added rules).
+     - RHSInterreduce -> True         (Twee's interreduce does the
+       symmetric RHS sweep too).
+     - AutoMaxWeight -> 20            (Twee's heap doesn't bound CP
+       size explicitly, but the growing-bound stash keeps the queue
+       budget-tractable on hard saturations -- same effect Twee gets
+       from its tight join-loop runtime budget).
+   Subopts override any default, mirroring the "Waldmeister" and
+   "VampireUEQ" preset shape. *)
+atpParseMethod["Twee"] := atpParseMethod[{"Twee"}];
+atpParseMethod[{"Twee", subopts___Rule}] :=
+    Block[{o = Association[{subopts}], merged, mnf},
+        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", False], 1, 0];
+        o = KeyDrop[o, "GoalDirected"];
+        merged = Join[<|
+            "CriticalPairWeight" -> "Twee",
+            "GroundJoin" -> True, "Connectedness" -> True,
+            "UnfailingCP" -> True,
+            "BackwardSubsume" -> True, "BackwardDemod" -> True,
+            "RHSInterreduce" -> True,
+            "AutoMaxWeight" -> 20|>, o];
+        atpParseCompletionOpts[Normal[merged], mnf]
+    ];
+
 (* Method -> "VampirePortfolio": a 10-entry rotation modeled on the
    portfolio-cycling shape Vampire 5.0.1 ships for UEQ -- many short
    strategy slices rather than one tuned config.  With TimeConstraint

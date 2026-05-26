@@ -1944,6 +1944,28 @@ VerificationTest[
     TestID -> "ATP/returnspec/All-returns-every-introspective"
 ]
 
+(* === Method -> "Twee" preset ====================================== *)
+
+(* The "Twee" preset bundles Twee's defaults: the dedup-aware Twee
+   weight + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume
+   + BackwardDemod + RHSInterreduce + AutoMaxWeight=20.  Sanity:
+   it parses, runs, and proves a trivial Boolean goal. *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> "Twee", TimeConstraint -> 5],
+    ProofObject,
+    TestID -> "ATP/method/Twee-preset-proves"
+]
+
+(* Suboption override: subopts must merge over the preset's defaults
+   (here: turn AutoMaxWeight off via 0). *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> {"Twee", "AutoMaxWeight" -> 0}, TimeConstraint -> 5],
+    ProofObject,
+    TestID -> "ATP/method/Twee-preset-subopt-override"
+]
+
 (* === PortfolioFrontLoad ============================================ *)
 
 (* PortfolioFrontLoad -> n widens the time slice given to the first n
