@@ -4627,6 +4627,8 @@ static u32 atp_symbol_count(Term t) {
   }
 }
 
+// (atp_term_depth defined below at line ~4653.)
+
 // === ClasHeuristics: advanced CP-weight term measures ===============
 // Helpers feeding the non-default `AtpCpWeightMode` weight modes --
 // ports of measures from Waldmeister's `ClasHeuristics`,
@@ -4767,6 +4769,25 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       // CH_Unifikationsmass: (wl+wr) * unification-measure.
       u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
       return (wl + wr) * atp_unif_measure(lhs, rhs);
+    }
+    case ATP_CP_WEIGHT_TWEE: {
+      // Twee.CP.score (src/Twee/CP.hs:240).  Asymmetric:
+      //   lhsweight * size(larger) + rhsweight * size(smaller)
+      //   + depthweight * depth
+      // Twee defaults: lhsweight=4, rhsweight=1, depthweight=2.
+      // The "larger side" is treated as the peak the CP must
+      // reduce away, so making the SMALLER side cheap is what
+      // accelerates the search.  Integer-arithmetic version (we
+      // approximate Twee's varweight 6/7 == 1 since our atp_symbol_-
+      // count already counts every node uniformly).
+      u32 m = atp_symbol_count(lhs);
+      u32 n = atp_symbol_count(rhs);
+      u32 large = m > n ? m : n;
+      u32 small = m + n - large;
+      u32 d = atp_term_depth(lhs);
+      u32 dr = atp_term_depth(rhs);
+      if (dr > d) d = dr;
+      return 4u * large + 1u * small + 2u * d;
     }
     case ATP_CP_WEIGHT_ADD:
     default:

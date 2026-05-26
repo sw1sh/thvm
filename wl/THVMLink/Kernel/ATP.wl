@@ -2004,7 +2004,11 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
 $AtpCpWeightCodes = <|
     "Add" -> 0, "Max" -> 1, "Ord" -> 2, "Gt" -> 3,
     "Mix" -> 4, "Mix2" -> 5, "Unif" -> 6,
-    "Goal" -> 7, "CPinGoal" -> 7, "Learned" -> 8, Automatic -> -1
+    "Goal" -> 7, "CPinGoal" -> 7,
+    "Twee" -> 8,   (* Twee KB-completion asymmetric weight (Smallbone),
+                     biases toward CPs whose smaller side is small;
+                     ported from src/Twee/CP.hs Twee.CP.score. *)
+    "Learned" -> 9, Automatic -> -1
 |>;
 
 TFindProof::badmethod =
