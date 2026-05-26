@@ -315,6 +315,33 @@ producing per-element accumulators, the register-blocking benefit
 doesn't exist; only the cost (more code, more index arithmetic per
 thread) lands.
 
+## Status (2026-05-27)
+
+- **Path #1 LANDED** (commits `b9f2f32e` + `eb732ab7`): parallel
+  accumulators emit in `rmu_emit_store_reduce` + axis-id translation
+  in `hand_opts.c`. Render is correct: F parallel accumulators share
+  ONE inner K-loop. test_render_uop pins it.
+- **Path #2 LANDED** (commit `d31b74fb`): shared-load hoisting in the
+  parallel-accumulator emit. Reduce body's INDEX_E subexpressions
+  that don't depend on any UPCAST'd axis get hoisted to one `float
+  _sh<kid>_<idx> = in[...]` declaration per K-iteration, then the F
+  MADs reuse the local. Cuts `in1[` occurrences in K-body from F to
+  1.
+- **CUDA gate STILL Metal-only** (`hand_opts.c::kernel_hand_coded_opts`
+  narrows to `b->id == 2`). V100 BS=128 STEPS=10 after path #2 +
+  gate-widened still runs at 3682 ms warm vs 1464 ms narrow-gate
+  baseline. Loss stays monotone 2.81 -> 1.73, correctness preserved.
+
+**Why the V100 gap is still open**: the heuristic also applies
+UNROLL(K, 4) from section 7. With UPCAST=4 + UNROLL=4 the parallel-acc
+body becomes F=4 MADs * 4-way K-unroll = 16 MADs per outer K-iter.
+For K=400 that's 1600 statements per kernel. nvrtc spends ~340 s on
+the cold compile and the larger PTX hurts V100 occupancy. Path #2
+hoists the X-side shared load but the W-side per-lane loads still
+have 4-way-K-stride structure that begs for `float4`-style adjacent-
+load folding (the tinygrad `fold_expanded_index` at devectorizer.py:
+81-117). That's path #3 below.
+
 ## What a faithful port of the late passes would look like
 
 In rough order of impact:
@@ -411,6 +438,37 @@ For path #2 (load folding), add a render-time analyzer:
 - new `src/codegen/render_load_fold.c` -- detect F adjacent loads
   inside a #pragma-unroll'd block, emit a single wide load + GEP.
 - backend renderer flag (`Renderer.supports_float4` analog).
+
+### 5. Architectural alternative: full late-pass UOp port
+
+Path #1 + #2 + #3 are renderer-level patches that mimic individual
+late-pass effects at source-emission time. The structural alternative
+is to actually run tinygrad's expander + devectorizer at the UOp
+graph level BEFORE rendering, the way tinygrad does:
+
+```
+heuristic-tagged UOp -> [expander] -> [devectorizer / reduce_to_acc]
+                     -> [load_store_folding] -> [pm_render]
+                     -> renderer that just walks and emits
+```
+
+This decouples the renderer from the optimization passes entirely.
+The renderer only needs to emit a small set of canonical UOps
+(STORE, LOAD, DEFINE_ACC, ENDIF, etc.). All the F-replication, load
+folding, accumulator declaration, etc. happens in graph rewrites
+that produce a smaller, simpler UOp graph that any backend renderer
+can consume.
+
+The cost: significant rewrite of `render_uop.c`. The benefit:
+adding a new late-pass becomes a `PatternMatcher` addition (~10
+lines) instead of a per-renderer-branch C edit. And the UOp graph
+shrinks during rewrites so nvrtc isn't asked to compile 1600-
+statement bodies that it then has to simplify.
+
+This is the "real" port. Path #1 + #2 + #3 are the pragmatic patches
+that buy time. The CUDA wall regression suggests the pragmatic patch
+ceiling is below tinygrad parity; the real port is what unlocks the
+full perf.
 
 ## References
 
