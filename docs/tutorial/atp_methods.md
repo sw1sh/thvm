@@ -502,6 +502,22 @@ argument as `"ForwardSubsume"`. Vampire's `bs=unit_only` direct port.
 
 Default: `False`. The `"VampireUEQ"` preset turns it on.
 
+### 4.20 `"BackwardDemod" -> True`
+
+After each newly-added rule batch, normalize each older rule's LHS
+against the new rule(s); if it reduces, drop the rule and re-queue the
+simplified equation `(reduced_lhs, old_rhs)`. The companion
+`"RHSInterreduce"` option performs the RHS half. Pairing both gives
+the full `bd=all` analog from Vampire's UEQ flag block.
+
+Sound + completeness-preserving: the rewritten equation is a logical
+consequence of the original rule plus the new rule, so any rewrite step
+reachable from the old rule remains reachable from the rewritten
+equation. The new rule itself stays in R.
+
+Default: `False`. The `"VampireUEQ"` preset turns it on alongside
+`"RHSInterreduce" -> True`.
+
 ## 5. Per-class recommendations
 
 Empirical patterns from the recent benchmark sweep + parallel Vampire
