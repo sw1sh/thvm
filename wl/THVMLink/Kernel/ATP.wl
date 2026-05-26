@@ -3181,7 +3181,8 @@ holdToInactive[axHC_HoldComplete] :=
    Association of every spec.  The default ("ProofObject") returns the
    bare ProofObject, so existing call shapes are unchanged. *)
 $AtpReturnSpecs = {"ProofObject", "Lemmas", "PreprocessedAxioms",
-    "RelevantAxioms", "RawTrace", "Statistics", "Status"};
+    "RelevantAxioms", "RawTrace", "Statistics", "Status",
+    "AppliedMethod"};
 
 atpReturnSpecQ[All] := True;
 atpReturnSpecQ[x_String] := MemberQ[$AtpReturnSpecs, x];
@@ -3229,6 +3230,13 @@ atpReturnValue[bundle_, "RawTrace"] := bundle["cRes"]["Trace"];
 atpReturnValue[bundle_, "Statistics"] := atpStatisticsAssoc[bundle["cRes"]];
 atpReturnValue[bundle_, "Status"] :=
     atpReturnStatus[bundle["cRes"]["Status"]];
+(* "AppliedMethod" -> the Method config that produced this bundle.
+   For a portfolio run, this is the winning schedule entry; for a
+   single-config or completion run, the only entry tried.  Useful for
+   debugging "what did Automatic actually try?". *)
+atpReturnValue[bundle_, "AppliedMethod"] :=
+    Replace[Lookup[bundle, "AppliedMethod", Missing["NotAvailable"]],
+        Missing[___] :> Automatic];
 
 atpProjectReturn[bundle_, spec_String] := atpReturnValue[bundle, spec];
 atpProjectReturn[bundle_, All] :=
@@ -3498,7 +3506,8 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            (the ProofObject is $Failed) so the introspectives reflect it. *)
         If[ cRes["Status"] =!= 1,
             Return[<|"enc" -> enc, "cRes" -> cRes,
-                "ProofObject" -> $Failed, "RelevantAxioms" -> relAx|>]
+                "ProofObject" -> $Failed, "RelevantAxioms" -> relAx,
+                "AppliedMethod" -> OptionValue[Method]|>]
         ];
         extSteps = cRes["ExtSteps"];
         (* Preferred path: the no-completion EXT chain cites the
@@ -3576,7 +3585,8 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                 If[ Head[poB] === ProofObject, poB, $Failed]
             ];
             <|"enc" -> enc, "cRes" -> cRes,
-                "ProofObject" -> poFinal, "RelevantAxioms" -> relAx|>
+                "ProofObject" -> poFinal, "RelevantAxioms" -> relAx,
+                "AppliedMethod" -> OptionValue[Method]|>
         ]
     ]]]],
     "TATPError"
@@ -3606,7 +3616,8 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
         (* No goal, so no ProofObject; Mode None means all axioms kept. *)
         <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> $Failed,
           "RelevantAxioms" -> <|"Mode" -> None,
-              "Kept" -> axioms, "Dropped" -> {}|>|>
+              "Kept" -> axioms, "Dropped" -> {}|>,
+          "AppliedMethod" -> OptionValue[Method]|>
     ],
     "TATPError"
 ];

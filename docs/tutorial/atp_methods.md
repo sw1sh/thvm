@@ -641,6 +641,7 @@ returns the bare `ProofObject`, so existing call shapes are unchanged.
 | `"RawTrace"` | The decoded C-engine completion trace (CP / ORIENT / SIMPLIFY entries). |
 | `"Statistics"` | A small run-stats `Association` (`Status`, `Steps`, `Rules`, `Trace`, `QueueSize`). |
 | `"Status"` | A `"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"` tag. |
+| `"AppliedMethod"` | The actual `Method` config that produced the bundle. For a portfolio run, the winning schedule entry; for a single-config run, the only entry tried. Useful for inspecting what `Automatic` chose. |
 | `All` | An `Association` of every spec above. |
 
 Examples:

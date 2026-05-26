@@ -995,6 +995,24 @@ VerificationTest[
     TestID -> "ATP/method/VampirePortfolio-baseline"
 ]
 
+VerificationTest[
+    (* "AppliedMethod" return spec: for a single-config call the
+       returned value is the bare Method (here a string preset). *)
+    TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        "AppliedMethod", Method -> "VampireUEQ"],
+    "VampireUEQ",
+    TestID -> "ATP/return/AppliedMethod-single-config"
+]
+
+VerificationTest[
+    (* "AppliedMethod" under Automatic returns the actual schedule
+       entry that won.  The default Automatic schedule's first entry
+       (Mix2) closes InverseOfInverse trivially. *)
+    TFindProof["InverseOfInverse", "AbelianGroupAxioms", "AppliedMethod"],
+    {"Completion", "CriticalPairWeight" -> "Mix2"},
+    TestID -> "ATP/return/AppliedMethod-portfolio-winner"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[
