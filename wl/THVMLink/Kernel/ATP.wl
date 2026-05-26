@@ -2750,12 +2750,16 @@ atpAutoTuneForClass["Sheffer"] := {
        defaults cfg_ground_join=True, cfg_use_connectedness_standalone=
        True).  These redundancy criteria delete CPs whose two sides
        join through a path strictly below the peak; the combination
-       prunes the CP queue without losing completeness.  Both knobs
-       already exist in our engine but were missing from the Sheffer
-       schedule.  Sourced from ~/.twee-src/twee/src/Twee/Join.hs. *)
+       prunes the CP queue without losing completeness.  Iters 18 / 20
+       also bundle BS / BD / RHSI here (sentinel-LHS soft-delete +
+       backward demodulation): every redundancy criterion the engine
+       has, on the same entry, so the CP queue stays tightest for the
+       deep Implies-X family that walls every cheaper config. *)
     {"Completion", "CriticalPairWeight" -> "Twee",
         "GroundJoin" -> True, "Connectedness" -> True,
-        "AutoMaxWeight" -> 20}};
+        "AutoMaxWeight" -> 20,
+        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "RHSInterreduce" -> True}};
 atpAutoTuneForClass["Boolean"] := {
     (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /
        OrAssociativity / Distributivity) and symmetric (ExcludedMiddle /
