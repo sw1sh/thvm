@@ -135,7 +135,13 @@ static u32 gc_node_size(Term t) {
         case UOP_CMPLT: case UOP_CMPEQ:
           return 2;
         case UOP_FLIP:   return 2;
-        case UOP_REDUCE: return 3;
+        // UOP_REDUCE: heap = [src, kind, n_axes, axis_0, ..., axis_{n-1}].
+        // Total cells = 3 + n_axes (multi-axis port).
+        case UOP_REDUCE: {
+          Term n_cell = HEAP[loc + 2];
+          if (term_tag(n_cell) != TAG_NUM) return 0;
+          return 3 + (u32)term_val(n_cell);
+        }
         case UOP_RESHAPE: case UOP_EXPAND: case UOP_PERMUTE: {
           Term ndim_cell = HEAP[loc + 1];
           if (term_tag(ndim_cell) != TAG_NUM) return 0;
@@ -349,6 +355,13 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   //    to rebuild on next allocation.
   uop_const_cache_reset();
   uop_mov_cache_reset();
+  // The cross-realize loc -> tid cache (schedule/materialize.c) keys
+  // off heap loc; after Cheney compacts the heap those locs name
+  // entirely different cells (or fall outside HEAP_NEXT).  Clear so
+  // a stale loc never resolves to an unrelated tid.  Cost: lose the
+  // cross-realize sharing on the first realize after a GC; the next
+  // emit_kernel_for_boundary repopulates it.
+  materialized_loc_clear();
 
   // 5. Swap from / to.
   u64 swap_start = GC_FROM_START, swap_end = GC_FROM_END;

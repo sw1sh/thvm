@@ -88,6 +88,7 @@ EXPORT uint64_t py_uop_after(uint64_t node, uint64_t after_node) {
 }
 
 EXPORT uint64_t py_uop_load(uint64_t src) { return uop_load(src); }
+EXPORT uint64_t py_uop_detach(uint64_t src) { return uop_detach(src); }
 
 // ============== high-level tensor surface (TAG_TEN) ==================
 // Phase 1 of the Python Tensor frontend (docs/plans/py_tensor_frontend
@@ -222,6 +223,28 @@ EXPORT uint64_t py_wnf(uint64_t t)     { return wnf(t); }
 EXPORT uint64_t py_nf(uint64_t t)      { return nf(t); }
 EXPORT uint64_t py_realize(uint64_t t) { return thvm_realize(t); }
 
+// py_realize_many: bundle n terms into one TAG_CTR and realize them
+// together (thvm_realize routes a CTR to thvm_realize_many).  This is
+// the tinygrad `loss.realize(*sched)` contract: every assign + consumer
+// is scheduled in ONE materialize pass, so a buffer that is BOTH
+// assigned and read by another assign (e.g. Adam's m read by the param
+// update) fires its ASSIGN exactly once instead of being re-fired by a
+// later per-tensor realize against an already-updated buffer.  The
+// resolved children are written back into `terms[]` so each Python
+// Tensor can refresh its handle to the materialized TAG_TEN.
+EXPORT uint64_t py_realize_many(uint64_t *terms, uint32_t n) {
+  if (n == 0) return 0;
+  if (n == 1) { terms[0] = thvm_realize(terms[0]); return terms[0]; }
+  if (n > 256) n = 256;
+  Term children[256];
+  for (uint32_t i = 0; i < n; i++) children[i] = terms[i];
+  Term ctr = term_new_ctr(0, children, n);
+  Term res = thvm_realize(ctr);
+  uint32_t rn = term_ctr_n(res);
+  for (uint32_t i = 0; i < rn && i < n; i++) terms[i] = term_ctr_at(res, i);
+  return res;
+}
+
 // --- live-tensor pinning + cross-step buffer reclaim ---
 // The eager py path realizes a fresh forward/backward/optimizer graph
 // every step; the per-realize pool only recycles THAT realize's scratch,
@@ -308,6 +331,10 @@ EXPORT uint64_t py_cuda_jit_evictions(void) {
   return 0;
 #endif
 }
+EXPORT void py_cg_profile_dump(uint32_t top_n) {
+  cg_profile_dump(stderr, top_n);
+  fflush(stderr);
+}
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
 EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
 EXPORT uint32_t py_const_UOP_SHRINK(void) { return UOP_SHRINK; }
@@ -341,6 +368,13 @@ EXPORT int py_ten_get_requires_grad(uint64_t t) {
 EXPORT uint64_t py_grad_memo_hits  (void) { return grad_memo_hits_get();   }
 EXPORT uint64_t py_grad_memo_misses(void) { return grad_memo_misses_get(); }
 EXPORT uint64_t py_grad_fires      (void) { return HOT_GRAD_FIRES;         }
+// Per-realize slot-mechanism counters for the topo-deferred-fire diagnosis.
+EXPORT uint64_t py_grad_slot_first  (void) { return grad_slot_first_get();   }
+EXPORT uint64_t py_grad_slot_fold   (void) { return grad_slot_fold_get();    }
+EXPORT uint64_t py_grad_slot_refire (void) { return grad_slot_refire_get();  }
+EXPORT uint64_t py_grad_slot_prewalk(void) { return grad_slot_prewalk_get(); }
+EXPORT uint64_t py_grad_slot_excess (void) { return grad_slot_excess_get();  }
+EXPORT uint64_t py_grad_slot_stuck  (void) { return grad_slot_stuck_get();   }
 
 // Walk-once backward readback: the canonical "this tensor's grad"
 // after a uop_grad-driven realize.  grad_leaf_sup's target==0 path
@@ -362,6 +396,19 @@ EXPORT int py_ten_clear_grad(uint64_t t) {
 }
 
 // ---------------- buffer accessors (handy for debug) ----------------
+EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  return TENS[id].buf_id;
+}
+EXPORT uint64_t py_cuda_buf_dptr(uint32_t buf_id) {
+#ifdef THVM_HAS_CUDA
+  return (uint64_t)cuda_buf_dptr(buf_id);
+#else
+  (void)buf_id; return 0;
+#endif
+}
 EXPORT uint32_t py_uop_buffer_scope(uint64_t t) { return uop_buffer_scope(t); }
 EXPORT uint32_t py_uop_buffer_dtype(uint64_t t) { return uop_buffer_dtype(t); }
 EXPORT uint32_t py_uop_buffer_ndim(uint64_t t)  { return uop_buffer_ndim(t); }

@@ -367,28 +367,74 @@ static GradDepEntry GRAD_DEP[GRAD_DEP_CAP];
 // Per-forward-node cotangent accumulator ("the .grad slot is a graph").
 // Keyed on (forward-node heap loc, target).  The dup machinery shares a
 // fan-out forward node as ONE heap loc, so every backward arrival at that
-// node hashes here.  The FIRST arrival allocates the node's chain-rule cell
-// and stores its cotangent gy DIRECTLY (no wrapper -- the fan-out-1 majority
-// pays nothing).  A LATER arrival, if that cell has NOT fired yet, folds its
-// gy into the cell's gy slot via uop_binary(ADD,...) (a real ADD only for
-// genuine fan-out) and returns a discardable CONST(0): the chain rule reads
-// cell+1 lazily at fire time (see interact_grad_dispatch), so it sees the
-// summed cotangent and walks the subtree ONCE.  If the cell already fired
-// (a cross-parent arrival that lost the race), we fall back to a fresh cell
-// for that edge -- a baseline re-walk, still correct (leaves accumulate both
-// contributions).  `fired` is set by grad_slot_mark_fired when the cell's
-// chain rule runs.  No global dependency count: the graph-valued cotangent
-// makes correctness count-free; the per-slot fired flag is a local, best-
-// effort single-walk optimization.
+// node hashes here.
+//
+// Topo-deferred fire (tinygrad gradient.py:91 compute_gradient analogue):
+// a pre-walk over the forward DAG counts each node's `n_expected` arrivals
+// (= the number of differentiable BWD edges that will land here -- one per
+// parent that calls grad_bwd_emit_uop on this node).  The chain rule then
+// defers ALL arrivals into a side-channel accumulator (`pending_gy`) and
+// returns CONST(0) until the LAST arrival, which allocates the cell and
+// returns its BWD projection.  wnf fires the cell ONCE, walking the
+// downstream subtree exactly once per leaf.
+//
+// Mirrors tinygrad's `for t0 in reversed(walk): grads[k] = grads[k] + v`
+// (gradient.py:94-117): each node accumulates contributions from ALL its
+// parents before its own backward rule fires.  Pre-fanin removes the
+// depth-first eager-fire blowup where every cross-tree arrival re-walked
+// the entire downstream subtree, depositing N parallel BWD subgraphs per
+// leaf (1563:32:150 refire:fold:first ratio on beautiful_mnist BS=16).
+//
+// `n_expected==0` means the pre-walk hasn't seen this node (a defensive
+// FALLBACK fires immediately to match prior behavior; correctness intact).
 #define GRAD_SLOT_CAP (1u << 15)
 typedef struct {
   u32  gen;
-  u64  loc;       // forward-node heap loc (dedup key)
-  Term target;    // dedup key
-  u64  cell;      // current accumulation cell (loc); cell+1 holds running gy
-  u8   fired;     // 1 once `cell`'s chain rule has fired
+  u64  loc;         // forward-node heap loc (dedup key)
+  Term target;      // dedup key
+  Term pending_gy;  // accumulated cotangent across early arrivals (0 = none)
+  u32  n_arrived;   // bwd arrivals seen so far
+  u32  n_expected;  // bwd arrivals the pre-walk counted (0 = uncounted)
+  u64  cell;        // allocated on the last arrival; cell+1 holds final gy
+  u8   fired;       // 1 once `cell`'s chain rule has fired
 } GradSlotEntry;
 static GradSlotEntry GRAD_SLOT[GRAD_SLOT_CAP];
+
+// Per-realize counters for the per-node slot mechanism, exported to the WL
+// and Python bridges so the dedup-verification probes (py/csource/thvm_py.c
+// py_grad_slot_*) can diagnose pre-walk gaps.  Reset at grad_memo_begin_realize.
+// FIRST   = first arrival at a forward node (cell allocated, cotangent stored).
+// FOLD    = later arrival while the cell hasn't fired yet (gy folded in).
+// REFIRE  = later arrival AFTER the cell already fired (fresh cell, downstream
+//           re-walked from scratch).  A high REFIRE count is the kernel-blowup
+//           smell -- each refire deposits an N-leaf ADD term per leaf.
+// PREWALK = number of slots the topo-deferred-fire pre-walk credited (with
+//           positive n_expected).
+// EXCESS  = arrivals that exceeded the pre-walked n_expected count (one extra
+//           per arrival past the predicted total -- diagnoses under-count).
+static u64 GRAD_SLOT_FIRST   = 0;
+static u64 GRAD_SLOT_FOLD    = 0;
+static u64 GRAD_SLOT_REFIRE  = 0;
+static u64 GRAD_SLOT_PREWALK = 0;
+static u64 GRAD_SLOT_EXCESS  = 0;
+fn u64 grad_slot_first_get  (void) { return GRAD_SLOT_FIRST;   }
+fn u64 grad_slot_fold_get   (void) { return GRAD_SLOT_FOLD;    }
+fn u64 grad_slot_refire_get (void) { return GRAD_SLOT_REFIRE;  }
+fn u64 grad_slot_prewalk_get(void) { return GRAD_SLOT_PREWALK; }
+fn u64 grad_slot_excess_get (void) { return GRAD_SLOT_EXCESS;  }
+
+// Count slots with n_expected > 0 but n_arrived < n_expected: pre-walk
+// over-counted, the cell never reaches its last-arrival fire, the cotangent
+// is silently dropped.  Used by the dedup-verification probe.
+fn u64 grad_slot_stuck_get(void) {
+  u64 stuck = 0;
+  for (u32 i = 0; i < GRAD_SLOT_CAP; i++) {
+    GradSlotEntry *e = &GRAD_SLOT[i];
+    if (e->gen == GRAD_MEMO_GEN && e->n_expected > 0
+        && e->n_arrived < e->n_expected) stuck++;
+  }
+  return stuck;
+}
 
 fn void grad_memo_begin_realize(void) {
   GRAD_MEMO_GEN++;
@@ -398,8 +444,13 @@ fn void grad_memo_begin_realize(void) {
     memset(GRAD_DEP,  0, sizeof(GRAD_DEP));
     memset(GRAD_SLOT, 0, sizeof(GRAD_SLOT));
   }
-  GRAD_MEMO_HITS   = 0;
-  GRAD_MEMO_MISSES = 0;
+  GRAD_MEMO_HITS    = 0;
+  GRAD_MEMO_MISSES  = 0;
+  GRAD_SLOT_FIRST   = 0;
+  GRAD_SLOT_FOLD    = 0;
+  GRAD_SLOT_REFIRE  = 0;
+  GRAD_SLOT_PREWALK = 0;
+  GRAD_SLOT_EXCESS  = 0;
 }
 
 static inline u32 grad_dep_hash(u64 loc, Term target) {
@@ -492,15 +543,167 @@ static int grad_depends_on_target(Term t, Term target) {
   return 1;
 }
 
+// Slot lookup helper.  Returns a pointer to an existing entry (gen matches +
+// (loc,target) matches), or to the first empty entry (gen != GRAD_MEMO_GEN)
+// which the caller should initialize via grad_slot_init.  Returns NULL only
+// when the table is full (a rare correctness-fallback case).
+static GradSlotEntry *grad_slot_get(u64 loc, Term target) {
+  u32 idx = grad_dep_hash(loc, target);
+  for (u32 probe = 0; probe < GRAD_SLOT_CAP; probe++) {
+    GradSlotEntry *e = &GRAD_SLOT[(idx + probe) & (GRAD_SLOT_CAP - 1)];
+    if (e->gen != GRAD_MEMO_GEN) return e;       // empty: caller initializes
+    if (e->loc == loc && e->target == target) return e;
+  }
+  return NULL;
+}
+
+// Initialize a freshly-empty slot entry to a zeroed (loc, target) slot.
+static void grad_slot_init(GradSlotEntry *e, u64 loc, Term target) {
+  e->gen        = GRAD_MEMO_GEN;
+  e->loc        = loc;
+  e->target     = target;
+  e->pending_gy = 0;
+  e->n_arrived  = 0;
+  e->n_expected = 0;
+  e->cell       = 0;
+  e->fired      = 0;
+}
+
+// Pre-walk the forward DAG rooted at `y`, counting the number of bwd
+// arrivals each UOP node will receive.  Mirrors `_deepwalk` (gradient.py:84):
+// a single topo pass over the target path.  For each visited node we credit
+// fanin[child] += 1 for every differentiable child slot (uop_arity-many) --
+// matches the exact slots the dispatch table descends into (ADD/MUL/NEG/...).
+// Non-diff sinks (CMPLT/CMPEQ/BITCAST/CONST/LOAD/ASSIGN) stop the recursion.
+// KERNEL descends into source_uop.  Visited tracking via the GRAD_DEP table
+// (re-purposed: e->visiting flag = "already counted") so each loc is visited
+// O(fanout) times for the credit, but only descended into once.
+static void grad_prewalk_count(Term y);
+
+static int grad_prewalk_visited(u64 loc, Term target) {
+  u32 idx = grad_dep_hash(loc, target);
+  for (u32 probe = 0; probe < GRAD_DEP_CAP; probe++) {
+    GradDepEntry *e = &GRAD_DEP[(idx + probe) & (GRAD_DEP_CAP - 1)];
+    if (e->gen == GRAD_MEMO_GEN && e->loc == loc && e->target == target) {
+      // Re-purpose `visiting` flag as "prewalked": set on first visit so we
+      // don't re-descend, but we ALWAYS credit fanin on each visit (counted
+      // by the parent that called us, not by the visited node itself).
+      if (e->visiting) return 1;
+      e->visiting = 1;
+      return 0;
+    }
+    if (e->gen != GRAD_MEMO_GEN) {
+      e->gen      = GRAD_MEMO_GEN;
+      e->loc      = loc;
+      e->target   = target;
+      e->visiting = 1;
+      e->result   = 0;
+      return 0;
+    }
+  }
+  return 1;   // table full: bail (no descent; downstream may refire as fallback)
+}
+
+// Returns 1 if `op` produces no BWD arrivals on its UOP children (the chain
+// rule short-circuits these to grad_zero_at(y)).  Match the dispatch table
+// in interact_grad_dispatch exactly: any case that emits grad_zero_at and
+// does NOT call grad_bwd_for_child / grad_bwd_emit_uop on its inputs is a
+// diff-sink (CMPLT/CMPEQ, BITCAST, CONST/LOAD/ASSIGN).
+//
+// NOTE: UOP_DETACH is NOT a diff sink here, even though dispatch's DETACH
+// case returns grad_zero_at.  Reason: wnf eagerly UNWRAPS DETACH at wnf/_.c
+// before dispatch (heap_set(gloc + 0, whnf) where whnf = wnf(DETACH) =
+// wnf(child)), so the grad cell originally for DETACH ends up dispatching
+// for the unwrapped child.  Treating DETACH as a sink under-counts fanin
+// at the unwrapped-child's children (the gradient propagates through the
+// detached cell, just keyed under DETACH's slot).
+static int grad_op_is_diff_sink(u8 op) {
+  return op == UOP_CMPLT  || op == UOP_CMPEQ
+      || op == UOP_BITCAST
+      || op == UOP_CONST  || op == UOP_LOAD || op == UOP_ASSIGN;
+}
+
+// Credit `child` as a BWD arrival at the slot it will land in.  Mirrors the
+// chain-rule's call site (grad_bwd_emit_uop on a UOP child).  We also recurse
+// the pre-walk through that child so its OWN children get credited.
+static void grad_prewalk_credit_and_descend(Term child, Term target) {
+  Term cr = term_resolve(child);
+  if (term_tag(cr) != TAG_UOP) return;     // TEN leaf / NUM: no slot
+  u64 loc = term_val(cr);
+  // Credit fanin on this slot (create the entry if needed).
+  GradSlotEntry *e = grad_slot_get(loc, target);
+  if (e == NULL) return;                   // table full: defensive
+  if (e->gen != GRAD_MEMO_GEN) {
+    grad_slot_init(e, loc, target);
+    GRAD_SLOT_PREWALK++;
+  }
+  e->n_expected++;
+  grad_prewalk_count(cr);                  // descend through this UOP once
+}
+
+// Credit the BWD-arrival children of a UOP node at (loc, op).  The chain
+// rule's dispatch table descends into uop_arity-many slots for normal ops,
+// into KERNELS[kid].source_uop for UOP_KERNEL, and into no slots for
+// grad_zero_at diff-sinks (CMPLT/CMPEQ/BITCAST/CONST/LOAD/ASSIGN).
+static void grad_prewalk_descend_children(u8 op, u64 loc, Term target) {
+  if (op == UOP_KERNEL) {
+    u32 kid = (u32)term_val(heap_read(loc + 1));
+    if (kid != 0 && kid < KERNELS_NEXT) {
+      Term src = KERNELS[kid].source_uop;
+      if (src != 0) grad_prewalk_credit_and_descend(src, target);
+    }
+    return;
+  }
+  if (grad_op_is_diff_sink(op)) return;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    grad_prewalk_credit_and_descend(heap_read(loc + i), target);
+  }
+}
+
+static void grad_prewalk_count(Term y) {
+  Term r = term_resolve(y);
+  if (term_tag(r) != TAG_UOP) return;
+  u64 loc = term_val(r);
+  u8  op  = (u8)term_ext(r);
+  Term target = grad_current_target();
+  if (grad_prewalk_visited(loc, target)) return;
+  // DETACH: wnf unwraps DETACH(child) to child before dispatch, so the grad
+  // cell originally for DETACH actually dispatches the CHILD's chain rule
+  // (see wnf/_.c UOP_DETACH unwrap).  Pre-walk through the unwrapped child's
+  // STRUCTURE without re-crediting it (its own slot has its own fanin from
+  // its other parents).
+  if (op == UOP_DETACH) {
+    Term unwrapped = term_resolve(heap_read(loc + 0));
+    if (term_tag(unwrapped) == TAG_UOP) {
+      grad_prewalk_descend_children((u8)term_ext(unwrapped),
+                                    term_val(unwrapped), target);
+    }
+    return;
+  }
+  grad_prewalk_descend_children(op, loc, target);
+}
+
+// Public pre-walk entry: call once per backward seed BEFORE wnf fires the
+// chain-rule (typically wired in via uop_grad / uop_grad_with_target).
+// Targets==0 only -- the slot mechanism activates in the shared single-walk
+// mode (GRAD_REQ_NCOUNT > 0 && target == 0).
+fn void grad_prewalk_fanin(Term y) {
+  if (!(GRAD_REQ_NCOUNT > 0 && grad_current_target() == 0)) return;
+  grad_prewalk_count(y);
+}
+
 // Emit the BWD projection for a non-TEN child `child` given incoming
 // cotangent `gy`.  In the requires_grad single walk (GRAD_REQ_NCOUNT > 0,
-// target == 0) this routes through the per-node slot so a forward node
-// reached by N consumers fires its chain rule ONCE -- the remaining N-1
-// arrivals fold their cotangent into the slot and return a discardable
-// CONST(0).  Every other mode (target-aware fire, or the legacy SUP/DUP
-// projection) keeps one fresh cell per arrival: the target-aware path
-// returns the grad as a value (not a leaf side-effect) so it cannot discard
-// arrivals, and the legacy path needs the DUP nest's linearity.
+// target == 0) this routes through the per-node slot using topo-deferred
+// fire: each arrival folds gy into pending_gy and returns CONST(0) until the
+// LAST one (n_arrived == n_expected), which allocates the cell with the
+// summed cotangent and returns its BWD projection (wnf fires it ONCE).
+// Mirrors tinygrad's `grads[k] = grads[k] + v` accumulator (gradient.py:116).
+// Every other mode (target-aware fire, or the legacy SUP/DUP projection)
+// keeps one fresh cell per arrival: the target-aware path returns the grad
+// as a value (not a leaf side-effect) so it cannot discard arrivals, and the
+// legacy path needs the DUP nest's linearity.
 static Term grad_bwd_emit_uop(Term child, Term gy) {
   Term cr = term_resolve(child);
   if (term_tag(cr) == TAG_TEN) return grad_leaf_sup(cr, gy);
@@ -510,44 +713,78 @@ static Term grad_bwd_emit_uop(Term child, Term gy) {
     heap_set(c + 1, gy);
     return grad_bwd_of(c);
   }
-  u64  loc    = term_val(cr);
-  Term target = grad_current_target();
-  u32  idx    = grad_dep_hash(loc, target);
-  u32  dt      = grad_target_dtype();
-  for (u32 probe = 0; probe < GRAD_SLOT_CAP; probe++) {
-    GradSlotEntry *e = &GRAD_SLOT[(idx + probe) & (GRAD_SLOT_CAP - 1)];
-    if (e->gen == GRAD_MEMO_GEN && e->loc == loc && e->target == target) {
-      if (!e->fired) {
-        // Later arrival, cell not yet fired: fold gy into its running
-        // cotangent.  uop_binary applies x+0->x, so no spurious node; the
-        // cell reads cell+1 lazily at fire time and walks the subtree once.
-        u64 c = e->cell;
-        heap_set(c + 1, uop_binary(UOP_ADD, heap_read(c + 1), gy));
-        return uop_const(dt, 0);
-      }
-      // Current cell already fired: open a fresh accumulation cell for this
-      // edge (a baseline re-walk, correct -- leaves sum both fires).
+  u64           loc    = term_val(cr);
+  Term          target = grad_current_target();
+  u32           dt     = grad_target_dtype();
+  GradSlotEntry *e     = grad_slot_get(loc, target);
+  if (e == NULL) {
+    // Table full: per-arrival cell (correctness intact, kernel-count regresses).
+    u64 c = grad_cell_alloc(child);
+    heap_set(c + 1, gy);
+    return grad_bwd_of(c);
+  }
+  if (e->gen != GRAD_MEMO_GEN) grad_slot_init(e, loc, target);
+
+  // No pre-walk count (n_expected==0) means the pre-walk didn't reach this
+  // node -- fall back to the legacy fold/fire behavior so unprewalked grad
+  // calls (e.g. mid-graph re-realize) stay correct.
+  if (e->n_expected == 0) {
+    if (e->fired) {
+      // Stale cell: open a fresh one (matches the prior REFIRE path).
       u64 c = grad_cell_alloc(child);
       heap_set(c + 1, gy);
       e->cell  = c;
       e->fired = 0;
+      GRAD_SLOT_REFIRE++;
       return grad_bwd_of(c);
     }
-    if (e->gen != GRAD_MEMO_GEN) {
-      // First arrival: store gy directly (no wrapper).
-      u64 c = grad_cell_alloc(child);
-      heap_set(c + 1, gy);
-      e->gen    = GRAD_MEMO_GEN;
-      e->loc    = loc;
-      e->target = target;
-      e->cell   = c;
-      e->fired  = 0;
-      return grad_bwd_of(c);
+    if (e->cell != 0) {
+      // Later arrival on the same uncounted slot: fold (legacy behavior).
+      u64 c = e->cell;
+      heap_set(c + 1, uop_binary(UOP_ADD, heap_read(c + 1), gy));
+      GRAD_SLOT_FOLD++;
+      return uop_const(dt, 0);
     }
+    u64 c = grad_cell_alloc(child);
+    heap_set(c + 1, gy);
+    e->cell = c;
+    GRAD_SLOT_FIRST++;
+    return grad_bwd_of(c);
   }
-  // Table full: fall back to a fresh per-arrival cell (correctness intact).
+
+  // Topo-deferred fire: accumulate `gy` into the slot's pending side-channel.
+  e->n_arrived++;
+  if (e->n_arrived < e->n_expected) {
+    // Early arrival -- fold and defer.
+    e->pending_gy = (e->pending_gy == 0)
+                  ? gy
+                  : uop_binary(UOP_ADD, e->pending_gy, gy);
+    GRAD_SLOT_FOLD++;
+    return uop_const(dt, 0);
+  }
+  if (e->n_arrived == e->n_expected) {
+    // Last predicted arrival -- allocate cell with the FULL summed cotangent.
+    // wnf fires this cell once; the chain rule walks the downstream subtree
+    // exactly once with the accumulated upstream gradient.
+    Term full_gy = (e->pending_gy == 0) ? gy : uop_binary(UOP_ADD, e->pending_gy, gy);
+    u64 c = grad_cell_alloc(child);
+    heap_set(c + 1, full_gy);
+    e->cell  = c;
+    e->fired = 0;
+    e->pending_gy = 0;     // reset so excess arrivals start a fresh round
+    GRAD_SLOT_FIRST++;
+    return grad_bwd_of(c);
+  }
+  // Excess arrival: pre-walk under-counted (or saw a different fanout shape).
+  // Allocate a fresh cell with JUST THIS gy so the new BWD walk adds the
+  // missing contribution to leaves without double-counting prior arrivals.
+  // Equivalent to the legacy "REFIRE" path but tagged as excess so callers
+  // can diagnose pre-walk gaps.
+  GRAD_SLOT_EXCESS++;
   u64 c = grad_cell_alloc(child);
   heap_set(c + 1, gy);
+  e->cell  = c;
+  e->fired = 0;
   return grad_bwd_of(c);
 }
 
@@ -856,27 +1093,34 @@ static Term interact_grad_dispatch(Term grad_term) {
     // SUM: gy_for_a = EXPAND(reshape_keepdim(gy), a.shape).
     // MAX: gy_for_a = MUL(mask_at_argmax, EXPAND(reshape_keepdim(gy), a.shape)).
     case UOP_REDUCE: {
-      Term a    = heap_read(y_loc + 0);
-      u32  kind = (u32)term_val(heap_read(y_loc + 1));
-      u32  axis = (u32)term_val(heap_read(y_loc + 2));
+      // Multi-axis REDUCE vjp: gy is broadcast-lifted back to a.shape via
+      // RESHAPE (keepdim=1 on every reduce axis) + EXPAND.  MAX-mask path
+      // re-uses the SAME multi-axis REDUCE to find the argmax positions.
+      // Mirrors tinygrad gradient.py REDUCE branch.
+      u32  kind   = uop_reduce_kind(y);
+      u32  n_axes = uop_reduce_n_axes(y);
+      u32  axes[MAX_DIM];
+      for (u32 i = 0; i < n_axes; i++) axes[i] = uop_reduce_axis(y, i);
+      Term a    = uop_reduce_src(y);
 
       Shape a_shape;
       if (!term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0) {
         return grad_term;   // can't determine src shape; bail
       }
 
-      // Build reshape-keepdim of gy: insert a 1 at `axis` so the
-      // EXPAND back to a.shape is well-formed.  When a.ndim == 1,
-      // the reduce output shape is {1} (per uop_meta), so a
-      // RESHAPE to {1} is identity-ish; we still call it to be
-      // explicit about the intermediate.
+      // Build reshape-keepdim of gy: insert 1 at EVERY reduce axis so
+      // the EXPAND back to a.shape is well-formed.
       u32 keep_dims[MAX_DIM] = {0};
       if (a_shape.ndim == 1) {
         // a.shape = {N}, y.shape = {1}, keepdim = {1}; expand back to {N}.
         keep_dims[0] = 1;
       } else {
+        u8 is_reduce_axis[MAX_DIM] = {0};
+        for (u32 i = 0; i < n_axes; i++) {
+          if (axes[i] < MAX_DIM) is_reduce_axis[axes[i]] = 1;
+        }
         for (u32 i = 0; i < a_shape.ndim; i++)
-          keep_dims[i] = (i == axis) ? 1u : a_shape.dims[i];
+          keep_dims[i] = is_reduce_axis[i] ? 1u : a_shape.dims[i];
       }
       Term gy_keepdim = uop_reshape(gy, a_shape.ndim, keep_dims);
       Term gy_lifted  = uop_expand(gy_keepdim, a_shape.ndim, a_shape.dims);
@@ -887,8 +1131,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       if (kind == REDUCE_SUM) {
         gy_a = gy_lifted;
       } else if (kind == REDUCE_MAX) {
-        // mask = (a == lift(MAX(a, axis)))
-        Term mx        = uop_reduce(REDUCE_MAX, axis, a_fwd);
+        // mask = (a == lift(MAX(a, axes)))
+        Term mx        = uop_reduce_multi(REDUCE_MAX, n_axes, axes, a_fwd);
         Term mx_keep   = uop_reshape(mx, a_shape.ndim, keep_dims);
         Term mx_lifted = uop_expand(mx_keep, a_shape.ndim, a_shape.dims);
         Term mask      = uop_binary(UOP_CMPEQ, a_fwd, mx_lifted);
@@ -933,14 +1177,44 @@ static Term interact_grad_dispatch(Term grad_term) {
         for (u32 i = 0; i < pad; i++) a_padded[i] = 1;
         for (u32 i = 0; i < a_shape.ndim; i++) a_padded[pad + i] = a_shape.dims[i];
 
-        // Walk axes high-to-low; each REDUCE_SUM drops that axis.
-        // After all reduces, cur has rank a_shape.ndim and matches
-        // a.shape (no reshape needed -- reduces preserve non-broadcast
-        // dims and drop broadcast ones).
+        // Reduce the broadcast axes (a_padded==1 && out>1).  Mirror
+        // tinygrad's EXPAND grad (gradient.py:68 -- one _rop(ADD, axes)
+        // over ALL broadcast axes).  thvm's UOP_REDUCE is single-axis,
+        // so a chain of single-axis reduces is built; reduce_chain_collect
+        // (uop_meta.c) fuses a chain into ONE kernel ONLY when the reduced
+        // axes are the CONTIGUOUS TRAILING axes of the input.  The conv
+        // weight-grad and BatchNorm backward broadcast LEADING / sandwiched
+        // axes (e.g. {0,2,3} of {B,C,H,W}), so the naive high-to-low chain
+        // can't fuse -> one kernel per axis (the backward kernel-count
+        // blowup).  Permute the broadcast axes to be trailing first, so
+        // the chain IS contiguous-trailing and fuses; the surviving kept
+        // axes stay in their original relative order (== a_shape), so a
+        // single reshape lands the result.
+        u32 bcast_axes[MAX_DIM]; u32 n_bcast = 0;
+        for (u32 i = 0; i < ndim; i++) {
+          if (a_padded[i] == 1 && out_dims[i] > 1) bcast_axes[n_bcast++] = i;
+        }
         Term cur = gy;
-        for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-          if (a_padded[axis] == 1 && out_dims[axis] > 1) {
+        int already_trailing = (n_bcast == 0)
+            || (bcast_axes[n_bcast - 1] == ndim - 1
+                && bcast_axes[0] == ndim - n_bcast);
+        if (n_bcast >= 2 && !already_trailing) {
+          // Build perm = (kept axes in order) ++ (broadcast axes in order).
+          u32 perm[MAX_DIM]; u32 pn = 0;
+          u8  is_bcast[MAX_DIM] = {0};
+          for (u32 i = 0; i < n_bcast; i++) is_bcast[bcast_axes[i]] = 1;
+          for (u32 i = 0; i < ndim; i++) if (!is_bcast[i]) perm[pn++] = i;
+          for (u32 i = 0; i < n_bcast; i++) perm[pn++] = bcast_axes[i];
+          cur = uop_permute(cur, ndim, perm);
+          // Reduce the now-trailing broadcast axes high-to-low.
+          for (i32 axis = (i32)ndim - 1; axis >= (i32)(ndim - n_bcast); axis--)
             cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
+        } else {
+          // Already trailing-contiguous (or <2 axes): reduce in place.
+          for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
+            if (a_padded[axis] == 1 && out_dims[axis] > 1) {
+              cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
+            }
           }
         }
         // If a had explicit dim==1 axes that we DIDN'T reduce (because
@@ -1055,6 +1329,11 @@ static Term interact_grad_dispatch(Term grad_term) {
     case UOP_LOAD:
     case UOP_ASSIGN:
       // Not differentiable -- bw is zero.
+      return grad_zero_at(y);
+
+    case UOP_DETACH:
+      // Stop-gradient: the cotangent reaching a detach dies (its child
+      // is treated as a constant).  Matches tinygrad `x.detach()`.
       return grad_zero_at(y);
 
     default:

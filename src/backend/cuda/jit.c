@@ -30,7 +30,7 @@
 // Without eviction those step-unique modules leaked to end-of-session
 // (cuModuleLoadData reserves GPU code memory), saturating the device
 // after a handful of no-JIT steps -- the dominant CUDA training leak.
-#define CUDA_JIT_CACHE_CAP 512
+#define CUDA_JIT_CACHE_CAP 4096
 
 typedef struct {
   u64        key;        // 0 = empty slot; FNV hash of the .cu source
@@ -70,14 +70,36 @@ static u64 cuda_jit_hash(const char *src) {
   return h | (1ULL << 63);   // never 0 (the empty-slot sentinel)
 }
 
-// Direct-mapped: each key has exactly one home slot.  Lookup and insert
-// agree on the slot, so eviction (on collision) is consistent -- unlike
-// open addressing, where evicting a probed slot would strand both the
-// evicted key and the newly inserted one off their probe chains.
+// Open-addressed (linear probe).  A training run's kernel set is stable
+// and bounded (~140 distinct sources for beautiful_mnist), so with a
+// 4096-slot table they all coexist and every step after the first HITS
+// -- no recompile, no module thrash.  The OLD direct-mapped cache
+// evicted on every home-slot collision, so ~14 collision pairs among
+// 121 kernels (birthday) ping-pong-evicted under interleaved dispatch
+// -> ~140 spurious recompiles/step -> the eviction nan + the ~10s/step
+// wall.  Eviction now happens only when the table is genuinely full
+// (a degenerate workload), via cuda_jit_probe returning a full marker.
 static CudaJitSlot *cuda_jit_home_slot(u64 key) {
   u32 h = (u32)(key ^ (key >> 32));
   h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
   return &CUDA_JIT_CACHE[h & (CUDA_JIT_CACHE_CAP - 1)];
+}
+
+// Linear-probe lookup.  Returns the slot holding `key` (a hit, *found=1),
+// or the first empty slot on its probe chain (a miss to insert into,
+// *found=0), or -- only when the whole table is occupied -- the home slot
+// to evict (*found=-1).
+static CudaJitSlot *cuda_jit_probe(u64 key, int *found) {
+  u32 h0 = (u32)(key ^ (key >> 32));
+  h0 ^= h0 >> 13; h0 *= 0x5bd1e995u; h0 ^= h0 >> 15;
+  h0 &= (CUDA_JIT_CACHE_CAP - 1);
+  for (u32 i = 0; i < CUDA_JIT_CACHE_CAP; i++) {
+    CudaJitSlot *s = &CUDA_JIT_CACHE[(h0 + i) & (CUDA_JIT_CACHE_CAP - 1)];
+    if (s->key == key && s->func != NULL) { *found = 1; return s; }
+    if (s->key == 0) { *found = 0; return s; }   // empty -> insert here
+  }
+  *found = -1;
+  return &CUDA_JIT_CACHE[h0];   // table full -> evict home (degenerate)
 }
 
 // Compile a .cu source string with nvrtc and load it as a module.
@@ -90,12 +112,13 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     return NULL;
   }
   u64 key = cuda_jit_hash(cu_src);
-  CudaJitSlot *slot = cuda_jit_home_slot(key);
-  if (slot->key == key && slot->func != NULL) {
+  int found = 0;
+  CudaJitSlot *slot = cuda_jit_probe(key, &found);
+  if (found == 1) {
     return slot->func;   // cache hit -- skip nvrtc + module load
   }
   CUDA_JIT_COMPILES++;
-  if (slot->module != NULL && slot->key != key) CUDA_JIT_EVICTIONS++;
+  if (found == -1 && slot->module != NULL) CUDA_JIT_EVICTIONS++;
 
   // --- nvrtc compile ------------------------------------------------
   nvrtcProgram prog;
@@ -326,6 +349,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     return -1;
   }
   if (ke == NULL || out_buf_id == 0 || out_buf_id >= CUDA_BUFS_NEXT) return -1;
+  u64 t_dispatch_start = cg_now_us();
   // Only the structural-lift path is wired: the CUDA renderer entry
   // (cg_render_uop_kernel_cuda_root) consumes a lifted UOp DAG root.
   // A kernel the lifter declined (store_root == 0) has no DAG to
@@ -349,6 +373,33 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   if (cu == NULL) {
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- render produced no source\n");
     return -1;
+  }
+  {
+    // Canonicalize a<N>/_acc<N> ids so structurally-identical kernels
+    // produce byte-identical source across steps -> JIT cache HIT
+    // (compile once), instead of fresh global axis ids every step.
+    char *canon = cg_canonicalize_axis_ids(cu);
+    if (canon != NULL) { free(cu); cu = canon; }
+  }
+  // THVM_CUDA_DUMP_KID=<kid>: print this kid's rendered .cu source once
+  // (mirrors the CPU THVM_DUMP_KERNEL_SRC env).  Used to inspect
+  // hand-coded LOCAL/UPCAST application on a specific hotspot kernel.
+  {
+    static u32 dump_kid = 0;
+    static int dump_kid_known = 0;
+    static u32 dumped_once = 0;
+    if (!dump_kid_known) {
+      char const *e = getenv("THVM_CUDA_DUMP_KID");
+      dump_kid = (e != NULL) ? (u32)atoi(e) : 0;
+      dump_kid_known = 1;
+    }
+    u32 this_kid = (u32)(ke - KERNELS);
+    if (dump_kid != 0 && dump_kid == this_kid && dumped_once != this_kid) {
+      dumped_once = this_kid;
+      fprintf(stderr, "=== CUDA kernel src kid=%u ===\n%s\n=== end kid=%u ===\n",
+              this_kid, cu, this_kid);
+      fflush(stderr);
+    }
   }
   CUfunction func = cuda_jit_compile(cu, "k");
   free(cu);
@@ -411,5 +462,14 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     grid_x = (u32)((total + block_x - 1) / block_x);
   }
 
-  return cuda_jit_launch(func, grid_x, block_x, args);
+  int rc = cuda_jit_launch(func, grid_x, block_x, args);
+  // Per-kid wall-time profile.  cuda_dispatch_kernel includes
+  // render + compile (cache-hit fast path) + arg packing +
+  // cuLaunchKernel + cuCtxSynchronize.  CUDA only has the
+  // structural-lift JIT route (no interpreter fallback); mirror of
+  // cpu_jit's record in backend/cpu/interpret.c so THVM_KERNEL_PROFILE
+  // shows both backends through the same table.
+  u32 kid = (u32)(ke - KERNELS);
+  cg_profile_record(kid, KDISPATCH_CUDA_JIT, cg_now_us() - t_dispatch_start);
+  return rc;
 }

@@ -28,16 +28,22 @@ typedef void (*CpuJitFn)(void *out, const void *const *ins,
                          unsigned n, const unsigned *in_numels);
 
 #define CPU_JIT_CACHE_CAP 256
-// JIT warmup gate.  When a kernel hash hasn't been compiled yet
-// (no in-memory `func`, no /tmp dylib on disk), the FIRST few
-// fires use the interpreter and bump `fire_count`.  Once the
-// counter hits CPU_JIT_WARMUP, the next fire commits to a clang
-// compile.  Mirrors tinygrad's approach of NOT JIT-compiling
-// rarely-fired kernels: a one-shot kernel pays no compile cost,
-// while a kernel inside a training loop crosses the threshold
-// almost immediately and amortizes the compile across the rest
-// of the run.
-#define CPU_JIT_WARMUP 5
+// JIT warmup gate: a kernel hash must fire CPU_JIT_WARMUP times before
+// committing to a clang compile (interpreted until then).  Default 0 =
+// compile on first fire (tinygrad always compiles).  At BS=128 an
+// interpreted conv step is ~100s, so any warmup>0 makes the first few
+// steps catastrophically slow; compiling immediately pays one clang
+// pass (~ms/kernel) and every subsequent step is fast.  The source-keyed
+// cache + on-disk /tmp dylib reuse make repeat compiles free.
+#define CPU_JIT_WARMUP 0
+// Override the warmup threshold via THVM_CPU_JIT_WARMUP (0 = compile on
+// first fire).  Lets a training loop with large one-shot-feeling kernels
+// (e.g. the conv im2col STORE) commit to a compile sooner.
+static u32 cpu_jit_warmup(void) {
+  static int v = -1;
+  if (v < 0) { const char *e = getenv("THVM_CPU_JIT_WARMUP"); v = e ? atoi(e) : CPU_JIT_WARMUP; }
+  return (u32)v;
+}
 typedef struct {
   u64       key;          // 0 = empty
   CpuJitFn  func;         // NULL until compile completes
@@ -110,6 +116,18 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
   return h | (1ULL << 63);
 }
 
+// Per-kid resolved JIT function-pointer cache.  Each KernelEntry
+// hashes to a deterministic source-key; once resolved, the (key,fn)
+// pair is invariant for the lifetime of the kid (kernel_apply_opt
+// rewires cached_lift before the FIRST dispatch).  Caching by kid
+// lets repeat-fire dispatches skip cpu_jit_render_canon entirely --
+// the renderer walks the lifted DAG into a tmpfile each call (~60us
+// for a small kernel, several hundred for a 7-deep nested loop), and
+// at 360 conv-backward dispatches/step that overhead is real.
+//
+// Cleared on cpu_jit_cache_reset (thvm_init / thvm_free).
+static CpuJitFn KID_JIT_FN[KERNELS_CAP];
+
 fn void cpu_jit_cache_reset(void) {
   for (u32 i = 0; i < CPU_JIT_CACHE_CAP; i++) {
     if (CPU_JIT_CACHE[i].dl_handle) dlclose(CPU_JIT_CACHE[i].dl_handle);
@@ -119,6 +137,10 @@ fn void cpu_jit_cache_reset(void) {
     CPU_JIT_CACHE[i].n_inputs   = 0;
     CPU_JIT_CACHE[i].fire_count = 0;
   }
+  // Per-kid resolved-fn pointers reset too: the KERNELS table is
+  // re-bumped from 0 by ctx init so stale pointers would otherwise
+  // alias fresh kids that happen to land on the same slot.
+  memset(KID_JIT_FN, 0, sizeof(KID_JIT_FN));
 }
 
 static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
@@ -134,7 +156,7 @@ static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
 
 // Compile + load.  Returns the resolved `k` function pointer or NULL
 // on any failure (caller falls back to interpreter).
-static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
+static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   // Render the kernel as C99 by lifting to the UOp DAG and walking
   // it via cg_render_uop_kernel_c. Output signature matches the
   // existing CPU-JIT contract (void k(out_v, ins_v, n, in_numels))
@@ -157,21 +179,7 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // inputs, 0 on the output).  in_bufs[] is kept as a GC root and a
   // per-slot identity cache for cpu_uop_walk; the renderer doesn't
   // consult it.
-  if (ke->cached_lift.store_root == 0) return NULL;
-  Term store_root = ke->cached_lift.store_root;
-  // Render into a temp file (portable across macOS/Linux/Windows) and
-  // read it back, rather than a fixed stack buffer -- no length cap.
-  FILE *fp = tmpfile();
-  if (fp == NULL) return NULL;
-  cg_render_uop_kernel_c_root(store_root, "k", fp);
-  long n = ftell(fp);
-  if (n <= 0) { fclose(fp); return NULL; }
-  char *src = (char *)malloc((size_t)n + 1);
-  if (src == NULL) { fclose(fp); return NULL; }
-  rewind(fp);
-  size_t got = fread(src, 1, (size_t)n, fp);
-  fclose(fp);
-  src[got] = '\0';
+  if (ke->cached_lift.store_root == 0 || src == NULL) return NULL;
 
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_%016llx.c",
@@ -184,7 +192,6 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // verify cache freshness against the current source.
   struct stat st;
   if (stat(dl_path, &st) == 0) {
-    free(src);
     void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
     if (!h) return NULL;
     CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
@@ -195,10 +202,9 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   }
 
   FILE *f = fopen(src_path, "w");
-  if (!f) { free(src); return NULL; }
+  if (!f) return NULL;
   fputs(src, f);
   fclose(f);
-  free(src);
 
   char cmd[768];
   snprintf(cmd, sizeof cmd,
@@ -216,11 +222,97 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   return jfn;
 }
 
+// Render the kernel C source and canonicalize its a<N>/_acc<N> ids so
+// structurally-identical kernels are byte-identical across steps.  The
+// JIT key is the hash of THIS source (not the lifted-DAG term loc, which
+// is a fresh heap cell every realize and so never repeats -> the kernel
+// never crossed the warmup gate and stayed on the interpreter forever).
+// Caller frees the returned string.
+static char *cpu_jit_render_canon(KernelEntry const *ke) {
+  if (ke->cached_lift.store_root == 0) return NULL;
+  FILE *fp = tmpfile();
+  if (fp == NULL) return NULL;
+  cg_render_uop_kernel_c_root(ke->cached_lift.store_root, "k", fp);
+  long n = ftell(fp);
+  if (n <= 0) { fclose(fp); return NULL; }
+  char *raw = (char *)malloc((size_t)n + 1);
+  if (raw == NULL) { fclose(fp); return NULL; }
+  rewind(fp);
+  size_t got = fread(raw, 1, (size_t)n, fp);
+  fclose(fp);
+  raw[got] = '\0';
+  char *canon = cg_canonicalize_axis_ids(raw);
+  if (canon != NULL) { free(raw); return canon; }
+  return raw;
+}
+
+static u64 cpu_src_hash(const char *src) {
+  u64 h = 0xcbf29ce484222325ULL;
+  for (const char *p = src; *p; p++) { h ^= (u64)(unsigned char)*p; h *= 0x100000001b3ULL; }
+  return h | (1ULL << 63);
+}
+
 // Try the JIT path; returns 1 on success, 0 if the kernel can't be
 // JITted (caller dispatches via the interpreter).
 fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (!cg_supports(ke)) return 0;
-  u64 key = cpu_jit_hash(ke);
+  // Per-kid fast path: if this kid was already compiled to a JIT fn
+  // pointer, reuse it directly -- skips cpu_jit_render_canon (heap
+  // walk into a tmpfile) and the source hash entirely.  The kid -> fn
+  // binding is invariant once set; kernel_apply_opt only rewires
+  // cached_lift BEFORE the first dispatch, after which a kid never
+  // changes shape/source.  Skip the per-kid cache for kids that have
+  // never compiled before (KID_JIT_FN[kid] == NULL) -- they fall
+  // through to the full source-hash path which has its own warmup
+  // gate + on-disk dylib reuse.
+  u32 _kid = (u32)(ke - KERNELS);
+  if (_kid < KERNELS_CAP && KID_JIT_FN[_kid] != NULL) {
+    CpuJitFn _jfn = KID_JIT_FN[_kid];
+    u32 ni = ke->n_inputs;
+    const void *ins_buf [ni ? ni : 1];
+    unsigned    nums_buf[ni ? ni : 1];
+    for (u32 i = 0; i < ni; i++) {
+      ins_buf [i] = CPU_BUFS[in_buf_ids[i]].data;
+      nums_buf[i] = ke->input_numels[i];
+    }
+    void *out = CPU_BUFS[out_buf_id].data;
+    unsigned numel = (unsigned)ke->output_numel;
+    _jfn(out, ins_buf, numel, nums_buf);
+    return 1;
+  }
+  char *src = cpu_jit_render_canon(ke);
+  if (src == NULL) return 0;
+  u64 key = cpu_src_hash(src);
+  // THVM_DUMP_KERNEL_SRC=<kid>: print this kid's JIT hash + shape once
+  // so the caller can read the rendered C from /tmp/thvm_jit_<hash>.c.
+  // The hash key embeds source content; if the same shape produces N
+  // distinct sources it shows up here as N different hashes.
+  {
+    static int    DUMPED[2048] = {0};
+    static u32    DUMP_TARGET  = 0xFFFFFFFFu;
+    static int    DUMP_TARGET_KNOWN = 0;
+    if (!DUMP_TARGET_KNOWN) {
+      char const *e = getenv("THVM_DUMP_KERNEL_SRC");
+      if (e != NULL && e[0] != '\0') DUMP_TARGET = (u32)atoi(e);
+      DUMP_TARGET_KNOWN = 1;
+    }
+    u32 kid = (u32)(ke - KERNELS);
+    if (DUMP_TARGET != 0xFFFFFFFFu && (DUMP_TARGET == 0 || kid == DUMP_TARGET)
+        && kid < 2048 && !DUMPED[kid]) {
+      DUMPED[kid] = 1;
+      fprintf(stderr, "[kdump] kid=%u key=%016llx n_in=%u shape=[",
+              kid, (unsigned long long)key, ke->n_inputs);
+      for (u32 i = 0; i < ke->output_shape.ndim; i++) {
+        fprintf(stderr, "%s%u", i ? "," : "", ke->output_shape.dims[i]);
+      }
+      fprintf(stderr, "] in_bufs=[");
+      for (u32 i = 0; i < ke->n_inputs && i < 4; i++) {
+        u32 numel = (ke->input_numels ? ke->input_numels[i] : 0);
+        fprintf(stderr, "%s%u:%u", i ? "," : "", in_buf_ids[i], numel);
+      }
+      fprintf(stderr, "] out_buf=%u out_numel=%u\n", out_buf_id, ke->output_numel);
+    }
+  }
   CpuJitSlot *s = cpu_jit_lookup_slot(key);
   CpuJitFn jfn = (s && s->key == key) ? s->func : NULL;
 
@@ -239,26 +331,29 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     int dl_exists = (stat(dl_path, &st) == 0);
     if (!dl_exists) {
       if (s != NULL) {
+        u32 warmup = cpu_jit_warmup();
         if (s->key == 0) {                 // claim a fresh slot for tracking
           s->key = key;
           s->func = NULL;
           s->dl_handle = NULL;
           s->n_inputs = ke->n_inputs;
           s->fire_count = 1;
-          return 0;
-        }
-        if (s->key == key && s->func == NULL) {
+          if (warmup > 1) { free(src); return 0; }
+          // warmup<=1: fall through to compile on first fire.
+        } else if (s->key == key && s->func == NULL) {
           s->fire_count++;
-          if (s->fire_count < CPU_JIT_WARMUP) return 0;
+          if (s->fire_count < warmup) { free(src); return 0; }
           // Crossed warmup threshold: fall through to compile.
         }
       } else {
+        free(src);
         return 0;                          // table full; stay on interpreter
       }
     }
-    jfn = cpu_jit_build(ke, key);
-    if (!jfn) return 0;
+    jfn = cpu_jit_build(ke, key, src);
+    if (!jfn) { free(src); return 0; }
   }
+  free(src);                               // source no longer needed (hit or compiled)
 
   // Skip the JIT path if any input is a non-contiguous view --
   // gated behind THVM_JIT_STRIDED=1.  Each unique stride pattern
@@ -268,10 +363,17 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Render_uop_c (post-F6) handles non-contig views correctly via
   // kernel_lift's view.strides path -- the gate is purely a perf
   // knob, not a correctness one.
-  static int strided_jit_known = 0, strided_jit_enabled = 0;
+  // Strided/chained-input kernels (the conv im2col unfold reads the
+  // _pool view) are now DEFAULT-JIT'd: the source-keyed cache amortizes
+  // the compile across the whole training run (the old "doubles LeNet
+  // wall" concern assumed the term-loc key never reused the dylib, so
+  // every step recompiled).  THVM_JIT_STRIDED=0 reverts to the walker
+  // for these.  A single conv2 unfold STORE drops from ~1s interpreted
+  // to a compiled strided loop.
+  static int strided_jit_known = 0, strided_jit_enabled = 1;
   if (!strided_jit_known) {
     char const *e = getenv("THVM_JIT_STRIDED");
-    strided_jit_enabled = (e && e[0] == '1');
+    if (e != NULL) strided_jit_enabled = (e[0] != '0');
     strided_jit_known = 1;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
@@ -281,6 +383,12 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       if (!strided_jit_enabled) return 0;
     }
   }
+  // Cache the resolved (kid -> fn) so the next fire of this kid
+  // skips render+hash+lookup (the early-return at the top of this
+  // function).  Only cached when jfn is non-NULL AND the per-input
+  // strided-jit gate above didn't reject -- this means a future call
+  // with identical inputs is safe to short-circuit.
+  if (_kid < KERNELS_CAP) KID_JIT_FN[_kid] = jfn;
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by
   // VLA below); no fixed cap beyond what the codegen supports.

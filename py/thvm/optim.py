@@ -44,8 +44,18 @@ class Optimizer:
         self.lr = lr
 
     def zero_grad(self):
+        # Clear BOTH the Python .grad handle AND the canonical C-side
+        # TENS[tid].grad accumulator -- thvm's backward() *accumulates*
+        # into that accumulator (tinygrad semantics), so without clearing
+        # it each step the gradients pile up across steps and blow up to
+        # nan within a few iterations.
+        from .tensor import _TH
         for p in self.params:
             p.grad = None
+            try:
+                _TH.ten_clear_grad(p.term)
+            except Exception:
+                pass
 
     def step(self):
         self.schedule_step()
@@ -122,7 +132,15 @@ class Adam(Optimizer):
         self.t += 1
         bc1 = 1.0 - self.b1 ** self.t
         bc2 = 1.0 - self.b2 ** self.t
-        out = []
+        # Phase 1: the in-place m/v moment updates, THEN realize them so
+        # each m[i]/v[i].term collapses from its ASSIGN node to a TEN
+        # before phase 2 reads it.  Without this split, m_hat = m[i] *
+        # (1/bc1) captures the *unrealized* ASSIGN(m[i], ...) node, p's
+        # update embeds it, and realizing p re-fires m[i]'s in-place
+        # write against the already-updated buffer (m -> 1.9x, or m picks
+        # up v's value).  Realizing m,v first is backend-agnostic and
+        # needs no scheduler bundling.
+        mv = []
         for i, p in enumerate(self.params):
             g = p.grad
             if g is None:
@@ -130,11 +148,19 @@ class Adam(Optimizer):
             g = g.reshape(*p.shape) if p.shape else g
             self.m[i].assign(self.m[i] * self.b1 + g * (1.0 - self.b1))
             self.v[i].assign(self.v[i] * self.b2 + (g * g) * (1.0 - self.b2))
+            mv += [self.m[i], self.v[i]]
+        if mv:
+            Tensor.realize(*mv)
+        # Phase 2: the param updates read the now-realized m,v (plain TENs).
+        out = []
+        for i, p in enumerate(self.params):
+            if p.grad is None:
+                continue
             m_hat = self.m[i] * (1.0 / bc1)
             v_hat = self.v[i] * (1.0 / bc2)
             p.assign(p - m_hat * self.lr
                      * (v_hat.sqrt() + self.eps).reciprocal())
-            out += [self.m[i], self.v[i], p]
+            out.append(p)
         return out
 
 

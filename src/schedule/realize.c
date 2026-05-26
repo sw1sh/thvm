@@ -25,7 +25,18 @@
 static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
   if (tid == 0 || tid >= TENS_NEXT) return;
   TenDesc *d = &TENS[tid];
-  if (d->buf_id != 0) cpu_buf_mark_preserved(d->buf_id);
+  if (d->buf_id != 0) {
+    cpu_buf_mark_preserved(d->buf_id);
+    // Arena view: the parent arena CpuBuf isn't reachable through any
+    // TenDesc.buf_id chain, but the view's bytes live inside it -- so
+    // we also mark the parent preserved.  Without this, pool_rollback
+    // would freelist-push the arena while a view still names its
+    // bytes via its data pointer (dangling read).
+    if (CPU_BUFS != NULL && d->buf_id < CPU_BUFS_NEXT) {
+      u32 parent = CPU_BUFS[d->buf_id].parent_buf_id;
+      if (parent != 0) cpu_buf_mark_preserved(parent);
+    }
+  }
   u32 kid = d->producer_kid;
   if (kid == 0 || kid >= KERNELS_NEXT) return;
   if (visited_kids[kid]) return;
@@ -65,6 +76,14 @@ fn Term thvm_realize(Term expr) {
 #endif
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
+  // Start with a clean cross-realize loc -> tid cache so a prior
+  // realize's intermediate (whose buffer may have been pool-rolled-
+  // back) cannot alias a later realize's input.  Tests that call
+  // bufferize_classify / thvm_materialize directly bypass realize
+  // entirely and so never see a populated cache (gated by the scope
+  // counter below).
+  materialized_loc_clear();
+  materialized_loc_scope_enter();
 
   // wnf is the only reducer -- `nf` is the inspector primitive (see
   // wnf/nf.c), NOT in this hot path.
@@ -134,12 +153,29 @@ fn Term thvm_realize(Term expr) {
   mark_gc_preserve(res);
   jit_capture_mark_preserved();
 
+  // Arena planner cross-step leak fix: drop the preserved bit on
+  // every arena view CpuBuf (and its parent arena) so pool_rollback
+  // reclaims the entire arena cohort.  By construction arena views
+  // hold internal forward intermediates of THIS realize (the
+  // last_use>0 + consumer_count==1 gate in
+  // arena_boundary_is_plannable excludes sinks/roots), so dropping
+  // them is safe: the SINK lives in a standalone (non-arena)
+  // CpuBuf and keeps its preserve flag.  Without this clear, the
+  // gc-mark walk over the SINK result reaches view-tids embedded in
+  // KERNELS[].input_tids chains, marks the views preserved, and the
+  // parent-arena link in tensor_mark_buf_preserved keeps the entire
+  // 600MB arena alive across the rollback (the symptom: peak grows
+  // ~1.4GB -> 2.1GB by step 4 of BS=16 MNIST).  Tinygrad mirror:
+  // tinygrad/schedule/memory.py:13-16 _can_plan excludes held_bufs
+  // from the arena, so planned bufs naturally die at end-of-schedule.
+  cpu_buf_clear_preserved_arena_views(cpu_wm);
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
 #ifdef THVM_HAS_CUDA
+  cuda_buf_clear_preserved_arena_views(cuda_wm);
   cuda_buf_pool_rollback_with_preserve(cuda_wm);
   cuda_buf_clear_preserved(cuda_wm);
 #endif
@@ -187,6 +223,18 @@ fn Term thvm_realize(Term expr) {
   }
   if (!kgc_disabled_env) kernel_gc_sweep(res);
 
+  // Cross-realize loc -> tid cache: scoped to ONE realize call so a
+  // forward intermediate emitted as a kernel mid-pass stays reachable
+  // for sibling children inside the same materialize loop (the
+  // multi-root grad share that drove the cache addition), but does
+  // NOT survive the pool-rollback -- whose freelist push would alias
+  // a future allocation to the cached tid and corrupt subsequent
+  // grad reads (BN-grad NaN repro).  Mirrors tinygrad's per-schedule
+  // _realize_cache lifetime: the cache lives only inside one
+  // run_rangeify call.
+  materialized_loc_clear();
+  materialized_loc_scope_leave();
+
   return res;
 }
 
@@ -216,6 +264,9 @@ fn Term thvm_realize_many(Term ctr_term) {
 #endif
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
+  // Start with a clean cross-realize loc -> tid cache (see thvm_realize).
+  materialized_loc_clear();
+  materialized_loc_scope_enter();
   u32 kn_at_call_start = KERNELS_NEXT;
 
   Term res = ctr_term;
@@ -256,12 +307,19 @@ fn Term thvm_realize_many(Term ctr_term) {
   for (u32 i = 0; i < cn && i < 256; i++) mark_gc_preserve(term_ctr_at(res, i));
   jit_capture_mark_preserved();
 
+  // Arena planner cross-step leak fix (see thvm_realize for full
+  // rationale).  Drop preserve on arena views + parent arenas so
+  // pool_rollback reclaims them; sink CpuBufs are standalone (not
+  // arena) and keep their preserve flag.  Tinygrad mirror:
+  // tinygrad/schedule/memory.py:13-16.
+  cpu_buf_clear_preserved_arena_views(cpu_wm);
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
   cpu_buf_clear_preserved(cpu_wm);
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
 #ifdef THVM_HAS_CUDA
+  cuda_buf_clear_preserved_arena_views(cuda_wm);
   cuda_buf_pool_rollback_with_preserve(cuda_wm);
   cuda_buf_clear_preserved(cuda_wm);
 #endif
@@ -293,5 +351,11 @@ fn Term thvm_realize_many(Term ctr_term) {
     kgc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
   }
   if (!kgc_disabled_env) kernel_gc_sweep(res);
+
+  // Same lifetime as thvm_realize: drop the loc -> tid cache before
+  // returning so non-preserved bufs (pool-rollback-recycled) can't be
+  // re-handed-out under the same cached tid in a future realize call.
+  materialized_loc_clear();
+  materialized_loc_scope_leave();
   return res;
 }

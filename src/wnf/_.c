@@ -170,6 +170,13 @@ enter:
         whnf = interact_kernel(next);
         goto apply;
       }
+      if (op == UOP_DETACH) {
+        // Stop-gradient marker: identity at runtime.  The backward was
+        // already built (grad treats it as a leaf), so unwrap to the
+        // child and re-enter -- it never reaches a kernel/TEN read.
+        next = heap_read(term_val(next) + 0);
+        goto enter;
+      }
       // (slots UOP_GRAD/UOP_FWD have moved to TAG_DP0/DP1+DUP_GRAD_FLAG;
       // see the TAG_DP{0,1} branch above.)
       if (op == UOP_ASSIGN) {
@@ -200,7 +207,14 @@ enter:
         Term dst_w  = wnf(heap_read(aloc + 0));
         s_pos = WNF_S_POS;
         if (term_tag(src_w) == TAG_TEN && term_tag(dst_w) == TAG_TEN) {
-          whnf = interact_assign_with(dst_w, src_w);
+          // Fire this ASSIGN cell's buffer write at most once per pass:
+          // a cell reachable from two roots (Adam's m as both a step
+          // output and inside the param update that reads m) would
+          // otherwise re-apply the update against the updated buffer.
+          if (assign_fire_claim(aloc))
+            whnf = interact_assign_with(dst_w, src_w);
+          else
+            whnf = dst_w;
           goto apply;
         }
         // Either side stuck (e.g. dst still a UOP) -- leave as WHNF.

@@ -9,6 +9,16 @@ static Term uop_graph_simplify_unary(Term t, void *user) {
   return uop_rewrite_unary(v.op, v.src[0]);
 }
 
+// Unwrap UOP_DETACH(x) -> x.  Detach is a backward-only marker (grad
+// stops at it); by the time the graph is simplified for materialize the
+// backward is built, so it is pure identity at the value level and must
+// not survive into the kernel lifter / renderer.
+static Term uop_graph_simplify_detach(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_DETACH) return 0;
+  return heap_read(term_val(t) + 0);
+}
+
 static Term uop_graph_simplify_binary(Term t, void *user) {
   (void)user;
   UOpView v;
@@ -288,7 +298,7 @@ static Term uop_graph_simplify_reduce_const_mul(Term t, void *user) {
   if (!uop_view(t, &v) || v.op != UOP_REDUCE) {
     return 0;
   }
-  u32 kind = (u32)term_val(heap_read(v.loc + 1));
+  u32 kind = uop_reduce_kind(t);
   if (kind != REDUCE_SUM) {
     return 0;
   }
@@ -308,8 +318,11 @@ static Term uop_graph_simplify_reduce_const_mul(Term t, void *user) {
   } else {
     return 0;
   }
-  u32 axis = (u32)term_val(heap_read(v.loc + 2));
-  Term inner_reduce = uop_reduce(REDUCE_SUM, axis, x);
+  // Preserve full axes list across the rewrite.
+  u32 n_axes = uop_reduce_n_axes(t);
+  u32 axes[MAX_DIM];
+  for (u32 i = 0; i < n_axes; i++) axes[i] = uop_reduce_axis(t, i);
+  Term inner_reduce = uop_reduce_multi(REDUCE_SUM, n_axes, axes, x);
   return uop_binary(UOP_MUL, inner_reduce, c);
 }
 
@@ -333,7 +346,7 @@ static Term uop_graph_simplify_reduce_add_const(Term t, void *user) {
   if (!uop_view(t, &v) || v.op != UOP_REDUCE) {
     return 0;
   }
-  u32 kind = (u32)term_val(heap_read(v.loc + 1));
+  u32 kind = uop_reduce_kind(t);
   if (kind != REDUCE_SUM) {
     return 0;
   }
@@ -363,15 +376,19 @@ static Term uop_graph_simplify_reduce_add_const(Term t, void *user) {
   if (!term_shape_in(x, 0, &src_shape)) {
     return 0;
   }
-  u32 axis = (u32)term_val(heap_read(v.loc + 2));
-  if (axis >= src_shape.ndim) {
-    return 0;
+  // Multi-axis: the constant is replicated across the product of every
+  // reduce axis extent (SUM over a const-broadcast region).
+  u32 n_axes = uop_reduce_n_axes(t);
+  u32 axes[MAX_DIM];
+  u64 region = 1;
+  for (u32 i = 0; i < n_axes; i++) {
+    axes[i] = uop_reduce_axis(t, i);
+    if (axes[i] >= src_shape.ndim) return 0;
+    region *= (u64)src_shape.dims[axes[i]];
   }
-  u32 axis_size = src_shape.dims[axis];
-
-  f32 new_c_val = c_val * (f32)axis_size;
+  f32 new_c_val = c_val * (f32)region;
   Term new_const = uop_const(DT_FP32, f32_bits(new_c_val));
-  Term inner_reduce = uop_reduce(REDUCE_SUM, axis, x);
+  Term inner_reduce = uop_reduce_multi(REDUCE_SUM, n_axes, axes, x);
   return uop_binary(UOP_ADD, inner_reduce, new_const);
 }
 
@@ -498,6 +515,7 @@ static Term uop_graph_simplify_cast(Term t, void *user) {
 
 fn Term uop_graph_simplify(Term root) {
   UOpGraphRewriteRule rules[] = {
+    {"detach-unwrap",           uop_graph_simplify_detach},
     {"symbolic-unary",          uop_graph_simplify_unary},
     {"symbolic-binary",         uop_graph_simplify_binary},
     {"symbolic-cast",           uop_graph_simplify_cast},
@@ -515,6 +533,7 @@ fn Term uop_graph_simplify(Term root) {
 
 static Term uop_graph_simplify_materialize_subset(Term root) {
   UOpGraphRewriteRule rules[] = {
+    {"detach-unwrap",           uop_graph_simplify_detach},
     {"symbolic-unary",          uop_graph_simplify_unary},
     {"symbolic-binary",         uop_graph_simplify_binary},
     {"symbolic-cast",           uop_graph_simplify_cast},

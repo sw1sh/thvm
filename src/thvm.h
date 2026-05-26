@@ -323,7 +323,14 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_LOG2        14   // heap = [src]
 #define UOP_SQRT        15   // heap = [src]
 #define UOP_CMPLT       16   // heap = [a, b]
-#define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(axis)]
+#define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(n_axes), NUM(axis_0), ..., NUM(axis_{n-1})]
+                             // Multi-axis REDUCE: src reduces over ALL n_axes
+                             // simultaneously (matches tinygrad uop/ops.py
+                             // Ops.REDUCE with arg=(op,()) + ranges in src[1:]
+                             // and schedule/indexing.py:90 convert_reduce_to_reduce_with_ranges).
+                             // n_axes==1 case retains 4-cell layout
+                             // [src, kind, n_axes=1, axis_0] -- builder
+                             // uop_reduce(kind, axis, src) wraps n=1.
 // (slots 18, 19 were UOP_GRAD / UOP_FWD -- folded into TAG_DP0 /
 // TAG_DP1 with the DUP_GRAD_FLAG bit set on the ext (label) field.
 // A grad cell is just a regular dup-style cell holding [y]; its two
@@ -457,7 +464,15 @@ int             dtype_is_packed   (u32 dt);
 // single source of truth.
 #define UOP_BUFFERIZE   40
 // 41, 42 = UOP_IOR / UOP_IXOR (declared in the Symbolic INDEX layer above).
-#define UOP_COUNT       43
+// Identity-forward, STOP-backward marker (tinygrad UOp detach / stop-grad).
+// uop_grad treats it as a leaf w.r.t. its child (the cotangent dies), and
+// uop_graph_simplify unwraps it to its src BEFORE materialize, so no
+// kernel/render/walker path ever sees it.  Used by BatchNorm.calc_stats
+// (`y = x - mean.detach()`) so the variance gradient does not flow back
+// through the mean -- mathematically d(var)/d(mean)=0, so the result is
+// identical but the backward graph is far smaller.
+#define UOP_DETACH      43
+#define UOP_COUNT       44
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -929,8 +944,27 @@ typedef struct {
   u8    owns_data;
   u8    preserved;
   u8    freeable;
+  // skip_freelist: when set, cpu_buf_pool_rollback_with_preserve
+  // real-frees this buf via cpu_buf_free instead of parking it on
+  // CPU_FREELIST.  Set on per-realize arena CpuBufs (each one is a
+  // 100-700MB one-shot block, sized to that pass's max-live working
+  // set; recycling it via best-fit try_pop would either snag it for
+  // smaller requests in the next realize -- wasting most of the
+  // bytes -- or leave it parked indefinitely while a fresh arena is
+  // calloc'd, which is exactly the cross-step leak that motivated
+  // this flag.  Mirror: tinygrad allocates a fresh arena per
+  // memory_plan_rewrite call and lets Python GC reclaim the previous
+  // arena's BUFFER_VIEW chain.)
+  u8    skip_freelist;
   void *handle;
   void (*on_release)(void *handle);
+  // Arena views: when non-zero, this buf is an external view into
+  // parent_buf_id's data.  cpu_buf_free decrements the parent's
+  // refcount so the arena dies once its last view is freed.  Mirror:
+  // tinygrad/schedule/memory.py:60 BUFFER_VIEW(arena, nbytes, offset)
+  // -- the arena UOp src keeps the underlying buffer alive while any
+  // BUFFER_VIEW persists.
+  u32   parent_buf_id;
 } CpuBuf;
 
 #define CPU_BUFS_CAP     (1ULL << 20)
@@ -1873,6 +1907,24 @@ fn u32 view_strided_index(View const *v, u32 flat_idx);
 // nviews == 0, equivalent to view_strided_index(&t->view, ...).
 fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 
+// Cross-realize loc -> tid cache (defined in schedule/materialize.c).
+// Records the TenDesc tid produced by each emitted kernel's source UOP
+// heap loc.  Consulted by:
+//   - thvm_materialize entry, to short-circuit a UOP whose previous
+//     realize pass already produced a TenDesc;
+//   - bufferize_walk_rec (schedule/bufferize_classify.c), to stop the
+//     classify walk at a cached UOP so subsequent passes do not
+//     re-bufferize+re-emit a shared forward intermediate the first
+//     pass already realized.
+// Cleared by tracing GC + kernel GC sweeps when their respective IDs
+// move/recycle.
+fn u32  materialized_loc_lookup       (u64 loc);
+fn void materialized_loc_insert       (u64 loc, u32 tid);
+fn void materialized_loc_clear        (void);
+fn void materialized_loc_scope_enter  (void);
+fn void materialized_loc_scope_leave  (void);
+fn u32  materialized_loc_scope_depth  (void);
+
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).
 fn View view_create(Shape shape);
@@ -1896,6 +1948,17 @@ fn Term uop_const  (u32 dtype, u32 bits);
 fn Term uop_unary  (u32 opcode, Term src);                       // NEG/RECIP/EXP2/LOG2/SQRT
 fn Term uop_binary (u32 opcode, Term a, Term b);                 // ADD/MUL/CMPLT
 fn Term uop_reduce (u32 kind, u32 axis, Term src);
+// Multi-axis REDUCE: reduces over all `n_axes` axes simultaneously.
+// Mirrors tinygrad uop/ops.py Ops.REDUCE with multiple range srcs.
+// `uop_reduce(kind, axis, src)` is the n_axes==1 convenience.
+fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src);
+// REDUCE-node accessors (centralised so the heap layout can evolve
+// without touching every call site).  Caller passes a TAG_UOP cell with
+// op==UOP_REDUCE.
+fn u32  uop_reduce_kind   (Term red);
+fn u32  uop_reduce_n_axes (Term red);
+fn u32  uop_reduce_axis   (Term red, u32 i);   // i in [0..n_axes)
+fn Term uop_reduce_src    (Term red);
 fn Term uop_reshape(Term src, u32 ndim, const u32 *dims);
 fn Term uop_permute(Term src, u32 ndim, const u32 *perm);
 fn Term uop_expand (Term src, u32 ndim, const u32 *dims);
@@ -2186,6 +2249,43 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
 // Returns the number of opts successfully applied.
 fn u32 kernel_hand_coded_opts(struct KernelEntry *ke);
 
+// === Address-coefficient decode (UOP_INDEX_E.addr) ===================
+// Externally-callable wrappers over dag_scan.c's static decoders so the
+// hand_coded_optimizations heuristic (codegen/hand_opts.c) can implement
+// tinygrad's stride heuristic for UPCAST axis selection.
+//
+// UopDagAddrCoeffsView: minimal projection of UdgAddrCoeffs (axis-id +
+// coeff pairs).  HAND_OPT_MAX_AXES bounds n; offsets beyond the count
+// are not initialised.
+#define UOP_DAG_ADDR_MAX_AXES 8
+typedef struct {
+  u32 axis_ids[UOP_DAG_ADDR_MAX_AXES];
+  u32 coeffs  [UOP_DAG_ADDR_MAX_AXES];
+  u32 n_axes;
+  i32 offset;
+  int ok;
+} UopDagAddrCoeffsView;
+
+// Decode an UOP_INDEX_E.addr term into per-axis (axis_id, coeff) pairs
+// and an absolute byte offset.  Mirrors tinygrad's index.backward_slice
+// + IADD/IMUL distribution.  On bail (unrecognized leaf shape, e.g. an
+// IDIV/IMOD/IWHERE remnant from a conv2d-flat index that the simplifier
+// didn't collapse), out->ok stays 0 but out->n_axes carries whatever was
+// decoded so far.
+void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out);
+
+// Look up a coefficient by axis_id.  Returns 0 when absent (which the
+// stride heuristic also treats as "stride 0 on this axis" -- the axis
+// does not contribute to the address).
+u32  uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id);
+
+// Enumerate every distinct UOP_INDEX_E.addr term reachable from `root`
+// (dedup by Term identity).  Writes up to `cap` addresses to out_addrs.
+// Returns the count.  The caller decodes each via
+// uop_dag_decode_addr_coeffs.  Mirrors tinygrad's Scheduler.bufs (the
+// reversed list of Ops.INDEX nodes the heuristic iterates).
+u32  uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap);
+
 // Should this kernel get the hand-coded opt heuristic on its next
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
 // or NOOPT=1 disables) AND the per-shape autotuned flag is still 0.
@@ -2312,6 +2412,132 @@ int uop_dag_classify_gemv_shape(Term root,
 // shape lives in input_views, not in the lifted DAG.
 int uop_dag_classify_conv2d_flat_shape(Term root);
 
+// === Generalized contraction-shape extractor ==========================
+//
+// Covers a generalized tensor contraction of the form
+//
+//   out[M_axes, N_axes] = sum_{K} A[K_axis, N_axes] * B[M_axes, K_axis]
+//
+// (with M_axes and N_axes being compound, axis ordering arbitrary on
+// each operand).  The conv-backward x-gradient kernel
+// `out[a0,a1,a2,a3,a4,a5] = sum_{a6} W[a6,a3,a4,a5] * G[a0,a6,a1,a2]`
+// is the canonical instance: M=(a0,a1,a2), N=(a3,a4,a5), K=a6.  When
+// the strides on each side compose as a contiguous nest with at most
+// ONE outer "batch" M-axis (whose stride in B is K*inner_M, separating
+// the inner-M block from K), this dispatches as a batched cblas_sgemm
+// without materializing any permuted operand.
+//
+// Per-call GEMM layout (after batching over `batch`):
+//   sub_A : shape (K, N)                stride (ldA, 1)   -- W slice
+//   sub_B : shape (K, inner_M)          stride (ldB, 1)   -- G slice
+//   sub_C : shape (inner_M, N)          stride (ldC, 1)   -- out slice
+//   cblas_sgemm(RowMajor, Trans, NoTrans, inner_M, N, K,
+//               1, sub_B, ldB, sub_A, ldA, 0, sub_C, ldC)
+typedef struct {
+  u32 dtype;
+  u32 a_input;            // L (typically weights / "(K, N)")
+  u32 b_input;            // R (typically activations / "(M, K)" possibly batched)
+  u32 K;                  // reduce extent
+  u32 N;                  // product of N-axis extents (axes in A only)
+  u32 inner_M;            // product of M-axis extents excluding the batch axis
+  u32 batch;              // outer-loop iteration count (1 when no batch axis)
+  u32 ldA;                // leading dim for A's (K, N) slice    (== N here)
+  u32 ldB;                // leading dim for B's (K, inner_M) slice (== inner_M)
+  u32 ldC;                // leading dim for C's (inner_M, N) slice (== N)
+  u32 batch_stride_a;     // element-stride between A batches (0 if A has no batch axis)
+  u32 batch_stride_b;     // element-stride between B batches
+  u32 batch_stride_c;     // element-stride between C batches
+  u32 flags;              // reserved
+} UopDagContractionShape;
+
+int uop_dag_classify_contraction_shape(Term root,
+                                       struct KernelEntry const *ke,
+                                       UopDagContractionShape *out);
+
+// === im2col conv contraction extractor ================================
+//
+// Covers two duals of the same im2col fingerprint:
+//
+//   (A) BACKWARD weight-grad:
+//       dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
+//                                dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
+//
+//   (B) FORWARD conv:
+//       out[B, Cout, OH, OW] = sum_{Cin, KH, KW}
+//                                X[B, Cin, OH+KH, OW+KW] * W[Cout, Cin, KH, KW]
+//
+// In both cases two of the reduce K-axes share their stride coefficient
+// in operand A (X) with a non-reduce output axis.  C7.1 extends
+// udg_decode_addr_coeffs to distribute IMUL over IADD so the
+// `(OH+KH)*W` and `(OW+KW)*1` address arms expand and each axis -- K
+// AND patch-M -- gets its own coefficient entry.  The classifier picks
+// the patch-M axes out of the output axes (any output axis whose
+// A-stride matches one of the K-axes is reclassified from N-axis to
+// patch-M).
+//
+// The two forms differ only in which axis plays the "outer batch" role:
+//   (A) BWD: B is a K-axis (sum over batch), Cin is a clean N axis.
+//            The outer loop walks B and dW accumulates (beta=1 from b>0).
+//   (B) FWD: Cin is a K-axis (sum over channels), B is a clean N axis.
+//            The outer loop walks B and writes a different output slice
+//            each iteration (beta=0).
+//
+// Tinygrad lowers BOTH forms through the same `_pool` ShapeTracker view
+// (mixin/movement.py:569); thvm doesn't have a `_pool` lowering yet, so
+// this classifier-plus-dispatch combo is the equivalent shortcut.
+//
+// Per-call layouts:
+//   BWD: patches[Cin*KH*KW, OH*OW] from X[b]; sub_dY = dY[b] (Cout, OH*OW);
+//        sgemm(NoTrans, Trans, M=Cout, N=Cin*KH*KW, K=OH*OW, dY[b], patches,
+//              beta=(b==0?0:1), dW)  -- dW shape (Cout, Cin*KH*KW).
+//   FWD: patches[OH*OW, Cin*KH*KW] from X[b]; W (Cout, Cin*KH*KW);
+//        sgemm(NoTrans, Trans, M=Cout, N=OH*OW, K=Cin*KH*KW, W, patches,
+//              beta=0, out[b])  -- out[b] shape (Cout, OH*OW).
+typedef struct {
+  u32 dtype;
+  u32 a_input;            // X (the im2col operand) -- both forms
+  u32 b_input;            // dY (BWD) or W (FWD)    -- the clean operand
+  u32 M;                  // GEMM M = Cout-style axis (output axis with bc!=0)
+  u32 N_patchless;        // BWD: product of non-patch clean-N axes (Cin)
+                          // FWD: product of non-patch unpaired-K axes (Cin)
+  u32 KH_total;           // product of patch-M extents (KH*KW)
+  u32 N;                  // sgemm-N in BWD = N_patchless * KH_total = Cin*KH*KW
+                          // sgemm-N in FWD = K_row * K_col = OH*OW
+                          // (kept for backward-compat: BWD-only field)
+  u32 K_row;              // OH-style patch-paired output axis extent
+  u32 K_col;              // OW-style patch-paired output axis extent (innermost K)
+  u32 K_outer;            // BWD: B-style outer-K extent (loop bound)
+                          // FWD: Cin-style outer-K extent (inner sgemm-K factor)
+  u32 X_W;                // X width stride (a-stride of K_row patch axis)
+  u32 X_H;                // X height (inferred from X_Cin_stride / X_W)
+  u32 X_Cin_stride;       // X's Cin stride (a-stride of the unpaired K axis in FWD
+                          // or of the clean-N axis in BWD; equals H*W either way)
+  u32 X_outer_stride;     // X's batch stride
+                          // BWD: a-stride of K_outer (= N_extent_used * X_Cin_stride)
+                          // FWD: a-stride of N_outer (= K_outer.extent * X_Cin_stride)
+  u32 Y_outer_stride;     // BWD: dY's batch stride (b-stride of K_outer)
+                          // FWD: 0 (W has no batch axis)
+  u32 Y_M_stride;         // b-stride of M-axis in operand B
+                          // BWD: dY's Cout stride = OH*OW
+                          // FWD: W's   Cout stride = Cin*KH*KW
+  u32 out_M_stride;       // out's M-axis stride
+                          // BWD: dW's   Cout stride = Cin*KH*KW (= N)
+                          // FWD: out's Cout stride = OH*OW
+  u32 patch_n;            // number of patch axes (2 for KH+KW)
+  u32 patch_extent[8];    // per-patch-axis extent (KH first, then KW)
+  u32 patch_out_coeff[8]; // per-patch-axis out-coeff
+  u32 patch_a_stride[8];  // per-patch-axis a-stride (gathered into patches)
+  u32 forward_conv;       // 0 = BWD weight-grad (default), 1 = FWD conv
+  u32 N_outer_extent;     // FWD only: B's extent (clean-N axis = outer loop bound)
+                          // BWD: equal to K_outer (B's extent)
+  u32 N_outer_out_stride; // FWD only: B's out-stride (= Cout*OH*OW)
+                          // BWD: 0 (dW has no batch dimension; same slot every iter)
+} UopDagIm2colShape;
+
+int uop_dag_classify_im2col_contraction(Term root,
+                                        struct KernelEntry const *ke,
+                                        UopDagIm2colShape *out);
+
 // === conv2d-flat full-shape extractor ==================================
 // Inverts the conv2d-flat IDIV/IMOD address decomposition so the
 // conv2d shape facts can flow from the lifted DAG instead of from
@@ -2416,6 +2642,17 @@ fn Term uop_recognise_conv(Term root);
 // for symmetry with uop_classify_matmul + future tile-size gates.
 fn int uop_classify_conv2d(Term root, u32 *out_kred);
 
+// Direct-multi-axis conv classifier: detects the conv2d shape the
+// multi-axis-REDUCE port (commit 598055ee) emits when shapes stay
+// un-flattened (reduce has separate Cin/kH/kW axes, no IDIV/IMOD).
+// Fills *out_kred with the product of all reduce-axis extents.
+fn int uop_classify_conv2d_direct(Term root, u32 *out_kred);
+
+// "Either form" wrapper.  Used by callers that just need to know if
+// this is a conv kernel (flat OR direct multi-axis), without caring
+// which form -- e.g. hand_opt_is_conv_kernel for LOCAL/UPCAST gating.
+fn int uop_classify_conv2d_any(Term root, u32 *out_kred);
+
 // === Kernel lift to UOp DAG ===
 // Package the unified-rangeify pass's store_root for a kernel entry
 // into a UOp DAG root suitable for cg_render_uop_kernel.  The lifter
@@ -2483,6 +2720,9 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
 // passes the post-lift store root, same as the MSL/C99 entries.
 fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
                                        FILE *fp);
+// Renumber a<N>/_acc<N> ids to a dense per-kernel sequence so identical
+// kernels render byte-identically across steps (JIT cache hit).
+fn char *cg_canonicalize_axis_ids(const char *src);
 
 // === Per-USE movement-chain resolver ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
@@ -2584,6 +2824,9 @@ fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out);
 // the cpu kernel).  Output shape == src shape; arity 1.
 fn Term uop_load(Term src);
 
+// Build a UOP_DETACH node wrapping `src` (stop-gradient; see UOP_DETACH).
+fn Term uop_detach(Term src);
+
 
 // === schedule/ ===
 // Top-level materialize driver: heap-walk pass that in-place rewrites
@@ -2642,6 +2885,7 @@ typedef enum {
   // KDISPATCH_METAL_ALIAS = 13 stable for any external integer-keyed
   // consumer of dispatch kinds.
   KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
+  KDISPATCH_CUDA_JIT    = 14,  // CUDA: nvrtc-compiled kernel via cuLaunchKernel
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
@@ -2654,6 +2898,9 @@ void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
 // THVM_METAL_PROFILE_PEROP=1.  External linkage so the .m TU can call it.
 void  cg_profile_record_gpu(u32 kid, u64 gpu_us);
 u32   cg_kernel_dispatch_kind(u32 kid);
+// THVM_KERNEL_PROFILE=N: dump top-N kernels by cumulative wall time
+// at thvm_free. N=0 -> default 20. Uses K_PROFILE + KERNELS[kid].output_shape.
+void  cg_profile_dump(FILE *fp, u32 top_n);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.
@@ -2687,6 +2934,10 @@ fn void backend_dispatch_end_all(void);
 fn void kernel_fire_gen_bump(void);
 fn void kernel_fire_scope_begin(void);
 fn void kernel_fire_scope_end(void);
+// Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns
+// 1 the first time the loc is seen in the current fire-gen, 0 on every
+// re-visit (so a multiply-reachable ASSIGN writes its buffer once).
+fn int assign_fire_claim(u64 loc);
 
 // Allocate a borrowed buffer: we don't own `data`, and on release we
 // call `on_release(handle)` instead of free().  Used by the WL bridge

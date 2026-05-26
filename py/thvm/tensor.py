@@ -54,6 +54,17 @@ _GRAD_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
 _PIN_NEXT = 1
 
 
+def _term_is_assign(t: int) -> bool:
+    """True iff term `t` is a TAG_UOP whose opcode is UOP_ASSIGN.  Used
+    by Tensor.realize to gate the realize_many bundle: pure-elementwise
+    bundles share forward intermediates via the cross-realize loc->tid
+    cache (schedule/materialize.c), but ASSIGN bundles must run
+    one-at-a-time to avoid in-place buffer aliasing across siblings."""
+    if _TH.term_tag(t) != K.TAG_UOP:
+        return False
+    return _TH.term_ext(t) == K.ASSIGN
+
+
 def _wrap_other(self_t: "Tensor", other) -> "Tensor":
     """Coerce a Python scalar (or Tensor) into a Tensor matching self's
     dtype.  Broadcasts to self.shape when other is a scalar."""
@@ -199,11 +210,39 @@ class Tensor:
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
         """Drive thvm's pipeline; mutates `term` to the resulting
-        TAG_TEN.  Extra tensors realize too (tinygrad pattern)."""
-        self.term = _TH.realize(self.term)
+        TAG_TEN.  When the input set is ASSIGN-free we bundle through
+        realize_many so the shared forward intermediates inside
+        backward grad chains get emitted once per pass (the
+        cross-realize loc -> tid cache in schedule/materialize.c lives
+        for one realize call's scope -- mirrors tinygrad's
+        per-schedule _realize_cache).
+
+        ASSIGN-bearing bundles still go per-tensor: a bundled
+        realize_many of multiple in-place ASSIGNs lets the buffer
+        planner alias across siblings, which racing reads can corrupt
+        (the previous "CUDA NaN under bundling" failure mode -- still
+        latent on CPU when an ASSIGN's src reads a sibling's already-
+        written buffer).  Adam/SGD _step build pure-ASSIGN bundles, so
+        their realize(*mv) and realize(*out) paths stay one-at-a-time;
+        loss.realize(*grads) is ASSIGN-free and bundles."""
+        if not lst:
+            self.term = _TH.realize(self.term)
+            self._pin()
+            return self
+        terms_all = [self.term] + [x.term for x in lst]
+        has_assign = any(_term_is_assign(t) for t in terms_all)
+        if has_assign:
+            self.term = _TH.realize(self.term)
+            self._pin()
+            for x in lst:
+                x.realize()
+            return self
+        out = _TH.realize_many(terms_all)
+        self.term = out[0]
         self._pin()
-        for x in lst:
-            x.realize()
+        for x, r in zip(lst, out[1:]):
+            x.term = r
+            x._pin()
         return self
 
     def contiguous(self) -> "Tensor":
@@ -227,9 +266,12 @@ class Tensor:
     # ---- bookkeeping helpers (forward-only stubs for Phase 3A) --------
 
     def detach(self) -> "Tensor":
-        """tinygrad detach -- stops gradient.  Phase 3A: no autograd
-        graph yet, so it's just a shallow alias (same term)."""
-        return Tensor._from_term(self.term, self._dtype, self._shape)
+        """tinygrad detach -- stop-gradient.  Wraps in UOP_DETACH:
+        identity forward (unwrapped before materialize), zero backward
+        (the cotangent dies at the detach).  Used e.g. by BatchNorm to
+        keep the variance gradient from flowing through the mean."""
+        return Tensor._from_term(_TH.detach(self.term), self._dtype,
+                                 self._shape)
 
     def assign(self, x: "Tensor") -> "Tensor":
         """tinygrad assign -- lazy IN-PLACE update.  Builds UOP_ASSIGN(self,
@@ -838,30 +880,48 @@ class Tensor:
 
     def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1,
                    padding=0, ceil_mode=False) -> "Tensor":
-        del dilation, ceil_mode  # not used in the Phase-3A path
+        """tinygrad-faithful max_pool2d: _pool unfold then a max-reduce
+        over the trailing window axes.  Stays on the autograd graph (the
+        old Phase-3A path realized to numpy and returned a fresh tensor,
+        which severed backward -- so every conv UPSTREAM of a pool got
+        no gradient).  Port of tinygrad/mixin/__init__.py:max_pool2d."""
+        del ceil_mode  # ceildiv output sizing is a Phase-later path
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
-        kH, kW = kernel_size
+        k_ = tuple(int(k) for k in kernel_size)
         if stride is None:
-            stride = kernel_size
-        if isinstance(stride, int):
-            stride = (stride, stride)
-        sH, sW = stride
-        arr = self.realize().numpy()
+            stride = k_
         if padding:
-            pH = padding if isinstance(padding, int) else padding[0]
-            pW = padding if isinstance(padding, int) else padding[1]
-            arr = np.pad(arr, ((0, 0), (0, 0), (pH, pH), (pW, pW)),
-                         constant_values=-np.inf)
-        B, C, H, W = arr.shape
-        out_h = (H - kH) // sH + 1
-        out_w = (W - kW) // sW + 1
-        out = np.zeros((B, C, out_h, out_w), dtype=arr.dtype)
-        for h in range(out_h):
-            for w in range(out_w):
-                patch = arr[:, :, h*sH:h*sH+kH, w*sW:w*sW+kW]
-                out[:, :, h, w] = patch.max(axis=(2, 3))
-        return Tensor(out, dtype=self._dtype)
+            # max-pool padding must fill with -inf so a padded cell never
+            # wins the window max; thvm's pad is zero-only, so refuse
+            # rather than silently zero-pad (which would corrupt the max).
+            raise NotImplementedError(
+                "max_pool2d padding != 0 needs a -inf pad (not yet wired)")
+        s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
+        d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
+        spatial = self._shape[-len(k_):]
+        # Fast path: non-overlapping window (stride == kernel, no dilation,
+        # divides evenly).  Pooling is then a pure CONTIGUOUS reshape that
+        # splits each spatial axis into (out, k) -- a stride view that fuses
+        # straight into the max-reduce.  The general _pool below builds an
+        # overlap unfold via repeat/expand whose reshape-of-broadcast can't
+        # stay a view in thvm yet, so it MATERIALIZES a huge intermediate
+        # (a (B,C,20,20) pool blows up multi-GB at BS=128); the reshape path
+        # sidesteps that entirely for the common stride==kernel pool.
+        if (all(s == k for s, k in zip(s_, k_)) and all(d == 1 for d in d_)
+                and all(i % k == 0 for i, k in zip(spatial, k_))):
+            prefix = list(self._shape[:-len(k_)])
+            split = []
+            for i, k in zip(spatial, k_):
+                split.extend([i // k, k])
+            x = self.reshape(*prefix, *split)
+            # window (k) axes are the odd trailing positions; reduce them.
+            base = len(prefix)
+            kaxes = tuple(base + 2 * j + 1 for j in range(len(k_)))
+            return x.max(axis=kaxes)
+        # General overlapping/strided/dilated case: _pool unfold + window max.
+        x = self._pool(k_, stride=stride, dilation=dilation)
+        return x.max(axis=tuple(range(-len(k_), 0)))
 
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,

@@ -70,6 +70,157 @@ static void boundary_hash_insert(u64 loc, u32 idx) {
   }
 }
 
+// Persistent loc -> tid cache: once emit_kernel_for_boundary realizes
+// a UOP at heap address `loc` into a kernel whose output is TENS[tid],
+// remember the mapping so a subsequent realize call hitting the same
+// UOP loc (typical for forward intermediates shared across multiple
+// backward grad targets) short-circuits to TAG_TEN(tid) instead of
+// re-bufferizing + re-emitting the same kernel.  Mirror context:
+// tinygrad/schedule/indexing.py:pm_generate_realize_map memoizes
+// realized UOps via the per-UOp .buffer attribute on the lazy graph
+// (engine/realize.py:lower_uop -> sched.metadata['_realize_cache']);
+// once a UOp is scheduled, downstream schedules read its assigned
+// Buffer instead of re-lowering.  thvm has no per-UOp .buffer field --
+// the source UOPs live in the read-only dyn heap -- so we keep the
+// mapping in a side hash keyed by heap loc.
+//
+// Bounded scan; the cap above absorbs hash collisions.  Cleared on
+// kernel-GC sweep (kernel_gc.c) so a recycled tid never aliases an
+// orphaned UOP loc, and on tens-arena rewind (gc_collect) so a
+// reclaimed loc never lives in the table referencing a stale tid.
+#define MATERIALIZED_LOC_CAP    (1u << 17)        // 128K slots
+#define MATERIALIZED_LOC_EMPTY  0
+typedef struct {
+  u64 loc;
+  u32 tid;
+} MaterializedLocEntry;
+static MaterializedLocEntry MATERIALIZED_LOC_TABLE[MATERIALIZED_LOC_CAP];
+static u32                  MATERIALIZED_LOC_LEN = 0;
+
+// In-realize scope counter: thvm_realize / thvm_realize_many bracket
+// their bodies with materialized_loc_scope_{enter,leave}.  The cache
+// is consulted by thvm_materialize ONLY when depth > 0 -- tests that
+// call thvm_materialize / bufferize_classify directly (without going
+// through a realize wrapper) skip the cross-realize substitution so
+// their fresh terms aren't unexpectedly rewritten by stale cache
+// entries left over from earlier tests in the same binary.
+static u32 MATERIALIZE_SCOPE_DEPTH = 0;
+fn void materialized_loc_scope_enter(void) { MATERIALIZE_SCOPE_DEPTH++; }
+fn void materialized_loc_scope_leave(void) {
+  if (MATERIALIZE_SCOPE_DEPTH > 0) MATERIALIZE_SCOPE_DEPTH--;
+}
+fn u32  materialized_loc_scope_depth(void) { return MATERIALIZE_SCOPE_DEPTH; }
+
+static inline u32 materialized_loc_hash(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (MATERIALIZED_LOC_CAP - 1);
+}
+
+fn void materialized_loc_clear(void) {
+  for (u32 i = 0; i < MATERIALIZED_LOC_CAP; i++) {
+    MATERIALIZED_LOC_TABLE[i].loc = MATERIALIZED_LOC_EMPTY;
+    MATERIALIZED_LOC_TABLE[i].tid = 0;
+  }
+  MATERIALIZED_LOC_LEN = 0;
+}
+
+fn u32 materialized_loc_lookup(u64 loc) {
+  if (loc == 0) return 0;
+  u32 h = materialized_loc_hash(loc);
+  for (u32 probe = 0; probe < MATERIALIZED_LOC_CAP; probe++) {
+    u32 i = (h + probe) & (MATERIALIZED_LOC_CAP - 1);
+    if (MATERIALIZED_LOC_TABLE[i].loc == MATERIALIZED_LOC_EMPTY) return 0;
+    if (MATERIALIZED_LOC_TABLE[i].loc == loc) {
+      u32 tid = MATERIALIZED_LOC_TABLE[i].tid;
+      // Defensive: a cleared/recycled tid (TENS_NEXT shrank past it)
+      // must not be returned -- caller would build a dangling TAG_TEN.
+      if (tid == 0 || tid >= TENS_NEXT) return 0;
+      return tid;
+    }
+  }
+  return 0;
+}
+
+fn void materialized_loc_insert(u64 loc, u32 tid) {
+  if (loc == 0 || tid == 0) return;
+  // Bail when the table is mostly full; the lookup degrades to a long
+  // miss probe otherwise.  Caller falls back to re-emit (correctness
+  // intact, just no cross-realize savings).
+  if (MATERIALIZED_LOC_LEN * 2 > MATERIALIZED_LOC_CAP) return;
+  u32 h = materialized_loc_hash(loc);
+  for (u32 probe = 0; probe < MATERIALIZED_LOC_CAP; probe++) {
+    u32 i = (h + probe) & (MATERIALIZED_LOC_CAP - 1);
+    if (MATERIALIZED_LOC_TABLE[i].loc == MATERIALIZED_LOC_EMPTY) {
+      MATERIALIZED_LOC_TABLE[i].loc = loc;
+      MATERIALIZED_LOC_TABLE[i].tid = tid;
+      MATERIALIZED_LOC_LEN++;
+      return;
+    }
+    if (MATERIALIZED_LOC_TABLE[i].loc == loc) {
+      // Already present: update tid (a re-emit in the same pass replaced
+      // the prior kernel; keep the newer mapping).
+      MATERIALIZED_LOC_TABLE[i].tid = tid;
+      return;
+    }
+  }
+}
+
+// Recursive in-place substitution of cached UOP descendants with
+// TAG_TEN leaves.  Walks parent UOPs (NEVER UOP_KERNEL, NEVER
+// UOP_ASSIGN -- those are stop points for the materialize entry
+// path) and for each child cell, if the child is a UOP at a cached
+// loc, heap_set the parent cell to TAG_TEN.  Otherwise recurse.
+// Visited bitmap bounds revisits per call.
+static void materialize_subst_cached_rec(Term term, u8 *visited, u64 cap) {
+  if (term_tag(term) != TAG_UOP) return;
+  u32 op = term_ext(term);
+  if (op == UOP_KERNEL) return;
+  if (op == UOP_ASSIGN) {
+    // ASSIGN(dst, src): walk only the src; dst is a TAG_TEN reference
+    // and shouldn't be substituted.  ASSIGN's own loc isn't subject
+    // to the cache (we don't cache ASSIGN emits).
+    u64 loc = term_val(term);
+    if (loc >= cap || visited[loc]) return;
+    visited[loc] = 1;
+    Term src = heap_read(loc + 1);
+    if (term_tag(src) == TAG_UOP) {
+      u32 cached_tid = materialized_loc_lookup(term_val(src));
+      if (cached_tid != 0) {
+        heap_set(loc + 1, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
+      } else {
+        materialize_subst_cached_rec(src, visited, cap);
+      }
+    }
+    return;
+  }
+  u64 loc = term_val(term);
+  if (loc >= cap || visited[loc]) return;
+  visited[loc] = 1;
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    Term child = heap_read(loc + i);
+    if (term_tag(child) != TAG_UOP) continue;
+    if (term_ext(child) == UOP_KERNEL) continue;
+    u32 cached_tid = materialized_loc_lookup(term_val(child));
+    if (cached_tid != 0) {
+      heap_set(loc + i, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
+    } else {
+      materialize_subst_cached_rec(child, visited, cap);
+    }
+  }
+}
+
+static void materialize_subst_cached_inplace(Term root) {
+  if (term_tag(root) != TAG_UOP) return;
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
+  if (visited == NULL) return;
+  materialize_subst_cached_rec(root, visited, cap);
+  free(visited);
+}
+
 #define BOUNDARY_DEPTH_INVALID 0xFFFFFFFFu
 static u32 BOUNDARY_DEPTH    [BUFFERIZE_NODES_CAP];
 // Per-boundary maximum-consumer depth.  Filled after topo by
@@ -165,15 +316,18 @@ typedef struct {
 static MemPlanEntry MEM_PLAN[MEM_PLAN_CAP];
 static u32          MEM_PLAN_LEN = 0;
 
-// CPU planner: default-off opt-in via THVM_REUSE_BUFS=1.  The chain-
-// rule + Phase-3 fusion-relaxation cases on the CPU interpreter want
-// DUP/SUP-aware lifetime tracking that's a follow-up; until then the
-// CPU path stays gated.
+// CPU planner: default-on; THVM_REUSE_BUFS=0 opts out.  The earlier
+// concern (DUP/SUP-aware lifetime tracking) hasn't materialized as a
+// correctness regression on the unified-rangeify path; verified on
+// beautiful_mnist BS=2/16 STEPS=4 (peak -7%, loss curves byte-equivalent
+// up to BLAS-summation fp-order noise) + full C suite + numpy conv+BN
+// grad ref.  Brings CPU's recycling behavior in line with Metal/CUDA,
+// where the planner has been default-on for a while.
 static int mem_plan_cpu_enabled(void) {
   static int known = 0, enabled = 0;
   if (!known) {
     char const *e = getenv("THVM_REUSE_BUFS");
-    enabled       = (e && e[0] == '1');
+    enabled       = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
     known         = 1;
   }
   return enabled;
@@ -261,6 +415,19 @@ static void mem_plan_push_dead(u32 current_depth) {
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
     if (e->pushed)                              continue;
+    // last_use_depth == 0 is the "no realize-boundary consumer" sentinel
+    // (see boundary_compute_last_use's comment around line 3478): the
+    // sink / realize root / preserved orphan -- the caller will read this
+    // buf AFTER realize returns.  Don't push it to the freelist or the
+    // next allocate will hand its dptr to a fresh kernel intermediate,
+    // overwriting the caller's content.  CUDA bit: cuda_buf_alloc's
+    // best-fit freelist would hand a 4-byte popper the loss-scalar's
+    // dptr; the caller's later loss.numpy() then reads the popper's
+    // value (the symptom: BS=128 CUDA loss goes 2.76 -> 3.00 across an
+    // opt-step realize call).  CPU was unaffected because the TLSF arena
+    // planner skips sinks via its arena-plannability gate, but the
+    // legacy freelist push path here applied to ALL backends.
+    if (e->last_use_depth == 0)                 continue;
     if (e->last_use_depth >= current_depth)     continue;
     if (e->buf_id == 0)                         continue;
     Backend *b = e->backend;
@@ -282,6 +449,351 @@ static void mem_plan_push_dead(u32 current_depth) {
     b->buf_freelist_push(e->buf_id);
     e->pushed = 1;
   }
+}
+
+// === per-realize ARENA memory planner =================================
+//
+// Direct port of tinygrad/schedule/memory.py memory_plan_rewrite
+// (lines 20-65).  Stronger than the legacy freelist above: instead of
+// recycling individual buf_ids after their last consumer fires, the
+// arena planner pre-computes a non-overlapping byte offset for every
+// plannable output by feeding their open/close events to a TLSF
+// suballocator -- the same algorithm tinygrad runs on its lowered
+// schedule.  Plannable outputs become VIEWS into a single arena
+// CpuBuf; non-overlapping lifetimes share bytes -> peak ~= max
+// concurrent live, not sum-of-all.
+//
+// Plannability gate: same as the legacy planner (BOUNDARY_LAST_USE > 0
+// AND consumer_count == 1).  Multi-consumer / orphan / root bufs take
+// the legacy cpu_buf_alloc path.  Arena allocator runs per-realize;
+// the arena CpuBuf is freed by pool_rollback at end-of-realize.
+//
+// CPU + CUDA today (Metal stays on the freelist push/pop scope so its
+// MTLCommandBuffer dispatch-time synchronisation invariants aren't
+// broken).  CUDA mirrors CPU: ARENA_BUF_ID indexes the backend's
+// per-realize arena buf; arena_data returns a host pointer for CPU and
+// arena_dptr returns a CUdeviceptr for CUDA; arena_tensor_alloc emits
+// the per-view backend buf and zero-inits the slot (memset for CPU,
+// cuMemsetD8 for CUDA).
+
+typedef struct {
+  u64 offset;
+  u64 nbytes;
+  u8  in_arena;        // 1 if this boundary's output lives in the arena
+} ArenaSlot;
+
+#define ARENA_SLOTS_CAP BOUNDARY_ORDER_CAP
+static ArenaSlot ARENA_SLOTS[ARENA_SLOTS_CAP];
+static u32       ARENA_SLOTS_LEN     = 0;
+static u64       ARENA_SIZE          = 0;
+static u32       ARENA_BUF_ID        = 0;
+static u8       *ARENA_DATA          = NULL;   // CPU arena base
+#ifdef THVM_HAS_CUDA
+static CUdeviceptr ARENA_DPTR        = 0;      // CUDA arena base
+#endif
+
+// Telemetry: counts arena vs legacy allocs per realize for THVM_ARENA_DUMP.
+static u32 ARENA_ALLOCS_ARENA  = 0;
+static u32 ARENA_ALLOCS_LEGACY = 0;
+static u64 ARENA_PEAK_BYTES    = 0;
+
+fn u64 mem_plan_arena_peak_bytes(void)  { return ARENA_PEAK_BYTES;    }
+fn u32 mem_plan_arena_alloc_count(void) { return ARENA_ALLOCS_ARENA;  }
+fn u32 mem_plan_legacy_alloc_count(void){ return ARENA_ALLOCS_LEGACY; }
+
+static int arena_plan_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_ARENA_PLAN");
+    enabled = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
+    known = 1;
+  }
+  return enabled;
+}
+
+static void arena_reset(void) {
+  for (u32 i = 0; i < ARENA_SLOTS_LEN; i++) {
+    ARENA_SLOTS[i].offset    = 0;
+    ARENA_SLOTS[i].nbytes    = 0;
+    ARENA_SLOTS[i].in_arena  = 0;
+  }
+  ARENA_SLOTS_LEN = 0;
+  ARENA_SIZE      = 0;
+  ARENA_BUF_ID    = 0;
+  ARENA_DATA      = NULL;
+#ifdef THVM_HAS_CUDA
+  ARENA_DPTR      = 0;
+#endif
+}
+
+typedef struct {
+  u32 pos;
+  u32 ord_idx;
+  u8  is_open;
+} ArenaEvent;
+
+static void arena_event_swap(ArenaEvent *a, ArenaEvent *b) {
+  ArenaEvent t = *a; *a = *b; *b = t;
+}
+
+// Sort by (pos asc, is_open desc): at the same position, opens come
+// before closes so a freshly-allocated buf doesn't release its
+// offset back to TLSF before the alloc that uses it.  Tinygrad
+// memory.py:43-44 achieves the same via True > False sort on the
+// is_open flag.
+static void arena_sort_events(ArenaEvent *ev, u32 n) {
+  // Simple insertion sort: n is small (<= 2 * 16k worst-case, typical
+  // a few hundred), and the per-realize cost is < 1% of emit time.
+  for (u32 i = 1; i < n; i++) {
+    for (u32 j = i; j > 0; j--) {
+      ArenaEvent *a = &ev[j-1];
+      ArenaEvent *b = &ev[j];
+      int swap = (a->pos > b->pos)
+              || (a->pos == b->pos && a->is_open < b->is_open);
+      if (!swap) break;
+      arena_event_swap(a, b);
+    }
+  }
+}
+
+static int arena_boundary_is_plannable(u32 ord_idx) {
+  u64 loc = BOUNDARY_ORDER[ord_idx];
+  u32 binfo = bufferize_info_find(loc);
+  if (binfo == 0xFFFFFFFFu) return 0;
+  // last_use == 0 means "no realize-boundary consumer" -- this is the
+  // realize root or an orphan preserved tensor.  Tinygrad's
+  // equivalent: held_bufs excludes result bufs from
+  // memory_plan_rewrite (schedule/memory.py:22).
+  if (BOUNDARY_LAST_USE[binfo] == 0) return 0;
+  // Single-consumer gate (matches mem_plan_record at line 596):
+  // multi-consumer outputs may be aliased through DUP/SUP / read by
+  // a NEXT realize pass's chain rule.  thvm_realize runs wnf +
+  // materialize in a loop; a buf produced in pass N can be read in
+  // pass N+1.  BOUNDARY_LAST_USE is per-pass, so it can't see the
+  // N+1 reader.  Restricting to consumer_count==1 keeps arena-recycle
+  // safe for the current iterative-realize model.  Tinygrad's
+  // single-pass schedule doesn't have this constraint, but porting
+  // that would require collapsing thvm_realize's loop.
+  if (BUFFERIZE_NODES[binfo].consumer_count != 1) return 0;
+  return 1;
+}
+
+static u64 arena_boundary_nbytes(u32 ord_idx) {
+  u64 loc = BOUNDARY_ORDER[ord_idx];
+  u32 binfo = bufferize_info_find(loc);
+  if (binfo == 0xFFFFFFFFu) return 0;
+  u8 op = BUFFERIZE_NODES[binfo].op;
+  Term root_term = term_new(0, TAG_UOP, op, loc);
+  Shape sh = {0};
+  if (!term_shape_in(root_term, 0, &sh)) return 0;
+  u32 dtype = DT_FP32;
+  term_dtype_in(root_term, 0, &dtype);
+  u64 numel = (u64)shape_numel(sh);
+  return dtype_storage_bytes(dtype, numel);
+}
+
+// BOUNDARY_LAST_USE[B] stores the consumer's depth (BOUNDARY_DEPTH).
+// We need the consumer's BOUNDARY_ORDER index for arena lifetimes.
+// boundaries at the SAME depth are sorted by loc; the LAST one at the
+// target depth is the safe latest position any consumer at that depth
+// could be at (we don't know which specific boundary at that depth is
+// the consumer, only that it's at depth D).  Conservative: use the
+// last boundary at depth D.  O(n) scan per call -- amortised across
+// the whole emit pass it's still O(n^2) worst-case but typical
+// n_boundaries < 500 so this is well below 1ms.
+static u32 arena_last_pos_at_depth(u32 depth) {
+  u32 last = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+    u64 loc = BOUNDARY_ORDER[i];
+    u32 binfo = bufferize_info_find(loc);
+    if (binfo == 0xFFFFFFFFu) continue;
+    if (BOUNDARY_DEPTH[binfo] == depth) last = i;
+  }
+  return last;
+}
+
+// Build per-boundary lifetimes + run TLSF to assign offsets.  Mirror
+// of tinygrad/schedule/memory.py:25-53.  Sets up ARENA_SLOTS[] and
+// ARENA_SIZE.  No arena CpuBuf allocation here -- the first
+// arena-slot read lazily allocates the bytes (so a no-plannable pass
+// doesn't allocate at all).
+static void arena_compute(void) {
+  arena_reset();
+  ARENA_ALLOCS_ARENA  = 0;
+  ARENA_ALLOCS_LEGACY = 0;
+  if (!arena_plan_enabled())     return;
+  if (BOUNDARY_ORDER_LEN == 0)   return;
+  if (CURRENT_BACKEND == NULL)   return;
+  int is_cpu  = (CURRENT_BACKEND == &CPU_BACKEND);
+  int is_cuda = 0;
+#ifdef THVM_HAS_CUDA
+  is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
+#endif
+  if (!is_cpu && !is_cuda)       return;
+
+  ARENA_SLOTS_LEN = BOUNDARY_ORDER_LEN;
+  static u32 first_pos[ARENA_SLOTS_CAP];
+  static u32 last_pos [ARENA_SLOTS_CAP];
+  static u64 nbytes   [ARENA_SLOTS_CAP];
+  static u8  planned  [ARENA_SLOTS_CAP];
+  u32 n_planned = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+    first_pos[i] = i; last_pos[i] = i; nbytes[i] = 0; planned[i] = 0;
+    if (!arena_boundary_is_plannable(i)) continue;
+    u64 nb = arena_boundary_nbytes(i);
+    if (nb == 0) continue;
+    u64 loc = BOUNDARY_ORDER[i];
+    u32 binfo = bufferize_info_find(loc);
+    u32 lu_depth = BOUNDARY_LAST_USE[binfo];
+    u32 last_at = arena_last_pos_at_depth(lu_depth);
+    if (last_at < i) last_at = i;
+    nbytes[i]   = nb;
+    last_pos[i] = last_at;
+    planned[i]  = 1;
+    n_planned++;
+  }
+  if (n_planned == 0) return;
+
+  static ArenaEvent events[ARENA_SLOTS_CAP * 2];
+  u32 n_ev = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+    if (!planned[i]) continue;
+    events[n_ev].pos = first_pos[i]; events[n_ev].ord_idx = i; events[n_ev].is_open = 1; n_ev++;
+    events[n_ev].pos = last_pos [i] + 1u; events[n_ev].ord_idx = i; events[n_ev].is_open = 0; n_ev++;
+  }
+  arena_sort_events(events, n_ev);
+
+  u64 total = 0;
+  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) total += nbytes[i];
+  if (total == 0) return;
+  u64 tlsf_total = total * 2u;
+  tlsf_total = tlsf_round_up(tlsf_total, TLSF_BLOCK_SIZE);
+
+  static TlsfAllocator tlsf;
+  tlsf_init(&tlsf, tlsf_total);
+
+  u64 peak = 0;
+  for (u32 e = 0; e < n_ev; e++) {
+    u32 i = events[e].ord_idx;
+    if (events[e].is_open) {
+      u64 want = tlsf_round_up(nbytes[i], TLSF_BLOCK_SIZE);
+      u64 off = tlsf_alloc(&tlsf, want);
+      if (off == (u64)-1) {
+        // OOM in a 2x-sized arena shouldn't happen; if it does, bail
+        // and let every emit fall back to the legacy alloc path.
+        arena_reset();
+        tlsf_dispose(&tlsf);
+        return;
+      }
+      ARENA_SLOTS[i].offset    = off;
+      ARENA_SLOTS[i].nbytes    = nbytes[i];
+      ARENA_SLOTS[i].in_arena  = 1;
+      u64 end = off + nbytes[i];
+      if (end > peak) peak = end;
+    } else {
+      tlsf_free(&tlsf, ARENA_SLOTS[i].offset);
+    }
+  }
+  tlsf_dispose(&tlsf);
+  ARENA_SIZE = tlsf_round_up(peak, TLSF_BLOCK_SIZE);
+  ARENA_PEAK_BYTES = ARENA_SIZE;
+  if (getenv("THVM_ARENA_DUMP")) {
+    fprintf(stderr,
+            "arena: %u/%u plannable, sum=%.2fMB arena=%.2fMB peak_off=%.2fMB\n",
+            n_planned, BOUNDARY_ORDER_LEN,
+            (double)total / 1048576.0,
+            (double)ARENA_SIZE / 1048576.0,
+            (double)peak / 1048576.0);
+  }
+}
+
+// Lazily allocate the arena backend buf on the first arena-slot read.
+// Single block participates in CPU_MEM_LIVE / CUDA_MEM_LIVE +
+// pool_rollback like any other buf.  Returns 1 if an arena exists (or
+// was just created), 0 otherwise.
+static int arena_ensure(void) {
+  if (ARENA_BUF_ID != 0)        return 1;
+  if (ARENA_SIZE == 0)          return 0;
+  if (CURRENT_BACKEND == &CPU_BACKEND) {
+    ARENA_BUF_ID = cpu_buf_alloc(ARENA_SIZE);
+    if (ARENA_BUF_ID == 0)      return 0;
+    ARENA_DATA = (u8 *)CPU_BUFS[ARENA_BUF_ID].data;
+    // Per-realize arena: this block is sized to fit this pass's
+    // max-live working set (computed by arena_compute via TLSF
+    // events).  At end of realize the entire arena is released; we
+    // want pool_rollback to real-free it, NOT park it on the
+    // freelist where best-fit might snag a 646MB slot for a 16MB
+    // request (or, worse, leave it parked while every subsequent
+    // realize calloc's a fresh arena -- the cross-step leak this
+    // flag fixes).
+    CPU_BUFS[ARENA_BUF_ID].skip_freelist = 1;
+    return 1;
+  }
+#ifdef THVM_HAS_CUDA
+  if (CURRENT_BACKEND == &CUDA_BACKEND) {
+    ARENA_BUF_ID = cuda_buf_alloc(ARENA_SIZE);
+    if (ARENA_BUF_ID == 0)      return 0;
+    ARENA_DPTR = cuda_buf_dptr(ARENA_BUF_ID);
+    CUDA_BUFS[ARENA_BUF_ID].skip_freelist = 1;
+    return 1;
+  }
+#endif
+  return 0;
+}
+
+// Allocate a TenDesc whose buf is an external view into the arena.
+// Returns 0 on miss (caller falls back to tensor_alloc).
+static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
+  if (ord_idx >= ARENA_SLOTS_LEN)        return 0;
+  if (!ARENA_SLOTS[ord_idx].in_arena)    return 0;
+  int is_cpu  = (CURRENT_BACKEND == &CPU_BACKEND);
+  int is_cuda = 0;
+#ifdef THVM_HAS_CUDA
+  is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
+#endif
+  if (!is_cpu && !is_cuda)               return 0;
+  if (!arena_ensure())                   return 0;
+  if (TENS_NEXT >= TENS_CAP) {
+    fprintf(stderr, "arena_tensor_alloc: out of descriptor slots\n");
+    exit(1);
+  }
+  u32 tid = (u32)TENS_NEXT++;
+  TenDesc *d = &TENS[tid];
+  d->dtype        = dtype;
+  d->refcount     = 1;
+  d->view         = view_create(shape);
+  d->prior_views  = NULL;
+  d->nviews       = 0;
+  d->requires_grad = 0;
+  d->grad         = 0;
+  d->backend      = CURRENT_BACKEND;
+  d->producer_kid = 0;
+  u64 off    = ARENA_SLOTS[ord_idx].offset;
+  u64 nbytes = dtype_storage_bytes(dtype, (u64)d->view.numel);
+  if (nbytes == 0) nbytes = 1;
+  // Zero-init the slot: a previous lifetime's bytes still occupy it
+  // (TLSF only tracks block ownership, not zeroing).  buf_alloc's
+  // calloc/cuMemsetD8/freelist-pop guaranteed zero, so kernels writing
+  // through REDUCE_ADD / accumulate-style paths depend on it.
+  //
+  // Arena view: ties this backend buf's lifetime to ARENA_BUF_ID via
+  // the parent_buf_id chain in buf_incref / buf_decref so the arena
+  // bytes outlive every view.  Mirror: tinygrad schedule/memory.py:60
+  // BUFFER_VIEW(arena, nbytes, offset).
+  if (is_cpu) {
+    memset(ARENA_DATA + off, 0, (size_t)nbytes);
+    d->buf_id = cpu_buf_alloc_arena_view(ARENA_DATA + off, nbytes,
+                                         ARENA_BUF_ID);
+  }
+#ifdef THVM_HAS_CUDA
+  else if (is_cuda) {
+    cuMemsetD8(ARENA_DPTR + off, 0, (size_t)nbytes);
+    d->buf_id = cuda_buf_alloc_arena_view(ARENA_DPTR + off, nbytes,
+                                          ARENA_BUF_ID);
+  }
+#endif
+  ARENA_ALLOCS_ARENA++;
+  return tid;
 }
 
 
@@ -661,6 +1173,55 @@ static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   return unified_rewrite_rec_sub(st, NULL, t, depth);
 }
 
+// Walk a producer value subtree and return 1 if it contains any
+// CMPEQ / CMPLT / IWHERE / INVALID op -- the family whose semantics
+// depend on which consumer axis the producer's closed_range gets
+// bound to.  When a producer's value is mask-free, binding its
+// closed_range to a consumer REDUCE-type RANGE is safe: the value is
+// the same numeric expression regardless of whether the axis is
+// looped over or reduce-accumulated.  When a CMPEQ/IWHERE is present
+// (pool/reshape-MAX gradient one-hot indicator), pairing the wrong
+// axis routes the mask through the reduce iter and decodes wrong.
+// Used to relax the type=0 gate in try_inline_bufferize_1axis_via_decomp
+// for plain-arithmetic producers such as BN's vector broadcast or the
+// non-matmul-REDUCE-feed broadcast subtract.
+#define MASK_SCAN_VISITED_CAP 256
+typedef struct {
+  Term keys[MASK_SCAN_VISITED_CAP];
+  u32  n;
+} MaskScanVisited;
+static int mask_scan_seen(MaskScanVisited *v, Term t) {
+  for (u32 i = 0; i < v->n; i++) if (v->keys[i] == t) return 1;
+  if (v->n < MASK_SCAN_VISITED_CAP) v->keys[v->n++] = t;
+  return 0;
+}
+static int uop_value_subtree_has_mask_op_rec(MaskScanVisited *v,
+                                              Term t, u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  if (mask_scan_seen(v, r)) return 0;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_CMPEQ || op == UOP_CMPLT || op == UOP_IWHERE
+      || op == UOP_INVALID) return 1;
+  // Stop at boundaries: a nested BUFFERIZE is opaque (its value subtree
+  // gets evaluated under its OWN closed_ranges, independent of the
+  // outer producer's axis bindings).  Same for KERNEL/BUFFER leaves.
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (uop_value_subtree_has_mask_op_rec(v, heap_read(loc + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+static int uop_value_subtree_has_mask_op(Term root) {
+  if (root == 0) return 0;
+  MaskScanVisited v;
+  v.n = 0;
+  return uop_value_subtree_has_mask_op_rec(&v, root, 0);
+}
+
 // Try inlining a 1-axis BUFFERIZE by decomposing the consumer's flat
 // addr expression into (stride, iter_expr) leaves and binding the
 // closed_range to the unique iter_expr whose extent matches.  Two
@@ -751,6 +1312,16 @@ static Term try_inline_bufferize_1axis_via_decomp(
     }
   }
   // Sub-case 1: dn >= 2 stride-match by extent.
+  // When the producer's value subtree is mask-free (no CMPEQ/CMPLT/
+  // IWHERE/INVALID), pairing with a type=1 (reduce) RANGE is safe --
+  // the producer's value is the same numeric expression regardless of
+  // whether the consumer treats the axis as a loop iter or a reduce
+  // accumulator.  This covers BN's vector broadcast and the non-matmul-
+  // REDUCE-feed broadcast subtract that hangs beautiful_mnist when the
+  // conservative REDUCE-as-boundary seed is dropped (env-toggle
+  // THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE=0).  Pool/reshape-MAX
+  // gradient's CMPEQ one-hot indicator keeps the strict gate.
+  int producer_mask_free = !uop_value_subtree_has_mask_op(v);
   if (decomp_ok && !has_unknown_extent && dn >= 2) {
     int found = -1;
     for (u32 j = 0; j < dn; j++) {
@@ -758,7 +1329,7 @@ static Term try_inline_bufferize_1axis_via_decomp(
       u32 e_ext = (u32)term_val(heap_read(term_val(e) + 2));
       if (e_ext != want_ext) continue;
       u32 atype = (u32)term_val(heap_read(term_val(e) + 1));
-      if (atype != 0) { found = -1; break; }
+      if (atype != 0 && !producer_mask_free) { found = -1; break; }
       if (found >= 0) { found = -1; break; }
       found = (i32)j;
     }
@@ -1597,13 +2168,14 @@ static int stranded_range_check_value(RangeAxisSet const *iter_axes,
   // RANGE leaves -- entirely unobservable from the walker's perspective.
   if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
   if (op == UOP_REDUCE) {
-    // Enter the reduce's axis into the iterated set for the body walk.
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    // Enter every reduce axis into the iterated set for the body walk.
+    Term t = term_new(0, TAG_UOP, op, loc);
+    u32 n_axes = uop_reduce_n_axes(t);
     RangeAxisSet inner = *iter_axes;
-    range_axis_add(&inner, r_aid);
+    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(t, i));
     BufferizeScanVisited iv;
     iv.n = 0;
-    return stranded_range_check_value(&inner, &iv, heap_read(loc + 0),
+    return stranded_range_check_value(&inner, &iv, uop_reduce_src(t),
                                       depth + 1);
   }
   u8 ar = uop_arity(op);
@@ -1655,12 +2227,13 @@ static int bufferize_strand_check_deep(RangeAxisSet const *iter,
     return bufferize_strand_check_deep(&inner, &iv, val, depth + 1);
   }
   if (op == UOP_REDUCE) {
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
+    Term t = term_new(0, TAG_UOP, op, loc);
+    u32 n_axes = uop_reduce_n_axes(t);
     RangeAxisSet inner = *iter;
-    range_axis_add(&inner, r_aid);
+    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(t, i));
     BufferizeScanVisited iv;
     iv.n = 0;
-    return bufferize_strand_check_deep(&inner, &iv, heap_read(loc + 0),
+    return bufferize_strand_check_deep(&inner, &iv, uop_reduce_src(t),
                                        depth + 1);
   }
   u8 ar = uop_arity(op);
@@ -1901,41 +2474,44 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
       return 0;
     }
   }
-  // Multiply REDUCE extent into out_numel when descending into a reduce
-  // body so the broadcast check counts the full iteration footprint.
+  // Multiply REDUCE extent (every reduce axis) into out_numel when
+  // descending into a reduce body so the broadcast check counts the full
+  // iteration footprint.  Multi-axis REDUCE folds N axes simultaneously
+  // (mirrors tinygrad's REDUCE.src[1:] range list).
   if (op == UOP_REDUCE) {
+    Term t = term_new(0, TAG_UOP, op, loc);
     u64 inner_out = out_numel;
-    Term body = heap_read(loc + 0);
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
-    // Find the reduce range's extent by scanning the body for a
-    // UOP_RANGE with this axis_id.
-    u32 r_ext = 0;
-    BufferizeScanVisited iv;
-    iv.n = 0;
-    // small inline scan
-    Term stack[64];
-    u32  top = 0;
-    stack[top++] = body;
-    while (top > 0 && r_ext == 0) {
-      Term cur = term_resolve(stack[--top]);
-      if (term_tag(cur) != TAG_UOP) continue;
-      u8  cop = term_ext(cur);
-      u64 cloc = term_val(cur);
-      if (cop == UOP_RANGE) {
-        u32 aid = (u32)term_val(heap_read(cloc + 0));
-        if (aid == r_aid) {
-          r_ext = (u32)term_val(heap_read(cloc + 2));
-          break;
+    Term body = uop_reduce_src(t);
+    u32 n_axes = uop_reduce_n_axes(t);
+    // Find each reduce range's extent by scanning the body for UOP_RANGE
+    // with each axis_id, then multiply all extents into the footprint.
+    for (u32 ai = 0; ai < n_axes; ai++) {
+      u32 r_aid = uop_reduce_axis(t, ai);
+      u32 r_ext = 0;
+      Term stack[64];
+      u32  top = 0;
+      stack[top++] = body;
+      while (top > 0 && r_ext == 0) {
+        Term cur = term_resolve(stack[--top]);
+        if (term_tag(cur) != TAG_UOP) continue;
+        u8  cop = term_ext(cur);
+        u64 cloc = term_val(cur);
+        if (cop == UOP_RANGE) {
+          u32 aid = (u32)term_val(heap_read(cloc + 0));
+          if (aid == r_aid) {
+            r_ext = (u32)term_val(heap_read(cloc + 2));
+            break;
+          }
+          continue;
         }
-        continue;
+        if (cop == UOP_BUFFER || cop == UOP_BUFFERIZE || cop == UOP_KERNEL) continue;
+        u8 car = uop_arity(cop);
+        for (u8 i = 0; i < car && top < 64; i++) {
+          stack[top++] = heap_read(cloc + i);
+        }
       }
-      if (cop == UOP_BUFFER || cop == UOP_BUFFERIZE || cop == UOP_KERNEL) continue;
-      u8 car = uop_arity(cop);
-      for (u8 i = 0; i < car && top < 64; i++) {
-        stack[top++] = heap_read(cloc + i);
-      }
+      if (r_ext > 0) inner_out *= (u64)r_ext;
     }
-    if (r_ext > 0) inner_out *= (u64)r_ext;
     return broadcast_input_scan_rec(ke, v, body, inner_out, depth + 1);
   }
   u8 ar = uop_arity(op);
@@ -1975,9 +2551,20 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_PAD:         return "PAD";
     case UOP_SHRINK:      return "SHRINK";
     case UOP_FLIP:        return "FLIP";
+    case UOP_ADD:         return "ADD";
+    case UOP_MUL:         return "MUL";
+    case UOP_NEG:         return "NEG";
+    case UOP_RECIP:       return "RECIP";
+    case UOP_EXP2:        return "EXP2";
+    case UOP_LOG2:        return "LOG2";
+    case UOP_SQRT:        return "SQRT";
     case UOP_CMPLT:       return "CMPLT";
+    case UOP_CMPEQ:       return "CMPEQ";
     case UOP_REDUCE:      return "REDUCE";
     case UOP_LOAD:        return "LOAD";
+    case UOP_ASSIGN:      return "ASSIGN";
+    case UOP_CAST:        return "CAST";
+    case UOP_BITCAST:     return "BITCAST";
     case UOP_RANGE:       return "RANGE";
     case UOP_INDEX_E:     return "INDEX_E";
     case UOP_IADD:        return "IADD";
@@ -1988,6 +2575,7 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_BUFFER:      return "BUFFER";
     case UOP_STORE:       return "STORE";
     case UOP_BUFFERIZE:   return "BUFFERIZE";
+    case UOP_DETACH:      return "DETACH";
     default:              return "?";
   }
 }
@@ -2070,10 +2658,14 @@ static void bypass_dbg_dump_rec(Term t, u32 indent, u32 depth) {
     return;
   }
   if (op == UOP_REDUCE) {
-    u32 kind = (u32)term_val(heap_read(loc + 1));
-    u32 axis = (u32)term_val(heap_read(loc + 2));
-    fprintf(stderr, "REDUCE kind=%u axis=%u\n", kind, axis);
-    bypass_dbg_dump_rec(heap_read(loc + 0), indent + 2, depth + 1);
+    u32 kind = uop_reduce_kind(r);
+    u32 n_axes = uop_reduce_n_axes(r);
+    fprintf(stderr, "REDUCE kind=%u axes=[", kind);
+    for (u32 i = 0; i < n_axes; i++) {
+      fprintf(stderr, "%s%u", i ? "," : "", uop_reduce_axis(r, i));
+    }
+    fputs("]\n", stderr);
+    bypass_dbg_dump_rec(uop_reduce_src(r), indent + 2, depth + 1);
     return;
   }
   fprintf(stderr, "%s (ext=%u, loc=%llx)\n", name, term_ext(r),
@@ -3076,6 +3668,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     return ref;
   }
 
+  // Cross-realize alias: if a previous realize pass already produced
+  // a TenDesc for this UOP loc, plug it in as an input slot here too.
+  // Matches the materialize-entry short-circuit so a forward
+  // intermediate realized in pass N stays reachable in pass N+1's
+  // kernels (and is never re-emitted).  Mirror: tinygrad's
+  // pm_generate_realize_map memoizes UOp -> Buffer on the lazy graph;
+  // each subsequent schedule sees the prior Buffer attached.
   // Boundary that isn't this kernel's root: become an input.  The
   // upstream boundary was emitted earlier in topo order, so its
   // BOUNDARY_TID slot is populated.
@@ -3216,10 +3815,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       // (0 for SUM).  Short-circuit to the source value; the kernel's
       // output_shape (set in emit_kernel_for_boundary) already drops
       // the axis, so the bytes flow through unchanged.
-      u32 axis0 = (u32)term_val(heap_read(loc + 2));
+      // Multi-axis REDUCE: identity-shortcut fires when EVERY reduce
+      // axis is size-1 AND the output shape equals the input shape
+      // (i.e. shape inference dropped no real dims).
+      u32 n_axes = uop_reduce_n_axes(t);
       Shape src_sh0 = {0};
       Shape out_sh0 = {0};
-      int same_shape = term_shape_in(heap_read(loc), 0, &src_sh0)
+      int same_shape = term_shape_in(uop_reduce_src(t), 0, &src_sh0)
                     && term_shape_in(t, 0, &out_sh0)
                     && src_sh0.ndim == out_sh0.ndim;
       if (same_shape) {
@@ -3227,8 +3829,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
           if (src_sh0.dims[d] != out_sh0.dims[d]) { same_shape = 0; break; }
         }
       }
-      if (same_shape && axis0 < src_sh0.ndim && src_sh0.dims[axis0] == 1) {
-        u32 sidx = visit(heap_read(loc), ke, root_loc, memo);
+      int all_size_one = same_shape;
+      for (u32 ai = 0; ai < n_axes && all_size_one; ai++) {
+        u32 ax = uop_reduce_axis(t, ai);
+        if (!(ax < src_sh0.ndim && src_sh0.dims[ax] == 1)) all_size_one = 0;
+      }
+      if (all_size_one) {
+        u32 sidx = visit(uop_reduce_src(t), ke, root_loc, memo);
         if (sidx == VISIT_BAIL) return VISIT_BAIL;
         visit_memo_store(memo, loc, sidx);
         return sidx;
@@ -3274,7 +3881,21 @@ static Term emit_kernel_for_boundary(u32 bi) {
   u32 this_depth = BOUNDARY_DEPTH[idx];
   mem_plan_push_dead(this_depth);
 
-  u32 out_tid = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
+  // Arena planner (port of tinygrad/schedule/memory.py
+  // memory_plan_rewrite line 47-52): if this boundary's output was
+  // assigned an arena slot by arena_compute(), use a view-buf into
+  // the shared arena.  Non-overlapping lifetimes share bytes, so 40
+  // same-depth conv outputs occupy only ~3x one output's size in the
+  // arena (live set), not 40x.  Fall through to tensor_alloc on miss
+  // (multi-consumer / root / arena-disabled).
+  u32 out_tid = arena_tensor_alloc(bi, out_shape, out_dtype);
+  if (out_tid == 0) {
+    out_tid = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
+    if (out_tid != 0 && CURRENT_BACKEND == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
+#ifdef THVM_HAS_CUDA
+    if (out_tid != 0 && CURRENT_BACKEND == &CUDA_BACKEND) ARENA_ALLOCS_LEGACY++;
+#endif
+  }
   u32 kid     = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
   ke->output_tid    = out_tid;
@@ -3497,6 +4118,21 @@ static Term emit_kernel_for_boundary(u32 bi) {
                     CURRENT_BACKEND);
   }
 
+  if (getenv("THVM_DUMP_KERNEL_SHAPE")) {
+    fprintf(stderr, "KSHAPE kid=%u op=%s shape=[", kid, bypass_dbg_op_name(op));
+    for (u32 i = 0; i < out_shape.ndim; i++) {
+      fprintf(stderr, "%s%u", i ? "," : "", out_shape.dims[i]);
+    }
+    fprintf(stderr, "] depth=%u\n", this_depth);
+  }
+
+  // Persist loc -> tid so a later realize pass that walks the same
+  // UOP loc (a shared forward intermediate referenced by multiple
+  // grad targets) substitutes to a TAG_TEN leaf instead of
+  // re-emitting an identical kernel.  See MATERIALIZED_LOC_TABLE
+  // comment above for full rationale.
+  materialized_loc_insert(boundary_loc, out_tid);
+
   return kernel_term;
 }
 
@@ -3545,7 +4181,31 @@ static void materialize_inner_assigns(Term term) {
   }
 }
 
+// Recursively strip UOP_DETACH(x) -> x in place across a UOP DAG, so the
+// stop-gradient marker never reaches kernel lifting / render / the walker
+// (the gated uop_graph_simplify can't be relied on).  Detach is identity
+// at the value level; the backward was already built before materialize.
+// Resolves chains of DETACH and rewrites each parent slot in place.
+static Term materialize_strip_detach(Term term) {
+  for (int hops = 0; hops < 64 && term_tag(term) == TAG_UOP
+                     && term_ext(term) == UOP_DETACH; hops++) {
+    term = heap_read(term_val(term) + 0);
+  }
+  if (term_tag(term) != TAG_UOP) return term;
+  u32 op = term_ext(term);
+  if (op == UOP_KERNEL) return term;
+  u8 ar = uop_arity((u8)op);
+  u64 loc = term_val(term);
+  for (u8 i = 0; i < ar; i++) {
+    Term child = heap_read(loc + i);
+    Term stripped = materialize_strip_detach(child);
+    if (stripped != child) heap_set(loc + i, stripped);
+  }
+  return term;
+}
+
 fn Term thvm_materialize(Term term) {
+  term = materialize_strip_detach(term);
   HOT_MATERIALIZE_CALLS++;
   // REF / ALO transparency: jump (don't unfold) into the body cell.
   // term_resolve walks VAR-SUB and ALO chains -- pure pointer hops,
@@ -3611,6 +4271,39 @@ fn Term thvm_materialize(Term term) {
   }
   if (term_tag(term) != TAG_UOP)        return term;
   if (term_ext(term) == UOP_KERNEL)     return term;
+
+  // Cross-realize alias short-circuit.  If a previous realize pass
+  // already emitted a kernel for the UOP at this heap loc (a shared
+  // forward intermediate referenced by multiple grad targets, the
+  // dominant cross-realize over-emission pattern), return the prior
+  // kernel's output as a TAG_TEN leaf so we don't re-bufferize or
+  // re-emit an identical kernel.  See MATERIALIZED_LOC_TABLE.
+  // Cross-realize cache short-circuits only fire when called from
+  // inside a realize wrapper (thvm_realize / thvm_realize_many).
+  // Tests that drive thvm_materialize directly want the unsubstituted
+  // path; the scope counter gates this.
+  if (materialized_loc_scope_depth() > 0) {
+    u32 cached_tid = materialized_loc_lookup(term_val(term));
+    if (cached_tid != 0) {
+      return term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid);
+    }
+    // Pre-substitute cached UOP descendants with TAG_TEN leaves so
+    // the bufferize_classify walk that follows sees an "external"
+    // tensor wherever a previous realize pass produced one.  Without
+    // this, an interior UOP at a cached loc would otherwise be
+    // re-classified / re-emitted as a fresh boundary even though its
+    // kernel and output buffer already exist from the prior pass.
+    // Mirror: tinygrad's pm_generate_realize_map memoizes UOp ->
+    // Buffer on the lazy graph and downstream schedules read the
+    // prior Buffer.
+    materialize_subst_cached_inplace(term);
+  }
+  // DETACH is a stop-gradient marker with identity runtime semantics;
+  // by materialize time the backward is already built, so unwrap it to
+  // its src (no kernel/render/walker path ever needs to know about it).
+  if (term_ext(term) == UOP_DETACH) {
+    return thvm_materialize(heap_read(term_val(term) + 0));
+  }
   // GRAD is a stop point in materialize -- wnf fires interact_grad,
   // then thvm_realize loops back here to compile the unrolled UOps.
   // ASSIGN is a wnf-fired primitive (interact_assign) -- not a kernel.
@@ -3676,6 +4369,10 @@ fn Term thvm_materialize(Term term) {
   // lowered tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py).
   topo_sort_buffers_unified(term);
   mem_plan_reset();
+  // Arena planner: pre-compute per-boundary offsets into a shared
+  // arena buf.  Mirror: tinygrad/schedule/memory.py memory_plan_rewrite
+  // (called inside lower_schedule_item before kernel dispatch).
+  arena_compute();
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     BOUNDARY_TID [i] = 0;
     BOUNDARY_TERM[i] = 0;
@@ -3703,6 +4400,32 @@ fn Term thvm_materialize(Term term) {
       KERNELS_NEXT = kernels_at_start;
       TENS_NEXT    = tens_at_start;
       mem_plan_drain_freelist();
+      // Arena views allocated during the partial emit are dropped by
+      // the TENS_NEXT rewind; the arena CpuBuf itself (allocated
+      // lazily) survives in CPU_BUFS until pool_rollback reclaims it.
+      // Drop the +1 sentinel here too so the arena can be reclaimed
+      // (the view-refcount adds 1 per view; rewinding TENS doesn't
+      // decref those views, so without the sentinel drop the arena
+      // would leak permanently on every bail).  Note: TENS_NEXT
+      // rewind discards the view CpuBufs along with their TenDescs --
+      // but those views' parent_buf_id->arena refcounts were already
+      // bumped when they were allocated and we don't have a per-view
+      // decref hook in the rewind loop.  This is a transient leak per
+      // failed pass (rare); the arena_reset below clears the static
+      // pointers so the next pass starts fresh.
+      if (ARENA_BUF_ID != 0) {
+        if (CURRENT_BACKEND == &CPU_BACKEND
+            && ARENA_BUF_ID < CPU_BUFS_NEXT) {
+          cpu_buf_decref(ARENA_BUF_ID);
+        }
+#ifdef THVM_HAS_CUDA
+        else if (CURRENT_BACKEND == &CUDA_BACKEND
+                 && ARENA_BUF_ID < CUDA_BUFS_NEXT) {
+          cuda_buf_decref(ARENA_BUF_ID);
+        }
+#endif
+      }
+      arena_reset();
       return term;
     }
     if (BOUNDARY_ORDER[i] == term_val(term)) sink_kernel = k;
@@ -3712,6 +4435,35 @@ fn Term thvm_materialize(Term term) {
   // from them (the chain rule's freshly-emitted UOPs may still
   // reference those tids).
   mem_plan_drain_freelist();
+  // Arena: drop the +1 sentinel refcount that buf_alloc gave the
+  // arena buf at first-view time, so the arena is released the moment
+  // its last view decrefs.  Each arena view incref'd it by 1; total
+  // refcount is (1 + N_live_views).  After this decref it's exactly
+  // N_live_views, which drops naturally as TenDescs release.  Without
+  // this drop the arena leaks until session shutdown (every realize
+  // accumulates a permanent arena).
+  if (ARENA_BUF_ID != 0) {
+    if (CURRENT_BACKEND == &CPU_BACKEND
+        && ARENA_BUF_ID < CPU_BUFS_NEXT) {
+      cpu_buf_decref(ARENA_BUF_ID);
+    }
+#ifdef THVM_HAS_CUDA
+    else if (CURRENT_BACKEND == &CUDA_BACKEND
+             && ARENA_BUF_ID < CUDA_BUFS_NEXT) {
+      cuda_buf_decref(ARENA_BUF_ID);
+    }
+#endif
+  }
+  if (getenv("THVM_ARENA_DUMP")) {
+    fprintf(stderr,
+            "arena: end-of-pass arena_allocs=%u legacy_allocs=%u\n",
+            ARENA_ALLOCS_ARENA, ARENA_ALLOCS_LEGACY);
+  }
+  ARENA_DATA   = NULL;
+  ARENA_BUF_ID = 0;
+#ifdef THVM_HAS_CUDA
+  ARENA_DPTR   = 0;
+#endif
   // Diagnostic: print per-kernel input edge data for every kernel
   // emitted in this pass.  No-op unless
   // DUMP_BUFFERIZE_KERNEL_EDGES=1.

@@ -64,7 +64,10 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_LOAD:                                     return 1;
-        case UOP_REDUCE:                                   return 3;
+        // UOP_REDUCE is now variable-arity (multi-axis): heap is
+        // [src, kind, n_axes, axis_0, ..., axis_{n-1}].  Treat like
+        // other variable-arity ops -- unsupported in book snapshot.
+        case UOP_REDUCE:                                   return 0;
         case UOP_KERNEL:                                   return 2;
         case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
         case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:

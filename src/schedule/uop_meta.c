@@ -23,7 +23,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_LOG2: case UOP_SQRT:
     case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
-    case UOP_REDUCE:  case UOP_LOAD:
+    case UOP_REDUCE:  case UOP_LOAD:    case UOP_DETACH:
     case UOP_CAST:    case UOP_BITCAST:
     // UOP_BUFFERIZE heap: [value, NUM(addrspace), NUM(removable),
     // NUM(n_ranges), range_0, ...].  Only slot 0 (value) is a
@@ -203,7 +203,7 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     return 0;
   }
   if (uop_is_unary_elementwise(op) || op == UOP_LOAD || op == UOP_FLIP
-      || op == UOP_CAST || op == UOP_BITCAST) {
+      || op == UOP_CAST || op == UOP_BITCAST || op == UOP_DETACH) {
     return term_shape_in(heap_read(loc), 0, out);
   }
   // UOP_BUFFERIZE is a realize-boundary marker; its shape == value.shape.
@@ -274,20 +274,24 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   }
   if (op == UOP_REDUCE) {
     Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
-    u32 axis = (u32)term_val(heap_read(loc + 2));
-    // Drop the reduced axis -- output ndim is src ndim minus one.  For
-    // a 1-D source this gives a 0-D scalar; for 0-D inputs (degenerate;
-    // the SHRINK/EXPAND chains never produce them) we bail.
-    //
-    // The earlier branch returned `ndim=1, dims=[1]` for cs.ndim<=1
-    // unconditionally, which made the downstream "size-1 axis short-
-    // circuit" in src/schedule/materialize.c (treats REDUCE as no-op
-    // when src.ndim == out.ndim AND src.dims[axis]==1) fire on the
-    // outer REDUCE of a (1,)-input chain -- the reduce never executed
-    // and the result buffer read zeros (project_thvm_mul_reduce_leading_one_zero).
+    // Multi-axis REDUCE: drop ALL axes in the list.  Output ndim is
+    // src ndim minus n_axes.  Mirrors tinygrad's per-REDUCE ranges-set
+    // shape derivation (uop/ops.py).
     if (cs.ndim == 0) return 0;
+    Term t = term_new(0, TAG_UOP, op, loc);
+    u32 n_axes = uop_reduce_n_axes(t);
+    // Build a per-axis "is reduce axis" mask so we can drop them all in
+    // one pass regardless of order.
+    u8 drop[MAX_DIM] = {0};
+    for (u32 ai = 0; ai < n_axes; ai++) {
+      u32 ax = uop_reduce_axis(t, ai);
+      if (ax < cs.ndim) drop[ax] = 1;
+    }
     u32 dst = 0;
-    for (u32 i = 0; i < cs.ndim; i++) { if (i == axis) continue; out->dims[dst++] = cs.dims[i]; }
+    for (u32 i = 0; i < cs.ndim; i++) {
+      if (drop[i]) continue;
+      out->dims[dst++] = cs.dims[i];
+    }
     out->ndim = dst;
     for (u32 i = dst; i < MAX_DIM; i++) out->dims[i] = 0;
     return 1;
@@ -414,14 +418,23 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
     if (n >= MAX_DIM) return 0;
     u64 loc = term_val(cur);
     Term k_term = heap_read(loc + 1);
-    Term a_term = heap_read(loc + 2);
-    if (term_tag(k_term) != TAG_NUM || term_tag(a_term) != TAG_NUM) return 0;
+    if (term_tag(k_term) != TAG_NUM) return 0;
     u32 k = (u32)term_val(k_term);
     if (kind == 0xFFFFFFFFu) kind = k;
     else if (kind != k) return 0;
-    out->locs[n] = loc;
-    axes_outer[n] = (u32)term_val(a_term);
-    n++;
+    // Multi-axis REDUCE: flatten every axis of this REDUCE into the
+    // chain in the OUTER-to-INNER order matching how a chain of
+    // single-axis REDUCEs would list its outer-most-first.  The current
+    // representation packs axes within one REDUCE in builder order; for
+    // the SUM-fusion preservation check we treat them as a contiguous
+    // block.
+    u32 cur_n = uop_reduce_n_axes(cur);
+    for (u32 ai = 0; ai < cur_n; ai++) {
+      if (n >= MAX_DIM) return 0;
+      out->locs[n] = loc;
+      axes_outer[n] = uop_reduce_axis(cur, ai);
+      n++;
+    }
     cur = term_resolve(heap_read(loc));
   }
   if (n < 2) return 0;

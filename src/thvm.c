@@ -273,6 +273,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/grad.c"
 #include "uop/leaf_tids.c"
 #include "uop/load.c"
+#include "uop/detach.c"
 #include "uop/cast.c"
 #include "uop/bitcast.c"
 #include "uop/index_simplify.c"
@@ -311,6 +312,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // bufferize_classify.c (uses BUFFERIZE_NODES + CMAP_LL +
 // bufferize_consumers_for_loc) and indexing.c (apply_movement_op_*).
 #include "schedule/rangeify_unified.c"
+// Per-realize arena memory planner uses a TLSF suballocator.  tlsf.c
+// is standalone (no thvm globals); materialize.c uses tlsf_init /
+// tlsf_alloc / tlsf_free at the start of every emit pass.  Port of
+// tinygrad/runtime/support/memory.py TLSFAllocator.
+#include "schedule/tlsf.c"
 #include "schedule/materialize.c"
 
 // === jit/ ===
@@ -611,6 +617,16 @@ void thvm_free(void) {
             (unsigned long long)bypass_gate_resid_count(),
             (unsigned long long)bypass_gate_stranded_count(),
             (unsigned long long)bypass_gate_bcast_count());
+  }
+  // Per-kernel wall-time profile. THVM_KERNEL_PROFILE=N -> top N rows
+  // (N=0 / unset disables; setting "" or "1" defaults to 20).
+  {
+    char const *e = getenv("THVM_KERNEL_PROFILE");
+    if (e != NULL && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0')) {
+      u32 n = (u32)atoi(e);
+      if (n == 0) n = 20;
+      cg_profile_dump(stderr, n);
+    }
   }
   if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
   // Wipe every file-static cache / side table that thvm_init seeds.

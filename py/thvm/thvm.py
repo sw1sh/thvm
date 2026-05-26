@@ -78,6 +78,7 @@ _uop_opt = _bind("py_uop_opt", c_uint64, c_uint64, c_uint32, c_uint32)
 _uop_store = _bind("py_uop_store", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_after = _bind("py_uop_after", c_uint64, c_uint64, c_uint64)
 _uop_load = _bind("py_uop_load", c_uint64, c_uint64)
+_uop_detach = _bind("py_uop_detach", c_uint64, c_uint64)
 
 # ---------------- high-level tensor surface (TAG_TEN) ----------------
 _ten_create = _bind("py_ten_create", c_uint64,
@@ -108,6 +109,8 @@ _fwd = _bind("py_fwd", c_uint64, c_uint64, c_uint64)
 _wnf = _bind("py_wnf", c_uint64, c_uint64)
 _nf = _bind("py_nf", c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
+_realize_many = _bind("py_realize_many", c_uint64,
+                      ctypes.POINTER(c_uint64), c_uint32)
 _pin_set = _bind("py_pin_set", None, c_uint64, c_uint64)
 _pin_drop = _bind("py_pin_drop", None, c_uint64)
 _reclaim = _bind("py_reclaim", None)
@@ -123,12 +126,19 @@ _cpu_live_bytes = _bind("py_cpu_live_bytes", c_uint64)
 _cpu_peak_reset = _bind("py_cpu_peak_reset", None)
 _cuda_jit_compiles = _bind("py_cuda_jit_compiles", c_uint64)
 _cuda_jit_evictions = _bind("py_cuda_jit_evictions", c_uint64)
+_cg_profile_dump = _bind("py_cg_profile_dump", None, c_uint32)
 _ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
                                c_uint64, c_int32)
 _ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
 _grad_memo_hits   = _bind("py_grad_memo_hits",   c_uint64)
 _grad_memo_misses = _bind("py_grad_memo_misses", c_uint64)
 _grad_fires       = _bind("py_grad_fires",       c_uint64)
+_grad_slot_first   = _bind("py_grad_slot_first",   c_uint64)
+_grad_slot_fold    = _bind("py_grad_slot_fold",    c_uint64)
+_grad_slot_refire  = _bind("py_grad_slot_refire",  c_uint64)
+_grad_slot_prewalk = _bind("py_grad_slot_prewalk", c_uint64)
+_grad_slot_excess  = _bind("py_grad_slot_excess",  c_uint64)
+_grad_slot_stuck   = _bind("py_grad_slot_stuck",   c_uint64)
 _ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 
@@ -457,6 +467,9 @@ class Thvm:
     def load(self, src: Term) -> Term:
         return Term(_uop_load(c_uint64(int(src))))
 
+    def detach(self, src: Term) -> Term:
+        return Term(_uop_detach(c_uint64(int(src))))
+
     # ============ high-level tensor surface (TAG_TEN) ============
     # Phase 1 of the Python Tensor frontend.  add / mul / cmplt /
     # cmpeq / reduce above already compose TAG_TEN operands; these add
@@ -548,6 +561,16 @@ class Thvm:
         """Drive wnf -> materialize -> kernelize -> schedule -> dispatch."""
         return Term(_realize(c_uint64(int(t))))
 
+    def realize_many(self, terms: "list[Term]") -> "list[Term]":
+        """Realize several terms in ONE scheduler pass (tinygrad
+        `loss.realize(*sched)`).  Returns the resolved terms in order."""
+        n = len(terms)
+        if n == 0:
+            return []
+        arr = (c_uint64 * n)(*[int(t) for t in terms])
+        _realize_many(arr, c_uint32(n))
+        return [Term(arr[i]) for i in range(n)]
+
     # ---- live-tensor pinning + cross-step buffer reclaim ----
     def pin_set(self, handle: int, t: Term) -> None:
         _pin_set(c_uint64(handle), c_uint64(int(t)))
@@ -589,6 +612,9 @@ class Thvm:
     def cuda_jit_evictions(self) -> int:
         return int(_cuda_jit_evictions())
 
+    def cg_profile_dump(self, top_n: int = 20) -> None:
+        _cg_profile_dump(c_uint32(top_n))
+
     # ---- requires_grad (canonical on TenDesc.requires_grad) ----
     def ten_set_requires_grad(self, t: Term, on: bool) -> bool:
         return bool(_ten_set_requires_grad(c_uint64(int(t)),
@@ -600,6 +626,12 @@ class Thvm:
     def grad_memo_hits   (self) -> int: return int(_grad_memo_hits())
     def grad_memo_misses (self) -> int: return int(_grad_memo_misses())
     def grad_fires       (self) -> int: return int(_grad_fires())
+    def grad_slot_first  (self) -> int: return int(_grad_slot_first())
+    def grad_slot_fold   (self) -> int: return int(_grad_slot_fold())
+    def grad_slot_refire (self) -> int: return int(_grad_slot_refire())
+    def grad_slot_prewalk(self) -> int: return int(_grad_slot_prewalk())
+    def grad_slot_excess (self) -> int: return int(_grad_slot_excess())
+    def grad_slot_stuck  (self) -> int: return int(_grad_slot_stuck())
 
     def ten_get_grad(self, t: Term) -> int:
         """Read TENS[tid].grad (the chain-rule accumulator).

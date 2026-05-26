@@ -30,13 +30,58 @@ fn void kernel_fire_gen_bump(void) {
   if (KERNEL_FIRE_GEN == 0) KERNEL_FIRE_GEN = 1;   // skip 0 sentinel
 }
 
+// One realize PASS (the whole scope from scope_begin to its matching
+// scope_end -- thvm_realize / thvm_realize_many) gets a stable epoch.
+// Unlike KERNEL_FIRE_GEN, this is NOT advanced by interact_assign_with's
+// post-write gen bump, so the ASSIGN memo (assign_fire_claim) can tell
+// "same cell, same pass" across the gen advances an in-place assign
+// forces for downstream kernel re-fire.
+static u32 ASSIGN_PASS_EPOCH = 0;
+
 fn void kernel_fire_scope_begin(void) {
-  if (KERNEL_FIRE_SCOPE_DEPTH == 0) kernel_fire_gen_bump();
+  if (KERNEL_FIRE_SCOPE_DEPTH == 0) {
+    kernel_fire_gen_bump();
+    ASSIGN_PASS_EPOCH++;
+    if (ASSIGN_PASS_EPOCH == 0) ASSIGN_PASS_EPOCH = 1;
+  }
   KERNEL_FIRE_SCOPE_DEPTH++;
 }
 
 fn void kernel_fire_scope_end(void) {
   if (KERNEL_FIRE_SCOPE_DEPTH > 0) KERNEL_FIRE_SCOPE_DEPTH--;
+}
+
+// Per-pass ASSIGN firing memo.  An UOP_ASSIGN cell reachable from more
+// than one realize root (e.g. Adam's `m` assign is BOTH a top-level
+// schedule_step output AND embedded in the param update that reads
+// `m`) must fire its in-place buffer write exactly ONCE per pass --
+// otherwise the second visit re-applies `m = m*b1 + g*(1-b1)` against
+// the already-updated buffer (m -> 1.9x).  Keyed by the cell's heap loc
+// + the realize-pass epoch (NOT the fire gen, which an in-place assign
+// bumps mid-pass); recursive training loops get a FRESH cell loc each
+// iter (alo_realize deep-copies), so no cross-iter false skip.
+#define ASSIGN_FIRE_MEMO_CAP 8192u
+static u64 ASSIGN_FIRE_LOC[ASSIGN_FIRE_MEMO_CAP];
+static u32 ASSIGN_FIRE_EPOCH[ASSIGN_FIRE_MEMO_CAP];
+fn int assign_fire_claim(u64 loc) {
+  if (loc == 0) return 1;
+  u32 h = (u32)((loc >> 4) % ASSIGN_FIRE_MEMO_CAP);
+  for (u32 probe = 0; probe < 4; probe++) {
+    u32 i = (h + probe) % ASSIGN_FIRE_MEMO_CAP;
+    if (ASSIGN_FIRE_EPOCH[i] == ASSIGN_PASS_EPOCH && ASSIGN_FIRE_LOC[i] == loc)
+      return 0;                                  // already fired this pass
+    if (ASSIGN_FIRE_EPOCH[i] != ASSIGN_PASS_EPOCH) {  // free / stale slot
+      ASSIGN_FIRE_EPOCH[i] = ASSIGN_PASS_EPOCH;
+      ASSIGN_FIRE_LOC[i] = loc;
+      return 1;                                  // claimed -- fire it
+    }
+  }
+  // 4-way slot full of this-pass entries: overwrite the base slot.  A
+  // mis-claim only costs a re-fire (the prior buggy behavior), never a
+  // dropped distinct assign.
+  ASSIGN_FIRE_EPOCH[h] = ASSIGN_PASS_EPOCH;
+  ASSIGN_FIRE_LOC[h] = loc;
+  return 1;
 }
 
 fn void kernel_fire_by_id(u32 kid) {
@@ -86,6 +131,28 @@ fn void kernel_fire_by_id(u32 kid) {
     in_buf_ids[i] = TENS[resolved_tids[i]].buf_id;
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
+
+  // Re-alloc the output buf if its slot was recycled out from under us
+  // (refcount==0 == "donor slot drained by buf_freelist_try_pop" or
+  // "post-rollback dead slot").  Without this, a re-fire would dispatch
+  // to a stale dptr -- which for CUDA is either a 0 dptr (-1 hard fail)
+  // or, worse, a dptr now owned by ANOTHER live tensor (silent loss
+  // overwrite -- the per-batch CE kernel re-firing into the scalar mean
+  // buf slot was the documented BS=128 CUDA mnist bug).  The fresh
+  // buf_alloc gets a new slot id with a fresh storage region (or one
+  // recycled cleanly by the same freelist machinery), and we re-bind
+  // TENS[output_tid].buf_id so subsequent fires see the live slot.
+  // Tinygrad parity: their Buffer.ensure_allocated() at fire time.
+  Backend *out_b = TENS[ke->output_tid].backend;
+  if (out_b != NULL && out_b->buf_refcount != NULL && out_b->buf_alloc != NULL
+      && (out_buf_id == 0 || out_b->buf_refcount(out_buf_id) == 0)) {
+    u64 nbytes = dtype_storage_bytes(ke->output_dtype, (u64)ke->output_numel);
+    u32 new_id = out_b->buf_alloc(nbytes);
+    if (new_id != 0) {
+      TENS[ke->output_tid].buf_id = new_id;
+      out_buf_id = new_id;
+    }
+  }
 
   // First-fire opt decisions.  Two layers:
   //   - hand-coded heuristic (HAND_CODED_OPTS, default ON; NOOPT=1 off):

@@ -670,8 +670,17 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
   int is_mul   = upat_match(&bufferize_upat_mul, mul, bindings);
   int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
   // Conv contraction: one MUL operand is the `_pool` unfold.  Decline
-  // matmul-protect so it fuses instead of materializing a contiguous
-  // im2col operand for GEMM.
+  // matmul-protect on EVERY backend so it fuses as a regular reduce
+  // indexing the strided unfold view -- no materialized contiguous
+  // im2col (which OOMs at scale: 24 GB CPU / 16 GB GPU for the
+  // beautiful_mnist conv backward).  The earlier CPU rationale ("BLAS
+  // over a materialized im2col, the fused reduce explodes / is 1000x
+  // slower in the walker") is obsolete: the explosion was the
+  // reshape-split-source strand bug (fixed in rangeify_unified.c -- a
+  // rank-changing reshape over a non-movement source realizes its
+  // source), and the fused reduce now compiles via strided JIT (conv2
+  // fwd 1.7 s BLAS -> ~3 ms fused-JIT).  So fused is both correct,
+  // faster, and lighter than the protected im2col on CPU too.
   if (is_mul && distinct
       && (bufferize_chain_has_pool_merge(bindings[0])
           || bufferize_chain_has_pool_merge(bindings[1]))) {
@@ -687,6 +696,44 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
             is_mul, distinct, is_mul && distinct);
   }
   return is_mul && distinct;
+}
+
+// True when the recompute subtree feeding elementwise node at `loc` reaches
+// a UOP_REDUCE without first crossing a realized boundary.  Such a node is
+// a reduce EPILOGUE: tinygrad fuses it into the reduce's consumer kernel
+// (recompute) rather than materializing it, so it does NOT get the blanket
+// MULTI realize seed.  The walk descends only through elementwise + movement
+// ops (the recompute-cheap prologue between a reduce and its readers) and
+// stops at REDUCE (found), realized boundaries, KERNEL/TEN leaves, or any
+// other op -- so a reduce-FREE shared subexpression (the multi-consumer
+// elementwise the bufferize-telemetry tests assert IS realized) is left
+// untouched.
+static int bufferize_elementwise_src_has_reduce(u64 loc, u32 depth) {
+  if (depth > 32) return 0;
+  if (loc >= HEAP_NEXT) return 0;
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  u8 op = BUFFERIZE_NODES[idx].op;
+  u8 ar = uop_arity(op);
+  for (u8 s = 0; s < ar; s++) {
+    Term ch = term_resolve(heap_read(loc + s));
+    if (term_tag(ch) != TAG_UOP) continue;
+    u8 cop = term_ext(ch);
+    if (cop == UOP_KERNEL) continue;
+    u64 cloc = term_val(ch);
+    if (cop == UOP_REDUCE) return 1;
+    // Stop descending at an already-realized boundary -- it's a separate
+    // kernel whose output this node READS, not a fusable recompute source.
+    u32 cidx = bufferize_info_find(cloc);
+    if (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized) continue;
+    int child_ew = uop_is_unary_elementwise(cop)
+                || uop_is_binary_elementwise(cop)
+                || uop_is_ternary_elementwise(cop);
+    if (child_ew || uop_is_movement(cop)) {
+      if (bufferize_elementwise_src_has_reduce(cloc, depth + 1)) return 1;
+    }
+  }
+  return 0;
 }
 
 fn void bufferize_classify(Term root) {
@@ -745,7 +792,27 @@ fn void bufferize_classify(Term root) {
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->consumer_count >= 2) {
-        bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+        // Mirror tinygrad: a multi-consumer REDUCE-EPILOGUE elementwise is
+        // NOT pre-realized.  tinygrad's pm_generate_realize_map seeds only
+        // COPY/CONTIGUOUS/STORE (indexing.py:28-35); a multi-consumer
+        // elementwise that consumes a reduce fuses (recomputes) into each
+        // consumer's kernel rather than materializing.  thvm's blanket MULTI
+        // seed force-realized every such epilogue, emitting an extra kernel
+        // per reduce.  Skip the seed only when the node is elementwise AND
+        // its recompute source reaches a REDUCE (the epilogue case) -- the
+        // unified consumer-divergence walk then realizes it only on genuine
+        // range divergence and otherwise recomputes, matching tinygrad
+        // (verified: tinygrad fuses such chains into one kernel).  A reduce-
+        // FREE shared subexpression keeps the MULTI seed so the existing
+        // bufferize-telemetry / diamond-fanout tests stay green.
+        int ew = uop_is_unary_elementwise(info->op)
+              || uop_is_binary_elementwise(info->op)
+              || uop_is_ternary_elementwise(info->op);
+        int src_has_reduce = ew
+            && bufferize_elementwise_src_has_reduce(info->loc, 0);
+        if (!(ew && src_has_reduce)) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+        }
       }
       if (info->op == UOP_REDUCE) {
         // Only MATMUL REDUCEs stay as boundaries (mirrors tinygrad's
@@ -765,7 +832,31 @@ fn void bufferize_classify(Term root) {
           bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
         } else {
-          bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+          // Env-toggle: THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE=0 skips
+          // the seed for REDUCEs whose consumer chain bottoms out at
+          // EXPAND (the broadcast-back-to-vector pattern used by
+          // softmax/BN/mean reduction).  These are exactly the REDUCEs
+          // the softmax-style unmark loop below would have unmarked
+          // anyway -- skipping the seed up front saves the round trip
+          // and lets the materialize.c orphan-BUFFERIZE path
+          // (try_inline_bufferize_1axis_via_decomp with the mask-free
+          // relaxation) fuse them inline.  REDUCEs whose chain does
+          // NOT bottom out at EXPAND (softmax-CE diamond: conv-REDUCE
+          // -> max + sub, where the sub branch reads conv-REDUCE
+          // directly without an EXPAND) stay seeded because inlining
+          // them recomputes the producer N times in the consumer
+          // kernel (cpu_uop_walk slowdown >> kernel-launch overhead).
+          // Default (env unset or != "0") keeps the conservative
+          // blanket seed and lets the unmark loop do the work.
+          char const *_red_e =
+              getenv("THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE");
+          int skip_seed = 0;
+          if (_red_e != NULL && _red_e[0] == '0') {
+            skip_seed = bufferize_reduce_consumer_is_broadcast_chain(info->loc);
+          }
+          if (!skip_seed) {
+            bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+          }
         }
       }
     }

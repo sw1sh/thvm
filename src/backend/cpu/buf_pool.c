@@ -63,7 +63,17 @@ fn void cpu_buf_pool_rollback_with_preserve(u32 wm) {
     // buffer.  Fresh scratch in a watermark scope is refcount>=1, so
     // this gate doesn't change the per-realize path.
     if (CPU_BUFS[i].refcount == 0) continue;
-    if (CPU_BUFS[i].owns_data) {
+    if (CPU_BUFS[i].skip_freelist) {
+      // Per-realize arena (see CpuBuf.skip_freelist).  Skip the
+      // freelist park, real-free immediately so its 100-700MB don't
+      // accumulate across steps.  Views into this arena still living
+      // in [wm, CPU_BUFS_NEXT) at iteration time are tied via
+      // parent_buf_id; cpu_buf_free's parent-decref chain handles
+      // the lifecycle uniformly whether we free arena first or
+      // last (the parent-decref gate `refcount > 0` no-ops the
+      // double-decref).
+      cpu_buf_free((u32)i);
+    } else if (CPU_BUFS[i].owns_data) {
       cpu_buf_freelist_push((u32)i);
     } else {
       cpu_buf_free((u32)i);
@@ -98,6 +108,36 @@ fn void cpu_buf_mark_preserved(u32 buf_id) {
 fn void cpu_buf_clear_preserved(u32 wm) {
   if (wm < 1) wm = 1;
   for (u64 i = wm; i < CPU_BUFS_NEXT; i++) CPU_BUFS[i].preserved = 0;
+}
+
+// Cross-realize arena-view release: arena views are by construction
+// "internal forward intermediates" (consumer_count==1, last_use>0;
+// see arena_boundary_is_plannable in schedule/materialize.c).  The
+// per-realize tracing-GC walk may still mark some of them preserved
+// (e.g., a view-tid that lands as a TAG_TEN reachable from the SINK
+// result Term).  Without this routine, marking the view preserved
+// also marks its backing arena preserved (CpuBuf.parent_buf_id link
+// in tensor_mark_buf_preserved.c) -- and the arena stays alive
+// across pool_rollback, accumulating ~600MB per training step.
+//
+// Tinygrad's invariant (tinygrad/schedule/memory.py:13-16,
+// memory_plan_rewrite line 29): plannable buffers are EXCLUDED from
+// `held_bufs` -- i.e. they don't survive into the next schedule.  In
+// thvm the equivalent is to actively drop the preserve flag on
+// arena views (and their parent arenas) at end-of-realize so
+// pool_rollback releases the entire arena cohort.  Sink-tensor
+// outputs are kept distinct via the last_use==0 gate in
+// arena_boundary_is_plannable, which excludes them from the arena
+// in the first place -- so the sink's standalone CpuBuf still keeps
+// its preserve flag through this clear.
+fn void cpu_buf_clear_preserved_arena_views(u32 wm) {
+  if (wm < 1) wm = 1;
+  for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
+    u32 parent = CPU_BUFS[i].parent_buf_id;
+    if (parent == 0) continue;
+    CPU_BUFS[i].preserved = 0;
+    if (parent < CPU_BUFS_NEXT) CPU_BUFS[parent].preserved = 0;
+  }
 }
 
 // Refcount-driven-free hooks (sub-item b of the refcount-driven

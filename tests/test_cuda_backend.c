@@ -523,6 +523,81 @@ int main(void) {
     free(cu);
   }
 
+  // === arena view: parent dptr shared, views disjoint, refcount chain ===
+  // Mirrors the CPU arena planner's view-into-arena pattern (see
+  // schedule/materialize.c::arena_tensor_alloc): cuMemAlloc one parent
+  // arena, hand out N non-overlapping cuda_buf_alloc_arena_view slices,
+  // verify each view's dptr equals parent.dptr + offset, verify the
+  // parent's refcount tracks the live view set, and verify cuMemFree
+  // (= the live-bytes counter going back to zero) fires only after the
+  // parent's last view drops + the +1 sentinel is dropped.
+  TEST_BEGIN("cuda-backend/arena-view-parent-refcount-chain");
+  {
+    enum { N_VIEWS = 4, VIEW_BYTES = 4096 };
+    u64 parent_bytes = (u64)N_VIEWS * VIEW_BYTES;
+    u64 live_before  = cuda_buf_live_bytes();
+    u32 parent = cuda_buf_alloc(parent_bytes);
+    CHECK(parent != 0);
+    CHECK_EQ(cuda_buf_live_bytes(), live_before + parent_bytes);
+    CHECK_EQ(cuda_buf_refcount(parent), 1u);
+    CHECK_EQ(CUDA_BUFS[parent].owns_data, 1);
+
+    CUdeviceptr parent_dptr = cuda_buf_dptr(parent);
+    u32 views[N_VIEWS];
+    for (int v = 0; v < N_VIEWS; v++) {
+      u64 off = (u64)v * VIEW_BYTES;
+      views[v] = cuda_buf_alloc_arena_view(parent_dptr + off,
+                                           VIEW_BYTES, parent);
+      CHECK(views[v] != 0);
+      CHECK_EQ(cuda_buf_dptr(views[v]), parent_dptr + off);
+      CHECK_EQ(CUDA_BUFS[views[v]].owns_data, 0);
+      CHECK_EQ(CUDA_BUFS[views[v]].parent_buf_id, parent);
+    }
+    // Parent refcount = 1 sentinel + 1 per live view.
+    CHECK_EQ(cuda_buf_refcount(parent), 1u + (u32)N_VIEWS);
+    // Live bytes unchanged: views borrow parent storage.
+    CHECK_EQ(cuda_buf_live_bytes(), live_before + parent_bytes);
+
+    // Drop views one by one.  Parent refcount drops with each, live
+    // bytes unchanged until the parent itself is finally released.
+    for (int v = 0; v < N_VIEWS; v++) {
+      cuda_buf_decref(views[v]);
+      CHECK_EQ(cuda_buf_refcount(parent), 1u + (u32)(N_VIEWS - v - 1));
+      CHECK_EQ(cuda_buf_live_bytes(), live_before + parent_bytes);
+    }
+    // Sentinel drop: parent refcount hits zero -> cuMemFree fires ->
+    // live bytes return to baseline.
+    cuda_buf_decref(parent);
+    CHECK_EQ(cuda_buf_refcount(parent), 0u);
+    CHECK_EQ(cuda_buf_live_bytes(), live_before);
+  }
+
+  // === arena view never lands on the freelist ========================
+  // Recycling a non-owning view through the freelist would alias the
+  // parent's dptr into a future cuda_buf_alloc.  freelist_push must
+  // refuse the view (owns_data == 0); freelist_try_pop must skip any
+  // accidentally-present view entry.
+  TEST_BEGIN("cuda-backend/arena-view-skips-freelist");
+  {
+    u32 parent = cuda_buf_alloc(8192);
+    CHECK(parent != 0);
+    CUdeviceptr pdptr = cuda_buf_dptr(parent);
+    u32 view = cuda_buf_alloc_arena_view(pdptr, 4096, parent);
+    CHECK(view != 0);
+
+    u32 free_len_before = CUDA_FREELIST_LEN;
+    // Forcibly drop the view's refcount to mimic a planner releasing
+    // it, then attempt the push.  Owning bufs would land; the view
+    // must not.
+    CUDA_BUFS[view].refcount = 0;
+    cuda_buf_freelist_push(view);
+    CHECK_EQ(CUDA_FREELIST_LEN, free_len_before);
+    // Restore the view's accounting and free through the parent chain.
+    CUDA_BUFS[view].refcount = 1;
+    cuda_buf_decref(view);
+    cuda_buf_decref(parent);
+  }
+
   thvm_cuda_shutdown();
   thvm_free();
   TEST_REPORT();

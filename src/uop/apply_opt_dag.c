@@ -201,26 +201,33 @@ static Term apply_opt_dag_sub_uncached(Term t, ApplyOptDagSubState *st) {
     return uop_opt(new_tgt, uop_opt_kind(t), uop_opt_factor(t));
   }
   if (op == UOP_REDUCE) {
-    // Rebuild with the (possibly remapped) reduce axis -- see the
+    // Rebuild with the (possibly remapped) reduce axes -- see the
     // long comment on ApplyOptDagSubState.reduce_shift_above.
-    u64 rloc     = term_val(t);
-    u32 kind     = (u32)term_val(heap_read(rloc + 1));
-    u32 red_axis = (u32)term_val(heap_read(rloc + 2));
-    u32 new_axis = red_axis;
-    if (st->reduce_shift_above != 0xFFFFFFFFu
-        && red_axis > st->reduce_shift_above) {
-      new_axis = red_axis + 1;
+    // Multi-axis: shift/swap each axis independently.
+    u32 kind   = uop_reduce_kind(t);
+    u32 n_axes = uop_reduce_n_axes(t);
+    u32 new_axes[MAX_DIM];
+    int axes_changed = 0;
+    for (u32 i = 0; i < n_axes; i++) {
+      u32 ax = uop_reduce_axis(t, i);
+      u32 mapped = ax;
+      if (st->reduce_shift_above != 0xFFFFFFFFu
+          && ax > st->reduce_shift_above) {
+        mapped = ax + 1;
+      }
+      if (st->reduce_swap_a != 0xFFFFFFFFu) {
+        if (ax == st->reduce_swap_a)      mapped = st->reduce_swap_b;
+        else if (ax == st->reduce_swap_b) mapped = st->reduce_swap_a;
+      }
+      new_axes[i] = mapped;
+      if (mapped != ax) axes_changed = 1;
     }
-    if (st->reduce_swap_a != 0xFFFFFFFFu) {
-      if (red_axis == st->reduce_swap_a)      new_axis = st->reduce_swap_b;
-      else if (red_axis == st->reduce_swap_b) new_axis = st->reduce_swap_a;
-    }
-    Term old_src = heap_read(rloc + 0);
+    Term old_src = uop_reduce_src(t);
     Term new_src = (term_tag(old_src) == TAG_UOP)
                    ? apply_opt_dag_substitute(old_src, st)
                    : old_src;
-    if (new_src == old_src && new_axis == red_axis) return t;
-    return uop_reduce(kind, new_axis, new_src);
+    if (new_src == old_src && !axes_changed) return t;
+    return uop_reduce_multi(kind, n_axes, new_axes, new_src);
   }
   u8 ar = uop_arity(op);
   if (ar == 0) return t;

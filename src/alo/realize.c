@@ -48,7 +48,16 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
         case UOP_ADD: case UOP_MUL: case UOP_CMPLT:        return 2;
         case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
         case UOP_LOG2: case UOP_SQRT:                      return 1;
-        case UOP_REDUCE:                                   return 3;
+        // UOP_REDUCE: book heap = [src, kind, n_axes, axis_0, ...].
+        // n_axes lives at val+2 (a TAG_NUM cell in the book); total
+        // cells = 3 + n_axes.
+        case UOP_REDUCE: {
+          Term n_cell = book_read(val + 2);
+          u32 n_axes = (term_tag(n_cell) == TAG_NUM)
+                       ? (u32)term_val(n_cell) : 1;
+          if (n_axes > MAX_DIM) n_axes = MAX_DIM;
+          return 3 + n_axes;
+        }
         case UOP_LOAD:                                     return 1;
         case UOP_KERNEL:                                   return 2;
         default:                                           return 0;

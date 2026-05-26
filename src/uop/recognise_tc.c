@@ -172,16 +172,18 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent) {
 
   u64 sloc = term_val(root);
   Term reduce = heap_read(sloc + 2);
-  u64 rloc = term_val(reduce);
-  u32 kind = (u32)term_val(heap_read(rloc + 1));
+  u32 kind = uop_reduce_kind(reduce);
   if (kind != REDUCE_SUM) return 0;
-  u32 red_axis = (u32)term_val(heap_read(rloc + 2));
+  // TC matmul classifier expects a single reduce axis (K) -- multi-axis
+  // REDUCE bails (caller falls back to non-TC path).
+  if (uop_reduce_n_axes(reduce) != 1) return 0;
+  u32 red_axis = uop_reduce_axis(reduce, 0);
 
   // Walk the MUL's INDEX_E address expressions for a UOP_RANGE leaf
   // whose axis_id matches red_axis; its extent is K.  Mirrors
   // rmu_emit_matmul_tc's K-extent lookup so callers see the same
   // value the renderer will see.
-  Term mul    = heap_read(rloc + 0);
+  Term mul    = uop_reduce_src(reduce);
   Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
   Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
 
@@ -253,12 +255,13 @@ fn int uop_classify_dot(Term root, u32 *out_k_extent) {
 
   u64 sloc = term_val(root);
   Term reduce = heap_read(sloc + 2);
-  u64 rloc = term_val(reduce);
-  u32 kind = (u32)term_val(heap_read(rloc + 1));
+  u32 kind = uop_reduce_kind(reduce);
   if (kind != REDUCE_SUM) return 0;
-  u32 red_axis = (u32)term_val(heap_read(rloc + 2));
+  // Dot recogniser expects single reduce axis.
+  if (uop_reduce_n_axes(reduce) != 1) return 0;
+  u32 red_axis = uop_reduce_axis(reduce, 0);
 
-  Term mul    = heap_read(rloc + 0);
+  Term mul    = uop_reduce_src(reduce);
   Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
   Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
 
@@ -302,12 +305,13 @@ fn int uop_classify_gemv(Term root, u32 *out_k_extent, int *out_w_first) {
 
   u64 sloc = term_val(root);
   Term reduce = heap_read(sloc + 2);
-  u64 rloc = term_val(reduce);
-  u32 kind = (u32)term_val(heap_read(rloc + 1));
+  u32 kind = uop_reduce_kind(reduce);
   if (kind != REDUCE_SUM) return 0;
-  u32 red_axis = (u32)term_val(heap_read(rloc + 2));
+  // GEMV recogniser expects single reduce axis.
+  if (uop_reduce_n_axes(reduce) != 1) return 0;
+  u32 red_axis = uop_reduce_axis(reduce, 0);
 
-  Term mul    = heap_read(rloc + 0);
+  Term mul    = uop_reduce_src(reduce);
   Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
   Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
 

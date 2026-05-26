@@ -213,10 +213,14 @@ static Term ru_reduce_repair_broadcast_body(Term reduce_t, Term reduce_range) {
       || term_ext(reduce_range) != UOP_RANGE) {
     return reduce_t;
   }
-  u64 rloc  = term_val(reduce_t);
-  u32 kind  = (u32)term_val(heap_read(rloc + 1));
-  u32 r_aid = (u32)term_val(heap_read(rloc + 2));
-  Term body = heap_read(rloc + 0);
+  // Multi-axis REDUCE: only the single-axis case admits the constant-body
+  // simplification cleanly (extent-multiply lifted out).  Multi-axis paths
+  // route through ru_subtree_uses_axis per-axis; for now we bail on
+  // n_axes!=1 and let the body be reduced as-is.
+  if (uop_reduce_n_axes(reduce_t) != 1) return reduce_t;
+  u32 kind  = uop_reduce_kind(reduce_t);
+  u32 r_aid = uop_reduce_axis(reduce_t, 0);
+  Term body = uop_reduce_src(reduce_t);
   if (ru_subtree_uses_axis(body, r_aid, 0)) return reduce_t;
   u32 extent = uop_range_extent(reduce_range);
   if (extent == 0) return reduce_t;
@@ -662,6 +666,20 @@ fn void run_rangeify_unified(Term root) {
 
     Term out_rngs[RU_MAX_AXES] = {0};
 
+    // A rank-changing RESHAPE -- the pool windowing
+    // `x.reshape(B,C,Ho,k,Wo,k)` (split) and the pool-gradient merge
+    // `reshape((B,C,Ho,k,Wo,k)->(B,C,Ho,Wo))` -- swizzles the consumer's
+    // ranges into compound IDIV/IMOD/affine index expressions
+    // (apply_movement_op_reshape) that flow into the reshape SOURCE's
+    // out_rngs.  The source no longer needs a force-realize band-aid: the
+    // general strand covered-check below (ru_expr_references_aid) now
+    // recognises the swizzled leaf axes inside those compound out_rngs as
+    // covered, so the source FUSES into the consuming reduce/elementwise
+    // kernel instead of materializing.  Mirrors tinygrad, which lowers
+    // relu->max_pool2d->sum to a single fused reduce kernel
+    // (schedule/indexing.py `_apply_reshape` + symbolic simplify +
+    // `remove_movement_op_after_rangeify`).
+
     if (RU_REALIZE_MAP[node_idx].realized_full
         || RU_REALIZE_MAP[node_idx].realized_partial) {
       // *** Mirror indexing.py:182-189: realize_map entry pre-seeded ***
@@ -804,29 +822,31 @@ fn void run_rangeify_unified(Term root) {
     } else if (info->op == UOP_REDUCE) {
       // Mirror indexing.py:253-254
       //   `tuple(rctx.new_range(s, axistype=AxisType.REDUCE) if i in arg[1] else r ...`
-      // thvm UOP_REDUCE stores a single axis at heap[loc + 2].
+      // Multi-axis REDUCE: every axis in the node's axes-list gets a
+      // fresh KAX_REDUCE range; non-reduce dims thread out_rngs through.
       //
-      // We also record the fresh REDUCE range Term in
-      // RU_REDUCE_RANGES[node_idx] so materialize.c can enumerate the
-      // reduce-axes via accessor without re-deriving them from the
-      // heap. This is the thvm-side equivalent of
-      // tinygrad's `convert_reduce_to_reduce_with_ranges` storing the
-      // ranges in `src=(value,) + tuple(new_ranges)` at indexing.py:94.
+      // RU_REDUCE_RANGES[node_idx] records every fresh REDUCE range
+      // Term so materialize.c can enumerate them via accessor without
+      // re-deriving from the heap (thvm equivalent of tinygrad's
+      // convert_reduce_to_reduce_with_ranges packing them into
+      // src=(value,)+tuple(new_ranges) at indexing.py:94).
       Shape src_shape;
+      Term red_t = term_new(0, TAG_UOP, info->op, info->loc);
+      u32 n_axes = uop_reduce_n_axes(red_t);
       if (!ru_node_src_shape(info->loc, &src_shape)) {
         for (u8 a = 0; a < my_ndim; a++) in_rngs[a] = out_rngs[a];
       } else {
-        u32 raxis = (u32)term_val(heap_read(info->loc + 2));
-        // tinygrad keeps the input rank == producer.shape rank; with
-        // a single axis collapse, src_shape == out_shape with raxis
-        // expanded. Re-thread out_rngs and inject a fresh REDUCE range
-        // at raxis.
+        u8 is_reduce_axis[RU_MAX_AXES] = {0};
+        for (u32 ai = 0; ai < n_axes; ai++) {
+          u32 ax = uop_reduce_axis(red_t, ai);
+          if (ax < RU_MAX_AXES) is_reduce_axis[ax] = 1;
+        }
         u8 dst_ndim = (u8)src_shape.ndim;
         if (dst_ndim > RU_MAX_AXES) dst_ndim = RU_MAX_AXES;
         u8 src_cursor = 0;
         RU_REDUCE_RANGES[node_idx].n = 0;
         for (u8 a = 0; a < dst_ndim; a++) {
-          if (a == raxis) {
+          if (is_reduce_axis[a]) {
             Term rng = ru_new_range(src_shape.dims[a], KAX_REDUCE);
             in_rngs[a] = rng;
             // Record only true UOP_RANGE leaves (extent-1 reduce axes
@@ -1280,6 +1300,28 @@ typedef struct {
   u8  n_free;
 } RuFreeAxisSet;
 
+// Does expression `t` reference a UOP_RANGE leaf with axis_id == aid
+// anywhere in its DAG?  Stops at BUFFER/BUFFERIZE/KERNEL boundaries
+// (their internal ranges are scoped separately).  Used by the strand
+// covered-check so a free axis that appears inside a COMPOUND out_rngs
+// entry (the IDIV/IMOD/affine swizzle a rank-changing RESHAPE builds,
+// `aid_hi*k + aid_lo`) counts as covered: the consumer iterates those
+// leaf axes in its own scope and substitutes the whole compound
+// expression on splice (ru_subtree_rewrite_ranges via in_rngs).
+static int ru_expr_references_aid(Term t, u32 aid, u32 depth) {
+  if (depth > 64) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) return uop_range_axis_id(r) == aid;
+  if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return 0;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++)
+    if (ru_expr_references_aid(heap_read(loc + i), aid, depth + 1)) return 1;
+  return 0;
+}
+
 static int ru_free_axis_bound_has(RuFreeAxisSet const *s, u32 aid) {
   for (u8 i = 0; i < s->n_bound; i++) if (s->bound_aids[i] == aid) return 1;
   return 0;
@@ -1312,18 +1354,22 @@ static void ru_collect_free_axes_rec(Term t, RuFreeAxisSet *s, u32 depth) {
   if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return;
   u64 loc = term_val(r);
   if (op == UOP_REDUCE) {
-    // The REDUCE's axis cell at heap[loc + 2] is the axis_id (a raw u32
-    // stored as a TAG_NUM Term).  Push it onto the bound set, recurse
-    // into the body, then pop.
-    u32 r_aid = (u32)term_val(heap_read(loc + 2));
-    int pushed = 0;
-    if (!ru_free_axis_bound_has(s, r_aid)
-        && s->n_bound < RU_AXIS_SUBST_CAP) {
-      s->bound_aids[s->n_bound++] = r_aid;
-      pushed = 1;
+    // Push EVERY reduce axis onto the bound set, recurse into the body,
+    // then pop them all.  Multi-axis support: a REDUCE binds all its
+    // axes simultaneously (mirrors tinygrad's per-REDUCE .ranges set;
+    // uop/ops.py: ended_ranges contain every axis in src[1:]).
+    u32 n_axes = uop_reduce_n_axes(r);
+    u32 pushed_count = 0;
+    for (u32 i = 0; i < n_axes; i++) {
+      u32 r_aid = uop_reduce_axis(r, i);
+      if (!ru_free_axis_bound_has(s, r_aid)
+          && s->n_bound < RU_AXIS_SUBST_CAP) {
+        s->bound_aids[s->n_bound++] = r_aid;
+        pushed_count++;
+      }
     }
-    ru_collect_free_axes_rec(heap_read(loc + 0), s, depth + 1);
-    if (pushed) s->n_bound--;
+    ru_collect_free_axes_rec(uop_reduce_src(r), s, depth + 1);
+    s->n_bound -= pushed_count;
     return;
   }
   u8 ar = uop_arity(op);
@@ -1595,25 +1641,34 @@ fn void pm_apply_rangeify(Term root) {
     Term in_addr   = ru_build_input_addr_for(rm, info->loc);
     Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
                                         in_addr, rm);
-    // Rewire UOP_REDUCE's axis field from the original shape-axis index
-    // (e.g. "axis 1 of {3,2}") to the freshly minted UOP_RANGE's axis_id.
-    // uop_graph_rebuild_with_srcs preserves the original axis cell from
-    // info->loc, but downstream walkers (cpu_uop_walk's uwalk_run_reduce,
-    // render_uop's rmu_emit_store_reduce) match the REDUCE's stored axis
-    // against the body's UOP_RANGE.axis_id -- which is now the fresh
-    // RU_REDUCE_RANGES[i].ranges[0]'s axis_id, not the shape-axis index.
-    if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 1
+    // Rewire UOP_REDUCE's axes from the original shape-axis indices
+    // (e.g. "axes (1, 3) of {3,2,4,5}") to the freshly minted
+    // UOP_RANGE.axis_ids.  Multi-axis: one fresh RANGE per axis in
+    // RU_REDUCE_RANGES[i].ranges -- the rewritten REDUCE inherits
+    // every axis_id from those ranges, dropping shape-coord axes.
+    // Downstream walkers (cpu_uop_walk's uwalk_run_reduce, render_uop)
+    // match against RANGE.axis_id, not the shape index.
+    if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n >= 1
         && term_tag(rewritten) == TAG_UOP
         && term_ext(rewritten) == UOP_REDUCE) {
-      Term rng = RU_REDUCE_RANGES[i].ranges[0];
-      u32 r_aid = (u32)term_val(heap_read(term_val(rng) + 0));
-      u32 kind  = (u32)term_val(heap_read(term_val(rewritten) + 1));
-      Term src  = heap_read(term_val(rewritten) + 0);
-      rewritten = uop_reduce(kind, r_aid, src);
-      // Repair: if the rewritten body lost the reduce-axis RANGE leaf
+      u32 n_rrng = RU_REDUCE_RANGES[i].n;
+      u32 new_axes[MAX_DIM];
+      for (u32 k = 0; k < n_rrng && k < MAX_DIM; k++) {
+        Term rng = RU_REDUCE_RANGES[i].ranges[k];
+        new_axes[k] = (u32)term_val(heap_read(term_val(rng) + 0));
+      }
+      u32 kind  = uop_reduce_kind(rewritten);
+      Term src  = uop_reduce_src(rewritten);
+      rewritten = uop_reduce_multi(kind, n_rrng, new_axes, src);
+      // Repair: if the rewritten body lost any reduce-axis RANGE leaf
       // (e.g. a stride-0 broadcast collapsed past ru_rewrite_subtree),
       // collapse the REDUCE to `body * extent` (SUM) or `body` (MAX).
-      rewritten = ru_reduce_repair_broadcast_body(rewritten, rng);
+      // Currently only the single-axis broadcast-repair fires; multi-
+      // axis with mid-chain collapse stays as-is (the unmatched axes
+      // still bind in the walker for the surviving ranges).
+      if (n_rrng == 1) {
+        rewritten = ru_reduce_repair_broadcast_body(rewritten, RU_REDUCE_RANGES[i].ranges[0]);
+      }
     }
     // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
     // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
@@ -1687,12 +1742,16 @@ fn void pm_apply_rangeify(Term root) {
       for (u8 fi = 0; fi < fs.n_free; fi++) {
         u32 aid = fs.free_aids[fi];
         int covered = 0;
+        // An axis is covered when it appears ANYWHERE inside one of the
+        // producer's out_rngs expressions -- not only as a top-level plain
+        // RANGE.  A rank-changing RESHAPE swizzles the consumer ranges into
+        // compound IDIV/IMOD/affine out_rngs (`aid_hi*k + aid_lo`); the leaf
+        // axes inside those expressions are iterated by the consumer and
+        // substituted as a whole on splice (ru_subtree_rewrite_ranges via
+        // the consumer's in_rngs).  Treating them as stranded force-realized
+        // the reshape source unnecessarily (the old reshape-source band-aid).
         for (u8 a = 0; a < rm->out_ndim && !covered; a++) {
-          Term pr = rm->out_rngs[a];
-          if (term_tag(pr) == TAG_UOP && term_ext(pr) == UOP_RANGE
-              && uop_range_axis_id(pr) == aid) {
-            covered = 1;
-          }
+          if (ru_expr_references_aid(rm->out_rngs[a], aid, 0)) covered = 1;
         }
         if (!covered) { stranded = 1; break; }
       }

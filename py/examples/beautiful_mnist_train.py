@@ -98,8 +98,11 @@ def main():
     Tensor.training = True
     wall, peak = [], 0
     acc = float("nan")
+    _noreclaim = os.environ.get("NORECLAIM") == "1"
     for i in range(steps):
-        GlobalCounters.reset()             # triggers cross-step reclaim
+        opt.zero_grad()                    # clear grad accumulators (tinygrad pattern)
+        if not _noreclaim:
+            GlobalCounters.reset()         # triggers cross-step reclaim
         _TH.cpu_peak_reset()               # within-step peak from here
         t0 = time.time()
         idx = np.random.randint(0, len(Xtr), size=bs)
@@ -127,7 +130,16 @@ def main():
               + (f" test_acc={acc:5.2f}%" if test_every and (i+1) % test_every == 0 else ""),
               flush=True)
 
-    if not test_every:
+    if os.environ.get("THVM_KERNEL_PROFILE"):
+        _TH.cg_profile_dump(int(os.environ.get("THVM_KERNEL_PROFILE", "20")))
+        return
+    # TEST_EVERY=0 means SKIP eval entirely.  Inverted previously: `not
+    # test_every` ran the final test_acc when 0, which is the eval-mode
+    # hang on CUDA/Metal (model(x) under Tensor.training=False stalls),
+    # leaving the process zombied forever in test_acc after the last step
+    # printed.  Now: only run a final eval if test_every > 0 AND we
+    # didn't already eval this step.
+    if test_every and (steps % test_every) != 0:
         acc = test_acc()
     warm = wall[1:] or wall
     print(f"\nSUMMARY final_acc={acc:.2f}% cold={wall[0]:.0f}ms "

@@ -38,6 +38,10 @@ fn void cpu_buf_freelist_push(u32 buf_id) {
   // doesn't keep counting toward TTotalBufBytes / the
   // memory-probe sums.  cpu_buf_freelist_try_pop resets
   // refcount = 1 on the next allocation.
+  // Note: arena views are external (owns_data=0); cpu_buf_freelist_try_pop
+  // explicitly skips externals so they never get recycled through here.
+  // Their parent_buf_id link is dropped through cpu_buf_free() when the
+  // rollback path retires them, NOT here.
   CpuBuf *b = &CPU_BUFS[buf_id];
   b->refcount  = 0;
   b->preserved = 0;
@@ -52,6 +56,17 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   // lets a freed 10MB activation back a later 8MB one, so the live set
   // (not the sum) bounds memory -- tinygrad's reuse behaviour.  The
   // kernel only touches [0,nbytes); the slot keeps its larger nbytes.
+  //
+  // Slot identity: the recycled storage block is handed to a FRESH
+  // CPU_BUFS slot id; the donor slot is left with data=NULL (dead).
+  // Without this swap, the planner's same-pass push/pop would alias
+  // two TenDescs onto one slot id (planner pushes while the donor's
+  // owning TenDesc still holds buf_id; pop binds the new TenDesc to
+  // the same id).  A subsequent re-fire of the donor's producer kernel
+  // would then write back through the alias and overwrite the new
+  // tensor.  Mirrors cuda_buf_freelist_try_pop; tinygrad parity:
+  // their schedule/memory.py + Buffer object give each recycle a
+  // fresh logical Buffer wrapping reused storage.
   u32 best = 0; u64 best_nb = (u64)-1;
   for (u32 i = 0; i < CPU_FREELIST_LEN; i++) {
     u32 bid = CPU_FREELIST[i];
@@ -62,15 +77,42 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
     if (b->nbytes < best_nb) { best_nb = b->nbytes; best = i; }
   }
   if (best_nb == (u64)-1) return 0;   // miss
-  u32 bid = CPU_FREELIST[best];
+  u32 donor_bid = CPU_FREELIST[best];
   CPU_FREELIST[best] = CPU_FREELIST[CPU_FREELIST_LEN - 1];
   CPU_FREELIST_LEN--;
-  CpuBuf *b = &CPU_BUFS[bid];
-  memset(b->data, 0, (size_t)nbytes);
-  b->refcount  = 1;
-  b->preserved = 0;
-  b->freeable  = 0;
-  return bid;
+  CpuBuf *donor = &CPU_BUFS[donor_bid];
+  void *data = donor->data;
+  u64   nb   = donor->nbytes;
+  donor->data       = NULL;
+  donor->nbytes     = 0;
+  donor->refcount   = 0;
+  donor->preserved  = 0;
+  donor->freeable   = 0;
+  donor->owns_data  = 0;
+  donor->handle     = NULL;
+  donor->on_release = NULL;
+  if (CPU_BUFS_NEXT >= CPU_BUFS_CAP) {
+    // Out of slot table -- restore donor and bail; caller falls back
+    // to fresh calloc (extra alloc; never aliasing).
+    donor->data      = data;
+    donor->nbytes    = nb;
+    donor->refcount  = 0;
+    donor->owns_data = 1;
+    cpu_buf_freelist_push(donor_bid);
+    return 0;
+  }
+  u32 new_id = (u32)CPU_BUFS_NEXT++;
+  CpuBuf *nb_slot = &CPU_BUFS[new_id];
+  nb_slot->data       = data;
+  nb_slot->nbytes     = nb;
+  nb_slot->refcount   = 1;
+  nb_slot->preserved  = 0;
+  nb_slot->freeable   = 0;
+  nb_slot->owns_data  = 1;
+  nb_slot->handle     = NULL;
+  nb_slot->on_release = NULL;
+  memset(data, 0, (size_t)nbytes);
+  return new_id;
 }
 
 // Undo a cpu_buf_freelist_push: if `buf_id` is still parked on the
