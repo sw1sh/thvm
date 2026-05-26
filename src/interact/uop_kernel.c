@@ -132,6 +132,28 @@ fn void kernel_fire_by_id(u32 kid) {
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
 
+  // Re-alloc the output buf if its slot was recycled out from under us
+  // (refcount==0 == "donor slot drained by buf_freelist_try_pop" or
+  // "post-rollback dead slot").  Without this, a re-fire would dispatch
+  // to a stale dptr -- which for CUDA is either a 0 dptr (-1 hard fail)
+  // or, worse, a dptr now owned by ANOTHER live tensor (silent loss
+  // overwrite -- the per-batch CE kernel re-firing into the scalar mean
+  // buf slot was the documented BS=128 CUDA mnist bug).  The fresh
+  // buf_alloc gets a new slot id with a fresh storage region (or one
+  // recycled cleanly by the same freelist machinery), and we re-bind
+  // TENS[output_tid].buf_id so subsequent fires see the live slot.
+  // Tinygrad parity: their Buffer.ensure_allocated() at fire time.
+  Backend *out_b = TENS[ke->output_tid].backend;
+  if (out_b != NULL && out_b->buf_refcount != NULL && out_b->buf_alloc != NULL
+      && (out_buf_id == 0 || out_b->buf_refcount(out_buf_id) == 0)) {
+    u64 nbytes = dtype_storage_bytes(ke->output_dtype, (u64)ke->output_numel);
+    u32 new_id = out_b->buf_alloc(nbytes);
+    if (new_id != 0) {
+      TENS[ke->output_tid].buf_id = new_id;
+      out_buf_id = new_id;
+    }
+  }
+
   // First-fire opt decisions.  Two layers:
   //   - hand-coded heuristic (HAND_CODED_OPTS, default ON; NOOPT=1 off):
   //     apply tinygrad-style UPCAST/LOCAL/GROUP/UNROLL/TC by default,

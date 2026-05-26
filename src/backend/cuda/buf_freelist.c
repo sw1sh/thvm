@@ -34,6 +34,20 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
   // varied activation sizes, so peak device memory ~= sum-of-activations
   // instead of the live set; best-fit fixes that).  cuMemFree/Alloc are
   // costly so recycling matters even more here.
+  //
+  // Slot identity: a recycled storage block gets handed to a FRESH
+  // CUDA_BUFS slot id.  The donor slot is left with dptr=0 (dead).  This
+  // matters because the planner pushes a buf to the freelist while the
+  // OWNING TenDesc still holds buf_id == donor.  Without the slot swap,
+  // a same-pass alloc that best-fit-pops the donor would alias two
+  // TenDescs onto the same slot id; the next realize's kernel re-fire
+  // would write to the donor's TenDesc.buf_id and overwrite the new
+  // tensor stored there.  Handing the storage to a new slot keeps each
+  // TenDesc.buf_id pointing at distinct logical buffers; the donor's
+  // dptr==0 then drives the per-fire re-alloc in kernel_fire_by_id.
+  // Tinygrad parity: their schedule/memory.py + runtime Buffer object
+  // separates logical Buffer identity from underlying storage; recycle
+  // creates a new Buffer wrapping reused bytes.
   u32 best_i = 0; u64 best_nb = (u64)-1;
   for (u32 i = 0; i < CUDA_FREELIST_LEN; i++) {
     u32 bid = CUDA_FREELIST[i];
@@ -43,12 +57,34 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
     if (b->nbytes < best_nb) { best_nb = b->nbytes; best_i = i; }
   }
   if (best_nb == (u64)-1) return 0;
-  u32 bid = CUDA_FREELIST[best_i];
+  u32 donor_bid = CUDA_FREELIST[best_i];
   CUDA_FREELIST[best_i] = CUDA_FREELIST[CUDA_FREELIST_LEN - 1];
   CUDA_FREELIST_LEN--;
-  cuMemsetD8(CUDA_BUFS[bid].dptr, 0, (size_t)nbytes);
-  CUDA_BUFS[bid].refcount = 1;
-  return bid;
+  // Transfer storage from donor slot to a fresh slot.  Donor goes dead.
+  CudaBuf *donor = &CUDA_BUFS[donor_bid];
+  CUdeviceptr dptr = donor->dptr;
+  u64         nb   = donor->nbytes;
+  donor->dptr     = 0;
+  donor->nbytes   = 0;
+  donor->refcount = 0;
+  donor->preserved = 0;
+  if (CUDA_BUFS_NEXT >= CUDA_BUFS_CAP) {
+    // Out of slot table -- restore donor and bail; caller will fall back
+    // to cuMemAlloc (cost: an extra fresh allocation, never aliasing).
+    donor->dptr     = dptr;
+    donor->nbytes   = nb;
+    donor->refcount = 0;
+    cuda_buf_freelist_push(donor_bid);
+    return 0;
+  }
+  u32 new_id = (u32)CUDA_BUFS_NEXT++;
+  CudaBuf *nb_slot = &CUDA_BUFS[new_id];
+  nb_slot->dptr     = dptr;
+  nb_slot->nbytes   = nb;
+  nb_slot->refcount = 1;
+  nb_slot->preserved = 0;
+  cuMemsetD8(dptr, 0, (size_t)nbytes);
+  return new_id;
 }
 
 fn void cuda_buf_freelist_remove(u32 buf_id) {

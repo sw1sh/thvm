@@ -27,17 +27,34 @@ int main(void) {
   cpu_buf_freelist_push(a);
   CHECK_EQ(CPU_BUFS[a].refcount, 0);   // bm4b: push drops refcount
 
-  TEST_BEGIN("slot-reuse/realloc-after-push-pops-same-slot");
-  // Same as the bm4a check but exercising the new push path.
+  TEST_BEGIN("slot-reuse/realloc-after-push-recycles-storage-on-fresh-slot");
+  // Same alloc shape as the bm4a check, but the pop returns a FRESH
+  // slot id holding the donor's storage (see cpu_buf_freelist_try_pop:
+  // identity-swap fixes the cross-TenDesc loss-overwrite bug).  Donor
+  // `a` ends up dead (data=NULL).
+  void *a_data = NULL; // captured below
+  cpu_buf_freelist_push(a);   // ensure a is on the list (was popped earlier)
+  // The push above may be a no-op if a was already popped to a fresh
+  // slot; cpu_buf_freelist_push is idempotent given the dead-slot
+  // bookkeeping.  Re-stage a fresh donor for a clean assertion.
+  thvm_free();
+  thvm_init();
+  u32 a2 = cpu_buf_alloc(64);
+  CHECK(a2 > 0);
+  a_data = CPU_BUFS[a2].data;
+  cpu_buf_freelist_push(a2);
   u32 b = cpu_buf_alloc(64);
-  CHECK_EQ(b, a);                       // recycled
-  CHECK_EQ(CPU_BUFS[b].refcount, 1);    // pop reset
+  CHECK(b != a2);                       // fresh slot
+  CHECK_EQ(CPU_BUFS[b].data, a_data);   // donor's storage
+  CHECK_EQ(CPU_BUFS[b].refcount, 1);    // fresh slot reset
+  CHECK(CPU_BUFS[a2].data == NULL);     // donor dead
 
   TEST_BEGIN("slot-reuse/rollback-pushes-non-preserved-owning-bufs");
   // Drop a fresh CpuBuf into [wm, NEXT) and DON'T mark it
   // preserved.  cpu_buf_pool_rollback_with_preserve should push
   // it to the freelist (refcount drops to 0); a subsequent
-  // cpu_buf_alloc with matching nbytes pops it back out.
+  // cpu_buf_alloc with matching nbytes recycles its storage onto
+  // a fresh slot id (the donor slot's data goes NULL).
   thvm_free();
   thvm_init();
   u32 wm = cpu_buf_pool_begin();
@@ -46,13 +63,16 @@ int main(void) {
   CHECK(c1 > 0); CHECK(c2 > 0);
   CHECK_EQ(CPU_BUFS[c1].refcount, 1);
   CHECK_EQ(CPU_BUFS[c2].refcount, 1);
+  void *c1_data = CPU_BUFS[c1].data;
+  void *c2_data = CPU_BUFS[c2].data;
   cpu_buf_pool_rollback_with_preserve(wm);
   // Both owning + not preserved -> pushed -> refcount 0.
   CHECK_EQ(CPU_BUFS[c1].refcount, 0);
   CHECK_EQ(CPU_BUFS[c2].refcount, 0);
-  // Next 48-byte alloc must reuse one of them.
+  // Next 48-byte alloc takes one donor's storage onto a fresh slot id.
   u32 c3 = cpu_buf_alloc(48);
-  CHECK(c3 == c1 || c3 == c2);
+  CHECK(c3 != c1 && c3 != c2);          // fresh slot id
+  CHECK(CPU_BUFS[c3].data == c1_data || CPU_BUFS[c3].data == c2_data);
   CHECK_EQ(CPU_BUFS[c3].refcount, 1);
 
   TEST_BEGIN("slot-reuse/rollback-skips-preserved-owning-bufs");
