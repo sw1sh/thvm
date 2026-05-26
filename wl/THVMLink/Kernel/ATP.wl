@@ -2018,6 +2018,13 @@ $AtpCpWeightCodes = <|
                          penalty).  Cheap symbol-set biasing toward
                          goal-relevant CPs -- a poor man's "Goal" mode
                          that does not need structural matching. *)
+    "Diversity" -> 11, (* E DiversityWeight (HEURISTICS/
+                         che_diversityweight.c::DiversityWeightCompute).
+                         base + #distinct CTR labels + #distinct FVR
+                         ids.  Penalizes CPs whose sides drag in many
+                         unrelated symbols / variables -- favors
+                         structurally compact CPs.  Linear shape
+                         (E's fdiff1=1, fdiff2=0, vdiff1=1, vdiff2=0). *)
     Automatic -> -1
 |>;
 

@@ -3062,7 +3062,22 @@ typedef enum {
                               // similar in spirit to ATP_CP_WEIGHT_GOAL
                               // but using a cheap symbol-set bitmask
                               // instead of a full structural match.
-  ATP_CP_WEIGHT_LAST = 11,
+  ATP_CP_WEIGHT_DIVERSITY = 11, // E-style diversity weight (port of
+                              // HEURISTICS/che_diversityweight.c::
+                              // DiversityWeightCompute).  Walks both
+                              // sides; combines the base symbol count
+                              // with a linear penalty in #distinct
+                              // CTR labels and #distinct FVR ids:
+                              //   base + f_distinct + v_distinct
+                              // (E's defaults are configurable; we
+                              // use the linear fdiff1=1, fdiff2=0,
+                              // vdiff1=1, vdiff2=0 shape).  Penalizes
+                              // CPs whose two sides drag in many
+                              // unrelated symbols / variables --
+                              // surfaces structurally "compact" CPs
+                              // first.  Distinct-set tracking uses
+                              // u64 bitmasks (WALD_MAX_SYMBOLS=64).
+  ATP_CP_WEIGHT_LAST = 12,
 } AtpCpWeightMode;
 
 typedef struct {

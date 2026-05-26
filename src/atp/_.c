@@ -4868,6 +4868,50 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       if (dr > d) d = dr;
       return 4u * large + 1u * small + 2u * d;
     }
+    case ATP_CP_WEIGHT_DIVERSITY: {
+      // E DiversityWeight (HEURISTICS/che_diversityweight.c:161).
+      // Iterative walk of both sides; we tally:
+      //   base       -- total CTR/FVR node count
+      //   f_distinct -- # of distinct CTR head labels (popcount of
+      //                 the label-seen bitmask)
+      //   v_distinct -- # of distinct FVR ids (popcount of the FVR-seen
+      //                 bitmask)
+      //   weight = base + f_distinct + v_distinct
+      // Linear E-defaults shape (fdiff1=1, fdiff2=0, vdiff1=1, vdiff2=0).
+      // Labels and FVR ids are tracked in u64 bitmasks; WALD_MAX_SYMBOLS
+      // is 64 so the f-mask covers the whole label space.  FVR ids are
+      // capped at 64 since thvm_normalize_vars renumbers each rule into
+      // 0..REWRITE_MAX_VAR-1 (== 64).
+      u64 f_mask = 0;
+      u64 v_mask = 0;
+      u32 base = 0;
+      Term stack[256];
+      u32 sp = 0;
+      if (sp < 256) stack[sp++] = lhs;
+      if (sp < 256) stack[sp++] = rhs;
+      while (sp > 0) {
+        Term cur = stack[--sp];
+        if (term_tag(cur) == TAG_CTR) {
+          u32 lab = term_ext(cur);
+          if (lab < 64u) f_mask |= ((u64)1 << lab);
+          base++;
+          u32 n = term_ctr_n(cur);
+          for (u32 i = 0; i < n && sp < 256; i++) {
+            stack[sp++] = term_ctr_at(cur, i);
+          }
+        } else if (term_tag(cur) == TAG_FVR) {
+          u32 vid = term_ext(cur);
+          if (vid < 64u) v_mask |= ((u64)1 << vid);
+          base++;
+        } else {
+          base++;
+        }
+      }
+      // Portable popcount via Kernighan's bit-clearing loop.
+      u32 f_distinct = 0; { u64 m = f_mask; while (m) { f_distinct++; m &= m - 1u; } }
+      u32 v_distinct = 0; { u64 m = v_mask; while (m) { v_distinct++; m &= m - 1u; } }
+      return base + f_distinct + v_distinct;
+    }
     case ATP_CP_WEIGHT_CONJSYM: {
       // E ConjectureSymbolWeight (HEURISTICS/che_funweights.c:550).
       // Walk both sides.  A node whose head symbol appears in the

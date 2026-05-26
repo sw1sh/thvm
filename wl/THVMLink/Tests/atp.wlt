@@ -920,6 +920,16 @@ VerificationTest[
     TestID -> "ATP/method/forward-subsume-proves"
 ]
 
+VerificationTest[
+    (* Diversity: E DiversityWeight port -- base node count + linear
+       penalty in #distinct CTR labels + #distinct FVR ids.  Proves
+       baseline theorem. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Diversity"}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Diversity-proves"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[
