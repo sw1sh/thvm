@@ -2620,6 +2620,16 @@ atpAutoTuneForClass["Sheffer"] := {
     {"Completion", "CriticalPairWeight" -> "Mix2",
         "AxiomRelevance" -> "SInE", "AutoMaxWeight" -> 20},
     {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "AutoMaxWeight" -> 20},
+    (* Vampire LRS (Limited Resource Strategy): predicts how many CPs
+       the saturator can REACH in the remaining time budget and prunes
+       the queue to those.  Sound (discarded CPs are unreachable in
+       budget; same incomplete-in-budget tradeoff Vampire ships) and
+       cheap (one quickselect + O(queue) prune per recompute period).
+       For the deep cross-axiom Sheffer Implies-X family where the
+       lean configs above wall, LRS narrows the heap-min selection to
+       the budget-tractable subset. *)
+    {"Completion", "CriticalPairWeight" -> "Mix2", "LRS" -> True,
         "AutoMaxWeight" -> 20}};
 atpAutoTuneForClass["Boolean"] := {
     (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /
