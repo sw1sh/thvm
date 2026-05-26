@@ -3212,7 +3212,8 @@ TFindProof[thms_Association, theory_String,
    skipped with a console warning.  See Kernel/ATP/TPTPImport.wl. *)
 TFindProof[File[path_String], opts:OptionsPattern[]] :=
     tptpDispatch[THVMLink`TPTPImport`tptpImport[File[path]], opts]
-TFindProof[s_String, opts:OptionsPattern[]] /; StringContainsQ[s, "cnf("] :=
+TFindProof[s_String, opts:OptionsPattern[]] /;
+        StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
     tptpDispatch[THVMLink`TPTPImport`tptpImport[s], opts]
 
 tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[

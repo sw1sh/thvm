@@ -71,10 +71,13 @@ scanClauses[text_String, i0_Integer] := Block[{i = i0, len, head},
     While[ i <= len,
         Which[
             i + 3 <= len && StringTake[text, {i, i + 3}] === "cnf(",
-                i = consumeCnf[text, i + 4]
+                i = consumeAnnotated[text, i + 4]
+            ,
+            i + 3 <= len && StringTake[text, {i, i + 3}] === "fof(",
+                i = consumeAnnotated[text, i + 4]
             ,
             i + 3 <= len && MemberQ[
-                {"fof(", "tff(", "thf("}, StringTake[text, {i, i + 3}]],
+                {"tff(", "thf("}, StringTake[text, {i, i + 3}]],
                 head = StringTake[text, {i, i + 2}];
                 Message[tptpImport::skipnoncnf, head, i];
                 i = skipParenthesised[text, i + 4]
@@ -88,7 +91,10 @@ scanClauses[text_String, i0_Integer] := Block[{i = i0, len, head},
     ]
 ]
 
-consumeCnf[text_String, i0_Integer] :=
+(* Reads the cnf(...) / fof(...) tail: name, role, body.  Body is
+   passed unmodified to clauseToEquation, which handles both cnf flat
+   equations and fof universal-prefixed equations via stripUniversal. *)
+consumeAnnotated[text_String, i0_Integer] :=
     Block[{i = i0, dummy, role, body, bodyEnd},
         {dummy, i} = readWord[text, i];   (* clause name; discard *)
         i = skipPast[text, i, ","];
@@ -174,14 +180,77 @@ clauseToEquation[{role_String, body_String}] :=
         ]
     ]
 
-parseFormula[body_String] := Block[{cut = topLevelEqSplit[body]},
-    Which[
-        cut === $Failed, $Failed,
-        cut[[3]] === "!=",
-            Unequal[parseTermString[cut[[1]]], parseTermString[cut[[2]]]],
-        True,
-            Equal[parseTermString[cut[[1]]], parseTermString[cut[[2]]]]
+parseFormula[body_String] :=
+    Block[{stripped = stripUniversal[body], cut},
+        cut = topLevelEqSplit[stripped];
+        Which[
+            cut === $Failed, $Failed,
+            cut[[3]] === "!=",
+                Unequal[parseTermString[cut[[1]]], parseTermString[cut[[2]]]],
+            True,
+                Equal[parseTermString[cut[[1]]], parseTermString[cut[[2]]]]
+        ]
     ]
+
+(* Strip a leading `! [V1, V2, ...] :` universal quantifier (any
+   number of bound vars, optional whitespace).  Universal binding is
+   the default for cnf clauses anyway, so we treat the FOF prefix as
+   a no-op and parse the body that follows.  Conjunction / disjunction
+   / existential / negation outside this single-equation shape stays
+   un-handled (topLevelEqSplit will return $Failed and clauseToEquation
+   warns).
+
+   Also strips a single outer pair of parentheses that often surrounds
+   FOF bodies in pretty-printed inputs. *)
+stripUniversal[body_String] := Block[{trim = StringTrim[body], inner},
+    If[ StringStartsQ[trim, "!"],
+        inner = StringTrim @ StringDrop[trim, 1];
+        If[ StringStartsQ[inner, "["],
+            (* skip the variable list up to the matching ']' *)
+            Block[{i = 2, depth = 1, len = StringLength[inner]},
+                While[ i <= len && depth > 0,
+                    Switch[ StringTake[inner, {i, i}],
+                        "[", depth = depth + 1,
+                        "]", depth = depth - 1,
+                        _,   Null
+                    ];
+                    i = i + 1
+                ];
+                inner = StringTrim @ StringDrop[inner, i - 1];
+                If[ StringStartsQ[inner, ":"],
+                    inner = StringTrim @ StringDrop[inner, 1];
+                    stripUniversal[stripOuterParens @ inner]
+                    ,
+                    trim   (* malformed -- bail with the original *)
+                ]
+            ]
+            ,
+            trim   (* "!" without "[" -- not a quantifier *)
+        ]
+        ,
+        stripOuterParens[trim]
+    ]
+]
+
+(* If the body is exactly `( ... )`, strip one paired layer. *)
+stripOuterParens[s_String] := Block[{trim = StringTrim[s], len, depth, ok},
+    len = StringLength[trim];
+    If[ len < 2 || StringTake[trim, 1] =!= "(" ||
+            StringTake[trim, {len, len}] =!= ")",
+        Return[trim]
+    ];
+    (* Confirm the first '(' matches the LAST ')' (not an early
+       close).  Scan once, depth-counting. *)
+    depth = 0; ok = True;
+    Do[ Switch[ StringTake[trim, {k, k}],
+            "(", depth = depth + 1,
+            ")", depth = depth - 1,
+            _,   Null
+        ];
+        If[ depth === 0 && k < len, ok = False; Break[]],
+        {k, len}
+    ];
+    If[ ok, StringTrim @ StringTake[trim, {2, len - 1}], trim]
 ]
 
 (* Find the top-level (depth-0) `=` or `!=` in body.  Returns
@@ -295,21 +364,26 @@ ensureVar[name_String] := (
     $tptpVars[name]
 )
 
-(* WL Symbols disallow underscore and `$` mid-name.  Mangle TPTP
-   identifiers so the Symbol[] call succeeds, round-trippable for
-   the common cases:
-     $true     -> Tptp$True
-     sk_c1     -> skC1        (CamelCase fold)
-     plain     -> plain       (unchanged) *)
+(* Build a Symbol in our private sub-context so it can never collide
+   with the user's Global` bindings (e.g. a calling script that
+   happened to bind `r = ...` would otherwise replace TPTP constant
+   `r` with whatever value the user assigned).  Names that WL would
+   reject as Symbols (underscore, leading `$`) are CamelCase-folded
+   first:
+     $true   -> THVMLink`TPTPImport`Tptp`Tptp$True
+     sk_c1   -> THVMLink`TPTPImport`Tptp`skC1
+     plain   -> THVMLink`TPTPImport`Tptp`plain *)
+$tptpCtx = "THVMLink`TPTPImport`Tptp`";
+
 mangleHead[name_String] := Which[
     StringStartsQ[name, "$"],
-        "Tptp$" <> StringJoin[
+        $tptpCtx <> "Tptp$" <> StringJoin[
             Capitalize /@ StringSplit[StringDrop[name, 1], "_"]],
     StringContainsQ[name, "_"],
-        With[{parts = StringSplit[name, "_"]},
+        $tptpCtx <> With[{parts = StringSplit[name, "_"]},
             First[parts] <> StringJoin[Capitalize /@ Rest[parts]]
         ],
-    True, name
+    True, $tptpCtx <> name
 ]
 
 End[];   (* `Private` *)

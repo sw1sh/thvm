@@ -85,3 +85,35 @@ VerificationTest[
     True,
     TestID -> "ATP/tptp/findproof-no-conjecture-completes"
 ]
+
+VerificationTest[
+    (* FOF without quantifier -- free variables become universals. *)
+    Module[{r = THVMLink`TPTPImport`tptpImport[
+        "fof(a, axiom, and(X, Y) = and(Y, X))."]},
+        {Length[r["Axioms"]], MatchQ[r["Conjecture"], None]}
+    ],
+    {1, True},
+    TestID -> "ATP/tptp/fof-free-vars-as-universals"
+]
+
+VerificationTest[
+    (* FOF with explicit ! [X,Y] universal -- quantifier stripped, body kept. *)
+    Module[{r = THVMLink`TPTPImport`tptpImport[
+        "fof(comm, axiom, ! [X, Y] : (and(X, Y) = and(Y, X)))."]},
+        {Length[r["Axioms"]], FreeQ[r["Axioms"], Missing]}
+    ],
+    {1, True},
+    TestID -> "ATP/tptp/fof-universal-quantifier-stripped"
+]
+
+VerificationTest[
+    Module[{p = TFindProof[
+        "fof(assoc, axiom, ! [X, Y, Z] : (and(X, and(Y, Z)) = and(and(X, Y), Z))).
+         fof(comm, axiom, ! [X, Y] : (and(X, Y) = and(Y, X))).
+         fof(goal, negated_conjecture, and(and(p, q), r) != and(r, and(q, p))).",
+        TimeConstraint -> 10]},
+        Head @ Quiet @ p["ProofFunction"][p["Theorems"]]
+    ],
+    Success,
+    TestID -> "ATP/tptp/findproof-fof-string-proves"
+]
