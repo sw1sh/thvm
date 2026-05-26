@@ -503,6 +503,37 @@ table is useful when you pin `Method` explicitly.
 | AC (commutative+associative, no inverse) | `{"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}` | Waldmeister `GtS` family. |
 | Lattice | `{"Completion", "CriticalPairWeight" -> "Gt", "GroundJoin" -> True, "GoalInterleave" -> 50}` then LPO fallback | Waldmeister `Verband` row uses `gj()` + an LPO pass. |
 
+### 5.1 Currently out of reach
+
+These 5 unit-equality goals are known to be cracked by Vampire 5.0.1 (UEQ
+portfolio) within 30 s in our parallel baseline, but neither the
+`Automatic` schedule nor any tried explicit `Method` (including
+`"VampireUEQ"`, `"CriticalPairWeight" -> "ConjSym"`, `"Diversity"`,
+`"Twee"`, `"ForwardSubsume" -> True`, and pairings with `"GroundJoin"
+-> True` or `"Connectedness" -> True`) closes them within 25 s on the
+single-config form:
+
+- `McCuneAxioms / EqualityOfInverses`
+- `RobbinsAxioms / DoubleNegation`
+- `ShefferAxioms / AndAssociativity`
+- `ShefferAxioms / ImpliesWolframAxioms`
+- `ShefferAxioms / ImpliesWolframAlternateAxioms`
+
+Vampire's winning flag block on `Sheffer/AndAssociativity` is
+
+```
+dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
+bd=all:av=off:gtg=exists_sym
+```
+
+The orderable subset is shipped as `Method -> "VampireUEQ"`. The three
+flags still unported -- backward subsumption (`bs=unit_only` proper:
+delete an EXISTING rule when a new one subsumes it, vs. the current
+forward-only `"ForwardSubsume"` flag which skips the new rule add),
+backward demodulation (`bd=all`), and goal-type-graph premise
+selection (`gtg=exists_sym`) -- look like the missing pieces for at
+least this target.
+
 ## 6. Return specs
 
 `TFindProof` takes an optional LAST positional argument selecting what
