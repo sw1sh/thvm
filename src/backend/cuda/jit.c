@@ -349,6 +349,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     return -1;
   }
   if (ke == NULL || out_buf_id == 0 || out_buf_id >= CUDA_BUFS_NEXT) return -1;
+  u64 t_dispatch_start = cg_now_us();
   // Only the structural-lift path is wired: the CUDA renderer entry
   // (cg_render_uop_kernel_cuda_root) consumes a lifted UOp DAG root.
   // A kernel the lifter declined (store_root == 0) has no DAG to
@@ -441,5 +442,15 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     grid_x = (u32)((total + block_x - 1) / block_x);
   }
 
-  return cuda_jit_launch(func, grid_x, block_x, args);
+  int rc = cuda_jit_launch(func, grid_x, block_x, args);
+  // Per-kid wall-time profile.  cuda_dispatch_kernel includes
+  // render + compile (cache-hit fast path) + arg packing +
+  // cuLaunchKernel + cuCtxSynchronize.  Recorded as KDISPATCH_JIT
+  // since CUDA only has the structural-lift JIT route (no
+  // interpreter fallback).  Mirror of cpu_jit's record in
+  // backend/cpu/interpret.c so THVM_KERNEL_PROFILE shows both
+  // backends through the same table.
+  u32 kid = (u32)(ke - KERNELS);
+  cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t_dispatch_start);
+  return rc;
 }

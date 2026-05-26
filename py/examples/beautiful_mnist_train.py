@@ -130,6 +130,9 @@ def main():
               + (f" test_acc={acc:5.2f}%" if test_every and (i+1) % test_every == 0 else ""),
               flush=True)
 
+    if os.environ.get("THVM_KERNEL_PROFILE"):
+        _TH.cg_profile_dump(int(os.environ.get("THVM_KERNEL_PROFILE", "20")))
+        return
     if not test_every:
         acc = test_acc()
     warm = wall[1:] or wall

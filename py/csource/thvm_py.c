@@ -331,6 +331,10 @@ EXPORT uint64_t py_cuda_jit_evictions(void) {
   return 0;
 #endif
 }
+EXPORT void py_cg_profile_dump(uint32_t top_n) {
+  cg_profile_dump(stderr, top_n);
+  fflush(stderr);
+}
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
 EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
 EXPORT uint32_t py_const_UOP_SHRINK(void) { return UOP_SHRINK; }

@@ -126,6 +126,7 @@ _cpu_live_bytes = _bind("py_cpu_live_bytes", c_uint64)
 _cpu_peak_reset = _bind("py_cpu_peak_reset", None)
 _cuda_jit_compiles = _bind("py_cuda_jit_compiles", c_uint64)
 _cuda_jit_evictions = _bind("py_cuda_jit_evictions", c_uint64)
+_cg_profile_dump = _bind("py_cg_profile_dump", None, c_uint32)
 _ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
                                c_uint64, c_int32)
 _ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
@@ -610,6 +611,9 @@ class Thvm:
 
     def cuda_jit_evictions(self) -> int:
         return int(_cuda_jit_evictions())
+
+    def cg_profile_dump(self, top_n: int = 20) -> None:
+        _cg_profile_dump(c_uint32(top_n))
 
     # ---- requires_grad (canonical on TenDesc.requires_grad) ----
     def ten_set_requires_grad(self, t: Term, on: bool) -> bool:
