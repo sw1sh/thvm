@@ -116,12 +116,27 @@ class BatchNorm:
         if self.track_running_stats and Tensor.training:
             n = x.numel()
             corr = n / (n - x.shape[1]) if n > x.shape[1] else 1.0
-            self.running_mean.assign(
+            # Realize the running-stat assigns IMMEDIATELY rather than
+            # letting them accumulate as an ASSIGN chain on .term.  The
+            # bench doesn't include running_mean / running_var in its
+            # per-step realize bundle (Adam.schedule_step skips them: no
+            # grad means no opt update fires), so without an explicit
+            # realize here each training step nests another ASSIGN UOp
+            # over the prior term.  By eval time the chain references
+            # the entire training-mode forward graph, which materialize
+            # then tries to re-execute -- locks up in the eval-mode
+            # forward read because the ASSIGN sub-DAG cross-references
+            # the same buffers the eval reads.  Tinygrad sidesteps this
+            # via its lazybuffer model (assign returns a tensor backed
+            # by the same buffer; .realized state lets readers stop the
+            # walk at the buffer), thvm's eager assign needs the
+            # explicit realize.  Cost: 2 small assigns per BN per step.
+            Tensor.realize(self.running_mean.assign(
                 self.running_mean * (1.0 - self.momentum)
-                + mean.detach() * self.momentum)
-            self.running_var.assign(
+                + mean.detach() * self.momentum))
+            Tensor.realize(self.running_var.assign(
                 self.running_var * (1.0 - self.momentum)
-                + var.detach() * (self.momentum * corr))
+                + var.detach() * (self.momentum * corr)))
         invstd = (var + self.eps).rsqrt()
         return x.batchnorm(self.weight, self.bias, mean, invstd)
 
