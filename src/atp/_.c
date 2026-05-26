@@ -4878,6 +4878,10 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
 // use_mix_heuristic unset and no goal makes this function the
 // bare symbol-count sum.
 #define MIX_UNORIENTED_PENALTY 4u
+
+// Forward-decl: atp_cp_priority_sized uses this; the helper is defined
+// next to thvm_atp_set_use_sos.
+static int atp_term_touches_goal(const AtpState *s, Term t);
 // Priority weight for a CP whose symbol-count sum is already known
 // (`base`) -- e.g. counted for free during acp_pack.  Identical
 // verdict to atp_cp_priority; only the redundant size walk is
@@ -4902,6 +4906,17 @@ static u32 atp_cp_priority_sized(AtpState *s, Term lhs, Term rhs, u32 base) {
     if (c != KBO_GT && c != KBO_LT) {
       // KBO_EQ / KBO_UN -- penalize.
       base += MIX_UNORIENTED_PENALTY;
+    }
+  }
+  // Set-of-Support bonus: a CP that shares any symbol with the goal
+  // gets its priority halved, surfacing it earlier in the min-heap.
+  // Sound -- nothing dropped, only ordering perturbed.  Mirrors
+  // Vampire's --sos / E-prover's -S sos in spirit; tailored for the
+  // equational-completion variant where the "support set" is symbols
+  // (the goal isn't a separate clause set in our engine).
+  if (s != NULL && s->use_sos && s->goal_lhs != 0) {
+    if (atp_term_touches_goal(s, lhs) || atp_term_touches_goal(s, rhs)) {
+      base = base >> 1;   // halve -> sort earlier
     }
   }
   return base;
@@ -5595,6 +5610,53 @@ fn void thvm_atp_set_use_lrs(AtpState *s, u8 on) {
   s->lrs_start_us = 0u;
   s->lrs_last_recompute_at = 0u;
   s->lrs_horizon = 0u;
+}
+
+// Walk a Term collecting its CTR symbol-label bits into mask[].
+// goal_sym_mask is a fixed-size bit-set of 8 * 32 = 256 labels (the
+// most common range); larger labels mod into the same buckets, so the
+// "touches goal" check is a sound over-approximation -- it never rules
+// out a CP that genuinely shares a symbol with the goal.
+static void atp_sym_mask_collect(Term t, u32 mask[8]) {
+  if (term_tag(t) == TAG_CTR) {
+    u32 lbl = term_ext(t);
+    mask[(lbl >> 5) & 7u] |= 1u << (lbl & 31u);
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) return;
+    for (u32 i = 0; i < n; i++) {
+      atp_sym_mask_collect(term_ctr_at(t, i), mask);
+    }
+  }
+}
+
+static int atp_term_touches_goal(const AtpState *s, Term t) {
+  if (s == NULL || !s->use_sos) return 0;
+  if (term_tag(t) == TAG_CTR) {
+    u32 lbl = term_ext(t);
+    if (s->goal_sym_mask[(lbl >> 5) & 7u] & (1u << (lbl & 31u))) return 1;
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) return 0;
+    for (u32 i = 0; i < n; i++) {
+      if (atp_term_touches_goal(s, term_ctr_at(t, i))) return 1;
+    }
+  }
+  return 0;
+}
+
+// Set-of-Support: a CP whose sides share symbols with the goal gets a
+// priority bonus (smaller cp_pri = earlier in the min-heap), nudging
+// the saturator to explore goal-relevant CPs first.  Sound -- only the
+// heap ordering changes; no CP is dropped.  Mirrors Vampire's `--sos`
+// and E-prover's `-S sos` in spirit; the equational-completion variant
+// preserves completeness because we still process all CPs eventually.
+fn void thvm_atp_set_use_sos(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_sos = on ? 1u : 0u;
+  if (on) {
+    for (u32 i = 0; i < 8u; i++) s->goal_sym_mask[i] = 0u;
+    if (s->goal_lhs) atp_sym_mask_collect(s->goal_lhs, s->goal_sym_mask);
+    if (s->goal_rhs) atp_sym_mask_collect(s->goal_rhs, s->goal_sym_mask);
+  }
 }
 
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped

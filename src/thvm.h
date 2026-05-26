@@ -3573,6 +3573,16 @@ typedef struct {
   u8   use_lazy_normalize;
   u64  n_cps_push_normalized;     // diagnostics: full-R normalizes at push
 
+  // Set-of-Support (SOS) heuristic: bias CP priority toward CPs whose
+  // terms share symbols with the goal.  Sound (completeness preserved
+  // -- no CP is dropped; only the heap key is reduced for goal-touching
+  // CPs so they surface earlier).  Wired to Method "SetOfSupport".
+  // Default OFF.
+  u8   use_sos;
+  u32  goal_sym_mask[8];          // bit-set of goal symbols (CTR ext labels)
+                                  // -- 8 * 32 = 256 distinct labels indexable;
+                                  // cap with mod for larger.
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3706,6 +3716,7 @@ fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
 // subset it can actually reach.  Sound (incomplete in principle, complete
 // in budget); 0 = off (default) -> engine byte-identical.
 fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset

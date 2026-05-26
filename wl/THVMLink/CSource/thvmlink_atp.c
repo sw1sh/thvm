@@ -545,6 +545,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // args[20].  0 = off, engine byte-identical.
   mint use_lrs = MArgument_getInteger(args[20]);
   thvm_atp_set_use_lrs(atp, (u8)(use_lrs != 0));
+  // Method -> {... "SetOfSupport" -> True}: bias the CP-queue heap
+  // toward CPs whose terms share symbols with the goal.  args[21].
+  // 0 = off.  Set BEFORE goal so the symbol mask snapshot is taken
+  // after thvm_atp_set_goal below.  (Actual mask init happens inside
+  // thvm_atp_set_use_sos which reads s->goal_lhs/rhs, so we re-call
+  // it after the goal is set.)
+  mint use_sos = MArgument_getInteger(args[21]);
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];
@@ -565,6 +572,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   if (goal_lhs != 0u || goal_rhs != 0u) {
     thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
   }
+  // Apply SoS AFTER the goal is set so the symbol-mask snapshot
+  // includes goal_lhs / goal_rhs labels.
+  thvm_atp_set_use_sos(atp, (u8)(use_sos != 0));
 
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
