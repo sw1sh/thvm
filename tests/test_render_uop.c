@@ -475,29 +475,29 @@ int main(void) {
     fp = fmemopen(bufma, sizeof(bufma), "w");
     cg_render_uop_kernel(st_up, "k_conv_up", Y, ins, 2, fp);
     fclose(fp);
-    // UPCAST inner axis (a2 after the axis-shift) is the #pragma-
-    // unroll for-loop wrapping the accumulator and store.
-    CHECK(contains(bufma, "#pragma unroll(4)"));
-    CHECK(contains(bufma, "for (uint a2 = 0; a2 < 4"));
-    // Accumulator declared INSIDE the UPCAST loop, so each iteration
-    // gets a fresh _acc.
-    CHECK(contains(bufma, "float _acc5 = 0.0f"));
-    // All three reduce nest loops emit (cin, kh, kw -> a5, a6, a7).
+    // Path #1 (docs/tinygrad_late_passes.md): the UPCAST'd output axis
+    // is fully unrolled at the renderer level into F parallel
+    // accumulators sharing ONE inner reduce nest -- the
+    // register-blocking pattern from tinygrad expander.py:do_expand +
+    // devectorizer.py:reduce_to_acc.  NO runtime `for (a2 ...)` loop
+    // over the UPCAST'd axis; instead F=4 separate _acc5_0..3.
+    CHECK(contains(bufma, "float _acc5_0 = 0.0f"));
+    CHECK(contains(bufma, "float _acc5_1 = 0.0f"));
+    CHECK(contains(bufma, "float _acc5_2 = 0.0f"));
+    CHECK(contains(bufma, "float _acc5_3 = 0.0f"));
+    CHECK(!contains(bufma, "for (uint a2 ="));
+    // All three reduce nest loops emit ONCE (cin, kh, kw -> a5, a6, a7).
     CHECK(contains(bufma, "for (uint a5 = 0; a5 < 8"));
     CHECK(contains(bufma, "for (uint a6 = 0; a6 < 3"));
     CHECK(contains(bufma, "for (uint a7 = 0; a7 < 3"));
-    // MAC is present: _accN = _accN + in0[...] * in1[...].  The reads
-    // resolve to slot names in0/in1 (NOT 0.0f, which would mean the
-    // discover walk lost the input buffers).
-    CHECK(contains(bufma, "_acc5 = _acc5 + (in0["));
-    CHECK(contains(bufma, "* in1["));
-    // The W (in1) address must include the UPCAST inner axis a2,
-    // proving each unrolled iteration reads a distinct slice.
-    CHECK(contains(bufma, "(int)(a1) * (int)(4)"));
-    CHECK(contains(bufma, "+ (int)(a2)"));
-    // The final store references _acc5 and a2 -- the per-iteration
-    // result reaches the output.
-    CHECK(contains(bufma, "= _acc5;"));
+    // F separate MAD statements inside the shared reduce nest.
+    CHECK(contains(bufma, "_acc5_0 = _acc5_0 + "));
+    CHECK(contains(bufma, "_acc5_3 = _acc5_3 + "));
+    CHECK(contains(bufma, "in0["));
+    CHECK(contains(bufma, "in1["));
+    // F separate stores at adjacent offsets after the shared reduce.
+    CHECK(contains(bufma, "= _acc5_0;"));
+    CHECK(contains(bufma, "= _acc5_3;"));
   }
 
   TEST_BEGIN("render-uop/parallel-accumulators-on-upcast-output-axis");

@@ -61,13 +61,17 @@ static int hand_opt_getenv_int(char const *name, int dflt) {
 
 // --- axis snapshot -------------------------------------------------
 // Unified view of "the kernel's current axis list" -- mirrors tinygrad's
-// k.rngs / k.full_shape / k.axis_types.  The slot index IS the RANGE
-// leaf's axis_id (the lifter and kernel_apply_opt's DAG split keep
-// axis_id == ordinal position).
+// k.rngs / k.full_shape / k.axis_types.  The SLOT INDEX is the ordinal
+// position; the axis_id may not be zero-based / contiguous (kernels
+// lifted from the production rangeify pipeline carry global axis_ids
+// that start anywhere in 0..u32_max).  KOpt's `axis` field targets by
+// axis_id (uop_dag_apply_kopt looks up the RANGE leaf by id), so
+// consumers must translate slot -> axis_id when building the KOpt.
 typedef struct {
   u32 n;
   u8  kax_type[MAX_AXES];
   u32 extent  [MAX_AXES];
+  u32 axis_id [MAX_AXES];
 } HandOptAxes;
 
 static int hand_opt_snapshot_axes(KernelEntry const *ke, HandOptAxes *out) {
@@ -79,10 +83,10 @@ static int hand_opt_snapshot_axes(KernelEntry const *ke, HandOptAxes *out) {
                                exts, MAX_AXES);
   if (n == 0) return 0;
   for (u32 i = 0; i < n; i++) {
-    if (ids[i] != i) return 0;        // axis_id gap -> bail (caller skips)
     if (types[i] > KAX_GROUP_REDUCE) return 0;
     out->kax_type[i] = (u8)types[i];
     out->extent[i]   = exts[i];
+    out->axis_id[i]  = ids[i];
   }
   out->n = n;
   return 1;
@@ -178,18 +182,20 @@ static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   return 1;
 }
 
-// --- Metal-only gate ------------------------------------------------
+// --- GPU gate -------------------------------------------------------
 // CPU kernels route matmul/gemv/dot/conv through cBLAS / the clang-JIT'd
 // interpreter from the bare (un-OPT'd) DAG; applying a hand-coded opt
-// mutates the DAG so those classifiers stop recognising it.  CUDA
-// admission is a separate session.
-static int hand_opt_kernel_on_metal(KernelEntry const *ke) {
+// mutates the DAG so those classifiers stop recognising it.  GPU
+// backends have no BLAS fallback -- the structural-lift JIT is the only
+// path, so the shape-primitive heuristic always helps.  METAL_BACKEND.id
+// == 2, CUDA_BACKEND.id == 3 (cpu == 1) -- see kautotune_backend_id.
+static int hand_opt_kernel_on_gpu(KernelEntry const *ke) {
   Backend *b = NULL;
   if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
     b = TENS[ke->output_tid].backend;
   }
   if (b == NULL) b = DEFAULT_BACKEND;
-  return b != NULL && b->id == 2;
+  return b != NULL && (b->id == 2 || b->id == 3);
 }
 
 // --- matvec detection (heuristic.py 65-82) --------------------------
@@ -303,7 +309,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // ke->schedule->autotuned = 1 at the start.
   if (ke->schedule != NULL) ke->schedule->autotuned = 1;
   if (!hand_coded_opts_enabled()) return 0;
-  if (!hand_opt_kernel_on_metal(ke)) return 0;
+  if (!hand_opt_kernel_on_gpu(ke)) return 0;
 
   u32 n_applied = 0;
   HandOptAxes ax;
@@ -385,7 +391,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
               for (u32 j = 0; j < ax2.n; j++) {
                 u8 tj = ax2.kax_type[j];
                 if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax2.extent[j] == g_ext) {
-                  KOpt o = { KOP_LOCAL, (u8)j, (u32)MV_BLOCK };
+                  KOpt o = { KOP_LOCAL, (u8)ax2.axis_id[j], (u32)MV_BLOCK };
                   if (kernel_apply_opt(ke, o)) { n_applied++; break; }
                 }
               }
@@ -397,7 +403,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
               for (u32 j = 0; j < ax3.n; j++) {
                 u8 tj = ax3.kax_type[j];
                 if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax3.extent[j] == g_ext) {
-                  KOpt o = { KOP_UPCAST, (u8)j, (u32)MV_RPT };
+                  KOpt o = { KOP_UPCAST, (u8)ax3.axis_id[j], (u32)MV_RPT };
                   if (kernel_apply_opt(ke, o)) { n_applied++; break; }
                 }
               }
@@ -493,7 +499,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         }
       }
       if (!have_best) break;
-      KOpt opt = { KOP_UPCAST, (u8)best_axis, best_amt };
+      KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[best_axis], best_amt };
       if (!kernel_apply_opt(ke, opt)) break;
       n_applied++;
       if (n_upcasted_set < MAX_AXES) upcasted_set[n_upcasted_set++] = best_axis;
@@ -535,7 +541,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           (void)last;
         } else {
           if (ext % 4 == 0) {
-            KOpt opt = { KOP_UNROLL, (u8)last, 4 };
+            KOpt opt = { KOP_UNROLL, (u8)ax.axis_id[last], 4 };
             if (kernel_apply_opt(ke, opt)) n_applied++;
           }
         }
@@ -554,7 +560,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         if (n_dims > 0) {
           u32 last = dims[n_dims - 1];
           if (ax.extent[last] % 4 == 0) {
-            KOpt opt = { KOP_UPCAST, (u8)last, 4 };
+            KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[last], 4 };
             if (kernel_apply_opt(ke, opt)) n_applied++;
           }
         }
@@ -676,7 +682,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           HandOptAxes axc;
           if (!hand_opt_snapshot_axes(ke, &axc)) break;
           if (current_axis >= axc.n) continue;
-          KOpt opt = { KOP_LOCAL, (u8)current_axis, sz };
+          KOpt opt = { KOP_LOCAL, (u8)axc.axis_id[current_axis], sz };
           if (kernel_apply_opt(ke, opt)) {
             n_applied++;
             shift++;       // one more axis sitting above subsequent picks
