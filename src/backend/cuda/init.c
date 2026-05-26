@@ -12,11 +12,11 @@
 //
 // CUDA_BUFS[] is a parallel table to TENS[], exactly like CPU_BUFS[]:
 // each entry pairs a CUdeviceptr (device memory) with a host-side
-// refcount so view aliases share storage.  Device buffers are always
-// "owned" (cuMemAlloc'd here) -- there is no external-buffer path
-// because the WL/py bridge cannot hand thvm a pre-existing device
-// pointer the way it hands a NumericArray's host bytes to the CPU
-// backend.
+// refcount so view aliases share storage.  Most device buffers are
+// "owned" (cuMemAlloc'd here), but the per-realize arena planner now
+// also allocates non-owning "view" entries that point into a parent
+// arena's dptr at an offset (see cuda_buf_alloc_arena_view).  Mirror:
+// backend/cpu/init.c + the parent_buf_id field on CpuBuf.
 
 // cuda.h uses the bare identifier `fn` (a CUhostFn parameter +
 // CUDA_HOST_NODE_PARAMS member name), which collides with thvm.h's
@@ -29,10 +29,13 @@
 #define fn static inline
 
 typedef struct {
-  CUdeviceptr dptr;       // device allocation; 0 = free slot
+  CUdeviceptr dptr;          // device allocation or view base; 0 = free slot
   u64         nbytes;
   u32         refcount;
-  u8          preserved;  // per-realize pool keep-flag (see buf_pool.c)
+  u8          preserved;     // per-realize pool keep-flag (see buf_pool.c)
+  u8          owns_data;     // 1: cuMemFree on release; 0: view, do not free
+  u8          skip_freelist; // 1: pool_rollback real-frees instead of parking
+  u32         parent_buf_id; // arena views: parent CudaBuf to ref/unref
 } CudaBuf;
 
 #define CUDA_BUFS_CAP       (1u << 16)
@@ -126,11 +129,17 @@ fn int cuda_device_sm(void) {
 
 fn void cuda_shutdown(void) {
   if (!CUDA_READY) return;
+  // Views (owns_data == 0) borrow another slot's dptr; only the owner
+  // calls cuMemFree.  Scanning ownership-aware here avoids a double-free
+  // at shutdown when arena views still occupy slots above the parent.
   for (u64 i = 1; i < CUDA_BUFS_NEXT; i++) {
-    if (CUDA_BUFS[i].dptr != 0) {
+    if (CUDA_BUFS[i].dptr != 0 && CUDA_BUFS[i].owns_data) {
       cuMemFree(CUDA_BUFS[i].dptr);
-      CUDA_BUFS[i].dptr = 0;
     }
+    CUDA_BUFS[i].dptr          = 0;
+    CUDA_BUFS[i].parent_buf_id = 0;
+    CUDA_BUFS[i].owns_data     = 0;
+    CUDA_BUFS[i].skip_freelist = 0;
   }
   // jit.c owns the module cache; it registers cuda_jit_cache_reset
   // which cuModuleUnload's every cached module before we drop the

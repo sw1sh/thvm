@@ -50,11 +50,60 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   cuMemsetD8(dptr, 0, (size_t)nbytes);
   u32 id = (u32)CUDA_BUFS_NEXT++;
   CudaBuf *b = &CUDA_BUFS[id];
-  b->dptr     = dptr;
-  b->nbytes   = nbytes;
-  b->refcount = 1;
+  b->dptr          = dptr;
+  b->nbytes        = nbytes;
+  b->refcount      = 1;
+  b->preserved     = 0;
+  b->owns_data     = 1;
+  b->skip_freelist = 0;
+  b->parent_buf_id = 0;
   CUDA_MEM_LIVE += nbytes;
   if (CUDA_MEM_LIVE > CUDA_MEM_PEAK) CUDA_MEM_PEAK = CUDA_MEM_LIVE;
+  return id;
+}
+
+// Borrow an existing device pointer for the lifetime of the returned
+// buf_id.  No cuMemAlloc, no cuMemFree -- the caller owns `dptr`.
+// Mirror of backend/cpu/buf_alloc.c::cpu_buf_alloc_external; today the
+// only caller is cuda_buf_alloc_arena_view, but having the symbol
+// available keeps the CPU/CUDA shape identical and admits a future
+// py-bridge device-pointer import path.
+fn u32 cuda_buf_alloc_external(CUdeviceptr dptr, u64 nbytes) {
+  if (!CUDA_READY) {
+    fprintf(stderr, "cuda_buf_alloc_external: backend not initialised\n");
+    return 0;
+  }
+  if (CUDA_BUFS_NEXT >= CUDA_BUFS_CAP) {
+    fprintf(stderr, "cuda_buf_alloc_external: out of slots\n");
+    return 0;
+  }
+  u32 id = (u32)CUDA_BUFS_NEXT++;
+  CudaBuf *b = &CUDA_BUFS[id];
+  b->dptr          = dptr;
+  b->nbytes        = nbytes;
+  b->refcount      = 1;
+  b->preserved     = 0;
+  b->owns_data     = 0;
+  b->skip_freelist = 0;
+  b->parent_buf_id = 0;
+  return id;
+}
+
+// Arena view: external buf at (parent's dptr + offset, nbytes) whose
+// lifetime is tied to `parent_buf_id` (the arena CudaBuf).  Each incref
+// of this view increments the parent; each decref-to-zero decrements
+// the parent and frees the view cell, but leaves the parent's bytes
+// alive until the parent's own refcount drops to zero.  Mirror:
+// tinygrad schedule/memory.py:60 emits BUFFER_VIEW(arena, nbytes,
+// offset) whose arena edge keeps the underlying buffer alive while any
+// view persists.  Matches backend/cpu/buf_alloc.c:93-100.
+fn u32 cuda_buf_alloc_arena_view(CUdeviceptr dptr, u64 nbytes,
+                                 u32 parent_buf_id) {
+  u32 id = cuda_buf_alloc_external(dptr, nbytes);
+  if (id != 0 && parent_buf_id != 0 && parent_buf_id < CUDA_BUFS_NEXT) {
+    CUDA_BUFS[id].parent_buf_id = parent_buf_id;
+    CUDA_BUFS[parent_buf_id].refcount++;
+  }
   return id;
 }
 

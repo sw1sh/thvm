@@ -38,7 +38,20 @@ fn void cuda_buf_pool_rollback_with_preserve(u32 wm) {
     // reclaim (wm=1) re-scans prior realizes' freed slots; re-pushing
     // would double-list them -> two allocations alias one buffer.
     if (CUDA_BUFS[i].refcount == 0) continue;
-    cuda_buf_freelist_push((u32)i);
+    if (CUDA_BUFS[i].skip_freelist) {
+      // Per-realize arena (see CudaBuf.skip_freelist).  Skip the
+      // freelist park, real-free immediately so its 100-700MB don't
+      // accumulate across steps.  Views into this arena still living
+      // in [wm, CUDA_BUFS_NEXT) at iteration time are tied via
+      // parent_buf_id; cuda_buf_free's parent-decref chain handles
+      // the lifecycle uniformly whether we free arena first or last
+      // (the parent-decref gate `refcount > 0` no-ops the double).
+      cuda_buf_free((u32)i);
+    } else if (CUDA_BUFS[i].owns_data) {
+      cuda_buf_freelist_push((u32)i);
+    } else {
+      cuda_buf_free((u32)i);
+    }
   }
 }
 
@@ -66,4 +79,24 @@ fn void cuda_buf_mark_preserved(u32 buf_id) {
 fn void cuda_buf_clear_preserved(u32 wm) {
   if (wm < 1) wm = 1;
   for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) CUDA_BUFS[i].preserved = 0;
+}
+
+// Cross-realize arena-view release: same role as
+// backend/cpu/buf_pool.c::cpu_buf_clear_preserved_arena_views.  Arena
+// views are by construction internal forward intermediates
+// (consumer_count == 1, last_use > 0; arena_boundary_is_plannable in
+// schedule/materialize.c).  The per-realize tracing GC may still mark
+// some preserved (e.g. a view-tid reachable from the SINK Term); that
+// preserve also marks the parent arena alive via
+// tensor_mark_buf_preserved's parent_buf_id link, which would block
+// pool_rollback from reclaiming the entire arena cohort.  Drop the
+// preserve flag on both halves so the arena dies at end-of-realize.
+fn void cuda_buf_clear_preserved_arena_views(u32 wm) {
+  if (wm < 1) wm = 1;
+  for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) {
+    u32 parent = CUDA_BUFS[i].parent_buf_id;
+    if (parent == 0) continue;
+    CUDA_BUFS[i].preserved = 0;
+    if (parent < CUDA_BUFS_NEXT) CUDA_BUFS[parent].preserved = 0;
+  }
 }

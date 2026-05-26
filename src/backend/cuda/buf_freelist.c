@@ -24,6 +24,11 @@ fn void cuda_buf_freelist_push(u32 buf_id) {
   // own refcount-aware skip (cpu_buf_freelist_push has owns_data + the
   // mem_plan caller's refcount>1 check; CUDA was the missing twin).
   if (CUDA_BUFS[buf_id].refcount > 0) return;
+  // Non-owning bufs (arena views, future external imports) borrow
+  // another slot's dptr; recycling them through the freelist would
+  // hand the same dptr to a fresh alloc while the parent arena still
+  // backs it.  Mirrors backend/cpu/buf_freelist.c's owns_data guard.
+  if (!CUDA_BUFS[buf_id].owns_data) return;
   CUDA_FREELIST[CUDA_FREELIST_LEN++] = buf_id;
   CUDA_BUFS[buf_id].refcount = 0;
 }
@@ -54,6 +59,7 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
     if (bid == 0 || bid >= CUDA_BUFS_NEXT) continue;
     CudaBuf *b = &CUDA_BUFS[bid];
     if (b->dptr == 0 || b->nbytes < nbytes) continue;
+    if (!b->owns_data) continue;       // skip arena views / externals
     if (b->nbytes < best_nb) { best_nb = b->nbytes; best_i = i; }
   }
   if (best_nb == (u64)-1) return 0;
@@ -64,25 +70,32 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
   CudaBuf *donor = &CUDA_BUFS[donor_bid];
   CUdeviceptr dptr = donor->dptr;
   u64         nb   = donor->nbytes;
-  donor->dptr     = 0;
-  donor->nbytes   = 0;
-  donor->refcount = 0;
+  donor->dptr      = 0;
+  donor->nbytes    = 0;
+  donor->refcount  = 0;
   donor->preserved = 0;
+  donor->owns_data = 0;
+  donor->skip_freelist = 0;
+  donor->parent_buf_id = 0;
   if (CUDA_BUFS_NEXT >= CUDA_BUFS_CAP) {
     // Out of slot table -- restore donor and bail; caller will fall back
     // to cuMemAlloc (cost: an extra fresh allocation, never aliasing).
-    donor->dptr     = dptr;
-    donor->nbytes   = nb;
-    donor->refcount = 0;
+    donor->dptr      = dptr;
+    donor->nbytes    = nb;
+    donor->refcount  = 0;
+    donor->owns_data = 1;
     cuda_buf_freelist_push(donor_bid);
     return 0;
   }
   u32 new_id = (u32)CUDA_BUFS_NEXT++;
   CudaBuf *nb_slot = &CUDA_BUFS[new_id];
-  nb_slot->dptr     = dptr;
-  nb_slot->nbytes   = nb;
-  nb_slot->refcount = 1;
-  nb_slot->preserved = 0;
+  nb_slot->dptr          = dptr;
+  nb_slot->nbytes        = nb;
+  nb_slot->refcount      = 1;
+  nb_slot->preserved     = 0;
+  nb_slot->owns_data     = 1;
+  nb_slot->skip_freelist = 0;
+  nb_slot->parent_buf_id = 0;
   cuMemsetD8(dptr, 0, (size_t)nbytes);
   return new_id;
 }
