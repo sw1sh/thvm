@@ -20,7 +20,18 @@ fn void tensor_mark_buf_preserved(u32 id) {
     }
     case 2: thvm_metal_buf_mark_preserved(d->buf_id); break;
 #ifdef THVM_HAS_CUDA
-    case 3: cuda_buf_mark_preserved(d->buf_id); break;
+    case 3: {
+      cuda_buf_mark_preserved(d->buf_id);
+      // Arena view: tracing GC reaches the view via TenDesc but the
+      // parent arena CudaBuf has no Term naming it.  Mark parent too
+      // so pool_rollback doesn't free arena bytes while a view's dptr
+      // still references them (mirror of the CPU branch above).
+      if (d->buf_id < CUDA_BUFS_NEXT) {
+        u32 parent = CUDA_BUFS[d->buf_id].parent_buf_id;
+        if (parent != 0) cuda_buf_mark_preserved(parent);
+      }
+      break;
+    }
 #endif
     default: break;
   }
