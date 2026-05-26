@@ -175,6 +175,7 @@ fn Term thvm_realize(Term expr) {
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
 #ifdef THVM_HAS_CUDA
+  cuda_buf_clear_preserved_arena_views(cuda_wm);
   cuda_buf_pool_rollback_with_preserve(cuda_wm);
   cuda_buf_clear_preserved(cuda_wm);
 #endif
@@ -318,6 +319,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   cpu_buf_clear_freeable(cpu_wm);
   thvm_metal_buf_clear_preserved(metal_wm);
 #ifdef THVM_HAS_CUDA
+  cuda_buf_clear_preserved_arena_views(cuda_wm);
   cuda_buf_pool_rollback_with_preserve(cuda_wm);
   cuda_buf_clear_preserved(cuda_wm);
 #endif

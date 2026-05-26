@@ -468,9 +468,13 @@ static void mem_plan_push_dead(u32 current_depth) {
 // the legacy cpu_buf_alloc path.  Arena allocator runs per-realize;
 // the arena CpuBuf is freed by pool_rollback at end-of-realize.
 //
-// CPU only today (CURRENT_BACKEND == &CPU_BACKEND check).  Metal/CUDA
-// stay on the freelist push/pop scope so their dispatch-time
-// synchronisation invariants aren't broken.
+// CPU + CUDA today (Metal stays on the freelist push/pop scope so its
+// MTLCommandBuffer dispatch-time synchronisation invariants aren't
+// broken).  CUDA mirrors CPU: ARENA_BUF_ID indexes the backend's
+// per-realize arena buf; arena_data returns a host pointer for CPU and
+// arena_dptr returns a CUdeviceptr for CUDA; arena_tensor_alloc emits
+// the per-view backend buf and zero-inits the slot (memset for CPU,
+// cuMemsetD8 for CUDA).
 
 typedef struct {
   u64 offset;
@@ -483,7 +487,10 @@ static ArenaSlot ARENA_SLOTS[ARENA_SLOTS_CAP];
 static u32       ARENA_SLOTS_LEN     = 0;
 static u64       ARENA_SIZE          = 0;
 static u32       ARENA_BUF_ID        = 0;
-static u8       *ARENA_DATA          = NULL;
+static u8       *ARENA_DATA          = NULL;   // CPU arena base
+#ifdef THVM_HAS_CUDA
+static CUdeviceptr ARENA_DPTR        = 0;      // CUDA arena base
+#endif
 
 // Telemetry: counts arena vs legacy allocs per realize for THVM_ARENA_DUMP.
 static u32 ARENA_ALLOCS_ARENA  = 0;
@@ -514,6 +521,9 @@ static void arena_reset(void) {
   ARENA_SIZE      = 0;
   ARENA_BUF_ID    = 0;
   ARENA_DATA      = NULL;
+#ifdef THVM_HAS_CUDA
+  ARENA_DPTR      = 0;
+#endif
 }
 
 typedef struct {
@@ -614,7 +624,12 @@ static void arena_compute(void) {
   if (!arena_plan_enabled())     return;
   if (BOUNDARY_ORDER_LEN == 0)   return;
   if (CURRENT_BACKEND == NULL)   return;
-  if (CURRENT_BACKEND != &CPU_BACKEND) return;
+  int is_cpu  = (CURRENT_BACKEND == &CPU_BACKEND);
+  int is_cuda = 0;
+#ifdef THVM_HAS_CUDA
+  is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
+#endif
+  if (!is_cpu && !is_cuda)       return;
 
   ARENA_SLOTS_LEN = BOUNDARY_ORDER_LEN;
   static u32 first_pos[ARENA_SLOTS_CAP];
@@ -692,25 +707,38 @@ static void arena_compute(void) {
   }
 }
 
-// Lazily allocate the arena CpuBuf on the first arena-slot read.
-// Single calloc'd block participates in CPU_MEM_LIVE / pool_rollback
-// like any other buf.
-static u8 *arena_data(void) {
-  if (ARENA_DATA != NULL)       return ARENA_DATA;
-  if (ARENA_SIZE == 0)          return NULL;
-  if (CURRENT_BACKEND != &CPU_BACKEND) return NULL;
-  ARENA_BUF_ID = cpu_buf_alloc(ARENA_SIZE);
-  if (ARENA_BUF_ID == 0)        return NULL;
-  ARENA_DATA = (u8 *)CPU_BUFS[ARENA_BUF_ID].data;
-  // Per-realize arena: this block is sized to fit this pass's max-live
-  // working set (computed by arena_compute via TLSF events).  At end of
-  // realize the entire arena is released; we want pool_rollback to
-  // real-free it, NOT park it on the freelist where best-fit might
-  // snag a 646MB slot for a 16MB request (or, worse, leave it parked
-  // while every subsequent realize calloc's a fresh arena -- the
-  // cross-step leak this flag fixes).
-  CPU_BUFS[ARENA_BUF_ID].skip_freelist = 1;
-  return ARENA_DATA;
+// Lazily allocate the arena backend buf on the first arena-slot read.
+// Single block participates in CPU_MEM_LIVE / CUDA_MEM_LIVE +
+// pool_rollback like any other buf.  Returns 1 if an arena exists (or
+// was just created), 0 otherwise.
+static int arena_ensure(void) {
+  if (ARENA_BUF_ID != 0)        return 1;
+  if (ARENA_SIZE == 0)          return 0;
+  if (CURRENT_BACKEND == &CPU_BACKEND) {
+    ARENA_BUF_ID = cpu_buf_alloc(ARENA_SIZE);
+    if (ARENA_BUF_ID == 0)      return 0;
+    ARENA_DATA = (u8 *)CPU_BUFS[ARENA_BUF_ID].data;
+    // Per-realize arena: this block is sized to fit this pass's
+    // max-live working set (computed by arena_compute via TLSF
+    // events).  At end of realize the entire arena is released; we
+    // want pool_rollback to real-free it, NOT park it on the
+    // freelist where best-fit might snag a 646MB slot for a 16MB
+    // request (or, worse, leave it parked while every subsequent
+    // realize calloc's a fresh arena -- the cross-step leak this
+    // flag fixes).
+    CPU_BUFS[ARENA_BUF_ID].skip_freelist = 1;
+    return 1;
+  }
+#ifdef THVM_HAS_CUDA
+  if (CURRENT_BACKEND == &CUDA_BACKEND) {
+    ARENA_BUF_ID = cuda_buf_alloc(ARENA_SIZE);
+    if (ARENA_BUF_ID == 0)      return 0;
+    ARENA_DPTR = cuda_buf_dptr(ARENA_BUF_ID);
+    CUDA_BUFS[ARENA_BUF_ID].skip_freelist = 1;
+    return 1;
+  }
+#endif
+  return 0;
 }
 
 // Allocate a TenDesc whose buf is an external view into the arena.
@@ -718,9 +746,13 @@ static u8 *arena_data(void) {
 static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
   if (ord_idx >= ARENA_SLOTS_LEN)        return 0;
   if (!ARENA_SLOTS[ord_idx].in_arena)    return 0;
-  if (CURRENT_BACKEND != &CPU_BACKEND)   return 0;
-  u8 *arena = arena_data();
-  if (arena == NULL)                     return 0;
+  int is_cpu  = (CURRENT_BACKEND == &CPU_BACKEND);
+  int is_cuda = 0;
+#ifdef THVM_HAS_CUDA
+  is_cuda = (CURRENT_BACKEND == &CUDA_BACKEND);
+#endif
+  if (!is_cpu && !is_cuda)               return 0;
+  if (!arena_ensure())                   return 0;
   if (TENS_NEXT >= TENS_CAP) {
     fprintf(stderr, "arena_tensor_alloc: out of descriptor slots\n");
     exit(1);
@@ -740,15 +772,26 @@ static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
   u64 nbytes = dtype_storage_bytes(dtype, (u64)d->view.numel);
   if (nbytes == 0) nbytes = 1;
   // Zero-init the slot: a previous lifetime's bytes still occupy it
-  // (TLSF only tracks block ownership, not zeroing).  cpu_buf_alloc's
-  // calloc/freelist-pop guaranteed zero, so kernels writing through
-  // REDUCE_ADD / accumulate-style paths depend on it.
-  memset(arena + off, 0, (size_t)nbytes);
-  // Arena view: ties this CpuBuf's lifetime to ARENA_BUF_ID via the
-  // parent_buf_id chain in cpu_buf_incref / cpu_buf_decref so the
-  // arena bytes outlive every view.  Mirror: tinygrad
-  // schedule/memory.py:60 BUFFER_VIEW(arena, nbytes, offset).
-  d->buf_id = cpu_buf_alloc_arena_view(arena + off, nbytes, ARENA_BUF_ID);
+  // (TLSF only tracks block ownership, not zeroing).  buf_alloc's
+  // calloc/cuMemsetD8/freelist-pop guaranteed zero, so kernels writing
+  // through REDUCE_ADD / accumulate-style paths depend on it.
+  //
+  // Arena view: ties this backend buf's lifetime to ARENA_BUF_ID via
+  // the parent_buf_id chain in buf_incref / buf_decref so the arena
+  // bytes outlive every view.  Mirror: tinygrad schedule/memory.py:60
+  // BUFFER_VIEW(arena, nbytes, offset).
+  if (is_cpu) {
+    memset(ARENA_DATA + off, 0, (size_t)nbytes);
+    d->buf_id = cpu_buf_alloc_arena_view(ARENA_DATA + off, nbytes,
+                                         ARENA_BUF_ID);
+  }
+#ifdef THVM_HAS_CUDA
+  else if (is_cuda) {
+    cuMemsetD8(ARENA_DPTR + off, 0, (size_t)nbytes);
+    d->buf_id = cuda_buf_alloc_arena_view(ARENA_DPTR + off, nbytes,
+                                          ARENA_BUF_ID);
+  }
+#endif
   ARENA_ALLOCS_ARENA++;
   return tid;
 }
@@ -3849,6 +3892,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
   if (out_tid == 0) {
     out_tid = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
     if (out_tid != 0 && CURRENT_BACKEND == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
+#ifdef THVM_HAS_CUDA
+    if (out_tid != 0 && CURRENT_BACKEND == &CUDA_BACKEND) ARENA_ALLOCS_LEGACY++;
+#endif
   }
   u32 kid     = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
@@ -4367,8 +4413,17 @@ fn Term thvm_materialize(Term term) {
       // decref hook in the rewind loop.  This is a transient leak per
       // failed pass (rare); the arena_reset below clears the static
       // pointers so the next pass starts fresh.
-      if (ARENA_BUF_ID != 0 && ARENA_BUF_ID < CPU_BUFS_NEXT) {
-        cpu_buf_decref(ARENA_BUF_ID);
+      if (ARENA_BUF_ID != 0) {
+        if (CURRENT_BACKEND == &CPU_BACKEND
+            && ARENA_BUF_ID < CPU_BUFS_NEXT) {
+          cpu_buf_decref(ARENA_BUF_ID);
+        }
+#ifdef THVM_HAS_CUDA
+        else if (CURRENT_BACKEND == &CUDA_BACKEND
+                 && ARENA_BUF_ID < CUDA_BUFS_NEXT) {
+          cuda_buf_decref(ARENA_BUF_ID);
+        }
+#endif
       }
       arena_reset();
       return term;
@@ -4380,15 +4435,24 @@ fn Term thvm_materialize(Term term) {
   // from them (the chain rule's freshly-emitted UOPs may still
   // reference those tids).
   mem_plan_drain_freelist();
-  // Arena: drop the +1 sentinel refcount that cpu_buf_alloc() gave
-  // the arena buf at first-view time, so the arena is released the
-  // moment its last view decrefs.  Each arena view incref'd it by 1;
-  // total refcount is (1 + N_live_views).  After this decref it's
-  // exactly N_live_views, which drops naturally as TenDescs release.
-  // Without this drop the arena leaks until session shutdown (every
-  // realize accumulates a permanent arena).
-  if (ARENA_BUF_ID != 0 && ARENA_BUF_ID < CPU_BUFS_NEXT) {
-    cpu_buf_decref(ARENA_BUF_ID);
+  // Arena: drop the +1 sentinel refcount that buf_alloc gave the
+  // arena buf at first-view time, so the arena is released the moment
+  // its last view decrefs.  Each arena view incref'd it by 1; total
+  // refcount is (1 + N_live_views).  After this decref it's exactly
+  // N_live_views, which drops naturally as TenDescs release.  Without
+  // this drop the arena leaks until session shutdown (every realize
+  // accumulates a permanent arena).
+  if (ARENA_BUF_ID != 0) {
+    if (CURRENT_BACKEND == &CPU_BACKEND
+        && ARENA_BUF_ID < CPU_BUFS_NEXT) {
+      cpu_buf_decref(ARENA_BUF_ID);
+    }
+#ifdef THVM_HAS_CUDA
+    else if (CURRENT_BACKEND == &CUDA_BACKEND
+             && ARENA_BUF_ID < CUDA_BUFS_NEXT) {
+      cuda_buf_decref(ARENA_BUF_ID);
+    }
+#endif
   }
   if (getenv("THVM_ARENA_DUMP")) {
     fprintf(stderr,
@@ -4397,6 +4461,9 @@ fn Term thvm_materialize(Term term) {
   }
   ARENA_DATA   = NULL;
   ARENA_BUF_ID = 0;
+#ifdef THVM_HAS_CUDA
+  ARENA_DPTR   = 0;
+#endif
   // Diagnostic: print per-kernel input edge data for every kernel
   // emitted in this pass.  No-op unless
   // DUMP_BUFFERIZE_KERNEL_EDGES=1.
