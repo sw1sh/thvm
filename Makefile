@@ -549,7 +549,11 @@ $(METAL_LIBPATH): $(METAL_AIRS) | $(BUILD)
 # Darwin folds libm into libSystem; Linux needs an explicit -lm (the
 # UOp walker / renderer call exp2/log2/sqrt).
 TEST_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm)
-TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,)
+# Test binaries that #include src/thvm.c (which pulls in src/atp/_.c)
+# need ATP_DEFINES so the ATP_RULE_INDEX-gated forward decls match
+# the unconditional call sites at ~lines 5866, 8601, 9982.  Folding
+# ATP_DEFINES into TEST_DEFINES keeps the per-target rules clean.
+TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,) $(ATP_DEFINES)
 
 # === Embedded thvm runtime source ==================================
 # At build time, flatten src/thvm.c (resolve all `#include "..."`,
@@ -574,7 +578,7 @@ AOT_TESTS := $(BIN)/test_aot_emit $(BIN)/test_aot_e2e \
              $(BIN)/test_aot_e2e_bench $(BIN)/test_aot_build
 
 $(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) build/thvm_runtime_blob.c | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< build/thvm_runtime_blob.c $(TEST_LDFLAGS)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< build/thvm_runtime_blob.c $(TEST_LDFLAGS)
 
 $(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
