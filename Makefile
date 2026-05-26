@@ -573,7 +573,7 @@ $(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(META
 # single-TU build; -lcuda -lnvrtc link the driver + nvrtc.  Only
 # reachable when the CUDA block above added it to TESTS (Linux+CUDA).
 $(BIN)/test_cuda_backend: tests/test_cuda_backend.c $(SRC) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
 # Cross-backend dispatch microbench.  One binary; the backend is chosen
 # at runtime via DEV={cpu,metal,cuda}.  On macOS it links the Metal
@@ -640,7 +640,7 @@ ifeq ($(shell uname -s),Linux)
 PY_SO           := py/thvm/libthvm_py.so
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
-	$(CC) -fPIC -O2 $(CUDA_DEFINES) \
+	$(CC) -fPIC -O2 $(CUDA_DEFINES) $(ATP_DEFINES) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
 ifdef HAVE_CUDA
