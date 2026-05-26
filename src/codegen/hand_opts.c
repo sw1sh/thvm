@@ -309,12 +309,8 @@ static int hand_opt_kernel_on_metal(KernelEntry const *ke) {
     b = TENS[ke->output_tid].backend;
   }
   if (b == NULL) b = DEFAULT_BACKEND;
-  // METAL_BACKEND.id == 2, CUDA_BACKEND.id == 3 (cpu == 1) -- see
-  // kautotune_backend_id.  Accept both GPU backends; the hand-coded
-  // opts (UPCAST/UNROLL/LOCAL/TC markers) are GPU-target-agnostic and
-  // lower through the same UOP_OPT(_, ...) wrappers + uop_dag_apply_kopt
-  // path on both render_uop CUDA + MSL entries.
-  return b != NULL && (b->id == 2 || b->id == 3);
+  // METAL_BACKEND.id == 2 (cpu == 1) -- see kautotune_backend_id.
+  return b != NULL && b->id == 2;
 }
 
 // --- the heuristic -------------------------------------------------
