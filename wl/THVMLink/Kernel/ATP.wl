@@ -3200,6 +3200,23 @@ TFindProof[thms_Association, theory_String,
 
    atpEncodeProblem validates axiom/conjecture shape and surfaces
    the encoder state (the Variables list + the Term decoder maps). *)
+(* TPTP source -> conjecture + axioms, then prove.  Accepts:
+     - File["foo.p"]: read + parse, then prove the Conjecture against
+       the Axioms.
+     - a string containing "cnf(": parse inline, then prove.
+   The parser handles the TPTP UEQ fragment (one equational literal
+   per cnf clause).  fof / tff / thf clauses + include directives are
+   skipped with a console warning.  See Kernel/ATP/TPTPImport.wl. *)
+TFindProof[File[path_String], opts:OptionsPattern[]] := Block[{
+        imported = THVMLink`TPTPImport`tptpImport[File[path]]
+    },
+    TFindProof[imported["Conjecture"], imported["Axioms"], opts]
+]
+TFindProof[s_String, opts:OptionsPattern[]] /; StringContainsQ[s, "cnf("] :=
+    Block[{imported = THVMLink`TPTPImport`tptpImport[s]},
+        TFindProof[imported["Conjecture"], imported["Axioms"], opts]
+    ]
+
 (* The proving entry: optional LAST positional returnSpec.  Without it,
    the bare ProofObject is returned (backward compatible); with it, the
    run is projected onto the requested introspectives. *)
@@ -3459,3 +3476,8 @@ TFindEquationalProof[args___] := TFindProof[args];
 
 End[];
 EndPackage[];
+
+(* Sub-modules live under Kernel/ATP/ and are picked up by the
+   recursive autoloader in Kernel/THVMLink.wl -- no explicit Get
+   here.  Files load alphabetically by full path, so Kernel/ATP/
+   children load AFTER Kernel/ATP.wl. *)

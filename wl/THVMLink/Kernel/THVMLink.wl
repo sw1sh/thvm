@@ -1200,13 +1200,23 @@ EndPackage[];
    can call each other's helpers without qualification.  Definition
    order doesn't matter (every cross-file reference uses SetDelayed),
    so we Get them in alphabetical order via FileNames -- adding a new
-   sibling means dropping it in this directory; no edits here. *)
-With[{here = $InputFileName},
+   sibling means dropping it in this directory; no edits here.
+
+   Subdirectories (Kernel/ATP/, ...) are scanned recursively.  Files
+   are ordered (parent-dir files first, then any subdirectory file)
+   by sorting on a {depth, lowercased path} key, so Kernel/ATP.wl
+   loads before Kernel/ATP/*.wl regardless of WL Sort's char-order
+   quirks.  Subdirectory files that depend on a parent's BeginPackage
+   can rely on this. *)
+With[{base = DirectoryName[$InputFileName]},
     Scan[
         Get,
-        Sort @ Select[
-            FileNames["*.wl", DirectoryName[here]],
-            FileBaseName[#] =!= "THVMLink" &
+        SortBy[
+            Select[
+                FileNames["*.wl", base, Infinity],
+                FileBaseName[#] =!= "THVMLink" &
+            ],
+            f |-> {Length @ FileNameSplit[f], ToLowerCase[f]}
         ]
     ]
 ]
