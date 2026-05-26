@@ -4929,6 +4929,22 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       if (dr > d) d = dr;
       return 4u * large + 1u * small + 2u * d;
     }
+    case ATP_CP_WEIGHT_STAGGERED: {
+      // E StaggeredWeight (HEURISTICS/che_varweights.c::
+      // StaggeredWeightCompute).  Lazily compute max axiom weight on
+      // first call (one pass over rules; the result is reused for
+      // the rest of the run).  Bucket the CP into integer stagger
+      // groups via base / stagger_limit.
+      u32 base = atp_symbol_count(lhs) + atp_symbol_count(rhs);
+      u32 max_aw = 0;
+      for (u32 i = 0; i < s->n_rules; i++) {
+        u32 wi = atp_symbol_count(s->lhs[i]) + atp_symbol_count(s->rhs[i]);
+        if (wi > max_aw) max_aw = wi;
+      }
+      u32 stagger_limit = (max_aw / 2u);
+      if (stagger_limit < 1u) stagger_limit = 1u;
+      return base / stagger_limit;
+    }
     case ATP_CP_WEIGHT_RELLEVEL: {
       // E RelevanceLevelWeight (HEURISTICS/che_funweights.c:610) +
       // init_relevance_vector.  N-level port: per-symbol BFS distance

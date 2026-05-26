@@ -2087,6 +2087,13 @@ $AtpCpWeightCodes = <|
                          Variable nodes weight 1.  Deeper goal-
                          relevance bias than ConjSym (the 1-level
                          analog). *)
+    "Staggered" -> 13, (* E StaggeredWeight (HEURISTICS/
+                         che_varweights.c::StaggeredWeightCompute).
+                         base_weight / max(1, max_axiom_weight / 2).
+                         Buckets CPs by integer stagger group so within
+                         a bucket the age-fairness FifoTiebreak picks
+                         oldest-first.  Pair with FifoTiebreak -> True
+                         for the intended behaviour. *)
     Automatic -> -1
 |>;
 

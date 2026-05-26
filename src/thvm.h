@@ -3092,7 +3092,15 @@ typedef enum {
                               // sym multiplier).  Variable nodes weight
                               // 1.  Cached level masks recomputed when
                               // the goal is set.
-  ATP_CP_WEIGHT_LAST = 13,
+  ATP_CP_WEIGHT_STAGGERED = 13, // E StaggeredWeight (HEURISTICS/
+                              // che_varweights.c::StaggeredWeightCompute).
+                              // base_weight / max(1, max_axiom_weight/2).
+                              // Buckets CPs by integer stagger group so
+                              // FifoTiebreak fairness (oldest-first
+                              // within a bucket) dominates the heap
+                              // selection.  Pair with FifoTiebreak->True
+                              // for the intended behaviour.
+  ATP_CP_WEIGHT_LAST = 14,
 } AtpCpWeightMode;
 
 typedef struct {

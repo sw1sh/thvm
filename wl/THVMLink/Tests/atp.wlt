@@ -1032,6 +1032,17 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Staggered: E StaggeredWeight port -- coarse-grained CP weight
+       bucketing.  Designed to pair with FifoTiebreak; baseline proves
+       in either config. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Staggered",
+            "FifoTiebreak" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/cpweight-Staggered-proves"
+]
+
+VerificationTest[
     (* "PortfolioTrace" single-config fallback: returns a 1-element list
        whose entry mirrors AppliedMethod / WallTime / Proved. *)
     Module[{t = TFindProof["InverseOfInverse", "AbelianGroupAxioms",
