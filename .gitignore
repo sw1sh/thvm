@@ -32,3 +32,7 @@ __pycache__/
 py/thvm/libthvm_py.dylib
 
 brain/
+
+# Regenerable Vampire benchmark artifacts (re-export via run_vampire_baseline.sh)
+tools/baselines/vampire_raw/
+tools/baselines/vampire_tptp/
