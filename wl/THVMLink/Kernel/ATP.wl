@@ -2229,6 +2229,39 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
+(* Method -> "VampireUEQ": a preset modeled on the Vampire 5.0.1 UEQ
+   portfolio entry that cracks ShefferAxioms/AndAssociativity --
+       dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
+       bd=all:av=off:gtg=exists_sym
+   Decoded to thvm knobs (best-effort mapping; Vampire's
+   gtg=exists_sym / bs=unit_only / bd=all are not yet ported):
+     - GoalDirected -> True            (Vampire's `tgt=full`: prefer
+       goal-aimed expansion across the queue).
+     - Ordering -> "LPO"               (`to=lpo`).
+     - AutoPrecedence -> True          (`sp=arity`: our layered
+       AutoPrecedence reduces to the arity ladder for single-operator
+       Sheffer-shape problems; for multi-operator problems we add
+       inverse/distributor structure on top, which Vampire's sp=arity
+       does not -- a strict superset for the cases that need it).
+     - SelectionRatio -> 10            (`dis+10` = age:weight 1:10
+       in Vampire; our SelectionRatio is the inverse FIFO ratio).
+     - UnfailingCP -> True             (necessary completeness for
+       unorientable equations under LPO).
+     - AutoMaxWeight -> True           (Vampire keeps its CP queue
+       small via age-weight balance; the closest analog we have is the
+       growing-bound weight stash). *)
+atpParseMethod["VampireUEQ"] := atpParseMethod[{"VampireUEQ"}];
+atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
+    Block[{o = Association[{subopts}], merged, mnf},
+        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", True], 1, 0];
+        o = KeyDrop[o, "GoalDirected"];
+        merged = Join[<|
+            "Ordering" -> "LPO", "AutoPrecedence" -> True,
+            "SelectionRatio" -> 10, "UnfailingCP" -> True,
+            "AutoMaxWeight" -> True|>, o];
+        atpParseCompletionOpts[Normal[merged], mnf]
+    ];
+
 atpParseMethod[m_] := (
     Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0});
 

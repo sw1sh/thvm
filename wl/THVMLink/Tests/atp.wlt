@@ -831,6 +831,24 @@ VerificationTest[
     TestID -> "ATP/method/bad-method-warns-and-falls-back"
 ]
 
+VerificationTest[
+    (* Method -> "Waldmeister" preset still proves a standard theorem. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "Waldmeister"],
+    ProofObject,
+    TestID -> "ATP/method/Waldmeister-preset-proves"
+]
+
+VerificationTest[
+    (* Method -> "VampireUEQ" preset (LPO + AutoPrecedence +
+       SelectionRatio 10 + UnfailingCP + AutoMaxWeight + MNF front)
+       proves a baseline theorem too -- bundled knob smoke check. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "VampireUEQ"],
+    ProofObject,
+    TestID -> "ATP/method/VampireUEQ-preset-proves"
+]
+
 (* --- CriticalPairWeight: each ClasHeuristics weight mode proves ---- *)
 
 VerificationTest[
