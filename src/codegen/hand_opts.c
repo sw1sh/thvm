@@ -79,14 +79,6 @@
 // (tinygrad's inverse-sense knob) also disables and wins if both set.
 // Memoised: -1 = uninitialised, 0 = off, 1 = on.
 static int HAND_CODED_OPTS_ENABLED = -1;
-
-// Side-channel "hand_opts has run for this kid" memo.  ke->schedule
-// is NULL on Python-built kernels (the CUDA bridge route) so we can't
-// stash on ke->schedule->autotuned alone -- without this memo, hand_
-// opts re-ran every fire on those kernels (~7ms overhead * 29 fires/
-// step regressed wall ~200ms even when the heuristic was a no-op).
-// One byte per kid, indexed (kid - KERNELS); KERNELS_CAP-bounded.
-static u8 HAND_OPTS_RAN[KERNELS_CAP] = {0};
 static int hand_coded_opts_enabled(void) {
   if (HAND_CODED_OPTS_ENABLED < 0) {
     char const *noopt = getenv("NOOPT");
@@ -113,9 +105,6 @@ typedef struct {
   u32 n;
   u8  kax_type[MAX_AXES];
   u32 extent  [MAX_AXES];
-  u32 axis_id [MAX_AXES];   // actual axis id (may not equal slot
-                             // index -- kernels lifted from production
-                             // pipeline carry non-zero-based ids).
 } HandOptAxes;
 
 static int hand_opt_snapshot_axes(KernelEntry const *ke, HandOptAxes *out) {
@@ -126,17 +115,15 @@ static int hand_opt_snapshot_axes(KernelEntry const *ke, HandOptAxes *out) {
     u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
                                  exts, MAX_AXES);
     if (n == 0) return 0;
-    // ids are sorted ascending but NOT necessarily zero-based -- a
-    // kernel lifted from the production pipeline (rangeify -> kernel
-    // -> lift) carries global axis ids that may start anywhere in
-    // 0..u32_max.  The slot index is the ordinal position; the
-    // axis_id is stored separately and passed to kernel_apply_opt as
-    // opt.axis, since uop_dag_apply_kopt targets by axis_id (not slot).
+    // ids are sorted ascending; treat the slot index as the axis index
+    // (the lifter / DAG-split keep axis_id == ordinal position).  If a
+    // gap appears (shouldn't, but be defensive), bail rather than mis-
+    // index a subsequent kernel_apply_opt.
     for (u32 i = 0; i < n; i++) {
+      if (ids[i] != i) return 0;
       if (types[i] > KAX_GROUP_REDUCE) return 0;
       out->kax_type[i] = (u8)types[i];
       out->extent[i]   = exts[i];
-      out->axis_id[i]  = ids[i];
     }
     out->n = n;
     return 1;
@@ -148,9 +135,6 @@ static int hand_opt_snapshot_axes(KernelEntry const *ke, HandOptAxes *out) {
     for (u32 i = 0; i < n; i++) {
       out->kax_type[i] = axes_resolve_kax_type(ke, i);
       out->extent[i]   = exts[i];
-      // Schedule mode: legacy applied_opts uses slot index as axis,
-      // see apply_opt.c.  Keep the existing semantics.
-      out->axis_id[i]  = i;
     }
     out->n = n;
     return 1;
@@ -256,13 +240,11 @@ static int hand_opt_is_conv_kernel(KernelEntry const *ke) {
   // Already wrapped (rare -- recogniser usually runs at render time)?
   if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
       && uop_opt_kind(value) == UOP_OPT_CONV) return 1;
-  // Otherwise detect the conv2d SHAPE structurally -- includes both
-  // the flat im2col-matmul form (single REDUCE axis + IDIV/IMOD
-  // addresses, lowers through rmu_emit_conv) AND the direct multi-
-  // axis form (separate Cin/kH/kW reduce axes + linear addresses,
-  // lowers through the generic multi-axis accumulator path).  Both
-  // benefit from LOCAL/UPCAST tiling.
-  return uop_classify_conv2d_any(sroot, NULL);
+  // Otherwise detect the conv2d im2col-matmul SHAPE structurally -- this
+  // is the same predicate uop_recognise_conv uses, so a 1 here means the
+  // kernel WILL render through rmu_emit_conv (which copes with the deep
+  // multi-UPCAST + multi-LOCAL tiling).
+  return uop_classify_conv2d(sroot, NULL);
 }
 
 // True iff this is a conv-matmul kernel we want to tile deeply: the
@@ -277,46 +259,24 @@ static int hand_opt_is_tileable_reduce(KernelEntry const *ke,
   u32 r = hand_opt_reduce_axis(ax);
   if (r == 0xFFFFFFFFu) return 0;
   if (hand_opt_n_loop_axes(ax) < 2) return 0;
-  // Deep tiling (case-2 UPCAST + case-3 LOCAL) was validated against
-  // the OPT_CONV-wrapped flat conv form that lowers through
-  // render_uop.c's rmu_emit_conv template (single-axis K, decomposed
-  // via the conv-split recovery into Cin*kH*kW nested loops with
-  // straight-line UPCAST-blocked accumulators).  The direct multi-
-  // axis form (separate Cin/kH/kW reduce axes) lowers through the
-  // GENERIC rmu_emit_store_reduce path, which does NOT correctly
-  // handle UPCAST'd output axes inside a multi-axis REDUCE body
-  // (the renderer emits the output decode + closes the loops, but
-  // the reduce body is dropped -- see the THVM_CUDA_DUMP_KID=3 dump
-  // when UPCAST is applied: empty reduce, _acc=0 stored).  So gate
-  // the deep-tile path on the flat form only; the direct form falls
-  // through to the conservative one-LOCAL pass below.
-  u32 kred_flat = 0;
-  if (!uop_classify_conv2d(ke->cached_lift.store_root, &kred_flat)) return 0;
+  // Gate the deep conv tiling on a reasonably large contraction (K >=
+  // 128) AND a non-trivial contiguous spatial axis (>= 4).  The cheap
+  // first conv (K ~ 25) stays excluded.  The late-stage small-spatial
+  // convs (wOut 6, 8) now enter the deep tiling path -- when wOut is
+  // too small for the dual-UPCAST + outer-LOCAL coalescing (wOut/2 < 8
+  // would leave fewer than 8 threads per group), the case-2 UPCAST and
+  // case-3 LOCAL passes pick narrower factors adaptively (single cOut
+  // UPCAST + full-wOut LOCAL).
   if (ax->extent[r] < 128) return 0;
   u32 c_axis = hand_opt_last_output_axis(ax);
   if (c_axis == 0xFFFFFFFFu || ax->extent[c_axis] < 4) return 0;
+  // cOut must be UPCAST-able (>=4) so the case-2 register block has
+  // enough M to amortise the conv-input load.
   u32 first = 0xFFFFFFFFu;
   for (u32 i = 0; i < ax->n; i++) {
     if (ax->kax_type[i] == KAX_LOOP) { first = i; break; }
   }
   if (first == 0xFFFFFFFFu || ax->extent[first] < 4) return 0;
-  return 1;
-}
-
-// True iff this kernel is a direct-multi-axis conv (the CUDA kid=3
-// shape from beautiful_mnist BS>=128).  These lower through the
-// GENERIC reduce emit path, not rmu_emit_conv, so we apply only the
-// safe single-LOCAL split (no UPCAST -- see hand_opt_is_tileable_reduce
-// comment for why).  Returns 1 iff (a) classifies as direct conv AND
-// (b) K product is large enough (>= 128) to amortise the LOCAL split.
-static int hand_opt_is_direct_conv(KernelEntry const *ke,
-                                   HandOptAxes const *ax) {
-  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
-  u32 kred_direct = 0;
-  if (!uop_classify_conv2d_direct(ke->cached_lift.store_root, &kred_direct)) return 0;
-  if (kred_direct < 128) return 0;
-  // Need at least 2 KAX_LOOP output axes to have a meaningful LOCAL split.
-  if (hand_opt_n_loop_axes(ax) < 2) return 0;
   return 1;
 }
 
@@ -336,35 +296,21 @@ static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   return 1;
 }
 
-// True iff the kernel is dispatched on a GPU backend (Metal == id 2
-// or CUDA == id 3).  CPU kernels route matmul/gemv/dot/conv through
-// cBLAS / the clang-JIT'd interpreter from the bare (un-OPT'd) DAG;
-// applying a hand-coded opt mutates the DAG so those classifiers stop
-// recognising it -> the kernel falls back to the slow per-element
-// interpreter (or, for the BLAS-parity tests, the dispatch-count
-// assertion fails).  So the heuristic only runs on GPU backends; the
-// per-backend factor tables in kernel_hand_coded_opts branch on
-// ke->output_tid backend id to pick the right tiling.
-static int hand_opt_kernel_on_gpu(KernelEntry const *ke) {
+// True iff the kernel is dispatched on the Metal backend.  CPU kernels
+// route matmul/gemv/dot/conv through cBLAS / the clang-JIT'd
+// interpreter from the bare (un-OPT'd) DAG; applying a hand-coded opt
+// mutates the DAG so those classifiers stop recognising it -> the
+// kernel falls back to the slow per-element interpreter (or, for the
+// BLAS-parity tests, the dispatch-count assertion fails).  So the
+// heuristic only runs for Metal-backed kernels.
+static int hand_opt_kernel_on_metal(KernelEntry const *ke) {
   Backend *b = NULL;
   if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
     b = TENS[ke->output_tid].backend;
   }
   if (b == NULL) b = DEFAULT_BACKEND;
-  if (b == NULL) return 0;
-  return b->id == 2 || b->id == 3;
-}
-
-// Returns the backend id for the kernel's output tensor (1 == cpu,
-// 2 == metal, 3 == cuda).  0 if no backend resolves.  Mirrors
-// kautotune_backend_id; used here to pick per-backend factor tables.
-static u32 hand_opt_backend_id(KernelEntry const *ke) {
-  Backend *b = NULL;
-  if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
-    b = TENS[ke->output_tid].backend;
-  }
-  if (b == NULL) b = DEFAULT_BACKEND;
-  return (b != NULL) ? b->id : 0;
+  // METAL_BACKEND.id == 2 (cpu == 1) -- see kautotune_backend_id.
+  return b != NULL && b->id == 2;
 }
 
 // --- the heuristic -------------------------------------------------
@@ -376,13 +322,8 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // ke->schedule->autotuned = 1 at the start.  schedule may be NULL
   // for some test fixtures; tolerate that.
   if (ke->schedule != NULL) ke->schedule->autotuned = 1;
-  {
-    u32 kid = (u32)(ke - KERNELS);
-    if (kid < KERNELS_CAP) HAND_OPTS_RAN[kid] = 1;
-  }
   if (!hand_coded_opts_enabled()) return 0;
-  if (!hand_opt_kernel_on_gpu(ke)) return 0;
-  u32 backend_id = hand_opt_backend_id(ke);     // 2 == metal, 3 == cuda
+  if (!hand_opt_kernel_on_metal(ke)) return 0;
 
   u32 n_applied = 0;
   HandOptAxes ax;
@@ -400,15 +341,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // bail to the scalar accumulator (slower).  So for v1: apply TC,
   // then RETURN.  (Follow-up: K-padding + a tiled M/N reshape, like
   // tinygrad, to unlock parallel-TC with sub-tile M/N.)
-  // TC is currently a Metal-only optimization in hand_opts: the
-  // parallel-TC GLOBAL promotion was tuned against the simdgroup_matrix
-  // template + Metal threadgroup dispatch (cg_tile_metal_dispatch_shape).
-  // CUDA has a WMMA path in the renderer but the parallel-TC dispatch
-  // geometry hasn't been cross-validated -- skip TC on CUDA for now;
-  // the existing flat one-thread-per-output dispatch is fast enough on
-  // V100 for the matmul shapes thvm currently emits (no matmul shows
-  // up as a top hot kid on beautiful_mnist).
-  if (backend_id == 2) {
+  {
     u32 K = 0;
     if (hand_opt_classify_matmul(ke, &K)) {
       static const u32 tc_tiles[] = {8, 16, 32};
@@ -445,15 +378,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   }
 
   if (!hand_opt_snapshot_axes(ke, &ax)) return n_applied;
-  int tileable    = hand_opt_is_tileable_reduce(ke, &ax);
-  int direct_conv = !tileable && hand_opt_is_direct_conv(ke, &ax);
-  // CUDA: only run opts on the conv-shaped kernels (flat + direct).
-  // The Metal-tuned UPCAST+LOCAL factor table regresses non-conv
-  // kernels on V100 -- the existing flat one-thread-per-output
-  // dispatch is faster than the conservative one-axis tile.  Re-
-  // enable for non-conv kernels once a CUDA-specific factor table
-  // for the non-conv path is added.
-  if (backend_id == 3 && !tileable && !direct_conv) return n_applied;
+  int tileable = hand_opt_is_tileable_reduce(ke, &ax);
 
   // ---- 2. UPCAST: pull floats into per-thread registers ----
   // tinygrad's "potentially do more upcasts" loop (heuristic.py
@@ -493,7 +418,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         for (u32 i = 0; i < 3; i++) {
           u32 f = m_factors[i];
           if (ext % f != 0 || ext / f < 1) continue;
-          KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[m_axis], f };
+          KOpt opt = { KOP_UPCAST, (u8)m_axis, f };
           if (kernel_apply_opt(ke, opt)) n_applied++;
           break;
         }
@@ -513,17 +438,11 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         u32 ext = ax.extent[c_axis];
         u32 f = 2;
         if (ext % f == 0 && ext / f >= 32) {
-          KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[c_axis], f };
+          KOpt opt = { KOP_UPCAST, (u8)c_axis, f };
           if (kernel_apply_opt(ke, opt)) n_applied++;
         }
       }
     }
-  } else if (direct_conv) {
-    // Direct-multi-axis conv lowers through the generic reduce emit
-    // path which doesn't currently cope with UPCAST'd output axes
-    // (drops the reduce body, _acc=0 stored).  Skip UPCAST here; just
-    // the LOCAL split below.  Re-enable when the generic emit path
-    // is hardened against UPCAST + multi-axis REDUCE.
   } else {
     static const u32 upcast_factors[] = {4, 2};
     for (u32 i = 0; i < 2; i++) {
@@ -534,7 +453,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       u32 f = upcast_factors[i];
       if (ax.extent[axis] % f != 0 || ax.extent[axis] / f < 1) continue;
       if (i > 0 && hand_opt_output_loop_product(&ax) < 1024) break;
-      KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[axis], f };
+      KOpt opt = { KOP_UPCAST, (u8)axis, f };
       if (kernel_apply_opt(ke, opt)) { n_applied++; }
     }
   }
@@ -575,7 +494,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
             u32 f = conv_local_factors[i];
             if (f > (u32)local_cap) continue;
             if (ext % f != 0 || ext / f < 1) continue;
-            KOpt opt = { KOP_LOCAL, (u8)ax.axis_id[c_axis], f };
+            KOpt opt = { KOP_LOCAL, (u8)c_axis, f };
             if (kernel_apply_opt(ke, opt)) { n_applied++; cur_local_prod = f; }
             break;
           }
@@ -599,28 +518,12 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
             u32 f = conv_local_factors[i];
             if ((u64)cur_local_prod * f > (u64)local_cap) continue;
             if (ext % f != 0 || ext / f < 1) continue;
-            KOpt opt = { KOP_LOCAL, (u8)ax.axis_id[h_axis], f };
+            KOpt opt = { KOP_LOCAL, (u8)h_axis, f };
             if (kernel_apply_opt(ke, opt)) { n_applied++; cur_local_prod *= f; }
             break;
           }
         }
       }
-    } else if (direct_conv) {
-      // Direct-multi-axis conv on CUDA: LOCAL/UPCAST alone (without
-      // UPCAST register-blocking or shared-mem GROUP_REDUCE cooperative
-      // load) costs MORE than the flat one-thread-per-output dispatch on
-      // V100 -- the renderer adds inner-loop arithmetic (a*F+b axis
-      // decode) for each LOCAL split without compensating throughput.
-      // The renderer's multi-axis-REDUCE UPCAST path drops the reduce
-      // body (rendered source has _acc=0 stored, no MAC loop), and the
-      // GROUP_REDUCE path (which WOULD emit __shared__ + per-block
-      // cooperative weight load) is gated off in hand_opts v3 pending
-      // UPCAST cross-check.  Until one of those is unblocked, applying
-      // LOCAL alone here regresses kid=3 / kid=12 by 2x.  Treat as a
-      // no-op: classifier still flags the kernels so future work has
-      // something to gate on.  Re-enable LOCAL when UPCAST + multi-
-      // axis-REDUCE in the generic emit path is fixed.
-      (void)direct_conv;
     } else {
       static const u32 single_local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
       if (hand_opt_snapshot_axes(ke, &ax)) {
@@ -631,7 +534,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
             u32 f = single_local_factors[i];
             if (f > 256) continue;
             if (ext % f != 0 || ext / f < 1) continue;
-            KOpt opt = { KOP_LOCAL, (u8)ax.axis_id[axis], f };
+            KOpt opt = { KOP_LOCAL, (u8)axis, f };
             if (kernel_apply_opt(ke, opt)) { n_applied++; }
             break;  // one LOCAL split only
           }
@@ -674,8 +577,9 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke) {
   if (!hand_coded_opts_enabled()) return 0;
   if (ke == NULL) return 0;
+  // schedule may be NULL on some fixtures -- if so we can't memoise
+  // the decision, but we still want to run the heuristic once.  Use
+  // the autotuned flag when present; otherwise allow.
   if (ke->schedule != NULL && ke->schedule->autotuned) return 0;
-  u32 kid = (u32)(ke - KERNELS);
-  if (kid < KERNELS_CAP && HAND_OPTS_RAN[kid]) return 0;
   return 1;
 }
