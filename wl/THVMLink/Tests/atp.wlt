@@ -1966,6 +1966,41 @@ VerificationTest[
     TestID -> "ATP/method/Twee-preset-subopt-override"
 ]
 
+(* === $AtpMethodPresets coverage =================================== *)
+
+(* The named-preset registry should be non-empty and include the
+   single-config presets we exercise above ("Waldmeister", "VampireUEQ",
+   "Twee") plus the schedule presets ("Portfolio", "VampirePortfolio").
+   A future preset addition has to extend the registry, which keeps
+   the doc and dispatcher in sync. *)
+VerificationTest[
+    With[{p = THVMLink`ATP`Private`$AtpMethodPresets},
+        {ListQ[p], AllTrue[p, StringQ],
+         SubsetQ[p, {"Waldmeister", "VampireUEQ", "Twee",
+                     "Portfolio", "VampirePortfolio"}]}],
+    {True, True, True},
+    TestID -> "ATP/method/preset-registry-contents"
+]
+
+(* Each named single-config preset should ACCEPT a call without
+   crashing and return either a ProofObject (proved) or $Failed
+   (timed out / saturated short) -- never an unevaluated form, never
+   a Failure[].  Regressions in a preset's parse logic (suboption
+   merge, mnf computation, returned arg vector) surface here.  We
+   don't require a proof: e.g. "Waldmeister" is tuned for unrecognized
+   single-operator Sheffer problems and falls behind on BooleanAxioms.
+   VampireUEQ + Twee do prove this goal trivially, which the iter 45
+   tests above already cover. *)
+VerificationTest[
+    With[{prs = {"Waldmeister", "VampireUEQ", "Twee"}},
+        AllTrue[prs,
+            With[{p = TFindProof["AndCommutativity", "BooleanAxioms",
+                    Method -> #, TimeConstraint -> 5]},
+                Head[p] === ProofObject || p === $Failed] &]],
+    True,
+    TestID -> "ATP/method/single-config-presets-do-not-crash"
+]
+
 (* === PortfolioFrontLoad ============================================ *)
 
 (* PortfolioFrontLoad -> n widens the time slice given to the first n
