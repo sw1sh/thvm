@@ -384,6 +384,100 @@ int main(void) {
     CHECK(!contains(bufmu, "for (uint a1 ="));
   }
 
+  TEST_BEGIN("render-uop/multi-axis-reduce-upcasts-output-axis");
+  // Multi-axis REDUCE (3 reduce axes) with KOP_UPCAST applied to one
+  // output axis (the "conv kid=3" shape: out [N,Cout,H,W], reduce
+  // (Cin,kH,kW)).  Regression for the claim that the renderer drops
+  // the MAC when an output axis carries UOP_OPT_UPCAST and the REDUCE
+  // has > 1 axis.  Validates that:
+  //   (a) the UPCAST inner axis renders as a #pragma unroll for-loop,
+  //   (b) each iteration declares its own accumulator,
+  //   (c) the reduce nest (3 axes) sits INSIDE that loop with the
+  //       MAC `_accN = _accN + in0[...] * in1[...]` present,
+  //   (d) the store at the end references the UPCAST axis in scope.
+  {
+    enum { N=4, COUT=8, H=4, W=4, CIN=8, KH=3, KW=3 };
+    u32 out_d[4] = { N, COUT, H, W };
+    u32 in_d [4] = { N, CIN, H+KH-1, W+KW-1 };
+    u32 w_d  [4] = { COUT, CIN, KH, KW };
+    Term Y     = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 4, out_d, 0);
+    Term X     = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 4, in_d , 1);
+    Term W_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 4, w_d,   2);
+    Term ins[2] = { X, W_buf };
+    Term r_n  = uop_range(0, 0, N);
+    Term r_co = uop_range(1, 0, COUT);
+    Term r_h  = uop_range(2, 0, H);
+    Term r_w  = uop_range(3, 0, W);
+    Term r_ci = uop_range(4, 1, CIN);
+    Term r_kh = uop_range(5, 1, KH);
+    Term r_kw = uop_range(6, 1, KW);
+    Term k_inW = uop_const(DT_INT32, W+KW-1);
+    Term x_n   = uop_int_binary(UOP_IMUL, r_n,
+                  uop_const(DT_INT32, CIN*(H+KH-1)*(W+KW-1)));
+    Term x_ci  = uop_int_binary(UOP_IMUL, r_ci,
+                  uop_const(DT_INT32, (H+KH-1)*(W+KW-1)));
+    Term x_hi  = uop_int_binary(UOP_IADD, r_h, r_kh);
+    Term x_ho  = uop_int_binary(UOP_IMUL, x_hi, k_inW);
+    Term x_wi  = uop_int_binary(UOP_IADD, r_w, r_kw);
+    Term x_a0  = uop_int_binary(UOP_IADD, x_n, x_ci);
+    Term x_a1  = uop_int_binary(UOP_IADD, x_a0, x_ho);
+    Term x_a   = uop_int_binary(UOP_IADD, x_a1, x_wi);
+    Term xv    = uop_index_e(X, x_a);
+    Term w_co  = uop_int_binary(UOP_IMUL, r_co,
+                  uop_const(DT_INT32, CIN*KH*KW));
+    Term w_ci  = uop_int_binary(UOP_IMUL, r_ci,
+                  uop_const(DT_INT32, KH*KW));
+    Term w_kh  = uop_int_binary(UOP_IMUL, r_kh,
+                  uop_const(DT_INT32, KW));
+    Term w_a0  = uop_int_binary(UOP_IADD, w_co, w_ci);
+    Term w_a1  = uop_int_binary(UOP_IADD, w_a0, w_kh);
+    Term w_a   = uop_int_binary(UOP_IADD, w_a1, r_kw);
+    Term wv    = uop_index_e(W_buf, w_a);
+    Term mul   = uop_binary(UOP_MUL, xv, wv);
+    u32 raxes[3] = { 4, 5, 6 };
+    Term rd    = uop_reduce_multi(REDUCE_SUM, 3, raxes, mul);
+    Term y_n   = uop_int_binary(UOP_IMUL, r_n,
+                  uop_const(DT_INT32, COUT*H*W));
+    Term y_co  = uop_int_binary(UOP_IMUL, r_co,
+                  uop_const(DT_INT32, H*W));
+    Term y_h   = uop_int_binary(UOP_IMUL, r_h,
+                  uop_const(DT_INT32, W));
+    Term y_a0  = uop_int_binary(UOP_IADD, y_n, y_co);
+    Term y_a1  = uop_int_binary(UOP_IADD, y_a0, y_h);
+    Term y_a   = uop_int_binary(UOP_IADD, y_a1, r_w);
+    Term st_ma = uop_store(Y, y_a, rd);
+    KOpt up    = { KOP_UPCAST, 1 /*cOut axis*/, 4 };
+    Term st_up = uop_dag_apply_kopt(st_ma, up);
+    CHECK(st_up != 0 && st_up != st_ma);
+    char bufma[8192];
+    fp = fmemopen(bufma, sizeof(bufma), "w");
+    cg_render_uop_kernel(st_up, "k_conv_up", Y, ins, 2, fp);
+    fclose(fp);
+    // UPCAST inner axis (a2 after the axis-shift) is the #pragma-
+    // unroll for-loop wrapping the accumulator and store.
+    CHECK(contains(bufma, "#pragma unroll(4)"));
+    CHECK(contains(bufma, "for (uint a2 = 0; a2 < 4"));
+    // Accumulator declared INSIDE the UPCAST loop, so each iteration
+    // gets a fresh _acc.
+    CHECK(contains(bufma, "float _acc5 = 0.0f"));
+    // All three reduce nest loops emit (cin, kh, kw -> a5, a6, a7).
+    CHECK(contains(bufma, "for (uint a5 = 0; a5 < 8"));
+    CHECK(contains(bufma, "for (uint a6 = 0; a6 < 3"));
+    CHECK(contains(bufma, "for (uint a7 = 0; a7 < 3"));
+    // MAC is present: _accN = _accN + in0[...] * in1[...].  The reads
+    // resolve to slot names in0/in1 (NOT 0.0f, which would mean the
+    // discover walk lost the input buffers).
+    CHECK(contains(bufma, "_acc5 = _acc5 + (in0["));
+    CHECK(contains(bufma, "* in1["));
+    // The W (in1) address must include the UPCAST inner axis a2,
+    // proving each unrolled iteration reads a distinct slice.
+    CHECK(contains(bufma, "(int)(a1) * (int)(4)"));
+    CHECK(contains(bufma, "+ (int)(a2)"));
+    // The final store references _acc5 and a2 -- the per-iteration
+    // result reaches the output.
+    CHECK(contains(bufma, "= _acc5;"));
+  }
+
   TEST_BEGIN("render-uop/tc-pattern-match-emits-simdgroup");
   // Build matmul shape: STORE(C, m*N+n,
   //   OPT(REDUCE(MUL(A[m*K+k], B[k*N+n]), SUM, k), TC, 0)).
