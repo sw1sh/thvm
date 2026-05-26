@@ -3382,12 +3382,20 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
             TFindProof[
                 CanonicalizePatterns @ unquantifyFormula @ First[cjList],
                 axioms, returnSpec, opts],
+            (* Iterator var must NOT be a short name like `c` -- WL's
+               Table iter-scoping does not fully shadow a pre-existing
+               global binding (e.g. a user's outer `Do[..., {c, ...}]`),
+               so the iter leaks the caller's value into
+               unquantifyFormula's input and the encoder later sees a
+               raw Symbol where it expected an equation.  Use a private
+               name so the leak window closes. *)
             Module[{proofs},
                 proofs = Table[
                     TFindProof[
-                        CanonicalizePatterns @ unquantifyFormula @ c,
+                        CanonicalizePatterns @
+                            unquantifyFormula @ atpCjListIter$,
                         axioms, returnSpec, opts],
-                    {c, cjList}];
+                    {atpCjListIter$, cjList}];
                 If[ returnSpec === "ProofObject"
                         && ! AllTrue[proofs, Head[#] === ProofObject &],
                     $Failed, proofs]]

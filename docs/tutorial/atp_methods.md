@@ -771,7 +771,39 @@ TFindProof[goal, axioms, "RawTrace", TimeConstraint -> 5]
 Pair with `"Lemmas"` to read the final rule set, or with `"Statistics"`
 to see how much of the trace cap was used.
 
-### 8.6 Catching a wedge
+### 8.6 Scripting footgun: short iterator names
+
+When calling `TFindProof` inside a script-level `Do` / `Module` /
+`Table`, **do not use short iterator names** like `c`, `theory`, `thm`,
+`m`, `x`, `f` for the iteration variable. These collide with internal
+pattern variables or iterator scopes inside the prover and the
+dispatch path SIGSEGV-crashes the wolframscript kernel before
+producing useful output.
+
+Example that crashes:
+
+```wolfram
+Do[
+    TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        TimeConstraint -> 5],
+    {c, {"InverseOfInverse"}}]   (* iter var `c` *)
+```
+
+Example that works:
+
+```wolfram
+Do[
+    TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        TimeConstraint -> 5],
+    {benchIter, {"InverseOfInverse"}}]   (* iter var `benchIter` *)
+```
+
+The same applies inside `Module[{thm = ..., theory = ...}, ...]` and
+`Table[..., {m, ...}]`. Prefix with `bench`, `loop`, or any longer
+name to be safe. `tools/baselines/bench_methods.wls` demonstrates the
+workaround.
+
+### 8.7 Catching a wedge
 
 A goal that hangs longer than expected almost always either explodes the
 CP queue (visible via `"Statistics"["QueueSize"]` on a `TimeConstraint`
@@ -781,7 +813,7 @@ explodes, the first lever to pull is `"AutoMaxWeight" -> 20` (defers
 over-weight CPs); if that does not help, switch the weight (`Mix2 ->
 Mix -> Gt`) and bound `MaxWeight` directly.
 
-### 8.7 Which config actually ran -- the introspection trio
+### 8.8 Which config actually ran -- the introspection trio
 
 When `Method -> Automatic` or `Method -> "VampirePortfolio"` cycles
 through multiple schedule entries, three return specs disclose what
