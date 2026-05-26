@@ -31,7 +31,8 @@ __pycache__/
 # Built dylib for py/ ctypes wrapper (rebuild via `make py`)
 py/thvm/libthvm_py.dylib
 
-brain/
+# brain/ is now tracked as a submodule (github.com/sw1sh/brain-arc, private).
+# Local runs/data/.venv inside the submodule remain ignored via brain/.gitignore.
 
 # Regenerable Vampire benchmark artifacts (re-export via run_vampire_baseline.sh)
 tools/baselines/vampire_raw/

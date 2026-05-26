@@ -1,3 +1,6 @@
 [submodule "external/reference-kernels"]
 	path = external/reference-kernels
 	url = https://github.com/gpu-mode/reference-kernels.git
+[submodule "brain"]
+	path = brain
+	url = git@github.com:sw1sh/brain-arc.git
