@@ -92,3 +92,41 @@ VerificationTest[
     "UNSAT",
     TestID -> "ATP/smt/congruence-then-direct-eq"
 ]
+
+VerificationTest[
+    (* Ground TPTP CNF dispatch: transitivity. *)
+    THVMLink`SMT`TFindProofSMT[
+        "cnf(a1, axiom, a = b).
+         cnf(a2, axiom, b = c).
+         cnf(g, negated_conjecture, a != c)."]["Status"],
+    "Proved",
+    TestID -> "ATP/smt/tptp-cnf-ground-trans-proves"
+]
+
+VerificationTest[
+    (* Ground TPTP FOF dispatch: congruence. *)
+    THVMLink`SMT`TFindProofSMT[
+        "fof(a1, axiom, a = b).
+         fof(g, negated_conjecture, f(a) != f(b))."]["Status"],
+    "Proved",
+    TestID -> "ATP/smt/tptp-fof-ground-cong-proves"
+]
+
+VerificationTest[
+    (* SAT TPTP input returns $Failed. *)
+    THVMLink`SMT`TFindProofSMT[
+        "cnf(a1, axiom, a = b).
+         cnf(g, negated_conjecture, a != c)."],
+    $Failed,
+    TestID -> "ATP/smt/tptp-sat-returns-failed"
+]
+
+VerificationTest[
+    (* Non-ground input is rejected with a message. *)
+    THVMLink`SMT`TFindProofSMT[
+        "cnf(a1, axiom, and(X, Y) = and(Y, X)).
+         cnf(g, negated_conjecture, and(a, b) != and(b, a))."],
+    $Failed,
+    {THVMLink`SMT`TFindProofSMT::nonground},
+    TestID -> "ATP/smt/tptp-nonground-rejected"
+]

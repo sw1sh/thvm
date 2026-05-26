@@ -50,7 +50,21 @@ TFindProofSMT::usage =
     "by reducing it to a QF_UF satisfiability query: assert each " <>
     "hypothesis, assert the negation of goal, and run congruence " <>
     "closure.  Returns a small ProofObject-shaped Association on " <>
-    "UNSAT, $Failed on SAT.";
+    "UNSAT, $Failed on SAT.  TFindProofSMT[\"...cnf/fof string...\"] " <>
+    "and TFindProofSMT[File[\"path.p\"]] parse a TPTP fragment via " <>
+    "THVMLink`TPTPImport`tptpImport and dispatch the same way -- the " <>
+    "input must be ground (no variables) since congruence closure " <>
+    "is a quantifier-free decision procedure; non-ground inputs " <>
+    "return $Failed with a console message.";
+
+TFindProofSMT::nonground =
+    "TFindProofSMT skipping non-ground input: the term `1` contains a " <>
+    "Pattern[]/Blank[] variable.  Congruence closure is a quantifier-" <>
+    "free decision procedure -- use TFindProof for variable-bearing " <>
+    "axioms.";
+
+TFindProofSMT::noconjecture =
+    "TFindProofSMT requires a conjecture in the input; got axioms only.";
 
 TSatEUF::badin =
     "TSatEUF inputs must be lists of equalities (HoldPattern[Equal[_,_]]) " <>
@@ -214,6 +228,38 @@ collectLiterals[lits_List] := Block[{e = {}, d = {}, l},
     ];
     {e, d}
 ]
+
+(* ----- TPTP-string / File overloads -----
+   TPTPImport returns clauses with universally-quantified
+   variables as Pattern[Unique[], Blank[]] expressions, which
+   congruence closure cannot handle (it is a ground decision
+   procedure).  Reject any clause that contains a Blank[] head
+   so the user gets a clear message instead of an internal
+   crash. *)
+
+TFindProofSMT[File[path_String]] :=
+    tptpDispatchSMT @ THVMLink`TPTPImport`tptpImport[File[path]]
+
+TFindProofSMT[s_String] /;
+        StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
+    tptpDispatchSMT @ THVMLink`TPTPImport`tptpImport[s]
+
+tptpDispatchSMT[imported_Association] := Block[
+    {axioms = imported["Axioms"], conj = imported["Conjecture"],
+     nonGround},
+    Which[
+        conj === None,
+            Message[TFindProofSMT::noconjecture]; $Failed,
+        (nonGround = SelectFirst[Append[axioms, conj], ! groundQ[#] &,
+            None]) =!= None,
+            Message[TFindProofSMT::nonground, nonGround]; $Failed,
+        True,
+            TFindProofSMT[conj, axioms]
+    ]
+]
+
+groundQ[expr_] := FreeQ[expr, _Pattern | _Blank | _BlankSequence |
+    _BlankNullSequence]
 
 End[];
 EndPackage[];
