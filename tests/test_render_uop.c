@@ -592,6 +592,105 @@ int main(void) {
     if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(bufpa), 0);
   }
 
+  TEST_BEGIN("render-uop/parallel-acc-hoists-shared-loads");
+  // Path #2 of docs/tinygrad_late_passes.md: in the parallel-accumulator
+  // emit, UOP_INDEX_E loads whose address does NOT depend on any UPCAST'd
+  // axis must be hoisted to ONE local variable per shared load before the
+  // F MAD lines, then reused.  Same conv-flavoured shape as
+  // parallel-accumulators-on-upcast-output-axis (the test directly above):
+  //   in0=W [Cout,K] is per-lane (depends on UPCAST'd cOut)
+  //   in1=X [B*hOut*wOut,K] is shared across all F=4 lanes
+  // so we expect ONE `float _sh<r>_0 = in1[...];` and four MADs each
+  // referencing _sh<r>_0 (no per-MAD `in1[`).
+  //
+  // Source-level analogue of tinygrad
+  // codegen/late/devectorizer.py:81-117 fold_expanded_index, which folds
+  // adjacent INDEX nodes into one wider CAT'd INDEX + per-lane GEP at
+  // the UOp-graph level.
+  {
+    enum { M=2, COUT=4, HW=10, K=400 };
+    u32 dY[4] = { COUT, M, HW, HW };
+    u32 dW[2] = { COUT, K };
+    u32 dX[2] = { M*HW*HW, K };
+    Term Y = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 4, dY, 0);
+    Term W = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dW, 1);
+    Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dX, 2);
+    Term ins[2] = { W, X };
+    Term r_co = uop_range(0, 0, COUT);
+    Term r_b  = uop_range(1, 0, M);
+    Term r_h  = uop_range(2, 0, HW);
+    Term r_w  = uop_range(3, 0, HW);
+    Term r_k  = uop_range(4, 1, K);
+    Term k_HW   = uop_const(DT_INT32, HW);
+    Term k_HWHW = uop_const(DT_INT32, HW*HW);
+    Term k_K    = uop_const(DT_INT32, K);
+    Term x_bhw = uop_int_binary(UOP_IMUL, r_b, k_HWHW);
+    Term x_hw  = uop_int_binary(UOP_IMUL, r_h, k_HW);
+    Term x_a0  = uop_int_binary(UOP_IADD, x_bhw, x_hw);
+    Term x_a1  = uop_int_binary(UOP_IADD, x_a0, r_w);
+    Term x_a2  = uop_int_binary(UOP_IMUL, x_a1, k_K);
+    Term x_a   = uop_int_binary(UOP_IADD, x_a2, r_k);
+    Term xv    = uop_index_e(X, x_a);
+    Term w_co  = uop_int_binary(UOP_IMUL, r_co, k_K);
+    Term w_a   = uop_int_binary(UOP_IADD, w_co, r_k);
+    Term wv    = uop_index_e(W, w_a);
+    Term mul   = uop_binary(UOP_MUL, xv, wv);
+    Term rd    = uop_reduce(REDUCE_SUM, /*axis=*/4, mul);
+    Term y_a0  = uop_int_binary(UOP_IMUL, r_co, uop_const(DT_INT32, M*HW*HW));
+    Term y_a1  = uop_int_binary(UOP_IMUL, r_b,  k_HWHW);
+    Term y_a2  = uop_int_binary(UOP_IADD, y_a0, y_a1);
+    Term y_a3  = uop_int_binary(UOP_IMUL, r_h,  k_HW);
+    Term y_a4  = uop_int_binary(UOP_IADD, y_a2, y_a3);
+    Term y_a   = uop_int_binary(UOP_IADD, y_a4, r_w);
+    Term st_pa = uop_store(Y, y_a, rd);
+    KOpt up_pa = { KOP_UPCAST, 0 /*cOut*/, 4 };
+    Term st_pa2 = uop_dag_apply_kopt(st_pa, up_pa);
+    CHECK(st_pa2 != 0 && st_pa2 != st_pa);
+    char bufsh[8192];
+    fp = fmemopen(bufsh, sizeof(bufsh), "w");
+    cg_render_uop_kernel(st_pa2, "k_par_acc_sh", Y, ins, 2, fp);
+    fclose(fp);
+    // Locate the K-loop body: everything between "for (uint a5" and the
+    // matching "}" (the only inner loop here, so the next "}" closes it).
+    const char *kloop = strstr(bufsh, "for (uint a5 = 0; a5 < 400");
+    CHECK(kloop != NULL);
+    const char *kloop_end = strchr(kloop, '}');
+    CHECK(kloop_end != NULL);
+    u32 body_len = (u32)(kloop_end - kloop);
+    char kbody[4096];
+    if (body_len >= sizeof(kbody)) body_len = sizeof(kbody) - 1;
+    memcpy(kbody, kloop, body_len);
+    kbody[body_len] = 0;
+    // ONE shared-load declaration named `_sh5_0` (red_axis is 5 after the
+    // KOP_UPCAST shift), keyed on in1 (the shared X buffer).
+    CHECK(contains(kbody, "float _sh5_0 = in1["));
+    // No `_sh5_1` -- only one distinct shared load.
+    CHECK(!contains(kbody, "float _sh5_1 = "));
+    // F=4 MAD lines, each referencing _sh5_0 instead of an inline in1[...].
+    CHECK(contains(kbody, "_acc5_0 = _acc5_0 + (_sh5_0 * in0["));
+    CHECK(contains(kbody, "_acc5_1 = _acc5_1 + (_sh5_0 * in0["));
+    CHECK(contains(kbody, "_acc5_2 = _acc5_2 + (_sh5_0 * in0["));
+    CHECK(contains(kbody, "_acc5_3 = _acc5_3 + (_sh5_0 * in0["));
+    // Exactly ONE `in1[` occurrence inside the K-loop body (the hoist
+    // declaration); the F MADs reuse the local.  Without path #2 there
+    // would be F=4 separate `in1[` reads.
+    {
+      const char *p = kbody;
+      int n = 0;
+      while ((p = strstr(p, "in1[")) != NULL) { n++; p++; }
+      CHECK_EQ(n, 1);
+    }
+    // And F=4 `in0[` reads (the per-lane W loads, NOT hoisted).
+    {
+      const char *p = kbody;
+      int n = 0;
+      while ((p = strstr(p, "in0[")) != NULL) { n++; p++; }
+      CHECK_EQ(n, 4);
+    }
+    // The MSL must still compile through xcrun metal.
+    if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(bufsh), 0);
+  }
+
   TEST_BEGIN("render-uop/parallel-accumulators-multi-axis-upcast");
   // Two UPCAST'd output axes (cOut UPCAST=4 AND wOut UPCAST=2) -> F=8
   // parallel accumulators arranged as a 4x2 register-blocked tile.

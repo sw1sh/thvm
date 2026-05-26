@@ -309,10 +309,57 @@ static const char *rmu_int_op_name(u32 op) {
   }
 }
 
+// Hoisted-subexpression map: when the parallel-accumulator emit path
+// (rmu_emit_store_reduce, path #2 of docs/tinygrad_late_passes.md)
+// pre-emits a shared load to a local variable, every rmu_emit_term
+// recursion below the substituted Term short-circuits to the variable
+// name.  Keys are Terms in the ORIGINAL pre-rewrite red_src; the per-k
+// uop_graph_rewrite is identity on non-UPCAST'd subtrees (hash-consed
+// rebuild), so the same key matches in every per-k rewrite output.
+// Modelled on tinygrad/codegen/late/devectorizer.py:81-117
+// fold_expanded_index, which folds adjacent INDEX nodes into one wider
+// CAT'd INDEX + per-lane GEP at the UOp-graph level; thvm doesn't have
+// a full UOp-graph expander, so we do the equivalent at source-emission
+// time in the renderer.
+#define RMU_HOIST_MAX 64
+typedef struct {
+  Term       key;   // Term to substitute; 0 = empty slot
+  char const *name; // variable name to emit instead (rmu_emit_term writes verbatim)
+} RmuHoistSlot;
+static RmuHoistSlot RMU_HOIST_MAP[RMU_HOIST_MAX];
+static u32 RMU_HOIST_N = 0;
+
+static void rmu_hoist_clear(void) {
+  for (u32 i = 0; i < RMU_HOIST_N; i++) {
+    RMU_HOIST_MAP[i].key  = 0;
+    RMU_HOIST_MAP[i].name = NULL;
+  }
+  RMU_HOIST_N = 0;
+}
+
+static int rmu_hoist_add(Term key, char const *name) {
+  if (RMU_HOIST_N >= RMU_HOIST_MAX) return 0;
+  RMU_HOIST_MAP[RMU_HOIST_N].key  = key;
+  RMU_HOIST_MAP[RMU_HOIST_N].name = name;
+  RMU_HOIST_N++;
+  return 1;
+}
+
+static char const *rmu_hoist_lookup(Term key) {
+  for (u32 i = 0; i < RMU_HOIST_N; i++) {
+    if (RMU_HOIST_MAP[i].key == key) return RMU_HOIST_MAP[i].name;
+  }
+  return NULL;
+}
+
 // Emit a symbolic int expression (UOP_RANGE / UOP_I* / UOP_IWHERE /
 // UOP_INVALID / UOP_CONST).  Recursive; parenthesises binary ops to
 // keep precedence unambiguous.
 static void rmu_emit_term(Term t, FILE *fp) {
+  if (RMU_HOIST_N > 0) {
+    char const *hn = rmu_hoist_lookup(t);
+    if (hn != NULL) { fputs(hn, fp); return; }
+  }
   if (term_tag(t) != TAG_UOP) {
     if (term_tag(t) == TAG_NUM) {
       fprintf(fp, "%u", (u32)term_val(t));
@@ -2788,6 +2835,147 @@ static int rmu_emit_chain_reduce(Term store, FILE *fp, u32 depth) {
   return 1;
 }
 
+// Does the subtree rooted at `t` contain any UOP_RANGE leaf whose
+// axis_id is listed in `up_axes[0..n_up)`?  Used by the parallel-acc
+// emit path (path #2 of docs/tinygrad_late_passes.md) to classify
+// subexpressions as "shared across all F register-blocked lanes"
+// (returns 0 -- safe to hoist once before the F MADs) versus
+// "per-lane" (returns 1 -- must stay in the per-k MAD body).
+//
+// Walks UOP_RANGE / UOP_OPT / generic UOp children; treats UOP_BUFFER /
+// UOP_CONST / UOP_INVALID / TAG_NUM as leaves with no axis dependence.
+static int rmu_term_depends_on_upcast(Term t, u32 const *up_axes, u32 n_up) {
+  if (n_up == 0) return 0;
+  if (term_tag(t) != TAG_UOP) return 0;
+  Term stack[256];
+  u32  sp = 0;
+  stack[sp++] = t;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) != TAG_UOP) continue;
+    u32 op = term_ext(cur);
+    if (op == UOP_RANGE) {
+      u32 aid = (u32)term_val(heap_read(term_val(cur) + 0));
+      for (u32 i = 0; i < n_up; i++) {
+        if (up_axes[i] == aid) return 1;
+      }
+      continue;
+    }
+    if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
+    if (op == UOP_OPT) {
+      Term tgt = heap_read(term_val(cur) + 0);
+      if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
+      continue;
+    }
+    u8 ar = uop_arity(op);
+    u64 loc = term_val(cur);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
+      Term child = heap_read(loc + i);
+      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    }
+  }
+  return 0;
+}
+
+// Walk red_src and register every UOP_INDEX_E subterm whose address
+// does NOT depend on any UPCAST'd axis as a "shared load": one local
+// variable, emitted once before the F MAD lines, reused across all F
+// lanes.  Returns the number of distinct shared loads installed in the
+// global hoist map.  Caller (rmu_emit_store_reduce parallel-acc branch)
+// emits the declarations and calls rmu_hoist_clear afterwards.
+//
+// Naming: `_sh<red_axis>_<idx>` (idx is 0-based in walk order).
+//
+// This is the source-level equivalent of tinygrad's
+// codegen/late/devectorizer.py:81-117 fold_expanded_index, which folds
+// adjacent INDEX nodes into one wider CAT'd INDEX + per-lane GEP at the
+// UOp-graph level.  thvm has no full UOp-graph expander so we do the
+// shared-load amortisation at source-emission time.  Without this the
+// F per-lane MADs each re-emit the shared `in<k>[...]` load verbatim;
+// nvcc CSEs them eventually but at huge compile cost on V100 (cold
+// step 1 was 349 s with path #1 alone; warm wall regressed to 3541 ms
+// from a 540 ms baseline).
+static u32 rmu_hoist_shared_loads(Term red_src,
+                                  u32 const *up_axes, u32 n_up,
+                                  u32 red_axis,
+                                  char *name_pool, u32 name_pool_cap,
+                                  FILE *fp, u32 indent_depth) {
+  if (n_up == 0) return 0;
+  Term stack[256];
+  u32  sp = 0;
+  if (term_tag(red_src) != TAG_UOP) return 0;
+  stack[sp++] = red_src;
+  // Dedupe seen Terms across the walk so we visit each INDEX_E once.
+  Term seen[RMU_HOIST_MAX];
+  u32  n_seen = 0;
+  u32  n_hoist = 0;
+  u32  pool_used = 0;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) != TAG_UOP) continue;
+    u32 op = term_ext(cur);
+    if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID
+        || op == UOP_RANGE) {
+      continue;
+    }
+    if (op == UOP_INDEX_E) {
+      // Already considered?
+      int dup = 0;
+      for (u32 i = 0; i < n_seen; i++) {
+        if (seen[i] == cur) { dup = 1; break; }
+      }
+      if (!dup && n_seen < RMU_HOIST_MAX) seen[n_seen++] = cur;
+      if (dup) continue;
+      // Only the addr matters for dependence: the buffer pointer is
+      // constant.
+      Term addr = heap_read(term_val(cur) + 1);
+      Term buf  = heap_read(term_val(cur) + 0);
+      if (rmu_term_depends_on_upcast(addr, up_axes, n_up)) {
+        // Per-lane load; can't hoist.  Descend into addr in case a
+        // nested INDEX_E inside (rare) is shared.
+        if (term_tag(addr) == TAG_UOP && sp < 256) stack[sp++] = addr;
+        continue;
+      }
+      // Shared: install in the hoist map and emit one declaration.
+      // Skip if the buffer is unresolved (rmu_buf_name_or_null == NULL):
+      // INDEX_E with NULL buf falls through to the `0.0f` literal
+      // semantics in rmu_emit_term; hoisting a literal would just be a
+      // const float local with no benefit, and would prematurely freeze
+      // the literal across the F MADs.
+      const char *bn = rmu_buf_name_or_null(buf);
+      if (bn == NULL) continue;
+      if (n_hoist >= RMU_HOIST_MAX) continue;
+      // Compute the name and reserve pool space.
+      char tmp[32];
+      int  tn = snprintf(tmp, sizeof(tmp), "_sh%u_%u", red_axis, n_hoist);
+      if (tn <= 0 || (u32)tn + 1 > name_pool_cap - pool_used) continue;
+      char *slot_name = name_pool + pool_used;
+      memcpy(slot_name, tmp, (u32)tn + 1);
+      pool_used += (u32)tn + 1;
+      if (!rmu_hoist_add(cur, slot_name)) continue;
+      // Emit:  float _sh<r>_<i> = in<k>[<addr>];
+      for (u32 d = 0; d < indent_depth; d++) fputs("  ", fp);
+      fprintf(fp, "float %s = %s[", slot_name, bn);
+      rmu_emit_term(addr, fp);
+      fputs("];\n", fp);
+      n_hoist++;
+      continue;
+    }
+    if (op == UOP_OPT) {
+      Term tgt = heap_read(term_val(cur) + 0);
+      if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
+      continue;
+    }
+    u8 ar = uop_arity(op);
+    u64 loc = term_val(cur);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
+      Term child = heap_read(loc + i);
+      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    }
+  }
+  return n_hoist;
+}
+
 // REDUCE-shaped emission: STORE(buf, addr, REDUCE(src, kind, axis)).
 // Hoists an accumulator outside the reduce-axis loop and references it
 // in the store statement.  Returns 1 if the shape matched and was
@@ -3026,11 +3214,37 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       rmu_emit_range_open(red_ranges[ai], fp, pa_red_depth, red_kind_opts[ai]);
       pa_red_depth++;
     }
+    // Shared-load hoist (path #2 of docs/tinygrad_late_passes.md).
+    // Inside the K loop body, before the F MAD lines, emit ONE local
+    // variable per UOP_INDEX_E whose address doesn't depend on any
+    // UPCAST'd axis -- the load is identical across all F lanes, so
+    // pre-loading once + reusing the local in every MAD shrinks the
+    // emitted body from F*2 reads per K-iter to F+(shared count) reads.
+    // The per-k uop_graph_rewrite below is identity on the hoisted
+    // subtrees (the rewrite only touches UPCAST'd RANGE leaves and the
+    // hash-consed rebuilder preserves Term identity on unchanged
+    // subtrees), so the hoist map keyed on the ORIGINAL red_src matches
+    // every per-k rewrite result.  See tinygrad
+    // codegen/late/devectorizer.py:81-117 fold_expanded_index for the
+    // UOp-graph-level analogue (folds adjacent INDEX nodes into one
+    // wider CAT'd INDEX + per-lane GEP).
+    rmu_hoist_clear();
+    char hoist_name_pool[RMU_HOIST_MAX * 32] = {0};
+    u32 n_hoist = rmu_hoist_shared_loads(red_src,
+                                         pa_up.up_axes, pa_up.n,
+                                         red_axis,
+                                         hoist_name_pool,
+                                         (u32)sizeof(hoist_name_pool),
+                                         fp, pa_red_depth);
+    (void)n_hoist;  // emitted inline; declarations precede the F MADs
     // F MAD statements, each with the UPCAST'd RANGE leaves substituted
     // by a literal CONST in the row-major-decoded position.  Innermost
     // UPCAST axis (last in pa_up.up_axes[]) varies fastest so adjacent
     // k indices share outer-axis values -- the compiler CSEs any
-    // outer-axis-only address arithmetic across the rectangle.
+    // outer-axis-only address arithmetic across the rectangle.  Shared
+    // loads are already pre-emitted via the hoist map above; the
+    // rmu_emit_term recursion short-circuits to the local-variable
+    // name whenever it encounters a hoisted Term.
     UOpGraphRewriteRule pa_rules[1] = {
       { "parallel_acc_subst", rmu_conv_m_subst_rule }
     };
@@ -3052,6 +3266,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
         fputs(";\n", fp);
       }
     }
+    rmu_hoist_clear();
     // Close all reduce loops (innermost first).
     for (i32 ai = (i32)red_n_axes - 1; ai >= 0; ai--) {
       pa_red_depth--;
