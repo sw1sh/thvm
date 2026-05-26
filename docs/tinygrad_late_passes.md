@@ -552,6 +552,67 @@ END / STACK / GEP-folded wide LOADs is the remaining work for stage
 land as off-pipeline tools today; the V100 wall measurement awaits
 the renderer wiring.
 
+### 5c. Architectural alternative piece #3 (stages a + b) LANDED
+
+The first two stages of the renderer-side wiring are in place:
+
+- `src/uop/linearize.c` (stage a): port of
+  `tinygrad/codegen/late/linearizer.py:7-52` `linearize()`.  Entry
+  `uop_linearize(sink, &LinKernel) -> int`.  Walks a post-devectorize
+  DAG (or any UOp DAG -- the linearizer is shape-agnostic) and
+  produces a `LinKernel`: an ordered array of UOp Terms in emission
+  order.  The algorithm is the tinygrad priority-tuple toposort:
+  bottom-up out-degree count, per-opcode priority bias
+  (`LOAD = -1`, `STORE = +1`, `RANGE = +5`, `END = -5`,
+  `PLACEHOLDER = -17`, `BUFFER = -18`), then a min-heap pop-and-emit
+  ordered by toposort-respecting ideal-position key.  No allocations
+  on the main heap; everything lives in `static` arrays sized by
+  `LIN_KERNEL_CAP = 4096`.
+
+- `src/codegen/render_linearized.c` (stage b, partial): proof-of-
+  concept renderer that consumes a `LinKernel` and emits a C99
+  kernel for the simplest shape -- a single-store elementwise body
+  over one `KAX_LOOP` range.  Recognises `UOP_CONST`, `UOP_RANGE`,
+  `UOP_INDEX_E`, `UOP_LOAD`, `UOP_CAST`, binary/unary ALU, and
+  `UOP_PLACEHOLDER` (for the post-`reduce_to_acc` shape).  Anything
+  involving `UOP_REDUCE` or `UOP_AFTER` returns `0` and the caller
+  is expected to fall back to the legacy emit (not yet wired).
+
+Tested via `tests/test_uop_linearize.c` (4 cases, 29 assertions):
+  1. Elementwise STORE(1 + LOAD(in[i])) -- toposort order +
+     LOAD < ADD < STORE + RANGE < LOAD.
+  2. Matmul SUM(A[i,k] * B[k,j]) -- LOADs < MUL < REDUCE < STORE.
+  3. Post-devectorize REDUCE -- PLACEHOLDER present, END precedes
+     final LOAD, no surviving REDUCE.
+  4. End-to-end: linearize + cg_render_linearized_c on case 1
+     emits a valid C99 kernel with the expected loop header and
+     INDEX_E body.
+
+**Stages c-f deferred.**  The remaining work to close the V100 wall
+regression is:
+  (c) extend the renderer to handle REDUCE-path PLACEHOLDER + STORE-
+      back-to-acc + END + final LOAD as a multi-line emit (the
+      AFTER-chain semantics linearize produces).
+  (d) extend to STACK / GEP / VCONST so vector loads + per-lane
+      scalar ALU emit correctly after `uop_load_store_fold_graph`
+      has run.
+  (e) wire the renderer into `cg_render_uop_kernel_metal_root` /
+      `cg_render_uop_kernel_cuda_root` for opt-rich kernels, gated
+      so the legacy emit keeps fielding the kernels that today's
+      test_render_uop 301/301 pins.
+  (f) measure V100 BS=128 STEPS=10 wall vs the <=540 ms target.
+
+The reason the wire-up (stage e) is the longest remaining piece is
+that the legacy `rmu_emit_store` walks ~4500 lines of interleaved
+concerns: range-with-opt collection, conv recogniser branch, TC
+template branch, parallel-accumulator broadcast-hoist, simd-collective
+warp reduces, kvar wedging, multi-output AFTER chains.  A drop-in
+replacement that doesn't regress any of the 301 test_render_uop cases
+needs to either be limited to a narrow opt-rich shape (with a robust
+gate) or grow to cover all the legacy concerns.  Either path is a
+multi-session piece of work; landing stages a + b first gives the
+next agent the post-linearize input shape to start from.
+
 ## References
 
 - `/Users/swish/src/tinygrad/tinygrad/codegen/__init__.py:full_rewrite_to_sink` -- the pipeline
