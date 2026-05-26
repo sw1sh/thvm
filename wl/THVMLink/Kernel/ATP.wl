@@ -2308,7 +2308,14 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
        after adding a new rule, soft-delete any existing rule subsumed
        by it.  Iter 18 c7c42f3d shipped the C-side implementation;
        earlier iters used ForwardSubsume as an approximation -- now
-       replaced by the real backward variant). *)
+       replaced by the real backward variant).
+     - BackwardDemod -> True           (direct port of `bd=all` LHS
+       half: after a new-rule batch, normalize each older rule's LHS
+       with the new rule(s); if it reduces, drop and re-queue the
+       simplified equation.  Iter 20 07205c88).
+     - RHSInterreduce -> True          (the bd=all RHS half: the
+       Waldmeister IR_InterreduktionRechts equivalent.  Pairs with
+       BackwardDemod to give the full bd=all both-sides demodulation). *)
 atpParseMethod["VampireUEQ"] := atpParseMethod[{"VampireUEQ"}];
 atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
     Block[{o = Association[{subopts}], merged, mnf},
@@ -2318,7 +2325,9 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
             "Ordering" -> "LPO", "AutoPrecedence" -> True,
             "SelectionRatio" -> 10, "UnfailingCP" -> True,
             "AutoMaxWeight" -> True,
-            "BackwardSubsume" -> True|>, o];
+            "BackwardSubsume" -> True,
+            "BackwardDemod" -> True,
+            "RHSInterreduce" -> True|>, o];
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 

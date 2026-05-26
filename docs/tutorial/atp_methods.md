@@ -248,6 +248,11 @@ are not yet ported):
   `nwc=1.2` non-goal weight skew).
 - `BackwardSubsume -> True` (direct port of `bs=unit_only`: after
   adding a new rule, soft-delete any existing rule subsumed by it).
+- `BackwardDemod -> True` (direct port of `bd=all` LHS half: after
+  a new-rule batch, normalize each older rule's LHS with the new
+  rule(s); on reduction, drop and re-queue the simplified equation).
+- `RHSInterreduce -> True` (the `bd=all` RHS half: Waldmeister
+  `IR_InterreduktionRechts`).
 
 List form takes the same `Method -> {"VampireUEQ", subopt -> value, ...}`
 override pattern as `"Waldmeister"`.
@@ -518,11 +523,13 @@ table is useful when you pin `Method` explicitly.
 
 These 5 unit-equality goals are known to be cracked by Vampire 5.0.1 (UEQ
 portfolio) within 30 s in our parallel baseline, but neither the
-`Automatic` schedule nor any tried explicit `Method` (including
-`"VampireUEQ"` -- which now bundles real `BackwardSubsume` per iter 18 /
-19 -- `"CriticalPairWeight" -> "ConjSym"`, `"Diversity"`, `"Twee"`,
+`Automatic` schedule nor any tried explicit `Method` -- including the
+faithful `"VampireUEQ"` preset (after iters 18-21 it bundles real
+`BackwardSubsume` + `BackwardDemod` + `RHSInterreduce`, every orderable
+flag from Vampire's winning block for Sheffer/AndAssociativity),
+`"CriticalPairWeight" -> "ConjSym"`, `"Diversity"`, `"Twee"`,
 `"ForwardSubsume" -> True`, and pairings with `"GroundJoin" -> True` or
-`"Connectedness" -> True`) closes them within 25 s on the single-config
+`"Connectedness" -> True` -- closes them within 30 s on the single-config
 form:
 
 - `McCuneAxioms / EqualityOfInverses`
@@ -538,20 +545,29 @@ dis+10_6_to=lpo:tgt=full:fde=none:sp=arity:nwc=1.2:bs=unit_only:
 bd=all:av=off:gtg=exists_sym
 ```
 
-The orderable subset is shipped as `Method -> "VampireUEQ"`. After iter
-18 (`bs=unit_only` directly ported as `"BackwardSubsume"`), two flags
-remain unported:
+The orderable subset is shipped as `Method -> "VampireUEQ"`. After iters
+18 (BackwardSubsume) and 20 (BackwardDemod) every orderable flag in
+Vampire's winning Sheffer/AndAssociativity block is now ported:
 
-- `bd=all` -- backward demodulation: after a new rule N is added, rewrite
-  every existing rule's LHS / RHS at any position using N, then re-add
-  the rewritten rule (we have `"RHSInterreduce"` for the RHS-only
-  half, but no LHS demodulation).
-- `gtg=exists_sym` -- Vampire's GoalGuessing (`Shell/GoalGuessing.cpp`)
-  flags clauses with conjecture-symbol occurrences as goal-like for
-  premise selection. Less directly applicable to thvm: every problem
-  here has an explicit `negated_conjecture` role, so the conjecture
-  side is already known -- but the same machinery could feed a more
-  selective SInE pass.
+| Vampire flag | thvm equivalent |
+|-|-|
+| `to=lpo` | `Ordering -> "LPO"` |
+| `sp=arity` | `AutoPrecedence -> True` (strict superset for multi-op) |
+| `dis+10` | `SelectionRatio -> 10` |
+| `nwc=1.2` | `AutoMaxWeight -> True` |
+| `tgt=full` | `GoalDirected -> True` (MNF front alongside completion) |
+| `bs=unit_only` | `BackwardSubsume -> True` |
+| `bd=all` | `BackwardDemod -> True` + `RHSInterreduce -> True` |
+| `fde=none` | (not exposed; thvm's forward demodulation is built into normalize and not toggleable) |
+| `av=off` | (n/a; thvm has no AVATAR splitting to begin with) |
+| `gtg=exists_sym` | (not ported; Vampire's GoalGuessing flags clauses with conjecture-symbol occurrences as goal-like for premise selection.  Less directly applicable to thvm: every problem here has an explicit `negated_conjecture` role.) |
+
+That the faithful preset still does not close these 5 targets within
+30 s suggests the remaining gap is in the search-shape variables not
+visible at the flag layer -- Vampire's wider portfolio runs many
+100 ms strategies until one of them happens to surface the right
+critical pair early, which is a different lever than any single-config
+tuning can replicate.
 
 ## 6. Return specs
 
