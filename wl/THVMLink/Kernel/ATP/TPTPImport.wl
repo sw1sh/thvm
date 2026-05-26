@@ -18,16 +18,18 @@
    later clause is independent.  We build a fresh Pattern[Unique[]]
    per occurrence so subsequent equations share no bound variables. *)
 
-BeginPackage["THVMLink`TPTPImport`"];
+BeginPackage["THVMLink`ATP`", {"THVMLink`"}];
 
-tptpImport::usage =
-    "tptpImport[File[\"file.p\"]] | tptpImport[\"... cnf source ...\"] " <>
-    "returns <|\"Axioms\" -> {...}, \"Conjecture\" -> ...|>.";
+TPTPImport::usage =
+    "TPTPImport[File[\"file.p\"]] | TPTPImport[\"... cnf source ...\"] " <>
+    "returns <|\"Axioms\" -> {...}, \"Conjecture\" -> ...|>.  Function " <>
+    "symbols come back as String-headed terms (\"and\"[X, Y] etc.) so " <>
+    "they cannot collide with user-level WL symbols.";
 
-tptpImport::badrole = "Skipping cnf clause with unsupported role `1`.";
-tptpImport::badfmla = "Could not parse formula `1` (expected " <>
+TPTPImport::badrole = "Skipping cnf clause with unsupported role `1`.";
+TPTPImport::badfmla = "Could not parse formula `1` (expected " <>
     "`lhs = rhs` or `lhs != rhs`).";
-tptpImport::skipnoncnf =
+TPTPImport::skipnoncnf =
     "Skipping unsupported `1` directive at offset `2` (only cnf clauses " <>
     "are handled; see github.com/TPTPWorld/SyntaxBNF for the full grammar).";
 
@@ -35,12 +37,12 @@ Begin["`Private`"];
 
 (* ----- entry ----- *)
 
-tptpImport[File[path_String]] := tptpImport @ Import[path, "Text"]
+TPTPImport[File[path_String]] := TPTPImport @ Import[path, "Text"]
 
-tptpImport[s_String] /; FileExistsQ[s] && ! StringContainsQ[s, "cnf("] :=
-    tptpImport @ File[s]
+TPTPImport[s_String] /; FileExistsQ[s] && ! StringContainsQ[s, "cnf("] :=
+    TPTPImport @ File[s]
 
-tptpImport[text_String] := Block[{stripped, clauses, results},
+TPTPImport[text_String] := Block[{stripped, clauses, results},
     stripped = StringReplace[text, {
         RegularExpression["%[^\n]*"]                 -> "",
         RegularExpression["/\\*([^*]|\\*[^/])*\\*+/"] -> ""
@@ -79,11 +81,11 @@ scanClauses[text_String, i0_Integer] := Block[{i = i0, len, head},
             i + 3 <= len && MemberQ[
                 {"tff(", "thf("}, StringTake[text, {i, i + 3}]],
                 head = StringTake[text, {i, i + 2}];
-                Message[tptpImport::skipnoncnf, head, i];
+                Message[TPTPImport::skipnoncnf, head, i];
                 i = skipParenthesised[text, i + 4]
             ,
             i + 7 <= len && StringTake[text, {i, i + 7}] === "include(",
-                Message[tptpImport::skipnoncnf, "include", i];
+                Message[TPTPImport::skipnoncnf, "include", i];
                 i = skipParenthesised[text, i + 8]
             ,
             True, i = i + 1
@@ -161,7 +163,7 @@ clauseToEquation[{role_String, body_String}] :=
         fmla = parseFormula[body];
         Which[
             fmla === $Failed,
-                Message[tptpImport::badfmla, body];
+                Message[TPTPImport::badfmla, body];
                 {"skip", $Failed}
             ,
             MemberQ[{"axiom", "hypothesis", "lemma"}, role],
@@ -175,7 +177,7 @@ clauseToEquation[{role_String, body_String}] :=
                 {"conjecture", fmla}
             ,
             True,
-                Message[tptpImport::badrole, role];
+                Message[TPTPImport::badrole, role];
                 {"skip", $Failed}
         ]
     ]
@@ -320,11 +322,22 @@ readTerm[text_String, i0_Integer] :=
         ];
         If[ i <= len && StringTake[text, {i, i}] === "(",
             {parts, i} = readArgs[text, i + 1];
-            {Symbol[mangleHead[tok]] @@ parts, i}
+            (* String-headed term: "and"[x, y] etc.  Strings as Heads
+               sidestep the THVMLink`TPTPImport`Tptp` namespacing dance
+               (no Symbol collisions with user globals because Strings
+               are not bound to anything in any context). *)
+            {tok @@ parts, i}
             ,
             If[ tptpVarQ[tok],
                 {ensureVar[tok], i},
-                {Symbol[mangleHead[tok]], i}
+                (* Nullary constant: "a"[] (empty argument list) rather
+                   than the bare string "a".  WL evaluates `"a" == "b"`
+                   to False eagerly because Equal short-circuits on
+                   distinct string literals, but Equal on distinct
+                   compound expressions (`"a"[]` vs `"b"[]`) stays
+                   unevaluated -- the form TFindProof and TSatEUF
+                   expect.  Equivalent shape to the n-ary case. *)
+                {tok[], i}
             ]
         ]
     ]
@@ -364,27 +377,10 @@ ensureVar[name_String] := (
     $tptpVars[name]
 )
 
-(* Build a Symbol in our private sub-context so it can never collide
-   with the user's Global` bindings (e.g. a calling script that
-   happened to bind `r = ...` would otherwise replace TPTP constant
-   `r` with whatever value the user assigned).  Names that WL would
-   reject as Symbols (underscore, leading `$`) are CamelCase-folded
-   first:
-     $true   -> THVMLink`TPTPImport`Tptp`Tptp$True
-     sk_c1   -> THVMLink`TPTPImport`Tptp`skC1
-     plain   -> THVMLink`TPTPImport`Tptp`plain *)
-$tptpCtx = "THVMLink`TPTPImport`Tptp`";
-
-mangleHead[name_String] := Which[
-    StringStartsQ[name, "$"],
-        $tptpCtx <> "Tptp$" <> StringJoin[
-            Capitalize /@ StringSplit[StringDrop[name, 1], "_"]],
-    StringContainsQ[name, "_"],
-        $tptpCtx <> With[{parts = StringSplit[name, "_"]},
-            First[parts] <> StringJoin[Capitalize /@ Rest[parts]]
-        ],
-    True, $tptpCtx <> name
-]
+(* (Function-symbol heads are kept as bare Strings -- "and"[X, Y]
+   instead of a Symbol in a private context.  Strings are not bound
+   in any WL context, so they cannot collide with the user's globals
+   and don't need a Tptp` namespace dance.) *)
 
 End[];   (* `Private` *)
 EndPackage[];

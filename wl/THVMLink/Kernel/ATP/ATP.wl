@@ -38,7 +38,13 @@
 
    See docs/plans/waldmeister_ic_atp.md for the algorithmic intent. *)
 
-BeginPackage["THVMLink`"];
+(* THVMLink`ATP` is the single ATP entry context.  All public ATP /
+   SMT / TPTPImport symbols live here so user code can do
+   `Get["THVMLink`ATP`"]` (or equivalently `<< THVMLink`ATP``) and
+   call them by bare name.  THVMLink` is on the context path so bare
+   IC primitives (TDef / TRef / TLam / ...) owned by sibling Kernel
+   files still resolve transparently. *)
+BeginPackage["THVMLink`ATP`", {"THVMLink`"}];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
@@ -48,17 +54,28 @@ TFindEquationalProof::usage = "TFindEquationalProof is a deprecated alias for TF
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning -- a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire -- D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
 
-(* Forward-declare symbols owned by sibling files (Switch.wl owns
-   the IC term constructors) so bare references inside
-   Begin[`Private`] resolve to THVMLink`X instead of a phantom
-   THVMLink`Private`X.  ATP.wl is parsed first in alphabetical
-   order, so these public names don't yet exist when this file's
-   body runs.  Mirrors the same guard in Lazy.wl. *)
-{TDef, TRef, TIfZero, TOp2, TNum, TSup, TApp, TLam,
- TCollapse, TCnf, TTermTag, TTermVal, TTermExt, THeapRead,
- FromTTerm, TTerm};
+(* Forward-declare sibling-file public symbols (SMT.wl owns
+   TSatEUF / TSmtDecide / TFindProofSMT; TPTPImport.wl owns
+   TPTPImport) so bare references inside this file's Begin[`Private`]
+   resolve to the shared THVMLink`ATP`X symbol rather than creating
+   a phantom THVMLink`ATP`Private`X.  The alphabetical autoload order
+   (ATP -> SMT -> TPTPImport) means those symbols don't exist yet when
+   this file is parsed; the bare mention here pre-creates them in the
+   public context.  Mirrors the iter-9 idiom in the original ATP.wl. *)
+{TSatEUF, TSmtDecide, TFindProofSMT, TPTPImport};
+
+(* (The IC primitives TDef / TRef / TLam / TCollapse / ... are owned by
+   the depth-4 sibling Switch.wl, which already loaded before this
+   depth-5 file -- bare references resolve via the context path
+   THVMLink` pushed by the BeginPackage second arg.) *)
 
 Begin["`Private`"];
+
+(* `load` is the LibraryFunctionLoad helper defined in
+   THVMLink`Private` by THVMLink.wl; alias it here so bare `load[...]`
+   in $atpRunProofFn / $atpRunExistFn / ... resolves to the same
+   helper (THVMLink`ATP`Private is a separate context). *)
+load = THVMLink`Private`load;
 
 (* Diagnostic: when True, every Throw[$Failed] inside the ProofObject
    dataset assembly (buildCplDataset / buildCEngineChain / cplOrient)
@@ -2276,7 +2293,7 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None};
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 
@@ -2399,7 +2416,7 @@ atpParseMethod["VampirePortfolio"] :=
     (* atpScheduleFor pattern-matches a list directly, but
        atpParseMethod's contract is "single config".  Return a sentinel
        that atpScheduleFor recognizes for the rotation. *)
-    {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0};
+    {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None};
 
 $VampirePortfolio = {
     (* 1: VampireUEQ-faithful single config (the iter-21 flag-complete
@@ -3450,15 +3467,45 @@ TFindProof[thms_Association, theory_String,
    per cnf clause).  fof / tff / thf clauses + include directives are
    skipped with a console warning.  See Kernel/ATP/TPTPImport.wl. *)
 TFindProof[File[path_String], opts:OptionsPattern[]] :=
-    tptpDispatch[THVMLink`TPTPImport`tptpImport[File[path]], opts]
+    tptpDispatch[TPTPImport[File[path]], opts]
 TFindProof[s_String, opts:OptionsPattern[]] /;
         StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
-    tptpDispatch[THVMLink`TPTPImport`tptpImport[s], opts]
+    tptpDispatch[TPTPImport[s], opts]
+
+(* Convert TPTP's String-headed terms ("and"[X, Y], "a"[]) into
+   Symbol-headed terms in a private context so atpEncodeProblem and
+   the WL ProofObject verifier (which expect Symbol heads) work as
+   usual.  The conversion is one-way at dispatch time: TPTPImport's
+   user-visible output stays String-headed for clean InputForm display
+   ("and"[X, Y] instead of THVMLink`...`Tptp`and[X, Y]). *)
+(* CamelCase-fold underscored names so Symbol[] accepts them.
+   sk_c1 -> skC1, op_overtilde -> opOvertilde, $true -> Dollar$true.
+   Symbol[] rejects identifier strings with `_` (parsed as Blank) or
+   leading `$` (parsed as $-prefix); this fold side-steps both. *)
+tptpStringToSymbol[s_String] :=
+    Symbol["THVMLink`ATP`Private`Tptp$" <> Which[
+        StringStartsQ[s, "$"], "Dollar" <> StringDrop[s, 1],
+        StringContainsQ[s, "_"], With[{parts = StringSplit[s, "_"]},
+            First[parts] <> StringJoin[Capitalize /@ Rest[parts]]],
+        True, s
+    ]];
+(* Internalize: convert "h"[args...] -> Tptp$h[args...].  Nullary
+   "a"[] (with empty args) collapses to bare Symbol Tptp$a so it
+   matches the WL ProofObject decoder's `Symbol[name]` shape for
+   0-arity constants (line ~780 -- the decoder returns
+   `Symbol[name]` rather than `Symbol[name][]` for arity 0, so the
+   verifier sees consistent shapes on round-trip). *)
+tptpInternalize[expr_] :=
+    expr //. {
+        h_String[] :> tptpStringToSymbol[h],
+        h_String[args__] :> tptpStringToSymbol[h][args]
+    };
 
 tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
     imported["Conjecture"] === None,
-    TFindProof[imported["Axioms"], opts],
-    TFindProof[imported["Conjecture"], imported["Axioms"], opts]
+    TFindProof[tptpInternalize /@ imported["Axioms"], opts],
+    TFindProof[tptpInternalize @ imported["Conjecture"],
+        tptpInternalize /@ imported["Axioms"], opts]
 ]
 
 (* The proving entry: optional LAST positional returnSpec.  Without it,
@@ -3472,11 +3519,11 @@ tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
    inside `/;` does not always see the supplied opts. *)
 TFindProof[conjecture_, axioms_List, opts:OptionsPattern[]] /;
         ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
-    THVMLink`SMT`TFindProofSMT[conjecture, axioms];
+    TFindProofSMT[conjecture, axioms];
 TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] /;
         ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
-    THVMLink`SMT`TFindProofSMT[conjecture, axioms];
+    TFindProofSMT[conjecture, axioms];
 
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[

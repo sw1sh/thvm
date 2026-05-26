@@ -3,7 +3,7 @@
    wl/THVMLink/Tests/run.wls. *)
 
 VerificationTest[
-    Module[{r = THVMLink`TPTPImport`tptpImport[
+    Module[{r = TPTPImport[
         "cnf(a, axiom, and(X, Y) = and(Y, X))."]},
         {Length[r["Axioms"]], MatchQ[r["Conjecture"], None]}
     ],
@@ -12,7 +12,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Module[{r = THVMLink`TPTPImport`tptpImport[
+    Module[{r = TPTPImport[
         "cnf(g, negated_conjecture, foo(sk) != sk)."]},
         Head[r["Conjecture"]]
     ],
@@ -21,7 +21,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Module[{r = THVMLink`TPTPImport`tptpImport[
+    Module[{r = TPTPImport[
         "cnf(a1, axiom, and(X1, and(X2, X3)) = and(and(X1, X2), X3))."]},
         FreeQ[r["Axioms"], Missing]
     ],
@@ -30,7 +30,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Module[{r = THVMLink`TPTPImport`tptpImport[
+    Module[{r = TPTPImport[
         "cnf(g, negated_conjecture, sk_c1 != sk_c1)."]},
         FreeQ[ToString @ InputForm @ r["Conjecture"], "_c1"]
     ],
@@ -39,7 +39,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Module[{r = THVMLink`TPTPImport`tptpImport[File[
+    Module[{r = TPTPImport[File[
         FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp",
             "AbelianGroupAxioms__InverseOfInverse.p"}]
     ]]},
@@ -88,7 +88,7 @@ VerificationTest[
 
 VerificationTest[
     (* FOF without quantifier -- free variables become universals. *)
-    Module[{r = THVMLink`TPTPImport`tptpImport[
+    Module[{r = TPTPImport[
         "fof(a, axiom, and(X, Y) = and(Y, X))."]},
         {Length[r["Axioms"]], MatchQ[r["Conjecture"], None]}
     ],
@@ -98,7 +98,7 @@ VerificationTest[
 
 VerificationTest[
     (* FOF with explicit ! [X,Y] universal -- quantifier stripped, body kept. *)
-    Module[{r = THVMLink`TPTPImport`tptpImport[
+    Module[{r = TPTPImport[
         "fof(comm, axiom, ! [X, Y] : (and(X, Y) = and(Y, X)))."]},
         {Length[r["Axioms"]], FreeQ[r["Axioms"], Missing]}
     ],

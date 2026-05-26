@@ -33,7 +33,7 @@
      A future DPLL(T) shell on top will turn this into a real
      SMT solver. *)
 
-BeginPackage["THVMLink`SMT`"];
+BeginPackage["THVMLink`ATP`", {"THVMLink`"}];
 
 TSatEUF::usage =
     "TSatEUF[{lhs == rhs, ...}, {lhs != rhs, ...}] decides the " <>
@@ -52,7 +52,7 @@ TFindProofSMT::usage =
     "closure.  Returns a small ProofObject-shaped Association on " <>
     "UNSAT, $Failed on SAT.  TFindProofSMT[\"...cnf/fof string...\"] " <>
     "and TFindProofSMT[File[\"path.p\"]] parse a TPTP fragment via " <>
-    "THVMLink`TPTPImport`tptpImport and dispatch the same way -- the " <>
+    "TPTPImport and dispatch the same way -- the " <>
     "input must be ground (no variables) since congruence closure " <>
     "is a quantifier-free decision procedure; non-ground inputs " <>
     "return $Failed with a console message.";
@@ -249,11 +249,11 @@ collectLiterals[lits_List] := Block[{e = {}, d = {}, l},
    crash. *)
 
 TFindProofSMT[File[path_String]] :=
-    tptpDispatchSMT @ THVMLink`TPTPImport`tptpImport[File[path]]
+    tptpDispatchSMT @ TPTPImport[File[path]]
 
 TFindProofSMT[s_String] /;
         StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
-    tptpDispatchSMT @ THVMLink`TPTPImport`tptpImport[s]
+    tptpDispatchSMT @ TPTPImport[s]
 
 tptpDispatchSMT[imported_Association] := Block[
     {axioms = imported["Axioms"], conj = imported["Conjecture"],

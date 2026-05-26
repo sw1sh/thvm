@@ -7,7 +7,7 @@ PacletObject[<|
         {
             "Kernel",
             "Root"    -> "Kernel",
-            "Context" -> {"THVMLink`"}
+            "Context" -> {"THVMLink`", "THVMLink`ATP`"}
         },
         {"LibraryLink"}
     }

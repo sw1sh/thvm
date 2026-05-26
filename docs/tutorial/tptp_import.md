@@ -29,9 +29,43 @@ saturator) and `TFindProofSMT` (QF_UF decision procedure, see
 `docs/tutorial/smt.md`) — accept a `File["..."]` or inline string
 without forcing the caller to hand-translate clauses to WL.
 
-## 2. Quick start
+## 2. Loading
 
-### 2.1 An inline string, ATP path
+`TPTPImport` and the dispatch overloads live in `THVMLink\`ATP\`` --
+the single load entry brings every ATP / SMT public symbol into scope
+by bare name:
+
+```mathematica
+<< THVMLink`ATP`
+```
+
+(Equivalent to `Get["THVMLink\`ATP\`"]` / `Needs["THVMLink\`ATP\`"]`.)
+All examples below assume this has run.
+
+## 3. Quick start
+
+### 3.1 Just parse, don't prove
+
+```mathematica
+TPTPImport["cnf(a, axiom, and(X, Y) = and(Y, X))."]
+(* -> <|"Axioms" -> {"and"[v$_, w$_] == "and"[w$_, v$_]},
+        "Conjecture" -> None|> *)
+```
+
+The parser returns an Association. Function-symbol names come back as
+String heads (`"and"[X, Y]` etc.) so they cannot collide with any
+user-level WL symbol -- see §7 below.
+
+```mathematica
+TPTPImport[File["AbelianGroupAxioms__InverseOfInverse.p"]]
+(* -> <|"Axioms" -> {4 equational axioms},
+        "Conjecture" -> "not"["not"["skC1"[]]] == "skC1"[]|> *)
+```
+
+Use the file overload for benchmark `.p` files. Underscored TPTP
+names (`sk_c1`, `op_overtilde`) come through verbatim as Strings.
+
+### 3.2 Inline string, ATP path
 
 ```mathematica
 TFindProof[
@@ -41,13 +75,12 @@ TFindProof[
 (* -> ProofObject[...] *)
 ```
 
-The string contains three clauses: two universally-quantified
-equational axioms (commutativity + associativity of `and`) and a
-ground inequality conjecture. The importer parses the clauses, the
-dispatch routes them as `Axioms / Conjecture`, and the saturator
-closes the goal.
+Three clauses: two universally-quantified equational axioms
+(commutativity + associativity of `and`) and a ground inequality
+conjecture. The importer parses the clauses, the dispatch routes them
+as `Axioms / Conjecture`, and the saturator closes the goal.
 
-### 2.2 A file, ATP path
+### 3.3 A file, ATP path
 
 ```mathematica
 TFindProof[File["AbelianGroupAxioms__InverseOfInverse.p"],
@@ -55,13 +88,41 @@ TFindProof[File["AbelianGroupAxioms__InverseOfInverse.p"],
 (* -> ProofObject[...] *)
 ```
 
-Same dispatch. The file is parsed via `Import[..., "Text"]` and fed
-through `tptpImport`.
+Same dispatch as the inline string. The file is read via
+`Import[..., "Text"]` then handed to `TPTPImport`.
 
-### 2.3 An inline string, ground SMT path
+### 3.4 Use the parsed Association manually
 
 ```mathematica
-THVMLink`SMT`TFindProofSMT[
+imported = TPTPImport[File["MyProblem.p"]];
+TFindProof[imported["Conjecture"], imported["Axioms"],
+    Method -> "VampireUEQ", TimeConstraint -> 30]
+```
+
+If you want to pick a non-default `Method`, pass options to a
+`TFindProof[conjecture, axioms, opts]` call directly -- the
+File/string overloads always go through the default Automatic
+dispatch.
+
+### 3.5 Saturate (no conjecture)
+
+```mathematica
+TFindProof[
+    "cnf(a1, axiom, mul(X, e) = X).
+     cnf(a2, axiom, mul(e, X) = X).",
+    TimeConstraint -> 5]
+(* -> {Inactive[Equal][mul[v_, e], v_], Inactive[Equal][mul[e, v_], v_]} *)
+```
+
+When the input has no `conjecture` / `negated_conjecture` clause, the
+dispatch falls through to `TFindProof[axioms]`'s single-argument
+completion form: saturate the axioms within `TimeConstraint`, return
+the completed rule set as a list of `Inactive[Equal]` equations.
+
+### 3.6 Inline string, ground SMT path
+
+```mathematica
+TFindProofSMT[
     "cnf(a1, axiom, a = b).
      cnf(a2, axiom, b = c).
      cnf(g,  negated_conjecture, a != c)."]
@@ -73,7 +134,7 @@ congruence closure for a near-linear-time decision instead of
 saturation. Non-ground inputs are rejected with a clear message:
 
 ```mathematica
-THVMLink`SMT`TFindProofSMT[
+TFindProofSMT[
     "cnf(a, axiom, and(X, Y) = and(Y, X))."]
 (* TFindProofSMT::nonground: ... -- use TFindProof instead. *)
 (* -> $Failed *)
@@ -81,9 +142,23 @@ THVMLink`SMT`TFindProofSMT[
 
 See `docs/tutorial/smt.md` for the SMT entry.
 
-## 3. Coverage matrix
+### 3.7 FOF (first-order form) with explicit universal
 
-### 3.0 What TPTP encodes
+```mathematica
+TPTPImport[
+    "fof(comm, axiom, ! [X, Y] : (and(X, Y) = and(Y, X)))."]
+(* -> <|"Axioms" -> {"and"[v$_, w$_] == "and"[w$_, v$_]}, ...|> *)
+```
+
+`fof` clauses with a leading `! [V1, ..., Vn] :` universal quantifier
+(optionally wrapped in parens) parse the same as the equivalent
+`cnf` form -- the quantifier is stripped, the body becomes a
+universal equational axiom. Free variables in a bare `fof` (no
+explicit quantifier) are also treated as universals.
+
+## 4. Coverage matrix
+
+### 4.0 What TPTP encodes
 
 The TPTP infrastructure (`tptp.org`, `github.com/TPTPWorld/SyntaxBNF`)
 formalises two axes:
@@ -161,7 +236,7 @@ problems by topic, encoded as a 3-letter prefix in the file name (e.g.
 problem-list catalogue files tag each problem with the expected SZS
 status; the importer ignores these (only the clause set is parsed).
 
-### 3.1 thvm coverage against each axis
+### 4.1 thvm coverage against each axis
 
 **Axis A (clause heads):**
 
@@ -212,7 +287,7 @@ return is SZS `Timeout` / `GaveUp`. The `"Statistics"["Status"]` key
 on a bundle (`docs/tutorial/atp_methods.md` 7.1) surfaces these
 directly.
 
-### 3.2 Bottom line
+### 4.2 Bottom line
 
 For TPTP **UEQ** division benchmarks the importer + saturator is a
 complete drop-in: every UEQ problem parses, and the standard ATP
@@ -222,7 +297,7 @@ ground shape -> route through `TFindProofSMT`; everything else
 (typed, higher-order, modal, general first-order with non-equality
 predicates) is unsupported.
 
-## 4. Supported grammar subset
+## 5. Supported grammar subset
 
 The full TPTP grammar (`github.com/TPTPWorld/SyntaxBNF`, ~735 lines)
 covers `cnf / fof / tff / thf / tcf / ncf / tpi`. The importer
@@ -231,7 +306,7 @@ equational literal. Other clause heads (`tff` / `thf` / `tcf` / `ncf`
 / `tpi` / `include`) are skipped with a console warning so the rest
 of the file still parses.
 
-### 4.1 `cnf(name, role, formula).`
+### 5.1 `cnf(name, role, formula).`
 
 ```
 cnf(<name>, <role>, <lhs> = <rhs>).
@@ -250,7 +325,7 @@ cnf(<name>, <role>, <lhs> != <rhs>).
   one gets a fresh `Pattern[Unique[]]` so subsequent clauses share no
   bound variables.
 
-### 4.2 `fof(name, role, formula).`
+### 5.2 `fof(name, role, formula).`
 
 ```
 fof(<name>, <role>, ! [V1, ..., Vn] : (<lhs> = <rhs>)).
@@ -265,28 +340,28 @@ literal shape applies as `cnf`.
 `fof` clauses with conjunctions / disjunctions / existentials /
 negations outside this single-equation shape are not handled — the
 importer returns `Missing` for those formulas and prints
-`tptpImport::badfmla`.
+`TPTPImport::badfmla`.
 
-### 4.3 Comments
+### 5.3 Comments
 
 Line comments (`% ...`) and block comments (`/* ... */`) are stripped
 before parsing.
 
-### 4.4 What's NOT supported
+### 5.4 What's NOT supported
 
 | Construct | Status |
 |-|-|
 | `cnf` multi-literal clauses (`l1 \| l2 \| ...`) | Not supported (UEQ is unit-equality, so this is fine for UEQ benchmarks). |
-| `fof` with `&` / `\|` / `~` / `?` outside `! [...] :` | Not supported -- `tptpImport::badfmla`. |
-| `tff` (typed first-order) | Skipped (`tptpImport::skipnoncnf`). |
+| `fof` with `&` / `\|` / `~` / `?` outside `! [...] :` | Not supported -- `TPTPImport::badfmla`. |
+| `tff` (typed first-order) | Skipped (`TPTPImport::skipnoncnf`). |
 | `thf` (typed higher-order) | Skipped. |
 | `tcf` (typed cnf) / `ncf` / `tpi` | Skipped. |
 | `include('path').` | Skipped. The caller must resolve includes by passing the assembled file. |
 | Equational rewriting modulo theory annotations | Not part of UEQ; not supported. |
 
-## 5. Output shape
+## 6. Output shape
 
-`THVMLink\`TPTPImport\`tptpImport` returns:
+`TPTPImport` returns:
 
 ```mathematica
 <|
@@ -300,39 +375,53 @@ Both `TFindProof` and `TFindProofSMT` consume this directly. When
 single-argument completion form (saturate the axioms, return the
 derived lemmas).
 
-## 6. Namespacing
+## 7. String heads, not namespaced Symbols
 
-All symbols built from TPTP function-symbol names land in the private
-context `THVMLink\`TPTPImport\`Tptp\``. This is load-bearing:
-without it a TPTP `and` or `p` would shadow a user-level `and` or `p`
-binding, corrupting the parsed clauses. So the parsed axiom
+TPTP function-symbol names come back as bare String heads, not
+Symbols in some private context. So the parsed axiom
 
 ```
 cnf(a, axiom, and(X, Y) = and(Y, X)).
 ```
 
-prints as
+prints (via `InputForm`) as
 
 ```
-THVMLink`TPTPImport`Tptp`and[v1_, v2_] == THVMLink`TPTPImport`Tptp`and[v2_, v1_]
+"and"[v$_, w$_] == "and"[w$_, v$_]
 ```
 
-(via `InputForm`). When passed back to `TFindProof` this works
-transparently — the prover only cares about structural equality.
+Strings are not bound to anything in any WL context, so a TPTP `and`
+or `p` cannot shadow a user-level `and` or `p` binding -- no
+namespace dance needed. Nullary constants come back as `"a"[]` (empty
+argument list) rather than the bare String `"a"` because WL
+short-circuits `Equal` on distinct String atoms (`"a" == "b"` would
+eagerly evaluate to `False`); the compound form `"a"[] == "b"[]`
+stays unevaluated, matching the shape `TFindProof` and `TSatEUF`
+expect.
 
-Underscores in TPTP names get folded to camelCase (`sk_c1` becomes
-`skC1`) so the WL `Symbol[]` constructor accepts them. Names starting
-with `$` (TPTP system symbols) get a `Tptp$` prefix for the same
-reason.
+Variables are clause-scoped uppercase identifiers; the parser builds
+a fresh `Pattern[Unique["v"], Blank[]]` per occurrence, so the same
+name (`X`) in different clauses gets different WL variables and the
+axioms cannot accidentally cross-bind.
 
-## 7. The dispatch surface
+At dispatch time, the file/string overloads of `TFindProof` /
+`TFindProofSMT` internally convert String heads to Symbols in a
+private context (`THVMLink\`ATP\`Private\`Tptp$and` etc.) before
+calling the encoder, since the WL `ProofObject` verifier expects
+Symbol heads. The conversion is one-way: the parser's user-facing
+output stays String-headed for clean `InputForm` display. Underscored
+TPTP names (`sk_c1`, `op_overtilde`) get CamelCase-folded at
+conversion time (`Tptp$skC1`, `Tptp$opOvertilde`) since `Symbol[]`
+rejects identifiers containing `_`.
+
+## 8. The dispatch surface
 
 ```mathematica
 TFindProof[File["path.p"], opts]           (* ATP, file *)
 TFindProof["...cnf/fof source...", opts]   (* ATP, inline *)
 
-THVMLink`SMT`TFindProofSMT[File["path.p"]] (* SMT, file *)
-THVMLink`SMT`TFindProofSMT["...source..."] (* SMT, inline *)
+TFindProofSMT[File["path.p"]] (* SMT, file *)
+TFindProofSMT["...source..."] (* SMT, inline *)
 ```
 
 `opts` is the usual `TFindProof` option set (see
@@ -341,7 +430,7 @@ suboptions, and return specs work the same way as with WL-form
 input — the importer is purely an alternative encoding path for the
 same `Axioms / Conjecture` pair.
 
-## 8. Where the code lives
+## 9. Where the code lives
 
 - `wl/THVMLink/Kernel/ATP/TPTPImport.wl` -- the parser. ~390 LOC. Pure
   WL; no C-side dependency.
@@ -359,7 +448,7 @@ same `Axioms / Conjecture` pair.
   the parallel Vampire baseline harness; doubles as a regression
   corpus for the importer.
 
-## 9. Extending coverage
+## 10. Extending coverage
 
 For the standing UEQ benchmark corpus the current `cnf` + `fof`
 subset is sufficient. Extensions toward the full TPTP grammar (the
@@ -375,7 +464,7 @@ TPTPWorld BNF reference) are tracked on a per-construct basis:
   through `atpEncodeProblem`; thvm has sort-check gating in the C
   engine but the WL surface currently assumes homogeneous mode.
 - `include`. Mechanical: resolve the path relative to the importer
-  file's directory, recursively `tptpImport` the included file, and
+  file's directory, recursively `TPTPImport` the included file, and
   splice the clause list.
 
 Each is a localized change; the parser scanner is already structured
