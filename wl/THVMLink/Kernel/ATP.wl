@@ -896,13 +896,19 @@ atpPrecedenceArray[_, enc_] := {};
    path) and the Main* fields carry the completion DAG for the
    critical-pair lemma path.  ExtSteps / MainSteps are $Failed when
    the corresponding extraction produced nothing. *)
-cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
-    cpWeight_:-1, ordering_:0, autoPrec_:0, useMnf_:0,
-    maxCpWeight_:0, goalInterleave_:0, groundJoin_:0,
+(* All Method-knob arguments are passed positionally by atpProveBundle
+   via `Sequence @@ atpMethodCfg`, which always supplies the full 21
+   values, so no default-bearing Optional patterns are needed.  Dropping
+   them keeps the pattern under WL's 13-optional threshold and silences
+   the Pattern::patm noise that previously fired on every TFindProof
+   call. *)
+cEngineProof[enc_, maxSteps_, wallSeconds_,
+    cpWeight_, ordering_, autoPrec_, useMnf_,
+    maxCpWeight_, goalInterleave_, groundJoin_,
     selRatio_, autoMaxWeight_, rhsInterreduce_, unfailingCP_,
-    cpSetInterreduce_, connectedness_, precedenceSpec_:None,
-    fifoTiebreak_:0, recordNorm_:1, useLRS_:0, useSOS_:0,
-    useFwdSub_:0, useBwdSub_:0, useBwdDemod_:0] := Block[{
+    cpSetInterreduce_, connectedness_, precedenceSpec_,
+    fifoTiebreak_, recordNorm_, useLRS_, useSOS_,
+    useFwdSub_, useBwdSub_, useBwdDemod_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray
