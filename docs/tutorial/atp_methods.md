@@ -614,6 +614,16 @@ visible at the flag layer -- Vampire's wider portfolio runs many
 critical pair early, which is a different lever than any single-config
 tuning can replicate.
 
+Iter 26 added `Method -> "VampirePortfolio"` as a 10-entry rotation
+that approximates Vampire's portfolio-cycling shape (see §3.6). Iter
+27 ran it at `TimeConstraint -> 60` (~6 s per slice) on
+`Sheffer/AndAssociativity` -- still does not close. Confirms the
+practical reading: cracking these 5 targets at single-machine clock
+times comparable to Vampire's UEQ-portfolio wall budget needs either
+many minutes of cycling (Vampire spends 30 s -- 5 minutes in
+practice) or a deeper search-space restructuring not in the flag /
+schedule layer.
+
 ## 6. Return specs
 
 `TFindProof` takes an optional LAST positional argument selecting what

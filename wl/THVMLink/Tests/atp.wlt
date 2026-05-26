@@ -975,12 +975,24 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* RelLevel: E RelevanceLevelWeight port -- 2-level scoring on top
-       of the conjecture-symbol mask.  Proves baseline. *)
+    (* RelLevel: E RelevanceLevelWeight port -- N-level BFS distance
+       from the conjecture through the axiom co-occurrence graph;
+       per-node weight = 1 + level (cap at MAX+1).  Proves baseline. *)
     Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
         Method -> {"Completion", "CriticalPairWeight" -> "RelLevel"}],
     ProofObject,
     TestID -> "ATP/method/cpweight-RelLevel-proves"
+]
+
+VerificationTest[
+    (* VampirePortfolio: 10-entry rotation modeled on Vampire's UEQ
+       portfolio-cycling shape.  Each entry gets TimeConstraint/10
+       wall time; the first that proves wins.  Baseline target proves
+       inside the first slice (VampireUEQ). *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "VampirePortfolio", TimeConstraint -> 20],
+    ProofObject,
+    TestID -> "ATP/method/VampirePortfolio-baseline"
 ]
 
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
