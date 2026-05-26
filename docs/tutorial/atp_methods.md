@@ -47,12 +47,28 @@ Legacy name: the symbol was originally `TFindEquationalProof`. It is
 kept as a deprecated alias and forwards every call to `TFindProof`, so
 existing notebooks and downstream code keep working unchanged.
 
-## 2. Quick start
+## 2. Loading
 
-Each example is intentionally short; expand the `Method` per section 4
+All ATP-related public symbols (`TFindProof`, `TATP`,
+`TRelevantAxioms`, `TSatEUF`, `TSmtDecide`, `TFindProofSMT`,
+`TPTPImport`, ...) live in `THVMLink\`ATP\``. The single load entry
+brings everything into scope by bare name:
+
+```wolfram
+<< THVMLink`ATP`
+```
+
+(Equivalent to `Get["THVMLink\`ATP\`"]` / `Needs["THVMLink\`ATP\`"]`.)
+All examples below assume this entry has run. The SMT and TPTP-import
+companion entries are documented in `docs/tutorial/smt.md` and
+`docs/tutorial/tptp_import.md` respectively.
+
+## 3. Quick start
+
+Each example is intentionally short; expand the `Method` per section 5
 for the cases where the default leaves a goal open.
 
-### 2.1 A group theorem (default Automatic)
+### 3.1 A group theorem (default Automatic)
 
 ```wolfram
 TFindProof["InverseOfInverse", "AbelianGroupAxioms"]
@@ -64,7 +80,7 @@ the GT critical-pair weight with `AutoPrecedence` so the inverse
 operator ranks above the binary operator -- the inverse-of-inverse
 rewrite then orients cleanly. Proves in a fraction of a second.
 
-### 2.2 A Boolean symmetric theorem (GoalDirected)
+### 3.2 A Boolean symmetric theorem (GoalDirected)
 
 ```wolfram
 TFindProof["DoubleNegation", "BooleanAxioms",
@@ -79,7 +95,7 @@ Default `Automatic` also closes this (the schedule falls through to
 `"GoalDirected"` after the completion configs), just slower; pinning
 `Method -> "GoalDirected"` skips the front-load.
 
-### 2.3 A Sheffer / Wolfram single-operator goal (Waldmeister preset)
+### 3.3 A Sheffer / Wolfram single-operator goal (Waldmeister preset)
 
 ```wolfram
 TFindProof["AndAssociativity", "WolframAxioms",
@@ -97,7 +113,7 @@ problem: KBO + AutoPrecedence + `SelectionRatio -> 51` (Waldmeister's
 interreduction combination is the one that reaches `AndAssociativity`
 through the Waldmeister structure-precedence rule set.
 
-### 2.4 A cross-system many-axiom theorem (SInE premise selection)
+### 3.4 A cross-system many-axiom theorem (SInE premise selection)
 
 ```wolfram
 TFindProof["ImpliesWolframAxioms", "MeredithAxioms",
@@ -114,13 +130,13 @@ mirror Vampire's `--sine_tolerance / --sine_depth /
 --sine_generality_threshold`, the option block that won the parallel
 Vampire benchmark of thvm's then-uncrackable theorems.
 
-## 3. Methods
+## 4. Methods
 
 `Method` selects the saturator's strategy. Every concrete method head
 accepts the same suboption vocabulary (section 4); the head fixes the
 broad search shape, the suboptions tune it.
 
-### 3.1 `Automatic` (the default)
+### 4.1 `Automatic` (the default)
 
 Problem-aware portfolio. `Automatic` analyzes the axioms + conjecture,
 detects the algebraic structure (a port of Waldmeister's PhilMarlow /
@@ -150,7 +166,7 @@ When to use: as the default. Override only when you already know the
 right config (Sheffer / Wolfram single-operator and combinator goals are
 the most common reasons).
 
-### 3.2 `"Portfolio"`
+### 4.2 `"Portfolio"`
 
 The FIXED Waldmeister-style schedule (the prior behaviour, kept reachable
 verbatim):
@@ -168,7 +184,7 @@ verbatim):
 When to use: when you want a strategy schedule but explicitly do NOT want
 the problem-aware front-load.
 
-### 3.3 `"Completion"`
+### 4.3 `"Completion"`
 
 Plain unfailing Knuth-Bendix completion. Default `CriticalPairWeight` is
 the engine's `Gt`; default `Ordering` is `KBO`; no MNF front. The
@@ -179,7 +195,7 @@ many Boolean axiomatizations once the right ordering is picked).
 When to use: when you want a single explicit completion config (rather
 than a portfolio) and the goal is reachable through saturation.
 
-### 3.4 `"GoalDirected"` / `"MNF"`
+### 4.4 `"GoalDirected"` / `"MNF"`
 
 Completion + the MNF bidirectional front search. Both spellings are
 synonyms.
@@ -196,7 +212,7 @@ you have reason to believe the goal IS a consequence of the axioms
 (e.g. it is symmetric). Pay attention to wall budgets; the front search
 re-expands its whole node table every time a rule is added.
 
-### 3.5 `"Waldmeister"`
+### 4.5 `"Waldmeister"`
 
 Faithful Waldmeister DEFAULT strategy preset for an unrecognized
 single-operator (Sheffer / Wolfram nand) problem. Decoded from
@@ -219,7 +235,7 @@ meets at one normal form.
 When to use: Sheffer / Wolfram axiom systems and other single-operator
 problems where Waldmeister's empirical default is well-tuned.
 
-### 3.6 `"VampirePortfolio"`
+### 4.6 `"VampirePortfolio"`
 
 A 10-entry rotation modeled on the portfolio-cycling shape Vampire
 5.0.1 ships for UEQ: many short strategy slices rather than one tuned
@@ -247,7 +263,7 @@ default `Automatic` walls on a hard goal. The cost is that each slice
 gets only ~10% of the wall budget; goals that need a long single
 configuration won't benefit.
 
-### 3.7 `"VampireUEQ"`
+### 4.7 `"VampireUEQ"`
 
 Preset modeled on the Vampire 5.0.1 UEQ-portfolio entry that cracks
 `ShefferAxioms/AndAssociativity` in our parallel baseline:
@@ -288,14 +304,14 @@ override pattern as `"Waldmeister"`.
 When to use: hard Sheffer / nand goals where the `"Waldmeister"` default
 walls; experimentally a complement to the Waldmeister-tuned schedule.
 
-## 4. Suboptions catalog
+## 5. Suboptions catalog
 
 Every entry in the table below is parsed by `atpParseCompletionOpts` /
 the dedicated `atpXxxOpt` helpers and propagated through `cEngineProof`
 to the C engine (`thvm_atp_set_*`), except where noted. Defaults are the
 engine defaults (which `Automatic` may override per detected structure).
 
-### 4.1 `"CriticalPairWeight" -> ...`
+### 5.1 `"CriticalPairWeight" -> ...`
 
 Waldmeister `ClasHeuristics` critical-pair selection weight (which
 pending CP to process next).
@@ -331,7 +347,7 @@ TFindProof[goal, axioms,
     Method -> {"Completion", "CriticalPairWeight" -> "Mix2"}]
 ```
 
-### 4.2 `"Ordering" -> "KBO" | "LPO"`
+### 5.2 `"Ordering" -> "KBO" | "LPO"`
 
 Reduction ordering used to orient equations. KBO (Knuth-Bendix Ordering)
 is the default and the natural choice for most algebraic structures
@@ -342,7 +358,7 @@ reductions) that KBO cannot orient.
 Default: `"KBO"`. When to set: LPO for combinator logic; combine with
 `"AutoPrecedence" -> True` for any LPO run.
 
-### 4.3 `"AutoPrecedence" -> True | False`
+### 5.3 `"AutoPrecedence" -> True | False`
 
 Use Waldmeister's structure-driven precedence (the PhilMarlow port). For
 groups this puts the inverse on top; for rings the distributor `*` above
@@ -351,7 +367,7 @@ groups this puts the inverse on top; for rings the distributor `*` above
 Default: `False`. When to set: any time you select LPO; for KBO on
 groups / rings / lattices to orient unary inverses cleanly.
 
-### 4.4 `"AxiomRelevance" -> ...`
+### 5.4 `"AxiomRelevance" -> ...`
 
 The axiom-relevance filter, configurable via Method suboption (back-compat
 alias: `"DropDivergentAxioms"`):
@@ -375,7 +391,7 @@ Default: `"Safe"`. When to set `"SInE"`: many-axiom cross-system goals
 (the canonical case is `Implies*Axioms` against a multi-system axiom
 table).
 
-### 4.5 `"MaxWeight" -> n`
+### 5.5 `"MaxWeight" -> n`
 
 Drop critical pairs whose combined term weight exceeds `n` symbols.
 `0` / `Automatic` = unbounded.
@@ -384,7 +400,7 @@ Default: 0 (unbounded). When to set: a very large CP queue that wastes
 time on giant pairs; pair with `"GoalInterleave"` so the goal-directed
 selections still fire.
 
-### 4.6 `"GoalInterleave" -> n`
+### 5.6 `"GoalInterleave" -> n`
 
 Every n-th CP selection is a goal-directed (`CPinGoal`) pick; the rest
 use the chosen weight. `0` / `Automatic` = off.
@@ -392,7 +408,7 @@ use the chosen weight. `0` / `Automatic` = off.
 Default: 0 (off). `Automatic` for groups / lattices / monoids uses
 `GoalInterleave 50` per Waldmeister's `itl(mi)`.
 
-### 4.7 `"GroundJoin" -> True`
+### 5.7 `"GroundJoin" -> True`
 
 Delete ground-joinable critical pairs (every ground instance of the CP
 joins, so it is a redundancy). Sound (Martin-Nipkow / Twee criterion).
@@ -400,7 +416,7 @@ joins, so it is a redundancy). Sound (Martin-Nipkow / Twee criterion).
 Default: `False`. When to set: lattice / Boolean axiomatizations where
 the CP queue is dominated by ground-joinable redundancies.
 
-### 4.8 `"Connectedness" -> True`
+### 5.8 `"Connectedness" -> True`
 
 Bachmair-Dershowitz connectedness CP deletion (Twee section 6.2). Drop
 a critical pair whose two sides join through intermediate terms strictly
@@ -410,7 +426,7 @@ criterion stronger than trivial joinability.
 Default: `False`. When to set: alongside `"GroundJoin"` for axiom sets
 with many redundant CPs at the same generation depth.
 
-### 4.9 `"SelectionRatio" -> n`
+### 5.9 `"SelectionRatio" -> n`
 
 Waldmeister CPdimension fairness: 1 FIFO (oldest-CP) pick per `n` CP
 selections, the rest by weight. The fairness lever against
@@ -419,7 +435,7 @@ smallest-weight starvation.
 Default: 0 (engine default 11). Waldmeister also uses 50 / 100 / 200;
 the `"Waldmeister"` preset sets 51.
 
-### 4.10 `"AutoMaxWeight" -> b`
+### 5.10 `"AutoMaxWeight" -> b`
 
 A growing CP-weight bound (`b + 2 * deepest-rule-weight`) that defers
 over-weight critical pairs to a stash and force-drains them when the
@@ -430,7 +446,7 @@ permanently dropped).
 Default: 0 (off). When to set: `Automatic` for Sheffer uses `20`; try
 `10`-`30` on a goal whose CP queue blows up.
 
-### 4.11 `"RHSInterreduce" -> True`
+### 5.11 `"RHSInterreduce" -> True`
 
 Waldmeister `IR_InterreduktionRechts`: after a rule is oriented,
 normalize the RHS of every other rule against it, re-queuing any rule
@@ -439,7 +455,7 @@ whose RHS shrinks. Keeps `R` fully reduced so the CP set stays small.
 Default: `False`. `Automatic` for `"Waldmeister"` turns it on. When to
 set: deep theorem proofs where the rule set otherwise diverges.
 
-### 4.12 `"UnfailingCP" -> True`
+### 5.12 `"UnfailingCP" -> True`
 
 Superpose BOTH faces of every unorientable equation (the unfailing
 completion completeness requirement). With the default the engine
@@ -449,7 +465,7 @@ Default: `False`. The `"Waldmeister"` preset turns it on. When to set:
 any goal whose proof requires reasoning through an unorientable equation
 (commutativity-driven Boolean goals).
 
-### 4.13 `"CPSetInterreduce" -> True`
+### 5.13 `"CPSetInterreduce" -> True`
 
 Waldmeister `KPV_KPMengeInterreduzieren`: periodically re-normalize the
 whole CP queue against the full rule set, deleting CPs that became
@@ -459,7 +475,7 @@ live, irreducible CPs.
 Default: `False`. The `"Waldmeister"` preset turns it on; the Sheffer
 `"AndAssociativity"` proof needs it.
 
-### 4.14 `"Precedence" -> {sym1, sym2, ...}`
+### 5.14 `"Precedence" -> {sym1, sym2, ...}`
 
 Explicit reduction-ordering precedence (symbol names highest-to-lowest),
 mirroring Waldmeister's `p > q > nand` ORDERING block. Resolved against
@@ -469,7 +485,7 @@ Default: `Automatic` (the chosen identity or `AutoPrecedence`). When to
 set: when you know the right precedence from the algebra (e.g. Sheffer
 goal-skolem-constants above the binary operator).
 
-### 4.15 `"SkolemHighest" -> True`
+### 5.15 `"SkolemHighest" -> True`
 
 Rank the goal's ground / skolemized constants above every operator (the
 structural rule Waldmeister's `p > q > nand` precedence encodes). Takes
@@ -479,7 +495,7 @@ otherwise.
 Default: `Automatic` (off). When to set: any single-operator Sheffer /
 Wolfram goal where the conjecture's skolem constants should orient.
 
-### 4.16 `"FifoTiebreak" -> True`
+### 5.16 `"FifoTiebreak" -> True`
 
 Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving
 critical pair's insertion age across the post-orient CP-normalize sweep,
@@ -489,7 +505,7 @@ engine byte-identical when unset.
 Default: `False`. When to set: a run where the weight distribution has
 many ties and the order of FIFO-tied CPs measurably matters.
 
-### 4.17 `"RecordNorm" -> True | False`
+### 5.17 `"RecordNorm" -> True | False`
 
 Per-step normalize-trace recording for the ProofObject builder. Default
 `True` is the historical path -- WL walks `CP -> NORM_STEP* -> ORIENT`
@@ -502,7 +518,7 @@ Default: `True`. When to set `False`: long-running completions where the
 per-step recording overhead dominates and you can pay the BFS
 reconstruction cost.
 
-### 4.18 `"ForwardSubsume" -> True`
+### 5.18 `"ForwardSubsume" -> True`
 
 When adding a new rule `l' = r'` to R, scan existing rules; if some
 existing rule `l = r` subsumes the new one (`\E sigma`, `l*sigma = l'`
@@ -516,7 +532,7 @@ equation is a unit clause).
 Default: `False`. Pair with `"BackwardSubsume" -> True` for the full
 subsumption pruning that classical saturation provers run by default.
 
-### 4.19 `"BackwardSubsume" -> True`
+### 5.19 `"BackwardSubsume" -> True`
 
 After adding a new rule `l = r` to R, scan existing rules; for each
 existing rule that the new one subsumes, soft-delete it. The
@@ -531,7 +547,7 @@ argument as `"ForwardSubsume"`. Vampire's `bs=unit_only` direct port.
 
 Default: `False`. The `"VampireUEQ"` preset turns it on.
 
-### 4.20 `"BackwardDemod" -> True`
+### 5.20 `"BackwardDemod" -> True`
 
 After each newly-added rule batch, normalize each older rule's LHS
 against the new rule(s); if it reduces, drop the rule and re-queue the
@@ -547,7 +563,7 @@ equation. The new rule itself stays in R.
 Default: `False`. The `"VampireUEQ"` preset turns it on alongside
 `"RHSInterreduce" -> True`.
 
-### 4.21 `"SymbolWeights" -> {sym -> w, ...}`
+### 5.21 `"SymbolWeights" -> {sym -> w, ...}`
 
 Per-symbol KBO weight overrides. Default per-symbol weight is `1` (with
 variable weight `1` too). An association or list of rules
@@ -563,7 +579,7 @@ preferentially orient away from it.
 
 Default: identity (uniform 1, engine byte-identical).
 
-## 5. Per-class recommendations
+## 6. Per-class recommendations
 
 Empirical patterns from the recent benchmark sweep + parallel Vampire
 study. These are the defaults `Automatic` already front-loads; the same
@@ -580,7 +596,7 @@ table is useful when you pin `Method` explicitly.
 | AC (commutative+associative, no inverse) | `{"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}` | Waldmeister `GtS` family. |
 | Lattice | `{"Completion", "CriticalPairWeight" -> "Gt", "GroundJoin" -> True, "GoalInterleave" -> 50}` then LPO fallback | Waldmeister `Verband` row uses `gj()` + an LPO pass. |
 
-### 5.1 Currently out of reach
+### 6.1 Currently out of reach
 
 These 5 unit-equality goals are known to be cracked by Vampire 5.0.1 (UEQ
 portfolio) within 30 s in our parallel baseline, but neither the
@@ -640,7 +656,7 @@ many minutes of cycling (Vampire spends 30 s -- 5 minutes in
 practice) or a deeper search-space restructuring not in the flag /
 schedule layer.
 
-## 6. Return specs
+## 7. Return specs
 
 `TFindProof` takes an optional LAST positional argument selecting what
 to return. A single String returns that one value bare; a list of
@@ -683,9 +699,9 @@ TFindProof[AxiomaticTheory["AbelianGroupAxioms"],
 Bound completion with `TimeConstraint` / `TimeConstraint`, since a
 non-terminating axiom set never saturates.
 
-## 7. Debugging and introspection
+## 8. Debugging and introspection
 
-### 7.1 Statistics
+### 9.1 Statistics
 
 ```wolfram
 TFindProof[goal, axioms, "Statistics"]
@@ -697,7 +713,7 @@ Fast first sanity check: a "Proved" with `Steps` in the hundreds and
 `QueueSize` near 0 is a clean saturation; a "TimedOut" with `QueueSize`
 in the millions is CP explosion.
 
-### 7.2 `"PreprocessedAxioms"`
+### 9.2 `"PreprocessedAxioms"`
 
 ```wolfram
 TFindProof[goal, axioms, "PreprocessedAxioms"]
@@ -707,7 +723,7 @@ Returns the axioms after `ForAll -> Pattern` quantifier elimination,
 `Exists -> Skolem`, and canonical pattern-variable naming. The exact
 shape the C engine encodes.
 
-### 7.3 `"RelevantAxioms"` and `TRelevantAxioms`
+### 9.3 `"RelevantAxioms"` and `TRelevantAxioms`
 
 ```wolfram
 TRelevantAxioms["InverseOfInverse", "AbelianGroupAxioms",
@@ -719,7 +735,7 @@ The Mode tag identifies the filter (`None`, `"Safe"`, `"Connected"`,
 `"SInE"`); each entry of `Dropped` carries the witnessing axiom and the
 symbols that triggered the drop reason.
 
-### 7.4 Environment variables
+### 9.4 Environment variables
 
 | Env var | Effect |
 |---------|--------|
@@ -729,7 +745,7 @@ symbols that triggered the drop reason.
 
 All env vars are read once per process at first call.
 
-### 7.5 Tracing a specific Method config
+### 9.5 Tracing a specific Method config
 
 The `RawTrace` return spec is the raw decoded C-engine trace -- one
 record per CP / ORIENT / SIMPLIFY event:
@@ -742,7 +758,7 @@ TFindProof[goal, axioms, "RawTrace", TimeConstraint -> 5]
 Pair with `"Lemmas"` to read the final rule set, or with `"Statistics"`
 to see how much of the trace cap was used.
 
-### 7.6 Catching a wedge
+### 9.6 Catching a wedge
 
 A goal that hangs longer than expected almost always either explodes the
 CP queue (visible via `"Statistics"["QueueSize"]` on a `TimeConstraint`
@@ -752,12 +768,12 @@ explodes, the first lever to pull is `"AutoMaxWeight" -> 20` (defers
 over-weight CPs); if that does not help, switch the weight (`Mix2 ->
 Mix -> Gt`) and bound `MaxWeight` directly.
 
-## 8. Recipes
+## 9. Recipes
 
 Combinations of the suboptions in §4 that pair well, organized by what
 you're trying to attack.
 
-### 8.1 Throw everything at it
+### 9.1 Throw everything at it
 
 ```wolfram
 TFindProof[goal, axioms, Method -> "VampirePortfolio",
@@ -768,7 +784,7 @@ TFindProof[goal, axioms, Method -> "VampirePortfolio",
 10` wall time. Best when you don't know what shape the goal has and
 want to spend a fixed budget exploring.
 
-### 8.2 Maximum CP-queue pruning
+### 9.2 Maximum CP-queue pruning
 
 ```wolfram
 TFindProof[goal, axioms, Method -> {"Completion",
@@ -782,7 +798,7 @@ run. Tightest CP queue at the cost of more per-step interreduction
 work. Good when the CP-explosion pathway is the suspected wedge (see
 §7.6) and you have a long wall budget to amortize the bookkeeping.
 
-### 8.3 Goal-relevance bias
+### 9.3 Goal-relevance bias
 
 ```wolfram
 TFindProof[goal, axioms, Method -> {"Completion",
@@ -796,7 +812,7 @@ CP weight scales with BFS distance from the conjecture symbol set
 `Implies*Axioms` against a foreign axiom system) where the bulk of
 the search wanders far from the conjecture.
 
-### 8.4 Cheap relevance bias (no SInE filter)
+### 9.4 Cheap relevance bias (no SInE filter)
 
 ```wolfram
 TFindProof[goal, axioms, Method -> {"Completion",
@@ -808,7 +824,7 @@ A poor man's `"RelLevel"`: just the symbol-set bias, no axiom pruning.
 sufficient when the conjecture's symbol set already covers most of the
 relevant axioms.
 
-### 8.5 Sheffer / Wolfram nand single-operator
+### 9.5 Sheffer / Wolfram nand single-operator
 
 ```wolfram
 TFindProof[goal, axioms, Method -> {"Waldmeister",
@@ -820,7 +836,7 @@ Best baseline for deep single-operator saturations. The `"Sheffer"`
 class in §5 lists more specialized variants that `Automatic`
 front-loads on this shape.
 
-### 8.6 Variable-duplicating combinator (S, W, M)
+### 9.6 Variable-duplicating combinator (S, W, M)
 
 ```wolfram
 TFindProof[goal, axioms, Method -> {"Completion",
