@@ -732,3 +732,83 @@ in the same way; `Method -> "Completion"` skips MNF). When the queue
 explodes, the first lever to pull is `"AutoMaxWeight" -> 20` (defers
 over-weight CPs); if that does not help, switch the weight (`Mix2 ->
 Mix -> Gt`) and bound `MaxWeight` directly.
+
+## 8. Recipes
+
+Combinations of the suboptions in §4 that pair well, organized by what
+you're trying to attack.
+
+### 8.1 Throw everything at it
+
+```wolfram
+TFindProof[goal, axioms, Method -> "VampirePortfolio",
+    TimeConstraint -> 60]
+```
+
+10-entry portfolio rotation (§3.6). Each slice gets `TimeConstraint /
+10` wall time. Best when you don't know what shape the goal has and
+want to spend a fixed budget exploring.
+
+### 8.2 Maximum CP-queue pruning
+
+```wolfram
+TFindProof[goal, axioms, Method -> {"Completion",
+    "BackwardSubsume" -> True, "BackwardDemod" -> True,
+    "RHSInterreduce" -> True, "GroundJoin" -> True,
+    "Connectedness" -> True, "AutoMaxWeight" -> 20}]
+```
+
+Every sound redundancy criterion the engine has, on a single completion
+run. Tightest CP queue at the cost of more per-step interreduction
+work. Good when the CP-explosion pathway is the suspected wedge (see
+§7.6) and you have a long wall budget to amortize the bookkeeping.
+
+### 8.3 Goal-relevance bias
+
+```wolfram
+TFindProof[goal, axioms, Method -> {"Completion",
+    "CriticalPairWeight" -> "RelLevel",
+    "AxiomRelevance" -> "SInE"}]
+```
+
+CP weight scales with BFS distance from the conjecture symbol set
+(§4.1 `"RelLevel"`); SInE prunes axioms unreachable from the goal
+(§4.4). Good for cross-system many-axiom theorems (e.g.
+`Implies*Axioms` against a foreign axiom system) where the bulk of
+the search wanders far from the conjecture.
+
+### 8.4 Cheap relevance bias (no SInE filter)
+
+```wolfram
+TFindProof[goal, axioms, Method -> {"Completion",
+    "CriticalPairWeight" -> "ConjSym"}]
+```
+
+A poor man's `"RelLevel"`: just the symbol-set bias, no axiom pruning.
+1-level vs. N-level (§4.1 `"ConjSym"` vs. `"RelLevel"`). Cheap, and
+sufficient when the conjecture's symbol set already covers most of the
+relevant axioms.
+
+### 8.5 Sheffer / Wolfram nand single-operator
+
+```wolfram
+TFindProof[goal, axioms, Method -> {"Waldmeister",
+    "CriticalPairWeight" -> "Gt", "CPSetInterreduce" -> True}]
+```
+
+The faithful Waldmeister default (§3.5) plus CP-set interreduction.
+Best baseline for deep single-operator saturations. The `"Sheffer"`
+class in §5 lists more specialized variants that `Automatic`
+front-loads on this shape.
+
+### 8.6 Variable-duplicating combinator (S, W, M)
+
+```wolfram
+TFindProof[goal, axioms, Method -> {"Completion",
+    "Ordering" -> "LPO", "AutoPrecedence" -> True,
+    "CriticalPairWeight" -> "Add"}]
+```
+
+KBO cannot orient variable-duplicating rules; LPO + the auto-precedence
+puts the relevant heads on top. Bare `"Add"` CP weight matches
+Waldmeister's `KombS` heuristic for combinator logic.
