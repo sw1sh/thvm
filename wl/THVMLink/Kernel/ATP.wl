@@ -2027,13 +2027,15 @@ $AtpCpWeightCodes = <|
                          (E's fdiff1=1, fdiff2=0, vdiff1=1, vdiff2=0). *)
     "RelLevel" -> 12,  (* E RelevanceLevelWeight (HEURISTICS/
                          che_funweights.c::RelevanceLevelWeightInit +
-                         init_relevance_vector).  Two-level scoring:
-                         a CTR node's weight is 1 if its head appears
-                         in the conjecture, 2 if it appears in an axiom
-                         that itself shares a symbol with the
-                         conjecture, 4 otherwise.  Variable nodes
-                         weight 1.  A deeper goal-relevance bias than
-                         ConjSym (which is the 1-level analog). *)
+                         init_relevance_vector).  N-level scoring:
+                         each CTR symbol gets its BFS distance from the
+                         conjecture through the "co-occurs-in-an-axiom"
+                         relation, capped at ATP_REL_LEVEL_MAX = 8.  A
+                         node's weight is 1 + sym_level[label]; remote
+                         symbols (unreachable) collapse to level MAX+1.
+                         Variable nodes weight 1.  Deeper goal-
+                         relevance bias than ConjSym (the 1-level
+                         analog). *)
     Automatic -> -1
 |>;
 

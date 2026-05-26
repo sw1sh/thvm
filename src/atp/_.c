@@ -4220,23 +4220,39 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   s->conj_sym_mask = 0;
   atp_collect_symbols(lhs, &s->conj_sym_mask);
   atp_collect_symbols(rhs, &s->conj_sym_mask);
-  // Recompute the level-1 relevance mask for ATP_CP_WEIGHT_RELLEVEL.
-  // An axiom (lhs[i], rhs[i]) is "conjecture-touching" if it has any
-  // CTR label in conj_sym_mask.  The level-1 mask is the union of
-  // every conjecture-touching axiom's symbols MINUS the conjecture
-  // symbols (which are already level 0).  Skips dead rules (BS soft
-  // delete).
+  // Recompute the level-1 relevance mask for back-compat (legacy
+  // CONJSYM consumers).  Now also recompute the per-symbol BFS level
+  // array sym_level[] for ATP_CP_WEIGHT_RELLEVEL.  Skips dead rules.
   s->rel_lvl1_mask = 0;
-  for (u32 i = 0; i < s->n_rules; i++) {
-    if (s->r_dead[i]) continue;
-    u64 rule_syms = 0;
-    atp_collect_symbols(s->lhs[i], &rule_syms);
-    atp_collect_symbols(s->rhs[i], &rule_syms);
-    if (rule_syms & s->conj_sym_mask) {
-      s->rel_lvl1_mask |= rule_syms;
-    }
+  for (u32 i = 0; i < WALD_MAX_SYMBOLS; i++) s->sym_level[i] = ATP_REL_LEVEL_REMOTE;
+  for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++) {
+    if (s->conj_sym_mask & ((u64)1 << lab)) s->sym_level[lab] = 0u;
   }
-  s->rel_lvl1_mask &= ~s->conj_sym_mask;
+  // BFS through the symbol/axiom graph: an axiom links every pair of
+  // its symbols.  Mark a symbol at level k+1 if it co-occurs in some
+  // axiom with any level-k symbol and is not yet marked at <=k.
+  u64 frontier = s->conj_sym_mask;
+  for (u8 level = 0; level < (u8)ATP_REL_LEVEL_MAX && frontier; level++) {
+    u64 next_frontier = 0;
+    for (u32 i = 0; i < s->n_rules; i++) {
+      if (s->r_dead[i]) continue;
+      u64 rule_syms = 0;
+      atp_collect_symbols(s->lhs[i], &rule_syms);
+      atp_collect_symbols(s->rhs[i], &rule_syms);
+      if (rule_syms & frontier) {
+        // Find labels in this axiom not yet marked.
+        for (u32 lab = 0; lab < WALD_MAX_SYMBOLS; lab++) {
+          if ((rule_syms & ((u64)1 << lab)) &&
+              s->sym_level[lab] == ATP_REL_LEVEL_REMOTE) {
+            s->sym_level[lab] = level + 1u;
+            next_frontier |= ((u64)1 << lab);
+            if (level == 0u) s->rel_lvl1_mask |= ((u64)1 << lab);
+          }
+        }
+      }
+    }
+    frontier = next_frontier;
+  }
   return 1;
 }
 
@@ -4914,14 +4930,15 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       return 4u * large + 1u * small + 2u * d;
     }
     case ATP_CP_WEIGHT_RELLEVEL: {
-      // E RelevanceLevelWeight (HEURISTICS/che_funweights.c:610).
-      // Two-level port: nodes at relevance level 0 (in conjecture)
-      // weight 1; level 1 (in a conjecture-touching axiom) weight 2;
-      // level 2 (remote) weight 4.  Variable nodes weight 1.  Sum
-      // over both sides of the CP.  Level masks are precomputed at
-      // thvm_atp_set_goal time so this walk is O(|CP|).
-      u64 m0 = s->conj_sym_mask;
-      u64 m1 = s->rel_lvl1_mask;
+      // E RelevanceLevelWeight (HEURISTICS/che_funweights.c:610) +
+      // init_relevance_vector.  N-level port: per-symbol BFS distance
+      // from the conjecture through the axiom co-occurrence graph,
+      // capped at ATP_REL_LEVEL_MAX = 8.  Per-CTR-node weight is
+      //   1 + sym_level[label]   (cap at REMOTE penalty = MAX + 2)
+      // so level 0 contributes 1, level 1 contributes 2, ..., remote
+      // (255) contributes ATP_REL_LEVEL_MAX + 2 = 10.  Variable
+      // nodes weight 1.  Sum over both sides.  Level array is
+      // precomputed at thvm_atp_set_goal time so this walk is O(|CP|).
       Term stack[256];
       u32 sp = 0;
       if (sp < 256) stack[sp++] = lhs;
@@ -4931,13 +4948,14 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
         Term cur = stack[--sp];
         if (term_tag(cur) == TAG_CTR) {
           u32 lab = term_ext(cur);
-          if (lab < 64u && (m0 & ((u64)1 << lab))) {
-            total += 1u;            // level 0 (conjecture symbol)
-          } else if (lab < 64u && (m1 & ((u64)1 << lab))) {
-            total += 2u;            // level 1 (conj-touching axiom)
+          u32 level;
+          if (lab < WALD_MAX_SYMBOLS &&
+              s->sym_level[lab] != ATP_REL_LEVEL_REMOTE) {
+            level = s->sym_level[lab];
           } else {
-            total += 4u;            // level 2 (remote)
+            level = ATP_REL_LEVEL_MAX + 1u;  // remote penalty
           }
+          total += 1u + level;
           u32 n = term_ctr_n(cur);
           for (u32 i = 0; i < n && sp < 256; i++) {
             stack[sp++] = term_ctr_at(cur, i);

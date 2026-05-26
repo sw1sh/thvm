@@ -3341,6 +3341,16 @@ typedef struct {
   // ATP_CP_WEIGHT_RELLEVEL weight mode.  Recomputed by
   // thvm_atp_set_goal alongside conj_sym_mask.
   u64 rel_lvl1_mask;
+  // Per-symbol relevance LEVEL: 0 = appears in conjecture; k = appears
+  // first at BFS depth k from the conjecture through the
+  // "co-occurs-in-an-axiom" relation; 255 (ATP_REL_LEVEL_REMOTE) =
+  // does not appear in any conjecture-reachable axiom.  Recomputed by
+  // thvm_atp_set_goal.  Used by ATP_CP_WEIGHT_RELLEVEL whose per-node
+  // weight is 1 + level (capped).  Caps at ATP_REL_LEVEL_MAX = 8 so
+  // levels >8 collapse to the maximum penalty.  Array sized to
+  // WALD_MAX_SYMBOLS == 64 (inlined; the macro is defined later in
+  // this header so use the literal here for the AtpState declaration).
+  u8 sym_level[64];
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of
@@ -4135,6 +4145,8 @@ fn u32       thvm_atp_cp_dataset_append(const AtpState *s,
 // parsed signature + variable table + equations + single
 // conclusion goal; downstream feeds it to thvm_atp_run.
 #define WALD_MAX_SYMBOLS 64
+#define ATP_REL_LEVEL_MAX 8u
+#define ATP_REL_LEVEL_REMOTE 255u
 #define WALD_MAX_VARS    32
 #define WALD_MAX_EQNS    64
 #define WALD_NAME_LEN    32
