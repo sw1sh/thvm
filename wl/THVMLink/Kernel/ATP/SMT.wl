@@ -66,6 +66,17 @@ TFindProofSMT::nonground =
 TFindProofSMT::noconjecture =
     "TFindProofSMT requires a conjecture in the input; got axioms only.";
 
+TSmtDecide::usage =
+    "TSmtDecide[formula] decides a quantifier-free Boolean " <>
+    "combination of equality atoms (Equal[_,_] / Unequal[_,_]) " <>
+    "via lazy DPLL(T) -- Tseitin-free atom-abstraction + a " <>
+    "Wolfram SatisfiabilityInstances propositional kernel + " <>
+    "congruence closure as the theory solver.  Returns an " <>
+    "Association with \"Status\" -> \"SAT\" | \"UNSAT\", and on " <>
+    "SAT a \"Model\" -> {atom -> True | False, ...} satisfying " <>
+    "assignment certified by congruence closure.  Boolean " <>
+    "combinators handled: And, Or, Not, Implies, Equivalent, Xor.";
+
 TSatEUF::badin =
     "TSatEUF inputs must be lists of equalities (HoldPattern[Equal[_,_]]) " <>
     "and disequalities (HoldPattern[Unequal[_,_]]); got `1` / `2`.";
@@ -145,7 +156,7 @@ ccUnion[a_, b_] := Block[{ra = ccFind[a], rb = ccFind[b]},
     ]
 ]
 
-congruencePropagate[rep_] := Block[{parents = $use[rep], i, j, n, u, v},
+congruencePropagate[rep_] := Block[{parents = $use[rep], n, u, v},
     n = Length[parents];
     Do[
         u = parents[[i]];
@@ -260,6 +271,87 @@ tptpDispatchSMT[imported_Association] := Block[
 
 groundQ[expr_] := FreeQ[expr, _Pattern | _Blank | _BlankSequence |
     _BlankNullSequence]
+
+(* ----- DPLL(T) shell -----
+   Lazy SMT: replace each equality/disequality atom with a fresh
+   propositional variable, hand the Boolean abstraction to
+   SatisfiabilityInstances, then T-check each model via congruence
+   closure.  On T-conflict, add the negation of the model as a
+   blocking clause and re-query.  On the first T-consistent model,
+   return SAT; if SatisfiabilityInstances ever returns {}, UNSAT.
+
+   The blocking-clause loop is finite because each iteration rules
+   out one truth assignment and there are 2^|atoms| assignments
+   total. *)
+
+TSmtDecide[formula_] := Block[
+    {atoms, propVars, abstraction, blocking = True, instance,
+     model, theoryRes, eqs, diseqs},
+    atoms = collectAtoms[formula];
+    If[ atoms === {},
+        Return @ <|"Status" -> If[TrueQ[formula], "SAT", "UNSAT"],
+                   "Model" -> <||>|>
+    ];
+    propVars = Table[Unique["smt$p"], {Length[atoms]}];
+    abstraction = formula /. Thread[atoms -> propVars];
+    While[ True,
+        instance = Quiet @ SatisfiabilityInstances[
+            And[abstraction, blocking], propVars, 1];
+        If[ instance === {} || Head[instance] =!= List,
+            Return @ <|"Status" -> "UNSAT"|>
+        ];
+        model = AssociationThread[atoms, First @ instance];
+        {eqs, diseqs} = modelToLiterals[model];
+        theoryRes = TSatEUF[eqs, diseqs];
+        If[ theoryRes["Status"] === "SAT",
+            Return @ <|"Status" -> "SAT", "Model" -> model|>
+        ];
+        (* T-conflict: forbid this exact propositional assignment. *)
+        blocking = And[blocking, Not[
+            And @@ MapThread[
+                If[#2, #1, Not[#1]] &,
+                {propVars, First @ instance}
+            ]
+        ]];
+    ]
+]
+
+collectAtoms[formula_] := Sort @ DeleteDuplicates @ Cases[
+    formula, (_Equal | _Unequal), {0, Infinity}, Heads -> False]
+
+modelToLiterals[model_Association] := Block[{e = {}, d = {}},
+    KeyValueMap[
+        Function[{atom, val},
+            Which[
+                MatchQ[atom, _Equal] && val,    AppendTo[e, atom],
+                MatchQ[atom, _Equal] && ! val,  AppendTo[d, Unequal @@ atom],
+                MatchQ[atom, _Unequal] && val,  AppendTo[d, atom],
+                MatchQ[atom, _Unequal] && ! val,
+                    AppendTo[e, Equal @@ atom]
+            ]
+        ],
+        model
+    ];
+    {e, d}
+]
+
+(* TFindProofSMT overload taking a Boolean-combination goal.  An
+   entailment hyps |= phi is UNSAT of hyps /\ ~phi -- ask
+   TSmtDecide on that. *)
+
+TFindProofSMT[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File],
+        hypotheses_List : {}] :=
+    Block[{res = TSmtDecide[And @@ Append[hypotheses, Not[goal]]]},
+        If[ res["Status"] === "UNSAT",
+            <|
+                "Status"     -> "Proved",
+                "Method"     -> "DPLL(T)+CongruenceClosure",
+                "Goal"       -> goal,
+                "Hypotheses" -> hypotheses
+            |>,
+            $Failed
+        ]
+    ]
 
 End[];
 EndPackage[];

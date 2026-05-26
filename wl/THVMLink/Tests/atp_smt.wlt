@@ -130,3 +130,64 @@ VerificationTest[
     {THVMLink`SMT`TFindProofSMT::nonground},
     TestID -> "ATP/smt/tptp-nonground-rejected"
 ]
+
+(* ----- DPLL(T) shell over Boolean combinations of equality atoms ----- *)
+
+VerificationTest[
+    THVMLink`SMT`TSmtDecide[a == b]["Status"],
+    "SAT",
+    TestID -> "ATP/smt/dpllt-atom-sat"
+]
+
+VerificationTest[
+    (* Direct propositional contradiction caught by the SAT kernel. *)
+    THVMLink`SMT`TSmtDecide[a == b && a != b]["Status"],
+    "UNSAT",
+    TestID -> "ATP/smt/dpllt-direct-contradiction"
+]
+
+VerificationTest[
+    (* Theory contradiction caught after SAT yields a model. *)
+    THVMLink`SMT`TSmtDecide[a == b && b == c && a != c]["Status"],
+    "UNSAT",
+    TestID -> "ATP/smt/dpllt-theory-transitivity"
+]
+
+VerificationTest[
+    (* Disjunction with one feasible branch -> SAT. *)
+    THVMLink`SMT`TSmtDecide[(a == b || c == d) && c == e]["Status"],
+    "SAT",
+    TestID -> "ATP/smt/dpllt-disjunction-feasible"
+]
+
+VerificationTest[
+    (* Both disjuncts blocked by theory -> UNSAT only after blocking. *)
+    THVMLink`SMT`TSmtDecide[
+        (a == b || b == c) && a != b && b != c]["Status"],
+    "UNSAT",
+    TestID -> "ATP/smt/dpllt-or-both-blocked"
+]
+
+VerificationTest[
+    (* Congruence inside a disjunction: T-solver must propagate
+       through the (a==b && c==d) branch and discover f[a,c]=f[b,d]. *)
+    THVMLink`SMT`TSmtDecide[
+        ((a == b && c == d) || x == y) && f[a, c] != f[b, d] && x != y
+    ]["Status"],
+    "UNSAT",
+    TestID -> "ATP/smt/dpllt-congruence-under-disjunction"
+]
+
+VerificationTest[
+    THVMLink`SMT`TFindProofSMT[
+        Implies[a == b && b == c, a == c]]["Status"],
+    "Proved",
+    TestID -> "ATP/smt/dpllt-findproof-implication"
+]
+
+VerificationTest[
+    (* Equivalent[a==b, b==a] is a tautology: SAT. *)
+    THVMLink`SMT`TSmtDecide[Equivalent[a == b, b == a]]["Status"],
+    "SAT",
+    TestID -> "ATP/smt/dpllt-equivalent-symmetry"
+]
