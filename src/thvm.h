@@ -3615,6 +3615,19 @@ typedef struct {
                                   // -- 8 * 32 = 256 distinct labels indexable;
                                   // cap with mod for larger.
 
+  // Forward subsumption pruning (analog of Vampire's --forward_subsumption
+  // flag, restricted to unit equations -- which all our equations are).
+  // When adding a rule l'=r' to R, atp_push_rule scans existing rules
+  // and drops the add if any existing rule l=r subsumes the new one:
+  // \E sigma s.t. l*sigma = l' AND r*sigma = r' (or the cross-orientation
+  // l*sigma = r' AND r*sigma = l').  Sound + completeness-preserving:
+  // the new rule is logically implied by the existing one, so dropping
+  // it adds zero deductive power.
+  // Default OFF (engine byte-identical).  Wired to Method
+  // "ForwardSubsume" -> True via thvm_atp_set_use_fwd_subsume.
+  u8   use_fwd_subsume;
+  u64  n_rules_fwd_subsumed;      // diagnostic counter
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode
@@ -3749,6 +3762,7 @@ fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
 // in budget); 0 = off (default) -> engine byte-identical.
 fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 
 // Proof-trace capacity (entries).  Defaults to ATP_MAX_TRACE; overridable
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset

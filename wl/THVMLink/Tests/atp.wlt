@@ -909,6 +909,17 @@ VerificationTest[
     TestID -> "ATP/method/cpweight-Twee-proves"
 ]
 
+VerificationTest[
+    (* ForwardSubsume -> True: Vampire --forward_subsumption analog
+       (unit-only).  Skip a rule add when an already-stored rule
+       generalizes it.  Sound + completeness-preserving.  Baseline
+       theorem still proves. *)
+    Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> {"Completion", "ForwardSubsume" -> True}],
+    ProofObject,
+    TestID -> "ATP/method/forward-subsume-proves"
+]
+
 (* --- Ordering: KBO and LPO both prove AND verify ------------------- *)
 
 VerificationTest[

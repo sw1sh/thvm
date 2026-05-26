@@ -552,6 +552,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // thvm_atp_set_use_sos which reads s->goal_lhs/rhs, so we re-call
   // it after the goal is set.)
   mint use_sos = MArgument_getInteger(args[21]);
+  // Method -> {... "ForwardSubsume" -> True}: drop the rule add when
+  // an already-stored rule subsumes it (Vampire --forward_subsumption
+  // analog, unit-only).  Sound + completeness-preserving.  args[22].
+  // 0 = off (engine byte-identical).
+  mint use_fwd_sub = MArgument_getInteger(args[22]);
+  thvm_atp_set_use_fwd_subsume(atp, (u8)(use_fwd_sub != 0));
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];

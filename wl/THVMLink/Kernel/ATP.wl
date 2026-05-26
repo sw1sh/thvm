@@ -99,7 +99,7 @@ $atpRunProofFn := $atpRunProofFn = load[
     {{"NumericArray", "Shared"}, Integer, Integer, Real,
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
-     Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -901,7 +901,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
     maxCpWeight_:0, goalInterleave_:0, groundJoin_:0,
     selRatio_, autoMaxWeight_, rhsInterreduce_, unfailingCP_,
     cpSetInterreduce_, connectedness_, precedenceSpec_:None,
-    fifoTiebreak_:0, recordNorm_:1, useLRS_:0, useSOS_:0] := Block[{
+    fifoTiebreak_:0, recordNorm_:1, useLRS_:0, useSOS_:0,
+    useFwdSub_:0] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray
@@ -911,7 +912,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_:0.0,
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
-        recordNorm, useLRS, useSOS];
+        recordNorm, useLRS, useSOS, useFwdSub];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -2150,7 +2151,18 @@ atpLRSOpt[o_Association] := Switch[Lookup[o, "LRS", Automatic],
    rather than a separate clause set. *)
 atpSOSOpt[o_Association] := Switch[Lookup[o, "SetOfSupport", Automatic],
     True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0};
+(* "ForwardSubsume" -> True: when adding a new rule l'=r' to R, drop
+   it if some already-stored rule l=r subsumes the new one (\E sigma:
+   l*sigma = l' AND r*sigma = r', or the cross-orientation).  Sound +
+   completeness-preserving: the new equation is a substitution
+   instance of the existing rule, so it adds no deductive power that
+   an instance-of-the-existing-rule rewrite step cannot produce.
+   Vampire's --forward_subsumption analog, unit-only (every equation
+   in UEQ is a unit clause).  Default off (engine byte-identical). *)
+atpFwdSubsumeOpt[o_Association] :=
+    Switch[Lookup[o, "ForwardSubsume", Automatic],
+        True, 1, False | Automatic, 0, _, 0];
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -2172,7 +2184,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o],
          atpCPSetInterreduceOpt[o], atpConnectednessOpt[o],
          atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o],
-         atpLRSOpt[o], atpSOSOpt[o]}
+         atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -2272,7 +2284,7 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
     ];
 
 atpParseMethod[m_] := (
-    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0});
+    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0});
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs

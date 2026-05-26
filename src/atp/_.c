@@ -5641,6 +5641,27 @@ fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
 // byte-identical, so the duplicate guard catches the "add the same
 // rule 300x" pathology that interreduction's subsumption misses
 // while the matcher is dead on out-of-range variables.
+// Try to match existing pattern (pat_lhs, pat_rhs) into target (tg_lhs, tg_rhs)
+// under a single substitution \sigma so pat_lhs*\sigma = tg_lhs AND
+// pat_rhs*\sigma = tg_rhs.  Returns 1 on success.  Used by forward
+// subsumption to decide whether an existing rule logically implies a
+// proposed new rule.
+static u8 atp_rule_subsumes_oriented(Term pat_lhs, Term pat_rhs,
+                                     Term tg_lhs, Term tg_rhs) {
+  RewriteSubst subst = {{0}};
+  if (!thvm_match(pat_lhs, tg_lhs, &subst)) return 0;
+  Term applied_rhs = thvm_subst_apply(pat_rhs, &subst);
+  return kbo_eq(applied_rhs, tg_rhs);
+}
+
+// Unit-equation subsumption: existing rule (l_i, r_i) subsumes
+// proposed new rule (lhs, rhs) iff EITHER orientation works.
+// Equations are unoriented so we try both pairings.
+static u8 atp_rule_subsumes_unit(Term l_i, Term r_i, Term lhs, Term rhs) {
+  return atp_rule_subsumes_oriented(l_i, r_i, lhs, rhs)
+      || atp_rule_subsumes_oriented(l_i, r_i, rhs, lhs);
+}
+
 static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return 0;
 #ifdef ATP_VAR_NORM
@@ -5651,6 +5672,20 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
     }
   }
 #endif
+  // Forward subsumption pruning (Vampire --forward_subsumption analog,
+  // unit-only): drop the rule if some already-stored rule generalizes
+  // it.  Sound + completeness-preserving: the new equation is a
+  // substitution instance of the existing one, so it adds no deductive
+  // power that an instance-of-the-existing-rule rewrite step cannot
+  // already produce.  Gated by use_fwd_subsume.
+  if (s->use_fwd_subsume) {
+    for (u32 i = 0; i < s->n_rules; i++) {
+      if (atp_rule_subsumes_unit(s->lhs[i], s->rhs[i], lhs, rhs)) {
+        s->n_rules_fwd_subsumed++;
+        return 0;
+      }
+    }
+  }
   atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
@@ -5794,6 +5829,14 @@ fn void thvm_atp_set_use_sos(AtpState *s, u8 on) {
     if (s->goal_lhs) atp_sym_mask_collect(s->goal_lhs, s->goal_sym_mask);
     if (s->goal_rhs) atp_sym_mask_collect(s->goal_rhs, s->goal_sym_mask);
   }
+}
+
+// Forward subsumption: when adding a new rule, drop it if some existing
+// rule already subsumes it.  Vampire's --forward_subsumption analog,
+// unit-only.  Sound + completeness-preserving; default off.
+fn void thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_fwd_subsume = on ? 1u : 0u;
 }
 
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped
