@@ -3819,11 +3819,11 @@ tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
    inside `/;` does not always see the supplied opts. *)
 TFindProof[conjecture_, axioms_List, opts:OptionsPattern[]] /;
         ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
-    TFindProofSMT[conjecture, axioms];
+    TFindProofSMT[conjecture, atpFlattenAxioms[axioms]];
 TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] /;
         ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
-    TFindProofSMT[conjecture, axioms];
+    TFindProofSMT[conjecture, atpFlattenAxioms[axioms]];
 
 (* Strip Inactive[Equal] / Inactive[Unequal] from conjecture + axioms
    so a `TFindProof[..., "Lemmas"]` round-trip works (Lemmas spec

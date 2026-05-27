@@ -270,3 +270,13 @@ VerificationTest[
     "SAT",
     TestID -> "SMT/inactive/single-equality-SAT"
 ]
+
+(* TFindProof[..., Method -> "SMT"] should also auto-flatten nested
+   axiom lists, mirroring the iter-62 TFindProof entry shape.  Pre-
+   iter-67, a nested {{a == b}, {b == c}} hit collectLiterals'
+   catch-all and returned $Failed. *)
+VerificationTest[
+    TFindProof[a == c, {{a == b}, {b == c}}, Method -> "SMT"]["Status"],
+    "Proved",
+    TestID -> "SMT/method-smt-nested-axioms-flattened"
+]
