@@ -214,13 +214,14 @@ static int test_case5_reduce_accumulator(void) {
   CHECK(has(ptx, ".reg .f32 %acc_f32_"));
   CHECK(has(ptx, "mov.b32 %acc_f32_0,"));   // init / update reassign
   CHECK(has(ptx, "add.f32 %alu_f32_0, %acc_f32_0,"));  // acc + x
-  // Serial reduce loop present (the real one tests against extent 4).
+  // Exactly ONE serial reduce loop (the real Cin loop, extent 4).  The
+  // synthetic extent-0 marker range is skipped (no spurious empty loop),
+  // and the loop closes by liveness right after the accumulate.
   CHECK(has(ptx, "setp.lt.s32"));
   CHECK(has(ptx, ", 4;"));
-  // Labels must be unique: LOOP_1 exists (the second loop occurrence),
-  // proving labels are keyed on occurrence, not the repeated axis id.
-  CHECK(has(ptx, "LOOP_1:"));
-  CHECK(has(ptx, "END_1:"));
+  CHECK(has(ptx, "LOOP_0:"));
+  CHECK(has(ptx, "END_0:"));
+  CHECK(lacks(ptx, "LOOP_1:"));   // no spurious second loop
   free(ptx);
 
   thvm_free();

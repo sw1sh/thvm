@@ -124,7 +124,7 @@ typedef struct {
   // axis-id labels would collide into invalid PTX.  A matching UOP_END
   // pops + emits the close; still-open loops at body end drain in reverse
   // (mirrors render_linearized.c's auto-close-at-end fallback).
-  struct { Term range; u32 label; } open_ranges[PTX_MAX_OPEN_RANGES];
+  struct { Term range; u32 label; u32 last_use; } open_ranges[PTX_MAX_OPEN_RANGES];
   u32  n_open;
   u32  next_loop_label;
 
@@ -412,6 +412,48 @@ static int ptx_emit_thread_geom(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
   return 1;
 }
 
+// Does t's subtree reference a UOP_RANGE with this axis_id?  Used to
+// compute a loop's liveness span (the last linearized node that uses
+// its induction var).  Skips END markers -- they carry a synthetic
+// range whose axis_id matches but does not constitute a real use.
+static int ptx_term_refs_axis(Term t, u32 axis_id, u32 depth) {
+  if (depth > 256 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_END) return 0;
+  if (op == UOP_RANGE) return uop_range_axis_id(t) == axis_id;
+  u8 ar = uop_arity((u8)op);
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar; i++) {
+    if (ptx_term_refs_axis(heap_read(loc + i), axis_id, depth + 1)) return 1;
+  }
+  if (op == UOP_STACK) {
+    u32 sn = uop_stack_n(t);
+    for (u32 i = 0; i < sn; i++) {
+      if (ptx_term_refs_axis(uop_stack_src(t, i), axis_id, depth + 1)) return 1;
+    }
+  } else if (op == UOP_AFTER) {
+    // Only the value arm is a real use; the ordering arm is sequencing.
+    if (ptx_term_refs_axis(heap_read(loc + 0), axis_id, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// Last linearized index (in [open_idx+1, n)) whose node references the
+// loop's axis.  The loop closes right after that node, so anything later
+// (e.g. the reduce's final F-lane store, which does not use the reduce
+// axis) lands OUTSIDE the loop -- the fix for "stores emitted inside the
+// reduce loop".  Returns open_idx if nothing uses it (degenerate).
+static u32 ptx_loop_last_use(LinKernel const *lk, u32 open_idx, u32 axis_id) {
+  u32 last = open_idx;
+  for (u32 j = open_idx + 1; j < lk->n; j++) {
+    Term t = lk->uops[j];
+    if (term_tag(t) != TAG_UOP) continue;
+    if (term_ext(t) == UOP_END) continue;        // synthetic marker range
+    if (ptx_term_refs_axis(t, axis_id, 0)) last = j;
+  }
+  return last;
+}
+
 // === Body walk ========================================================
 //
 // Returns 1 if every node rendered, 0 if any node is outside coverage
@@ -501,11 +543,18 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
           }
           break;
         }
+        // A degenerate extent-0 RANGE is the synthetic marker the reduce
+        // accumulator's END carries -- not a real loop.  Skip it (no
+        // register, no loop); liveness-based closing (below) handles the
+        // real reduce loop, and the END node is a no-op.
+        u32 ext0 = uop_range_extent(t);
+        if (ext0 == 0) break;
         // Serial loop (reduce / unpromoted axis).  Faithful to tinygrad's
-        // do-while: mov ridx,-1 ; bra END ; LOOP: ... END increments +
-        // tests + branches back to LOOP (matching UOP_END or the drain).
-        // Labels use a unique occurrence id (not axis id) to stay valid
-        // even when two ranges share an axis id.
+        // do-while: mov ridx,-1 ; bra END ; LOOP: ... ; END incr+test+bra.
+        // The loop CLOSES by liveness -- after the last node that uses its
+        // axis -- NOT at the UOP_END marker (whose synthetic range matched
+        // a phantom empty loop, leaving the real loop to auto-close after
+        // the final store, i.e. re-storing every iteration).
         char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
         ptx_reg_put(ctx, t, r);
         if (ctx->n_open >= PTX_MAX_OPEN_RANGES) return 0;
@@ -513,34 +562,19 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         fprintf(fp, "\tmov.u32 %s, 0xFFFFFFFF;\n", r);
         fprintf(fp, "\tbra END_%u;\n", label);
         fprintf(fp, "LOOP_%u:\n", label);
-        ctx->open_ranges[ctx->n_open].range = t;
-        ctx->open_ranges[ctx->n_open].label = label;
+        ctx->open_ranges[ctx->n_open].range    = t;
+        ctx->open_ranges[ctx->n_open].label    = label;
+        ctx->open_ranges[ctx->n_open].last_use =
+            ptx_loop_last_use(lk, i, axis_id);
         ctx->n_open++;
         break;
       }
 
-      case UOP_END: {
-        // Close the range(s) this END marks.  Pop each from the open
-        // stack (it must be open) and emit the close.
-        u32 n = uop_end_n(t);
-        for (u32 e = 0; e < n; e++) {
-          Term r = uop_end_range(t, e);
-          if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
-          // Find r's open entry (most recent) for its label, close it,
-          // and remove from the stack.
-          for (u32 k = ctx->n_open; k > 0; k--) {
-            if (ctx->open_ranges[k - 1].range == r) {
-              ptx_emit_loop_close(ctx, r, ctx->open_ranges[k - 1].label, fp);
-              for (u32 m = k; m < ctx->n_open; m++) {
-                ctx->open_ranges[m - 1] = ctx->open_ranges[m];
-              }
-              ctx->n_open--;
-              break;
-            }
-          }
-        }
+      case UOP_END:
+        // No-op: loops close by liveness (after this node, below), not by
+        // the END marker.  The marker's synthetic range does not name the
+        // real loop reliably.
         break;
-      }
 
       case UOP_INDEX_E: {
         // Pointer arithmetic: byte_addr = base + idx * itemsize, in u64.
@@ -724,9 +758,20 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
       default:
         return 0;
     }
+
+    // Liveness close: after emitting node i, close any open loop whose
+    // last referencing node was i (innermost first).  This places the
+    // loop-close right after the loop body, so later nodes (the reduce's
+    // final F-lane store) fall OUTSIDE the loop.
+    while (ctx->n_open > 0
+           && ctx->open_ranges[ctx->n_open - 1].last_use <= i) {
+      ctx->n_open--;
+      ptx_emit_loop_close(ctx, ctx->open_ranges[ctx->n_open].range,
+                          ctx->open_ranges[ctx->n_open].label, fp);
+    }
   }
-  // Drain: close any range with no explicit UOP_END node, in reverse
-  // (innermost first).  Mirrors render_linearized.c's auto-close-at-end.
+  // Drain: close any loop still open (defensive -- liveness should have
+  // closed them all), innermost first.
   while (ctx->n_open > 0) {
     ctx->n_open--;
     ptx_emit_loop_close(ctx, ctx->open_ranges[ctx->n_open].range,
