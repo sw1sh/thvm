@@ -33,16 +33,16 @@ The implementation is a single self-contained `.wl` file inlined here at convers
 
 ## Details & Options
 
-- The result is `<|"Axioms" -> {phi_1, phi_2, …}, "Conjecture" -> psi|>`. `"Conjecture"` is [None]() when no `conjecture` / `negated_conjecture` clause is present.
-- Function and predicate symbols are returned as *[String]()-headed compounds*: `cnf(a, axiom, and(X, Y) = and(Y, X))` parses as `"and"[v$_, w$_] == "and"[w$_, v$_]`. Strings are not bound in any context, so a parsed TPTP `and` cannot shadow a user-level binding.
-- Variables are clause-scoped: each Uppercase identifier inside one clause names the same universally-bound variable; the same name in a later clause is independent. Each occurrence gets a fresh `Pattern[Unique["v"], Blank[]]`.
-- Single equational literals come back as bare `Equal[..]` / `Unequal[..]` (the unit-equality fragment most equational provers target); multi-literal `cnf` clauses come back as `Or[lit_1, lit_2, …]`. Inner `! [...]` / `? [...]` quantifiers stay as WL `ForAll` / `Exists`; existential vars are bare Symbols with proper snapshot+restore scope.
-- `negated_conjecture` carries the negation of the goal; the importer un-negates: `s != t` flips to `s == t`; a disjunction of disequations flips to the corresponding conjunction of equations; anything else gets a plain `Not[...]` wrapper.
-- `tff`, `tcf`, `thf` strip `X:srt` sort annotations at preprocessing (the homogeneous-untyped surface). `type`-role clauses (signature declarations) are silently skipped.
-- `thf` formula bodies pick up `^ [V1, ..., Vn] : body` lambdas (-> [Function]()) and left-associative `f @ x @ y` application (-> `f[x][y]`).
-- Sequents `lhs1, lhs2 --> rhs1, rhs2` (each side optionally bracketed) rewrite to `Implies[And[lhs_i], Or[rhs_j]]`.
-- `include('path', [name1, ...])` accepts an optional clause-name selector that filters which clauses from the included file are admitted. Path resolution order: as given (absolute or relative-to-cwd), then relative to the importing file's directory, then `$TPTP`, then `$TPTP/Problems`.
-- Term-level coverage includes single-quoted atoms (`'name with space'`), double-quoted distinct objects (`"foo"` -> `"\"foo\""[]` with literal quote chars preserved in the head to distinguish from plain atoms), and signed numeric literals (integer, rational, real, scientific - all wrapped as `"<numstr>"[]` to dodge [Equal]()'s eager evaluation on bare numeric atoms).
+- The result is an [Association]() of shape `<|"Axioms" -> {phi1, phi2, …}, "Conjecture" -> psi|>`. `"Conjecture"` is [None]() when no `conjecture` or `negated_conjecture` clause is present.
+- Function and predicate symbols are returned as [String]()-headed compounds: `cnf(a, axiom, and(X, Y) = and(Y, X))` parses as `"and"[v_, w_] == "and"[w_, v_]`. [String]()s are not bound in any context, so a parsed TPTP `and` cannot shadow a user-level binding.
+- Variables are clause-scoped: each upper-case identifier inside one clause names the same universally bound variable; the same name in a later clause is independent. Each occurrence gets a fresh [Pattern]() of a [Unique]()-generated symbol over a [Blank]().
+- Single equational literals come back as bare [Equal]() or [Unequal]() (the unit-equality fragment most equational provers target); multi-literal `cnf` clauses come back as [Or]() of the literals. Inner `! [...]` / `? [...]` quantifiers stay as [ForAll]() and [Exists]() so the downstream consumer sees the full structure; existential bound variables are bare [Symbol]()s with proper snapshot-and-restore scope around the quantifier body.
+- A `negated_conjecture` clause carries the negation of the goal. The importer un-negates: a single `s != t` flips to [Equal]() of `s` and `t`; a disjunction of disequations flips to the corresponding conjunction of equations; anything else gets a plain [Not]() wrapper.
+- `tff`, `tcf`, and `thf` strip `X:srt` sort annotations at preprocessing (the homogeneous-untyped surface). `type`-role clauses (signature declarations) are silently skipped.
+- `thf` formula bodies pick up `^ [V1, ..., Vn] : body` lambdas, which become [Function]() expressions, and left-associative `f @ x @ y` application, which becomes the curried form `f[x][y]`.
+- Sequents `lhs1, lhs2 --> rhs1, rhs2` (each side optionally bracketed in `[...]`) rewrite to [Implies]() of [And]() of the left literals and [Or]() of the right literals.
+- `include('path', [name1, ...])` accepts an optional clause-name selector that filters which clauses from the included file are admitted. Path resolution order: as given (absolute or relative-to-cwd), then relative to the importing file's directory, then relative to the `$TPTP` environment variable, then relative to `$TPTP/Problems`.
+- Term-level coverage includes single-quoted atoms (`'name with space'`), double-quoted distinct objects (TPTP semantics: pairwise non-equal by built-in axiom), and signed numeric literals (integer, rational, real, scientific). Numeric literals are wrapped as 0-arity [String]()-headed compounds to dodge [Equal]()'s eager evaluation on bare numeric atoms.
 
 ## Basic Examples
 
@@ -86,12 +86,34 @@ Module[{tmp = CreateFile[]},
 
 ### `fof` Boolean connectives
 
-`&`, `|`, `~`, `=>`, `<=`, `<=>`, `<~>`, `~&`, `~|` parse with the standard precedence (left-associative `&` / `|`; non-associative `<=>` / `=>` / etc.):
+The implication `=>` becomes [Implies]():
 
 ```wl
-{TPTPImport["fof(a, axiom, p(X) => q(X))."]["Axioms"][[1]] // Head,
- TPTPImport["fof(a, axiom, p <=> q)."]["Axioms"][[1]] // Head,
- TPTPImport["fof(a, axiom, p ~& q)."]["Axioms"][[1]] // FullForm}
+TPTPImport["fof(a, axiom, p(X) => q(X))."]["Axioms"][[1]]
+```
+
+---
+
+The biconditional `<=>` becomes [Equivalent]():
+
+```wl
+TPTPImport["fof(a, axiom, p <=> q)."]["Axioms"][[1]]
+```
+
+---
+
+The negated-conjunction shorthand `~&` becomes [Not]() of [And]():
+
+```wl
+TPTPImport["fof(a, axiom, p ~& q)."]["Axioms"][[1]]
+```
+
+---
+
+Left-associative `&` flattens into an n-ary [And]():
+
+```wl
+TPTPImport["fof(a, axiom, p & q & r & s)."]["Axioms"][[1]]
 ```
 
 ### Quantifiers
@@ -136,33 +158,78 @@ A sequent (left side, arrow, right side) rewrites to [Implies]() of [And]() of t
 TPTPImport["fof(a, axiom, p & q --> r | s)."]["Axioms"][[1]] // FullForm
 ```
 
-### Numeric literals + quoted atoms
+### Numeric literals
 
-Signed and unsigned integers, rationals, reals, and scientific-notation reals all parse as 0-arity [String]()-headed compounds. Quoted atoms preserve their literal contents in the head:
+An unsigned integer parses as a 0-arity [String]()-headed compound:
+
+```wl
+TPTPImport["cnf(a, axiom, foo(42) = bar)."]["Axioms"][[1]]
+```
+
+---
+
+A signed integer keeps its sign in the head:
+
+```wl
+TPTPImport["cnf(a, axiom, foo(-42) = bar)."]["Axioms"][[1]]
+```
+
+---
+
+Scientific-notation reals round-trip as a single compound:
+
+```wl
+TPTPImport["cnf(a, axiom, foo(-1.5e-3) = bar)."]["Axioms"][[1]]
+```
+
+### Quoted atoms and distinct objects
+
+A single-quoted atom carries its contents verbatim as the [String]() head:
+
+```wl
+TPTPImport["cnf(a, axiom, eq(a, 'name with spaces'))."]["Axioms"][[1]]
+```
+
+---
+
+A double-quoted distinct object preserves the literal quote characters in the head, which keeps it visually distinguishable from a plain quoted atom:
 
 ```wl
 TPTPImport[
-"cnf(a, axiom, foo(42) = bar).
-cnf(b, axiom, foo(3.14) = bar).
-cnf(c, axiom, foo(-1.5e-3) = bar).
-cnf(d, axiom, eq(a, 'name with spaces')).
-cnf(e, axiom, eq(\"distinct1\", \"distinct2\"))."]["Axioms"]
+    "cnf(a, axiom, eq(\"distinct1\", \"distinct2\"))."]["Axioms"][[1]]
 ```
 
 ### `include`
 
-The included file's clauses splice into the enclosing scan. The optional clause-name selector filters which clauses are admitted:
+Without a selector, every clause from the included file is admitted. Build an axioms file with three clauses, include the whole file, and count the resulting axioms:
 
 ```wl
-Module[{tmpdir = CreateDirectory[], r},
+Module[{tmpdir = CreateDirectory[]},
+    Export[FileNameJoin[{tmpdir, "ax.ax"}],
+        "cnf(a1, axiom, mul(X, e) = X).\n" <>
+        "cnf(a2, axiom, mul(e, X) = X).\n" <>
+        "cnf(a3, axiom, mul(inv(X), X) = e).\n", "Text"];
+    Export[FileNameJoin[{tmpdir, "main.p"}],
+        "include('ax.ax').\n", "Text"];
+    Length @ TPTPImport[
+        File @ FileNameJoin[{tmpdir, "main.p"}]]["Axioms"]
+]
+```
+
+---
+
+With a clause-name selector, only the listed clauses are admitted:
+
+```wl
+Module[{tmpdir = CreateDirectory[]},
     Export[FileNameJoin[{tmpdir, "ax.ax"}],
         "cnf(a1, axiom, mul(X, e) = X).\n" <>
         "cnf(a2, axiom, mul(e, X) = X).\n" <>
         "cnf(a3, axiom, mul(inv(X), X) = e).\n", "Text"];
     Export[FileNameJoin[{tmpdir, "main.p"}],
         "include('ax.ax', [a1, a3]).\n", "Text"];
-    r = TPTPImport[File @ FileNameJoin[{tmpdir, "main.p"}]];
-    {Length @ r["Axioms"], First /@ r["Axioms"]}
+    Length @ TPTPImport[
+        File @ FileNameJoin[{tmpdir, "main.p"}]]["Axioms"]
 ]
 ```
 
@@ -176,6 +243,52 @@ r = TPTPImport[
      cnf(a2, axiom, and(X, and(Y, Z)) = and(and(X, Y), Z)).
      cnf(g,  negated_conjecture, and(and(p, q), r) != and(r, and(q, p)))."];
 FindEquationalProof[r["Conjecture"], r["Axioms"]]
+```
+
+---
+
+Build an [EntityStore]() over a directory of TPTP problem files, one entity per problem. Set up a tiny inline corpus first:
+
+```wl
+$tptpCorpus = CreateDirectory[];
+Export[FileNameJoin[{$tptpCorpus, "GroupAxioms__Identity.p"}],
+    "cnf(a, axiom, mul(X, e) = X).\n" <>
+    "cnf(g, negated_conjecture, mul(a, e) != a).\n", "Text"];
+Export[FileNameJoin[{$tptpCorpus, "BooleanAxioms__DoubleNeg.p"}],
+    "cnf(a, axiom, not(not(X)) = X).\n" <>
+    "cnf(g, negated_conjecture, not(not(p)) != p).\n", "Text"]
+```
+
+---
+
+Parse each problem file into a property [Association](), keyed by the file's basename and carrying the inferred theory name plus the parsed axioms and conjecture:
+
+```wl
+$tptpEntities = Association @ Map[
+    Function[path,
+        With[{name = FileBaseName[path], r = TPTPImport[File[path]]},
+            name -> <|
+                "Name"       -> name,
+                "Theory"     -> First @ StringSplit[name, "__"],
+                "Conjecture" -> r["Conjecture"],
+                "AxiomCount" -> Length @ r["Axioms"]
+            |>]],
+    FileNames["*.p", $tptpCorpus]]
+```
+
+---
+
+Wrap the per-problem associations in an [EntityStore](), then query it like any other entity type:
+
+```wl
+$tptpStore = EntityStore[<|"TPTPProblem" -> <|
+    "Label" -> "TPTP problem",
+    "Properties" -> AssociationMap[<|"Label" -> ToLowerCase[#]|> &,
+        {"Name", "Theory", "Conjecture", "AxiomCount"}],
+    "Entities" -> $tptpEntities|>|>];
+EntityValue[
+    EntityList[$tptpStore["TPTPProblem"]],
+    {"Theory", "AxiomCount"}]
 ```
 
 ## Possible Issues
