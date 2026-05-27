@@ -3130,6 +3130,49 @@ int main(void) {
     #undef LAB_g
   }
 
+  TEST_BEGIN("atp/auto-precedence/mccune-arity-fallback");
+  {
+    // McCune's single-axiom group/Sheffer-style equation uses {and:arity2,
+    // not:arity1}; no Sinai pattern matches its dense form, so the
+    // structural detection sees no commutativity/associativity/inverse/
+    // identity/distributivity.  Praezedenzgenerator must then fall
+    // through to pure Fuchs arity scoring -- which ranks `and` (arity 2)
+    // above `not` (arity 1).  This is the same ordering Vampire reaches
+    // via `to=lpo:sp=arity` in its cracking config for
+    // McCuneAxioms/EqualityOfInverses; thvm's WL `wl_precedence[i]=i+1`
+    // bridge default is label-index-arbitrary, so auto-prec genuinely
+    // changes the ordering once wired into the WL surface.
+    //
+    // Axiom (TPTP): and(X0, not(and(X1, and(and(and(X2, not(X2)),
+    //                                          not(and(X3, X1))), X0)))) = X3
+    #define LAB_AND 10u
+    #define LAB_NOT 11u
+    #define MK_AND(a, b) ({ Term _c[2] = {(a), (b)}; term_new_ctr(LAB_AND, _c, 2); })
+    #define MK_NOT(a)    ({ Term _c[1] = {(a)};      term_new_ctr(LAB_NOT, _c, 1); })
+
+    Term x0 = mk_v(0u), x1 = mk_v(1u), x2 = mk_v(2u), x3 = mk_v(3u);
+    Term inner = MK_AND(MK_AND(x2, MK_NOT(x2)), MK_NOT(MK_AND(x3, x1)));
+    Term mid   = MK_AND(inner, x0);
+    Term outer = MK_AND(x1, mid);
+    Term lhs   = MK_AND(x0, MK_NOT(outer));
+    Term rhs   = x3;
+
+    u32 prec[12] = {0u};
+    u32 n_seen   = atp_auto_precedence(&lhs, &rhs, 1u, 12u, prec);
+    CHECK_EQ(n_seen, 2u);              // only `and` and `not` appear
+    CHECK_EQ(prec[LAB_AND], 2u);       // arity-2 -> top of the seen set
+    CHECK_EQ(prec[LAB_NOT], 1u);       // arity-1 -> next
+    // Sanity: the auto-derived ordering DIFFERS from the trivial label-
+    // index default (which would give prec[10]=11, prec[11]=12 -> NOT
+    // outranks AND, the inverse direction).
+    CHECK(prec[LAB_AND] > prec[LAB_NOT]);
+
+    #undef MK_AND
+    #undef MK_NOT
+    #undef LAB_AND
+    #undef LAB_NOT
+  }
+
   thvm_free();
   TEST_REPORT();
 }
