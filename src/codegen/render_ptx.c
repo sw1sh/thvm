@@ -536,6 +536,15 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         fprintf(stderr, "[ptx-bail] uncovered opcode %u\n", op);
       return 0;
     }
+    // GROUP_REDUCE: cooperative shared-mem accumulator needs a `.shared`
+    // declaration + `bar.sync` + `if (tt==0)` guarded final fold.  Not
+    // yet covered by this renderer -- fall back to the C-source emit
+    // (rmu_emit_group_reduce now emits the CUDA __shared__ form).
+    if (op == UOP_RANGE && uop_range_axis_type(t) == KAX_GROUP_REDUCE) {
+      if (getenv("THVM_ROUTE_TRACE"))
+        fprintf(stderr, "[ptx-bail] KAX_GROUP_REDUCE axis -- falls back to C\n");
+      return 0;
+    }
   }
 
   // Thread geometry: promote store-indexing KAX_LOOP axes to parallel
