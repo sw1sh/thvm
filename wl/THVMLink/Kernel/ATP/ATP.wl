@@ -2552,7 +2552,8 @@ atpParseMethod[{"EProver", subopts___Rule}] :=
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
 $AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee", "EProver",
-    "Portfolio", "VampirePortfolio", "VampirePortfolioCompact"};
+    "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
+    "AllPresets"};
 
 (* Method -> "VampirePortfolio": a 10-entry rotation modeled on the
    portfolio-cycling shape Vampire 5.0.1 ships for UEQ -- many short
@@ -2627,6 +2628,18 @@ atpParseMethod["VampirePortfolioCompact"] :=
     {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0};
 atpScheduleFor["VampirePortfolioCompact"] := $VampirePortfolioCompact;
 atpScheduleFor["VampirePortfolioCompact", _, _] := $VampirePortfolioCompact;
+
+(* Method -> "AllPresets": a 4-entry rotation through every named
+   single-config preset (Waldmeister, VampireUEQ, Twee, EProver).
+   For users who want a "try every approach" sweep without spelling
+   out each preset.  At TC=20 each entry gets ~5s; at TC=60 each
+   gets ~15s.  Useful as a portfolio when the autotuner's structure
+   guess might be wrong. *)
+$AtpAllPresets = {"Waldmeister", "VampireUEQ", "Twee", "EProver"};
+atpParseMethod["AllPresets"] :=
+    {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0};
+atpScheduleFor["AllPresets"] := $AtpAllPresets;
+atpScheduleFor["AllPresets", _, _] := $AtpAllPresets;
 
 atpParseMethod[m_] := (
     Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0});
@@ -2706,7 +2719,8 @@ TAtpDescribeMethod[{name_String, subopts___Rule}] /;
         KeyExistsQ[$AtpPresetDefaults, name] :=
     Join[$AtpPresetDefaults[name], Association[{subopts}]];
 TAtpDescribeMethod[name : ("Portfolio" | "VampirePortfolio"
-        | "VampirePortfolioCompact" | "Automatic")] :=
+        | "VampirePortfolioCompact" | "AllPresets"
+        | "Automatic")] :=
     <|"Schedule" -> atpScheduleFor[name]|>;
 TAtpDescribeMethod[Automatic] :=
     <|"Schedule" -> atpScheduleFor[Automatic]|>;

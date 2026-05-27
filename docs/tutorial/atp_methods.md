@@ -304,6 +304,75 @@ override pattern as `"Waldmeister"`.
 When to use: hard Sheffer / nand goals where the `"Waldmeister"` default
 walls; experimentally a complement to the Waldmeister-tuned schedule.
 
+### 4.8 `"Twee"`
+
+Preset modeled on Twee 2.x's saturation defaults (Smallbone, 2021+):
+
+- `CriticalPairWeight -> "Twee"` (the iter 11 port of Twee.CP.score:
+  asymmetric large/small bias + shared-subterm dedup discount).
+- `GroundJoin -> True` (Twee's `cfg_ground_join`: delete ground-
+  joinable CPs).
+- `Connectedness -> True` (Twee's `cfg_use_connectedness_standalone`:
+  Bachmair-Dershowitz below-peak redundancy, Twee section 6.2).
+- `UnfailingCP -> True` (Twee always superposes both faces of an
+  unorientable equation).
+- `BackwardSubsume -> True` + `BackwardDemod -> True` +
+  `RHSInterreduce -> True` (Twee's `interreduce` keeps R reduced).
+- `AutoMaxWeight -> 20` (Twee doesn't bound CP size explicitly; the
+  growing-bound stash keeps the queue budget-tractable).
+
+When to use: shared-subterm-heavy problems (e.g. nested Sheffer
+expressions) where the dedup discount in Twee weight pays off, or any
+goal where Twee's compute-graph stays tighter than the Vampire-style
+flat saturation.
+
+### 4.9 `"EProver"`
+
+Preset modeled on E's typical CASC-mode UEQ classification (Schulz,
+2002+).  E rotates dozens of strategies internally; this preset picks
+the combination most often selected at E's auto-mode for UEQ:
+
+- `CriticalPairWeight -> "ConjSym"` (iter 22 port of E's
+  ConjectureSymbolWeight: conjecture-symbol nodes weight 1, others
+  weight 4).
+- `Ordering -> "KBO"` (E's default term ordering for UEQ).
+  `AutoPrecedence` is intentionally OFF: thvm's Waldmeister-flavored
+  precedence demotes AC operators in a way that stalls ConjSym on
+  Boolean goals.
+- `SelectionRatio -> 10` (E's `dis+10` age:weight 1:10).
+- `AutoMaxWeight -> 20` (E manages CP queue size via PCL bounds;
+  AutoMaxWeight is our analog).
+- `BackwardSubsume -> True` + `RHSInterreduce -> True` (E's standard
+  simplification sweep).
+- `UnfailingCP -> True` (E's unfailing completion mode is on by
+  default for UEQ).
+
+When to use: cross-system goals (Implies-X family) where ConjectureSymbol
+weighting biases the search toward conjecture-relevant CPs.
+
+### 4.10 `"VampirePortfolioCompact"`
+
+A 3-entry rotation sized for small `TimeConstraint`s where the
+10-entry `"VampirePortfolio"` would give each slice <1s:
+
+1. `"VampireUEQ"` (Vampire's flagship UEQ entry).
+2. `"Twee"` (Twee's redundancy + dedup-aware weight).
+3. `Completion + Mix2 + AutoPrecedence + AutoMaxWeight 20`.
+
+At `TC=5` each entry gets ~1.67s; at `TC=15` ~5s.
+
+When to use: when budget is too small for the full 10-entry
+`"VampirePortfolio"` to give any slice useful time.
+
+### 4.11 `"AllPresets"`
+
+A 4-entry rotation through every named single-config preset:
+`{"Waldmeister", "VampireUEQ", "Twee", "EProver"}`.
+
+When to use: as a portfolio when the autotuner's structure guess
+might be wrong and you want every approach tried with a fair share
+of the budget.
+
 ## 5. Suboptions catalog
 
 Every entry in the table below is parsed by `atpParseCompletionOpts` /
@@ -863,6 +932,77 @@ Useful when a goal "should" be cheap but takes a long time: look at
 which slices ran and how long each took, then either pin the cheap
 config explicitly with `Method -> ...` or feed the slow ones a tighter
 `"AutoMaxWeight"`.
+
+### 8.9 What does my Method actually mean? -- `TAtpSchedule` + `TAtpDescribeMethod`
+
+Two helpers expose what a `Method` spec resolves to without paying for
+the C engine:
+
+```wolfram
+TAtpSchedule[Method]
+(* -> the schedule (list of single-config Methods) the dispatcher
+      would expand to.  Schedule presets ("Portfolio", "VampirePortfolio",
+      "AllPresets", ...) return their full rotation; single-config
+      Methods return a 1-element list. *)
+
+TAtpSchedule[Method, conjecture, axioms]
+(* For Automatic, threads the conj + ax through the structure-
+   recognized auto-tuner so the returned schedule matches what
+   TFindProof[conj, ax, Method -> spec] would dispatch. *)
+
+TAtpSchedule[Method, "Theorem", "Theory"]
+(* AxiomaticTheory-resolved variant. *)
+```
+
+```wolfram
+TAtpDescribeMethod["Twee"]
+(* -> <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True,
+        "Connectedness" -> True, "UnfailingCP" -> True,
+        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "RHSInterreduce" -> True, "AutoMaxWeight" -> 20|> *)
+
+TAtpDescribeMethod[{"Twee", "AutoMaxWeight" -> 0}]
+(* -> defaults merged with the user's overrides. *)
+
+TAtpDescribeMethod["VampirePortfolioCompact"]
+(* -> <|"Schedule" -> {"VampireUEQ", "Twee",
+        {"Completion", "CriticalPairWeight" -> "Mix2",
+            "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}}|> *)
+```
+
+`$AtpMethodPresets` enumerates the named presets the dispatcher
+recognizes:
+
+```wolfram
+THVMLink`ATP`Private`$AtpMethodPresets
+(* -> {"Waldmeister", "VampireUEQ", "Twee", "EProver",
+       "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
+       "AllPresets"} *)
+```
+
+### 8.10 `PortfolioFrontLoad -> n`
+
+Multi-entry schedules (Automatic / Portfolio / VampirePortfolio /
+AllPresets) divide `TimeConstraint` fairly across all remaining entries.
+At small total budgets each entry gets a sliver -- e.g. VampirePortfolio
+at `TC=5` gives each of 10 configs only 0.5s.
+
+`PortfolioFrontLoad -> n` widens the slice for the first `n` entries:
+each gets 2x the share that a fair recurrence would assign them;
+entries past `n` revert to fair share.  Default `0` reproduces fair
+sharing exactly.
+
+```wolfram
+TFindProof[goal, axioms, Method -> "AllPresets",
+    TimeConstraint -> 20, PortfolioFrontLoad -> 2]
+(* The first two presets (Waldmeister, VampireUEQ) each get ~6.7s
+   instead of the fair 5s; EProver + Twee split the remaining ~6.6s. *)
+```
+
+When `Automatic`'s structure-detector front-loads a config it's
+confident about (e.g. Gt + AutoPrecedence for Group), pair it with
+`PortfolioFrontLoad -> 1` or `-> 2` to actually give those tuned
+entries the time they need.
 
 ## 9. Recipes
 

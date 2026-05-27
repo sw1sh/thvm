@@ -2045,6 +2045,21 @@ VerificationTest[
     TestID -> "ATP/method/VampirePortfolioCompact-proves-trivial"
 ]
 
+(* "AllPresets" expands to the 4-preset rotation. *)
+VerificationTest[
+    TAtpSchedule["AllPresets"],
+    {"Waldmeister", "VampireUEQ", "Twee", "EProver"},
+    TestID -> "ATP/schedule/AllPresets-rotation"
+]
+
+(* AllPresets dispatches + proves a trivial goal. *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> "AllPresets", TimeConstraint -> 8],
+    ProofObject,
+    TestID -> "ATP/method/AllPresets-proves-trivial"
+]
+
 (* Automatic with no problem in hand returns the fixed $AtpSchedule
    (no structure-recognition tailoring possible without conj+ax). *)
 VerificationTest[
@@ -2082,7 +2097,7 @@ VerificationTest[
         {ListQ[p], AllTrue[p, StringQ],
          SubsetQ[p, {"Waldmeister", "VampireUEQ", "Twee", "EProver",
                      "Portfolio", "VampirePortfolio",
-                     "VampirePortfolioCompact"}]}],
+                     "VampirePortfolioCompact", "AllPresets"}]}],
     {True, True, True},
     TestID -> "ATP/method/preset-registry-contents"
 ]
