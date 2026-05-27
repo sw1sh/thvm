@@ -483,29 +483,32 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           }
           fputc('\n', stderr);
         }
-        // rmu_emit_group_reduce only handles SINGLE-axis reduces; on
-        // multi-axis reduces, rmu_emit_store_reduce bails to the generic
-        // path which ignores the GROUP_REDUCE wrapper but the launch
-        // geometry still drops to 16-thread blocks -> redundant writes /
-        // OOB.  Skip GROUPTOP unless the kernel has exactly one reduce
-        // axis.
-        if (n_red == 1) {
-          u32 axis = red_aids[0];
-          u32 ext  = red_exts[0];
-          u32 sz   = 16;
-          if (ext > 0 && ext % sz == 0 && ext / sz >= 1) {
-            KOpt opt = { KOP_GROUPTOP, (u8)axis, sz };
-            int ok = kernel_apply_opt(ke, opt);
-            if (trace) fprintf(stderr, "[group] apply GROUPTOP a%u sz=%u -> %d\n",
-                               axis, sz, ok);
-            if (ok) n_applied++;
-          } else if (trace) {
-            fprintf(stderr, "[group] skip a%u ext=%u (no divide / trivial)\n",
-                    axis, ext);
+        // rmu_emit_group_reduce now handles multi-axis (serial REDUCE
+        // loops around the cooperative GROUP axis), so apply GROUPTOP
+        // to the LARGEST reduce axis that divides evenly by 16.  Picking
+        // the largest axis minimizes per-thread iteration count for the
+        // strided walk.
+        i32 best_idx = -1;
+        u32 best_ext = 0;
+        u32 sz = 16;
+        for (u32 i = 0; i < n_red; i++) {
+          if (red_exts[i] < sz) continue;
+          if (red_exts[i] % sz != 0) continue;
+          if (red_exts[i] > best_ext) {
+            best_ext = red_exts[i];
+            best_idx = (i32)i;
           }
+        }
+        if (best_idx >= 0) {
+          u32 axis = red_aids[best_idx];
+          KOpt opt = { KOP_GROUPTOP, (u8)axis, sz };
+          int ok = kernel_apply_opt(ke, opt);
+          if (trace) fprintf(stderr,
+              "[group] apply GROUPTOP a%u sz=%u (best of %u red axes) -> %d\n",
+              axis, sz, n_red, ok);
+          if (ok) n_applied++;
         } else if (trace) {
-          fprintf(stderr, "[group] skip: n_red=%u != 1 (multi-axis not supported)\n",
-                  n_red);
+          fprintf(stderr, "[group] skip: no reduce axis divides %u\n", sz);
         }
       }
     }

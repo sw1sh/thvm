@@ -2140,35 +2140,77 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
 
 // GROUP_REDUCE-shaped emission: parallel cooperative reduce using a
 // threadgroup-shared accumulator + barrier + per-thread serial walk
-// + final single-thread combine.  Fires when the reduce range was
-// stamped with UOP_OPT_GROUP_REDUCE by the lifter (Phase 4 follow-on).
+// + final single-thread combine.  Fires when one of the reduce ranges
+// was stamped with UOP_OPT_GROUP_REDUCE by hand_opts (KOP_GROUPTOP).
 //
-// Shape:
-//   threadgroup float _accN[L];
+// Single-axis shape (the only one rmu_emit_group_reduce_single covers):
+//   __shared__ float _accN[L];
 //   _accN[tt] = init;
-//   threadgroup_barrier(...);
+//   __syncthreads();
 //   for (uint k = tt; k < red_extent; k += L) _accN[tt] = combine(_accN[tt], body(k));
-//   threadgroup_barrier(...);
+//   __syncthreads();
 //   if (tt == 0) {
 //     float total = init;
 //     for (uint i = 0; i < L; i++) total = combine(total, _accN[i]);
 //     out[addr] = total;
 //   }
 //
+// Multi-axis shape (rmu_emit_group_reduce_multi): outer serial REDUCE
+// loops wrap the cooperative inner GROUP_REDUCE axis.  Lets the conv
+// reduce (C_in, kH, kW: 3 axes, one GROUP'd) get the parallel template
+// without bailing.
+//
 // Caller passes the open output-axis loop nest in `n_out` /
 // `needs_close[]` so this function can close them in the same order
 // as the scalar path.
+
+// Internal helper: write the combine LHS = LHS OP body line (or the
+// max-ternary form).  acc_lhs is the full LHS expression including
+// any `[tt]` subscript; rmu_emit_term renders the body in place.
+static void rmu_emit_group_combine_line(const char *acc_lhs, u32 red_kind,
+                                        Term body, FILE *fp) {
+  fprintf(fp, "%s = ", acc_lhs);
+  fprintf(fp, "%s", acc_lhs);
+  if (red_kind == REDUCE_SUM)      fputs(" + ", fp);
+  else if (red_kind == REDUCE_MAX) fputs(" > ", fp);   // placeholder
+  else                              fputs(" + ", fp);
+  rmu_emit_term(body, fp);
+  if (red_kind == REDUCE_MAX) {
+    fprintf(fp, " ? %s : ", acc_lhs);
+    rmu_emit_term(body, fp);
+  }
+  fputs(";\n", fp);
+}
+
 static int rmu_emit_group_reduce(Term buf, Term addr,
-                                 Term red_range, Term red_src,
-                                 u32 red_kind, u32 red_axis,
-                                 u32 group_extent,
+                                 Term const *red_ranges,
+                                 u32 const *red_kind_opts,
+                                 u32 const *red_factor_opts,
+                                 u32 red_n_axes,
+                                 Term red_src,
+                                 u32 red_kind,
                                  FILE *fp, u32 body_depth,
                                  u32 n_out, int const *needs_close) {
+  // Find the (single) GROUP_REDUCE axis and the cooperative factor.
+  // Multi-GROUP-REDUCE-axes-per-reduce isn't reachable from the gate
+  // (hand_opts applies GROUPTOP to one REDUCE axis at a time) but the
+  // code defends against it explicitly.
+  i32 grp_idx = -1;
+  for (u32 ai = 0; ai < red_n_axes; ai++) {
+    if (red_kind_opts[ai] == UOP_OPT_GROUP_REDUCE) {
+      if (grp_idx >= 0) return 0;        // multiple GROUP_REDUCE axes: bail
+      grp_idx = (i32)ai;
+    }
+  }
+  if (grp_idx < 0) return 0;
+  u32 group_extent = red_factor_opts[grp_idx];
   if (group_extent == 0) return 0;
+  Term red_range = red_ranges[grp_idx];
   if (term_tag(red_range) != TAG_UOP || term_ext(red_range) != UOP_RANGE) {
     return 0;
   }
-  u32 red_extent = term_val(heap_read(term_val(red_range) + 2));
+  u32 red_axis   = uop_range_axis_id(red_range);
+  u32 red_extent = uop_range_extent(red_range);
   // Target-specific spellings: Metal -> `threadgroup` + `threadgroup_barrier`;
   // CUDA -> `__shared__` + `__syncthreads()`; C target bails (no shared mem).
   if (RMU_TARGET == CG_TARGET_C) return 0;
@@ -2180,39 +2222,50 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
                              : "threadgroup_barrier(mem_flags::mem_threadgroup);";
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
+  char acc_slot[40];
+  snprintf(acc_slot, sizeof(acc_slot), "%s[tt]", acc_name);
   // Shared-mem accumulator declaration.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s %s[%u];\n", shared_kw, acc_name, group_extent);
   // Per-thread init.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "%s[tt] = ", acc_name);
+  fprintf(fp, "%s = ", acc_slot);
   rmu_emit_reduce_init(red_kind, fp);
   fputs(";\n", fp);
   // Pre-loop barrier so every thread sees a clean slot.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s\n", barrier_stmt);
-  // Per-thread strided walk over the reduce extent.
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  // Multi-axis: open serial REDUCE loops for the non-GROUP axes around
+  // the cooperative strided walk over the GROUP axis.  Each thread
+  // iterates the full cross-product of non-grouped extents AND a 1/L
+  // slice of the grouped axis; the shared accumulator collects all
+  // partial sums into `_acc[tt]`.  Inner combine line touches body once.
+  u32 loop_depth = body_depth;
+  for (u32 ai = 0; ai < red_n_axes; ai++) {
+    if ((i32)ai == grp_idx) continue;
+    Term r = red_ranges[ai];
+    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
+    u32 ax  = uop_range_axis_id(r);
+    u32 ext = uop_range_extent(r);
+    for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+    fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) {\n",
+            ax, ax, ext, ax);
+    loop_depth++;
+  }
+  // Per-thread strided walk over the GROUP axis.
+  for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
   fprintf(fp, "for (uint a%u = tt; a%u < %u; a%u += %u) {\n",
           red_axis, red_axis, red_extent, red_axis, group_extent);
-  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
-  fprintf(fp, "%s[tt] = ", acc_name);
-  // Use the existing combine helper but supply the shared-slot lhs.
-  // rmu_emit_reduce_combine writes "_accN = _accN OP rhs;" -- we want
-  // "_accN[tt] = _accN[tt] OP rhs;" so render the rhs alone here.
-  fprintf(fp, "%s[tt]", acc_name);
-  if (red_kind == REDUCE_SUM)      fputs(" + ", fp);
-  else if (red_kind == REDUCE_MAX) fputs(" > ", fp);   // placeholder
-  else                              fputs(" + ", fp);
-  rmu_emit_term(red_src, fp);
-  if (red_kind == REDUCE_MAX) {
-    // max via ternary so the line stays a single statement.
-    fprintf(fp, " ? %s[tt] : ", acc_name);
-    rmu_emit_term(red_src, fp);
+  loop_depth++;
+  for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+  rmu_emit_group_combine_line(acc_slot, red_kind, red_src, fp);
+  // Close GROUP-axis loop + non-GROUP serial loops.
+  for (u32 ai = 0; ai <= red_n_axes; ai++) {
+    if (loop_depth <= body_depth) break;
+    loop_depth--;
+    for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
   }
-  fputs(";\n", fp);
-  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("}\n", fp);
   // Post-loop barrier.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s\n", barrier_stmt);
@@ -3338,21 +3391,20 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
                                          out_factors, n_out_true, depth, fp,
                                          needs_close);
   // GROUP_REDUCE detection has to fire BEFORE we declare the scalar
-  // accumulator -- otherwise the rendered MSL would have both decls
+  // accumulator -- otherwise the rendered output would have both decls
   // and the threadgroup-shared `_acc[L]` collides with the prior
-  // `float _acc;`.  GROUP_REDUCE is single-axis only.
-  if (red_n_axes == 1 && red_kind_opt != RMU_NO_OPT
-      && red_kind_opt == UOP_OPT_GROUP_REDUCE) {
-    // GROUP_REDUCE doesn't handle inner-K decomp yet; pass n_out_true
-    // so the close-loop count matches the open-loop count.
-    return rmu_emit_group_reduce(buf, addr, red_range, red_src,
-                                 red_kind, red_axis, red_factor_opt,
-                                 fp, body_depth, n_out_true, needs_close);
-  }
-  // Multi-axis GROUP_REDUCE on any axis: bail to the generic path.
-  if (red_n_axes > 1) {
+  // `float _acc;`.  Multi-axis is supported: serial REDUCE loops wrap
+  // the cooperative GROUP-axis strided walk.
+  {
+    int any_group = 0;
     for (u32 ai = 0; ai < red_n_axes; ai++) {
-      if (red_kind_opts[ai] == UOP_OPT_GROUP_REDUCE) return 0;
+      if (red_kind_opts[ai] == UOP_OPT_GROUP_REDUCE) { any_group = 1; break; }
+    }
+    if (any_group) {
+      return rmu_emit_group_reduce(buf, addr, red_ranges, red_kind_opts,
+                                   red_factor_opts, red_n_axes, red_src,
+                                   red_kind, fp, body_depth, n_out_true,
+                                   needs_close);
     }
   }
   // Emit accumulator decl using the reduce_axis as the unique id.
