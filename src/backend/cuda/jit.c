@@ -187,6 +187,10 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
   if (is_ptx) {
     ptx = (char *)cu_src;   // borrowed; freed by the caller's render buffer
     CUDA_JIT_PTX_LOADS++;
+    if (getenv("THVM_CUDA_DUMP_ALL_PTX")) {
+      fprintf(stderr, "--- our PTX (#%llu) ---\n%s--- end ---\n",
+              (unsigned long long)CUDA_JIT_PTX_LOADS, ptx);
+    }
   } else {
     // --- nvrtc compile ----------------------------------------------
     nvrtcProgram prog;

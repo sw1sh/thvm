@@ -133,9 +133,15 @@ typedef struct {
   // serial loops -- matching render_uop.c's rmu_emit_output_loops + the
   // CUDA dispatch.  `gd` holds the per-axis (stride, modulus) decode.
   RmuGlobalDecode gd;
-  int  has_geom;        // 1 -> at least one promoted axis (geom emitted)
+  int  has_geom;        // 1 -> at least one promoted/LOCAL axis (geom emitted)
   int  emitted_guard;   // 1 -> a `tid >= total` guard branched to DONE
-  char gtid_reg[40];    // flat thread-id register (ctaid*ntid + tid.x)
+  // Register holding the source for GLOBAL-axis decode: flat thread id
+  // (ctaid*ntid+tidx) when there is no LOCAL split; %ctaid.x when there
+  // is (mirrors legacy `tid` vs `tg` switch).
+  char gtid_reg[40];
+  // Register holding %tid.x when LOCAL axes are present; LOCAL RANGEs
+  // decode from here.  Empty otherwise.
+  char local_reg[40];
 
   int sm;               // compute capability (70 = V100)
 } PtxCtx;
@@ -281,6 +287,15 @@ static int ptx_is_cmp(u32 op) {
   return op == UOP_CMPLT || op == UOP_CMPEQ || op == UOP_ILT;
 }
 
+// 1 if the Term's opcode produces a .pred result (a comparison).  Used
+// so MUL/ADD with a comparison operand (the thvm "MUL(val, cmp) ->
+// masked value" idiom) emits selp instead of mul.f32 (which would be
+// invalid: PTX rejects mixed .f32 and .pred operands).
+static int ptx_term_is_pred(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  return ptx_is_cmp(term_ext(t));
+}
+
 static int ptx_is_int_alu(u32 op) {
   return op == UOP_IADD || op == UOP_ISUB || op == UOP_IMUL
       || op == UOP_IDIV || op == UOP_IMOD
@@ -325,8 +340,10 @@ static int ptx_emit_thread_geom(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
   ctx->emitted_guard = 0;
   memset(&ctx->gd, 0, sizeof(ctx->gd));
 
-  // Collect output (non-REDUCE) RANGE terms in list order.  Bail on any
-  // LOCAL axis (axis_type 4) -- the threadgroup split is M3b.
+  // Collect output (non-REDUCE) RANGE terms in list order.  LOCAL axes
+  // are kept -- rmu_compute_global_decode_ctx detects them by
+  // axis_type==4 and fills local_stride/modulus, which the RANGE case
+  // decodes from %tid.x.
   Term out_ranges[MAX_DIM];
   u32  out_kinds[MAX_DIM];
   u32  n_out = 0;
@@ -334,10 +351,6 @@ static int ptx_emit_thread_geom(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
     Term t = lk->uops[i];
     if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) continue;
     u32 at = uop_range_axis_type(t);
-    if (at == KAX_LOCAL) {                  // threadgroup split: M3b
-      if (getenv("THVM_ROUTE_TRACE")) fprintf(stderr, "[ptx-bail] LOCAL axis\n");
-      return 0;
-    }
     if (at == KAX_REDUCE) continue;         // reduce stays a loop
     if (n_out >= MAX_DIM) return 0;
     out_ranges[n_out] = t;
@@ -388,31 +401,64 @@ static int ptx_emit_thread_geom(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
   }
 
   rmu_compute_global_decode_ctx(out_ranges, n_out, promote, NULL, &ctx->gd);
-  if (ctx->gd.has_local) return 0;          // shouldn't happen (we bailed)
-  if (ctx->gd.n_globals == 0 || ctx->gd.total == 0) return 1;  // all serial
+  if (ctx->gd.n_globals == 0 && !ctx->gd.has_local) return 1;  // all serial
 
   ctx->has_geom = 1;
-  // Emit the flat thread id: tid = ctaid.x * ntid.x + tid.x.  All index
-  // registers are s32 to match the loop induction var + mad.wide.s32
-  // address path; the special-register reads use mov.u32 (the specials
-  // are u32) into the s32 regs (a bit copy, ptxas-legal).
+  // When LOCAL axes are present, GLOBAL decodes from %ctaid.x ("tg") +
+  // LOCAL from %tid.x ("tt").  Otherwise GLOBAL decodes from the flat
+  // thread id (ctaid*ntid+tidx).  Mirrors render_uop.c's `idx = has_local
+  // ? "tg" : "tid"` switch.
   char rtidx[40], rctaid[40], rntid[40];
   ptx_ssa(ctx, "tidx",  DT_INT32, rtidx,  sizeof(rtidx));
   ptx_ssa(ctx, "ctaid", DT_INT32, rctaid, sizeof(rctaid));
-  ptx_ssa(ctx, "ntid",  DT_INT32, rntid,  sizeof(rntid));
-  ptx_ssa(ctx, "gtid",  DT_INT32, ctx->gtid_reg, sizeof(ctx->gtid_reg));
   fprintf(fp, "\tmov.u32 %s, %%tid.x;\n",   rtidx);
   fprintf(fp, "\tmov.u32 %s, %%ctaid.x;\n", rctaid);
-  fprintf(fp, "\tmov.u32 %s, %%ntid.x;\n",  rntid);
-  fprintf(fp, "\tmad.lo.s32 %s, %s, %s, %s;\n",
-          ctx->gtid_reg, rctaid, rntid, rtidx);
-  // Bounds guard: if (tid >= total) ret.
-  char gp[40]; ptx_ssa(ctx, "guard", DT_BOOL, gp, sizeof(gp));
-  fprintf(fp, "\tsetp.ge.s32 %s, %s, %lld;\n",
-          gp, ctx->gtid_reg, (long long)ctx->gd.total);
-  fprintf(fp, "\t@%s bra DONE;\n", gp);
-  ctx->emitted_guard = 1;
+  if (ctx->gd.has_local) {
+    snprintf(ctx->gtid_reg,  sizeof(ctx->gtid_reg),  "%s", rctaid);
+    snprintf(ctx->local_reg, sizeof(ctx->local_reg), "%s", rtidx);
+  } else {
+    ptx_ssa(ctx, "ntid", DT_INT32, rntid, sizeof(rntid));
+    ptx_ssa(ctx, "gtid", DT_INT32, ctx->gtid_reg, sizeof(ctx->gtid_reg));
+    fprintf(fp, "\tmov.u32 %s, %%ntid.x;\n", rntid);
+    fprintf(fp, "\tmad.lo.s32 %s, %s, %s, %s;\n",
+            ctx->gtid_reg, rctaid, rntid, rtidx);
+    ctx->local_reg[0] = '\0';
+  }
+  if (ctx->gd.n_globals > 0 && ctx->gd.total > 0) {
+    char gp[40]; ptx_ssa(ctx, "guard", DT_BOOL, gp, sizeof(gp));
+    fprintf(fp, "\tsetp.ge.s32 %s, %s, %lld;\n",
+            gp, ctx->gtid_reg, (long long)ctx->gd.total);
+    fprintf(fp, "\t@%s bra DONE;\n", gp);
+    ctx->emitted_guard = 1;
+  }
   return 1;
+}
+
+// Resolve an operand to a VALUE register, emitting an implicit ld.global
+// if the operand is a bare INDEX_E.  thvm's convention is that INDEX_E
+// in value position means "load from this address" (the C-source
+// renderer prints `buf[addr]`); PTX is SSA and needs an explicit load.
+// Cached on a synthetic key (~t) so the same INDEX_E is loaded once.
+static const char *ptx_value_resolve(PtxCtx *ctx, Term t,
+                                     char *out, u32 out_sz, FILE *fp) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_INDEX_E) {
+    const char *r = ptx_reg_get(ctx, t);
+    snprintf(out, out_sz, "%s", r);
+    return out;
+  }
+  Term key = (Term)(~(u64)t);
+  const char *cached = ptx_reg_get(ctx, key);
+  if (cached[0] != '\0') { snprintf(out, out_sz, "%s", cached); return out; }
+  const char *ir = ptx_reg_get(ctx, t);
+  if (ir[0] == '\0') { out[0] = '\0'; return out; }
+  Term buf = heap_read(term_val(t) + 0);
+  u32 dt = (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFER)
+         ? uop_buffer_dtype(buf) : DT_FP32;
+  char vr[40]; ptx_ssa(ctx, "val", dt, vr, sizeof(vr));
+  fprintf(fp, "\tld.global.%s %s, [%s+0];\n", ptx_mem_type(dt), vr, ir);
+  ptx_reg_put(ctx, key, vr);
+  snprintf(out, out_sz, "%s", vr);
+  return out;
 }
 
 // Does t's subtree reference a UOP_RANGE with this axis_id?  Used to
@@ -548,6 +594,25 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
           }
           break;
         }
+        // LOCAL (threadgroup-bound) axis: decode from %tid.x ("tt").
+        if (ctx->has_geom && axis_id < 256
+            && ctx->gd.local_modulus_of_axis[axis_id] != 0
+            && ctx->local_reg[0] != '\0') {
+          u32 lstride = ctx->gd.local_stride_of_axis[axis_id];
+          u32 lmod    = ctx->gd.local_modulus_of_axis[axis_id];
+          char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
+          ptx_reg_put(ctx, t, r);
+          if (ctx->gd.n_locals == 1) {
+            fprintf(fp, "\tmov.s32 %s, %s;\n", r, ctx->local_reg);
+          } else if (lstride <= 1) {
+            fprintf(fp, "\trem.s32 %s, %s, %u;\n", r, ctx->local_reg, lmod);
+          } else {
+            char tmp[40]; ptx_ssa(ctx, "ldiv", DT_INT32, tmp, sizeof(tmp));
+            fprintf(fp, "\tdiv.s32 %s, %s, %u;\n", tmp, ctx->local_reg, lstride);
+            fprintf(fp, "\trem.s32 %s, %s, %u;\n", r, tmp, lmod);
+          }
+          break;
+        }
         // A degenerate extent-0 RANGE is the synthetic marker the reduce
         // accumulator's END carries -- not a real loop.  Skip it (no
         // register, no loop); liveness-based closing (below) handles the
@@ -653,11 +718,34 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
           int val_is_stack = (term_tag(value) == TAG_UOP
                               && term_ext(value) == UOP_STACK
                               && uop_stack_n(value) == F);
+          // The buffer ptr is on STORE slot 0; some F-lane store shapes
+          // carry plain integer indices in the STACK (not INDEX_E), in
+          // which case we compute the byte address per lane via
+          // mad.wide.s32 + the buffer's base pointer.
+          PtxBufSlot *bs = NULL;
+          if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFER) {
+            bs = ptx_find_buf(ctx, buf);
+            if (bs == NULL) bs = ptx_register_buf(ctx, buf);
+          }
           for (u32 i = 0; i < F; i++) {
             Term addr_i = uop_stack_src(addr, i);
             Term val_i  = val_is_stack ? uop_stack_src(value, i) : value;
-            const char *ir = ptx_reg_get(ctx, addr_i);
-            const char *vr = ptx_reg_get(ctx, val_i);
+            const char *ir;
+            char ibuf[40];
+            if (term_tag(addr_i) == TAG_UOP && term_ext(addr_i) == UOP_INDEX_E) {
+              ir = ptx_reg_get(ctx, addr_i);
+            } else {
+              // Plain integer index lane: compute the byte address.
+              const char *idx_reg = ptx_reg_get(ctx, addr_i);
+              if (idx_reg[0] == '\0' || bs == NULL) return 0;
+              u32 isz = dtype_itemsize(bs->dtype);
+              ptx_ssa(ctx, "index", DT_INT64, ibuf, sizeof(ibuf));
+              fprintf(fp, "\tmad.wide.s32 %s, %s, %u, %s;\n",
+                      ibuf, idx_reg, isz, bs->reg);
+              ir = ibuf;
+            }
+            char vbuf[40];
+            const char *vr = ptx_value_resolve(ctx, val_i, vbuf, sizeof(vbuf), fp);
             if (ir[0] == '\0' || vr[0] == '\0') return 0;
             u32 dt = ptx_dtype_of(val_i);
             fprintf(fp, "\tst.global.%s [%s+0], %s;\n",
@@ -667,7 +755,8 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         }
         // Scalar memory store.
         const char *ir = ptx_reg_get(ctx, addr);
-        const char *vr = ptx_reg_get(ctx, value);
+        char vbuf[40];
+        const char *vr = ptx_value_resolve(ctx, value, vbuf, sizeof(vbuf), fp);
         if (ir[0] == '\0' || vr[0] == '\0') return 0;
         u32 dt = ptx_dtype_of(value);
         fprintf(fp, "\tst.global.%s [%s+0], %s;\n", ptx_mem_type(dt), ir, vr);
@@ -729,9 +818,11 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         Term a = (ar >= 1) ? heap_read(loc + 0) : 0;
         Term b = (ar >= 2) ? heap_read(loc + 1) : 0;
         Term c = (ar >= 3) ? heap_read(loc + 2) : 0;
-        const char *ra = a ? ptx_reg_get(ctx, a) : "";
-        const char *rb = b ? ptx_reg_get(ctx, b) : "";
-        const char *rc = c ? ptx_reg_get(ctx, c) : "";
+        // Implicit-load INDEX_E in value position (thvm convention).
+        char ra_buf[40] = {0}, rb_buf[40] = {0}, rc_buf[40] = {0};
+        const char *ra = a ? ptx_value_resolve(ctx, a, ra_buf, sizeof(ra_buf), fp) : "";
+        const char *rb = b ? ptx_value_resolve(ctx, b, rb_buf, sizeof(rb_buf), fp) : "";
+        const char *rc = c ? ptx_value_resolve(ctx, c, rc_buf, sizeof(rc_buf), fp) : "";
         if ((ar >= 1 && ra[0] == '\0')
             || (ar >= 2 && rb[0] == '\0')
             || (ar >= 3 && rc[0] == '\0')) return 0;
@@ -751,6 +842,20 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         }
         char r[40]; ptx_ssa(ctx, "alu", res_dt, r, sizeof(r));
         ptx_reg_put(ctx, t, r);
+        // MUL/ADD-with-comparison-operand: the IR pattern MUL(val, cmp)
+        // means "val if cmp else 0" (masked value).  PTX rejects mixing
+        // .f32 with .pred in mul/add; emit selp instead.
+        if ((op == UOP_MUL || op == UOP_ADD)
+            && dtype_is_float(res_dt)
+            && ar >= 2 && (ptx_term_is_pred(a) || ptx_term_is_pred(b))) {
+          const char *val_reg = ptx_term_is_pred(a) ? rb : ra;
+          const char *pred_reg = ptx_term_is_pred(a) ? ra : rb;
+          char zero[24]; ptx_render_val(res_dt, 0, zero, sizeof(zero));
+          // selp.f32 r, val, 0.0, pred  ->  pred ? val : 0
+          fprintf(fp, "\tselp.%s %s, %s, %s, %s;\n",
+                  ptx_reg_type(res_dt), r, val_reg, zero, pred_reg);
+          break;
+        }
         if (!ptx_emit_alu(op, r, ra, rb, rc, alu_dt, fp)) return 0;
         break;
       }
