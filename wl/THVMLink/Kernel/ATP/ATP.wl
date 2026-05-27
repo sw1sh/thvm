@@ -2703,14 +2703,26 @@ atpScheduleFor[m_] := {m};
    inspect / count / cherry-pick entries before running.  The
    underlying atpScheduleFor is private; TAtpSchedule is the public
    alias. *)
+(* Catch unrecognized string Method names BEFORE atpScheduleFor's
+   catch-all wraps them in a 1-element list -- otherwise
+   TAtpSchedule["NotARealMethod"] silently returns {"NotARealMethod"}.
+   Recognized strings are the named presets + the three completion-
+   family heads + "Automatic". *)
+$AtpKnownMethodNames := Join[$AtpMethodPresets,
+    {"Completion", "GoalDirected", "MNF", "Automatic"}];
+TAtpSchedule[m_String] /; ! MemberQ[$AtpKnownMethodNames, m] :=
+    (Message[TFindProof::badmethod, m]; $Failed);
 TAtpSchedule[m_] := atpScheduleFor[m];
+TAtpSchedule[m_String, cj_, ax_List] /;
+        ! MemberQ[$AtpKnownMethodNames, m] :=
+    (Message[TFindProof::badmethod, m]; $Failed);
 TAtpSchedule[m_, cj_, ax_List] := atpScheduleFor[m, ax, cj];
 TAtpSchedule[m_, thm_String, theory_String] := With[{
         cj = AxiomaticTheory[theory, "NotableTheorems"][thm],
         ax = AxiomaticTheory[theory]},
     If[ MissingQ[cj] || ! ListQ[ax],
         $Failed,
-        atpScheduleFor[m, ax, cj]]
+        TAtpSchedule[m, cj, ax]]
 ];
 
 (* TAtpDescribeMethod: human-readable Method expansion.  Returns the
@@ -2731,6 +2743,14 @@ TAtpDescribeMethod[name : ("Portfolio" | "VampirePortfolio"
     <|"Schedule" -> atpScheduleFor[name]|>;
 TAtpDescribeMethod[Automatic] :=
     <|"Schedule" -> atpScheduleFor[Automatic]|>;
+(* Catch unrecognized string Method names BEFORE the catch-all
+   silently returns <||>.  Same recognized set as TAtpSchedule. *)
+TAtpDescribeMethod[m_String] /;
+        ! MemberQ[$AtpKnownMethodNames, m] :=
+    (Message[TFindProof::badmethod, m]; $Failed);
+TAtpDescribeMethod[{m_String, subopts___Rule}] /;
+        ! MemberQ[$AtpKnownMethodNames, m] :=
+    (Message[TFindProof::badmethod, m]; $Failed);
 TAtpDescribeMethod[{m_String, subopts___Rule}] :=
     Association[{subopts}];
 TAtpDescribeMethod[m_String] := <||>;

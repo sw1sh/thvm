@@ -2039,6 +2039,23 @@ VerificationTest[
     TestID -> "ATP/describe/unknown-theorem-name-fails"
 ]
 
+(* Unknown Method NAME (not in $AtpMethodPresets or the canonical
+   completion family) should yield $Failed with TFindProof::badmethod
+   rather than silently being accepted as a 1-element schedule.  The
+   iter 56 fix flags this gap in both TAtpSchedule and
+   TAtpDescribeMethod. *)
+VerificationTest[
+    Quiet @ TAtpSchedule["NotARealMethod"],
+    $Failed,
+    TestID -> "ATP/schedule/unknown-method-name-fails"
+]
+
+VerificationTest[
+    Quiet @ TAtpDescribeMethod["NotARealMethod"],
+    $Failed,
+    TestID -> "ATP/describe/unknown-method-name-fails"
+]
+
 (* === TAtpSchedule public introspection ============================ *)
 
 (* TAtpSchedule[Method] returns the schedule the dispatcher would
