@@ -5,6 +5,9 @@
 
    Uses the iter-30-32 return specs (AppliedMethod / WallTime /
    PortfolioTrace) so a portfolio's per-slice cost is visible.
+   Iter 45-52 added the named presets (Twee / EProver / AllPresets /
+   VampirePortfolioCompact); the default method set below now exercises
+   each preset alongside the bare Automatic dispatch.
 
    Usage:
      wolframscript -f tools/baselines/bench_methods.wls
@@ -19,18 +22,22 @@ print[args___] := WriteString["stdout",
 
 $theorems = {
     {"AbelianGroupAxioms", "InverseOfInverse"},
-    {"BooleanAxioms", "AndCommutativity"}
+    {"BooleanAxioms", "AndCommutativity"},
+    {"GroupAxioms", "LeftIdentity"}
 };
 
-(* Keep the method set small + simple-config-first; large portfolio
-   sweeps over many theorems have hit kernel SIGSEGV in this paclet
-   when configs that fail-fast cycle through several portfolio slices
-   in sequence.  Add more once that bug is investigated. *)
+(* Named-preset surface (post-iter-52).  Each preset bundles a specific
+   strategy; "VampirePortfolioCompact" + "AllPresets" expand into
+   schedules.  The iter-40 SIGSEGV fix means cycling fail-fast slices
+   is safe again -- a portfolio sweep no longer crashes the kernel.  *)
 $methods = {
     Automatic,
-    {"Completion", "CriticalPairWeight" -> "Twee"},
-    {"Completion", "CriticalPairWeight" -> "Staggered",
-        "FifoTiebreak" -> True}
+    "Waldmeister",
+    "VampireUEQ",
+    "Twee",
+    "EProver",
+    "VampirePortfolioCompact",
+    "AllPresets"
 };
 
 $budget = 5;
@@ -46,11 +53,12 @@ Do[
             Method -> benchM, TimeConstraint -> $budget];
         headStr = If[Head[proof] === ProofObject, "ProofObject", "Failed"];
         walls = Quiet @ TFindProof[benchThm, benchTheory, "WallTime",
-            Method -> benchM, TimeConstraint -> 1];
+            Method -> benchM, TimeConstraint -> $budget];
         walls = If[NumericQ[walls], Round[walls, 0.01], -1];
         applied = Quiet @ TFindProof[benchThm, benchTheory, "AppliedMethod",
-            Method -> benchM, TimeConstraint -> 1];
-        applied = If[applied === Automatic || (! ListQ[applied] && ! StringQ[applied]),
+            Method -> benchM, TimeConstraint -> $budget];
+        applied = If[
+            applied === Automatic || (! ListQ[applied] && ! StringQ[applied]),
             "n/a", ToString[InputForm @ applied]];
         print[benchTheory, "/", benchThm, "\t",
             ToString[InputForm @ benchM], "\t",
