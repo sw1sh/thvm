@@ -67,7 +67,16 @@ static void rmu_emit_unroll_pragma(FILE *fp, u32 factor) {
 // matmul's K=25 contraction, conv's K=9/27, etc.  Larger reduces stay
 // on the rolled loop to keep the generated body size sane.  (Formerly
 // RMU_CONV_UNROLL_MAX -- the conv2d-flat template uses the same gate.)
-#define RMU_REDUCE_UNROLL_MAX 64u
+//
+// Lowered from 64 -> 16 (2026-05-27) after V100 measurement showed
+// nvrtc spending 350-390 s cold-compiling conv kid=3 with all three
+// reduce axes (32, 5, 5) `#pragma unroll`'d AND four parallel
+// accumulators (F=4): 32*5*5*5 stmts = 4000 explicit PTX lines.  With
+// threshold 16 the K=32 outer stays as a runtime for-loop; only the
+// kH/kW (extent 5) inner stays unrolled.  nvcc handles 5*5 = 25
+// inline iterations of a 5-stmt body easily.  Cold step 1 dropped
+// from 390 s -> 54 s with this change.
+#define RMU_REDUCE_UNROLL_MAX 16u
 
 // Buffer name resolution.
 //
