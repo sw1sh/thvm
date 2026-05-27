@@ -102,9 +102,19 @@ static CudaJitSlot *cuda_jit_probe(u64 key, int *found) {
   return &CUDA_JIT_CACHE[h0];   // table full -> evict home (degenerate)
 }
 
-// Compile a .cu source string with nvrtc and load it as a module.
-// Returns a resolved CUfunction for `kernel_name`, or NULL on any
-// nvrtc / driver failure (the reason lands in thvm_cuda_last_error).
+// Detect a PTX-assembly source (emitted by render_ptx.c) vs a CUDA-C
+// source (render_uop / render_linearized).  PTX modules start with a
+// `.version` directive (after optional leading whitespace).
+static int cuda_src_is_ptx(const char *s) {
+  if (s == NULL) return 0;
+  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+  return strncmp(s, ".version", 8) == 0;
+}
+
+// Compile a CUDA-C source string with nvrtc (or load a PTX source
+// directly, bypassing nvrtc) and load it as a module.  Returns a
+// resolved CUfunction for `kernel_name`, or NULL on any nvrtc / driver
+// failure (the reason lands in thvm_cuda_last_error).
 fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
   if (!CUDA_READY) {
     snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
@@ -161,53 +171,68 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     }
   }
 
-  // --- nvrtc compile ------------------------------------------------
-  nvrtcProgram prog;
-  nvrtcResult nr = nvrtcCreateProgram(&prog, cu_src, kernel_name,
-                                      0, NULL, NULL);
-  if (nr != NVRTC_SUCCESS) {
-    snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
-             "nvrtcCreateProgram: %s", nvrtcGetErrorString(nr));
-    return NULL;
-  }
-  // --gpu-architecture: track the live device.  V100 -> compute_70.
-  char arch_opt[32];
-  int sm = cuda_device_sm();
-  if (sm <= 0) sm = 70;   // safe default if the probe failed
-  snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
-  const char *opts[] = { arch_opt };
-  nr = nvrtcCompileProgram(prog, 1, opts);
-  if (nr != NVRTC_SUCCESS) {
-    size_t log_sz = 0;
-    nvrtcGetProgramLogSize(prog, &log_sz);
-    char *log = (char *)malloc(log_sz + 1);
-    if (log != NULL) {
-      nvrtcGetProgramLog(prog, log);
-      log[log_sz] = '\0';
-      fprintf(stderr, "thvm: nvrtc compile failed:\n%s\n", log);
+  // PTX passthrough: if the rendered source is already PTX assembly
+  // (the render_ptx.c emitter, detected by a leading `.version`), skip
+  // nvrtc entirely and hand the text straight to cuModuleLoadData.  This
+  // is the whole point of the PTX renderer -- bypass nvrtc's C++ frontend,
+  // which is what blows up on the opt-rich conv kernels.  `ptx` borrows
+  // cu_src in this branch (ptx_owned == 0, so we don't free it).
+  char *ptx = NULL;
+  int   ptx_owned = 0;
+  int   is_ptx = cuda_src_is_ptx(cu_src);
+
+  if (is_ptx) {
+    ptx = (char *)cu_src;   // borrowed; freed by the caller's render buffer
+  } else {
+    // --- nvrtc compile ----------------------------------------------
+    nvrtcProgram prog;
+    nvrtcResult nr = nvrtcCreateProgram(&prog, cu_src, kernel_name,
+                                        0, NULL, NULL);
+    if (nr != NVRTC_SUCCESS) {
       snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
-               "nvrtcCompileProgram: %s (see stderr for log)",
-               nvrtcGetErrorString(nr));
-      free(log);
+               "nvrtcCreateProgram: %s", nvrtcGetErrorString(nr));
+      return NULL;
     }
+    // --gpu-architecture: track the live device.  V100 -> compute_70.
+    char arch_opt[32];
+    int sm = cuda_device_sm();
+    if (sm <= 0) sm = 70;   // safe default if the probe failed
+    snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
+    const char *opts[] = { arch_opt };
+    nr = nvrtcCompileProgram(prog, 1, opts);
+    if (nr != NVRTC_SUCCESS) {
+      size_t log_sz = 0;
+      nvrtcGetProgramLogSize(prog, &log_sz);
+      char *log = (char *)malloc(log_sz + 1);
+      if (log != NULL) {
+        nvrtcGetProgramLog(prog, log);
+        log[log_sz] = '\0';
+        fprintf(stderr, "thvm: nvrtc compile failed:\n%s\n", log);
+        snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
+                 "nvrtcCompileProgram: %s (see stderr for log)",
+                 nvrtcGetErrorString(nr));
+        free(log);
+      }
+      nvrtcDestroyProgram(&prog);
+      return NULL;
+    }
+    size_t ptx_sz = 0;
+    nvrtcGetPTXSize(prog, &ptx_sz);
+    ptx = (char *)malloc(ptx_sz);
+    if (ptx == NULL) {
+      nvrtcDestroyProgram(&prog);
+      snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR, "PTX alloc failed");
+      return NULL;
+    }
+    nvrtcGetPTX(prog, ptx);
     nvrtcDestroyProgram(&prog);
-    return NULL;
+    ptx_owned = 1;
   }
-  size_t ptx_sz = 0;
-  nvrtcGetPTXSize(prog, &ptx_sz);
-  char *ptx = (char *)malloc(ptx_sz);
-  if (ptx == NULL) {
-    nvrtcDestroyProgram(&prog);
-    snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR, "PTX alloc failed");
-    return NULL;
-  }
-  nvrtcGetPTX(prog, ptx);
-  nvrtcDestroyProgram(&prog);
 
   // --- module load + function lookup -------------------------------
   CUmodule module;
   CUresult cr = cuModuleLoadData(&module, ptx);
-  free(ptx);
+  if (ptx_owned) free(ptx);
   if (cr != CUDA_SUCCESS) {
     cuda_set_error("cuModuleLoadData", cr);
     return NULL;
