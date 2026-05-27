@@ -327,10 +327,12 @@ thread) lands.
   _sh<kid>_<idx> = in[...]` declaration per K-iteration, then the F
   MADs reuse the local. Cuts `in1[` occurrences in K-body from F to
   1.
-- **CUDA gate STILL Metal-only** (`hand_opts.c::kernel_hand_coded_opts`
-  narrows to `b->id == 2`). V100 BS=128 STEPS=10 after path #2 +
-  gate-widened still runs at 3682 ms warm vs 1464 ms narrow-gate
-  baseline. Loss stays monotone 2.81 -> 1.73, correctness preserved.
+- **CUDA gate widened** (`hand_opts.c::kernel_hand_coded_opts` uses
+  `hand_opt_kernel_on_gpu`, `b->id == 2 || b->id == 3`), per spec --
+  tinygrad's `hand_coded_optimizations` runs on every renderer. V100
+  BS=128 STEPS=10 runs slow on CUDA (see the measurement table below);
+  the remedy is the PTX renderer port, not a backend carve-out. Loss
+  stays monotone 2.81 -> 1.73, correctness preserved.
 - **Architectural alternative piece #1 LANDED** (this commit): port of
   tinygrad `codegen/late/expander.py` to the thvm UOp graph rewrite
   layer.  Introduces FOUR structural opcodes (`UOP_VCONST`,
@@ -380,22 +382,26 @@ the new pipeline runs.
 
 **V100 wall, BS=128 STEPS=10 (TEST_EVERY=0, THVM_GC=0, V100-SXM2-16GB)**:
 
-| Configuration                                         | Cold step 1 | Warm mean | Compiles | Loss |
+| Configuration                                         | Cold step 1 | Warm step | Compiles | Loss |
 |-------------------------------------------------------|------------:|----------:|---------:|-----:|
-| Gate Metal-only (CUDA off; CURRENT PRODUCTION)        |    3890 ms  |   505 ms  |     110  | 2.81 -> 1.73 |
-| Gate widened + RMU_REDUCE_UNROLL_MAX=16               |  43408 ms   | 81000 ms  |     137  | 2.81 -> 2.47 (5 steps) |
-| Gate widened + 16 + Section-7 UNROLL CUDA-skip        |  43408 ms   | 65000 ms  |     137  | 2.81 -> 1.83 (5 steps) |
+| Gate widened (CUDA gets the heuristic; SPEC)          |  43408 ms   |   262 s   |     167  | 2.81 -> 1.83 (5 steps) |
+| Gate widened, no Section-7 UNROLL CUDA-skip           |  47196 ms   |   301 s   |     165  | 2.81 -> 1.89 (5 steps) |
 | Gate widened + RMU_REDUCE_UNROLL_MAX=64 (initial try) |   ~390 s    | ~3500 ms  |     ~140 | 2.81 -> 1.73 |
+| Reference: heuristic OFF on CUDA (naive, no opts)     |    3890 ms  |   505 ms  |     110  | 2.81 -> 1.73 |
 | tinygrad reference (PTX renderer)                     |       -     |  ~115 ms  |       -  | -    |
 
-**Disposition**: production CUDA gate stays Metal-only
-(`hand_opts.c::kernel_hand_coded_opts` calls `hand_opt_kernel_metal_only`).
-The 505 ms warm matches the naive baseline; the widened-gate experiments
-on V100 ran 130x slower (65000 ms) even with Section-7 UNROLL skipped.
-The Section-7 CUDA-skip (`hand_opt_kernel_is_cuda` check in the
-heuristic body) stays in place so it is ready when the gate widens
-again -- it was a 13% warm improvement when the gate was widened, real
-but tiny next to the 130x gap.
+**Finding, not a disposition**: the gate runs the heuristic on CUDA
+(`hand_opts.c::kernel_hand_coded_opts` calls `hand_opt_kernel_on_gpu`,
+which is `b->id == 2 || b->id == 3`), matching tinygrad's spec --
+`hand_coded_optimizations` applies to every renderer. On V100 the
+opt'd kernels currently run ~130x slower than the heuristic-off naive
+path (262 s vs 505 ms warm) because thvm emits C-style source for
+nvrtc instead of PTX; the heuristic's UPCAST/UNROLL register-blocking
+assumes the PTX register model. The Section-7 UNROLL CUDA-skip
+(`hand_opt_kernel_is_cuda` check in the heuristic body) trims this
+~13% (301 s -> 262 s) and is a tinygrad-style intra-heuristic target
+skip (heuristic.py:37 AMX, :109 DSP). The remediation is to port
+`tinygrad/renderer/ptx.py`, NOT to disable the spec on CUDA.
 
 **Diagnosis**: every IR-level rewrite landed cleanly with unit tests.
 The GRAPH shrinks dramatically through the sym sweeps. But the final

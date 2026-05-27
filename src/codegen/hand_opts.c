@@ -212,18 +212,6 @@ static int hand_opt_kernel_is_cuda(KernelEntry const *ke) {
   return b != NULL && b->id == 3;
 }
 
-// Production CUDA gate: kept off until tinygrad's PTX renderer is
-// ported.  See the long comment at kernel_hand_coded_opts entry for
-// the V100 measurement.
-static int hand_opt_kernel_metal_only(KernelEntry const *ke) {
-  Backend *b = NULL;
-  if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
-    b = TENS[ke->output_tid].backend;
-  }
-  if (b == NULL) b = DEFAULT_BACKEND;
-  return b != NULL && b->id == 2;
-}
-
 // --- matvec detection (heuristic.py 65-82) --------------------------
 // Returns 1 if the kernel matches tinygrad's matvec shape:
 //   STORE.value is REDUCE_SUM of MUL of INDEX_E,INDEX_E
@@ -335,22 +323,16 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // ke->schedule->autotuned = 1 at the start.
   if (ke->schedule != NULL) ke->schedule->autotuned = 1;
   if (!hand_coded_opts_enabled()) return 0;
-  // Metal-only gate.  The whole architectural pipeline (expander +
-  // devectorize + linearize + render_linearized + shared-load CSE +
-  // parallel-acc emit) was ported faithfully from tinygrad, and the
-  // kernels produced on CUDA are correct.  But tinygrad's CUDA backend
-  // ALSO ships a direct PTX renderer (tinygrad/renderer/ptx.py) that
-  // bypasses nvrtc's C++ frontend; the heuristic's UPCAST/UNROLL/MATVEC
-  // shapes are tuned for the PTX renderer's register model.  Routed
-  // through nvrtc on V100, the same shapes produce kernels that are
-  // both slow to compile AND slow to run -- BS=128 STEPS=10 warm step
-  // ~262 s (this gate widened, with the Section-7 UNROLL CUDA-skip
-  // active) vs ~540 ms with the gate Metal-only and CUDA taking the
-  // legacy walker path.  Until the PTX renderer port lands, CUDA stays
-  // off.  See docs/tinygrad_late_passes.md "V100 measurement" for the
-  // full numbers + the Section-7 skip in the heuristic body (which
-  // stays in place so it is ready when the gate widens again).
-  if (!hand_opt_kernel_metal_only(ke)) return 0;
+  // GPU gate: runs on both Metal (b->id == 2) and CUDA (b->id == 3),
+  // matching tinygrad's spec (heuristic.py applies to all renderers).
+  // Intra-heuristic target-aware skips (see hand_opt_kernel_is_cuda
+  // users below) are the tinygrad-faithful way to handle backend
+  // peculiarities -- mirrors heuristic.py:37 (AMX skip) and :109
+  // (DSP skip).  See docs/tinygrad_late_passes.md for the V100
+  // measurement (warm step is currently 130x naive baseline; the
+  // remediation is to port tinygrad/renderer/ptx.py, not to narrow
+  // the gate).
+  if (!hand_opt_kernel_on_gpu(ke)) return 0;
 
   u32 n_applied = 0;
   HandOptAxes ax;
