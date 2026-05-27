@@ -2489,7 +2489,7 @@ atpParseMethod[{"Twee", subopts___Rule}] :=
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
 $AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee",
-    "Portfolio", "VampirePortfolio"};
+    "Portfolio", "VampirePortfolio", "VampirePortfolioCompact"};
 
 (* Method -> "VampirePortfolio": a 10-entry rotation modeled on the
    portfolio-cycling shape Vampire 5.0.1 ships for UEQ -- many short
@@ -2546,6 +2546,24 @@ $VampirePortfolio = {
    into the schedule.  Anything else passes through atpParseMethod. *)
 atpScheduleFor["VampirePortfolio"] := $VampirePortfolio;
 atpScheduleFor["VampirePortfolio", _, _] := $VampirePortfolio;
+
+(* Method -> "VampirePortfolioCompact": a 3-entry rotation suitable
+   for small TimeConstraints where the 10-entry $VampirePortfolio
+   would give each slice a sliver (TC=5 -> 0.5s/entry, not enough
+   to crack much).  At TC=5 each entry gets ~1.67s; at TC=15 ~5s.
+   Picks one entry from each of the three lever families exercised
+   by the full portfolio: Vampire flagship, Twee redundancy, and a
+   weight-tuned completion fallback. *)
+$VampirePortfolioCompact = {
+    "VampireUEQ",
+    "Twee",
+    {"Completion", "CriticalPairWeight" -> "Mix2",
+        "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}
+};
+atpParseMethod["VampirePortfolioCompact"] :=
+    {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0};
+atpScheduleFor["VampirePortfolioCompact"] := $VampirePortfolioCompact;
+atpScheduleFor["VampirePortfolioCompact", _, _] := $VampirePortfolioCompact;
 
 atpParseMethod[m_] := (
     Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0});

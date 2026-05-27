@@ -1984,6 +1984,21 @@ VerificationTest[
     TestID -> "ATP/schedule/VampirePortfolio-len-10"
 ]
 
+(* "VampirePortfolioCompact": 3-entry rotation for small budgets. *)
+VerificationTest[
+    Length @ TAtpSchedule["VampirePortfolioCompact"],
+    3,
+    TestID -> "ATP/schedule/VampirePortfolioCompact-len-3"
+]
+
+(* The compact rotation should dispatch + prove a trivial goal. *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> "VampirePortfolioCompact", TimeConstraint -> 5],
+    ProofObject,
+    TestID -> "ATP/method/VampirePortfolioCompact-proves-trivial"
+]
+
 (* Automatic with no problem in hand returns the fixed $AtpSchedule
    (no structure-recognition tailoring possible without conj+ax). *)
 VerificationTest[
@@ -2020,7 +2035,8 @@ VerificationTest[
     With[{p = THVMLink`ATP`Private`$AtpMethodPresets},
         {ListQ[p], AllTrue[p, StringQ],
          SubsetQ[p, {"Waldmeister", "VampireUEQ", "Twee",
-                     "Portfolio", "VampirePortfolio"}]}],
+                     "Portfolio", "VampirePortfolio",
+                     "VampirePortfolioCompact"}]}],
     {True, True, True},
     TestID -> "ATP/method/preset-registry-contents"
 ]
