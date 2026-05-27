@@ -803,21 +803,44 @@ Verified on V100 with `THVM_GROUPTOP=1 STEPS=3 BS=128`:
 - 137 compiles (same as baseline -- only the Linear kernel changes shape)
 - warm 9.3 s vs baseline 9.5 s (~+2.5%)
 
-A bigger speedup needs the gate to fire on more than one kernel.  Two
-directions:
-1. **Multi-axis GROUP_REDUCE template**: open the cooperative pattern
-   around N reduce axes (each thread strides through the cross-product),
-   so conv's `(C_in, kH, kW)` reduce gets the parallel template.
-2. **Proper split semantics**: tinygrad's `OptOps.GROUP` splits a
-   single REDUCE axis into outer (serial) + inner (cooperative)
-   instead of treating the OPT as a single-axis stamp.  Pairs naturally
-   with the multi-axis template.
+## Multi-axis GROUP_REDUCE (commit 9d84ba5a)
+
+`rmu_emit_group_reduce` now accepts the full reduce-range array.  The
+non-grouped REDUCE axes wrap the cooperative GROUP-axis loop as serial
+for-loops, so the conv `(C_in, kH, kW)` reduce gets the parallel
+template too:
+
+```
+for (uint a_red1 = 0; a_red1 < ext1; ++a_red1)
+  for (uint a_red2 = 0; a_red2 < ext2; ++a_red2)
+    for (uint a_grp = tt; a_grp < extG; a_grp += k)
+      _acc[tt] = combine(_acc[tt], body(...));
+```
+
+`hand_opts.c` Section 4 GROUPTOP gate picks the LARGEST REDUCE axis
+that divides 16 (the obvious heuristic for the parallel slice).
+
+V100 beautiful_mnist BS=128 **STEPS=5** (THVM_GROUPTOP=1, no PTX):
+
+| Config              | Cold    | Warm mean | Compiles | Loss        |
+|---------------------|--------:|----------:|---------:|-------------|
+| Baseline (no GROUPTOP) | 15.1 s | 18.2 s | 137 | 2.81 -> 2.20 |
+| **GROUPTOP multi-axis** | **10.7 s** | **7.3 s** | **125** | **2.81 -> 2.20** |
+
+That's a **-29% cold / -60% warm** with -12 compiles and bit-identical
+losses.  The gate now fires on ~30 kernels per step (vs 1 in the
+single-axis era); most are 3-axis conv reduces ("best of 3 red axes"),
+plus the original Linear matmul.
+
+(Peak memory at 5 steps is 1.2GB in BOTH configs -- the earlier note
+of "GROUPTOP raises peak to 1.2GB" was comparing different step counts
+and is wrong; not a regression.)
 
 The PTX-renderer GROUP_REDUCE emit (shared declaration in prologue +
-`bar.sync 0;` + the `if (tt==0)` final fold) is deferred until the
-gate fires on enough kernels to justify the new code path -- the
-C-source CUDA path through nvrtc handles the single matmul case at
-~comparable warm time today.
+`bar.sync 0;` + the `if (tt==0)` final fold) is still deferred -- the
+C-source CUDA path through nvrtc already gives us the win above, and
+the PTX detour would need to be measurably faster than nvrtc to be
+worth the new code.
 
 ## References
 
