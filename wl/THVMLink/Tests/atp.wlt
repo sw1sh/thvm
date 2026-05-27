@@ -2290,6 +2290,14 @@ VerificationTest[
     TestID -> "ATP/single-axiom/ForAll-wraps"
 ]
 
+(* Single-arg completion form also auto-wraps a non-list axiom
+   (iter 69 parity with iter 68's prove path). *)
+VerificationTest[
+    Length @ TFindProof[a == b, TimeConstraint -> 3],
+    1,
+    TestID -> "ATP/single-axiom/single-arg-completion-wraps"
+]
+
 (* === TPTPImport pipe-through (iter 65) ============================ *)
 
 (* TPTPImport produces String-headed compounds like "f"[X_] for TPTP

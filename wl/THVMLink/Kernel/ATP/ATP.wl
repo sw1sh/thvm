@@ -4092,6 +4092,17 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     "TATPError"
 ];
 
+(* Single non-list axiom: auto-wrap and re-dispatch.  Same shape as
+   the (conj, single_ax) wrap (iter 68), at the completion entry. *)
+TFindProof[axiom : (_Equal | _Unequal | _ForAll
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        opts:OptionsPattern[]] :=
+    TFindProof[{axiom}, opts];
+TFindProof[axiom : (_Equal | _Unequal | _ForAll
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
+    TFindProof[{axiom}, returnSpec, opts];
+
 (* Completion of an explicit axiom list. *)
 TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
