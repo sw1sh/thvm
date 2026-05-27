@@ -2304,6 +2304,22 @@ atpBwdDemodOpt[o_Association] :=
 atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0};
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
+(* Shared dispatch helper for the named-preset methods (Waldmeister,
+   VampireUEQ, Twee, EProver, ...).  Each preset is just a defaults
+   Association + a default GoalDirected toggle; this helper merges
+   user subopts over the defaults, computes mnf, and forwards to
+   atpParseCompletionOpts.  Subopts always override the preset's
+   defaults; "GoalDirected" -> True/False in subopts overrides the
+   preset default (post-merge).  Returns the option vector that
+   atpParseCompletionOpts produces. *)
+atpDispatchPreset[defaults_Association, defaultGD_, subopts_List] :=
+    Block[{o = Association[subopts], merged, mnf},
+        merged = Join[defaults, o];
+        mnf = If[ TrueQ @ Lookup[merged, "GoalDirected", defaultGD], 1, 0];
+        merged = KeyDrop[merged, "GoalDirected"];
+        atpParseCompletionOpts[Normal[merged], mnf]
+    ];
+
 (* Shared suboption decoder for the completion-family methods.  Returns
    {cpWeight, ordering, autoPrec, useMnf}; `mnf` is fixed by the head
    ("Completion" -> 0, "GoalDirected"/"MNF" -> 1) so every method takes
@@ -2359,36 +2375,31 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
    "GoalDirected" -> True to add the MNF bidirectional front on top of
    the completion path for a symmetric goal that never meets at one
    normal form. *)
+(* Waldmeister's Orkus default for an unrecognized (single-operator
+   nand) problem is StdS = kbo(std), itl(mi), zb(mnf) (Sinai.h:109,
+   131): KBO ordering, the interleaved CPdimension (itl(mi) ->
+   SelectionRatio 51), the MixWeight classification (no cph(...) ->
+   Heu_MixWeight, NewClassification.c:850), and goal normalization
+   (zb(mnf)).  With Mix the engine follows WM's exact selection
+   trajectory; Add diverges at rule 10.  RHSInterreduce + UnfailingCP
+   are part of faithful unfailing completion.  StdS has no gj(), so
+   GroundJoin is off.
+
+   WM's zb(mnf) is goal normalization, not a separate exhaustive
+   bidirectional front; thvm's MNF front search re-expands its whole
+   node table every time a rule is added (O(n_nodes) per selection),
+   which dominates a deep completion.  The preset runs the completion
+   path -- whose single-normal-form goal check closes every goal WM's
+   StdS closes -- and only adds the MNF front when
+   "GoalDirected" -> True is requested for a symmetric goal the
+   single-NF check cannot reach. *)
 atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
-    Block[{o = Association[{subopts}], merged, mnf},
-        (* Waldmeister's Orkus default for an unrecognized (single-
-           operator nand) problem is StdS = kbo(std), itl(mi), zb(mnf)
-           (Sinai.h:109,131): KBO ordering, the interleaved CPdimension
-           (itl(mi) -> SelectionRatio 51), the MixWeight classification
-           (no cph(...) -> Heu_MixWeight, NewClassification.c:850), and
-           goal normalization (zb(mnf)).  With Mix the engine follows
-           WM's exact selection trajectory; Add diverges at rule 10.
-           RHSInterreduce + UnfailingCP are part of faithful unfailing
-           completion.  StdS has no gj(), so GroundJoin is off.
-
-           WM's zb(mnf) is goal normalization, not a separate exhaustive
-           bidirectional front; thvm's MNF front search re-expands its
-           whole node table every time a rule is added (O(n_nodes) per
-           selection), which dominates a deep completion.  The preset
-           runs the completion path -- whose single-normal-form goal
-           check closes every goal WM's StdS closes -- and only adds
-           the MNF front when "GoalDirected" -> True is requested for a
-           symmetric goal the single-NF check cannot reach. *)
-        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", False], 1, 0];
-        o = KeyDrop[o, "GoalDirected"];
-        merged = Join[<|
-            "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
-            "AutoPrecedence" -> True, "SelectionRatio" -> 51,
-            "RHSInterreduce" -> True, "UnfailingCP" -> True,
-            "CPSetInterreduce" -> True|>, o];
-        atpParseCompletionOpts[Normal[merged], mnf]
-    ];
+    atpDispatchPreset[<|
+        "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
+        "AutoPrecedence" -> True, "SelectionRatio" -> 51,
+        "RHSInterreduce" -> True, "UnfailingCP" -> True,
+        "CPSetInterreduce" -> True|>, False, {subopts}];
 
 (* Method -> "VampireUEQ": a preset modeled on the Vampire 5.0.1 UEQ
    portfolio entry that cracks ShefferAxioms/AndAssociativity --
@@ -2428,18 +2439,13 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
        BackwardDemod to give the full bd=all both-sides demodulation). *)
 atpParseMethod["VampireUEQ"] := atpParseMethod[{"VampireUEQ"}];
 atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
-    Block[{o = Association[{subopts}], merged, mnf},
-        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", True], 1, 0];
-        o = KeyDrop[o, "GoalDirected"];
-        merged = Join[<|
-            "Ordering" -> "LPO", "AutoPrecedence" -> True,
-            "SelectionRatio" -> 10, "UnfailingCP" -> True,
-            "AutoMaxWeight" -> True,
-            "BackwardSubsume" -> True,
-            "BackwardDemod" -> True,
-            "RHSInterreduce" -> True|>, o];
-        atpParseCompletionOpts[Normal[merged], mnf]
-    ];
+    atpDispatchPreset[<|
+        "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "SelectionRatio" -> 10, "UnfailingCP" -> True,
+        "AutoMaxWeight" -> True,
+        "BackwardSubsume" -> True,
+        "BackwardDemod" -> True,
+        "RHSInterreduce" -> True|>, True, {subopts}];
 
 (* Method -> "Twee": a preset modeled on Twee 2.x's defaults --
        cfg_lhsweight=4, cfg_rhsweight=1, cfg_depthweight=2,
@@ -2470,18 +2476,13 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
    "VampireUEQ" preset shape. *)
 atpParseMethod["Twee"] := atpParseMethod[{"Twee"}];
 atpParseMethod[{"Twee", subopts___Rule}] :=
-    Block[{o = Association[{subopts}], merged, mnf},
-        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", False], 1, 0];
-        o = KeyDrop[o, "GoalDirected"];
-        merged = Join[<|
-            "CriticalPairWeight" -> "Twee",
-            "GroundJoin" -> True, "Connectedness" -> True,
-            "UnfailingCP" -> True,
-            "BackwardSubsume" -> True, "BackwardDemod" -> True,
-            "RHSInterreduce" -> True,
-            "AutoMaxWeight" -> 20|>, o];
-        atpParseCompletionOpts[Normal[merged], mnf]
-    ];
+    atpDispatchPreset[<|
+        "CriticalPairWeight" -> "Twee",
+        "GroundJoin" -> True, "Connectedness" -> True,
+        "UnfailingCP" -> True,
+        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "RHSInterreduce" -> True,
+        "AutoMaxWeight" -> 20|>, False, {subopts}];
 
 (* Method -> "EProver": a preset modeled on E's typical CASC run
    shape (Schulz, 2002+).  E's heuristic is much larger than a
@@ -2510,19 +2511,14 @@ atpParseMethod[{"Twee", subopts___Rule}] :=
    Subopts override any default, mirroring the other preset shapes. *)
 atpParseMethod["EProver"] := atpParseMethod[{"EProver"}];
 atpParseMethod[{"EProver", subopts___Rule}] :=
-    Block[{o = Association[{subopts}], merged, mnf},
-        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", False], 1, 0];
-        o = KeyDrop[o, "GoalDirected"];
-        merged = Join[<|
-            "CriticalPairWeight" -> "ConjSym",
-            "Ordering" -> "KBO",
-            "SelectionRatio" -> 10,
-            "AutoMaxWeight" -> 20,
-            "BackwardSubsume" -> True,
-            "RHSInterreduce" -> True,
-            "UnfailingCP" -> True|>, o];
-        atpParseCompletionOpts[Normal[merged], mnf]
-    ];
+    atpDispatchPreset[<|
+        "CriticalPairWeight" -> "ConjSym",
+        "Ordering" -> "KBO",
+        "SelectionRatio" -> 10,
+        "AutoMaxWeight" -> 20,
+        "BackwardSubsume" -> True,
+        "RHSInterreduce" -> True,
+        "UnfailingCP" -> True|>, False, {subopts}];
 
 (* Registry of the named Method presets `atpParseMethod` recognizes.
    "Portfolio" / "VampirePortfolio" expand to schedules (a list of
