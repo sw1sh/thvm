@@ -3514,12 +3514,10 @@ TRelevantAxioms[conjRaw_, axiom : (_Equal | _Unequal | _ForAll
 
 TRelevantAxioms[conjRaw_, axRaw_List, opts:OptionsPattern[]] :=
     (* Same normalization pipeline as TFindProof's entry (iters 60-65):
-       strip Inactive, flatten one level, auto-internalize String-headed
-       compound terms from TPTPImport. *)
+       atpNormalizeConj + atpNormalizeAxioms. *)
     atpRelevancePartition[
-        atpMaybeInternalizeTPTP[
-            atpStripInactive[atpFlattenAxioms[axRaw]]],
-        atpMaybeInternalizeTPTP[atpStripInactive[conjRaw]],
+        atpNormalizeAxioms[axRaw],
+        atpNormalizeConj[conjRaw],
         atpRelevanceSpec[OptionValue[Method]]];
 
 (* Render a held expression in the form WL's ProofObject expects
@@ -3865,6 +3863,13 @@ atpFlattenAxioms[ax_List] := Flatten[ax, 1];
 atpMaybeInternalizeTPTP[expr_] := If[
     !FreeQ[expr, _String[___]],
     tptpInternalize[expr], expr];
+
+(* Composed normalizers used by every user-facing entry (TFindProof,
+   TRelevantAxioms, TFindProofSMT).  Iter 71 consolidation. *)
+atpNormalizeConj[c_] :=
+    atpMaybeInternalizeTPTP[atpStripInactive[c]];
+atpNormalizeAxioms[ax_List] :=
+    atpMaybeInternalizeTPTP[atpStripInactive[atpFlattenAxioms[ax]]];
 (* A single Equal / Inactive[Equal] / ForAll axiom (no enclosing
    List) is a common shape -- the user pastes one ax directly.
    Wrap in a 1-element List and re-dispatch.  Iter 68. *)
@@ -3880,9 +3885,8 @@ TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[
-            atpMaybeInternalizeTPTP[atpStripInactive[conjecture]],
-            atpMaybeInternalizeTPTP[atpStripInactive[
-                atpFlattenAxioms[axioms]]],
+            atpNormalizeConj[conjecture],
+            atpNormalizeAxioms[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -3891,9 +3895,8 @@ TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[
-            atpMaybeInternalizeTPTP[atpStripInactive[conjecture]],
-            atpMaybeInternalizeTPTP[atpStripInactive[
-                atpFlattenAxioms[axioms]]],
+            atpNormalizeConj[conjecture],
+            atpNormalizeAxioms[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -4121,9 +4124,7 @@ TFindProof[axiom : (_Equal | _Unequal | _ForAll
 (* Completion of an explicit axiom list. *)
 TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[
-            atpMaybeInternalizeTPTP[
-                atpStripInactive[atpFlattenAxioms[axioms]]],
+        atpCompletionBundle[atpNormalizeAxioms[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -4131,9 +4132,7 @@ TFindProof[axioms_List, OptionsPattern[]] :=
 TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
         OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[
-            atpMaybeInternalizeTPTP[
-                atpStripInactive[atpFlattenAxioms[axioms]]],
+        atpCompletionBundle[atpNormalizeAxioms[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
