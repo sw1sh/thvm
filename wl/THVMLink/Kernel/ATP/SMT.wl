@@ -181,24 +181,49 @@ congruentQ[u_, v_] :=
 
 (* ----- API ----- *)
 
+(* Drop literally-True equalities and literally-False disequalities;
+   either category is vacuously satisfied (a == a or Unequal[1, 2] just
+   doesn't constrain anything).  Conversely, literally-False equalities
+   (Equal[1, 2]) and literally-True disequalities (Unequal[a, a] -- WL
+   doesn't auto-evaluate Unequal on bare symbols, but the False form is
+   what gets in) are immediate UNSAT contradictions.  Without this
+   preprocessing, a user passing a reflexive `a == a` (which WL
+   evaluates to True before TSatEUF sees it) hits the badin guard and
+   gets $Failed instead of the obvious SAT verdict. *)
+atpSmtPreprocess[eqs_List, diseqs_List] :=
+    Module[{eqsFalse, diseqsTrue, eqsClean, diseqsClean},
+        eqsFalse = MemberQ[eqs, False];
+        diseqsTrue = MemberQ[diseqs, False];
+        If[ eqsFalse, Return[{"UNSAT", "Witness" -> False}, Module]];
+        If[ diseqsTrue, Return[{"UNSAT", "Witness" -> False}, Module]];
+        eqsClean = DeleteCases[eqs, True];
+        diseqsClean = DeleteCases[diseqs, True];
+        {"Continue", eqsClean, diseqsClean}
+    ];
+
 TSatEUF[eqs_List, diseqs_List] :=
-    If[ ! (AllTrue[eqs, MatchQ[#, _Equal] &] &&
-           AllTrue[diseqs, MatchQ[#, _Unequal] &]),
-        Message[TSatEUF::badin, eqs, diseqs]; $Failed,
-        Block[{$parent, $rank, $use, $subterms, witness, classes},
-            ccInit[];
-            Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, eqs];
-            Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, diseqs];
-            Scan[ccUnion[#[[1]], #[[2]]] &, eqs];
-            witness = SelectFirst[
-                diseqs,
-                ccFind[#[[1]]] === ccFind[#[[2]]] &,
-                None
-            ];
-            If[ witness =!= None,
-                <|"Status" -> "UNSAT", "Witness" -> witness|>,
-                classes = GatherBy[$subterms, ccFind];
-                <|"Status" -> "SAT", "Classes" -> classes|>
+    Module[{pre = atpSmtPreprocess[eqs, diseqs], eqsC, diseqsC},
+        If[ First[pre] === "UNSAT",
+            Return @ <|"Status" -> "UNSAT", pre[[2]]|>];
+        eqsC = pre[[2]]; diseqsC = pre[[3]];
+        If[ ! (AllTrue[eqsC, MatchQ[#, _Equal] &] &&
+               AllTrue[diseqsC, MatchQ[#, _Unequal] &]),
+            Message[TSatEUF::badin, eqs, diseqs]; $Failed,
+            Block[{$parent, $rank, $use, $subterms, witness, classes},
+                ccInit[];
+                Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, eqsC];
+                Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, diseqsC];
+                Scan[ccUnion[#[[1]], #[[2]]] &, eqsC];
+                witness = SelectFirst[
+                    diseqsC,
+                    ccFind[#[[1]]] === ccFind[#[[2]]] &,
+                    None
+                ];
+                If[ witness =!= None,
+                    <|"Status" -> "UNSAT", "Witness" -> witness|>,
+                    classes = GatherBy[$subterms, ccFind];
+                    <|"Status" -> "SAT", "Classes" -> classes|>
+                ]
             ]
         ]
     ]

@@ -217,3 +217,30 @@ VerificationTest[
     ProofObject,
     TestID -> "ATP/smt/default-method-still-saturator"
 ]
+
+(* === Reflexive-equality preprocessing (iter 57) =================== *)
+
+(* WL evaluates `a == a` to True before TSatEUF sees it.  Pre-iter-57
+   that hit the badin guard and returned $Failed; now reflexive
+   equalities are dropped as vacuously SAT. *)
+VerificationTest[
+    TSatEUF[{a == a}, {}],
+    <|"Status" -> "SAT", "Classes" -> {}|>,
+    TestID -> "SMT/preprocess/reflexive-eq-is-vacuously-SAT"
+]
+
+(* A False inequality (e.g. Unequal[1, 2] which WL evaluates to True)
+   is similarly dropped. *)
+VerificationTest[
+    TSatEUF[{}, {Unequal[1, 2]}],
+    <|"Status" -> "SAT", "Classes" -> {}|>,
+    TestID -> "SMT/preprocess/false-diseq-is-vacuously-SAT"
+]
+
+(* Mix: a == a (True, dropped) + a != b (real constraint, no
+   contradiction without a == b in eqs) -- still SAT. *)
+VerificationTest[
+    TSatEUF[{a == a}, {a != b}]["Status"],
+    "SAT",
+    TestID -> "SMT/preprocess/reflexive-with-real-diseq"
+]
