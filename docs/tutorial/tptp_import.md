@@ -528,11 +528,25 @@ same `Axioms / Conjecture` pair.
 
 ## 9. Where the code lives
 
-- `wl/THVMLink/Kernel/ATP/TPTPImport.wl` -- the parser. Pure WL; no
-  C-side dependency. Recursive-descent over the Boolean precedence
-  layers (binary connectives, `|`, `&`, unary `~`/quantifier prefixes,
-  atomic formulas) with a separate path for cnf (`|`-split disjunction
-  of literals) and pre-pass sort-stripping for tff/tcf.
+- `wl/THVMLink/Kernel/ATP/TPTPImport.resource.wl` -- the parser
+  implementation. Self-contained, bare top-level definitions, no
+  package shell -- the body that the Wolfram Function Repository
+  resource notebook scrapes. Recursive-descent over the Boolean
+  precedence layers (binary connectives, `|`, `&`, unary
+  `~`/quantifier prefixes, atomic formulas) with a separate path
+  for cnf (`|`-split disjunction of literals) and pre-pass
+  sort-stripping for tff/tcf/thf.
+- `wl/THVMLink/Kernel/ATP/TPTPImport.wl` -- the in-tree wrapper.
+  `BeginPackage`s `THVMLink`ATP``, pre-declares `TPTPImport` in the
+  public context, and `Get`s the resource from inside `Private` so
+  helpers land in the private context while `TPTPImport` resolves
+  to the public symbol. One source of truth shared between thvm
+  and the deployed Function Repository resource.
+- `wl/THVMLink/Kernel/ATP/TPTPImport.md` -- the WFR authoring
+  document. Inlines the resource implementation via the
+  `MarkdownToNotebook` `#| file:` cell option; runs through
+  `ResourceFunction["MarkdownToNotebook"]` to produce the
+  Function-Repository-shaped `.nb` for submission.
 - `wl/THVMLink/Kernel/ATP.wl` -- the `TFindProof[File | string]`
   overloads + `tptpDispatch` helper that routes to the appropriate
   ATP entry.
