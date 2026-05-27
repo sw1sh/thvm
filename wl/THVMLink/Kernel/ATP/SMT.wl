@@ -234,6 +234,12 @@ TSatEUF[eqs_List, diseqs_List] :=
         ]
     ]
 
+(* Single non-list hypothesis: auto-wrap (matches iter 68-70 shape
+   across TFindProof / TRelevantAxioms / TATP).  Iter 72. *)
+TFindProofSMT[goal_, hyp : (_Equal | _Unequal
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
+    TFindProofSMT[goal, {hyp}];
+
 TFindProofSMT[goal_, hypotheses_List : {}] :=
     Block[{eqs, diseqs, res},
         {eqs, diseqs} = collectLiterals[

@@ -280,3 +280,11 @@ VerificationTest[
     "Proved",
     TestID -> "SMT/method-smt-nested-axioms-flattened"
 ]
+
+(* TFindProofSMT[goal, single_hypothesis] auto-wraps (iter 72,
+   parity with TFindProof / TRelevantAxioms / TATP wraps). *)
+VerificationTest[
+    TFindProofSMT[a == c, a == c]["Status"],
+    "Proved",
+    TestID -> "SMT/TFindProofSMT/single-hyp-wraps"
+]
