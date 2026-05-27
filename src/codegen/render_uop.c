@@ -4607,14 +4607,28 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
         ptx_on = (e != NULL && e[0] != '0');
         ptx_init = 1;
       }
-      if (ptx_on) {
+      // THVM_CUDA_PTX_MAX=N caps the number of kernels that go through
+      // the PTX renderer (0 = disable, default = unlimited).  Used to
+      // bisect a wrong-results regression: find the smallest N that
+      // makes the workload diverge, then dump kernel N's PTX.
+      static int ptx_max_init = 0;
+      static int ptx_max = -1;
+      static int ptx_count = 0;
+      if (!ptx_max_init) {
+        char const *e = getenv("THVM_CUDA_PTX_MAX");
+        ptx_max = (e != NULL) ? atoi(e) : -1;
+        ptx_max_init = 1;
+      }
+      int ptx_allowed = ptx_on && (ptx_max < 0 || ptx_count < ptx_max);
+      if (ptx_allowed) {
         FILE *pfp = fmemopen(scratch, sizeof(scratch) - 1, "w");
         if (pfp != NULL) {
           int pok = cg_render_linearized_ptx(&lk, kernel_name, 0, pfp);
           long pn = ftell(pfp);
           fclose(pfp);
           if (pok && pn > 0) {
-            if (route_trace) fprintf(stderr, "[route] %s: linearized-PTX\n", kernel_name);
+            ptx_count++;
+            if (route_trace) fprintf(stderr, "[route] %s: linearized-PTX #%d\n", kernel_name, ptx_count);
             scratch[pn] = 0; fputs(scratch, fp); return;
           }
           if (route_trace) fprintf(stderr, "[route] %s: PTX bailed\n", kernel_name);
