@@ -771,6 +771,54 @@ next lever is GROUP_REDUCE / threadgroup-parallel reductions, a
 substantial new subsystem (shared memory + `bar.sync` + warp shuffles
 in the renderer).
 
+## GROUP_REDUCE wiring (May 2026)
+
+End-to-end GROUP_REDUCE on CUDA now lands but only fires on **single
+reduce-axis** kernels (one of the conv-stack's Linear matmul shapes in
+beautiful_mnist).  The heuristic gate at hand_opts Section 4 declines
+multi-axis reduces (conv `sum(C_in, kH, kW)`, layernorm/softmax
+broadcast) because `rmu_emit_group_reduce` is single-axis only -- the
+mixed shape would race extra REDUCE loops against the cooperative one.
+
+What landed (commits 322b5c93 + 0d672e41 + 15e2bd1b):
+- `uop_dag_apply_group_reduce` (`uop/apply_opt_dag.c`): single-axis
+  stamp (no axis-id split), flips the target REDUCE leaf to KAX_GROUP_
+  REDUCE and wraps every reference in `OPT(_, GROUP_REDUCE, k)`.
+- `rmu_emit_group_reduce` (`codegen/render_uop.c`): target-aware --
+  `__shared__/__syncthreads()` on CUDA, `threadgroup/threadgroup_
+  barrier` on Metal, bail on C target.
+- `RMU_HAS_GROUP_REDUCE` flag (mirrors `RMU_SIMD_WARP`): set per-render
+  via `rmu_dag_has_group_reduce` so the output axis decode picks `tg`
+  (one block per output) instead of flat `tid`.  Without this, the
+  block-size-N launch with 16 different outputs hit shared[16] -> OOB.
+- `cuda_dag_group_reduce_factor` / `rmt_dag_group_reduce_factor`: read
+  the OPT factor `k` (the cooperative block size = 16) instead of the
+  range extent (= full reduce size = 576).  Wrong read -> launch with
+  block=576 -> immediate `cuModuleLoadData: CUDA_ERROR_ILLEGAL_ADDRESS`.
+- PTX renderer bails on KAX_GROUP_REDUCE so the kernels fall back to
+  the (now-correct) C-source path.
+
+Verified on V100 with `THVM_GROUPTOP=1 STEPS=3 BS=128`:
+- losses 2.81/2.58/2.47 IDENTICAL to baseline
+- 137 compiles (same as baseline -- only the Linear kernel changes shape)
+- warm 9.3 s vs baseline 9.5 s (~+2.5%)
+
+A bigger speedup needs the gate to fire on more than one kernel.  Two
+directions:
+1. **Multi-axis GROUP_REDUCE template**: open the cooperative pattern
+   around N reduce axes (each thread strides through the cross-product),
+   so conv's `(C_in, kH, kW)` reduce gets the parallel template.
+2. **Proper split semantics**: tinygrad's `OptOps.GROUP` splits a
+   single REDUCE axis into outer (serial) + inner (cooperative)
+   instead of treating the OPT as a single-axis stamp.  Pairs naturally
+   with the multi-axis template.
+
+The PTX-renderer GROUP_REDUCE emit (shared declaration in prologue +
+`bar.sync 0;` + the `if (tt==0)` final fold) is deferred until the
+gate fires on enough kernels to justify the new code path -- the
+C-source CUDA path through nvrtc handles the single matmul case at
+~comparable warm time today.
+
 ## References
 
 - `/Users/swish/src/tinygrad/tinygrad/codegen/__init__.py:full_rewrite_to_sink` -- the pipeline
