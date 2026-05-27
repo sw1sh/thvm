@@ -176,6 +176,86 @@ int main(void) {
     free(ptx);
   }
 
+  // === opt-rich UPCAST conv/matmul: C[bs,cout] = sum_cin W[cout,cin]   ===
+  // * X[bs,cin], with Cout UPCAST=4 (F parallel accumulators).  This is
+  // the conv "kid=3" shape -- the kernel that motivated the whole PTX
+  // port.  Renders through the full opt-rich pipeline (expand parallel
+  // accumulators + F-lane store) to PTX, runs on V100, vs CPU reference.
+  TEST_BEGIN("cuda-ptx/upcast-conv-parallel-acc-vs-cpu-reference");
+  {
+    enum { BS = 8, COUT = 4, CIN = 4 };
+    Term r_cout = uop_range(0, KAX_UPCAST, COUT);
+    Term r_bs   = uop_range(1, KAX_LOOP, BS);
+    Term r_cin  = uop_range(2, KAX_LOOP, CIN);
+    u32 wd[2] = { COUT, CIN }, xd[2] = { BS, CIN }, cd[2] = { BS, COUT };
+    Term cbuf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, cd, 0);
+    Term wbuf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, wd, 1);
+    Term xbuf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, xd, 2);
+    Term wa = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, r_cout, uop_const(DT_INT32, CIN)), r_cin);
+    Term wl = uop_load(uop_index_e(wbuf, wa));
+    Term xa = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, r_bs, uop_const(DT_INT32, CIN)), r_cin);
+    Term xl = uop_load(uop_index_e(xbuf, xa));
+    u32 rax[1] = { 2 };
+    Term red = uop_reduce_multi(REDUCE_SUM, 1, rax, uop_binary(UOP_MUL, wl, xl));
+    Term ca = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, r_bs, uop_const(DT_INT32, COUT)), r_cout);
+    Term st = uop_store(cbuf, uop_index_e(cbuf, ca), red);
+
+    // Full opt-rich late-pass pipeline (mirrors cg_render_uop_kernel_cuda_root).
+    Term r2 = uop_recognise_conv(st);
+    r2 = uop_expand_graph(r2);          r2 = uop_symbolic_rewrite(r2);
+    r2 = uop_devectorize_graph(r2);     r2 = uop_symbolic_rewrite(r2);
+    r2 = uop_load_store_fold_graph(r2); r2 = uop_symbolic_rewrite(r2);
+    LinKernel lk;
+    CHECK(uop_linearize(r2, &lk));
+    int sm = cuda_device_sm(); if (sm <= 0) sm = 70;
+    static char pbuf[1 << 18];
+    FILE *pf = fmemopen(pbuf, sizeof(pbuf) - 1, "w");
+    int ok = cg_render_linearized_ptx(&lk, "convk3", sm, pf);
+    long pn = ftell(pf); fclose(pf);
+    CHECK(ok);
+    if (!ok) { thvm_free(); TEST_REPORT(); }
+    pbuf[pn > 0 ? pn : 0] = 0;
+
+    CUfunction func = thvm_cuda_compile(pbuf, "convk3");
+    if (func == NULL)
+      fprintf(stderr, "  convk3 compile/load failed: %s\n", thvm_cuda_last_error());
+    CHECK(func != NULL);
+
+    float hW[COUT * CIN], hX[BS * CIN], hRef[BS * COUT], hGpu[BS * COUT];
+    for (int i = 0; i < COUT * CIN; i++) hW[i] = (float)(i % 7) * 0.5f - 1.0f;
+    for (int i = 0; i < BS * CIN; i++)   hX[i] = (float)(i % 5) * 0.25f + 0.3f;
+    for (int b = 0; b < BS; b++)
+      for (int o = 0; o < COUT; o++) {
+        float acc = 0.0f;
+        for (int k = 0; k < CIN; k++) acc += hW[o * CIN + k] * hX[b * CIN + k];
+        hRef[b * COUT + o] = acc;
+      }
+
+    u32 bC = thvm_cuda_buf_alloc((u64)BS * COUT * sizeof(float));
+    u32 bW = thvm_cuda_buf_alloc((u64)COUT * CIN * sizeof(float));
+    u32 bX = thvm_cuda_buf_alloc((u64)BS * CIN * sizeof(float));
+    CHECK(bC && bW && bX);
+    CHECK(thvm_cuda_buf_write(bW, hW, sizeof hW) == 0);
+    CHECK(thvm_cuda_buf_write(bX, hX, sizeof hX) == 0);
+    u32 buf_ids[3] = { bC, bW, bX };
+    CUdeviceptr dptrs[3]; void *args[3];
+    thvm_cuda_pack_args(buf_ids, 3, dptrs, args);
+    // BS is the promoted thread axis (total = BS); one thread per row.
+    CHECK(thvm_cuda_launch(func, /*grid_x=*/1, /*block_x=*/BS, args) == 0);
+    CHECK(thvm_cuda_buf_read(bC, hGpu, sizeof hGpu) == 0);
+    int all_ok = 1;
+    for (int i = 0; i < BS * COUT; i++)
+      if (!approx_eq(hGpu[i], hRef[i])) {
+        all_ok = 0;
+        fprintf(stderr, "  convk3 mismatch at %d: gpu=%f ref=%f\n", i, hGpu[i], hRef[i]);
+      }
+    CHECK(all_ok);
+    thvm_cuda_buf_free(bC); thvm_cuda_buf_free(bW); thvm_cuda_buf_free(bX);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

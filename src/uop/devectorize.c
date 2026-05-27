@@ -634,6 +634,19 @@ static Term devec_pm_unroll_stack(Term t, void *user) {
   return inner;
 }
 
+// UNROLL(STORE) -> STORE.  An UPCAST'd output store expanded by
+// do_expand is UNROLL(STORE(buf, addr_lanes, value_lanes)); once the
+// addr/value lanes are STACKs the UNROLL marker is redundant (the F-ness
+// lives in the STACKs), and the renderer lowers the STORE itself into F
+// scalar stores.  Mirrors devec_pm_unroll_stack for the void-typed STORE.
+static Term devec_pm_unroll_store(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_UNROLL) return 0;
+  Term inner = heap_read(term_val(t) + 0);
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_STORE) return 0;
+  return inner;
+}
+
 // === devec INDEX_E + LOAD on STACK srcs ================================
 //
 // After CONTRACT(non-UNROLL) folds to STACK(src x N), INDEX_E whose
@@ -794,6 +807,7 @@ fn Term uop_devectorize_graph(Term root) {
     { "devec_pm_gep_unwrap",       devec_pm_gep_unwrap },
     { "devec_pm_stack_singleton",  devec_pm_stack_singleton },
     { "devec_pm_unroll_stack",     devec_pm_unroll_stack },
+    { "devec_pm_unroll_store",     devec_pm_unroll_store },
   };
   t = uop_graph_rewrite(t, RENDER_RULES,
                         sizeof(RENDER_RULES) / sizeof(RENDER_RULES[0]),

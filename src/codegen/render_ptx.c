@@ -343,14 +343,27 @@ static int ptx_emit_thread_geom(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
   }
   if (n_out == 0) return 1;                 // no output axes (scalar)
 
-  // Find the STORE's address axes (the axes the store position indexes).
+  // Find the real memory STORE (buf is a BUFFER, not an accumulator
+  // PLACEHOLDER) -- that store's address determines which output axes
+  // are promoted to threads.
   Term store = 0;
   for (u32 i = 0; i < lk->n; i++) {
     Term t = lk->uops[i];
-    if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_STORE) store = t;
+    if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_STORE) continue;
+    Term b = heap_read(term_val(t) + 0);
+    if (term_tag(b) == TAG_UOP && term_ext(b) == UOP_BUFFER) store = t;
   }
   if (store == 0) return 1;
   Term addr = heap_read(term_val(store) + 1);
+  // F-lane store: addr is a STACK of F per-lane INDEX_E.  The promoted
+  // (non-upcast) axes are shared across lanes, so collect them from lane
+  // 0 -- rmu_collect_ranges does not descend into STACK itself.
+  while (term_tag(addr) == TAG_UOP && term_ext(addr) == UOP_AFTER)
+    addr = heap_read(term_val(addr) + 0);
+  if (term_tag(addr) == TAG_UOP && term_ext(addr) == UOP_STACK
+      && uop_stack_n(addr) > 0) {
+    addr = uop_stack_src(addr, 0);
+  }
   Term addr_ranges[MAX_DIM];
   u32  addr_n = 0;
   rmu_collect_ranges(addr, addr_ranges, &addr_n);
@@ -412,11 +425,12 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
     Term t = lk->uops[i];
     if (term_tag(t) != TAG_UOP) continue;
     u32 op = term_ext(t);
-    // PLACEHOLDER (reduce accumulator) IS handled (M3b).  The vector
-    // shapes (STACK/GEP/VCONST/UNROLL) + structural wrappers + a raw
-    // un-lowered REDUCE are M3c -- bail so the caller falls back.
-    if (op == UOP_STACK || op == UOP_GEP
-        || op == UOP_VCONST || op == UOP_UNROLL || op == UOP_CONTRACT
+    // PLACEHOLDER (reduce acc, M3b) + STACK/GEP (F-lane vectors, M3c)
+    // are handled.  VCONST/UNROLL/CONTRACT/OPT/BUFFERIZE + a raw
+    // un-lowered REDUCE/BITCAST are not -- bail so the caller falls back
+    // to the C-source emit (a fully-lowered opt-rich kernel carries none
+    // of these).
+    if (op == UOP_VCONST || op == UOP_UNROLL || op == UOP_CONTRACT
         || op == UOP_OPT || op == UOP_BUFFERIZE || op == UOP_REDUCE
         || op == UOP_BITCAST || op == UOP_INVALID) {
       return 0;
@@ -574,23 +588,71 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         Term buf   = heap_read(loc + 0);
         Term addr  = heap_read(loc + 1);
         Term value = heap_read(loc + 2);
-        const char *vr = ptx_reg_get(ctx, value);
-        if (vr[0] == '\0') return 0;
         // STORE into a PLACEHOLDER is an accumulator reassignment: a bit
         // copy into the persistent acc register (init = const, update =
         // acc+x).  Mirrors render_linearized.c's `_accN = value;`.
         if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_PLACEHOLDER) {
+          const char *vr = ptx_reg_get(ctx, value);
           const char *ar = ptx_reg_get(ctx, buf);
-          if (ar[0] == '\0') return 0;
+          if (vr[0] == '\0' || ar[0] == '\0') return 0;
           u32 dt = uop_placeholder_dtype(buf);
           fprintf(fp, "\tmov.b%s %s, %s;\n", ptx_reg_type(dt) + 1, ar, vr);
           break;
         }
+        // Peel AFTER ordering wrappers off addr + value (the reduce
+        // accumulator chain wraps the final value bundle in AFTER).
+        while (term_tag(addr) == TAG_UOP && term_ext(addr) == UOP_AFTER)
+          addr = heap_read(term_val(addr) + 0);
+        while (term_tag(value) == TAG_UOP && term_ext(value) == UOP_AFTER)
+          value = heap_read(term_val(value) + 0);
+        // F-LANE PARALLEL STORE: an UPCAST'd output store has a STACK of
+        // F addresses (and F values) -- emit F scalar stores, one per
+        // lane.  Each addr lane is an INDEX_E (its register is the byte
+        // address); each value lane has its own register.
+        if (term_tag(addr) == TAG_UOP && term_ext(addr) == UOP_STACK) {
+          u32 F = uop_stack_n(addr);
+          int val_is_stack = (term_tag(value) == TAG_UOP
+                              && term_ext(value) == UOP_STACK
+                              && uop_stack_n(value) == F);
+          for (u32 i = 0; i < F; i++) {
+            Term addr_i = uop_stack_src(addr, i);
+            Term val_i  = val_is_stack ? uop_stack_src(value, i) : value;
+            const char *ir = ptx_reg_get(ctx, addr_i);
+            const char *vr = ptx_reg_get(ctx, val_i);
+            if (ir[0] == '\0' || vr[0] == '\0') return 0;
+            u32 dt = ptx_dtype_of(val_i);
+            fprintf(fp, "\tst.global.%s [%s+0], %s;\n",
+                    ptx_mem_type(dt), ir, vr);
+          }
+          break;
+        }
+        // Scalar memory store.
         const char *ir = ptx_reg_get(ctx, addr);
-        if (ir[0] == '\0') return 0;
+        const char *vr = ptx_reg_get(ctx, value);
+        if (ir[0] == '\0' || vr[0] == '\0') return 0;
         u32 dt = ptx_dtype_of(value);
         fprintf(fp, "\tst.global.%s [%s+0], %s;\n", ptx_mem_type(dt), ir, vr);
         break;
+      }
+
+      case UOP_STACK:
+        // A STACK is a lane bundle; its lanes are separate nodes that
+        // already have registers.  No instruction -- consumers (STORE
+        // F-lane, GEP) read the lanes directly.
+        break;
+
+      case UOP_GEP: {
+        // GEP(STACK, i) extracts lane i: alias that lane's register.
+        Term src = heap_read(loc + 0);
+        u32 ni = uop_gep_n_idx(t);
+        if (ni < 1) return 0;
+        u32 idx = uop_gep_idx(t, 0);
+        if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_STACK
+            && idx < uop_stack_n(src)) {
+          ptx_reg_put(ctx, t, ptx_reg_get(ctx, uop_stack_src(src, idx)));
+          break;
+        }
+        return 0;   // GEP over a non-STACK (UNROLL vector) -- M3 follow-up
       }
 
       case UOP_CAST: {
