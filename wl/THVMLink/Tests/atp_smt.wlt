@@ -254,3 +254,19 @@ VerificationTest[
     "Proved",
     TestID -> "SMT/TFindProofSMT/skips-True-hypothesis"
 ]
+
+(* Inactive[Equal] / Inactive[Unequal] are FindEquationalProof's
+   inert ProofObject lemma form -- TSatEUF should accept them
+   alongside the bare Equal / Unequal heads (iter 59). *)
+VerificationTest[
+    TSatEUF[{Inactive[Equal][a, b], Inactive[Equal][b, c]},
+        {Inactive[Unequal][a, c]}]["Status"],
+    "UNSAT",
+    TestID -> "SMT/inactive/transitive-contradiction"
+]
+
+VerificationTest[
+    TSatEUF[{Inactive[Equal][a, b]}, {}]["Status"],
+    "SAT",
+    TestID -> "SMT/inactive/single-equality-SAT"
+]

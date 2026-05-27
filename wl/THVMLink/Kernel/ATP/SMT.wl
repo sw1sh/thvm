@@ -206,6 +206,12 @@ TSatEUF[eqs_List, diseqs_List] :=
         If[ First[pre] === "UNSAT",
             Return @ <|"Status" -> "UNSAT", pre[[2]]|>];
         eqsC = pre[[2]]; diseqsC = pre[[3]];
+        (* Accept Inactive[Equal][a, b] as an alias for Equal[a, b]
+           (the inert form FindEquationalProof's ProofObject "Lemmas"
+           spec returns).  Inactive[Unequal] same.  Strip Inactive
+           before the strict-head check + congruence closure. *)
+        eqsC = Replace[eqsC, Inactive[Equal][a_, b_] :> Equal[a, b], {1}];
+        diseqsC = Replace[diseqsC, Inactive[Unequal][a_, b_] :> Unequal[a, b], {1}];
         If[ ! (AllTrue[eqsC, MatchQ[#, _Equal] &] &&
                AllTrue[diseqsC, MatchQ[#, _Unequal] &]),
             Message[TSatEUF::badin, eqs, diseqs]; $Failed,
