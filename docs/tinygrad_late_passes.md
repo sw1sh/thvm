@@ -820,20 +820,37 @@ for (uint a_red1 = 0; a_red1 < ext1; ++a_red1)
 `hand_opts.c` Section 4 GROUPTOP gate picks the LARGEST REDUCE axis
 that divides 16 (the obvious heuristic for the parallel slice).
 
-V100 beautiful_mnist BS=128 **STEPS=5** (THVM_GROUPTOP=1, no PTX):
+V100 beautiful_mnist BS=128 **STEPS=5** A/B (THVM_GC=0, no JIT):
 
 | Config              | Cold    | Warm mean | Compiles | Loss        |
 |---------------------|--------:|----------:|---------:|-------------|
-| Baseline (no GROUPTOP) | 15.1 s | 18.2 s | 137 | 2.81 -> 2.20 |
-| **GROUPTOP multi-axis** | **10.7 s** | **7.3 s** | **125** | **2.81 -> 2.20** |
+| Baseline (no GROUPTOP, no PTX) | 15.1 s | 18.2 s | 137 | 2.81 -> 2.20 |
+| PTX=1 only          | 11.8 s | 17.2 s | 124 | 2.81 -> 2.20 |
+| GROUPTOP=1 only     | 10.7 s | 7.3 s  | 125 | 2.81 -> 2.20 |
+| **PTX + GROUPTOP**  | **9.2 s** | **7.4 s** | **124** | **2.81 -> 2.20** |
 
-That's a **-29% cold / -60% warm** with -12 compiles and bit-identical
-losses.  The gate now fires on ~30 kernels per step (vs 1 in the
-single-axis era); most are 3-axis conv reduces ("best of 3 red axes"),
-plus the original Linear matmul.
+Headline: **-39% cold / -59% warm** at bit-identical losses (137
+compiles -> 124).  The gate now fires on ~30 kernels per step (vs 1 in
+the single-axis era); most are 3-axis conv reduces ("best of 3 red
+axes"), plus the original Linear matmul.
 
-(Peak memory at 5 steps is 1.2GB in BOTH configs -- the earlier note
-of "GROUPTOP raises peak to 1.2GB" was comparing different step counts
+**Caveat on warm_mean numbers**: at 10+ steps both configs hit a
+per-step time SPIKE around step 4-6 (warm jumps ~10 s -> ~25 s and
+stays high).  This is consistent across baseline AND GROUPTOP -- a
+separate pre-existing issue (memory pool growth / fragmentation across
+steps, see [[project_memory_parity_followup]]).  Pre-spike (steps 2-3
+of baseline vs steps 2-5 of GROUPTOP, which are still pre-spike under
+the smaller working set): baseline warm 10.9 s vs GROUPTOP warm 7.3 s,
+~**-33% pre-spike warm**.  The post-spike steady-state shows GROUPTOP
+also wins but by a smaller margin (23 s vs 31 s ~ -26%).
+
+`THVM_GROUP_SZ=N` (default 16, matches tinygrad).  A sweep at 3 steps
+shows the result is roughly flat across 4/8/16/32/64 with noise
+dominating differences; 16 keeps the default and the env stays as a
+follow-up knob.
+
+(Peak memory at 5 steps is 1.2 GB in BOTH configs -- the earlier note
+of "GROUPTOP raises peak to 1.2 GB" was comparing different step counts
 and is wrong; not a regression.)
 
 The PTX-renderer GROUP_REDUCE emit (shared declaration in prologue +
