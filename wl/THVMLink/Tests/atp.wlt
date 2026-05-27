@@ -2252,6 +2252,18 @@ VerificationTest[
     TestID -> "ATP/inactive/single-arg-completion-strips-Inactive"
 ]
 
+(* === Nested axiom-list auto-flatten (iter 62) ===================== *)
+
+(* Users concatenating axiom subsets often write {ax1, ax2} without
+   Flatten; pre-iter-62 the encoder silently rejected the inner Lists
+   and TFindProof returned Missing.  atpFlattenAxioms now auto-
+   flattens one level at entry. *)
+VerificationTest[
+    Head @ TFindProof[a == c, {{a == b}, {b == c}}, TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/flatten/nested-axiom-list-auto-flattens"
+]
+
 (* === Globals-collision footgun =================================== *)
 
 (* `CanonicalizePatterns` renames axiom-bound variables to canonical

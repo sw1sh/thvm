@@ -3812,10 +3812,18 @@ TFindProof[conjecture_, axioms_List,
 atpStripInactive[expr_] := expr /. {
     Inactive[Equal][a_, b_] :> a == b,
     Inactive[Unequal][a_, b_] :> Unequal[a, b]};
+
+(* Flatten one level of nesting in the axiom list.  Users
+   concatenating axiom subsets via `{theory_axioms, extra_lemmas}`
+   without an explicit Flatten get a List-of-Lists that the encoder
+   silently rejects -- this auto-flattens that case.  Iter 62.
+   `Flatten[ax, 1]` is a no-op if ax is already a flat list of
+   Equal / ForAll / Inactive[Equal] heads. *)
+atpFlattenAxioms[ax_List] := Flatten[ax, 1];
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[atpStripInactive[conjecture],
-            atpStripInactive[axioms],
+            atpStripInactive[atpFlattenAxioms[axioms]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -3824,7 +3832,7 @@ TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[atpStripInactive[conjecture],
-            atpStripInactive[axioms],
+            atpStripInactive[atpFlattenAxioms[axioms]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -4041,7 +4049,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
 (* Completion of an explicit axiom list. *)
 TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[atpStripInactive[axioms],
+        atpCompletionBundle[atpStripInactive[atpFlattenAxioms[axioms]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -4049,7 +4057,7 @@ TFindProof[axioms_List, OptionsPattern[]] :=
 TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
         OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[atpStripInactive[axioms],
+        atpCompletionBundle[atpStripInactive[atpFlattenAxioms[axioms]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
