@@ -358,6 +358,56 @@ have 4-way-K-stride structure that begs for `float4`-style adjacent-
 load folding (the tinygrad `fold_expanded_index` at devectorizer.py:
 81-117). That's path #3 below.
 
+## Architectural port FULLY LANDED (pieces #1-6, ~2400 LOC, 6 commits)
+
+By end of 2026-05-27 the structural port is complete end-to-end:
+
+```
+recognise_conv
+  -> uop_expand_graph        (fc371fe3 -- F-replicates UPCAST/UNROLL)
+  -> uop_symbolic_rewrite     (79cbe9ff -- sym pass: ADD/MUL/etc. fold)
+  -> uop_devectorize_graph    (525136bc + 1e7747b9 -- reduce_to_acc + do_contract)
+  -> uop_symbolic_rewrite     (79cbe9ff -- post-devec fold)
+  -> uop_load_store_fold_graph (525136bc + 79cbe9ff -- adjacent + shared-load CSE)
+  -> uop_symbolic_rewrite     (79cbe9ff -- post-fold fold)
+  -> uop_linearize             (b0acd7d3 -- topo flatten)
+  -> cg_render_linearized_*    (d5af3033 + 5dacdf3a -- new emit; bail to legacy)
+```
+
+Active at all 3 entry points (Metal/C/CUDA) via the route gate at
+`cg_render_uop_kernel_*_root`. When `uop_has_upcast_or_unroll(root)`,
+the new pipeline runs.
+
+**V100 wall measured at end of loop iteration N (gate widened)**:
+- baseline (no opts): ~540 ms warm step
+- path #1 + #2 legacy renderer hacks: ~3500 ms warm step
+- full architectural pipeline + sym + CSE: **~50 s warm step**
+- cold step 1: 350-390 s (nvrtc)
+- Loss correct in all cases (2.81 -> 1.73 monotone, no NaN)
+
+**Diagnosis**: every IR-level rewrite landed cleanly with unit tests.
+The GRAPH shrinks dramatically through the sym sweeps. But the final
+EMITTED source for `kid=3` conv with the heuristic's `UPCAST=4` +
+`UNROLL=4` choices is ~1600 MAD statements per kernel, which nvrtc's
+C++ frontend can't handle efficiently regardless of how clean the
+upstream IR is.
+
+**The gap is between IR-rewrite output and source emission**. tinygrad
+gets around it via:
+1. PTX-level emitter (`tinygrad/renderer/ptx.py`) that bypasses nvcc/nvrtc's C++ frontend entirely.
+2. `tinygrad/runtime/support/assembler_cuda.py` that compiles PTX -> SASS directly.
+
+thvm goes UOp -> C-style source -> nvrtc -> PTX -> SASS. The C-style
+source stage is what crashes on 1600-statement kernels.
+
+**Spec-aligned paths to actually close V100**:
+- (A) PTX-level emitter mirroring `tinygrad/renderer/ptx.py`. Big work but tinygrad-canonical.
+- (B) Target-aware factor caps in the heuristic (`Renderer.target` knobs in tinygrad; thvm would need a `renderer-knobs` analog).  Smaller, also spec-aligned.
+
+The architectural pipeline (pieces #1-6) is the necessary prerequisite
+for either. Without expander/devec/linearize/sym, neither a PTX emitter
+nor target-aware caps would have a clean IR to operate on. Now they do.
+
 ## What a faithful port of the late passes would look like
 
 In rough order of impact:
