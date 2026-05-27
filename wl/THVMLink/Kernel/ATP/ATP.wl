@@ -619,8 +619,10 @@ universalPatterns[expr_ /; ! FreeQ[expr, _ForAll], bound_: {}] :=
 universalPatterns[expr_, ___] := expr
 
 unquantifyFormula[expr_] := expr /. {
-    universal_ForAll :> universalPatterns[universal],
-    existential_Exists :> skolemPatterns[existential]}
+    Inactive[Equal][a_, b_]   :> a == b,
+    Inactive[Unequal][a_, b_] :> Unequal[a, b],
+    universal_ForAll          :> universalPatterns[universal],
+    existential_Exists        :> skolemPatterns[existential]}
 
 (* === rewrite-rule list ============================================ *)
 
@@ -3802,9 +3804,18 @@ TFindProof[conjecture_, axioms_List,
         ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
     TFindProofSMT[conjecture, axioms];
 
+(* Strip Inactive[Equal] / Inactive[Unequal] from conjecture + axioms
+   so a `TFindProof[..., "Lemmas"]` round-trip works (Lemmas spec
+   returns Inactive-headed equations to keep them from collapsing on
+   display).  Cheap top-level rewrite; the dispatcher + encoder
+   downstream see bare Equal / Unequal heads.  Iter 60. *)
+atpStripInactive[expr_] := expr /. {
+    Inactive[Equal][a_, b_] :> a == b,
+    Inactive[Unequal][a_, b_] :> Unequal[a, b]};
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
-        atpProveBundle[conjecture, axioms,
+        atpProveBundle[atpStripInactive[conjecture],
+            atpStripInactive[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -3812,7 +3823,8 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
 TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, OptionsPattern[]] :=
     atpProjectReturn[
-        atpProveBundle[conjecture, axioms,
+        atpProveBundle[atpStripInactive[conjecture],
+            atpStripInactive[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],

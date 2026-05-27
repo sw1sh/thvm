@@ -2214,6 +2214,33 @@ VerificationTest[
     TestID -> "ATP/portfolio/frontload-runs-vampireportfolio"
 ]
 
+(* === Inactive[Equal] axioms / conjecture (iter 60) ================ *)
+
+(* TFindProof "Lemmas" returns Inactive[Equal]-headed equations so
+   they don't collapse on display.  Piping those back through
+   TFindProof previously failed: the encoder rejects Inactive[Equal]
+   as not matching `_Equal`.  atpStripInactive strips both heads at
+   entry so the round-trip works. *)
+VerificationTest[
+    Head @ TFindProof[Inactive[Equal][a, c],
+        {Inactive[Equal][a_, b_], Inactive[Equal][b_, c_]},
+        TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/inactive/equal-axioms+conjecture-prove"
+]
+
+(* Real round-trip variant: a hand-built Inactive[Equal] axiom that
+   IS pattern-bound, used to prove a ground conjecture.  The Lemmas
+   spec returns bare-symbol axioms (no Pattern wrappers), so a true
+   "feed lemmas as axioms" round-trip is shape-mismatched at the
+   variable level -- that's a documentation point, not a regression. *)
+VerificationTest[
+    Head @ TFindProof[Inactive[Equal][f[a], g[a]],
+        {Inactive[Equal][f[x_], g[x_]]}, TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/inactive/pattern-axiom-proves-ground-goal"
+]
+
 (* === Globals-collision footgun =================================== *)
 
 (* `CanonicalizePatterns` renames axiom-bound variables to canonical
