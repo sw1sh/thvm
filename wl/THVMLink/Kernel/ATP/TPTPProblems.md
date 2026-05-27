@@ -32,7 +32,40 @@ The [TPTP (Thousands of Problems for Theorem Provers)](https://tptp.org/) librar
 
 ## Content
 
-The primary content is the full [Association]() of parsed problems, keyed by TPTP name. The two named accessors group problems by their domain code and by their SZS status:
+The corpus is built fresh at evaluation time by fetching the [ProofAtlas TPTP v9.0.0 subset](https://github.com/lammdachs/proofatlas-tptp-subset) (a 7 MB tarball of all 13,178 CNF/FOF problems under 64 kB each, organised by 48 domain codes) and mapping [`TPTPImport`](https://resources.wolframcloud.com/FunctionRepository/resources/TPTPImport/) over every `.p` file. The result is an [Association]() keyed by TPTP problem name, each entry carrying the domain code, format (`"cnf"` or `"fof"`), SZS status, TPTP rating, parsed [Axioms](), and [Conjecture]():
+
+```wl
+tptpProblems = Block[
+    {url = "https://github.com/lammdachs/proofatlas-tptp-subset/" <>
+           "archive/refs/heads/main.tar.gz",
+     tarFile, extracted, root, indexEntries,
+     tptpImport = ResourceFunction["TPTPImport"]},
+    tarFile = URLDownload[url, CreateFile[]];
+    extracted = ExtractArchive[tarFile, CreateDirectory[]];
+    root = DirectoryName @ SelectFirst[extracted,
+        FileBaseName[#] === "index" && FileExtension[#] === "json" &];
+    SetEnvironment["TPTP" -> root];
+    indexEntries = Association /@ Lookup[
+        Import[FileNameJoin[{root, "index.json"}], "JSON"], "problems"];
+    Association @ Map[
+        With[
+            {name = FileBaseName[#["path"]],
+             r = Quiet @ tptpImport[File @
+                FileNameJoin[{root, "Problems", #["path"]}]]},
+            name -> <|
+                "Name"       -> name,
+                "Domain"     -> #["domain"],
+                "Format"     -> #["format"],
+                "Status"     -> #["status"],
+                "Rating"     -> #["rating"],
+                "AxiomCount" -> Length[r["Axioms"]],
+                "Axioms"     -> r["Axioms"],
+                "Conjecture" -> r["Conjecture"]|>] &,
+        indexEntries]
+];
+```
+
+The primary content is the full [Association]() of parsed problems. The two named accessors group problems by domain code and by SZS status:
 
 ```wl
 #| eval: false
@@ -51,96 +84,58 @@ ResourceData[ResourceObject[EvaluationNotebook[]], "ByStatus"] = GroupBy[Values[
 
 ## Basic Examples
 
-Look up a single problem by its TPTP name. The four-axiom abelian-group problem `GRP001-4` shows the parsed-axiom shape: variables ([Pattern]()s named `X`) preserved, function symbols ([String]()-headed compounds) safely escaped:
+Look up a single problem by its TPTP name. The abelian-group problem `GRP001-4` exposes the parsed-axiom shape: variables ([Pattern]()s named `X`) preserved, function symbols ([String]()-headed compounds) safely escaped:
 
 ```wl
-Module[{tptpProblems = <|
-    "GRP001-4" -> <|"Name" -> "GRP001-4", "Domain" -> "GRP",
-        "Status" -> "unsatisfiable", "Rating" -> 0.0, "AxiomCount" -> 4,
-        "Axioms" -> {
-            "multiply"["e", X_, X_],
-            "multiply"[X_, "e", X_],
-            "multiply"[X_, "inverse"[X_], "e"],
-            "multiply"["inverse"[X_], X_, "e"]},
-        "Conjecture" -> Equal["multiply"["a", "b", "c"],
-            "multiply"["c", "b", "a"]]|>|>},
-    tptpProblems["GRP001-4"]
-]
+tptpProblems["GRP001-4"]
 ```
 
 ---
 
-The full dataset has thousands of entries; check its length:
+The full dataset has thousands of entries:
 
 ```wl
-Module[{tptpProblems = <|
-    "GRP001-1" -> <|"Domain" -> "GRP"|>,
-    "GRP001-4" -> <|"Domain" -> "GRP"|>,
-    "BOO001-1" -> <|"Domain" -> "BOO"|>|>},
-    Length[tptpProblems]
-]
+Length[tptpProblems]
 ```
 
-<!-- => 13178 in the deployed corpus -->
+<!-- => 13178 -->
 
 ## Scope & Additional Elements
 
-The 48 TPTP domains carry very different problem counts; the synthetic (`"SYN"`), set theory (`"SET"`), and software verification (`"SWV"`) domains dominate. Use the `"ByDomain"` accessor to count problems per domain:
+The 48 TPTP domains carry very different problem counts; the synthetic (`"SYN"`), set theory (`"SET"`), and software verification (`"SWV"`) domains dominate:
 
 ```wl
-Module[{tptpProblems = <|
-    "GRP001-1" -> <|"Domain" -> "GRP"|>,
-    "GRP001-4" -> <|"Domain" -> "GRP"|>,
-    "BOO001-1" -> <|"Domain" -> "BOO"|>,
-    "RNG001-1" -> <|"Domain" -> "RNG"|>,
-    "SYN001-1" -> <|"Domain" -> "SYN"|>|>},
-    ReverseSort @ Counts[
-        Values[tptpProblems][[All, "Domain"]]]
-]
+ReverseSort @ Counts[Values[tptpProblems][[All, "Domain"]]]
 ```
 
 ---
 
-The `"ByStatus"` accessor breaks the corpus down by the SZS catalogue status; the vast majority of problems are `"unsatisfiable"` (the standard ATP target):
+The SZS catalogue status partitions the corpus; the vast majority of problems are `"unsatisfiable"` (the standard ATP target):
 
 ```wl
-Module[{tptpProblems = <|
-    "GRP001-1" -> <|"Status" -> "unsatisfiable"|>,
-    "GRP001-4" -> <|"Status" -> "unsatisfiable"|>,
-    "PUZ001+2" -> <|"Status" -> "theorem"|>,
-    "SAT001-1" -> <|"Status" -> "satisfiable"|>|>},
-    Counts @ Values[tptpProblems][[All, "Status"]]
-]
+Counts @ Values[tptpProblems][[All, "Status"]]
 ```
 
 ---
 
-Filter by rating to find the unsolved-at-state-of-the-art frontier (rating 1.0):
+Filter by rating to find the unsolved-at-state-of-the-art frontier (rating $\geq 0.98$, the problems no system in the current evaluation cohort closes):
 
 ```wl
-Module[{tptpProblems = <|
-    "GRP001-1" -> <|"Name" -> "GRP001-1", "Rating" -> 0.0|>,
-    "GRP001-4" -> <|"Name" -> "GRP001-4", "Rating" -> 0.0|>,
-    "HARD0001" -> <|"Name" -> "HARD0001", "Rating" -> 1.0|>,
-    "HARD0002" -> <|"Name" -> "HARD0002", "Rating" -> 0.98|>|>},
-    Select[Values[tptpProblems], #["Rating"] >= 0.98 &][[All, "Name"]]
-]
+Take[
+    Sort @ Select[Values[tptpProblems], #["Rating"] >= 0.98 &][[All, "Name"]],
+    UpTo[10]]
 ```
 
 ## Visualizations
 
-A bar chart of axiom-count totals by domain shows which mathematical areas carry the heaviest axiomatic load - typically `"GRP"`, `"SET"`, and `"SYN"` dominate:
+A bar chart of problem counts by domain shows which mathematical areas the corpus emphasises - typically `"SWV"` (software verification), `"SYN"` (synthetic), and `"SET"` (set theory) dominate:
 
 ```wl
-Module[{axiomsByDomain = <|
-    "GRP" -> 4520, "BOO" -> 1850, "RNG" -> 3120, "LCL" -> 6400,
-    "SET" -> 8910, "TOP" -> 980,  "PUZ" -> 720,  "SYN" -> 12300|>},
-    BarChart[ReverseSort @ axiomsByDomain,
-        ChartLabels -> Automatic,
-        AxesLabel -> {None, "axiom-count total"},
-        PerformanceGoal -> "Speed",
-        ImageSize -> 600]
-]
+BarChart[ReverseSort @ Counts[Values[tptpProblems][[All, "Domain"]]],
+    ChartLabels -> Automatic,
+    AxesLabel -> {None, "problem count"},
+    PerformanceGoal -> "Speed",
+    ImageSize -> 600]
 ```
 
 ---
@@ -148,55 +143,41 @@ Module[{axiomsByDomain = <|
 A histogram of TPTP ratings shows the difficulty distribution: most problems have low ratings (solved easily by every modern prover); a long tail at the high end carries the hard problems:
 
 ```wl
-Module[{ratings = RandomVariate[BetaDistribution[1.5, 4], 1000]},
-    Histogram[ratings, 20,
-        AxesLabel -> {"TPTP rating", "problem count"},
-        PlotLabel -> "Difficulty distribution",
-        PerformanceGoal -> "Speed",
-        ImageSize -> 600]
-]
+Histogram[Values[tptpProblems][[All, "Rating"]], 20,
+    AxesLabel -> {"TPTP rating", "problem count"},
+    PlotLabel -> "Difficulty distribution",
+    PerformanceGoal -> "Speed",
+    ImageSize -> 600]
 ```
 
 ## Analysis
 
-Aggregate the axiom counts by domain to see which areas of mathematics carry the heaviest axiomatic load in the corpus. The result is an [Association]() of domain-code → total axioms:
+Aggregate the axiom counts by domain to see which areas of mathematics carry the heaviest axiomatic load. The result is an [Association]() of domain code → total axiom count across that domain's problems:
 
 ```wl
-Module[{tptpProblems = <|
-    "GRP001-1" -> <|"Domain" -> "GRP", "AxiomCount" -> 9|>,
-    "GRP001-4" -> <|"Domain" -> "GRP", "AxiomCount" -> 4|>,
-    "BOO001-1" -> <|"Domain" -> "BOO", "AxiomCount" -> 5|>,
-    "RNG001-1" -> <|"Domain" -> "RNG", "AxiomCount" -> 7|>|>},
-    ReverseSort @ GroupBy[Values @ tptpProblems,
-        #["Domain"] &, Total[#[[All, "AxiomCount"]]] &]
-]
+ReverseSort @ GroupBy[Values[tptpProblems],
+    #["Domain"] &, Total[#[[All, "AxiomCount"]]] &]
 ```
 
 ---
 
-Pattern-match against the parsed axioms to extract the leading function symbol of every equational axiom - useful for inventorying which operators a problem axiomatises:
+Pattern-match against the parsed axioms to extract the leading function symbol of every equational axiom in `GRP001-4` - useful for inventorying which operators a problem axiomatises:
 
 ```wl
-Module[{axioms = {
-    "and"[X_, Y_] == "and"[Y_, X_],
-    "or"[X_, "or"[Y_, Z_]] == "or"["or"[X_, Y_], Z_],
-    "not"["not"[X_]] == X_}},
-    Cases[axioms, Equal[h_[___], _] :> h]
-]
+Cases[tptpProblems["GRP001-4"]["Axioms"],
+    HoldPattern[Equal[h_[___], _]] :> h]
 ```
 
 ---
 
-The TPTP rating spread within a single domain highlights the difficulty gradient - low-rated problems are warm-ups, high-rated ones are the open frontier for state-of-the-art provers:
+The TPTP rating spread within the group-theory domain shows the difficulty gradient - low-rated problems are warm-ups, high-rated ones are the open frontier for state-of-the-art provers:
 
 ```wl
-Module[{ratings = <|
-    "GRP001-1" -> 0.0,  "GRP001-4" -> 0.0,
-    "GRP456-1" -> 0.43, "GRP789-1" -> 0.79,
-    "GRP999-1" -> 1.0|>},
-    {Min @ Values @ ratings,
-     Median @ Values @ ratings,
-     Max @ Values @ ratings}
+With[{grp = Select[Values[tptpProblems], #["Domain"] === "GRP" &]},
+    <|"Min" -> Min[grp[[All, "Rating"]]],
+      "Median" -> Median[grp[[All, "Rating"]]],
+      "Max" -> Max[grp[[All, "Rating"]]],
+      "Count" -> Length[grp]|>
 ]
 ```
 
