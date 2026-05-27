@@ -3483,7 +3483,13 @@ TRelevantAxioms[thm_String, theory_String, opts:OptionsPattern[]] :=
         TRelevantAxioms[cjRaw, axRaw, opts]
     ];
 TRelevantAxioms[conjRaw_, axRaw_List, opts:OptionsPattern[]] :=
-    atpRelevancePartition[axRaw, conjRaw,
+    (* Strip Inactive and one level of list nesting -- same shape as
+       TFindProof's entry path (iter 60-62), so a relevance call on
+       Lemmas / concatenated axioms returns the same partition shape
+       the prove call would. *)
+    atpRelevancePartition[
+        atpStripInactive[atpFlattenAxioms[axRaw]],
+        atpStripInactive[conjRaw],
         atpRelevanceSpec[OptionValue[Method]]];
 
 (* Render a held expression in the form WL's ProofObject expects

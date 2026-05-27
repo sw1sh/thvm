@@ -2264,6 +2264,31 @@ VerificationTest[
     TestID -> "ATP/flatten/nested-axiom-list-auto-flattens"
 ]
 
+(* === TRelevantAxioms input normalization (iter 63) ================ *)
+
+(* TRelevantAxioms should accept Inactive[Equal] axioms (the
+   FindEquationalProof "Lemmas" form) without misclassifying them as
+   confined.  Pre-fix, the relevance filter saw Inactive[Equal] as an
+   unknown head and dropped the axiom as ConfinedBothSides. *)
+VerificationTest[
+    Lookup[
+        TRelevantAxioms[Inactive[Equal][a, c],
+            {Inactive[Equal][a_, b_], Inactive[Equal][b_, c_]}],
+        "Dropped"],
+    {},
+    TestID -> "ATP/relevant/Inactive-axioms-not-misclassified"
+]
+
+(* TRelevantAxioms should auto-flatten nested axiom lists, matching
+   the TFindProof entry shape. *)
+VerificationTest[
+    Length @ Lookup[
+        TRelevantAxioms[a == c, {{a == b}, {b == c}}],
+        "Kept"],
+    2,
+    TestID -> "ATP/relevant/nested-axiom-list-auto-flattens"
+]
+
 (* === Globals-collision footgun =================================== *)
 
 (* `CanonicalizePatterns` renames axiom-bound variables to canonical
