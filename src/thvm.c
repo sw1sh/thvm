@@ -203,6 +203,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // LOOP range); the production renderer entry points still call the
 // legacy emit.  See file header for the architectural rationale.
 #include "codegen/render_linearized.c"
+// codegen/render_ptx.c -- PTX assembly emitter consuming the SAME
+// LinKernel as render_linearized.c, emitting PTX text directly so the
+// CUDA jit can cuModuleLoadData it without nvrtc's C++ frontend.  Port
+// of tinygrad/renderer/ptx.py.  Milestone 1: elementwise + loop core.
+#include "codegen/render_ptx.c"
 // CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.
 // cpu_dispatch_kernel composes the three (BLAS first, then JIT, then
 // interpreter); each records its route via cg_profile_record.

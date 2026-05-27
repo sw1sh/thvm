@@ -2937,6 +2937,14 @@ fn int cg_render_linearized_metal(LinKernel const *lk, const char *kernel_name,
                                   FILE *fp);
 fn int cg_render_linearized_cuda (LinKernel const *lk, const char *kernel_name,
                                   FILE *fp);
+// PTX emitter (src/codegen/render_ptx.c).  Walks the SAME LinKernel but
+// emits PTX assembly text directly (bypassing nvrtc's C++ frontend) so
+// the CUDA jit can cuModuleLoadData it.  `sm` is the compute capability
+// (70 = V100); <=0 defaults to 70.  Returns 1 on success, 0 if any
+// opcode is outside the renderer's coverage (caller falls back to the
+// C-source CUDA emit).
+fn int cg_render_linearized_ptx  (LinKernel const *lk, const char *kernel_name,
+                                  int sm, FILE *fp);
 // Route-gate predicate (src/codegen/render_linearized.c).  Returns 1
 // iff the UOp DAG rooted at `root` contains any UOP_RANGE leaf with
 // axis_type in {KAX_UPCAST, KAX_UNROLL} -- the "opt-rich" shape that
