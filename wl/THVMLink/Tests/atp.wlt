@@ -1966,6 +1966,26 @@ VerificationTest[
     TestID -> "ATP/method/Twee-preset-subopt-override"
 ]
 
+(* === Method -> "EProver" preset =================================== *)
+
+(* The EProver preset bundles E's typical CASC config: ConjSym
+   weight + KBO + SelectionRatio 10 + AutoMaxWeight 20 +
+   BackwardSubsume + RHSInterreduce + UnfailingCP. *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> "EProver", TimeConstraint -> 5],
+    ProofObject,
+    TestID -> "ATP/method/EProver-preset-proves"
+]
+
+(* Subopt override (turn AutoMaxWeight off). *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> {"EProver", "AutoMaxWeight" -> 0}, TimeConstraint -> 5],
+    ProofObject,
+    TestID -> "ATP/method/EProver-preset-subopt-override"
+]
+
 (* === TAtpSchedule public introspection ============================ *)
 
 (* TAtpSchedule[Method] returns the schedule the dispatcher would
@@ -2034,7 +2054,7 @@ VerificationTest[
 VerificationTest[
     With[{p = THVMLink`ATP`Private`$AtpMethodPresets},
         {ListQ[p], AllTrue[p, StringQ],
-         SubsetQ[p, {"Waldmeister", "VampireUEQ", "Twee",
+         SubsetQ[p, {"Waldmeister", "VampireUEQ", "Twee", "EProver",
                      "Portfolio", "VampirePortfolio",
                      "VampirePortfolioCompact"}]}],
     {True, True, True},
@@ -2048,10 +2068,10 @@ VerificationTest[
    merge, mnf computation, returned arg vector) surface here.  We
    don't require a proof: e.g. "Waldmeister" is tuned for unrecognized
    single-operator Sheffer problems and falls behind on BooleanAxioms.
-   VampireUEQ + Twee do prove this goal trivially, which the iter 45
-   tests above already cover. *)
+   VampireUEQ + Twee + EProver do prove this goal trivially, which
+   the per-preset tests already cover. *)
 VerificationTest[
-    With[{prs = {"Waldmeister", "VampireUEQ", "Twee"}},
+    With[{prs = {"Waldmeister", "VampireUEQ", "Twee", "EProver"}},
         AllTrue[prs,
             With[{p = TFindProof["AndCommutativity", "BooleanAxioms",
                     Method -> #, TimeConstraint -> 5]},

@@ -2483,12 +2483,53 @@ atpParseMethod[{"Twee", subopts___Rule}] :=
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
+(* Method -> "EProver": a preset modeled on E's typical CASC run
+   shape (Schulz, 2002+).  E's heuristic is much larger than a
+   single config: it rotates dozens of weight + selection
+   combinations under its DISCOUNT loop.  This preset bundles the
+   combo most often selected at E's auto-mode classification for
+   UEQ problems:
+     - CriticalPairWeight -> "ConjSym"  (E's
+       ConjectureSymbolWeight: conjecture-symbol nodes weight 1,
+       off-conjecture nodes weight 4 -- the iter 22 port).
+     - Ordering -> "KBO"               (E's default term ordering
+       for UEQ).  AutoPrecedence intentionally OFF: thvm's Waldmeister-
+       flavored precedence layer (inverse > distributor > arity > AC-
+       demoted > ...) demotes AC operators in a way that stalls
+       ConjSym on simple Boolean goals.  E uses a different precedence
+       generator; leaving the default lexicographic order matches the
+       cases this preset is designed for.
+     - SelectionRatio -> 10 (E's `dis+10` age:weight 1:10 = our
+       "1 FIFO pick per 10 selections").
+     - AutoMaxWeight -> 20 (E manages CP queue size via PCL-side
+       bounds; AutoMaxWeight is our analog).
+     - BackwardSubsume + RHSInterreduce (E's standard simplification
+       sweep across the active+passive sets at each loop iteration).
+     - UnfailingCP -> True (E's unfailing completion mode is on by
+       default for UEQ).
+   Subopts override any default, mirroring the other preset shapes. *)
+atpParseMethod["EProver"] := atpParseMethod[{"EProver"}];
+atpParseMethod[{"EProver", subopts___Rule}] :=
+    Block[{o = Association[{subopts}], merged, mnf},
+        mnf = If[ TrueQ @ Lookup[o, "GoalDirected", False], 1, 0];
+        o = KeyDrop[o, "GoalDirected"];
+        merged = Join[<|
+            "CriticalPairWeight" -> "ConjSym",
+            "Ordering" -> "KBO",
+            "SelectionRatio" -> 10,
+            "AutoMaxWeight" -> 20,
+            "BackwardSubsume" -> True,
+            "RHSInterreduce" -> True,
+            "UnfailingCP" -> True|>, o];
+        atpParseCompletionOpts[Normal[merged], mnf]
+    ];
+
 (* Registry of the named Method presets `atpParseMethod` recognizes.
    "Portfolio" / "VampirePortfolio" expand to schedules (a list of
    configs); the rest are single-config presets.  Exposed as
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
-$AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee",
+$AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee", "EProver",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact"};
 
 (* Method -> "VampirePortfolio": a 10-entry rotation modeled on the
