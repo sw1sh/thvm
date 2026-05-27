@@ -163,27 +163,65 @@ scanClauses[text_String, i0_Integer, baseDir_String] :=
     ]
 
 (* Reads the cnf(...) / fof(...) / tff(...) / tcf(...) tail:
-   name, role, body.  Sows a 4-tuple {name, head, role, body} so
-   downstream consumers (clauseToFormula for the parser, the
-   include-selector filter for `include(..., [name1, ...])`) can both
-   see the clause name.  clauseToFormula ignores the name; the
-   include filter uses it.
+   name, role, body, [optional annotations].  Sows a 4-tuple
+   {name, head, role, body} so downstream consumers (clauseToFormula
+   for the parser, the include-selector filter for `include(...,
+   [name1, ...])`) can both see the clause name.  clauseToFormula
+   ignores the name; the include filter uses it.
 
-   For tff/tcf/thf, a `type` role is a signature declaration with
-   no semantic content for the untyped homogeneous saturator -- skip
-   it silently without emitting a tuple. *)
+   TPTP optionally allows a 4th positional argument (source
+   annotation: file/inference/introduced/etc.) and a 5th (useful_info
+   list).  These are discarded -- the parser stops at the body's
+   trailing comma or its closing paren, and skipParenthesised winds
+   the cursor past whatever annotation follows.
+
+   For tff/tcf/thf, a `type` role is a signature declaration with no
+   semantic content for the untyped homogeneous saturator -- skip it
+   silently without emitting a tuple. *)
 consumeAnnotated[text_String, i0_Integer, head_String] :=
-    Block[{i = i0, name, role, body, bodyEnd},
+    Block[{i = i0, name, role, body, bodyEnd, clauseEnd},
         {name, i} = readWord[text, i];
         i = skipPast[text, i, ","];
         {role, i} = readWord[text, i];
         i = skipPast[text, i, ","];
-        {body, bodyEnd} = readBalanced[text, i];
+        {body, bodyEnd} = readBalancedUpTo[text, i, ","];
         If[ ! (MemberQ[{"tff", "tcf", "thf"}, head] && role === "type"),
             Sow[{name, head, role, StringTrim[body]}]
         ];
-        skipPast[text, bodyEnd, "."]
+        (* Wind the cursor past any remaining annotations + the
+           outer `).` terminator.  readBalancedUpTo stopped at a
+           top-level `,` or `)` of the cnf(...) outer call; in either
+           case, scanning to the next `).` finishes the clause. *)
+        clauseEnd = bodyEnd;
+        While[ clauseEnd <= StringLength[text] &&
+                StringTake[text, {clauseEnd, clauseEnd}] =!= ")",
+            clauseEnd = clauseEnd + 1];
+        skipPast[text, clauseEnd, "."]
     ]
+
+(* Read a balanced sub-expression starting at i0; stop just BEFORE the
+   first depth-0 character in `delims` (a string of one-char
+   delimiters) or just BEFORE a closing `)` at depth 0.  Returns
+   {content, cursor-AT-the-delimiter}.  Used by consumeAnnotated to
+   peel the body off `cnf(name, role, body, ...)` without grabbing
+   the trailing annotations. *)
+readBalancedUpTo[text_String, i0_Integer, delims_String] := Block[
+    {i = i0, len = StringLength[text], depth = 0, ch, done = False},
+    While[ ! done && i <= len,
+        ch = StringTake[text, {i, i}];
+        Which[
+            ch === "(" || ch === "[" || ch === "{",
+                depth = depth + 1; i = i + 1,
+            ch === "]" || ch === "}",
+                depth = depth - 1; i = i + 1,
+            ch === ")",
+                If[ depth === 0, done = True, depth = depth - 1; i = i + 1],
+            depth === 0 && StringContainsQ[delims, ch], done = True,
+            True, i = i + 1
+        ]
+    ];
+    {StringTake[text, {i0, i - 1}], i}
+]
 
 (* Read an include directive starting AFTER the open paren of
    `include(`.  The TPTP form is
@@ -916,11 +954,15 @@ readTerm[text_String, i0_Integer] :=
                 {child, i}
             ,
             (* Single-quoted atom: 'foo bar'.  Contents become the
-               String head of a 0-arity compound; an optional argument
-               list is then handled by the post-token path below. *)
+               String head of a 0-arity compound.  Per TPTP, a
+               single-quoted atom is always a constant, never a
+               variable -- pass the `quoted -> True` flag so the
+               post-token path doesn't try to promote it to a
+               Pattern even if the contents happen to start with an
+               upper-case letter. *)
             ch === "'",
                 {tok, i} = readQuoted[text, i, "'"];
-                readTermAfterToken[text, i, tok]
+                readTermAfterToken[text, i, tok, True]
             ,
             (* Double-quoted distinct object: "hello world".  TPTP
                semantics: distinct objects are pairwise non-equal by
@@ -948,23 +990,29 @@ readTerm[text_String, i0_Integer] :=
             True,
                 {tok, i} = readWord[text, i];
                 If[ tok === "", Return[{$Failed, i}]];
-                readTermAfterToken[text, i, tok]
+                readTermAfterToken[text, i, tok, False]
         ]
     ]
 
-(* After reading the leading token (bare-word or quoted), check for an
-   optional `(args)` argument list.  A bare token without args is
-   either a variable (uppercase prefix) -> Pattern via $tptpVars, or a
-   0-arity constant -> `tok[]` (String-headed empty-arg compound,
-   sidesteps Equal's eager evaluation on distinct String atoms). *)
-readTermAfterToken[text_String, i0_Integer, tok_String] := Block[
+(* After reading the leading token, check for an optional `(args)`
+   argument list.  Without args, the token is either:
+     - a TPTP variable (bare upper-case-prefixed word) -> Pattern via
+       $tptpVars
+     - a 0-arity constant (everything else, including any quoted atom
+       regardless of capitalisation) -> `tok[]` (String-headed empty-
+       arg compound, sidesteps Equal's eager evaluation on distinct
+       String atoms).
+   The `quoted` flag forces the constant branch even for a token that
+   looks like an upper-case word, since TPTP's single-quoted atoms
+   are always constants. *)
+readTermAfterToken[text_String, i0_Integer, tok_String, quoted_] := Block[
     {i = i0, len = StringLength[text], parts},
     i = skipWS[text, i];
     If[ i <= len && StringTake[text, {i, i}] === "(",
         {parts, i} = readArgs[text, i + 1];
         {tok @@ parts, i}
         ,
-        If[ tptpVarQ[tok],
+        If[ ! quoted && tptpVarQ[tok],
             {ensureVar[tok], i},
             {tok[], i}
         ]
@@ -1062,9 +1110,20 @@ tptpVarQ[s_String] :=
 (* Per-clause variable cache.  $tptpVars is Block-scoped from
    clauseToEquation so we assign to it directly (Block bindings are
    mutable inside the block). *)
+(* Per-clause variable cache.  Preserve the TPTP name as the Pattern
+   symbol so a clause's parse displays as `"foo"[X_] == X_` rather
+   than `"foo"[v$123_] == v$123_`.  Pattern variables are scope-local
+   to a rule, so two clauses both referencing `X` don't cross-bind.
+
+   The symbol lives in `Global`` so the rendered axiom reads as the
+   plain variable name (`X_`) without context decoration.  Underscores
+   in TPTP variable names (rare but legal -- `X_var`) get folded to
+   `$` since WL symbol identifiers cannot contain `_`. *)
 ensureVar[name_String] := (
     If[ ! KeyExistsQ[$tptpVars, name],
-        $tptpVars[name] = Pattern[Evaluate @ Unique["v"], Blank[]]
+        $tptpVars[name] = Pattern[
+            Evaluate @ Symbol["Global`" <> StringReplace[name, "_" -> "$"]],
+            Blank[]]
     ];
     $tptpVars[name]
 )
