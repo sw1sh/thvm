@@ -488,14 +488,20 @@ static int op_is_expandable(u32 op) {
     case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_IWHERE:
     case UOP_INDEX_E:
-    // STORE is expandable (tinygrad expander.py:130 do_expand eligible
-    // set).  An UPCAST'd output store has an UNROLL'd address (and value)
-    // -- do_expand consumes the UNROLLs into a vectorized store wrapped
-    // in one outer UNROLL, which the devectorizer lowers to F scalar
-    // stores.  This REPLACES the old fix_store_unroll CONTRACT-wrap,
-    // which re-matched its own output (graph_rewrite re-recurses) and
-    // nested ~129 deep before the depth cap.
+    // STORE / LOAD / REDUCE are expandable (tinygrad expander.py:130
+    // do_expand eligible set).  Making LOAD + REDUCE expandable is what
+    // lets an UPCAST'd output's UNROLL propagate ALL the way up:
+    //   LOAD(UNROLL(idx))         -> UNROLL(LOAD(idx_lanes))
+    //   MUL(UNROLL(LOAD), x)      -> UNROLL(MUL(...))
+    //   REDUCE(UNROLL(MUL), cin)  -> UNROLL(REDUCE(...))   [F distinct reduces]
+    // so the surrounding CONTRACT(cout, UNROLL(REDUCE)) folds via Case B
+    // (GEP) into F DISTINCT reduce lanes -- not F identical broadcast
+    // copies (which collapsed conv's F Cout reductions into one).  STORE
+    // expansion (above) consumes the UNROLL'd output address into F
+    // per-lane stores.
     case UOP_STORE:
+    case UOP_LOAD:
+    case UOP_REDUCE:
       return 1;
     default:
       return 0;
@@ -629,6 +635,20 @@ static Term expander_do_expand(Term root) {
       // below; devectorize lowers it to F scalar stores.
       rebuilt = uop_store(new_srcs[0], new_srcs[1], new_srcs[2]);
       break;
+    case UOP_LOAD:
+      rebuilt = uop_load(new_srcs[0]);
+      break;
+    case UOP_REDUCE: {
+      // Body (slot 0) is expanded; the reduce kind + axes are NUM
+      // payload read from the original node.
+      u32 kind = uop_reduce_kind(root);
+      u32 na   = uop_reduce_n_axes(root);
+      u32 axes[MAX_DIM];
+      if (na > MAX_DIM) na = MAX_DIM;
+      for (u32 i = 0; i < na; i++) axes[i] = uop_reduce_axis(root, i);
+      rebuilt = uop_reduce_multi(kind, na, axes, new_srcs[0]);
+      break;
+    }
     default:
       return 0;
   }

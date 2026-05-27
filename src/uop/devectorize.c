@@ -213,68 +213,99 @@ typedef struct {
 // where end_marker itself nests AFTER(update, init).  The AFTER tree
 // is what the renderer's existing emit-after walker (rmu_emit_after)
 // already linearizes into source order.
+// Combine an accumulator load with a body lane via the REDUCE's kind.
+// Returns 0 for an unknown kind.
+static Term devec_reduce_combine(u32 kind, Term acc_val, Term body) {
+  if (kind == REDUCE_SUM) {
+    return uop_binary(UOP_ADD, acc_val, body);
+  }
+  if (kind == REDUCE_MAX) {
+    // No UOP_MAX in the value layer: max(acc, body) ->
+    // WHERE(CMPLT(acc, body), body, acc).
+    Term lt = uop_binary(UOP_CMPLT, acc_val, body);
+    return uop_iwhere(lt, body, acc_val);
+  }
+  return 0;
+}
+
+// Build the END marker carrying the reduce axes (by axis_id; the
+// renderer / linearizer matches on axis_id alone, extent is a
+// placeholder).
+static Term devec_reduce_end_marker(Term red) {
+  u32 n_axes = uop_reduce_n_axes(red);
+  Term axes_terms[8] = {0};
+  u32 nax = n_axes > 8 ? 8 : n_axes;
+  for (u32 i = 0; i < nax; i++) {
+    axes_terms[i] = uop_range(uop_reduce_axis(red, i), KAX_LOOP, 0);
+  }
+  return (nax > 0) ? uop_end(nax, axes_terms) : 0;
+}
+
 static Term devec_reduce_to_acc(DevecReduceCtx *ctx, Term red) {
   if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) return 0;
   u64 loc = term_val(red);
   Term body = heap_read(loc + 0);
   u32 kind = uop_reduce_kind(red);
-  u32 n_axes = uop_reduce_n_axes(red);
-  // dtype inherited from body.
   u32 body_dtype = DT_FP32;
   (void)term_dtype_in(body, 0, &body_dtype);
+  u32 idbits = devec_reduce_identity_bits(kind, body_dtype);
+  Term identity  = uop_const(body_dtype, idbits);
+  Term zero_addr = uop_const(DT_INT32, 0);
+  Term end_marker = devec_reduce_end_marker(red);
+
+  // PARALLEL ACCUMULATORS: when the reduce body is an F-wide STACK (an
+  // UPCAST'd output -- e.g. conv's Cout=4 lanes), the F lanes are F
+  // INDEPENDENT reductions (W[cout,:] . X differs per cout).  A single
+  // scalar accumulator would make all F outputs read the same sum.  So
+  // allocate F accumulators, one per lane, and gather their final loads
+  // into a STACK.  Mirrors tinygrad reduce_to_acc giving the DEFINE_REG
+  // the body's vec(F) dtype, then no_vectorized splitting into F lanes.
+  // A STACK-bodied reduce (an output upcast that reached reduce_to_acc
+  // as F lanes rather than F distinct REDUCE nodes) needs F independent
+  // accumulators -- a single scalar acc would make all F outputs read
+  // the same sum.  (For the conv shape the REDUCE-expandable path
+  // produces F distinct scalar reduces instead, so this guards the
+  // alternate lowering.)
+  u32 F = (term_tag(body) == TAG_UOP && term_ext(body) == UOP_STACK)
+        ? uop_stack_n(body) : 1;
+  if (F > 1 && F <= 256) {
+    Term seq = 0;          // AFTER chain: inits first, then updates
+    Term loads[256];
+    for (u32 i = 0; i < F; i++) {
+      Term acc_i = uop_placeholder(body_dtype, ctx->acc_num++);
+      Term init_i = uop_store(acc_i, zero_addr, identity);
+      seq = (seq == 0) ? init_i : uop_after(init_i, seq);
+      loads[i] = uop_load(acc_i);   // captured here; the update reads
+                                    // a fresh load (same acc Term)
+    }
+    // Updates: combined_i = combine(LOAD(acc_i), body_lane_i).  The
+    // accumulator Term is identified by the placeholder built above; a
+    // fresh LOAD over the same placeholder reads the current value.
+    // Re-derive acc_i from the load's src (loads[i] = LOAD(acc_i)).
+    for (u32 i = 0; i < F; i++) {
+      Term acc_i = heap_read(term_val(loads[i]) + 0);
+      Term acc_val = uop_load(acc_i);
+      Term body_i  = uop_stack_src(body, i);
+      Term combined = devec_reduce_combine(kind, acc_val, body_i);
+      if (combined == 0) return 0;
+      Term update_i = uop_store(acc_i, zero_addr, combined);
+      seq = uop_after(update_i, seq);
+    }
+    if (end_marker != 0) seq = uop_after(end_marker, seq);
+    Term final = uop_stack(F, loads);
+    return uop_after(final, seq);
+  }
+
+  // Scalar reduce (F == 1): one accumulator.
   u32 acc_id = ctx->acc_num++;
   Term acc = uop_placeholder(body_dtype, acc_id);
-  u32 idbits = devec_reduce_identity_bits(kind, body_dtype);
-  Term identity = uop_const(body_dtype, idbits);
-  Term zero_addr = uop_const(DT_INT32, 0);
-  // init: STORE(acc, 0, identity)
   Term init = uop_store(acc, zero_addr, identity);
-  // loaded acc value used inside the update.
-  Term acc_val = uop_load(acc);
-  // body op: combine acc with body via the same op the REDUCE carried.
-  Term combined = 0;
-  if (kind == REDUCE_SUM) {
-    combined = uop_binary(UOP_ADD, acc_val, body);
-  } else if (kind == REDUCE_MAX) {
-    // No UOP_MAX in the value layer; the tinygrad path emits
-    // alu(MAX, acc, body) and the renderer lowers it.  thvm currently
-    // does MAX-reduces via the REDUCE_MAX kind on the REDUCE itself;
-    // for a one-shot fallback emit a CMPLT-based select.
-    // body if body >= acc else acc -> WHERE(CMPLT(acc, body), body, acc)
-    Term lt = uop_binary(UOP_CMPLT, acc_val, body);
-    combined = uop_iwhere(lt, body, acc_val);
-  } else {
-    // Unknown reduce kind; bail out and leave the REDUCE alone.
-    return 0;
-  }
+  Term combined = devec_reduce_combine(kind, uop_load(acc), body);
+  if (combined == 0) return 0;       // unknown reduce kind
   Term update = uop_store(acc, zero_addr, combined);
-  // END marker carrying the reduce axes (as their RANGE Terms).
-  // Build a tiny array of RANGE Terms for each axis_id.  In thvm's
-  // representation the axes are stored as IDs; we synthesize a
-  // canonical RANGE(axis_id, KAX_LOOP, extent) for the marker since the
-  // REDUCE node itself does not carry per-axis extents.  The marker is
-  // only consumed positionally by the renderer (close N loops here);
-  // the precise RANGE term is identification only.
-  Term axes_terms[8] = {0};
-  u32 nax = n_axes;
-  if (nax > 8) nax = 8;
-  for (u32 i = 0; i < nax; i++) {
-    u32 ax = uop_reduce_axis(red, i);
-    // extent 0 placeholder -- the renderer matches END.range to a
-    // RANGE on the value tree by axis_id alone.
-    axes_terms[i] = uop_range(ax, KAX_LOOP, 0);
-  }
-  Term end_marker = (nax > 0) ? uop_end(nax, axes_terms) : 0;
-  // Sequence: AFTER(update, init), then END after that, then LOAD after
-  // END.  thvm's UOP_AFTER takes (node, after_node) meaning "node
-  // executes after after_node".  We thread:
-  //   chain1 = AFTER(update, init)        -- update sequenced after init
-  //   chain2 = (end_marker != 0) ? AFTER(end_marker, chain1) : chain1
-  //   result = AFTER(LOAD(acc), chain2)   -- final load after the end
   Term chain1 = uop_after(update, init);
   Term chain2 = (end_marker != 0) ? uop_after(end_marker, chain1) : chain1;
-  Term final_load = uop_load(acc);
-  Term result = uop_after(final_load, chain2);
+  Term result = uop_after(uop_load(acc), chain2);
   return result;
 }
 
