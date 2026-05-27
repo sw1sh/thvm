@@ -2264,6 +2264,32 @@ VerificationTest[
     TestID -> "ATP/flatten/nested-axiom-list-auto-flattens"
 ]
 
+(* === Single-axiom shape (iter 68) =================================== *)
+
+(* TFindProof[goal, axiom] (axiom NOT wrapped in a List) should
+   auto-wrap and dispatch.  Common when the user pastes a single
+   axiom directly.  Pre-iter-68 this returned the unevaluated
+   TFindProof[...] expression. *)
+VerificationTest[
+    Head @ TFindProof[a == b, a == b, TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/single-axiom/bare-Equal-wraps"
+]
+
+VerificationTest[
+    Head @ TFindProof[Inactive[Equal][a, b], Inactive[Equal][a, b],
+        TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/single-axiom/Inactive-wraps"
+]
+
+VerificationTest[
+    Head @ TFindProof[f[a] == g[a], ForAll[x, f[x] == g[x]],
+        TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/single-axiom/ForAll-wraps"
+]
+
 (* === TPTPImport pipe-through (iter 65) ============================ *)
 
 (* TPTPImport produces String-headed compounds like "f"[X_] for TPTP

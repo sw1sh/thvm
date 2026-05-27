@@ -3850,6 +3850,18 @@ atpFlattenAxioms[ax_List] := Flatten[ax, 1];
 atpMaybeInternalizeTPTP[expr_] := If[
     !FreeQ[expr, _String[___]],
     tptpInternalize[expr], expr];
+(* A single Equal / Inactive[Equal] / ForAll axiom (no enclosing
+   List) is a common shape -- the user pastes one ax directly.
+   Wrap in a 1-element List and re-dispatch.  Iter 68. *)
+TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        opts:OptionsPattern[]] :=
+    TFindProof[conjecture, {axiom}, opts];
+TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
+    TFindProof[conjecture, {axiom}, returnSpec, opts];
+
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpProveBundle[
