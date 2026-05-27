@@ -2580,10 +2580,10 @@ $AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee", "EProver",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
     "AllPresets"};
 
-(* Method -> "VampirePortfolio": a 10-entry rotation modeled on the
+(* Method -> "VampirePortfolio": an 11-entry rotation modeled on the
    portfolio-cycling shape Vampire 5.0.1 ships for UEQ -- many short
    strategy slices rather than one tuned config.  With TimeConstraint
-   -> T, each entry runs at T / 10 wall time.  Designed to exercise
+   -> T, each entry runs at T / 11 wall time.  Designed to exercise
    the full knob surface (CP weight modes, orderings, redundancy
    criteria) on a single Method invocation.
 
@@ -2628,7 +2628,15 @@ $VampirePortfolio = {
     (* 9: GoalDirected + SInE for cross-system many-axiom goals. *)
     {"GoalDirected", "AxiomRelevance" -> "SInE"},
     (* 10: Add weight, the bare default for combinator / Sheffer-X. *)
-    {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20}
+    {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},
+    (* 11: Mix2 + SelectionRatio 2 (aggressive 1-FIFO-per-2 age bias).
+       Iter 75/76 sweep: this cracks the cross-system Sheffer Implies-X
+       family (ImpliesWolframAxioms + ImpliesWolframAlternate, ~3.7s)
+       that every other rotation entry walls on.  The tight age bias
+       forces the long derivation chain through before the CP queue
+       blows up; SR=1 and SR>=5 both miss it. *)
+    {"Completion", "CriticalPairWeight" -> "Mix2",
+        "SelectionRatio" -> 2, "AutoMaxWeight" -> 20}
 };
 
 (* Hook VampirePortfolio into atpScheduleFor so the rotation expands

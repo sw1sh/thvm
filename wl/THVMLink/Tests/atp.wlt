@@ -2067,11 +2067,12 @@ VerificationTest[
     TestID -> "ATP/schedule/single-config-preset-len-1"
 ]
 
-(* "VampirePortfolio" expands to the 10-entry $VampirePortfolio. *)
+(* "VampirePortfolio" expands to the 11-entry $VampirePortfolio
+   (iter 76 added the Mix2 + SelectionRatio 2 cross-system entry). *)
 VerificationTest[
     Length @ TAtpSchedule["VampirePortfolio"],
-    10,
-    TestID -> "ATP/schedule/VampirePortfolio-len-10"
+    11,
+    TestID -> "ATP/schedule/VampirePortfolio-len-11"
 ]
 
 (* "VampirePortfolioCompact": 3-entry rotation for small budgets. *)
