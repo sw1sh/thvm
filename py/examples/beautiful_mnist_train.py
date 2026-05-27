@@ -106,6 +106,10 @@ def main():
         _TH.cpu_peak_reset()               # within-step peak from here
         t0 = time.time()
         idx = np.random.randint(0, len(Xtr), size=bs)
+        if os.environ.get("THVM_CUDA_LOG_COMPILES"):
+            import sys
+            sys.stderr.write(f"=== step {i+1} start, compiles_before={_TH.cuda_jit_compiles()} ===\n")
+            sys.stderr.flush()
         loss = (model(Tensor(Xtr[idx]))
                 .sparse_categorical_crossentropy(Tensor(Ytr[idx]))
                 .backward())

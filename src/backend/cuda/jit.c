@@ -119,6 +119,47 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
   }
   CUDA_JIT_COMPILES++;
   if (found == -1 && slot->module != NULL) CUDA_JIT_EVICTIONS++;
+  // THVM_CUDA_LOG_COMPILES=1: one line per nvrtc compile, with the
+  // source size + first source line as a fingerprint.  Used to
+  // diagnose mid-stream cache-miss waves (e.g. step-4 spike from
+  // step-varying CONSTs baked into kernel source).
+  {
+    static int trace_init = 0;
+    static int trace_on   = 0;
+    if (!trace_init) {
+      char const *e = getenv("THVM_CUDA_LOG_COMPILES");
+      trace_on = (e != NULL && e[0] != '0');
+      trace_init = 1;
+    }
+    if (trace_on) {
+      size_t sz = 0; while (cu_src[sz] != '\0' && sz < 1000000) sz++;
+      // Fingerprint: find the LAST store statement (output address).
+      // The output STORE is the kernel's unique signature -- different
+      // output shapes have different store addresses.
+      char last_out[120] = {0};
+      const char *p = cu_src + sz;
+      while (p > cu_src && *(p-1) != '\n') p--;  // start of last line
+      // Walk back past empty closing braces
+      while (p > cu_src) {
+        const char *line_start = p;
+        while (line_start > cu_src && *(line_start-1) != '\n') line_start--;
+        if (strstr(line_start, "out[") || strstr(line_start, " = _acc")) {
+          size_t i = 0;
+          while (line_start[i] && line_start[i] != '\n' && i < 119) {
+            last_out[i] = line_start[i]; i++;
+          }
+          last_out[i] = '\0';
+          break;
+        }
+        p = line_start - 1;
+        if (p <= cu_src) break;
+      }
+      fprintf(stderr, "[cuda-compile #%llu] sz=%zu %.100s\n",
+              (unsigned long long)CUDA_JIT_COMPILES, sz,
+              last_out[0] ? last_out : "(no store found)");
+      fflush(stderr);
+    }
+  }
 
   // --- nvrtc compile ------------------------------------------------
   nvrtcProgram prog;
