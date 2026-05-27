@@ -2012,6 +2012,33 @@ VerificationTest[
     TestID -> "ATP/describe/VPC-wraps-schedule"
 ]
 
+(* Problem-aware describe: Automatic with conj + ax in hand should
+   reflect the structure-tailored schedule (6 entries for
+   AbelianGroup with the auto-tuned front). *)
+VerificationTest[
+    Length @ Lookup[
+        TAtpDescribeMethod[Automatic, "InverseOfInverse", "AbelianGroupAxioms"],
+        "Schedule"],
+    6,
+    TestID -> "ATP/describe/Automatic-with-problem-front-loads-Group"
+]
+
+(* Single-config preset ignores problem context (Twee is structure-
+   agnostic). *)
+VerificationTest[
+    TAtpDescribeMethod["Twee", "AndCommutativity", "BooleanAxioms"]
+        === TAtpDescribeMethod["Twee"],
+    True,
+    TestID -> "ATP/describe/single-preset-ignores-problem-context"
+]
+
+(* Unknown theorem in the AxiomaticTheory-name form yields $Failed. *)
+VerificationTest[
+    TAtpDescribeMethod[Automatic, "NotAThm", "BooleanAxioms"],
+    $Failed,
+    TestID -> "ATP/describe/unknown-theorem-name-fails"
+]
+
 (* === TAtpSchedule public introspection ============================ *)
 
 (* TAtpSchedule[Method] returns the schedule the dispatcher would

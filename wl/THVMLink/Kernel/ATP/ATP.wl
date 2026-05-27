@@ -2735,6 +2735,22 @@ TAtpDescribeMethod[{m_String, subopts___Rule}] :=
     Association[{subopts}];
 TAtpDescribeMethod[m_String] := <||>;
 
+(* Problem-aware variants: Automatic / Portfolio / VampirePortfolio /
+   etc. produce structure-tailored schedules when conjecture + axioms
+   are in hand.  Single-config presets ignore the problem context;
+   pass-through to the 1-arg form. *)
+TAtpDescribeMethod[m_, cj_, ax_List] :=
+    With[{s = atpScheduleFor[m, ax, cj]},
+        If[ ListQ[s] && Length[s] > 1,
+            <|"Schedule" -> s|>,
+            TAtpDescribeMethod[m]]];
+TAtpDescribeMethod[m_, thm_String, theory_String] := With[{
+        cj = AxiomaticTheory[theory, "NotableTheorems"][thm],
+        ax = AxiomaticTheory[theory]},
+    If[ MissingQ[cj] || ! ListQ[ax],
+        $Failed,
+        TAtpDescribeMethod[m, cj, ax]]];
+
 (* ====================================================================
    Problem-analysis auto-tuner  (port of Waldmeister's PhilMarlow /
    XFiles "structure recognition -> strategy database").
