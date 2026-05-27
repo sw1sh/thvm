@@ -36,12 +36,18 @@ static int has(const char *hay, const char *needle) {
   return hay != NULL && strstr(hay, needle) != NULL;
 }
 
-// Case 1: elementwise STORE(out[i], 1.0f + LOAD(in[i])) over a LOOP
-// range of 8.  The canonical PTX shape: param loads, a loop, a global
+static int lacks(const char *hay, const char *needle) {
+  return hay != NULL && strstr(hay, needle) == NULL;
+}
+
+// Case 1: elementwise STORE(out[i], 1.0f + LOAD(in[i])).  The single
+// output axis indexes the store, so it is PROMOTED to a parallel thread
+// (decoded from the flat thread id) -- not a serial loop.  The canonical
+// GPU elementwise shape: thread-id builtins, bounds guard, a global
 // load, a float add, a global store.
 static int test_case1_elementwise(void) {
   thvm_init();
-  TEST_BEGIN("case1 elementwise add-const renders full PTX");
+  TEST_BEGIN("case1 elementwise add-const renders promoted thread PTX");
 
   u32 dims[1] = { 8 };
   Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
@@ -62,36 +68,39 @@ static int test_case1_elementwise(void) {
   CHECK(has(ptx, ".visible .entry ew_add"));
   CHECK(has(ptx, ".param .u64 data0"));
   CHECK(has(ptx, ".param .u64 data1"));
-  // Param pointer loads.
+  // Thread-id builtins + bounds guard (promoted parallel axis).
+  CHECK(has(ptx, "mov.u32 %tidx_s32_0, %tid.x;"));
+  CHECK(has(ptx, "%ctaid.x"));
+  CHECK(has(ptx, "%ntid.x"));
+  CHECK(has(ptx, "mad.lo.s32"));
+  CHECK(has(ptx, "setp.ge.s32"));
+  CHECK(has(ptx, ", 8;"));            // guard against total=8
+  CHECK(has(ptx, "bra DONE;"));
+  CHECK(has(ptx, "DONE:"));
+  // n_globals==1: the axis is the flat thread id directly.
+  CHECK(has(ptx, "mov.s32 %ridx_s32_0, %gtid_s32_0;"));
+  // It must NOT be a serial loop.
+  CHECK(lacks(ptx, "LOOP_0:"));
+  // Param loads + pointer arithmetic + memory ops.
   CHECK(has(ptx, "ld.param.u64 %dat_u64_0, [data0+0];"));
-  CHECK(has(ptx, "ld.param.u64 %dat_u64_1, [data1+0];"));
-  // Loop scaffold.
-  CHECK(has(ptx, "LOOP_0:"));
-  CHECK(has(ptx, "END_0:"));
-  CHECK(has(ptx, "setp.lt.s32"));
-  CHECK(has(ptx, "bra LOOP_0;"));
-  // Pointer arithmetic + memory ops.
   CHECK(has(ptx, "mad.wide.s32"));
   CHECK(has(ptx, "ld.global.f32"));
   CHECK(has(ptx, "add.f32"));
   CHECK(has(ptx, "st.global.f32"));
-  // Const immediate + epilogue.
   CHECK(has(ptx, "0f3F800000"));
   CHECK(has(ptx, "ret;"));
-  // Reg declarations present.
-  CHECK(has(ptx, ".reg .f32"));
-  CHECK(has(ptx, ".reg .u64 %dat_u64_<2>;"));
   free(ptx);
 
   thvm_free();
   TEST_REPORT();
 }
 
-// Case 2: integer index arithmetic (i*8 + j) exercises mul.lo.s32 +
-// add.s32 on the address path.
+// Case 2: two output axes (i, j) both index the store -> both promoted
+// to a 2-D grid decoded from one flat thread id ((tid/8)%8, tid%8).  The
+// index arithmetic (i*8 + j) still exercises mul.lo.s32 + add.s32.
 static int test_case2_int_alu(void) {
   thvm_init();
-  TEST_BEGIN("case2 integer index arithmetic renders mul.lo + add");
+  TEST_BEGIN("case2 2-D promoted grid: div/rem decode + mul.lo/add index");
 
   u32 dims[2] = { 8, 8 };
   Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims, 0);
@@ -109,8 +118,12 @@ static int test_case2_int_alu(void) {
   CHECK(ptx != NULL);
   CHECK(has(ptx, "mul.lo.s32"));
   CHECK(has(ptx, "add.s32"));
-  CHECK(has(ptx, "LOOP_0:"));
-  CHECK(has(ptx, "LOOP_1:"));
+  // 2-axis grid decode: one axis via div+rem, the other via rem.
+  CHECK(has(ptx, "div.s32"));
+  CHECK(has(ptx, "rem.s32"));
+  CHECK(has(ptx, ", 64;"));           // guard against total=8*8
+  CHECK(lacks(ptx, "LOOP_0:"));
+  CHECK(lacks(ptx, "LOOP_1:"));
   free(ptx);
 
   thvm_free();
@@ -118,7 +131,7 @@ static int test_case2_int_alu(void) {
 }
 
 // Case 3: a cast f32 -> s32 must emit cvt.rzi.s32.f32 (truncate toward
-// zero).
+// zero).  The axis is promoted (thread-decoded).
 static int test_case3_cast(void) {
   thvm_init();
   TEST_BEGIN("case3 float->int cast renders cvt.rzi");
@@ -138,6 +151,7 @@ static int test_case3_cast(void) {
   CHECK(has(ptx, "cvt.rzi.s32.f32"));
   CHECK(has(ptx, "ld.global.f32"));
   CHECK(has(ptx, "st.global.s32"));
+  CHECK(has(ptx, "mad.lo.s32"));      // promoted thread geometry
   free(ptx);
 
   thvm_free();

@@ -9,10 +9,11 @@
 //   build LinKernel -> cg_render_linearized_ptx -> cuModuleLoadData
 //   -> cuLaunchKernel -> read back -> compare.
 //
-// Milestone 2 deliberately uses a pure-LOOP kernel (one thread iterates
-// every element) so the launch geometry is the trivial grid=1/block=1.
-// Thread-axis (GLOBAL/LOCAL) geometry + the opt-rich parallel-accumulator
-// shape are milestone 3.
+// The single output axis indexes the store, so the PTX renderer PROMOTES
+// it to a parallel thread (M3a thread geometry): each thread decodes its
+// element index from the flat thread id and is gated by a `tid >= N`
+// bounds guard.  The launch is grid=1 / block=N (one thread per element).
+// The opt-rich parallel-accumulator (UPCAST) shape is milestone 3b/c.
 //
 // Builds + runs ONLY in the Linux+CUDA build (THVM_HAS_CUDA); the
 // Makefile wires it under the CUDA guard.
@@ -100,8 +101,8 @@ int main(void) {
     CUdeviceptr dptrs[2];
     void *args[2];
     thvm_cuda_pack_args(buf_ids, 2, dptrs, args);
-    // Single thread iterates the whole N-loop in the kernel.
-    CHECK(thvm_cuda_launch(func, /*grid_x=*/1, /*block_x=*/1, args) == 0);
+    // Promoted parallel axis: one thread per element, guarded by tid>=N.
+    CHECK(thvm_cuda_launch(func, /*grid_x=*/1, /*block_x=*/N, args) == 0);
 
     CHECK(thvm_cuda_buf_read(bOut, hGpu, sizeof hGpu) == 0);
     int all_ok = 1;
@@ -112,6 +113,62 @@ int main(void) {
                 i, hGpu[i], hRef[i]);
       }
     }
+    CHECK(all_ok);
+
+    thvm_cuda_buf_free(bOut);
+    thvm_cuda_buf_free(bIn);
+    free(ptx);
+  }
+
+  // === 2-D grid: out[i,j] = in[i,j] + 1, MxM, decoded from one flat ===
+  // thread id ((tid/M)%M, tid%M).  Validates the multi-axis div/rem
+  // promotion on real hardware (the conv-output-axis decode shape).
+  TEST_BEGIN("cuda-ptx/2d-grid-decode-vs-cpu-reference");
+  {
+    enum { M = 4 };
+    u32 dims[2] = { M, M };
+    Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims, 0);
+    Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims, 1);
+    Term ri      = uop_range(0, KAX_LOOP, M);
+    Term rj      = uop_range(1, KAX_LOOP, M);
+    Term addr    = uop_int_binary(UOP_IADD,
+                     uop_int_binary(UOP_IMUL, ri, uop_const(DT_INT32, M)), rj);
+    Term ld      = uop_load(uop_index_e(in_buf, addr));
+    Term one     = uop_const(DT_FP32, 0x3f800000u);
+    Term add     = uop_binary(UOP_ADD, ld, one);
+    Term st      = uop_store(out_buf, uop_index_e(out_buf, addr), add);
+
+    int sm = cuda_device_sm();
+    if (sm <= 0) sm = 70;
+    char *ptx = render_ptx_str(st, "ptx_2d", sm);
+    CHECK(ptx != NULL);
+
+    CUfunction func = thvm_cuda_compile(ptx, "ptx_2d");
+    if (func == NULL)
+      fprintf(stderr, "  2d compile/load failed: %s\n", thvm_cuda_last_error());
+    CHECK(func != NULL);
+
+    float hIn[M * M], hRef[M * M], hGpu[M * M];
+    for (int i = 0; i < M * M; i++) { hIn[i] = (float)i - 5.0f; hRef[i] = hIn[i] + 1.0f; }
+
+    u32 bOut = thvm_cuda_buf_alloc((u64)M * M * sizeof(float));
+    u32 bIn  = thvm_cuda_buf_alloc((u64)M * M * sizeof(float));
+    CHECK(bOut != 0 && bIn != 0);
+    CHECK(thvm_cuda_buf_write(bIn, hIn, sizeof hIn) == 0);
+
+    u32 buf_ids[2] = { bOut, bIn };
+    CUdeviceptr dptrs[2];
+    void *args[2];
+    thvm_cuda_pack_args(buf_ids, 2, dptrs, args);
+    CHECK(thvm_cuda_launch(func, /*grid_x=*/1, /*block_x=*/(M * M), args) == 0);
+
+    CHECK(thvm_cuda_buf_read(bOut, hGpu, sizeof hGpu) == 0);
+    int all_ok = 1;
+    for (int i = 0; i < M * M; i++)
+      if (!approx_eq(hGpu[i], hRef[i])) {
+        all_ok = 0;
+        fprintf(stderr, "  2d mismatch at %d: gpu=%f ref=%f\n", i, hGpu[i], hRef[i]);
+      }
     CHECK(all_ok);
 
     thvm_cuda_buf_free(bOut);

@@ -125,6 +125,15 @@ typedef struct {
   Term open_ranges[PTX_MAX_OPEN_RANGES];
   u32  n_open;
 
+  // Thread geometry: promoted store-indexing KAX_LOOP axes become
+  // parallel grid threads (decoded from the flat thread id) rather than
+  // serial loops -- matching render_uop.c's rmu_emit_output_loops + the
+  // CUDA dispatch.  `gd` holds the per-axis (stride, modulus) decode.
+  RmuGlobalDecode gd;
+  int  has_geom;        // 1 -> at least one promoted axis (geom emitted)
+  int  emitted_guard;   // 1 -> a `tid >= total` guard branched to DONE
+  char gtid_reg[40];    // flat thread-id register (ctaid*ntid + tid.x)
+
   int sm;               // compute capability (70 = V100)
 } PtxCtx;
 
@@ -301,6 +310,92 @@ static void ptx_emit_loop_close(PtxCtx *ctx, Term range, FILE *fp) {
   fprintf(fp, "\t@%s bra LOOP_%u;\n", p, axis_id);
 }
 
+// Thread-geometry pre-pass.  Mirrors render_uop.c's rmu_emit_output_loops
+// promotion: a plain KAX_LOOP output axis that indexes the STORE address
+// becomes a parallel grid thread (decoded from the flat thread id), not a
+// serial loop.  Builds the RmuGlobalDecode, emits the thread-id builtins
+// + `tid >= total` bounds guard.  Returns 1 on success, 0 if the kernel
+// uses a shape M3a doesn't cover yet (LOCAL axes) -- caller bails to the
+// C-source emit.
+static int ptx_emit_thread_geom(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
+  ctx->has_geom = 0;
+  ctx->emitted_guard = 0;
+  memset(&ctx->gd, 0, sizeof(ctx->gd));
+
+  // Collect output (non-REDUCE) RANGE terms in list order.  Bail on any
+  // LOCAL axis (axis_type 4) -- the threadgroup split is M3b.
+  Term out_ranges[MAX_DIM];
+  u32  out_kinds[MAX_DIM];
+  u32  n_out = 0;
+  for (u32 i = 0; i < lk->n; i++) {
+    Term t = lk->uops[i];
+    if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) continue;
+    u32 at = uop_range_axis_type(t);
+    if (at == KAX_LOCAL) return 0;          // threadgroup split: M3b
+    if (at == KAX_REDUCE) continue;         // reduce stays a loop
+    if (n_out >= MAX_DIM) return 0;
+    out_ranges[n_out] = t;
+    out_kinds[n_out]  = RMU_NO_OPT;
+    n_out++;
+  }
+  if (n_out == 0) return 1;                 // no output axes (scalar)
+
+  // Find the STORE's address axes (the axes the store position indexes).
+  Term store = 0;
+  for (u32 i = 0; i < lk->n; i++) {
+    Term t = lk->uops[i];
+    if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_STORE) store = t;
+  }
+  if (store == 0) return 1;
+  Term addr = heap_read(term_val(store) + 1);
+  Term addr_ranges[MAX_DIM];
+  u32  addr_n = 0;
+  rmu_collect_ranges(addr, addr_ranges, &addr_n);
+  u32 addr_axes[MAX_DIM];
+  for (u32 i = 0; i < addr_n && i < MAX_DIM; i++) {
+    addr_axes[i] = (term_tag(addr_ranges[i]) == TAG_UOP
+                    && term_ext(addr_ranges[i]) == UOP_RANGE)
+                 ? uop_range_axis_id(addr_ranges[i]) : 0xFFFFFFFFu;
+  }
+
+  // promote[i] = KAX_LOOP output axis that indexes the store position.
+  u8 promote[MAX_DIM] = {0};
+  for (u32 i = 0; i < n_out; i++) {
+    u32 aid = uop_range_axis_id(out_ranges[i]);
+    if (uop_range_axis_type(out_ranges[i]) != KAX_LOOP) continue;
+    for (u32 j = 0; j < addr_n && j < MAX_DIM; j++) {
+      if (addr_axes[j] == aid) { promote[i] = 1; break; }
+    }
+  }
+
+  rmu_compute_global_decode_ctx(out_ranges, n_out, promote, NULL, &ctx->gd);
+  if (ctx->gd.has_local) return 0;          // shouldn't happen (we bailed)
+  if (ctx->gd.n_globals == 0 || ctx->gd.total == 0) return 1;  // all serial
+
+  ctx->has_geom = 1;
+  // Emit the flat thread id: tid = ctaid.x * ntid.x + tid.x.  All index
+  // registers are s32 to match the loop induction var + mad.wide.s32
+  // address path; the special-register reads use mov.u32 (the specials
+  // are u32) into the s32 regs (a bit copy, ptxas-legal).
+  char rtidx[40], rctaid[40], rntid[40];
+  ptx_ssa(ctx, "tidx",  DT_INT32, rtidx,  sizeof(rtidx));
+  ptx_ssa(ctx, "ctaid", DT_INT32, rctaid, sizeof(rctaid));
+  ptx_ssa(ctx, "ntid",  DT_INT32, rntid,  sizeof(rntid));
+  ptx_ssa(ctx, "gtid",  DT_INT32, ctx->gtid_reg, sizeof(ctx->gtid_reg));
+  fprintf(fp, "\tmov.u32 %s, %%tid.x;\n",   rtidx);
+  fprintf(fp, "\tmov.u32 %s, %%ctaid.x;\n", rctaid);
+  fprintf(fp, "\tmov.u32 %s, %%ntid.x;\n",  rntid);
+  fprintf(fp, "\tmad.lo.s32 %s, %s, %s, %s;\n",
+          ctx->gtid_reg, rctaid, rntid, rtidx);
+  // Bounds guard: if (tid >= total) ret.
+  char gp[40]; ptx_ssa(ctx, "guard", DT_BOOL, gp, sizeof(gp));
+  fprintf(fp, "\tsetp.ge.s32 %s, %s, %lld;\n",
+          gp, ctx->gtid_reg, (long long)ctx->gd.total);
+  fprintf(fp, "\t@%s bra DONE;\n", gp);
+  ctx->emitted_guard = 1;
+  return 1;
+}
+
 // === Body walk ========================================================
 //
 // Returns 1 if every node rendered, 0 if any node is outside coverage
@@ -321,6 +416,11 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
       return 0;
     }
   }
+
+  // Thread geometry: promote store-indexing KAX_LOOP axes to parallel
+  // threads (emits the flat thread id + bounds guard).  Must run before
+  // the BUFFER param loads so the guard sits near the top.
+  if (!ptx_emit_thread_geom(lk, ctx, fp)) return 0;
 
   for (u32 i = 0; i < lk->n; i++) {
     Term t = lk->uops[i];
@@ -349,11 +449,30 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
       }
 
       case UOP_RANGE: {
-        // Loop induction variable.  Faithful to tinygrad's do-while:
-        //   mov ridx, -1 ; bra END ; LOOP:
-        // END (matching UOP_END, or the body-end drain) increments +
-        // tests + branches back to LOOP.
         u32 axis_id = uop_range_axis_id(t);
+        // Promoted parallel axis: decode a<id> from the flat thread id
+        // rather than opening a serial loop.  a<id> = tid (n_globals==1),
+        // or (tid / stride) % mod for a multi-axis grid.
+        if (ctx->has_geom && axis_id < 256
+            && ctx->gd.modulus_of_axis[axis_id] != 0) {
+          u32 stride = ctx->gd.stride_of_axis[axis_id];
+          u32 mod    = ctx->gd.modulus_of_axis[axis_id];
+          char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
+          ptx_reg_put(ctx, t, r);
+          if (ctx->gd.n_globals == 1) {
+            fprintf(fp, "\tmov.s32 %s, %s;\n", r, ctx->gtid_reg);
+          } else if (stride <= 1) {
+            fprintf(fp, "\trem.s32 %s, %s, %u;\n", r, ctx->gtid_reg, mod);
+          } else {
+            char tmp[40]; ptx_ssa(ctx, "gdiv", DT_INT32, tmp, sizeof(tmp));
+            fprintf(fp, "\tdiv.s32 %s, %s, %u;\n", tmp, ctx->gtid_reg, stride);
+            fprintf(fp, "\trem.s32 %s, %s, %u;\n", r, tmp, mod);
+          }
+          break;
+        }
+        // Serial loop (reduce / unpromoted axis).  Faithful to tinygrad's
+        // do-while: mov ridx,-1 ; bra END ; LOOP: ... END increments +
+        // tests + branches back to LOOP (matching UOP_END or the drain).
         char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
         ptx_reg_put(ctx, t, r);
         fprintf(fp, "\tmov.u32 %s, 0xFFFFFFFF;\n", r);
@@ -506,6 +625,8 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
   while (ctx->n_open > 0) {
     ptx_emit_loop_close(ctx, ctx->open_ranges[--ctx->n_open], fp);
   }
+  // The bounds guard branches here; the caller's `ret;` follows.
+  if (ctx->emitted_guard) fputs("DONE:\n", fp);
   return 1;
 }
 
