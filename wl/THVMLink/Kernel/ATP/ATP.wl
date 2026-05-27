@@ -4041,7 +4041,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
 (* Completion of an explicit axiom list. *)
 TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[axioms,
+        atpCompletionBundle[atpStripInactive[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -4049,7 +4049,7 @@ TFindProof[axioms_List, OptionsPattern[]] :=
 TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
         OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[axioms,
+        atpCompletionBundle[atpStripInactive[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],

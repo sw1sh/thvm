@@ -2241,6 +2241,17 @@ VerificationTest[
     TestID -> "ATP/inactive/pattern-axiom-proves-ground-goal"
 ]
 
+(* Single-arg completion form should also strip Inactive (iter 61).
+   Pre-iter-61, TFindProof[{Inactive[Equal][f[x_], g[x_]]}] returned
+   empty Lemmas because the encoder rejected Inactive[Equal] as a
+   bad axiom shape.  Now identical results to the bare-Equal form. *)
+VerificationTest[
+    Length @ TFindProof[{Inactive[Equal][f[x_], g[x_]]},
+        TimeConstraint -> 3],
+    1,
+    TestID -> "ATP/inactive/single-arg-completion-strips-Inactive"
+]
+
 (* === Globals-collision footgun =================================== *)
 
 (* `CanonicalizePatterns` renames axiom-bound variables to canonical
