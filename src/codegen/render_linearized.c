@@ -357,8 +357,27 @@ static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp) {
       }
       return;
     }
-    case UOP_UNROLL: {
-      // UNROLL referenced as a value: pull through to the inner src.
+    case UOP_UNROLL:
+    case UOP_CONTRACT:
+    case UOP_OPT: {
+      // UNROLL / CONTRACT / OPT referenced as a value: pull through to
+      // the inner src (slot 0 carries the wrapped value for all three).
+      Term inner = heap_read(loc + 0);
+      lz_emit_value(inner, ctx, fp);
+      return;
+    }
+    case UOP_REDUCE: {
+      // REDUCE that survived devectorize (multi-axis K loop the
+      // reduce_to_acc pass didn't lower).  Emit the body src.  The
+      // surrounding accumulator/loop scaffolding the legacy walker
+      // would have emitted is not present here -- this is a best-
+      // effort fallback; the route gate's caller will likely bail to
+      // legacy on a kernel that hits this path.
+      Term inner = heap_read(loc + 0);
+      lz_emit_value(inner, ctx, fp);
+      return;
+    }
+    case UOP_BUFFERIZE: {
       Term inner = heap_read(loc + 0);
       lz_emit_value(inner, ctx, fp);
       return;
@@ -463,6 +482,24 @@ static void lz_emit_prelude_cuda(LzCtx const *ctx, const char *kn, FILE *fp) {
 // number of open for-loops so the emitted source stays readable.
 
 static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
+  // Pre-pass: scope check.  If the linearized list contains any
+  // structural opcode (CONTRACT / UNROLL / OPT / BUFFERIZE / a UOP_REDUCE
+  // that survived devectorize) the post-late-pass pipeline did not
+  // fully lower the kernel and the renderer's per-opcode coverage is
+  // incomplete.  Bail to legacy so the existing walker handles the
+  // kernel; emitting partial source here would land broken kernels in
+  // the JIT cache.  Once the late-pass pipeline reliably folds
+  // CONTRACT away, this gate can relax.
+  for (u32 i = 0; i < lk->n; i++) {
+    Term t = lk->uops[i];
+    if (term_tag(t) != TAG_UOP) continue;
+    u32 op = term_ext(t);
+    if (op == UOP_CONTRACT || op == UOP_UNROLL || op == UOP_OPT
+        || op == UOP_BUFFERIZE || op == UOP_REDUCE) {
+      return 0;
+    }
+  }
+
   // Pass 1: register every UOP_BUFFER + emit every PLACEHOLDER decl.
   // PLACEHOLDERs are emitted at body scope (depth 1) before any
   // for-loop opens so the accumulator persists across the loop body.
@@ -535,6 +572,24 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
         Term buf   = heap_read(term_val(t) + 0);
         Term addr  = heap_read(term_val(t) + 1);
         Term value = heap_read(term_val(t) + 2);
+        // Peel structural wrappers (CONTRACT / UNROLL / OPT) that the
+        // expander may have left on the addr / value subtrees.
+        while (term_tag(addr) == TAG_UOP) {
+          u32 ao = term_ext(addr);
+          if (ao == UOP_CONTRACT || ao == UOP_UNROLL || ao == UOP_OPT) {
+            addr = heap_read(term_val(addr) + 0);
+          } else {
+            break;
+          }
+        }
+        while (term_tag(value) == TAG_UOP) {
+          u32 vo = term_ext(value);
+          if (vo == UOP_CONTRACT || vo == UOP_UNROLL || vo == UOP_OPT) {
+            value = heap_read(term_val(value) + 0);
+          } else {
+            break;
+          }
+        }
         // STACK rhs: F parallel stores.  The addr for each lane is the
         // shared address + lane offset; for the conv-kid=3 shape the
         // STACK lanes are the F UPCAST'd output positions, which the
@@ -609,8 +664,16 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
       case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR:
       case UOP_IXOR: case UOP_IWHERE:
       case UOP_GEP: case UOP_STACK: case UOP_VCONST: case UOP_UNROLL:
+      case UOP_CONTRACT:
+      case UOP_OPT:
+      case UOP_REDUCE:
+      case UOP_BUFFERIZE:
         // Pure value nodes; no statement emit.  STORE pulls them
-        // through lz_emit_value when their parent fires.
+        // through lz_emit_value when their parent fires.  CONTRACT/
+        // OPT/REDUCE/BUFFERIZE are structural wrappers the expander
+        // and devectorizer may have left behind; the toposort surfaces
+        // them but they have no body emit (the renderer reads through
+        // them when their consumer fires).
         break;
       default:
         // Unknown op: bail to legacy.

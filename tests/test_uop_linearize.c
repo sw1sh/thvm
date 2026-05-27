@@ -355,6 +355,42 @@ static int test_case6_render_multi_axis_reduce(void) {
   TEST_REPORT();
 }
 
+// Case 7b: piece #4 -- conservative-bail check.  The conv-kid=3
+// post-expander shape carries surviving UOP_CONTRACT wrappers (the
+// expander's fix_store_unroll wrap that pm_render's do_contract
+// rule doesn't always fold).  Asserts the renderer bails on such a
+// list so the legacy walker handles the kernel rather than emit
+// partial source.
+static int test_case7b_bail_on_unfolded_contract(void) {
+  thvm_init();
+  TEST_BEGIN("case7b piece#4: render_linearized bails on surviving CONTRACT");
+
+  u32 dims[1] = { 4 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
+  Term r       = uop_range(0, KAX_UPCAST, 4);   // UPCAST -> expander wraps
+  Term in_idx  = uop_index_e(in_buf, r);
+  Term ld      = uop_load(in_idx);
+  Term out_idx = uop_index_e(out_buf, r);
+  Term store   = uop_store(out_buf, out_idx, ld);
+  Term r2 = uop_expand_graph(store);
+  r2 = uop_devectorize_graph(r2);
+  LinKernel lk;
+  CHECK(uop_linearize(r2, &lk));
+  char buf[2048];
+  FILE *fp = fmemopen(buf, sizeof(buf) - 1, "w");
+  CHECK(fp != NULL);
+  // The renderer SHOULD bail (return 0) on this opt-rich shape so the
+  // caller falls back to the legacy walker.  A 1 here would mean we're
+  // emitting partial source into the JIT cache.
+  int ok = cg_render_linearized_c(&lk, "k", fp);
+  fclose(fp);
+  CHECK_EQ(ok, 0);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 // Case 7: piece #4 -- the route-gate helper.  Builds two DAGs (one
 // with KAX_LOOP only, one with a KAX_UPCAST RANGE) and asserts
 // uop_has_upcast_or_unroll fires on the second and not the first.
@@ -403,5 +439,6 @@ int main(void) {
   rc |= test_case5_render_reduce_single_axis();
   rc |= test_case6_render_multi_axis_reduce();
   rc |= test_case7_route_gate();
+  rc |= test_case7b_bail_on_unfolded_contract();
   return rc;
 }
