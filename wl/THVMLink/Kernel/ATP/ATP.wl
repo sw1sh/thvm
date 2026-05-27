@@ -3834,10 +3834,21 @@ atpStripInactive[expr_] := expr /. {
    `Flatten[ax, 1]` is a no-op if ax is already a flat list of
    Equal / ForAll / Inactive[Equal] heads. *)
 atpFlattenAxioms[ax_List] := Flatten[ax, 1];
+
+(* If the expression contains a String-headed compound (the shape
+   TPTPImport produces -- e.g. "f"[X_] for the TPTP atom f(X)),
+   internalize it to Symbol-headed.  No-op if nothing matches.
+   Iter 65: lets users pipe TPTPImport["..."] output directly into
+   TFindProof[conj, ax] without the manual tptpInternalize step.  *)
+atpMaybeInternalizeTPTP[expr_] := If[
+    !FreeQ[expr, _String[___]],
+    tptpInternalize[expr], expr];
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
-        atpProveBundle[atpStripInactive[conjecture],
-            atpStripInactive[atpFlattenAxioms[axioms]],
+        atpProveBundle[
+            atpMaybeInternalizeTPTP[atpStripInactive[conjecture]],
+            atpMaybeInternalizeTPTP[atpStripInactive[
+                atpFlattenAxioms[axioms]]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -3845,8 +3856,10 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
 TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, OptionsPattern[]] :=
     atpProjectReturn[
-        atpProveBundle[atpStripInactive[conjecture],
-            atpStripInactive[atpFlattenAxioms[axioms]],
+        atpProveBundle[
+            atpMaybeInternalizeTPTP[atpStripInactive[conjecture]],
+            atpMaybeInternalizeTPTP[atpStripInactive[
+                atpFlattenAxioms[axioms]]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],

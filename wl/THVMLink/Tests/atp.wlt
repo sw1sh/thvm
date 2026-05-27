@@ -2264,6 +2264,30 @@ VerificationTest[
     TestID -> "ATP/flatten/nested-axiom-list-auto-flattens"
 ]
 
+(* === TPTPImport pipe-through (iter 65) ============================ *)
+
+(* TPTPImport produces String-headed compounds like "f"[X_] for TPTP
+   atoms.  Pre-iter-65, piping the result directly into
+   TFindProof[conj, ax] failed because the encoder expected Symbol
+   heads.  atpMaybeInternalizeTPTP now auto-detects the String-headed
+   shape and threads it through tptpInternalize. *)
+VerificationTest[
+    With[{imp = TPTPImport[
+            "cnf(c1, axiom, f(X) = g(X)).\ncnf(c2, conjecture, f(a) = g(a)).\n"]},
+        Head @ TFindProof[imp["Conjecture"], imp["Axioms"],
+            TimeConstraint -> 3]],
+    ProofObject,
+    TestID -> "ATP/tptp/import-pipe-through-to-TFindProof"
+]
+
+(* No-op for Symbol-headed axioms: the FreeQ check skips
+   tptpInternalize when nothing has a String head. *)
+VerificationTest[
+    Head @ TFindProof[a == c, {a == b, b == c}, TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/tptp/auto-internalize-skips-Symbol-heads"
+]
+
 (* === TATP Inactive support (iter 64) ============================== *)
 
 (* TATP's encoder should accept Inactive[Equal] axioms (the
