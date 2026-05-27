@@ -334,7 +334,10 @@ static int ptx_emit_thread_geom(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
     Term t = lk->uops[i];
     if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) continue;
     u32 at = uop_range_axis_type(t);
-    if (at == KAX_LOCAL) return 0;          // threadgroup split: M3b
+    if (at == KAX_LOCAL) {                  // threadgroup split: M3b
+      if (getenv("THVM_ROUTE_TRACE")) fprintf(stderr, "[ptx-bail] LOCAL axis\n");
+      return 0;
+    }
     if (at == KAX_REDUCE) continue;         // reduce stays a loop
     if (n_out >= MAX_DIM) return 0;
     out_ranges[n_out] = t;
@@ -475,6 +478,8 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
     if (op == UOP_VCONST || op == UOP_UNROLL || op == UOP_CONTRACT
         || op == UOP_OPT || op == UOP_BUFFERIZE || op == UOP_REDUCE
         || op == UOP_BITCAST || op == UOP_INVALID) {
+      if (getenv("THVM_ROUTE_TRACE"))
+        fprintf(stderr, "[ptx-bail] uncovered opcode %u\n", op);
       return 0;
     }
   }

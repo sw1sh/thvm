@@ -199,6 +199,19 @@ static Term sym_pm_stack_singleton(Term t, void *user) {
   return uop_stack_src(t, 0);
 }
 
+// OPT(target, kind, factor) -> target.  The OPT wrapper is an
+// optimization marker (KOP_TC / FAST_MATH / SIMD_REDUCE / UPCAST etc.)
+// the LEGACY rmu_emit renderer honors structurally.  The linearized
+// pipeline does NOT implement these markers -- they are dead weight for
+// it, and they cause 100% of real beautiful_mnist kernels to bail the
+// linearized renderers (PTX + C-source) because the pre-pass excludes
+// UOP_OPT.  Peeling lets the linearized path see + lower the kernel.
+static Term sym_pm_strip_opt(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_OPT) return 0;
+  return uop_opt_target(t);
+}
+
 // === Entry point ============================================================
 
 // One pass of all sym rules.  Each rule returns 0 to mean "no match",
@@ -213,6 +226,7 @@ fn Term uop_symbolic_rewrite(Term root) {
     { "sym_pm_int_binary",      sym_pm_int_binary      },
     { "sym_pm_gep_stack",       sym_pm_gep_stack       },
     { "sym_pm_stack_singleton", sym_pm_stack_singleton },
+    { "sym_pm_strip_opt",       sym_pm_strip_opt       },
   };
   return uop_graph_rewrite(root, SYM_RULES,
                            sizeof(SYM_RULES) / sizeof(SYM_RULES[0]),
