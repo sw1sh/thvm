@@ -4587,6 +4587,26 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
     LinKernel lk;
     if (uop_linearize(r2, &lk)) {
       char scratch[131072];
+      // THVM_CUDA_PTX=1: emit PTX assembly directly (the jit's passthrough
+      // detects the `.version` prefix + skips nvrtc).  This is the
+      // nvrtc-frontend bypass; falls through to the C-source emit if the
+      // PTX renderer bails on a shape it doesn't cover.  sm defaults to 70
+      // (V100); the driver JITs sm_70 PTX forward to any newer device.
+      static int ptx_init = 0, ptx_on = 0;
+      if (!ptx_init) {
+        char const *e = getenv("THVM_CUDA_PTX");
+        ptx_on = (e != NULL && e[0] != '0');
+        ptx_init = 1;
+      }
+      if (ptx_on) {
+        FILE *pfp = fmemopen(scratch, sizeof(scratch) - 1, "w");
+        if (pfp != NULL) {
+          int pok = cg_render_linearized_ptx(&lk, kernel_name, 0, pfp);
+          long pn = ftell(pfp);
+          fclose(pfp);
+          if (pok && pn > 0) { scratch[pn] = 0; fputs(scratch, fp); return; }
+        }
+      }
       FILE *sfp = fmemopen(scratch, sizeof(scratch) - 1, "w");
       if (sfp != NULL) {
         int ok = cg_render_linearized_cuda(&lk, kernel_name, sfp);
