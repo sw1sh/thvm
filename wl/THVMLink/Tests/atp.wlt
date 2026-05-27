@@ -2298,6 +2298,21 @@ VerificationTest[
     TestID -> "ATP/single-axiom/single-arg-completion-wraps"
 ]
 
+(* TRelevantAxioms and TATP also auto-wrap a single non-list axiom
+   (iter 70 parity).  Pre-iter-70, TRelAx returned unevaluated and
+   TATP threw TATPParseError. *)
+VerificationTest[
+    Lookup[TRelevantAxioms[a == b, a == b], "Kept"],
+    {a == b},
+    TestID -> "ATP/single-axiom/TRelAx-wraps"
+]
+
+VerificationTest[
+    TATP[a == b, a == b]["Status"],
+    "PROVED",
+    TestID -> "ATP/single-axiom/TATP-wraps"
+]
+
 (* === TPTPImport pipe-through (iter 65) ============================ *)
 
 (* TPTPImport produces String-headed compounds like "f"[X_] for TPTP

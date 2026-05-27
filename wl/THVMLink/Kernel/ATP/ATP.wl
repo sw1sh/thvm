@@ -512,6 +512,14 @@ tatpAllWitnesses[enc_, maxSteps_, witnessSpec_, maxDepth_, maxWitnesses_] := Blo
     Append[atpStatsAssoc[stats], "Witnesses" -> witnessAssocs]
 ]
 
+(* Single non-list axiom: auto-wrap to a 1-element list, same shape
+   as iter-68 / 69's TFindProof wrap.  TATP is HoldAll so pattern
+   matching doesn't evaluate; the wrap re-dispatches the held form. *)
+TATP[axiom : (_Equal | _Unequal | _ForAll
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        conjecture_, opts:OptionsPattern[]] :=
+    TATP[{axiom}, conjecture, opts];
+
 TATP[axioms_, conjecture_, OptionsPattern[]] := Catch[
     Block[{
         enc = atpEncodeProblem[axioms, conjecture],
@@ -3497,6 +3505,13 @@ TRelevantAxioms[thm_String, theory_String, opts:OptionsPattern[]] :=
         If[ ! ListQ[axRaw] || MissingQ[cjRaw], Return[$Failed]];
         TRelevantAxioms[cjRaw, axRaw, opts]
     ];
+(* Single non-list axiom: auto-wrap to a 1-element list, same shape
+   as iter-68/69's TFindProof wrap. *)
+TRelevantAxioms[conjRaw_, axiom : (_Equal | _Unequal | _ForAll
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        opts:OptionsPattern[]] :=
+    TRelevantAxioms[conjRaw, {axiom}, opts];
+
 TRelevantAxioms[conjRaw_, axRaw_List, opts:OptionsPattern[]] :=
     (* Same normalization pipeline as TFindProof's entry (iters 60-65):
        strip Inactive, flatten one level, auto-internalize String-headed
