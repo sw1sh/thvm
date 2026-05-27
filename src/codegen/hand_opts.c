@@ -488,9 +488,13 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         // to the LARGEST reduce axis that divides evenly by 16.  Picking
         // the largest axis minimizes per-thread iteration count for the
         // strided walk.
+        // Cooperative size: tinygrad's GROUPTOP default = 16.  A/B on
+        // V100 beautiful_mnist showed sz=16 beats sz=32 (more kernels
+        // divide 16 cleanly; smaller block yields better occupancy for
+        // shared-mem-bound reduces).  Override via THVM_GROUP_SZ.
+        u32 sz = (u32)hand_opt_getenv_int("THVM_GROUP_SZ", 16);
         i32 best_idx = -1;
         u32 best_ext = 0;
-        u32 sz = 16;
         for (u32 i = 0; i < n_red; i++) {
           if (red_exts[i] < sz) continue;
           if (red_exts[i] % sz != 0) continue;
