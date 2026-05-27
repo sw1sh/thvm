@@ -45,8 +45,10 @@ static CudaJitSlot CUDA_JIT_CACHE[CUDA_JIT_CACHE_CAP];
 // correlates with cache thrashing.
 u64 CUDA_JIT_COMPILES = 0;
 u64 CUDA_JIT_EVICTIONS = 0;
+u64 CUDA_JIT_PTX_LOADS = 0;   // of the compiles, how many were PTX passthrough
 fn u64 cuda_jit_compiles(void)  { return CUDA_JIT_COMPILES; }
 fn u64 cuda_jit_evictions(void) { return CUDA_JIT_EVICTIONS; }
+fn u64 cuda_jit_ptx_loads(void) { return CUDA_JIT_PTX_LOADS; }
 
 // Forward-declared in init.c so cuda_shutdown can unload every cached
 // module before the context is destroyed.
@@ -164,9 +166,10 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
         p = line_start - 1;
         if (p <= cu_src) break;
       }
-      fprintf(stderr, "[cuda-compile #%llu] sz=%zu %.100s\n",
-              (unsigned long long)CUDA_JIT_COMPILES, sz,
-              last_out[0] ? last_out : "(no store found)");
+      fprintf(stderr, "[cuda-compile #%llu] %s sz=%zu %.100s\n",
+              (unsigned long long)CUDA_JIT_COMPILES,
+              cuda_src_is_ptx(cu_src) ? "PTX  " : "nvrtc",
+              sz, last_out[0] ? last_out : "(no store found)");
       fflush(stderr);
     }
   }
@@ -183,6 +186,7 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
 
   if (is_ptx) {
     ptx = (char *)cu_src;   // borrowed; freed by the caller's render buffer
+    CUDA_JIT_PTX_LOADS++;
   } else {
     // --- nvrtc compile ----------------------------------------------
     nvrtcProgram prog;

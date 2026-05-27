@@ -719,33 +719,49 @@ CUDA jit `cuModuleLoadData`s it without nvrtc's C++ frontend.  Port of
 - **route** (`2e18307e`): `THVM_CUDA_PTX=1` emits PTX before the C-source
   emit; the jit passthrough loads it.
 
-**V100 result (beautiful_mnist BS=128, gate widened so conv gets UPCAST):**
+**CORRECTION (was over-claimed): PTX is NOT exercised by beautiful_mnist.**
+An earlier draft of this section claimed the PTX path gave a ~48x warm
+speedup (262 s -> 5.4 s).  That was WRONG.  A clean A/B with the current
+code:
 
-| Configuration                         | Cold   | Warm step |
-|---------------------------------------|-------:|----------:|
-| Widened gate, C-source -> nvrtc       |  43 s  |   262 s   |
-| Widened gate, **PTX** (THVM_CUDA_PTX=1)|  22 s  |   **5.4 s** |
-| Reference: heuristic OFF (naive)      | 3.9 s  |   505 ms  |
-| tinygrad reference (PTX renderer)     |   -    |  ~115 ms  |
+| Configuration                          | Cold   | Warm step |
+|----------------------------------------|-------:|----------:|
+| Widened gate, `THVM_CUDA_PTX=1`        | 21 s   |  6.3 s    |
+| Widened gate, PTX unset                | 12 s   |  5.9 s    |
+| Reference: heuristic OFF (naive)       | 3.9 s  |  505 ms   |
+| tinygrad reference (PTX renderer)      |   -    |  ~115 ms  |
 
-The PTX bypass is **~48x faster** than the nvrtc opt path (262 s -> 5.4 s)
-and trains correctly (loss 2.809 -> 2.575 -> 2.468).  `test_cuda_ptx`
-25/25 on V100 incl. the conv "kid=3" parallel-accumulator kernel vs CPU
-reference.
+`THVM_CUDA_PTX=1` and unset are **identical within noise** -- because PTX
+is never used.  A per-compile counter + a `THVM_ROUTE_TRACE=1` render-path
+trace (STEPS=1, 137 kernels) show:
+- **PTX loads = 0**, nvrtc compiles = 137.
+- 1455 render calls reach the linearized path; **ALL bail the PTX
+  renderer AND the C-source linearized renderer**, falling to legacy
+  `rmu_emit` (1543 legacy total).
 
-**Remaining gap (5.4 s vs the 505 ms naive / 115 ms tinygrad):** the F
-final stores currently sit INSIDE the reduce loop (F * Cin global writes
-instead of F; last-write-wins keeps results correct) plus a spurious
-extent-0 reduce loop survives.  Both are LINEARIZER placement issues:
-`reduce_to_acc`'s END marker uses a synthetic extent-0 range so the
-renderer matches END to a phantom empty loop while the real reduce loop
-auto-closes after the final store.  Two attempted fixes (AFTER-arm
-`lin_range_product` exclusion; real-range END marker) either no-op'd or
-moved the END so the accumulation fell OUTSIDE the loop (24/25) -- the
-AFTER-chain + END + nkey priority interaction in `src/uop/linearize.c`
-needs a careful, separately-tested pass.  Correctness is solid at the
-current placement; this is purely the perf follow-up that would realize
-the heuristic's benefit (toward tinygrad's 115 ms).
+So 100% of the REAL beautiful_mnist kernels bail both linearized
+renderers and run on the legacy path -- the same path as before the PTX
+work.  `test_cuda_ptx` (conv "kid=3", 25/25) only proves the PTX renderer
+is correct on a TINY synthetic kernel; the real mnist kernels (multi-axis
+kH*kW reduces, BatchNorm, the backward pass) carry shapes the linearized
+pipeline does not fully lower, so they bail.
+
+**What is actually true:**
+- The PTX emitter (M1-M3c) is built and correct on synthetic
+  elementwise / parallel-grid / parallel-accumulator kernels.
+- The expander/devectorize fixes (STORE/LOAD/REDUCE in do_expand, F
+  parallel accumulators, F-lane store) are real correctness improvements
+  to the late-pass pipeline, regression-clean.
+- But neither the PTX nor the C-source linearized renderer handles any
+  real beautiful_mnist kernel yet; the workload still runs on legacy
+  `rmu_emit`, and the widened-gate UPCAST kernels are ~12x slower than
+  the naive no-opt baseline there (6 s vs 505 ms) -- the SAME finding as
+  the very first investigation, unchanged by the PTX work.
+
+**To make PTX matter, the prerequisite is: get the linearized pipeline
+to fully lower real kernels** (today it bails on 100% of them).  That is
+a larger effort than the synthetic-kernel coverage built so far -- the
+PTX renderer is downstream of it and can only help kernels that reach it.
 
 ## References
 
