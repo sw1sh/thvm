@@ -2313,6 +2313,20 @@ VerificationTest[
     TestID -> "ATP/single-axiom/TATP-wraps"
 ]
 
+(* TAtpSchedule and TAtpDescribeMethod also wrap a single non-list
+   axiom (iter 73 parity). *)
+VerificationTest[
+    ListQ @ TAtpSchedule[Automatic, a == c, a == b],
+    True,
+    TestID -> "ATP/single-axiom/TAtpSchedule-wraps"
+]
+
+VerificationTest[
+    AssociationQ @ TAtpDescribeMethod[Automatic, a == c, a == b],
+    True,
+    TestID -> "ATP/single-axiom/TAtpDescribeMethod-wraps"
+]
+
 (* === TPTPImport pipe-through (iter 65) ============================ *)
 
 (* TPTPImport produces String-headed compounds like "f"[X_] for TPTP

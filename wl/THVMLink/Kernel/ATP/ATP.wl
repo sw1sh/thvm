@@ -2734,6 +2734,10 @@ TAtpSchedule[m_] := atpScheduleFor[m];
 TAtpSchedule[m_String, cj_, ax_List] /;
         ! MemberQ[$AtpKnownMethodNames, m] :=
     (Message[TFindProof::badmethod, m]; $Failed);
+TAtpSchedule[m_, cj_,
+        axiom : (_Equal | _Unequal | _ForAll
+            | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
+    TAtpSchedule[m, cj, {axiom}];
 TAtpSchedule[m_, cj_, ax_List] := atpScheduleFor[m, ax, cj];
 TAtpSchedule[m_, thm_String, theory_String] := With[{
         cj = AxiomaticTheory[theory, "NotableTheorems"][thm],
@@ -2777,6 +2781,10 @@ TAtpDescribeMethod[m_String] := <||>;
    etc. produce structure-tailored schedules when conjecture + axioms
    are in hand.  Single-config presets ignore the problem context;
    pass-through to the 1-arg form. *)
+TAtpDescribeMethod[m_, cj_,
+        axiom : (_Equal | _Unequal | _ForAll
+            | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
+    TAtpDescribeMethod[m, cj, {axiom}];
 TAtpDescribeMethod[m_, cj_, ax_List] :=
     With[{s = atpScheduleFor[m, ax, cj]},
         If[ ListQ[s] && Length[s] > 1,
