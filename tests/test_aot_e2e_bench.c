@@ -198,9 +198,16 @@ static int compile_emitted_count_bench(const char *out_bin) {
     "}\n");
   fclose(f);
 
+  // The bench .c includes src/thvm.c -> src/atp/_.c, which has
+  // functions defined only under ATP_RULE_INDEX but called
+  // unconditionally.  Pass the same ATP defines the host test binary
+  // was built with (Makefile ATP_DEFINES), or clang errors out with
+  // "static declaration of 'atp_pretty_term' follows non-static".
   char cmd[2048];
   snprintf(cmd, sizeof cmd,
     "clang -O2 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
+    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
+    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
     "-framework Accelerate -o '%s' '%s' 2>&1",
     out_bin, src_path);
 

@@ -123,6 +123,8 @@ static int compile_e2e_binary(const char *emit_src,
   char cmd[2048];
   snprintf(cmd, sizeof cmd,
     "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
+    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
+    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
     "-framework Accelerate "
     "-o '%s' '%s' 2>&1",
     out_bin_path, src_path);
@@ -326,6 +328,8 @@ int main(void) {
     char cmd[2048];
     snprintf(cmd, sizeof cmd,
       "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
+    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
+    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
       "-framework Accelerate -o /tmp/aot_e2e_count /tmp/aot_e2e_count.c 2>&1");
     FILE *p = popen(cmd, "r");
     CHECK(p != NULL);
@@ -465,6 +469,8 @@ int main(void) {
     char cmd[2048];
     snprintf(cmd, sizeof cmd,
       "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
+    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
+    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
       "-framework Accelerate -o /tmp/aot_e2e_fib /tmp/aot_e2e_fib.c 2>&1");
     FILE *p = popen(cmd, "r");
     CHECK(p != NULL);

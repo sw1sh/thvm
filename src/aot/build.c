@@ -267,12 +267,39 @@ fn char *thvm_aot_compile_to_dylib(u32 def_id, const char *name) {
 #else
   static const char *trace_def = "";
 #endif
+  // The embedded runtime blob includes src/atp/_.c, which has
+  // functions (atp_pretty_term / atp_rule_trace_on /
+  // atp_rewrite_normalize_indexed) DEFINED only under ATP_RULE_INDEX
+  // but CALLED unconditionally -- so the blob won't compile without
+  // these defines (clang: "static declaration follows non-static
+  // declaration").  Mirror whatever ATP flags the host was built with
+  // (the Makefile's ATP_DEFINES) so the blob matches.
+  static const char *atp_defs =
+#ifdef ATP_RULE_INDEX
+    "-DATP_RULE_INDEX "
+#endif
+#ifdef ATP_FV_INDEX
+    "-DATP_FV_INDEX "
+#endif
+#ifdef ATP_VAR_NORM
+    "-DATP_VAR_NORM "
+#endif
+#ifdef ATP_ORDERED_REWRITE
+    "-DATP_ORDERED_REWRITE "
+#endif
+#ifdef ATP_ORPHAN_KILL
+    "-DATP_ORPHAN_KILL "
+#endif
+#ifdef ATP_CP_GROUND_JOIN
+    "-DATP_CP_GROUND_JOIN "
+#endif
+    "";
   char cmd[2048];
   snprintf(cmd, sizeof cmd,
     "clang -O2 -fPIC -std=c11 -Wno-everything "
-    "-DACCELERATE_NEW_LAPACK -DTHVM_HAS_WL_BRIDGE %s%s "
+    "-DACCELERATE_NEW_LAPACK -DTHVM_HAS_WL_BRIDGE %s%s%s "
     "-o '%s' '%s' 2>&1",
-    trace_def, dylib_flags, dyl_path, src_path);
+    trace_def, atp_defs, dylib_flags, dyl_path, src_path);
 
   FILE *p = popen(cmd, "r");
   if (!p) return NULL;
