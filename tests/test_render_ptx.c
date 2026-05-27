@@ -186,11 +186,53 @@ static int test_case4_reduce_bails(void) {
   TEST_REPORT();
 }
 
+// Case 5: a devectorized reduce (row-sum) renders a PLACEHOLDER
+// accumulator + serial reduce loop with UNIQUE labels (the linearized
+// list can carry two RANGE nodes sharing an axis id; labels keyed on
+// axis id would collide into invalid PTX).  The accumulator is a
+// persistent register: mov-init, add+mov update, read-back.
+static int test_case5_reduce_accumulator(void) {
+  thvm_init();
+  TEST_BEGIN("case5 devectorized reduce: acc register + unique loop labels");
+
+  u32 dc[1] = { 3 };
+  u32 da[2] = { 3, 4 };
+  Term C  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dc, 0);
+  Term A  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, da, 1);
+  Term ri = uop_range(0, KAX_LOOP, 3);
+  Term rk = uop_range(1, KAX_REDUCE, 4);
+  Term addr = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, ri, uop_const(DT_INT32, 4)), rk);
+  Term ld  = uop_load(uop_index_e(A, addr));
+  Term red = uop_reduce(REDUCE_SUM, 1, ld);
+  Term st  = uop_store(C, uop_index_e(C, ri), red);
+  Term devec = uop_devectorize_graph(st);
+
+  char *ptx = render_ptx_str(devec, "rowsum", 70);
+  CHECK(ptx != NULL);
+  // Accumulator register present + initialised + read.
+  CHECK(has(ptx, ".reg .f32 %acc_f32_"));
+  CHECK(has(ptx, "mov.b32 %acc_f32_0,"));   // init / update reassign
+  CHECK(has(ptx, "add.f32 %alu_f32_0, %acc_f32_0,"));  // acc + x
+  // Serial reduce loop present (the real one tests against extent 4).
+  CHECK(has(ptx, "setp.lt.s32"));
+  CHECK(has(ptx, ", 4;"));
+  // Labels must be unique: LOOP_1 exists (the second loop occurrence),
+  // proving labels are keyed on occurrence, not the repeated axis id.
+  CHECK(has(ptx, "LOOP_1:"));
+  CHECK(has(ptx, "END_1:"));
+  free(ptx);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 int main(void) {
   int rc = 0;
   rc |= test_case1_elementwise();
   rc |= test_case2_int_alu();
   rc |= test_case3_cast();
   rc |= test_case4_reduce_bails();
+  rc |= test_case5_reduce_accumulator();
   return rc;
 }

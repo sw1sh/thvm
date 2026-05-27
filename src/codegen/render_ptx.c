@@ -118,12 +118,15 @@ typedef struct {
   PtxPrefixCount prefixes[PTX_MAX_PREFIX];
   u32            n_prefixes;
 
-  // Stack of RANGE Terms whose loop is open (scaffold emitted, close
-  // pending).  A matching UOP_END pops + emits the close; any still-open
-  // range at body end is drained in reverse (mirrors the C renderer's
-  // auto-close-at-end fallback for kernels with no explicit END node).
-  Term open_ranges[PTX_MAX_OPEN_RANGES];
+  // Stack of open loops (scaffold emitted, close pending).  Labels are
+  // keyed on a monotonic occurrence id, NOT the axis id -- a malformed
+  // linearized list can carry two RANGE nodes with the same axis id, and
+  // axis-id labels would collide into invalid PTX.  A matching UOP_END
+  // pops + emits the close; still-open loops at body end drain in reverse
+  // (mirrors render_linearized.c's auto-close-at-end fallback).
+  struct { Term range; u32 label; } open_ranges[PTX_MAX_OPEN_RANGES];
   u32  n_open;
+  u32  next_loop_label;
 
   // Thread geometry: promoted store-indexing KAX_LOOP axes become
   // parallel grid threads (decoded from the flat thread id) rather than
@@ -296,18 +299,18 @@ static u32 ptx_alu_dtype(u32 op, Term t, Term a) {
   return ptx_dtype_of(t);
 }
 
-// Emit the loop-close for an open RANGE: increment the induction var,
+// Emit the loop-close for an open loop: increment the induction var,
 // test against the extent, branch back to LOOP if still in range.
-// Faithful to tinygrad ptx.py END (bottom-tested do-while).
-static void ptx_emit_loop_close(PtxCtx *ctx, Term range, FILE *fp) {
-  u32 axis_id = uop_range_axis_id(range);
+// Faithful to tinygrad ptx.py END (bottom-tested do-while).  `label` is
+// the occurrence id of the matching open scaffold.
+static void ptx_emit_loop_close(PtxCtx *ctx, Term range, u32 label, FILE *fp) {
   u32 extent  = uop_range_extent(range);
   const char *rr = ptx_reg_get(ctx, range);
   char p[40]; ptx_ssa(ctx, "pred", DT_BOOL, p, sizeof(p));
-  fprintf(fp, "END_%u:\n", axis_id);
+  fprintf(fp, "END_%u:\n", label);
   fprintf(fp, "\tadd.s32 %s, %s, 1;\n", rr, rr);
   fprintf(fp, "\tsetp.lt.s32 %s, %s, %u;\n", p, rr, extent);
-  fprintf(fp, "\t@%s bra LOOP_%u;\n", p, axis_id);
+  fprintf(fp, "\t@%s bra LOOP_%u;\n", p, label);
 }
 
 // Thread-geometry pre-pass.  Mirrors render_uop.c's rmu_emit_output_loops
@@ -409,7 +412,10 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
     Term t = lk->uops[i];
     if (term_tag(t) != TAG_UOP) continue;
     u32 op = term_ext(t);
-    if (op == UOP_PLACEHOLDER || op == UOP_STACK || op == UOP_GEP
+    // PLACEHOLDER (reduce accumulator) IS handled (M3b).  The vector
+    // shapes (STACK/GEP/VCONST/UNROLL) + structural wrappers + a raw
+    // un-lowered REDUCE are M3c -- bail so the caller falls back.
+    if (op == UOP_STACK || op == UOP_GEP
         || op == UOP_VCONST || op == UOP_UNROLL || op == UOP_CONTRACT
         || op == UOP_OPT || op == UOP_BUFFERIZE || op == UOP_REDUCE
         || op == UOP_BITCAST || op == UOP_INVALID) {
@@ -434,6 +440,17 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         if (s == NULL) return 0;
         // Load the param pointer into its base register at the top.
         fprintf(fp, "\tld.param.u64 %s, [%s+0];\n", s->reg, s->param);
+        break;
+      }
+
+      case UOP_PLACEHOLDER: {
+        // Reduce accumulator: a single persistent register reassigned by
+        // the init / update STOREs and read by the final LOAD.  Unlike
+        // the other value nodes this register is NOT single-assignment
+        // (PTX registers aren't SSA at the hardware level).
+        u32 dt = uop_placeholder_dtype(t);
+        char r[40]; ptx_ssa(ctx, "acc", dt, r, sizeof(r));
+        ptx_reg_put(ctx, t, r);
         break;
       }
 
@@ -473,13 +490,18 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         // Serial loop (reduce / unpromoted axis).  Faithful to tinygrad's
         // do-while: mov ridx,-1 ; bra END ; LOOP: ... END increments +
         // tests + branches back to LOOP (matching UOP_END or the drain).
+        // Labels use a unique occurrence id (not axis id) to stay valid
+        // even when two ranges share an axis id.
         char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
         ptx_reg_put(ctx, t, r);
-        fprintf(fp, "\tmov.u32 %s, 0xFFFFFFFF;\n", r);
-        fprintf(fp, "\tbra END_%u;\n", axis_id);
-        fprintf(fp, "LOOP_%u:\n", axis_id);
         if (ctx->n_open >= PTX_MAX_OPEN_RANGES) return 0;
-        ctx->open_ranges[ctx->n_open++] = t;
+        u32 label = ctx->next_loop_label++;
+        fprintf(fp, "\tmov.u32 %s, 0xFFFFFFFF;\n", r);
+        fprintf(fp, "\tbra END_%u;\n", label);
+        fprintf(fp, "LOOP_%u:\n", label);
+        ctx->open_ranges[ctx->n_open].range = t;
+        ctx->open_ranges[ctx->n_open].label = label;
+        ctx->n_open++;
         break;
       }
 
@@ -490,11 +512,12 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         for (u32 e = 0; e < n; e++) {
           Term r = uop_end_range(t, e);
           if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
-          ptx_emit_loop_close(ctx, r, fp);
-          // Remove r from the open stack.
-          for (u32 k = 0; k < ctx->n_open; k++) {
-            if (ctx->open_ranges[k] == r) {
-              for (u32 m = k + 1; m < ctx->n_open; m++) {
+          // Find r's open entry (most recent) for its label, close it,
+          // and remove from the stack.
+          for (u32 k = ctx->n_open; k > 0; k--) {
+            if (ctx->open_ranges[k - 1].range == r) {
+              ptx_emit_loop_close(ctx, r, ctx->open_ranges[k - 1].label, fp);
+              for (u32 m = k; m < ctx->n_open; m++) {
                 ctx->open_ranges[m - 1] = ctx->open_ranges[m];
               }
               ctx->n_open--;
@@ -530,6 +553,14 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
 
       case UOP_LOAD: {
         Term idx = heap_read(loc + 0);
+        // LOAD of a PLACEHOLDER reads the accumulator register directly
+        // (the final reduce result); no global load.
+        if (term_tag(idx) == TAG_UOP && term_ext(idx) == UOP_PLACEHOLDER) {
+          const char *ar = ptx_reg_get(ctx, idx);
+          if (ar[0] == '\0') return 0;
+          ptx_reg_put(ctx, t, ar);
+          break;
+        }
         const char *ir = ptx_reg_get(ctx, idx);
         if (ir[0] == '\0') return 0;
         u32 dt = ptx_dtype_of(t);
@@ -540,11 +571,23 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
       }
 
       case UOP_STORE: {
+        Term buf   = heap_read(loc + 0);
         Term addr  = heap_read(loc + 1);
         Term value = heap_read(loc + 2);
-        const char *ir = ptx_reg_get(ctx, addr);
         const char *vr = ptx_reg_get(ctx, value);
-        if (ir[0] == '\0' || vr[0] == '\0') return 0;
+        if (vr[0] == '\0') return 0;
+        // STORE into a PLACEHOLDER is an accumulator reassignment: a bit
+        // copy into the persistent acc register (init = const, update =
+        // acc+x).  Mirrors render_linearized.c's `_accN = value;`.
+        if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_PLACEHOLDER) {
+          const char *ar = ptx_reg_get(ctx, buf);
+          if (ar[0] == '\0') return 0;
+          u32 dt = uop_placeholder_dtype(buf);
+          fprintf(fp, "\tmov.b%s %s, %s;\n", ptx_reg_type(dt) + 1, ar, vr);
+          break;
+        }
+        const char *ir = ptx_reg_get(ctx, addr);
+        if (ir[0] == '\0') return 0;
         u32 dt = ptx_dtype_of(value);
         fprintf(fp, "\tst.global.%s [%s+0], %s;\n", ptx_mem_type(dt), ir, vr);
         break;
@@ -623,7 +666,9 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
   // Drain: close any range with no explicit UOP_END node, in reverse
   // (innermost first).  Mirrors render_linearized.c's auto-close-at-end.
   while (ctx->n_open > 0) {
-    ptx_emit_loop_close(ctx, ctx->open_ranges[--ctx->n_open], fp);
+    ctx->n_open--;
+    ptx_emit_loop_close(ctx, ctx->open_ranges[ctx->n_open].range,
+                        ctx->open_ranges[ctx->n_open].label, fp);
   }
   // The bounds guard branches here; the caller's `ret;` follows.
   if (ctx->emitted_guard) fputs("DONE:\n", fp);
