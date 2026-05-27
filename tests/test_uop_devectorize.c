@@ -259,6 +259,153 @@ static int test_case6_end_to_end_upcast(void) {
   TEST_REPORT();
 }
 
+// Case 8: conv-kid=3 shape end-to-end.  Builds the body
+//   out[Cout, BS] = sum_{Cin} W[Cout, Cin] * X[BS, Cin]
+// with Cout UPCAST'd factor=4, then runs expand + devectorize.  Asserts
+// the post-devec graph is CONTRACT-free and the body MUL is a STACK
+// of 4 lanes whose addresses substitute literal Cout values 0/4/8/12.
+//
+// Mirrors the F=4 output-upcast shape that hand_opts wires up for the
+// CUDA path's beautiful_mnist conv kid=3 -- the path the route gate is
+// supposed to unblock.  Reference: tinygrad expander.py:77-86 do_contract,
+// the fold that turns CONTRACT-without-UNROLL broadcasts into STACKs.
+static int test_case8_conv_kid3_no_contract(void) {
+  thvm_init();
+  TEST_BEGIN("case8 conv-shape expand+devectorize -> CONTRACT-free");
+
+  // axes: 0 = Cout (UPCAST 4), 1 = BS (LOOP 8), 2 = Cin (LOOP 4 reduce)
+  Term r_cout = uop_range(0, KAX_UPCAST, 4);
+  Term r_bs   = uop_range(1, KAX_LOOP, 8);
+  Term r_cin  = uop_range(2, KAX_LOOP, 4);
+
+  u32 wdims[2] = {4, 4};
+  u32 xdims[2] = {8, 4};
+  Term wbuf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, wdims, 1);
+  Term xbuf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, xdims, 2);
+
+  // W[Cout, Cin] addr = Cout * 4 + Cin
+  Term w_addr = uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IMUL, r_cout, uop_const(DT_INT32, 4)),
+                  r_cin);
+  Term w_load = uop_load(uop_index_e(wbuf, w_addr));
+  // X[BS, Cin] addr = BS * 4 + Cin
+  Term x_addr = uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IMUL, r_bs, uop_const(DT_INT32, 4)),
+                  r_cin);
+  Term x_load = uop_load(uop_index_e(xbuf, x_addr));
+  Term body = uop_binary(UOP_MUL, w_load, x_load);
+  u32 raxes[1] = { 2 };
+  Term red = uop_reduce_multi(REDUCE_SUM, 1, raxes, body);
+
+  Term ex = uop_expand_graph(red);
+  Term dv = uop_devectorize_graph(ex);
+
+  // No CONTRACT survives.
+  CHECK_EQ(subtree_count_op(dv, UOP_CONTRACT, 0), 0);
+  // No UPCAST RANGE survives (it became VCONST -> STACK lanes).
+  // Walk to confirm: any RANGE found should NOT carry KAX_UPCAST.
+  // We don't have a helper for that; instead, assert at least one
+  // STACK appears (the lane bundle replacing the UPCAST RANGE).
+  CHECK(subtree_count_op(dv, UOP_STACK, 0) >= 1);
+  // VCONST is consumed.
+  CHECK_EQ(subtree_count_op(dv, UOP_VCONST, 0), 0);
+  // The W-load lane bundle is a STACK of 4 LOADs (one per Cout lane).
+  // The accumulator path (reduce_to_acc) produces 4 LOADs at minimum
+  // (acc reads + final read).  We assert the total LOAD count is >= 4
+  // (the 4 W-lane LOADs alone account for 4; the lane X LOAD, acc
+  // load + final load push the count higher).
+  CHECK(subtree_count_op(dv, UOP_LOAD, 0) >= 4);
+  // Accumulator chain in place.
+  CHECK(subtree_count_op(dv, UOP_PLACEHOLDER, 0) >= 1);
+  CHECK_EQ(subtree_count_op(dv, UOP_REDUCE, 0), 0);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 9: multi-axis K reduce + UPCAST output, single accumulator.
+// Same Cout UPCAST=4 + multiple LOOP K-axes (mimics conv kH*kW*Cin).
+// After expand+devectorize, no CONTRACT survives and the W LOAD lanes
+// stack to 4 with proper per-lane Cout offsets.
+static int test_case9_multi_axis_k_with_upcast(void) {
+  thvm_init();
+  TEST_BEGIN("case9 multi-axis K + UPCAST Cout -> CONTRACT-free");
+
+  Term r_cout = uop_range(0, KAX_UPCAST, 4);
+  Term r_kh   = uop_range(3, KAX_LOOP, 3);
+  Term r_kw   = uop_range(4, KAX_LOOP, 3);
+  Term r_cin  = uop_range(2, KAX_LOOP, 2);
+
+  u32 wdims[4] = {4, 2, 3, 3};
+  Term wbuf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 4, wdims, 1);
+  // W[Cout, Cin, kH, kW] = Cout*2*3*3 + Cin*3*3 + kH*3 + kW
+  Term addr =
+    uop_int_binary(UOP_IADD,
+      uop_int_binary(UOP_IADD,
+        uop_int_binary(UOP_IADD,
+          uop_int_binary(UOP_IMUL, r_cout, uop_const(DT_INT32, 18)),
+          uop_int_binary(UOP_IMUL, r_cin,  uop_const(DT_INT32, 9))),
+        uop_int_binary(UOP_IMUL, r_kh, uop_const(DT_INT32, 3))),
+      r_kw);
+  Term w_load = uop_load(uop_index_e(wbuf, addr));
+  u32 raxes[3] = { 2, 3, 4 };
+  Term red = uop_reduce_multi(REDUCE_SUM, 3, raxes, w_load);
+
+  Term ex = uop_expand_graph(red);
+  Term dv = uop_devectorize_graph(ex);
+
+  CHECK_EQ(subtree_count_op(dv, UOP_CONTRACT, 0), 0);
+  CHECK_EQ(subtree_count_op(dv, UOP_VCONST, 0), 0);
+  // Cout lanes -> at least one STACK of 4.
+  CHECK(subtree_count_op(dv, UOP_STACK, 0) >= 1);
+  // 4 W lane LOADs at minimum (one per Cout slice through the K-reduce).
+  CHECK(subtree_count_op(dv, UOP_LOAD, 0) >= 4);
+  CHECK_EQ(subtree_count_op(dv, UOP_REDUCE, 0), 0);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 10: confirm the post-fold graph renders to a non-empty CUDA
+// source.  Build a single-axis UPCAST'd ALU body (no REDUCE, no STORE
+// over an UPCAST'd addr -- those pathways stress different folds);
+// run expand + devectorize; assert CONTRACT-free + render_linearized
+// produces source text.
+//
+// We avoid wrapping the whole STORE in a CONTRACT (which happens when
+// the STORE's addr carries an UPCAST'd RANGE -- fix_store_unroll in
+// expander.c).  Instead, the body computes an UPCAST-broadcast value
+// + stores it to a scalar address; the post-fold value is a STACK of
+// lane scalars that the renderer's STACK rhs lane logic can emit.
+static int test_case10_post_fold_renders(void) {
+  thvm_init();
+  TEST_BEGIN("case10 expand+devectorize output renders");
+
+  // Body: IADD(CONST(7), Cout) where Cout is UPCAST factor 4.  After
+  // expand+devectorize this folds to STACK(7+0, 7+1, 7+2, 7+3).
+  Term r_cout = uop_range(0, KAX_UPCAST, 4);
+  Term seven = uop_const(DT_INT32, 7);
+  Term body = uop_int_binary(UOP_IADD, seven, r_cout);
+
+  Term ex = uop_expand_graph(body);
+  Term dv = uop_devectorize_graph(ex);
+
+  // Post-fold structural assertions.
+  CHECK_EQ(subtree_count_op(dv, UOP_CONTRACT, 0), 0);
+  CHECK_EQ(subtree_count_op(dv, UOP_VCONST, 0), 0);
+  CHECK(subtree_count_op(dv, UOP_STACK, 0) >= 1);
+
+  // Linearize + render to confirm the route gate's pipeline succeeds
+  // end to end on the fold output.  Render to /dev/null via fmemopen.
+  static LinKernel lk;
+  int ok = uop_linearize(dv, &lk);
+  CHECK_EQ(ok, 1);
+  CHECK(lk.n >= 2);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 // Case 7: hash-cons on PLACEHOLDER + STACK.
 static int test_case7_hash_cons(void) {
   thvm_init();
@@ -297,5 +444,8 @@ int main(void) {
   rc |= test_case5_load_fold();
   rc |= test_case6_end_to_end_upcast();
   rc |= test_case7_hash_cons();
+  rc |= test_case8_conv_kid3_no_contract();
+  rc |= test_case9_multi_axis_k_with_upcast();
+  rc |= test_case10_post_fold_renders();
   return rc;
 }

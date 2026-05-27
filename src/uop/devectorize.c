@@ -389,6 +389,271 @@ static Term devec_pm_devectorize(Term t, void *user) {
   return devec_no_vec_alu(t);
 }
 
+// === devec_pm_do_contract (mirrors tinygrad expander.py:77-86 do_contract)
+//
+// The expander's expander_pm_do_contract folds the well-formed case
+// CONTRACT(UNROLL(x, eargs), cargs) but bails when src is not an
+// UNROLL.  After expander_broadcast wraps scalar leaves (BUFFER /
+// CONST / RANGE) in CONTRACT-without-UNROLL markers (the "broadcast"
+// shape, tinygrad expander.py:80), those wrappers reach devectorize
+// untouched.  We finish the fold here so the post-devectorize graph
+// is CONTRACT-free.
+//
+// Cases:
+//   Case A (broadcast): CONTRACT(non-UNROLL src, args) ->
+//                       STACK(src, src, ..., src)  [N = prod(factors)]
+//   Case B (defensive copy of expander's do_contract): in case the
+//                       expander couldn't see this CONTRACT (e.g. it
+//                       was synthesized by a later rewrite) we still
+//                       apply the GEP-swizzle fold.  Identical logic
+//                       to expander_pm_do_contract.
+//
+// Reference: tinygrad/codegen/late/expander.py:77-86 do_contract.
+
+static Term devec_pm_do_contract(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONTRACT) return 0;
+  Term src = heap_read(term_val(t) + 0);
+  u32 c_n = uop_contract_n_args(t);
+  if (c_n == 0) return src;
+  u32 c_axes[MAX_DIM];
+  u32 c_factors[MAX_DIM];
+  for (u32 i = 0; i < c_n && i < MAX_DIM; i++) {
+    c_axes[i]    = uop_contract_axis_id(t, i);
+    c_factors[i] = uop_contract_factor(t, i);
+  }
+  // Case A: CONTRACT(non-UNROLL src) -> STACK(src * total_factor).
+  // Mirrors expander.py:80.
+  //
+  // GUARD: do NOT fold if src is a STORE *OR* a CONTRACT that wraps
+  // a STORE.  Two reasons:
+  //
+  //   1. Semantics: CONTRACT(STORE, (ax, F)) means "execute this STORE
+  //      F times with the contracted axis taking values 0..F-1"; the
+  //      F lanes have DIFFERENT addresses (Cout substituted in addr).
+  //      Emitting STACK(STORE * F) of F identical STORE Terms would
+  //      silently collapse F distinct stores into one (they all share
+  //      the unsubstituted addr).  Tinygrad routes this through STORE
+  //      in do_expand's eligible-ops list -- thvm's expander.c skips
+  //      STORE, so leave CONTRACT(STORE) intact and let the renderer's
+  //      CONTRACT-bail path handle it (render_linearized.c lz_emit_body).
+  //
+  //   2. Termination: expander_fix_store_unroll has a known
+  //      self-recursive pattern that leaves a deep chain of nested
+  //      CONTRACT(STORE) wrappers (one per recursive depth-cap hit).
+  //      If Case A folded the inner-of-2 CONTRACT-without-UNROLL nodes
+  //      to STACK(CONTRACT(STORE) * N), the surrounding CONTRACT
+  //      would then fold STACK over STACK ad infinitum, exploding
+  //      the graph + hanging the linearizer's range-product walker.
+  //
+  // The fold IS sound + necessary for the LOAD path (case 8) where
+  // identical LOAD Terms share the same source / address.
+  if (term_tag(src) != TAG_UOP || term_ext(src) != UOP_UNROLL) {
+    if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_STORE) return 0;
+    // Walk through any chain of nested CONTRACT wrappers (a known
+    // by-product of expander_fix_store_unroll's self-recursive
+    // depth-cap behavior).  If the chain bottoms out at a STORE,
+    // bail; otherwise fold normally.
+    if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_CONTRACT) {
+      Term probe = src;
+      for (u32 d = 0; d < 8; d++) {
+        if (term_tag(probe) != TAG_UOP || term_ext(probe) != UOP_CONTRACT) break;
+        probe = heap_read(term_val(probe) + 0);
+      }
+      if (term_tag(probe) == TAG_UOP && term_ext(probe) == UOP_STORE) return 0;
+      // Still inside CONTRACT chain after 8 layers -- treat as
+      // pathological + leave it for the renderer to bail on.
+      if (term_tag(probe) == TAG_UOP && term_ext(probe) == UOP_CONTRACT) return 0;
+    }
+    u32 total = 1;
+    for (u32 i = 0; i < c_n; i++) total *= c_factors[i];
+    if (total == 0 || total > 256) return 0;
+    Term elts[256];
+    for (u32 i = 0; i < total; i++) elts[i] = src;
+    return uop_stack(total, elts);
+  }
+  // Case B: CONTRACT(UNROLL(x, eargs), cargs) -> UNROLL(GEP(x, sw),
+  // eargs \ cargs).  Identical to expander_pm_do_contract.
+  u32 e_n = uop_unroll_n_args(src);
+  u32 e_axes[MAX_DIM];
+  u32 e_factors[MAX_DIM];
+  for (u32 i = 0; i < e_n && i < MAX_DIM; i++) {
+    e_axes[i]    = uop_unroll_axis_id(src, i);
+    e_factors[i] = uop_unroll_factor(src, i);
+  }
+  u32 r_axes[MAX_DIM];
+  u32 r_factors[MAX_DIM];
+  u32 r_n = 0;
+  for (u32 i = 0; i < e_n; i++) {
+    int in_c = 0;
+    for (u32 j = 0; j < c_n; j++) {
+      if (e_axes[i] == c_axes[j]) { in_c = 1; break; }
+    }
+    if (!in_c) {
+      r_axes[r_n]    = e_axes[i];
+      r_factors[r_n] = e_factors[i];
+      r_n++;
+    }
+  }
+  Term inner = heap_read(term_val(src) + 0);
+  u32 total_r = 1, total_c = 1;
+  for (u32 i = 0; i < r_n; i++) total_r *= r_factors[i];
+  for (u32 i = 0; i < c_n; i++) total_c *= c_factors[i];
+  u32 total = total_r * total_c;
+  if (total == 0 || total > 256) return 0;
+  u32 idx_buf[256];
+  u32 written = 0;
+  for (u32 ri = 0; ri < total_r; ri++) {
+    u32 r_vals[MAX_DIM] = {0};
+    {
+      u32 rem = ri;
+      for (u32 rj = 0; rj < r_n; rj++) {
+        u32 k = r_n - 1 - rj;
+        r_vals[k] = rem % r_factors[k];
+        rem /= r_factors[k];
+      }
+    }
+    for (u32 ci = 0; ci < total_c; ci++) {
+      u32 c_vals[MAX_DIM] = {0};
+      {
+        u32 rem = ci;
+        for (u32 cj = 0; cj < c_n; cj++) {
+          u32 k = c_n - 1 - cj;
+          c_vals[k] = rem % c_factors[k];
+          rem /= c_factors[k];
+        }
+      }
+      u32 e_vals[MAX_DIM] = {0};
+      for (u32 ei = 0; ei < e_n; ei++) {
+        u32 ax = e_axes[ei];
+        int found = 0;
+        for (u32 j = 0; j < r_n; j++) {
+          if (r_axes[j] == ax) { e_vals[ei] = r_vals[j]; found = 1; break; }
+        }
+        if (!found) {
+          for (u32 j = 0; j < c_n; j++) {
+            if (c_axes[j] == ax) { e_vals[ei] = c_vals[j]; break; }
+          }
+        }
+      }
+      // _expand_arg_to_idx (expander.py:8-13): idx = sum(rpk[ax]*mul);
+      // mul running right-to-left.
+      u32 idx = 0, mul = 1;
+      for (u32 ei = e_n; ei-- > 0; ) {
+        idx += e_vals[ei] * mul;
+        mul *= e_factors[ei];
+      }
+      idx_buf[written++] = idx;
+    }
+  }
+  Term gepped = uop_gep(inner, written, idx_buf);
+  if (r_n == 0) return gepped;
+  return uop_unroll(gepped, r_n, r_axes, r_factors);
+}
+
+// === Push UNROLL through scalar wrappers (LOAD / INDEX_E) ==============
+//
+// LOAD is not in the expander's op_is_expandable() list, so when a
+// LOAD wraps a vector-indexed INDEX_E the UNROLL marker stays INSIDE
+// the LOAD.  Mirror tinygrad's do_expand by pushing the UNROLL up:
+//   LOAD(UNROLL(idx, args))  ->  UNROLL(LOAD(idx), args)
+// This is sound because LOAD over a vector index distributes per-lane.
+//
+// Reference: tinygrad/codegen/late/expander.py:74-75 (do_expand wraps
+// in outer UNROLL after rebuilding the root op).
+
+static Term devec_pm_push_unroll_load(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_LOAD) return 0;
+  Term inner = heap_read(term_val(t) + 0);
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_UNROLL) return 0;
+  u32 n = uop_unroll_n_args(inner);
+  if (n == 0 || n > MAX_DIM) return 0;
+  u32 axes[MAX_DIM];
+  u32 factors[MAX_DIM];
+  for (u32 i = 0; i < n; i++) {
+    axes[i]    = uop_unroll_axis_id(inner, i);
+    factors[i] = uop_unroll_factor(inner, i);
+  }
+  Term idx = heap_read(term_val(inner) + 0);
+  Term new_load = uop_load(idx);
+  return uop_unroll(new_load, n, axes, factors);
+}
+
+// === UNROLL(STACK(...)) collapse ========================================
+//
+// After CONTRACT-broadcast + INDEX_E/LOAD devec turn the body into a
+// STACK of N lanes, the surrounding UNROLL becomes a redundant marker
+// (the lanes are already enumerated).  Drop the UNROLL when its child
+// is a STACK whose width matches prod(factors).
+//
+// This is the "structural sink" mirroring tinygrad's pm_render rule
+// devectorizer.py:282-284 (STACK at the leaf of a UNROLL of matching
+// width collapses).
+
+static Term devec_pm_unroll_stack(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_UNROLL) return 0;
+  Term inner = heap_read(term_val(t) + 0);
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_STACK) return 0;
+  u32 expect = 1;
+  u32 na = uop_unroll_n_args(t);
+  for (u32 i = 0; i < na; i++) expect *= uop_unroll_factor(t, i);
+  if (uop_stack_n(inner) != expect) return 0;
+  return inner;
+}
+
+// === devec INDEX_E + LOAD on STACK srcs ================================
+//
+// After CONTRACT(non-UNROLL) folds to STACK(src x N), INDEX_E whose
+// buf or addr is a STACK becomes a vector op.  Split it per-lane
+// (mirror of devec_no_vec_alu but specialized for these two ops,
+// which the ALU dispatcher above didn't cover because their dtype /
+// constructor doesn't fit the generic ALU shape).
+
+static Term devec_no_vec_index_e(Term t) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_INDEX_E) return 0;
+  u64 loc = term_val(t);
+  Term buf = heap_read(loc + 0);
+  Term addr = heap_read(loc + 1);
+  int buf_v = (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_STACK);
+  int addr_v = (term_tag(addr) == TAG_UOP && term_ext(addr) == UOP_STACK);
+  if (!buf_v && !addr_v) return 0;
+  u32 width = buf_v ? uop_stack_n(buf) : uop_stack_n(addr);
+  if (width == 0 || width == 1) return 0;
+  if (buf_v && addr_v && uop_stack_n(buf) != uop_stack_n(addr)) return 0;
+  if (width > 256) return 0;
+  Term lanes[256];
+  for (u32 i = 0; i < width; i++) {
+    Term b = buf_v ? uop_stack_src(buf, i) : buf;
+    Term a = addr_v ? uop_stack_src(addr, i) : addr;
+    lanes[i] = uop_index_e(b, a);
+  }
+  return uop_stack(width, lanes);
+}
+
+static Term devec_no_vec_load(Term t) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_LOAD) return 0;
+  Term inner = heap_read(term_val(t) + 0);
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_STACK) return 0;
+  u32 width = uop_stack_n(inner);
+  if (width == 0 || width == 1) return 0;
+  if (width > 256) return 0;
+  Term lanes[256];
+  for (u32 i = 0; i < width; i++) {
+    lanes[i] = uop_load(uop_stack_src(inner, i));
+  }
+  return uop_stack(width, lanes);
+}
+
+static Term devec_pm_devectorize_extra(Term t, void *user) {
+  (void)user;
+  Term r;
+  if ((r = devec_no_vec_index_e(t)) != 0) return r;
+  if ((r = devec_no_vec_load(t)) != 0) return r;
+  return 0;
+}
+
 // === pm_render lowering rules (devectorizer.py:275-295) ================
 //
 // 1. VCONST -> STACK of scalar CONSTs.
@@ -462,35 +727,72 @@ static Term devec_pm_stack_singleton(Term t, void *user) {
 // === Entry point: uop_devectorize_graph ================================
 
 fn Term uop_devectorize_graph(Term root) {
-  // Pass (a): pm_reduce -- one shared ReduceContext threads acc_num
+  // The pipeline runs THREE rewrite groups in this order:
+  //
+  //   1. CONTRACT folding + UNROLL push + scalar ALU devec.  This
+  //      runs FIRST (before pm_reduce wraps the body in UOP_AFTER)
+  //      because the graph rewriter does not descend into AFTER's
+  //      variadic children -- once reduce_to_acc nests the body
+  //      under AFTER, no further per-node rewrites reach it.
+  //
+  //   2. pm_reduce (reduce_to_acc): REDUCE -> PLACEHOLDER + STOREs +
+  //      END + LOAD chain.  Mirrors devectorizer.py:311-328.
+  //
+  //   3. A final cleanup pm_render pass over the post-reduce graph
+  //      (catches GEP/STACK singletons synthesized while rebuilding).
+  //
+  // Reference: tinygrad/codegen/late/expander.py:77-86 do_contract;
+  //            tinygrad/codegen/late/expander.py:22-75 do_expand.
+  Term t = root;
+
+  // Pass (a1): push UNROLL through scalar wrappers (LOAD).  Must
+  // run BEFORE the CONTRACT fold + devectorize so the inner
+  // INDEX_E with CONTRACT-broadcasts is exposed.  Mirrors tinygrad
+  // expander.py:74-75 do_expand's outer-UNROLL wrap, which thvm's
+  // expander.c skips because UOP_LOAD is not in op_is_expandable().
+  static UOpGraphRewriteRule const PUSH_RULES[] = {
+    { "devec_pm_push_unroll_load", devec_pm_push_unroll_load },
+  };
+  t = uop_graph_rewrite(t, PUSH_RULES,
+                        sizeof(PUSH_RULES) / sizeof(PUSH_RULES[0]),
+                        NULL);
+  // pm_render: VCONST -> STACK; do_contract (Cases A + B).
+  static UOpGraphRewriteRule const RENDER_RULES[] = {
+    { "devec_pm_vconst_to_stack",  devec_pm_vconst_to_stack },
+    { "devec_pm_do_contract",      devec_pm_do_contract },
+    { "devec_pm_gep_unwrap",       devec_pm_gep_unwrap },
+    { "devec_pm_stack_singleton",  devec_pm_stack_singleton },
+    { "devec_pm_unroll_stack",     devec_pm_unroll_stack },
+  };
+  t = uop_graph_rewrite(t, RENDER_RULES,
+                        sizeof(RENDER_RULES) / sizeof(RENDER_RULES[0]),
+                        NULL);
+  // devectorize: vector ALU / INDEX_E / LOAD -> STACK of scalars.
+  static UOpGraphRewriteRule const DEVEC_RULES[] = {
+    { "devec_pm_devectorize",       devec_pm_devectorize },
+    { "devec_pm_devectorize_extra", devec_pm_devectorize_extra },
+  };
+  t = uop_graph_rewrite(t, DEVEC_RULES,
+                        sizeof(DEVEC_RULES) / sizeof(DEVEC_RULES[0]),
+                        NULL);
+  // Second sweep of pm_render to clean up STACK/GEP residue from
+  // the per-lane rebuilds.
+  t = uop_graph_rewrite(t, RENDER_RULES,
+                        sizeof(RENDER_RULES) / sizeof(RENDER_RULES[0]),
+                        NULL);
+
+  // Pass (b): pm_reduce -- one shared ReduceContext threads acc_num
   // across every REDUCE the rewrite encounters.
   static UOpGraphRewriteRule const REDUCE_RULES[] = {
     { "devec_pm_reduce", devec_pm_reduce },
   };
   DevecReduceCtx ctx = { 0 };
-  Term t = uop_graph_rewrite(root, REDUCE_RULES,
-                             sizeof(REDUCE_RULES) / sizeof(REDUCE_RULES[0]),
-                             &ctx);
-  // Pass (b): devectorize -- vector ALU -> STACK of scalar ALU.  This
-  // pass must see STACK leaves (produced by pm_render lowering of
-  // VCONST/GEP) to drive the width detection, so we run pm_render
-  // FIRST on this sub-pass, then devectorize.
-  static UOpGraphRewriteRule const RENDER_RULES[] = {
-    { "devec_pm_vconst_to_stack",  devec_pm_vconst_to_stack },
-    { "devec_pm_gep_unwrap",       devec_pm_gep_unwrap },
-    { "devec_pm_stack_singleton",  devec_pm_stack_singleton },
-  };
-  t = uop_graph_rewrite(t, RENDER_RULES,
-                        sizeof(RENDER_RULES) / sizeof(RENDER_RULES[0]),
-                        NULL);
-  static UOpGraphRewriteRule const DEVEC_RULES[] = {
-    { "devec_pm_devectorize", devec_pm_devectorize },
-  };
-  t = uop_graph_rewrite(t, DEVEC_RULES,
-                        sizeof(DEVEC_RULES) / sizeof(DEVEC_RULES[0]),
-                        NULL);
-  // Pass (c) again: clean up any STACK-of-singleton / GEP-of-singleton
-  // residue left by devectorize.
+  t = uop_graph_rewrite(t, REDUCE_RULES,
+                        sizeof(REDUCE_RULES) / sizeof(REDUCE_RULES[0]),
+                        &ctx);
+
+  // Pass (c) final: STACK-singleton / GEP-singleton cleanup (the
+  // reduce-to-acc rebuild may have left singletons on edge cases).
   t = uop_graph_rewrite(t, RENDER_RULES,
                         sizeof(RENDER_RULES) / sizeof(RENDER_RULES[0]),
                         NULL);
