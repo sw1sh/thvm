@@ -32,6 +32,31 @@ static int rmt_collect_conv2d_info(KernelEntry const *ke,
 // (the production lifted-DAG kernels): kernel_apply_opt mutates the
 // DAG (not ke->schedule->applied_opts, which stays empty), so the
 // applied_opts-reading tile path would compute the pre-opt grid.
+// Read the OPT(_, GROUP_REDUCE, k) factor wrapping a KAX_GROUP_REDUCE
+// range -- the cooperative threadgroup size.  See cuda_dag_group_reduce_
+// factor for the same logic on the CUDA side; the GROUP_REDUCE template
+// in render_uop.c iterates the full reduce extent in strides of `k`.
+static u32 rmt_dag_group_reduce_factor(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_OPT) {
+    u32 kind = (u32)term_val(heap_read(loc + 1));
+    if (kind == UOP_OPT_GROUP_REDUCE) {
+      return (u32)term_val(heap_read(loc + 2));
+    }
+    return rmt_dag_group_reduce_factor(heap_read(loc + 0));
+  }
+  if (op == UOP_RANGE || op == UOP_BUFFER || op == UOP_CONST
+      || op == UOP_INVALID) return 0;
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    u32 f = rmt_dag_group_reduce_factor(heap_read(loc + i));
+    if (f != 0) return f;
+  }
+  return 0;
+}
+
 static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
                                   u32 *threads_x) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
@@ -41,17 +66,19 @@ static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
   if (n == 0) return 0;
   u64 total = 1;            // product of promoted-LOOP output extents
   u64 local_total = 1;      // product of KAX_LOCAL extents
-  u32 group_reduce_extent = 0;
+  int has_group_reduce = 0;
   for (u32 i = 0; i < n; i++) {
     if (exts[i] == 0) return 0;
     switch (types[i]) {
       case KAX_LOOP:         total *= (u64)exts[i]; break;
       case KAX_LOCAL:        local_total *= (u64)exts[i]; break;
-      case KAX_GROUP_REDUCE: group_reduce_extent = exts[i]; break;
+      case KAX_GROUP_REDUCE: has_group_reduce = 1; break;
       // KAX_UPCAST / KAX_UNROLL / KAX_REDUCE: in-thread, not in `tid`.
       default: break;
     }
   }
+  u32 group_reduce_extent = has_group_reduce
+      ? rmt_dag_group_reduce_factor(ke->cached_lift.store_root) : 0;
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 groups, threads;
   if (group_reduce_extent != 0) {

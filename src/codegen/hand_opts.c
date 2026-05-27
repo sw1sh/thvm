@@ -447,26 +447,65 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // tinygrad's axis indexes into `axes_of(AxisType.REDUCE)` -- the i-th
   // REDUCE axis among all axes.  We translate (0,1,2) -> the
   // corresponding axis_id by scanning the snapshot for REDUCE-kind axes.
+  //
+  // Env gate THVM_GROUPTOP=0 disables the gate entirely (default ON);
+  // useful for A/B vs the pre-GROUP_REDUCE baseline while the
+  // CUDA-launch-context corruption is investigated.
+  if (hand_opt_getenv_int("THVM_GROUPTOP", 1) != 0)
   {
     int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
     if (hand_opt_snapshot_axes(ke, &ax)) {
       u64 olp = hand_opt_output_loop_product(&ax);
       u64 thr = NOLOCALS ? 240 : 2048;
       if (olp <= thr) {
-        u32 red_aids[MAX_AXES]; u32 n_red = 0;
+        // red_aids[k] holds the axis_id of the k-th REDUCE axis; red_exts[k]
+        // its extent.  Snapshot positions and axis_ids may not match
+        // (uop_dag_collect_axes returns axes in DAG-walk order, axis_ids
+        // can have gaps from prior axis-id remapping passes).
+        u32 red_aids[MAX_AXES]; u32 red_exts[MAX_AXES]; u32 n_red = 0;
         for (u32 i = 0; i < ax.n; i++) {
-          if (ax.kax_type[i] == KAX_REDUCE) red_aids[n_red++] = i;
+          if (ax.kax_type[i] == KAX_REDUCE) {
+            red_aids[n_red] = ax.axis_id[i];
+            red_exts[n_red] = ax.extent[i];
+            n_red++;
+          }
         }
-        // Cap size at 16 if the extent is small (skip oversized groups).
-        for (u32 i = 0; i < n_red && i < 3; i++) {
-          u32 axis = red_aids[i];
-          u32 ext  = ax.extent[axis];
+        static int trace = -1;
+        if (trace < 0) {
+          const char *e = getenv("THVM_GROUP_REDUCE_TRACE");
+          trace = (e != NULL && e[0] != '0') ? 1 : 0;
+        }
+        if (trace) {
+          fprintf(stderr, "[group] n_red=%u olp=%llu reduces:", n_red,
+                  (unsigned long long)olp);
+          for (u32 i = 0; i < n_red; i++) {
+            fprintf(stderr, " a%u(ext=%u)", red_aids[i], red_exts[i]);
+          }
+          fputc('\n', stderr);
+        }
+        // rmu_emit_group_reduce only handles SINGLE-axis reduces; on
+        // multi-axis reduces, rmu_emit_store_reduce bails to the generic
+        // path which ignores the GROUP_REDUCE wrapper but the launch
+        // geometry still drops to 16-thread blocks -> redundant writes /
+        // OOB.  Skip GROUPTOP unless the kernel has exactly one reduce
+        // axis.
+        if (n_red == 1) {
+          u32 axis = red_aids[0];
+          u32 ext  = red_exts[0];
           u32 sz   = 16;
-          if (ext == 0 || ext % sz != 0) continue;
-          // Skip if the resulting outer reduce would be trivial.
-          if (ext / sz < 1) continue;
-          KOpt opt = { KOP_GROUPTOP, (u8)axis, sz };
-          if (kernel_apply_opt(ke, opt)) { n_applied++; break; }
+          if (ext > 0 && ext % sz == 0 && ext / sz >= 1) {
+            KOpt opt = { KOP_GROUPTOP, (u8)axis, sz };
+            int ok = kernel_apply_opt(ke, opt);
+            if (trace) fprintf(stderr, "[group] apply GROUPTOP a%u sz=%u -> %d\n",
+                               axis, sz, ok);
+            if (ok) n_applied++;
+          } else if (trace) {
+            fprintf(stderr, "[group] skip a%u ext=%u (no divide / trivial)\n",
+                    axis, ext);
+          }
+        } else if (trace) {
+          fprintf(stderr, "[group] skip: n_red=%u != 1 (multi-axis not supported)\n",
+                  n_red);
         }
       }
     }

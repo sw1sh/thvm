@@ -318,6 +318,32 @@ fn int cuda_jit_launch(CUfunction func,
 // Returns 1 with (grid_x, block_x) on success; 0 if the DAG has no
 // axes / overflows 32 bits / a block dim exceeds the V100 cap (1024
 // threads/block on sm_70).
+// Find the OPT(_, GROUP_REDUCE, k) wrapping a KAX_GROUP_REDUCE range
+// and return k -- the cooperative block size to launch.  The range's
+// own extent is the FULL reduce extent (each thread strides it by k);
+// the OPT factor is the cooperative thread count.  Returns 0 if no
+// GROUP_REDUCE OPT is present.
+static u32 cuda_dag_group_reduce_factor(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_OPT) {
+    u32 kind = (u32)term_val(heap_read(loc + 1));
+    if (kind == UOP_OPT_GROUP_REDUCE) {
+      return (u32)term_val(heap_read(loc + 2));
+    }
+    return cuda_dag_group_reduce_factor(heap_read(loc + 0));
+  }
+  if (op == UOP_RANGE || op == UOP_BUFFER || op == UOP_CONST
+      || op == UOP_INVALID) return 0;
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    u32 f = cuda_dag_group_reduce_factor(heap_read(loc + i));
+    if (f != 0) return f;
+  }
+  return 0;
+}
+
 fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
                                u32 *block_x) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
@@ -327,17 +353,22 @@ fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
   if (n == 0) return 0;
   u64 total = 1;            // product of promoted-LOOP output extents
   u64 local_total = 1;      // product of KAX_LOCAL extents
-  u32 group_reduce_extent = 0;
+  int has_group_reduce = 0;
   for (u32 i = 0; i < n; i++) {
     if (exts[i] == 0) return 0;
     switch (types[i]) {
       case KAX_LOOP:         total       *= (u64)exts[i]; break;
       case KAX_LOCAL:        local_total *= (u64)exts[i]; break;
-      case KAX_GROUP_REDUCE: group_reduce_extent = exts[i]; break;
+      case KAX_GROUP_REDUCE: has_group_reduce = 1; break;
       // KAX_UPCAST / KAX_UNROLL / KAX_REDUCE: in-thread, not in tid.
       default: break;
     }
   }
+  // The GROUP_REDUCE block size is the OPT(_, GROUP_REDUCE, k) factor,
+  // NOT the range extent (which is the full reduce extent each thread
+  // strides over).  Look up the OPT wrap explicitly.
+  u32 group_reduce_extent = has_group_reduce
+      ? cuda_dag_group_reduce_factor(ke->cached_lift.store_root) : 0;
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 grid, block;
   // SIMD_REDUCE: a warp-collective reduce gives each reduce-axis tuple
@@ -476,6 +507,11 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
       dumped_once = this_kid;
       fprintf(stderr, "=== CUDA kernel src kid=%u ===\n%s\n=== end kid=%u ===\n",
               this_kid, cu, this_kid);
+      fflush(stderr);
+    }
+    if (getenv("THVM_CUDA_DUMP_SHARED") && strstr(cu, "__shared__")) {
+      fprintf(stderr, "=== CUDA kernel kid=%u (has __shared__) ===\n%s\n=== end ===\n",
+              this_kid, cu);
       fflush(stderr);
     }
   }

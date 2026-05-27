@@ -47,6 +47,19 @@ static cg_target RMU_TARGET = CG_TARGET_METAL;
 // by cg_render_uop_kernel_cuda_root; the MSL / C99 entries leave it 0.
 static int RMU_SIMD_WARP = 0;
 
+// 1 when the kernel carries a KAX_GROUP_REDUCE axis (the cooperative
+// shared-memory reduce template): block size = group_extent, grid =
+// product(LOOP outputs), so the promoted output axis must decode from
+// `tg` (the block index) instead of the flat `tid` -- same as
+// RMU_SIMD_WARP but for the LOCAL-style launch shape, not the warp.
+// Without this the renderer emits `a0 = (tid/.) % .` over a 1280-block
+// launch with block=16 and each block computes 16 different outputs
+// into one shared accumulator: data-race / OOB.
+static int RMU_HAS_GROUP_REDUCE = 0;
+
+// Forward decl: defined alongside rmu_dag_has_simd_reduce below.
+static int rmu_dag_has_group_reduce(Term t);
+
 // Emit an unroll pragma matching the current target's syntax.  C99 /
 // clang accept `#pragma clang loop unroll_count(N)`; MSL / GPU targets
 // use the GCC-style `#pragma unroll(N)`.  factor==0 means "full".
@@ -1384,7 +1397,7 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
     // promoted output axis decodes from the block index `tg` (the same
     // form a LOCAL split uses) -- never the per-thread `tid`, which
     // would split a warp across 32 distinct rows.
-    char const *idx = (gctx->has_local || RMU_SIMD_WARP) ? "tg" : "tid";
+    char const *idx = (gctx->has_local || RMU_SIMD_WARP || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid";
     if (gctx->n_globals == 1) {
       fprintf(fp, "uint a%u = %s; /* global ext=%u */\n", axis_id, idx, extent);
     } else if (stride <= 1) {
@@ -1570,7 +1583,7 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
   if (gd.n_globals > 0 && gd.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "if (%s >= %lluu) return;\n",
-            (gd.has_local || RMU_SIMD_WARP) ? "tg" : "tid",
+            (gd.has_local || RMU_SIMD_WARP || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid",
             (unsigned long long)gd.total);
   }
   u32 body_depth = depth;
@@ -3813,7 +3826,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   if (g_decode.n_globals > 0 && g_decode.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fprintf(fp, "if (%s >= %lluu) return;\n",
-            (g_decode.has_local || RMU_SIMD_WARP) ? "tg" : "tid",
+            (g_decode.has_local || RMU_SIMD_WARP || RMU_HAS_GROUP_REDUCE) ? "tg" : "tid",
             (unsigned long long)g_decode.total);
   }
 
@@ -4256,6 +4269,11 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   fputs("    uint sgi [[ simdgroup_index_in_threadgroup ]],\n", fp);
   fputs("    uint thread_index_in_simdgroup "
         "[[ thread_index_in_simdgroup ]]) {\n", fp);
+  // Cooperative shared-mem reduce (KAX_GROUP_REDUCE) launches grid =
+  // output product, threadgroup = group_extent; the output decode must
+  // come from `tg` (one threadgroup per output tuple).  Same flag the
+  // CUDA entry uses.
+  RMU_HAS_GROUP_REDUCE = rmu_dag_has_group_reduce(root);
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
@@ -4266,6 +4284,7 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   } else {
     fputs("  /* empty kernel */\n", fp);
   }
+  RMU_HAS_GROUP_REDUCE = 0;
   fputs("}\n", fp);
 }
 
@@ -4456,6 +4475,48 @@ static int rmu_dag_has_simd_reduce(Term t) {
       return rmu_dag_has_simd_reduce(heap_read(loc + 0))
           || rmu_dag_has_simd_reduce(heap_read(loc + 1))
           || rmu_dag_has_simd_reduce(heap_read(loc + 2));
+    default:
+      return 0;
+  }
+}
+
+// True iff `t`'s subtree contains a UOP_RANGE whose axis_type ==
+// KAX_GROUP_REDUCE -- the structural marker that hand_opts applied
+// KOP_GROUP/GROUPTOP to one of the reduce axes.  Used by the CUDA
+// (and Metal) entry point to set RMU_HAS_GROUP_REDUCE before the body
+// emit so the GLOBAL output decode uses `tg` (one block per output
+// tuple) -- matching the launch geometry cuda_dag_dispatch_shape sets
+// (grid = output product, block = group_extent).  Without this the
+// output axes decode from a flat `tid` across a launch sized for
+// cooperative-reduce semantics, racing 16 different outputs onto the
+// same shared accumulator (-> CUDA_ERROR_ILLEGAL_ADDRESS at module
+// load on the resulting register-thrashing kernel).
+static int rmu_dag_has_group_reduce(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    return (u32)term_val(heap_read(loc + 1)) == KAX_GROUP_REDUCE;
+  }
+  switch (op) {
+    case UOP_OPT:
+      return rmu_dag_has_group_reduce(heap_read(loc + 0));
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E: case UOP_AFTER:
+      return rmu_dag_has_group_reduce(heap_read(loc + 0))
+          || rmu_dag_has_group_reduce(heap_read(loc + 1));
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_REDUCE:
+      return rmu_dag_has_group_reduce(heap_read(loc + 0));
+    case UOP_IWHERE:
+    case UOP_STORE:
+      return rmu_dag_has_group_reduce(heap_read(loc + 0))
+          || rmu_dag_has_group_reduce(heap_read(loc + 1))
+          || rmu_dag_has_group_reduce(heap_read(loc + 2));
     default:
       return 0;
   }
@@ -4674,6 +4735,10 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   // agree on the row.  The launch geometry (cuda_dag_dispatch_shape)
   // matches: grid = output-LOOP product, block = 32.
   RMU_SIMD_WARP = rmu_dag_has_simd_reduce(root);
+  // Cooperative shared-mem reduce: same launch-shape -> output decode
+  // logic as SIMD_REDUCE but for the GROUP_REDUCE template (block =
+  // group_extent, grid = output product).
+  RMU_HAS_GROUP_REDUCE = rmu_dag_has_group_reduce(root);
   if (rmu_dag_has_tc(root)) {
     fputs("#include <mma.h>\n", fp);
     fputs("#include <cuda_fp16.h>\n", fp);
@@ -4727,5 +4792,6 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   }
   RMU_TARGET = CG_TARGET_METAL;
   RMU_SIMD_WARP = 0;
+  RMU_HAS_GROUP_REDUCE = 0;
   fputs("}\n", fp);
 }
