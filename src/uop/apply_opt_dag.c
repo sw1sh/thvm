@@ -391,6 +391,47 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   return apply_opt_dag_substitute(root, &st);
 }
 
+// ---------- KOP_GROUP / KOP_GROUPTOP --------------------------------
+// Stamp the target UOP_RANGE leaf (which must be a KAX_REDUCE axis) as
+// KAX_GROUP_REDUCE and wrap every reference in OPT(_, GROUP_REDUCE, k)
+// so the renderer's rmu_emit_store_reduce sees the OPT annotation on
+// the reduce axis and dispatches to rmu_emit_group_reduce (cooperative
+// shared-memory accumulator + barrier + final per-thread fold).
+//
+// Unlike UPCAST/UNROLL/LOCAL this is NOT an axis-id split: the existing
+// REDUCE node keeps naming the same axis_id, the cooperative `k`
+// threads stride through the full reduce extent.  This matches the
+// thvm rmu_emit_group_reduce template which iterates the full
+// red_extent in strides of `k`.
+//
+// Validity: target axis_id must currently be a KAX_REDUCE leaf with
+// extent % k == 0.  Returns 0 on bail.
+
+fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
+  if (k == 0) return 0;
+  Term old_leaf = apply_opt_dag_find_range(root, target_axis);
+  if (old_leaf == 0) return 0;
+  if (uop_range_axis_type(old_leaf) != KAX_REDUCE) return 0;
+  u32 extent = uop_range_extent(old_leaf);
+  if (extent == 0 || extent % k != 0) return 0;
+
+  Term new_leaf = uop_range(target_axis, KAX_GROUP_REDUCE, extent);
+  Term wrapped  = uop_opt(new_leaf, UOP_OPT_GROUP_REDUCE, k);
+
+  ApplyOptDagSplitCtx ctx;
+  ctx.n = 1;
+  ctx.entries[0].key = old_leaf;
+  ctx.entries[0].val = wrapped;
+
+  ApplyOptDagSubState st;
+  st.memo_n             = 0;
+  st.map                = &ctx;
+  st.reduce_shift_above = 0xFFFFFFFFu;  // no axis-id shift (single-axis stamp)
+  st.reduce_swap_a      = 0xFFFFFFFFu;
+  st.reduce_swap_b      = 0xFFFFFFFFu;
+  return apply_opt_dag_substitute(root, &st);
+}
+
 // ---------- KOP_SWAP ------------------------------------------------
 // Swap axis_ids of every UOP_RANGE leaf at positions (a, b).  Both
 // positions must already exist in the DAG (otherwise no-op).  Reuses
@@ -806,6 +847,9 @@ fn Term uop_dag_apply_kopt(Term root, KOpt opt) {
     case KOP_UNROLL:
     case KOP_LOCAL:
       return uop_dag_apply_split(root, opt.op, opt.axis, opt.arg);
+    case KOP_GROUP:
+    case KOP_GROUPTOP:
+      return uop_dag_apply_group_reduce(root, opt.axis, opt.arg);
     case KOP_FAST_MATH:
       return uop_dag_apply_fast_math(root);
     case KOP_SIMD_REDUCE:

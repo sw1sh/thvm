@@ -443,14 +443,29 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   //   for axis, sz in product((0,1,2), (16,)): try GROUPTOP(axis, sz);
   //   break on first success.
   // Then: if group_for_reduces > 0: return.
+  //
+  // tinygrad's axis indexes into `axes_of(AxisType.REDUCE)` -- the i-th
+  // REDUCE axis among all axes.  We translate (0,1,2) -> the
+  // corresponding axis_id by scanning the snapshot for REDUCE-kind axes.
   {
     int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
     if (hand_opt_snapshot_axes(ke, &ax)) {
       u64 olp = hand_opt_output_loop_product(&ax);
       u64 thr = NOLOCALS ? 240 : 2048;
       if (olp <= thr) {
-        for (u32 axis = 0; axis < 3; axis++) {
-          KOpt opt = { KOP_GROUPTOP, (u8)axis, 16 };
+        u32 red_aids[MAX_AXES]; u32 n_red = 0;
+        for (u32 i = 0; i < ax.n; i++) {
+          if (ax.kax_type[i] == KAX_REDUCE) red_aids[n_red++] = i;
+        }
+        // Cap size at 16 if the extent is small (skip oversized groups).
+        for (u32 i = 0; i < n_red && i < 3; i++) {
+          u32 axis = red_aids[i];
+          u32 ext  = ax.extent[axis];
+          u32 sz   = 16;
+          if (ext == 0 || ext % sz != 0) continue;
+          // Skip if the resulting outer reduce would be trivial.
+          if (ext / sz < 1) continue;
+          KOpt opt = { KOP_GROUPTOP, (u8)axis, sz };
           if (kernel_apply_opt(ke, opt)) { n_applied++; break; }
         }
       }

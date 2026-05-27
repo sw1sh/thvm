@@ -2156,11 +2156,20 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
     return 0;
   }
   u32 red_extent = term_val(heap_read(term_val(red_range) + 2));
+  // Target-specific spellings: Metal -> `threadgroup` + `threadgroup_barrier`;
+  // CUDA -> `__shared__` + `__syncthreads()`; C target bails (no shared mem).
+  if (RMU_TARGET == CG_TARGET_C) return 0;
+  const char *shared_kw = (RMU_TARGET == CG_TARGET_CUDA)
+                          ? "__shared__ float"
+                          : "threadgroup float";
+  const char *barrier_stmt = (RMU_TARGET == CG_TARGET_CUDA)
+                             ? "__syncthreads();"
+                             : "threadgroup_barrier(mem_flags::mem_threadgroup);";
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
   // Shared-mem accumulator declaration.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "threadgroup float %s[%u];\n", acc_name, group_extent);
+  fprintf(fp, "%s %s[%u];\n", shared_kw, acc_name, group_extent);
   // Per-thread init.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s[tt] = ", acc_name);
@@ -2168,7 +2177,7 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   fputs(";\n", fp);
   // Pre-loop barrier so every thread sees a clean slot.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+  fprintf(fp, "%s\n", barrier_stmt);
   // Per-thread strided walk over the reduce extent.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "for (uint a%u = tt; a%u < %u; a%u += %u) {\n",
@@ -2193,7 +2202,7 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   fputs("}\n", fp);
   // Post-loop barrier.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+  fprintf(fp, "%s\n", barrier_stmt);
   // Final combine + store on a single thread.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("if (tt == 0) {\n", fp);
