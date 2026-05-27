@@ -1986,6 +1986,32 @@ VerificationTest[
     TestID -> "ATP/method/EProver-preset-subopt-override"
 ]
 
+(* === TAtpDescribeMethod public Method-spec introspection ========== *)
+
+(* For a named preset, returns the preset's full defaults Association. *)
+VerificationTest[
+    KeyTake[TAtpDescribeMethod["Twee"],
+        {"CriticalPairWeight", "GroundJoin", "AutoMaxWeight"}],
+    <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True,
+      "AutoMaxWeight" -> 20|>,
+    TestID -> "ATP/describe/Twee-preset-defaults"
+]
+
+(* List form: subopts merge over the preset's defaults. *)
+VerificationTest[
+    Lookup[TAtpDescribeMethod[{"Twee", "AutoMaxWeight" -> 0}],
+        "AutoMaxWeight"],
+    0,
+    TestID -> "ATP/describe/Twee-subopt-overrides-default"
+]
+
+(* Schedule-style Method wraps the schedule in <|"Schedule" -> ...|>. *)
+VerificationTest[
+    Length @ Lookup[TAtpDescribeMethod["VampirePortfolioCompact"], "Schedule"],
+    3,
+    TestID -> "ATP/describe/VPC-wraps-schedule"
+]
+
 (* === TAtpSchedule public introspection ============================ *)
 
 (* TAtpSchedule[Method] returns the schedule the dispatcher would

@@ -48,13 +48,15 @@ BeginPackage["THVMLink`ATP`", {"THVMLink`"}];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindProof[axioms, \"RawTrace\"]).  Bound completion with TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); TimeConstraint (wall-clock seconds, default Infinity = unbounded -- bounds non-terminating recursive-axiom saturations; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED 4-entry schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, TimeConstraint divides FAIRLY across the schedule (each remaining config gets the remaining-budget/remaining-configs share); default 60s per config when TimeConstraint is Infinity.  PortfolioFrontLoad -> n (default 0) widens the slice given to the first n entries: each receives 2x what an unweighted recurrence would assign, with entries past n reverting to fair share.  Useful when the auto-tuned front of an Automatic schedule deserves more time than 1/(total entries).  Additional presets: Method -> \"VampireUEQ\" is the flagship Vampire UEQ entry (LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce, with the MNF front on by default); Method -> \"Twee\" bundles Twee 2.x defaults (CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20); Method -> \"VampirePortfolio\" expands into the 10-entry $VampirePortfolio rotation.  $AtpMethodPresets enumerates the named presets the dispatcher recognizes.";
+TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindProof[axioms, \"RawTrace\"]).  Bound completion with TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); TimeConstraint (wall-clock seconds, default Infinity = unbounded -- bounds non-terminating recursive-axiom saturations; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED 4-entry schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, TimeConstraint divides FAIRLY across the schedule (each remaining config gets the remaining-budget/remaining-configs share); default 60s per config when TimeConstraint is Infinity.  PortfolioFrontLoad -> n (default 0) widens the slice given to the first n entries: each receives 2x what an unweighted recurrence would assign, with entries past n reverting to fair share.  Useful when the auto-tuned front of an Automatic schedule deserves more time than 1/(total entries).  Additional presets: Method -> \"VampireUEQ\" is the flagship Vampire UEQ entry (LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce, with the MNF front on by default); Method -> \"Twee\" bundles Twee 2.x defaults (CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20); Method -> \"EProver\" bundles E's typical CASC config (CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP); Method -> \"VampirePortfolio\" expands into the 10-entry $VampirePortfolio rotation; Method -> \"VampirePortfolioCompact\" is a 3-entry rotation (VampireUEQ + Twee + Mix2-AutoPrec) sized for small TimeConstraints.  $AtpMethodPresets enumerates the named presets the dispatcher recognizes; TAtpSchedule[Method] returns the schedule a Method would expand to; TAtpDescribeMethod[Method] returns the expanded options Association of a preset.";
 
 TFindEquationalProof::usage = "TFindEquationalProof is a deprecated alias for TFindProof; every call forwards to TFindProof.  Kept for back-compat with notebooks and downstream code that already use the name.  New code should call TFindProof.";
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning -- a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire -- D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
 
 TAtpSchedule::usage = "TAtpSchedule[Method] returns the schedule (a list of single-config Methods) that TFindProof[..., Method -> spec] would expand to, without running the C engine.  Useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.  TAtpSchedule[Method, conjecture, axioms] threads the conjecture + axioms through Automatic's structure-recognized auto-tune, so the returned schedule matches what TFindProof[conjecture, axioms, Method -> spec] would dispatch.  TAtpSchedule[Method, \"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.";
+
+TAtpDescribeMethod::usage = "TAtpDescribeMethod[Method] returns an Association describing what a Method spec resolves to.  For a named preset (Waldmeister, VampireUEQ, Twee, EProver), returns the preset's full defaults Association (the suboptions the dispatcher merges with the user's subopts).  For a list spec like {\"Twee\", subopts...}, returns the preset's defaults merged with the user's overrides -- the actual options that will reach the C engine.  For a non-preset config like {\"Completion\", subopts...}, returns Association[subopts].  For Automatic / \"Portfolio\" / \"VampirePortfolio\" / \"VampirePortfolioCompact\", returns <|\"Schedule\" -> ...|> describing the multi-entry rotation rather than a single config.";
 
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide / TFindProofSMT; TPTPImport.wl owns
@@ -2320,6 +2322,49 @@ atpDispatchPreset[defaults_Association, defaultGD_, subopts_List] :=
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
+(* Central registry of named-preset defaults.  TAtpDescribeMethod
+   inspects this Association; each preset's atpParseMethod definition
+   reads $AtpPresetDefaults[<name>] for its own merge.  Adding a new
+   preset is one entry here + one atpParseMethod definition that
+   forwards to atpDispatchPreset. *)
+$AtpPresetDefaults = <|
+    "Waldmeister" -> <|
+        "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
+        "AutoPrecedence" -> True, "SelectionRatio" -> 51,
+        "RHSInterreduce" -> True, "UnfailingCP" -> True,
+        "CPSetInterreduce" -> True|>,
+    "VampireUEQ" -> <|
+        "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "SelectionRatio" -> 10, "UnfailingCP" -> True,
+        "AutoMaxWeight" -> True,
+        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "RHSInterreduce" -> True|>,
+    "Twee" -> <|
+        "CriticalPairWeight" -> "Twee",
+        "GroundJoin" -> True, "Connectedness" -> True,
+        "UnfailingCP" -> True,
+        "BackwardSubsume" -> True, "BackwardDemod" -> True,
+        "RHSInterreduce" -> True,
+        "AutoMaxWeight" -> 20|>,
+    "EProver" -> <|
+        "CriticalPairWeight" -> "ConjSym",
+        "Ordering" -> "KBO",
+        "SelectionRatio" -> 10,
+        "AutoMaxWeight" -> 20,
+        "BackwardSubsume" -> True,
+        "RHSInterreduce" -> True,
+        "UnfailingCP" -> True|>
+|>;
+
+(* Per-preset default for the GoalDirected (MNF front) toggle.  Mostly
+   False -- VampireUEQ is the lone True per Vampire's `tgt=full`. *)
+$AtpPresetGoalDirected = <|
+    "Waldmeister" -> False,
+    "VampireUEQ"  -> True,
+    "Twee"        -> False,
+    "EProver"     -> False
+|>;
+
 (* Shared suboption decoder for the completion-family methods.  Returns
    {cpWeight, ordering, autoPrec, useMnf}; `mnf` is fixed by the head
    ("Completion" -> 0, "GoalDirected"/"MNF" -> 1) so every method takes
@@ -2395,11 +2440,8 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
    single-NF check cannot reach. *)
 atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
-    atpDispatchPreset[<|
-        "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
-        "AutoPrecedence" -> True, "SelectionRatio" -> 51,
-        "RHSInterreduce" -> True, "UnfailingCP" -> True,
-        "CPSetInterreduce" -> True|>, False, {subopts}];
+    atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
+        $AtpPresetGoalDirected["Waldmeister"], {subopts}];
 
 (* Method -> "VampireUEQ": a preset modeled on the Vampire 5.0.1 UEQ
    portfolio entry that cracks ShefferAxioms/AndAssociativity --
@@ -2439,13 +2481,8 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
        BackwardDemod to give the full bd=all both-sides demodulation). *)
 atpParseMethod["VampireUEQ"] := atpParseMethod[{"VampireUEQ"}];
 atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
-    atpDispatchPreset[<|
-        "Ordering" -> "LPO", "AutoPrecedence" -> True,
-        "SelectionRatio" -> 10, "UnfailingCP" -> True,
-        "AutoMaxWeight" -> True,
-        "BackwardSubsume" -> True,
-        "BackwardDemod" -> True,
-        "RHSInterreduce" -> True|>, True, {subopts}];
+    atpDispatchPreset[$AtpPresetDefaults["VampireUEQ"],
+        $AtpPresetGoalDirected["VampireUEQ"], {subopts}];
 
 (* Method -> "Twee": a preset modeled on Twee 2.x's defaults --
        cfg_lhsweight=4, cfg_rhsweight=1, cfg_depthweight=2,
@@ -2476,13 +2513,8 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
    "VampireUEQ" preset shape. *)
 atpParseMethod["Twee"] := atpParseMethod[{"Twee"}];
 atpParseMethod[{"Twee", subopts___Rule}] :=
-    atpDispatchPreset[<|
-        "CriticalPairWeight" -> "Twee",
-        "GroundJoin" -> True, "Connectedness" -> True,
-        "UnfailingCP" -> True,
-        "BackwardSubsume" -> True, "BackwardDemod" -> True,
-        "RHSInterreduce" -> True,
-        "AutoMaxWeight" -> 20|>, False, {subopts}];
+    atpDispatchPreset[$AtpPresetDefaults["Twee"],
+        $AtpPresetGoalDirected["Twee"], {subopts}];
 
 (* Method -> "EProver": a preset modeled on E's typical CASC run
    shape (Schulz, 2002+).  E's heuristic is much larger than a
@@ -2511,14 +2543,8 @@ atpParseMethod[{"Twee", subopts___Rule}] :=
    Subopts override any default, mirroring the other preset shapes. *)
 atpParseMethod["EProver"] := atpParseMethod[{"EProver"}];
 atpParseMethod[{"EProver", subopts___Rule}] :=
-    atpDispatchPreset[<|
-        "CriticalPairWeight" -> "ConjSym",
-        "Ordering" -> "KBO",
-        "SelectionRatio" -> 10,
-        "AutoMaxWeight" -> 20,
-        "BackwardSubsume" -> True,
-        "RHSInterreduce" -> True,
-        "UnfailingCP" -> True|>, False, {subopts}];
+    atpDispatchPreset[$AtpPresetDefaults["EProver"],
+        $AtpPresetGoalDirected["EProver"], {subopts}];
 
 (* Registry of the named Method presets `atpParseMethod` recognizes.
    "Portfolio" / "VampirePortfolio" expand to schedules (a list of
@@ -2666,6 +2692,27 @@ TAtpSchedule[m_, thm_String, theory_String] := With[{
         $Failed,
         atpScheduleFor[m, ax, cj]]
 ];
+
+(* TAtpDescribeMethod: human-readable Method expansion.  Returns the
+   options Association a Method spec resolves to, so users can see
+   what `Method -> "Twee"` (or `{"Twee", ...}`) actually means before
+   dispatch.  Schedule-style Methods (Automatic / Portfolio /
+   VampirePortfolio[Compact]) return a <|"Schedule" -> ...|> wrapper
+   describing the multi-entry rotation. *)
+TAtpDescribeMethod[name_String] /;
+        KeyExistsQ[$AtpPresetDefaults, name] :=
+    $AtpPresetDefaults[name];
+TAtpDescribeMethod[{name_String, subopts___Rule}] /;
+        KeyExistsQ[$AtpPresetDefaults, name] :=
+    Join[$AtpPresetDefaults[name], Association[{subopts}]];
+TAtpDescribeMethod[name : ("Portfolio" | "VampirePortfolio"
+        | "VampirePortfolioCompact" | "Automatic")] :=
+    <|"Schedule" -> atpScheduleFor[name]|>;
+TAtpDescribeMethod[Automatic] :=
+    <|"Schedule" -> atpScheduleFor[Automatic]|>;
+TAtpDescribeMethod[{m_String, subopts___Rule}] :=
+    Association[{subopts}];
+TAtpDescribeMethod[m_String] := <||>;
 
 (* ====================================================================
    Problem-analysis auto-tuner  (port of Waldmeister's PhilMarlow /
