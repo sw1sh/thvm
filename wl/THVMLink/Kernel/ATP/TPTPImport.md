@@ -2,7 +2,7 @@
 Template: FunctionResource
 ResourceType: Function
 Name: TPTPImport
-Description: Parse a TPTP problem file or source string into axioms and a conjecture
+Description: Parse a TPTP problem from a file or string into axioms and a conjecture
 ContributedBy: Nikolay Murzin, Claude (Anthropic)
 Keywords: [TPTP, ATP, theorem prover, equational logic, parser, first-order logic, higher-order logic]
 Categories: [Strings & Text, Core Language & Structure]
@@ -11,7 +11,7 @@ Links: ["[TPTP project (Thousands of Problems for Theorem Provers)](https://tptp
 EntrySymbol: TPTPImport
 ---
 
-`TPTPImport` parses a [TPTP](https://tptp.org/) (Thousands of Problems for Theorem Provers) problem file or source string into the canonical `<|"Axioms" -> {...}, "Conjecture" -> ...|>` shape that the Wolfram Language's [FindEquationalProof]() and SMT-style decision procedures consume.
+`TPTPImport` parses a [TPTP](https://tptp.org/) (Thousands of Problems for Theorem Provers) problem file or string into the canonical `<|"Axioms" -> {…}, "Conjecture" -> …|>` shape that the Wolfram Language's [FindEquationalProof]() and SMT-style decision procedures consume.
 
 The parser handles every clause head defined by the [TPTPWorld BNF](https://github.com/TPTPWorld/SyntaxBNF) - `cnf` / `fof` / `tff` / `tcf` / `thf` / `ncf` - plus `include` directives, sequents, quoted atoms, distinct objects, signed numeric literals, and the full `$`-defined atom family. Function symbols come back as [String]()-headed compounds (`"and"[X, Y]` rather than `Symbol["and"]`) so a parsed TPTP problem can never collide with a user-level Wolfram Language binding.
 
@@ -25,18 +25,18 @@ The implementation is a single self-contained `.wl` file inlined here at convers
 
 ## Usage
 
-<code>[TPTPImport]()[*source*]</code> parses a TPTP source - a [File]() reference, a path [String](), or a raw [String]() containing TPTP clauses - and returns an [Association]() with `"Axioms"` and `"Conjecture"` keys.
+<code>[TPTPImport]()[*tptp*]</code> parses *tptp* - a [File]() reference, a path [String](), or a raw [String]() containing TPTP clauses - and returns an [Association]() with `"Axioms"` and `"Conjecture"` keys.
 
 <code>[TPTPImport]()[[File]()[*path*]]</code> reads *path* as TPTP text; relative `include` directives are resolved against the file's directory.
 
-<code>[TPTPImport]()[*string*]</code> parses *string* as TPTP source; relative `include` directives are resolved against [Directory]().
+<code>[TPTPImport]()[*string*]</code> parses *string*; relative `include` directives are resolved against [Directory]().
 
 ## Details & Options
 
-- The result is `<|"Axioms" -> {phi_1, phi_2, ...}, "Conjecture" -> psi|>`. `"Conjecture"` is [None]() when no `conjecture` / `negated_conjecture` clause is present.
+- The result is `<|"Axioms" -> {phi_1, phi_2, …}, "Conjecture" -> psi|>`. `"Conjecture"` is [None]() when no `conjecture` / `negated_conjecture` clause is present.
 - Function and predicate symbols are returned as *[String]()-headed compounds*: `cnf(a, axiom, and(X, Y) = and(Y, X))` parses as `"and"[v$_, w$_] == "and"[w$_, v$_]`. Strings are not bound in any context, so a parsed TPTP `and` cannot shadow a user-level binding.
 - Variables are clause-scoped: each Uppercase identifier inside one clause names the same universally-bound variable; the same name in a later clause is independent. Each occurrence gets a fresh `Pattern[Unique["v"], Blank[]]`.
-- Single equational literals come back as bare `Equal[..]` / `Unequal[..]` (the unit-equality fragment most equational provers target); multi-literal `cnf` clauses come back as `Or[lit_1, lit_2, ...]`. Inner `! [...]` / `? [...]` quantifiers stay as WL `ForAll` / `Exists`; existential vars are bare Symbols with proper snapshot+restore scope.
+- Single equational literals come back as bare `Equal[..]` / `Unequal[..]` (the unit-equality fragment most equational provers target); multi-literal `cnf` clauses come back as `Or[lit_1, lit_2, …]`. Inner `! [...]` / `? [...]` quantifiers stay as WL `ForAll` / `Exists`; existential vars are bare Symbols with proper snapshot+restore scope.
 - `negated_conjecture` carries the negation of the goal; the importer un-negates: `s != t` flips to `s == t`; a disjunction of disequations flips to the corresponding conjunction of equations; anything else gets a plain `Not[...]` wrapper.
 - `tff`, `tcf`, `thf` strip `X:srt` sort annotations at preprocessing (the homogeneous-untyped surface). `type`-role clauses (signature declarations) are silently skipped.
 - `thf` formula bodies pick up `^ [V1, ..., Vn] : body` lambdas (-> [Function]()) and left-associative `f @ x @ y` application (-> `f[x][y]`).
@@ -75,14 +75,13 @@ TPTPImport["fof(comm, axiom, ! [X, Y] : (and(X, Y) = and(Y, X)))."]
 
 ### File input
 
-A [File]() argument reads the path as TPTP text. Relative `include` directives inside the file are resolved against the file's directory.
+A [File]() argument reads the path as TPTP text; relative `include` directives inside the file are resolved against the file's directory. Round-trip a single-clause file through the parser:
 
 ```wl
-TPTPImport[
-    File @ FileNameJoin[{$InstallationDirectory,
-        "Documentation", "English", "System", "ReferencePages",
-        "Symbols", "FindEquationalProof.nb"}]
-] // Head
+Module[{tmp = CreateFile[]},
+    Export[tmp, "cnf(a, axiom, foo(X) = X).\n", "Text"];
+    TPTPImport[File[tmp]]
+]
 ```
 
 ### `fof` Boolean connectives
@@ -115,11 +114,15 @@ tff(a, axiom, ! [X:$i] : p(X))."]
 
 ### `thf` typed higher-order
 
-`^ [V1, ..., Vn] : body` lambdas become [Function]() expressions; `f @ x @ y` applies left-associatively:
+A `! [X:srt]` universal over a higher-order argument applies `@` against the bound variable:
 
 ```wl
 TPTPImport["thf(a, axiom, ! [X:$i] : (p @ X))."]["Axioms"][[1]]
 ```
+
+---
+
+A `^ [V1, ..., Vn] : body` lambda becomes a [Function]() expression:
 
 ```wl
 TPTPImport["thf(a, axiom, ^ [X:$i] : (f @ X))."]["Axioms"][[1]] // Head
