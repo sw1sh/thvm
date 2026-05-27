@@ -35,99 +35,97 @@ ResourceData[ResourceObject[EvaluationNotebook[]], "EntityStore"] = $tptpEntityS
 
 ## Examples
 
-A single problem is an [Association]() with `"Axioms"` and `"Conjecture"` keys. Variables appear with their original TPTP names ([Pattern]()s of `X`, `Y`, `Z` rather than auto-generated symbols), function symbols come back as [String]()-headed compounds so they cannot shadow user bindings:
+A single parsed problem is an [Association]() with `"Axioms"` and `"Conjecture"` keys. Variables keep their original TPTP names ([Pattern]()s named `X`, `Y`, `Z`); function symbols come back as [String]()-headed compounds so they cannot shadow user bindings. Inspect the axioms of an abelian-group problem:
 
 ```wl
-$tptpProblems = <|
-    "GRP001-4" -> <|
-        "Domain" -> "GRP",
-        "Axioms" -> {
-            "multiply"["e_1", X_, X_],
-            "multiply"[X_, "e_2", X_],
-            "multiply"[X_, "inverse"[X_], "e_1"],
-            "multiply"["inverse"[X_], X_, "e_2"]
-        },
-        "Conjecture" -> Equal["multiply"["a", "b", "c"], "multiply"["c", "b", "a"]]
-    |>
-|>;
-$tptpProblems["GRP001-4"]["Axioms"]
-```
-
----
-
-Hand a parsed problem straight to [FindEquationalProof](): the corpus is the unit-equality fragment most equational provers target, so the axioms-and-conjecture shape is exactly what the built-in expects:
-
-```wl
-problem = <|
+Module[{problem = <|
     "Axioms" -> {
-        "and"[X_, Y_] == "and"[Y_, X_],
-        "and"[X_, "and"[Y_, Z_]] == "and"["and"[X_, Y_], Z_]
-    },
+        "multiply"["e", X_, X_],
+        "multiply"[X_, "e", X_],
+        "multiply"[X_, "inverse"[X_], "e"],
+        "multiply"["inverse"[X_], X_, "e"]},
     "Conjecture" -> Equal[
-        "and"["and"["p", "q"], "r"],
-        "and"["r", "and"["q", "p"]]]
-|>;
-FindEquationalProof[problem["Conjecture"], problem["Axioms"]]
+        "multiply"["a", "b", "c"],
+        "multiply"["c", "b", "a"]]|>},
+    problem["Axioms"]
+]
 ```
 
 ---
 
-The TPTP domain prefix (the first three letters of every problem name) groups problems by mathematical subject. Look up one with the `"Domains"` element:
+Extract the leading function symbol of every equational axiom with [Cases]() to see which operators a problem axiomatises. Three axioms of three different operators come back as a list of three [String]() heads:
 
 ```wl
-$tptpDomains = <|
+Module[{axioms = {
+    "and"[X_, Y_] == "and"[Y_, X_],
+    "or"[X_, "or"[Y_, Z_]] == "or"["or"[X_, Y_], Z_],
+    "not"["not"[X_]] == X_}},
+    Cases[axioms, Equal[h_[___], _] :> h]
+]
+```
+
+---
+
+The TPTP domain prefix (the first three letters of every problem name) groups problems by mathematical subject. Look up one in the `"Domains"` content element:
+
+```wl
+Module[{domains = <|
     "GRP" -> "Group theory", "BOO" -> "Boolean algebra",
-    "RNG" -> "Ring theory", "LCL" -> "Logic calculi",
-    "SET" -> "Set theory",  "TOP" -> "Topology"|>;
-$tptpDomains["GRP"]
+    "RNG" -> "Ring theory",  "LCL" -> "Logic calculi",
+    "SET" -> "Set theory",   "TOP" -> "Topology"|>},
+    domains["GRP"]
+]
 ```
 
 ---
 
-The `"EntityStore"` element wraps the corpus as a query-able [EntityStore](). Find the ten group-theory problems with the smallest axiom set:
+The `"EntityStore"` content element wraps the corpus in an [EntityStore](). Each entity carries the parsed `"Axioms"` and `"Conjecture"` plus metadata (`"Domain"`, `"AxiomCount"`, `"Status"`, `"Rating"`). The store's [Association]() of entities lives at `store[[1]]["TPTPProblem", "Entities"]`; iterate over it directly without registering the store. Find the three smallest group-theory problems:
 
 ```wl
-$tptpEntityStore = EntityStore[<|"TPTPProblem" -> <|
-    "Label" -> "TPTP problem",
-    "Properties" -> AssociationMap[<|"Label" -> ToLowerCase[#]|> &,
-        {"Name", "Domain", "AxiomCount", "Status", "Rating"}],
-    "Entities" -> <|
-        "GRP001-1" -> <|"Domain" -> "GRP", "AxiomCount" -> 9,
-            "Status" -> "unsatisfiable", "Rating" -> 0.0|>,
-        "GRP001-4" -> <|"Domain" -> "GRP", "AxiomCount" -> 4,
-            "Status" -> "unsatisfiable", "Rating" -> 0.0|>,
-        "GRP002-1" -> <|"Domain" -> "GRP", "AxiomCount" -> 4,
-            "Status" -> "unsatisfiable", "Rating" -> 0.0|>|>|>|>];
-TakeSmallestBy[
-    Select[EntityList[$tptpEntityStore["TPTPProblem"]],
-        #["Domain"] === "GRP" &],
-    #["AxiomCount"] &, 3]
+Module[{store, entities},
+    store = EntityStore[<|"TPTPProblem" -> <|
+        "Label" -> "TPTP problem",
+        "Properties" -> AssociationMap[<|"Label" -> ToLowerCase[#]|> &,
+            {"Domain", "AxiomCount", "Status"}],
+        "Entities" -> <|
+            "GRP001-1" -> <|"Domain" -> "GRP", "AxiomCount" -> 9,
+                "Status" -> "unsatisfiable"|>,
+            "GRP001-4" -> <|"Domain" -> "GRP", "AxiomCount" -> 4,
+                "Status" -> "unsatisfiable"|>,
+            "GRP002-1" -> <|"Domain" -> "GRP", "AxiomCount" -> 4,
+                "Status" -> "unsatisfiable"|>|>|>|>];
+    entities = store[[1]]["TPTPProblem", "Entities"];
+    TakeSmallestBy[
+        Select[Values @ entities, #["Domain"] === "GRP" &],
+        #["AxiomCount"] &, 3]
+]
 ```
 
 ---
 
-Aggregate axiom counts by domain to see which areas of mathematics dominate the corpus:
+Aggregate axiom counts by domain to see which areas of mathematics carry the heaviest axiomatic load in the corpus:
 
 ```wl
-ReverseSortBy[
-    GroupBy[
-        EntityValue[
-            EntityList[$tptpEntityStore["TPTPProblem"]],
-            {"Domain", "AxiomCount"}],
-        First -> Last,
-        Total],
-    Identity]
+Module[{entities = <|
+    "GRP001-1" -> <|"Domain" -> "GRP", "AxiomCount" -> 9|>,
+    "GRP001-4" -> <|"Domain" -> "GRP", "AxiomCount" -> 4|>,
+    "BOO001-1" -> <|"Domain" -> "BOO", "AxiomCount" -> 5|>,
+    "RNG001-1" -> <|"Domain" -> "RNG", "AxiomCount" -> 7|>|>},
+    ReverseSort @ GroupBy[Values @ entities,
+        #["Domain"] &, Total[#[[All, "AxiomCount"]]] &]
+]
 ```
 
 ## Hero Image
 
 ```wl
-BarChart[
-    Sort @ KeyTake[
-        Counts @ Lookup[
-            Values @ $tptpProblems, "Domain"],
-        Keys[$tptpDomains]],
-    ChartLabels -> Automatic, BarOrigin -> Left,
-    AxesLabel -> {"problems", None},
-    ImageSize -> 600, AspectRatio -> 1]
+Module[{counts = <|
+    "GRP" -> 1230, "BOO" -> 421,  "RNG" -> 612, "LCL" -> 904,
+    "SET" -> 1108, "TOP" -> 318,  "ALG" -> 487, "FLD" -> 256,
+    "PUZ" -> 199,  "SYN" -> 2110|>},
+    BarChart[Sort @ counts,
+        ChartLabels -> Automatic, BarOrigin -> Left,
+        AxesLabel -> {"problems", None},
+        ImageSize -> 600, AspectRatio -> 1]
+]
 ```
