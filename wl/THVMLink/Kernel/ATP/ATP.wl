@@ -3231,18 +3231,25 @@ atpTunedSchedule[axioms_, conjecture_] := Block[{base, sineTail},
 
 (* function symbols of an axiom/conjecture (raw ForAll form, a list of
    them, or an unquantified equation): non-variable atoms, minus the
-   ForAll-bound variables and the structural heads. *)
-atpFnSyms[expr_] := Block[{vars, body},
+   ForAll-bound variables, the Pattern-bound variables, and the
+   structural heads. *)
+atpFnSyms[expr_] := Block[{vars, patternVars, body},
     (* ForAll is HoldAll, so a `ForAll[v_, _] :> v` rule does NOT bind
        v -- extract the bound-variable spec by Part instead. *)
     vars = Flatten @ Map[#[[1]] &, Cases[expr, _ForAll, {0, Infinity}]];
+    (* Pattern[x, _] introduces x as a bound variable in equational
+       axiom shape (an axiom without an outer ForAll wrapper).  Walk
+       the expression for Pattern wrappers and collect their first
+       arg.  Iter 66. *)
+    patternVars = DeleteDuplicates @
+        Cases[expr, Verbatim[Pattern][s_Symbol, _] :> s, {0, Infinity}];
     body = expr /. ForAll[_, e_] :> e;
     (* Heads -> True is essential here: the discriminating function
        symbol is usually an operator (CenterDot, OverTilde, ...)
        appearing as a HEAD, which Cases skips by default. *)
     DeleteDuplicates @ DeleteCases[
         Cases[body, s_Symbol, {0, Infinity}, Heads -> True],
-        Alternatives @@ Join[vars,
+        Alternatives @@ Join[vars, patternVars,
             {Equal, Inactive, ForAll, Exists, List, And, Or, Not,
              Implies, Pattern, Blank, HoldPattern, Verbatim, Rule}]]
 ];
@@ -3491,13 +3498,13 @@ TRelevantAxioms[thm_String, theory_String, opts:OptionsPattern[]] :=
         TRelevantAxioms[cjRaw, axRaw, opts]
     ];
 TRelevantAxioms[conjRaw_, axRaw_List, opts:OptionsPattern[]] :=
-    (* Strip Inactive and one level of list nesting -- same shape as
-       TFindProof's entry path (iter 60-62), so a relevance call on
-       Lemmas / concatenated axioms returns the same partition shape
-       the prove call would. *)
+    (* Same normalization pipeline as TFindProof's entry (iters 60-65):
+       strip Inactive, flatten one level, auto-internalize String-headed
+       compound terms from TPTPImport. *)
     atpRelevancePartition[
-        atpStripInactive[atpFlattenAxioms[axRaw]],
-        atpStripInactive[conjRaw],
+        atpMaybeInternalizeTPTP[
+            atpStripInactive[atpFlattenAxioms[axRaw]]],
+        atpMaybeInternalizeTPTP[atpStripInactive[conjRaw]],
         atpRelevanceSpec[OptionValue[Method]]];
 
 (* Render a held expression in the form WL's ProofObject expects
@@ -4076,7 +4083,9 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
 (* Completion of an explicit axiom list. *)
 TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[atpStripInactive[atpFlattenAxioms[axioms]],
+        atpCompletionBundle[
+            atpMaybeInternalizeTPTP[
+                atpStripInactive[atpFlattenAxioms[axioms]]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
@@ -4084,7 +4093,9 @@ TFindProof[axioms_List, OptionsPattern[]] :=
 TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
         OptionsPattern[]] :=
     atpProjectReturn[
-        atpCompletionBundle[atpStripInactive[atpFlattenAxioms[axioms]],
+        atpCompletionBundle[
+            atpMaybeInternalizeTPTP[
+                atpStripInactive[atpFlattenAxioms[axioms]]],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],

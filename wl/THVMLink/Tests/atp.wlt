@@ -2288,6 +2288,19 @@ VerificationTest[
     TestID -> "ATP/tptp/auto-internalize-skips-Symbol-heads"
 ]
 
+(* TRelevantAxioms on an unquantified pattern axiom should keep
+   the axiom (Pattern variables shouldn't be misclassified as
+   confined symbols).  Iter 66 fixed atpFnSyms to skip Pattern-
+   bound variables; pre-fix `f[x_] == g[x_]` was dropped as
+   ConfinedBothSides on x. *)
+VerificationTest[
+    Length @ Lookup[
+        TRelevantAxioms[f[a] == g[a], {f[x_] == g[x_]}],
+        "Kept"],
+    1,
+    TestID -> "ATP/relevant/pattern-var-not-confined-symbol"
+]
+
 (* === TATP Inactive support (iter 64) ============================== *)
 
 (* TATP's encoder should accept Inactive[Equal] axioms (the
