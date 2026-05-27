@@ -3134,20 +3134,31 @@ atpAutoTuneForClass["Combinatory"] := {
     {"Completion", "CriticalPairWeight" -> "Add"}};
 atpAutoTuneForClass["Sheffer"] := {
     (* No Tafel2 Sheffer row.  Measured per-entry behavior:
-       - Add weight closes the cross-axiom Implies-X family quickly
-         (ImpliesWolframAxioms 0.68s, ImpliesWolframAlternate 0.68s)
-         where Gt/Mix2 wall.  Add FIRST.
+       - Mix2 + SelectionRatio 2 (aggressive 1-FIFO-per-2 age bias)
+         cracks the cross-axiom Implies-X family FASTER than Add:
+         ImpliesWolframAxioms ~3.7s + ImpliesWolframAlternate ~3.7s
+         + Commutativity ~0.55s, vs Add's ~7.9s on the same goals.
+         The default SelectionRatio (11) leaves these unreachable; the
+         tight age bias forces the saturator through the long
+         derivation chain these cross-system goals need before the
+         CP queue blows up.  Iter 75.  FRONT-LOAD it.
+       - Add weight also closes the Implies-X family (slower, ~7.9s)
+         but is more general across nand goals -- kept as the second
+         entry.
        - GoalDirected (MNF bidirectional front) is the closer for the
          symmetric goals (nand-Commutativity, etc.) and a known
          engine bug can hang MNF on hard cross-axiom Implies-X if it's
-         the first attempt.  Run AFTER Add so any hang is bounded by
-         the remaining-budget slice and the shell-level kill-after.
+         the first attempt.  Run AFTER the completion configs so any
+         hang is bounded by the remaining-budget slice and the
+         shell-level kill-after.
        - SInE relevance pruning helps the cross-system Meredith-class
          Implies-X (Vampire benchmark winner).
        All entries cap CP weight via AutoMaxWeight -> 20 -- no memory
        thrashing.  AndAssociativity-class deep saturations stay out of
        this lean schedule (need Waldmeister preset + minutes of
        saturation; the safety tail's Gt entry still picks them up). *)
+    {"Completion", "CriticalPairWeight" -> "Mix2",
+        "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
     {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},
     {"GoalDirected", "CriticalPairWeight" -> "Mix2", "AutoMaxWeight" -> 20},
     {"Completion", "CriticalPairWeight" -> "Mix2",

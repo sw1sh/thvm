@@ -2425,3 +2425,31 @@ VerificationTest[
     ProofObject,
     TestID -> "ATP/footgun/canonicalize-survives-global-collision"
 ]
+
+(* === Hard Sheffer Implies-X via Mix2 + SelectionRatio 2 (iter 75) == *)
+
+(* ShefferAxioms/ImpliesWolframAxioms + ImpliesWolframAlternateAxioms
+   are cross-system "Sheffer implies Wolfram's nand axioms" goals that
+   the default schedule (SelectionRatio 11) leaves unreachable in a
+   reasonable budget.  Mix2 + SelectionRatio 2 (aggressive
+   1-FIFO-per-2 age bias) cracks both in ~4s by forcing the saturator
+   through the long derivation chain before the CP queue explodes.
+   Generous TimeConstraint (60s) so the test survives a loaded box;
+   the proof's C-engine cost is ~4s. *)
+VerificationTest[
+    Head @ TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Mix2",
+            "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
+        TimeConstraint -> 60],
+    ProofObject,
+    TestID -> "ATP/sheffer/ImpliesWolframAxioms-Mix2-SR2"
+]
+
+VerificationTest[
+    Head @ TFindProof["ImpliesWolframAlternateAxioms", "ShefferAxioms",
+        Method -> {"Completion", "CriticalPairWeight" -> "Mix2",
+            "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
+        TimeConstraint -> 60],
+    ProofObject,
+    TestID -> "ATP/sheffer/ImpliesWolframAlternateAxioms-Mix2-SR2"
+]
