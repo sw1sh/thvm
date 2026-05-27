@@ -2264,6 +2264,18 @@ VerificationTest[
     TestID -> "ATP/flatten/nested-axiom-list-auto-flattens"
 ]
 
+(* === TATP Inactive support (iter 64) ============================== *)
+
+(* TATP's encoder should accept Inactive[Equal] axioms (the
+   FindEquationalProof "Lemmas" form).  Iter 64 extended
+   forAllToPattern to strip the Inactive wrapper before
+   encodeEquation's strict HoldComplete[Equal[_, _]] check fires. *)
+VerificationTest[
+    TATP[{Inactive[Equal][f[x_], g[x_]]}, f[a] == g[a]]["Status"],
+    "PROVED",
+    TestID -> "ATP/TATP/Inactive-axiom-proves"
+]
+
 (* === TRelevantAxioms input normalization (iter 63) ================ *)
 
 (* TRelevantAxioms should accept Inactive[Equal] axioms (the

@@ -301,6 +301,14 @@ forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
         applyForAllSubst[HoldComplete[body], {v}],
     HoldComplete[ForAll[Verbatim[List][vars__Symbol], body_]] :>
         applyForAllSubst[HoldComplete[body], List @@ Hold[vars]],
+    (* Inactive[Equal] / Inactive[Unequal] = FindEquationalProof's
+       inert ProofObject lemma form.  Strip the Inactive wrapper so
+       downstream encodeEquation's strict HoldComplete[Equal[_, _]]
+       check fires.  Iter 64. *)
+    HoldComplete[Inactive[Equal][a_, b_]] :>
+        HoldComplete[Equal[a, b]],
+    HoldComplete[Inactive[Unequal][a_, b_]] :>
+        HoldComplete[Unequal[a, b]],
     _ :> axHC
 }]
 
