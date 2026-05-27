@@ -117,21 +117,37 @@ class Adam(Optimizer):
         self.t = 0
         self.m = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         self.v = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
+        # Per-step bias-correction factors live as 1-element TENSORs (not
+        # Python floats) so the rendered kernel source is step-INVARIANT
+        # (the kernel reads `*bc1_inv_buf` instead of having a baked CONST
+        # literal that changes every step).  Without this thvm's nvrtc JIT
+        # cache misses on the F=10-or-so param-update kernels EVERY step
+        # (different bc1/bc2 -> different source hash) -- 28 fresh
+        # nvrtc compiles per step on V100, ~270 s/step at BS=128.
+        import numpy as _np
+        self._bc1_inv = Tensor(_np.array([1.0], dtype=_np.float32))
+        self._bc2_inv = Tensor(_np.array([1.0], dtype=_np.float32))
+        self._bc1_inv.realize()
+        self._bc2_inv.realize()
         for x in [*self.m, *self.v]:
             x.realize()
 
     def _step(self):
-        # Bias correction is baked HOST-SIDE: the step count t lives in
-        # Python (not the graph), so the per-step factors 1/(1-b1^t) and
-        # 1/(1-b2^t) are plain float scalars folded into the in-place
-        # assign -- no graph-resident counter (which would make the
-        # realize fixpoint loop), and JIT-capturable since each step's
-        # constants are baked at emit time exactly like WL does.  Without
-        # this the early v is under-corrected (b2>b1) -> updates inflate
-        # ~5x -> divergence/nan within a few steps.
+        # Bias correction values live in the 1-element bc1_inv/bc2_inv
+        # tensors (allocated in __init__).  Compute the new values
+        # host-side, then ten_write them into the existing buffers.  The
+        # buffer addresses + kernel source stay step-invariant so the
+        # nvrtc JIT cache hits every step.
         self.t += 1
         bc1 = 1.0 - self.b1 ** self.t
         bc2 = 1.0 - self.b2 ** self.t
+        import numpy as _np
+        from .thvm import Thvm as _Thvm
+        _th = _Thvm()
+        _th.ten_write(self._bc1_inv.term,
+                      _np.array([1.0/bc1], dtype=_np.float32).tobytes())
+        _th.ten_write(self._bc2_inv.term,
+                      _np.array([1.0/bc2], dtype=_np.float32).tobytes())
         # Phase 1: the in-place m/v moment updates, THEN realize them so
         # each m[i]/v[i].term collapses from its ASSIGN node to a TEN
         # before phase 2 reads it.  Without this split, m_hat = m[i] *
@@ -156,8 +172,8 @@ class Adam(Optimizer):
         for i, p in enumerate(self.params):
             if p.grad is None:
                 continue
-            m_hat = self.m[i] * (1.0 / bc1)
-            v_hat = self.v[i] * (1.0 / bc2)
+            m_hat = self.m[i] * self._bc1_inv
+            v_hat = self.v[i] * self._bc2_inv
             p.assign(p - m_hat * self.lr
                      * (v_hat.sqrt() + self.eps).reciprocal())
             out.append(p)
