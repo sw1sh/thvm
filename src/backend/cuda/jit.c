@@ -236,11 +236,15 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
   // --- module load + function lookup -------------------------------
   CUmodule module;
   CUresult cr = cuModuleLoadData(&module, ptx);
-  if (ptx_owned) free(ptx);
   if (cr != CUDA_SUCCESS) {
+    if (getenv("THVM_CUDA_DUMP_FAIL_PTX")) {
+      fprintf(stderr, "--- INVALID PTX (cuModuleLoadData failed) ---\n%s\n--- end ---\n", ptx);
+    }
+    if (ptx_owned) free(ptx);
     cuda_set_error("cuModuleLoadData", cr);
     return NULL;
   }
+  if (ptx_owned) free(ptx);
   CUfunction func;
   cr = cuModuleGetFunction(&func, module, kernel_name);
   if (cr != CUDA_SUCCESS) {
