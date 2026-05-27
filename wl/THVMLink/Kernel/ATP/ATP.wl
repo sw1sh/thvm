@@ -2304,6 +2304,13 @@ atpBwdDemodOpt[o_Association] :=
     Switch[Lookup[o, "BackwardDemod", Automatic],
         True, 1, False | Automatic, 0, _, 0];
 atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0};
+(* Accept the string form "Automatic" as a synonym for the symbol --
+   users typing Method -> "Automatic" alongside the other string-named
+   presets ("Waldmeister", "Twee", ...) shouldn't trip the badmethod
+   message just because the canonical spec uses the symbol Automatic. *)
+atpParseMethod["Automatic"] := atpParseMethod[Automatic];
+atpScheduleFor["Automatic"] := atpScheduleFor[Automatic];
+atpScheduleFor["Automatic", ax_, cj_] := atpScheduleFor[Automatic, ax, cj];
 atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
 
 (* Shared dispatch helper for the named-preset methods (Waldmeister,

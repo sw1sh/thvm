@@ -2052,6 +2052,24 @@ VerificationTest[
     TestID -> "ATP/schedule/AllPresets-rotation"
 ]
 
+(* Method -> "Automatic" (string) should be a synonym for the
+   symbol Automatic, so users typing it alongside the other named
+   string presets don't trip the bad-method message.  The schedule
+   should match the bare-symbol form. *)
+VerificationTest[
+    TAtpSchedule["Automatic"],
+    TAtpSchedule[Automatic],
+    TestID -> "ATP/method/Automatic-string-is-symbol-alias"
+]
+
+(* The string form also dispatches + proves trivially. *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> "Automatic", TimeConstraint -> 3],
+    ProofObject,
+    TestID -> "ATP/method/Automatic-string-proves"
+]
+
 (* AllPresets dispatches + proves a trivial goal. *)
 VerificationTest[
     Head @ TFindProof["AndCommutativity", "BooleanAxioms",
