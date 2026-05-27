@@ -1097,3 +1097,23 @@ TFindProof[goal, axioms, Method -> {"Completion",
 oldest CP first. Use when many CPs share near-identical raw weights
 and the implementation's arbitrary heap order is starving the older
 half. The combination mirrors E's `StaggeredWeight` heuristic family.
+
+### 9.8 Cross-system Sheffer "implies" goals (tight age bias)
+
+```wolfram
+TFindProof[goal, "ShefferAxioms", Method -> {"Completion",
+    "CriticalPairWeight" -> "Mix2",
+    "SelectionRatio" -> 2, "AutoMaxWeight" -> 20}]
+```
+
+For the cross-system "Sheffer stroke implies Wolfram's nand axioms"
+goals (`ImpliesWolframAxioms`, `ImpliesWolframAlternateAxioms`), the
+default `SelectionRatio` (11) leaves the proof unreachable in a
+reasonable budget. `SelectionRatio -> 2` -- a 1-FIFO-pick-per-2-
+selections age bias -- forces the saturator through the long
+cross-system derivation chain before the CP queue explodes, cracking
+both in ~4s. The sweet spot is sharp: `SelectionRatio -> 1` (pure
+FIFO) and `>= 5` both miss it. `Automatic` front-loads this config
+on Sheffer goals, so you usually get it for free; pin it explicitly
+when you want the single fast config without the portfolio's
+budget split.
