@@ -683,6 +683,70 @@ gate) or grow to cover all the legacy concerns.  Either path is a
 multi-session piece of work; landing stages a + b first gives the
 next agent the post-linearize input shape to start from.
 
+## PTX renderer (the nvrtc bypass) -- M1-M3c LANDED, conv renders to PTX
+
+The fix for the nvrtc-frontend bottleneck is a PTX emitter that consumes
+the SAME linearized UOp list and emits PTX assembly directly, so the
+CUDA jit `cuModuleLoadData`s it without nvrtc's C++ frontend.  Port of
+`tinygrad/renderer/ptx.py`.  All landed + V100-validated:
+
+- **M1** `src/codegen/render_ptx.c` (`cac3598e`): SSA register allocation
+  per value UOp (`%<prefix>_<type>_<n>`), one PTX instruction per node,
+  `.reg` decls + `.visible .entry` prologue.  INDEX_E lowers to int64
+  pointer math inline (`mad.wide.s32 base + idx*itemsize`).
+- **M2** `src/backend/cuda/jit.c` (`c033a531`): PTX passthrough -- a
+  source with a leading `.version` skips nvrtc, straight to
+  `cuModuleLoadData`.
+- **M3a** (`70da9734`): thread-axis geometry.  A store-indexing KAX_LOOP
+  axis is PROMOTED to a parallel grid thread (flat-thread-id decode via
+  the reused `rmu_compute_global_decode_ctx`) + `tid >= total` guard.
+- **M3b** (`c75ce385`): reduce accumulator (PLACEHOLDER -> persistent
+  register) + unique occurrence-keyed loop labels.
+- **expander/devectorize** (`86e78dfb`, `18b74cee`, `2cd837bf`): the
+  prerequisite lowering, which the original "M3c blocked" analysis
+  pointed at.  STORE/LOAD/REDUCE added to `do_expand` (was: only
+  ALU/INDEX_E) so an UPCAST'd output's UNROLL propagates all the way up
+  (LOAD(UNROLL) -> UNROLL(LOAD) -> UNROLL(MUL) -> UNROLL(REDUCE)); the
+  old `fix_store_unroll` CONTRACT-wrap (which re-matched its own output
+  and nested ~129 deep) is gone.  Result: F DISTINCT reduces -> F
+  parallel accumulators, and an F-lane store `STORE(buf, STACK[F] addr,
+  STACK[F] value)` (the redundant UNROLL(STORE) marker is dropped by
+  `devec_pm_unroll_store`).
+- **M3c renderer** (`2cd837bf`): render_ptx handles the F-lane store (F
+  scalar `st.global`, peeling AFTER wrappers) + STACK lane bundles + GEP
+  lane extraction; the thread-geometry pass peels a STACK address to
+  lane 0 so the batch axis is still found + promoted.
+- **route** (`2e18307e`): `THVM_CUDA_PTX=1` emits PTX before the C-source
+  emit; the jit passthrough loads it.
+
+**V100 result (beautiful_mnist BS=128, gate widened so conv gets UPCAST):**
+
+| Configuration                         | Cold   | Warm step |
+|---------------------------------------|-------:|----------:|
+| Widened gate, C-source -> nvrtc       |  43 s  |   262 s   |
+| Widened gate, **PTX** (THVM_CUDA_PTX=1)|  22 s  |   **5.4 s** |
+| Reference: heuristic OFF (naive)      | 3.9 s  |   505 ms  |
+| tinygrad reference (PTX renderer)     |   -    |  ~115 ms  |
+
+The PTX bypass is **~48x faster** than the nvrtc opt path (262 s -> 5.4 s)
+and trains correctly (loss 2.809 -> 2.575 -> 2.468).  `test_cuda_ptx`
+25/25 on V100 incl. the conv "kid=3" parallel-accumulator kernel vs CPU
+reference.
+
+**Remaining gap (5.4 s vs the 505 ms naive / 115 ms tinygrad):** the F
+final stores currently sit INSIDE the reduce loop (F * Cin global writes
+instead of F; last-write-wins keeps results correct) plus a spurious
+extent-0 reduce loop survives.  Both are LINEARIZER placement issues:
+`reduce_to_acc`'s END marker uses a synthetic extent-0 range so the
+renderer matches END to a phantom empty loop while the real reduce loop
+auto-closes after the final store.  Two attempted fixes (AFTER-arm
+`lin_range_product` exclusion; real-range END marker) either no-op'd or
+moved the END so the accumulation fell OUTSIDE the loop (24/25) -- the
+AFTER-chain + END + nkey priority interaction in `src/uop/linearize.c`
+needs a careful, separately-tested pass.  Correctness is solid at the
+current placement; this is purely the perf follow-up that would realize
+the heuristic's benefit (toward tinygrad's 115 ms).
+
 ## References
 
 - `/Users/swish/src/tinygrad/tinygrad/codegen/__init__.py:full_rewrite_to_sink` -- the pipeline
