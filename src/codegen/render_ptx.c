@@ -213,12 +213,20 @@ static PtxBufSlot *ptx_register_buf(PtxCtx *ctx, Term buf) {
     if (ctx->bufs[i].buf == buf) return &ctx->bufs[i];
   }
   if (ctx->n_bufs >= PTX_MAX_BUFS) return NULL;
+  // Position-based naming: data0..data_{N-1} in REGISTRATION ORDER,
+  // matching cuda_dispatch_kernel's args[0..N-1] (output then inputs in
+  // resolved_tids order).  An earlier inst-based naming (data<inst>)
+  // emitted the wrong param at any position whose inst differed from
+  // the slot index -- e.g. a kernel using buffer insts {0,1,3,4,5,6,7}
+  // (no inst=2) put data7 at position 2 and the kernel read args[2]
+  // (some other buffer) into the inst=7 register.
+  u32 pos = ctx->n_bufs;
   PtxBufSlot *s = &ctx->bufs[ctx->n_bufs++];
   s->buf   = buf;
   s->inst  = uop_buffer_inst_get(buf);
   s->dtype = uop_buffer_dtype(buf);
-  snprintf(s->param, sizeof(s->param), "data%u", s->inst);
-  snprintf(s->reg, sizeof(s->reg), "%%dat_u64_%u", s->inst);
+  snprintf(s->param, sizeof(s->param), "data%u", pos);
+  snprintf(s->reg, sizeof(s->reg), "%%dat_u64_%u", pos);
   return s;
 }
 
