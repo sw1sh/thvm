@@ -3034,6 +3034,102 @@ int main(void) {
   }
 #endif  // ATP_FLATTERM_DIFF
 
+  // === atp/precedence: Waldmeister structural precedence generator ====
+  //
+  // atp_auto_precedence (src/atp/precedence.c) ports Waldmeister's
+  // Praezedenzgenerator: it walks the axiom set, tags each operator's
+  // algebraic properties (commutative / associative / inverse / unit /
+  // distributes), and emits a numeric precedence.  These tests pin the
+  // generated ordering against the canonical group precedence that real
+  // Waldmeister .pr files hand-specify (i > f > e > a), then confirm the
+  // output is consumable by the live thvm_kbo ordering.
+  {
+    // Group axioms over {e:0, i:1, f:2} with constant a (LAB_e=1, LAB_i=2,
+    // LAB_f=3, LAB_a=4; n_labels=5).
+    Term ax_l[3], ax_r[3];
+    // assoc: f(f(x0,x1),x2) = f(x0,f(x1,x2))
+    ax_l[0] = mk_f(mk_f(mk_v(0u), mk_v(1u)), mk_v(2u));
+    ax_r[0] = mk_f(mk_v(0u), mk_f(mk_v(1u), mk_v(2u)));
+    // left identity: f(e,x0) = x0
+    ax_l[1] = mk_f(mk_e(), mk_v(0u));
+    ax_r[1] = mk_v(0u);
+    // left inverse: f(i(x0),x0) = e
+    ax_l[2] = mk_f(mk_i(mk_v(0u)), mk_v(0u));
+    ax_r[2] = mk_e();
+
+    u32 prec[5] = {0u};
+    u32 n_seen = atp_auto_precedence(ax_l, ax_r, 3u, 5u, prec);
+
+    TEST_BEGIN("atp/auto-precedence/group-order");
+    {
+      // Four symbols seen (e, i, f, a -- a only via the structural
+      // pattern? no: a never appears in these axioms, so only e,i,f).
+      CHECK_EQ(n_seen, 3u);
+      // Ranks are 1..n ascending by structural score; the inverse symbol
+      // sits highest, the binary product next, the unit constant lowest.
+      CHECK_EQ(prec[LAB_i], 3u);   // inverse symbol -- top
+      CHECK_EQ(prec[LAB_f], 2u);   // binary product -- middle
+      CHECK_EQ(prec[LAB_e], 1u);   // unit constant -- bottom of the seen set
+      CHECK_EQ(prec[LAB_a], 0u);   // unseen -> sentinel rank 0
+    }
+
+    TEST_BEGIN("atp/auto-precedence/orients-group-kbo");
+    {
+      // Feed the generated precedence into a unit-weight KBO config and
+      // confirm every group axiom orients left-to-right (lhs > rhs) -- the
+      // convergent completion direction.  This proves the structural
+      // generator's output is directly consumable by the live ordering.
+      static u32 gw[5] = {0u, 1u, 1u, 1u, 1u};
+      KboConfig gcfg = {
+        .weights = gw, .precedence = prec, .n_labels = 5u, .var_weight = 1u,
+      };
+      CHECK_EQ((int)thvm_kbo(ax_l[0], ax_r[0], &gcfg), (int)KBO_GT);  // assoc
+      CHECK_EQ((int)thvm_kbo(ax_l[1], ax_r[1], &gcfg), (int)KBO_GT);  // left-id
+      CHECK_EQ((int)thvm_kbo(ax_l[2], ax_r[2], &gcfg), (int)KBO_GT);  // left-inv
+    }
+  }
+
+  TEST_BEGIN("atp/auto-precedence/ring-distributor-and-ac");
+  {
+    // Ring-flavoured axioms over {plus:5, times:6}: + is AC, * distributes
+    // over +.  The distributor must outrank what it distributes over
+    // (Sinai Ring precedence "*+"), and an AC operator is demoted within
+    // its arity band so a non-AC binary operator at the same arity wins.
+    #define LAB_plus  5u
+    #define LAB_times 6u
+    #define LAB_g     7u            // a plain (non-AC) binary operator
+    #define MK2(lab, x, y) ({ Term _c[2] = {(x), (y)}; term_new_ctr((lab), _c, 2); })
+    #define MK_PL(x, y) MK2(LAB_plus, (x), (y))
+    #define MK_TI(x, y) MK2(LAB_times, (x), (y))
+    #define MK_G(x, y)  MK2(LAB_g, (x), (y))
+
+    Term rl[5], rr[5];
+    // + commutative: +(x0,x1) = +(x1,x0)
+    rl[0] = MK_PL(mk_v(0u), mk_v(1u));  rr[0] = MK_PL(mk_v(1u), mk_v(0u));
+    // + associative: +(+(x0,x1),x2) = +(x0,+(x1,x2))
+    rl[1] = MK_PL(MK_PL(mk_v(0u), mk_v(1u)), mk_v(2u));
+    rr[1] = MK_PL(mk_v(0u), MK_PL(mk_v(1u), mk_v(2u)));
+    // left distributivity of * over +: *(x0,+(x1,x2)) = +(*(x0,x1),*(x0,x2))
+    rl[2] = MK_TI(mk_v(0u), MK_PL(mk_v(1u), mk_v(2u)));
+    rr[2] = MK_PL(MK_TI(mk_v(0u), mk_v(1u)), MK_TI(mk_v(0u), mk_v(2u)));
+    // g commutative only (not associative) -> not AC: g(x0,x1) = g(x1,x0)
+    rl[3] = MK_G(mk_v(0u), mk_v(1u));   rr[3] = MK_G(mk_v(1u), mk_v(0u));
+
+    u32 prec[8] = {0u};
+    u32 n_seen = atp_auto_precedence(rl, rr, 4u, 8u, prec);
+    CHECK_EQ(n_seen, 3u);                       // plus, times, g
+    CHECK(prec[LAB_times] > prec[LAB_plus]);     // distributor above distributee
+    CHECK(prec[LAB_g]     > prec[LAB_plus]);     // non-AC binop above AC binop (same arity)
+
+    #undef MK2
+    #undef MK_PL
+    #undef MK_TI
+    #undef MK_G
+    #undef LAB_plus
+    #undef LAB_times
+    #undef LAB_g
+  }
+
   thvm_free();
   TEST_REPORT();
 }
