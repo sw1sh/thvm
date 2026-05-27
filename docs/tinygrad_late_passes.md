@@ -378,19 +378,31 @@ Active at all 3 entry points (Metal/C/CUDA) via the route gate at
 `cg_render_uop_kernel_*_root`. When `uop_has_upcast_or_unroll(root)`,
 the new pipeline runs.
 
-**V100 wall measured at end of loop iteration N (gate widened)**:
-- baseline (no opts): ~540 ms warm step
-- path #1 + #2 legacy renderer hacks: ~3500 ms warm step
-- full architectural pipeline + sym + CSE: **~50 s warm step**
-- cold step 1: 350-390 s (nvrtc)
-- Loss correct in all cases (2.81 -> 1.73 monotone, no NaN)
+**V100 wall, BS=128 STEPS=10 (TEST_EVERY=0, THVM_GC=0, V100-SXM2-16GB)**:
+
+| Configuration                                         | Cold step 1 | Warm mean | Compiles | Loss |
+|-------------------------------------------------------|------------:|----------:|---------:|-----:|
+| Gate Metal-only (CUDA off; CURRENT PRODUCTION)        |    3890 ms  |   505 ms  |     110  | 2.81 -> 1.73 |
+| Gate widened + RMU_REDUCE_UNROLL_MAX=16               |  43408 ms   | 81000 ms  |     137  | 2.81 -> 2.47 (5 steps) |
+| Gate widened + 16 + Section-7 UNROLL CUDA-skip        |  43408 ms   | 65000 ms  |     137  | 2.81 -> 1.83 (5 steps) |
+| Gate widened + RMU_REDUCE_UNROLL_MAX=64 (initial try) |   ~390 s    | ~3500 ms  |     ~140 | 2.81 -> 1.73 |
+| tinygrad reference (PTX renderer)                     |       -     |  ~115 ms  |       -  | -    |
+
+**Disposition**: production CUDA gate stays Metal-only
+(`hand_opts.c::kernel_hand_coded_opts` calls `hand_opt_kernel_metal_only`).
+The 505 ms warm matches the naive baseline; the widened-gate experiments
+on V100 ran 130x slower (65000 ms) even with Section-7 UNROLL skipped.
+The Section-7 CUDA-skip (`hand_opt_kernel_is_cuda` check in the
+heuristic body) stays in place so it is ready when the gate widens
+again -- it was a 13% warm improvement when the gate was widened, real
+but tiny next to the 130x gap.
 
 **Diagnosis**: every IR-level rewrite landed cleanly with unit tests.
 The GRAPH shrinks dramatically through the sym sweeps. But the final
 EMITTED source for `kid=3` conv with the heuristic's `UPCAST=4` +
-`UNROLL=4` choices is ~1600 MAD statements per kernel, which nvrtc's
-C++ frontend can't handle efficiently regardless of how clean the
-upstream IR is.
+`UNROLL=4` choices is hundreds of MAD statements per kernel, which
+nvrtc's C++ frontend handles in tens of seconds AND produces PTX that
+overflows V100's register file (kernels then run far below peak).
 
 **The gap is between IR-rewrite output and source emission**. tinygrad
 gets around it via:
@@ -398,11 +410,13 @@ gets around it via:
 2. `tinygrad/runtime/support/assembler_cuda.py` that compiles PTX -> SASS directly.
 
 thvm goes UOp -> C-style source -> nvrtc -> PTX -> SASS. The C-style
-source stage is what crashes on 1600-statement kernels.
+source stage is what crashes on hundreds-of-statement kernels, AND the
+register-pressure feedback that tinygrad's heuristic counts on (PTX
+register allocator + occupancy model) is absent in the C-source path.
 
 **Spec-aligned paths to actually close V100**:
 - (A) PTX-level emitter mirroring `tinygrad/renderer/ptx.py`. Big work but tinygrad-canonical.
-- (B) Target-aware factor caps in the heuristic (`Renderer.target` knobs in tinygrad; thvm would need a `renderer-knobs` analog).  Smaller, also spec-aligned.
+- (B) Target-aware factor caps in the heuristic (`Renderer.target` knobs in tinygrad; thvm has the `hand_opt_kernel_is_cuda` gate now, the Section-7 skip is the first user).  Smaller, also spec-aligned.
 
 The architectural pipeline (pieces #1-6) is the necessary prerequisite
 for either. Without expander/devec/linearize/sym, neither a PTX emitter

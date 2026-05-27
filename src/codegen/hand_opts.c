@@ -198,6 +198,32 @@ static int hand_opt_kernel_on_gpu(KernelEntry const *ke) {
   return b != NULL && (b->id == 2 || b->id == 3);
 }
 
+// Returns 1 if the kernel will run on CUDA (backend id == 3).  Used for
+// target-aware heuristic branching: nvrtc's C++ frontend is sensitive to
+// register pressure in ways Metal/MSL is not, so a few sections of the
+// hand-coded heuristic are CUDA-suppressed.  Mirrors tinygrad's
+// `k.ren.target.device == "DSP"` / AMX skip pattern (heuristic.py 37, 109).
+static int hand_opt_kernel_is_cuda(KernelEntry const *ke) {
+  Backend *b = NULL;
+  if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
+    b = TENS[ke->output_tid].backend;
+  }
+  if (b == NULL) b = DEFAULT_BACKEND;
+  return b != NULL && b->id == 3;
+}
+
+// Production CUDA gate: kept off until tinygrad's PTX renderer is
+// ported.  See the long comment at kernel_hand_coded_opts entry for
+// the V100 measurement.
+static int hand_opt_kernel_metal_only(KernelEntry const *ke) {
+  Backend *b = NULL;
+  if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
+    b = TENS[ke->output_tid].backend;
+  }
+  if (b == NULL) b = DEFAULT_BACKEND;
+  return b != NULL && b->id == 2;
+}
+
 // --- matvec detection (heuristic.py 65-82) --------------------------
 // Returns 1 if the kernel matches tinygrad's matvec shape:
 //   STORE.value is REDUCE_SUM of MUL of INDEX_E,INDEX_E
@@ -309,21 +335,22 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // ke->schedule->autotuned = 1 at the start.
   if (ke->schedule != NULL) ke->schedule->autotuned = 1;
   if (!hand_coded_opts_enabled()) return 0;
-  // CUDA gate stays off pending renderer-side load hoisting (per
-  // docs/tinygrad_late_passes.md "path #2" -- load_store_folding /
-  // shared-load CSE inside the parallel-accumulator reduce body).
-  // Without it the parallel-acc emit re-reads the shared K-th input F
-  // times per K iteration, so V100 register pressure + nvrtc compile
-  // time both explode (cold step 1: 349s, warm 3541ms vs 540ms naive).
-  // Once path #2 lands, restore the original `hand_opt_kernel_on_gpu`
-  // call (delete the b->id == 2 narrowing below) and re-measure.
-  if (!hand_opt_kernel_on_gpu(ke)) return 0;
-  {
-    Backend *b = NULL;
-    if (ke->output_tid > 0 && ke->output_tid < TENS_NEXT) b = TENS[ke->output_tid].backend;
-    if (b == NULL) b = DEFAULT_BACKEND;
-    if (b == NULL || b->id != 2) return 0;
-  }
+  // Metal-only gate.  The whole architectural pipeline (expander +
+  // devectorize + linearize + render_linearized + shared-load CSE +
+  // parallel-acc emit) was ported faithfully from tinygrad, and the
+  // kernels produced on CUDA are correct.  But tinygrad's CUDA backend
+  // ALSO ships a direct PTX renderer (tinygrad/renderer/ptx.py) that
+  // bypasses nvrtc's C++ frontend; the heuristic's UPCAST/UNROLL/MATVEC
+  // shapes are tuned for the PTX renderer's register model.  Routed
+  // through nvrtc on V100, the same shapes produce kernels that are
+  // both slow to compile AND slow to run -- BS=128 STEPS=10 warm step
+  // ~262 s (this gate widened, with the Section-7 UNROLL CUDA-skip
+  // active) vs ~540 ms with the gate Metal-only and CUDA taking the
+  // legacy walker path.  Until the PTX renderer port lands, CUDA stays
+  // off.  See docs/tinygrad_late_passes.md "V100 measurement" for the
+  // full numbers + the Section-7 skip in the heuristic body (which
+  // stays in place so it is ready when the gate widens again).
+  if (!hand_opt_kernel_metal_only(ke)) return 0;
 
   u32 n_applied = 0;
   HandOptAxes ax;
@@ -538,7 +565,14 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // renderer's reduce matcher is fixed to follow UNROLL'd reduce axes,
   // suppress the full-extent UNROLL.  The split-by-4 branch (factor 4 <
   // extent) is unaffected and still applies.
-  {
+  //
+  // CUDA SKIP: stacking UNROLL on top of UPCAST blows V100 register
+  // pressure -- nvrtc spills, the kernel runs at a fraction of peak.
+  // Tinygrad gets away with the same heuristic because their PTX
+  // renderer schedules registers directly; thvm's C-source path has no
+  // such control.  Mirrors tinygrad's backend-aware skips at
+  // heuristic.py:37 (AMX) + 109 (DSP).
+  if (!hand_opt_kernel_is_cuda(ke)) {
     if (hand_opt_snapshot_axes(ke, &ax)) {
       u32 unr[MAX_AXES];
       u32 n_unr = hand_opt_unrollable_dims(&ax, unr);
