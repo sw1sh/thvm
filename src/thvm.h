@@ -2917,12 +2917,23 @@ fn u32  lin_kernel_size (LinKernel const *k);
 fn Term lin_kernel_at   (LinKernel const *k, u32 i);
 
 // === Linearized-list renderer (src/codegen/render_linearized.c) ===
-// Stub renderer that consumes a LinKernel and emits C99 source for a
-// single-store elementwise kernel over one LOOP range.  Stage (b) of
-// the architectural piece #3 wiring; not used by production paths.
-// Returns 1 on success, 0 if the kernel shape is out of scope.
-fn int cg_render_linearized_c(LinKernel const *lk, const char *kernel_name,
-                              FILE *fp);
+// Consumes a LinKernel and emits C99 / MSL / CUDA source for the
+// post-expander+devectorize+linearize shape (multi-axis RANGE nest +
+// PLACEHOLDER accs + END markers + AFTER ordering + STACK lanes).
+// Returns 1 on success, 0 if any opcode in the linearized list is
+// outside the renderer's coverage (caller falls back to legacy emit).
+fn int cg_render_linearized_c    (LinKernel const *lk, const char *kernel_name,
+                                  FILE *fp);
+fn int cg_render_linearized_metal(LinKernel const *lk, const char *kernel_name,
+                                  FILE *fp);
+fn int cg_render_linearized_cuda (LinKernel const *lk, const char *kernel_name,
+                                  FILE *fp);
+// Route-gate predicate (src/codegen/render_linearized.c).  Returns 1
+// iff the UOp DAG rooted at `root` contains any UOP_RANGE leaf with
+// axis_type in {KAX_UPCAST, KAX_UNROLL} -- the "opt-rich" shape that
+// drives the parallel-accumulator emit and is the only kernel class
+// the linearized renderer currently beats the legacy walker on.
+fn int uop_has_upcast_or_unroll(Term root);
 
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);

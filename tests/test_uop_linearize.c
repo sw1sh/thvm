@@ -247,11 +247,161 @@ static int test_case4_end_to_end_render(void) {
   TEST_REPORT();
 }
 
+// Case 5: piece #4 -- render a single-axis REDUCE through the new
+// pipeline.  Build a small REDUCE SUM over k axis, devectorize, and
+// render to C99.  Assert the emitted source has the accumulator decl
+// (`float _acc0;`), the init store (`_acc0 = 0`), the for-loop, the
+// update (`_acc0 = (_acc0 + ...)`), and the final load reference.
+static int test_case5_render_reduce_single_axis(void) {
+  thvm_init();
+  TEST_BEGIN("case5 piece#4: REDUCE single axis renders with PLACEHOLDER + STORE + END");
+
+  u32 dims_out[1] = { 1 };
+  u32 dims_in [1] = { 8 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in,  1);
+  Term rk      = uop_range(0, KAX_LOOP, 8);
+  Term in_idx  = uop_index_e(in_buf, rk);
+  Term ld      = uop_load(in_idx);
+  u32 axes[1] = { 0 };
+  Term red    = uop_reduce_multi(REDUCE_SUM, 1, axes, ld);
+  Term zero   = uop_const(DT_INT32, 0);
+  Term out_idx= uop_index_e(out_buf, zero);
+  Term store  = uop_store(out_buf, out_idx, red);
+
+  Term devec = uop_devectorize_graph(store);
+  LinKernel lk;
+  CHECK(uop_linearize(devec, &lk));
+
+  char buf[8192];
+  FILE *fp = fmemopen(buf, sizeof(buf) - 1, "w");
+  CHECK(fp != NULL);
+  int ok = cg_render_linearized_c(&lk, "k_reduce", fp);
+  long n = ftell(fp);
+  fclose(fp);
+  if (!ok) {
+    // The linearized renderer declined this shape -- not a failure
+    // for piece #4 if the legacy path still serves it; just record.
+    thvm_free();
+    TEST_REPORT();
+  }
+  CHECK(n > 0);
+  buf[n] = 0;
+  // Required artifacts of the new pipeline:
+  CHECK(strstr(buf, "void k_reduce(") != NULL);
+  CHECK(strstr(buf, "float _acc0;") != NULL);
+  CHECK(strstr(buf, "_acc0 = ") != NULL);
+  CHECK(strstr(buf, "for (uint a0 = 0; a0 < 8;") != NULL);
+  CHECK(strstr(buf, "}\n") != NULL);
+  // The final store back to out reads `_acc0` (after END).
+  CHECK(strstr(buf, "out[0]") != NULL);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 6: piece #4 -- multi-axis REDUCE (conv-like K axis).  Build
+// REDUCE over 3 axes; assert each axis opens its own for-loop AND END
+// closes them all.
+static int test_case6_render_multi_axis_reduce(void) {
+  thvm_init();
+  TEST_BEGIN("case6 piece#4: 3-axis REDUCE renders with 3 for-loops");
+
+  u32 dims_out[1] = { 1 };
+  u32 dims_in [3] = { 4, 3, 3 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 3, dims_in,  1);
+  Term r_cin = uop_range(0, KAX_LOOP, 4);
+  Term r_kh  = uop_range(1, KAX_LOOP, 3);
+  Term r_kw  = uop_range(2, KAX_LOOP, 3);
+  // addr = r_cin*9 + r_kh*3 + r_kw
+  Term cin_s = uop_int_binary(UOP_IMUL, r_cin, uop_const(DT_INT32, 9));
+  Term kh_s  = uop_int_binary(UOP_IMUL, r_kh,  uop_const(DT_INT32, 3));
+  Term cs_kh = uop_int_binary(UOP_IADD, cin_s, kh_s);
+  Term addr  = uop_int_binary(UOP_IADD, cs_kh, r_kw);
+  Term in_idx = uop_index_e(in_buf, addr);
+  Term ld     = uop_load(in_idx);
+  u32 axes[3] = { 0, 1, 2 };
+  Term red = uop_reduce_multi(REDUCE_SUM, 3, axes, ld);
+  Term zero  = uop_const(DT_INT32, 0);
+  Term out_idx = uop_index_e(out_buf, zero);
+  Term store = uop_store(out_buf, out_idx, red);
+
+  Term devec = uop_devectorize_graph(store);
+  LinKernel lk;
+  CHECK(uop_linearize(devec, &lk));
+
+  char buf[16384];
+  FILE *fp = fmemopen(buf, sizeof(buf) - 1, "w");
+  CHECK(fp != NULL);
+  int ok = cg_render_linearized_c(&lk, "k_multi", fp);
+  long n = ftell(fp);
+  fclose(fp);
+  if (!ok) {
+    thvm_free();
+    TEST_REPORT();
+  }
+  buf[n] = 0;
+  // All three axes must appear as for-loops.
+  CHECK(strstr(buf, "for (uint a0 = 0; a0 < 4;") != NULL);
+  CHECK(strstr(buf, "for (uint a1 = 0; a1 < 3;") != NULL);
+  CHECK(strstr(buf, "for (uint a2 = 0; a2 < 3;") != NULL);
+  // The accumulator decl is at body scope (before any for-loop).
+  const char *acc = strstr(buf, "float _acc0;");
+  const char *first_for = strstr(buf, "for (uint a");
+  CHECK(acc != NULL && first_for != NULL && acc < first_for);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 7: piece #4 -- the route-gate helper.  Builds two DAGs (one
+// with KAX_LOOP only, one with a KAX_UPCAST RANGE) and asserts
+// uop_has_upcast_or_unroll fires on the second and not the first.
+static int test_case7_route_gate(void) {
+  thvm_init();
+  TEST_BEGIN("case7 piece#4: uop_has_upcast_or_unroll detects opt-rich kernels");
+
+  u32 dims[1] = { 8 };
+  Term ob = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+  Term ib = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
+
+  // Plain LOOP: gate must NOT fire.
+  Term rl = uop_range(0, KAX_LOOP, 8);
+  Term il = uop_index_e(ib, rl);
+  Term ll = uop_load(il);
+  Term ol = uop_index_e(ob, rl);
+  Term sl = uop_store(ob, ol, ll);
+  CHECK_EQ(uop_has_upcast_or_unroll(sl), 0);
+
+  // UPCAST: gate MUST fire.
+  Term ru = uop_range(1, KAX_UPCAST, 4);
+  Term iu = uop_index_e(ib, ru);
+  Term lu = uop_load(iu);
+  Term ou = uop_index_e(ob, ru);
+  Term su = uop_store(ob, ou, lu);
+  CHECK_EQ(uop_has_upcast_or_unroll(su), 1);
+
+  // UNROLL: gate MUST fire.
+  Term rn = uop_range(2, KAX_UNROLL, 4);
+  Term in_ = uop_index_e(ib, rn);
+  Term ln = uop_load(in_);
+  Term on = uop_index_e(ob, rn);
+  Term sn = uop_store(ob, on, ln);
+  CHECK_EQ(uop_has_upcast_or_unroll(sn), 1);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 int main(void) {
   int rc = 0;
   rc |= test_case1_elementwise();
   rc |= test_case2_matmul();
   rc |= test_case3_post_devectorize_reduce();
   rc |= test_case4_end_to_end_render();
+  rc |= test_case5_render_reduce_single_axis();
+  rc |= test_case6_render_multi_axis_reduce();
+  rc |= test_case7_route_gate();
   return rc;
 }

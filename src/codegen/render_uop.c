@@ -4133,6 +4133,32 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
                                   FILE *fp) {
   if (fp == NULL) fp = stderr;
   if (kernel_name == NULL) kernel_name = "uop_kernel";
+  // Piece #4 route gate: opt-rich kernels (those carrying KAX_UPCAST /
+  // KAX_UNROLL RANGE leaves) try the new expander + devectorize +
+  // linearize + render_linearized pipeline first.  If any stage bails
+  // we fall through to the legacy emit below.  The route reads from a
+  // scratch buffer so a bail leaves `fp` untouched.
+  if (uop_has_upcast_or_unroll(root)) {
+    Term r2 = uop_recognise_conv(root);
+    r2 = uop_expand_graph(r2);
+    r2 = uop_devectorize_graph(r2);
+    r2 = uop_load_store_fold_graph(r2);
+    LinKernel lk;
+    if (uop_linearize(r2, &lk)) {
+      char scratch[131072];
+      FILE *sfp = fmemopen(scratch, sizeof(scratch) - 1, "w");
+      if (sfp != NULL) {
+        int ok = cg_render_linearized_metal(&lk, kernel_name, sfp);
+        long sn = ftell(sfp);
+        fclose(sfp);
+        if (ok && sn > 0) {
+          scratch[sn] = 0;
+          fputs(scratch, fp);
+          return;
+        }
+      }
+    }
+  }
   Term slot_bufs[RMU_DISCOVER_MAX] = {0};
   u32 n_inputs = 0;
   rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
@@ -4280,6 +4306,28 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
                                     FILE *fp) {
   if (fp == NULL) fp = stderr;
   if (kernel_name == NULL) kernel_name = "uop_kernel";
+  // Piece #4 route gate -- see comments on cg_render_uop_kernel_root.
+  if (uop_has_upcast_or_unroll(root)) {
+    Term r2 = uop_recognise_conv(root);
+    r2 = uop_expand_graph(r2);
+    r2 = uop_devectorize_graph(r2);
+    r2 = uop_load_store_fold_graph(r2);
+    LinKernel lk;
+    if (uop_linearize(r2, &lk)) {
+      char scratch[131072];
+      FILE *sfp = fmemopen(scratch, sizeof(scratch) - 1, "w");
+      if (sfp != NULL) {
+        int ok = cg_render_linearized_c(&lk, kernel_name, sfp);
+        long sn = ftell(sfp);
+        fclose(sfp);
+        if (ok && sn > 0) {
+          scratch[sn] = 0;
+          fputs(scratch, fp);
+          return;
+        }
+      }
+    }
+  }
   Term slot_bufs[RMU_DISCOVER_MAX] = {0};
   u32 n_inputs = 0;
   rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
@@ -4464,6 +4512,28 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
                                        FILE *fp) {
   if (fp == NULL) fp = stderr;
   if (kernel_name == NULL) kernel_name = "uop_kernel";
+  // Piece #4 route gate -- see comments on cg_render_uop_kernel_root.
+  if (uop_has_upcast_or_unroll(root)) {
+    Term r2 = uop_recognise_conv(root);
+    r2 = uop_expand_graph(r2);
+    r2 = uop_devectorize_graph(r2);
+    r2 = uop_load_store_fold_graph(r2);
+    LinKernel lk;
+    if (uop_linearize(r2, &lk)) {
+      char scratch[131072];
+      FILE *sfp = fmemopen(scratch, sizeof(scratch) - 1, "w");
+      if (sfp != NULL) {
+        int ok = cg_render_linearized_cuda(&lk, kernel_name, sfp);
+        long sn = ftell(sfp);
+        fclose(sfp);
+        if (ok && sn > 0) {
+          scratch[sn] = 0;
+          fputs(scratch, fp);
+          return;
+        }
+      }
+    }
+  }
   Term slot_bufs[RMU_DISCOVER_MAX] = {0};
   u32 n_inputs = 0;
   rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
