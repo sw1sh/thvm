@@ -244,3 +244,13 @@ VerificationTest[
     "SAT",
     TestID -> "SMT/preprocess/reflexive-with-real-diseq"
 ]
+
+(* TFindProofSMT with a pre-evaluated True hypothesis (iter 58):
+   a vacuous `a == a` in the hypothesis list pre-fix triggered
+   collectLiterals' catch-all reject and returned $Failed.  Now True
+   is skipped, matching the TSatEUF preprocess shape. *)
+VerificationTest[
+    TFindProofSMT[a == c, {a == a, a == b, b == c}]["Status"],
+    "Proved",
+    TestID -> "SMT/TFindProofSMT/skips-True-hypothesis"
+]

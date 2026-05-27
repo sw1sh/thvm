@@ -256,6 +256,13 @@ negate[other_]           := (Message[TSatEUF::badin, other, {}]; $Failed)
 collectLiterals[lits_List] := Block[{e = {}, d = {}, l},
     Do[ l = lits[[i]];
         Which[
+            (* Pre-evaluated True literals (e.g. a == a -> True or
+               Unequal[1, 2] -> True after WL evaluates) are vacuously
+               satisfied and can be skipped without affecting the
+               theory query.  Matches iter-57's TSatEUF preprocess
+               shape so an `a == a` hypothesis no longer kills the
+               whole TFindProofSMT call. *)
+            l === True,          Null,
             MatchQ[l, _Equal],   AppendTo[e, l],
             MatchQ[l, _Unequal], AppendTo[d, l],
             True, Return[{$Failed, $Failed}]
