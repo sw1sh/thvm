@@ -310,6 +310,13 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // uop_load_store_fold_graph(root).  Same disposition as expander: NOT
 // WIRED into render_uop.c -- runs only via test_uop_devectorize for now.
 #include "uop/devectorize.c"
+// uop/symbolic_rewrite.c -- port of (a subset of) tinygrad/uop/symbolic.py
+// "sym" PatternMatcher passes.  Provides uop_symbolic_rewrite(root) which
+// re-runs the simplifying constructors over a bottom-up rebuild and adds
+// the scalar-lane-only MUL-by-0 + GEP-on-STACK + STACK-singleton rules.
+// Wired into render_uop.c between expander/devectorize/load_store_fold so
+// the post-devectorize graph shrinks before reaching the linearizer.
+#include "uop/symbolic_rewrite.c"
 // uop/linearize.c -- port of tinygrad codegen/late/linearizer.py.
 // Walks a post-devectorize DAG and produces a LinKernel: an ordered
 // list of UOp Terms ready for the new render_linearized.c emit walk.

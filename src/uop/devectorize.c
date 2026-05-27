@@ -883,6 +883,55 @@ static int devec_load_fold_dtype_ok(u32 dtype) {
   return 0;
 }
 
+// Shared-load CSE: F lanes of a STACK that ALL reference the same
+// scalar LOAD via hash-consed INDEX_E (e.g. the X loads in a conv
+// chain where the per-K address does not depend on the F-lane
+// upcast axis).  Hash-cons already makes them the same Term; this
+// rule rewrites the STACK into UNROLL(load, [(axis=0xFE, F)]) +
+// per-lane GEPs so the renderer (which lowers UNROLL'd LOADs as a
+// single scalar emit + lane broadcasts) emits the LOAD once rather
+// than F times.  Mirrors the broadcast effect of tinygrad's
+// devectorizer.py:160 fold_expanded_index ALL-same-source case
+// (which is implicit there because GEP(VCONST, ...) folds first).
+//
+// Returns the rewritten STACK, or 0 if no fold applies.
+static Term devec_fold_load_stack_shared(Term t) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_STACK) return 0;
+  u32 n = uop_stack_n(t);
+  if (!(n == 2 || n == 4 || n == 8)) return 0;
+  Term first = uop_stack_src(t, 0);
+  // Must be a LOAD over an INDEX_E to qualify (matches the wide-load
+  // gate; preserves dtype routing).
+  if (term_tag(first) != TAG_UOP || term_ext(first) != UOP_LOAD) return 0;
+  Term inner = heap_read(term_val(first) + 0);
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_INDEX_E) return 0;
+  // ALL lanes must be the same LOAD term (hash-cons identity).
+  for (u32 i = 1; i < n; i++) {
+    if (uop_stack_src(t, i) != first) return 0;
+  }
+  // Dtype gate -- same supports_float4 check as the adjacent-stride
+  // wide-LOAD fold above.
+  Term buf = heap_read(term_val(inner) + 0);
+  u32 dt = DT_FP32;
+  if (!term_dtype_in(buf, 0, &dt) || !devec_load_fold_dtype_ok(dt)) {
+    return 0;
+  }
+  // Emit one shared LOAD wrapped in UNROLL(axis=0xFE, factor=n) so the
+  // linearized renderer sees a marker and emits the LOAD once, then
+  // broadcasts the scalar across the n lanes through per-lane GEPs.
+  // GEP-on-UNROLL is the same shape the adjacent-stride fold produces;
+  // the renderer path handles both identically.
+  u32 axis_id = 0xFEu;
+  u32 factor  = n;
+  Term wide_vector = uop_unroll(first, 1, &axis_id, &factor);
+  Term out[16];
+  for (u32 i = 0; i < n; i++) {
+    u32 idx = i;
+    out[i] = uop_gep(wide_vector, 1, &idx);
+  }
+  return uop_stack(n, out);
+}
+
 static Term devec_fold_load_stack(Term t, void *user) {
   (void)user;
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_STACK) return 0;
@@ -891,6 +940,11 @@ static Term devec_fold_load_stack(Term t, void *user) {
   // F = 4 / 8 / 16 supported; F=2 also legal (float2).  Restrict to
   // powers of two between 2 and 8 -- the tinygrad backend default.
   if (!(n == 2 || n == 4 || n == 8)) return 0;
+  // Shared-load CSE: try the all-identical-lane fold first.  When it
+  // matches it short-circuits the adjacent-stride scan below (the
+  // lanes have stride 0, not 1, and would fail off-check otherwise).
+  Term shared = devec_fold_load_stack_shared(t);
+  if (shared != 0) return shared;
   Term shared_buf = 0;
   Term shared_base = 0;
   u32  base_off = 0;

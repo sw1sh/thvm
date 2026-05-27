@@ -226,6 +226,82 @@ static int test_case5_load_fold(void) {
   TEST_REPORT();
 }
 
+// Case 5b: shared-load CSE -- F=4 lanes of a STACK that all reference
+// the same scalar LOAD (per-K X address that does NOT depend on the
+// F-lane upcast axis).  Hash-cons already gives identical Term values
+// to all lanes; the shared-load fold rewrites the STACK into
+// UNROLL(load, 4) + per-lane GEPs so the renderer emits the LOAD once
+// rather than F times.
+static int test_case5b_load_fold_shared(void) {
+  thvm_init();
+  TEST_BEGIN("case5b STACK of 4 IDENTICAL LOADs -> 1 shared LOAD + GEPs");
+
+  u32 dims[1] = { 16 };
+  Term buf = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims);
+  // Single address (a fixed CONST address standing in for the per-K
+  // shared X[K] read).  All four lanes reference the SAME LOAD.
+  Term addr = uop_const(DT_INT32, 7);
+  Term idx = uop_index_e(buf, addr);
+  Term shared_ld = uop_load(idx);
+  Term lanes[4] = { shared_ld, shared_ld, shared_ld, shared_ld };
+  Term stack = uop_stack(4, lanes);
+
+  Term out = uop_load_store_fold_graph(stack);
+  CHECK_EQ(term_tag(out), TAG_UOP);
+  CHECK_EQ(term_ext(out), UOP_STACK);
+  CHECK_EQ(uop_stack_n(out), 4u);
+  // Every lane is a GEP into the same UNROLL'd LOAD.  Walk the GEP
+  // src chain to recover the inner LOAD and assert it's the same
+  // Term we built originally (hash-cons identity).
+  Term unrolled = 0;
+  for (u32 i = 0; i < 4; i++) {
+    Term lane = uop_stack_src(out, i);
+    CHECK_EQ(term_tag(lane), TAG_UOP);
+    CHECK_EQ(term_ext(lane), UOP_GEP);
+    Term src = heap_read(term_val(lane) + 0);
+    if (i == 0) unrolled = src;
+    else CHECK_EQ(src, unrolled);
+  }
+  CHECK_EQ(term_tag(unrolled), TAG_UOP);
+  CHECK_EQ(term_ext(unrolled), UOP_UNROLL);
+  Term inner = heap_read(term_val(unrolled) + 0);
+  CHECK_EQ(inner, shared_ld);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 5c: shared-load CSE must NOT fire on F=2 STACK of two
+// DISTINCT (non-shared) loads at non-adjacent addresses -- this is
+// the failure mode it must avoid (otherwise we'd CSE different
+// per-lane reads into one and produce wrong values).
+static int test_case5c_load_fold_no_share_distinct(void) {
+  thvm_init();
+  TEST_BEGIN("case5c STACK of 2 DIFFERENT LOADs -> no shared-fold");
+
+  u32 dims[1] = { 16 };
+  Term buf = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims);
+  Term addr_a = uop_const(DT_INT32, 0);
+  Term addr_b = uop_const(DT_INT32, 7);  // non-adjacent (off by 7)
+  Term ld_a = uop_load(uop_index_e(buf, addr_a));
+  Term ld_b = uop_load(uop_index_e(buf, addr_b));
+  Term lanes[2] = { ld_a, ld_b };
+  Term stack = uop_stack(2, lanes);
+
+  Term out = uop_load_store_fold_graph(stack);
+  // Output must remain a STACK of the two original distinct LOAD
+  // Terms (neither shared-CSE nor adjacent-stride fold should fire
+  // because the addresses are neither identical nor stride-1).
+  CHECK_EQ(term_tag(out), TAG_UOP);
+  CHECK_EQ(term_ext(out), UOP_STACK);
+  CHECK_EQ(uop_stack_n(out), 2u);
+  CHECK_EQ(uop_stack_src(out, 0), ld_a);
+  CHECK_EQ(uop_stack_src(out, 1), ld_b);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 // Case 6: end-to-end -- expander + devectorize on an UPCAST'd shape
 // should produce a graph with no UPCAST RANGE, no UNROLL/CONTRACT/VCONST
 // residue, and a STACK-rooted output (because the lanes were expanded).
@@ -442,6 +518,8 @@ int main(void) {
   rc |= test_case3_vconst_to_stack();
   rc |= test_case4_gep_stack_unwrap();
   rc |= test_case5_load_fold();
+  rc |= test_case5b_load_fold_shared();
+  rc |= test_case5c_load_fold_no_share_distinct();
   rc |= test_case6_end_to_end_upcast();
   rc |= test_case7_hash_cons();
   rc |= test_case8_conv_kid3_no_contract();

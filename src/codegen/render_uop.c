@@ -4141,8 +4141,27 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   if (uop_has_upcast_or_unroll(root)) {
     Term r2 = uop_recognise_conv(root);
     r2 = uop_expand_graph(r2);
+    // sym pass between expander + devectorize: re-fires constructor-
+    // time identities (ADD-zero, MUL-one, CONST*CONST fold, NEG-NEG,
+    // GEP-on-STACK) that the expander left behind around hash-consed
+    // children.  Mirrors tinygrad/codegen/__init__.py:full_rewrite_to_sink
+    // which runs `sym + pm_pre_expander + pm_group_for_reduce + expander`
+    // in one combined rewrite pass.
+    r2 = uop_symbolic_rewrite(r2);
     r2 = uop_devectorize_graph(r2);
+    // sym pass between devectorize + load_store_fold: catches the
+    // CONST(0)-acc-init + GEP(STACK,(i,)) + STACK-singleton folds the
+    // devectorizer scatters as it builds per-lane STACKs.  Mirrors
+    // tinygrad/codegen/__init__.py:full_rewrite_to_sink "postopt symbolic".
+    r2 = uop_symbolic_rewrite(r2);
     r2 = uop_load_store_fold_graph(r2);
+    // sym pass after load_store_fold: the wide-load + per-lane GEP
+    // rewrite synthesises new STACK/GEP/UNROLL chains around the
+    // folded loads; one more sym sweep collapses any residual
+    // GEP(STACK(...),(i,)) the fold leaves behind.  Mirrors
+    // tinygrad/codegen/__init__.py:full_rewrite_to_sink "post index
+    // symbolic".
+    r2 = uop_symbolic_rewrite(r2);
     LinKernel lk;
     if (uop_linearize(r2, &lk)) {
       char scratch[131072];
@@ -4310,8 +4329,27 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   if (uop_has_upcast_or_unroll(root)) {
     Term r2 = uop_recognise_conv(root);
     r2 = uop_expand_graph(r2);
+    // sym pass between expander + devectorize: re-fires constructor-
+    // time identities (ADD-zero, MUL-one, CONST*CONST fold, NEG-NEG,
+    // GEP-on-STACK) that the expander left behind around hash-consed
+    // children.  Mirrors tinygrad/codegen/__init__.py:full_rewrite_to_sink
+    // which runs `sym + pm_pre_expander + pm_group_for_reduce + expander`
+    // in one combined rewrite pass.
+    r2 = uop_symbolic_rewrite(r2);
     r2 = uop_devectorize_graph(r2);
+    // sym pass between devectorize + load_store_fold: catches the
+    // CONST(0)-acc-init + GEP(STACK,(i,)) + STACK-singleton folds the
+    // devectorizer scatters as it builds per-lane STACKs.  Mirrors
+    // tinygrad/codegen/__init__.py:full_rewrite_to_sink "postopt symbolic".
+    r2 = uop_symbolic_rewrite(r2);
     r2 = uop_load_store_fold_graph(r2);
+    // sym pass after load_store_fold: the wide-load + per-lane GEP
+    // rewrite synthesises new STACK/GEP/UNROLL chains around the
+    // folded loads; one more sym sweep collapses any residual
+    // GEP(STACK(...),(i,)) the fold leaves behind.  Mirrors
+    // tinygrad/codegen/__init__.py:full_rewrite_to_sink "post index
+    // symbolic".
+    r2 = uop_symbolic_rewrite(r2);
     LinKernel lk;
     if (uop_linearize(r2, &lk)) {
       char scratch[131072];
@@ -4516,8 +4554,27 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   if (uop_has_upcast_or_unroll(root)) {
     Term r2 = uop_recognise_conv(root);
     r2 = uop_expand_graph(r2);
+    // sym pass between expander + devectorize: re-fires constructor-
+    // time identities (ADD-zero, MUL-one, CONST*CONST fold, NEG-NEG,
+    // GEP-on-STACK) that the expander left behind around hash-consed
+    // children.  Mirrors tinygrad/codegen/__init__.py:full_rewrite_to_sink
+    // which runs `sym + pm_pre_expander + pm_group_for_reduce + expander`
+    // in one combined rewrite pass.
+    r2 = uop_symbolic_rewrite(r2);
     r2 = uop_devectorize_graph(r2);
+    // sym pass between devectorize + load_store_fold: catches the
+    // CONST(0)-acc-init + GEP(STACK,(i,)) + STACK-singleton folds the
+    // devectorizer scatters as it builds per-lane STACKs.  Mirrors
+    // tinygrad/codegen/__init__.py:full_rewrite_to_sink "postopt symbolic".
+    r2 = uop_symbolic_rewrite(r2);
     r2 = uop_load_store_fold_graph(r2);
+    // sym pass after load_store_fold: the wide-load + per-lane GEP
+    // rewrite synthesises new STACK/GEP/UNROLL chains around the
+    // folded loads; one more sym sweep collapses any residual
+    // GEP(STACK(...),(i,)) the fold leaves behind.  Mirrors
+    // tinygrad/codegen/__init__.py:full_rewrite_to_sink "post index
+    // symbolic".
+    r2 = uop_symbolic_rewrite(r2);
     LinKernel lk;
     if (uop_linearize(r2, &lk)) {
       char scratch[131072];

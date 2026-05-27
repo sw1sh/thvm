@@ -353,6 +353,30 @@ static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st,
   Term cur = changed ? uop_graph_rebuild_with_srcs(resolved, srcs)
                      : resolved;
 
+  // Variadic STACK descent.  uop_arity returns 0 for STACK so the
+  // generic fixed-arity walk above leaves the lanes untouched -- but
+  // the sym pass (and any future graph rewrite running over post-
+  // devectorize lanes) needs to recurse into each src and rebuild the
+  // STACK if any lane changed.  The lane reads + rebuild use the
+  // canonical uop_stack constructor, which hash-conses on the new
+  // lane Terms and collapses singletons.
+  if (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_STACK) {
+    u32 n = uop_stack_n(cur);
+    if (n > 0 && n <= 256) {
+      Term lanes[256];
+      int stack_changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term old_l = uop_stack_src(cur, i);
+        Term new_l = uop_graph_rewrite_rec(st, old_l, depth + 1);
+        lanes[i] = new_l;
+        if (new_l != old_l) stack_changed = 1;
+      }
+      if (stack_changed) {
+        cur = uop_stack(n, lanes);
+      }
+    }
+  }
+
   for (u32 restart = 0; restart < UOP_GRAPH_REWRITE_MAX_RESTARTS; restart++) {
     int hit = 0;
     for (u32 i = 0; i < st->n_rules; i++) {

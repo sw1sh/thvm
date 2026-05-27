@@ -2899,6 +2899,15 @@ fn Term uop_end_range   (Term t, u32 i);
 fn Term uop_devectorize_graph    (Term root);
 fn Term uop_load_store_fold_graph(Term root);
 
+// === Symbolic rewrite (src/uop/symbolic_rewrite.c) ===
+// Port of tinygrad/uop/symbolic.py "sym" PatternMatcher passes.  Runs a
+// bottom-up graph rewrite that reinvokes the simplifying constructors
+// (uop_rewrite_binary, uop_rewrite_unary, uop_simplify_int_binary)
+// and adds scalar-lane-only rules the constructor skips for shape
+// safety (float MUL by 0).  Called between expander/devectorize/
+// load_store_fold in the render_uop pipeline.
+fn Term uop_symbolic_rewrite(Term root);
+
 // === Linearizer (src/uop/linearize.c) ===
 // Port of tinygrad codegen/late/linearizer.py: walks a post-devectorize
 // UOp DAG and produces an ordered list of Terms in emission order.
