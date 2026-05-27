@@ -462,56 +462,11 @@ static Term expander_fix_reduce_unroll(Term t, void *user) {
   return uop_reduce_multi(kind, n_kept, kept_axes, new_src);
 }
 
-// === fix_store_unroll (expander.py:127-130) ===============================
-// STORE has 3 slots in thvm: [buf, addr, value].  Tinygrad's STORE has
-// (buf, addr, value, *ranges) where unrolled ranges appear at the tail.
-// For thvm, the unrolled ranges show up via UNROLL nodes nested in the
-// addr subtree (after pm_pre_expander rewrites the RANGE leaves there).
-// Wrap the whole STORE in a CONTRACT collecting those axes.
-
-static Term expander_fix_store_unroll(Term t, void *user) {
-  (void)user;
-  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_STORE) return 0;
-  // Walk addr subtree to find any UNROLL'd axes.
-  Term addr = heap_read(term_val(t) + 1);
-  u32 ax_buf[MAX_DIM];
-  u32 fa_buf[MAX_DIM];
-  u32 n = 0;
-  // BFS into addr.
-  Term stack[64];
-  u32 sp = 0;
-  stack[sp++] = addr;
-  while (sp > 0) {
-    Term cur = stack[--sp];
-    if (term_tag(cur) != TAG_UOP) continue;
-    u32 cop = term_ext(cur);
-    if (cop == UOP_UNROLL) {
-      u32 na = uop_unroll_n_args(cur);
-      for (u32 j = 0; j < na && n < MAX_DIM; j++) {
-        u32 ax = uop_unroll_axis_id(cur, j);
-        u32 fa = uop_unroll_factor(cur, j);
-        // dedup.
-        int dup = 0;
-        for (u32 k = 0; k < n; k++) {
-          if (ax_buf[k] == ax) { dup = 1; break; }
-        }
-        if (!dup) {
-          ax_buf[n] = ax;
-          fa_buf[n] = fa;
-          n++;
-        }
-      }
-      continue;
-    }
-    u8 ar = uop_arity((u8)cop);
-    u64 cloc = term_val(cur);
-    for (u8 j = 0; j < ar && j < MAX_UOP_SRC && sp < 64; j++) {
-      stack[sp++] = heap_read(cloc + j);
-    }
-  }
-  if (n == 0) return 0;
-  return uop_contract(t, n, ax_buf, fa_buf);
-}
+// (fix_store_unroll removed: STORE is expanded by do_expand now, like
+// tinygrad.  The old CONTRACT-wrap re-matched its own output under
+// graph_rewrite's re-recursion and nested ~129 deep before the depth
+// cap, which made BOTH the C-source and PTX linearized renderers bail
+// on every conv kernel.)
 
 // === do_expand (expander.py:22-75) ========================================
 // Any UOp whose src[] contains an UNROLL: collect all UNROLL args
@@ -533,6 +488,14 @@ static int op_is_expandable(u32 op) {
     case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_IWHERE:
     case UOP_INDEX_E:
+    // STORE is expandable (tinygrad expander.py:130 do_expand eligible
+    // set).  An UPCAST'd output store has an UNROLL'd address (and value)
+    // -- do_expand consumes the UNROLLs into a vectorized store wrapped
+    // in one outer UNROLL, which the devectorizer lowers to F scalar
+    // stores.  This REPLACES the old fix_store_unroll CONTRACT-wrap,
+    // which re-matched its own output (graph_rewrite re-recurses) and
+    // nested ~129 deep before the depth cap.
+    case UOP_STORE:
       return 1;
     default:
       return 0;
@@ -597,6 +560,13 @@ static Term expander_do_expand(Term root) {
   Term new_srcs[MAX_UOP_SRC];
   for (u8 i = 0; i < ar; i++) {
     Term s = srcs[i];
+    // STORE slot 0 is the buffer pointer -- it is shared across all F
+    // lanes, never broadcast (mirrors tinygrad's "pass through range/
+    // pointer args").  Pass it through unchanged.
+    if (op == UOP_STORE && i == 0) {
+      new_srcs[0] = s;
+      continue;
+    }
     if (term_tag(s) == TAG_UOP && term_ext(s) == UOP_UNROLL) {
       // Check if this UNROLL's args match the unified set exactly.
       u32 sa = uop_unroll_n_args(s);
@@ -652,6 +622,12 @@ static Term expander_do_expand(Term root) {
       break;
     case UOP_INDEX_E:
       rebuilt = uop_index_e(new_srcs[0], new_srcs[1]);
+      break;
+    case UOP_STORE:
+      // new_srcs[0]=buf (passthrough), [1]=expanded addr, [2]=expanded
+      // value.  The vectorized store is wrapped in the outer UNROLL
+      // below; devectorize lowers it to F scalar stores.
+      rebuilt = uop_store(new_srcs[0], new_srcs[1], new_srcs[2]);
       break;
     default:
       return 0;
@@ -803,7 +779,10 @@ fn Term uop_expand_graph(Term root) {
   static UOpGraphRewriteRule const PRE_RULES[] = {
     { "exp_range_to_unroll",   expander_pm_range },
     { "exp_fix_reduce_unroll", expander_fix_reduce_unroll },
-    { "exp_fix_store_unroll",  expander_fix_store_unroll },
+    // fix_store_unroll removed: STORE is now expanded by do_expand
+    // (op_is_expandable) like tinygrad, consuming the UNROLL'd address
+    // rather than wrapping the whole store in a self-re-matching
+    // CONTRACT (which nested ~129 deep).
   };
   Term t = uop_graph_rewrite(root, PRE_RULES,
                              sizeof(PRE_RULES) / sizeof(PRE_RULES[0]),
