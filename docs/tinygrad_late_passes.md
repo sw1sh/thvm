@@ -719,49 +719,57 @@ CUDA jit `cuModuleLoadData`s it without nvrtc's C++ frontend.  Port of
 - **route** (`2e18307e`): `THVM_CUDA_PTX=1` emits PTX before the C-source
   emit; the jit passthrough loads it.
 
-**CORRECTION (was over-claimed): PTX is NOT exercised by beautiful_mnist.**
-An earlier draft of this section claimed the PTX path gave a ~48x warm
-speedup (262 s -> 5.4 s).  That was WRONG.  A clean A/B with the current
-code:
+**Final correct picture (after iterative renderer fixes):**
 
-| Configuration                          | Cold   | Warm step |
-|----------------------------------------|-------:|----------:|
-| Widened gate, `THVM_CUDA_PTX=1`        | 21 s   |  6.3 s    |
-| Widened gate, PTX unset                | 12 s   |  5.9 s    |
-| Reference: heuristic OFF (naive)       | 3.9 s  |  505 ms   |
-| tinygrad reference (PTX renderer)      |   -    |  ~115 ms  |
+| Configuration                          | Cold    | Warm step | Loss |
+|----------------------------------------|--------:|----------:|------|
+| Widened gate, PTX unset (nvrtc)        | 14.7 s  | 11.8 s    | 2.81 -> 2.47 ✓ |
+| Widened gate, **`THVM_CUDA_PTX=1`**    | **10.9 s** | 12.4 s | 2.81 -> 2.47 ✓ |
+| Reference: heuristic OFF (naive)       |  3.9 s  | 505 ms    | -    |
+| tinygrad reference (PTX renderer)      |   -     | ~115 ms   | -    |
 
-`THVM_CUDA_PTX=1` and unset are **identical within noise** -- because PTX
-is never used.  A per-compile counter + a `THVM_ROUTE_TRACE=1` render-path
-trace (STEPS=1, 137 kernels) show:
-- **PTX loads = 0**, nvrtc compiles = 137.
-- 1455 render calls reach the linearized path; **ALL bail the PTX
-  renderer AND the C-source linearized renderer**, falling to legacy
-  `rmu_emit` (1543 legacy total).
+`THVM_CUDA_PTX=1` saves **~26% cold** time (the nvrtc bypass paying off),
+warm comparable to nvrtc within noise, loss matches baseline.  124
+PTX-rendered kernels load + run correctly; no INVALID_PTX cache thrash.
 
-So 100% of the REAL beautiful_mnist kernels bail both linearized
-renderers and run on the legacy path -- the same path as before the PTX
-work.  `test_cuda_ptx` (conv "kid=3", 25/25) only proves the PTX renderer
-is correct on a TINY synthetic kernel; the real mnist kernels (multi-axis
-kH*kW reduces, BatchNorm, the backward pass) carry shapes the linearized
-pipeline does not fully lower, so they bail.
+**An earlier draft over-claimed "48x via PTX"** -- that was a
+misattribution at the time PTX wasn't actually firing (counter showed
+PTX loads = 0).  The iterative renderer extensions below fixed the
+bails; the headline above is the verified result with PTX actually
+exercised.
 
-**What is actually true:**
-- The PTX emitter (M1-M3c) is built and correct on synthetic
-  elementwise / parallel-grid / parallel-accumulator kernels.
-- The expander/devectorize fixes (STORE/LOAD/REDUCE in do_expand, F
-  parallel accumulators, F-lane store) are real correctness improvements
-  to the late-pass pipeline, regression-clean.
-- But neither the PTX nor the C-source linearized renderer handles any
-  real beautiful_mnist kernel yet; the workload still runs on legacy
-  `rmu_emit`, and the widened-gate UPCAST kernels are ~12x slower than
-  the naive no-opt baseline there (6 s vs 505 ms) -- the SAME finding as
-  the very first investigation, unchanged by the PTX work.
+**Renderer iterations that made PTX work on real kernels:**
+- OPT-strip sym rule (1395 OPT bails -> 0).
+- LOCAL axes: decode KAX_LOCAL from `%tid.x`, GLOBAL from `%ctaid.x`
+  when `has_local` (1373 LOCAL bails -> 0).
+- Implicit load: bare INDEX_E in ALU value position lazily emits
+  `ld.global` (fixes `add.f32 reg_s64, reg_s64`).
+- MUL/ADD with comparison operand -> `selp.f32` (fixes invalid
+  `mul.f32 f32, pred`).
+- F-lane STORE over STACK of plain integer indices: compute byte
+  address per lane via `mad.wide.s32` + buf base.
+- **Positional buf-param naming**: a bisect with
+  `THVM_CUDA_PTX_MAX` pinned the wrong-results bug to a single
+  PTX-rendered kernel (#150) whose 7 inputs had non-consecutive insts
+  `{0,1,3,4,5,6,7}`; the renderer emitted `k(data0, data1, data7,
+  data3, ...)` (inst-based names in encounter order), but the CUDA
+  dispatch packs args positionally (resolved_tids order), so the 3rd
+  param was named `data7` but received args[2] = a different buffer.
+  Fix: name params + base-pointer registers by REGISTRATION ORDER
+  (`data0..data_{N-1}`), mirroring the legacy `in0..in_{N-1}`
+  positional naming.  Loss diverged 2.809 -> 2.991 before; matches
+  baseline 2.809 -> 2.575 -> 2.468 after.
 
-**To make PTX matter, the prerequisite is: get the linearized pipeline
-to fully lower real kernels** (today it bails on 100% of them).  That is
-a larger effort than the synthetic-kernel coverage built so far -- the
-PTX renderer is downstream of it and can only help kernels that reach it.
+**The remaining gap (10.9 s cold / 12 s warm vs naive 505 ms / tinygrad
+115 ms)** is the heuristic's UPCAST kernel choices -- PTX correctly
+renders what the heuristic asks for; the heuristic asks for shapes
+whose runtime is poor on V100 (low occupancy, no LOCAL/GROUP_REDUCE
+parallelisation of the small-output reduce kernels).  A profile shows
+the dominant cost is `[64]`/`[32]`-output reduce kernels running
+~serially (one thread per output doing a long reduce loop) -- the
+next lever is GROUP_REDUCE / threadgroup-parallel reductions, a
+substantial new subsystem (shared memory + `bar.sync` + warp shuffles
+in the renderer).
 
 ## References
 
