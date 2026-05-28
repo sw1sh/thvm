@@ -39,7 +39,7 @@ An `Automatic` schedule against an AbelianGroup goal carries the structure-aware
 
 ```wl
 TAtpSchedule[Automatic,
-    Inactive[Equal][x*y, y*x], "AbelianGroup"]
+    Inactive[Equal][x*y, y*x], "AbelianGroupAxioms"]
 ```
 <!-- => structure-aware front + the fixed "Portfolio" tail -->
 

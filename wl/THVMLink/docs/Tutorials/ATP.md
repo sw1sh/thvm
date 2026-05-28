@@ -38,7 +38,7 @@ Equational axioms can be supplied directly, or as a name resolved through the bu
 [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof) takes a conjecture and an axiom set and returns a real Wolfram `ProofObject`. The simplest call resolves both names through `AxiomaticTheory`:
 
 ```wl
-p = TFindProof["AbelianGroupCommutativity", "AbelianGroup"];
+p = TFindProof["AbelianGroupCommutativity", "AbelianGroupAxioms"];
 {Head[p], p["Status"], p["ProofLength"]}
 ```
 <!-- => {ProofObject, "Proved", _Integer} -->
@@ -48,7 +48,7 @@ The returned object speaks the standard `ProofObject` interface: `p["ProofDatase
 Mix an explicit conjecture against a named theory:
 
 ```wl
-TFindProof[Inactive[Equal][x*y*z, z*y*x], "AbelianGroup"]
+TFindProof[Inactive[Equal][x*y*z, z*y*x], "AbelianGroupAxioms"]
 ```
 
 Pass both arguments explicitly when there's no canonical name for the axiom set - typical when working with a custom theory:
@@ -69,7 +69,7 @@ A list-valued conjecture (a multi-equation theorem, e.g. one of the entries in `
 Drop the conjecture entirely and `TFindProof` runs saturation as its own deliverable - it returns the completed rule set as a list of `Inactive[Equal]` lemmas. Bound it with `TimeConstraint`, since non-terminating axiom sets never saturate:
 
 ```wl
-TFindProof["AbelianGroup", TimeConstraint -> 5]
+TFindProof["AbelianGroupAxioms", TimeConstraint -> 5]
 ```
 <!-- => {Inactive[Equal][...], ...} -->
 
@@ -88,7 +88,7 @@ TFindProof[
 The last positional argument selects what `TFindProof` returns. A single string returns that bare value; a list returns an Association keyed by the requested names; `All` returns every output:
 
 ```wl
-TFindProof[Inactive[Equal][x*y, y*x], "AbelianGroup", All]
+TFindProof[Inactive[Equal][x*y, y*x], "AbelianGroupAxioms", All]
 ```
 <!-- => <|"ProofObject" -> _, "Status" -> "Proved", "Lemmas" -> {...},
         "PreprocessedAxioms" -> {...}, "RelevantAxioms" -> <|...|>,
@@ -117,7 +117,7 @@ Pass a single Association as `Method`:
 ```wl
 TFindProof[
     Inactive[Equal][x*y, y*x],
-    "AbelianGroup",
+    "AbelianGroupAxioms",
     Method -> {"Completion",
         "Ordering"          -> "LPO",
         "AutoPrecedence"    -> True,
@@ -156,7 +156,7 @@ A portfolio is a schedule of single-config Methods tried in turn; the first that
 ```wl
 TFindProof[
     Inactive[Equal][x*y*z, z*y*x],
-    "AbelianGroup",
+    "AbelianGroupAxioms",
     Method         -> "VampirePortfolio",
     TimeConstraint -> 30,
     All
@@ -177,7 +177,7 @@ TAtpSchedule["VampirePortfolio"]
 ```wl
 TAtpSchedule[Automatic,
     Inactive[Equal][x*y, y*x],
-    "AbelianGroup"]
+    "AbelianGroupAxioms"]
 ```
 <!-- => structure-aware front + the fixed Portfolio tail -->
 
@@ -196,7 +196,7 @@ Large theories carry axioms that no proof of the current goal needs. [TRelevantA
 ```wl
 TRelevantAxioms[
     Inactive[Equal][x*y, y*x],
-    "AbelianGroup",
+    "AbelianGroupAxioms",
     Method -> {"AxiomRelevance" -> "Safe"}]
 ```
 <!-- => <|"Mode" -> "Safe", "Kept" -> {...},
