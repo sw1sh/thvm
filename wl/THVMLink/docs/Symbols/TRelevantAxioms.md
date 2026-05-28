@@ -26,9 +26,7 @@ Modes (passed via `Method -> {"AxiomRelevance" -> $mode$}`):
 - `"Connected"` or `{"Connected", "FrequencyCutoff" -> $f$, "MaxGenerations" -> $n$}` - symbol-reachability pruning.  Coarse heuristic; can drop a needed axiom.
 - `"SInE"` or `{"SInE", "SineTolerance" -> $st$, "SineDepth" -> $sd$, "SineGenerality" -> $sgt$}` - the Hoder-Voronkov SInE premise selection as it ships in Vampire (D-relation + bounded BFS from the conjecture's symbols).  Defaults `3 / 2 / 8` mirror Vampire's `--sine_tolerance / --sine_depth / --sine_generality_threshold`.
 
-## Examples
-
-### Basic examples
+## Basic Examples
 
 The default `"Safe"` mode on AbelianGroup commutativity:
 

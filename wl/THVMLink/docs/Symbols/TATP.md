@@ -21,9 +21,7 @@ RelatedGuides: [THVMLink]
 - Method options accepted by [TFindProof]() are accepted here too (the dispatch goes through the same WL surface).
 - `Witness -> {$x_, ...$}` captures the existential bindings on a successful proof.  `AllWitnesses -> True` enumerates bounded existential proofs with `MaxDepth` / `MaxWitnesses` caps.
 
-## Examples
-
-### Basic examples
+## Basic Examples
 
 A small group-theory saturation, no goal (returns the derived rules):
 

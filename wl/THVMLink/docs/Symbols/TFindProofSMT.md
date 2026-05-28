@@ -22,9 +22,7 @@ RelatedGuides: [THVMLink]
 - A ground-gate rejects inputs with universally-quantified variables (`Pattern` / `Blank` heads).  Congruence closure is a quantifier-free decision procedure; for variable-bearing axioms reach for [TFindProof]() (an unfailing Knuth-Bendix completion engine).
 - `Method -> "SMT"` on the standard [TFindProof]() entry point routes through this dispatcher instead of the saturator.
 
-## Examples
-
-### Basic examples
+## Basic Examples
 
 Single-literal entailment:
 

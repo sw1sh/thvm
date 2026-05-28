@@ -38,10 +38,9 @@ Equational axioms can be supplied directly, or as a name resolved through the bu
 [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof) takes a conjecture and an axiom set and returns a real Wolfram `ProofObject`. The simplest call resolves both names through `AxiomaticTheory`:
 
 ```wl
-p = TFindProof["InverseOfInverse", "AbelianGroupAxioms"];
-{Head[p], p["Status"], p["ProofLength"]}
+TFindProof["InverseOfInverse", "AbelianGroupAxioms", TimeConstraint -> 10]
 ```
-<!-- => {ProofObject, "Proved", _Integer} -->
+<!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", ...|>] -->
 
 The returned object speaks the standard `ProofObject` interface: `p["ProofDataset"]`, `p["ProofGraph"]`, `p["ProofFunction"]`, `p["ProofLength"]`, `p["Properties"]` all work the same way they do for built-in [FindEquationalProof]().
 

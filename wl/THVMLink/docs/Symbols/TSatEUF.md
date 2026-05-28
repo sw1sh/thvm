@@ -22,9 +22,7 @@ $equalities$ is a list of `Equal[lhs, rhs]` literals; $disequalities$ is a list 
 - Atoms are uninterpreted: symbols (`a`, `b`, ...), nullary functions (`f[]`), and compound applications (`f[a, b]`) are all treated the same way.  No theory-specific reasoning beyond equality plus congruence.
 - For Boolean combinations of equality atoms, see [TSmtDecide]().  For entailment queries, see [TFindProofSMT]().  For variable-bearing axioms reach for [TFindProof]() (an unfailing Knuth-Bendix completion engine).
 
-## Examples
-
-### Basic examples
+## Basic Examples
 
 The transitivity case:
 

@@ -22,9 +22,7 @@ $formula$ is any combination of `Equal[lhs, rhs]` / `Unequal[lhs, rhs]` atoms vi
 - Operates over Wolfram's `Equal` / `Unequal` heads directly (no `Inactive` wrapping required).
 - For raw congruence closure on a flat (in)equality list, use [TSatEUF]().  For entailment queries, use [TFindProofSMT]().  For variable-bearing axioms reach for [TFindProof]().
 
-## Examples
-
-### Basic examples
+## Basic Examples
 
 A simple UNSAT case (transitivity collision):
 

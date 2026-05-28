@@ -20,9 +20,7 @@ RelatedGuides: [THVMLink]
 - A non-preset config like `{"Completion", "Ordering" -> "LPO"}` returns the bare Association of suboptions, with no preset merge.
 - `Automatic` / `"Portfolio"` / `"VampirePortfolio"` / `"VampirePortfolioCompact"` return `<|"Schedule" -> {...}|>` describing the multi-entry rotation rather than a single config.
 
-## Examples
-
-### Basic examples
+## Basic Examples
 
 A named preset returns its defaults:
 

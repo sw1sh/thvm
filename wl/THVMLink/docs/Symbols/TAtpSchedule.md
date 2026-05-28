@@ -24,9 +24,7 @@ RelatedGuides: [THVMLink]
 - A portfolio like `"VampirePortfolio"` returns the multi-entry rotation.
 - `Automatic` (the default) returns the structure-aware front + the fixed `"Portfolio"` tail.  Without the conjecture / axioms it returns the un-front-loaded `"Portfolio"`.
 
-## Examples
-
-### Basic examples
+## Basic Examples
 
 A named portfolio expands to its rotation:
 
