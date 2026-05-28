@@ -1754,6 +1754,20 @@ static u8 atp_dt_leaf_match(u32 node) {
 // drops call overhead on the CTR spine and bounds the recursion depth
 // to the path's STAR-edge count, so a deep (ATP_DT_FLAT_CAP-long)
 // subject cannot overflow the stack.
+//
+// Shared recursion-depth cap for the three DT-descent functions
+// (atp_dt_descend, atp_ri_descend, atp_ri_descend_unorient).  The
+// descent can develop a STAR-edge cycle under Waldmeister + LRS +
+// RandomRatio on andassoc -- empirical bisection on that combo:
+//   cap=1024  -> 1294 bails / 30s, engine exits cleanly       (sweet spot)
+//   cap=4096  -> 591 bails / 30s, still clean
+//   cap=8192  -> wall-cap timeout (deep descents dominate compute)
+//   cap=16384 -> SIGSEGV on the macOS main-thread 8MB stack
+// Past ~4096 depth the search is super-linear: each level branches over
+// multiple STAR alternatives so the cost grows fast.  1024 keeps queries
+// bounded while still surfacing the cycles via q_depth_capped for the
+// upstream fv_index_insert / atp_dt_flatten investigation.
+#define ATP_DT_DESCENT_DEPTH_CAP 1024u
 static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth);
 static u8 atp_dt_descend(u32 node, u32 pos) {
   return atp_dt_descend_rec(node, pos, 0u);
@@ -1766,7 +1780,7 @@ static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
   // thread-stack guard at ~100 bytes/frame.  Returning no-match is
   // sound: any CP genuinely subsuming the subject would be reached
   // before this depth in a well-formed DT.
-  if (depth >= 1024u) { ix->q_depth_capped++; return 0; }
+  if (depth >= ATP_DT_DESCENT_DEPTH_CAP) { ix->q_depth_capped++; return 0; }
   for (;;) {
     ix->q_nodevisits++;
     if (pos == g_atp_dt_flatlen) {
@@ -2315,7 +2329,7 @@ static void atp_ri_descend(u32 node, u32 pos) {
 }
 static void atp_ri_descend_rec(u32 node, u32 pos, u32 depth) {
   AtpRuleIndex *ix = g_atp_ri_ix;
-  if (depth >= 1024u) { ix->q_depth_capped++; return; }  // depth-cap safety (see atp_dt_descend)
+  if (depth >= ATP_DT_DESCENT_DEPTH_CAP) { ix->q_depth_capped++; return; }  // depth-cap safety (see atp_dt_descend)
   for (;;) {
     ix->q_nodevisits++;
     if (pos == g_atp_ri_qend) {
@@ -2432,7 +2446,7 @@ static void atp_ri_descend_unorient(u32 node, u32 pos) {
 }
 static void atp_ri_descend_unorient_rec(u32 node, u32 pos, u32 depth) {
   AtpRuleIndex *ix = g_atp_ri_ix;
-  if (depth >= 1024u) { ix->q_depth_capped++; return; }  // depth-cap safety
+  if (depth >= ATP_DT_DESCENT_DEPTH_CAP) { ix->q_depth_capped++; return; }  // depth-cap safety
   for (;;) {
     if (pos == g_atp_ri_qend) {
       atp_ri_leaf_collect_unorient(node);
