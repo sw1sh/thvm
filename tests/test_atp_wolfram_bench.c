@@ -398,6 +398,20 @@ int main(int argc, char **argv) {
       if (wall_cap > 0.0) thvm_atp_set_wall_deadline(s, wall_cap);
     }
   }
+  // THVM_ATP_RANDOM_RATIO=<n> -- every n-th CP selection picks a
+  // uniformly-random queued CP via xorshift64.  Default off.
+  // THVM_ATP_RANDOM_SEED=<u64> seeds the stream (default: a fixed
+  // nonzero so unseeded runs are deterministic).
+  {
+    const char *rratio = getenv("THVM_ATP_RANDOM_RATIO");
+    const char *rseed  = getenv("THVM_ATP_RANDOM_SEED");
+    if (rseed != NULL && rseed[0] != '\0') {
+      thvm_atp_set_random_seed(s, strtoull(rseed, NULL, 10));
+    }
+    if (rratio != NULL && rratio[0] != '\0' && rratio[0] != '0') {
+      thvm_atp_set_random_modulo(s, (u32)strtoul(rratio, NULL, 10));
+    }
+  }
 
   if (strcmp(goal, "mccune") == 0) {
     thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));

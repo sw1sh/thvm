@@ -4328,6 +4328,23 @@ fn void thvm_atp_set_selection_ratio(AtpState *s, u32 modulo) {
   s->fifo_modulo = modulo;   // 0 -> default (11) at selection time
 }
 
+// Vampire-style random CP-selection mode.  `modulo == 0` disables (engine
+// byte-identical); `modulo > 0` makes every nth selection pick a
+// uniformly-random queued CP via the deterministic xorshift64 stream
+// seeded by `thvm_atp_set_random_seed`.  Pairs with the heap-min default
+// the same way `fifo_modulo` does.
+fn void thvm_atp_set_random_modulo(AtpState *s, u32 modulo) {
+  if (s == NULL) return;
+  s->random_modulo = modulo;
+}
+fn void thvm_atp_set_random_seed(AtpState *s, u64 seed) {
+  if (s == NULL) return;
+  // xorshift64 forbids state 0; coerce to a nonzero default if the
+  // caller passes 0 (which means "default seed" rather than "no
+  // randomness"; randomness itself is gated on random_modulo > 0).
+  s->rng_state = seed ? seed : 0x9E3779B97F4A7C15ull;
+}
+
 fn void thvm_atp_set_cp_fifo_tiebreak(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->cp_fifo_tiebreak = on ? 1u : 0u;
@@ -5642,6 +5659,16 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       if (s->cp_goal[i] < s->cp_goal[best]) best = i;
     }
     j = best;
+  } else if (s->random_modulo > 0u &&
+             (s->cp_select_count % s->random_modulo) == 0u) {
+    // Vampire-style random pick: advance xorshift64 once, take the
+    // result mod n_cps.  Deterministic given the seed; trajectory
+    // differs from heap-min so the portfolio can sample paths the
+    // weight-greedy walk misses (Vampire's distinctive McCune win).
+    u64 x = s->rng_state ? s->rng_state : 0x9E3779B97F4A7C15ull;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    s->rng_state = x;
+    j = (u32)(x % (u64)s->n_cps);
   } else if (((s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO)
               - ATP_CP_FIFO_THRESHOLD)
              <= s->cp_select_count

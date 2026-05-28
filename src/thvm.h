@@ -3763,6 +3763,16 @@ typedef struct {
   // heavy CP.  Default 11 (1:10, the most-fair Waldmeister setting);
   // Waldmeister also uses 50/100/200.  0 is treated as the default.
   u32  fifo_modulo;
+  // Vampire-style random CP-selection seed + ratio.  Default 0 (off,
+  // engine byte-identical).  When `random_modulo > 0`, every nth CP
+  // selection picks a uniformly-random queued CP instead of the heap
+  // root, driven by a deterministic xorshift64 stream seeded via
+  // `thvm_atp_set_random_seed`.  Mirrors Vampire's `lrs+10_<n>` portfolio
+  // entries whose distinctive ingredient on McCune is randomised clause
+  // selection: deterministic-but-reseedable so the run is reproducible
+  // while the trajectory differs from the strict heap-min path.
+  u32  random_modulo;
+  u64  rng_state;
   // Waldmeister `-:w1=fifo` secondary CP key.  The heap already breaks
   // equal-weight ties by cp_seq (insertion age), but the post-orient
   // CP-normalize sweep (atp_normalize_graph) reheapifies and reassigns
@@ -4063,6 +4073,11 @@ fn void      thvm_atp_set_use_connectedness(AtpState *s, u8 on);
 // `modulo` CP selections.  0 = default (11).  Larger = more weight-
 // greedy; Waldmeister uses 11/50/100/200 per problem analysis.
 fn void      thvm_atp_set_selection_ratio(AtpState *s, u32 modulo);
+// Vampire-style random CP-selection mode.  `modulo == 0` disables (engine
+// byte-identical); `modulo > 0` makes every nth selection pick a
+// uniformly-random queued CP from a deterministic xorshift64 stream.
+fn void      thvm_atp_set_random_modulo(AtpState *s, u32 modulo);
+fn void      thvm_atp_set_random_seed  (AtpState *s, u64 seed);
 // Waldmeister `-:w1=fifo` secondary key: preserve each surviving CP's
 // original insertion age (cp_seq) across the post-orient normalize
 // sweep, so equal-weight ties resolve oldest-first run-wide.  0 = off
