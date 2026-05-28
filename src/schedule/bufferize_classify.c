@@ -875,6 +875,31 @@ fn void bufferize_classify(Term root) {
           if (_red_e != NULL && _red_e[0] == '0') {
             skip_seed = bufferize_reduce_consumer_is_broadcast_chain(info->loc);
           }
+          // THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED=1 also skips
+          // the seed when the REDUCE's unique consumer is itself a
+          // REDUCE (the kid 105 [B,H,W,Cout,kH,kW] -> kid 106
+          // [B,Cout,H,W] conv-input-grad pattern on beautiful_mnist).
+          // The multi-axis REDUCE renderer (commits 29804a8c..e07d77f1)
+          // can handle the combined reduce; skipping the seed lets it
+          // fuse into one kernel instead of writing the 160 MB
+          // intermediate.  Default OFF -- the chain-guard pass below
+          // already handles many cases.  Opt-in for workloads where
+          // the upstream materialized intermediate is large.
+          if (!skip_seed && info->consumer_count == 1) {
+            char const *_riri_e =
+                getenv("THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED");
+            if (_riri_e != NULL && _riri_e[0] == '1') {
+              u64 cons[1];
+              if (bufferize_consumers_for_loc(info->loc, cons, 1) == 1) {
+                u32 cidx = bufferize_info_find(cons[0]);
+                if (cidx != 0xFFFFFFFFu
+                    && BUFFERIZE_NODES[cidx].op == UOP_REDUCE
+                    && !(BUFFERIZE_NODES[cidx].reasons & BUFFERIZE_REASON_MATMUL)) {
+                  skip_seed = 1;
+                }
+              }
+            }
+          }
           if (!skip_seed) {
             bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           }
