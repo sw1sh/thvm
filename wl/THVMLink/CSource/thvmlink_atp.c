@@ -229,21 +229,6 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
     wl_weights[i] = 1;
     wl_precedence[i] = i + 1;
   }
-#ifdef ATP_AUTO_PREC
-  // Waldmeister-style auto-precedence from axiom-set analysis.
-  {
-    static Term ax_lhs[ATP_WL_CFG_MAX_LABELS];
-    static Term ax_rhs[ATP_WL_CFG_MAX_LABELS];
-    u32 n_ax_use = n_ax < ATP_WL_CFG_MAX_LABELS ? n_ax
-                                                : ATP_WL_CFG_MAX_LABELS;
-    for (u32 i = 0; i < n_ax_use; i++) {
-      ax_lhs[i] = (Term)data[1 + 2 * i + 0];
-      ax_rhs[i] = (Term)data[1 + 2 * i + 1];
-    }
-    atp_auto_precedence(ax_lhs, ax_rhs, n_ax_use,
-                        (u32)max_label + 1, wl_precedence);
-  }
-#endif
   static KboConfig wl_kbo;
   wl_kbo.weights    = wl_weights;
   wl_kbo.precedence = wl_precedence;
