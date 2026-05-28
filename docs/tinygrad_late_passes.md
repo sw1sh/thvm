@@ -859,6 +859,82 @@ C-source CUDA path through nvrtc already gives us the win above, and
 the PTX detour would need to be measurably faster than nvrtc to be
 worth the new code.
 
+## Dispatch caches + async launch + TinyJit
+
+The remaining "the warm step is still 7-9 s, not 100 ms" gap was NOT
+the GPU.  Three pieces landed:
+
+### Per-KernelEntry CUfunction cache (commit 30147adc)
+
+`cuda_dispatch_kernel` was re-rendering + re-canonicalizing the .cu
+source on EVERY dispatch (1-3 ms per call), then hashing the string
+into the source-text cache to get back a CUfunction.  124 kernels per
+step burned 100-500 ms of CPU work to produce byte-identical source.
+
+`CUDA_KE_CACHE[1<<14]` (keyed by ke pointer offset mod cap; value
+(store_root, func, grid_x, block_x, kvar_ids)) skips render + hash
+when store_root unchanged from the prior dispatch.  Cache miss writes
+the slot AFTER render+compile so kernel_apply_opt-mutated DAGs
+naturally invalidate (store_root changes -> miss -> re-render).
+
+Effect: **warm step 7.4 s -> 800 ms (-89%)**, step-4 spike GONE
+(turns out the spike was render-time accumulation / open_memstream
+allocator fragmentation).  Loss bit-identical.
+
+### Drop per-launch cuCtxSynchronize (commit 03629553)
+
+`cuda_jit_launch` forced the CPU to block until each kernel finished,
+serializing what should be an asynchronous CUDA stream.  The
+default-stream `cuMemcpyDtoH` used by `loss.item()` / `Tensor.numpy()`
+is itself synchronous and naturally enforces the right "wait for all
+prior work before reading" boundary, so removing the per-launch sync
+is semantically equivalent for the user but lets the GPU queue many
+launches deep.
+
+Effect: warm ~800 ms -> ~750 ms.  `THVM_CUDA_SYNC=1` restores the old
+behavior for debugging (a bad kernel then surfaces its error at the
+launch site instead of the next memcpy).
+
+### TinyJit (commit 87c59ab4)
+
+The remaining ~640 ms warm step was the C-side `wnf + materialize`
+fixpoint loop in `thvm_realize` (graph build + scheduler).  Captured
+on first call via the existing `jit_capture_begin/end/replay` infra
+(C-side already there, wired through `py_jit_*` + new `_misc.py
+TinyJit`).  beautiful_mnist_train pre-allocates stable `X_buf` /
+`OH_buf` input Tensors; the step closure runs once under
+`jit_begin/end_with_result(loss.term)` and every subsequent call goes
+through `jit_replay(slot)` -- no graph build, no materialize, no
+render.
+
+**`Y.numpy()` host-side scatter trap**: `sparse_categorical_crossentropy`
+did `Y.numpy()` to build the one-hot host-side, which baked step-1's
+labels into the captured graph (replays reused those frozen labels).
+New `cross_entropy_from_onehot(OH)` reads from a caller-pre-allocated
+one-hot Tensor; the train script scatter-fills OH outside the JIT
+scope so the captured graph reads new contents from OH's stable
+buf_id.
+
+V100 beautiful_mnist BS=128 STEPS=10 (THVM_CUDA_PTX=1 THVM_GROUPTOP=1
+THVM_JIT=1): **warm step 121 ms** (vs tinygrad reference ~115 ms,
+**at tinygrad parity**), per-step time flat, 124 compiles.
+
+### KNOWN ISSUE: conv+bias JIT replay produces stale loss
+
+The captured graph for `Conv2d(..., bias=True)` produces stale output
+on replay -- loss stays at step-1's value despite X_buf refreshing.
+Conv with `bias=False` replays correctly.  Test accuracy still climbs
+(~38-49% at 10 steps) because the optimizer's param assigns fire on
+replay, but the loss readback is stuck.
+
+Root cause TBD; likely a buffer-aliasing issue in the conv+bias
+materialize path where the captured op holds a buf_id that's been
+recycled into a different role between capture and replay.
+
+**For correct training today: `THVM_JIT=0`** -- 800 ms warm step,
+bit-identical losses, full convergence.  121 ms warm step (JIT on)
+is tinygrad-speed but training-broken; documented as the next arc.
+
 ## References
 
 - `/Users/swish/src/tinygrad/tinygrad/codegen/__init__.py:full_rewrite_to_sink` -- the pipeline
