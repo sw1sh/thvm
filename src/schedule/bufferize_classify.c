@@ -897,9 +897,19 @@ fn void bufferize_classify(Term root) {
           abs_loc = bufferize_absorbing_boundary(info->loc, 16);
           if (abs_loc != 0) {
             u32 abs_idx = bufferize_info_find(abs_loc);
+            // Default: skip when absorbing root is another REDUCE
+            // (rangeify_try_lower_elementwise bails > 1 REDUCE per
+            // kernel).  THVM_FUSE_REDUCE_INTO_REDUCE=1 opts in to
+            // letting the now-landed multi-axis REDUCE renderer handle
+            // the combined reduce -- closes the kid 105 + kid 106
+            // [128,20,20,32,5,5] -> [128,32,24,24] conv-input-grad
+            // pair on beautiful_mnist (160 MB intermediate -> 0).
             if (abs_idx != 0xFFFFFFFFu
                 && BUFFERIZE_NODES[abs_idx].op == UOP_REDUCE) {
-              continue;
+              char const *_fir = getenv("THVM_FUSE_REDUCE_INTO_REDUCE");
+              if (!(_fir != NULL && _fir[0] == '1')) {
+                continue;
+              }
             }
           }
           if (abs_loc != 0) {
