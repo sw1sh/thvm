@@ -153,6 +153,13 @@ static void jit_capture_retain_buf(JitCapture *c, Backend *b, u32 buf_id) {
   if (b->buf_jit_pin != NULL) {
     b->buf_jit_pin(buf_id);
   }
+  // If the buf is currently parked on the backend's freelist (refcount==
+  // 0 from a prior owner's decref), yank it back -- otherwise a later
+  // alloc would pop+transfer-storage, leaving our captured op's buf_id
+  // with dptr=0.  buf_freelist_remove no-ops if buf isn't on the list.
+  if (b->buf_freelist_remove != NULL) {
+    b->buf_freelist_remove(buf_id);
+  }
   c->retained[c->n_retained].backend = b;
   c->retained[c->n_retained].buf_id  = buf_id;
   c->n_retained++;
