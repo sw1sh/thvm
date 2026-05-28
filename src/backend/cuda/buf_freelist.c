@@ -11,27 +11,32 @@ fn void cuda_buf_freelist_push(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
   if (CUDA_BUFS[buf_id].jit_pinned) return;            // held by JIT capture
   if (CUDA_FREELIST_LEN >= CUDA_FREELIST_CAP) return;  // saturated; leak to shutdown
-  // Defensive: refuse to freelist a buf still referenced by a TenDesc.
-  // Without this, a stray push (from a buggy planner decision or a
-  // mis-tracked rollback) would orphan the TenDesc: its buf_id still
-  // names this slot but the next cuda_buf_alloc(same nbytes) pops it
-  // and hands the dptr to a different writer.  The original TenDesc's
-  // numpy() read then returns whatever the popper wrote.  Concrete
-  // repro pre-fix: beautiful_mnist BS=128 loss read=2.76 before opt
-  // step then loss=3.00 after a single opt-step realize -- the loss's
-  // 4-byte scalar buf was on the freelist somehow, the opt step's
-  // best-fit pop hands its dptr to a small intermediate, intermediate
-  // writes 3.00 to it, caller reads.  Mirrors CPU's cpu_buf_freelist's
-  // own refcount-aware skip (cpu_buf_freelist_push has owns_data + the
-  // mem_plan caller's refcount>1 check; CUDA was the missing twin).
-  if (CUDA_BUFS[buf_id].refcount > 0) return;
   // Non-owning bufs (arena views, future external imports) borrow
   // another slot's dptr; recycling them through the freelist would
   // hand the same dptr to a fresh alloc while the parent arena still
   // backs it.  Mirrors backend/cpu/buf_freelist.c's owns_data guard.
   if (!CUDA_BUFS[buf_id].owns_data) return;
+  if (CUDA_BUFS[buf_id].dptr == 0) return;             // already dead
+  // Note: we used to reject refcount > 0 here as a defense against the
+  // following hazard: a stray push would orphan a still-live TenDesc,
+  // and the next cuda_buf_alloc(same nbytes) would best-fit-pop the
+  // slot and hand its dptr to a fresh writer, so the original TenDesc's
+  // numpy() read returned whatever the popper wrote.  The concrete
+  // pre-fix repro was beautiful_mnist BS=128: loss read=2.76 before opt
+  // step then loss=3.00 after a single opt-step realize -- the loss's
+  // 4-byte scalar buf was on the freelist somehow and a small
+  // intermediate stole its dptr.  But the guard made the freelist
+  // unreachable: the only producer (cuda_buf_pool_rollback_with_preserve)
+  // pushes refcount>0 bufs.  Net effect: every cuMemAlloc was fresh
+  // (~92/step on beautiful_mnist BS=128, ~100us each).  The hazard is
+  // now neutralized by cuda_buf_freelist_try_pop's slot identity swap:
+  // the donor slot is zeroed (dptr=0) and a FRESH slot id wraps the
+  // recycled dptr.  Any stale TenDesc reading the donor sees dptr==0
+  // (dead -> per-fire re-alloc in kernel_fire_by_id), not aliased
+  // bytes.  CPU's cpu_buf_freelist_push has no refcount guard either.
   CUDA_FREELIST[CUDA_FREELIST_LEN++] = buf_id;
-  CUDA_BUFS[buf_id].refcount = 0;
+  CUDA_BUFS[buf_id].refcount  = 0;
+  CUDA_BUFS[buf_id].preserved = 0;
 }
 
 fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
