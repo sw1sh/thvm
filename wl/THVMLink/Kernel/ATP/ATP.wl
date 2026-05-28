@@ -2390,6 +2390,7 @@ $AtpPresetDefaults = <|
     "EProver" -> <|
         "CriticalPairWeight" -> "ConjSym",
         "Ordering" -> "KBO",
+        "AutoPrecedence" -> "Occurrence",  (* E `-G InvFreqRank` CASC default *)
         "SelectionRatio" -> 10,
         "AutoMaxWeight" -> 20,
         "BackwardSubsume" -> True,
