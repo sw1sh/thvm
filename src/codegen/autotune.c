@@ -376,11 +376,11 @@ static int kautotune_cache_load(char const *path, u64 expected_key,
   KOptSeq seq = {0};
   seq.n = (u8)n_opts;
   for (u32 i = 0; i < n_opts; i++) {
-    if (op[i] > 255 || axis[i] > 255 || arg[i] > 0xFFFFFFFFULL) {
+    if (op[i] > 255 || axis[i] > 0xFFFFFFFFULL || arg[i] > 0xFFFFFFFFULL) {
       return 0;
     }
     seq.opts[i].op   = (u8)op[i];
-    seq.opts[i].axis = (u8)axis[i];
+    seq.opts[i].axis = (u32)axis[i];
     seq.opts[i].arg  = (u32)arg[i];
   }
   if (out_seq != NULL) {

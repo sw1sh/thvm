@@ -661,7 +661,14 @@ struct KernelEntry;
 
 typedef struct {
   u8  op;        // KOP_*
-  u8  axis;      // 0-indexed; meaning depends on op
+  u32 axis;      // axis_id; meaning depends on op.  MUST be u32: axis_ids
+                 // are GLOBAL (accumulate across the whole DAG, not
+                 // per-kernel 0-based), so a deep backward graph (full
+                 // LeNet) reaches ids > 255.  A u8 here silently truncated
+                 // (344 -> 88), so uop_dag_apply_split's find_range looked
+                 // up the wrong id, applied nothing, and the kernel
+                 // rendered fully-serial -> nvrtc hung for many minutes on
+                 // the 2.36M-iteration single-thread loop nest at BS=128.
   u32 arg;       // op-specific (split factor for UPCAST/UNROLL, target
                  // axis index for SWAP, full axis size for GLOBAL,
                  // MMA tile size for TC, ...)

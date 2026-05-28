@@ -563,7 +563,7 @@ EXPORT void py_propose_tc_counters_reset(void) {
 // alongside the propose surface to compose the tinygrad-style BEAM
 // autotune loop in Python.
 EXPORT uint64_t py_kernel_apply_opt(uint32_t kid, uint8_t op,
-                                    uint8_t axis, uint32_t arg) {
+                                    uint32_t axis, uint32_t arg) {
   if (kid == 0 || kid >= KERNELS_NEXT) return 0;
   KernelEntry *ke = &KERNELS[kid];
   KOpt opt = { op, axis, arg };
@@ -576,7 +576,7 @@ EXPORT uint64_t py_kernel_apply_opt(uint32_t kid, uint8_t op,
 // for agents that prefer to manage the DAG directly without the
 // kid-keyed KERNELS[] machinery.
 EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
-                                      uint8_t axis, uint32_t arg) {
+                                      uint32_t axis, uint32_t arg) {
   KOpt opt = { op, axis, arg };
   return uop_dag_apply_kopt(root, opt);
 }

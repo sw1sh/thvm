@@ -414,7 +414,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           // Apply GROUP on the FIRST reduce axis (tinygrad uses axis 0
           // which is the index into axes_of(REDUCE); we use the axis_id).
           if (MV_TPR > 1) {
-            KOpt o = { KOP_GROUP, (u8)red_aid, (u32)MV_TPR };
+            KOpt o = { KOP_GROUP, red_aid, (u32)MV_TPR };
             if (kernel_apply_opt(ke, o)) n_applied++;
           }
           if (MV_BLOCK > 1) {
@@ -426,7 +426,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
               for (u32 j = 0; j < ax2.n; j++) {
                 u8 tj = ax2.kax_type[j];
                 if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax2.extent[j] == g_ext) {
-                  KOpt o = { KOP_LOCAL, (u8)ax2.axis_id[j], (u32)MV_BLOCK };
+                  KOpt o = { KOP_LOCAL, ax2.axis_id[j], (u32)MV_BLOCK };
                   if (kernel_apply_opt(ke, o)) { n_applied++; break; }
                 }
               }
@@ -438,7 +438,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
               for (u32 j = 0; j < ax3.n; j++) {
                 u8 tj = ax3.kax_type[j];
                 if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax3.extent[j] == g_ext) {
-                  KOpt o = { KOP_UPCAST, (u8)ax3.axis_id[j], (u32)MV_RPT };
+                  KOpt o = { KOP_UPCAST, ax3.axis_id[j], (u32)MV_RPT };
                   if (kernel_apply_opt(ke, o)) { n_applied++; break; }
                 }
               }
@@ -521,7 +521,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         }
         if (best_idx >= 0) {
           u32 axis = red_aids[best_idx];
-          KOpt opt = { KOP_GROUPTOP, (u8)axis, sz };
+          KOpt opt = { KOP_GROUPTOP, axis, sz };
           int ok = kernel_apply_opt(ke, opt);
           if (trace) fprintf(stderr,
               "[group] apply GROUPTOP a%u sz=%u (best of %u red axes) -> %d\n",
@@ -627,7 +627,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           fprintf(stderr, "[upcast] no best -> exit loop\n");
         break;
       }
-      KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[best_axis], best_amt };
+      KOpt opt = { KOP_UPCAST, ax.axis_id[best_axis], best_amt };
       if (getenv("THVM_UPCAST_TRACE"))
         fprintf(stderr, "[upcast] picking axis_id=%u amt=%u (best_num=%u sum=%u)\n",
                 ax.axis_id[best_axis], best_amt, best_num, best_sum);
@@ -683,7 +683,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           (void)last;
         } else {
           if (ext % 4 == 0) {
-            KOpt opt = { KOP_UNROLL, (u8)ax.axis_id[last], 4 };
+            KOpt opt = { KOP_UNROLL, ax.axis_id[last], 4 };
             if (kernel_apply_opt(ke, opt)) n_applied++;
           }
         }
@@ -702,7 +702,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         if (n_dims > 0) {
           u32 last = dims[n_dims - 1];
           if (ax.extent[last] % 4 == 0) {
-            KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[last], 4 };
+            KOpt opt = { KOP_UPCAST, ax.axis_id[last], 4 };
             if (kernel_apply_opt(ke, opt)) n_applied++;
           }
         }
@@ -842,7 +842,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           HandOptAxes axc;
           if (!hand_opt_snapshot_axes(ke, &axc)) break;
           if (current_axis >= axc.n) continue;
-          KOpt opt = { KOP_LOCAL, (u8)axc.axis_id[current_axis], sz };
+          KOpt opt = { KOP_LOCAL, axc.axis_id[current_axis], sz };
           if (kernel_apply_opt(ke, opt)) {
             n_applied++;
             shift++;       // one more axis sitting above subsequent picks
@@ -853,6 +853,40 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   }
 
   // ---- Section 10: THREAD -- SKIPPED (no KOP_THREAD in thvm) --------
+
+  // THVM_HANDOPT_TRACE=1: per-kernel summary of axis types + n_applied,
+  // used to diagnose fully-serial kernels (no GLOBAL/LOCAL -> render
+  // falls back to a single-thread loop nest that nvrtc chokes on at
+  // large trip counts).
+  {
+    static int ht_known = 0, ht_on = 0;
+    if (!ht_known) { char const *e = getenv("THVM_HANDOPT_TRACE");
+                     ht_on = (e != NULL && e[0] == '1'); ht_known = 1; }
+    if (ht_on) {
+      HandOptAxes axf;
+      if (hand_opt_snapshot_axes(ke, &axf)) {
+        u32 n_glob = 0, n_loc = 0, n_loop = 0, n_red = 0, n_up = 0, n_unr = 0;
+        for (u32 i = 0; i < axf.n; i++) {
+          switch (axf.kax_type[i]) {
+            case KAX_GLOBAL: n_glob++; break;
+            case KAX_LOCAL:  n_loc++;  break;
+            case KAX_LOOP:   n_loop++; break;
+            case KAX_REDUCE: n_red++;  break;
+            case KAX_UPCAST: n_up++;   break;
+            case KAX_UNROLL: n_unr++;  break;
+            default: break;
+          }
+        }
+        u64 olp = hand_opt_output_loop_product(&axf);
+        fprintf(stderr,
+                "[handopt] kid=%u n_applied=%u axes(G=%u L=%u loop=%u red=%u up=%u unr=%u) olp=%llu\n",
+                (u32)(ke - KERNELS), n_applied,
+                n_glob, n_loc, n_loop, n_red, n_up, n_unr,
+                (unsigned long long)olp);
+        fflush(stderr);
+      }
+    }
+  }
 
   return n_applied;
 }

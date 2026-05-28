@@ -171,10 +171,10 @@ _kernel_opts_propose = _bind(
     c_uint32)
 _kernel_apply_opt = _bind(
     "py_kernel_apply_opt", c_uint64,
-    c_uint32, ctypes.c_uint8, ctypes.c_uint8, c_uint32)
+    c_uint32, ctypes.c_uint8, c_uint32, c_uint32)
 _uop_dag_apply_kopt = _bind(
     "py_uop_dag_apply_kopt", c_uint64,
-    c_uint64, ctypes.c_uint8, ctypes.c_uint8, c_uint32)
+    c_uint64, ctypes.c_uint8, c_uint32, c_uint32)
 _cuda_dag_dispatch_shape = _bind(
     "py_cuda_dag_dispatch_shape", c_uint32,
     c_uint64, ctypes.POINTER(c_uint32), ctypes.POINTER(c_uint32))
