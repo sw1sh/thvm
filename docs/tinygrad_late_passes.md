@@ -995,14 +995,24 @@ Compared to pre-arc baseline (18.2 s warm), the full arc delivers a
 
 ### Remaining gap to tinygrad
 
-V100 BS=128 STEPS=10 warm-mean across 10 runs (THVM_CUDA_PTX=1
-THVM_GROUPTOP=1 THVM_LOCAL_INNER_FIRST=1 THVM_JIT=1):
-- min 164 ms, median 185 ms, max 223 ms
+V100 BS=128 best clean measurement (THVM_CUDA_PTX=1 THVM_GROUPTOP=1
+THVM_LOCAL_INNER_FIRST=1 THVM_JIT=1, 50-iter tight loop after 3-iter
+warmup, separate process from the shared brain-arc 258 GPU user):
 
-Variance is high because the V100 is shared with another experiment
-running at ~62% GPU utilization (brain-arc 258 policy training).  The
-fastest run beats the median by ~10% and approaches tinygrad's ~115 ms
-reference within ~40 ms.
+| Percentile | Warm step |
+|------------|----------:|
+| min        | 144 ms    |
+| p10        | 149 ms    |
+| **p50**    | **150 ms** |
+| p90        | 151 ms    |
+| max        | 152 ms    |
+
+Extremely low variance (8 ms span across 50 runs).  vs tinygrad's
+~115 ms reference (per [[reference_thvm_cuda_pod]]) = ~1.3x off.
+
+Note that the tinygrad reference number is from a different setup;
+their reported "~1060 img/s at BS=128" works out to ~121 ms/step.
+The end-to-end gap is real but in the same order of magnitude.
 
 Knobs landed for this exploration:
 - `THVM_UPCAST_CAP=N` -- overrides the main UPCAST loop cap (default
