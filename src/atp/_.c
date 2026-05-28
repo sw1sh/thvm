@@ -2303,16 +2303,23 @@ static void atp_ri_leaf_collect(u32 node) {
 // than recursing.  Only the STAR (rule-variable) branches, which can
 // fan out, recurse.  For the typical CTR spine of a rule LHS the whole
 // descent is then one loop with no call overhead.
+static void atp_ri_descend_rec(u32 node, u32 pos, u32 depth);
 static void atp_ri_descend(u32 node, u32 pos) {
+  atp_ri_descend_rec(node, pos, 0u);
+}
+static void atp_ri_descend_rec(u32 node, u32 pos, u32 depth) {
   AtpRuleIndex *ix = g_atp_ri_ix;
+  if (depth >= 1024u) return;                  // depth-cap safety (see atp_dt_descend)
   for (;;) {
     ix->q_nodevisits++;
     if (pos == g_atp_ri_qend) {
       atp_ri_leaf_collect(node);
       return;
     }
+    if (pos > g_atp_ri_qend) return;           // overshoot safety
     u32 sz         = g_atp_ri_subsz[pos];
     u32 csym_exact = g_atp_ri_flatsym[pos];   // CTR_BASE+lab / NUM / STAR+idx
+    if (sz == 0u) return;                      // would stall at same pos
     u32 ctr_next   = ATP_RI_NIL;              // the lone CTR-match child
     for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
          c = ix->nodes[c].sibling) {
@@ -2325,12 +2332,12 @@ static void atp_ri_descend(u32 node, u32 pos) {
         u32 bound = g_atp_ri_star[k];
         if (bound == ATP_RI_NIL) {
           g_atp_ri_star[k] = pos;
-          atp_ri_descend(c, pos + sz);
+          atp_ri_descend_rec(c, pos + sz, depth + 1u);
           g_atp_ri_star[k] = ATP_RI_NIL;
         } else if (g_atp_ri_subsz[bound] == sz &&
                    memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
                           (size_t)sz * sizeof(u32)) == 0) {
-          atp_ri_descend(c, pos + sz);
+          atp_ri_descend_rec(c, pos + sz, depth + 1u);
         }
       } else if (csym == csym_exact) {
         // Stored CTR/NUM equal to the subject's head: consume the head;
@@ -2413,15 +2420,22 @@ static void atp_ri_leaf_collect_unorient(u32 node) {
 // different leaf action (collect every face, not the min).  Kept
 // separate so the hot orientable descent stays a tight single-callback
 // loop with no per-node branch on index kind.
+static void atp_ri_descend_unorient_rec(u32 node, u32 pos, u32 depth);
 static void atp_ri_descend_unorient(u32 node, u32 pos) {
+  atp_ri_descend_unorient_rec(node, pos, 0u);
+}
+static void atp_ri_descend_unorient_rec(u32 node, u32 pos, u32 depth) {
   AtpRuleIndex *ix = g_atp_ri_ix;
+  if (depth >= 1024u) return;                  // depth-cap safety
   for (;;) {
     if (pos == g_atp_ri_qend) {
       atp_ri_leaf_collect_unorient(node);
       return;
     }
+    if (pos > g_atp_ri_qend) return;           // overshoot safety
     u32 sz         = g_atp_ri_subsz[pos];
     u32 csym_exact = g_atp_ri_flatsym[pos];
+    if (sz == 0u) return;                      // would stall at same pos
     u32 ctr_next   = ATP_RI_NIL;
     for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
          c = ix->nodes[c].sibling) {
@@ -2431,12 +2445,12 @@ static void atp_ri_descend_unorient(u32 node, u32 pos) {
         u32 bound = g_atp_ri_star[k];
         if (bound == ATP_RI_NIL) {
           g_atp_ri_star[k] = pos;
-          atp_ri_descend_unorient(c, pos + sz);
+          atp_ri_descend_unorient_rec(c, pos + sz, depth + 1u);
           g_atp_ri_star[k] = ATP_RI_NIL;
         } else if (g_atp_ri_subsz[bound] == sz &&
                    memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
                           (size_t)sz * sizeof(u32)) == 0) {
-          atp_ri_descend_unorient(c, pos + sz);
+          atp_ri_descend_unorient_rec(c, pos + sz, depth + 1u);
         }
       } else if (csym == csym_exact) {
         ctr_next = c;
