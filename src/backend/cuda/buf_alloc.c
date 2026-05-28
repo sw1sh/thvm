@@ -130,6 +130,15 @@ fn CUdeviceptr cuda_buf_dptr(u32 buf_id) {
   return CUDA_BUFS[buf_id].dptr;
 }
 
+// Expose the dptr as an opaque u64 for the JIT replay dedup safety
+// check.  Two bufs alias storage iff their dptrs are equal AND their
+// nbytes ranges overlap (we approximate as "same dptr" since same
+// dptr without overlap is impossible on cuMemAlloc).
+fn u64 cuda_buf_addr(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return 0;
+  return (u64)CUDA_BUFS[buf_id].dptr;
+}
+
 // Walk to the storage root: a view buf chains through parent_buf_id
 // until the owning slot.  Two bufs alias storage iff their roots match
 // AND their dptr regions overlap.  Used by the JIT replay dedup

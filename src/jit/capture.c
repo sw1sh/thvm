@@ -1130,15 +1130,26 @@ static void jit_capture_finalize(u32 slot, Term root) {
           // back to identity (a == b) on backends without view aliasing.
           if (mid_write_backend != op_backend) continue;
           u32 (*root_of)(u32) = op_backend->buf_storage_root;
+          u64 (*addr_of)(u32) = op_backend->buf_addr;
           u32 mid_root = root_of != NULL ? root_of(mid_write_buf) : mid_write_buf;
           u32 op_out_root = root_of != NULL ? root_of(op->out_buf_id) : op->out_buf_id;
-          if (dedup_trace) fprintf(stderr, "  [skip_check] mid op%u buf=%u root=%u, op out=%u root=%u\n",
-                          m, mid_write_buf, mid_root, op->out_buf_id, op_out_root);
+          u64 mid_addr = addr_of != NULL ? addr_of(mid_write_buf) : 0;
+          u64 op_out_addr = addr_of != NULL ? addr_of(op->out_buf_id) : 0;
+          if (dedup_trace) fprintf(stderr, "  [skip_check] mid op%u buf=%u root=%u addr=%p, op out=%u root=%u addr=%p\n",
+                          m, mid_write_buf, mid_root, (void*)mid_addr,
+                          op->out_buf_id, op_out_root, (void*)op_out_addr);
+          // Both checks: parent-chain root match OR same physical dptr
+          // (catches arena reuse that lands a fresh buf at a previously-
+          // freed dptr without parent_buf_id linkage).
           if (mid_root == op_out_root) { safe = 0; break; }
+          if (mid_addr != 0 && mid_addr == op_out_addr) { safe = 0; break; }
           for (u32 k = 0; k < op->n_inputs; k++) {
             u32 op_in_root = root_of != NULL ? root_of(op_ids[k]) : op_ids[k];
-            if (dedup_trace) fprintf(stderr, "    in[%u] buf=%u root=%u\n", k, op_ids[k], op_in_root);
+            u64 op_in_addr = addr_of != NULL ? addr_of(op_ids[k]) : 0;
+            if (dedup_trace) fprintf(stderr, "    in[%u] buf=%u root=%u addr=%p\n",
+                            k, op_ids[k], op_in_root, (void*)op_in_addr);
             if (mid_root == op_in_root) { safe = 0; break; }
+            if (mid_addr != 0 && mid_addr == op_in_addr) { safe = 0; break; }
           }
           if (!safe) break;
         }

@@ -733,6 +733,12 @@ struct Backend {
   // roots match.  NULL on backends without view aliasing -- caller
   // should fall back to identity (`a == b`).
   u32   (*buf_storage_root)(u32 buf_id);
+  // Optional: physical storage address probe.  Returns the device /
+  // host pointer as an opaque u64 (0 if buf has no storage).  Two
+  // bufs alias storage iff their addresses overlap -- a sounder
+  // alias check than buf_storage_root since arena reuse can land
+  // a fresh buf at the same dptr without updating parent_buf_id.
+  u64   (*buf_addr)(u32 buf_id);
   void  (*dispatch_begin)(void);
   void  (*dispatch_flush)(void);
   void  (*dispatch_end)(void);
