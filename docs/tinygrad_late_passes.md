@@ -1131,6 +1131,32 @@ Next levers (real GPU optimization, not knob tuning):
 | + TinyJit (full beautiful_mnist) | -- | -- | -- | ✗ ILLEGAL_ADDRESS |
 | tinygrad reference         |    -    | ~115 ms | -      | -        |
 
+### 2026-05-28 cumulative session state
+
+15+ commits this session landed (multi-UPCAST fix, CUDA Graph capture+
+replay, GROUP_SZ=128 / UPCAST_CAP=64 / LOCAL_INNER_FIRST=1 defaults
+flipped, FUSE_REDUCE_INTO_REDUCE opt-in, SKIP_SMALL_EXPAND opt-in,
+nvrtc --use_fast_math + --ftz=true defaults, __launch_bounds__(block_x)
+on every kernel signature, #pragma unroll on small LOOP-typed output
+axes via THVM_LOOP_UNROLL_MAX, alias-aware dedup safety infra +
+buf_storage_root / buf_addr backend hooks, multiple JIT replay
+diagnostic knobs).
+
+Validated state (clean GPU window, 5-trial bench, 50 steps each):
+- beautiful_mnist BS=128 V100: warm_mean **135 ms / step** (was 184 ms
+  start-of-session; -27%)
+- tinygrad master no-BEAM on same V100: ~80-100 ms / step
+- Gap: ~50 ms, all GPU compute time (cuGraphLaunch CPU is 1.3 ms;
+  cuStreamSynchronize = 200+ ms under contention reflects actual
+  GPU kernel time)
+
+GPU-bound diagnosis: closing the remaining 50 ms gap requires
+fewer-but-bigger fused kernels (per-param Adam batching, schedule-
+level dedup at tensor level, multi-tensor kernels).  Launch overhead
+is already amortised to near-zero by CUDA Graph; further dispatch
+dedup is unsafe (dedup mystery -- see project_thvm_jit_dispatch_redundancy
+memory).
+
 ## References
 
 - `/Users/swish/src/tinygrad/tinygrad/codegen/__init__.py:full_rewrite_to_sink` -- the pipeline
