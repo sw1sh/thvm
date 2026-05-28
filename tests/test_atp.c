@@ -3173,6 +3173,35 @@ int main(void) {
     #undef LAB_NOT
   }
 
+  TEST_BEGIN("atp/occurrence-precedence/rare-outranks-common");
+  {
+    // Vampire `sp=occurrence` / E `-G InvFreqRank`: rank by ASCENDING
+    // occurrence count.  Build axioms with four distinct counts so a
+    // unique rank lands on each symbol.
+    //   f(e, a) = a                          -- e=1, f=1, a=2
+    //   f(a, i(a)) = a                       -- f=1, a=3, i=1
+    //   f(a, f(i(a), a)) = a                 -- f=2, a=4, i=1
+    // Cumulative CTR counts: e=1, i=2, f=4, a=9.
+    // Ascending: e(1) < i(2) < f(4) < a(9).
+    // Ranks (rare = high): e -> 4, i -> 3, f -> 2, a -> 1.
+    Term oa_l[3], oa_r[3];
+    oa_l[0] = mk_f(mk_e(), mk_a());          oa_r[0] = mk_a();
+    oa_l[1] = mk_f(mk_a(), mk_i(mk_a()));    oa_r[1] = mk_a();
+    oa_l[2] = mk_f(mk_a(), mk_f(mk_i(mk_a()), mk_a()));
+    oa_r[2] = mk_a();
+
+    u32 prec[5] = {0u};
+    u32 n_seen = atp_occurrence_precedence(oa_l, oa_r, 3u, 5u, prec);
+    CHECK_EQ(n_seen, 4u);              // e, i, f, a all appear
+    CHECK_EQ(prec[LAB_e], 4u);         // count 1 -> top (rarest)
+    CHECK_EQ(prec[LAB_i], 3u);         // count 2
+    CHECK_EQ(prec[LAB_f], 2u);         // count 4
+    CHECK_EQ(prec[LAB_a], 1u);         // count 9 -> bottom
+    // Distinguishes from auto_precedence on the same axioms (which
+    // would key off arity, not frequency).
+    CHECK(prec[LAB_e] > prec[LAB_a]);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

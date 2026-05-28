@@ -4190,6 +4190,12 @@ fn u32  atp_generate_precedence(const AtpSymProps *props, u32 n_labels,
 // Convenience: analyze then generate in one call.  Equivalent to
 // atp_analyze_axioms followed by atp_generate_precedence on a
 // scratch AtpSymProps array (capped at WALD_MAX_SYMBOLS labels).
+// Occurrence-frequency precedence (Vampire `sp=occurrence` / E
+// `-G InvFreqRank`): rank by ASCENDING occurrence count -- rarest
+// symbol gets the highest rank, most common the lowest.  Ignores
+// structural detection; pure frequency.  See src/atp/precedence.c.
+fn u32  atp_occurrence_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                  u32 n_labels, u32 *prec);
 fn u32  atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
                             u32 n_labels, u32 *prec);
 

@@ -374,3 +374,73 @@ fn u32 atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
   atp_analyze_axioms(lhs, rhs, n_eqns, props, cap);
   return atp_generate_precedence(props, cap, prec);
 }
+
+// === occurrence-frequency precedence ================================
+//
+// Vampire's `sp=occurrence` / E's `-G InvFreqRank`: rank symbols by
+// ASCENDING occurrence count in the axiom set -- rare symbols get the
+// highest rank, common symbols the lowest.  Intuition: rewriting toward
+// frequent symbols often makes the term set smaller, while a rule
+// rewriting AWAY from rare symbols tends to terminate faster.
+//
+// Mirrors atp_auto_precedence's contract: `prec[label]` is the rank
+// (1..n_seen, 0 = unseen).  Returns n_seen.  Unlike auto_precedence
+// this ignores structural detection -- it's a pure frequency count.
+fn u32 atp_occurrence_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                 u32 n_labels, u32 *prec) {
+  if (n_labels > WALD_MAX_SYMBOLS) n_labels = WALD_MAX_SYMBOLS;
+  u32 count[WALD_MAX_SYMBOLS];
+  for (u32 i = 0; i < n_labels; i++) { count[i] = 0; prec[i] = 0; }
+  // Walk each axiom side, count CTR labels.  Recursion bounded by
+  // term depth (no manual stack needed for reasonable axioms; large
+  // arities would blow the call stack but axiom terms are small).
+  Term stack[256];
+  for (u32 e = 0; e < n_eqns; e++) {
+    Term seeds[2] = { lhs[e], rhs[e] };
+    for (u32 s = 0; s < 2; s++) {
+      u32 sp = 0;
+      stack[sp++] = seeds[s];
+      while (sp > 0) {
+        Term t = stack[--sp];
+        if (term_tag(t) == TAG_CTR) {
+          u32 lab = term_ext(t);
+          if (lab < n_labels) count[lab]++;
+          u32 n = term_ctr_n(t);
+          for (u32 c = 0; c < n && sp < 256; c++) {
+            stack[sp++] = term_ctr_at(t, c);
+          }
+        }
+      }
+    }
+  }
+  // Sort the seen labels by ASCENDING count, then assign ranks
+  // (rare = high rank).  Score: pack count into high bits, label into
+  // low bits so equal counts tie-break by label index (stable).
+  u64 score[WALD_MAX_SYMBOLS];
+  u32 order[WALD_MAX_SYMBOLS];
+  u32 n_seen = 0;
+  for (u32 l = 0; l < n_labels; l++) {
+    if (count[l] == 0) continue;
+    score[n_seen] = ((u64)count[l] << 32) | (u64)l;
+    order[n_seen] = l;
+    n_seen++;
+  }
+  for (u32 i = 1; i < n_seen; i++) {
+    u64 sk = score[i];
+    u32 ok = order[i];
+    u32 j = i;
+    while (j > 0 && score[j - 1] > sk) {
+      score[j] = score[j - 1];
+      order[j] = order[j - 1];
+      j--;
+    }
+    score[j] = sk;
+    order[j] = ok;
+  }
+  // Ascending score order -> assign ranks N..1 (most common = rank 1,
+  // rarest = rank N).  Result: rare symbols outrank common ones.
+  for (u32 i = 0; i < n_seen; i++) {
+    prec[order[i]] = n_seen - i;
+  }
+  return n_seen;
+}
