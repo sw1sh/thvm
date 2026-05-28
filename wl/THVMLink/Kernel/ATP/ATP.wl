@@ -4215,7 +4215,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
 atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime,
-            axEq, varNames, axDataset, po},
+            axEq, varNames, lemmaEq, axDataset, lemmaDataset, po},
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], 0.];
         (* Encode with a None conjecture: the packed goal pair is (0, 0),
@@ -4232,14 +4232,20 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
            ProofObjectQ + $ProofPattern require. *)
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         varNames = cRes["VarSyms"];
+        lemmaEq = atpMainRulesLemmas[cRes];
         axDataset = MapIndexed[
             Function[{eq, idx}, {"Axiom", First[idx]} ->
                 <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
                   "Proof" -> <||>|>],
             axEq];
+        lemmaDataset = MapIndexed[
+            Function[{eq, idx}, {"Lemma", First[idx]} ->
+                <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
+                  "Proof" -> <||>|>],
+            lemmaEq];
         po = ProofObject["EquationalLogic", None, axEq,
             <|"Variables" -> varNames, "Constants" -> {},
-              "Proof" -> axDataset|>];
+              "Proof" -> Join[axDataset, lemmaDataset]|>];
         <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> po,
           "RelevantAxioms" -> <|"Mode" -> None,
               "Kept" -> axioms, "Dropped" -> {}|>,
