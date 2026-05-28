@@ -539,7 +539,9 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       if (!hand_opt_snapshot_axes(ke, &ax)) break;
       u64 olp = hand_opt_output_loop_product(&ax);
       u64 us  = hand_opt_upcast_size(&ax);
-      if (olp < 1024 || us >= 32) break;
+      // tinygrad caps upcast_size at 32; THVM_UPCAST_CAP overrides.
+      u64 ucap = (u64)hand_opt_getenv_int("THVM_UPCAST_CAP", 32);
+      if (olp < 1024 || us >= ucap) break;
 
       // Build list of current UPCAST/UNROLL axis_ids for the stride test.
       u32 uu_aids[MAX_AXES]; u32 n_uu = 0;
