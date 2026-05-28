@@ -134,7 +134,7 @@ TAtpSchedule["VampirePortfolio"]
 
 ```wl
 TAtpSchedule[Automatic,
-    Inactive[Equal][x*y, y*x], "AbelianGroupAxioms"]
+    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x], "AbelianGroupAxioms"]
 ```
 <!-- => the structure-aware front + the fixed Portfolio tail -->
 
@@ -152,7 +152,7 @@ Large theories carry axioms that no proof of the current goal needs.  [TRelevant
 
 ```wl
 TRelevantAxioms[
-    Inactive[Equal][x*y, y*x],
+    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
     "AbelianGroupAxioms",
     Method -> {"AxiomRelevance" -> "Safe"}]
 ```
@@ -185,7 +185,7 @@ The last positional argument selects what [TFindProof]() returns:
 Available keys: `"ProofObject"` (default; the bare object), `"Lemmas"` (the completed rule set), `"PreprocessedAxioms"` (the normalised axioms fed to the engine), `"RelevantAxioms"` ([TRelevantAxioms]()'s keep / drop partition), `"RawTrace"` (the decoded completion trace), `"Statistics"` (a small run-stats Association), `"Status"` (`"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"`).
 
 ```wl
-TFindProof[Inactive[Equal][x*y, y*x], "AbelianGroupAxioms", All]
+TFindProof[Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x], "AbelianGroupAxioms", All]
 ```
 <!-- => <|"ProofObject" -> _, "Status" -> "Proved", "Lemmas" -> {...}, ...|> -->
 

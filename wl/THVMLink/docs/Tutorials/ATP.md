@@ -29,7 +29,7 @@ The ATP context is its own load. The thvm context only carries the IC primitives
 Needs["THVMLink`ATP`"];
 ```
 
-Equational axioms can be supplied directly, or as a name resolved through the built-in [AxiomaticTheory](). Variables are written as patterns (`x_`, `y_`); the engine treats them as universally-quantified meta-variables.
+Equational axioms can be supplied directly, or as a name resolved through the built-in [AxiomaticTheory](). Variables are written as patterns (`x_`, `y_`); the engine treats them as universally-quantified meta-variables. Use a non-`Orderless` operator (`CircleTimes` / `CenterDot` / a function head like `f[x, y]`) when both sides of a conjecture must differ - Wolfram's `Times` sorts its operands at parse time, so `x*y == y*x` reads as `x*y == x*y` and never reaches the engine as a non-trivial goal.
 
 ---
 
@@ -48,17 +48,17 @@ The returned object speaks the standard `ProofObject` interface: `p["ProofDatase
 Mix an explicit conjecture against a named theory:
 
 ```wl
-TFindProof[Inactive[Equal][x*y*z, z*y*x], "AbelianGroupAxioms"]
+TFindProof[Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x], "AbelianGroupAxioms"]
 ```
 
-Pass both arguments explicitly when there's no canonical name for the axiom set - typical when working with a custom theory:
+Pass both arguments explicitly when there's no canonical name for the axiom set - typical when working with a custom theory.  `e` is a fresh constant symbol for the identity; `inv` a fresh function head for the inverse:
 
 ```wl
 TFindProof[
-    Inactive[Equal][x*y, y*x],
-    {Inactive[Equal][x*(y*z), (x*y)*z],
-     Inactive[Equal][x*1, x],
-     Inactive[Equal][x*inv[x], 1]}
+    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
+    {Inactive[Equal][x \[CircleTimes] (y \[CircleTimes] z), (x \[CircleTimes] y) \[CircleTimes] z],
+     Inactive[Equal][x \[CircleTimes] e, x],
+     Inactive[Equal][x \[CircleTimes] inv[x], e]}
 ]
 ```
 
@@ -66,19 +66,20 @@ A list-valued conjecture (a multi-equation theorem, e.g. one of the entries in `
 
 ## Single-argument completion
 
-Drop the conjecture entirely and `TFindProof` runs saturation as its own deliverable - it returns the completed rule set as a list of `Inactive[Equal]` lemmas. Bound it with `TimeConstraint`, since non-terminating axiom sets never saturate:
+Drop the conjecture entirely and `TFindProof` runs saturation as its own deliverable. The default return is a `ProofObject` with `"Theorems" -> None` - same shape as the goal-directed call, just with a goalless proof slot. Bound it with `TimeConstraint`, since non-terminating axiom sets never saturate:
 
 ```wl
 TFindProof["AbelianGroupAxioms", TimeConstraint -> 5]
 ```
-<!-- => {Inactive[Equal][...], ...} -->
+<!-- => ProofObject[<|"Theorems" -> None, "Axioms" -> {...}, ...|>] -->
 
-The same call works on a list of axioms. Pair it with `"RawTrace"` to get the decoded saturation trace alongside the lemmas:
+Pass `"Lemmas"` (or any other return spec) when you want just the saturated rule set as a list of `Inactive[Equal]` equations:
 
 ```wl
 TFindProof[
-    {Inactive[Equal][x*(y*z), (x*y)*z], Inactive[Equal][x*1, x]},
-    "RawTrace",
+    {Inactive[Equal][x \[CircleTimes] (y \[CircleTimes] z), (x \[CircleTimes] y) \[CircleTimes] z],
+     Inactive[Equal][x \[CircleTimes] e, x]},
+    "Lemmas",
     TimeConstraint -> 3
 ]
 ```
@@ -88,7 +89,7 @@ TFindProof[
 The last positional argument selects what `TFindProof` returns. A single string returns that bare value; a list returns an Association keyed by the requested names; `All` returns every output:
 
 ```wl
-TFindProof[Inactive[Equal][x*y, y*x], "AbelianGroupAxioms", All]
+TFindProof[Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x], "AbelianGroupAxioms", All]
 ```
 <!-- => <|"ProofObject" -> _, "Status" -> "Proved", "Lemmas" -> {...},
         "PreprocessedAxioms" -> {...}, "RelevantAxioms" -> <|...|>,
@@ -116,7 +117,7 @@ Pass a single Association as `Method`:
 
 ```wl
 TFindProof[
-    Inactive[Equal][x*y, y*x],
+    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
     "AbelianGroupAxioms",
     Method -> {"Completion",
         "Ordering"          -> "LPO",
@@ -155,7 +156,7 @@ A portfolio is a schedule of single-config Methods tried in turn; the first that
 
 ```wl
 TFindProof[
-    Inactive[Equal][x*y*z, z*y*x],
+    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
     "AbelianGroupAxioms",
     Method         -> "VampirePortfolio",
     TimeConstraint -> 30,
@@ -176,7 +177,7 @@ TAtpSchedule["VampirePortfolio"]
 
 ```wl
 TAtpSchedule[Automatic,
-    Inactive[Equal][x*y, y*x],
+    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
     "AbelianGroupAxioms"]
 ```
 <!-- => structure-aware front + the fixed Portfolio tail -->
@@ -195,7 +196,7 @@ Large theories carry axioms that no proof of the current goal needs. [TRelevantA
 
 ```wl
 TRelevantAxioms[
-    Inactive[Equal][x*y, y*x],
+    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
     "AbelianGroupAxioms",
     Method -> {"AxiomRelevance" -> "Safe"}]
 ```
@@ -217,9 +218,9 @@ Modes:
 
 ```wl
 TATP[
-    {Inactive[Equal][x*1, x],
-     Inactive[Equal][x*inv[x], 1],
-     Inactive[Equal][x*(y*z), (x*y)*z]},
+    {Inactive[Equal][x \[CircleTimes] e, x],
+     Inactive[Equal][x \[CircleTimes] inv[x], e],
+     Inactive[Equal][x \[CircleTimes] (y \[CircleTimes] z), (x \[CircleTimes] y) \[CircleTimes] z]},
     Inactive[Equal][inv[inv[x]], x]
 ]
 ```
