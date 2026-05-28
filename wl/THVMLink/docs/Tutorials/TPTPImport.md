@@ -101,7 +101,7 @@ What TPTP encodes vs what thvm consumes:
 | `cnf` equations   | Full   | Each `=`/`!=` literal -> an axiom / goal      |
 | `cnf` non-equality literals | Partial | Universal `p(...)` and Skolemized goals route through; predicate-only clauses become equational `p(...) = TRUE` |
 | `fof` equational  | Full   | Universal quantifier handled via WL `Pattern`  |
-| `fof` Boolean structure | Partial | `&`, `|`, `~`, `=>`, `<=>` translated to WL Boolean equivalents |
+| `fof` Boolean structure | Partial | `&`, `\|`, `~`, `=>`, `<=>` translated to WL Boolean equivalents |
 | `fof` mixed quantifiers | Skolemized | Existentials get fresh Skolem constants     |
 | `tff`/`tcf`/`thf` | Skeleton | Type/term distinction parsed; type annotations dropped before dispatch |
 | `include('path')` | Full   | Recursive include; relative to source file    |
