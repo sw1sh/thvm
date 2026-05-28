@@ -1751,16 +1751,29 @@ static u8 atp_dt_leaf_match(u32 node) {
 // drops call overhead on the CTR spine and bounds the recursion depth
 // to the path's STAR-edge count, so a deep (ATP_DT_FLAT_CAP-long)
 // subject cannot overflow the stack.
+static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth);
 static u8 atp_dt_descend(u32 node, u32 pos) {
+  return atp_dt_descend_rec(node, pos, 0u);
+}
+static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
   AtpFvIndex *ix = g_atp_dt_ix;
+  // Hard recursion-depth cap.  Under the Waldmeister + LRS + Random
+  // combo the DT can develop a STAR-edge cycle (5000+ frames observed
+  // before stack overflow on andassoc).  Cap well below the 512KB
+  // thread-stack guard at ~100 bytes/frame.  Returning no-match is
+  // sound: any CP genuinely subsuming the subject would be reached
+  // before this depth in a well-formed DT.
+  if (depth >= 1024u) return 0;
   for (;;) {
     ix->q_nodevisits++;
     if (pos == g_atp_dt_flatlen) {
       // Whole subject consumed -- this node's records are leaves.
       return atp_dt_leaf_match(node);
     }
+    if (pos > g_atp_dt_flatlen) return 0;   // overshoot safety
     u32  sz         = g_atp_dt_subsz[pos];   // preorder span of t's subtree
     u32  csym_exact = g_atp_dt_flatsym[pos]; // CTR_BASE+lab / NUM / STAR+idx
+    if (sz == 0u) return 0;                  // would stall at same pos
     u32  ctr_next   = ATP_DT_NIL;            // the lone CTR/NUM-match child
     for (u32 c = ix->nodes[node].child; c != ATP_DT_NIL;
          c = ix->nodes[c].sibling) {
@@ -1774,13 +1787,13 @@ static u8 atp_dt_descend(u32 node, u32 pos) {
         u32 bound = g_atp_dt_star[k];
         if (bound == 0) {
           g_atp_dt_star[k] = pos;             // first occurrence: bind
-          u8 hit = atp_dt_descend(c, pos + sz);
+          u8 hit = atp_dt_descend_rec(c, pos + sz, depth + 1u);
           g_atp_dt_star[k] = 0;               // unbind on backtrack
           if (hit) return 1;
         } else if (g_atp_dt_subsz[bound] == sz &&
                    memcmp(&g_atp_dt_flatsym[bound], &g_atp_dt_flatsym[pos],
                           (size_t)sz * sizeof(u32)) == 0) {
-          if (atp_dt_descend(c, pos + sz)) return 1;
+          if (atp_dt_descend_rec(c, pos + sz, depth + 1u)) return 1;
         }
       } else if (csym == csym_exact) {
         // Stored CTR/NUM equal to t's own symbol -- consume t's head;
