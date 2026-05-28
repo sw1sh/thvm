@@ -445,16 +445,58 @@ static u32 bufferize_reduce_count(void) {
 // tile-jit path.  Returning the absorbing boundary's op lets the
 // rule gate inlining on the consumer being a non-REDUCE root.
 static u64 bufferize_absorbing_boundary(u64 start_loc, u32 hops_left) {
+  // THVM_BUFFERIZE_DEBUG=1: trace the absorbing-root walk so we can
+  // diagnose REDUCE-chain fusion failures.  Print the start node, then
+  // each parent hop with its op + realized flag.  When the walk bails
+  // (multi-parent, no parent, or hop limit), explain why.  Used to
+  // localize cases where a REDUCE-into-REDUCE chain like kid 105 ->
+  // kid 106 on beautiful_mnist isn't seen as such by this pass.
+  int trace = 0;
+  {
+    static int known = 0, on = 0;
+    if (!known) {
+      char const *e = getenv("THVM_BUFFERIZE_DEBUG");
+      on = (e != NULL && e[0] == '1');
+      known = 1;
+    }
+    trace = on;
+  }
+  if (trace) {
+    u32 sidx = bufferize_info_find(start_loc);
+    u8  sop  = (sidx != 0xFFFFFFFFu) ? BUFFERIZE_NODES[sidx].op : 0xFF;
+    fprintf(stderr, "[bufdbg] absorb walk start: loc=%llu op=%u realized=%u\n",
+            (unsigned long long)start_loc,
+            sop,
+            (sidx != 0xFFFFFFFFu) ? BUFFERIZE_NODES[sidx].realized : 0);
+  }
   u64 cur = start_loc;
   while (hops_left > 0) {
     u64 next = bufferize_unique_uop_parent(cur);
-    if (next == 0) return 0;
+    if (next == 0) {
+      if (trace) fprintf(stderr, "[bufdbg]   bail: no unique parent for loc=%llu\n",
+                         (unsigned long long)cur);
+      return 0;
+    }
     u32 idx = bufferize_info_find(next);
-    if (idx == 0xFFFFFFFFu) return 0;
-    if (BUFFERIZE_NODES[idx].realized) return next;
+    if (idx == 0xFFFFFFFFu) {
+      if (trace) fprintf(stderr, "[bufdbg]   bail: parent loc=%llu not in BUFFERIZE_NODES\n",
+                         (unsigned long long)next);
+      return 0;
+    }
+    if (trace) fprintf(stderr, "[bufdbg]   hop %u: loc=%llu op=%u realized=%u\n",
+                       hops_left,
+                       (unsigned long long)next,
+                       BUFFERIZE_NODES[idx].op,
+                       BUFFERIZE_NODES[idx].realized);
+    if (BUFFERIZE_NODES[idx].realized) {
+      if (trace) fprintf(stderr, "[bufdbg]   -> absorb root op=%u\n",
+                         BUFFERIZE_NODES[idx].op);
+      return next;
+    }
     cur = next;
     hops_left--;
   }
+  if (trace) fprintf(stderr, "[bufdbg]   bail: exhausted hops\n");
   return 0;
 }
 
@@ -888,24 +930,58 @@ fn void bufferize_classify(Term root) {
           if (!skip_seed) {
             char const *_riri_e =
                 getenv("THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED");
-            if (_riri_e != NULL && _riri_e[0] == '1') {
-              // Use cmap edge count, not consumer_count: the kid 105 ->
-              // kid 106 conv-input-grad pattern has its consumer reached
-              // through a DP0/DP1 projection (grad cell), which adds a
-              // cmap edge but doesn't bump consumer_count (see the
-              // bufferize_walk_rec DP-unwrap path).  Gating on
-              // consumer_count == 1 would miss grad-side REDUCE->REDUCE
-              // fusions entirely.
-              u64 cons[2];
-              u32 n_cons = bufferize_consumers_for_loc(info->loc, cons, 2);
-              if (n_cons == 1) {
-                u32 cidx = bufferize_info_find(cons[0]);
-                if (cidx != 0xFFFFFFFFu
-                    && BUFFERIZE_NODES[cidx].op == UOP_REDUCE
-                    && !(BUFFERIZE_NODES[cidx].reasons & BUFFERIZE_REASON_MATMUL)) {
-                  skip_seed = 1;
+            int riri_on = (_riri_e != NULL && _riri_e[0] == '1');
+            char const *_dbg = getenv("THVM_BUFFERIZE_DEBUG");
+            int dbg_on = (_dbg != NULL && _dbg[0] == '1');
+            // Walk through layout-only movement ops (RESHAPE/PERMUTE/
+            // EXPAND/SHRINK/PAD/FLIP) looking for the next UOP_REDUCE
+            // consumer.  Direct REDUCE->REDUCE in the bufferize graph
+            // is rare; the kid 105 -> kid 106 conv-input-grad pattern
+            // on beautiful_mnist has a RESHAPE between them, and many
+            // grad-chained reduces have multiple movement hops.  Use
+            // cmap edges (not consumer_count) so DP-grad projections
+            // count.  Each hop must be unique-consumer to be safe to
+            // fuse; multi-consumer movement means the source has fan-
+            // out and recycling its bytes through fusion is wrong.
+            u64 cons[4];
+            u32 n_cons = bufferize_consumers_for_loc(info->loc, cons, 4);
+            int consumer_is_reduce = 0;
+            u32 next_reduce_idx = 0xFFFFFFFFu;
+            u32 movement_hops = 0;
+            u8  walk_op = 0xFF;
+            if (n_cons == 1) {
+              u64 cur = cons[0];
+              for (u32 hop = 0; hop < 8; hop++) {
+                u32 cidx = bufferize_info_find(cur);
+                if (cidx == 0xFFFFFFFFu) break;
+                walk_op = BUFFERIZE_NODES[cidx].op;
+                if (walk_op == UOP_REDUCE) {
+                  if (!(BUFFERIZE_NODES[cidx].reasons & BUFFERIZE_REASON_MATMUL)) {
+                    consumer_is_reduce = 1;
+                    next_reduce_idx = cidx;
+                  }
+                  break;
                 }
+                int is_movement = (walk_op == UOP_RESHAPE || walk_op == UOP_PERMUTE
+                                || walk_op == UOP_EXPAND  || walk_op == UOP_SHRINK
+                                || walk_op == UOP_PAD     || walk_op == UOP_FLIP);
+                if (!is_movement) break;
+                movement_hops++;
+                u64 next_cons[2];
+                if (bufferize_consumers_for_loc(cur, next_cons, 2) != 1) break;
+                cur = next_cons[0];
               }
+            }
+            if (dbg_on) {
+              fprintf(stderr,
+                      "[bufdbg] riri: reduce loc=%llu n_consumers=%u walk: %u movement hops, final_op=%u consumer_is_reduce=%d riri_knob=%d -> skip_seed=%d\n",
+                      (unsigned long long)info->loc, n_cons,
+                      movement_hops, walk_op,
+                      consumer_is_reduce, riri_on,
+                      (riri_on && consumer_is_reduce));
+            }
+            if (riri_on && consumer_is_reduce) {
+              skip_seed = 1;
             }
           }
           if (!skip_seed) {
