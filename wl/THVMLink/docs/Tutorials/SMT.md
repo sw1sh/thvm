@@ -18,7 +18,7 @@ When the conjecture and every axiom are *ground* - no variables - the problem co
 
 - [TSatEUF]() - raw decision procedure over a list of equalities and disequalities.
 - [TSmtDecide]() - DPLL(T) lift to arbitrary Boolean combinations of equality atoms.
-- [TFindProofSMT]() - entailment surface that reduces `H ⊨ G` to satisfiability of <code>H ∧ ¬G</code>.
+- [TFindProofSMT]() - entailment surface that reduces `H |= G` to satisfiability of `H && !G`.
 
 The same engines are reachable from [TFindProof]() via `Method -> "SMT"`. TPTP problem files drop in directly: `File["...p"]` or a `cnf/fof` string at any of the three entries triggers the shared TPTP parser before dispatch.
 
@@ -69,7 +69,7 @@ TSmtDecide[((a == b && c == d) || x == y) && f[a, c] != f[b, d] && x != y]
 ```
 <!-- => <|"Status" -> "UNSAT"|> -->
 
-The second example exercises the theory-conflict path: the SAT shell picks the <code>(a==b ∧ c==d)</code> disjunct as the candidate model, congruence closure fires inside it and discovers `f[a, c] == f[b, d]`, which contradicts the stated disequality; the alternative `x == y` branch is already excluded; UNSAT.
+The second example exercises the theory-conflict path: the SAT shell picks the `(a==b && c==d)` disjunct as the candidate model, congruence closure fires inside it and discovers `f[a, c] == f[b, d]`, which contradicts the stated disequality; the alternative `x == y` branch is already excluded; UNSAT.
 
 A SAT verdict comes with a satisfying assignment:
 
@@ -82,7 +82,7 @@ The algorithm is the textbook lazy DPLL(T) shell: each equality/disequality atom
 
 ## Entailment surface
 
-[TFindProofSMT]() reduces an entailment `H1, ..., Hn ⊨ G` to a satisfiability query on <code>H1 ∧ ... ∧ Hn ∧ ¬G</code>:
+[TFindProofSMT]() reduces an entailment `H1, ..., Hn |= G` to a satisfiability query on `H1 && ... && Hn && !G`:
 
 ```wl
 TFindProofSMT[a == c, {a == b, b == c}]
@@ -97,7 +97,7 @@ TFindProofSMT[Implies[a == b && b == c, a == c]]
 ```wl
 TFindProofSMT[a == c, {a == b}]
 ```
-<!-- => $Failed -- counter-model exists -->
+<!-- => $Failed - counter-model exists -->
 
 The `Method` field discloses which engine handled the call: pure congruence closure for equality-literal goals, DPLL(T) + congruence closure for Boolean-combination goals.
 
