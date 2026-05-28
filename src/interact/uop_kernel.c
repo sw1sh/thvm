@@ -181,6 +181,22 @@ fn void kernel_fire_by_id(u32 kid) {
       jit_capture_record((u32)(ke - KERNELS),
                          in_buf_ids, ke->n_inputs, out_buf_id);
     }
+    // THVM_DISPATCH_TRACE=1: one line per actual dispatch, with the
+    // fire-gen + scope depth + capturing flag.  Used to localize
+    // redundant re-dispatch (e.g. a kernel firing N x per step): if the
+    // same kid logs many lines with DIFFERENT fire_gen, the redundancy
+    // is multiple fire scopes; with the SAME fire_gen it's a memo miss.
+    {
+      static int dt_known = 0, dt_on = 0;
+      if (!dt_known) { char const *e = getenv("THVM_DISPATCH_TRACE");
+                       dt_on = (e != NULL && e[0] == '1'); dt_known = 1; }
+      if (dt_on) {
+        fprintf(stderr, "[dispatch] kid=%u gen=%u depth=%u cap=%d out_buf=%u\n",
+                (u32)(ke - KERNELS), KERNEL_FIRE_GEN, KERNEL_FIRE_SCOPE_DEPTH,
+                jit_is_capturing() ? 1 : 0, out_buf_id);
+        fflush(stderr);
+      }
+    }
     b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   }
 
