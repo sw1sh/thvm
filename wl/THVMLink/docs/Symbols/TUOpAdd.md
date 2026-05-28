@@ -50,11 +50,11 @@ TTensorData @ TRealize @ TUOpMul[TUOpAdd[x, y], TUOpAdd[x, y]]
 
 ```wl
 W = TGlorot[{3, 8}];
-x = TTensorCreate[ConstantArray[1., {3}]];
+x = TTensorCreate[ConstantArray[1., {1, 3}]];
 b = TZeros[{8}];
 TTensorShape @ TRealize @ TLinear[x, W, b]
 ```
-<!-- => {8} -->
+<!-- => {1, 8} - TLinear lowers to TMatMul, which expects rank >= 2 inputs -->
 
 ## Properties and Relations
 

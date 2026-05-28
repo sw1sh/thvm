@@ -27,7 +27,7 @@ Snapshot the plan for a tiny forward pass:
 ```wl
 Needs["THVMLink`"];
 TInit[];
-W = TGlorot[{4, 8}]; b = TZeros[{8}]; x = TTensorCreate[ConstantArray[1., {4}]];
+W = TGlorot[{4, 8}]; b = TZeros[{8}]; x = TTensorCreate[ConstantArray[1., {1, 4}]];
 TMaterialize @ TLinear[x, W, b];
 TMemoryPlan[]
 ```

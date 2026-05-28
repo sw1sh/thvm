@@ -68,7 +68,7 @@ TBenchExport[
             TInit[];
             $W = TGlorot[{16, 32}];
             $b = TZeros[{32}];
-            $x = TTensorCreate[ConstantArray[1., {16}]]
+            $x = TTensorCreate[ConstantArray[1., {1, 16}]]
         ],
         "StepFn"   -> Function[Null, TRealize @ TLinear[$x, $W, $b]],
         "NumSteps" -> 20

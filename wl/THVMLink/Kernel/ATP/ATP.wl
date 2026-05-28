@@ -2005,6 +2005,20 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
         ];
         hypKey = {$HypothesisSym, 1};
 
+        (* No-goal saturation: the conjPair is (0, 0) and mainSteps is
+           empty.  Drive resolveTrace over each surviving main-rule
+           (resolveRule maps live-rule index -> trace index), so the
+           dataset surfaces ONLY the saturated rule set (the
+           "compatible lemmas") as CriticalPairLemma entries with full
+           Construct / Position / Rule / Orientation provenance the
+           goal-directed buildCplDataset would emit. *)
+        If[ conjPair === {0, 0} && mainSteps === {},
+            Do[
+                Quiet @ Check[resolveRule[k - 1], Null,
+                    {General::stop}],
+                {k, Length[mainRules]}];
+            Throw[Join[axiomEntries, entries]]];
+
         (* the goal chain: each MainStep rewrites one side of the
            running equation, citing its (resolved) rule. *)
         If[ mainSteps === {},
@@ -4215,7 +4229,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
 atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
     Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime,
-            axEq, varNames, lemmaEq, axDataset, lemmaDataset, po},
+            axEq, varNames, ds, po},
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], 0.];
         (* Encode with a None conjecture: the packed goal pair is (0, 0),
@@ -4225,28 +4239,35 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
             enc, OptionValue[MaxSteps], atpWall,
             Sequence @@ atpMethodCfg];
-        (* Construct a ProofObject with "Theorems" -> None.  The Proof
-           dataset uses the same {Type, Index} -> <|Statement, Proof|>
-           shape the goal-directed buildCplDataset emits, with the
-           saturated rule set surfaced as CriticalPairLemma entries so
-           the standard ProofObject "Lemmas" / "ProofGraph" accessors
-           see them (matching the FindEquationalProof convention). *)
+        (* Construct a ProofObject with "Theorems" -> None.  Use the
+           same buildCplDataset path the goal-directed bundle uses,
+           which now recognises the (conjPair == {0, 0}, no main
+           steps) no-goal mode and enumerates every TRACE_CP entry so
+           the dataset surfaces the saturated rule set with full
+           Construct / Position / Rule / Orientation provenance - same
+           shape as the goal-directed case, minus Hypothesis and
+           Conclusion (no goal). *)
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         varNames = cRes["VarSyms"];
-        lemmaEq = atpMainRulesLemmas[cRes];
-        axDataset = MapIndexed[
-            Function[{eq, idx}, {"Axiom", First[idx]} ->
-                <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
-                  "Proof" -> <||>|>],
-            axEq];
-        lemmaDataset = MapIndexed[
-            Function[{eq, idx}, {"CriticalPairLemma", First[idx]} ->
-                <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
-                  "Proof" -> <||>|>],
-            lemmaEq];
-        po = ProofObject["EquationalLogic", None, axEq,
-            <|"Variables" -> varNames, "Constants" -> {},
-              "Proof" -> Join[axDataset, lemmaDataset]|>];
+        ds = Block[{$RecursionLimit = Max[$RecursionLimit, 16384]},
+            Check[
+                Quiet[buildCplDataset[enc, enc["ConjPair"], cRes],
+                    {General::newsym, RuleDelayed::rhs}],
+                $Failed]];
+        po = If[ ds === $Failed || ! ListQ[ds],
+            (* Fallback: minimal axioms-only dataset so the
+               ProofObject is still ProofObjectQ-valid. *)
+            ProofObject["EquationalLogic", None, axEq,
+                <|"Variables" -> varNames, "Constants" -> {},
+                  "Proof" -> MapIndexed[
+                    Function[{eq, idx}, {"Axiom", First[idx]} ->
+                        <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
+                          "Proof" -> <||>|>],
+                    axEq]|>],
+            ProofObject["EquationalLogic", None, axEq,
+                <|"Variables" -> Union[varNames,
+                    Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
+                  "Constants" -> {}, "Proof" -> ds|>]];
         <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> po,
           "RelevantAxioms" -> <|"Mode" -> None,
               "Kept" -> axioms, "Dropped" -> {}|>,
