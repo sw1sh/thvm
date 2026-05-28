@@ -189,6 +189,60 @@ TFindProof[Inactive[Equal][x*y, y*x], "AbelianGroup", All]
 ```
 <!-- => <|"ProofObject" -> _, "Status" -> "Proved", "Lemmas" -> {...}, ...|> -->
 
+## Recipes
+
+A few combinations that come up often beyond the four [problem-shaped examples](#a-few-problem-shaped-examples) above.
+
+### Maximum CP-queue pruning
+
+Stack the redundancy criteria so the queue stays small over long completions.  Trades CPU time per step against queue-size growth:
+
+```wl
+TFindProof[conjecture, axioms,
+    Method -> {"Completion",
+        "GroundJoin" -> True,
+        "Connectedness" -> True,
+        "BackwardSubsume" -> True,
+        "BackwardDemod" -> True,
+        "AutoMaxWeight" -> 20}]
+```
+
+### Variable-duplicating combinator goal (S, W, M)
+
+Combinator-logic axioms (`S x y z = x z (y z)` etc.) require an ordering that allows variable-duplicating RHS.  LPO does; KBO does not.
+
+```wl
+TFindProof[conjecture, axioms,
+    Method -> {"Completion",
+        "Ordering" -> "LPO",
+        "AutoPrecedence" -> True,
+        "CriticalPairWeight" -> "Add"}]
+```
+
+### Cross-system Sheffer "implies" goals (tight age bias)
+
+The cross-system `ShefferAxioms/ImpliesWolframAxioms` family responds to `Mix2` weight with `SelectionRatio -> 2` - one FIFO pick per two heuristic picks, an aggressive age bias.  See [the upstream finding](https://github.com/sw1sh/thvm) for the sweep.
+
+```wl
+TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
+    Method -> {"Completion",
+        "CriticalPairWeight" -> "Mix2",
+        "SelectionRatio" -> 2,
+        "AutoMaxWeight" -> 20},
+    TimeConstraint -> 30]
+```
+
+### Vampire's McCune cracking config
+
+The single Vampire 5.0.1 portfolio entry that proves `McCuneAxioms/EqualityOfInverses` in the cross-system baseline (`lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=3681690318`) is bundled as `"VampireRandom"`:
+
+```wl
+TFindProof["EqualityOfInverses", "McCuneAxioms",
+    Method -> "VampireRandom", TimeConstraint -> 60]
+```
+
+The seeded xorshift64 inside the random pick makes the trajectory reproducible; pass `"RandomSeed" -> n` to switch seed.
+
 ## Where the code lives
 
 - `wl/THVMLink/Kernel/ATP/ATP.wl` - the WL surface: method parser, preset dispatcher, portfolio scheduler, `Automatic` problem-aware front-load.
