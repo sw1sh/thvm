@@ -606,6 +606,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // includes goal_lhs / goal_rhs labels.
   thvm_atp_set_use_sos(atp, (u8)(use_sos != 0));
 
+  // Method -> {... "RandomRatio" -> n, "RandomSeed" -> u64}: Vampire-
+  // style random CP-selection.  Default 0/0 = off, engine byte-identical.
+  // args[27] = ratio, args[28] = seed.  Seed applied before ratio so the
+  // first random pick is reproducible.
+  mint random_ratio_in = MArgument_getInteger(args[27]);
+  mint random_seed_in  = MArgument_getInteger(args[28]);
+  thvm_atp_set_random_seed(atp, (u64)random_seed_in);
+  thvm_atp_set_random_modulo(atp, random_ratio_in > 0 ? (u32)random_ratio_in : 0u);
+
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
   AtpStatus st = thvm_atp_run(atp);
