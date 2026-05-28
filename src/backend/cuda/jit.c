@@ -708,15 +708,19 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
                 (u32)(ke - KERNELS),
                 CUDA_KE_CACHE[cache_idx].grid_x,
                 CUDA_KE_CACHE[cache_idx].block_x);
-        fprintf(stderr, "  out buf_id=%u dptr=%p nbytes=%llu\n",
+        fprintf(stderr, "  out buf_id=%u dptr=%p nbytes=%llu parent=%u root=%u\n",
                 out_buf_id, (void*)dptrs[0],
-                (unsigned long long)CUDA_BUFS[out_buf_id].nbytes);
+                (unsigned long long)CUDA_BUFS[out_buf_id].nbytes,
+                CUDA_BUFS[out_buf_id].parent_buf_id,
+                cuda_buf_storage_root(out_buf_id));
         for (u32 i = 0; i < n_in; i++) {
           u32 ib = in_buf_ids[i];
-          fprintf(stderr, "  in[%u] buf_id=%u dptr=%p nbytes=%llu refcount=%u pinned=%u\n",
+          fprintf(stderr, "  in[%u] buf_id=%u dptr=%p nbytes=%llu refcount=%u pinned=%u parent=%u root=%u\n",
                   i, ib, (void*)dptrs[1+i],
                   (unsigned long long)CUDA_BUFS[ib].nbytes,
-                  CUDA_BUFS[ib].refcount, CUDA_BUFS[ib].jit_pinned);
+                  CUDA_BUFS[ib].refcount, CUDA_BUFS[ib].jit_pinned,
+                  CUDA_BUFS[ib].parent_buf_id,
+                  cuda_buf_storage_root(ib));
         }
       }
     }

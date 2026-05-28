@@ -1079,8 +1079,17 @@ static void jit_capture_finalize(u32 slot, Term root) {
       u32 const *op_ids = op->heap_in_buf_ids != NULL
                        ? op->heap_in_buf_ids
                        : op->in_buf_ids;
-      // Scan backward for a matching prior DISPATCH.
-      for (i32 jj = (i32)i - 1; jj >= 0; jj--) {
+      // Scan backward for a matching prior DISPATCH.  Optional
+      // THVM_JIT_REPLAY_DEDUP_WINDOW caps the lookback distance --
+      // useful for narrowing down which intermediate is causing
+      // unsafe-skip false positives.
+      i32 window = 0;
+      {
+        char const *we = getenv("THVM_JIT_REPLAY_DEDUP_WINDOW");
+        if (we != NULL) window = atoi(we);
+      }
+      i32 lookback_floor = window > 0 ? (i32)i - window : -1;
+      for (i32 jj = (i32)i - 1; jj > lookback_floor; jj--) {
         JitCaptureOp *prev = &c->ops[jj];
         if (prev->kind != JIT_OP_DISPATCH || prev->replay_skip) continue;
         if (prev->kid != op->kid) continue;
@@ -1123,9 +1132,12 @@ static void jit_capture_finalize(u32 slot, Term root) {
           u32 (*root_of)(u32) = op_backend->buf_storage_root;
           u32 mid_root = root_of != NULL ? root_of(mid_write_buf) : mid_write_buf;
           u32 op_out_root = root_of != NULL ? root_of(op->out_buf_id) : op->out_buf_id;
+          if (dedup_trace) fprintf(stderr, "  [skip_check] mid op%u buf=%u root=%u, op out=%u root=%u\n",
+                          m, mid_write_buf, mid_root, op->out_buf_id, op_out_root);
           if (mid_root == op_out_root) { safe = 0; break; }
           for (u32 k = 0; k < op->n_inputs; k++) {
             u32 op_in_root = root_of != NULL ? root_of(op_ids[k]) : op_ids[k];
+            if (dedup_trace) fprintf(stderr, "    in[%u] buf=%u root=%u\n", k, op_ids[k], op_in_root);
             if (mid_root == op_in_root) { safe = 0; break; }
           }
           if (!safe) break;
