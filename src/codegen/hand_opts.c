@@ -555,14 +555,14 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       if (!hand_opt_snapshot_axes(ke, &ax)) break;
       u64 olp = hand_opt_output_loop_product(&ax);
       u64 us  = hand_opt_upcast_size(&ax);
-      // tinygrad caps upcast_size at 32; on V100 beautiful_mnist BS=128
-      // an A/B sweep (3-trial, post-GROUP_SZ=128 baseline) shows cap=64
-      // saves ~30ms / step (167->136, -18%) and drops peak memory
-      // 2319->1807 MB (-22%) -- the bigger budget lets the multi-UPCAST
-      // loop reach the conv-bwd K-reduce intermediates that fit fewer
-      // accumulators at the tinygrad-faithful 32 cap.  Loss byte-
-      // identical.  Override via THVM_UPCAST_CAP=32 to restore tinygrad.
-      u64 ucap = (u64)hand_opt_getenv_int("THVM_UPCAST_CAP", 64);
+      // tinygrad caps upcast_size at 32.  An earlier session change
+      // (commit 77a7b671) bumped default to 64 citing a ~30ms / step
+      // gain in a low-contention window.  Later 5-trial alternating
+      // bench at BS=128 (proper variance control) showed the gap was
+      // within noise (cap=32: median 240ms; cap=64: median 240ms).
+      // Reverted to tinygrad-faithful 32.  Per-workload tuning via
+      // THVM_UPCAST_CAP=N is still available.
+      u64 ucap = (u64)hand_opt_getenv_int("THVM_UPCAST_CAP", 32);
       if (olp < 1024 || us >= ucap) break;
 
       // Build list of current UPCAST/UNROLL axis_ids for the stride test.
@@ -761,14 +761,12 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         // THVM_LOCAL_INNER_FIRST=1 reverses to (expand=0 first, then
         // highest axis first) -- prioritize INDEX-relevant axes for
         // LOCAL placement, giving better load coalescing for the
-        // innermost-W axis in conv2d kernels.  V100 A/B (post-GROUP_SZ
-        // and -UPCAST_CAP=64 baseline) showed inner-first saves ~30ms
-        // / step on its own (167->136 median, peak 2319->1807 MB);
-        // combines with the new UPCAST_CAP default at zero extra cost
-        // (both knobs reach the same kernel layout).  Default-ON now;
-        // set THVM_LOCAL_INNER_FIRST=0 to restore the tinygrad-faithful
-        // sort.
-        int inner_first = hand_opt_getenv_int("THVM_LOCAL_INNER_FIRST", 1);
+        // innermost-W axis in conv2d kernels.  Earlier session change
+        // (commit 77a7b671) defaulted to 1 citing ~30ms gain in low-
+        // contention window; later 5-trial alternating bench at BS=128
+        // showed within-noise (= vs OFF: 240 vs 240 ms median).
+        // Reverted to tinygrad-faithful 0; opt in via THVM_LOCAL_INNER_FIRST=1.
+        int inner_first = hand_opt_getenv_int("THVM_LOCAL_INNER_FIRST", 0);
         for (u32 i = 1; i < n_cands; i++) {
           LocalCand k = cands[i];
           i32 j = (i32)i - 1;
