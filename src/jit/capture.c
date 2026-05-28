@@ -1373,8 +1373,12 @@ fn u32 jit_replay(u32 slot) {
       case JIT_OP_ASSIGN: {
         HOT_JIT_REPLAY_ASSIGNS++;
         u32 dst = op->assign_dst_tid, src = op->assign_src_tid;
+        if (trace) fprintf(stderr, "[replay] op%u ASSIGN dst_tid=%u src_tid=%u\n",
+                           i, dst, src);
         if (dst == 0 || dst >= TENS_NEXT) break;
         if (src == 0 || src >= TENS_NEXT) break;
+        if (trace) fprintf(stderr, "[replay]   dst_buf=%u src_buf=%u\n",
+                           TENS[dst].buf_id, TENS[src].buf_id);
         TenDesc *dd = &TENS[dst], *sd = &TENS[src];
         if (dd->backend == NULL || dd->backend != sd->backend) break;
         u32 numel = dd->view.numel;
