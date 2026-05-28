@@ -290,6 +290,9 @@ fn void jit_capture_drop(u32 slot) {
     JIT_ACTIVE_SLOT = 0;
     JIT_PAUSE_DEPTH = 0;
   }
+#ifdef THVM_HAS_CUDA
+  cuda_jit_graph_invalidate(slot);
+#endif
   // Keep the ops buffer allocated -- the slot can be reused for
   // another capture without re-malloc.
 }
@@ -1161,6 +1164,59 @@ fn u32 jit_replay(u32 slot) {
   backend_dispatch_begin_all();
   int trace = getenv("THVM_JIT_REPLAY_TRACE") != NULL;
   if (trace) fprintf(stderr, "[replay] start n_ops=%u\n", c->n_ops);
+
+#ifdef THVM_HAS_CUDA
+  // CUDA Graph fast path: if every op is a CUDA-backend dispatch/copy
+  // and the slot already has a cached CUgraphExec, cuGraphLaunch it
+  // instead of looping over per-op cuLaunchKernel.  Cache miss: capture
+  // this replay's per-op work into a graph, then launch.  See
+  // cuda_jit_graph_replay / cuda_jit_graph_capture_begin in backend/cuda/jit.c.
+  int cuda_only = 1;
+  for (u32 i = 0; i < c->n_ops; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    if (op->replay_skip) continue;
+    Backend *b = NULL;
+    if (op->kind == JIT_OP_DISPATCH) {
+      if (op->kid >= KERNELS_NEXT) { cuda_only = 0; break; }
+      if (KERNELS[op->kid].output_tid >= TENS_NEXT) { cuda_only = 0; break; }
+      b = TENS[KERNELS[op->kid].output_tid].backend;
+    } else if (op->kind == JIT_OP_ASSIGN) {
+      if (op->assign_dst_tid >= TENS_NEXT) { cuda_only = 0; break; }
+      b = TENS[op->assign_dst_tid].backend;
+    }
+    if (b == NULL || b->id != 3 /* CUDA */) { cuda_only = 0; break; }
+  }
+  int cuda_graph_replayed = 0;
+  int cuda_capturing = 0;
+  if (cuda_only && cuda_jit_graph_replay(slot) == 0) {
+    if (trace) fprintf(stderr, "[replay] CUDA graph hit (n_ops=%u)\n", c->n_ops);
+    cuda_graph_replayed = 1;
+    HOT_JIT_GRAPH_RUNS++;
+    for (u32 i = 0; i < c->n_ops; i++) {
+      JitCaptureOp *op = &c->ops[i];
+      if (op->replay_skip) continue;
+      if (op->kind == JIT_OP_DISPATCH) {
+        HOT_KERNEL_FIRES++;
+        HOT_JIT_REPLAY_DISPATCHES++;
+        HOT_JIT_GRAPH_DISPATCHES++;
+      } else {
+        HOT_JIT_REPLAY_ASSIGNS++;
+      }
+      ITRS++;
+    }
+  } else if (cuda_only) {
+    // Cache miss -- capture into a CUgraph as we go through the op loop.
+    if (cuda_jit_graph_capture_begin() == 0) {
+      cuda_capturing = 1;
+      if (trace) fprintf(stderr, "[replay] CUDA graph capturing slot=%u\n", slot);
+    }
+  }
+  if (cuda_graph_replayed) {
+    backend_dispatch_end_all();
+    return c->n_ops;
+  }
+#endif
+
   for (u32 i = 0; i < c->n_ops;) {
 #ifdef THVM_HAS_METAL
     u32 metal_run = jit_replay_try_metal_graph_run(slot, c, i);
@@ -1233,6 +1289,15 @@ fn u32 jit_replay(u32 slot) {
     }
     i++;
   }
+#ifdef THVM_HAS_CUDA
+  if (cuda_capturing) {
+    if (cuda_jit_graph_capture_end_and_launch(slot) != 0) {
+      if (trace) fprintf(stderr, "[replay] CUDA graph capture FAILED -- per-op work already ran on capture stream, results may be missing\n");
+    } else if (trace) {
+      fprintf(stderr, "[replay] CUDA graph captured + launched slot=%u\n", slot);
+    }
+  }
+#endif
   backend_dispatch_end_all();
   return c->n_ops;
 }

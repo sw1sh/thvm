@@ -286,7 +286,7 @@ fn int cuda_jit_launch(CUfunction func,
                               grid_x, 1, 1,      // grid dim
                               block_x, 1, 1,     // block dim
                               0,                 // shared mem bytes
-                              NULL,              // stream (default)
+                              CUDA_CUR_STREAM,   // 0/NULL = default sync
                               args, NULL);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuLaunchKernel", r);
@@ -324,6 +324,163 @@ fn int cuda_jit_launch(CUfunction func,
     }
   }
   return 0;
+}
+
+// CUDA Graph capture/replay -- amortise per-launch overhead across the
+// JIT replay sequence.  tinygrad's CUDA backend captures the captured
+// dispatch sequence into a CUgraph on the first run, then cuGraphLaunch
+// (a single driver call) on every subsequent run.  beautiful_mnist on
+// V100 sees the captured ~120 kernels replay in ~1.6-3ms vs ~100ms+
+// of per-launch overhead via individual cuLaunchKernel.
+//
+// THVM_CUDA_JIT_GRAPH=0 disables (forces per-launch fallback for A/B).
+fn int cuda_jit_graph_enabled(void) {
+  static int init = 0, on = 1;
+  if (!init) {
+    char const *e = getenv("THVM_CUDA_JIT_GRAPH");
+    on = (e == NULL || e[0] != '0');
+    init = 1;
+  }
+  return on;
+}
+
+// Cached fast path: if the slot already has an instantiated CUgraphExec,
+// launch it and return 0.  Caller can skip the per-op replay loop.
+static u64 CUDA_JIT_GRAPH_HITS = 0;
+static u64 CUDA_JIT_GRAPH_CAPS = 0;
+fn u64 cuda_jit_graph_hits(void) { return CUDA_JIT_GRAPH_HITS; }
+fn u64 cuda_jit_graph_captures(void) { return CUDA_JIT_GRAPH_CAPS; }
+
+fn int cuda_jit_graph_replay(u32 slot) {
+  if (!cuda_jit_graph_enabled()) return -1;
+  if (!CUDA_READY) return -1;
+  if (slot >= CUDA_JIT_GRAPH_CACHE_NSLOTS) return -1;
+  if (!CUDA_JIT_GRAPH_CACHE[slot].valid) return -1;
+  CUDA_JIT_GRAPH_HITS++;
+  CUresult r = cuGraphLaunch(CUDA_JIT_GRAPH_CACHE[slot].exec,
+                             CUDA_CAPTURE_STREAM);
+  if (r != CUDA_SUCCESS) {
+    cuda_set_error("cuGraphLaunch", r);
+    if (getenv("THVM_CUDA_JIT_GRAPH_TRACE")) {
+      fprintf(stderr, "thvm: cuGraphLaunch FAIL slot=%u err=%d\n",
+              slot, (int)r);
+    }
+    return -1;
+  }
+  // Sync so the caller sees the work complete (matches the per-launch
+  // path's implicit default-stream ordering: the next CPU read sees
+  // GPU-written data).
+  r = cuStreamSynchronize(CUDA_CAPTURE_STREAM);
+  if (r != CUDA_SUCCESS) {
+    cuda_set_error("cuStreamSynchronize(graph)", r);
+    return -1;
+  }
+  return 0;
+}
+
+// Begin a fresh capture into CUDA_CAPTURE_STREAM.  Subsequent
+// cuLaunchKernel / cuMemcpyDtoDAsync calls (which honor
+// CUDA_CUR_STREAM) get recorded into the in-flight graph instead of
+// running directly.  Returns 0 on success.
+fn int cuda_jit_graph_capture_begin(void) {
+  if (!cuda_jit_graph_enabled()) return -1;
+  if (!CUDA_READY) return -1;
+  if (CUDA_CAPTURE_STREAM == NULL) {
+    CUresult r = cuStreamCreate(&CUDA_CAPTURE_STREAM, CU_STREAM_NON_BLOCKING);
+    if (r != CUDA_SUCCESS) {
+      cuda_set_error("cuStreamCreate(capture)", r);
+      CUDA_CAPTURE_STREAM = NULL;
+      return -1;
+    }
+  }
+  // THREAD_LOCAL: only this thread's CUDA ops are captured; other
+  // threads can do unrelated CUDA work concurrently.  GLOBAL would
+  // serialize the whole process.
+  CUresult r = cuStreamBeginCapture(CUDA_CAPTURE_STREAM,
+                                    CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
+  if (r != CUDA_SUCCESS) {
+    cuda_set_error("cuStreamBeginCapture", r);
+    if (getenv("THVM_CUDA_JIT_GRAPH_TRACE")) {
+      fprintf(stderr, "thvm: cuStreamBeginCapture FAIL err=%d\n", (int)r);
+    }
+    return -1;
+  }
+  CUDA_CUR_STREAM = CUDA_CAPTURE_STREAM;
+  return 0;
+}
+
+// Finalize the in-flight capture, instantiate as a CUgraphExec, cache
+// for this slot, then launch it immediately (the caller wanted the
+// dispatches to actually happen this turn too).  Returns 0 on success.
+// On failure, the cache stays invalid and the caller falls back to the
+// already-completed per-launch path -- nothing was lost since the
+// capture itself executed nothing.
+fn int cuda_jit_graph_capture_end_and_launch(u32 slot) {
+  if (CUDA_CAPTURE_STREAM == NULL) return -1;
+  if (slot >= CUDA_JIT_GRAPH_CACHE_NSLOTS) {
+    cuStreamEndCapture(CUDA_CAPTURE_STREAM, NULL);
+    CUDA_CUR_STREAM = NULL;
+    return -1;
+  }
+  CUgraph g = NULL;
+  CUresult r = cuStreamEndCapture(CUDA_CAPTURE_STREAM, &g);
+  CUDA_CUR_STREAM = NULL;
+  if (r != CUDA_SUCCESS || g == NULL) {
+    cuda_set_error("cuStreamEndCapture", r);
+    if (getenv("THVM_CUDA_JIT_GRAPH_TRACE")) {
+      fprintf(stderr, "thvm: cuStreamEndCapture FAIL err=%d\n", (int)r);
+    }
+    return -1;
+  }
+  CUgraphExec exec = NULL;
+  r = cuGraphInstantiate(&exec, g, 0);
+  if (r != CUDA_SUCCESS) {
+    cuda_set_error("cuGraphInstantiate", r);
+    if (getenv("THVM_CUDA_JIT_GRAPH_TRACE")) {
+      fprintf(stderr, "thvm: cuGraphInstantiate FAIL err=%d\n", (int)r);
+    }
+    cuGraphDestroy(g);
+    return -1;
+  }
+  // Replace any prior cached graph for this slot (jit recapture path).
+  if (CUDA_JIT_GRAPH_CACHE[slot].valid) {
+    cuGraphExecDestroy(CUDA_JIT_GRAPH_CACHE[slot].exec);
+    cuGraphDestroy   (CUDA_JIT_GRAPH_CACHE[slot].graph);
+  }
+  CUDA_JIT_GRAPH_CACHE[slot].graph = g;
+  CUDA_JIT_GRAPH_CACHE[slot].exec  = exec;
+  CUDA_JIT_GRAPH_CACHE[slot].valid = 1;
+  CUDA_JIT_GRAPH_CAPS++;
+  if (getenv("THVM_CUDA_JIT_GRAPH_TRACE")) {
+    size_t n_nodes = 0;
+    cuGraphGetNodes(g, NULL, &n_nodes);
+    fprintf(stderr, "thvm: cuGraph captured slot=%u nodes=%zu\n",
+            slot, n_nodes);
+  }
+  // Launch the cached graph now so the captured work actually runs.
+  r = cuGraphLaunch(exec, CUDA_CAPTURE_STREAM);
+  if (r != CUDA_SUCCESS) {
+    cuda_set_error("cuGraphLaunch(first)", r);
+    return -1;
+  }
+  r = cuStreamSynchronize(CUDA_CAPTURE_STREAM);
+  if (r != CUDA_SUCCESS) {
+    cuda_set_error("cuStreamSynchronize(graph-first)", r);
+    return -1;
+  }
+  return 0;
+}
+
+// Slot recapture / jit_capture_drop hook: invalidate any cached graph
+// so the next replay re-captures the (possibly changed) sequence.
+fn void cuda_jit_graph_invalidate(u32 slot) {
+  if (slot >= CUDA_JIT_GRAPH_CACHE_NSLOTS) return;
+  if (!CUDA_JIT_GRAPH_CACHE[slot].valid) return;
+  cuGraphExecDestroy(CUDA_JIT_GRAPH_CACHE[slot].exec);
+  cuGraphDestroy   (CUDA_JIT_GRAPH_CACHE[slot].graph);
+  CUDA_JIT_GRAPH_CACHE[slot].exec  = NULL;
+  CUDA_JIT_GRAPH_CACHE[slot].graph = NULL;
+  CUDA_JIT_GRAPH_CACHE[slot].valid = 0;
 }
 
 // DAG-mode dispatch geometry: derive (grid_x, block_x) from the lifted
