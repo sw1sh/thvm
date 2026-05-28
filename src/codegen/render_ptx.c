@@ -594,10 +594,10 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         // Promoted parallel axis: decode a<id> from the flat thread id
         // rather than opening a serial loop.  a<id> = tid (n_globals==1),
         // or (tid / stride) % mod for a multi-axis grid.
-        if (ctx->has_geom && axis_id < 256
-            && ctx->gd.modulus_of_axis[axis_id] != 0) {
-          u32 stride = ctx->gd.stride_of_axis[axis_id];
-          u32 mod    = ctx->gd.modulus_of_axis[axis_id];
+        if (ctx->has_geom
+            && rmu_gd_g_mod(&ctx->gd, axis_id) != 0) {
+          u32 stride = rmu_gd_g_stride(&ctx->gd, axis_id);
+          u32 mod    = rmu_gd_g_mod(&ctx->gd, axis_id);
           char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
           ptx_reg_put(ctx, t, r);
           if (ctx->gd.n_globals == 1) {
@@ -612,11 +612,11 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
           break;
         }
         // LOCAL (threadgroup-bound) axis: decode from %tid.x ("tt").
-        if (ctx->has_geom && axis_id < 256
-            && ctx->gd.local_modulus_of_axis[axis_id] != 0
+        if (ctx->has_geom
+            && rmu_gd_l_mod(&ctx->gd, axis_id) != 0
             && ctx->local_reg[0] != '\0') {
-          u32 lstride = ctx->gd.local_stride_of_axis[axis_id];
-          u32 lmod    = ctx->gd.local_modulus_of_axis[axis_id];
+          u32 lstride = rmu_gd_l_stride(&ctx->gd, axis_id);
+          u32 lmod    = rmu_gd_l_mod(&ctx->gd, axis_id);
           char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
           ptx_reg_put(ctx, t, r);
           if (ctx->gd.n_locals == 1) {

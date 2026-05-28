@@ -1273,11 +1273,11 @@ static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
 // dispatch index `tid`.  rmu_emit_store builds this once pre-loop and
 // threads it through to rmu_emit_range_open_ctx.
 //
-//   modulus_of_axis[axis_id] = this axis's extent (0 if not promoted)
-//   stride_of_axis [axis_id] = product of inner promoted-GLOBAL
-//                              extents (1 for the innermost)
-//   n_globals                = count of promoted axes
-//   total                    = product of all promoted extents
+//   rmu_gd_g_mod(gd, axis_id)    = this axis's extent (0 if not promoted)
+//   rmu_gd_g_stride(gd, axis_id) = product of inner promoted-GLOBAL
+//                                  extents (1 for the innermost)
+//   n_globals                    = count of promoted axes
+//   total                        = product of all promoted extents
 //                              (== output_numel; the dispatcher
 //                              launches >= this many threads and the
 //                              kernel guards `tid >= total`)
@@ -1309,18 +1309,47 @@ static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
 // fast path (`uint l0 = tt;`) is just the n==1 case (stride 1).  The
 // threadgroup size is the product of all LOCAL extents; the heuristic
 // keeps it <= 256 (Apple's maxTotalThreadsPerThreadgroup is 1024).
+// Dense (axis_id, stride, modulus) tables.  Indexing by raw axis_id with
+// a fixed [256] array silently dropped any axis whose id >= 256 -- and
+// thvm axis_ids are GLOBAL (accumulate across the whole DAG), so deep
+// backward graphs reach ids in the hundreds.  A dropped axis fell through
+// to the serial-loop / raw-`tt` fallback in rmu_emit_range_open_ctx, so
+// the full beautiful_mnist LeNet's conv kernels rendered single-threaded
+// and nvrtc choked.  A kernel has <= RMU_MAX_RANGES axes, so a dense list
+// + linear scan is both correct (no id ceiling) and cheap.
 typedef struct {
-  u32 stride_of_axis [256];   // GLOBAL axes: stride into the `tg` flat decode
-  u32 modulus_of_axis[256];   // GLOBAL axes: extent (0 if not promoted)
+  u32 g_aid   [RMU_MAX_RANGES]; // promoted-GLOBAL axis_id
+  u32 g_stride[RMU_MAX_RANGES]; // stride into the `tg`/`tid` flat decode
+  u32 g_mod   [RMU_MAX_RANGES]; // extent
   u32 n_globals;
   u64 total;                  // product of promoted-GLOBAL extents
   int has_local;              // 1 -> decode GLOBAL axes from `tg`, not `tid`
-  // LOCAL-axis decode (mirrors the GLOBAL arrays but over `tt`).
-  u32 local_stride_of_axis [256];
-  u32 local_modulus_of_axis[256];
+  // LOCAL-axis decode (mirrors the GLOBAL tables but over `tt`).
+  u32 l_aid   [RMU_MAX_RANGES];
+  u32 l_stride[RMU_MAX_RANGES];
+  u32 l_mod   [RMU_MAX_RANGES];
   u32 n_locals;
   u64 local_total;            // product of LOCAL extents (threadgroup size)
 } RmuGlobalDecode;
+
+// Lookups by axis_id (linear scan; n is tiny).  Return 0 modulus = "this
+// axis_id is not a promoted GLOBAL / LOCAL axis".
+static u32 rmu_gd_g_mod(RmuGlobalDecode const *g, u32 aid) {
+  for (u32 i = 0; i < g->n_globals; i++) if (g->g_aid[i] == aid) return g->g_mod[i];
+  return 0;
+}
+static u32 rmu_gd_g_stride(RmuGlobalDecode const *g, u32 aid) {
+  for (u32 i = 0; i < g->n_globals; i++) if (g->g_aid[i] == aid) return g->g_stride[i];
+  return 0;
+}
+static u32 rmu_gd_l_mod(RmuGlobalDecode const *g, u32 aid) {
+  for (u32 i = 0; i < g->n_locals; i++) if (g->l_aid[i] == aid) return g->l_mod[i];
+  return 0;
+}
+static u32 rmu_gd_l_stride(RmuGlobalDecode const *g, u32 aid) {
+  for (u32 i = 0; i < g->n_locals; i++) if (g->l_aid[i] == aid) return g->l_stride[i];
+  return 0;
+}
 
 // Emit a loop opener (or thread-position bind) for a UOP_RANGE leaf.
 // `opt_kind` is the OPT annotation (RMU_NO_OPT if none).
@@ -1370,10 +1399,10 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   // With a single LOCAL axis: `uint aN = tt;`.  With >=2, decode each
   // from `tt` with its own (stride, modulus) -- mirrors multi-GLOBAL.
   if (opt_kind == UOP_OPT_LOCAL || axis_type == 4) {
-    if (gctx != NULL && axis_id < 256
-        && gctx->local_modulus_of_axis[axis_id] != 0 && gctx->n_locals >= 2) {
-      u32 lstride = gctx->local_stride_of_axis[axis_id];
-      u32 lmod    = gctx->local_modulus_of_axis[axis_id];
+    if (gctx != NULL
+        && rmu_gd_l_mod(gctx, axis_id) != 0 && gctx->n_locals >= 2) {
+      u32 lstride = rmu_gd_l_stride(gctx, axis_id);
+      u32 lmod    = rmu_gd_l_mod(gctx, axis_id);
       if (lstride <= 1) {
         fprintf(fp, "uint a%u = tt %% %uu; /* local ext=%u */\n",
                 axis_id, lmod, extent);
@@ -1390,9 +1419,9 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   // (thread_position_in_grid) normally; from `tg`
   // (threadgroup_position_in_grid) when the kernel also has a LOCAL
   // axis (one threadgroup per GLOBAL tuple, LOCAL axis over `tt`).
-  if (gctx != NULL && axis_id < 256 && gctx->modulus_of_axis[axis_id] != 0) {
-    u32 stride = gctx->stride_of_axis[axis_id];
-    u32 mod    = gctx->modulus_of_axis[axis_id];
+  if (gctx != NULL && rmu_gd_g_mod(gctx, axis_id) != 0) {
+    u32 stride = rmu_gd_g_stride(gctx, axis_id);
+    u32 mod    = rmu_gd_g_mod(gctx, axis_id);
     // SIMD_REDUCE: one threadblock = one warp = one output row, so the
     // promoted output axis decodes from the block index `tg` (the same
     // form a LOCAL split uses) -- never the per-thread `tid`, which
@@ -1417,8 +1446,8 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) /*reduce*/ {\n",
             axis_id, axis_id, bound, axis_id);
   } else if (RMU_SIMD_WARP && axis_type == 0 /* KAX_LOOP */
-             && gctx != NULL && axis_id < 256
-             && gctx->modulus_of_axis[axis_id] == 0) {
+             && gctx != NULL
+             && rmu_gd_g_mod(gctx, axis_id) == 0) {
     // SIMD_REDUCE warp-per-row kernel: a reduce-independent broadcast
     // output axis (the unpromoted column) is distributed across the 32
     // warp lanes -- each lane writes a 1/32 stripe of the columns.
@@ -1501,9 +1530,10 @@ static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
     u64 loc = term_val(r);
     u32 axis_id = (u32)term_val(heap_read(loc + 0));
     u32 extent  = (u32)term_val(heap_read(loc + 2));
-    if (axis_id >= 256 || extent == 0) continue;
-    out->stride_of_axis [axis_id] = stride;
-    out->modulus_of_axis[axis_id] = extent;
+    if (extent == 0 || n_glb >= RMU_MAX_RANGES) continue;
+    out->g_aid   [n_glb] = axis_id;
+    out->g_stride[n_glb] = stride;
+    out->g_mod   [n_glb] = extent;
     n_glb++;
     stride *= extent;
     total  *= extent;
@@ -1526,9 +1556,10 @@ static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
       u64 loc = term_val(r);
       u32 axis_id = (u32)term_val(heap_read(loc + 0));
       u32 extent  = (u32)term_val(heap_read(loc + 2));
-      if (axis_id >= 256 || extent == 0) continue;
-      out->local_stride_of_axis [axis_id] = lstride;
-      out->local_modulus_of_axis[axis_id] = extent;
+      if (extent == 0 || n_loc >= RMU_MAX_RANGES) continue;
+      out->l_aid   [n_loc] = axis_id;
+      out->l_stride[n_loc] = lstride;
+      out->l_mod   [n_loc] = extent;
       n_loc++;
       lstride *= extent;
       ltotal  *= extent;
@@ -1616,7 +1647,7 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
                   ? (u32)term_val(heap_read(term_val(r) + 0)) : 0xFFFFFFFFu;
     u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
                   ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
-    int promoted    = (axis_id < 256 && gd.modulus_of_axis[axis_id] != 0);
+    int promoted    = (rmu_gd_g_mod(&gd, axis_id) != 0);
     int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type)
                    || promoted;
     if (out_kinds[i] != RMU_NO_OPT
@@ -3697,7 +3728,12 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // one-thread-per-output shape).  Keeping `c` a serial loop INSIDE
   // the row thread instead lets the row reduction run ONCE per row and
   // the column loop reuse `_accN` -- O(R*C) work, not O(R*C^2).
-  u8  reduce_dep_axis[256] = {0};
+  // Dense list of output axis_ids some reduce depends on (was a [256]
+  // bool keyed by axis_id; axis_ids exceed 255 in deep graphs, so the
+  // fixed array silently dropped large-id axes -> they were never seen
+  // as reduce-dependent and got mis-promoted).  <= RMU_MAX_RANGES axes.
+  u32 reduce_dep_axes[RMU_MAX_RANGES];
+  u32 n_reduce_dep = 0;
   int any_reduce_dep = 0;
   {
     Term hoist_reduces[RMU_MAX_RANGES];
@@ -3714,13 +3750,16 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
         if (term_tag(r_ranges[j]) != TAG_UOP
             || term_ext(r_ranges[j]) != UOP_RANGE) continue;
         u32 ax = (u32)term_val(heap_read(term_val(r_ranges[j]) + 0));
-        if (ax >= 256) continue;
         // Only output axes count: the reduce's own reduce-axis is not
         // a broadcast lever.  An axis is an output axis iff it indexes
         // the store position.
         for (u32 k = 0; k < addr_n; k++) {
           if (addr_axes[k] == ax) {
-            reduce_dep_axis[ax] = 1;
+            int seen = 0;
+            for (u32 m = 0; m < n_reduce_dep; m++)
+              if (reduce_dep_axes[m] == ax) { seen = 1; break; }
+            if (!seen && n_reduce_dep < RMU_MAX_RANGES)
+              reduce_dep_axes[n_reduce_dep++] = ax;
             any_reduce_dep = 1;
             break;
           }
@@ -3764,7 +3803,10 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       // the reduce runs once per reduce-axis tuple, not once per
       // broadcast element.  Pure-elementwise kernels (no reduce, or
       // reduces with no output-axis dependence) keep full promotion.
-      if (any_reduce_dep && axis_id < 256 && !reduce_dep_axis[axis_id]) {
+      int is_reduce_dep = 0;
+      for (u32 m = 0; m < n_reduce_dep; m++)
+        if (reduce_dep_axes[m] == axis_id) { is_reduce_dep = 1; break; }
+      if (any_reduce_dep && !is_reduce_dep) {
         continue;
       }
       promote_global[i] = 1;
@@ -3930,7 +3972,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
                   ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
     // Promoted output axes are thread-bound (decoded from `tid`, no
     // `{` block) just like LOCAL / explicit-GLOBAL axes.
-    int promoted = (axis_id < 256 && g_decode.modulus_of_axis[axis_id] != 0);
+    int promoted = (rmu_gd_g_mod(&g_decode, axis_id) != 0);
     int threadbound = rmu_axis_is_threadbound(opt_kinds[i], axis_type)
                    || promoted;
     if (opt_kinds[i] != RMU_NO_OPT
