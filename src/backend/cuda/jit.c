@@ -915,6 +915,13 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // cg_render_uop_kernel_cuda_root is called directly (rather than via
   // thvm_cuda_render in _.c) because jit.c is #included before _.c --
   // a forward call would hit an implicit declaration.
+  // THVM_CUDA_RENDER_TRACE=1: localize warmup hangs to render vs
+  // canonicalize vs nvrtc.  Prints kid + stage with flush so the LAST
+  // line names the stuck stage.
+  static int rt_known = 0, rt_on = 0;
+  if (!rt_known) { char const *e = getenv("THVM_CUDA_RENDER_TRACE");
+                   rt_on = (e != NULL && e[0] == '1'); rt_known = 1; }
+  u32 rt_kid = (u32)(ke - KERNELS);
   char  *cu  = NULL;
   size_t csz = 0;
   FILE  *cfp = open_memstream(&cu, &csz);
@@ -922,12 +929,14 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- open_memstream failed\n");
     return -1;
   }
+  if (rt_on) { fprintf(stderr, "[render] kid=%u start\n", rt_kid); fflush(stderr); }
   cg_render_uop_kernel_cuda_root(store_root, "k", cfp);
   fclose(cfp);
   if (cu == NULL) {
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- render produced no source\n");
     return -1;
   }
+  if (rt_on) { fprintf(stderr, "[render] kid=%u done sz=%zu, canonicalizing\n", rt_kid, csz); fflush(stderr); }
   {
     // Canonicalize a<N>/_acc<N> ids so structurally-identical kernels
     // produce byte-identical source across steps -> JIT cache HIT
@@ -935,6 +944,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     char *canon = cg_canonicalize_axis_ids(cu);
     if (canon != NULL) { free(cu); cu = canon; }
   }
+  if (rt_on) { fprintf(stderr, "[render] kid=%u canon done, compiling\n", rt_kid); fflush(stderr); }
   // THVM_CUDA_DUMP_KID=<kid>: print this kid's rendered .cu source once
   // (mirrors the CPU THVM_DUMP_KERNEL_SRC env).  Used to inspect
   // hand-coded LOCAL/UPCAST application on a specific hotspot kernel.

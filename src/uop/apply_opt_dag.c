@@ -341,9 +341,26 @@ static u32 apply_opt_dag_collect_ranges(Term root, Term *out, u32 cap) {
 fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   if (k == 0) return 0;
   Term old_leaf = apply_opt_dag_find_range(root, target_axis);
-  if (old_leaf == 0) return 0;
+  if (old_leaf == 0) {
+    if (getenv("THVM_HANDOPT_TRACE")) {
+      // Distinguish "no range with this id" from "multiple distinct".
+      u32 n_match = 0;
+      Term rs[APPLY_OPT_DAG_SPLIT_MAP_CAP];
+      u32 nr = apply_opt_dag_collect_ranges(root, rs, APPLY_OPT_DAG_SPLIT_MAP_CAP);
+      for (u32 i = 0; i < nr; i++) if (uop_range_axis_id(rs[i]) == target_axis) n_match++;
+      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: find_range=0 (%u matching ranges of %u total)\n",
+              op, target_axis, k, n_match, nr);
+      fflush(stderr);
+    }
+    return 0;
+  }
   u32 extent = uop_range_extent(old_leaf);
-  if (extent % k != 0) return 0;
+  if (extent % k != 0) {
+    if (getenv("THVM_HANDOPT_TRACE"))
+      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: extent=%u %% k != 0\n",
+              op, target_axis, k, extent);
+    return 0;
+  }
   u32 axis_type_outer = uop_range_axis_type(old_leaf);
   u8  inner_kax       = apply_opt_dag_inner_kax(op);
   u32 opt_kind        = apply_opt_dag_inner_opt_kind(op);
