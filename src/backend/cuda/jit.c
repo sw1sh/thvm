@@ -292,10 +292,28 @@ fn int cuda_jit_launch(CUfunction func,
     cuda_set_error("cuLaunchKernel", r);
     return -1;
   }
-  r = cuCtxSynchronize();
-  if (r != CUDA_SUCCESS) {
-    cuda_set_error("cuCtxSynchronize", r);
-    return -1;
+  // Per-launch cuCtxSynchronize was hiding the CUDA driver's ability
+  // to PIPELINE launches: every kernel made the CPU block until the
+  // GPU finished, serializing what should be an asynchronous stream.
+  // The default-stream memcpyDtoH used by loss.item() / .numpy() is
+  // synchronous and naturally enforces "wait for all prior kernels
+  // before reading data back," so removing this per-launch sync is
+  // semantically equivalent for the user but lets the GPU queue many
+  // kernels deep.  Set THVM_CUDA_SYNC=1 to restore the old behavior
+  // for debugging (so a misbehaving kernel surfaces its error at the
+  // exact launch that triggered it instead of at the next memcpy).
+  static int sync_init = 0, sync_on = 0;
+  if (!sync_init) {
+    char const *e = getenv("THVM_CUDA_SYNC");
+    sync_on = (e != NULL && e[0] != '0');
+    sync_init = 1;
+  }
+  if (sync_on) {
+    r = cuCtxSynchronize();
+    if (r != CUDA_SUCCESS) {
+      cuda_set_error("cuCtxSynchronize", r);
+      return -1;
+    }
   }
   return 0;
 }
