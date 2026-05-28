@@ -46,7 +46,18 @@ static Term fv(u32 id) { return term_new_fvr(id); }
 #define L_P 2u
 #define L_Q 3u
 #define L_R 4u
+// McCune-axiom symbols (binary and, unary not): arity 2 + arity 1.
+#define L_AND 5u
+#define L_NOT 6u
 static Term konst(u32 label) { return term_new_ctr(label, NULL, 0); }
+static Term and_op(Term x, Term y) {
+  Term c[2] = { x, y };
+  return term_new_ctr(L_AND, c, 2);
+}
+static Term not_op(Term x) {
+  Term c[1] = { x };
+  return term_new_ctr(L_NOT, c, 1);
+}
 
 // Wolfram axiom:
 //   nand(nand(nand(a,b),c), nand(a,nand(nand(a,c),a))) == c
@@ -179,6 +190,28 @@ static void goal_andassocu(Term *l, Term *r) {
   *r = and2(and2(p, q), rr);
 }
 
+// McCune's single-axiom group/Sheffer-style equation over {and:2, not:1}:
+//   and(X0, not(and(X1, and(and(and(X2, not(X2)), not(and(X3, X1))), X0))))
+//   = X3
+// (Vampire TPTP form: tools/baselines/vampire_raw/
+//  McCuneAxioms__EqualityOfInverses.out f1.)
+static Term mccune_axiom_lhs(void) {
+  Term x0 = fv(0), x1 = fv(1), x2 = fv(2), x3 = fv(3);
+  Term inner = and_op(and_op(x2, not_op(x2)),
+                      not_op(and_op(x3, x1)));
+  Term mid   = and_op(inner, x0);
+  return and_op(x0, not_op(and_op(x1, mid)));
+}
+
+// EqualityOfInverses conjecture (positive form): for the Skolem constant
+// p, and(p, not(p)) == and(not(p), p) -- the goal Vampire negates to a
+// disequality on sk_c1.  Uses L_P as the single ground constant.
+static void goal_mccune(Term *l, Term *r) {
+  Term p = konst(L_P);
+  *l = and_op(p, not_op(p));
+  *r = and_op(not_op(p), p);
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -200,16 +233,22 @@ int main(int argc, char **argv) {
   // (p>q>r) -- matches Waldmeister's AutoPrecedence on the function
   // symbol over skolem constants.  Goals that use only nand (thm,
   // wolfram, ...) are unaffected: their terms never touch labels 2-4.
-  static u32 weights[5]    = { 0u, 1u, 1u, 1u, 1u };
-  static u32 precedence[5] = { 0u, 4u, 3u, 2u, 1u };
+  // n_labels covers Sheffer (L_NAND=1, L_P/Q/R=2..4) AND McCune (L_AND=5,
+  // L_NOT=6).  Sheffer goals never touch labels 5-6 and McCune never
+  // touches labels 1/3/4, so the per-label weight/precedence entries for
+  // the unused symbols are inert on the respective paths.  Precedence
+  // ranks `and` (arity 2) above `not` (arity 1) on the McCune side, in
+  // line with the Fuchs arity ladder atp_auto_precedence would derive.
+  static u32 weights[7]    = { 0u, 1u, 1u, 1u, 1u, 1u, 1u };
+  static u32 precedence[7] = { 0u, 4u, 3u, 2u, 1u, 6u, 5u };
   KboConfig cfg = {
     .weights    = weights,
     .precedence = precedence,
-    .n_labels   = 5u,
+    .n_labels   = 7u,
     .var_weight = use_kbo0 ? 0u : 1u,
   };
-  static u32 lpo_prec[5] = { 0u, 4u, 3u, 2u, 1u };
-  static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 5u };
+  static u32 lpo_prec[7] = { 0u, 4u, 3u, 2u, 1u, 6u, 5u };
+  static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 7u };
 
   // cpgen mode: generate the critical pairs of the axiom with
   // itself -- the distance-1 lemmas -- in ONE CP-generation call,
@@ -360,7 +399,11 @@ int main(int argc, char **argv) {
     }
   }
 
-  thvm_atp_add_equation(s, axiom_lhs(), fv(2));
+  if (strcmp(goal, "mccune") == 0) {
+    thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));
+  } else {
+    thvm_atp_add_equation(s, axiom_lhs(), fv(2));
+  }
 
   // "sat" mode: pure completion, NO goal -- run to the step/wall cap
   // and watch the CP queue grow.  This is the explosion probe (a deep
@@ -379,6 +422,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "wolfram")== 0) goal_wolfram(&gl, &gr);
   else if (strcmp(goal, "andassoc")==0) goal_andassoc(&gl, &gr);
   else if (strcmp(goal, "andassocu")==0) goal_andassocu(&gl, &gr);
+  else if (strcmp(goal, "mccune")  == 0) goal_mccune(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
