@@ -3841,11 +3841,13 @@ TFindProof[thm_String, theory_String,
    whose 2nd arg is a return-spec String, not a theory name -- from
    matching here. *)
 TFindProof[
-        cj : (_List | _ForAll | _Equal | _Inactive),
+        cj : (_List | _ForAll | _Equal | _Unequal
+            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
         theory_String, opts:OptionsPattern[]] /; ! atpReturnSpecQ[theory] :=
     atpProveFromTheory[cj, theory, opts];
 TFindProof[
-        cj : (_List | _ForAll | _Equal | _Inactive),
+        cj : (_List | _ForAll | _Equal | _Unequal
+            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
         theory_String, returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     atpProveFromTheory[cj, theory, returnSpec, opts];
 (* An Association (e.g. the whole NotableTheorems table) "just does
