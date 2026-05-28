@@ -282,17 +282,26 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
                                       u32 *out_sum_strides) {
   Term addrs[64];
   u32 n_bufs = uop_dag_collect_index_e_addrs(root, addrs, 64);
+  int trace = getenv("THVM_UPCAST_TRACE") != NULL;
+  if (trace) fprintf(stderr, "[stride] rng=%u n_bufs=%u uu={", rng, n_bufs);
+  if (trace) for (u32 j = 0; j < n_uu; j++) fprintf(stderr, "%u%s", upcast_unroll_aids[j], j+1<n_uu?",":"");
+  if (trace) fputs("}\n", stderr);
   int any_strideless = 0;
   u32 num_strides = 0;
   u32 sum_strides = 0;
   for (u32 i = 0; i < n_bufs; i++) {
     UopDagAddrCoeffsView cv;
     uop_dag_decode_addr_coeffs(addrs[i], &cv);
-    if (!cv.ok) continue;
+    if (!cv.ok) {
+      if (trace) fprintf(stderr, "  buf%u: decode FAILED\n", i);
+      continue;
+    }
     u32 coeff = uop_dag_addr_coeff_lookup(&cv, rng);
+    if (trace) fprintf(stderr, "  buf%u: coeff(rng=%u)=%u", i, rng, coeff);
     if (coeff != 0) {
       num_strides += 1;
       sum_strides += coeff;
+      if (trace) fputs(" -> num_strides++\n", stderr);
     } else {
       // rng absent from this buf.  Check: are all existing UPCAST/UNROLL
       // axes also absent?  tinygrad's test is "rng not in BS && all(r2 in
@@ -302,10 +311,13 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
       // conflict (rng's stride-0-on-this-buf vectorizes the load).
       int all_uu_present = 1;
       for (u32 j = 0; j < n_uu; j++) {
-        if (uop_dag_addr_coeff_lookup(&cv, upcast_unroll_aids[j]) == 0) {
+        u32 uuc = uop_dag_addr_coeff_lookup(&cv, upcast_unroll_aids[j]);
+        if (trace) fprintf(stderr, " uu_coeff(%u)=%u", upcast_unroll_aids[j], uuc);
+        if (uuc == 0) {
           all_uu_present = 0; break;
         }
       }
+      if (trace) fprintf(stderr, " all_uu=%d\n", all_uu_present);
       if (all_uu_present) any_strideless = 1;
     }
   }
@@ -544,15 +556,28 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       if (olp < 1024 || us >= ucap) break;
 
       // Build list of current UPCAST/UNROLL axis_ids for the stride test.
+      // hand_opt_upcast_buf_stride -> udg_addr_lookup keys on axis_id, so
+      // we must pass ax.axis_id[i] not the snapshot index i.  The earlier
+      // implementation stored `i` here, which made the all-UU-present
+      // check fail on every iteration past the first -> UPCAST loop
+      // bailed after one apply.  This bug suppressed multi-axis UPCAST
+      // on every kernel (kept us at 4 accumulators vs tinygrad's 12 for
+      // the same conv2 [128,32,20,20] kernel).
       u32 uu_aids[MAX_AXES]; u32 n_uu = 0;
       for (u32 i = 0; i < ax.n; i++) {
         if (ax.kax_type[i] == KAX_UPCAST || ax.kax_type[i] == KAX_UNROLL) {
-          uu_aids[n_uu++] = i;
+          uu_aids[n_uu++] = ax.axis_id[i];
         }
       }
 
       u32 dims[MAX_AXES];
       u32 n_dims = hand_opt_upcastable_dims(&ax, dims);
+      if (getenv("THVM_UPCAST_TRACE")) {
+        fprintf(stderr, "[upcast] olp=%llu us=%llu n_dims=%u upcastable:", (unsigned long long)olp, (unsigned long long)us, n_dims);
+        for (u32 i = 0; i < n_dims; i++)
+          fprintf(stderr, " ax%u(id=%u,ext=%u,type=%u)", dims[i], ax.axis_id[dims[i]], ax.extent[dims[i]], ax.kax_type[dims[i]]);
+        fputc('\n', stderr);
+      }
 
       // Best candidate so far (sorted ascending by (num_strides, sum_strides, axis, amount)).
       int have_best = 0;
@@ -570,8 +595,11 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           u32 amt = amounts[ai];
           if (ax.extent[axis] % amt != 0) continue;
           u32 num = 0, sum = 0;
+          // Same axis_id-vs-snapshot-index bug here: pass ax.axis_id[axis]
+          // not the snapshot index.
           if (!hand_opt_upcast_buf_stride(ke->cached_lift.store_root,
-                                          axis, uu_aids, n_uu, &num, &sum)) {
+                                          ax.axis_id[axis], uu_aids, n_uu,
+                                          &num, &sum)) {
             continue;   // no buf strideless on this axis
           }
           if (!have_best
@@ -584,9 +612,20 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           }
         }
       }
-      if (!have_best) break;
+      if (!have_best) {
+        if (getenv("THVM_UPCAST_TRACE"))
+          fprintf(stderr, "[upcast] no best -> exit loop\n");
+        break;
+      }
       KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[best_axis], best_amt };
-      if (!kernel_apply_opt(ke, opt)) break;
+      if (getenv("THVM_UPCAST_TRACE"))
+        fprintf(stderr, "[upcast] picking axis_id=%u amt=%u (best_num=%u sum=%u)\n",
+                ax.axis_id[best_axis], best_amt, best_num, best_sum);
+      if (!kernel_apply_opt(ke, opt)) {
+        if (getenv("THVM_UPCAST_TRACE"))
+          fprintf(stderr, "[upcast] kernel_apply_opt FAILED -> exit loop\n");
+        break;
+      }
       n_applied++;
       if (n_upcasted_set < MAX_AXES) upcasted_set[n_upcasted_set++] = best_axis;
     }

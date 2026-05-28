@@ -1886,6 +1886,16 @@ static int udg_addr_decode_leaf(Term t, u32 coeff, UdgAddrCoeffs *out) {
       if (!udg_addr_decode_leaf(b, coeff, out)) return 0;
       return 1;
     }
+    if (op == UOP_OPT) {
+      // OPT(inner, kind, k) wraps the inner subtree with a renderer hint
+      // (UPCAST / UNROLL / GROUP_REDUCE / TC / ...).  For address-coeff
+      // decoding the wrapper is transparent: the underlying RANGE leaf
+      // contributes its axis stride exactly as before.  Without this
+      // unwrap, decoding bails on every post-UPCAST address (because
+      // apply_opt_dag wraps the new inner RANGE in OPT(_, UPCAST, k)),
+      // which breaks the multi-UPCAST stride heuristic.
+      return udg_addr_decode_leaf(uop_opt_target(t), coeff, out);
+    }
     Term inner = 0; u32 c = 0;
     if (udg_match_imul_const(t, &inner, &c)) {
       // (coeff * c) needs to fit in u32; bail on overflow.
