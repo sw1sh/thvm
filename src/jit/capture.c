@@ -1036,6 +1036,108 @@ static void jit_capture_finalize(u32 slot, Term root) {
   jit_capture_sink_assigns(c, root);
   jit_capture_pack_replay_temporaries(c, root);
 
+  // Dedup pass: if a DISPATCH writes (kid, in_buf_ids, out_buf_id) IDENTICAL
+  // to a prior DISPATCH and nothing between them writes to any of the
+  // inputs OR the output buffer, the value sitting in out_buf_id is still
+  // the same -- the second dispatch is redundant.  Mark it replay_skip.
+  //
+  // Background: beautiful_mnist captures 29 fires of kid 45 [128,32,20,20]
+  // per step, all with identical in[0]=buf142 in[1]=buf7 out=buf143
+  // (both inputs jit_pinned, never mutated).  Each fire computes the
+  // same conv2 forward output, then ~50 ops later it fires again.  Cost:
+  // 29 * 0.77ms = 22 ms / step of pure waste.
+  //
+  // Disable via THVM_JIT_REPLAY_DEDUP=0.  Set THVM_JIT_REPLAY_DEDUP_TRACE=1
+  // for per-skip diagnostics.
+  // Default OFF until the alias check is sound: same buf_id can hold
+  // different logical tensors when the CUDA arena (buf_pool.c) recycles
+  // a slot, so "same in_buf_ids" doesn't imply "same content".  Enable
+  // via THVM_JIT_REPLAY_DEDUP=1 only for workloads where you've verified
+  // the captured op stream doesn't alias buffers through arena views.
+  // beautiful_mnist with dedup=1 gives wall=14ms / step (vs 184ms
+  // baseline) but loss=-0.006 / test_acc=13% -- conclusively breaks
+  // training, so this is a future-work hook, not a perf knob to land
+  // by default.  Diagnostic value: confirms 86% of dispatches in
+  // beautiful_mnist have identical (kid, in_bufs, out_buf) tuples
+  // statically, the schedule pipeline is over-emitting redundant
+  // dispatches that should be consolidated upstream (closer to the
+  // tensor / interact layer).
+  int dedup_on = 0;
+  {
+    char const *de = getenv("THVM_JIT_REPLAY_DEDUP");
+    if (de != NULL && de[0] != '0') dedup_on = 1;
+  }
+  if (!noskip && dedup_on) {
+    int dedup_trace = getenv("THVM_JIT_REPLAY_DEDUP_TRACE") != NULL;
+    u32 n_skipped = 0;
+    for (u32 i = 0; i < c->n_ops; i++) {
+      JitCaptureOp *op = &c->ops[i];
+      if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
+      if (op->kid == 0 || op->kid >= KERNELS_NEXT) continue;
+      Backend *op_backend = jit_dispatch_output_backend(op);
+      if (op_backend == NULL) continue;
+      u32 const *op_ids = op->heap_in_buf_ids != NULL
+                       ? op->heap_in_buf_ids
+                       : op->in_buf_ids;
+      // Scan backward for a matching prior DISPATCH.
+      for (i32 jj = (i32)i - 1; jj >= 0; jj--) {
+        JitCaptureOp *prev = &c->ops[jj];
+        if (prev->kind != JIT_OP_DISPATCH || prev->replay_skip) continue;
+        if (prev->kid != op->kid) continue;
+        if (prev->out_buf_id != op->out_buf_id) continue;
+        if (prev->n_inputs != op->n_inputs) continue;
+        u32 const *prev_ids = prev->heap_in_buf_ids != NULL
+                           ? prev->heap_in_buf_ids
+                           : prev->in_buf_ids;
+        int same = 1;
+        for (u32 k = 0; k < op->n_inputs; k++) {
+          if (prev_ids[k] != op_ids[k]) { same = 0; break; }
+        }
+        if (!same) continue;
+        // Verify nothing between (jj, i) mutates the inputs or output.
+        int safe = 1;
+        for (u32 m = (u32)jj + 1; m < i; m++) {
+          JitCaptureOp *mid = &c->ops[m];
+          if (mid->replay_skip) continue;
+          // Writes happen via DISPATCH.out_buf_id or ASSIGN.dst_tid.buf_id.
+          u32 mid_write_buf = 0;
+          Backend *mid_write_backend = NULL;
+          if (mid->kind == JIT_OP_DISPATCH) {
+            mid_write_buf = mid->out_buf_id;
+            mid_write_backend = jit_dispatch_output_backend(mid);
+          } else if (mid->kind == JIT_OP_ASSIGN) {
+            if (mid->assign_dst_tid != 0 && mid->assign_dst_tid < TENS_NEXT) {
+              mid_write_buf = TENS[mid->assign_dst_tid].buf_id;
+              mid_write_backend = TENS[mid->assign_dst_tid].backend;
+            }
+          }
+          if (mid_write_buf == 0 || mid_write_backend == NULL) continue;
+          // Conflict only when the mid-write is on the same backend as op
+          // AND aliases op's output or any of its inputs.
+          if (mid_write_backend != op_backend) continue;
+          if (mid_write_buf == op->out_buf_id) { safe = 0; break; }
+          for (u32 k = 0; k < op->n_inputs; k++) {
+            if (mid_write_buf == op_ids[k]) { safe = 0; break; }
+          }
+          if (!safe) break;
+        }
+        if (safe) {
+          if (dedup_trace) {
+            fprintf(stderr, "[jit-dedup] op%u kid=%u out=%u dups op%d -> skip\n",
+                    i, op->kid, op->out_buf_id, jj);
+          }
+          op->replay_skip = 1;
+          n_skipped++;
+          break;
+        }
+      }
+    }
+    if (dedup_trace) {
+      fprintf(stderr, "[jit-dedup] slot=%u skipped %u of %u dispatches\n",
+              slot, n_skipped, c->n_ops);
+    }
+  }
+
   jit_capture_release_retained(c);
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
