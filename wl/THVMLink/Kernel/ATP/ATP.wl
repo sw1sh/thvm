@@ -4186,7 +4186,8 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
    so no ProofObject). *)
 atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
-    Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime},
+    Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime,
+            axEq, varNames, axDataset, po},
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], 0.];
         (* Encode with a None conjecture: the packed goal pair is (0, 0),
@@ -4196,8 +4197,22 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
             enc, OptionValue[MaxSteps], atpWall,
             Sequence @@ atpMethodCfg];
-        (* No goal, so no ProofObject; Mode None means all axioms kept. *)
-        <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> $Failed,
+        (* Construct a ProofObject with "Theorems" -> None so the
+           no-goal saturation has the same return shape as the goal-
+           directed call.  The Proof dataset lists the input axioms
+           in the {"Axiom", k} -> <|"Statement", "Proof"|> shape
+           ProofObjectQ + $ProofPattern require. *)
+        axEq = holdToInactive /@ enc["AxHCsRaw"];
+        varNames = cRes["VarSyms"];
+        axDataset = MapIndexed[
+            Function[{eq, idx}, {"Axiom", First[idx]} ->
+                <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
+                  "Proof" -> <||>|>],
+            axEq];
+        po = ProofObject["EquationalLogic", None, axEq,
+            <|"Variables" -> varNames, "Constants" -> {},
+              "Proof" -> axDataset|>];
+        <|"enc" -> enc, "cRes" -> cRes, "ProofObject" -> po,
           "RelevantAxioms" -> <|"Mode" -> None,
               "Kept" -> axioms, "Dropped" -> {}|>,
           "AppliedMethod" -> OptionValue[Method],
@@ -4217,14 +4232,17 @@ TFindProof[axiom : (_Equal | _Unequal | _ForAll
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     TFindProof[{axiom}, returnSpec, opts];
 
-(* Completion of an explicit axiom list. *)
+(* Completion of an explicit axiom list.  Default return is
+   "ProofObject" (matching the goal-directed form); the ProofObject's
+   Theorems slot is None to signal no goal.  Use TFindProof[axioms,
+   "Lemmas"] for the saturated rule set. *)
 TFindProof[axioms_List, OptionsPattern[]] :=
     atpProjectReturn[
         atpCompletionBundle[atpNormalizeAxioms[axioms],
             MaxSteps -> OptionValue[MaxSteps],
             Method -> OptionValue[Method],
             TimeConstraint -> OptionValue[TimeConstraint]],
-        "Lemmas"];
+        "ProofObject"];
 TFindProof[axioms_List, returnSpec_?atpReturnSpecQ,
         OptionsPattern[]] :=
     atpProjectReturn[
@@ -4261,7 +4279,7 @@ atpTheoryCompletion[theory_String, returnSpec_,
    above, guarded by atpReturnSpecQ to disambiguate from a
    (theorem, theory) prove.) *)
 TFindProof[theory_String, OptionsPattern[]] :=
-    atpTheoryCompletion[theory, "Lemmas",
+    atpTheoryCompletion[theory, "ProofObject",
         MaxSteps -> OptionValue[MaxSteps],
         Method -> OptionValue[Method],
         TimeConstraint -> OptionValue[TimeConstraint]];
