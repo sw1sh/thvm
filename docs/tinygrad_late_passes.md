@@ -1131,31 +1131,57 @@ Next levers (real GPU optimization, not knob tuning):
 | + TinyJit (full beautiful_mnist) | -- | -- | -- | ✗ ILLEGAL_ADDRESS |
 | tinygrad reference         |    -    | ~115 ms | -      | -        |
 
-### 2026-05-28 cumulative session state
+### 2026-05-28 cumulative session state (HONEST POST-REVERT)
 
-15+ commits this session landed (multi-UPCAST fix, CUDA Graph capture+
-replay, GROUP_SZ=128 / UPCAST_CAP=64 / LOCAL_INNER_FIRST=1 defaults
-flipped, FUSE_REDUCE_INTO_REDUCE opt-in, SKIP_SMALL_EXPAND opt-in,
-nvrtc --use_fast_math + --ftz=true defaults, __launch_bounds__(block_x)
-on every kernel signature, #pragma unroll on small LOOP-typed output
-axes via THVM_LOOP_UNROLL_MAX, alias-aware dedup safety infra +
-buf_storage_root / buf_addr backend hooks, multiple JIT replay
-diagnostic knobs).
+19+ commits this session, four of them reverts of the same session's
+own perf "wins" that turned out to be contention noise or BS-specific
+regressions:
 
-Validated state (clean GPU window, 5-trial bench, 50 steps each):
-- beautiful_mnist BS=128 V100: warm_mean **135 ms / step** (was 184 ms
-  start-of-session; -27%)
-- tinygrad master no-BEAM on same V100: ~80-100 ms / step
-- Gap: ~50 ms, all GPU compute time (cuGraphLaunch CPU is 1.3 ms;
-  cuStreamSynchronize = 200+ ms under contention reflects actual
-  GPU kernel time)
+**Kept (architectural / infra)**:
+- multi-UPCAST decoder unwrap (commit 9ae5da7d) -- real correctness fix
+- CUDA Graph capture+replay (2983c605, 463273fd) -- infra (~1ms gain)
+- per-kid GPU time profiling (ea75780d) -- THVM_CUDA_GPU_TIME
+- __launch_bounds__(block_x) on every CUDA signature (7d8e687a)
+- Backend.buf_storage_root + buf_addr hooks (aa1f57d2, 26fea217)
+- JIT replay diagnostic knobs: ASSIGN trace, dedup_window,
+  parent/root dispatch dump, graph-launch timing
+- 5 opt-in perf knobs (FUSE_REDUCE_INTO_REDUCE,
+  BUFFERIZE_SKIP_SMALL_EXPAND, JIT_REPLAY_DEDUP, CUDA_FAST_MATH,
+  LOOP_UNROLL_MAX) available for per-workload A/B
 
-GPU-bound diagnosis: closing the remaining 50 ms gap requires
-fewer-but-bigger fused kernels (per-param Adam batching, schedule-
-level dedup at tensor level, multi-tensor kernels).  Launch overhead
-is already amortised to near-zero by CUDA Graph; further dispatch
-dedup is unsafe (dedup mystery -- see project_thvm_jit_dispatch_redundancy
-memory).
+**Reverted (after cross-BS validation)**:
+- GROUP_SZ default 16->128 (commit 90434003 -> 1ac4c304):
+  2.3x slower at BS=64 (364ms vs 155ms)
+- LOOP_UNROLL_MAX default 1->4 (5b5e94c8 -> 6fea2996):
+  11% slower at BS=64 (154ms vs 139ms)
+- --use_fast_math default ON (95c19515 -> 6fea2996):
+  10% slower at BS=64 (154ms vs 140ms)
+- UPCAST_CAP default 32->64 + LOCAL_INNER_FIRST default 0->1
+  (77a7b671 -> a580508f): within-noise at BS=128 (240 vs 240 ms
+  median over 5 trials)
+
+**Honest cumulative state (under co-tenant arc_policy_v2 contention,
+6+ hours of ~55% baseline GPU usage from another agent)**:
+- BS=32:  ~100 ms warm
+- BS=64:  ~155 ms warm
+- BS=128: ~225 ms warm
+- BS=256: ~470 ms warm
+- Loss byte-identical to pre-session at every BS
+
+cuGraph timing measurement (commit 075c01d9) revealed cuGraphLaunch
+CPU = 1.3 ms; cuStreamSynchronize = 200+ ms = actual GPU compute.
+**We are GPU-bound on compute, not dispatch overhead.**
+
+Closing the remaining 80-100ms gap to tinygrad's ~100ms steady at
+BS=128 needs structural work: per-param Adam multi-tensor batching,
+schedule-level dispatch dedup at the tensor layer, or a major
+fusion-aware schedule rewrite.  Knob tuning at the codegen level
+has reached the variance floor for this workload.
+
+**Lesson learned**: a perf knob A/B at one batch size in one GPU
+state is NOT enough.  Validate across BS=32/64/128/256 with
+alternating trials to control variance, and verify under both clean
+and contended GPU conditions before landing as default.
 
 ## References
 
