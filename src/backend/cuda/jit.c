@@ -536,7 +536,6 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // cg_render_uop_kernel_cuda_root is called directly (rather than via
   // thvm_cuda_render in _.c) because jit.c is #included before _.c --
   // a forward call would hit an implicit declaration.
-  u64 t_render_start = cg_now_us();
   char  *cu  = NULL;
   size_t csz = 0;
   FILE  *cfp = open_memstream(&cu, &csz);
@@ -546,17 +545,6 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   }
   cg_render_uop_kernel_cuda_root(store_root, "k", cfp);
   fclose(cfp);
-  static u64 TOTAL_RENDER_US = 0;
-  static u64 TOTAL_FIRES = 0;
-  TOTAL_RENDER_US += cg_now_us() - t_render_start;
-  TOTAL_FIRES++;
-  if (getenv("THVM_CUDA_TIME_RENDER")
-      && (TOTAL_FIRES & (TOTAL_FIRES - 1)) == 0) {
-    fprintf(stderr, "[render-time] %llu fires, total %llu us (avg %llu us)\n",
-            (unsigned long long)TOTAL_FIRES,
-            (unsigned long long)TOTAL_RENDER_US,
-            (unsigned long long)(TOTAL_RENDER_US / TOTAL_FIRES));
-  }
   if (cu == NULL) {
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- render produced no source\n");
     return -1;

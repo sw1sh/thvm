@@ -538,7 +538,14 @@ class Tensor:
 
         Y holds class indices (a gathered batch / dataset slice -- data,
         not on the autograd path), so it is one-hot'd host-side and the
-        gradient flows only through `self` (the logits)."""
+        gradient flows only through `self` (the logits).
+
+        Under TinyJit:  Y.numpy() does a host-side read, which means the
+        one-hot buffer baked into the captured graph is step-1's labels;
+        replays reuse those frozen labels instead of refilling.  For a
+        JIT-capturable train step, pre-allocate a one-hot Tensor outside
+        the JIT and pass it as the `oh` kwarg of the lower-level call --
+        the caller writes fresh one-hots into oh's buffer each iter."""
         ax = axis if axis >= 0 else axis + self.ndim
         n_classes = self._shape[ax]
         labels = Y.numpy().astype(np.int64).reshape(-1)
@@ -546,6 +553,16 @@ class Tensor:
         oh[np.arange(labels.shape[0]), labels] = 1.0
         ls = self.log_softmax(axis=ax)
         return (ls * Tensor(oh.reshape(self._shape))).sum(axis=ax).mean() * -1.0
+
+    def cross_entropy_from_onehot(self, OH: "Tensor",
+                                  axis: int = -1) -> "Tensor":
+        """JIT-capturable cross-entropy: caller pre-allocates a one-hot
+        Tensor OH (same shape as `self`'s logits, BUT with the class
+        dim being n_classes) and refills it between calls.  The graph
+        reads OH's stable buf_id, so replay sees fresh one-hots."""
+        ax = axis if axis >= 0 else axis + self.ndim
+        ls = self.log_softmax(axis=ax)
+        return (ls * OH).sum(axis=ax).mean() * -1.0
 
     def argmax(self, axis: int = -1) -> "Tensor":
         """Index of the max along `axis`.  Host-side (used for eval
@@ -568,8 +585,21 @@ class Tensor:
 
     def relu(self) -> "Tensor":
         # relu(x) = (0 < x) * x
-        zero = Tensor(np.zeros(self._shape, dtype=self._dtype.np_dtype),
-                      dtype=self._dtype)
+        # JIT-friendly: cache the zero tensor PER SHAPE so the captured
+        # graph references a stable buf_id.  An earlier impl allocated a
+        # fresh zero each call (`Tensor(np.zeros(...))`), which broke
+        # TinyJit -- the captured op held the temp zero's buf_id but
+        # the Python wrapper went out of scope so subsequent replays
+        # saw a freed/recycled buffer.  Memoizing keeps the zero alive.
+        if not hasattr(Tensor, "_zero_cache"):
+            Tensor._zero_cache = {}
+        key = (self._shape, self._dtype.name)
+        zero = Tensor._zero_cache.get(key)
+        if zero is None:
+            zero = Tensor(np.zeros(self._shape, dtype=self._dtype.np_dtype),
+                          dtype=self._dtype)
+            zero.realize()
+            Tensor._zero_cache[key] = zero
         mask = Term(_uop_binary(_ct.c_uint32(K.CMPLT),
                                 _ct.c_uint64(int(zero.term)),
                                 _ct.c_uint64(int(self.term))))

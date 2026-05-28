@@ -283,6 +283,9 @@ EXPORT void py_reclaim(void) {
 // from stable slots written (py_ten_write) before each replay.
 EXPORT uint32_t py_jit_begin(void)          { return jit_capture_begin(); }
 EXPORT void     py_jit_end(void)            { jit_capture_end(); }
+EXPORT void     py_jit_end_with_result(uint64_t root) {
+  jit_capture_end_with_result((Term)root);
+}
 EXPORT uint32_t py_jit_replay(uint32_t s)   { return jit_replay(s); }
 EXPORT uint32_t py_jit_op_count(uint32_t s) { return jit_capture_op_count(s); }
 EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
