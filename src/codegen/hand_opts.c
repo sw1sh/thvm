@@ -500,11 +500,16 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         // to the LARGEST reduce axis that divides evenly by 16.  Picking
         // the largest axis minimizes per-thread iteration count for the
         // strided walk.
-        // Cooperative size: tinygrad's GROUPTOP default = 16.  A/B on
-        // V100 beautiful_mnist showed sz=16 beats sz=32 (more kernels
-        // divide 16 cleanly; smaller block yields better occupancy for
-        // shared-mem-bound reduces).  Override via THVM_GROUP_SZ.
-        u32 sz = (u32)hand_opt_getenv_int("THVM_GROUP_SZ", 16);
+        // Cooperative size: tinygrad's GROUPTOP default = 16, but on V100
+        // an A/B sweep (50-step beautiful_mnist BS=128, 4 alternating
+        // trials each) shows sz=128 beats sz=16 by ~10-15ms / step (~7%):
+        //   default(16): 190,189,189,173  median 189ms
+        //   sz=128:      181,176,165,164  median 176ms
+        // Loss byte-identical at every step.  sz=256 blows up to 700+ ms
+        // (block size exceeds 1024 max once combined with locals on some
+        // kernels).  sz=32 / sz=64 land in between.  Override via
+        // THVM_GROUP_SZ (set to 16 to restore the tinygrad-faithful value).
+        u32 sz = (u32)hand_opt_getenv_int("THVM_GROUP_SZ", 128);
         i32 best_idx = -1;
         u32 best_ext = 0;
         for (u32 i = 0; i < n_red; i++) {
