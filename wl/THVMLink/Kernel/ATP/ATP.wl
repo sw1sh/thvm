@@ -39,12 +39,15 @@
    See docs/plans/waldmeister_ic_atp.md for the algorithmic intent. *)
 
 (* THVMLink`ATP` is the single ATP entry context.  All public ATP /
-   SMT / TPTPImport symbols live here so user code can do
-   `Get["THVMLink`ATP`"]` (or equivalently `<< THVMLink`ATP``) and
-   call them by bare name.  THVMLink` is on the context path so bare
-   IC primitives (TDef / TRef / TLam / ...) owned by sibling Kernel
-   files still resolve transparently. *)
-BeginPackage["THVMLink`ATP`", {"THVMLink`"}];
+   SMT symbols live here so user code can do `Get["THVMLink`ATP`"]`
+   (or equivalently `<< THVMLink`ATP``) and call them by bare name.
+   THVMLink` is on the context path so bare IC primitives (TDef /
+   TRef / TLam / ...) owned by sibling Kernel files still resolve
+   transparently.  Wolfram`Parser` is on the path so `TPTPImport`
+   (the EBNFParse-driven TPTP parser, now a sibling in the
+   Wolfram/WolframParser paclet) resolves without qualification. *)
+Needs["Wolfram`Parser`"];
+BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
@@ -59,14 +62,15 @@ TAtpSchedule::usage = "TAtpSchedule[Method] returns the schedule (a list of sing
 TAtpDescribeMethod::usage = "TAtpDescribeMethod[Method] returns an Association describing what a Method spec resolves to.  For a named preset (Waldmeister, VampireUEQ, Twee, EProver), returns the preset's full defaults Association (the suboptions the dispatcher merges with the user's subopts).  For a list spec like {\"Twee\", subopts...}, returns the preset's defaults merged with the user's overrides -- the actual options that will reach the C engine.  For a non-preset config like {\"Completion\", subopts...}, returns Association[subopts].  For Automatic / \"Portfolio\" / \"VampirePortfolio\" / \"VampirePortfolioCompact\", returns <|\"Schedule\" -> ...|> describing the multi-entry rotation rather than a single config.";
 
 (* Forward-declare sibling-file public symbols (SMT.wl owns
-   TSatEUF / TSmtDecide / TFindProofSMT; TPTPImport.wl owns
-   TPTPImport) so bare references inside this file's Begin[`Private`]
-   resolve to the shared THVMLink`ATP`X symbol rather than creating
-   a phantom THVMLink`ATP`Private`X.  The alphabetical autoload order
-   (ATP -> SMT -> TPTPImport) means those symbols don't exist yet when
-   this file is parsed; the bare mention here pre-creates them in the
-   public context.  Mirrors the iter-9 idiom in the original ATP.wl. *)
-{TSatEUF, TSmtDecide, TFindProofSMT, TPTPImport};
+   TSatEUF / TSmtDecide / TFindProofSMT) so bare references inside
+   this file's Begin[`Private`] resolve to the shared
+   THVMLink`ATP`X symbol rather than creating a phantom
+   THVMLink`ATP`Private`X.  The alphabetical autoload order means
+   those symbols don't exist yet when this file is parsed; the bare
+   mention here pre-creates them in the public context.
+   TPTPImport now lives in Wolfram`Parser` (added to the context
+   path above) so it doesn't need pre-declaration. *)
+{TSatEUF, TSmtDecide, TFindProofSMT};
 
 (* (The IC primitives TDef / TRef / TLam / TCollapse / ... are owned by
    the depth-4 sibling Switch.wl, which already loaded before this
