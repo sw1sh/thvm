@@ -709,13 +709,23 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           n_cands++;
         }
         // Sort by (-expand, -axis): expand=1 first, then highest axis first.
+        // THVM_LOCAL_INNER_FIRST=1 reverses to (expand=0 first, then
+        // highest axis first) -- prioritize INDEX-relevant axes for
+        // LOCAL placement.  Useful for conv2d on V100 where putting more
+        // LOCAL on the innermost W axis improves load coalescing.
+        int inner_first = hand_opt_getenv_int("THVM_LOCAL_INNER_FIRST", 0);
         for (u32 i = 1; i < n_cands; i++) {
           LocalCand k = cands[i];
           i32 j = (i32)i - 1;
           while (j >= 0) {
             int ex_j = cands[j].expand, ex_k = k.expand;
-            if (ex_j > ex_k) break;
-            if (ex_j == ex_k && cands[j].axis > k.axis) break;
+            if (inner_first) {
+              if (ex_j < ex_k) break;
+              if (ex_j == ex_k && cands[j].axis > k.axis) break;
+            } else {
+              if (ex_j > ex_k) break;
+              if (ex_j == ex_k && cands[j].axis > k.axis) break;
+            }
             cands[j + 1] = cands[j];
             j--;
           }
