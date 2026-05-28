@@ -221,7 +221,7 @@ TFindProof[conjecture, axioms,
 
 ### Cross-system Sheffer "implies" goals (tight age bias)
 
-The cross-system `ShefferAxioms/ImpliesWolframAxioms` family responds to `Mix2` weight with `SelectionRatio -> 2` - one FIFO pick per two heuristic picks, an aggressive age bias.  See [the upstream finding](https://github.com/sw1sh/thvm) for the sweep.
+The cross-system `ShefferAxioms/ImpliesWolframAxioms` family responds to `Mix2` weight with `SelectionRatio -> 2` - one FIFO pick per two heuristic picks, an aggressive age bias.  The tight 1-FIFO-per-2 bias is a sharp sweet spot; `SelectionRatio -> 1` and `-> 5` both miss.
 
 ```wl
 TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
