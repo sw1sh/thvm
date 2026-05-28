@@ -942,22 +942,65 @@ Minimal repro NOW correct:
 Conv+ReLU+Linear+SCCE under JIT also correct (loss changes step-over-
 step).  The simple JIT path is fully working.
 
-### KNOWN: full beautiful_mnist train under JIT hits CUDA error
+### Arena-view JIT pin fix (commit 3276c7ee) -- FULL MNIST JIT WORKS
 
-The literal `Conv2d(1,32,5) -> ReLU -> Conv2d(32,32,5) -> ReLU ->
-BatchNorm -> max_pool2d -> Conv2d(32,64,3) -> ReLU -> Conv2d(64,64,3)
--> ReLU -> BatchNorm -> max_pool2d -> Flatten -> Linear(576,10)` model
-with full Adam backward+optim hits `CUDA_ERROR_ILLEGAL_ADDRESS` during
-the first capture's realize.  Some deeper scheduler/planner
-interaction with the accumulated jit_pinned bufs.
+Root cause of the prior `CUDA_ERROR_ILLEGAL_ADDRESS` on full
+beautiful_mnist: the materialize-time arena planner allocates one big
+cuMemAlloc'd buffer per realize, then carves it into per-tensor views
+(`cuda_buf_alloc_arena_view` sets `parent_buf_id` + `owns_data=0`).
+JIT capture pinned the VIEW (correctly preventing the view slot from
+being freed) but the underlying ARENA still got cuMemFree'd at the
+next realize's pool_rollback.  The next realize then cuMemAlloc'd a
+NEW (often smaller) arena at a different address.  The captured op's
+dispatch wrote 9.4 MB worth into a 1.18 MB freed/reused region --
+compute-sanitizer pinned this as "out of bounds, 4.89 MB after nearest
+allocation of size 1.18 MB".
 
-For CORRECT training on the full beautiful_mnist today, set
-`THVM_JIT=0`.  That keeps the KE-CUfunction cache + async launches +
-GROUP_REDUCE wins -- ~765 ms warm step, bit-identical losses, full
-convergence.  Compared to pre-arc baseline (7.4 s warm), this is
-**~10× faster CORRECT training** with no JIT, plus the JIT
-infrastructure ready for the remaining bug-fix that brings full mnist
-to ~121 ms warm.
+Fix: `cuda_buf_jit_pin` / `_unpin` recurse through `parent_buf_id` so
+pinning a view also pins the arena.  Mirrors the `parent_buf_id`
+refcount chain in `cuda_buf_free` / `cuda_buf_decref`.
+
+V100 beautiful_mnist BS=128 STEPS=10 (THVM_CUDA_PTX=1 THVM_GROUPTOP=1
+THVM_JIT=1) -- the literal model from tinygrad:
+
+| Metric              | Value          |
+|---------------------|---------------:|
+| Cold step           | 5.2 s          |
+| **Warm step**       | **192 ms**     |
+| Loss (10 steps)     | 2.81 -> 1.43 ✓ |
+| Test accuracy       | 50.44% ✓       |
+| Compiles            | 124, stable    |
+| Per-step time       | flat           |
+
+Compared to tinygrad reference (~115 ms warm), we're now within
+~1.7× -- same order of magnitude, real tinygrad-class speed.
+
+Compared to pre-arc baseline (18.2 s warm), the full arc delivers a
+**95× warm-step speedup with bit-identical correct training**.
+
+### Diagnostics added
+
+- `THVM_CUDA_LAUNCH_TRACE` -- per-launch failure log (kid, grid, block, err)
+- `THVM_CUDA_DUMP_FAILED_KERNEL` -- dump rendered .cu source of any
+  kernel whose compile/load failed
+- `THVM_CUDA_DUMP_DISPATCH=<kid>` -- dump dispatch args (buf_ids,
+  dptrs, nbytes, refcount, pinned) for one specific kernel
+- `THVM_CUDA_ALLOC_TRACE` -- log every cuda_buf_alloc (fresh, freelist-
+  popped, external/arena-view) with size + dptr
+- `THVM_CUDA_KE_CACHE=0` -- disable per-KE CUfunction cache (force
+  re-render+probe each dispatch) for A/B
+- `THVM_JIT_NO_PIN` -- disable JIT capture's sticky buf pin for A/B
+- Combined with `compute-sanitizer --tool memcheck`, these surfaced
+  the arena-view pin bug in one pass.
+
+### Remaining gap to tinygrad
+
+192 ms vs tinygrad's ~115 ms = 1.7× off.  The warm step is dominated
+by 5 conv kernels each ~38 ms at [128, 32, 20, 20] = the conv2 forward
++ its 4 backward / grad kernels.  ~34 GFLOP/s effective vs V100 peak
+14 TFLOP/s = 0.24% peak.  Memory-bound (uncoalesced access pattern
+within the LOCAL axes); next levers are LOCAL-axis reordering for
+coalesced loads + more UPCAST (more outputs per thread).
 
 ### Summary table (V100 BS=128 STEPS=5)
 
