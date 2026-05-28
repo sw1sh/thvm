@@ -5646,6 +5646,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // the body runs exactly once (the orphan test is a cheap predictable
   // branch) and the engine is byte-identical.
   for (;;) {
+  // Orphan-murder above can drain the queue mid-loop (n_cps-- after each
+  // discard); the upstream guard only fires before the for(;;) starts, so
+  // the inner re-entry needs its own n_cps==0 check.  Without this the
+  // FIFO/random branches would compute j over an empty array and the
+  // subsequent acp_unpack would dereference a freed slot.
+  if (s->n_cps == 0u) return 0;
   // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
   // selections, weight pick (heap root) otherwise.
   u32 j = 0;
