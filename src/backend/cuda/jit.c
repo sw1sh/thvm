@@ -217,7 +217,15 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     opts[n_opts++] = arch_opt;
     if (getenv("THVM_CUDA_NO_FAST_MATH") == NULL) {
       opts[n_opts++] = "--use_fast_math";
+      // --ftz=true flushes denormals to zero (V100 fp32 normally takes
+      // denormal stalls).  Implied by --use_fast_math on some toolkits
+      // but explicit is safer.
+      opts[n_opts++] = "--ftz=true";
     }
+    // NOTE: --restrict would be wrong here -- arena view buffers can
+    // share the same dptr via parent_buf_id at the runtime layer, and
+    // two kernel args holding view bufs of the same arena alias each
+    // other.  Don't enable.
     nr = nvrtcCompileProgram(prog, (int)n_opts, opts);
     if (nr != NVRTC_SUCCESS) {
       size_t log_sz = 0;
