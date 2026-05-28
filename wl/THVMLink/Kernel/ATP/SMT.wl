@@ -33,7 +33,7 @@
      A future DPLL(T) shell on top will turn this into a real
      SMT solver. *)
 
-BeginPackage["THVMLink`ATP`", {"THVMLink`"}];
+BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
 TSatEUF::usage =
     "TSatEUF[{lhs == rhs, ...}, {lhs != rhs, ...}] decides the " <>
@@ -236,8 +236,7 @@ TSatEUF[eqs_List, diseqs_List] :=
 
 (* Single non-list hypothesis: auto-wrap (matches iter 68-70 shape
    across TFindProof / TRelevantAxioms / TATP).  Iter 72. *)
-TFindProofSMT[goal_, hyp : (_Equal | _Unequal
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
+TFindProofSMT[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
     TFindProofSMT[goal, {hyp}];
 
 TFindProofSMT[goal_, hypotheses_List : {}] :=

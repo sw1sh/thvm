@@ -2821,6 +2821,14 @@ TAtpSchedule[m_, thm_String, theory_String] := With[{
         $Failed,
         TAtpSchedule[m, cj, ax]]
 ];
+(* Conjecture-expression against a NAMED theory: resolve the axioms
+   through AxiomaticTheory, then thread through atpScheduleFor. *)
+TAtpSchedule[m_,
+        cj : (_List | _ForAll | _Equal | _Unequal
+            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        theory_String] := With[{ax = AxiomaticTheory[theory]},
+    If[ ! ListQ[ax], $Failed, TAtpSchedule[m, cj, ax]]
+];
 
 (* TAtpDescribeMethod: human-readable Method expansion.  Returns the
    options Association a Method spec resolves to, so users can see
@@ -3598,6 +3606,17 @@ TRelevantAxioms[thm_String, theory_String, opts:OptionsPattern[]] :=
         cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
         If[ ! ListQ[axRaw] || MissingQ[cjRaw], Return[$Failed]];
         TRelevantAxioms[cjRaw, axRaw, opts]
+    ];
+(* Conjecture-expression against a NAMED theory: resolve the axioms
+   through AxiomaticTheory, then run the relevance partition. *)
+TRelevantAxioms[
+        conjRaw : (_List | _ForAll | _Equal | _Unequal
+            | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+        theory_String, opts:OptionsPattern[]] :=
+    Block[{axRaw},
+        axRaw = AxiomaticTheory[theory];
+        If[ ! ListQ[axRaw], Return[$Failed]];
+        TRelevantAxioms[conjRaw, axRaw, opts]
     ];
 (* Single non-list axiom: auto-wrap to a 1-element list, same shape
    as iter-68/69's TFindProof wrap. *)
