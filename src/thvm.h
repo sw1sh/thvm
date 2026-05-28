@@ -727,6 +727,12 @@ struct Backend {
   u32   (*buf_refcount)(u32 buf_id);
   void  (*buf_freelist_push)(u32 buf_id);
   void  (*buf_freelist_remove)(u32 buf_id);
+  // Optional: storage-root walker for alias-aware analysis (JIT replay
+  // dedup, materialize liveness).  Returns the buf id at the end of the
+  // parent chain (the owning slot).  Two bufs alias storage iff their
+  // roots match.  NULL on backends without view aliasing -- caller
+  // should fall back to identity (`a == b`).
+  u32   (*buf_storage_root)(u32 buf_id);
   void  (*dispatch_begin)(void);
   void  (*dispatch_flush)(void);
   void  (*dispatch_end)(void);

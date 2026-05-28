@@ -129,3 +129,19 @@ fn CUdeviceptr cuda_buf_dptr(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return 0;
   return CUDA_BUFS[buf_id].dptr;
 }
+
+// Walk to the storage root: a view buf chains through parent_buf_id
+// until the owning slot.  Two bufs alias storage iff their roots match
+// AND their dptr regions overlap.  Used by the JIT replay dedup
+// safety check.  Returns 0 on invalid id.
+fn u32 cuda_buf_storage_root(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return 0;
+  u32 cur = buf_id;
+  // Bound the walk to prevent any future cycle from hanging.
+  for (u32 hops = 0; hops < 32; hops++) {
+    u32 parent = CUDA_BUFS[cur].parent_buf_id;
+    if (parent == 0 || parent >= CUDA_BUFS_NEXT) return cur;
+    cur = parent;
+  }
+  return cur;
+}

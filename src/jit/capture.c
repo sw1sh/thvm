@@ -1113,11 +1113,20 @@ static void jit_capture_finalize(u32 slot, Term root) {
           }
           if (mid_write_buf == 0 || mid_write_backend == NULL) continue;
           // Conflict only when the mid-write is on the same backend as op
-          // AND aliases op's output or any of its inputs.
+          // AND aliases op's output or any of its inputs.  Alias check:
+          // walk both buf_ids to their storage root (via buf_storage_root,
+          // optional backend hook) -- a view buf and its arena parent
+          // share a root, so a write to view buf 200 with parent 142 is
+          // detected as a conflict for inputs/outputs naming 142.  Falls
+          // back to identity (a == b) on backends without view aliasing.
           if (mid_write_backend != op_backend) continue;
-          if (mid_write_buf == op->out_buf_id) { safe = 0; break; }
+          u32 (*root_of)(u32) = op_backend->buf_storage_root;
+          u32 mid_root = root_of != NULL ? root_of(mid_write_buf) : mid_write_buf;
+          u32 op_out_root = root_of != NULL ? root_of(op->out_buf_id) : op->out_buf_id;
+          if (mid_root == op_out_root) { safe = 0; break; }
           for (u32 k = 0; k < op->n_inputs; k++) {
-            if (mid_write_buf == op_ids[k]) { safe = 0; break; }
+            u32 op_in_root = root_of != NULL ? root_of(op_ids[k]) : op_ids[k];
+            if (mid_root == op_in_root) { safe = 0; break; }
           }
           if (!safe) break;
         }
