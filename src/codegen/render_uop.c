@@ -1438,10 +1438,14 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
     // sequential loops via the UNROLL OPT.  Compile-time penalty is
     // bounded by the cap.  Skip symbolic-bound and large-extent.
     if (RMU_TARGET != CG_TARGET_C && !is_var && extent > 1) {
+      // Default 1 (effectively OFF): a 10% regression at BS=64
+      // surfaced when defaulting to 4 (warm 154ms -> 138ms with =1).
+      // Cross-BS validation pending; opt in per workload until a clean-
+      // window sweep proves a default that's positive at every BS.
       static int loop_unroll_max = -1;
       if (loop_unroll_max < 0) {
         char const *e = getenv("THVM_LOOP_UNROLL_MAX");
-        loop_unroll_max = (e != NULL && e[0] != '\0') ? atoi(e) : 4;
+        loop_unroll_max = (e != NULL && e[0] != '\0') ? atoi(e) : 1;
         if (loop_unroll_max < 0) loop_unroll_max = 0;
       }
       if ((int)extent <= loop_unroll_max) {

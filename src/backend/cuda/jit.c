@@ -215,7 +215,14 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     const char *opts[8];
     u32 n_opts = 0;
     opts[n_opts++] = arch_opt;
-    if (getenv("THVM_CUDA_NO_FAST_MATH") == NULL) {
+    // Default OFF: a 10% regression at BS=64 surfaced when
+    // --use_fast_math was on by default (warm 154ms -> 140ms with
+    // THVM_CUDA_NO_FAST_MATH=1).  Opt in per workload until cross-BS
+    // validation proves a positive default; loss byte-identical at
+    // BS=128 with vs without it, but BS=64 hurts measurably.
+    // THVM_CUDA_FAST_MATH=1 enables.
+    char const *_fme = getenv("THVM_CUDA_FAST_MATH");
+    if (_fme != NULL && _fme[0] == '1') {
       opts[n_opts++] = "--use_fast_math";
       // --ftz=true flushes denormals to zero (V100 fp32 normally takes
       // denormal stalls).  Implied by --use_fast_math on some toolkits
