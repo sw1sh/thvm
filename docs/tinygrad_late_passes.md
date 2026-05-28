@@ -919,21 +919,58 @@ V100 beautiful_mnist BS=128 STEPS=10 (THVM_CUDA_PTX=1 THVM_GROUPTOP=1
 THVM_JIT=1): **warm step 121 ms** (vs tinygrad reference ~115 ms,
 **at tinygrad parity**), per-step time flat, 124 compiles.
 
-### KNOWN ISSUE: conv+bias JIT replay produces stale loss
+### Sticky `jit_pinned` buf flag (commits 33f19afd + 9b1a41eb)
 
-The captured graph for `Conv2d(..., bias=True)` produces stale output
-on replay -- loss stays at step-1's value despite X_buf refreshing.
-Conv with `bias=False` replays correctly.  Test accuracy still climbs
-(~38-49% at 10 steps) because the optimizer's param assigns fire on
-replay, but the loss readback is stuck.
+Root cause of the stale-replay bug: the per-realize `preserved` flag
+gets cleared at end-of-realize (`cuda_buf_clear_preserved`), so a
+captured intermediate buf survived its own realize's rollback but the
+NEXT realize's rollback freelisted it.  Replay's captured dispatch
+then read dptr=0 -> cuda_dispatch_kernel returned -1 -> loss stayed at
+capture's value.
 
-Root cause TBD; likely a buffer-aliasing issue in the conv+bias
-materialize path where the captured op holds a buf_id that's been
-recycled into a different role between capture and replay.
+Added a sticky `jit_pinned` flag on `CudaBuf` (set by
+`cuda_buf_jit_pin` when JIT capture retains a buf; cleared by
+`jit_capture_drop`).  `pool_rollback`, `pool_rollback_with_preserve`,
+`freelist_push`, `buf_free` all guard on it.  Wired through the
+backend vtable.
 
-**For correct training today: `THVM_JIT=0`** -- 800 ms warm step,
-bit-identical losses, full convergence.  121 ms warm step (JIT on)
-is tinygrad-speed but training-broken; documented as the next arc.
+Minimal repro NOW correct:
+- capture:  `c(X=zeros).sum()` = -426.6
+- replay (after `X.assign(0.5)`): -1001.7
+- truth (fresh `c(X)`):            -1001.7  ✓ matches
+
+Conv+ReLU+Linear+SCCE under JIT also correct (loss changes step-over-
+step).  The simple JIT path is fully working.
+
+### KNOWN: full beautiful_mnist train under JIT hits CUDA error
+
+The literal `Conv2d(1,32,5) -> ReLU -> Conv2d(32,32,5) -> ReLU ->
+BatchNorm -> max_pool2d -> Conv2d(32,64,3) -> ReLU -> Conv2d(64,64,3)
+-> ReLU -> BatchNorm -> max_pool2d -> Flatten -> Linear(576,10)` model
+with full Adam backward+optim hits `CUDA_ERROR_ILLEGAL_ADDRESS` during
+the first capture's realize.  Some deeper scheduler/planner
+interaction with the accumulated jit_pinned bufs.
+
+For CORRECT training on the full beautiful_mnist today, set
+`THVM_JIT=0`.  That keeps the KE-CUfunction cache + async launches +
+GROUP_REDUCE wins -- ~765 ms warm step, bit-identical losses, full
+convergence.  Compared to pre-arc baseline (7.4 s warm), this is
+**~10× faster CORRECT training** with no JIT, plus the JIT
+infrastructure ready for the remaining bug-fix that brings full mnist
+to ~121 ms warm.
+
+### Summary table (V100 BS=128 STEPS=5)
+
+| Config                     | Cold    | Warm    | Loss   | Correct? |
+|----------------------------|--------:|--------:|-------:|---------:|
+| Pre-arc baseline           | 15.1 s  | 18.2 s  | ✓      | ✓        |
+| + GROUP_REDUCE             | 10.7 s  |  7.3 s  | ✓      | ✓        |
+| + KE-CUfunction cache      |  5.1 s  | **800 ms** | ✓ | ✓        |
+| + async launches           |  5.1 s  | **750 ms** | ✓ | ✓        |
+| + PTX + GROUPTOP (no JIT)  |  8.7 s  | **765 ms** | ✓ | ✓        |
+| + TinyJit (simple model)   |    -    | **121 ms** (tinygrad parity) | ✓ | ✓ |
+| + TinyJit (full beautiful_mnist) | -- | -- | -- | ✗ ILLEGAL_ADDRESS |
+| tinygrad reference         |    -    | ~115 ms | -      | -        |
 
 ## References
 
