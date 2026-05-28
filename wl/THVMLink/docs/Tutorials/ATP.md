@@ -29,7 +29,7 @@ The ATP context is its own load. The thvm context only carries the IC primitives
 Needs["THVMLink`ATP`"];
 ```
 
-Equational axioms can be supplied directly, or as a name resolved through the built-in [AxiomaticTheory](). Variables are written as patterns (`x_`, `y_`); the engine treats them as universally-quantified meta-variables. Use a non-`Orderless` operator (`CircleTimes` / `CenterDot` / a function head like `f[x, y]`) when both sides of a conjecture must differ - Wolfram's `Times` sorts its operands at parse time, so `x*y == y*x` reads as `x*y == x*y` and never reaches the engine as a non-trivial goal.
+Equational axioms can be supplied directly, or as a name resolved through the built-in [AxiomaticTheory](). Each axiom and conjecture is universally quantified through a ForAll wrapper (the standard Wolfram surface, identical to [FindEquationalProof](paclet:ref/FindEquationalProof)). Use a non-`Orderless` operator (`CircleTimes` / `CenterDot` / a function head like `f[x, y]`) when both sides of an equation must differ - Wolfram's `Times` sorts its operands at parse time, so `x*y == y*x` reads as `x*y == x*y` and never reaches the engine as a non-trivial goal.
 
 ---
 
@@ -48,18 +48,18 @@ The returned object speaks the standard `ProofObject` interface: `p["ProofDatase
 Mix an explicit conjecture against a named theory:
 
 ```wl
-TFindProof[Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x], "AbelianGroupAxioms"]
+TFindProof[
+    ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z == z \[CircleTimes] (y \[CircleTimes] x)],
+    "AbelianGroupAxioms"]
 ```
 
-Pass both arguments explicitly when there's no canonical name for the axiom set - typical when working with a custom theory.  `e` is a fresh constant symbol for the identity; `inv` a fresh function head for the inverse:
+Pass both arguments explicitly when there's no canonical name for the axiom set - typical when working with a custom theory:
 
 ```wl
 TFindProof[
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
-    {Inactive[Equal][x \[CircleTimes] (y \[CircleTimes] z), (x \[CircleTimes] y) \[CircleTimes] z],
-     Inactive[Equal][x \[CircleTimes] e, x],
-     Inactive[Equal][x \[CircleTimes] inv[x], e]}
-]
+    ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a],
+    {ForAll[{a, b, c}, a \[CircleTimes] (b \[CircleTimes] c) == (a \[CircleTimes] b) \[CircleTimes] c],
+     ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a]}]
 ```
 
 A list-valued conjecture (a multi-equation theorem, e.g. one of the entries in `AxiomaticTheory["BooleanAxioms", "NotableTheorems"]`) returns a list of `ProofObject`s, one per conjunct.
@@ -77,11 +77,10 @@ Pass `"Lemmas"` (or any other return spec) when you want just the saturated rule
 
 ```wl
 TFindProof[
-    {Inactive[Equal][x \[CircleTimes] (y \[CircleTimes] z), (x \[CircleTimes] y) \[CircleTimes] z],
-     Inactive[Equal][x \[CircleTimes] e, x]},
+    {ForAll[{a, b, c}, a \[CircleTimes] (b \[CircleTimes] c) == (a \[CircleTimes] b) \[CircleTimes] c],
+     ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a]},
     "Lemmas",
-    TimeConstraint -> 3
-]
+    TimeConstraint -> 3]
 ```
 
 ## Picking what comes back
@@ -89,7 +88,10 @@ TFindProof[
 The last positional argument selects what `TFindProof` returns. A single string returns that bare value; a list returns an Association keyed by the requested names; `All` returns every output:
 
 ```wl
-TFindProof[Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x], "AbelianGroupAxioms", All]
+TFindProof[
+    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
+    "AbelianGroupAxioms",
+    All]
 ```
 <!-- => <|"ProofObject" -> _, "Status" -> "Proved", "Lemmas" -> {...},
         "PreprocessedAxioms" -> {...}, "RelevantAxioms" -> <|...|>,
@@ -117,14 +119,12 @@ Pass a single Association as `Method`:
 
 ```wl
 TFindProof[
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
+    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
     "AbelianGroupAxioms",
     Method -> {"Completion",
-        "Ordering"          -> "LPO",
-        "AutoPrecedence"    -> True,
-        "CriticalPairWeight"-> "Mix2",
-        "SelectionRatio"    -> 2}
-]
+        "Ordering"           -> "KBO",
+        "CriticalPairWeight" -> "Mix"},
+    TimeConstraint -> 15]
 ```
 
 ### Named presets
@@ -137,12 +137,9 @@ Each named preset bundles the defaults of a real-world prover so a one-name call
 - `"EProver"` - CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP.
 
 ```wl
-TFindProof[
-    Inactive[Equal][nand[nand[a, b], nand[a, b]],
-                    nand[nand[a, a], nand[b, b]]],
-    "ShefferAxioms",
-    Method -> "Waldmeister"
-]
+TFindProof["Commutativity", "ShefferAxioms",
+    Method -> "VampireUEQ",
+    TimeConstraint -> 30]
 ```
 
 ### Portfolios
@@ -156,12 +153,11 @@ A portfolio is a schedule of single-config Methods tried in turn; the first that
 
 ```wl
 TFindProof[
-    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
+    ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z == z \[CircleTimes] (y \[CircleTimes] x)],
     "AbelianGroupAxioms",
+    All,
     Method         -> "VampirePortfolio",
-    TimeConstraint -> 30,
-    All
-]
+    TimeConstraint -> 30]
 ```
 
 `PortfolioFrontLoad -> n` widens the slice given to the first `n` entries (each gets 2x the unweighted share) - use it when an `Automatic` front genuinely deserves more time than the fair share.
@@ -177,7 +173,7 @@ TAtpSchedule["VampirePortfolio"]
 
 ```wl
 TAtpSchedule[Automatic,
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
+    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
     "AbelianGroupAxioms"]
 ```
 <!-- => structure-aware front + the fixed Portfolio tail -->
@@ -196,7 +192,7 @@ Large theories carry axioms that no proof of the current goal needs. [TRelevantA
 
 ```wl
 TRelevantAxioms[
-    Inactive[Equal][x \[CircleTimes] y, y \[CircleTimes] x],
+    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
     "AbelianGroupAxioms",
     Method -> {"AxiomRelevance" -> "Safe"}]
 ```
@@ -218,11 +214,10 @@ Modes:
 
 ```wl
 TATP[
-    {Inactive[Equal][x \[CircleTimes] e, x],
-     Inactive[Equal][x \[CircleTimes] inv[x], e],
-     Inactive[Equal][x \[CircleTimes] (y \[CircleTimes] z), (x \[CircleTimes] y) \[CircleTimes] z]},
-    Inactive[Equal][inv[inv[x]], x]
-]
+    {ForAll[a, a \[CircleTimes] e == a],
+     ForAll[a, a \[CircleTimes] inv[a] == e],
+     ForAll[{a, b, c}, a \[CircleTimes] (b \[CircleTimes] c) == (a \[CircleTimes] b) \[CircleTimes] c]},
+    ForAll[a, inv[inv[a]] == a]]
 ```
 
 `TATP[File["path.pr"]]` parses a Waldmeister `.pr` spec via the C-side `wald_parse_file` and runs the saturator directly.
