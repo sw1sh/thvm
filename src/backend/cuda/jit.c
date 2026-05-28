@@ -72,6 +72,101 @@ static u64 cuda_jit_hash(const char *src) {
   return h | (1ULL << 63);   // never 0 (the empty-slot sentinel)
 }
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+// --- on-disk PTX cache (tinygrad parity) ---------------------------------
+// nvrtc compilation is the dominant warmup cost (~5s for beautiful_mnist
+// fwd alone, ~30+s with bwd).  In-process CudaJitSlot only deduplicates
+// within a single Python invocation; tinygrad keeps a sqlite-backed disk
+// cache so a second `python beautiful_mnist.py` reuses the prior run's
+// compiled PTX.  thvm's port is a flat directory of .ptx files keyed on
+// FNV(src + arch + fast_math_flag).  Default ON; THVM_CUDA_DISK_CACHE=0
+// disables.  Lives under XDG_CACHE_HOME or ~/.cache/thvm/cuda_ptx/.
+static int cuda_disk_cache_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_CUDA_DISK_CACHE");
+    enabled = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
+    known = 1;
+  }
+  return enabled;
+}
+
+static int cuda_disk_cache_path(u64 cache_key, char *out, size_t cap) {
+  char const *base = getenv("THVM_CUDA_CACHE_DIR");
+  char default_dir[1024];
+  if (base == NULL || base[0] == '\0') {
+    char const *xdg = getenv("XDG_CACHE_HOME");
+    char const *home = getenv("HOME");
+    if (xdg != NULL && xdg[0] != '\0') {
+      snprintf(default_dir, sizeof default_dir, "%s/thvm/cuda_ptx", xdg);
+    } else if (home != NULL && home[0] != '\0') {
+      snprintf(default_dir, sizeof default_dir, "%s/.cache/thvm/cuda_ptx", home);
+    } else {
+      snprintf(default_dir, sizeof default_dir, "/tmp/thvm-cuda-ptx");
+    }
+    base = default_dir;
+  }
+  // Best-effort mkdir -p (cheap; ENOENT on partial parent path is fine
+  // -- the open() below will fail and the caller falls through to nvrtc).
+  {
+    char tmp[1024];
+    snprintf(tmp, sizeof tmp, "%s", base);
+    for (char *p = tmp + 1; *p; p++) {
+      if (*p == '/') { *p = '\0'; mkdir(tmp, 0755); *p = '/'; }
+    }
+    mkdir(tmp, 0755);
+  }
+  int n = snprintf(out, cap, "%s/%016llx.ptx", base, (unsigned long long)cache_key);
+  return (n > 0 && (size_t)n < cap) ? 1 : 0;
+}
+
+// Returned buffer is malloc'd + NUL-terminated; caller owns it.
+// Returns NULL on miss (no entry, or read error).
+static char *cuda_disk_cache_get(u64 cache_key) {
+  if (!cuda_disk_cache_enabled()) return NULL;
+  char path[1024];
+  if (!cuda_disk_cache_path(cache_key, path, sizeof path)) return NULL;
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) return NULL;
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  if (sz <= 0 || sz > (long)(64 * 1024 * 1024)) { fclose(f); return NULL; }
+  fseek(f, 0, SEEK_SET);
+  char *buf = (char *)malloc((size_t)sz + 1);
+  if (buf == NULL) { fclose(f); return NULL; }
+  size_t got = fread(buf, 1, (size_t)sz, f);
+  fclose(f);
+  if (got != (size_t)sz) { free(buf); return NULL; }
+  buf[sz] = '\0';
+  return buf;
+}
+
+static void cuda_disk_cache_put(u64 cache_key, const char *ptx, size_t ptx_sz) {
+  if (!cuda_disk_cache_enabled()) return;
+  char path[1024];
+  if (!cuda_disk_cache_path(cache_key, path, sizeof path)) return;
+  // Atomic-ish: write to tmp then rename so a concurrent reader never sees
+  // a partial file.  Two writers racing produce identical content (deterministic
+  // nvrtc output for the same src + opts), so a last-writer-wins rename is safe.
+  char tmp[1100];
+  snprintf(tmp, sizeof tmp, "%s.tmp.%d", path, (int)getpid());
+  FILE *f = fopen(tmp, "wb");
+  if (f == NULL) return;
+  size_t wrote = fwrite(ptx, 1, ptx_sz, f);
+  fclose(f);
+  if (wrote != ptx_sz) { unlink(tmp); return; }
+  if (rename(tmp, path) != 0) unlink(tmp);
+}
+
+// Telemetry: count disk-cache hits and writes.
+u64 CUDA_JIT_DISK_HITS  = 0;
+u64 CUDA_JIT_DISK_WRITES = 0;
+fn u64 cuda_jit_disk_hits(void)   { return CUDA_JIT_DISK_HITS;  }
+fn u64 cuda_jit_disk_writes(void) { return CUDA_JIT_DISK_WRITES; }
+
 // Open-addressed (linear probe).  A training run's kernel set is stable
 // and bounded (~140 distinct sources for beautiful_mnist), so with a
 // 4096-slot table they all coexist and every step after the first HITS
@@ -192,7 +287,29 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
               (unsigned long long)CUDA_JIT_PTX_LOADS, ptx);
     }
   } else {
-    // --- nvrtc compile ----------------------------------------------
+    // --- nvrtc compile (with on-disk PTX cache lookup first) -------
+    char arch_opt[32];
+    int sm = cuda_device_sm();
+    if (sm <= 0) sm = 70;   // safe default if the probe failed
+    snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
+    char const *_fme = getenv("THVM_CUDA_FAST_MATH");
+    int fast_math_on = (_fme != NULL && _fme[0] == '1');
+
+    // Disk cache key: hash src bytes, then mix in arch sm + fast_math
+    // flag so PTX compiled for a different target doesn't collide.
+    u64 disk_key = key;
+    disk_key ^= ((u64)sm) << 1;
+    disk_key ^= ((u64)fast_math_on) << 33;
+    disk_key |= (1ULL << 63);
+
+    char *cached_ptx = cuda_disk_cache_get(disk_key);
+    if (cached_ptx != NULL) {
+      ptx = cached_ptx;
+      ptx_owned = 1;
+      CUDA_JIT_DISK_HITS++;
+      goto module_load;
+    }
+
     nvrtcProgram prog;
     nvrtcResult nr = nvrtcCreateProgram(&prog, cu_src, kernel_name,
                                         0, NULL, NULL);
@@ -201,11 +318,6 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
                "nvrtcCreateProgram: %s", nvrtcGetErrorString(nr));
       return NULL;
     }
-    // --gpu-architecture: track the live device.  V100 -> compute_70.
-    char arch_opt[32];
-    int sm = cuda_device_sm();
-    if (sm <= 0) sm = 70;   // safe default if the probe failed
-    snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
     // --use_fast_math: enable fast-math intrinsics (rsqrt -> rsqrtf,
     // div -> approx, etc.).  Default ON; THVM_CUDA_NO_FAST_MATH=1
     // restores precise math.  For beautiful_mnist / similar training
@@ -220,9 +332,8 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     // THVM_CUDA_NO_FAST_MATH=1).  Opt in per workload until cross-BS
     // validation proves a positive default; loss byte-identical at
     // BS=128 with vs without it, but BS=64 hurts measurably.
-    // THVM_CUDA_FAST_MATH=1 enables.
-    char const *_fme = getenv("THVM_CUDA_FAST_MATH");
-    if (_fme != NULL && _fme[0] == '1') {
+    // THVM_CUDA_FAST_MATH=1 enables (fast_math_on captured above).
+    if (fast_math_on) {
       opts[n_opts++] = "--use_fast_math";
       // --ftz=true flushes denormals to zero (V100 fp32 normally takes
       // denormal stalls).  Implied by --use_fast_math on some toolkits
@@ -261,8 +372,13 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     nvrtcGetPTX(prog, ptx);
     nvrtcDestroyProgram(&prog);
     ptx_owned = 1;
+    // Persist to disk so subsequent invocations skip nvrtc entirely.
+    // ptx_sz includes the trailing NUL nvrtcGetPTX writes.
+    cuda_disk_cache_put(disk_key, ptx, ptx_sz > 0 ? ptx_sz - 1 : 0);
+    CUDA_JIT_DISK_WRITES++;
   }
 
+module_load:
   // --- module load + function lookup -------------------------------
   CUmodule module;
   CUresult cr = cuModuleLoadData(&module, ptx);
