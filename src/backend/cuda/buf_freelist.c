@@ -98,6 +98,12 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
   nb_slot->skip_freelist = 0;
   nb_slot->parent_buf_id = 0;
   cuMemsetD8(dptr, 0, (size_t)nbytes);
+  if (getenv("THVM_CUDA_ALLOC_TRACE")) {
+    fprintf(stderr,
+            "[freelist] req=%llu -> donor_bid=%u (nbytes=%llu) -> new buf_id=%u dptr=%p\n",
+            (unsigned long long)nbytes, donor_bid,
+            (unsigned long long)nb, new_id, (void*)dptr);
+  }
   return new_id;
 }
 

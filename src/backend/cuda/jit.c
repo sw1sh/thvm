@@ -509,7 +509,16 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     u32      kvar_ids[KVAR_USED_CAP];
   } CUDA_KE_CACHE[1 << 14];   // KERNELS_CAP order of magnitude
   u32 cache_idx = (u32)(ke - KERNELS) & ((1 << 14) - 1);
-  if (CUDA_KE_CACHE[cache_idx].store_root == store_root
+  // THVM_CUDA_KE_CACHE=0 disables per-KE func/grid cache for A/B
+  // (forces re-render+probe-source-hash every dispatch).
+  static int ke_cache_init = 0, ke_cache_on = 1;
+  if (!ke_cache_init) {
+    char const *e = getenv("THVM_CUDA_KE_CACHE");
+    ke_cache_on = (e == NULL || e[0] != '0');
+    ke_cache_init = 1;
+  }
+  if (ke_cache_on
+      && CUDA_KE_CACHE[cache_idx].store_root == store_root
       && CUDA_KE_CACHE[cache_idx].func != NULL) {
     u32 n_in = ke->n_inputs;
     u32 n_kvar = CUDA_KE_CACHE[cache_idx].n_kvar;
@@ -531,6 +540,25 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     for (u32 i = 0; i < n_kvar; i++) {
       kvar_val[i] = kernel_kvar_value(ke, kvar_ids[i]);
       args[1 + n_in + i] = &kvar_val[i];
+    }
+    {
+      char const *fk = getenv("THVM_CUDA_DUMP_DISPATCH");
+      if (fk != NULL && (u32)atoi(fk) == (u32)(ke - KERNELS)) {
+        fprintf(stderr, "thvm: dispatch kid=%u grid=%u block=%u\n",
+                (u32)(ke - KERNELS),
+                CUDA_KE_CACHE[cache_idx].grid_x,
+                CUDA_KE_CACHE[cache_idx].block_x);
+        fprintf(stderr, "  out buf_id=%u dptr=%p nbytes=%llu\n",
+                out_buf_id, (void*)dptrs[0],
+                (unsigned long long)CUDA_BUFS[out_buf_id].nbytes);
+        for (u32 i = 0; i < n_in; i++) {
+          u32 ib = in_buf_ids[i];
+          fprintf(stderr, "  in[%u] buf_id=%u dptr=%p nbytes=%llu refcount=%u pinned=%u\n",
+                  i, ib, (void*)dptrs[1+i],
+                  (unsigned long long)CUDA_BUFS[ib].nbytes,
+                  CUDA_BUFS[ib].refcount, CUDA_BUFS[ib].jit_pinned);
+        }
+      }
     }
     int rc = cuda_jit_launch(CUDA_KE_CACHE[cache_idx].func,
                              CUDA_KE_CACHE[cache_idx].grid_x,

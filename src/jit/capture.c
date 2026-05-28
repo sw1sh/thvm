@@ -150,7 +150,7 @@ static void jit_capture_retain_buf(JitCapture *c, Backend *b, u32 buf_id) {
   // dptr=0 / dispatch returns -1 / loss reads stale.  jit_pin sets a
   // separate flag that survives clear_preserved and gets unpinned only
   // on jit_capture_drop.
-  if (b->buf_jit_pin != NULL) {
+  if (b->buf_jit_pin != NULL && getenv("THVM_JIT_NO_PIN") == NULL) {
     b->buf_jit_pin(buf_id);
   }
   // If the buf is currently parked on the backend's freelist (refcount==

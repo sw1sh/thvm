@@ -85,15 +85,29 @@ fn void cuda_buf_mark_preserved(u32 buf_id) {
 // the schedule's per-realize buffer planner.  Skip dead buffers: a buf
 // freed by the time the JIT retain runs has dptr==0; pinning it would
 // just hold a dead slot.
+//
+// Arena views: pin recursively into the parent arena.  Without this
+// the view stays alive but its dptr points into the OLD arena's
+// (cuMemFree'd) storage; the NEXT realize allocates a possibly-smaller
+// arena at a different dptr, and the captured op's dispatch writes
+// into the wrong / freed region -> CUDA_ERROR_ILLEGAL_ADDRESS.
 fn void cuda_buf_jit_pin(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
   if (CUDA_BUFS[buf_id].dptr == 0) return;
   CUDA_BUFS[buf_id].jit_pinned = 1;
+  u32 parent = CUDA_BUFS[buf_id].parent_buf_id;
+  if (parent != 0 && parent < CUDA_BUFS_NEXT) {
+    cuda_buf_jit_pin(parent);
+  }
 }
 
 fn void cuda_buf_jit_unpin(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
   CUDA_BUFS[buf_id].jit_pinned = 0;
+  u32 parent = CUDA_BUFS[buf_id].parent_buf_id;
+  if (parent != 0 && parent < CUDA_BUFS_NEXT) {
+    cuda_buf_jit_unpin(parent);
+  }
 }
 
 fn void cuda_buf_clear_preserved(u32 wm) {

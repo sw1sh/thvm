@@ -33,7 +33,15 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   if (nbytes == 0) nbytes = 1;   // cuMemAlloc rejects 0
 
   u32 recycled = cuda_buf_freelist_try_pop(nbytes);
-  if (recycled != 0) return recycled;
+  if (recycled != 0) {
+    if (getenv("THVM_CUDA_ALLOC_TRACE")) {
+      fprintf(stderr, "[alloc] req=%llu -> recycled buf_id=%u nbytes=%llu dptr=%p\n",
+              (unsigned long long)nbytes, recycled,
+              (unsigned long long)CUDA_BUFS[recycled].nbytes,
+              (void*)CUDA_BUFS[recycled].dptr);
+    }
+    return recycled;
+  }
 
   if (CUDA_BUFS_NEXT >= CUDA_BUFS_CAP) {
     fprintf(stderr, "cuda_buf_alloc: out of slots (cap=%u)\n", CUDA_BUFS_CAP);
@@ -59,6 +67,10 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   b->parent_buf_id = 0;
   CUDA_MEM_LIVE += nbytes;
   if (CUDA_MEM_LIVE > CUDA_MEM_PEAK) CUDA_MEM_PEAK = CUDA_MEM_LIVE;
+  if (getenv("THVM_CUDA_ALLOC_TRACE")) {
+    fprintf(stderr, "[alloc] req=%llu -> fresh buf_id=%u dptr=%p\n",
+            (unsigned long long)nbytes, id, (void*)dptr);
+  }
   return id;
 }
 
@@ -86,6 +98,10 @@ fn u32 cuda_buf_alloc_external(CUdeviceptr dptr, u64 nbytes) {
   b->owns_data     = 0;
   b->skip_freelist = 0;
   b->parent_buf_id = 0;
+  if (getenv("THVM_CUDA_ALLOC_TRACE")) {
+    fprintf(stderr, "[alloc-ext] req=%llu -> external buf_id=%u dptr=%p\n",
+            (unsigned long long)nbytes, id, (void*)dptr);
+  }
   return id;
 }
 
