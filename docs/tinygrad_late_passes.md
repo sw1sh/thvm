@@ -1007,12 +1007,20 @@ warmup, separate process from the shared brain-arc 258 GPU user):
 | p90        | 151 ms    |
 | max        | 152 ms    |
 
-Extremely low variance (8 ms span across 50 runs).  vs tinygrad's
-~115 ms reference (per [[reference_thvm_cuda_pod]]) = ~1.3x off.
+Extremely low variance (8 ms span across 50 runs).
 
-Note that the tinygrad reference number is from a different setup;
-their reported "~1060 img/s at BS=128" works out to ~121 ms/step.
-The end-to-end gap is real but in the same order of magnitude.
+### Direct head-to-head vs tinygrad on the SAME V100
+
+Ran tinygrad's literal `examples/beautiful_mnist.py` on the same pod
+(`PYTHONPATH=/root/tinygrad DEV=CUDA BS=128 STEPS=200`):
+- Steady-state rate: 12.13 it/s = **~82 ms/step**
+- First-iter cold: ~7 s (nvrtc compile + first JIT capture)
+- Their default BS=512 hits ~2.5 it/s = ~400 ms/step (0.78 ms/img)
+
+So at BS=128, tinygrad is **~82 ms/step**, thvm is **150 ms/step** ->
+we are 1.8x off the steady state.  Closing this gap means making the
+conv2 kernels' GPU exec time ~1.8x faster -- the 5 kernels at
+[128,32,20,20] currently eat ~95 ms of the warm step.
 
 Knobs landed for this exploration:
 - `THVM_UPCAST_CAP=N` -- overrides the main UPCAST loop cap (default
