@@ -5,10 +5,6 @@
 fn void cuda_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
   CudaBuf *b = &CUDA_BUFS[buf_id];
-  // STICKY JIT pin: free is a no-op while held by a capture.  The
-  // jit_unpin call on jit_capture_drop releases the buf cleanly via
-  // its own refcount-zero-free path.
-  if (b->jit_pinned) return;
   // Snapshot parent BEFORE we zero the slot.  Arena views (non-owning
   // bufs pointing into a parent arena CudaBuf) must drop their parent
   // ref no matter which code path frees them -- pool_rollback's direct

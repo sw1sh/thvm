@@ -82,9 +82,12 @@ fn void cuda_buf_mark_preserved(u32 buf_id) {
 // subsequent realize's pool_rollback.  Cleared on jit_capture_drop.
 // We do NOT bump refcount here -- the JIT already calls buf_incref
 // separately (in jit_capture_retain_buf), and double-counting confuses
-// the schedule's per-realize buffer planner.
+// the schedule's per-realize buffer planner.  Skip dead buffers: a buf
+// freed by the time the JIT retain runs has dptr==0; pinning it would
+// just hold a dead slot.
 fn void cuda_buf_jit_pin(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
+  if (CUDA_BUFS[buf_id].dptr == 0) return;
   CUDA_BUFS[buf_id].jit_pinned = 1;
 }
 

@@ -290,6 +290,10 @@ fn int cuda_jit_launch(CUfunction func,
                               args, NULL);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuLaunchKernel", r);
+    if (getenv("THVM_CUDA_LAUNCH_TRACE")) {
+      fprintf(stderr, "thvm: cuLaunchKernel FAIL grid=%u block=%u err=%d\n",
+              grid_x, block_x, (int)r);
+    }
     return -1;
   }
   // Per-launch cuCtxSynchronize was hiding the CUDA driver's ability
@@ -312,6 +316,10 @@ fn int cuda_jit_launch(CUfunction func,
     r = cuCtxSynchronize();
     if (r != CUDA_SUCCESS) {
       cuda_set_error("cuCtxSynchronize", r);
+      if (getenv("THVM_CUDA_LAUNCH_TRACE")) {
+        fprintf(stderr, "thvm: cuCtxSync FAIL after kernel grid=%u block=%u err=%d\n",
+                grid_x, block_x, (int)r);
+      }
       return -1;
     }
   }
@@ -527,6 +535,9 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     int rc = cuda_jit_launch(CUDA_KE_CACHE[cache_idx].func,
                              CUDA_KE_CACHE[cache_idx].grid_x,
                              CUDA_KE_CACHE[cache_idx].block_x, args);
+    if (rc != 0 && getenv("THVM_CUDA_LAUNCH_TRACE")) {
+      fprintf(stderr, "thvm: dispatch FAIL kid=%u (cache hit)\n", (u32)(ke - KERNELS));
+    }
     u32 kid = (u32)(ke - KERNELS);
     cg_profile_record(kid, KDISPATCH_CUDA_JIT, cg_now_us() - t_dispatch_start);
     return rc;
@@ -582,12 +593,17 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     }
   }
   CUfunction func = cuda_jit_compile(cu, "k");
-  free(cu);
   if (func == NULL) {
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- compile failed: %s\n",
             thvm_cuda_last_error());
+    if (getenv("THVM_CUDA_DUMP_FAILED_KERNEL")) {
+      fprintf(stderr, "=== FAILED kernel src kid=%u ===\n%s=== end ===\n",
+              (u32)(ke - KERNELS), cu);
+    }
+    free(cu);
     return -1;
   }
+  free(cu);
 
   // Pack the cuLaunchKernel argument array.  Order matches the CUDA
   // kernel signature emitted by cg_render_uop_kernel_cuda_root:
@@ -643,6 +659,9 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   }
 
   int rc = cuda_jit_launch(func, grid_x, block_x, args);
+  if (rc != 0 && getenv("THVM_CUDA_LAUNCH_TRACE")) {
+    fprintf(stderr, "thvm: dispatch FAIL kid=%u (cache miss)\n", (u32)(ke - KERNELS));
+  }
   // Populate the per-KernelEntry cache for the next dispatch of this
   // store_root.  If a different KernelEntry collides on cache_idx its
   // slot just gets overwritten -- correctness is preserved (we always
