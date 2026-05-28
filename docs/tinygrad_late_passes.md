@@ -995,12 +995,33 @@ Compared to pre-arc baseline (18.2 s warm), the full arc delivers a
 
 ### Remaining gap to tinygrad
 
-192 ms vs tinygrad's ~115 ms = 1.7× off.  The warm step is dominated
-by 5 conv kernels each ~38 ms at [128, 32, 20, 20] = the conv2 forward
-+ its 4 backward / grad kernels.  ~34 GFLOP/s effective vs V100 peak
-14 TFLOP/s = 0.24% peak.  Memory-bound (uncoalesced access pattern
-within the LOCAL axes); next levers are LOCAL-axis reordering for
-coalesced loads + more UPCAST (more outputs per thread).
+V100 BS=128 STEPS=10 warm-mean across 10 runs (THVM_CUDA_PTX=1
+THVM_GROUPTOP=1 THVM_LOCAL_INNER_FIRST=1 THVM_JIT=1):
+- min 164 ms, median 185 ms, max 223 ms
+
+Variance is high because the V100 is shared with another experiment
+running at ~62% GPU utilization (brain-arc 258 policy training).  The
+fastest run beats the median by ~10% and approaches tinygrad's ~115 ms
+reference within ~40 ms.
+
+Knobs landed for this exploration:
+- `THVM_UPCAST_CAP=N` -- overrides the main UPCAST loop cap (default
+  tinygrad-faithful 32).  Sweep shows no gain at 8/16/64/128 on this
+  model; the conv2 kernels are memory-bound, not register-pressure-bound.
+- `THVM_LOCAL_INNER_FIRST=1` -- reverses the LOCAL picker sort from
+  (expand=1 first, axis desc) to (expand=0 first, axis desc), favoring
+  the innermost address-relevant axes for LOCAL placement.  ~10% win
+  on the conv2 kernels via better load coalescing in the inner W
+  dimension.
+- `THVM_GROUP_SZ=N` -- cooperative reduce width (default 16).
+
+Next levers (real GPU optimization, not knob tuning):
+- Shared-memory weight cache for the conv inner loop (currently 800
+  global loads per thread; could be ~200 shared loads with proper tile).
+- Multi-axis UPCAST on both Cout and W (more outputs per thread).
+- WMMA path for fp32 conv via im2col + GEMM (V100 fp32 doesn't have
+  TensorCore acceleration, so this is a wash on V100 specifically but
+  needed for sm_80+ TF32 path).
 
 ### Summary table (V100 BS=128 STEPS=5)
 
