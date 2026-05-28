@@ -1017,10 +1017,26 @@ Ran tinygrad's literal `examples/beautiful_mnist.py` on the same pod
 - First-iter cold: ~7 s (nvrtc compile + first JIT capture)
 - Their default BS=512 hits ~2.5 it/s = ~400 ms/step (0.78 ms/img)
 
-So at BS=128, tinygrad is **~82 ms/step**, thvm is **150 ms/step** ->
-we are 1.8x off the steady state.  Closing this gap means making the
-conv2 kernels' GPU exec time ~1.8x faster -- the 5 kernels at
-[128,32,20,20] currently eat ~95 ms of the warm step.
+So at BS=128, tinygrad is **~82 ms/step**, thvm is **152 ms/step**
+(p50 of 100-iter bench with full opts) -> we are 1.85x off the steady
+state.
+
+### Full-opts 100-iter bench (THVM_CUDA_PTX=1 THVM_GROUPTOP=1 THVM_LOCAL_INNER_FIRST=1 THVM_LOCAL_CAP=1024 THVM_JIT=1)
+
+| Percentile | Warm step |
+|------------|----------:|
+| min        | 134 ms    |
+| p10        | 140 ms    |
+| **p50**    | **152 ms** |
+| p90        | 168 ms    |
+| max        | 182 ms    |
+
+Closing the remaining 1.85x gap to tinygrad's 82 ms requires real
+renderer-level work, not knob tuning:
+- THREAD opt (a 3rd parallelism dim that tinygrad has and we don't:
+  GLOBAL+LOCAL+UPCAST is ours; theirs adds THREAD which binds a warp).
+- Shared-memory weight cache in the conv2 inner loop (currently 800
+  global weight loads per thread; could be ~32 with proper tile).
 
 Knobs landed for this exploration:
 - `THVM_UPCAST_CAP=N` -- overrides the main UPCAST loop cap (default
