@@ -499,6 +499,10 @@ int main(int argc, char **argv) {
   printf("ordering=%s  step_cap=%u  wall_cap=%.0fs  cp_weight_mode=%u\n",
          use_lpo ? "lpo" : (use_kbo0 ? "kbo0" : "kbo"),
          step_cap, wall_cap, (u32)s->cp_weight_mode);
+  if (s->random_modulo > 0u) {
+    printf("random_ratio=%u  random_seed=%llu\n",
+           s->random_modulo, (unsigned long long)s->rng_state);
+  }
   if (!saturate) {
     char glb[2048], grb[2048];
     atp_pretty_term(gl, glb, sizeof glb);
