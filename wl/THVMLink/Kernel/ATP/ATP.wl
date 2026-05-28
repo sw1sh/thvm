@@ -2394,7 +2394,23 @@ $AtpPresetDefaults = <|
         "AutoMaxWeight" -> 20,
         "BackwardSubsume" -> True,
         "RHSInterreduce" -> True,
-        "UnfailingCP" -> True|>
+        "UnfailingCP" -> True|>,
+    (* Vampire's `lrs+10_32:to=lpo:sp=arity:nwc=1:fgj=on:bd=all:
+       random_seed=...` cracking config -- the third portfolio entry
+       that proves McCuneAxioms/EqualityOfInverses in 2.45s
+       (tools/baselines/vampire_raw/McCuneAxioms__EqualityOfInverses
+       .out config 3).  Random selection alone is not the cracking
+       ingredient at thvm's per-CP throughput (engine + bench
+       experiments at 60s budget still don't close McCune), but the
+       config is the experimentally-validated combination users
+       should reach for first. *)
+    "VampireRandom" -> <|
+        "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "SelectionRatio" -> 10, "UnfailingCP" -> True,
+        "GroundJoin" -> True, "BackwardDemod" -> True,
+        "RHSInterreduce" -> True,
+        "RandomRatio" -> 32, "RandomSeed" -> 3681690318,
+        "LRS" -> True|>
 |>;
 
 (* Per-preset default for the GoalDirected (MNF front) toggle.  Mostly
@@ -2403,7 +2419,8 @@ $AtpPresetGoalDirected = <|
     "Waldmeister" -> False,
     "VampireUEQ"  -> True,
     "Twee"        -> False,
-    "EProver"     -> False
+    "EProver"     -> False,
+    "VampireRandom" -> True
 |>;
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -2588,12 +2605,28 @@ atpParseMethod[{"EProver", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["EProver"],
         $AtpPresetGoalDirected["EProver"], {subopts}];
 
+(* Method -> "VampireRandom": the Vampire 5.0.1 portfolio entry that
+   cracks McCuneAxioms/EqualityOfInverses (`lrs+10_32:to=lpo:sp=arity:
+   nwc=1:fgj=on:bd=all:random_seed=3681690318`).  Bundles
+   LPO + AutoPrecedence + LRS + GroundJoin + BackwardDemod +
+   RHSInterreduce + UnfailingCP + RandomRatio 32 + Vampire's exact
+   seed.  Random clause selection alone is not the cracking
+   ingredient at thvm's per-CP throughput (engine experiments at
+   60s budget still don't close McCune), but this is the
+   experimentally-validated combination users should reach for
+   first when working on the hard targets. *)
+atpParseMethod["VampireRandom"] := atpParseMethod[{"VampireRandom"}];
+atpParseMethod[{"VampireRandom", subopts___Rule}] :=
+    atpDispatchPreset[$AtpPresetDefaults["VampireRandom"],
+        $AtpPresetGoalDirected["VampireRandom"], {subopts}];
+
 (* Registry of the named Method presets `atpParseMethod` recognizes.
    "Portfolio" / "VampirePortfolio" expand to schedules (a list of
    configs); the rest are single-config presets.  Exposed as
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
 $AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee", "EProver",
+    "VampireRandom",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
     "AllPresets"};
 
