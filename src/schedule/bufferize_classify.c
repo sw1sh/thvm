@@ -789,6 +789,20 @@ fn void bufferize_classify(Term root) {
     // (pm_generate_realize_map realizes COPY/CONTIGUOUS/STORE only;
     //  REDUCE realize emerges from ending_ranges + consumer-divergence
     //  inside run_rangeify).
+    // THVM_BUFFERIZE_SKIP_SMALL_EXPAND=1 opt-in: skip the multi-consumer
+    // bufferize seed for movement ops (EXPAND/RESHAPE/PERMUTE) whose
+    // source is small (broadcast 1-element to N).  Lets the scheduler
+    // inline the broadcast into each consumer instead of materializing
+    // once and reading N times -- saves the kernel dispatch + the
+    // materialized buf allocation.  beautiful_mnist emits 29 fires per
+    // step for several scalar-broadcast kernels (kid 74 `out[i] = in0[0]`,
+    // kid 75 `out[i] = in0[i] * (in1[0]*in2[0]*in3[0])`); inlining
+    // could collapse them.
+    int skip_small_expand = 0;
+    {
+      char const *_ee = getenv("THVM_BUFFERIZE_SKIP_SMALL_EXPAND");
+      if (_ee != NULL && _ee[0] == '1') skip_small_expand = 1;
+    }
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->consumer_count >= 2) {
@@ -810,7 +824,14 @@ fn void bufferize_classify(Term root) {
               || uop_is_ternary_elementwise(info->op);
         int src_has_reduce = ew
             && bufferize_elementwise_src_has_reduce(info->loc, 0);
-        if (!(ew && src_has_reduce)) {
+        // Also skip for movement ops over small sources (opt-in).
+        int skip_movement = 0;
+        if (skip_small_expand &&
+            (info->op == UOP_EXPAND || info->op == UOP_RESHAPE
+             || info->op == UOP_PERMUTE)) {
+          skip_movement = 1;
+        }
+        if (!(ew && src_has_reduce) && !skip_movement) {
           bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
         }
       }
