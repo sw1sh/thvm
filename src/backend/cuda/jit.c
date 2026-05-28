@@ -206,8 +206,19 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     int sm = cuda_device_sm();
     if (sm <= 0) sm = 70;   // safe default if the probe failed
     snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
-    const char *opts[] = { arch_opt };
-    nr = nvrtcCompileProgram(prog, 1, opts);
+    // --use_fast_math: enable fast-math intrinsics (rsqrt -> rsqrtf,
+    // div -> approx, etc.).  Default ON; THVM_CUDA_NO_FAST_MATH=1
+    // restores precise math.  For beautiful_mnist / similar training
+    // workloads the small numeric difference doesn't change loss
+    // convergence; tinygrad's CUDA renderer enables similar
+    // intrinsics via UOP_OPT(_, FAST_MATH, _) wraps.
+    const char *opts[8];
+    u32 n_opts = 0;
+    opts[n_opts++] = arch_opt;
+    if (getenv("THVM_CUDA_NO_FAST_MATH") == NULL) {
+      opts[n_opts++] = "--use_fast_math";
+    }
+    nr = nvrtcCompileProgram(prog, (int)n_opts, opts);
     if (nr != NVRTC_SUCCESS) {
       size_t log_sz = 0;
       nvrtcGetProgramLogSize(prog, &log_sz);
