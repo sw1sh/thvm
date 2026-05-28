@@ -560,6 +560,23 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
         }
       }
     }
+    // Optional per-kid GPU time via CUDA events.  Costs a sync per
+    // launch (defeats async pipelining), so only on when the env knob
+    // is set.  Use to identify true GPU-time hotspots, distinct from
+    // the CPU dispatch-wall the cg_profile_record below captures
+    // (which can be dominated by launch-queue full-waits, NOT compute).
+    static int   gpu_time_init = 0, gpu_time_on = 0;
+    static CUevent gpu_ev_a = NULL, gpu_ev_b = NULL;
+    if (!gpu_time_init) {
+      char const *e = getenv("THVM_CUDA_GPU_TIME");
+      gpu_time_on = (e != NULL && e[0] != '0');
+      if (gpu_time_on) {
+        cuEventCreate(&gpu_ev_a, 0);
+        cuEventCreate(&gpu_ev_b, 0);
+      }
+      gpu_time_init = 1;
+    }
+    if (gpu_time_on) cuEventRecord(gpu_ev_a, NULL);
     int rc = cuda_jit_launch(CUDA_KE_CACHE[cache_idx].func,
                              CUDA_KE_CACHE[cache_idx].grid_x,
                              CUDA_KE_CACHE[cache_idx].block_x, args);
@@ -567,6 +584,13 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
       fprintf(stderr, "thvm: dispatch FAIL kid=%u (cache hit)\n", (u32)(ke - KERNELS));
     }
     u32 kid = (u32)(ke - KERNELS);
+    if (gpu_time_on && rc == 0) {
+      cuEventRecord(gpu_ev_b, NULL);
+      cuEventSynchronize(gpu_ev_b);
+      float ms = 0.0f;
+      cuEventElapsedTime(&ms, gpu_ev_a, gpu_ev_b);
+      cg_profile_record_gpu(kid, (u64)(ms * 1000.0f));
+    }
     cg_profile_record(kid, KDISPATCH_CUDA_JIT, cg_now_us() - t_dispatch_start);
     return rc;
   }
