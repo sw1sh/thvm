@@ -749,7 +749,11 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           for (u32 fi = 0; fi < nf; fi++) {
             u32 f = facs[fi];
             if (ext % f != 0) continue;
-            if ((u64)local_running * (u64)f > 128) continue;
+            // THVM_LOCAL_CAP overrides the 128-thread block cap
+            // (V100 maxThreadsPerBlock=1024; tinygrad-faithful default
+            // is 128).
+            u64 lcap = (u64)hand_opt_getenv_int("THVM_LOCAL_CAP", 128);
+            if ((u64)local_running * (u64)f > lcap) continue;
             picked = f; break;
           }
           if (picked > 0) {
