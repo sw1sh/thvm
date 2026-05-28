@@ -144,68 +144,6 @@ static void rmu_buf_names_reset(void) {
   RMU_BUF_NAMES_N = 0;
 }
 
-// Renumber axis (`a<N>`) and accumulator (`_acc<N>`) identifiers to a
-// dense per-kernel sequence in first-appearance order, so two
-// structurally identical kernels render to byte-identical source
-// regardless of the global RU_RANGE_IDX_COUNTER value when they were
-// lowered.  Without this, every training step's kernels carry fresh
-// global axis ids -> unique source string -> JIT cache miss -> recompile
-// (the dominant eager-train wall + the nvrtc cache-thrash that corrupts a
-// launch and nans the train).  A reduce's loop var `a<N>` and its
-// accumulator `_acc<N>` share the same N, so one old->new number map
-// covers both and keeps them consistent.  Returns a malloc'd copy
-// (caller frees), or NULL on OOM.
-fn char *cg_canonicalize_axis_ids(const char *src) {
-  if (src == NULL) return NULL;
-  size_t len = strlen(src);
-  char *out = (char *)malloc(len * 2 + 16);
-  if (out == NULL) return NULL;
-  u32 old_ids[512];
-  u32 n_map = 0;
-  size_t o = 0;
-  size_t i = 0;
-  while (i < len) {
-    char c = src[i];
-    int id_start = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')
-                && (i == 0 || !( (src[i-1] >= 'A' && src[i-1] <= 'Z')
-                              || (src[i-1] >= 'a' && src[i-1] <= 'z')
-                              || (src[i-1] >= '0' && src[i-1] <= '9')
-                              || src[i-1] == '_'));
-    if (!id_start) { out[o++] = c; i++; continue; }
-    // Read the full identifier [A-Za-z0-9_]+.
-    size_t j = i;
-    while (j < len && ((src[j] >= 'A' && src[j] <= 'Z') || (src[j] >= 'a' && src[j] <= 'z')
-                    || (src[j] >= '0' && src[j] <= '9') || src[j] == '_')) j++;
-    size_t tok_len = j - i;
-    // Classify: `a<digits>` or `_acc<digits>` (digits at the tail).
-    const char *prefix = NULL; size_t plen = 0;
-    if (tok_len >= 2 && src[i] == 'a' && src[i+1] >= '0' && src[i+1] <= '9') {
-      prefix = "a"; plen = 1;
-    } else if (tok_len >= 5 && src[i] == '_' && src[i+1] == 'a' && src[i+2] == 'c'
-            && src[i+3] == 'c' && src[i+4] >= '0' && src[i+4] <= '9') {
-      prefix = "_acc"; plen = 4;
-    }
-    int all_digits = (prefix != NULL);
-    for (size_t k = i + plen; all_digits && k < j; k++)
-      if (src[k] < '0' || src[k] > '9') all_digits = 0;
-    if (prefix != NULL && all_digits) {
-      u32 num = 0;
-      for (size_t k = i + plen; k < j; k++) num = num * 10u + (u32)(src[k] - '0');
-      u32 newid = 0xFFFFFFFFu;
-      for (u32 m = 0; m < n_map; m++) if (old_ids[m] == num) { newid = m; break; }
-      if (newid == 0xFFFFFFFFu) {
-        if (n_map < 512) { old_ids[n_map] = num; newid = n_map; n_map++; }
-        else newid = num;   // overflow: leave as-is-ish (won't dedup, but correct)
-      }
-      o += (size_t)snprintf(out + o, plen + 12, "%s%u", prefix, newid);
-    } else {
-      memcpy(out + o, src + i, tok_len); o += tok_len;
-    }
-    i = j;
-  }
-  out[o] = '\0';
-  return out;
-}
 
 // Register a Term -> name mapping in the legacy fallback map.  Used
 // by the cg_render_uop_kernel(out_buf, in_bufs[]) entry points to

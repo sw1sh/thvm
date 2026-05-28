@@ -241,8 +241,9 @@ static char *cpu_jit_render_canon(KernelEntry const *ke) {
   size_t got = fread(raw, 1, (size_t)n, fp);
   fclose(fp);
   raw[got] = '\0';
-  char *canon = cg_canonicalize_axis_ids(raw);
-  if (canon != NULL) { free(raw); return canon; }
+  // Axis ids are already dense 0..n per kernel (uop_dag_renumber_axes in
+  // materialize), so the rendered source is byte-identical for
+  // structurally-identical kernels without a post-render canonicalize.
   return raw;
 }
 

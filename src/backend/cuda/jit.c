@@ -936,15 +936,11 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- render produced no source\n");
     return -1;
   }
-  if (rt_on) { fprintf(stderr, "[render] kid=%u done sz=%zu, canonicalizing\n", rt_kid, csz); fflush(stderr); }
-  {
-    // Canonicalize a<N>/_acc<N> ids so structurally-identical kernels
-    // produce byte-identical source across steps -> JIT cache HIT
-    // (compile once), instead of fresh global axis ids every step.
-    char *canon = cg_canonicalize_axis_ids(cu);
-    if (canon != NULL) { free(cu); cu = canon; }
-  }
-  if (rt_on) { fprintf(stderr, "[render] kid=%u canon done, compiling\n", rt_kid); fflush(stderr); }
+  // Axis ids are already dense 0..n per kernel (uop_dag_renumber_axes
+  // runs in materialize), so render emits byte-identical source for
+  // structurally-identical kernels directly -- the JIT/disk cache hits
+  // without a post-render canonicalize pass.
+  if (rt_on) { fprintf(stderr, "[render] kid=%u done sz=%zu, compiling\n", rt_kid, csz); fflush(stderr); }
   // THVM_CUDA_DUMP_KID=<kid>: print this kid's rendered .cu source once
   // (mirrors the CPU THVM_DUMP_KERNEL_SRC env).  Used to inspect
   // hand-coded LOCAL/UPCAST application on a specific hotspot kernel.
