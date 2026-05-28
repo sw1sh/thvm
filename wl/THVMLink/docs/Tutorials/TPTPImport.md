@@ -14,7 +14,7 @@ RelatedTutorials: [ATP, SMT, Overview]
 
 The TPTP (Thousands of Problems for Theorem Provers) benchmark suite is the standard cross-prover problem corpus - Vampire, E, Twee, Waldmeister all run on it - and ATP literature quotes timings against TPTP slugs like `LCL129-1.p` or `ShefferAxioms/AndAssociativity.p`. A reader who wants to reproduce a result, or who already has a problem in TPTP form, needs an importer.
 
-[TPTPImport]() parses a TPTP file or string into an Association of `"Axioms"` and `"Conjecture"`. Better yet, the equational and SMT entry points - [TFindProof]() and [TFindProofSMT]() - accept `File["..."]` or an inline TPTP string directly, so the parse happens behind the dispatch:
+[TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) parses a TPTP file or string into an Association of `"Axioms"` and `"Conjecture"`. Better yet, the equational and SMT entry points - [TFindProof]() and [TFindProofSMT]() - accept `File["..."]` or an inline TPTP string directly, so the parse happens behind the dispatch:
 
 - Variable-bearing axioms route to [TFindProof]() (unfailing Knuth-Bendix completion).
 - Ground problems route happily through [TFindProofSMT]() (congruence closure).
@@ -24,19 +24,20 @@ Function-symbol names come back as String heads (<code>"and"[x_, y_]</code> rath
 
 ## Setting up
 
-`TPTPImport` and the dispatch overloads live in <code>THVMLink\`ATP\`</code>:
+The TPTP parser itself - [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) - lives in the <code>[Wolfram\`Parser\`](paclet:Wolfram/WolframParser/guide/WolframParser)</code> paclet. The dispatch overloads on [TFindProof]() and [TFindProofSMT]() that accept a `File` or string call it through transparently, so loading just <code>THVMLink\`ATP\`</code> is enough for the file / string entry points to work:
 
 ```wl
 Needs["THVMLink`ATP`"];
 ```
 
-All examples below assume this has run.
+Reach for `Needs["Wolfram`Parser`"]` explicitly only when you want to call [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) directly to inspect the parsed Association before dispatch.
 
 ## Parsing a problem
 
 The simplest call - just parse, don't prove - shows the output shape:
 
 ```wl
+Needs["Wolfram`Parser`"];
 TPTPImport["cnf(a, axiom, and(X, Y) = and(Y, X))."]
 ```
 <!-- => <|"Axioms" -> {"and"[v$_, w$_] == "and"[w$_, v$_]}, "Conjecture" -> None|> -->
@@ -121,9 +122,9 @@ If you want to coerce a particular String head into a Symbol after the fact, `ex
 
 ## Where the code lives
 
-- `wl/THVMLink/Kernel/ATP/TPTPImport.wl` - the parser + the file/string entry. Built on top of `Wolfram` Parser` 's `EBNFParse`.
+- [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) and its `EBNFParse`-driven grammar sit in the [Wolfram/WolframParser](paclet:Wolfram/WolframParser/guide/WolframParser) paclet.  See the [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) tech note for the grammar internals.
 - `wl/THVMLink/Kernel/ATP/ATP.wl` - the `TFindProof[File[...]]` / `TFindProof[String]` dispatch overloads.
 - `wl/THVMLink/Kernel/ATP/SMT.wl` - the parallel `TFindProofSMT` dispatch (see the [SMT](paclet:WolframInstitute/THVMLink/tutorial/SMT) tech note).
 - `wl/THVMLink/Tests/atp_tptp.wlt` - end-to-end coverage on representative `.p` files from the UEQ division.
 
-Extending coverage to a new TPTP form is mostly about adding productions to the BNF grammar reference and the corresponding handler in the parser; the dispatch surface above usually picks the new shape up without changes.
+Extending coverage to a new TPTP form is mostly about adding productions to the BNF grammar in Wolfram/WolframParser; the dispatch surface above usually picks the new shape up without changes.
