@@ -4071,6 +4071,17 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
   }
 
+  // Dense-renumber axis_ids to 0..n per kernel (the lifter assigns
+  // global, sparse, possibly-large ids; downstream wants a fresh 0..n
+  // axis space like tinygrad).  Runs here -- after every materialize-
+  // time rewrite, before the init snapshot + fire-time hand_opts -- so
+  // hand_opts' `axis_id+1` splits stay contiguous on a dense base and
+  // the renderer emits dense ids directly (no post-render canonicalize).
+  if (ke->cached_lift.store_root != 0) {
+    ke->cached_lift.store_root =
+        uop_dag_renumber_axes(ke->cached_lift.store_root);
+  }
+
   // Snapshot the post-materialize / pre-runtime-opt cached_lift state
   // so axes_reset_to_default can revert kernel_apply_opt's DAG
   // mutations during autotune's bench-each-variant flow.

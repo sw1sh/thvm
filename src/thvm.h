@@ -2264,6 +2264,15 @@ fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
 fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
                             u32 n_applied);
 
+// Dense-renumber a kernel DAG's UOP_RANGE axis_ids to 0..n-1 (ascending
+// by current id).  The lifter assigns global, sparse, sometimes-large
+// axis_ids; this maps each kernel to a fresh 0..n axis space (the
+// tinygrad model) so KOpt.axis, the render decode tables, and the JIT
+// source never depend on the absolute id magnitude.  Returns the new
+// root (or `root` if already dense).  Called by materialize once
+// store_root is finalized, before fire-time hand_opts.
+fn Term uop_dag_renumber_axes(Term root);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via

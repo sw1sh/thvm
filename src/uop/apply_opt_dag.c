@@ -163,6 +163,14 @@ typedef struct {
   // positions (sentinel 0xFFFFFFFFu when unused).
   u32 reduce_swap_a;
   u32 reduce_swap_b;
+  // Dense renumber (uop_dag_renumber_axes): a full old_id -> new_id
+  // table applied to REDUCE axis fields (RANGE leaves are remapped via
+  // the `map` entries).  remap_n == 0 disables (shift/swap path used
+  // instead).  When active, reduce_shift_above / reduce_swap_* are
+  // sentinels and only the table applies.
+  u32 const *remap_old;
+  u32 const *remap_new;
+  u32        remap_n;
 } ApplyOptDagSubState;
 
 static int apply_opt_dag_sub_memo_lookup(ApplyOptDagSubState *st, Term t,
@@ -211,13 +219,22 @@ static Term apply_opt_dag_sub_uncached(Term t, ApplyOptDagSubState *st) {
     for (u32 i = 0; i < n_axes; i++) {
       u32 ax = uop_reduce_axis(t, i);
       u32 mapped = ax;
-      if (st->reduce_shift_above != 0xFFFFFFFFu
-          && ax > st->reduce_shift_above) {
-        mapped = ax + 1;
-      }
-      if (st->reduce_swap_a != 0xFFFFFFFFu) {
-        if (ax == st->reduce_swap_a)      mapped = st->reduce_swap_b;
-        else if (ax == st->reduce_swap_b) mapped = st->reduce_swap_a;
+      if (st->remap_n > 0) {
+        // Dense-renumber table remap (takes precedence; shift/swap are
+        // sentinels in this mode).  Unlisted ids keep their value
+        // (defensive: a well-formed renumber lists every axis).
+        for (u32 m = 0; m < st->remap_n; m++) {
+          if (st->remap_old[m] == ax) { mapped = st->remap_new[m]; break; }
+        }
+      } else {
+        if (st->reduce_shift_above != 0xFFFFFFFFu
+            && ax > st->reduce_shift_above) {
+          mapped = ax + 1;
+        }
+        if (st->reduce_swap_a != 0xFFFFFFFFu) {
+          if (ax == st->reduce_swap_a)      mapped = st->reduce_swap_b;
+          else if (ax == st->reduce_swap_b) mapped = st->reduce_swap_a;
+        }
       }
       new_axes[i] = mapped;
       if (mapped != ax) axes_changed = 1;
@@ -405,6 +422,7 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   st.reduce_shift_above = target_axis;     // red_axis > target -> +1
   st.reduce_swap_a     = 0xFFFFFFFFu;
   st.reduce_swap_b     = 0xFFFFFFFFu;
+  st.remap_n = 0;
   return apply_opt_dag_substitute(root, &st);
 }
 
@@ -446,6 +464,7 @@ fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
   st.reduce_shift_above = 0xFFFFFFFFu;  // no axis-id shift (single-axis stamp)
   st.reduce_swap_a      = 0xFFFFFFFFu;
   st.reduce_swap_b      = 0xFFFFFFFFu;
+  st.remap_n = 0;
   return apply_opt_dag_substitute(root, &st);
 }
 
@@ -482,6 +501,7 @@ fn Term uop_dag_apply_swap(Term root, u32 axis_a, u32 axis_b) {
   st.reduce_shift_above = 0xFFFFFFFFu;     // no +1 shift on swap
   st.reduce_swap_a     = axis_a;           // but follow the swap
   st.reduce_swap_b     = axis_b;
+  st.remap_n = 0;
   return apply_opt_dag_substitute(root, &st);
 }
 
@@ -851,6 +871,77 @@ fn Term uop_dag_apply_vec_load(Term root, u32 width) {
 }
 
 // ---------- top-level dispatcher ------------------------------------
+
+// Dense-renumber every UOP_RANGE axis_id in a kernel DAG to 0..n-1,
+// ascending by current axis_id.  Rewrites RANGE leaves (via the
+// substitution map, by Term identity) AND REDUCE axis fields (via the
+// old->new table in ApplyOptDagSubState).  Makes axis_ids per-kernel-
+// dense so downstream consumers (KOpt.axis, render decode arrays, the
+// JIT source) never see the global, sparse, possibly-large ids the
+// lifter assigns -- the tinygrad model, where each kernel's axes are a
+// fresh 0..n.  Returns the new root (or `root` unchanged when already
+// dense / no ranges).
+//
+// Determinism / cache-stability: sort by current axis_id; the lifter
+// assigns ids monotonically in DAG-build order, so structurally-
+// identical kernels (even with different absolute id bases) map to the
+// SAME dense ids -> the rendered source is byte-identical and the JIT
+// disk cache hits without a separate post-render canonicalize pass.
+//
+// Insertion point: after materialize finalizes store_root, before the
+// fire-time hand_opts split pass (whose `axis_id+1` inserts then stay
+// contiguous on top of a dense base).
+fn Term uop_dag_renumber_axes(Term root) {
+  if (root == 0 || term_tag(root) != TAG_UOP) return root;
+  Term ranges[APPLY_OPT_DAG_SPLIT_MAP_CAP];
+  u32 n_ranges = apply_opt_dag_collect_ranges(root, ranges,
+                                              APPLY_OPT_DAG_SPLIT_MAP_CAP);
+  if (n_ranges == 0) return root;
+  // Distinct axis_ids.
+  u32 ids[APPLY_OPT_DAG_SPLIT_MAP_CAP]; u32 n_ids = 0;
+  for (u32 i = 0; i < n_ranges; i++) {
+    u32 a = uop_range_axis_id(ranges[i]);
+    int seen = 0;
+    for (u32 j = 0; j < n_ids; j++) if (ids[j] == a) { seen = 1; break; }
+    if (!seen && n_ids < APPLY_OPT_DAG_SPLIT_MAP_CAP) ids[n_ids++] = a;
+  }
+  // Ascending insertion sort (n tiny).
+  for (u32 i = 1; i < n_ids; i++) {
+    u32 v = ids[i]; i32 j = (i32)i - 1;
+    while (j >= 0 && ids[j] > v) { ids[j + 1] = ids[j]; j--; }
+    ids[j + 1] = v;
+  }
+  // Already dense 0..n-1?  Then a no-op (identity map).
+  int identity = 1;
+  for (u32 i = 0; i < n_ids; i++) if (ids[i] != i) { identity = 0; break; }
+  if (identity) return root;
+  // remap_new[i] = i: ids[i] (old, sorted) -> dense i.
+  u32 remap_new[APPLY_OPT_DAG_SPLIT_MAP_CAP];
+  for (u32 i = 0; i < n_ids; i++) remap_new[i] = i;
+  // RANGE leaf substitution map: old range term -> new range with dense id.
+  ApplyOptDagSplitCtx ctx; ctx.n = 0;
+  for (u32 i = 0; i < n_ranges && ctx.n < APPLY_OPT_DAG_SPLIT_MAP_CAP; i++) {
+    Term r = ranges[i];
+    u32 a = uop_range_axis_id(r);
+    u32 dense = a;
+    for (u32 j = 0; j < n_ids; j++) if (ids[j] == a) { dense = j; break; }
+    if (dense == a) continue;
+    ctx.entries[ctx.n].key = r;
+    ctx.entries[ctx.n].val = uop_range(dense, uop_range_axis_type(r),
+                                       uop_range_extent(r));
+    ctx.n++;
+  }
+  ApplyOptDagSubState st;
+  st.memo_n             = 0;
+  st.map                = &ctx;
+  st.reduce_shift_above = 0xFFFFFFFFu;
+  st.reduce_swap_a      = 0xFFFFFFFFu;
+  st.reduce_swap_b      = 0xFFFFFFFFu;
+  st.remap_old          = ids;
+  st.remap_new          = remap_new;
+  st.remap_n            = n_ids;
+  return apply_opt_dag_substitute(root, &st);
+}
 
 fn Term uop_dag_apply_kopt(Term root, KOpt opt) {
   switch (opt.op) {
