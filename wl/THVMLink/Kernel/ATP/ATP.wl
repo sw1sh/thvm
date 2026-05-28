@@ -3409,6 +3409,15 @@ atpRelevanceSpec[{("Completion" | "GoalDirected" | "MNF" | "Waldmeister"),
         dd === False, None,
         True, "Safe"]
 ];
+(* Bare rule list (no leading method head): user passing just relevance
+   options, e.g. Method -> {"AxiomRelevance" -> "SInE"} or
+   Method -> {"AxiomRelevance" -> {"SInE", "SineTolerance" -> 3}}.
+   Honor it the same as the method-head form. *)
+atpRelevanceSpec[{subopts___Rule}] := Block[{o, r},
+    o = Association[subopts];
+    r = Lookup[o, "AxiomRelevance", Automatic];
+    If[ r === Automatic, "Safe", atpNormRelevance[r]]
+];
 atpRelevanceSpec[_] := "Safe";
 
 atpNormRelevance[None | All | False] := None;
