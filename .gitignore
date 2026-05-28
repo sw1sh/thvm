@@ -13,6 +13,7 @@ wl/THVMLink/LibraryResources/
 #   wolframscript -f wl/THVMLink/build.wls
 # ).
 wl/THVMLink/Documentation/
+wl/THVMLink/ResourceDefinition.nb
 
 wl/Notebooks
 
