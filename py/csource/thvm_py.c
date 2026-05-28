@@ -366,6 +366,20 @@ EXPORT uint64_t py_cuda_jit_evictions(void) {
   return 0;
 #endif
 }
+EXPORT uint64_t py_cuda_jit_disk_hits(void) {
+#ifdef THVM_HAS_CUDA
+  return cuda_jit_disk_hits();
+#else
+  return 0;
+#endif
+}
+EXPORT uint64_t py_cuda_jit_disk_writes(void) {
+#ifdef THVM_HAS_CUDA
+  return cuda_jit_disk_writes();
+#else
+  return 0;
+#endif
+}
 EXPORT void py_cg_profile_dump(uint32_t top_n) {
   cg_profile_dump(stderr, top_n);
   fflush(stderr);
