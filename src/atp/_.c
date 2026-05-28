@@ -1780,7 +1780,26 @@ static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
   // thread-stack guard at ~100 bytes/frame.  Returning no-match is
   // sound: any CP genuinely subsuming the subject would be reached
   // before this depth in a well-formed DT.
-  if (depth >= ATP_DT_DESCENT_DEPTH_CAP) { ix->q_depth_capped++; return 0; }
+  if (depth >= ATP_DT_DESCENT_DEPTH_CAP) {
+    ix->q_depth_capped++;
+    // THVM_ATP_DT_TRACE=1 dumps the (node, pos) of the first cap hit
+    // per process so an investigator can spot whether the cap fires
+    // repeatedly at the same node (= true cycle) or scatters across
+    // nodes (= just deep search).
+    {
+      static u8 dumped = 0;
+      if (!dumped) {
+        const char *t = getenv("THVM_ATP_DT_TRACE");
+        if (t != NULL && t[0] != '\0' && t[0] != '0') {
+          fprintf(stderr,
+                  "atp_dt_descend depth-cap hit: node=%u pos=%u flatlen=%u\n",
+                  node, pos, g_atp_dt_flatlen);
+          dumped = 1u;
+        }
+      }
+    }
+    return 0;
+  }
   for (;;) {
     ix->q_nodevisits++;
     if (pos == g_atp_dt_flatlen) {
