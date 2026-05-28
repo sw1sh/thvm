@@ -4804,7 +4804,30 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   fputs("#ifndef INFINITY\n"
         "#define INFINITY __int_as_float(0x7f800000)\n"
         "#endif\n\n", fp);
-  fprintf(fp, "extern \"C\" __global__ void %s(\n", kernel_name);
+  // __launch_bounds__(block_x) tells nvcc the maximum threads-per-block
+  // so it can size the per-thread register file accordingly.  Compute
+  // block_x from the same LOCAL/GROUP_REDUCE extents the dispatch
+  // shape uses; mirrors cuda_dag_dispatch_shape's KAX_LOCAL +
+  // KAX_GROUP_REDUCE accumulation.  Skip the annotation when block
+  // can't be determined (caller falls back to the flat 256-thread
+  // dispatch shape).
+  {
+    u32 lb_ids[MAX_AXES], lb_types[MAX_AXES], lb_exts[MAX_AXES];
+    u32 lb_n = uop_dag_collect_axes(root, lb_ids, lb_types, lb_exts, MAX_AXES);
+    u32 block_size = 1;
+    int has_group_reduce = 0;
+    for (u32 i = 0; i < lb_n; i++) {
+      if (lb_exts[i] == 0) continue;
+      if (lb_types[i] == KAX_LOCAL) block_size *= lb_exts[i];
+      else if (lb_types[i] == KAX_GROUP_REDUCE) has_group_reduce = 1;
+    }
+    if (block_size > 1 && block_size <= 1024 && !has_group_reduce) {
+      fprintf(fp, "extern \"C\" __global__ void __launch_bounds__(%u) %s(\n",
+              block_size, kernel_name);
+    } else {
+      fprintf(fp, "extern \"C\" __global__ void %s(\n", kernel_name);
+    }
+  }
   u32 out_dtype = uop_buffer_dtype(out_buf);
   fprintf(fp, "    %s *out", rmu_cuda_type_name(out_dtype));
   for (u32 i = 0; i < n_inputs; i++) {
