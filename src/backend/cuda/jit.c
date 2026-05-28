@@ -374,8 +374,18 @@ fn int cuda_jit_graph_replay(u32 slot) {
   // synchronize with other streams.  Without this drain, a fresh input
   // upload could race the graph's read of that input.
   cuStreamSynchronize(NULL);
+  u64 t_pre = 0, t_launch = 0;
+  int graph_trace = getenv("THVM_CUDA_JIT_GRAPH_TIME") != NULL;
+  if (graph_trace) t_pre = cg_now_us();
   CUresult r = cuGraphLaunch(CUDA_JIT_GRAPH_CACHE[slot].exec,
                              CUDA_CAPTURE_STREAM);
+  if (graph_trace) {
+    t_launch = cg_now_us() - t_pre;
+    cuStreamSynchronize(CUDA_CAPTURE_STREAM);
+    u64 t_sync = cg_now_us() - t_pre - t_launch;
+    fprintf(stderr, "[graph] launch=%llu us, sync=%llu us\n",
+            (unsigned long long)t_launch, (unsigned long long)t_sync);
+  }
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuGraphLaunch", r);
     if (getenv("THVM_CUDA_JIT_GRAPH_TRACE")) {
