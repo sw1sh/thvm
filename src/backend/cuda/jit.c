@@ -466,10 +466,57 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   if (!cg_supports(ke) || ke->cached_lift.store_root == 0) return -1;
   Term store_root = ke->cached_lift.store_root;
 
+  // Per-KernelEntry CUfunction cache.  cuda_dispatch_kernel previously
+  // re-rendered + re-canonicalized + re-hashed the source on EVERY
+  // dispatch (turning the cuda_jit_compile source-hash table into a
+  // cache HIT after).  Render alone was 1-3 ms per call (open_memstream
+  // + rmu_emit_store recursion + canonicalize), so a 124-kernel/step
+  // warm loop burned 100-500 ms on rendering that yielded the SAME
+  // CUfunction every time.  Cache (store_root, grid_x, block_x, func)
+  // here so an unchanged-DAG dispatch skips all of it.
+  static struct CudaKeFuncCache {
+    Term     store_root;   // key; 0 = empty slot
+    CUfunction func;
+    u32      grid_x;
+    u32      block_x;
+  } CUDA_KE_CACHE[1 << 14];   // KERNELS_CAP order of magnitude
+  u32 cache_idx = (u32)(ke - KERNELS) & ((1 << 14) - 1);
+  if (CUDA_KE_CACHE[cache_idx].store_root == store_root
+      && CUDA_KE_CACHE[cache_idx].func != NULL) {
+    u32 n_in = ke->n_inputs;
+    u32 kvar_ids[KVAR_USED_CAP];
+    u32 n_kvar = kvar_collect_from_dag(store_root, kvar_ids, KVAR_USED_CAP);
+    u32 n_args = 1 + n_in + n_kvar;
+    CUdeviceptr dptrs   [n_args ? n_args : 1];
+    unsigned    kvar_val[n_kvar ? n_kvar : 1];
+    void       *args    [n_args ? n_args : 1];
+    dptrs[0] = cuda_buf_dptr(out_buf_id);
+    if (dptrs[0] == 0) return -1;
+    args[0] = &dptrs[0];
+    for (u32 i = 0; i < n_in; i++) {
+      u32 ib = in_buf_ids[i];
+      if (ib == 0 || ib >= CUDA_BUFS_NEXT) return -1;
+      dptrs[1 + i] = cuda_buf_dptr(ib);
+      if (dptrs[1 + i] == 0) return -1;
+      args[1 + i] = &dptrs[1 + i];
+    }
+    for (u32 i = 0; i < n_kvar; i++) {
+      kvar_val[i] = kernel_kvar_value(ke, kvar_ids[i]);
+      args[1 + n_in + i] = &kvar_val[i];
+    }
+    int rc = cuda_jit_launch(CUDA_KE_CACHE[cache_idx].func,
+                             CUDA_KE_CACHE[cache_idx].grid_x,
+                             CUDA_KE_CACHE[cache_idx].block_x, args);
+    u32 kid = (u32)(ke - KERNELS);
+    cg_profile_record(kid, KDISPATCH_CUDA_JIT, cg_now_us() - t_dispatch_start);
+    return rc;
+  }
+
   // Render the lifted DAG to a .cu string, then nvrtc-compile it.
   // cg_render_uop_kernel_cuda_root is called directly (rather than via
   // thvm_cuda_render in _.c) because jit.c is #included before _.c --
   // a forward call would hit an implicit declaration.
+  u64 t_render_start = cg_now_us();
   char  *cu  = NULL;
   size_t csz = 0;
   FILE  *cfp = open_memstream(&cu, &csz);
@@ -479,6 +526,17 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   }
   cg_render_uop_kernel_cuda_root(store_root, "k", cfp);
   fclose(cfp);
+  static u64 TOTAL_RENDER_US = 0;
+  static u64 TOTAL_FIRES = 0;
+  TOTAL_RENDER_US += cg_now_us() - t_render_start;
+  TOTAL_FIRES++;
+  if (getenv("THVM_CUDA_TIME_RENDER")
+      && (TOTAL_FIRES & (TOTAL_FIRES - 1)) == 0) {
+    fprintf(stderr, "[render-time] %llu fires, total %llu us (avg %llu us)\n",
+            (unsigned long long)TOTAL_FIRES,
+            (unsigned long long)TOTAL_RENDER_US,
+            (unsigned long long)(TOTAL_RENDER_US / TOTAL_FIRES));
+  }
   if (cu == NULL) {
     fprintf(stderr, "thvm: cuda_dispatch_kernel -- render produced no source\n");
     return -1;
@@ -577,6 +635,15 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   }
 
   int rc = cuda_jit_launch(func, grid_x, block_x, args);
+  // Populate the per-KernelEntry cache for the next dispatch of this
+  // store_root.  If a different KernelEntry collides on cache_idx its
+  // slot just gets overwritten -- correctness is preserved (we always
+  // re-check store_root == key before reuse); only the cache hit rate
+  // suffers under collisions.
+  CUDA_KE_CACHE[cache_idx].store_root = store_root;
+  CUDA_KE_CACHE[cache_idx].func       = func;
+  CUDA_KE_CACHE[cache_idx].grid_x     = grid_x;
+  CUDA_KE_CACHE[cache_idx].block_x    = block_x;
   // Per-kid wall-time profile.  cuda_dispatch_kernel includes
   // render + compile (cache-hit fast path) + arg packing +
   // cuLaunchKernel + cuCtxSynchronize.  CUDA only has the
