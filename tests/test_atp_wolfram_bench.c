@@ -735,6 +735,14 @@ int main(int argc, char **argv) {
       printf("   ri-descent (unorient): %llu depth-cap bails (latent DT-cycle)\n",
              (unsigned long long)s->unorient_index->q_depth_capped);
     }
+    if (s->cp_index != NULL && s->cp_index->q_depth_capped > 0) {
+      printf("   ri-descent (cp): %llu depth-cap bails (latent DT-cycle)\n",
+             (unsigned long long)s->cp_index->q_depth_capped);
+    }
+    if (s->cp_subindex != NULL && s->cp_subindex->q_depth_capped > 0) {
+      printf("   ri-descent (cp-sub): %llu depth-cap bails (latent DT-cycle)\n",
+             (unsigned long long)s->cp_subindex->q_depth_capped);
+    }
   }
 #endif
 
