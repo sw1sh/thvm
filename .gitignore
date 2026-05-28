@@ -9,7 +9,14 @@ bin/
 # Compiled WL paclet library (rebuilt by `make wl`).
 wl/THVMLink/LibraryResources/
 
+# Built documentation notebooks (regenerate with
+#   wolframscript -f wl/THVMLink/build.wls
+# ).
+wl/THVMLink/Documentation/
+
 wl/Notebooks
+
+WolframParser
 
 # Local-only reference symlink to the research prototype. Create with:
 #   ln -s ../TinyHVM TinyHVM
