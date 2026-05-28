@@ -1031,6 +1031,67 @@ state.
 | p90        | 168 ms    |
 | max        | 182 ms    |
 
+### Multi-UPCAST + CUDA Graph + per-kid GPU timing (2026-05-28)
+
+Three landings on `py-jit-speedup`:
+
+**Multi-UPCAST fix** (commit 9ae5da7d).  Two latent bugs kept the
+UPCAST picker bailing after exactly one apply per kernel:
+
+1. `kernel_hand_coded_opts` passed snapshot-index `i` to
+   `hand_opt_upcast_buf_stride`, but the stride decoder keys on
+   `axis_id` -- on iter 2+ the `all_uu_present` check looked up the
+   wrong key and always missed.
+2. `udg_addr_decode_leaf` (used by the stride decoder) bailed on
+   `UOP_OPT`-wrapped RANGE leaves, which is exactly the shape every
+   post-UPCAST inner axis takes (`OPT(range, UPCAST, k)`).  Treat
+   OPT as transparent for coefficient decoding.
+
+After the fix, the conv2 forward kernel (kid 29, output
+`[128,32,20,20]`, ~2.6 GFLOPS) emits **16 accumulators** via two
+UPCASTs of `amt=4` (was 4 accumulators with a single UPCAST), matching
+tinygrad's pattern.
+
+**CUDA Graph capture+replay** (commit 2983c605).  Wraps the JIT
+replay's per-op `cuLaunchKernel` loop in a `cuStreamBeginCapture`
+on first hit, `cuGraphInstantiate` + `cuGraphLaunch` on every
+subsequent hit.  All dispatch-path CUDA calls (`cuLaunchKernel`,
+`cuMemcpyDtoDAsync`) honor a process-global `CUDA_CUR_STREAM` so the
+capture stream is plumbed without per-call API changes.
+`THVM_CUDA_JIT_GRAPH=0` disables; `_TRACE=1` prints
+captured-node counts and per-replay hit/miss events.
+
+Measured benefit on BS=128 beautiful_mnist: **~1 ms/step** -- the
+workload is already GPU-bound (~184 ms of actual kernel time per
+step from nsys), so amortizing launch overhead is a small fraction
+of total cost.  CUDA Graph will pay off bigger when single-kernel
+time is small relative to per-launch driver overhead -- not the
+shape of this conv-bwd-heavy loop.
+
+**Per-kid GPU time profiling** (commit ea75780d).  `cg_profile_record`
+captures CPU dispatch wall, which on the async-launch path is
+launch-queue full-wait, NOT kernel execution.  Added
+`THVM_CUDA_GPU_TIME=1` which wraps each launch in CUDA events
+(serializes; opt-in) and feeds `cg_profile_record_gpu`.
+`THVM_KERNEL_PROFILE` now shows a `gpu_us` column.
+
+This identified the real hotspot: **kid 105** with shape
+`[128,20,20,32,5,5]` at **8.3 ms/fire x 5 fires/step = 41 ms/step**
+(22% of total step time).  It's a conv-related K-reduce that
+materializes a 160 MB 6-D intermediate before a downstream reduce
+collapses it.  Tinygrad fuses the full reduce sequence and never
+writes the intermediate -- the next perf lever, and clearly separable
+from the per-launch optimizations above.
+
+Top remaining levers (in priority order):
+1. **Fuse kid 105's 6-D intermediate** with its downstream
+   `[Cout, kH, kW]` reduce.  Estimated save: ~30 ms/step (the 160 MB
+   write/read + the second kernel cost).
+2. **De-duplicate kid 45's 29 fires/step** -- the conv2 forward output
+   `[128,32,20,20]` re-fires once per backward consumer.  Estimated
+   save: ~10-15 ms/step if we cache the fwd output across backward
+   accesses.
+
 Closing the remaining 1.85x gap to tinygrad's 82 ms requires real
 renderer-level work, not knob tuning:
 - THREAD opt (a 3rd parallelism dim that tinygrad has and we don't:
