@@ -329,14 +329,23 @@ groundQ[expr_] := FreeQ[expr, _Pattern | _Blank | _BlankSequence |
 
 TSmtDecide[formula_] := Block[
     {atoms, propVars, abstraction, blocking = True, instance,
-     model, theoryRes, eqs, diseqs},
-    atoms = collectAtoms[formula];
+     model, theoryRes, eqs, diseqs, normFormula},
+    (* Strip Inactive[Equal] / Inactive[Unequal] so the atom collector
+       and the SatisfiabilityInstances boolean kernel see bare Equal /
+       Unequal heads.  Without this, an Inactive-wrapped atom list
+       contributes zero atoms, the Heads === Equal | Unequal Cases
+       filter never fires, and the formula falls through to the empty-
+       atoms TrueQ branch (UNSAT for every non-literally-True input). *)
+    normFormula = formula /. {
+        Inactive[Equal][a_, b_]   :> a == b,
+        Inactive[Unequal][a_, b_] :> Unequal[a, b]};
+    atoms = collectAtoms[normFormula];
     If[ atoms === {},
-        Return @ <|"Status" -> If[TrueQ[formula], "SAT", "UNSAT"],
+        Return @ <|"Status" -> If[TrueQ[normFormula], "SAT", "UNSAT"],
                    "Model" -> <||>|>
     ];
     propVars = Table[Unique["smt$p"], {Length[atoms]}];
-    abstraction = formula /. Thread[atoms -> propVars];
+    abstraction = normFormula /. Thread[atoms -> propVars];
     While[ True,
         instance = Quiet @ SatisfiabilityInstances[
             And[abstraction, blocking], propVars, 1];
