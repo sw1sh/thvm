@@ -700,6 +700,10 @@ int main(int argc, char **argv) {
            avg_cand, avg_node);
     printf("   fv-match: %llu thvm_match calls on survivors\n",
            (unsigned long long)matchcalls);
+    if (s->fv_index != NULL && s->fv_index->q_depth_capped > 0) {
+      printf("   fv-descent: %llu depth-cap bails (latent DT-cycle)\n",
+             (unsigned long long)s->fv_index->q_depth_capped);
+    }
   }
 #endif
 
@@ -723,6 +727,14 @@ int main(int argc, char **argv) {
            avg_cand, avg_node, avg_mc);
     printf("   ri-cmp: candidates/query vs n_rules=%u  ->  prune-ratio %.4f\n",
            rbuilt, (rbuilt > 0) ? (avg_cand / (double)rbuilt) : 0.0);
+    if (s->rule_index != NULL && s->rule_index->q_depth_capped > 0) {
+      printf("   ri-descent: %llu depth-cap bails (latent DT-cycle)\n",
+             (unsigned long long)s->rule_index->q_depth_capped);
+    }
+    if (s->unorient_index != NULL && s->unorient_index->q_depth_capped > 0) {
+      printf("   ri-descent (unorient): %llu depth-cap bails (latent DT-cycle)\n",
+             (unsigned long long)s->unorient_index->q_depth_capped);
+    }
   }
 #endif
 

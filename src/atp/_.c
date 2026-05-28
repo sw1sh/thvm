@@ -1463,6 +1463,9 @@ struct AtpFvIndex {
   u64 q_candidates;       // leaf records reached by retrieval
   u64 q_matchcalls;       // thvm_match calls issued on candidates
   u64 q_nodevisits;       // discrimination-tree nodes touched
+  u64 q_depth_capped;     // recursion-depth bails (see atp_dt_descend);
+                          // nonzero indicates the latent DT-cycle bug
+                          // fired -- worth investigating upstream.
 };
 typedef struct AtpFvIndex AtpFvIndex;
 
@@ -1763,7 +1766,7 @@ static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
   // thread-stack guard at ~100 bytes/frame.  Returning no-match is
   // sound: any CP genuinely subsuming the subject would be reached
   // before this depth in a well-formed DT.
-  if (depth >= 1024u) return 0;
+  if (depth >= 1024u) { ix->q_depth_capped++; return 0; }
   for (;;) {
     ix->q_nodevisits++;
     if (pos == g_atp_dt_flatlen) {
@@ -2044,6 +2047,9 @@ struct AtpRuleIndex {
   u64        q_candidates;      // leaf records reached by retrieval
   u64        q_matchcalls;      // thvm_match calls issued on candidates
   u64        q_nodevisits;      // discrimination-tree nodes touched
+  u64        q_depth_capped;    // recursion-depth bails in atp_ri_descend /
+                                // _unorient -- nonzero = latent DT-cycle
+                                // bug worth investigating.
   u8         any_folded;        // some rule LHS folded a var -> imperfect
   // 1 for the unorientable-faces index: a leaf rec's `rule` field then
   // carries the direction in its high bit (ATP_RI_DIR_BIT) -- bit set =
@@ -2309,7 +2315,7 @@ static void atp_ri_descend(u32 node, u32 pos) {
 }
 static void atp_ri_descend_rec(u32 node, u32 pos, u32 depth) {
   AtpRuleIndex *ix = g_atp_ri_ix;
-  if (depth >= 1024u) return;                  // depth-cap safety (see atp_dt_descend)
+  if (depth >= 1024u) { ix->q_depth_capped++; return; }  // depth-cap safety (see atp_dt_descend)
   for (;;) {
     ix->q_nodevisits++;
     if (pos == g_atp_ri_qend) {
@@ -2426,7 +2432,7 @@ static void atp_ri_descend_unorient(u32 node, u32 pos) {
 }
 static void atp_ri_descend_unorient_rec(u32 node, u32 pos, u32 depth) {
   AtpRuleIndex *ix = g_atp_ri_ix;
-  if (depth >= 1024u) return;                  // depth-cap safety
+  if (depth >= 1024u) { ix->q_depth_capped++; return; }  // depth-cap safety
   for (;;) {
     if (pos == g_atp_ri_qend) {
       atp_ri_leaf_collect_unorient(node);
