@@ -1430,6 +1430,25 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
             "a%u < %s; a%u += 32u) {\n",
             axis_id, axis_id, bound, axis_id);
   } else {
+    // Small LOOP-typed output axes (non-reduce, non-promoted): emit
+    // `#pragma unroll` so the per-thread inner loop body unrolls in
+    // the SASS rather than running with branch overhead per iter.
+    // Cap at THVM_LOOP_UNROLL_MAX (default 4) to avoid blowing up the
+    // body for huge axes; tinygrad's renderer unrolls similar small
+    // sequential loops via the UNROLL OPT.  Compile-time penalty is
+    // bounded by the cap.  Skip symbolic-bound and large-extent.
+    if (RMU_TARGET != CG_TARGET_C && !is_var && extent > 1) {
+      static int loop_unroll_max = -1;
+      if (loop_unroll_max < 0) {
+        char const *e = getenv("THVM_LOOP_UNROLL_MAX");
+        loop_unroll_max = (e != NULL && e[0] != '\0') ? atoi(e) : 4;
+        if (loop_unroll_max < 0) loop_unroll_max = 0;
+      }
+      if ((int)extent <= loop_unroll_max) {
+        fprintf(fp, "#pragma unroll(%u)\n", extent);
+        for (u32 i = 0; i < depth; i++) fputs("  ", fp);
+      }
+    }
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) {\n",
             axis_id, axis_id, bound, axis_id);
   }
