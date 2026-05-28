@@ -39,7 +39,7 @@ TATP[
 A Waldmeister `.pr` benchmark file:
 
 ```wl
-TATP[File["wolfram.pr"]]
+TATP[File["tests/data/atp/wolfram_axiom_literal.pr"]]
 ```
 <!-- => <|"Status" -> "Proved", ...|> -->
 

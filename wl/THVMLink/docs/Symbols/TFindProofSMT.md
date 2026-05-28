@@ -62,7 +62,7 @@ TFindProofSMT[
 A `.p` file from disk:
 
 ```wl
-TFindProofSMT[File["AbelianGroupAxioms__InverseOfInverse.p"]]
+TFindProofSMT[File["tools/baselines/vampire_tptp/AbelianGroupAxioms__InverseOfInverse.p"]]
 ```
 
 A non-ground TPTP fragment is rejected:

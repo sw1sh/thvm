@@ -45,7 +45,7 @@ TPTPImport["cnf(a, axiom, and(X, Y) = and(Y, X))."]
 Universal variables (`X`, `Y` in the TPTP source) come through as the Wolfram pattern-variable convention (`v$_`, `w$_`) so they bind correctly against the saturation engine's matcher. The file overload eats benchmark `.p` files directly:
 
 ```wl
-TPTPImport[File["AbelianGroupAxioms__InverseOfInverse.p"]]
+TPTPImport[File["tools/baselines/vampire_tptp/AbelianGroupAxioms__InverseOfInverse.p"]]
 ```
 <!-- => <|"Axioms" -> {4 equational axioms}, "Conjecture" -> "not"["not"["skC1"[]]] == "skC1"[]|> -->
 
@@ -68,14 +68,14 @@ Three clauses: two universally-quantified equational axioms (commutativity and a
 Files behave the same way:
 
 ```wl
-TFindProof[File["AbelianGroupAxioms__InverseOfInverse.p"], TimeConstraint -> 10]
+TFindProof[File["tools/baselines/vampire_tptp/AbelianGroupAxioms__InverseOfInverse.p"], TimeConstraint -> 10]
 ```
 <!-- => ProofObject[...] -->
 
 If you want a non-default `Method`, pull the parsed shape out and feed it back through the standard two-argument call:
 
 ```wl
-imported = TPTPImport[File["MyProblem.p"]];
+imported = TPTPImport[File["tools/baselines/vampire_tptp/AbelianGroupAxioms__InverseOfInverse.p"]];
 TFindProof[imported["Conjecture"], imported["Axioms"],
     Method -> "VampireUEQ", TimeConstraint -> 30]
 ```
