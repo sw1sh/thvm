@@ -885,12 +885,20 @@ fn void bufferize_classify(Term root) {
           // intermediate.  Default OFF -- the chain-guard pass below
           // already handles many cases.  Opt-in for workloads where
           // the upstream materialized intermediate is large.
-          if (!skip_seed && info->consumer_count == 1) {
+          if (!skip_seed) {
             char const *_riri_e =
                 getenv("THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED");
             if (_riri_e != NULL && _riri_e[0] == '1') {
-              u64 cons[1];
-              if (bufferize_consumers_for_loc(info->loc, cons, 1) == 1) {
+              // Use cmap edge count, not consumer_count: the kid 105 ->
+              // kid 106 conv-input-grad pattern has its consumer reached
+              // through a DP0/DP1 projection (grad cell), which adds a
+              // cmap edge but doesn't bump consumer_count (see the
+              // bufferize_walk_rec DP-unwrap path).  Gating on
+              // consumer_count == 1 would miss grad-side REDUCE->REDUCE
+              // fusions entirely.
+              u64 cons[2];
+              u32 n_cons = bufferize_consumers_for_loc(info->loc, cons, 2);
+              if (n_cons == 1) {
                 u32 cidx = bufferize_info_find(cons[0]);
                 if (cidx != 0xFFFFFFFFu
                     && BUFFERIZE_NODES[cidx].op == UOP_REDUCE
