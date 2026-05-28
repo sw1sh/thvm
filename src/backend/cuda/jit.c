@@ -497,13 +497,15 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     CUfunction func;
     u32      grid_x;
     u32      block_x;
+    u32      n_kvar;
+    u32      kvar_ids[KVAR_USED_CAP];
   } CUDA_KE_CACHE[1 << 14];   // KERNELS_CAP order of magnitude
   u32 cache_idx = (u32)(ke - KERNELS) & ((1 << 14) - 1);
   if (CUDA_KE_CACHE[cache_idx].store_root == store_root
       && CUDA_KE_CACHE[cache_idx].func != NULL) {
     u32 n_in = ke->n_inputs;
-    u32 kvar_ids[KVAR_USED_CAP];
-    u32 n_kvar = kvar_collect_from_dag(store_root, kvar_ids, KVAR_USED_CAP);
+    u32 n_kvar = CUDA_KE_CACHE[cache_idx].n_kvar;
+    u32 *kvar_ids = CUDA_KE_CACHE[cache_idx].kvar_ids;
     u32 n_args = 1 + n_in + n_kvar;
     CUdeviceptr dptrs   [n_args ? n_args : 1];
     unsigned    kvar_val[n_kvar ? n_kvar : 1];
@@ -662,6 +664,10 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   CUDA_KE_CACHE[cache_idx].func       = func;
   CUDA_KE_CACHE[cache_idx].grid_x     = grid_x;
   CUDA_KE_CACHE[cache_idx].block_x    = block_x;
+  CUDA_KE_CACHE[cache_idx].n_kvar     = n_kvar;
+  for (u32 i = 0; i < n_kvar && i < KVAR_USED_CAP; i++) {
+    CUDA_KE_CACHE[cache_idx].kvar_ids[i] = kvar_ids[i];
+  }
   // Per-kid wall-time profile.  cuda_dispatch_kernel includes
   // render + compile (cache-hit fast path) + arg packing +
   // cuLaunchKernel + cuCtxSynchronize.  CUDA only has the
