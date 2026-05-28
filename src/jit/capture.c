@@ -120,9 +120,9 @@ static void jit_capture_release_retained(JitCapture *c) {
   for (u32 i = 0; i < c->n_retained; i++) {
     Backend *b = c->retained[i].backend;
     u32 buf_id = c->retained[i].buf_id;
-    if (b != NULL && b->buf_decref != NULL && buf_id != 0) {
-      b->buf_decref(buf_id);
-    }
+    if (b == NULL || buf_id == 0) continue;
+    if (b->buf_jit_unpin != NULL) b->buf_jit_unpin(buf_id);
+    if (b->buf_decref != NULL)    b->buf_decref(buf_id);
   }
   c->n_retained = 0;
 }
@@ -142,6 +142,16 @@ static void jit_capture_retain_buf(JitCapture *c, Backend *b, u32 buf_id) {
   }
   if (b->buf_incref != NULL) {
     b->buf_incref(buf_id);
+  }
+  // STICKY pin: the per-realize `preserved` flag gets cleared at
+  // end-of-realize (cuda_buf_clear_preserved), so a buf retained mid-
+  // realize then handed off to a later replay loses its pin and the
+  // NEXT realize's pool_rollback freelists it -- replay then hits
+  // dptr=0 / dispatch returns -1 / loss reads stale.  jit_pin sets a
+  // separate flag that survives clear_preserved and gets unpinned only
+  // on jit_capture_drop.
+  if (b->buf_jit_pin != NULL) {
+    b->buf_jit_pin(buf_id);
   }
   c->retained[c->n_retained].backend = b;
   c->retained[c->n_retained].buf_id  = buf_id;
@@ -1142,6 +1152,8 @@ fn u32 jit_replay(u32 slot) {
   if (c->n_ops == 0) return 0;
   HOT_JIT_REPLAY_CALLS++;
   backend_dispatch_begin_all();
+  int trace = getenv("THVM_JIT_REPLAY_TRACE") != NULL;
+  if (trace) fprintf(stderr, "[replay] start n_ops=%u\n", c->n_ops);
   for (u32 i = 0; i < c->n_ops;) {
 #ifdef THVM_HAS_METAL
     u32 metal_run = jit_replay_try_metal_graph_run(slot, c, i);
@@ -1157,20 +1169,27 @@ fn u32 jit_replay(u32 slot) {
     }
     switch (op->kind) {
       case JIT_OP_DISPATCH: {
+        if (trace) fprintf(stderr, "[replay] op%u DISPATCH kid=%u out_buf=%u\n",
+                           i, op->kid, op->out_buf_id);
         if (op->kid == 0 || op->kid >= KERNELS_NEXT) {
+          if (trace) fprintf(stderr, "[replay]   skip: invalid kid\n");
           i++;
           continue;
         }
         KernelEntry *ke = &KERNELS[op->kid];
         Backend *b = TENS[ke->output_tid].backend;
         if (b == NULL || b->dispatch_kernel == NULL) {
+          if (trace) fprintf(stderr, "[replay]   skip: ke->output_tid=%u backend=%p\n",
+                             ke->output_tid, (void*)b);
           i++;
           continue;
         }
         u32 *ids = op->heap_in_buf_ids != NULL
                  ? op->heap_in_buf_ids
                  : op->in_buf_ids;
-        if (b->dispatch_kernel(ke, ids, op->out_buf_id) == 0) {
+        int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);
+        if (trace) fprintf(stderr, "[replay]   dispatch rc=%d\n", rc);
+        if (rc == 0) {
           HOT_KERNEL_FIRES++;
           HOT_JIT_REPLAY_DISPATCHES++;
           ITRS++;

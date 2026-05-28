@@ -709,6 +709,13 @@ struct Backend {
   void  (*buf_free) (u32 buf_id);
   void  (*buf_incref)(u32 buf_id);
   void  (*buf_decref)(u32 buf_id);
+  // Optional: sticky JIT pin -- mark a buf as held by an active JIT
+  // capture so subsequent realize/rollback cycles don't free it.
+  // Cleared on jit_capture_drop.  NULL on backends that lack the
+  // mechanic; the JIT then falls back to mark_preserved (which is
+  // per-realize and gets cleared at end-of-realize).
+  void  (*buf_jit_pin)(u32 buf_id);
+  void  (*buf_jit_unpin)(u32 buf_id);
   int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
   int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
   int   (*buf_copy) (u32 dst_buf_id, u32 src_buf_id, u64 nbytes);

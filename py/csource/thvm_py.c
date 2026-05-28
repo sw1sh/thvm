@@ -289,6 +289,38 @@ EXPORT void     py_jit_end_with_result(uint64_t root) {
 EXPORT uint32_t py_jit_replay(uint32_t s)   { return jit_replay(s); }
 EXPORT uint32_t py_jit_op_count(uint32_t s) { return jit_capture_op_count(s); }
 EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
+// Diagnostic accessors for one captured op.
+EXPORT uint32_t py_jit_op_kid(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].kid;
+}
+EXPORT uint32_t py_jit_op_out_buf(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].out_buf_id;
+}
+EXPORT uint32_t py_jit_op_n_inputs(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].n_inputs;
+}
+EXPORT uint32_t py_jit_op_in_buf(uint32_t s, uint32_t i, uint32_t j) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  JitCaptureOp *op = &JIT_CAPTURES[s].ops[i];
+  if (j >= op->n_inputs) return 0;
+  uint32_t const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+  return ids[j];
+}
+EXPORT uint32_t py_jit_op_replay_skip(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].replay_skip;
+}
+EXPORT uint64_t py_hot_jit_replay_dispatches(void) {
+  return HOT_JIT_REPLAY_DISPATCHES;
+}
 
 // --- introspection (Phase-4 cross-check surface) ---
 EXPORT uint32_t py_tens_count(void) {

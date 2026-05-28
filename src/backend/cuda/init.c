@@ -35,6 +35,10 @@ typedef struct {
   u8          preserved;     // per-realize pool keep-flag (see buf_pool.c)
   u8          owns_data;     // 1: cuMemFree on release; 0: view, do not free
   u8          skip_freelist; // 1: pool_rollback real-frees instead of parking
+  u8          jit_pinned;    // STICKY: held by an active JIT capture (replay
+                             // re-fires kernels against this buf_id).
+                             // pool_rollback skips; clear_preserved leaves it.
+                             // Cleared only by jit_capture_drop on the slot.
   u32         parent_buf_id; // arena views: parent CudaBuf to ref/unref
 } CudaBuf;
 

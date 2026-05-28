@@ -9,6 +9,7 @@
 
 fn void cuda_buf_freelist_push(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
+  if (CUDA_BUFS[buf_id].jit_pinned) return;            // held by JIT capture
   if (CUDA_FREELIST_LEN >= CUDA_FREELIST_CAP) return;  // saturated; leak to shutdown
   // Defensive: refuse to freelist a buf still referenced by a TenDesc.
   // Without this, a stray push (from a buggy planner decision or a
