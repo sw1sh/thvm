@@ -30,7 +30,7 @@ The SMT entries live alongside the equational engine. One `Needs` brings them al
 Needs["THVMLink`ATP`"];
 ```
 
-All examples below assume this entry has run. Equality atoms are written with `==`, disequalities with `!=`. The engines accept any combination of named symbols (`a`, `b`, ...) and compound function applications (`f[a, b]`) - everything in sight is treated as an uninterpreted term.
+All examples below assume this entry has run. Equality atoms are written with `==`, disequalities with `!=`. The engines accept any combination of undefined symbols (`a`, `b`, ...) and compound function applications (`f[a, b]`) - everything in sight is treated as an uninterpreted term.
 
 ## Pure congruence closure
 
@@ -69,14 +69,14 @@ TSmtDecide[((a == b && c == d) || x == y) && f[a, c] != f[b, d] && x != y]
 ```
 <!-- => <|"Status" -> "UNSAT"|> -->
 
-The second example exercises the theory-conflict path: the SAT shell picks the <code>(a==b ∧ c==d)</code> disjunct as the candidate model, congruence closure fires inside it and discovers <code>f[a,c] == f[b,d]</code>, which contradicts the stated disequality; the alternative <code>x == y</code> branch is already excluded; UNSAT.
+The second example exercises the theory-conflict path: the SAT shell picks the <code>(a==b ∧ c==d)</code> disjunct as the candidate model, congruence closure fires inside it and discovers `f[a, c] == f[b, d]`, which contradicts the stated disequality; the alternative `x == y` branch is already excluded; UNSAT.
 
 A SAT verdict comes with a satisfying assignment:
 
 ```wl
 TSmtDecide[(a == b || c == d) && c == e]
 ```
-<!-- => <|"Status" -> "SAT", "Model" -> <|a == b -> True, ...|>|> -->
+<!-- => <|"Status" -> "SAT", "Model" -> <|...|>|> -->
 
 The algorithm is the textbook lazy DPLL(T) shell: each equality/disequality atom is abstracted as a fresh propositional variable; the Boolean abstraction is handed to Wolfram's <code>[SatisfiabilityInstances]()</code> as the propositional kernel; every candidate model is theory-checked via [TSatEUF](); on T-conflict the exact assignment is forbidden by a blocking clause and the kernel is re-queried. Loop terminates - there are <code>2^|atoms|</code> assignments and each iteration prunes one. Sound and complete for QF_UF.
 
