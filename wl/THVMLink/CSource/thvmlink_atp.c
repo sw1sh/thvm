@@ -404,6 +404,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Waldmeister-style auto-precedence from axiom-set analysis, gated
   // at runtime by the Method "AutoPrecedence" suboption (was a
   // compile-time -DATP_AUTO_PREC switch).
+  // auto_prec dispatch:
+  //   0 = off (identity precedence, the default initialized above)
+  //   1 = Waldmeister structural (atp_auto_precedence)
+  //   2 = Vampire `sp=occurrence` / E InvFreqRank (atp_occurrence_precedence)
   if (auto_prec != 0) {
     static Term ax_lhs[ATP_WL_CFG_MAX_LABELS];
     static Term ax_rhs[ATP_WL_CFG_MAX_LABELS];
@@ -413,8 +417,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       ax_lhs[i] = (Term)data[1 + 2 * i + 0];
       ax_rhs[i] = (Term)data[1 + 2 * i + 1];
     }
-    atp_auto_precedence(ax_lhs, ax_rhs, n_ax_use,
-                        (u32)max_label + 1, wl_precedence_p);
+    if (auto_prec == 2) {
+      atp_occurrence_precedence(ax_lhs, ax_rhs, n_ax_use,
+                                (u32)max_label + 1, wl_precedence_p);
+    } else {
+      atp_auto_precedence(ax_lhs, ax_rhs, n_ax_use,
+                          (u32)max_label + 1, wl_precedence_p);
+    }
   }
   // Method "Precedence"/"SkolemHighest": an explicit per-label precedence
   // array overrides identity / auto_prec.  args[17] is a label-indexed

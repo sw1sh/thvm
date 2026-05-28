@@ -2436,7 +2436,10 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
         ord = Switch[Lookup[o, "Ordering", Automatic],
             "LPO", 1, "KBO" | Automatic, 0, _, 0];
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
-            True, 1, False | Automatic, 0, _, 0];
+            True, 1,
+            "Occurrence", 2,
+            False | Automatic, 0,
+            _, 0];
         {cw, ord, ap, mnf, atpMaxWeightOpt[o], atpGoalInterleaveOpt[o],
          atpGroundJoinOpt[o], atpSelectionRatioOpt[o], atpAutoMaxWeightOpt[o],
          atpRHSInterreduceOpt[o], atpUnfailingCPOpt[o],
