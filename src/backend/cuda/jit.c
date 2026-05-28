@@ -357,6 +357,12 @@ fn int cuda_jit_graph_replay(u32 slot) {
   if (slot >= CUDA_JIT_GRAPH_CACHE_NSLOTS) return -1;
   if (!CUDA_JIT_GRAPH_CACHE[slot].valid) return -1;
   CUDA_JIT_GRAPH_HITS++;
+  // Drain any pending default-stream work before launching the captured
+  // graph on the capture stream.  TSet / cuMemcpyHtoD on default stream
+  // is host-synchronous (blocks until the copy is queued) but does NOT
+  // synchronize with other streams.  Without this drain, a fresh input
+  // upload could race the graph's read of that input.
+  cuStreamSynchronize(NULL);
   CUresult r = cuGraphLaunch(CUDA_JIT_GRAPH_CACHE[slot].exec,
                              CUDA_CAPTURE_STREAM);
   if (r != CUDA_SUCCESS) {
@@ -367,14 +373,13 @@ fn int cuda_jit_graph_replay(u32 slot) {
     }
     return -1;
   }
-  // Sync so the caller sees the work complete (matches the per-launch
-  // path's implicit default-stream ordering: the next CPU read sees
-  // GPU-written data).
-  r = cuStreamSynchronize(CUDA_CAPTURE_STREAM);
-  if (r != CUDA_SUCCESS) {
-    cuda_set_error("cuStreamSynchronize(graph)", r);
-    return -1;
-  }
+  // No cuStreamSynchronize here -- the natural sync point is the next
+  // user-visible CPU read (loss.numpy() -> cuda_buf_read).  Forcing a
+  // sync per replay defeats the pipelining win that's the whole point
+  // of cuGraphLaunch + async dispatch.  cuda_buf_read syncs the
+  // capture stream before reading; cuda_buf_write also issues an
+  // explicit cuEventRecord so the next graph launch waits on the
+  // upload (see buf_read.c / buf_write.c).
   return 0;
 }
 
@@ -458,14 +463,12 @@ fn int cuda_jit_graph_capture_end_and_launch(u32 slot) {
             slot, n_nodes);
   }
   // Launch the cached graph now so the captured work actually runs.
+  // No host-side sync -- the next cuda_buf_read on the result tensor
+  // syncs the capture stream as needed (matches the per-launch async
+  // pipeline that cuGraphLaunch is meant to amortise).
   r = cuGraphLaunch(exec, CUDA_CAPTURE_STREAM);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuGraphLaunch(first)", r);
-    return -1;
-  }
-  r = cuStreamSynchronize(CUDA_CAPTURE_STREAM);
-  if (r != CUDA_SUCCESS) {
-    cuda_set_error("cuStreamSynchronize(graph-first)", r);
     return -1;
   }
   return 0;
