@@ -4225,11 +4225,12 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
             enc, OptionValue[MaxSteps], atpWall,
             Sequence @@ atpMethodCfg];
-        (* Construct a ProofObject with "Theorems" -> None so the
-           no-goal saturation has the same return shape as the goal-
-           directed call.  The Proof dataset lists the input axioms
-           in the {"Axiom", k} -> <|"Statement", "Proof"|> shape
-           ProofObjectQ + $ProofPattern require. *)
+        (* Construct a ProofObject with "Theorems" -> None.  The Proof
+           dataset uses the same {Type, Index} -> <|Statement, Proof|>
+           shape the goal-directed buildCplDataset emits, with the
+           saturated rule set surfaced as CriticalPairLemma entries so
+           the standard ProofObject "Lemmas" / "ProofGraph" accessors
+           see them (matching the FindEquationalProof convention). *)
         axEq = holdToInactive /@ enc["AxHCsRaw"];
         varNames = cRes["VarSyms"];
         lemmaEq = atpMainRulesLemmas[cRes];
@@ -4239,7 +4240,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
                   "Proof" -> <||>|>],
             axEq];
         lemmaDataset = MapIndexed[
-            Function[{eq, idx}, {"Lemma", First[idx]} ->
+            Function[{eq, idx}, {"CriticalPairLemma", First[idx]} ->
                 <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
                   "Proof" -> <||>|>],
             lemmaEq];
