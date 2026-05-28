@@ -212,6 +212,33 @@ static void goal_mccune(Term *l, Term *r) {
   *r = and_op(not_op(p), p);
 }
 
+// Robbins basis for Boolean algebra (three axioms over {or:2, not:1}):
+//   1. or(X1, or(X2, X3)) = or(or(X1, X2), X3)      -- associativity
+//   2. or(X1, X2)         = or(X2, X1)              -- commutativity
+//   3. not(or(not(or(X1, X2)), not(or(X1, not(X2))))) = X1   -- Robbins
+// Reuses the McCune-side L_AND label as `or` (arity 2) and L_NOT as
+// `not` (arity 1): KBO/LPO only care about arity here, so the integer
+// tags are reusable -- the bench's output prints them as `C5`/`C6`.
+// Conjecture (DoubleNegation): not(not(sk_c1)) = sk_c1.  Uses L_P.
+static void robbins_axioms(Term *l1, Term *r1,
+                           Term *l2, Term *r2,
+                           Term *l3, Term *r3) {
+  Term x1 = fv(0), x2 = fv(1), x3 = fv(2);
+  *l1 = and_op(x1, and_op(x2, x3));
+  *r1 = and_op(and_op(x1, x2), x3);
+  *l2 = and_op(x1, x2);
+  *r2 = and_op(x2, x1);
+  Term inner_a = not_op(and_op(x1, x2));
+  Term inner_b = not_op(and_op(x1, not_op(x2)));
+  *l3 = not_op(and_op(inner_a, inner_b));
+  *r3 = x1;
+}
+static void goal_robbins(Term *l, Term *r) {
+  Term p = konst(L_P);
+  *l = not_op(not_op(p));
+  *r = p;
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -415,6 +442,12 @@ int main(int argc, char **argv) {
 
   if (strcmp(goal, "mccune") == 0) {
     thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));
+  } else if (strcmp(goal, "robbins") == 0) {
+    Term r_l1, r_r1, r_l2, r_r2, r_l3, r_r3;
+    robbins_axioms(&r_l1, &r_r1, &r_l2, &r_r2, &r_l3, &r_r3);
+    thvm_atp_add_equation(s, r_l1, r_r1);
+    thvm_atp_add_equation(s, r_l2, r_r2);
+    thvm_atp_add_equation(s, r_l3, r_r3);
   } else {
     thvm_atp_add_equation(s, axiom_lhs(), fv(2));
   }
@@ -437,6 +470,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "andassoc")==0) goal_andassoc(&gl, &gr);
   else if (strcmp(goal, "andassocu")==0) goal_andassocu(&gl, &gr);
   else if (strcmp(goal, "mccune")  == 0) goal_mccune(&gl, &gr);
+  else if (strcmp(goal, "robbins") == 0) goal_robbins(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
