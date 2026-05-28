@@ -1782,19 +1782,20 @@ static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
   // before this depth in a well-formed DT.
   if (depth >= ATP_DT_DESCENT_DEPTH_CAP) {
     ix->q_depth_capped++;
-    // THVM_ATP_DT_TRACE=1 dumps the (node, pos) of the first cap hit
-    // per process so an investigator can spot whether the cap fires
-    // repeatedly at the same node (= true cycle) or scatters across
-    // nodes (= just deep search).
+    // THVM_ATP_DT_TRACE=1 dumps the (node, pos, flatlen) of the first 4
+    // cap hits per process so an investigator can spot whether the cap
+    // fires repeatedly at the same node (= true cycle) or scatters
+    // across nodes (= just deep search).  4 samples is enough to tell
+    // the patterns apart while staying near-silent on production runs.
     {
-      static u8 dumped = 0;
-      if (!dumped) {
+      static u32 dumped = 0u;
+      if (dumped < 4u) {
         const char *t = getenv("THVM_ATP_DT_TRACE");
         if (t != NULL && t[0] != '\0' && t[0] != '0') {
           fprintf(stderr,
-                  "atp_dt_descend depth-cap hit: node=%u pos=%u flatlen=%u\n",
-                  node, pos, g_atp_dt_flatlen);
-          dumped = 1u;
+                  "atp_dt_descend depth-cap hit #%u: node=%u pos=%u flatlen=%u\n",
+                  dumped + 1u, node, pos, g_atp_dt_flatlen);
+          dumped++;
         }
       }
     }
