@@ -547,17 +547,20 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     vortest_gate = (e != NULL && e[0] == '1') ? 1 : 0;
   }
   LpoCmp pre;
-  if (vortest_gate && lpo_pretest_flat_dispatch(s, t, cfg, &pre)) return pre;
-  // Flatterm recursive LPO (WM LPO.c port).  Encodes both operands into
-  // cache-dense KboFlatNode arrays and runs the same Dershowitz LPO body
-  // over them with O(1) child stepping (cur += node[cur].sz).  Memoized
-  // per call on (pa, pb) positions.  Opt-in via THVM_LPO_FLAT_REC; falls
-  // back to the Term-tree lpo_rec on encode overflow or when disabled.
   static int flatrec_gate = -1;
   if (flatrec_gate < 0) {
     const char *e = getenv("THVM_LPO_FLAT_REC");
     flatrec_gate = (e != NULL && e[0] == '1') ? 1 : 0;
   }
+  // When Flatrec is on, the Vortest pretest reuses the same flat encode.
+  // When Flatrec is off, Vortest pays its own encode via the dispatch helper.
+  if (vortest_gate && !flatrec_gate &&
+      lpo_pretest_flat_dispatch(s, t, cfg, &pre)) return pre;
+  // Flatterm recursive LPO (WM LPO.c port).  Encodes both operands into
+  // cache-dense KboFlatNode arrays and runs the same Dershowitz LPO body
+  // over them with O(1) child stepping (cur += node[cur].sz).  Memoized
+  // per call on (pa, pb, side) positions.  Opt-in via THVM_LPO_FLAT_REC;
+  // falls back to the Term-tree lpo_rec on encode overflow or when disabled.
   if (flatrec_gate) {
     static u32 stub_w[1] = {0u};
     KboConfig stub = { .weights = stub_w, .precedence = stub_w,
@@ -565,6 +568,15 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     u32 na = 0u, nb = 0u;
     if (kbo_flat_encode(s, &stub, g_lpo_flat_a, &na) &&
         kbo_flat_encode(t, &stub, g_lpo_flat_b, &nb)) {
+      // Vortest reuses the encode (zero extra cost).
+      if (vortest_gate) {
+        int r1 = lpo_pretest_groesser_flat(g_lpo_flat_a, na,
+                                           g_lpo_flat_b, nb, cfg);
+        if (r1 > 0) return LPO_GT;
+        int r2 = lpo_pretest_groesser_flat(g_lpo_flat_b, nb,
+                                           g_lpo_flat_a, na, cfg);
+        if (r2 > 0) return LPO_LT;
+      }
       // Fast var-set incomparability check directly on the flat spines.
       // Avoids the recursive lpo_var_set_acc / lpo_vars_in_range walk over
       // Term trees that the pre-flatrec lpo_pretest_varset would do.
