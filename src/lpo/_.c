@@ -467,8 +467,9 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
   if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
   if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
 
-  u32 prec_a = ((u32)a[pa].sym < cfg->n_labels) ? cfg->precedence[(u32)a[pa].sym] : 0u;
-  u32 prec_b = ((u32)b[pb].sym < cfg->n_labels) ? cfg->precedence[(u32)b[pb].sym] : 0u;
+  // KboFlatNode.w was loaded with cfg->precedence at encode time.
+  i32 prec_a = a[pa].w;
+  i32 prec_b = b[pb].w;
   if (prec_a > prec_b) {
     if (lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
     return LPO_UN;
@@ -575,9 +576,11 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
       if (e2->epoch == g_lpo_epoch && e2->s == s && e2->t == t)
         return (LpoCmp)(i8)e2->cmp;
     }
-    static u32 stub_w[1] = {0u};
-    KboConfig stub = { .weights = stub_w, .precedence = stub_w,
-                       .n_labels = 0u, .var_weight = 0u };
+    // Use LpoConfig's precedence as kbo_flat_encode's `weights` so each
+    // KboFlatNode.w holds the symbol's precedence directly -- the inner
+    // recursion avoids re-indexing cfg->precedence[sym] per node.
+    KboConfig stub = { .weights = cfg->precedence, .precedence = cfg->precedence,
+                       .n_labels = cfg->n_labels, .var_weight = 0u };
     u32 na = 0u, nb = 0u;
     if (kbo_flat_encode(s, &stub, g_lpo_flat_a, &na) &&
         kbo_flat_encode(t, &stub, g_lpo_flat_b, &nb)) {
