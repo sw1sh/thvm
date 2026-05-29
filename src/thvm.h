@@ -3032,6 +3032,17 @@ fn long long thvm_kbo_term_weight(const KboConfig *cfg, Term t);
 // non-CTR/non-FVR head.  Byte-identical verdict (ATP_KBO_FLAT_SELFCHECK).
 fn KboCmp thvm_kbo_flat(Term s, Term t, const KboConfig *cfg);
 
+// Slice entrypoint: same decision as thvm_kbo_flat, but takes pre-
+// encoded KboFlatNode arrays from the caller.  Lets the ATP hot path
+// bypass the per-call kbo_flat_encode when a rule side or subject is
+// already flat in the surrounding normalize context.  na/nb are
+// accepted for caller-side assertions; the decision walks via each
+// node's `sz` field so the totals are not consulted internally.
+struct KboFlatNode;
+fn KboCmp thvm_kbo_flat_slice(const struct KboFlatNode *a, u32 na,
+                              const struct KboFlatNode *b, u32 nb,
+                              const KboConfig *cfg);
+
 // === lpo/ ===
 // Lexicographic Path Ordering (LPO; Waldmeister's
 // `Lexikografische-Pfad-Ordnung`, Dershowitz 1982).  An

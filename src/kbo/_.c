@@ -811,7 +811,7 @@ fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg) {
 // symbols recurse -- the array layout makes child i of a node at p start
 // at the cursor advanced past its left siblings, exactly like preorder.
 
-typedef struct {
+typedef struct KboFlatNode {
   i32 sym;   // >= 0 : CTR label;  < 0 : -(varid+1) for a variable
   i32 w;     // own weight (cfg->weights[label] or cfg->var_weight)
   u32 sz;    // subtree span in nodes (this node + all descendants)
@@ -980,21 +980,38 @@ static KboCmp kbo_flat_rek(KboLin *st, const KboFlatNode *a, u32 pa,
 // overrun (a term deeper than KBO_FLAT_CAP) it falls back to thvm_kbo so
 // the verdict is never weakened.  Byte-identical verdict to thvm_kbo
 // (asserted under ATP_KBO_FLAT_SELFCHECK).
+// Iter 133 step 4: split the flatterm comparator into a "slice" core
+// that takes pre-encoded operands, plus the historical entrypoint that
+// encodes-then-slices.  Callers in the ATP hot path that already have
+// one or both operands flat (e.g. the rule lhs/rhs cache built once at
+// push time) bypass the per-call encode and feed the slice directly.
+// Byte-identical verdict to thvm_kbo (asserted under
+// ATP_KBO_FLAT_SELFCHECK).
+fn KboCmp thvm_kbo_flat_slice(const KboFlatNode *a, u32 na,
+                              const KboFlatNode *b, u32 nb,
+                              const KboConfig *cfg) {
+  (void)na; (void)nb;  /* lengths are encoded in each node's `sz` field;
+                        * the decision walks via sz, so the slice does
+                        * not need to know totals -- but accept them for
+                        * callers that want to assert shape pre-flight. */
+  KboLin *st = &g_kbo_st;
+  st->cfg = cfg;
+  st->n_touched = 0;
+
+  long long phidiff = 0;
+  if (kbo_flat_vortest(st, a, 0u, b, 0u, &phidiff)) {
+    kbo_lin_clear(st);
+    return KBO_EQ;
+  }
+  KboCmp varcmp = kbo_lin_decide_clear(st);
+  return kbo_flat_rek(st, a, 0u, b, 0u, phidiff, varcmp);
+}
+
 fn KboCmp thvm_kbo_flat(Term s, Term t, const KboConfig *cfg) {
   u32 na = 0, nb = 0;
   if (!kbo_flat_encode(s, cfg, g_kbo_flat_a, &na) ||
       !kbo_flat_encode(t, cfg, g_kbo_flat_b, &nb)) {
     return thvm_kbo(s, t, cfg);
   }
-  KboLin *st = &g_kbo_st;
-  st->cfg = cfg;
-  st->n_touched = 0;
-
-  long long phidiff = 0;
-  if (kbo_flat_vortest(st, g_kbo_flat_a, 0u, g_kbo_flat_b, 0u, &phidiff)) {
-    kbo_lin_clear(st);
-    return KBO_EQ;
-  }
-  KboCmp varcmp = kbo_lin_decide_clear(st);
-  return kbo_flat_rek(st, g_kbo_flat_a, 0u, g_kbo_flat_b, 0u, phidiff, varcmp);
+  return thvm_kbo_flat_slice(g_kbo_flat_a, na, g_kbo_flat_b, nb, cfg);
 }
