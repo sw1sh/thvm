@@ -324,9 +324,28 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     // workloads the small numeric difference doesn't change loss
     // convergence; tinygrad's CUDA renderer enables similar
     // intrinsics via UOP_OPT(_, FAST_MATH, _) wraps.
-    const char *opts[8];
+    const char *opts[16];
     u32 n_opts = 0;
     opts[n_opts++] = arch_opt;
+    // nvrtc has no default filesystem include search path, so a WMMA
+    // tensor-core matmul kernel's `#include <mma.h>` fails to compile
+    // ("could not open source file mma.h") -- the kernel then never
+    // dispatches, its output stays zero, the forward produces degenerate
+    // logits, and training stalls at the random-guess loss with frozen
+    // params.  Mirror tinygrad (runtime/support/compiler_cuda.py): point
+    // nvrtc at the toolkit include dir from $CUDA_PATH/$CUDA_HOME, else
+    // the standard locations.
+    char inc_opt[512];
+    const char *cuda_path = getenv("CUDA_PATH");
+    if (cuda_path == NULL || cuda_path[0] == '\0') cuda_path = getenv("CUDA_HOME");
+    if (cuda_path != NULL && cuda_path[0] != '\0') {
+      snprintf(inc_opt, sizeof inc_opt, "-I%s/include", cuda_path);
+      opts[n_opts++] = inc_opt;
+    } else {
+      opts[n_opts++] = "-I/usr/local/cuda/include";
+      opts[n_opts++] = "-I/usr/include";
+      opts[n_opts++] = "-I/opt/cuda/include";
+    }
     // Default OFF: a 10% regression at BS=64 surfaced when
     // --use_fast_math was on by default (warm 154ms -> 140ms with
     // THVM_CUDA_NO_FAST_MATH=1).  Opt in per workload until cross-BS
