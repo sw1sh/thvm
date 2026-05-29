@@ -358,6 +358,147 @@ static int lpo_pretest_groesser_flat(const KboFlatNode *a, u32 na,
 static KboFlatNode g_lpo_flat_a[KBO_FLAT_CAP];
 static KboFlatNode g_lpo_flat_b[KBO_FLAT_CAP];
 
+// === flatterm recursive LPO body (Waldmeister LPO.c port) =================
+// Operates on KboFlatNode slices instead of Term trees: children iteration
+// is array-indexed (next child = cur + node[cur].sz) instead of going
+// through term_ctr_at which descends via heap reads.  The memo is keyed
+// on (pa, pb) -- positions within the per-call encode buffers -- which is
+// a much smaller key space than (Term, Term) and stays stable for the
+// duration of one thvm_lpo call.
+
+#define LPO_FLAT_MEMO_BITS 14
+#define LPO_FLAT_MEMO_SIZE (1u << LPO_FLAT_MEMO_BITS)
+#define LPO_FLAT_MEMO_MASK (LPO_FLAT_MEMO_SIZE - 1u)
+// `side` encodes which buffer holds the lhs: 0 = g_lpo_flat_a, 1 = g_lpo_flat_b.
+// (pa, pb, side) -- without `side`, swapped recursive calls (a-vs-b and b-vs-a)
+// collide on (pa, pb) and pollute each other's verdicts.
+typedef struct { u32 pa, pb; u32 epoch; u8 cmp; u8 side; } LpoFlatMemoEnt;
+static LpoFlatMemoEnt g_lpo_flat_memo[LPO_FLAT_MEMO_SIZE];
+static u32 g_lpo_flat_epoch = 0;
+
+static inline u32 lpo_flat_hash(u32 pa, u32 pb, u8 side) {
+  u64 h = ((u64)pa * 0x9E3779B97F4A7C15ull) ^ ((u64)pb * 0xBF58476D1CE4E5B9ull);
+  h ^= ((u64)side * 0x94D049BB133111EBull);
+  h ^= h >> 29;
+  return (u32)h & LPO_FLAT_MEMO_MASK;
+}
+
+static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
+                           const KboFlatNode *b, u32 pb,
+                           const LpoConfig *cfg);
+
+static u8 lpo_flat_slice_eq(const KboFlatNode *a, u32 pa,
+                            const KboFlatNode *b, u32 pb) {
+  if (a[pa].sym != b[pb].sym) return 0;
+  if (a[pa].sz != b[pb].sz)   return 0;
+  u32 n = a[pa].sz;
+  for (u32 i = 1; i < n; i++) {
+    if (a[pa + i].sym != b[pb + i].sym) return 0;
+  }
+  return 1;
+}
+
+static u8 lpo_flat_var_occurs(const KboFlatNode *t, u32 pos, i32 vsym) {
+  u32 end = pos + t[pos].sz;
+  for (u32 i = pos; i < end; i++) if (t[i].sym == vsym) return 1;
+  return 0;
+}
+
+static u8 lpo_flat_dominates_all_args(const KboFlatNode *a, u32 pa,
+                                      const KboFlatNode *b, u32 pb,
+                                      const LpoConfig *cfg) {
+  // b[pb] must be a CTR; iterate its children via Ende skip.
+  if (b[pb].sym < 0) return 1;
+  u32 child = pb + 1u;
+  u32 end   = pb + b[pb].sz;
+  while (child < end) {
+    if (lpo_flat_rec(a, pa, b, child, cfg) != LPO_GT) return 0;
+    child += b[child].sz;
+  }
+  return 1;
+}
+
+static u8 lpo_flat_some_arg_dominates(const KboFlatNode *a, u32 pa,
+                                      const KboFlatNode *b, u32 pb,
+                                      const LpoConfig *cfg) {
+  if (a[pa].sym < 0) return 0;
+  u32 child = pa + 1u;
+  u32 end   = pa + a[pa].sz;
+  while (child < end) {
+    LpoCmp c = lpo_flat_rec(a, child, b, pb, cfg);
+    if (c == LPO_EQ || c == LPO_GT) return 1;
+    child += a[child].sz;
+  }
+  return 0;
+}
+
+static LpoCmp lpo_flat_lex(const KboFlatNode *a, u32 pa,
+                           const KboFlatNode *b, u32 pb,
+                           const LpoConfig *cfg) {
+  u32 ca = pa + 1u, cb = pb + 1u;
+  u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
+  while (ca < ea && cb < eb) {
+    LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
+    if (c != LPO_EQ) return c;
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
+  return LPO_EQ;
+}
+
+static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
+                                   const KboFlatNode *b, u32 pb,
+                                   const LpoConfig *cfg) {
+  if (lpo_flat_slice_eq(a, pa, b, pb)) return LPO_EQ;
+  u8 a_is_var = (a[pa].sym < 0);
+  u8 b_is_var = (b[pb].sym < 0);
+  if (a_is_var && b_is_var) return LPO_UN;
+  if (a_is_var) {
+    if (lpo_flat_var_occurs(b, pb, a[pa].sym)) return LPO_LT;
+    return LPO_UN;
+  }
+  if (b_is_var) {
+    if (lpo_flat_var_occurs(a, pa, b[pb].sym)) return LPO_GT;
+    return LPO_UN;
+  }
+  if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
+  if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
+
+  u32 prec_a = ((u32)a[pa].sym < cfg->n_labels) ? cfg->precedence[(u32)a[pa].sym] : 0u;
+  u32 prec_b = ((u32)b[pb].sym < cfg->n_labels) ? cfg->precedence[(u32)b[pb].sym] : 0u;
+  if (prec_a > prec_b) {
+    if (lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
+    return LPO_UN;
+  }
+  if (prec_a < prec_b) {
+    if (lpo_flat_dominates_all_args(b, pb, a, pa, cfg)) return LPO_LT;
+    return LPO_UN;
+  }
+  if (a[pa].sz != b[pb].sz) return LPO_UN;
+  LpoCmp lex = lpo_flat_lex(a, pa, b, pb, cfg);
+  if (lex == LPO_EQ) return LPO_EQ;
+  if (lex == LPO_GT) {
+    if (lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
+    return LPO_UN;
+  }
+  if (lpo_flat_dominates_all_args(b, pb, a, pa, cfg)) return LPO_LT;
+  return LPO_UN;
+}
+
+static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
+                           const KboFlatNode *b, u32 pb,
+                           const LpoConfig *cfg) {
+  if (a == b && pa == pb) return LPO_EQ;
+  u8 side = (a == g_lpo_flat_a) ? 0u : 1u;
+  u32 idx = lpo_flat_hash(pa, pb, side);
+  LpoFlatMemoEnt *e = &g_lpo_flat_memo[idx];
+  if (e->epoch == g_lpo_flat_epoch && e->pa == pa && e->pb == pb && e->side == side)
+    return (LpoCmp)(i8)e->cmp;
+  LpoCmp c = lpo_flat_rec_compute(a, pa, b, pb, cfg);
+  e->pa = pa; e->pb = pb; e->epoch = g_lpo_flat_epoch; e->cmp = (u8)c; e->side = side;
+  return c;
+}
+
 static int lpo_pretest_flat_dispatch(Term s, Term t,
                                      const LpoConfig *cfg, LpoCmp *out) {
   // Borrow KBO's encoder -- LPO does not care about weights, only sym/sz.
@@ -412,6 +553,31 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     vortest_gate = (e != NULL && e[0] == '1') ? 1 : 0;
   }
   if (vortest_gate && lpo_pretest_flat_dispatch(s, t, cfg, &pre)) return pre;
+  // Flatterm recursive LPO (WM LPO.c port).  Encodes both operands into
+  // cache-dense KboFlatNode arrays and runs the same Dershowitz LPO body
+  // over them with O(1) child stepping (cur += node[cur].sz).  Memoized
+  // per call on (pa, pb) positions.  Opt-in via THVM_LPO_FLAT_REC; falls
+  // back to the Term-tree lpo_rec on encode overflow or when disabled.
+  static int flatrec_gate = -1;
+  if (flatrec_gate < 0) {
+    const char *e = getenv("THVM_LPO_FLAT_REC");
+    flatrec_gate = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  if (flatrec_gate) {
+    static u32 stub_w[1] = {0u};
+    KboConfig stub = { .weights = stub_w, .precedence = stub_w,
+                       .n_labels = 0u, .var_weight = 0u };
+    u32 na = 0u, nb = 0u;
+    if (kbo_flat_encode(s, &stub, g_lpo_flat_a, &na) &&
+        kbo_flat_encode(t, &stub, g_lpo_flat_b, &nb)) {
+      // Bump epoch -- positions are only meaningful for THIS encode pair.
+      if (++g_lpo_flat_epoch == 0) {
+        for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) g_lpo_flat_memo[i].epoch = 0;
+        g_lpo_flat_epoch = 1;
+      }
+      return lpo_flat_rec(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+    }
+  }
   return lpo_rec(s, t, cfg);
 }
 
