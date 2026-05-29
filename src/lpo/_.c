@@ -259,6 +259,132 @@ fn void thvm_lpo_invalidate(void) {
 // invalidate on GC).  Default off keeps thvm_lpo sound for any caller.
 fn void thvm_lpo_set_persist(u8 on) { g_lpo_persist = on ? 1u : 0u; }
 
+// === flatterm-spine subterm pretest (Waldmeister LV_VortestLPOGroesser) ====
+// Single linear pass over the KboFlatNode encoding of a and b.  Detects the
+// two cheap conclusive verdicts that dominate Waldmeister's hot loop:
+//
+//   (a) b is a strict preorder slice (= subterm) of a              -> LPO_GT
+//   (b) a is a strict preorder slice (= subterm) of b              -> LPO_LT
+//   (c) one operand is a constant, every symbol on the other side
+//       is precedence-dominated (or the other is var-heavy)        -> +/- forced
+//
+// Returns +1 / -1 if conclusive (caller maps to LPO_GT / LPO_LT), or 0
+// to fall through to the full recursive thvm_lpo (then the memoized
+// lpo_rec resolves the residual hard cases).  See
+// waldmeister/sources/ORD/LPOVortests.c:436 LV_VortestLPOGroesser for the
+// reference algorithm (Termliste candidate scan).
+
+#define LPO_FLAT_KAND_CAP 256
+
+static int lpo_pretest_groesser_flat(const KboFlatNode *a, u32 na,
+                                     const KboFlatNode *b, u32 nb,
+                                     const LpoConfig *cfg) {
+  if (na == 0 || nb == 0) return 0;
+  // VortestLPOGroesserVar.
+  if (a[0].sym < 0) return -1;            // var never strictly dominates
+  if (b[0].sym < 0) {
+    i32 vs = b[0].sym;
+    // b is a variable -- a > b iff that var occurs strictly inside a.
+    for (u32 i = 1; i < na; i++) if (a[i].sym == vs) return +1;
+    return -1;
+  }
+  // VortestLPOGroesserKonst -- a is a constant (no children, sz == 1).
+  if (a[0].sz == 1u) {
+    u32 pa = ((u32)a[0].sym < cfg->n_labels) ? cfg->precedence[(u32)a[0].sym] : 0u;
+    for (u32 i = 0; i < nb; i++) {
+      if (b[i].sym < 0) return -1;        // var in b -- const cannot dominate
+      u32 pb_i = ((u32)b[i].sym < cfg->n_labels) ? cfg->precedence[(u32)b[i].sym] : 0u;
+      if (pb_i >= pa) return -1;          // some symbol in b matches or beats a
+    }
+    return +1;
+  }
+  if (b[0].sz == 1u) {
+    u32 pb = ((u32)b[0].sym < cfg->n_labels) ? cfg->precedence[(u32)b[0].sym] : 0u;
+    for (u32 i = 0; i < na; i++) {
+      if (a[i].sym < 0) continue;
+      u32 pa_i = ((u32)a[i].sym < cfg->n_labels) ? cfg->precedence[(u32)a[i].sym] : 0u;
+      if (pa_i >= pb) return +1;
+    }
+    return -1;
+  }
+
+  // General subterm scan.  Candidates track a cursor `cur` into b: each
+  // candidate represents an active hypothesis that b's prefix from position
+  // 1 onwards is being matched against a's preorder walk.  When cur reaches
+  // nb the candidate has matched all of b, so b is a strict subterm of a.
+  u32 kand[LPO_FLAT_KAND_CAP];
+  u32 nk = 0;
+  i32 aelt_cur = -1;                      // aeltester candidate; -1 once dropped
+  if (a[0].sym == b[0].sym && a[0].sz == b[0].sz) {
+    kand[nk++] = 1u;
+    aelt_cur = 1;
+  }
+
+  for (u32 i = 1; i < na; i++) {
+    i32 sym = a[i].sym;
+    u32 wr = 0;
+    u8  aelt_kept = 0;
+    for (u32 r = 0; r < nk; r++) {
+      u32 cur = kand[r];
+      // Reaching the right edge means a strict-subterm hit; the entire b
+      // walked over a's preorder slice [i-... , i-1].
+      if (cur == nb) return +1;
+      if (b[cur].sym == sym) {
+        if (aelt_cur >= 0 && (u32)aelt_cur == cur) aelt_kept = 1;
+        kand[wr++] = cur + 1u;
+        if (aelt_kept) aelt_cur = (i32)(cur + 1u);
+      } else if (aelt_cur >= 0 && (u32)aelt_cur == cur) {
+        aelt_cur = -1;
+      }
+    }
+    nk = wr;
+    if (sym == b[0].sym) {
+      // Seed a new candidate starting fresh at b[0].  This match consumes
+      // the top symbol; cur=1 means "advance past b[0]".
+      if (nk < LPO_FLAT_KAND_CAP) kand[nk++] = 1u;
+    }
+  }
+  for (u32 r = 0; r < nk; r++) if (kand[r] == nb) return +1;
+  // No subterm hit either direction.  The symmetric VarMenge check (a's
+  // var set must contain b's; otherwise a > b is impossible) belongs here
+  // but a stricter version of this is already in lpo_pretest_varset which
+  // thvm_lpo calls first; leaving 0 here punts to lpo_rec.
+  return 0;
+}
+
+// Cached encode buffers for the pretest.  Reused across calls in the same
+// thvm_lpo invocation; thvm_kbo_flat reuses g_kbo_flat_a/b in its own way
+// so we maintain a private pair to avoid stomping on a concurrent KBO call.
+static KboFlatNode g_lpo_flat_a[KBO_FLAT_CAP];
+static KboFlatNode g_lpo_flat_b[KBO_FLAT_CAP];
+
+static int lpo_pretest_flat_dispatch(Term s, Term t,
+                                     const LpoConfig *cfg, LpoCmp *out) {
+  // Borrow KBO's encoder -- LPO does not care about weights, only sym/sz.
+  // Use a stub KboConfig (var_weight=0, n_labels=0) so kbo_flat_encode
+  // never tries to read an LpoConfig label array.
+  static u32 stub_w[1] = {0u};
+  KboConfig stub = { .weights = stub_w, .precedence = stub_w,
+                     .n_labels = 0u, .var_weight = 0u };
+  u32 na = 0u, nb = 0u;
+  if (!kbo_flat_encode(s, &stub, g_lpo_flat_a, &na)) return 0;
+  if (!kbo_flat_encode(t, &stub, g_lpo_flat_b, &nb)) return 0;
+  int r1 = lpo_pretest_groesser_flat(g_lpo_flat_a, na,
+                                     g_lpo_flat_b, nb, cfg);
+  if (r1 > 0) { *out = LPO_GT; return 1; }
+  int r2 = lpo_pretest_groesser_flat(g_lpo_flat_b, nb,
+                                     g_lpo_flat_a, na, cfg);
+  if (r2 > 0) { *out = LPO_LT; return 1; }
+  // Both directions returned non-GT.  If BOTH ruled the strict-dominance
+  // out forcibly (-1 / -1) AND neither side is var-only, the terms are
+  // LPO_UN.  But the constant-side cases already covered the var-only
+  // legs, and the general-scan -1 path means "no subterm hit found", which
+  // is NOT a strict UN proof -- there might still be a non-subterm-based
+  // LPO_GT/LT via the recursive case (2) precedence path.  So only commit
+  // to UN when BOTH legs came back from the const/var branches.
+  return 0;
+}
+
 fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
   if (g_lpo_persist) {
     // Persist across calls; invalidate only on a config change (distinct
@@ -275,6 +401,17 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
   // forced LPO_UN verdict; otherwise the full recursion runs.
   LpoCmp pre;
   if (lpo_pretest_varset(s, t, &pre)) return pre;
+  // Flatterm subterm pretest (LV_VortestLPOGroesser).  Catches the two
+  // common conclusive cases (b strict subterm of a, or a strict subterm of
+  // b) in O(|s|+|t|) without recursion or memo; only the residual hard
+  // cases reach lpo_rec.  Opt-in via THVM_LPO_VORTEST_FLAT until A/B
+  // confirms no regression on KBO-mode or non-Sheffer benches.
+  static int vortest_gate = -1;
+  if (vortest_gate < 0) {
+    const char *e = getenv("THVM_LPO_VORTEST_FLAT");
+    vortest_gate = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  if (vortest_gate && lpo_pretest_flat_dispatch(s, t, cfg, &pre)) return pre;
   return lpo_rec(s, t, cfg);
 }
 
