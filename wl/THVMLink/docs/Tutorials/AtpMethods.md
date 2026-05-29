@@ -54,14 +54,12 @@ TFindProof["DoubleNegation", "BooleanAxioms",
 ### A Sheffer / Wolfram single-operator goal (Waldmeister preset)
 
 ```wl
-TFindProof["AndAssociativity", "WolframAxioms",
-    Method -> {"Waldmeister",
-        "CriticalPairWeight" -> "Gt",
-        "CPSetInterreduce" -> True},
+TFindProof["ImpliesWolframAlternateAxioms", "WolframAxioms",
+    Method -> "Waldmeister",
     TimeConstraint -> 30]
 ```
 
-`Method -> "Waldmeister"` bundles Waldmeister's faithful default strategy for an unrecognized single-operator problem: KBO + AutoPrecedence + `SelectionRatio -> 51` + RHSInterreduce + UnfailingCP + CPSetInterreduce.  The `Gt` weight + CPSetInterreduce override is the empirically-cracking combination for `AndAssociativity`.
+`Method -> "Waldmeister"` bundles Waldmeister's faithful default strategy for an unrecognized single-operator problem: KBO + AutoPrecedence + `SelectionRatio -> 51` + RHSInterreduce + UnfailingCP + CPSetInterreduce.  The bundled preset cracks the cross-system `WolframAxioms` / `ImpliesWolframAlternateAxioms` chain in ~140 steps.  Several Sheffer-style theorems (`AndAssociativity`, `Commutativity`, `OrAssociativity`) remain open at the bundled-preset level - real Waldmeister cracks them with `LPO + p > q > nand` (skolem constants highest) precedence, which the thvm preset does not yet front-load.
 
 ### A cross-system many-axiom theorem (SInE premise selection)
 
