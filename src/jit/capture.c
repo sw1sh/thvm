@@ -759,7 +759,7 @@ static void jit_capture_sink_assigns(JitCapture *c, Term root) {
   }
 }
 
-#ifdef THVM_HAS_METAL
+#if defined(THVM_HAS_METAL) || defined(THVM_HAS_CUDA)
 typedef struct {
   Backend *backend;
   u32      buf_id;
@@ -858,19 +858,29 @@ static int jit_capture_replay_packable_output(JitCaptureOp const *op,
       || op->kid == 0 || op->kid >= KERNELS_NEXT) {
     return 0;
   }
-  if (cg_kernel_dispatch_kind(op->kid) != KDISPATCH_METAL_TILE) {
-    return 0;
-  }
   KernelEntry const *ke = &KERNELS[op->kid];
   if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
     return 0;
   }
   TenDesc const *td = &TENS[ke->output_tid];
   Backend *backend = td->backend;
-  if (backend == NULL || backend->id != METAL_BACKEND.id
-      || backend->buf_decref == NULL || td->buf_id != op->out_buf_id) {
+  if (backend == NULL || backend->buf_decref == NULL
+      || td->buf_id != op->out_buf_id) {
     return 0;
   }
+  // Only pack genuine GPU-kernel-produced intermediates whose storage is
+  // recycle-safe: a Metal tile dispatch or a CUDA nvrtc dispatch on its
+  // own backend.  (CPU JIT already frees transients during materialize,
+  // so it doesn't need this; CPU stays on its existing path.)
+  u32 dk = cg_kernel_dispatch_kind(op->kid);
+  int ok = 0;
+#ifdef THVM_HAS_METAL
+  if (dk == KDISPATCH_METAL_TILE && backend->id == METAL_BACKEND.id) ok = 1;
+#endif
+#ifdef THVM_HAS_CUDA
+  if (dk == KDISPATCH_CUDA_JIT && backend->id == CUDA_BACKEND.id) ok = 1;
+#endif
+  if (!ok) return 0;
   u64 nbytes = jit_dispatch_output_nbytes(op);
   if (nbytes == 0) {
     return 0;
