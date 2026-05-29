@@ -112,10 +112,27 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                     ],
                 $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt,
                     tUopShape[TTerm[$heapReadFn[val]]],
+                (* REDUCE heap: [src, NUM(kind), NUM(n_axes),
+                   NUM(axis_0), ..., NUM(axis_{n-1})] (uop/reduce.c).
+                   n_axes at val+2; the axes at val+3..val+2+n_axes.
+                   A multi-axis REDUCE folds N axes in one node, so drop
+                   ALL N (descending, so each Delete leaves the lower
+                   indices valid).  The old code read val+2 (= n_axes,
+                   a COUNT) as the single axis and dropped only one --
+                   correct only when n_axes happened to equal axis_0
+                   (single-axis reduce over axis 1); it produced a
+                   bogus rank-N shape for the conv-backward _pool chain
+                   (e.g. LeNet conv2: rank-4 {20,50,8,2^32-2} instead of
+                   {50,8,8}), breaking the downstream PoolingLayer's
+                   rank-3 pre-check in fromLayer. *)
                 $UopReduce,
-                    dropAxis[
-                        tUopShape[TTerm[$heapReadFn[val]]],
-                        $termValFn[$heapReadFn[val + 2]]
+                    Module[{srcShape, nAxes, axes},
+                        srcShape = tUopShape[TTerm[$heapReadFn[val]]];
+                        If[ srcShape === $Failed, Return[$Failed, Module]];
+                        nAxes = $termValFn[$heapReadFn[val + 2]];
+                        axes  = Table[$termValFn[$heapReadFn[val + 3 + i]],
+                                      {i, 0, nAxes - 1}];
+                        Fold[dropAxis, srcShape, ReverseSort[axes]]
                     ],
                 $UopReshape,
                     (* RESHAPE heap layout: [src, NUM(ndim), NUM(d0), ...];
