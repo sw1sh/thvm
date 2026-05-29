@@ -978,6 +978,17 @@ typedef struct KernelEntry {
                                    // kernel referenced by N consumers in one
                                    // realize fires once instead of N times.
                                    // Bumped per top-level interact_kernel.
+  u64       fire_assign_seq;       // ASSIGN_SEQ at this kernel's last actual
+                                   // dispatch (THVM_PRECISE_FIRE_MEMO path):
+                                   // skip a re-fire when no input buffer was
+                                   // ASSIGNed since, instead of re-firing on
+                                   // every per-assign fire_gen bump.
+  u32       fire_pass;             // ASSIGN_PASS_EPOCH at last actual dispatch.
+                                   // The precise memo only skips a re-fire
+                                   // for a kernel that fired in the CURRENT
+                                   // pass -- so cross-realize / post-JIT-
+                                   // replay reads (whose buffer writes the
+                                   // memo can't see) always re-fire (sound).
   // Axis-typed scheduling plan.  `schedule` is a pointer for
   // historical reasons; today it always aims at `_local_schedule`
   // below (each kernel owns its own plan).
@@ -3117,6 +3128,7 @@ fn void backend_dispatch_begin_all(void);
 fn void backend_dispatch_flush_all(void);
 fn void backend_dispatch_end_all(void);
 fn void kernel_fire_gen_bump(void);
+fn void kernel_assign_write_record(void *backend, u32 buf_id);
 fn void kernel_fire_scope_begin(void);
 fn void kernel_fire_scope_end(void);
 // Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns

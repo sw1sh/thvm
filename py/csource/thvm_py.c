@@ -127,6 +127,11 @@ EXPORT int py_ten_write(uint64_t t, const void *data, uint64_t nbytes) {
   TenDesc *d = &TENS[id];
   if (d->backend == NULL || d->backend->buf_write == NULL) return 0;
   d->backend->buf_write(d->buf_id, data, nbytes);
+  // Host write is a buffer mutation the precise fire memo must see (else
+  // a kernel reading this buf -- e.g. the eval forward reading a freshly
+  // ten_write'n xSlot -- would wrongly skip re-firing and read stale
+  // bytes).  Record it on the same ASSIGN-write ring as interact_assign.
+  kernel_assign_write_record(d->backend, d->buf_id);
   return 1;
 }
 
@@ -380,6 +385,10 @@ EXPORT uint64_t py_cuda_jit_disk_writes(void) {
   return 0;
 #endif
 }
+extern uint64_t PRECISE_SKIPS, PRECISE_REFIRE_INPUT, PRECISE_REFIRE_OUT;
+EXPORT uint64_t py_precise_skips(void)        { return PRECISE_SKIPS; }
+EXPORT uint64_t py_precise_refire_input(void) { return PRECISE_REFIRE_INPUT; }
+EXPORT uint64_t py_precise_refire_out(void)   { return PRECISE_REFIRE_OUT; }
 EXPORT void py_cg_profile_dump(uint32_t top_n) {
   cg_profile_dump(stderr, top_n);
   fflush(stderr);

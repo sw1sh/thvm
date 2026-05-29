@@ -34,6 +34,8 @@ from .thvm import K, Term, Thvm, _uop_binary
 # Process-global bridge.  All Tensors share one Thvm instance.
 _TH = Thvm()
 _TAG_TEN = K.TAG_TEN
+import os as _os
+_BUNDLE_ASSIGNS = _os.environ.get('THVM_BUNDLE_ASSIGNS','')=='1'
 
 # Phase 3B: TenDesc.requires_grad is the canonical "this is a
 # parameter" flag (set via py_ten_set_requires_grad).  This dict
@@ -231,7 +233,7 @@ class Tensor:
             return self
         terms_all = [self.term] + [x.term for x in lst]
         has_assign = any(_term_is_assign(t) for t in terms_all)
-        if has_assign:
+        if has_assign and not _BUNDLE_ASSIGNS:
             self.term = _TH.realize(self.term)
             self._pin()
             for x in lst:
