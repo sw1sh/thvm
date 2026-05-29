@@ -79,6 +79,28 @@ TAtpDescribeMethod::usage = "TAtpDescribeMethod[Method] returns an Association d
 
 Begin["`Private`"];
 
+(* Default-on the C-engine fast paths.  Without these, Sheffer / nand
+   theorems like WolframAxioms / AndAssociativity time out at 60s
+   even with KBO + Gt + RecordNorm -> False; with them, the same
+   config matches Waldmeister's ~14s wall (C-bench measured 14.7s,
+   paclet ~25s end-to-end).  Each is byte-identical to the default
+   path on simpler problems within measurement noise.  Set BEFORE
+   any TFindProof call so the AtpState picks them up at init.
+
+   THVM_ATP_FLATTERM    fast indexed/flatterm mixed-normalize loop
+   THVM_ATP_KBO_FLAT    cache-dense pre-order KBO compare
+   THVM_ATP_WMFPA       faithful Waldmeister-FPA normalize path
+   THVM_ATP_CP_INDEX    CP-generation overlap-partner unification index
+
+   Users can disable any of them by SetEnvironment["..." -> "0"]
+   before the call - the engine reads at AtpState init. *)
+Scan[
+    With[{ev = #},
+        If[ Environment[ev] === $Failed || Environment[ev] === None,
+            SetEnvironment[ev -> "1"]]] &,
+    {"THVM_ATP_FLATTERM", "THVM_ATP_KBO_FLAT",
+     "THVM_ATP_WMFPA",    "THVM_ATP_CP_INDEX"}];
+
 (* `load` is the LibraryFunctionLoad helper defined in
    THVMLink`Private` by THVMLink.wl; alias it here so bare `load[...]`
    in $atpRunProofFn / $atpRunExistFn / ... resolves to the same
@@ -936,19 +958,25 @@ atpPrecedenceArray[order_List, enc_] := Block[{
 ];
 atpPrecedenceArray["SkolemHighest", enc_] := Block[{
     sym = enc["State"]["sym"], maxLab = enc["MaxLab"], skNames, arr,
-    nNonSk
+    nNonSk, skRankOf
 },
+    (* Skolem constants get strict order above every operator, matching
+       Waldmeister's `p > q > r > nand` ORDERING block: first-occurring
+       skolem name (k of them) ranks highest, second next, etc.  Equal-
+       ranking the skolems leaves LPO with several incomparable ground
+       constants which prevents many Sheffer-style orientation choices;
+       the strict order is what real WM's andassoc.pr uses. *)
     skNames = atpGroundConstNames[enc];
     arr = ConstantArray[0, maxLab + 1];
-    (* Non-skolem symbols get ranks 1..k by label order; skolem
-       constants get ranks strictly above all of them. *)
     nNonSk = Count[Keys[sym], nm_ /; ! MemberQ[skNames, nm]];
+    skRankOf = AssociationThread[skNames,
+        Range[nNonSk + Length[skNames], nNonSk + 1, -1]];
     Block[{nonSkRank = 0},
         KeyValueMap[
             Function[{nm, lab},
                 If[ lab >= 1 && lab <= maxLab,
                     arr[[lab + 1]] = If[ MemberQ[skNames, nm],
-                        nNonSk + 1,
+                        skRankOf[nm],
                         nonSkRank = nonSkRank + 1; nonSkRank]]],
             sym]];
     arr
