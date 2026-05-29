@@ -387,8 +387,9 @@ static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
                            const KboFlatNode *b, u32 pb,
                            const LpoConfig *cfg);
 
-static u8 lpo_flat_slice_eq(const KboFlatNode *a, u32 pa,
-                            const KboFlatNode *b, u32 pb) {
+static inline __attribute__((always_inline))
+u8 lpo_flat_slice_eq(const KboFlatNode *a, u32 pa,
+                     const KboFlatNode *b, u32 pb) {
   if (a[pa].sym != b[pb].sym) return 0;
   if (a[pa].sz != b[pb].sz)   return 0;
   u32 n = a[pa].sz;
@@ -404,9 +405,10 @@ static u8 lpo_flat_var_occurs(const KboFlatNode *t, u32 pos, i32 vsym) {
   return 0;
 }
 
-static u8 lpo_flat_dominates_all_args(const KboFlatNode *a, u32 pa,
-                                      const KboFlatNode *b, u32 pb,
-                                      const LpoConfig *cfg) {
+static inline __attribute__((always_inline))
+u8 lpo_flat_dominates_all_args(const KboFlatNode *a, u32 pa,
+                               const KboFlatNode *b, u32 pb,
+                               const LpoConfig *cfg) {
   // b[pb] must be a CTR; iterate its children via Ende skip.
   if (b[pb].sym < 0) return 1;
   u32 child = pb + 1u;
@@ -418,9 +420,10 @@ static u8 lpo_flat_dominates_all_args(const KboFlatNode *a, u32 pa,
   return 1;
 }
 
-static u8 lpo_flat_some_arg_dominates(const KboFlatNode *a, u32 pa,
-                                      const KboFlatNode *b, u32 pb,
-                                      const LpoConfig *cfg) {
+static inline __attribute__((always_inline))
+u8 lpo_flat_some_arg_dominates(const KboFlatNode *a, u32 pa,
+                               const KboFlatNode *b, u32 pb,
+                               const LpoConfig *cfg) {
   if (a[pa].sym < 0) return 0;
   u32 child = pa + 1u;
   u32 end   = pa + a[pa].sz;
