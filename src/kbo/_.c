@@ -476,12 +476,65 @@ static void kbo_addvars_walk(KboLin *st, Term t, int sign) {
   if (heap_stack) free(heap_stack);
 }
 
+// Iter 136 (workflow-research finding #1): WM-style single-pass walk
+// over a divergent subtree, no memo lookup.  WM's Vortest (KBO.c:254-301)
+// does one cell-by-cell preorder pass and never builds a per-subtree
+// weight cache, because in completion the same subtree cell rarely
+// recurs across compares -- the memo miss-rate is high enough that the
+// lookup itself is overhead.  This entrypoint mirrors that: walk the
+// subtree iteratively (no recursion / no memo), bumping each FVR
+// variable's balance and accumulating the symbol-weight sum into
+// phidiff in one pass.  Enable via THVM_KBO_VORTEST_LINEAR=1; default
+// off so the engine stays byte-identical to the memo path.
+static Term g_kbo_walk_stack[KBO_MEMO_STACK_CAP];
+static int g_kbo_vortest_linear_gate = -1;
+static void kbo_lin_addto_walk(KboLin *st, Term t, int sign,
+                               long long *phidiff) {
+  Term *stack = g_kbo_walk_stack;
+  u32 cap = KBO_MEMO_STACK_CAP;
+  Term *heap_stack = NULL;
+  u32 sp = 0u;
+  stack[sp++] = t;
+  while (sp > 0u) {
+    Term cur = stack[--sp];
+    u32 tg = term_tag(cur);
+    if (tg == TAG_FVR) {
+      kbo_bump(st, term_ext(cur), sign);
+      *phidiff += (long long)sign * (long long)st->cfg->var_weight;
+    } else if (tg == TAG_CTR) {
+      u32 lab = term_ext(cur);
+      *phidiff += (long long)sign *
+          (long long)(lab < st->cfg->n_labels ? st->cfg->weights[lab] : 0);
+      u64 base; u32 n = kbo_ctr_children(cur, &base);
+      if (sp + n > cap) {
+        u32 ncap = cap * 2u;
+        while (sp + n > ncap) ncap *= 2u;
+        Term *nh = (Term *)malloc((size_t)ncap * sizeof *nh);
+        for (u32 k = 0; k < sp; k++) nh[k] = stack[k];
+        if (heap_stack) free(heap_stack);
+        heap_stack = nh; stack = nh; cap = ncap;
+      }
+      for (u32 i = 0; i < n; i++) stack[sp++] = heap_read(base + i);
+    }
+    /* atoms contribute neither phidiff nor var balance under WM-style */
+  }
+  if (heap_stack) free(heap_stack);
+}
+
 // Add the whole subtree `t` to one side of the current balance scope:
 // weight*sign into *phidiff, var occurrences*sign into bal[].  A CTR
 // subtree applies its memoized weight in O(1) and its variable profile in
 // O(#distinct vars); only an overflowed profile falls back to a full walk.
 static void kbo_lin_addto(KboLin *st, Term t, int sign,
                           long long *phidiff) {
+  if (g_kbo_vortest_linear_gate < 0) {
+    const char *e = getenv("THVM_KBO_VORTEST_LINEAR");
+    g_kbo_vortest_linear_gate = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  if (g_kbo_vortest_linear_gate) {
+    kbo_lin_addto_walk(st, t, sign, phidiff);
+    return;
+  }
   switch (term_tag(t)) {
     case TAG_FVR:
       kbo_bump(st, term_ext(t), sign);
