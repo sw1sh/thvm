@@ -19,6 +19,11 @@
 // saturation loop is otherwise uninterruptible; it polls
 // thvm_atp_abort_hook, which we point at the current evaluation's
 // AbortQ for the duration of a run so a host abort returns promptly.
+#ifdef __APPLE__
+#include <pthread.h>
+#include <sys/qos.h>
+#endif
+#include <time.h>
 static WolframLibraryData g_atp_abort_libData = NULL;
 static int atp_abort_cb(void) {
   return (g_atp_abort_libData != NULL) ? g_atp_abort_libData->AbortQ() : 0;
@@ -626,7 +631,55 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
+  /* Iter 132: experimental macOS QoS bump (opt-in via
+   * THVM_ATP_QOS_BUMP=1).  Bumping the calling thread's QoS hint did
+   * not measurably change the AndAssociativity wall in this session
+   * (paclet stayed ~25s vs bench ~15s after QOS_USER_INTERACTIVE).  We
+   * keep the path opt-in so future workloads can A/B without a
+   * source edit; default OFF so the path stays byte-identical to the
+   * pre-iter shape. */
+#ifdef __APPLE__
+  static int g_do_qos = -1;
+  if (g_do_qos < 0) {
+    const char *evq = getenv("THVM_ATP_QOS_BUMP");
+    g_do_qos = (evq != NULL && evq[0] == '1') ? 1 : 0;
+  }
+  qos_class_t saved_qos = QOS_CLASS_UNSPECIFIED;
+  int saved_rel_prio = 0;
+  int qos_bumped = 0;
+  if (g_do_qos) {
+    pthread_get_qos_class_np(pthread_self(), &saved_qos, &saved_rel_prio);
+    if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0) {
+      qos_bumped = 1;
+    }
+  }
+#endif
+  /* Iter 132 phase timing -- probe per-phase wall to localize the
+   * paclet-vs-bench overhead.  Enable with THVM_ATP_PHASETIME=1. */
+  static int g_phase = -1;
+  if (g_phase < 0) {
+    const char *evp = getenv("THVM_ATP_PHASETIME");
+    g_phase = (evp != NULL && evp[0] == '1') ? 1 : 0;
+  }
+  struct timespec _tp0, _tp1;
+  if (g_phase) clock_gettime(CLOCK_MONOTONIC, &_tp0);
   AtpStatus st = thvm_atp_run(atp);
+  if (g_phase) {
+    clock_gettime(CLOCK_MONOTONIC, &_tp1);
+    double d = (_tp1.tv_sec - _tp0.tv_sec) + (_tp1.tv_nsec - _tp0.tv_nsec)/1e9;
+    fprintf(stderr, "[atp-phase] thvm_atp_run: %.3fs n_rules=%u n_trace=%u status=%d qos_bump=%d\n",
+            d, atp->n_rules, atp->n_trace, (int)st,
+#ifdef __APPLE__
+            qos_bumped);
+#else
+            0);
+#endif
+  }
+#ifdef __APPLE__
+  if (qos_bumped) {
+    pthread_set_qos_class_self_np(saved_qos, saved_rel_prio);
+  }
+#endif
   thvm_atp_abort_hook = NULL;
   g_atp_abort_libData = NULL;
   if (st == ATP_ABORTED) { thvm_atp_free(atp); return LIBRARY_FUNCTION_ERROR; }
@@ -677,7 +730,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // out, the ext state's freshly-init'd KBO state shares the persistent
   // memo with the timed-out main state and atp_compare on the first
   // axiom add can spin without polling wall_deadline.  Gate on PROVED.
-  if (st == ATP_PROVED) {
+  // Iter 132 diagnostic: temporarily skip EXT-state extraction to
+  // isolate where the ~10s paclet overhead vs the C-bench wall is
+  // spent.  Set THVM_ATP_SKIP_EXT=1 to skip; default is the historical
+  // path.  When skipping, downstream extractors fall back to the
+  // completion-chain dataset (no axiom-cited ext lemmas).
+  static int g_skip_ext = -1;
+  if (g_skip_ext < 0) {
+    const char *ev = getenv("THVM_ATP_SKIP_EXT");
+    g_skip_ext = (ev != NULL && ev[0] == '1') ? 1 : 0;
+  }
+  if (!g_skip_ext && st == ATP_PROVED) {
     ext = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
     if (ext != NULL) {
       ext->wall_deadline_us = atp->wall_deadline_us;
