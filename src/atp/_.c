@@ -3863,6 +3863,16 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
     s->ft_unorient_resume = (ur != NULL && (ur[0] == '0' && ur[1] == '\0')) ? 0u : 1u;
   }
 #endif
+  // Iter 133 (workflow plan step 3): the unorientable-side rewrite step
+  // has a discrimination-tree retrieval (atp_unorient_step_indexed) that
+  // is byte-identical-redex with the linear O(n_rules) scan but skips it
+  // when the index can prune.  Replaces a per-position O(n_rules) thvm_match
+  // sweep that dominates Sheffer/AndAssoc completion.  Default ON; set
+  // THVM_ATP_UNORIENT_INDEX=0 to opt out for A/B.
+  {
+    const char *uoi = getenv("THVM_ATP_UNORIENT_INDEX");
+    s->use_unorient_index = (uoi != NULL && uoi[0] == '0' && uoi[1] == '\0') ? 0u : 1u;
+  }
   // Opt-in Vampire Limited Resource Strategy.  OFF unless THVM_ATP_LRS is
   // set to a non-"0" value, or thvm_atp_set_use_lrs flips it on later (the
   // WL Method -> {... "LRS" -> True} surface does the latter).  Sound only

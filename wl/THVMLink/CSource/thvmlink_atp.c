@@ -22,6 +22,10 @@
 #ifdef __APPLE__
 #include <pthread.h>
 #include <sys/qos.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_act.h>
+#include <mach/thread_policy.h>
 #endif
 #include <time.h>
 static WolframLibraryData g_atp_abort_libData = NULL;
@@ -631,14 +635,49 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   g_atp_abort_libData = libData;
   thvm_atp_abort_hook = atp_abort_cb;
-  /* Iter 132: experimental macOS QoS bump (opt-in via
-   * THVM_ATP_QOS_BUMP=1).  Bumping the calling thread's QoS hint did
-   * not measurably change the AndAssociativity wall in this session
-   * (paclet stayed ~25s vs bench ~15s after QOS_USER_INTERACTIVE).  We
-   * keep the path opt-in so future workloads can A/B without a
-   * source edit; default OFF so the path stays byte-identical to the
-   * pre-iter shape. */
+  /* Iter 133 (workflow plan step 1): bypass the parent-process QoS
+   * clamp by installing THREAD_TIME_CONSTRAINT_POLICY on the calling
+   * thread for the duration of thvm_atp_run.  This is the mechanism
+   * CoreAudio uses to pin its render thread to the performance
+   * cluster on Apple Silicon; unlike pthread_set_qos_class_self_np
+   * (which is clamped by the parent's QoS hint), the realtime policy
+   * is a hard scheduler directive -- in principle.  In practice on
+   * a 25s sustained completion the (7ms/9ms) audio-style window makes
+   * the kernel THROTTLE the thread, so AndAssociativity goes from
+   * 26s Proved to 60s TimedOut with the policy installed.  Kept opt-in
+   * (THVM_ATP_PCORE_RT=1) for shorter workloads + future tuning of
+   * (period, computation, constraint); default OFF. */
 #ifdef __APPLE__
+  static int g_do_pcore_rt = -1;
+  if (g_do_pcore_rt < 0) {
+    const char *evrt = getenv("THVM_ATP_PCORE_RT");
+    g_do_pcore_rt = (evrt != NULL && evrt[0] == '1') ? 1 : 0;
+  }
+  static mach_timebase_info_data_t g_tbi = {0, 0};
+  if (g_tbi.denom == 0) mach_timebase_info(&g_tbi);
+  thread_time_constraint_policy_data_t saved_tc = {0, 0, 0, 0};
+  thread_extended_policy_data_t saved_ext = {1};
+  int rt_pinned = 0;
+  thread_port_t self_port = mach_thread_self();
+  if (g_do_pcore_rt && g_tbi.denom != 0) {
+    /* CoreAudio-style 10ms period, 7ms compute, 9ms constraint, preemptible.
+     * Reads as P-core-mandatory to the macOS scheduler. */
+    uint64_t period_abs      = ((uint64_t)10000000ULL * g_tbi.denom) / g_tbi.numer;
+    uint64_t computation_abs = ((uint64_t)7000000ULL  * g_tbi.denom) / g_tbi.numer;
+    uint64_t constraint_abs  = ((uint64_t)9000000ULL  * g_tbi.denom) / g_tbi.numer;
+    thread_time_constraint_policy_data_t tc;
+    tc.period      = (uint32_t)period_abs;
+    tc.computation = (uint32_t)computation_abs;
+    tc.constraint  = (uint32_t)constraint_abs;
+    tc.preemptible = TRUE;
+    if (thread_policy_set(self_port, THREAD_TIME_CONSTRAINT_POLICY,
+            (thread_policy_t)&tc, THREAD_TIME_CONSTRAINT_POLICY_COUNT)
+        == KERN_SUCCESS) {
+      rt_pinned = 1;
+    }
+  }
+  /* Fall back to the QoS bump only when RT didn't take.  The two
+   * paths conflict (mixing produces UNSPECIFIED scheduling). */
   static int g_do_qos = -1;
   if (g_do_qos < 0) {
     const char *evq = getenv("THVM_ATP_QOS_BUMP");
@@ -647,7 +686,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   qos_class_t saved_qos = QOS_CLASS_UNSPECIFIED;
   int saved_rel_prio = 0;
   int qos_bumped = 0;
-  if (g_do_qos) {
+  if (!rt_pinned && g_do_qos) {
     pthread_get_qos_class_np(pthread_self(), &saved_qos, &saved_rel_prio);
     if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0) {
       qos_bumped = 1;
@@ -667,18 +706,27 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   if (g_phase) {
     clock_gettime(CLOCK_MONOTONIC, &_tp1);
     double d = (_tp1.tv_sec - _tp0.tv_sec) + (_tp1.tv_nsec - _tp0.tv_nsec)/1e9;
-    fprintf(stderr, "[atp-phase] thvm_atp_run: %.3fs n_rules=%u n_trace=%u status=%d qos_bump=%d\n",
+    fprintf(stderr, "[atp-phase] thvm_atp_run: %.3fs n_rules=%u n_trace=%u status=%d rt_pin=%d qos_bump=%d\n",
             d, atp->n_rules, atp->n_trace, (int)st,
 #ifdef __APPLE__
-            qos_bumped);
+            rt_pinned, qos_bumped);
 #else
-            0);
+            0, 0);
 #endif
   }
 #ifdef __APPLE__
+  /* Restore the thread's scheduling policy before returning to the
+   * caller; otherwise the WolframKernel's normal evaluation would
+   * keep running under the RT directive. */
+  if (rt_pinned) {
+    thread_extended_policy_data_t ext = {1};  /* timeshare=TRUE */
+    thread_policy_set(self_port, THREAD_EXTENDED_POLICY,
+        (thread_policy_t)&ext, THREAD_EXTENDED_POLICY_COUNT);
+  }
   if (qos_bumped) {
     pthread_set_qos_class_self_np(saved_qos, saved_rel_prio);
   }
+  mach_port_deallocate(mach_task_self(), self_port);
 #endif
   thvm_atp_abort_hook = NULL;
   g_atp_abort_libData = NULL;
