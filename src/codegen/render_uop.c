@@ -1462,10 +1462,19 @@ static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
   u32 n_glb  = 0;
   u64 total  = 1;
   for (i32 i = (i32)n_ranges - 1; i >= 0; i--) {
-    if (!promote[i]) continue;
     Term r = ranges[i];
     if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
     u64 loc = term_val(r);
+    // Include both promote[]-marked (KAX_LOOP -> parallel grid) axes AND
+    // axes that arrived pre-stamped axis_type==5 (legacy KAX_GLOBAL: the
+    // matmul/TC templates).  Without the latter, a scalar-fallback matmul
+    // with >=2 KAX_GLOBAL output axes (every fp32 matmul -- WMMA needs
+    // fp16) had each emit `uint aN = tg;` via the legacy path below, so M
+    // and N both collapsed to one grid index and only out[0] was written.
+    // Treating them as globals here routes them through the multi-global
+    // tid/stride%mod decode, which matches the flat grid (tid 0..numel-1).
+    u32 axis_type_i = (u32)term_val(heap_read(loc + 1));
+    if (!promote[i] && axis_type_i != 5) continue;
     u32 axis_id = (u32)term_val(heap_read(loc + 0));
     u32 extent  = (u32)term_val(heap_read(loc + 2));
     if (extent == 0 || n_glb >= RMU_MAX_RANGES) continue;
