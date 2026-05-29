@@ -46,6 +46,40 @@ algorithmically (atp_rewrite_normalize, atp_ri_find_redex / DT
 descent, KBO compare inner loop).  No quick wins captured this iter
 without finer profiling.
 
+### Iter 134 sample-profile + env-flag sweep
+
+Sample-profiled the C-bench during the AndAssociativity saturation:
+
+  atp_push_cps_traced                 1153 samples
+    atp_rewrite_normalize_flatterm_mixed   938
+      atp_ft_unorient_step                 614
+        thvm_kbo                           314
+          kbo_vortest / kbo_lin_addto      ~280
+
+So the dominant cost on the unorientable side is the KBO compare
+chain (kbo_vortest -> kbo_lin_addto -> kbo_subtree_memo).  The
+unorient discrimination tree already prunes 99.94% of positions
+(0.06 candidates / query); the survivors all go through thvm_kbo.
+
+Env-flag sweep:
+
+  FLATTERM=1 + CP_INDEX=1 alone               12.2s  (best)
+  FLATTERM=1 + CP_INDEX=1 + WMFPA=1            12.1s  (current default)
+  FLATTERM=1 + CP_INDEX=1 + KBO_FLAT=1         14.6s
+  FLATTERM=0 + CP_INDEX=1 + WMFPA=1            30s    TIMEOUT
+  All four off                                 30s    TIMEOUT
+
+Tried defaulting only FLATTERM + CP_INDEX in the paclet load to drop
+WMFPA + KBO_FLAT: WolframKernel crashed mid-saturation.  Some
+invariant on the WolframKernel side wants WMFPA or KBO_FLAT to be on.
+Reverted -- the 4-flag default-on path stays the safe default.
+
+So the remaining engine gap is genuinely in thvm_kbo's tree-walk
+(kbo_vortest + kbo_subtree_memo + kbo_lin_addto).  Closing it wants
+WM-style per-symbol-balance compact var-multiset + memo invalidation
+strategy that survives splice-changed subjects -- real engine work,
+not env tuning.
+
 ## Build recipe
 
 Two edits unlock the in-tree `PowerMain.c` CLI driver (same one the
