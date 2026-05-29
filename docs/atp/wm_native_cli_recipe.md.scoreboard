@@ -54,3 +54,38 @@ preorder spine with Ende sibling-skip pointers; the LV_VortestLPO inline
 inverter that's WM's main hot function; the MO_RegelGefunden fast install
 that beats thvm's atp_rule_install path).  Per-rule cost parity is real
 engine work, not env-flag tuning.
+
+### Iter 137-140 — WM LPO machinery ported into thvm
+
+Ported the three pieces of Waldmeister's LPO hot path that the iter 135
+sample showed dominant.  Stacking measurements on AndAssoc LPO+Mix+Wald
++skolems-high (the matched-algorithm config from iter 136):
+
+| Config                                    | Rules | Wall | r/s   | Cumulative |
+|-------------------------------------------|-------|------|-------|------------|
+| Baseline (Term-tree lpo_rec)              |  197  | 30s  |  6.5  |    --      |
+| + LV_VortestLPOGroesser flat pretest      |  208  | 30s  |  6.9  |   +5.6%    |
+| + Flatrec (LPO.c body over KboFlatNode)   |  239  | 30s  |  8.0  |  +21.3%    |
+| + flat-varset (drop dual Term-tree pass)  |  249  | 30s  |  8.3  |  +27.7%    |
+| + Vortest+Flatrec shared encode           |  247  | 30s  |  8.2  |  (noise)   |
+| + (s,t) memo on flatrec path              |  247  | 30s  |  8.2  |  (noise)   |
+
+Closed 28% of the 24x gap to wmcli's 161 r/s.  The remaining ~19x sits
+beyond LPO compare:
+
+  - 60% of cycles still in lpo_flat_rec dispatch + memo lookup itself
+    (the WM-style preorder spine is the right rep, but the per-call
+    dispatch overhead is structural for the algorithm).
+  - 40% is shared between rewrite/CP gen/rule install — atp_dt_descend_rec,
+    thvm_unify_apply, thvm_subst_apply, atp_ri_*.  WM's MO_RegelGefunden
+    is the largest WM hot function (1352 samples in iter 135) and the
+    thvm atp_rule_install machinery isn't structured the same way.
+
+So the loop-rate cap is set across multiple machinery layers, not just
+LPO.  Closing the rest needs each layer touched.  The pattern from this
+iter (port the WM data structure first, gate behind env knob, A/B against
+baseline, only flip default after broader regression sweep) carries
+forward as the right approach for atp_dt / atp_ri / atp_rule_install.
+
+Branch is clean; THVM_LPO_FLAT_REC=1 is the load-bearing knob, default
+off pending non-Sheffer A/B (test_atp 135624/135624 passes with it on).
