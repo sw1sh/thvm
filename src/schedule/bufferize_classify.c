@@ -831,19 +831,27 @@ fn void bufferize_classify(Term root) {
     // (pm_generate_realize_map realizes COPY/CONTIGUOUS/STORE only;
     //  REDUCE realize emerges from ending_ranges + consumer-divergence
     //  inside run_rangeify).
-    // THVM_BUFFERIZE_SKIP_SMALL_EXPAND=1 opt-in: skip the multi-consumer
-    // bufferize seed for movement ops (EXPAND/RESHAPE/PERMUTE) whose
-    // source is small (broadcast 1-element to N).  Lets the scheduler
-    // inline the broadcast into each consumer instead of materializing
-    // once and reading N times -- saves the kernel dispatch + the
-    // materialized buf allocation.  beautiful_mnist emits 29 fires per
-    // step for several scalar-broadcast kernels (kid 74 `out[i] = in0[0]`,
-    // kid 75 `out[i] = in0[i] * (in1[0]*in2[0]*in3[0])`); inlining
-    // could collapse them.
-    int skip_small_expand = 0;
+    // A movement op (EXPAND/RESHAPE/PERMUTE/SHRINK/PAD/FLIP) is a pure
+    // VIEW: it computes nothing, only remaps indices over its source
+    // buffer.  tinygrad NEVER realizes a movement op for being multi-
+    // consumer -- it folds the swizzle into each consumer's LOAD index
+    // (remove_movement_op_after_rangeify; pm_generate_realize_map seeds
+    // only COPY/CONTIGUOUS/STORE, indexing.py:28-35).  thvm's blanket
+    // MULTI seed force-realized them, which for a broadcast EXPAND
+    // materialised the full expanded tensor (conv backward shares one
+    // out_grad-broadcast EXPAND between the weight-grad reduce -- reduces
+    // b/h/w -- and the input-grad reduce -- reduces cout; realizing it
+    // is a 1.3 GB buffer, the dominant peak-memory cost on every
+    // backend).  Default-skip the MULTI seed for movement ops so the
+    // unified consumer-divergence walk keeps them views (its matching
+    // branch inherits ranges instead of realizing on divergence); realize
+    // still emerges downstream via the consuming REDUCEs' ending_ranges.
+    // THVM_BUFFERIZE_SKIP_SMALL_EXPAND=0 reverts to the old realize-the-
+    // movement-op behaviour for bisection.
+    int skip_movement_default = 1;
     {
       char const *_ee = getenv("THVM_BUFFERIZE_SKIP_SMALL_EXPAND");
-      if (_ee != NULL && _ee[0] == '1') skip_small_expand = 1;
+      if (_ee != NULL && _ee[0] == '0') skip_movement_default = 0;
     }
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
@@ -866,13 +874,8 @@ fn void bufferize_classify(Term root) {
               || uop_is_ternary_elementwise(info->op);
         int src_has_reduce = ew
             && bufferize_elementwise_src_has_reduce(info->loc, 0);
-        // Also skip for movement ops over small sources (opt-in).
-        int skip_movement = 0;
-        if (skip_small_expand &&
-            (info->op == UOP_EXPAND || info->op == UOP_RESHAPE
-             || info->op == UOP_PERMUTE)) {
-          skip_movement = 1;
-        }
+        // Movement ops stay views (see the default-skip rationale above).
+        int skip_movement = skip_movement_default && uop_is_movement(info->op);
         if (!(ew && src_has_reduce) && !skip_movement) {
           bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
         }

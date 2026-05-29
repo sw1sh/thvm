@@ -719,6 +719,25 @@ fn void run_rangeify_unified(Term root) {
           all_all_same = 0; break;
         }
       }
+      // A pure movement op is a VIEW: it computes nothing, only remaps
+      // indices over its source buffer.  When its consumers present
+      // divergent ranges (e.g. an out_grad broadcast EXPAND feeding both
+      // the weight-grad reduce -- which reduces b/h/w -- and the
+      // input-grad reduce -- which reduces cout), tinygrad does NOT
+      // realize the movement op; each consumer recomputes the swizzle
+      // into its own LOAD index (remove_movement_op_after_rangeify,
+      // schedule/indexing.py).  thvm's per-axis realize-on-divergence
+      // below was a stand-in for the symbolic-OR-of-valids range merge
+      // (indexing.py:211-213) thvm lacks, but for a movement op the
+      // merge is unnecessary: inherit consumer 0's ranges and stay a
+      // view.  Realizing it instead materialised the full expanded
+      // tensor (conv backward: a 1.3 GB out_grad broadcast), the
+      // dominant peak-memory cost on every backend.  Realize still
+      // emerges correctly downstream via the consuming REDUCEs'
+      // ending_ranges, not the shared view.
+      if (!all_all_same && uop_is_movement(info->op)) {
+        all_all_same = 1;
+      }
       if (all_all_same) {
         // Mirror "OR of valids" path (indexing.py:211-213). Without a
         // full symbolic-bool merger we collapse to consumer 0's range
