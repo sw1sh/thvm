@@ -1,0 +1,56 @@
+## Updated AndAssociativity scoreboard (iter 136 — rule-trajectory comparison)
+
+The "thvm 12.1s vs wmcli 10s = 2s engine gap" framing in iter 133 was wrong.
+It compared thvm KBO+Gt to wmcli LPO, which find different proofs.  Honest
+per-rule throughput at the SAME algorithm:
+
+| Path                                              | Rules | Wall  | Rules/s | Notes                          |
+|---------------------------------------------------|-------|-------|---------|---------------------------------|
+| `FindEquationalProof` (Mathematica built-in)      | ~1673 | 7.4 s | ~226    | private build; LPO+Mix          |
+| `wmcli andassoc.pr` (LTO+m1)                      |  1673 | 10.4s |  161    | WM LPO, p>q>r>nand              |
+| thvm KBO + Gt + FLATTERM (current default)        |   338 | 12.8s |   26    | DIFFERENT trajectory, shorter   |
+| thvm LPO + Mix + Wald + nand-highest precedence   |   199 | 30.5s |  6.5    | TIMEOUT, matches WM algo        |
+| thvm LPO + Mix + Wald + skolems-highest (WM-prec) |   198 | 30.2s |  6.6    | TIMEOUT, matches WM precedence  |
+
+**Two distinct gaps, not one:**
+
+1. **Trajectory gap**: thvm's KBO+Gt finds a 338-rule proof (5x shorter than
+   WM's 1673).  This is a different completion, not a faster algorithm.  In
+   matched-algorithm mode (LPO+Mix+Wald) thvm can't even reach a proof.
+
+2. **Per-rule cost gap**: at matched LPO algorithm, thvm is 24x slower per
+   rule than wmcli (6.6 r/s vs 161 r/s).  Precedence direction (nand-high
+   vs skolems-high) makes no measurable difference (199 vs 198 rules at
+   30s).  The 24x is the real engine speed gap.
+
+The KBO+Gt "win" (12.8s vs WM 10s) hides this: a shortcut to a shorter
+proof masks a 24x per-rule cost gap.  When the user asks "is the engine
+slower?" the honest answer is YES, by ~24x on matched algorithm — KBO+Gt
+just happens to crack AndAssoc in fewer steps so the wall comes out close.
+
+### What this means for the algorithmic gap
+
+WM at 161 rules/s and thvm at 26 rules/s (KBO+Gt path) have similar per-
+rule cost.  thvm at 6.6 rules/s on the WM-matched LPO+Mix+Wald path is 4x
+slower than its own KBO+Gt path — thvm's LPO compare is significantly
+slower than its KBO compare, AND its Mix+Wald CP-selection is doing more
+per-iteration bookkeeping than Gt.
+
+The "atp_rewrite_normalize hot path" call chain identified in iter 134
+(atp_ft_unorient_step -> thvm_kbo, 938+614+314 samples) was profiled
+under KBO+Gt+FLATTERM.  Under LPO+Mix+Wald the hot path will be different
+(LPO vortest + Mix-weight CP scoring + MNF interreduce), and that's
+where the 24x lives.
+
+### Next step
+
+Profile thvm under LPO+Mix+Wald (not KBO+Gt) to identify the actual
+per-rule hotspot in the matched-algorithm config.  The KBO_FLAT and
+flatterm work targets the wrong hotspot — it speeds up thvm_kbo, which
+isn't on the LPO critical path.
+
+The structural next step is to port WM's per-rule machinery (TermzellenT
+preorder spine with Ende sibling-skip pointers; the LV_VortestLPO inline
+inverter that's WM's main hot function; the MO_RegelGefunden fast install
+that beats thvm's atp_rule_install path).  Per-rule cost parity is real
+engine work, not env-flag tuning.

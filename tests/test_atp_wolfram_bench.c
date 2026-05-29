@@ -275,7 +275,10 @@ int main(int argc, char **argv) {
     .var_weight = use_kbo0 ? 0u : 1u,
   };
   static u32 lpo_prec[7] = { 0u, 4u, 3u, 2u, 1u, 6u, 5u };
+  static u32 lpo_prec_wm[7] = { 0u, 1u, 4u, 3u, 2u, 6u, 5u };
+  const char *lpo_wm_env = getenv("ATP_BENCH_LPO_SKOLEMS_HIGH");
   static LpoConfig lpo = { .precedence = lpo_prec, .n_labels = 7u };
+  if (lpo_wm_env != NULL && lpo_wm_env[0] == '1') lpo.precedence = lpo_prec_wm;
 
   // cpgen mode: generate the critical pairs of the axiom with
   // itself -- the distance-1 lemmas -- in ONE CP-generation call,
