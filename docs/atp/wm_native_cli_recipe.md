@@ -6,12 +6,26 @@ linux x86-64 ELFs.  The MacOSX-ARM64 Makefile builds `libwaldmeister.a`
 
 Captured native AndAssoc wall on this hardware (iter 133):
 
-| Path                                         | Wall  |
-|----------------------------------------------|-------|
-| `FindEquationalProof` (Mathematica built-in) | 7.4 s |
-| `wmcli andassoc.pr` (built per below)        | 9.7 s |
-| thvm C-bench (env flags on, perf cores)      | 14.7s |
-| thvm paclet (env flags on, default config)   | 25.5s |
+| Path                                              | Wall  | Notes                                       |
+|---------------------------------------------------|-------|---------------------------------------------|
+| `FindEquationalProof` (Mathematica built-in)      | 7.4 s | private build; links Foundation+libc++      |
+| `wmcli andassoc.pr` (my LTO+m1-tuned build)       | 10.0s | same WM source; -O3 -flto -mcpu=apple-m1    |
+| thvm C-bench (KBO_FLAT=0 + others on)             | 12.1s | algorithm gap to native wmcli: ~2s          |
+| thvm C-bench (KBO_FLAT=1 + others on)             | 14.6s | KBO_FLAT compare net-negative on this load  |
+| thvm paclet (current stack, all flags default-on) | 25.2s | E-core scheduling +10s on top of C-bench    |
+
+**The 2.6s gap between FindEquationalProof (7.4s) and my wmcli (10.0s)
+is BUILD QUALITY, not algorithm.**  Both run the SAME Waldmeister
+source.  Wolfram's `Contents/SystemFiles/Kernel/Binaries/MacOSX-ARM64/ELProver`
+is 1.97 MB, dynamically links Foundation, libc++, CoreFoundation; mine
+is 478 KB, libSystem + mathlink only.  Wolfram's build uses a more
+aggressive compiler toolchain + global LTO (my `libwaldmeister.a`
+archives non-LTO `.o` pieces).  This is not a reproducible delta
+from the source tree alone.
+
+So the honest thvm-engine reference is **wmcli at 10.0s**, not
+FindEquationalProof's 7.4s.  The remaining algorithmic gap is C-bench
+12.1s -> wmcli 10.0s = ~2s in `atp_rewrite_normalize` + KBO compare.
 
 ## Build recipe
 
