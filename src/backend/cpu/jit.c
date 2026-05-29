@@ -184,7 +184,7 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_%016llx.c",
            (unsigned long long)key);
-  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_jit_%016llx.dylib",
+  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_jit_%016llx_O3.dylib",
            (unsigned long long)key);
 
   // Skip the compile if the .dylib is already on disk (e.g. from a
@@ -207,8 +207,14 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   fclose(f);
 
   char cmd[768];
+  // -O3 (not -O2): on the rendered conv-backward gather-reduce kernels
+  // (deeply-nested masked-index expressions) -O3's extra unrolling +
+  // scalar opts give ~1.6x over -O2 with NO float-semantics change
+  // (-O3 does NOT enable -ffast-math, so the reduction stays scalar +
+  // bit-identical).  The dylib cache filename carries an _O3 tag so a
+  // prior session's -O2 artifact is never reused after this flag change.
   snprintf(cmd, sizeof cmd,
-           "clang -O2 -fPIC -shared -o '%s' '%s' 2>/dev/null",
+           "clang -O3 -fPIC -shared -o '%s' '%s' 2>/dev/null",
            dl_path, src_path);
   if (system(cmd) != 0) return NULL;
 
@@ -326,7 +332,7 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     // its compile cache: one-shot kernels pay no compile cost;
     // training-loop kernels cross the threshold almost immediately.
     char dl_path[256];
-    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_%016llx.dylib",
+    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_%016llx_O3.dylib",
              (unsigned long long)key);
     struct stat st;
     int dl_exists = (stat(dl_path, &st) == 0);
