@@ -30,6 +30,7 @@ fn void cpu_buf_free(u32 buf_id) {
   b->preserved  = 0;
   b->freeable   = 0;
   b->skip_freelist = 0;
+  b->jit_pinned = 0;
   b->parent_buf_id = 0;
   if (parent != 0 && parent < CPU_BUFS_NEXT
       && CPU_BUFS[parent].refcount > 0) {

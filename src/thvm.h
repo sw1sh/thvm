@@ -1043,6 +1043,14 @@ typedef struct {
   // memory_plan_rewrite call and lets Python GC reclaim the previous
   // arena's BUFFER_VIEW chain.)
   u8    skip_freelist;
+  // jit_pinned: STICKY hold by an active JIT capture.  The per-realize
+  // `preserved` flag is cleared at end-of-realize (cpu_buf_clear_preserved),
+  // but a capture's recorded buffers must survive every sub-realize's
+  // pool rollback AND every later replay until the capture is dropped.
+  // jit_pin sets this flag (survives clear_preserved); the reclaim paths
+  // (freelist push, pool rollback) skip a pinned buf.  Mirror of
+  // CudaBuf.jit_pinned (backend/cuda/init.c + buf_pool.c).
+  u8    jit_pinned;
   void *handle;
   void (*on_release)(void *handle);
   // Arena views: when non-zero, this buf is an external view into

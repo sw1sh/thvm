@@ -53,6 +53,7 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
   b->refcount   = 1;
   b->owns_data  = 1;
   b->skip_freelist = 0;
+  b->jit_pinned = 0;
   b->parent_buf_id = 0;
   b->handle     = NULL;
   b->on_release = NULL;
@@ -77,6 +78,8 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
   b->nbytes     = nbytes;
   b->refcount   = 1;
   b->owns_data  = 0;
+  b->skip_freelist = 0;
+  b->jit_pinned = 0;
   b->handle     = handle;
   b->on_release = on_release;
   b->parent_buf_id = 0;

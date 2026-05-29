@@ -27,6 +27,7 @@
 fn void cpu_buf_freelist_push(u32 buf_id) {
   if (CPU_BUFS == NULL) return;   // Metal-active: no CPU bufs.
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
+  if (CPU_BUFS[buf_id].jit_pinned) return;   // held by an active JIT capture
   if (CPU_FREELIST_LEN >= CPU_FREELIST_CAP) {
     // Free-list saturated; drop the slot on the floor.  The buf's
     // memory stays alive until cpu_shutdown, so we leak storage
@@ -89,6 +90,7 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   donor->preserved  = 0;
   donor->freeable   = 0;
   donor->owns_data  = 0;
+  donor->jit_pinned = 0;
   donor->handle     = NULL;
   donor->on_release = NULL;
   if (CPU_BUFS_NEXT >= CPU_BUFS_CAP) {
@@ -109,6 +111,7 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   nb_slot->preserved  = 0;
   nb_slot->freeable   = 0;
   nb_slot->owns_data  = 1;
+  nb_slot->jit_pinned = 0;
   nb_slot->handle     = NULL;
   nb_slot->on_release = NULL;
   memset(data, 0, (size_t)nbytes);
