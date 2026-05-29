@@ -27,17 +27,6 @@ from pathlib import Path
 
 import numpy as np
 
-# Enable the dispatch-redundancy fix (commit 102242b3) by default: the
-# optimizer step's ~44 in-place ASSIGNs otherwise re-fire every shared
-# forward/grad kernel ~8x (the per-assign fire_gen bump).  Bundling the
-# assigns into one scope + the precise fire memo cuts ~8x of dispatches
-# (BS=128 warm 9057ms -> 837ms here) with loss + eval-acc byte-identical
-# to the per-tensor path.  setdefault so THVM_BUNDLE_ASSIGNS=0 /
-# THVM_PRECISE_FIRE_MEMO=0 still opt out.  Must precede the thvm import
-# (the bundle flag is read at module load).
-os.environ.setdefault("THVM_BUNDLE_ASSIGNS", "1")
-os.environ.setdefault("THVM_PRECISE_FIRE_MEMO", "1")
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from thvm import Tensor, nn                 # noqa: E402

@@ -34,8 +34,14 @@ from .thvm import K, Term, Thvm, _uop_binary
 # Process-global bridge.  All Tensors share one Thvm instance.
 _TH = Thvm()
 _TAG_TEN = K.TAG_TEN
+# Bundle ASSIGN-bearing realizes through realize_many (one fire scope) by
+# default -- with the precise fire memo (default-on in uop_kernel.c) this
+# kills the ~8x dispatch redundancy of the per-tensor optimizer step
+# (loss + eval-acc byte-identical, validated BS=8/32/128).  Opt out with
+# THVM_BUNDLE_ASSIGNS=0 for the cross-dependent-assign edge case (a
+# sibling's src reading a sibling's freshly-written dst in one bundle).
 import os as _os
-_BUNDLE_ASSIGNS = _os.environ.get('THVM_BUNDLE_ASSIGNS','')=='1'
+_BUNDLE_ASSIGNS = _os.environ.get('THVM_BUNDLE_ASSIGNS', '1') != '0'
 
 # Phase 3B: TenDesc.requires_grad is the canonical "this is a
 # parameter" flag (set via py_ten_set_requires_grad).  This dict

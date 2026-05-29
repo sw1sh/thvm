@@ -45,7 +45,8 @@ fn void kernel_fire_gen_bump(void) {
 static int precise_fire_memo_enabled(void) {
   static int known = 0, on = 0;
   if (!known) { char const *e = getenv("THVM_PRECISE_FIRE_MEMO");
-                on = (e != NULL && e[0] == '1'); known = 1; }
+                on = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');  // default ON
+                known = 1; }
   return on;
 }
 static u64 ASSIGN_SEQ = 0;
