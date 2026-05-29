@@ -205,31 +205,46 @@ static u32 ru_f32_bits(f32 v) {
 // zeros.  Repair: the reduce of a body that's constant along the
 // reduce axis equals `body * extent` for SUM (and just `body` for
 // MAX/MIN).
-static Term ru_reduce_repair_broadcast_body(Term reduce_t, Term reduce_range) {
+static Term ru_reduce_repair_broadcast_body(Term reduce_t,
+                                            Term const *reduce_ranges,
+                                            u32 n_ranges) {
   if (term_tag(reduce_t) != TAG_UOP || term_ext(reduce_t) != UOP_REDUCE) {
     return reduce_t;
   }
-  if (term_tag(reduce_range) != TAG_UOP
-      || term_ext(reduce_range) != UOP_RANGE) {
-    return reduce_t;
+  if (n_ranges == 0) return reduce_t;
+  // Repair fires only when the body is INVARIANT over EVERY reduce axis:
+  // a stride-0 broadcast source collapsed each reduce-axis RANGE to
+  // CONST(0) past ru_rewrite_subtree, so the body references none of them
+  // and the walker's r_extent==0 fallback would yield 0.  SUM then equals
+  // body * prod(extents); MAX/MIN equals body.  Handles 1 OR MORE reduce
+  // axes (a `bias.expand(...,H,W).sum((H,W))` conv-bias / broadcast grad
+  // reduces 2+ broadcast axes -- single-axis-only repair left those at 0).
+  // When the body still uses some reduce axis we bail and let the walker
+  // reduce the surviving ranges as-is (the partial-collapse case).
+  u32 n_axes = uop_reduce_n_axes(reduce_t);
+  u32 kind   = uop_reduce_kind(reduce_t);
+  Term body  = uop_reduce_src(reduce_t);
+  for (u32 a = 0; a < n_axes; a++) {
+    if (ru_subtree_uses_axis(body, uop_reduce_axis(reduce_t, a), 0)) {
+      return reduce_t;
+    }
   }
-  // Multi-axis REDUCE: only the single-axis case admits the constant-body
-  // simplification cleanly (extent-multiply lifted out).  Multi-axis paths
-  // route through ru_subtree_uses_axis per-axis; for now we bail on
-  // n_axes!=1 and let the body be reduced as-is.
-  if (uop_reduce_n_axes(reduce_t) != 1) return reduce_t;
-  u32 kind  = uop_reduce_kind(reduce_t);
-  u32 r_aid = uop_reduce_axis(reduce_t, 0);
-  Term body = uop_reduce_src(reduce_t);
-  if (ru_subtree_uses_axis(body, r_aid, 0)) return reduce_t;
-  u32 extent = uop_range_extent(reduce_range);
-  if (extent == 0) return reduce_t;
   if (kind == REDUCE_SUM) {
-    if (extent == 1) return body;
-    Term k = uop_const(DT_FP32, ru_f32_bits((f32)extent));
+    u64 prod = 1;
+    for (u32 r = 0; r < n_ranges; r++) {
+      Term rng = reduce_ranges[r];
+      if (term_tag(rng) != TAG_UOP || term_ext(rng) != UOP_RANGE) {
+        return reduce_t;
+      }
+      u32 extent = uop_range_extent(rng);
+      if (extent == 0) return reduce_t;
+      prod *= (u64)extent;
+    }
+    if (prod == 1) return body;
+    Term k = uop_const(DT_FP32, ru_f32_bits((f32)prod));
     return uop_binary(UOP_MUL, body, k);
   }
-  // MAX/MIN of a constant-in-axis body == body.
+  // MAX/MIN of a body constant over every reduce axis == body.
   return body;
 }
 
@@ -1679,15 +1694,14 @@ fn void pm_apply_rangeify(Term root) {
       u32 kind  = uop_reduce_kind(rewritten);
       Term src  = uop_reduce_src(rewritten);
       rewritten = uop_reduce_multi(kind, n_rrng, new_axes, src);
-      // Repair: if the rewritten body lost any reduce-axis RANGE leaf
-      // (e.g. a stride-0 broadcast collapsed past ru_rewrite_subtree),
-      // collapse the REDUCE to `body * extent` (SUM) or `body` (MAX).
-      // Currently only the single-axis broadcast-repair fires; multi-
-      // axis with mid-chain collapse stays as-is (the unmatched axes
-      // still bind in the walker for the surviving ranges).
-      if (n_rrng == 1) {
-        rewritten = ru_reduce_repair_broadcast_body(rewritten, RU_REDUCE_RANGES[i].ranges[0]);
-      }
+      // Repair: if the rewritten body lost ALL its reduce-axis RANGE
+      // leaves (a stride-0 broadcast collapsed them past
+      // ru_rewrite_subtree), collapse the REDUCE to `body * prod(extents)`
+      // (SUM) or `body` (MAX/MIN).  Handles 1+ reduce axes -- the
+      // multi-axis broadcast case (conv bias, broadcast grads reducing
+      // 2+ widened axes) previously fell through and computed 0.
+      rewritten = ru_reduce_repair_broadcast_body(
+          rewritten, RU_REDUCE_RANGES[i].ranges, n_rrng);
     }
     // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
     // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
