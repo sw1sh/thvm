@@ -562,6 +562,16 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
   // per call on (pa, pb, side) positions.  Opt-in via THVM_LPO_FLAT_REC;
   // falls back to the Term-tree lpo_rec on encode overflow or when disabled.
   if (flatrec_gate) {
+    // Top-level memo across calls keyed by (s, t).  When ATP turns on
+    // persistence the engine invalidates this on every GC, mirroring
+    // g_lpo_memo.  Hits return without paying the encode/recursion cost.
+    if (g_lpo_persist) {
+      u32 idx = (u32)((u64)s * 0x9E3779B97F4A7C15ull
+                    ^ (u64)t * 0xBF58476D1CE4E5B9ull) & LPO_MEMO_MASK;
+      LpoMemoEnt *e2 = &g_lpo_memo[idx];
+      if (e2->epoch == g_lpo_epoch && e2->s == s && e2->t == t)
+        return (LpoCmp)(i8)e2->cmp;
+    }
     static u32 stub_w[1] = {0u};
     KboConfig stub = { .weights = stub_w, .precedence = stub_w,
                        .n_labels = 0u, .var_weight = 0u };
@@ -610,7 +620,14 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
         for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) g_lpo_flat_memo[i].epoch = 0;
         g_lpo_flat_epoch = 1;
       }
-      return lpo_flat_rec(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+      LpoCmp rr = lpo_flat_rec(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+      if (g_lpo_persist) {
+        u32 idx2 = (u32)((u64)s * 0x9E3779B97F4A7C15ull
+                       ^ (u64)t * 0xBF58476D1CE4E5B9ull) & LPO_MEMO_MASK;
+        LpoMemoEnt *e3 = &g_lpo_memo[idx2];
+        e3->s = s; e3->t = t; e3->epoch = g_lpo_epoch; e3->cmp = (u8)rr;
+      }
+      return rr;
     }
   }
   // Term-tree fallback (encode overflow or flatrec disabled): the recursive
