@@ -536,12 +536,6 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     thvm_lpo_invalidate();
   }
   if (lpo_eq(s, t)) return LPO_EQ;
-  // Variable-set pretest (Waldmeister `LPOVortests`): a single
-  // bitset pass over both terms rules out the incomparable-var-set
-  // case before the recursive descent.  Conclusive only for the
-  // forced LPO_UN verdict; otherwise the full recursion runs.
-  LpoCmp pre;
-  if (lpo_pretest_varset(s, t, &pre)) return pre;
   // Flatterm subterm pretest (LV_VortestLPOGroesser).  Catches the two
   // common conclusive cases (b strict subterm of a, or a strict subterm of
   // b) in O(|s|+|t|) without recursion or memo; only the residual hard
@@ -552,6 +546,7 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     const char *e = getenv("THVM_LPO_VORTEST_FLAT");
     vortest_gate = (e != NULL && e[0] == '1') ? 1 : 0;
   }
+  LpoCmp pre;
   if (vortest_gate && lpo_pretest_flat_dispatch(s, t, cfg, &pre)) return pre;
   // Flatterm recursive LPO (WM LPO.c port).  Encodes both operands into
   // cache-dense KboFlatNode arrays and runs the same Dershowitz LPO body
@@ -570,6 +565,34 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     u32 na = 0u, nb = 0u;
     if (kbo_flat_encode(s, &stub, g_lpo_flat_a, &na) &&
         kbo_flat_encode(t, &stub, g_lpo_flat_b, &nb)) {
+      // Fast var-set incomparability check directly on the flat spines.
+      // Avoids the recursive lpo_var_set_acc / lpo_vars_in_range walk over
+      // Term trees that the pre-flatrec lpo_pretest_varset would do.
+      u32 vs[LPO_MAX_VAR] = {0};
+      u32 vt[LPO_MAX_VAR] = {0};
+      u8 in_range = 1u;
+      for (u32 i = 0; i < na; i++) {
+        if (g_lpo_flat_a[i].sym < 0) {
+          u32 vid = (u32)(-g_lpo_flat_a[i].sym - 1);
+          if (vid >= LPO_MAX_VAR) { in_range = 0u; break; }
+          vs[vid] = 1u;
+        }
+      }
+      if (in_range) for (u32 i = 0; i < nb; i++) {
+        if (g_lpo_flat_b[i].sym < 0) {
+          u32 vid = (u32)(-g_lpo_flat_b[i].sym - 1);
+          if (vid >= LPO_MAX_VAR) { in_range = 0u; break; }
+          vt[vid] = 1u;
+        }
+      }
+      if (in_range) {
+        u8 s_extra = 0u, t_extra = 0u;
+        for (u32 i = 0; i < LPO_MAX_VAR; i++) {
+          if (vs[i] && !vt[i]) s_extra = 1u;
+          if (vt[i] && !vs[i]) t_extra = 1u;
+        }
+        if (s_extra && t_extra) return LPO_UN;
+      }
       // Bump epoch -- positions are only meaningful for THIS encode pair.
       if (++g_lpo_flat_epoch == 0) {
         for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) g_lpo_flat_memo[i].epoch = 0;
@@ -578,6 +601,10 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
       return lpo_flat_rec(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
     }
   }
+  // Term-tree fallback (encode overflow or flatrec disabled): the recursive
+  // lpo_pretest_varset is the only remaining safety net for the UN case.
+  LpoCmp pre2;
+  if (lpo_pretest_varset(s, t, &pre2)) return pre2;
   return lpo_rec(s, t, cfg);
 }
 
