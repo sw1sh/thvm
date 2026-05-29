@@ -147,3 +147,36 @@ precedence in ~9.7s, returning `1673 Rules / 102 Equations /
 - paclet 25.5s vs C-bench 14.7s.  ~10s in WL\<->C overhead localized in
   iter 132 to macOS scheduler parking the dylib on E-cores when called
   from WolframKernel.
+
+### Iter 135: ORDERING + trajectory shape
+
+Sample-profiled native wmcli — hot functions are LPO-vortest variants:
+
+  MO_RegelGefunden               1352   (rule install)
+  LV_VortestLPOGroesser           599
+  LV_VortestLPO                   270
+  LV_VortestLPOGroesserGleich     207
+  CH_MixWeight + CF_Phi            55
+
+WM uses **LPO** (`andassoc.pr` declares `ORDERING LPO`, precedence
+`p > q > r > nand`).  thvm's C-bench uses **KBO** with the inverse-
+direction precedence by default.
+
+Tried switching the bench to LPO + WM-matching precedence + Mix
+weight + Waldmeister knobs.  Results:
+
+  thvm KBO + Gt + FLATTERM       12.1s, 338 rules  (CRACKED)
+  thvm LPO + Mix + Wald-knobs    30s TIMEOUT, 196 rules
+  thvm LPO + Gt + FLATTERM       30s TIMEOUT, 204 rules
+  wmcli LPO (native)             10.0s, 1601 rules (CRACKED)
+
+So thvm KBO finds a **5x SHORTER proof** (338 rules vs WM's 1601),
+but the per-rule cost is higher (~36ms vs WM's ~6ms).  Net wall:
+thvm 12.1s vs WM 10s = ~2s gap, all of it per-rule cost.
+
+The proof-trajectory difference means a straight LPO port wouldn't
+help -- thvm's LPO is also slower per-step than WM's, AND it doesn't
+find the 338-rule KBO shortcut.  The real lever is closing the per-
+rule cost on thvm's KBO+FLATTERM path: WM-style flatterm with cached
+`Ende` sibling-skip pointers (per the workflow research finding) so
+KBO compare's tree walk becomes linear pointer chasing.
