@@ -4694,6 +4694,12 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
   // indexed path the moment R is orientable again.
   if (lhs == s->lhs && rhs == s->rhs && n_rules == s->n_rules) {
     if (s->n_unorient == 0u) {
+      // Iter 133 step 2: keep the subject in flat form when use_flatterm
+      // is on.  flatterm_mixed runs indexed_fixpoint + (no-op) unorient
+      // step, returning the same NF as the indexed path but avoiding the
+      // per-call tree-flatten + rebuild round-trip.
+      if (s->use_flatterm)
+        return atp_rewrite_normalize_flatterm_mixed(s, t, step_cap);
       // Gated faithful WM-FPA path (flatterm + DSBaum + NormalformInner-
       // most).  Byte-identical NF to the indexed path; OFF by default.
       if (s->use_wmfpa) return atp_rewrite_normalize_wmfpa(s, t, step_cap);
