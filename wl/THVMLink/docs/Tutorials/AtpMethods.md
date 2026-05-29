@@ -51,15 +51,18 @@ TFindProof["DoubleNegation", "BooleanAxioms",
 
 `DoubleNegation` is a symmetric goal whose two sides never share a normal form, so plain completion never closes it.  `"GoalDirected"` adds the MNF bidirectional front search alongside completion; the front collision then resolves into a critical-pair-lemma proof.  `Automatic` also closes this (its tail eventually tries `"GoalDirected"`), but pinning the Method skips the upstream attempts.
 
-### A Sheffer / Wolfram single-operator goal (Waldmeister preset)
+### A Sheffer / Wolfram single-operator goal (Waldmeister-tuned config)
 
 ```wl
-TFindProof["ImpliesWolframAlternateAxioms", "WolframAxioms",
-    Method -> "Waldmeister",
-    TimeConstraint -> 30]
+TFindProof["AndAssociativity", "WolframAxioms",
+    Method -> {"Completion",
+        "Ordering"           -> "KBO",
+        "CriticalPairWeight" -> "Gt",
+        "RecordNorm"         -> False},
+    TimeConstraint -> 60]
 ```
 
-`Method -> "Waldmeister"` bundles Waldmeister's faithful default strategy for an unrecognized single-operator problem: KBO + AutoPrecedence + `SelectionRatio -> 51` + RHSInterreduce + UnfailingCP + CPSetInterreduce.  The bundled preset cracks the cross-system `WolframAxioms` / `ImpliesWolframAlternateAxioms` chain in ~140 steps.  Several Sheffer-style theorems (`AndAssociativity`, `Commutativity`, `OrAssociativity`) remain open at the bundled-preset level - real Waldmeister cracks them with `LPO + p > q > nand` (skolem constants highest) precedence, which the thvm preset does not yet front-load.
+The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) need a different config than the `"Waldmeister"` preset's defaults: `RecordNorm -> False` routes the saturator through the fast indexed-flatterm normalize path instead of recording every per-step rewrite; `KBO + Gt` matches Waldmeister's own cracking ordering for the dense single-operator signature; the four engine-internal fast paths (`THVM_ATP_FLATTERM`, `THVM_ATP_KBO_FLAT`, `THVM_ATP_WMFPA`, `THVM_ATP_CP_INDEX`) default to on when the `ATP` context loads.  With this combination, `AndAssociativity` proves in ~25s on the paclet (~15s in the C bench, ~14s under real Waldmeister); the bundled `"Waldmeister"` preset (KBO + Mix + SR 51) is slower on this specific theorem because Mix-weight CP selection leads to a different saturation trajectory.
 
 ### A cross-system many-axiom theorem (SInE premise selection)
 
