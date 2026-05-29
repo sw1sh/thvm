@@ -97,6 +97,53 @@ typedef struct {
 static MaterializedLocEntry MATERIALIZED_LOC_TABLE[MATERIALIZED_LOC_CAP];
 static u32                  MATERIALIZED_LOC_LEN = 0;
 
+// Heap-rewrite journal.  materialize_subst_cached_rec replaces a parent
+// UOP cell that points at a cached child subtree with a TAG_TEN leaf
+// (heap_set), so the same pass doesn't re-materialize the shared subtree.
+// That mutation is PERMANENT on the global (hash-consed) heap, but the
+// loc->tid cache backing it is per-realize (cleared on every realize
+// boundary -- see thvm_realize).  Across realizes the substituted tid's
+// buffer is reclaimed by the pool rollback, so a later realize that
+// re-walks the SAME hash-consed node would read a TAG_TEN leaf naming a
+// tid whose buffer is dead -- tensor_view_of then re-increfs a drained
+// CpuBuf, the producer kernel dispatches into a NULL data pointer, and
+// the consumer segfaults.  To keep the rewrite per-realize (matching the
+// cache lifetime), every substitution is journaled here and restored to
+// the original child term when the cache is cleared.  The substitution
+// only ever targets UOP-produced intermediates (params are already
+// TAG_TEN and never get rewritten), so reverting them all at the realize
+// boundary is exactly correct -- the next realize re-runs the
+// substitution against its own live cache.
+#define SUBST_JOURNAL_CAP  (1u << 16)
+typedef struct {
+  u64  cell;     // heap cell that was overwritten (loc + child index)
+  Term orig;     // original child term to restore
+} SubstJournalEntry;
+static SubstJournalEntry SUBST_JOURNAL[SUBST_JOURNAL_CAP];
+static u32               SUBST_JOURNAL_LEN = 0;
+
+// Record a heap rewrite so materialized_loc_clear can undo it.  Returns
+// 1 if journaled (caller may proceed with heap_set), 0 if the journal is
+// full (caller must NOT rewrite -- recurse instead so correctness holds
+// even without the dedup).
+static int subst_journal_record(u64 cell, Term orig) {
+  if (SUBST_JOURNAL_LEN >= SUBST_JOURNAL_CAP) return 0;
+  SUBST_JOURNAL[SUBST_JOURNAL_LEN].cell = cell;
+  SUBST_JOURNAL[SUBST_JOURNAL_LEN].orig = orig;
+  SUBST_JOURNAL_LEN++;
+  return 1;
+}
+
+static void subst_journal_restore(void) {
+  // Reverse order: a cell rewritten more than once (shouldn't happen --
+  // the visited bitmap bounds it -- but be safe) restores to its
+  // earliest original.
+  for (u32 i = SUBST_JOURNAL_LEN; i > 0; i--) {
+    heap_set(SUBST_JOURNAL[i - 1].cell, SUBST_JOURNAL[i - 1].orig);
+  }
+  SUBST_JOURNAL_LEN = 0;
+}
+
 // In-realize scope counter: thvm_realize / thvm_realize_many bracket
 // their bodies with materialized_loc_scope_{enter,leave}.  The cache
 // is consulted by thvm_materialize ONLY when depth > 0 -- tests that
@@ -119,6 +166,11 @@ static inline u32 materialized_loc_hash(u64 loc) {
 }
 
 fn void materialized_loc_clear(void) {
+  // Undo this realize's heap rewrites BEFORE wiping the cache so the
+  // hash-consed UOP graph is back to its original shape for the next
+  // realize (the substituted tids' buffers don't survive the pool
+  // rollback -- see SUBST_JOURNAL).
+  subst_journal_restore();
   for (u32 i = 0; i < MATERIALIZED_LOC_CAP; i++) {
     MATERIALIZED_LOC_TABLE[i].loc = MATERIALIZED_LOC_EMPTY;
     MATERIALIZED_LOC_TABLE[i].tid = 0;
@@ -137,6 +189,22 @@ fn u32 materialized_loc_lookup(u64 loc) {
       // Defensive: a cleared/recycled tid (TENS_NEXT shrank past it)
       // must not be returned -- caller would build a dangling TAG_TEN.
       if (tid == 0 || tid >= TENS_NEXT) return 0;
+      // This cache is NON-OWNING: it records loc -> tid but does not pin
+      // the tid's backing buffer.  A prior realize's intermediate can have
+      // its buffer reclaimed by cpu_buf_pool_rollback_with_preserve (the
+      // reference graph no longer needs it) while this stale entry lingers.
+      // The tid stays in range, so the TENS_NEXT guard above passes, but
+      // its buffer is dead (refcount 0 / unallocated).  Returning it makes
+      // the consumer view-resolve onto a drained slot: tensor_view_of
+      // re-increfs a dead CpuBuf, the producer kernel then dispatches into
+      // a NULL data pointer, and the downstream read segfaults.  Treat a
+      // dead-buffer tid as a miss so the caller re-materializes fresh
+      // (correctness intact; only the cross-realize cache hit is lost).
+      Backend *b   = TENS[tid].backend;
+      u32      bid = TENS[tid].buf_id;
+      if (bid == 0) return 0;
+      if (b != NULL && b->buf_refcount != NULL && b->buf_refcount(bid) == 0)
+        return 0;
       return tid;
     }
   }
@@ -187,7 +255,7 @@ static void materialize_subst_cached_rec(Term term, u8 *visited, u64 cap) {
     Term src = heap_read(loc + 1);
     if (term_tag(src) == TAG_UOP) {
       u32 cached_tid = materialized_loc_lookup(term_val(src));
-      if (cached_tid != 0) {
+      if (cached_tid != 0 && subst_journal_record(loc + 1, src)) {
         heap_set(loc + 1, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
       } else {
         materialize_subst_cached_rec(src, visited, cap);
@@ -204,7 +272,7 @@ static void materialize_subst_cached_rec(Term term, u8 *visited, u64 cap) {
     if (term_tag(child) != TAG_UOP) continue;
     if (term_ext(child) == UOP_KERNEL) continue;
     u32 cached_tid = materialized_loc_lookup(term_val(child));
-    if (cached_tid != 0) {
+    if (cached_tid != 0 && subst_journal_record(loc + i, child)) {
       heap_set(loc + i, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
     } else {
       materialize_subst_cached_rec(child, visited, cap);
