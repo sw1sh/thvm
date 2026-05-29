@@ -27,6 +27,25 @@ So the honest thvm-engine reference is **wmcli at 10.0s**, not
 FindEquationalProof's 7.4s.  The remaining algorithmic gap is C-bench
 12.1s -> wmcli 10.0s = ~2s in `atp_rewrite_normalize` + KBO compare.
 
+### thvm with LTO + M1 (matching wmcli's flags)
+
+Rebuilt the thvm C-bench AND paclet dylib with the same flags my LTO
+wmcli used (`-std=c11 -O3 -flto -mcpu=apple-m1`):
+
+  C-bench (KBO_FLAT=0):  12.9s  (was 12.1s)  -- noise / slightly worse
+  C-bench (KBO_FLAT=1):  15.1s  (was 14.6s)  -- noise / slightly worse
+  paclet                : 26.7s  (was 25.2s)  -- noise / slightly worse
+
+So `-O3 -flto -mcpu=apple-m1` does NOT measurably help thvm on this
+workload at the bench level.  The 2.6s built-in advantage really does
+come from Wolfram's private build chain, not from any flags I can set
+through the public Makefile.
+
+The remaining ~2s thvm-engine gap to wmcli has to be closed
+algorithmically (atp_rewrite_normalize, atp_ri_find_redex / DT
+descent, KBO compare inner loop).  No quick wins captured this iter
+without finer profiling.
+
 ## Build recipe
 
 Two edits unlock the in-tree `PowerMain.c` CLI driver (same one the
