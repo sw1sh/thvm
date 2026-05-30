@@ -33,6 +33,10 @@
 #define RU_MAX_AXES   MAX_DIM
 #define RU_MAX_ENDING (RU_MAX_NODES * 4u)
 
+// Forward decl: the THVM_FUSE_CONV_BWD gate (defined below) is read by
+// ru_apply_movement, which lexically precedes the definition.
+static int ru_fuse_conv_bwd_enabled(void);
+
 // Per-node range map. Out_rngs[i] is the per-axis index expression a
 // consumer threads into this node; in_rngs[i] is the equivalent at this
 // node's source (after movement op swizzle / REDUCE axis injection).
@@ -431,6 +435,22 @@ static int ru_apply_movement(u64 loc, u8 op,
     u32 src_ndim = src_shape.ndim;
     if (src_ndim > RU_MAX_AXES) src_ndim = RU_MAX_AXES;
     for (u32 i = 0; i < src_ndim; i++) in_dims[i] = src_shape.dims[i];
+    // THVM_FUSE_CONV_BWD: route the RESHAPE swizzle through the placeholder
+    // round-trip (indexing.py:140-143).  Substituting each consumer free
+    // RANGE for a clean single placeholder before the flat-decompose lets
+    // the divmod-recombine fire symbolically, so a consecutive split +
+    // re-split (the `_pool` unfold feeding the col2im) recombines back to
+    // its source iter instead of leaking independent 6/24 decode axes into
+    // a 10^14-iter cross-product.  Flag-OFF keeps the bare path bit-exact.
+    if (ru_fuse_conv_bwd_enabled()) {
+      if (apply_movement_op_reshape_composed(out_ndim, out_dims, src_ndim,
+                                             in_dims, out_rngs, in_rngs)) {
+        *in_ndim = src_ndim;
+        return 1;
+      }
+      *in_ndim = 0;
+      return 0;
+    }
     if (apply_movement_op_reshape(out_ndim, out_dims, src_ndim, in_dims,
                                   out_rngs, in_rngs)) {
       *in_ndim = src_ndim;
