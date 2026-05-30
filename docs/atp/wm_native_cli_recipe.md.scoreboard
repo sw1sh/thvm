@@ -103,6 +103,28 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 152 — non-LPO unify/subst skip-unchanged
+
+Attacked the non-LPO machinery for the first time.  Two general-purpose
+correctness opts:
+
+  - thvm_unify_apply: tracks whether ANY subterm rewrote during the
+    recursive descent.  If not, returns the original t pointer instead
+    of allocating a fresh term_new_ctr.  Used during CP-gen rule rename.
+  - thvm_subst_apply: same hash-cons skip pattern.  Used during
+    atp_ft_unorient_step's candidate loop (subst applied to rule RHS
+    to get `repl`).
+
+AndAssoc bench within noise (308-310 vs 308-311).  These don't shift
+the rules/30s needle on this workload (per-allocation saving is small
+relative to total runtime) but they hold true for any CP-gen workload
+that touches subst with sparse bindings.
+
+Also tried and reverted: packed (key, epoch_cmp) memo entries -- two
+32-bit fields instead of (pa, pb, epoch, cmp, side) struct.  Hoped to
+collapse the memo compare to one 64-bit read; in practice the compiler
+optimizes the original struct equally well.
+
 ### Iter 151 — Flatrec default-on
 
 Iters 137-149's stacked LPO machinery (per-level Vortest + direct
