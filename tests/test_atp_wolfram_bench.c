@@ -583,6 +583,7 @@ int main(int argc, char **argv) {
   {
     const char *mnf = getenv("THVM_ATP_MNF");
     if (mnf != NULL && *mnf == '1') thvm_atp_set_use_mnf(s, 1u);
+    else if (mnf != NULL && *mnf == '0') thvm_atp_set_use_mnf(s, 0u);
   }
 
   // Optional automatic growing CP-weight bound (Waldmeister MaxWeight).
