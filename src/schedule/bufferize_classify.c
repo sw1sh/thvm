@@ -706,6 +706,31 @@ static int bufferize_chain_has_pool_merge(Term t) {
   return 0;
 }
 
+// THVM_FUSE_CONV_BWD Part 1: true iff a (broadcast) EXPAND sits within the
+// node's immediate movement-op chain.  The `_pool` unfold that scatters into
+// the conv-backward contraction carries a RESHAPE-over-EXPAND signature (the
+// sliding-window repeat); we must NOT realize that boundary -- it has to stay
+// a strided view so the downstream reduce can index it.  Every OTHER multi-
+// consumer activation boundary (r1 = relu(conv1), its flat reshape) IS
+// realized so the backward `_pool`(r1) composes into an INDEX_E strided read
+// over the realized buffer instead of recomputing relu(conv1).  Walks up to
+// hop_cap movement hops from `info->loc`'s source, stopping at the first non-
+// movement op.
+static int bufferize_node_has_expand_in_movement_chain(u64 node_loc,
+                                                       u8 node_op,
+                                                       u32 hop_cap) {
+  if (node_op == UOP_EXPAND) return 1;
+  Term cur = term_resolve(heap_read(node_loc + 0));
+  for (u32 hops = 0; hops < hop_cap; hops++) {
+    if (term_tag(cur) != TAG_UOP) return 0;
+    u8 op = term_ext(cur);
+    if (op == UOP_EXPAND) return 1;
+    if (!uop_is_movement(op)) return 0;
+    cur = term_resolve(heap_read(term_val(cur) + 0));
+  }
+  return 0;
+}
+
 // Opt-in gate: fuse the conv-BACKWARD contraction reduce into its
 // downstream _pool-scatter reduce (the data-grad sum_cout(out_grad *
 // weight) + weight-grad), instead of force-realizing it for BLAS.  The
@@ -964,7 +989,22 @@ fn void bufferize_classify(Term root) {
             && bufferize_elementwise_src_has_reduce(info->loc, 0);
         // Movement ops stay views (see the default-skip rationale above).
         int skip_movement = skip_movement_default && uop_is_movement(info->op);
-        if (!(ew && src_has_reduce) && !skip_movement) {
+        // THVM_FUSE_CONV_BWD Part 1 (realize-at-boundary): MULTI-seed every
+        // multi-consumer ACTIVATION boundary EXCEPT the `_pool` unfold (which
+        // carries an EXPAND in its movement chain).  Realizing r1 =
+        // relu(conv1) and its flat reshape as buffers lets the backward
+        // `_pool`(r1) resolve to a strided INDEX_E read over the realized
+        // buffer (Part 2) instead of recomputing the relu(conv1) subtree --
+        // the spurious conv-spatial cross-product that hangs.  The unfold
+        // stays a view (its EXPAND broadcast would materialize the full
+        // sliding-window tensor if realized).
+        int fuse_realize_boundary = 0;
+        if (bufferize_fuse_conv_bwd_enabled()) {
+          fuse_realize_boundary =
+              !bufferize_node_has_expand_in_movement_chain(info->loc, info->op, 6);
+        }
+        if (fuse_realize_boundary
+            || (!(ew && src_has_reduce) && !skip_movement)) {
           bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
         }
       }
