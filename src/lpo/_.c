@@ -308,6 +308,11 @@ static int lpo_pretest_groesser_flat(const KboFlatNode *a, u32 na,
     return -1;
   }
 
+  // Fast-fail: b can only be a strict subterm of a if a has strictly more
+  // nodes.  na <= nb rules out the subterm direction so the general scan
+  // below would always return 0 (inconclusive).  Return 0 immediately
+  // without paying the candidate-list cost.
+  if (na <= nb) return 0;
   // General subterm scan.  Candidates track a cursor `cur` into b: each
   // candidate represents an active hypothesis that b's prefix from position
   // 1 onwards is being matched against a's preorder walk.  When cur reaches
