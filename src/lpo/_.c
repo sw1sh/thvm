@@ -433,15 +433,15 @@ LpoCmp lpo_flat_lex(const KboFlatNode *a, u32 pa,
 static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
                                    const KboFlatNode *b, u32 pb,
                                    const LpoConfig *cfg) {
-  if (lpo_flat_slice_eq(a, pa, b, pb)) return LPO_EQ;
+  if (__builtin_expect(lpo_flat_slice_eq(a, pa, b, pb), 0)) return LPO_EQ;
   u8 a_is_var = (a[pa].sym < 0);
   u8 b_is_var = (b[pb].sym < 0);
-  if (a_is_var && b_is_var) return LPO_UN;
-  if (a_is_var) {
-    if (lpo_flat_var_occurs(b, pb, a[pa].sym)) return LPO_LT;
-    return LPO_UN;
-  }
-  if (b_is_var) {
+  if (__builtin_expect(a_is_var | b_is_var, 0)) {
+    if (a_is_var && b_is_var) return LPO_UN;
+    if (a_is_var) {
+      if (lpo_flat_var_occurs(b, pb, a[pa].sym)) return LPO_LT;
+      return LPO_UN;
+    }
     if (lpo_flat_var_occurs(a, pa, b[pb].sym)) return LPO_GT;
     return LPO_UN;
   }
