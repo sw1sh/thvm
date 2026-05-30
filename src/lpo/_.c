@@ -599,10 +599,15 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     vortest_gate = (e != NULL && e[0] == '1') ? 1 : 0;
   }
   LpoCmp pre;
+  // Flatrec is default-on as of iter 151: the per-level Vortest +
+  // direct-subterm-scan + WM-AlleDiff stack delivered +60% measured
+  // throughput on AndAssoc LPO+Mix+Wald with no regressions across
+  // test_lpo (12/12) and test_atp (135624/135624).  THVM_LPO_FLAT_REC=0
+  // disables for differential or fallback debugging.
   static int flatrec_gate = -1;
   if (flatrec_gate < 0) {
     const char *e = getenv("THVM_LPO_FLAT_REC");
-    flatrec_gate = (e != NULL && e[0] == '1') ? 1 : 0;
+    flatrec_gate = (e != NULL && e[0] == '0') ? 0 : 1;
   }
   // When Flatrec is on, the Vortest pretest reuses the same flat encode.
   // When Flatrec is off, Vortest pays its own encode via the dispatch helper.
