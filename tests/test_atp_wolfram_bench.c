@@ -342,6 +342,14 @@ int main(int argc, char **argv) {
       thvm_atp_set_cp_set_interreduce(s, 1u);
     }
   }
+  // THVM_ATP_CP_SET_IR_PERIOD: override the default 16-rule period for
+  // the full-R CP-queue interreduction sweep.  Lower = more frequent.
+  {
+    const char *pr = getenv("THVM_ATP_CP_SET_IR_PERIOD");
+    if (pr != NULL && pr[0] != '\0') {
+      s->cp_set_ir_period = (u32)strtoul(pr, NULL, 10);
+    }
+  }
   // THVM_ATP_WALDMEISTER=1 replicates the WL Method->"Waldmeister"
   // preset's runtime knobs (SelectionRatio 51, RHSInterreduce,
   // UnfailingCP) so a profiling run follows the same trajectory the
