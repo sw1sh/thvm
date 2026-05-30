@@ -103,6 +103,34 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 162 — BWD_SUB + BWD_DEMOD isolated +31%
+
+Iter 160 had tried fwd_sub + bwd_sub + bwd_demod TOGETHER and observed
+a -7% regression on AndAssoc, dismissed the trio.  Iter 162 split them
+and found:
+
+  - FWD_SUB alone: -17% (regresses to 192 rules)
+  - BWD_SUB alone: +30% (232 -> 301 rules)
+  - BWD_DEMOD alone: noise (218 vs 217)
+  - BWD_SUB + BWD_DEMOD: +31% (232 -> 304 rules)
+  - All three: -7% (FWD_SUB pulls the trio down)
+
+Forward subsumption costs more in subsumption checks than it saves in
+rule drops on AndAssoc.  Backward subsumption pays off because fewer
+surviving rules => smaller discrimination tree => cheaper unorient
+queries every step.  Backward demodulation adds another +1% layered
+on top.
+
+Lesson: when a multi-flag combo regresses, do the per-flag isolation
+before declaring the bundle dead.  The trio's "regression" hid a
+real +31% lever inside.
+
+State: 304 rules / 30s sustained.  Cumulative honest improvement vs
+iter-136 baseline (195 rules / 30s): +56%.
+
+Also wired THVM_ATP_FWD_SUB / BWD_SUB / BWD_DEMOD as independent env
+toggles so future A/B work doesn't need to edit the preset.
+
 ### Iter 161 — exhausted preset-flag combos
 
 Tested SOS, LRS=0, CP_FIFO_TIEBREAK, AUTO_MAXW=10/20/50 -- all within
