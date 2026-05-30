@@ -374,6 +374,11 @@ int main(int argc, char **argv) {
       // gated against lazy_normalize at the push site (use_lazy_normalize
       // && !use_mnf) so the combination stays sound.
       thvm_atp_set_use_mnf(s, 1u);
+      // Auto-MaxWeight base=30 (iter 164): grows with rule depth (slope=2),
+      // bounds CP weight so heavy junk gets stashed.  +9.5% on AndAssoc,
+      // +13% on wolfram, neutral on mccune/robbins.  Default-on as part
+      // of preset.
+      thvm_atp_set_auto_max_cp_weight(s, 30u);
     }
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
