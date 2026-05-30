@@ -364,7 +364,7 @@ static u32 g_lpo_flat_epoch = 0;
 static u8 lpo_flat_encode_rec(Term t, const LpoConfig *cfg,
                               KboFlatNode *out, u32 *pos) {
   u32 here = *pos;
-  if (here >= KBO_FLAT_CAP) return 0;
+  if (__builtin_expect(here >= KBO_FLAT_CAP, 0)) return 0;
   *pos = here + 1u;
   u32 tag = term_tag(t);
   if (tag == TAG_FVR) {
@@ -373,7 +373,7 @@ static u8 lpo_flat_encode_rec(Term t, const LpoConfig *cfg,
     out[here].sz  = 1u;
     return 1;
   }
-  if (tag != TAG_CTR) return 0;
+  if (__builtin_expect(tag != TAG_CTR, 0)) return 0;
   u32 lab = term_ext(t);
   out[here].sym = (i32)lab;
   out[here].w   = (lab < cfg->n_labels) ? (i32)cfg->precedence[lab] : 0;
@@ -381,7 +381,9 @@ static u8 lpo_flat_encode_rec(Term t, const LpoConfig *cfg,
   // arity cell via term_ctr_n per call.
   u64 base = term_val(t);
   Term n_cell = heap_read(base);
-  if (term_tag(n_cell) != TAG_NUM) { out[here].sz = 1u; return 1; }
+  if (__builtin_expect(term_tag(n_cell) != TAG_NUM, 0)) {
+    out[here].sz = 1u; return 1;
+  }
   u32 n = (u32)term_val(n_cell);
   for (u32 i = 0; i < n; i++) {
     Term child = heap_read(base + 1u + (u64)i);
