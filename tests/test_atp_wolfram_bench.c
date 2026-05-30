@@ -409,9 +409,10 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_orphan_murder(s, (om[0] != '0') ? 1u : 0u);
   }
 
-  // Independent A/B toggles for WM-standard subsumption / demodulation
-  // (NOT in the WALDMEISTER preset because they regress AndAssoc but
-  // may help other workloads -- per iter-160 measurement).
+  // Independent A/B toggles for WM-standard subsumption / demodulation.
+  // BWD_SUB and BWD_DEMOD are now in the WALDMEISTER preset (iter 162)
+  // but kept here so they can be turned OFF for differential debugging;
+  // FWD_SUB is OFF by default because it regresses AndAssoc.
   {
     const char *fs = getenv("THVM_ATP_FWD_SUB");
     if (fs != NULL && fs[0] != '\0')
@@ -426,6 +427,13 @@ int main(int argc, char **argv) {
     const char *bd = getenv("THVM_ATP_BWD_DEMOD");
     if (bd != NULL && bd[0] != '\0')
       thvm_atp_set_use_bwd_demod(s, (bd[0] != '0') ? 1u : 0u);
+  }
+  // SOS (Set-of-Support) -- a CP-scoring bonus for CPs touching goal
+  // symbols.  Not WM standard (Vampire/E heuristic); kept as opt-in.
+  {
+    const char *ss = getenv("THVM_ATP_SOS");
+    if (ss != NULL && ss[0] != '\0')
+      thvm_atp_set_use_sos(s, (ss[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_GROUND_JOIN=1 / THVM_ATP_CONNECT=1: sound CP-volume
