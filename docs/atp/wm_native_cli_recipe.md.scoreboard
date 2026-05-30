@@ -103,6 +103,36 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 157 — CRITICAL fix + honest baseline
+
+Re-ran test_kbo (which I'd been skipping after most commits, only
+checking test_atp + test_lpo).  Found 17/196 failures in
+"lpo/pretest-agrees-with-full-recursion".  Traced to iter-138's
+flatterm port: an over-eager `if (a[pa].sz != b[pb].sz) return LPO_UN;`
+check before lex compare.  KboFlatNode.sz is the subtree-span node
+count, NOT arity -- two same-head terms with different child shapes
+can have different sz (e.g. f(x,y) vs f(g(x),y)).  The check silently
+returned UN when correct verdict was GT/LT.  All iters 138-156
+inherited it.
+
+**Honest impact**: AndAssoc bench drops from 315 -> 217 rules / 30s
+after the fix.  Sound baseline vs iter-136 (195 rules / 30s on
+Term-tree lpo_rec): real +10-11% throughput, NOT the previously
+reported +60%.
+
+Why ATP tests stayed green: bug only fires on equal-head,
+different-child-shape pairs that don't arise in the Sheffer test
+suite (uniform arity, tight shape constraints).  In completion, the
+wrong UN return made the engine think rules were unorientable -- the
+engine handled that gracefully (the rule went into the unorient
+queue) but the bench's rules/30s metric was inflated because
+"unorientable" rule-paths skipped some work that the orient-and-
+install path would have done.
+
+Lesson: ALWAYS run test_kbo + test_lpo + test_atp + WL paclet
+test after each LPO/KBO change.  test_atp alone is insufficient
+coverage for soundness regressions.
+
 ### Iter 156 — heap_read tightening sweep across all ATP recursive walks
 
 Applied the iter-155 lpo_flat_encode_rec pattern (direct heap_read for
