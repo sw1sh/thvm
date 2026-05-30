@@ -370,6 +370,10 @@ int main(int argc, char **argv) {
       // backward demodulation together give +31% on AndAssoc.)
       thvm_atp_set_use_bwd_subsume(s, 1u);
       thvm_atp_set_use_bwd_demod(s, 1u);
+      // MNF goal-directed front search.  +1.6% on AndAssoc (iter 163);
+      // gated against lazy_normalize at the push site (use_lazy_normalize
+      // && !use_mnf) so the combination stays sound.
+      thvm_atp_set_use_mnf(s, 1u);
     }
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
