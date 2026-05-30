@@ -103,6 +103,30 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 170 — long-wall finding: rule count alone doesn't crack
+
+Ran AndAssoc at 600s wall on current preset (default config, no env
+overrides):
+  - 30s:  423 rules
+  - 60s:  ~800 rules
+  - 120s: ~1200 rules
+  - 600s: 1735 rules
+
+WM cracks AndAssoc at 1673 rules in 10.4s.  thvm at 600s has *more*
+rules than WM needs, but hasn't cracked.
+
+This means thvm's completion trajectory derives DIFFERENT rules than
+WM's, not just slower-rate-same-rules.  Cracking requires deriving
+the specific subset that proves the goal -- rule count alone is the
+wrong metric.
+
+Also tested: AUTO_MAXW=15 (iter-163's AndAssoc-specific value) on new
+preset: 352 vs 423 baseline.  The new preset (AUTO_MAXW=30 + SEL_RATIO=
+141 + ...) absorbs the workload-specific tuning; iter-163's finding
+no longer applies.
+
+State holds at 423 rules / 30s.  +117% cumulative honest improvement.
+
 ### Iter 169 — preset feature dependency analysis
 
 Wired two more env handlers (UNFAILING, CP_FIFO) and ran the per-flag
