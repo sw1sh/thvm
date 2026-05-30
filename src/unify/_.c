@@ -197,7 +197,12 @@ static Term nv_rewrite(Term t, const NvMap *m) {
     case TAG_FVR: {
       u32 old = term_ext(t);
       for (u32 i = 0; i < m->n; i++) {
-        if (m->old_id[i] == old) return term_new_fvr(i);
+        // Identity rename optimization: if old id is already its dense
+        // position, return original t without allocating.
+        if (m->old_id[i] == old) {
+          if (i == old) return t;
+          return term_new_fvr(i);
+        }
       }
       return t;  // unreachable: nv_collect registered every id
     }
@@ -205,9 +210,13 @@ static Term nv_rewrite(Term t, const NvMap *m) {
       u32 n = term_ctr_n(t);
       if (n > REWRITE_MAX_ARITY) return t;
       Term children[REWRITE_MAX_ARITY];
+      u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
-        children[i] = nv_rewrite(term_ctr_at(t, i), m);
+        Term orig = term_ctr_at(t, i);
+        children[i] = nv_rewrite(orig, m);
+        if (children[i] != orig) changed = 1;
       }
+      if (!changed) return t;
       return term_new_ctr(term_ext(t), children, n);
     }
     default: return t;
