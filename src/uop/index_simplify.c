@@ -135,6 +135,53 @@ static int uop_term_max_value(Term t, i64 *out) {
   }
 }
 
+// Conservative lower-bound estimator (mirror of uop_term_max_value;
+// tinygrad symbolic vmin).  Returns 1 and sets *out to a value V such
+// that the term is provably >= V (RANGE leaves >= 0).  Used by
+// parse_valid / uop_given_valid to derive the [vmin, vmax] window of a
+// guarded expression.
+static int uop_term_min_value(Term t, i64 *out) {
+  if (term_tag(t) == TAG_NUM) { *out = (i64)(i32)term_val(t); return 1; }
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_RANGE: {
+      u32 ext;
+      if (!uop_range_extent_into(t, &ext)) return 0;
+      *out = 0;  // iters in [0, extent)
+      return 1;
+    }
+    case UOP_CONST: { i64 v; if (!uop_iconst_value(t, &v)) return 0; *out = v; return 1; }
+    case UOP_IADD: {
+      i64 a, b;
+      if (!uop_term_min_value(heap_read(term_val(t) + 0), &a)) return 0;
+      if (!uop_term_min_value(heap_read(term_val(t) + 1), &b)) return 0;
+      *out = a + b;
+      return 1;
+    }
+    case UOP_IMUL: {
+      // Non-negative operands only (index exprs); min = min(a)*min(b).
+      i64 amin, bmin;
+      if (!uop_term_min_value(heap_read(term_val(t) + 0), &amin)) return 0;
+      if (!uop_term_min_value(heap_read(term_val(t) + 1), &bmin)) return 0;
+      if (amin < 0 || bmin < 0) return 0;
+      *out = amin * bmin;
+      return 1;
+    }
+    case UOP_IDIV: {
+      i64 dv, a;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &dv) || dv <= 0) return 0;
+      if (!uop_term_min_value(heap_read(term_val(t) + 0), &a) || a < 0) return 0;
+      *out = a / dv;
+      return 1;
+    }
+    case UOP_IMOD:
+      *out = 0;  // x % c in [0, c) for non-negative x
+      return 1;
+    default: return 0;
+  }
+}
+
 // "Bounded" check: is `y` provably in [0, bound)?  RANGE leaves
 // have a known extent; ICONST in range qualifies; compound non-neg
 // expressions with a derivable max < bound qualify; everything else
@@ -290,12 +337,65 @@ static int uop_match_affine_numerator_deep(Term n, i64 div,
   return 0;
 }
 
+// === invalid_gate / propagate_invalid (tinygrad symbolic.py:25-65) ===
+
+// The valid-given index folds (propagate_invalid push + uop_given_valid)
+// gate behind THVM_FUSE_CONV_BWD so the shared index simplifier stays
+// bit-identical when the conv-backward fusion is off.  Cached: the env
+// is fixed for the process lifetime.
+static int uop_valid_fold_enabled(void) {
+  static int v = -1;
+  if (v < 0) { char const *e = getenv("THVM_FUSE_CONV_BWD"); v = (e && e[0] == '1') ? 1 : 0; }
+  return v;
+}
+
+// True iff `t` is the bare INVALID sentinel CONST.
+static int uop_is_invalid(Term t) {
+  return term_tag(t) == TAG_UOP && term_ext(t) == UOP_INVALID;
+}
+
+// Recognise the `cond.where(x, INVALID)` invalid-gate shape (symbolic.py:26
+// `invalid_gate = UPat.var("cond").where(UPat.var("x"), invalid_pat)`).
+// Returns 1 and fills *cond_out/*x_out on match.
+static int uop_match_invalid_gate(Term t, Term *cond_out, Term *x_out) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IWHERE) return 0;
+  Term else_v = heap_read(term_val(t) + 2);
+  if (!uop_is_invalid(else_v)) return 0;
+  *cond_out = heap_read(term_val(t) + 0);
+  *x_out    = heap_read(term_val(t) + 1);
+  return 1;
+}
+
 // === Binary integer simplifier ===
 
 fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   i64 av, bv;
   int a_const = uop_iconst_value(a, &av);
   int b_const = uop_iconst_value(b, &bv);
+
+  // propagate_invalid: push a (non-comparison) binary op past an
+  // invalid-gate so the gate stays at the top, where uop_given_valid
+  // can fold the body against its own condition.  Mirrors
+  // tinygrad/uop/symbolic.py:55-65:
+  //   (op, src=(cond.where(x,INV), y)) -> cond.where(x op y, INV)
+  //   (op, src=(y, cond.where(x,INV))) -> cond.where(y op x, INV)
+  //   (op, src=(INV, *))               -> INV   (binary with invalid)
+  // Comparisons (ILT) keep INVALID as a propagated 0/1 elsewhere; we
+  // only handle the arithmetic ops the col2im decode uses.
+  if (uop_valid_fold_enabled()
+      && (opcode == UOP_IADD || opcode == UOP_ISUB || opcode == UOP_IMUL
+          || opcode == UOP_IDIV || opcode == UOP_IMOD || opcode == UOP_IAND)) {
+    if (uop_is_invalid(a) || uop_is_invalid(b)) return uop_invalid();
+    Term gc, gx;
+    if (uop_match_invalid_gate(a, &gc, &gx)) {
+      Term inner = uop_int_binary(opcode, gx, b);
+      return uop_iwhere(gc, inner, uop_invalid());
+    }
+    if (uop_match_invalid_gate(b, &gc, &gx)) {
+      Term inner = uop_int_binary(opcode, a, gx);
+      return uop_iwhere(gc, inner, uop_invalid());
+    }
+  }
 
   // Constant-fold: both operands ICONST.
   if (a_const && b_const) {
@@ -659,6 +759,180 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   return 0;
 }
 
+// === uop_given_valid (tinygrad symbolic.py:303-353) ===
+
+// Mint a throwaway RANGE leaf with a reserved high axis_id (won't
+// collide with real kernel axes, which are densely numbered from 0) and
+// a constrained extent.  uop_given_valid substitutes a guarded
+// expression with such a fake so the div/mod folds see the TIGHTER
+// [0, extent) bound from the valid clause, then substitutes the fake
+// back -- it never escapes into a kernel body.  Mirrors tinygrad's
+// `UOp.variable(f"fake{i}", v0, v1)` in uop_given_valid.
+#define UOP_VALID_FAKE_AXIS_BASE 0x70000000u
+static Term uop_make_fake_range(u32 extent) {
+  static u32 ctr = 0;
+  if (extent == 0) return 0;
+  return uop_range(UOP_VALID_FAKE_AXIS_BASE + (ctr++ & 0xFFFF), KAX_LOOP, extent);
+}
+
+
+// Rebuild `t`, replacing every structural occurrence of `from` with
+// `to`, routing through the simplifying constructors (uop_int_binary /
+// uop_iwhere) so the substituted tree is re-simplified bottom-up.  This
+// is the `substitute` half of tinygrad's uop_given_valid: it lets a
+// bounded fake-variable propagate the div/mod folds, then the inverse
+// substitution restores the original sub-expression.  Bounded recursion
+// over the finite index DAG.
+static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
+  if (t == from) return to;
+  if (depth > 48) return t;
+  if (term_tag(t) != TAG_UOP) return t;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
+    case UOP_IXOR: {
+      Term a = uop_index_substitute(heap_read(term_val(t) + 0), from, to, depth + 1);
+      Term b = uop_index_substitute(heap_read(term_val(t) + 1), from, to, depth + 1);
+      if (a == heap_read(term_val(t) + 0) && b == heap_read(term_val(t) + 1)) return t;
+      return uop_int_binary(op, a, b);
+    }
+    case UOP_IWHERE: {
+      Term c = uop_index_substitute(heap_read(term_val(t) + 0), from, to, depth + 1);
+      Term x = uop_index_substitute(heap_read(term_val(t) + 1), from, to, depth + 1);
+      Term e = uop_index_substitute(heap_read(term_val(t) + 2), from, to, depth + 1);
+      if (c == heap_read(term_val(t) + 0) && x == heap_read(term_val(t) + 1)
+          && e == heap_read(term_val(t) + 2)) return t;
+      return uop_iwhere(c, x, e);
+    }
+    default: return t;
+  }
+}
+
+// True iff the DAG rooted at `t` contains a UOP_RANGE leaf whose
+// axis_id equals `aid`.  Bounded recursion over the finite index DAG.
+static int uop_term_has_range_aid(Term t, u32 aid, u32 depth) {
+  if (depth > 48 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE) return (u32)term_val(heap_read(term_val(t) + 0)) == aid;
+  if (op == UOP_CONST || op == UOP_INVALID) return 0;
+  u32 n = (op == UOP_IWHERE) ? 3 : 2;
+  for (u32 i = 0; i < n; i++) {
+    if (uop_term_has_range_aid(heap_read(term_val(t) + i), aid, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// True iff `clause` and `x` share at least one RANGE leaf (same axis_id).
+// Mirrors tinygrad's `any(r in x.ranges for r in c.ranges)`
+// (symbolic.py:383).
+static int uop_term_shares_range_with(Term clause, Term x, u32 depth) {
+  if (depth > 48 || term_tag(clause) != TAG_UOP) return 0;
+  u32 op = term_ext(clause);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(term_val(clause) + 0));
+    return uop_term_has_range_aid(x, aid, 0);
+  }
+  if (op == UOP_CONST || op == UOP_INVALID) return 0;
+  u32 n = (op == UOP_IWHERE) ? 3 : 2;
+  for (u32 i = 0; i < n; i++) {
+    if (uop_term_shares_range_with(heap_read(term_val(clause) + i), x, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// parse_valid (symbolic.py:303-314): decompose a single valid clause
+// into (expr, is_upper, bound):
+//   X < c        -> (X, upper, c-1)        [X <= c-1]
+//   (X < c).ne(1) i.e. X >= c              [thvm has no CMPNE form; the
+//                                           PAD lower guard is ILT(s-1, X)
+//                                           = (X > s-1) = (X >= s); we
+//                                           recognise that as a lower bound]
+// Returns 1 on a recognised clause.  *is_upper: 1 => X <= bound, 0 => X >= bound.
+static int uop_parse_valid(Term v, Term *expr_out, int *is_upper, i64 *bound_out) {
+  if (term_tag(v) != TAG_UOP || term_ext(v) != UOP_ILT) return 0;
+  Term lhs = heap_read(term_val(v) + 0);
+  Term rhs = heap_read(term_val(v) + 1);
+  i64 c;
+  // X < c  ->  X <= c-1
+  if (uop_iconst_value(rhs, &c)) {
+    *expr_out = lhs; *is_upper = 1; *bound_out = c - 1;
+    return 1;
+  }
+  // c < X  ->  X >= c+1   (the PAD lower guard ILT(s-1, X))
+  if (uop_iconst_value(lhs, &c)) {
+    *expr_out = rhs; *is_upper = 0; *bound_out = c + 1;
+    return 1;
+  }
+  return 0;
+}
+
+// Split a valid condition (a left-assoc IAND tree) into its clauses.
+static u32 uop_valid_split_and(Term v, Term *out, u32 cap, u32 depth) {
+  if (depth > 32 || cap == 0) return 0;
+  if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_IAND) {
+    u32 n0 = uop_valid_split_and(heap_read(term_val(v) + 0), out, cap, depth + 1);
+    u32 n1 = uop_valid_split_and(heap_read(term_val(v) + 1), out + n0, cap - n0, depth + 1);
+    return n0 + n1;
+  }
+  out[0] = v;
+  return 1;
+}
+
+// uop_given_valid (symbolic.py:316-353): simplify `uop` assuming `valid`
+// is true.  For each parsed clause, substitute the bounded expression
+// with a fresh RANGE that has the constrained extent, re-simplify, and
+// substitute back; keep the result only if the substitution changed and
+// re-simplified the body (a strictly-smaller form).  This is what folds
+// the col2im decode: given `(X) < 125` the guarded `X//25` / `X%25`
+// simplify against the tightened [vmin, vmax] window of X.
+static Term uop_given_valid(Term valid, Term uop) {
+  Term clauses[16];
+  u32 nc = uop_valid_split_and(valid, clauses, 16, 0);
+  // Aggregate per-expression bounds: lo[i], hi[i] (NULL == unknown).
+  Term exprs[16]; i64 los[16], his[16]; int has_lo[16], has_hi[16];
+  u32 ne = 0;
+  for (u32 i = 0; i < nc; i++) {
+    Term e; int up; i64 b;
+    if (!uop_parse_valid(clauses[i], &e, &up, &b)) continue;
+    // Find or insert.
+    u32 idx = ne;
+    for (u32 j = 0; j < ne; j++) if (exprs[j] == e) { idx = j; break; }
+    if (idx == ne) {
+      if (ne >= 16) break;
+      exprs[ne] = e; has_lo[ne] = 0; has_hi[ne] = 0; ne++;
+    }
+    if (up) { his[idx] = b; has_hi[idx] = 1; }
+    else    { los[idx] = b; has_lo[idx] = 1; }
+  }
+  for (u32 i = 0; i < ne; i++) {
+    Term e = exprs[i];
+    // Skip a bare RANGE / CONST -- nothing to fold.
+    if (term_tag(e) != TAG_UOP) continue;
+    u32 eop = term_ext(e);
+    if (eop == UOP_RANGE || eop == UOP_CONST) continue;
+    i64 lo, hi;
+    if (has_lo[i]) lo = los[i]; else if (!uop_term_min_value(e, &lo)) continue;
+    if (has_hi[i]) hi = his[i]; else if (!uop_term_max_value(e, &hi)) continue;
+    if (lo < 0 || hi < lo) continue;
+    // Build a fresh bounded RANGE standing in for `e` over [0, hi-lo]
+    // shifted by lo (i.e. fake in [0, hi-lo], e == fake+lo).  We model
+    // the constrained variable as a RANGE of extent (hi-lo+1) plus lo.
+    u64 span = (u64)(hi - lo) + 1;
+    if (span == 0 || span > 0x40000000ull) continue;
+    Term fake = uop_make_fake_range((u32)span);
+    if (fake == 0) continue;
+    Term fake_expr = (lo == 0) ? fake
+                   : uop_int_binary(UOP_IADD, fake, uop_iconst(lo));
+    Term sub = uop_index_substitute(uop, e, fake_expr, 0);
+    if (sub == uop) continue;  // e not present in uop -- skip
+    // Substitute the fake back to the original expr and re-simplify.
+    Term back = uop_index_substitute(sub, fake, e, 0);
+    if (back != uop) uop = back;
+  }
+  return uop;
+}
+
 // === Ternary IWHERE simplifier ===
 
 fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
@@ -679,6 +953,43 @@ fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
     if (inner_else == else_v) {
       Term combined = uop_int_binary(UOP_IAND, cond, inner_cond);
       return uop_iwhere(combined, inner_then, else_v);
+    }
+  }
+  // drop_and_clauses (tinygrad symbolic.py:382-385): in WHERE(cond, x, INV)
+  // partition cond's AND-clauses by whether their ranges appear in x; if
+  // any clause's ranges are absent from x, drop it (the gate can't affect
+  // x's value there).  Gated behind the conv-bwd opt.
+  if (uop_is_invalid(else_v) && uop_valid_fold_enabled()
+      && term_tag(cond) == TAG_UOP && term_ext(cond) == UOP_IAND) {
+    Term clauses[16];
+    u32 nclauses = uop_valid_split_and(cond, clauses, 16, 0);
+    if (nclauses >= 2) {
+      Term kept = 0;
+      int dropped = 0;
+      for (u32 i = 0; i < nclauses; i++) {
+        if (uop_term_shares_range_with(clauses[i], then_v, 0)) {
+          kept = (kept == 0) ? clauses[i]
+                             : uop_int_binary(UOP_IAND, kept, clauses[i]);
+        } else {
+          dropped = 1;
+        }
+      }
+      if (dropped && kept != 0 && kept != cond) {
+        return uop_iwhere(kept, then_v, else_v);
+      }
+    }
+  }
+  // gated_given_valid (tinygrad symbolic.py:408-412): when the gate is a
+  // valid mask (`WHERE(cond, body, INVALID)`), simplify `body` against
+  // the bounds `cond` asserts.  Gated behind the conv-bwd opt so the
+  // shared index simplifier stays bit-identical with the flag OFF.
+  if (uop_is_invalid(else_v) && uop_valid_fold_enabled()
+      && term_tag(then_v) == TAG_UOP) {
+    u32 to = term_ext(then_v);
+    if (to == UOP_IDIV || to == UOP_IMOD || to == UOP_IADD
+        || to == UOP_IMUL || to == UOP_ISUB) {
+      Term folded = uop_given_valid(cond, then_v);
+      if (folded != then_v) return uop_iwhere(cond, folded, else_v);
     }
   }
   return 0;
