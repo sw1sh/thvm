@@ -385,6 +385,14 @@ int main(int argc, char **argv) {
       // +13% on wolfram, neutral on mccune/robbins.  Default-on as part
       // of preset.
       thvm_atp_set_auto_max_cp_weight(s, 30u);
+      // CP-weight = CH_MaxWeight = max(|lhs|,|rhs|) symbol count.  The
+      // engine default ATP_CP_WEIGHT_GT (ordering-directed) is a poor
+      // match for Sheffer/AndAssoc-style single-symbol theories.  CH_Max
+      // (mode=1) is Pareto-better across the WL-axiom bench: AndAssoc
+      // 421 -> 1305 rules/30s, wolfram 352 -> 997 rules/15s, mccune
+      // PROVES in 11.2s (mode=GT does NOT prove at 60s); robbins
+      // accumulates rules more slowly but neither mode cracks robbins.
+      thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
     }
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
