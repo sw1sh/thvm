@@ -706,11 +706,99 @@ static int bufferize_chain_has_pool_merge(Term t) {
   return 0;
 }
 
+// Opt-in gate: fuse the conv-BACKWARD contraction reduce into its
+// downstream _pool-scatter reduce (the data-grad sum_cout(out_grad *
+// weight) + weight-grad), instead of force-realizing it for BLAS.  The
+// backward contraction's MUL operands (out_grad, weight) do NOT carry
+// the forward `_pool` RESHAPE-over-EXPAND signature, so
+// bufferize_chain_has_pool_merge can't recognise it; we recognise it
+// structurally instead -- a SUM REDUCE whose output flows through a
+// movement chain (pad/repeat/shrink/reshape -- the scatter) into ANOTHER
+// REDUCE.  Default OFF; the materialized contraction is the dominant
+// beautiful_mnist peak-memory cost (3x39MB + a 1.31GB unfold product).
+static int bufferize_fuse_conv_bwd_enabled(void) {
+  char const *e = getenv("THVM_FUSE_CONV_BWD");
+  return (e != NULL && e[0] == '1');
+}
+
+// True iff the REDUCE at `reduce_loc`'s output feeds a downstream
+// (non-matmul) REDUCE through a chain of movement + elementwise ops,
+// every hop of which has a UNIQUE consumer, with at least one PAD or
+// SHRINK on the path.  This is the conv-backward contraction ->
+// _pool-scatter -> scatter-reduce pattern: the cout-contraction SUM
+// reduces into a [B,H,W,Cout,kH,kW] view that a pad+repeat+shrink+reshape
+// chain scatters (the overlap-add window scatter -- ALWAYS carries a
+// PAD/SHRINK) before the input-grad/weight-grad REDUCE consumes it; an
+// ADD/MUL accumulation hop may sit between the reduce and the scatter.
+// The PAD/SHRINK requirement keeps Linear's GEMM protected (its SUM
+// feeds a relu/bias ADD then a softmax REDUCE with NO scatter movement).
+// Such a reduce must NOT be matmul-protected (it would materialize the
+// 39MB contraction output) AND must skip its bufferize seed (riri) so it
+// fuses into the scatter-reduce kernel.  hop_cap bounds the walk (the
+// conv-bwd chain is ~10 hops; the old riri cap of 8 stalled on a PAD).
+static int bufferize_reduce_feeds_scatter_reduce(u64 reduce_loc, u32 hop_cap) {
+  // BFS the consumer DAG; the scatter chain may fan out at an ADD/MUL
+  // accumulation (conv1's cout-reduce feeds two consumers).  Each frontier
+  // node carries whether a PAD/SHRINK scatter has been crossed; match when
+  // ANY path reaches a non-matmul REDUCE through such a scatter.
+  u64 q_loc[128];
+  u8  q_saw[128];
+  u32 qh = 0, qt = 0;
+  u64 vis[128];
+  u32 nvis = 0;
+  {
+    u64 cons[4];
+    u32 nc = bufferize_consumers_for_loc(reduce_loc, cons, 4);
+    for (u32 c = 0; c < nc && qt < 128; c++) { q_loc[qt] = cons[c]; q_saw[qt] = 0; qt++; }
+  }
+  u32 budget = hop_cap;
+  while (qh < qt && budget-- > 0) {
+    u64 cur = q_loc[qh];
+    u8  saw = q_saw[qh];
+    qh++;
+    u8 seen = 0;
+    for (u32 v = 0; v < nvis; v++) if (vis[v] == cur) { seen = 1; break; }
+    if (seen) continue;
+    if (nvis < 128) vis[nvis++] = cur;
+    u32 cidx = bufferize_info_find(cur);
+    if (cidx == 0xFFFFFFFFu) continue;
+    u8 walk_op = BUFFERIZE_NODES[cidx].op;
+    if (walk_op == UOP_REDUCE) {
+      if (saw && !(BUFFERIZE_NODES[cidx].reasons & BUFFERIZE_REASON_MATMUL))
+        return 1;
+      continue;  // matmul or no-scatter reduce: dead end on this path
+    }
+    if (walk_op == UOP_PAD || walk_op == UOP_SHRINK) saw = 1;
+    int is_movement = (walk_op == UOP_RESHAPE || walk_op == UOP_PERMUTE
+                    || walk_op == UOP_EXPAND  || walk_op == UOP_SHRINK
+                    || walk_op == UOP_PAD     || walk_op == UOP_FLIP);
+    int is_elementwise = uop_is_unary_elementwise(walk_op)
+                      || uop_is_binary_elementwise(walk_op)
+                      || uop_is_ternary_elementwise(walk_op);
+    if (!is_movement && !is_elementwise) continue;
+    u64 next_cons[4];
+    u32 nnc = bufferize_consumers_for_loc(cur, next_cons, 4);
+    for (u32 c = 0; c < nnc && qt < 128; c++) {
+      q_loc[qt] = next_cons[c]; q_saw[qt] = saw; qt++;
+    }
+  }
+  return 0;
+}
+
 static int bufferize_uop_is_matmul(u64 reduce_loc) {
   Term mul = term_resolve(heap_read(reduce_loc + 0));
   Term bindings[UPAT_NUM_BINDINGS] = {0};
   int is_mul   = upat_match(&bufferize_upat_mul, mul, bindings);
   int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
+  // Conv BACKWARD contraction: precise decline so it fuses with the
+  // _pool-scatter instead of force-realizing the 39MB im2col.  Gated:
+  // declines ONLY a SUM-MUL reduce whose output scatters (movement chain)
+  // into another reduce -- Linear's GEMM (whose reduce feeds an
+  // elementwise/relu, not a scatter-reduce) keeps BLAS.
+  if (is_mul && distinct && bufferize_fuse_conv_bwd_enabled()
+      && bufferize_reduce_feeds_scatter_reduce(reduce_loc, 32)) {
+    return 0;
+  }
   // Conv contraction: one MUL operand is the `_pool` unfold.  Decline
   // matmul-protect on EVERY backend so it fuses as a regular reduce
   // indexing the strided unfold view -- no materialized contiguous
@@ -930,6 +1018,19 @@ fn void bufferize_classify(Term root) {
           // intermediate.  Default OFF -- the chain-guard pass below
           // already handles many cases.  Opt-in for workloads where
           // the upstream materialized intermediate is large.
+          // THVM_FUSE_CONV_BWD=1: precise seed-skip for the conv-backward
+          // contraction reduce -- its output feeds a _pool-scatter
+          // (movement+elementwise chain with a PAD/SHRINK) into another
+          // REDUCE.  Skipping the seed lets the multi-axis REDUCE
+          // renderer fuse the contraction into the scatter-reduce kernel
+          // instead of materializing the 39MB im2col.  Narrower than the
+          // generic riri walk below (which matches any reduce->movement->
+          // reduce); Linear's GEMM has no PAD/SHRINK scatter so it stays
+          // protected.
+          if (!skip_seed && bufferize_fuse_conv_bwd_enabled()
+              && bufferize_reduce_feeds_scatter_reduce(info->loc, 32)) {
+            skip_seed = 1;
+          }
           if (!skip_seed) {
             char const *_riri_e =
                 getenv("THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED");

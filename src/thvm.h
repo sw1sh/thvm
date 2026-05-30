@@ -2131,6 +2131,7 @@ fn int  rangeify_unified_has_ranges_at         (u32 node_idx);
 fn u32  rangeify_unified_out_ndim_at           (u32 node_idx);
 fn Term rangeify_unified_out_rng_at            (u32 node_idx, u32 axis);
 fn int  rangeify_unified_is_realized           (u32 node_idx);
+fn int  rangeify_unified_aid_is_fuse_bound     (u32 aid);
 fn Term rangeify_unified_subst_at              (u32 node_idx);
 // Main-heap UOP_BUFFERIZE Term at this node's realize boundary (0 if not
 // a boundary). Mirrors tinygrad's Ops.BUFFERIZE landing in the tsink at

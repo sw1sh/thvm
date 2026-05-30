@@ -77,6 +77,10 @@ typedef struct {
   u8   n;
 } RuReduceRanges;
 
+#define RU_FUSE_ALL_REDUCE_AIDS_CAP 512
+static u32 RU_FUSE_ALL_REDUCE_AIDS[RU_FUSE_ALL_REDUCE_AIDS_CAP];
+static u32 RU_FUSE_ALL_REDUCE_AIDS_N;
+
 static RuRangeMap      RU_RANGE_MAP    [RU_MAX_NODES];
 static RuRealizeEntry  RU_REALIZE_MAP  [RU_MAX_NODES];
 static RuEndingRanges  RU_ENDING_RANGES[RU_MAX_NODES];
@@ -120,6 +124,18 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_REALIZE_MAP[node_idx].realized_full
       || RU_REALIZE_MAP[node_idx].realized_partial;
+}
+
+// THVM_FUSE_CONV_BWD: is `aid` a REDUCE-range / realized-scope axis
+// anywhere in the last rangeify pass?  Used by materialize.c's
+// would-strand check to mirror the rangeify-side covered-check so a
+// hash-cons-aliased foreign axis in a fusing conv-bwd product's value
+// does not re-trigger materialize-side realization.  Empty (returns 0)
+// when the fuse flag is off.
+fn int rangeify_unified_aid_is_fuse_bound(u32 aid) {
+  for (u32 g = 0; g < RU_FUSE_ALL_REDUCE_AIDS_N; g++)
+    if (RU_FUSE_ALL_REDUCE_AIDS[g] == aid) return 1;
+  return 0;
 }
 
 // Number of reduce-ranges attached to this node.  Non-zero only for
@@ -1412,6 +1428,91 @@ static void ru_collect_free_axes_rec(Term t, RuFreeAxisSet *s, u32 depth) {
   }
 }
 
+// Opt-in (THVM_FUSE_CONV_BWD): collect the axis_ids of every REDUCE
+// range bound at a CONSUMER REDUCE scope reachable from `node_idx`
+// through a chain of movement-op consumers.  Used by the strand
+// covered-check so a free axis that this node leaks but whose proper
+// binding lives at the OUTER consumer's REDUCE counts as covered (the
+// conv-backward contraction product, op=MUL ndim=7: its reduce axes are
+// bound by the downstream _pool-scatter REDUCE, NOT at this movement-op
+// level).  Without this the product is force-realized -> the 1.31GB
+// unfold materializes.  Walk is hop-capped and unique-consumer per hop
+// (multi-consumer fan-out means the binding is genuinely ambiguous, so
+// we stop and let the strand check realize).
+static int ru_fuse_conv_bwd_enabled(void) {
+  char const *e = getenv("THVM_FUSE_CONV_BWD");
+  return (e != NULL && e[0] == '1');
+}
+
+static void ru_collect_reduce_aids_into(u32 ci, u32 *out_aids, u8 *n_out, u8 cap) {
+  for (u8 k = 0; k < RU_REDUCE_RANGES[ci].n; k++) {
+    u32 aid = uop_range_axis_id(RU_REDUCE_RANGES[ci].ranges[k]);
+    u8 dup = 0;
+    for (u8 j = 0; j < *n_out; j++) if (out_aids[j] == aid) { dup = 1; break; }
+    if (!dup && *n_out < cap) out_aids[(*n_out)++] = aid;
+  }
+}
+
+#define RU_CONSRED_BFS_CAP 256
+#define RU_CONSRED_AIDS_CAP 64
+// BFS the consumer DAG from `node_idx` through movement + elementwise
+// consumers, collecting the reduce-range aids of every REDUCE reached.
+// The conv-backward contraction product fans out into MULTIPLE
+// _pool-scatter chains (data-grad reduces cout, weight-grad reduces
+// b/h/w), each scattering through pad/repeat/shrink/reshape (and an
+// ADD/MUL accumulation hop) before a distinct REDUCE; the product's
+// leaked window axes are bound at those scatter REDUCEs.  A FUSED
+// (non-realized) consumer reduce is walked PAST -- riri folds it into
+// its own consumer, so the combined kernel binds both scopes' axes.  A
+// realized reduce is a hard boundary.  We must visit them all (a
+// unique-consumer walk only sees one scope and leaves the others
+// genuinely stranded).
+static void ru_collect_consumer_reduce_aids(u32 node_idx, u32 *out_aids,
+                                            u8 *n_out, u8 cap, u32 hop_cap) {
+  u32 queue[RU_CONSRED_BFS_CAP];
+  u32 qhead = 0, qtail = 0;
+  u32 visited[RU_CONSRED_BFS_CAP];
+  u32 n_visited = 0;
+  queue[qtail++] = node_idx;
+  u32 budget = hop_cap;
+  while (qhead < qtail && budget-- > 0) {
+    u32 cur = queue[qhead++];
+    u32 cidxs[RU_MAX_CONSUMERS];
+    u32 nc = ru_consumers_for_node(cur, cidxs, RU_MAX_CONSUMERS);
+    for (u32 c = 0; c < nc; c++) {
+      u32 ci = cidxs[c];
+      u8 seen = 0;
+      for (u32 v = 0; v < n_visited; v++) if (visited[v] == ci) { seen = 1; break; }
+      if (seen) continue;
+      if (n_visited < RU_CONSRED_BFS_CAP) visited[n_visited++] = ci;
+      u8 cop = BUFFERIZE_NODES[ci].op;
+      if (RU_REDUCE_RANGES[ci].n > 0) {
+        // Reached a REDUCE -- record its axes.  If it is itself FUSED
+        // (not realized -- e.g. a seed-skipped conv-bwd contraction that
+        // riri folds into ITS consumer scatter-reduce), keep walking past
+        // it: the combined fused kernel binds BOTH this reduce's axes and
+        // the downstream scatter-reduce's window axes, so the producer's
+        // leaked window axes are covered by that outer scope.  A REALIZED
+        // reduce is a hard boundary (its body is its own scope) -- stop.
+        ru_collect_reduce_aids_into(ci, out_aids, n_out, cap);
+        int red_realized = RU_REALIZE_MAP[ci].realized_full
+                        || RU_REALIZE_MAP[ci].realized_partial;
+        if (!red_realized && qtail < RU_CONSRED_BFS_CAP) queue[qtail++] = ci;
+        continue;
+      }
+      int is_movement = (cop == UOP_RESHAPE || cop == UOP_PERMUTE
+                      || cop == UOP_EXPAND  || cop == UOP_SHRINK
+                      || cop == UOP_PAD     || cop == UOP_FLIP);
+      // Also traverse elementwise accumulation hops (the conv-bwd scatter
+      // chain crosses an ADD/MUL/WHERE between reduces).
+      int is_ew = uop_is_unary_elementwise(cop)
+               || uop_is_binary_elementwise(cop)
+               || uop_is_ternary_elementwise(cop);
+      if ((is_movement || is_ew) && qtail < RU_CONSRED_BFS_CAP) queue[qtail++] = ci;
+    }
+  }
+}
+
 // Walk a spliced subtree and rebuild it with each UOP_RANGE leaf whose
 // axis_id matches m->from_aid[k] replaced by m->to_term[k].  Mirrors
 // tinygrad's variable-substitution sweep used inside
@@ -1646,6 +1747,52 @@ fn void pm_apply_rangeify(Term root) {
   // indexing.py:78) instead of re-decomposing the flat addr.
   RU_INDEX_AXIS_N = 0;
 
+  // Opt-in (THVM_FUSE_CONV_BWD): collect the axis_ids of every REDUCE
+  // range in the graph.  When the conv-backward contraction fuses, a
+  // product's strided-unfold INDEX_E addr can carry hash-cons-shared
+  // RANGE leaves whose binding lives at a REDUCE scope NOT reachable
+  // through this node's consumer DAG (a different layer's backward; the
+  // addr expression hash-conses to the same Term).  Those leaves index
+  // CORRECTLY when the product splices into the contraction reduce
+  // (verified grad-exact), so they must NOT trip the strand check.  A
+  // genuine producer-internal strand (a stripped partial-realize
+  // closed_range) is NOT a reduce-range axis, so it still strands.
+  RU_FUSE_ALL_REDUCE_AIDS_N = 0;
+  if (ru_fuse_conv_bwd_enabled()) {
+    for (u32 n = 0; n < BUFFERIZE_NODES_LEN; n++) {
+      // Every REDUCE range axis in the graph...
+      for (u8 k = 0; k < RU_REDUCE_RANGES[n].n; k++) {
+        u32 aid = uop_range_axis_id(RU_REDUCE_RANGES[n].ranges[k]);
+        u8 dup = 0;
+        for (u32 j = 0; j < RU_FUSE_ALL_REDUCE_AIDS_N; j++)
+          if (RU_FUSE_ALL_REDUCE_AIDS[j] == aid) { dup = 1; break; }
+        if (!dup && RU_FUSE_ALL_REDUCE_AIDS_N < RU_FUSE_ALL_REDUCE_AIDS_CAP)
+          RU_FUSE_ALL_REDUCE_AIDS[RU_FUSE_ALL_REDUCE_AIDS_N++] = aid;
+      }
+      // ...plus the LOOP axes owned by a REALIZED scope.  A realized
+      // node's out_rngs are closed into its own BUFFERIZE; any of those
+      // leaves that hash-cons-aliases into a fusing product's addr is
+      // bound at the realized scope (the consumer substitutes it on
+      // splice), so it must not trip the strand check either.
+      int rn_realized = RU_REALIZE_MAP[n].realized_full
+                     || RU_REALIZE_MAP[n].realized_partial;
+      if (rn_realized && RU_RANGE_MAP[n].has_ranges) {
+        for (u8 a = 0; a < RU_RANGE_MAP[n].out_ndim; a++) {
+          u32 ax[RU_MAX_AXES];
+          u32 na = ru_collect_range_axes(RU_RANGE_MAP[n].out_rngs[a],
+                                         ax, RU_MAX_AXES, 0);
+          for (u32 z = 0; z < na; z++) {
+            u8 dup = 0;
+            for (u32 j = 0; j < RU_FUSE_ALL_REDUCE_AIDS_N; j++)
+              if (RU_FUSE_ALL_REDUCE_AIDS[j] == ax[z]) { dup = 1; break; }
+            if (!dup && RU_FUSE_ALL_REDUCE_AIDS_N < RU_FUSE_ALL_REDUCE_AIDS_CAP)
+              RU_FUSE_ALL_REDUCE_AIDS[RU_FUSE_ALL_REDUCE_AIDS_N++] = ax[z];
+          }
+        }
+      }
+    }
+  }
+
   // Walk nodes bottom-up (children-first) so each consumer sees its
   // producers' substitutes.  RU_TOPO_ORDER is consumer-first
   // (computed by ru_compute_topo_order at run_rangeify_unified entry);
@@ -1771,10 +1918,34 @@ fn void pm_apply_rangeify(Term root) {
       fs.n_bound = 0;
       fs.n_free  = 0;
       ru_collect_free_axes_rec(rewritten, &fs, 0);
+      // Opt-in: a free axis whose proper binding is a CONSUMER REDUCE
+      // (conv-backward contraction product -> _pool-scatter -> REDUCE)
+      // counts as covered.  Force-realizing here would materialize the
+      // 1.31GB unfold; deferring lets the product fuse into the
+      // scatter-reduce kernel as a strided-view read.
+      u32 cons_red_aids[RU_CONSRED_AIDS_CAP];
+      u8  n_cons_red = 0;
+      if (ru_fuse_conv_bwd_enabled() && fs.n_free > 0) {
+        ru_collect_consumer_reduce_aids(i, cons_red_aids, &n_cons_red,
+                                        RU_CONSRED_AIDS_CAP, RU_CONSRED_BFS_CAP);
+      }
       int stranded = 0;
       for (u8 fi = 0; fi < fs.n_free; fi++) {
         u32 aid = fs.free_aids[fi];
         int covered = 0;
+        for (u8 cr = 0; cr < n_cons_red && !covered; cr++) {
+          if (cons_red_aids[cr] == aid) covered = 1;
+        }
+        // Hash-cons-aliased REDUCE / realized-scope axis from a disjoint
+        // scope (a different layer's backward whose addr expression
+        // hash-conses to the same Term): covered.  These index correctly
+        // when the product splices into the contraction reduce (verified
+        // grad-exact on conv2_bwd + 2-layer); a genuine producer-internal
+        // strand is neither a reduce axis nor a realized-scope axis.
+        if (!covered && ru_fuse_conv_bwd_enabled()) {
+          for (u32 g = 0; g < RU_FUSE_ALL_REDUCE_AIDS_N && !covered; g++)
+            if (RU_FUSE_ALL_REDUCE_AIDS[g] == aid) covered = 1;
+        }
         // An axis is covered when it appears ANYWHERE inside one of the
         // producer's out_rngs expressions -- not only as a top-level plain
         // RANGE.  A rank-changing RESHAPE swizzles the consumer ranges into

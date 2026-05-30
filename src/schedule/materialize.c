@@ -2257,7 +2257,14 @@ static int stranded_range_check_value(RangeAxisSet const *iter_axes,
   u64 loc = term_val(r);
   if (op == UOP_RANGE) {
     u32 aid = (u32)term_val(heap_read(loc + 0));
-    return range_axis_has(iter_axes, aid) ? 0 : 1;
+    if (range_axis_has(iter_axes, aid)) return 0;
+    // THVM_FUSE_CONV_BWD: a hash-cons-aliased REDUCE / realized-scope axis
+    // from a disjoint scope is bound when the fusing conv-bwd product
+    // splices into its contraction reduce; mirror the rangeify-side
+    // covered-check so it is not re-flagged stranded here.  (No-op when
+    // the fuse flag is off -- the fuse-bound set is empty.)
+    if (rangeify_unified_aid_is_fuse_bound(aid)) return 0;
+    return 1;
   }
   // UOP_BUFFERIZE is opaque: its stored value subtree carries closed_ranges
   // (its own iter scope), not the consumer's.  cpu_uop_walk's INDEX_E case
@@ -2308,7 +2315,11 @@ static int bufferize_strand_check_deep(RangeAxisSet const *iter,
   u64 loc = term_val(r);
   if (op == UOP_RANGE) {
     u32 aid = (u32)term_val(heap_read(loc + 0));
-    return range_axis_has(iter, aid) ? 0 : 1;
+    if (range_axis_has(iter, aid)) return 0;
+    // THVM_FUSE_CONV_BWD: hash-cons-aliased foreign reduce/realized axis
+    // (see stranded_range_check_value) -- bound at splice, not stranded.
+    if (rangeify_unified_aid_is_fuse_bound(aid)) return 0;
+    return 1;
   }
   if (op == UOP_KERNEL || op == UOP_BUFFER) return 0;
   if (op == UOP_BUFFERIZE) {
