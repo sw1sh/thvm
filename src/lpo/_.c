@@ -626,7 +626,10 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
         for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) g_lpo_flat_memo[i].epoch = 0;
         g_lpo_flat_epoch = 1;
       }
-      LpoCmp rr = lpo_flat_rec(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+      // Skip memo for the top-level (0,0) call -- it always hits slot 0 so
+      // the memo lookup is pure overhead.  The recursive calls below this
+      // still memoize.
+      LpoCmp rr = lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
       if (g_lpo_persist) {
         u32 idx2 = (u32)((u64)s * 0x9E3779B97F4A7C15ull
                        ^ (u64)t * 0xBF58476D1CE4E5B9ull) & LPO_MEMO_MASK;
