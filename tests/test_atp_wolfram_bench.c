@@ -362,6 +362,13 @@ int main(int argc, char **argv) {
       // interreduction against the rule set.  +6% on AndAssoc post-fix
       // (iter 160); part of standard Waldmeister.
       thvm_atp_set_cp_set_interreduce(s, 1u);
+      // Backward subsumption (WM standard): scan existing rules and
+      // soft-delete any subsumed by the newly-added rule.  +30% on
+      // AndAssoc post-fix (iter 162) -- the kill churn pays off because
+      // fewer surviving rules => smaller DT => cheaper unorient queries.
+      // (Forward subsumption + backward demodulation alone regress;
+      // backward subsumption alone is the lever.)
+      thvm_atp_set_use_bwd_subsume(s, 1u);
     }
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
@@ -395,6 +402,25 @@ int main(int argc, char **argv) {
     const char *om = getenv("THVM_ATP_ORPHAN");
     if (om != NULL && om[0] != '\0')
       thvm_atp_set_use_orphan_murder(s, (om[0] != '0') ? 1u : 0u);
+  }
+
+  // Independent A/B toggles for WM-standard subsumption / demodulation
+  // (NOT in the WALDMEISTER preset because they regress AndAssoc but
+  // may help other workloads -- per iter-160 measurement).
+  {
+    const char *fs = getenv("THVM_ATP_FWD_SUB");
+    if (fs != NULL && fs[0] != '\0')
+      thvm_atp_set_use_fwd_subsume(s, (fs[0] != '0') ? 1u : 0u);
+  }
+  {
+    const char *bs = getenv("THVM_ATP_BWD_SUB");
+    if (bs != NULL && bs[0] != '\0')
+      thvm_atp_set_use_bwd_subsume(s, (bs[0] != '0') ? 1u : 0u);
+  }
+  {
+    const char *bd = getenv("THVM_ATP_BWD_DEMOD");
+    if (bd != NULL && bd[0] != '\0')
+      thvm_atp_set_use_bwd_demod(s, (bd[0] != '0') ? 1u : 0u);
   }
 
   // THVM_ATP_GROUND_JOIN=1 / THVM_ATP_CONNECT=1: sound CP-volume
