@@ -200,7 +200,15 @@ static int uop_term_strictly_below(Term y, i64 bound) {
 // Conservative non-negative estimator over UOp index expressions.
 // Returns 1 only when the value is provably >= 0 by structure.
 // Mirrors scalar/simplify.c's simplify_value_nonneg.
-static int uop_term_nonneg(Term t) {
+static int uop_term_nonneg_d(Term t, u32 depth) {
+  // Bounded recursion over the finite index DAG (mirrors the depth>48
+  // guards on uop_index_substitute / uop_term_has_range_aid in this
+  // file).  The composed conv-backward col2im index can nest deeply
+  // (and on the CUDA symbolic-codegen path the iwhere valid-fold builds
+  // very deep masked-divmod trees); without this cap the recursion
+  // overflows the stack.  A deep/pathological term is conservatively
+  // "not provably nonneg" (a missed simplification, never wrong).
+  if (depth > 64) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
   switch (op) {
@@ -213,7 +221,7 @@ static int uop_term_nonneg(Term t) {
     case UOP_IMUL: {
       Term a = heap_read(term_val(t) + 0);
       Term b = heap_read(term_val(t) + 1);
-      return uop_term_nonneg(a) && uop_term_nonneg(b);
+      return uop_term_nonneg_d(a, depth + 1) && uop_term_nonneg_d(b, depth + 1);
     }
     case UOP_IDIV:
     case UOP_IMOD: {
@@ -221,11 +229,13 @@ static int uop_term_nonneg(Term t) {
       Term b = heap_read(term_val(t) + 1);
       i64 dv;
       if (!uop_iconst_value(b, &dv) || dv <= 0) return 0;
-      return uop_term_nonneg(a);
+      return uop_term_nonneg_d(a, depth + 1);
     }
     default: return 0;
   }
 }
+
+static int uop_term_nonneg(Term t) { return uop_term_nonneg_d(t, 0); }
 
 // Recognise `(c * x) + y` shape on a numerator.  Returns 1 on match;
 // *c_out, *x_out, *y_out filled in.  *y_out may be 0 if the shape is
@@ -935,7 +945,7 @@ static Term uop_given_valid(Term valid, Term uop) {
 
 // === Ternary IWHERE simplifier ===
 
-fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
+static Term uop_simplify_iwhere_body(Term cond, Term then_v, Term else_v) {
   i64 cv;
   if (uop_iconst_value(cond, &cv)) {
     return cv != 0 ? then_v : else_v;
@@ -993,4 +1003,24 @@ fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
     }
   }
   return 0;
+}
+
+// Recursion-depth guard around the iwhere simplifier.  Several folds
+// above re-wrap via uop_iwhere -> uop_simplify_iwhere (the IWHERE-of-
+// IWHERE collapse, drop_and_clauses, and especially gated_given_valid,
+// which substitutes the gate's bounds into the body via
+// uop_index_substitute).  On the fused conv-backward col2im index the
+// CUDA symbolic-codegen path drives gated_given_valid without reaching a
+// fixpoint (each pass yields a different `folded`), so the
+// uop_iwhere<->uop_simplify_iwhere<->uop_index_substitute cycle grows
+// the stack without bound (SIGSEGV).  Bail to the raw (un-folded) IWHERE
+// once nesting is pathological -- always correct, just a missed
+// simplification; the schedule-level realize keeps the kernel feasible.
+fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
+  static _Thread_local u32 depth = 0;
+  if (depth > 96) return 0;
+  depth++;
+  Term r = uop_simplify_iwhere_body(cond, then_v, else_v);
+  depth--;
+  return r;
 }
