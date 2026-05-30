@@ -13,11 +13,14 @@
 //                                       returns on success
 //   2.  IMAGE float4 (51-62)         -- SKIPPED (thvm has no ImageDType)
 //   3.  MATVEC (65-82)               -- PORTED
-//   4.  GROUPTOP early gate (84-90)  -- PORTED (kernel_apply_opt declines
-//                                       KOP_GROUPTOP today, so the section
-//                                       is structurally faithful but no-op
-//                                       in practice; will fire when the
-//                                       DAG path adds GROUP support)
+//   4.  GROUPTOP early gate (84-90)  -- PORTED + LIVE: applies KOP_GROUPTOP
+//                                       (cooperative GROUP_REDUCE, sz=16) to
+//                                       the largest reduce axis when the
+//                                       output-loop product <= 2048.  Load-
+//                                       bearing on CUDA: 2.2x on beautiful_
+//                                       mnist (10.8ms on, 23.5ms off) -- it
+//                                       parallelizes the small-output BN /
+//                                       softmax channel reduces.
 //   5.  Mask UPCAST  (97-106)        -- SKIPPED (TODO: detect IWHERE
 //                                       mask axes from the DAG)
 //   6.  Main UPCAST loop (108-134)   -- PORTED (the load-bearing pass)
@@ -27,7 +30,8 @@
 //   10. THREAD (180-189)             -- SKIPPED (thvm has no KOP_THREAD)
 //   11. NOLOCALS env                 -- PORTED (no-op when backend declines)
 //
-// Backend gate: Metal id=2 only.  CUDA enablement is a separate session.
+// Backend gate: applies on Metal (id=2) and CUDA (id=3); the GROUPTOP +
+// UPCAST occupancy-cap passes are CUDA-live (see hand_opt_occupancy_floor).
 
 // --- env knob ------------------------------------------------------
 // Default ON.  HAND_CODED_OPTS=0 disables; NOOPT=1 (tinygrad's
