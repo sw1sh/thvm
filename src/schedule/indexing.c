@@ -176,12 +176,15 @@ static Term reshape_const_zero(void) {
 // this function -- every one is substituted back to its real range.
 #define RESHAPE_PLACEHOLDER_AXIS_BASE 0x60000000u
 
-// Collect distinct free RANGE leaves (axis_id + extent) over all the
-// out_rngs into out_aids/out_ext, bounded by cap.  Returns the count, or
-// (u32)-1 on overflow (caller declines the round-trip and falls back).
+// Collect distinct free RANGE leaves (axis_id + extent + axis_type) over
+// all the out_rngs into out_aids/out_ext/out_atype, bounded by cap.
+// Returns the count, or (u32)-1 on overflow (caller declines the round-
+// trip and falls back).  axis_type is collected so the forward
+// placeholder substitution can rebuild the exact hash-consed Term (the
+// uop_range key includes axis_type).
 static u32 reshape_collect_distinct_ranges(Term t, u32 *out_aids,
-                                           u32 *out_ext, u32 *n, u32 cap,
-                                           u32 depth) {
+                                           u32 *out_ext, u32 *out_atype,
+                                           u32 *n, u32 cap, u32 depth) {
   if (depth > 64) return *n;
   if (term_tag(t) != TAG_UOP) return *n;
   u8 op = term_ext(t);
@@ -191,8 +194,9 @@ static u32 reshape_collect_distinct_ranges(Term t, u32 *out_aids,
       if (out_aids[i] == aid) return *n;
     }
     if (*n >= cap) { *n = (u32)-1; return *n; }
-    out_aids[*n] = aid;
-    out_ext[*n]  = uop_range_extent(t);
+    out_aids[*n]  = aid;
+    out_ext[*n]   = uop_range_extent(t);
+    out_atype[*n] = uop_range_axis_type(t);
     (*n)++;
     return *n;
   }
@@ -204,7 +208,7 @@ static u32 reshape_collect_distinct_ranges(Term t, u32 *out_aids,
   u64 loc = term_val(t);
   for (u8 i = 0; i < ar; i++) {
     reshape_collect_distinct_ranges(heap_read(loc + i), out_aids, out_ext,
-                                    n, cap, depth + 1);
+                                    out_atype, n, cap, depth + 1);
     if (*n == (u32)-1) return *n;
   }
   return *n;
@@ -222,19 +226,28 @@ fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
   // Gather the distinct real RANGE leaves the consumer out_rngs reference.
   u32 real_aids[2 * MAX_DIM];
   u32 real_ext[2 * MAX_DIM];
+  u32 real_atype[2 * MAX_DIM];
   u32 n_real = 0;
   for (u32 a = 0; a < out_ndim; a++) {
     reshape_collect_distinct_ranges(out_rngs[a], real_aids, real_ext,
-                                    &n_real, 2 * MAX_DIM, 0);
+                                    real_atype, &n_real, 2 * MAX_DIM, 0);
     if (n_real == (u32)-1) return 0;  // too many leaves: decline, fall back
   }
 
   // Build a placeholder RANGE per distinct real leaf (clean single leaf,
   // same extent, disjoint axis_id) and the real->placeholder forward map.
+  // Reconstruct `real_rng[i]` with the ORIGINAL axis_type so the forward
+  // substitution matches the actual hash-consed Term in out_rngs (the
+  // uop_range hash-cons key includes axis_type -- rebuilding a KAX_REDUCE
+  // window range as KAX_LOOP would silently miss it, leaking it past the
+  // placeholder swap so the divmod-recombine can't fire and the window
+  // strands as a non-reduce loop -- the conv-bwd 2nd-step 6.8e12-iter
+  // hang).  Placeholders stay KAX_LOOP (a clean disjoint axis), and the
+  // inverse map restores the real range identity (incl. its type).
   Term real_rng[2 * MAX_DIM];
   Term placeholder[2 * MAX_DIM];
   for (u32 i = 0; i < n_real; i++) {
-    real_rng[i]    = uop_range(real_aids[i], KAX_LOOP, real_ext[i]);
+    real_rng[i]    = uop_range(real_aids[i], real_atype[i], real_ext[i]);
     placeholder[i] = uop_range(RESHAPE_PLACEHOLDER_AXIS_BASE + i, KAX_LOOP,
                                real_ext[i]);
   }

@@ -2692,6 +2692,108 @@ static char const *bypass_dbg_op_name(u8 op) {
   }
 }
 
+// Debug-only: product of the extents of every LOOP-typed RANGE leaf in
+// `t` that is NOT in `bound` (the STORE addr axes + any enclosing
+// REDUCE axes).  A stranded reduce window rendered as outer LOOP loops
+// shows up here as a huge product (the conv-bwd 24x24 window strand).
+static u64 strand_loop_product_rec(RangeAxisSet const *bound,
+                                   BufferizeScanVisited *v, Term t,
+                                   u32 depth) {
+  if (depth > 256) return 1;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 1;
+  if (bufferize_scan_seen(v, r)) return 1;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_RANGE) {
+    u32 aid   = (u32)term_val(heap_read(loc + 0));
+    u32 atype = (u32)term_val(heap_read(loc + 1));
+    u32 ext   = (u32)term_val(heap_read(loc + 2));
+    if (atype == 0 /*LOOP*/ && !range_axis_has(bound, aid) && ext > 1)
+      return (u64)ext;
+    return 1;
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 1;
+  if (op == UOP_REDUCE) {
+    RangeAxisSet inner = *bound;
+    u32 n_axes = uop_reduce_n_axes(r);
+    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(r, i));
+    BufferizeScanVisited iv;
+    iv.n = 0;
+    return strand_loop_product_rec(&inner, &iv, uop_reduce_src(r), depth + 1);
+  }
+  u64 prod = 1;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    u64 c = strand_loop_product_rec(bound, v, heap_read(loc + i), depth + 1);
+    if (c > 1 && prod > (u64)~0ull / c) return (u64)~0ull;
+    prod *= c;
+  }
+  return prod;
+}
+
+static u64 strand_loop_product(Term store_root) {
+  if (store_root == 0 || term_tag(store_root) != TAG_UOP
+      || term_ext(store_root) != UOP_STORE) return 0;
+  u64 sloc = term_val(store_root);
+  Term s_addr  = heap_read(sloc + 1);
+  Term s_value = heap_read(sloc + 2);
+  RangeAxisSet bound;
+  bound.n = 0;
+  BufferizeScanVisited av;
+  av.n = 0;
+  stranded_range_collect_addr(&bound, &av, s_addr, 0);
+  BufferizeScanVisited vv;
+  vv.n = 0;
+  return strand_loop_product_rec(&bound, &vv, s_value, 0);
+}
+
+// Debug-only: total iteration product of every DISTINCT RANGE leaf (LOOP
+// and REDUCE) in the store's value subtree, regardless of addr-binding.
+// A correct-but-infeasible reduce (the conv data-grad's 144-padded window
+// absorbed into the reduce -> ~6.8e12) surfaces here even though its
+// stranded-LOOP product is 1.  Distinct by axis_id so a leaf referenced
+// in both legs of a MUL isn't double-counted.
+static void total_iter_collect_rec(BufferizeScanVisited *seen,
+                                   u32 *aids, u32 *exts, u32 *n, u32 cap,
+                                   Term t, u32 depth) {
+  if (depth > 256 || *n >= cap) return;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return;
+  if (bufferize_scan_seen(seen, r)) return;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(loc + 0));
+    u32 ext = (u32)term_val(heap_read(loc + 2));
+    for (u32 i = 0; i < *n; i++) if (aids[i] == aid) return;
+    if (ext > 1) { aids[*n] = aid; exts[*n] = ext; (*n)++; }
+    return;
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++)
+    total_iter_collect_rec(seen, aids, exts, n, cap, heap_read(loc + i),
+                           depth + 1);
+}
+
+static u64 total_iter_product(Term store_root) {
+  if (store_root == 0 || term_tag(store_root) != TAG_UOP
+      || term_ext(store_root) != UOP_STORE) return 0;
+  u64 sloc = term_val(store_root);
+  Term s_value = heap_read(sloc + 2);
+  u32 aids[64], exts[64], n = 0;
+  BufferizeScanVisited seen;
+  seen.n = 0;
+  total_iter_collect_rec(&seen, aids, exts, &n, 64, s_value, 0);
+  u64 prod = 1;
+  for (u32 i = 0; i < n; i++) {
+    if (prod > (u64)~0ull / exts[i]) return (u64)~0ull;
+    prod *= exts[i];
+  }
+  return prod;
+}
+
 static void bypass_dbg_dump_rec(Term t, u32 indent, u32 depth) {
   if (depth > 40) {
     for (u32 i = 0; i < indent; i++) fputc(' ', stderr);
@@ -4192,6 +4294,25 @@ static Term emit_kernel_for_boundary(u32 bi) {
   if (ke->cached_lift.store_root != 0) {
     ke->cached_lift.store_root =
         uop_dag_renumber_axes(ke->cached_lift.store_root);
+  }
+
+  // Schedule-time explosion guard (debug-only): walk the finalized
+  // store_root, multiply every LOOP-typed RANGE leaf in the value
+  // subtree that is NOT in the STORE addr (i.e. a stranded loop), and
+  // report when the product blows past a threshold.  Lets us diagnose
+  // the conv-bwd window-strand WITHOUT dispatching the ~6.8e12-iter
+  // kernel that otherwise hangs.  Gated behind THVM_DUMP_STRAND_GUARD.
+  if (ke->cached_lift.store_root != 0 && getenv("THVM_DUMP_STRAND_GUARD")) {
+    u64 strand_prod = strand_loop_product(ke->cached_lift.store_root);
+    u64 total_prod  = total_iter_product(ke->cached_lift.store_root);
+    if (strand_prod >= 100ull || total_prod >= 100000000ull) {
+      fprintf(stderr,
+              "STRAND_GUARD kid=%u op=%s strand_loop_product=%llu "
+              "total_iter_product=%llu\n",
+              kid, bypass_dbg_op_name(op), (unsigned long long)strand_prod,
+              (unsigned long long)total_prod);
+      bypass_dbg_dump("strand_root", kid, ke->cached_lift.store_root);
+    }
   }
 
   // Snapshot the post-materialize / pre-runtime-opt cached_lift state

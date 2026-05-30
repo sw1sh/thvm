@@ -810,6 +810,61 @@ static int bufferize_reduce_feeds_scatter_reduce(u64 reduce_loc, u32 hop_cap) {
   return 0;
 }
 
+// THVM_FUSE_CONV_BWD: true iff the contraction REDUCE at `reduce_loc`
+// reads a now-REALIZED activation buffer through a `_pool` unfold (a
+// movement chain carrying an EXPAND -- the sliding-window repeat).  This
+// is precisely the 2nd-train-step trigger: the forward `relu(conv)`
+// activation that was FUSED on step 0 persists as a realized arena buffer
+// on step 1 (the Adam weight ASSIGN shifts the realize boundaries), so
+// the backward contraction's `_pool(activation)` operand resolves to a
+// strided INDEX_E over the realized buffer.  Reading the realized buffer
+// back through the `_pool`'s `[6,24]`-repeat col2im mints a 24*6 window
+// decode whose ranges are INDEPENDENT of the contraction's clean kh,kw --
+// a redundant cross-product that blows the fused reduce up to ~6.8e12
+// iters (the hang).  Such a contraction must REALIZE so the scatter-reduce
+// reads a clean strided buffer instead of inlining the col2im.  A step-0
+// contraction (activation still fused, no realized read on this path)
+// returns 0 and stays fused -- its grad reduction order is bit-exact.
+static int bufferize_reduce_reads_realized_pool(u64 reduce_loc, u32 hop_cap) {
+  Term mul = term_resolve(heap_read(reduce_loc + 0));
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  // Recurse the MUL operand subtree (DFS): flag if ANY path crosses a
+  // `_pool` EXPAND and then reaches a realized boundary (the realized-
+  // activation read).  An intervening relu MUL / bias ADD on a backward
+  // path means a shallow single-chain walk misses it, so descend through
+  // elementwise + movement nodes.  hop_cap bounds the traversal budget.
+  Term stk[64];
+  u8   se[64];  // saw_expand flag per stack entry
+  u32  sp = 0;
+  stk[sp] = heap_read(term_val(mul) + 0); se[sp] = 0; sp++;
+  stk[sp] = heap_read(term_val(mul) + 1); se[sp] = 0; sp++;
+  u32 budget = hop_cap * 8;
+  while (sp > 0 && budget-- > 0) {
+    Term cur = term_resolve(stk[--sp]);
+    u8 saw_expand = se[sp];
+    if (term_tag(cur) != TAG_UOP) continue;
+    u8 op = term_ext(cur);
+    if (op == UOP_KERNEL) continue;
+    u32 cidx = bufferize_info_find(term_val(cur));
+    int rz = (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized);
+    if (rz && saw_expand && op != UOP_EXPAND) return 1;
+    if (op == UOP_EXPAND) saw_expand = 1;
+    // Don't descend into a realized boundary that's NOT pool-read (it's a
+    // separate kernel's output, not part of this contraction's recompute).
+    if (rz && !saw_expand) continue;
+    int is_movement = uop_is_movement(op);
+    int is_ew = uop_is_unary_elementwise(op)
+             || uop_is_binary_elementwise(op)
+             || uop_is_ternary_elementwise(op);
+    if (!is_movement && !is_ew) continue;
+    u8 ar = uop_arity(op);
+    for (u8 s = 0; s < ar && sp < 64; s++) {
+      stk[sp] = heap_read(term_val(cur) + s); se[sp] = saw_expand; sp++;
+    }
+  }
+  return 0;
+}
+
 static int bufferize_uop_is_matmul(u64 reduce_loc) {
   Term mul = term_resolve(heap_read(reduce_loc + 0));
   Term bindings[UPAT_NUM_BINDINGS] = {0};
@@ -1069,7 +1124,18 @@ fn void bufferize_classify(Term root) {
           // protected.
           if (!skip_seed && bufferize_fuse_conv_bwd_enabled()
               && bufferize_reduce_feeds_scatter_reduce(info->loc, 32)) {
-            skip_seed = 1;
+            // Fuse the contraction into the scatter-reduce -- UNLESS it
+            // reads a now-realized activation through the `_pool` col2im
+            // (the 2nd-train-step trigger).  That fused read mints a
+            // redundant 24*6 window decode INDEPENDENT of the clean kh,kw,
+            // a cross-product that blows the reduce up to ~6.8e12 iters
+            // (the hang).  Realizing only THAT contraction materializes a
+            // clean strided buffer for the scatter-reduce; every other
+            // contraction (step-0 fused activation, the weight/data-grad
+            // reduces whose operands are not a realized-pool read) stays
+            // fused so its grad reduction order is bit-exact vs flag-OFF.
+            if (!bufferize_reduce_reads_realized_pool(info->loc, 12))
+              skip_seed = 1;
           }
           if (!skip_seed) {
             char const *_riri_e =
