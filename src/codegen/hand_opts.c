@@ -169,6 +169,21 @@ static u32 hand_opt_group_for_reduces(HandOptAxes const *ax) {
   return n;
 }
 
+// LEVER (occupancy cap, GPU codegen only): a kernel is "reduce-heavy" iff it
+// carries any REDUCE / GROUP_REDUCE axis.  These are the conv-backward
+// weight-grad kernels whose output (GLOBAL/LOCAL/LOOP) extent is small while
+// the reduce loop is enormous: aggressive UPCAST of the small output shrinks
+// the launch grid below the SM count and tanks occupancy.  Non-reduce kernels
+// (matmul, elementwise) have large output grids and are NOT gated.
+static int hand_opt_is_reduce_heavy(HandOptAxes const *ax) {
+  for (u32 i = 0; i < ax->n; i++) {
+    if (ax->kax_type[i] == KAX_REDUCE || ax->kax_type[i] == KAX_GROUP_REDUCE) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // --- matmul classification (for TC kept as-is from prior commit) ----
 static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
@@ -549,21 +564,31 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   //     existing UPCAST/UNROLL axes present); collect (num_strides,
   //     sum_strides, axis, amount); sort; apply best UPCAST.
   {
+    // LEVER (per-kernel occupancy cap, GPU codegen only): for reduce-heavy
+    // kernels, refuse to UPCAST below a minimum launch grid so the
+    // conv-backward weight-grad keeps enough global blocks to fill the SMs.
+    // tinygrad's only floor is `olp >= 1024` (line below); on the V100
+    // weight-grad that still upcasts 16x down to ~1600 threads (~31% SM util).
+    // THVM_UPCAST_REDUCE_MIN_GRID raises that floor *only* for reduce-heavy
+    // kernels: it is the minimum number of output (GLOBAL/LOCAL/LOOP) elements
+    // -- i.e. launch threads -- that must remain AFTER an UPCAST is applied.
+    // Default 0 == disabled == bit-identical to the current path.  The GPU A/B
+    // sets it to e.g. 6400 (keeps ~80 V100 SMs fed at ~2 warps/SM) so the
+    // weight-grad caps at ~4x upcast instead of 16x.  Matmul/elementwise have
+    // large output grids that never fall under the floor, so they never gate.
+    u32 occ_min_grid = (u32)hand_opt_getenv_int("THVM_UPCAST_REDUCE_MIN_GRID", 0);
+    int upcast_trace = getenv("THVM_UPCAST_TRACE") != NULL;
     u32 upcasted_set[MAX_AXES];
     u32 n_upcasted_set = 0;
     while (1) {
       if (!hand_opt_snapshot_axes(ke, &ax)) break;
       u64 olp = hand_opt_output_loop_product(&ax);
       u64 us  = hand_opt_upcast_size(&ax);
-      // tinygrad caps upcast_size at 32.  An earlier session change
-      // (commit 77a7b671) bumped default to 64 citing a ~30ms / step
-      // gain in a low-contention window.  Later 5-trial alternating
-      // bench at BS=128 (proper variance control) showed the gap was
-      // within noise (cap=32: median 240ms; cap=64: median 240ms).
-      // Reverted to tinygrad-faithful 32.  Per-workload tuning via
-      // THVM_UPCAST_CAP=N is still available.
+      // tinygrad caps upcast_size at 32; per-workload tuning via THVM_UPCAST_CAP.
       u64 ucap = (u64)hand_opt_getenv_int("THVM_UPCAST_CAP", 32);
       if (olp < 1024 || us >= ucap) break;
+      // Per-kernel occupancy cap (THVM_UPCAST_REDUCE_MIN_GRID), reduce-heavy only.
+      int reduce_heavy = (occ_min_grid > 0) && hand_opt_is_reduce_heavy(&ax);
 
       // Build list of current UPCAST/UNROLL axis_ids for the stride test.
       // hand_opt_upcast_buf_stride -> udg_addr_lookup keys on axis_id, so
@@ -627,6 +652,18 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           fprintf(stderr, "[upcast] no best -> exit loop\n");
         break;
       }
+      // Occupancy gate (reduce-heavy only): applying UPCAST(best_axis,best_amt)
+      // divides the launch grid to olp/best_amt; stop once that drops below the
+      // SM-occupancy floor.  Shape-only -- changes how many upcasts, never math.
+      if (reduce_heavy) {
+        u64 olp_after = olp / (u64)best_amt;
+        if (olp_after < (u64)occ_min_grid) {
+          if (getenv("THVM_UPCAST_TRACE"))
+            fprintf(stderr, "[upcast] occupancy-SKIP amt=%u (post-grid %llu < min %d)\n",
+                    best_amt, (unsigned long long)olp_after, occ_min_grid);
+          break;
+        }
+      }
       KOpt opt = { KOP_UPCAST, ax.axis_id[best_axis], best_amt };
       if (getenv("THVM_UPCAST_TRACE"))
         fprintf(stderr, "[upcast] picking axis_id=%u amt=%u (best_num=%u sum=%u)\n",
@@ -637,6 +674,12 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         break;
       }
       n_applied++;
+      if (upcast_trace) {
+        fprintf(stderr, "[upcast] APPLY amt=%u axis=%u (olp %llu->%llu, us %llu)%s\n",
+                best_amt, best_axis, (unsigned long long)olp,
+                (unsigned long long)(olp / (u64)best_amt),
+                (unsigned long long)us, reduce_heavy ? " [reduce-heavy]" : "");
+      }
       if (n_upcasted_set < MAX_AXES) upcasted_set[n_upcasted_set++] = best_axis;
     }
   }
