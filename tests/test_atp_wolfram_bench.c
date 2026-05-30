@@ -320,13 +320,11 @@ int main(int argc, char **argv) {
   if (use_lpo) thvm_atp_set_lpo(s, &lpo);
   // CP-weight mode: when `THVM_ATP_CP_WEIGHT` (an `AtpCpWeightMode`
   // integer) is exported, override the mode for the experiment;
-  // otherwise leave the engine default (ATP_CP_WEIGHT_GT) in place.
-  {
-    const char *cw = getenv("THVM_ATP_CP_WEIGHT");
-    if (cw != NULL && *cw != 0) {
-      thvm_atp_set_cp_weight_mode(s, (u32)strtoul(cw, NULL, 10));
-    }
-  }
+  // otherwise leave the engine default (ATP_CP_WEIGHT_GT) in place
+  // (or the WALDMEISTER preset's CH_MaxWeight if that is set below).
+  // The env-override block runs AFTER the WALDMEISTER preset so a user
+  // can opt out of the preset's mode without disabling the preset.
+  const char *env_cp_weight = getenv("THVM_ATP_CP_WEIGHT");
   // THVM_ATP_RIGHT_REDUCE=0 disables interreduction right-reduction
   // (RHS composition) for A/B measurement; default (unset/1) keeps the
   // DISCOUNT-loop right-reduction on.
@@ -394,6 +392,12 @@ int main(int argc, char **argv) {
       // accumulates rules more slowly but neither mode cracks robbins.
       thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
     }
+  }
+  // Apply THVM_ATP_CP_WEIGHT after the WALDMEISTER preset so an
+  // experiment-time env override (e.g. `THVM_ATP_CP_WEIGHT=8`) wins over
+  // the preset's CH_MaxWeight default.
+  if (env_cp_weight != NULL && *env_cp_weight != 0) {
+    thvm_atp_set_cp_weight_mode(s, (u32)strtoul(env_cp_weight, NULL, 10));
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
   // interreduce sweep (already-redundant with right_reduce inline path).
