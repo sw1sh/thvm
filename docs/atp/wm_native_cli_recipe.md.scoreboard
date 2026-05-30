@@ -103,6 +103,23 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 160 — CP_SET_INTERREDUCE wired into WALDMEISTER preset
+
+THVM_ATP_CP_SET_IR=1 was a manual override; the WALDMEISTER preset
+didn't enable it.  But WM does this as part of standard operation
+(KPV_KPMengeInterreduzieren -- periodic CP-queue interreduction
+against the rule set).  Added to the preset.
+
+AndAssoc bench: 231-233 rules / 30s sustained (was 217-218).
++6% real throughput.  Cumulative honest improvement vs iter-136
+baseline: +19% (195 -> 232 rules / 30s).
+
+Tried and reverted: enabling use_fwd_subsume + use_bwd_subsume +
+use_bwd_demod in WALDMEISTER preset.  These ARE WM standard but
+the per-step overhead on AndAssoc outweighs the savings: rules
+dropped to 216-217 with 2.6x more steps (kill-and-replace churn
+beats useful work on this workload).
+
 ### Iter 159 — CP weight mode A/B post-fix
 
 Re-tested CP weight modes against the iter-157/158 sound baseline:
