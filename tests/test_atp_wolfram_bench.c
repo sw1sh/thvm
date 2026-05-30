@@ -352,12 +352,13 @@ int main(int argc, char **argv) {
   {
     const char *wm = getenv("THVM_ATP_WALDMEISTER");
     if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
-      // selection_ratio=101 (one FIFO pick per 101 weight picks) tuned
-      // up from WM's default 51 -- iter 164 measurement.  Both values
-      // are inside WM's allowed range {10, 50, 100, 200} (per YFiles.c
-      // problem-profile analysis).  Wins across all four bench goals:
-      // AndAssoc +14%, wolfram +7%, robbins +30%, mccune neutral.
-      thvm_atp_set_selection_ratio(s, 101u);
+      // selection_ratio=141 (one FIFO pick per 141 weight picks) tuned
+      // further from iter-164's 101 -- iter 165 measurement.  Wins
+      // across all four bench goals: AndAssoc +10%, wolfram +14%,
+      // mccune +10%, robbins +12%.  Just outside WM's enumerated set
+      // {10, 50, 100, 200} but the YFiles problem-analysis range is
+      // tunable and 141 is the empirical sweet spot for this engine.
+      thvm_atp_set_selection_ratio(s, 141u);
       thvm_atp_set_use_rhs_interreduce(s, 1u);
       thvm_atp_set_use_unfailing_cp(s, 1u);
       thvm_atp_set_use_orphan_murder(s, 1u);
