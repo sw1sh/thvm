@@ -465,6 +465,20 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
     if (lpo_flat_var_occurs(a, pa, b[pb].sym)) return LPO_GT;
     return LPO_UN;
   }
+  // Per-level subterm Vortest: pretest at each recursion level catches
+  // the strict-subterm cases without paying the cost of the some_arg_dom
+  // recursion below.  Mirrors WM's LP_LPOGroesser structure where each
+  // recursive call enters via LV_VortestLPOGroesser before the
+  // some-arg-dominates dispatch.  Slice the two arrays implicitly via
+  // (pa, .sz)-relative addressing.
+  {
+    int r1 = lpo_pretest_groesser_flat(a + pa, a[pa].sz,
+                                       b + pb, b[pb].sz, cfg);
+    if (r1 > 0) return LPO_GT;
+    int r2 = lpo_pretest_groesser_flat(b + pb, b[pb].sz,
+                                       a + pa, a[pa].sz, cfg);
+    if (r2 > 0) return LPO_LT;
+  }
   if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
   if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
 
