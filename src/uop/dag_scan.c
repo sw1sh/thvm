@@ -150,6 +150,86 @@ u32 uop_dag_reduce_axis_extent(Term t) {
   }
 }
 
+// Look up the extent of the UOP_RANGE leaf at `axis_id` anywhere in the
+// DAG rooted at `t`.  Returns 0 if no such leaf is reachable.  Used by
+// uop_dag_max_reduce_extent_product to resolve a REDUCE node's named
+// reduce axes (which carry only axis_ids) to concrete extents.
+static u32 uop_dag_range_extent_by_axis(Term t, u32 axis_id) {
+  if (t == 0 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    if (uop_range_axis_id(t) == axis_id) return uop_range_extent(t);
+    return 0;
+  }
+  if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) return 0;
+  if (op == UOP_OPT) return uop_dag_range_extent_by_axis(uop_opt_target(t), axis_id);
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    u32 e = uop_dag_range_extent_by_axis(heap_read(loc + i), axis_id);
+    if (e) return e;
+  }
+  return 0;
+}
+
+// Walk the DAG rooted at `t` for UOP_REDUCE nodes; for each, compute the
+// product of its reduce-axis extents (resolving each named axis_id to
+// the matching UOP_RANGE leaf's extent).  Writes the LARGEST such
+// product across all reduces into *out_product and the n_axes of that
+// reduce into *out_n_axes.  Returns 1 if at least one reduce with a
+// resolvable extent was found, 0 otherwise.
+//
+// Used by the CONV-BWD REDUCE TILING trigger (codegen/hand_opts.c) to
+// recognise a reduce-heavy kernel (e.g. the conv weight-grad sum over
+// B*oh*ow) without a "conv" classifier -- the decision is purely on the
+// reduce-extent product, so a small forward-conv K=25 reduce (below the
+// trigger's threshold) is left untouched.
+int uop_dag_max_reduce_extent_product(Term t, u64 *out_product,
+                                      u32 *out_n_axes) {
+  if (t == 0 || term_tag(t) != TAG_UOP) return 0;
+  u64 best = 0;
+  u32 best_n = 0;
+  int found = 0;
+  // Iterative DFS over the whole DAG (no memo: lifted DAGs are bounded).
+  Term stack[512];
+  u32 sp = 0;
+  stack[sp++] = t;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) != TAG_UOP) continue;
+    u32 op = term_ext(cur);
+    if (op == UOP_REDUCE) {
+      u32 n_axes = uop_reduce_n_axes(cur);
+      u64 prod = 1;
+      int ok = (n_axes > 0);
+      for (u32 i = 0; i < n_axes; i++) {
+        u32 aid = uop_reduce_axis(cur, i);
+        u32 ext = uop_dag_range_extent_by_axis(t, aid);
+        if (ext == 0) { ok = 0; break; }
+        prod *= (u64)ext;
+      }
+      if (ok && prod > best) { best = prod; best_n = n_axes; found = 1; }
+    }
+    if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
+    if (op == UOP_OPT) {
+      Term tgt = uop_opt_target(cur);
+      if (term_tag(tgt) == TAG_UOP && sp < 512) stack[sp++] = tgt;
+      continue;
+    }
+    u8 ar = uop_arity(op);
+    u64 loc = term_val(cur);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 512; i++) {
+      Term child = heap_read(loc + i);
+      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    }
+  }
+  if (found) {
+    if (out_product) *out_product = best;
+    if (out_n_axes)  *out_n_axes  = best_n;
+  }
+  return found;
+}
+
 // Walk the DAG rooted at `t` and verify every UOP_REDUCE node carries
 // a sum/max kind compatible with the reduce-unroll/group-reduce
 // metal templates.  UOP_REDUCE encodes kind in a child slot; we

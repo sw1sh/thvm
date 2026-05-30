@@ -270,6 +270,15 @@ fn void kernel_fire_by_id(u32 kid) {
   if (kernel_should_hand_code_opts(ke)) {
     kernel_hand_coded_opts(ke);
   }
+  // CONV-BWD REDUCE TILING (THVM_CONV_BWD_REDUCE_TILING=1, default off):
+  // tile a reduce-heavy CUDA kernel's long reduce across a warp via
+  // KOP_SIMD_REDUCE.  No-op when the knob is off so the default path is
+  // bit-identical.  Runs after the hand-coded heuristic (which is gated
+  // to Metal today) so it only adds the SIMD_REDUCE wrapper, never
+  // conflicts with an UPCAST/LOCAL the heuristic would have applied.
+  if (kernel_should_conv_bwd_reduce_tile(ke)) {
+    kernel_conv_bwd_reduce_tiling(ke);
+  }
   if (kernel_should_autotune(ke)) {
     kernel_autotune(kid);
   }

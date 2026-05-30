@@ -34,6 +34,13 @@ static char *render_cuda(Term root, const char *name) {
 
 int main(void) {
   thvm_init();
+  // CONV-BWD REDUCE TILING knob ON for the whole binary.  The renderer
+  // memoises it on first read; set it up front.  The multi-axis
+  // warp-stripe it enables is narrowly gated (SIMD_REDUCE-wrapped AND
+  // >= 2 reduce axes AND outer extent % 32 == 0), so no other test's
+  // reduce shape is perturbed -- the single-axis SIMD test and the
+  // non-SIMD nested-reduce test both fall outside the gate.
+  setenv("THVM_CONV_BWD_REDUCE_TILING", "1", 1);
 
   // === Signature + prologue ==========================================
   TEST_BEGIN("render-uop-cuda/elementwise-signature-and-prologue");
@@ -420,6 +427,50 @@ int main(void) {
     CHECK(cu != NULL);
     CHECK(contains(cu, "__uint_as_float(0x3f800000u)"));
     CHECK(!contains(cu, "as_type<float>"));
+    free(cu);
+  }
+
+  // === CONV-BWD REDUCE TILING: multi-axis SIMD reduce warp-stripe =====
+  TEST_BEGIN("render-uop-cuda/conv-bwd-reduce-tiling-warp-stripes-outer-axis");
+  {
+    // out[c] = sum_{b,k}(in[b,k] indexed by (b*64+k)) -- a 2-axis reduce
+    // over (b=64, k=4): the conv-weight-grad shape in miniature (reduce
+    // over batch + spatial).  Wrapped in OPT(_, SIMD_REDUCE, _).  With
+    // THVM_CONV_BWD_REDUCE_TILING=1 the OUTER reduce axis (b, extent 64,
+    // %32==0) is striped across the 32 warp lanes; the inner axis (k)
+    // stays a serial loop; the per-lane partials fold via __shfl_xor_sync.
+    u32 dimsOut[1] = { 1 };
+    u32 dimsIn[2]  = { 64, 4 };
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsOut, 0);
+    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsIn,  1);
+    Term r_b = uop_range(0, KAX_REDUCE, 64);
+    Term r_k = uop_range(1, KAX_REDUCE, 4);
+    Term bk  = uop_int_binary(UOP_IADD,
+                              uop_int_binary(UOP_IMUL, r_b, uop_const(DT_INT32, 4)),
+                              r_k);
+    Term ld  = uop_index_e(in0, bk);
+    u32 axes[2] = { 0, 1 };
+    Term red = uop_reduce_multi(REDUCE_SUM, 2, axes, ld);
+    Term zero = uop_const(DT_INT32, 0);
+    Term st   = uop_store(out, zero, red);
+    Term st_simd = uop_dag_apply_simd_reduce(st);
+    CHECK(st_simd != 0);
+    CHECK(st_simd != st);
+    char *cu = render_cuda(st_simd, "k_cbt");
+    CHECK(cu != NULL);
+    // Outer axis (a0) is the warp stripe: lane index + stride 32, extent 64.
+    CHECK(contains(cu, "for (uint a0 = (threadIdx.x % 32u); a0 < 64; a0 += 32u)"));
+    // Inner axis (a1) is a plain serial loop, extent 4, nested inside.
+    CHECK(contains(cu, "for (uint a1 = 0; a1 < 4"));
+    char *p_a0 = strstr(cu, "for (uint a0 = (threadIdx.x % 32u)");
+    char *p_a1 = strstr(cu, "for (uint a1 = 0; a1 < 4");
+    CHECK(p_a0 != NULL && p_a1 != NULL && p_a0 < p_a1);   // a1 nests in a0
+    // 5-step warp butterfly folds the lane partials (same as single-axis).
+    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 16u)"));
+    CHECK(contains(cu, "__shfl_xor_sync(0xffffffffu, _acc0, 1u)"));
+    // Not the Metal collective; not a down-shuffle.
+    CHECK(!contains(cu, "simd_sum"));
+    CHECK(!contains(cu, "__shfl_down_sync"));
     free(cu);
   }
 

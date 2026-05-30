@@ -2362,6 +2362,14 @@ int uop_dag_dtype_uniform(Term root, u32 dt);
 // reachable from `root` and return its extent; 0 if none.
 u32 uop_dag_reduce_axis_extent(Term root);
 
+// Largest product of reduce-axis extents across every UOP_REDUCE node
+// in the DAG rooted at `root`.  Writes the product to *out_product and
+// the axis count of that reduce to *out_n_axes; returns 1 if found.
+// Used by the CONV-BWD REDUCE TILING trigger to recognise a
+// reduce-heavy kernel by reduce magnitude alone.
+int uop_dag_max_reduce_extent_product(Term root, u64 *out_product,
+                                      u32 *out_n_axes);
+
 // 1 iff at least one UOP_REDUCE is reachable from `root` AND every
 // reachable op is in the metal reduce-unroll accepted set (mirrors
 // propose_metal_reduce_unroll_kernel's UOp-DAG gate).
@@ -2424,6 +2432,14 @@ u32  uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap);
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
 // or NOOPT=1 disables) AND the per-shape autotuned flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke);
+
+// CONV-BWD REDUCE TILING (env knob THVM_CONV_BWD_REDUCE_TILING, default
+// OFF).  When ON, stamps KOP_SIMD_REDUCE on a reduce-heavy CUDA kernel
+// so the long conv-backward reduce is tiled across a warp.  No-op (and
+// the default path is bit-identical) when the knob is off / the kernel
+// doesn't qualify.  Returns the number of opts applied (0 or 1).
+fn int kernel_should_conv_bwd_reduce_tile(struct KernelEntry const *ke);
+fn u32 kernel_conv_bwd_reduce_tiling(struct KernelEntry *ke);
 
 // === Slice 5 decode shims (Metal-TU-callable) =========================
 // Thin external-linkage wrappers over heap_read / term_* / UOp

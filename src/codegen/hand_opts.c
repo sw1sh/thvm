@@ -1073,3 +1073,89 @@ fn int kernel_should_hand_code_opts(struct KernelEntry const *ke) {
   if (ke->schedule != NULL && ke->schedule->hand_coded_done) return 0;
   return 1;
 }
+
+// === CONV-BWD REDUCE TILING ==========================================
+// Env knob THVM_CONV_BWD_REDUCE_TILING (default 0 = OFF -> no-op, the
+// default path is bit-identical).  When ON, this stamps KOP_SIMD_REDUCE
+// onto a *reduce-heavy* CUDA kernel so the long conv-backward reduce
+// (e.g. the weight-grad sum over B*oh*ow) is tiled across a warp: each
+// of the 32 lanes takes a 1/32 stripe of the outermost reduce axis and
+// a __shfl_xor_sync butterfly folds the per-lane partials.  This is the
+// CUDA realisation of tinygrad's GROUP-on-a-reduce-axis lowering
+// (codegen/late/expander.py fix_group_for_reduce); the renderer side
+// (render_uop.c rmu_emit_one_reduce, same knob) handles BOTH the
+// existing single-axis SIMD path and the new multi-axis warp-stripe.
+//
+// The decision is purely on the reduce magnitude -- no "conv"
+// classifier.  We require:
+//   - CUDA backend (id == 3);
+//   - the largest reduce-axis-extent product >= the threshold (default
+//     1024; well above a forward-conv K=9/25/27 reduce, so those small
+//     reduces -- where the warp stripe would idle most lanes -- are
+//     left on the scalar accumulator);
+//   - a moderate output (LOOP product) so warp-per-row makes sense
+//     (cuda_dag_dispatch_shape launches grid = reduce-dependent output
+//     rows, block = 32).
+//
+// On match, kernel_apply_opt(KOP_SIMD_REDUCE) routes through the DAG
+// path (uop_dag_apply_simd_reduce) which wraps every UOP_REDUCE in
+// OPT(_, SIMD_REDUCE, 0); cuda_dag_has_opt_axes then picks the
+// warp-per-row launch geometry automatically.
+
+static int CONV_BWD_REDUCE_TILING_ENABLED = -1;
+static u64 CONV_BWD_REDUCE_TILING_THRESHOLD = 0;
+static int conv_bwd_reduce_tiling_enabled(void) {
+  if (CONV_BWD_REDUCE_TILING_ENABLED < 0) {
+    char const *e = getenv("THVM_CONV_BWD_REDUCE_TILING");
+    CONV_BWD_REDUCE_TILING_ENABLED = (e != NULL && e[0] == '1') ? 1 : 0;
+    int thr = hand_opt_getenv_int("THVM_CONV_BWD_REDUCE_TILING_MIN", 1024);
+    CONV_BWD_REDUCE_TILING_THRESHOLD = (thr > 0) ? (u64)thr : 1024;
+  }
+  return CONV_BWD_REDUCE_TILING_ENABLED;
+}
+
+// True iff this kernel is a CUDA reduce-heavy kernel eligible for the
+// SIMD_REDUCE warp tiling (and the knob is on).  Cheap pre-check before
+// the apply.
+fn int kernel_should_conv_bwd_reduce_tile(struct KernelEntry const *ke) {
+  if (!conv_bwd_reduce_tiling_enabled()) return 0;
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  // CUDA only: the warp __shfl_xor_sync butterfly + warp-per-row launch
+  // geometry are CUDA-specific (Metal uses simd_sum via a parallel path
+  // and a different dispatch).  Backend id 3 == CUDA.
+  Backend *b = NULL;
+  if (ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
+    b = TENS[ke->output_tid].backend;
+  }
+  if (b == NULL) b = DEFAULT_BACKEND;
+  if (b == NULL || b->id != 3) return 0;
+  // Don't re-stamp: a kernel already carrying a SIMD_REDUCE wrapper or
+  // any OPT axis is left alone.
+  HandOptAxes ax;
+  if (hand_opt_snapshot_axes(ke, &ax)) {
+    for (u32 i = 0; i < ax.n; i++) {
+      if (ax.kax_type[i] == KAX_GROUP_REDUCE || ax.kax_type[i] == KAX_LOCAL
+          || ax.kax_type[i] == KAX_UPCAST || ax.kax_type[i] == KAX_UNROLL) {
+        return 0;
+      }
+    }
+  }
+  u64 prod = 0;
+  u32 n_axes = 0;
+  if (!uop_dag_max_reduce_extent_product(ke->cached_lift.store_root,
+                                         &prod, &n_axes)) {
+    return 0;
+  }
+  if (prod < CONV_BWD_REDUCE_TILING_THRESHOLD) return 0;
+  return 1;
+}
+
+// Apply the SIMD_REDUCE warp tiling to a reduce-heavy CUDA kernel.
+// Returns the number of opts applied (0 or 1).  No-op (returns 0) when
+// the knob is off or the kernel doesn't qualify -- so the default path
+// is untouched.
+fn u32 kernel_conv_bwd_reduce_tiling(struct KernelEntry *ke) {
+  if (!kernel_should_conv_bwd_reduce_tile(ke)) return 0;
+  KOpt opt = { KOP_SIMD_REDUCE, 0, 0 };
+  return kernel_apply_opt(ke, opt) ? 1u : 0u;
+}

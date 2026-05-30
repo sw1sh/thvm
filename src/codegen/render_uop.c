@@ -60,6 +60,27 @@ static int RMU_HAS_GROUP_REDUCE = 0;
 // Forward decl: defined alongside rmu_dag_has_simd_reduce below.
 static int rmu_dag_has_group_reduce(Term t);
 
+// CONV-BWD REDUCE TILING knob.  Default OFF (-1 uninit, 0 off, 1 on).
+// When ON, a SIMD_REDUCE-wrapped *multi-axis* reduce (e.g. the conv
+// weight-grad sum over B,oh,ow) stripes its OUTERMOST reduce axis
+// across the 32 warp lanes (lane = threadIdx.x % 32 takes a 1/32 slice
+// with `+= 32u` stride), keeps the inner reduce axes as serial nested
+// loops, then folds the 32 per-lane partials with the same
+// __shfl_xor_sync butterfly (CUDA) / simd_sum (Metal) the single-axis
+// SIMD path uses.  Mathematically identical to the serial multi-axis
+// reduce; it just parallelises the outer stripe over a warp, mirroring
+// tinygrad's GROUP-on-one-reduce-axis lowering (codegen/late/expander.py
+// fix_group_for_reduce).  OFF -> the multi-axis branch falls through to
+// the plain nested-loop emit, bit-identical to the prior renderer.
+static int RMU_CONV_BWD_REDUCE_TILING = -1;
+static int rmu_conv_bwd_reduce_tiling_on(void) {
+  if (RMU_CONV_BWD_REDUCE_TILING < 0) {
+    char const *e = getenv("THVM_CONV_BWD_REDUCE_TILING");
+    RMU_CONV_BWD_REDUCE_TILING = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  return RMU_CONV_BWD_REDUCE_TILING;
+}
+
 // Emit an unroll pragma matching the current target's syntax.  C99 /
 // clang accept `#pragma clang loop unroll_count(N)`; MSL / GPU targets
 // use the GCC-style `#pragma unroll(N)`.  factor==0 means "full".
@@ -3953,6 +3974,78 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
       // Warp butterfly: 5 __shfl_xor_sync steps fold 32 lanes.  xor (not
       // down) makes this an ALL-reduce -- every lane ends with the full
       // result, matching Metal simd_sum/simd_max broadcast semantics.
+      const char *op = (r_kind == REDUCE_MAX) ? "fmaxf" : "+";
+      for (u32 s = 16; s >= 1; s >>= 1) {
+        for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+        if (r_kind == REDUCE_MAX) {
+          fprintf(fp, "%s = %s(%s, __shfl_xor_sync(0xffffffffu, %s, %uu));\n",
+                  acc_name, op, acc_name, acc_name, s);
+        } else {
+          fprintf(fp, "%s = %s %s __shfl_xor_sync(0xffffffffu, %s, %uu);\n",
+                  acc_name, acc_name, op, acc_name, s);
+        }
+      }
+    } else {
+      for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+      if (r_kind == REDUCE_MAX) {
+        fprintf(fp, "%s = simd_max(%s);\n", acc_name, acc_name);
+      } else {
+        fprintf(fp, "%s = simd_sum(%s);\n", acc_name, acc_name);
+      }
+    }
+    return;
+  }
+  // CONV-BWD REDUCE TILING (env-gated): a SIMD_REDUCE-wrapped MULTI-axis
+  // reduce stripes its OUTERMOST reduce axis across the 32 warp lanes,
+  // keeps the inner reduce axes as serial nested loops, and folds the
+  // per-lane partials with the same butterfly the single-axis SIMD path
+  // uses.  The `a0 = lane; a0 < ext; a0 += 32u` stride handles a ragged
+  // outer extent (extent not a multiple of 32): a lane that does zero
+  // iterations keeps the reduce-init value (0 for SUM, -INFINITY for
+  // MAX -- the identity), so the butterfly fold stays correct.  Gated
+  // on outer extent >= 32 so a tiny outer axis (which would idle most
+  // lanes) stays on the serial accumulator.  Like the single-axis SIMD
+  // path, the warp re-orders the float adds, so the result differs from
+  // a serial reduce in the last ULPs -- the accepted tinygrad-GROUP
+  // parity tradeoff, NOT a bit-identical transform.  The warp index is
+  // already bound to one output row (RMU_SIMD_WARP -> tg decode), so
+  // every lane in the block agrees on the output-axis tuple.
+  if (is_simd && RMU_TARGET != CG_TARGET_C && r_n_axes >= 2
+      && rmu_conv_bwd_reduce_tiling_on()
+      && reduce_extent >= 32) {
+    const char *lane = (RMU_TARGET == CG_TARGET_CUDA)
+                         ? "(threadIdx.x % 32u)"
+                         : "thread_index_in_simdgroup";
+    // Outer axis: strided over the 32 lanes.
+    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+    fprintf(fp, "for (uint a%u = %s; a%u < %u; a%u += 32u) {\n",
+            r_axis, lane, r_axis, reduce_extent, r_axis);
+    // Inner axes (1..n-1): plain serial loops nested inside.
+    for (u32 ai = 1; ai < r_n_axes; ai++) {
+      rmu_emit_range_open(axis_ranges[ai], fp, emit_depth + ai, 0);
+    }
+    u32 inner_depth = emit_depth + r_n_axes;
+    // Child reduces nested inside the innermost loop (same as the plain
+    // path below).  This warp-stripe path is SIMD-collective, so it cannot
+    // lane-block (the warp is already owned): pass lb=NULL, matching the
+    // single-axis SIMD branch.
+    for (u32 k = 0; k < n_reduces; k++) {
+      if (parent_idx[k] != self_idx) continue;
+      rmu_emit_one_reduce_lb(reduces[k], inner_depth, simd_flags[k],
+                          reduces, simd_flags, parent_idx, k, n_reduces, fp,
+                          store_addr, NULL);
+    }
+    for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
+    rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+    // Close inner axes + the outer stripe loop.
+    for (u32 ai = 0; ai < r_n_axes; ai++) {
+      u32 close_depth = inner_depth - 1 - ai;
+      for (u32 d = 0; d < close_depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
+    // Cross-lane butterfly: fold the 32 per-lane partials into every
+    // lane (all-reduce), identical to the single-axis SIMD combine.
+    if (RMU_TARGET == CG_TARGET_CUDA) {
       const char *op = (r_kind == REDUCE_MAX) ? "fmaxf" : "+";
       for (u32 s = 16; s >= 1; s >>= 1) {
         for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
