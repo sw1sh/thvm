@@ -34,9 +34,14 @@ static u8 unify_occurs(u32 var_id, Term t, const RewriteSubst *subst) {
   switch (term_tag(t)) {
     case TAG_FVR: return term_ext(t) == var_id;
     case TAG_CTR: {
-      u32 n = term_ctr_n(t);
+      // Direct heap_read for arity + children.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return 0;
+      u32 n = (u32)term_val(n_cell);
       for (u32 i = 0; i < n; i++) {
-        if (unify_occurs(var_id, term_ctr_at(t, i), subst)) return 1;
+        Term c = heap_read(base + 1u + (u64)i);
+        if (unify_occurs(var_id, c, subst)) return 1;
       }
       return 0;
     }
@@ -225,12 +230,16 @@ static Term nv_rewrite(Term t, const NvMap *m) {
       return t;  // unreachable: nv_collect registered every id
     }
     case TAG_CTR: {
-      u32 n = term_ctr_n(t);
+      // Direct heap_read for arity + children.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
       if (n > REWRITE_MAX_ARITY) return t;
       Term children[REWRITE_MAX_ARITY];
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
-        Term orig = term_ctr_at(t, i);
+        Term orig = heap_read(base + 1u + (u64)i);
         children[i] = nv_rewrite(orig, m);
         if (children[i] != orig) changed = 1;
       }
