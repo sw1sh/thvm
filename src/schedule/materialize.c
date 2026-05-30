@@ -720,6 +720,39 @@ static void arena_compute(void) {
     planned[i]  = 1;
     n_planned++;
   }
+  if (getenv("THVM_ARENA_DUMP_BUFS")) {
+    for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+      u64 nb = arena_boundary_nbytes(i);
+      if (nb < 1048576) continue;
+      u64 loc = BOUNDARY_ORDER[i];
+      u32 binfo = bufferize_info_find(loc);
+      u32 op = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].op : 0xFFu;
+      u64 kind = 0, naxes = 0, a0 = 0;
+      if (op == UOP_REDUCE) {
+        kind  = term_val(heap_read(loc + 1));
+        naxes = term_val(heap_read(loc + 2));
+        if (naxes >= 1) a0 = term_val(heap_read(loc + 3));
+      }
+      u64 cons[4];
+      u32 nc = bufferize_consumers_for_loc(loc, cons, 4);
+      u32 cop0 = 0xFFu, cop1 = 0xFFu;
+      if (nc >= 1) {
+        u32 ci = bufferize_info_find(cons[0]);
+        if (ci != 0xFFFFFFFFu) cop0 = BUFFERIZE_NODES[ci].op;
+      }
+      if (nc >= 2) {
+        u32 ci = bufferize_info_find(cons[1]);
+        if (ci != 0xFFFFFFFFu) cop1 = BUFFERIZE_NODES[ci].op;
+      }
+      fprintf(stderr,
+              "  buf[%u] op=%u bytes=%.2fMB plannable=%d kind=%llu naxes=%llu a0=%llu n_cons=%u cop0=%u cop1=%u life=[%u,%u]\n",
+              i, op, (double)nb / 1048576.0,
+              arena_boundary_is_plannable(i),
+              (unsigned long long)kind, (unsigned long long)naxes,
+              (unsigned long long)a0, nc, cop0, cop1,
+              first_pos[i], last_pos[i]);
+    }
+  }
   if (n_planned == 0) return;
 
   static ArenaEvent events[ARENA_SLOTS_CAP * 2];
