@@ -260,6 +260,11 @@ fn u32 jit_capture_begin(void) {
       JIT_CAPTURES[i].in_use   = 1;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
+      // Open the realize-dedup span (gated by THVM_JIT_REALIZE_DEDUP):
+      // the multiple realizes of this captured step share one loc->tid
+      // cache so a kernel emitted by realize-1 is reused (not re-emitted
+      // + re-recorded) by realize-2/3.  Closed in jit_capture_end{,_with_result}.
+      materialized_loc_jit_span_begin();
       return i;
     }
   }
@@ -267,6 +272,10 @@ fn u32 jit_capture_begin(void) {
 }
 
 fn void jit_capture_end(void) {
+  // Close the realize-dedup span (restore the deferred heap rewrites +
+  // wipe the loc->tid cache) BEFORE finalize, which only inspects the
+  // recorded op list.
+  materialized_loc_jit_span_end();
   if (JIT_ACTIVE_SLOT != 0) {
     jit_capture_finalize(JIT_ACTIVE_SLOT, 0);
   }
@@ -275,6 +284,7 @@ fn void jit_capture_end(void) {
 }
 
 fn void jit_capture_end_with_result(Term root) {
+  materialized_loc_jit_span_end();
   if (JIT_ACTIVE_SLOT != 0) {
     jit_capture_finalize(JIT_ACTIVE_SLOT, root);
   }

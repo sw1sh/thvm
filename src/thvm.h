@@ -2019,6 +2019,11 @@ fn void materialized_loc_clear        (void);
 fn void materialized_loc_scope_enter  (void);
 fn void materialized_loc_scope_leave  (void);
 fn u32  materialized_loc_scope_depth  (void);
+// JIT-capture realize-dedup span: preserve the loc->tid cache across the
+// several realizes of one captured step so shared forward/grad kernels
+// are emitted (and recorded) once.  Gated by THVM_JIT_REALIZE_DEDUP.
+fn void materialized_loc_jit_span_begin(void);
+fn void materialized_loc_jit_span_end  (void);
 
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).

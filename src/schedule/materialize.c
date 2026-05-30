@@ -158,6 +158,61 @@ fn void materialized_loc_scope_leave(void) {
 }
 fn u32  materialized_loc_scope_depth(void) { return MATERIALIZE_SCOPE_DEPTH; }
 
+// JIT-capture realize-dedup span.  A single JIT-captured training step
+// calls thvm_realize / thvm_realize_many several times (loss.realize,
+// then the grad bundle, then the optimizer-step bundle).  Normally the
+// loc->tid cache is cleared at every realize boundary, so the forward +
+// grad kernels shared across those realizes get RE-emitted (fresh kids)
+// and re-recorded into the capture -- the documented dispatch
+// redundancy.  Across realizes the clear is needed because pool-rollback
+// reclaims a non-preserved intermediate's buffer.  But JIT capture pins
+// every recorded kernel output (jit_capture_retain_dispatch_bufs ->
+// buf_jit_pin), and rollback skips pinned bufs, so those outputs survive
+// the boundary.  Persisting the cache across the span therefore lets a
+// later realize's materialize substitute the EXISTING tid (one kernel,
+// one dispatch) instead of re-emitting.  Safety net: materialized_loc_lookup
+// already treats a dead-buffer tid as a miss, so a non-pinned (rolled-back)
+// intermediate falls back to a fresh re-emit -- correctness is preserved
+// even if a buffer didn't survive.  Mirror: tinygrad schedules the whole
+// `loss.realize(*opt.schedule_step())` step in ONE run_rangeify pass, so a
+// shared kernel is scheduled exactly once.
+//
+// Gated by THVM_JIT_REALIZE_DEDUP (default OFF -- the env-knob discipline
+// for an aliasing-sensitive path).  When the span is active and enabled,
+// materialized_loc_clear() defers the wipe; the deferred clear runs at
+// materialized_loc_jit_span_end().
+static u32 MATERIALIZE_JIT_SPAN_DEPTH = 0;
+static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_JIT_REALIZE_DEDUP");
+    on = (e != NULL && e[0] != '0' && e[0] != '\0');
+    known = 1;
+  }
+  return on;
+}
+static int materialized_loc_span_holds(void) {
+  return MATERIALIZE_JIT_SPAN_DEPTH > 0 && MATERIALIZE_JIT_DEDUP_ENABLED();
+}
+fn void materialized_loc_clear(void);   // fwd decl (span_end calls it)
+fn void materialized_loc_jit_span_begin(void) {
+  if (!MATERIALIZE_JIT_DEDUP_ENABLED()) return;
+  // A fresh span starts with a clean cache: any cross-realize state from
+  // a prior (non-span) realize is undone here so the span only ever
+  // reuses tids materialized WITHIN it.
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0) materialized_loc_clear();
+  MATERIALIZE_JIT_SPAN_DEPTH++;
+}
+fn void materialized_loc_jit_span_end(void) {
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0) return;
+  MATERIALIZE_JIT_SPAN_DEPTH--;
+  // Real clear (restore journal + wipe) now that the span's realizes are
+  // all done.  The heap rewrites that the span accumulated are undone so
+  // the hash-consed graph is back to its original shape for replay /
+  // future realizes.
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0) materialized_loc_clear();
+}
+
 static inline u32 materialized_loc_hash(u64 loc) {
   loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
   loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
@@ -169,8 +224,22 @@ fn void materialized_loc_clear(void) {
   // Undo this realize's heap rewrites BEFORE wiping the cache so the
   // hash-consed UOP graph is back to its original shape for the next
   // realize (the substituted tids' buffers don't survive the pool
-  // rollback -- see SUBST_JOURNAL).
+  // rollback -- see SUBST_JOURNAL).  The journal restore ALWAYS runs,
+  // even inside a JIT-capture span: it returns the in-place TAG_TEN
+  // substitutions to their original UOP children so the NEXT realize in
+  // the span re-derives every substitution through materialized_loc_lookup
+  // (whose dead-buffer guard re-validates that the cached tid's buffer is
+  // still live).  Without that re-validation a stale, recycled tid could
+  // be re-bound blind.
   subst_journal_restore();
+  // Inside an active JIT-capture realize-dedup span KEEP the loc->tid map
+  // so a later realize in the same captured step can substitute the
+  // kernel this one emitted (one kernel, one recorded dispatch) instead
+  // of re-emitting it.  Buffers stay live because JIT capture pins every
+  // recorded kernel output (buf_jit_pin); a non-pinned intermediate that
+  // got rolled back fails the lookup's dead-buffer guard -> safe re-emit.
+  // Deferred full wipe runs at materialized_loc_jit_span_end().
+  if (materialized_loc_span_holds()) return;
   for (u32 i = 0; i < MATERIALIZED_LOC_CAP; i++) {
     MATERIALIZED_LOC_TABLE[i].loc = MATERIALIZED_LOC_EMPTY;
     MATERIALIZED_LOC_TABLE[i].tid = 0;
