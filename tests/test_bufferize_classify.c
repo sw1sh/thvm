@@ -190,6 +190,43 @@ int main(void) {
   bufferize_classify(nb_root);
   CHECK_EQ(bufferize_is_realized(nb_r), 1);    // no broadcast-of-CONST sibling
 
+  TEST_BEGIN("realize-classify/reduce-epilogue-fuse-off-default");
+  // reduce(x) * scalar_const, with the scalar-MUL as the realize root.
+  // DEFAULT (flag unset): the reduce stays a realized boundary -- its
+  // [8] output is stored, then the epilogue reads it.  The fuse rule is
+  // opt-in; bit-exact behaviour must not change without the flag.
+  thvm_free();
+  thvm_init();
+  unsetenv("THVM_FUSE_REDUCE_EPILOGUE");
+  u32 t_ep = alloc_f32_tensor2(4, 8);
+  Term ep_x = term_new(0, TAG_TEN, DT_FP32, t_ep);
+  Term ep_r = uop_reduce(REDUCE_SUM, 0, ep_x);          // shape {8}
+  Term ep_half = uop_const(DT_FP32, 0x3F000000u);       // 0.5f
+  Term ep_root = uop_binary(UOP_MUL, ep_r,
+                            uop_expand(ep_half, 1, (u32[]){8}));
+  bufferize_classify(ep_root);
+  CHECK_EQ(bufferize_is_realized(ep_root), 1);           // the root
+  CHECK_EQ(bufferize_is_realized(ep_r), 1);              // reduce realized (default)
+
+  TEST_BEGIN("realize-classify/reduce-epilogue-fuse-on");
+  // THVM_FUSE_REDUCE_EPILOGUE=1: the single-consumer reduce whose sole
+  // consumer is the shape-preserving scalar-broadcast MUL fuses into the
+  // epilogue's kernel -- the reduce is no longer a realized boundary.
+  thvm_free();
+  thvm_init();
+  setenv("THVM_FUSE_REDUCE_EPILOGUE", "1", 1);
+  u32 t_ep2 = alloc_f32_tensor2(4, 8);
+  Term ep2_x = term_new(0, TAG_TEN, DT_FP32, t_ep2);
+  Term ep2_r = uop_reduce(REDUCE_SUM, 0, ep2_x);         // shape {8}
+  Term ep2_half = uop_const(DT_FP32, 0x3F000000u);       // 0.5f
+  Term ep2_root = uop_binary(UOP_MUL, ep2_r,
+                             uop_expand(ep2_half, 1, (u32[]){8}));
+  bufferize_classify(ep2_root);
+  CHECK_EQ(bufferize_is_realized(ep2_root), 1);          // the root stays
+  CHECK_EQ(bufferize_is_realized(ep2_r), 0);             // reduce fused away
+  CHECK(bufferize_reasons(ep2_r) & BUFFERIZE_REASON_INLINE);
+  unsetenv("THVM_FUSE_REDUCE_EPILOGUE");
+
   thvm_free();
   TEST_REPORT();
 }

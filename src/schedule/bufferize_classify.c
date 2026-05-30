@@ -549,6 +549,79 @@ static int bufferize_softmax_reduce_tile_cap_enabled(void) {
   return e == NULL ? 1 : (e[0] != '0');
 }
 
+// Reduce-epilogue fusion: when a non-matmul REDUCE has exactly ONE
+// consumer that is a realized, shape-preserving elementwise op (the
+// post-reduce scaling that the optimizer/bias-grad path emits as a
+// `[N]->[N]` unary/scalar-broadcast tail), keep the reduce + its
+// epilogue in ONE kernel rather than realizing the reduce, storing it,
+// and re-loading it for the elementwise.  This mirrors tinygrad, which
+// lowers `reduce -> elementwise` to a single kernel via `STORE.end(
+// *reduce_ranges)` (the elementwise computes in the reduce kernel after
+// the accumulator, before the store).  The thvm kernel walker already
+// supports REDUCE as an intermediate op whose result is consumed
+// elementwise by later program ops (materialize.c, the
+// `single_reduce_emit` / "REDUCE as an intermediate op" path), so
+// unmarking the reduce lets the epilogue's kernel absorb it.
+//
+// Default OFF (env unset/"0") so the bit-exact gates stay green without
+// the flag; THVM_FUSE_REDUCE_EPILOGUE=1 enables it for the GPU A/B.
+static int bufferize_reduce_epilogue_fuse_enabled(void) {
+  char const *e = getenv("THVM_FUSE_REDUCE_EPILOGUE");
+  return e != NULL && e[0] == '1';
+}
+
+// True iff op is a unary elementwise OR a binary elementwise whose
+// non-reduce operand is a CONST/broadcast scalar (the `(1-b1)*g`,
+// `g*scale` post-reduce tail).  These preserve the reduce's output
+// iteration space exactly -- no new ranges, no rank change -- so they
+// fuse into the reduce kernel as a pure epilogue.  A binary op with two
+// genuine reduce-shaped operands (a real matmul-style combine) is
+// rejected: its second operand would need its own load index.
+static int bufferize_is_scalar_preserving_epilogue(u64 loc, u64 reduce_loc) {
+  u32 idx = bufferize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  u8 op = BUFFERIZE_NODES[idx].op;
+  if (uop_is_unary_elementwise(op)) return 1;
+  if (!uop_is_binary_elementwise(op)) return 0;
+  // Binary: exactly one operand must be the reduce; the other must be a
+  // broadcast scalar (CONST leaf or 1-elem TEN).  Resolve both slots.
+  Term a = term_resolve(heap_read(loc + 0));
+  Term b = term_resolve(heap_read(loc + 1));
+  u64 a_loc = (term_tag(a) == TAG_UOP) ? term_val(a) : 0;
+  u64 b_loc = (term_tag(b) == TAG_UOP) ? term_val(b) : 0;
+  int a_is_reduce = (a_loc == reduce_loc);
+  int b_is_reduce = (b_loc == reduce_loc);
+  if (a_is_reduce == b_is_reduce) return 0;          // both or neither
+  Term other = a_is_reduce ? b : a;
+  // The other operand must be a BROADCAST SCALAR: it bottoms out (through
+  // a pure view chain of EXPAND/RESHAPE/etc.) at either a UOP_CONST leaf
+  // or a single-element realized tensor (the `0.5`/`1-b1` scalar that
+  // Python materialises as a 1-elem TEN before broadcasting).  Either
+  // way the kernel loads ONE value, not a per-element stream, so the
+  // epilogue iterates exactly the reduce's output ranges with no extra
+  // load index.  Any other leaf (a full-shape buffer, another reduce, a
+  // computed value) is rejected -- it would need its own iteration.
+  int saw_movement = 0;
+  for (u32 hops = 0; hops < 8; hops++) {
+    if (term_tag(other) == TAG_TEN) {
+      // A scalar broadcast TEN reached only through movement ops.
+      Shape lsh = {0};
+      if (!saw_movement) return 0;               // a same-shape buffer, not scalar
+      if (!term_shape_in(other, 0, &lsh)) return 0;
+      u64 numel = 1;
+      for (u32 d = 0; d < lsh.ndim; d++) numel *= lsh.dims[d];
+      return numel == 1;
+    }
+    if (term_tag(other) != TAG_UOP) return 0;
+    u8 oop = term_ext(other);
+    if (oop == UOP_CONST) return 1;
+    if (!uop_is_movement(oop)) return 0;
+    saw_movement = 1;
+    other = term_resolve(heap_read(term_val(other) + 0));   // movement src
+  }
+  return 0;
+}
+
 // bufferize_unique_uop_parent returns the SOLE parent of `loc` or 0
 // if zero/multiple.  bufferize_reduce_consumer_is_broadcast_chain
 // already requires the chain to have a unique parent at every hop,
@@ -1464,6 +1537,51 @@ fn void bufferize_classify(Term root) {
       u32 outer_kind = (u32)term_val(heap_read(consumer_locs[0] + 1));
       if (inner_kind != outer_kind) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
+    }
+    // Reduce-epilogue fusion (THVM_FUSE_REDUCE_EPILOGUE=1, default OFF):
+    // a non-matmul REDUCE with exactly ONE consumer that is a realized,
+    // shape-preserving elementwise epilogue keeps the reduce + the
+    // epilogue in one kernel.  Mirrors tinygrad's `reduce -> elementwise`
+    // single-kernel lowering (the elementwise runs after the accumulator,
+    // before the store).  Target: the optimizer / bias-grad `[N]->[N]`
+    // post-reduce scaling kernels (e.g. `(1-b1)*g` right after the
+    // bias-grad reduce) that otherwise pay a store + reload + separate
+    // launch.  The reduce's output shape must equal the epilogue's output
+    // shape so the epilogue iterates exactly the reduce's output ranges.
+    if (bufferize_reduce_epilogue_fuse_enabled()) {
+      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+        UOpInfo *info = &BUFFERIZE_NODES[i];
+        if (info->op != UOP_REDUCE) continue;
+        if (!info->realized) continue;
+        if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
+        if (info->consumer_count != 1) continue;
+        u64 consumer_locs[1];
+        u32 n_cons = bufferize_consumers_for_loc(info->loc, consumer_locs, 1);
+        if (n_cons != 1) continue;
+        u32 cidx = bufferize_info_find(consumer_locs[0]);
+        if (cidx == 0xFFFFFFFFu) continue;
+        // The consumer must itself be a realized boundary (its kernel
+        // absorbs the reduce) and a scalar-preserving elementwise tail.
+        if (!BUFFERIZE_NODES[cidx].realized) continue;
+        if (!bufferize_is_scalar_preserving_epilogue(consumer_locs[0],
+                                                      info->loc))
+          continue;
+        // Output shapes must match (same iteration space -- the epilogue
+        // adds no ranges and changes no rank).
+        Shape rsh = {0};
+        Shape csh = {0};
+        Term rt = term_new(0, TAG_UOP, info->op, info->loc);
+        Term ct = term_new(0, TAG_UOP, BUFFERIZE_NODES[cidx].op,
+                           consumer_locs[0]);
+        if (!term_shape_in(rt, 0, &rsh) || !term_shape_in(ct, 0, &csh))
+          continue;
+        if (rsh.ndim != csh.ndim) continue;
+        int same = 1;
+        for (u32 d = 0; d < rsh.ndim; d++)
+          if (rsh.dims[d] != csh.dims[d]) { same = 0; break; }
+        if (!same) continue;
+        bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
+      }
     }
     // Fanin-cap split: mark wide-fanin elementwise/movement children
     // as realized boundaries so the metal renderer's n_inputs > 30
