@@ -620,6 +620,10 @@ int main(int argc, char **argv) {
     if (pr != NULL && pr[0] == '1') g_atp_phase_enabled = 1u;
   }
 
+  // Reset CP-cap-hit counters so the per-run totals attribute lost CPs
+  // to a specific cap (ATP_CP_BATCH per-pair vs CP_MAX_DEPTH per-position).
+  thvm_cp_caps_reset();
+
   clock_t   t0  = clock();
   AtpStatus st  = ATP_RUNNING;
   u32       i   = 0;
@@ -674,6 +678,15 @@ int main(int argc, char **argv) {
   }
   printf("   dropped: ground-joinable=%u connected-below-peak=%u\n",
          s->n_cps_ground_joinable, s->n_cps_dropped_connected_below_peak);
+  {
+    u64 cp_capped = 0, depth_capped = 0;
+    thvm_cp_caps_get(&cp_capped, &depth_capped);
+    printf("   caps: cp_batch_hits=%llu  depth_capped_positions=%llu  "
+           "(CP_MAX_DEPTH=%u)\n",
+           (unsigned long long)cp_capped,
+           (unsigned long long)depth_capped,
+           (u32)CP_MAX_DEPTH);
+  }
   printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);
   printf("   lazy-normalize=%u  push-time full-R normalizes=%llu\n",
          s->use_lazy_normalize,

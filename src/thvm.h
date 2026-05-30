@@ -3115,7 +3115,7 @@ fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 // unified with.  pos_len == 0 is a top (outermost) overlap.  This is
 // the provenance a Waldmeister-PCL-shaped proof needs to present the
 // CP as a CriticalPairLemma.
-#define CP_MAX_DEPTH 8
+#define CP_MAX_DEPTH 16
 typedef struct {
   Term lhs;
   Term rhs;
@@ -3142,6 +3142,13 @@ fn u32 thvm_critical_pairs_range(const Term *lhs, const Term *rhs, u32 n_rules,
 // saturator drives both faces of an unorientable equation through it.
 fn u32 thvm_critical_pairs_pair(Term li, Term ri, Term lj, Term rj,
                                 CriticalPair *out, u32 cap, u32 count);
+
+// Diagnostic counters for the CP enumeration caps:
+//   *out_dropped       -- per-pair buffer cap-hits (ctx->count >= ctx->cap)
+//   *out_depth_capped  -- positions stranded under a CTR at CP_MAX_DEPTH
+// thvm_cp_caps_reset() zeros both before a fresh measurement.
+fn void thvm_cp_caps_reset(void);
+fn void thvm_cp_caps_get(u64 *out_dropped, u64 *out_depth_capped);
 
 // === atp/ ===
 // Saturation loop state (stage 5).  See

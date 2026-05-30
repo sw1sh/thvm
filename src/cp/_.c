@@ -29,6 +29,23 @@
 // CriticalPair is declared in src/thvm.h so external callers can hold
 // the buffer.
 
+// Diagnostic counters: how many CPs/positions the per-pair caps drop.
+// These are pure observation; raising the caps (CP_MAX_DEPTH /
+// ATP_CP_BATCH) reduces the counts.  The bench prints them at
+// saturation end to attribute lost CPs to a specific cap.
+static u64 g_cp_dropped_capped         = 0;
+static u64 g_cp_positions_depth_capped = 0;
+
+fn void thvm_cp_caps_reset(void) {
+  g_cp_dropped_capped         = 0;
+  g_cp_positions_depth_capped = 0;
+}
+
+fn void thvm_cp_caps_get(u64 *out_dropped, u64 *out_depth_capped) {
+  if (out_dropped)     *out_dropped     = g_cp_dropped_capped;
+  if (out_depth_capped) *out_depth_capped = g_cp_positions_depth_capped;
+}
+
 // Replace the sub-term at position `p` of `t` with `repl`.  `p` is
 // a path of child indices: p[0] is the index at depth 0, p[1] at
 // depth 1, etc.  `p_len == 0` means top.  Returns the rebuilt term.
@@ -66,7 +83,13 @@ static u32 cp_walk_positions(Term t, u32 *path, u32 depth, u32 max_depth,
                              CpVisitor visit, void *ctx, u32 count) {
   if (term_tag(t) != TAG_CTR) return count;  // skip variables (FVR)
   count = visit(path, depth, ctx);
-  if (depth >= max_depth) return count;
+  if (depth >= max_depth) {
+    // Only count a depth-cap-hit when there is at least one child we
+    // would otherwise have descended into -- a leaf CTR at the cap is
+    // already fully enumerated.
+    if (term_ctr_n(t) > 0) g_cp_positions_depth_capped++;
+    return count;
+  }
   u32 n = term_ctr_n(t);
   for (u32 i = 0; i < n; i++) {
     path[depth] = i;
@@ -93,7 +116,13 @@ typedef struct {
 
 static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   CpCtx *ctx = (CpCtx *)raw;
-  if (ctx->count >= ctx->cap) return ctx->count;
+  if (ctx->count >= ctx->cap) {
+    // Position would have been tried; we cannot know whether unify
+    // would have produced a CP without doing the work, so attribute
+    // this as a "capped visit" -- an upper bound on dropped CPs.
+    g_cp_dropped_capped++;
+    return ctx->count;
+  }
 
   Term sub = cp_subterm_at(ctx->li, p, p_len);
   if (sub == 0) return ctx->count;

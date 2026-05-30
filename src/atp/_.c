@@ -2188,6 +2188,7 @@ static void atp_ri_rebuild(AtpState *s) {
     // caller installed by hand, which is fine in that all-orientable
     // regime.
     if (s->n_unorient > 0u && !s->r_orient[i]) continue;
+    if (s->r_dead != NULL && s->r_dead[i]) continue;  // bwd-subsumed: sentinel LHS
     AtpRiVarMap vm;
     atp_ri_varmap_reset(&vm);
     u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
@@ -2218,6 +2219,7 @@ static void atp_ri_rebuild(AtpState *s) {
     if (s->n_unorient > 0u) {
       for (u32 i = 0; i < s->n_rules; i++) {
         if (s->r_orient[i]) continue;                 // oriented: rule_index
+        if (s->r_dead != NULL && s->r_dead[i]) continue;  // bwd-subsumed: sentinel face
         // l->r face: match lhs[i], replace by rhs[i].
         if (atp_vars_contained(s->rhs[i], s->lhs[i])) {
           AtpRiVarMap vm;
@@ -3328,6 +3330,7 @@ static Term atp_unorient_step_indexed(AtpState *s, Term t, u8 *fired) {
   g_atp_ri_subsz   = usubsz;
   g_atp_ri_flatsym = uflatsym;
   g_atp_ri_lhs     = s->lhs;
+  g_atp_ri_rhs     = s->rhs;  // r->l face records dereference rhs[rule] in leaf_collect_unorient
   u32 fire_pos = 0u;
   u8  hit = atp_ft_unorient_step(s, uflat, usubsz, uflatsym, &flatlen,
                                  &folded, 0u, &fire_pos);
@@ -8563,7 +8566,7 @@ done:
 // drop-on-overflow policy in `KPVerwaltung.c` -- *Kritische-Paare-
 // Verwaltung*, "critical-pair management").
 
-#define ATP_CP_BATCH 1024
+#define ATP_CP_BATCH 4096
 
 // Stage 7.1: trivial-joinability check AND critical-pair reduction.
 // Normalize both sides of a candidate CP under the current rule set R
@@ -10356,7 +10359,10 @@ typedef struct {
 
 static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
   CpCtxIc *ctx = (CpCtxIc *)raw;
-  if (ctx->count >= ctx->cap) return ctx->count;
+  if (ctx->count >= ctx->cap) {
+    g_cp_dropped_capped++;
+    return ctx->count;
+  }
 
   Term sub = cp_subterm_at(ctx->li, p, p_len);
   if (sub == 0) return ctx->count;
