@@ -314,47 +314,21 @@ int lpo_pretest_groesser_flat(const KboFlatNode *a, u32 na,
   // below would always return 0 (inconclusive).  Return 0 immediately
   // without paying the candidate-list cost.
   if (na <= nb) return 0;
-  // General subterm scan.  Candidates track a cursor `cur` into b: each
-  // candidate represents an active hypothesis that b's prefix from position
-  // 1 onwards is being matched against a's preorder walk.  When cur reaches
-  // nb the candidate has matched all of b, so b is a strict subterm of a.
-  u32 kand[LPO_FLAT_KAND_CAP];
-  u32 nk = 0;
-  i32 aelt_cur = -1;                      // aeltester candidate; -1 once dropped
-  if (a[0].sym == b[0].sym && a[0].sz == b[0].sz) {
-    kand[nk++] = 1u;
-    aelt_cur = 1;
-  }
-
-  for (u32 i = 1; i < na; i++) {
-    i32 sym = a[i].sym;
-    u32 wr = 0;
-    u8  aelt_kept = 0;
-    for (u32 r = 0; r < nk; r++) {
-      u32 cur = kand[r];
-      // Reaching the right edge means a strict-subterm hit; the entire b
-      // walked over a's preorder slice [i-... , i-1].
-      if (cur == nb) return +1;
-      if (b[cur].sym == sym) {
-        if (aelt_cur >= 0 && (u32)aelt_cur == cur) aelt_kept = 1;
-        kand[wr++] = cur + 1u;
-        if (aelt_kept) aelt_cur = (i32)(cur + 1u);
-      } else if (aelt_cur >= 0 && (u32)aelt_cur == cur) {
-        aelt_cur = -1;
-      }
+  // Direct subterm search: walk a's preorder positions; at each i where
+  // a[i].sym == b[0].sym AND a[i].sz == b[0].sz, check the slice
+  // a[i..i+nb) against b[0..nb).  Simpler than the candidate-list
+  // approach -- no per-outer-step bookkeeping -- and faster when
+  // matches at b[0].sym are common (each candidate would otherwise pile
+  // up in the parallel scan).  i=0 is excluded for strict-subterm.
+  for (u32 i = 1; i + nb <= na; i++) {
+    if (a[i].sym != b[0].sym) continue;
+    if (a[i].sz  != b[0].sz)  continue;
+    u8 match = 1;
+    for (u32 j = 1; j < nb; j++) {
+      if (a[i + j].sym != b[j].sym) { match = 0; break; }
     }
-    nk = wr;
-    if (sym == b[0].sym) {
-      // Seed a new candidate starting fresh at b[0].  This match consumes
-      // the top symbol; cur=1 means "advance past b[0]".
-      if (nk < LPO_FLAT_KAND_CAP) kand[nk++] = 1u;
-    }
+    if (match) return +1;
   }
-  for (u32 r = 0; r < nk; r++) if (kand[r] == nb) return +1;
-  // No subterm hit either direction.  The symmetric VarMenge check (a's
-  // var set must contain b's; otherwise a > b is impossible) belongs here
-  // but a stricter version of this is already in lpo_pretest_varset which
-  // thvm_lpo calls first; leaving 0 here punts to lpo_rec.
   return 0;
 }
 
