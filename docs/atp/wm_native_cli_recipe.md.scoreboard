@@ -103,6 +103,27 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 153 — non-LPO skip-unchanged in rename_vars + nv_rewrite
+
+Continued the iter-152 hash-cons skip-unchanged sweep across the rest
+of the ATP code's term-rebuilding helpers:
+
+  - thvm_rename_vars: identity-rename short-circuit (offset==0); also
+    skip-unchanged in CTR (closed-term ground goal sides).
+  - nv_rewrite (thvm_normalize_vars second pass): identity-dense skip
+    (FVR's old id == its dense position) + skip-unchanged in CTR.
+
+Verified the remaining `term_new_ctr` sites:
+- thvm_rewrite_step, atp_ic_rewrite_step, atp_ri_build, atp_norm_memo
+  all already had the skip-unchanged pattern.
+- thvm_materialize, realize_many wnf rebuilds are JIT/schedule path,
+  not ATP.
+
+AndAssoc bench within noise (310-312 vs 308-313 prior).  These don't
+shift the AndAssoc rules/30s needle (the recursive walks are <1.5% of
+runtime each) but the savings hold for any ATP workload whose subst,
+unify, or alpha-renaming binds sparse.
+
 ### Iter 152 — non-LPO unify/subst skip-unchanged
 
 Attacked the non-LPO machinery for the first time.  Two general-purpose
