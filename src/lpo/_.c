@@ -435,9 +435,10 @@ u8 lpo_flat_some_arg_dominates(const KboFlatNode *a, u32 pa,
   return 0;
 }
 
-static LpoCmp lpo_flat_lex(const KboFlatNode *a, u32 pa,
-                           const KboFlatNode *b, u32 pb,
-                           const LpoConfig *cfg) {
+static inline __attribute__((always_inline))
+LpoCmp lpo_flat_lex(const KboFlatNode *a, u32 pa,
+                    const KboFlatNode *b, u32 pb,
+                    const LpoConfig *cfg) {
   u32 ca = pa + 1u, cb = pb + 1u;
   u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
   while (ca < ea && cb < eb) {
