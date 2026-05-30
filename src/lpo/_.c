@@ -356,6 +356,41 @@ typedef struct { u32 pa, pb; u32 epoch; u8 cmp; u8 side; } LpoFlatMemoEnt;
 static LpoFlatMemoEnt g_lpo_flat_memo[LPO_FLAT_MEMO_SIZE];
 static u32 g_lpo_flat_epoch = 0;
 
+// LPO-specific flatterm encoder.  Bypasses term_ctr_at's redundant
+// term_ctr_n call per child access (which costs an extra heap_read per
+// iteration).  Stores precedence directly in .w via the LpoConfig
+// precedence table -- the inner recursion reads a[pa].w instead of
+// indexing cfg->precedence[sym] per node.
+static u8 lpo_flat_encode_rec(Term t, const LpoConfig *cfg,
+                              KboFlatNode *out, u32 *pos) {
+  u32 here = *pos;
+  if (here >= KBO_FLAT_CAP) return 0;
+  *pos = here + 1u;
+  u32 tag = term_tag(t);
+  if (tag == TAG_FVR) {
+    out[here].sym = -(i32)(term_ext(t) + 1u);
+    out[here].w   = 0;
+    out[here].sz  = 1u;
+    return 1;
+  }
+  if (tag != TAG_CTR) return 0;
+  u32 lab = term_ext(t);
+  out[here].sym = (i32)lab;
+  out[here].w   = (lab < cfg->n_labels) ? (i32)cfg->precedence[lab] : 0;
+  // Cache the children base loc once -- term_ctr_at would re-read the
+  // arity cell via term_ctr_n per call.
+  u64 base = term_val(t);
+  Term n_cell = heap_read(base);
+  if (term_tag(n_cell) != TAG_NUM) { out[here].sz = 1u; return 1; }
+  u32 n = (u32)term_val(n_cell);
+  for (u32 i = 0; i < n; i++) {
+    Term child = heap_read(base + 1u + (u64)i);
+    if (!lpo_flat_encode_rec(child, cfg, out, pos)) return 0;
+  }
+  out[here].sz = *pos - here;
+  return 1;
+}
+
 static inline u32 lpo_flat_hash(u32 pa, u32 pb, u8 side) {
   u64 h = ((u64)pa * 0x9E3779B97F4A7C15ull) ^ ((u64)pb * 0xBF58476D1CE4E5B9ull);
   h ^= ((u64)side * 0x94D049BB133111EBull);
@@ -629,14 +664,9 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
       if (e2->epoch == g_lpo_epoch && e2->s == s && e2->t == t)
         return (LpoCmp)(i8)e2->cmp;
     }
-    // Use LpoConfig's precedence as kbo_flat_encode's `weights` so each
-    // KboFlatNode.w holds the symbol's precedence directly -- the inner
-    // recursion avoids re-indexing cfg->precedence[sym] per node.
-    KboConfig stub = { .weights = cfg->precedence, .precedence = cfg->precedence,
-                       .n_labels = cfg->n_labels, .var_weight = 0u };
     u32 na = 0u, nb = 0u;
-    if (kbo_flat_encode(s, &stub, g_lpo_flat_a, &na) &&
-        kbo_flat_encode(t, &stub, g_lpo_flat_b, &nb)) {
+    if (lpo_flat_encode_rec(s, cfg, g_lpo_flat_a, &na) &&
+        lpo_flat_encode_rec(t, cfg, g_lpo_flat_b, &nb)) {
       // Vortest reuses the encode (zero extra cost).
       if (vortest_gate) {
         int r1 = lpo_pretest_groesser_flat(g_lpo_flat_a, na,
