@@ -103,6 +103,22 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 167 — code-level opts at structural floor
+
+Profile after iter-162-166 wins shows:
+  - lpo_flat_rec_compute: 1271 samples (LPO compare)
+  - thvm_match: 275 samples (4.4%, hot in bwd_subsume's per-rule scan)
+  - lpo_flat_rec wrapper: 197
+  - lpo_flat_encode_rec: 132
+
+Tried:
+  - top-symbol fast-reject in atp_rule_subsumes_oriented: noise
+    (419-420 vs 423) -- thvm_match already does the check internally
+  - drop __builtin_expect on var case in compute: 422-423 (noise)
+
+Both reverted.  At the current preset's 423 rules / 30s baseline,
+direct code-level opts on the hot path are below noise.
+
 ### Iter 166 — additional parameter sweeps, no new wins
 
 Continued the per-flag isolation sweep:
