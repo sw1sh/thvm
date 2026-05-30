@@ -103,6 +103,27 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 147 — drop redundant lpo_eq + arity-2 lex unroll
+
+| Commit                                            | Rules | Wall | Delta |
+|---------------------------------------------------|-------|------|-------|
+| iter-146 final                                    |  307  | 30s  |  --   |
+| drop top-level lpo_eq before flatrec              |  307  | 30s  | noise |
+| unroll lex compare's arity-2 fast path            |  310  | 30s  | +1.0% |
+
+Cumulative iter-147: +1.0% from the lex unroll.  Total closure 57.4%.
+
+The lpo_eq removal was a code-cleanup (was running a recursive Term-tree
+walk redundantly before slice_eq inside lpo_flat_rec_compute).  The lex
+unroll's win comes from exposing the loop body as straight-line code so
+gcc can interleave the two memo-wrapped lpo_flat_rec calls with no
+branch in between -- per-iteration cost shrinks below what the loop
+counter increment costs.
+
+Tried and reverted: always_inline lpo_flat_rec wrapper (recursive
+function, compiler bails), unroll some_arg_dom + dominates_all_args
+(no measurable gain on top of compile-driven inlining).
+
 ### Iter 146 — direct subterm scan + branch hints
 
 | Commit                                            | Rules | Wall | Delta |
