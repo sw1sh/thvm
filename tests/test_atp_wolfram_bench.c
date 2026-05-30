@@ -455,6 +455,16 @@ int main(int argc, char **argv) {
       if (r > 0) thvm_atp_set_selection_ratio(s, r);
     }
   }
+  // THVM_ATP_GOAL_INTERLEAVE=<N>: enable goal-direction interleaving --
+  // every N-th CP selection picks the CP with the smallest goal-matching
+  // weight instead of the smallest plain weight.  0 = off.
+  {
+    const char *gi = getenv("THVM_ATP_GOAL_INTERLEAVE");
+    if (gi != NULL && gi[0] != '\0') {
+      u32 r = (u32)atoi(gi);
+      thvm_atp_set_goal_interleave(s, r);
+    }
+  }
 
   // THVM_ATP_GROUND_JOIN=1 / THVM_ATP_CONNECT=1: sound CP-volume
   // reducers (Waldmeister Grundzusammenfuehrbar / Bachmair-Dershowitz
