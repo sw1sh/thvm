@@ -276,9 +276,10 @@ fn void thvm_lpo_set_persist(u8 on) { g_lpo_persist = on ? 1u : 0u; }
 
 #define LPO_FLAT_KAND_CAP 256
 
-static int lpo_pretest_groesser_flat(const KboFlatNode *a, u32 na,
-                                     const KboFlatNode *b, u32 nb,
-                                     const LpoConfig *cfg) {
+static inline __attribute__((always_inline))
+int lpo_pretest_groesser_flat(const KboFlatNode *a, u32 na,
+                              const KboFlatNode *b, u32 nb,
+                              const LpoConfig *cfg) {
   if (na == 0 || nb == 0) return 0;
   // VortestLPOGroesserVar.
   if (a[0].sym < 0) return -1;            // var never strictly dominates
