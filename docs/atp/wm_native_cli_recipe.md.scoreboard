@@ -103,6 +103,27 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 155 — LPO-specific encoder skips term_ctr_at's redundant heap_read
+
+| Commit                                            | Rules | Wall | Delta |
+|---------------------------------------------------|-------|------|-------|
+| iter-153 final                                    | 308-313| 30s |  --   |
+| local LPO encoder, direct heap_read for children  |  315  | 30s  | +1.5% |
+| branch hints on cold paths                        |  315  | 30s  | noise |
+
+The encoder win: kbo_flat_encode called term_ctr_at per child, which
+internally re-reads the arity cell via term_ctr_n -- an extra heap_read
+per iteration.  Local lpo_flat_encode_rec caches base = term_val(t) once
+and reads each child via heap_read(base + 1 + i) directly.
+
+Also stores precedence into .w via cfg->precedence[lab] directly
+(was going through kbo_flat_encode's stub cfg with weights=precedence
+indirection).
+
+AndAssoc bench: 315 rules / 30s sustained across 3 runs (was 308-313
+noise band on the kbo_flat_encode path).  Cumulative ~+60% throughput
+from iter-136 baseline.
+
 ### Iter 154 — no successful opts
 
 Tried thvm_match pointer-identity shortcut (`if (pattern == term) return 1;`
