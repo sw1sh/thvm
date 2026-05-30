@@ -552,7 +552,9 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
   // lex.
   if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
   if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
-  if (a[pa].sz != b[pb].sz) return LPO_UN;
+  // Same head symbol implies same arity (signature constraint), but
+  // subtree sizes (`sz`) may differ when children have different shapes
+  // -- so DO NOT short-circuit on sz mismatch.  lex compare handles it.
   u32 diff_a = 0, diff_b = 0;
   LpoCmp lex = lpo_flat_lex_diff(a, pa, b, pb, cfg, &diff_a, &diff_b);
   if (lex == LPO_EQ) return LPO_EQ;
@@ -564,8 +566,7 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
     if (lpo_flat_dominates_from(a, pa, b, pb, diff_b, cfg)) return LPO_GT;
     return LPO_UN;
   }
-  // lex == LPO_LT: symmetric skip starting at b's diff position in a's
-  // coords.
+  // lex == LPO_LT or LPO_UN
   if (lpo_flat_dominates_from(b, pb, a, pa, diff_a, cfg)) return LPO_LT;
   return LPO_UN;
 }
