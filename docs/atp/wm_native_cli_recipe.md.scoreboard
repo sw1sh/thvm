@@ -103,6 +103,28 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 159 — CP weight mode A/B post-fix
+
+Re-tested CP weight modes against the iter-157/158 sound baseline:
+
+  weight=0 (ADD):  286 rules / 30s  -- BEST raw throughput
+  weight=2 (ORD):  287 rules / 30s
+  weight=3 (GT):   134 rules / 30s
+  weight=4 (Mix):  217 rules / 30s  -- WM-matched config (current)
+  weight=5 (Mix2): 155 rules / 30s
+
+ADD/ORD beat Mix by +32% on AndAssoc under sound LPO -- the simpler
+symbol-count weight orders CPs more effectively for this workload
+than Mix's LPO-orient-then-mix.  But ADD/ORD don't match WM's
+trajectory (WM uses Mix in the Waldmeister preset).
+
+So Mix=4 is the right choice for the "match WM" goal that this work
+is targeting.  Noting ADD/ORD for a separate "raw throughput" config
+that doesn't try to mirror Waldmeister.
+
+Also re-tried memcmp slice_eq -- still within noise on AndAssoc;
+reverted to per-element loop.
+
 ### Iter 158 — A/B verify post-fix that earlier opts are still net-positive
 
 Re-tested the major iter-138-156 optimizations against the sound
