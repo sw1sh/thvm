@@ -103,6 +103,17 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 161 — exhausted preset-flag combos
+
+Tested SOS, LRS=0, CP_FIFO_TIEBREAK, AUTO_MAXW=10/20/50 -- all within
+noise of 231-233 rules / 30s baseline.
+
+Long bench (600s wall) confirms the rate-decay curve: 232 r/30s ->
+265 r/60s -> 318 r/120s -> 480 r/600s.  At 600s the rate has dropped
+to ~0.8 r/s as the queue grows; WM cracks at 1673 rules in 10.4s
+sustained ~161 r/s.  Without orders-of-magnitude per-step
+improvements, thvm can't crack AndAssoc at this rate.
+
 ### Iter 160 — CP_SET_INTERREDUCE wired into WALDMEISTER preset
 
 THVM_ATP_CP_SET_IR=1 was a manual override; the WALDMEISTER preset
