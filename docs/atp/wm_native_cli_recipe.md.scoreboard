@@ -103,6 +103,32 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 164 — AUTO_MAXW=30 + SEL_RATIO=101 across-goal wins
+
+Two more preset additions tested for cross-goal generalization:
+
+**AUTO_MAXW=30** (CP-weight bound base, slope=2 default):
+  - AndAssoc: 306 -> 335 (+9.5%)
+  - wolfram:  288 -> 326 (+13%)
+  - mccune:   798 -> 798 (neutral)
+  - robbins:  207 -> 207 (neutral)
+  All non-negative.  Default-on.
+
+**selection_ratio=101** (FIFO/weight pick ratio, up from WM's default 51):
+  - AndAssoc: 335 -> 382 (+14%)
+  - wolfram:  326 -> 350 (+7%)
+  - mccune:   798 -> 802 (neutral)
+  - robbins:  207 -> 270 (+30%)
+  All non-negative.  WM-allowed value (inside {10, 50, 100, 200}).
+
+State: 382 rules / 30s on AndAssoc, default preset.  Cumulative
+honest improvement vs iter-136 baseline (195): +96% (195 -> 382).
+
+Lesson: same per-flag isolation pattern as iter 162.  AUTO_MAXW was
+opt-in (iter 163 dismissed it as workload-specific based on the
+"AndAssoc-15 hurts wolfram" measurement), but base=30 is the cross-
+goal-safe value that the workload-specific 15 obscured.
+
 ### Iter 163 — MNF in preset + AUTO_MAXW workload-specific finding
 
 Continuing iter-162's per-flag isolation pattern:
