@@ -103,6 +103,26 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 156 — heap_read tightening sweep across all ATP recursive walks
+
+Applied the iter-155 lpo_flat_encode_rec pattern (direct heap_read for
+arity + children, bypasses term_ctr_at's redundant arity refetch) to
+the remaining ATP Term-walking helpers:
+
+  - thvm_unify_apply (unify/_.c)
+  - thvm_subst_apply (rewrite/_.c)
+  - thvm_match (rewrite/_.c -- hot in atp_ft_unorient_step candidate loop)
+  - thvm_rename_vars (unify/_.c -- per-CP rule rename)
+  - thvm_unify (unify/_.c -- CP-gen unification of two rule LHSs)
+  - unify_occurs (unify/_.c -- occurs check during unification)
+  - nv_rewrite (unify/_.c -- thvm_normalize_vars second pass)
+
+AndAssoc within noise (315-316 vs 315 prior) since these helpers
+collectively account for <5% of runtime; commit for the per-call
+cycle savings.  Together with the iter-155 LPO encoder, all ATP-side
+recursive Term walks now use direct heap_read instead of going through
+term_ctr_at's internal term_ctr_n refetch.
+
 ### Iter 155 — LPO-specific encoder skips term_ctr_at's redundant heap_read
 
 | Commit                                            | Rules | Wall | Delta |
