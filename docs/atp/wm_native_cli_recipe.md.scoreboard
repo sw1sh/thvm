@@ -103,6 +103,25 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 148 — cold-mark unequal-precedence branches
+
+For Sheffer (single internal symbol nand) and most equational theories
+with one internal function symbol, the recursive lpo_flat_rec_compute
+calls almost always see prec_a == prec_b -- only at leaf positions
+involving constants does unequal precedence arise.
+
+Tagging both unequal-prec branches as cold via __builtin_expect lets
+gcc lay the equal-prec fall-through as straight-line code with no
+taken branch on the hot path.
+
+AndAssoc LPO+Mix+Wald+Flatrec: 315 rules / 30s (was 310, noise ±3).
++1.6%.  Cumulative ~60% closure of the 24x per-rule gap to wmcli.
+
+Tried and reverted: hints on the equal-prec case (1) some_arg_dom
+calls (they fire OFTEN during completion -- my hint was wrong-direction),
+and on lex == LPO_EQ (path is dead-code reachable but rarely fires
+in practice -- noise rather than win).
+
 ### Iter 147 — drop redundant lpo_eq + arity-2 lex unroll
 
 | Commit                                            | Rules | Wall | Delta |
