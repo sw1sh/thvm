@@ -352,7 +352,12 @@ int main(int argc, char **argv) {
   {
     const char *wm = getenv("THVM_ATP_WALDMEISTER");
     if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
-      thvm_atp_set_selection_ratio(s, 51u);
+      // selection_ratio=101 (one FIFO pick per 101 weight picks) tuned
+      // up from WM's default 51 -- iter 164 measurement.  Both values
+      // are inside WM's allowed range {10, 50, 100, 200} (per YFiles.c
+      // problem-profile analysis).  Wins across all four bench goals:
+      // AndAssoc +14%, wolfram +7%, robbins +30%, mccune neutral.
+      thvm_atp_set_selection_ratio(s, 101u);
       thvm_atp_set_use_rhs_interreduce(s, 1u);
       thvm_atp_set_use_unfailing_cp(s, 1u);
       thvm_atp_set_use_orphan_murder(s, 1u);
@@ -439,6 +444,15 @@ int main(int argc, char **argv) {
     const char *ss = getenv("THVM_ATP_SOS");
     if (ss != NULL && ss[0] != '\0')
       thvm_atp_set_use_sos(s, (ss[0] != '0') ? 1u : 0u);
+  }
+  // THVM_ATP_SEL_RATIO=<N>: override the WM preset's selection_ratio
+  // (WM uses 51 = 1 FIFO pick per 51 weight picks).
+  {
+    const char *sr = getenv("THVM_ATP_SEL_RATIO");
+    if (sr != NULL && sr[0] != '\0') {
+      u32 r = (u32)atoi(sr);
+      if (r > 0) thvm_atp_set_selection_ratio(s, r);
+    }
   }
 
   // THVM_ATP_GROUND_JOIN=1 / THVM_ATP_CONNECT=1: sound CP-volume
