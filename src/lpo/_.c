@@ -474,8 +474,7 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
   // the strict-subterm cases without paying the cost of the some_arg_dom
   // recursion below.  Mirrors WM's LP_LPOGroesser structure where each
   // recursive call enters via LV_VortestLPOGroesser before the
-  // some-arg-dominates dispatch.  Slice the two arrays implicitly via
-  // (pa, .sz)-relative addressing.
+  // some-arg-dominates dispatch.
   {
     int r1 = lpo_pretest_groesser_flat(a + pa, a[pa].sz,
                                        b + pb, b[pb].sz, cfg);
@@ -484,20 +483,28 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
                                        a + pa, a[pa].sz, cfg);
     if (r2 > 0) return LPO_LT;
   }
-  if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
-  if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
-
-  // KboFlatNode.w was loaded with cfg->precedence at encode time.
+  // Precedence dispatch first (WM's structure): when precs differ, case
+  // (2) dominates_all_args resolves directly; case (1) only fires for
+  // the OTHER direction (children of the smaller-prec side might still
+  // dominate via deeper subterm).  When precs are equal, lex + case (3)
+  // applies and case (1) some_arg_dom is checked symmetrically.
   i32 prec_a = a[pa].w;
   i32 prec_b = b[pb].w;
   if (prec_a > prec_b) {
     if (lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
+    // case (1) symmetric: some child of b might still dominate a (rare).
+    if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
     return LPO_UN;
   }
   if (prec_a < prec_b) {
     if (lpo_flat_dominates_all_args(b, pb, a, pa, cfg)) return LPO_LT;
+    if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
     return LPO_UN;
   }
+  // Equal precedence: case (1) both directions can fire, then case (3)
+  // lex.
+  if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
+  if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
   if (a[pa].sz != b[pb].sz) return LPO_UN;
   LpoCmp lex = lpo_flat_lex(a, pa, b, pb, cfg);
   if (lex == LPO_EQ) return LPO_EQ;
