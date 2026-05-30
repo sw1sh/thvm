@@ -103,6 +103,23 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 143 — top-level memo skip
+
+The top-level `lpo_flat_rec(g_lpo_flat_a, 0, g_lpo_flat_b, 0)` always
+hashed to memo slot 0, so every thvm_lpo call paid full memo lookup
+overhead on a single hot slot that the recursive descent kept
+overwriting.  Bypass it -- call lpo_flat_rec_compute directly at the
+top -- and let only the recursive children memoize.
+
+AndAssoc LPO+Mix+Wald+Flatrec: 259 rules / 30s (was 253).  +2.4%.
+Cumulative 31.5% closure of the 24x gap.  Profile post-skip:
+lpo_flat_rec_compute +0 dropped from 1014 -> 943 samples; the
+lpo_flat_rec wrapper +0 dropped from 1014 -> 85.  The freed cycles
+went into raising rule throughput.
+
+Also forced always_inline on lpo_flat_lex for consistency with the
+other inlined helpers (no measurable AndAssoc impact).
+
 Profile-after-optimization (atp_ft_unorient_step subtree, 8s sample):
   atp_ft_unorient_step @+936         3003  (82% of unorient step)
   → atp_compare @+1972               2467
