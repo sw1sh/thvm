@@ -192,7 +192,17 @@ static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
   return on;
 }
 static int materialized_loc_span_holds(void) {
-  return MATERIALIZE_JIT_SPAN_DEPTH > 0 && MATERIALIZE_JIT_DEDUP_ENABLED();
+  // CPU-only for now.  The cross-realize buffer reuse is verified correct on
+  // CPU (beautiful_mnist JIT bit-exact, 17% faster), but on the CUDA backend
+  // a shared buffer read back by a later realize is still corrupted
+  // (loss -0.045 vs 2.302) by a buffer-lifecycle hazard that is NOT the CUDA
+  // Graph, NOT the jit-pin, and NOT the arena recycle alone (forcing legacy
+  // allocs only changed the wrong value, didn't fix it).  Until that
+  // CUDA-specific corruption is root-caused, the span is inert on non-CPU
+  // backends so THVM_JIT_REALIZE_DEDUP=1 is a safe no-op there rather than a
+  // silent-wrong-answer footgun.
+  return MATERIALIZE_JIT_SPAN_DEPTH > 0 && MATERIALIZE_JIT_DEDUP_ENABLED()
+         && CURRENT_BACKEND == &CPU_BACKEND;
 }
 fn void materialized_loc_clear(void);   // fwd decl (span_end calls it)
 fn void materialized_loc_jit_span_begin(void) {
@@ -694,6 +704,18 @@ static void arena_sort_events(ArenaEvent *ev, u32 n) {
 }
 
 static int arena_boundary_is_plannable(u32 ord_idx) {
+  // During a JIT-capture dedup span, a kernel output materialized in one
+  // realize may be REUSED by a later realize of the same step (the whole
+  // point of the span -- forward activations read back by the grad/optim
+  // realizes).  The per-realize arena plans lifetimes WITHIN one realize,
+  // so it would recycle such a buffer's slot mid-step and corrupt the
+  // cross-realize read (the JIT pin keeps the buf_id alive but the arena
+  // already reused its bytes).  Force every boundary to a legacy
+  // (non-arena, non-recycled) alloc for the span; with the jit-capture pin
+  // (survives pool-rollback) the shared outputs stay live AND valid across
+  // all of the step's realizes.  Trades within-step arena recycling for
+  // correctness; the extra peak is bounded and the GPU has the headroom.
+  if (materialized_loc_span_holds()) return 0;
   u64 loc = BOUNDARY_ORDER[ord_idx];
   u32 binfo = bufferize_info_find(loc);
   if (binfo == 0xFFFFFFFFu) return 0;
