@@ -38,11 +38,20 @@ fn u8 thvm_match(Term pattern, Term term, RewriteSubst *subst) {
     case TAG_CTR: {
       if (term_tag(term) != TAG_CTR) return 0;
       if (term_ext(pattern) != term_ext(term)) return 0;
-      u32 np = term_ctr_n(pattern);
-      u32 nt = term_ctr_n(term);
+      // Direct heap_read for both pattern and term's arity + children
+      // (avoids term_ctr_at's redundant arity refetch per call).
+      u64 pbase = term_val(pattern);
+      u64 tbase = term_val(term);
+      Term pn_cell = heap_read(pbase);
+      Term tn_cell = heap_read(tbase);
+      if (term_tag(pn_cell) != TAG_NUM || term_tag(tn_cell) != TAG_NUM) return 0;
+      u32 np = (u32)term_val(pn_cell);
+      u32 nt = (u32)term_val(tn_cell);
       if (np != nt) return 0;
       for (u32 i = 0; i < np; i++) {
-        if (!thvm_match(term_ctr_at(pattern, i), term_ctr_at(term, i), subst)) return 0;
+        Term pc = heap_read(pbase + 1u + (u64)i);
+        Term tc = heap_read(tbase + 1u + (u64)i);
+        if (!thvm_match(pc, tc, subst)) return 0;
       }
       return 1;
     }
