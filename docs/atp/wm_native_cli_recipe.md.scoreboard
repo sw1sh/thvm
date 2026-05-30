@@ -103,6 +103,21 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 158 — A/B verify post-fix that earlier opts are still net-positive
+
+Re-tested the major iter-138-156 optimizations against the sound
+post-fix baseline (217 rules / 30s):
+
+  - Per-level Vortest in compute: still +3% (215 -> 217)
+  - AlleDiff skip (dominates_from with diff_a/diff_b): still +1%
+  - always_inline lex_diff: still beneficial
+
+All earlier algorithmic wins remain real under sound LPO; the +60%
+inflation was specifically the sz check's wrong-UN shortcut.
+
+Real cumulative: 217-218 rules / 30s vs iter-136 baseline 195 = +11%
+honest throughput improvement.  Gap to wmcli's 161 r/s = ~22x.
+
 ### Iter 157 — CRITICAL fix + honest baseline
 
 Re-ran test_kbo (which I'd been skipping after most commits, only
