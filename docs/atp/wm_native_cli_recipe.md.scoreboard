@@ -103,6 +103,53 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 145 — per-level Vortest unlocks +16%
+
+The big iter-142 conclusion ("LPO compare at structural floor") was
+wrong.  Re-reading WM's LP_LPOGroesser uncovered a missed pattern: WM
+runs LV_VortestLPOGroesser at EVERY recursion entry, catching strict-
+subterm cases without paying the full case-(1) some_arg_dominates +
+recursive descent at that level.  My Vortest was only at the top of
+thvm_lpo, so deeper levels were re-doing all the case-(1) work.
+
+Four iter-145 commits stacking on AndAssoc LPO+Mix+Wald+Flatrec:
+
+| Commit                                            | Rules | Wall | Delta |
+|---------------------------------------------------|-------|------|-------|
+| iter-143 baseline                                 |  259  | 30s  |  --   |
+| per-level Vortest in lpo_flat_rec_compute         |  264  | 30s  | +1.9% |
+| fast-fail Vortest when na <= nb                   |  277  | 30s  | +4.9% |
+| precedence dispatch before case (1) (WM order)    |  279  | 30s  | +0.7% |
+| always_inline lpo_pretest_groesser_flat           |  291  | 30s  | +4.3% |
+
+Cumulative iter-145: +12.4% over iter-143; 47.7% closure of the 24x
+gap to wmcli's 161 r/s.  Tests 135624/135624 + LPO 12/12 stable.
+
+The fast-fail (`na <= nb` rules out b-strict-subterm-of-a in O(1))
+was the biggest single win.  The always_inline was second -- without
+it gcc emitted lpo_pretest_groesser_flat as a frame-setup callee at
+every recursion level.
+
+Profile after stack:
+  lpo_flat_rec_compute (entry)              624 samples
+  lpo_flat_rec_compute (+1456 mid-body)     310
+  lpo_flat_rec_compute (+1820)              284
+  lpo_flat_rec wrapper (memo path)          155
+  lpo_flat_rec_compute (+3684 deep)         117
+  thvm_unify_apply                           61
+
+Compute is now a single ~4KB function with all helpers inlined; the
+recursive descent shows as offsets into ONE function body rather than
+a fan-out of separate callees.  I-cache pressure is a concern but
+un-inlining lex regressed (-1% rules) so the locality win outweighs
+the size cost.
+
+Tried but reverted: simpler memo hash (more collisions, -6.5%),
+__attribute__((hot)) on compute (compiler picks worse schedule,
+-2.3%), cross-call encode cache (no hit on Sheffer workload),
+memcmp slice_eq (call overhead beats loop for tiny slices), un-
+inline lex (-1%).
+
 ### Iter 143 — top-level memo skip
 
 The top-level `lpo_flat_rec(g_lpo_flat_a, 0, g_lpo_flat_b, 0)` always
