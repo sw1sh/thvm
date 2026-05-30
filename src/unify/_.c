@@ -110,12 +110,17 @@ fn Term thvm_unify_apply(Term t, const RewriteSubst *subst) {
   switch (term_tag(t)) {
     case TAG_FVR: return t;  // unbound -- leave as-is
     case TAG_CTR: {
-      u32 n = term_ctr_n(t);
+      // Read arity and base once via direct heap_read -- term_ctr_at
+      // would re-fetch the arity cell per call.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
       if (n > REWRITE_MAX_ARITY) return t;
       Term children[REWRITE_MAX_ARITY];
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
-        Term orig = term_ctr_at(t, i);
+        Term orig = heap_read(base + 1u + (u64)i);
         children[i] = thvm_unify_apply(orig, subst);
         if (children[i] != orig) changed = 1;
       }
