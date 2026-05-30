@@ -65,9 +65,15 @@ fn Term thvm_subst_apply(Term t, const RewriteSubst *subst) {
       u32 n = term_ctr_n(t);
       if (n > REWRITE_MAX_ARITY) return t;
       Term children[REWRITE_MAX_ARITY];
+      u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
-        children[i] = thvm_subst_apply(term_ctr_at(t, i), subst);
+        Term orig = term_ctr_at(t, i);
+        children[i] = thvm_subst_apply(orig, subst);
+        if (children[i] != orig) changed = 1;
       }
+      // Hash-cons skip: if no child rewrote, reuse original t pointer
+      // (saves a term_new_ctr allocation per unchanged subtree).
+      if (!changed) return t;
       return term_new_ctr(term_ext(t), children, n);
     }
     default: return t;
