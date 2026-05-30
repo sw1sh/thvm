@@ -480,13 +480,15 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
   // applies and case (1) some_arg_dom is checked symmetrically.
   i32 prec_a = a[pa].w;
   i32 prec_b = b[pb].w;
-  if (prec_a > prec_b) {
+  // For most signatures (e.g. Sheffer = single nand internal) precedences
+  // are equal on the dominant recursive path; mark unequal-prec as cold.
+  if (__builtin_expect(prec_a > prec_b, 0)) {
     if (lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
     // case (1) symmetric: some child of b might still dominate a (rare).
     if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
     return LPO_UN;
   }
-  if (prec_a < prec_b) {
+  if (__builtin_expect(prec_a < prec_b, 0)) {
     if (lpo_flat_dominates_all_args(b, pb, a, pa, cfg)) return LPO_LT;
     if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
     return LPO_UN;
