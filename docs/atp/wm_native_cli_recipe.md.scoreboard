@@ -103,6 +103,15 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 154 — no successful opts
+
+Tried thvm_match pointer-identity shortcut (`if (pattern == term) return 1;`
+at entry).  UNSOUND for repeat-occurrence variables: pattern f(X, X)
+matched against f(A, B) would return 1 on the inner X match instead of
+failing the kbo_eq(A, B) check.  Reverted.
+
+State holds at 309-311 rules / 30s.
+
 ### Iter 153 — non-LPO skip-unchanged in rename_vars + nv_rewrite
 
 Continued the iter-152 hash-cons skip-unchanged sweep across the rest
