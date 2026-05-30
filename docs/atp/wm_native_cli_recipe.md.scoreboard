@@ -103,6 +103,22 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 166 — additional parameter sweeps, no new wins
+
+Continued the per-flag isolation sweep:
+
+  - SEL_RATIO further: 161=320, 181=317, 201=383, 251=384, 301=432
+    (slight at AndAssoc but -22% on wolfram).  141 stays optimal.
+  - AUTO_MAXW resweep on SEL=141 baseline: 30 still optimal (422).
+  - GOAL_INTERLEAVE = {1, 3, 5, 10, 20, 50, 100}: all regress.
+    Wired env handler for future A/B work.
+  - RANDOM_RATIO = {5, 10, 20, 50}: all regress significantly.
+  - RIGHT_REDUCE: noise (420-421 vs 423).
+  - CP_SET_IR off: noise (422-423).
+
+State holds at iter-165's 423 rules / 30s.  Cumulative honest
+improvement: +117%.
+
 ### Iter 165 — SEL_RATIO=141 tuned further
 
 Finer SEL_RATIO sweep around iter-164's 101 found a higher peak at 141:
