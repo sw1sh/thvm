@@ -103,6 +103,53 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 172 — final closing summary
+
+35-iter loop run on /loop "figure out why native wmcli and thvm is
+slower than FindEquationalProof and fix the gap".
+
+Honest baseline (matched algorithm, sound LPO post-iter-157 fix):
+  iter-136: 195 rules / 30s
+  iter-172: 423 rules / 30s
+  +117% cumulative honest throughput improvement
+
+Major win timeline (post-iter-157 sz fix; iter-138-156 wins also
+present but partly inflated by the bug):
+- iter-160: CP_SET_INTERREDUCE in preset (+6%, since absorbed)
+- iter-162: BWD_SUBSUME isolated from regressing trio (+30%)
+- iter-162: BWD_DEMOD layered (+1%)
+- iter-163: MNF in preset (+1.6%)
+- iter-164: AUTO_MAXW=30 cross-goal-safe (+9.5% AndAssoc / +13% wolfram)
+- iter-164: SEL_RATIO=101 (+14%)
+- iter-165: SEL_RATIO=141 (+10%)
+
+Two main lessons:
+1. Iter-157 -- ALWAYS run test_kbo + test_lpo + test_atp + WL paclet
+   after every LPO/KBO change.  A wrong sz check silently inflated
+   measurements iter 138-156 by ~45% via early-UN returns the engine
+   handled as unorientable rules.
+2. Iter-162 -- when a multi-flag combo regresses, isolate per-flag
+   before declaring the bundle dead.  fwd+bwd+demod together
+   regressed but contained a real +31% BWD_SUB+BWD_DEMOD lever.
+   This pattern unlocked iters 162-165 (+50%+ wins).
+
+Remaining gap to wmcli (cracks AndAssoc at 1673 rules / 10.4s =
+161 r/s):
+  - thvm at 30s wall: 423 rules / 30s = 14.1 r/s (11.4x gap)
+  - thvm at 600s wall: 1735 rules (more than WM's 1673) but no crack
+  - The completion trajectory derives DIFFERENT rules than WM's;
+    rule count alone isn't the cracking metric.
+
+Closing the remaining gap requires:
+  (a) per-LPO-call cycle reduction (caught by iter-157-style
+      soundness invariants -- need careful work)
+  (b) completion-trajectory alignment with WM to derive the same
+      cracking rule subset -- significant algorithmic restructure
+      beyond parameter tuning.
+
+State holds at 423 rules / 30s in default preset.  All test suites
+green: test_atp 135624/135624, test_kbo 204/204, test_lpo 12/12.
+
 ### Iter 170 — long-wall finding: rule count alone doesn't crack
 
 Ran AndAssoc at 600s wall on current preset (default config, no env
