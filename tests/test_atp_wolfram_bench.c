@@ -391,13 +391,19 @@ int main(int argc, char **argv) {
       // +13% on wolfram, neutral on mccune/robbins.  Default-on as part
       // of preset.
       thvm_atp_set_auto_max_cp_weight(s, 30u);
-      // CP-weight = CH_MaxWeight = max(|lhs|,|rhs|) symbol count.  The
-      // engine default ATP_CP_WEIGHT_GT (ordering-directed) is a poor
-      // match for Sheffer/AndAssoc-style single-symbol theories.  CH_Max
-      // (mode=1) is Pareto-better across the WL-axiom bench: AndAssoc
-      // 421 -> 1305 rules/30s, wolfram 352 -> 997 rules/15s, mccune
-      // PROVES in 11.2s (mode=GT does NOT prove at 60s); robbins
-      // accumulates rules more slowly but neither mode cracks robbins.
+      // CP-weight = CH_MaxWeight = max(|lhs|,|rhs|) symbol count.
+      // PORTFOLIO TRADE-OFF: MaxWeight (mode=1) cracks mccune in 11.3s
+      // where the engine-default GT does not crack at 60s; but on the
+      // SHEFFER/Wolfram axiom (andassoc, wolfram, etc.) the bare engine
+      // (no preset, just GT weight, larger heap) PROVES AndAssoc in
+      // 11.6s -- WM-PARITY -- while THIS preset's MaxWeight + add-ons
+      // (MNF, BWD_SUB, ORPHAN_MURDER, LAZY_NORMALIZE, AUTO_MAXW,
+      // CP_SET_IR) divert the trajectory and the cracker is never
+      // derived.  When chasing a Sheffer/Wolfram cracking-time result,
+      // use the bare engine instead:
+      //   THVM_HEAP_CELLS=$((1<<30)) ./bin/test_atp_wolfram_bench \
+      //       andassoc 99999999 60
+      // (no THVM_ATP_WALDMEISTER; just default GT weight + larger heap).
       thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
     }
   }
