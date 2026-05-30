@@ -62,12 +62,17 @@ fn Term thvm_subst_apply(Term t, const RewriteSubst *subst) {
       return t;
     }
     case TAG_CTR: {
-      u32 n = term_ctr_n(t);
+      // Direct heap_read for arity + children (avoids term_ctr_at's
+      // redundant arity refetch per call).
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
       if (n > REWRITE_MAX_ARITY) return t;
       Term children[REWRITE_MAX_ARITY];
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
-        Term orig = term_ctr_at(t, i);
+        Term orig = heap_read(base + 1u + (u64)i);
         children[i] = thvm_subst_apply(orig, subst);
         if (children[i] != orig) changed = 1;
       }
