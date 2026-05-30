@@ -80,15 +80,22 @@ fn u8 thvm_unify(Term s, Term t, RewriteSubst *subst) {
 // be unified without variable-name collisions.  Stage 4 uses this to
 // rename rule_j's variables apart from rule_i's before the overlap.
 fn Term thvm_rename_vars(Term t, u32 offset) {
+  if (offset == 0) return t;  // identity rename -- no work needed
   switch (term_tag(t)) {
     case TAG_FVR: return term_new_fvr(term_ext(t) + offset);
     case TAG_CTR: {
       u32 n = term_ctr_n(t);
       if (n > REWRITE_MAX_ARITY) return t;
       Term children[REWRITE_MAX_ARITY];
+      u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
-        children[i] = thvm_rename_vars(term_ctr_at(t, i), offset);
+        Term orig = term_ctr_at(t, i);
+        children[i] = thvm_rename_vars(orig, offset);
+        if (children[i] != orig) changed = 1;
       }
+      // If t had no variables, every child returned itself -- avoid the
+      // wasted term_new_ctr (closed-term case, e.g. ground goal sides).
+      if (!changed) return t;
       return term_new_ctr(term_ext(t), children, n);
     }
     default: return t;
