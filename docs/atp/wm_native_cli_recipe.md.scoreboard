@@ -103,6 +103,26 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 163 — MNF in preset + AUTO_MAXW workload-specific finding
+
+Continuing iter-162's per-flag isolation pattern:
+
+  - MNF goal-directed front search: +1.6% (304 -> 309-311 rules)
+    -- WM standard; gated against lazy_normalize at the push site so
+    the combination is sound.
+  - SOS (Set-of-Support): -1.6% (regresses to 304); now wired as opt-in
+    THVM_ATP_SOS env var, NOT in preset.
+  - GROUND_JOIN / RIGHT_REDUCE / CONNECT: all within noise; not added.
+  - AUTO_MAXW=15: +33% on AndAssoc (309 -> 410-412 rules) but -7% on
+    wolfram goal -- WORKLOAD-SPECIFIC, stays opt-in via env not preset.
+
+State (default preset, no extra env): 309-311 rules / 30s sustained.
+Cumulative honest improvement vs iter-136 baseline (195): +59%.
+
+State (default preset + THVM_ATP_AUTO_MAXW=15): 410-412 rules / 30s
+on AndAssoc specifically (cumulative +110% on this workload).
+Note: not generalizable to other goals.
+
 ### Iter 162 — BWD_SUB + BWD_DEMOD isolated +31%
 
 Iter 160 had tried fwd_sub + bwd_sub + bwd_demod TOGETHER and observed
