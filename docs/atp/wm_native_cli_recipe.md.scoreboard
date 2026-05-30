@@ -103,6 +103,35 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 149 — WM's LPOGroesserAlleDiff (skip post-lex EQ children)
+
+| Commit                                            | Rules | Wall | Delta |
+|---------------------------------------------------|-------|------|-------|
+| iter-148 final                                    |  310-313| 30s |  --   |
+| drop __builtin_expect on slice_eq                 |  312-314| 30s | noise+|
+| port WM AlleDiff -- skip post-lex EQ children     |  315  | 30s  | +1.0% |
+| apply AlleDiff to LT direction too                |  315  | 30s  | noise |
+
+Cumulative iter-149: +1% from AlleDiff (real algorithmic win, not micro-
+opt).  Re-reading WM's LP_LPO source uncovered that after lex compare
+finds the differing position, earlier children are pairwise EQ -- so
+dominates_all_args trivially holds on them via case (1) (some_arg_dom
+fires with the matching equal-child).  WM's LPOGroesserAlleDiff returns
+the diff position; subsequent LPOGroesserEx uses TO_NaechsterTeilterm(Diff)
+to start AFTER the differing child.
+
+Port: lpo_flat_lex_diff returns the (ca, cb) at the differing position;
+lpo_flat_dominates_from(start_child=diff_pos) skips earlier checks.
+
+This is the third major pattern unlocked by careful WM source reading
+(after per-level Vortest in iter-145 and direct subterm scan in iter-146).
+The lesson holds: WM source is dense and each careful pass surfaces a
+new optimization.
+
+State: 315 rules / 30s sustained on AndAssoc LPO+Mix+Wald+Flatrec.
+Cumulative throughput improvement from iter-136 baseline: +60% (197 ->
+315 rules / 30s).
+
 ### Iter 148 — cold-mark unequal-precedence branches
 
 For Sheffer (single internal symbol nand) and most equational theories
