@@ -446,6 +446,13 @@ int main(int argc, char **argv) {
     if (ss != NULL && ss[0] != '\0')
       thvm_atp_set_use_sos(s, (ss[0] != '0') ? 1u : 0u);
   }
+  // THVM_ATP_UNFAILING=0/1: independent override of unfailing CP
+  // generation (WM standard; in preset by default).
+  {
+    const char *uf = getenv("THVM_ATP_UNFAILING");
+    if (uf != NULL && uf[0] != '\0')
+      thvm_atp_set_use_unfailing_cp(s, (uf[0] != '0') ? 1u : 0u);
+  }
   // THVM_ATP_SEL_RATIO=<N>: override the WM preset's selection_ratio
   // (WM uses 51 = 1 FIFO pick per 51 weight picks).
   {
