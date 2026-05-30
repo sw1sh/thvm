@@ -448,7 +448,7 @@ LpoCmp lpo_flat_lex(const KboFlatNode *a, u32 pa,
 static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
                                    const KboFlatNode *b, u32 pb,
                                    const LpoConfig *cfg) {
-  if (__builtin_expect(lpo_flat_slice_eq(a, pa, b, pb), 0)) return LPO_EQ;
+  if (lpo_flat_slice_eq(a, pa, b, pb)) return LPO_EQ;
   u8 a_is_var = (a[pa].sym < 0);
   u8 b_is_var = (b[pb].sym < 0);
   if (__builtin_expect(a_is_var | b_is_var, 0)) {
