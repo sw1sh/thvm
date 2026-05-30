@@ -358,6 +358,10 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_orphan_murder(s, 1u);
       thvm_atp_set_use_unorient_index(s, 1u);
       thvm_atp_set_use_lazy_normalize(s, 1u);
+      // WM's KPV_KPMengeInterreduzieren -- periodic CP-queue
+      // interreduction against the rule set.  +6% on AndAssoc post-fix
+      // (iter 160); part of standard Waldmeister.
+      thvm_atp_set_cp_set_interreduce(s, 1u);
     }
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
