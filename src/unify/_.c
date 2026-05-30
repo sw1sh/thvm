@@ -65,11 +65,19 @@ fn u8 thvm_unify(Term s, Term t, RewriteSubst *subst) {
   }
   if (term_tag(s) == TAG_CTR && term_tag(t) == TAG_CTR) {
     if (term_ext(s) != term_ext(t)) return 0;
-    u32 ns = term_ctr_n(s);
-    u32 nt = term_ctr_n(t);
+    // Direct heap_read for both arities + children.
+    u64 sbase = term_val(s);
+    u64 tbase = term_val(t);
+    Term sn_cell = heap_read(sbase);
+    Term tn_cell = heap_read(tbase);
+    if (term_tag(sn_cell) != TAG_NUM || term_tag(tn_cell) != TAG_NUM) return 0;
+    u32 ns = (u32)term_val(sn_cell);
+    u32 nt = (u32)term_val(tn_cell);
     if (ns != nt) return 0;
     for (u32 i = 0; i < ns; i++) {
-      if (!thvm_unify(term_ctr_at(s, i), term_ctr_at(t, i), subst)) return 0;
+      Term sc = heap_read(sbase + 1u + (u64)i);
+      Term tc = heap_read(tbase + 1u + (u64)i);
+      if (!thvm_unify(sc, tc, subst)) return 0;
     }
     return 1;
   }
