@@ -103,6 +103,27 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 169 — preset feature dependency analysis
+
+Wired two more env handlers (UNFAILING, CP_FIFO) and ran the per-flag
+"toggle off and measure" pattern on current preset features:
+
+  - UNFAILING=0: 422 (noise vs 423) -- not load-bearing on AndAssoc
+  - CP_FIFO=1:   153 (-64%) -- FIFO tiebreaker hurts hard, stays off
+  - ORPHAN=0:    421 (noise)
+  - UNORIDX=0:   421 (noise)
+  - LAZY_NORM=0: 422 (noise)
+
+So at the current preset baseline, only these are load-bearing:
+BWD_SUB + BWD_DEMOD (iter 162), MNF (iter 163), AUTO_MAXW=30 +
+SEL_RATIO=141 (iter 164-165).  The other preset features stay for
+cross-workload safety but don't contribute on AndAssoc.
+
+Lesson: the iter-160 CP_SET_IR +6% measurement was real AT THAT BASELINE,
+but with iter-162+'s subsequent wins enabled, CP_SET_IR is now absorbed
+(toggle off shows 422-423, no measurable hit).  Multiple features that
+each helped solo can become redundant once a more-impactful one lands.
+
 ### Iter 168 — final state verification
 
 All three test suites + bench reverified clean at the iter-165 baseline:
