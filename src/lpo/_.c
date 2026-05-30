@@ -421,6 +421,21 @@ LpoCmp lpo_flat_lex(const KboFlatNode *a, u32 pa,
                     const LpoConfig *cfg) {
   u32 ca = pa + 1u, cb = pb + 1u;
   u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
+  // Fast path for the common arity-2 case (e.g. Sheffer's nand): unroll
+  // two iterations.  When the parent has more children, fall through to
+  // the general loop.
+  if (ca < ea && cb < eb) {
+    LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
+    if (c != LPO_EQ) return c;
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
+  if (ca < ea && cb < eb) {
+    LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
+    if (c != LPO_EQ) return c;
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
   while (ca < ea && cb < eb) {
     LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
     if (c != LPO_EQ) return c;
