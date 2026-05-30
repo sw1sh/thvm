@@ -89,3 +89,40 @@ forward as the right approach for atp_dt / atp_ri / atp_rule_install.
 
 Branch is clean; THVM_LPO_FLAT_REC=1 is the load-bearing knob, default
 off pending non-Sheffer A/B (test_atp 135624/135624 passes with it on).
+
+### Iter 141-142 — micro-opts and the LPO compare wall
+
+Tried four more iterations after the bulk LPO port:
+
+  - Skip memo for tiny slices (sz <= 2): -2.4% (memo helps even for small terms).
+  - always_inline on slice_eq / some_arg_dominates / dominates_all_args: +1.6%.
+  - Top-level (s, t) memo on flatrec path: noise (ATP's persist mode rarely
+    hits the same (s, t) since new CPs constantly add fresh Term cells).
+  - Precedence-in-spine (KboFlatNode.w carries cfg->precedence inline): noise
+    on this signature size; correct optimization for larger signatures.
+
+Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
+
+Profile-after-optimization (atp_ft_unorient_step subtree, 8s sample):
+  atp_ft_unorient_step @+936         3003  (82% of unorient step)
+  → atp_compare @+1972               2467
+    → lpo_flat_rec @+564             1341  (memo store + return)
+      → lpo_flat_rec @+480 (recur)    998
+        → lpo_flat_rec @+480           541
+          → ...                       330 → 173 → 81 → 37
+
+The recursive descent IS where the cost lives.  Memo lookup is small per
+call; the bulk is in the inlined slice_eq + some_arg_dominates +
+dominates_all_args body.  At this point per-call cost is structural to
+the algorithm; closing the remaining ~19x to WM's 161 r/s requires:
+
+  - thvm_subst_apply / thvm_match port: the per-candidate match before
+    the LPO compare.
+  - atp_dt_descend_rec port: discrim-tree descent for index queries.
+  - atp_ri_descend_rec port: rule-index linear scan when the DT misses.
+
+WM's MO_RegelGefunden (rule install, 1352 WM-samples) has no thvm hot
+analog -- the install path is structurally different and may not be the
+bottleneck thvm-side.  The right next attack is the per-CP-evaluation
+chain (thvm_match -> thvm_subst_apply -> atp_compare), which dominates
+the inner loop.
