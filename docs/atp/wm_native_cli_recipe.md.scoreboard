@@ -103,6 +103,29 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 165 — SEL_RATIO=141 tuned further
+
+Finer SEL_RATIO sweep around iter-164's 101 found a higher peak at 141:
+
+  - AndAssoc: 382 -> 423 (+10%)
+  - wolfram:  350 -> 398 (+14%)
+  - mccune:   802 -> 882 (+10%)
+  - robbins:  270 -> 302 (+12%)
+
+All four bench goals improve.  141 is slightly outside WM's
+enumerated {10, 50, 100, 200} set but the engine's empirical optimum
+is what it is.
+
+Also verified at long-wall:
+  - 30s:  423 rules
+  - 120s: 824 rules
+  - 300s: 1262 rules
+WM cracks at 1673 rules / 10.4s.  thvm rate at 300s = 4.2 r/s (vs WM
+161 r/s).
+
+Cumulative honest improvement vs iter-136 baseline (195): +117%
+(195 -> 423 rules / 30s).
+
 ### Iter 164 — AUTO_MAXW=30 + SEL_RATIO=101 across-goal wins
 
 Two more preset additions tested for cross-goal generalization:
