@@ -103,6 +103,21 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 150 — no successful opts
+
+Tried 3 micro-opts, all reverted:
+- Fibonacci-multiplier hash (-2.5% rules; 3-multiply xor hash spreads
+  better even though it has more ops)
+- Drop dead lex == LPO_EQ check (-1.6%; compiler benefits from the
+  defensive check as a branch hint structure)
+- __builtin_expect(lex == LPO_GT, 1) (-1.6%; gcc default schedule beats
+  it for this workload)
+
+State: 315 rules / 30s sustained.  Direct LPO compare optimization is
+at structural floor for this workload -- further wins must come from
+patterns I haven't spotted yet in WM source OR from non-LPO machinery
+(thvm_unify_apply 81 samples = 1.2% of runtime, atp_dt_descend ~ same).
+
 ### Iter 149 — WM's LPOGroesserAlleDiff (skip post-lex EQ children)
 
 | Commit                                            | Rules | Wall | Delta |
