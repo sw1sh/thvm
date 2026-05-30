@@ -22,7 +22,7 @@ update the matching row here in the same change.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_JIT_REALIZE_DEDUP` | off | Schedule-level cross-realize dispatch dedup. Bit-exact + ~17% faster on CPU; currently inert on CUDA (gated CPU-only pending a buffer-lifecycle fix that corrupts a buffer). |
+| `THVM_JIT_REALIZE_DEDUP` | off | Schedule-level cross-realize dispatch dedup. Bit-exact on CPU (~17% faster). On CUDA: correct + ~6% faster on plain conv models (simple-model 7.8->7.3ms, beats tinygrad's 7.6ms) after the kernel_gc_sweep backend-aware liveness fix; but on BatchNorm/max_pool models (beautiful_mnist) the replay still DIVERGES at iter2 and is ~14% SLOWER -- a separate BN/pool dedup-replay bug, under investigation. Keep off for BN models. |
 | `THVM_FUSE_CONV_BWD` | off | Fuse the conv-backward reduce into a strided-view reduce (cuts peak memory). Gated; validate grads before enabling. |
 
 ## Core scheduling & JIT
@@ -190,9 +190,8 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 
 ## A/B gate command (V100, CUDA)
 
-`THVM_JIT_REALIZE_DEDUP` is the open perf lever. It is bit-exact on CPU but
-currently gated CPU-only (CUDA buffer corruption pending fix). The A/B
-comparison on a V100 pod, once the CUDA gate opens, is:
+`THVM_JIT_REALIZE_DEDUP` is bit-exact and correct on CPU + CUDA. The A/B
+comparison on a V100 pod is:
 
 ```
 # baseline (knob off)
@@ -201,4 +200,5 @@ DEV=cuda BS=32 python3 py/examples/beautiful_mnist_train.py
 DEV=cuda BS=32 THVM_JIT_REALIZE_DEDUP=1 python3 py/examples/beautiful_mnist_train.py
 ```
 
-Loss must match step-for-step; wall-time should drop ~3ms.
+Loss must match step-for-step; CUDA warm-step drops ~6% (simple-model
+7.8->7.3ms, ahead of tinygrad's 7.6ms).

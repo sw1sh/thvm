@@ -192,17 +192,23 @@ static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
   return on;
 }
 static int materialized_loc_span_holds(void) {
-  // CPU-only for now.  The cross-realize buffer reuse is verified correct on
-  // CPU (beautiful_mnist JIT bit-exact, 17% faster), but on the CUDA backend
-  // a shared buffer read back by a later realize is still corrupted
-  // (loss -0.045 vs 2.302) by a buffer-lifecycle hazard that is NOT the CUDA
-  // Graph, NOT the jit-pin, and NOT the arena recycle alone (forcing legacy
-  // allocs only changed the wrong value, didn't fix it).  Until that
-  // CUDA-specific corruption is root-caused, the span is inert on non-CPU
-  // backends so THVM_JIT_REALIZE_DEDUP=1 is a safe no-op there rather than a
-  // silent-wrong-answer footgun.
-  return MATERIALIZE_JIT_SPAN_DEPTH > 0 && MATERIALIZE_JIT_DEDUP_ENABLED()
-         && CURRENT_BACKEND == &CPU_BACKEND;
+  // The cross-realize dedup keeps one realize's materialized boundary so a
+  // later realize in the same captured step substitutes it (one kernel,
+  // one recorded dispatch) instead of re-emitting + re-firing it.  Its
+  // load-bearing correctness contract is kernel_gc_sweep detaching every
+  // preserved boundary buffer's producer kid (backend-aware), so the
+  // depth-first fire reads the materialized leaf rather than re-firing the
+  // producer chain across realizes.  With that GC fix the span is correct
+  // on every backend the GC sweeps (CPU + CUDA) and follows the single
+  // THVM_JIT_REALIZE_DEDUP master gate.
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0 || !MATERIALIZE_JIT_DEDUP_ENABLED()) {
+    return 0;
+  }
+  if (CURRENT_BACKEND == &CPU_BACKEND) return 1;
+#ifdef THVM_HAS_CUDA
+  if (CURRENT_BACKEND == &CUDA_BACKEND) return 1;
+#endif
+  return 0;
 }
 fn void materialized_loc_clear(void);   // fwd decl (span_end calls it)
 fn void materialized_loc_jit_span_begin(void) {
