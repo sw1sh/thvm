@@ -103,6 +103,27 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 151 — Flatrec default-on
+
+Iters 137-149's stacked LPO machinery (per-level Vortest + direct
+subterm scan + flatterm recursive LPO body + AlleDiff post-lex skip +
+inline helpers + branch hints + WM precedence dispatch) measured +60%
+throughput with zero regressions across test_lpo (12/12), test_atp
+(135624/135624), and the WL paclet ATP test suite.
+
+Promoted the gate from opt-in (THVM_LPO_FLAT_REC=1) to default-on
+(THVM_LPO_FLAT_REC=0 disables).  All future thvm_lpo callers get the
+optimized path by default -- atp_compare in the rewrite/normalize/CP-
+gen loops automatically benefits.
+
+AndAssoc bench with no env knob: 308-311 rules / 30s (was 195-198 on
+the Term-tree fallback path).  +57% baseline.
+
+Also tried: GROUND_JOIN, CONNECT, MNF, RIGHT_REDUCE env flags
+(WALDMEISTER preset already chooses the optimal combination); CP
+weight modes 0-7 (Mix=4 is optimal at 311 vs Mix2=5 at 307; everything
+else is slower).  No further configuration win available.
+
 ### Iter 150 — no successful opts
 
 Tried 3 micro-opts, all reverted:
