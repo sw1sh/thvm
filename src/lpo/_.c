@@ -541,7 +541,11 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     // Safe default: fresh memo every call.
     thvm_lpo_invalidate();
   }
-  if (lpo_eq(s, t)) return LPO_EQ;
+  // lpo_eq is a recursive Term-tree walk -- redundant on the flatrec
+  // path since slice_eq at the top of lpo_flat_rec_compute catches the
+  // EQ case faster (it operates on the cache-dense KboFlatNode spine
+  // instead of dereferencing heap cells).  Skip the early-eq check
+  // when flatrec is on.
   // Flatterm subterm pretest (LV_VortestLPOGroesser).  Catches the two
   // common conclusive cases (b strict subterm of a, or a strict subterm of
   // b) in O(|s|+|t|) without recursion or memo; only the residual hard
