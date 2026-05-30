@@ -103,6 +103,32 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 146 — direct subterm scan + branch hints
+
+| Commit                                            | Rules | Wall | Delta |
+|---------------------------------------------------|-------|------|-------|
+| iter-145 final                                    |  291  | 30s  |  --   |
+| replace candidate-list with direct subterm scan   |  307  | 30s  | +5.5% |
+| __builtin_expect on slice_eq + var-path           |  310* | 30s  | +1.0% |
+
+(* noise band ±2, sustained ~307 rules/30s.)
+
+Cumulative iter-146: +5.5% over iter-145.  Total closure 55.8% from
+the matched-algorithm baseline.
+
+Tried and reverted: single-direction Vortest by size (noise), un-inline
+some_arg_dom var check (compiler already optimized), builtin_expect in
+Vortest scan (wrong direction -- nand-sym matches are common, not rare),
+local LPO-specific encoder (compiler already inlined kbo_flat_encode),
+noinline cold-var-path extraction (var checks too cheap to matter).
+
+The direct subterm scan was the big iter-146 win: WM's Termliste
+candidate-list approach has O(na * avg_nk) cost, but for Sheffer where
+many positions have b[0].sym = nand the candidates pile up to nk ~ na/2.
+A direct "for each starting position, check if slice matches" loop is
+O((na-nb)*nb) with the sz-mismatch fast-fail killing most starting
+positions before the inner compare.
+
 ### Iter 145 — per-level Vortest unlocks +16%
 
 The big iter-142 conclusion ("LPO compare at structural floor") was
