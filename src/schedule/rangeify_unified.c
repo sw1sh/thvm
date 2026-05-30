@@ -992,8 +992,8 @@ static Term RU_BUFFERIZE_TERM[RU_SUBST_CAP];
 // to what `kernel_lift_to_uop` emits as `cached_lift.store_root`.
 // Built from the rewritten subtree + a fresh UOP_BUFFER sized by the
 // boundary's closed-range extents.  Zero if no boundary or if dtype
-// inference declined.  Consumed under THVM_LIFT_FROM_BUFFERIZE=1 by
-// materialize.c.
+// inference declined.  Consumed by kernel_lift.c via the
+// rangeify_unified_store_root_at accessor.
 static Term RU_STORE_ROOT[RU_SUBST_CAP];
 
 // Side table: per-axis range terms preserved at INDEX_E construction.

@@ -478,11 +478,9 @@ int main(void) {
   CHECK(key3 != key1);
 
   TEST_BEGIN("bufferize/remove-by-cost-score-default-threshold-respected");
-  // Default is now ON with a high threshold (1000).  A small
-  // shared buffer (score = 3 / 2 = 1) should not fire.  shared
-  // stays realized; rule hits stay zero.
-  unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
-  unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
+  // The removal rule is unconditionally ON with a high threshold
+  // (1000).  A small shared buffer (score = 3 / 2 = 1) does not
+  // fire; shared stays realized; rule hits stay zero.
   Term ds   = uop_binary(UOP_ADD, a, b);
   Term ds_l = uop_binary(UOP_MUL, ds, c);
   Term ds_r = uop_binary(UOP_MUL, ds, a);
@@ -497,9 +495,7 @@ int main(void) {
 
   TEST_BEGIN("bufferize/remove-by-cost-score-respects-reduce-gate");
   // A buffer whose subtree contains a REDUCE must not be removed
-  // even when the rule is enabled and threshold is low.
-  setenv("THVM_BUFFERIZE_REMOVE_BY_SCORE", "1", 1);
-  setenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD", "1", 1);
+  // by the removal rule.
   // Build a multi-consumer REDUCE: rd has 2 consumers, but its
   // subtree contains the REDUCE itself so the rule must skip it.
   Term rd  = uop_reduce(REDUCE_SUM, 0, a);
@@ -513,8 +509,6 @@ int main(void) {
     // subtree_has_reduce; either way the rule does not remove it.
     CHECK_EQ(brd->realized, 1);
   }
-  unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
-  unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
 
   TEST_BEGIN("bufferize/chain-ops-record-source-and-output-dims");
   // Build the same shared/root reshape graph as the movement

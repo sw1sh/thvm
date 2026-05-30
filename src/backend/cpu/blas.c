@@ -22,9 +22,9 @@
 
 #if HAVE_BLAS
 
-// Count cblas dispatches landed via the DAG-side classifier.  Read
-// by THVM_BLAS_DISPATCH_TRACE=1 and queried by tests.  Reset by
-// thvm_init.
+// Count cblas dispatches landed via the DAG-side classifier.
+// Queried by tests through the blas_*_dispatch_dag accessors below.
+// Reset by thvm_init.
 static u64 BLAS_GEMM_DISPATCH_DAG = 0;
 static u64 BLAS_DOT_DISPATCH_DAG  = 0;
 static u64 BLAS_GEMV_DISPATCH_DAG = 0;

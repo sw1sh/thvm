@@ -1157,9 +1157,9 @@ static int uwalk_resolve_input_ptr(KernelEntry *ke, u32 slot, u32 buf_id,
 // Returns 1 if the walker handled the kernel (output buffer written),
 // 0 if it declined (caller should fall back).
 fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  // Diagnostic env knob: print one line per walker entry summarising
-  // lift outcome + root op. Mirrors THVM_CPU_INTERPRET_TRACE; useful
-  // for measuring how many kernels the walker covers.
+  // Diagnostic env knob THVM_CPU_UOP_WALK_TRACE: print one line per
+  // walker entry summarising lift outcome + root op; useful for
+  // measuring how many kernels the walker covers.
   static int trace_known = 0, trace_on = 0;
   if (!trace_known) {
     char const *e = getenv("THVM_CPU_UOP_WALK_TRACE");

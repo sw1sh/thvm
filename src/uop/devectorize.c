@@ -919,8 +919,7 @@ static int devec_extract_unit_stride(Term addr, Term *out_base, u32 *out_off) {
 // Backend gate for wide-load folding.  In the absence of a renderer
 // flag plumbed all the way through, allow folding on float / half /
 // bfloat dtypes -- the dtype gate matches tinygrad's supports_float4
-// check (which is True on Metal + CUDA, False on cpu).  Callers may
-// further restrict via env var THVM_DISABLE_LOAD_FOLD.
+// check (which is True on Metal + CUDA, False on cpu).
 static int devec_load_fold_dtype_ok(u32 dtype) {
   if (dtype == DT_FP32) return 1;
   // dtypes for f16 / bf16 are gated off until the renderer can emit
