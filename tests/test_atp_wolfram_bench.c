@@ -453,6 +453,13 @@ int main(int argc, char **argv) {
     if (uf != NULL && uf[0] != '\0')
       thvm_atp_set_use_unfailing_cp(s, (uf[0] != '0') ? 1u : 0u);
   }
+  // THVM_ATP_CP_FIFO=1: enable FIFO tiebreaker for CPs of equal weight
+  // (sequence-order disambiguation instead of arbitrary heap order).
+  {
+    const char *cf = getenv("THVM_ATP_CP_FIFO");
+    if (cf != NULL && cf[0] != '\0')
+      thvm_atp_set_cp_fifo_tiebreak(s, (cf[0] != '0') ? 1u : 0u);
+  }
   // THVM_ATP_SEL_RATIO=<N>: override the WM preset's selection_ratio
   // (WM uses 51 = 1 FIFO pick per 51 weight picks).
   {
