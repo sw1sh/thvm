@@ -151,6 +151,19 @@ fn int cuda_device_sm(void) {
   return cc_major * 10 + cc_minor;
 }
 
+// Streaming-multiprocessor (SM) count of the active device (V100 -> 80,
+// A100 -> 108, H100 -> 132/144).  hand_opts.c derives the reduce-heavy
+// occupancy floor from this so the UPCAST cap auto-tunes per GPU rather
+// than needing a hand-set THVM_UPCAST_REDUCE_MIN_GRID.  Returns 0 when
+// CUDA is not ready (callers treat 0 as "no cap").
+fn int cuda_device_sm_count(void) {
+  int count = 0;
+  if (!CUDA_READY) return 0;
+  cuDeviceGetAttribute(&count,
+      CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, CUDA_DEVICE);
+  return count > 0 ? count : 0;
+}
+
 fn void cuda_shutdown(void) {
   if (!CUDA_READY) return;
   // Views (owns_data == 0) borrow another slot's dptr; only the owner

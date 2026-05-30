@@ -341,6 +341,56 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
   return any_strideless;
 }
 
+// --- reduce-heavy occupancy floor ----------------------------------
+// The minimum launch grid (output GLOBAL/LOCAL/LOOP element product) that
+// must remain AFTER an UPCAST, for reduce-heavy kernels only.  Below this
+// floor the conv-backward weight-grad would upcast 16x down to ~1600
+// threads (~31% V100 SM util); the floor caps it so enough global blocks
+// stay to fill the SMs.  Shape-only: changes how many UPCASTs apply,
+// never the math.
+//
+// THVM_UPCAST_REDUCE_MIN_GRID overrides the auto-derivation:
+//   unset / 0  -> AUTO: cuda_device_sm_count() * 80 threads/SM on CUDA,
+//                 0 (no cap) on CPU/Metal.
+//   > 0        -> forced floor (explicit per-device tuning wins).
+//   < 0        -> force OFF (no cap) even on CUDA.
+// The 80 threads/SM multiplier reproduces the tuned V100 floor: 80 SMs *
+// 80 = 6400 (~2.5 warps/SM), and scales to any GPU (A100 108 SMs -> 8640,
+// H100 132 SMs -> 10560) with zero manual tuning.  Memoised: the env read
+// + cuDeviceGetAttribute happen once.
+// Resolve the env override once: -2 uninit, -1 force OFF, 0 auto, >0 forced.
+static int OCC_FLOOR_ENV = -2;
+// Auto-derived CUDA floor, memoised once cuda_device_sm_count() is valid.
+static int OCC_FLOOR_AUTO = -1;
+static u32 hand_opt_occupancy_floor(KernelEntry const *ke) {
+  if (OCC_FLOOR_ENV == -2) {
+    char const *e = getenv("THVM_UPCAST_REDUCE_MIN_GRID");
+    int v = (e != NULL && e[0] != '\0')
+              ? hand_opt_getenv_int("THVM_UPCAST_REDUCE_MIN_GRID", 0)
+              : 0;
+    // env: >0 forced floor, <0 forced OFF, unset/empty/0 -> auto-derive.
+    OCC_FLOOR_ENV = (v > 0) ? v : (v < 0 ? -1 : 0);
+  }
+  if (OCC_FLOOR_ENV > 0) return (u32)OCC_FLOOR_ENV;   // explicit tuning wins
+  if (OCC_FLOOR_ENV < 0) return 0;                    // force OFF
+  // AUTO: derive from the device SM count on CUDA only (CPU/Metal -> 0).
+  // Memoised per-backend: a CPU kernel keeps OCC_FLOOR_AUTO at 0 without
+  // poisoning the CUDA derivation, since cuda_device_sm_count() is only
+  // queried (and cached) once a CUDA kernel actually hits this path.
+#ifdef THVM_HAS_CUDA
+  if (hand_opt_kernel_is_cuda(ke)) {
+    if (OCC_FLOOR_AUTO < 0) {
+      int n_sm = cuda_device_sm_count();
+      OCC_FLOOR_AUTO = (n_sm > 0) ? n_sm * 80 : 0;  // 80 thr/SM ~ 2.5 warps/SM
+    }
+    return (u32)OCC_FLOOR_AUTO;
+  }
+#else
+  (void)ke;
+#endif
+  return 0;   // CPU / Metal: no occupancy cap
+}
+
 // --- the heuristic -------------------------------------------------
 // Returns the number of opts successfully applied.
 fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
@@ -569,14 +619,17 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     // conv-backward weight-grad keeps enough global blocks to fill the SMs.
     // tinygrad's only floor is `olp >= 1024` (line below); on the V100
     // weight-grad that still upcasts 16x down to ~1600 threads (~31% SM util).
-    // THVM_UPCAST_REDUCE_MIN_GRID raises that floor *only* for reduce-heavy
-    // kernels: it is the minimum number of output (GLOBAL/LOCAL/LOOP) elements
-    // -- i.e. launch threads -- that must remain AFTER an UPCAST is applied.
-    // Default 0 == disabled == bit-identical to the current path.  The GPU A/B
-    // sets it to e.g. 6400 (keeps ~80 V100 SMs fed at ~2 warps/SM) so the
-    // weight-grad caps at ~4x upcast instead of 16x.  Matmul/elementwise have
-    // large output grids that never fall under the floor, so they never gate.
-    u32 occ_min_grid = (u32)hand_opt_getenv_int("THVM_UPCAST_REDUCE_MIN_GRID", 0);
+    // The reduce-heavy occupancy floor raises that bound *only* for
+    // reduce-heavy kernels: it is the minimum number of output
+    // (GLOBAL/LOCAL/LOOP) elements -- i.e. launch threads -- that must
+    // remain AFTER an UPCAST is applied.  It is now AUTO-DERIVED from the
+    // device SM count (hand_opt_occupancy_floor): CUDA -> n_sm*80 (~6400 on
+    // an 80-SM V100, keeping it fed at ~2.5 warps/SM), CPU/Metal -> 0 (no
+    // cap, bit-identical to the un-capped path).  THVM_UPCAST_REDUCE_MIN_GRID
+    // overrides: >0 forces a floor, <0 forces OFF, 0/unset = auto.  Matmul/
+    // elementwise have large output grids that never fall under the floor,
+    // so they never gate.
+    u32 occ_min_grid = hand_opt_occupancy_floor(ke);
     int upcast_trace = getenv("THVM_UPCAST_TRACE") != NULL;
     u32 upcasted_set[MAX_AXES];
     u32 n_upcasted_set = 0;
