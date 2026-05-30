@@ -103,6 +103,37 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 176 — WM trail comparison: cracking rule + CP-throughput gap
+
+Captured wmcli's full proof trail for andassoc.pr.  Key finding:
+
+**WM's cracking rule** (R#1672, internal ID 4333534, used in proof step
+4359187): `nand(nand(nand(x1,x2),nand(x1,x2)),x3) -> nand(x1,nand(x1,nand(x2,x3)))`
+
+Searched thvm's 591 unique rules at 60s for this shape (and rotations):
+ZERO matches.  thvm derives rules of similar size but doesn't hit this
+specific shape -- the trajectory divergence is concrete.
+
+**WM CP throughput**: 4,574,980 critical pairs explored in 10.4s =
+440K CPs/sec.
+
+**thvm CP throughput** (default preset, 30s):
+- with bwd_sub on:  ~6.7K CPs queued (kills rules => fewer pair CPs)
+- with bwd_sub off: 31.4K CPs queued (rate ~1K/sec)
+
+Either way thvm is ~10^2-10^3x lower CP throughput than WM.  WM
+processes more CPs PER STEP via tighter per-CP machinery (flatterm
+rep, inline allocations, no per-call memo lookups).
+
+Closing the cracking gap requires either:
+  (a) increase CP throughput by 100-1000x (full per-CP rewrite), OR
+  (b) better CP selection priority to discover WM's specific cracking
+      rule shape early (algorithmic, not measured to be reachable
+      via current heuristics)
+
+State: 423 rules / 30s holds.  Cumulative honest improvement: +117%.
+But the gap to cracking is now quantified concretely.
+
 ### Iter 172 — final closing summary
 
 35-iter loop run on /loop "figure out why native wmcli and thvm is
