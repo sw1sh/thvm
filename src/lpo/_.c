@@ -415,34 +415,55 @@ u8 lpo_flat_some_arg_dominates(const KboFlatNode *a, u32 pa,
   return 0;
 }
 
+// Returns lex verdict.  When verdict is LPO_GT or LPO_LT, sets *diff_b
+// to the b-position of the differing child (so dominates_all_args can
+// skip earlier EQ children via WM's LPOGroesserAlleDiff trick -- earlier
+// children are pairwise EQ to a's children, which means a > them via
+// case (1) with the matching a-child, so they trivially satisfy the
+// dominance check).
 static inline __attribute__((always_inline))
-LpoCmp lpo_flat_lex(const KboFlatNode *a, u32 pa,
-                    const KboFlatNode *b, u32 pb,
-                    const LpoConfig *cfg) {
+LpoCmp lpo_flat_lex_diff(const KboFlatNode *a, u32 pa,
+                         const KboFlatNode *b, u32 pb,
+                         const LpoConfig *cfg, u32 *diff_b) {
   u32 ca = pa + 1u, cb = pb + 1u;
   u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
-  // Fast path for the common arity-2 case (e.g. Sheffer's nand): unroll
-  // two iterations.  When the parent has more children, fall through to
-  // the general loop.
+  // Fast path for the common arity-2 case (e.g. Sheffer's nand).
   if (ca < ea && cb < eb) {
     LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
-    if (c != LPO_EQ) return c;
+    if (c != LPO_EQ) { *diff_b = cb; return c; }
     ca += a[ca].sz;
     cb += b[cb].sz;
   }
   if (ca < ea && cb < eb) {
     LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
-    if (c != LPO_EQ) return c;
+    if (c != LPO_EQ) { *diff_b = cb; return c; }
     ca += a[ca].sz;
     cb += b[cb].sz;
   }
   while (ca < ea && cb < eb) {
     LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
-    if (c != LPO_EQ) return c;
+    if (c != LPO_EQ) { *diff_b = cb; return c; }
     ca += a[ca].sz;
     cb += b[cb].sz;
   }
   return LPO_EQ;
+}
+
+// dominates_all_args starting from a given child position in b (used by
+// the post-lex path so we skip the children that were already proven
+// EQ to a's children via lex).
+static inline __attribute__((always_inline))
+u8 lpo_flat_dominates_from(const KboFlatNode *a, u32 pa,
+                           const KboFlatNode *b, u32 pb,
+                           u32 start_child,
+                           const LpoConfig *cfg) {
+  u32 child = start_child;
+  u32 end   = pb + b[pb].sz;
+  while (child < end) {
+    if (lpo_flat_rec(a, pa, b, child, cfg) != LPO_GT) return 0;
+    child += b[child].sz;
+  }
+  return 1;
 }
 
 static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
@@ -498,12 +519,24 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
   if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
   if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
   if (a[pa].sz != b[pb].sz) return LPO_UN;
-  LpoCmp lex = lpo_flat_lex(a, pa, b, pb, cfg);
+  u32 diff_pos = 0;
+  LpoCmp lex = lpo_flat_lex_diff(a, pa, b, pb, cfg, &diff_pos);
   if (lex == LPO_EQ) return LPO_EQ;
+  // After lex finds the differing position, earlier children are
+  // pairwise EQ -- so dominates_all_args trivially holds for them via
+  // case (1) at that child position.  Skip to diff_pos (WM's
+  // LPOGroesserAlleDiff structure).
   if (lex == LPO_GT) {
-    if (lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
+    if (lpo_flat_dominates_from(a, pa, b, pb, diff_pos, cfg)) return LPO_GT;
     return LPO_UN;
   }
+  // lex == LPO_LT: dominate_all in the SYMMETRIC direction (a's children
+  // are >= b's children up through diff_pos in b's coords).  The
+  // diff_pos was b's coord; for the symmetric check we need a's coord
+  // of the same child index.  Since lex advanced in lockstep, diff_pos
+  // corresponds to the same lex index in a; recompute a's coord by
+  // walking children to that index... or simpler: just call the full
+  // dominates_all_args (one less specialization to maintain).
   if (lpo_flat_dominates_all_args(b, pb, a, pa, cfg)) return LPO_LT;
   return LPO_UN;
 }
