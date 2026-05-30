@@ -103,6 +103,34 @@ Tried four more iterations after the bulk LPO port:
 
 Iter 142 final on AndAssoc LPO+Mix+Wald+skolems-high: 253 rules / 30s.
 
+### Iter 168 — final state verification
+
+All three test suites + bench reverified clean at the iter-165 baseline:
+- test_atp: 135624/135624
+- test_kbo: 204/204
+- test_lpo: 12/12
+- AndAssoc bench: 423 rules / 30s
+
+Final cumulative summary:
+- iter-136 raw baseline: 195 rules / 30s (LPO+Mix+Wald on Term-tree)
+- iter-167 final preset: 423 rules / 30s
+- Improvement: +117% honest throughput
+
+Major wins by iter:
+  - 137-149: LPO machinery port (per-level Vortest, AlleDiff skip,
+    direct subterm scan, branch hints) -- nominal +30% but iter-157
+    found a soundness bug masking part of it
+  - 157: critical sz check fix, honest baseline at 217
+  - 160: CP_SET_INTERREDUCE +6%
+  - 162: BWD_SUB+BWD_DEMOD isolated from regressing trio +31%
+  - 163: MNF +1.6%
+  - 164: AUTO_MAXW=30 +9.5%, SEL_RATIO=101 +14%
+  - 165: SEL_RATIO=141 +10%
+
+Remaining gap to wmcli (161 r/s): thvm at 14.1 r/s = 11.4x.  Not
+closeable at this architecture without per-LPO-call rewrites that
+get caught by the iter-157-style soundness invariants.
+
 ### Iter 167 — code-level opts at structural floor
 
 Profile after iter-162-166 wins shows:
