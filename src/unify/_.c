@@ -84,12 +84,17 @@ fn Term thvm_rename_vars(Term t, u32 offset) {
   switch (term_tag(t)) {
     case TAG_FVR: return term_new_fvr(term_ext(t) + offset);
     case TAG_CTR: {
-      u32 n = term_ctr_n(t);
+      // Direct heap_read for arity + children (skip term_ctr_at's
+      // redundant arity refetch).
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
       if (n > REWRITE_MAX_ARITY) return t;
       Term children[REWRITE_MAX_ARITY];
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
-        Term orig = term_ctr_at(t, i);
+        Term orig = heap_read(base + 1u + (u64)i);
         children[i] = thvm_rename_vars(orig, offset);
         if (children[i] != orig) changed = 1;
       }
