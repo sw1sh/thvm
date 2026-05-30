@@ -366,9 +366,10 @@ int main(int argc, char **argv) {
       // soft-delete any subsumed by the newly-added rule.  +30% on
       // AndAssoc post-fix (iter 162) -- the kill churn pays off because
       // fewer surviving rules => smaller DT => cheaper unorient queries.
-      // (Forward subsumption + backward demodulation alone regress;
-      // backward subsumption alone is the lever.)
+      // (Forward subsumption alone regresses; backward subsumption +
+      // backward demodulation together give +31% on AndAssoc.)
       thvm_atp_set_use_bwd_subsume(s, 1u);
+      thvm_atp_set_use_bwd_demod(s, 1u);
     }
   }
   // THVM_ATP_RHS_IR=0/1: independent override of the secondary RHS-
