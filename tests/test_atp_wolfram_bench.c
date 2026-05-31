@@ -838,6 +838,13 @@ int main(int argc, char **argv) {
                (unsigned long long)si_total,
                100.0 * (double)g_atp_ri_splice_inline_hits / (double)si_total);
       }
+      u64 pm_total = g_atp_unf_pos_memo_hits + g_atp_unf_pos_memo_misses;
+      if (pm_total > 0) {
+        printf("   pos-memo: %llu hits / %llu queries (%.0f%% hit-ratio)\n",
+               (unsigned long long)g_atp_unf_pos_memo_hits,
+               (unsigned long long)pm_total,
+               100.0 * (double)g_atp_unf_pos_memo_hits / (double)pm_total);
+      }
     }
   }
   { u32 unor = 0;

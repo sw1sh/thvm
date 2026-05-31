@@ -392,8 +392,8 @@ static inline void atp_unf_pos_memo_put(u64 h, u8 folded) {
   e->epoch  = g_atp_unf_memo_epoch;
   e->folded = folded;
 }
-static u64 g_atp_unf_pos_memo_hits   = 0;
-static u64 g_atp_unf_pos_memo_misses = 0;
+u64 g_atp_unf_pos_memo_hits   = 0;
+u64 g_atp_unf_pos_memo_misses = 0;
 // Bottom-up subtree FNV-64 hash over the flat encode.  Each
 // flathash[p] is the hash of the SUBTREE rooted at p, computed from
 // flatsym[p..p+subsz[p]).  Direct port of atp_term_struct_hash adapted
