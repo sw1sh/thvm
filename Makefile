@@ -310,7 +310,9 @@ TESTS := \
   $(BIN)/test_atp_ft \
   $(BIN)/test_ft_match \
   $(BIN)/test_ft_norm \
-  $(BIN)/test_atp_ft_norm
+  $(BIN)/test_atp_ft_norm \
+  $(BIN)/test_ft_ri \
+  $(BIN)/test_atp_ft_ri
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -714,6 +716,30 @@ $(BIN)/test_atp_ft_norm_verify: tests/test_atp.c $(SRC) | $(BIN)
 	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
 	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
 	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# Stage 6b: AtpFt-native discrim-tree descent.  Pulls in ft_ri.c on
+# top of the Stage 6 envelope; the THVM_ATPFT_RI flag enables the
+# descent path inside ft_norm.c (env-knob THVM_ATPFT_RI=1 to actually
+# USE it; the default leaves the linear-scan fallback in place).
+#
+# test_ft_ri      - differential corpus: ft_norm linear-scan vs ft_norm
+#                   discrim-tree path on random rules + random subjects.
+# test_atp_ft_ri  - the full ATP suite under Stage 6b's envelope.
+$(BIN)/test_ft_ri: tests/test_ft_ri.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -DTHVM_ATPFT_RI \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/test_atp_ft_ri: tests/test_atp.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -DTHVM_ATPFT_RI \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)

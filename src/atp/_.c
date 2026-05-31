@@ -39,7 +39,9 @@
 # endif
 # include "ft_match.c"
 # include "ft_splice.c"
-# include "ft_norm.c"
+// ft_norm.c included LATER (after AtpRuleIndex / ATP_RI_* are defined
+// further down this TU) -- ft_norm.c uses Stage 6b's extern hooks
+// (atp_ri_find_redex_ft_pub, atp_ri_ft_sync) under THVM_ATPFT_RI.
 #endif
 
 // === 8.1c: ATP primitives registered into the TAG_PRI table ========
@@ -3181,6 +3183,19 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   }
   return flattened ? atp_ri_build(flat, subsz, flatsym, 0u) : t;
 }
+
+// === Stage 6b: AtpFt-native discrim-tree descent + ft_norm wiring =====
+//
+// Both files reuse the AtpRuleIndex / ATP_RI_* / atp_ri_rebuild
+// definitions above; they are included here so those references
+// resolve.  ft_ri.c is gated on THVM_ATPFT_RI; ft_norm.c is gated on
+// THVM_ATPFT_NORM (and conditionally pulls in ft_ri.c's externs).
+#ifdef THVM_ATPFT_NORM
+# ifdef THVM_ATPFT_RI
+#  include "ft_ri.c"
+# endif
+# include "ft_norm.c"
+#endif
 
 // === Faithful Waldmeister-FPA normalize path (gated, default OFF) =====
 //

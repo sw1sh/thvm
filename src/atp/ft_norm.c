@@ -46,6 +46,13 @@ extern AtpFtCell *ft_splice(AtpFt          *a,
                             const AtpFtCell *rhs_tmpl,
                             const void     *subst);
 
+// Stage 6b hooks -- defined in ft_ri.c when THVM_ATPFT_RI is on.
+#ifdef THVM_ATPFT_RI
+extern int  atp_ri_find_redex_ft_pub(AtpState *s, AtpFtCell *root,
+                                     AtpFtCell **redex_out, u32 *rule_out);
+extern void atp_ri_ft_sync(AtpState *s);
+#endif
+
 // --- SUBST_FRESH entry-clear ----------------------------------------
 //
 // Walk via `cell->next` pre-order.  This visits every cell of the
@@ -121,6 +128,54 @@ static int find_redex_ft(AtpState        *s,
 // reduction; the caller's downstream `ft_eq` check then treats it as
 // "not joinable".
 
+// find_redex_ft via the discrim-tree descent (Stage 6b).  When enabled,
+// we ALSO need a parent-cell for the splice and a verified substitution.
+// The discrim-tree descent's leaf-collect returns the rule + star_ft
+// bindings; we then re-derive parent via a pre-order scan from root,
+// and rebuild the subst via ft_match (cheap: pattern-side traversal).
+//
+// This keeps the splice contract unchanged.  The Stage-6b WIN is on
+// the find phase: O(|subject| * average descent depth) instead of
+// O(|subject| * n_rules).
+#ifdef THVM_ATPFT_RI
+static int find_redex_ft_via_ri(AtpState        *s,
+                                AtpFtCell       *root,
+                                AtpFtCell      **parent_out,
+                                AtpFtCell      **redex_out,
+                                u32             *rule_out,
+                                AtpFtSubst      *subst_buf) {
+  AtpFtCell *redex_cell = NULL;
+  u32        rule       = 0u;
+  if (!atp_ri_find_redex_ft_pub(s, root, &redex_cell, &rule)) {
+    return 0;
+  }
+  // Find parent by pre-order walk -- the cell whose `next` reaches
+  // the redex.  O(|subject|) but limited by the linear-scan WIN above.
+  AtpFtCell *parent = NULL;
+  if (redex_cell != root) {
+    AtpFtCell *end_after = (root->end != NULL) ? root->end->next : NULL;
+    AtpFtCell *prev = root;
+    for (AtpFtCell *p = root->next; p != NULL && p != end_after;
+         p = p->next) {
+      if (p == redex_cell) { parent = prev; break; }
+      prev = p;
+    }
+  }
+  // Rebuild subst: ft_match against the rule's pattern.
+  ft_subst_reset(subst_buf);
+  if (!ft_match(s->lhs_ft[rule], redex_cell, subst_buf)) {
+    // Defensive: a perfect-descent hit MUST match.  If it doesn't,
+    // the rule was bwd-subsumed mid-step or the index is stale; bail
+    // and let the next find_redex re-query (or the caller fall back).
+    return 0;
+  }
+  *parent_out = parent;
+  *redex_out  = redex_cell;
+  *rule_out   = rule;
+  return 1;
+}
+#endif
+
 AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap);
 AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
   if (t == NULL) return NULL;
@@ -138,13 +193,45 @@ AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
   // must be 0.  Stage 5's contract: callers MUST zero the struct
   // before first use.
   memset(&subst, 0, sizeof(subst));
+
+#ifdef THVM_ATPFT_RI
+  // Stage 6b: opt-in via THVM_ATPFT_RI=1 (env knob).  Default OFF so
+  // the baseline Stage 6 linear-scan path is unchanged for the default
+  // build (which also has THVM_ATPFT_RI not defined at all).
+  static int ri_env_cached = -1;
+  if (ri_env_cached < 0) {
+    const char *env = getenv("THVM_ATPFT_RI");
+    ri_env_cached = (env != NULL && env[0] != '0') ? 1 : 0;
+  }
+  int use_ri = ri_env_cached;
+  if (use_ri) {
+    // Ensure the Term-side rule index is current; rebuild on dirty.
+    if (s->rule_index == NULL || s->rule_index_dirty ||
+        s->rule_index->n_rules_built != s->n_rules) {
+      atp_ri_rebuild(s);
+    }
+    // Refresh FT pattern mirror from s->lhs_ft[].
+    atp_ri_ft_sync(s);
+  }
+#endif
+
   for (u32 i = 0; i < step_cap; i++) {
     AtpFtCell *parent = NULL;
     AtpFtCell *redex  = NULL;
     u32        rule   = 0u;
-    if (!find_redex_ft(s, t, &parent, &redex, &rule, &subst)) {
-      break;
+    int hit = 0;
+#ifdef THVM_ATPFT_RI
+    if (use_ri) {
+      hit = find_redex_ft_via_ri(s, t, &parent, &redex, &rule, &subst);
+      // Folded rule-index or stale: fall back to linear scan THIS step.
+      if (!hit) hit = find_redex_ft(s, t, &parent, &redex, &rule, &subst);
+    } else {
+      hit = find_redex_ft(s, t, &parent, &redex, &rule, &subst);
     }
+#else
+    hit = find_redex_ft(s, t, &parent, &redex, &rule, &subst);
+#endif
+    if (!hit) break;
     AtpFtCell *rhs_tmpl = s->rhs_ft[rule];
     AtpFtCell *new_root = ft_splice(a, t, parent, redex, rhs_tmpl, &subst);
     if (new_root != NULL) t = new_root;
