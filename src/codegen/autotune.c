@@ -841,6 +841,8 @@ static int autotune_env_enabled(void) {
 }
 
 fn int kernel_should_autotune(KernelEntry const *ke) {
+  static int tr = -1;
+  if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   if (!autotune_env_enabled()) {
     return 0;
   }
@@ -851,5 +853,9 @@ fn int kernel_should_autotune(KernelEntry const *ke) {
     return 0;
   }
   KOpt buf[16];
-  return kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf)) > 0;
+  u32 nc = kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf));
+  if (tr) {
+    fprintf(stderr, "[autotune] kid=%u n_cand=%u\n", (u32)(ke - KERNELS), nc);
+  }
+  return nc > 0;
 }
