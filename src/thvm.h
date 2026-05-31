@@ -698,6 +698,13 @@ typedef struct {
                                // across axes_reset_to_default so a
                                // proposer-explored variant doesn't
                                // re-trigger autotune mid-bench.
+  u8   hand_coded_done;        // 1 = kernel_hand_coded_opts has run.
+                               // Separate from `autotuned` so applying
+                               // the hand-coded heuristic does NOT block
+                               // a subsequent BEAM/autotune pass (the
+                               // fire path runs hand_opts then autotune;
+                               // sharing one flag let hand_opts suppress
+                               // BEAM on every non-WL path).
 } KpSchedule;
 
 struct Backend {

@@ -400,9 +400,10 @@ static u32 hand_opt_occupancy_floor(KernelEntry const *ke) {
 fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   if (ke == NULL) return 0;
   // Mark "decided" up front (whether or not anything applies) so a
-  // re-dispatch doesn't re-run.  Mirrors kernel_autotune's
-  // ke->schedule->autotuned = 1 at the start.
-  if (ke->schedule != NULL) ke->schedule->autotuned = 1;
+  // re-dispatch doesn't re-run.  Uses its OWN flag (hand_coded_done),
+  // NOT `autotuned` -- otherwise hand_opts would suppress a subsequent
+  // BEAM/autotune pass (the fire path runs hand_opts then autotune).
+  if (ke->schedule != NULL) ke->schedule->hand_coded_done = 1;
   if (!hand_coded_opts_enabled()) return 0;
   // GPU gate: runs on both Metal (b->id == 2) and CUDA (b->id == 3),
   // matching tinygrad's spec (heuristic.py applies to all renderers).
@@ -992,11 +993,10 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
 }
 
 // Should this kernel get the hand-coded heuristic on its next fire?
-// Mirrors kernel_autotune's cheap pre-check: the env opt-in is on AND
-// the per-shape autotuned flag is still 0.
+// The env opt-in is on AND the per-shape hand_coded_done flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke) {
   if (!hand_coded_opts_enabled()) return 0;
   if (ke == NULL) return 0;
-  if (ke->schedule != NULL && ke->schedule->autotuned) return 0;
+  if (ke->schedule != NULL && ke->schedule->hand_coded_done) return 0;
   return 1;
 }

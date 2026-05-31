@@ -235,3 +235,23 @@ no-standalone-doc-commit rule.)
    kernels.
 Verify each on Metal + CUDA warm with the zero_grad bench; correctness via step-0
 parity; never regress default below NOOPT.
+
+### M1 step 1 LANDED (2026-06-01): hand_coded_done/autotuned flag split
+
+Split the shared `autotuned` flag: `kernel_hand_coded_opts` now sets its own
+`hand_coded_done` (thvm.h KpSchedule) instead of `autotuned`, and
+`kernel_should_hand_code_opts` checks `hand_coded_done`. autotune keeps `autotuned`.
+This unblocks BEAM/autotune on the py/JIT path (previously hand_opts' `autotuned=1`
+suppressed it on every non-WL path - the "BEAM only in WL" bug).
+
+Verified (Metal M3 Max, beautiful_mnist, BS=8, zero_grad):
+- default BEAM=0: 3.57ms (UNCHANGED - the fix is behavior-neutral when BEAM off).
+- default BEAM=2: **2.19ms** (1.6x faster; autotune now fires: 328 kernels evaluated
+  vs 0 before, 84 with candidates, 27 cache entries written).
+- Correctness: BEAM=2 fwd-sum 36021.043 vs BEAM=0 36021.035 (fp reduction-order); CPU
+  default step0 loss 2.3536 unchanged.
+
+Remaining M1: (a) expand `propose.c` so the 240/328 no-candidate kernels get tuned
+(would close 2.19->~1.8ms, the NOOPT+BEAM floor); (b) re-evaluate hand_opts on Metal
+(net-negative) + CUDA (pending free GPU) with the fixed bench; decide additive-BEAM vs
+replace-on-Metal.
