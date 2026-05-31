@@ -340,10 +340,21 @@ static u64 atp_term_struct_hash(Term t) {
       return 0xdeadbeefcafebabeull ^ ((u64)term_tag(t) * 0x100000001b3ull);
   }
 }
+// Normalize result cache: maps (term_struct_hash, g_atp_unf_memo_epoch)
+// to the already-normalized Term.
+#define ATP_NORM_CACHE_BITS 16
+#define ATP_NORM_CACHE_SIZE (1u << ATP_NORM_CACHE_BITS)
+#define ATP_NORM_CACHE_MASK (ATP_NORM_CACHE_SIZE - 1u)
+typedef struct { u64 hash; u32 epoch; u32 n_rules; Term nf; } AtpNormCacheEnt;
+static AtpNormCacheEnt g_atp_norm_cache[ATP_NORM_CACHE_SIZE];
 fn void atp_unf_memo_invalidate(void) {
   if (++g_atp_unf_memo_epoch == 0u) {
     for (u32 i = 0; i < ATP_UNF_MEMO_SIZE; i++)
       g_atp_unf_memo[i].epoch = 0u;
+    // Also zero the normalize-result cache so a stale NF doesn't
+    // survive the epoch-wrap.
+    for (u32 i = 0; i < ATP_NORM_CACHE_SIZE; i++)
+      g_atp_norm_cache[i].epoch = 0u;
     g_atp_unf_memo_epoch = 1u;
   }
 }
@@ -360,6 +371,16 @@ u64 g_atp_unf_memo_hits   = 0;
 u64 g_atp_unf_memo_misses = 0;
 u64 g_atp_ri_splice_inline_hits   = 0;
 u64 g_atp_ri_splice_inline_misses = 0;
+
+// Normalize-result cache counters (struct/storage declared above so
+// atp_unf_memo_invalidate can clear on epoch wrap-around).  The
+// cache is currently dormant -- the value slot stored Term cells
+// which heap_reset recycles; the get/put helpers were removed when
+// that storage shape proved unsafe.  Leaving the storage + counters
+// in place lets a future port re-introduce a NF cache (e.g. keyed by
+// content hash of the result, not the cell ID).
+u64 g_atp_norm_cache_hits   = 0;
+u64 g_atp_norm_cache_misses = 0;
 
 // Per-position no-fire memo for the unorientable discrimination-tree
 // descent at atp_ri_query_pos_unorient.  Keyed by (subtree-phash,
@@ -481,7 +502,8 @@ static Term atp_rewrite_normalize(AtpState *s, Term t,
   // the indexed / IC / linear paths below (which all assume rules are
   // pre-oriented).  Needs s for the reduction-order comparison.
   if (s != NULL) {
-    return atp_rewrite_normalize_ordered(s, t, lhs, rhs, n_rules, step_cap);
+    Term out = atp_rewrite_normalize_ordered(s, t, lhs, rhs, n_rules, step_cap);
+    return out;
   }
 #endif
   if (s != NULL && s->use_ic_rewrite) {
@@ -2589,6 +2611,12 @@ static u8 atp_ri_find_redex(u32 flatlen, u32 clean_before,
     if (p < clean_before && p + g_atp_ri_subsz[p] <= clean_before) {
       continue;                              // unchanged, known non-redex
     }
+    // Leaf positions (FVR / NUM) can never match a rule LHS top (rule
+    // LHSs are CTR-rooted; an FVR-rooted LHS would be a non-decreasing
+    // x->t and orient would have rejected it).  Skip without paying
+    // the discrim-tree descent.  O(1) flat lookup vs the descent's
+    // STAR-edge walk that always returns NIL at the leaves.
+    if (g_atp_ri_flatsym[p] < ATP_RI_CTR_BASE) continue;
     u32 m = atp_ri_query_pos(p);
     if (m != ATP_RI_NIL) {
       *redex_pos  = p;
@@ -4153,6 +4181,12 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // drop any entries from a prior run (cfg pointer may be reused).
   thvm_kbo_set_persist(1u);
   thvm_kbo_invalidate();
+  // Persistent unf_memo / norm-cache: an init may inherit stale entries
+  // keyed by Terms reused across distinct atp states (e.g. test harness
+  // builds two AtpStates with different rule sets but shared Term IDs
+  // when the cell allocator recycles slots).  Bump the epoch to drop
+  // any survivors.
+  atp_unf_memo_invalidate();
   s->kbo      = cfg;
   s->step_cap = step_cap;
   // CP-priority weight: the ordering-directed GT heuristic is the
@@ -4492,6 +4526,13 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // KBO weight memo are both keyed on cell addresses, now stale -- drop them.
   thvm_lpo_invalidate();
   thvm_kbo_invalidate();
+  // The normalize-result cache stores Term values (cell addresses), so
+  // GC relocation makes its entries stale.  Bump the unf_memo_epoch so
+  // every cached NF is invalidated.  Whole-subject + per-position
+  // no-fire memos are hash-keyed (cell-relocation-safe), but they
+  // share the same epoch counter so they invalidate together -- a
+  // small over-invalidation we accept for code simplicity.
+  atp_unf_memo_invalidate();
   return 1;
 }
 
@@ -9012,13 +9053,60 @@ done:
 // Cost: two `thvm_rewrite_normalize` calls per CP candidate.  Worth
 // it when the saturation produces many joinable CPs (group axioms
 // generate ~hundreds of trivially-joinable overlaps per round).
+// Joinability cache: maps (lhs_hash ^ rhs_hash, R-epoch, n_rules) to
+// the trivially-joinable verdict.  Stores only the boolean, not Term
+// cells -- safe across heap_reset (which doesn't bump unf_memo_epoch
+// directly anymore since the norm-result-cache port was reverted).
+// On hit when the verdict is 0 (NOT joinable), we still have to
+// normalize for the caller's *lhs/*rhs write-back so the cache
+// short-circuit only helps when joined.  When the verdict is 1
+// (joined), the caller drops the CP and doesn't need the NFs, so
+// we skip the normalize entirely on hit -- the structural lever.
+#define ATP_JOIN_CACHE_BITS 16
+#define ATP_JOIN_CACHE_SIZE (1u << ATP_JOIN_CACHE_BITS)
+#define ATP_JOIN_CACHE_MASK (ATP_JOIN_CACHE_SIZE - 1u)
+typedef struct { u64 key; u32 epoch; u32 n_rules; u8 joined; } AtpJoinCacheEnt;
+static AtpJoinCacheEnt g_atp_join_cache[ATP_JOIN_CACHE_SIZE];
+u64 g_atp_join_cache_hits   = 0;
+u64 g_atp_join_cache_misses = 0;
+
 static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   const u32 NORM_CAP = 64;
+  static int dbg_join_cache = -1;
+  if (dbg_join_cache < 0) {
+    const char *e = getenv("THVM_ATP_JOIN_CACHE");
+    dbg_join_cache = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  u64 join_key = 0;
+  u8  join_cache_eligible = 0;
+  if (dbg_join_cache) {
+    u64 lh = atp_term_struct_hash(*lhs);
+    u64 rh = atp_term_struct_hash(*rhs);
+    // Symmetric: joinable(l, r) == joinable(r, l), so the mix is symmetric.
+    join_key = (lh + rh) ^ (lh * rh + 0x9e3779b97f4a7c15ull);
+    AtpJoinCacheEnt *e = &g_atp_join_cache[(u32)join_key & ATP_JOIN_CACHE_MASK];
+    if (e->key == join_key && e->epoch == g_atp_unf_memo_epoch
+        && e->n_rules == s->n_rules && e->joined == 1u) {
+      g_atp_join_cache_hits++;
+      // Caller drops CP without reading *lhs/*rhs further.
+      return 1u;
+    }
+    join_cache_eligible = 1u;
+  }
   Term l = atp_rewrite_normalize(s, *lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   Term r = atp_rewrite_normalize(s, *rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   *lhs = l;
   *rhs = r;
-  return kbo_eq(l, r);
+  u8 joined = kbo_eq(l, r);
+  if (join_cache_eligible) {
+    g_atp_join_cache_misses++;
+    AtpJoinCacheEnt *e = &g_atp_join_cache[(u32)join_key & ATP_JOIN_CACHE_MASK];
+    e->key     = join_key;
+    e->epoch   = g_atp_unf_memo_epoch;
+    e->n_rules = s->n_rules;
+    e->joined  = joined;
+  }
+  return joined;
 }
 
 // Permutation-subsumption (port of WM `GZ_ACVerzichtbar` in

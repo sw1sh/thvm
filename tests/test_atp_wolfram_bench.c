@@ -852,6 +852,20 @@ int main(int argc, char **argv) {
                (unsigned long long)rc_total,
                100.0 * (double)g_atp_rhs_cache_hits / (double)rc_total);
       }
+      u64 nc_total = g_atp_norm_cache_hits + g_atp_norm_cache_misses;
+      if (nc_total > 0) {
+        printf("   norm-cache: %llu hits / %llu queries (%.0f%% hit-ratio)\n",
+               (unsigned long long)g_atp_norm_cache_hits,
+               (unsigned long long)nc_total,
+               100.0 * (double)g_atp_norm_cache_hits / (double)nc_total);
+      }
+      u64 jc_total = g_atp_join_cache_hits + g_atp_join_cache_misses;
+      if (jc_total > 0) {
+        printf("   join-cache: %llu hits / %llu queries (%.0f%% hit-ratio)\n",
+               (unsigned long long)g_atp_join_cache_hits,
+               (unsigned long long)jc_total,
+               100.0 * (double)g_atp_join_cache_hits / (double)jc_total);
+      }
     }
   }
   { u32 unor = 0;
