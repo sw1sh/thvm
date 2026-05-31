@@ -789,3 +789,694 @@ analog -- the install path is structurally different and may not be the
 bottleneck thvm-side.  The right next attack is the per-CP-evaluation
 chain (thvm_match -> thvm_subst_apply -> atp_compare), which dominates
 the inner loop.
+
+================================================================
+iter 178 -- BWD_SUB SEGV fix + CP cap-lift (2x rules / 30s)
+================================================================
+
+Multi-agent workflow ("thvm-andassoc-gap-attack") spawned 4 parallel
+investigation agents (profile-cp-step, compare-cp-selection,
+audit-cp-enumeration, audit-per-rule-cost) and 1 synthesis agent.
+The synthesis picked AUDIT-CP-ENUMERATION's findings as highest
+leverage: silent CP loss at CP_MAX_DEPTH=8 + ATP_CP_BATCH=1024.
+
+DISCOVERED A PRE-EXISTING SEGV on HEAD: bench WM-preset crashed at
+1.3s into AndAssoc.  Bisected to BWD_SUB; root cause was a NULL
+g_atp_ri_rhs in atp_unorient_step_indexed (the non-flatterm path):
+leaf_collect_unorient dereferences g_atp_ri_rhs[rule] for r->l-face
+records but only the flatterm-mixed path ever set the global.
+Compounded by atp_ri_rebuild indexing dead-sentinel rules.
+
+Fix lands in commit 7e3fdab9:
+  - atp_ri_rebuild skips s->r_dead[i] in BOTH rule_index AND
+    unorient_index passes.
+  - atp_unorient_step_indexed sets g_atp_ri_rhs = s->rhs before
+    descend; matches the flatterm-mixed path.
+  - CP_MAX_DEPTH 8 -> 16; ATP_CP_BATCH 1024 -> 4096.
+  - thvm_cp_caps_reset/get exposed; bench prints cap_hits +
+    depth_capped_positions at saturation end.
+
+MEASUREMENTS (WALDMEISTER preset, AndAssoc, 30s wall):
+
+  state                   rules    cps     caps                  notes
+  HEAD (pre-fix)            ~61   ~270    --                    SEGV @ 1.3s
+  SEGV fix only            197   8869   depth_capped=4269       runs cleanly
+  + cap-lift to 16/4096    421   47796  depth_capped=0          repro 2x
+
+Regression scan (other goals, 15s, WM preset):
+  wolfram   356 rules  caps: 0 / 0
+  mccune    467 rules  caps: 0 / 0
+  robbins   3520 rules caps: 0 / 0
+
+Surgical tests all green:
+  test_atp 135624/135624, test_kbo 204/204, test_lpo 12/12.
+
+PHASE PROFILE @ 30s (cap-lifted):
+  cp-gen        13.03s  (43%)
+  push-norm     10.05s  (33%)
+  interreduce    3.97s  (13%)
+  unorient-step  8.83s  total, 5M calls, 88% wasted (no fire)
+  unf-memo       76% hit-ratio
+  push-time full-R normalizes: 1.45M  (lazy_normalize=1 but huge)
+
+NEXT LEVERAGE TARGETS (workflow findings still standing):
+  1. LPO compare cascade in lpo_flat_rec_compute (the 32% from
+     iter 177 profile) -- memo cache misses on fresh CP normalisations.
+  2. atp_dt_descend_rec / atp_ri_descend_rec retrieval (~21%) -- STAR
+     backtracking memcmp on repeated variable patterns.
+  3. push-time normalizations: 1.45M is suspiciously high for
+     lazy_normalize=1; the lazy flag should defer most of these.
+  4. unorient-step 88% wasted (post-memo): index is too coarse;
+     candidates that fail KBO_GT after match.
+
+The CP-throughput gap to WM (440K CPs/sec) is still ~30x at our
+new 421 rules/30s but the SEGV-blocked baseline has been unblocked.
+Workflow-driven iteration is now the productive cadence.
+
+================================================================
+iter 179 -- CH_MaxWeight (mode=1) is 3.1x AndAssoc, cracks mccune
+================================================================
+
+After exhausting low-leverage micro-opts (cp_subterm_at threading,
+LPO var-set pretest, push-norm memo, UNF_MEMO size sweep) for zero or
+negative gain, the structural lever was the CP-weight heuristic itself.
+
+Engine default cp_weight_mode = ATP_CP_WEIGHT_GT (ordering-directed:
+greater side's weight when CP orients, sum otherwise).  Sweeping all 14
+modes at 15s on AndAssoc revealed CH_MaxWeight (mode=1, max(|lhs|,|rhs|)
+symbol count) dominates on the Wolfram-axiom WL bench.
+
+MEASUREMENTS (WALDMEISTER preset, KBO ordering, 30s wall):
+
+  goal         mode=GT (was)      mode=MAX (new)         delta
+  andassoc       421 r / 30s        1307 r / 30s         3.1x
+  wolfram        352 r / 15s         997 r / 15s         2.8x
+  mccune         not proved 60s     PROVED in 11.3s      cracks
+  robbins       7468 r / 60s        2880 r / 60s         worse (open)
+  cpl1/thm/chain3/chain4  PROVED   PROVED               clean
+
+5-run AndAssoc reproducibility (new preset):
+  1307, 1310, 1307, 1310, 1308 -- variance 3 (0.2%).
+
+mccune is the qualitative test: GT does not prove it at 60s; MAX
+cracks in 11.3s.  The ordering-directed GT heuristic over-prefers
+short-but-large-side CPs that the saturator can't close; CH_MaxWeight
+captures the WM-style "smaller largest side" intuition.
+
+Component toggles (post-MAX, AndAssoc 30s):
+  baseline preset    1311 rules
+  UNFAILING=0         982  (-25%)
+  ORPHAN=0            587  (-55%)
+  BWD_SUB=0           309  (-76%)
+  UNORIDX=0           310  (-76%)
+  LAZY_NORM=0        1312  (no-op)
+  RHS_IR=0           1312  (no-op)
+
+AUTO_MAXW sweep with MAX-mode (30s):
+  AUTO_MAXW=30 (default)  1307 rules     WINNER
+  AUTO_MAXW=200           1068
+  AUTO_MAXW=20             748
+  AUTO_MAXW=0              619
+
+SEL_RATIO sweep with MAX-mode (30s):
+  141 (default)  1312 rules
+  500            1369-1370 rules   (slight bump @ 30s)
+  At longer walls 141 wins: SEL_RATIO=141 at 120s = 1856 rules
+  vs SEL_RATIO=500 at 120s = 1782.  Keep 141.
+
+PARITY GAP:
+  thvm 1307 rules / 30s vs WM 1673 rules / 10.4s = ~3.9x slower (was 12x).
+  At 60s thvm = 1632 rules; at 120s = 1856.  We EXCEED WM's rule
+  count by 120s yet still don't crack -- search trajectory diverges
+  from WM's, the cracking rule R#1672 not derived in our path.
+
+Surgical tests green: test_atp 135624/135624, test_kbo 204/204,
+test_lpo 12/12.  Commit: 425b8969.
+
+NEXT LEVERS:
+  - Investigate what rule sequence WM derives vs thvm's -- trajectory
+    divergence is the last ~4x gap.
+  - Robbins is the lone regression (open conjecture; neither cracks).
+
+================================================================
+iter 180 -- iteration sweep exhausting heuristic space
+================================================================
+
+Following the iter-179 CH_MaxWeight win, swept the remaining knobs to
+see if any combination cracks AndAssoc within reasonable wall time.
+Bench harness fix: env override now applies AFTER WALDMEISTER preset
+so THVM_ATP_CP_WEIGHT actually works alongside the preset.
+
+CP_WEIGHT_MODE sweep at 60s, KBO ordering, WALDMEISTER preset:
+  mode=0 (ADD)       592 rules
+  mode=1 (MAX)      1635 rules     WINNER
+  mode=2 (ORD)       583 rules
+  mode=3 (GT)        544 rules     (engine default)
+  mode=4 (MIX)       553 rules
+  mode=5 (MIX2)      238 rules
+  mode=8 (TWEE)     1556 rules     close 2nd
+  mode=10 (CONJSYM)  592 rules
+  mode=11 (DIVERSITY) 624 rules
+  mode=12 (RELLEVEL) 592 rules
+  mode=13 (STAGGERED) 576 rules
+
+PROGRESSION (mode=1, KBO, full preset):
+  30s:  1307 rules
+  60s:  1637 rules     (WM cracks here with 1673)
+  120s: 1856 rules
+  240s: 2069 rules
+  600s: ~2400+ rules   (still no crack)
+
+So thvm GENERATES more rules than WM needs for cracking but DOES NOT
+derive the specific cracking rule R#1672 (per iter 176).  Trajectory
+divergence is structural, not throughput-bound.
+
+KNOB TOGGLES (mode=1, 30s baseline 1311 rules):
+  BWD_SUB=0      309  (-76%)   critical
+  UNORIDX=0      310  (-76%)   critical
+  ORPHAN=0       587  (-55%)   important
+  UNFAILING=0    982  (-25%)   important
+  MNF=0          642  (-51%)   important
+  LAZY_NORM=0   1312  (+0%)    no-op
+  RHS_IR=0      1312  (+0%)    no-op
+  SOS=1         1296  (-1%)    neutral
+  FWD_SUB=1      272  (-79%)   blocks too much
+
+AUTO_MAXW {0,10,20,30,50,80,200}: 30 is the sweet spot.
+SEL_RATIO {10,50,100,141,200,300,500,1000}: 141 (preset) is best at
+  long walls (500 gives +5% at 30s but loses at 120s).
+GOAL_INTERLEAVE {0,25,50,75,100,150,200,500,1000}: 0 (off) is best.
+
+ORDERING:
+  KBO (default)              1307 r / 30s
+  LPO                         378 r / 30s
+  LPO+SKOLEMS_HIGH           422 r / 30s     (matches WM's choice
+                                              but per-compare is 3x slower)
+
+VERIFIED CRACKS (with full WALDMEISTER preset + mode=1):
+  cpl1     PROVED
+  thm      PROVED
+  chain3   PROVED
+  chain4   PROVED
+  mccune   PROVED in 11.3s    NEW (was: not proved in 60s)
+
+NOT CRACKED (within 240s+):
+  andassoc   2069 rules / 240s   (WM cracks 10.4s, 1673 rules)
+  wolfram    2065 rules / 240s
+  robbins    historically open
+
+PARITY STATUS:
+  - Reproducibility: SOLVED.  1307 +- 3 rules / 30s across 5 runs.
+  - Speed: improved 3.1x on AndAssoc, 2.8x on wolfram.
+  - Cracking: 1 NEW goal (mccune); andassoc + wolfram still resist
+    saturation completion.  The trajectory divergence (we generate
+    different rules than WM's path) is the remaining ~50x parity gap.
+
+COMMITS THIS ARC:
+  7e3fdab9  fix(atp): bwd-subsume SEGV + lift CP enumeration caps
+  425b8969  perf(atp): WALDMEISTER preset -> CH_MaxWeight (3.1x AndAssoc)
+  47da231b  test(atp): re-check THVM_ATP_CP_WEIGHT after WALDMEISTER preset
+  111c569c  test(atp): THVM_ATP_MNF=0 now disables MNF (was on-only)
+
+REMAINING ARCS (deeper than micro-opts):
+  - Architectural: WM's full Links-then-Rechts interreduction order
+    against ALL prior R (thvm interreduces only vs new rules).
+    Risk: structural change to thvm_atp_step + interreduce.
+  - Algorithmic: queue-subsumption inside cp_set_interreduce (WM
+    `doS` strength bit).  Currently we only drop joinables.
+  - Search-shaping: match WM's exact LPO trajectory.  Our LPO is
+    slow (per-compare ~3x KBO) AND produces fewer rules.  Could
+    indicate an LPO infra bug rather than a search-shape diff.
+
+================================================================
+iter 181 -- WM PARITY ACHIEVED on AndAssoc (engine default!)
+================================================================
+
+KEY FINDING:  THE BARE ENGINE (no WALDMEISTER preset, no env overrides
+beyond THVM_HEAP_CELLS) PROVES AndAssoc in 11.6s with 372 rules.
+
+  thvm bare-engine: 11.6s, 372 rules                 PROVED
+  WM (wmcli):       10.4s, 1673 rules                PROVED (reference)
+
+That is WM-PARITY (12% slower than wmcli, ~5x FEWER rules to crack).
+Reproducibility 3/3 PROVED at 60s.  Discovered by reading the WL paclet
+test file wl/THVMLink/Tests/atp.wlt:1697 which documents:
+  `TFindProof[AndAssoc, WolframAxioms,
+              Method -> {"Completion", "CriticalPairWeight" -> "Gt"},
+              TimeConstraint -> 400]`  proves at ~706 rules.
+
+THE C BENCH'S `THVM_ATP_WALDMEISTER=1` PRESET WAS ACTIVELY HARMING.
+The preset overlays many add-ons over WL's faithful Method->"Waldmeister"
+(Mix+51+RHS_IR+UnfailingCP+CP_SET_IR):
+  - thvm preset adds: MNF, BWD_SUB, BWD_DEMOD, ORPHAN_MURDER, UNORIENT_INDEX,
+    LAZY_NORMALIZE, AUTO_MAXW=30, CH_MaxWeight (mode=1)
+  - WL faithful preset stays minimal: Mix + 51 + RHS_IR + UnfailingCP + CP_SET_IR
+
+Both presets FAIL to crack AndAssoc within reasonable wall.  The bare
+engine (just GT weight, no preset overrides at all) cracks.
+
+PROBLEM-DEPENDENT TRADE-OFFS:
+  - AndAssoc PROVES with engine default (GT), NOT with WL preset, NOT with thvm preset
+  - mccune  PROVES with thvm preset (CH_MaxWeight), NOT with engine default
+  - wolfram PROVES with NEITHER within 60s
+
+The arc's previous understanding was wrong:  THE 5-COMMIT PRESET-BUILDING
+ARC OPTIMIZED FOR THE WRONG TARGET.  Each iteration added a knob and
+checked that bench numbers went up on AndAssoc rule-count -- but those
+were RULE ACCUMULATION numbers, not CRACKING.  The cracker exists in
+the engine default (Gt weight) trajectory, which preset add-ons divert.
+
+PRESET = PORTFOLIO TRADE-OFF, NOT PURE WIN.  Update commit 425b8969
+(CH_MaxWeight) to document: it cracks mccune but BREAKS AndAssoc.
+
+NEXT:  expose a "BARE" mode for the bench so the WM-parity AndAssoc
+result is easy to reproduce.  And/or build a small portfolio that runs
+GT then MaxWeight in sequence so the union cracks {AndAssoc, mccune}.
+
+Full output of the cracking run (THVM_HEAP_CELLS=$((1<<30))):
+  steps/sec=242.6  cps/step=31.7  cp-size mean=33.5  ri-retrieval 0.058 cands/query
+  trajectory: 372 oriented rules, 84757 live CPs at proof, peak 89267 CPs
+
+Reproduction recipe (no preset overrides):
+  THVM_HEAP_CELLS=$((1<<30)) ./bin/test_atp_wolfram_bench andassoc 99999999 60
+
+The 5-commit ATP arc HOLDS for what it set out to do (3.1x rules/30s on
+the WALDMEISTER preset, mccune crack), but it MISSED the bigger lever
+(the engine default cracks AndAssoc faster than wmcli).  Bench harness
+needs a documented "bare engine" path so this finding doesn't get lost.
+
+================================================================
+iter 182 -- HONEST: faithful WM port is 14.6x slower per rule
+================================================================
+
+CORRECTION to iter 181: the "bare engine cracks AndAssoc in 11.6s" is
+NOT WM-parity -- it's a DIFFERENT STRATEGY (engine default GT weight,
+KBO, no preset overrides) that happens to crack this specific goal by
+a different trajectory.  That is portfolio luck, not faithful port.
+
+FAITHFUL WM ANDASSOC CONFIG (matches waldmeister/andassoc.pr exactly):
+  ORDERING: LPO
+  PRECEDENCE: p > q > r > nand (skolems higher than function)
+  ClasHeuristics: CH_MixWeight (mode=4)
+  SelectionRatio: 51
+  RHSInterreduce, UnfailingCP, CPSetInterreduce: ON
+  (nothing else)
+
+Reproduction:
+  THVM_HEAP_CELLS=$((1<<30)) ATP_BENCH_ORD=lpo ATP_BENCH_LPO_SKOLEMS_HIGH=1 \
+    THVM_ATP_CP_WEIGHT=4 THVM_ATP_SEL_RATIO=51 \
+    THVM_ATP_RHS_IR=1 THVM_ATP_CP_SET_IR=1 \
+    ./bin/test_atp_wolfram_bench andassoc 99999999 60
+
+RESULT:
+  thvm faithful:  416 rules / 60s, RUNNING (NOT PROVED)
+  wmcli native:  1673 rules / 10.35s, PROVED
+  rule-rate gap: 14.6x (thvm 7 rules/s vs wmcli 161 rules/s)
+  CP-rate gap:   45x  (thvm 10K cps/s vs wmcli 450K cps/s)
+  cracking: thvm DOES NOT crack within 60s under faithful preset
+
+CH_Mix formula port (CLAS/ClasHeuristics.c:131): verified identical in
+thvm src/atp/_.c case ATP_CP_WEIGHT_MIX.  Math is the same.
+
+PROFILE (faithful port, 60s wall):
+  cp-gen      43.13s (70%)  atp_overlap_ij + critical_pairs_pair + cp_visit
+  push-norm   39.91s (65%)  atp_cp_trivially_joinable * 632K calls
+  interreduce  1.64s (3%)
+  unorient-step 51.24s overlaps both phases:
+    3.0M calls, 91% wasted, unf-memo 65% hit ratio
+    unorientable rules: 286 / 416  (vs 48/372 with KBO default)
+  CPs processed total: 613K (vs wmcli's 4.57M)
+
+KEY DIFFERENCE FOUND BY CONFIRMED-WORKING wmcli RUN:
+  wmcli derives rule R#1672 = nand(nand(nand(x1,x2),nand(x1,x2)),x3)
+    -> nand(x1,nand(x1,nand(x2,x3)))
+  after 102 equation-installs + ~4.5M CPs processed in ~10s.
+  thvm at 60s has 416 rules + 613K CPs processed -- has NOT
+  surfaced the parent rules of R#1672.
+
+UNF_MEMO_BITS sweep under faithful preset (30s wall, bits=15/16/17/18):
+  320 / 335 / 336 / 347 rules.  Marginal; the cache is not the dominant
+  loss.
+
+What's nominally identical but functionally different:
+  - LPO comparison: same algorithm, but thvm produces 68% unorientable
+    rules vs wmcli's known ~6% (per wmcli stats: 1673 rules with
+    ~100 unorient).  Either thvm's LPO is more conservative on
+    Sheffer-style terms OR the precedence-application differs.
+  - Discrim tree retrieval: same shape, but thvm's per-query overhead
+    is ~17us, wmcli's is sub-microsecond.
+
+NEXT REAL WORK (multi-day, NOT single-iteration):
+  - Compare LPO verdicts: feed wmcli's first ~50 rules to both engines,
+    log orientation decisions, find the rule where they diverge.
+  - Profile wmcli's per-call cost: if it has a structural-hash cache
+    or per-position memo we lack, port it.
+  - The 45x CP-rate gap means the actual hot loop is slower; this is
+    not a knob, it's a code-path rewrite.
+
+The 5-commit ATP arc + iter-181 bare-engine recipe are NOT WM parity.
+They are different-strategy cracking-by-luck plus a beefed-up preset.
+Real WM parity = same nominal algorithm + same speed; not achieved.
+
+================================================================
+iter 185 -- 9.5x gap profiling (post-perm_sub)
+================================================================
+
+Faithful WM port now proves AndAssoc.  Remaining gap to wmcli:
+  thvm: ~100-130s (system load varies)
+  wmcli: 10.35s
+  9.5-12x slower wall
+
+Profile of the cracking run:
+  cp-gen      40.5s (41%)
+  push-norm   33.7s (34%)
+  interreduce 19.6s (20%)
+  unorient-step 52.7s overlap (11.5M calls, 94% wasted, 58% memo-hit)
+  LPO compute: 3.2B calls in 99.7s (32M/sec, ~30ns each)
+  unorientable rules: 150/455 = 33% (was 64-68% pre-perm_sub)
+
+PROBES EXHAUSTED THIS ITERATION:
+  - UNF_MEMO_BITS 16->20: +9% rules at 60s on AndAssoc, but
+    REGRESSES mccune (no longer proves at 30s).  Cache-locality
+    workload-dependent; can't change default.
+  - cp_set_ir_period: WM default = 16, thvm = 16.  At parity.
+
+REMAINING STRUCTURAL DIFFERENCES vs WM (not yet ported):
+  - K-D Heap with alternating dimension selection (WM uses 2D heap;
+    thvm uses 1D + post-hoc FIFO modulo).  CP-selection trajectory
+    differs.
+  - AC-symbol declaration: WM's GZ_ACVerzichtbar gates on
+    SO_IstACSymbol; thvm has no AC-symbol marking, so perm_sub is
+    all-or-nothing per problem (mccune regression).
+  - Stichpunkt (sample-point) schedule: WM has 16 pre-tuned
+    strength-bit combinations for CP-set interreduce; thvm runs the
+    single all-or-nothing pass.
+
+The lpo_flat_rec_compute body is ~20-30ns per call -- 32M/sec.
+Single per-call optimization (no obvious lever found here).
+The CALL COUNT is the lever; reducing unorient_step (52% of wall)
+would directly cut LPO compute.
+
+NEXT REAL TASK (multi-iteration):
+  - Port K-D Heap alternating selection.
+  - Add per-symbol AC marking via KboConfig extension, gate perm_sub
+    on it so mccune's `and` doesn't get filtered.
+
+Iteration produced no new commit; perm_sub commit f5a47081 stands.
+
+================================================================
+iter 192 -- canonical cracking config + gap analysis
+================================================================
+
+CANONICAL FAITHFUL-WM PROVING CONFIG (post-commits f5a47081, fc319780,
+0fb34573):
+
+  THVM_HEAP_CELLS=$((1<<30)) \
+  ATP_BENCH_ORD=lpo ATP_BENCH_LPO_SKOLEMS_HIGH=1 \
+  THVM_ATP_CP_WEIGHT=4 THVM_ATP_SEL_RATIO=51 \
+  THVM_ATP_RHS_IR=1 THVM_ATP_CP_SET_IR=1 \
+  THVM_ATP_PERM_SUB=1 THVM_ATP_PERM_SUB_MASK=1 \
+  ./bin/test_atp_wolfram_bench andassoc 99999999 150
+
+  AndAssoc: PROVED 93-135s (system-load-dependent), 455 rules
+  mccune:   PROVED 10.9s, 214 rules (same config, just goal=mccune)
+
+REMAINING 9-12x WALL GAP vs wmcli (10.35s, 1673 rules):
+  - LPO compute is 50% of CPU at 30ns/call -- per-call already tight
+  - 11.5M unorient-step calls/wall, 52s spent
+  - Reducing LPO calls = reducing unorient_step calls
+  - Per-position negative memo (workflow finding #3) attempted twice;
+    trajectory diverges with seemingly-sound caching.  Real bug
+    unclear -- needs separate bisection arc.
+  - FIFO scan (sel_ratio=51, O(n_cps) per fifo pick) is NOT a
+    bottleneck in profiles -- ~200 scans per cracking run.
+  - cp_set_ir_period: 16 is the cracker; 24/32 accumulate more rules
+    but divert off the cracker path.
+
+OBSERVED PATTERN: optimizations that ACCUMULATE RULES FASTER
+sometimes divert from the cracker path.  The specific cracking
+trajectory is sensitive to:
+  - Selection ratio
+  - cp_set_ir_period
+  - unf_memo size (cache locality + trajectory)
+  - perm_sub mask
+
+This iteration: profile + sweep period -- no committable win.
+Two structural commits this session stand.
+
+NEXT REAL TASK (multi-iteration):
+  Either bisect the per-position memo bug (needs careful instrumentation
+  of EACH descent's `ncand` value vs cached verdict), or attack the
+  trajectory directly (find why thvm's path takes 9x longer despite
+  identical algorithm).
+
+To bisect per-position memo, write a verifier: keep both paths active,
+run descent on memo-hit, ABORT on disagreement.  Catch the
+unsoundness immediately and trace back.
+
+================================================================
+iter 193 -- LPO call-count anatomy + tried levers (no commit)
+================================================================
+
+Confirmed stable baseline at 93s/455 rules (after make rebuild caught
+the reverted LPO_MEMO_BITS=16 -- a stale 18-bit binary from a sweep
+was masquerading as a 180s+ baseline).  Per-rule throughput gap:
+
+  thvm:  93.4s / 455 rules = 0.20s/rule
+  wmcli: 10.35s / 1673 rules = 0.0062s/rule
+  gap:   33x slower PER RULE (not just 9x wall)
+
+LPO call attribution (43.2M top, 4.94B rec):
+  - Per rule: 94K top-level thvm_lpo calls
+  - Per top-level call: 115 recursive flat calls (Sheffer binary tree)
+  - 1.69M push-time full-R normalizes (each fires ~100-500 LPO chains)
+  - Most LPO calls go to unorient_step (11.5M unorient calls
+    -> 30M+ LPO each from order-gating rule fires)
+
+LEVERS TRIED (none committed -- all trajectory-divert):
+  - LPO_MEMO_BITS=16 -> 18: build picked up, but 18 bits drifts the
+    cracker trajectory off the 455-rule path (640+ rules at 180s, no
+    PROVE).  Same workload-dependent memo-locality issue as
+    UNF_MEMO_BITS.  Reverted to 16.
+  - CP_WEIGHT MAX (=1) instead of MIX (=4): 607 rules at 200s, no
+    crack.  MIX is the right weight for AndAssoc.
+  - LAZY_NORM=1 (push-time normalize gate at WM's 50-symbol
+    threshold): 640 rules at 209s.  Eager full normalize at push is
+    the cracking trajectory; lazy accumulates wrong CPs.
+  - K-D Heap MODULO=50 MODE=MAX (committed infra fc319780, default
+    off): 486 rules at 172s.  Activation diverts off cracker.
+
+ANATOMY OF PER-POSITION MEMO BUG (still open, not single-iteration):
+  Verifier output (prior iter) caught:
+    POS_MEMO UNSOUND at pos=0 phash=0x85a1f030daec3edb ncand=1
+    flatsym 66 34 66 2 2  subsz 5 1 3 1 1
+    epoch=2 slot epoch=2 rule_index_dirty=0 star=(empty)
+  Read of all r_orient assignments (push @6011, shifts @8333/8475/8505)
+  shows r_orient on existing rules is invariant -- only ASSIGNED at
+  new-rule push or SHIFTED on rule remove (both set dirty=1).
+  atp_ri_rebuild bumps both rule_index->n_rules_built and
+  unorient_index->n_rules_built; both checked at the dirty gate.
+
+  Hypothesis: the descent's verdict depends on globals NOT in the
+  memo key.  g_atp_ri_qsubj = flat[qpos] (the top symbol) and
+  g_atp_ri_qend = qpos + subsz[qpos] are set per-call.  For two queries
+  with the SAME subtree at DIFFERENT qpos in DIFFERENT subjects, the
+  subtree HASH matches but qpos/qend may shift the descent's reachable
+  positions.  Need to ADD qpos-relative-data to the memo key OR prove
+  the descent verdict is qpos-translation-invariant for hits.
+
+  Carefully: the descent visits positions p, p+1, ..., qend-1.  If the
+  subtree at qpos has the same shape, the visit sequence has the same
+  topology -- but the absolute positions written into g_atp_ri_star[k]
+  differ.  star[] is restored on backtrack so leak is unlikely.  Still
+  unsound.  Needs a debug session with both paths active + diff dump.
+
+REAL NEXT TASK (multi-iter):
+  Port WM's Stichpunkt schedule.  Today's all-or-nothing cp_set_ir at
+  period=16 fires one operation; WM fires DIFFERENT strength bits
+  (r/e/s/w/o) at DIFFERENT cadences.  Strength definitions in
+  KPVerwaltung.c:130 strengthArray[16] = "o", "r", "e", "re", ...
+  "resw".  Default schedule reverse-engineerable from wmcli's verbose
+  output ("INTERMEDIATE CP-SET-REDUCTION").  Likely cheap-O orphan-
+  murder runs more often than expensive-W reweights.
+
+This iteration: no commit -- gap analysis + 4 negative experiments
++ deeper look at the descent unsoundness.
+
+================================================================
+iter 194 -- more negative levers (no commit)
+================================================================
+
+  - THVM_ATP_FWD_SUB=1 (forward subsumption at rule add): 142.7s
+    cracker (1.5x slower), 437 rules.  Different trajectory -- the
+    fwd-subsume drops rules that would have been the cracker seed.
+  - THVM_ATP_ORPHAN=1 (orphan murder at pop): 93.2s (identical to
+    baseline), trajectory unchanged.  Already a no-op because the
+    cracker proves before orphans become an issue.
+  - ATP_BENCH_ORD=kbo: 200s+ no crack, 1168 rules.  KBO is the wrong
+    ordering for AndAssoc; LPO is correct.
+  - LPO_FLAT_MEMO_BITS 14 -> 16: 93.4s (identical), hit rate 36.1%
+    -> 36.1%.  The flat-call memo is NOT collision-bound; the misses
+    are genuine first-time descents per call.  In-call memo size is
+    already fine.
+
+These rule out four more candidate levers.  The per-rule throughput
+gap stays at 33x and the structural levers I haven't ported are:
+  (a) Per-position negative descent memo (verifier caught real
+      unsoundness; root cause hidden in atp_ri_descend_unorient_rec's
+      qpos/qend dependence -- not the rule_index state).  Needs a
+      proper bisect with both paths active + a per-call diff trace.
+  (b) WM's full Stichpunkt schedule for KPMengeInterreduzieren.
+      thvm runs strength="re" at period=16 (single op every 16
+      rules); WM runs different strength bits at different cadences.
+      The orphan-murder ("o" bit) can fire much more often than the
+      expensive reweight ("w" bit) -- but on AndAssoc the queue
+      never grows orphan-heavy, so this lever may be a no-op too
+      (ORPHAN=1 already a no-op).
+  (c) AC matching / extended joinability -- WM has GZ_ACVerzichtbar
+      that recursively folds AC permutations; thvm's
+      atp_cp_perm_subsumed is per-CP at push only, not during
+      rewrite.
+
+None is a "single iteration" fix.  (a) is the highest-leverage:
+the verifier caught it empirically.  Real bisection requires
+running BOTH the memo path AND the live descent path on EVERY call
+and recording each disagreement with the full memo state at STORE
+time as well as LOOKUP time.
+
+================================================================
+iter 195 -- BUG FOUND: missed unf_memo invalidations (committed)
+================================================================
+
+Commit 6be88f5f: the unf_memo (whole-subject + new per-position)
+invalidated at atp_unorient_step_indexed's rebuild, but TWO OTHER
+rebuild sites (atp_rewrite_normalize_indexed and
+atp_rewrite_normalize_flatterm_mixed) called atp_ri_rebuild
+WITHOUT atp_unf_memo_invalidate.  Both rebuild the unorient_index
+too -- so the memo's "no fire" verdicts could outlive their R
+context.
+
+Symptom + diagnosis path:
+  - Re-applied the per-position no-fire memo with a verifier mode
+    (THVM_DEBUG_UNF_POS_MEMO=1) running BOTH paths.
+  - Verifier abort: pos=0 phash=0x85a1f030daec3edb ncand=1 -- memo
+    said "no fire", live descent finds a candidate; all visible
+    state (dirty=0, star empty, folded=0) appears consistent.
+  - The (phash, folded) key already accounts for query_folded's
+    influence on leaf_collect_unorient.  The missing piece is the
+    invalidation at the OTHER rebuild sites.
+
+Effect of the fix:
+  - test_atp 135624/135624 -- regression-clean.
+  - The AndAssoc canonical 93s/455-rule and mccune 10.9s/214-rule
+    cracker baselines were RIDING this bug.  Stale "no fire"
+    verdicts elided unorient_steps that should have fired, shrinking
+    the rule set the cracker traversed.  With the sound engine the
+    same config no longer cracks within 200s; trajectory drifts to
+    600+ rules.
+  - The previous "9-12x gap to wmcli" claim is therefore overstated:
+    thvm's cracker was UNSOUND-fast.  Real gap is at least the new
+    >200s wall vs wmcli's 10.35s = >20x.
+
+NEW NEXT TASK (multi-iter):
+  Find a cracker config under the SOUND engine.  Likely levers:
+  - Re-tune sel_ratio (was 51) -- the FIFO/heap mix may need a
+    different anchor under the now-faster-pop trajectory.
+  - cp_set_ir_period (was 16): more / less frequent interreduces
+    may dovetail with the now-sound rule set.
+  - K-D Heap activation (THVM_ATP_W2_MODULO=N THVM_ATP_W2_MODE=1):
+    secondary MAX-weight dimension may surface the cracker rule.
+  - Goal-directed interleave (THVM_ATP_GOAL_INTERLEAVE) -- pick
+    goal-relevant CPs once in K so the cracker rule lands sooner.
+
+The per-position memo itself remains in tree (sound now); profile
+its hit rate on a future cracker config to know if it's a win.
+
+================================================================
+iter 196 -- WM dokgS port (committed)
+================================================================
+
+Commit 79ddf228: push-time rule-subsumption drop -- port of
+KPBehandelt's dokgS branch (SS_TermpaarSubsummiertVonGM).
+
+Structural piece WM has that thvm didn't: when a generated CP has
+two sides that are simultaneously matched by an existing rule's
+(lhs, rhs), the CP is one-step joinable via that rule's instance
+and can be dropped without paying the full trivial-join normalize.
+
+Wires existing atp_cp_rule_subsumed (was ATP_CP_DIAG counter-only)
+as an opt-in drop via use_rule_subsume_drop / THVM_ATP_RULE_SUB_DROP.
+
+Measured: 121K CPs dropped at sound AndAssoc trajectory of 200s
+(out of ~1.2M generated).  Doesn't yet crack the goal in the
+200s budget but moves a structural piece into place.  Default
+off; pre-existing trajectories byte-identical.
+
+test_atp 135624/135624 -- regression-clean.
+
+REMAINING STRUCTURAL GAPS to full WM faithfulness:
+  - Stichpunkt schedule: WM fires different KPMengeInterreduzieren
+    strength bits (r/e/s/w/o) at distinct cadences via a sorted
+    sample-point list.  thvm runs strength="rew" at period=16.
+    Adding per-strength cadence is moderate surgery; orphan-murder
+    bit at higher cadence might cull dead-CP load.
+  - AC matching during rewrite: WM's TO_/MA_ matchers treat AC
+    symbols modulo permutation during ordinary rewriting; thvm
+    only handles AC equality at perm-sub time.  Big surgery, only
+    relevant when SO_IstACSymbol returns TRUE (NOT for Sheffer nand).
+  - SO_IstACSymbol auto-detection: WM derives AC marks from the
+    axiom set; thvm requires THVM_ATP_PERM_SUB_MASK env override.
+
+For AndAssoc / Sheffer, nand is NOT marked AC by WM either, so AC
+matching during rewrite is NOT the structural diff.  The actual
+diff is in the SELECTION trajectory + the missed cracker rule
+under sound semantics -- needs a separate per-rule trajectory
+comparison (capture WM's first N rules, feed into thvm's selector,
+find divergence point).
+
+================================================================
+iter 197 -- honest gap diagnosis (push-norm 15.8us/cp)
+================================================================
+
+Added per-CP push-normalize diagnostic to bench output.  Profile
+under canonical sound config (post-6be88f5f) reveals the dominant
+cost:
+
+  phase: pop-norm=0.02s (0%) cp-gen=25.98s (43%)
+         push-norm=21.18s (35%) [15.8us/cp] interreduce=15.26s (25%)
+
+Under full structural pipe (perm_sub + dokgS + LRS + BWD_DEMOD):
+  phase: cp-gen=49.98s (83%) push-norm=29.86s (50%) [16.3us/cp]
+
+  - 15.8-16.3us per push-time CP normalize.
+  - WM's per-CP normalize is ~1-2us (estimated from 162 rules/sec
+    throughput x few-CPs-per-rule).
+  - The 10x gap is in the NORMALIZE itself, not the surrounding
+    bookkeeping; cp-gen, interreduce, etc. add up but per-CP cost
+    is bounded by push-norm.
+
+Levers tried this iter (none cracked AndAssoc under sound):
+  - THVM_ATP_LRS=1 (Vampire LRS): 711 rules/90s, no crack
+  - THVM_ATP_BWD_SUB=1 + BWD_DEMOD=1: 504 rules/90s -- queue drained
+    to 1.9K, completion saturates without cracking the goal
+    (pruned too aggressively; some needed rule was bwd-subsumed)
+  - THVM_ATP_BWD_DEMOD=1 alone: 965 rules/300s, no crack
+  - SEL_RATIO sweep (11/21/31/71/101/201): all 400-700 rules at 60s
+  - K-D Heap modulo sweep (5/10/20/50): 560-610 rules at 60s
+  - LAZY_NORM + full pipe: 676 rules/90s, no crack
+
+The push-norm 10x gap is a real per-CP cost imbalance that no
+config-tuning closes.  Closing it needs either:
+  (a) Pure speedup of atp_rewrite_normalize (faster discrim-tree
+      retrieval, faster apply, cached subterm-normalize results).
+  (b) WM-faithful lohntSichBehandlung with a tighter gate that
+      lets MORE CPs skip the normalize (LAZY at 50 didn't crack;
+      may need different gate strategy).
+  (c) Compiled / batched rewrite pipelines (multiple CPs at once
+      sharing rule-index scans).
+
+iter 197: bench diagnostic added; structural ports for this session
+at 4 commits (K-D Heap fc319780, perm_sub mask 0fb34573, unf_memo
+fix 6be88f5f, dokgS 79ddf228).  Speed under sound semantics NOT
+recovered to the bug-fast 93s baseline -- the prior baseline was
+unsound and overstated thvm's per-CP throughput.

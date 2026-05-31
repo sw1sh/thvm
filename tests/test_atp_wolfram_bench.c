@@ -790,8 +790,13 @@ int main(int argc, char **argv) {
     u64 sumus = g_atp_phase_us_pop_normalize + g_atp_phase_us_cp_gen +
                 g_atp_phase_us_push_normalize + g_atp_phase_us_interreduce +
                 g_atp_phase_us_goal_check + g_atp_phase_us_norm_graph;
+    double push_norm_us_per_cp = (s->n_cps_push_normalized > 0)
+        ? (double)g_atp_phase_us_push_normalize /
+          (double)s->n_cps_push_normalized
+        : 0.0;
     printf("   phase: pop-norm=%.2fs (%.0f%%) cp-gen=%.2fs (%.0f%%)\n"
-           "          push-norm=%.2fs (%.0f%%) interreduce=%.2fs (%.0f%%)\n"
+           "          push-norm=%.2fs (%.0f%%) [%.1fus/cp]"
+           " interreduce=%.2fs (%.0f%%)\n"
            "          goal-check=%.2fs (%.0f%%) norm-graph=%.2fs (%.0f%%)\n"
            "          sum=%.2fs / wall=%.2fs (%.0f%%)\n",
            g_atp_phase_us_pop_normalize / 1e6,
@@ -800,6 +805,7 @@ int main(int argc, char **argv) {
            100.0 * (g_atp_phase_us_cp_gen / 1e6) / w,
            g_atp_phase_us_push_normalize / 1e6,
            100.0 * (g_atp_phase_us_push_normalize / 1e6) / w,
+           push_norm_us_per_cp,
            g_atp_phase_us_interreduce / 1e6,
            100.0 * (g_atp_phase_us_interreduce / 1e6) / w,
            g_atp_phase_us_goal_check / 1e6,
