@@ -402,5 +402,33 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
       n++;
     }
   }
+
+  // General Metal candidates: UPCAST/LOCAL on output LOOP axes + GROUPTOP
+  // on the reduce axis, for EVERY Metal kernel -- not just the TC /
+  // conv2d-tile / reduce-tail special cases handled above (those return
+  // early or are THVM_TILE-gated, leaving the bulk of elementwise + plain
+  // reduce kernels with zero candidates so BEAM no-ops on them).  These
+  // are correctness-preserving axis transforms; kernel_apply_tune_candidate
+  // skips any that don't apply to a given kernel, and the bench keeps a
+  // variant only when it is faster than the un-opt'd baseline -- so this
+  // can only help (it falls back to no-opt when the hand-coded-style opts
+  // would slow the kernel, which is the common case on Metal).
+  if (propose_metal_backend_enabled()) {
+    if (axis_idx != 0xFF && n < cap) {        // cooperative reduce
+      out[n].op = KOP_GROUPTOP; out[n].axis = axis_idx; out[n].arg = 16; n++;
+    }
+    static const u32 metal_upcast[] = {4, 2};
+    for (u32 i = 0; i < sizeof(metal_upcast)/sizeof(*metal_upcast) && n < cap; i++) {
+      u8 ax = propose_loop_axis_for_factor(ke, 0, metal_upcast[i]);
+      if (ax == 0xFF) continue;
+      out[n].op = KOP_UPCAST; out[n].axis = ax; out[n].arg = metal_upcast[i]; n++;
+    }
+    static const u32 metal_local[] = {32, 16, 8};
+    for (u32 i = 0; i < sizeof(metal_local)/sizeof(*metal_local) && n < cap; i++) {
+      u8 ax = propose_loop_axis_for_factor(ke, 0, metal_local[i]);
+      if (ax == 0xFF) continue;
+      out[n].op = KOP_LOCAL; out[n].axis = ax; out[n].arg = metal_local[i]; n++;
+    }
+  }
   return n;
 }

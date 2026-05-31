@@ -255,3 +255,25 @@ Remaining M1: (a) expand `propose.c` so the 240/328 no-candidate kernels get tun
 (would close 2.19->~1.8ms, the NOOPT+BEAM floor); (b) re-evaluate hand_opts on Metal
 (net-negative) + CUDA (pending free GPU) with the fixed bench; decide additive-BEAM vs
 replace-on-Metal.
+
+### M1 step 2 LANDED (2026-06-01): expand the Metal BEAM proposer
+
+Added a general Metal candidate block to `propose.c`: UPCAST{4,2}/LOCAL{32,16,8} on
+output LOOP axes + GROUPTOP{16} on the reduce axis, for EVERY Metal kernel (previously
+only TC/conv2d-tile/reduce-tail special cases proposed anything, so 240/328 kernels got
+0 candidates and BEAM no-op'd them). The opts are correctness-preserving axis transforms;
+`kernel_apply_tune_candidate` skips inapplicable ones and the time-only bench keeps a
+variant only when faster, so it self-filters to no-op where the hand-coded-style opts
+would slow the kernel (the common case on Metal).
+
+Verified (Metal M3 Max, beautiful_mnist BS=8, zero_grad, BEAM=2): warm_min 2.07ms
+(was 2.19ms with the partial proposer; default BEAM=0 is 3.57ms -> 1.7x), candidate
+coverage 84 -> 206/328 kernels, 73 cache entries. Correctness: BEAM=2 fwd-sum matches
+BEAM=0 within fp (11098.66 vs 11098.67); no GPU orphan (recoveryCount=0); CPU/CUDA
+propose paths unchanged (the new block is Metal-gated).
+
+M1 status: BEAM is now usable + effective on the py/JIT path for Metal (3.57 -> 2.07ms).
+Remaining: the 122 still-uncovered kernels (no divisible LOOP axis >= the factors);
+the default-policy decision (hand_opts is net-negative on Metal, so default should
+perhaps prefer BEAM/NOOPT on Metal) + CUDA hand_opts re-eval -- both pending a free
+CUDA pod. Next: M2 (reduce-into-reduce fusion) is CPU-verifiable and not GPU-gated.
