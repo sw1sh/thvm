@@ -1176,6 +1176,28 @@ static void rmu_collect_ranges_with_opts_through_reduce(
       RMU_NO_OPT, 0, bound, &n_bound);
 }
 
+// RMU_MAX_RANGES-cap range-only variant for the rmu_emit_store
+// dependency analysis (required_pos + reduce-feeding-broadcast hoist).
+// Those scans must see EVERY free range a reduce body references to
+// place the reduce after all output loops it depends on; the MAX_DIM=8
+// default truncates fused conv-backward reduce bodies (>8 free ranges)
+// so a late output axis (e.g. an unfold window axis) is dropped from
+// the dependency set, required_pos undercounts, and the reduce hoists
+// above that axis's output loop -> use-before-declaration in the
+// emitted kernel.  Placement-only: kernels whose reduce bodies fit in
+// MAX_DIM ranges collect identically, so default-seed codegen is
+// unchanged.
+static void rmu_collect_ranges_through_reduce_kernel(
+    Term t, Term *ranges, u32 *n_out) {
+  u32 dummy_kinds[RMU_MAX_RANGES]   = {0};
+  u32 dummy_factors[RMU_MAX_RANGES] = {0};
+  u32 bound[RMU_BOUND_AXIS_CAP];
+  u32 n_bound = 0;
+  rmu_collect_ranges_rec_through_reduce_cap(
+      t, ranges, dummy_kinds, dummy_factors, n_out, RMU_MAX_RANGES,
+      0, 0, bound, &n_bound);
+}
+
 // RMU_MAX_RANGES-cap variants used by rmu_emit_store so kernel iter
 // scopes spanning >MAX_DIM axes (output + aux LOOP + reduce) don't
 // drop late LOOP axes to the cap.
@@ -3698,9 +3720,9 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
                                   &n_hoist);
     for (u32 i = 0; i < n_hoist; i++) {
       Term r_src = heap_read(term_val(hoist_reduces[i]) + 0);
-      Term r_ranges[MAX_DIM];
+      Term r_ranges[RMU_MAX_RANGES];
       u32  r_n = 0;
-      rmu_collect_ranges_through_reduce(r_src, r_ranges, &r_n);
+      rmu_collect_ranges_through_reduce_kernel(r_src, r_ranges, &r_n);
       for (u32 j = 0; j < r_n; j++) {
         if (term_tag(r_ranges[j]) != TAG_UOP
             || term_ext(r_ranges[j]) != UOP_RANGE) continue;
@@ -3798,13 +3820,17 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   u32 required_pos[RMU_MAX_RANGES] = {0};
   for (u32 i = 0; i < n_reduces; i++) {
     Term r_src = heap_read(term_val(reduces[i]) + 0);
-    Term r_ranges[MAX_DIM];
+    Term r_ranges[RMU_MAX_RANGES];
     u32  r_n = 0;
     // Descend through nested UOP_REDUCE bodies so axes referenced only
     // by a transitively-nested reduce still bump required_pos.  Without
     // this an outer reduce hoists above output loops whose axes its
     // inner reduces actually need, producing undeclared-axis MSL.
-    rmu_collect_ranges_through_reduce(r_src, r_ranges, &r_n);
+    // RMU_MAX_RANGES cap: fused conv-backward reduce bodies reference
+    // >MAX_DIM free ranges, so the MAX_DIM-capped collector dropped late
+    // unfold-window axes from the dependency set and hoisted the reduce
+    // above their output loops (undeclared `aN`, the kid=64 a13 bug).
+    rmu_collect_ranges_through_reduce_kernel(r_src, r_ranges, &r_n);
     u32 max_pos = 0;
     for (u32 j = 0; j < r_n; j++) {
       if (term_tag(r_ranges[j]) != TAG_UOP
