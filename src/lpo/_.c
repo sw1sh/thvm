@@ -349,6 +349,23 @@ static KboFlatNode g_lpo_flat_b[KBO_FLAT_CAP];
 #define LPO_FLAT_MEMO_BITS 14
 #define LPO_FLAT_MEMO_SIZE (1u << LPO_FLAT_MEMO_BITS)
 #define LPO_FLAT_MEMO_MASK (LPO_FLAT_MEMO_SIZE - 1u)
+
+// Diagnostic counters for lpo_flat_rec.  Exposed via thvm_lpo_flat_stats.
+static u64 g_lpo_flat_rec_calls    = 0;   // total wrapper invocations
+static u64 g_lpo_flat_memo_hits    = 0;   // (pa,pb,side,epoch) cache hit
+static u64 g_lpo_flat_compute_calls = 0;  // compute body invocations
+static u64 g_lpo_top_calls         = 0;   // top-level thvm_lpo calls
+fn void thvm_lpo_flat_stats(u64 *rec_calls, u64 *memo_hits,
+                            u64 *compute_calls, u64 *top_calls) {
+  if (rec_calls)     *rec_calls     = g_lpo_flat_rec_calls;
+  if (memo_hits)     *memo_hits     = g_lpo_flat_memo_hits;
+  if (compute_calls) *compute_calls = g_lpo_flat_compute_calls;
+  if (top_calls)     *top_calls     = g_lpo_top_calls;
+}
+fn void thvm_lpo_flat_stats_reset(void) {
+  g_lpo_flat_rec_calls = g_lpo_flat_memo_hits = 0;
+  g_lpo_flat_compute_calls = g_lpo_top_calls = 0;
+}
 // `side` encodes which buffer holds the lhs: 0 = g_lpo_flat_a, 1 = g_lpo_flat_b.
 // (pa, pb, side) -- without `side`, swapped recursive calls (a-vs-b and b-vs-a)
 // collide on (pa, pb) and pollute each other's verdicts.
@@ -574,12 +591,16 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
 static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
                            const KboFlatNode *b, u32 pb,
                            const LpoConfig *cfg) {
+  g_lpo_flat_rec_calls++;
   if (a == b && pa == pb) return LPO_EQ;
   u8 side = (a == g_lpo_flat_a) ? 0u : 1u;
   u32 idx = lpo_flat_hash(pa, pb, side);
   LpoFlatMemoEnt *e = &g_lpo_flat_memo[idx];
-  if (e->epoch == g_lpo_flat_epoch && e->pa == pa && e->pb == pb && e->side == side)
+  if (e->epoch == g_lpo_flat_epoch && e->pa == pa && e->pb == pb && e->side == side) {
+    g_lpo_flat_memo_hits++;
     return (LpoCmp)(i8)e->cmp;
+  }
+  g_lpo_flat_compute_calls++;
   LpoCmp c = lpo_flat_rec_compute(a, pa, b, pb, cfg);
   e->pa = pa; e->pb = pb; e->epoch = g_lpo_flat_epoch; e->cmp = (u8)c; e->side = side;
   return c;
@@ -715,6 +736,8 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
       // Skip memo for the top-level (0,0) call -- it always hits slot 0 so
       // the memo lookup is pure overhead.  The recursive calls below this
       // still memoize.
+      g_lpo_top_calls++;
+      g_lpo_flat_compute_calls++;
       LpoCmp rr = lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
       if (g_lpo_persist) {
         u32 idx2 = (u32)((u64)s * 0x9E3779B97F4A7C15ull

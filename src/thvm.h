@@ -3071,6 +3071,12 @@ fn void   thvm_lpo_invalidate(void);
 // The caller then MUST invalidate on cell movement (the ATP does, on GC).
 fn void   thvm_lpo_set_persist(u8 on);
 
+// Diagnostic counters for lpo_flat_rec / compute / memo (the AndAssoc
+// faithful-port profile shows lpo_flat_rec_compute is 41% of CPU).
+fn void thvm_lpo_flat_stats(u64 *rec_calls, u64 *memo_hits,
+                            u64 *compute_calls, u64 *top_calls);
+fn void thvm_lpo_flat_stats_reset(void);
+
 // === rewrite/ ===
 // One-shot equational rewriter on TAG_CTR + TAG_FVR (stage 3 of
 // docs/plans/waldmeister_ic_atp.md).  No recursive descent into

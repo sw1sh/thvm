@@ -650,6 +650,7 @@ int main(int argc, char **argv) {
   // Reset CP-cap-hit counters so the per-run totals attribute lost CPs
   // to a specific cap (ATP_CP_BATCH per-pair vs CP_MAX_DEPTH per-position).
   thvm_cp_caps_reset();
+  thvm_lpo_flat_stats_reset();
 
   clock_t   t0  = clock();
   AtpStatus st  = ATP_RUNNING;
@@ -713,6 +714,17 @@ int main(int argc, char **argv) {
            (unsigned long long)cp_capped,
            (unsigned long long)depth_capped,
            (u32)CP_MAX_DEPTH);
+  }
+  {
+    u64 lrec = 0, lhits = 0, lcomp = 0, ltop = 0;
+    thvm_lpo_flat_stats(&lrec, &lhits, &lcomp, &ltop);
+    double hr = (lrec > 0) ? (100.0 * (double)lhits / (double)lrec) : 0.0;
+    double rec_per_top = (ltop > 0) ? ((double)lrec / (double)ltop) : 0.0;
+    double comp_per_top = (ltop > 0) ? ((double)lcomp / (double)ltop) : 0.0;
+    printf("   lpo: top=%llu  rec=%llu  compute=%llu  memo-hit=%.1f%%  "
+           "(rec/top=%.1f compute/top=%.1f)\n",
+           (unsigned long long)ltop, (unsigned long long)lrec,
+           (unsigned long long)lcomp, hr, rec_per_top, comp_per_top);
   }
   printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);
   printf("   lazy-normalize=%u  push-time full-R normalizes=%llu\n",
