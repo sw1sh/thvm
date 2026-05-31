@@ -377,6 +377,16 @@ int main(int argc, char **argv) {
       }
       thvm_atp_set_perm_subsume_mask(mask);
     }
+    // THVM_ATP_RULE_SUB_DROP=1: port of WM `dokgS` (KPBehandelt's
+    // SS_TermpaarSubsummiertVonGM branch).  Push-time rule-subsumption
+    // drop -- a CP whose two sides are directly subsumed by an existing
+    // rule's pattern is joinable in one step via that rule, so dropping
+    // is sound.  Cheaper than the full trivial-join normalize for the
+    // dropped subset.
+    const char *rsd = getenv("THVM_ATP_RULE_SUB_DROP");
+    if (rsd != NULL && rsd[0] != '\0' && rsd[0] != '0') {
+      thvm_atp_set_use_rule_subsume_drop(s, 1u);
+    }
   }
   // THVM_ATP_W2_MODULO / THVM_ATP_W2_MODE: K-D Heap alternating-
   // dimension selection (port of WM `CPdimension` in KPVerwaltung.c).

@@ -6200,6 +6200,11 @@ fn void thvm_atp_set_use_perm_subsume(AtpState *s, u8 on) {
   s->use_perm_subsume = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_rule_subsume_drop = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode) {
   if (s == NULL) return;
   s->w2_modulo = modulo;
@@ -10334,6 +10339,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_perm_subsumed++;
       continue;
     }
+    // WM dokgS port: push-time rule-subsumption drop (KPVerwaltung.c:451
+    // KPBehandelt's SS_TermpaarSubsummiertVonGM branch).  Strict subset
+    // of trivial-join (rule_subsumed -> joinable) so dropping is sound;
+    // catches CPs that would normalize away WITHOUT running the full
+    // joinability normalize.  Gated by use_rule_subsume_drop.
+    if (s->use_rule_subsume_drop && atp_cp_rule_subsumed(s, cp_lhs, cp_rhs)) {
+      s->n_cps_dropped_rule_subsumed++;
+      continue;
+    }
     // 8e: under -DATP_CP_GRAPH this runs ONE thvm_match_multi
     // traversal of cp_graph; off the flag it is the array scan.
     u8 q_subsmd    = atp_cp_queue_subsumed(s, cp_lhs, cp_rhs);
@@ -10342,7 +10356,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                          rule_a, rule_b)) {
       s->n_cps_dropped_connected++;
     }
-    if (atp_cp_rule_subsumed(s, cp_lhs, cp_rhs)) {
+    if (!s->use_rule_subsume_drop &&
+        atp_cp_rule_subsumed(s, cp_lhs, cp_rhs)) {
       s->n_cps_dropped_rule_subsumed++;
     }
 #endif

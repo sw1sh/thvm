@@ -3910,6 +3910,12 @@ typedef struct {
   u8   use_perm_subsume;
   u32  n_cps_dropped_perm_subsumed;
 
+  // WM dokgS (KPVerwaltung.c:451 KPBehandelt): push-time rule-subsumption
+  // drop.  Cheaper than full trivial-join normalize for CPs that are
+  // directly subsumed by an existing rule's pattern.  Sound: a rule-
+  // subsumed CP is joinable in one step via that rule's instance.
+  u8   use_rule_subsume_drop;
+
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
   // rate how many MORE CPs the saturator will pop before the deadline,
@@ -4150,6 +4156,7 @@ fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_perm_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
+fn void      thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
