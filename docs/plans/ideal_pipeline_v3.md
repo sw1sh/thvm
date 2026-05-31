@@ -277,3 +277,31 @@ Remaining: the 122 still-uncovered kernels (no divisible LOOP axis >= the factor
 the default-policy decision (hand_opts is net-negative on Metal, so default should
 perhaps prefer BEAM/NOOPT on Metal) + CUDA hand_opts re-eval -- both pending a free
 CUDA pod. Next: M2 (reduce-into-reduce fusion) is CPU-verifiable and not GPU-gated.
+
+### M2 audit (2026-06-01, post-restart): the kernel-count gap is NOT reduce-into-reduce
+
+Re-scope. Audited the faithful beautiful_mnist (CPU, BS=8) boundary structure:
+- 207 boundaries total. Top-op: ADD 111, MUL 44, RESHAPE 26, REDUCE **only 14**, RECIP
+  6, CMPLT 4, PERMUTE 2. So the gap is ELEMENTWISE, not reduce-chains -- M2's
+  reduce-into-reduce hypothesis (from v2/the rangeify_unified.c:160 comment) is WRONG.
+- forward+backward ALONE = 123 boundaries ~= tinygrad's TOTAL of 120. So thvm's fwd+bwd
+  fusion is already competitive; the optimizer adds the other 84 (207-123).
+- Reasons: 114 ROOT (0x1; inherent STORE/ASSIGN -- tinygrad seeds these too) + **74
+  walk-realized (0x0)** + a few REDUCE/MULTI. The 74 walk-realized are the gap (tinygrad
+  fuses them into consumers; thvm's rangeify walk realizes them).
+- Root mechanism: thvm's consumer-divergence realize (rangeify_unified.c:838-862)
+  lacks tinygrad's boolean-OR-of-valids merge (indexing.py:211-213) -- when consumers
+  diverge thvm realizes per-axis where tinygrad merges valids and stays a view. The
+  ending-ranges PCONTIG path (864-888) is NOT the gap: tinygrad's PCONTIG defaults to 0
+  (helpers.py:254), so its default also realizes-all there -- thvm is already faithful.
+
+REVISED milestone ordering for the kernel-count/memory gap (the goal is memory parity;
+thvm already wins wall-time on both backends):
+- The real lever is the **boolean-OR validity union** (was M3) + the **optimizer
+  fusion** (84 boundaries; needs multi-output kernels / a FUSE_OPTIM analog -- ties to
+  M5 graph-batching). Both are LARGE: the OR-merge needs term-algebra boolean ops;
+  optimizer fusion needs multi-output kernel_lift. M2-as-reduce-into-reduce is retired.
+- fwd+bwd fusion is NOT a priority (already ~= tinygrad).
+
+Infra: added `tools/bench_train.py` -- the stable warm-train harness (simple/beautiful,
+DEV, BS, faithful, BEAM, zero_grad) replacing the per-session /tmp scratch scripts.
