@@ -304,7 +304,8 @@ TESTS := \
   $(BIN)/test_multi_trace \
   $(BIN)/test_multi_trace_on \
   $(BIN)/test_ft_alloc \
-  $(BIN)/test_ft
+  $(BIN)/test_ft \
+  $(BIN)/test_ft_order
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -635,6 +636,14 @@ $(BIN)/test_ft_alloc: tests/test_ft_alloc.c $(SRC) | $(BIN)
 # per-rule -D defines unlock both.
 $(BIN)/test_ft: tests/test_ft.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -o $@ $< $(TEST_LDFLAGS)
+
+# Stage 3 AtpFt-native LPO/KBO -- src/atp/ft_order.c is gated on
+# THVM_ATPFT_CONVERT (same envelope as ft.c).  The test file
+# #includes ft_alloc.c + ft.c + ft_order.c directly after src/thvm.c;
+# the per-rule -D defines unlock all three layers (THVM_ATPFT_ALLOC,
+# THVM_ATPFT_CONVERT, THVM_ATPFT_LPO).
+$(BIN)/test_ft_order: tests/test_ft_order.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -DTHVM_ATPFT_LPO -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
