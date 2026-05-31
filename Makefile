@@ -628,13 +628,19 @@ PY_THVM_OBJ     := $(BUILD)/py_thvm.o
 PY_METAL_OBJ    := $(BUILD)/py_thvm_metal.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
 	clang -fPIC -O2 -DACCELERATE_NEW_LAPACK $(ATP_DEFINES) \
+	    -DTHVM_HAS_METAL $(METAL_DEFINES) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
 $(PY_METAL_OBJ): py/csource/thvm_py_metal.m | $(BUILD)
 	clang -fPIC -fobjc-arc -O2 -c -o $@ $<
-$(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ)
+# Link the REAL Metal backend (backend_metal.o) + its metallib so the
+# general DEV=metal tensor/realize path (metal_buf_write/read/dispatch)
+# is live -- without it thvm.c falls back to the no-op Metal STUB and
+# every Metal buffer reads back zero.  py_thvm_metal.o (py_metal_* manual
+# dispatch harness) coexists; distinct symbol prefixes, no conflict.
+$(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ) $(METAL_LIBPATH)
 	clang -shared -framework Accelerate -framework Metal -framework Foundation \
-	    -o $@ $^
+	    -o $@ $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ)
 .PHONY: py
 py: $(PY_DYLIB)
 endif
