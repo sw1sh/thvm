@@ -4108,6 +4108,20 @@ typedef struct {
   struct AtpFtCell  *goal_lhs_ft;
   struct AtpFtCell  *goal_rhs_ft;
 #endif
+
+#ifdef THVM_ATPFT_CPQ
+  // Stage 7 of docs/atp/atpft_plan.md: parallel native AtpFt CP queue.
+  // Each populated slot owns its two FT spans in Arena A; the legacy
+  // cp_packed[] byte queue stays populated in parallel (FV index +
+  // cp_graph mirror + peek/stash consumers).  Capacity tracks
+  // s->cp_cap (atp_ensure_cp_cap grows both arrays).  See
+  // src/atp/ft_cpq.c for the entry layout and lifetime rules.
+  //
+  // Sized to cp_cap; populated slots are [0..n_cps).  Element type
+  // declared as void* in this header to keep the public struct free
+  // of the (in-TU) AtpCpEntry definition; the .c side casts back.
+  void *cp_packed_ft;
+#endif
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

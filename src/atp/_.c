@@ -25,6 +25,26 @@
 # include "ft.c"
 #endif
 
+// Stage 7 forward decls: the CP-queue helpers in ft_cpq.c are referenced
+// from atp_ensure_cp_cap / atp_cp_heap_insert_packed / atp_cp_swap /
+// select_cp / thvm_atp_cp_set / interreduce -- all defined BEFORE
+// ft_cpq.c is included (it sits after ft_norm.c so it can use
+// atp_rewrite_normalize_ft).  Hoist the prototypes here so the early
+// callers compile cleanly under the flag.  Off the flag this block is
+// gone and no symbol is referenced.
+#ifdef THVM_ATPFT_CPQ
+struct AtpFtCell;
+static void atp_cp_ft_ensure_cap(AtpState *s, u32 need, u32 old_cap);
+static u32  atp_cp_ft_set       (AtpState *s, u32 i, Term lhs, Term rhs,
+                                 u32 priority_hint, u32 origin_rule);
+static void atp_cp_ft_clear     (AtpState *s, u32 i);
+static void atp_cp_ft_swap      (AtpState *s, u32 i, u32 j);
+static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
+static u8   atp_cp_trivially_joinable_ft(AtpState *s,
+                                         struct AtpFtCell **lhs,
+                                         struct AtpFtCell **rhs);
+#endif
+
 // Stage 6: AtpFt-native normalize fixpoint (push-norm joinable check).
 // Requires Stage 4's parallel rule mirror (THVM_ATPFT_RULES) and
 // Stage 5's matcher (THVM_ATPFT_MATCH).  Off the flag the splice +
@@ -676,6 +696,7 @@ static void atp_ft_rules_verify_push(AtpState *s, u32 k) {
 // live packed buffer.
 static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   if (need <= s->cp_cap) return;
+  u32 old_cap = s->cp_cap;
   u32 cap = s->cp_cap ? s->cp_cap : ATP_INIT_CPS;
   while (cap < need) cap *= 2;
   u8  **nc = (u8 **)realloc(s->cp_packed, cap * sizeof(u8 *));
@@ -695,6 +716,14 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
     s->cp_packed[i] = NULL;
     s->cp_trace[i]  = ATP_TRACE_NONE;
   }
+#ifdef THVM_ATPFT_CPQ
+  // Stage 7: grow the parallel AtpFt queue alongside the legacy one.
+  // The fresh tail is NULL-initialised by atp_cp_ft_ensure_cap so the
+  // slot-occupied invariant matches cp_packed[i].
+  atp_cp_ft_ensure_cap(s, cap, old_cap);
+#else
+  (void)old_cap;
+#endif
   s->cp_cap = cap;
 }
 
@@ -930,6 +959,14 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   atp_ensure_cp_cap(s, i + 1u);
   free(s->cp_packed[i]);                 // free(NULL) is a no-op
   s->cp_packed[i] = acp_pack(lhs, rhs, NULL, NULL);
+#ifdef THVM_ATPFT_CPQ
+  // Stage 7: mirror the slot into the parallel FT queue.  Test
+  // harnesses populate the queue via thvm_atp_cp_set + reheapify;
+  // keep the two views in lockstep so the heap swap routines stay
+  // sound (they swap entries on both arrays unconditionally).
+  atp_cp_ft_clear(s, i);
+  atp_cp_ft_set(s, i, lhs, rhs, /*priority_hint=*/0u, /*origin=*/0xffffu);
+#endif
 }
 
 // Unpack CP queue slot i back into two fresh transient heap Terms --
@@ -1251,6 +1288,9 @@ static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
       s->n_cps_dropped_joinable++;
       free(s->cp_packed[i]);
       s->cp_packed[i] = NULL;
+#ifdef THVM_ATPFT_CPQ
+      atp_cp_ft_clear(s, i);
+#endif
       touched = 1;
       continue;
     }
@@ -1259,11 +1299,21 @@ static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
       free(s->cp_packed[i]);
       s->cp_packed[i] = NULL;
       s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
+#ifdef THVM_ATPFT_CPQ
+      // Re-mirror the rewritten CP into the FT queue at slot w.  Free
+      // the slot-i entry first (its terms no longer match), then build
+      // a fresh entry from the new (l, r).
+      atp_cp_ft_clear(s, i);
+      atp_cp_ft_set(s, w, l, r, /*priority_hint=*/0u, /*origin=*/0xffffu);
+#endif
       touched = 1;
     } else if (w != i) {
       // Unchanged -- compact the existing buffer down to slot w.
       s->cp_packed[w] = s->cp_packed[i];
       s->cp_packed[i] = NULL;
+#ifdef THVM_ATPFT_CPQ
+      atp_cp_ft_move(s, /*dst=*/w, /*src=*/i);
+#endif
     }
     s->cp_trace[w] = s->cp_trace[i];
     // Carry the insertion age down to the compacted slot so a
@@ -3197,6 +3247,17 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
 # include "ft_norm.c"
 #endif
 
+// Stage 7: AtpFt-native CP queue (dual-store).  Requires Stages 4 + 6
+// (rule mirror + ft-norm fixpoint).  Off the flag this header is gone
+// and the cp_packed_ft field is absent from AtpState, so the engine
+// is byte-identical to the legacy packed-byte queue.
+#ifdef THVM_ATPFT_CPQ
+# if !defined(THVM_ATPFT_RULES) || !defined(THVM_ATPFT_NORM)
+#  error "THVM_ATPFT_CPQ requires THVM_ATPFT_RULES and THVM_ATPFT_NORM"
+# endif
+# include "ft_cpq.c"
+#endif
+
 // === Faithful Waldmeister-FPA normalize path (gated, default OFF) =====
 //
 // Wires src/wmfpa/wmfpa.h (flatterm rep + DSBaum discrimination tree +
@@ -4476,6 +4537,16 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->rhs_ft);
   free(s->r_dead_lhs_save_ft);
   free(s->r_dead_rhs_save_ft);
+# ifdef THVM_ATPFT_CPQ
+  // Stage 7: drop the parallel CP queue array.  The FT spans inside
+  // each entry are slab-backed -- ft_destroy below releases the whole
+  // slab pool in one pass, so we skip the per-slot ft_free_span walk
+  // (it would push onto a free list that's about to be destroyed).
+  if (s->cp_packed_ft != NULL) {
+    free((void *)s->cp_packed_ft);
+    s->cp_packed_ft = NULL;
+  }
+# endif
   if (s->ft_arena_ptr != NULL) {
     ft_destroy((AtpFt *)s->ft_arena_ptr);
     free(s->ft_arena_ptr);
@@ -5979,6 +6050,12 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
   u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
   u32  tg = s->cp_goal[i];  s->cp_goal[i]  = s->cp_goal[j];  s->cp_goal[j]  = tg;
   u32  t2 = s->cp_pri2[i];  s->cp_pri2[i]  = s->cp_pri2[j];  s->cp_pri2[j]  = t2;
+#ifdef THVM_ATPFT_CPQ
+  // Stage 7: the parallel FT queue indexes identically; swap entries
+  // alongside the legacy arrays so heap sift keeps both views in
+  // lockstep.
+  atp_cp_ft_swap(s, i, j);
+#endif
 }
 
 static void atp_cp_sift_up(AtpState *s, u32 i) {
@@ -6015,6 +6092,11 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   s->cp_pri[i]   = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
   s->cp_goal[i]  = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                      ? atp_goal_weight(s, lhs, rhs) : 0u;
+#ifdef THVM_ATPFT_CPQ
+  // Stage 7: dual-store -- mirror the CP into Arena-A FT cells.  The
+  // FT spans live until the slot is freed (pop / drop / destroy).
+  atp_cp_ft_set(s, i, lhs, rhs, s->cp_pri[i], /*origin=*/0xffffu);
+#endif
   // K-D Heap secondary dimension: compute cp_pri2 with the alternate
   // weight mode (w2_mode, set via thvm_atp_set_w2).  Cheap -- ~one
   // symbol-count walk per CP -- and only filled when w2_modulo > 0.
@@ -6269,6 +6351,9 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     if (s->cp_pri[i] <= horizon) continue;
     free(s->cp_packed[i]);
     s->cp_packed[i] = NULL;
+#ifdef THVM_ATPFT_CPQ
+    atp_cp_ft_clear(s, i);
+#endif
 #ifdef ATP_FV_INDEX
     atp_fv_index_remove(s->fv_index, s->cp_seq[i]);
 #endif
@@ -6281,6 +6366,9 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_seq[i]   = s->cp_seq[last];
       s->cp_goal[i]  = s->cp_goal[last];
       s->cp_pri2[i]  = s->cp_pri2[last];
+#ifdef THVM_ATPFT_CPQ
+      atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
+#endif
     }
     s->n_cps--;
     s->n_cps_dropped_lrs++;
@@ -6413,6 +6501,13 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 #endif
   free(s->cp_packed[j]);
   s->cp_packed[j] = NULL;
+#ifdef THVM_ATPFT_CPQ
+  // Stage 7: the popped slot's FT spans return to Arena A's free list
+  // BEFORE backfill -- the slot is about to be overwritten with the
+  // last slot's entry (still owned).  No-op when the entry was never
+  // populated (NULL slots are idempotent on clear).
+  atp_cp_ft_clear(s, j);
+#endif
   s->n_cps--;
   if (j != s->n_cps) {
     // Backfill slot j from the (ex-)last slot, then repair the heap.
@@ -6424,6 +6519,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_seq[j]   = s->cp_seq[last];
     s->cp_goal[j]  = s->cp_goal[last];
     s->cp_pri2[j]  = s->cp_pri2[last];
+#ifdef THVM_ATPFT_CPQ
+    // Move the (still-owned) FT entry from the last slot into j; zero
+    // the now-vacated tail so a later destroy / clear does not
+    // double-free the transferred spans.
+    atp_cp_ft_move(s, /*dst=*/j, /*src=*/last);
+#endif
     atp_cp_sift_up(s, j);
     atp_cp_sift_down(s, j);
   }

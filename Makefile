@@ -312,7 +312,9 @@ TESTS := \
   $(BIN)/test_ft_norm \
   $(BIN)/test_atp_ft_norm \
   $(BIN)/test_ft_ri \
-  $(BIN)/test_atp_ft_ri
+  $(BIN)/test_atp_ft_ri \
+  $(BIN)/test_ft_cpq \
+  $(BIN)/test_atp_ft_cpq
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -740,6 +742,31 @@ $(BIN)/test_atp_ft_ri: tests/test_atp.c $(SRC) | $(BIN)
 	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
 	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
 	  -DTHVM_ATPFT_RI \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# Stage 7: AtpFt-native CP queue (dual-store).  Pulls in ft_cpq.c on
+# top of the Stage 6 envelope; the THVM_ATPFT_CPQ flag enables the
+# parallel cp_packed_ft[] queue inside _.c.  The legacy cp_packed[]
+# byte queue stays populated alongside it (FV index + cp_graph mirror
+# + peek/stash consumers stay on the byte queue until Stages 8-9).
+#
+# test_ft_cpq      - push/pop/swap parity between legacy and FT views
+#                    + atp_cp_trivially_joinable_ft verdict parity.
+# test_atp_ft_cpq  - the full ATP suite under Stage 7's envelope.
+$(BIN)/test_ft_cpq: tests/test_ft_cpq.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -DTHVM_ATPFT_CPQ \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/test_atp_ft_cpq: tests/test_atp.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -DTHVM_ATPFT_CPQ \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
