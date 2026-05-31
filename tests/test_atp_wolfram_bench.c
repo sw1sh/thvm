@@ -845,6 +845,13 @@ int main(int argc, char **argv) {
                (unsigned long long)pm_total,
                100.0 * (double)g_atp_unf_pos_memo_hits / (double)pm_total);
       }
+      u64 rc_total = g_atp_rhs_cache_hits + g_atp_rhs_cache_misses;
+      if (rc_total > 0) {
+        printf("   rhs-flat-cache: %llu hits / %llu queries (%.0f%% hit-ratio)\n",
+               (unsigned long long)g_atp_rhs_cache_hits,
+               (unsigned long long)rc_total,
+               100.0 * (double)g_atp_rhs_cache_hits / (double)rc_total);
+      }
     }
   }
   { u32 unor = 0;

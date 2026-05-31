@@ -1480,3 +1480,50 @@ at 4 commits (K-D Heap fc319780, perm_sub mask 0fb34573, unf_memo
 fix 6be88f5f, dokgS 79ddf228).  Speed under sound semantics NOT
 recovered to the bug-fast 93s baseline -- the prior baseline was
 unsound and overstated thvm's per-CP throughput.
+
+================================================================
+iter 200 -- DS port lands (no speed win) + honest reality check
+================================================================
+
+Session committed 6 ATP changes (4 structural ports + 1 correctness
+fix + 1 diagnostic):
+
+  fc319780  K-D Heap secondary dimension
+  0fb34573  per-symbol perm_sub mask
+  6be88f5f  unf_memo invalidation at ALL rebuild sites (correctness)
+  79ddf228  WM dokgS port (push-time rule-subsumption drop)
+  2439f384  per-CP push-normalize diagnostic
+  975f0794  WM TermzellenT subst-apply port (direct flat-to-flat splice)
+  301a4445  counter export for pos-memo / splice-inline
+
+A/B measurements under sound semantics (post-6be88f5f):
+
+  tree path (no FLATTERM):
+    AndAssoc canonical 30s wall, runs to wall cap, ~500 rules
+  FLATTERM only:
+    same wall, same rules -- flatterm overhead matches its savings
+  FLATTERM + SUBST_FLAT (the DS port):
+    +0.7s slower per 30s; 100% inline hit ratio but the recursive
+    atp_subst_apply_to_flat emits EVERY rule-rhs cell even for static
+    subtrees, whereas thvm_subst_apply's hash-cons skip returns the
+    original Term cell unchanged.  Net: small regression on Sheffer
+    where rule RHS is often a single variable.
+
+Conclusion: the DS port is structurally correct (100% hit ratio,
+test_atp 135624/135624) but NOT a speed win on the current
+workloads.  The remaining 10x push-norm gap to WM is in the
+call-boundary flatten/build + the constant-rule-subtree emit cost.
+
+To deliver "hopefully faster" requires multi-iter follow-ups:
+  (a) Cache rule RHS flat encodings at rule_index rebuild time so
+      atp_subst_apply_to_flat walks pre-encoded flat linearly
+      (cached memcpys) instead of recursive Term-tree walks.
+  (b) Native flatterm CP queue storage: replace acp_pack/unpack
+      with flatterm-native CP records, eliminate the per-call
+      atp_ri_flatten on entry + atp_ri_build at exit.
+  (c) Make push-norm operate on flatterm-direct CP records (no
+      Term conversion at the trivially_joinable boundary).
+
+The bug-fast 93s/10.9s cracker baselines are now retired as
+unsound.  Honest sound-engine cracker speed is bounded by the
+above multi-iter work.

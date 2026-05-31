@@ -2630,6 +2630,29 @@ static Term g_atp_ri_repl_flat   [ATP_RI_FLAT_CAP];
 static u32  g_atp_ri_repl_subsz  [ATP_RI_FLAT_CAP];
 static u32  g_atp_ri_repl_flatsym[ATP_RI_FLAT_CAP];
 
+// Per-rule RHS flatterm cache.  Filled lazily when atp_subst_apply_to_flat
+// is first called for a rule in the current epoch.  Invalidated when
+// rule_index_dirty fires (R changed -> cached encodings may be stale).
+// Stores rule_rhs's preorder flatterm as (cached_flat, cached_subsz,
+// cached_flatsym, cached_len) so subsequent calls iterate the cached
+// arrays linearly (no Term-tree recursion + heap reads).  Memory is
+// O(sum |rhs|) -- small relative to the rule set.
+#define ATP_RHS_FLAT_CAP 256u
+typedef struct {
+  u32  epoch;          // 0 = uncached; matches g_atp_unf_memo_epoch when valid
+  u32  len;
+  Term flat[ATP_RHS_FLAT_CAP];
+  u32  subsz[ATP_RHS_FLAT_CAP];
+  u32  flatsym[ATP_RHS_FLAT_CAP];
+  u8   folded;
+} AtpRhsFlatCacheEnt;
+#define ATP_RHS_FLAT_CACHE_BITS 12
+#define ATP_RHS_FLAT_CACHE_SIZE (1u << ATP_RHS_FLAT_CACHE_BITS)
+#define ATP_RHS_FLAT_CACHE_MASK (ATP_RHS_FLAT_CACHE_SIZE - 1u)
+static AtpRhsFlatCacheEnt g_atp_rhs_flat_cache[ATP_RHS_FLAT_CACHE_SIZE];
+u64 g_atp_rhs_cache_hits   = 0;
+u64 g_atp_rhs_cache_misses = 0;
+
 // Emit the substitution-applied rule rhs directly into `dst_flat` /
 // `dst_subsz` / `dst_flatsym` in flatterm form, WITHOUT round-tripping
 // through a Term tree.  Mirrors the structure of WM's MA/SubstApply on
@@ -2639,6 +2662,111 @@ static u32  g_atp_ri_repl_flatsym[ATP_RI_FLAT_CAP];
 // subject_flat / subject_subsz / subject_flatsym into dst arrays.
 // Returns 1 on success; 0 on cap overrun OR on a var binding that
 // doesn't fit ATP_RI_MAXVARS (caller falls back to the Term-tree path).
+// Look up (or fill) the cached flat encoding of `rule_rhs`.  Returns
+// the entry's slot; caller checks `entry->epoch == g_atp_unf_memo_epoch`
+// and uses (flat, subsz, flatsym, len) directly.  On cache miss,
+// flattens rule_rhs once via atp_ri_flatten and stores it.  Returns
+// NULL on encoding overrun (caller falls back to the recursive path).
+static AtpRhsFlatCacheEnt *atp_rhs_flat_cache_get(Term rule_rhs) {
+  u64 h = (u64)rule_rhs * 0x9E3779B97F4A7C15ull;
+  h ^= h >> 29;
+  u32 idx = (u32)h & ATP_RHS_FLAT_CACHE_MASK;
+  AtpRhsFlatCacheEnt *e = &g_atp_rhs_flat_cache[idx];
+  if (e->epoch == g_atp_unf_memo_epoch &&
+      e->len > 0u && e->flat[0] == rule_rhs) {
+    g_atp_rhs_cache_hits++;
+    return e;
+  }
+  // Miss: re-encode.  Use atp_ri_flatten into the slot's own buffers
+  // (Term, subsz, flatsym).
+  u32 len = 0u;
+  u8 folded_local = 0u;
+  if (!atp_ri_flatten(rule_rhs, e->flat, e->subsz, e->flatsym,
+                      &folded_local, ATP_RHS_FLAT_CAP, &len)) {
+    e->epoch = 0u;
+    return NULL;
+  }
+  e->epoch  = g_atp_unf_memo_epoch;
+  e->len    = len;
+  e->folded = folded_local;
+  g_atp_rhs_cache_misses++;
+  return e;
+}
+
+// Cached variant: iterate the pre-encoded rule_rhs flat linearly and
+// emit cells to dst, replacing FVR cells with the bound subject slice
+// (via star[var_id]).  Skips the recursive Term-tree walk +
+// per-cell heap_reads that the original atp_subst_apply_to_flat
+// pays on every call.  Returns 1 on success; 0 on cap overrun OR
+// out-of-range var binding (caller falls back).
+static u8 atp_subst_apply_to_flat_cached(Term rule_rhs,
+                                         const u32 *star,
+                                         const Term *subj_flat,
+                                         const u32 *subj_subsz,
+                                         const u32 *subj_flatsym,
+                                         Term *dst_flat,
+                                         u32 *dst_subsz,
+                                         u32 *dst_flatsym,
+                                         u32 *dst_pos,
+                                         u8 *folded,
+                                         u32 cap) {
+  AtpRhsFlatCacheEnt *e = atp_rhs_flat_cache_get(rule_rhs);
+  if (e == NULL) return 0;
+  if (e->folded) return 0;                       // folded rhs: bail to safe path
+  // Two-stack walk: linear pass over the cached rhs flat.  Maintain a
+  // parallel `here` array for ancestor positions so each cell's subsz
+  // (a function of dst positions) can be computed in one pass.
+  u32 stack_here[ATP_RHS_FLAT_CAP];
+  u32 stack_end [ATP_RHS_FLAT_CAP];
+  u32 sp = 0u;
+  for (u32 i = 0; i < e->len; i++) {
+    while (sp > 0u && i >= stack_end[sp - 1u]) {
+      u32 anc_here = stack_here[sp - 1u];
+      dst_subsz[anc_here] = *dst_pos - anc_here;
+      sp--;
+    }
+    u32 cell_sym = e->flatsym[i];
+    if (cell_sym >= ATP_RI_CTR_BASE) {
+      if (*dst_pos >= cap) return 0;
+      dst_flat   [*dst_pos] = e->flat[i];
+      dst_flatsym[*dst_pos] = cell_sym;
+      stack_here[sp] = *dst_pos;
+      stack_end [sp] = i + e->subsz[i];
+      sp++;
+      *dst_pos = *dst_pos + 1u;
+    } else if (cell_sym >= ATP_RI_STAR_BASE) {
+      u32 vid = cell_sym - ATP_RI_STAR_BASE;
+      if (vid >= ATP_RI_MAXVARS) return 0;
+      u32 spos = star[vid];
+      if (spos == ATP_RI_NIL) return 0;
+      u32 ssz = subj_subsz[spos];
+      if (*dst_pos + ssz > cap) return 0;
+      memcpy(&dst_flat   [*dst_pos], &subj_flat   [spos],
+             (size_t)ssz * sizeof(Term));
+      memcpy(&dst_subsz  [*dst_pos], &subj_subsz  [spos],
+             (size_t)ssz * sizeof(u32));
+      memcpy(&dst_flatsym[*dst_pos], &subj_flatsym[spos],
+             (size_t)ssz * sizeof(u32));
+      *dst_pos = *dst_pos + ssz;
+    } else {
+      // NUM / other leaf -- emit as-is.
+      if (*dst_pos >= cap) return 0;
+      dst_flat   [*dst_pos] = e->flat[i];
+      dst_flatsym[*dst_pos] = cell_sym;
+      dst_subsz  [*dst_pos] = 1u;
+      *dst_pos = *dst_pos + 1u;
+    }
+  }
+  while (sp > 0u) {
+    u32 anc_here = stack_here[sp - 1u];
+    dst_subsz[anc_here] = *dst_pos - anc_here;
+    sp--;
+  }
+  (void)folded;   // cached path doesn't set caller's folded; safe since
+                  // we already bailed when e->folded was 1.
+  return 1;
+}
+
 static u8 atp_subst_apply_to_flat(Term rule_rhs,
                                   const u32 *star,
                                   const Term *subj_flat,
@@ -2770,10 +2898,19 @@ static u8 atp_ri_splice_inline(Term *flat, u32 *subsz, u32 *flatsym,
                                Term rule_rhs, const u32 *star, u32 cap) {
   u32 oldsz = subsz[redex_pos];
   u32 rlen = 0u;
-  if (!atp_subst_apply_to_flat(rule_rhs, star, flat, subsz, flatsym,
-                               g_atp_ri_repl_flat, g_atp_ri_repl_subsz,
-                               g_atp_ri_repl_flatsym, &rlen, folded, cap)) {
-    return 0;
+  // Try the cache-driven linear path first (skips per-cell Term-tree
+  // recursion + heap_reads).  Falls back to the recursive walker on
+  // cache overrun / folded rhs.
+  if (!atp_subst_apply_to_flat_cached(rule_rhs, star, flat, subsz, flatsym,
+                                      g_atp_ri_repl_flat, g_atp_ri_repl_subsz,
+                                      g_atp_ri_repl_flatsym, &rlen,
+                                      folded, cap)) {
+    rlen = 0u;
+    if (!atp_subst_apply_to_flat(rule_rhs, star, flat, subsz, flatsym,
+                                 g_atp_ri_repl_flat, g_atp_ri_repl_subsz,
+                                 g_atp_ri_repl_flatsym, &rlen, folded, cap)) {
+      return 0;
+    }
   }
   u32 tail = *flatlen - redex_pos - oldsz;
   if (redex_pos + rlen + tail > cap) return 0;
