@@ -3512,15 +3512,23 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
   fprintf(fp, "float %s = ", acc_name);
   rmu_emit_reduce_init(r_kind, fp);
   fputs(";\n", fp);
-  Term r_ranges[MAX_DIM];
-  u32  r_kinds[MAX_DIM]   = {0};
-  u32  r_factors[MAX_DIM] = {0};
+  // RMU_MAX_RANGES (32), NOT MAX_DIM (8): a faithful-seed fused conv-bwd
+  // reduce body is a 7-D MUL [N,Cout,oh,ow,Cin,kh,kw] whose distinct RANGE
+  // leaves exceed 8 once hand_opts adds UPCAST/LOCAL split axes.  With the
+  // narrow MAX_DIM cap the collector truncated, the reduce-axis lookup below
+  // missed an (N,oh,ow) leaf, and the loop for that axis was skipped ->
+  // accumulation over extent 20/20/32 dropped -> the CUDA ~60x-low grad
+  // (379254528 vs 22559834112).  Mirrors the wide cap already used by
+  // rmu_emit_store_reduce / the conv template / rmu_range_is_inner_reduce_decomp.
+  Term r_ranges[RMU_MAX_RANGES];
+  u32  r_kinds[RMU_MAX_RANGES]   = {0};
+  u32  r_factors[RMU_MAX_RANGES] = {0};
   u32  n_r_ranges = 0;
   // Descend through nested UOP_REDUCE bodies: a reduce-axis RANGE leaf
   // we need to open a for-loop on may live inside a nested reduce body.
   // Without this descent the lookup misses, the loop is skipped, and
   // `_accN` is declared but never updated.
-  rmu_collect_ranges_with_opts_through_reduce(
+  rmu_collect_ranges_with_opts_through_reduce_kernel(
       r_src, r_ranges, r_kinds, r_factors, &n_r_ranges);
   // Look up every reduce-axis's RANGE term + extent.  Order axes per
   // the builder list (axis_0 outermost; tinygrad lowerer.py opens them

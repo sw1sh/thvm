@@ -381,3 +381,27 @@ beautiful 404->394, warm_min unchanged (10.78->10.80ms), and it perturbs the BN-
 which is exactly the codegen gap. So the safe variant can't deliver the win. Removed;
 ru_seed_boundary_holds is faithful-or-default only. Confirms: the lever is fused-kernel
 codegen, full stop.
+
+### Phase C VERDICT CORRECTED (2026-05-31): the CUDA "render bug" was a CAP-WIDTH bug, FIXED (eea6f161). Remaining = fused-kernel SPEED + JIT-replay.
+
+The earlier "thvm codegen can't render fused kernels / needs a rewrite" conclusion was WRONG
+(too pessimistic). The cuda-fused-reduce-codegen-fix workflow + lldb discriminators
+(NOOPT/LOCAL_CAP isolated it to the LOCAL-split leaf count) found the real cause: a
+MAX_DIM(8) cap in render_uop.c rmu_emit_one_reduce truncated the fused conv-bwd reduce's
+RANGE leaves once UPCAST/LOCAL splits pushed it past 8 -> a dropped (N,oh,ow) reduce axis
+-> ~60x-low grad. One-site cap widening (MAX_DIM->RMU_MAX_RANGES + the existing wide
+collector) fixes it: CUDA conv2_bwd faithful grad now 22559858688.0 (correct); CPU + CUDA
+default bit-identical; nn.wlt 55/0, grad.wlt 61/1. LANDED eea6f161.
+
+REMAINING for the faithful seed to be a WIN (both concrete, NOT a rewrite):
+1. SPEED: faithful beautiful_mnist is ~1248ms (vs 10.8ms heuristic default) -- the fused
+   conv-bwd kernels are CORRECT (eager iters now match default) but render with G=0 (no
+   GLOBAL/grid promotion) so a 327M-iter fused kernel runs in one threadblock (LOCAL only,
+   no grid parallelism). tinygrad parallelizes the same fused reduce across grid+threads.
+   The fix is codegen GLOBAL-promotion + GROUPTOP/upcast for the fused reduce (occupancy),
+   NOT a rewrite. This is the actual kernel-granularity lever.
+2. JIT-REPLAY: faithful beautiful eager iters correct (iter0 2.2835, iter1 2.4268 == default)
+   but JIT replay (iter2+) diverges/explodes (2.857 -> 6.5) -- a faithful+replay buffer
+   issue on BN models (separate from the render cap; akin to the earlier dedup replay bug).
+The cap fix is a genuine latent CUDA-codegen correctness fix regardless of the faithful path
+(any >8-leaf reduce). NEXT: the G=0 GLOBAL-promotion for fused reduces (the speed lever).
