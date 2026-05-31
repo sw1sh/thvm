@@ -308,7 +308,9 @@ TESTS := \
   $(BIN)/test_ft_order \
   $(BIN)/test_atp_ft_rules \
   $(BIN)/test_atp_ft \
-  $(BIN)/test_ft_match
+  $(BIN)/test_ft_match \
+  $(BIN)/test_ft_norm \
+  $(BIN)/test_atp_ft_norm
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -678,6 +680,40 @@ $(BIN)/test_ft_match: tests/test_ft_match.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
 	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# === Stage 6: splice + normalize + push-norm wiring ==================
+# test_ft_norm   - differential corpus (Term-NF vs AtpFt-NF) for
+#                  random subjects + random orientable rule sets.
+# test_atp_ft_norm
+#                - the full 135624-assertion test_atp suite built with
+#                  THVM_ATPFT_NORM=1 -- env-knob off by default so the
+#                  Term path stays authoritative; env-on flips to the
+#                  AtpFt verdict.
+# test_atp_ft_norm_verify
+#                - same binary as test_atp_ft_norm but the bench /
+#                  bring-up runs it under THVM_ATPFT_NORM_VERIFY=1
+#                  (mismatch -> abort).  Same .c file, same flags --
+#                  the env knob does the switching.
+$(BIN)/test_ft_norm: tests/test_ft_norm.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/test_atp_ft_norm: tests/test_atp.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/test_atp_ft_norm_verify: tests/test_atp.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)

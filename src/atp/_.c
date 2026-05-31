@@ -25,6 +25,23 @@
 # include "ft.c"
 #endif
 
+// Stage 6: AtpFt-native normalize fixpoint (push-norm joinable check).
+// Requires Stage 4's parallel rule mirror (THVM_ATPFT_RULES) and
+// Stage 5's matcher (THVM_ATPFT_MATCH).  Off the flag the splice +
+// normalize TUs are not pulled in; atp_cp_trivially_joinable retains
+// its Term-only behaviour byte-identically.
+#ifdef THVM_ATPFT_NORM
+# if !defined(THVM_ATPFT_RULES)
+#  error "THVM_ATPFT_NORM requires THVM_ATPFT_RULES"
+# endif
+# ifndef THVM_ATPFT_MATCH
+#  define THVM_ATPFT_MATCH 1
+# endif
+# include "ft_match.c"
+# include "ft_splice.c"
+# include "ft_norm.c"
+#endif
+
 // === 8.1c: ATP primitives registered into the TAG_PRI table ========
 //
 // `prim_unify_apply` is the first primitive: takes two terms (s, t),
@@ -9302,6 +9319,50 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   *lhs = l;
   *rhs = r;
   u8 joined = kbo_eq(l, r);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // Stage 6: AtpFt-native push-norm joinable check.
+  //
+  // Three modes:
+  //   THVM_ATPFT_NORM=0 / unset  -> Term path only (above).
+  //   THVM_ATPFT_NORM=1          -> AtpFt path is authoritative; the
+  //                                 Term verdict is REPLACED by the
+  //                                 AtpFt verdict.  *lhs / *rhs are
+  //                                 left at the Term-path NF (caller
+  //                                 reads them for downstream
+  //                                 bookkeeping; the AtpFt cells leak
+  //                                 into Arena A until the Stage 4 GC
+  //                                 sweep).
+  //   THVM_ATPFT_NORM_VERIFY=1   -> both paths run; mismatch -> abort
+  //                                 with a diagnostic.
+  static int ft_norm_mode = -1;
+  static int ft_norm_verify = -1;
+  if (ft_norm_mode < 0) {
+    const char *e = getenv("THVM_ATPFT_NORM");
+    ft_norm_mode = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (ft_norm_verify < 0) {
+    const char *e = getenv("THVM_ATPFT_NORM_VERIFY");
+    ft_norm_verify = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (ft_norm_mode || ft_norm_verify) {
+    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *fl = ft_from_term(a, *lhs, 0);
+    AtpFtCell *fr = ft_from_term(a, *rhs, 0);
+    fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
+    fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
+    u8 ft_joined = (u8)ft_eq(fl, fr);
+    if (ft_norm_verify && ft_joined != joined) {
+      fprintf(stderr,
+              "ATPFT NORM VERIFY: joinable verdict mismatch "
+              "(term=%u ft=%u) at n_rules=%u\n",
+              (unsigned)joined, (unsigned)ft_joined, s->n_rules);
+      abort();
+    }
+    if (ft_norm_mode) {
+      joined = ft_joined;
+    }
+  }
+#endif
   if (join_cache_eligible) {
     g_atp_join_cache_misses++;
     AtpJoinCacheEnt *e = &g_atp_join_cache[(u32)join_key & ATP_JOIN_CACHE_MASK];

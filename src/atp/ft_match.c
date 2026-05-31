@@ -298,4 +298,23 @@ AtpFtCell *ft_subst_apply(AtpFt *a, const AtpFtCell *tmpl,
   return ft_subst_apply_rec(a, tmpl, s, scratch);
 }
 
+// --- Type-erased accessors for Stage 6 splice ------------------------
+//
+// ft_splice.c only sees `const void *subst` so it doesn't take a hard
+// build-time dep on AtpFtSubst's layout.  These two helpers are the
+// thin bridge: id -> binding pointer, and the slot-table cap.
+//
+// Returns NULL when id is out of range or unbound -- the splice
+// translates either to "regime (a) unbound-var" or treats it as a
+// defensive failure (callers should never feed an out-of-range id).
+AtpFtCell *ft_subst_lookup(const void *subst, u32 var_id) {
+  const AtpFtSubst *s = (const AtpFtSubst *)subst;
+  if (s == NULL) return NULL;
+  if (var_id >= ATPFT_MAX_VARS) return NULL;
+  return s->bind[var_id];
+}
+u32 ft_subst_max_vars(void) {
+  return ATPFT_MAX_VARS;
+}
+
 #endif // THVM_ATPFT_MATCH
