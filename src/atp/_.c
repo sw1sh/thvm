@@ -359,6 +359,58 @@ static inline void atp_unf_memo_put(u64 h) {
 u64 g_atp_unf_memo_hits   = 0;
 u64 g_atp_unf_memo_misses = 0;
 
+// Per-position no-fire memo for the unorientable discrimination-tree
+// descent at atp_ri_query_pos_unorient.  Keyed by (subtree-phash,
+// query_folded).  Soundness: the descent's verdict depends on
+// (subtree structure, R's unorient_index, ix->any_folded, query_folded).
+// The first two are bound to the current epoch (invalidated on every
+// atp_ri_rebuild via atp_unf_memo_invalidate).  ix->any_folded is
+// per-index, refreshed at rebuild.  query_folded is per-CALL (depends
+// on whole subject), so MUST be in the key -- otherwise a verdict
+// stored at folded=X is looked up at folded=Y and disagrees via
+// leaf_collect_unorient's `perfect = !any_folded && !query_folded` flag.
+// Caches NEGATIVE verdicts only (ncand==0): a positive verdict has
+// data (the candidate list) we'd have to cache too, and the positive
+// path is rare and short-circuits early so the win is in the
+// dominant "no fire here" no-op path.
+#define ATP_UNF_POS_MEMO_BITS 14
+#define ATP_UNF_POS_MEMO_SIZE (1u << ATP_UNF_POS_MEMO_BITS)
+#define ATP_UNF_POS_MEMO_MASK (ATP_UNF_POS_MEMO_SIZE - 1u)
+typedef struct { u64 hash; u32 epoch; u8 folded; } AtpUnfPosMemoEnt;
+static AtpUnfPosMemoEnt g_atp_unf_pos_memo[ATP_UNF_POS_MEMO_SIZE];
+// Epoch tracks g_atp_unf_memo_epoch -- same R-change invalidation.
+static inline u8 atp_unf_pos_memo_get(u64 h, u8 folded) {
+  AtpUnfPosMemoEnt *e = &g_atp_unf_pos_memo[(u32)h & ATP_UNF_POS_MEMO_MASK];
+  return (e->hash == h && e->epoch == g_atp_unf_memo_epoch
+          && e->folded == folded) ? 1u : 0u;
+}
+static inline void atp_unf_pos_memo_put(u64 h, u8 folded) {
+  AtpUnfPosMemoEnt *e = &g_atp_unf_pos_memo[(u32)h & ATP_UNF_POS_MEMO_MASK];
+  e->hash   = h;
+  e->epoch  = g_atp_unf_memo_epoch;
+  e->folded = folded;
+}
+static u64 g_atp_unf_pos_memo_hits   = 0;
+static u64 g_atp_unf_pos_memo_misses = 0;
+// Bottom-up subtree FNV-64 hash over the flat encode.  Each
+// flathash[p] is the hash of the SUBTREE rooted at p, computed from
+// flatsym[p..p+subsz[p]).  Direct port of atp_term_struct_hash adapted
+// to flat-array iteration -- no Term tree walk.
+static void atp_unf_flathash(const u32 *flatsym, const u32 *subsz,
+                             u32 flatlen, u64 *flathash) {
+  for (i64 p = (i64)flatlen - 1; p >= 0; p--) {
+    u64 h = 0xcbf29ce484222325ull ^ ((u64)flatsym[p] * 0x100000001b3ull);
+    u32 child = (u32)p + 1u;
+    u32 end   = (u32)p + subsz[p];
+    while (child < end) {
+      h ^= flathash[child];
+      h *= 0x100000001b3ull;
+      child += subsz[child];
+    }
+    flathash[p] = h;
+  }
+}
+
 #ifdef ATP_RULE_INDEX
 // 7e lever 2: forward declaration -- the rule-LHS redex index and its
 // indexed normalizer are defined further down (after the FV-index
@@ -2647,6 +2699,7 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   if (s->rule_index == NULL) s->rule_index = atp_ri_new();
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
+    atp_unf_memo_invalidate();   // R changed -> unorient_index rebuilt too
   }
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
@@ -3188,6 +3241,20 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
   // in this scan weighs the CURRENT term; entries built within the scan
   // are valid (no splice fires until a redex is found, then we return).
   thvm_kbo_invalidate();
+  // Per-position no-fire memo: precompute bottom-up subtree FNV-64
+  // hashes once for this subject so the per-position cache key (subtree
+  // hash) is a single array read.  Computing flathash[] is O(|flatlen|)
+  // -- cheap relative to the n-positions x m-rules descent it skips.
+  // Verifier mode (THVM_DEBUG_UNF_POS_MEMO=1) runs BOTH paths and
+  // aborts on disagreement -- catches any soundness regression in the
+  // memo at the call that exposes it.
+  static u64 g_flathash_buf[ATP_RI_FLAT_CAP];
+  atp_unf_flathash(flatsym, subsz, *flatlen, g_flathash_buf);
+  static int dbg_verify = -1;
+  if (dbg_verify < 0) {
+    const char *e = getenv("THVM_DEBUG_UNF_POS_MEMO");
+    dbg_verify = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+  }
   for (u32 p = 0; p < *flatlen; p++) {
     if (p < resume && p + subsz[p] <= resume) {
       continue;                              // unchanged, known non-redex
@@ -3218,9 +3285,32 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
     // (e.g. the first call on a freshly-constructed subject).
     g_atp_ri_ix = ux;
     g_atp_ri_query_folded = *folded;  // leaf-collect's perfect-match guard
-    u32 ncand = atp_ri_query_pos_unorient(p);
+    u64 phash = g_flathash_buf[p];
+    u32 ncand;
+    if (!dbg_verify && atp_unf_pos_memo_get(phash, *folded)) {
+      g_atp_unf_pos_memo_hits++;
+      g_atp_ri_ix = saved_ix;
+      continue;                                     // memoed: no fire here
+    }
+    ncand = atp_ri_query_pos_unorient(p);
+    if (dbg_verify) {
+      u8 memo_says_nofire = atp_unf_pos_memo_get(phash, *folded);
+      if (memo_says_nofire && ncand != 0u) {
+        fprintf(stderr, "POS_MEMO UNSOUND at pos=%u phash=0x%llx ncand=%u\n",
+                p, (unsigned long long)phash, ncand);
+        fprintf(stderr, "  flatlen=%u  folded=%u  qend=%u\n",
+                *flatlen, *folded, p + subsz[p]);
+        fprintf(stderr, "  n_rules=%u  n_unorient=%u  dirty=%u\n",
+                s->n_rules, s->n_unorient, s->rule_index_dirty);
+        abort();
+      }
+    }
     g_atp_ri_ix = saved_ix;
-    if (ncand == 0u) continue;                      // no firable face here
+    if (ncand == 0u) {                              // no firable face here
+      atp_unf_pos_memo_put(phash, *folded);
+      g_atp_unf_pos_memo_misses++;
+      continue;
+    }
     // Now we have candidate face(s) -- materialise the subterm for the
     // match/order checks below.
     Term sub = atp_ri_build(flat, subsz, flatsym, p);
@@ -3369,6 +3459,7 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules ||
       s->unorient_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
+    atp_unf_memo_invalidate();   // R changed -> unorient verdicts may flip
   }
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
