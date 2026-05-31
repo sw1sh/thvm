@@ -189,7 +189,16 @@ static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
     on = (e != NULL && e[0] != '0' && e[0] != '\0');
     known = 1;
   }
-  return on;
+  // The faithful realize-seed (THVM_RU_FAITHFUL_SEED) produces FEWER
+  // boundaries, so a forward intermediate is shared across realizes (forward
+  // in realize-1, read by backward in realize-2) WITHOUT a unifying boundary.
+  // The cross-realize materialized_loc dedup is what unifies the producer's
+  // output tid with the consumer's input tid; without it the JIT capture
+  // records divergent buf_ids (producer reallocs across realizes) and replay
+  // reads stale intermediates -> divergence/explosion.  So faithful IMPLIES
+  // the dedup (verified: faithful+dedup converges on the JIT replay, faithful
+  // alone diverges).
+  return on || ru_faithful_seed_on();
 }
 static int materialized_loc_span_holds(void) {
   // The cross-realize dedup keeps one realize's materialized boundary so a

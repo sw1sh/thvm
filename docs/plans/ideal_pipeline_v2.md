@@ -405,3 +405,30 @@ REMAINING for the faithful seed to be a WIN (both concrete, NOT a rewrite):
    issue on BN models (separate from the render cap; akin to the earlier dedup replay bug).
 The cap fix is a genuine latent CUDA-codegen correctness fix regardless of the faithful path
 (any >8-leaf reduce). NEXT: the G=0 GLOBAL-promotion for fused reduces (the speed lever).
+
+### Phase C STATUS (2026-05-31, final this arc): faithful seed CORRECT end-to-end; speed is the fundamental fused-codegen tradeoff
+
+The faithful realize-seed (THVM_RU_FAITHFUL_SEED, ideal_pipeline_v2 Phase C / tinygrad-faithful
+scheduling) is now CORRECT end-to-end on CUDA, including the JIT workload. Two landed fixes:
+- eea6f161: rmu_emit_one_reduce range-collection cap MAX_DIM->RMU_MAX_RANGES (fused conv-bwd
+  reduce rendered ~60x-low on CUDA because >8 leaves truncated; now correct, conv2_bwd 22.5B).
+- 69557475: couple faithful -> cross-realize dedup (materialized_loc unifies the producer-out
+  and consumer-in tids; without it the JIT capture records divergent buf_ids (producer reallocs
+  across realizes -- cuda_buf_decref ignores jit_pin) and replay reads stale -> diverge/explode).
+Verified V100: faithful pod_iters + beautiful_mnist replay CONVERGE (2.44/2.34/2.27 ~ default
+2.43/2.32/2.29, float reassociation only); default bit-identical (2.302, nn.wlt 55/0, grad.wlt
+61/1, CUDA test_cuda_backend 81/81).
+
+SPEED (the "and beyond"): faithful stays default-OFF because it is ~1000x slower than the
+heuristic-seed materialize default (simple model: faithful 1242ms vs default 6.4ms; the fused
+conv-bwd kernel kid=53 = 90.9% of wall). Root: the faithful fused conv-bwd is a deep nested-loop
+(up to 15 axes) that RECOMPUTES the strided _pool/im2col unfold per reduce-iter; thvm's codegen
+renders this far less efficiently than tinygrad's (coalescing/tiling), and materializing the
+unfold (the heuristic seed) is vastly cheaper on thvm. A blanket render_uop.c MAX_DIM->
+RMU_MAX_RANGES cap-sweep (to let >8-axis fused kernels compile without the undeclared-axis
+fallback) was TRIED and REVERTED: it made faithful SLOWER (8687ms -- more axes -> more nested
+loops) and perturbed the loss. So matching tinygrad's fused-kernel speed is a real fused-kernel
+CODEGEN arc (coalesced/tiled strided-unfold reduce, occupancy), NOT a cap fix -- and even then
+thvm's materialize path may remain the faster default. NET: ideal_pipeline_v2 Phase C is faithful
+to tinygrad's SCHEDULING (correct); the heuristic seed remains the fast default; the fused-kernel
+codegen quality is the open arc for the faithful seed to ALSO be fast.
