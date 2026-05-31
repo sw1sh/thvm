@@ -4210,6 +4210,8 @@ static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
 // thvm_atp_add_equation enqueues an input axiom (TRACE_AXIOM, no
 // parent); the interreduce re-queue path uses TRACE_SIMPLIFY with
 // the dropped rule's trace index so the proof DAG stays connected.
+static u8 atp_cp_perm_subsumed(Term lhs, Term rhs);
+
 static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
                                u32 reason, u32 parent_a) {
   if (s == NULL) return 0;
@@ -4232,6 +4234,16 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // derived one, carries a dense [0, k) variable set.
   thvm_normalize_vars(&lhs, &rhs);
 #endif
+  // Permutation-subsumption (WM GZ_ACVerzichtbar): same filter as the
+  // overlap-CP push.  Catches commutativity-shaped equations re-queued
+  // by interreduce / RHS-composition (atp_add_equation_simplified)
+  // before they enter the queue.  Skip for axioms (parent_a ==
+  // ATP_TRACE_NONE) -- those are user-supplied and we must not drop.
+  if (s->use_perm_subsume && parent_a != ATP_TRACE_NONE
+      && atp_cp_perm_subsumed(lhs, rhs)) {
+    s->n_cps_dropped_perm_subsumed++;
+    return 0;
+  }
   u32 trace_idx = atp_trace_push(s, reason, parent_a,
                                  ATP_TRACE_NONE, lhs, rhs);
   atp_cp_heap_push(s, lhs, rhs, trace_idx);
@@ -6062,6 +6074,11 @@ fn void thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_orphan_murder = on ? 1u : 0u;
+}
+
+fn void thvm_atp_set_use_perm_subsume(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_perm_subsume = on ? 1u : 0u;
 }
 
 fn void thvm_atp_set_use_unorient_index(AtpState *s, u8 on) {
@@ -8595,6 +8612,49 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   return kbo_eq(l, r);
 }
 
+// Permutation-subsumption (port of WM `GZ_ACVerzichtbar` in
+// Grundzusammenfuehrung.c:137).  Returns 1 iff (lhs, rhs) are
+// AC-equivalent: they have the same top symbol AND the same multiset
+// of immediate children, where two children are "the same" if they
+// are themselves AC-equivalent or structurally equal (kbo_eq).
+//
+// Catches `nand(x, y) = nand(y, x)` and its nested variants, e.g.:
+//   nand(nand(x,y), z)     = nand(nand(y,x), z)
+//   nand(nand(x,y), nand(x,y)) = nand(nand(y,x), nand(x,y))
+// WM drops such CPs at push + orient time when the top symbol is not
+// AC-marked, preventing the cascade of commutativity-derived rules
+// that dominates the AndAssoc faithful-port trajectory.
+//
+// Arity-2 only (Sheffer signature).  Higher arities would need a
+// multiset matching with backtracking; defer.
+static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
+  if (lhs == rhs) return 0;                      // identical handled elsewhere
+  if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
+  if (term_ext(lhs) != term_ext(rhs)) return 0;
+  u32 nl = term_ctr_n(lhs), nr = term_ctr_n(rhs);
+  if (nl != nr || nl != 2u) return 0;
+  Term l0 = term_ctr_at(lhs, 0), l1 = term_ctr_at(lhs, 1);
+  Term r0 = term_ctr_at(rhs, 0), r1 = term_ctr_at(rhs, 1);
+  // Two children are AC-same iff structurally equal OR they themselves
+  // are an AC-permutation -- recurse.  This catches deep commutativity.
+  u8 l0_r0 = kbo_eq(l0, r0) || atp_cp_perm_subsumed(l0, r0);
+  u8 l1_r1 = kbo_eq(l1, r1) || atp_cp_perm_subsumed(l1, r1);
+  if (l0_r0 && l1_r1) {
+    // Identical (as multisets, same order):  caller (trivial-join /
+    // duplicate-rule guard) handles this; we don't drop it because
+    // the equation is `t = t` which should have been spotted upstream.
+    // But pure structural equality (l0 == r0 && l1 == r1 with no
+    // perm) is already caught earlier; this branch fires only when
+    // the children are AC-equal under deeper permutation.  Treat it
+    // as perm-subsumed: the equation says nothing new beyond what
+    // its (already-derived) children-AC-equality said.
+    return 1;
+  }
+  u8 l0_r1 = kbo_eq(l0, r1) || atp_cp_perm_subsumed(l0, r1);
+  u8 l1_r0 = kbo_eq(l1, r0) || atp_cp_perm_subsumed(l1, r0);
+  return l0_r1 && l1_r0;
+}
+
 // Stage 7.2b: source-rule-disjoint connectedness check.  Returns 1
 // if (lhs, rhs) is joinable under R \ {rule_a, rule_b} -- the two
 // rules that birthed this CP via overlap unification.  Bachmair-
@@ -10117,6 +10177,16 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // byte-identical so the subsumption filters below actually fire.
     thvm_normalize_vars(&cp_lhs, &cp_rhs);
 #endif
+    // Permutation-subsumption (WM GZ_ACVerzichtbar):  drop CPs that
+    // are pure commutativity-of-top, since they cascade into an
+    // unorientable rule that triggers UnfailingCP both-face overlaps
+    // and explodes the unorient fraction (the AndAssoc trajectory
+    // divergence pinned in iter 183).  Gated by use_perm_subsume so
+    // the default trajectory is byte-identical.
+    if (s->use_perm_subsume && atp_cp_perm_subsumed(cp_lhs, cp_rhs)) {
+      s->n_cps_dropped_perm_subsumed++;
+      continue;
+    }
     // 8e: under -DATP_CP_GRAPH this runs ONE thvm_match_multi
     // traversal of cp_graph; off the flag it is the array scan.
     u8 q_subsmd    = atp_cp_queue_subsumed(s, cp_lhs, cp_rhs);
@@ -10465,6 +10535,17 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
 fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
   AtpAddedRange r = {0, 0};
   if (s == NULL) return r;
+
+  // Permutation-subsumption: drop AC-equal-at-top equations before
+  // they become rules.  This catches the post-normalize simple-
+  // commutativity form (e.g. nand(x_0, x_1) = nand(x_1, x_0)) that the
+  // push-time filter missed because the CP entered the queue in a
+  // larger, non-canonical shape and reduced to commutativity only at
+  // pop-time normalize.
+  if (s->use_perm_subsume && atp_cp_perm_subsumed(lhs, rhs)) {
+    s->n_cps_dropped_perm_subsumed++;
+    return r;
+  }
 
   // 8.5c: dispatch between KBO and LPO based on which config is
   // attached.  See `atp_compare`.

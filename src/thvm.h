@@ -3889,6 +3889,15 @@ typedef struct {
   u32  r_trace_dead_cap;          // capacity in bits (== trace ids)
   u32  n_cps_dropped_orphan;      // diagnostics: orphan CPs skipped at pop
 
+  // Permutation-subsumption (port of WM `GZ_ACVerzichtbar` in
+  // INF/Grundzusammenfuehrung.c:137):  drop a CP whose two sides are
+  // equal as multisets at the top.  Catches `nand(x,y) = nand(y,x)`
+  // and prevents the cascade of commutativity-derived rules that
+  // dominates the AndAssoc faithful-port trajectory (RULE 16
+  // commutativity -> 68% unorientable rule set vs wmcli's 6%).
+  u8   use_perm_subsume;
+  u32  n_cps_dropped_perm_subsumed;
+
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
   // rate how many MORE CPs the saturator will pop before the deadline,
@@ -4127,6 +4136,7 @@ fn void      thvm_atp_set_record_norm_steps(AtpState *s, u8 on);
 fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
+fn void      thvm_atp_set_use_perm_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
 // Vampire-style Limited Resource Strategy.  When set together with a

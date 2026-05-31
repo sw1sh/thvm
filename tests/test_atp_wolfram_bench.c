@@ -350,6 +350,17 @@ int main(int argc, char **argv) {
       s->cp_set_ir_period = (u32)strtoul(pr, NULL, 10);
     }
   }
+  // THVM_ATP_PERM_SUB=1: port of WM `GZ_ACVerzichtbar`.  Drops a CP at
+  // push time when its two sides are equal as multisets at the top
+  // (commutativity-shaped, e.g. nand(x,y) = nand(y,x)).  On AndAssoc
+  // faithful-preset trajectory this is the single biggest source of
+  // the 11x per-CP LPO load gap vs wmcli.
+  {
+    const char *ps = getenv("THVM_ATP_PERM_SUB");
+    if (ps != NULL && ps[0] != '\0' && ps[0] != '0') {
+      thvm_atp_set_use_perm_subsume(s, 1u);
+    }
+  }
   // THVM_ATP_WALDMEISTER=1 replicates the WL Method->"Waldmeister"
   // preset's runtime knobs (SelectionRatio 51, RHSInterreduce,
   // UnfailingCP) so a profiling run follows the same trajectory the
