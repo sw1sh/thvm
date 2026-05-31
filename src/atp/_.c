@@ -8,6 +8,23 @@
 //
 // See docs/plans/saturation_loop.md for the algorithm.
 
+// Stage 4 of docs/atp/atpft_plan.md: parallel AtpFt rule storage.
+// Pull in the cell layout + dual-arena allocator + Stage-2 constructors
+// /converters / hashes when THVM_ATPFT_RULES is on so atp_push_rule /
+// thvm_atp_set_goal can populate s->lhs_ft[] / s->rhs_ft[] / goal_*_ft
+// from inside this single TU.  Off the flag this whole block is gone,
+// so the default build is byte-identical (no extra symbols, no extra
+// allocations, no extra arenas).  THVM_ATPFT_ALLOC / _CONVERT are
+// required transitively; the test target sets all three together.
+#ifdef THVM_ATPFT_RULES
+# if !defined(THVM_ATPFT_ALLOC) || !defined(THVM_ATPFT_CONVERT)
+#  error "THVM_ATPFT_RULES requires THVM_ATPFT_ALLOC and THVM_ATPFT_CONVERT"
+# endif
+# include "ft.h"
+# include "ft_alloc.c"
+# include "ft.c"
+#endif
+
 // === 8.1c: ATP primitives registered into the TAG_PRI table ========
 //
 // `prim_unify_apply` is the first primitive: takes two terms (s, t),
@@ -549,8 +566,89 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
     s->r_dead_lhs_save[i] = 0;
     s->r_dead_rhs_save[i] = 0;
   }
+#ifdef THVM_ATPFT_RULES
+  // Stage 4: grow the parallel AtpFt slot arrays in lockstep with the
+  // Term arrays above.  Cells themselves live in s->ft_arena_ptr's slab
+  // pool (allocated once in thvm_atp_init); these slot arrays only hold
+  // POINTERS, so realloc never invalidates an in-flight AtpFtCell *.
+  // New tail slots start NULL: a rule's slot is filled by atp_push_rule
+  // immediately after the Term writes (or stays NULL for the never-used
+  // tail above n_rules).
+  struct AtpFtCell **nlf  = (struct AtpFtCell **)realloc(
+      s->lhs_ft,              cap * sizeof(struct AtpFtCell *));
+  struct AtpFtCell **nrf  = (struct AtpFtCell **)realloc(
+      s->rhs_ft,              cap * sizeof(struct AtpFtCell *));
+  struct AtpFtCell **nlsf = (struct AtpFtCell **)realloc(
+      s->r_dead_lhs_save_ft,  cap * sizeof(struct AtpFtCell *));
+  struct AtpFtCell **nrsf = (struct AtpFtCell **)realloc(
+      s->r_dead_rhs_save_ft,  cap * sizeof(struct AtpFtCell *));
+  if (nlf == NULL || nrf == NULL || nlsf == NULL || nrsf == NULL) {
+    fprintf(stderr, "atp_ensure_rule_cap: ft realloc to %u rules failed\n",
+            cap);
+    exit(1);
+  }
+  s->lhs_ft = nlf; s->rhs_ft = nrf;
+  s->r_dead_lhs_save_ft = nlsf; s->r_dead_rhs_save_ft = nrsf;
+  for (u32 i = s->r_cap; i < cap; i++) {
+    s->lhs_ft[i]             = NULL;
+    s->rhs_ft[i]             = NULL;
+    s->r_dead_lhs_save_ft[i] = NULL;
+    s->r_dead_rhs_save_ft[i] = NULL;
+  }
+#endif
   s->r_cap = cap;
 }
+
+#ifdef THVM_ATPFT_RULES
+// Stage 4 verification probe (env THVM_ATPFT_VERIFY=1).  After every
+// rule slot k is written, re-convert the live Term pair through the
+// scratch arena and confirm structural equality + hash agreement with
+// the persistent AtpFt mirror written in atp_push_rule.  A divergence
+// here means atp_push_rule's slot-write semantics drifted from the
+// boundary converter -- abort loudly so a soundness bug surfaces at
+// the mutating call, not laundered into a downstream Stage-5 reader.
+//
+// The probe is cheap when off (one env-probe-cached flag check) and
+// O(rule-size) per slot when on, so a flagged 135k-assertion run is
+// only ~10-20% slower; off it is byte-identical.
+static int atp_ft_rules_verify_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("THVM_ATPFT_VERIFY");
+    on = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return on;
+}
+
+static void atp_ft_rules_verify_push(AtpState *s, u32 k) {
+  if (!atp_ft_rules_verify_on()) return;
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  // Scratch round-trip: ft_from_term into Arena B with scratch=1, then
+  // reset.  Scratch cells are short-lived by construction, so this
+  // never grows the persistent arena -- the probe is allocation-neutral
+  // for the live rule mirror.
+  ft_scratch_reset(a);
+  AtpFtCell *l_check = ft_from_term(a, s->lhs[k], 1);
+  AtpFtCell *r_check = ft_from_term(a, s->rhs[k], 1);
+  if (!ft_eq(s->lhs_ft[k], l_check) || !ft_eq(s->rhs_ft[k], r_check)) {
+    fprintf(stderr, "ATPFT VERIFY: rule %u ft_eq mismatch\n", k);
+    abort();
+  }
+  u64 hl_ft = ft_hash(s->lhs_ft[k]);
+  u64 hr_ft = ft_hash(s->rhs_ft[k]);
+  u64 hl_tm = atp_term_struct_hash(s->lhs[k]);
+  u64 hr_tm = atp_term_struct_hash(s->rhs[k]);
+  if (hl_ft != hl_tm || hr_ft != hr_tm) {
+    fprintf(stderr,
+            "ATPFT VERIFY: rule %u ft_hash mismatch "
+            "(lhs ft=%llx tm=%llx, rhs ft=%llx tm=%llx)\n", k,
+            (unsigned long long)hl_ft, (unsigned long long)hl_tm,
+            (unsigned long long)hr_ft, (unsigned long long)hr_tm);
+    abort();
+  }
+  ft_scratch_reset(a);
+}
+#endif // THVM_ATPFT_RULES
 
 // Grow the CP arrays (cp_packed / cp_trace / cp_pri / cp_seq) to hold
 // at least `need` entries.  Same doubling discipline as
@@ -4209,6 +4307,18 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // engine-wide default-on caused a measurable atp.wlt slowdown.
   atp_register_primitives();
   acp_selftest();   // verify the Stringterms pack/unpack round-trip
+#ifdef THVM_ATPFT_RULES
+  // Stage 4: stand up the AtpFt slab pool BEFORE atp_ensure_rule_cap
+  // grows the parallel slot arrays (those start NULL; cells get
+  // allocated lazily from this arena in atp_push_rule).  One arena
+  // per AtpState, freed wholesale in thvm_atp_free.
+  s->ft_arena_ptr = (struct AtpFt *)malloc(sizeof(AtpFt));
+  if (s->ft_arena_ptr == NULL) {
+    fprintf(stderr, "thvm_atp_init: ft_arena malloc failed\n");
+    exit(1);
+  }
+  ft_init((AtpFt *)s->ft_arena_ptr);
+#endif
   // Allocate the growable rule / CP arrays at their initial
   // capacity.  ensure_*_cap fills the trace slots with
   // ATP_TRACE_NONE (0 is a valid trace index, so explicit fill
@@ -4325,6 +4435,21 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->r_dead_lhs_save);
   free(s->r_dead_rhs_save);
   free(s->r_trace_dead);
+#ifdef THVM_ATPFT_RULES
+  // Stage 4: release the parallel pointer arrays + drop the slab pool
+  // (one ft_destroy frees every AtpFtCell handed out in this state's
+  // lifetime; the slot arrays themselves are plain malloc'd pointer
+  // tables).
+  free(s->lhs_ft);
+  free(s->rhs_ft);
+  free(s->r_dead_lhs_save_ft);
+  free(s->r_dead_rhs_save_ft);
+  if (s->ft_arena_ptr != NULL) {
+    ft_destroy((AtpFt *)s->ft_arena_ptr);
+    free(s->ft_arena_ptr);
+    s->ft_arena_ptr = NULL;
+  }
+#endif
   // Each cp_packed[] slot is a malloc'd byte string the queue owns;
   // free every non-NULL slot (free(NULL) is a no-op) then the array.
   if (s->cp_packed != NULL) {
@@ -4709,6 +4834,10 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
     s->goal_rhs = 0;
     s->conj_sym_mask = 0;
     s->rel_lvl1_mask = 0;
+#ifdef THVM_ATPFT_RULES
+    s->goal_lhs_ft = NULL;
+    s->goal_rhs_ft = NULL;
+#endif
     return 1;
   }
   // 8.4d: gate on sort-check when a spec is attached -- both
@@ -4722,6 +4851,16 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   }
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
+#ifdef THVM_ATPFT_RULES
+  // Stage 4: mirror the goal pair into the AtpFt arena.  Goals are
+  // persistent (live as long as the conjecture); convert with
+  // scratch=0.  Set-goal can be called multiple times (test setup,
+  // existential mode flip); the previous goal cells become unreachable
+  // in the arena but the slab pool never returns memory mid-state,
+  // freed wholesale at thvm_atp_free.
+  s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs, 0);
+  s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs, 0);
+#endif
   // Recompute the conjecture symbol mask for ATP_CP_WEIGHT_CONJSYM.
   s->conj_sym_mask = 0;
   atp_collect_symbols(lhs, &s->conj_sym_mask);
@@ -6417,6 +6556,19 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   atp_ensure_rule_cap(s, s->n_rules + 1);
   s->lhs[s->n_rules] = lhs;
   s->rhs[s->n_rules] = rhs;
+#ifdef THVM_ATPFT_RULES
+  // Stage 4: mirror the Term pair into the parallel AtpFt slots
+  // immediately so every later observer sees the two paths in lockstep
+  // (slot[i] occupancy on the ft side is exactly slot[i] occupancy on
+  // the Term side).  Persistent allocation (scratch=0) so the cells
+  // live as long as the rule slot does -- ft_destroy at thvm_atp_free
+  // releases them all.  thvm_normalize_vars already settled the
+  // variable canonicalization above, so the ft image is built from the
+  // canonical form.  VERIFY probe runs after both writes are committed.
+  s->lhs_ft[s->n_rules] = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs, 0);
+  s->rhs_ft[s->n_rules] = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs, 0);
+  atp_ft_rules_verify_push(s, s->n_rules);
+#endif
   // Cache the rule's orientation once -- atp_ordered_try_top reads this
   // instead of recomputing a full KBO compare per rewrite position.
   s->r_orient[s->n_rules] = (u8)(atp_compare(s, lhs, rhs) == KBO_GT);
@@ -6455,6 +6607,18 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
         s->rhs[i] = dead_sentinel;
         s->r_dead[i] = 1;
         s->n_rules_bwd_subsumed++;
+#ifdef THVM_ATPFT_RULES
+        // Stage 4: mirror the slot-save on the AtpFt side.  The dead
+        // sentinel is a TAG_FVR with var id 255 (out of range); convert
+        // it the same way ft_from_term handles any FVR so a later
+        // sentinel-check on the ft path matches the Term path.
+        s->r_dead_lhs_save_ft[i] = s->lhs_ft[i];
+        s->r_dead_rhs_save_ft[i] = s->rhs_ft[i];
+        s->lhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                    dead_sentinel, 0);
+        s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                    dead_sentinel, 0);
+#endif
       }
     }
   }
@@ -8532,6 +8696,10 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
     s->goal_lhs = 0;
     s->goal_rhs = 0;
     s->goal_existential = 0;
+#ifdef THVM_ATPFT_RULES
+    s->goal_lhs_ft = NULL;
+    s->goal_rhs_ft = NULL;
+#endif
     return 1;
   }
   if (s->spec != NULL) {
@@ -8544,6 +8712,12 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
   s->goal_existential = 1;
+#ifdef THVM_ATPFT_RULES
+  // Stage 4: mirror the goal on the AtpFt side (same persistence /
+  // arena story as thvm_atp_set_goal).
+  s->goal_lhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, lhs, 0);
+  s->goal_rhs_ft = ft_from_term((AtpFt *)s->ft_arena_ptr, rhs, 0);
+#endif
   return 1;
 }
 
@@ -8747,6 +8921,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         s->rhs[j - 1]      = s->rhs[j];
         s->r_trace[j - 1]  = s->r_trace[j];
         s->r_orient[j - 1] = s->r_orient[j];
+#ifdef THVM_ATPFT_RULES
+        // Stage 4: shift the AtpFt slot pointers in lockstep -- no
+        // re-conversion, the cells themselves are address-stable in
+        // the slab pool, only the slot index changes.
+        s->lhs_ft[j - 1] = s->lhs_ft[j];
+        s->rhs_ft[j - 1] = s->rhs_ft[j];
+#endif
       }
       s->n_rules--;
 #ifdef ATP_RULE_INDEX
@@ -8820,6 +9001,15 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             s->rhs[i]     = r_reduced;
             s->r_trace[i] = new_t;
             s->n_right_reduced++;
+#ifdef THVM_ATPFT_RULES
+            // Stage 4: the in-place RHS edit replaces the Term; the
+            // AtpFt mirror must re-convert (the old AtpFt RHS cells
+            // become unreachable in the arena, freed wholesale at
+            // ft_destroy time).  LHS unchanged so lhs_ft[i] stays.
+            s->rhs_ft[i] = ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                        r_reduced, 0);
+            atp_ft_rules_verify_push(s, i);
+#endif
             // RHS does not feed the LHS discrimination tree, so the
             // rule-LHS index stays valid; no dirty flag needed.
 #ifdef ATP_RULE_INDEX
@@ -8892,6 +9082,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
+#ifdef THVM_ATPFT_RULES
+          // Stage 4: shift the parallel AtpFt slot pointers.
+          s->lhs_ft[k - 1]              = s->lhs_ft[k];
+          s->rhs_ft[k - 1]              = s->rhs_ft[k];
+          s->r_dead_lhs_save_ft[k - 1]  = s->r_dead_lhs_save_ft[k];
+          s->r_dead_rhs_save_ft[k - 1]  = s->r_dead_rhs_save_ft[k];
+#endif
         }
         s->n_rules--;
 #ifdef ATP_RULE_INDEX
@@ -8922,6 +9119,13 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
+#ifdef THVM_ATPFT_RULES
+          // Stage 4: shift the parallel AtpFt slot pointers.
+          s->lhs_ft[k - 1]              = s->lhs_ft[k];
+          s->rhs_ft[k - 1]              = s->rhs_ft[k];
+          s->r_dead_lhs_save_ft[k - 1]  = s->r_dead_lhs_save_ft[k];
+          s->r_dead_rhs_save_ft[k - 1]  = s->r_dead_rhs_save_ft[k];
+#endif
         }
         s->n_rules--;
 #ifdef ATP_RULE_INDEX

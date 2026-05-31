@@ -305,7 +305,9 @@ TESTS := \
   $(BIN)/test_multi_trace_on \
   $(BIN)/test_ft_alloc \
   $(BIN)/test_ft \
-  $(BIN)/test_ft_order
+  $(BIN)/test_ft_order \
+  $(BIN)/test_atp_ft_rules \
+  $(BIN)/test_atp_ft
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -644,6 +646,25 @@ $(BIN)/test_ft: tests/test_ft.c $(SRC) | $(BIN)
 # THVM_ATPFT_CONVERT, THVM_ATPFT_LPO).
 $(BIN)/test_ft_order: tests/test_ft_order.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -DTHVM_ATPFT_LPO -o $@ $< $(TEST_LDFLAGS)
+
+# Stage 4 AtpFt-backed rule storage smoke test -- src/atp/_.c pulls in
+# ft.h + ft_alloc.c + ft.c under THVM_ATPFT_RULES, so all four flags
+# are passed together (RULES requires ALLOC + CONVERT; LPO included so
+# the ft_order.c entry points stay live for Stage 5+ readers).  The
+# test pushes a small batch of Sheffer rules and asserts the AtpFt
+# mirror agrees with the Term path on every slot (ft_eq + ft_hash).
+$(BIN)/test_atp_ft_rules: tests/test_atp_ft_rules.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -DTHVM_ATPFT_LPO -DTHVM_ATPFT_RULES -o $@ $< $(TEST_LDFLAGS)
+
+# Stage 4 headline acceptance -- the full 135624-assertion test_atp
+# suite compiled with the AtpFt parallel writes enabled.  Off the
+# flags the run is byte-identical to bin/test_atp; with them on every
+# rule push / goal set / interreduce compaction also writes the AtpFt
+# mirror, so a slot drift (or a Stage-4 bug) would surface as either
+# a hard verify-abort (with THVM_ATPFT_VERIFY=1) or an assertion-count
+# divergence vs the 135624 baseline.
+$(BIN)/test_atp_ft: tests/test_atp.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -DTHVM_ATPFT_LPO -DTHVM_ATPFT_RULES -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)

@@ -4079,6 +4079,35 @@ typedef struct {
   u8    *cp_feat_label;    // 0/1 proof-relevance label (filled post-hoc)
   u32    n_cp_feat;        // number of recorded rows
   u32    cp_feat_cap;      // capacity of the three parallel arrays
+
+#ifdef THVM_ATPFT_RULES
+  // Stage 4 of docs/atp/atpft_plan.md: parallel AtpFt rule storage.
+  // Eagerly mirror every Term written into lhs[]/rhs[]/r_dead_*_save[]/
+  // goal_* into AtpFtCell* slots that share the slot lifetime exactly
+  // (allocate-with-grow, write-with-set, shift-with-compact).  The Term
+  // path stays authoritative at Stage 4 -- every reader (rule_index,
+  // CP gen, rewriter) keeps consuming Terms; the AtpFt mirror is
+  // verification-only (THVM_ATPFT_VERIFY=1 cross-checks ft_eq + ft_hash
+  // parity after each rule add).  Stage 5+ flips individual readers
+  // (rule_index_ft, rewrite_normalize_ft, ...) onto the mirror.
+  // AtpFt cells are address-stable across thvm_atp_gc_collect (the Term
+  // collector moves Term cells; AtpFt has its own slab pool that the
+  // collector never touches), so no GC fixup of these pointers is
+  // needed -- the post-GC invariant ft_eq(lhs_ft[i], lhs[i]) holds by
+  // construction.  ft_arena owns every cell here; thvm_atp_free
+  // releases the whole arena in one ft_destroy.
+  struct AtpFt    *ft_arena_ptr;     // points at ft_arena_storage below
+                                     // (boxed pointer so the struct
+                                     // forward-decl is enough in this
+                                     // header; full AtpFt comes in via
+                                     // ft.h at the .c boundary).
+  struct AtpFtCell **lhs_ft;
+  struct AtpFtCell **rhs_ft;
+  struct AtpFtCell **r_dead_lhs_save_ft;
+  struct AtpFtCell **r_dead_rhs_save_ft;
+  struct AtpFtCell  *goal_lhs_ft;
+  struct AtpFtCell  *goal_rhs_ft;
+#endif
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
