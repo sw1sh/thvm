@@ -307,7 +307,8 @@ TESTS := \
   $(BIN)/test_ft \
   $(BIN)/test_ft_order \
   $(BIN)/test_atp_ft_rules \
-  $(BIN)/test_atp_ft
+  $(BIN)/test_atp_ft \
+  $(BIN)/test_ft_match
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -665,6 +666,19 @@ $(BIN)/test_atp_ft_rules: tests/test_atp_ft_rules.c $(SRC) | $(BIN)
 # divergence vs the 135624 baseline.
 $(BIN)/test_atp_ft: tests/test_atp.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -DTHVM_ATPFT_LPO -DTHVM_ATPFT_RULES -o $@ $< $(TEST_LDFLAGS)
+
+# Stage 5 AtpFt-native match + substitution-apply -- src/atp/ft_match.c
+# is gated on THVM_ATPFT_MATCH (and depends on ALLOC + CONVERT + LPO).
+# Stage 5 is purely additive: ft_match.c has no live callers in
+# src/atp/_.c at this stage (wiring lands in Stage 5b / 6 per
+# docs/atp/atpft_plan.md), so only this test binary turns the flag on.
+# The test file #includes ft_alloc.c + ft.c + ft_order.c + ft_match.c
+# directly after src/thvm.c; the per-rule -D defines unlock all four.
+$(BIN)/test_ft_match: tests/test_ft_match.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
