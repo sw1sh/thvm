@@ -3426,6 +3426,18 @@ typedef struct {
   // selection then takes a goal-min pick every use_goal_interleave-th
   // step (E-style ratio: size-based system-building + goal steering).
   u32  *cp_goal;
+  // K-D Heap secondary dimension (port of WM `CPdimension` in
+  // KPVerwaltung.c).  cp_pri2 is a SECOND priority computed at push
+  // time using w2_mode (a different ATP_CP_WEIGHT_* mode than cp_pri's
+  // primary).  Every w2_modulo-th selection picks min-cp_pri2 instead
+  // of min-cp_pri -- WM's alternating-dimension fairness that surfaces
+  // structurally simple rules buried under the primary-weight ordering.
+  // Default w2_modulo=0 (disabled, byte-identical engine); set via
+  // thvm_atp_set_w2 / env THVM_ATP_W2_MODULO / W2_MODE.
+  u32  *cp_pri2;
+  u32   w2_modulo;       // 0 = disabled
+  u8    w2_mode;         // ATP_CP_WEIGHT_* used for cp_pri2 computation
+  u32   n_cps_w2_picks;  // diagnostic counter
   u32   cp_seq_next;
   u32   cp_cap;
   // Waldmeister CP-queue interleaving: selection alternates between
@@ -4137,6 +4149,7 @@ fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_perm_subsume(AtpState *s, u8 on);
+fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
 // Vampire-style Limited Resource Strategy.  When set together with a

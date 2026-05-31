@@ -490,12 +490,14 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   u32  *np = (u32  *)realloc(s->cp_pri,   cap * sizeof(u32));
   u32  *nq = (u32  *)realloc(s->cp_seq,   cap * sizeof(u32));
   u32  *ng = (u32  *)realloc(s->cp_goal,  cap * sizeof(u32));
-  if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL) {
+  u32  *np2 = (u32 *)realloc(s->cp_pri2,  cap * sizeof(u32));
+  if (nc == NULL || nt == NULL || np == NULL || nq == NULL || ng == NULL
+      || np2 == NULL) {
     fprintf(stderr, "atp_ensure_cp_cap: realloc to %u CPs failed\n", cap);
     exit(1);
   }
   s->cp_packed = nc; s->cp_trace = nt;
-  s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng;
+  s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
   for (u32 i = s->cp_cap; i < cap; i++) {
     s->cp_packed[i] = NULL;
     s->cp_trace[i]  = ATP_TRACE_NONE;
@@ -3929,6 +3931,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_pri);
   free(s->cp_goal);
   free(s->cp_seq);
+  free(s->cp_pri2);
   // Auto-MaxWeight overflow stash: each packed byte string is owned
   // here too (free(NULL) is a no-op for slots already drained).
   if (s->cp_stash_packed != NULL) {
@@ -5393,6 +5396,7 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
   u32  tp = s->cp_pri[i];   s->cp_pri[i]   = s->cp_pri[j];   s->cp_pri[j]   = tp;
   u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
   u32  tg = s->cp_goal[i];  s->cp_goal[i]  = s->cp_goal[j];  s->cp_goal[j]  = tg;
+  u32  t2 = s->cp_pri2[i];  s->cp_pri2[i]  = s->cp_pri2[j];  s->cp_pri2[j]  = t2;
 }
 
 static void atp_cp_sift_up(AtpState *s, u32 i) {
@@ -5429,6 +5433,11 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   s->cp_pri[i]   = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
   s->cp_goal[i]  = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                      ? atp_goal_weight(s, lhs, rhs) : 0u;
+  // K-D Heap secondary dimension: compute cp_pri2 with the alternate
+  // weight mode (w2_mode, set via thvm_atp_set_w2).  Cheap -- ~one
+  // symbol-count walk per CP -- and only filled when w2_modulo > 0.
+  s->cp_pri2[i]  = (s->w2_modulo > 0u)
+                     ? atp_cp_weight_base(s, lhs, rhs, s->w2_mode) : 0u;
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
   s->n_cps++;
@@ -5689,6 +5698,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_pri[i]   = s->cp_pri[last];
       s->cp_seq[i]   = s->cp_seq[last];
       s->cp_goal[i]  = s->cp_goal[last];
+      s->cp_pri2[i]  = s->cp_pri2[last];
     }
     s->n_cps--;
     s->n_cps_dropped_lrs++;
@@ -5753,7 +5763,22 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
   // selections, weight pick (heap root) otherwise.
   u32 j = 0;
-  if (s->use_goal_interleave > 0u &&
+  if (s->w2_modulo > 0u &&
+      (s->cp_select_count % s->w2_modulo) == 0u) {
+    // K-D Heap secondary dimension (WM CPdimension d=1): every
+    // w2_modulo-th selection picks the min-cp_pri2 entry instead of
+    // the primary heap root.  O(n_cps) scan; the period gates cost.
+    // Surfaces structurally simple CPs buried under primary weight.
+    u32 best = 0;
+    for (u32 i = 1; i < s->n_cps; i++) {
+      if (s->cp_pri2[i] < s->cp_pri2[best]
+          || (s->cp_pri2[i] == s->cp_pri2[best] && s->cp_seq[i] < s->cp_seq[best])) {
+        best = i;
+      }
+    }
+    j = best;
+    s->n_cps_w2_picks++;
+  } else if (s->use_goal_interleave > 0u &&
       (s->cp_select_count % s->use_goal_interleave) == 0u) {
     // Goal-directed pick: the most goal-relevant queued CP (min
     // cp_goal).  E-style ratio -- the other picks are weight-based,
@@ -5816,6 +5841,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_pri[j]   = s->cp_pri[last];
     s->cp_seq[j]   = s->cp_seq[last];
     s->cp_goal[j]  = s->cp_goal[last];
+    s->cp_pri2[j]  = s->cp_pri2[last];
     atp_cp_sift_up(s, j);
     atp_cp_sift_down(s, j);
   }
@@ -5856,6 +5882,8 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     s->cp_pri[i] = atp_cp_priority(s, l, r);
     s->cp_goal[i] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
+    s->cp_pri2[i] = (s->w2_modulo > 0u)
+                      ? atp_cp_weight_base(s, l, r, s->w2_mode) : 0u;
     // Waldmeister `-:w1=fifo`: keep each surviving CP's original
     // insertion age so equal-weight ties stay oldest-first run-wide.
     // The post-orient compaction (atp_normalize_graph) already carried
@@ -6079,6 +6107,12 @@ fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_perm_subsume(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_perm_subsume = on ? 1u : 0u;
+}
+
+fn void thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode) {
+  if (s == NULL) return;
+  s->w2_modulo = modulo;
+  s->w2_mode   = (mode < ATP_CP_WEIGHT_LAST) ? mode : ATP_CP_WEIGHT_MAX;
 }
 
 fn void thvm_atp_set_use_unorient_index(AtpState *s, u8 on) {

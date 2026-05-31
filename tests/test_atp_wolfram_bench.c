@@ -361,6 +361,23 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_perm_subsume(s, 1u);
     }
   }
+  // THVM_ATP_W2_MODULO / THVM_ATP_W2_MODE: K-D Heap alternating-
+  // dimension selection (port of WM `CPdimension` in KPVerwaltung.c).
+  // Every w2_modulo-th selection picks min-cp_pri2 instead of the
+  // primary heap root.  cp_pri2 is computed with the alternate weight
+  // mode (e.g. CH_MaxWeight when primary is CH_MixWeight).  Surfaces
+  // structurally simple CPs buried under the primary ordering.
+  {
+    const char *w2m = getenv("THVM_ATP_W2_MODULO");
+    const char *w2d = getenv("THVM_ATP_W2_MODE");
+    if (w2m != NULL && w2m[0] != '\0') {
+      u32 mod = (u32)strtoul(w2m, NULL, 10);
+      u32 mode = (w2d != NULL && w2d[0] != '\0')
+                   ? (u32)strtoul(w2d, NULL, 10)
+                   : (u32)ATP_CP_WEIGHT_MAX;
+      thvm_atp_set_w2(s, mod, (u8)mode);
+    }
+  }
   // THVM_ATP_WALDMEISTER=1 replicates the WL Method->"Waldmeister"
   // preset's runtime knobs (SelectionRatio 51, RHSInterreduce,
   // UnfailingCP) so a profiling run follows the same trajectory the
