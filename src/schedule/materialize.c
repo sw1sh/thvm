@@ -3037,7 +3037,19 @@ static void topo_sort_boundaries(Term root) {
     // Partial realizes that genuinely drop axes and inline cleanly
     // (softmax denom / layer-norm mean broadcasts) are NOT promoted, so
     // their fusion is preserved.
-    if (!BUFFERIZE_NODES[i].realized) {
+    // THVM_RU_FAITHFUL_SEED: this boundary gate must agree with the
+    // rangeify realize-map seed (rangeify_unified.c).  In faithful mode the
+    // CLASSIFY realized bit (MULTI/REDUCE/MATMUL heuristics) is NOT a
+    // boundary by itself -- only ROOT (== tinygrad STORE) is.  Every other
+    // node falls through to the rangeify-realized gate below, so a node the
+    // unified walk fused (single-consumer inherit, no ending-ranges) is
+    // inlined into its consumer instead of escaping into its own kernel
+    // (the conv-backward 6-D MUL was emitted as a 327M-element kernel
+    // otherwise).  The effectively-full / would-strand checks still apply,
+    // so a genuinely stranding inline (the _pool col2im) is still realized.
+    int classify_real = BUFFERIZE_NODES[i].realized
+                     && ru_seed_boundary_holds(BUFFERIZE_NODES[i].reasons);
+    if (!classify_real) {
       u32 nr  = uop_bufferize_n_ranges(buf);
       u32 ond = rangeify_unified_out_ndim_at(i);
       int effectively_full = (ond > 0 && nr == ond);
