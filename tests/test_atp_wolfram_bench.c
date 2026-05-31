@@ -831,6 +831,13 @@ int main(int argc, char **argv) {
                (unsigned long long)unf_total,
                100.0 * (double)g_atp_unf_memo_hits / (double)unf_total);
       }
+      u64 si_total = g_atp_ri_splice_inline_hits + g_atp_ri_splice_inline_misses;
+      if (si_total > 0) {
+        printf("   splice-inline: %llu hits / %llu attempts (%.0f%% hit-ratio)\n",
+               (unsigned long long)g_atp_ri_splice_inline_hits,
+               (unsigned long long)si_total,
+               100.0 * (double)g_atp_ri_splice_inline_hits / (double)si_total);
+      }
     }
   }
   { u32 unor = 0;

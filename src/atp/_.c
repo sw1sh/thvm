@@ -358,6 +358,8 @@ static inline void atp_unf_memo_put(u64 h) {
 }
 u64 g_atp_unf_memo_hits   = 0;
 u64 g_atp_unf_memo_misses = 0;
+u64 g_atp_ri_splice_inline_hits   = 0;
+u64 g_atp_ri_splice_inline_misses = 0;
 
 // Per-position no-fire memo for the unorientable discrimination-tree
 // descent at atp_ri_query_pos_unorient.  Keyed by (subtree-phash,
@@ -2628,6 +2630,77 @@ static Term g_atp_ri_repl_flat   [ATP_RI_FLAT_CAP];
 static u32  g_atp_ri_repl_subsz  [ATP_RI_FLAT_CAP];
 static u32  g_atp_ri_repl_flatsym[ATP_RI_FLAT_CAP];
 
+// Emit the substitution-applied rule rhs directly into `dst_flat` /
+// `dst_subsz` / `dst_flatsym` in flatterm form, WITHOUT round-tripping
+// through a Term tree.  Mirrors the structure of WM's MA/SubstApply on
+// TermzellenT cells: walk rule_rhs preorder, emit CTR cells, inline
+// subject-flatterm slices for each var binding (star[var_id] = subject
+// preorder position).  Allocation-free -- pure memcpy from
+// subject_flat / subject_subsz / subject_flatsym into dst arrays.
+// Returns 1 on success; 0 on cap overrun OR on a var binding that
+// doesn't fit ATP_RI_MAXVARS (caller falls back to the Term-tree path).
+static u8 atp_subst_apply_to_flat(Term rule_rhs,
+                                  const u32 *star,
+                                  const Term *subj_flat,
+                                  const u32 *subj_subsz,
+                                  const u32 *subj_flatsym,
+                                  Term *dst_flat,
+                                  u32 *dst_subsz,
+                                  u32 *dst_flatsym,
+                                  u32 *dst_pos,
+                                  u8 *folded,
+                                  u32 cap) {
+  u32 here = *dst_pos;
+  if (here >= cap) return 0;
+  switch (term_tag(rule_rhs)) {
+    case TAG_FVR: {
+      u32 vid = term_ext(rule_rhs);
+      if (vid >= ATP_RI_MAXVARS) return 0;     // folded: fall back to tree path
+      u32 spos = star[vid];
+      if (spos == ATP_RI_NIL) return 0;        // unbound: fall back
+      u32 ssz = subj_subsz[spos];
+      if (here + ssz > cap) return 0;
+      memcpy(&dst_flat[here],    &subj_flat[spos],
+             (size_t)ssz * sizeof(Term));
+      memcpy(&dst_subsz[here],   &subj_subsz[spos],
+             (size_t)ssz * sizeof(u32));
+      memcpy(&dst_flatsym[here], &subj_flatsym[spos],
+             (size_t)ssz * sizeof(u32));
+      *dst_pos = here + ssz;
+      return 1;
+    }
+    case TAG_CTR: {
+      dst_flat[here]    = rule_rhs;
+      dst_flatsym[here] = atp_ri_flatsym_raw(rule_rhs, folded);
+      *dst_pos = here + 1u;
+      u64 base = term_val(rule_rhs);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) {
+        dst_subsz[here] = 1u;
+        return 1;
+      }
+      u32 n = (u32)term_val(n_cell);
+      for (u32 i = 0; i < n; i++) {
+        Term child = heap_read(base + 1u + (u64)i);
+        if (!atp_subst_apply_to_flat(child, star, subj_flat, subj_subsz,
+                                     subj_flatsym, dst_flat, dst_subsz,
+                                     dst_flatsym, dst_pos, folded, cap)) {
+          return 0;
+        }
+      }
+      dst_subsz[here] = *dst_pos - here;
+      return 1;
+    }
+    default: {
+      dst_flat[here]    = rule_rhs;
+      dst_flatsym[here] = atp_ri_flatsym_raw(rule_rhs, folded);
+      dst_subsz[here]   = 1u;
+      *dst_pos = here + 1u;
+      return 1;
+    }
+  }
+}
+
 // Splice a rewrite into the persistent flat arrays.  A normalize step
 // rewrote preorder position `redex_pos` (old subtree span
 // `subsz[redex_pos]`) into `repl`.  Rather than re-flatten the whole
@@ -2675,6 +2748,50 @@ static u8 atp_ri_splice(Term *flat, u32 *subsz, u32 *flatsym, u32 *flatlen,
   // position-independent (Term cells, self-relative spans, raw
   // symbols), so a contiguous copy is exact -- and far cheaper than
   // re-walking repl's tree.
+  memcpy(&flat[redex_pos],    g_atp_ri_repl_flat,
+         (size_t)rlen * sizeof(Term));
+  memcpy(&subsz[redex_pos],   g_atp_ri_repl_subsz,
+         (size_t)rlen * sizeof(u32));
+  memcpy(&flatsym[redex_pos], g_atp_ri_repl_flatsym,
+         (size_t)rlen * sizeof(u32));
+  *flatlen = redex_pos + rlen + tail;
+  return 1;
+}
+
+// Flatterm-native splice: same as atp_ri_splice but produces the
+// rewrite's replacement directly in the scratch flat arrays via
+// atp_subst_apply_to_flat (no Term-tree round-trip).  Caller passes
+// rule_rhs (the rule's RHS Term, traversed as a template) + star (the
+// var bindings as subject preorder positions).  Returns 1 on success;
+// 0 on cap overrun OR fold-incompatible binding -- caller falls back
+// to the Term-tree atp_ri_splice path.
+static u8 atp_ri_splice_inline(Term *flat, u32 *subsz, u32 *flatsym,
+                               u32 *flatlen, u8 *folded, u32 redex_pos,
+                               Term rule_rhs, const u32 *star, u32 cap) {
+  u32 oldsz = subsz[redex_pos];
+  u32 rlen = 0u;
+  if (!atp_subst_apply_to_flat(rule_rhs, star, flat, subsz, flatsym,
+                               g_atp_ri_repl_flat, g_atp_ri_repl_subsz,
+                               g_atp_ri_repl_flatsym, &rlen, folded, cap)) {
+    return 0;
+  }
+  u32 tail = *flatlen - redex_pos - oldsz;
+  if (redex_pos + rlen + tail > cap) return 0;
+  u32 a = 0u;
+  while (a != redex_pos) {
+    u32 c = a + 1u;
+    while (c + subsz[c] <= redex_pos) c += subsz[c];
+    subsz[a] = subsz[a] + rlen - oldsz;
+    a = c;
+  }
+  if (tail > 0u && rlen != oldsz) {
+    memmove(&flat[redex_pos + rlen],    &flat[redex_pos + oldsz],
+            (size_t)tail * sizeof(Term));
+    memmove(&subsz[redex_pos + rlen],   &subsz[redex_pos + oldsz],
+            (size_t)tail * sizeof(u32));
+    memmove(&flatsym[redex_pos + rlen], &flatsym[redex_pos + oldsz],
+            (size_t)tail * sizeof(u32));
+  }
   memcpy(&flat[redex_pos],    g_atp_ri_repl_flat,
          (size_t)rlen * sizeof(Term));
   memcpy(&subsz[redex_pos],   g_atp_ri_repl_subsz,
@@ -3151,9 +3268,34 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
                            &subst)) {
       return any;                                   // unreachable: confirmed
     }
-    Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
-    if (atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
-                      redex_pos, repl, ATP_RI_FLAT_CAP)) {
+    // Flatterm-native splice port (WM TermzellenT MA/SubstApply
+    // analog): when the rule's var bindings are all in-range
+    // (g_atp_ri_best_star[k] != ATP_RI_NIL and < ATP_RI_MAXVARS) AND
+    // neither the index nor the subject folded, splice DIRECTLY from
+    // the rule rhs Term + star positions into the persistent flat
+    // arrays -- no thvm_subst_apply, no atp_ri_build, no
+    // atp_ri_flatten round-trip.  Falls back to the Term-tree
+    // atp_ri_splice on overrun / fold.  Gated by THVM_ATP_SUBST_FLAT
+    // so the default trajectory stays byte-identical.
+    u8 spliced = 0u;
+    static int dbg_subst_flat = -1;
+    if (dbg_subst_flat < 0) {
+      const char *e = getenv("THVM_ATP_SUBST_FLAT");
+      dbg_subst_flat = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (dbg_subst_flat && !g_atp_ri_ix->any_folded && !*folded) {
+      spliced = atp_ri_splice_inline(flat, subsz, flatsym, flatlen, folded,
+                                     redex_pos, s->rhs[redex_rule],
+                                     g_atp_ri_best_star, ATP_RI_FLAT_CAP);
+      if (spliced) g_atp_ri_splice_inline_hits++;
+      else         g_atp_ri_splice_inline_misses++;
+    }
+    if (!spliced) {
+      Term repl = thvm_subst_apply(s->rhs[redex_rule], &subst);
+      spliced = atp_ri_splice(flat, subsz, flatsym, flatlen, folded,
+                              redex_pos, repl, ATP_RI_FLAT_CAP);
+    }
+    if (spliced) {
       if (redex_pos < lo) lo = redex_pos;
       prev_redex = redex_pos;
       any = 1u;
