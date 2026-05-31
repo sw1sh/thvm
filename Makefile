@@ -302,7 +302,8 @@ TESTS := \
   $(BIN)/test_aot_e2e_bench \
   $(BIN)/test_aot_build \
   $(BIN)/test_multi_trace \
-  $(BIN)/test_multi_trace_on
+  $(BIN)/test_multi_trace_on \
+  $(BIN)/test_ft_alloc
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -616,6 +617,15 @@ endif
 # pass; see docs/plans/multicomputation_trace.md.
 $(BIN)/test_multi_trace_on: tests/test_multi_trace.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_TRACE -o $@ $< $(TEST_LDFLAGS)
+
+# Stage 1 AtpFt allocator -- src/atp/ft_alloc.c is gated on
+# THVM_ATPFT_ALLOC; nothing in src/thvm.c includes it yet, so only the
+# test binary turns the flag on.  The test file #includes ft_alloc.c
+# directly after src/thvm.c, so we pass the test source like any other
+# test target -- the per-rule -DTHVM_ATPFT_ALLOC define is what
+# unlocks the file.
+$(BIN)/test_ft_alloc: tests/test_ft_alloc.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -DTHVM_ATPFT_ALLOC -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
