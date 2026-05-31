@@ -8661,10 +8661,32 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
 //
 // Arity-2 only (Sheffer signature).  Higher arities would need a
 // multiset matching with backtracking; defer.
+// Per-symbol AC mask: bit i = "label i's CTRs are subject to the
+// permutation-subsumption filter".  Set globally by the bench harness
+// (env THVM_ATP_PERM_SUB_MASK) and queried inline below.  Mask of 0
+// means "no per-symbol restriction" -- legacy behaviour where every
+// AC-equal CP is dropped.  Mask != 0 means "only drop when the top
+// symbol is in the mask" -- lets the WL paclet enable perm_sub for
+// problems like AndAssoc (set bit 1 = nand) without breaking mccune
+// (whose `and` symbol is intentionally outside the mask so its
+// commutativity-shaped goal CP survives).
+static u64 g_atp_perm_subsume_mask = 0ull;
+fn void thvm_atp_set_perm_subsume_mask(u64 mask) {
+  g_atp_perm_subsume_mask = mask;
+}
+
 static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
   if (lhs == rhs) return 0;                      // identical handled elsewhere
   if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
   if (term_ext(lhs) != term_ext(rhs)) return 0;
+  // Per-symbol mask gate: when set, only fire perm_sub for symbols in
+  // the mask.  Top-symbol bit outside the mask -> keep (return 0).
+  if (g_atp_perm_subsume_mask != 0ull) {
+    u32 lab = term_ext(lhs);
+    if (lab >= 64u || ((g_atp_perm_subsume_mask >> lab) & 1ull) == 0ull) {
+      return 0;
+    }
+  }
   u32 nl = term_ctr_n(lhs), nr = term_ctr_n(rhs);
   if (nl != nr || nl != 2u) return 0;
   Term l0 = term_ctr_at(lhs, 0), l1 = term_ctr_at(lhs, 1);

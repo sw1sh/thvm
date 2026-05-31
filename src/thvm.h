@@ -4149,6 +4149,7 @@ fn void      thvm_atp_set_right_reduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_perm_subsume(AtpState *s, u8 on);
+fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);

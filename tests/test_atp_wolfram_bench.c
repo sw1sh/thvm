@@ -360,6 +360,23 @@ int main(int argc, char **argv) {
     if (ps != NULL && ps[0] != '\0' && ps[0] != '0') {
       thvm_atp_set_use_perm_subsume(s, 1u);
     }
+    // Optional: restrict perm_sub to specific top-symbol labels.  Format
+    // is a comma-separated list of label ints (e.g. "1" for nand,
+    // "1,5" for nand + and).  Default (unset) = drop all AC-equal CPs.
+    const char *pm = getenv("THVM_ATP_PERM_SUB_MASK");
+    if (pm != NULL && pm[0] != '\0') {
+      u64 mask = 0ull;
+      const char *p = pm;
+      while (*p) {
+        char *end = NULL;
+        unsigned long lab = strtoul(p, &end, 10);
+        if (end == p) break;
+        if (lab < 64u) mask |= (1ull << lab);
+        p = end;
+        if (*p == ',') p++;
+      }
+      thvm_atp_set_perm_subsume_mask(mask);
+    }
   }
   // THVM_ATP_W2_MODULO / THVM_ATP_W2_MODE: K-D Heap alternating-
   // dimension selection (port of WM `CPdimension` in KPVerwaltung.c).
