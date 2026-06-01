@@ -85,3 +85,58 @@ clone" preset was tried on 9 holdouts and cracked zero.
    not thvm" identifies the concrete future-work backlog; 4 of those are
    "Vamp only" (neither thvm nor WL crack them) so they're a joint
    benchmark target, not a thvm-specific gap.
+
+## Pass 2 — residual sweep (workflow wf_3bbe1102-ea5)
+
+Targeted the 24-row residual via three angles from the next-moves list.
+Outcome: **+2 PROVED** (83 → 85 / 107).
+
+### Newly proved
+
+| Theory | Theorem | Seconds | Length | Winning angle |
+|---|---|---|---|---|
+| ShefferAxioms | ImpliesWolframAxioms | 49.15 | 101 | B — memory-budgeted Vampire |
+| ShefferAxioms | ImpliesWolframAlternateAxioms | 49.29 | 96 | B — memory-budgeted Vampire |
+
+Both were previously CRASH (137/139 OOM under `VampirePortfolio` @ 120s).
+The fix wasn't longer TC — it was a **smaller** per-attempt search.
+`VampirePortfolioCompact` (3-entry rotation, ~20s per entry) +
+`VampireUEQ` + `AxiomRelevance->"SInE"` for axiom pre-filtering produced
+proofs that stay inside the kernel's 4-6 GB envelope and close.
+
+### Still missing (22)
+
+Same shape as the previous pass, minus the two Sheffer-Implies cracks:
+
+- 20 deep-Wolfram / Sheffer / Meredith cross-axiom-set entailments,
+  AndAssoc / OrAssoc — either TimedOut (search-too-shallow at 60-600s)
+  or Failed (saturation exhausted under the tried orderings).
+- `McCuneAxioms / EqualityOfInverses` + `RobbinsAxioms / DoubleNegation` —
+  the classical hard pair.  600s+ Waldmeister-Hauptkomponenten attempts
+  did NOT crack them; consistent with the project memory's verdict
+  (McCune: per-CP throughput gap to Vampire's 2.45s; Robbins: needs the
+  McCune-EQP AC-completion route which thvm doesn't ship yet).
+
+### Angle outcomes
+
+| Angle | Targeted | Result |
+|---|---|---|
+| A — nand-lowest LPO precedence on Sheffer entailments | 4 Sheffer/Implies-* cases | 0 cracked.  The inverse precedence reduced search but did not close. |
+| B — memory-budgeted Vampire (Compact + SInE) | 5 OOM-137/139 cases | **2 cracked** (ShefferAxioms entailments).  3 remain OOM under the lighter config. |
+| C — 600s+ Waldmeister + LPO-GroundJoin variants for McCune / Robbins | 4 classical-hard cases | 0 cracked.  Confirms these are not budget-tractable on the current engine. |
+
+### Next moves
+
+1. **AC-completion arc**: Robbins/DoubleNegation requires McCune-EQP-style
+   completion-modulo-AC.  thvm's AC arc (`src/atp/ac.c`) ships
+   AC-canonical-form + AC-extended overlap + Stickel unifier, but the
+   *completion loop* still treats AC-equal CPs as syntactic — modulo-AC
+   rule retention is the missing piece.
+2. **McCune EqualityOfInverses**: per-CP throughput gap.  The deferred-
+   selection / lazy-normalization arc remains the concrete engine-side
+   next step (queue CPs cheaply, normalize at selection time —
+   how WM and Vampire's DISCOUNT loops do it).
+3. **AssocAxioms entailments OOM**: even Vampire's `--memory_limit` cap
+   doesn't fix the WolframAxioms/AndAssociativity-class blowup.  Memory
+   discipline at the saturation level (lazy-normalize + CP-budget) is
+   the lever.

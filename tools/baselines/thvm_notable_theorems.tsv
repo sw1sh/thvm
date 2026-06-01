@@ -75,8 +75,8 @@ ShefferAxioms	AndAssociativity	TimedOut	43.58	-	-
 ShefferAxioms	Commutativity	PROVED	0.04	25	Success
 ShefferAxioms	ImpliesHillmanAxioms	TimedOut	35.03	-	-
 ShefferAxioms	ImpliesMeredithAxioms	TimedOut	40.54	-	-
-ShefferAxioms	ImpliesWolframAlternateAxioms	CRASH	-	-	-
-ShefferAxioms	ImpliesWolframAxioms	CRASH	-	-	-
+ShefferAxioms	ImpliesWolframAlternateAxioms	PROVED	49.29	96	Success
+ShefferAxioms	ImpliesWolframAxioms	PROVED	49.15	101	Success
 ShefferAxioms	ImpliesWolframCommutativeAxioms	PROVED	32.94	143	Success
 ShefferAxioms	OrAssociativity	Failed	61.02	-	-
 WolframAlternateAxioms	AndAssociativity	Failed	60.89	-	-
