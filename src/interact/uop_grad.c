@@ -608,18 +608,19 @@ static int grad_prewalk_visited(u64 loc, Term target) {
 // rule short-circuits these to grad_zero_at(y)).  Match the dispatch table
 // in interact_grad_dispatch exactly: any case that emits grad_zero_at and
 // does NOT call grad_bwd_for_child / grad_bwd_emit_uop on its inputs is a
-// diff-sink (CMPLT/CMPEQ, BITCAST, CONST/LOAD/ASSIGN).
+// diff-sink (CMPLT/CMPEQ, BITCAST, CONST/LOAD/ASSIGN, DETACH).
 //
-// NOTE: UOP_DETACH is NOT a diff sink here, even though dispatch's DETACH
-// case returns grad_zero_at.  Reason: wnf eagerly UNWRAPS DETACH at wnf/_.c
-// before dispatch (heap_set(gloc + 0, whnf) where whnf = wnf(DETACH) =
-// wnf(child)), so the grad cell originally for DETACH ends up dispatching
-// for the unwrapped child.  Treating DETACH as a sink under-counts fanin
-// at the unwrapped-child's children (the gradient propagates through the
-// detached cell, just keyed under DETACH's slot).
+// UOP_DETACH is a diff sink: a detach stops the gradient (its child is a
+// constant for backward), so the chain rule emits zero and credits no
+// children.  Mirrors tinygrad gradient.py:89, which drops Ops.DETACH from
+// the backward walk so nothing flows through it.  The wnf BWD-descent
+// (wnf/_.c) pins the grad cell's y to the DETACH term (no forward unwrap)
+// so interact_grad's UOP_DETACH case fires grad_zero_at -- the fire side
+// and this prewalk-count side must agree, else the detached child's slot
+// over-counts n_expected and the live path's arrival mis-fires.
 static int grad_op_is_diff_sink(u8 op) {
   return op == UOP_CMPLT  || op == UOP_CMPEQ
-      || op == UOP_BITCAST
+      || op == UOP_BITCAST || op == UOP_DETACH
       || op == UOP_CONST  || op == UOP_LOAD || op == UOP_ASSIGN;
 }
 
@@ -668,19 +669,11 @@ static void grad_prewalk_count(Term y) {
   u8  op  = (u8)term_ext(r);
   Term target = grad_current_target();
   if (grad_prewalk_visited(loc, target)) return;
-  // DETACH: wnf unwraps DETACH(child) to child before dispatch, so the grad
-  // cell originally for DETACH actually dispatches the CHILD's chain rule
-  // (see wnf/_.c UOP_DETACH unwrap).  Pre-walk through the unwrapped child's
-  // STRUCTURE without re-crediting it (its own slot has its own fanin from
-  // its other parents).
-  if (op == UOP_DETACH) {
-    Term unwrapped = term_resolve(heap_read(loc + 0));
-    if (term_tag(unwrapped) == TAG_UOP) {
-      grad_prewalk_descend_children((u8)term_ext(unwrapped),
-                                    term_val(unwrapped), target);
-    }
-    return;
-  }
+  // DETACH is a stop-gradient (tinygrad gradient.py:89): the backward walk
+  // never flows through it, so its children get no cotangent from this
+  // path.  grad_prewalk_descend_children short-circuits on the diff-sink
+  // (DETACH included) and credits nothing -- matching the fire side, where
+  // interact_grad's UOP_DETACH case returns zero.
   grad_prewalk_descend_children(op, loc, target);
 }
 
