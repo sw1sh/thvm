@@ -135,6 +135,14 @@ Today: KBO, LPO, RPO, WPO.  Open items:
 * Reflexivity-resolution (`fol_reflex_resolve`) -- a negative
   equality `¬(s = t)` resolves when s and t unify.
 * Multiset-modulo clause equality + empty-clause detection.
+* Subsumption (`fol_subsumes`) -- recursive backtracking match
+  with C2's variables renamed apart so they act as constants.
+* Tautology detection (`fol_is_tautology`) -- catches A v ¬A and
+  positive (s = s).
+* Equality factoring (`fol_eq_factor`) -- Vampire-style:
+  (s1=t1) v (s2=t2) v R with σ unifying s1, s2 yields
+  σ((s1=t1) v ¬(t1=t2) v R).  Completes the FOL+equality
+  refutation-complete inference family.
 
 The unit-equational saturator in `src/atp/_.c` is unchanged; FOL
 clauses live in a parallel module that callers opt into.

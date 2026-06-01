@@ -228,6 +228,147 @@ fn FolClause *fol_paramodulate(const FolClause *eq_clause, u32 eq_idx,
   return r;
 }
 
+// === subsumption ====================================================
+//
+// Clause C1 subsumes clause C2 iff there is a substitution σ
+// (mapping C1's free variables) such that σ(C1) is a multiset
+// SUBSET of C2 -- i.e. every literal of σ(C1) appears (with matching
+// sign + structure) in C2 and each C2 literal is used at most once.
+//
+// Standard recursive backtracking match.  At each step pick the
+// lowest-index unmatched C1 literal and try every unused C2 literal
+// of matching sign that one-way-matches under the current σ.  The
+// substitution is snapshotted before each attempt and restored on
+// backtrack.
+//
+// Variables of C2 are renamed apart by FOL_RENAME_OFFSET so they
+// can't be bound by the matcher -- they act as ground atoms.
+//
+// Complexity is |C1|! worst case; bounded by FOL_MAX_LITS = 64 but
+// in practice clauses subsumed in saturation are small.
+
+static u8 fol_subsume_rec(const FolClause *c1, u32 c1_idx,
+                          const FolLit *c2_lits, u32 n2,
+                          u8 *used,
+                          RewriteSubst *subst) {
+  if (c1_idx >= c1->n_lits) return 1u;
+  const FolLit *l1 = &c1->lits[c1_idx];
+  for (u32 j = 0; j < n2; j++) {
+    if (used[j]) continue;
+    if (c2_lits[j].sign != l1->sign) continue;
+    RewriteSubst snap = *subst;
+    if (thvm_match(l1->atom, c2_lits[j].atom, subst)) {
+      used[j] = 1u;
+      if (fol_subsume_rec(c1, c1_idx + 1u, c2_lits, n2, used, subst)) {
+        return 1u;
+      }
+      used[j] = 0u;
+    }
+    *subst = snap;
+  }
+  return 0u;
+}
+
+fn u8 fol_subsumes(const FolClause *c1, const FolClause *c2) {
+  if (c1 == NULL || c2 == NULL) return 0u;
+  if (c1->n_lits > c2->n_lits) return 0u;
+  if (c1->n_lits == 0u) return 1u;   // empty subsumes everything
+  if (c2->n_lits > FOL_MAX_LITS) return 0u;
+
+  // Rename C2's variables apart so the matcher can't bind them.
+  FolLit renamed[FOL_MAX_LITS];
+  for (u32 k = 0; k < c2->n_lits; k++) {
+    renamed[k].atom = thvm_rename_vars(c2->lits[k].atom, FOL_RENAME_OFFSET);
+    renamed[k].sign = c2->lits[k].sign;
+  }
+  u8 used[FOL_MAX_LITS] = {0};
+  RewriteSubst subst = {{0}};
+  return fol_subsume_rec(c1, 0u, renamed, c2->n_lits, used, &subst);
+}
+
+// Tautology check: a clause is a tautology iff it contains both a
+// positive and a negative occurrence of the same atom.  Cheap O(n^2)
+// scan, used by saturation loops to drop derived clauses before they
+// enter the passive set.
+fn u8 fol_is_tautology(const FolClause *c) {
+  if (c == NULL) return 0u;
+  for (u32 i = 0; i < c->n_lits; i++) {
+    for (u32 j = i + 1u; j < c->n_lits; j++) {
+      if (c->lits[i].sign == c->lits[j].sign) continue;
+      if (kbo_eq(c->lits[i].atom, c->lits[j].atom)) return 1u;
+    }
+  }
+  // Equality-reflexivity tautology: (s = s) positive.
+  for (u32 i = 0; i < c->n_lits; i++) {
+    if (c->lits[i].sign != 0u) continue;
+    if (!fol_atom_is_eq(c->lits[i].atom)) continue;
+    Term lhs = term_ctr_at(c->lits[i].atom, 0u);
+    Term rhs = term_ctr_at(c->lits[i].atom, 1u);
+    if (kbo_eq(lhs, rhs)) return 1u;
+  }
+  return 0u;
+}
+
+// === equality factoring =============================================
+//
+// Standard (Vampire-style) equality factoring: given a clause
+//   C = (s1 = t1) v (s2 = t2) v R          (both positive equalities)
+// and σ that unifies s1 and s2, derive
+//   σ((s1 = t1) v ¬(t1 = t2) v R)
+// dropping the second equality and adding the negative `¬(t1 = t2)`
+// witness.  Together with paramodulation + reflex-resolve, this
+// completes the equality-inference family.
+//
+// Returns NULL on:
+//   * either literal is not a positive equality,
+//   * the equalities don't unify on the chosen side,
+//   * literal-cap overflow.
+fn FolClause *fol_eq_factor(const FolClause *c, u32 i, u32 j) {
+  if (c == NULL || i == j) return NULL;
+  if (i >= c->n_lits || j >= c->n_lits) return NULL;
+  const FolLit *li = &c->lits[i];
+  const FolLit *lj = &c->lits[j];
+  if (li->sign != 0u || lj->sign != 0u) return NULL;
+  if (!fol_atom_is_eq(li->atom) || !fol_atom_is_eq(lj->atom)) return NULL;
+
+  Term s1 = term_ctr_at(li->atom, 0u);
+  Term t1 = term_ctr_at(li->atom, 1u);
+  Term s2 = term_ctr_at(lj->atom, 0u);
+  Term t2 = term_ctr_at(lj->atom, 1u);
+
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(s1, s2, &subst)) return NULL;
+
+  Term t1_sub = thvm_unify_apply(t1, &subst);
+  Term t2_sub = thvm_unify_apply(t2, &subst);
+  Term s1_sub = thvm_unify_apply(s1, &subst);
+
+  // The new clause has same size as c: keeps `i`, drops `j`, and
+  // adds the witness ¬(t1 = t2).  Net: -1 + 1 = 0.
+  if (c->n_lits > FOL_MAX_LITS) return NULL;
+  FolClause *r = fol_clause_new(c->n_lits);
+  if (r == NULL) return NULL;
+  u32 idx = 0u;
+  for (u32 k = 0; k < c->n_lits; k++) {
+    if (k == j) continue;
+    if (k == i) {
+      // Rebuild s1 = t1 under σ.
+      Term kids[2] = { s1_sub, t1_sub };
+      r->lits[idx].atom = term_new_ctr(FOL_LAB_EQ, kids, 2u);
+      r->lits[idx].sign = 0u;
+    } else {
+      r->lits[idx].atom = thvm_unify_apply(c->lits[k].atom, &subst);
+      r->lits[idx].sign = c->lits[k].sign;
+    }
+    idx++;
+  }
+  // Append ¬(t1 = t2)_σ.
+  Term kids[2] = { t1_sub, t2_sub };
+  r->lits[idx].atom = term_new_ctr(FOL_LAB_EQ, kids, 2u);
+  r->lits[idx].sign = 1u;
+  return r;
+}
+
 // === reflexivity resolution =========================================
 //
 // If a clause contains a NEGATIVE equality literal ¬(s = t) and s and

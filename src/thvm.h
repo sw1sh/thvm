@@ -3165,8 +3165,26 @@ fn FolClause *fol_paramodulate(const FolClause *eq_clause, u32 eq_idx,
 // equality / atoms don't unify.
 fn FolClause *fol_reflex_resolve(const FolClause *c, u32 idx);
 
+// Equality factoring (Vampire-style): given C = (s1 = t1) v (s2 = t2)
+// v R and σ unifying s1 with s2, derive σ((s1=t1) v ¬(t1=t2) v R).
+// Together with paramodulation + reflex-resolve, this completes the
+// equality-inference family for refutation-complete FOL+equality.
+fn FolClause *fol_eq_factor(const FolClause *c, u32 i, u32 j);
+
 // Is the atom an equality (CTR with the FOL_LAB_EQ label, arity 2)?
 fn u8         fol_atom_is_eq(Term atom);
+
+// Clause subsumption: does c1 subsume c2 (i.e. exists σ with
+// σ(c1) ⊆ c2 as multisets)?  Variables of c2 are renamed apart so
+// they can't be bound by the matcher.  Worst-case |c1|! backtracking
+// match; bounded by FOL_MAX_LITS = 64.
+fn u8         fol_subsumes(const FolClause *c1, const FolClause *c2);
+
+// Tautology check: a clause is a tautology iff
+//   (a) it contains both ±A for some atom A, or
+//   (b) it contains a positive equality (s = s).
+// Cheap O(n^2) scan.
+fn u8         fol_is_tautology(const FolClause *c);
 // Invalidate thvm_lpo's persistent (s,t)->verdict memo.  Call when term
 // cells move (GC) or the precedence changes (new run).
 fn void   thvm_lpo_invalidate(void);
