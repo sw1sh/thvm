@@ -703,6 +703,76 @@ int main(void) {
     cnf_free(s);
   }
 
+  // === paramodulation in saturation ===============================
+
+  TEST_BEGIN("fol/sat-paramod-into-predicate");
+  {
+    // C1: (a = b)         positive equality
+    // C2: P(a)            atom containing `a`
+    // C3: ¬P(b)           the negation of the paramodulant
+    // Paramod C1 into C2 at [0]: derive P(b).  Then resolve P(b) with
+    // C3 -> empty clause -> PROVED.
+    CnfState *s = cnf_init(128);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_b)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-paramod-chain");
+  {
+    // C1: (a = b)
+    // C2: (b = c)
+    // C3: ¬P(c)
+    // C4: P(a)
+    // Chain of paramodulations: P(a) -> P(b) -> P(c) closes against C3.
+    CnfState *s = cnf_init(256);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred2(0u, k(L_b), k(L_c)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_c)), .sign = 1 };
+    FolClause *c4 = fol_clause_new(1);
+    c4->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    cnf_add_clause(s, c4);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-paramod-with-unification");
+  {
+    // C1: (f(x) = a)        equality with variable
+    // C2: P(f(b))            target containing f(b)
+    // C3: ¬P(a)              negation of expected paramodulant
+    // σ = {x ↦ b}: paramod C1 into C2 at [0] -> P(a).  Refutes against C3.
+    CnfState *s = cnf_init(256);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, pred1(L_f, v(0)), k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, pred1(L_f, k(L_b))), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

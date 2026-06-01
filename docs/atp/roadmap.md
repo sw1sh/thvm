@@ -145,10 +145,13 @@ Today: KBO, LPO, RPO, WPO.  Open items:
   refutation-complete inference family.
 * Saturation loop (`CnfState` in src/fol/sat.c) -- Otter-style
   given-clause: FIFO passive queue, active set, per-step
-  cross-resolution + self-factoring/eq-factoring/reflex-resolve,
-  tautology + subsumption filters on derived clauses.  No
-  indexing yet (O(n^2) subsumption + CP scans); the unit-equational
-  layer's discrim-tree machinery can lift in once a workload runs.
+  cross-resolution + paramodulation (BOTH orientations, every
+  non-variable position via `cnf_walk_positions` reusing the
+  CP_MAX_DEPTH bound from src/cp) + self-factoring + reflex-resolve
+  + eq-factoring + self-paramod, tautology + subsumption filters
+  on derived clauses.  No indexing yet (O(n^2) subsumption + CP
+  scans); the unit-equational layer's discrim-tree machinery can
+  lift in once a workload runs.
 
 The unit-equational saturator in `src/atp/_.c` is unchanged; FOL
 clauses live in a parallel module that callers opt into.

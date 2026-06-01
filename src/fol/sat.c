@@ -161,6 +161,75 @@ static void cnf_gen_reflex(CnfState *s, u32 c_id) {
   }
 }
 
+// Recursive position walker: invokes `cb` at every non-variable
+// position inside `atom`, passing the current path.  Caps depth at
+// CP_MAX_DEPTH (the existing cp/_.c walker's bound -- positions
+// stored on the CP are tagged with a u8 array of length CP_MAX_DEPTH,
+// reusing the same convention here keeps the depth budget consistent).
+typedef void (*CnfPosCb)(const u32 *p, u32 p_len, void *ctx);
+
+static void cnf_walk_positions(Term t, u32 *path, u32 depth,
+                               CnfPosCb cb, void *ctx) {
+  if (term_tag(t) != TAG_CTR) return;
+  cb(path, depth, ctx);
+  if (depth >= CP_MAX_DEPTH) return;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) {
+    path[depth] = i;
+    cnf_walk_positions(term_ctr_at(t, i), path, depth + 1u, cb, ctx);
+  }
+}
+
+// Paramodulation visitor context: emits a CP for each visited
+// position of `target_atom`.
+typedef struct {
+  CnfState        *s;
+  const FolClause *eq_clause;
+  u32              eq_idx;
+  const FolClause *target;
+  u32              target_idx;
+} CnfParamodCtx;
+
+static void cnf_paramod_at_pos(const u32 *p, u32 p_len, void *raw) {
+  CnfParamodCtx *ctx = (CnfParamodCtx *)raw;
+  if (ctx->s->status != ATP_RUNNING) return;
+  // Both orientations (s->t, t->s) -- paramodulation needs both for
+  // refutation completeness with non-Horn clauses.
+  FolClause *r0 = fol_paramodulate(ctx->eq_clause, ctx->eq_idx, /*swap*/ 0,
+                                   ctx->target, ctx->target_idx, p, p_len);
+  cnf_consider(ctx->s, r0);
+  if (ctx->s->status != ATP_RUNNING) return;
+  FolClause *r1 = fol_paramodulate(ctx->eq_clause, ctx->eq_idx, /*swap*/ 1,
+                                   ctx->target, ctx->target_idx, p, p_len);
+  cnf_consider(ctx->s, r1);
+}
+
+// All paramodulation results of eq_clause (as the source of an
+// equality literal) into target (any literal, any non-variable
+// position).
+static void cnf_gen_paramod(CnfState *s, u32 eq_id, u32 target_id) {
+  const FolClause *eqc = s->clauses[eq_id];
+  const FolClause *tgt = s->clauses[target_id];
+  if (eqc == NULL || tgt == NULL) return;
+  for (u32 i = 0; i < eqc->n_lits; i++) {
+    if (eqc->lits[i].sign != 0u) continue;          // positive equalities only
+    if (!fol_atom_is_eq(eqc->lits[i].atom)) continue;
+    for (u32 j = 0; j < tgt->n_lits; j++) {
+      // Skip paramodulating an equality literal into itself when
+      // eq_id == target_id and i == j (same literal in same clause).
+      if (eq_id == target_id && i == j) continue;
+      CnfParamodCtx ctx = {
+        .s = s, .eq_clause = eqc, .eq_idx = i,
+        .target = tgt, .target_idx = j,
+      };
+      u32 path[CP_MAX_DEPTH];
+      cnf_walk_positions(tgt->lits[j].atom, path, 0u,
+                         cnf_paramod_at_pos, &ctx);
+      if (s->status != ATP_RUNNING) return;
+    }
+  }
+}
+
 // Eq-factor every pair of positive-equality literals.
 static void cnf_gen_eq_factoring(CnfState *s, u32 c_id) {
   const FolClause *c = s->clauses[c_id];
@@ -212,6 +281,11 @@ fn AtpStatus cnf_step(CnfState *s) {
   if (s->status != ATP_RUNNING) return s->status;
   cnf_gen_eq_factoring(s, given_id);
   if (s->status != ATP_RUNNING) return s->status;
+  // Self-paramod: given's own equality literals against its other
+  // literals.  Useful when a clause carries both an equation and a
+  // predicate atom that the equation rewrites.
+  cnf_gen_paramod(s, given_id, given_id);
+  if (s->status != ATP_RUNNING) return s->status;
 
   // Cross-inferences with every other active clause.  Snapshot the
   // active count before the loop -- new clauses added during the
@@ -223,6 +297,12 @@ fn AtpStatus cnf_step(CnfState *s) {
     cnf_gen_resolution(s, given_id, a_id);
     if (s->status != ATP_RUNNING) return s->status;
     cnf_gen_resolution(s, a_id, given_id);   // symmetric face
+    if (s->status != ATP_RUNNING) return s->status;
+    // Paramodulation BOTH directions: given's equalities -> active,
+    // active's equalities -> given.
+    cnf_gen_paramod(s, given_id, a_id);
+    if (s->status != ATP_RUNNING) return s->status;
+    cnf_gen_paramod(s, a_id, given_id);
     if (s->status != ATP_RUNNING) return s->status;
   }
 
