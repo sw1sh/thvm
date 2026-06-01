@@ -162,6 +162,14 @@ class Tensor:
         self.grad: Tensor | None = None
         self._pin_id = 0
         self._pin()
+        # tinygrad: the constructor flag is sufficient -- wire the C-side
+        # TenDesc.requires_grad + tid->Tensor routing so backward() finds
+        # this leaf.  requires_grad_'s own guards (C-side TAG_TEN check,
+        # tid>0) make a graph-result / non-leaf term safely no-op.  Only
+        # route when truthy so the None-vs-False distinction the optimizer
+        # relies on (BatchNorm running stats stay non-trained) is preserved.
+        if requires_grad:
+            self.requires_grad_(True)
 
     @classmethod
     def _from_term(cls, term: Term, dtype: DType,
