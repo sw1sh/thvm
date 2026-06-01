@@ -36,7 +36,18 @@ interactions.
 
 * **[engineering.md](engineering.md)** — how the algorithms map to
   data structures: rule storage, CP queue, discrimination trees,
-  memos, the AtpFt port, env gates, soundness probes.
+  memos, the AtpFt port, controls (build defines, C setters, env
+  knobs), soundness probes, profiling.
+
+* **[roadmap.md](roadmap.md)** — what's covered today, what's open,
+  ranked by impact and difficulty.  Where the next arcs live.
+
+The WL `Method` / preset / portfolio surface (and the proof-object
+API a user actually calls) lives in
+`wl/THVMLink/docs/Tutorials/ATP.md` and `AtpMethods.md`.  The C-level
+docs in this directory describe what's *underneath* the WL surface
+— the engine internals, the C-side controls, and what `Method`'s
+suboptions translate to.
 
 ## Entry points
 
@@ -58,7 +69,7 @@ loop](algorithms.md#saturation-loop) for the contract.
 ## Test suite
 
 `tests/test_atp.c` is the regression baseline (135624 assertions).
-Stage-specific test binaries cover the AtpFt port:
+Feature-gated test binaries cover the AtpFt port + opt-in caches:
 
   tests/test_atp.c              -- 135624 assertions, default build
   tests/test_atp_ft_rules.c     -- AtpFt rule-storage parity probe
@@ -69,3 +80,9 @@ Stage-specific test binaries cover the AtpFt port:
   tests/test_ft_ri.c            -- AtpFt discrim-tree differential
   tests/test_ft_cpq.c           -- AtpFt CP-queue dual-store invariants
   tests/test_lpo_cache.c        -- LPO orient cache differential
+  tests/test_ac.c               -- AC declarations + canonical-form flatten
+
+The strongest soundness gate is `bin/test_atp_ft_norm_verify` —
+`tests/test_atp.c` built with the full AtpFt stack plus
+`THVM_ATPFT_NORM_VERIFY=1`, which runs every push-norm through
+both the Term path and the AtpFt path and aborts on disagreement.

@@ -315,7 +315,8 @@ TESTS := \
   $(BIN)/test_atp_ft_ri \
   $(BIN)/test_ft_cpq \
   $(BIN)/test_atp_ft_cpq \
-  $(BIN)/test_lpo_cache
+  $(BIN)/test_lpo_cache \
+  $(BIN)/test_ac
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -770,12 +771,20 @@ $(BIN)/test_atp_ft_cpq: tests/test_atp.c $(SRC) | $(BIN)
 	  -DTHVM_ATPFT_CPQ \
 	  -o $@ $< $(TEST_LDFLAGS)
 
-# Stage 8: LPO/KBO orientability cache (src/atp/lpo_cache.c).  Gated
-# by THVM_ATP_LPO_ORIENT_CACHE -- the default build is byte-identical,
+# LPO/KBO orientability cache (src/atp/lpo_cache.c).  Gated by
+# THVM_ATP_LPO_ORIENT_CACHE -- the default build is byte-identical,
 # but the test binary turns it on so the cache APIs are live.
 $(BIN)/test_lpo_cache: tests/test_lpo_cache.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_LPO_ORIENT_CACHE \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# AC reasoning (src/atp/ac.c).  Gated by THVM_ATP_AC -- declarations
+# + canonical-form flatten with no live caller yet, so the default
+# build is byte-identical.  Stage 1 of the AC arc; see docs/atp/roadmap.md.
+$(BIN)/test_ac: tests/test_ac.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
