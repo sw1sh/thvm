@@ -60,6 +60,8 @@ because the engine doesn't implement them yet.
     PROVED in 4 iters / 1 surviving rule; wmcli 12 rules / 90 CPs.
   - lattice idempotence (waldmeister/lattice_idem.pr): thvm PROVED
     in 4 iters / 4 rules; wmcli 5 rules / 24 CPs.
+  - commutative ring 0*a=0 (waldmeister/ring_zero.pr): thvm PROVED
+    in 4 iters / 1 rule; wmcli 24 rules / 308 CPs.
 
 ## Open arcs
 

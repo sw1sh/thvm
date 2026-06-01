@@ -281,6 +281,80 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);
   }
 
+  // ---------------------------------------------------------------------
+  // Commutative ring 0 * a = 0.
+  //   p (+): comm + assoc + 0-identity + negation inverse.
+  //   m (*): comm + assoc.  m distributes over p.
+  // Mirrors waldmeister/ring_zero.pr (wmcli: 1ms, 24 rules, 308 CPs).
+  // ---------------------------------------------------------------------
+  TEST_BEGIN("ac/bench-ring-zero");
+  {
+#define L_P   8u   // plus  (AC)
+#define L_M   9u   // mult  (AC)
+#define L_N  10u   // negation (unary)
+#define L_Z  11u   // zero (const)
+    thvm_atp_set_ac_mask((1ull << L_P) | (1ull << L_M));
+
+    Term x = v(0), y = v(1), w = v(2);
+    Term a = k(L_A);
+    Term zc = k(L_Z);
+    Term nx = term_new_ctr(L_N, &x, 1u);
+
+    static const u32 W[16] = {
+      1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
+      1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u
+    };
+    // Precedence a > n > m > p > z (a=5, n=4, m=3, p=2, z=1).
+    static const u32 P[16] = {
+      0u,         // 0
+      0u,         // 1 (unused)
+      0u, 0u,     // 2, 3 (unused)
+      5u,         // 4 = L_A
+      0u, 0u, 0u, // 5, 6, 7 (unused)
+      2u,         // 8 = L_P
+      3u,         // 9 = L_M
+      4u,         // 10 = L_N
+      1u,         // 11 = L_Z
+      0u, 0u, 0u, 0u
+    };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 16, .var_weight = 1u };
+
+    AtpState *s = thvm_atp_init(&kbo, 65536);
+    // + axioms.
+    thvm_atp_add_equation(s, bin(L_P, x, y), bin(L_P, y, x));
+    thvm_atp_add_equation(s, bin(L_P, bin(L_P, x, y), w),
+                              bin(L_P, x, bin(L_P, y, w)));
+    thvm_atp_add_equation(s, bin(L_P, zc, x), x);
+    thvm_atp_add_equation(s, bin(L_P, nx, x), zc);
+    // * axioms.
+    thvm_atp_add_equation(s, bin(L_M, x, y), bin(L_M, y, x));
+    thvm_atp_add_equation(s, bin(L_M, bin(L_M, x, y), w),
+                              bin(L_M, x, bin(L_M, y, w)));
+    // Distributivity.
+    thvm_atp_add_equation(s, bin(L_M, x, bin(L_P, y, w)),
+                              bin(L_P, bin(L_M, x, y), bin(L_M, x, w)));
+    // Goal: m(z, a) = z, i.e. 0 * a = 0.
+    thvm_atp_set_goal(s, bin(L_M, zc, a), zc);
+
+    double t0 = now_secs();
+    AtpStatus st = ATP_RUNNING;
+    u32 iters = 0;
+    for (u32 i = 0; i < 65536u; i++) {
+      st = thvm_atp_step(s);
+      iters++;
+      if (st != ATP_RUNNING) break;
+    }
+    double t1 = now_secs();
+    printf("  thvm/ac-ring     %s  wall=%.4fs  iters=%u  n_rules=%u\n",
+           status_name(st), t1 - t0, iters, s->n_rules);
+    // wmcli reference: 24 rules / 308 CPs / PROVED at 1 ms.
+    CHECK(st == ATP_PROVED);
+
+    thvm_atp_free(s);
+    thvm_atp_set_ac_mask(0ull);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
