@@ -8,7 +8,12 @@
 
 set -u
 TC=${TC:-30}
-HARDLIMIT=$((TC + 5))
+# +15s gap (was +5): the C engine consults wall_seconds at coarse
+# granularity, so a hard case can overrun by several seconds.  The
+# WL-side TimeConstrained in run_thvm_one.wls uses TC+10 -- this
+# bash hard-limit must stay above that to avoid SIGKILL-during-write
+# producing empty stdout (which the wrapper classifies as CRASH).
+HARDLIMIT=$((TC + 15))
 OUT=tools/baselines/thvm_notable_theorems.tsv
 THMS=${1:-/tmp/thms.tsv}
 
