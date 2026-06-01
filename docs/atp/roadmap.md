@@ -64,12 +64,20 @@ Coverage (see "Coverage today" above) lands the core: AC
 match + canon, AC-KBO/AC-LPO, extended overlap, AC-eq goal-check.
 Remaining sub-items:
 
-* AC unification (full AC u-mgu set, not just one-way match).
-  Currently we only need match for rewriting; unification is the
-  next gap once the engine takes E-restricted superposition CPs.
-* Bench fan-out: lattice, group-axiom, ring-axiom problems from
-  the Waldmeister + TPTP UEQ corpora.  Differential against wmcli
-  + Twee on each.
+* AC unification in CP generation.  `atp_overlap_ij` extends each
+  rule under Bachmair-Plaisted to `f(l, z) -> f(r, z)`, but the
+  inner unification call (`thvm_critical_pairs_pair`) is still
+  syntactic.  The abelian-group bench (waldmeister/abelian_group.pr,
+  thvm/ac-abelian in `test_atp_ac_bench.c`) surfaces this directly:
+  wmcli derives 12 rules / 90 CPs to prove `i(f(a,b)) = f(i(b),i(a))`
+  while thvm terminates with `QUEUE_EMPTY` after 2 rules because the
+  f(i(x),x)=e self-overlap doesn't unify syntactically (even
+  extended).  Lifting the inner pair routine to AC unification
+  (Stickel-style) is the next AC arc.
+* Bench fan-out beyond abelian-group: lattice axioms, ring axioms,
+  boolean-ring, Robbins.  Each gates on AC unification landing first
+  (the diagnostic on abelian-group is sufficient to bench-drive the
+  unifier work).
 * Selection / ordering interplay: the AC top-symbol bias in the
   precedence picker (currently AC labels sit at the precedence
   floor) hasn't been re-tuned now that AC-LPO is on; on harder

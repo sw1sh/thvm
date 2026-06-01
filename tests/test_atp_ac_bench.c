@@ -178,6 +178,62 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);
   }
 
+  // ---------------------------------------------------------------------
+  // Abelian group inversion: prove i(f(a,b)) = f(i(b), i(a)).
+  //   f comm + assoc, f(e, x) = x, f(i(x), x) = e.
+  // Mirrors waldmeister/abelian_group.pr (wmcli: 1ms, 12 rules, 90 CPs).
+  // ---------------------------------------------------------------------
+  TEST_BEGIN("ac/bench-abelian-group-inv");
+  {
+#define L_I  6u
+    thvm_atp_set_ac_mask(1ull << L_F);
+
+    Term x = v(0), y = v(1), z = v(2);
+    Term a = k(L_A), b = k(L_B);
+    Term e = k(L_E);
+    Term ix = term_new_ctr(L_I, &x, 1u);
+    Term iy = term_new_ctr(L_I, &y, 1u);
+
+    // weights all 1, prec a > b > i > e > f.
+    static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    static const u32 P[8] = { 0u, 1u, 0u, 2u, 5u, 4u, 3u, 0u };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 8, .var_weight = 1u };
+
+    AtpState *s = thvm_atp_init(&kbo, 8192);
+    thvm_atp_add_equation(s, bin(L_F, x, y), bin(L_F, y, x));
+    thvm_atp_add_equation(s, bin(L_F, bin(L_F, x, y), z),
+                              bin(L_F, x, bin(L_F, y, z)));
+    thvm_atp_add_equation(s, bin(L_F, e, x), x);
+    thvm_atp_add_equation(s, bin(L_F, ix, x), e);
+
+    Term ia = term_new_ctr(L_I, &a, 1u);
+    Term ib = term_new_ctr(L_I, &b, 1u);
+    thvm_atp_set_goal(s, term_new_ctr(L_I, (Term[]){bin(L_F, a, b)}, 1u),
+                          bin(L_F, ib, ia));
+
+    double t0 = now_secs();
+    AtpStatus st = ATP_RUNNING;
+    u32 iters = 0;
+    for (u32 i = 0; i < 8192u; i++) {
+      st = thvm_atp_step(s);
+      iters++;
+      if (st != ATP_RUNNING) break;
+    }
+    double t1 = now_secs();
+    printf("  thvm/ac-abelian  %s  wall=%.4fs  iters=%u  n_rules=%u\n",
+           status_name(st), t1 - t0, iters, s->n_rules);
+    // Acceptance for this stage: harness runs to a terminal status;
+    // PROVED is the goal but QUEUE_EMPTY (saturation completes without
+    // joining the goal) is the diagnostic outcome we're trying to
+    // surface differential to wmcli's reported 12 rules.
+    CHECK(st != ATP_RUNNING);
+    (void)ia; (void)ib; (void)iy;
+
+    thvm_atp_free(s);
+    thvm_atp_set_ac_mask(0ull);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
