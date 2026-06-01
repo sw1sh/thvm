@@ -705,6 +705,52 @@ int main(void) {
 
   // === paramodulation in saturation ===============================
 
+  TEST_BEGIN("fol/sat-demod-chain");
+  {
+    // C1=(a=b), C2=(b=c), C3=P(a), C4=¬P(c).
+    // Forward demod chains: P(a)->P(b)->P(c), then resolves with ¬P(c).
+    // Same shape as the paramod-chain test, but here demod (not
+    // paramod-into-paramod) should drive the simplification too.
+    CnfState *s = cnf_init(256);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred2(0u, k(L_b), k(L_c)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c4 = fol_clause_new(1);
+    c4->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_c)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    cnf_add_clause(s, c4);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-demod-budget-doesnt-loop");
+  {
+    // (a=b) and (b=a): cyclic rule pair.  Without an ordering check,
+    // demod could loop a -> b -> a -> ...  CNF_DEMOD_BUDGET caps the
+    // chain at 16; saturation must reach a terminal status.
+    CnfState *s = cnf_init(64);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred2(0u, k(L_b), k(L_a)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    // Either QUEUE_EMPTY (saturation completed) or PROVED (some
+    // derived empty clause).  Not RUNNING, not infinite-loop.
+    CHECK(st != ATP_RUNNING);
+    cnf_free(s);
+  }
+
   TEST_BEGIN("fol/sat-paramod-into-predicate");
   {
     // C1: (a = b)         positive equality

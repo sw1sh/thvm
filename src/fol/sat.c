@@ -98,6 +98,42 @@ fn i32 cnf_add_clause(CnfState *s, FolClause *c) {
   return (i32)id;
 }
 
+// Forward demodulation: normalize `*pc` against every unit positive
+// equality currently in the active set.  Iterates to a fixpoint
+// bounded by CNF_DEMOD_BUDGET steps -- without a reduction-ordering
+// check, demodulation can in principle loop on cyclic rule pairs.
+// On success the caller's pointer is replaced with the demodulated
+// clause and the original is freed.  No-op if no rule fires.
+//
+// Naïve / non-ordering-aware (same caveat as fol_demodulate itself).
+// An ordering-aware version that gates σ(s) -> σ(t) on σ(s) > σ(t)
+// follows once CnfState carries a KboConfig / LpoConfig / RpoConfig /
+// WpoConfig.
+#define CNF_DEMOD_BUDGET 16u
+
+static void cnf_forward_demod(CnfState *s, FolClause **pc) {
+  if (pc == NULL || *pc == NULL) return;
+  FolClause *c = *pc;
+  for (u32 iter = 0; iter < CNF_DEMOD_BUDGET; iter++) {
+    u8 changed = 0u;
+    for (u32 i = 0; i < s->n_active; i++) {
+      FolClause *rule = s->clauses[s->active[i]];
+      if (rule == NULL) continue;
+      // Skip when target IS the rule (no self-rewrite).
+      if (rule == c) continue;
+      FolClause *d = fol_demodulate(rule, c);
+      if (d != NULL) {
+        fol_clause_free(c);
+        c = d;
+        changed = 1u;
+        break;
+      }
+    }
+    if (!changed) break;
+  }
+  *pc = c;
+}
+
 // Internal: check whether `c` is subsumed by any currently-stored
 // active or passive clause.  Used as a forward-redundancy filter on
 // derived clauses.
@@ -156,11 +192,18 @@ static void cnf_flush_deferred(CnfState *s) {
 
 // Push a derived clause through the redundancy filters; consume on
 // success (state-owns), free on drop.
+//
+// Order matters: forward demodulation FIRST (normalize against
+// active unit equalities), then tautology / subsumption checks on
+// the normalized form.  Demod-normalized clauses are more likely to
+// subsume / be subsumed, so running demod before subsumption maximizes
+// the redundancy filtering's bite.
 static void cnf_consider(CnfState *s, FolClause *c) {
   if (c == NULL) return;
   if (s->status != ATP_RUNNING) { fol_clause_free(c); return; }
+  cnf_forward_demod(s, &c);
+  if (c == NULL) return;
   if (fol_clause_is_empty(c)) {
-    // The empty clause -- UNSAT, refutation found.
     cnf_add_clause(s, c);
     s->status = ATP_PROVED;
     return;

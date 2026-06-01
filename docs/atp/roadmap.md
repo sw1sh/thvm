@@ -200,13 +200,24 @@ End-to-end smoke (in tests/test_fol.c):
   `∀x.(P(x) -> Q(x)) ∧ P(a) ∧ ¬Q(a)`  -> PROVED via cnf_run.
   Russell-style `∀x.(R(x,x) <-> ¬R(x,x))`  -> PROVED.
 
-Demodulation primitive (`fol_demodulate(eq_clause, target)`) lands
-in src/fol/_.c: a unit positive equality `[s = t]` acts as an
-oriented rewrite rule `s -> t` that rewrites every literal atom of
-the target clause via thvm_match + thvm_subst_apply.  Returns a fresh
-clause if anything changed, NULL otherwise.  Naïve (no σ(s) > σ(t)
-ordering check yet); the ordering-aware variant is a follow-up that
-plugs in a KboConfig / LpoConfig / RpoConfig / WpoConfig.
+Demodulation lands in two layers:
+
+* Primitive `fol_demodulate(eq_clause, target)` in src/fol/_.c:
+  a unit positive equality `[s = t]` rewrites every literal atom of
+  the target clause via thvm_match + thvm_subst_apply.  Returns a
+  fresh clause on change, NULL otherwise.  Rule variables renamed
+  apart by FOL_RENAME_OFFSET so target vars stay consistent across
+  literals.
+
+* Forward demodulation in `cnf_consider` (src/fol/sat.c): every
+  derived clause is normalized against the active set's unit
+  positive equalities BEFORE tautology / subsumption checks, up to
+  CNF_DEMOD_BUDGET = 16 iterations.  The budget caps cyclic
+  rewrite pairs (a=b ∧ b=a) under naïve no-ordering demod.
+
+Naïve (no σ(s) > σ(t) ordering check yet); the ordering-aware
+variant is a follow-up that plugs in a KboConfig / LpoConfig /
+RpoConfig / WpoConfig.
 
 Open follow-ups (efficiency / completeness):
 * Tseitin structural CNF for shallow clauses on deeply-nested ∨/∧.
@@ -214,10 +225,13 @@ Open follow-ups (efficiency / completeness):
   on rather than try-everything).
 * Discrim-tree / FV-index for fast subsumption + CP queries.
 * Ordering-aware demodulation -- attach a reduction ordering to
-  CnfState and gate σ(s) -> σ(t) on σ(s) > σ(t).  Wire into cnf_step
-  to normalize newly-derived clauses (forward demodulation) and
-  re-normalize active/passive clauses when a new unit eq lands
-  (backward demodulation).
+  CnfState and gate σ(s) -> σ(t) on σ(s) > σ(t).  The CNF_DEMOD_BUDGET
+  cap can drop with proper orientation; cycles can't arise under a
+  well-founded ordering.
+* Backward demodulation: when a fresh unit positive equality enters
+  the active set, re-normalize every existing active/passive clause
+  through it.  Mirror the cnf_backward_subsume + deferred-free
+  pattern so mid-step inference loops stay safe.
 
 ### Theory reasoning
 
