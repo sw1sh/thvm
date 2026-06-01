@@ -1799,19 +1799,28 @@ static Term try_inline_bufferize_via_axis_table(
   }
   if (prod_idx == 0xFFFFFFFFu) return 0;
   u32 prod_ndim = rangeify_unified_out_ndim_at(prod_idx);
-  // realized_axes[i] = the i-th producer output axis position that
-  // was closed in this BUFFERIZE.  For full-realize the mask is 0 and
-  // prod_ndim == n_ranges (identity).  For partial-realize the mask
-  // marks specific bits.
+  // realized_axes[i] = the i-th producer output axis position that was
+  // CLOSED (became an actual UOP_RANGE closed_range) in this BUFFERIZE.
+  // Mirror tinygrad indexing.py:66 `closed_ranges = tuple([r for i,r in
+  // enumerate(range_map[s][1]) if i in realized_ranges])` and thvm's own
+  // ru_collect_closed_ranges (rangeify_unified.c): a realized output axis
+  // whose out_rng collapsed to CONST(0) (a keepdim size-1 axis) carries no
+  // stride and is NOT a closed_range, so it is skipped here.  Filtering on
+  // the actual UOP_RANGE out_rng (not just the axes_mask popcount) keeps
+  // n_realized == n_ranges for the keepdim-reduce broadcast case, so the
+  // i-th closed_range binds POSITIONALLY to the i-th surviving output axis
+  // -- never disambiguated by extent.
+  int prod_full = rangeify_unified_realized_full_at(prod_idx);
   u8 axes_mask = rangeify_unified_axes_mask_at(prod_idx);
   u32 realized_axes[MAX_DIM] = {0};
   u32 n_realized = 0;
-  if (axes_mask == 0 && prod_ndim == n_ranges) {
-    for (u32 a = 0; a < prod_ndim; a++) realized_axes[n_realized++] = a;
-  } else {
-    for (u32 a = 0; a < prod_ndim && a < MAX_DIM; a++) {
-      if (axes_mask & (u8)(1u << a)) realized_axes[n_realized++] = a;
-    }
+  for (u32 a = 0; a < prod_ndim && a < MAX_DIM; a++) {
+    int axis_realized = prod_full || (axes_mask & (u8)(1u << a));
+    if (!axis_realized) continue;
+    Term r = rangeify_unified_out_rng_at(prod_idx, a);
+    if (r == 0 || term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+    if (n_realized < MAX_DIM) realized_axes[n_realized] = a;
+    n_realized++;
   }
   if (n_realized != n_ranges || ax_n < prod_ndim) return 0;
   // Bail rather than truncate (see stride_match note): every closed_range
@@ -1832,8 +1841,28 @@ static Term try_inline_bufferize_via_axis_table(
         || term_ext(cr) != UOP_RANGE) return 0;
     u32 ax = realized_axes[i];
     if (ax >= ax_n) return 0;
+    // The side-table ax_rngs[] are the consumer's in_rngs as they stood
+    // when THIS INDEX_E was built.  When this BUFFERIZE is itself being
+    // inlined into a grandparent consumer (a chain of inlines composing,
+    // e.g. the data-grad mul reads a rsqrt-cube correction whose value
+    // again reads the realized rsqrt buffer), an outer subst is active
+    // that maps those construction-time ranges to the grandparent's live
+    // iteration ranges.  Thread the side-table range through the active
+    // subst FIRST so the binding lands on the grandparent's ranges, not
+    // the stale construction-time ones.  This mirrors tinygrad
+    // indexing.py:78 where `ctx.range_map[x][0]` is always the LIVE
+    // consumer iteration: as the bottom-up rewrite composes nested
+    // BUFFERIZE.index() reads, every read uses the current consumer's
+    // ranges -- the multi-outer-axis general case the bare positional
+    // bind missed.
+    Term to_rng = ax_rngs[ax];
+    if (sub != NULL) {
+      for (u32 si = 0; si < sub->n; si++) {
+        if (sub->from[si] == to_rng) { to_rng = sub->to[si]; break; }
+      }
+    }
     new_sub.from[new_sub.n] = cr;
-    new_sub.to  [new_sub.n] = ax_rngs[ax];
+    new_sub.to  [new_sub.n] = to_rng;
     new_sub.n++;
   }
   return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
@@ -2013,6 +2042,20 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       if (v != 0 && n_ranges == 1
           && (term_tag(addr_term) != TAG_UOP
               || term_ext(addr_term) != UOP_RANGE)) {
+        // Tinygrad-spec POSITIONAL inline first (indexing.py:66,78): bind
+        // the single closed_range to the consumer's in_rng at the
+        // producer's realized output axis via the per-axis side table --
+        // NEVER by extent equality.  This is the keepdim-reduce broadcast
+        // (softmax `f - s.max(kd)`, layer-norm `t - mean`): the producer
+        // realized a 1-axis BUFFERIZE (the row reduce-to-scalar), the
+        // keepdim col axis collapsed to CONST(0), and the consumer reads
+        // it at a compound row*col addr.  The extent-keyed decomp below
+        // mis-binds (BAILs -> value collapses to +0.0f) whenever two
+        // consumer axes share an extent; the side-table path is
+        // unambiguous because it keys on the positional realized axis.
+        Term axis_hit = try_inline_bufferize_via_axis_table(
+            st, sub, resolved, inner_buf, v, n_ranges, depth);
+        if (axis_hit != 0) return axis_hit;
         Term hit = try_inline_bufferize_1axis_via_decomp(
             st, sub, inner_buf, v, addr_term, depth);
         if (hit != 0) return hit;

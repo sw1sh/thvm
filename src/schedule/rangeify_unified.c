@@ -1115,6 +1115,15 @@ fn u8 rangeify_unified_axes_mask_at(u32 node_idx) {
   return RU_REALIZE_MAP[node_idx].axes_mask;
 }
 
+// 1 iff the node is fully realized (all output axes closed); 0 for
+// partial-realize or not-realized.  The materialize bypass rewriter
+// uses this with rangeify_unified_out_rng_at to recover the positional
+// closed-range -> output-axis map (mirroring ru_collect_closed_ranges).
+fn int rangeify_unified_realized_full_at(u32 node_idx) {
+  if (node_idx >= RU_MAX_NODES) return 0;
+  return RU_REALIZE_MAP[node_idx].realized_full ? 1 : 0;
+}
+
 fn u32 rangeify_unified_node_idx_for_bufferize(Term buf) {
   if (buf == 0) return 0xFFFFFFFFu;
   for (u32 i = 0; i < RU_SUBST_CAP; i++) {
