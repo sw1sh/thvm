@@ -143,6 +143,12 @@ Today: KBO, LPO, RPO, WPO.  Open items:
   (s1=t1) v (s2=t2) v R with σ unifying s1, s2 yields
   σ((s1=t1) v ¬(t1=t2) v R).  Completes the FOL+equality
   refutation-complete inference family.
+* Saturation loop (`CnfState` in src/fol/sat.c) -- Otter-style
+  given-clause: FIFO passive queue, active set, per-step
+  cross-resolution + self-factoring/eq-factoring/reflex-resolve,
+  tautology + subsumption filters on derived clauses.  No
+  indexing yet (O(n^2) subsumption + CP scans); the unit-equational
+  layer's discrim-tree machinery can lift in once a workload runs.
 
 The unit-equational saturator in `src/atp/_.c` is unchanged; FOL
 clauses live in a parallel module that callers opt into.

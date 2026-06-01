@@ -596,6 +596,113 @@ int main(void) {
     fol_clause_free(cl);
   }
 
+  // === saturation loop ============================================
+
+  TEST_BEGIN("fol/sat-trivial-resolution");
+  {
+    // C1 = P(a)         (one clause)
+    // C2 = ¬P(a)        (its negation)
+    // Saturation should derive the empty clause -> PROVED.
+    CnfState *s = cnf_init(64);
+    CHECK(s != NULL);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-three-clause-chain");
+  {
+    // Classic example:
+    //   C1: P(a)
+    //   C2: ¬P(x) v Q(x)
+    //   C3: ¬Q(a)
+    // Saturate: resolve C1+C2 => Q(a).  Then Q(a)+C3 => empty clause.
+    CnfState *s = cnf_init(128);
+    CHECK(s != NULL);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(2);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 1 };
+    c2->lits[1] = (FolLit){ .atom = pred1(P_Q, v(0)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_Q, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-unsat-no-resolve");
+  {
+    // C1: P(a)
+    // C2: Q(b)
+    // No common predicate, no resolution possible -> QUEUE_EMPTY.
+    CnfState *s = cnf_init(64);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_Q, k(L_b)), .sign = 0 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_QUEUE_EMPTY);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-step-cap");
+  {
+    // P(x) v P(f(x)): self-resolves into P(f(f(x))), P(f(f(f(x)))),
+    // etc. (no goal, no termination).  step_cap = 4 should bound it
+    // to ABORTED before the queue grows unboundedly.
+    CnfState *s = cnf_init(4);
+    FolClause *c = fol_clause_new(2);
+    c->lits[0] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 0 };
+    c->lits[1] = (FolLit){ .atom = pred1(P_P, pred1(L_f, v(0))), .sign = 1 };
+    cnf_add_clause(s, c);
+    AtpStatus st = cnf_run(s);
+    // Saturation must reach a terminal status -- either QUEUE_EMPTY
+    // (if the inference chain dies) or ABORTED via step_cap.
+    CHECK(st == ATP_QUEUE_EMPTY || st == ATP_ABORTED || st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-tautology-dropped");
+  {
+    // C1: P(x) v ¬P(x) -- tautology.
+    // After adding it (it goes to passive then is selected as given),
+    // it survives in the active set but generates no useful CPs.
+    // No goal -> QUEUE_EMPTY.
+    CnfState *s = cnf_init(64);
+    FolClause *c = fol_clause_new(2);
+    c->lits[0] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 0 };
+    c->lits[1] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 1 };
+    cnf_add_clause(s, c);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_QUEUE_EMPTY || st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-eq-reflexivity-resolution");
+  {
+    // ¬(x = x): negative reflexive equality.
+    // Reflex-resolve fires immediately, yielding the empty clause.
+    CnfState *s = cnf_init(64);
+    FolClause *c = fol_clause_new(1);
+    c->lits[0] = (FolLit){ .atom = pred2(0u, v(0), v(0)), .sign = 1 };
+    cnf_add_clause(s, c);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

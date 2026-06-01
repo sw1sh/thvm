@@ -397,3 +397,9 @@ fn FolClause *fol_reflex_resolve(const FolClause *c, u32 idx) {
   }
   return r;
 }
+
+// === saturation loop ================================================
+// CnfState + given-clause driver.  See `sat.c` for the
+// implementation; we include it here so the single-TU build sees
+// everything in one place.
+#include "sat.c"

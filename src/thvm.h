@@ -3185,6 +3185,10 @@ fn u8         fol_subsumes(const FolClause *c1, const FolClause *c2);
 //   (b) it contains a positive equality (s = s).
 // Cheap O(n^2) scan.
 fn u8         fol_is_tautology(const FolClause *c);
+
+// CnfState declarations follow AtpStatus -- see search for
+// "FOL saturation loop" below.
+
 // Invalidate thvm_lpo's persistent (s,t)->verdict memo.  Call when term
 // cells move (GC) or the precedence changes (new run).
 fn void   thvm_lpo_invalidate(void);
@@ -3290,6 +3294,34 @@ typedef enum {
   ATP_QUEUE_EMPTY = 4,
   ATP_ABORTED     = 5,   // host abort hook fired (e.g. WL Abort/TimeConstrained)
 } AtpStatus;
+
+// === FOL saturation loop (Otter-style given-clause) =================
+// CnfState holds the clause store + active/passive split.  Each
+// cnf_step pops a passive clause, moves it to active, generates all
+// cross-inferences with the prior active set + self-inferences,
+// then pushes derived clauses through tautology + subsumption
+// filters before queuing.  See src/fol/sat.c.
+typedef struct {
+  FolClause **clauses;
+  u32         n;
+  u32         cap;
+  u32        *active;
+  u32         n_active;
+  u32         cap_active;
+  u32        *passive;
+  u32         n_passive;
+  u32         cap_passive;
+  u32         passive_head;   // FIFO dequeue index
+  u32         step;
+  u32         step_cap;
+  AtpStatus   status;
+} CnfState;
+
+fn CnfState *cnf_init        (u32 step_cap);
+fn void      cnf_free        (CnfState *s);
+fn i32       cnf_add_clause  (CnfState *s, FolClause *c);  // takes ownership
+fn AtpStatus cnf_step        (CnfState *s);
+fn AtpStatus cnf_run         (CnfState *s);
 
 // Initial heap capacities for the growable rule / CP arrays in
 // AtpState.  The arrays double on demand (see atp_ensure_rule_cap /
