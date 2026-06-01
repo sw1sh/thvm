@@ -3362,6 +3362,23 @@ fn Term fol_skolemize    (Term f);
 fn void fol_reset_skolem (void);
 fn u8   fol_is_skolem    (u32 label);
 
+// Distribute ∨ over ∧ to produce a conjunction-of-disjunctions.
+// Caller must run fol_nnf and fol_skolemize first.  Worst-case
+// exponential in nested-OR depth (the standard CNF blowup);
+// Tseitin-style structural CNF is a follow-up if a real bench hits
+// the blowup.
+fn Term fol_distribute(Term f);
+
+// Walk a CNF-shaped Term (AND-of-OR-of-literals) and extract one
+// FolClause per top-level disjunct.  Returns a heap-allocated
+// FolClause** of size *n_out; caller owns the array AND each clause.
+fn FolClause **fol_extract_clauses(Term cnf_formula, u32 *n_out);
+
+// End-to-end: f -> NNF -> Skolem -> distribute -> extract.  Resets
+// the Skolem counter so each call is independent.  Caller owns the
+// returned array + every clause.
+fn FolClause **fol_formula_to_clauses(Term f, u32 *n_out);
+
 // Initial heap capacities for the growable rule / CP arrays in
 // AtpState.  The arrays double on demand (see atp_ensure_rule_cap /
 // atp_ensure_cp_cap), so these are starting sizes, not ceilings --

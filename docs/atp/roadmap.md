@@ -185,10 +185,28 @@ Open follow-ups (in order):
   Output is quantifier-free with free vars implicitly universal.
   `fol_reset_skolem()` clears the counter between runs.
 
-Open follow-ups:
-* Prenex form + CNF distribution (∨ over ∧).
-* Clause extraction (top-level conjunction -> array of FolClause*).
-* End-to-end `fol_formula_to_clauses` that drives all four steps.
+CNF pipeline closed end-to-end:
+* `fol_distribute(f)` -- distribute ∨ over ∧ to reach AND-of-ORs
+  shape.  Worst-case exponential in nested-OR depth (the standard
+  CNF blowup); Tseitin structural CNF is a follow-up if a real bench
+  hits the blowup.
+* `fol_extract_clauses(cnf, &n_out)` -- walk the AND-of-ORs tree and
+  emit one FolClause* per top-level disjunct.  Negation literals
+  decoded from `¬atom` connectives.
+* `fol_formula_to_clauses(f, &n_out)` -- one-shot wrapper: NNF +
+  Skolem + distribute + extract.  Resets Skolem counter each call.
+
+End-to-end smoke (in tests/test_fol.c):
+  `∀x.(P(x) -> Q(x)) ∧ P(a) ∧ ¬Q(a)`  -> PROVED via cnf_run.
+  Russell-style `∀x.(R(x,x) <-> ¬R(x,x))`  -> PROVED.
+
+Open follow-ups (efficiency / completeness):
+* Tseitin structural CNF for shallow clauses on deeply-nested ∨/∧.
+* Selection function in cnf_step (pick maximal literal to inference
+  on rather than try-everything).
+* Discrim-tree / FV-index for fast subsumption + CP queries.
+* Demodulation: rewrite active clauses with unit positive
+  equalities.  Reuses the equational layer's rewriting machinery.
 
 ### Theory reasoning
 

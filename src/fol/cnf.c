@@ -288,3 +288,143 @@ fn Term fol_skolemize(Term f) {
 fn u8 fol_is_skolem(u32 label) {
   return (label >= FOL_LAB_SKOLEM_BASE) ? 1u : 0u;
 }
+
+// === CNF distribution ===============================================
+//
+// Take an NNF + skolemized formula (whose only connectives are AND,
+// OR, NOT-on-atom) and rewrite it into a conjunction-of-disjunctions:
+//
+//   distribute(p ∧ q) = distribute(p) ∧ distribute(q)
+//   distribute(p ∨ q):
+//     dp = distribute(p),  dq = distribute(q)
+//     if dp = (a ∧ b):   distribute((a ∨ dq) ∧ (b ∨ dq))
+//     if dq = (a ∧ b):   distribute((dp ∨ a) ∧ (dp ∨ b))
+//     else:              dp ∨ dq
+//   distribute(literal) = literal
+//
+// Worst-case exponential in nested-OR depth -- the classical Tseitin
+// alternative (intro auxiliary atoms) avoids that blowup but enlarges
+// the signature.  For initial coverage we lean on the simpler
+// distribution; Tseitin-CNF is a follow-up if a real bench hits the
+// blowup.
+
+fn Term fol_distribute(Term f) {
+  if (term_tag(f) != TAG_CTR) return f;
+  u32 lab = term_ext(f);
+  if (lab == FOL_LAB_AND) {
+    Term p = term_ctr_at(f, 0u);
+    Term q = term_ctr_at(f, 1u);
+    return fol_mk_and(fol_distribute(p), fol_distribute(q));
+  }
+  if (lab == FOL_LAB_OR) {
+    Term dp = fol_distribute(term_ctr_at(f, 0u));
+    Term dq = fol_distribute(term_ctr_at(f, 1u));
+    // (a ∧ b) ∨ dq  =>  (a ∨ dq) ∧ (b ∨ dq)
+    if (term_tag(dp) == TAG_CTR && term_ext(dp) == FOL_LAB_AND) {
+      Term a = term_ctr_at(dp, 0u);
+      Term b = term_ctr_at(dp, 1u);
+      return fol_mk_and(fol_distribute(fol_mk_or(a, dq)),
+                        fol_distribute(fol_mk_or(b, dq)));
+    }
+    // dp ∨ (a ∧ b)  =>  (dp ∨ a) ∧ (dp ∨ b)
+    if (term_tag(dq) == TAG_CTR && term_ext(dq) == FOL_LAB_AND) {
+      Term a = term_ctr_at(dq, 0u);
+      Term b = term_ctr_at(dq, 1u);
+      return fol_mk_and(fol_distribute(fol_mk_or(dp, a)),
+                        fol_distribute(fol_mk_or(dp, b)));
+    }
+    return fol_mk_or(dp, dq);
+  }
+  // NOT-on-atom or literal atom -- leave alone.
+  return f;
+}
+
+// === clause extraction ==============================================
+//
+// Walk a fully-distributed (NNF + skolemized + distributed) formula
+// and emit one FolClause per top-level disjunct.
+
+// Append `lit` to the literals array, growing if needed.
+static void fol_extract_lit(FolLit **lits, u32 *n, u32 *cap, FolLit lit) {
+  if (*n >= *cap) {
+    u32 ncap = (*cap == 0u) ? 8u : (*cap) * 2u;
+    FolLit *grow = (FolLit *)realloc(*lits, (size_t)ncap * sizeof(FolLit));
+    if (grow == NULL) return;
+    *lits = grow;
+    *cap = ncap;
+  }
+  (*lits)[*n] = lit;
+  *n += 1u;
+}
+
+// Walk an OR subtree and append every literal into `*lits`.
+static void fol_extract_or(Term f, FolLit **lits, u32 *n, u32 *cap) {
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_OR) {
+    fol_extract_or(term_ctr_at(f, 0u), lits, n, cap);
+    fol_extract_or(term_ctr_at(f, 1u), lits, n, cap);
+    return;
+  }
+  FolLit lit;
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_NOT) {
+    lit.atom = term_ctr_at(f, 0u);
+    lit.sign = 1u;
+  } else {
+    lit.atom = f;
+    lit.sign = 0u;
+  }
+  fol_extract_lit(lits, n, cap, lit);
+}
+
+// Append a clause built from `or_root` to `*out`, growing as needed.
+static void fol_append_clause(FolClause ***out, u32 *n, u32 *cap, Term or_root) {
+  FolLit *lits = NULL;
+  u32 nl = 0u, capl = 0u;
+  fol_extract_or(or_root, &lits, &nl, &capl);
+  FolClause *c = fol_clause_new(nl);
+  if (c == NULL) { free(lits); return; }
+  for (u32 i = 0; i < nl; i++) c->lits[i] = lits[i];
+  free(lits);
+  if (*n >= *cap) {
+    u32 ncap = (*cap == 0u) ? 8u : (*cap) * 2u;
+    FolClause **grow = (FolClause **)realloc(*out, (size_t)ncap * sizeof(FolClause *));
+    if (grow == NULL) { fol_clause_free(c); return; }
+    *out = grow;
+    *cap = ncap;
+  }
+  (*out)[*n] = c;
+  *n += 1u;
+}
+
+// Walk the AND-of-... tree and emit a clause per top-level disjunct.
+static void fol_extract_and(Term f, FolClause ***out, u32 *n, u32 *cap) {
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_AND) {
+    fol_extract_and(term_ctr_at(f, 0u), out, n, cap);
+    fol_extract_and(term_ctr_at(f, 1u), out, n, cap);
+    return;
+  }
+  fol_append_clause(out, n, cap, f);
+}
+
+fn FolClause **fol_extract_clauses(Term cnf_formula, u32 *n_out) {
+  if (n_out == NULL) return NULL;
+  FolClause **out = NULL;
+  u32 n = 0u, cap = 0u;
+  fol_extract_and(cnf_formula, &out, &n, &cap);
+  *n_out = n;
+  return out;
+}
+
+// === end-to-end formula -> clauses ==================================
+//
+// One-shot: f -> NNF -> Skolem -> distribute -> extract.  Returns a
+// heap-allocated array of `*n_out` FolClause*; caller owns each
+// clause (free via fol_clause_free) and the array (free via free()).
+// Resets the Skolem counter so each call is independent.
+fn FolClause **fol_formula_to_clauses(Term f, u32 *n_out) {
+  if (n_out == NULL) return NULL;
+  fol_reset_skolem();
+  Term nnf  = fol_nnf(f);
+  Term sk   = fol_skolemize(nnf);
+  Term cnf_ = fol_distribute(sk);
+  return fol_extract_clauses(cnf_, n_out);
+}

@@ -999,6 +999,196 @@ int main(void) {
     CHECK(term_ext(sk_a) != term_ext(sk_b));
   }
 
+  // === CNF distribution ===========================================
+
+  TEST_BEGIN("fol/distribute-atom-passthrough");
+  {
+    Term atom = pred1(P_P, k(L_a));
+    Term d = fol_distribute(atom);
+    CHECK(kbo_eq(d, atom));
+  }
+
+  TEST_BEGIN("fol/distribute-and-passthrough");
+  {
+    // (P ∧ Q) stays unchanged (already CNF).
+    Term f = fol_mk_and(pred1(P_P, k(L_a)), pred1(P_Q, k(L_b)));
+    Term d = fol_distribute(f);
+    CHECK(kbo_eq(d, f));
+  }
+
+  TEST_BEGIN("fol/distribute-or-over-and");
+  {
+    // P ∨ (Q ∧ R)  =>  (P ∨ Q) ∧ (P ∨ R)
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term r = pred2(P_R, k(L_a), k(L_b));
+    Term f = fol_mk_or(p, fol_mk_and(q, r));
+    Term d = fol_distribute(f);
+    Term expect = fol_mk_and(fol_mk_or(p, q), fol_mk_or(p, r));
+    CHECK(kbo_eq(d, expect));
+  }
+
+  TEST_BEGIN("fol/distribute-and-over-or-left");
+  {
+    // (P ∧ Q) ∨ R  =>  (P ∨ R) ∧ (Q ∨ R)
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term r = pred2(P_R, k(L_a), k(L_b));
+    Term f = fol_mk_or(fol_mk_and(p, q), r);
+    Term d = fol_distribute(f);
+    Term expect = fol_mk_and(fol_mk_or(p, r), fol_mk_or(q, r));
+    CHECK(kbo_eq(d, expect));
+  }
+
+  // === clause extraction ==========================================
+
+  TEST_BEGIN("fol/extract-unit-clause");
+  {
+    // Just an atom -> one clause with one positive literal.
+    u32 n = 0;
+    Term atom = pred1(P_P, k(L_a));
+    FolClause **cs = fol_extract_clauses(atom, &n);
+    CHECK(n == 1);
+    CHECK(cs[0]->n_lits == 1);
+    CHECK(cs[0]->lits[0].sign == 0);
+    CHECK(kbo_eq(cs[0]->lits[0].atom, atom));
+    fol_clause_free(cs[0]);
+    free(cs);
+  }
+
+  TEST_BEGIN("fol/extract-negated-unit");
+  {
+    Term atom = pred1(P_P, k(L_a));
+    Term neg  = fol_mk_not(atom);
+    u32 n = 0;
+    FolClause **cs = fol_extract_clauses(neg, &n);
+    CHECK(n == 1);
+    CHECK(cs[0]->n_lits == 1);
+    CHECK(cs[0]->lits[0].sign == 1);
+    CHECK(kbo_eq(cs[0]->lits[0].atom, atom));
+    fol_clause_free(cs[0]);
+    free(cs);
+  }
+
+  TEST_BEGIN("fol/extract-multi-clause");
+  {
+    // (P ∨ Q) ∧ (¬R ∨ S)
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term r = pred2(P_R, k(L_a), k(L_b));
+    Term s_atom = pred1(P_P, k(L_c));
+    Term f = fol_mk_and(fol_mk_or(p, q),
+                         fol_mk_or(fol_mk_not(r), s_atom));
+    u32 n = 0;
+    FolClause **cs = fol_extract_clauses(f, &n);
+    CHECK(n == 2);
+    CHECK(cs[0]->n_lits == 2);
+    CHECK(cs[1]->n_lits == 2);
+    // First clause: P, Q positive.
+    CHECK(cs[0]->lits[0].sign == 0);
+    CHECK(cs[0]->lits[1].sign == 0);
+    // Second clause: ¬R, S.
+    CHECK(cs[1]->lits[0].sign == 1);
+    CHECK(cs[1]->lits[1].sign == 0);
+    fol_clause_free(cs[0]);
+    fol_clause_free(cs[1]);
+    free(cs);
+  }
+
+  // === end-to-end formula -> clauses -> PROVED ====================
+
+  TEST_BEGIN("fol/e2e-modus-ponens");
+  {
+    // ∀x. P(x) -> Q(x)
+    // P(a)
+    // ¬Q(a)
+    // Expect: empty clause derivable via cnf_run.
+    Term x = v(0);
+    Term px = pred1(P_P, x);
+    Term qx = pred1(P_Q, x);
+    Term formula = fol_mk_all(x, fol_mk_imp(px, qx));
+
+    u32 nc = 0;
+    FolClause **clauses = fol_formula_to_clauses(formula, &nc);
+    CHECK(nc == 1);
+    // The single clause is ¬P(x) ∨ Q(x).
+    CHECK(clauses[0]->n_lits == 2);
+
+    CnfState *s = cnf_init(128);
+    cnf_add_clause(s, clauses[0]);
+    free(clauses);
+
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    cnf_add_clause(s, c2);
+
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_Q, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c3);
+
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/e2e-existential-witness");
+  {
+    // ∃x.P(x)   (one positive existential, no other axioms).
+    // After Skolemization: P(sk_0).  Saturation: one clause, no
+    // resolution possible -> QUEUE_EMPTY (satisfiable).
+    Term y = v(0);
+    Term formula = fol_mk_ex(y, pred1(P_P, y));
+    u32 nc = 0;
+    FolClause **clauses = fol_formula_to_clauses(formula, &nc);
+    CHECK(nc == 1);
+    CHECK(clauses[0]->n_lits == 1);
+    // The atom should be P(sk_0) where sk_0 is a fresh Skolem.
+    Term arg = term_ctr_at(clauses[0]->lits[0].atom, 0);
+    CHECK(fol_is_skolem(term_ext(arg)));
+
+    CnfState *s = cnf_init(64);
+    cnf_add_clause(s, clauses[0]);
+    free(clauses);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_QUEUE_EMPTY);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/e2e-russell-style");
+  {
+    // The "barber" / Russell-style: ¬(∃x.∀y. shaves(x, y) <-> ¬shaves(y, y)).
+    // The negation is the test conjecture; if we drop the negation
+    // and produce clauses, saturation should derive the contradiction.
+    // We craft it directly as the clause-form refutation target:
+    //
+    // ∃x.∀y.(shaves(x, y) <-> ¬shaves(y, y))
+    // ==> Skolemize x -> b (the barber).
+    // ∀y. shaves(b, y) <-> ¬shaves(y, y)
+    // <-> expansion produces two clauses each direction.
+    //
+    // For simplicity: prove that ∃y.(¬shaves(y, y)) implies that we
+    // have a witness whose shaves(b, witness) leads to contradiction
+    // with both polarities.
+    //
+    // Direct refutation: assume shaves(b, b) <-> ¬shaves(b, b).
+    // After NNF + skolem + CNF: yields the empty clause via
+    // resolution.
+    Term b = v(0);                                  // barber
+    Term shaves_bb = pred2(P_R, b, b);              // shaves(b, b)
+    Term phi = fol_mk_iff(shaves_bb, fol_mk_not(shaves_bb));
+    // Wrap to make x_0 universal (so saturation works post-Skolem).
+    Term f = fol_mk_all(b, phi);
+    u32 nc = 0;
+    FolClause **clauses = fol_formula_to_clauses(f, &nc);
+    CnfState *s = cnf_init(256);
+    for (u32 i = 0; i < nc; i++) cnf_add_clause(s, clauses[i]);
+    free(clauses);
+    AtpStatus st = cnf_run(s);
+    // Russell paradox: this should yield the empty clause.
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
   TEST_BEGIN("fol/skolem-nested-quantifier-scope");
   {
     // ∀x.∀y.∃z.R(x, y, z): z becomes sk(x, y).
