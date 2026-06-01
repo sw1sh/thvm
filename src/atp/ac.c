@@ -719,48 +719,133 @@ fn void thvm_atp_auto_ac(const Term *lhs, const Term *rhs, u32 n_eqns) {
 
 // --- AC unification for CP generation -------------------------------
 //
-// Stage 7 (`atp_ac_unify_emit_cps`) is the inner-unification half of
-// the AC-completion arc.  `atp_overlap_ij` (Stage 4b) supplies extended
-// rules via Bachmair-Plaisted; this routine supplies the AC-modulo
-// unifiers at the position where the overlap actually fires.
+// `atp_ac_unify_emit_cps` is the inner-unification half of the AC-
+// completion arc.  `atp_overlap_ij` (Stage 4b/8) supplies extended
+// rules via bilateral Bachmair-Plaisted; this routine supplies the
+// AC-modulo unifiers at the position where the overlap fires.
 //
-// Approach (leaf-bijection subset of Stickel-AC-unification):
+// Algorithm (Stickel-style recursive enumeration):
 //   * sub = li|p and lj must both be CTRs with the same AC top label.
-//   * AC-flatten both to leaf multisets S, T.  Bail if |S| != |T| (the
-//     proper Stickel algorithm handles ≠ via variable-absorbs-set;
-//     left to a follow-up arc -- the |S|==|T| case is what the
-//     abelian-group bench needs).
-//   * Enumerate permutations π of [0..n).  For each π, attempt
-//     pairwise syntactic unification of (S[i], T[π(i)]).  On success,
-//     emit one CP using the resulting substitution.
+//   * AC-flatten both to leaf multisets S, T.
+//   * Recurse: at each step pick the lowest-index unused S leaf.
+//     - CTR/non-FVR: must pair with exactly one unused T leaf via
+//       syntactic unification.
+//     - FVR: can absorb any non-empty subset of unused T leaves;
+//       the bound term is the right-assoc f-tree over the subset.
+//   * Also run with S and T swapped: T-side FVRs can absorb S-leaves,
+//     a structurally distinct unifier the asymmetric recursion misses.
+//   * Each successful leaf-consumption builds a CP using the
+//     accumulated substitution.
 //
-// Permutation cap: ATP_AC_UNIFY_MAX_LEAVES = 6 (720 perms).  Larger
-// leaf sets bail (returns count unchanged) -- a graceful regression
-// to the syntactic path, never wrong, just incomplete.
-#define ATP_AC_UNIFY_MAX_LEAVES 6u
-#define ATP_AC_UNIFY_MAX_PERMS  720u
+// Bounds: ATP_AC_UNIFY_MAX_LEAVES = 8 (bitmask fits in u32), and a
+// hard cap of ATP_AC_UNIFY_MAX_EMITS = 64 CPs per call to bound work
+// on theories that admit unbounded unifier sets.  Beyond either, the
+// call returns the partial count -- correct but incomplete, falling
+// back to the syntactic CP path which still runs separately.
+#define ATP_AC_UNIFY_MAX_LEAVES 8u
+#define ATP_AC_UNIFY_MAX_EMITS  64u
 
-static u32 atp_ac_factorial(u32 n) {
-  u32 f = 1u;
-  for (u32 i = 2u; i <= n; i++) f *= i;
-  return f;
+static Term atp_ac_build_tree(u32 ac_label, Term *leaves, u32 n) {
+  if (n == 1u) return leaves[0];
+  Term acc = leaves[n - 1u];
+  for (i32 i = (i32)n - 2; i >= 0; i--) {
+    Term kids[2] = { leaves[i], acc };
+    acc = term_new_ctr(ac_label, kids, 2u);
+  }
+  return acc;
 }
 
-// Build the k-th permutation in lex order of [0..n) via the factorial
-// number system.  Writes the permutation to `perm[0..n)`.  No
-// allocation; uses an O(n^2) leftover shuffle which is fine for n ≤ 6.
-static void atp_ac_unrank_perm(u32 k, u32 n, u32 *perm) {
-  u32 leftover[ATP_AC_UNIFY_MAX_LEAVES];
-  for (u32 i = 0; i < n; i++) leftover[i] = i;
-  for (u32 i = 0; i < n; i++) {
-    u32 base = atp_ac_factorial(n - 1u - i);
-    u32 pick = (base == 0u) ? 0u : (k / base);
-    if (base != 0u) k %= base;
-    if (pick >= (n - i)) pick = (n - i) - 1u;
-    perm[i] = leftover[pick];
-    for (u32 j = pick; j + 1u < (n - i); j++) {
-      leftover[j] = leftover[j + 1u];
+typedef struct {
+  Term         li, ri, rj;
+  const u32   *p_path;
+  u32          p_len;
+  CriticalPair *out;
+  u32          cap;
+  u32          count;
+  u32          ac_label;
+  u32          emits_this_call;
+} AcUnifyCtx;
+
+static void atp_ac_emit_unifier(RewriteSubst *subst, AcUnifyCtx *ctx) {
+  if (ctx->count >= ctx->cap) return;
+  if (ctx->emits_this_call >= ATP_AC_UNIFY_MAX_EMITS) return;
+
+  Term replaced = cp_replace_at(ctx->li, ctx->p_path, ctx->p_len, ctx->rj);
+  Term cp_lhs   = thvm_unify_apply(replaced, subst);
+  Term cp_rhs   = thvm_unify_apply(ctx->ri, subst);
+  Term cp_peak  = thvm_unify_apply(ctx->li, subst);
+
+  CriticalPair *slot = &ctx->out[ctx->count];
+  slot->lhs = cp_lhs;
+  slot->rhs = cp_rhs;
+  slot->peak = cp_peak;
+  slot->pos_len = (u8)ctx->p_len;
+  for (u32 d = 0; d < ctx->p_len; d++) slot->pos[d] = (u8)ctx->p_path[d];
+  ctx->count++;
+  ctx->emits_this_call++;
+}
+
+static void atp_ac_unify_recurse(Term *S, u32 nS, u32 used_S,
+                                 Term *T, u32 nT, u32 used_T,
+                                 RewriteSubst *subst, AcUnifyCtx *ctx) {
+  if (ctx->count >= ctx->cap) return;
+  if (ctx->emits_this_call >= ATP_AC_UNIFY_MAX_EMITS) return;
+
+  u32 full_S = (nS >= 32u) ? 0xFFFFFFFFu : ((1u << nS) - 1u);
+  u32 full_T = (nT >= 32u) ? 0xFFFFFFFFu : ((1u << nT) - 1u);
+
+  if (used_S == full_S && used_T == full_T) {
+    atp_ac_emit_unifier(subst, ctx);
+    return;
+  }
+  // Either side fully consumed but not both: mismatch.
+  if (used_S == full_S || used_T == full_T) return;
+
+  // Pick lowest-index unused S leaf.
+  u32 i = 0u;
+  while ((used_S >> i) & 1u) i++;
+  Term s = S[i];
+
+  if (term_tag(s) == TAG_FVR) {
+    // FVR absorbs a non-empty subset of unused T.
+    u32 remaining = full_T & ~used_T;
+    u32 sub = remaining;
+    do {
+      if (sub != 0u) {
+        Term picked[ATP_AC_UNIFY_MAX_LEAVES];
+        u32 np = 0u;
+        for (u32 j = 0; j < nT; j++) {
+          if ((sub >> j) & 1u) picked[np++] = T[j];
+        }
+        Term tree = atp_ac_build_tree(ctx->ac_label, picked, np);
+
+        RewriteSubst snap = *subst;
+        if (thvm_unify(s, tree, subst)) {
+          atp_ac_unify_recurse(S, nS, used_S | (1u << i),
+                               T, nT, used_T | sub,
+                               subst, ctx);
+          if (ctx->emits_this_call >= ATP_AC_UNIFY_MAX_EMITS) return;
+        }
+        *subst = snap;
+      }
+      if (sub == 0u) break;
+      sub = (sub - 1u) & remaining;
+    } while (1);
+    return;
+  }
+
+  // Non-FVR: pair with exactly one unused T leaf.
+  u32 remaining = full_T & ~used_T;
+  for (u32 j = 0; j < nT; j++) {
+    if (((remaining >> j) & 1u) == 0u) continue;
+    RewriteSubst snap = *subst;
+    if (thvm_unify(s, T[j], subst)) {
+      atp_ac_unify_recurse(S, nS, used_S | (1u << i),
+                           T, nT, used_T | (1u << j),
+                           subst, ctx);
+      if (ctx->emits_this_call >= ATP_AC_UNIFY_MAX_EMITS) return;
     }
+    *subst = snap;
   }
 }
 
@@ -783,38 +868,30 @@ fn u32 atp_ac_unify_emit_cps(Term li, Term ri,
   u32 ns = 0u, nt = 0u;
   if (!atp_ac_flatten(sub, &ac, S, &ns, ATP_AC_UNIFY_MAX_LEAVES)) return count;
   if (!atp_ac_flatten(lj,  &ac, T, &nt, ATP_AC_UNIFY_MAX_LEAVES)) return count;
-  if (ns != nt || ns < 2u) return count;
-  if (ns > ATP_AC_UNIFY_MAX_LEAVES) return count;
+  if (ns < 2u || nt < 2u) return count;
+  if (ns > ATP_AC_UNIFY_MAX_LEAVES || nt > ATP_AC_UNIFY_MAX_LEAVES) return count;
 
-  u32 fact = atp_ac_factorial(ns);
-  if (fact > ATP_AC_UNIFY_MAX_PERMS) return count;
+  AcUnifyCtx ctx = {
+    .li = li, .ri = ri, .rj = rj,
+    .p_path = p_path, .p_len = p_len,
+    .out = out, .cap = cap, .count = count,
+    .ac_label = lab, .emits_this_call = 0u,
+  };
 
-  for (u32 k = 0; k < fact; k++) {
-    u32 perm[ATP_AC_UNIFY_MAX_LEAVES];
-    atp_ac_unrank_perm(k, ns, perm);
-
+  // Pass 1: S leaves drive the recursion (S-side FVRs absorb T leaves).
+  {
     RewriteSubst subst = {{0}};
-    u8 ok = 1u;
-    for (u32 i = 0; i < ns; i++) {
-      if (!thvm_unify(S[i], T[perm[i]], &subst)) { ok = 0u; break; }
-    }
-    if (!ok) continue;
-
-    Term replaced = cp_replace_at(li, p_path, p_len, rj);
-    Term cp_lhs   = thvm_unify_apply(replaced, &subst);
-    Term cp_rhs   = thvm_unify_apply(ri, &subst);
-    Term cp_peak  = thvm_unify_apply(li, &subst);
-
-    CriticalPair *slot = &out[count];
-    slot->lhs = cp_lhs;
-    slot->rhs = cp_rhs;
-    slot->peak = cp_peak;
-    slot->pos_len = (u8)p_len;
-    for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p_path[d];
-    count++;
-    if (count >= cap) return count;
+    atp_ac_unify_recurse(S, ns, 0u, T, nt, 0u, &subst, &ctx);
   }
-  return count;
+  // Pass 2: T leaves drive the recursion (T-side FVRs absorb S leaves).
+  // Skip if pass 1 already saturated the per-call cap.
+  if (ctx.emits_this_call < ATP_AC_UNIFY_MAX_EMITS && ctx.count < ctx.cap) {
+    ctx.emits_this_call = 0u;  // independent budget for the swapped run
+    RewriteSubst subst = {{0}};
+    atp_ac_unify_recurse(T, nt, 0u, S, ns, 0u, &subst, &ctx);
+  }
+
+  return ctx.count;
 }
 
 #endif // THVM_ATP_AC

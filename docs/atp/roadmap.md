@@ -40,8 +40,10 @@ because the engine doesn't implement them yet.
   - `atp_ac_eq` / `atp_ac_hash` (AC-modulo equality / hash).
   - `atp_match_ac` (AC-modulo one-way match; greedy
     multi-pass-with-leftover-chain).
-  - `atp_ac_unify_emit_cps` (leaf-bijection AC unifier feeding
-    `cp_visit`; enumerates permutations up to 6 leaves).
+  - `atp_ac_unify_emit_cps` (Stickel-style recursive AC unifier
+    feeding `cp_visit`; handles variable-absorbs-set, |S| != |T|
+    asymmetric unifiers via FVR absorption of any non-empty leaf
+    subset; bidirectional, up to 8 leaves per side + 64 CPs / call).
   - `atp_ac_extend_rule` (Bachmair-Plaisted `R+`) used as a
     BILATERAL extension in `atp_overlap_ij`: emits CPs over
     (i-ext X j), (i X j-ext), and (i-ext X j-ext) face combos.
@@ -55,7 +57,9 @@ because the engine doesn't implement them yet.
   - commutative-monoid (waldmeister/commutative_monoid.pr): thvm
     <0.1ms vs wmcli 2ms (AC-eq goal-check short-circuit).
   - abelian-group inversion (waldmeister/abelian_group.pr): thvm
-    PROVED in 10 iters / 1 surviving rule; wmcli 12 rules / 90 CPs.
+    PROVED in 4 iters / 1 surviving rule; wmcli 12 rules / 90 CPs.
+  - lattice idempotence (waldmeister/lattice_idem.pr): thvm PROVED
+    in 4 iters / 4 rules; wmcli 5 rules / 24 CPs.
 
 ## Open arcs
 
@@ -69,16 +73,17 @@ Coverage (see "Coverage today" above) lands the core: AC
 match + canon, AC-KBO/AC-LPO, extended overlap, AC-eq goal-check.
 Remaining sub-items:
 
-* Full Stickel AC unification.  The current leaf-bijection unifier
-  handles `|S| == |T|` (covers abelian-group cleanly); the variable-
-  absorbs-set case (`|S| != |T|`, an FVR leaf swallows multiple
-  T-leaves) is left.  Larger leaf counts (> 6) bail at the
-  permutation cap and lose CPs; lift the cap with a Diophantine
-  basis solver instead of full factorial enumeration.
-* Bench fan-out beyond abelian-group: lattice axioms, ring axioms,
-  boolean-ring, Robbins.  Most likely need full Stickel; harness
-  scaffolding (per-mode wmcli reference + thvm timing) is already
-  in `tests/test_atp_ac_bench.c`.
+* Bench fan-out beyond lattice idempotence: ring axioms (commutative
+  + distributive), boolean-ring (`x*x = x` simplification), Robbins
+  algebra (Hilbert-prize problem -- gates on goal-directed search +
+  AC selection tuning, not just unification).  Harness scaffolding
+  is in `tests/test_atp_ac_bench.c`; add cases as the engine
+  unblocks each.
+* Lift the per-call CP cap from 64 once a real workload hits it
+  (none today; the cap exists so Stickel can't explode on pathological
+  inputs).  Larger leaf counts (> 8 per side) bail to the syntactic
+  path -- raise via a Diophantine multiplicity basis if a real bench
+  needs it.
 * Selection / ordering interplay: the AC top-symbol bias in the
   precedence picker (currently AC labels sit at the precedence
   floor) hasn't been re-tuned now that AC-LPO is on; on harder

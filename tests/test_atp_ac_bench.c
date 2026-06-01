@@ -234,6 +234,53 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);
   }
 
+  // ---------------------------------------------------------------------
+  // Lattice idempotence: prove f(a, a) = a from absorption + comm/assoc.
+  //   f, g: comm + assoc.  Absorption: f(x, g(x, y)) = x, g(x, f(x, y)) = x.
+  // Mirrors waldmeister/lattice_idem.pr (wmcli: 1ms, 5 rules, 24 CPs).
+  // ---------------------------------------------------------------------
+  TEST_BEGIN("ac/bench-lattice-idem");
+  {
+#define L_G  7u
+    thvm_atp_set_ac_mask((1ull << L_F) | (1ull << L_G));
+
+    Term x = v(0), y = v(1), z = v(2);
+    Term a = k(L_A);
+
+    static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    // Precedence a > f > g (LPO).
+    static const u32 P[8] = { 0u, 1u, 0u, 0u, 2u, 0u, 0u, 0u };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 8, .var_weight = 1u };
+
+    AtpState *s = thvm_atp_init(&kbo, 8192);
+    thvm_atp_add_equation(s, bin(L_F, x, y), bin(L_F, y, x));
+    thvm_atp_add_equation(s, bin(L_F, bin(L_F, x, y), z),
+                              bin(L_F, x, bin(L_F, y, z)));
+    thvm_atp_add_equation(s, bin(L_G, x, y), bin(L_G, y, x));
+    thvm_atp_add_equation(s, bin(L_G, bin(L_G, x, y), z),
+                              bin(L_G, x, bin(L_G, y, z)));
+    thvm_atp_add_equation(s, bin(L_F, x, bin(L_G, x, y)), x);
+    thvm_atp_add_equation(s, bin(L_G, x, bin(L_F, x, y)), x);
+    thvm_atp_set_goal(s, bin(L_F, a, a), a);
+
+    double t0 = now_secs();
+    AtpStatus st = ATP_RUNNING;
+    u32 iters = 0;
+    for (u32 i = 0; i < 8192u; i++) {
+      st = thvm_atp_step(s);
+      iters++;
+      if (st != ATP_RUNNING) break;
+    }
+    double t1 = now_secs();
+    printf("  thvm/ac-lattice  %s  wall=%.4fs  iters=%u  n_rules=%u\n",
+           status_name(st), t1 - t0, iters, s->n_rules);
+    CHECK(st == ATP_PROVED);
+
+    thvm_atp_free(s);
+    thvm_atp_set_ac_mask(0ull);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
