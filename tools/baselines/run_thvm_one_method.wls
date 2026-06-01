@@ -1,16 +1,17 @@
 #!/usr/bin/env wolframscript
-(* Run thvm TFindProof on a single NotableTheorem under a hard
-   wall-clock cap.  Mirrors run_wl_one.wls's TSV output line for
-   line so the same downstream comparator parses both. *)
+(* Variant of run_thvm_one.wls that accepts a Method spec as the
+   4th positional arg (a WL-expression string).  Outputs the same
+   TSV-format line. *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 args = $ScriptCommandLine;
 theory = args[[2]];
 thm = args[[3]];
 TC = ToExpression[args[[4]]];
+methodExpr = ToExpression[args[[5]]];
 
 {t, r} = AbsoluteTiming @ TimeConstrained[
-    TFindProof[thm, theory, TimeConstraint -> N[TC]],
+    TFindProof[thm, theory, Method -> methodExpr, TimeConstraint -> N[TC]],
     TC + 2, $TimedOut];
 
 verifyOne[p_] := Head @ Quiet @ Check[p["ProofFunction"][p["Theorems"]], $Failed];
@@ -29,11 +30,6 @@ verifies = Which[
             If[ AllTrue[vs, # === Success &], "Success", ToString[vs]]],
     True, "-"];
 
-(* Use ProofObject's "ProofLength" property (#axioms+#lemmas+
-   #conclusion).  Length[r["ProofDataset"]["MainSteps"]] landed in
-   Failure[] (ProofDataset is a Dataset, not Association) and
-   Length[Failure[_, _]] == 2 -- the source of every "2" in legacy
-   TSVs. *)
 proofLen = Which[
     Head[r] === ProofObject,
         ToString @ Quiet @ Check[r["ProofLength"], "-"],
@@ -41,8 +37,6 @@ proofLen = Which[
         ToString[Total[Quiet @ Check[#["ProofLength"], 0] & /@ r]],
     True, "-"];
 
-(* Save thvm's proof to tools/baselines/proofs_thvm/ -- separate
-   dir from the WL proofs in tools/baselines/proofs/. *)
 isProofResult = (Head[r] === ProofObject) ||
     (ListQ[r] && AllTrue[r, Head[#] === ProofObject &]);
 If[ isProofResult,

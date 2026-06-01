@@ -41,12 +41,25 @@ runCase[theory_, thm_] := Module[{t, r, status, seconds, proofLen, verify},
                 If[ ListQ[vs] && AllTrue[vs, # === Success &],
                     "Success", ToString[vs]]],
         True, "-"];
+    (* Use ProofObject's "ProofLength" property (#axioms + #lemmas +
+       #conclusion: the canonical proof-step count).  The old
+       Length[r["ProofDataset"]["MainSteps"]] call landed in Failure[]
+       (ProofDataset is a Dataset, not an Association) and Length
+       [Failure[_, _]] == 2 -- the source of every "2" in legacy TSVs. *)
     proofLen = Which[
-        Head[r] === ProofObject && AssociationQ @ r["ProofDataset"],
-            ToString @ Length[r["ProofDataset"]["MainSteps"]],
+        Head[r] === ProofObject,
+            ToString @ Quiet @ Check[r["ProofLength"], "-"],
         ListQ[r] && AllTrue[r, Head[#] === ProofObject &],
-            ToString[Total[Length[#["ProofDataset"]["MainSteps"]] & /@ r]],
+            ToString[Total[Quiet @ Check[#["ProofLength"], 0] & /@ r]],
         True, "-"];
+    (* Save the thvm proof to tools/baselines/proofs_thvm/ for later
+       inspection -- separate dir from the WL FindEquationalProof
+       outputs in tools/baselines/proofs/. *)
+    If[ Head[r] === ProofObject || (ListQ[r] && AllTrue[r, Head[#] === ProofObject &]),
+        Module[{outDir = "tools/baselines/proofs_thvm", f},
+            If[ ! DirectoryQ[outDir], CreateDirectory[outDir]];
+            f = FileNameJoin[{outDir, theory <> "__" <> thm <> ".m"}];
+            Quiet @ Check[Put[r, f], $Failed]]];
     seconds = Round[t, 0.01];
     {status, seconds, proofLen, verify}
 ];
