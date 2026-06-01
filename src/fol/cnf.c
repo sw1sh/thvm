@@ -428,3 +428,153 @@ fn FolClause **fol_formula_to_clauses(Term f, u32 *n_out) {
   Term cnf_ = fol_distribute(sk);
   return fol_extract_clauses(cnf_, n_out);
 }
+
+// === Tseitin structural CNF =========================================
+//
+// Naïve `fol_distribute` is O(exp) in nested-OR depth.  The Tseitin
+// transformation produces a clause set whose size is linear in the
+// input formula by introducing a fresh auxiliary atom for every
+// compound subformula and encoding the equivalence `aux ↔ G` as a
+// small set of clauses.
+//
+// Auxiliaries are predicates whose arguments are the FREE variables
+// of the subformula they name -- so the aux properly captures the
+// subformula's truth value at a particular variable binding.
+//
+// Caller must run fol_nnf + fol_skolemize first; this pass only
+// handles ∧, ∨, ¬-on-atom, and atoms.
+
+#define FOL_LAB_TSEITIN_BASE 0x10000u
+#define FOL_TSEITIN_MAX_VARS  128u
+
+static u32 g_fol_tseitin_next = 0u;
+
+fn void fol_reset_tseitin(void) { g_fol_tseitin_next = 0u; }
+
+fn u8 fol_is_tseitin_aux(u32 label) {
+  return (label >= FOL_LAB_TSEITIN_BASE && label < FOL_LAB_SKOLEM_BASE) ? 1u : 0u;
+}
+
+// Collect distinct FVR ids in `t` into `vars[0..*n)`.  Stops at cap.
+static void fol_collect_vars(Term t, u32 *vars, u32 *n, u32 cap) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      for (u32 i = 0; i < *n; i++) if (vars[i] == id) return;
+      if (*n < cap) vars[(*n)++] = id;
+      return;
+    }
+    case TAG_CTR: {
+      u32 nk = term_ctr_n(t);
+      for (u32 i = 0; i < nk; i++) {
+        fol_collect_vars(term_ctr_at(t, i), vars, n, cap);
+      }
+      return;
+    }
+    default: return;
+  }
+}
+
+// Build a fresh auxiliary atom A_n(v1, ..., vk) from the var list.
+static Term fol_fresh_aux(const u32 *vars, u32 n_vars) {
+  u32 label = FOL_LAB_TSEITIN_BASE + g_fol_tseitin_next;
+  g_fol_tseitin_next++;
+  if (n_vars == 0u) return term_new_ctr(label, NULL, 0u);
+  Term kids[FOL_TSEITIN_MAX_VARS];
+  if (n_vars > FOL_TSEITIN_MAX_VARS) n_vars = FOL_TSEITIN_MAX_VARS;
+  for (u32 i = 0; i < n_vars; i++) kids[i] = term_new_fvr(vars[i]);
+  return term_new_ctr(label, kids, n_vars);
+}
+
+// Append a clause from a literal list (literals are copied).
+static void fol_tseitin_emit(FolClause ***out, u32 *n, u32 *cap,
+                             const FolLit *lits, u32 nl) {
+  FolClause *c = fol_clause_new(nl);
+  if (c == NULL) return;
+  for (u32 i = 0; i < nl; i++) c->lits[i] = lits[i];
+  if (*n >= *cap) {
+    u32 ncap = (*cap == 0u) ? 8u : (*cap) * 2u;
+    FolClause **grow = (FolClause **)realloc(*out, (size_t)ncap * sizeof(FolClause *));
+    if (grow == NULL) { fol_clause_free(c); return; }
+    *out = grow;
+    *cap = ncap;
+  }
+  (*out)[*n] = c;
+  *n += 1u;
+}
+
+// Decompose `f` into a "name" literal that's equisatisfiable with f.
+// For an atom or ¬-atom, the literal IS the name (no aux needed).
+// For a compound (∧ or ∨), introduce an auxiliary atom, emit the
+// encoding clauses for aux ↔ f, and return aux as the name.
+static FolLit fol_tseitin_rec(Term f, FolClause ***out, u32 *n, u32 *cap) {
+  // ¬atom case.
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_NOT) {
+    Term inner = term_ctr_at(f, 0u);
+    return (FolLit){ .atom = inner, .sign = 1u };
+  }
+  // Pure atom (any non-connective CTR or FVR).
+  if (term_tag(f) != TAG_CTR || !fol_is_connective(term_ext(f))) {
+    return (FolLit){ .atom = f, .sign = 0u };
+  }
+
+  u32 lab = term_ext(f);
+  Term left  = term_ctr_at(f, 0u);
+  Term right = term_ctr_at(f, 1u);
+  FolLit name_b = fol_tseitin_rec(left,  out, n, cap);
+  FolLit name_c = fol_tseitin_rec(right, out, n, cap);
+
+  u32 vars[FOL_TSEITIN_MAX_VARS];
+  u32 n_vars = 0u;
+  fol_collect_vars(f, vars, &n_vars, FOL_TSEITIN_MAX_VARS);
+  Term aux = fol_fresh_aux(vars, n_vars);
+
+  FolLit neg_aux = { .atom = aux, .sign = 1u };
+  FolLit pos_aux = { .atom = aux, .sign = 0u };
+  FolLit neg_b   = { .atom = name_b.atom, .sign = (u8)(name_b.sign ^ 1u) };
+  FolLit neg_c   = { .atom = name_c.atom, .sign = (u8)(name_c.sign ^ 1u) };
+
+  if (lab == FOL_LAB_AND) {
+    // aux ↔ B ∧ C
+    //   ¬aux ∨ B            ¬aux ∨ C            ¬B ∨ ¬C ∨ aux
+    FolLit c1[2] = { neg_aux, name_b };
+    FolLit c2[2] = { neg_aux, name_c };
+    FolLit c3[3] = { neg_b,  neg_c, pos_aux };
+    fol_tseitin_emit(out, n, cap, c1, 2);
+    fol_tseitin_emit(out, n, cap, c2, 2);
+    fol_tseitin_emit(out, n, cap, c3, 3);
+  } else {                     // FOL_LAB_OR
+    // aux ↔ B ∨ C
+    //   ¬aux ∨ B ∨ C        ¬B ∨ aux            ¬C ∨ aux
+    FolLit c1[3] = { neg_aux, name_b, name_c };
+    FolLit c2[2] = { neg_b, pos_aux };
+    FolLit c3[2] = { neg_c, pos_aux };
+    fol_tseitin_emit(out, n, cap, c1, 3);
+    fol_tseitin_emit(out, n, cap, c2, 2);
+    fol_tseitin_emit(out, n, cap, c3, 2);
+  }
+  return pos_aux;
+}
+
+fn FolClause **fol_tseitin_extract_clauses(Term nnf_skolemized, u32 *n_out) {
+  if (n_out == NULL) return NULL;
+  fol_reset_tseitin();
+  FolClause **out = NULL;
+  u32 n = 0u, cap = 0u;
+  FolLit root = fol_tseitin_rec(nnf_skolemized, &out, &n, &cap);
+  // Assert the root: emit `{ root }` as a unit clause.
+  fol_tseitin_emit(&out, &n, &cap, &root, 1u);
+  *n_out = n;
+  return out;
+}
+
+// End-to-end Tseitin pipeline: f -> NNF -> Skolem -> Tseitin CNF.
+// Drop-in replacement for fol_formula_to_clauses on
+// deeply-nested formulas where naïve distribute blows up.
+fn FolClause **fol_formula_to_clauses_tseitin(Term f, u32 *n_out) {
+  if (n_out == NULL) return NULL;
+  fol_reset_skolem();
+  Term nnf = fol_nnf(f);
+  Term sk  = fol_skolemize(nnf);
+  return fol_tseitin_extract_clauses(sk, n_out);
+}

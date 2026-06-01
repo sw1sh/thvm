@@ -3467,6 +3467,20 @@ fn FolClause **fol_extract_clauses(Term cnf_formula, u32 *n_out);
 // returned array + every clause.
 fn FolClause **fol_formula_to_clauses(Term f, u32 *n_out);
 
+// Tseitin structural CNF: produces a linear-size clausal encoding
+// by introducing fresh auxiliary predicates for each compound
+// subformula.  For deeply-nested ∨/∧, avoids the exponential blowup
+// of the naïve distribute path -- e.g. Pelletier P12 (iff
+// associativity) drops from 16k+ saturation steps to a handful.
+//
+// Aux predicates live at `FOL_LAB_TSEITIN_BASE + counter` and carry
+// the subformula's free vars as arguments.  Reset the counter via
+// fol_reset_tseitin before each independent run.
+fn FolClause **fol_tseitin_extract_clauses(Term nnf_skolemized, u32 *n_out);
+fn FolClause **fol_formula_to_clauses_tseitin(Term f, u32 *n_out);
+fn void        fol_reset_tseitin(void);
+fn u8          fol_is_tseitin_aux(u32 label);
+
 // Initial heap capacities for the growable rule / CP arrays in
 // AtpState.  The arrays double on demand (see atp_ensure_rule_cap /
 // atp_ensure_cp_cap), so these are starting sizes, not ceilings --

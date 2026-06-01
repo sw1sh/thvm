@@ -1558,6 +1558,96 @@ int main(void) {
     free(cs);
   }
 
+  // === Tseitin structural CNF ====================================
+
+  TEST_BEGIN("fol/tseitin-atom-single-clause");
+  {
+    // Atom F: just emits the unit clause { F }.
+    Term p = pred1(P_P, k(L_a));
+    u32 n = 0;
+    FolClause **cs = fol_tseitin_extract_clauses(p, &n);
+    CHECK(n == 1);
+    CHECK(cs[0]->n_lits == 1);
+    CHECK(cs[0]->lits[0].sign == 0);
+    CHECK(kbo_eq(cs[0]->lits[0].atom, p));
+    fol_clause_free(cs[0]);
+    free(cs);
+  }
+
+  TEST_BEGIN("fol/tseitin-and-emits-three-encoding-plus-unit");
+  {
+    // P ∧ Q: Tseitin emits
+    //   aux ↔ P ∧ Q:  3 clauses
+    //   + unit aux
+    // = 4 clauses total.  Naïve distribute would emit { P }, { Q }
+    // i.e. 2 clauses; Tseitin is BIGGER for this trivial case but
+    // the asymptotic win shows on deep formulas.
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term f = fol_mk_and(p, q);
+    u32 n = 0;
+    FolClause **cs = fol_tseitin_extract_clauses(f, &n);
+    CHECK(n == 4);
+    for (u32 i = 0; i < n; i++) fol_clause_free(cs[i]);
+    free(cs);
+  }
+
+  TEST_BEGIN("fol/tseitin-or-emits-three-encoding-plus-unit");
+  {
+    // P ∨ Q: similar shape, 4 clauses total.
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term f = fol_mk_or(p, q);
+    u32 n = 0;
+    FolClause **cs = fol_tseitin_extract_clauses(f, &n);
+    CHECK(n == 4);
+    for (u32 i = 0; i < n; i++) fol_clause_free(cs[i]);
+    free(cs);
+  }
+
+  TEST_BEGIN("fol/tseitin-aux-labels-are-recognized");
+  {
+    // After fol_tseitin_extract_clauses runs, each aux's label
+    // should pass fol_is_tseitin_aux().  And NOT pass fol_is_skolem
+    // (they're disjoint ranges).
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term f = fol_mk_and(p, q);
+    u32 n = 0;
+    FolClause **cs = fol_tseitin_extract_clauses(f, &n);
+    u8 found_aux = 0;
+    for (u32 i = 0; i < n; i++) {
+      for (u32 j = 0; j < cs[i]->n_lits; j++) {
+        u32 lab = term_ext(cs[i]->lits[j].atom);
+        if (fol_is_tseitin_aux(lab)) {
+          found_aux = 1;
+          CHECK(!fol_is_skolem(lab));
+        }
+      }
+    }
+    CHECK(found_aux);
+    for (u32 i = 0; i < n; i++) fol_clause_free(cs[i]);
+    free(cs);
+  }
+
+  TEST_BEGIN("fol/tseitin-e2e-smoke");
+  {
+    // Smallest end-to-end test: P ∧ ¬P (contradiction) -> empty.
+    // Via Tseitin: aux ↔ (P ∧ ¬P) yields the contradiction encoding;
+    // saturation should reach UNSAT.
+    Term p = pred1(P_P, k(L_a));
+    Term conj = fol_mk_and(p, fol_mk_not(p));    // unsatisfiable
+    u32 nc = 0;
+    FolClause **clauses = fol_formula_to_clauses_tseitin(conj, &nc);
+    CHECK(nc > 0);
+    CnfState *s = cnf_init(1024);
+    for (u32 i = 0; i < nc; i++) cnf_add_clause(s, clauses[i]);
+    free(clauses);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
   // === end-to-end formula -> clauses -> PROVED ====================
 
   TEST_BEGIN("fol/e2e-modus-ponens");

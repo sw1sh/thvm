@@ -256,8 +256,27 @@ printer:
   + literal list.  Visited bitmap dedups; parents print before the
   derived clause (post-order on the inverse DAG).
 
+Tseitin structural CNF in `src/fol/cnf.c`:
+* `fol_tseitin_extract_clauses(nnf_sk, &n_out)` -- the structural
+  alternative to `fol_distribute + fol_extract_clauses`.  Linear
+  output size: each compound subformula gets a fresh auxiliary
+  predicate at `FOL_LAB_TSEITIN_BASE + counter`, carrying the
+  subformula's free variables.  Encoding emits 3 clauses per ∧ / ∨
+  node.  Caller can opt in via `fol_formula_to_clauses_tseitin`
+  instead of the default `fol_formula_to_clauses`.
+* `fol_reset_tseitin()` / `fol_is_tseitin_aux(label)` helpers.
+* Aux range `[0x10000, 0x20000)` disjoint from Skolem range
+  `[0x20000, 0x3FFFF]` so trace printers + diagnostics can
+  distinguish them.
+
+NOTE: while Tseitin produces linear-size CNF, saturation on the
+auxiliary-rich clause set can be slower per step than on the
+naïve CNF for shallow formulas (more clauses to subsume + resolve
+against).  The win materialises on formulas where naïve distribute
+would actually blow up exponentially; for the existing Pelletier
+P1-P19 set, the naïve path is competitive.
+
 Open follow-ups (efficiency / completeness):
-* Tseitin structural CNF for shallow clauses on deeply-nested ∨/∧.
 * Discrim-tree / FV-index for fast subsumption + CP queries.
 Ordering-aware demodulation lands: CnfState carries optional
 KboConfig / LpoConfig / RpoConfig / WpoConfig fields (set via
