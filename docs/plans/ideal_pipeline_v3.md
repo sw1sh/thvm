@@ -571,6 +571,70 @@ infrastructure (tinygrad uses bounds pervasively), so it advances "everything pe
 spec" beyond just faithful-CPU. Supersedes the "N-D-preserving rangeify change" framing
 above.
 
+### DECISIVE NEGATIVE RESULT (2026-06-01, later): the symbolic/valid path does NOT fix faithful-CPU
+
+Tested the de-risk hypothesis empirically. thvm ALREADY has the valid-simplification
+machinery -- `uop_given_valid` (fake constrained-RANGE substitution), `drop_and_clauses`,
+`gated_given_valid`, `uop_parse_valid` (index_simplify.c:1112-1340) -- gated behind
+`THVM_FUSE_CONV_BWD`. Enabling it: faithful parity PASSES (loss identical, correct) but
+faithful-CPU warm does NOT improve (237 -> 248ms, slightly SLOWER). So the symbolic/valid
+path -- which `uop_int_bounds` (79d16c39) was built to strengthen -- does NOT deliver the
+faithful-CPU speedup. The de-risk reframe ("symbolic completion suffices") was WRONG:
+tinygrad's affine conv kernels come from keeping the window positions as SEPARATE LOOP
+AXES (N-D: `r_8_20_5_8_4_4_32_5_5`), and index-VALUE simplification alone does not
+restructure thvm's flattened single-axis loop into separate strided axes. The bottleneck
+is the GATHER (memory-access structure / loop nesting), not the index arithmetic that
+bounds + valid-fold simplify.
+
+**So faithful-CPU speed genuinely needs the structural N-D loop restructuring** (rangeify
+keeps the _pool window axes separate instead of flattening) -- large, narrow benefit
+(default WINS CPU via BLAS; GPU faithful is competitive), correctness-critical, on an
+already-MET goal whose original "faithful must be fast" steer was the resolved zero_grad
+bench bug. The symbolic path is a confirmed dead-end for this. `uop_int_bounds` and
+`fold_add_divmod_recombine` stand as sound, tested spec-completeness infrastructure (thvm
+lacked bounds entirely; tinygrad uses them pervasively), useful for future bounds-based
+work -- but they do not, and cannot alone, close the faithful-CPU gap. Recombine + bounds
+were the tractable wins; the residual is the deferred structural change.
+
+### DEFINITIVE faithful-CPU diagnosis via workflow + clang -Rpass (2026-06-01)
+
+Ran a 4-phase workflow (map both codebases / design / implement / adversarial-verify, 10
+agents). It settled the faithful-CPU root cause with clang `-Rpass-analysis` on the actual
+generated conv kernel, correcting every earlier guess:
+
+**Removing IDIV/IMOD is necessary but NOT sufficient.** The workflow ported tinygrad's
+`fast_idiv`/magicgu late-rewrite (lower `x//c` -> `(x*m)>>s`, `x%c` -> `x - c*(x//c)`;
+new UOP_ISHR), taking the conv kernel to idiv/imod = 0. clang STILL vectorizes ZERO loops
+even with `-march=native -ffast-math`. The actual blockers, confirmed by the compiler's own
+diagnostics:
+1. **maxpool-fusion validity ternaries** -- thvm FUSES the maxpool into the conv2 reduce,
+   so the kernel is ~31 `(cond ? val : INVALID)` masked gathers. tinygrad REALIZES a
+   separate maxpool buffer (`r_2560_10_2_2`) so conv2 reads a clean affine buffer with NO
+   ternaries.
+2. **scalar accumulator** -- thvm emits one scalar `_acc`; clang won't reorder the FP
+   reduction. tinygrad register-blocks it (`float acc0[16]`, from UPCAST) so independent
+   lanes vectorize without fast-math.
+
+**So the real perf levers (evidence-backed) are TWO structural changes, both previously
+dismissed:**
+- (A) **Realize the maxpool separately** so conv2 is an affine reduce with no validity
+  ternaries. This is FAITHFUL -- tinygrad's own realize-map does it; thvm's faithful seed
+  + walk OVER-fuses it. (A rangeify/seed change at the maxpool boundary.)
+- (B) **Register-block the conv accumulator** = un-gate CPU UPCAST (hand_opts.c:417 gates
+  ALL opts off for CPU; tick-2 found UPCAST "doesn't help" -- but that was BECAUSE the
+  ternaries (A) blocked vectorization; with A done, B's `acc0[N]` should vectorize).
+Neither alone helps (tick-2 proved B-alone is a no-op; fast_idiv proves arithmetic-alone is
+a no-op). A + B + the affine arithmetic (fast_idiv) together are what tinygrad has. NEXT
+ARC: implement A then B, measuring vectorization (clang -Rpass) + warm at each step.
+
+**fast_idiv/magicgu LANDED as a prerequisite leg** (not the fix): faithful tinygrad codegen
+(it emits `(x*21)>>9` for `x//25`), correct (the adversarial-verify caught a silent
+magicgu-degenerate `m=1,s=0` mis-lowering of a gated numerator bounded below the divisor --
+`x//c -> x` instead of 0; fixed with a `hi < bv -> exact` guard + regression test), all
+suites green (grad 68, cpu_jit 342, rangeify 45, pool_im2col 13, index_simplify 172),
+parity-exact, perf-neutral (~1%, expected). It is the affine-arithmetic leg that matters
+once A+B unblock vectorization.
+
 **State of v3 after this session:** achievable compiler goals MET (wins warm wall on
 CPU/CUDA/Metal in default mode; faithful kernel count within 9% of tinygrad; numerically
 correct). Landed this session: honest `sched_kernels` probe (ea2f6ff6), realize.c

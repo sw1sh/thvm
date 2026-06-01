@@ -136,7 +136,8 @@ static Term sym_pm_int_binary(Term t, void *user) {
   u32 op = term_ext(t);
   if (op != UOP_IADD && op != UOP_ISUB && op != UOP_IMUL &&
       op != UOP_IDIV && op != UOP_IMOD && op != UOP_ILT  &&
-      op != UOP_IAND && op != UOP_IOR  && op != UOP_IXOR) return 0;
+      op != UOP_IAND && op != UOP_IOR  && op != UOP_IXOR &&
+      op != UOP_ISHR) return 0;
   Term a = heap_read(term_val(t) + 0);
   Term b = heap_read(term_val(t) + 1);
   Term r = uop_simplify_int_binary(op, a, b);

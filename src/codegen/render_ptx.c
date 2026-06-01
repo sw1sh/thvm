@@ -266,6 +266,8 @@ static int ptx_emit_alu(u32 op, const char *d, const char *a,
       fprintf(fp, "\tor.b%s %s, %s, %s;\n", tn + 1, d, a, b); return 1;
     case UOP_IXOR:
       fprintf(fp, "\txor.b%s %s, %s, %s;\n", tn + 1, d, a, b); return 1;
+    case UOP_ISHR:
+      fprintf(fp, "\tshr.%s %s, %s, %s;\n", tn, d, a, b); return 1;
     case UOP_NEG:
       fprintf(fp, "\tneg.%s %s, %s;\n", tn, d, a); return 1;
     case UOP_RECIP:
@@ -307,7 +309,8 @@ static int ptx_term_is_pred(Term t) {
 static int ptx_is_int_alu(u32 op) {
   return op == UOP_IADD || op == UOP_ISUB || op == UOP_IMUL
       || op == UOP_IDIV || op == UOP_IMOD
-      || op == UOP_IAND || op == UOP_IOR || op == UOP_IXOR;
+      || op == UOP_IAND || op == UOP_IOR || op == UOP_IXOR
+      || op == UOP_ISHR;
 }
 
 // The dtype to use for an ALU op's instruction suffix + result register.
@@ -826,7 +829,7 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
       case UOP_ADD: case UOP_MUL:
       case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
       case UOP_IDIV: case UOP_IMOD:
-      case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+      case UOP_IAND: case UOP_IOR: case UOP_IXOR: case UOP_ISHR:
       case UOP_NEG: case UOP_RECIP:
       case UOP_SQRT: case UOP_EXP2: case UOP_LOG2:
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_ILT:

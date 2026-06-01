@@ -140,6 +140,7 @@ static const char *lz_alu_symbol(u32 op) {
     case UOP_IAND:               return "&";
     case UOP_IOR:                return "|";
     case UOP_IXOR:               return "^";
+    case UOP_ISHR:               return ">>";
     default:                     return "?";
   }
 }
@@ -266,7 +267,7 @@ static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD:
     case UOP_CMPLT: case UOP_CMPEQ: case UOP_ILT:
-    case UOP_IAND: case UOP_IOR: case UOP_IXOR: {
+    case UOP_IAND: case UOP_IOR: case UOP_IXOR: case UOP_ISHR: {
       Term a = heap_read(loc + 0);
       Term b = heap_read(loc + 1);
       fputc('(', fp);
@@ -662,7 +663,7 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
       case UOP_CAST: case UOP_BITCAST:
       case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
       case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR:
-      case UOP_IXOR: case UOP_IWHERE:
+      case UOP_IXOR: case UOP_ISHR: case UOP_IWHERE:
       case UOP_GEP: case UOP_STACK: case UOP_VCONST: case UOP_UNROLL:
       case UOP_CONTRACT:
       case UOP_OPT:

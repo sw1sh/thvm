@@ -517,6 +517,85 @@ int main(void) {
     CHECK_EQ(uop_int_bounds(div_var, &blo, &bhi), 0);
   }
 
+  // === fast_idiv: magicgu + IDIV/IMOD -> mul-shift late lowering ===
+  {
+    // magicgu correctness: (x*m)>>s == x/d for every 0<=x<=vmax, for the
+    // conv _pool intermediate widths (9, 11, 24, 25, 28).  This is the
+    // exact identity the render-time lowering relies on.
+    i64 widths[5] = { 9, 11, 24, 25, 28 };
+    i64 vmaxes[5] = { 31, 39, 143, 143, 167 };
+    for (int wi = 0; wi < 5; wi++) {
+      i64 d = widths[wi], vmax = vmaxes[wi], m = 0, s = 0;
+      char nm[64];
+      snprintf(nm, sizeof nm, "fastidiv/magicgu-d%lld", (long long)d);
+      TEST_BEGIN(nm);
+      CHECK_EQ(thvm_magicgu(vmax, d, &m, &s), 1);
+      int all_ok = 1;
+      for (i64 x = 0; x <= vmax; x++) {
+        // signed arithmetic right-shift, matching the rendered (int) cast.
+        if ((i64)(((i32)(x * m)) >> (i32)s) != x / d) { all_ok = 0; break; }
+      }
+      CHECK_EQ(all_ok, 1);
+    }
+
+    Term fr0 = uop_range(400, KAX_LOOP, 4);   // [0,3]
+    Term fr1 = uop_range(401, KAX_LOOP, 10);  // [0,9]
+    Term fnum = uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IMUL, fr0, uop_const(DT_INT32, 10)), fr1);
+
+    // fast_idiv-node: bounded non-negative `(r*10 + r1) / 11` (num in
+    // [0,39]) lowers to ISHR(IMUL(num, m), s).
+    TEST_BEGIN("fastidiv/idiv-node-lowers-to-shr");
+    Term div11 = uop_int_binary(UOP_IDIV, fnum, uop_const(DT_INT32, 11));
+    CHECK_EQ(term_ext(div11), UOP_IDIV);  // simplifier leaves it IDIV
+    Term lowered = uop_fast_idiv_node(div11);
+    CHECK(lowered != 0);
+    CHECK_EQ(term_ext(lowered), UOP_ISHR);
+    CHECK_EQ(term_ext(heap_read(term_val(lowered) + 0)), UOP_IMUL);
+
+    // fast_idiv-node: `num % 11` lowers to ISUB(num, IMUL(div, 11)) with NO
+    // residual IDIV/IMOD.
+    TEST_BEGIN("fastidiv/imod-node-lowers-to-sub-mul-shr");
+    Term mod11 = uop_int_binary(UOP_IMOD, fnum, uop_const(DT_INT32, 11));
+    Term modlow = uop_fast_idiv_node(mod11);
+    CHECK(modlow != 0);
+    CHECK_EQ(term_ext(modlow), UOP_ISUB);
+    Term sub_rhs = heap_read(term_val(modlow) + 1);
+    CHECK_EQ(term_ext(sub_rhs), UOP_IMUL);
+
+    // skip: power-of-two divisor is NOT lowered (signed >> is not a valid
+    // truncating divide there; left to the existing/simpler fold).
+    TEST_BEGIN("fastidiv/skips-power-of-two");
+    Term div8 = uop_int_binary(UOP_IDIV, fnum, uop_const(DT_INT32, 8));
+    CHECK_EQ(uop_fast_idiv_node(div8), 0);
+
+    // skip: a non-const (unbounded) divisor path is NOT lowered.
+    TEST_BEGIN("fastidiv/skips-non-const-divisor");
+    Term divvar = uop_int_binary(UOP_IDIV, fr1, fr0);
+    CHECK_EQ(uop_fast_idiv_node(divvar), 0);
+
+    // regression (silent-corruption guard): a GATED numerator proven BELOW
+    // the divisor -- IWHERE(cond, r1[0,9], INVALID) // 25 -- must lower to the
+    // EXACT value (x//25 == 0, x%25 == x), NOT the degenerate magicgu identity
+    // m=1,s=0 that mis-lowers x//25 to (x*1)>>0 == x.  This shape evades the
+    // constructor's x//c->0 fold (which uses the IWHERE-blind max-value path)
+    // but reaches fast_idiv (whose uop_int_bounds DOES see through IWHERE).
+    TEST_BEGIN("fastidiv/gated-numerator-below-divisor-folds-exact");
+    Term gcond = uop_int_binary(UOP_ILT, fr0, fr1);     // symbolic, won't fold
+    Term gated = uop_iwhere(gcond, fr1, uop_invalid()); // bounds [0,9], stays IWHERE
+    CHECK_EQ(term_ext(gated), UOP_IWHERE);
+    Term gdiv = uop_int_binary(UOP_IDIV, gated, uop_const(DT_INT32, 25));
+    CHECK_EQ(term_ext(gdiv), UOP_IDIV);                 // not pre-folded
+    Term gdiv_low = uop_fast_idiv_node(gdiv);
+    CHECK(gdiv_low != 0);
+    CHECK_EQ(term_ext(gdiv_low), UOP_CONST);            // == 0, NOT x
+    i64 gdv;
+    CHECK(uop_iconst_value(gdiv_low, &gdv));
+    CHECK_EQ(gdv, 0);
+    Term gmod = uop_int_binary(UOP_IMOD, gated, uop_const(DT_INT32, 25));
+    CHECK_EQ(uop_fast_idiv_node(gmod), gated);          // x%25 == x for x<25
+  }
+
   thvm_free();
   TEST_REPORT();
 }

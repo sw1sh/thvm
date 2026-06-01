@@ -124,6 +124,15 @@ static int uop_term_max_value(Term t, i64 *out) {
       *out = dv - 1;
       return 1;
     }
+    case UOP_ISHR: {
+      i64 sft, a;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &sft) || sft < 0 || sft >= 63)
+        return 0;
+      if (!uop_term_max_value(heap_read(term_val(t) + 0), &a)) return 0;
+      if (a < 0) return 0;
+      *out = a >> sft;
+      return 1;
+    }
     case UOP_IWHERE: {
       i64 a, b;
       if (!uop_term_max_value(heap_read(term_val(t) + 1), &a)) return 0;
@@ -229,6 +238,14 @@ static int uop_term_nonneg_d(Term t, u32 depth) {
       Term b = heap_read(term_val(t) + 1);
       i64 dv;
       if (!uop_iconst_value(b, &dv) || dv <= 0) return 0;
+      return uop_term_nonneg_d(a, depth + 1);
+    }
+    case UOP_ISHR: {
+      // a >> s is non-negative when a is non-negative and s >= 0.
+      Term a = heap_read(term_val(t) + 0);
+      Term b = heap_read(term_val(t) + 1);
+      i64 sft;
+      if (!uop_iconst_value(b, &sft) || sft < 0) return 0;
       return uop_term_nonneg_d(a, depth + 1);
     }
     default: return 0;
@@ -412,6 +429,27 @@ static int uop_int_bounds_d(Term t, i64 *lo, i64 *hi, u32 depth) {
       *lo = 0; *hi = c - 1;
       return 1;
     }
+    case UOP_ISHR: {
+      // `a >> s` with s a non-negative constant.  For a provably
+      // non-negative numerator the arithmetic right-shift is a floor
+      // divide by 2**s, so the interval is [la>>s, ha>>s].  This is the
+      // form the fast_idiv render-time lowering emits (x*m)>>s; keeping it
+      // bounded lets a containing div/mod still fold and keeps
+      // uop_int_bounds sound on a lowered tree.
+      i64 sft;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &sft) || sft < 0 || sft >= 63)
+        return 0;
+      Term num = heap_read(term_val(t) + 0);
+      i64 la, ha;
+      if (!uop_int_bounds_d(num, &la, &ha, depth + 1)) return 0;
+      if (la < 0) {
+        if (!uop_term_nonneg(num)) return 0;
+        la = 0;
+      }
+      *lo = la >> sft;
+      *hi = ha >> sft;
+      return 1;
+    }
     case UOP_IWHERE: {
       // select(cond, x, y): union the two branch intervals, ignoring
       // cond.  An INVALID branch is a masking sentinel (no numeric
@@ -455,6 +493,39 @@ static int uop_int_bounds_d(Term t, i64 *lo, i64 *hi, u32 depth) {
 // int-typed UOp `t`.  Returns 1 on success, 0 if unbounded/unknown.
 static int uop_int_bounds(Term t, i64 *lo, i64 *hi) {
   return uop_int_bounds_d(t, lo, hi, 0);
+}
+
+// === magicgu: magic multiply-shift constants for unsigned divide ===
+//
+// Compute (m, s) such that `x / d == (x * m) >> s` for every integer
+// 0 <= x <= vmax, with d > 0.  Direct port of tinygrad
+// uop/decompositions.py:272-280 (magicgu), itself adapted from Hacker's
+// Delight Ch.10.  The window-decode `idx // 25`-style divides the conv
+// _pool reshape leaves are non-negative and bounded, so this lowers them
+// to a vectorizable integer multiply + arithmetic-right-shift instead of
+// a scalar IDIV.  Returns 1 on success (fills *m_out, *s_out), 0 if no
+// shift in the searched range works (matching tinygrad's `assert False`,
+// which is unreachable for valid d>0 / vmax>=0 but we fail soft here).
+static int thvm_magicgu(i64 vmax, i64 d, i64 *m_out, i64 *s_out) {
+  if (d <= 0 || vmax < 0) return 0;
+  // nc = (vmax+1)//d * d - 1
+  i64 nc = (vmax + 1) / d * d - 1;
+  // nbits = vmax.bit_length()
+  i32 nbits = 0;
+  for (i64 v = vmax; v > 0; v >>= 1) nbits++;
+  for (i32 s = 0; s <= 2 * nbits + 1; s++) {
+    // 2**s > nc*(d - 1 - (2**s - 1) % d)
+    if (s >= 62) return 0;  // 2**s would overflow i64 -- bail soft
+    i64 pow2 = (i64)1 << s;
+    i64 rhs = nc * (d - 1 - (pow2 - 1) % d);
+    if (pow2 > rhs) {
+      // m = (2**s + d - 1 - (2**s - 1) % d) // d
+      *m_out = (pow2 + d - 1 - (pow2 - 1) % d) / d;
+      *s_out = s;
+      return 1;
+    }
+  }
+  return 0;
 }
 
 // Recognise `(c * x) + y` shape on a numerator.  Returns 1 on match;
@@ -784,6 +855,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       case UOP_IAND: return uop_iconst(av & bv);
       case UOP_IOR:  return uop_iconst(av | bv);
       case UOP_IXOR: return uop_iconst(av ^ bv);
+      case UOP_ISHR: return uop_iconst((i64)((i32)av >> (i32)bv));
       default: break;
     }
   }
@@ -1141,7 +1213,7 @@ static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-    case UOP_IXOR: {
+    case UOP_IXOR: case UOP_ISHR: {
       Term a = uop_index_substitute(heap_read(term_val(t) + 0), from, to, depth + 1);
       Term b = uop_index_substitute(heap_read(term_val(t) + 1), from, to, depth + 1);
       if (a == heap_read(term_val(t) + 0) && b == heap_read(term_val(t) + 1)) return t;
@@ -1157,6 +1229,69 @@ static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
     }
     default: return t;
   }
+}
+
+// === fast_idiv late lowering (tinygrad get_late_rewrite_patterns) ===
+//
+// Rewrite `x // c` (c a positive non-power-of-two constant, x a provably
+// non-negative bounded index) into the magic multiply-shift `(x * m) >> s`,
+// and `x % c` into `x - c*(x // c)`.  Faithful port of tinygrad's fast_idiv
+// (uop/decompositions.py:282-300), applied -- exactly as tinygrad does --
+// as a LATE codegen rewrite (get_late_rewrite_patterns, wired in
+// codegen/__init__.py:89), NOT inside the general symbolic simplifier.
+// Keeping it out of uop_int_binary is essential: the schedule/index
+// pipeline (and the structural unit tests + uop_int_bounds-driven valid
+// folds) rely on div/mod staying in their canonical IDIV/IMOD shape; only
+// the final rendered kernel wants the vectorizable mul-shift form.  A
+// scalar `/c`,`%c` serializes on clang's idiv unit and blocks SIMD;
+// `(x*m)>>s` vectorizes.
+//
+// Bounds (uop_int_bounds) and the int32 no-overflow guard (m*hi <=
+// INT32_MAX, mirroring fast_idiv's `m*vmax <= x.dtype.max`) are checked per
+// node; on failure the literal IDIV/IMOD is kept -- so this can never emit
+// a wrong value.  Powers of two are skipped (signed >> is not a valid
+// truncating divide there, and they are already cheap).
+//
+// Single-node rewrite: given an already-children-rewritten IDIV/IMOD node,
+// return its lowered form, or 0 if the guards fail.  Driven over the full
+// kernel AST by uop_graph_rewrite (bottom-up), so nested div/mod inside a
+// numerator are lowered to ISHR first -- which uop_int_bounds still bounds.
+static Term uop_fast_idiv_node(Term node) {
+  if (term_tag(node) != TAG_UOP) return 0;
+  u32 op = term_ext(node);
+  if (op != UOP_IDIV && op != UOP_IMOD) return 0;
+  Term num = heap_read(term_val(node) + 0);
+  Term den = heap_read(term_val(node) + 1);
+  i64 bv;
+  if (!uop_iconst_value(den, &bv) || bv <= 1 || (bv & (bv - 1)) == 0) return 0;
+  i64 lo, hi;
+  if (!uop_int_bounds(num, &lo, &hi) || lo < 0 || hi < 0) return 0;
+  // Numerator provably below the divisor (0 <= x <= hi < c): x//c == 0 and
+  // x%c == x exactly.  magicgu returns the DEGENERATE identity m=1,s=0 here
+  // (nc < 0), which would mis-lower x//c to `(x*1)>>0 == x` -- a silent
+  // index-corruption for gated/bounded numerators (e.g. IWHERE(cond, r<c,
+  // INVALID)//c).  Short-circuit to the exact values before magicgu.
+  if (hi < bv) return (op == UOP_IDIV) ? uop_iconst(0) : num;
+  i64 m, s;
+  if (!thvm_magicgu(hi, bv, &m, &s)) return 0;
+  if (m < 1 || m > 0x7fffffff || hi > 0x7fffffff / m) return 0;  // int32 mul guard
+  Term mul = uop_int_binary(UOP_IMUL, num, uop_iconst(m));
+  Term div = uop_int_binary(UOP_ISHR, mul, uop_iconst(s));
+  if (op == UOP_IDIV) return div;
+  // x % c -> x - c*(x // c); reuses the lowered div so no IDIV remains.
+  Term cm = uop_int_binary(UOP_IMUL, div, den);
+  return uop_int_binary(UOP_ISUB, num, cm);
+}
+
+// uop_graph_rewrite rule wrapper (signature Term(Term, void*)).
+// THVM_NO_FAST_IDIV=1 disables the lowering (keeps literal IDIV/IMOD) --
+// an A/B toggle alongside thvm's other index-fold env knobs.
+fn Term uop_fast_idiv_rule(Term t, void *user) {
+  (void)user;
+  static int gate = -1;
+  if (gate < 0) gate = getenv("THVM_NO_FAST_IDIV") ? 1 : 0;
+  if (gate) return 0;
+  return uop_fast_idiv_node(t);
 }
 
 // True iff the DAG rooted at `t` contains a UOP_RANGE leaf whose

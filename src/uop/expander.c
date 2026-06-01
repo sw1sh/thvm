@@ -486,6 +486,7 @@ static int op_is_expandable(u32 op) {
     case UOP_CAST: case UOP_BITCAST:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_IWHERE:
     case UOP_INDEX_E:
     // STORE / LOAD / REDUCE are expandable (tinygrad expander.py:130
@@ -621,6 +622,7 @@ static Term expander_do_expand(Term root) {
     }
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
       rebuilt = uop_int_binary(op, new_srcs[0], new_srcs[1]);
       break;
     case UOP_IWHERE:

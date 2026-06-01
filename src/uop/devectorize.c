@@ -334,7 +334,7 @@ static int devec_alu_op_arity(u32 op) {
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR:
-    case UOP_IXOR:
+    case UOP_IXOR: case UOP_ISHR:
       return 2;
     case UOP_IWHERE:
       return 3;
@@ -391,7 +391,7 @@ static Term devec_no_vec_alu(Term node) {
         break;
       case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
       case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-      case UOP_IXOR:
+      case UOP_IXOR: case UOP_ISHR:
         lane_node = uop_int_binary(op, lane_srcs[0], lane_srcs[1]);
         break;
       case UOP_IWHERE:

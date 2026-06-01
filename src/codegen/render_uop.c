@@ -265,6 +265,7 @@ static const char *rmu_int_op_name(u32 op) {
     case UOP_IAND: return "&";
     case UOP_IOR:  return "|";
     case UOP_IXOR: return "^";
+    case UOP_ISHR: return ">>";
     default:       return "?";
   }
 }
@@ -359,7 +360,7 @@ static void rmu_emit_term(Term t, FILE *fp) {
     }
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
-    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: {
+    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: case UOP_ISHR: {
       // Signed integer arithmetic.  RANGE loop vars are declared `uint`
       // (loop counters, always non-negative), but UOP_ISUB is a SIGNED
       // subtract (thvm.h:368) and may legitimately go negative -- e.g.
@@ -683,6 +684,7 @@ static void rmu_collect_ranges_rec_cap(Term t, Term *ranges,
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
@@ -751,6 +753,7 @@ static int rmu_term_contains_rec(Term t, Term needle, u32 depth) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1)
@@ -835,6 +838,7 @@ static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1)
@@ -874,6 +878,7 @@ static int rmu_term_has_reduce(Term t, u32 depth) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return rmu_term_has_reduce(heap_read(loc + 0), depth + 1)
@@ -925,6 +930,7 @@ static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
@@ -988,6 +994,7 @@ static void rmu_collect_reduces_with_simd(Term t, int parent_is_simd,
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
@@ -1111,6 +1118,7 @@ static void rmu_collect_ranges_rec_through_reduce_cap(
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_ranges_rec_through_reduce_cap(
@@ -1747,7 +1755,7 @@ static void rmu_collect_divmod_consts(Term t, u32 want_axis,
   }
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_ILT: case UOP_IAND:
-    case UOP_IOR:  case UOP_IXOR:
+    case UOP_IOR:  case UOP_IXOR: case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
@@ -4139,6 +4147,7 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
@@ -4437,10 +4446,27 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
   RMU_TARGET = CG_TARGET_C;
-  if (root != 0 && term_tag(root) == TAG_UOP) {
-    u32 op = term_ext(root);
-    if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
-    else if (op == UOP_AFTER) rmu_emit_after(root, fp, 1);
+  // Late fast_idiv lowering (tinygrad get_late_rewrite_patterns,
+  // codegen/__init__.py:89): rewrite every constant-divisor `x // c`,
+  // `x % c` over a bounded non-negative index into the vectorizable
+  // `(x*m) >> s` magic multiply-shift across the WHOLE kernel AST.  The C
+  // target's scalar `/c`,`%c` serialize on clang's idiv unit and block
+  // SIMD (the fused conv _pool window-decode is all such div/mod); the
+  // mul-shift form vectorizes.  Applied bottom-up by uop_graph_rewrite, so
+  // a numerator's own nested div/mod lower first (and stay bounded via
+  // uop_int_bounds' ISHR case).  C target only: METAL has a compiler bug
+  // with the magic multiply and CUDA renders via its own path -- mirrors
+  // fast_idiv's device gate (decompositions.py:284).  No-op where the
+  // bounds / int32-overflow guards fail, so it can never change a value.
+  Term emit_root = root;
+  if (root != 0) {
+    UOpGraphRewriteRule fi_rules[1] = { { "fast_idiv", uop_fast_idiv_rule } };
+    emit_root = uop_graph_rewrite(root, fi_rules, 1, NULL);
+  }
+  if (emit_root != 0 && term_tag(emit_root) == TAG_UOP) {
+    u32 op = term_ext(emit_root);
+    if (op == UOP_STORE)      rmu_emit_store(emit_root, fp, 1);
+    else if (op == UOP_AFTER) rmu_emit_after(emit_root, fp, 1);
     else {
       fputs("  /* unsupported root op */\n", fp);
     }
@@ -4527,10 +4553,27 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
   RMU_TARGET = CG_TARGET_C;
-  if (root != 0 && term_tag(root) == TAG_UOP) {
-    u32 op = term_ext(root);
-    if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
-    else if (op == UOP_AFTER) rmu_emit_after(root, fp, 1);
+  // Late fast_idiv lowering (tinygrad get_late_rewrite_patterns,
+  // codegen/__init__.py:89): rewrite every constant-divisor `x // c`,
+  // `x % c` over a bounded non-negative index into the vectorizable
+  // `(x*m) >> s` magic multiply-shift across the WHOLE kernel AST.  The C
+  // target's scalar `/c`,`%c` serialize on clang's idiv unit and block
+  // SIMD (the fused conv _pool window-decode is all such div/mod); the
+  // mul-shift form vectorizes.  Applied bottom-up by uop_graph_rewrite, so
+  // a numerator's own nested div/mod lower first (and stay bounded via
+  // uop_int_bounds' ISHR case).  C target only: METAL has a compiler bug
+  // with the magic multiply and CUDA renders via its own path -- mirrors
+  // fast_idiv's device gate (decompositions.py:284).  No-op where the
+  // bounds / int32-overflow guards fail, so it can never change a value.
+  Term emit_root = root;
+  if (root != 0) {
+    UOpGraphRewriteRule fi_rules[1] = { { "fast_idiv", uop_fast_idiv_rule } };
+    emit_root = uop_graph_rewrite(root, fi_rules, 1, NULL);
+  }
+  if (emit_root != 0 && term_tag(emit_root) == TAG_UOP) {
+    u32 op = term_ext(emit_root);
+    if (op == UOP_STORE)      rmu_emit_store(emit_root, fp, 1);
+    else if (op == UOP_AFTER) rmu_emit_after(emit_root, fp, 1);
     else {
       fputs("  /* unsupported root op */\n", fp);
     }
@@ -4559,6 +4602,7 @@ static int rmu_dag_has_simd_reduce(Term t) {
       return rmu_dag_has_simd_reduce(heap_read(loc + 0));
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER:
       return rmu_dag_has_simd_reduce(heap_read(loc + 0))
@@ -4601,6 +4645,7 @@ static int rmu_dag_has_group_reduce(Term t) {
       return rmu_dag_has_group_reduce(heap_read(loc + 0));
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER:
       return rmu_dag_has_group_reduce(heap_read(loc + 0))
@@ -4685,6 +4730,7 @@ static int rmu_dag_has_tc(Term t) {
       return rmu_dag_has_tc(heap_read(loc + 0));
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER:
       return rmu_dag_has_tc(heap_read(loc + 0))
