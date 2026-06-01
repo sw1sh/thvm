@@ -109,8 +109,8 @@ fn Term thvm_realize(Term expr) {
   // into a kernel's source_uop).  Materialize then compiles that sink
   // and the next iteration's wnf fires it.
   //
-  // The loop (vs the old fire-once three phases) is required for the
-  // assign->compute->assign chain: an ASSIGN whose src is a compute
+  // The loop is required for the assign->compute->assign chain: an
+  // ASSIGN whose src is a compute
   // reading a PRIOR assign's mutated buffer (e.g. y := (w := w+x) * x)
   // cannot materialize until that prior assign has fired, which needs
   // its own materialize+wnf first.  One pass left the outer compute
@@ -140,16 +140,10 @@ fn Term thvm_realize(Term expr) {
   backend_dispatch_end_all();
   kernel_fire_scope_end();
 
-  // gc3: tracing-GC preserve.  Composes gc1 + gc2 into
-  // mark_gc_preserve(res), which walks the live root set
-  // (result + WNF_LAST_STACK + DEFS) AND defensively overlays
-  // mark_heap_rooted_preserve to cover pending UOP cells
-  // missed by the root-set walk (e.g., forward intermediates
-  // a future TGrad realize will need).  Net effective
-  // coverage matches hrp2 today -- the tracing infrastructure
-  // lands cleanly, no bench delta yet; real savings unblock
-  // once a WL-pinned-Terms side table lets gc_mark_term
-  // find pending UOPs without the heap-rooted overlay.
+  // Tracing-GC preserve: mark_gc_preserve(res) walks the live root set
+  // (result + WNF_LAST_STACK + DEFS) AND overlays mark_heap_rooted_preserve
+  // to cover pending UOP cells the root-set walk misses (e.g. forward
+  // intermediates a future TGrad realize will need).
   mark_gc_preserve(res);
   jit_capture_mark_preserved();
 

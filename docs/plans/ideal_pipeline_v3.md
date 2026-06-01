@@ -386,3 +386,93 @@ faithful path does not. So:
 
 Harness: `tools/bench_train.py` now reports `sched_kernels` (the honest eager
 `kernel_count()` delta) alongside warm wall, so this measurement error can't recur.
+
+### Faithful-CPU codegen root-caused: it's index arithmetic + gather, NOT missing opts (2026-06-01)
+
+Pursued the faithful-CPU gap (238ms vs tinygrad 15ms). Mapped the CPU backend
+(`src/backend/cpu/{jit,blas,interpret,uop_walk}.c`): three routes -- cBLAS first
+(`blas.c`, the six `uop_dag_classify_*` shapes), then a clang `-O3` C-codegen JIT
+(`jit.c:216`), then a scalar UOP-walker interpreter. There is NO thread parallelism off
+the BLAS path and NO explicit SIMD. `hand_opts.c:417` gates ALL hand opts off for CPU
+(rationale: opts mutate the DAG and defeat the cBLAS classifiers).
+
+Hypothesis tested (agent, worktree, CPU): un-gate the renderer-safe UNROLL/UPCAST for
+the NON-BLAS-eligible CPU kernels (the fused convs, which never reach cBLAS anyway). The
+gate change is correct -- parity-safe, default-mode unaffected (BLAS kernels stay bare) --
+but **UPCAST/UNROLL do NOT help (~3.6%, run-to-run noise)**. Two findings:
+- **The real bottleneck is the index/gather, not float throughput.** The dominant fused
+  kernel (conv1+bias+relu -> conv2 -> maxpool, one kernel) has inner loops full of
+  `IDIV/9`, `IMOD/9`, `<27` bounds, and chained `? : INVALID` validity ternaries feeding
+  STRIDED gathered loads (`in4[a9*576+..]`, `in5[a9*36+..]`). clang `-O3` cannot vectorize
+  gathered loads under data-dependent masks; UPCAST just adds `#pragma unroll`. A
+  microbench hoisting the IDIV/IMOD by hand moved only 20.8 -> 19.0ms/iter. So the
+  prerequisite is **index-simplification** (collapse the redundant per-element
+  IDIV/IMOD + hoist/loop-restrict the validity masks instead of per-element ternaries)
+  AND loop-ordering to expose a unit-stride inner loop -- exactly what tinygrad's
+  symbolic.py + opt search do to run the SAME fused schedule at 15ms.
+- **Bug surfaced (recorded, not hidden):** the Section-7 split-by-4 reduce UNROLL
+  MISCOMPILES on the CPU reduce path (faithful loss 2.3228 vs 2.3486 reference) -- the
+  same renderer reduce-lane defect already documented for full-extent UNROLL
+  (`hand_opts.c:755-762`), but it also hits the split-by-4 case on CPU, not just
+  full-extent on GPU. So the documented "RENDERER LIMIT" is broader than the comment
+  claims. The reduce-lane matcher in `rmu_emit_store_reduce` reads the fused reduce body
+  through the wrong accumulator lane after an UNROLL.
+
+The gate change was REVERTED (perf-neutral churn; commit-only-verified-wins). Re-apply
+recipe when index-simplification lands: add `hand_opt_kernel_blas_eligible(ke)` (OR of the
+six `uop_dag_classify_*_shape`), and at `hand_opts.c:417` route non-BLAS CPU kernels
+through a UPCAST-only `hand_opt_cpu_vectorize` (NOT reduce-UNROLL until the reduce-lane
+bug is fixed).
+
+**Sharpened next lever (supersedes "extend hand_opts to vectorize"):** index/address
+simplification for the fused conv kernels -- diff `src/uop/index_simplify.c` +
+`symbolic_rewrite.c` against tinygrad `uop/symbolic.py` (IDIV/IMOD fold under known
+bounds) and `schedule/indexing.py` valid-mask handling; render validity as loop-range
+restriction, not per-element ternary; hoist loop-invariant index subexpressions to named
+locals at the right loop depth. Plus fixing the reduce-lane UNROLL bug to unlock the
+UNROLL half. All large; CPU-verifiable; gated by the parity guardrail.
+
+### Memory audit: thvm HAS a linear-scan planner; the gap is the multi-pass realize loop (2026-06-01)
+
+Audited the peak-memory item (M5 / [[project_memory_parity_followup]]) before porting
+anything. thvm ALREADY has a linear-scan buffer planner: `materialize.c:789-915` computes
+per-boundary lifetimes (`first_pos`/`last_pos`), builds open/close events, and runs a TLSF
+suballocator (`src/schedule/tlsf.c`) that allocs at open / frees at close, so
+non-overlapping buffers share bytes. So the follow-up's "need linear-scan reuse in the
+scheduler" is STALE -- it exists. `THVM_ARENA_DUMP=1` (standalone eager, CPU, full step):
+- default: a pass with 25/70 boundaries plannable, sum 12.82MB packed to 12.25MB arena
+  (only ~4.5% reuse) + 45 legacy allocs.
+- faithful: 2/13 plannable, 0.10MB arena + 11 legacy.
+
+The peak is dominated by NON-plannable (legacy, never-recycled) buffers. `arena_boundary_is_plannable`
+(`materialize.c:721`) forces legacy when: (A) inside a JIT-capture dedup span -- so the
+JIT BENCH gets ZERO arena planning (line 733); (B) the boundary is a realize root/output
+(`BOUNDARY_LAST_USE==0`, correct, matches tinygrad memory.py:22); (C) `consumer_count != 1`
+(line 751). (A) and (C) share ONE root: `thvm_realize` runs `materialize` in a LOOP of
+passes; per-pass `BOUNDARY_LAST_USE` can't see a buffer read by a LATER pass, so anything
+that might cross a pass boundary is forced legacy for safety. `arena_last_pos_at_depth`
+(line 778) further OVER-estimates within-pass lifetimes (depth-bucketed, not exact
+consumer position), which is why even plannable buffers show peak~=sum.
+
+**This is the same root as the JIT dispatch-redundancy item** (the capture-vs-eager kernel
+duplication, [[project_thvm_jit_dispatch_redundancy]], also from the multi-pass model).
+tinygrad's SINGLE-PASS schedule co-plans every buffer's lifetime across the whole step,
+which is why its peak is ~flat (~1MB vs thvm 14.8-31MB). So the real M5 fix is **step-global
+buffer lifetimes / collapsing `thvm_realize`'s loop to a single pass** -- large,
+architectural, correctness-critical (the realize driver), and it closes BOTH peak-memory
+AND JIT-redundancy. NOT "add a planner" (have one) and NOT a rangeify/fusion change.
+
+### Meta-assessment after 3 audit ticks (2026-06-01)
+
+The kernel-count (tick 1), faithful-CPU (tick 2), and memory (tick 3) audits converge on
+one conclusion: **thvm is at or near tinygrad parity on every achievable axis** -- it WINS
+warm wall on CPU/CUDA/Metal in default mode, matches tinygrad's kernel count within 9% in
+faithful mode, and is numerically correct (parity guardrail). The three residual gaps are
+all LARGE architectural arcs on correctness-critical paths, and two share a root:
+1. **Faithful-CPU codegen** (index-simp + loop-reorder for fused convs; the gather/IDIV
+   bottleneck). Narrow benefit (you'd use default on CPU, which already beats tinygrad).
+2. **Peak memory** -- step-global buffer planning (collapse the realize loop).
+3. **JIT dispatch redundancy** -- same multi-pass-realize root as #2.
+Highest leverage: the **single-pass / step-global realize** change (closes #2 and #3). It
+is the right next arc, approached incrementally + parity-gated. None of the three is a
+quick win; the v3 plan's milestone framing understated their architectural depth.
