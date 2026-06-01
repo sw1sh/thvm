@@ -223,11 +223,11 @@ int main(void) {
     double t1 = now_secs();
     printf("  thvm/ac-abelian  %s  wall=%.4fs  iters=%u  n_rules=%u\n",
            status_name(st), t1 - t0, iters, s->n_rules);
-    // Acceptance for this stage: harness runs to a terminal status;
-    // PROVED is the goal but QUEUE_EMPTY (saturation completes without
-    // joining the goal) is the diagnostic outcome we're trying to
-    // surface differential to wmcli's reported 12 rules.
-    CHECK(st != ATP_RUNNING);
+    // Stage 8 (bilateral Bachmair-Plaisted) closes this: the
+    // i(f(x,y)) = f(i(y), i(x)) derivation lands as a rule via
+    // (extended-R0) X (extended-R1) overlap + the AC-bijection
+    // unifier from Stage 7.
+    CHECK(st == ATP_PROVED);
     (void)ia; (void)ib; (void)iy;
 
     thvm_atp_free(s);

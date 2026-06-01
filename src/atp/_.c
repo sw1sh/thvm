@@ -11380,24 +11380,60 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     if (li_lab == lj_lab && li_lab < 64u
         && ((ac_mask >> li_lab) & 1ull) != 0ull) {
       AtpAcInfo ac = { .ac_mask = ac_mask };
-      // Extend i (or both -- for a symmetric pass).  We extend the
-      // OUTER side (i) and overlap against the renamed-apart inner
-      // (j); the dual extension is covered by atp_overlap_ij(j, i)
-      // when the saturator generates that pair later.
       Term ext_li = 0, ext_ri = 0;
-      if (atp_ac_extend_rule(li, ri, &ac, &ext_li, &ext_ri)) {
+      Term ext_lj = 0, ext_rj = 0;
+      u8 has_ext_i = atp_ac_extend_rule(li, ri, &ac, &ext_li, &ext_ri);
+      u8 has_ext_j = atp_ac_extend_rule(lj, rj, &ac, &ext_lj, &ext_rj);
+
+      // i-extended X j (li becomes f(li, z), z fresh per rename).
+      if (has_ext_i) {
         cnt = thvm_critical_pairs_pair(ext_li, ext_ri, lj, rj, buf, cap, cnt);
         if (j_un) {
           cnt = thvm_critical_pairs_pair(ext_li, ext_ri, rj, lj, buf, cap, cnt);
         }
         if (i_un) {
-          // i unorientable: also extend the ri face.
           Term ext_ri2 = 0, ext_li2 = 0;
           if (atp_ac_extend_rule(ri, li, &ac, &ext_ri2, &ext_li2)) {
             cnt = thvm_critical_pairs_pair(ext_ri2, ext_li2, lj, rj, buf, cap, cnt);
             if (j_un) {
               cnt = thvm_critical_pairs_pair(ext_ri2, ext_li2, rj, lj, buf, cap, cnt);
             }
+          }
+        }
+      }
+
+      // i X j-extended (the dual: lj becomes f(lj, z')).  The
+      // saturator's atp_overlap_ij(j, i) pass DOES eventually run with
+      // i+j swapped, but i-X-jext is a STRUCTURALLY DIFFERENT CP set
+      // than j-X-iext when li != lj: position p in the unextended OUTER
+      // rule against the extended INNER rule covers merge-positions in
+      // the inner that the swapped pass walks OVER (it walks the
+      // extended-outer's positions, not the unextended-outer's).
+      if (has_ext_j) {
+        cnt = thvm_critical_pairs_pair(li, ri, ext_lj, ext_rj, buf, cap, cnt);
+        if (j_un) {
+          cnt = thvm_critical_pairs_pair(li, ri, ext_rj, ext_lj, buf, cap, cnt);
+        }
+        if (i_un) {
+          cnt = thvm_critical_pairs_pair(ri, li, ext_lj, ext_rj, buf, cap, cnt);
+          if (j_un) {
+            cnt = thvm_critical_pairs_pair(ri, li, ext_rj, ext_lj, buf, cap, cnt);
+          }
+        }
+      }
+
+      // i-extended X j-extended: needed when neither side's positions
+      // surface the AC merge-fix without both extensions in play (the
+      // canonical case Bachmair-Plaisted's symmetric variant covers).
+      if (has_ext_i && has_ext_j) {
+        cnt = thvm_critical_pairs_pair(ext_li, ext_ri, ext_lj, ext_rj, buf, cap, cnt);
+        if (j_un) {
+          cnt = thvm_critical_pairs_pair(ext_li, ext_ri, ext_rj, ext_lj, buf, cap, cnt);
+        }
+        if (i_un) {
+          cnt = thvm_critical_pairs_pair(ext_ri, ext_li, ext_lj, ext_rj, buf, cap, cnt);
+          if (j_un) {
+            cnt = thvm_critical_pairs_pair(ext_ri, ext_li, ext_rj, ext_lj, buf, cap, cnt);
           }
         }
       }

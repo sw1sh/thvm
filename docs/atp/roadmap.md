@@ -40,17 +40,22 @@ because the engine doesn't implement them yet.
   - `atp_ac_eq` / `atp_ac_hash` (AC-modulo equality / hash).
   - `atp_match_ac` (AC-modulo one-way match; greedy
     multi-pass-with-leftover-chain).
-  - `atp_ac_extend_rule` (Bachmair-Plaisted `R+` for the
-    extended-overlap CPs).
+  - `atp_ac_unify_emit_cps` (leaf-bijection AC unifier feeding
+    `cp_visit`; enumerates permutations up to 6 leaves).
+  - `atp_ac_extend_rule` (Bachmair-Plaisted `R+`) used as a
+    BILATERAL extension in `atp_overlap_ij`: emits CPs over
+    (i-ext X j), (i X j-ext), and (i-ext X j-ext) face combos.
   - `atp_kbo_ac` / `atp_lpo_ac` (canonical-form AC orderings).
   Wired into `atp_ordered_try_top`, `atp_rewrite_normalize_ordered`,
-  `atp_overlap_ij`, `thvm_atp_goal_check`, `atp_compare_uncached`.
-  Gated by `THVM_ATP_AC` build define + non-zero `ac_mask`
-  (engine-global; set via `thvm_atp_set_ac_mask` / `thvm_atp_auto_ac`).
-  Comparative bench (commutative-monoid in
-  `waldmeister/commutative_monoid*.pr`): thvm/ac matches or beats
-  wmcli's 1-2 ms on the simple cases via the AC-eq goal-check
-  short-circuit.
+  `atp_overlap_ij`, `thvm_atp_goal_check`, `atp_compare_uncached`,
+  `cp_visit`.  Gated by `THVM_ATP_AC` build define + non-zero
+  `ac_mask` (engine-global; set via `thvm_atp_set_ac_mask` /
+  `thvm_atp_auto_ac`).
+  Differential vs wmcli on `tests/test_atp_ac_bench`:
+  - commutative-monoid (waldmeister/commutative_monoid.pr): thvm
+    <0.1ms vs wmcli 2ms (AC-eq goal-check short-circuit).
+  - abelian-group inversion (waldmeister/abelian_group.pr): thvm
+    PROVED in 10 iters / 1 surviving rule; wmcli 12 rules / 90 CPs.
 
 ## Open arcs
 
@@ -64,20 +69,16 @@ Coverage (see "Coverage today" above) lands the core: AC
 match + canon, AC-KBO/AC-LPO, extended overlap, AC-eq goal-check.
 Remaining sub-items:
 
-* AC unification in CP generation.  `atp_overlap_ij` extends each
-  rule under Bachmair-Plaisted to `f(l, z) -> f(r, z)`, but the
-  inner unification call (`thvm_critical_pairs_pair`) is still
-  syntactic.  The abelian-group bench (waldmeister/abelian_group.pr,
-  thvm/ac-abelian in `test_atp_ac_bench.c`) surfaces this directly:
-  wmcli derives 12 rules / 90 CPs to prove `i(f(a,b)) = f(i(b),i(a))`
-  while thvm terminates with `QUEUE_EMPTY` after 2 rules because the
-  f(i(x),x)=e self-overlap doesn't unify syntactically (even
-  extended).  Lifting the inner pair routine to AC unification
-  (Stickel-style) is the next AC arc.
+* Full Stickel AC unification.  The current leaf-bijection unifier
+  handles `|S| == |T|` (covers abelian-group cleanly); the variable-
+  absorbs-set case (`|S| != |T|`, an FVR leaf swallows multiple
+  T-leaves) is left.  Larger leaf counts (> 6) bail at the
+  permutation cap and lose CPs; lift the cap with a Diophantine
+  basis solver instead of full factorial enumeration.
 * Bench fan-out beyond abelian-group: lattice axioms, ring axioms,
-  boolean-ring, Robbins.  Each gates on AC unification landing first
-  (the diagnostic on abelian-group is sufficient to bench-drive the
-  unifier work).
+  boolean-ring, Robbins.  Most likely need full Stickel; harness
+  scaffolding (per-mode wmcli reference + thvm timing) is already
+  in `tests/test_atp_ac_bench.c`.
 * Selection / ordering interplay: the AC top-symbol bias in the
   precedence picker (currently AC labels sit at the precedence
   floor) hasn't been re-tuned now that AC-LPO is on; on harder
