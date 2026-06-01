@@ -925,6 +925,101 @@ int main(void) {
     CHECK(!fol_is_connective(L_a));
   }
 
+  // === Skolemization ==============================================
+
+  TEST_BEGIN("fol/skolem-existential-constant");
+  {
+    // ∃y.P(y) -- no enclosing ∀.  Skolemizes y to a 0-ary
+    // Skolem constant sk_0.  Result: P(sk_0).
+    fol_reset_skolem();
+    Term y = v(0);
+    Term f = fol_mk_ex(y, pred1(P_P, y));
+    Term n = fol_skolemize(fol_nnf(f));
+    // n should be: P(sk_0)  where sk_0 is a CTR with label FOL_LAB_SKOLEM_BASE
+    CHECK(term_tag(n) == TAG_CTR);
+    CHECK(term_ext(n) == P_P);
+    CHECK(term_ctr_n(n) == 1);
+    Term arg = term_ctr_at(n, 0);
+    CHECK(term_tag(arg) == TAG_CTR);
+    CHECK(fol_is_skolem(term_ext(arg)));
+    CHECK(term_ctr_n(arg) == 0);
+  }
+
+  TEST_BEGIN("fol/skolem-existential-under-universal");
+  {
+    // ∀x.∃y.P(x, y) -- y becomes sk(x).
+    fol_reset_skolem();
+    Term x = v(0);
+    Term y = v(1);
+    Term f = fol_mk_all(x, fol_mk_ex(y, pred2(P_R, x, y)));
+    Term n = fol_skolemize(fol_nnf(f));
+    // Expected: P(x, sk(x))  -- the ∀ is dropped; ∃ replaced.
+    CHECK(term_tag(n) == TAG_CTR);
+    CHECK(term_ext(n) == P_R);
+    CHECK(term_ctr_n(n) == 2);
+    Term arg0 = term_ctr_at(n, 0);
+    Term arg1 = term_ctr_at(n, 1);
+    CHECK(term_tag(arg0) == TAG_FVR);
+    CHECK(term_ext(arg0) == 0);                   // x
+    CHECK(term_tag(arg1) == TAG_CTR);
+    CHECK(fol_is_skolem(term_ext(arg1)));
+    CHECK(term_ctr_n(arg1) == 1);                 // unary sk(x)
+    CHECK(kbo_eq(term_ctr_at(arg1, 0), x));
+  }
+
+  TEST_BEGIN("fol/skolem-drops-forall");
+  {
+    // ∀x.P(x) -- no existentials.  Just drops the ∀.
+    fol_reset_skolem();
+    Term x = v(0);
+    Term f = fol_mk_all(x, pred1(P_P, x));
+    Term n = fol_skolemize(fol_nnf(f));
+    Term expect = pred1(P_P, x);
+    CHECK(kbo_eq(n, expect));
+  }
+
+  TEST_BEGIN("fol/skolem-fresh-labels-distinct");
+  {
+    // Two unrelated existentials should get distinct Skolem labels.
+    fol_reset_skolem();
+    Term y1 = v(0);
+    Term y2 = v(1);
+    Term f1 = fol_mk_ex(y1, pred1(P_P, y1));
+    Term f2 = fol_mk_ex(y2, pred1(P_Q, y2));
+    Term and = fol_mk_and(f1, f2);
+    Term n = fol_skolemize(fol_nnf(and));
+    // n = P(sk_a) ∧ Q(sk_b) with sk_a != sk_b.
+    CHECK(term_ext(n) == FOL_LAB_AND);
+    Term left  = term_ctr_at(n, 0);
+    Term right = term_ctr_at(n, 1);
+    Term sk_a = term_ctr_at(left, 0);
+    Term sk_b = term_ctr_at(right, 0);
+    CHECK(fol_is_skolem(term_ext(sk_a)));
+    CHECK(fol_is_skolem(term_ext(sk_b)));
+    CHECK(term_ext(sk_a) != term_ext(sk_b));
+  }
+
+  TEST_BEGIN("fol/skolem-nested-quantifier-scope");
+  {
+    // ∀x.∀y.∃z.R(x, y, z): z becomes sk(x, y).
+    // (Need 3-arg predicate; use existing labels P_P / etc. for a
+    //  simpler test: ∀x.∃z.(P(x) ∧ Q(z)).)
+    fol_reset_skolem();
+    Term x = v(0);
+    Term z = v(1);
+    Term inner = fol_mk_and(pred1(P_P, x), pred1(P_Q, z));
+    Term f = fol_mk_all(x, fol_mk_ex(z, inner));
+    Term n = fol_skolemize(fol_nnf(f));
+    // Result: P(x) ∧ Q(sk(x)).
+    CHECK(term_ext(n) == FOL_LAB_AND);
+    Term q_atom = term_ctr_at(n, 1);
+    CHECK(term_ext(q_atom) == P_Q);
+    Term sk = term_ctr_at(q_atom, 0);
+    CHECK(fol_is_skolem(term_ext(sk)));
+    CHECK(term_ctr_n(sk) == 1);
+    CHECK(kbo_eq(term_ctr_at(sk, 0), x));
+  }
+
   thvm_free();
   TEST_REPORT();
 }

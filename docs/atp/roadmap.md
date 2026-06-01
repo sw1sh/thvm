@@ -172,16 +172,20 @@ Open follow-ups (in order):
 
 ### Skolemization + CNF + reflection
 
-`src/fol/cnf.c` lands the foundation:
+`src/fol/cnf.c` covers:
 * Reserved CTR labels for connectives (`FOL_LAB_NOT/AND/OR/IMP/IFF/
   ALL/EX`) -- formulas are Term trees, user predicates use labels
-  below the reserved range.
+  below the reserved range.  thvm's CTR label encoding caps at 18
+  bits (262143), so Skolem labels (`FOL_LAB_SKOLEM_BASE = 0x20000`)
+  sit above connectives but inside the encoding range.
 * `fol_nnf(f)` -- negation normal form: pushes `¬` to atoms,
   eliminates `->` and `<->`, preserves quantifiers.
+* `fol_skolemize(f)` -- replaces every `∃y` with `sk_n(x1..xk)` over
+  the enclosing `∀`-bound vars; drops surviving `∀` quantifiers.
+  Output is quantifier-free with free vars implicitly universal.
+  `fol_reset_skolem()` clears the counter between runs.
 
 Open follow-ups:
-* Skolemization (replace `∃x.p` with `p[x := sk(vars)]` for fresh
-  Skolem function `sk` over the enclosing `∀`-bound vars).
 * Prenex form + CNF distribution (∨ over ∧).
 * Clause extraction (top-level conjunction -> array of FolClause*).
 * End-to-end `fol_formula_to_clauses` that drives all four steps.
