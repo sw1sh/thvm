@@ -455,37 +455,39 @@ fn Term fol_demodulate_atom(Term s, Term t, Term atom) {
 // Apply `eq_clause`'s positive equality as a rewrite rule to every
 // literal of `target`.  Returns a fresh clause if anything rewrote,
 // NULL otherwise.  Caller owns the result.
+//
+// Variables: the RULE's free variables are renamed apart by
+// FOL_RENAME_OFFSET (not the target's).  thvm_match binds only the
+// PATTERN-side variables, so renaming the rule's s/t makes its vars
+// distinct from the target's; the substitution lands in the
+// rule-renamed-var range and gets eliminated when applied to t.
+// Target variables stay in their original IDs and remain consistent
+// across the resulting clause's literals.
 fn FolClause *fol_demodulate(const FolClause *eq_clause, const FolClause *target) {
   if (eq_clause == NULL || target == NULL) return NULL;
   if (eq_clause->n_lits != 1u) return NULL;
   if (eq_clause->lits[0].sign != 0u) return NULL;
   Term eq_atom = eq_clause->lits[0].atom;
   if (!fol_atom_is_eq(eq_atom)) return NULL;
-  Term s = term_ctr_at(eq_atom, 0u);
-  Term t = term_ctr_at(eq_atom, 1u);
+  Term s_raw = term_ctr_at(eq_atom, 0u);
+  Term t_raw = term_ctr_at(eq_atom, 1u);
+  Term s = thvm_rename_vars(s_raw, FOL_RENAME_OFFSET);
+  Term t = thvm_rename_vars(t_raw, FOL_RENAME_OFFSET);
 
-  FolLit *new_lits = NULL;
   u32 n = target->n_lits;
   u8 any_change = 0u;
   Term *cache = (Term *)calloc(n, sizeof(Term));
   if (cache == NULL) return NULL;
   for (u32 i = 0; i < n; i++) {
     Term raw = target->lits[i].atom;
-    // Rename the eq_clause's variables apart so the matcher can't
-    // bind any free variable of the target.  (Free vars of the
-    // target are universally quantified at the saturation level.)
-    // We do that by renaming the TARGET's atom variables, not the
-    // rule's -- standard convention to keep rules' var ids small.
-    Term renamed = thvm_rename_vars(raw, FOL_RENAME_OFFSET);
-    Term re = fol_rewrite_once(renamed, s, t);
-    if (re == renamed) re = raw;   // back to original when no rewrite
+    Term re  = fol_rewrite_once(raw, s, t);
     if (re != raw) any_change = 1u;
     cache[i] = re;
   }
   if (!any_change) { free(cache); return NULL; }
 
   FolClause *r = fol_clause_new(n);
-  if (r == NULL) { free(cache); free(new_lits); return NULL; }
+  if (r == NULL) { free(cache); return NULL; }
   for (u32 i = 0; i < n; i++) {
     r->lits[i].atom = cache[i];
     r->lits[i].sign = target->lits[i].sign;

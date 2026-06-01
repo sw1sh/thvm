@@ -1102,6 +1102,40 @@ int main(void) {
     fol_clause_free(tgt);
   }
 
+  TEST_BEGIN("fol/demod-preserves-target-vars");
+  {
+    // Rule: f(x) = a.  Target: P(f(b), x).
+    // Rewrite f(b) -> a in literal 0.  Literal 1 has bare `x`.
+    // The result must keep `x` (var id 0) consistent across both
+    // literals of the result -- not split into rule-x and target-x.
+    Term f_x = pred1(L_f, v(0));
+    Term eq_atom = pred2(0u, f_x, k(L_a));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = eq_atom, .sign = 0 };
+    FolClause *tgt = fol_clause_new(2);
+    tgt->lits[0] = (FolLit){ .atom = pred2(P_R, pred1(L_f, k(L_b)), v(0)), .sign = 0 };
+    tgt->lits[1] = (FolLit){ .atom = pred1(P_Q, v(0)), .sign = 0 };
+    FolClause *r = fol_demodulate(eqc, tgt);
+    CHECK(r != NULL);
+    CHECK(r->n_lits == 2);
+    // Lit 0: R(a, v0) -- f(b) rewrote to a, but v0 must stay v0.
+    Term lit0 = r->lits[0].atom;
+    CHECK(term_ext(lit0) == P_R);
+    Term lit0_kid0 = term_ctr_at(lit0, 0);
+    CHECK(kbo_eq(lit0_kid0, k(L_a)));
+    Term lit0_kid1 = term_ctr_at(lit0, 1);
+    CHECK(term_tag(lit0_kid1) == TAG_FVR);
+    CHECK(term_ext(lit0_kid1) == 0);
+    // Lit 1: Q(v0) -- unchanged, v0 stays.
+    Term lit1 = r->lits[1].atom;
+    Term lit1_kid0 = term_ctr_at(lit1, 0);
+    CHECK(term_tag(lit1_kid0) == TAG_FVR);
+    CHECK(term_ext(lit1_kid0) == 0);
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+    fol_clause_free(r);
+  }
+
   TEST_BEGIN("fol/demod-with-unification");
   {
     // eq_clause = (f(x) = a).  target = P(f(b)).
