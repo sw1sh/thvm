@@ -5071,6 +5071,14 @@ fn void thvm_atp_set_rpo(AtpState *s, const RpoConfig *rpo) {
   s->rpo = rpo;
 }
 
+// Attach a WpoConfig.  WPO unifies KBO/LPO/RPO via weights + precedence
+// + per-symbol status.  Highest-precedence ordering when multiple are
+// set: WPO > RPO > LPO > KBO.  Callers should set exactly one.
+fn void thvm_atp_set_wpo(AtpState *s, const WpoConfig *wpo) {
+  if (s == NULL) return;
+  s->wpo = wpo;
+}
+
 // Milestone 10: runtime gate for the MNF goal-directed front search.
 // No-op effect unless the dylib was compiled with -DATP_MNF -- the
 // field is always present, but goal_check only reads it inside its
@@ -5201,11 +5209,15 @@ static KboCmp atp_compare_uncached(AtpState *s, Term lhs, Term rhs) {
   u64 ac_mask = thvm_atp_get_ac_mask();
   if (ac_mask != 0ull) {
     AtpAcInfo ac = { .ac_mask = ac_mask };
-    // RPO under AC: canonicalize both terms modulo AC, then apply the
-    // syntactic RPO.  Same shape as atp_lpo_ac -- RPO's verdict on AC-
-    // canonical forms is AC-invariant by construction.  When RPO is
-    // set but LPO is not, RPO wins; if BOTH are set, RPO takes
-    // precedence (call sites should set just one).
+    // WPO/RPO under AC: canonicalize both terms modulo AC, then apply
+    // the syntactic ordering.  WPO > RPO > LPO precedence among set
+    // configs; callers should set exactly one.
+    if (s->wpo != NULL) {
+      AtpAcInfo ac2 = ac;
+      Term cl = atp_ac_canon(lhs, &ac2);
+      Term cr = atp_ac_canon(rhs, &ac2);
+      return (KboCmp)thvm_wpo(cl, cr, s->wpo);
+    }
     if (s->rpo != NULL) {
       AtpAcInfo ac2 = ac;
       Term cl = atp_ac_canon(lhs, &ac2);
@@ -5218,6 +5230,9 @@ static KboCmp atp_compare_uncached(AtpState *s, Term lhs, Term rhs) {
     return atp_kbo_ac(lhs, rhs, s->kbo, &ac);
   }
 #endif
+  if (s->wpo != NULL) {
+    return (KboCmp)thvm_wpo(lhs, rhs, s->wpo);
+  }
   if (s->rpo != NULL) {
     return (KboCmp)thvm_rpo(lhs, rhs, s->rpo);
   }
@@ -11108,10 +11123,10 @@ static u8 gj_cover(AtpState *s, Term lhs, Term rhs,
 static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return 0;
   // No ordering => keep (no GJ verdict can be made).
-  if (s->kbo == NULL && s->lpo == NULL && s->rpo == NULL) return 0;
-  // GJ's gj_less_in is implemented for KBO only; under LPO or RPO the
+  if (s->kbo == NULL && s->lpo == NULL && s->rpo == NULL && s->wpo == NULL) return 0;
+  // GJ's gj_less_in is implemented for KBO only; under LPO/RPO/WPO the
   // ground-join check is off (caller falls back to keep).
-  if (s->lpo != NULL || s->rpo != NULL) return 0;
+  if (s->lpo != NULL || s->rpo != NULL || s->wpo != NULL) return 0;
 
   u32 var_ids[ATP_GJ_MAX_VARS];
   u32 n_vars = 0;

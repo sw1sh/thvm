@@ -3091,6 +3091,37 @@ typedef struct {
 
 fn RpoCmp thvm_rpo(Term s, Term t, const RpoConfig *cfg);
 fn void   thvm_rpo_invalidate(void);
+
+// === wpo/ ===
+// Weighted Path Ordering (Yamada-Kusakari-Sakabata 2014).  Unifies
+// KBO, LPO and RPO: per-symbol weight + precedence + status.  Compare
+// strict weight first; on tie, fall back to an RPO-style precedence/
+// status comparison.  Variable-multiplicity dominance is enforced both
+// directions, as in KBO.  Admissibility (weights > 0 on unary symbols)
+// is the caller's problem; the comparator is sound but only
+// well-founded under admissible weights.
+typedef enum {
+  WPO_EQ =  0,
+  WPO_GT =  1,
+  WPO_LT = -1,
+  WPO_UN =  2,
+} WpoCmp;
+
+typedef enum {
+  WPO_STATUS_LEX = 0,
+  WPO_STATUS_MUL = 1,
+} WpoStatus;
+
+typedef struct {
+  const u32       *weights;    // per-symbol weight (size n_labels)
+  const u32       *precedence; // per-symbol precedence (size n_labels)
+  const WpoStatus *status;     // per-symbol status; NULL => all-LEX
+  u32              n_labels;
+  u32              var_weight; // weight contribution per variable occurrence
+} WpoConfig;
+
+fn WpoCmp thvm_wpo(Term s, Term t, const WpoConfig *cfg);
+fn void   thvm_wpo_invalidate(void);
 // Invalidate thvm_lpo's persistent (s,t)->verdict memo.  Call when term
 // cells move (GC) or the precedence changes (new run).
 fn void   thvm_lpo_invalidate(void);
@@ -3683,6 +3714,7 @@ typedef struct {
   const KboConfig *kbo;
   const LpoConfig *lpo;
   const RpoConfig *rpo;
+  const WpoConfig *wpo;
 
   // Bounds.
   u32 step;
@@ -4169,6 +4201,7 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 // default).
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 fn void      thvm_atp_set_rpo     (AtpState *s, const RpoConfig *rpo);
+fn void      thvm_atp_set_wpo     (AtpState *s, const WpoConfig *wpo);
 
 // Milestone 10: enable/disable the MNF goal-directed front search at
 // runtime.  No-op unless the dylib was compiled with -DATP_MNF.  When

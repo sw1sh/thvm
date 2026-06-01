@@ -422,6 +422,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "kbo/_.c"
 #include "lpo/_.c"
 #include "rpo/_.c"
+#include "wpo/_.c"
 
 // === rewrite/ ===
 // Equational rewriter (one-shot rule application + iterative

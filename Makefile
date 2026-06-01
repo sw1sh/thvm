@@ -286,6 +286,8 @@ TESTS := \
   $(BIN)/test_lpo \
   $(BIN)/test_rpo \
   $(BIN)/test_atp_rpo \
+  $(BIN)/test_wpo \
+  $(BIN)/test_atp_wpo \
   $(BIN)/test_dyn_lab \
   $(BIN)/test_wsq \
   $(BIN)/test_wspq \

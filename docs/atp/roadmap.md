@@ -16,10 +16,13 @@ because the engine doesn't implement them yet.
 * Knuth-Bendix unfailing completion (orientable + unorientable
   rules).
 * Reduction orderings: KBO (`src/kbo`), LPO (`src/lpo`), RPO
-  (`src/rpo`); KBO and LPO with automatic precedence
-  (`src/atp/precedence.c`).  RPO adds per-symbol LEX/MUL status
-  (LPO is the all-LEX special case; MPO is all-MUL).  Wire into
-  ATP via `thvm_atp_set_rpo`.
+  (`src/rpo`), WPO (`src/wpo`); KBO and LPO with automatic
+  precedence (`src/atp/precedence.c`).  RPO adds per-symbol LEX/MUL
+  status (LPO is the all-LEX special case; MPO is all-MUL).  WPO
+  layers per-symbol integer weights on top of RPO -- weight ties
+  fall through to an RPO-style precedence/status comparison.  Wire
+  into ATP via `thvm_atp_set_rpo` / `thvm_atp_set_wpo`; dispatch
+  priority WPO > RPO > LPO > KBO when multiple are set.
 * Term indexing: discrimination tree over rule LHSs
   (`AtpRuleIndex`), FV index over queued CPs (`AtpFvIndex`).
 * Redundancy filters: trivial join, forward rule-subsumption,
@@ -97,21 +100,25 @@ Remaining sub-items:
 
 ### Additional reduction orderings
 
-Today: KBO, LPO, RPO.  Open items:
+Today: KBO, LPO, RPO, WPO.  Open items:
 
-* **PO** (Polynomial Ordering) - assigns each symbol a polynomial
-  interpretation.  Strong on arithmetic-flavored problems.
-* **WPO** (Weighted Path Ordering) - generalizes KBO + LPO + RPO
-  via a per-symbol weighted-status combination.
-* **RPO flatrec / Vortest port**.  Today's RPO (src/rpo/_.c) uses the
-  Term-tree recursion with a per-call memo.  LPO has a flatterm
-  Vortest pretest + flatrec recursion (lpo_flat_rec_*) that doubled
-  throughput on AndAssoc; the same scaffolding can lift to RPO once
-  a real bench shows lpo_flat / rpo_flat hot.
-* **RPO under GJ**.  Ground-joinability (`atp_compare`'s gj_less_in
-  path) is implemented for KBO only -- under RPO the cracker skips
-  GJ entirely.  Lifting gj_less_in to a precedence-only ordering is
-  the next gap for RPO-driven completion on hard theories.
+* **PO** (Polynomial Ordering).  Assigns each symbol a polynomial
+  interpretation rather than a single integer weight.  Strong on
+  arithmetic-flavored problems and the standard companion to KBO
+  when a single linear weight doesn't separate the rules.
+* **Flatrec / Vortest port to RPO and WPO**.  LPO has a flatterm
+  Vortest pretest + flatrec recursion (lpo_flat_rec_*) that
+  doubled throughput on AndAssoc; the equivalent scaffolding can
+  lift to RPO + WPO once a real bench shows them hot.
+* **Ground-joinability under LPO/RPO/WPO**.  `gj_less_in` is
+  KBO-only; under non-KBO orderings the cracker skips GJ entirely.
+  Lifting it to a precedence-only ordering is the next gap for
+  RPO/WPO-driven completion on hard theories.
+* **Automatic WPO weight tuning**.  KBO has automatic precedence
+  via `src/atp/precedence.c`; WPO needs both weights AND
+  precedence picked from the axiom set.  Iterating an LP-style
+  weight search (e.g. KBOlin) over the axioms is the standard
+  approach.
 
 ### Full first-order clauses
 
