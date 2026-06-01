@@ -3171,6 +3171,16 @@ fn FolClause *fol_reflex_resolve(const FolClause *c, u32 idx);
 // equality-inference family for refutation-complete FOL+equality.
 fn FolClause *fol_eq_factor(const FolClause *c, u32 i, u32 j);
 
+// Demodulation: rewrite `target`'s literal atoms using the unit
+// positive equality from `eq_clause` as an oriented rule `s -> t`.
+// Returns a fresh clause if any literal rewrote, NULL otherwise.
+// Reuses thvm_match + thvm_subst_apply.  Naïve / non-ordering-aware:
+// callers must give a properly-orientable equation (no σ(s) > σ(t)
+// check yet).
+fn FolClause *fol_demodulate     (const FolClause *eq_clause,
+                                  const FolClause *target);
+fn Term       fol_demodulate_atom(Term s, Term t, Term atom);
+
 // Is the atom an equality (CTR with the FOL_LAB_EQ label, arity 2)?
 fn u8         fol_atom_is_eq(Term atom);
 

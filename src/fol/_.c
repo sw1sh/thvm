@@ -398,6 +398,102 @@ fn FolClause *fol_reflex_resolve(const FolClause *c, u32 idx) {
   return r;
 }
 
+// === demodulation ===================================================
+//
+// A unit positive equality clause `[s = t]` can act as an oriented
+// rewrite rule.  Demodulation walks every other clause's atoms,
+// matches the rule's LHS against any subterm, and replaces with the
+// rule's RHS (with the matching σ applied).
+//
+// Naïve directed-equality demodulation (no ordering check):
+//   * `s` is taken as the rule's input, `t` as the output.
+//   * No σ(s) > σ(t) check -- callers may give us a non-orientable
+//     equation, in which case demodulation may not preserve
+//     completeness.  An ordering-aware version is a follow-up that
+//     plugs in a KboConfig / LpoConfig / RpoConfig / WpoConfig.
+//
+// Returns a new clause IF any literal changed; otherwise NULL
+// (caller can skip the swap).  Recursive rewrite is bottom-up,
+// applying the rule innermost-first (left-to-right at each node).
+
+static Term fol_rewrite_once(Term term, Term s, Term t);
+
+static Term fol_rewrite_at_root(Term term, Term s, Term t) {
+  RewriteSubst subst = {{0}};
+  if (thvm_match(s, term, &subst)) {
+    return thvm_subst_apply(t, &subst);
+  }
+  return term;
+}
+
+static Term fol_rewrite_once(Term term, Term s, Term t) {
+  // Try root first.
+  Term root = fol_rewrite_at_root(term, s, t);
+  if (root != term) return root;
+
+  if (term_tag(term) != TAG_CTR) return term;
+  u32 n = term_ctr_n(term);
+  if (n == 0u) return term;
+  if (n > REWRITE_MAX_ARITY) return term;
+  Term kids[REWRITE_MAX_ARITY];
+  u8 changed = 0u;
+  for (u32 i = 0; i < n; i++) {
+    Term orig = term_ctr_at(term, i);
+    kids[i] = fol_rewrite_once(orig, s, t);
+    if (kids[i] != orig) changed = 1u;
+  }
+  if (!changed) return term;
+  return term_new_ctr(term_ext(term), kids, n);
+}
+
+// Apply the rewrite `s -> t` to a single literal's atom.  Returns
+// the new atom (== old atom if no rewrite fired).
+fn Term fol_demodulate_atom(Term s, Term t, Term atom) {
+  return fol_rewrite_once(atom, s, t);
+}
+
+// Apply `eq_clause`'s positive equality as a rewrite rule to every
+// literal of `target`.  Returns a fresh clause if anything rewrote,
+// NULL otherwise.  Caller owns the result.
+fn FolClause *fol_demodulate(const FolClause *eq_clause, const FolClause *target) {
+  if (eq_clause == NULL || target == NULL) return NULL;
+  if (eq_clause->n_lits != 1u) return NULL;
+  if (eq_clause->lits[0].sign != 0u) return NULL;
+  Term eq_atom = eq_clause->lits[0].atom;
+  if (!fol_atom_is_eq(eq_atom)) return NULL;
+  Term s = term_ctr_at(eq_atom, 0u);
+  Term t = term_ctr_at(eq_atom, 1u);
+
+  FolLit *new_lits = NULL;
+  u32 n = target->n_lits;
+  u8 any_change = 0u;
+  Term *cache = (Term *)calloc(n, sizeof(Term));
+  if (cache == NULL) return NULL;
+  for (u32 i = 0; i < n; i++) {
+    Term raw = target->lits[i].atom;
+    // Rename the eq_clause's variables apart so the matcher can't
+    // bind any free variable of the target.  (Free vars of the
+    // target are universally quantified at the saturation level.)
+    // We do that by renaming the TARGET's atom variables, not the
+    // rule's -- standard convention to keep rules' var ids small.
+    Term renamed = thvm_rename_vars(raw, FOL_RENAME_OFFSET);
+    Term re = fol_rewrite_once(renamed, s, t);
+    if (re == renamed) re = raw;   // back to original when no rewrite
+    if (re != raw) any_change = 1u;
+    cache[i] = re;
+  }
+  if (!any_change) { free(cache); return NULL; }
+
+  FolClause *r = fol_clause_new(n);
+  if (r == NULL) { free(cache); free(new_lits); return NULL; }
+  for (u32 i = 0; i < n; i++) {
+    r->lits[i].atom = cache[i];
+    r->lits[i].sign = target->lits[i].sign;
+  }
+  free(cache);
+  return r;
+}
+
 // === saturation loop ================================================
 // CnfState + given-clause driver.  See `sat.c` for the
 // implementation; we include it here so the single-TU build sees

@@ -200,13 +200,24 @@ End-to-end smoke (in tests/test_fol.c):
   `∀x.(P(x) -> Q(x)) ∧ P(a) ∧ ¬Q(a)`  -> PROVED via cnf_run.
   Russell-style `∀x.(R(x,x) <-> ¬R(x,x))`  -> PROVED.
 
+Demodulation primitive (`fol_demodulate(eq_clause, target)`) lands
+in src/fol/_.c: a unit positive equality `[s = t]` acts as an
+oriented rewrite rule `s -> t` that rewrites every literal atom of
+the target clause via thvm_match + thvm_subst_apply.  Returns a fresh
+clause if anything changed, NULL otherwise.  Naïve (no σ(s) > σ(t)
+ordering check yet); the ordering-aware variant is a follow-up that
+plugs in a KboConfig / LpoConfig / RpoConfig / WpoConfig.
+
 Open follow-ups (efficiency / completeness):
 * Tseitin structural CNF for shallow clauses on deeply-nested ∨/∧.
 * Selection function in cnf_step (pick maximal literal to inference
   on rather than try-everything).
 * Discrim-tree / FV-index for fast subsumption + CP queries.
-* Demodulation: rewrite active clauses with unit positive
-  equalities.  Reuses the equational layer's rewriting machinery.
+* Ordering-aware demodulation -- attach a reduction ordering to
+  CnfState and gate σ(s) -> σ(t) on σ(s) > σ(t).  Wire into cnf_step
+  to normalize newly-derived clauses (forward demodulation) and
+  re-normalize active/passive clauses when a new unit eq lands
+  (backward demodulation).
 
 ### Theory reasoning
 

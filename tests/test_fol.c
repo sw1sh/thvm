@@ -999,6 +999,127 @@ int main(void) {
     CHECK(term_ext(sk_a) != term_ext(sk_b));
   }
 
+  // === demodulation ===============================================
+
+  TEST_BEGIN("fol/demod-atom-no-match");
+  {
+    // a -> b applied to P(c): no rewrite (c doesn't match a).
+    Term s = k(L_a), t = k(L_b);
+    Term atom = pred1(P_P, k(L_c));
+    Term out = fol_demodulate_atom(s, t, atom);
+    CHECK(kbo_eq(out, atom));
+  }
+
+  TEST_BEGIN("fol/demod-atom-replaces-subterm");
+  {
+    // a -> b applied to P(a): yields P(b).
+    Term s = k(L_a), t = k(L_b);
+    Term atom = pred1(P_P, k(L_a));
+    Term out = fol_demodulate_atom(s, t, atom);
+    Term expect = pred1(P_P, k(L_b));
+    CHECK(kbo_eq(out, expect));
+  }
+
+  TEST_BEGIN("fol/demod-atom-replaces-deep");
+  {
+    // a -> b applied to P(f(g(a, c))): rewrites the deep `a`.
+    Term s = k(L_a), t = k(L_b);
+    Term inner = pred2(L_a, k(L_a), k(L_c));   // uses L_a as a binary CTR
+    Term atom  = pred1(P_P, inner);            // P(a(a, c))
+    Term out   = fol_demodulate_atom(s, t, atom);
+    // After rewrite: a -> b matches at root of `inner`? Yes, `inner`
+    // is CTR with label L_a so its label MATCHES our s = L_a-CTR
+    // (also unary in s).  Wait -- s is k(L_a) which is a 0-ary CTR.
+    // `inner` is a 2-ary L_a-CTR.  They have the SAME label but
+    // different arities.  thvm_match checks arity equality, so they
+    // don't match at the root of `inner`.  But the leaf `a` inside
+    // does match.  So `inner` becomes `a(b, c)`.
+    Term expect_inner = pred2(L_a, k(L_b), k(L_c));
+    Term expect = pred1(P_P, expect_inner);
+    CHECK(kbo_eq(out, expect));
+  }
+
+  TEST_BEGIN("fol/demod-clause-unit-eq");
+  {
+    // eq_clause = (a = b); target = P(a) v Q(a).
+    // Result: P(b) v Q(b).
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 0 };
+    FolClause *tgt = fol_clause_new(2);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    tgt->lits[1] = (FolLit){ .atom = pred1(P_Q, k(L_a)), .sign = 0 };
+    FolClause *r = fol_demodulate(eqc, tgt);
+    CHECK(r != NULL);
+    CHECK(r->n_lits == 2);
+    CHECK(kbo_eq(r->lits[0].atom, pred1(P_P, k(L_b))));
+    CHECK(kbo_eq(r->lits[1].atom, pred1(P_Q, k(L_b))));
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+    fol_clause_free(r);
+  }
+
+  TEST_BEGIN("fol/demod-clause-no-change");
+  {
+    // eq_clause = (a = b); target = P(c).  No rewrite -> NULL.
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 0 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_c)), .sign = 0 };
+    FolClause *r = fol_demodulate(eqc, tgt);
+    CHECK(r == NULL);
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+  }
+
+  TEST_BEGIN("fol/demod-not-unit-rejects");
+  {
+    // eq_clause has 2 literals -- not a unit equality, rejects.
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(2);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 0 };
+    eqc->lits[1] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *r = fol_demodulate(eqc, tgt);
+    CHECK(r == NULL);
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+  }
+
+  TEST_BEGIN("fol/demod-negative-eq-rejects");
+  {
+    // Negative equality -- not a rewrite rule, rejects.
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 1 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *r = fol_demodulate(eqc, tgt);
+    CHECK(r == NULL);
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+  }
+
+  TEST_BEGIN("fol/demod-with-unification");
+  {
+    // eq_clause = (f(x) = a).  target = P(f(b)).
+    // σ = {x ↦ b}.  After rewrite: P(a).
+    Term f_x = pred1(L_f, v(0));
+    Term eq_atom = pred2(0u, f_x, k(L_a));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = eq_atom, .sign = 0 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, pred1(L_f, k(L_b))), .sign = 0 };
+    FolClause *r = fol_demodulate(eqc, tgt);
+    CHECK(r != NULL);
+    CHECK(kbo_eq(r->lits[0].atom, pred1(P_P, k(L_a))));
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+    fol_clause_free(r);
+  }
+
   // === CNF distribution ===========================================
 
   TEST_BEGIN("fol/distribute-atom-passthrough");
