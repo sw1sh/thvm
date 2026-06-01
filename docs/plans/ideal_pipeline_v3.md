@@ -694,6 +694,34 @@ faithful (tinygrad-devectorizer-shaped) prerequisite that pays off once the gath
 de-fused. faithful-CPU: 217ms (session start) -> 78ms (2.8x, Lever B), gap to tinygrad ~15ms
 is now the gather-fusion arc.
 
+### BREAKTHROUGH: seed REDUCE on the faithful path -> faithful-CPU 77.6ms -> 5.18ms (15x) (2026-06-01)
+
+The wall lever turned out to be the realize SEED, not the codegen. The ROOT-only faithful
+seed (ideal_pipeline_v2's premise) was UNDER-realizing: it left the FORWARD conv REDUCE
+un-realized, so the backward maxpool-grad RECOMPUTED the conv forward inline AND lowered the
+conv data-grad as a per-lane col2im GATHER (`in4[<IDIV/IMOD/IWHERE>]`) -- the 62KB kid 254
+(28% of wall) + kid 262 (19%). That violated tinygrad's actual rule ("one reduce per kernel;
+a REDUCE output always escapes into a buffer"). Fix: `ru_seed_boundary_holds` now seeds
+ROOT || REDUCE on the faithful path (22 lines, `THVM_RU_NO_SEED_REDUCE=1` A/B revert). The
+conv forward is realized once; the argmax mask reads an affine materialized buffer and the
+data-grad lowers as a strided reduce (tinygrad's shape). The col2im-gather kernels are GONE
+(largest emitted kernel 62653B -> 6338B; gather count 2 -> 0).
+
+Result (verified, SHIP): faithful warm **77.61ms -> 5.18ms (15x)** -- now BELOW tinygrad
+(~15ms) AND thvm's own default (6.45ms). Parity bit-EXACT (step-0 loss + data-grad SSQ
+identical to the default schedule -- actually CLOSER to default than the old col2im-gather
+faithful). All core suites green; default mode byte-unchanged (6.45ms / 164 kernels / loss
+identical). Peak 25.7 -> 41.3MB (UP, but under default's 45.3MB, flat over 25 iters, linear
+at BS=16 -- seeding a boundary is monotonically DE-fusing, the OPPOSITE of the over-fusion
+hang, so no hang/balloon). Kernel count 113 -> 161 (more realized, each now affine + BLAS-
+eligible + register-blocked -> fast; kernel count is NOT the speed metric).
+
+So the codegen levers landed earlier this session (register-blocking 3fb0cbf6, float4 +
+mask-hoist d4c83e1c, fast_idiv 60102482) were correct + faithful prerequisites, and this
+seed change is what put faithful-CPU AHEAD of tinygrad. The faithful-CPU arc is DONE
+(exceeded the goal). Residual: a few small (<1% each) masked-reduce kernels still carry a
+divmod mask, off the hot path -- not worth the deeper index reformulation.
+
 **State of v3 after this session:** achievable compiler goals MET (wins warm wall on
 CPU/CUDA/Metal in default mode; faithful kernel count within 9% of tinygrad; numerically
 correct). Landed this session: honest `sched_kernels` probe (ea2f6ff6), realize.c

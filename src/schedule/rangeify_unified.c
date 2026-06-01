@@ -161,7 +161,28 @@ fn int ru_faithful_seed_on(void) {
 // so it was correct, but it cut only ~10 kernels with no speed change -- the
 // real granularity win is in fusing REDUCEs, which is the codegen gap.)
 fn int ru_seed_boundary_holds(u32 reasons) {
-  if (ru_faithful_seed_on()) return (reasons & BUFFERIZE_REASON_ROOT) != 0;
+  if (ru_faithful_seed_on()) {
+    if (reasons & BUFFERIZE_REASON_ROOT) return 1;
+    // Seed every REDUCE output as a boundary.  This is faithful to tinygrad
+    // (one reduce per kernel; a REDUCE output always escapes into a buffer)
+    // and is the lever that de-fuses the conv data-grad.  Without it the
+    // ROOT-only walk leaves the FORWARD conv REDUCE un-realized, so the
+    // backward maxpool-grad RECOMPUTES the conv forward inline -- the giant
+    // [8,64,8,8] kid (the `_acc8` conv-forward recompute fused with the
+    // col2im `in4[divmod]` gather, ~28% of the wall) -- to rebuild the
+    // argmax mask, and lowers the data-grad as a per-lane col2im gather.
+    // Seeding the REDUCE realizes the conv forward once; the mask then reads
+    // an affine materialized buffer and the data-grad lowers as a strided
+    // reduce (tinygrad's shape).  THVM_RU_NO_SEED_REDUCE=1 reverts to the
+    // ROOT-only seed for A/B comparison.
+    static int no_seed_reduce = -1;
+    if (no_seed_reduce < 0) {
+      char const *e = getenv("THVM_RU_NO_SEED_REDUCE");
+      no_seed_reduce = (e != NULL && e[0] == '1') ? 1 : 0;
+    }
+    if (!no_seed_reduce && (reasons & BUFFERIZE_REASON_REDUCE)) return 1;
+    return 0;
+  }
   return 1;
 }
 
