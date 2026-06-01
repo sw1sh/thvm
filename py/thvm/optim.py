@@ -114,49 +114,42 @@ class Adam(Optimizer):
     def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, **_):
         super().__init__(params, lr)
         self.b1, self.b2, self.eps = b1, b2, eps
-        self.t = 0
         self.m = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         self.v = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
-        # Per-step bias-correction factors live as 1-element TENSORs (not
-        # Python floats) so the rendered kernel source is step-INVARIANT
-        # (the kernel reads `*bc1_inv_buf` instead of having a baked CONST
-        # literal that changes every step).  Without this thvm's nvrtc JIT
-        # cache misses on the F=10-or-so param-update kernels EVERY step
-        # (different bc1/bc2 -> different source hash) -- 28 fresh
-        # nvrtc compiles per step on V100, ~270 s/step at BS=128.
+        # Bias-correction state lives ON-GRAPH as 1-element Tensors b1_t,
+        # b2_t initialised to ones, advanced INSIDE _step by a captured
+        # kernel (b1_t.assign(b1_t * b1)).  Because b1_t/b2_t are in the
+        # realize set the step returns, TinyJit captures their advance
+        # kernel and re-fires it every replay -- so t (== the b1_t/b2_t
+        # power) advances under JIT, matching tinygrad nn/optim.py:161-183.
+        # A host-side `self.t += 1; ten_write(1/bc1)` would be DEAD on
+        # replay (TinyJit re-fires only captured kernels, not the Python
+        # body), pinning the correction at the step-1 value forever.
         import numpy as _np
-        self._bc1_inv = Tensor(_np.array([1.0], dtype=_np.float32))
-        self._bc2_inv = Tensor(_np.array([1.0], dtype=_np.float32))
-        self._bc1_inv.realize()
-        self._bc2_inv.realize()
+        self.b1_t = Tensor(_np.array([1.0], dtype=_np.float32))
+        self.b2_t = Tensor(_np.array([1.0], dtype=_np.float32))
+        self.b1_t.realize()
+        self.b2_t.realize()
         for x in [*self.m, *self.v]:
             x.realize()
 
     def _step(self):
-        # Bias correction values live in the 1-element bc1_inv/bc2_inv
-        # tensors (allocated in __init__).  Compute the new values
-        # host-side, then ten_write them into the existing buffers.  The
-        # buffer addresses + kernel source stay step-invariant so the
-        # nvrtc JIT cache hits every step.
-        self.t += 1
-        bc1 = 1.0 - self.b1 ** self.t
-        bc2 = 1.0 - self.b2 ** self.t
-        import numpy as _np
-        from .thvm import Thvm as _Thvm
-        _th = _Thvm()
-        _th.ten_write(self._bc1_inv.term,
-                      _np.array([1.0/bc1], dtype=_np.float32).tobytes())
-        _th.ten_write(self._bc2_inv.term,
-                      _np.array([1.0/bc2], dtype=_np.float32).tobytes())
-        # Phase 1: the in-place m/v moment updates, THEN realize them so
-        # each m[i]/v[i].term collapses from its ASSIGN node to a TEN
-        # before phase 2 reads it.  Without this split, m_hat = m[i] *
-        # (1/bc1) captures the *unrealized* ASSIGN(m[i], ...) node, p's
-        # update embeds it, and realizing p re-fires m[i]'s in-place
-        # write against the already-updated buffer (m -> 1.9x, or m picks
-        # up v's value).  Realizing m,v first is backend-agnostic and
+        # Advance the on-graph bias-correction state (tinygrad
+        # nn/optim.py:167-168: self.b1_t *= self.b1).  These assigns are
+        # captured by TinyJit and re-fired each replay, so b1_t == b1**t
+        # advances every step.
+        self.b1_t.assign(self.b1_t * self.b1)
+        self.b2_t.assign(self.b2_t * self.b2)
+        # Phase 1: the in-place m/v moment updates plus the b1_t/b2_t
+        # advance, THEN realize them so each m[i]/v[i]/b1_t/b2_t.term
+        # collapses from its ASSIGN node to a TEN before phase 2 reads it.
+        # Without this split, m_hat = m[i] / (1 - b1_t) captures the
+        # *unrealized* ASSIGN(m[i], ...) node, p's update embeds it, and
+        # realizing p re-fires m[i]'s in-place write against the already-
+        # updated buffer (m -> 1.9x, or m picks up v's value).  Realizing
+        # the moments + correction state first is backend-agnostic and
         # needs no scheduler bundling.
-        mv = []
+        mv = [self.b1_t, self.b2_t]
         for i, p in enumerate(self.params):
             g = p.grad
             if g is None:
@@ -165,19 +158,24 @@ class Adam(Optimizer):
             self.m[i].assign(self.m[i] * self.b1 + g * (1.0 - self.b1))
             self.v[i].assign(self.v[i] * self.b2 + (g * g) * (1.0 - self.b2))
             mv += [self.m[i], self.v[i]]
-        if mv:
-            Tensor.realize(*mv)
-        # Phase 2: the param updates read the now-realized m,v (plain TENs).
+        Tensor.realize(*mv)
+        # Phase 2: the param updates read the now-realized m,v + b1_t,b2_t
+        # (plain TENs).  tinygrad nn/optim.py:173-174,182: m_hat = m/(1-b1_t),
+        # v_hat = v/(1-b2_t), p -= lr * m_hat / (sqrt(v_hat) + eps).
         out = []
         for i, p in enumerate(self.params):
             if p.grad is None:
                 continue
-            m_hat = self.m[i] * self._bc1_inv
-            v_hat = self.v[i] * self._bc2_inv
+            m_hat = self.m[i] / (1.0 - self.b1_t)
+            v_hat = self.v[i] / (1.0 - self.b2_t)
             p.assign(p - m_hat * self.lr
                      * (v_hat.sqrt() + self.eps).reciprocal())
             out.append(p)
-        return out
+        # b1_t/b2_t are advanced+realized in phase 1; they must ALSO be in
+        # the returned realize set so TinyJit's capture-liveness pass keeps
+        # their advance kernel (otherwise jit_capture_finalize marks it
+        # replay_skip=1 and the correction freezes again under replay).
+        return out + [self.b1_t, self.b2_t]
 
 
 # Muon needs Newton-Schulz orthogonalization; thvm has no batched matmul
