@@ -3099,6 +3099,242 @@ static u32 rmu_hoist_shared_loads(Term red_src,
   return n_hoist;
 }
 
+// Read an integer CONST Term's value.  Returns 1 + value when t is an
+// integer UOP_CONST, else 0.  (Mirrors index_simplify.c's uop_iconst_value,
+// which is static in a later TU.)
+static int rmu_const_int(Term t, i64 *out) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
+  Term num = heap_read(term_val(t) + 0);
+  if (term_tag(num) != TAG_NUM) return 0;
+  if (!dtype_is_int(term_ext(num))) return 0;
+  *out = (i64)(i32)term_val(num);  // DT_INT32 sign-extension
+  return 1;
+}
+
+// Does `t` reference `axis_id` anywhere (a RANGE leaf with that id)?
+// UOP_OPT (an UPCAST/UNROLL/LOCAL annotation wrapping a RANGE) is
+// transparent -- only its target (slot 0) is a recursable child.
+static int rmu_term_refs_axis(Term t, u32 axis_id) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE)
+    return (u32)term_val(heap_read(term_val(t) + 0)) == axis_id;
+  if (op == UOP_CONST || op == UOP_BUFFER || op == UOP_INVALID) return 0;
+  if (op == UOP_OPT)
+    return rmu_term_refs_axis(heap_read(term_val(t) + 0), axis_id);
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++)
+    if (rmu_term_refs_axis(heap_read(loc + i), axis_id)) return 1;
+  return 0;
+}
+
+// Is `op` an integer (index-space) UOp?  Used to pick the `int` vs `float`
+// type for a hoisted lane-invariant local.
+static int rmu_op_is_int(u32 op) {
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
+    case UOP_IXOR: case UOP_ISHR: case UOP_IWHERE: case UOP_INVALID:
+    case UOP_RANGE:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+// Is `t` a "worth hoisting" non-leaf node?  Bare RANGE/CONST/INVALID/
+// BUFFER leaves are not worth a local (they emit as a single token); a
+// single INDEX_E load IS worth it (the shared-load amortisation), and any
+// compound integer-mask subtree (IWHERE/IAND/ILT/IDIV/IMOD chain) is worth
+// it because the lane fan-out replicates it N times.
+static int rmu_hoist_worth(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_INDEX_E) return 1;
+  switch (op) {
+    case UOP_IWHERE: case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ILT:    case UOP_IDIV: case UOP_IMOD: case UOP_ISHR:
+    case UOP_IADD:   case UOP_ISUB: case UOP_IMUL:
+    case UOP_ADD:    case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+// Generalised lane-invariant hoist (Lever 2).  In the lane-block reduce
+// combine, the per-lane fan-out re-emits the ENTIRE rewritten subtree per
+// lane k -- so any maximal subterm of `red_src` that does NOT depend on a
+// lane (UPCAST) axis is emitted N times verbatim, N-1 of them redundant.
+// The dominant cost is the col2im/_pool validity-mask chain (IWHERE/ILT/
+// IDIV/IMOD over the row half `oh = a_out + a_reduce*stride`, which is
+// lane-INVARIANT) replicated 16x.  This walks red_src top-down and, for
+// each MAXIMAL subterm that (a) is worth hoisting (rmu_hoist_worth) and
+// (b) references NO lane axis (rmu_term_depends_on_upcast == 0), emits ONE
+// `int`/`float` local and registers it in the hoist map; rmu_emit_term
+// then short-circuits every per-lane occurrence to that local name.
+//
+// Maximal: a lane-invariant node is hoisted whole and NOT descended (its
+// entire subtree is invariant); a lane-VARIANT node is descended so its
+// invariant sub-subtrees (e.g. the oh-half of a mixed oh/ow mask) hoist.
+// rmu_lane_subst's uop_graph_rewrite is identity on subtrees containing no
+// lane axis (hash-consed rebuild preserves Term identity), so the map keyed
+// on the ORIGINAL red_src matches every per-lane rewrite result -- the same
+// invariant the conv parallel-acc hoist relies on.
+//
+// This is the source-emission analogue of tinygrad codegen/late/
+// expander.py:do_expand, which only replicates UOps that depend on the
+// expand axis and leaves lane-invariant UOps as a single shared node.
+// Every RANGE axis in `t` a member of allowed[0..n_allowed)?  Used to keep
+// the hoist from lifting a subterm that references an axis opened DEEPER
+// than the hoist point (e.g. a nested reduce's K-axis) -- that local would
+// reference an undeclared `aN`.
+static int rmu_term_axes_in_set(Term t, u32 const *allowed, u32 n_allowed) {
+  if (term_tag(t) != TAG_UOP) return 1;
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(term_val(t) + 0));
+    for (u32 i = 0; i < n_allowed; i++) if (allowed[i] == aid) return 1;
+    return 0;
+  }
+  if (op == UOP_CONST || op == UOP_BUFFER || op == UOP_INVALID) return 1;
+  if (op == UOP_OPT)
+    return rmu_term_axes_in_set(heap_read(term_val(t) + 0), allowed, n_allowed);
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++)
+    if (!rmu_term_axes_in_set(heap_read(loc + i), allowed, n_allowed)) return 0;
+  return 1;
+}
+
+static u32 rmu_hoist_lane_invariant(Term t,
+                                    u32 const *up_axes, u32 n_up,
+                                    u32 red_axis,
+                                    u32 const *scope_axes, u32 n_scope,
+                                    char *name_pool, u32 name_pool_cap,
+                                    u32 *pool_used, u32 *n_hoist,
+                                    FILE *fp, u32 indent_depth) {
+  if (n_up == 0 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID
+      || op == UOP_RANGE)
+    return 0;
+  // Already hoisted (a shared subtree reached twice)?  Skip.
+  if (rmu_hoist_lookup(t) != NULL) return 0;
+  if (rmu_hoist_worth(t) && !rmu_term_depends_on_upcast(t, up_axes, n_up)
+      && rmu_term_axes_in_set(t, scope_axes, n_scope)) {
+    // Maximal lane-invariant subtree: hoist it whole.
+    if (*n_hoist >= RMU_HOIST_MAX) return 0;
+    const char *ty = rmu_op_is_int(op) ? "int" : "float";
+    char tmp[40];
+    int tn = snprintf(tmp, sizeof(tmp), "_sh%u_%u", red_axis, *n_hoist);
+    if (tn <= 0 || (u32)tn + 1 > name_pool_cap - *pool_used) return 0;
+    char *slot_name = name_pool + *pool_used;
+    memcpy(slot_name, tmp, (u32)tn + 1);
+    // Emit the RHS FIRST (before the key is in the map) so rmu_emit_term
+    // renders the full subtree -- not a self-referential `_shN = _shN;`.
+    for (u32 d = 0; d < indent_depth; d++) fputs("  ", fp);
+    fprintf(fp, "%s %s = ", ty, slot_name);
+    rmu_emit_term(t, fp);
+    fputs(";\n", fp);
+    if (!rmu_hoist_add(t, slot_name)) return 0;
+    *pool_used += (u32)tn + 1;
+    (*n_hoist)++;
+    return 1;
+  }
+  // Lane-variant (or not-worth, or out-of-scope) node: descend to find
+  // invariant subtrees.  UOP_OPT is transparent.
+  u64 loc = term_val(t);
+  if (op == UOP_OPT) {
+    rmu_hoist_lane_invariant(heap_read(loc + 0), up_axes, n_up, red_axis,
+                             scope_axes, n_scope,
+                             name_pool, name_pool_cap, pool_used, n_hoist,
+                             fp, indent_depth);
+    return 0;
+  }
+  // Do NOT descend into a nested UOP_REDUCE: its body opens its own K-loop
+  // DEEPER than this hoist point, so any local lifted from inside it would
+  // reference an axis not yet declared here.  The nested reduce hoists its
+  // own invariants when it emits (it is itself a lane-block reduce).
+  if (op == UOP_REDUCE) return 0;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++)
+    rmu_hoist_lane_invariant(heap_read(loc + i), up_axes, n_up, red_axis,
+                             scope_axes, n_scope,
+                             name_pool, name_pool_cap, pool_used, n_hoist,
+                             fp, indent_depth);
+  return 0;
+}
+
+// Affine-coefficient extractor: compute the integer coefficient of
+// `axis_id` in the affine index expression `t`.  Returns 1 + writes *coeff
+// when `t` is affine in axis_id over the {IADD,ISUB,IMUL-by-const,RANGE,
+// CONST} index grammar; returns 0 when axis_id appears under a non-affine
+// op (IDIV/IMOD/IWHERE/ILT/... -> a gather or data-dependent index) so the
+// caller falls back to the scalar store.  A subtree NOT referencing axis_id
+// contributes coefficient 0.  This is the structural equivalent of probing
+// addr[axis+1]-addr[axis], without relying on the int simplifier to cancel
+// two large symbolic trees.
+static int rmu_axis_affine_coeff(Term t, u32 axis_id, i64 *coeff) {
+  if (term_tag(t) != TAG_UOP) { *coeff = 0; return 1; }
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE) {
+    *coeff = ((u32)term_val(heap_read(term_val(t) + 0)) == axis_id) ? 1 : 0;
+    return 1;
+  }
+  if (op == UOP_CONST || op == UOP_BUFFER || op == UOP_INVALID) {
+    *coeff = 0; return 1;
+  }
+  u64 loc = term_val(t);
+  // UOP_OPT (UPCAST/UNROLL/LOCAL annotation) is transparent: the lane
+  // axis RANGE is wrapped in an OPT that carries no arithmetic -- recurse
+  // into its target (slot 0) with the coefficient unchanged.
+  if (op == UOP_OPT)
+    return rmu_axis_affine_coeff(heap_read(loc + 0), axis_id, coeff);
+  if (op == UOP_IADD || op == UOP_ISUB) {
+    i64 ca, cb;
+    if (!rmu_axis_affine_coeff(heap_read(loc + 0), axis_id, &ca)) return 0;
+    if (!rmu_axis_affine_coeff(heap_read(loc + 1), axis_id, &cb)) return 0;
+    *coeff = (op == UOP_IADD) ? (ca + cb) : (ca - cb);
+    return 1;
+  }
+  if (op == UOP_IMUL) {
+    Term a = heap_read(loc + 0), b = heap_read(loc + 1);
+    i64 av, bv;
+    int a_const = rmu_const_int(a, &av);
+    int b_const = rmu_const_int(b, &bv);
+    // axis must sit on exactly one side of a const*var product to stay
+    // affine; var*var with axis inside is non-affine.
+    if (a_const && !rmu_term_refs_axis(b, axis_id)) { *coeff = 0; return 1; }
+    if (b_const && !rmu_term_refs_axis(a, axis_id)) { *coeff = 0; return 1; }
+    if (a_const) {
+      i64 cb;
+      if (!rmu_axis_affine_coeff(b, axis_id, &cb)) return 0;
+      *coeff = av * cb; return 1;
+    }
+    if (b_const) {
+      i64 ca;
+      if (!rmu_axis_affine_coeff(a, axis_id, &ca)) return 0;
+      *coeff = bv * ca; return 1;
+    }
+    // Neither side const: affine only if axis appears in neither side.
+    if (!rmu_term_refs_axis(t, axis_id)) { *coeff = 0; return 1; }
+    return 0;
+  }
+  // Any other op (IDIV/IMOD/IWHERE/ILT/IAND/...): affine only if axis_id
+  // does not appear inside it at all (then coeff 0); otherwise non-affine.
+  if (!rmu_term_refs_axis(t, axis_id)) { *coeff = 0; return 1; }
+  return 0;
+}
+
+// Index stride of `addr` along `axis_id`: the affine coefficient of that
+// axis.  Returns 1 + writes *stride when affine; 0 for a non-affine
+// (gather) index -> not float4-vectorizable.
+static int rmu_axis_index_stride(Term addr, u32 axis_id, i64 *stride) {
+  return rmu_axis_affine_coeff(addr, axis_id, stride);
+}
+
 // REDUCE-shaped emission: STORE(buf, addr, REDUCE(src, kind, axis)).
 // Hoists an accumulator outside the reduce-axis loop and references it
 // in the store statement.  Returns 1 if the shape matched and was
@@ -3399,6 +3635,44 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
       fputs("}\n", fp);
     }
+    // float4 store probe (Lever B / NEON, C target, f32 out).  When the
+    // innermost UPCAST output axis is contiguous stride-1 in the store
+    // address and its extent is a multiple of 4, the lanes group into
+    // contiguous 4-wide runs whose accumulators pack into one
+    // `*((float4*)..)=(float4){..}` store.  This is the load-bearing change:
+    // with N scalar `out[..]=_accN_k;` stores clang's SLP cost model
+    // DECLINES the upstream lane chain (each _accN_k -> scalar `fmadd`);
+    // once the store is a float4, clang packs the lanes into `fmla.4s`.
+    // Mirrors tinygrad's `*((float4*)data0)=(float4){alu..}` final store
+    // (codegen/late/devectorizer.py).  Value-exact: each lane keeps its own
+    // sequential reduction order; the float4 only re-groups the final
+    // per-lane accumulators (verified bit-exact vs the scalar store).
+    u32 pa_vaxis = pa_up.up_axes[pa_up.n - 1];
+    u32 pa_vext  = pa_up_exts[pa_up.n - 1];
+    u32 pa_out_dt = uop_buffer_dtype(buf);
+    int pa_vec4 = 0;
+    if (RMU_TARGET == CG_TARGET_C && pa_out_dt == DT_FP32 && pa_vext % 4 == 0) {
+      i64 s;
+      if (rmu_axis_index_stride(addr, pa_vaxis, &s) && s == 1) pa_vec4 = 1;
+    }
+    if (pa_vec4) {
+      // Group every 4 consecutive lanes (the fastest-varying innermost
+      // UPCAST axis spans 4 contiguous positions) into one float4 store.
+      for (u32 g = 0; g * 4 < pa_total; g++) {
+        u32 rem0 = g * 4;
+        for (i32 i = (i32)pa_up.n - 1; i >= 0; i--) {
+          pa_up.up_vals[i] = rem0 % pa_up_exts[i];
+          rem0 /= pa_up_exts[i];
+        }
+        Term ak0 = uop_graph_rewrite(addr, pa_rules, 1, &pa_up);
+        for (u32 d = 0; d < pa_body_depth; d++) fputs("  ", fp);
+        fprintf(fp, "*((float4*)(&%s[", rmu_buf_name(buf));
+        rmu_emit_term(ak0, fp);
+        fprintf(fp, "])) = (float4){%s_%u, %s_%u, %s_%u, %s_%u};\n",
+                pa_acc_name, g * 4 + 0, pa_acc_name, g * 4 + 1,
+                pa_acc_name, g * 4 + 2, pa_acc_name, g * 4 + 3);
+      }
+    } else
     // F final stores.
     for (u32 k = 0; k < pa_total; k++) {
       u32 rem = k;
@@ -3745,6 +4019,46 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
                         store_addr, (n_lanes > 1) ? lb : NULL);
   }
   if (n_lanes > 1) {
+    // Lane-invariant hoist (Lever 2): the per-lane fan-out below re-emits
+    // the whole body per lane.  Hoist every maximal subterm of r_src that
+    // references no lane axis (the col2im/_pool validity-mask row-half and
+    // shared loads) into ONE local before the N combines, so each lane's
+    // body short-circuits to the local instead of recomputing it.  Save/
+    // restore the global hoist map -- the conv parallel-acc path also uses
+    // it but never overlaps this reduce's emit.  rmu_lane_subst is identity
+    // on lane-invariant subtrees (hash-cons preserves Term identity), so the
+    // map keyed on the ORIGINAL r_src matches every per-lane rewrite result.
+    u32 saved_hoist_n = RMU_HOIST_N;
+    char lane_hoist_pool[RMU_HOIST_MAX * 40] = {0};
+    u32 lane_pool_used = 0;
+    u32 lane_n_hoist = 0;
+    // Axes in scope at inner_depth: the output-loop axes (store_addr), this
+    // reduce's own axes, and the inner-reduce-decomp axes opened above.  A
+    // hoisted local may reference ONLY these (not a nested reduce's K-axis).
+    u32 scope_axes[RMU_MAX_RANGES];
+    u32 n_scope = 0;
+    {
+      Term sa_ranges[RMU_MAX_RANGES];
+      u32  sa_n = 0;
+      rmu_collect_ranges(store_addr, sa_ranges, &sa_n);
+      for (u32 i = 0; i < sa_n && n_scope < RMU_MAX_RANGES; i++) {
+        if (term_tag(sa_ranges[i]) == TAG_UOP
+            && term_ext(sa_ranges[i]) == UOP_RANGE)
+          scope_axes[n_scope++] =
+              (u32)term_val(heap_read(term_val(sa_ranges[i]) + 0));
+      }
+      for (u32 ai = 0; ai < r_n_axes && n_scope < RMU_MAX_RANGES; ai++)
+        scope_axes[n_scope++] = axis_ids[ai];
+      for (u32 i = 0; i < n_decomp && n_scope < RMU_MAX_RANGES; i++)
+        if (term_tag(decomp_ranges[i]) == TAG_UOP
+            && term_ext(decomp_ranges[i]) == UOP_RANGE)
+          scope_axes[n_scope++] =
+              (u32)term_val(heap_read(term_val(decomp_ranges[i]) + 0));
+    }
+    rmu_hoist_lane_invariant(r_src, lb->up_axes, lb->n, r_axis,
+                             scope_axes, n_scope,
+                             lane_hoist_pool, (u32)sizeof(lane_hoist_pool),
+                             &lane_pool_used, &lane_n_hoist, fp, inner_depth);
     // N straight-line lane combines inside the shared K loop: each lane's
     // accumulator is independent, so clang vectorizes the N-wide update.
     RmuConvMSubstCtx cx = {0};
@@ -3758,6 +4072,14 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
       for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
       rmu_emit_reduce_combine(lane_acc, r_kind, r_src_k, fp);
       RMU_ACC_LANE_SUFFIX[0] = '\0';
+    }
+    // Drop this reduce's hoist entries so they don't leak into a sibling
+    // reduce or the store fan-out (their `_sh` locals are out of scope once
+    // we close the reduce loop).
+    while (RMU_HOIST_N > saved_hoist_n) {
+      RMU_HOIST_N--;
+      RMU_HOIST_MAP[RMU_HOIST_N].key  = 0;
+      RMU_HOIST_MAP[RMU_HOIST_N].name = NULL;
     }
   } else {
     for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
@@ -4174,10 +4496,52 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     }
   }
   if (lbp != NULL) {
+    // float4 store probe (Lever B / NEON, C target, f32 out).  When the
+    // innermost lane axis is contiguous stride-1 in the store address and
+    // its extent is a multiple of 4, the lanes group into contiguous 4-wide
+    // runs whose 4 scalar epilogue values pack into one `*((float4*)..)=`
+    // store.  This is the load-bearing change: with N scalar `out[..]=`
+    // stores the epilogue's mask/bias LOAD defeats clang's SLP cost model
+    // and the upstream lane accumulators compile to scalar `fmadd`; once the
+    // store is a float4 the whole lane chain packs to `fmla.4s`.  The
+    // accumulators + combines stay scalar (clang SLP repacks them) -- this
+    // mirrors tinygrad's `float acc0[16]` + `*((float4*)data0)=(float4){..}`
+    // (codegen/late/devectorizer.py fold_expanded_index + the float4 store).
+    // Value-exact: each lane keeps its own sequential reduction order; the
+    // float4 only re-groups the final per-lane epilogue results.
+    u32 vlane_axis = lb.up_axes[lb.n - 1];
+    u32 vlane_ext  = lb.up_exts[lb.n - 1];
+    u32 out_dt = uop_buffer_dtype(buf);
+    int vec4 = 0;
+    if (RMU_TARGET == CG_TARGET_C && out_dt == DT_FP32 && vlane_ext % 4 == 0) {
+      i64 s;
+      if (rmu_axis_index_stride(addr, vlane_axis, &s) && s == 1) vec4 = 1;
+    }
+    RmuConvMSubstCtx cx = {0};
+    if (vec4) {
+      // Group every 4 consecutive lanes into a float4 store.  Lane decode
+      // makes the innermost axis the fastest-varying, so lanes [4g..4g+3]
+      // share all outer axes and span 4 contiguous innermost positions.
+      for (u32 g = 0; g * 4 < lb.n_lanes; g++) {
+        Term addr0 = rmu_lane_subst(addr, &lb, g * 4, &cx);
+        for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+        fprintf(fp, "*((float4*)(&%s[", rmu_buf_name(buf));
+        rmu_emit_term(addr0, fp);
+        fputs("])) = (float4){", fp);
+        for (u32 j = 0; j < 4; j++) {
+          Term value_k = rmu_lane_subst(value, &lb, g * 4 + j, &cx);
+          snprintf(RMU_ACC_LANE_SUFFIX, sizeof(RMU_ACC_LANE_SUFFIX),
+                   "_%u", g * 4 + j);
+          if (j > 0) fputs(", ", fp);
+          rmu_emit_term(value_k, fp);
+          RMU_ACC_LANE_SUFFIX[0] = '\0';
+        }
+        fputs("};\n", fp);
+      }
+    } else
     // Fan the store out into N lane stores: per-lane addr + value with the
     // UPCAST lane axes substituted to literals and the `_acc` references
     // suffixed `_<k>` so each lane reads its own accumulator(s).
-    RmuConvMSubstCtx cx = {0};
     for (u32 k = 0; k < lb.n_lanes; k++) {
       Term addr_k  = rmu_lane_subst(addr,  &lb, k, &cx);
       Term value_k = rmu_lane_subst(value, &lb, k, &cx);
@@ -4634,6 +4998,17 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   fputs("#define THVM_BITCAST(t, x) "
         "({ t _t; __typeof__(x) _x = (x); "
         "memcpy(&_t, &_x, sizeof(_t)); _t; })\n", fp);
+  // float4 vector type for the lane-block float4 store (Lever B / NEON):
+  // the renderer emits `*((float4*)(&out[base])) = (float4){l0,l1,l2,l3}`
+  // for contiguous 4-wide output lane groups so clang packs the upstream
+  // accumulator chain into `fmla.4s` instead of scalar `fmadd`.  GCC/clang
+  // ext_vector_type extension; both CPU JIT compilers accept it.  aligned(4)
+  // (element alignment, NOT 16) makes the cast an UNALIGNED vector store so
+  // it is safe for any contiguous base offset, regardless of the arena
+  // buffer's alignment -- arm64 NEON handles unaligned `str q` natively and
+  // it still emits the packed fmla.4s (verified bit-exact + 20 fmla.4s).
+  fputs("typedef float float4 __attribute__((aligned(4),"
+        "ext_vector_type(4)));\n", fp);
   // CPU-JIT entry-point signature; cpu/jit.c dlsyms "k" and calls
   // it directly with caller pointers.
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
@@ -4742,6 +5117,14 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   fputs("#define THVM_BITCAST(t, x) "
         "({ t _t; __typeof__(x) _x = (x); "
         "memcpy(&_t, &_x, sizeof(_t)); _t; })\n", fp);
+  // float4 vector type for the lane-block float4 store (Lever B / NEON):
+  // the renderer emits `*((float4*)(&out[base])) = (float4){l0,l1,l2,l3}`
+  // for contiguous 4-wide output lane groups so clang packs the upstream
+  // accumulator chain into `fmla.4s` instead of scalar `fmadd`.  aligned(4)
+  // = an UNALIGNED vector store, safe for any contiguous base offset (arm64
+  // NEON `str q` handles unaligned natively); still emits packed fmla.4s.
+  fputs("typedef float float4 __attribute__((aligned(4),"
+        "ext_vector_type(4)));\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels) {\n", fp);
   fputs("  (void)n; (void)in_numels;\n", fp);

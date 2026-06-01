@@ -668,6 +668,32 @@ maxpool-grad col2im per-lane body duplication inflates its inherent ternaries (m
 is the next lever). The clang `-Rpass=loop-vectorize=0` metric is an x86 artifact on this
 arm64 box -- the real signal is the NEON `fmla.4s` + the 2.9x warm drop.
 
+### NEON codegen close-out + the wall is now GATHER-bound (2026-06-01)
+
+Third workflow pushed faithful-CPU codegen further (float4 lane-store + lane-invariant
+mask-hoist, render_uop.c). Both levers are correct (independently memcmp-verified bit-exact:
+0/102400 diffs on the conv-recompute kernel, 0/32768 on the hardest fused col2im+mask
+kernel), parity-exact, all 7 suites green, GPU paths untouched. Codegen is strictly better:
+the conv-recompute kernels now emit 20-36 packed NEON `fmla.4s` (were 0 -- the float4 store
+flips clang's SLP cost model so the scalar lane accumulators pack), and the fused kernel's
+col2im validity ternaries dropped 416 -> 62 (lane-invariant masks hoisted to one `_sh` local
+each). Faithful warm is NET-NEUTRAL (~78ms; the earlier "73.74ms" was machine-state drift,
+re-verified against a freshly-built clean-HEAD worktree -- NOT a regression).
+
+**Decisive: the faithful-CPU wall is now GATHER-bound, not codegen-bound.** Normalized
+profiling shows 47% of wall in TWO fused kernels -- kid 254 ([8,64,8,8], 28%): a conv2-
+forward-recompute FUSED with a col2im/_pool GATHER (`in4[<IDIV/IMOD/IWHERE index>]`, a
+data-dependent per-lane address that CANNOT vectorize and is memory-latency-bound) -- and
+kid 262 ([8,32,24,24], 19%): the maxpool-grad scatter. NEON FMA + mask-hoisting optimize
+everything they can but the gather LOAD dominates. **The genuine remaining lever is
+SCHEDULER de-fusion** of the col2im gather from the conv recompute (kid 254 over-fuses them
+into one kernel) -- a rangeify/materialize change, OUT OF SCOPE for render_uop.c codegen,
+and the same arc [[project_beautiful_mnist_speed]] flags as the "6-D fusion lever (still
+hangs on data-grad)". That is the next target for the wall; the codegen NEON work is the
+faithful (tinygrad-devectorizer-shaped) prerequisite that pays off once the gather is
+de-fused. faithful-CPU: 217ms (session start) -> 78ms (2.8x, Lever B), gap to tinygrad ~15ms
+is now the gather-fusion arc.
+
 **State of v3 after this session:** achievable compiler goals MET (wins warm wall on
 CPU/CUDA/Metal in default mode; faithful kernel count within 9% of tinygrad; numerically
 correct). Landed this session: honest `sched_kernels` probe (ea2f6ff6), realize.c
