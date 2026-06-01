@@ -201,10 +201,12 @@ End-to-end smoke (in tests/test_fol.c):
   Russell-style `∀x.(R(x,x) <-> ¬R(x,x))`  -> PROVED.
 
 Standard FOL bench (in tests/test_fol_pelletier.c):
-  Pelletier P1-P10 (propositional) + P15 (∀-quantifier) all PROVE
-  end-to-end via fol_formula_to_clauses -> cnf_run.  Covers
-  contrapositive, double-negation, Peirce's law, mutual implications,
-  ∀-distribution.
+  Pelletier P1-P14 (propositional) + P15/P18/P19 (FOL with
+  quantifier alternation) all PROVE end-to-end via
+  fol_formula_to_clauses -> cnf_run.  Covers contrapositive,
+  double-negation, Peirce's law, biconditional associativity,
+  distributivity, mutual implications, ∀-distribution, the drinker
+  paradox, and ∃-bound nested implications.
 
 Demodulation lands in two layers:
 

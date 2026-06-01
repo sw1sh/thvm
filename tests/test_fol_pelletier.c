@@ -166,6 +166,49 @@ int main(void) {
     CHECK(st == ATP_PROVED);
   }
 
+  // P11: P ↔ P [trivial tautology].
+  TEST_BEGIN("pelletier/p11-trivial-iff");
+  {
+    Term p = P_atom();
+    Term conj = fol_mk_iff(p, p);
+    AtpStatus st = refute(conj, 64);
+    CHECK(st == ATP_PROVED);
+  }
+
+  // P12: ((P ↔ Q) ↔ R) ↔ (P ↔ (Q ↔ R))  [biconditional associativity].
+  TEST_BEGIN("pelletier/p12-iff-assoc");
+  {
+    Term p = P_atom(), q = Q_atom(), r = R_atom();
+    Term lhs = fol_mk_iff(fol_mk_iff(p, q), r);
+    Term rhs = fol_mk_iff(p, fol_mk_iff(q, r));
+    Term conj = fol_mk_iff(lhs, rhs);
+    AtpStatus st = refute(conj, 16384);
+    CHECK(st == ATP_PROVED);
+  }
+
+  // P13: (P ∨ (Q ∧ R)) ↔ ((P ∨ Q) ∧ (P ∨ R))  [distributivity].
+  TEST_BEGIN("pelletier/p13-distrib");
+  {
+    Term p = P_atom(), q = Q_atom(), r = R_atom();
+    Term lhs = fol_mk_or(p, fol_mk_and(q, r));
+    Term rhs = fol_mk_and(fol_mk_or(p, q), fol_mk_or(p, r));
+    Term conj = fol_mk_iff(lhs, rhs);
+    AtpStatus st = refute(conj, 8192);
+    CHECK(st == ATP_PROVED);
+  }
+
+  // P14: (P ↔ Q) ↔ ((Q ∨ ¬P) ∧ (¬Q ∨ P)).
+  TEST_BEGIN("pelletier/p14-iff-via-or");
+  {
+    Term p = P_atom(), q = Q_atom();
+    Term lhs = fol_mk_iff(p, q);
+    Term rhs = fol_mk_and(fol_mk_or(q, fol_mk_not(p)),
+                           fol_mk_or(fol_mk_not(q), p));
+    Term conj = fol_mk_iff(lhs, rhs);
+    AtpStatus st = refute(conj, 4096);
+    CHECK(st == ATP_PROVED);
+  }
+
   // P15 (FOL): (∀x.(P(x) → Q(x))) → ((∀x.P(x)) → (∀x.Q(x)))
   // This is a basic FOL theorem; tests Skolemization + paramod.
   TEST_BEGIN("pelletier/p15-fol-implication");
@@ -178,6 +221,48 @@ int main(void) {
         fol_mk_all(x, Q1(x))
       )
     );
+    AtpStatus st = refute(conj, 4096);
+    CHECK(st == ATP_PROVED);
+  }
+
+  // P16: (P → Q) ∨ (Q → P)  [classical but not intuitionistic].
+  TEST_BEGIN("pelletier/p16-or-imp");
+  {
+    Term p = P_atom(), q = Q_atom();
+    Term conj = fol_mk_or(fol_mk_imp(p, q), fol_mk_imp(q, p));
+    AtpStatus st = refute(conj, 1024);
+    CHECK(st == ATP_PROVED);
+  }
+
+  // P18: ∃y.∀x. (P(y) → P(x))   [drinker paradox].
+  // Negation: ∀y.∃x. P(y) ∧ ¬P(x).
+  // Skolemize x -> f(y): ∀y. P(y) ∧ ¬P(f(y)).
+  // Resolution: P(y0) vs ¬P(f(y1)) with σ = {y0 ↦ f(y1)} -> empty.
+  TEST_BEGIN("pelletier/p18-drinker-paradox");
+  {
+    Term y = v(0);
+    Term x = v(1);
+    Term conj = fol_mk_ex(y,
+      fol_mk_all(x,
+        fol_mk_imp(P1(y), P1(x))));
+    AtpStatus st = refute(conj, 256);
+    CHECK(st == ATP_PROVED);
+  }
+
+  // P19: ∃x.∀y.∀z. ((P(y) → Q(z)) → (P(x) → Q(x)))
+  // After negation + Skolemization gives a more complex clause set.
+  TEST_BEGIN("pelletier/p19-existential-bound");
+  {
+    Term x = v(0);
+    Term y = v(1);
+    Term z = v(2);
+    Term inner = fol_mk_imp(
+      fol_mk_imp(P1(y), Q1(z)),
+      fol_mk_imp(P1(x), Q1(x))
+    );
+    Term conj = fol_mk_ex(x,
+      fol_mk_all(y,
+        fol_mk_all(z, inner)));
     AtpStatus st = refute(conj, 4096);
     CHECK(st == ATP_PROVED);
   }
