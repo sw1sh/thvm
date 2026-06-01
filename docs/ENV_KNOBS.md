@@ -42,6 +42,8 @@ update the matching row here in the same change.
 | `THVM_NF_PARALLEL_STEP_SESSION` | off | Parallel normal-form step session. |
 | `THVM_PRECISE_FIRE_MEMO` | off | Precise dispatch-fire memoization. |
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |
+| `THVM_RU_FAITHFUL_SEED` | off | Realize-seed only structural boundaries (ROOT) + REDUCE outputs, deriving the rest in the rangeify walk (tinygrad's structural seed); default mode also seeds MULTI/MATMUL/FANIN. Faithful CPU beats tinygrad + default (see [[project_faithful_cpu_breakthrough]]). |
+| `THVM_RU_NO_SEED_REDUCE` | off | A/B revert: under faithful seed, go back to ROOT-only (drop the REDUCE-output seed). ROOT-only under-realizes -> conv data-grad becomes a col2im gather (faithful beautiful_mnist CPU 5.18ms -> 77.6ms). For comparison only. |
 
 ## Bufferize & kernel lift
 
@@ -75,6 +77,7 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | `THVM_TILE` | off | Tile-size tuning for the tiled codegen path. |
 | `THVM_LOOP_UNROLL_MAX` | (impl) | Max loop-unroll iterations. |
 | `THVM_HANDOPT_TRACE` | off | Trace hand-coded optimization decisions. |
+| `THVM_NO_FAST_IDIV` | off | A/B revert (read in `index_simplify.c`, not hand_opts): disable the fast_idiv/magicgu late-rewrite that lowers `x//c` -> `(x*m)>>s` at the C-render root (tinygrad's decompositions.py). On = keep literal IDIV/IMOD. |
 
 ## Memory, GC & buffer management
 
