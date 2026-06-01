@@ -102,6 +102,28 @@ def feed():
     _TH.ten_write(ohSlot.term, oh.tobytes())
 
 
+def schedule_kernels():
+    """Honest per-step kernel count: one plain eager fwd+bwd+optimizer realize,
+    measured as the KERNELS-registry delta.
+
+    This is the metric for verifying scheduling/fusion milestones. The JIT warm
+    path and the THVM_KERNEL_PROFILE "N kernels with samples" line both UNION the
+    eager-built kernels with the capture-rebuilt set, roughly doubling the count
+    (the 207-vs-113 inflation that derailed an earlier audit -- the duplication is
+    JIT dispatch redundancy, not a fusion gap). A clean eager step does not pay
+    that, so it reflects what the scheduler actually fuses."""
+    feed()
+    k0 = _TH.kernel_count()
+    logits = xSlot.sequential(layers)
+    loss = (logits.log_softmax(axis=1) * ohSlot).sum(axis=1).mean() * -1.0
+    loss.backward(); loss.realize()
+    Tensor.realize(*[p.grad for p in opt.params if p.grad is not None],
+                   *opt.schedule_step())
+    opt.zero_grad()
+    return _TH.kernel_count() - k0
+
+
+sched_k = schedule_kernels()
 wall = []
 for i in range(NITER):
     feed()
@@ -112,4 +134,4 @@ mode = "faithful" if os.environ.get("THVM_RU_FAITHFUL_SEED") else "default"
 beam = os.environ.get("BEAM", "0")
 print(f"thvm {DEV} {MODEL} {mode} BEAM={beam}: "
       f"warm_min={min(warm):.2f}ms warm_mean={np.mean(warm):.2f}ms "
-      f"loss={lv:.4f} peak_mb={_peak_bytes() / 1e6:.1f}")
+      f"loss={lv:.4f} sched_kernels={sched_k} peak_mb={_peak_bytes() / 1e6:.1f}")

@@ -59,15 +59,20 @@ Committed on `py-jit-speedup`: `e14f7da9` (faithful conv-bwd compiles: required_
 cap), `bb24342d` (beautiful_mnist_jit zero_grad), `d595fcb7` (py dylib links the real
 Metal backend). Verified parity (warm train, BS=8):
 
-| | CUDA | Metal | kernels | peak mem |
-|---|---|---|---|---|
-| thvm default | 6.15ms | 3.63ms | 328 | 31MB |
-| thvm faithful | 8.64ms | 4.72ms | 226 | 14.8MB |
-| tinygrad | ~8.7ms(BEAM) / 12ms | 6.03ms | 120 | ~1-3MB |
+| | CUDA wall | Metal wall | CPU wall | kernels (eager) | peak mem |
+|---|---|---|---|---|---|
+| thvm default | 6.15ms | 3.63ms | **7.36ms** | 164 | 31MB |
+| thvm faithful | 8.64ms | 4.72ms | **238ms** | 113 | 14.8MB |
+| tinygrad | ~8.7ms(BEAM) / 12ms | 6.03ms | 15.09ms | 104 | ~1-3MB |
 
-thvm wins wall-time both backends; tinygrad fuses more (fewer kernels, less memory).
-Faithful is the middle. The 226->120 residual is reduce-into-reduce fusion + ShapeTracker
-merge (the `rangeify_unified.c:160` comment localizes it).
+The `kernels` column is the HONEST eager-schedule count (`kernel_count()` delta on one
+clean realize); the earlier 328/226/120 figures were the JIT-harness counts, ~2x
+inflated by capture-vs-eager duplication (see the audit-correction entry in section 4).
+On kernel count thvm faithful (113) is within 9% of tinygrad (104) and the forward fuses
+MORE -- fusion parity is essentially met. The standing gaps are CODEGEN (faithful's CPU
+wall is 16x tinygrad because fused convs miss the BLAS path and render unvectorized -- the
+real "faithful incl. performance" lever) and peak memory (buffer reuse). thvm default
+WINS CPU/CUDA/Metal wall via the Accelerate-BLAS matmul path.
 
 ---
 
@@ -327,3 +332,57 @@ Added `py/tests/test_faithful_parity.py` -- a faithful<->default forward+grad pa
 guardrail (subprocess per seed; step-0 loss + conv1 weight-grad ssq within fp). This
 locks in the correctness invariant so the future deep memory-fusion work can be verified
 against a fast regression check, not just the full WL suite. Passes (2.3s).
+
+### Kernel-count audit CORRECTION + the real gap is CODEGEN, not fusion (2026-06-01)
+
+Measured the actual per-step kernel count three ways, apples-to-apples (CPU, BS=8, full
+fwd+bwd+Adam, 14 params), to settle the OR-merge question before building it. The result
+overturns the prior re-scope:
+
+- **The "207 vs 120" 2x kernel gap was a measurement artifact.** A clean EAGER realize
+  (`kernel_count()` delta, no JIT) gives thvm **faithful 113**, **default 164**,
+  **tinygrad 104**. Faithful is within 9% of tinygrad; the forward pass alone fuses
+  MORE than tinygrad (thvm 13 vs tg 16). The bench harness's "207" UNIONs the
+  eager-built kernels with the JIT-capture-rebuilt set (~2x) plus the slot-assign /
+  zero_grad kernels -- that duplication is JIT dispatch redundancy
+  ([[project_thvm_jit_dispatch_redundancy]]), NOT a fusion gap. The M2 audit's tinygrad
+  baseline of 120 was bogus (real tinygrad fwd+bwd=46, +Adam=58, total=104).
+- **OR-merge is NOT a kernel-count lever -- REFUTED.** At the multi-consumer divergence
+  site, tinygrad with default `PCONTIG=0` (helpers.py:254) collapses the per-axis
+  decision to a single `all_all_same` flag (indexing.py:208): either keep a FULL view
+  (all consumer indices match -> merge valids) or FULL-realize every axis. thvm
+  (`rangeify_unified.c:845-861`) PARTIAL-realizes only the diverging axes, so it fuses
+  AT LEAST as much as tinygrad's default there. The boolean-OR-of-valids merge only
+  affects WHICH valid the shared view in the all-same case carries -- a correctness
+  nuance thvm already handles correctly by deferring valids to address-build time
+  (`movement_index.c` IAND'd ILT masks), not a realize-count win. Built nothing; the
+  audit (temporary `THVM_RU_REALIZE_TRACE`, since removed) showed thvm's divergence
+  realizes are genuinely-different indices, which tinygrad realizes too.
+
+**The real "faithful means FAITHFUL incl. performance" gap is CPU CODEGEN, surfaced by
+the same measurement (warm wall, BS=8, beautiful_mnist):**
+- thvm **default 7.36ms** (164 kernels) -- BEATS tinygrad.
+- tinygrad **15.09ms** (104 kernels).
+- thvm **faithful 238ms** (113 kernels) -- 16x SLOWER than tinygrad despite ~= kernel
+  count. One fused conv kernel runs ~81ms/fire at ~2 GFLOPS single-threaded.
+
+Mechanism: thvm's default seed keeps convs as MATMUL, routed to Accelerate `cblas_sgemm`
+(`src/backend/cpu/blas.c`, "10-100x speedup") -- that BLAS path is why default beats
+tinygrad. The FAITHFUL seed fuses the matmul into elementwise+reduce, which the DAG-side
+GEMM classifier no longer recognises, so it renders as a naive triple-nested C loop with
+no UPCAST/UNROLL/vectorization. tinygrad runs ITS equally-fused schedule at 15ms because
+its CLANG codegen applies hand opts (UPCAST/UNROLL) that vectorize the C loop; thvm's
+faithful path does not. So:
+
+**Re-scope (supersedes the "every lever is large memory infra" conclusion):**
+- Kernel-count/fusion parity is **essentially MET** (faithful 113 ~= tg 104). Stop
+  chasing it. Retire the OR-merge and multi-output-for-kernel-count items.
+- The genuine remaining gap is **faithful-kernel CPU codegen quality**: extend
+  hand_opts/`propose.c` (M1/M4) to apply UPCAST/UNROLL to the big fused conv kernels so
+  the non-BLAS path vectorizes, closing the 238ms -> ~15ms gap. This IS the
+  performance half of "faithful." CPU-verifiable, not GPU-gated.
+- Standing-separate: peak-memory buffer reuse (~7x, [[project_memory_parity_followup]])
+  and JIT dispatch redundancy -- both real, both independent of rangeify fusion.
+
+Harness: `tools/bench_train.py` now reports `sched_kernels` (the honest eager
+`kernel_count()` delta) alongside warm wall, so this measurement error can't recur.

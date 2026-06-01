@@ -1,6 +1,6 @@
 # thvm vs tinygrad: Comprehensive ML-Compiler Comparison, Knob Reference, and Coverage-Gap Plan
 
-*Comparison of `thvm` (C port, branch `py-jit-speedup`, `/private/tmp/thvm-jit`) against `tinygrad` (the spec, `/Users/swish/src/tinygrad/tinygrad`). All file:line citations are against those trees. Benchmark figures are warm Metal `beautiful_mnist` train unless noted; the CUDA picture is qualitatively identical.*
+*Comparison of `thvm` (this repo, C port; work on branch `py-jit-speedup`) against `tinygrad` (the spec, under `tinygrad/`). thvm citations are repo-relative (`src/...`); tinygrad citations are relative to its package root (`tinygrad/...`). Benchmark figures are warm Metal `beautiful_mnist` train unless noted; the CUDA picture is qualitatively identical.*
 
 > **Revision (2026-06-01).** The first draft of this report was assembled by
 > excerpt-reading agents and overstated three gaps; each was disproved by reading the
@@ -19,11 +19,13 @@
 >   of tinygrad `symbolic.py`, wired in materialize + render. The gap is *specific*
 >   unported rules (boolean-OR validity union, full view-cancellation, arange-collapse),
 >   a medium completion.
-> - **The kernel-count gap is NOT reduce-into-reduce.** Audited: of 207 faithful
->   beautiful_mnist boundaries only 14 are REDUCE; forward+backward alone is 123 ~=
->   tinygrad's *total* 120. The excess is the unfused optimizer (84 boundaries) + ~74
->   walk-realized intermediates whose root cause is the missing boolean-OR-of-valids
->   merge in the consumer-divergence realize. There are also **no missing autodiff
+> - **There is essentially NO kernel-count gap (2026-06-01 audit).** Honest eager-schedule
+>   counts (full step, CPU, BS=8): thvm faithful **113**, default **164**, tinygrad
+>   **104**. Faithful is within 9% and the forward fuses MORE than tinygrad (13 vs 16).
+>   The earlier "207 vs 120 / unfused-optimizer / boolean-OR-merge" framing was an
+>   artifact of the JIT-harness kernel count (~2x inflated). The real residual is CODEGEN:
+>   faithful's fused convs miss thvm's Accelerate-BLAS matmul path, so faithful CPU wall
+>   is 238 ms vs tinygrad 15 ms (default 7.36 ms). There are also **no missing autodiff
 >   backward rules** (Tensor ops like maximum/relu decompose to primitives that already
 >   have gradients; thvm has no SIN/COS/POW/WHERE *primitives* to differentiate).
 
@@ -31,7 +33,17 @@
 
 ## 1. Executive summary
 
-`thvm` is a faithful C port of tinygrad's UOP-DAG-to-kernel compiler: it reproduces the same pipeline shape (UOP DAG -> realize-seed classify -> consumer-driven rangeify -> materialize -> render -> backend dispatch), the same consumer-divergence fusion model, a near-line-by-line port of tinygrad's hand-coded optimization heuristic (`hand_coded_optimizations` -> `src/codegen/hand_opts.c`), AND a real BEAM autotuner (`src/codegen/autotune.c`) and symbolic rewrite engine (`src/uop/symbolic_rewrite.c` et al.). The two diverge in three places that matter. **(1) Realize-seeding:** tinygrad seeds *only* structural boundaries (`COPY`/`CONTIGUOUS`/`STORE`, `indexing.py:28-35`) and derives every other realize from the rangeify walk; thvm's *default* mode over-seeds (`ROOT + MULTI + REDUCE + MATMUL + FANIN_CAP` in `bufferize_classify.c`), producing more, smaller kernels, while its opt-in **faithful** mode (`THVM_RU_FAITHFUL_SEED=1`, `rangeify_unified.c:147-166`) seeds `ROOT` only to match tinygrad's structural seed. **(2) Optimization search:** both pair the hand-coded heuristic with a BEAM autotuner, but thvm's candidate **proposer** (`propose.c`) is narrower than tinygrad's ~200-action `search.py` (and was only recently unblocked on the py/JIT path); thvm also has no second-phase warp-shuffle THREAD reduce. **(3) Symbolic depth:** thvm's symbolic engine ports a *subset* of tinygrad's `symbolic.py`; the unported rules (boolean-OR validity merge, full ShapeTracker view-cancellation, arange-collapse) are where its movement/validity handling stays conservative. The measured tradeoff is the report's headline (warm Metal, BS=8): **thvm default 3.57 ms / 328 kernels / 31 MB**, **thvm default + `BEAM=2` 2.07 ms**, **thvm faithful 4.72 ms / 226 kernels / 14.8 MB**, **tinygrad 6.03 ms / 120 kernels / ~1-3 MB**. thvm wins wall-time (over-realization + a thvm-specific occupancy floor maximize per-kernel parallelism; BEAM closes most of the rest); tinygrad wins fusion and memory (heavier fusion + symbolic merge + structural seed). Faithful mode is the middle: it closes ~half the kernel-count gap (328 -> 226) and most of the memory gap (31 -> 14.8 MB) for a ~1.3x wall-time cost. The remaining 226-vs-120 kernel-count gap is **algorithmic** but lives in the **unfused optimizer + the missing boolean-OR-of-valids merge** (the rangeify walk over-realizes ~74 intermediates), NOT in reduce-into-reduce fusion (forward+backward alone already matches tinygrad's kernel count).
+`thvm` is a faithful C port of tinygrad's UOP-DAG-to-kernel compiler: it reproduces the same pipeline shape (UOP DAG -> realize-seed classify -> consumer-driven rangeify -> materialize -> render -> backend dispatch), the same consumer-divergence fusion model, a near-line-by-line port of tinygrad's hand-coded optimization heuristic (`hand_coded_optimizations` -> `src/codegen/hand_opts.c`), AND a real BEAM autotuner (`src/codegen/autotune.c`) and symbolic rewrite engine (`src/uop/symbolic_rewrite.c` et al.). The two diverge in three places that matter. **(1) Realize-seeding:** tinygrad seeds *only* structural boundaries (`COPY`/`CONTIGUOUS`/`STORE`, `indexing.py:28-35`) and derives every other realize from the rangeify walk; thvm's *default* mode over-seeds (`ROOT + MULTI + REDUCE + MATMUL + FANIN_CAP` in `bufferize_classify.c`), producing more, smaller kernels, while its opt-in **faithful** mode (`THVM_RU_FAITHFUL_SEED=1`, `rangeify_unified.c:147-166`) seeds `ROOT` only to match tinygrad's structural seed. **(2) Optimization search:** both pair the hand-coded heuristic with a BEAM autotuner, but thvm's candidate **proposer** (`propose.c`) is narrower than tinygrad's ~200-action `search.py` (and was only recently unblocked on the py/JIT path); thvm also has no second-phase warp-shuffle THREAD reduce. **(3) Symbolic depth:** thvm's symbolic engine ports a *subset* of tinygrad's `symbolic.py`; the unported rules (boolean-OR validity merge, full ShapeTracker view-cancellation, arange-collapse) are where its movement/validity handling stays conservative. The measured tradeoff is the report's headline (warm Metal, BS=8): **thvm default 3.57 ms / 328 kernels / 31 MB**, **thvm default + `BEAM=2` 2.07 ms**, **thvm faithful 4.72 ms / 226 kernels / 14.8 MB**, **tinygrad 6.03 ms / 120 kernels / ~1-3 MB**. thvm wins wall-time (over-realization + a thvm-specific occupancy floor maximize per-kernel parallelism; BEAM closes most of the rest); tinygrad wins fusion and memory (heavier fusion + symbolic merge + structural seed). Faithful mode closes most of the memory gap (31 -> 14.8 MB). On Metal it costs ~1.3x
+wall; on CPU it costs 32x (238 ms vs default's 7.36 ms) -- see below. **A 2026-06-01
+audit corrects the kernel-count story:** the honest eager-schedule counts are faithful
+**113**, default **164**, tinygrad **104** (the 328/226/120 figures were JIT-harness
+counts, ~2x inflated by capture-vs-eager duplication). So faithful is within 9% of
+tinygrad on kernels and the forward fuses MORE -- **fusion parity is essentially met**,
+and the boolean-OR-of-valids merge is NOT a kernel-count lever (with default `PCONTIG=0`
+thvm's per-axis divergence realize fuses at least as much as tinygrad's all-or-nothing
+one). The genuine residual is **codegen quality**: faithful's fused convs miss thvm's
+Accelerate-BLAS matmul path and render unvectorized, so faithful CPU wall is 16x
+tinygrad's -- the real "faithful incl. performance" lever.
 
 ---
 
@@ -81,7 +93,14 @@ Both compilers lower a tensor program to device kernels through structurally ide
 
 ## 3. Scheduling & fusion: the core algorithmic comparison
 
-This is where the 120-vs-226-vs-328 kernel-count gap is born.
+This section explains the realize-seeding model. **Note (2026-06-01 audit):** the
+honest eager-schedule kernel counts are thvm faithful **113**, default **164**, tinygrad
+**104** (CPU, BS=8, full step; `kernel_count()` delta on a clean realize). Faithful is
+within 9% of tinygrad -- fusion parity is essentially met. The 328/226/120 figures used
+below were the JIT-harness counts (~2x inflated by capture-vs-eager duplication, a JIT
+dispatch-redundancy artifact, not a fusion gap). See section 4 / the plan's
+audit-correction entry. The figures are kept inline where they were the basis of a
+historical measurement; treat the eager counts as ground truth.
 
 ### 3.1 Realize-boundary seeding
 
@@ -90,10 +109,10 @@ This is where the 120-vs-226-vs-328 kernel-count gap is born.
 | Structural seed | `COPY`, `CONTIGUOUS`, `STORE` only (`indexing.py:29`) | `ROOT` + `MULTI` + `REDUCE` + `MATMUL` + `FANIN_CAP` | `ROOT` only (`rangeify_unified.c:164`) |
 | Derivation | divergence walk derives all multi-consumer/reduce boundaries | pre-seeded, walk sees them already realized | divergence + ending-ranges walk derives the rest |
 | `ALWAYS_CONTIGUOUS` never-realize set | `CONTIGUOUS, AFTER, COPY, BUFFER, CONST, BIND, DEVICE, MSELECT, MSTACK, PARAM` (`indexing.py:10-11`) | no `BIND`; const/buffer handled ad hoc | same |
-| Kernels (beautiful_mnist) | ~120 | 328 | 226 |
+| Kernels (eager, beautiful_mnist) | 104 | 164 | 113 |
 | Peak memory | ~1-3 MB | 31 MB | 14.8 MB |
 
-The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in default it returns `1` for every realized node; in faithful it returns true only for `BUFFERIZE_REASON_ROOT`. The header comment there records that a tried "drop-MULTI-only middle ground was removed: it kept the REDUCE boundaries thvm's codegen needs (so it was correct) but cut only ~10 kernels with no speed change - **the real granularity win is in fusing REDUCEs, which is the codegen gap**." That single comment localizes the residual 226-vs-120 gap: thvm's codegen emits one REDUCE per kernel, so faithful seeding cannot fuse the reduce chains tinygrad fuses.
+The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in default it returns `1` for every realized node; in faithful it returns true only for `BUFFERIZE_REASON_ROOT`. Faithful seeding closes the kernel-count gap to within 9% of tinygrad (113 vs 104) and the forward pass fuses MORE than tinygrad (13 vs 16). So fusion granularity is NOT the residual gap (the older "fuse REDUCEs is the codegen gap" reading is superseded by the 2026-06-01 audit). The residual that matters is **codegen quality on the fused kernels**: faithful's CPU wall is 238 ms vs tinygrad's 15 ms (vs thvm default's 7.36 ms) because the fused convs miss thvm's Accelerate-BLAS matmul path and render as unvectorized C loops, where tinygrad's CLANG codegen applies UPCAST/UNROLL. That is the real "faithful incl. performance" lever (M1/M4 proposer + hand_opts coverage for fused kernels), not more fusion.
 
 ### 3.2 Movement ops & ShapeTracker
 
@@ -315,12 +334,24 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 **Scheduling / fusion (algorithmic)**
 
 - **BEAM proposer coverage** - *medium* (engine EXISTS, not missing). `autotune.c`'s search is real + wired; the `propose.c` candidate set is narrow vs `search.py`'s ~200 actions. Where: widen `propose.c` (PADTO/SWAP/THREAD + the full UPCAST/LOCAL/GROUP grid, CUDA too) and add a per-level Pareto beam in `autotune.c`. The flag bug that suppressed it on non-WL paths is already fixed (`3c134358`); the Metal proposer is already expanded (`e5c51194`).
-- **Boolean-OR validity union** - *medium/large*. The consumer-divergence realize (`rangeify_unified.c:838-862`) falls back to consumer[0] / per-axis realize where tinygrad OR-merges the per-axis validity masks and stays a view (`indexing.py:211-213`). **This is the actual driver of the kernel-count/memory gap** (~74 walk-realized intermediates). Needs term-algebra boolean ops first.
+- **Boolean-OR validity union** - *NOT a kernel-count lever (refuted 2026-06-01)*. The
+  consumer-divergence realize (`rangeify_unified.c:838-862`) falls back to consumer[0] /
+  per-axis realize where tinygrad OR-merges the per-axis validity masks and stays a view
+  (`indexing.py:211-213`). With default `PCONTIG=0`, tinygrad's per-axis decision is the
+  single `all_all_same` flag (indexing.py:208): full view (merge valids) or full-realize
+  every axis. thvm partial-realizes only the diverging axes, so it fuses AT LEAST as much
+  as tinygrad's default. The OR-merge only sets WHICH valid the all-same view carries -- a
+  correctness nuance thvm handles by deferring valids to address-build (`movement_index.c`
+  IAND'd ILT masks). Honest eager counts (faithful 113 vs tg 104) confirm no gap here.
 - **ShapeTracker / movement-op symbolic-merge completion** - *medium/large* (engine exists, subset ported). `ru_compose_view_chain` decomposes per-step and can't cancel split+resplit (unfold+col2im); the symbolic rewrite engine is wired but lacks the view-cancellation + arange/reduce-collapse rules. Where: `rangeify_unified.c:1255-1337` + extend `uop/symbolic_rewrite.c` toward `symbolic.py`/`indexing.py:141-145`.
-- **Optimizer fusion** - *large*. The Adam step emits ~84 boundaries (3+ assigns/param x 16) where tinygrad fuses across params; needs multi-output kernels (a `kernel_lift` that emits N independent stores) / a `FUSE_OPTIM` analog. (NOTE: reduce-into-reduce fusion is NOT a gap -- only 14 of 207 faithful boundaries are REDUCE and forward+backward already matches tinygrad's kernel count; the v1 draft's "reduce-into-reduce is the residual" claim is retracted.)
+- **Optimizer fusion** - *small/none*. Honest eager counts: thvm faithful 113, tinygrad
+  104 for the full step including Adam (14 params); tinygrad itself does NOT cross-param
+  fuse Adam (58 kernels / 14 params ~= 4/param, comparable to thvm). So the v1 "84-boundary
+  unfused optimizer" claim was an artifact of the inflated 207 count. Cross-param
+  multi-output kernels remain a *possible* small win but are not a parity gap. Likewise
+  reduce-into-reduce fusion is NOT a gap (forward+backward already matches tinygrad).
 - **Late rewrite / arange-reduce collapse** - *medium*. No `REDUCE(SUM,[RANGE]) -> range*extent` collapse (`simplify.py:146-155`); misses reduce-epilogue inlining.
 - **PCONTIG per-axis ending-ranges check** - *small*. thvm realizes *all* non-realized axes on ending ranges; tinygrad checks per-axis contiguity (`indexing.py:227`). Where: `rangeify_unified.c:864-888`.
-- **Boolean OR validity union** - *medium*. Falls back to `consumer[0]` instead of OR-merging valids (`indexing.py:211-213`). Needs term-algebra boolean ops.
 - **BIND const-fold UOp + `ALWAYS_CONTIGUOUS` set** - *small*. No `Ops.BIND`; may leak scalar-load kernels. Where: `bufferize_classify.c` recognition + rangeify skip-op gate.
 - **Stranded-range symbolic coverage proof** - *medium*. Strand checks are conservative; tinygrad proves coverage symbolically. Gates some broadcast-reduce fusions.
 
@@ -373,29 +404,38 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 `3c134358` BEAM flag-conflict fix (autotune now runs on the py/JIT path);
 `e5c51194` general Metal BEAM proposer (Metal `BEAM=2` 3.57 -> 2.07 ms).
 
-**Corrected priority order** (tie-back: thvm already wins wall-time on both backends;
-the open gap is fusion/memory parity, plus widening BEAM's reach):
+**Corrected priority order** (tie-back: thvm default already WINS wall-time on CPU/CUDA/
+Metal; kernel-count/fusion parity is essentially met. The open gaps are faithful-kernel
+codegen quality and peak memory):
 
-1. **Finish BEAM coverage** (medium): widen `propose.c` to the full `search.py` action
+1. **Faithful-kernel CPU codegen** (the real "faithful incl. performance" lever): the
+   fused convs that miss the Accelerate-BLAS matmul path render as unvectorized C loops
+   (faithful CPU wall 238 ms vs tinygrad 15 ms vs thvm default 7.36 ms). Extend
+   `propose.c` / `hand_opts.c` to apply UPCAST/UNROLL to the big fused reduce kernels so
+   the non-BLAS path vectorizes, OR teach the GEMM classifier to recognise a fused
+   matmul-with-epilogue. *Verify:* faithful CPU warm wall closes toward tinygrad's 15 ms;
+   per-kernel GFLOPS on the fused conv; output parity via `test_faithful_parity.py`.
+2. **Finish BEAM coverage** (medium): widen `propose.c` to the full `search.py` action
    space (PADTO/SWAP/THREAD + the UPCAST/LOCAL/GROUP grid, CUDA too); add a per-level
    Pareto beam in `autotune.c`. Re-evaluate hand_opts vs BEAM per backend (hand_opts is
    net-negative on Metal post-bench-fix) and decide the default policy. *Verify:* per-
    kernel GFLOPS + warm wall-time, CUDA + Metal, cache hit on 2nd run, output parity.
-2. **Boolean-OR validity union** (medium/large): the real kernel-count/memory lever.
-   Add term-algebra boolean ops, then OR-merge valids at `rangeify_unified.c:838-862`
-   instead of realizing on divergence (mirrors `indexing.py:211-213`). *Verify:* faithful
-   walk-realized boundary count drops; peak-memory vs tinygrad; grad/nn regression-clean.
-3. **Symbolic-merge completion** (medium/large): view-cancellation in
-   `ru_compose_view_chain` + arange/reduce-collapse late rewrites; retires the
-   `THVM_FUSE_CONV_BWD` hack. *Verify:* split+resplit cancels to identity; conv-bwd
-   fuses without the env flag.
-4. **Optimizer fusion** (large): multi-output `kernel_lift` / a `FUSE_OPTIM` analog so
-   the Adam step stops emitting ~84 boundaries (3+/param x 16). Ties to memory parity +
-   graph batching.
-5. **Opt-section completion** (M4): full-extent UNROLL renderer fix, mask-UPCAST,
-   THREAD + CUDA warp-shuffle, multi-reduce TC (`TC_OPT>=1`).
-6. **Memory planner + graph batching** (M5); **optimizers (LARS/Muon) + higher-order
-   grads** (M6); **backend breadth (CL/ROCm, multi-device)** (M7).
+   (Overlaps item 1: the same proposer expansion feeds both.)
+3. **Peak-memory buffer reuse** (large): reuse-distance / linear-scan buffer planner +
+   alias-friendly reduce-output layout (extend the TLSF arena). The standing ~7x
+   peak-mem item; independent of rangeify fusion. *Verify:* peak working-set ratio vs
+   tinygrad; dispatch-count delta.
+4. **JIT dispatch redundancy** (known item): the capture-vs-eager kernel duplication that
+   inflated the harness count ~2x. Schedule-level dedup. *Verify:* JIT replay kernel
+   count approaches the eager `sched_kernels`.
+5. **Symbolic-merge completion** (medium): view-cancellation in `ru_compose_view_chain` +
+   arange/reduce-collapse late rewrites; retires the `THVM_FUSE_CONV_BWD` hack (a
+   cleanliness win, not a kernel-count one). *Verify:* split+resplit cancels to identity.
+6. **Opt-section completion** (M4): full-extent UNROLL renderer fix, mask-UPCAST,
+   THREAD + CUDA warp-shuffle, multi-reduce TC (`TC_OPT>=1`); **optimizers (LARS/Muon) +
+   higher-order grads** (M6); **backend breadth (CL/ROCm, multi-device)** (M7).
+   (Cross-param optimizer multi-output kernels: a possible SMALL win, not a parity gap --
+   tinygrad does not cross-param fuse Adam either.)
 
 **Cross-cutting clean track** (co-equal "clean" goal): retire/document the env-knob
 sprawl, sweep transient comments, and refactor the `render_uop.c` reduce-emission path
@@ -403,4 +443,4 @@ once the symbolic-merge work retires the strand/cap hacks.
 
 ---
 
-*Relevant source anchors:* thvm scheduling `/private/tmp/thvm-jit/src/schedule/rangeify_unified.c:147-166,480-487,591-647,733-999,835-888,1255-1337`, `bufferize_classify.c:728-822`, `materialize.c:180-200,2465-2499,2841-2865`; hand-opts `/private/tmp/thvm-jit/src/codegen/hand_opts.c:1-52,192-202,241-281,297-346,369-396`; grad `/private/tmp/thvm-jit/src/interact/uop_grad.c`, `py/thvm/optim.py:46-58`. tinygrad spec `/Users/swish/src/tinygrad/tinygrad/schedule/indexing.py:10-11,28-35,129-145,148-269,211-232`, `codegen/opt/heuristic.py:27-189`, `codegen/opt/search.py:13-25,120-193`, `gradient.py:49-82`, `helpers.py:231-266`.
+*Relevant source anchors:* thvm scheduling `src/schedule/rangeify_unified.c:147-166,480-487,591-647,733-999,835-888,1255-1337`, `bufferize_classify.c:728-822`, `materialize.c:180-200,2465-2499,2841-2865`; hand-opts `src/codegen/hand_opts.c:1-52,192-202,241-281,297-346,369-396`; grad `src/interact/uop_grad.c`, `py/thvm/optim.py:46-58`. tinygrad spec `tinygrad/schedule/indexing.py:10-11,28-35,129-145,148-269,211-232`, `codegen/opt/heuristic.py:27-189`, `codegen/opt/search.py:13-25,120-193`, `gradient.py:49-82`, `helpers.py:231-266`.
