@@ -497,19 +497,83 @@ class Tensor:
     def div(self, o): return self.__truediv__(o)
 
     def __matmul__(self, other: "Tensor") -> "Tensor":
-        """Matmul -- composes RESHAPE+EXPAND+MUL+REDUCE; thvm fuses."""
-        if self.ndim != 2 or other.ndim != 2:
-            raise NotImplementedError(
-                f"matmul: only 2-D for Phase 2A "
-                f"({self._shape} @ {other._shape})")
-        M, K_in = self._shape
-        K2, N = other._shape
-        if K_in != K2:
-            raise ValueError(
-                f"matmul shape mismatch: {self._shape} @ {other._shape}")
-        a = self.reshape(M, K_in, 1).expand(M, K_in, N)
-        b = other.reshape(1, K_in, N).expand(M, K_in, N)
-        return (a * b).sum(axis=1)
+        """Matmul -- composes RESHAPE+EXPAND+MUL+REDUCE; thvm fuses.
+
+        2-D @ 2-D takes the byte-identical specialized path below.
+        N-D (batched / broadcast) matmul ports tinygrad's dot rule
+        (tinygrad/mixin/__init__.py:341-346) with thvm's EXPLICIT
+        broadcast (thvm mul does not implicit-broadcast): insert a
+        broadcast-1 slot, transpose w's contraction axis to trailing,
+        expand the leading batch dims to the numpy-broadcast batch,
+        then the same MUL + trailing-reduce as the 2-D path.
+        """
+        if self.ndim == 2 and other.ndim == 2:
+            M, K_in = self._shape
+            K2, N = other._shape
+            if K_in != K2:
+                raise ValueError(
+                    f"matmul shape mismatch: {self._shape} @ {other._shape}")
+            a = self.reshape(M, K_in, 1).expand(M, K_in, N)
+            b = other.reshape(1, K_in, N).expand(M, K_in, N)
+            return (a * b).sum(axis=1)
+        return self._dot_nd(other)
+
+    def _dot_nd(self, w: "Tensor") -> "Tensor":
+        """N-D dot, faithful to tinygrad/mixin/__init__.py:341-346.
+
+        tinygrad:
+            axis_w = -min(w.ndim, 2)
+            x = x.reshape(*x.shape[:-1], *[1]*min(dx-1,dw-1,1), x.shape[-1])
+            w = w.reshape(*w.shape[:-2], *[1]*min(dx-1,dw-1,1),
+                          *w.shape[axis_w:]).transpose(-1, axis_w)
+            return (x*w).sum(-1)
+        tinygrad's mul implicitly broadcasts the leading batch dims;
+        thvm's does not, so after the reshape/transpose we compute the
+        numpy-broadcast common shape and .expand() both operands to it.
+        """
+        x = self
+        dx, dw = x.ndim, w.ndim
+        if not (dx > 0 and dw > 0):
+            raise RuntimeError(
+                f"both tensors need to be at least 1D, got {dx}D and {dw}D")
+        axis_w = -min(dw, 2)
+        if x._shape[-1] != w._shape[axis_w]:
+            raise RuntimeError(f"cannot dot {x._shape} and {w._shape}")
+
+        pad = (1,) * min(dx - 1, dw - 1, 1)
+        # x: (..., M, 1?, K)
+        xs = (*x._shape[:-1], *pad, x._shape[-1])
+        x = x.reshape(*xs)
+        # w: (..., 1?, *w.shape[axis_w:]) then move contraction axis -> last.
+        ws = (*w._shape[:-2], *pad, *w._shape[axis_w:])
+        w = w.reshape(*ws).transpose(-1, axis_w)
+
+        # Now the trailing-2 of x is (.., 1?, K) and of w is (.., K, N?).
+        # The contraction axis K is x's last and w's axis -2 (after the
+        # transpose).  Broadcast every remaining dim numpy-style, then
+        # let the elementwise MUL line up + trailing-reduce over K.
+        xs, ws = x._shape, w._shape
+        nd = max(len(xs), len(ws))
+        xs_f = (1,) * (nd - len(xs)) + tuple(xs)
+        ws_f = (1,) * (nd - len(ws)) + tuple(ws)
+        if xs_f != xs:
+            x = x.reshape(*xs_f)
+        if ws_f != ws:
+            w = w.reshape(*ws_f)
+        bshape = []
+        for a, b in zip(xs_f, ws_f):
+            if a == b or a == 1 or b == 1:
+                bshape.append(max(a, b))
+            else:
+                raise RuntimeError(
+                    f"cannot dot {self._shape} and {w._shape}: "
+                    f"non-broadcastable {a} vs {b}")
+        bshape = tuple(bshape)
+        if x._shape != bshape:
+            x = x.expand(*bshape)
+        if w._shape != bshape:
+            w = w.expand(*bshape)
+        return (x * w).sum(axis=-1)
 
     # ---- elementwise unary --------------------------------------------
 
@@ -980,8 +1044,6 @@ class Tensor:
 
         Port of tinygrad/mixin/__init__.py:conv2d (line ~1235).
         """
-        if groups != 1:
-            raise NotImplementedError("conv2d groups != 1: Phase 3C")
         sH, sW = (stride, stride) if isinstance(stride, int) else stride
         dH, dW = (dilation, dilation) if isinstance(dilation, int) else dilation
         if isinstance(padding, int):
@@ -1000,27 +1062,56 @@ class Tensor:
         x = x._pool((kH, kW), stride=(sH, sW), dilation=(dH, dW))
         H_out, W_out = x._shape[2:4]
 
-        # Broadcast x and weight over (B, C_out, H_out, W_out), placing
-        # the reduce axes (C_in, kH, kW) as the TRAILING three so
-        # reduce_chain_collect in src/schedule/uop_meta.c fuses the
-        # three .sum() calls into one contiguous-axis REDUCE (it only
-        # fuses contiguous trailing axes).  Without this the walker
-        # hits triply-nested REDUCEs in the backward and explodes by
-        # ~25x per output element.
-        # Move x's C_in axis from position 1 to position 3 (between
-        # W_out and kH).  Then add the broadcast C_out axis at 1.
-        # x:      (B, C_in, H_out, W_out, kH, kW)
-        #      -> (B, H_out, W_out, C_in, kH, kW)         via permute
-        #      -> (B, 1, H_out, W_out, C_in, kH, kW)      via reshape
-        #      -> (B, C_out, H_out, W_out, C_in, kH, kW)  via expand
-        x_b = (x.permute(0, 2, 3, 1, 4, 5)
-                .reshape(B, 1, H_out, W_out, C_in, kH, kW)
-                .expand(B, C_out, H_out, W_out, C_in, kH, kW))
-        w_b = (weight.reshape(1, C_out, 1, 1, C_in, kH, kW)
-                     .expand(B, C_out, H_out, W_out, C_in, kH, kW))
-        # Sum over the TRAILING three (C_in, kH, kW).  reduce_chain_collect
-        # fuses these into a single REDUCE of extent C_in*kH*kW.
-        out = (x_b * w_b).sum(axis=(4, 5, 6))
+        if groups == 1:
+            # Broadcast x and weight over (B, C_out, H_out, W_out),
+            # placing the reduce axes (C_in, kH, kW) as the TRAILING
+            # three so reduce_chain_collect in src/schedule/uop_meta.c
+            # fuses the three .sum() calls into one contiguous-axis
+            # REDUCE (it only fuses contiguous trailing axes).  Without
+            # this the walker hits triply-nested REDUCEs in the backward
+            # and explodes by ~25x per output element.
+            # Move x's C_in axis from position 1 to position 3 (between
+            # W_out and kH).  Then add the broadcast C_out axis at 1.
+            # x:      (B, C_in, H_out, W_out, kH, kW)
+            #      -> (B, H_out, W_out, C_in, kH, kW)         via permute
+            #      -> (B, 1, H_out, W_out, C_in, kH, kW)      via reshape
+            #      -> (B, C_out, H_out, W_out, C_in, kH, kW)  via expand
+            x_b = (x.permute(0, 2, 3, 1, 4, 5)
+                    .reshape(B, 1, H_out, W_out, C_in, kH, kW)
+                    .expand(B, C_out, H_out, W_out, C_in, kH, kW))
+            w_b = (weight.reshape(1, C_out, 1, 1, C_in, kH, kW)
+                         .expand(B, C_out, H_out, W_out, C_in, kH, kW))
+            # Sum over the TRAILING three (C_in, kH, kW).
+            # reduce_chain_collect fuses these into a single REDUCE of
+            # extent C_in*kH*kW.
+            out = (x_b * w_b).sum(axis=(4, 5, 6))
+            if bias is not None:
+                out = out + bias.reshape(1, -1, 1, 1)
+            return out
+
+        # Grouped / depthwise: port of tinygrad/mixin/__init__.py:1244-1249
+        # specialized to 2 spatial dims (HW=(kH,kW), oyx=(H_out,W_out)).
+        # The channel dim C_in == groups*cin is split into (groups, cin);
+        # the weight's C_out == groups*rcout splits into (groups, rcout).
+        # The reduce axes (cin, kH, kW) stay TRAILING-three for fusion.
+        cin = weight._shape[1]
+        if groups * cin != C_in:
+            raise ValueError(
+                f"conv2d groups mismatch: groups({groups})*cin({cin}) "
+                f"!= C_in({C_in})")
+        rcout = C_out // groups
+        # x:  (B, C_in, H_out, W_out, kH, kW)
+        #  -> (B, groups, cin, 1, H_out, W_out, kH, kW)        reshape
+        #  -> (B, groups, cin, rcout, H_out, W_out, kH, kW)    expand
+        #  -> (B, groups, rcout, H_out, W_out, cin, kH, kW)    permute
+        x_b = (x.reshape(B, groups, cin, 1, H_out, W_out, kH, kW)
+                .expand(B, groups, cin, rcout, H_out, W_out, kH, kW)
+                .permute(0, 1, 3, 4, 5, 2, 6, 7))
+        w_b = (weight.reshape(1, groups, rcout, 1, 1, cin, kH, kW)
+                     .expand(B, groups, rcout, H_out, W_out, cin, kH, kW))
+        # Sum over the TRAILING three (cin, kH, kW); merge groups*rcout
+        # back into C_out.
+        out = (x_b * w_b).sum(axis=(5, 6, 7)).reshape(B, C_out, H_out, W_out)
         if bias is not None:
             out = out + bias.reshape(1, -1, 1, 1)
         return out
