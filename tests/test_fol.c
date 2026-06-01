@@ -207,6 +207,182 @@ int main(void) {
     fol_clause_free(r);
   }
 
+  // === paramodulation ==========================================
+
+  TEST_BEGIN("fol/paramod-basic");
+  {
+    // eq_clause = (a = b)        positive equality
+    // target    = P(a)
+    // path      = [0]            (P's child 0 = a)
+    // paramodulant = P(b)
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));      // FOL_LAB_EQ = 0
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 0 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    u32 path[1] = { 0u };
+    FolClause *p = fol_paramodulate(eqc, 0, /*swap*/ 0, tgt, 0, path, 1);
+    CHECK(p != NULL);
+    CHECK(p->n_lits == 1);
+    CHECK(p->lits[0].sign == 0);
+    CHECK(kbo_eq(p->lits[0].atom, pred1(P_P, k(L_b))));
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+    fol_clause_free(p);
+  }
+
+  TEST_BEGIN("fol/paramod-swapped-orientation");
+  {
+    // eq_clause = (a = b)
+    // target    = P(b)
+    // path      = [0]
+    // With swap=1, use orientation b -> a; paramodulant = P(a).
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 0 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_b)), .sign = 0 };
+    u32 path[1] = { 0u };
+    FolClause *p = fol_paramodulate(eqc, 0, /*swap*/ 1, tgt, 0, path, 1);
+    CHECK(p != NULL);
+    CHECK(p->n_lits == 1);
+    CHECK(kbo_eq(p->lits[0].atom, pred1(P_P, k(L_a))));
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+    fol_clause_free(p);
+  }
+
+  TEST_BEGIN("fol/paramod-with-unification");
+  {
+    // eq_clause = (f(x) = b)     (with variable x)
+    // target    = P(f(a))
+    // path      = [0]            (P's child 0 = f(a))
+    // unify f(x) with f(a): x ↦ a.  paramodulant = P(b).
+    Term f_a = pred1(L_f, k(L_a));
+    Term eq_atom = pred2(0u, pred1(L_f, v(0)), k(L_b));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = eq_atom, .sign = 0 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, f_a), .sign = 0 };
+    u32 path[1] = { 0u };
+    FolClause *p = fol_paramodulate(eqc, 0, 0, tgt, 0, path, 1);
+    CHECK(p != NULL);
+    CHECK(p->n_lits == 1);
+    CHECK(kbo_eq(p->lits[0].atom, pred1(P_P, k(L_b))));
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+    fol_clause_free(p);
+  }
+
+  TEST_BEGIN("fol/paramod-fails-on-negative-equality");
+  {
+    // eq_clause = ¬(a = b): negative equality -- paramod fires only on
+    // POSITIVE equality.  Should return NULL.
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 1 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    u32 path[1] = { 0u };
+    FolClause *p = fol_paramodulate(eqc, 0, 0, tgt, 0, path, 1);
+    CHECK(p == NULL);
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+  }
+
+  TEST_BEGIN("fol/paramod-into-variable-position-fails");
+  {
+    // target = P(x), path [0] = x (FVR).  Paramod into variable
+    // positions is disallowed (no useful CP).
+    Term eq_atom = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(1);
+    eqc->lits[0] = (FolLit){ .atom = eq_atom, .sign = 0 };
+    FolClause *tgt = fol_clause_new(1);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, v(5)), .sign = 0 };
+    u32 path[1] = { 0u };
+    FolClause *p = fol_paramodulate(eqc, 0, 0, tgt, 0, path, 1);
+    CHECK(p == NULL);
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+  }
+
+  TEST_BEGIN("fol/paramod-multi-literal");
+  {
+    // eq_clause = (a = b) v Q(c)
+    // target    = P(a) v R(a, a)
+    // paramod at target_idx=0, path=[0]:
+    //   drop eq -> keep Q(c).  Replace P(a) with P(b).
+    //   Final: Q(c) v P(b) v R(a, a).
+    Term a_eq_b = pred2(0u, k(L_a), k(L_b));
+    FolClause *eqc = fol_clause_new(2);
+    eqc->lits[0] = (FolLit){ .atom = a_eq_b, .sign = 0 };
+    eqc->lits[1] = (FolLit){ .atom = pred1(P_Q, k(L_b)), .sign = 0 };
+    FolClause *tgt = fol_clause_new(2);
+    tgt->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    tgt->lits[1] = (FolLit){ .atom = pred2(P_R, k(L_a), k(L_a)), .sign = 0 };
+    u32 path[1] = { 0u };
+    FolClause *p = fol_paramodulate(eqc, 0, 0, tgt, 0, path, 1);
+    CHECK(p != NULL);
+    CHECK(p->n_lits == 3);
+    fol_clause_free(eqc);
+    fol_clause_free(tgt);
+    fol_clause_free(p);
+  }
+
+  // === reflexivity resolution =====================================
+
+  TEST_BEGIN("fol/reflex-resolve-trivial");
+  {
+    // C = ¬(a = a) v P(b).  Atoms unify trivially => resolvent = P(b).
+    Term a_eq_a = pred2(0u, k(L_a), k(L_a));
+    FolClause *c = fol_clause_new(2);
+    c->lits[0] = (FolLit){ .atom = a_eq_a, .sign = 1 };
+    c->lits[1] = (FolLit){ .atom = pred1(P_P, k(L_b)), .sign = 0 };
+    FolClause *r = fol_reflex_resolve(c, 0);
+    CHECK(r != NULL);
+    CHECK(r->n_lits == 1);
+    CHECK(kbo_eq(r->lits[0].atom, pred1(P_P, k(L_b))));
+    fol_clause_free(c);
+    fol_clause_free(r);
+  }
+
+  TEST_BEGIN("fol/reflex-resolve-with-unifier");
+  {
+    // C = ¬(x = a) v P(x).  σ = {x ↦ a} unifies x and a.
+    // Resolvent = P(a).
+    Term eq_atom = pred2(0u, v(0), k(L_a));
+    FolClause *c = fol_clause_new(2);
+    c->lits[0] = (FolLit){ .atom = eq_atom, .sign = 1 };
+    c->lits[1] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 0 };
+    FolClause *r = fol_reflex_resolve(c, 0);
+    CHECK(r != NULL);
+    CHECK(r->n_lits == 1);
+    CHECK(kbo_eq(r->lits[0].atom, pred1(P_P, k(L_a))));
+    fol_clause_free(c);
+    fol_clause_free(r);
+  }
+
+  TEST_BEGIN("fol/reflex-resolve-fails-positive");
+  {
+    // Positive equality literal -- reflex-resolve requires negative.
+    Term a_eq_a = pred2(0u, k(L_a), k(L_a));
+    FolClause *c = fol_clause_new(1);
+    c->lits[0] = (FolLit){ .atom = a_eq_a, .sign = 0 };
+    FolClause *r = fol_reflex_resolve(c, 0);
+    CHECK(r == NULL);
+    fol_clause_free(c);
+  }
+
+  TEST_BEGIN("fol/reflex-resolve-fails-non-eq");
+  {
+    // ¬P(a) is not an equality literal.
+    FolClause *c = fol_clause_new(1);
+    c->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 1 };
+    FolClause *r = fol_reflex_resolve(c, 0);
+    CHECK(r == NULL);
+    fol_clause_free(c);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

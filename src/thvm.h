@@ -3148,6 +3148,25 @@ fn u8         fol_clause_is_empty(const FolClause *c);
 fn FolClause *fol_resolve    (const FolClause *c1, u32 i,
                               const FolClause *c2, u32 j);
 fn FolClause *fol_factor     (const FolClause *c, u32 i, u32 j);
+
+// Paramodulation: superpose a positive equality literal (s = t) from
+// `eq_clause` into a subterm `u` (at `path`) of `target`'s
+// `target_idx`-th literal.  `swap` chooses orientation (0: s->t,
+// 1: t->s).  Equality literals are atoms with the FOL_LAB_EQ label.
+// Returns the paramodulant or NULL.
+fn FolClause *fol_paramodulate(const FolClause *eq_clause, u32 eq_idx,
+                               u8 swap,
+                               const FolClause *target, u32 target_idx,
+                               const u32 *path, u32 path_len);
+
+// Reflexivity-resolution (a.k.a. equality resolution): a clause with
+// a negative equality ¬(s = t) becomes σ(C \ ¬(s=t)) when s and t
+// unify with mgu σ.  Returns NULL when the literal isn't a negative
+// equality / atoms don't unify.
+fn FolClause *fol_reflex_resolve(const FolClause *c, u32 idx);
+
+// Is the atom an equality (CTR with the FOL_LAB_EQ label, arity 2)?
+fn u8         fol_atom_is_eq(Term atom);
 // Invalidate thvm_lpo's persistent (s,t)->verdict memo.  Call when term
 // cells move (GC) or the precedence changes (new run).
 fn void   thvm_lpo_invalidate(void);

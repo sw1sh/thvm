@@ -144,3 +144,115 @@ fn FolClause *fol_factor(const FolClause *c, u32 i, u32 j) {
 fn u8 fol_clause_is_empty(const FolClause *c) {
   return (c != NULL && c->n_lits == 0u) ? 1u : 0u;
 }
+
+// === paramodulation ==================================================
+//
+// Given clauses
+//   C1 = (s = t) v R1    (`eq_idx` points at a positive equality literal)
+//   C2 = L[u]    v R2    (`target_idx` points at any literal; the position
+//                         `path` walks into that literal's atom to `u`)
+// with mgu σ of s and u, the paramodulant is
+//   σ( R1 v L[t] v R2 )
+//
+// Variables of C2 are renamed apart by FOL_RENAME_OFFSET before the
+// unify so the two clauses' free variables don't collide.  `swap`
+// selects the orientation of the equality (0: use s -> t, 1: use t -> s)
+// -- standard paramodulation explores both.  Returns a fresh
+// heap-allocated clause on success, NULL on failure (sign / shape /
+// unify / cap / alloc / position-into-variable).
+//
+// Equality predicate is identified by the FOL_LAB_EQ label
+// (= 0 by convention; callers wrap (s = t) atoms as CTR(FOL_LAB_EQ,
+// [s, t]).  Reuses cp_subterm_at + cp_replace_at from src/cp for
+// position handling.
+#define FOL_LAB_EQ 0u
+
+fn u8 fol_atom_is_eq(Term atom) {
+  return (term_tag(atom) == TAG_CTR
+          && term_ext(atom) == FOL_LAB_EQ
+          && term_ctr_n(atom) == 2u) ? 1u : 0u;
+}
+
+fn FolClause *fol_paramodulate(const FolClause *eq_clause, u32 eq_idx,
+                               u8 swap,
+                               const FolClause *target, u32 target_idx,
+                               const u32 *path, u32 path_len) {
+  if (eq_clause == NULL || target == NULL) return NULL;
+  if (eq_idx >= eq_clause->n_lits) return NULL;
+  if (target_idx >= target->n_lits) return NULL;
+  if (eq_clause->lits[eq_idx].sign != 0u) return NULL;
+  Term eq_atom = eq_clause->lits[eq_idx].atom;
+  if (!fol_atom_is_eq(eq_atom)) return NULL;
+
+  Term s = term_ctr_at(eq_atom, swap ? 1u : 0u);
+  Term t = term_ctr_at(eq_atom, swap ? 0u : 1u);
+
+  Term target_atom = target->lits[target_idx].atom;
+  Term target_atom_renamed = thvm_rename_vars(target_atom, FOL_RENAME_OFFSET);
+  Term u = cp_subterm_at(target_atom_renamed, path, path_len);
+  if (u == 0) return NULL;
+  if (term_tag(u) == TAG_FVR) return NULL;   // no paramod into vars
+
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(s, u, &subst)) return NULL;
+
+  Term replaced_atom = cp_replace_at(target_atom_renamed, path, path_len, t);
+  Term new_atom     = thvm_unify_apply(replaced_atom, &subst);
+
+  u32 out_n = (eq_clause->n_lits - 1u) + target->n_lits;
+  if (out_n > FOL_MAX_LITS) return NULL;
+
+  FolClause *r = fol_clause_new(out_n);
+  if (r == NULL) return NULL;
+  u32 idx = 0u;
+  // R1: lits of eq_clause minus the equality.
+  for (u32 k = 0; k < eq_clause->n_lits; k++) {
+    if (k == eq_idx) continue;
+    r->lits[idx].atom = thvm_unify_apply(eq_clause->lits[k].atom, &subst);
+    r->lits[idx].sign = eq_clause->lits[k].sign;
+    idx++;
+  }
+  // R2 + L[t]: every target literal, with target_idx replaced.
+  for (u32 k = 0; k < target->n_lits; k++) {
+    Term ak;
+    if (k == target_idx) {
+      ak = new_atom;
+    } else {
+      Term raw = thvm_rename_vars(target->lits[k].atom, FOL_RENAME_OFFSET);
+      ak = thvm_unify_apply(raw, &subst);
+    }
+    r->lits[idx].atom = ak;
+    r->lits[idx].sign = target->lits[k].sign;
+    idx++;
+  }
+  return r;
+}
+
+// === reflexivity resolution =========================================
+//
+// If a clause contains a NEGATIVE equality literal ¬(s = t) and s and
+// t unify with mgu σ, the resolvent is σ(C minus that literal).  This
+// is the standard reflexivity-resolution inference, sometimes called
+// "equality resolution".  Returns NULL when the literal isn't a
+// negative equality / atoms don't unify / cap.
+fn FolClause *fol_reflex_resolve(const FolClause *c, u32 idx) {
+  if (c == NULL || idx >= c->n_lits) return NULL;
+  if (c->lits[idx].sign != 1u) return NULL;
+  Term atom = c->lits[idx].atom;
+  if (!fol_atom_is_eq(atom)) return NULL;
+
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(term_ctr_at(atom, 0u), term_ctr_at(atom, 1u), &subst)) {
+    return NULL;
+  }
+  FolClause *r = fol_clause_new(c->n_lits - 1u);
+  if (r == NULL) return NULL;
+  u32 j = 0u;
+  for (u32 k = 0; k < c->n_lits; k++) {
+    if (k == idx) continue;
+    r->lits[j].atom = thvm_unify_apply(c->lits[k].atom, &subst);
+    r->lits[j].sign = c->lits[k].sign;
+    j++;
+  }
+  return r;
+}

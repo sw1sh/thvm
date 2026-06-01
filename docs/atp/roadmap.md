@@ -122,19 +122,28 @@ Today: KBO, LPO, RPO, WPO.  Open items:
 
 ### Full first-order clauses
 
-Today: `src/fol/_.c` lands the foundation -- typed `FolLit` /
-`FolClause`, binary resolution with variable-rename-apart, factoring,
-multiset-modulo clause equality, empty-clause detection.  The
-unit-equational saturator in `src/atp/_.c` is unchanged; FOL clauses
-live in a parallel module that callers opt into.
+`src/fol/_.c` covers:
+* Typed `FolLit` / `FolClause` (atoms are `Term` CTRs; sign per
+  literal).  Equality atoms use the `FOL_LAB_EQ` (= 0) label.
+* Binary resolution (`fol_resolve`) with variable rename-apart via
+  `FOL_RENAME_OFFSET` (= `REWRITE_MAX_VAR / 2`).
+* Factoring (`fol_factor`) on two same-polarity literals.
+* Paramodulation (`fol_paramodulate`) -- superpose a positive
+  equality literal into a target subterm at a given path.  Reuses
+  `cp_subterm_at` / `cp_replace_at` from `src/cp`.  Both
+  orientations via the `swap` flag.
+* Reflexivity-resolution (`fol_reflex_resolve`) -- a negative
+  equality `¬(s = t)` resolves when s and t unify.
+* Multiset-modulo clause equality + empty-clause detection.
+
+The unit-equational saturator in `src/atp/_.c` is unchanged; FOL
+clauses live in a parallel module that callers opt into.
 
 Open follow-ups (in order):
 
-* Paramodulation (equality on a literal): superpose an equality
-  literal `s=t` from one clause into a subterm of another and emit
-  the resulting clause.  Reuses CP-style position enumeration
-  (`src/cp/_.c`) plus the clausal context.
-* Equality-factoring + reflexivity resolution.
+* Equality-factoring (positive equalities `s = t` and `u = v` that
+  unify on one side -- distinct from the syntactic factoring already
+  shipped).
 * Selection function (positive/maximal literal-pick policy a la
   E or Vampire).
 * Saturation loop with active/passive queues + redundancy:
