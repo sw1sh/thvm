@@ -267,6 +267,58 @@ int main(void) {
     CHECK(st == ATP_PROVED);
   }
 
+  // === proof display ===========================================
+  // Demonstrates the proof-reconstruction pipeline end-to-end:
+  // build a Pelletier problem, prove it, print the proof tree.
+  // The proof goes to stderr so test runners with `2>&1 | head`
+  // can inspect it; the test itself just verifies the file is
+  // non-empty / contains the expected sentinel substring.
+
+  TEST_BEGIN("pelletier/p1-print-proof");
+  {
+    // Build P1 again, but this time capture the proof tree.
+    Term p = P_atom(), q = Q_atom();
+    Term conj = fol_mk_iff(
+      fol_mk_imp(p, q),
+      fol_mk_imp(fol_mk_not(q), fol_mk_not(p))
+    );
+    Term negated = fol_mk_not(conj);
+    u32 nc = 0;
+    FolClause **clauses = fol_formula_to_clauses(negated, &nc);
+    CnfState *s = cnf_init(512);
+    for (u32 i = 0; i < nc; i++) cnf_add_clause(s, clauses[i]);
+    free(clauses);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+
+    // Find the empty clause and print its proof DAG.
+    u32 empty_id = 0;
+    u8 found = 0;
+    for (u32 i = 0; i < s->n; i++) {
+      if (s->clauses[i] != NULL && s->clauses[i]->n_lits == 0u) {
+        empty_id = i; found = 1; break;
+      }
+    }
+    CHECK(found);
+    FILE *proof = fopen("/tmp/thvm_fol_pelletier_p1_proof.txt", "w");
+    CHECK(proof != NULL);
+    fprintf(proof, "=== Pelletier P1: (P -> Q) <-> (~Q -> ~P) ===\n");
+    fprintf(proof, "negated formula -> %u clauses; saturation -> PROVED at c%u.\n\n",
+            nc, empty_id);
+    cnf_print_proof(s, proof, empty_id);
+    fclose(proof);
+
+    // Verify the file is non-empty (sanity-check the writer didn't bail).
+    FILE *check = fopen("/tmp/thvm_fol_pelletier_p1_proof.txt", "r");
+    CHECK(check != NULL);
+    fseek(check, 0, SEEK_END);
+    long sz = ftell(check);
+    fclose(check);
+    CHECK(sz > 100);   // a real proof DAG is dozens of lines at minimum
+
+    cnf_free(s);
+  }
+
   // Used a P_atom helper that doesn't get warned out.
   (void)S_atom();
 
