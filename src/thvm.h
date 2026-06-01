@@ -4213,6 +4213,18 @@ typedef struct AtpAcInfo {
 fn void      thvm_atp_set_ac_mask(u64 mask);
 fn u64       thvm_atp_get_ac_mask(void);
 fn void      thvm_atp_auto_ac    (const Term *lhs, const Term *rhs, u32 n_eqns);
+
+// AC unification at one CP-generation position.  cp_visit calls this
+// when its current subterm `sub` and rule-j's lhs `lj` share the same
+// AC top label.  Enumerates leaf-bijection AC unifiers (up to a small
+// permutation cap), emits one CP per unifier into `out[count..]`, and
+// returns the new `count`.  Defined in src/atp/ac.c.  No-op return
+// (count unchanged) when AC mask is 0 / leaves don't bijection /
+// permutation cap exceeded.
+fn u32       atp_ac_unify_emit_cps(Term li, Term ri,
+                                   Term sub, Term lj, Term rj,
+                                   const u32 *p_path, u32 p_len,
+                                   CriticalPair *out, u32 cap, u32 count);
 #endif
 
 fn void      thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on);

@@ -128,6 +128,23 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   if (sub == 0) return ctx->count;
   if (term_tag(sub) == TAG_FVR) return ctx->count;  // skip vars (defensive)
 
+#ifdef THVM_ATP_AC
+  // AC-modulo unification at this position: when sub and lj share an
+  // AC top label, emit ONE CP per leaf-bijection AC unifier.  The
+  // syntactic call below still runs unconditionally and may add
+  // another CP (a structurally-distinct unifier the AC enumeration
+  // missed due to the |S|=|T| leaf-bijection restriction); duplicates
+  // get filtered downstream via the CP-seen index.
+  if (term_tag(sub) == TAG_CTR && term_tag(ctx->lj) == TAG_CTR
+      && term_ext(sub) == term_ext(ctx->lj)) {
+    ctx->count = atp_ac_unify_emit_cps(ctx->li, ctx->ri,
+                                       sub, ctx->lj, ctx->rj,
+                                       p, p_len,
+                                       ctx->out, ctx->cap, ctx->count);
+    if (ctx->count >= ctx->cap) return ctx->count;
+  }
+#endif
+
   RewriteSubst subst = {{0}};
   if (!thvm_unify(sub, ctx->lj, &subst)) return ctx->count;
 

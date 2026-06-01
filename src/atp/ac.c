@@ -717,4 +717,104 @@ fn void thvm_atp_auto_ac(const Term *lhs, const Term *rhs, u32 n_eqns) {
   atp_acinfo_compute(&g_atp_ac_info, props, WALD_MAX_SYMBOLS);
 }
 
+// --- AC unification for CP generation -------------------------------
+//
+// Stage 7 (`atp_ac_unify_emit_cps`) is the inner-unification half of
+// the AC-completion arc.  `atp_overlap_ij` (Stage 4b) supplies extended
+// rules via Bachmair-Plaisted; this routine supplies the AC-modulo
+// unifiers at the position where the overlap actually fires.
+//
+// Approach (leaf-bijection subset of Stickel-AC-unification):
+//   * sub = li|p and lj must both be CTRs with the same AC top label.
+//   * AC-flatten both to leaf multisets S, T.  Bail if |S| != |T| (the
+//     proper Stickel algorithm handles ≠ via variable-absorbs-set;
+//     left to a follow-up arc -- the |S|==|T| case is what the
+//     abelian-group bench needs).
+//   * Enumerate permutations π of [0..n).  For each π, attempt
+//     pairwise syntactic unification of (S[i], T[π(i)]).  On success,
+//     emit one CP using the resulting substitution.
+//
+// Permutation cap: ATP_AC_UNIFY_MAX_LEAVES = 6 (720 perms).  Larger
+// leaf sets bail (returns count unchanged) -- a graceful regression
+// to the syntactic path, never wrong, just incomplete.
+#define ATP_AC_UNIFY_MAX_LEAVES 6u
+#define ATP_AC_UNIFY_MAX_PERMS  720u
+
+static u32 atp_ac_factorial(u32 n) {
+  u32 f = 1u;
+  for (u32 i = 2u; i <= n; i++) f *= i;
+  return f;
+}
+
+// Build the k-th permutation in lex order of [0..n) via the factorial
+// number system.  Writes the permutation to `perm[0..n)`.  No
+// allocation; uses an O(n^2) leftover shuffle which is fine for n ≤ 6.
+static void atp_ac_unrank_perm(u32 k, u32 n, u32 *perm) {
+  u32 leftover[ATP_AC_UNIFY_MAX_LEAVES];
+  for (u32 i = 0; i < n; i++) leftover[i] = i;
+  for (u32 i = 0; i < n; i++) {
+    u32 base = atp_ac_factorial(n - 1u - i);
+    u32 pick = (base == 0u) ? 0u : (k / base);
+    if (base != 0u) k %= base;
+    if (pick >= (n - i)) pick = (n - i) - 1u;
+    perm[i] = leftover[pick];
+    for (u32 j = pick; j + 1u < (n - i); j++) {
+      leftover[j] = leftover[j + 1u];
+    }
+  }
+}
+
+fn u32 atp_ac_unify_emit_cps(Term li, Term ri,
+                             Term sub, Term lj, Term rj,
+                             const u32 *p_path, u32 p_len,
+                             CriticalPair *out, u32 cap, u32 count) {
+  if (count >= cap) return count;
+  u64 ac_mask = thvm_atp_get_ac_mask();
+  if (ac_mask == 0ull) return count;
+  if (term_tag(sub) != TAG_CTR || term_tag(lj) != TAG_CTR) return count;
+  u32 lab = term_ext(sub);
+  if (lab != term_ext(lj)) return count;
+  if (lab >= 64u) return count;
+  if (((ac_mask >> lab) & 1ull) == 0ull) return count;
+
+  AtpAcInfo ac = { .ac_mask = ac_mask };
+  Term S[ATP_AC_UNIFY_MAX_LEAVES];
+  Term T[ATP_AC_UNIFY_MAX_LEAVES];
+  u32 ns = 0u, nt = 0u;
+  if (!atp_ac_flatten(sub, &ac, S, &ns, ATP_AC_UNIFY_MAX_LEAVES)) return count;
+  if (!atp_ac_flatten(lj,  &ac, T, &nt, ATP_AC_UNIFY_MAX_LEAVES)) return count;
+  if (ns != nt || ns < 2u) return count;
+  if (ns > ATP_AC_UNIFY_MAX_LEAVES) return count;
+
+  u32 fact = atp_ac_factorial(ns);
+  if (fact > ATP_AC_UNIFY_MAX_PERMS) return count;
+
+  for (u32 k = 0; k < fact; k++) {
+    u32 perm[ATP_AC_UNIFY_MAX_LEAVES];
+    atp_ac_unrank_perm(k, ns, perm);
+
+    RewriteSubst subst = {{0}};
+    u8 ok = 1u;
+    for (u32 i = 0; i < ns; i++) {
+      if (!thvm_unify(S[i], T[perm[i]], &subst)) { ok = 0u; break; }
+    }
+    if (!ok) continue;
+
+    Term replaced = cp_replace_at(li, p_path, p_len, rj);
+    Term cp_lhs   = thvm_unify_apply(replaced, &subst);
+    Term cp_rhs   = thvm_unify_apply(ri, &subst);
+    Term cp_peak  = thvm_unify_apply(li, &subst);
+
+    CriticalPair *slot = &out[count];
+    slot->lhs = cp_lhs;
+    slot->rhs = cp_rhs;
+    slot->peak = cp_peak;
+    slot->pos_len = (u8)p_len;
+    for (u32 d = 0; d < p_len; d++) slot->pos[d] = (u8)p_path[d];
+    count++;
+    if (count >= cap) return count;
+  }
+  return count;
+}
+
 #endif // THVM_ATP_AC
