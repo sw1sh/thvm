@@ -11,15 +11,15 @@ The engine lives in `src/atp/_.c` (the saturation loop, rule storage,
 CP queue, indexes, memos) with the supporting reduction orderings,
 matcher, unifier, and rewriter in sibling modules:
 
-  /Users/swish/src/thvm/src/atp/_.c            -- saturation engine
-  /Users/swish/src/thvm/src/atp/precedence.c   -- automatic precedence
-  /Users/swish/src/thvm/src/atp/ft*.c          -- AtpFt: native flatterm
-  /Users/swish/src/thvm/src/atp/lpo_cache.c    -- LPO orient cache
-  /Users/swish/src/thvm/src/kbo/_.c            -- Knuth-Bendix ordering
-  /Users/swish/src/thvm/src/lpo/_.c            -- Lexicographic Path Order
-  /Users/swish/src/thvm/src/rewrite/_.c        -- match + subst-apply
-  /Users/swish/src/thvm/src/unify/_.c          -- unification
-  /Users/swish/src/thvm/src/cp/_.c             -- critical-pair enum
+  src/atp/_.c            -- saturation engine
+  src/atp/precedence.c   -- automatic precedence
+  src/atp/ft*.c          -- AtpFt: native flatterm
+  src/atp/lpo_cache.c    -- LPO orient cache
+  src/kbo/_.c            -- Knuth-Bendix ordering
+  src/lpo/_.c            -- Lexicographic Path Order
+  src/rewrite/_.c        -- match + subst-apply
+  src/unify/_.c          -- unification
+  src/cp/_.c             -- critical-pair enum
 
 The Term representation inside the engine is heap-cell `Term` (a 64-bit
 packed pointer into thvm's IC heap, shared with everything else in
@@ -86,3 +86,11 @@ The strongest soundness gate is `bin/test_atp_ft_norm_verify` —
 `tests/test_atp.c` built with the full AtpFt stack plus
 `THVM_ATPFT_NORM_VERIFY=1`, which runs every push-norm through
 both the Term path and the AtpFt path and aborts on disagreement.
+
+## Related docs
+
+- `algorithms.md` — the algorithmic content (selection, redundancy, AC).
+- `engineering.md` — implementation details (AtpFt, indexes, GC).
+- `roadmap.md` — coverage today + open arcs.
+- `vampire_port.md` — Vampire-flag → thvm-option mapping table, with
+  high-value port targets surfaced from the NotableTheorems baseline.
