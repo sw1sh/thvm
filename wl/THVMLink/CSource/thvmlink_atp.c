@@ -485,6 +485,37 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       }
     }
   }
+  // Method "KboWeightScheme" -> "InvPrecedence": derive per-symbol KBO
+  // weights from the just-computed precedence (rank N..1).  Common
+  // symbols (high precedence) get LOW weight; rare (low precedence)
+  // get HIGH weight.  Mirrors Vampire `kws=inv_precedence`.  Skipped
+  // when explicit "SymbolWeights" is supplied (the explicit array
+  // wins per Vampire convention) or when no precedence is in play
+  // (kws is a tweak on TOP of an ordering; without a precedence
+  // gradient it would be uniform-1 anyway).  args[29].
+  mint kws_mode = MArgument_getInteger(args[29]);
+  if (kws_mode == 1) {
+    MTensor sw_t_check = MArgument_getMTensor(args[25]);
+    int sw_provided = 0;
+    if (sw_t_check != NULL) {
+      mint sw_len_c = libData->MTensor_getFlattenedLength(sw_t_check);
+      sw_provided = (sw_len_c > 0);
+    }
+    if (!sw_provided) {
+      // Find the max precedence rank actually assigned.  Any unseen
+      // label has prec=0 (which stays weight 1 -- the uniform default).
+      u32 max_p = 0u;
+      for (u32 i = 0; i < (u32)max_label + 1; i++) {
+        if (wl_precedence_p[i] > max_p) max_p = wl_precedence_p[i];
+      }
+      // weight[lab] = max_p - prec[lab] + 1 for seen labels; 1 for unseen.
+      for (u32 i = 0; i < (u32)max_label + 1; i++) {
+        if (wl_precedence_p[i] > 0u) {
+          wl_weights_p[i] = max_p - wl_precedence_p[i] + 1u;
+        }
+      }
+    }
+  }
   // Method "VarWeight" -> n: per-variable KBO weight override (default
   // 1).  Mirrors Waldmeister `-w VAR=N`.  args[26].  Pass <= 0 (or
   // omit) to keep the default 1.

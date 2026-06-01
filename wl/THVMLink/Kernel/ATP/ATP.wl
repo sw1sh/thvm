@@ -147,7 +147,7 @@ $atpRunProofFn := $atpRunProofFn = load[
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
      Integer, Integer, Integer, Integer, Integer, Integer, {Integer, 1},
-     Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -1031,7 +1031,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     cpSetInterreduce_, connectedness_, precedenceSpec_,
     fifoTiebreak_, recordNorm_, useLRS_, useSOS_,
     useFwdSub_, useBwdSub_, useBwdDemod_, symbolWeightsSpec_,
-    varWeight_, randomRatio_, randomSeed_] := Block[{
+    varWeight_, randomRatio_, randomSeed_, kwsMode_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
@@ -1043,7 +1043,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
         recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod,
-        symbolWeightsArr, varWeight, randomRatio, randomSeed];
+        symbolWeightsArr, varWeight, randomRatio, randomSeed, kwsMode];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -2260,6 +2260,15 @@ atpRandomRatioOpt[o_Association] := With[{n = Lookup[o, "RandomRatio", 0]},
    fixed nonzero default; runs under a given seed are reproducible. *)
 atpRandomSeedOpt[o_Association] := With[{s = Lookup[o, "RandomSeed", 0]},
     If[ IntegerQ[s], s, 0]];
+(* "KboWeightScheme" -> "InvPrecedence": derive per-symbol KBO weights
+   from the just-computed precedence (max_prec - prec + 1).  Mirrors
+   Vampire `kws=inv_precedence` -- frequent operators (high precedence
+   under sp=reverse_frequency) get LOW weight, so the KBO ordering's
+   weight and precedence components reinforce rather than fight.
+   Default 0 = off (uniform-1 weights, engine byte-identical). *)
+atpKboWeightSchemeOpt[o_Association] :=
+    Switch[Lookup[o, "KboWeightScheme", Automatic],
+        "InvPrecedence", 1, False | Automatic, 0, _, 0];
 (* "RHSInterreduce" -> True: Waldmeister IR_InterreduktionRechts -- after
    a rule is oriented, normalize the RHS of every other rule against it,
    re-queuing any rule whose RHS shrinks.  Keeps R fully reduced so the
@@ -2379,7 +2388,7 @@ atpBwdSubsumeOpt[o_Association] :=
 atpBwdDemodOpt[o_Association] :=
     Switch[Lookup[o, "BackwardDemod", Automatic],
         True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0};
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0};
 (* Accept the string form "Automatic" as a synonym for the symbol --
    users typing Method -> "Automatic" alongside the other string-named
    presets ("Waldmeister", "Twee", ...) shouldn't trip the badmethod
@@ -2491,7 +2500,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o],
          atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o],
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
-         atpRandomRatioOpt[o], atpRandomSeedOpt[o]}
+         atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -2502,7 +2511,7 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0};
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 

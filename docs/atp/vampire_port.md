@@ -42,7 +42,7 @@ Conventions:
 | (CASC heuristic) | `"CriticalPairWeight" -> {Add\|Max\|Ord\|Gt\|Mix\|Mix2\|Unif\|Goal}` | `src/atp/_.c` (`cp_weight_mode`) | Engine default `Gt`; Vampire's analog spans `Mix2`+`Unif`+`Goal` depending on the strategy slot. |
 | (random pick) | `"RandomRatio" -> n`, `"RandomSeed" -> u64` | `src/atp/_.c::thvm_atp_set_random_modulo` / `_random_seed` | Every nth CP selection is a uniform-random queue pick — Vampire's `random_seed=...` cracking ingredient. |
 | `nwc=N` (non-unit weighting) | GAP | — | Multiplies non-unit clause weight by N.  Bias toward unit-clause picks.  HIGH-VALUE PORT TARGET. |
-| `kws=inv_precedence` | GAP | — | KBO weight scheme = inverse of precedence rank.  Appeared with `nwc=3` in 5 wins. |
+| `kws=inv_precedence` | `"KboWeightScheme" -> "InvPrecedence"` | `wl/THVMLink/CSource/thvmlink_atp.c` args[29] | PORTED.  Derives per-symbol KBO weight from AutoPrecedence (weight = `max_prec - prec(sym) + 1`) when SymbolWeights is not provided.  Probe @ TC=60s combining `ReverseFrequency` + `InvPrecedence` + `GroundJoin` + `BackwardDemod` + `RHSInterreduce` + `UnfailingCP` cracked 0/6 of the residual NotableTheorems; needs `nwc=N` + `spb=*` companions for the full Vampire shape. |
 | `kmz=on` | GAP | — | KBO "modular zero" — variant weight handling for zero-coefficient slots. |
 | `spb=goal_then_units` | GAP | — | LITERAL selection priority: goal literals first, then units, then others.  Appeared 38× in wins — second-most common spb after `intro`/`goal`. |
 | `spb=goal` | GAP | — | Goal-literal selection.  14 wins. |
@@ -125,9 +125,12 @@ Ordered by win-frequency in `vampire_raw/`:
 4. **`nwc=N` non-unit weight coefficient** — multiply non-unit clause
    weight by N in `cp_weight_mode` evaluation.  Bias toward unit-clause
    selection.  Trivial 5-LOC addition.
-5. **`kws=inv_precedence` KBO weight scheme** — set per-symbol weight
-   = `max_prec - precedence(sym) + 1`.  Tied to AutoPrecedence;
-   straightforward to add as `"KboWeightScheme" -> "InvPrecedence"`.
+5. ~~**`kws=inv_precedence` KBO weight scheme**~~ — PORTED as
+   `"KboWeightScheme" -> "InvPrecedence"`.  Derives weight =
+   `max_prec - prec(sym) + 1` when no explicit SymbolWeights set.
+   Probe combining with `ReverseFrequency` cracked 0/6 stuck cases @
+   TC=60s — needs `nwc=N` companion (Vampire's winning shape uses
+   `nwc=3:kws=inv_precedence` together).
 6. **`fsr=off` forward subsumption resolution toggle** — split the
    existing `"ForwardSubsume"` knob into `"ForwardSubsume" -> {True,
    False}` (current behavior) plus `"ForwardSubsumeResolution" ->
