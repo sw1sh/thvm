@@ -66,7 +66,11 @@ def main():
     bs = getenv("BS", 128)
     steps = getenv("STEPS", 70)
     test_every = getenv("TEST_EVERY", 10)
-    eval_batches = getenv("EVAL_BATCHES", 16)   # batched eval (cap)
+    # EVAL_BATCHES=0 (default) covers the FULL test set so the accuracy
+    # report is full-10000 apples-to-apples; a positive value caps the
+    # number of batches.  Cross-step reclaim now keeps eval memory flat,
+    # so the full sweep is affordable.
+    eval_batches = getenv("EVAL_BATCHES", 0)
     np.random.seed(42)
 
     Xtr, Ytr, Xte, Yte = (t.numpy() for t in mnist())
@@ -85,7 +89,9 @@ def main():
     def test_acc():
         Tensor.training = False
         correct = total = 0
-        for b in range(min(eval_batches, (len(Xte) + bs - 1) // bs)):
+        n_full = (len(Xte) + bs - 1) // bs
+        nb = n_full if eval_batches <= 0 else min(eval_batches, n_full)
+        for b in range(nb):
             xb = Xte[b * bs:(b + 1) * bs]
             yb = Yte[b * bs:(b + 1) * bs]
             if len(xb) == 0:
@@ -93,6 +99,11 @@ def main():
             pred = np.argmax(model(Tensor(xb)).numpy(), axis=1)
             correct += int((pred == yb).sum()); total += len(yb)
         Tensor.training = True
+        # The eval forwards build unpinned transient buffers; free them so
+        # peak memory stays flat across evals (params/grads/JIT buffers
+        # remain pinned by their live Tensors).
+        if not _noreclaim:
+            _TH.reclaim()
         return 100.0 * correct / max(total, 1)
 
     Tensor.training = True
@@ -129,7 +140,7 @@ def main():
             return loss
 
     for i in range(steps):
-        if not _noreclaim and not _use_jit:
+        if not _noreclaim:
             GlobalCounters.reset()         # triggers cross-step reclaim
         _TH.cpu_peak_reset()               # within-step peak from here
         t0 = time.time()
