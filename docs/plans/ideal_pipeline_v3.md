@@ -305,3 +305,25 @@ thvm already wins wall-time on both backends):
 
 Infra: added `tools/bench_train.py` -- the stable warm-train harness (simple/beautiful,
 DEV, BS, faithful, BEAM, zero_grad) replacing the per-session /tmp scratch scripts.
+
+### Optimizer-fusion audit + parity guardrail (2026-06-01)
+
+Audited the Adam optimizer's boundary structure (simple model, 6 params): 79 boundaries
+total, 50 without the optimizer -> 29 from the step. Each m/v/p update is ALREADY a
+single ADD boundary (the in-place assign reads m + g and writes m in one kernel; the
+RHS is NOT split). So the optimizer is near-minimal PER-PARAM (3 boundaries/param); the
+only remaining fusion lever is CROSS-PARAM (fuse all 16 m-updates into one kernel, etc.)
+which requires multi-output kernels -- a `kernel_lift` that emits N independent stores.
+So optimizer fusion is LARGE infrastructure, not a contained intermediate-fusion win.
+
+**Conclusion of the contained-win sweep:** every remaining lever is large infrastructure
+for MEMORY parity (thvm already wins wall-time on both backends): boolean-OR validity
+merge (needs term-algebra bool ops), multi-output kernels (optimizer + reduce fusion),
+reuse-distance memory planner, THREAD/warp-shuffle. These are deliberate, verified,
+multi-session builds -- not autonomous loop-chunks -- because they touch the rangeify
+walk / kernel_lift that the hard-won faithful correctness depends on.
+
+Added `py/tests/test_faithful_parity.py` -- a faithful<->default forward+grad parity
+guardrail (subprocess per seed; step-0 loss + conv1 weight-grad ssq within fp). This
+locks in the correctness invariant so the future deep memory-fusion work can be verified
+against a fast regression check, not just the full WL suite. Passes (2.3s).
