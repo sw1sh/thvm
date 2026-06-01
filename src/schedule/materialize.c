@@ -2203,6 +2203,155 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   return out;
 }
 
+// === Post-inline broadcast-collapsed REDUCE repair ===
+//
+// thvm's UOP_REDUCE stores only its axis_ids; cpu_uop_walk's
+// uwalk_run_reduce recovers each axis's loop extent by scanning the
+// REDUCE body for a UOP_RANGE leaf with that axis_id.  When the body
+// reads a producer whose VALUE is invariant over a reduce axis (a
+// per-channel mean broadcast over the spatial/window axes -- e.g. the
+// detached-mean live adjoint `sum_{H,W}(m[c]*gy)` at N=1, or any
+// `bias.expand(...).sum()` grad), the materialize inline collapses the
+// producer BUFFERIZE down to its invariant value and the reduce-axis
+// RANGE leaves vanish from the body.  uwalk_run_reduce then sees
+// cext==0 and bails to the reduce identity (0 for SUM), zeroing the
+// adjoint -- the same failure ru_reduce_repair_broadcast_body fixes at
+// rangeify time, but that repair runs BEFORE the inline (when the body
+// still references the axis through the not-yet-inlined BUFFERIZE addr)
+// so it can't fire here.  Mirror tinygrad, where REDUCE carries its
+// RANGE srcs explicitly (uop/ops.py + schedule/indexing.py:94) so the
+// extent is never lost: re-apply the body-invariant repair AFTER the
+// inline.  A SUM reduce of a body invariant over axis a equals
+// body * extent(a); MAX/MIN equals body.
+//
+// The lost extents are recovered from the PRE-inline tree (where the
+// reduce-axis RANGE leaves still exist in the BUFFERIZE addrs / movement
+// swizzles): build an axis_id -> extent map by walking every RANGE leaf.
+
+#define RU_AXEXT_CAP 256
+typedef struct { u32 aid[RU_AXEXT_CAP]; u32 ext[RU_AXEXT_CAP]; u32 n; } AxExtMap;
+
+static void axext_add(AxExtMap *m, u32 aid, u32 ext) {
+  if (ext == 0) return;
+  for (u32 i = 0; i < m->n; i++) if (m->aid[i] == aid) return;
+  if (m->n < RU_AXEXT_CAP) { m->aid[m->n] = aid; m->ext[m->n] = ext; m->n++; }
+}
+
+static u32 axext_lookup(AxExtMap const *m, u32 aid) {
+  for (u32 i = 0; i < m->n; i++) if (m->aid[i] == aid) return m->ext[i];
+  return 0;
+}
+
+static void axext_collect_rec(AxExtMap *m, Term t, u32 depth) {
+  if (depth > 256) return;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) {
+    axext_add(m, uop_range_axis_id(r), uop_range_extent(r));
+    return;
+  }
+  // Pick up the extents a BUFFERIZE encodes in its closed_ranges (these
+  // are the producer's realized output-axis ranges -- the spatial axes a
+  // partial-realize keeps that the consumer reduce then contracts).
+  if (op == UOP_BUFFERIZE) {
+    u32 nr = uop_bufferize_n_ranges(r);
+    for (u32 i = 0; i < nr; i++) {
+      Term cr = uop_bufferize_range_at(r, i);
+      if (cr != 0 && term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE) {
+        axext_add(m, uop_range_axis_id(cr), uop_range_extent(cr));
+      }
+    }
+  }
+  if (op == UOP_BUFFER) return;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++) axext_collect_rec(m, heap_read(loc + i), depth + 1);
+}
+
+// Return 1 if subtree `t` references a UOP_RANGE leaf with axis_id `aid`.
+// Does not descend into UOP_BUFFER (opaque) but DOES descend into the
+// already-inlined body (no BUFFERIZE survives post-inline on the walker
+// path).
+static int subtree_uses_axis_mat(Term t, u32 aid, u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) return uop_range_axis_id(r) == aid;
+  if (op == UOP_BUFFER) return 0;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++)
+    if (subtree_uses_axis_mat(heap_read(loc + i), aid, depth + 1)) return 1;
+  return 0;
+}
+
+static u32 f32_to_bits(f32 v) { u32 b; memcpy(&b, &v, sizeof b); return b; }
+
+static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
+  if (depth > 256) return t;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return t;
+  u8 op = term_ext(r);
+  if (op == UOP_BUFFER) return r;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  // Rebuild recursable children first.
+  Term srcs[MAX_UOP_SRC] = {0};
+  int changed = 0;
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term c  = heap_read(loc + i);
+    Term nc = repair_collapsed_reduces_rec(c, m, depth + 1);
+    srcs[i] = nc;
+    if (nc != c) changed = 1;
+  }
+  if (op != UOP_REDUCE) {
+    return changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
+  }
+  // For a REDUCE: detect axes the (rebuilt) body no longer references.
+  // SUM contributes a *extent factor per such axis; MAX/MIN drops them
+  // (the reduce of a body constant over an axis == body for MAX/MIN).
+  u32 n_axes = uop_reduce_n_axes(r);
+  u32 kind   = uop_reduce_kind(r);
+  Term body  = srcs[0];   // the recursively-repaired body
+  u32 kept_axes[MAX_DIM];
+  u32 n_kept = 0;
+  u64 prod   = 1;
+  int any_collapsed = 0;
+  int bail = 0;
+  for (u32 a = 0; a < n_axes && a < MAX_DIM; a++) {
+    u32 ax = uop_reduce_axis(r, a);
+    if (subtree_uses_axis_mat(body, ax, 0)) {
+      if (n_kept < MAX_DIM) kept_axes[n_kept++] = ax;
+    } else {
+      u32 ext = axext_lookup(m, ax);
+      // No recoverable extent -> bail entirely (keep the original reduce
+      // verbatim; we never make things worse than the pre-repair walker).
+      if (ext == 0) { bail = 1; break; }
+      any_collapsed = 1;
+      prod *= (u64)ext;
+    }
+  }
+  if (bail || !any_collapsed) {
+    // Body may still have changed (a nested reduce deeper down was
+    // repaired); rebuild the reduce shell over the original axes.
+    if (!changed) return r;
+    u32 all_axes[MAX_DIM];
+    for (u32 a = 0; a < n_axes && a < MAX_DIM; a++) all_axes[a] = uop_reduce_axis(r, a);
+    return uop_reduce_multi(kind, n_axes, all_axes, body);
+  }
+  Term new_body = body;
+  if (kind == REDUCE_SUM && prod != 1) {
+    Term k = uop_const(DT_FP32, f32_to_bits((f32)prod));
+    new_body = uop_binary(UOP_MUL, body, k);
+  }
+  // Rebuild the reduce over only the surviving (still-referenced) axes;
+  // if none survive, the reduce degenerates to its (scaled) body.
+  if (n_kept == 0) return new_body;
+  return uop_reduce_multi(kind, n_kept, kept_axes, new_body);
+}
+
 static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {
   if (root == 0 || ke == NULL) return root;
   UnifiedRewriteState st;
@@ -4346,6 +4495,17 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // returns 0 if ru_root is 0 -- so inside this branch we already
     // know cached_lift.store_root holds the unified pass's root.
     Term ru_rewritten = unified_store_root_for_walker(ke, ke->cached_lift.store_root);
+    // Re-apply the broadcast-collapsed REDUCE repair AFTER the inline:
+    // a per-channel-mean-style producer fused into a reduce collapses its
+    // value to the invariant per-channel scalar, dropping the reduce-axis
+    // RANGE leaves so uwalk_run_reduce would bail to the SUM identity 0
+    // (the detached-mean live-adjoint at N=1, bias.expand grads, etc.).
+    // The lost axis extents are recovered from the PRE-inline store_root.
+    {
+      AxExtMap _axm; _axm.n = 0;
+      axext_collect_rec(&_axm, ke->cached_lift.store_root, 0);
+      ru_rewritten = repair_collapsed_reduces_rec(ru_rewritten, &_axm, 0);
+    }
     // Scan the rewritten store_root for INDEX_E reads against slots
     // whose tid carries non-trivial layout (chain or non-contig
     // view).  The flag commit is deferred until the bypass-succeeded

@@ -44,6 +44,7 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PY = str(ROOT / "py")
+sys.path.insert(0, os.environ.get("THVM_PY", PY))
 
 
 def _have_tg():
@@ -54,8 +55,97 @@ def _have_tg():
         return False
 
 
+def _conv2d_np(x, w):
+    N, Cin, H, Wd = x.shape
+    Co, _, kh, kw = w.shape
+    oh, ow = H - kh + 1, Wd - kw + 1
+    out = np.zeros((N, Co, oh, ow))
+    for n in range(N):
+        for co in range(Co):
+            for i in range(oh):
+                for j in range(ow):
+                    out[n, co, i, j] = (x[n, :, i:i + kh, j:j + kw] * w[co]).sum()
+    return out
+
+
+def _maxpool_np(a, k=2):
+    n, c, h, w = a.shape
+    a = a.reshape(n, c, h // k, k, w // k, k)
+    return a.max(axis=3).max(axis=4)
+
+
+def _relu_bn_pool_sum_np(X, w):
+    y = np.maximum(_conv2d_np(X, w), 0.0)
+    m = y.mean(axis=(0, 2, 3), keepdims=True)
+    v = y.var(axis=(0, 2, 3), keepdims=True)
+    return _maxpool_np((y - m) / np.sqrt(v + 1e-5), 2).sum()
+
+
+def _fd_grad(X, W0, eps=1e-6):
+    g = np.zeros_like(W0)
+    it = np.nditer(W0, flags=["multi_index"])
+    while not it.finished:
+        mi = it.multi_index
+        wp = W0.copy(); wp[mi] += eps
+        wm = W0.copy(); wm[mi] -= eps
+        g[mi] = (_relu_bn_pool_sum_np(X, wp) - _relu_bn_pool_sum_np(X, wm)) / (2 * eps)
+        it.iternext()
+    return g
+
+
 @unittest.skipUnless(_have_tg(), "tinygrad not on path")
 class TestCompositeReduceBwdParity(unittest.TestCase):
+
+    def test_relu_bn_train_maxpool_sum_conv_weight_grad_vs_fp64_oracle(self):
+        """relu->BN(train)->maxpool->sum conv-weight grad, checked against an
+        fp64 numpy finite-difference oracle (ground truth) AND tinygrad.
+
+        The trigger is a TIE in a maxpool window: relu maps several inputs to
+        exactly 0, and BN maps every per-channel 0 to the same normalized
+        value, so a 2x2 pool window can contain two equal maxima.  thvm's
+        MAX-reduce backward used to route the FULL gy to every tied position
+        (missing the /count split that tinygrad does at gradient.py:12-14:
+        (mask/count)*gy), double-counting that channel's adjoint and
+        corrupting it ~15% downstream through BN + conv.  Fixed in
+        uop_grad.c REDUCE_MAX branch (divide mask by sum(mask) over the reduce
+        axes).  The forward is bit-correct (5.6e-7 vs fp64) -- this is a pure
+        backward bug.  Before the fix relmax-vs-oracle ~0.092; after ~3e-7."""
+        import thvm
+        import thvm.nn as THN
+        import tinygrad
+        import tinygrad.nn as TGN
+
+        rng = np.random.default_rng(0)
+        N, Cin, Cout, H, K = 2, 1, 4, 8, 5
+        X = rng.standard_normal((N, Cin, H, H)).astype(np.float64)
+        W0 = (rng.standard_normal((Cout, Cin, K, K)) * 0.3).astype(np.float64)
+        g_truth = _fd_grad(X, W0)
+
+        Xf = X.astype(np.float32); Wf = W0.astype(np.float32)
+        thvm.Tensor.training = True
+        wh = thvm.Tensor(Wf.copy()).requires_grad_(True)
+        (THN.BatchNorm(Cout)(thvm.Tensor(Xf.copy()).conv2d(wh).relu())
+         .max_pool2d().sum().backward())
+        thvm.Tensor.training = False
+        g_th = np.asarray(wh.grad.numpy(), np.float64).reshape(W0.shape)
+
+        tinygrad.Tensor.training = True
+        wt = tinygrad.Tensor(Wf.copy(), requires_grad=True)
+        (TGN.BatchNorm(Cout)(tinygrad.Tensor(Xf.copy()).conv2d(wt).relu())
+         .max_pool2d().sum().backward())
+        tinygrad.Tensor.training = False
+        g_tg = np.asarray(wt.grad.numpy(), np.float64).reshape(W0.shape)
+
+        denom = np.abs(g_truth).max() + 1e-12
+        relmax_oracle = np.abs(g_th - g_truth).max() / denom
+        relmax_tg = np.abs(g_th - g_tg).max() / denom
+        self.assertLess(relmax_oracle, 1e-3,
+                        f"relu->BN->maxpool->sum conv-weight grad vs fp64 "
+                        f"oracle relmax={relmax_oracle:.4g} (tie-split /count "
+                        f"in maxpool backward); thvm absmax {np.abs(g_th).max():.6g} "
+                        f"truth absmax {np.abs(g_truth).max():.6g}")
+        self.assertLess(relmax_tg, 1e-3,
+                        f"thvm vs tinygrad relmax={relmax_tg:.4g}")
 
     def test_conv_relu_bn_train_sum_conv_weight_grad_vs_tinygrad(self):
         """(a) conv->relu->BN(train)->sum, conv-weight grad, scheduled by thvm

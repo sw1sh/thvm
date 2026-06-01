@@ -182,6 +182,109 @@ class TestDetachReduceBwdParity(unittest.TestCase):
                         f"tinygrad {g_tg} -- reduction-order roundoff on a "
                         f"structurally-zero grad")
 
+    # --- OPEN: maxpool MAX-grad /count nested reduce fused into conv-weight ---
+    def test_relu_bn_maxpool_sum_bwd_n1(self):
+        # N=1 relu -> BatchNorm(train) -> maxpool2d(2) -> sum, conv-weight grad.
+        # The maxpool MAX vjp is (mask/count)*gy (gradient.py:11-14), where
+        # count = mask.sum(window-axes) broadcast back over the window.  When
+        # that nested SUM-reduce + its broadcast-back + the recip are FUSED
+        # into the conv-weight backward chain (which itself reduces the N=1
+        # batch axis), the walker's nested-reduce-iter handler
+        # (uop_walk.c:806-811 cext==0 identity bail) lets count read 0 at some
+        # fused positions -> recip(0)=inf -> mask*inf = NaN.  Without the
+        # /count divide (clean HEAD) this was silently all-0.  fp64 truth and
+        # tinygrad both give a finite grad (|g|.max ~1.57); thvm is NaN.
+        import thvm
+        import thvm.nn as THN
+        import tinygrad
+        import tinygrad.nn as TGN
+        rng = np.random.default_rng(0)
+        Xn = rng.standard_normal((1, 3, 8, 8)).astype(np.float32)
+        Wn = rng.standard_normal((4, 3, 3, 3)).astype(np.float32)
+
+        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
+        THN.BatchNorm(4)(x.conv2d(w).relu()).max_pool2d((2, 2)).sum().backward()
+        g_thvm = w.grad.numpy()
+
+        tinygrad.Tensor.training = True
+        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)
+        TGN.BatchNorm(4)(tx.conv2d(tw).relu()).max_pool2d((2, 2)).sum() \
+            .backward()
+        g_tg = tw.grad.numpy()
+        tinygrad.Tensor.training = False
+
+        self.assertFalse(bool(np.isnan(g_thvm).any()),
+                         "relu->BN->maxpool->sum conv-weight grad is NaN "
+                         "(maxpool /count nested reduce fused into the N=1 "
+                         "conv-weight reduce)")
+        self.assertLess(float(np.abs(g_thvm - g_tg).max()), 1e-3,
+                        f"thvm {g_thvm.reshape(-1)[:4]} vs "
+                        f"tinygrad {g_tg.reshape(-1)[:4]}")
+
+    def test_relu_maxpool_sum_bwd_n1(self):
+        # Minimal isolation of the maxpool /count fusion NaN: N=1 relu ->
+        # maxpool2d(2) -> sum, conv-weight grad (no normalization layer).  This
+        # NaNs too (sparse: some grad entries finite ~2.6, others NaN), proving
+        # the root is the maxpool /count nested-reduce fusion itself, NOT a
+        # BatchNorm/GroupNorm interaction.  N=2 of the same graph is finite, so
+        # the trigger is the size-1 batch axis in the fused conv-weight reduce.
+        import thvm
+        import tinygrad
+        rng = np.random.default_rng(0)
+        Xn = rng.standard_normal((1, 3, 8, 8)).astype(np.float32)
+        Wn = rng.standard_normal((4, 3, 3, 3)).astype(np.float32)
+
+        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
+        x.conv2d(w).relu().max_pool2d((2, 2)).sum().backward()
+        g_thvm = w.grad.numpy()
+
+        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)
+        tx.conv2d(tw).relu().max_pool2d((2, 2)).sum().backward()
+        g_tg = tw.grad.numpy()
+
+        self.assertFalse(bool(np.isnan(g_thvm).any()),
+                         "relu->maxpool->sum conv-weight grad is NaN")
+        self.assertLess(float(np.abs(g_thvm - g_tg).max()), 1e-3,
+                        f"thvm {g_thvm.reshape(-1)[:4]} vs "
+                        f"tinygrad {g_tg.reshape(-1)[:4]}")
+
+    def test_relu_groupnorm_maxpool_sum_bwd_n2(self):
+        # N=2 relu -> GroupNorm(2) -> maxpool2d(2) -> sum, conv-weight grad.
+        # Same maxpool /count fusion NaN, but with a per-group mean/var reduce
+        # ahead of the pool (groupnorm reduces the per-group channel+spatial
+        # axes).  fp64 truth and tinygrad both give a finite grad (|g|.max
+        # ~3.78); thvm is NaN.  GroupNorm is built from primitives because
+        # thvm.nn has no GroupNorm class.
+        import thvm
+        import tinygrad
+        rng = np.random.default_rng(0)
+        Xn = rng.standard_normal((2, 3, 8, 8)).astype(np.float32)
+        Wn = rng.standard_normal((4, 3, 3, 3)).astype(np.float32)
+        G = 2
+
+        def gn(y, T):
+            n, c, h, ww = y.shape
+            yg = y.reshape(n, T, c // T, h, ww)
+            mu = yg.mean(axis=(2, 3, 4), keepdim=True)
+            var = ((yg - mu) * (yg - mu)).mean(axis=(2, 3, 4), keepdim=True)
+            yn = (yg - mu) * ((var + 1e-5).rsqrt())
+            return yn.reshape(n, c, h, ww)
+
+        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
+        gn(x.conv2d(w).relu(), G).max_pool2d((2, 2)).sum().backward()
+        g_thvm = w.grad.numpy()
+
+        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)
+        gn(tx.conv2d(tw).relu(), G).max_pool2d((2, 2)).sum().backward()
+        g_tg = tw.grad.numpy()
+
+        self.assertFalse(bool(np.isnan(g_thvm).any()),
+                         "relu->groupnorm(2)->maxpool->sum conv-weight grad "
+                         "is NaN")
+        self.assertLess(float(np.abs(g_thvm - g_tg).max()), 1e-3,
+                        f"thvm {g_thvm.reshape(-1)[:4]} vs "
+                        f"tinygrad {g_tg.reshape(-1)[:4]}")
+
 
 if __name__ == "__main__":
     unittest.main()
