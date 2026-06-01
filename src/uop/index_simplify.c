@@ -237,6 +237,226 @@ static int uop_term_nonneg_d(Term t, u32 depth) {
 
 static int uop_term_nonneg(Term t) { return uop_term_nonneg_d(t, 0); }
 
+// === uop_int_bounds: conservative [lo, hi] interval inference ===
+//
+// A single two-sided range estimator over the int UOp index DAG,
+// mirroring tinygrad's symbolic (vmin, vmax) pair.  Unlike the older
+// one-sided uop_term_min_value / uop_term_max_value above (which bail
+// the moment a sign is mixed and special-case IMOD's lower bound to 0),
+// this returns a tight-as-cheaply-possible inclusive interval for both
+// endpoints in one pass, with full sign handling on IMUL / IDIV and
+// overflow guards on every intermediate.
+//
+// Contract: returns 1 and fills *lo/*hi such that the value of `t` is
+// provably in [*lo, *hi] for ALL assignments of its RANGE leaves (each
+// RANGE r ranges over [0, static_extent(r)-1]).  Returns 0 when no
+// finite two-sided bound can be derived; callers MUST treat 0 as "no
+// information" and never assume anything about *lo/*hi in that case.
+//
+// CONSERVATISM: every unhandled op, unknown leaf (BUFFER/LOAD/etc.),
+// non-constant divisor/modulus, or arithmetic overflow returns 0.  A
+// wrong (too-narrow) bound would silently miscompile a later div/mod or
+// valid-mask fold, so the function errs hard toward 0/unknown.
+//
+// This primitive is NOT yet wired into any simplification rule -- it is
+// verified infrastructure for a later increment.
+
+// Floor division for i64: C `/` truncates toward zero, but interval
+// arithmetic over IDIV needs floor (round toward -inf) so that the
+// endpoints stay sound for negative numerators.  Requires d > 0.
+static i64 uop_floordiv_i64(i64 a, i64 d) {
+  i64 q = a / d;
+  i64 r = a % d;
+  if (r != 0 && ((r < 0) != (d < 0))) q -= 1;
+  return q;
+}
+
+// Checked i64 add/sub/mul: return 1 and write *out on success, 0 on
+// overflow.  __builtin_*_overflow is available on clang/gcc (the only
+// compilers this codebase targets).
+static int uop_chk_add(i64 a, i64 b, i64 *out) { return !__builtin_add_overflow(a, b, out); }
+static int uop_chk_sub(i64 a, i64 b, i64 *out) { return !__builtin_sub_overflow(a, b, out); }
+static int uop_chk_mul(i64 a, i64 b, i64 *out) { return !__builtin_mul_overflow(a, b, out); }
+
+static int uop_int_bounds_d(Term t, i64 *lo, i64 *hi, u32 depth);
+static int uop_is_invalid(Term t);  // defined below (invalid_gate section)
+
+// Min/max of the four corner products la*lb, la*hb, ha*lb, ha*hb, with
+// overflow checking.  Returns 1 and fills *lo/*hi on success, 0 if any
+// corner overflows i64.
+static int uop_mul_corner_bounds(i64 la, i64 ha, i64 lb, i64 hb,
+                                 i64 *lo, i64 *hi) {
+  i64 corners[4];
+  if (!uop_chk_mul(la, lb, &corners[0])) return 0;
+  if (!uop_chk_mul(la, hb, &corners[1])) return 0;
+  if (!uop_chk_mul(ha, lb, &corners[2])) return 0;
+  if (!uop_chk_mul(ha, hb, &corners[3])) return 0;
+  i64 mn = corners[0], mx = corners[0];
+  for (u32 i = 1; i < 4; i++) {
+    if (corners[i] < mn) mn = corners[i];
+    if (corners[i] > mx) mx = corners[i];
+  }
+  *lo = mn; *hi = mx;
+  return 1;
+}
+
+static int uop_int_bounds_d(Term t, i64 *lo, i64 *hi, u32 depth) {
+  if (depth > 64) return 0;  // pathological nesting -> unknown
+  // Bare NUM leaf (a raw heap integer, not wrapped in a CONST UOp).
+  if (term_tag(t) == TAG_NUM) {
+    i64 v = (i64)(i32)term_val(t);
+    *lo = v; *hi = v;
+    return 1;
+  }
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_CONST: {
+      i64 v;
+      if (!uop_iconst_value(t, &v)) return 0;
+      *lo = v; *hi = v;
+      return 1;
+    }
+    case UOP_RANGE: {
+      // Iter ranges over [0, static_extent-1].  static_extent is the
+      // worst-case upper bound even for kvar (symbolic) extents, so the
+      // interval stays sound when the runtime extent is smaller.
+      // (uop_range_extent_into reads the raw packed extent; kvar_extent_static
+      // unpacks a symbolic extent's registered upper bound.  We use those two
+      // -- not index.c's uop_range_static_extent -- because index.c is
+      // #included AFTER this file in thvm.c, so its accessors aren't visible
+      // here yet, whereas the kvar helpers and uop_range_extent_into are.)
+      u32 packed;
+      if (!uop_range_extent_into(t, &packed)) return 0;
+      u32 ext = kvar_extent_static(packed);
+      if (ext == 0) return 0;  // degenerate / empty -- no useful bound
+      *lo = 0; *hi = (i64)ext - 1;
+      return 1;
+    }
+    case UOP_IADD: {
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 0), &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 1), &lb, &hb, depth + 1)) return 0;
+      if (!uop_chk_add(la, lb, lo)) return 0;
+      if (!uop_chk_add(ha, hb, hi)) return 0;
+      return 1;
+    }
+    case UOP_ISUB: {
+      // [la - hb, ha - lb].
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 0), &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 1), &lb, &hb, depth + 1)) return 0;
+      if (!uop_chk_sub(la, hb, lo)) return 0;
+      if (!uop_chk_sub(ha, lb, hi)) return 0;
+      return 1;
+    }
+    case UOP_IMUL: {
+      Term a = heap_read(term_val(t) + 0);
+      Term b = heap_read(term_val(t) + 1);
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(a, &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(b, &lb, &hb, depth + 1)) return 0;
+      // const * range: scale, swapping endpoints for a negative const.
+      i64 c;
+      if (uop_iconst_value(a, &c)) {
+        if (c >= 0) { if (!uop_chk_mul(c, lb, lo) || !uop_chk_mul(c, hb, hi)) return 0; }
+        else        { if (!uop_chk_mul(c, hb, lo) || !uop_chk_mul(c, lb, hi)) return 0; }
+        return 1;
+      }
+      if (uop_iconst_value(b, &c)) {
+        if (c >= 0) { if (!uop_chk_mul(c, la, lo) || !uop_chk_mul(c, ha, hi)) return 0; }
+        else        { if (!uop_chk_mul(c, ha, lo) || !uop_chk_mul(c, la, hi)) return 0; }
+        return 1;
+      }
+      // Both non-const but bounded: min/max over the four corners.
+      return uop_mul_corner_bounds(la, ha, lb, hb, lo, hi);
+    }
+    case UOP_IDIV: {
+      // Positive constant divisor only.  thvm renders IDIV as C `/`
+      // (truncation toward zero), which equals floor ONLY for a
+      // non-negative numerator; for a negative numerator C-trunc and floor
+      // disagree, so a floor bound would be unsound vs the emitted code.
+      // Index expressions are non-negative, so we bound only the provably
+      // non-negative case and return unknown otherwise.  (la>=0 => the
+      // whole range is non-negative; or uop_term_nonneg proves it when the
+      // interval bound is loose -- then clamp the low end to 0.)
+      i64 d;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &d) || d <= 0) return 0;
+      Term num = heap_read(term_val(t) + 0);
+      i64 la, ha;
+      if (!uop_int_bounds_d(num, &la, &ha, depth + 1)) return 0;
+      if (la < 0) {
+        if (!uop_term_nonneg(num)) return 0;
+        la = 0;  // proven >= 0; the interval lower bound was just loose
+      }
+      *lo = uop_floordiv_i64(la, d);  // == la/d for la >= 0 (trunc == floor)
+      *hi = uop_floordiv_i64(ha, d);
+      return 1;
+    }
+    case UOP_IMOD: {
+      // Positive constant modulus c.  For a non-negative numerator C `%`
+      // lands in [0, c); for a negative numerator C `%` is negative, so
+      // the [0, c-1] bound (and the x%c==x tightening) is sound only when
+      // the numerator is provably non-negative.  Index exprs are
+      // non-negative; return unknown otherwise.
+      i64 c;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &c) || c <= 0) return 0;
+      Term num = heap_read(term_val(t) + 0);
+      i64 la, ha;
+      int nb = uop_int_bounds_d(num, &la, &ha, depth + 1);
+      if (nb && la >= 0 && ha < c) {  // x % c == x
+        *lo = la; *hi = ha;
+        return 1;
+      }
+      if (!((nb && la >= 0) || uop_term_nonneg(num))) return 0;
+      *lo = 0; *hi = c - 1;
+      return 1;
+    }
+    case UOP_IWHERE: {
+      // select(cond, x, y): union the two branch intervals, ignoring
+      // cond.  An INVALID branch is a masking sentinel (no numeric
+      // value); skip it and take the other branch's bound.  If both are
+      // INVALID, or the live branch is unbounded, return 0.
+      Term x = heap_read(term_val(t) + 1);
+      Term y = heap_read(term_val(t) + 2);
+      int xi = uop_is_invalid(x), yi = uop_is_invalid(y);
+      if (xi && yi) return 0;
+      i64 lx, hx, ly, hy;
+      if (yi) return uop_int_bounds_d(x, lo, hi, depth + 1);
+      if (xi) return uop_int_bounds_d(y, lo, hi, depth + 1);
+      if (!uop_int_bounds_d(x, &lx, &hx, depth + 1)) return 0;
+      if (!uop_int_bounds_d(y, &ly, &hy, depth + 1)) return 0;
+      *lo = lx < ly ? lx : ly;
+      *hi = hx > hy ? hx : hy;
+      return 1;
+    }
+    case UOP_ILT:
+      // Comparison result is boolean 0/1.
+      *lo = 0; *hi = 1;
+      return 1;
+    case UOP_IAND:
+    case UOP_IOR: {
+      // Boolean conjunction/disjunction on 0/1 -> [0, 1].  Only claim
+      // this when BOTH operands are themselves provably in [0, 1]; a
+      // bitwise use on wider integers has no such bound (return 0).
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 0), &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 1), &lb, &hb, depth + 1)) return 0;
+      if (la < 0 || ha > 1 || lb < 0 || hb > 1) return 0;
+      *lo = 0; *hi = 1;
+      return 1;
+    }
+    default:
+      return 0;  // unknown op / BUFFER / LOAD / etc. -- no info
+  }
+}
+
+// Public entry: infer a conservative inclusive [lo, hi] for the
+// int-typed UOp `t`.  Returns 1 on success, 0 if unbounded/unknown.
+static int uop_int_bounds(Term t, i64 *lo, i64 *hi) {
+  return uop_int_bounds_d(t, lo, hi, 0);
+}
+
 // Recognise `(c * x) + y` shape on a numerator.  Returns 1 on match;
 // *c_out, *x_out, *y_out filled in.  *y_out may be 0 if the shape is
 // the simpler `c * x` (no addend).  Either operand of the IADD may

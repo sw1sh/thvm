@@ -530,6 +530,60 @@ the lever is how rangeify lowers the conv-backward col2im, correctness-critical,
 met goal with narrow benefit (default+GPU faithful are fine). Recombine port stands as a
 faithful-spec improvement; the conv-backward-lowering rewrite is the (large, deferred) rest.
 
+### SESSION CONCLUSION (2026-06-01): the faithful IDIV/IMOD is STRUCTURAL (1-D flatten vs N-D)
+
+Final root cause, proven: every faithful conv IDIV/IMOD (fwd fused conv+maxpool AND
+conv-backward) is `(spatial_lo + stride*spatial_hi) / W` then `% W` -- thvm FLATTENS a 2-D
+spatial coordinate into a 1-D index somewhere in the `_pool`/window movement chain, then
+the consumer DECODES it back (IDIV/IMOD). The encode is coprime with the window stride, so
+it is NOT recombinable (the landed `fold_add_divmod_recombine` doesn't touch it) and NOT
+bounds-foldable -- even tinygrad's full `divandmod.py` (nest-by-factor, divide-by-gcd,
+factor-remainder, vmin/vmax folding) would not fold it. tinygrad AVOIDS it structurally: it
+keeps the window position as a SEPARATE N-D reduce axis (never forms `spatial_lo +
+stride*spatial_hi`), so its conv kernels are affine + `acc0[12]`-vectorized. The fix is to
+keep spatial dims N-D through the rangeify `_pool`/window lowering (a movement-chain
+composition that preserves separate strided axes instead of flatten+decode) -- a structural
+rangeify change, correctness-critical, NARROW benefit (default WINS CPU via BLAS; GPU
+faithful is competitive; only faithful-CPU is slow), on an already-MET goal. A separately
+useful but infra-blocked item: thvm has NO uop vmin/vmax bounds tracking, so porting
+tinygrad's bounds-based div/mod rules needs a bounds-inference pass built first.
+
+### DE-RISKING REFRAME (2026-06-01, later same session): the fix is SYMBOLIC completion, not a rangeify rewrite
+
+Read tinygrad's actual rangeify (`schedule/indexing.py`). `_apply_reshape` (line 112-125)
+does the SAME flatten+decode thvm does -- `combined_axes = usum(acc_k*src_k)` then
+`combined_axes % s` / `//= s` (IDIV/IMOD) -- and `remove_movement_op_after_rangeify`
+(line 98) just deletes the movement node post-rangeify. The affine conv kernels come from
+line 124-125, quoted verbatim: *"this simplify is doing a lot of heavy lifting. this is the
+replacement for the reshape view merging code"* -- `graph_rewrite(sink, symbolic +
+pm_simplify_valid + pm_drop_and_clauses)`. So tinygrad ALSO emits the flatten/decode +
+valid masks, then COLLAPSES them symbolically. The faithful-CPU fix is therefore SYMBOLIC
+COMPLETION (value-preserving, parity-gated, the same pattern as the landed recombine port),
+NOT the high-risk N-D rangeify restructure the prior note feared. Concrete missing pieces
+vs thvm (all in `tinygrad/uop/`): (1) a uop `vmin`/`vmax` bounds-inference pass (thvm has
+NONE -- the prerequisite); (2) `pm_simplify_valid` (collapse `cond ? X : INVALID` using
+bounds); (3) `pm_drop_and_clauses` (drop redundant AND clauses in the compound valid
+masks -- the giant `& & &` chains); (4) `divandmod.py` bounds-based folding
+(nest-by-factor / divide-by-gcd / factor-remainder / vmin-vmax). Build order: (1) first
+(infra, unit-testable in isolation), then (2)-(4) build on it. Still narrow-benefit on a
+met goal, but LOWER-risk + DEFINED + the vmin/vmax pass is broadly useful spec
+infrastructure (tinygrad uses bounds pervasively), so it advances "everything per tinygrad
+spec" beyond just faithful-CPU. Supersedes the "N-D-preserving rangeify change" framing
+above.
+
+**State of v3 after this session:** achievable compiler goals MET (wins warm wall on
+CPU/CUDA/Metal in default mode; faithful kernel count within 9% of tinygrad; numerically
+correct). Landed this session: honest `sched_kernels` probe (ea2f6ff6), realize.c
+transient-comment trim (d3317049), full `fold_add_divmod_recombine` port (4febd18e), plus
+five plan corrections + one stale-memory correction. Every REMAINING lever is large infra
+for narrow benefit on a met goal: (1) N-D-preserving rangeify window lowering (faithful-CPU
+speed); (2) uop vmin/vmax bounds pass + fuller symbolic div/mod; (3) step-global buffer
+planning (memory; faithful already near-optimal, default is an intentional tradeoff) +
+JIT-redundancy (shared multi-pass-realize root); (4) M4 GPU opt-section (mask-UPCAST /
+THREAD / multi-reduce-TC, GPU-gated). The next deliberate arc, per the "faithful must be
+fast" steer, is (1); it warrants a focused effort given its blast radius (every conv, every
+backend) and the parity-correctness risk.
+
 **M3 scoped to the exact code (2026-06-01 tick 4):** the IDIV/IMOD source is
 `ru_compose_one_view` (`rangeify_unified.c:1295-1321`): it composes EACH view in
 `TENS[tid].prior_views[]` by flatten-then-decompose (`coord_d = (cur/suffix[d]) %

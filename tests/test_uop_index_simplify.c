@@ -355,6 +355,168 @@ int main(void) {
   Term guarded = uop_iwhere(axis_ok, load, uop_invalid());
   CHECK_EQ(guarded, load);
 
+  // === uop_int_bounds: conservative [lo, hi] interval inference =========
+  // The primitive is NOT wired into any rule; these tests pin its exact
+  // contract on the canonical shapes a later increment will consume.
+  {
+    i64 blo, bhi;
+
+    TEST_BEGIN("bounds/const");
+    Term c7 = uop_const(DT_INT32, 7);
+    CHECK_EQ(uop_int_bounds(c7, &blo, &bhi), 1);
+    CHECK_EQ(blo, 7);
+    CHECK_EQ(bhi, 7);
+
+    TEST_BEGIN("bounds/negative-const");
+    Term cneg = uop_const(DT_INT32, (u32)(i32)-5);
+    CHECK_EQ(uop_int_bounds(cneg, &blo, &bhi), 1);
+    CHECK_EQ(blo, -5);
+    CHECK_EQ(bhi, -5);
+
+    TEST_BEGIN("bounds/range");
+    // r0 has extent 4 -> iter in [0, 3].
+    Term r0 = uop_range(300, KAX_LOOP, 4);
+    CHECK_EQ(uop_int_bounds(r0, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 3);
+
+    TEST_BEGIN("bounds/add");
+    // r0 in [0,3], r1 in [0,9] -> sum in [0, 12].
+    Term r1 = uop_range(301, KAX_LOOP, 10);
+    Term add01 = uop_int_binary(UOP_IADD, r0, r1);
+    CHECK_EQ(uop_int_bounds(add01, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 12);
+
+    TEST_BEGIN("bounds/sub");
+    // r0 in [0,3], r1 in [0,9] -> r0 - r1 in [0-9, 3-0] = [-9, 3].
+    Term sub01 = uop_int_binary(UOP_ISUB, r0, r1);
+    CHECK_EQ(uop_int_bounds(sub01, &blo, &bhi), 1);
+    CHECK_EQ(blo, -9);
+    CHECK_EQ(bhi, 3);
+
+    TEST_BEGIN("bounds/mul-positive-const");
+    // 10 * r0, r0 in [0,3] -> [0, 30].
+    Term mul10 = uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, 10));
+    CHECK_EQ(uop_int_bounds(mul10, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 30);
+
+    TEST_BEGIN("bounds/mul-negative-const-swaps");
+    // (-3) * r0, r0 in [0,3] -> [-9, 0] (endpoints swap for c < 0).
+    Term mulneg = uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, (u32)(i32)-3));
+    CHECK_EQ(uop_int_bounds(mulneg, &blo, &bhi), 1);
+    CHECK_EQ(blo, -9);
+    CHECK_EQ(bhi, 0);
+
+    TEST_BEGIN("bounds/mul-two-vars-corners");
+    // (r0 - 2) * (r1 - 4): a in [-2, 1], b in [-4, 5].
+    // corners: -2*-4=8, -2*5=-10, 1*-4=-4, 1*5=5 -> [-10, 8].
+    Term a_off = uop_int_binary(UOP_ISUB, r0, uop_const(DT_INT32, 2));
+    Term b_off = uop_int_binary(UOP_ISUB, r1, uop_const(DT_INT32, 4));
+    Term mul_vv = uop_int_binary(UOP_IMUL, a_off, b_off);
+    CHECK_EQ(uop_int_bounds(mul_vv, &blo, &bhi), 1);
+    CHECK_EQ(blo, -10);
+    CHECK_EQ(bhi, 8);
+
+    TEST_BEGIN("bounds/idiv-positive-const");
+    // r1 in [0,9], r1 / 3 -> [0, 3].
+    Term div3 = uop_int_binary(UOP_IDIV, r1, uop_const(DT_INT32, 3));
+    CHECK_EQ(uop_int_bounds(div3, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 3);
+
+    TEST_BEGIN("bounds/idiv-possibly-negative-numerator-unknown");
+    // (r0 - 5) / 3: the numerator can be negative (r0 < 5), where thvm's
+    // C-truncated `/` disagrees with floor, so a bound would be unsound.
+    // The estimator returns 0 (unknown) for a possibly-negative IDIV
+    // numerator (index exprs are non-negative; this only loses synthetic
+    // negatives).
+    Term neg_num = uop_int_binary(UOP_ISUB, r0, uop_const(DT_INT32, 5));
+    Term div_neg = uop_int_binary(UOP_IDIV, neg_num, uop_const(DT_INT32, 3));
+    CHECK_EQ(uop_int_bounds(div_neg, &blo, &bhi), 0);
+
+    TEST_BEGIN("bounds/imod-conservative");
+    // r1 in [0,9], r1 % 4: numerator can exceed 4 (9 >= 4), so the safe
+    // conservative bound [0, c-1] = [0, 3] applies.
+    Term mod4 = uop_int_binary(UOP_IMOD, r1, uop_const(DT_INT32, 4));
+    CHECK_EQ(uop_int_bounds(mod4, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 3);
+
+    TEST_BEGIN("bounds/imod-tightened-when-numerator-below-modulus");
+    // r0 in [0,3], r0 % 5: numerator provably < 5, so x % 5 == x and the
+    // bound tightens to [0, 3].
+    Term mod5 = uop_int_binary(UOP_IMOD, r0, uop_const(DT_INT32, 5));
+    CHECK_EQ(uop_int_bounds(mod5, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 3);
+
+    TEST_BEGIN("bounds/where-union");
+    // select(cond, r0, r1+100): branches [0,3] and [100,109] -> [0, 109].
+    Term r1_100 = uop_int_binary(UOP_IADD, r1, uop_const(DT_INT32, 100));
+    Term cmp = uop_int_binary(UOP_ILT, r0, r1);
+    Term sel = uop_iwhere(cmp, r0, r1_100);
+    CHECK_EQ(uop_int_bounds(sel, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 109);
+
+    TEST_BEGIN("bounds/where-invalid-branch-skipped");
+    // select(cond, r1, INVALID): the INVALID else-branch is a masking
+    // sentinel; the bound is just the live branch r1 -> [0, 9].
+    Term sel_inv = uop_iwhere(cmp, r1, uop_invalid());
+    CHECK_EQ(uop_int_bounds(sel_inv, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 9);
+
+    TEST_BEGIN("bounds/cmplt-boolean");
+    // r0 < r1 -> boolean [0, 1].
+    CHECK_EQ(uop_int_bounds(cmp, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 1);
+
+    TEST_BEGIN("bounds/iand-boolean");
+    // (r0 < r1) & (r1 < r0) -> both boolean -> [0, 1].
+    Term cmp2 = uop_int_binary(UOP_ILT, r1, r0);
+    Term and_bb = uop_int_binary(UOP_IAND, cmp, cmp2);
+    CHECK_EQ(uop_int_bounds(and_bb, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 1);
+
+    TEST_BEGIN("bounds/nested-pack-r0x10-plus-r1");
+    // (r0*10 + r1), r0 in [0,3], r1 in [0,9] -> [0, 39].
+    Term packed = uop_int_binary(UOP_IADD,
+                    uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, 10)), r1);
+    CHECK_EQ(uop_int_bounds(packed, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 39);
+
+    TEST_BEGIN("bounds/nested-pack-div11");
+    // (r0*10 + r1) / 11, numerator in [0, 39] -> [0, 3].
+    Term packed_div = uop_int_binary(UOP_IDIV, packed, uop_const(DT_INT32, 11));
+    CHECK_EQ(uop_int_bounds(packed_div, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 3);
+
+    TEST_BEGIN("bounds/nested-pack-mod11");
+    // (r0*10 + r1) % 11, numerator in [0, 39] (>= 11) -> [0, 10].
+    Term packed_mod = uop_int_binary(UOP_IMOD, packed, uop_const(DT_INT32, 11));
+    CHECK_EQ(uop_int_bounds(packed_mod, &blo, &bhi), 1);
+    CHECK_EQ(blo, 0);
+    CHECK_EQ(bhi, 10);
+
+    TEST_BEGIN("bounds/unknown-buffer-returns-zero");
+    // A bare BUFFER is not an int index expr -> no info.
+    u32 dims[1] = { 16 };
+    Term buf = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims);
+    CHECK_EQ(uop_int_bounds(buf, &blo, &bhi), 0);
+
+    TEST_BEGIN("bounds/idiv-non-const-divisor-returns-zero");
+    // r1 / r0 -- divisor not a positive const -> unknown.
+    Term div_var = uop_int_binary(UOP_IDIV, r1, r0);
+    CHECK_EQ(uop_int_bounds(div_var, &blo, &bhi), 0);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
