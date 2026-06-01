@@ -4640,6 +4640,11 @@ fn u32  atp_occurrence_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
 fn u32  atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
                             u32 n_labels, u32 *prec);
 
+// Vampire `sp=reverse_frequency`: common symbols outrank rare ones,
+// inverse of atp_occurrence_precedence.  See src/atp/precedence.c.
+fn u32  atp_reverse_frequency_precedence(const Term *lhs, const Term *rhs,
+                                         u32 n_eqns, u32 n_labels, u32 *prec);
+
 // 8.10b: top-K peek into the CP queue.  Reuses the existing
 // INC-priority + collapse_ordered pipeline from
 // `thvm_atp_select_cp` but does NOT pop -- the queue is left

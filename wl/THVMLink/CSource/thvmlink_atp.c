@@ -416,7 +416,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // auto_prec dispatch:
   //   0 = off (identity precedence, the default initialized above)
   //   1 = Waldmeister structural (atp_auto_precedence)
-  //   2 = Vampire `sp=occurrence` / E InvFreqRank (atp_occurrence_precedence)
+  //   2 = E/Vampire `sp=frequency` (atp_occurrence_precedence) --
+  //       rare > common.  Historical name "Occurrence" kept.
+  //   3 = Vampire `sp=reverse_frequency`
+  //       (atp_reverse_frequency_precedence) -- common > rare.  Most
+  //       common winning shape in tools/baselines/vampire_raw/ (122 wins).
   if (auto_prec != 0) {
     static Term ax_lhs[ATP_WL_CFG_MAX_LABELS];
     static Term ax_rhs[ATP_WL_CFG_MAX_LABELS];
@@ -426,7 +430,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       ax_lhs[i] = (Term)data[1 + 2 * i + 0];
       ax_rhs[i] = (Term)data[1 + 2 * i + 1];
     }
-    if (auto_prec == 2) {
+    if (auto_prec == 3) {
+      atp_reverse_frequency_precedence(ax_lhs, ax_rhs, n_ax_use,
+                                       (u32)max_label + 1, wl_precedence_p);
+    } else if (auto_prec == 2) {
       atp_occurrence_precedence(ax_lhs, ax_rhs, n_ax_use,
                                 (u32)max_label + 1, wl_precedence_p);
     } else {

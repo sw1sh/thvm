@@ -444,3 +444,65 @@ fn u32 atp_occurrence_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
   }
   return n_seen;
 }
+
+// Vampire `sp=reverse_frequency`: opposite direction of
+// atp_occurrence_precedence (which matches Vampire `sp=frequency` /
+// E InvFreqRank).  Common symbols outrank rare ones -- frequent
+// operators sit highest in the precedence, so they remain on the LHS
+// side of rules where the rewrite goes toward rarer-symbol RHSs.
+//
+// Empirically Vampire's most common winning precedence on UEQ targets
+// (122 wins in tools/baselines/vampire_raw/).  See docs/atp/vampire_port.md.
+fn u32 atp_reverse_frequency_precedence(const Term *lhs, const Term *rhs,
+                                        u32 n_eqns, u32 n_labels, u32 *prec) {
+  if (n_labels > WALD_MAX_SYMBOLS) n_labels = WALD_MAX_SYMBOLS;
+  u32 count[WALD_MAX_SYMBOLS];
+  for (u32 i = 0; i < n_labels; i++) { count[i] = 0; prec[i] = 0; }
+  Term stack[256];
+  for (u32 e = 0; e < n_eqns; e++) {
+    Term seeds[2] = { lhs[e], rhs[e] };
+    for (u32 s = 0; s < 2; s++) {
+      u32 sp = 0;
+      stack[sp++] = seeds[s];
+      while (sp > 0) {
+        Term t = stack[--sp];
+        if (term_tag(t) == TAG_CTR) {
+          u32 lab = term_ext(t);
+          if (lab < n_labels) count[lab]++;
+          u32 n = term_ctr_n(t);
+          for (u32 c = 0; c < n && sp < 256; c++) {
+            stack[sp++] = term_ctr_at(t, c);
+          }
+        }
+      }
+    }
+  }
+  u64 score[WALD_MAX_SYMBOLS];
+  u32 order[WALD_MAX_SYMBOLS];
+  u32 n_seen = 0;
+  for (u32 l = 0; l < n_labels; l++) {
+    if (count[l] == 0) continue;
+    score[n_seen] = ((u64)count[l] << 32) | (u64)l;
+    order[n_seen] = l;
+    n_seen++;
+  }
+  for (u32 i = 1; i < n_seen; i++) {
+    u64 sk = score[i];
+    u32 ok = order[i];
+    u32 j = i;
+    while (j > 0 && score[j - 1] > sk) {
+      score[j] = score[j - 1];
+      order[j] = order[j - 1];
+      j--;
+    }
+    score[j] = sk;
+    order[j] = ok;
+  }
+  // Ascending score order -> assign ranks 1..N (rarest = rank 1,
+  // most common = rank N).  Result: common symbols outrank rare ones,
+  // inverse of atp_occurrence_precedence.
+  for (u32 i = 0; i < n_seen; i++) {
+    prec[order[i]] = i + 1u;
+  }
+  return n_seen;
+}

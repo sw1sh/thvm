@@ -2481,6 +2481,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
         ap = Switch[Lookup[o, "AutoPrecedence", Automatic],
             True, 1,
             "Occurrence", 2,
+            "ReverseFrequency", 3,
             False | Automatic, 0,
             _, 0];
         {cw, ord, ap, mnf, atpMaxWeightOpt[o], atpGoalInterleaveOpt[o],
