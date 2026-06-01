@@ -246,6 +246,293 @@ static u64 atp_ac_hash(Term t, const AtpAcInfo *ac) {
   return atp_term_struct_hash(atp_ac_canon(t, ac));
 }
 
+// --- AC matching ---------------------------------------------------
+//
+// `atp_match_ac(pattern, subject, ac, subst)` is `thvm_match` lifted
+// to AC: a one-way match that accepts ANY permutation of AC-symbol
+// children as a valid alignment.  Returns 1 on success with the
+// substitution recorded in `*subst`; 0 on failure.  Caller must
+// zero-init `subst` before the first call (or use a freshly cleared
+// one) -- on partial-match failure we DO NOT roll back bindings the
+// caller had pre-installed; we may add bindings before failing.
+// Callers that want clean rollback save subst state externally.
+//
+// Algorithm (simplified, suitable for unit-AC rules):
+//
+//   1. If the pattern's top is NOT an AC label, fall through to the
+//      standard syntactic match.  (The match still has to descend
+//      into AC subterms recursively -- handled here too.)
+//   2. If the pattern's top IS an AC label, the subject must also
+//      be CTR with the same label; AC-flatten both into leaf
+//      multisets `P[]` (size `np`) and `S[]` (size `ns`).  Fail if
+//      `np > ns`.
+//   3. Sort P into four kinds (ground / non-trivial CTR / bound
+//      var / unbound var).  Greedy assignment:
+//        - For each ground leaf, find an unused subject leaf with
+//          which `kbo_eq` holds.  Fail if none.
+//        - For each non-trivial-CTR leaf, find an unused subject
+//          leaf where atp_match_ac succeeds (recursive).  Fail if
+//          none.  Backtracking left to a future stage; greedy here.
+//        - For each bound var, find an unused subject leaf with
+//          `kbo_eq` against the binding.
+//   4. Distribute remaining subject leaves over the unbound vars:
+//        - 0 unbound vars + 0 leaves left: succeed.
+//        - 0 unbound vars + N leaves left: fail.
+//        - 1 unbound var: bind to (a) the single remaining leaf,
+//          or (b) an AC-rebuilt right-assoc chain of the leaves.
+//        - >1 unbound var: bail conservatively (return 0).
+//          (The full multi-var partition algorithm is a future arc.)
+//
+// Coverage at this stage:
+//   * `f(x, e) → x`            -- e ground, x unbound var.  Works.
+//   * `f(x, x) → x`            -- both leaves are the same var;
+//                                 first sighting binds, second checks
+//                                 consistency.  Works for any
+//                                 subject `f(a, a)`.
+//   * `f(x, y, z) → ...`       -- one var per leaf, direct match.
+//   * `f(x, f(y, z)) → ...`    -- canonicalize to flat `f(x, y, z)`
+//                                 first, then match.  Caller is
+//                                 responsible for invoking on
+//                                 canonicalized pattern -- or use
+//                                 atp_match_ac which flattens.
+//
+// Not yet covered:
+//   * `f(x, y) → ...`          against subject `f(a, b, c)` with
+//                                 unbound x and y -- two vars,
+//                                 multiple leaves; partition
+//                                 enumeration deferred.
+//   * Backtracking when a greedy non-trivial-CTR match consumes
+//     a leaf that should have gone to a var.  Conservative fail.
+
+// Forward decl from rewrite/_.c.
+fn u8 thvm_match(Term pattern, Term term, RewriteSubst *subst);
+
+// Build a right-associative chain of `label` over `leaves[0..n)`.
+// Caller guarantees n >= 1.  Used to bind a single AC-var to a
+// multi-leaf remainder.
+static Term atp_ac_chain_from(u32 label, const Term *leaves, u32 n) {
+  return atp_ac_build_chain(label, leaves, n);
+}
+
+static u8 atp_match_ac(Term pattern, Term subject,
+                       const AtpAcInfo *ac, RewriteSubst *subst);
+
+// AC-flat-vs-flat match: pattern leaves P[] vs subject leaves S[],
+// both already AC-flattened under the same AC label `label`.  Handles
+// ground / bound-var / CTR-with-vars / unbound-var pattern leaves.
+//
+// Algorithm:
+//   1. Identify each distinct unbound var with its multiplicity (count
+//      of P leaves equal to FVR(vid)).  Cap at MAX_AC_UNBOUND_VARS;
+//      more than that bails conservatively.
+//   2. Pass 1: match every NON-unbound-var pattern leaf greedily
+//      against an unused subject leaf via kbo_eq (ground / bound-var
+//      / NUM) or atp_match_ac (recursive CTR).
+//   3. Pass 2: handle the unbound vars.
+//        - n_unbound == 0: leftover subject leaves must be 0.
+//        - n_unbound == 1 with multiplicity 1: bind to single leftover
+//          (1 leaf) or AC chain over leftovers (>1 leaves).
+//        - n_unbound == 1 with multiplicity m > 1: leftover must be
+//          exactly m copies of one value X; bind to X.
+//        - n_unbound > 1: pair-up.  Requires sum-of-multiplicities ==
+//          leftover.count; greedy bind (mult 1 vars take 1 leaf each;
+//          mult m > 1 takes m kbo_eq copies).  Bails when the structure
+//          can't be satisfied greedily (a full partition enumerator is
+//          a future stage).
+#define ATPFT_AC_MAX_UNBOUND 8u
+
+static u8 atp_match_ac_flat(u32 label,
+                            const Term *P, u32 np,
+                            Term *S, u32 ns,
+                            const AtpAcInfo *ac, RewriteSubst *subst) {
+  if (np > ns) return 0;
+  if (ns > ATP_AC_FLATTEN_CAP) return 0;
+
+  // Identify each distinct unbound var + its multiplicity.
+  u32 ub_vid [ATPFT_AC_MAX_UNBOUND];
+  u32 ub_mult[ATPFT_AC_MAX_UNBOUND];
+  u32 n_ub = 0u;
+  for (u32 i = 0; i < np; i++) {
+    Term p = P[i];
+    if (term_tag(p) != TAG_FVR) continue;
+    u32 vid = term_ext(p);
+    if (vid >= REWRITE_MAX_VAR) return 0;
+    if (subst->bindings[vid] != 0) continue;
+    // unbound
+    u32 k = 0u;
+    while (k < n_ub && ub_vid[k] != vid) k++;
+    if (k < n_ub) {
+      ub_mult[k] += 1u;
+    } else if (n_ub < ATPFT_AC_MAX_UNBOUND) {
+      ub_vid [n_ub] = vid;
+      ub_mult[n_ub] = 1u;
+      n_ub += 1u;
+    } else {
+      return 0;            // too many distinct unbound vars
+    }
+  }
+
+  // Pass 1: every NON-unbound-var pattern leaf consumes a subject leaf.
+  u8 used[ATP_AC_FLATTEN_CAP] = {0};
+  for (u32 i = 0; i < np; i++) {
+    Term p = P[i];
+    if (term_tag(p) == TAG_FVR) {
+      u32 vid = term_ext(p);
+      if (subst->bindings[vid] == 0) continue;   // unbound, deferred
+      // Bound var: kbo_eq against binding.
+      Term bound = subst->bindings[vid];
+      u8 matched = 0u;
+      for (u32 j = 0; j < ns; j++) {
+        if (used[j]) continue;
+        if (kbo_eq(S[j], bound)) {
+          used[j] = 1u;
+          matched = 1u;
+          break;
+        }
+      }
+      if (!matched) return 0;
+    } else if (term_tag(p) == TAG_CTR) {
+      u8 matched = 0u;
+      for (u32 j = 0; j < ns; j++) {
+        if (used[j]) continue;
+        if (atp_match_ac(p, S[j], ac, subst)) {
+          used[j] = 1u;
+          matched = 1u;
+          break;
+        }
+      }
+      if (!matched) return 0;
+    } else {
+      u8 matched = 0u;
+      for (u32 j = 0; j < ns; j++) {
+        if (used[j]) continue;
+        if (kbo_eq(S[j], p)) {
+          used[j] = 1u;
+          matched = 1u;
+          break;
+        }
+      }
+      if (!matched) return 0;
+    }
+  }
+
+  // Pass 2: leftover subj distribution over unbound vars.
+  Term left_buf[ATP_AC_FLATTEN_CAP];
+  u32 leftover = 0u;
+  for (u32 j = 0; j < ns; j++) {
+    if (!used[j]) left_buf[leftover++] = S[j];
+  }
+
+  if (n_ub == 0u) {
+    return leftover == 0u ? 1u : 0u;
+  }
+
+  if (n_ub == 1u) {
+    u32 m = ub_mult[0];
+    if (leftover < m) return 0;
+    if (m == 1u) {
+      // Single unbound var; single or chain binding.
+      Term binding = (leftover == 1u)
+                       ? left_buf[0]
+                       : atp_ac_chain_from(label, left_buf, leftover);
+      subst->bindings[ub_vid[0]] = binding;
+      return 1u;
+    }
+    // Multiplicity > 1: leftover must be exactly m copies of one value.
+    if (leftover != m) return 0;
+    Term candidate = left_buf[0];
+    for (u32 j = 1; j < leftover; j++) {
+      if (!kbo_eq(left_buf[j], candidate)) return 0;
+    }
+    subst->bindings[ub_vid[0]] = candidate;
+    return 1u;
+  }
+
+  // n_ub >= 2.  Greedy pair-up: requires sum-of-multiplicities ==
+  // leftover.count.  Otherwise the assignment is ambiguous and a
+  // full partition enumerator is needed (future stage).
+  u32 total_slots = 0u;
+  for (u32 k = 0; k < n_ub; k++) total_slots += ub_mult[k];
+  if (total_slots != leftover) return 0;
+
+  // For each unbound var in declaration order, consume `ub_mult[k]`
+  // copies of the first available leftover value.
+  u8 used2[ATP_AC_FLATTEN_CAP] = {0};
+  for (u32 k = 0; k < n_ub; k++) {
+    u32 m = ub_mult[k];
+    // Find the first unused leftover leaf as the binding candidate.
+    u32 base = (u32)-1;
+    for (u32 j = 0; j < leftover; j++) {
+      if (!used2[j]) { base = j; break; }
+    }
+    if (base == (u32)-1) return 0;
+    Term candidate = left_buf[base];
+    used2[base] = 1u;
+    // Consume m-1 more copies of `candidate`.
+    u32 need = m - 1u;
+    for (u32 j = base + 1u; need > 0u && j < leftover; j++) {
+      if (used2[j]) continue;
+      if (kbo_eq(left_buf[j], candidate)) {
+        used2[j] = 1u;
+        need -= 1u;
+      }
+    }
+    if (need > 0u) return 0;
+    subst->bindings[ub_vid[k]] = candidate;
+  }
+  return 1u;
+}
+
+fn u8 atp_match_ac(Term pattern, Term subject,
+                   const AtpAcInfo *ac, RewriteSubst *subst) {
+  // Fast path: pattern is a var -- standard thvm_match handling
+  // (bind on first sighting / kbo_eq on second).
+  if (term_tag(pattern) == TAG_FVR) {
+    u32 id = term_ext(pattern);
+    if (id >= REWRITE_MAX_VAR) return 0;
+    if (subst->bindings[id] == 0) {
+      subst->bindings[id] = subject;
+      return 1;
+    }
+    return kbo_eq(subst->bindings[id], subject);
+  }
+
+  // Pattern is not a CTR? (NUM etc.) Use kbo_eq.
+  if (term_tag(pattern) != TAG_CTR) {
+    return kbo_eq(pattern, subject) ? 1u : 0u;
+  }
+
+  // Pattern is CTR.  Subject must also be CTR.
+  if (term_tag(subject) != TAG_CTR) return 0;
+  if (term_ext(pattern) != term_ext(subject)) return 0;
+
+  u32 lab = term_ext(pattern);
+  if (atp_ac_is_ac_label(ac, lab)) {
+    // AC top: flatten both sides and do AC-flat match.
+    Term P[ATP_AC_FLATTEN_CAP];
+    Term S[ATP_AC_FLATTEN_CAP];
+    u32  np = 0u, ns = 0u;
+    if (!atp_ac_flatten_under(pattern, lab, P, &np, ATP_AC_FLATTEN_CAP))
+      return 0;
+    if (!atp_ac_flatten_under(subject, lab, S, &ns, ATP_AC_FLATTEN_CAP))
+      return 0;
+    return atp_match_ac_flat(lab, P, np, S, ns, ac, subst);
+  }
+
+  // Non-AC CTR: same-arity recursive match.
+  u32 np = term_ctr_n(pattern);
+  u32 ns = term_ctr_n(subject);
+  if (np != ns) return 0;
+  for (u32 i = 0; i < np; i++) {
+    if (!atp_match_ac(term_ctr_at(pattern, i),
+                      term_ctr_at(subject, i),
+                      ac, subst)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 // --- Engine-global AcInfo + setters --------------------------------
 //
 // One file-static `g_atp_ac_info` carries the AC bit-mask used by

@@ -277,7 +277,139 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);       // clean up for any later test
   }
 
-  // -- T13: AC mask wires into atp_cp_trivially_joinable ----------------
+  // -- T13: AC-match accepts AC permutation of subject ------------------
+  TEST_BEGIN("ac/match-ac-permutation");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0), y = v(1);
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    // pat = f(x, y)   subj = f(b, a)
+    Term pat  = bin(LAB_F, x, y);
+    Term subj = bin(LAB_F, b, a);
+
+    RewriteSubst subst = {{0}};
+    CHECK(atp_match_ac(pat, subj, &ac, &subst));
+    // x or y bound to a, the other to b (greedy order: x first).
+    CHECK(subst.bindings[0] != 0);
+    CHECK(subst.bindings[1] != 0);
+    // Bindings cover {a, b} as a multiset.
+    u8 cov_a = kbo_eq(subst.bindings[0], a) || kbo_eq(subst.bindings[1], a);
+    u8 cov_b = kbo_eq(subst.bindings[0], b) || kbo_eq(subst.bindings[1], b);
+    CHECK(cov_a && cov_b);
+  }
+
+  // -- T14: AC-match handles unit elimination shape ----------------------
+  //
+  // Pattern  f(x, e)  with e = LAB_A treated as a ground constant.
+  // Subject  f(b, a)  matches with x bound to b.
+  TEST_BEGIN("ac/match-unit-elim");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0);
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    Term pat  = bin(LAB_F, x, a);       // f(x, a) with `a` ground
+    Term subj = bin(LAB_F, b, a);       // f(b, a)
+
+    RewriteSubst subst = {{0}};
+    CHECK(atp_match_ac(pat, subj, &ac, &subst));
+    CHECK(kbo_eq(subst.bindings[0], b));   // x = b
+  }
+
+  // -- T15: AC-match handles repeated-var pattern (idempotence) ----------
+  TEST_BEGIN("ac/match-idempotence");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0);
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    Term pat  = bin(LAB_F, x, x);
+
+    // subj f(a, a) -- matches, x = a.
+    Term s1 = bin(LAB_F, a, a);
+    RewriteSubst subst1 = {{0}};
+    CHECK(atp_match_ac(pat, s1, &ac, &subst1));
+    CHECK(kbo_eq(subst1.bindings[0], a));
+
+    // subj f(a, b) -- doesn't match (a != b).
+    Term s2 = bin(LAB_F, a, b);
+    RewriteSubst subst2 = {{0}};
+    CHECK(!atp_match_ac(pat, s2, &ac, &subst2));
+  }
+
+  // -- T16: AC-match binds the var to a chain when leftovers > 1 ---------
+  //
+  // Pattern  f(x, a)  matched against subject  f(a, b, c) -- AC-flat
+  // subject is multiset {a, b, c}.  Pattern's `a` consumes one `a`;
+  // remaining {b, c} bound to x as f(b, c) (or hash-sorted).
+  TEST_BEGIN("ac/match-leftover-chain");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0);
+    Term a = k(LAB_A), b = k(LAB_B), c = k(LAB_C);
+
+    Term pat  = bin(LAB_F, x, a);                  // f(x, a)
+    Term subj = bin(LAB_F, a, bin(LAB_F, b, c));   // f(a, f(b, c))
+                                                   // AC-flat = {a, b, c}
+
+    RewriteSubst subst = {{0}};
+    CHECK(atp_match_ac(pat, subj, &ac, &subst));
+    // x should be bound to f(b, c) -- a 2-leaf AC chain.
+    Term xb = subst.bindings[0];
+    CHECK(term_tag(xb) == TAG_CTR);
+    CHECK(term_ext(xb) == LAB_F);
+    // The chain's leaves are {b, c}.
+    Term lv[8];
+    u32 n = 0u;
+    CHECK(atp_ac_flatten(xb, &ac, lv, &n, 8));
+    CHECK_EQ(n, 2u);
+    u8 has_b = kbo_eq(lv[0], b) || kbo_eq(lv[1], b);
+    u8 has_c = kbo_eq(lv[0], c) || kbo_eq(lv[1], c);
+    CHECK(has_b && has_c);
+  }
+
+  // -- T17: AC-match fails on count mismatch + multi-unbound-var bail ----
+  TEST_BEGIN("ac/match-bail-shapes");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0), y = v(1);
+    Term a = k(LAB_A), b = k(LAB_B), c = k(LAB_C);
+
+    // np > ns -- pattern has 3 leaves, subject has 2.
+    Term pat3 = bin(LAB_F, x, bin(LAB_F, a, b));     // f(x, a, b)
+    Term sub2 = bin(LAB_F, a, b);                    // f(a, b)
+    RewriteSubst s1 = {{0}};
+    CHECK(!atp_match_ac(pat3, sub2, &ac, &s1));
+
+    // Multi-unbound-var -- two unbound vars + extra subj leaves =>
+    // partition needed, we bail conservatively.
+    Term pat_xy  = bin(LAB_F, x, y);
+    Term sub3    = bin(LAB_F, a, bin(LAB_F, b, c));  // 3 subj leaves
+    RewriteSubst s2 = {{0}};
+    CHECK(!atp_match_ac(pat_xy, sub3, &ac, &s2));    // bail
+  }
+
+  // -- T18: AC-match falls through to syntactic on non-AC top -----------
+  TEST_BEGIN("ac/match-non-ac-top");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };   // f is AC; g is not
+    Term x = v(0);
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    Term pat  = bin(LAB_G, x, a);          // g(x, a) - g not AC
+    Term s_ok = bin(LAB_G, b, a);          // g(b, a)
+    Term s_no = bin(LAB_G, a, b);          // g(a, b) -- 2nd arg differs
+
+    RewriteSubst sok = {{0}};
+    CHECK(atp_match_ac(pat, s_ok, &ac, &sok));
+    CHECK(kbo_eq(sok.bindings[0], b));
+
+    RewriteSubst sno = {{0}};
+    CHECK(!atp_match_ac(pat, s_no, &ac, &sno));     // syntactic fails
+  }
+
+  // -- T19: AC mask wires into atp_cp_trivially_joinable ----------------
   //
   // Tag two terms l = f(a, b), r = f(b, a) that are AC-equal under f.
   // Without the AC mask set, atp_cp_trivially_joinable should report
