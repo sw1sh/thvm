@@ -148,10 +148,12 @@ Today: KBO, LPO, RPO, WPO.  Open items:
   cross-resolution + paramodulation (BOTH orientations, every
   non-variable position via `cnf_walk_positions` reusing the
   CP_MAX_DEPTH bound from src/cp) + self-factoring + reflex-resolve
-  + eq-factoring + self-paramod, tautology + subsumption filters
-  on derived clauses.  No indexing yet (O(n^2) subsumption + CP
-  scans); the unit-equational layer's discrim-tree machinery can
-  lift in once a workload runs.
+  + eq-factoring + self-paramod, tautology + forward AND backward
+  subsumption filters on derived clauses.  Deferred-free queue keeps
+  mid-step inference loops safe when backward subsumption clobbers
+  clauses they captured at entry; queue drains at end-of-step.  No
+  indexing yet (O(n^2) subsumption + CP scans); the unit-equational
+  layer's discrim-tree machinery can lift in once a workload runs.
 
 The unit-equational saturator in `src/atp/_.c` is unchanged; FOL
 clauses live in a parallel module that callers opt into.

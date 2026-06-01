@@ -41,6 +41,12 @@ fn CnfState *cnf_init(u32 step_cap) {
     free(s->clauses); free(s->active); free(s->passive); free(s);
     return NULL;
   }
+  s->cap_deferred = CNF_DEFAULT_CAP;
+  s->deferred_free = (FolClause **)calloc(s->cap_deferred, sizeof(FolClause *));
+  if (s->deferred_free == NULL) {
+    free(s->clauses); free(s->active); free(s->passive); free(s);
+    return NULL;
+  }
   s->step_cap = (step_cap == 0u) ? 1u << 30 : step_cap;
   s->status = ATP_RUNNING;
   return s;
@@ -51,9 +57,14 @@ fn void cnf_free(CnfState *s) {
   for (u32 i = 0; i < s->n; i++) {
     if (s->clauses[i] != NULL) fol_clause_free(s->clauses[i]);
   }
+  // Drain any deferred frees still pending.
+  for (u32 i = 0; i < s->n_deferred; i++) {
+    if (s->deferred_free[i] != NULL) fol_clause_free(s->deferred_free[i]);
+  }
   free(s->clauses);
   free(s->active);
   free(s->passive);
+  free(s->deferred_free);
   free(s);
 }
 
@@ -104,6 +115,45 @@ static u8 cnf_is_subsumed(const CnfState *s, const FolClause *c) {
   return 0u;
 }
 
+// Backward subsumption: a freshly-added clause may subsume some
+// older active/passive ones, making them redundant.  We mark them
+// for removal by NULLing the slot in `clauses[]` immediately and
+// pushing the FolClause* to a deferred-free queue.  Concurrent
+// inference loops that captured a clause pointer at entry stay
+// safe; the actual `free` happens at end-of-step.
+static void cnf_backward_subsume(CnfState *s, u32 new_id) {
+  const FolClause *new_c = s->clauses[new_id];
+  if (new_c == NULL) return;
+  for (u32 i = 0; i < s->n; i++) {
+    if (i == new_id) continue;
+    FolClause *old = s->clauses[i];
+    if (old == NULL) continue;
+    if (fol_subsumes(new_c, old)) {
+      s->clauses[i] = NULL;
+      if (s->n_deferred >= s->cap_deferred) {
+        cnf_grow(&s->cap_deferred, (u8 **)&s->deferred_free, sizeof(FolClause *));
+      }
+      if (s->n_deferred < s->cap_deferred) {
+        s->deferred_free[s->n_deferred++] = old;
+      } else {
+        // Couldn't grow -- last resort, leak the clause (rather than
+        // free it and risk a dangling pointer).  cnf_free will sweep.
+        // Pin to clauses[] so it gets freed by cnf_free.
+        s->clauses[i] = old;
+      }
+    }
+  }
+}
+
+// Process the deferred-free queue.  Call at the END of cnf_step,
+// after every inference-loop frame has unwound.
+static void cnf_flush_deferred(CnfState *s) {
+  for (u32 i = 0; i < s->n_deferred; i++) {
+    fol_clause_free(s->deferred_free[i]);
+  }
+  s->n_deferred = 0u;
+}
+
 // Push a derived clause through the redundancy filters; consume on
 // success (state-owns), free on drop.
 static void cnf_consider(CnfState *s, FolClause *c) {
@@ -117,7 +167,10 @@ static void cnf_consider(CnfState *s, FolClause *c) {
   }
   if (fol_is_tautology(c)) { fol_clause_free(c); return; }
   if (cnf_is_subsumed(s, c)) { fol_clause_free(c); return; }
-  cnf_add_clause(s, c);
+  i32 new_id = cnf_add_clause(s, c);
+  if (new_id >= 0) {
+    cnf_backward_subsume(s, (u32)new_id);
+  }
 }
 
 // Generate all binary-resolution inferences between two clauses.
@@ -257,12 +310,18 @@ fn AtpStatus cnf_step(CnfState *s) {
     return s->status;
   }
 
-  // FIFO pop: find the lowest-index unprocessed passive id.
-  if (s->passive_head >= s->n_passive) {
+  // FIFO pop: find the lowest-index unprocessed passive id, skipping
+  // entries whose clauses[] was NULLed by backward subsumption.
+  u32 given_id = 0u;
+  u8 found = 0u;
+  while (s->passive_head < s->n_passive) {
+    u32 cand = s->passive[s->passive_head++];
+    if (s->clauses[cand] != NULL) { given_id = cand; found = 1u; break; }
+  }
+  if (!found) {
     s->status = ATP_QUEUE_EMPTY;
     return s->status;
   }
-  u32 given_id = s->passive[s->passive_head++];
 
   // Move given to active.
   if (s->n_active >= s->cap_active) {
@@ -289,11 +348,21 @@ fn AtpStatus cnf_step(CnfState *s) {
 
   // Cross-inferences with every other active clause.  Snapshot the
   // active count before the loop -- new clauses added during the
-  // step go straight to passive, not active.
+  // step go straight to passive, not active.  Skip slots whose
+  // clauses[] has been NULLed by backward subsumption.
   u32 active_snapshot = s->n_active;
+  if (s->clauses[given_id] == NULL) {
+    // Backward subsumption clobbered the given clause; skip its
+    // cross-inferences.  Continue stepping (another passive will
+    // pop next iteration).
+    s->step++;
+    cnf_flush_deferred(s);
+    return s->status;
+  }
   for (u32 k = 0; k + 1u < active_snapshot; k++) {
     u32 a_id = s->active[k];
     if (a_id == given_id) continue;
+    if (s->clauses[a_id] == NULL) continue;
     cnf_gen_resolution(s, given_id, a_id);
     if (s->status != ATP_RUNNING) return s->status;
     cnf_gen_resolution(s, a_id, given_id);   // symmetric face
@@ -307,6 +376,7 @@ fn AtpStatus cnf_step(CnfState *s) {
   }
 
   s->step++;
+  cnf_flush_deferred(s);
   return s->status;
 }
 

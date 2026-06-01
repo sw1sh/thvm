@@ -752,6 +752,39 @@ int main(void) {
     cnf_free(s);
   }
 
+  TEST_BEGIN("fol/sat-backward-subsumption");
+  {
+    // Setup that lets backward subsumption fire on a derived clause:
+    //   C1: ¬P(x) v Q(x)
+    //   C2: P(a) v P(b)            (two specific instances)
+    //   C3: ¬Q(a)
+    //   C4: ¬Q(b)
+    // Resolving C1+C2 (twice) gives Q(a) v P(b) and P(a) v Q(b).
+    // Resolving these against C3, C4 chains to empty -> PROVED.  The
+    // derived clauses' active set may grow large; backward subsumption
+    // keeps it bounded by pruning subsumed entries.  We assert
+    // PROVED -- specific subsumed-count tracking would need a stat
+    // counter that isn't shipped yet.
+    CnfState *s = cnf_init(256);
+    FolClause *c1 = fol_clause_new(2);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 1 };
+    c1->lits[1] = (FolLit){ .atom = pred1(P_Q, v(0)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(2);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    c2->lits[1] = (FolLit){ .atom = pred1(P_P, k(L_b)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_Q, k(L_a)), .sign = 1 };
+    FolClause *c4 = fol_clause_new(1);
+    c4->lits[0] = (FolLit){ .atom = pred1(P_Q, k(L_b)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    cnf_add_clause(s, c4);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
   TEST_BEGIN("fol/sat-paramod-with-unification");
   {
     // C1: (f(x) = a)        equality with variable

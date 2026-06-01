@@ -3312,6 +3312,14 @@ typedef struct {
   u32         n_passive;
   u32         cap_passive;
   u32         passive_head;   // FIFO dequeue index
+  // Deferred-free queue for backward subsumption: when a derived
+  // clause subsumes an older one, the slot in clauses[] is NULLed
+  // immediately but the FolClause* gets pushed here and freed at
+  // end-of-step.  Avoids dangling pointers in mid-step inference
+  // loops that captured the clause pointer at entry.
+  FolClause **deferred_free;
+  u32         n_deferred;
+  u32         cap_deferred;
   u32         step;
   u32         step_cap;
   AtpStatus   status;
