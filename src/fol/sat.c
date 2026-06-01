@@ -123,6 +123,21 @@ fn void cnf_set_kbo(CnfState *s, const KboConfig *kbo) { if (s) s->cnf_kbo = kbo
 fn void cnf_set_lpo(CnfState *s, const LpoConfig *lpo) { if (s) s->cnf_lpo = lpo; }
 fn void cnf_set_rpo(CnfState *s, const RpoConfig *rpo) { if (s) s->cnf_rpo = rpo; }
 fn void cnf_set_wpo(CnfState *s, const WpoConfig *wpo) { if (s) s->cnf_wpo = wpo; }
+fn void cnf_set_select(CnfState *s, CnfSelection sel) { if (s) s->cnf_select = sel; }
+
+// Pick a selected literal of `c` under the state's selection
+// policy.  Returns the literal index or ~0u when the policy says
+// "all literals allowed" (either NONE was set, or the policy found
+// no matching literal -- the all-literals fallback preserves
+// completeness for Horn-like clauses).
+static u32 cnf_select_lit(const CnfState *s, const FolClause *c) {
+  if (s == NULL || c == NULL || s->cnf_select == CNF_SELECT_NONE) return ~0u;
+  u8 want_sign = (s->cnf_select == CNF_SELECT_NEGATIVE) ? 1u : 0u;
+  for (u32 i = 0; i < c->n_lits; i++) {
+    if (c->lits[i].sign == want_sign) return i;
+  }
+  return ~0u;  // fallback: all literals
+}
 
 // Rewrite-once with optional ordering gate.  When the state has any
 // ordering attached, only fires if σ(s) > σ(t) at the match site
@@ -358,12 +373,19 @@ static void cnf_consider(CnfState *s, FolClause *c) {
 }
 
 // Generate all binary-resolution inferences between two clauses.
+// Under a selection function, only the selected literal of each
+// clause participates (with the all-literals fallback when the
+// policy finds no matching lit).
 static void cnf_gen_resolution(CnfState *s, u32 a_id, u32 b_id) {
   const FolClause *a = s->clauses[a_id];
   const FolClause *b = s->clauses[b_id];
   if (a == NULL || b == NULL) return;
+  u32 sel_a = cnf_select_lit(s, a);
+  u32 sel_b = cnf_select_lit(s, b);
   for (u32 i = 0; i < a->n_lits; i++) {
+    if (sel_a != ~0u && i != sel_a) continue;
     for (u32 j = 0; j < b->n_lits; j++) {
+      if (sel_b != ~0u && j != sel_b) continue;
       if (a->lits[i].sign == b->lits[j].sign) continue;  // need complementary
       FolClause *r = fol_resolve(a, i, b, j);
       cnf_consider(s, r);
@@ -443,15 +465,20 @@ static void cnf_paramod_at_pos(const u32 *p, u32 p_len, void *raw) {
 
 // All paramodulation results of eq_clause (as the source of an
 // equality literal) into target (any literal, any non-variable
-// position).
+// position).  Selection function applies to the TARGET literal --
+// paramod only fires into the selected literal when one is picked.
+// (The eq_clause's source-equality literal is unconstrained -- it
+// must be a positive equality regardless of selection.)
 static void cnf_gen_paramod(CnfState *s, u32 eq_id, u32 target_id) {
   const FolClause *eqc = s->clauses[eq_id];
   const FolClause *tgt = s->clauses[target_id];
   if (eqc == NULL || tgt == NULL) return;
+  u32 sel_t = cnf_select_lit(s, tgt);
   for (u32 i = 0; i < eqc->n_lits; i++) {
     if (eqc->lits[i].sign != 0u) continue;          // positive equalities only
     if (!fol_atom_is_eq(eqc->lits[i].atom)) continue;
     for (u32 j = 0; j < tgt->n_lits; j++) {
+      if (sel_t != ~0u && j != sel_t) continue;
       // Skip paramodulating an equality literal into itself when
       // eq_id == target_id and i == j (same literal in same clause).
       if (eq_id == target_id && i == j) continue;

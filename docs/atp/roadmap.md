@@ -225,10 +225,16 @@ Naïve (no σ(s) > σ(t) ordering check yet); the ordering-aware
 variant is a follow-up that plugs in a KboConfig / LpoConfig /
 RpoConfig / WpoConfig.
 
+Selection function lands in src/fol/sat.c: `CnfSelection` enum
+(NONE / NEGATIVE / POSITIVE) + `cnf_set_select(s, sel)` setter.
+When set, cnf_gen_resolution restricts both faces to their selected
+literal; cnf_gen_paramod restricts the TARGET face only (source
+must remain a positive equality regardless).  Falls back to "all
+literals" when the policy finds no matching lit -- preserves
+completeness for Horn-style inputs without the target polarity.
+
 Open follow-ups (efficiency / completeness):
 * Tseitin structural CNF for shallow clauses on deeply-nested ∨/∧.
-* Selection function in cnf_step (pick maximal literal to inference
-  on rather than try-everything).
 * Discrim-tree / FV-index for fast subsumption + CP queries.
 Ordering-aware demodulation lands: CnfState carries optional
 KboConfig / LpoConfig / RpoConfig / WpoConfig fields (set via

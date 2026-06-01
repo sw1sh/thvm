@@ -796,6 +796,73 @@ int main(void) {
     cnf_free(s);
   }
 
+  TEST_BEGIN("fol/sat-selection-negative-completes");
+  {
+    // Three-clause chain under CNF_SELECT_NEGATIVE.  Selection picks
+    // the negative literal in C2 (¬P(x)) and C3 (¬Q(a)); C1 = P(a)
+    // has no negative literal so falls back to "all literals" -- the
+    // positive P(a).  Saturation proceeds the same as the no-
+    // selection case for Horn-style clauses.
+    CnfState *s = cnf_init(128);
+    cnf_set_select(s, CNF_SELECT_NEGATIVE);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(2);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 1 };
+    c2->lits[1] = (FolLit){ .atom = pred1(P_Q, v(0)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_Q, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-selection-positive-completes");
+  {
+    // Same chain under CNF_SELECT_POSITIVE.
+    CnfState *s = cnf_init(128);
+    cnf_set_select(s, CNF_SELECT_POSITIVE);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(2);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, v(0)), .sign = 1 };
+    c2->lits[1] = (FolLit){ .atom = pred1(P_Q, v(0)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_Q, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-selection-falls-back-when-no-target-polarity");
+  {
+    // C1 = P(a) v Q(a)        (all positive)
+    // C2 = ¬P(a)               (one negative)
+    // Under NEGATIVE selection: C1 has no neg lit -> falls back to
+    // "all literals" -> P(a) and Q(a) both eligible.  Resolution
+    // P(a) + ¬P(a) gives Q(a).  No more inferences possible against
+    // ¬P(a) (already used), and Q(a) has no complement -> QUEUE_EMPTY
+    // (Q(a) survives as a non-refuted fact).
+    CnfState *s = cnf_init(128);
+    cnf_set_select(s, CNF_SELECT_NEGATIVE);
+    FolClause *c1 = fol_clause_new(2);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    c1->lits[1] = (FolLit){ .atom = pred1(P_Q, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_QUEUE_EMPTY);
+    cnf_free(s);
+  }
+
   TEST_BEGIN("fol/sat-backward-demod");
   {
     // Setup that requires BACKWARD demod (not just forward).

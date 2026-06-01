@@ -3311,6 +3311,18 @@ typedef enum {
 // cross-inferences with the prior active set + self-inferences,
 // then pushes derived clauses through tautology + subsumption
 // filters before queuing.  See src/fol/sat.c.
+// Selection-function policies for the saturation loop.  When set on
+// CnfState, cross-resolution / paramodulation only fire on a
+// clause's SELECTED literal, dramatically pruning the inference
+// space.  Falls back to "all literals" when the selected policy
+// finds no matching literal (preserves completeness in the trivial
+// sense for Horn-like clauses without the target polarity).
+typedef enum {
+  CNF_SELECT_NONE     = 0,   // try every literal (default behavior)
+  CNF_SELECT_NEGATIVE = 1,   // first negative literal, else all
+  CNF_SELECT_POSITIVE = 2,   // first positive literal, else all
+} CnfSelection;
+
 typedef struct {
   FolClause **clauses;
   u32         n;
@@ -3343,6 +3355,9 @@ typedef struct {
   const LpoConfig *cnf_lpo;
   const RpoConfig *cnf_rpo;
   const WpoConfig *cnf_wpo;
+  // Selection function: opt-in literal-pick policy.  Default
+  // CNF_SELECT_NONE = current "try every literal" behavior.
+  CnfSelection cnf_select;
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);
@@ -3360,6 +3375,10 @@ fn void      cnf_set_kbo     (CnfState *s, const KboConfig *kbo);
 fn void      cnf_set_lpo     (CnfState *s, const LpoConfig *lpo);
 fn void      cnf_set_rpo     (CnfState *s, const RpoConfig *rpo);
 fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
+
+// Attach a selection function (default NONE).  Affects which literal
+// of a clause is allowed to participate in resolution + paramodulation.
+fn void      cnf_set_select  (CnfState *s, CnfSelection sel);
 
 // === FOL formula -> CNF pipeline ====================================
 // Formulas are Term trees with reserved CTR labels for connectives.
