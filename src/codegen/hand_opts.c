@@ -217,6 +217,49 @@ static int hand_opt_kernel_on_gpu(KernelEntry const *ke) {
   return b != NULL && (b->id == 2 || b->id == 3);
 }
 
+// Returns 1 if the kernel runs on the CPU backend (backend id == 1).
+static int hand_opt_kernel_on_cpu(KernelEntry const *ke) {
+  Backend *b = NULL;
+  if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
+    b = TENS[ke->output_tid].backend;
+  }
+  if (b == NULL) b = DEFAULT_BACKEND;
+  return b != NULL && b->id == 1;
+}
+
+// Returns 1 iff the CPU dispatch ladder (cpu_blas_dispatch, blas.c) would
+// route this kernel through cBLAS / Accelerate from the BARE (un-OPT'd)
+// lifted DAG.  Applying a hand-coded UPCAST/UNROLL mutates the DAG so the
+// shape classifiers below stop recognising it -- losing the 10-100x BLAS
+// fast path -- so for these kernels we must keep returning 0 from
+// kernel_hand_coded_opts (no opts) on CPU.  Mirrors cpu_blas_dispatch's
+// exact try-ladder (blas.c:448-470): dot / gemv / gemm(matmul) /
+// contraction / im2col-contraction; plus the conv2d-flat structural gate
+// (tile.c:89) that propose.c routes through a BLAS-backed template.
+//
+// The fused conv2+maxpool reduce (the faithful-mode hot kernel) fails ALL
+// of these (the maxpool WHERE-mask poisons the clean contraction shape),
+// so it is NOT BLAS-eligible and falls through to UPCAST register-blocking
+// -- exactly the Lever-B target.  tinygrad runs hand_coded_optimizations
+// on every renderer including CPU (heuristic.py:8); only LOCAL/THREAD/DSP
+// sections are renderer-gated -- the UPCAST/UNROLL machinery always runs.
+static int hand_opt_cpu_blas_eligible(KernelEntry const *ke) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  Term root = ke->cached_lift.store_root;
+  UopDagDotShape         dot;
+  UopDagGemvShape        gemv;
+  UopDagGemmShape        gemm;
+  UopDagContractionShape contr;
+  UopDagIm2colShape      im2col;
+  if (uop_dag_classify_dot_shape (root, ke, &dot))   return 1;
+  if (uop_dag_classify_gemv_shape(root, ke, &gemv))  return 1;
+  if (uop_dag_classify_matmul_shape(root, ke, &gemm)) return 1;
+  if (uop_dag_classify_contraction_shape(root, ke, &contr)) return 1;
+  if (uop_dag_classify_im2col_contraction(root, ke, &im2col)) return 1;
+  if (uop_dag_classify_conv2d_flat_shape(root)) return 1;
+  return 0;
+}
+
 // Returns 1 if the kernel will run on CUDA (backend id == 3).  Used for
 // target-aware heuristic branching: nvrtc's C++ frontend is sensitive to
 // register pressure in ways Metal/MSL is not, so a few sections of the
@@ -414,7 +457,24 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // measurement (warm step is currently 130x naive baseline; the
   // remediation is to port tinygrad/renderer/ptx.py, not to narrow
   // the gate).
-  if (!hand_opt_kernel_on_gpu(ke)) return 0;
+  //
+  // CPU (Lever B): tinygrad runs hand_coded_optimizations on EVERY
+  // renderer including CPU (heuristic.py:8); only the LOCAL/THREAD/DSP
+  // sections are renderer-gated.  thvm previously suppressed ALL CPU opts
+  // because the CPU dispatch ladder routes matmul/gemv/dot/conv through
+  // cBLAS from the BARE DAG and an UPCAST mutates the DAG out of those
+  // shapes.  But a NON-BLAS-eligible reduce kernel (the fused conv2+
+  // maxpool faithful kernel) has no BLAS route to poison, so we let the
+  // UPCAST register-blocking run -- giving render_uop independent acc0[N]
+  // lanes that clang can vectorize.  BLAS-eligible CPU kernels stay bare.
+  int on_cpu = hand_opt_kernel_on_cpu(ke);
+  if (on_cpu) {
+    if (hand_opt_cpu_blas_eligible(ke)) return 0;   // keep cBLAS fast path
+    // else: fall through to the UPCAST/UNROLL sections (GPU-only
+    // sections below are individually skipped via `on_cpu`).
+  } else if (!hand_opt_kernel_on_gpu(ke)) {
+    return 0;
+  }
 
   u32 n_applied = 0;
   HandOptAxes ax;
@@ -424,8 +484,10 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // wrapped the matmul STORE in OPT(_, TC, 0); this is the explicit
   // record on the schedule path) + parallel-TC GLOBAL promote for any
   // 8-multiple output axis.  Tinygrad RETURNs after TC + M/N UPCAST;
-  // we mirror that.
-  {
+  // we mirror that.  CPU has no tensor cores (k.ren.tensor_cores empty);
+  // a CPU matmul would already be BLAS-eligible and returned above, so
+  // this is doubly unreachable on CPU -- gated explicitly for clarity.
+  if (!on_cpu) {
     u32 K = 0;
     if (hand_opt_classify_matmul(ke, &K)) {
       static const u32 tc_tiles[] = {8, 16, 32};
@@ -462,6 +524,10 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     int MV_BLOCK    = hand_opt_getenv_int("MV_BLOCKSIZE", 4);
     int MV_TPR      = hand_opt_getenv_int("MV_THREADS_PER_ROW", 8);
     int MV_RPT      = hand_opt_getenv_int("MV_ROWS_PER_THREAD", 4);
+    // MATVEC applies GROUP/LOCAL (k.ren.has_local in heuristic.py:66) ->
+    // GPU-only.  CPU has no local memory; skip (a CPU matvec is BLAS-
+    // eligible via gemv and already returned above).
+    if (on_cpu) MV = 0;
     if (MV != 0 && (MV_BLOCK > 1 || MV_TPR > 1 || MV_RPT > 1)) {
       u32 red_aid = 0;
       UopDagAddrCoeffsView idx0v, idx1v;
@@ -533,7 +599,11 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // Env gate THVM_GROUPTOP=0 disables the gate entirely (default ON);
   // useful for A/B vs the pre-GROUP_REDUCE baseline while the
   // CUDA-launch-context corruption is investigated.
-  if (hand_opt_getenv_int("THVM_GROUPTOP", 1) != 0)
+  // CPU SKIP: GROUPTOP -> KOP_GROUPTOP -> GROUP_REDUCE, a cooperative
+  // local-memory reduce (k.ren.has_local, heuristic.py:84-90); CPU has no
+  // local memory and the GROUP_REDUCE shape triggers render_uop's
+  // multi_axis_reject (would also defeat the parallel-acc UPCAST path).
+  if (!on_cpu && hand_opt_getenv_int("THVM_GROUPTOP", 1) != 0)
   {
     int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
     if (hand_opt_snapshot_axes(ke, &ax)) {
@@ -822,7 +892,12 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // Take top 3 (sorted by axis ascending), apply each LOCAL.
   //
   // Section 11 NOLOCALS gate runs first: NOLOCALS=1 -> KOP_NOLOCALS instead.
-  {
+  //
+  // CPU SKIP: LOCAL binds threads to local-memory blocks (k.ren.has_local,
+  // heuristic.py:159); CPU has no local memory.  Skipping it leaves the
+  // CPU kernel with serial output loops + the UPCAST register-blocking
+  // (Sections 6-8), which is the desired Lever-B shape.
+  if (!on_cpu) {
     int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
     if (NOLOCALS) {
       KOpt opt = { KOP_NOLOCALS, 0, 0 };

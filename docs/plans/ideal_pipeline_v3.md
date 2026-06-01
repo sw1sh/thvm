@@ -635,6 +635,39 @@ suites green (grad 68, cpu_jit 342, rangeify 45, pool_im2col 13, index_simplify 
 parity-exact, perf-neutral (~1%, expected). It is the affine-arithmetic leg that matters
 once A+B unblock vectorization.
 
+### LEVER B LANDED: CPU UPCAST register-blocking -> faithful-CPU 2.9x (2026-06-01)
+
+A second workflow (map / implA / implB / adversarial-verify) settled the A+B plan with
+clang-`-Rpass` + a hook on tinygrad's own renderer:
+- **Lever A (realize maxpool) was correctly SKIPPED.** Post-`fast_idiv` the forward convs
+  are ALREADY ternary-free (the realize-map already matches tinygrad). The only
+  ternary-bearing kernels are the backward maxpool/conv-grad col2im scatters -- and
+  tinygrad's equivalent has MORE of them (its dominant kernel `r_2_8_2_24_12_4_4_32_6_6`
+  has 136 ternaries + `acc0[96]`). So removing them would DIVERGE from tinygrad, not match
+  it. tinygrad's speed is 100% register-blocking, not ternary elimination.
+- **Lever B LANDED (the real fix):** un-gate CPU UPCAST for NON-BLAS-eligible reduce
+  kernels (`hand_opts.c`: `hand_opt_cpu_blas_eligible` mirrors the cpu_blas_dispatch ladder
+  so cBLAS kernels stay bare) + register-block the accumulator in the generic store path
+  (`render_uop.c`: `RmuLaneBlock` -> N independent `_acc<axis>_<k>` lanes sharing each
+  reduce loop, N-way store fan-out). The scalar `_acc` clang refused to reorder becomes N
+  independent reduction lanes -> SLP -> NEON `fmla.4s`. **faithful warm ~217ms -> ~74ms
+  (2.9x)**, parity bit-exact, default unchanged (6.3ms), peak 25.7MB + 113 kernels
+  unchanged (purely codegen-internal, NO realize-boundary movement), all core suites green
+  (grad 68, cpu_jit 342, rangeify 45, pool_im2col 13, index_simplify 172), GPU paths
+  untouched (render_metal 8, render_cuda 83).
+- **Latent correctness bug FIXED en route:** un-gating CPU UNROLL exposed that the generic
+  store path emitted a split-K inner-decomp axis as an OUTER loop that reset the
+  accumulator -> the Linear matmul+bias summed only 1/4 of K (loss 2.32 vs 2.35). Fixed by
+  folding inner-decomp INSIDE the reduce (matching `rmu_emit_store_reduce`/`rmu_emit_conv`);
+  verified vs numpy ground truth (K up to 12800) + multi-shape JIT-replay parity (rel 0).
+- Cleanup: deleted the now-dead `rmu_emit_one_reduce` scalar wrapper + fixed its comment refs.
+
+Remaining toward tinygrad's ~15ms (follow-ups, NOT blockers): only ~2 of the 7 largest
+kernels emit packed `fmla.4s` so far (lane-blocking is necessary-but-not-sufficient); the
+maxpool-grad col2im per-lane body duplication inflates its inherent ternaries (mask-hoisting
+is the next lever). The clang `-Rpass=loop-vectorize=0` metric is an x86 artifact on this
+arm64 box -- the real signal is the NEON `fmla.4s` + the 2.9x warm drop.
+
 **State of v3 after this session:** achievable compiler goals MET (wins warm wall on
 CPU/CUDA/Metal in default mode; faithful kernel count within 9% of tinygrad; numerically
 correct). Landed this session: honest `sched_kernels` probe (ea2f6ff6), realize.c

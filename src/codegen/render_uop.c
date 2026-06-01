@@ -290,6 +290,14 @@ typedef struct {
 static RmuHoistSlot RMU_HOIST_MAP[RMU_HOIST_MAX];
 static u32 RMU_HOIST_N = 0;
 
+// Accumulator-lane suffix: when register-blocking an UPCAST'd output axis
+// in the generic store path, each lane k gets its own `_acc<axis>_<k>`.
+// rmu_emit_term appends this suffix to the `_acc<axis>` it emits for a
+// UOP_REDUCE expression leaf, so a store value referencing the reduce
+// picks up the right per-lane accumulator.  Empty string = no suffix (the
+// default scalar / GPU parallel-acc paths set their names explicitly).
+static char RMU_ACC_LANE_SUFFIX[16] = {0};
+
 static void rmu_hoist_clear(void) {
   for (u32 i = 0; i < RMU_HOIST_N; i++) {
     RMU_HOIST_MAP[i].key  = 0;
@@ -631,7 +639,7 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // accumulator is shared across all axes of one REDUCE node).
       Term tred = term_new(0, TAG_UOP, op, loc);
       u32 axis0 = uop_reduce_axis(tred, 0);
-      fprintf(fp, "_acc%u", axis0);
+      fprintf(fp, "_acc%u%s", axis0, RMU_ACC_LANE_SUFFIX);
       return;
     }
     default:
@@ -3236,12 +3244,15 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   // the load once it sees F independent accumulators with overlapping
   // address arithmetic).
   //
-  // Gates: GPU only (Metal/CUDA -- both honour register-blocking; C
-  // target lacks the ILP machinery to benefit), single-K reduce with
-  // no OPT-K-axis wrap (UNROLL/GROUP_REDUCE), no inner-reduce-decomp
-  // (the inner-axis fold uses the SHARED accumulator and would
-  // conflict with per-element accumulators).  When gated off, fall
-  // through to the legacy single-acc / serial-UPCAST-loop emit.
+  // Gates: register-blocking helps EVERY renderer including C (Lever B).
+  // On Metal/CUDA the F independent accumulators feed ILP/occupancy; on
+  // the C target they give clang independent reduction lanes (acc0[N])
+  // so it can vectorize the FP reduce WITHOUT -ffast-math -- the scalar
+  // `_acc` it could not reorder.  Other gates: single-K reduce with no
+  // OPT-K-axis wrap (UNROLL/GROUP_REDUCE), no inner-reduce-decomp (the
+  // inner-axis fold uses the SHARED accumulator and would conflict with
+  // per-element accumulators).  When gated off, fall through to the
+  // legacy single-acc / serial-UPCAST-loop emit.
   // Multi-axis-K reject: no GROUP_REDUCE on any reduce axis (the
   // GROUP_REDUCE shape is single-axis only) and the parallel-acc emit
   // can only open NON-OPT'd reduce loops (UNROLL is honoured; UPCAST
@@ -3256,7 +3267,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   RmuConvMSubstCtx pa_up = {0};
   u32 pa_up_exts[RMU_CONV_UPCAST_MAX] = {0};
   u32 pa_total = 1;
-  if (RMU_TARGET != CG_TARGET_C && n_inner == 0 && !multi_axis_reject) {
+  if (n_inner == 0 && !multi_axis_reject) {
     for (u32 i = 0; i < n_out_true && pa_up.n < RMU_CONV_UPCAST_MAX; i++) {
       if (out_kinds[i] != UOP_OPT_UPCAST) continue;
       Term r = out_ranges[i];
@@ -3521,10 +3532,44 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
 // RANGE/END so a RANGE that another RANGE depends on is opened first --
 // i.e. an inner reduce-loop nests inside every reduce-loop it depends on.
 #define RMU_REDUCE_NO_PARENT 0xFFFFFFFFu
-static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
+
+// Register-blocking lane context for the generic store path: when one or
+// more UPCAST'd OUTPUT axes are register-blocked, every reduce emits
+// `n_lanes = prod(up_exts)` independent accumulators `_acc<axis>_<k>`
+// that SHARE the reduce's loop -- N straight-line combines per K-iter, so
+// clang sees N independent reduction chains it can vectorize WITHOUT
+// -ffast-math (Lever B).  The store value referencing the reduce picks up
+// the right lane via RMU_ACC_LANE_SUFFIX (set per lane around the body
+// emit).  n_lanes == 1 (lb == NULL) reproduces the legacy scalar path
+// byte-for-byte.  Mirrors tinygrad codegen/late/devectorizer.py
+// reduce_to_acc + expander.py do_expand (UPCAST -> per-lane DEFINE_ACC).
+typedef struct {
+  u32 n;                          // count of register-blocked axes
+  u32 up_axes[RMU_CONV_UPCAST_MAX];
+  u32 up_exts[RMU_CONV_UPCAST_MAX];
+  u32 n_lanes;                    // prod(up_exts)
+} RmuLaneBlock;
+
+// Decode linear lane k into per-axis literal values + install the
+// UPCAST-axis -> CONST rewrite ctx; also set the global `_<k>` acc suffix.
+static Term rmu_lane_subst(Term t, const RmuLaneBlock *lb, u32 k,
+                           RmuConvMSubstCtx *cx) {
+  cx->n = lb->n;
+  u32 rem = k;
+  for (i32 i = (i32)lb->n - 1; i >= 0; i--) {
+    cx->up_axes[i] = lb->up_axes[i];
+    cx->up_vals[i] = rem % lb->up_exts[i];
+    rem /= lb->up_exts[i];
+  }
+  UOpGraphRewriteRule rules[1] = { { "lane_subst", rmu_conv_m_subst_rule } };
+  return uop_graph_rewrite(t, rules, 1, cx);
+}
+
+static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth, int is_simd,
                                 const Term *reduces, const u8 *simd_flags,
                                 const u32 *parent_idx, u32 self_idx,
-                                u32 n_reduces, FILE *fp) {
+                                u32 n_reduces, FILE *fp, Term store_addr,
+                                const RmuLaneBlock *lb) {
   u32  r_kind   = uop_reduce_kind(red);
   // Multi-axis REDUCE: one shell, one shared accumulator named after
   // axis_0; emit a nested for-loop PER reduce axis with the innermost
@@ -3536,12 +3581,28 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
   if (r_n_axes == 0) return;
   u32  r_axis = uop_reduce_axis(red, 0);     // accumulator name + SIMD slice axis
   Term r_src  = uop_reduce_src(red);
+  u32  n_lanes = (lb != NULL && lb->n_lanes > 1) ? lb->n_lanes : 1;
+  // SIMD-collective reduce can't lane-block (it owns the warp); fall back
+  // to scalar for those.  Lane-blocking only on the C target (Lever B);
+  // GPU keeps its existing register-block path in rmu_emit_store_reduce.
+  if (n_lanes > 1 && (is_simd || RMU_TARGET != CG_TARGET_C)) n_lanes = 1;
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
-  for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-  fprintf(fp, "float %s = ", acc_name);
-  rmu_emit_reduce_init(r_kind, fp);
-  fputs(";\n", fp);
+  if (n_lanes > 1) {
+    RmuConvMSubstCtx cx = {0};
+    for (u32 k = 0; k < n_lanes; k++) {
+      for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+      fprintf(fp, "float %s_%u = ", acc_name, k);
+      rmu_emit_reduce_init(r_kind, fp);
+      fputs(";\n", fp);
+    }
+    (void)cx;
+  } else {
+    for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
+    fprintf(fp, "float %s = ", acc_name);
+    rmu_emit_reduce_init(r_kind, fp);
+    fputs(";\n", fp);
+  }
   // RMU_MAX_RANGES (32), NOT MAX_DIM (8): a faithful-seed fused conv-bwd
   // reduce body is a 7-D MUL [N,Cout,oh,ow,Cin,kh,kw] whose distinct RANGE
   // leaves exceed 8 once hand_opts adds UPCAST/LOCAL split axes.  With the
@@ -3641,6 +3702,37 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
     rmu_emit_range_open(axis_ranges[ai], fp, emit_depth + ai, 0);
   }
   u32 inner_depth = emit_depth + r_n_axes;
+  // Inner-reduce-decomposition: when hand_opts UNROLL/UPCAST'd this
+  // reduce's K axis, the inner (fresh) half is an UNROLL/UPCAST-flagged
+  // RANGE in r_ranges that the REDUCE node DID NOT add to its axis tuple
+  // (uop_dag_apply_split edits the leaf, not REDUCE.axes).  It is NOT an
+  // output axis (absent from store_addr) and NOT a named reduce axis.
+  // It must fold INTO this accumulator -- a nested loop INSIDE the K
+  // loop, before the combine -- exactly as rmu_emit_store_reduce /
+  // rmu_emit_conv do via rmu_emit_inner_reduce_decomp_loops.  Without
+  // this the generic rmu_emit_store path (which handles STORE(ADD(REDUCE,
+  // bias)) matmul+bias kernels) opened it as an OUTER loop, resetting
+  // _acc each iteration + storing inside -> a partial sum, wrong value.
+  // See rmu_range_is_inner_reduce_decomp's banner (tinygrad do_expand).
+  Term  decomp_ranges [RMU_MAX_RANGES];
+  u32   decomp_factors[RMU_MAX_RANGES] = {0};
+  u32   n_decomp = 0;
+  for (u32 j = 0; j < n_r_ranges; j++) {
+    if (term_tag(r_ranges[j]) != TAG_UOP
+        || term_ext(r_ranges[j]) != UOP_RANGE) continue;
+    if (r_kinds[j] != UOP_OPT_UNROLL && r_kinds[j] != UOP_OPT_UPCAST) continue;
+    u32 ax = (u32)term_val(heap_read(term_val(r_ranges[j]) + 0));
+    int is_named_reduce = 0;
+    for (u32 ai = 0; ai < r_n_axes; ai++)
+      if (axis_ids[ai] == ax) { is_named_reduce = 1; break; }
+    if (is_named_reduce) continue;
+    if (rmu_term_uses_axis(store_addr, ax)) continue;  // real output axis
+    decomp_ranges [n_decomp]   = r_ranges[j];
+    decomp_factors[n_decomp]   = r_factors[j];
+    n_decomp++;
+  }
+  inner_depth = rmu_emit_inner_reduce_decomp_loops(
+      decomp_ranges, NULL, decomp_factors, n_decomp, fp, inner_depth);
   // Emit nested reduces that depend on THIS reduce's axis var INSIDE the
   // innermost loop, before the combine that references their `_accN`.
   // Each child's own reduce-axis loop -- and any deeper nesting -- is
@@ -3648,13 +3740,37 @@ static void rmu_emit_one_reduce(Term red, u32 emit_depth, int is_simd,
   // always precedes its parent.
   for (u32 k = 0; k < n_reduces; k++) {
     if (parent_idx[k] != self_idx) continue;
-    rmu_emit_one_reduce(reduces[k], inner_depth, simd_flags[k],
-                        reduces, simd_flags, parent_idx, k, n_reduces, fp);
+    rmu_emit_one_reduce_lb(reduces[k], inner_depth, simd_flags[k],
+                        reduces, simd_flags, parent_idx, k, n_reduces, fp,
+                        store_addr, (n_lanes > 1) ? lb : NULL);
   }
-  for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
-  rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+  if (n_lanes > 1) {
+    // N straight-line lane combines inside the shared K loop: each lane's
+    // accumulator is independent, so clang vectorizes the N-wide update.
+    RmuConvMSubstCtx cx = {0};
+    for (u32 k = 0; k < n_lanes; k++) {
+      Term r_src_k = rmu_lane_subst(r_src, lb, k, &cx);
+      char lane_acc[40];
+      snprintf(lane_acc, sizeof(lane_acc), "%s_%u", acc_name, k);
+      // Nested-acc references inside r_src_k must pick up the same lane
+      // suffix (the inner reduce was lane-blocked above).
+      snprintf(RMU_ACC_LANE_SUFFIX, sizeof(RMU_ACC_LANE_SUFFIX), "_%u", k);
+      for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
+      rmu_emit_reduce_combine(lane_acc, r_kind, r_src_k, fp);
+      RMU_ACC_LANE_SUFFIX[0] = '\0';
+    }
+  } else {
+    for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
+    rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+  }
+  // Close inner-reduce-decomp loops (innermost first).
+  for (u32 i = 0; i < n_decomp; i++) {
+    inner_depth--;
+    for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
   for (u32 ai = 0; ai < r_n_axes; ai++) {
-    u32 close_depth = inner_depth - 1 - ai;
+    u32 close_depth = emit_depth + r_n_axes - 1 - ai;
     for (u32 d = 0; d < close_depth; d++) fputs("  ", fp);
     fputs("}\n", fp);
   }
@@ -3701,6 +3817,56 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
                     && term_ext(addr_ranges[i]) == UOP_RANGE)
                  ? (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0))
                  : 0xFFFFFFFFu;
+  }
+
+  // Inner-reduce-decomp axes: an UNROLL/UPCAST'd RANGE that does NOT
+  // index the store position (absent from addr) is the inner half of a
+  // hand_opts-split REDUCE (K) axis.  It must fold INTO the reduce
+  // accumulator (rmu_emit_one_reduce_lb opens it inside the K loop), NOT
+  // wrap the accumulator as an outer loop.  So exclude it here from both
+  // the required_pos depth computation and the outer range-loop emit.
+  // Mirrors rmu_range_is_inner_reduce_decomp (the rmu_emit_store_reduce /
+  // rmu_emit_conv partition).  See its banner for the tinygrad do_expand
+  // correspondence.
+  int range_is_inner_decomp[RMU_MAX_RANGES] = {0};
+  for (u32 i = 0; i < n_ranges; i++) {
+    range_is_inner_decomp[i] =
+        rmu_range_is_inner_reduce_decomp(ranges[i], opt_kinds[i], addr);
+  }
+
+  // Register-blocking (Lever B, C target only): collect UPCAST'd OUTPUT
+  // axes into a lane block.  Each becomes `n_lanes = prod(exts)` straight-
+  // line accumulator lanes that SHARE every reduce's loop -- so clang sees
+  // N independent reduction chains it can vectorize without -ffast-math,
+  // instead of one scalar `_acc` it refuses to reorder.  The lane axes are
+  // NOT emitted as output loops (excluded from required_pos + the outer
+  // range emit); the final store fans out into N lane stores.  Mirrors
+  // rmu_emit_store_reduce's parallel-acc path / tinygrad do_expand.
+  RmuLaneBlock lb = {0};
+  lb.n_lanes = 1;
+  int lane_is_axis[RMU_MAX_RANGES] = {0};
+  if (RMU_TARGET == CG_TARGET_C) {
+    u32 total = 1;
+    for (u32 i = 0; i < n_ranges && lb.n < RMU_CONV_UPCAST_MAX; i++) {
+      Term r = ranges[i];
+      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+      if (opt_kinds[i] != UOP_OPT_UPCAST) continue;
+      if (range_is_inner_decomp[i]) continue;     // inner-K, folds in reduce
+      u32 axis_id = (u32)term_val(heap_read(term_val(r) + 0));
+      int is_output = 0;
+      for (u32 j = 0; j < addr_n; j++)
+        if (addr_axes[j] == axis_id) { is_output = 1; break; }
+      if (!is_output) continue;                    // only true-output lanes
+      u32 e = (u32)term_val(heap_read(term_val(r) + 2));
+      if (e < 2 || e > 16) continue;
+      if ((u32)(total * e) > 32) continue;         // cap lanes at 32
+      lb.up_axes[lb.n] = axis_id;
+      lb.up_exts[lb.n] = e;
+      lb.n++;
+      total *= e;
+      lane_is_axis[i] = 1;
+    }
+    lb.n_lanes = total;
   }
 
   // Reduce-feeding-broadcast hoist: collect the set of output-axis ids
@@ -3847,6 +4013,11 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       for (u32 k = 0; k < n_ranges; k++) {
         if (term_tag(ranges[k]) != TAG_UOP
             || term_ext(ranges[k]) != UOP_RANGE) continue;
+        // Inner-reduce-decomp axes (fold inside the reduce) and register-
+        // blocked lane axes (straight-line accumulators) don't open an
+        // outer loop, so they don't bump the reduce's emission depth.
+        if (range_is_inner_decomp[k]) continue;
+        if (lane_is_axis[k]) continue;
         u32 oaxis = (u32)term_val(heap_read(term_val(ranges[k]) + 0));
         if (oaxis == axis && (k + 1) > max_pos) max_pos = k + 1;
       }
@@ -3887,10 +4058,10 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // or RMU_REDUCE_NO_PARENT if reduces[i] is a root (no enclosing-reduce
   // axis dependence).  Root reduces are emitted by Pass-0 / the output-
   // loop interleave at their required_pos; non-root reduces are emitted
-  // recursively by rmu_emit_one_reduce inside their parent's loop.  This
+  // recursively by rmu_emit_one_reduce_lb inside their parent's loop.  This
   // is the thvm port of tinygrad's per-RANGE scheduling: a reduce-loop
   // RANGE nests inside every reduce-loop RANGE it depends on (see
-  // rmu_emit_one_reduce's header for the tinygrad file:line).
+  // rmu_emit_one_reduce_lb's header for the tinygrad file:line).
   u32 parent_idx[RMU_MAX_RANGES];
   for (u32 i = 0; i < n_reduces; i++) parent_idx[i] = RMU_REDUCE_NO_PARENT;
   for (u32 i = 0; i < n_reduces; i++) {
@@ -3936,17 +4107,23 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
             (unsigned long long)g_decode.total);
   }
 
+  // Register-block only when at least one reduce exists (a pure
+  // elementwise UPCAST is already vectorizable as a serial unroll loop).
+  RmuLaneBlock *lbp = (lb.n_lanes > 1 && n_reduces > 0) ? &lb : NULL;
+  if (lbp == NULL)
+    for (u32 i = 0; i < n_ranges; i++) lane_is_axis[i] = 0;
+
   // Pass 0: emit ROOT reduces with required_pos == 0 BEFORE any output
   // loop.  These are fully hoistable -- their body uses no output axis.
   // Non-root reduces (parent_idx set: their body references an enclosing
   // reduce's axis var) are emitted recursively inside that parent's loop
-  // by rmu_emit_one_reduce, never here.
+  // by rmu_emit_one_reduce_lb, never here.
   for (u32 i = 0; i < n_reduces; i++) {
     if (required_pos[i] != 0) continue;
     if (parent_idx[i] != RMU_REDUCE_NO_PARENT) continue;
-    rmu_emit_one_reduce(reduces[i], depth, reduce_simd_flag[i],
+    rmu_emit_one_reduce_lb(reduces[i], depth, reduce_simd_flag[i],
                         reduces, reduce_simd_flag, parent_idx, i,
-                        n_reduces, fp);
+                        n_reduces, fp, addr, lbp);
   }
 
   // Track which output ranges opened a `{` (thread-bound axes
@@ -3955,6 +4132,12 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   int needs_close[RMU_MAX_RANGES] = {0};
   for (u32 i = 0; i < n_ranges; i++) {
     Term r = ranges[i];
+    // Inner-reduce-decomp axes are emitted INSIDE the reduce accumulator
+    // (rmu_emit_one_reduce_lb), never as an outer loop -- skip here.
+    if (range_is_inner_decomp[i]) continue;
+    // Register-blocked lane axes are straight-line accumulator indices,
+    // not loops -- the final store fans them out below.
+    if (lane_is_axis[i]) continue;
     u32 axis_id   = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
                   ? (u32)term_val(heap_read(term_val(r) + 0)) : 0xFFFFFFFFu;
     u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
@@ -3985,17 +4168,36 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     for (u32 r_i = 0; r_i < n_reduces; r_i++) {
       if (required_pos[r_i] != i + 1) continue;
       if (parent_idx[r_i] != RMU_REDUCE_NO_PARENT) continue;
-      rmu_emit_one_reduce(reduces[r_i], body_depth, reduce_simd_flag[r_i],
+      rmu_emit_one_reduce_lb(reduces[r_i], body_depth, reduce_simd_flag[r_i],
                           reduces, reduce_simd_flag, parent_idx, r_i,
-                          n_reduces, fp);
+                          n_reduces, fp, addr, lbp);
     }
   }
-  for (u32 i = 0; i < body_depth; i++) fputs("  ", fp);
-  fprintf(fp, "%s[", rmu_buf_name(buf));
-  rmu_emit_term(addr, fp);
-  fputs("] = ", fp);
-  rmu_emit_term(value, fp);
-  fputs(";\n", fp);
+  if (lbp != NULL) {
+    // Fan the store out into N lane stores: per-lane addr + value with the
+    // UPCAST lane axes substituted to literals and the `_acc` references
+    // suffixed `_<k>` so each lane reads its own accumulator(s).
+    RmuConvMSubstCtx cx = {0};
+    for (u32 k = 0; k < lb.n_lanes; k++) {
+      Term addr_k  = rmu_lane_subst(addr,  &lb, k, &cx);
+      Term value_k = rmu_lane_subst(value, &lb, k, &cx);
+      snprintf(RMU_ACC_LANE_SUFFIX, sizeof(RMU_ACC_LANE_SUFFIX), "_%u", k);
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      fprintf(fp, "%s[", rmu_buf_name(buf));
+      rmu_emit_term(addr_k, fp);
+      fputs("] = ", fp);
+      rmu_emit_term(value_k, fp);
+      fputs(";\n", fp);
+      RMU_ACC_LANE_SUFFIX[0] = '\0';
+    }
+  } else {
+    for (u32 i = 0; i < body_depth; i++) fputs("  ", fp);
+    fprintf(fp, "%s[", rmu_buf_name(buf));
+    rmu_emit_term(addr, fp);
+    fputs("] = ", fp);
+    rmu_emit_term(value, fp);
+    fputs(";\n", fp);
+  }
   // Close braces (innermost first), only for ranges that opened one.
   for (i32 i = (i32)n_ranges - 1; i >= 0; i--) {
     if (!needs_close[i]) continue;
