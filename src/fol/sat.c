@@ -37,14 +37,16 @@ fn CnfState *cnf_init(u32 step_cap) {
   s->active = (u32 *)calloc(s->cap_active, sizeof(u32));
   s->cap_passive = CNF_DEFAULT_CAP;
   s->passive = (u32 *)calloc(s->cap_passive, sizeof(u32));
-  if (s->clauses == NULL || s->active == NULL || s->passive == NULL) {
-    free(s->clauses); free(s->active); free(s->passive); free(s);
+  s->trace_cap = CNF_DEFAULT_CAP;
+  s->trace = (FolTrace *)calloc(s->trace_cap, sizeof(FolTrace));
+  if (s->clauses == NULL || s->active == NULL || s->passive == NULL || s->trace == NULL) {
+    free(s->clauses); free(s->active); free(s->passive); free(s->trace); free(s);
     return NULL;
   }
   s->cap_deferred = CNF_DEFAULT_CAP;
   s->deferred_free = (FolClause **)calloc(s->cap_deferred, sizeof(FolClause *));
   if (s->deferred_free == NULL) {
-    free(s->clauses); free(s->active); free(s->passive); free(s);
+    free(s->clauses); free(s->active); free(s->passive); free(s->trace); free(s);
     return NULL;
   }
   s->step_cap = (step_cap == 0u) ? 1u << 30 : step_cap;
@@ -65,6 +67,7 @@ fn void cnf_free(CnfState *s) {
   free(s->active);
   free(s->passive);
   free(s->deferred_free);
+  free(s->trace);
   free(s);
 }
 
@@ -77,18 +80,26 @@ static void cnf_grow(u32 *cap, u8 **arr, u32 elsz) {
   }
 }
 
-// Append clause `c` (state takes ownership), assign next id, queue in
-// passive.  Returns the assigned id, or -1 on overflow.
-fn i32 cnf_add_clause(CnfState *s, FolClause *c) {
+// Internal: append clause + record trace metadata.  Used by every
+// inference path so the provenance DAG stays consistent.
+static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
+                                 FolInference rule,
+                                 u32 parent_a, u32 parent_b) {
   if (s == NULL || c == NULL) return -1;
   if (s->n >= s->cap) {
     cnf_grow(&s->cap, (u8 **)&s->clauses, sizeof(FolClause *));
     if (s->n >= s->cap) return -1;
-    // Zero the new slots.
     for (u32 i = s->n; i < s->cap; i++) s->clauses[i] = NULL;
+  }
+  while (s->n >= s->trace_cap) {
+    cnf_grow(&s->trace_cap, (u8 **)&s->trace, sizeof(FolTrace));
+    if (s->n >= s->trace_cap) return -1;
   }
   u32 id = s->n;
   s->clauses[id] = c;
+  s->trace[id].rule     = rule;
+  s->trace[id].parent_a = parent_a;
+  s->trace[id].parent_b = parent_b;
   s->n++;
   if (s->n_passive >= s->cap_passive) {
     cnf_grow(&s->cap_passive, (u8 **)&s->passive, sizeof(u32));
@@ -96,6 +107,12 @@ fn i32 cnf_add_clause(CnfState *s, FolClause *c) {
   }
   s->passive[s->n_passive++] = id;
   return (i32)id;
+}
+
+// Public entry point: user-added clauses get the INPUT marker.
+fn i32 cnf_add_clause(CnfState *s, FolClause *c) {
+  return cnf_add_clause_traced(s, c, FOL_INF_INPUT,
+                                FOL_NO_PARENT, FOL_NO_PARENT);
 }
 
 // Ordering-aware demodulation: when CnfState carries a reduction
@@ -296,13 +313,13 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
     // Push d through tautology + subsumption (forward-demod is
     // intentionally skipped here -- see comment above).
     if (fol_clause_is_empty(d)) {
-      cnf_add_clause(s, d);
+      cnf_add_clause_traced(s, d, FOL_INF_DEMOD, new_id, i);
       s->status = ATP_PROVED;
       return;
     }
     if (fol_is_tautology(d)) { fol_clause_free(d); continue; }
     if (cnf_is_subsumed(s, d)) { fol_clause_free(d); continue; }
-    cnf_add_clause(s, d);
+    cnf_add_clause_traced(s, d, FOL_INF_DEMOD, new_id, i);
   }
 }
 
@@ -346,26 +363,34 @@ static void cnf_flush_deferred(CnfState *s) {
 }
 
 // Push a derived clause through the redundancy filters; consume on
-// success (state-owns), free on drop.
+// success (state-owns), free on drop.  Records the supplied
+// (rule, parent_a, parent_b) in the trace if the clause survives.
 //
 // Order matters: forward demodulation FIRST (normalize against
 // active unit equalities), then tautology / subsumption checks on
 // the normalized form.  Demod-normalized clauses are more likely to
 // subsume / be subsumed, so running demod before subsumption maximizes
 // the redundancy filtering's bite.
-static void cnf_consider(CnfState *s, FolClause *c) {
+//
+// Forward demod doesn't update the trace -- the derivation's
+// "inference rule" is whatever produced the pre-demod candidate;
+// demod just normalizes the literal contents.  This matches Vampire's
+// convention of treating demod as a non-inference simplifier.
+static void cnf_consider(CnfState *s, FolClause *c,
+                         FolInference rule,
+                         u32 parent_a, u32 parent_b) {
   if (c == NULL) return;
   if (s->status != ATP_RUNNING) { fol_clause_free(c); return; }
   cnf_forward_demod(s, &c);
   if (c == NULL) return;
   if (fol_clause_is_empty(c)) {
-    cnf_add_clause(s, c);
+    cnf_add_clause_traced(s, c, rule, parent_a, parent_b);
     s->status = ATP_PROVED;
     return;
   }
   if (fol_is_tautology(c)) { fol_clause_free(c); return; }
   if (cnf_is_subsumed(s, c)) { fol_clause_free(c); return; }
-  i32 new_id = cnf_add_clause(s, c);
+  i32 new_id = cnf_add_clause_traced(s, c, rule, parent_a, parent_b);
   if (new_id >= 0) {
     cnf_backward_subsume(s, (u32)new_id);
     cnf_backward_demod(s, (u32)new_id);
@@ -388,7 +413,7 @@ static void cnf_gen_resolution(CnfState *s, u32 a_id, u32 b_id) {
       if (sel_b != ~0u && j != sel_b) continue;
       if (a->lits[i].sign == b->lits[j].sign) continue;  // need complementary
       FolClause *r = fol_resolve(a, i, b, j);
-      cnf_consider(s, r);
+      cnf_consider(s, r, FOL_INF_RESOLVE, a_id, b_id);
       if (s->status != ATP_RUNNING) return;
     }
   }
@@ -401,7 +426,7 @@ static void cnf_gen_factoring(CnfState *s, u32 c_id) {
   for (u32 i = 0; i < c->n_lits; i++) {
     for (u32 j = i + 1u; j < c->n_lits; j++) {
       FolClause *r = fol_factor(c, i, j);
-      cnf_consider(s, r);
+      cnf_consider(s, r, FOL_INF_FACTOR, c_id, FOL_NO_PARENT);
       if (s->status != ATP_RUNNING) return;
     }
   }
@@ -415,7 +440,7 @@ static void cnf_gen_reflex(CnfState *s, u32 c_id) {
     if (c->lits[i].sign != 1u) continue;
     if (!fol_atom_is_eq(c->lits[i].atom)) continue;
     FolClause *r = fol_reflex_resolve(c, i);
-    cnf_consider(s, r);
+    cnf_consider(s, r, FOL_INF_REFLEX, c_id, FOL_NO_PARENT);
     if (s->status != ATP_RUNNING) return;
   }
 }
@@ -445,8 +470,10 @@ typedef struct {
   CnfState        *s;
   const FolClause *eq_clause;
   u32              eq_idx;
+  u32              eq_id;        // for the trace
   const FolClause *target;
   u32              target_idx;
+  u32              target_id;    // for the trace
 } CnfParamodCtx;
 
 static void cnf_paramod_at_pos(const u32 *p, u32 p_len, void *raw) {
@@ -456,11 +483,11 @@ static void cnf_paramod_at_pos(const u32 *p, u32 p_len, void *raw) {
   // refutation completeness with non-Horn clauses.
   FolClause *r0 = fol_paramodulate(ctx->eq_clause, ctx->eq_idx, /*swap*/ 0,
                                    ctx->target, ctx->target_idx, p, p_len);
-  cnf_consider(ctx->s, r0);
+  cnf_consider(ctx->s, r0, FOL_INF_PARAMOD, ctx->eq_id, ctx->target_id);
   if (ctx->s->status != ATP_RUNNING) return;
   FolClause *r1 = fol_paramodulate(ctx->eq_clause, ctx->eq_idx, /*swap*/ 1,
                                    ctx->target, ctx->target_idx, p, p_len);
-  cnf_consider(ctx->s, r1);
+  cnf_consider(ctx->s, r1, FOL_INF_PARAMOD, ctx->eq_id, ctx->target_id);
 }
 
 // All paramodulation results of eq_clause (as the source of an
@@ -483,8 +510,8 @@ static void cnf_gen_paramod(CnfState *s, u32 eq_id, u32 target_id) {
       // eq_id == target_id and i == j (same literal in same clause).
       if (eq_id == target_id && i == j) continue;
       CnfParamodCtx ctx = {
-        .s = s, .eq_clause = eqc, .eq_idx = i,
-        .target = tgt, .target_idx = j,
+        .s = s, .eq_clause = eqc, .eq_idx = i, .eq_id = eq_id,
+        .target = tgt, .target_idx = j, .target_id = target_id,
       };
       u32 path[CP_MAX_DEPTH];
       cnf_walk_positions(tgt->lits[j].atom, path, 0u,
@@ -506,7 +533,7 @@ static void cnf_gen_eq_factoring(CnfState *s, u32 c_id) {
       if (c->lits[j].sign != 0u) continue;
       if (!fol_atom_is_eq(c->lits[j].atom)) continue;
       FolClause *r = fol_eq_factor(c, i, j);
-      cnf_consider(s, r);
+      cnf_consider(s, r, FOL_INF_EQ_FACTOR, c_id, FOL_NO_PARENT);
       if (s->status != ATP_RUNNING) return;
     }
   }
@@ -600,4 +627,99 @@ fn AtpStatus cnf_run(CnfState *s) {
     if (st != ATP_RUNNING) break;
   }
   return s->status;
+}
+
+// === proof printer ===================================================
+//
+// Recursively walk the trace DAG from a root clause.  Print each
+// ancestor exactly once (track visited via a bitmap on the stack).
+// The output format is text-only; one line per visited clause:
+//   c<id>: <rule> [c<a>[, c<b>]]   <literals>
+// Children before parents would be the topological reversal; we
+// instead print parents first (post-order on the inverse DAG) so a
+// reader sees the dependencies before the clause that uses them.
+
+static const char *cnf_rule_name(FolInference r) {
+  switch (r) {
+    case FOL_INF_INPUT:     return "input";
+    case FOL_INF_RESOLVE:   return "resolve";
+    case FOL_INF_FACTOR:    return "factor";
+    case FOL_INF_PARAMOD:   return "paramod";
+    case FOL_INF_REFLEX:    return "reflex";
+    case FOL_INF_EQ_FACTOR: return "eq-factor";
+    case FOL_INF_DEMOD:     return "demod";
+    default:                return "?";
+  }
+}
+
+static void cnf_print_atom(Term atom, FILE *out) {
+  if (term_tag(atom) == TAG_FVR) {
+    fprintf(out, "v%u", term_ext(atom));
+    return;
+  }
+  if (term_tag(atom) == TAG_CTR) {
+    u32 lab = term_ext(atom);
+    u32 n   = term_ctr_n(atom);
+    fprintf(out, "s%u", lab);
+    if (n > 0u) {
+      fprintf(out, "(");
+      for (u32 i = 0; i < n; i++) {
+        if (i > 0u) fprintf(out, ", ");
+        cnf_print_atom(term_ctr_at(atom, i), out);
+      }
+      fprintf(out, ")");
+    }
+    return;
+  }
+  fprintf(out, "?");
+}
+
+static void cnf_print_clause_line(const CnfState *s, u32 id, FILE *out) {
+  const FolClause *c = s->clauses[id];
+  if (c == NULL) {
+    fprintf(out, "c%u: <freed>\n", id);
+    return;
+  }
+  const FolTrace *t = &s->trace[id];
+  fprintf(out, "c%u: %s", id, cnf_rule_name(t->rule));
+  if (t->parent_a != FOL_NO_PARENT) {
+    fprintf(out, " [c%u", t->parent_a);
+    if (t->parent_b != FOL_NO_PARENT) fprintf(out, ", c%u", t->parent_b);
+    fprintf(out, "]");
+  }
+  fprintf(out, "   ");
+  if (c->n_lits == 0u) {
+    fprintf(out, "FALSE");
+  } else {
+    for (u32 i = 0; i < c->n_lits; i++) {
+      if (i > 0u) fprintf(out, " | ");
+      if (c->lits[i].sign != 0u) fprintf(out, "~");
+      cnf_print_atom(c->lits[i].atom, out);
+    }
+  }
+  fprintf(out, "\n");
+}
+
+static void cnf_print_proof_rec(const CnfState *s, u32 id,
+                                u8 *visited, u32 n, FILE *out) {
+  if (id >= n || visited[id]) return;
+  visited[id] = 1u;
+  const FolTrace *t = &s->trace[id];
+  if (t->parent_a != FOL_NO_PARENT) {
+    cnf_print_proof_rec(s, t->parent_a, visited, n, out);
+  }
+  if (t->parent_b != FOL_NO_PARENT) {
+    cnf_print_proof_rec(s, t->parent_b, visited, n, out);
+  }
+  cnf_print_clause_line(s, id, out);
+}
+
+fn void cnf_print_proof(const CnfState *s, void *out_raw, u32 root_id) {
+  if (s == NULL || out_raw == NULL) return;
+  if (root_id >= s->n) return;
+  FILE *out = (FILE *)out_raw;
+  u8 *visited = (u8 *)calloc(s->n, 1);
+  if (visited == NULL) return;
+  cnf_print_proof_rec(s, root_id, visited, s->n, out);
+  free(visited);
 }

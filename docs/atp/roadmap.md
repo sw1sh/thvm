@@ -233,6 +233,21 @@ must remain a positive equality regardless).  Falls back to "all
 literals" when the policy finds no matching lit -- preserves
 completeness for Horn-style inputs without the target polarity.
 
+Proof reconstruction lands as a per-clause inference trace + DAG
+printer:
+* `FolInference` enum: INPUT / RESOLVE / FACTOR / PARAMOD / REFLEX
+  / EQ_FACTOR / DEMOD.
+* `FolTrace` parallel array in CnfState: `{rule, parent_a,
+  parent_b}` per clause id.  `FOL_NO_PARENT = 0xFFFFFFFF` sentinel.
+* Inference functions in src/fol/sat.c stash the trace via
+  cnf_add_clause_traced; user-added input clauses use the existing
+  cnf_add_clause path (defaults to INPUT trace).
+* `cnf_print_proof(s, FILE*, root_id)` walks the trace DAG from
+  any root (typically the empty clause when status == PROVED) and
+  prints a text proof: one line per ancestor with rule + parents
+  + literal list.  Visited bitmap dedups; parents print before the
+  derived clause (post-order on the inverse DAG).
+
 Open follow-ups (efficiency / completeness):
 * Tseitin structural CNF for shallow clauses on deeply-nested ∨/∧.
 * Discrim-tree / FV-index for fast subsumption + CP queries.

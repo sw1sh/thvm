@@ -796,6 +796,104 @@ int main(void) {
     cnf_free(s);
   }
 
+  TEST_BEGIN("fol/sat-trace-records-resolution");
+  {
+    // C1 = P(a), C2 = ¬P(a).  After cnf_run -> PROVED, the empty
+    // clause should be at some id with rule=RESOLVE and parents
+    // pointing to the two input clauses.
+    CnfState *s = cnf_init(64);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 1 };
+    i32 id1 = cnf_add_clause(s, c1);
+    i32 id2 = cnf_add_clause(s, c2);
+    CHECK(id1 == 0);
+    CHECK(id2 == 1);
+    // Input clauses' trace.
+    CHECK(s->trace[0].rule == FOL_INF_INPUT);
+    CHECK(s->trace[0].parent_a == FOL_NO_PARENT);
+    CHECK(s->trace[1].rule == FOL_INF_INPUT);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    // The empty clause must exist somewhere with rule=RESOLVE.
+    u8 found_empty = 0;
+    for (u32 i = 0; i < s->n; i++) {
+      if (s->clauses[i] == NULL) continue;
+      if (s->clauses[i]->n_lits == 0u) {
+        found_empty = 1;
+        CHECK(s->trace[i].rule == FOL_INF_RESOLVE);
+        // Parents are c0 and c1 in some order.
+        u8 parents_ok =
+          (s->trace[i].parent_a == 0u && s->trace[i].parent_b == 1u) ||
+          (s->trace[i].parent_a == 1u && s->trace[i].parent_b == 0u);
+        CHECK(parents_ok);
+        break;
+      }
+    }
+    CHECK(found_empty);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-print-proof-doesnt-crash");
+  {
+    // Smoke test: run a small refutation and print its proof DAG to
+    // /dev/null.  Verifies the printer walks the trace without
+    // segfaulting.
+    CnfState *s = cnf_init(64);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    u32 empty_id = 0;
+    for (u32 i = 0; i < s->n; i++) {
+      if (s->clauses[i] != NULL && s->clauses[i]->n_lits == 0u) {
+        empty_id = i;
+        break;
+      }
+    }
+    FILE *null_out = fopen("/dev/null", "w");
+    CHECK(null_out != NULL);
+    cnf_print_proof(s, null_out, empty_id);
+    fclose(null_out);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-trace-paramod-recorded");
+  {
+    // (a=b), P(a), ¬P(b) -> paramod chain.  The empty clause's
+    // ancestor should include a PARAMOD node.
+    CnfState *s = cnf_init(128);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_b)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    // At least one derived clause has rule=PARAMOD (or rule=DEMOD if
+    // demod fired first since backward demod runs on the eq).
+    u8 found_eq_inference = 0;
+    for (u32 i = 0; i < s->n; i++) {
+      if (s->clauses[i] == NULL) continue;
+      if (s->trace[i].rule == FOL_INF_PARAMOD
+          || s->trace[i].rule == FOL_INF_DEMOD) {
+        found_eq_inference = 1;
+        break;
+      }
+    }
+    CHECK(found_eq_inference);
+    cnf_free(s);
+  }
+
   TEST_BEGIN("fol/sat-selection-negative-completes");
   {
     // Three-clause chain under CNF_SELECT_NEGATIVE.  Selection picks

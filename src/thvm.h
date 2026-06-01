@@ -3136,10 +3136,35 @@ typedef struct {
   u8   sign;     // 0 = positive, 1 = negative
 } FolLit;
 
+// Inference rule that produced a clause -- recorded per-clause for
+// proof reconstruction.  INPUT marks a user-supplied clause; the
+// rest match the inferences in src/fol.
+typedef enum {
+  FOL_INF_INPUT     = 0,
+  FOL_INF_RESOLVE   = 1,
+  FOL_INF_FACTOR    = 2,
+  FOL_INF_PARAMOD   = 3,
+  FOL_INF_REFLEX    = 4,
+  FOL_INF_EQ_FACTOR = 5,
+  FOL_INF_DEMOD     = 6,
+} FolInference;
+
+#define FOL_NO_PARENT 0xFFFFFFFFu
+
 typedef struct {
   FolLit *lits;
   u32     n_lits;
 } FolClause;
+
+// Per-clause provenance.  Lives in a parallel array in CnfState
+// (one entry per clause id) rather than inside FolClause so the
+// inference functions in src/fol/_.c don't need to know about
+// saturation-level concepts.
+typedef struct {
+  FolInference rule;
+  u32          parent_a;
+  u32          parent_b;
+} FolTrace;
 
 fn FolClause *fol_clause_new (u32 n_lits);
 fn void       fol_clause_free(FolClause *c);
@@ -3358,6 +3383,12 @@ typedef struct {
   // Selection function: opt-in literal-pick policy.  Default
   // CNF_SELECT_NONE = current "try every literal" behavior.
   CnfSelection cnf_select;
+  // Per-clause inference trace, parallel to `clauses[]`.  Each
+  // entry records the inference rule that produced the clause and
+  // up to two parent ids.  INPUT marks user-added clauses; ~0u
+  // (FOL_NO_PARENT) is the no-parent sentinel.
+  FolTrace *trace;
+  u32       trace_cap;
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);
@@ -3379,6 +3410,14 @@ fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 // Attach a selection function (default NONE).  Affects which literal
 // of a clause is allowed to participate in resolution + paramodulation.
 fn void      cnf_set_select  (CnfState *s, CnfSelection sel);
+
+// Walk the provenance DAG rooted at `root_id` (typically the empty
+// clause's id when status == ATP_PROVED) and write a text proof
+// to `out`.  Format: each line is
+//   c<id>: <rule> [c<parent_a>[, c<parent_b>]]
+// followed by the clause's literal list.  Cycles cannot occur (every
+// derived clause's parents have strictly smaller ids).
+fn void      cnf_print_proof (const CnfState *s, void *out, u32 root_id);
 
 // === FOL formula -> CNF pipeline ====================================
 // Formulas are Term trees with reserved CTR labels for connectives.
