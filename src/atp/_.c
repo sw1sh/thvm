@@ -396,6 +396,18 @@ static u64 atp_term_struct_hash(Term t) {
       return 0xdeadbeefcafebabeull ^ ((u64)term_tag(t) * 0x100000001b3ull);
   }
 }
+
+// Stage 8: LPO/KBO orientability cache.  Gated by THVM_ATP_LPO_ORIENT_CACHE;
+// compiles to nothing when the flag is off so the default build stays
+// byte-identical.  Defined here -- after atp_term_struct_hash, before
+// atp_compare -- so the wrapped comparator below can call it.
+#include "lpo_cache.c"
+#ifdef THVM_ATP_LPO_ORIENT_CACHE
+#define ATP_ORIENT_CACHE_INVAL() atp_lpo_orient_cache_invalidate()
+#else
+#define ATP_ORIENT_CACHE_INVAL() ((void)0)
+#endif
+
 // Normalize result cache: maps (term_struct_hash, g_atp_unf_memo_epoch)
 // to the already-normalized Term.
 #define ATP_NORM_CACHE_BITS 16
@@ -3739,6 +3751,7 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
   // in this scan weighs the CURRENT term; entries built within the scan
   // are valid (no splice fires until a redex is found, then we return).
   thvm_kbo_invalidate();
+  ATP_ORIENT_CACHE_INVAL();
   // Per-position no-fire memo: precompute bottom-up subtree FNV-64
   // hashes once for this subject so the per-position cache key (subtree
   // hash) is a single array read.  Computing flathash[] is O(|flatlen|)
@@ -4372,6 +4385,9 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // drop any entries from a prior run (cfg pointer may be reused).
   thvm_kbo_set_persist(1u);
   thvm_kbo_invalidate();
+  // Stage 8: drop the structural-hash orient cache too -- a fresh state
+  // may reuse Term cell ids with new precedence/operator content.
+  ATP_ORIENT_CACHE_INVAL();
   // Persistent unf_memo / norm-cache: an init may inherit stale entries
   // keyed by Terms reused across distinct atp states (e.g. test harness
   // builds two AtpStates with different rule sets but shared Term IDs
@@ -4754,6 +4770,12 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // KBO weight memo are both keyed on cell addresses, now stale -- drop them.
   thvm_lpo_invalidate();
   thvm_kbo_invalidate();
+  // Stage 8 orient cache is keyed on atp_term_struct_hash (GC-stable by
+  // construction), so the entries would still be sound -- but the
+  // workload changes at this boundary (rules churned, GC mid-saturation)
+  // and the cache's contents are no longer representative of the next
+  // phase.  Bump the epoch; cheap (one counter inc).
+  ATP_ORIENT_CACHE_INVAL();
   // The normalize-result cache stores Term values (cell addresses), so
   // GC relocation makes its entries stale.  Bump the unf_memo_epoch so
   // every cached NF is invalidated.  Whole-subject + per-position
@@ -5130,7 +5152,12 @@ fn void thvm_atp_set_goal_interleave(AtpState *s, u32 ratio) {
 // 8.5c: order-aware compare.  Picks LPO (if attached) or KBO,
 // returning a unified KboCmp-shaped result.  The two enums share
 // numeric values (EQ=0, GT=1, LT=-1, UN=2), so the cast is safe.
-static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
+//
+// Stage 8: a `THVM_ATP_LPO_ORIENT_CACHE` wrapper sits on top of this
+// body (see below) and memoises the verdict by structural-hash pair.
+// With the flag off, the macro alias below collapses back to this
+// function and the default build is byte-identical.
+static KboCmp atp_compare_uncached(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return KBO_UN;
   if (s->lpo != NULL) {
     return (KboCmp)thvm_lpo(lhs, rhs, s->lpo);
@@ -5176,6 +5203,37 @@ static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
 #endif
   return thvm_kbo(lhs, rhs, s->kbo);
 }
+
+// Stage 8 wrapper: structural-hash-keyed verdict cache.  See
+// src/atp/lpo_cache.c for the storage + invalidation.  With the flag
+// off this collapses to a direct call -- default build byte-identical.
+#ifdef THVM_ATP_LPO_ORIENT_CACHE
+static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL) return KBO_UN;
+  u64 lh = atp_term_struct_hash(lhs);
+  u64 rh = atp_term_struct_hash(rhs);
+  KboCmp cached;
+  int hit = atp_lpo_orient_cache_get(lh, rh, &cached);
+  if (hit && !atp_lpo_orient_verify_gate()) return cached;
+  KboCmp fresh = atp_compare_uncached(s, lhs, rhs);
+  if (hit && cached != fresh) {
+    char lb[2048], rb[2048];
+    atp_pretty_term(lhs, lb, sizeof lb);
+    atp_pretty_term(rhs, rb, sizeof rb);
+    fprintf(stderr, "ATP_LPO_ORIENT_CACHE MISMATCH cached=%d fresh=%d\n"
+                    " lh=0x%016llx rh=0x%016llx\n lhs=%s\n rhs=%s\n",
+            (int)cached, (int)fresh,
+            (unsigned long long)lh, (unsigned long long)rh, lb, rb);
+    abort();
+  }
+  if (!hit) atp_lpo_orient_cache_put(lh, rh, fresh);
+  return fresh;
+}
+#else
+static inline KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
+  return atp_compare_uncached(s, lhs, rhs);
+}
+#endif
 
 #if defined(ATP_ORDERED_REWRITE) || defined(ATP_MNF)
 // === variable-occurrence helpers ====================================

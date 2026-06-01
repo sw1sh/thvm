@@ -1,247 +1,124 @@
-# AtpFt: ATP-Private Flatterm Data Structure
+# AtpFt + LPO/Selection Plan (revised after Stage 7 profile)
 
-ATP is its own venture, separate from the heap-cell `Term` used by
-IC / UOP / WL. This plan stands up a native flatterm representation
-(`AtpFtCell`) modeled on Waldmeister's `TermzellenT`, with its own
-arenas and operations, so the ATP rewrite/match/normalize stack
-operates on AtpFt directly and only converts to heap-cell Term at
-narrow boundaries (WL bridge in/out, trace, pretty-print).
+ATP is its own venture, separate from heap-cell `Term` used by IC / UOP / WL.
+Stages 1-7 stood up a native flatterm representation (`AtpFtCell`) modeled
+on Waldmeister's `TermzellenT` with its own arenas, operations, and full
+match/splice/normalize/discrim-descent/CP-queue pipeline -- all gated by
+env flags, all live-verified at `test_atp 135624/135624` under
+`THVM_ATPFT_NORM_VERIFY=1` (live differential against the Term path).
 
-See `docs/atp/wm_native_cli_recipe.md.scoreboard` iter 200+ for the
-context that motivated this plan (the push-norm 10x gap to WM that
-the prior structural ports could not close because they were always
-fronting a Term-cell representation).
+**The original plan assumed push-norm us/cp was the dominant cost.**
+Stages 6/6b/7 landed sound at parity, confirming the hypothesis was wrong.
+A profile workflow (4 parallel agents: `sample`-based hot-function
+attribution, phase decomposition, trajectory shape, wmcli A/B) gave the
+revised picture below.
 
----
+## True bottleneck ranking (post-Stage-7 profile)
 
-## Cell layout (24 B, 8-byte aligned)
+| Rank | Bottleneck                                       | % wall  | Plan-as-written? |
+|------|--------------------------------------------------|---------|------------------|
+| 1    | LPO recursion (30.5% self / 66.6% incl)          | 30-45%  | **Not targeted** |
+| 2    | Dual-path legacy `atp_dt_*` + `acp_unpack_term`  | 25-30%  | Stages 8-9       |
+| 3    | CP-selection quality (35% unorientable rules)    | ~20%    | **Not targeted** |
+| 4    | push-norm full-R normalize (linear in `\|R\|`)   | ~15%    | Stage 8 NORM     |
+| 5    | KBO/CPQ auxiliary                                | ~5%     | Already landed   |
 
-```c
-typedef struct AtpFtCell {
-  struct AtpFtCell *next;   // 8B: next cell in pre-order walk (WM Nachf)
-  struct AtpFtCell *end;    // 8B: last cell of THIS subterm    (WM Ende)
-  u32               sym;    // 4B: sym (high bit = var flag)
-  u16               arity;  // 2B: 0..REWRITE_MAX_ARITY (cached -- avoids
-                            //     heap_read per visit; biggest single
-                            //     reason current FLAT cp-gen lags TREE)
-  u8                flags;  // 1B: bit0=subst_fresh, bit1=ground,
-                            //     bit2=lpo_rank_valid
-  u8                _pad;
-} AtpFtCell;
-```
+`sample`-based top-10 self-time confirms KBO group at 30.5% self
+(`kbo_lin_addto` 9.0%, `kbo_memo_combine` 7.3%, `kbo_subtree_memo` 6.1%,
+`kbo_vortest` 4.8%), legacy DT at 13.7% self, byte-Term unpack at
+13.0% self.
 
-Field order chosen so `cell->end->next` is the standard
-"next-sibling-of-this-subterm" jump (mirrors WM `TO_NaechsterTeilterm`
-and matches the offsets that thvm's existing `KboFlatNode` uses --
-LPO/KBO fast paths can take `AtpFtCell*` directly with zero encode).
+## Trajectory data
 
-`subst_fresh` = WM substFlag (innermost-rewrite skip).
-`ground` = OR-folded at construction by `ftnew_ctr` so LPO has an
-O(1) ground test it lacks today.
+| wall  | steps | rules | unorientable | rules/sec |
+|-------|-------|-------|--------------|-----------|
+| 20s   | 4003  | 397   | 84 (21%)     | 20        |
+| 60s   | 7047  | 516   | (growing)    | 3.0       |
+| 180s  | 13080 | 640   | 224 (35%)    | 1.0       |
 
-## Two-arena allocator
+Rule-acquisition rate decays 20x over 9x wall. wmcli sustains
+~162 rules/sec (1673 rules in 10.2s).  **Rate decay is the trajectory
+problem**, not per-CP cost.
 
-* **Arena A -- persistent.** Slab pool, 30000 cells/block (WM
-  number) = 720 KB per block, free-list per slab. Holds anything
-  reachable from a root (`s->lhs[i]`, `s->rhs[i]`, queued CPs,
-  witness bindings, MNF colored nodes).
-  Operations: `ft_alloc_persistent`, `ft_free_span(first, last)`
-  (O(1) chain push -- mirrors WM `TermzellenlisteLoeschen`).
+## Revised Stages 8-10
 
-* **Arena B -- scratch.** Bump pointer in one contiguous region
-  (256 KB to start, doubles on overflow). Reset O(1) at the top of
-  every push-norm / cp-gen call. Holds subject flatten, RHS rebuild
-  scratch, narrow/match temporaries.
+### Stage 8 (revised): LPO orientability cache + shape-hash memo key
 
-GC stays exactly as today: walks roots, but via `ft_walk_persistent`
-instead of `term_walk`. Scratch is invisible to GC.
+Replace the planned "precedence + weight/priority AtpFt" port.
 
-## Primitive API
+Implement:
+- Per-(lhs, rhs) orientability triple-cache {LR, RL, UNORIENTABLE}
+  keyed by `(term_shape_hash, term_shape_hash)`.
+- Re-key `kbo_subtree_memo` / `kbo_lin_addto` memos from term-pointer
+  to shape-hash so the 35% hit rate lifts toward 70%+.
+- Short-circuit `kbo_vortest` on cache hit before any recursion.
 
-```c
-// Construction (Arena A default; scratch=1 routes to Arena B)
-AtpFtCell *ftnew_var  (AtpFt *a, u32 var_id,            int scratch);
-AtpFtCell *ftnew_const(AtpFt *a, u32 sym,               int scratch);
-AtpFtCell *ftnew_ctr  (AtpFt *a, u32 sym, u16 arity,
-                       AtpFtCell *const *kids,          int scratch);
+Expected wall impact: **25-35% reduction** -- LPO sits inside both
+unorient-step (50% wall) and push-norm (42% wall).
 
-// Per-call substitution slot table (NOT in-cell -- shared rule LHSs
-// across matches would otherwise need per-match clearing)
-typedef struct { AtpFtCell *bind[REWRITE_MAX_VAR]; u32 wm; } AtpFtSubst;
-int  ft_match      (const AtpFtCell *pat, const AtpFtCell *subj, AtpFtSubst *o);
-AtpFtCell *ft_subst_apply(AtpFt *a, const AtpFtCell *tmpl,
-                          const AtpFtSubst *s, int scratch);
+Risk: LOW.  KBO precedence/weights are run-invariant so invalidation
+is trivial; reuses existing shape-hash infra from FT-RI.
 
-// In-place rewrite at a position
-AtpFtCell *ft_splice(AtpFt *a, AtpFtCell *root,
-                     AtpFtCell *redex_vorg, AtpFtCell *redex,
-                     const AtpFtCell *rhs_tmpl, const AtpFtSubst *s);
+### Stage 9 (revised): Retire legacy byte-Term mirror
 
-// Equality + hash (struct-keyed)
-int  ft_eq  (const AtpFtCell *x, const AtpFtCell *y);
-u64  ft_hash(const AtpFtCell *x);
+Keep the original Stage 8/9 intent reframed as code-hygiene cleanup.
 
-// Boundary
-AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch);
-Term       ft_to_term  (const AtpFtCell *x);
-```
+Implement:
+- Delete `atp_dt_descend_rec/child/insert_term` + the byte-queue
+  `atp_rewrite_normalize` path.
+- Drop `acp_unpack_term` from the hot path.
+- Make FT-RI authoritative for indexing/unification.
 
-## CP queue layout
+Expected wall impact: **20-25% reduction** (directly removes 22.7% self
++ GC pressure relief).
 
-Replaces `acp_pack`/`acp_unpack` varint encoding:
+Risk: MED.  Touch is wide -- every push-norm/cp-gen call site -- but
+the FT path is already proven equivalent (Stage 7 sound parity).
+Mostly mechanical deletion.
 
-```c
-typedef struct {
-  AtpFtCell *lhs;
-  AtpFtCell *rhs;
-  u32        size;
-  u32        weight;
-  u16        priority;
-  u16        origin_rule;
-} AtpCpEntry;
-```
+### Stage 10 (revised, scoped down): CP-selection bias against unorientable
 
-24 B header + cells (Arena A). ~144 B per 5-cell CP vs acp_pack's
-~12 B -- 10x larger storage, but eliminates the unpack + heap-Term
-materialize on every `select_cp` (the dominant cost we measured).
+Add an LPO-orientability check at CP-selection time (free if Stage 8's
+cache is in place).  De-prioritize or hard-defer CPs whose normalized
+form yields an unorientable rule.
 
-## LPO/KBO: AtpFt is the flatterm
+Expected wall impact: **40-60% reduction** to reach the same rule count,
+BUT risk that we just defer work rather than eliminate it.
 
-The existing `KboFlatNode` is exactly `{u32 sym; u32 next_sib; u16
-arity; ...}` -- a flatterm with sibling-skip. `AtpFtCell` is the
-same layout with the field order chosen so `cell->end->next` IS the
-next-sibling jump. Net: `thvm_kbo`/`thvm_lpo` accept `AtpFtCell*`
-with no encode step (Stage 3).
+Risk: HIGH.  Easy to mis-tune and starve the search.  A/B harness
+with wmcli's rule-trajectory as ground truth (wmcli IS runnable on
+this box via `DYLD_FRAMEWORK_PATH="/Applications/Wolfram 15.1.app/Contents/Frameworks"`).
 
----
+## What is OUT OF SCOPE
 
-# 10-Stage Migration
+- No further AtpFt porting beyond what Stage 9 cleanup requires.
+  The 5000+ LOC foundation is sound and complete.
+- Precedence / weight-priority queues stay on the legacy representation
+  (not on the critical path).
+- Sunk-cost porting beyond profile-driven justification is cancelled.
 
-Each stage is a separate commit, opt-in flag, leaves test_atp
-135624/135624 green. Stages in dependency order. Breakthrough at
-Stage 6.
+## Stage 1-7 status (all committed, all green)
 
-### Stage 1 -- cell + dual-arena allocator + slab pool
-- Scope: new `src/atp/ft.h` (cell struct) + `src/atp/ft_alloc.c`
-  (slab pool, bump scratch, `ft_alloc_persistent`, `ft_free_span`,
-  `ft_scratch_reset`, `ft_walk_persistent`). No live callers yet.
-  Unit test `tests/test_ft_alloc.c`.
-- Flag: `THVM_ATPFT_ALLOC` build define.
-- LOC: ~350. Risk: LOW (additive).
-- Accept: `test_ft_alloc` green; `test_atp` 135624/135624.
-- Push-norm impact: none.
+| Stage | Commit   | Acceptance                                            |
+|-------|----------|-------------------------------------------------------|
+| 1     | 85565a95 | test_ft_alloc 32811/32811                              |
+| 2     | c86e288a | test_ft 34/34 (1000-term round-trip + hash agreement)  |
+| 3     | 88c2423b | test_ft_order 100k/100k differential                   |
+| 4     | 9e72c6fd | test_atp_ft 135624/135624 (bit-identical bench)        |
+| 5     | 53ebd9e8 | test_ft_match 100k/100k differential                   |
+| 6     | f1259b1a | test_atp_ft_norm 135624/135624 + live VERIFY           |
+| 6b    | ca132d6d | test_atp_ft_ri 135624/135624                           |
+| 7     | 03bd2429 | test_atp_ft_cpq 135624/135624 + ALL FLAGS + VERIFY     |
 
-### Stage 2 -- constructors + boundary converters + struct-eq/hash
-- Scope: `ft.c` -- `ftnew_var/const/ctr` (stitches next/end,
-  OR-folds ground, caches arity); `ft_from_term`/`ft_to_term`;
-  `ft_eq`/`ft_hash` paralleling `atp_term_struct_hash`;
-  `atp_pretty_ft` mirror of `atp_pretty_term`. Test: 10k random
-  Terms round-trip via from/to and hash agrees with reference.
-- Flag: `THVM_ATPFT_CONVERT` build define.
-- LOC: ~450. Risk: LOW (pure converters, differential-tested).
-- Push-norm impact: none.
+Every flag combination including
+`THVM_ATPFT_CPQ=1 THVM_ATPFT_RI=1 THVM_ATPFT_NORM=1 THVM_ATPFT_NORM_VERIFY=1`
+produces 135624/135624.
 
-### Stage 3 -- AtpFt-native LPO/KBO entry points
-- Scope: add `thvm_kbo_ft(AtpFtCell*, AtpFtCell*)` and
-  `thvm_lpo_ft(...)` reading cells directly. `thvm_kbo(Term,Term)`
-  becomes a wrapper that calls `ft_from_term` (Arena-B scratch).
-  Validate via existing `test_kbo*`/`test_lpo*`/`test_probe_lpo_wm`.
-- Flag: `THVM_ATPFT_LPO=1` env.
-- LOC: ~400. Risk: LOW (LPO/KBO already flatterm-internal).
-- Push-norm impact: none (LPO is in cp-priority).
+## wmcli reference
 
-### Stage 4 -- rule storage migration (s->lhs/rhs -> AtpFtCell*)
-- Scope: `AtpState.lhs/rhs/r_dead_lhs_save/r_dead_rhs_save` become
-  `AtpFtCell **`. Update `atp_orient_and_add` and GC roots in
-  `thvm_atp_gc_collect`. Parallel `atp_ri_descend_ft` for the
-  rule index reading `cell->sym`/`cell->next`.
-- Flag: `THVM_ATPFT_RULES=1` env.
-- LOC: ~700. Risk: MED (GC roots).
-- Accept: `test_atp` green under both flag values; AndAssoc 30s
-  bench cp count matches within 0.1%.
-- Push-norm impact: partial (kills per-call rule flatten under
-  FLAT path).
+| problem      | wall   | rules | CPs       | result        |
+|--------------|--------|-------|-----------|---------------|
+| andassoc.pr  | 10.22s | 1673  | 4,574,980 | Goal proved.  |
+| wolfram.pr   | 3.93s  | 600   | 631,573   | Goal proved.  |
 
-### Stage 5 -- AtpFt-native match + slot-table substitution
-- Scope: `ft_match.c` -- `ft_match` (pattern vs subject ->
-  `AtpFtSubst.bind[REWRITE_MAX_VAR]` + wm watermark) and
-  `ft_subst_apply` (builds into Arena B). Differential test
-  against `thvm_match` over 10^5 cases. Wire into
-  `atp_ri_descend_ft` and `atp_overlap_ij`.
-- Flag: `THVM_ATPFT_MATCH=1` env (requires Stage 4).
-- LOC: ~600. Risk: MED (match correctness).
-- Push-norm impact: partial (slot-table backtrack, no per-match
-  clear pass).
-
-### Stage 6 -- AtpFt-native splice + subst_fresh push-norm  *** BREAKTHROUGH ***
-- Scope: `ft_splice.c` -- `ft_splice` doing the WM
-  `SigmaRInEZ`/`InLZ` split (build instantiated RHS in Arena B,
-  in-place splice into Arena A via next/end rewire, free displaced
-  span). Set `subst_fresh` on every freshly-spliced cell. New
-  `atp_rewrite_normalize_ft_fixpoint` consuming the bit (skip
-  cells with `subst_fresh==1` in inner-rewrite; clear after
-  fixpoint -- the WM `BL_NormalformInnermost2` trick).
-- Flag: `THVM_ATPFT_NORM=1` env (requires Stage 5).
-- LOC: ~750. Risk: MED.
-- Accept: `test_atp` green; pos-memo redundancy drops below 20%
-  (currently 91%).
-- Push-norm impact: **15.8 us/cp -> ~3-4 us/cp** (the WM trick
-  that closes most of the gap).
-
-### Stage 7 -- AtpFt CP queue (replace acp_pack)
-- Scope: replace `acp_pack`/`_unpack` + `cp_packed[]` with
-  `AtpCpEntry` rooted in Arena A. Update queue push/pop,
-  `select_cp`, `cp_get/set`, `peek_top_k`, `cp_features`.
-- Flag: `THVM_ATPFT_CPQ=1` (requires Stage 6).
-- LOC: ~550. Risk: MED.
-- Accept: AndAssoc 30s -- live-CP timeline, selection order, and
-  final proof byte-identical.
-- Push-norm impact: partial (~1 us/cp from no re-flatten on
-  select_cp).
-
-### Stage 8 -- precedence.c + weight/priority paths
-- Scope: `src/atp/precedence.c` ports + `_.c` weight/priority
-  sites (`atp_kbo_weight`, `atp_cp_priority`, `atp_goal_*`,
-  `atp_term_depth`, etc.) read AtpFt cells directly.
-- Flag: `THVM_ATPFT_PRIO=1` (requires Stage 7).
-- LOC: ~500. Risk: LOW.
-- Push-norm impact: partial (kills per-call flatten on weight/
-  priority path that fires 22.6M ri-queries/run).
-
-### Stage 9 -- MNF + hash memos + trace-arg cleanup
-- Scope: re-key `atp_unf_memo`, `atp_norm_memo`, `mnf_lookup/insert`,
-  `atp_struct_hash` with `ft_hash`/`ft_eq`. Trace and proof-step
-  `before/after` stay heap Term (cold, GC-rooted) but converted
-  via `ft_to_term` at recording site.
-- Flag: `THVM_ATPFT_MEMOS=1` (requires Stage 8).
-- LOC: ~400. Risk: LOW.
-- Push-norm impact: partial (~0.5 us/cp -- kills Term materialize
-  on memo probes).
-
-### Stage 10 -- cutover
-- Scope: flip defaults of all `THVM_ATPFT_*` flags to ON. Keep
-  Term-path source + `THVM_ATPFT_DISABLE=1` escape hatch for one
-  release. Update scoreboard. Delete dead `acp_pack`/`_unpack`
-  in a follow-up.
-- Flag: `THVM_ATPFT_DISABLE=1` reverses.
-- LOC: ~150. Risk: LOW.
-- Accept: AndAssoc 30s push-norm <= 2.5 us/cp; mccune cracker
-  push-norm <= 2.5 us/cp; `test_atp` 135624/135624.
-
----
-
-## Summary
-
-**10 stages, ~4850 LOC total**: 650 infra + 1300 LPO/match/splice +
-1050 rules/queue + 900 priority/memos + 950 cleanup/cutover.
-
-**Breakthrough at Stage 6** when `subst_fresh` + in-place splice +
-slot-table backtrack collapse the per-cell allocation tax dominating
-the current 15.8 us/cp push-norm.
-
-Stages 7-9 trim the remaining 30-40%.
-
-Each preceding stage individually leaves test_atp 135624/135624
-green and ships behind its own env / build flag, so a regression
-rolls back to the prior tested configuration without losing the
-intervening commits.
+Wrapper: `DYLD_FRAMEWORK_PATH="/Applications/Wolfram 15.1.app/Contents/Frameworks" wmcli <file.pr>`.
