@@ -31,7 +31,7 @@ Conventions:
 | `sp=arity` | `"AutoPrecedence" -> True` | `src/atp/precedence.c::atp_auto_precedence` | Fuchs arity ladder — same direction as Vampire's. |
 | `sp=occurrence` | `"AutoPrecedence" -> "Occurrence"` | `src/atp/precedence.c::atp_occurrence_precedence` | Vampire `sp=occurrence` / E `-G InvFreqRank`. |
 | `sp=reverse_arity` | GAP | — | Inverted arity ladder.  Worth porting — appeared 10× in winning configs. |
-| `sp=reverse_frequency` | GAP | — | Most common (122 wins) — inverted occurrence frequency.  HIGH-VALUE PORT TARGET. |
+| `sp=reverse_frequency` | `"AutoPrecedence" -> "ReverseFrequency"` | `src/atp/precedence.c::atp_reverse_frequency_precedence` | PORTED (commit 3ba3f8f4).  Probe on 6 stuck NotableTheorems @ TC=60s with LPO+ReverseFrequency+GroundJoin+BackwardDemod+RHSInterreduce+UnfailingCP cracked 0 -- necessary but not sufficient; needs combination with the still-unported `spb`/`nwc`/`kws` knobs. |
 | (explicit) | `"Precedence" -> {...}` | `wl/THVMLink/CSource/thvmlink_atp.c` args[17] → `LpoConfig.precedence` | Symbol-name list, highest-to-lowest.  Mirrors Waldmeister's `p > q > nand`. |
 | (skolems-highest) | `"SkolemHighest" -> True` | same | Ranks goal's ground/skolemized constants above operators. |
 
@@ -110,10 +110,9 @@ the winning strategy verbatim.  Three patterns dominate:
 
 Ordered by win-frequency in `vampire_raw/`:
 
-1. **`sp=reverse_frequency` precedence** (122 wins) — port to
-   `src/atp/precedence.c` as `atp_reverse_frequency_precedence`.  Wire
-   into the `"AutoPrecedence"` dispatch alongside the existing
-   "Occurrence" mode.
+1. ~~**`sp=reverse_frequency` precedence** (122 wins)~~ — PORTED
+   (commit 3ba3f8f4).  Solo probe on 6 hard cases cracked 0 / 6;
+   needs combination with the remaining items below to move the bench.
 2. **`spb=goal_then_units` literal selection** (38 wins) — at CP
    selection time, pick a clause that contains a goal literal first,
    then units, then others.  Lives next to `atp_select_cp` in
