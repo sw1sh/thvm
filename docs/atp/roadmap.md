@@ -200,6 +200,12 @@ End-to-end smoke (in tests/test_fol.c):
   `∀x.(P(x) -> Q(x)) ∧ P(a) ∧ ¬Q(a)`  -> PROVED via cnf_run.
   Russell-style `∀x.(R(x,x) <-> ¬R(x,x))`  -> PROVED.
 
+Standard FOL bench (in tests/test_fol_pelletier.c):
+  Pelletier P1-P10 (propositional) + P15 (∀-quantifier) all PROVE
+  end-to-end via fol_formula_to_clauses -> cnf_run.  Covers
+  contrapositive, double-negation, Peirce's law, mutual implications,
+  ∀-distribution.
+
 Demodulation lands in two layers:
 
 * Primitive `fol_demodulate(eq_clause, target)` in src/fol/_.c:
