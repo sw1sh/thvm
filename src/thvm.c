@@ -438,13 +438,15 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "cp/_.c"
 
 // === atp/ ===
+// Algebraic-structure detection + precedence generation, ported
+// from Waldmeister's PhilMarlow + Praezedenzgenerator.  Included
+// BEFORE the saturator so atp/ac.c (transitively included by
+// atp/_.c) can call atp_analyze_axioms from thvm_atp_auto_ac.
+#include "atp/precedence.c"
+
 // Saturation-loop state: AtpState struct + init / free /
 // add_equation / set_goal.  Step + run drivers land in 5.2.
 #include "atp/_.c"
-
-// Algebraic-structure detection + precedence generation, ported
-// from Waldmeister's PhilMarlow + Praezedenzgenerator.
-#include "atp/precedence.c"
 
 // === wald/ ===
 // Waldmeister .pr spec parser (stage 6.3).  Data model only at

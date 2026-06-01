@@ -397,7 +397,7 @@ static u64 atp_term_struct_hash(Term t) {
   }
 }
 
-// Stage 8: LPO/KBO orientability cache.  Gated by THVM_ATP_LPO_ORIENT_CACHE;
+// LPO/KBO orientability cache.  Gated by THVM_ATP_LPO_ORIENT_CACHE;
 // compiles to nothing when the flag is off so the default build stays
 // byte-identical.  Defined here -- after atp_term_struct_hash, before
 // atp_compare -- so the wrapped comparator below can call it.
@@ -407,6 +407,13 @@ static u64 atp_term_struct_hash(Term t) {
 #else
 #define ATP_ORIENT_CACHE_INVAL() ((void)0)
 #endif
+
+// AC reasoning: declarations + canonical-form flatten + AC-equality
+// / AC-hash.  See docs/atp/engineering.md.  Gated on THVM_ATP_AC;
+// off the flag the file compiles to nothing.  Included here so the
+// global g_atp_ac_info + atp_ac_eq are visible to the trivial-join
+// wiring below.
+#include "ac.c"
 
 // Normalize result cache: maps (term_struct_hash, g_atp_unf_memo_epoch)
 // to the already-normalized Term.
@@ -9493,6 +9500,21 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   *lhs = l;
   *rhs = r;
   u8 joined = kbo_eq(l, r);
+#ifdef THVM_ATP_AC
+  // AC-equality redundancy: when an AC bitmask is registered (via
+  // thvm_atp_set_ac_mask or thvm_atp_auto_ac), treat AC-equal normal
+  // forms as joinable.  Sound iff the AC axioms (commutativity +
+  // associativity) for every masked label are present in the rule
+  // set -- normalize would have closed any AC-equal pair via those
+  // axioms eventually, so the CP is redundant.  No-op when the mask
+  // is 0.
+  if (!joined && thvm_atp_get_ac_mask() != 0ull) {
+    AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
+    if (atp_ac_eq(l, r, &ac)) {
+      joined = 1u;
+    }
+  }
+#endif
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
   // Stage 6: AtpFt-native push-norm joinable check.
   //

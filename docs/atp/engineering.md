@@ -383,7 +383,7 @@ Set via `-D` at compile time (`CFLAGS` or per-target Makefile rule).
 | `THVM_ATPFT_RI`                 | `atp_ri_descend_ft` (cell-walking discrim tree)                |
 | `THVM_ATPFT_CPQ`                | native AtpFt CP queue alongside byte queue                     |
 | `THVM_ATP_LPO_ORIENT_CACHE`     | LPO/KBO orientability cache (top-level)                        |
-| `THVM_ATP_AC`                   | AC declarations + canonical-form flatten                       |
+| `THVM_ATP_AC`                   | AC declarations + canonical form + AC-eq trivial-join hook    |
 | `ATP_RULE_INDEX`                | discrim tree over rule LHSs (default on)                       |
 | `ATP_FV_INDEX`                  | FV index over queued CPs (default on)                          |
 | `ATP_CP_GRAPH`                  | Term-DAG CP mirror (optional debug / classifier)               |
@@ -430,6 +430,12 @@ Filters:
   `thvm_atp_set_perm_subsume_mask(mask)` — WM `GZ_ACVerzichtbar`
   filter: drop CPs whose two sides are AC-equal at the top symbol,
   for the bit-masked symbols.
+* `thvm_atp_set_ac_mask(mask)` / `thvm_atp_get_ac_mask()` /
+  `thvm_atp_auto_ac(lhs, rhs, n)` — register the engine-global AC
+  bit-mask (each bit = "this CTR label is associative + commutative").
+  When set, `atp_cp_trivially_joinable` treats AC-equal normal forms
+  as joined.  `auto_ac` derives the mask from a caller-supplied
+  axiom set.  Requires `-DTHVM_ATP_AC` at build time.
 * `thvm_atp_set_use_rule_subsume_drop(s, on)` — WM `dokgS`:
   push-time rule-subsumption drop.
 * `thvm_atp_set_use_fwd_subsume(s, on)` and

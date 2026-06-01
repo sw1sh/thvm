@@ -4199,6 +4199,19 @@ fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_perm_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
+
+#ifdef THVM_ATP_AC
+// AC reasoning controls.  See src/atp/ac.c.  `set_ac_mask` registers
+// a u64 bit-mask of CTR labels that are associative + commutative;
+// `auto_ac` derives the mask by analyzing a caller-supplied axiom
+// set (parallel `lhs[]` / `rhs[]` arrays + count).
+// `atp_cp_trivially_joinable` then treats AC-equal normal forms as
+// joinable for these symbols.
+fn void      thvm_atp_set_ac_mask(u64 mask);
+fn u64       thvm_atp_get_ac_mask(void);
+fn void      thvm_atp_auto_ac    (const Term *lhs, const Term *rhs, u32 n_eqns);
+#endif
+
 fn void      thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);

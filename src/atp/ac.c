@@ -214,4 +214,89 @@ static Term atp_ac_canon(Term t, const AtpAcInfo *ac) {
   return atp_ac_canon_rec(t, ac);
 }
 
+// --- AC equality and AC hash ---------------------------------------
+//
+// `atp_ac_eq(s, t, ac)` decides `s ≡_AC t` -- structural equality up
+// to (a) commuting AC-symbol children and (b) re-associating AC-
+// symbol subterms.  Implemented as `kbo_eq(canon(s), canon(t))`
+// where `canon` is the right-associative hash-sorted chain produced
+// by `atp_ac_canon`.  Allocation cost is bounded by the union of
+// AC subterms across `s` and `t`; the common case is allocation-free
+// (no AC subterm, identity-return from canon, kbo_eq on the
+// originals).
+//
+// `atp_ac_hash(t, ac)` is a 64-bit FNV-style hash invariant under
+// AC.  Computed as `atp_term_struct_hash(canon(t))`, so by
+// construction `atp_ac_eq(s, t, ac) == 1 ==> atp_ac_hash(s, ac) ==
+// atp_ac_hash(t, ac)`.
+
+// Forward decl from _.c (kbo_eq lives outside ac.c's TU).
+static u8 kbo_eq(Term a, Term b);
+
+static u8 atp_ac_eq(Term s, Term t, const AtpAcInfo *ac) {
+  if (kbo_eq(s, t)) return 1;
+  if (ac == NULL || ac->ac_mask == 0ull) return 0;
+  Term cs = atp_ac_canon(s, ac);
+  Term ct = atp_ac_canon(t, ac);
+  return kbo_eq(cs, ct);
+}
+
+static u64 atp_ac_hash(Term t, const AtpAcInfo *ac) {
+  if (ac == NULL || ac->ac_mask == 0ull) return atp_term_struct_hash(t);
+  return atp_term_struct_hash(atp_ac_canon(t, ac));
+}
+
+// --- Engine-global AcInfo + setters --------------------------------
+//
+// One file-static `g_atp_ac_info` carries the AC bit-mask used by
+// hot-path callers (`atp_cp_trivially_joinable`, future AC-matching
+// in the rewriter).  Mirrors the global-static discipline of
+// `g_atp_perm_subsume_mask` in `_.c`.
+//
+// Callers can set the mask explicitly (e.g. WL paclet writes the
+// auto-detected mask via a setter) or run `thvm_atp_auto_ac(s)`
+// after `thvm_atp_add_equation` calls to derive the mask from the
+// engine's current rule set.
+
+static AtpAcInfo g_atp_ac_info = { .ac_mask = 0ull };
+
+fn void thvm_atp_set_ac_mask(u64 mask) {
+  g_atp_ac_info.ac_mask = mask;
+}
+
+fn u64 thvm_atp_get_ac_mask(void) {
+  return g_atp_ac_info.ac_mask;
+}
+
+// Derive the AC mask by analyzing an explicit axiom set.  The caller
+// supplies the per-equation lhs[] / rhs[] arrays + count -- the
+// engine's `s->lhs[]`/`rhs[]` storage holds POST-ORIENTATION rules,
+// not the raw axiom equations, so a caller that wants AC inferred
+// from the user-supplied axioms must keep its own copy and feed
+// them through here.  (The WL bridge does this naturally; tests
+// supply their corpus directly.)
+fn void thvm_atp_auto_ac(const Term *lhs, const Term *rhs, u32 n_eqns) {
+  if (lhs == NULL || rhs == NULL || n_eqns == 0u) {
+    g_atp_ac_info.ac_mask = 0ull;
+    return;
+  }
+  AtpSymProps props[WALD_MAX_SYMBOLS];
+  for (u32 i = 0; i < WALD_MAX_SYMBOLS; i++) {
+    props[i].seen = 0u;
+    props[i].arity = 0u;
+    props[i].is_commutative = 0u;
+    props[i].is_associative = 0u;
+    props[i].is_idempotent = 0u;
+    props[i].has_left_unit = 0u;
+    props[i].has_right_unit = 0u;
+    props[i].has_inverse = 0u;
+    props[i].is_unit_symbol = 0u;
+    props[i].is_inverse_symbol = 0u;
+    props[i].distributes = 0u;
+    props[i].distributes_over = 0u;
+  }
+  atp_analyze_axioms(lhs, rhs, n_eqns, props, WALD_MAX_SYMBOLS);
+  atp_acinfo_compute(&g_atp_ac_info, props, WALD_MAX_SYMBOLS);
+}
+
 #endif // THVM_ATP_AC

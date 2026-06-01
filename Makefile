@@ -316,7 +316,8 @@ TESTS := \
   $(BIN)/test_ft_cpq \
   $(BIN)/test_atp_ft_cpq \
   $(BIN)/test_lpo_cache \
-  $(BIN)/test_ac
+  $(BIN)/test_ac \
+  $(BIN)/test_atp_ac
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -779,10 +780,20 @@ $(BIN)/test_lpo_cache: tests/test_lpo_cache.c $(SRC) | $(BIN)
 	  -DTHVM_ATP_LPO_ORIENT_CACHE \
 	  -o $@ $< $(TEST_LDFLAGS)
 
-# AC reasoning (src/atp/ac.c).  Gated by THVM_ATP_AC -- declarations
-# + canonical-form flatten with no live caller yet, so the default
-# build is byte-identical.  Stage 1 of the AC arc; see docs/atp/roadmap.md.
+# AC reasoning (src/atp/ac.c).  Gated by THVM_ATP_AC.  With the mask
+# left at 0 (the default), the AC-eq trivial-join hook is a no-op,
+# so the test suite is byte-identical to the default build.  See
+# docs/atp/roadmap.md for the staged AC arc.
 $(BIN)/test_ac: tests/test_ac.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# test_atp.c compiled with -DTHVM_ATP_AC.  The headline acceptance:
+# the full 135624-assertion ATP regression suite under a build that
+# has AC support compiled in (mask defaults to 0 so behaviour is
+# byte-identical to the default).
+$(BIN)/test_atp_ac: tests/test_atp.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC \
 	  -o $@ $< $(TEST_LDFLAGS)
