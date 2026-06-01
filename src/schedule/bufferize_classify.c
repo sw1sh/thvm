@@ -1311,6 +1311,21 @@ fn void bufferize_classify(Term root) {
                                             visited, &n_visited, 8, 16);
       if (outer_src == 0 || term_tag(outer_src) != TAG_UOP) continue;
       if (term_val(outer_src) != info->loc) continue;
+      // tinygrad keeps the bufferize between two reduce OPS whenever the
+      // outer reduce's body reads the inner reduce's buffered output
+      // (remove_bufferize, schedule/rangeify.py:269-293: buffer_in_reduce
+      // -> return None, PCONTIG default 0).  A multi-axis reduce of one
+      // logical reduce is a single REDUCE op with multiple ranges
+      // (convert_reduce_to_reduce_with_ranges), never two ops -- so the
+      // only way two REDUCE ops chain here is genuinely separate reduces.
+      // Fusing different-kind reduces (MAX-pool feeding a SUM) into one
+      // kernel corrupts the result: the inner reduce's accumulator
+      // semantics are lost when inlined into the outer reduce body.  Gate
+      // the unmark on matching kinds so a kind-mismatched chain keeps its
+      // boundary (two kernels), matching tinygrad.
+      u32 inner_kind = (u32)term_val(heap_read(info->loc + 1));
+      u32 outer_kind = (u32)term_val(heap_read(consumer_locs[0] + 1));
+      if (inner_kind != outer_kind) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
     // Fanin-cap split: mark wide-fanin elementwise/movement children
