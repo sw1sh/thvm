@@ -648,7 +648,7 @@ int main(void) {
 
     // Labels 0..5 (LAB_F=1, LAB_G=2, LAB_A=3, LAB_B=4, LAB_C=5).
     static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
-    static const u32 P[8] = { 0u, 6u, 5u, 1u, 1u, 4u, 0u, 0u };
+    static const u32 P[8] = { 0u, 6u, 5u, 1u, 2u, 4u, 0u, 0u };
     KboConfig kbo = { .weights = W, .precedence = P,
                       .n_labels = 8, .var_weight = 1u };
     AtpState *s = thvm_atp_init(&kbo, 1024);
@@ -668,6 +668,68 @@ int main(void) {
 
     thvm_atp_free(s);
     thvm_atp_set_ac_mask(0ull);
+  }
+
+  // -- T27: atp_kbo_ac equates AC-permutations --------------------------
+  TEST_BEGIN("ac/kbo-ac-equates-permutations");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    static const u32 P[8] = { 0u, 6u, 5u, 1u, 2u, 4u, 0u, 0u };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 8, .var_weight = 1u };
+
+    Term a = k(LAB_A), b = k(LAB_B), c = k(LAB_C);
+
+    // Syntactically distinct AC-permutations should compare EQ.
+    Term s1 = bin(LAB_F, a, b);
+    Term s2 = bin(LAB_F, b, a);
+    CHECK(thvm_kbo(s1, s2, &kbo) != KBO_EQ);     // syntactic: unequal
+    CHECK(atp_kbo_ac(s1, s2, &kbo, &ac) == KBO_EQ); // AC-aware: equal
+
+    // f(a, f(b, c))  vs  f(f(c, b), a)  -- different shape, same multiset
+    Term s3 = bin(LAB_F, a, bin(LAB_F, b, c));
+    Term s4 = bin(LAB_F, bin(LAB_F, c, b), a);
+    CHECK(atp_kbo_ac(s3, s4, &kbo, &ac) == KBO_EQ);
+
+    // Distinct multisets -- AC-aware sees a strict ordering.
+    Term s5 = bin(LAB_F, a, a);   // {a, a}
+    Term s6 = bin(LAB_F, b, b);   // {b, b}
+    KboCmp r = atp_kbo_ac(s5, s6, &kbo, &ac);
+    CHECK(r == KBO_GT || r == KBO_LT);   // not EQ, not UN
+  }
+
+  // -- T28: atp_lpo_ac mirrors the AC-equality behaviour -----------------
+  TEST_BEGIN("ac/lpo-ac-equates-permutations");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    static const u32 P[8] = { 0u, 6u, 5u, 1u, 2u, 4u, 0u, 0u };
+    LpoConfig lpo = { .precedence = P, .n_labels = 8 };
+
+    Term a = k(LAB_A), b = k(LAB_B);
+    Term s1 = bin(LAB_F, a, b);
+    Term s2 = bin(LAB_F, b, a);
+    CHECK(thvm_lpo(s1, s2, &lpo) != LPO_EQ);
+    CHECK(atp_lpo_ac(s1, s2, &lpo, &ac) == LPO_EQ);
+  }
+
+  // -- T29: empty-AC-mask atp_*_ac collapses to syntactic ---------------
+  TEST_BEGIN("ac/orderings-no-op-on-empty-mask");
+  {
+    AtpAcInfo empty = { .ac_mask = 0ull };
+    static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    static const u32 P[8] = { 0u, 6u, 5u, 1u, 2u, 4u, 0u, 0u };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 8, .var_weight = 1u };
+    LpoConfig lpo = { .precedence = P, .n_labels = 8 };
+
+    Term a = k(LAB_A), b = k(LAB_B);
+    Term s1 = bin(LAB_F, a, b);
+    Term s2 = bin(LAB_F, b, a);
+
+    // No AC declared -> AC-aware ordering is the syntactic ordering.
+    CHECK(atp_kbo_ac(s1, s2, &kbo, &empty) == thvm_kbo(s1, s2, &kbo));
+    CHECK(atp_lpo_ac(s1, s2, &lpo, &empty) == thvm_lpo(s1, s2, &lpo));
   }
 
   thvm_free();

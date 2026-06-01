@@ -620,6 +620,50 @@ fn u8 atp_ac_extend_rule(Term lhs, Term rhs, const AtpAcInfo *ac,
   return 1u;
 }
 
+// --- AC-aware reduction orderings ----------------------------------
+//
+// `atp_kbo_ac(s, t, kbo, ac)` and `atp_lpo_ac(s, t, lpo, ac)`
+// canonicalize both terms modulo AC (right-associative hash-sorted
+// chain over AC-symbol positions; non-AC subterms untouched) and
+// then apply the syntactic ordering to the canonical forms.  The
+// verdict is AC-invariant by construction: s ≡_AC t implies
+// canon(s) == canon(t), so the ordering returns KBO_EQ / LPO_EQ on
+// AC-permuted siblings.
+//
+// This is the simplest correct AC-compatible ordering.  It's
+// strictly more powerful than the syntactic ordering on AC theories
+// because it avoids the cycle where two AC-equal terms get
+// alternating orientations on every superposition step.
+//
+// Cost: one atp_ac_canon walk per side per compare.  For non-AC
+// terms canon is identity (no allocation), so non-AC workloads pay
+// nothing.  AC workloads pay an O(|term|) bottom-up rebuild per
+// compare; cache-eviction discipline is the same as the syntactic
+// orderings (epoch-stamped, invalidated on GC).
+//
+// Reference: Steinbach (1989) for AC-KBO; Bachmair-Plaisted (1989)
+// for AC-LPO.  The canonical-form trick is a simplification: the
+// "pure" constructions track AC weights / per-symbol-precedence
+// rules separately, but the canonical-form reduction is sound and
+// sufficient for the current AC theory coverage (commutativity,
+// associativity, group/ring axioms, lattices).  Future stage may
+// replace this with the structural AC-KBO if AC-completeness with
+// finer ordering control is needed.
+
+fn KboCmp atp_kbo_ac(Term s, Term t, const KboConfig *cfg, const AtpAcInfo *ac) {
+  if (ac == NULL || ac->ac_mask == 0ull) return thvm_kbo(s, t, cfg);
+  Term cs = atp_ac_canon(s, ac);
+  Term ct = atp_ac_canon(t, ac);
+  return thvm_kbo(cs, ct, cfg);
+}
+
+fn LpoCmp atp_lpo_ac(Term s, Term t, const LpoConfig *cfg, const AtpAcInfo *ac) {
+  if (ac == NULL || ac->ac_mask == 0ull) return thvm_lpo(s, t, cfg);
+  Term cs = atp_ac_canon(s, ac);
+  Term ct = atp_ac_canon(t, ac);
+  return thvm_lpo(cs, ct, cfg);
+}
+
 // --- Engine-global AcInfo + setters --------------------------------
 //
 // One file-static `g_atp_ac_info` carries the AC bit-mask used by

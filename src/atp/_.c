@@ -5182,6 +5182,22 @@ fn void thvm_atp_set_goal_interleave(AtpState *s, u32 ratio) {
 // function and the default build is byte-identical.
 static KboCmp atp_compare_uncached(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL) return KBO_UN;
+#ifdef THVM_ATP_AC
+  // AC-aware ordering: when an AC mask is registered, route through
+  // atp_kbo_ac / atp_lpo_ac.  They canonicalize both terms modulo
+  // AC and apply the syntactic ordering to the canonical forms, so
+  // the verdict is AC-invariant by construction.  Without this,
+  // AC-permuted siblings flip orientation on every superposition
+  // step and the trajectory blows up.
+  u64 ac_mask = thvm_atp_get_ac_mask();
+  if (ac_mask != 0ull) {
+    AtpAcInfo ac = { .ac_mask = ac_mask };
+    if (s->lpo != NULL) {
+      return (KboCmp)atp_lpo_ac(lhs, rhs, s->lpo, &ac);
+    }
+    return atp_kbo_ac(lhs, rhs, s->kbo, &ac);
+  }
+#endif
   if (s->lpo != NULL) {
     return (KboCmp)thvm_lpo(lhs, rhs, s->lpo);
   }
