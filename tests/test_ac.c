@@ -518,6 +518,118 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);
   }
 
+  // -- T22: atp_ac_extend_rule builds f(lhs, z) / f(rhs, z) -------------
+  //
+  // Rule  f(a, b) -> c  with f AC.  Extension f(f(a, b), z) -> f(c, z)
+  // where z is a fresh var id (no var in the rule, so z = 0).
+  TEST_BEGIN("ac/extend-rule-ground");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term a = k(LAB_A), b = k(LAB_B), c = k(LAB_C);
+    Term lhs = bin(LAB_F, a, b);   // f(a, b)
+    Term rhs = c;                  // c
+
+    Term ext_lhs = 0, ext_rhs = 0;
+    CHECK(atp_ac_extend_rule(lhs, rhs, &ac, &ext_lhs, &ext_rhs));
+    CHECK(term_tag(ext_lhs) == TAG_CTR);
+    CHECK(term_ext(ext_lhs) == LAB_F);
+    CHECK(term_tag(ext_rhs) == TAG_CTR);
+    CHECK(term_ext(ext_rhs) == LAB_F);
+
+    // Ext-LHS arity 2: first child is the original lhs; second is a var.
+    CHECK_EQ(term_ctr_n(ext_lhs), 2u);
+    Term lhs0 = term_ctr_at(ext_lhs, 0);
+    Term lhs1 = term_ctr_at(ext_lhs, 1);
+    CHECK(kbo_eq(lhs0, lhs));
+    CHECK(term_tag(lhs1) == TAG_FVR);
+    u32 z_id = term_ext(lhs1);
+
+    // Ext-RHS uses the SAME fresh var id as ext-LHS (so it's a
+    // valid rule: vars of rhs ⊆ vars of lhs).
+    CHECK_EQ(term_ctr_n(ext_rhs), 2u);
+    Term rhs0 = term_ctr_at(ext_rhs, 0);
+    Term rhs1 = term_ctr_at(ext_rhs, 1);
+    CHECK(kbo_eq(rhs0, rhs));
+    CHECK(term_tag(rhs1) == TAG_FVR);
+    CHECK_EQ(term_ext(rhs1), z_id);
+
+    // ext_rhs's vars are contained in ext_lhs's vars (the basic rule
+    // invariant -- here: just z appears on both sides).
+    CHECK(atp_vars_contained(ext_rhs, ext_lhs));
+  }
+
+  // -- T23: extend with existing vars in the rule -----------------------
+  //
+  // Rule  f(x, a) -> g(x)  with f AC, x = var 0.  Extension picks
+  // fresh z = var 1 and builds f(f(x, a), z) -> f(g(x), z).
+  TEST_BEGIN("ac/extend-rule-with-vars");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0);
+    Term a = k(LAB_A);
+    Term lhs = bin(LAB_F, x, a);          // f(x, a)
+    Term rhs = bin(LAB_G, x, x);          // g(x, x) -- vars contained in lhs
+
+    Term ext_lhs = 0, ext_rhs = 0;
+    CHECK(atp_ac_extend_rule(lhs, rhs, &ac, &ext_lhs, &ext_rhs));
+    CHECK_EQ(term_ext(ext_lhs), LAB_F);
+    Term zL = term_ctr_at(ext_lhs, 1);
+    Term zR = term_ctr_at(ext_rhs, 1);
+    CHECK(term_tag(zL) == TAG_FVR);
+    CHECK(term_tag(zR) == TAG_FVR);
+    CHECK_EQ(term_ext(zL), 1u);            // z = 1, fresh past var 0 (x)
+    CHECK_EQ(term_ext(zR), 1u);
+  }
+
+  // -- T24: extend bails on non-AC rule ----------------------------------
+  TEST_BEGIN("ac/extend-rule-non-ac-bail");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0);
+    Term a = k(LAB_A);
+    Term lhs = bin(LAB_G, x, a);   // g is NOT AC
+    Term rhs = x;
+
+    Term ext_lhs = 0, ext_rhs = 0;
+    CHECK(!atp_ac_extend_rule(lhs, rhs, &ac, &ext_lhs, &ext_rhs));
+    // Out args untouched on bail.
+    CHECK_EQ(ext_lhs, 0);
+    CHECK_EQ(ext_rhs, 0);
+  }
+
+  // -- T25: extension lets AC-matcher cover merge positions -------------
+  //
+  // R+ = f(f(a, b), z) → f(c, z).  An AC-matching subject f(a, b, d)
+  // (i.e. AC-flat {a, b, d}) should match R+.LHS with z = d.
+  TEST_BEGIN("ac/extend-rule-matches-merge");
+  {
+    thvm_atp_set_ac_mask(1ull << LAB_F);
+    AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
+
+    Term a = k(LAB_A), b = k(LAB_B), c = k(LAB_C);
+    Term d = k(LAB_A);                     // reuse LAB_A as a generic ground
+                                           // (actually use a distinct: skip and use LAB_C as d)
+    d = bin(LAB_F, c, c);                  // a non-trivial ground; not in {a, b}
+
+    Term lhs = bin(LAB_F, a, b);
+    Term rhs = c;
+    Term ext_lhs = 0, ext_rhs = 0;
+    CHECK(atp_ac_extend_rule(lhs, rhs, &ac, &ext_lhs, &ext_rhs));
+
+    // Subject AC-flatten = {a, b, d}.  AC-match ext_lhs against
+    // this subject should succeed with z = d (the leftover after
+    // {a, b} are matched).
+    Term subj = bin(LAB_F, a, bin(LAB_F, b, d));   // AC-flat {a, b, d}
+    RewriteSubst subst = {{0}};
+    CHECK(atp_match_ac(ext_lhs, subj, &ac, &subst));
+    // z had id m+1 where m = max var id in original lhs (-1, since
+    // lhs is ground) and rhs (-1, since rhs is c, ground).  So z = 0.
+    CHECK(subst.bindings[0] != 0);
+    CHECK(kbo_eq(subst.bindings[0], d));
+
+    thvm_atp_set_ac_mask(0ull);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

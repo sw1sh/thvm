@@ -533,6 +533,93 @@ fn u8 atp_match_ac(Term pattern, Term subject,
   return 1;
 }
 
+// --- AC rule extension (Bachmair-Plaisted) -------------------------
+//
+// For AC-completeness, a rewrite system R must be closed under
+// superposition AT MERGE POSITIONS that the syntactic overlap rule
+// misses.  The standard Bachmair-Plaisted construction routes this
+// through a per-rule "extension":
+//
+//   Rule R : l → r with l's top symbol f AC
+//   ↓
+//   Rule R+ : f(l, z) → f(r, z)  where z is fresh.
+//
+// Overlapping R+ with any other AC-top rule R' covers the merge-
+// position CPs that vanilla overlapping R with R' would skip.  E.g.
+//
+//   R  : f(a, b) → c     (a, b ground; f AC)
+//   R' : f(x, y) → g(x, y)
+//
+// Vanilla overlap: R'.LHS = f(x, y) unifies with R.LHS at the top
+// position only, giving CP (c, g(a, b)).
+//
+// R+ : f(f(a, b), z) → f(c, z).  Overlap R+.LHS with R'.LHS at the
+// top of R+: f(f(a,b), z) ≡_AC f(x, y) under σ = {x → f(a,b),
+// y → z} OR {x → a, y → f(b, z)} OR {x → b, y → f(a, z)}.  These
+// are the "merge" overlaps -- the matcher must explore them for AC
+// completeness.
+//
+// atp_ac_extend_rule(lhs, rhs, ac, *ext_lhs, *ext_rhs):
+//   Returns 1 if l's top is AC, writes ext_lhs = f(lhs, z),
+//   ext_rhs = f(rhs, z) for a fresh var z (id > all vars in l or r).
+//   Returns 0 if l's top is not an AC label -- non-AC rules don't
+//   need extensions.
+//
+// Stage 4: helper + tests only.  Stage 4 wiring lives in the CP
+// enumerator (src/cp/_.c) where overlap_ij would additionally
+// consider extended-LHS forms.  Deferred to Stage 4b -- the
+// enumerator surface is larger and a profile guides the wiring.
+
+// Recursive walk to find max FVR id in a term.  Returns -1 if no
+// FVRs present.  Uses a small explicit stack to avoid deep recursion
+// stack on long terms (rule LHSs are bounded by REWRITE_MAX_VAR
+// in practice).
+static i32 atp_term_max_var(Term t) {
+  i32 max_id = -1;
+  Term stack[64];
+  u32  sp = 0u;
+  if (sp < 64u) stack[sp++] = t;
+  while (sp > 0u) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) == TAG_FVR) {
+      i32 id = (i32)term_ext(cur);
+      if (id > max_id) max_id = id;
+    } else if (term_tag(cur) == TAG_CTR) {
+      u32 n = term_ctr_n(cur);
+      for (u32 i = 0; i < n && sp < 64u; i++) {
+        stack[sp++] = term_ctr_at(cur, i);
+      }
+    }
+  }
+  return max_id;
+}
+
+fn u8 atp_ac_extend_rule(Term lhs, Term rhs, const AtpAcInfo *ac,
+                         Term *ext_lhs_out, Term *ext_rhs_out) {
+  if (ext_lhs_out == NULL || ext_rhs_out == NULL) return 0;
+  if (term_tag(lhs) != TAG_CTR) return 0;
+  u32 lab = term_ext(lhs);
+  if (!atp_ac_is_ac_label(ac, lab)) return 0;
+
+  // Pick a fresh variable id: max(lhs_max, rhs_max) + 1, but capped
+  // at REWRITE_MAX_VAR - 1 so the matcher's dense binding array
+  // can still address it.  If the rule's own vars already saturate
+  // the slot space, we fail conservatively rather than alias an
+  // existing id.
+  i32 l_max = atp_term_max_var(lhs);
+  i32 r_max = atp_term_max_var(rhs);
+  i32 m = l_max > r_max ? l_max : r_max;
+  u32 z_id = (u32)(m + 1);
+  if (z_id >= REWRITE_MAX_VAR) return 0;
+
+  Term z = term_new_fvr(z_id);
+  Term lhs_kids[2] = { lhs, z };
+  Term rhs_kids[2] = { rhs, z };
+  *ext_lhs_out = term_new_ctr(lab, lhs_kids, 2u);
+  *ext_rhs_out = term_new_ctr(lab, rhs_kids, 2u);
+  return 1u;
+}
+
 // --- Engine-global AcInfo + setters --------------------------------
 //
 // One file-static `g_atp_ac_info` carries the AC bit-mask used by
