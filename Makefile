@@ -288,6 +288,7 @@ TESTS := \
   $(BIN)/test_atp_rpo \
   $(BIN)/test_wpo \
   $(BIN)/test_atp_wpo \
+  $(BIN)/test_fol \
   $(BIN)/test_dyn_lab \
   $(BIN)/test_wsq \
   $(BIN)/test_wspq \

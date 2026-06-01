@@ -450,6 +450,14 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // add_equation / set_goal.  Step + run drivers land in 5.2.
 #include "atp/_.c"
 
+// === fol/ ===
+// First-order clausal reasoning (Vampire/E-class).  Generalises the
+// unit-equational saturator with multi-literal clauses + binary
+// resolution + factoring.  Builds on thvm_unify / thvm_rename_vars
+// from src/unify and on kbo_eq for structural literal comparison;
+// must come after both.
+#include "fol/_.c"
+
 // === wald/ ===
 // Waldmeister .pr spec parser (stage 6.3).  Data model only at
 // 6.3a; lexer / section drivers / term parser / equations land

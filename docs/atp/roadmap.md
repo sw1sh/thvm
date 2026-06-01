@@ -122,21 +122,25 @@ Today: KBO, LPO, RPO, WPO.  Open items:
 
 ### Full first-order clauses
 
-Today: single-equation axioms.  Open: clauses (vectors of literals
-with signs).  Requires:
+Today: `src/fol/_.c` lands the foundation -- typed `FolLit` /
+`FolClause`, binary resolution with variable-rename-apart, factoring,
+multiset-modulo clause equality, empty-clause detection.  The
+unit-equational saturator in `src/atp/_.c` is unchanged; FOL clauses
+live in a parallel module that callers opt into.
 
-* Clause representation (literal vector, sign bits, sort).
-* Resolution inference (binary resolution + factoring).
-* Paramodulation (equality on a literal).
-* Equality factoring + reflexivity resolution.
-* Selection function (which literal in a clause to inference on).
-* Subsumption-resolution (cheaper than full subsumption for
-  clauses).
-* Optional: splitting (case analysis on disjunctive clauses).
+Open follow-ups (in order):
 
-This is the biggest single arc - it changes the input language.
-Output: a Vampire/E-class prover instead of a Waldmeister-class
-one.
+* Paramodulation (equality on a literal): superpose an equality
+  literal `s=t` from one clause into a subterm of another and emit
+  the resulting clause.  Reuses CP-style position enumeration
+  (`src/cp/_.c`) plus the clausal context.
+* Equality-factoring + reflexivity resolution.
+* Selection function (positive/maximal literal-pick policy a la
+  E or Vampire).
+* Saturation loop with active/passive queues + redundancy:
+  forward/backward subsumption, demodulation by equational rules,
+  splitting.
+* Integration with CNF preprocessing (next section).
 
 ### Skolemization + CNF + reflection
 

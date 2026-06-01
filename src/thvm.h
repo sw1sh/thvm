@@ -3122,6 +3122,32 @@ typedef struct {
 
 fn WpoCmp thvm_wpo(Term s, Term t, const WpoConfig *cfg);
 fn void   thvm_wpo_invalidate(void);
+
+// === fol/ ===
+// First-order clausal reasoning -- generalises the unit-equational
+// engine (src/atp/) to full FOL.  A literal is a signed atom (a CTR
+// term representing a predicate application or an equation), a clause
+// is a disjunction of literals, and the empty clause witnesses
+// unsatisfiability.  This is the foundation -- types + binary
+// resolution + factoring.  Saturation (subsumption, paramodulation,
+// selection) layers on in follow-up modules.
+typedef struct {
+  Term atom;
+  u8   sign;     // 0 = positive, 1 = negative
+} FolLit;
+
+typedef struct {
+  FolLit *lits;
+  u32     n_lits;
+} FolClause;
+
+fn FolClause *fol_clause_new (u32 n_lits);
+fn void       fol_clause_free(FolClause *c);
+fn u8         fol_clause_eq  (const FolClause *a, const FolClause *b);
+fn u8         fol_clause_is_empty(const FolClause *c);
+fn FolClause *fol_resolve    (const FolClause *c1, u32 i,
+                              const FolClause *c2, u32 j);
+fn FolClause *fol_factor     (const FolClause *c, u32 i, u32 j);
 // Invalidate thvm_lpo's persistent (s,t)->verdict memo.  Call when term
 // cells move (GC) or the precedence changes (new run).
 fn void   thvm_lpo_invalidate(void);
