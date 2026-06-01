@@ -158,18 +158,6 @@ Today: KBO, LPO, RPO, WPO.  Open items:
 The unit-equational saturator in `src/atp/_.c` is unchanged; FOL
 clauses live in a parallel module that callers opt into.
 
-Open follow-ups (in order):
-
-* Equality-factoring (positive equalities `s = t` and `u = v` that
-  unify on one side -- distinct from the syntactic factoring already
-  shipped).
-* Selection function (positive/maximal literal-pick policy a la
-  E or Vampire).
-* Saturation loop with active/passive queues + redundancy:
-  forward/backward subsumption, demodulation by equational rules,
-  splitting.
-* Integration with CNF preprocessing (next section).
-
 ### Skolemization + CNF + reflection
 
 `src/fol/cnf.c` covers:
@@ -201,12 +189,14 @@ End-to-end smoke (in tests/test_fol.c):
   Russell-style `∀x.(R(x,x) <-> ¬R(x,x))`  -> PROVED.
 
 Standard FOL bench (in tests/test_fol_pelletier.c):
-  Pelletier P1-P14 (propositional) + P15/P18/P19 (FOL with
+  Pelletier P1-P14 + P16 (propositional) + P15/P18/P19 (FOL with
   quantifier alternation) all PROVE end-to-end via
   fol_formula_to_clauses -> cnf_run.  Covers contrapositive,
   double-negation, Peirce's law, biconditional associativity,
   distributivity, mutual implications, ∀-distribution, the drinker
-  paradox, and ∃-bound nested implications.
+  paradox, and ∃-bound nested implications.  The pelletier/p1-print
+  -proof test additionally dumps the refutation DAG to
+  /tmp/thvm_fol_pelletier_p1_proof.txt for inspection.
 
 Demodulation lands in two layers:
 
@@ -276,16 +266,20 @@ against).  The win materialises on formulas where naïve distribute
 would actually blow up exponentially; for the existing Pelletier
 P1-P19 set, the naïve path is competitive.
 
-Open follow-ups (efficiency / completeness):
-* Discrim-tree / FV-index for fast subsumption + CP queries.
-Ordering-aware demodulation lands: CnfState carries optional
-KboConfig / LpoConfig / RpoConfig / WpoConfig fields (set via
+Ordering-aware demodulation: CnfState carries optional KboConfig /
+LpoConfig / RpoConfig / WpoConfig fields (set via
 `cnf_set_{kbo,lpo,rpo,wpo}`).  Demod's per-position rewrite gates
 on σ(s) > σ(t) under the configured ordering when any is set,
 falling back to naïve unconditional rewriting otherwise.  Dispatch
 priority WPO > RPO > LPO > KBO.  Cyclic rule pairs (a=b ∧ b=a) no
 longer fire under a well-founded ordering -- the CNF_DEMOD_BUDGET
 cap is only relevant for the naïve fallback.
+
+Open follow-ups (efficiency):
+* Discrim-tree / FV-index for fast subsumption + CP queries.  The
+  unit-equational layer's AtpRuleIndex + AtpFvIndex are the natural
+  templates -- lifting them to FolClause's literal vector is a
+  bounded port.
 
 ### Theory reasoning
 
@@ -319,12 +313,14 @@ Standard interface: SMT-LIB or TPTP-TFF input + a theory dispatcher.
 * **Conditional rewriting** - Horn-clause-only reasoning when the
   input fits.
 
-### Proof reconstruction
+### External proof certificates
 
-PCL-style trace with one record per inference, replayable into a
-verifier (Coq, Lean, Isabelle).  thvm has a trace skeleton
-(`s->trace[]`) but the inference detail isn't yet complete for full
-reconstruction.
+The FOL layer's `cnf_print_proof` emits a human-readable refutation
+DAG; the unit-equational layer's `s->trace[]` records inferences
+but doesn't yet carry the σ for each rewrite step.  Open: emit a
+PCL-style trace (Vampire/E format) replayable in Coq / Lean /
+Isabelle.  Requires storing the per-rewrite substitution alongside
+the (before, after) Term pair the existing TRACE_NORM records hold.
 
 ## Open work-items inside the current coverage
 
