@@ -317,7 +317,8 @@ TESTS := \
   $(BIN)/test_atp_ft_cpq \
   $(BIN)/test_lpo_cache \
   $(BIN)/test_ac \
-  $(BIN)/test_atp_ac
+  $(BIN)/test_atp_ac \
+  $(BIN)/test_atp_ac_bench
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -794,6 +795,14 @@ $(BIN)/test_ac: tests/test_ac.c $(SRC) | $(BIN)
 # has AC support compiled in (mask defaults to 0 so behaviour is
 # byte-identical to the default).
 $(BIN)/test_atp_ac: tests/test_atp.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# AC bench: commutative-monoid theorem mirrored from
+# waldmeister/commutative_monoid.pr.  Times thvm with + without AC
+# mask + outputs side-by-side with wmcli's recorded run.
+$(BIN)/test_atp_ac_bench: tests/test_atp_ac_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC \
 	  -o $@ $< $(TEST_LDFLAGS)

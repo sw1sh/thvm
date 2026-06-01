@@ -1,4 +1,4 @@
-# thvm/atp — Coverage Roadmap
+# thvm/atp - Coverage Roadmap
 
 What the engine covers today and the open arcs that would extend it
 further.  For the algorithms shipped, see [algorithms.md](algorithms.md);
@@ -7,7 +7,7 @@ for the implementation, [engineering.md](engineering.md).
 The WL `Method` / preset / portfolio surface that wraps these
 controls lives in `wl/THVMLink/docs/Tutorials/ATP.md` and
 `AtpMethods.md`.  This document tracks what's open at the C-engine
-level — features that the WL preset language can't dispatch to
+level - features that the WL preset language can't dispatch to
 because the engine doesn't implement them yet.
 
 ## Coverage today
@@ -26,16 +26,31 @@ because the engine doesn't implement them yet.
   / GOAL / TWEE / STAGGERED / RELLEVEL / DIVERSITY / CONJSYM
   weight modes, with periodic FIFO / random / goal-directed /
   K-D-secondary alternation.
-* Mandatory Normal Form (MNF) — opt-in eager normalization
+* Mandatory Normal Form (MNF) - opt-in eager normalization
   variant.
-* LRS (Limited Resource Strategy) — wall-time-aware queue
+* LRS (Limited Resource Strategy) - wall-time-aware queue
   pruning.
-* AtpFt — parallel native flatterm representation (cells,
+* AtpFt - parallel native flatterm representation (cells,
   arenas, match, splice, normalize, discrim tree, CP queue)
   gated behind env flags, live-verified to byte-equivalence
   with the Term path.
-* AC declarations + canonical-form flattening (`src/atp/ac.c`)
-  — Stage 1 of the AC arc below.  No live caller yet.
+* AC reasoning (`src/atp/ac.c`) under `THVM_ATP_AC`:
+  - AC symbol declarations + auto-detect from axioms.
+  - AC canonical form (right-assoc, hash-sorted leaves).
+  - `atp_ac_eq` / `atp_ac_hash` (AC-modulo equality / hash).
+  - `atp_match_ac` (AC-modulo one-way match; greedy
+    multi-pass-with-leftover-chain).
+  - `atp_ac_extend_rule` (Bachmair-Plaisted `R+` for the
+    extended-overlap CPs).
+  - `atp_kbo_ac` / `atp_lpo_ac` (canonical-form AC orderings).
+  Wired into `atp_ordered_try_top`, `atp_rewrite_normalize_ordered`,
+  `atp_overlap_ij`, `thvm_atp_goal_check`, `atp_compare_uncached`.
+  Gated by `THVM_ATP_AC` build define + non-zero `ac_mask`
+  (engine-global; set via `thvm_atp_set_ac_mask` / `thvm_atp_auto_ac`).
+  Comparative bench (commutative-monoid in
+  `waldmeister/commutative_monoid*.pr`): thvm/ac matches or beats
+  wmcli's 1-2 ms on the simple cases via the AC-eq goal-check
+  short-circuit.
 
 ## Open arcs
 
@@ -43,51 +58,35 @@ In rough order from "closest to what we have" to "different
 shape".  Each arc lands behind a build/env flag so the default
 engine stays unchanged at every step.
 
-### AC reasoning during rewrite
+### AC reasoning follow-ups
 
-`src/atp/ac.c` provides per-engine AC info (auto-detected from
-the axiom set), AC flattening to a leaf multiset, and AC
-canonical form (right-associative chain over hash-sorted leaves).
-Open sub-arcs from this base:
+Coverage (see "Coverage today" above) lands the core: AC
+match + canon, AC-KBO/AC-LPO, extended overlap, AC-eq goal-check.
+Remaining sub-items:
 
-* AC equality and AC hashing — `atp_ac_eq(s, t) → bool` and a
-  hash invariant under AC.  Wire into trivial-join and
-  perm-subsumption.
-* AC matching during rewrite — pattern `f(x, y, z)` matches
-  subject `f(a, b, c)` under AC iff there's a permutation σ
-  making the multisets agree.  Poly-time for unit AC patterns;
-  backtracking for shared vars.  Wire into
-  `atp_rewrite_normalize` behind `THVM_ATP_AC=1`.
-* AC superposition — for AC symbols generate the extended
-  "merge position" overlaps needed for AC-completeness.
-* AC-KBO and AC-LPO — orderings that respect AC canonical form
-  (Steinbach for AC-KBO; Bachmair-Plaisted for AC-LPO).
-* Bench — standard AC theory benchmarks (group, ring, lattice);
-  differential against Waldmeister on these.
-
-Why this is the natural next arc:
-
-* Largest payoff per LOC.  Handles algebraic theories the current
-  engine has to enumerate commutative variants of.
-* Fits the saturation loop unchanged — still unit-equational, just
-  with a new equivalence-modulo during matching and ordering.
-* Standard references: Bachmair-Plaisted for ordering, Peterson-
-  Stickel for completion; Waldmeister and Twee both implement.
-* Differential-testable: each AC operation has a clear "no-AC"
-  version (the current engine) to compare against on AC-free
-  workloads.
+* AC unification (full AC u-mgu set, not just one-way match).
+  Currently we only need match for rewriting; unification is the
+  next gap once the engine takes E-restricted superposition CPs.
+* Bench fan-out: lattice, group-axiom, ring-axiom problems from
+  the Waldmeister + TPTP UEQ corpora.  Differential against wmcli
+  + Twee on each.
+* Selection / ordering interplay: the AC top-symbol bias in the
+  precedence picker (currently AC labels sit at the precedence
+  floor) hasn't been re-tuned now that AC-LPO is on; on harder
+  problems the wrong AC-vs-skolem layering will starve the
+  cracker.
 
 ### Additional reduction orderings
 
 Today: KBO and LPO.  Others worth shipping:
 
-* **RPO** (Recursive Path Ordering) — strict precedence-only,
+* **RPO** (Recursive Path Ordering) - strict precedence-only,
   handles deeper structural reductions where KBO weights fail.
   LPO is a special case (lex status); MPO is the multiset-status
   variant.
-* **PO** (Polynomial Ordering) — assigns each symbol a polynomial
+* **PO** (Polynomial Ordering) - assigns each symbol a polynomial
   interpretation.  Strong on arithmetic-flavored problems.
-* **WPO** (Weighted Path Ordering) — generalizes KBO + LPO.
+* **WPO** (Weighted Path Ordering) - generalizes KBO + LPO.
 
 The structural lever is a configurable ordering interface (rather
 than the current KBO/LPO-only `atp_compare`).
@@ -106,7 +105,7 @@ with signs).  Requires:
   clauses).
 * Optional: splitting (case analysis on disjunctive clauses).
 
-This is the biggest single arc — it changes the input language.
+This is the biggest single arc - it changes the input language.
 Output: a Vampire/E-class prover instead of a Waldmeister-class
 one.
 
@@ -130,23 +129,23 @@ Standard interface: SMT-LIB or TPTP-TFF input + a theory dispatcher.
 
 ### Inference selection refinements
 
-* **Literal selection** — Vampire-style maximal-literal selection
+* **Literal selection** - Vampire-style maximal-literal selection
   to reduce inference fan-out.
-* **Avatar-style splitting** — propositionally split a clause's
+* **Avatar-style splitting** - propositionally split a clause's
   ground sub-clauses.
-* **Inference scheduling** — interleave resolution, paramodulation,
+* **Inference scheduling** - interleave resolution, paramodulation,
   demodulation per a configurable strategy.
 
 ### Saturation algorithms
 
-* **DISCOUNT** — current shape (the given-clause loop with
+* **DISCOUNT** - current shape (the given-clause loop with
   passive/active sets).
-* **Otter** — explicit `usable` / `sos` queues with different
+* **Otter** - explicit `usable` / `sos` queues with different
   selection.  Predates DISCOUNT; partially supported via
   `set_use_sos`.
-* **Limited-Resource Strategy** — partially implemented
+* **Limited-Resource Strategy** - partially implemented
   (`set_use_lrs`, queue pruning by predicted reachability).
-* **Conditional rewriting** — Horn-clause-only reasoning when the
+* **Conditional rewriting** - Horn-clause-only reasoning when the
   input fits.
 
 ### Proof reconstruction
