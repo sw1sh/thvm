@@ -151,6 +151,58 @@ static u8 cnf_is_subsumed(const CnfState *s, const FolClause *c) {
   return 0u;
 }
 
+// Backward demodulation: when a fresh unit positive equality lands,
+// re-normalize every existing clause through it.  Modified clauses
+// take a fresh id (the old slot gets NULLed + deferred-free); the
+// new version still passes tautology + subsumption filters.
+//
+// Snapshot s->n BEFORE the loop so demodulated derivatives we add
+// don't get re-visited.  Doesn't recurse into cnf_consider's
+// forward-demod (the rule has already been applied; further demod
+// would be no-op against this particular rule, and we don't fire
+// the OTHER active rules here -- those run on the next iteration
+// of the saturation loop when this clause comes off passive).
+static void cnf_backward_demod(CnfState *s, u32 new_id) {
+  FolClause *rule = s->clauses[new_id];
+  if (rule == NULL) return;
+  if (rule->n_lits != 1u || rule->lits[0].sign != 0u) return;
+  if (!fol_atom_is_eq(rule->lits[0].atom)) return;
+  u32 n_snap = s->n;
+  for (u32 i = 0; i < n_snap; i++) {
+    if (i == new_id) continue;
+    FolClause *old = s->clauses[i];
+    if (old == NULL) continue;
+    FolClause *d = fol_demodulate(rule, old);
+    if (d == NULL) continue;
+
+    // Clobber the old slot; defer free.
+    s->clauses[i] = NULL;
+    if (s->n_deferred >= s->cap_deferred) {
+      cnf_grow(&s->cap_deferred, (u8 **)&s->deferred_free, sizeof(FolClause *));
+    }
+    if (s->n_deferred < s->cap_deferred) {
+      s->deferred_free[s->n_deferred++] = old;
+    } else {
+      // Couldn't grow the deferred queue -- last resort, leak and
+      // skip the demodulated derivative entirely.
+      s->clauses[i] = old;
+      fol_clause_free(d);
+      continue;
+    }
+
+    // Push d through tautology + subsumption (forward-demod is
+    // intentionally skipped here -- see comment above).
+    if (fol_clause_is_empty(d)) {
+      cnf_add_clause(s, d);
+      s->status = ATP_PROVED;
+      return;
+    }
+    if (fol_is_tautology(d)) { fol_clause_free(d); continue; }
+    if (cnf_is_subsumed(s, d)) { fol_clause_free(d); continue; }
+    cnf_add_clause(s, d);
+  }
+}
+
 // Backward subsumption: a freshly-added clause may subsume some
 // older active/passive ones, making them redundant.  We mark them
 // for removal by NULLing the slot in `clauses[]` immediately and
@@ -213,6 +265,7 @@ static void cnf_consider(CnfState *s, FolClause *c) {
   i32 new_id = cnf_add_clause(s, c);
   if (new_id >= 0) {
     cnf_backward_subsume(s, (u32)new_id);
+    cnf_backward_demod(s, (u32)new_id);
   }
 }
 

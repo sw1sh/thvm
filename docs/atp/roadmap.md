@@ -215,6 +215,12 @@ Demodulation lands in two layers:
   CNF_DEMOD_BUDGET = 16 iterations.  The budget caps cyclic
   rewrite pairs (a=b ∧ b=a) under naïve no-ordering demod.
 
+* Backward demodulation in `cnf_consider` (src/fol/sat.c): when the
+  freshly-added clause is itself a unit positive equality, walk
+  every existing clause and apply the new rule.  Modified clauses
+  get a fresh id with the demodulated content; the old slot is
+  NULLed + deferred-free, mirroring `cnf_backward_subsume`'s pattern.
+
 Naïve (no σ(s) > σ(t) ordering check yet); the ordering-aware
 variant is a follow-up that plugs in a KboConfig / LpoConfig /
 RpoConfig / WpoConfig.
@@ -228,10 +234,6 @@ Open follow-ups (efficiency / completeness):
   CnfState and gate σ(s) -> σ(t) on σ(s) > σ(t).  The CNF_DEMOD_BUDGET
   cap can drop with proper orientation; cycles can't arise under a
   well-founded ordering.
-* Backward demodulation: when a fresh unit positive equality enters
-  the active set, re-normalize every existing active/passive clause
-  through it.  Mirror the cnf_backward_subsume + deferred-free
-  pattern so mid-step inference loops stay safe.
 
 ### Theory reasoning
 

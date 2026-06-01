@@ -729,6 +729,36 @@ int main(void) {
     cnf_free(s);
   }
 
+  TEST_BEGIN("fol/sat-backward-demod");
+  {
+    // Setup that requires BACKWARD demod (not just forward).
+    //   C1: P(a)        (added first; lives in active when C2 arrives)
+    //   C2: ¬P(b)
+    //   C3: (a = b)     (the unit eq, added last)
+    //
+    // Without backward demod: forward demod on a NEW derivative
+    // rewrites it, but C1, C2 sit unchanged in active.  Resolution
+    // P(a) + ¬P(b) doesn't apply (different atoms).  Paramod is
+    // wired but might fire after multiple steps.
+    //
+    // With backward demod: when C3 lands as a unit positive eq, it
+    // rewrites C1 -> P(b).  Then resolution P(b) + ¬P(b) closes
+    // immediately -> empty clause.
+    CnfState *s = cnf_init(128);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_b)), .sign = 1 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
   TEST_BEGIN("fol/sat-demod-budget-doesnt-loop");
   {
     // (a=b) and (b=a): cyclic rule pair.  Without an ordering check,
