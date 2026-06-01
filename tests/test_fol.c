@@ -729,6 +729,73 @@ int main(void) {
     cnf_free(s);
   }
 
+  TEST_BEGIN("fol/sat-ordered-demod-allows-correct-orientation");
+  {
+    // Attach KBO with precedence putting `a` strictly above `b`.
+    // (a = b): under KBO orientation a -> b is allowed; b -> a is not.
+    // With ordering on, demod should still rewrite a -> b in P(a).
+    static const u32 W[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+    // Make `a` (L_a=10) heavier than `b` (L_b=11): precedence-based,
+    // a > b.  Higher precedence value = greater under thvm.
+    static const u32 P[32] = {
+      0,0,0,0,0,0,0,0,0,0,  // 0..9
+      9,                    // L_a = 10 -> 9
+      1,                    // L_b = 11 -> 1
+      0,                    // L_f = 12 -> 0
+      0,                    // L_c = 13 -> 0
+      0,                    // L_d = 14 -> 0
+      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    };
+    KboConfig kbo = { .weights = W, .precedence = P, .n_labels = 16, .var_weight = 1u };
+
+    CnfState *s = cnf_init(128);
+    cnf_set_kbo(s, &kbo);
+
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_b)), .sign = 1 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st == ATP_PROVED);
+    cnf_free(s);
+  }
+
+  TEST_BEGIN("fol/sat-ordered-demod-blocks-wrong-orientation");
+  {
+    // Cyclic rule pair (a=b) ∧ (b=a) under KBO with precedence a > b.
+    // Without an ordering: demod would loop, capped at CNF_DEMOD_BUDGET.
+    // With ordering: a -> b allowed (a > b), but b -> a blocked (b < a).
+    // Saturation still terminates -- the cycle doesn't fire.
+    static const u32 W[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+    static const u32 P[32] = {
+      0,0,0,0,0,0,0,0,0,0,
+      9, 1,
+      0,0,0,
+      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    };
+    KboConfig kbo = { .weights = W, .precedence = P, .n_labels = 16, .var_weight = 1u };
+
+    CnfState *s = cnf_init(64);
+    cnf_set_kbo(s, &kbo);
+    FolClause *c1 = fol_clause_new(1);
+    c1->lits[0] = (FolLit){ .atom = pred2(0u, k(L_a), k(L_b)), .sign = 0 };
+    FolClause *c2 = fol_clause_new(1);
+    c2->lits[0] = (FolLit){ .atom = pred2(0u, k(L_b), k(L_a)), .sign = 0 };
+    FolClause *c3 = fol_clause_new(1);
+    c3->lits[0] = (FolLit){ .atom = pred1(P_P, k(L_a)), .sign = 0 };
+    cnf_add_clause(s, c1);
+    cnf_add_clause(s, c2);
+    cnf_add_clause(s, c3);
+    AtpStatus st = cnf_run(s);
+    CHECK(st != ATP_RUNNING);
+    cnf_free(s);
+  }
+
   TEST_BEGIN("fol/sat-backward-demod");
   {
     // Setup that requires BACKWARD demod (not just forward).

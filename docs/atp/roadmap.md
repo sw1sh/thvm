@@ -230,10 +230,14 @@ Open follow-ups (efficiency / completeness):
 * Selection function in cnf_step (pick maximal literal to inference
   on rather than try-everything).
 * Discrim-tree / FV-index for fast subsumption + CP queries.
-* Ordering-aware demodulation -- attach a reduction ordering to
-  CnfState and gate σ(s) -> σ(t) on σ(s) > σ(t).  The CNF_DEMOD_BUDGET
-  cap can drop with proper orientation; cycles can't arise under a
-  well-founded ordering.
+Ordering-aware demodulation lands: CnfState carries optional
+KboConfig / LpoConfig / RpoConfig / WpoConfig fields (set via
+`cnf_set_{kbo,lpo,rpo,wpo}`).  Demod's per-position rewrite gates
+on σ(s) > σ(t) under the configured ordering when any is set,
+falling back to naïve unconditional rewriting otherwise.  Dispatch
+priority WPO > RPO > LPO > KBO.  Cyclic rule pairs (a=b ∧ b=a) no
+longer fire under a well-founded ordering -- the CNF_DEMOD_BUDGET
+cap is only relevant for the naïve fallback.
 
 ### Theory reasoning
 

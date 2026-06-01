@@ -98,17 +98,105 @@ fn i32 cnf_add_clause(CnfState *s, FolClause *c) {
   return (i32)id;
 }
 
+// Ordering-aware demodulation: when CnfState carries a reduction
+// ordering, gate each rewrite `s -> t` on σ(s) > σ(t).  Without any
+// ordering set, demod fires unconditionally (the same naïve behaviour
+// the Stage 11 forward + Stage 12 backward demod relied on).
+//
+// Dispatch priority for multiple set orderings: WPO > RPO > LPO > KBO.
+static KboCmp cnf_compare(const CnfState *s, Term lhs, Term rhs) {
+  if (s == NULL) return KBO_UN;
+  if (s->cnf_wpo != NULL) return (KboCmp)thvm_wpo(lhs, rhs, s->cnf_wpo);
+  if (s->cnf_rpo != NULL) return (KboCmp)thvm_rpo(lhs, rhs, s->cnf_rpo);
+  if (s->cnf_lpo != NULL) return (KboCmp)thvm_lpo(lhs, rhs, s->cnf_lpo);
+  if (s->cnf_kbo != NULL) return thvm_kbo(lhs, rhs, s->cnf_kbo);
+  return KBO_UN;
+}
+
+static u8 cnf_has_ordering(const CnfState *s) {
+  return (s != NULL && (s->cnf_kbo != NULL || s->cnf_lpo != NULL
+                        || s->cnf_rpo != NULL || s->cnf_wpo != NULL))
+         ? 1u : 0u;
+}
+
+fn void cnf_set_kbo(CnfState *s, const KboConfig *kbo) { if (s) s->cnf_kbo = kbo; }
+fn void cnf_set_lpo(CnfState *s, const LpoConfig *lpo) { if (s) s->cnf_lpo = lpo; }
+fn void cnf_set_rpo(CnfState *s, const RpoConfig *rpo) { if (s) s->cnf_rpo = rpo; }
+fn void cnf_set_wpo(CnfState *s, const WpoConfig *wpo) { if (s) s->cnf_wpo = wpo; }
+
+// Rewrite-once with optional ordering gate.  When the state has any
+// ordering attached, only fires if σ(s) > σ(t) at the match site
+// (σ(s) is the matched subterm `term` itself -- thvm_match is
+// one-way, so σ applied to the pattern reproduces the subject).
+static Term cnf_rewrite_once(const CnfState *s, Term term, Term lhs, Term rhs) {
+  // Root match attempt.
+  RewriteSubst subst = {{0}};
+  if (thvm_match(lhs, term, &subst)) {
+    Term sub_rhs = thvm_subst_apply(rhs, &subst);
+    u8 ok = 1u;
+    if (cnf_has_ordering(s)) {
+      // σ(lhs) == term under a successful one-way match.
+      ok = (cnf_compare(s, term, sub_rhs) == KBO_GT) ? 1u : 0u;
+    }
+    if (ok) return sub_rhs;
+  }
+  if (term_tag(term) != TAG_CTR) return term;
+  u32 n = term_ctr_n(term);
+  if (n == 0u) return term;
+  if (n > REWRITE_MAX_ARITY) return term;
+  Term kids[REWRITE_MAX_ARITY];
+  u8 changed = 0u;
+  for (u32 i = 0; i < n; i++) {
+    Term orig = term_ctr_at(term, i);
+    kids[i] = cnf_rewrite_once(s, orig, lhs, rhs);
+    if (kids[i] != orig) changed = 1u;
+  }
+  if (!changed) return term;
+  return term_new_ctr(term_ext(term), kids, n);
+}
+
+// Apply eq_clause's positive equality to every literal of target,
+// gated by the state's ordering when set.  Returns a fresh clause
+// if anything changed; NULL otherwise.  Caller owns the result.
+static FolClause *cnf_demodulate_ordered(const CnfState *s,
+                                         const FolClause *eq_clause,
+                                         const FolClause *target) {
+  if (eq_clause == NULL || target == NULL) return NULL;
+  if (eq_clause->n_lits != 1u) return NULL;
+  if (eq_clause->lits[0].sign != 0u) return NULL;
+  Term eq_atom = eq_clause->lits[0].atom;
+  if (!fol_atom_is_eq(eq_atom)) return NULL;
+  Term s_raw = term_ctr_at(eq_atom, 0u);
+  Term t_raw = term_ctr_at(eq_atom, 1u);
+  Term lhs = thvm_rename_vars(s_raw, FOL_RENAME_OFFSET);
+  Term rhs = thvm_rename_vars(t_raw, FOL_RENAME_OFFSET);
+
+  u32 n = target->n_lits;
+  Term *cache = (Term *)calloc(n, sizeof(Term));
+  if (cache == NULL) return NULL;
+  u8 any_change = 0u;
+  for (u32 i = 0; i < n; i++) {
+    Term raw = target->lits[i].atom;
+    Term re  = cnf_rewrite_once(s, raw, lhs, rhs);
+    if (re != raw) any_change = 1u;
+    cache[i] = re;
+  }
+  if (!any_change) { free(cache); return NULL; }
+  FolClause *r = fol_clause_new(n);
+  if (r == NULL) { free(cache); return NULL; }
+  for (u32 i = 0; i < n; i++) {
+    r->lits[i].atom = cache[i];
+    r->lits[i].sign = target->lits[i].sign;
+  }
+  free(cache);
+  return r;
+}
+
 // Forward demodulation: normalize `*pc` against every unit positive
 // equality currently in the active set.  Iterates to a fixpoint
 // bounded by CNF_DEMOD_BUDGET steps -- without a reduction-ordering
-// check, demodulation can in principle loop on cyclic rule pairs.
-// On success the caller's pointer is replaced with the demodulated
-// clause and the original is freed.  No-op if no rule fires.
-//
-// Naïve / non-ordering-aware (same caveat as fol_demodulate itself).
-// An ordering-aware version that gates σ(s) -> σ(t) on σ(s) > σ(t)
-// follows once CnfState carries a KboConfig / LpoConfig / RpoConfig /
-// WpoConfig.
+// check, demodulation can in principle loop on cyclic rule pairs;
+// with one set, well-foundedness makes the budget cap untouched.
 #define CNF_DEMOD_BUDGET 16u
 
 static void cnf_forward_demod(CnfState *s, FolClause **pc) {
@@ -121,7 +209,7 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc) {
       if (rule == NULL) continue;
       // Skip when target IS the rule (no self-rewrite).
       if (rule == c) continue;
-      FolClause *d = fol_demodulate(rule, c);
+      FolClause *d = cnf_demodulate_ordered(s, rule, c);
       if (d != NULL) {
         fol_clause_free(c);
         c = d;
@@ -172,7 +260,7 @@ static void cnf_backward_demod(CnfState *s, u32 new_id) {
     if (i == new_id) continue;
     FolClause *old = s->clauses[i];
     if (old == NULL) continue;
-    FolClause *d = fol_demodulate(rule, old);
+    FolClause *d = cnf_demodulate_ordered(s, rule, old);
     if (d == NULL) continue;
 
     // Clobber the old slot; defer free.

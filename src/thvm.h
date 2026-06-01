@@ -3333,6 +3333,16 @@ typedef struct {
   u32         step;
   u32         step_cap;
   AtpStatus   status;
+  // Optional reduction ordering for demodulation.  When set, demod
+  // only applies a rewrite `s -> t` at a position where σ(s) > σ(t)
+  // under the configured ordering -- the standard well-foundedness
+  // gate.  When all four are NULL, demod falls back to naïve
+  // unconditional application (the CNF_DEMOD_BUDGET cap protects).
+  // Priority WPO > RPO > LPO > KBO when multiple are set.
+  const KboConfig *cnf_kbo;
+  const LpoConfig *cnf_lpo;
+  const RpoConfig *cnf_rpo;
+  const WpoConfig *cnf_wpo;
 } CnfState;
 
 fn CnfState *cnf_init        (u32 step_cap);
@@ -3340,6 +3350,16 @@ fn void      cnf_free        (CnfState *s);
 fn i32       cnf_add_clause  (CnfState *s, FolClause *c);  // takes ownership
 fn AtpStatus cnf_step        (CnfState *s);
 fn AtpStatus cnf_run         (CnfState *s);
+
+// Attach a reduction ordering for ordering-aware demodulation.
+// When set, demod gates each rewrite `s -> t` on σ(s) > σ(t).
+// When all four are NULL, demod fires unconditionally.  Setting
+// more than one is allowed; the dispatch priority is WPO > RPO >
+// LPO > KBO.
+fn void      cnf_set_kbo     (CnfState *s, const KboConfig *kbo);
+fn void      cnf_set_lpo     (CnfState *s, const LpoConfig *lpo);
+fn void      cnf_set_rpo     (CnfState *s, const RpoConfig *rpo);
+fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 
 // === FOL formula -> CNF pipeline ====================================
 // Formulas are Term trees with reserved CTR labels for connectives.
