@@ -476,3 +476,73 @@ all LARGE architectural arcs on correctness-critical paths, and two share a root
 Highest leverage: the **single-pass / step-global realize** change (closes #2 and #3). It
 is the right next arc, approached incrementally + parity-gated. None of the three is a
 quick win; the v3 plan's milestone framing understated their architectural depth.
+
+### Faithful-CPU lever PRECISELY located: ShapeTracker view-cancellation (M3), with evidence (2026-06-01 tick 4)
+
+Two refinements that re-rank the gaps:
+- **Memory is a NON-lever for faithful (closed).** `THVM_ARENA_DUMP_BUFS` shows faithful
+  has ZERO buffers >=1MB -- it fuses the fat activations away (no materialized 1.77MB
+  conv1-out). The 11MB peak is many small buffers + pool high-water across the 3 separate
+  realize calls, NOT avoidable activations. So faithful memory is near-optimal; the
+  step-global work would mainly help DEFAULT mode (the intentional materialize-for-BLAS
+  tradeoff). De-prioritized.
+- **The faithful-CPU 16x is the conv index form, and the fix is M3.** Dumped tinygrad's
+  fused-conv CPU kernels (DEBUG=4): `r_8_8_2_8_12_3_4_5_5` etc. have CLEAN AFFINE indexing
+  (no IDIV/IMOD, no `<27 ? : INVALID` masks) and a VECTORIZED accumulator `float acc0[12]`
+  / `acc0[16]` (UPCAST into SIMD lanes). thvm's faithful conv kernel (tick 2) is the
+  opposite: `(a2+8*a4)/9`, `%9`, per-element validity ternaries, strided gathers. So
+  tinygrad collapses the conv window (reshape/permute/shrink chain) to an AFFINE strided
+  view via ShapeTracker merge; thvm's `ru_compose_view_chain` does not, leaving the
+  reshape's IDIV/IMOD -- which blocks clang vectorization regardless of UPCAST (why tick
+  2's UPCAST/UNROLL experiment was ~noise). **The lever is M3 ShapeTracker
+  view-cancellation** (collapse the conv movement chain to affine), THEN un-gate CPU
+  UPCAST for the now-affine kernel. M3 is a DEFINED tinygrad port (View merge /
+  ShapeTracker.simplify -> `ru_compose_view_chain`, rangeify_unified.c:1255-1337 +
+  `symbolic_rewrite.c`), not a vague "index-simp" and not the step-global re-architecture.
+
+**Re-ranked next arc: M3 ShapeTracker view-cancellation** -- it is the highest-value lever
+that is BOTH a real measurable win (faithful-CPU 238ms -> toward tinygrad 15ms) AND a clean
+tinygrad-spec port (medium, parity-gated), unlike the step-global re-architecture (large,
+correctness-critical, low value now that faithful memory is near-optimal).
+
+### M3 narrowed to the rangeify conv-backward LOWERING, not symbolic recombine (2026-06-01 tick 5, LANDED + decisive)
+
+Ported tinygrad's `fold_add_divmod_recombine` (symbolic.py:28-49) into thvm's
+`index_simplify.c` -- generalised thvm's narrow `(r//M)*M + (r%M) -> r` rule (mul=1,
+two-direct-operand) to the full multi-term ADD split with the `*mul` scaling + nested-IDIV
++ nested-MOD cases. Verified value-exact (parity bit-identical loss; grad-ssq within ~1e-7
+reduction-order; index_simplify 89/89 incl. the dedicated recombination tests, grad 68/68,
+cpu_jit 342/342, rangeify 45/45, movement_index 51/51). It FIRES 200+ times/2-steps on
+real index sums -- a genuine spec-faithfulness + cleanliness win (subsumes the narrow rule)
+-- BUT it does NOT fix the faithful conv-backward (IDIV/IMOD 112->104; the 5 dominant
+col2im kernels unchanged at 16 each; warm ~2% = noise).
+
+**Why (decisive, cross-checked against tinygrad's own CPU lowering):** thvm's faithful
+conv-BACKWARD is lowered as an INVALID-gated col2im GATHER -- the `//div` decode lives in
+one LOAD's address sum and the `%div` decode in a DIFFERENT LOAD's (separate input arrays),
+so `fold_add_divmod_recombine` (single `split_uop(ADD)`) can never pair them, and the base
+is `IWHERE(cond, p, INVALID)`-masked. tinygrad lowers the SAME conv-backward as a clean
+strided reduce (`r_2_5_5_16_8_24_24`, <=2 div/mod per kernel) -- it does NOT col2im-gather.
+So the faithful-CPU 16x is the **rangeify conv-backward lowering** (masked gather vs strided
+reduce), a rangeify/movement-lowering change, NOT the symbolic recombine (now ported) and
+NOT view-merge (the prior tick's framing -- superseded). This is the deepest localization:
+the lever is how rangeify lowers the conv-backward col2im, correctness-critical, and on a
+met goal with narrow benefit (default+GPU faithful are fine). Recombine port stands as a
+faithful-spec improvement; the conv-backward-lowering rewrite is the (large, deferred) rest.
+
+**M3 scoped to the exact code (2026-06-01 tick 4):** the IDIV/IMOD source is
+`ru_compose_one_view` (`rangeify_unified.c:1295-1321`): it composes EACH view in
+`TENS[tid].prior_views[]` by flatten-then-decompose (`coord_d = (cur/suffix[d]) %
+dims[d]`), so an N-view chain nests N levels of IDIV/IMOD. A SINGLE view composes
+affinely (d=0 gets no IMOD, contiguous suffix gets no IDIV). So the fix is a
+**view-chain MERGE pre-pass**: collapse `prior_views[]` into the fewest views whose
+composition is affine-expressible (classic ShapeTracker `merge_views` math: v_outer o
+v_inner merges iff the strides compose without a genuine reshape-remainder). The conv
+window (reshape->permute->shrink->reshape) then collapses to ~1 strided view -> affine
+address -> clang vectorizes (matching tinygrad's `acc0[12]` affine conv kernel). NOTE:
+current tinygrad folded ShapeTracker into UOps (no `View.__add__` file); port the classic
+merge_views algorithm onto thvm's `View` struct (shape/strides/offset/mask), NOT a 1:1
+file copy. Implement incrementally (start: merge a contiguous inner reshape into its outer
+view), parity-gated by `test_faithful_parity.py` (silent index bugs are the risk -- verify
+EXACT values). On GPU faithful is already competitive (gather is cheaper there), so this is
+primarily a faithful-CPU + index-cleanliness win; medium value, defined port.

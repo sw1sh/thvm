@@ -347,6 +347,147 @@ static int uop_match_affine_numerator_deep(Term n, i64 div,
   return 0;
 }
 
+// Recognise a bare `IMUL(q, const)` with the constant on either side.
+// Returns 1 on match; *q_out is the non-const operand, *c_out the const.
+static int uop_match_mul_const(Term t, Term *q_out, i64 *c_out) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IMUL) return 0;
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  i64 v;
+  if (uop_iconst_value(b, &v)) { *q_out = a; *c_out = v; return 1; }
+  if (uop_iconst_value(a, &v)) { *q_out = b; *c_out = v; return 1; }
+  return 0;
+}
+
+// Recognise a "MOD-term" addend for fold_add_divmod_recombine: either a
+// bare `base % div` (mul = 1) or `(base % div) * mul`.  On match returns
+// 1 and fills *base_out, *div_out, *mul_out.  `div`/`mul` are CONST.
+// Mirror of the head of tinygrad/uop/symbolic.py:30-33's term loop.
+static int uop_match_recombine_mod_term(Term u, Term *base_out, i64 *div_out,
+                                        i64 *mul_out) {
+  if (term_tag(u) != TAG_UOP) return 0;
+  // Bare `base % div`  ->  mul = 1.
+  if (term_ext(u) == UOP_IMOD) {
+    Term div_c = heap_read(term_val(u) + 1);
+    i64 div;
+    if (!uop_iconst_value(div_c, &div)) return 0;
+    *base_out = heap_read(term_val(u) + 0);
+    *div_out = div;
+    *mul_out = 1;
+    return 1;
+  }
+  // `(base % div) * mul`.
+  Term m; i64 mul;
+  if (uop_match_mul_const(u, &m, &mul)
+      && term_tag(m) == TAG_UOP && term_ext(m) == UOP_IMOD) {
+    Term div_c = heap_read(term_val(m) + 1);
+    i64 div;
+    if (!uop_iconst_value(div_c, &div)) return 0;
+    *base_out = heap_read(term_val(m) + 0);
+    *div_out = div;
+    *mul_out = mul;
+    return 1;
+  }
+  return 0;
+}
+
+// Rebuild the sum of `terms[]` (count `nt`) skipping indices `skip_i` and
+// `skip_j`, then add `head` (the recombined leaf).  Left-associates via
+// uop_int_binary so the result is itself re-simplified.  The analog of
+// tinygrad's `head.usum(*[t for k,t in ... if k not in (i,j)])`.
+static Term uop_recombine_rebuild(Term head, Term const *terms, u32 nt,
+                                  u32 skip_i, u32 skip_j) {
+  Term acc = head;
+  for (u32 k = 0; k < nt; k++) {
+    if (k == skip_i || k == skip_j) continue;
+    acc = uop_int_binary(UOP_IADD, acc, terms[k]);
+  }
+  return acc;
+}
+
+// Port of tinygrad/uop/symbolic.py:28-49 fold_add_divmod_recombine.  Splits
+// the IADD tree under `(a + b)` into its full list of addend leaves, then
+// looks for a (MOD-term, matching div-term) pair that recombines into a
+// flatter form.  The three exact cases (all value-identities):
+//   1. (base%div)*mul + (base//div)*(div*mul)            -> base*mul
+//   2. ((base//d)%div)*mul + (base//(d*div))*(div*mul)   -> (base//d)*mul
+//   3. ((base//div)%e)*div + base%div  (mul==1)          -> base%(div*e)
+// On a match returns the recombined sum; else 0.  This generalises the
+// shallow `(r//M)*M + (r%M) -> r` rule (a special case of #1 with mul=1)
+// past the two-direct-operand shape to terms buried in a deep left-
+// associated IADD tree (the rangeify im2col / maxpool-reshape INDEX).
+static Term uop_fold_add_divmod_recombine(Term a, Term b) {
+  // Collect leaves from the two operands directly -- we must NOT rebuild
+  // `uop_int_binary(IADD, a, b)` here, since that re-enters this rule on
+  // the same operands and loops.  Each operand is already a simplified
+  // (sub)tree; walking both yields the full addend list of the sum a+b.
+  Term terms[32];
+  u32  nt = 0;
+  if (!uop_iadd_tree_collect_const_mul(a, terms, &nt, 32, 0)) return 0;
+  if (!uop_iadd_tree_collect_const_mul(b, terms, &nt, 32, 0)) return 0;
+  if (nt < 2) return 0;
+  for (u32 i = 0; i < nt; i++) {
+    Term base; i64 div, mul;
+    if (!uop_match_recombine_mod_term(terms[i], &base, &div, &mul)) continue;
+    if (div <= 0) continue;
+    i64 want = div * mul;  // the div-term's required coefficient
+    for (u32 j = 0; j < nt; j++) {
+      if (i == j) continue;
+      Term q; i64 vc;
+      if (!uop_match_mul_const(terms[j], &q, &vc) || vc != want) continue;
+      int exact = 0;
+      // Case 1: (base%div)*mul + (base//div)*(div*mul) -> base*mul.
+      if (term_tag(q) == TAG_UOP && term_ext(q) == UOP_IDIV) {
+        Term q_div = heap_read(term_val(q) + 1);
+        i64 qd;
+        if (uop_iconst_value(q_div, &qd) && qd == div
+            && heap_read(term_val(q) + 0) == base) {
+          exact = 1;
+        }
+      }
+      // Case 2: ((base//d)%div)*mul + (base//(d*div))*(div*mul)
+      //         -> (base//d)*mul.   Here `base` is itself `inner // d`.
+      if (!exact && term_tag(base) == TAG_UOP && term_ext(base) == UOP_IDIV) {
+        Term base_div = heap_read(term_val(base) + 1);
+        i64 bd;
+        if (uop_iconst_value(base_div, &bd)
+            && term_tag(q) == TAG_UOP && term_ext(q) == UOP_IDIV) {
+          Term q_div = heap_read(term_val(q) + 1);
+          i64 qd;
+          if (uop_iconst_value(q_div, &qd) && qd == bd * div
+              && heap_read(term_val(q) + 0) == heap_read(term_val(base) + 0)) {
+            exact = 1;
+          }
+        }
+      }
+      if (exact) {
+        Term head = uop_int_binary(UOP_IMUL, base, uop_iconst(mul));
+        return uop_recombine_rebuild(head, terms, nt, i, j);
+      }
+      // Case 3: ((base//div)%e)*div + base%div  (mul==1)
+      //         -> base%(div*e).   Here terms[i] is the bare `base%div`
+      //         (mul==1) and terms[j] = ((base//div)%e) * div, so the
+      //         `v` coefficient `want == div`, and `q = (base//div) % e`.
+      if (mul == 1 && term_tag(q) == TAG_UOP && term_ext(q) == UOP_IMOD) {
+        Term q_e = heap_read(term_val(q) + 1);
+        Term q_inner = heap_read(term_val(q) + 0);
+        i64 e;
+        if (uop_iconst_value(q_e, &e) && e > 0
+            && term_tag(q_inner) == TAG_UOP && term_ext(q_inner) == UOP_IDIV
+            && heap_read(term_val(q_inner) + 0) == base) {
+          Term qi_div = heap_read(term_val(q_inner) + 1);
+          i64 qid;
+          if (uop_iconst_value(qi_div, &qid) && qid == div) {
+            Term head = uop_int_binary(UOP_IMOD, base, uop_iconst(div * e));
+            return uop_recombine_rebuild(head, terms, nt, i, j);
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}
+
 // === invalid_gate / propagate_invalid (tinygrad symbolic.py:25-65) ===
 
 // The valid-given index folds (propagate_invalid push + uop_given_valid)
@@ -474,36 +615,15 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         if (uop_match_const_mul(a, &c1, &x1) && b == x1) {
           return uop_int_binary(UOP_IMUL, x1, uop_iconst(c1 + 1));
         }
-        // Divmod recombination: (r // M) * M + (r % M) -> r.
-        // Either operand of the IADD can be the IMUL.  Helps
-        // RESHAPE-roundtrip chains where the consumer's flat-
-        // decompose-recompose composes back to the source iter.
-        Term mod_term;
-        if (uop_match_const_mul(a, &c1, &x1)
-            && term_tag(b) == TAG_UOP && term_ext(b) == UOP_IMOD) {
-          mod_term = b;
-        } else if (uop_match_const_mul(b, &c1, &x1)
-                   && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IMOD) {
-          mod_term = a;
-        } else {
-          mod_term = 0;
-        }
-        if (mod_term != 0) {
-          // Verify x1 = (orig // c1) and mod_term = orig % c1 share `orig`.
-          Term mod_a = heap_read(term_val(mod_term) + 0);
-          Term mod_b = heap_read(term_val(mod_term) + 1);
-          i64 mod_c;
-          if (uop_iconst_value(mod_b, &mod_c) && mod_c == c1
-              && term_tag(x1) == TAG_UOP && term_ext(x1) == UOP_IDIV) {
-            Term div_a = heap_read(term_val(x1) + 0);
-            Term div_b = heap_read(term_val(x1) + 1);
-            i64 div_c;
-            if (uop_iconst_value(div_b, &div_c) && div_c == c1
-                && div_a == mod_a) {
-              return mod_a;
-            }
-          }
-        }
+      }
+      // Divmod recombination over the full IADD tree (tinygrad
+      // fold_add_divmod_recombine).  Subsumes the shallow two-operand
+      // `(r//M)*M + (r%M) -> r` case as case 1 with mul=1, and also
+      // collapses the deep im2col / maxpool-reshape gather index where
+      // the matching (mod, div*mul) pair is buried among many addends.
+      {
+        Term r = uop_fold_add_divmod_recombine(a, b);
+        if (r != 0) return r;
       }
       break;
     case UOP_ISUB:
