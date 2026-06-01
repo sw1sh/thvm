@@ -1,4 +1,4 @@
-// test_ft_order.c - Stage 3 of AtpFt: AtpFt-native LPO/KBO entry points.
+// test_ft_order.c - AtpFt-native LPO/KBO entry points.
 //
 // Differential tests against the existing Term-tree thvm_kbo / thvm_lpo
 // over the SAME random-Term corpus the test_kbo_linear / test_lpo

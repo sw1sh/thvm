@@ -1,4 +1,4 @@
-// ft_norm.c - Stage 6 of AtpFt: AtpFt-native innermost-rewrite
+// ft_norm.c - AtpFt-native innermost-rewrite
 // normalize fixpoint.
 //
 // Loop shape (mirrors WM `BL_NormalformInnermost2` in NFBildung.c:622):

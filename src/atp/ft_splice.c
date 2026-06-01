@@ -1,4 +1,4 @@
-// ft_splice.c - Stage 6 of AtpFt: in-place WM-style splice of an
+// ft_splice.c - in-place WM-style splice of an
 // AtpFt subject by an instantiated rule RHS.
 //
 // Scope: implement `ft_splice`, the operation that takes a `redex`
@@ -10,7 +10,7 @@
 // root cell for the root-rewrite case when the new root has a
 // different arity than the old.
 //
-// Two regimes (per the Stage 6 design):
+// Two regimes (per design):
 //
 //   (a) ground/unbound-var single-cell RHS: `rhs_tmpl` is one cell,
 //       arity 0, and (if a variable) carries no binding in `subst`.
@@ -69,10 +69,10 @@ static inline u32  ft_s_var_id (const AtpFtCell *c) {
 // We rely on the AtpFtSubst layout from ft_match.c: `bind[ATPFT_MAX_VARS]`
 // indexed by var id.  Defining a forward struct here would shadow that
 // type, so we use a fully-qualified accessor pattern -- this TU is
-// always built together with ft_match.c (the Stage 5 TU); the type is
+// always built together with ft_match.c (the matcher TU); the type is
 // in scope.
 //
-// To avoid a circular dependency on the Stage 5 layout (which would
+// To avoid a circular dependency on the matcher layout (which would
 // force this file to import ft_match.c's ATPFT_MAX_VARS), we accept
 // the subst as a `const void *` and re-resolve the binding via a
 // helper provided by ft_match.c.  ft_match.c exposes a tiny accessor
@@ -88,7 +88,7 @@ extern u32        ft_subst_max_vars(void);
 // binding (i.e. rule-tmpl-only vars unreachable from the LHS) are
 // rejected (returns NULL) -- the caller must surface this as a bug.
 //
-// Arena is always Arena A (scratch=0): Stage 6's splice must outlive
+// Arena is always Arena A (scratch=0): the splice must outlive
 // the next ft_scratch_reset; the caller controls when the Arena B
 // scratch resets.
 

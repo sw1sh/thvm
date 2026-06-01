@@ -1,4 +1,4 @@
-// test_ft.c - Stage 2 of AtpFt: constructors, boundary converters,
+// test_ft.c - constructors, boundary converters,
 // structural equality, hash, and pretty-print.
 //
 // Differential tests against the existing heap-Term path:

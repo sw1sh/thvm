@@ -1,4 +1,4 @@
-// ft.c - Stage 2 of AtpFt: constructors, boundary converters, structural
+// ft.c - constructors, boundary converters, structural
 // equality / hash, and pretty-print mirroring atp_pretty_term.
 //
 // Stage 2 is purely additive: no caller in the rest of the engine

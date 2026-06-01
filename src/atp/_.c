@@ -6,9 +6,9 @@
 // rewriter feeding step 4 of the algorithm in 5.4.  This file just
 // gives the loop a place to live.
 //
-// See docs/plans/saturation_loop.md for the algorithm.
+// See docs/atp/algorithms.md for the algorithm.
 
-// Stage 4 of docs/atp/atpft_plan.md: parallel AtpFt rule storage.
+// Parallel AtpFt rule storage (docs/atp/engineering.md).
 // Pull in the cell layout + dual-arena allocator + Stage-2 constructors
 // /converters / hashes when THVM_ATPFT_RULES is on so atp_push_rule /
 // thvm_atp_set_goal can populate s->lhs_ft[] / s->rhs_ft[] / goal_*_ft

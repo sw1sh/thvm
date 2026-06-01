@@ -1,4 +1,4 @@
-// test_ft_alloc.c - Stage 1 of AtpFt: dual-arena allocator unit tests.
+// test_ft_alloc.c - dual-arena allocator unit tests.
 //
 // Exercises ft_init / ft_destroy, persistent slab + free-list recycle,
 // scratch bump + reset + overflow grow, and ft_walk_persistent over

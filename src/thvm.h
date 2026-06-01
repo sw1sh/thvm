@@ -4081,7 +4081,7 @@ typedef struct {
   u32    cp_feat_cap;      // capacity of the three parallel arrays
 
 #ifdef THVM_ATPFT_RULES
-  // Stage 4 of docs/atp/atpft_plan.md: parallel AtpFt rule storage.
+  // Parallel AtpFt rule storage; see docs/atp/engineering.md.
   // Eagerly mirror every Term written into lhs[]/rhs[]/r_dead_*_save[]/
   // goal_* into AtpFtCell* slots that share the slot lifetime exactly
   // (allocate-with-grow, write-with-set, shift-with-compact).  The Term
@@ -4110,7 +4110,7 @@ typedef struct {
 #endif
 
 #ifdef THVM_ATPFT_CPQ
-  // Stage 7 of docs/atp/atpft_plan.md: parallel native AtpFt CP queue.
+  // Parallel native AtpFt CP queue; see docs/atp/engineering.md.
   // Each populated slot owns its two FT spans in Arena A; the legacy
   // cp_packed[] byte queue stays populated in parallel (FV index +
   // cp_graph mirror + peek/stash consumers).  Capacity tracks

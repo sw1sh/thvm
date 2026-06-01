@@ -1,4 +1,4 @@
-// ft_order.c - Stage 3 of AtpFt: AtpFt-native LPO/KBO entry points.
+// ft_order.c - AtpFt-native LPO/KBO entry points.
 //
 // Stage 3 wires the existing flatterm LPO/KBO comparators (src/kbo/_.c
 // and src/lpo/_.c -- both operate on KboFlatNode arrays internally) to

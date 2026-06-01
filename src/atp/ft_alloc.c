@@ -1,4 +1,4 @@
-// ft_alloc.c - Stage 1 of AtpFt: dual-arena slab allocator.
+// ft_alloc.c - dual-arena slab allocator.
 //
 // Persistent (Arena A): slab pool of fixed 30000-cell blocks; each
 // block is malloc'd once and never realloc'd, so AtpFtCell* handed

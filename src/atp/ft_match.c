@@ -1,7 +1,7 @@
-// ft_match.c - Stage 5 of AtpFt: AtpFt-native one-way matching +
+// ft_match.c - AtpFt-native one-way matching +
 // substitution-apply.
 //
-// Stage 5 lifts the Stage-3 (rewrite/_.c) `thvm_match` / `thvm_subst_apply`
+// lifts the (rewrite/_.c) `thvm_match` / `thvm_subst_apply`
 // pair onto AtpFt cells.  Goal: equivalent behavior to thvm_match on
 // the heap-cell Term path -- same boolean verdict, same recorded
 // bindings -- while reading exclusively through the flat
@@ -9,7 +9,7 @@
 // the AtpFt-native rule-index descent without the per-call
 // AtpFtCell -> Term encode that today's bridge would force).
 //
-// API shape (mirrors docs/atp/atpft_plan.md):
+// API shape (see docs/atp/engineering.md):
 //
 //   typedef struct AtpFtSubst {
 //     AtpFtCell *bind[ATPFT_MAX_VARS];   // NULL = unbound
@@ -25,7 +25,7 @@
 //
 // Differences from rewrite/_.c thvm_match:
 //   * The dense REWRITE_MAX_VAR=64 slot table is identical (we reuse
-//     ATPFT_MAX_VARS=64 by definition), but Stage 5 ALSO maintains a
+//     ATPFT_MAX_VARS=64 by definition), but ALSO maintains a
 //     watermark + `bound_ids[]` list so the matcher restores partial
 //     bindings on a child mismatch instead of leaving the caller to
 //     zero the table.  This is the WM-style backtracking discipline
@@ -40,14 +40,11 @@
 //     equality) -- equivalent to `kbo_eq` on the Term side, but does
 //     not synthesize a Term.
 //   * `ft_subst_apply` deep-copies the bound subterm at every var
-//     occurrence.  Stage 6 splice will replace this with a zero-copy
-//     splice; Stage 5's deep copy is the "obviously correct" baseline
+//     occurrence.  ft_splice replaces this with a zero-copy in-place
+//     splice; the deep copy is the "obviously correct" baseline
 //     against which the splice is differential-tested.
 //
-// Gated on THVM_ATPFT_MATCH.  This is purely additive in Stage 5: no
-// live caller in src/atp/_.c wires through ft_match yet (per
-// docs/atp/atpft_plan.md, that wiring lands in Stage 5b / 6 to keep
-// the Stage 5 commit risk-bounded).
+// Gated on THVM_ATPFT_MATCH.
 
 #ifdef THVM_ATPFT_MATCH
 
@@ -59,7 +56,7 @@
 //
 // ft.c keeps the same accessor names (ft_is_var, ft_var_id, ft_ctr_sym)
 // as `static inline` in its TU.  In the single-TU build the test
-// includes ft.c BEFORE ft_match.c (Stage 2 lands the converters); the
+// includes ft.c BEFORE ft_match.c (lands the converters); the
 // helpers are then in scope under the file-static `static inline`
 // linkage and reusing them is byte-identical to redefining.  For the
 // avoidance of "implicit declaration" warnings if ft_match.c is ever
@@ -298,7 +295,7 @@ AtpFtCell *ft_subst_apply(AtpFt *a, const AtpFtCell *tmpl,
   return ft_subst_apply_rec(a, tmpl, s, scratch);
 }
 
-// --- Type-erased accessors for Stage 6 splice ------------------------
+// --- Type-erased accessors for splice ------------------------
 //
 // ft_splice.c only sees `const void *subst` so it doesn't take a hard
 // build-time dep on AtpFtSubst's layout.  These two helpers are the

@@ -1,4 +1,4 @@
-// ft_ri.c - Stage 6b of AtpFt: AtpFt-native discrim-tree descent.
+// ft_ri.c - AtpFt-native discrim-tree descent.
 //
 // Reuses the existing AtpRuleIndex discrim tree (built from s->lhs[]
 // via atp_ri_rebuild).  The tree's edge labels are pure symbol-skeleton

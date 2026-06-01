@@ -1,4 +1,4 @@
-// test_ft_norm.c - Stage 6 of AtpFt: AtpFt-native normalize fixpoint
+// test_ft_norm.c - AtpFt-native normalize fixpoint
 // differential corpus against the Term-side reference.
 //
 // T1: ground-only rules; AtpFt NF matches Term NF.

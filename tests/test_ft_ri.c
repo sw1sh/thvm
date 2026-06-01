@@ -1,4 +1,4 @@
-// test_ft_ri.c - Stage 6b of AtpFt: AtpFt-native discrim-tree descent.
+// test_ft_ri.c - AtpFt-native discrim-tree descent.
 //
 // Differential corpus against:
 //   (a) the Term-side reference (atp_rewrite_normalize),

@@ -1,4 +1,4 @@
-// test_ft_match.c - Stage 5 of AtpFt: AtpFt-native ft_match +
+// test_ft_match.c - AtpFt-native ft_match +
 // ft_subst_apply.
 //
 // T1: ft_match of pattern x against subject f(a,b) -> binds x.

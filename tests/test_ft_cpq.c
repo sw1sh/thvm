@@ -1,5 +1,5 @@
-// test_ft_cpq.c - Stage 7 of docs/atp/atpft_plan.md:
-// AtpFt-native CP queue (dual-store) smoke test.
+// test_ft_cpq.c - AtpFt-native CP queue (dual-store) smoke test.
+// See docs/atp/engineering.md.
 //
 // Built with -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -DTHVM_ATPFT_LPO
 // -DTHVM_ATPFT_MATCH -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM

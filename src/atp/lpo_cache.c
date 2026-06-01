@@ -18,7 +18,7 @@
 // (< 2^-64 per probe), and `THVM_ATPFT_NORM_VERIFY=1` runs the
 // uncached path alongside and aborts on disagreement.
 //
-// See docs/atp/atpft_plan.md Stage 8.
+// See docs/atp/engineering.md.
 
 #ifdef THVM_ATP_LPO_ORIENT_CACHE
 

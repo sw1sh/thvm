@@ -1,11 +1,10 @@
 // ft.h - AtpFt flatterm cell + dual-arena allocator state.
 //
-// Stage 1 of docs/atp/atpft_plan.md: the ATP rewrite/match/normalize
-// stack will (in later stages) run on flat cells rather than heap-cell
-// Term, mirroring Waldmeister's TermzellenT representation.  This
-// header pins the cell layout and the allocator state; the operations
-// live in ft_alloc.c (Stage 1) and ft.c / ft_match.c / ft_splice.c
-// (Stages 2-6).
+// Parallel native-flatterm representation modeled on Waldmeister's
+// TermzellenT.  See docs/atp/engineering.md for the design.  This
+// header pins the cell layout and the allocator state; operations
+// live in ft_alloc.c, ft.c, ft_match.c, ft_splice.c, ft_norm.c,
+// ft_ri.c, ft_cpq.c.
 //
 // Layout notes:
 //   - AtpFtCell is 24 bytes, 8-byte aligned.  The two pointer fields

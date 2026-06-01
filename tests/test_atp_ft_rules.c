@@ -1,5 +1,5 @@
-// test_atp_ft_rules.c - Stage 4 of docs/atp/atpft_plan.md:
-// AtpFt-backed parallel rule storage smoke test.
+// test_atp_ft_rules.c - AtpFt parallel rule storage smoke test.
+// See docs/atp/engineering.md.
 //
 // Construct a small AtpState, push a batch of Sheffer-flavored rules
 // + axioms, set a goal, then assert at every step that the parallel

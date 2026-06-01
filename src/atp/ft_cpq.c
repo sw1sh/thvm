@@ -1,11 +1,11 @@
-// ft_cpq.c - Stage 7 of AtpFt: native Arena-A CP queue (dual-store).
+// ft_cpq.c - AtpFt: native Arena-A CP queue (dual-store).
 //
-// Stage 7 of docs/atp/atpft_plan.md.  Under -DTHVM_ATPFT_CPQ the CP
-// queue gains a parallel storage `s->cp_packed_ft[]` (one
-// `AtpCpEntry` per slot) holding the lhs/rhs AtpFt cells in Arena A.
-// The legacy packed-byte queue (`s->cp_packed[]`) is kept populated
-// in parallel for the FV index, cp_graph mirror, peek/stash and trace
-// paths.  Stages 8-9 retire the byte queue once those consumers are
+// Under -DTHVM_ATPFT_CPQ the CP queue gains a parallel storage
+// `s->cp_packed_ft[]` (one `AtpCpEntry` per slot) holding the
+// lhs/rhs AtpFt cells in Arena A.  The legacy packed-byte queue
+// (`s->cp_packed[]`) is kept populated in parallel for the FV
+// index, cp_graph mirror, peek/stash and trace paths.  See
+// docs/atp/engineering.md.  Byte queue retires once those consumers are
 // re-keyed onto the AtpFt structural hash.
 //
 // What this TU provides:
@@ -200,15 +200,14 @@ static void atp_cp_ft_transfer_out(AtpState *s, u32 i,
 //
 // Sibling of atp_cp_trivially_joinable that operates ENTIRELY on FT
 // cells.  Normalizes both sides to fixpoint via the Stage-6 ft-norm
-// path (which Stage 6b descends through the discrim tree), then
+// path (which descends through the discrim tree), then
 // returns ft_eq(*lhs, *rhs).  Updates *lhs / *rhs to the NF cells so
 // the caller can read them post-call.
 //
-// Mirrors the Term-path verdict bit-for-bit by construction (Stage 6
-// VERIFY mode established equality of the two normalize paths on the
+// Mirrors the Term-path verdict bit-for-bit by construction (// VERIFY mode established equality of the two normalize paths on the
 // differential corpus).  Joining is symmetric in lhs/rhs.
 //
-// Used by the Stage 7 select-time hot path under THVM_ATPFT_CPQ: the
+// Used by the select-time hot path under THVM_ATPFT_CPQ: the
 // caller pulls (entry.lhs, entry.rhs) off the queue and hands them
 // straight here, skipping the ft_from_term step that today's
 // THVM_ATPFT_NORM path pays at every joinability call.
