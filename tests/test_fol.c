@@ -806,6 +806,125 @@ int main(void) {
     cnf_free(s);
   }
 
+  // === CNF preprocessing: NNF =====================================
+
+  TEST_BEGIN("fol/nnf-atom");
+  {
+    // A bare predicate atom is its own NNF.
+    Term p = pred1(P_P, k(L_a));
+    Term n = fol_nnf(p);
+    CHECK(kbo_eq(n, p));
+  }
+
+  TEST_BEGIN("fol/nnf-double-neg");
+  {
+    // ¬¬P(a) -> P(a).
+    Term p = pred1(P_P, k(L_a));
+    Term ff = fol_mk_not(fol_mk_not(p));
+    Term n = fol_nnf(ff);
+    CHECK(kbo_eq(n, p));
+  }
+
+  TEST_BEGIN("fol/nnf-demorgan-and");
+  {
+    // ¬(P ∧ Q) -> ¬P ∨ ¬Q.
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term ff = fol_mk_not(fol_mk_and(p, q));
+    Term n = fol_nnf(ff);
+    Term expect = fol_mk_or(fol_mk_not(p), fol_mk_not(q));
+    CHECK(kbo_eq(n, expect));
+  }
+
+  TEST_BEGIN("fol/nnf-demorgan-or");
+  {
+    // ¬(P ∨ Q) -> ¬P ∧ ¬Q.
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term ff = fol_mk_not(fol_mk_or(p, q));
+    Term n = fol_nnf(ff);
+    Term expect = fol_mk_and(fol_mk_not(p), fol_mk_not(q));
+    CHECK(kbo_eq(n, expect));
+  }
+
+  TEST_BEGIN("fol/nnf-imp");
+  {
+    // P -> Q  ==>  ¬P ∨ Q.
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term n = fol_nnf(fol_mk_imp(p, q));
+    Term expect = fol_mk_or(fol_mk_not(p), q);
+    CHECK(kbo_eq(n, expect));
+  }
+
+  TEST_BEGIN("fol/nnf-neg-imp");
+  {
+    // ¬(P -> Q)  ==>  P ∧ ¬Q.
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term n = fol_nnf(fol_mk_not(fol_mk_imp(p, q)));
+    Term expect = fol_mk_and(p, fol_mk_not(q));
+    CHECK(kbo_eq(n, expect));
+  }
+
+  TEST_BEGIN("fol/nnf-iff");
+  {
+    // P <-> Q  ==>  (¬P ∨ Q) ∧ (P ∨ ¬Q).  Equivalent to the textbook
+    // form (¬P ∨ Q) ∧ (¬Q ∨ P) up to OR-argument order; the NNF
+    // implementation here emits the (P ∨ ¬Q) variant.
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_b));
+    Term n = fol_nnf(fol_mk_iff(p, q));
+    Term left  = fol_mk_or(fol_mk_not(p), q);
+    Term right = fol_mk_or(p, fol_mk_not(q));
+    Term expect = fol_mk_and(left, right);
+    CHECK(kbo_eq(n, expect));
+  }
+
+  TEST_BEGIN("fol/nnf-quantifiers");
+  {
+    // ¬(∀x.P(x))  ==>  ∃x.¬P(x)
+    // ¬(∃x.P(x))  ==>  ∀x.¬P(x)
+    Term x = v(0);
+    Term px = pred1(P_P, x);
+    {
+      Term n = fol_nnf(fol_mk_not(fol_mk_all(x, px)));
+      Term expect = fol_mk_ex(x, fol_mk_not(px));
+      CHECK(kbo_eq(n, expect));
+    }
+    {
+      Term n = fol_nnf(fol_mk_not(fol_mk_ex(x, px)));
+      Term expect = fol_mk_all(x, fol_mk_not(px));
+      CHECK(kbo_eq(n, expect));
+    }
+  }
+
+  TEST_BEGIN("fol/nnf-nested");
+  {
+    // ¬(P ∧ (Q -> R))  ==>  ¬P ∨ (Q ∧ ¬R).
+    Term p = pred1(P_P, k(L_a));
+    Term q = pred1(P_Q, k(L_a));
+    Term r = pred2(P_R, k(L_a), k(L_b));
+    Term inner = fol_mk_imp(q, r);
+    Term ff = fol_mk_not(fol_mk_and(p, inner));
+    Term n = fol_nnf(ff);
+    Term expect = fol_mk_or(fol_mk_not(p), fol_mk_and(q, fol_mk_not(r)));
+    CHECK(kbo_eq(n, expect));
+  }
+
+  TEST_BEGIN("fol/nnf-is-connective");
+  {
+    CHECK(fol_is_connective(FOL_LAB_NOT));
+    CHECK(fol_is_connective(FOL_LAB_AND));
+    CHECK(fol_is_connective(FOL_LAB_OR));
+    CHECK(fol_is_connective(FOL_LAB_IMP));
+    CHECK(fol_is_connective(FOL_LAB_IFF));
+    CHECK(fol_is_connective(FOL_LAB_ALL));
+    CHECK(fol_is_connective(FOL_LAB_EX));
+    CHECK(!fol_is_connective(P_P));
+    CHECK(!fol_is_connective(L_a));
+  }
+
   thvm_free();
   TEST_REPORT();
 }

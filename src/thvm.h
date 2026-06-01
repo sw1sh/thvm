@@ -3331,6 +3331,24 @@ fn i32       cnf_add_clause  (CnfState *s, FolClause *c);  // takes ownership
 fn AtpStatus cnf_step        (CnfState *s);
 fn AtpStatus cnf_run         (CnfState *s);
 
+// === FOL formula -> CNF pipeline ====================================
+// Formulas are Term trees with reserved CTR labels for connectives.
+// Predicate / function symbols use labels < FOL_LAB_NOT; equality
+// follows the existing FOL_LAB_EQ = 0 convention.
+fn u8   fol_is_connective(u32 label);
+fn Term fol_mk_not(Term p);
+fn Term fol_mk_and(Term p, Term q);
+fn Term fol_mk_or (Term p, Term q);
+fn Term fol_mk_imp(Term p, Term q);
+fn Term fol_mk_iff(Term p, Term q);
+fn Term fol_mk_all(Term var, Term body);
+fn Term fol_mk_ex (Term var, Term body);
+
+// Negation normal form: pushes ¬ down to atoms; eliminates -> and <->.
+// Atoms (non-connective CTRs + FVRs) are returned wrapped in ¬ iff
+// the outer rewriting demanded a negation.  Quantifier-preserving.
+fn Term fol_nnf(Term f);
+
 // Initial heap capacities for the growable rule / CP arrays in
 // AtpState.  The arrays double on demand (see atp_ensure_rule_cap /
 // atp_ensure_cp_cap), so these are starting sizes, not ceilings --

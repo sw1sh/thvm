@@ -403,3 +403,7 @@ fn FolClause *fol_reflex_resolve(const FolClause *c, u32 idx) {
 // implementation; we include it here so the single-TU build sees
 // everything in one place.
 #include "sat.c"
+
+// === CNF preprocessing ==============================================
+// Formula -> CNF pipeline (NNF + Skolemize + distribute + extract).
+#include "cnf.c"

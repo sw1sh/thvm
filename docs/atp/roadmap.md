@@ -172,10 +172,19 @@ Open follow-ups (in order):
 
 ### Skolemization + CNF + reflection
 
-A goal `∀x ∃y P(x, y) → Q(x)` is not a unit equation.  Open work:
-the standard FOL-to-CNF pipeline (NNF, Skolemization with the
-matrix-tracking outer quantifier, Tseitin/structural CNF) on top of
-the clausal extension above.
+`src/fol/cnf.c` lands the foundation:
+* Reserved CTR labels for connectives (`FOL_LAB_NOT/AND/OR/IMP/IFF/
+  ALL/EX`) -- formulas are Term trees, user predicates use labels
+  below the reserved range.
+* `fol_nnf(f)` -- negation normal form: pushes `¬` to atoms,
+  eliminates `->` and `<->`, preserves quantifiers.
+
+Open follow-ups:
+* Skolemization (replace `∃x.p` with `p[x := sk(vars)]` for fresh
+  Skolem function `sk` over the enclosing `∀`-bound vars).
+* Prenex form + CNF distribution (∨ over ∧).
+* Clause extraction (top-level conjunction -> array of FolClause*).
+* End-to-end `fol_formula_to_clauses` that drives all four steps.
 
 ### Theory reasoning
 
