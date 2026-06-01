@@ -4207,6 +4207,9 @@ fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // set (parallel `lhs[]` / `rhs[]` arrays + count).
 // `atp_cp_trivially_joinable` then treats AC-equal normal forms as
 // joinable for these symbols.
+typedef struct AtpAcInfo {
+  u64 ac_mask;          // bit i set iff CTR label i is AC
+} AtpAcInfo;
 fn void      thvm_atp_set_ac_mask(u64 mask);
 fn u64       thvm_atp_get_ac_mask(void);
 fn void      thvm_atp_auto_ac    (const Term *lhs, const Term *rhs, u32 n_eqns);

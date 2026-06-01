@@ -94,13 +94,37 @@ fn Term thvm_subst_apply(Term t, const RewriteSubst *subst) {
   }
 }
 
+#ifdef THVM_ATP_AC
+// AC-modulo one-way match.  Declared in thvm.h alongside the AC
+// mask setters; defined in src/atp/ac.c (transitively included by
+// src/atp/_.c into the same single-TU build).  Under THVM_ATP_AC
+// rewrite_try_top consults the engine-global AC mask: a non-zero
+// mask routes match attempts through atp_match_ac so AC-permuted
+// subjects align with the pattern.
+fn u8 atp_match_ac(Term pattern, Term subject,
+                   const AtpAcInfo *ac, RewriteSubst *subst);
+#endif
+
 // Try each rule at the top position only.  Returns the rewritten
 // term and sets *fired = 1 on a hit; *fired = 0 if no rule matches
 // here.  Internal helper used by `thvm_rewrite_step`.
 static Term rewrite_try_top(Term t, const Term *lhs, const Term *rhs,
                             u32 n_rules, u8 *fired) {
+#ifdef THVM_ATP_AC
+  u64 ac_mask = thvm_atp_get_ac_mask();
+#endif
   for (u32 i = 0; i < n_rules; i++) {
     RewriteSubst subst = {{0}};
+#ifdef THVM_ATP_AC
+    if (ac_mask != 0ull) {
+      AtpAcInfo ac = { .ac_mask = ac_mask };
+      if (atp_match_ac(lhs[i], t, &ac, &subst)) {
+        *fired = 1;
+        return thvm_subst_apply(rhs[i], &subst);
+      }
+      continue;
+    }
+#endif
     if (thvm_match(lhs[i], t, &subst)) {
       *fired = 1;
       return thvm_subst_apply(rhs[i], &subst);

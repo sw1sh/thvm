@@ -41,9 +41,9 @@
 // for binary symbols) and an "AC unit" companion (the identity
 // element, if any -- e.g. 0 for `+`, 1 for `*`).
 
-typedef struct AtpAcInfo {
-  u64 ac_mask;          // bit i set iff CTR label i is AC
-} AtpAcInfo;
+// AtpAcInfo typedef now lives in thvm.h so non-ATP TUs (rewrite/_.c)
+// can construct one without dragging ac.c.  Declaration here is
+// suppressed (struct already forward-declared by thvm.h's typedef).
 
 // Compute the AcInfo from a previously-filled AtpSymProps array.
 // `props[i]` contains the per-label analysis from

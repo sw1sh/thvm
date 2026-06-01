@@ -460,6 +460,64 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);
   }
 
+  // -- T20: AC-aware rewrite fires under the mask -------------------------
+  //
+  // Rule: f(x, a) -> b  with `f` AC and `a, b` ground constants.
+  // Subject: f(a, c) -- syntactically f(a, c) has 'a' on the LEFT,
+  // so without AC the rule's f(x, a) wouldn't match (pattern's a is
+  // in the SECOND slot).  Under AC the rule matches with x = c,
+  // rewrites to b.
+  TEST_BEGIN("ac/rewrite-fires-under-mask");
+  {
+    thvm_atp_set_ac_mask(1ull << LAB_F);
+
+    Term x = v(0);
+    Term a = k(LAB_A), b = k(LAB_B), c = k(LAB_C);
+
+    Term lhs[1] = { bin(LAB_F, x, a) };
+    Term rhs[1] = { b };
+
+    Term subject = bin(LAB_F, a, c);   // AC-equivalent to f(c, a)
+
+    Term nf = thvm_rewrite_normalize(subject, lhs, rhs, 1, 32);
+    CHECK(kbo_eq(nf, b));              // rewrote to b via AC match
+
+    // Same subject without the AC mask should NOT rewrite -- the
+    // pattern f(x, a) requires `a` in the second slot syntactically.
+    thvm_atp_set_ac_mask(0ull);
+    Term nf2 = thvm_rewrite_normalize(subject, lhs, rhs, 1, 32);
+    CHECK(kbo_eq(nf2, subject));       // unchanged
+
+    thvm_atp_set_ac_mask(0ull);
+  }
+
+  // -- T21: idempotence rule with AC: f(x, x) -> x ------------------------
+  TEST_BEGIN("ac/rewrite-idempotence");
+  {
+    thvm_atp_set_ac_mask(1ull << LAB_F);
+
+    Term x = v(0);
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    Term lhs[1] = { bin(LAB_F, x, x) };
+    Term rhs[1] = { x };
+
+    // subject f(a, a) -> a under the rule.  AC permutes children but
+    // both are `a` so syntactic match would work too; this test is
+    // mostly a smoke that the AC path doesn't break the repeated-var
+    // case.
+    Term s1 = bin(LAB_F, a, a);
+    Term nf1 = thvm_rewrite_normalize(s1, lhs, rhs, 1, 32);
+    CHECK(kbo_eq(nf1, a));
+
+    // subject f(a, b) -- doesn't match (a != b), no rewrite.
+    Term s2 = bin(LAB_F, a, b);
+    Term nf2 = thvm_rewrite_normalize(s2, lhs, rhs, 1, 32);
+    CHECK(kbo_eq(nf2, s2));
+
+    thvm_atp_set_ac_mask(0ull);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
