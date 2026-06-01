@@ -15,8 +15,11 @@ because the engine doesn't implement them yet.
 * Unit-equational reasoning (single equation per axiom).
 * Knuth-Bendix unfailing completion (orientable + unorientable
   rules).
-* Reduction orderings: KBO (`src/kbo`), LPO (`src/lpo`); both with
-  automatic precedence (`src/atp/precedence.c`).
+* Reduction orderings: KBO (`src/kbo`), LPO (`src/lpo`), RPO
+  (`src/rpo`); KBO and LPO with automatic precedence
+  (`src/atp/precedence.c`).  RPO adds per-symbol LEX/MUL status
+  (LPO is the all-LEX special case; MPO is all-MUL).  Wire into
+  ATP via `thvm_atp_set_rpo`.
 * Term indexing: discrimination tree over rule LHSs
   (`AtpRuleIndex`), FV index over queued CPs (`AtpFvIndex`).
 * Redundancy filters: trivial join, forward rule-subsumption,
@@ -94,18 +97,21 @@ Remaining sub-items:
 
 ### Additional reduction orderings
 
-Today: KBO and LPO.  Others worth shipping:
+Today: KBO, LPO, RPO.  Open items:
 
-* **RPO** (Recursive Path Ordering) - strict precedence-only,
-  handles deeper structural reductions where KBO weights fail.
-  LPO is a special case (lex status); MPO is the multiset-status
-  variant.
 * **PO** (Polynomial Ordering) - assigns each symbol a polynomial
   interpretation.  Strong on arithmetic-flavored problems.
-* **WPO** (Weighted Path Ordering) - generalizes KBO + LPO.
-
-The structural lever is a configurable ordering interface (rather
-than the current KBO/LPO-only `atp_compare`).
+* **WPO** (Weighted Path Ordering) - generalizes KBO + LPO + RPO
+  via a per-symbol weighted-status combination.
+* **RPO flatrec / Vortest port**.  Today's RPO (src/rpo/_.c) uses the
+  Term-tree recursion with a per-call memo.  LPO has a flatterm
+  Vortest pretest + flatrec recursion (lpo_flat_rec_*) that doubled
+  throughput on AndAssoc; the same scaffolding can lift to RPO once
+  a real bench shows lpo_flat / rpo_flat hot.
+* **RPO under GJ**.  Ground-joinability (`atp_compare`'s gj_less_in
+  path) is implemented for KBO only -- under RPO the cracker skips
+  GJ entirely.  Lifting gj_less_in to a precedence-only ordering is
+  the next gap for RPO-driven completion on hard theories.
 
 ### Full first-order clauses
 

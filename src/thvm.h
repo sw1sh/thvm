@@ -3064,6 +3064,33 @@ typedef struct {
 } LpoConfig;
 
 fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg);
+
+// === rpo/ ===
+// Recursive Path Ordering (Dershowitz 1982).  Generalises LPO with
+// per-symbol status (LEX or MUL); strict-precedence only, no weights.
+// LPO is the all-LEX special case; MPO (multiset path ordering) is the
+// all-MUL one.  Used as a third reduction ordering for problems where
+// KBO weights or LPO's strict-lex bias rule out useful orientations.
+typedef enum {
+  RPO_EQ =  0,
+  RPO_GT =  1,
+  RPO_LT = -1,
+  RPO_UN =  2,
+} RpoCmp;
+
+typedef enum {
+  RPO_STATUS_LEX = 0,
+  RPO_STATUS_MUL = 1,
+} RpoStatus;
+
+typedef struct {
+  const u32       *precedence;   // higher value = greater symbol
+  const RpoStatus *status;       // status[label] in {LEX, MUL}; NULL => all-LEX
+  u32              n_labels;
+} RpoConfig;
+
+fn RpoCmp thvm_rpo(Term s, Term t, const RpoConfig *cfg);
+fn void   thvm_rpo_invalidate(void);
 // Invalidate thvm_lpo's persistent (s,t)->verdict memo.  Call when term
 // cells move (GC) or the precedence changes (new run).
 fn void   thvm_lpo_invalidate(void);
@@ -3655,6 +3682,7 @@ typedef struct {
   // fallback.
   const KboConfig *kbo;
   const LpoConfig *lpo;
+  const RpoConfig *rpo;
 
   // Bounds.
   u32 step;
@@ -4140,6 +4168,7 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 // uses LPO instead of KBO.  Pass NULL to revert to KBO (the
 // default).
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
+fn void      thvm_atp_set_rpo     (AtpState *s, const RpoConfig *rpo);
 
 // Milestone 10: enable/disable the MNF goal-directed front search at
 // runtime.  No-op unless the dylib was compiled with -DATP_MNF.  When

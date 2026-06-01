@@ -284,6 +284,8 @@ TESTS := \
   $(BIN)/test_rewrite_pri \
   $(BIN)/test_sup_rewrite \
   $(BIN)/test_lpo \
+  $(BIN)/test_rpo \
+  $(BIN)/test_atp_rpo \
   $(BIN)/test_dyn_lab \
   $(BIN)/test_wsq \
   $(BIN)/test_wspq \

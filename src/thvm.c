@@ -421,6 +421,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // allocation; reads CTR/FVR terms and a caller-supplied KboConfig.
 #include "kbo/_.c"
 #include "lpo/_.c"
+#include "rpo/_.c"
 
 // === rewrite/ ===
 // Equational rewriter (one-shot rule application + iterative
