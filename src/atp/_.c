@@ -415,6 +415,22 @@ static u64 atp_term_struct_hash(Term t) {
 // wiring below.
 #include "ac.c"
 
+// Match helper: thvm_match by default; switches to atp_match_ac
+// when THVM_ATP_AC is built AND the engine-global AC mask is non-zero.
+// Used by the ATP-internal hot match sites (atp_ordered_try_top,
+// rewrite-step fallbacks).  The compile-time #ifdef keeps the
+// default build (without THVM_ATP_AC) byte-identical to thvm_match.
+static inline u8 atp_match_maybe_ac(Term pat, Term subj, RewriteSubst *subst) {
+#ifdef THVM_ATP_AC
+  u64 m = thvm_atp_get_ac_mask();
+  if (m != 0ull) {
+    AtpAcInfo ac = { .ac_mask = m };
+    return atp_match_ac(pat, subj, &ac, subst);
+  }
+#endif
+  return thvm_match(pat, subj, subst);
+}
+
 // Normalize result cache: maps (term_struct_hash, g_atp_unf_memo_epoch)
 // to the already-normalized Term.
 #define ATP_NORM_CACHE_BITS 16
@@ -5338,7 +5354,7 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
       }
       // oriented rule -- forward only, no order check, no waste.
       RewriteSubst subst = {{0}};
-      if (thvm_match(li, t, &subst)) {
+      if (atp_match_maybe_ac(li, t, &subst)) {
         *fired = 1;
         return thvm_subst_apply(rhs[i], &subst);
       }
@@ -5360,7 +5376,7 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
       // r->l path may still apply if its top (term_tag(ri)) matches.
     } else {
       RewriteSubst subst = {{0}};
-      if (thvm_match(li, t, &subst) &&                     // l -> r
+      if (atp_match_maybe_ac(li, t, &subst) &&             // l -> r
           atp_vars_contained(ri, li)) {
         Term repl = thvm_subst_apply(ri, &subst);
         if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
@@ -5373,7 +5389,7 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
     }
     {
       RewriteSubst subst = {{0}};
-      if (thvm_match(ri, t, &subst) &&                     // r -> l
+      if (atp_match_maybe_ac(ri, t, &subst) &&             // r -> l
           atp_vars_contained(li, ri)) {
         Term repl = thvm_subst_apply(li, &subst);
         if (atp_compare(s, t, repl) == KBO_GT) { *fired = 1; return repl; }
@@ -5429,6 +5445,31 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
   // -- interreduced away or re-oriented after reduction -- restores the
   // indexed path the moment R is orientable again.
   if (lhs == s->lhs && rhs == s->rhs && n_rules == s->n_rules) {
+#ifdef THVM_ATP_AC
+    // Under a non-zero AC mask, route through the pure linear
+    // ordered_rewrite_step path (the outermost fallback below).
+    // Reasons:
+    //   - The indexed / flatterm / wmfpa fast paths key their
+    //     discrim-tree descents on syntactic preorder and would
+    //     miss AC-permuted redexes.
+    //   - The "mixed loop" path runs atp_rewrite_normalize_indexed
+    //     interleaved with ordered_rewrite_step under
+    //     g_atp_skip_oriented = 1, which BYPASSES the oriented-
+    //     branch AC match in atp_ordered_try_top.
+    // So the AC path takes the linear ordered step directly.  The
+    // slowdown applies only when ac_mask != 0; default builds and
+    // ac_mask = 0 take the original fast paths unchanged.
+    if (thvm_atp_get_ac_mask() != 0ull) {
+      for (u32 i = 0; i < step_cap; i++) {
+        if (atp_norm_deadline_fired(s)) return t;
+        u8 fired = 0;
+        Term t2 = atp_ordered_rewrite_step(s, t, lhs, rhs, n_rules, &fired);
+        if (!fired) break;
+        t = t2;
+      }
+      return t;
+    }
+#endif
     if (s->n_unorient == 0u) {
       // Iter 133 step 2: keep the subject in flat form when use_flatterm
       // is on.  flatterm_mixed runs indexed_fixpoint + (no-op) unorient
@@ -8861,6 +8902,17 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   s->goal_lhs_nf = l;
   s->goal_rhs_nf = r;
   if (kbo_eq(l, r)) return ATP_PROVED;
+#ifdef THVM_ATP_AC
+  // AC-equality join: when an AC mask is registered, two normal
+  // forms that are syntactically distinct but AC-equal still close
+  // the goal.  Sound iff every masked label's commutativity +
+  // associativity is reachable via the rewrite system (the AC mask
+  // is a declaration; the engine treats it as such).
+  if (thvm_atp_get_ac_mask() != 0ull) {
+    AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
+    if (atp_ac_eq(l, r, &ac)) return ATP_PROVED;
+  }
+#endif
 #ifdef ATP_MNF
   // Milestone 10: the MNF bidirectional search AUGMENTS the single-NF
   // check -- it does not replace it.  goal_lhs seeds a GREEN front,
@@ -11289,6 +11341,54 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
       cnt = thvm_critical_pairs_pair(ri, li, rj, lj, buf, cap, cnt);
     }
   }
+
+#ifdef THVM_ATP_AC
+  // AC-superposition extension (Bachmair-Plaisted).  When both rules
+  // have the SAME AC-top symbol, the standard syntactic overlap above
+  // misses the merge-position CPs needed for AC-completeness.  The
+  // standard fix: replace one rule's LHS with its extended form
+  // R+ = f(l, z) → f(r, z) and re-run the overlap.  The matcher's
+  // AC mode (Stage 3 atp_match_ac) then surfaces the merge-position
+  // unifications.
+  //
+  // Run only when the engine-global AC mask is non-zero AND both top
+  // symbols are the same AC label.  No-op under default builds (the
+  // whole block is #ifdef'd) and under runs that haven't registered
+  // an AC mask.
+  u64 ac_mask = thvm_atp_get_ac_mask();
+  if (ac_mask != 0ull
+      && term_tag(li) == TAG_CTR
+      && term_tag(lj) == TAG_CTR) {
+    u32 li_lab = term_ext(li);
+    u32 lj_lab = term_ext(lj);
+    if (li_lab == lj_lab && li_lab < 64u
+        && ((ac_mask >> li_lab) & 1ull) != 0ull) {
+      AtpAcInfo ac = { .ac_mask = ac_mask };
+      // Extend i (or both -- for a symmetric pass).  We extend the
+      // OUTER side (i) and overlap against the renamed-apart inner
+      // (j); the dual extension is covered by atp_overlap_ij(j, i)
+      // when the saturator generates that pair later.
+      Term ext_li = 0, ext_ri = 0;
+      if (atp_ac_extend_rule(li, ri, &ac, &ext_li, &ext_ri)) {
+        cnt = thvm_critical_pairs_pair(ext_li, ext_ri, lj, rj, buf, cap, cnt);
+        if (j_un) {
+          cnt = thvm_critical_pairs_pair(ext_li, ext_ri, rj, lj, buf, cap, cnt);
+        }
+        if (i_un) {
+          // i unorientable: also extend the ri face.
+          Term ext_ri2 = 0, ext_li2 = 0;
+          if (atp_ac_extend_rule(ri, li, &ac, &ext_ri2, &ext_li2)) {
+            cnt = thvm_critical_pairs_pair(ext_ri2, ext_li2, lj, rj, buf, cap, cnt);
+            if (j_un) {
+              cnt = thvm_critical_pairs_pair(ext_ri2, ext_li2, rj, lj, buf, cap, cnt);
+            }
+          }
+        }
+      }
+    }
+  }
+#endif
+
   return cnt;
 }
 

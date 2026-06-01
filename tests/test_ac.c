@@ -630,6 +630,46 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);
   }
 
+  // -- T26: AC saturation proves a ground AC theorem -------------------
+  //
+  // Axioms:  f(a, b) = c   (ground rule, oriented LHS > RHS via KBO)
+  // AC mask: { f }
+  // Goal:    f(b, a) = c
+  //
+  // KBO config: f weight 1, a/b/c weight 1 each; precedence picks
+  // f > c > a, b so f(a,b) (weight 3) > c (weight 1).  The rule
+  // orients cleanly; AC-aware rewriting + goal-check AC-eq prove
+  // f(b, a) = c.
+  TEST_BEGIN("ac/saturate-ground-rewrite");
+  {
+    thvm_atp_set_ac_mask(1ull << LAB_F);
+
+    Term a = k(LAB_A), b = k(LAB_B), c = k(LAB_C);
+
+    // Labels 0..5 (LAB_F=1, LAB_G=2, LAB_A=3, LAB_B=4, LAB_C=5).
+    static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    static const u32 P[8] = { 0u, 6u, 5u, 1u, 1u, 4u, 0u, 0u };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 8, .var_weight = 1u };
+    AtpState *s = thvm_atp_init(&kbo, 1024);
+
+    thvm_atp_add_equation(s, bin(LAB_F, a, b), c);
+    thvm_atp_set_goal(s, bin(LAB_F, b, a), c);
+
+    AtpStatus st = ATP_RUNNING;
+    u32 budget = 64, iters = 0;
+    while (budget-- > 0u) {
+      st = thvm_atp_step(s);
+      iters++;
+      if (st != ATP_RUNNING) break;
+    }
+    CHECK(st == ATP_PROVED);
+    (void)iters;
+
+    thvm_atp_free(s);
+    thvm_atp_set_ac_mask(0ull);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
