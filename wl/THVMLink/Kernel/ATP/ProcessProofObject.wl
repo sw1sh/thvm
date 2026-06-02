@@ -264,6 +264,89 @@ proofFieldFor[step_Association, nameToKey_Association] := Block[
     ]
 ]
 
+(* ---- CLI -> verifiable ProofObject lift -------------------------
+   Take the Association that TSZSDerivationToProofObject returns and
+   produce a literal `ProofObject["EquationalLogic", goal, axioms,
+   data]` that WL's property machinery accepts (ProofFunction etc.).
+
+   Three transforms compose:
+     1. TPTPImport renders TPTP terms as String tokens wrapped in a
+        zero-arg call -- `"x1"[]` for variables, `"k1"[]` for
+        constants.  liftStringLeaves promotes both to Global` Symbols.
+     2. Axiom variables must appear as Pattern[name, Blank[]] (the
+        `name_` form the AxiomaticTheory schemas expect).
+        withVariablePatterns rewrites a chosen set of symbols into
+        that pattern form.
+     3. arg3 axioms use Inactive[Equal][lhs, rhs]; arg4 Proof entries'
+        Statement field uses HoldForm[lhs == rhs].  Different
+        wrappers around the same canonicalized equation. *)
+liftStringLeaves[expr_] := expr //. {
+    h_String[] /; StringLength[h] > 0 :> Symbol["Global`" <> h]
+};
+
+collectVarSymbols[expr_] := DeleteDuplicates @ Cases[
+    {expr},
+    s_Symbol /; (Context[s] === "Global`" &&
+        StringMatchQ[SymbolName[s],
+            "x" ~~ DigitCharacter ..]),
+    Infinity];
+
+(* `expr /. v -> Pattern[v, Blank[]]` would loop since the RHS
+   contains the LHS literally.  Build the substitution map with
+   Hold and ReleaseHold once at the end. *)
+withVariablePatterns[expr_, vars_List] := ReleaseHold @ Block[
+    {pairs},
+    pairs = Map[# -> Hold[Pattern][#, Blank[]] &, vars];
+    Hold[expr] /. pairs /. Hold[Pattern] -> Pattern
+];
+
+inactivateEqual[Equal[a_, b_]] := Inactive[Equal][a, b];
+inactivateEqual[other_]         := other;
+
+holdEqual[Equal[a_, b_]] := With[{x = a, y = b}, HoldForm[x == y]];
+holdEqual[other_]         := other;
+
+liftToProofObject[assoc_Association] := Block[
+    {goalRaw, axiomsRaw, dsRaw, goalLifted, axiomsLifted,
+     varSyms, allSyms, constSyms, axList, prfList},
+    goalRaw   = assoc["Goal"];
+    axiomsRaw = assoc["Axioms"];
+    dsRaw     = assoc["ProofDataset"];
+    goalLifted   = liftStringLeaves[goalRaw];
+    axiomsLifted = liftStringLeaves /@ axiomsRaw;
+    (* Variables come from axioms (the universally-quantified `x`
+       names).  The goal's skolem-constants live in constSyms. *)
+    varSyms   = collectVarSymbols[axiomsLifted];
+    allSyms   = DeleteDuplicates @ Cases[
+        {axiomsLifted, goalLifted},
+        s_Symbol /; Context[s] === "Global`",
+        Infinity];
+    constSyms = Complement[allSyms, varSyms];
+    axList = Map[
+        inactivateEqual @ withVariablePatterns[#, varSyms] &,
+        axiomsLifted];
+    prfList = KeyValueMap[
+        #1 -> Association[
+            "Statement" -> Block[{
+                raw = liftStringLeaves @
+                    Lookup[#2, "Statement", Missing[]]},
+                If[ raw === True || MissingQ[raw],
+                    raw,
+                    holdEqual @ withVariablePatterns[raw, varSyms]
+                ]],
+            "Proof"     -> Lookup[#2, "Proof", <||>]] &,
+        dsRaw];
+    ProofObject[
+        "EquationalLogic",
+        inactivateEqual @ withVariablePatterns[goalLifted, varSyms],
+        axList,
+        <|
+            "Variables" -> varSyms,
+            "Constants" -> constSyms,
+            "Proof"     -> prfList
+        |>]
+];
+
 buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
     {folded, nameToKey, entries, stmtFn},
     (* Drop bookkeeping steps (orient, reorient_equations,
@@ -359,7 +442,8 @@ Options[TVampireProofObject] = {
     TimeConstraint  -> 30,
     "Mode"          -> "casc",
     "Binary"        -> Automatic,
-    "ParseFormulas" -> False
+    "ParseFormulas" -> False,
+    "LiftToProofObject" -> False
 }
 
 (* Vampire-specific wrapper: chain TVampireProof + the generic
@@ -368,7 +452,10 @@ Options[TVampireProofObject] = {
 TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[
     {vampR = TVampireProof[theory, thm,
             FilterRules[{opts}, Options[TVampireProof]]],
-        parseOpt = "ParseFormulas" -> OptionValue["ParseFormulas"]},
+        liftQ = TrueQ @ OptionValue["LiftToProofObject"],
+        parseOpt, assoc},
+    parseOpt = "ParseFormulas" -> (liftQ ||
+        TrueQ @ OptionValue["ParseFormulas"]);
     If[ vampR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool"     -> "Vampire",
@@ -376,7 +463,12 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
             "Seconds"  -> vampR["Seconds"],
             "Strategy" -> vampR["Strategy"]
         |>],
-        TSZSDerivationToProofObject[vampR["Inferences"], parseOpt]
+        assoc = TSZSDerivationToProofObject[
+            vampR["Inferences"], parseOpt];
+        If[ liftQ,
+            THVMLink`ATP`Private`liftToProofObject[assoc],
+            assoc
+        ]
     ]
 ]
 
@@ -390,7 +482,15 @@ Options[TWaldmeisterProofObject] = {
     TimeConstraint  -> 30,
     "Binary"        -> Automatic,
     "MathlinkPath"  -> Automatic,
-    "ParseFormulas" -> False
+    "ParseFormulas" -> False,
+    (* LiftToProofObject -> True forces ParseFormulas and rewraps
+       the resulting Association into a literal 4-arg ProofObject
+       so the WL property machinery (ProofFunction, ProofGraph,
+       Theorems) dispatches.  pf[Theorems] still fails verification
+       because the Proof entries lack the rewrite metadata
+       (Orientation, Rule, Side, Position) the verifier needs --
+       extracting those from the SZS DAG is a deeper iter. *)
+    "LiftToProofObject" -> False
 }
 
 (* Two-arg (Theory, thm) form: resolve to a pre-generated .pr file
@@ -422,14 +522,24 @@ TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /;
         {wmR = TWaldmeisterProof[problemFile,
                 FilterRules[{opts},
                     {TimeConstraint, "Binary", "MathlinkPath"}]],
-            parseOpt = "ParseFormulas" -> OptionValue["ParseFormulas"]},
+            liftQ = TrueQ @ OptionValue["LiftToProofObject"],
+            parseOpt, assoc},
+        (* LiftToProofObject implies ParseFormulas: the lift needs
+           WL-parsed formula bodies to walk. *)
+        parseOpt = "ParseFormulas" -> (liftQ ||
+            TrueQ @ OptionValue["ParseFormulas"]);
         If[ wmR["Status"] =!= "Proved",
             Failure["ExternalNoProof", <|
                 "Tool"     -> "Waldmeister",
                 "Status"   -> wmR["Status"],
                 "Seconds"  -> wmR["Seconds"]
             |>],
-            TSZSDerivationToProofObject[wmR["Inferences"], parseOpt]
+            assoc = TSZSDerivationToProofObject[
+                wmR["Inferences"], parseOpt];
+            If[ liftQ,
+                THVMLink`ATP`Private`liftToProofObject[assoc],
+                assoc
+            ]
         ]
     ]
 
