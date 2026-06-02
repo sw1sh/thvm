@@ -284,32 +284,39 @@ equalSides[_]                       := $Failed;
 stripPatternHeads[expr_] := expr //.
     Verbatim[Pattern][v_, _] :> v;
 
-(* Hand-construct a Rule (matches the preset's stored shape:
-   the Rule field is an immediate `lhs_ -> rhs` per AbelianGroup
-   InverseOfInverse's preset).  Strip Pattern[] heads from the
-   RHS so bound vars substitute correctly when the verifier
-   applies the rule. *)
-mkRule[lhsPat_, rhsBody_] := With[
-    {lh = lhsPat, rh = stripPatternHeads[rhsBody]},
+(* Hand-construct a Rule that matches the preset's stored shape:
+   LHS is Pattern-wrapped (vars rendered as `name_`); RHS uses
+   the same Symbol names bare so bound vars substitute correctly. *)
+mkRule[lhsBase_, rhsBase_, vars_List : {}] := With[
+    {lh = withVariablePatterns[stripPatternHeads[lhsBase], vars],
+     rh = stripPatternHeads[rhsBase]},
     Rule @@ {lh, rh}];
 
-(* For Replace -- where we do need a RuleDelayed to defer the
-   stripped-RHS evaluation past the binding capture. *)
-mkRewriteRule[lhsPat_, rhsBody_] := With[
-    {lh = lhsPat, rh = stripPatternHeads[rhsBody]},
+(* For Replace -- defers RHS evaluation past binding capture. *)
+mkRewriteRule[lhsBase_, rhsBase_, vars_List : {}] := With[
+    {lh = withVariablePatterns[stripPatternHeads[lhsBase], vars],
+     rh = stripPatternHeads[rhsBase]},
     RuleDelayed @@ {lh, rh}];
 
-reconstructSingleRewrite[inputEq_, constructEq_, stepEq_] := Block[
-    {iSides, cSides, sSides, candidates, hit},
+reconstructSingleRewrite[inputEq_, constructEq_, stepEq_,
+        varSet_List : {}] := Block[
+    {iSides, cSides, sSides, candidates, hit, closureMode},
     iSides = equalSides[inputEq];
     cSides = equalSides[constructEq];
-    sSides = equalSides[stepEq];
+    (* True closure: Step.Statement collapses to `True` because the
+       rewrite makes both sides of Input syntactically equal.
+       Accept candidates whose rewritten equation has lhs === rhs. *)
+    closureMode = stepEq === True;
+    sSides = If[ closureMode, Missing[], equalSides[stepEq]];
     If[ iSides === $Failed || cSides === $Failed
-        || sSides === $Failed, Return[$Failed]];
+        || (! closureMode && sSides === $Failed), Return[$Failed]];
+    (* Statements are stored with BARE variables in the dataset; we
+       need Pattern[v, Blank[]] form for MatchQ to fire correctly. *)
+    cSides = withVariablePatterns[#, varSet] & /@ cSides;
     candidates = Flatten[Table[
         Block[{rule, lhsPat, allPositions},
-            lhsPat = cSides[[cs]];
-            rule = mkRewriteRule[lhsPat, cSides[[3 - cs]]];
+            lhsPat = cSides[[cs]];  (* already Pattern-wrapped earlier *)
+            rule = mkRewriteRule[lhsPat, cSides[[3 - cs]], varSet];
             allPositions = Prepend[
                 Position[iSides[[s]], _], {}];
             Table[
@@ -327,7 +334,9 @@ reconstructSingleRewrite[inputEq_, constructEq_, stepEq_] := Block[
                 {pos, allPositions}]],
         {s, 2}, {cs, 2}], 2];
     hit = SelectFirst[candidates,
-        (Sort @ #[[4]]) === (Sort @ sSides) &,
+        If[ closureMode,
+            #[[4, 1]] === #[[4, 2]],
+            (Sort @ #[[4]]) === (Sort @ sSides)] &,
         Missing["NoFit"]];
     If[ MissingQ[hit], $Failed,
         <|"Side" -> hit[[1]],
@@ -335,7 +344,7 @@ reconstructSingleRewrite[inputEq_, constructEq_, stepEq_] := Block[
           "Position" -> hit[[3]],
           "Orientation" -> If[hit[[2]] === 1, 1, -1],
           "Rule" -> mkRule[cSides[[hit[[2]]]],
-              cSides[[3 - hit[[2]]]]]|>]
+              cSides[[3 - hit[[2]]]], varSet]|>]
 ];
 
 (* ---- Superposition (CriticalPairLemma) reconstruction -----------
@@ -444,13 +453,18 @@ reconstructSuperposition[
               "MatchingSide" -> s2,
               "MatchingOrientation" -> o2,
               "Position" -> pos,
-              "Subpattern" -> subp,
+              (* Subpattern stored Pattern-wrapped (matches preset
+                 shape: (a_) ⊗ (b_) not bare a ⊗ b). *)
+              "Subpattern" -> withVariablePatterns[
+                  subp, Join[varSet, freshVars]],
               "Rule" -> mkRule[
                 If[o1 === 1, cs[[s1]], cs[[3 - s1]]],
-                If[o1 === 1, cs[[3 - s1]], cs[[s1]]]],
+                If[o1 === 1, cs[[3 - s1]], cs[[s1]]],
+                varSet],
               "MatchingRule" -> mkRule[
                 If[o2 === 1, ms[[s2]], ms[[3 - s2]]],
-                If[o2 === 1, ms[[3 - s2]], ms[[s2]]]]|>]]
+                If[o2 === 1, ms[[3 - s2]], ms[[s2]]],
+                freshVars]|>]]
 ];
 
 (* Take an already-lifted prfList (Association of {Type, n} ->
@@ -470,20 +484,39 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
             "SubstitutionLemma" | "Conclusion",
                 inputKey     = Lookup[proof, "Input",     Missing[]];
                 constructKey = Lookup[proof, "Construct", Missing[]];
+                (* Conclusion can omit Input -- the implicit Input is
+                   the Hypothesis (the goal being proved). *)
+                If[ type === "Conclusion" && MissingQ[inputKey],
+                    inputKey = {"Hypothesis", 1};
+                    proof = Association[proof, "Input" -> inputKey]];
                 If[ MissingQ[inputKey] || MissingQ[constructKey],
                     Return[entry]];
                 inputEntry     = Lookup[prfAssoc, Key[inputKey],     Missing[]];
                 constructEntry = Lookup[prfAssoc, Key[constructKey], Missing[]];
+                (* If Construct points at a True-closure entry (an
+                   SL/Conclusion whose Statement collapsed to True),
+                   walk one level back to the actual rewrite rule. *)
+                If[ AssociationQ[constructEntry] &&
+                    constructEntry["Statement"] === True,
+                    Block[{innerKey = Lookup[
+                            Lookup[constructEntry, "Proof", <||>],
+                            "Construct", Missing[]]},
+                        If[ ! MissingQ[innerKey],
+                            constructKey = innerKey;
+                            constructEntry = Lookup[prfAssoc,
+                                Key[innerKey], Missing[]];
+                            proof = Association[proof,
+                                "Construct" -> innerKey]]]];
                 If[ MissingQ[inputEntry] || MissingQ[constructEntry],
                     Return[entry]];
                 recon = reconstructSingleRewrite[
                     inputEntry["Statement"],
                     constructEntry["Statement"],
-                    stepEq];
+                    stepEq, varSet];
                 If[ recon === $Failed, Return[entry]];
                 Return[ReplacePart[entry,
                     "Proof" -> Association[proof, recon,
-                        "Source" -> "norm",
+                        "Source" -> If[type === "Conclusion", "cpl", "norm"],
                         "InputOrientation" -> 1,
                         "OutputExpression" -> stepEq]]],
             "CriticalPairLemma",
@@ -568,7 +601,11 @@ liftToProofObject[assoc_Association] := Block[
     axList = Map[
         inactivateEqual @ withVariablePatterns[#, varSyms] &,
         axiomsLifted];
-    (* First pass: lift each Statement / preserve skeleton Proof links. *)
+    (* First pass: lift each Statement / preserve skeleton Proof links.
+       NOTE: preset stores arg4-Proof Statements with BARE variables
+       (HoldForm[a ⊗ b == ...]) and arg3 axioms with Pattern[v, _]
+       (Inactive[Equal][(a_) ⊗ (b_), ...]).  So withVariablePatterns
+       is applied to arg3 above but NOT to the Statement here. *)
     prfList = KeyValueMap[
         #1 -> Association[
             "Statement" -> Block[{
@@ -576,7 +613,7 @@ liftToProofObject[assoc_Association] := Block[
                     Lookup[#2, "Statement", Missing[]]},
                 If[ raw === True || MissingQ[raw],
                     raw,
-                    holdEqual @ withVariablePatterns[raw, varSyms]
+                    holdEqual[raw]
                 ]],
             "Proof"     -> Lookup[#2, "Proof", <||>]] &,
         dsRaw];
