@@ -2468,6 +2468,27 @@ $AtpPresetDefaults = <|
         "AutoMaxWeight" -> True,
         "BackwardSubsume" -> True, "BackwardDemod" -> True,
         "RHSInterreduce" -> True|>,
+    (* "VampireUEQDefault": mirrors the FIRST slot of Vampire 5.0.1's
+       UEQ portfolio schedule (CASC/Schedules.cpp:5224):
+           lrs+10_1:1_sil=4000:st=3.0:i=102:sd=2:ss=axioms:sgt=8_0
+       That slot is the one that actually cracks the easy abelian-
+       group / boolean-ring cases in the comparator
+       (compare_vampireueq_vs_vampire.tsv, ~5ms wall on CLI side).
+       Key differences from "VampireUEQ" above (which was modeled on a
+       later LPO-flavored slot): default KBO ordering, age:weight=1:1
+       (thvm SR=2, i.e. 1 FIFO per 2 picks = full alternation), SInE
+       axiom-relevance filter active.  See
+       docs/atp/vampire_case_teardown.md for the full mapping. *)
+    "VampireUEQDefault" -> <|
+        "Ordering" -> "KBO", "AutoPrecedence" -> True,
+        "SelectionRatio" -> 2,
+        "AxiomRelevance" -> {"SInE",
+            "SineTolerance" -> 3.0,
+            "SineDepth" -> 2,
+            "SineGenerality" -> 8},
+        "UnfailingCP" -> True,
+        "RHSInterreduce" -> True,
+        "LRS" -> True|>,
     "Twee" -> <|
         "CriticalPairWeight" -> "Twee",
         "GroundJoin" -> True, "Connectedness" -> True,
@@ -2508,6 +2529,7 @@ $AtpPresetGoalDirected = <|
     "Waldmeister" -> False,
     "WaldmeisterLazy" -> False,
     "VampireUEQ"  -> True,
+    "VampireUEQDefault" -> False,  (* matches Vampire's UEQ portfolio default slot which doesn't enable goal-MNF *)
     "Twee"        -> False,
     "EProver"     -> False,
     "VampireRandom" -> True
@@ -2655,6 +2677,15 @@ atpParseMethod["VampireUEQ"] := atpParseMethod[{"VampireUEQ"}];
 atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["VampireUEQ"],
         $AtpPresetGoalDirected["VampireUEQ"], {subopts}];
+
+(* Method -> "VampireUEQDefault": the Vampire 5.0.1 UEQ portfolio
+   first-slot mirror; see $AtpPresetDefaults comment + docs/atp/
+   vampire_case_teardown.md for the per-token decode of
+   `lrs+10_1:1_sil=4000:st=3.0:i=102:sd=2:ss=axioms:sgt=8_0`. *)
+atpParseMethod["VampireUEQDefault"] := atpParseMethod[{"VampireUEQDefault"}];
+atpParseMethod[{"VampireUEQDefault", subopts___Rule}] :=
+    atpDispatchPreset[$AtpPresetDefaults["VampireUEQDefault"],
+        $AtpPresetGoalDirected["VampireUEQDefault"], {subopts}];
 
 (* Method -> "Twee": a preset modeled on Twee 2.x's defaults --
        cfg_lhsweight=4, cfg_rhsweight=1, cfg_depthweight=2,
