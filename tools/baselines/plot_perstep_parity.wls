@@ -14,7 +14,9 @@ data = Join[
     loadTsv["tools/baselines/parity_perstep.tsv"],
     loadTsv["tools/baselines/parity_perstep_hard.tsv"]];
 
-style[c_] := LightDarkSwitched[{c, Darker[c, 0.25]}];
+(* LightDarkSwitched isn't a valid ChartStyle directive (BarChart
+   silently renders bars white); plain RGB works under any theme. *)
+style[c_] := c;
 
 (* Match-rate: matched / preset_constructs, capped to [0,1].  When
    preset failed (preset_constructs == 0) report 0. *)
@@ -40,9 +42,13 @@ matchData = Table[
         presetsTested],
     {lbl, caseLabels}];
 
+(* Rotate the x labels 45 deg so 12 cases fit without collision. *)
+rotated[s_String] := Rotate[Style[s, FontSize -> 11],
+    -45 Degree];
+
 bc = BarChart[
     matchData,
-    ChartLabels -> {caseLabels, None},
+    ChartLabels -> {rotated /@ caseLabels, None},
     PlotLabel ->
         "per-step statement match rate (matched / preset_constructs)",
     AxesLabel -> {None, "fraction matched"},
@@ -54,7 +60,7 @@ bc = BarChart[
          "Method->Automatic",
          "Method->\"VampireUEQ\""}, Top],
     PlotRange -> {0, 1.05},
-    ImageSize -> 1000,
+    ImageSize -> {1100, 700},
     BarSpacing -> {Small, Medium},
     PlotTheme -> "Detailed",
     GridLines -> {None,
@@ -62,5 +68,5 @@ bc = BarChart[
 ];
 
 Export["tools/baselines/plots/perstep_match_rate.png", bc,
-    ImageResolution -> 160];
+    ImageResolution -> 200];
 print["wrote tools/baselines/plots/perstep_match_rate.png"];

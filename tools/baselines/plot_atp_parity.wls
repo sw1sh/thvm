@@ -76,7 +76,11 @@ flatRow[i_] := Flatten @ Table[
 
 absRows = Table[flatRow[i], {i, Length[cases]}];
 
-style[c_] := LightDarkSwitched[{c, Darker[c, 0.25]}];
+(* LightDarkSwitched isn't a valid ChartStyle directive; BarChart
+   just renders bars white when it can't parse the color spec.
+   Fall back to plain RGB and let the PlotTheme handle dark-mode
+   contrast. *)
+style[c_] := c;
 
 bcAbs = BarChart[
     absRows,
