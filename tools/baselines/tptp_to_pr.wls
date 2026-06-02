@@ -183,12 +183,23 @@ eqBlock = StringRiffle[
 ]
 conclusion = sanitizeTerm[goal["LHS"]] <> " = " <> sanitizeTerm[goal["RHS"]]
 
+(* KBO weights: 1 per symbol (uniform).  KBO with uniform weights +
+   precedence matches the internal thvm "Waldmeister" preset
+   (Mix weight + KBO + AutoPrecedence).  LPO would give a different
+   reduction system; sticking to KBO keeps the converter aligned
+   with the preset. *)
+weightBlock = StringRiffle[
+    Map[Replace[#, (n_String -> _Integer) :> n <> "=1"] &, sig],
+    ", "
+]
+
 pr = StringJoin[
     "NAME          ", sanitize @ FileBaseName[tptpFile], "\n",
     "MODE          PROOF\n",
     "SORTS         ANY\n",
     "SIGNATURE     ", sigBlock, "\n",
-    "ORDERING      LPO\n",
+    "ORDERING      KBO\n",
+    "              ", weightBlock, "\n",
     "              ", precBlock, "\n",
     "VARIABLES     ", varBlock, "\n",
     "EQUATIONS     ", eqBlock, "\n",

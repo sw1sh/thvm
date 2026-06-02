@@ -4,7 +4,8 @@ SORTS         ANY
 SIGNATURE     opCenterdot: ANY ANY -> ANY
               skC1: -> ANY
               skC2: -> ANY
-ORDERING      LPO
+ORDERING      KBO
+              opCenterdot=1, skC1=1, skC2=1
               skC1 > skC2 > opCenterdot
 VARIABLES     X1, X2, X3: ANY
 EQUATIONS     opCenterdot(opCenterdot(X1,X1),opCenterdot(X1,X2)) = X1

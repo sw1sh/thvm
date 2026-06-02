@@ -6,7 +6,8 @@ SIGNATURE     and: ANY ANY -> ANY
               not: ANY -> ANY
               opOvertilde: ANY -> ANY
               skC1: -> ANY
-ORDERING      LPO
+ORDERING      KBO
+              and=1, k1=1, not=1, opOvertilde=1, skC1=1
               k1 > skC1 > not > opOvertilde > and
 VARIABLES     X1, X2, X3: ANY
 EQUATIONS     and(X1,and(X2,X3)) = and(and(X1,X2),X3)
