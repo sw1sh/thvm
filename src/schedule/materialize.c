@@ -4872,13 +4872,19 @@ fn Term materialize_uop_in_env(Term t, u32 env_id) {
 // Bottoms out at non-UOP tags and at UOP_KERNEL (already materialized).
 // Idempotent across re-entries via the early returns inside
 // thvm_materialize.
-static void materialize_inner_assigns(Term term) {
+static void materialize_inner_assigns_rec(Term term, u8 *visited, u64 cap) {
   if (term_tag(term) != TAG_UOP) return;
   u32 op = term_ext(term);
   if (op == UOP_KERNEL) return;
   u8 ar = uop_arity((u8)op);
   if (ar == 0) return;
   u64 loc = term_val(term);
+  // Memoize per node: shared DAG nodes (residual fan-in, stacked-backward)
+  // must be walked once, not once per incoming edge -- else exponential in
+  // depth.  ASSIGN-src materialization is idempotent, so a second visit is
+  // pure redundant re-walk.  Same bitmap pattern as strip_detach / subst.
+  if (loc < cap && visited[loc]) return;
+  if (loc < cap) visited[loc] = 1;
   for (u8 i = 0; i < ar; i++) {
     Term child = heap_read(loc + i);
     if (term_tag(child) != TAG_UOP) continue;
@@ -4888,9 +4894,18 @@ static void materialize_inner_assigns(Term term) {
       Term csrc_mat = thvm_materialize(csrc);
       if (csrc_mat != csrc) heap_set(cloc + 1, csrc_mat);
     } else {
-      materialize_inner_assigns(child);
+      materialize_inner_assigns_rec(child, visited, cap);
     }
   }
+}
+
+static void materialize_inner_assigns(Term term) {
+  if (term_tag(term) != TAG_UOP) return;
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
+  if (visited == NULL) return;  // OOM: skip (re-entries stay idempotent)
+  materialize_inner_assigns_rec(term, visited, cap);
+  free(visited);
 }
 
 // Recursively strip UOP_DETACH(x) -> x in place across a UOP DAG, so the
@@ -4898,7 +4913,7 @@ static void materialize_inner_assigns(Term term) {
 // (the gated uop_graph_simplify can't be relied on).  Detach is identity
 // at the value level; the backward was already built before materialize.
 // Resolves chains of DETACH and rewrites each parent slot in place.
-static Term materialize_strip_detach(Term term) {
+static Term materialize_strip_detach_rec(Term term, u8 *visited, u64 cap) {
   for (int hops = 0; hops < 64 && term_tag(term) == TAG_UOP
                      && term_ext(term) == UOP_DETACH; hops++) {
     term = heap_read(term_val(term) + 0);
@@ -4906,14 +4921,36 @@ static Term materialize_strip_detach(Term term) {
   if (term_tag(term) != TAG_UOP) return term;
   u32 op = term_ext(term);
   if (op == UOP_KERNEL) return term;
-  u8 ar = uop_arity((u8)op);
   u64 loc = term_val(term);
+  // Memoize the child-strip per node: a DAG node shared by N parents
+  // (residual activations, stacked-backward fan-in) must be walked ONCE,
+  // not once per incoming edge -- else the walk is exponential in graph
+  // depth (a 2-layer transformer backward never finishes).  Children are
+  // stripped in place, so a second visit is pure redundant re-walk.
+  // Mirrors materialize_subst_cached_rec's visited bitmap.
+  if (loc < cap && visited[loc]) return term;
+  if (loc < cap) visited[loc] = 1;
+  u8 ar = uop_arity((u8)op);
   for (u8 i = 0; i < ar; i++) {
     Term child = heap_read(loc + i);
-    Term stripped = materialize_strip_detach(child);
+    Term stripped = materialize_strip_detach_rec(child, visited, cap);
     if (stripped != child) heap_set(loc + i, stripped);
   }
   return term;
+}
+
+static Term materialize_strip_detach(Term term) {
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
+  if (visited == NULL) {  // OOM: skip memoization, still de-DETACH the root
+    for (int hops = 0; hops < 64 && term_tag(term) == TAG_UOP
+                       && term_ext(term) == UOP_DETACH; hops++)
+      term = heap_read(term_val(term) + 0);
+    return term;
+  }
+  Term r = materialize_strip_detach_rec(term, visited, cap);
+  free(visited);
+  return r;
 }
 
 fn Term thvm_materialize(Term term) {
