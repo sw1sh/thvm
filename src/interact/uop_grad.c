@@ -231,16 +231,18 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
       matched = 1;
     }
     if (matched) {
-      // requires_grad filter (target-aware path): if the canonical
-      // C-side flag is in use AND the target tensor isn't marked,
-      // suppress the contribution -- the caller asked grads for a
-      // non-parameter, which is a no-op by definition.
-      if (GRAD_REQ_NCOUNT > 0 && term_tag(tr) == TAG_TEN) {
-        u32 tt = (u32)term_val(tr);
-        if (tt > 0 && tt < TENS_NEXT && TENS[tt].requires_grad == 0) {
-          return uop_const(grad_target_dtype(), 0);
-        }
-      }
+      // Explicit-target gradient (TUOpGradWithTarget / tinygrad
+      // Tensor.gradient(*targets), tensor.py:836 + gradient.py
+      // compute_gradient): the caller NAMED this leaf as the
+      // differentiation target, so its requires_grad flag is
+      // irrelevant -- return the cotangent unconditionally.  No
+      // requires_grad filter here: that belongs only to the
+      // target-FREE walk below (backward()'s implicit "collect every
+      // parameter" path), where it picks WHICH leaves to accumulate.
+      // Filtering a named target would zero an explicitly-requested
+      // gradient whenever some OTHER tensor is marked requires_grad
+      // (GRAD_REQ_NCOUNT > 0) -- the post-Adam-loop grad_with_target=0
+      // corruption.
       return gy_for_leaf;
     }
     return uop_const(grad_target_dtype(), 0);   // mismatch -> scalar zero

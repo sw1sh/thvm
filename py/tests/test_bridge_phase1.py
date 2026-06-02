@@ -87,6 +87,30 @@ class TestBridgePhase1(unittest.TestCase):
         self.assertEqual(self._eval(self.th.grad_with_target(y, gy, a), 3),
                          [5, 6, 7])
 
+    def test_grad_with_target_unmarked_under_requires_grad(self):
+        # Explicit-target gradient must ignore requires_grad on the
+        # target: tinygrad Tensor.gradient(*targets) (tensor.py:836)
+        # differentiates w.r.t. exactly the named targets, no filter.
+        # Regression for the post-Adam-loop grad=0 corruption: marking
+        # ANY tensor requires_grad bumps GRAD_REQ_NCOUNT, which used to
+        # make grad_with_target on an UNMARKED target return zero
+        # (uop_grad.c target-aware leaf filter).
+        param = self.th.ten_create(K.FP32, [2])
+        self.th.ten_write(param, _f32([1.0, 1.0]))
+        self.assertTrue(self.th.ten_set_requires_grad(param, True))
+        try:
+            a = self._const([3], [2, 3, 4])
+            b = self._const([3], [5, 6, 7])
+            y = self.th.mul(a, b)
+            gy = self._const([3], [1, 1, 1])
+            # a is NOT requires_grad, but it IS the explicit target:
+            # d(a*b)/da = b, unaffected by param's requires_grad.
+            self.assertEqual(
+                self._eval(self.th.grad_with_target(y, gy, a), 3),
+                [5, 6, 7])
+        finally:
+            self.th.ten_set_requires_grad(param, False)
+
     # --- introspection (Phase-4 cross-check surface) ---
 
     def test_introspection(self):
