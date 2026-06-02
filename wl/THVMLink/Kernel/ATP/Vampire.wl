@@ -20,11 +20,11 @@
        |>
 
    For unsolved problems Status is "Failed" / "TimedOut" and the
-   inference fields hold defaults.  Uses
-   Wolfram`Parser`TPTPImport[..., "SZS"] from
-   /Users/swish/src/wolfram/AISkills/examples/WolframParser. *)
+   inference fields hold defaults.  Uses Wolfram`Parser`TPTPImport[..., "SZS"]
+   from the Wolfram/WolframParser paclet (declared in BeginPackage so
+   Needs auto-loads it). *)
 
-BeginPackage["THVMLink`ATP`"]
+BeginPackage["THVMLink`ATP`", {"Wolfram`Parser`"}]
 
 TVampireProof::usage =
     "TVampireProof[\"path/to/file.p\", opts] runs the local Vampire 5.0.1 " <>
@@ -141,7 +141,7 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
     Block[{
         bin, tc, mode, cmd, out, secs, status,
-        derivation, foldedDerivation
+        proofText, solutionFile, derivation, foldedDerivation
     },
         bin = vampireBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
@@ -171,10 +171,25 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
             True,
                 "Failed"
         ];
+        (* casc-mode portfolio writes the winning strategy's proof
+           to a separate file ("Solution written to <path>") rather
+           than stdout.  Detect + read that file; fall back to the
+           inline proof body present in single-strategy modes. *)
+        solutionFile = First[
+            StringCases[out,
+                "Solution written to \"" ~~ p:Except["\""].. ~~ "\"" :> p,
+                1],
+            None];
+        proofText = Which[
+            status =!= "Proved", out,
+            StringQ[solutionFile] && FileExistsQ[solutionFile],
+                Import[solutionFile, "Text"],
+            True, out
+        ];
         derivation = If[
             status === "Proved",
             Quiet @ Check[
-                Wolfram`Parser`TPTPImport[out, "SZS"],
+                Wolfram`Parser`TPTPImport[proofText, "SZS"],
                 $Failed
             ],
             Missing["NoProof"]

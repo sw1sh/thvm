@@ -28,7 +28,7 @@
      to "SubstitutionLemma" (a benign default; tweak the table to
      add a prover's idiosyncratic inference). *)
 
-BeginPackage["THVMLink`ATP`"]
+BeginPackage["THVMLink`ATP`", {"Wolfram`Parser`"}]
 
 TSZSDerivationToProofObject::usage =
     "TSZSDerivationToProofObject[derivation_List] builds a thvm-shaped " <>
