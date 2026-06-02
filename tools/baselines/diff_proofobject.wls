@@ -104,6 +104,8 @@ sortKey[k_] := With[
     {idx, Last[k]}
 ];
 
+$summary = {};
+
 diffOne[theory_String, thm_String] := Block[
     {pP, pC, dsP, dsC, kvP, kvC, matchedP, matchedC,
      unmatchedP, unmatchedC},
@@ -134,6 +136,13 @@ diffOne[theory_String, thm_String] := Block[
         {i, Length[kvP]}];
     unmatchedP = Complement[Keys[dsP], Keys[matchedP]];
     unmatchedC = Complement[Keys[dsC], Keys[matchedC]];
+    AppendTo[$summary, <|
+        "Theory" -> theory, "Theorem" -> thm,
+        "PresetN" -> Length[dsP], "CliN" -> Length[dsC],
+        "Matched" -> Length[matchedP],
+        "PresetOnly" -> Length[unmatchedP],
+        "CliOnly" -> Length[unmatchedC]
+    |>];
     print["=== ", theory, " / ", thm, " ==="];
     print["preset constructs: ", Length[dsP],
         "    cli constructs: ", Length[dsC]];
@@ -176,4 +185,52 @@ diffOne[theory_String, thm_String] := Block[
 Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",
     Method -> "Completion", TimeConstraint -> 2.0];
 
-diffOne["AbelianGroupAxioms", "InverseOfInverse"];
+cases = {
+    {"AbelianGroupAxioms", "InverseOfInverse"},
+    {"AbelianGroupAxioms", "InverseOfComposite"},
+    {"AbelianGroupAxioms", "ImpliesMcCuneAxioms"},
+    {"AbelianGroupAxioms", "ImpliesAbelianMcCuneAxioms"},
+    {"BooleanAxioms",      "DoubleNegation"},
+    {"GroupAxioms",        "InverseOfInverse"},
+    {"HillmanAxioms",      "Commutativity"},
+    {"MeredithAxioms",     "Commutativity"}
+};
+
+Scan[Apply[diffOne], cases];
+
+print["===================================================="];
+print["sweep summary"];
+print["===================================================="];
+print[
+    StringPadRight["theory", 22], " ",
+    StringPadRight["theorem", 26], " ",
+    StringPadLeft["preset", 7], " ",
+    StringPadLeft["cli", 5], " ",
+    StringPadLeft["match", 7], " ",
+    StringPadLeft["pOnly", 7], " ",
+    StringPadLeft["cOnly", 7]];
+Scan[
+    r |-> print[
+        StringPadRight[r["Theory"],   22], " ",
+        StringPadRight[r["Theorem"],  26], " ",
+        StringPadLeft[ToString[r["PresetN"]],    7], " ",
+        StringPadLeft[ToString[r["CliN"]],       5], " ",
+        StringPadLeft[ToString[r["Matched"]],    7], " ",
+        StringPadLeft[ToString[r["PresetOnly"]], 7], " ",
+        StringPadLeft[ToString[r["CliOnly"]],    7]],
+    $summary];
+
+Export["tools/baselines/parity_wm_perstep.tsv",
+    Prepend[
+        Map[
+            r |-> {r["Theory"], r["Theorem"],
+                r["PresetN"], r["CliN"],
+                r["Matched"], r["PresetOnly"], r["CliOnly"]},
+            $summary],
+        {"theory", "theorem",
+            "preset_constructs", "cli_constructs",
+            "matched", "preset_only", "cli_only"}
+    ],
+    "TSV"];
+print[];
+print["wrote tools/baselines/parity_wm_perstep.tsv"];

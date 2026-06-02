@@ -1,0 +1,9 @@
+"theory"	"theorem"	"preset_constructs"	"cli_constructs"	"matched"	"preset_only"	"cli_only"
+"AbelianGroupAxioms"	"InverseOfInverse"	11	12	11	0	1
+"AbelianGroupAxioms"	"InverseOfComposite"	17	20	16	1	4
+"AbelianGroupAxioms"	"ImpliesMcCuneAxioms"	27	28	27	0	1
+"AbelianGroupAxioms"	"ImpliesAbelianMcCuneAxioms"	19	20	19	0	1
+"BooleanAxioms"	"DoubleNegation"	19	20	11	8	9
+"GroupAxioms"	"InverseOfInverse"	13	14	13	0	1
+"HillmanAxioms"	"Commutativity"	0	38	0	0	38
+"MeredithAxioms"	"Commutativity"	0	11	0	0	11
