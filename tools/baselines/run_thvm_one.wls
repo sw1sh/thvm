@@ -4,6 +4,17 @@
    line so the same downstream comparator parses both. *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
+
+(* $RecursionLimit bump: defensive against WL stack overflow during
+   proof-property access (ProofDataset / ProofGraph walk).  Doesn't
+   fix the *separate* multi-conjunct-portfolio-with-Mix2-CRASH bug
+   reproducible on WolframAxioms/ImpliesMeredithAxioms (that one
+   crashes inside the C engine during TFindProof itself; see the
+   per-conjunct bench TSV CRASH rows).  Crash signature: SIGSEGV
+   KERN_PROTECTION_FAILURE in the Stack Guard region --
+   ~/Library/Logs/DiagnosticReports/WolframKernel-*.ips. *)
+$RecursionLimit = 16384;
+
 args = $ScriptCommandLine;
 theory = args[[2]];
 thm = args[[3]];

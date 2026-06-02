@@ -6,6 +6,12 @@
    theory \t thm \t i_of_n \t status \t seconds \t proofLen \t verifies. *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
+
+(* See run_thvm_one.wls for the $RecursionLimit rationale -- proof
+   property accessors walk a recursive DAG that overflows WL's
+   default stack on deep reconstructed proofs. *)
+$RecursionLimit = 16384;
+
 args = $ScriptCommandLine;
 theory   = args[[2]];
 thm      = args[[3]];
