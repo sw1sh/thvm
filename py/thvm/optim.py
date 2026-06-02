@@ -1,11 +1,11 @@
 """thvm.nn.optim -- SGD / Adam / AdamW / LARS / Muon, mirroring tinygrad's nn.optim.
 
 The contract matches tinygrad's Optimizer: zero_grad() clears the
-parameter gradients and schedule_step() applies one update and returns
-the tensors that still need realizing.  thvm's assign is eager (it
-realizes the update immediately), so schedule_step performs the update
-in place and returns the (already-updated) params -- `loss.realize(*sched)`
-in the training loop then just realizes the loss.
+parameter gradients and schedule_step() builds one in-place update and
+returns the assign tensors that must be realized to apply it.  The
+assigns are LAZY: step() realizes them (tinygrad's
+`Tensor.realize(*self.schedule_step())`), or a training loop can fire
+them together with the loss via `loss.realize(*opt.schedule_step())`.
 
 Trainable params are those with requires_grad != False; an unset (None)
 requires_grad is promoted to True (tinygrad rule), while an explicit
@@ -58,7 +58,12 @@ class Optimizer:
                 pass
 
     def step(self):
-        self.schedule_step()
+        # The assigns built by schedule_step() are LAZY; realize them here
+        # (tinygrad's Optimizer.step is `Tensor.realize(*self.schedule_step())`).
+        # Without this the update never lands and a re-read of a param that
+        # feeds a multi-consumer view (e.g. attention's q/k/v slices of one
+        # qkv weight) makes wnf_n re-expand the un-sunk assign without bound.
+        Tensor.realize(*self.schedule_step())
 
     def schedule_step(self):
         """Build the (lazy, in-place) update assigns and return every
