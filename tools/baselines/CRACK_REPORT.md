@@ -140,3 +140,71 @@ Same shape as the previous pass, minus the two Sheffer-Implies cracks:
    doesn't fix the WolframAxioms/AndAssociativity-class blowup.  Memory
    discipline at the saturation level (lazy-normalize + CP-budget) is
    the lever.
+
+## Pass 3 — per-conjunct visibility (2026-06-02)
+
+The residual 22 are reported as "Failed" / "TimedOut" / "CRASH" under
+the in-process multi-conjunct dispatcher (`atpProveFromTheory` in
+ATP.wl), which collapses any List of proofs to `$Failed` if ANY
+conjunct fails.  Twelve of the 22 residuals are multi-conjunct
+(2 or 3 equations); the all-or-nothing collapse was hiding genuine
+partial progress.
+
+New per-conjunct bench harness (`tools/baselines/run_thvm_per_conjunct.sh`
++ `list_conjuncts.wls` + `run_thvm_one_conjunct.wls`) drives each
+conjunct in its OWN fresh wolframscript subprocess so a per-conjunct
+SIGSEGV cannot lose the prior conjuncts' results.  Output:
+`tools/baselines/thvm_per_conjunct.tsv` + rolled-up summary
+`tools/baselines/thvm_per_conjunct_summary.tsv`.
+
+### Per-conjunct status (residual 22, TC=30s, default Method)
+
+| Status         | Conjuncts (of 42) |
+|----------------|-------------------|
+| PROVED         | 18 (43%)          |
+| Failed         | 21                |
+| CRASH          | 2                 |
+| TimedOut       | 1                 |
+
+### Rolled-up theorem-level status
+
+| Status         | Theorems (of 22)  |
+|----------------|-------------------|
+| Partial(2/3)   | 7                 |
+| Partial(1/2)   | 3                 |
+| Partial(1/3)   | 1                 |
+| Failed         | 10                |
+| CRASH          | 1                 |
+
+Eleven theorems newly show partial progress.  The remaining un-cracked
+conjunct of every `*ImpliesShefferAxioms` / `*ImpliesHillmanAxioms`
+is the consistent hard slot (conjunct 3 fails in every case it
+appears: 8 of 8 multi-conjunct *Implies* residuals timeout on the
+3rd equation).  The classical hard pair (`McCuneAxioms/EqualityOfInverses`
++ `RobbinsAxioms/DoubleNegation`) remains single-conjunct unprovable.
+
+### Engine bug: multi-conjunct SIGSEGV
+
+WolframAxioms/ImpliesMeredithAxioms reproducibly SIGSEGVs the kernel
+on conjunct 2 (the easy `(x*y)*(x*z) == x` form).  The in-process
+dispatcher's Table iteration triggers it; standalone per-conjunct
+calls also crash with the same target.  Survives the broader
+g_atp_dt_*/ri_*/cp_q* pointer-cache NULL'ing in commit 0c7d100a, so
+the corruption is in a different code path (likely the
+proof-reconstruction trace[] or the Automatic-portfolio inner slot
+swap).  Filed for the engine arc; the per-conjunct harness's
+process-isolation means this doesn't poison the other rows.
+
+### Next moves
+
+The 18 newly-visible PROVEN conjuncts don't change the C engine's
+capability; they document the surface area thvm DOES cover but the
+WL dispatcher hides.  Engine work continues on the genuine
+heuristic/strategy gap that traps the residual unproven conjuncts
+in the same 10 single-conjunct + 12 hard-conjunct-of-multi spots:
+the search saturates without the goal under every config tried, so
+fix is a search-strategy lever (deferred-selection / AC-completion
+modulo / smarter ground-joinability + Twee Connectedness under
+LPO) — NOT another Vampire-knob micro-port (sp=reverse_frequency +
+kws=inv_precedence cracked 0/6 of the 6 stuck cases solo + combined
+at TC=60-180s).
