@@ -264,6 +264,117 @@ proofFieldFor[step_Association, nameToKey_Association] := Block[
     ]
 ]
 
+(* ---- Single-rewrite reconstruction ------------------------------
+   Given Input.eq, Construct.eq, Step.eq (all `Inactive[Equal][lhs, rhs]`
+   shaped, with Construct's vars as Pattern[v, Blank[]]), find which
+   (Side ∈ {1,2}, ConstructSide ∈ {1,2}, Position ∈ Positions(Input[Side]))
+   tuple yields Step.eq when Construct is used as a rewrite rule.
+
+   Returns an Association with Side / ConstructSide / Position /
+   Orientation / Rule keys, or $Failed if no fit.  Handles only
+   SubstitutionLemma + Conclusion (single-rewrite) steps; CriticalPairLemma
+   superposition reconstruction is deferred. *)
+equalSides[Inactive[Equal][a_, b_]] := {a, b};
+equalSides[Equal[a_, b_]]           := {a, b};
+equalSides[h_HoldForm]              := equalSides[ReleaseHold[h]];
+equalSides[_]                       := $Failed;
+
+(* Strip Pattern[v, _] -> v so the matched bindings (decorating
+   the LHS) substitute correctly into the RHS. *)
+stripPatternHeads[expr_] := expr //.
+    Verbatim[Pattern][v_, _] :> v;
+
+(* Hand-construct a Rule (matches the preset's stored shape:
+   the Rule field is an immediate `lhs_ -> rhs` per AbelianGroup
+   InverseOfInverse's preset).  Strip Pattern[] heads from the
+   RHS so bound vars substitute correctly when the verifier
+   applies the rule. *)
+mkRule[lhsPat_, rhsBody_] := With[
+    {lh = lhsPat, rh = stripPatternHeads[rhsBody]},
+    Rule @@ {lh, rh}];
+
+(* For Replace -- where we do need a RuleDelayed to defer the
+   stripped-RHS evaluation past the binding capture. *)
+mkRewriteRule[lhsPat_, rhsBody_] := With[
+    {lh = lhsPat, rh = stripPatternHeads[rhsBody]},
+    RuleDelayed @@ {lh, rh}];
+
+reconstructSingleRewrite[inputEq_, constructEq_, stepEq_] := Block[
+    {iSides, cSides, sSides, candidates, hit},
+    iSides = equalSides[inputEq];
+    cSides = equalSides[constructEq];
+    sSides = equalSides[stepEq];
+    If[ iSides === $Failed || cSides === $Failed
+        || sSides === $Failed, Return[$Failed]];
+    candidates = Flatten[Table[
+        Block[{rule, lhsPat, allPositions},
+            lhsPat = cSides[[cs]];
+            rule = mkRewriteRule[lhsPat, cSides[[3 - cs]]];
+            allPositions = Prepend[
+                Position[iSides[[s]], _], {}];
+            Table[
+                Block[{subterm, newSubterm, newSide, rewrittenEq},
+                    subterm = If[ pos === {}, iSides[[s]],
+                        Extract[iSides[[s]], pos]];
+                    If[ ! MatchQ[subterm, lhsPat], Nothing,
+                        newSubterm = Replace[subterm, rule];
+                        newSide = If[ pos === {}, newSubterm,
+                            ReplacePart[iSides[[s]],
+                                pos -> newSubterm]];
+                        rewrittenEq = ReplacePart[iSides,
+                            s -> newSide];
+                        {s, cs, pos, rewrittenEq}]],
+                {pos, allPositions}]],
+        {s, 2}, {cs, 2}], 2];
+    hit = SelectFirst[candidates,
+        (Sort @ #[[4]]) === (Sort @ sSides) &,
+        Missing["NoFit"]];
+    If[ MissingQ[hit], $Failed,
+        <|"Side" -> hit[[1]],
+          "ConstructSide" -> hit[[2]],
+          "Position" -> hit[[3]],
+          "Orientation" -> If[hit[[2]] === 1, 1, -1],
+          "Rule" -> mkRule[cSides[[hit[[2]]]],
+              cSides[[3 - hit[[2]]]]]|>]
+];
+
+(* Take an already-lifted prfList (Association of {Type, n} ->
+   <|Statement, Proof|>) and, for each SubstitutionLemma /
+   Conclusion entry, reconstruct the rewrite metadata.  Falls back
+   to leaving the skeleton Proof unchanged when reconstruction
+   fails (so the lifted object still works for property dispatch). *)
+augmentSingleRewriteEntries[prfList_List] := Block[
+    {prfAssoc = Association[prfList], augment},
+    augment[key_, entry_Association] := Block[
+        {type = First[key], proof, inputKey, constructKey,
+         inputEntry, constructEntry, stepEq, recon},
+        type = First[key];
+        If[ ! MemberQ[{"SubstitutionLemma", "Conclusion"}, type],
+            Return[entry]];
+        proof = Lookup[entry, "Proof", <||>];
+        inputKey     = Lookup[proof, "Input",     Missing[]];
+        constructKey = Lookup[proof, "Construct", Missing[]];
+        If[ MissingQ[inputKey] || MissingQ[constructKey],
+            Return[entry]];
+        inputEntry     = Lookup[prfAssoc, Key[inputKey],     Missing[]];
+        constructEntry = Lookup[prfAssoc, Key[constructKey], Missing[]];
+        If[ MissingQ[inputEntry] || MissingQ[constructEntry],
+            Return[entry]];
+        stepEq = entry["Statement"];
+        recon = reconstructSingleRewrite[
+            inputEntry["Statement"],
+            constructEntry["Statement"],
+            stepEq];
+        If[ recon === $Failed, Return[entry]];
+        ReplacePart[entry,
+            "Proof" -> Association[proof, recon,
+                "Source" -> "norm",
+                "InputOrientation" -> 1,
+                "OutputExpression" -> stepEq]]
+    ];
+    KeyValueMap[#1 -> augment[#1, #2] &, prfAssoc]
+];
+
 (* ---- CLI -> verifiable ProofObject lift -------------------------
    Take the Association that TSZSDerivationToProofObject returns and
    produce a literal `ProofObject["EquationalLogic", goal, axioms,
@@ -325,6 +436,7 @@ liftToProofObject[assoc_Association] := Block[
     axList = Map[
         inactivateEqual @ withVariablePatterns[#, varSyms] &,
         axiomsLifted];
+    (* First pass: lift each Statement / preserve skeleton Proof links. *)
     prfList = KeyValueMap[
         #1 -> Association[
             "Statement" -> Block[{
@@ -336,6 +448,13 @@ liftToProofObject[assoc_Association] := Block[
                 ]],
             "Proof"     -> Lookup[#2, "Proof", <||>]] &,
         dsRaw];
+    (* Second pass: for SubstitutionLemma + Conclusion entries (which
+       have a single-rewrite shape: Input parent + Construct parent),
+       reconstruct the rewrite metadata the verifier needs.  Walks
+       prfList for parent lookups (an Association of {Type, n} ->
+       <|Statement, Proof|>).  Augments the Proof field in-place;
+       leaves Axioms/Hypotheses/CPLs untouched. *)
+    prfList = augmentSingleRewriteEntries[prfList];
     ProofObject[
         "EquationalLogic",
         inactivateEqual @ withVariablePatterns[goalLifted, varSyms],
