@@ -111,9 +111,10 @@ class SGD(Optimizer):
 
 
 class Adam(Optimizer):
-    def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, **_):
+    def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8,
+                 weight_decay=0.0, **_):
         super().__init__(params, lr)
-        self.b1, self.b2, self.eps = b1, b2, eps
+        self.b1, self.b2, self.eps, self.wd = b1, b2, eps, weight_decay
         self.m = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         self.v = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         # Bias-correction state lives ON-GRAPH as 1-element Tensors b1_t,
@@ -168,8 +169,16 @@ class Adam(Optimizer):
                 continue
             m_hat = self.m[i] / (1.0 - self.b1_t)
             v_hat = self.v[i] / (1.0 - self.b2_t)
-            p.assign(p - m_hat * self.lr
-                     * (v_hat.sqrt() + self.eps).reciprocal())
+            upd = m_hat * self.lr * (v_hat.sqrt() + self.eps).reciprocal()
+            if self.wd:
+                # Decoupled (AdamW) weight decay -- add wd*p to the update so
+                # p -= lr*(m_hat/(sqrt(v_hat)+eps) + wd*p), matching tinygrad
+                # nn/optim.py:175,182 (up += wd*t.detach()).  Gated on wd!=0 so
+                # plain Adam (wd=0) keeps the exact m_hat*lr*recip expression
+                # and stays byte-identical.  p.detach() so the decay carries no
+                # autograd tape.
+                upd = upd + p.detach() * (self.wd * self.lr)
+            p.assign(p - upd)
             out.append(p)
         # b1_t/b2_t are advanced+realized in phase 1; they must ALSO be in
         # the returned realize set so TinyJit's capture-liveness pass keeps
@@ -178,8 +187,14 @@ class Adam(Optimizer):
         return out + [self.b1_t, self.b2_t]
 
 
-# Muon needs Newton-Schulz orthogonalization; thvm has no batched matmul
-# iteration helper yet, so alias to Adam (the script falls back unless
-# MUON=1).  AdamW == Adam without the decoupled weight decay term here.
+# AdamW = Adam with decoupled weight decay (tinygrad nn/optim.py:136-142:
+# AdamW(...) = LAMB(weight_decay, adam=True)); default wd 0.01 like tinygrad.
+def AdamW(params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.01, **_):
+    return Adam(params, lr=lr, b1=b1, b2=b2, eps=eps, weight_decay=weight_decay)
+
+
+# Muon needs Newton-Schulz orthogonalization; thvm has no batched-matmul
+# iteration helper yet, so it falls back to Adam (the script uses it only
+# under MUON=1).  This fallback also drops Muon's weight decay -- a known gap
+# until the Newton-Schulz update lands.
 Muon = Adam
-AdamW = Adam
