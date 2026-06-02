@@ -66,6 +66,66 @@ TTweeProofObject::usage =
 
 Begin["`Private`"]
 
+(* TPTP-symbol -> WL-operator reverse map.  Mirrors the encoder
+   table in tools/vampire/export_all.wls's $opNames (the script
+   that generated the TPTP problem files in
+   tools/baselines/vampire_tptp/).  Keep in sync with that table.
+
+   For operators NOT in this map, parsed TPTP heads stay as
+   String-headed compounds ("op_overtilde"[...], etc.) which the
+   shape comparator already handles. *)
+$tptpToWlOp = <|
+    "and"      -> CircleTimes,
+    "or"       -> CirclePlus,
+    "not"      -> OverBar,
+    "nand_op"  -> CircleMinus,
+    "fop"      -> CircleDot,
+    "diamond"  -> Diamond,
+    "star"     -> Star,
+    "wedge"    -> Wedge,
+    "vee"      -> Vee,
+    "circ"     -> SmallCircle,
+    "mul"      -> Times,
+    "add"      -> Plus,
+    "equiv"    -> Equivalent,
+    "implies"  -> Implies,
+    "lnot"     -> Not,
+    "land"     -> And,
+    "lor"      -> Or,
+    "nand"     -> Nand,
+    "nor"      -> Nor
+|>
+
+(* Walk a parsed TPTP expression and replace String-headed
+   compounds with their WL-symbol heads where the map knows them.
+   `op_overtilde` etc. (unknown) stay String-headed. *)
+reverseEncodeFormula[expr_] := expr //. {
+    h_String[args___] /; KeyExistsQ[$tptpToWlOp, h] :>
+        $tptpToWlOp[h][args]
+}
+
+(* Parse a single SZS formula-body string into a WL expression by
+   wrapping it in a fof(p, axiom, ...).  on the way out, the body
+   parses to WL form via TPTPImport's regular (non-SZS) mode; the
+   top-level ForAll is stripped by TPTPImport. *)
+parseFormulaBody[body_String] := Block[
+    {wrapped, parsed},
+    wrapped = "fof(p, axiom, " <> body <> ").";
+    parsed = Quiet @ Check[
+        Wolfram`Parser`TPTPImport[wrapped],
+        $Failed
+    ];
+    Which[
+        AssociationQ[parsed] && Length[parsed["Axioms"]] > 0,
+            reverseEncodeFormula @ First @ parsed["Axioms"],
+        AssociationQ[parsed] && parsed["Conjecture"] =!= Missing[],
+            reverseEncodeFormula @ parsed["Conjecture"],
+        True,
+            body  (* fall back to raw string -- comparator still works *)
+    ]
+]
+parseFormulaBody[other_] := other
+
 (* The canonical SZS-rule -> thvm-construct mapping.  Editable as a
    public Association.  Defaults cover the standard saturation-prover
    inference vocabulary; unmapped rules default to SubstitutionLemma
@@ -147,7 +207,7 @@ buildDatasetFromDerivation[derivation_List] := Block[
         step |-> With[
             {
                 key        = nameToKey[step["Name"]],
-                stmt       = step["Formula"],
+                stmt       = parseFormulaBody[step["Formula"]],
                 proofField = proofFieldFor[step, nameToKey]
             },
             key -> <|"Statement" -> stmt, "Proof" -> proofField|>
