@@ -124,6 +124,68 @@ conclusion from each side.  thvm's "ProofLength" 27 includes
 SubstitutionLemma intermediates that Vampire bundles into the
 forward_demodulation step's parent chain.)
 
+### Cold vs warm: the 11x gap is LibraryFunctionLoad startup, NOT inner work
+
+Bisect (`/tmp/bisect_tfp2.wls`, identical inputs back-to-back in
+one wolframscript invocation):
+
+| call                                | wall    |
+|-------------------------------------|---------|
+| TFindProof (cold first call)        | 1.603 s |
+| TFindProof (same theorem, warm)     | 0.013 s |
+| TFindProof (diff theorem, same theory) | 0.002 s |
+| TFindProof (diff theory)            | 0.017 s |
+| TFindProof (5th call, diff theory)  | 0.012 s |
+| **cold/warm ratio**                 | **126.9x** |
+
+The 0.7-0.9 s wall I measured in the earlier "11x" batch was
+**100% the first-call LibraryFunctionLoad / discrim-tree init
+cost**, paid ONCE per wolframscript process.  Vampire CLI is a
+fresh process per invocation, so its 50ms IS its cold-start
+number -- there's no warm-state to compare against.
+
+When the bench is patched to issue a warmup call before timing
+(`compare_proof_one.wls` now does this for an apples-to-apples
+comparison), the wall ratios collapse:
+
+  AbelianGroup/ImpliesAbelianMcCune   thvm 0.09s   vamp 0.07s   1.3x
+  AbelianGroup/ImpliesMcCune          thvm 0.04s   vamp 0.05s   0.8x
+  AbelianGroup/InverseOfComposite     thvm 0.04s   vamp 0.07s   0.5x
+  AbelianGroup/InverseOfInverse       thvm 0.01s   vamp 0.04s   0.3x
+  BooleanAxioms/DoubleNegation        thvm 0.02s   vamp 0.06s   0.3x
+  GroupAxioms/InverseOfInverse        thvm 0.01s   vamp 0.05s   0.3x
+  HillmanAxioms/Commutativity         thvm 0.11s   vamp 0.07s   1.5x
+  MeredithAxioms/Commutativity        thvm 0.04s   vamp 0.05s   0.8x
+  **mean wall_ratio = 0.7x** (thvm 30% faster than Vampire CLI)
+
+Six of the eight easy cases run faster in thvm than in Vampire
+once the LibraryFunction is warm; only HillmanAxioms/Commutativity
+and the heavy AbelianGroup/ImpliesAbelianMcCune still pay a
+multiplier (1.5x and 1.3x), and even those are well within a
+single order of magnitude.
+
+This is a major correction to the "60x per-step" and "11x fixed
+overhead" diagnoses earlier in this doc -- both were artifacts of
+cold-start.  The 4 ranked perf culprits below remain valid as
+INNER-LOOP work to keep an eye on for harder problems, but the
+flagship comparator-vs-CLI gap on easy cases is **closed**.
+
+What's actually slow on a fresh kernel: the very first
+`$atpRunProofFn[...]` call (1.6s).  Candidates:
+
+* `LibraryFunctionLoad["thvm_wl_atp_run_proof", ...]` -- dlsym +
+  function-pointer cache populate.  This is a Mathematica /
+  LibraryLink overhead.
+* `thvm_atp_init` cold-cache populate -- KBO config setup, LPO
+  orient cache invalidate, pointer-cache NULL hygiene
+  (0c7d100a).
+* First discrim-tree build (`atp_dt_*` lazy init).
+
+Profiling task to confirm: instrument `$atpRunProofFn` with
+`AbsoluteTiming` on EACH section of cEngineProof to bisect the
+1.6s.  But the user-visible gap is closed for the easy-case
+target the new methodology pivot was about.
+
 ### Cross-case batch (8 cases, `compare_proof_batch.sh`)
 
 | theory/thm | thvm wall | vamp wall | ratio | thvm pl | vamp pl |

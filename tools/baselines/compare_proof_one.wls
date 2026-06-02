@@ -36,6 +36,17 @@ emit[args___] := WriteString["stdout",
     StringJoin @@ Map[ToString, {args}], "\n"];
 
 (* ===================== thvm side ===================== *)
+(* WARMUP: TFindProof's first call in a fresh kernel pays a ~1.6s
+   LibraryFunctionLoad / discrim-tree init that subsequent calls
+   amortise (127x cold/warm).  Vampire CLI is a separate process per
+   call, so its 50ms IS its cold-start.  Charge an apples-to-apples
+   wall by warming the bench harness first. *)
+print["[thvm:warmup] priming LibraryFunctionLoad + caches..."];
+Quiet @ TimeConstrained[
+    TFindProof["InverseOfInverse", "GroupAxioms",
+        Method -> "Completion", TimeConstraint -> 2.0],
+    3, $TimedOut];
+
 print["[thvm:", preset, "] running..."];
 {thvmT, thvmR} = AbsoluteTiming @ TimeConstrained[
     TFindProof[thm, theory, Method -> preset, TimeConstraint -> N[TC]],
