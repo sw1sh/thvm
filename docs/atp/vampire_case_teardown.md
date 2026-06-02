@@ -124,6 +124,46 @@ conclusion from each side.  thvm's "ProofLength" 27 includes
 SubstitutionLemma intermediates that Vampire bundles into the
 forward_demodulation step's parent chain.)
 
+### Proof-DAG histogram (from `compare_proof_one.wls`, 0493b8d8+)
+
+The full thvm proof DAG (`ProofObject["Properties"]`) on this case
+exposes a starker breakdown than the compact `ProofLength`:
+
+| step kind          | thvm | Vampire (`folded`) |
+|--------------------|------|--------------------|
+| axiom / file       | 4    | 5                  |
+| hypothesis         | 1    | -                  |
+| superposition / CPL | 5  | 8                  |
+| forward_demod /    |      |                    |
+|   SubstitutionLemma| 135  | 4                  |
+| forward_subsumption_resolution | - | 1   |
+| conclusion         | 1    | -                  |
+| **total**          | **146** | **18**          |
+
+The crushing diff is the SubstitutionLemma column: **135 vs 4**.
+Each thvm SubstitutionLemma is ONE INNER rewrite step inside
+`atp_rewrite_normalize_indexed`; each Vampire `forward_demodulation`
+bundles a whole-clause normalize into one entry via the
+`attempted` DHSet + `it.right()` skip-subtree optimization
+(`Inferences/ForwardDemodulation.cpp:90`, points #2 and #3 in the
+ranked culprits below).
+
+The gap is NOT in the CP-generation count (5 vs 8 superpositions
+-- thvm actually generates FEWER critical pairs).  It's purely in
+the per-clause rewrite-step accounting + cost.  Closing this means:
+
+* **The normalize loop should emit ONE SubstitutionLemma per rewrite
+  attempt sequence**, not one per fired rewrite.  The proof
+  reconstructor walks the per-step TRACE_NORM records (recorded by
+  `set_record_norm_steps`); the bundling would happen at the
+  reconstructor level (atp.wl `emitNorm` / `buildCplDataset`), not
+  in the C engine.
+* **Per-step cost: profile the inner rewrite loop.** 27.6 ms /
+  step is suspicious -- the inner loop should be sub-millisecond
+  per rewrite attempt on terms this small.  Candidates: per-call
+  thvm_match overhead, per-CP weight recompute, AtpFt rebuild on
+  every push.
+
 Candidate root causes to instrument (in priority order):
 
 1. **Eager push-time normalize on every CP** -- thvm's
