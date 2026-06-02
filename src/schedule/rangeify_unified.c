@@ -837,23 +837,28 @@ fn void run_rangeify_unified(Term root) {
           all_all_same = 0; break;
         }
       }
-      // A pure movement op is a VIEW: it computes nothing, only remaps
-      // indices over its source buffer.  When its consumers present
-      // divergent ranges (e.g. an out_grad broadcast EXPAND feeding both
-      // the weight-grad reduce -- which reduces b/h/w -- and the
-      // input-grad reduce -- which reduces cout), tinygrad does NOT
-      // realize the movement op; each consumer recomputes the swizzle
-      // into its own LOAD index (remove_movement_op_after_rangeify,
-      // schedule/indexing.py).  thvm's per-axis realize-on-divergence
-      // below was a stand-in for the symbolic-OR-of-valids range merge
-      // (indexing.py:211-213) thvm lacks, but for a movement op the
-      // merge is unnecessary: inherit consumer 0's ranges and stay a
-      // view.  Realizing it instead materialised the full expanded
-      // tensor (conv backward: a 1.3 GB out_grad broadcast), the
-      // dominant peak-memory cost on every backend.  Realize still
-      // emerges correctly downstream via the consuming REDUCEs'
-      // ending_ranges, not the shared view.
-      if (!all_all_same && uop_is_movement(info->op)) {
+      // A broadcast EXPAND that injects (stride-0) range axes is the one
+      // movement op kept fused on divergence: its divergent consumer
+      // ranges are exactly the reduce axes of the consuming REDUCEs,
+      // covered by their ending_ranges (indexing.py:223-232,249-250), so
+      // tinygrad never materializes it (a conv-bwd out_grad broadcast is
+      // 1.3 GB).  thvm's ru_all_same_axis compares RANGE Term identity,
+      // seeing those reduce-injected axes as divergent; the share-as-view
+      // shortcut recovers the fused EXPAND.
+      //
+      // SHRINK / RESHAPE / PERMUTE / PAD / FLIP are partial-realized on
+      // genuine divergence, faithful to tinygrad: a SHRINK (getitem) or
+      // PERMUTE (transpose) view of a computed source whose consumers map
+      // the SAME producer axis to DIFFERENT downstream axes (q.reshape(M,
+      // N,1) vs q.reshape(M,1,N); Gw vs Gw.T) CANNOT collapse to consumer
+      // 0's ranges -- that carries consumer 0's stride into consumer 1's
+      // read (silent wrong result).  tinygrad mints a fresh range + marks
+      // the axis realized (indexing.py:213-215), so each consumer LOADs
+      // from a real buffer with its own ShapeTracker.  thvm does the same
+      // via the per-axis else branch below + the realized-movement
+      // BUFFERIZE boundary (see the RU_SUBST = BUFFERIZE keep further
+      // down).  Restrict the share-as-view shortcut to EXPAND only.
+      if (!all_all_same && info->op == UOP_EXPAND) {
         all_all_same = 1;
       }
       if (all_all_same) {
@@ -875,9 +880,49 @@ fn void run_rangeify_unified(Term root) {
           }
         }
         if (n_realized > 0) {
-          RU_REALIZE_MAP[node_idx].realized_partial = 1;
-          RU_REALIZE_MAP[node_idx].axes_mask        = partial_mask;
-          RU_REALIZE_MAP[node_idx].n_realized_axes  = n_realized;
+          // Mirror indexing.py:75: a BUFFERIZE whose realized_ranges cover
+          // EVERY output axis (len(range_map[s][1]) == len(realized_ranges))
+          // is a full GLOBAL boundary, not a LOCAL partial.
+          //
+          // A MOVEMENT op (SHRINK / RESHAPE / PERMUTE / FLIP) that realizes
+          // on consumer-divergence is FULLY realized regardless of how many
+          // axes diverged: it is a pure VIEW, so a partial-realize over just
+          // the divergent axis would leave the materialized buffer indexed
+          // by the NON-divergent axes only, and the divergent consumers (a
+          // getitem c[:,0] vs c[:,1], a transpose Gw vs Gw.T) would read it
+          // with the realized axis UNBOUND -- the begin offset / permuted
+          // stride is silently dropped (two different slices collapse to the
+          // same read).  tinygrad realizes the whole view (the RESHAPE/SHRINK
+          // gets realize_map[x] = list(range(ndim)) once any axis diverges),
+          // giving each consumer its own ShapeTracker over a contiguous
+          // buffer.  REDUCE / elementwise partial-realizes that legitimately
+          // drop a keepdim-reduced axis (softmax denom, layer-norm mean) are
+          // NOT movement ops, so they stay partial and keep their fusion.
+          // EXPAND is force-shared above (line ~912) and never reaches this
+          // branch; PAD carries a value-side WHERE guard handled separately.
+          // Only the index-remapping views land here.
+          int is_mv = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
+                    || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
+          if (n_realized == my_ndim || is_mv) {
+            RU_REALIZE_MAP[node_idx].realized_full = 1;
+            RU_REALIZE_MAP[node_idx].realized_partial = 0;
+            RU_REALIZE_MAP[node_idx].axes_mask =
+                (my_ndim < 8) ? (u8)((1u << my_ndim) - 1u) : 0xFFu;
+            RU_REALIZE_MAP[node_idx].n_realized_axes = my_ndim;
+            // Close ALL axes: mint a fresh LOOP range for each non-divergent
+            // axis too, so the materialized buffer is iterated over its full
+            // contiguous shape (the divergent axes already got fresh ranges
+            // above).
+            for (u8 a = 0; a < my_ndim; a++) {
+              if (!(partial_mask & (u8)(1u << a))) {
+                out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
+              }
+            }
+          } else {
+            RU_REALIZE_MAP[node_idx].realized_partial = 1;
+            RU_REALIZE_MAP[node_idx].axes_mask        = partial_mask;
+            RU_REALIZE_MAP[node_idx].n_realized_axes  = n_realized;
+          }
         }
       }
     }
@@ -2323,19 +2368,27 @@ fn void pm_apply_rangeify(Term root) {
     }
 
     // Mirror indexing.py:98-99 (remove_movement_op_after_rangeify):
-    //   movement ops are gone after rangeify; substitute points to the
-    //   producer's substitute directly.
+    //   `if x in ctx.range_map ... : return x.src[0]` -- but ONLY for a
+    //   NON-realized movement op.  A movement op that landed in the
+    //   realize_map (full OR partial) stays a boundary: its consumers
+    //   wrap it in a BUFFERIZE and index it per-consumer
+    //   (create_bufferize_and_index_based_on_ranges, indexing.py:63-78),
+    //   so forwarding it to its producer's substitute would discard the
+    //   just-emitted BUFFERIZE and re-share the producer view across the
+    //   divergent consumers (the exact corruption a partial-realize is
+    //   meant to break).  Keep RU_SUBST[i] = b for ANY realized movement
+    //   op; only NON-realized movement ops forward.
     int is_movement = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
                     || info->op == UOP_EXPAND  || info->op == UOP_PAD
                     || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
-    // For realized PAD specifically the BUFFERIZE we just emitted IS the
-    // canonical view of the post-WHERE-guarded value -- forwarding to
-    // the unguarded producer drops the mask.  Other realized movement
-    // ops can still forward (their BUFFERIZE's stored value equals the
-    // unguarded producer at the swizzled addr; consumers re-index off
-    // it correctly).  Stay with RU_SUBST[i] = b for the PAD-realized
-    // boundary case below.
-    if (is_movement && realized && info->op == UOP_PAD) {
+    // A realized movement op keeps its BUFFERIZE boundary (RU_SUBST[i] =
+    // b, set above).  This is REQUIRED for partial-realize of a SHRINK /
+    // RESHAPE / PERMUTE view of a computed source shared by divergent
+    // consumers: each consumer must INDEX_E the materialized buffer with
+    // its own ShapeTracker rather than inherit consumer 0's stride.  The
+    // PERMUTE/RESHAPE-realized swizzle-keep path below is for NON-realized
+    // producers only, so it is unreachable here; bail before it.
+    if (is_movement && realized) {
       continue;
     }
     if (is_movement) {
@@ -2385,6 +2438,24 @@ fn void pm_apply_rangeify(Term root) {
                 ru_index_axes_register(fwd, rm->in_rngs, rm->in_ndim);
               }
               fwd = ru_pad_wrap_where(info->loc, rm, fwd);
+            } else if (psub_is_bufferize
+                       && (info->op == UOP_SHRINK || info->op == UOP_FLIP)) {
+              // A non-realized SHRINK (getitem) / FLIP over a producer that
+              // realized to a BUFFERIZE must read that buffer at its OWN
+              // swizzled iter, NOT forward the bare buffer.  The SHRINK's
+              // in_rngs already carry the begin offset (apply_movement_op_
+              // shrink: in_rng[a] = out_rng[a] + begin), so an INDEX_E at
+              // this op's input addr reads the right slice.  Without the
+              // wrap, two different getitem slices of one realized source
+              // (c[:,0] vs c[:,1], the fused-QKV head split) forward the
+              // IDENTICAL bare buffer -- the begin offset is dropped and
+              // both reads collapse to the same element.  Mirror tinygrad
+              // create_bufferize_and_index_based_on_ranges (indexing.py:78,
+              // BUFFERIZE.index(*consumer_ranges)) + the realized-source
+              // SHRINK in apply_movement_op (indexing.py:131).
+              Term in_addr = ru_build_input_addr_for(rm, info->loc);
+              fwd = uop_index_e(psub, in_addr);
+              ru_index_axes_register(fwd, rm->in_rngs, rm->in_ndim);
             }
             RU_SUBST[i] = fwd;
             continue;

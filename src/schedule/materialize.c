@@ -4499,13 +4499,35 @@ static Term emit_kernel_for_boundary(u32 bi) {
   if (KSRC_IS_INPUT(result)) {
     u32 alias_tid = ke->input_tids[KSRC_INDEX(result)];
     if (alias_tid != 0 && alias_tid < TENS_NEXT) {
-      // Release the unused output_tid we speculatively allocated.
-      tensor_release(out_tid);
-      kernel_dealloc_last(kid);
-      Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
-      BOUNDARY_TID [bi] = alias_tid;
-      BOUNDARY_TERM[bi] = alias_term;
-      return alias_term;
+      // A realized movement-op boundary that resolved to a NON-CONTIGUOUS
+      // view-alias (a transpose / strided getitem of a computed source)
+      // must NOT be aliased to the underlying buffer.  The boundary exists
+      // because the rangeify consumer-divergence walk realized this view
+      // for two consumers whose swizzles diverge (Newton-Schulz `Gw` vs
+      // `Gw.T`, q.reshape(M,N,1) vs q.reshape(M,1,N)); those consumers read
+      // the boundary with a ROW-MAJOR flat addr over the boundary's OUTPUT
+      // shape (they assume the realized buffer is contiguous, mirroring
+      // tinygrad's BUFFERIZE.index(*consumer_ranges) over a contiguous
+      // store -- indexing.py:75-78).  Aliasing the strided source view
+      // instead leaks the source's stride into the flat read -> wrong
+      // element (the transpose is silently dropped).  Fall through to emit
+      // the copy/gather kernel so the boundary materializes contiguous
+      // data, exactly as a realized tinygrad BUFFERIZE does.  A CONTIGUOUS
+      // alias (offset/identity view, the gy=CONST(1.0) MSE-backward seed)
+      // is still aliased -- same bytes, no copy needed.
+      int alias_contig = TENS[alias_tid].view.contiguous
+                      && TENS[alias_tid].view.offset == 0
+                      && TENS[alias_tid].nviews == 0;
+      int boundary_is_movement = uop_is_movement(op);
+      if (!(boundary_is_movement && !alias_contig)) {
+        // Release the unused output_tid we speculatively allocated.
+        tensor_release(out_tid);
+        kernel_dealloc_last(kid);
+        Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+        BOUNDARY_TID [bi] = alias_tid;
+        BOUNDARY_TERM[bi] = alias_term;
+        return alias_term;
+      }
     }
   }
 
