@@ -116,6 +116,7 @@ _pin_drop = _bind("py_pin_drop", None, c_uint64)
 _reclaim = _bind("py_reclaim", None)
 _jit_begin = _bind("py_jit_begin", c_uint32)
 _jit_end = _bind("py_jit_end", None)
+_jit_end_with_result = _bind("py_jit_end_with_result", None, c_uint64)
 _jit_replay = _bind("py_jit_replay", c_uint32, c_uint32)
 _jit_op_count = _bind("py_jit_op_count", c_uint32, c_uint32)
 _jit_drop = _bind("py_jit_drop", None, c_uint32)
@@ -140,6 +141,7 @@ _grad_slot_prewalk = _bind("py_grad_slot_prewalk", c_uint64)
 _grad_slot_excess  = _bind("py_grad_slot_excess",  c_uint64)
 _grad_slot_stuck   = _bind("py_grad_slot_stuck",   c_uint64)
 _ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
+_ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 
 # ---------------- buffer accessors ----------------
@@ -169,10 +171,10 @@ _kernel_opts_propose = _bind(
     c_uint32)
 _kernel_apply_opt = _bind(
     "py_kernel_apply_opt", c_uint64,
-    c_uint32, ctypes.c_uint8, ctypes.c_uint8, c_uint32)
+    c_uint32, ctypes.c_uint8, c_uint32, c_uint32)
 _uop_dag_apply_kopt = _bind(
     "py_uop_dag_apply_kopt", c_uint64,
-    c_uint64, ctypes.c_uint8, ctypes.c_uint8, c_uint32)
+    c_uint64, ctypes.c_uint8, c_uint32, c_uint32)
 _cuda_dag_dispatch_shape = _bind(
     "py_cuda_dag_dispatch_shape", c_uint32,
     c_uint64, ctypes.POINTER(c_uint32), ctypes.POINTER(c_uint32))
@@ -235,6 +237,7 @@ if _HAS_CUDA:
     _cuda_buf_read = _bind("py_cuda_buf_read", c_int32,
                            c_uint32, c_void_p, c_uint64)
     _cuda_buf_release = _bind("py_cuda_buf_release", None, c_uint32)
+    _cuda_buf_dptr    = _bind("py_cuda_buf_dptr",    c_uint64, c_uint32)
 
     _cuda_dispatch = _bind(
         "py_cuda_dispatch", c_uint64,
@@ -586,6 +589,7 @@ class Thvm:
     # ---- JIT capture / replay (TinyJit) ----
     def jit_begin(self) -> int:       return int(_jit_begin())
     def jit_end(self) -> None:        _jit_end()
+    def jit_end_with_result(self, root: int) -> None: _jit_end_with_result(c_uint64(root))
     def jit_replay(self, s: int) -> int: return int(_jit_replay(c_uint32(s)))
     def jit_op_count(self, s: int) -> int: return int(_jit_op_count(c_uint32(s)))
     def jit_drop(self, s: int) -> None: _jit_drop(c_uint32(s))
@@ -622,6 +626,9 @@ class Thvm:
 
     def ten_get_requires_grad(self, t: Term) -> bool:
         return bool(_ten_get_requires_grad(c_uint64(int(t))))
+
+    def ten_get_buf_id(self, t: Term) -> int:
+        return int(_ten_get_buf_id(c_uint64(int(t))))
 
     def grad_memo_hits   (self) -> int: return int(_grad_memo_hits())
     def grad_memo_misses (self) -> int: return int(_grad_memo_misses())
@@ -983,6 +990,9 @@ class Cuda:
 
     def buf_release(self, handle: int) -> None:
         _cuda_buf_release(c_uint32(handle))
+
+    def buf_dptr(self, handle: int) -> int:
+        return int(_cuda_buf_dptr(c_uint32(handle)))
 
     # ---------------- dispatch ----------------
     def dispatch(self, fn: int, bufs, *, grid: int, block: int) -> int:

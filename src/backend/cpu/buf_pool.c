@@ -23,6 +23,7 @@ fn void cpu_buf_pool_rollback(u32 wm) {
   if (wm < 1) wm = 1;        // slot 0 is reserved
   if (wm > CPU_BUFS_NEXT) return;
   for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
+    if (CPU_BUFS[i].jit_pinned) continue;   // JIT capture holds this buf
     if (CPU_BUFS[i].data || CPU_BUFS[i].handle) {
       cpu_buf_free((u32)i);
     }
@@ -56,6 +57,7 @@ fn void cpu_buf_pool_rollback_with_preserve(u32 wm) {
   if (wm > CPU_BUFS_NEXT) return;
   for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
     if (CPU_BUFS[i].preserved) continue;
+    if (CPU_BUFS[i].jit_pinned) continue;   // sticky JIT retain
     if (CPU_BUFS[i].data == NULL && CPU_BUFS[i].handle == NULL) continue;
     // Skip buffers already released to the freelist (refcount==0): a
     // global reclaim (wm=1) re-scans prior realizes' freed slots, and
@@ -94,6 +96,7 @@ fn void cpu_buf_pool_free_unpreserved(u32 wm) {
   if (wm > CPU_BUFS_NEXT) return;
   for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
     if (CPU_BUFS[i].preserved) continue;
+    if (CPU_BUFS[i].jit_pinned) continue;   // sticky JIT retain
     if (CPU_BUFS[i].refcount == 0) continue;
     if (CPU_BUFS[i].data == NULL && CPU_BUFS[i].handle == NULL) continue;
     cpu_buf_free((u32)i);
@@ -103,6 +106,28 @@ fn void cpu_buf_pool_free_unpreserved(u32 wm) {
 fn void cpu_buf_mark_preserved(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
   CPU_BUFS[buf_id].preserved = 1;
+}
+
+// STICKY JIT retain (mirror of cuda_buf_jit_pin).  The per-realize
+// `preserved` flag is cleared at end-of-realize, but a JIT capture's
+// recorded buffers must survive every sub-realize's pool rollback and
+// every later replay.  jit_pin sets a separate flag that survives
+// clear_preserved; the freelist push + pool rollbacks skip a pinned buf.
+// Recurses to the parent arena so an arena-view's backing storage stays
+// alive as long as the view is pinned.  Unpinned only on jit_capture_drop.
+fn void cpu_buf_jit_pin(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
+  if (CPU_BUFS[buf_id].data == NULL) return;
+  CPU_BUFS[buf_id].jit_pinned = 1;
+  u32 parent = CPU_BUFS[buf_id].parent_buf_id;
+  if (parent != 0 && parent < CPU_BUFS_NEXT) cpu_buf_jit_pin(parent);
+}
+
+fn void cpu_buf_jit_unpin(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
+  CPU_BUFS[buf_id].jit_pinned = 0;
+  u32 parent = CPU_BUFS[buf_id].parent_buf_id;
+  if (parent != 0 && parent < CPU_BUFS_NEXT) cpu_buf_jit_unpin(parent);
 }
 
 fn void cpu_buf_clear_preserved(u32 wm) {

@@ -671,6 +671,86 @@ static void test_apply_vec_load_invalid_width_bails(void) {
   CHECK(r0 == root);
 }
 
+// === KOP_GROUP / KOP_GROUPTOP ========================================
+
+static void test_apply_group_reduce_stamps_reduce_axis(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+
+  // matmul has reduce axis 2 (K=32).  Apply GROUP with k=8.
+  Term r = uop_dag_apply_group_reduce(root, 2, 8);
+  CHECK(r != 0);
+  CHECK(r != root);
+
+  // The reduce-axis RANGE leaf should now have axis_type KAX_GROUP_REDUCE
+  // and be wrapped in OPT(_, GROUP_REDUCE, 8) at its use site.
+  Term value = heap_read(term_val(r) + 2);
+  CHECK(term_tag(value) == TAG_UOP && term_ext(value) == UOP_REDUCE);
+  Term body = uop_reduce_src(value);
+  // Walk to find OPT(RANGE(2, KAX_GROUP_REDUCE, 32), GROUP_REDUCE, 8).
+  Term ranges[16]; u32 nv = 0;
+  rmu_collect_ranges(body, ranges, &nv);
+  int saw_group_axis = 0;
+  for (u32 i = 0; i < nv; i++) {
+    if (uop_range_axis_id(ranges[i]) == 2
+        && uop_range_axis_type(ranges[i]) == KAX_GROUP_REDUCE
+        && uop_range_extent(ranges[i]) == 32) saw_group_axis = 1;
+  }
+  CHECK(saw_group_axis);
+}
+
+static void test_apply_group_reduce_bails_on_non_reduce(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  // axis 0 is KAX_LOOP (output M); GROUP should bail.
+  Term r = uop_dag_apply_group_reduce(root, 0, 4);
+  CHECK(r == 0);
+}
+
+static void test_apply_group_reduce_bails_on_bad_k(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  // K = 32; k=7 doesn't divide.
+  Term r = uop_dag_apply_group_reduce(root, 2, 7);
+  CHECK(r == 0);
+}
+
+static void test_apply_group_reduce_via_dispatcher(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  KOpt opt = { KOP_GROUPTOP, 2, 16 };
+  Term r = uop_dag_apply_kopt(root, opt);
+  CHECK(r != 0);
+  CHECK(r != root);
+}
+
+static void test_apply_group_reduce_renders_metal_shared(void) {
+  Term a, b, c;
+  Term root = build_matmul_root(&a, &b, &c);
+  Term r = uop_dag_apply_group_reduce(root, 2, 8);
+  CHECK(r != 0);
+  // MSL render path.
+  char buf[8192];
+  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  Term in_bufs[2] = { a, b };
+  cg_render_uop_kernel_root(r, "mm_group", fp);
+  fclose(fp);
+  (void)in_bufs;
+  // Should emit the threadgroup-shared accumulator + barriers.
+  CHECK(rmu_contains(buf, "threadgroup float _acc"));
+  CHECK(rmu_contains(buf, "threadgroup_barrier"));
+}
+
+static void test_apply_group_reduce_renders_cuda_shared(void) {
+  Term a, b, c;
+  Term root = build_matmul_root(&a, &b, &c);
+  Term r = uop_dag_apply_group_reduce(root, 2, 8);
+  CHECK(r != 0);
+  char buf[8192];
+  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  cg_render_uop_kernel_cuda_root(r, "mm_group", fp);
+  fclose(fp);
+  (void)c;
+  CHECK(rmu_contains(buf, "__shared__ float _acc"));
+  CHECK(rmu_contains(buf, "__syncthreads"));
+}
+
 int main(void) {
   thvm_init();
 
@@ -720,6 +800,18 @@ int main(void) {
                                                     test_apply_vec_load_bails_on_non_contiguous();
   TEST_BEGIN("apply_vec_load_via_dispatcher");      test_apply_vec_load_via_dispatcher();
   TEST_BEGIN("apply_vec_load_invalid_width_bails"); test_apply_vec_load_invalid_width_bails();
+
+  TEST_BEGIN("apply_group_reduce_stamps_reduce_axis");
+                                                    test_apply_group_reduce_stamps_reduce_axis();
+  TEST_BEGIN("apply_group_reduce_bails_on_non_reduce");
+                                                    test_apply_group_reduce_bails_on_non_reduce();
+  TEST_BEGIN("apply_group_reduce_bails_on_bad_k");
+                                                    test_apply_group_reduce_bails_on_bad_k();
+  TEST_BEGIN("apply_group_reduce_via_dispatcher");  test_apply_group_reduce_via_dispatcher();
+  TEST_BEGIN("apply_group_reduce_renders_metal_shared");
+                                                    test_apply_group_reduce_renders_metal_shared();
+  TEST_BEGIN("apply_group_reduce_renders_cuda_shared");
+                                                    test_apply_group_reduce_renders_cuda_shared();
 
   thvm_free();
   TEST_REPORT();

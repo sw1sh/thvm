@@ -66,7 +66,11 @@ def main():
     bs = getenv("BS", 128)
     steps = getenv("STEPS", 70)
     test_every = getenv("TEST_EVERY", 10)
-    eval_batches = getenv("EVAL_BATCHES", 16)   # batched eval (cap)
+    # EVAL_BATCHES=0 (default) covers the FULL test set so the accuracy
+    # report is full-10000 apples-to-apples; a positive value caps the
+    # number of batches.  Cross-step reclaim now keeps eval memory flat,
+    # so the full sweep is affordable.
+    eval_batches = getenv("EVAL_BATCHES", 0)
     np.random.seed(42)
 
     Xtr, Ytr, Xte, Yte = (t.numpy() for t in mnist())
@@ -85,7 +89,9 @@ def main():
     def test_acc():
         Tensor.training = False
         correct = total = 0
-        for b in range(min(eval_batches, (len(Xte) + bs - 1) // bs)):
+        n_full = (len(Xte) + bs - 1) // bs
+        nb = n_full if eval_batches <= 0 else min(eval_batches, n_full)
+        for b in range(nb):
             xb = Xte[b * bs:(b + 1) * bs]
             yb = Yte[b * bs:(b + 1) * bs]
             if len(xb) == 0:
@@ -93,30 +99,77 @@ def main():
             pred = np.argmax(model(Tensor(xb)).numpy(), axis=1)
             correct += int((pred == yb).sum()); total += len(yb)
         Tensor.training = True
+        # The eval forwards build unpinned transient buffers; free them so
+        # peak memory stays flat across evals (params/grads/JIT buffers
+        # remain pinned by their live Tensors).
+        if not _noreclaim:
+            _TH.reclaim()
         return 100.0 * correct / max(total, 1)
 
     Tensor.training = True
     wall, peak = [], 0
     acc = float("nan")
     _noreclaim = os.environ.get("NORECLAIM") == "1"
+
+    # JIT path: pre-allocate stable input buffers (X_buf / Y_buf), wrap
+    # the step in TinyJit, .assign fresh data each iter.  Disable with
+    # THVM_JIT=0 to fall back to per-step graph rebuild.
+    _use_jit = os.environ.get("THVM_JIT", "1") != "0"
+    X_buf = Y_buf = step_fn = None
+    if _use_jit:
+        from thvm import TinyJit
+        # Pre-allocate stable input tensors.  X_buf holds the input
+        # batch; OH_buf holds the one-hot labels (refilled host-side
+        # each iter so the captured graph reads the new contents).
+        # Sparse_categorical_crossentropy does Y.numpy() at capture
+        # time, baking in step-1's labels under JIT -- the JIT-safe
+        # cross_entropy_from_onehot path reads OH_buf directly.
+        X_buf  = Tensor(np.zeros((bs, 1, 28, 28), dtype=np.float32))
+        OH_buf = Tensor(np.zeros((bs, 10), dtype=np.float32))
+        X_buf.realize(); OH_buf.realize()
+
+        @TinyJit
+        def step_fn():
+            opt.zero_grad()
+            loss = (model(X_buf)
+                    .cross_entropy_from_onehot(OH_buf)
+                    .backward())
+            grads = [p.grad for p in opt.params if p.grad is not None]
+            Tensor.realize(loss, *grads)
+            Tensor.realize(*opt.schedule_step())
+            return loss
+
     for i in range(steps):
-        opt.zero_grad()                    # clear grad accumulators (tinygrad pattern)
         if not _noreclaim:
             GlobalCounters.reset()         # triggers cross-step reclaim
         _TH.cpu_peak_reset()               # within-step peak from here
         t0 = time.time()
         idx = np.random.randint(0, len(Xtr), size=bs)
-        loss = (model(Tensor(Xtr[idx]))
-                .sparse_categorical_crossentropy(Tensor(Ytr[idx]))
-                .backward())
-        # Realize loss + ALL grads in ONE pass so the memory planner sees
-        # the full forward+backward lifetime and frees each activation
-        # after backward consumes it (peak ~ live set, not sum-of-all).
-        # THEN the in-place optimizer ASSIGNs (writes) -- separate pass so
-        # they don't race the param reads above.
-        grads = [p.grad for p in opt.params if p.grad is not None]
-        Tensor.realize(loss, *grads)
-        Tensor.realize(*opt.schedule_step())
+        if os.environ.get("THVM_CUDA_LOG_COMPILES"):
+            import sys
+            sys.stderr.write(f"=== step {i+1} start, compiles_before={_TH.cuda_jit_compiles()} ===\n")
+            sys.stderr.flush()
+        if _use_jit:
+            # Refill the stable input buffers in place.  After the JIT
+            # captures the first step, replay re-dispatches the same
+            # kernels against the same buf_ids; the new contents drive
+            # the new outputs.  X_buf gets fresh batch; OH_buf gets
+            # fresh one-hot labels (scattered host-side -- the assign
+            # copies onto OH_buf's stable buf_id, so the captured graph
+            # reads the new contents).
+            X_buf.assign(Tensor(Xtr[idx])); X_buf.realize()
+            oh_np = np.zeros((bs, 10), dtype=np.float32)
+            oh_np[np.arange(bs), Ytr[idx]] = 1.0
+            OH_buf.assign(Tensor(oh_np)); OH_buf.realize()
+            loss = step_fn()
+        else:
+            opt.zero_grad()
+            loss = (model(Tensor(Xtr[idx]))
+                    .sparse_categorical_crossentropy(Tensor(Ytr[idx]))
+                    .backward())
+            grads = [p.grad for p in opt.params if p.grad is not None]
+            Tensor.realize(loss, *grads)
+            Tensor.realize(*opt.schedule_step())
         lv = loss.item()
         dt = (time.time() - t0) * 1e3
         wall.append(dt)

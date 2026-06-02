@@ -18,12 +18,16 @@ Backend CUDA_BACKEND = {
   .buf_free        = cuda_buf_free,
   .buf_incref      = cuda_buf_incref,
   .buf_decref      = cuda_buf_decref,
+  .buf_jit_pin     = cuda_buf_jit_pin,
+  .buf_jit_unpin   = cuda_buf_jit_unpin,
   .buf_read        = cuda_buf_read,
   .buf_write       = cuda_buf_write,
   .buf_copy        = cuda_buf_copy,
   .buf_refcount        = cuda_buf_refcount,
   .buf_freelist_push   = cuda_buf_freelist_push,
   .buf_freelist_remove = cuda_buf_freelist_remove,
+  .buf_storage_root    = cuda_buf_storage_root,
+  .buf_addr            = cuda_buf_addr,
   .dispatch_begin  = NULL,
   .dispatch_flush  = NULL,
   .dispatch_end    = NULL,
@@ -49,8 +53,16 @@ fn char *thvm_cuda_render(Term root, const char *kernel_name) {
   size_t sz  = 0;
   FILE  *fp  = open_memstream(&buf, &sz);
   if (fp == NULL) return NULL;
+  // THVM_CUDA_RENDER_TRACE=1: log render start/end + source size so a
+  // hang can be localized to render (start logged, end not) vs nvrtc
+  // (end logged, the cuda-compile line follows but never returns).
+  static int rt_known = 0, rt_on = 0;
+  if (!rt_known) { char const *e = getenv("THVM_CUDA_RENDER_TRACE");
+                   rt_on = (e != NULL && e[0] == '1'); rt_known = 1; }
+  if (rt_on) { fprintf(stderr, "[render] start %s\n", kernel_name); fflush(stderr); }
   cg_render_uop_kernel_cuda_root(root, kernel_name, fp);
   fclose(fp);
+  if (rt_on) { fprintf(stderr, "[render] end   %s sz=%zu\n", kernel_name, sz); fflush(stderr); }
   return buf;
 }
 

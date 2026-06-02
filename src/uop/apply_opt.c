@@ -291,6 +291,13 @@ static int kop_is_split(u8 op) {
   return op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL;
 }
 
+// KOP_GROUP / KOP_GROUPTOP: single-axis stamp (no axis-id shift).
+// The target axis flips from KAX_REDUCE to KAX_GROUP_REDUCE; downstream
+// axis_ids are unaffected.
+static int kop_is_group_reduce(u8 op) {
+  return op == KOP_GROUP || op == KOP_GROUPTOP;
+}
+
 // Simulate the full applied_opts history on a desired[MAX_AXES] vector.
 // Returns the post-replay axis count (n_cur).  All positions in
 // [0, n_cur) carry their post-replay axis_type in `desired_out`.
@@ -328,6 +335,11 @@ static u32 sim_kop_history(KOpt const *applied_opts, u32 n_applied,
       if (desired_out[a] == (u8)KAX_LOOP) {
         desired_out[a] = (u8)KAX_GLOBAL;
       }
+    } else if (kop_is_group_reduce(op)) {
+      u32 a = (u32)o->axis;
+      if (a >= MAX_AXES) continue;
+      if (a >= n_cur) n_cur = a + 1;
+      desired_out[a] = (u8)KAX_GROUP_REDUCE;
     } else if (op == KOP_SWAP) {
       u32 a = (u32)o->axis;
       u32 b = (u32)o->arg;

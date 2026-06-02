@@ -14,6 +14,7 @@ fn void cuda_buf_pool_rollback(u32 wm) {
   if (wm < 1) wm = 1;                 // slot 0 reserved
   if (wm > CUDA_BUFS_NEXT) return;
   for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) {
+    if (CUDA_BUFS[i].jit_pinned) continue;   // JIT capture holds this buf
     if (CUDA_BUFS[i].dptr != 0) cuda_buf_free((u32)i);
   }
   CUDA_BUFS_NEXT = wm;
@@ -33,6 +34,7 @@ fn void cuda_buf_pool_rollback_with_preserve(u32 wm) {
   if (wm > CUDA_BUFS_NEXT) return;
   for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) {
     if (CUDA_BUFS[i].preserved) continue;
+    if (CUDA_BUFS[i].jit_pinned) continue;   // sticky JIT retain
     if (CUDA_BUFS[i].dptr == 0) continue;
     // Skip buffers already on the freelist (refcount==0): a global
     // reclaim (wm=1) re-scans prior realizes' freed slots; re-pushing
@@ -74,6 +76,38 @@ fn void cuda_buf_pool_free_unpreserved(u32 wm) {
 fn void cuda_buf_mark_preserved(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
   CUDA_BUFS[buf_id].preserved = 1;
+}
+
+// STICKY pin: jit_capture sets this so the buf survives every
+// subsequent realize's pool_rollback.  Cleared on jit_capture_drop.
+// We do NOT bump refcount here -- the JIT already calls buf_incref
+// separately (in jit_capture_retain_buf), and double-counting confuses
+// the schedule's per-realize buffer planner.  Skip dead buffers: a buf
+// freed by the time the JIT retain runs has dptr==0; pinning it would
+// just hold a dead slot.
+//
+// Arena views: pin recursively into the parent arena.  Without this
+// the view stays alive but its dptr points into the OLD arena's
+// (cuMemFree'd) storage; the NEXT realize allocates a possibly-smaller
+// arena at a different dptr, and the captured op's dispatch writes
+// into the wrong / freed region -> CUDA_ERROR_ILLEGAL_ADDRESS.
+fn void cuda_buf_jit_pin(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
+  if (CUDA_BUFS[buf_id].dptr == 0) return;
+  CUDA_BUFS[buf_id].jit_pinned = 1;
+  u32 parent = CUDA_BUFS[buf_id].parent_buf_id;
+  if (parent != 0 && parent < CUDA_BUFS_NEXT) {
+    cuda_buf_jit_pin(parent);
+  }
+}
+
+fn void cuda_buf_jit_unpin(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return;
+  CUDA_BUFS[buf_id].jit_pinned = 0;
+  u32 parent = CUDA_BUFS[buf_id].parent_buf_id;
+  if (parent != 0 && parent < CUDA_BUFS_NEXT) {
+    cuda_buf_jit_unpin(parent);
+  }
 }
 
 fn void cuda_buf_clear_preserved(u32 wm) {

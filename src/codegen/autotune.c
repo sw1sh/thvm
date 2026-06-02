@@ -376,11 +376,11 @@ static int kautotune_cache_load(char const *path, u64 expected_key,
   KOptSeq seq = {0};
   seq.n = (u8)n_opts;
   for (u32 i = 0; i < n_opts; i++) {
-    if (op[i] > 255 || axis[i] > 255 || arg[i] > 0xFFFFFFFFULL) {
+    if (op[i] > 255 || axis[i] > 0xFFFFFFFFULL || arg[i] > 0xFFFFFFFFULL) {
       return 0;
     }
     seq.opts[i].op   = (u8)op[i];
-    seq.opts[i].axis = (u8)axis[i];
+    seq.opts[i].axis = (u32)axis[i];
     seq.opts[i].arg  = (u32)arg[i];
   }
   if (out_seq != NULL) {
@@ -841,6 +841,8 @@ static int autotune_env_enabled(void) {
 }
 
 fn int kernel_should_autotune(KernelEntry const *ke) {
+  static int tr = -1;
+  if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   if (!autotune_env_enabled()) {
     return 0;
   }
@@ -851,5 +853,9 @@ fn int kernel_should_autotune(KernelEntry const *ke) {
     return 0;
   }
   KOpt buf[16];
-  return kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf)) > 0;
+  u32 nc = kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf));
+  if (tr) {
+    fprintf(stderr, "[autotune] kid=%u n_cand=%u\n", (u32)(ke - KERNELS), nc);
+  }
+  return nc > 0;
 }

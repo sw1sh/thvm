@@ -127,6 +127,11 @@ EXPORT int py_ten_write(uint64_t t, const void *data, uint64_t nbytes) {
   TenDesc *d = &TENS[id];
   if (d->backend == NULL || d->backend->buf_write == NULL) return 0;
   d->backend->buf_write(d->buf_id, data, nbytes);
+  // Host write is a buffer mutation the precise fire memo must see (else
+  // a kernel reading this buf -- e.g. the eval forward reading a freshly
+  // ten_write'n xSlot -- would wrongly skip re-firing and read stale
+  // bytes).  Record it on the same ASSIGN-write ring as interact_assign.
+  kernel_assign_write_record(d->backend, d->buf_id);
   return 1;
 }
 
@@ -283,9 +288,44 @@ EXPORT void py_reclaim(void) {
 // from stable slots written (py_ten_write) before each replay.
 EXPORT uint32_t py_jit_begin(void)          { return jit_capture_begin(); }
 EXPORT void     py_jit_end(void)            { jit_capture_end(); }
+EXPORT void     py_jit_end_with_result(uint64_t root) {
+  jit_capture_end_with_result((Term)root);
+}
 EXPORT uint32_t py_jit_replay(uint32_t s)   { return jit_replay(s); }
 EXPORT uint32_t py_jit_op_count(uint32_t s) { return jit_capture_op_count(s); }
 EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
+// Diagnostic accessors for one captured op.
+EXPORT uint32_t py_jit_op_kid(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].kid;
+}
+EXPORT uint32_t py_jit_op_out_buf(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].out_buf_id;
+}
+EXPORT uint32_t py_jit_op_n_inputs(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].n_inputs;
+}
+EXPORT uint32_t py_jit_op_in_buf(uint32_t s, uint32_t i, uint32_t j) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  JitCaptureOp *op = &JIT_CAPTURES[s].ops[i];
+  if (j >= op->n_inputs) return 0;
+  uint32_t const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+  return ids[j];
+}
+EXPORT uint32_t py_jit_op_replay_skip(uint32_t s, uint32_t i) {
+  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
+  if (i >= JIT_CAPTURES[s].n_ops) return 0;
+  return JIT_CAPTURES[s].ops[i].replay_skip;
+}
+EXPORT uint64_t py_hot_jit_replay_dispatches(void) {
+  return HOT_JIT_REPLAY_DISPATCHES;
+}
 
 // --- introspection (Phase-4 cross-check surface) ---
 EXPORT uint32_t py_tens_count(void) {
@@ -331,6 +371,24 @@ EXPORT uint64_t py_cuda_jit_evictions(void) {
   return 0;
 #endif
 }
+EXPORT uint64_t py_cuda_jit_disk_hits(void) {
+#ifdef THVM_HAS_CUDA
+  return cuda_jit_disk_hits();
+#else
+  return 0;
+#endif
+}
+EXPORT uint64_t py_cuda_jit_disk_writes(void) {
+#ifdef THVM_HAS_CUDA
+  return cuda_jit_disk_writes();
+#else
+  return 0;
+#endif
+}
+extern uint64_t PRECISE_SKIPS, PRECISE_REFIRE_INPUT, PRECISE_REFIRE_OUT;
+EXPORT uint64_t py_precise_skips(void)        { return PRECISE_SKIPS; }
+EXPORT uint64_t py_precise_refire_input(void) { return PRECISE_REFIRE_INPUT; }
+EXPORT uint64_t py_precise_refire_out(void)   { return PRECISE_REFIRE_OUT; }
 EXPORT void py_cg_profile_dump(uint32_t top_n) {
   cg_profile_dump(stderr, top_n);
   fflush(stderr);
@@ -514,7 +572,7 @@ EXPORT void py_propose_tc_counters_reset(void) {
 // alongside the propose surface to compose the tinygrad-style BEAM
 // autotune loop in Python.
 EXPORT uint64_t py_kernel_apply_opt(uint32_t kid, uint8_t op,
-                                    uint8_t axis, uint32_t arg) {
+                                    uint32_t axis, uint32_t arg) {
   if (kid == 0 || kid >= KERNELS_NEXT) return 0;
   KernelEntry *ke = &KERNELS[kid];
   KOpt opt = { op, axis, arg };
@@ -527,7 +585,7 @@ EXPORT uint64_t py_kernel_apply_opt(uint32_t kid, uint8_t op,
 // for agents that prefer to manage the DAG directly without the
 // kid-keyed KERNELS[] machinery.
 EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
-                                      uint8_t axis, uint32_t arg) {
+                                      uint32_t axis, uint32_t arg) {
   KOpt opt = { op, axis, arg };
   return uop_dag_apply_kopt(root, opt);
 }

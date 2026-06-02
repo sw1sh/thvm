@@ -253,13 +253,14 @@ void cg_profile_dump(FILE *fp, u32 top_n) {
   }
   fprintf(fp, "\n[thvm prof] %u kernels with samples, total_wall=%llu us\n",
           nkids, (unsigned long long)total_all);
-  fprintf(fp, "[thvm prof]  kid    fires       total_us       avg_us  pct  route       flops/fire  shape\n");
+  fprintf(fp, "[thvm prof]  kid    fires       total_us       avg_us  pct       gpu_us   avg_gpu  route       flops/fire  shape\n");
   for (u32 i = 0; i < top_n; i++) {
     u32 kid = kids[i];
     KProfileSlot const *s = &K_PROFILE[kid];
     KernelEntry const *ke = &KERNELS[kid];
     u64 avg = s->dispatch_count ? (s->total_us / s->dispatch_count) : 0;
     double pct = total_all ? (100.0 * (double)s->total_us / (double)total_all) : 0.0;
+    u64 avg_gpu = s->gpu_samples ? (s->gpu_us / s->gpu_samples) : 0;
     char shape_buf[96];
     int n = 0;
     n += snprintf(shape_buf + n, (int)sizeof(shape_buf) - n, "[");
@@ -269,12 +270,14 @@ void cg_profile_dump(FILE *fp, u32 top_n) {
     }
     snprintf(shape_buf + n, (int)sizeof(shape_buf) - n, "]");
     u64 flops = cg_kernel_flops(ke);
-    fprintf(fp, "[thvm prof] %4u %8llu %14llu %12llu %4.1f%% %-10s %11llu  %s\n",
+    fprintf(fp, "[thvm prof] %4u %8llu %14llu %12llu %4.1f%% %12llu %9llu %-10s %11llu  %s\n",
             kid,
             (unsigned long long)s->dispatch_count,
             (unsigned long long)s->total_us,
             (unsigned long long)avg,
             pct,
+            (unsigned long long)s->gpu_us,
+            (unsigned long long)avg_gpu,
             kdispatch_tag(s->kind),
             (unsigned long long)flops,
             shape_buf);

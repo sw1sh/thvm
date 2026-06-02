@@ -14,6 +14,25 @@ fn u8 uop_arity(u8 op) {
     case UOP_CONST:
     case UOP_RANGE:    // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)]
     case UOP_INVALID:  // heap = [NUM(0)] sentinel
+    case UOP_VCONST:   // heap = [NUM(dtype), NUM(n), NUM(b_0), ...] - all NUMs
+    // Devectorizer-pass leaves: PLACEHOLDER carries only [NUM(dtype),
+    // NUM(acc_id)]; the renderer emits one acc declaration per unique
+    // acc_id.  No recursable child Terms.  Mirrors tinygrad's
+    // UOp.placeholder + reduce_to_acc (devectorizer.py:321).
+    case UOP_PLACEHOLDER:
+    // UOP_STACK is variadic: heap = [NUM(n), src_0, ..., src_{n-1}].
+    // The src cells are recursable Term children but the count varies,
+    // so the rewriter walks them via the dedicated STACK rebuild path
+    // (uop_graph_rebuild_with_srcs) -- arity-0 here keeps the generic
+    // walker out of the variadic payload.
+    case UOP_STACK:
+    // UOP_END heap = [NUM(n), range_0, ..., range_{n-1}].  Each range_i
+    // is a UOP_RANGE Term; they are atoms (arity 0) on their own and
+    // dedup via the canonical range constructor.  END itself is a leaf
+    // marker for the renderer.  Treating arity as 0 here means the
+    // generic walker won't try to rebuild END from a fixed-arity
+    // descent; the variadic rebuild path handles it explicitly.
+    case UOP_END:
       return 0;
     // UOP_OPT carries [target, NUM(kind), NUM(factor)]; only the
     // target slot is a recursable Term child.
@@ -32,6 +51,15 @@ fn u8 uop_arity(u8 op) {
     // payload mirrors RESHAPE/EXPAND's [src, NUM(ndim), NUM(d0)...]
     // convention (arity=1 even though the heap holds more slots).
     case UOP_BUFFERIZE:
+    // Expander-pass wrappers: each carries one recursable child Term
+    // plus a trailing NUM(n_args) header + 2*n_args NUM payload cells.
+    // See UOP_VCONST/UNROLL/CONTRACT/GEP heap layout comments in
+    // src/thvm.h.  Arity-1 matches RESHAPE/EXPAND etc. -- the rewriter
+    // descends into src[0] only; the NUM cells are read directly via
+    // uop_unroll_arg / uop_contract_arg / uop_gep_idx accessors.
+    case UOP_UNROLL:
+    case UOP_CONTRACT:
+    case UOP_GEP:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:
@@ -42,6 +70,7 @@ fn u8 uop_arity(u8 op) {
     // output (UOP_INDEX_E.addr -> IADD/IMUL chain -> UOP_RANGE).
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_INDEX_E:
       return 2;
     // Ternary symbolic ops.  IWHERE = [cond, then, else];

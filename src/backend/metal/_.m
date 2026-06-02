@@ -324,6 +324,14 @@ typedef struct {
   u64           nbytes;
   u32           refcount;
   u8            preserved;
+  // jit_pinned: STICKY hold by an active JIT capture.  `preserved` is
+  // cleared at end-of-realize (thvm_metal_buf_clear_preserved), but a
+  // capture's recorded buffers must survive every sub-realize's pool
+  // rollback AND every replay.  Without this a freelist-pushed captured
+  // buf gets popped+memset by a later alloc, so replay reads zeroed/
+  // overwritten contents.  Mirror of CpuBuf.jit_pinned / CudaBuf.jit_pinned;
+  // cleared only on jit_capture_drop.
+  u8            jit_pinned;
 } MetalBuf;
 
 static MetalBuf METAL_BUFS[METAL_BUFS_CAP];
@@ -423,6 +431,7 @@ static void metal_freelist_trim(void) {
 // thvm_wl_metal_buf_table reports.
 static int metal_buf_freelist_push_impl(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
+  if (METAL_BUFS[buf_id].jit_pinned) return 0;   // held by an active JIT capture
   if (METAL_FREELIST_LEN >= METAL_FREELIST_CAP) return 0;
   if (METAL_BUFS[buf_id].buf == nil) return 0;
   METAL_FREELIST[METAL_FREELIST_LEN++] = buf_id;
@@ -547,6 +556,7 @@ static void metal_buf_free(u32 buf_id) {
   METAL_BUFS[buf_id].nbytes   = 0;
   METAL_BUFS[buf_id].refcount = 0;
   METAL_BUFS[buf_id].preserved = 0;
+  METAL_BUFS[buf_id].jit_pinned = 0;
   metal_record_memory_peak();
 }
 
@@ -661,12 +671,30 @@ void thvm_metal_buf_mark_preserved(u32 buf_id) {
   METAL_BUFS[buf_id].preserved = 1;
 }
 
+// STICKY JIT retain (mirror of cpu_buf_jit_pin / cuda_buf_jit_pin).  A
+// capture's recorded buffers must survive clear_preserved across every
+// sub-realize's rollback and every replay; the sticky flag is honoured
+// (skip) by metal_buf_freelist_push_impl + the rollback below.  Metal has
+// no arena-view parent chain, so no recursion is needed.  Cleared only on
+// jit_capture_drop via metal_buf_jit_unpin.
+void metal_buf_jit_pin(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  if (METAL_BUFS[buf_id].buf == nil) return;
+  METAL_BUFS[buf_id].jit_pinned = 1;
+}
+
+void metal_buf_jit_unpin(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  METAL_BUFS[buf_id].jit_pinned = 0;
+}
+
 void thvm_metal_buf_pool_rollback_with_preserve(u32 wm) {
   if (wm < 1) wm = 1;
   if (wm > METAL_BUFS_NEXT) return;
   metal_dispatch_flush();
   for (u32 i = wm; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].preserved) continue;
+    if (METAL_BUFS[i].jit_pinned) continue;   // sticky JIT retain
     if (METAL_BUFS[i].buf == nil) continue;
     if (METAL_BUFS[i].refcount == 0) continue;
     if (!metal_buf_freelist_push_impl(i)) {
@@ -3722,6 +3750,8 @@ Backend METAL_BACKEND = {
   .buf_refcount        = thvm_metal_buf_refcount,
   .buf_freelist_push   = thvm_metal_buf_freelist_push,
   .buf_freelist_remove = thvm_metal_buf_freelist_remove,
+  .buf_jit_pin     = metal_buf_jit_pin,
+  .buf_jit_unpin   = metal_buf_jit_unpin,
   .dispatch_begin  = metal_dispatch_begin,
   .dispatch_flush  = metal_dispatch_flush,
   .dispatch_end    = metal_dispatch_end,

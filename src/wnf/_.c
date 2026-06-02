@@ -75,6 +75,29 @@ enter:
           next = heap_read(loc);
           goto enter;
         }
+        // DETACH is a stop-gradient: the cotangent reaching a detach
+        // dies and its child is treated as a constant (tinygrad
+        // gradient.py:89 excludes Ops.DETACH from the backward walk).
+        // The normal descent below re-enters cell[0] through the loop,
+        // which UNWRAPS DETACH to its forward child (the runtime
+        // identity at UOP_DETACH above) -- so interact_grad would then
+        // dispatch the unwrapped child's chain rule and propagate the
+        // cotangent, silently making .detach() a backward no-op.  Pin
+        // the grad cell's y to the DETACH term itself (no unwrap) and
+        // dispatch now so interact_grad's UOP_DETACH case returns zero.
+        {
+          Term y_raw = term_resolve(heap_read(loc + 0));
+          if (term_tag(y_raw) == TAG_UOP && term_ext(y_raw) == UOP_DETACH) {
+            if (BUDGET_HIT) BAIL_AT(next);
+            heap_set(loc + 0, y_raw);
+            Term g = interact_grad(next);
+            if (g == next) { whnf = next; goto apply; }
+            ITRS++;
+            multi_emit(RULE_GRAD_BWD, MULTI_TERM, loc, 0, 0);
+            next = g;
+            goto enter;
+          }
+        }
         // BWD: HVM4-style stack-based descent.  Push the grad-DP1
         // frame, descend into cell[0] (= y) so the normal enter loop
         // drives any nested DPs / UOPs to head form.  The apply phase

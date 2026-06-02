@@ -13,11 +13,14 @@
 //                                       returns on success
 //   2.  IMAGE float4 (51-62)         -- SKIPPED (thvm has no ImageDType)
 //   3.  MATVEC (65-82)               -- PORTED
-//   4.  GROUPTOP early gate (84-90)  -- PORTED (kernel_apply_opt declines
-//                                       KOP_GROUPTOP today, so the section
-//                                       is structurally faithful but no-op
-//                                       in practice; will fire when the
-//                                       DAG path adds GROUP support)
+//   4.  GROUPTOP early gate (84-90)  -- PORTED + LIVE: applies KOP_GROUPTOP
+//                                       (cooperative GROUP_REDUCE, sz=16) to
+//                                       the largest reduce axis when the
+//                                       output-loop product <= 2048.  Load-
+//                                       bearing on CUDA: 2.2x on beautiful_
+//                                       mnist (10.8ms on, 23.5ms off) -- it
+//                                       parallelizes the small-output BN /
+//                                       softmax channel reduces.
 //   5.  Mask UPCAST  (97-106)        -- SKIPPED (TODO: detect IWHERE
 //                                       mask axes from the DAG)
 //   6.  Main UPCAST loop (108-134)   -- PORTED (the load-bearing pass)
@@ -27,7 +30,8 @@
 //   10. THREAD (180-189)             -- SKIPPED (thvm has no KOP_THREAD)
 //   11. NOLOCALS env                 -- PORTED (no-op when backend declines)
 //
-// Backend gate: Metal id=2 only.  CUDA enablement is a separate session.
+// Backend gate: applies on Metal (id=2) and CUDA (id=3); the GROUPTOP +
+// UPCAST occupancy-cap passes are CUDA-live (see hand_opt_occupancy_floor).
 
 // --- env knob ------------------------------------------------------
 // Default ON.  HAND_CODED_OPTS=0 disables; NOOPT=1 (tinygrad's
@@ -169,6 +173,21 @@ static u32 hand_opt_group_for_reduces(HandOptAxes const *ax) {
   return n;
 }
 
+// LEVER (occupancy cap, GPU codegen only): a kernel is "reduce-heavy" iff it
+// carries any REDUCE / GROUP_REDUCE axis.  These are the conv-backward
+// weight-grad kernels whose output (GLOBAL/LOCAL/LOOP) extent is small while
+// the reduce loop is enormous: aggressive UPCAST of the small output shrinks
+// the launch grid below the SM count and tanks occupancy.  Non-reduce kernels
+// (matmul, elementwise) have large output grids and are NOT gated.
+static int hand_opt_is_reduce_heavy(HandOptAxes const *ax) {
+  for (u32 i = 0; i < ax->n; i++) {
+    if (ax->kax_type[i] == KAX_REDUCE || ax->kax_type[i] == KAX_GROUP_REDUCE) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // --- matmul classification (for TC kept as-is from prior commit) ----
 static int hand_opt_classify_matmul(KernelEntry const *ke, u32 *out_K) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
@@ -196,6 +215,63 @@ static int hand_opt_kernel_on_gpu(KernelEntry const *ke) {
   }
   if (b == NULL) b = DEFAULT_BACKEND;
   return b != NULL && (b->id == 2 || b->id == 3);
+}
+
+// Returns 1 if the kernel runs on the CPU backend (backend id == 1).
+static int hand_opt_kernel_on_cpu(KernelEntry const *ke) {
+  Backend *b = NULL;
+  if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
+    b = TENS[ke->output_tid].backend;
+  }
+  if (b == NULL) b = DEFAULT_BACKEND;
+  return b != NULL && b->id == 1;
+}
+
+// Returns 1 iff the CPU dispatch ladder (cpu_blas_dispatch, blas.c) would
+// route this kernel through cBLAS / Accelerate from the BARE (un-OPT'd)
+// lifted DAG.  Applying a hand-coded UPCAST/UNROLL mutates the DAG so the
+// shape classifiers below stop recognising it -- losing the 10-100x BLAS
+// fast path -- so for these kernels we must keep returning 0 from
+// kernel_hand_coded_opts (no opts) on CPU.  Mirrors cpu_blas_dispatch's
+// exact try-ladder (blas.c:448-470): dot / gemv / gemm(matmul) /
+// contraction / im2col-contraction; plus the conv2d-flat structural gate
+// (tile.c:89) that propose.c routes through a BLAS-backed template.
+//
+// The fused conv2+maxpool reduce (the faithful-mode hot kernel) fails ALL
+// of these (the maxpool WHERE-mask poisons the clean contraction shape),
+// so it is NOT BLAS-eligible and falls through to UPCAST register-blocking
+// -- exactly the Lever-B target.  tinygrad runs hand_coded_optimizations
+// on every renderer including CPU (heuristic.py:8); only LOCAL/THREAD/DSP
+// sections are renderer-gated -- the UPCAST/UNROLL machinery always runs.
+static int hand_opt_cpu_blas_eligible(KernelEntry const *ke) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  Term root = ke->cached_lift.store_root;
+  UopDagDotShape         dot;
+  UopDagGemvShape        gemv;
+  UopDagGemmShape        gemm;
+  UopDagContractionShape contr;
+  UopDagIm2colShape      im2col;
+  if (uop_dag_classify_dot_shape (root, ke, &dot))   return 1;
+  if (uop_dag_classify_gemv_shape(root, ke, &gemv))  return 1;
+  if (uop_dag_classify_matmul_shape(root, ke, &gemm)) return 1;
+  if (uop_dag_classify_contraction_shape(root, ke, &contr)) return 1;
+  if (uop_dag_classify_im2col_contraction(root, ke, &im2col)) return 1;
+  if (uop_dag_classify_conv2d_flat_shape(root)) return 1;
+  return 0;
+}
+
+// Returns 1 if the kernel will run on CUDA (backend id == 3).  Used for
+// target-aware heuristic branching: nvrtc's C++ frontend is sensitive to
+// register pressure in ways Metal/MSL is not, so a few sections of the
+// hand-coded heuristic are CUDA-suppressed.  Mirrors tinygrad's
+// `k.ren.target.device == "DSP"` / AMX skip pattern (heuristic.py 37, 109).
+static int hand_opt_kernel_is_cuda(KernelEntry const *ke) {
+  Backend *b = NULL;
+  if (ke != NULL && ke->output_tid > 0 && ke->output_tid < TENS_NEXT) {
+    b = TENS[ke->output_tid].backend;
+  }
+  if (b == NULL) b = DEFAULT_BACKEND;
+  return b != NULL && b->id == 3;
 }
 
 // --- matvec detection (heuristic.py 65-82) --------------------------
@@ -268,17 +344,26 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
                                       u32 *out_sum_strides) {
   Term addrs[64];
   u32 n_bufs = uop_dag_collect_index_e_addrs(root, addrs, 64);
+  int trace = getenv("THVM_UPCAST_TRACE") != NULL;
+  if (trace) fprintf(stderr, "[stride] rng=%u n_bufs=%u uu={", rng, n_bufs);
+  if (trace) for (u32 j = 0; j < n_uu; j++) fprintf(stderr, "%u%s", upcast_unroll_aids[j], j+1<n_uu?",":"");
+  if (trace) fputs("}\n", stderr);
   int any_strideless = 0;
   u32 num_strides = 0;
   u32 sum_strides = 0;
   for (u32 i = 0; i < n_bufs; i++) {
     UopDagAddrCoeffsView cv;
     uop_dag_decode_addr_coeffs(addrs[i], &cv);
-    if (!cv.ok) continue;
+    if (!cv.ok) {
+      if (trace) fprintf(stderr, "  buf%u: decode FAILED\n", i);
+      continue;
+    }
     u32 coeff = uop_dag_addr_coeff_lookup(&cv, rng);
+    if (trace) fprintf(stderr, "  buf%u: coeff(rng=%u)=%u", i, rng, coeff);
     if (coeff != 0) {
       num_strides += 1;
       sum_strides += coeff;
+      if (trace) fputs(" -> num_strides++\n", stderr);
     } else {
       // rng absent from this buf.  Check: are all existing UPCAST/UNROLL
       // axes also absent?  tinygrad's test is "rng not in BS && all(r2 in
@@ -288,10 +373,13 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
       // conflict (rng's stride-0-on-this-buf vectorizes the load).
       int all_uu_present = 1;
       for (u32 j = 0; j < n_uu; j++) {
-        if (uop_dag_addr_coeff_lookup(&cv, upcast_unroll_aids[j]) == 0) {
+        u32 uuc = uop_dag_addr_coeff_lookup(&cv, upcast_unroll_aids[j]);
+        if (trace) fprintf(stderr, " uu_coeff(%u)=%u", upcast_unroll_aids[j], uuc);
+        if (uuc == 0) {
           all_uu_present = 0; break;
         }
       }
+      if (trace) fprintf(stderr, " all_uu=%d\n", all_uu_present);
       if (all_uu_present) any_strideless = 1;
     }
   }
@@ -300,29 +388,92 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
   return any_strideless;
 }
 
+// --- reduce-heavy occupancy floor ----------------------------------
+// The minimum launch grid (output GLOBAL/LOCAL/LOOP element product) that
+// must remain AFTER an UPCAST, for reduce-heavy kernels only.  Below this
+// floor the conv-backward weight-grad would upcast 16x down to ~1600
+// threads (~31% V100 SM util); the floor caps it so enough global blocks
+// stay to fill the SMs.  Shape-only: changes how many UPCASTs apply,
+// never the math.
+//
+// THVM_UPCAST_REDUCE_MIN_GRID overrides the auto-derivation:
+//   unset / 0  -> AUTO: cuda_device_sm_count() * 80 threads/SM on CUDA,
+//                 0 (no cap) on CPU/Metal.
+//   > 0        -> forced floor (explicit per-device tuning wins).
+//   < 0        -> force OFF (no cap) even on CUDA.
+// The 80 threads/SM multiplier reproduces the tuned V100 floor: 80 SMs *
+// 80 = 6400 (~2.5 warps/SM), and scales to any GPU (A100 108 SMs -> 8640,
+// H100 132 SMs -> 10560) with zero manual tuning.  Memoised: the env read
+// + cuDeviceGetAttribute happen once.
+// Resolve the env override once: -2 uninit, -1 force OFF, 0 auto, >0 forced.
+static int OCC_FLOOR_ENV = -2;
+// Auto-derived CUDA floor, memoised once cuda_device_sm_count() is valid.
+static int OCC_FLOOR_AUTO = -1;
+static u32 hand_opt_occupancy_floor(KernelEntry const *ke) {
+  if (OCC_FLOOR_ENV == -2) {
+    char const *e = getenv("THVM_UPCAST_REDUCE_MIN_GRID");
+    int v = (e != NULL && e[0] != '\0')
+              ? hand_opt_getenv_int("THVM_UPCAST_REDUCE_MIN_GRID", 0)
+              : 0;
+    // env: >0 forced floor, <0 forced OFF, unset/empty/0 -> auto-derive.
+    OCC_FLOOR_ENV = (v > 0) ? v : (v < 0 ? -1 : 0);
+  }
+  if (OCC_FLOOR_ENV > 0) return (u32)OCC_FLOOR_ENV;   // explicit tuning wins
+  if (OCC_FLOOR_ENV < 0) return 0;                    // force OFF
+  // AUTO: derive from the device SM count on CUDA only (CPU/Metal -> 0).
+  // Memoised per-backend: a CPU kernel keeps OCC_FLOOR_AUTO at 0 without
+  // poisoning the CUDA derivation, since cuda_device_sm_count() is only
+  // queried (and cached) once a CUDA kernel actually hits this path.
+#ifdef THVM_HAS_CUDA
+  if (hand_opt_kernel_is_cuda(ke)) {
+    if (OCC_FLOOR_AUTO < 0) {
+      int n_sm = cuda_device_sm_count();
+      OCC_FLOOR_AUTO = (n_sm > 0) ? n_sm * 80 : 0;  // 80 thr/SM ~ 2.5 warps/SM
+    }
+    return (u32)OCC_FLOOR_AUTO;
+  }
+#else
+  (void)ke;
+#endif
+  return 0;   // CPU / Metal: no occupancy cap
+}
+
 // --- the heuristic -------------------------------------------------
 // Returns the number of opts successfully applied.
 fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   if (ke == NULL) return 0;
   // Mark "decided" up front (whether or not anything applies) so a
-  // re-dispatch doesn't re-run.  Mirrors kernel_autotune's
-  // ke->schedule->autotuned = 1 at the start.
-  if (ke->schedule != NULL) ke->schedule->autotuned = 1;
+  // re-dispatch doesn't re-run.  Uses its OWN flag (hand_coded_done),
+  // NOT `autotuned` -- otherwise hand_opts would suppress a subsequent
+  // BEAM/autotune pass (the fire path runs hand_opts then autotune).
+  if (ke->schedule != NULL) ke->schedule->hand_coded_done = 1;
   if (!hand_coded_opts_enabled()) return 0;
-  // CUDA gate stays off pending renderer-side load hoisting (per
-  // docs/tinygrad_late_passes.md "path #2" -- load_store_folding /
-  // shared-load CSE inside the parallel-accumulator reduce body).
-  // Without it the parallel-acc emit re-reads the shared K-th input F
-  // times per K iteration, so V100 register pressure + nvrtc compile
-  // time both explode (cold step 1: 349s, warm 3541ms vs 540ms naive).
-  // Once path #2 lands, restore the original `hand_opt_kernel_on_gpu`
-  // call (delete the b->id == 2 narrowing below) and re-measure.
-  if (!hand_opt_kernel_on_gpu(ke)) return 0;
-  {
-    Backend *b = NULL;
-    if (ke->output_tid > 0 && ke->output_tid < TENS_NEXT) b = TENS[ke->output_tid].backend;
-    if (b == NULL) b = DEFAULT_BACKEND;
-    if (b == NULL || b->id != 2) return 0;
+  // GPU gate: runs on both Metal (b->id == 2) and CUDA (b->id == 3),
+  // matching tinygrad's spec (heuristic.py applies to all renderers).
+  // Intra-heuristic target-aware skips (see hand_opt_kernel_is_cuda
+  // users below) are the tinygrad-faithful way to handle backend
+  // peculiarities -- mirrors heuristic.py:37 (AMX skip) and :109
+  // (DSP skip).  See docs/tinygrad_late_passes.md for the V100
+  // measurement (warm step is currently 130x naive baseline; the
+  // remediation is to port tinygrad/renderer/ptx.py, not to narrow
+  // the gate).
+  //
+  // CPU (Lever B): tinygrad runs hand_coded_optimizations on EVERY
+  // renderer including CPU (heuristic.py:8); only the LOCAL/THREAD/DSP
+  // sections are renderer-gated.  thvm previously suppressed ALL CPU opts
+  // because the CPU dispatch ladder routes matmul/gemv/dot/conv through
+  // cBLAS from the BARE DAG and an UPCAST mutates the DAG out of those
+  // shapes.  But a NON-BLAS-eligible reduce kernel (the fused conv2+
+  // maxpool faithful kernel) has no BLAS route to poison, so we let the
+  // UPCAST register-blocking run -- giving render_uop independent acc0[N]
+  // lanes that clang can vectorize.  BLAS-eligible CPU kernels stay bare.
+  int on_cpu = hand_opt_kernel_on_cpu(ke);
+  if (on_cpu) {
+    if (hand_opt_cpu_blas_eligible(ke)) return 0;   // keep cBLAS fast path
+    // else: fall through to the UPCAST/UNROLL sections (GPU-only
+    // sections below are individually skipped via `on_cpu`).
+  } else if (!hand_opt_kernel_on_gpu(ke)) {
+    return 0;
   }
 
   u32 n_applied = 0;
@@ -333,8 +484,10 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // wrapped the matmul STORE in OPT(_, TC, 0); this is the explicit
   // record on the schedule path) + parallel-TC GLOBAL promote for any
   // 8-multiple output axis.  Tinygrad RETURNs after TC + M/N UPCAST;
-  // we mirror that.
-  {
+  // we mirror that.  CPU has no tensor cores (k.ren.tensor_cores empty);
+  // a CPU matmul would already be BLAS-eligible and returned above, so
+  // this is doubly unreachable on CPU -- gated explicitly for clarity.
+  if (!on_cpu) {
     u32 K = 0;
     if (hand_opt_classify_matmul(ke, &K)) {
       static const u32 tc_tiles[] = {8, 16, 32};
@@ -371,6 +524,10 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     int MV_BLOCK    = hand_opt_getenv_int("MV_BLOCKSIZE", 4);
     int MV_TPR      = hand_opt_getenv_int("MV_THREADS_PER_ROW", 8);
     int MV_RPT      = hand_opt_getenv_int("MV_ROWS_PER_THREAD", 4);
+    // MATVEC applies GROUP/LOCAL (k.ren.has_local in heuristic.py:66) ->
+    // GPU-only.  CPU has no local memory; skip (a CPU matvec is BLAS-
+    // eligible via gemv and already returned above).
+    if (on_cpu) MV = 0;
     if (MV != 0 && (MV_BLOCK > 1 || MV_TPR > 1 || MV_RPT > 1)) {
       u32 red_aid = 0;
       UopDagAddrCoeffsView idx0v, idx1v;
@@ -393,7 +550,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           // Apply GROUP on the FIRST reduce axis (tinygrad uses axis 0
           // which is the index into axes_of(REDUCE); we use the axis_id).
           if (MV_TPR > 1) {
-            KOpt o = { KOP_GROUP, (u8)red_aid, (u32)MV_TPR };
+            KOpt o = { KOP_GROUP, red_aid, (u32)MV_TPR };
             if (kernel_apply_opt(ke, o)) n_applied++;
           }
           if (MV_BLOCK > 1) {
@@ -405,7 +562,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
               for (u32 j = 0; j < ax2.n; j++) {
                 u8 tj = ax2.kax_type[j];
                 if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax2.extent[j] == g_ext) {
-                  KOpt o = { KOP_LOCAL, (u8)ax2.axis_id[j], (u32)MV_BLOCK };
+                  KOpt o = { KOP_LOCAL, ax2.axis_id[j], (u32)MV_BLOCK };
                   if (kernel_apply_opt(ke, o)) { n_applied++; break; }
                 }
               }
@@ -417,7 +574,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
               for (u32 j = 0; j < ax3.n; j++) {
                 u8 tj = ax3.kax_type[j];
                 if ((tj == KAX_LOOP || tj == KAX_GLOBAL) && ax3.extent[j] == g_ext) {
-                  KOpt o = { KOP_UPCAST, (u8)ax3.axis_id[j], (u32)MV_RPT };
+                  KOpt o = { KOP_UPCAST, ax3.axis_id[j], (u32)MV_RPT };
                   if (kernel_apply_opt(ke, o)) { n_applied++; break; }
                 }
               }
@@ -434,15 +591,84 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   //   for axis, sz in product((0,1,2), (16,)): try GROUPTOP(axis, sz);
   //   break on first success.
   // Then: if group_for_reduces > 0: return.
+  //
+  // tinygrad's axis indexes into `axes_of(AxisType.REDUCE)` -- the i-th
+  // REDUCE axis among all axes.  We translate (0,1,2) -> the
+  // corresponding axis_id by scanning the snapshot for REDUCE-kind axes.
+  //
+  // Env gate THVM_GROUPTOP=0 disables the gate entirely (default ON);
+  // useful for A/B vs the pre-GROUP_REDUCE baseline while the
+  // CUDA-launch-context corruption is investigated.
+  // CPU SKIP: GROUPTOP -> KOP_GROUPTOP -> GROUP_REDUCE, a cooperative
+  // local-memory reduce (k.ren.has_local, heuristic.py:84-90); CPU has no
+  // local memory and the GROUP_REDUCE shape triggers render_uop's
+  // multi_axis_reject (would also defeat the parallel-acc UPCAST path).
+  if (!on_cpu && hand_opt_getenv_int("THVM_GROUPTOP", 1) != 0)
   {
     int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
     if (hand_opt_snapshot_axes(ke, &ax)) {
       u64 olp = hand_opt_output_loop_product(&ax);
       u64 thr = NOLOCALS ? 240 : 2048;
       if (olp <= thr) {
-        for (u32 axis = 0; axis < 3; axis++) {
-          KOpt opt = { KOP_GROUPTOP, (u8)axis, 16 };
-          if (kernel_apply_opt(ke, opt)) { n_applied++; break; }
+        // red_aids[k] holds the axis_id of the k-th REDUCE axis; red_exts[k]
+        // its extent.  Snapshot positions and axis_ids may not match
+        // (uop_dag_collect_axes returns axes in DAG-walk order, axis_ids
+        // can have gaps from prior axis-id remapping passes).
+        u32 red_aids[MAX_AXES]; u32 red_exts[MAX_AXES]; u32 n_red = 0;
+        for (u32 i = 0; i < ax.n; i++) {
+          if (ax.kax_type[i] == KAX_REDUCE) {
+            red_aids[n_red] = ax.axis_id[i];
+            red_exts[n_red] = ax.extent[i];
+            n_red++;
+          }
+        }
+        static int trace = -1;
+        if (trace < 0) {
+          const char *e = getenv("THVM_GROUP_REDUCE_TRACE");
+          trace = (e != NULL && e[0] != '0') ? 1 : 0;
+        }
+        if (trace) {
+          fprintf(stderr, "[group] n_red=%u olp=%llu reduces:", n_red,
+                  (unsigned long long)olp);
+          for (u32 i = 0; i < n_red; i++) {
+            fprintf(stderr, " a%u(ext=%u)", red_aids[i], red_exts[i]);
+          }
+          fputc('\n', stderr);
+        }
+        // rmu_emit_group_reduce now handles multi-axis (serial REDUCE
+        // loops around the cooperative GROUP axis), so apply GROUPTOP
+        // to the LARGEST reduce axis that divides evenly by 16.  Picking
+        // the largest axis minimizes per-thread iteration count for the
+        // strided walk.
+        // Cooperative size: tinygrad's GROUPTOP default = 16.  Earlier
+        // session A/B at BS=128 in a low-contention window showed
+        // sz=128 beats sz=16 by ~10ms/step, BUT a later bench at BS=64
+        // showed sz=128 makes things **2.3x slower** (364ms vs 155ms with
+        // sz=16) -- the bigger cooperative block hurts when the global
+        // grid is smaller (fewer blocks to schedule).  REVERTED to
+        // tinygrad-faithful 16.  Override via THVM_GROUP_SZ for per-
+        // workload tuning when a quieter GPU window allows clean A/B.
+        u32 sz = (u32)hand_opt_getenv_int("THVM_GROUP_SZ", 16);
+        i32 best_idx = -1;
+        u32 best_ext = 0;
+        for (u32 i = 0; i < n_red; i++) {
+          if (red_exts[i] < sz) continue;
+          if (red_exts[i] % sz != 0) continue;
+          if (red_exts[i] > best_ext) {
+            best_ext = red_exts[i];
+            best_idx = (i32)i;
+          }
+        }
+        if (best_idx >= 0) {
+          u32 axis = red_aids[best_idx];
+          KOpt opt = { KOP_GROUPTOP, axis, sz };
+          int ok = kernel_apply_opt(ke, opt);
+          if (trace) fprintf(stderr,
+              "[group] apply GROUPTOP a%u sz=%u (best of %u red axes) -> %d\n",
+              axis, sz, n_red, ok);
+          if (ok) n_applied++;
+        } else if (trace) {
+          fprintf(stderr, "[group] skip: no reduce axis divides %u\n", sz);
         }
       }
     }
@@ -463,24 +689,58 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   //     existing UPCAST/UNROLL axes present); collect (num_strides,
   //     sum_strides, axis, amount); sort; apply best UPCAST.
   {
+    // LEVER (per-kernel occupancy cap, GPU codegen only): for reduce-heavy
+    // kernels, refuse to UPCAST below a minimum launch grid so the
+    // conv-backward weight-grad keeps enough global blocks to fill the SMs.
+    // tinygrad's only floor is `olp >= 1024` (line below); on the V100
+    // weight-grad that still upcasts 16x down to ~1600 threads (~31% SM util).
+    // The reduce-heavy occupancy floor raises that bound *only* for
+    // reduce-heavy kernels: it is the minimum number of output
+    // (GLOBAL/LOCAL/LOOP) elements -- i.e. launch threads -- that must
+    // remain AFTER an UPCAST is applied.  It is now AUTO-DERIVED from the
+    // device SM count (hand_opt_occupancy_floor): CUDA -> n_sm*80 (~6400 on
+    // an 80-SM V100, keeping it fed at ~2.5 warps/SM), CPU/Metal -> 0 (no
+    // cap, bit-identical to the un-capped path).  THVM_UPCAST_REDUCE_MIN_GRID
+    // overrides: >0 forces a floor, <0 forces OFF, 0/unset = auto.  Matmul/
+    // elementwise have large output grids that never fall under the floor,
+    // so they never gate.
+    u32 occ_min_grid = hand_opt_occupancy_floor(ke);
+    int upcast_trace = getenv("THVM_UPCAST_TRACE") != NULL;
     u32 upcasted_set[MAX_AXES];
     u32 n_upcasted_set = 0;
     while (1) {
       if (!hand_opt_snapshot_axes(ke, &ax)) break;
       u64 olp = hand_opt_output_loop_product(&ax);
       u64 us  = hand_opt_upcast_size(&ax);
-      if (olp < 1024 || us >= 32) break;
+      // tinygrad caps upcast_size at 32; per-workload tuning via THVM_UPCAST_CAP.
+      u64 ucap = (u64)hand_opt_getenv_int("THVM_UPCAST_CAP", 32);
+      if (olp < 1024 || us >= ucap) break;
+      // Per-kernel occupancy cap (THVM_UPCAST_REDUCE_MIN_GRID), reduce-heavy only.
+      int reduce_heavy = (occ_min_grid > 0) && hand_opt_is_reduce_heavy(&ax);
 
       // Build list of current UPCAST/UNROLL axis_ids for the stride test.
+      // hand_opt_upcast_buf_stride -> udg_addr_lookup keys on axis_id, so
+      // we must pass ax.axis_id[i] not the snapshot index i.  The earlier
+      // implementation stored `i` here, which made the all-UU-present
+      // check fail on every iteration past the first -> UPCAST loop
+      // bailed after one apply.  This bug suppressed multi-axis UPCAST
+      // on every kernel (kept us at 4 accumulators vs tinygrad's 12 for
+      // the same conv2 [128,32,20,20] kernel).
       u32 uu_aids[MAX_AXES]; u32 n_uu = 0;
       for (u32 i = 0; i < ax.n; i++) {
         if (ax.kax_type[i] == KAX_UPCAST || ax.kax_type[i] == KAX_UNROLL) {
-          uu_aids[n_uu++] = i;
+          uu_aids[n_uu++] = ax.axis_id[i];
         }
       }
 
       u32 dims[MAX_AXES];
       u32 n_dims = hand_opt_upcastable_dims(&ax, dims);
+      if (getenv("THVM_UPCAST_TRACE")) {
+        fprintf(stderr, "[upcast] olp=%llu us=%llu n_dims=%u upcastable:", (unsigned long long)olp, (unsigned long long)us, n_dims);
+        for (u32 i = 0; i < n_dims; i++)
+          fprintf(stderr, " ax%u(id=%u,ext=%u,type=%u)", dims[i], ax.axis_id[dims[i]], ax.extent[dims[i]], ax.kax_type[dims[i]]);
+        fputc('\n', stderr);
+      }
 
       // Best candidate so far (sorted ascending by (num_strides, sum_strides, axis, amount)).
       int have_best = 0;
@@ -498,8 +758,11 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           u32 amt = amounts[ai];
           if (ax.extent[axis] % amt != 0) continue;
           u32 num = 0, sum = 0;
+          // Same axis_id-vs-snapshot-index bug here: pass ax.axis_id[axis]
+          // not the snapshot index.
           if (!hand_opt_upcast_buf_stride(ke->cached_lift.store_root,
-                                          axis, uu_aids, n_uu, &num, &sum)) {
+                                          ax.axis_id[axis], uu_aids, n_uu,
+                                          &num, &sum)) {
             continue;   // no buf strideless on this axis
           }
           if (!have_best
@@ -512,10 +775,39 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           }
         }
       }
-      if (!have_best) break;
-      KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[best_axis], best_amt };
-      if (!kernel_apply_opt(ke, opt)) break;
+      if (!have_best) {
+        if (getenv("THVM_UPCAST_TRACE"))
+          fprintf(stderr, "[upcast] no best -> exit loop\n");
+        break;
+      }
+      // Occupancy gate (reduce-heavy only): applying UPCAST(best_axis,best_amt)
+      // divides the launch grid to olp/best_amt; stop once that drops below the
+      // SM-occupancy floor.  Shape-only -- changes how many upcasts, never math.
+      if (reduce_heavy) {
+        u64 olp_after = olp / (u64)best_amt;
+        if (olp_after < (u64)occ_min_grid) {
+          if (getenv("THVM_UPCAST_TRACE"))
+            fprintf(stderr, "[upcast] occupancy-SKIP amt=%u (post-grid %llu < min %d)\n",
+                    best_amt, (unsigned long long)olp_after, occ_min_grid);
+          break;
+        }
+      }
+      KOpt opt = { KOP_UPCAST, ax.axis_id[best_axis], best_amt };
+      if (getenv("THVM_UPCAST_TRACE"))
+        fprintf(stderr, "[upcast] picking axis_id=%u amt=%u (best_num=%u sum=%u)\n",
+                ax.axis_id[best_axis], best_amt, best_num, best_sum);
+      if (!kernel_apply_opt(ke, opt)) {
+        if (getenv("THVM_UPCAST_TRACE"))
+          fprintf(stderr, "[upcast] kernel_apply_opt FAILED -> exit loop\n");
+        break;
+      }
       n_applied++;
+      if (upcast_trace) {
+        fprintf(stderr, "[upcast] APPLY amt=%u axis=%u (olp %llu->%llu, us %llu)%s\n",
+                best_amt, best_axis, (unsigned long long)olp,
+                (unsigned long long)(olp / (u64)best_amt),
+                (unsigned long long)us, reduce_heavy ? " [reduce-heavy]" : "");
+      }
       if (n_upcasted_set < MAX_AXES) upcasted_set[n_upcasted_set++] = best_axis;
     }
   }
@@ -538,7 +830,14 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // renderer's reduce matcher is fixed to follow UNROLL'd reduce axes,
   // suppress the full-extent UNROLL.  The split-by-4 branch (factor 4 <
   // extent) is unaffected and still applies.
-  {
+  //
+  // CUDA SKIP: stacking UNROLL on top of UPCAST blows V100 register
+  // pressure -- nvrtc spills, the kernel runs at a fraction of peak.
+  // Tinygrad gets away with the same heuristic because their PTX
+  // renderer schedules registers directly; thvm's C-source path has no
+  // such control.  Mirrors tinygrad's backend-aware skips at
+  // heuristic.py:37 (AMX) + 109 (DSP).
+  if (!hand_opt_kernel_is_cuda(ke)) {
     if (hand_opt_snapshot_axes(ke, &ax)) {
       u32 unr[MAX_AXES];
       u32 n_unr = hand_opt_unrollable_dims(&ax, unr);
@@ -555,7 +854,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           (void)last;
         } else {
           if (ext % 4 == 0) {
-            KOpt opt = { KOP_UNROLL, (u8)ax.axis_id[last], 4 };
+            KOpt opt = { KOP_UNROLL, ax.axis_id[last], 4 };
             if (kernel_apply_opt(ke, opt)) n_applied++;
           }
         }
@@ -574,7 +873,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         if (n_dims > 0) {
           u32 last = dims[n_dims - 1];
           if (ax.extent[last] % 4 == 0) {
-            KOpt opt = { KOP_UPCAST, (u8)ax.axis_id[last], 4 };
+            KOpt opt = { KOP_UPCAST, ax.axis_id[last], 4 };
             if (kernel_apply_opt(ke, opt)) n_applied++;
           }
         }
@@ -593,7 +892,12 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // Take top 3 (sorted by axis ascending), apply each LOCAL.
   //
   // Section 11 NOLOCALS gate runs first: NOLOCALS=1 -> KOP_NOLOCALS instead.
-  {
+  //
+  // CPU SKIP: LOCAL binds threads to local-memory blocks (k.ren.has_local,
+  // heuristic.py:159); CPU has no local memory.  Skipping it leaves the
+  // CPU kernel with serial output loops + the UPCAST register-blocking
+  // (Sections 6-8), which is the desired Lever-B shape.
+  if (!on_cpu) {
     int NOLOCALS = hand_opt_getenv_int("NOLOCALS", 0);
     if (NOLOCALS) {
       KOpt opt = { KOP_NOLOCALS, 0, 0 };
@@ -630,13 +934,27 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           n_cands++;
         }
         // Sort by (-expand, -axis): expand=1 first, then highest axis first.
+        // THVM_LOCAL_INNER_FIRST=1 reverses to (expand=0 first, then
+        // highest axis first) -- prioritize INDEX-relevant axes for
+        // LOCAL placement, giving better load coalescing for the
+        // innermost-W axis in conv2d kernels.  Earlier session change
+        // (commit 77a7b671) defaulted to 1 citing ~30ms gain in low-
+        // contention window; later 5-trial alternating bench at BS=128
+        // showed within-noise (= vs OFF: 240 vs 240 ms median).
+        // Reverted to tinygrad-faithful 0; opt in via THVM_LOCAL_INNER_FIRST=1.
+        int inner_first = hand_opt_getenv_int("THVM_LOCAL_INNER_FIRST", 0);
         for (u32 i = 1; i < n_cands; i++) {
           LocalCand k = cands[i];
           i32 j = (i32)i - 1;
           while (j >= 0) {
             int ex_j = cands[j].expand, ex_k = k.expand;
-            if (ex_j > ex_k) break;
-            if (ex_j == ex_k && cands[j].axis > k.axis) break;
+            if (inner_first) {
+              if (ex_j < ex_k) break;
+              if (ex_j == ex_k && cands[j].axis > k.axis) break;
+            } else {
+              if (ex_j > ex_k) break;
+              if (ex_j == ex_k && cands[j].axis > k.axis) break;
+            }
             cands[j + 1] = cands[j];
             j--;
           }
@@ -660,7 +978,11 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           for (u32 fi = 0; fi < nf; fi++) {
             u32 f = facs[fi];
             if (ext % f != 0) continue;
-            if ((u64)local_running * (u64)f > 128) continue;
+            // THVM_LOCAL_CAP overrides the 128-thread block cap
+            // (V100 maxThreadsPerBlock=1024; tinygrad-faithful default
+            // is 128).
+            u64 lcap = (u64)hand_opt_getenv_int("THVM_LOCAL_CAP", 128);
+            if ((u64)local_running * (u64)f > lcap) continue;
             picked = f; break;
           }
           if (picked > 0) {
@@ -696,7 +1018,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           HandOptAxes axc;
           if (!hand_opt_snapshot_axes(ke, &axc)) break;
           if (current_axis >= axc.n) continue;
-          KOpt opt = { KOP_LOCAL, (u8)axc.axis_id[current_axis], sz };
+          KOpt opt = { KOP_LOCAL, axc.axis_id[current_axis], sz };
           if (kernel_apply_opt(ke, opt)) {
             n_applied++;
             shift++;       // one more axis sitting above subsequent picks
@@ -708,15 +1030,48 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
 
   // ---- Section 10: THREAD -- SKIPPED (no KOP_THREAD in thvm) --------
 
+  // THVM_HANDOPT_TRACE=1: per-kernel summary of axis types + n_applied,
+  // used to diagnose fully-serial kernels (no GLOBAL/LOCAL -> render
+  // falls back to a single-thread loop nest that nvrtc chokes on at
+  // large trip counts).
+  {
+    static int ht_known = 0, ht_on = 0;
+    if (!ht_known) { char const *e = getenv("THVM_HANDOPT_TRACE");
+                     ht_on = (e != NULL && e[0] == '1'); ht_known = 1; }
+    if (ht_on) {
+      HandOptAxes axf;
+      if (hand_opt_snapshot_axes(ke, &axf)) {
+        u32 n_glob = 0, n_loc = 0, n_loop = 0, n_red = 0, n_up = 0, n_unr = 0;
+        for (u32 i = 0; i < axf.n; i++) {
+          switch (axf.kax_type[i]) {
+            case KAX_GLOBAL: n_glob++; break;
+            case KAX_LOCAL:  n_loc++;  break;
+            case KAX_LOOP:   n_loop++; break;
+            case KAX_REDUCE: n_red++;  break;
+            case KAX_UPCAST: n_up++;   break;
+            case KAX_UNROLL: n_unr++;  break;
+            default: break;
+          }
+        }
+        u64 olp = hand_opt_output_loop_product(&axf);
+        fprintf(stderr,
+                "[handopt] kid=%u n_applied=%u axes(G=%u L=%u loop=%u red=%u up=%u unr=%u) olp=%llu\n",
+                (u32)(ke - KERNELS), n_applied,
+                n_glob, n_loc, n_loop, n_red, n_up, n_unr,
+                (unsigned long long)olp);
+        fflush(stderr);
+      }
+    }
+  }
+
   return n_applied;
 }
 
 // Should this kernel get the hand-coded heuristic on its next fire?
-// Mirrors kernel_autotune's cheap pre-check: the env opt-in is on AND
-// the per-shape autotuned flag is still 0.
+// The env opt-in is on AND the per-shape hand_coded_done flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke) {
   if (!hand_coded_opts_enabled()) return 0;
   if (ke == NULL) return 0;
-  if (ke->schedule != NULL && ke->schedule->autotuned) return 0;
+  if (ke->schedule != NULL && ke->schedule->hand_coded_done) return 0;
   return 1;
 }

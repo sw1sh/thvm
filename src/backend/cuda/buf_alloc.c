@@ -33,7 +33,15 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   if (nbytes == 0) nbytes = 1;   // cuMemAlloc rejects 0
 
   u32 recycled = cuda_buf_freelist_try_pop(nbytes);
-  if (recycled != 0) return recycled;
+  if (recycled != 0) {
+    if (getenv("THVM_CUDA_ALLOC_TRACE")) {
+      fprintf(stderr, "[alloc] req=%llu -> recycled buf_id=%u nbytes=%llu dptr=%p\n",
+              (unsigned long long)nbytes, recycled,
+              (unsigned long long)CUDA_BUFS[recycled].nbytes,
+              (void*)CUDA_BUFS[recycled].dptr);
+    }
+    return recycled;
+  }
 
   if (CUDA_BUFS_NEXT >= CUDA_BUFS_CAP) {
     fprintf(stderr, "cuda_buf_alloc: out of slots (cap=%u)\n", CUDA_BUFS_CAP);
@@ -59,6 +67,10 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   b->parent_buf_id = 0;
   CUDA_MEM_LIVE += nbytes;
   if (CUDA_MEM_LIVE > CUDA_MEM_PEAK) CUDA_MEM_PEAK = CUDA_MEM_LIVE;
+  if (getenv("THVM_CUDA_ALLOC_TRACE")) {
+    fprintf(stderr, "[alloc] req=%llu -> fresh buf_id=%u dptr=%p\n",
+            (unsigned long long)nbytes, id, (void*)dptr);
+  }
   return id;
 }
 
@@ -86,6 +98,10 @@ fn u32 cuda_buf_alloc_external(CUdeviceptr dptr, u64 nbytes) {
   b->owns_data     = 0;
   b->skip_freelist = 0;
   b->parent_buf_id = 0;
+  if (getenv("THVM_CUDA_ALLOC_TRACE")) {
+    fprintf(stderr, "[alloc-ext] req=%llu -> external buf_id=%u dptr=%p\n",
+            (unsigned long long)nbytes, id, (void*)dptr);
+  }
   return id;
 }
 
@@ -112,4 +128,29 @@ fn u32 cuda_buf_alloc_arena_view(CUdeviceptr dptr, u64 nbytes,
 fn CUdeviceptr cuda_buf_dptr(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return 0;
   return CUDA_BUFS[buf_id].dptr;
+}
+
+// Expose the dptr as an opaque u64 for the JIT replay dedup safety
+// check.  Two bufs alias storage iff their dptrs are equal AND their
+// nbytes ranges overlap (we approximate as "same dptr" since same
+// dptr without overlap is impossible on cuMemAlloc).
+fn u64 cuda_buf_addr(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return 0;
+  return (u64)CUDA_BUFS[buf_id].dptr;
+}
+
+// Walk to the storage root: a view buf chains through parent_buf_id
+// until the owning slot.  Two bufs alias storage iff their roots match
+// AND their dptr regions overlap.  Used by the JIT replay dedup
+// safety check.  Returns 0 on invalid id.
+fn u32 cuda_buf_storage_root(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return 0;
+  u32 cur = buf_id;
+  // Bound the walk to prevent any future cycle from hanging.
+  for (u32 hops = 0; hops < 32; hops++) {
+    u32 parent = CUDA_BUFS[cur].parent_buf_id;
+    if (parent == 0 || parent >= CUDA_BUFS_NEXT) return cur;
+    cur = parent;
+  }
+  return cur;
 }

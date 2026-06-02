@@ -115,8 +115,14 @@ def main():
         Tensor.realize(*[p.grad for p in opt.params if p.grad is not None])
         lossSlot.assign(loss)
         Tensor.realize(lossSlot, *opt.schedule_step())   # phase 2: in-place
-        for p in opt.params:
-            p.grad = None
+        # Clear the C-side gradient accumulator (TENS[tid].grad).  thvm's
+        # backward() ACCUMULATES cotangents (tinygrad-faithful grads[k]+=v),
+        # so a bare `p.grad = None` (which only drops the Python handle) lets
+        # each step's gradient pile onto the previous one: step N's weight
+        # grad becomes ADD(step1_grad, ..., stepN_grad), which the faithful
+        # realize-seed fuses into one slow multi-accumulator reduce kernel.
+        # opt.zero_grad() calls ten_clear_grad so each step reduces once.
+        opt.zero_grad()
 
     jit = JitStep(train_step)
 

@@ -124,6 +124,15 @@ static int uop_term_max_value(Term t, i64 *out) {
       *out = dv - 1;
       return 1;
     }
+    case UOP_ISHR: {
+      i64 sft, a;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &sft) || sft < 0 || sft >= 63)
+        return 0;
+      if (!uop_term_max_value(heap_read(term_val(t) + 0), &a)) return 0;
+      if (a < 0) return 0;
+      *out = a >> sft;
+      return 1;
+    }
     case UOP_IWHERE: {
       i64 a, b;
       if (!uop_term_max_value(heap_read(term_val(t) + 1), &a)) return 0;
@@ -131,6 +140,53 @@ static int uop_term_max_value(Term t, i64 *out) {
       *out = a > b ? a : b;
       return 1;
     }
+    default: return 0;
+  }
+}
+
+// Conservative lower-bound estimator (mirror of uop_term_max_value;
+// tinygrad symbolic vmin).  Returns 1 and sets *out to a value V such
+// that the term is provably >= V (RANGE leaves >= 0).  Used by
+// parse_valid / uop_given_valid to derive the [vmin, vmax] window of a
+// guarded expression.
+static int uop_term_min_value(Term t, i64 *out) {
+  if (term_tag(t) == TAG_NUM) { *out = (i64)(i32)term_val(t); return 1; }
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_RANGE: {
+      u32 ext;
+      if (!uop_range_extent_into(t, &ext)) return 0;
+      *out = 0;  // iters in [0, extent)
+      return 1;
+    }
+    case UOP_CONST: { i64 v; if (!uop_iconst_value(t, &v)) return 0; *out = v; return 1; }
+    case UOP_IADD: {
+      i64 a, b;
+      if (!uop_term_min_value(heap_read(term_val(t) + 0), &a)) return 0;
+      if (!uop_term_min_value(heap_read(term_val(t) + 1), &b)) return 0;
+      *out = a + b;
+      return 1;
+    }
+    case UOP_IMUL: {
+      // Non-negative operands only (index exprs); min = min(a)*min(b).
+      i64 amin, bmin;
+      if (!uop_term_min_value(heap_read(term_val(t) + 0), &amin)) return 0;
+      if (!uop_term_min_value(heap_read(term_val(t) + 1), &bmin)) return 0;
+      if (amin < 0 || bmin < 0) return 0;
+      *out = amin * bmin;
+      return 1;
+    }
+    case UOP_IDIV: {
+      i64 dv, a;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &dv) || dv <= 0) return 0;
+      if (!uop_term_min_value(heap_read(term_val(t) + 0), &a) || a < 0) return 0;
+      *out = a / dv;
+      return 1;
+    }
+    case UOP_IMOD:
+      *out = 0;  // x % c in [0, c) for non-negative x
+      return 1;
     default: return 0;
   }
 }
@@ -153,7 +209,15 @@ static int uop_term_strictly_below(Term y, i64 bound) {
 // Conservative non-negative estimator over UOp index expressions.
 // Returns 1 only when the value is provably >= 0 by structure.
 // Mirrors scalar/simplify.c's simplify_value_nonneg.
-static int uop_term_nonneg(Term t) {
+static int uop_term_nonneg_d(Term t, u32 depth) {
+  // Bounded recursion over the finite index DAG (mirrors the depth>48
+  // guards on uop_index_substitute / uop_term_has_range_aid in this
+  // file).  The composed conv-backward col2im index can nest deeply
+  // (and on the CUDA symbolic-codegen path the iwhere valid-fold builds
+  // very deep masked-divmod trees); without this cap the recursion
+  // overflows the stack.  A deep/pathological term is conservatively
+  // "not provably nonneg" (a missed simplification, never wrong).
+  if (depth > 64) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
   switch (op) {
@@ -166,7 +230,7 @@ static int uop_term_nonneg(Term t) {
     case UOP_IMUL: {
       Term a = heap_read(term_val(t) + 0);
       Term b = heap_read(term_val(t) + 1);
-      return uop_term_nonneg(a) && uop_term_nonneg(b);
+      return uop_term_nonneg_d(a, depth + 1) && uop_term_nonneg_d(b, depth + 1);
     }
     case UOP_IDIV:
     case UOP_IMOD: {
@@ -174,10 +238,294 @@ static int uop_term_nonneg(Term t) {
       Term b = heap_read(term_val(t) + 1);
       i64 dv;
       if (!uop_iconst_value(b, &dv) || dv <= 0) return 0;
-      return uop_term_nonneg(a);
+      return uop_term_nonneg_d(a, depth + 1);
+    }
+    case UOP_ISHR: {
+      // a >> s is non-negative when a is non-negative and s >= 0.
+      Term a = heap_read(term_val(t) + 0);
+      Term b = heap_read(term_val(t) + 1);
+      i64 sft;
+      if (!uop_iconst_value(b, &sft) || sft < 0) return 0;
+      return uop_term_nonneg_d(a, depth + 1);
     }
     default: return 0;
   }
+}
+
+static int uop_term_nonneg(Term t) { return uop_term_nonneg_d(t, 0); }
+
+// === uop_int_bounds: conservative [lo, hi] interval inference ===
+//
+// A single two-sided range estimator over the int UOp index DAG,
+// mirroring tinygrad's symbolic (vmin, vmax) pair.  Unlike the older
+// one-sided uop_term_min_value / uop_term_max_value above (which bail
+// the moment a sign is mixed and special-case IMOD's lower bound to 0),
+// this returns a tight-as-cheaply-possible inclusive interval for both
+// endpoints in one pass, with full sign handling on IMUL / IDIV and
+// overflow guards on every intermediate.
+//
+// Contract: returns 1 and fills *lo/*hi such that the value of `t` is
+// provably in [*lo, *hi] for ALL assignments of its RANGE leaves (each
+// RANGE r ranges over [0, static_extent(r)-1]).  Returns 0 when no
+// finite two-sided bound can be derived; callers MUST treat 0 as "no
+// information" and never assume anything about *lo/*hi in that case.
+//
+// CONSERVATISM: every unhandled op, unknown leaf (BUFFER/LOAD/etc.),
+// non-constant divisor/modulus, or arithmetic overflow returns 0.  A
+// wrong (too-narrow) bound would silently miscompile a later div/mod or
+// valid-mask fold, so the function errs hard toward 0/unknown.
+//
+// This primitive is NOT yet wired into any simplification rule -- it is
+// verified infrastructure for a later increment.
+
+// Floor division for i64: C `/` truncates toward zero, but interval
+// arithmetic over IDIV needs floor (round toward -inf) so that the
+// endpoints stay sound for negative numerators.  Requires d > 0.
+static i64 uop_floordiv_i64(i64 a, i64 d) {
+  i64 q = a / d;
+  i64 r = a % d;
+  if (r != 0 && ((r < 0) != (d < 0))) q -= 1;
+  return q;
+}
+
+// Checked i64 add/sub/mul: return 1 and write *out on success, 0 on
+// overflow.  __builtin_*_overflow is available on clang/gcc (the only
+// compilers this codebase targets).
+static int uop_chk_add(i64 a, i64 b, i64 *out) { return !__builtin_add_overflow(a, b, out); }
+static int uop_chk_sub(i64 a, i64 b, i64 *out) { return !__builtin_sub_overflow(a, b, out); }
+static int uop_chk_mul(i64 a, i64 b, i64 *out) { return !__builtin_mul_overflow(a, b, out); }
+
+static int uop_int_bounds_d(Term t, i64 *lo, i64 *hi, u32 depth);
+static int uop_is_invalid(Term t);  // defined below (invalid_gate section)
+
+// Min/max of the four corner products la*lb, la*hb, ha*lb, ha*hb, with
+// overflow checking.  Returns 1 and fills *lo/*hi on success, 0 if any
+// corner overflows i64.
+static int uop_mul_corner_bounds(i64 la, i64 ha, i64 lb, i64 hb,
+                                 i64 *lo, i64 *hi) {
+  i64 corners[4];
+  if (!uop_chk_mul(la, lb, &corners[0])) return 0;
+  if (!uop_chk_mul(la, hb, &corners[1])) return 0;
+  if (!uop_chk_mul(ha, lb, &corners[2])) return 0;
+  if (!uop_chk_mul(ha, hb, &corners[3])) return 0;
+  i64 mn = corners[0], mx = corners[0];
+  for (u32 i = 1; i < 4; i++) {
+    if (corners[i] < mn) mn = corners[i];
+    if (corners[i] > mx) mx = corners[i];
+  }
+  *lo = mn; *hi = mx;
+  return 1;
+}
+
+static int uop_int_bounds_d(Term t, i64 *lo, i64 *hi, u32 depth) {
+  if (depth > 64) return 0;  // pathological nesting -> unknown
+  // Bare NUM leaf (a raw heap integer, not wrapped in a CONST UOp).
+  if (term_tag(t) == TAG_NUM) {
+    i64 v = (i64)(i32)term_val(t);
+    *lo = v; *hi = v;
+    return 1;
+  }
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_CONST: {
+      i64 v;
+      if (!uop_iconst_value(t, &v)) return 0;
+      *lo = v; *hi = v;
+      return 1;
+    }
+    case UOP_RANGE: {
+      // Iter ranges over [0, static_extent-1].  static_extent is the
+      // worst-case upper bound even for kvar (symbolic) extents, so the
+      // interval stays sound when the runtime extent is smaller.
+      // (uop_range_extent_into reads the raw packed extent; kvar_extent_static
+      // unpacks a symbolic extent's registered upper bound.  We use those two
+      // -- not index.c's uop_range_static_extent -- because index.c is
+      // #included AFTER this file in thvm.c, so its accessors aren't visible
+      // here yet, whereas the kvar helpers and uop_range_extent_into are.)
+      u32 packed;
+      if (!uop_range_extent_into(t, &packed)) return 0;
+      u32 ext = kvar_extent_static(packed);
+      if (ext == 0) return 0;  // degenerate / empty -- no useful bound
+      *lo = 0; *hi = (i64)ext - 1;
+      return 1;
+    }
+    case UOP_IADD: {
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 0), &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 1), &lb, &hb, depth + 1)) return 0;
+      if (!uop_chk_add(la, lb, lo)) return 0;
+      if (!uop_chk_add(ha, hb, hi)) return 0;
+      return 1;
+    }
+    case UOP_ISUB: {
+      // [la - hb, ha - lb].
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 0), &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 1), &lb, &hb, depth + 1)) return 0;
+      if (!uop_chk_sub(la, hb, lo)) return 0;
+      if (!uop_chk_sub(ha, lb, hi)) return 0;
+      return 1;
+    }
+    case UOP_IMUL: {
+      Term a = heap_read(term_val(t) + 0);
+      Term b = heap_read(term_val(t) + 1);
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(a, &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(b, &lb, &hb, depth + 1)) return 0;
+      // const * range: scale, swapping endpoints for a negative const.
+      i64 c;
+      if (uop_iconst_value(a, &c)) {
+        if (c >= 0) { if (!uop_chk_mul(c, lb, lo) || !uop_chk_mul(c, hb, hi)) return 0; }
+        else        { if (!uop_chk_mul(c, hb, lo) || !uop_chk_mul(c, lb, hi)) return 0; }
+        return 1;
+      }
+      if (uop_iconst_value(b, &c)) {
+        if (c >= 0) { if (!uop_chk_mul(c, la, lo) || !uop_chk_mul(c, ha, hi)) return 0; }
+        else        { if (!uop_chk_mul(c, ha, lo) || !uop_chk_mul(c, la, hi)) return 0; }
+        return 1;
+      }
+      // Both non-const but bounded: min/max over the four corners.
+      return uop_mul_corner_bounds(la, ha, lb, hb, lo, hi);
+    }
+    case UOP_IDIV: {
+      // Positive constant divisor only.  thvm renders IDIV as C `/`
+      // (truncation toward zero), which equals floor ONLY for a
+      // non-negative numerator; for a negative numerator C-trunc and floor
+      // disagree, so a floor bound would be unsound vs the emitted code.
+      // Index expressions are non-negative, so we bound only the provably
+      // non-negative case and return unknown otherwise.  (la>=0 => the
+      // whole range is non-negative; or uop_term_nonneg proves it when the
+      // interval bound is loose -- then clamp the low end to 0.)
+      i64 d;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &d) || d <= 0) return 0;
+      Term num = heap_read(term_val(t) + 0);
+      i64 la, ha;
+      if (!uop_int_bounds_d(num, &la, &ha, depth + 1)) return 0;
+      if (la < 0) {
+        if (!uop_term_nonneg(num)) return 0;
+        la = 0;  // proven >= 0; the interval lower bound was just loose
+      }
+      *lo = uop_floordiv_i64(la, d);  // == la/d for la >= 0 (trunc == floor)
+      *hi = uop_floordiv_i64(ha, d);
+      return 1;
+    }
+    case UOP_IMOD: {
+      // Positive constant modulus c.  For a non-negative numerator C `%`
+      // lands in [0, c); for a negative numerator C `%` is negative, so
+      // the [0, c-1] bound (and the x%c==x tightening) is sound only when
+      // the numerator is provably non-negative.  Index exprs are
+      // non-negative; return unknown otherwise.
+      i64 c;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &c) || c <= 0) return 0;
+      Term num = heap_read(term_val(t) + 0);
+      i64 la, ha;
+      int nb = uop_int_bounds_d(num, &la, &ha, depth + 1);
+      if (nb && la >= 0 && ha < c) {  // x % c == x
+        *lo = la; *hi = ha;
+        return 1;
+      }
+      if (!((nb && la >= 0) || uop_term_nonneg(num))) return 0;
+      *lo = 0; *hi = c - 1;
+      return 1;
+    }
+    case UOP_ISHR: {
+      // `a >> s` with s a non-negative constant.  For a provably
+      // non-negative numerator the arithmetic right-shift is a floor
+      // divide by 2**s, so the interval is [la>>s, ha>>s].  This is the
+      // form the fast_idiv render-time lowering emits (x*m)>>s; keeping it
+      // bounded lets a containing div/mod still fold and keeps
+      // uop_int_bounds sound on a lowered tree.
+      i64 sft;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &sft) || sft < 0 || sft >= 63)
+        return 0;
+      Term num = heap_read(term_val(t) + 0);
+      i64 la, ha;
+      if (!uop_int_bounds_d(num, &la, &ha, depth + 1)) return 0;
+      if (la < 0) {
+        if (!uop_term_nonneg(num)) return 0;
+        la = 0;
+      }
+      *lo = la >> sft;
+      *hi = ha >> sft;
+      return 1;
+    }
+    case UOP_IWHERE: {
+      // select(cond, x, y): union the two branch intervals, ignoring
+      // cond.  An INVALID branch is a masking sentinel (no numeric
+      // value); skip it and take the other branch's bound.  If both are
+      // INVALID, or the live branch is unbounded, return 0.
+      Term x = heap_read(term_val(t) + 1);
+      Term y = heap_read(term_val(t) + 2);
+      int xi = uop_is_invalid(x), yi = uop_is_invalid(y);
+      if (xi && yi) return 0;
+      i64 lx, hx, ly, hy;
+      if (yi) return uop_int_bounds_d(x, lo, hi, depth + 1);
+      if (xi) return uop_int_bounds_d(y, lo, hi, depth + 1);
+      if (!uop_int_bounds_d(x, &lx, &hx, depth + 1)) return 0;
+      if (!uop_int_bounds_d(y, &ly, &hy, depth + 1)) return 0;
+      *lo = lx < ly ? lx : ly;
+      *hi = hx > hy ? hx : hy;
+      return 1;
+    }
+    case UOP_ILT:
+      // Comparison result is boolean 0/1.
+      *lo = 0; *hi = 1;
+      return 1;
+    case UOP_IAND:
+    case UOP_IOR: {
+      // Boolean conjunction/disjunction on 0/1 -> [0, 1].  Only claim
+      // this when BOTH operands are themselves provably in [0, 1]; a
+      // bitwise use on wider integers has no such bound (return 0).
+      i64 la, ha, lb, hb;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 0), &la, &ha, depth + 1)) return 0;
+      if (!uop_int_bounds_d(heap_read(term_val(t) + 1), &lb, &hb, depth + 1)) return 0;
+      if (la < 0 || ha > 1 || lb < 0 || hb > 1) return 0;
+      *lo = 0; *hi = 1;
+      return 1;
+    }
+    default:
+      return 0;  // unknown op / BUFFER / LOAD / etc. -- no info
+  }
+}
+
+// Public entry: infer a conservative inclusive [lo, hi] for the
+// int-typed UOp `t`.  Returns 1 on success, 0 if unbounded/unknown.
+static int uop_int_bounds(Term t, i64 *lo, i64 *hi) {
+  return uop_int_bounds_d(t, lo, hi, 0);
+}
+
+// === magicgu: magic multiply-shift constants for unsigned divide ===
+//
+// Compute (m, s) such that `x / d == (x * m) >> s` for every integer
+// 0 <= x <= vmax, with d > 0.  Direct port of tinygrad
+// uop/decompositions.py:272-280 (magicgu), itself adapted from Hacker's
+// Delight Ch.10.  The window-decode `idx // 25`-style divides the conv
+// _pool reshape leaves are non-negative and bounded, so this lowers them
+// to a vectorizable integer multiply + arithmetic-right-shift instead of
+// a scalar IDIV.  Returns 1 on success (fills *m_out, *s_out), 0 if no
+// shift in the searched range works (matching tinygrad's `assert False`,
+// which is unreachable for valid d>0 / vmax>=0 but we fail soft here).
+static int thvm_magicgu(i64 vmax, i64 d, i64 *m_out, i64 *s_out) {
+  if (d <= 0 || vmax < 0) return 0;
+  // nc = (vmax+1)//d * d - 1
+  i64 nc = (vmax + 1) / d * d - 1;
+  // nbits = vmax.bit_length()
+  i32 nbits = 0;
+  for (i64 v = vmax; v > 0; v >>= 1) nbits++;
+  for (i32 s = 0; s <= 2 * nbits + 1; s++) {
+    // 2**s > nc*(d - 1 - (2**s - 1) % d)
+    if (s >= 62) return 0;  // 2**s would overflow i64 -- bail soft
+    i64 pow2 = (i64)1 << s;
+    i64 rhs = nc * (d - 1 - (pow2 - 1) % d);
+    if (pow2 > rhs) {
+      // m = (2**s + d - 1 - (2**s - 1) % d) // d
+      *m_out = (pow2 + d - 1 - (pow2 - 1) % d) / d;
+      *s_out = s;
+      return 1;
+    }
+  }
+  return 0;
 }
 
 // Recognise `(c * x) + y` shape on a numerator.  Returns 1 on match;
@@ -290,12 +638,206 @@ static int uop_match_affine_numerator_deep(Term n, i64 div,
   return 0;
 }
 
+// Recognise a bare `IMUL(q, const)` with the constant on either side.
+// Returns 1 on match; *q_out is the non-const operand, *c_out the const.
+static int uop_match_mul_const(Term t, Term *q_out, i64 *c_out) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IMUL) return 0;
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  i64 v;
+  if (uop_iconst_value(b, &v)) { *q_out = a; *c_out = v; return 1; }
+  if (uop_iconst_value(a, &v)) { *q_out = b; *c_out = v; return 1; }
+  return 0;
+}
+
+// Recognise a "MOD-term" addend for fold_add_divmod_recombine: either a
+// bare `base % div` (mul = 1) or `(base % div) * mul`.  On match returns
+// 1 and fills *base_out, *div_out, *mul_out.  `div`/`mul` are CONST.
+// Mirror of the head of tinygrad/uop/symbolic.py:30-33's term loop.
+static int uop_match_recombine_mod_term(Term u, Term *base_out, i64 *div_out,
+                                        i64 *mul_out) {
+  if (term_tag(u) != TAG_UOP) return 0;
+  // Bare `base % div`  ->  mul = 1.
+  if (term_ext(u) == UOP_IMOD) {
+    Term div_c = heap_read(term_val(u) + 1);
+    i64 div;
+    if (!uop_iconst_value(div_c, &div)) return 0;
+    *base_out = heap_read(term_val(u) + 0);
+    *div_out = div;
+    *mul_out = 1;
+    return 1;
+  }
+  // `(base % div) * mul`.
+  Term m; i64 mul;
+  if (uop_match_mul_const(u, &m, &mul)
+      && term_tag(m) == TAG_UOP && term_ext(m) == UOP_IMOD) {
+    Term div_c = heap_read(term_val(m) + 1);
+    i64 div;
+    if (!uop_iconst_value(div_c, &div)) return 0;
+    *base_out = heap_read(term_val(m) + 0);
+    *div_out = div;
+    *mul_out = mul;
+    return 1;
+  }
+  return 0;
+}
+
+// Rebuild the sum of `terms[]` (count `nt`) skipping indices `skip_i` and
+// `skip_j`, then add `head` (the recombined leaf).  Left-associates via
+// uop_int_binary so the result is itself re-simplified.  The analog of
+// tinygrad's `head.usum(*[t for k,t in ... if k not in (i,j)])`.
+static Term uop_recombine_rebuild(Term head, Term const *terms, u32 nt,
+                                  u32 skip_i, u32 skip_j) {
+  Term acc = head;
+  for (u32 k = 0; k < nt; k++) {
+    if (k == skip_i || k == skip_j) continue;
+    acc = uop_int_binary(UOP_IADD, acc, terms[k]);
+  }
+  return acc;
+}
+
+// Port of tinygrad/uop/symbolic.py:28-49 fold_add_divmod_recombine.  Splits
+// the IADD tree under `(a + b)` into its full list of addend leaves, then
+// looks for a (MOD-term, matching div-term) pair that recombines into a
+// flatter form.  The three exact cases (all value-identities):
+//   1. (base%div)*mul + (base//div)*(div*mul)            -> base*mul
+//   2. ((base//d)%div)*mul + (base//(d*div))*(div*mul)   -> (base//d)*mul
+//   3. ((base//div)%e)*div + base%div  (mul==1)          -> base%(div*e)
+// On a match returns the recombined sum; else 0.  This generalises the
+// shallow `(r//M)*M + (r%M) -> r` rule (a special case of #1 with mul=1)
+// past the two-direct-operand shape to terms buried in a deep left-
+// associated IADD tree (the rangeify im2col / maxpool-reshape INDEX).
+static Term uop_fold_add_divmod_recombine(Term a, Term b) {
+  // Collect leaves from the two operands directly -- we must NOT rebuild
+  // `uop_int_binary(IADD, a, b)` here, since that re-enters this rule on
+  // the same operands and loops.  Each operand is already a simplified
+  // (sub)tree; walking both yields the full addend list of the sum a+b.
+  Term terms[32];
+  u32  nt = 0;
+  if (!uop_iadd_tree_collect_const_mul(a, terms, &nt, 32, 0)) return 0;
+  if (!uop_iadd_tree_collect_const_mul(b, terms, &nt, 32, 0)) return 0;
+  if (nt < 2) return 0;
+  for (u32 i = 0; i < nt; i++) {
+    Term base; i64 div, mul;
+    if (!uop_match_recombine_mod_term(terms[i], &base, &div, &mul)) continue;
+    if (div <= 0) continue;
+    i64 want = div * mul;  // the div-term's required coefficient
+    for (u32 j = 0; j < nt; j++) {
+      if (i == j) continue;
+      Term q; i64 vc;
+      if (!uop_match_mul_const(terms[j], &q, &vc) || vc != want) continue;
+      int exact = 0;
+      // Case 1: (base%div)*mul + (base//div)*(div*mul) -> base*mul.
+      if (term_tag(q) == TAG_UOP && term_ext(q) == UOP_IDIV) {
+        Term q_div = heap_read(term_val(q) + 1);
+        i64 qd;
+        if (uop_iconst_value(q_div, &qd) && qd == div
+            && heap_read(term_val(q) + 0) == base) {
+          exact = 1;
+        }
+      }
+      // Case 2: ((base//d)%div)*mul + (base//(d*div))*(div*mul)
+      //         -> (base//d)*mul.   Here `base` is itself `inner // d`.
+      if (!exact && term_tag(base) == TAG_UOP && term_ext(base) == UOP_IDIV) {
+        Term base_div = heap_read(term_val(base) + 1);
+        i64 bd;
+        if (uop_iconst_value(base_div, &bd)
+            && term_tag(q) == TAG_UOP && term_ext(q) == UOP_IDIV) {
+          Term q_div = heap_read(term_val(q) + 1);
+          i64 qd;
+          if (uop_iconst_value(q_div, &qd) && qd == bd * div
+              && heap_read(term_val(q) + 0) == heap_read(term_val(base) + 0)) {
+            exact = 1;
+          }
+        }
+      }
+      if (exact) {
+        Term head = uop_int_binary(UOP_IMUL, base, uop_iconst(mul));
+        return uop_recombine_rebuild(head, terms, nt, i, j);
+      }
+      // Case 3: ((base//div)%e)*div + base%div  (mul==1)
+      //         -> base%(div*e).   Here terms[i] is the bare `base%div`
+      //         (mul==1) and terms[j] = ((base//div)%e) * div, so the
+      //         `v` coefficient `want == div`, and `q = (base//div) % e`.
+      if (mul == 1 && term_tag(q) == TAG_UOP && term_ext(q) == UOP_IMOD) {
+        Term q_e = heap_read(term_val(q) + 1);
+        Term q_inner = heap_read(term_val(q) + 0);
+        i64 e;
+        if (uop_iconst_value(q_e, &e) && e > 0
+            && term_tag(q_inner) == TAG_UOP && term_ext(q_inner) == UOP_IDIV
+            && heap_read(term_val(q_inner) + 0) == base) {
+          Term qi_div = heap_read(term_val(q_inner) + 1);
+          i64 qid;
+          if (uop_iconst_value(qi_div, &qid) && qid == div) {
+            Term head = uop_int_binary(UOP_IMOD, base, uop_iconst(div * e));
+            return uop_recombine_rebuild(head, terms, nt, i, j);
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// === invalid_gate / propagate_invalid (tinygrad symbolic.py:25-65) ===
+
+// The valid-given index folds (propagate_invalid push + uop_given_valid)
+// gate behind THVM_FUSE_CONV_BWD so the shared index simplifier stays
+// bit-identical when the conv-backward fusion is off.  Cached: the env
+// is fixed for the process lifetime.
+static int uop_valid_fold_enabled(void) {
+  static int v = -1;
+  if (v < 0) { char const *e = getenv("THVM_FUSE_CONV_BWD"); v = (e && e[0] == '1') ? 1 : 0; }
+  return v;
+}
+
+// True iff `t` is the bare INVALID sentinel CONST.
+static int uop_is_invalid(Term t) {
+  return term_tag(t) == TAG_UOP && term_ext(t) == UOP_INVALID;
+}
+
+// Recognise the `cond.where(x, INVALID)` invalid-gate shape (symbolic.py:26
+// `invalid_gate = UPat.var("cond").where(UPat.var("x"), invalid_pat)`).
+// Returns 1 and fills *cond_out/*x_out on match.
+static int uop_match_invalid_gate(Term t, Term *cond_out, Term *x_out) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IWHERE) return 0;
+  Term else_v = heap_read(term_val(t) + 2);
+  if (!uop_is_invalid(else_v)) return 0;
+  *cond_out = heap_read(term_val(t) + 0);
+  *x_out    = heap_read(term_val(t) + 1);
+  return 1;
+}
+
 // === Binary integer simplifier ===
 
 fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   i64 av, bv;
   int a_const = uop_iconst_value(a, &av);
   int b_const = uop_iconst_value(b, &bv);
+
+  // propagate_invalid: push a (non-comparison) binary op past an
+  // invalid-gate so the gate stays at the top, where uop_given_valid
+  // can fold the body against its own condition.  Mirrors
+  // tinygrad/uop/symbolic.py:55-65:
+  //   (op, src=(cond.where(x,INV), y)) -> cond.where(x op y, INV)
+  //   (op, src=(y, cond.where(x,INV))) -> cond.where(y op x, INV)
+  //   (op, src=(INV, *))               -> INV   (binary with invalid)
+  // Comparisons (ILT) keep INVALID as a propagated 0/1 elsewhere; we
+  // only handle the arithmetic ops the col2im decode uses.
+  if (uop_valid_fold_enabled()
+      && (opcode == UOP_IADD || opcode == UOP_ISUB || opcode == UOP_IMUL
+          || opcode == UOP_IDIV || opcode == UOP_IMOD || opcode == UOP_IAND)) {
+    if (uop_is_invalid(a) || uop_is_invalid(b)) return uop_invalid();
+    Term gc, gx;
+    if (uop_match_invalid_gate(a, &gc, &gx)) {
+      Term inner = uop_int_binary(opcode, gx, b);
+      return uop_iwhere(gc, inner, uop_invalid());
+    }
+    if (uop_match_invalid_gate(b, &gc, &gx)) {
+      Term inner = uop_int_binary(opcode, a, gx);
+      return uop_iwhere(gc, inner, uop_invalid());
+    }
+  }
 
   // Constant-fold: both operands ICONST.
   if (a_const && b_const) {
@@ -313,6 +855,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       case UOP_IAND: return uop_iconst(av & bv);
       case UOP_IOR:  return uop_iconst(av | bv);
       case UOP_IXOR: return uop_iconst(av ^ bv);
+      case UOP_ISHR: return uop_iconst((i64)((i32)av >> (i32)bv));
       default: break;
     }
   }
@@ -364,36 +907,15 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         if (uop_match_const_mul(a, &c1, &x1) && b == x1) {
           return uop_int_binary(UOP_IMUL, x1, uop_iconst(c1 + 1));
         }
-        // Divmod recombination: (r // M) * M + (r % M) -> r.
-        // Either operand of the IADD can be the IMUL.  Helps
-        // RESHAPE-roundtrip chains where the consumer's flat-
-        // decompose-recompose composes back to the source iter.
-        Term mod_term;
-        if (uop_match_const_mul(a, &c1, &x1)
-            && term_tag(b) == TAG_UOP && term_ext(b) == UOP_IMOD) {
-          mod_term = b;
-        } else if (uop_match_const_mul(b, &c1, &x1)
-                   && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IMOD) {
-          mod_term = a;
-        } else {
-          mod_term = 0;
-        }
-        if (mod_term != 0) {
-          // Verify x1 = (orig // c1) and mod_term = orig % c1 share `orig`.
-          Term mod_a = heap_read(term_val(mod_term) + 0);
-          Term mod_b = heap_read(term_val(mod_term) + 1);
-          i64 mod_c;
-          if (uop_iconst_value(mod_b, &mod_c) && mod_c == c1
-              && term_tag(x1) == TAG_UOP && term_ext(x1) == UOP_IDIV) {
-            Term div_a = heap_read(term_val(x1) + 0);
-            Term div_b = heap_read(term_val(x1) + 1);
-            i64 div_c;
-            if (uop_iconst_value(div_b, &div_c) && div_c == c1
-                && div_a == mod_a) {
-              return mod_a;
-            }
-          }
-        }
+      }
+      // Divmod recombination over the full IADD tree (tinygrad
+      // fold_add_divmod_recombine).  Subsumes the shallow two-operand
+      // `(r//M)*M + (r%M) -> r` case as case 1 with mul=1, and also
+      // collapses the deep im2col / maxpool-reshape gather index where
+      // the matching (mod, div*mul) pair is buried among many addends.
+      {
+        Term r = uop_fold_add_divmod_recombine(a, b);
+        if (r != 0) return r;
       }
       break;
     case UOP_ISUB:
@@ -659,9 +1181,246 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   return 0;
 }
 
+// === uop_given_valid (tinygrad symbolic.py:303-353) ===
+
+// Mint a throwaway RANGE leaf with a reserved high axis_id (won't
+// collide with real kernel axes, which are densely numbered from 0) and
+// a constrained extent.  uop_given_valid substitutes a guarded
+// expression with such a fake so the div/mod folds see the TIGHTER
+// [0, extent) bound from the valid clause, then substitutes the fake
+// back -- it never escapes into a kernel body.  Mirrors tinygrad's
+// `UOp.variable(f"fake{i}", v0, v1)` in uop_given_valid.
+#define UOP_VALID_FAKE_AXIS_BASE 0x70000000u
+static Term uop_make_fake_range(u32 extent) {
+  static u32 ctr = 0;
+  if (extent == 0) return 0;
+  return uop_range(UOP_VALID_FAKE_AXIS_BASE + (ctr++ & 0xFFFF), KAX_LOOP, extent);
+}
+
+
+// Rebuild `t`, replacing every structural occurrence of `from` with
+// `to`, routing through the simplifying constructors (uop_int_binary /
+// uop_iwhere) so the substituted tree is re-simplified bottom-up.  This
+// is the `substitute` half of tinygrad's uop_given_valid: it lets a
+// bounded fake-variable propagate the div/mod folds, then the inverse
+// substitution restores the original sub-expression.  Bounded recursion
+// over the finite index DAG.
+static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
+  if (t == from) return to;
+  if (depth > 48) return t;
+  if (term_tag(t) != TAG_UOP) return t;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
+    case UOP_IXOR: case UOP_ISHR: {
+      Term a = uop_index_substitute(heap_read(term_val(t) + 0), from, to, depth + 1);
+      Term b = uop_index_substitute(heap_read(term_val(t) + 1), from, to, depth + 1);
+      if (a == heap_read(term_val(t) + 0) && b == heap_read(term_val(t) + 1)) return t;
+      return uop_int_binary(op, a, b);
+    }
+    case UOP_IWHERE: {
+      Term c = uop_index_substitute(heap_read(term_val(t) + 0), from, to, depth + 1);
+      Term x = uop_index_substitute(heap_read(term_val(t) + 1), from, to, depth + 1);
+      Term e = uop_index_substitute(heap_read(term_val(t) + 2), from, to, depth + 1);
+      if (c == heap_read(term_val(t) + 0) && x == heap_read(term_val(t) + 1)
+          && e == heap_read(term_val(t) + 2)) return t;
+      return uop_iwhere(c, x, e);
+    }
+    default: return t;
+  }
+}
+
+// === fast_idiv late lowering (tinygrad get_late_rewrite_patterns) ===
+//
+// Rewrite `x // c` (c a positive non-power-of-two constant, x a provably
+// non-negative bounded index) into the magic multiply-shift `(x * m) >> s`,
+// and `x % c` into `x - c*(x // c)`.  Faithful port of tinygrad's fast_idiv
+// (uop/decompositions.py:282-300), applied -- exactly as tinygrad does --
+// as a LATE codegen rewrite (get_late_rewrite_patterns, wired in
+// codegen/__init__.py:89), NOT inside the general symbolic simplifier.
+// Keeping it out of uop_int_binary is essential: the schedule/index
+// pipeline (and the structural unit tests + uop_int_bounds-driven valid
+// folds) rely on div/mod staying in their canonical IDIV/IMOD shape; only
+// the final rendered kernel wants the vectorizable mul-shift form.  A
+// scalar `/c`,`%c` serializes on clang's idiv unit and blocks SIMD;
+// `(x*m)>>s` vectorizes.
+//
+// Bounds (uop_int_bounds) and the int32 no-overflow guard (m*hi <=
+// INT32_MAX, mirroring fast_idiv's `m*vmax <= x.dtype.max`) are checked per
+// node; on failure the literal IDIV/IMOD is kept -- so this can never emit
+// a wrong value.  Powers of two are skipped (signed >> is not a valid
+// truncating divide there, and they are already cheap).
+//
+// Single-node rewrite: given an already-children-rewritten IDIV/IMOD node,
+// return its lowered form, or 0 if the guards fail.  Driven over the full
+// kernel AST by uop_graph_rewrite (bottom-up), so nested div/mod inside a
+// numerator are lowered to ISHR first -- which uop_int_bounds still bounds.
+static Term uop_fast_idiv_node(Term node) {
+  if (term_tag(node) != TAG_UOP) return 0;
+  u32 op = term_ext(node);
+  if (op != UOP_IDIV && op != UOP_IMOD) return 0;
+  Term num = heap_read(term_val(node) + 0);
+  Term den = heap_read(term_val(node) + 1);
+  i64 bv;
+  if (!uop_iconst_value(den, &bv) || bv <= 1 || (bv & (bv - 1)) == 0) return 0;
+  i64 lo, hi;
+  if (!uop_int_bounds(num, &lo, &hi) || lo < 0 || hi < 0) return 0;
+  // Numerator provably below the divisor (0 <= x <= hi < c): x//c == 0 and
+  // x%c == x exactly.  magicgu returns the DEGENERATE identity m=1,s=0 here
+  // (nc < 0), which would mis-lower x//c to `(x*1)>>0 == x` -- a silent
+  // index-corruption for gated/bounded numerators (e.g. IWHERE(cond, r<c,
+  // INVALID)//c).  Short-circuit to the exact values before magicgu.
+  if (hi < bv) return (op == UOP_IDIV) ? uop_iconst(0) : num;
+  i64 m, s;
+  if (!thvm_magicgu(hi, bv, &m, &s)) return 0;
+  if (m < 1 || m > 0x7fffffff || hi > 0x7fffffff / m) return 0;  // int32 mul guard
+  Term mul = uop_int_binary(UOP_IMUL, num, uop_iconst(m));
+  Term div = uop_int_binary(UOP_ISHR, mul, uop_iconst(s));
+  if (op == UOP_IDIV) return div;
+  // x % c -> x - c*(x // c); reuses the lowered div so no IDIV remains.
+  Term cm = uop_int_binary(UOP_IMUL, div, den);
+  return uop_int_binary(UOP_ISUB, num, cm);
+}
+
+// uop_graph_rewrite rule wrapper (signature Term(Term, void*)).
+// THVM_NO_FAST_IDIV=1 disables the lowering (keeps literal IDIV/IMOD) --
+// an A/B toggle alongside thvm's other index-fold env knobs.
+fn Term uop_fast_idiv_rule(Term t, void *user) {
+  (void)user;
+  static int gate = -1;
+  if (gate < 0) gate = getenv("THVM_NO_FAST_IDIV") ? 1 : 0;
+  if (gate) return 0;
+  return uop_fast_idiv_node(t);
+}
+
+// True iff the DAG rooted at `t` contains a UOP_RANGE leaf whose
+// axis_id equals `aid`.  Bounded recursion over the finite index DAG.
+static int uop_term_has_range_aid(Term t, u32 aid, u32 depth) {
+  if (depth > 48 || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE) return (u32)term_val(heap_read(term_val(t) + 0)) == aid;
+  if (op == UOP_CONST || op == UOP_INVALID) return 0;
+  u32 n = (op == UOP_IWHERE) ? 3 : 2;
+  for (u32 i = 0; i < n; i++) {
+    if (uop_term_has_range_aid(heap_read(term_val(t) + i), aid, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// True iff `clause` and `x` share at least one RANGE leaf (same axis_id).
+// Mirrors tinygrad's `any(r in x.ranges for r in c.ranges)`
+// (symbolic.py:383).
+static int uop_term_shares_range_with(Term clause, Term x, u32 depth) {
+  if (depth > 48 || term_tag(clause) != TAG_UOP) return 0;
+  u32 op = term_ext(clause);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(term_val(clause) + 0));
+    return uop_term_has_range_aid(x, aid, 0);
+  }
+  if (op == UOP_CONST || op == UOP_INVALID) return 0;
+  u32 n = (op == UOP_IWHERE) ? 3 : 2;
+  for (u32 i = 0; i < n; i++) {
+    if (uop_term_shares_range_with(heap_read(term_val(clause) + i), x, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// parse_valid (symbolic.py:303-314): decompose a single valid clause
+// into (expr, is_upper, bound):
+//   X < c        -> (X, upper, c-1)        [X <= c-1]
+//   (X < c).ne(1) i.e. X >= c              [thvm has no CMPNE form; the
+//                                           PAD lower guard is ILT(s-1, X)
+//                                           = (X > s-1) = (X >= s); we
+//                                           recognise that as a lower bound]
+// Returns 1 on a recognised clause.  *is_upper: 1 => X <= bound, 0 => X >= bound.
+static int uop_parse_valid(Term v, Term *expr_out, int *is_upper, i64 *bound_out) {
+  if (term_tag(v) != TAG_UOP || term_ext(v) != UOP_ILT) return 0;
+  Term lhs = heap_read(term_val(v) + 0);
+  Term rhs = heap_read(term_val(v) + 1);
+  i64 c;
+  // X < c  ->  X <= c-1
+  if (uop_iconst_value(rhs, &c)) {
+    *expr_out = lhs; *is_upper = 1; *bound_out = c - 1;
+    return 1;
+  }
+  // c < X  ->  X >= c+1   (the PAD lower guard ILT(s-1, X))
+  if (uop_iconst_value(lhs, &c)) {
+    *expr_out = rhs; *is_upper = 0; *bound_out = c + 1;
+    return 1;
+  }
+  return 0;
+}
+
+// Split a valid condition (a left-assoc IAND tree) into its clauses.
+static u32 uop_valid_split_and(Term v, Term *out, u32 cap, u32 depth) {
+  if (depth > 32 || cap == 0) return 0;
+  if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_IAND) {
+    u32 n0 = uop_valid_split_and(heap_read(term_val(v) + 0), out, cap, depth + 1);
+    u32 n1 = uop_valid_split_and(heap_read(term_val(v) + 1), out + n0, cap - n0, depth + 1);
+    return n0 + n1;
+  }
+  out[0] = v;
+  return 1;
+}
+
+// uop_given_valid (symbolic.py:316-353): simplify `uop` assuming `valid`
+// is true.  For each parsed clause, substitute the bounded expression
+// with a fresh RANGE that has the constrained extent, re-simplify, and
+// substitute back; keep the result only if the substitution changed and
+// re-simplified the body (a strictly-smaller form).  This is what folds
+// the col2im decode: given `(X) < 125` the guarded `X//25` / `X%25`
+// simplify against the tightened [vmin, vmax] window of X.
+static Term uop_given_valid(Term valid, Term uop) {
+  Term clauses[16];
+  u32 nc = uop_valid_split_and(valid, clauses, 16, 0);
+  // Aggregate per-expression bounds: lo[i], hi[i] (NULL == unknown).
+  Term exprs[16]; i64 los[16], his[16]; int has_lo[16], has_hi[16];
+  u32 ne = 0;
+  for (u32 i = 0; i < nc; i++) {
+    Term e; int up; i64 b;
+    if (!uop_parse_valid(clauses[i], &e, &up, &b)) continue;
+    // Find or insert.
+    u32 idx = ne;
+    for (u32 j = 0; j < ne; j++) if (exprs[j] == e) { idx = j; break; }
+    if (idx == ne) {
+      if (ne >= 16) break;
+      exprs[ne] = e; has_lo[ne] = 0; has_hi[ne] = 0; ne++;
+    }
+    if (up) { his[idx] = b; has_hi[idx] = 1; }
+    else    { los[idx] = b; has_lo[idx] = 1; }
+  }
+  for (u32 i = 0; i < ne; i++) {
+    Term e = exprs[i];
+    // Skip a bare RANGE / CONST -- nothing to fold.
+    if (term_tag(e) != TAG_UOP) continue;
+    u32 eop = term_ext(e);
+    if (eop == UOP_RANGE || eop == UOP_CONST) continue;
+    i64 lo, hi;
+    if (has_lo[i]) lo = los[i]; else if (!uop_term_min_value(e, &lo)) continue;
+    if (has_hi[i]) hi = his[i]; else if (!uop_term_max_value(e, &hi)) continue;
+    if (lo < 0 || hi < lo) continue;
+    // Build a fresh bounded RANGE standing in for `e` over [0, hi-lo]
+    // shifted by lo (i.e. fake in [0, hi-lo], e == fake+lo).  We model
+    // the constrained variable as a RANGE of extent (hi-lo+1) plus lo.
+    u64 span = (u64)(hi - lo) + 1;
+    if (span == 0 || span > 0x40000000ull) continue;
+    Term fake = uop_make_fake_range((u32)span);
+    if (fake == 0) continue;
+    Term fake_expr = (lo == 0) ? fake
+                   : uop_int_binary(UOP_IADD, fake, uop_iconst(lo));
+    Term sub = uop_index_substitute(uop, e, fake_expr, 0);
+    if (sub == uop) continue;  // e not present in uop -- skip
+    // Substitute the fake back to the original expr and re-simplify.
+    Term back = uop_index_substitute(sub, fake, e, 0);
+    if (back != uop) uop = back;
+  }
+  return uop;
+}
+
 // === Ternary IWHERE simplifier ===
 
-fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
+static Term uop_simplify_iwhere_body(Term cond, Term then_v, Term else_v) {
   i64 cv;
   if (uop_iconst_value(cond, &cv)) {
     return cv != 0 ? then_v : else_v;
@@ -681,5 +1440,62 @@ fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
       return uop_iwhere(combined, inner_then, else_v);
     }
   }
+  // drop_and_clauses (tinygrad symbolic.py:382-385): in WHERE(cond, x, INV)
+  // partition cond's AND-clauses by whether their ranges appear in x; if
+  // any clause's ranges are absent from x, drop it (the gate can't affect
+  // x's value there).  Gated behind the conv-bwd opt.
+  if (uop_is_invalid(else_v) && uop_valid_fold_enabled()
+      && term_tag(cond) == TAG_UOP && term_ext(cond) == UOP_IAND) {
+    Term clauses[16];
+    u32 nclauses = uop_valid_split_and(cond, clauses, 16, 0);
+    if (nclauses >= 2) {
+      Term kept = 0;
+      int dropped = 0;
+      for (u32 i = 0; i < nclauses; i++) {
+        if (uop_term_shares_range_with(clauses[i], then_v, 0)) {
+          kept = (kept == 0) ? clauses[i]
+                             : uop_int_binary(UOP_IAND, kept, clauses[i]);
+        } else {
+          dropped = 1;
+        }
+      }
+      if (dropped && kept != 0 && kept != cond) {
+        return uop_iwhere(kept, then_v, else_v);
+      }
+    }
+  }
+  // gated_given_valid (tinygrad symbolic.py:408-412): when the gate is a
+  // valid mask (`WHERE(cond, body, INVALID)`), simplify `body` against
+  // the bounds `cond` asserts.  Gated behind the conv-bwd opt so the
+  // shared index simplifier stays bit-identical with the flag OFF.
+  if (uop_is_invalid(else_v) && uop_valid_fold_enabled()
+      && term_tag(then_v) == TAG_UOP) {
+    u32 to = term_ext(then_v);
+    if (to == UOP_IDIV || to == UOP_IMOD || to == UOP_IADD
+        || to == UOP_IMUL || to == UOP_ISUB) {
+      Term folded = uop_given_valid(cond, then_v);
+      if (folded != then_v) return uop_iwhere(cond, folded, else_v);
+    }
+  }
   return 0;
+}
+
+// Recursion-depth guard around the iwhere simplifier.  Several folds
+// above re-wrap via uop_iwhere -> uop_simplify_iwhere (the IWHERE-of-
+// IWHERE collapse, drop_and_clauses, and especially gated_given_valid,
+// which substitutes the gate's bounds into the body via
+// uop_index_substitute).  On the fused conv-backward col2im index the
+// CUDA symbolic-codegen path drives gated_given_valid without reaching a
+// fixpoint (each pass yields a different `folded`), so the
+// uop_iwhere<->uop_simplify_iwhere<->uop_index_substitute cycle grows
+// the stack without bound (SIGSEGV).  Bail to the raw (un-folded) IWHERE
+// once nesting is pathological -- always correct, just a missed
+// simplification; the schedule-level realize keeps the kernel feasible.
+fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
+  static _Thread_local u32 depth = 0;
+  if (depth > 96) return 0;
+  depth++;
+  Term r = uop_simplify_iwhere_body(cond, then_v, else_v);
+  depth--;
+  return r;
 }

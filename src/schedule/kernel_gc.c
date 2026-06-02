@@ -42,14 +42,21 @@ fn u32 kernel_gc_sweep(Term result) {
     // Already-stripped slot (idempotent across multiple sweeps).
     if (ke->n_inputs == 0 && ke->input_tids == NULL) continue;
     if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) continue;
-    u32 buf_id = TENS[ke->output_tid].buf_id;
-    // buf_id == 0 means the TenDesc was already released; treat as
-    // dead.  Otherwise the buffer is alive iff its CPU_BUFS slot has
-    // refcount > 0 -- after pool rollback, freed bufs sit at
-    // refcount=0 (freelist push or cpu_buf_free both leave it there).
+    Backend *b   = TENS[ke->output_tid].backend;
+    u32      buf_id = TENS[ke->output_tid].buf_id;
+    // buf_id == 0 means the TenDesc was already released; treat as dead.
+    // Liveness must be keyed off the OUTPUT's OWN backend buffer table:
+    // CUDA/Metal buf_ids index their own CUDA_BUFS/Metal tables, so the
+    // old CPU_BUFS[buf_id] read inspected an unrelated slot and never saw
+    // a live GPU boundary -- its producer_kid then stayed set, the depth-
+    // first fire recomputed it across realizes, and the cross-realize JIT
+    // dedup diverged (forward re-fires, the optimizer reads stale grad
+    // buffers, replay loss freezes at capture-time).  After pool rollback,
+    // freed bufs sit at refcount==0 (freelist push or buf_free both leave
+    // them there), so a positive refcount means committed-and-preserved.
     int alive = 0;
-    if (buf_id != 0 && buf_id < CPU_BUFS_NEXT) {
-      alive = (CPU_BUFS[buf_id].refcount > 0);
+    if (b != NULL && b->buf_refcount != NULL && buf_id != 0) {
+      alive = (b->buf_refcount(buf_id) > 0);
     }
     if (alive) {
       // The output buffer survived this realize's pool rollback, so it
@@ -63,9 +70,9 @@ fn u32 kernel_gc_sweep(Term result) {
       TENS[ke->output_tid].producer_kid = 0;
       continue;
     }
-    // This sweep keys liveness off CPU_BUFS; non-CPU backends have
-    // their own buffer tables, so leave their kernels inspectable.
-    if (TENS[ke->output_tid].backend != &CPU_BACKEND) {
+    // Buffer is dead.  Only the CPU sweep strips input arrays here; other
+    // backends keep their kernels inspectable for their own teardown.
+    if (b != &CPU_BACKEND) {
       continue;
     }
     // Buffer is dead.  Strip the input arrays; leave output_tid

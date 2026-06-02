@@ -384,6 +384,10 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_IAND        33   // heap = [a, b]; bitwise AND (boolean conjunction on 0/1).
 #define UOP_IOR         41   // heap = [a, b]; bitwise OR.
 #define UOP_IXOR        42   // heap = [a, b]; bitwise XOR.
+#define UOP_ISHR        51   // heap = [a, b]; signed arithmetic right-shift
+                             //   (a >> b).  Emitted by the fast_idiv index
+                             //   rewrite to lower `x // c` to a magic-number
+                             //   multiply-shift; see uop/index_simplify.c.
 #define UOP_IWHERE      34   // heap = [cond, then_v, else_v]; ternary select.
 #define UOP_INVALID     35   // heap = [NUM(0)]; sentinel for PAD masking.
                              //   `IWHERE(in_bounds, load(...), INVALID)` is
@@ -472,7 +476,57 @@ int             dtype_is_packed   (u32 dt);
 // through the mean -- mathematically d(var)/d(mean)=0, so the result is
 // identical but the backward graph is far smaller.
 #define UOP_DETACH      43
-#define UOP_COUNT       44
+// === Late-pass expander opcodes (mirror tinygrad codegen/late/expander.py) ===
+// Introduced by uop_expand_graph (src/uop/expander.c).  These are
+// structural placeholders the expander pass emits while lowering
+// KAX_UPCAST / KAX_UNROLL ranges from RANGE-leaf form into a vectorized
+// graph that downstream passes (devectorizer + reduce_to_acc, not yet
+// ported) can consume.  The current renderer does NOT walk these
+// opcodes -- the expander runs only when explicitly invoked
+// (uop_expand_graph) and the existing emit path stays on the RANGE-
+// leaf representation.  See docs/tinygrad_late_passes.md "Architectural
+// alternative" section.
+//
+// UOP_VCONST: vector-typed const.  Heap = [NUM(dtype), NUM(n),
+//   NUM(bits_0), ..., NUM(bits_{n-1})].  ext = scalar dtype.  Mirrors
+//   tinygrad's UOp.const(dtype.vec(n), tuple(range(n))) at
+//   expander.py:150.
+// UOP_UNROLL: opaque wrapper around a vector-typed value, carrying
+//   the (axis_id, extent) tuples that record which axes were unrolled.
+//   Heap = [src, NUM(n_args), NUM(axis_0), NUM(F_0), ...,
+//           NUM(axis_{n-1}), NUM(F_{n-1})].  Mirrors Ops.UNROLL at
+//   expander.py:67/75/86/105.
+// UOP_CONTRACT: inverse of UNROLL: collects unrolled lanes back via a
+//   GEP-style swizzle.  Heap = [src, NUM(n_args), NUM(axis_0),
+//   NUM(F_0), ..., NUM(axis_{n-1}), NUM(F_{n-1})].  Emitted by
+//   fix_reduce_unroll / fix_store_unroll (expander.py:116-130).
+// UOP_GEP: vector element extraction.  Heap = [src, NUM(n_idx),
+//   NUM(idx_0), ..., NUM(idx_{n_idx-1})].  Mirrors UOp.gep at
+//   expander.py:44/86.
+// UOP_STACK: variadic vector-construction node.  Heap = [NUM(n), src_0,
+//   ..., src_{n-1}].  Each src is a scalar Term.  The renderer turns
+//   this into per-element scalar emissions (UNROLL is the structural
+//   counterpart on the analysis side; STACK is the lowered scalar list).
+//   Mirrors tinygrad's Ops.STACK (uop/ops.py:215 + devectorizer.py:239).
+// UOP_PLACEHOLDER: a per-thread register accumulator declaration.
+//   Heap = [NUM(dtype), NUM(acc_id)].  Arity 0 -- the renderer emits one
+//   `dtype _accN;` declaration per unique acc_id at the top of the kernel
+//   body.  Mirrors tinygrad's UOp.placeholder + AddrSpace.REG used by
+//   reduce_to_acc (devectorizer.py:321).
+// UOP_END: explicit "close the reduce loops covering these ranges"
+//   marker.  Heap = [NUM(n_ranges), range_0, ..., range_{n-1}].  Each
+//   range_i is a Term referencing a UOP_RANGE (the reduce axis whose
+//   loop body just completed).  Mirrors tinygrad's Ops.END at
+//   uop/ops.py:215 + devectorizer.py:327.
+#define UOP_VCONST      44
+#define UOP_UNROLL      45
+#define UOP_CONTRACT    46
+#define UOP_GEP         47
+#define UOP_STACK       48
+#define UOP_PLACEHOLDER 49
+#define UOP_END         50
+// 51 = UOP_ISHR (declared in the Symbolic INDEX layer above).
+#define UOP_COUNT       52
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -612,7 +666,15 @@ struct KernelEntry;
 
 typedef struct {
   u8  op;        // KOP_*
-  u8  axis;      // 0-indexed; meaning depends on op
+  u32 axis;      // axis_id; meaning depends on op.  Kept u32 as defense:
+                 // uop_dag_renumber_axes now makes per-kernel axis_ids
+                 // dense 0..n (small), but a u8 here would silently
+                 // truncate at the construction-site casts if any kernel
+                 // ever reached apply without the renumber -- and that
+                 // truncation (344 -> 88) is exactly what made find_range
+                 // miss, hand_opts apply nothing, and a conv kernel render
+                 // fully-serial -> an 80-min nvrtc hang at BS=128.  u32
+                 // makes that failure mode impossible for 4 bytes.
   u32 arg;       // op-specific (split factor for UPCAST/UNROLL, target
                  // axis index for SWAP, full axis size for GLOBAL,
                  // MMA tile size for TC, ...)
@@ -641,6 +703,13 @@ typedef struct {
                                // across axes_reset_to_default so a
                                // proposer-explored variant doesn't
                                // re-trigger autotune mid-bench.
+  u8   hand_coded_done;        // 1 = kernel_hand_coded_opts has run.
+                               // Separate from `autotuned` so applying
+                               // the hand-coded heuristic does NOT block
+                               // a subsequent BEAM/autotune pass (the
+                               // fire path runs hand_opts then autotune;
+                               // sharing one flag let hand_opts suppress
+                               // BEAM on every non-WL path).
 } KpSchedule;
 
 struct Backend {
@@ -660,6 +729,13 @@ struct Backend {
   void  (*buf_free) (u32 buf_id);
   void  (*buf_incref)(u32 buf_id);
   void  (*buf_decref)(u32 buf_id);
+  // Optional: sticky JIT pin -- mark a buf as held by an active JIT
+  // capture so subsequent realize/rollback cycles don't free it.
+  // Cleared on jit_capture_drop.  NULL on backends that lack the
+  // mechanic; the JIT then falls back to mark_preserved (which is
+  // per-realize and gets cleared at end-of-realize).
+  void  (*buf_jit_pin)(u32 buf_id);
+  void  (*buf_jit_unpin)(u32 buf_id);
   int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
   int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
   int   (*buf_copy) (u32 dst_buf_id, u32 src_buf_id, u64 nbytes);
@@ -671,6 +747,18 @@ struct Backend {
   u32   (*buf_refcount)(u32 buf_id);
   void  (*buf_freelist_push)(u32 buf_id);
   void  (*buf_freelist_remove)(u32 buf_id);
+  // Optional: storage-root walker for alias-aware analysis (JIT replay
+  // dedup, materialize liveness).  Returns the buf id at the end of the
+  // parent chain (the owning slot).  Two bufs alias storage iff their
+  // roots match.  NULL on backends without view aliasing -- caller
+  // should fall back to identity (`a == b`).
+  u32   (*buf_storage_root)(u32 buf_id);
+  // Optional: physical storage address probe.  Returns the device /
+  // host pointer as an opaque u64 (0 if buf has no storage).  Two
+  // bufs alias storage iff their addresses overlap -- a sounder
+  // alias check than buf_storage_root since arena reuse can land
+  // a fresh buf at the same dptr without updating parent_buf_id.
+  u64   (*buf_addr)(u32 buf_id);
   void  (*dispatch_begin)(void);
   void  (*dispatch_flush)(void);
   void  (*dispatch_end)(void);
@@ -902,6 +990,17 @@ typedef struct KernelEntry {
                                    // kernel referenced by N consumers in one
                                    // realize fires once instead of N times.
                                    // Bumped per top-level interact_kernel.
+  u64       fire_assign_seq;       // ASSIGN_SEQ at this kernel's last actual
+                                   // dispatch (THVM_PRECISE_FIRE_MEMO path):
+                                   // skip a re-fire when no input buffer was
+                                   // ASSIGNed since, instead of re-firing on
+                                   // every per-assign fire_gen bump.
+  u32       fire_pass;             // ASSIGN_PASS_EPOCH at last actual dispatch.
+                                   // The precise memo only skips a re-fire
+                                   // for a kernel that fired in the CURRENT
+                                   // pass -- so cross-realize / post-JIT-
+                                   // replay reads (whose buffer writes the
+                                   // memo can't see) always re-fire (sound).
   // Axis-typed scheduling plan.  `schedule` is a pointer for
   // historical reasons; today it always aims at `_local_schedule`
   // below (each kernel owns its own plan).
@@ -956,6 +1055,14 @@ typedef struct {
   // memory_plan_rewrite call and lets Python GC reclaim the previous
   // arena's BUFFER_VIEW chain.)
   u8    skip_freelist;
+  // jit_pinned: STICKY hold by an active JIT capture.  The per-realize
+  // `preserved` flag is cleared at end-of-realize (cpu_buf_clear_preserved),
+  // but a capture's recorded buffers must survive every sub-realize's
+  // pool rollback AND every later replay until the capture is dropped.
+  // jit_pin sets this flag (survives clear_preserved); the reclaim paths
+  // (freelist push, pool rollback) skip a pinned buf.  Mirror of
+  // CudaBuf.jit_pinned (backend/cuda/init.c + buf_pool.c).
+  u8    jit_pinned;
   void *handle;
   void (*on_release)(void *handle);
   // Arena views: when non-zero, this buf is an external view into
@@ -1924,6 +2031,15 @@ fn void materialized_loc_clear        (void);
 fn void materialized_loc_scope_enter  (void);
 fn void materialized_loc_scope_leave  (void);
 fn u32  materialized_loc_scope_depth  (void);
+// JIT-capture realize-dedup span: preserve the loc->tid cache across the
+// several realizes of one captured step so shared forward/grad kernels
+// are emitted (and recorded) once.  Gated by THVM_JIT_REALIZE_DEDUP.
+fn void materialized_loc_jit_span_begin(void);
+fn void materialized_loc_jit_span_end  (void);
+// Flag the live graph as containing a maxpool MAX-reduce gradient so the
+// cross-realize materialized_loc span auto-enables (the /count argmax-tie
+// split needs the maxpool-input activation shared across the step's realizes).
+fn void materialize_note_maxpool_grad(void);
 
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).
@@ -1973,7 +2089,8 @@ fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsiz
 // Hash-cons via uop_mov_cache like the movement opcodes.
 fn Term uop_range    (u32 axis_id, u32 axis_type, u32 extent);
 fn Term uop_index_e  (Term buffer, Term addr);
-fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND/IOR/IXOR
+fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND/IOR/IXOR/ISHR
+fn Term uop_fast_idiv_rule(Term t, void *user);                  // late: x//c -> (x*m)>>s, x%c -> x-c*(x//c)
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
 
@@ -2036,6 +2153,7 @@ fn int  rangeify_unified_has_ranges_at         (u32 node_idx);
 fn u32  rangeify_unified_out_ndim_at           (u32 node_idx);
 fn Term rangeify_unified_out_rng_at            (u32 node_idx, u32 axis);
 fn int  rangeify_unified_is_realized           (u32 node_idx);
+fn int  rangeify_unified_aid_is_fuse_bound     (u32 aid);
 fn Term rangeify_unified_subst_at              (u32 node_idx);
 // Main-heap UOP_BUFFERIZE Term at this node's realize boundary (0 if not
 // a boundary). Mirrors tinygrad's Ops.BUFFERIZE landing in the tsink at
@@ -2188,6 +2306,15 @@ fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
 // represented.  See src/uop/apply_opt.c for the full simulation.
 fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
                             u32 n_applied);
+
+// Dense-renumber a kernel DAG's UOP_RANGE axis_ids to 0..n-1 (ascending
+// by current id).  The lifter assigns global, sparse, sometimes-large
+// axis_ids; this maps each kernel to a fresh 0..n axis space (the
+// tinygrad model) so KOpt.axis, the render decode tables, and the JIT
+// source never depend on the absolute id magnitude.  Returns the new
+// root (or `root` if already dense).  Called by materialize once
+// store_root is finalized, before fire-time hand_opts.
+fn Term uop_dag_renumber_axes(Term root);
 
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
@@ -2720,9 +2847,6 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
 // passes the post-lift store root, same as the MSL/C99 entries.
 fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
                                        FILE *fp);
-// Renumber a<N>/_acc<N> ids to a dense per-kernel sequence so identical
-// kernels render byte-identically across steps (JIT cache hit).
-fn char *cg_canonicalize_axis_ids(const char *src);
 
 // === Per-USE movement-chain resolver ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
@@ -2800,6 +2924,109 @@ fn Term uop_graph_rewrite(Term root,
                           u32 n_rules,
                           void *user);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
+
+// === Expander (src/uop/expander.c) ===
+// Port of tinygrad codegen/late/expander.py: lowers KAX_UPCAST /
+// KAX_UNROLL ranges from RANGE-leaf form into a vectorized UOp graph
+// using the structural placeholders UOP_VCONST/UNROLL/CONTRACT/GEP.
+// NOT WIRED INTO render_uop.c -- the renderer still consumes the
+// RANGE-leaf representation directly.  See file header for design
+// notes.
+fn Term uop_expand_graph(Term root);
+fn Term uop_vconst   (u32 dtype, u32 n, u32 const *bits);
+fn u32  uop_vconst_dtype(Term t);
+fn u32  uop_vconst_n    (Term t);
+fn u32  uop_vconst_bits (Term t, u32 i);
+fn Term uop_unroll   (Term src, u32 n_args, u32 const *axis_ids, u32 const *factors);
+fn u32  uop_unroll_n_args (Term t);
+fn u32  uop_unroll_axis_id(Term t, u32 i);
+fn u32  uop_unroll_factor (Term t, u32 i);
+fn Term uop_contract (Term src, u32 n_args, u32 const *axis_ids, u32 const *factors);
+fn u32  uop_contract_n_args (Term t);
+fn u32  uop_contract_axis_id(Term t, u32 i);
+fn u32  uop_contract_factor (Term t, u32 i);
+fn Term uop_gep      (Term src, u32 n_idx, u32 const *indices);
+fn u32  uop_gep_n_idx(Term t);
+fn u32  uop_gep_idx  (Term t, u32 i);
+
+// === Devectorizer (src/uop/devectorize.c) ===
+// Port of tinygrad codegen/late/devectorizer.py to the thvm UOp graph
+// rewrite framework.  Lowers the post-expander DAG (with vector dtypes,
+// VCONST, UNROLL, CONTRACT, GEP) into a renderer-consumable scalar DAG
+// where REDUCE has been replaced by PLACEHOLDER acc + STORE-back-to-acc
+// + END loops, ALU has been split into per-lane scalar ops via STACK,
+// and adjacent scalar LOADs over contiguous addresses have been re-
+// vectorized into wide LOADs.
+//
+// NOT WIRED INTO the renderer in this commit: the existing emit walk
+// in render_uop.c consumes the RANGE-leaf representation directly.
+// uop_devectorize_graph and uop_load_store_fold_graph run only when
+// explicitly invoked (tests).  See docs/tinygrad_late_passes.md.
+fn Term uop_stack       (u32 n, Term const *srcs);
+fn u32  uop_stack_n     (Term t);
+fn Term uop_stack_src   (Term t, u32 i);
+fn Term uop_placeholder (u32 dtype, u32 acc_id);
+fn u32  uop_placeholder_dtype (Term t);
+fn u32  uop_placeholder_acc_id(Term t);
+fn Term uop_end         (u32 n, Term const *ranges);
+fn u32  uop_end_n       (Term t);
+fn Term uop_end_range   (Term t, u32 i);
+fn Term uop_devectorize_graph    (Term root);
+fn Term uop_load_store_fold_graph(Term root);
+
+// === Symbolic rewrite (src/uop/symbolic_rewrite.c) ===
+// Port of tinygrad/uop/symbolic.py "sym" PatternMatcher passes.  Runs a
+// bottom-up graph rewrite that reinvokes the simplifying constructors
+// (uop_rewrite_binary, uop_rewrite_unary, uop_simplify_int_binary)
+// and adds scalar-lane-only rules the constructor skips for shape
+// safety (float MUL by 0).  Called between expander/devectorize/
+// load_store_fold in the render_uop pipeline.
+fn Term uop_symbolic_rewrite(Term root);
+
+// === Linearizer (src/uop/linearize.c) ===
+// Port of tinygrad codegen/late/linearizer.py: walks a post-devectorize
+// UOp DAG and produces an ordered list of Terms in emission order.
+// Stage (a) of the architectural piece #3 wiring; consumed by the new
+// renderer in src/codegen/render_linearized.c.  See file header for
+// the priority tuple + heap algorithm.
+#ifndef LIN_KERNEL_CAP
+#define LIN_KERNEL_CAP 4096
+#endif
+typedef struct {
+  Term uops[LIN_KERNEL_CAP];
+  u32  n;
+} LinKernel;
+fn int  uop_linearize   (Term sink, LinKernel *out);
+fn u32  lin_kernel_size (LinKernel const *k);
+fn Term lin_kernel_at   (LinKernel const *k, u32 i);
+
+// === Linearized-list renderer (src/codegen/render_linearized.c) ===
+// Consumes a LinKernel and emits C99 / MSL / CUDA source for the
+// post-expander+devectorize+linearize shape (multi-axis RANGE nest +
+// PLACEHOLDER accs + END markers + AFTER ordering + STACK lanes).
+// Returns 1 on success, 0 if any opcode in the linearized list is
+// outside the renderer's coverage (caller falls back to legacy emit).
+fn int cg_render_linearized_c    (LinKernel const *lk, const char *kernel_name,
+                                  FILE *fp);
+fn int cg_render_linearized_metal(LinKernel const *lk, const char *kernel_name,
+                                  FILE *fp);
+fn int cg_render_linearized_cuda (LinKernel const *lk, const char *kernel_name,
+                                  FILE *fp);
+// PTX emitter (src/codegen/render_ptx.c).  Walks the SAME LinKernel but
+// emits PTX assembly text directly (bypassing nvrtc's C++ frontend) so
+// the CUDA jit can cuModuleLoadData it.  `sm` is the compute capability
+// (70 = V100); <=0 defaults to 70.  Returns 1 on success, 0 if any
+// opcode is outside the renderer's coverage (caller falls back to the
+// C-source CUDA emit).
+fn int cg_render_linearized_ptx  (LinKernel const *lk, const char *kernel_name,
+                                  int sm, FILE *fp);
+// Route-gate predicate (src/codegen/render_linearized.c).  Returns 1
+// iff the UOp DAG rooted at `root` contains any UOP_RANGE leaf with
+// axis_type in {KAX_UPCAST, KAX_UNROLL} -- the "opt-rich" shape that
+// drives the parallel-accumulator emit and is the only kernel class
+// the linearized renderer currently beats the legacy walker on.
+fn int uop_has_upcast_or_unroll(Term root);
+
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);
 fn Term uop_graph_simplify_materialize(Term root, u32 env_id);
@@ -2932,6 +3159,7 @@ fn void backend_dispatch_begin_all(void);
 fn void backend_dispatch_flush_all(void);
 fn void backend_dispatch_end_all(void);
 fn void kernel_fire_gen_bump(void);
+fn void kernel_assign_write_record(void *backend, u32 buf_id);
 fn void kernel_fire_scope_begin(void);
 fn void kernel_fire_scope_end(void);
 // Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns

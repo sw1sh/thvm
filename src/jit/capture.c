@@ -120,9 +120,9 @@ static void jit_capture_release_retained(JitCapture *c) {
   for (u32 i = 0; i < c->n_retained; i++) {
     Backend *b = c->retained[i].backend;
     u32 buf_id = c->retained[i].buf_id;
-    if (b != NULL && b->buf_decref != NULL && buf_id != 0) {
-      b->buf_decref(buf_id);
-    }
+    if (b == NULL || buf_id == 0) continue;
+    if (b->buf_jit_unpin != NULL) b->buf_jit_unpin(buf_id);
+    if (b->buf_decref != NULL)    b->buf_decref(buf_id);
   }
   c->n_retained = 0;
 }
@@ -142,6 +142,23 @@ static void jit_capture_retain_buf(JitCapture *c, Backend *b, u32 buf_id) {
   }
   if (b->buf_incref != NULL) {
     b->buf_incref(buf_id);
+  }
+  // STICKY pin: the per-realize `preserved` flag gets cleared at
+  // end-of-realize (cuda_buf_clear_preserved), so a buf retained mid-
+  // realize then handed off to a later replay loses its pin and the
+  // NEXT realize's pool_rollback freelists it -- replay then hits
+  // dptr=0 / dispatch returns -1 / loss reads stale.  jit_pin sets a
+  // separate flag that survives clear_preserved and gets unpinned only
+  // on jit_capture_drop.
+  if (b->buf_jit_pin != NULL && getenv("THVM_JIT_NO_PIN") == NULL) {
+    b->buf_jit_pin(buf_id);
+  }
+  // If the buf is currently parked on the backend's freelist (refcount==
+  // 0 from a prior owner's decref), yank it back -- otherwise a later
+  // alloc would pop+transfer-storage, leaving our captured op's buf_id
+  // with dptr=0.  buf_freelist_remove no-ops if buf isn't on the list.
+  if (b->buf_freelist_remove != NULL) {
+    b->buf_freelist_remove(buf_id);
   }
   c->retained[c->n_retained].backend = b;
   c->retained[c->n_retained].buf_id  = buf_id;
@@ -243,6 +260,11 @@ fn u32 jit_capture_begin(void) {
       JIT_CAPTURES[i].in_use   = 1;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
+      // Open the realize-dedup span (gated by THVM_JIT_REALIZE_DEDUP):
+      // the multiple realizes of this captured step share one loc->tid
+      // cache so a kernel emitted by realize-1 is reused (not re-emitted
+      // + re-recorded) by realize-2/3.  Closed in jit_capture_end{,_with_result}.
+      materialized_loc_jit_span_begin();
       return i;
     }
   }
@@ -250,6 +272,10 @@ fn u32 jit_capture_begin(void) {
 }
 
 fn void jit_capture_end(void) {
+  // Close the realize-dedup span (restore the deferred heap rewrites +
+  // wipe the loc->tid cache) BEFORE finalize, which only inspects the
+  // recorded op list.
+  materialized_loc_jit_span_end();
   if (JIT_ACTIVE_SLOT != 0) {
     jit_capture_finalize(JIT_ACTIVE_SLOT, 0);
   }
@@ -258,6 +284,7 @@ fn void jit_capture_end(void) {
 }
 
 fn void jit_capture_end_with_result(Term root) {
+  materialized_loc_jit_span_end();
   if (JIT_ACTIVE_SLOT != 0) {
     jit_capture_finalize(JIT_ACTIVE_SLOT, root);
   }
@@ -273,6 +300,9 @@ fn void jit_capture_drop(u32 slot) {
     JIT_ACTIVE_SLOT = 0;
     JIT_PAUSE_DEPTH = 0;
   }
+#ifdef THVM_HAS_CUDA
+  cuda_jit_graph_invalidate(slot);
+#endif
   // Keep the ops buffer allocated -- the slot can be reused for
   // another capture without re-malloc.
 }
@@ -739,7 +769,7 @@ static void jit_capture_sink_assigns(JitCapture *c, Term root) {
   }
 }
 
-#ifdef THVM_HAS_METAL
+#if defined(THVM_HAS_METAL) || defined(THVM_HAS_CUDA)
 typedef struct {
   Backend *backend;
   u32      buf_id;
@@ -838,19 +868,29 @@ static int jit_capture_replay_packable_output(JitCaptureOp const *op,
       || op->kid == 0 || op->kid >= KERNELS_NEXT) {
     return 0;
   }
-  if (cg_kernel_dispatch_kind(op->kid) != KDISPATCH_METAL_TILE) {
-    return 0;
-  }
   KernelEntry const *ke = &KERNELS[op->kid];
   if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
     return 0;
   }
   TenDesc const *td = &TENS[ke->output_tid];
   Backend *backend = td->backend;
-  if (backend == NULL || backend->id != METAL_BACKEND.id
-      || backend->buf_decref == NULL || td->buf_id != op->out_buf_id) {
+  if (backend == NULL || backend->buf_decref == NULL
+      || td->buf_id != op->out_buf_id) {
     return 0;
   }
+  // Only pack genuine GPU-kernel-produced intermediates whose storage is
+  // recycle-safe: a Metal tile dispatch or a CUDA nvrtc dispatch on its
+  // own backend.  (CPU JIT already frees transients during materialize,
+  // so it doesn't need this; CPU stays on its existing path.)
+  u32 dk = cg_kernel_dispatch_kind(op->kid);
+  int ok = 0;
+#ifdef THVM_HAS_METAL
+  if (dk == KDISPATCH_METAL_TILE && backend->id == METAL_BACKEND.id) ok = 1;
+#endif
+#ifdef THVM_HAS_CUDA
+  if (dk == KDISPATCH_CUDA_JIT && backend->id == CUDA_BACKEND.id) ok = 1;
+#endif
+  if (!ok) return 0;
   u64 nbytes = jit_dispatch_output_nbytes(op);
   if (nbytes == 0) {
     return 0;
@@ -1016,6 +1056,140 @@ static void jit_capture_finalize(u32 slot, Term root) {
   jit_capture_sink_assigns(c, root);
   jit_capture_pack_replay_temporaries(c, root);
 
+  // Dedup pass: if a DISPATCH writes (kid, in_buf_ids, out_buf_id) IDENTICAL
+  // to a prior DISPATCH and nothing between them writes to any of the
+  // inputs OR the output buffer, the value sitting in out_buf_id is still
+  // the same -- the second dispatch is redundant.  Mark it replay_skip.
+  //
+  // Background: beautiful_mnist captures 29 fires of kid 45 [128,32,20,20]
+  // per step, all with identical in[0]=buf142 in[1]=buf7 out=buf143
+  // (both inputs jit_pinned, never mutated).  Each fire computes the
+  // same conv2 forward output, then ~50 ops later it fires again.  Cost:
+  // 29 * 0.77ms = 22 ms / step of pure waste.
+  //
+  // Disable via THVM_JIT_REPLAY_DEDUP=0.  Set THVM_JIT_REPLAY_DEDUP_TRACE=1
+  // for per-skip diagnostics.
+  // Default OFF until the alias check is sound: same buf_id can hold
+  // different logical tensors when the CUDA arena (buf_pool.c) recycles
+  // a slot, so "same in_buf_ids" doesn't imply "same content".  Enable
+  // via THVM_JIT_REPLAY_DEDUP=1 only for workloads where you've verified
+  // the captured op stream doesn't alias buffers through arena views.
+  // beautiful_mnist with dedup=1 gives wall=14ms / step (vs 184ms
+  // baseline) but loss=-0.006 / test_acc=13% -- conclusively breaks
+  // training, so this is a future-work hook, not a perf knob to land
+  // by default.  Diagnostic value: confirms 86% of dispatches in
+  // beautiful_mnist have identical (kid, in_bufs, out_buf) tuples
+  // statically, the schedule pipeline is over-emitting redundant
+  // dispatches that should be consolidated upstream (closer to the
+  // tensor / interact layer).
+  int dedup_on = 0;
+  {
+    char const *de = getenv("THVM_JIT_REPLAY_DEDUP");
+    if (de != NULL && de[0] != '0') dedup_on = 1;
+  }
+  if (!noskip && dedup_on) {
+    int dedup_trace = getenv("THVM_JIT_REPLAY_DEDUP_TRACE") != NULL;
+    u32 n_skipped = 0;
+    for (u32 i = 0; i < c->n_ops; i++) {
+      JitCaptureOp *op = &c->ops[i];
+      if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
+      if (op->kid == 0 || op->kid >= KERNELS_NEXT) continue;
+      Backend *op_backend = jit_dispatch_output_backend(op);
+      if (op_backend == NULL) continue;
+      u32 const *op_ids = op->heap_in_buf_ids != NULL
+                       ? op->heap_in_buf_ids
+                       : op->in_buf_ids;
+      // Scan backward for a matching prior DISPATCH.  Optional
+      // THVM_JIT_REPLAY_DEDUP_WINDOW caps the lookback distance --
+      // useful for narrowing down which intermediate is causing
+      // unsafe-skip false positives.
+      i32 window = 0;
+      {
+        char const *we = getenv("THVM_JIT_REPLAY_DEDUP_WINDOW");
+        if (we != NULL) window = atoi(we);
+      }
+      i32 lookback_floor = window > 0 ? (i32)i - window : -1;
+      for (i32 jj = (i32)i - 1; jj > lookback_floor; jj--) {
+        JitCaptureOp *prev = &c->ops[jj];
+        if (prev->kind != JIT_OP_DISPATCH || prev->replay_skip) continue;
+        if (prev->kid != op->kid) continue;
+        if (prev->out_buf_id != op->out_buf_id) continue;
+        if (prev->n_inputs != op->n_inputs) continue;
+        u32 const *prev_ids = prev->heap_in_buf_ids != NULL
+                           ? prev->heap_in_buf_ids
+                           : prev->in_buf_ids;
+        int same = 1;
+        for (u32 k = 0; k < op->n_inputs; k++) {
+          if (prev_ids[k] != op_ids[k]) { same = 0; break; }
+        }
+        if (!same) continue;
+        // Verify nothing between (jj, i) mutates the inputs or output.
+        int safe = 1;
+        for (u32 m = (u32)jj + 1; m < i; m++) {
+          JitCaptureOp *mid = &c->ops[m];
+          if (mid->replay_skip) continue;
+          // Writes happen via DISPATCH.out_buf_id or ASSIGN.dst_tid.buf_id.
+          u32 mid_write_buf = 0;
+          Backend *mid_write_backend = NULL;
+          if (mid->kind == JIT_OP_DISPATCH) {
+            mid_write_buf = mid->out_buf_id;
+            mid_write_backend = jit_dispatch_output_backend(mid);
+          } else if (mid->kind == JIT_OP_ASSIGN) {
+            if (mid->assign_dst_tid != 0 && mid->assign_dst_tid < TENS_NEXT) {
+              mid_write_buf = TENS[mid->assign_dst_tid].buf_id;
+              mid_write_backend = TENS[mid->assign_dst_tid].backend;
+            }
+          }
+          if (mid_write_buf == 0 || mid_write_backend == NULL) continue;
+          // Conflict only when the mid-write is on the same backend as op
+          // AND aliases op's output or any of its inputs.  Alias check:
+          // walk both buf_ids to their storage root (via buf_storage_root,
+          // optional backend hook) -- a view buf and its arena parent
+          // share a root, so a write to view buf 200 with parent 142 is
+          // detected as a conflict for inputs/outputs naming 142.  Falls
+          // back to identity (a == b) on backends without view aliasing.
+          if (mid_write_backend != op_backend) continue;
+          u32 (*root_of)(u32) = op_backend->buf_storage_root;
+          u64 (*addr_of)(u32) = op_backend->buf_addr;
+          u32 mid_root = root_of != NULL ? root_of(mid_write_buf) : mid_write_buf;
+          u32 op_out_root = root_of != NULL ? root_of(op->out_buf_id) : op->out_buf_id;
+          u64 mid_addr = addr_of != NULL ? addr_of(mid_write_buf) : 0;
+          u64 op_out_addr = addr_of != NULL ? addr_of(op->out_buf_id) : 0;
+          if (dedup_trace) fprintf(stderr, "  [skip_check] mid op%u buf=%u root=%u addr=%p, op out=%u root=%u addr=%p\n",
+                          m, mid_write_buf, mid_root, (void*)mid_addr,
+                          op->out_buf_id, op_out_root, (void*)op_out_addr);
+          // Both checks: parent-chain root match OR same physical dptr
+          // (catches arena reuse that lands a fresh buf at a previously-
+          // freed dptr without parent_buf_id linkage).
+          if (mid_root == op_out_root) { safe = 0; break; }
+          if (mid_addr != 0 && mid_addr == op_out_addr) { safe = 0; break; }
+          for (u32 k = 0; k < op->n_inputs; k++) {
+            u32 op_in_root = root_of != NULL ? root_of(op_ids[k]) : op_ids[k];
+            u64 op_in_addr = addr_of != NULL ? addr_of(op_ids[k]) : 0;
+            if (dedup_trace) fprintf(stderr, "    in[%u] buf=%u root=%u addr=%p\n",
+                            k, op_ids[k], op_in_root, (void*)op_in_addr);
+            if (mid_root == op_in_root) { safe = 0; break; }
+            if (mid_addr != 0 && mid_addr == op_in_addr) { safe = 0; break; }
+          }
+          if (!safe) break;
+        }
+        if (safe) {
+          if (dedup_trace) {
+            fprintf(stderr, "[jit-dedup] op%u kid=%u out=%u dups op%d -> skip\n",
+                    i, op->kid, op->out_buf_id, jj);
+          }
+          op->replay_skip = 1;
+          n_skipped++;
+          break;
+        }
+      }
+    }
+    if (dedup_trace) {
+      fprintf(stderr, "[jit-dedup] slot=%u skipped %u of %u dispatches\n",
+              slot, n_skipped, c->n_ops);
+    }
+  }
+
   jit_capture_release_retained(c);
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
@@ -1142,6 +1316,61 @@ fn u32 jit_replay(u32 slot) {
   if (c->n_ops == 0) return 0;
   HOT_JIT_REPLAY_CALLS++;
   backend_dispatch_begin_all();
+  int trace = getenv("THVM_JIT_REPLAY_TRACE") != NULL;
+  if (trace) fprintf(stderr, "[replay] start n_ops=%u\n", c->n_ops);
+
+#ifdef THVM_HAS_CUDA
+  // CUDA Graph fast path: if every op is a CUDA-backend dispatch/copy
+  // and the slot already has a cached CUgraphExec, cuGraphLaunch it
+  // instead of looping over per-op cuLaunchKernel.  Cache miss: capture
+  // this replay's per-op work into a graph, then launch.  See
+  // cuda_jit_graph_replay / cuda_jit_graph_capture_begin in backend/cuda/jit.c.
+  int cuda_only = 1;
+  for (u32 i = 0; i < c->n_ops; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    if (op->replay_skip) continue;
+    Backend *b = NULL;
+    if (op->kind == JIT_OP_DISPATCH) {
+      if (op->kid >= KERNELS_NEXT) { cuda_only = 0; break; }
+      if (KERNELS[op->kid].output_tid >= TENS_NEXT) { cuda_only = 0; break; }
+      b = TENS[KERNELS[op->kid].output_tid].backend;
+    } else if (op->kind == JIT_OP_ASSIGN) {
+      if (op->assign_dst_tid >= TENS_NEXT) { cuda_only = 0; break; }
+      b = TENS[op->assign_dst_tid].backend;
+    }
+    if (b == NULL || b->id != 3 /* CUDA */) { cuda_only = 0; break; }
+  }
+  int cuda_graph_replayed = 0;
+  int cuda_capturing = 0;
+  if (cuda_only && cuda_jit_graph_replay(slot) == 0) {
+    if (trace) fprintf(stderr, "[replay] CUDA graph hit (n_ops=%u)\n", c->n_ops);
+    cuda_graph_replayed = 1;
+    HOT_JIT_GRAPH_RUNS++;
+    for (u32 i = 0; i < c->n_ops; i++) {
+      JitCaptureOp *op = &c->ops[i];
+      if (op->replay_skip) continue;
+      if (op->kind == JIT_OP_DISPATCH) {
+        HOT_KERNEL_FIRES++;
+        HOT_JIT_REPLAY_DISPATCHES++;
+        HOT_JIT_GRAPH_DISPATCHES++;
+      } else {
+        HOT_JIT_REPLAY_ASSIGNS++;
+      }
+      ITRS++;
+    }
+  } else if (cuda_only) {
+    // Cache miss -- capture into a CUgraph as we go through the op loop.
+    if (cuda_jit_graph_capture_begin() == 0) {
+      cuda_capturing = 1;
+      if (trace) fprintf(stderr, "[replay] CUDA graph capturing slot=%u\n", slot);
+    }
+  }
+  if (cuda_graph_replayed) {
+    backend_dispatch_end_all();
+    return c->n_ops;
+  }
+#endif
+
   for (u32 i = 0; i < c->n_ops;) {
 #ifdef THVM_HAS_METAL
     u32 metal_run = jit_replay_try_metal_graph_run(slot, c, i);
@@ -1157,20 +1386,27 @@ fn u32 jit_replay(u32 slot) {
     }
     switch (op->kind) {
       case JIT_OP_DISPATCH: {
+        if (trace) fprintf(stderr, "[replay] op%u DISPATCH kid=%u out_buf=%u\n",
+                           i, op->kid, op->out_buf_id);
         if (op->kid == 0 || op->kid >= KERNELS_NEXT) {
+          if (trace) fprintf(stderr, "[replay]   skip: invalid kid\n");
           i++;
           continue;
         }
         KernelEntry *ke = &KERNELS[op->kid];
         Backend *b = TENS[ke->output_tid].backend;
         if (b == NULL || b->dispatch_kernel == NULL) {
+          if (trace) fprintf(stderr, "[replay]   skip: ke->output_tid=%u backend=%p\n",
+                             ke->output_tid, (void*)b);
           i++;
           continue;
         }
         u32 *ids = op->heap_in_buf_ids != NULL
                  ? op->heap_in_buf_ids
                  : op->in_buf_ids;
-        if (b->dispatch_kernel(ke, ids, op->out_buf_id) == 0) {
+        int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);
+        if (trace) fprintf(stderr, "[replay]   dispatch rc=%d\n", rc);
+        if (rc == 0) {
           HOT_KERNEL_FIRES++;
           HOT_JIT_REPLAY_DISPATCHES++;
           ITRS++;
@@ -1180,8 +1416,12 @@ fn u32 jit_replay(u32 slot) {
       case JIT_OP_ASSIGN: {
         HOT_JIT_REPLAY_ASSIGNS++;
         u32 dst = op->assign_dst_tid, src = op->assign_src_tid;
+        if (trace) fprintf(stderr, "[replay] op%u ASSIGN dst_tid=%u src_tid=%u\n",
+                           i, dst, src);
         if (dst == 0 || dst >= TENS_NEXT) break;
         if (src == 0 || src >= TENS_NEXT) break;
+        if (trace) fprintf(stderr, "[replay]   dst_buf=%u src_buf=%u\n",
+                           TENS[dst].buf_id, TENS[src].buf_id);
         TenDesc *dd = &TENS[dst], *sd = &TENS[src];
         if (dd->backend == NULL || dd->backend != sd->backend) break;
         u32 numel = dd->view.numel;
@@ -1207,6 +1447,15 @@ fn u32 jit_replay(u32 slot) {
     }
     i++;
   }
+#ifdef THVM_HAS_CUDA
+  if (cuda_capturing) {
+    if (cuda_jit_graph_capture_end_and_launch(slot) != 0) {
+      if (trace) fprintf(stderr, "[replay] CUDA graph capture FAILED -- per-op work already ran on capture stream, results may be missing\n");
+    } else if (trace) {
+      fprintf(stderr, "[replay] CUDA graph captured + launched slot=%u\n", slot);
+    }
+  }
+#endif
   backend_dispatch_end_all();
   return c->n_ops;
 }

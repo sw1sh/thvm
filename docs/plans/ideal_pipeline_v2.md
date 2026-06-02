@@ -243,3 +243,192 @@ What v1 promised that v2 disowns:
 1. **Everything can break during migration.** No "keep Metal working through the cut-over" carve-out. If Phase 3 regresses the suite, that's fine — fix it in the same or following commits, don't gate the cut-over on backward compatibility. Land the plan.
 2. **`tile.c` primitives stay as UOp ops — only the standalone IR layer retires.** The tile primitives (Fragment, Layout, per-thread/per-device slicing, ALLREDUCE) ARE the right target; tilelang has them and tinygrad is moving toward them (`Ops.MULTI(src, axis)` marker + `_device_num` symbolic Variable + `SHRINK` with `_device_num*sz` bounds + `MSELECT`/`MSTACK`/`Ops.ALLREDUCE` per `tinygrad/schedule/allreduce.py`, mirroring tilelang's `local.fragment` / `LayoutInferencePass` / `Fragment::FullyReplicated` / warp shuffles in `reduce.cc:243`). What was wrong in thvm: the parallel data-structure layer — `tile_anno.c`'s standalone KOpt struct, `apply_opt.c` mutating `KernelAxes` outside the UOp DAG, `propose.c` reading the side struct — duplicated concepts that should live as first-class UOp ops on the main heap. Phase 5b ports tile.c's IR concepts INTO the unified UOp DAG as `UOP_MULTI` / `UOP_MSELECT` / `UOP_MSTACK` / `UOP_DEVICE_NUM` / `UOP_ALLREDUCE` (1-to-1 names following tinygrad's MULTI direction), then deletes the standalone KOpt/tile_anno/apply_opt-side-struct layer. The matmul/conv pattern recognition itself stays (via UPatRule); it just consults the unified UOp DAG instead of the side struct.
 3. **Unified pass rewrites the main heap.** UOP_RANGE / UOP_INDEX_E / BUFFERIZE nodes land in the main tensor-level heap directly, not in a side-table. The heap already has these opcodes (currently used only post-kernel-lift); the unified pass makes them first-class at the tensor-level phase. `BUFFERIZE_NODES` side-table becomes vestigial in Phase 2 and deletes in Phase 4.
+
+## Phase C execution status (2026-05-31): faithful realize-seed landed behind THVM_RU_FAITHFUL_SEED; conv-backward MUL is the last blocker
+
+The central Phase C change (line 17: "bufferize_classify's consumer_count>=2 seed
++ named-rule unmarking is much weaker than tinygrad's reverse-topo run_rangeify
+walk") is now EXECUTED behind a default-OFF knob, not just diagnosed.
+
+Pinpointed divergence: the unified walk (`rangeify_unified.c`, a faithful port of
+tinygrad `run_rangeify` indexing.py:160-254 -- multi-consumer divergence + ending-
+ranges + EXPAND injection + REDUCE axis injection are all present) was being
+PRE-EMPTED by seeding its realize-map from the WHOLE bufferize_classify realized
+set (ROOT + MULTI + REDUCE + MATMUL + FANIN), at rangeify_unified.c:679-684.
+tinygrad seeds ONLY STORE/COPY/CONTIGUOUS (== thvm ROOT) and DERIVES the rest.
+
+Change (behind `THVM_RU_FAITHFUL_SEED`, default off; bit-identical when off):
+- rangeify_unified.c seed loop: seed RU_REALIZE_MAP only from nodes with
+  BUFFERIZE_REASON_ROOT; let the walk derive MULTI/REDUCE/MATMUL.
+- materialize.c topo_sort_boundaries gate: same ROOT-faithful filter so a node the
+  walk fused (single-consumer inherit) is inlined, not emitted as its own kernel.
+
+Result (CPU, simple 2-conv model): rangeify boundaries 148 -> 48 (3x fewer kernels
+-- the kernel-granularity win), and conv2_bwd grad-exact stays 22559834112.0.
+
+REMAINING BLOCKER (the conv-backward case, == the GPU-hang-adjacent core): with the
+faithful seed on, the conv2-backward 7-D MUL [32,32,20,20,32,5,5] (327M elts) is
+realized effectively-full by the walk (rangeify_unified_is_realized=1, nr==ond==7)
+where tinygrad fuses it into the consuming reduce -> a 1.31 GB alloc refused. The
+walk over-realizes it; leading hypothesis is that thvm's conv-backward autograd
+(uop_grad.c) shares one MUL across the weight-grad and data-grad reduces (2
+consumers with divergent ranges -> walk realizes on divergence, indexing.py:196-220)
+whereas tinygrad emits separate single-consumer MULs that each inherit + fuse. NEXT:
+confirm the consumer count of that MUL in the walk and either (a) split the shared
+conv-backward MUL in autograd to match tinygrad, or (b) handle the shared-MUL-feeding-
+two-reduces case in the walk without materializing the 6/7-D intermediate. Must NOT
+reintroduce the conv data-grad col2im hang (reference_tinygrad_beam_gpu_hang).
+
+### Phase C blocker refined (2026-05-31, cont.): 327M is a conv im2col/EXPAND INPUT, not a realize-map node
+
+Further isolation of the conv-backward blocker (the 1.31 GB / 327M-elt refuse under
+THVM_RU_FAITHFUL_SEED on the simple 2-conv model). Ruled OUT, with instrumentation:
+- NOT a boundary kernel OUTPUT (THVM_EMIT_BIG_TRACE on emit_kernel_for_boundary: no
+  kernel output >= 50M elts).
+- NOT in the rangeify walk realize-map (THVM_RU_REALIZE_TRACE: no realized node has
+  ndim >= 5; the walk fuses the conv-bwd MUL correctly).
+- NOT the post-walk strand-realize pass (rangeify_unified.c:2138-2174): its big-strand
+  cap was extended to fire under the faithful seed too (ru_faithful_seed_on(), via the
+  new shared helper) -- did NOT change the 327M.
+- NOT fixed by THVM_FUSE_CONV_BWD either (faithful+FUSE together still refuses 327M).
+
+The cpu_buf_alloc refusal message is correct: it is "an unfused im2col/EXPAND
+intermediate" -- a conv `_pool` unfold EXPAND being materialized as a kernel INPUT
+buffer (the heuristic MULTI/REDUCE seed kept it a view/fused; the faithful seed removed
+the boundary that covered it). This is the conv-unfold-materialization regime
+(project_conv_unfold_materialization), in the lowering / input-binding path, NOT the
+realize-map. NEXT: trace the actual alloc caller with a symbol-bearing build
+(backtrace_symbols_fd returned no frames on the stripped paclet dylib this session);
+the suspect is the materialize INLINE / cpu_interpret path realizing the unfold EXPAND
+when a consumer kernel's iteration does not cover all its ranges. Must keep the data-grad
+col2im hang guard intact (reference_tinygrad_beam_gpu_hang).
+
+Substrate landed (gated, default bit-identical): the ROOT-faithful seed
+(rangeify_unified.c) + the ROOT-faithful topo_sort_boundaries gate (materialize.c) +
+the shared `ru_faithful_seed_on()` helper + the strand-cap extension. Knob OFF = exact
+(simple model loss 2.302 / 148 kernels, conv2_bwd ssq 22559834112.0). Knob ON = 48
+rangeify boundaries (3x) on conv-forward paths, blocked only by the conv-unfold input.
+
+### Phase C blocker traced through 5 layers (2026-05-31, cont.2): conv-bwd unfold materialization is a fundamental materialize-fold gap, not one bug
+
+Used lldb (breakpoint on cpu_buf_alloc with $x0 > 1e9; the dylib is a unity build with
+no DWARF param info, so `nbytes` is unreadable -- read the ARM64 arg register x0 with
+--skip-prologue false). The 327M conv-bwd allocation SHAPE-SHIFTS as each path is closed:
+1. emit_kernel_for_boundary out_tid (the MUL boundary, ru_realized via the strand pass).
+2. The strand-realize pass (rangeify_unified.c:2169) -- its big-strand cap was being
+   EVADED: it measured out_numel from the out_rngs RANGE-leaf product (CONST-collapsed
+   axes excluded -> < 4M cap) while tensor_alloc uses term_shape_in (the full 1.31GB).
+   FIXED: cap now uses the node's real ru_node_shape numel. Plus the consumer-reduce-
+   covered relaxation (2088, 2120) extended to the faithful seed. After this the MUL is
+   correctly NOT realized (strand trace: loc=319 small_enough=0 -> realize=0).
+3. With the MUL un-realized, the 327M reappears at DISPATCH: cpu_dispatch_kernel ->
+   tensor_alloc (kernel_fire_by_id eager fire), i.e. a scheduled kernel still has a
+   327M output/intermediate.
+CONCLUSION: the faithful seed produces a conv-backward schedule with a 327M unfold cube
+that thvm's materialize+dispatch realizes wherever the current path is closed. tinygrad
+keeps that unfold a fused strided-view read INSIDE the consuming reduce (single-consumer
+range-inheritance, the unfold is a pure movement view). thvm's pipeline cannot fuse the
+7-D unfold -> MUL -> REDUCE into one bounded kernel without the heuristic seed's specific
+boundary placement -- this is the Phase 4d "fold materialize.c onto the lowered DAG" work,
+a fundamental fusion gap, NOT a localized bug. The whack-a-mole across emit/strand/dispatch
+is the signature. NEXT (milestone-scale): make materialize emit ONE bounded kernel for the
+unfold->MUL->reduce chain (the unfold stays an INDEX_E strided read, never its own buffer),
+matching tinygrad remove_movement_op_after_rangeify + the single-consumer reduce fusion.
+Landed this round (gated, default bit-identical): the strand-cap real-shape fix + the
+relaxation-gate extension to the faithful seed. Knob still blocked by the unfold cube.
+
+### Phase C VERDICT (2026-05-31): faithful seed is CORRECT but thvm's codegen can't render the fused kernels -- the gap is CODEGEN, not the seed
+
+End-to-end implemented + the conv-unfold blocker fully closed (7 layers: realize-map ->
+strand-realize -> cap-evasion -> root-alias -> dispatch -> chain-compose -> bypass strand
+check; the last fix was extending the RU_FUSE_ALL_REDUCE_AIDS fuse-bound set to the
+faithful seed so the bypass strand check stops flagging the unfold window -> the unfold
+fuses as a strided INDEX_E read instead of gathering the 1.31GB cube). The 327M abort is
+gone; the faithful seed now produces the tinygrad-style fused schedule.
+
+EMPIRICAL RESULT (V100 + CPU), THVM_RU_FAITHFUL_SEED=1:
+- CPU conv2_bwd grad-exact: 22559834112.0 = CORRECT. So the faithful SCHEDULE is right.
+- CPU simple-model: pathologically slow (eager cpu_uop_walk recomputes the fused unfold
+  inline, 327M MACs/pass -- the interpreter has no compiled strided-load loop).
+- CUDA conv2_bwd grad-exact: 379254528.0 = WRONG (vs 22559858688.0 default). The fused
+  conv-bwd kernel MIS-RENDERS on CUDA.
+- CUDA beautiful_mnist: warm_min 1244ms (vs default 10.8ms = ~115x SLOWER), loss 5.277
+  (default 4.374), 264 kernels.
+
+CONCLUSION: the faithful (tinygrad-granularity) seed is the WRONG lever for thvm AS-IS.
+thvm's codegen relies on the heuristic boundaries (MULTI/REDUCE/matmul) to emit correct +
+efficient kernels; removing them produces giant fused kernels that thvm's codegen renders
+INCORRECTLY (CUDA grad wrong) and WITHOUT the GROUPTOP/upcast/loop-structure that would make
+them fast (115x slower). tinygrad fuses into 5 kernels AND its codegen makes them fast+
+correct; thvm cannot. So the kernel-granularity gap is a CODEGEN problem (render + optimize
+large fused conv-bwd / multi-reduce kernels correctly and efficiently), NOT a realize-seed
+problem. The faithful-seed substrate (THVM_RU_FAITHFUL_SEED, default-off) + the cap-evasion
+fix stay as the foundation for the eventual codegen work; do NOT enable faithful until the
+fused-kernel codegen (correctness + GROUPTOP/upcast) lands. NEXT (the real milestone):
+thvm CUDA codegen for fused conv-bwd -- (1) FIX the wrong grad (the fused kernel render bug),
+(2) apply GROUPTOP/upcast to the fused reduce. Until then the heuristic seed (default) is
+correct + competitive and is the right default.
+
+### drop-MULTI-only middle ground: tried, removed (2026-05-31)
+
+Before concluding "codegen, not seed", tried a surgical variant: drop ONLY the pure-MULTI
+(consumer>=2) boundary seeds while KEEPING REDUCE/MATMUL/FANIN/ROOT (so conv-bwd stays a
+REDUCE boundary -> codegen-safe, no 327M, no wrong grad). Result: CORRECT (conv2_bwd
+grad-exact 22559834112.0) but the win is negligible -- CPU simple 148->146, CUDA
+beautiful 404->394, warm_min unchanged (10.78->10.80ms), and it perturbs the BN-model loss
+(4.374->4.209, float reassociation from the now-walk-derived multi-consumer nodes). The
+148->48 granularity from the FULL faithful seed came from fusing REDUCEs, not MULTIs --
+which is exactly the codegen gap. So the safe variant can't deliver the win. Removed;
+ru_seed_boundary_holds is faithful-or-default only. Confirms: the lever is fused-kernel
+codegen, full stop.
+
+### Phase C VERDICT CORRECTED (2026-05-31): the CUDA "render bug" was a CAP-WIDTH bug, FIXED (eea6f161). Remaining = fused-kernel SPEED + JIT-replay.
+
+The earlier "thvm codegen can't render fused kernels / needs a rewrite" conclusion was WRONG
+(too pessimistic). The cuda-fused-reduce-codegen-fix workflow + lldb discriminators
+(NOOPT/LOCAL_CAP isolated it to the LOCAL-split leaf count) found the real cause: a
+MAX_DIM(8) cap in render_uop.c rmu_emit_one_reduce truncated the fused conv-bwd reduce's
+RANGE leaves once UPCAST/LOCAL splits pushed it past 8 -> a dropped (N,oh,ow) reduce axis
+-> ~60x-low grad. One-site cap widening (MAX_DIM->RMU_MAX_RANGES + the existing wide
+collector) fixes it: CUDA conv2_bwd faithful grad now 22559858688.0 (correct); CPU + CUDA
+default bit-identical; nn.wlt 55/0, grad.wlt 61/1. LANDED eea6f161.
+
+REMAINING for the faithful seed to be a WIN (both concrete, NOT a rewrite):
+1. SPEED: faithful beautiful_mnist is ~1248ms (vs 10.8ms heuristic default) -- the fused
+   conv-bwd kernels are CORRECT (eager iters now match default) but render with G=0 (no
+   GLOBAL/grid promotion) so a 327M-iter fused kernel runs in one threadblock (LOCAL only,
+   no grid parallelism). tinygrad parallelizes the same fused reduce across grid+threads.
+   The fix is codegen GLOBAL-promotion + GROUPTOP/upcast for the fused reduce (occupancy),
+   NOT a rewrite. This is the actual kernel-granularity lever.
+2. JIT-REPLAY: faithful beautiful eager iters correct (iter0 2.2835, iter1 2.4268 == default)
+   but JIT replay (iter2+) diverges/explodes (2.857 -> 6.5) -- a faithful+replay buffer
+   issue on BN models (separate from the render cap; akin to the earlier dedup replay bug).
+The cap fix is a genuine latent CUDA-codegen correctness fix regardless of the faithful path
+(any >8-leaf reduce). NEXT: the G=0 GLOBAL-promotion for fused reduces (the speed lever).
+
+### Phase C STATUS (2026-05-31, final this arc): faithful seed CORRECT end-to-end; speed is the fundamental fused-codegen tradeoff
+
+The faithful realize-seed (THVM_RU_FAITHFUL_SEED, ideal_pipeline_v2 Phase C / tinygrad-faithful
+scheduling) is now CORRECT end-to-end on CUDA, including the JIT workload. Two landed fixes:
+- eea6f161: rmu_emit_one_reduce range-collection cap MAX_DIM->RMU_MAX_RANGES (fused conv-bwd
+  reduce rendered ~60x-low on CUDA because >8 leaves truncated; now correct, conv2_bwd 22.5B).
+- 69557475: couple faithful -> cross-realize dedup (materialized_loc unifies the producer-out
+  and consumer-in tids; without it the JIT capture records divergent buf_ids (producer reallocs
+  across realizes -- cuda_buf_decref ignores jit_pin) and replay reads stale -> diverge/explode).
+Verified V100: faithful pod_iters + beautiful_mnist replay CONVERGE (2.44/2.34/2.27 ~ default
+2.43/2.32/2.29, float reassociation only); default bit-identical (2.302, nn.wlt 55/0, grad.wlt
+61/1, CUDA test_cuda_backend 81/81).
+
+SPEED (the "and beyond"): faithful stays default-OFF because it is ~1000x slower than the
+heuristic-seed materialize default (simple model: faithful 1242ms vs default 6.4ms; the fused
+conv-bwd kernel kid=53 = 90.9% of wall). Root: the faithful fused conv-bwd is a deep nested-loop
+(up to 15 axes) that RECOMPUTES the strided _pool/im2col unfold per reduce-iter; thvm's codegen
+renders this far less efficiently than tinygrad's (coalescing/tiling), and materializing the
+unfold (the heuristic seed) is vastly cheaper on thvm. A blanket render_uop.c MAX_DIM->
+RMU_MAX_RANGES cap-sweep (to let >8-axis fused kernels compile without the undeclared-axis
+fallback) was TRIED and REVERTED: it made faithful SLOWER (8687ms -- more axes -> more nested
+loops) and perturbed the loss. So matching tinygrad's fused-kernel speed is a real fused-kernel
+CODEGEN arc (coalesced/tiled strided-unfold reduce, occupancy), NOT a cap fix -- and even then
+thvm's materialize path may remain the faster default. NET: ideal_pipeline_v2 Phase C is faithful
+to tinygrad's SCHEDULING (correct); the heuristic seed remains the fast default; the fused-kernel
+codegen quality is the open arc for the faithful seed to ALSO be fast.

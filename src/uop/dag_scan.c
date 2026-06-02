@@ -63,6 +63,7 @@ int uop_dag_dtype_uniform(Term t, u32 dt) {
     case UOP_RANGE: case UOP_INVALID:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
       return 1;
     // === one-operand recursion ======================================
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
@@ -115,6 +116,7 @@ u32 uop_dag_reduce_axis_extent(Term t) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER: {
       u32 a = uop_dag_reduce_axis_extent(heap_read(loc + 0));
@@ -204,6 +206,7 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
     case UOP_RANGE: case UOP_INVALID:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
       // Leaves / index-domain: no-op.
       return;
     case UOP_CAST: case UOP_BITCAST:
@@ -1288,7 +1291,7 @@ static int udg_x_has_rq_divmod(Term t, u32 axis_r_q, int depth) {
   // already returned 0 above.
   if (op == UOP_IADD || op == UOP_IMUL || op == UOP_ISUB || op == UOP_IDIV
       || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND
-      || op == UOP_IOR  || op == UOP_IXOR) {
+      || op == UOP_IOR  || op == UOP_IXOR || op == UOP_ISHR) {
     Term a = heap_read(term_val(t) + 0);
     Term b = heap_read(term_val(t) + 1);
     if (udg_x_has_rq_divmod(a, axis_r_q, depth + 1)) return 1;
@@ -1885,6 +1888,16 @@ static int udg_addr_decode_leaf(Term t, u32 coeff, UdgAddrCoeffs *out) {
       if (!udg_addr_decode_leaf(a, coeff, out)) return 0;
       if (!udg_addr_decode_leaf(b, coeff, out)) return 0;
       return 1;
+    }
+    if (op == UOP_OPT) {
+      // OPT(inner, kind, k) wraps the inner subtree with a renderer hint
+      // (UPCAST / UNROLL / GROUP_REDUCE / TC / ...).  For address-coeff
+      // decoding the wrapper is transparent: the underlying RANGE leaf
+      // contributes its axis stride exactly as before.  Without this
+      // unwrap, decoding bails on every post-UPCAST address (because
+      // apply_opt_dag wraps the new inner RANGE in OPT(_, UPCAST, k)),
+      // which breaks the multi-UPCAST stride heuristic.
+      return udg_addr_decode_leaf(uop_opt_target(t), coeff, out);
     }
     Term inner = 0; u32 c = 0;
     if (udg_match_imul_const(t, &inner, &c)) {

@@ -97,6 +97,53 @@ typedef struct {
 static MaterializedLocEntry MATERIALIZED_LOC_TABLE[MATERIALIZED_LOC_CAP];
 static u32                  MATERIALIZED_LOC_LEN = 0;
 
+// Heap-rewrite journal.  materialize_subst_cached_rec replaces a parent
+// UOP cell that points at a cached child subtree with a TAG_TEN leaf
+// (heap_set), so the same pass doesn't re-materialize the shared subtree.
+// That mutation is PERMANENT on the global (hash-consed) heap, but the
+// loc->tid cache backing it is per-realize (cleared on every realize
+// boundary -- see thvm_realize).  Across realizes the substituted tid's
+// buffer is reclaimed by the pool rollback, so a later realize that
+// re-walks the SAME hash-consed node would read a TAG_TEN leaf naming a
+// tid whose buffer is dead -- tensor_view_of then re-increfs a drained
+// CpuBuf, the producer kernel dispatches into a NULL data pointer, and
+// the consumer segfaults.  To keep the rewrite per-realize (matching the
+// cache lifetime), every substitution is journaled here and restored to
+// the original child term when the cache is cleared.  The substitution
+// only ever targets UOP-produced intermediates (params are already
+// TAG_TEN and never get rewritten), so reverting them all at the realize
+// boundary is exactly correct -- the next realize re-runs the
+// substitution against its own live cache.
+#define SUBST_JOURNAL_CAP  (1u << 16)
+typedef struct {
+  u64  cell;     // heap cell that was overwritten (loc + child index)
+  Term orig;     // original child term to restore
+} SubstJournalEntry;
+static SubstJournalEntry SUBST_JOURNAL[SUBST_JOURNAL_CAP];
+static u32               SUBST_JOURNAL_LEN = 0;
+
+// Record a heap rewrite so materialized_loc_clear can undo it.  Returns
+// 1 if journaled (caller may proceed with heap_set), 0 if the journal is
+// full (caller must NOT rewrite -- recurse instead so correctness holds
+// even without the dedup).
+static int subst_journal_record(u64 cell, Term orig) {
+  if (SUBST_JOURNAL_LEN >= SUBST_JOURNAL_CAP) return 0;
+  SUBST_JOURNAL[SUBST_JOURNAL_LEN].cell = cell;
+  SUBST_JOURNAL[SUBST_JOURNAL_LEN].orig = orig;
+  SUBST_JOURNAL_LEN++;
+  return 1;
+}
+
+static void subst_journal_restore(void) {
+  // Reverse order: a cell rewritten more than once (shouldn't happen --
+  // the visited bitmap bounds it -- but be safe) restores to its
+  // earliest original.
+  for (u32 i = SUBST_JOURNAL_LEN; i > 0; i--) {
+    heap_set(SUBST_JOURNAL[i - 1].cell, SUBST_JOURNAL[i - 1].orig);
+  }
+  SUBST_JOURNAL_LEN = 0;
+}
+
 // In-realize scope counter: thvm_realize / thvm_realize_many bracket
 // their bodies with materialized_loc_scope_{enter,leave}.  The cache
 // is consulted by thvm_materialize ONLY when depth > 0 -- tests that
@@ -111,6 +158,106 @@ fn void materialized_loc_scope_leave(void) {
 }
 fn u32  materialized_loc_scope_depth(void) { return MATERIALIZE_SCOPE_DEPTH; }
 
+// JIT-capture realize-dedup span.  A single JIT-captured training step
+// calls thvm_realize / thvm_realize_many several times (loss.realize,
+// then the grad bundle, then the optimizer-step bundle).  Normally the
+// loc->tid cache is cleared at every realize boundary, so the forward +
+// grad kernels shared across those realizes get RE-emitted (fresh kids)
+// and re-recorded into the capture -- the documented dispatch
+// redundancy.  Across realizes the clear is needed because pool-rollback
+// reclaims a non-preserved intermediate's buffer.  But JIT capture pins
+// every recorded kernel output (jit_capture_retain_dispatch_bufs ->
+// buf_jit_pin), and rollback skips pinned bufs, so those outputs survive
+// the boundary.  Persisting the cache across the span therefore lets a
+// later realize's materialize substitute the EXISTING tid (one kernel,
+// one dispatch) instead of re-emitting.  Safety net: materialized_loc_lookup
+// already treats a dead-buffer tid as a miss, so a non-pinned (rolled-back)
+// intermediate falls back to a fresh re-emit -- correctness is preserved
+// even if a buffer didn't survive.  Mirror: tinygrad schedules the whole
+// `loss.realize(*opt.schedule_step())` step in ONE run_rangeify pass, so a
+// shared kernel is scheduled exactly once.
+//
+// Gated by THVM_JIT_REALIZE_DEDUP (default OFF -- the env-knob discipline
+// for an aliasing-sensitive path).  When the span is active and enabled,
+// materialized_loc_clear() defers the wipe; the deferred clear runs at
+// materialized_loc_jit_span_end().
+static u32 MATERIALIZE_JIT_SPAN_DEPTH = 0;
+
+// Set the first time a maxpool MAX-reduce vjp is built (interact/uop_grad.c
+// REDUCE_MAX branch).  The /count argmax-tie split (gradient.py:11-14) is only
+// correct if the maxpool-input activation, the forward MAX, and the backward
+// mask read ONE materialized buffer.  Across the captured step's separate
+// realize calls (BN running-stat realizes, loss.realize, the grad bundle) that
+// requires the cross-realize materialized_loc span to persist -- otherwise each
+// realize re-materializes the activation into a fresh buffer and the two copies
+// fp-disagree at an argmax tie -> CMPEQ miss -> count 0 -> RECIP(0) NaN.  So a
+// maxpool grad in the live graph IMPLIES the dedup span, exactly as the
+// faithful seed does (verified: without the span the default-seed stacked-
+// maxpool training NaNs at step 2; with it the loss curve matches faithful).
+static int MAXPOOL_GRAD_SEEN = 0;
+fn void materialize_note_maxpool_grad(void) { MAXPOOL_GRAD_SEEN = 1; }
+static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_JIT_REALIZE_DEDUP");
+    on = (e != NULL && e[0] != '0' && e[0] != '\0');
+    known = 1;
+  }
+  // The faithful realize-seed (THVM_RU_FAITHFUL_SEED) produces FEWER
+  // boundaries, so a forward intermediate is shared across realizes (forward
+  // in realize-1, read by backward in realize-2) WITHOUT a unifying boundary.
+  // The cross-realize materialized_loc dedup is what unifies the producer's
+  // output tid with the consumer's input tid; without it the JIT capture
+  // records divergent buf_ids (producer reallocs across realizes) and replay
+  // reads stale intermediates -> divergence/explosion.  So faithful IMPLIES
+  // the dedup (verified: faithful+dedup converges on the JIT replay, faithful
+  // alone diverges).  A maxpool grad implies it for the same reason (see
+  // MAXPOOL_GRAD_SEEN).
+  return on || ru_faithful_seed_on() || MAXPOOL_GRAD_SEEN;
+}
+static int materialized_loc_span_holds(void) {
+  // The cross-realize dedup keeps one realize's materialized boundary so a
+  // later realize in the same captured step substitutes it (one kernel,
+  // one recorded dispatch) instead of re-emitting + re-firing it.  Its
+  // load-bearing correctness contract is kernel_gc_sweep detaching every
+  // preserved boundary buffer's producer kid (backend-aware), so the
+  // depth-first fire reads the materialized leaf rather than re-firing the
+  // producer chain across realizes.  With that GC fix the span is correct
+  // on every backend the GC sweeps (CPU + CUDA) and follows the single
+  // THVM_JIT_REALIZE_DEDUP master gate.
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0 || !MATERIALIZE_JIT_DEDUP_ENABLED()) {
+    return 0;
+  }
+  if (CURRENT_BACKEND == &CPU_BACKEND) return 1;
+#ifdef THVM_HAS_CUDA
+  if (CURRENT_BACKEND == &CUDA_BACKEND) return 1;
+#endif
+  return 0;
+}
+fn void materialized_loc_clear(void);   // fwd decl (span_end calls it)
+fn void materialized_loc_jit_span_begin(void) {
+  // Track the captured-step bracket UNCONDITIONALLY (the depth marks "inside a
+  // JIT capture").  Whether the span actually DEFERS the cross-realize clear is
+  // decided lazily by materialized_loc_span_holds, which re-checks
+  // MATERIALIZE_JIT_DEDUP_ENABLED() at clear time.  This matters for the
+  // maxpool auto-enable (MAXPOOL_GRAD_SEEN): the flag is set DURING the step's
+  // realize (when the MAX-reduce vjp is built), AFTER this begin runs, so an
+  // early gate here would miss it and let the activation re-materialize per
+  // realize -> the stacked-maxpool NaN.  When the gate is off at clear time the
+  // span behaves exactly as the old per-realize clear.
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0) materialized_loc_clear();
+  MATERIALIZE_JIT_SPAN_DEPTH++;
+}
+fn void materialized_loc_jit_span_end(void) {
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0) return;
+  MATERIALIZE_JIT_SPAN_DEPTH--;
+  // Real clear (restore journal + wipe) now that the span's realizes are
+  // all done.  The heap rewrites that the span accumulated are undone so
+  // the hash-consed graph is back to its original shape for replay /
+  // future realizes.
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0) materialized_loc_clear();
+}
+
 static inline u32 materialized_loc_hash(u64 loc) {
   loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
   loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
@@ -119,6 +266,25 @@ static inline u32 materialized_loc_hash(u64 loc) {
 }
 
 fn void materialized_loc_clear(void) {
+  // Undo this realize's heap rewrites BEFORE wiping the cache so the
+  // hash-consed UOP graph is back to its original shape for the next
+  // realize (the substituted tids' buffers don't survive the pool
+  // rollback -- see SUBST_JOURNAL).  The journal restore ALWAYS runs,
+  // even inside a JIT-capture span: it returns the in-place TAG_TEN
+  // substitutions to their original UOP children so the NEXT realize in
+  // the span re-derives every substitution through materialized_loc_lookup
+  // (whose dead-buffer guard re-validates that the cached tid's buffer is
+  // still live).  Without that re-validation a stale, recycled tid could
+  // be re-bound blind.
+  subst_journal_restore();
+  // Inside an active JIT-capture realize-dedup span KEEP the loc->tid map
+  // so a later realize in the same captured step can substitute the
+  // kernel this one emitted (one kernel, one recorded dispatch) instead
+  // of re-emitting it.  Buffers stay live because JIT capture pins every
+  // recorded kernel output (buf_jit_pin); a non-pinned intermediate that
+  // got rolled back fails the lookup's dead-buffer guard -> safe re-emit.
+  // Deferred full wipe runs at materialized_loc_jit_span_end().
+  if (materialized_loc_span_holds()) return;
   for (u32 i = 0; i < MATERIALIZED_LOC_CAP; i++) {
     MATERIALIZED_LOC_TABLE[i].loc = MATERIALIZED_LOC_EMPTY;
     MATERIALIZED_LOC_TABLE[i].tid = 0;
@@ -137,6 +303,22 @@ fn u32 materialized_loc_lookup(u64 loc) {
       // Defensive: a cleared/recycled tid (TENS_NEXT shrank past it)
       // must not be returned -- caller would build a dangling TAG_TEN.
       if (tid == 0 || tid >= TENS_NEXT) return 0;
+      // This cache is NON-OWNING: it records loc -> tid but does not pin
+      // the tid's backing buffer.  A prior realize's intermediate can have
+      // its buffer reclaimed by cpu_buf_pool_rollback_with_preserve (the
+      // reference graph no longer needs it) while this stale entry lingers.
+      // The tid stays in range, so the TENS_NEXT guard above passes, but
+      // its buffer is dead (refcount 0 / unallocated).  Returning it makes
+      // the consumer view-resolve onto a drained slot: tensor_view_of
+      // re-increfs a dead CpuBuf, the producer kernel then dispatches into
+      // a NULL data pointer, and the downstream read segfaults.  Treat a
+      // dead-buffer tid as a miss so the caller re-materializes fresh
+      // (correctness intact; only the cross-realize cache hit is lost).
+      Backend *b   = TENS[tid].backend;
+      u32      bid = TENS[tid].buf_id;
+      if (bid == 0) return 0;
+      if (b != NULL && b->buf_refcount != NULL && b->buf_refcount(bid) == 0)
+        return 0;
       return tid;
     }
   }
@@ -187,7 +369,7 @@ static void materialize_subst_cached_rec(Term term, u8 *visited, u64 cap) {
     Term src = heap_read(loc + 1);
     if (term_tag(src) == TAG_UOP) {
       u32 cached_tid = materialized_loc_lookup(term_val(src));
-      if (cached_tid != 0) {
+      if (cached_tid != 0 && subst_journal_record(loc + 1, src)) {
         heap_set(loc + 1, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
       } else {
         materialize_subst_cached_rec(src, visited, cap);
@@ -204,7 +386,7 @@ static void materialize_subst_cached_rec(Term term, u8 *visited, u64 cap) {
     if (term_tag(child) != TAG_UOP) continue;
     if (term_ext(child) == UOP_KERNEL) continue;
     u32 cached_tid = materialized_loc_lookup(term_val(child));
-    if (cached_tid != 0) {
+    if (cached_tid != 0 && subst_journal_record(loc + i, child)) {
       heap_set(loc + i, term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid));
     } else {
       materialize_subst_cached_rec(child, visited, cap);
@@ -557,6 +739,18 @@ static void arena_sort_events(ArenaEvent *ev, u32 n) {
 }
 
 static int arena_boundary_is_plannable(u32 ord_idx) {
+  // During a JIT-capture dedup span, a kernel output materialized in one
+  // realize may be REUSED by a later realize of the same step (the whole
+  // point of the span -- forward activations read back by the grad/optim
+  // realizes).  The per-realize arena plans lifetimes WITHIN one realize,
+  // so it would recycle such a buffer's slot mid-step and corrupt the
+  // cross-realize read (the JIT pin keeps the buf_id alive but the arena
+  // already reused its bytes).  Force every boundary to a legacy
+  // (non-arena, non-recycled) alloc for the span; with the jit-capture pin
+  // (survives pool-rollback) the shared outputs stay live AND valid across
+  // all of the step's realizes.  Trades within-step arena recycling for
+  // correctness; the extra peak is bounded and the GPU has the headroom.
+  if (materialized_loc_span_holds()) return 0;
   u64 loc = BOUNDARY_ORDER[ord_idx];
   u32 binfo = bufferize_info_find(loc);
   if (binfo == 0xFFFFFFFFu) return 0;
@@ -651,6 +845,39 @@ static void arena_compute(void) {
     last_pos[i] = last_at;
     planned[i]  = 1;
     n_planned++;
+  }
+  if (getenv("THVM_ARENA_DUMP_BUFS")) {
+    for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
+      u64 nb = arena_boundary_nbytes(i);
+      if (nb < 1048576) continue;
+      u64 loc = BOUNDARY_ORDER[i];
+      u32 binfo = bufferize_info_find(loc);
+      u32 op = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].op : 0xFFu;
+      u64 kind = 0, naxes = 0, a0 = 0;
+      if (op == UOP_REDUCE) {
+        kind  = term_val(heap_read(loc + 1));
+        naxes = term_val(heap_read(loc + 2));
+        if (naxes >= 1) a0 = term_val(heap_read(loc + 3));
+      }
+      u64 cons[4];
+      u32 nc = bufferize_consumers_for_loc(loc, cons, 4);
+      u32 cop0 = 0xFFu, cop1 = 0xFFu;
+      if (nc >= 1) {
+        u32 ci = bufferize_info_find(cons[0]);
+        if (ci != 0xFFFFFFFFu) cop0 = BUFFERIZE_NODES[ci].op;
+      }
+      if (nc >= 2) {
+        u32 ci = bufferize_info_find(cons[1]);
+        if (ci != 0xFFFFFFFFu) cop1 = BUFFERIZE_NODES[ci].op;
+      }
+      fprintf(stderr,
+              "  buf[%u] op=%u bytes=%.2fMB plannable=%d kind=%llu naxes=%llu a0=%llu n_cons=%u cop0=%u cop1=%u life=[%u,%u]\n",
+              i, op, (double)nb / 1048576.0,
+              arena_boundary_is_plannable(i),
+              (unsigned long long)kind, (unsigned long long)naxes,
+              (unsigned long long)a0, nc, cop0, cop1,
+              first_pos[i], last_pos[i]);
+    }
   }
   if (n_planned == 0) return;
 
@@ -1592,19 +1819,28 @@ static Term try_inline_bufferize_via_axis_table(
   }
   if (prod_idx == 0xFFFFFFFFu) return 0;
   u32 prod_ndim = rangeify_unified_out_ndim_at(prod_idx);
-  // realized_axes[i] = the i-th producer output axis position that
-  // was closed in this BUFFERIZE.  For full-realize the mask is 0 and
-  // prod_ndim == n_ranges (identity).  For partial-realize the mask
-  // marks specific bits.
+  // realized_axes[i] = the i-th producer output axis position that was
+  // CLOSED (became an actual UOP_RANGE closed_range) in this BUFFERIZE.
+  // Mirror tinygrad indexing.py:66 `closed_ranges = tuple([r for i,r in
+  // enumerate(range_map[s][1]) if i in realized_ranges])` and thvm's own
+  // ru_collect_closed_ranges (rangeify_unified.c): a realized output axis
+  // whose out_rng collapsed to CONST(0) (a keepdim size-1 axis) carries no
+  // stride and is NOT a closed_range, so it is skipped here.  Filtering on
+  // the actual UOP_RANGE out_rng (not just the axes_mask popcount) keeps
+  // n_realized == n_ranges for the keepdim-reduce broadcast case, so the
+  // i-th closed_range binds POSITIONALLY to the i-th surviving output axis
+  // -- never disambiguated by extent.
+  int prod_full = rangeify_unified_realized_full_at(prod_idx);
   u8 axes_mask = rangeify_unified_axes_mask_at(prod_idx);
   u32 realized_axes[MAX_DIM] = {0};
   u32 n_realized = 0;
-  if (axes_mask == 0 && prod_ndim == n_ranges) {
-    for (u32 a = 0; a < prod_ndim; a++) realized_axes[n_realized++] = a;
-  } else {
-    for (u32 a = 0; a < prod_ndim && a < MAX_DIM; a++) {
-      if (axes_mask & (u8)(1u << a)) realized_axes[n_realized++] = a;
-    }
+  for (u32 a = 0; a < prod_ndim && a < MAX_DIM; a++) {
+    int axis_realized = prod_full || (axes_mask & (u8)(1u << a));
+    if (!axis_realized) continue;
+    Term r = rangeify_unified_out_rng_at(prod_idx, a);
+    if (r == 0 || term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+    if (n_realized < MAX_DIM) realized_axes[n_realized] = a;
+    n_realized++;
   }
   if (n_realized != n_ranges || ax_n < prod_ndim) return 0;
   // Bail rather than truncate (see stride_match note): every closed_range
@@ -1625,8 +1861,28 @@ static Term try_inline_bufferize_via_axis_table(
         || term_ext(cr) != UOP_RANGE) return 0;
     u32 ax = realized_axes[i];
     if (ax >= ax_n) return 0;
+    // The side-table ax_rngs[] are the consumer's in_rngs as they stood
+    // when THIS INDEX_E was built.  When this BUFFERIZE is itself being
+    // inlined into a grandparent consumer (a chain of inlines composing,
+    // e.g. the data-grad mul reads a rsqrt-cube correction whose value
+    // again reads the realized rsqrt buffer), an outer subst is active
+    // that maps those construction-time ranges to the grandparent's live
+    // iteration ranges.  Thread the side-table range through the active
+    // subst FIRST so the binding lands on the grandparent's ranges, not
+    // the stale construction-time ones.  This mirrors tinygrad
+    // indexing.py:78 where `ctx.range_map[x][0]` is always the LIVE
+    // consumer iteration: as the bottom-up rewrite composes nested
+    // BUFFERIZE.index() reads, every read uses the current consumer's
+    // ranges -- the multi-outer-axis general case the bare positional
+    // bind missed.
+    Term to_rng = ax_rngs[ax];
+    if (sub != NULL) {
+      for (u32 si = 0; si < sub->n; si++) {
+        if (sub->from[si] == to_rng) { to_rng = sub->to[si]; break; }
+      }
+    }
     new_sub.from[new_sub.n] = cr;
-    new_sub.to  [new_sub.n] = ax_rngs[ax];
+    new_sub.to  [new_sub.n] = to_rng;
     new_sub.n++;
   }
   return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
@@ -1806,6 +2062,20 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       if (v != 0 && n_ranges == 1
           && (term_tag(addr_term) != TAG_UOP
               || term_ext(addr_term) != UOP_RANGE)) {
+        // Tinygrad-spec POSITIONAL inline first (indexing.py:66,78): bind
+        // the single closed_range to the consumer's in_rng at the
+        // producer's realized output axis via the per-axis side table --
+        // NEVER by extent equality.  This is the keepdim-reduce broadcast
+        // (softmax `f - s.max(kd)`, layer-norm `t - mean`): the producer
+        // realized a 1-axis BUFFERIZE (the row reduce-to-scalar), the
+        // keepdim col axis collapsed to CONST(0), and the consumer reads
+        // it at a compound row*col addr.  The extent-keyed decomp below
+        // mis-binds (BAILs -> value collapses to +0.0f) whenever two
+        // consumer axes share an extent; the side-table path is
+        // unambiguous because it keys on the positional realized axis.
+        Term axis_hit = try_inline_bufferize_via_axis_table(
+            st, sub, resolved, inner_buf, v, n_ranges, depth);
+        if (axis_hit != 0) return axis_hit;
         Term hit = try_inline_bufferize_1axis_via_decomp(
             st, sub, inner_buf, v, addr_term, depth);
         if (hit != 0) return hit;
@@ -1951,6 +2221,155 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   Term out = changed ? uop_graph_rebuild_with_srcs(resolved, srcs) : resolved;
   if (sub == NULL) unified_rewrite_memo_insert(st, resolved, out);
   return out;
+}
+
+// === Post-inline broadcast-collapsed REDUCE repair ===
+//
+// thvm's UOP_REDUCE stores only its axis_ids; cpu_uop_walk's
+// uwalk_run_reduce recovers each axis's loop extent by scanning the
+// REDUCE body for a UOP_RANGE leaf with that axis_id.  When the body
+// reads a producer whose VALUE is invariant over a reduce axis (a
+// per-channel mean broadcast over the spatial/window axes -- e.g. the
+// detached-mean live adjoint `sum_{H,W}(m[c]*gy)` at N=1, or any
+// `bias.expand(...).sum()` grad), the materialize inline collapses the
+// producer BUFFERIZE down to its invariant value and the reduce-axis
+// RANGE leaves vanish from the body.  uwalk_run_reduce then sees
+// cext==0 and bails to the reduce identity (0 for SUM), zeroing the
+// adjoint -- the same failure ru_reduce_repair_broadcast_body fixes at
+// rangeify time, but that repair runs BEFORE the inline (when the body
+// still references the axis through the not-yet-inlined BUFFERIZE addr)
+// so it can't fire here.  Mirror tinygrad, where REDUCE carries its
+// RANGE srcs explicitly (uop/ops.py + schedule/indexing.py:94) so the
+// extent is never lost: re-apply the body-invariant repair AFTER the
+// inline.  A SUM reduce of a body invariant over axis a equals
+// body * extent(a); MAX/MIN equals body.
+//
+// The lost extents are recovered from the PRE-inline tree (where the
+// reduce-axis RANGE leaves still exist in the BUFFERIZE addrs / movement
+// swizzles): build an axis_id -> extent map by walking every RANGE leaf.
+
+#define RU_AXEXT_CAP 256
+typedef struct { u32 aid[RU_AXEXT_CAP]; u32 ext[RU_AXEXT_CAP]; u32 n; } AxExtMap;
+
+static void axext_add(AxExtMap *m, u32 aid, u32 ext) {
+  if (ext == 0) return;
+  for (u32 i = 0; i < m->n; i++) if (m->aid[i] == aid) return;
+  if (m->n < RU_AXEXT_CAP) { m->aid[m->n] = aid; m->ext[m->n] = ext; m->n++; }
+}
+
+static u32 axext_lookup(AxExtMap const *m, u32 aid) {
+  for (u32 i = 0; i < m->n; i++) if (m->aid[i] == aid) return m->ext[i];
+  return 0;
+}
+
+static void axext_collect_rec(AxExtMap *m, Term t, u32 depth) {
+  if (depth > 256) return;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) {
+    axext_add(m, uop_range_axis_id(r), uop_range_extent(r));
+    return;
+  }
+  // Pick up the extents a BUFFERIZE encodes in its closed_ranges (these
+  // are the producer's realized output-axis ranges -- the spatial axes a
+  // partial-realize keeps that the consumer reduce then contracts).
+  if (op == UOP_BUFFERIZE) {
+    u32 nr = uop_bufferize_n_ranges(r);
+    for (u32 i = 0; i < nr; i++) {
+      Term cr = uop_bufferize_range_at(r, i);
+      if (cr != 0 && term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE) {
+        axext_add(m, uop_range_axis_id(cr), uop_range_extent(cr));
+      }
+    }
+  }
+  if (op == UOP_BUFFER) return;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++) axext_collect_rec(m, heap_read(loc + i), depth + 1);
+}
+
+// Return 1 if subtree `t` references a UOP_RANGE leaf with axis_id `aid`.
+// Does not descend into UOP_BUFFER (opaque) but DOES descend into the
+// already-inlined body (no BUFFERIZE survives post-inline on the walker
+// path).
+static int subtree_uses_axis_mat(Term t, u32 aid, u32 depth) {
+  if (depth > 256) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_RANGE) return uop_range_axis_id(r) == aid;
+  if (op == UOP_BUFFER) return 0;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  for (u8 i = 0; i < ar; i++)
+    if (subtree_uses_axis_mat(heap_read(loc + i), aid, depth + 1)) return 1;
+  return 0;
+}
+
+static u32 f32_to_bits(f32 v) { u32 b; memcpy(&b, &v, sizeof b); return b; }
+
+static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
+  if (depth > 256) return t;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return t;
+  u8 op = term_ext(r);
+  if (op == UOP_BUFFER) return r;
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(r);
+  // Rebuild recursable children first.
+  Term srcs[MAX_UOP_SRC] = {0};
+  int changed = 0;
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term c  = heap_read(loc + i);
+    Term nc = repair_collapsed_reduces_rec(c, m, depth + 1);
+    srcs[i] = nc;
+    if (nc != c) changed = 1;
+  }
+  if (op != UOP_REDUCE) {
+    return changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
+  }
+  // For a REDUCE: detect axes the (rebuilt) body no longer references.
+  // SUM contributes a *extent factor per such axis; MAX/MIN drops them
+  // (the reduce of a body constant over an axis == body for MAX/MIN).
+  u32 n_axes = uop_reduce_n_axes(r);
+  u32 kind   = uop_reduce_kind(r);
+  Term body  = srcs[0];   // the recursively-repaired body
+  u32 kept_axes[MAX_DIM];
+  u32 n_kept = 0;
+  u64 prod   = 1;
+  int any_collapsed = 0;
+  int bail = 0;
+  for (u32 a = 0; a < n_axes && a < MAX_DIM; a++) {
+    u32 ax = uop_reduce_axis(r, a);
+    if (subtree_uses_axis_mat(body, ax, 0)) {
+      if (n_kept < MAX_DIM) kept_axes[n_kept++] = ax;
+    } else {
+      u32 ext = axext_lookup(m, ax);
+      // No recoverable extent -> bail entirely (keep the original reduce
+      // verbatim; we never make things worse than the pre-repair walker).
+      if (ext == 0) { bail = 1; break; }
+      any_collapsed = 1;
+      prod *= (u64)ext;
+    }
+  }
+  if (bail || !any_collapsed) {
+    // Body may still have changed (a nested reduce deeper down was
+    // repaired); rebuild the reduce shell over the original axes.
+    if (!changed) return r;
+    u32 all_axes[MAX_DIM];
+    for (u32 a = 0; a < n_axes && a < MAX_DIM; a++) all_axes[a] = uop_reduce_axis(r, a);
+    return uop_reduce_multi(kind, n_axes, all_axes, body);
+  }
+  Term new_body = body;
+  if (kind == REDUCE_SUM && prod != 1) {
+    Term k = uop_const(DT_FP32, f32_to_bits((f32)prod));
+    new_body = uop_binary(UOP_MUL, body, k);
+  }
+  // Rebuild the reduce over only the surviving (still-referenced) axes;
+  // if none survive, the reduce degenerates to its (scaled) body.
+  if (n_kept == 0) return new_body;
+  return uop_reduce_multi(kind, n_kept, kept_axes, new_body);
 }
 
 static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {
@@ -2156,7 +2575,14 @@ static int stranded_range_check_value(RangeAxisSet const *iter_axes,
   u64 loc = term_val(r);
   if (op == UOP_RANGE) {
     u32 aid = (u32)term_val(heap_read(loc + 0));
-    return range_axis_has(iter_axes, aid) ? 0 : 1;
+    if (range_axis_has(iter_axes, aid)) return 0;
+    // THVM_FUSE_CONV_BWD: a hash-cons-aliased REDUCE / realized-scope axis
+    // from a disjoint scope is bound when the fusing conv-bwd product
+    // splices into its contraction reduce; mirror the rangeify-side
+    // covered-check so it is not re-flagged stranded here.  (No-op when
+    // the fuse flag is off -- the fuse-bound set is empty.)
+    if (rangeify_unified_aid_is_fuse_bound(aid)) return 0;
+    return 1;
   }
   // UOP_BUFFERIZE is opaque: its stored value subtree carries closed_ranges
   // (its own iter scope), not the consumer's.  cpu_uop_walk's INDEX_E case
@@ -2207,7 +2633,11 @@ static int bufferize_strand_check_deep(RangeAxisSet const *iter,
   u64 loc = term_val(r);
   if (op == UOP_RANGE) {
     u32 aid = (u32)term_val(heap_read(loc + 0));
-    return range_axis_has(iter, aid) ? 0 : 1;
+    if (range_axis_has(iter, aid)) return 0;
+    // THVM_FUSE_CONV_BWD: hash-cons-aliased foreign reduce/realized axis
+    // (see stranded_range_check_value) -- bound at splice, not stranded.
+    if (rangeify_unified_aid_is_fuse_bound(aid)) return 0;
+    return 1;
   }
   if (op == UOP_KERNEL || op == UOP_BUFFER) return 0;
   if (op == UOP_BUFFERIZE) {
@@ -2580,6 +3010,108 @@ static char const *bypass_dbg_op_name(u8 op) {
   }
 }
 
+// Debug-only: product of the extents of every LOOP-typed RANGE leaf in
+// `t` that is NOT in `bound` (the STORE addr axes + any enclosing
+// REDUCE axes).  A stranded reduce window rendered as outer LOOP loops
+// shows up here as a huge product (the conv-bwd 24x24 window strand).
+static u64 strand_loop_product_rec(RangeAxisSet const *bound,
+                                   BufferizeScanVisited *v, Term t,
+                                   u32 depth) {
+  if (depth > 256) return 1;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return 1;
+  if (bufferize_scan_seen(v, r)) return 1;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_RANGE) {
+    u32 aid   = (u32)term_val(heap_read(loc + 0));
+    u32 atype = (u32)term_val(heap_read(loc + 1));
+    u32 ext   = (u32)term_val(heap_read(loc + 2));
+    if (atype == 0 /*LOOP*/ && !range_axis_has(bound, aid) && ext > 1)
+      return (u64)ext;
+    return 1;
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 1;
+  if (op == UOP_REDUCE) {
+    RangeAxisSet inner = *bound;
+    u32 n_axes = uop_reduce_n_axes(r);
+    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(r, i));
+    BufferizeScanVisited iv;
+    iv.n = 0;
+    return strand_loop_product_rec(&inner, &iv, uop_reduce_src(r), depth + 1);
+  }
+  u64 prod = 1;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    u64 c = strand_loop_product_rec(bound, v, heap_read(loc + i), depth + 1);
+    if (c > 1 && prod > (u64)~0ull / c) return (u64)~0ull;
+    prod *= c;
+  }
+  return prod;
+}
+
+static u64 strand_loop_product(Term store_root) {
+  if (store_root == 0 || term_tag(store_root) != TAG_UOP
+      || term_ext(store_root) != UOP_STORE) return 0;
+  u64 sloc = term_val(store_root);
+  Term s_addr  = heap_read(sloc + 1);
+  Term s_value = heap_read(sloc + 2);
+  RangeAxisSet bound;
+  bound.n = 0;
+  BufferizeScanVisited av;
+  av.n = 0;
+  stranded_range_collect_addr(&bound, &av, s_addr, 0);
+  BufferizeScanVisited vv;
+  vv.n = 0;
+  return strand_loop_product_rec(&bound, &vv, s_value, 0);
+}
+
+// Debug-only: total iteration product of every DISTINCT RANGE leaf (LOOP
+// and REDUCE) in the store's value subtree, regardless of addr-binding.
+// A correct-but-infeasible reduce (the conv data-grad's 144-padded window
+// absorbed into the reduce -> ~6.8e12) surfaces here even though its
+// stranded-LOOP product is 1.  Distinct by axis_id so a leaf referenced
+// in both legs of a MUL isn't double-counted.
+static void total_iter_collect_rec(BufferizeScanVisited *seen,
+                                   u32 *aids, u32 *exts, u32 *n, u32 cap,
+                                   Term t, u32 depth) {
+  if (depth > 256 || *n >= cap) return;
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP) return;
+  if (bufferize_scan_seen(seen, r)) return;
+  u8  op  = term_ext(r);
+  u64 loc = term_val(r);
+  if (op == UOP_RANGE) {
+    u32 aid = (u32)term_val(heap_read(loc + 0));
+    u32 ext = (u32)term_val(heap_read(loc + 2));
+    for (u32 i = 0; i < *n; i++) if (aids[i] == aid) return;
+    if (ext > 1) { aids[*n] = aid; exts[*n] = ext; (*n)++; }
+    return;
+  }
+  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++)
+    total_iter_collect_rec(seen, aids, exts, n, cap, heap_read(loc + i),
+                           depth + 1);
+}
+
+static u64 total_iter_product(Term store_root) {
+  if (store_root == 0 || term_tag(store_root) != TAG_UOP
+      || term_ext(store_root) != UOP_STORE) return 0;
+  u64 sloc = term_val(store_root);
+  Term s_value = heap_read(sloc + 2);
+  u32 aids[64], exts[64], n = 0;
+  BufferizeScanVisited seen;
+  seen.n = 0;
+  total_iter_collect_rec(&seen, aids, exts, &n, 64, s_value, 0);
+  u64 prod = 1;
+  for (u32 i = 0; i < n; i++) {
+    if (prod > (u64)~0ull / exts[i]) return (u64)~0ull;
+    prod *= exts[i];
+  }
+  return prod;
+}
+
 static void bypass_dbg_dump_rec(Term t, u32 indent, u32 depth) {
   if (depth > 40) {
     for (u32 i = 0; i < indent; i++) fputc(' ', stderr);
@@ -2726,7 +3258,19 @@ static void topo_sort_boundaries(Term root) {
     // Partial realizes that genuinely drop axes and inline cleanly
     // (softmax denom / layer-norm mean broadcasts) are NOT promoted, so
     // their fusion is preserved.
-    if (!BUFFERIZE_NODES[i].realized) {
+    // THVM_RU_FAITHFUL_SEED: this boundary gate must agree with the
+    // rangeify realize-map seed (rangeify_unified.c).  In faithful mode the
+    // CLASSIFY realized bit (MULTI/REDUCE/MATMUL heuristics) is NOT a
+    // boundary by itself -- only ROOT (== tinygrad STORE) is.  Every other
+    // node falls through to the rangeify-realized gate below, so a node the
+    // unified walk fused (single-consumer inherit, no ending-ranges) is
+    // inlined into its consumer instead of escaping into its own kernel
+    // (the conv-backward 6-D MUL was emitted as a 327M-element kernel
+    // otherwise).  The effectively-full / would-strand checks still apply,
+    // so a genuinely stranding inline (the _pool col2im) is still realized.
+    int classify_real = BUFFERIZE_NODES[i].realized
+                     && ru_seed_boundary_holds(BUFFERIZE_NODES[i].reasons);
+    if (!classify_real) {
       u32 nr  = uop_bufferize_n_ranges(buf);
       u32 ond = rangeify_unified_out_ndim_at(i);
       int effectively_full = (ond > 0 && nr == ond);
@@ -3865,6 +4409,29 @@ static Term emit_kernel_for_boundary(u32 bi) {
     return BOUNDARY_TERM[bi];
   }
 
+  // Cross-pass boundary memoization (mirror tinygrad pm_generate_realize_map
+  // memoizing UOp -> Buffer; indexing.py:28-35).  A boundary at this loc may
+  // have already been emitted by an EARLIER materialize -- a prior fixpoint
+  // iteration of THIS realize, or an earlier CTR child (the loss) whose
+  // forward graph shares the loc with a later child's backward graph.  The
+  // canonical case: the maxpool-input activation, realized once but reached by
+  // the forward window-MAX (loss child) AND the backward argmax mask CMPEQ
+  // (grad child).  Without reuse each consumer re-emits the activation into a
+  // SEPARATE buffer; the two copies fp-disagree at an argmax tie, the CMPEQ
+  // misses, the /count divide sees 0, and RECIP(0) NaNs (the stacked-maxpool
+  // default-seed NaN).  Consulting MATERIALIZED_LOC here ties every consumer
+  // to the ONE emitted buffer.  Gated by scope>0 (inside a realize wrapper);
+  // the lookup's own dead-buffer guard makes a rolled-back tid a safe miss.
+  if (materialized_loc_scope_depth() > 0) {
+    u32 cached_tid = materialized_loc_lookup(boundary_loc);
+    if (cached_tid != 0) {
+      Term ten = term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid);
+      BOUNDARY_TID[bi]  = cached_tid;
+      BOUNDARY_TERM[bi] = ten;
+      return ten;
+    }
+  }
+
   u8   op        = BUFFERIZE_NODES[idx].op;
   Term root_term = term_new(0, TAG_UOP, op, boundary_loc);
 
@@ -3932,13 +4499,35 @@ static Term emit_kernel_for_boundary(u32 bi) {
   if (KSRC_IS_INPUT(result)) {
     u32 alias_tid = ke->input_tids[KSRC_INDEX(result)];
     if (alias_tid != 0 && alias_tid < TENS_NEXT) {
-      // Release the unused output_tid we speculatively allocated.
-      tensor_release(out_tid);
-      kernel_dealloc_last(kid);
-      Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
-      BOUNDARY_TID [bi] = alias_tid;
-      BOUNDARY_TERM[bi] = alias_term;
-      return alias_term;
+      // A realized movement-op boundary that resolved to a NON-CONTIGUOUS
+      // view-alias (a transpose / strided getitem of a computed source)
+      // must NOT be aliased to the underlying buffer.  The boundary exists
+      // because the rangeify consumer-divergence walk realized this view
+      // for two consumers whose swizzles diverge (Newton-Schulz `Gw` vs
+      // `Gw.T`, q.reshape(M,N,1) vs q.reshape(M,1,N)); those consumers read
+      // the boundary with a ROW-MAJOR flat addr over the boundary's OUTPUT
+      // shape (they assume the realized buffer is contiguous, mirroring
+      // tinygrad's BUFFERIZE.index(*consumer_ranges) over a contiguous
+      // store -- indexing.py:75-78).  Aliasing the strided source view
+      // instead leaks the source's stride into the flat read -> wrong
+      // element (the transpose is silently dropped).  Fall through to emit
+      // the copy/gather kernel so the boundary materializes contiguous
+      // data, exactly as a realized tinygrad BUFFERIZE does.  A CONTIGUOUS
+      // alias (offset/identity view, the gy=CONST(1.0) MSE-backward seed)
+      // is still aliased -- same bytes, no copy needed.
+      int alias_contig = TENS[alias_tid].view.contiguous
+                      && TENS[alias_tid].view.offset == 0
+                      && TENS[alias_tid].nviews == 0;
+      int boundary_is_movement = uop_is_movement(op);
+      if (!(boundary_is_movement && !alias_contig)) {
+        // Release the unused output_tid we speculatively allocated.
+        tensor_release(out_tid);
+        kernel_dealloc_last(kid);
+        Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+        BOUNDARY_TID [bi] = alias_tid;
+        BOUNDARY_TERM[bi] = alias_term;
+        return alias_term;
+      }
     }
   }
 
@@ -3971,6 +4560,17 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // returns 0 if ru_root is 0 -- so inside this branch we already
     // know cached_lift.store_root holds the unified pass's root.
     Term ru_rewritten = unified_store_root_for_walker(ke, ke->cached_lift.store_root);
+    // Re-apply the broadcast-collapsed REDUCE repair AFTER the inline:
+    // a per-channel-mean-style producer fused into a reduce collapses its
+    // value to the invariant per-channel scalar, dropping the reduce-axis
+    // RANGE leaves so uwalk_run_reduce would bail to the SUM identity 0
+    // (the detached-mean live-adjoint at N=1, bias.expand grads, etc.).
+    // The lost axis extents are recovered from the PRE-inline store_root.
+    {
+      AxExtMap _axm; _axm.n = 0;
+      axext_collect_rec(&_axm, ke->cached_lift.store_root, 0);
+      ru_rewritten = repair_collapsed_reduces_rec(ru_rewritten, &_axm, 0);
+    }
     // Scan the rewritten store_root for INDEX_E reads against slots
     // whose tid carries non-trivial layout (chain or non-contig
     // view).  The flag commit is deferred until the bypass-succeeded
@@ -4068,6 +4668,36 @@ static Term emit_kernel_for_boundary(u32 bi) {
                                                   m_opts, m_n_app);
       Term post = uop_apply_kernel_opts(root_after_split, m_opts, m_n_app);
       ke->cached_lift.store_root = post;
+    }
+  }
+
+  // Dense-renumber axis_ids to 0..n per kernel (the lifter assigns
+  // global, sparse, possibly-large ids; downstream wants a fresh 0..n
+  // axis space like tinygrad).  Runs here -- after every materialize-
+  // time rewrite, before the init snapshot + fire-time hand_opts -- so
+  // hand_opts' `axis_id+1` splits stay contiguous on a dense base and
+  // the renderer emits dense ids directly (no post-render canonicalize).
+  if (ke->cached_lift.store_root != 0) {
+    ke->cached_lift.store_root =
+        uop_dag_renumber_axes(ke->cached_lift.store_root);
+  }
+
+  // Schedule-time explosion guard (debug-only): walk the finalized
+  // store_root, multiply every LOOP-typed RANGE leaf in the value
+  // subtree that is NOT in the STORE addr (i.e. a stranded loop), and
+  // report when the product blows past a threshold.  Lets us diagnose
+  // the conv-bwd window-strand WITHOUT dispatching the ~6.8e12-iter
+  // kernel that otherwise hangs.  Gated behind THVM_DUMP_STRAND_GUARD.
+  if (ke->cached_lift.store_root != 0 && getenv("THVM_DUMP_STRAND_GUARD")) {
+    u64 strand_prod = strand_loop_product(ke->cached_lift.store_root);
+    u64 total_prod  = total_iter_product(ke->cached_lift.store_root);
+    if (strand_prod >= 100ull || total_prod >= 100000000ull) {
+      fprintf(stderr,
+              "STRAND_GUARD kid=%u op=%s strand_loop_product=%llu "
+              "total_iter_product=%llu\n",
+              kid, bypass_dbg_op_name(op), (unsigned long long)strand_prod,
+              (unsigned long long)total_prod);
+      bypass_dbg_dump("strand_root", kid, ke->cached_lift.store_root);
     }
   }
 

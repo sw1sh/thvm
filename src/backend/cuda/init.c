@@ -35,6 +35,10 @@ typedef struct {
   u8          preserved;     // per-realize pool keep-flag (see buf_pool.c)
   u8          owns_data;     // 1: cuMemFree on release; 0: view, do not free
   u8          skip_freelist; // 1: pool_rollback real-frees instead of parking
+  u8          jit_pinned;    // STICKY: held by an active JIT capture (replay
+                             // re-fires kernels against this buf_id).
+                             // pool_rollback skips; clear_preserved leaves it.
+                             // Cleared only by jit_capture_drop on the slot.
   u32         parent_buf_id; // arena views: parent CudaBuf to ref/unref
 } CudaBuf;
 
@@ -51,6 +55,26 @@ static u32     CUDA_FREELIST_LEN  = 0;
 static int        CUDA_READY   = 0;
 static CUdevice   CUDA_DEVICE  = 0;
 static CUcontext  CUDA_CONTEXT = NULL;
+
+// Dedicated stream used for cuGraph capture.  jit_replay flips
+// CUDA_CUR_STREAM to this stream for the duration of the first
+// capture pass; subsequent replays cuGraphLaunch on this stream too.
+// All cuLaunchKernel / cuMemcpyAsync calls in the dispatch path
+// honor CUDA_CUR_STREAM (NULL = default sync stream).
+static CUstream   CUDA_CAPTURE_STREAM = NULL;
+static CUstream   CUDA_CUR_STREAM     = NULL;   // 0/NULL = default
+
+// Per-JIT-slot cached CUgraph + CUgraphExec.  Keyed by jit slot id.
+// JIT_CAPTURE_NSLOTS lives in jit/capture.c; mirror the constant
+// here (cuda backend is included before capture.c, so a sym ref
+// would be a forward dep).  Bump together if capture.c bumps.
+#define CUDA_JIT_GRAPH_CACHE_NSLOTS 16
+typedef struct {
+  CUgraph     graph;
+  CUgraphExec exec;
+  int         valid;
+} CudaJitGraphCacheEntry;
+static CudaJitGraphCacheEntry CUDA_JIT_GRAPH_CACHE[CUDA_JIT_GRAPH_CACHE_NSLOTS];
 
 // jit.c (included after this file) owns the nvrtc module cache;
 // forward-declared so cuda_shutdown can unload every cached module
@@ -125,6 +149,19 @@ fn int cuda_device_sm(void) {
   cuDeviceGetAttribute(&cc_minor,
       CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, CUDA_DEVICE);
   return cc_major * 10 + cc_minor;
+}
+
+// Streaming-multiprocessor (SM) count of the active device (V100 -> 80,
+// A100 -> 108, H100 -> 132/144).  hand_opts.c derives the reduce-heavy
+// occupancy floor from this so the UPCAST cap auto-tunes per GPU rather
+// than needing a hand-set THVM_UPCAST_REDUCE_MIN_GRID.  Returns 0 when
+// CUDA is not ready (callers treat 0 as "no cap").
+fn int cuda_device_sm_count(void) {
+  int count = 0;
+  if (!CUDA_READY) return 0;
+  cuDeviceGetAttribute(&count,
+      CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, CUDA_DEVICE);
+  return count > 0 ? count : 0;
 }
 
 fn void cuda_shutdown(void) {

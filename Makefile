@@ -218,6 +218,11 @@ TESTS := \
   $(BIN)/test_uop_range_axis_type \
   $(BIN)/test_uop_movement_index \
   $(BIN)/test_uop_graph_rewrite \
+  $(BIN)/test_uop_expand \
+  $(BIN)/test_uop_devectorize \
+  $(BIN)/test_uop_symbolic \
+  $(BIN)/test_uop_linearize \
+  $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \
   $(BIN)/test_uop_range_axis_type \
   $(BIN)/test_grad \
@@ -373,6 +378,7 @@ ifeq ($(shell uname -s),Linux)
     CUDA_LDFLAGS   := -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib64/stubs \
                       -L/usr/lib/x86_64-linux-gnu -lcuda -lnvrtc
     TESTS          += $(BIN)/test_cuda_backend
+    TESTS          += $(BIN)/test_cuda_ptx
   endif
 endif
 
@@ -617,6 +623,9 @@ $(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(META
 $(BIN)/test_cuda_backend: tests/test_cuda_backend.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
+$(BIN)/test_cuda_ptx: tests/test_cuda_ptx.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
+
 # Cross-backend dispatch microbench.  One binary; the backend is chosen
 # at runtime via DEV={cpu,metal,cuda}.  On macOS it links the Metal
 # backend (so DEV=cpu and DEV=metal both work); on Linux+CUDA it links
@@ -835,13 +844,19 @@ PY_THVM_OBJ     := $(BUILD)/py_thvm.o
 PY_METAL_OBJ    := $(BUILD)/py_thvm_metal.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
 	clang -fPIC -O2 -DACCELERATE_NEW_LAPACK $(ATP_DEFINES) \
+	    -DTHVM_HAS_METAL $(METAL_DEFINES) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
 $(PY_METAL_OBJ): py/csource/thvm_py_metal.m | $(BUILD)
 	clang -fPIC -fobjc-arc -O2 -c -o $@ $<
-$(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ)
+# Link the REAL Metal backend (backend_metal.o) + its metallib so the
+# general DEV=metal tensor/realize path (metal_buf_write/read/dispatch)
+# is live -- without it thvm.c falls back to the no-op Metal STUB and
+# every Metal buffer reads back zero.  py_thvm_metal.o (py_metal_* manual
+# dispatch harness) coexists; distinct symbol prefixes, no conflict.
+$(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ) $(METAL_LIBPATH)
 	clang -shared -framework Accelerate -framework Metal -framework Foundation \
-	    -o $@ $^
+	    -o $@ $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ)
 .PHONY: py
 py: $(PY_DYLIB)
 endif

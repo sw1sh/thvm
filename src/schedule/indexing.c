@@ -25,20 +25,26 @@ fn void apply_movement_op_shrink(u32 ndim,
                                   u32 const *begin_end,
                                   Term const *out_rngs,
                                   Term *in_rngs) {
-  // SHRINK index transform is handled DOWNSTREAM by view_apply_shrink
-  // in materialize.c, which folds the begin offset into the produced
-  // TenDesc's view.offset.  Adding it here too caused double-shift
-  // (project_thvm_composed_grad_bug -- May 20).  This pass leaves
-  // out_rngs untouched; the kernel reads via the shifted view.
-  //
-  // begin_end retained in the signature for caller compatibility
-  // (ru_apply_movement passes it) and so we have a hook here if a
-  // UOP-DAG source ever needs the index-shift fallback (no current
-  // path triggers it; the view-resolve in materialize.c bottoms out
-  // at TAG_TEN for every existing test on master).
-  (void)begin_end;
+  // tinygrad indexing.py:131  rngs = tuple(a if ss == 0 else a+ss ...):
+  // shift each consumer index by the begin offset so the kernel reads
+  // the source at out_iter + begin.  A SHRINK that feeds a kernel body
+  // (REDUCE / elementwise) or sits over a COMPUTED source (PAD result)
+  // is rangeified through here -- view_apply_shrink in materialize.c
+  // only ever sees a SHRINK that resolves to a buffer-backed view
+  // *input alias* (op_is_view_movement path), and those never reach
+  // this swizzle, so the begin offset is applied exactly once.  The
+  // a4d6ca41 double-shift came from an earlier flow that fed a
+  // view-offset-shifted alias through a +ss-swizzled index; the
+  // current rangeify/view-resolve split keeps the two paths disjoint
+  // (project_shrink_over_pad_offset_dropped).
   for (u32 i = 0; i < ndim; i++) {
-    in_rngs[i] = out_rngs[i];
+    u32 ss = begin_end[2 * i];
+    if (ss == 0) {
+      in_rngs[i] = out_rngs[i];
+    } else {
+      Term ss_const = uop_const(DT_INT32, ss);
+      in_rngs[i] = uop_int_binary(UOP_IADD, out_rngs[i], ss_const);
+    }
   }
 }
 
@@ -140,6 +146,148 @@ fn void apply_movement_op_pad(u32 ndim,
 // alignment.
 static Term reshape_const_zero(void) {
   return uop_const(DT_INT32, 0);
+}
+
+// === PLACEHOLDER round-trip (gated THVM_FUSE_CONV_BWD) ================
+//
+// Mirror source: tinygrad/schedule/indexing.py:140-143 (RESHAPE case of
+// apply_movement_op) + indexing.py:112-125 (_apply_reshape).
+//
+//   sink = UOp.sink(*rngs).simplify()
+//   sub_array = {r: UOp.range(r.src[0], i, PLACEHOLDER) for i,r in enumerate(sink.ranges)}
+//   rngs = _apply_reshape(in_shape, arg, sink.substitute(sub_array))
+//            .substitute({v:k for k,v in sub_array.items()}).src
+//
+// thvm's flat-decompose (apply_movement_op_reshape) builds the same
+// `combined = sum(out_rng*stride)` flat then decomposes by in_shape via
+// IDIV/IMOD -- but it runs directly on the CONSUMER's out_rngs.  When a
+// prior reshape already swizzled those into compound IDIV/IMOD/affine
+// trees (the `_pool` unfold `[...,144,144]->[...,6,24,6,24]` mints fresh
+// independent ranges for the 6x24 split, discarding the packed structure
+// `flat = oh + kh*25`), the downstream `(a0 + a2*24)//25` has two
+// structurally-independent RANGE leaves and the divmod-recombine folds in
+// index_simplify.c have no shared `flat` to fold against.
+//
+// Fix (tinygrad's): substitute each free RANGE leaf in the consumer
+// out_rngs with a FRESH single placeholder RANGE (distinct clean axis_id,
+// same extent so the bound-aware folds still fire), run the flat-
+// decompose against the clean placeholders -- so the recombine fires
+// symbolically at constructor time in uop_int_binary -- then substitute
+// the real ranges back.  The recombine `(x//c)*c + x%c -> x`, then
+// `flat//25 -> kh, flat%25 -> oh`, fires before fresh ranges commit.
+//
+// Placeholder axis_ids use a high base disjoint from the real axis space
+// (RU_RANGE_IDX_COUNTER) so a placeholder can never collide with a real
+// range and the inverse substitution is exact.  Placeholders never escape
+// this function -- every one is substituted back to its real range.
+#define RESHAPE_PLACEHOLDER_AXIS_BASE 0x60000000u
+
+// Collect distinct free RANGE leaves (axis_id + extent + axis_type) over
+// all the out_rngs into out_aids/out_ext/out_atype, bounded by cap.
+// Returns the count, or (u32)-1 on overflow (caller declines the round-
+// trip and falls back).  axis_type is collected so the forward
+// placeholder substitution can rebuild the exact hash-consed Term (the
+// uop_range key includes axis_type).
+static u32 reshape_collect_distinct_ranges(Term t, u32 *out_aids,
+                                           u32 *out_ext, u32 *out_atype,
+                                           u32 *n, u32 cap, u32 depth) {
+  if (depth > 64) return *n;
+  if (term_tag(t) != TAG_UOP) return *n;
+  u8 op = term_ext(t);
+  if (op == UOP_RANGE) {
+    u32 aid = uop_range_axis_id(t);
+    for (u32 i = 0; i < *n; i++) {
+      if (out_aids[i] == aid) return *n;
+    }
+    if (*n >= cap) { *n = (u32)-1; return *n; }
+    out_aids[*n]  = aid;
+    out_ext[*n]   = uop_range_extent(t);
+    out_atype[*n] = uop_range_axis_type(t);
+    (*n)++;
+    return *n;
+  }
+  if (op == UOP_CONST || op == UOP_INVALID || op == UOP_BUFFER
+      || op == UOP_BUFFERIZE) {
+    return *n;
+  }
+  u8 ar = uop_arity(op);
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar; i++) {
+    reshape_collect_distinct_ranges(heap_read(loc + i), out_aids, out_ext,
+                                    out_atype, n, cap, depth + 1);
+    if (*n == (u32)-1) return *n;
+  }
+  return *n;
+}
+
+// PLACEHOLDER-composed RESHAPE swizzle.  Substitutes each consumer free
+// RANGE for a clean placeholder, runs the flat-decompose (which fires the
+// symbolic recombine), then maps placeholders back to the real ranges.
+// Returns the same 0/1 contract as apply_movement_op_reshape.
+fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
+                                          u32 in_ndim,  u32 const *in_shape,
+                                          Term const *out_rngs, Term *in_rngs) {
+  if (out_ndim > MAX_DIM || in_ndim > MAX_DIM) return 0;
+
+  // Gather the distinct real RANGE leaves the consumer out_rngs reference.
+  u32 real_aids[2 * MAX_DIM];
+  u32 real_ext[2 * MAX_DIM];
+  u32 real_atype[2 * MAX_DIM];
+  u32 n_real = 0;
+  for (u32 a = 0; a < out_ndim; a++) {
+    reshape_collect_distinct_ranges(out_rngs[a], real_aids, real_ext,
+                                    real_atype, &n_real, 2 * MAX_DIM, 0);
+    if (n_real == (u32)-1) return 0;  // too many leaves: decline, fall back
+  }
+
+  // Build a placeholder RANGE per distinct real leaf (clean single leaf,
+  // same extent, disjoint axis_id) and the real->placeholder forward map.
+  // Reconstruct `real_rng[i]` with the ORIGINAL axis_type so the forward
+  // substitution matches the actual hash-consed Term in out_rngs (the
+  // uop_range hash-cons key includes axis_type -- rebuilding a KAX_REDUCE
+  // window range as KAX_LOOP would silently miss it, leaking it past the
+  // placeholder swap so the divmod-recombine can't fire and the window
+  // strands as a non-reduce loop -- the conv-bwd 2nd-step 6.8e12-iter
+  // hang).  Placeholders stay KAX_LOOP (a clean disjoint axis), and the
+  // inverse map restores the real range identity (incl. its type).
+  Term real_rng[2 * MAX_DIM];
+  Term placeholder[2 * MAX_DIM];
+  for (u32 i = 0; i < n_real; i++) {
+    real_rng[i]    = uop_range(real_aids[i], real_atype[i], real_ext[i]);
+    placeholder[i] = uop_range(RESHAPE_PLACEHOLDER_AXIS_BASE + i, KAX_LOOP,
+                               real_ext[i]);
+  }
+
+  // Substitute real->placeholder in each consumer out_rng (routing through
+  // the simplifying constructors so commutative flips settle early, like
+  // tinygrad's `UOp.sink(*rngs).simplify()`).
+  Term sub_out[MAX_DIM];
+  for (u32 a = 0; a < out_ndim; a++) {
+    Term e = out_rngs[a];
+    for (u32 i = 0; i < n_real; i++) {
+      e = uop_index_substitute(e, real_rng[i], placeholder[i], 0);
+    }
+    sub_out[a] = e;
+  }
+
+  // Flat-decompose on the clean placeholder ranges.  The divmod-recombine
+  // folds (index_simplify.c) fire at constructor time, collapsing the
+  // split+re-split back to the source iter where possible.
+  Term sub_in[MAX_DIM];
+  if (!apply_movement_op_reshape(out_ndim, out_shape, in_ndim, in_shape,
+                                 sub_out, sub_in)) {
+    return 0;
+  }
+
+  // Substitute placeholders back to the real ranges (the inverse map).
+  for (u32 a = 0; a < in_ndim; a++) {
+    Term e = sub_in[a];
+    for (u32 i = 0; i < n_real; i++) {
+      e = uop_index_substitute(e, placeholder[i], real_rng[i], 0);
+    }
+    in_rngs[a] = e;
+  }
+  return 1;
 }
 
 fn int apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,

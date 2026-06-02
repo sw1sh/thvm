@@ -197,6 +197,17 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "codegen/profile.c"
 #include "codegen/render_metal.c"
 #include "codegen/render_uop.c"
+// codegen/render_linearized.c -- new emit walk that consumes a
+// LinKernel (uop_linearize output) instead of walking the legacy
+// DAG.  Test-only stub today (single-store elementwise over one
+// LOOP range); the production renderer entry points still call the
+// legacy emit.  See file header for the architectural rationale.
+#include "codegen/render_linearized.c"
+// codegen/render_ptx.c -- PTX assembly emitter consuming the SAME
+// LinKernel as render_linearized.c, emitting PTX text directly so the
+// CUDA jit can cuModuleLoadData it without nvrtc's C++ frontend.  Port
+// of tinygrad/renderer/ptx.py.  Milestone 1: elementwise + loop core.
+#include "codegen/render_ptx.c"
 // CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.
 // cpu_dispatch_kernel composes the three (BLAS first, then JIT, then
 // interpreter); each records its route via cg_profile_record.
@@ -291,6 +302,34 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/apply_opt.c"
 #include "uop/apply_opt_dag.c"
 #include "uop/dag_scan.c"
+// uop/expander.c -- port of tinygrad codegen/late/expander.py to thvm's
+// UOp graph rewrite framework.  Introduces UOP_UNROLL/CONTRACT/VCONST/GEP
+// + uop_expand_graph(root).  Not wired into render_uop.c yet -- runs only
+// when explicitly invoked (test_uop_expand exercises it directly).  See
+// docs/tinygrad_late_passes.md for the architectural alternative.
+#include "uop/expander.c"
+// uop/devectorize.c -- port of tinygrad codegen/late/devectorizer.py
+// (reduce_to_acc + devectorize + pm_render + load_store_folding) to
+// thvm's UOp graph rewrite framework.  Introduces UOP_STACK /
+// UOP_PLACEHOLDER / UOP_END + uop_devectorize_graph(root) +
+// uop_load_store_fold_graph(root).  Same disposition as expander: NOT
+// WIRED into render_uop.c -- runs only via test_uop_devectorize for now.
+#include "uop/devectorize.c"
+// uop/symbolic_rewrite.c -- port of (a subset of) tinygrad/uop/symbolic.py
+// "sym" PatternMatcher passes.  Provides uop_symbolic_rewrite(root) which
+// re-runs the simplifying constructors over a bottom-up rebuild and adds
+// the scalar-lane-only MUL-by-0 + GEP-on-STACK + STACK-singleton rules.
+// Wired into render_uop.c between expander/devectorize/load_store_fold so
+// the post-devectorize graph shrinks before reaching the linearizer.
+#include "uop/symbolic_rewrite.c"
+// uop/linearize.c -- port of tinygrad codegen/late/linearizer.py.
+// Walks a post-devectorize DAG and produces a LinKernel: an ordered
+// list of UOp Terms ready for the new render_linearized.c emit walk.
+// Stage (a) of the architectural piece #3 wiring; runs only via the
+// dedicated tests today (gates 3-5 keep the legacy renderer routed
+// for production paths until the new emit can match it on every
+// test_render_uop case).
+#include "uop/linearize.c"
 // codegen/hand_opts.c -- tinygrad's hand_coded_optimizations port.
 // Needs kernel_apply_opt (codegen/apply_opt.c) + the DAG axis
 // scanners (uop/dag_scan.c) above, so it lands here.

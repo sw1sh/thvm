@@ -1900,7 +1900,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
     MArgument_setInteger(res, 0);
     return LIBRARY_NO_ERROR;
   }
-  KOpt opt = { (u8)op, (u8)axis, arg };
+  KOpt opt = { (u8)op, axis, arg };
   int ok = tile_anno_apply_opt(&KERNELS[kid], opt);
   if (ok) {
   }

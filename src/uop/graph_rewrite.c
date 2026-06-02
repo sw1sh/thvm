@@ -238,6 +238,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
 
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
       return uop_int_binary(op, srcs[0], srcs[1]);
 
     case UOP_IWHERE:
@@ -270,6 +271,47 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
 
     case UOP_STORE:
       return uop_store(srcs[0], srcs[1], srcs[2]);
+
+    // === Expander structural opcodes (src/uop/expander.c) ===
+    // Arity 1: only src[0] is a recursable child.  The tail NUM cells
+    // (n_args + axis_id/factor pairs, or n_idx + indices) describe the
+    // op's static arg shape and don't change under graph rewrite.
+    case UOP_UNROLL: {
+      u32 n = (u32)term_val(heap_read(loc + 1));
+      if (n > 8) return t;
+      u32 axes[8];
+      u32 facs[8];
+      for (u32 i = 0; i < n; i++) {
+        axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
+        facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
+      }
+      return uop_unroll(srcs[0], n, axes, facs);
+    }
+    case UOP_CONTRACT: {
+      u32 n = (u32)term_val(heap_read(loc + 1));
+      if (n > 8) return t;
+      u32 axes[8];
+      u32 facs[8];
+      for (u32 i = 0; i < n; i++) {
+        axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
+        facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
+      }
+      return uop_contract(srcs[0], n, axes, facs);
+    }
+    case UOP_GEP: {
+      u32 n = (u32)term_val(heap_read(loc + 1));
+      if (n > 256) return t;
+      u32 idxs[256];
+      for (u32 i = 0; i < n; i++) {
+        idxs[i] = (u32)term_val(heap_read(loc + 2 + i));
+      }
+      return uop_gep(srcs[0], n, idxs);
+    }
+    // UOP_VCONST / UOP_PLACEHOLDER: arity 0, no rebuild path needed.
+    // UOP_STACK / UOP_END: variadic Term payload, arity-0 in the
+    // uop_meta table; nodes are constructed at devectorizer-pass output
+    // and rewrites do not need to descend into them.  If a future pass
+    // needs to recurse, add the rebuild explicitly here.
 
     default:
       return t;
@@ -311,6 +353,30 @@ static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st,
 
   Term cur = changed ? uop_graph_rebuild_with_srcs(resolved, srcs)
                      : resolved;
+
+  // Variadic STACK descent.  uop_arity returns 0 for STACK so the
+  // generic fixed-arity walk above leaves the lanes untouched -- but
+  // the sym pass (and any future graph rewrite running over post-
+  // devectorize lanes) needs to recurse into each src and rebuild the
+  // STACK if any lane changed.  The lane reads + rebuild use the
+  // canonical uop_stack constructor, which hash-conses on the new
+  // lane Terms and collapses singletons.
+  if (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_STACK) {
+    u32 n = uop_stack_n(cur);
+    if (n > 0 && n <= 256) {
+      Term lanes[256];
+      int stack_changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term old_l = uop_stack_src(cur, i);
+        Term new_l = uop_graph_rewrite_rec(st, old_l, depth + 1);
+        lanes[i] = new_l;
+        if (new_l != old_l) stack_changed = 1;
+      }
+      if (stack_changed) {
+        cur = uop_stack(n, lanes);
+      }
+    }
+  }
 
   for (u32 restart = 0; restart < UOP_GRAPH_REWRITE_MAX_RESTARTS; restart++) {
     int hit = 0;
