@@ -2283,15 +2283,35 @@ atpRHSInterreduceOpt[o_Association] := Switch[Lookup[o, "RHSInterreduce", Automa
    on; False/Automatic = off (the default lhs-only overlap). *)
 atpUnfailingCPOpt[o_Association] := Switch[Lookup[o, "UnfailingCP", Automatic],
     True, 1, False | Automatic, 0, _, 0];
-(* "LazyNormalize" -> True: DISCOUNT-style deferred CP normalization --
-   queue CPs in their UN-normalized form, defer normalize to selection
-   time.  Cuts the push-time work + memory pressure on saturating
-   workloads.  Engine-side lever already shipped
-   (src/atp/_.c:7012 thvm_atp_set_use_lazy_normalize, dispatched at
-   line ~11238 in the saturation loop).  Default off (engine default =
-   eager push-normalize). *)
+(* "LazyNormalize" -> True: Waldmeister/DISCOUNT-style deferred CP
+   normalization -- queue CPs in their oriented-only-reduced form,
+   defer the full unorientable-rules normalize + joinability verdict
+   to selection time.  Engine-side lever in
+   src/atp/_.c:7012 (thvm_atp_set_use_lazy_normalize); the saturation
+   loop's lazy push site is around line 11238.
+   IMPORTANT MEMORY CAVEAT (see [[project_lazy_normalize_memory_blowup]]):
+   the deferred-normalize path stores larger (over-deep) queued forms,
+   so on a saturating workload it can grow the queue unboundedly.  The
+   Waldmeister source ports REQUIRE either periodic
+   `CPSetInterreduce -> True` (the KPV_KPMengeInterreduzieren sweep
+   that drops joinable CPs) OR a queue size cap via
+   `AutoMaxWeight -> n` / `MaxWeight -> n`.  Without either, a hard
+   residual will OOM the kernel.  When set, this dispatcher emits a
+   TFindProof::lazyunsafe warning but proceeds. *)
 atpLazyNormalizeOpt[o_Association] := Switch[Lookup[o, "LazyNormalize", Automatic],
-    True, 1, False | Automatic, 0, _, 0];
+    True, (
+        If[ Lookup[o, "CPSetInterreduce", Automatic] === Automatic
+                || Lookup[o, "CPSetInterreduce", Automatic] === False,
+            If[ (Lookup[o, "AutoMaxWeight", Automatic] === Automatic
+                    || Lookup[o, "AutoMaxWeight", Automatic] === False)
+                && Lookup[o, "MaxWeight", Automatic] === Automatic,
+                Message[TFindProof::lazyunsafe]]];
+        1),
+    False | Automatic, 0, _, 0];
+(* `backticks` are StringForm slots in WL Messages; quote names with '
+   instead so the StringForm::sfr noise doesn't fire on every call. *)
+TFindProof::lazyunsafe =
+    "LazyNormalize -> True without CPSetInterreduce -> True OR a MaxWeight / AutoMaxWeight cap is unbounded: the un-normalized CP queue can grow until the kernel OOMs on a saturating workload.  Pair with 'CPSetInterreduce -> True', 'AutoMaxWeight -> 30', or 'MaxWeight -> 20'.";
 (* "CPSetInterreduce" -> True: Waldmeister KPV_KPMengeInterreduzieren --
    periodically re-normalize the whole CP queue against the full rule set,
    deleting CPs that became joinable and reweighting the rest, so the
