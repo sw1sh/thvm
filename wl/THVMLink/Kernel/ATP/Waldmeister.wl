@@ -84,7 +84,18 @@ parseProofLine[line_String] := Block[
         StringStartsQ[sourceClean, "cp"],         "superposition",
         StringStartsQ[sourceClean, "tes-red"],    "forward_demodulation",
         StringMatchQ[sourceClean, DigitCharacter ..],
-            "trivial_inequality_removal",  (* tes-final: just cites a prior step *)
+            (* Bare-digit source is used in TWO distinct WM patterns:
+               (a) `tes-eqn : ... : 2` -- copying equation 2 as a new
+                   numbered entry (bookkeeping; the kind disambig is
+                   `tes-eqn`).  This is the `equation_copy` rule the
+                   $BookkeepingRules table drops on fold.
+               (b) `tes-final : ... : 28` -- the closing step that
+                   cites the prior step that derived the empty clause.
+                   This maps to trivial_inequality_removal -> Conclusion. *)
+            If[ kind === "tes-final",
+                "trivial_inequality_removal",
+                "equation_copy"
+            ],
         True, "rewrite"
     ];
     (* Extract integer ARGS of the inference function:

@@ -154,6 +154,44 @@ $SZSRuleToConstruct = <|
 constructTypeOf[rule_String] :=
     Lookup[$SZSRuleToConstruct, rule, "SubstitutionLemma"]
 
+(* Inference rules that are PURE BOOKKEEPING -- they don't carry a
+   semantic step the proof reconstructor should emit.  Examples:
+   `orient` (turning an equation into a directed rule -- the rule
+   is implicit in any later cp/red that uses it), `reorient_equations`
+   (Vampire's parse-time equation-flip), bare axiom renames.
+
+   Drop these from the derivation BEFORE assigning construct keys.
+   References to a dropped step transitively resolve to the step's
+   own first parent (or the source axiom if there is no parent).
+   This is the generalisation of foldReorients in Vampire.wl. *)
+$BookkeepingRules = {
+    "orient",
+    "reorient_equations",
+    "equation_copy"  (* WM's `tes-eqn : ... : N` renaming of equation N *)
+}
+
+(* Build a name->name alias from every dropped step to its (first)
+   parent.  Resolve transitively. *)
+foldBookkeeping[derivation_List] := Block[
+    {aliases, resolve},
+    aliases = Association @ Cases[
+        derivation,
+        s_Association /; MemberQ[$BookkeepingRules, s["Rule"]]
+            && ListQ[s["Parents"]] && Length[s["Parents"]] >= 1 :>
+            (s["Name"] -> First[s["Parents"]])
+    ];
+    resolve[n_] := If[KeyExistsQ[aliases, n], resolve[aliases[n]], n];
+    (* Rewrite Parents of non-dropped steps via the alias map. *)
+    Map[
+        s |-> If[
+            MemberQ[$BookkeepingRules, s["Rule"]],
+            Nothing,
+            Append[s, "Parents" -> Map[resolve, Lookup[s, "Parents", {}]]]
+        ],
+        derivation
+    ] /. Nothing -> Sequence[]
+]
+
 isNegatedConjectureQ[step_Association] :=
     step["Rule"] === "file" && step["Role"] === "negated_conjecture"
 
@@ -201,8 +239,13 @@ proofFieldFor[step_Association, nameToKey_Association] := Block[
 ]
 
 buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
-    {nameToKey, entries, stmtFn},
-    nameToKey = assignConstructKeys[derivation];
+    {folded, nameToKey, entries, stmtFn},
+    (* Drop bookkeeping steps (`orient`, `reorient_equations`)
+       BEFORE construct-key assignment.  Aliases route any later
+       reference through to the step's first real parent.  See
+       $BookkeepingRules + foldBookkeeping above. *)
+    folded = foldBookkeeping[derivation];
+    nameToKey = assignConstructKeys[folded];
     (* Per-formula wrap-and-parse is SLOW (TPTPImport runs the
        full EBNF parser per call -- 5s/formula on AbelianGroup
        cases, dominating wall on a multi-step proof).  Default to
@@ -219,7 +262,7 @@ buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
             },
             key -> <|"Statement" -> stmt, "Proof" -> proofField|>
         ],
-        derivation
+        folded
     ];
     Association @@ entries
 ]
