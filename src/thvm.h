@@ -2036,6 +2036,10 @@ fn u32  materialized_loc_scope_depth  (void);
 // are emitted (and recorded) once.  Gated by THVM_JIT_REALIZE_DEDUP.
 fn void materialized_loc_jit_span_begin(void);
 fn void materialized_loc_jit_span_end  (void);
+// Flag the live graph as containing a maxpool MAX-reduce gradient so the
+// cross-realize materialized_loc span auto-enables (the /count argmax-tie
+// split needs the maxpool-input activation shared across the step's realizes).
+fn void materialize_note_maxpool_grad(void);
 
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).

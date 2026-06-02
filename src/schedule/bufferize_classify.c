@@ -946,6 +946,102 @@ static int bufferize_elementwise_src_has_reduce(u64 loc, u32 depth) {
   return 0;
 }
 
+// Descend from a (movement) node through its movement-op source chain to the
+// first underlying COMPUTE producer -- the activation buffer the window views
+// are layered over.  Returns its loc, or 0 if none (the chain bottoms out at a
+// leaf / KERNEL / TEN before any compute).  The maxpool window-reshape is a
+// pure view of the relu/BN activation; realizing the RESHAPE would materialize
+// the view, but realizing this underlying compute makes every window view
+// (forward MAX + backward CMPEQ) index the SAME buffer with bit-exact ties.
+static u64 bufferize_movement_compute_source(u64 loc, u32 depth) {
+  if (depth > 16 || loc >= HEAP_NEXT) return 0;
+  Term src = term_resolve(heap_read(loc + 0));
+  if (term_tag(src) != TAG_UOP) return 0;
+  u8 sop = term_ext(src);
+  if (sop == UOP_KERNEL) return 0;
+  u64 sloc = term_val(src);
+  if (uop_is_movement(sop)) return bufferize_movement_compute_source(sloc, depth + 1);
+  // First non-movement node: this is the activation compute (relu MUL, BN
+  // affine, etc.).  Return its loc so the caller can realize it.
+  return sloc;
+}
+
+// True iff the term `t` is (a movement-broadcast of) a REDUCE_MAX.  Used to
+// recognise the broadcast `lift(MAX(a))` operand of the maxpool backward mask
+// CMPEQ(a, lift(MAX(a))) (gradient.py:11-14).
+static int bufferize_term_is_reduce_max(Term t, u32 depth) {
+  if (depth > 16) return 0;
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP) return 0;
+  u8 op = term_ext(t);
+  if (op == UOP_KERNEL) return 0;
+  u64 tloc = term_val(t);
+  if (op == UOP_REDUCE)
+    return (u32)term_val(heap_read(tloc + 1)) == REDUCE_MAX;
+  if (uop_is_movement(op))
+    return bufferize_term_is_reduce_max(heap_read(tloc + 0), depth + 1);
+  return 0;
+}
+
+// True iff the node at `loc` is the maxpool backward argmax mask: a CMPEQ one
+// of whose operands is (a movement-broadcast of) a REDUCE_MAX -- i.e.
+// CMPEQ(activation, lift(MAX(activation))).  This mask, its SUM-reduce count,
+// and the RECIP(/count) must realize into their OWN windowed kernel rather
+// than fusing into the downstream conv-weight backward SUM-reduce: under an
+// N=1 batch the fused nested-reduce mis-iterates the count over the size-1
+// axis (the walker's cext==0 identity bail), reading count 0 at some fused
+// positions even when the mask itself is correct.  Materialising the mask
+// first gives the weight-grad reduce a clean strided operand.
+static int bufferize_node_is_maxpool_mask(u64 loc, u8 op) {
+  if (op != UOP_CMPEQ) return 0;
+  if (bufferize_term_is_reduce_max(heap_read(loc + 0), 0)) return 1;
+  if (bufferize_term_is_reduce_max(heap_read(loc + 1), 0)) return 1;
+  return 0;
+}
+
+// True iff the term `t` is the maxpool argmax mask CMPEQ(a, lift(MAX(a)))
+// reached through a movement-only chain.  Used to recognise the operands of
+// the normalized mask MUL(mask, RECIP(SUM(mask))).
+static int bufferize_term_is_maxpool_mask(Term t, u32 depth) {
+  if (depth > 16) return 0;
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP) return 0;
+  u8 op = term_ext(t);
+  if (op == UOP_KERNEL) return 0;
+  u64 tloc = term_val(t);
+  if (op == UOP_CMPEQ) return bufferize_node_is_maxpool_mask(tloc, op);
+  if (uop_is_movement(op))
+    return bufferize_term_is_maxpool_mask(heap_read(tloc + 0), depth + 1);
+  return 0;
+}
+
+// True iff the node at `loc` is the maxpool normalized mask gradient factor
+// MUL(mask, RECIP(SUM(mask))) (gradient.py:11-14): a MUL with one operand the
+// argmax mask (or a movement of it) and the other a RECIP whose source is a
+// SUM-reduce.  Realizing THIS makes the whole tie-split (/count divide)
+// materialize in its own windowed kernel; the downstream BN/conv backward
+// SUM-reduce then reads a clean strided cotangent instead of fusing the
+// nested mask->count->recip chain into its own (size-1-axis-prone) reduce.
+static int bufferize_node_is_maxpool_mask_norm(u64 loc, u8 op) {
+  if (op != UOP_MUL) return 0;
+  Term a = term_resolve(heap_read(loc + 0));
+  Term b = term_resolve(heap_read(loc + 1));
+  int a_mask = bufferize_term_is_maxpool_mask(a, 0);
+  int b_mask = bufferize_term_is_maxpool_mask(b, 0);
+  if (!a_mask && !b_mask) return 0;
+  // The other operand must be RECIP(SUM(...)) -- the broadcast 1/count.
+  Term other = a_mask ? b : a;
+  other = term_resolve(other);
+  while (term_tag(other) == TAG_UOP && uop_is_movement(term_ext(other)))
+    other = term_resolve(heap_read(term_val(other) + 0));
+  if (term_tag(other) != TAG_UOP || term_ext(other) != UOP_RECIP) return 0;
+  Term rsrc = term_resolve(heap_read(term_val(other) + 0));
+  while (term_tag(rsrc) == TAG_UOP && uop_is_movement(term_ext(rsrc)))
+    rsrc = term_resolve(heap_read(term_val(rsrc) + 0));
+  return term_tag(rsrc) == TAG_UOP && term_ext(rsrc) == UOP_REDUCE
+      && (u32)term_val(heap_read(term_val(rsrc) + 1)) == REDUCE_SUM;
+}
+
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   // Always touch the bufferize graph so its state stays in sync with
@@ -1061,6 +1157,34 @@ fn void bufferize_classify(Term root) {
         if (fuse_realize_boundary
             || (!(ew && src_has_reduce) && !skip_movement)) {
           bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+        }
+      }
+      // Maxpool-input pre-realize (ROUTE A): for EVERY REDUCE_MAX (the maxpool
+      // window reduce), realize the underlying activation it reduces -- the
+      // relu/BN output beneath the window-view movement chain.  The forward
+      // window-max (loss) and the backward argmax mask CMPEQ(a, lift(MAX(a)))
+      // (the /count tie-split, gradient.py:11-14) both reduce movement-views
+      // of that activation; left fused, each consuming kernel recomputes it
+      // independently and the two recomputes fp-disagree at an argmax tie ->
+      // CMPEQ miss -> count 0 -> RECIP(0) NaN.  Realizing the activation once
+      // makes every view index ONE shared buffer so ties are bit-exact.  Keyed
+      // off the REDUCE_MAX directly (not consumer-walks) so it fires for nested
+      // maxpools whose window view is not surfaced as multi-consumer.  We
+      // realize the compute SOURCE, never the window view itself (its EXPAND
+      // would materialize the sliding-window blow-up).
+      if (info->op == UOP_REDUCE
+          && (u32)term_val(heap_read(info->loc + 1)) == REDUCE_MAX) {
+        Term wsrc = term_resolve(heap_read(info->loc + 0));
+        if (term_tag(wsrc) == TAG_UOP && term_ext(wsrc) != UOP_KERNEL) {
+          u64 wloc = term_val(wsrc);
+          u64 act_loc = uop_is_movement(term_ext(wsrc))
+              ? bufferize_movement_compute_source(wloc, 0)
+              : wloc;
+          if (act_loc != 0) {
+            u32 aidx = bufferize_info_find(act_loc);
+            if (aidx != 0xFFFFFFFFu)
+              bufferize_node_mark(&BUFFERIZE_NODES[aidx], BUFFERIZE_REASON_MULTI);
+          }
         }
       }
       if (info->op == UOP_REDUCE) {
@@ -1198,6 +1322,19 @@ fn void bufferize_classify(Term root) {
             bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           }
         }
+      }
+      // Maxpool backward mask pre-realize (ROUTE A, part 2): realize the
+      // argmax mask CMPEQ(a, lift(MAX(a))) so the windowed /count divide
+      // (mask * RECIP(SUM(mask))) materializes in its OWN kernel instead of
+      // fusing into the downstream conv-weight backward SUM-reduce.  When the
+      // tie-split count is fused into an N=1 weight-grad reduce the walker's
+      // nested-reduce-iter mis-reads count over the size-1 batch axis -> wrong
+      // grad (and, before the activation pre-realize, RECIP(0) NaN).  A
+      // materialized mask gives both the count reduce and the weight-grad
+      // reduce a clean strided operand.  Fires regardless of consumer_count.
+      if (bufferize_node_is_maxpool_mask(info->loc, info->op)
+          || bufferize_node_is_maxpool_mask_norm(info->loc, info->op)) {
+        bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
       }
     }
     // Softmax-style REDUCE unmark: a REDUCE whose every consumer chain

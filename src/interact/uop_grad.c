@@ -1124,12 +1124,36 @@ static Term interact_grad_dispatch(Term grad_term) {
       if (kind == REDUCE_SUM) {
         gy_a = gy_lifted;
       } else if (kind == REDUCE_MAX) {
-        // mask = (a == lift(MAX(a, axes)))
-        Term mx        = uop_reduce_multi(REDUCE_MAX, n_axes, axes, a_fwd);
-        Term mx_keep   = uop_reshape(mx, a_shape.ndim, keep_dims);
+        // MAX vjp with the argmax-tie split (tinygrad gradient.py:11-14):
+        //   mask  = (a == broadcast_to_input(ret))
+        //   count = lift( SUM(mask, axes) )         # ties shared equally
+        //   gy_a  = mask * RECIP(count) * lift(gy)
+        // A maxpool grad in the live graph requires the cross-realize
+        // materialized_loc span so the activation / forward-MAX / backward-mask
+        // share ONE buffer across the step's separate realize calls (see
+        // materialize_note_maxpool_grad).
+        materialize_note_maxpool_grad();
+        // Reuse the FORWARD reduce node `y` (== tinygrad `ret`) as the window
+        // max -- gradient.py:11 `ret.src[0].eq(broadcast_to_input(ret))`.  `y`
+        // is the same hash-consed REDUCE_MAX the loss references and is realized
+        // as a boundary (REDUCE seed), so it materializes ONCE.  Both this
+        // backward `lift(y)` and the forward use read that single buffer, and
+        // `a_fwd` (the CMPEQ operand) reads the single realized maxpool-input
+        // activation (schedule/bufferize_classify.c REDUCE_MAX-keyed pre-
+        // realize).  Re-reducing `a_fwd` here instead would emit a SECOND max
+        // kernel that inline-recomputes the activation -- its bytes fp-disagree
+        // with the forward max at an argmax tie, the CMPEQ misses, the SUM
+        // count below goes to 0, and RECIP(0) NaNs (the stacked-maxpool bug).
+        Term mx_keep   = uop_reshape(y, a_shape.ndim, keep_dims);
         Term mx_lifted = uop_expand(mx_keep, a_shape.ndim, a_shape.dims);
         Term mask      = uop_binary(UOP_CMPEQ, a_fwd, mx_lifted);
-        gy_a           = uop_binary(UOP_MUL, mask, gy_lifted);
+        // count = SUM(mask) over the same reduce axes, broadcast back.
+        Term cnt        = uop_reduce_multi(REDUCE_SUM, n_axes, axes, mask);
+        Term cnt_keep   = uop_reshape(cnt, a_shape.ndim, keep_dims);
+        Term cnt_lifted = uop_expand(cnt_keep, a_shape.ndim, a_shape.dims);
+        Term inv_cnt    = uop_unary(UOP_RECIP, cnt_lifted);
+        Term mask_norm  = uop_binary(UOP_MUL, mask, inv_cnt);
+        gy_a            = uop_binary(UOP_MUL, mask_norm, gy_lifted);
       } else {
         // Unknown reduce kind: pass gy through unchanged (best effort).
         gy_a = gy_lifted;

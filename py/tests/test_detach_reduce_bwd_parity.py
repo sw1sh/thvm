@@ -202,9 +202,14 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         Xn = rng.standard_normal((1, 3, 8, 8)).astype(np.float32)
         Wn = rng.standard_normal((4, 3, 3, 3)).astype(np.float32)
 
+        # Both sides run BN in TRAIN mode (batch statistics); without the
+        # thvm training flag BN reads its init running_mean=0/var=1 and the
+        # two sides normalize differently.
+        thvm.Tensor.training = True
         x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
         THN.BatchNorm(4)(x.conv2d(w).relu()).max_pool2d((2, 2)).sum().backward()
         g_thvm = w.grad.numpy()
+        thvm.Tensor.training = False
 
         tinygrad.Tensor.training = True
         tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)

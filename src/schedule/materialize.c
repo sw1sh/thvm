@@ -182,6 +182,20 @@ fn u32  materialized_loc_scope_depth(void) { return MATERIALIZE_SCOPE_DEPTH; }
 // materialized_loc_clear() defers the wipe; the deferred clear runs at
 // materialized_loc_jit_span_end().
 static u32 MATERIALIZE_JIT_SPAN_DEPTH = 0;
+
+// Set the first time a maxpool MAX-reduce vjp is built (interact/uop_grad.c
+// REDUCE_MAX branch).  The /count argmax-tie split (gradient.py:11-14) is only
+// correct if the maxpool-input activation, the forward MAX, and the backward
+// mask read ONE materialized buffer.  Across the captured step's separate
+// realize calls (BN running-stat realizes, loss.realize, the grad bundle) that
+// requires the cross-realize materialized_loc span to persist -- otherwise each
+// realize re-materializes the activation into a fresh buffer and the two copies
+// fp-disagree at an argmax tie -> CMPEQ miss -> count 0 -> RECIP(0) NaN.  So a
+// maxpool grad in the live graph IMPLIES the dedup span, exactly as the
+// faithful seed does (verified: without the span the default-seed stacked-
+// maxpool training NaNs at step 2; with it the loss curve matches faithful).
+static int MAXPOOL_GRAD_SEEN = 0;
+fn void materialize_note_maxpool_grad(void) { MAXPOOL_GRAD_SEEN = 1; }
 static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
   static int known = 0, on = 0;
   if (!known) {
@@ -197,8 +211,9 @@ static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
   // records divergent buf_ids (producer reallocs across realizes) and replay
   // reads stale intermediates -> divergence/explosion.  So faithful IMPLIES
   // the dedup (verified: faithful+dedup converges on the JIT replay, faithful
-  // alone diverges).
-  return on || ru_faithful_seed_on();
+  // alone diverges).  A maxpool grad implies it for the same reason (see
+  // MAXPOOL_GRAD_SEEN).
+  return on || ru_faithful_seed_on() || MAXPOOL_GRAD_SEEN;
 }
 static int materialized_loc_span_holds(void) {
   // The cross-realize dedup keeps one realize's materialized boundary so a
@@ -221,10 +236,15 @@ static int materialized_loc_span_holds(void) {
 }
 fn void materialized_loc_clear(void);   // fwd decl (span_end calls it)
 fn void materialized_loc_jit_span_begin(void) {
-  if (!MATERIALIZE_JIT_DEDUP_ENABLED()) return;
-  // A fresh span starts with a clean cache: any cross-realize state from
-  // a prior (non-span) realize is undone here so the span only ever
-  // reuses tids materialized WITHIN it.
+  // Track the captured-step bracket UNCONDITIONALLY (the depth marks "inside a
+  // JIT capture").  Whether the span actually DEFERS the cross-realize clear is
+  // decided lazily by materialized_loc_span_holds, which re-checks
+  // MATERIALIZE_JIT_DEDUP_ENABLED() at clear time.  This matters for the
+  // maxpool auto-enable (MAXPOOL_GRAD_SEEN): the flag is set DURING the step's
+  // realize (when the MAX-reduce vjp is built), AFTER this begin runs, so an
+  // early gate here would miss it and let the activation re-materialize per
+  // realize -> the stacked-maxpool NaN.  When the gate is off at clear time the
+  // span behaves exactly as the old per-realize clear.
   if (MATERIALIZE_JIT_SPAN_DEPTH == 0) materialized_loc_clear();
   MATERIALIZE_JIT_SPAN_DEPTH++;
 }
@@ -4387,6 +4407,29 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // the alias so the emit loop sees a non-zero result.
   if (BOUNDARY_TID[bi] != 0 && BOUNDARY_TERM[bi] != 0) {
     return BOUNDARY_TERM[bi];
+  }
+
+  // Cross-pass boundary memoization (mirror tinygrad pm_generate_realize_map
+  // memoizing UOp -> Buffer; indexing.py:28-35).  A boundary at this loc may
+  // have already been emitted by an EARLIER materialize -- a prior fixpoint
+  // iteration of THIS realize, or an earlier CTR child (the loss) whose
+  // forward graph shares the loc with a later child's backward graph.  The
+  // canonical case: the maxpool-input activation, realized once but reached by
+  // the forward window-MAX (loss child) AND the backward argmax mask CMPEQ
+  // (grad child).  Without reuse each consumer re-emits the activation into a
+  // SEPARATE buffer; the two copies fp-disagree at an argmax tie, the CMPEQ
+  // misses, the /count divide sees 0, and RECIP(0) NaNs (the stacked-maxpool
+  // default-seed NaN).  Consulting MATERIALIZED_LOC here ties every consumer
+  // to the ONE emitted buffer.  Gated by scope>0 (inside a realize wrapper);
+  // the lookup's own dead-buffer guard makes a rolled-back tid a safe miss.
+  if (materialized_loc_scope_depth() > 0) {
+    u32 cached_tid = materialized_loc_lookup(boundary_loc);
+    if (cached_tid != 0) {
+      Term ten = term_new(0, TAG_TEN, TENS[cached_tid].dtype, cached_tid);
+      BOUNDARY_TID[bi]  = cached_tid;
+      BOUNDARY_TERM[bi] = ten;
+      return ten;
+    }
   }
 
   u8   op        = BUFFERIZE_NODES[idx].op;
