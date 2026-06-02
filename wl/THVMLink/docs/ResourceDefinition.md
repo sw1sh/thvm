@@ -22,11 +22,10 @@ SourceControlURL: https://github.com/sw1sh/thvm
 - Differentiation lives in the runtime. Mark parameter leaves with <code>[TRequiresGrad]()</code>, then <code>[TGrad]()</code> seeds a single backward walk; per-target adjoints land in `TenDesc.grad`, readable via <code>[TGradOf]()</code>.
 - Introspection is first class. <code>[THeapGraph]()</code> renders the live heap as an IC string diagram, <code>[TMemoryPlan]()</code> projects per-buffer alive spans, and <code>[TKernel]()</code> exposes per-kernel timing, source, and autotune candidates.
 - The ATP context (`THVMLink`ATP``) wraps `thvm`'s equational saturation engine via <code>[TFindProof]()</code> (a drop-in `FindEquationalProof` replacement that returns a full `ProofObject`) and the lower-level <code>[TATP]()</code>.
-- The [THVMLink guide](paclet:WolframInstitute/THVMLink/guide/THVMLink) is the per-subsystem inventory: term calculus, reduction, inspection, tensors, UOp graph, materialization, neural-net layers, kernels, memory + profiling, visualization, snapshots, contexts, benchmarking, multiway, and ATP.
 
 ## Usage
 
-THVMLink exposes <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TTensorCreate]()</code>, <code>[TUOpAdd]()</code>, <code>[TUOpMul]()</code>, <code>[TUOpReduce]()</code>, <code>[TRealize]()</code>, <code>[TGrad]()</code>, <code>[TKernel]()</code>, <code>[TMemoryPlan]()</code>, <code>[TFindProof]()</code>, and many more. See the [THVMLink guide](paclet:WolframInstitute/THVMLink/guide/THVMLink) for the full surface.
+THVMLink exposes <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TTensorCreate]()</code>, <code>[TUOpAdd]()</code>, <code>[TUOpMul]()</code>, <code>[TUOpReduce]()</code>, <code>[TRealize]()</code>, <code>[TGrad]()</code>, <code>[TKernel]()</code>, <code>[TMemoryPlan]()</code>, <code>[TFindProof]()</code>, and many more.
 
 ## Basic Examples
 
