@@ -106,12 +106,19 @@ sortKey[k_] := With[
 
 $summary = {};
 
-diffOne[theory_String, thm_String] := Block[
+(* presetMethod is a single-String thvm Method preset (e.g.
+   "Waldmeister", "VampireUEQ"); cliBuilder is the symbol of the
+   matching CLI ProofObject builder (TWaldmeisterProofObject,
+   TVampireProofObject, etc.). *)
+diffOne[theory_String, thm_String,
+        presetMethod_String : "Waldmeister",
+        cliBuilder_Symbol : THVMLink`ATP`TWaldmeisterProofObject] :=
+    Block[
     {pP, pC, dsP, dsC, kvP, kvC, matchedP, matchedC,
      unmatchedP, unmatchedC},
-    pP = TFindProof[thm, theory, Method -> "Waldmeister",
+    pP = TFindProof[thm, theory, Method -> presetMethod,
         TimeConstraint -> 8];
-    pC = THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
+    pC = cliBuilder[theory, thm,
         TimeConstraint -> 12, "ParseFormulas" -> True];
     dsP = dataset[pP];
     dsC = dataset[pC];
@@ -138,12 +145,13 @@ diffOne[theory_String, thm_String] := Block[
     unmatchedC = Complement[Keys[dsC], Keys[matchedC]];
     AppendTo[$summary, <|
         "Theory" -> theory, "Theorem" -> thm,
+        "Preset" -> presetMethod,
         "PresetN" -> Length[dsP], "CliN" -> Length[dsC],
         "Matched" -> Length[matchedP],
         "PresetOnly" -> Length[unmatchedP],
         "CliOnly" -> Length[unmatchedC]
     |>];
-    print["=== ", theory, " / ", thm, " ==="];
+    print["=== ", presetMethod, " :: ", theory, " / ", thm, " ==="];
     print["preset constructs: ", Length[dsP],
         "    cli constructs: ", Length[dsC]];
     print["content-matched:   ", Length[matchedP], " pairs"];
@@ -196,41 +204,51 @@ cases = {
     {"MeredithAxioms",     "Commutativity"}
 };
 
+(* Two-prover sweep: WM (default 2-arg diffOne) + Vampire (extra
+   args).  Concatenates into one summary table tagged by Preset. *)
 Scan[Apply[diffOne], cases];
+Scan[
+    Apply[Function[{theory, thm},
+        diffOne[theory, thm,
+            "VampireUEQ",
+            THVMLink`ATP`TVampireProofObject]]],
+    cases];
 
 print["===================================================="];
-print["sweep summary"];
+print["per-step parity sweep summary"];
 print["===================================================="];
 print[
+    StringPadRight["preset", 12], " ",
     StringPadRight["theory", 22], " ",
     StringPadRight["theorem", 26], " ",
-    StringPadLeft["preset", 7], " ",
-    StringPadLeft["cli", 5], " ",
+    StringPadLeft["pN", 5], " ",
+    StringPadLeft["cN", 5], " ",
     StringPadLeft["match", 7], " ",
     StringPadLeft["pOnly", 7], " ",
     StringPadLeft["cOnly", 7]];
 Scan[
     r |-> print[
+        StringPadRight[r["Preset"],   12], " ",
         StringPadRight[r["Theory"],   22], " ",
         StringPadRight[r["Theorem"],  26], " ",
-        StringPadLeft[ToString[r["PresetN"]],    7], " ",
+        StringPadLeft[ToString[r["PresetN"]],    5], " ",
         StringPadLeft[ToString[r["CliN"]],       5], " ",
         StringPadLeft[ToString[r["Matched"]],    7], " ",
         StringPadLeft[ToString[r["PresetOnly"]], 7], " ",
         StringPadLeft[ToString[r["CliOnly"]],    7]],
     $summary];
 
-Export["tools/baselines/parity_wm_perstep.tsv",
+Export["tools/baselines/parity_perstep.tsv",
     Prepend[
         Map[
-            r |-> {r["Theory"], r["Theorem"],
+            r |-> {r["Preset"], r["Theory"], r["Theorem"],
                 r["PresetN"], r["CliN"],
                 r["Matched"], r["PresetOnly"], r["CliOnly"]},
             $summary],
-        {"theory", "theorem",
+        {"preset", "theory", "theorem",
             "preset_constructs", "cli_constructs",
             "matched", "preset_only", "cli_only"}
     ],
     "TSV"];
 print[];
-print["wrote tools/baselines/parity_wm_perstep.tsv"];
+print["wrote tools/baselines/parity_perstep.tsv"];
