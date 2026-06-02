@@ -3990,6 +3990,11 @@ TFindProof[thm_String, theory_String,
                 FilterRules[{opts}, Options[THVMLink`ATP`TTweeProof]]],
                 "TATPError"]
         ];
+        If[ methodOpt === "WaldmeisterProcess",
+            Throw[THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
+                FilterRules[{opts}, Options[THVMLink`ATP`TWaldmeisterProof]]],
+                "TATPError"]
+        ];
         cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
         If[ MissingQ[cjRaw],
             Throw[Failure["TATPParseError",
