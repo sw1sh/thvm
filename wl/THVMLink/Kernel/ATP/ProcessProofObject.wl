@@ -398,13 +398,26 @@ reconstructSuperposition[
     mSides = mSides /. freshen;
     freshVars = Values[freshen];
     allVars = Join[varSet, freshVars];
+    (* Two host/applied orientations -- the SZS labeling might map
+       Construct->host + MatchingConstruct->applied OR the swap.
+       Try both: hostSides = either cSides or mSides; appliedSides
+       = the other.  Record `swap` so the caller knows which role
+       Construct ended up playing. *)
     candidates = Flatten[Table[
-        Block[{ruleLhs1, ruleRhs1, ruleLhs2, ruleRhs2,
-               positions, subpattern, sub, cpLhs, cpRhs},
-            ruleLhs1 = If[ o1 === 1, cSides[[s1]], cSides[[3 - s1]]];
-            ruleRhs1 = If[ o1 === 1, cSides[[3 - s1]], cSides[[s1]]];
-            ruleLhs2 = If[ o2 === 1, mSides[[s2]], mSides[[3 - s2]]];
-            ruleRhs2 = If[ o2 === 1, mSides[[3 - s2]], mSides[[s2]]];
+        Block[{hostSides, appliedSides, ruleLhs1, ruleRhs1,
+               ruleLhs2, ruleRhs2, positions, sub,
+               cpLhs, cpRhs},
+            If[ swap === 0,
+                hostSides = cSides; appliedSides = mSides,
+                hostSides = mSides; appliedSides = cSides];
+            ruleLhs1 = If[ o1 === 1, hostSides[[s1]],
+                hostSides[[3 - s1]]];
+            ruleRhs1 = If[ o1 === 1, hostSides[[3 - s1]],
+                hostSides[[s1]]];
+            ruleLhs2 = If[ o2 === 1, appliedSides[[s2]],
+                appliedSides[[3 - s2]]];
+            ruleRhs2 = If[ o2 === 1, appliedSides[[3 - s2]],
+                appliedSides[[s2]]];
             positions = nonVarPositions[ruleLhs1, allVars];
             Table[
                 Block[{subterm, ruleLhs1New},
@@ -418,43 +431,48 @@ reconstructSuperposition[
                             ruleRhs2,
                             ReplacePart[ruleLhs1, pos -> ruleRhs2]];
                         cpRhs = applySubstitution[ruleLhs1New, sub];
-                        {s1, o1, s2, o2, pos, subterm,
+                        {swap, s1, o1, s2, o2, pos, subterm,
                             {cpLhs, cpRhs}}]],
                 {pos, positions}]],
+        {swap, 0, 1},
         {s1, 2}, {o1, {1, -1}},
-        {s2, 2}, {o2, {1, -1}}], 4];
-    (* Alpha-equivalence check: two sides {a, b} match {c, d}
-       (sorted) when there's a substitution from allVars that
-       maps either ordering to sSides. *)
+        {s2, 2}, {o2, {1, -1}}], 5];
+    (* Alpha-equivalence check: a single substitution must
+       simultaneously map both sides.  Conjoint unification via
+       List[a, b] vs List[c, d] — cplUnify recurses pair-wise
+       with one shared σ, so an inconsistency in one slot fails
+       the whole match (which the prior independent-unify code
+       missed). *)
     Block[{checkPair},
         checkPair[{a_, b_}] := Block[
-            {sub1, sub2},
-            sub1 = Quiet @ THVMLink`ATP`Private`cplUnify[
-                a, sSides[[1]], allVars];
-            sub2 = Quiet @ THVMLink`ATP`Private`cplUnify[
-                b, sSides[[2]], allVars];
-            If[ AssociationQ[sub1] && AssociationQ[sub2],
-                True,
-                sub1 = Quiet @ THVMLink`ATP`Private`cplUnify[
-                    a, sSides[[2]], allVars];
-                sub2 = Quiet @ THVMLink`ATP`Private`cplUnify[
-                    b, sSides[[1]], allVars];
-                AssociationQ[sub1] && AssociationQ[sub2]]];
+            {sub},
+            sub = Quiet @ THVMLink`ATP`Private`cplUnify[
+                List[a, b], List[sSides[[1]], sSides[[2]]],
+                allVars];
+            If[ AssociationQ[sub], True,
+                sub = Quiet @ THVMLink`ATP`Private`cplUnify[
+                    List[a, b], List[sSides[[2]], sSides[[1]]],
+                    allVars];
+                AssociationQ[sub]]];
         hit = SelectFirst[candidates,
-            checkPair[#[[7]]] &,
+            checkPair[#[[8]]] &,
             Missing["NoFit"]]];
     If[ MissingQ[hit], $Failed,
-        Block[{cs = cSides, ms = mSides,
-               s1 = hit[[1]], o1 = hit[[2]],
-               s2 = hit[[3]], o2 = hit[[4]],
-               pos = hit[[5]], subp = hit[[6]]},
+        Block[{cs, ms,
+               swapHit = hit[[1]],
+               s1 = hit[[2]], o1 = hit[[3]],
+               s2 = hit[[4]], o2 = hit[[5]],
+               pos = hit[[6]], subp = hit[[7]]},
+            (* When swap=1, MatchingConstruct played host -- the
+               Rule comes from mSides + the MatchingRule from cSides. *)
+            If[ swapHit === 0,
+                cs = cSides; ms = mSides,
+                cs = mSides; ms = cSides];
             <|"Side" -> s1,
               "Orientation" -> o1,
               "MatchingSide" -> s2,
               "MatchingOrientation" -> o2,
               "Position" -> pos,
-              (* Subpattern stored Pattern-wrapped (matches preset
-                 shape: (a_) ⊗ (b_) not bare a ⊗ b). *)
               "Subpattern" -> withVariablePatterns[
                   subp, Join[varSet, freshVars]],
               "Rule" -> mkRule[
