@@ -2456,6 +2456,12 @@ $AtpPresetDefaults = <|
         "AutoPrecedence" -> True, "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True|>,
+    "WaldmeisterLazy" -> <|
+        "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "LazyNormalize" -> True,
+        "CPSetInterreduce" -> True,
+        "AutoMaxWeight" -> 30,
+        "UnfailingCP" -> True, "RHSInterreduce" -> True|>,
     "VampireUEQ" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
         "SelectionRatio" -> 10, "UnfailingCP" -> True,
@@ -2500,6 +2506,7 @@ $AtpPresetDefaults = <|
    False -- VampireUEQ is the lone True per Vampire's `tgt=full`. *)
 $AtpPresetGoalDirected = <|
     "Waldmeister" -> False,
+    "WaldmeisterLazy" -> False,
     "VampireUEQ"  -> True,
     "Twee"        -> False,
     "EProver"     -> False,
@@ -2589,6 +2596,24 @@ atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
         $AtpPresetGoalDirected["Waldmeister"], {subopts}];
+
+(* Method -> "WaldmeisterLazy": Waldmeister DISCOUNT-style preset
+   bundling the spec-safe LazyNormalize combo (see b2acc699 for the
+   empirical justification).  LazyNormalize defers the full CP
+   normalize to selection time; CPSetInterreduce is the WM
+   KPV_KPMengeInterreduzieren periodic queue purge that drops
+   joinable CPs as new rules land; AutoMaxWeight 30 caps the queue
+   growth so the un-normalized stored forms can't blow memory.
+   LPO + AutoPrecedence pair to give the lazy queue cheap ordering
+   verdicts.  See [[project_lazy_normalize_memory_blowup]] for why
+   the safety pairing is required.  Cracks 4 residuals that the
+   default Automatic schedule's Mix2+Gt slot sequence CRASHes on
+   (WolframAxioms/Implies{Hillman,Meredith,WolframAlternate,
+   WolframCommutative}*Axioms c1/c2). *)
+atpParseMethod["WaldmeisterLazy"] := atpParseMethod[{"WaldmeisterLazy"}];
+atpParseMethod[{"WaldmeisterLazy", subopts___Rule}] :=
+    atpDispatchPreset[$AtpPresetDefaults["WaldmeisterLazy"],
+        $AtpPresetGoalDirected["WaldmeisterLazy"], {subopts}];
 
 (* Method -> "VampireUEQ": a preset modeled on the Vampire 5.0.1 UEQ
    portfolio entry that cracks ShefferAxioms/AndAssociativity --
