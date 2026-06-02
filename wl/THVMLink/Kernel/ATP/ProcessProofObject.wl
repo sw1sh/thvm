@@ -54,6 +54,14 @@ TVampireProofObject::usage =
     "TFindProof so two ProofObjects from differing Methods (internal " <>
     "preset vs external CLI) can be compared structurally."
 
+TWaldmeisterProofObject::usage =
+    "TWaldmeisterProofObject[\"path/to/file.pr\", opts] runs the local " <>
+    "wmcli binary via TWaldmeisterProof and converts the proof " <>
+    "protocol via TSZSDerivationToProofObject to return a thvm-shaped " <>
+    "proof Association.  Used as the Method -> \"WaldmeisterProcess\" " <>
+    "dispatch target in TFindProof.  Path form only -- the two-arg " <>
+    "(Theory, thm) form needs a TPTP -> .pr converter (deferred)."
+
 TTweeProofObject::usage =
     "TTweeProofObject[\"Theory\", \"thm\", opts] runs Twee CLI via " <>
     "TTweeProof.  Twee's --tstp output is SZS-FRAMED but the proof " <>
@@ -354,6 +362,36 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
         TSZSDerivationToProofObject[vampR["Inferences"], parseOpt]
     ]
 ]
+
+(* Waldmeister wrapper: chain TWaldmeisterProof + the generic
+   SZS-shaped builder.  WM's proof protocol parses into the same
+   inference-record Association shape as Vampire's SZS, so the
+   exact same TSZSDerivationToProofObject path lifts it.  Only
+   supports the PATH form (.pr file) for now; the two-arg
+   (Theory, thm) form needs a TPTP->.pr converter, deferred. *)
+Options[TWaldmeisterProofObject] = {
+    TimeConstraint  -> 30,
+    "Binary"        -> Automatic,
+    "MathlinkPath"  -> Automatic,
+    "ParseFormulas" -> False
+}
+
+TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /;
+        FileExtension[problemFile] === "pr" :=
+    Block[
+        {wmR = TWaldmeisterProof[problemFile,
+                FilterRules[{opts},
+                    {TimeConstraint, "Binary", "MathlinkPath"}]],
+            parseOpt = "ParseFormulas" -> OptionValue["ParseFormulas"]},
+        If[ wmR["Status"] =!= "Proved",
+            Failure["ExternalNoProof", <|
+                "Tool"     -> "Waldmeister",
+                "Status"   -> wmR["Status"],
+                "Seconds"  -> wmR["Seconds"]
+            |>],
+            TSZSDerivationToProofObject[wmR["Inferences"], parseOpt]
+        ]
+    ]
 
 (* Twee wrapper: Twee's --tstp proof body is not TPTP fof, so we
    build a coarser dataset (Axioms + Lemmas with no inference
