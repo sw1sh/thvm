@@ -43,25 +43,25 @@ Options[TWaldmeisterProof] = {
     "MathlinkPath" -> Automatic
 }
 
-wmBinary[Automatic] := SelectFirst[
-    {
-        "/Users/swish/src/wolfram/waldmeister/wmcli",
-        "wmcli"
-    },
-    FileExistsQ[#] || # === "wmcli" &
+(* Resolve wmcli location: $WMCLI env var > PATH lookup ("wmcli").
+   The user's Mac build lives at <waldmeister-src>/wmcli but no
+   canonical install location exists -- set WMCLI to point at it
+   (or symlink into /usr/local/bin / ~/.local/bin / etc.). *)
+wmBinary[Automatic] := Block[{env = Environment["WMCLI"]},
+    Which[
+        StringQ[env] && FileExistsQ[env], env,
+        True, "wmcli"  (* PATH lookup, fails loudly at exec if absent *)
+    ]
 ]
 
 wmBinary[s_String] := s
 
-wmMathlinkPath[Automatic] := SelectFirst[
-    {
-        "/Applications/Wolfram 15.1.app/Contents/Frameworks",
-        "/Applications/Wolfram 15.0.app/Contents/Frameworks",
-        "/Applications/Wolfram.app/Contents/Frameworks",
-        "/Applications/Mathematica.app/Contents/Frameworks"
-    },
-    DirectoryQ
-]
+(* Frameworks dir lives under $InstallationDirectory (the resolved
+   Wolfram install for the current kernel).  No absolute path
+   hardcoding -- the path tracks whichever Wolfram product loaded
+   us. *)
+wmMathlinkPath[Automatic] :=
+    FileNameJoin[{$InstallationDirectory, "Frameworks"}]
 
 wmMathlinkPath[s_String] := s
 
