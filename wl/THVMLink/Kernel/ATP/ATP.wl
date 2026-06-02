@@ -3969,7 +3969,23 @@ TFindProof[theory_String, returnSpec_String,
     atpTheoryCompletion[theory, returnSpec, opts];
 TFindProof[thm_String, theory_String,
         opts:OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
-    Block[{cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm]},
+    Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method]},
+        (* Method -> "VampireProcess" / "TweeProcess" / etc. route
+           through the external CLI wrappers and return a thvm-shaped
+           ProofObject, so the same downstream consumers (proof
+           comparator, ProofFunction verifier, dataset accessors) see
+           the same shape across internal preset vs external CLI. *)
+        If[ methodOpt === "VampireProcess",
+            (* Fully-qualified path: ATP.wl loads before
+               ProcessProofObject.wl in the alphabetical autoloader
+               order, so the symbol is unresolved when this RHS is
+               first parsed.  Without qualification it would land in
+               THVMLink`ATP`Private`. *)
+            Throw[THVMLink`ATP`TVampireProofObject[theory, thm,
+                FilterRules[{opts}, Options[THVMLink`ATP`TVampireProof]]],
+                "TATPError"]
+        ];
+        cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
         If[ MissingQ[cjRaw],
             Throw[Failure["TATPParseError",
                 <|"Reason" -> "theorem \"" <> thm <>
