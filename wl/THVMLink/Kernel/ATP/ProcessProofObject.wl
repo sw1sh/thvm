@@ -200,14 +200,21 @@ proofFieldFor[step_Association, nameToKey_Association] := Block[
     ]
 ]
 
-buildDatasetFromDerivation[derivation_List] := Block[
-    {nameToKey, entries},
+buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
+    {nameToKey, entries, stmtFn},
     nameToKey = assignConstructKeys[derivation];
+    (* Per-formula wrap-and-parse is SLOW (TPTPImport runs the
+       full EBNF parser per call -- 5s/formula on AbelianGroup
+       cases, dominating wall on a multi-step proof).  Default to
+       raw String statements; opt-in to parsed-WL mode via
+       parseFormulasQ when full ProofObject identity / property
+       inspection is needed. *)
+    stmtFn = If[parseFormulasQ, parseFormulaBody, Identity];
     entries = Map[
         step |-> With[
             {
                 key        = nameToKey[step["Name"]],
-                stmt       = parseFormulaBody[step["Formula"]],
+                stmt       = stmtFn[step["Formula"]],
                 proofField = proofFieldFor[step, nameToKey]
             },
             key -> <|"Statement" -> stmt, "Proof" -> proofField|>
@@ -218,6 +225,8 @@ buildDatasetFromDerivation[derivation_List] := Block[
 ]
 
 End[]
+
+Options[TSZSDerivationToProofObject] = {"ParseFormulas" -> False}
 
 (* Public: build a thvm-shaped proof Association from a parsed SZS
    derivation list.  ATP-agnostic -- works for Vampire's
@@ -247,9 +256,10 @@ End[]
    expressions, only the outer wrapper).  A future parser pass over
    the formula bodies + theory-specific symbol-name reverse
    translation can lift this back into a real ProofObject. *)
-TSZSDerivationToProofObject[derivation_List] := Block[
-    {ds, axiomEntries, hypothesisEntries, axioms, goal, hist},
-    ds = THVMLink`ATP`Private`buildDatasetFromDerivation[derivation];
+TSZSDerivationToProofObject[derivation_List, opts : OptionsPattern[]] := Block[
+    {ds, axiomEntries, hypothesisEntries, axioms, goal, hist,
+        parseFlag = TrueQ @ OptionValue["ParseFormulas"]},
+    ds = THVMLink`ATP`Private`buildDatasetFromDerivation[derivation, parseFlag];
     axiomEntries      = KeySelect[ds, MatchQ[#, {"Axiom", _}] &];
     hypothesisEntries = KeySelect[ds, MatchQ[#, {"Hypothesis", _}] &];
     axioms = Values @ axiomEntries /. e_Association :> e["Statement"];
@@ -273,11 +283,24 @@ TSZSDerivationToProofObject[derivation_List] := Block[
     |>
 ]
 
+(* Hand-enumerated: Vampire.wl loads AFTER ProcessProofObject.wl in
+   the alphabetical autoloader order, so `Options[TVampireProof]`
+   evaluates to {} at file-load time.  Keep this list in sync with
+   Options[TVampireProof] in Vampire.wl + the "ParseFormulas" toggle. *)
+Options[TVampireProofObject] = {
+    TimeConstraint  -> 30,
+    "Mode"          -> "casc",
+    "Binary"        -> Automatic,
+    "ParseFormulas" -> False
+}
+
 (* Vampire-specific wrapper: chain TVampireProof + the generic
    SZS-to-ProofObject builder.  Future TEProverProofObject /
    TIProverProofObject etc. follow the same shape. *)
 TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[
-    {vampR = TVampireProof[theory, thm, opts]},
+    {vampR = TVampireProof[theory, thm,
+            FilterRules[{opts}, Options[TVampireProof]]],
+        parseOpt = "ParseFormulas" -> OptionValue["ParseFormulas"]},
     If[ vampR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool"     -> "Vampire",
@@ -285,15 +308,22 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
             "Seconds"  -> vampR["Seconds"],
             "Strategy" -> vampR["Strategy"]
         |>],
-        TSZSDerivationToProofObject[vampR["Inferences"]]
+        TSZSDerivationToProofObject[vampR["Inferences"], parseOpt]
     ]
 ]
 
 (* Twee wrapper: Twee's --tstp proof body is not TPTP fof, so we
    build a coarser dataset (Axioms + Lemmas with no inference
    metadata) that the shape comparator still reads. *)
+Options[TTweeProofObject] = {
+    TimeConstraint -> 30,
+    "Binary"       -> Automatic
+}
+
 TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[
-    {tR = TTweeProof[theory, thm, opts], ds, axs, lems},
+    {tR = TTweeProof[theory, thm,
+            FilterRules[{opts}, {TimeConstraint, "Binary"}]],
+        ds, axs, lems},
     If[ tR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool"    -> "Twee",
