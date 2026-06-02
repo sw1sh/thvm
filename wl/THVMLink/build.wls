@@ -81,8 +81,31 @@ noEvaluate = {"ATP.md", "AtpMethods.md"}
 (* Hard per-file time budget for example evaluation.  A cell that takes
    longer than this almost certainly indicates a hung saturator / kernel,
    not a slow-but-finishing run, and the build falls back to a no-eval
-   render of that file rather than waiting forever. *)
-perFileBudgetSec = 60
+   render of that file rather than waiting forever.
+
+   Lives in a private context (not Global) so the per-file ClearGlobalScratch
+   below cannot wipe it. *)
+THVMLink`Build`Private`perFileBudgetSec = 60
+
+(* Cells inside one file share the kernel with EVERY prior file's cells, so a
+   bare scratch name like `a` from one cell leaks into another file's cell
+   that also references `a`.  MTN sets `$Context` to the file's frontmatter
+   Context for the duration of the eval, so a bare `a` is parsed as
+   `THVMLink``ATP``a` for an ATP-context file or `THVMLink``a` for a base-
+   context file - NOT `Global``a`.  We snapshot every relevant scratch
+   context once the build's setup is done, then between files ClearAll any
+   new symbol in any of them - i.e. only doc-cell scratch, never the build
+   harness, MTN, or the paclet's own exports. *)
+THVMLink`Build`Private`scratchContexts =
+    {"Global`", "THVMLink`", "THVMLink`ATP`"}
+
+ClearGlobalScratch[] := Module[{ scratch },
+    scratch = Complement[
+        Join @@ (Names[# <> "*"] & /@ THVMLink`Build`Private`scratchContexts),
+        THVMLink`Build`Private`globalBoot
+    ];
+    Quiet[Unprotect @@ scratch; ClearAll @@ scratch]
+]
 
 (* The output basename is the source basename; it must match the URI tail
    (DocumentationBuild builds the URI from the file path). *)
@@ -99,15 +122,16 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
     evalQ    = ! MemberQ[noEvaluate, FileNameTake[srcFile]];
     t0       = AbsoluteTime[];
     fallbackQ = False;
+    ClearGlobalScratch[];
     res = TimeConstrained[
         mtn[srcFile, out, "Evaluate" -> evalQ],
-        perFileBudgetSec,
+        THVMLink`Build`Private`perFileBudgetSec,
         $TimedOut
     ];
     If[ res === $TimedOut,
         fallbackQ = True;
-        print["  [timeout >", perFileBudgetSec, "s] ", FileNameTake[srcFile],
-              " - falling back to no-eval render"];
+        print["  [timeout >", THVMLink`Build`Private`perFileBudgetSec, "s] ",
+              FileNameTake[srcFile], " - falling back to no-eval render"];
         mtn[srcFile, out, "Evaluate" -> False]
     ];
     dt = Round[AbsoluteTime[] - t0, 0.1];
@@ -119,6 +143,11 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
         "  (", dt, "s)"
     ]
 ]
+
+(* Snapshot every scratch-context's name set right before the loop;
+   ClearGlobalScratch[] preserves these and wipes anything new between files. *)
+THVMLink`Build`Private`globalBoot =
+    Join @@ (Names[# <> "*"] & /@ THVMLink`Build`Private`scratchContexts)
 
 print["building THVMLink documentation"]
 Scan[buildDoc, Sort @ FileNames["*.md", FileNameJoin[{pacletDir, "docs"}], Infinity]]
