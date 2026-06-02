@@ -338,39 +338,171 @@ reconstructSingleRewrite[inputEq_, constructEq_, stepEq_] := Block[
               cSides[[3 - hit[[2]]]]]|>]
 ];
 
+(* ---- Superposition (CriticalPairLemma) reconstruction -----------
+   A CPL inference superposes two rules: the Construct rule's LHS
+   contains a non-variable subterm at some Position, and that
+   subterm unifies with the MatchingConstruct rule's LHS.  The
+   resulting critical pair is:
+     σ(Construct.RHS)  ==  σ(Construct.LHS[Position <- MatchingConstruct.RHS])
+   where σ is the most-general unifier.
+
+   Enumerates (Side, Orientation, MatchingSide, MatchingOrientation,
+   Position) and runs cplUnify on each candidate.  Returns metadata
+   with Side / ConstructSide / Orientation / Subpattern /
+   MatchingConstruct (passed through) / MatchingOrientation /
+   MatchingSide / Position / Rule / MatchingRule keys, or $Failed. *)
+applySubstitution[expr_, sub_Association] := expr //. Normal[sub];
+
+(* Strip Pattern[v, Blank[]] -> v from an expression so we can
+   walk it as a plain term-tree for subpattern enumeration. *)
+unpatternize[expr_] := expr //.
+    Verbatim[Pattern][v_, _] :> v;
+
+(* A position is "non-variable" if the subterm at that position
+   isn't a Pattern-headed leaf -- superposition rules require the
+   matched subterm to be a non-variable position. *)
+nonVarPositions[expr_, varSet_List] := Block[
+    {plain = unpatternize[expr], positions},
+    (* Heads -> False so the head-slot {0} doesn't appear (rewriting
+       at the head of a compound term is undefined for superposition). *)
+    positions = Position[plain, _, Heads -> False];
+    Select[positions,
+        ! MemberQ[varSet, Extract[plain, #]] &]
+];
+
+reconstructSuperposition[
+        constructEq_, matchingEq_, stepEq_, varSet_List] := Block[
+    {cSides, mSides, sSides, candidates, hit, freshen, freshVars,
+     allVars},
+    cSides = equalSides[constructEq];
+    mSides = equalSides[matchingEq];
+    sSides = equalSides[stepEq];
+    If[ cSides === $Failed || mSides === $Failed
+        || sSides === $Failed, Return[$Failed]];
+    cSides = unpatternize /@ cSides;
+    mSides = unpatternize /@ mSides;
+    sSides = unpatternize /@ sSides;
+    (* Freshen MatchingConstruct's variables so they don't collide
+       with Construct's identical-name vars during unification. *)
+    freshen = AssociationThread[varSet,
+        Table[Unique["cplR"], {Length[varSet]}]];
+    mSides = mSides /. freshen;
+    freshVars = Values[freshen];
+    allVars = Join[varSet, freshVars];
+    candidates = Flatten[Table[
+        Block[{ruleLhs1, ruleRhs1, ruleLhs2, ruleRhs2,
+               positions, subpattern, sub, cpLhs, cpRhs},
+            ruleLhs1 = If[ o1 === 1, cSides[[s1]], cSides[[3 - s1]]];
+            ruleRhs1 = If[ o1 === 1, cSides[[3 - s1]], cSides[[s1]]];
+            ruleLhs2 = If[ o2 === 1, mSides[[s2]], mSides[[3 - s2]]];
+            ruleRhs2 = If[ o2 === 1, mSides[[3 - s2]], mSides[[s2]]];
+            positions = nonVarPositions[ruleLhs1, allVars];
+            Table[
+                Block[{subterm, ruleLhs1New},
+                    subterm = If[ pos === {}, ruleLhs1,
+                        Extract[ruleLhs1, pos]];
+                    sub = Quiet @ THVMLink`ATP`Private`cplUnify[
+                        subterm, ruleLhs2, allVars];
+                    If[ ! AssociationQ[sub], Nothing,
+                        cpLhs = applySubstitution[ruleRhs1, sub];
+                        ruleLhs1New = If[ pos === {},
+                            ruleRhs2,
+                            ReplacePart[ruleLhs1, pos -> ruleRhs2]];
+                        cpRhs = applySubstitution[ruleLhs1New, sub];
+                        {s1, o1, s2, o2, pos, subterm,
+                            {cpLhs, cpRhs}}]],
+                {pos, positions}]],
+        {s1, 2}, {o1, {1, -1}},
+        {s2, 2}, {o2, {1, -1}}], 4];
+    (* Alpha-equivalence check: two sides {a, b} match {c, d}
+       (sorted) when there's a substitution from allVars that
+       maps either ordering to sSides. *)
+    Block[{checkPair},
+        checkPair[{a_, b_}] := Block[
+            {sub1, sub2},
+            sub1 = Quiet @ THVMLink`ATP`Private`cplUnify[
+                a, sSides[[1]], allVars];
+            sub2 = Quiet @ THVMLink`ATP`Private`cplUnify[
+                b, sSides[[2]], allVars];
+            If[ AssociationQ[sub1] && AssociationQ[sub2],
+                True,
+                sub1 = Quiet @ THVMLink`ATP`Private`cplUnify[
+                    a, sSides[[2]], allVars];
+                sub2 = Quiet @ THVMLink`ATP`Private`cplUnify[
+                    b, sSides[[1]], allVars];
+                AssociationQ[sub1] && AssociationQ[sub2]]];
+        hit = SelectFirst[candidates,
+            checkPair[#[[7]]] &,
+            Missing["NoFit"]]];
+    If[ MissingQ[hit], $Failed,
+        Block[{cs = cSides, ms = mSides,
+               s1 = hit[[1]], o1 = hit[[2]],
+               s2 = hit[[3]], o2 = hit[[4]],
+               pos = hit[[5]], subp = hit[[6]]},
+            <|"Side" -> s1,
+              "Orientation" -> o1,
+              "MatchingSide" -> s2,
+              "MatchingOrientation" -> o2,
+              "Position" -> pos,
+              "Subpattern" -> subp,
+              "Rule" -> mkRule[
+                If[o1 === 1, cs[[s1]], cs[[3 - s1]]],
+                If[o1 === 1, cs[[3 - s1]], cs[[s1]]]],
+              "MatchingRule" -> mkRule[
+                If[o2 === 1, ms[[s2]], ms[[3 - s2]]],
+                If[o2 === 1, ms[[3 - s2]], ms[[s2]]]]|>]]
+];
+
 (* Take an already-lifted prfList (Association of {Type, n} ->
    <|Statement, Proof|>) and, for each SubstitutionLemma /
-   Conclusion entry, reconstruct the rewrite metadata.  Falls back
-   to leaving the skeleton Proof unchanged when reconstruction
-   fails (so the lifted object still works for property dispatch). *)
-augmentSingleRewriteEntries[prfList_List] := Block[
+   Conclusion / CriticalPairLemma entry, reconstruct the rewrite
+   metadata.  Falls back to leaving the skeleton Proof unchanged
+   when reconstruction fails (so the lifted object still works
+   for property dispatch). *)
+augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
     {prfAssoc = Association[prfList], augment},
     augment[key_, entry_Association] := Block[
-        {type = First[key], proof, inputKey, constructKey,
-         inputEntry, constructEntry, stepEq, recon},
-        type = First[key];
-        If[ ! MemberQ[{"SubstitutionLemma", "Conclusion"}, type],
-            Return[entry]];
+        {type = First[key], proof, constructKey, matchingKey, inputKey,
+         constructEntry, matchingEntry, inputEntry, stepEq, recon},
         proof = Lookup[entry, "Proof", <||>];
-        inputKey     = Lookup[proof, "Input",     Missing[]];
-        constructKey = Lookup[proof, "Construct", Missing[]];
-        If[ MissingQ[inputKey] || MissingQ[constructKey],
-            Return[entry]];
-        inputEntry     = Lookup[prfAssoc, Key[inputKey],     Missing[]];
-        constructEntry = Lookup[prfAssoc, Key[constructKey], Missing[]];
-        If[ MissingQ[inputEntry] || MissingQ[constructEntry],
-            Return[entry]];
         stepEq = entry["Statement"];
-        recon = reconstructSingleRewrite[
-            inputEntry["Statement"],
-            constructEntry["Statement"],
-            stepEq];
-        If[ recon === $Failed, Return[entry]];
-        ReplacePart[entry,
-            "Proof" -> Association[proof, recon,
-                "Source" -> "norm",
-                "InputOrientation" -> 1,
-                "OutputExpression" -> stepEq]]
+        Switch[type,
+            "SubstitutionLemma" | "Conclusion",
+                inputKey     = Lookup[proof, "Input",     Missing[]];
+                constructKey = Lookup[proof, "Construct", Missing[]];
+                If[ MissingQ[inputKey] || MissingQ[constructKey],
+                    Return[entry]];
+                inputEntry     = Lookup[prfAssoc, Key[inputKey],     Missing[]];
+                constructEntry = Lookup[prfAssoc, Key[constructKey], Missing[]];
+                If[ MissingQ[inputEntry] || MissingQ[constructEntry],
+                    Return[entry]];
+                recon = reconstructSingleRewrite[
+                    inputEntry["Statement"],
+                    constructEntry["Statement"],
+                    stepEq];
+                If[ recon === $Failed, Return[entry]];
+                Return[ReplacePart[entry,
+                    "Proof" -> Association[proof, recon,
+                        "Source" -> "norm",
+                        "InputOrientation" -> 1,
+                        "OutputExpression" -> stepEq]]],
+            "CriticalPairLemma",
+                constructKey = Lookup[proof, "Construct",         Missing[]];
+                matchingKey  = Lookup[proof, "MatchingConstruct", Missing[]];
+                If[ MissingQ[constructKey] || MissingQ[matchingKey],
+                    Return[entry]];
+                constructEntry = Lookup[prfAssoc, Key[constructKey], Missing[]];
+                matchingEntry  = Lookup[prfAssoc, Key[matchingKey],  Missing[]];
+                If[ MissingQ[constructEntry] || MissingQ[matchingEntry],
+                    Return[entry]];
+                recon = reconstructSuperposition[
+                    constructEntry["Statement"],
+                    matchingEntry["Statement"],
+                    stepEq, varSet];
+                If[ recon === $Failed, Return[entry]];
+                Return[ReplacePart[entry,
+                    "Proof" -> Association[proof, recon]]]];
+        entry
     ];
     KeyValueMap[#1 -> augment[#1, #2] &, prfAssoc]
 ];
@@ -454,7 +586,7 @@ liftToProofObject[assoc_Association] := Block[
        prfList for parent lookups (an Association of {Type, n} ->
        <|Statement, Proof|>).  Augments the Proof field in-place;
        leaves Axioms/Hypotheses/CPLs untouched. *)
-    prfList = augmentSingleRewriteEntries[prfList];
+    prfList = augmentSingleRewriteEntries[prfList, varSyms];
     ProofObject[
         "EquationalLogic",
         inactivateEqual @ withVariablePatterns[goalLifted, varSyms],
