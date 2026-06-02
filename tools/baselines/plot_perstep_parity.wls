@@ -19,18 +19,18 @@ caseLabel[r_] := StringSplit[r["theory"], "Axioms"][[1]] <>
 
 caseLabels = DeleteDuplicates[caseLabel /@ data];
 
-(* Stacked bars: per-theorem, side-by-side WM bar (blue) + Vampire
-   bar (red).  Bar height = match rate (0..1). *)
+(* Per-theorem grouped bars: 3 presets side-by-side.
+   Waldmeister (fixed), Automatic (problem-aware), VampireUEQ. *)
+presetsTested = {"Waldmeister", "Automatic", "VampireUEQ"};
+
 matchData = Table[
-    Block[{wm, vp},
-        wm = SelectFirst[data,
-            #["preset"] === "Waldmeister" &&
-            caseLabel[#] === lbl &];
-        vp = SelectFirst[data,
-            #["preset"] === "VampireUEQ" &&
-            caseLabel[#] === lbl &];
-        {If[ AssociationQ[wm], matchRate[wm], 0],
-         If[ AssociationQ[vp], matchRate[vp], 0]}],
+    Map[
+        preset |-> Block[
+            {r = SelectFirst[data,
+                #["preset"] === preset &&
+                caseLabel[#] === lbl &]},
+            If[ AssociationQ[r], matchRate[r], 0]],
+        presetsTested],
     {lbl, caseLabels}];
 
 bc = BarChart[
@@ -39,10 +39,13 @@ bc = BarChart[
     PlotLabel ->
         "per-step statement match rate (matched / preset_constructs)",
     AxesLabel -> {None, "fraction matched"},
-    ChartStyle -> {style[StandardBlue], style[StandardRed]},
+    ChartStyle -> {style[StandardBlue],
+        style[StandardGreen],
+        style[StandardRed]},
     ChartLegends -> Placed[
-        {"Waldmeister == WaldmeisterProcess",
-         "VampireUEQ == VampireProcess"}, Top],
+        {"Method->\"Waldmeister\"",
+         "Method->Automatic",
+         "Method->\"VampireUEQ\""}, Top],
     PlotRange -> {0, 1.05},
     ImageSize -> 1000,
     BarSpacing -> {Small, Medium},

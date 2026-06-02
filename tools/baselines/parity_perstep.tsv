@@ -7,6 +7,14 @@
 "Waldmeister"	"GroupAxioms"	"InverseOfInverse"	13	14	13	0	1
 "Waldmeister"	"HillmanAxioms"	"Commutativity"	0	38	0	0	38
 "Waldmeister"	"MeredithAxioms"	"Commutativity"	0	11	0	0	11
+"Automatic"	"AbelianGroupAxioms"	"InverseOfInverse"	11	12	11	0	1
+"Automatic"	"AbelianGroupAxioms"	"InverseOfComposite"	14	20	9	5	11
+"Automatic"	"AbelianGroupAxioms"	"ImpliesMcCuneAxioms"	24	28	16	8	12
+"Automatic"	"AbelianGroupAxioms"	"ImpliesAbelianMcCuneAxioms"	27	20	13	14	7
+"Automatic"	"BooleanAxioms"	"DoubleNegation"	19	20	11	8	9
+"Automatic"	"GroupAxioms"	"InverseOfInverse"	13	14	13	0	1
+"Automatic"	"HillmanAxioms"	"Commutativity"	56	38	1	55	37
+"Automatic"	"MeredithAxioms"	"Commutativity"	10	11	1	9	10
 "VampireUEQ"	"AbelianGroupAxioms"	"InverseOfInverse"	11	12	4	7	8
 "VampireUEQ"	"AbelianGroupAxioms"	"InverseOfComposite"	19	19	5	14	14
 "VampireUEQ"	"AbelianGroupAxioms"	"ImpliesMcCuneAxioms"	23	33	6	17	27

@@ -106,12 +106,13 @@ sortKey[k_] := With[
 
 $summary = {};
 
-(* presetMethod is a single-String thvm Method preset (e.g.
-   "Waldmeister", "VampireUEQ"); cliBuilder is the symbol of the
-   matching CLI ProofObject builder (TWaldmeisterProofObject,
-   TVampireProofObject, etc.). *)
+(* presetMethod is a thvm Method spec (a single-String preset like
+   "Waldmeister" / "VampireUEQ" / "Portfolio", or Automatic for
+   the structure-recognized auto-tune); cliBuilder is the symbol
+   of the matching CLI ProofObject builder
+   (TWaldmeisterProofObject, TVampireProofObject, etc.). *)
 diffOne[theory_String, thm_String,
-        presetMethod_String : "Waldmeister",
+        presetMethod_ : "Waldmeister",
         cliBuilder_Symbol : THVMLink`ATP`TWaldmeisterProofObject] :=
     Block[
     {pP, pC, dsP, dsC, kvP, kvC, matchedP, matchedC,
@@ -145,13 +146,13 @@ diffOne[theory_String, thm_String,
     unmatchedC = Complement[Keys[dsC], Keys[matchedC]];
     AppendTo[$summary, <|
         "Theory" -> theory, "Theorem" -> thm,
-        "Preset" -> presetMethod,
+        "Preset" -> ToString[presetMethod],
         "PresetN" -> Length[dsP], "CliN" -> Length[dsC],
         "Matched" -> Length[matchedP],
         "PresetOnly" -> Length[unmatchedP],
         "CliOnly" -> Length[unmatchedC]
     |>];
-    print["=== ", presetMethod, " :: ", theory, " / ", thm, " ==="];
+    print["=== ", ToString[presetMethod], " :: ", theory, " / ", thm, " ==="];
     print["preset constructs: ", Length[dsP],
         "    cli constructs: ", Length[dsC]];
     print["content-matched:   ", Length[matchedP], " pairs"];
@@ -205,8 +206,30 @@ cases = {
 };
 
 (* Two-prover sweep: WM (default 2-arg diffOne) + Vampire (extra
-   args).  Concatenates into one summary table tagged by Preset. *)
-Scan[Apply[diffOne], cases];
+   args).  Concatenates into one summary table tagged by Preset.
+   Method->Automatic is the problem-aware structure-recognized
+   schedule -- on theories where the fixed "Waldmeister" preset
+   doesn't fit (Hillman / Meredith Commutativity timeout at 60s
+   even though wmcli proves them in <12s), Automatic's auto-tune
+   correctly picks a strategy that proves quickly. *)
+(* Three-preset sweep on the WM CLI side: "Waldmeister" (the
+   actual fixed port -- matches wmcli on most theorems but times
+   out on Hillman/Meredith), Automatic (problem-aware auto-tune
+   -- cracks Hillman/Meredith in <100ms but diverges from wmcli's
+   strategy on AbelianGroup theorems), and one row per case for
+   VampireUEQ vs the Vampire CLI. *)
+Scan[
+    Apply[Function[{theory, thm},
+        diffOne[theory, thm,
+            "Waldmeister",
+            THVMLink`ATP`TWaldmeisterProofObject]]],
+    cases];
+Scan[
+    Apply[Function[{theory, thm},
+        diffOne[theory, thm,
+            Automatic,
+            THVMLink`ATP`TWaldmeisterProofObject]]],
+    cases];
 Scan[
     Apply[Function[{theory, thm},
         diffOne[theory, thm,
