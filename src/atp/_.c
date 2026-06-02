@@ -4395,9 +4395,25 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // freed AtpRuleIndex memory and a macOS-malloc SIGTRAP.  NULL them
   // on init so any unguarded read crashes loudly instead of silently.
 #ifdef ATP_RULE_INDEX
-  g_atp_ri_ix = NULL;
-  g_atp_cp_ix = NULL;
+  g_atp_ri_ix      = NULL;
+  g_atp_ri_flat    = NULL;
+  g_atp_ri_subsz   = NULL;
+  g_atp_ri_flatsym = NULL;
+  g_atp_ri_lhs     = NULL;
+  g_atp_ri_rhs     = NULL;
+  g_atp_cp_ix      = NULL;
+  g_atp_cp_qflat   = NULL;
+  g_atp_cp_qsubsz  = NULL;
+  g_atp_cp_qflatsym= NULL;
 #endif
+  // Defensive companion NULL'ing for the AtpFvIndex globals the
+  // discrim-tree-fallback FV index path keeps pointing at: a
+  // companion ri_ix/cp_ix hygiene pattern.  Harmless when nothing
+  // else clobbers them; prevents the same dangling-pointer class
+  // of bug as the ri_ix/cp_ix entries above.
+  g_atp_dt_ix      = NULL;
+  g_atp_dt_subsz   = NULL;
+  g_atp_dt_flatsym = NULL;
   // Persistent LPO memo: a completion compares the same subterm pairs
   // millions of times.  Opt in, and drop any entries from a prior run
   // (a static LpoConfig pointer may be reused with new precedence).
