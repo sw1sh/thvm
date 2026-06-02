@@ -2,7 +2,7 @@
 Template: Paclet
 ResourceType: Paclet
 Name: WolframInstitute/THVMLink
-Context: THVMLink`
+Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 Description: Wolfram Language bridge to thvm - observe and drive the interaction-net runtime.
 ContributedBy: Wolfram Institute
@@ -17,11 +17,11 @@ SourceControlURL: https://github.com/sw1sh/thvm
 ## Details & Options
 
 - THVMLink is the Wolfram-language driver for `thvm`, a tensor-aware interaction-net runtime that compiles to CPU, CUDA, and Metal back ends from one symbolic graph.
-- Construction is purely symbolic. <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TSup]()</code>, and <code>[TDup]()</code> build interaction-combinator terms; <code>[TUOpAdd]()</code> and the rest of the `TUOp*` family build the tensor UOp graph; <code>[TTensorCreate]()</code> ingests a `NumericArray` zero-copy on CPU.
+- Construction is purely symbolic. <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TSup]()</code>, and <code>[TDup]()</code> build interaction-combinator terms; <code>[TUOpAdd]()</code> and the rest of the `TUOp*` family build the tensor UOp graph; <code>[TTensorCreate]()</code> ingests a [NumericArray]() zero-copy on CPU.
 - Reduction is staged. <code>[TWnf]()</code> drives a term to weak normal form, <code>[TMaterialize]()</code> schedules the UOp DAG into kernels, and <code>[TRealize]()</code> fires the whole pipeline (schedule + dispatch).
 - Differentiation lives in the runtime. Mark parameter leaves with <code>[TRequiresGrad]()</code>, then <code>[TGrad]()</code> seeds a single backward walk; per-target adjoints land in `TenDesc.grad`, readable via <code>[TGradOf]()</code>.
 - Introspection is first class. <code>[THeapGraph]()</code> renders the live heap as an IC string diagram, <code>[TMemoryPlan]()</code> projects per-buffer alive spans, and <code>[TKernel]()</code> exposes per-kernel timing, source, and autotune candidates.
-- The ATP context (`THVMLink`ATP``) wraps `thvm`'s equational saturation engine via <code>[TFindProof]()</code> (a drop-in `FindEquationalProof` replacement that returns a full `ProofObject`) and the lower-level <code>[TATP]()</code>.
+- The ATP context (`` THVMLink`ATP` ``) wraps `thvm`'s equational saturation engine via <code>[TFindProof]()</code> (a drop-in [FindEquationalProof]() replacement that returns a full `ProofObject`) and the lower-level <code>[TATP]()</code>.
 
 ## Usage
 
@@ -75,6 +75,7 @@ THeapGraph @ TApp[TLam[w, TUOpAdd[w, w]], TTensorCreate[{1., 2.}]]
 Snapshot the live runtime to a transportable Wolfram expression, restore it across a fresh kernel:
 
 ```wl
+#| eval: False
 snap = TContextSnapshot[TLam[x, TUOpAdd[x, x]]];
 TFree[]; TInit[];
 TInitialize[snap]
@@ -86,7 +87,7 @@ TInitialize[snap]
 Project the schedule the materializer produces from a small neural-net forward pass and gate it through the memory planner:
 
 ```wl
-W = TGlorot[{10, 4}]; b = TZeros[{10}]; xs = TTensorCreate[ConstantArray[1., {4}]];
+W = TGlorot[{4, 10}]; b = TZeros[{10}]; xs = TTensorCreate[ConstantArray[1., {1, 4}]];
 loss = TL2Loss @ TLinear[xs, W, b];
 TMaterialize[loss];
 TMemoryPlanReport @ TMemoryPlan[]
@@ -98,8 +99,13 @@ TMemoryPlanReport @ TMemoryPlan[]
 Prove a small equational theorem with the C-engine ATP and reconstruct it as a Wolfram `ProofObject`:
 
 ```wl
+#| eval: False
 Needs["THVMLink`ATP`"];
-TFindProof[Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x], "AbelianGroupAxioms"]
+TFindProof[
+    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
+    "AbelianGroupAxioms",
+    TimeConstraint -> 10
+]
 ```
 <!-- => ProofObject[...] supporting ["ProofDataset"], ["ProofGraph"], ["ProofLength"], etc. -->
 

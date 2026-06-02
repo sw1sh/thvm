@@ -22,7 +22,11 @@ RelatedGuides: [THVMLink]
 ## Details & Options
 
 - The C engine saturates the axioms via unfailing Knuth-Bendix completion; the resulting equational rewrite chain is decoded into a verifier-shaped `ProofObject`. Returns `$Failed` when the conjecture is not proved.
-- An optional trailing positional argument selects what is returned, drawn from `{"ProofObject", "Lemmas", "PreprocessedAxioms", "RelevantAxioms", "RawTrace", "Statistics", "Status"}` (a single String returns that bare, a list returns an Association, `All` returns every spec).
+- An optional trailing positional argument selects what is returned, drawn from `{"ProofObject", "Lemmas", "PreprocessedAxioms", "RelevantAxioms", "RawTrace", "Statistics", "Status", "Counterexample"}` (a single String returns that bare, a list returns an Association, `All` returns every spec).
+- `"Counterexample"` is the equational dual of `"ProofObject"` - a disproof rather than a proof, returned as a [CounterexampleObject]() (the summary-boxed object that mirrors the Wolfram Function Repository's `FindEquationalCounterexample`), or `$Failed` when there is no extractable countermodel. The engine is chosen by the problem shape:
+  - A fully **ground** problem is decided by congruence closure (a complete decision procedure); the quotient is returned as a finite model in [FindFiniteModels]() structure - `co["Model"]` is an Association `op -> Cayley table` (0-indexed nested list) for each operator and `const -> element` for each constant, over the domain `{0, ..., k-1}`.
+  - A **quantified** problem is refuted by the saturated completion: when the completion saturates into a convergent term-rewriting system (Status `"Saturated"`, no unorientable equations) whose normal forms separate the goal's two sides, `co["NormalForms"]` are those normal forms and `co["Model"]` is a finite model in FindFiniteModels structure when the initial term algebra closes (else the convergent rules). It declines (`$Failed`) on a commutative/AC-saturated theory whose unorientable equations would need ordered rewriting.
+- For a ground problem, `Method -> "SMT"` decides the entailment by congruence closure directly (returning a `"Proved"` decision Association, or a `CounterexampleObject` on refute) and also accepts a TPTP `File` / `cnf`-`fof` string. Mirrors how [FindEquationalProof]() itself returns a countermodel-bearing `Failure` on a non-theorem.
 - Options:
   - `MaxSteps` - CP-processing cap (default 200000).
   - `TimeConstraint` - wall-clock seconds (default `Infinity`; bounds non-terminating recursive-axiom saturations; `TimeConstrained[]` and `Abort[]` also interrupt the running C engine).
@@ -110,12 +114,16 @@ p["ProofGraph"]
 
 ## Possible Issues
 
-A non-terminating axiom set never saturates. Bound completion runs with `TimeConstraint`:
+A non-terminating axiom set never saturates.  Bound completion runs with `TimeConstraint`; the rewrite expands forever (`f` rewrites to `f[f]`, then `f[f[f]]`, ...) so the prover times out instead of finding the goal:
 
 ```wl
-TFindProof[ {Inactive[Equal][S[x_][y_][z_], x[z][y[z]]]}, TimeConstraint -> 2 ]
+TFindProof[
+    Inactive[Equal][a, b],
+    {Inactive[Equal][f[x_], f[f[x_]]]},
+    TimeConstraint -> 2
+]
 ```
-<!-- => {...partial lemmas within 2s...} -->
+<!-- => $Failed within 2s (engine saturated against the timeout) -->
 
 ---
 

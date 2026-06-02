@@ -74,13 +74,19 @@ frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
 ]
 
 (* Heavy ATP tutorials accumulate too much C-engine memory if every cell
-   evaluates in the same kernel; the OS OOM-kills the build mid-way.
-   Render them without evaluation (the code stays visible, just unrun). *)
+   evaluates in the same kernel; render them without evaluation (the code
+   stays visible, just unrun). *)
 noEvaluate = {"ATP.md", "AtpMethods.md"}
+
+(* Hard per-file time budget for example evaluation.  A cell that takes
+   longer than this almost certainly indicates a hung saturator / kernel,
+   not a slow-but-finishing run, and the build falls back to a no-eval
+   render of that file rather than waiting forever. *)
+perFileBudgetSec = 60
 
 (* The output basename is the source basename; it must match the URI tail
    (DocumentationBuild builds the URI from the file path). *)
-buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ },
+buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt, fallbackQ },
     tmpl = frontmatterTemplate[srcFile];
     If[ ! KeyExistsQ[subdirs, tmpl],
         print["  [skip] ", FileNameTake[srcFile], " (no Template: in frontmatter)"];
@@ -91,12 +97,26 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ },
     Quiet @ CreateDirectory[dir, CreateIntermediateDirectories -> True];
     out      = FileNameJoin[{dir, baseName <> ".nb"}];
     evalQ    = ! MemberQ[noEvaluate, FileNameTake[srcFile]];
-    mtn[srcFile, out, "Evaluate" -> evalQ];
+    t0       = AbsoluteTime[];
+    fallbackQ = False;
+    res = TimeConstrained[
+        mtn[srcFile, out, "Evaluate" -> evalQ],
+        perFileBudgetSec,
+        $TimedOut
+    ];
+    If[ res === $TimedOut,
+        fallbackQ = True;
+        print["  [timeout >", perFileBudgetSec, "s] ", FileNameTake[srcFile],
+              " - falling back to no-eval render"];
+        mtn[srcFile, out, "Evaluate" -> False]
+    ];
+    dt = Round[AbsoluteTime[] - t0, 0.1];
     print["  ",
         FileNameTake[srcFile], " -> ",
         If[ subdirs[tmpl] === {}, "", "Documentation/English/" <> Last[subdirs[tmpl]] <> "/" ],
         baseName, ".nb",
-        If[ evalQ, "", " (no-eval)"]
+        If[ evalQ && !fallbackQ, "", " (no-eval)"],
+        "  (", dt, "s)"
     ]
 ]
 
