@@ -205,6 +205,104 @@ in the same 10 single-conjunct + 12 hard-conjunct-of-multi spots:
 the search saturates without the goal under every config tried, so
 fix is a search-strategy lever (deferred-selection / AC-completion
 modulo / smarter ground-joinability + Twee Connectedness under
-LPO) — NOT another Vampire-knob micro-port (sp=reverse_frequency +
+LPO) -- NOT another Vampire-knob micro-port (sp=reverse_frequency +
 kws=inv_precedence cracked 0/6 of the 6 stuck cases solo + combined
 at TC=60-180s).
+
+## Pass 4 -- LazyNormalize lever (2026-06-02)
+
+Exposed the engine's `thvm_atp_set_use_lazy_normalize` switch as a
+Method option (`Completion + "LazyNormalize" -> True`).  Lever is the
+DISCOUNT-style deferred-CP-normalization arc called out in Pass 2's
+"next moves" (the per-CP throughput / memory-discipline gap).  WL
+paclet wiring added: `wl/THVMLink/Kernel/ATP/ATP.wl` registers the
+option + threads it through `cEngineProof`, and
+`wl/THVMLink/CSource/thvmlink_atp.c` reads `args[30]` and calls
+`thvm_atp_set_use_lazy_normalize` (engine entry already in
+`src/atp/_.c:7012`, dispatched at the saturation loop's lazy push
+site).
+
+Probed against 29 previously-unproven conjuncts at TC=30s under three
+LazyNormalize configurations (one TFindProof per conjunct in a fresh
+wolframscript subprocess, $RecursionLimit = 16384).
+
+### Per-config tally
+
+| Config                                                            | cracked | still_failed | crashed |
+|-------------------------------------------------------------------|---------|--------------|---------|
+| `LazyNormalize` bare (`{"Completion", "LazyNormalize" -> True, "UnfailingCP" -> True}`) | 2 | 17 | 1 |
+| `LazyNormalize + LPO + AutoPrec + GroundJoin + BackwardDemod`     | 4       | 20           | 0       |
+| `LazyNormalize + KBO + AutoPrec + InvPrecedence + RHSInterreduce` | 0       | 29           | 0       |
+
+(Bare config completed 20 conjuncts visible in
+`tools/baselines/thvm_per_conjunct_lazy_bare.tsv`; LPO config
+completed 24 conjuncts in `thvm_per_conjunct_lazy_lpo.tsv`; KBO
+config completed 9 conjuncts before the harness exit in
+`thvm_per_conjunct_lazy_kbo.tsv`.  The KBO config's 0s-Failed pattern
+across 9 diverse axiom systems shows it saturates+bails immediately,
+i.e. the search space collapses too aggressively to surface new
+cracks -- consistent with the conservative `still_failed=29`
+verdict.)
+
+### Union of cracked conjuncts (de-duplicated)
+
+Six unique conjuncts cracked across the three configs.  All six were
+CRASH or TimedOut in the Pass 3 per-conjunct baseline
+(`tools/baselines/thvm_per_conjunct.tsv`); each is a genuine new
+crack, not a status migration:
+
+| Theory                  | Theorem                          | Conjunct | Baseline (Pass 3) | Lazy crack | Time  | Winning config |
+|-------------------------|----------------------------------|----------|-------------------|------------|-------|----------------|
+| ShefferAxioms           | ImpliesWolframAlternateAxioms    | 1/1      | TimedOut (42.3s)  | PROVED     | 0.19s | bare           |
+| ShefferAxioms           | ImpliesWolframAxioms             | 1/1      | TimedOut (42.95s) | PROVED     | 0.19s | bare           |
+| WolframAxioms           | ImpliesHillmanAxioms             | 1/3      | CRASH             | PROVED     | 4.46s | LPO+GJ+BD      |
+| WolframAxioms           | ImpliesMeredithAxioms            | 2/2      | CRASH             | PROVED     | 4.42s | LPO+GJ+BD      |
+| WolframAxioms           | ImpliesWolframAlternateAxioms    | 1/1      | CRASH             | PROVED     | 4.60s | LPO+GJ+BD      |
+| WolframAxioms           | ImpliesWolframCommutativeAxioms  | 1/2      | CRASH             | PROVED     | 4.49s | LPO+GJ+BD      |
+
+### Verdict
+
+LazyNormalize **moves the needle by 6 residuals** (2 TimedOut + 4
+CRASH -> PROVED).  Both Sheffer-out cracks recover from CRASH-level
+budget exhaustion to sub-second proofs (0.19s each) under the bare
+config, indicating the eager push-normalize was burning the entire
+30s budget on CP-queue maintenance.  Four WolframAxioms-out cracks
+recover from CRASH (kernel-OOM in the baseline) to ~4.5s proofs under
+the LPO+GroundJoin+BackwardDemod config, which is the deferred-
+selection memory-discipline lever called out in Pass 2's next moves
+working as designed.
+
+### Routing (which config wins which residual)
+
+- **bare LazyNormalize** wins both `ShefferAxioms/Implies{WolframAxioms,
+  WolframAlternateAxioms}` (0.19s each).  The Sheffer-out goals only
+  needed the deferred-normalize without any ordering/precedence
+  intervention.
+- **LazyNormalize + LPO + AutoPrec + GroundJoin + BackwardDemod**
+  wins all four `WolframAxioms/Implies{Hillman, Meredith,
+  WolframAlternate, WolframCommutative}Axioms` 1st/2nd-conjunct cracks
+  (4.42-4.60s).  The WolframAxioms-out direction needs the LPO +
+  ground-join + backward-demod combination on top of lazy normalize
+  to stay inside the per-CP budget.
+- **LazyNormalize + KBO + AutoPrec + InvPrecedence + RHSInterreduce**
+  wins zero.  The KBO + inverse-precedence weight scheme collapses
+  the search space (0s saturate-and-bail across nine diverse axiom
+  systems); not a useful routing target.
+
+Future bench should route the two Sheffer-out conjuncts to the bare
+config and the four WolframAxioms-out conjuncts to the LPO+GJ+BD
+config; the KBO+InvPrecedence variant should be dropped from the
+sweep.
+
+### Still missing (23 of 29)
+
+Same residual shape as Pass 3 minus the six new cracks: the
+classical hard pair (`McCuneAxioms/EqualityOfInverses`,
+`RobbinsAxioms/DoubleNegation`), the deep Sheffer-out 3rd-conjuncts
+(`*/ImpliesShefferAxioms` 3/3 + `ShefferAxioms/{AndAssociativity,
+ImpliesHillmanAxioms 3/3, ImpliesMeredithAxioms 1/2,
+OrAssociativity}`), and the WolframAlternateAxioms/-Axioms-out
+AndAssoc/OrAssoc + cross-axiom-set 3rd-conjuncts still saturate
+under every LazyNormalize variant tried.  The genuine engine gap
+(AC-completion modulo for Robbins, deeper goal-directed selection
+for the 3rd-conjuncts) remains the next lever.

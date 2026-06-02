@@ -516,6 +516,11 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       }
     }
   }
+  // Method "LazyNormalize" -> True: DISCOUNT-style deferred CP
+  // normalization (queue UN-normalized CPs, defer normalize to
+  // selection time).  Engine lever in src/atp/_.c:7012; gated at the
+  // saturation loop's lazy push site near line 11238.  args[30].
+  mint lazy_norm_mode = MArgument_getInteger(args[30]);
   // Method "VarWeight" -> n: per-variable KBO weight override (default
   // 1).  Mirrors Waldmeister `-w VAR=N`.  args[26].  Pass <= 0 (or
   // omit) to keep the default 1.
@@ -591,6 +596,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // Wolfram theorems reachable.  0 = off (default lhs-only overlap).
   mint unf_cp = MArgument_getInteger(args[14]);
   thvm_atp_set_use_unfailing_cp(atp, (u8)(unf_cp != 0));
+  // Method -> {... "LazyNormalize" -> True}: DISCOUNT-style deferred
+  // CP normalization.  Engine lever already in
+  // src/atp/_.c:7012 (thvm_atp_set_use_lazy_normalize); the saturation
+  // loop's lazy push site (~line 11238) gates on this + !use_mnf.
+  // 0 = off (default eager push-normalize, engine byte-identical).
+  thvm_atp_set_use_lazy_normalize(atp, (u8)(lazy_norm_mode != 0));
   // Method -> "Waldmeister": periodic full-rule-set CP-queue interreduction
   // (Waldmeister KPV_KPMengeInterreduzieren) -- purges queued CPs that have
   // become joinable through the growing rule set so the heap-min selection

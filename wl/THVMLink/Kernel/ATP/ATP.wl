@@ -147,7 +147,7 @@ $atpRunProofFn := $atpRunProofFn = load[
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
      Integer, Integer, Integer, Integer, Integer, Integer, {Integer, 1},
-     Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -1031,7 +1031,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     cpSetInterreduce_, connectedness_, precedenceSpec_,
     fifoTiebreak_, recordNorm_, useLRS_, useSOS_,
     useFwdSub_, useBwdSub_, useBwdDemod_, symbolWeightsSpec_,
-    varWeight_, randomRatio_, randomSeed_, kwsMode_] := Block[{
+    varWeight_, randomRatio_, randomSeed_, kwsMode_,
+    lazyNormalize_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
@@ -1043,7 +1044,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
         recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod,
-        symbolWeightsArr, varWeight, randomRatio, randomSeed, kwsMode];
+        symbolWeightsArr, varWeight, randomRatio, randomSeed, kwsMode,
+        lazyNormalize];
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -2281,6 +2283,15 @@ atpRHSInterreduceOpt[o_Association] := Switch[Lookup[o, "RHSInterreduce", Automa
    on; False/Automatic = off (the default lhs-only overlap). *)
 atpUnfailingCPOpt[o_Association] := Switch[Lookup[o, "UnfailingCP", Automatic],
     True, 1, False | Automatic, 0, _, 0];
+(* "LazyNormalize" -> True: DISCOUNT-style deferred CP normalization --
+   queue CPs in their UN-normalized form, defer normalize to selection
+   time.  Cuts the push-time work + memory pressure on saturating
+   workloads.  Engine-side lever already shipped
+   (src/atp/_.c:7012 thvm_atp_set_use_lazy_normalize, dispatched at
+   line ~11238 in the saturation loop).  Default off (engine default =
+   eager push-normalize). *)
+atpLazyNormalizeOpt[o_Association] := Switch[Lookup[o, "LazyNormalize", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
 (* "CPSetInterreduce" -> True: Waldmeister KPV_KPMengeInterreduzieren --
    periodically re-normalize the whole CP queue against the full rule set,
    deleting CPs that became joinable and reweighting the rest, so the
@@ -2388,7 +2399,7 @@ atpBwdSubsumeOpt[o_Association] :=
 atpBwdDemodOpt[o_Association] :=
     Switch[Lookup[o, "BackwardDemod", Automatic],
         True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0};
+atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0, 0};
 (* Accept the string form "Automatic" as a synonym for the symbol --
    users typing Method -> "Automatic" alongside the other string-named
    presets ("Waldmeister", "Twee", ...) shouldn't trip the badmethod
@@ -2500,7 +2511,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpPrecedenceOpt[o], atpFifoTiebreakOpt[o], atpRecordNormOpt[o],
          atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o],
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
-         atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o]}
+         atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o],
+         atpLazyNormalizeOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -2511,7 +2523,7 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0, 0};
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 

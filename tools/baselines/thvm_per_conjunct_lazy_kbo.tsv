@@ -1,0 +1,9 @@
+HillmanAxioms	ImpliesShefferAxioms	3	Failed	0.
+McCuneAxioms	EqualityOfInverses	1	Failed	0.
+MeredithAxioms	ImpliesShefferAxioms	3	Failed	0.
+RobbinsAxioms	DoubleNegation	1	Failed	0.
+ShefferAxioms	AndAssociativity	1	Failed	0.
+ShefferAxioms	ImpliesHillmanAxioms	3	Failed	0.
+ShefferAxioms	ImpliesMeredithAxioms	1	Failed	0.
+ShefferAxioms	ImpliesWolframAlternateAxioms	1	Failed	0.
+ShefferAxioms	ImpliesWolframAxioms	1	Failed	0.
