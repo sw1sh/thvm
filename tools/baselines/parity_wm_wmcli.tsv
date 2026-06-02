@@ -1,0 +1,9 @@
+theory	theorem	preset_constructs	wmcli_constructs	cli_minus_preset	notes
+AbelianGroupAxioms	InverseOfInverse	11	12	+1	one extra SL (WM emits normalize step thvm CP-set-interreduce inlines)
+AbelianGroupAxioms	InverseOfComposite	17	20	+3	more demods externalized
+AbelianGroupAxioms	ImpliesMcCuneAxioms	27	28	+1	standard +1 trajectory gap
+AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	19	20	+1	standard +1 trajectory gap
+BooleanAxioms	DoubleNegation	19	20	+1	standard +1 trajectory gap
+GroupAxioms	InverseOfInverse	13	14	+1	standard +1 trajectory gap
+HillmanAxioms	Commutativity	-	38	-	preset timed out @ 8s; CLI succeeds in 12s
+MeredithAxioms	Commutativity	-	11	-	preset timed out @ 8s; CLI succeeds in 12s

@@ -248,10 +248,9 @@ proofFieldFor[step_Association, nameToKey_Association] := Block[
 
 buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[
     {folded, nameToKey, entries, stmtFn},
-    (* Drop bookkeeping steps (`orient`, `reorient_equations`)
-       BEFORE construct-key assignment.  Aliases route any later
-       reference through to the step's first real parent.  See
-       $BookkeepingRules + foldBookkeeping above. *)
+    (* Drop bookkeeping steps (orient, reorient_equations,
+       equation_copy) BEFORE construct-key assignment; aliases
+       route later references to the step's first real parent. *)
     folded = foldBookkeeping[derivation];
     nameToKey = assignConstructKeys[folded];
     (* Per-formula wrap-and-parse is SLOW (TPTPImport runs the
