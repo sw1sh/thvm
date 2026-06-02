@@ -54,6 +54,16 @@ TVampireProofObject::usage =
     "TFindProof so two ProofObjects from differing Methods (internal " <>
     "preset vs external CLI) can be compared structurally."
 
+TTweeProofObject::usage =
+    "TTweeProofObject[\"Theory\", \"thm\", opts] runs Twee CLI via " <>
+    "TTweeProof.  Twee's --tstp output is SZS-FRAMED but the proof " <>
+    "body is Twee's own human-readable equation chain (not TPTP fof " <>
+    "inferences), so we return the lemma-list shape directly rather " <>
+    "than via TSZSDerivationToProofObject -- the dataset is keyed by " <>
+    "{\"Axiom\", n} / {\"Lemma\", n} only, with no per-step " <>
+    "construct-class metadata.  Used as Method -> \"TweeProcess\" in " <>
+    "TFindProof."
+
 Begin["`Private`"]
 
 (* The canonical SZS-rule -> thvm-construct mapping.  Editable as a
@@ -216,6 +226,47 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
             "Strategy" -> vampR["Strategy"]
         |>],
         TSZSDerivationToProofObject[vampR["Inferences"]]
+    ]
+]
+
+(* Twee wrapper: Twee's --tstp proof body is not TPTP fof, so we
+   build a coarser dataset (Axioms + Lemmas with no inference
+   metadata) that the shape comparator still reads. *)
+TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[
+    {tR = TTweeProof[theory, thm, opts], ds, axs, lems},
+    If[ tR["Status"] =!= "Proved",
+        Failure["ExternalNoProof", <|
+            "Tool"    -> "Twee",
+            "Status"  -> tR["Status"],
+            "Seconds" -> tR["Seconds"]
+        |>],
+        axs  = tR["Axioms"];
+        lems = tR["Lemmas"];
+        ds = Association @@ Join[
+            Table[
+                {"Axiom", i} -> <|
+                    "Statement" -> axs[[i]]["Statement"],
+                    "Proof" -> <||>
+                |>,
+                {i, Length[axs]}
+            ],
+            Table[
+                {"Lemma", i} -> <|
+                    "Statement" -> lems[[i]]["Statement"],
+                    "Proof" -> <||>
+                |>,
+                {i, Length[lems]}
+            ]
+        ];
+        <|
+            "Backend"       -> "Twee-TSTP",
+            "Status"        -> "Proved",
+            "Goal"          -> Missing["NotEmittedByTwee"],
+            "Axioms"        -> #["Statement"] & /@ axs,
+            "ProofDataset"  -> ds,
+            "ProofLength"   -> tR["ProofLength"],
+            "RuleHistogram" -> <|"twee-rewrite" -> Length[lems]|>
+        |>
     ]
 ]
 

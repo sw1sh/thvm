@@ -3985,6 +3985,11 @@ TFindProof[thm_String, theory_String,
                 FilterRules[{opts}, Options[THVMLink`ATP`TVampireProof]]],
                 "TATPError"]
         ];
+        If[ methodOpt === "TweeProcess",
+            Throw[THVMLink`ATP`TTweeProofObject[theory, thm,
+                FilterRules[{opts}, Options[THVMLink`ATP`TTweeProof]]],
+                "TATPError"]
+        ];
         cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
         If[ MissingQ[cjRaw],
             Throw[Failure["TATPParseError",
