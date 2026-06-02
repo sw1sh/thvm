@@ -376,6 +376,29 @@ Options[TWaldmeisterProofObject] = {
     "ParseFormulas" -> False
 }
 
+(* Two-arg (Theory, thm) form: resolve to a pre-generated .pr file
+   under tools/baselines/wm_pr/.  Pre-generate the .pr files via
+   tools/baselines/tptp_to_pr.wls; missing .pr returns
+   `NoCachedPr` Failure with the converter command line. *)
+TWaldmeisterProofObject[theory_String, thm_String,
+        opts : OptionsPattern[]] /; ! FileExtension[theory] === "pr" :=
+    Block[{path = FileNameJoin[{
+            Directory[], "tools", "baselines", "wm_pr",
+            theory <> "__" <> thm <> ".pr"}]},
+        If[ FileExistsQ[path],
+            TWaldmeisterProofObject[path, opts],
+            Failure["NoCachedPr", <|
+                "Theory" -> theory,
+                "Theorem" -> thm,
+                "Reason" -> StringJoin[
+                    "Run `wolframscript -f tools/baselines/tptp_to_pr.wls ",
+                    "tools/baselines/vampire_tptp/", theory, "__", thm,
+                    ".p tools/baselines/wm_pr/", theory, "__", thm, ".pr`"
+                ]
+            |>]
+        ]
+    ]
+
 TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "pr" :=
     Block[

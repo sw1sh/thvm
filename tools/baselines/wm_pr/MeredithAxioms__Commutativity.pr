@@ -1,0 +1,12 @@
+NAME          MeredithAxiomsCommutativity
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     opCenterdot: ANY ANY -> ANY
+              skC1: -> ANY
+              skC2: -> ANY
+ORDERING      LPO
+              skC1 > skC2 > opCenterdot
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     opCenterdot(X1,opCenterdot(X2,opCenterdot(X1,X3))) = opCenterdot(opCenterdot(opCenterdot(X3,X2),X2),X1)
+              opCenterdot(opCenterdot(X1,X1),opCenterdot(X2,X1)) = X1
+CONCLUSION    opCenterdot(skC1,skC2) = opCenterdot(skC2,skC1)
