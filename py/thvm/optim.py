@@ -1,4 +1,4 @@
-"""thvm.nn.optim -- SGD / Adam / Muon, mirroring tinygrad's nn.optim.
+"""thvm.nn.optim -- SGD / Adam / AdamW / LARS / Muon, mirroring tinygrad's nn.optim.
 
 The contract matches tinygrad's Optimizer: zero_grad() clears the
 parameter gradients and schedule_step() applies one update and returns
@@ -193,8 +193,136 @@ def AdamW(params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.01, **_):
     return Adam(params, lr=lr, b1=b1, b2=b2, eps=eps, weight_decay=weight_decay)
 
 
-# Muon needs Newton-Schulz orthogonalization; thvm has no batched-matmul
-# iteration helper yet, so it falls back to Adam (the script uses it only
-# under MUON=1).  This fallback also drops Muon's weight decay -- a known gap
-# until the Newton-Schulz update lands.
-Muon = Adam
+# LARS / Muon share one trust-ratio + momentum + Newton-Schulz core,
+# faithfully porting tinygrad nn/optim.py:99-133 (class LARS).  thvm's
+# SGD/Adam/AdamW above stay in their own byte-stable eager paths; LARS is
+# a separate class so adding it cannot perturb them.  In tinygrad SGD is
+# LARS(tcoef=0) and Muon is LARS(ns_coefficients=...); thvm keeps the fast
+# specialized SGD and exposes Muon as the LARS(NS) wrapper below.
+class LARS(Optimizer):
+    """Layer-wise Adaptive Rate Scaling (tinygrad nn/optim.py:99-133).
+
+    Trust ratio ``r = tcoef * |w| / (|g| + wd*|w|)`` gated on |w|>0 & |g|>0
+    (else 1.0) scales the momentum-SGD update.  With ``tcoef=0`` it is plain
+    momentum SGD; with ``ns_coefficients`` set it is Muon (the momentum
+    buffer is orthogonalized by Newton-Schulz before the update)."""
+
+    def __init__(self, params, lr=0.001, momentum=0.9, weight_decay=1e-4,
+                 ns_steps=0, ns_coefficients=None, nesterov=False,
+                 classic=True, pre_wd=True, tcoef=0.001, **_):
+        if momentum < 0:
+            raise ValueError(f"Invalid momentum value: {momentum}")
+        super().__init__(params, lr)
+        self.momentum, self.wd = momentum, weight_decay
+        self.ns_steps, self.ns_coefficients = ns_steps, ns_coefficients
+        self.nesterov, self.classic = nesterov, classic
+        self.pre_wd, self.tcoef = pre_wd, tcoef
+        # Momentum buffers, zero-initialised + realized (tinygrad's
+        # self.b = self._new_optim_param(); zeros on the first run).
+        self.b = ([Tensor.zeros(*(p.shape or (1,))) for p in self.params]
+                  if self.momentum else [])
+        for b in self.b:
+            b.realize()
+
+    def _step(self):
+        # The trust ratio, weight decay, momentum update, Newton-Schulz
+        # orthogonalization, and the in-place param assign, ported from
+        # tinygrad LARS._step (nn/optim.py:113-133).
+        #
+        # The non-NS path stays fully eager-inline like thvm's SGD: build g,
+        # update self.b[i] in place, p.assign(p - g), and return both the
+        # momentum buffers and the params so the caller realizes them TOGETHER
+        # (one fire scope).  An eager `Tensor.realize` of the momentum buffer
+        # mid-step (before reading it back into the param update) desyncs the
+        # next step's momentum recurrence and freezes the param -- SGD's inline
+        # one-shot realize is the correct shape.
+        #
+        # Newton-Schulz is the exception: it reads self.b[i] through a deep
+        # matmul chain, and a chain over an unrealized in-place ASSIGN node
+        # stalls realize (the same hazard the Adam class splits around with its
+        # `Tensor.realize(*mv)` barrier).  So when ns_coefficients is set we
+        # first build + realize the momentum buffers, then run NS on the now-
+        # plain-TEN buffers in a second pass.
+        out = []
+        ns = bool(self.ns_coefficients)
+        pre = []          # NS path scratch: (p, r, g_after_momentum)
+        moments = []
+        for i, p in enumerate(self.params):
+            g = p.grad
+            if g is None:
+                pre.append(None)
+                continue
+            g = g.reshape(*p.shape) if p.shape else g
+            if self.tcoef != 0:
+                # trust ratio (tinygrad nn/optim.py:117-119)
+                r1 = p.detach().square().sum().sqrt()
+                r2 = g.square().sum().sqrt()
+                r = (r1 > 0).where(
+                    (r2 > 0).where(
+                        (r1 * self.tcoef) * (r2 + r1 * self.wd).reciprocal(),
+                        1.0),
+                    1.0)
+            else:
+                r = 1.0
+            if self.pre_wd and self.wd > 0:
+                g = g + p.detach() * self.wd
+            # classic momentum applies the learning rate before momentum.
+            if self.classic:
+                g = (g * r * self.lr) if isinstance(r, Tensor) else (g * (r * self.lr))
+            if self.momentum:
+                self.b[i].assign(self.b[i] * self.momentum + g)
+                moments.append(self.b[i])
+                g = (g + self.b[i] * self.momentum) if self.nesterov else self.b[i]
+            if ns:
+                pre.append((p, r, g))
+                continue
+            # popular momentum applies the learning rate after momentum.
+            if not self.classic:
+                g = (g * r * self.lr) if isinstance(r, Tensor) else (g * (r * self.lr))
+            p.assign(p - g)
+            if self.momentum:
+                out.append(self.b[i])
+            out.append(p)
+        if not ns:
+            return out
+        # NS path: realize the momentum buffers, then orthogonalize.
+        if moments:
+            Tensor.realize(*moments)
+        out = list(moments)
+        for entry in pre:
+            if entry is None:
+                continue
+            p, r, g = entry
+            # orthogonalize the (reshaped-2D) momentum update, reshape back
+            # (tinygrad nn/optim.py:127).
+            gshape = g.shape
+            g = g.reshape(gshape[0], -1).newton_schulz(
+                self.ns_steps, self.ns_coefficients).reshape(*gshape)
+            # tinygrad nn/optim.py:129 reassigns its LOCAL `t = t.detach() *
+            # (1 - wd*lr)` for the "muon post-momentum weight decay", but that
+            # decayed `t` is then used ONLY for `g.cast(t.dtype)` (line 132) --
+            # the param update applied by schedule_step is `tt.assign(tt.detach()
+            # - up)` against the ORIGINAL param `tt` (line 60, _apply_update),
+            # so the decay never reaches the param value.  Porting the actual
+            # tinygrad behaviour (thvm is f32-only so the dtype hook is moot):
+            # no param decay -- p <- p - g.  (Verified: applying the decay puts
+            # thvm off tinygrad by exactly |p|*wd*lr.)
+            # popular momentum applies the learning rate after momentum.
+            if not self.classic:
+                g = (g * r * self.lr) if isinstance(r, Tensor) else (g * (r * self.lr))
+            p.assign(p - g)
+            out.append(p)
+        return out
+
+
+# Muon applies Newton-Schulz orthogonalization to the momentum update --
+# tinygrad nn/optim.py:86-97 (Muon(...) = LARS(pre_wd=False, classic=False,
+# nesterov=True, ns_coef)).  Coefficients/steps default to the Muon quintic
+# (3.4445,-4.775,2.0315), 5 steps; momentum 0.95, weight_decay 0.1, matching
+# tinygrad's defaults.  (tinygrad's "post-momentum weight decay" is dead code
+# -- see LARS._step -- so weight_decay does not affect the Muon param update.)
+def Muon(params, lr=0.001, momentum=0.95, weight_decay=0.1, ns_steps=5,
+         ns_coefficients=(3.4445, -4.775, 2.0315), nesterov=True, **_):
+    return LARS(params, lr=lr, momentum=momentum, weight_decay=weight_decay,
+                ns_steps=ns_steps, ns_coefficients=ns_coefficients,
+                nesterov=nesterov, classic=False, pre_wd=False, tcoef=0.0)

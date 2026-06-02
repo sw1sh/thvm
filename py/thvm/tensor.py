@@ -708,6 +708,70 @@ class Tensor:
     def minimum(self, other) -> "Tensor":
         return -(-self).maximum(-_wrap_other(self, other))
 
+    def square(self) -> "Tensor":
+        # tinygrad mixin/elementwise.py:498 -- square(x) = x*x.
+        return self * self
+
+    def __lt__(self, other) -> "Tensor":
+        # CMPLT lowers to a 0.0/1.0 mask (same op relu/maximum use).
+        a, b = self._broadcast(other)
+        less = Term(_uop_binary(_ct.c_uint32(K.CMPLT),
+                                _ct.c_uint64(int(a.term)),
+                                _ct.c_uint64(int(b.term))))
+        return Tensor._from_term(less, a._dtype, a._shape)
+
+    def __gt__(self, other) -> "Tensor":
+        return _wrap_other(self, other).__lt__(self)
+
+    def where(self, a, b) -> "Tensor":
+        """tinygrad Tensor.where -- self is a 0/1 (or boolean) mask;
+        returns mask*a + (1-mask)*b.  thvm has no ternary WHERE ALU op,
+        so it is composed from the 0/1 CMPLT mask exactly like maximum."""
+        mask = self
+        a_t = a if isinstance(a, Tensor) else None
+        b_t = b if isinstance(b, Tensor) else None
+        out_shape = mask._shape
+        if a_t is not None:
+            mask, a_t = mask._broadcast(a_t)
+            out_shape = mask._shape
+        if b_t is not None:
+            mask2, b_t = mask._broadcast(b_t)
+            mask = mask2
+            out_shape = mask._shape
+        sel_a = (mask * a) if a_t is not None else (mask * float(a))
+        inv = 1.0 - mask
+        sel_b = (inv * b) if b_t is not None else (inv * float(b))
+        return sel_a + sel_b
+
+    def newton_schulz(self, steps: int, params, eps: float = 1.0e-7) -> "Tensor":
+        """Newton-Schulz orthogonalization of an odd polynomial, port of
+        tinygrad/mixin/__init__.py:1444-1459.
+
+        For coefficients ``params = (a, b, c)`` (the Muon quintic) each
+        step computes ``G <- a*G + b*(GG^T)G + c*(GG^T)^2 G`` where the
+        left factor ``GG^T`` is always formed from the CURRENT step's G
+        (tinygrad's ``functools.reduce(lambda x,y:(y@y.T)@x,[G]*i,G)``
+        feeds the original ``y=G`` into every ``(y@y.T)`` factor, only the
+        rightmost ``@x`` chains).  G is Frobenius-normalized first; a
+        tall matrix (shape[-2] > shape[-1]) is transposed in/out so the
+        contraction stays on the smaller axis."""
+        assert self.ndim > 1, "NS only works for two or more dims"
+        if self._shape[-2] > self._shape[-1]:
+            return self.transpose(-2, -1).newton_schulz(
+                steps, params, eps).transpose(-2, -1)
+        G = self / (self.square().sum(axis=(-2, -1), keepdim=True).sqrt() + eps)
+        for _ in range(steps):
+            ggt = G @ G.transpose(-2, -1)
+            acc = None
+            for i, p in enumerate(params):
+                x = G
+                for _j in range(i):
+                    x = ggt @ x
+                term = x * p
+                acc = term if acc is None else acc + term
+            G = acc
+        return G
+
     # ---- reductions ---------------------------------------------------
 
     def _reduce(self, kind: int, axis, keepdim: bool) -> "Tensor":
