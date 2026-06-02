@@ -479,10 +479,17 @@ reconstructSuperposition[
                 If[o1 === 1, cs[[s1]], cs[[3 - s1]]],
                 If[o1 === 1, cs[[3 - s1]], cs[[s1]]],
                 varSet],
-              "MatchingRule" -> mkRule[
-                If[o2 === 1, ms[[s2]], ms[[3 - s2]]],
-                If[o2 === 1, ms[[3 - s2]], ms[[s2]]],
-                freshVars]|>]]
+              (* MatchingRule's vars rename back to varSet names
+                 (the cplR<n> Unique symbols would otherwise leak
+                 into the verifier's pattern machinery and trip
+                 internal Unique[] calls). *)
+              "MatchingRule" -> Block[{
+                  lhsBase = If[o2 === 1, ms[[s2]], ms[[3 - s2]]],
+                  rhsBase = If[o2 === 1, ms[[3 - s2]], ms[[s2]]],
+                  reverseMap = AssociationThread[
+                      freshVars, varSet]},
+                  mkRule[lhsBase /. reverseMap,
+                      rhsBase /. reverseMap, varSet]]|>]]
 ];
 
 (* Take an already-lifted prfList (Association of {Type, n} ->
