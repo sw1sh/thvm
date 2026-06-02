@@ -412,6 +412,20 @@ static u32 BOUNDARY_DEPTH    [BUFFERIZE_NODES_CAP];
 // realize root (the caller reads it; never recycle) and any orphan
 // preserved tensor.
 static u32 BOUNDARY_LAST_USE [BUFFERIZE_NODES_CAP];
+// Per-boundary fire-order sequence (post-order DFS position from the
+// realize sink).  kernel_fire_by_id (interact/uop_kernel.c:207) fires a
+// kernel's input producers first, in slot order, then dispatches the
+// kernel itself -- a post-order DFS over producer->consumer edges.  The
+// arena lifetime planner recycles a slot once its boundary-order
+// position passes, so that position MUST equal the actual dispatch
+// order; the (depth, loc) topo sort can diverge from it (a low-depth
+// node whose only consumer sits in a late DFS branch fires LATE, after
+// a higher-depth sibling that took its recycled slot -> clobber).
+// Sorting boundaries by this sequence makes BOUNDARY_ORDER the linear
+// execution order, matching tinygrad's lifetimes-over-linearized-
+// schedule invariant (schedule/memory.py:28 enumerates linear.src).
+// 0xFFFFFFFF = unvisited (orphan preserved tensor; falls back to depth).
+static u32 BOUNDARY_FIRE_SEQ [BUFFERIZE_NODES_CAP];
 
 #define VISIT_BAIL 0xDEADBEEFu
 // VISIT_OK signals "subgraph visited successfully".  Visit walks
@@ -1137,6 +1151,54 @@ static void boundary_compute_last_use(void) {
       boundary_last_use_descend(cloc, p_depth, visited);
     }
   }
+  free(visited);
+}
+
+// Post-order DFS from a UOp loc, descending into UOp children (in
+// arity/slot order) before assigning the node its own fire-order
+// sequence number.  Mirrors kernel_fire_by_id (interact/uop_kernel.c:
+// 207): a kernel fires every input producer first, then itself.  We
+// assign a sequence to EVERY visited bufferize node (not just the
+// realized ones) so the resulting order is a single global post-order;
+// the topo sort reads back only the boundary nodes' sequences, whose
+// relative order is preserved.  `*next_seq` runs across the whole walk;
+// `visited` dedups (each node fires once).
+static void boundary_fire_seq_rec(u64 from_loc, u8 *visited, u32 *next_seq) {
+  if (from_loc >= HEAP_NEXT) return;
+  if (visited[from_loc]) return;
+  visited[from_loc] = 1;
+  u32 idx = bufferize_info_find(from_loc);
+  if (idx == 0xFFFFFFFFu) return;
+  u8 ar = uop_arity(BUFFERIZE_NODES[idx].op);
+  u64 seen[MAX_UOP_SRC] = {0};
+  u8  n_seen = 0;
+  for (u8 c = 0; c < ar; c++) {
+    Term child = term_resolve(heap_read(from_loc + c));
+    if (term_tag(child) != TAG_UOP)    continue;
+    if (term_ext(child) == UOP_KERNEL) continue;
+    u64 cloc = term_val(child);
+    u8  dup  = 0;
+    for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+    if (dup) continue;
+    seen[n_seen++] = cloc;
+    boundary_fire_seq_rec(cloc, visited, next_seq);
+  }
+  if (BOUNDARY_FIRE_SEQ[idx] == 0xFFFFFFFFu) {
+    BOUNDARY_FIRE_SEQ[idx] = (*next_seq)++;
+  }
+}
+
+// Compute BOUNDARY_FIRE_SEQ[] by one post-order DFS rooted at the
+// realize sink.  Nodes unreachable from the root keep 0xFFFFFFFF and
+// fall back to depth-order in the topo sort.
+static void boundary_compute_fire_seq(Term root) {
+  for (u32 i = 0; i < BUFFERIZE_NODES_CAP; i++)
+    BOUNDARY_FIRE_SEQ[i] = 0xFFFFFFFFu;
+  if (HEAP_NEXT == 0) return;
+  u8 *visited = (u8 *)calloc(HEAP_NEXT, 1);
+  if (visited == NULL) return;
+  u32 next_seq = 0;
+  boundary_fire_seq_rec(term_val(root), visited, &next_seq);
   free(visited);
 }
 
@@ -3226,8 +3288,17 @@ static void topo_sort_boundaries(Term root) {
     BOUNDARY_DEPTH[i] = BOUNDARY_DEPTH_INVALID;
   boundary_depth_rec(term_val(root));
   boundary_compute_last_use();
+  // Fire-order sequence: the arena lifetime planner recycles a buffer's
+  // slot once its boundary-order position passes, so that position MUST
+  // be the actual kernel dispatch order (a post-order DFS from the
+  // sink), not the (depth, loc) topo sort -- else a producer that fires
+  // late (after a sibling that recycled its slot) clobbers still-live
+  // data.  Sorting by this sequence makes BOUNDARY_ORDER == execution
+  // order, matching tinygrad (schedule/memory.py:28 plans lifetimes over
+  // the linearized schedule, which IS the execution order).
+  boundary_compute_fire_seq(root);
 
-  struct { u64 loc; u32 depth; Term buf; } items[BOUNDARY_ORDER_CAP];
+  struct { u64 loc; u32 depth; u32 seq; Term buf; } items[BOUNDARY_ORDER_CAP];
   u32 n = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN && n < BOUNDARY_ORDER_CAP; i++) {
     // Select on the unified pass's UOP_BUFFERIZE Term.  Skip nodes
@@ -3279,17 +3350,28 @@ static void topo_sort_boundaries(Term root) {
     }
     items[n].loc   = BUFFERIZE_NODES[i].loc;
     items[n].depth = BOUNDARY_DEPTH[i];
+    items[n].seq   = BOUNDARY_FIRE_SEQ[i];
     items[n].buf   = buf;
     n++;
   }
+  // Sort by fire sequence (execution order).  Boundaries the DFS didn't
+  // reach (orphan preserved tensors) keep seq==0xFFFFFFFF and sort last
+  // by their (depth, loc) tiebreak so they stay deterministic.
   for (u32 i = 1; i < n; i++) {
     for (u32 j = i; j > 0; j--) {
-      u8 swap = (items[j].depth <  items[j-1].depth)
-            || (items[j].depth == items[j-1].depth && items[j].loc < items[j-1].loc);
+      u8 swap;
+      if (items[j].seq != items[j-1].seq) {
+        swap = (items[j].seq < items[j-1].seq);
+      } else if (items[j].depth != items[j-1].depth) {
+        swap = (items[j].depth < items[j-1].depth);
+      } else {
+        swap = (items[j].loc < items[j-1].loc);
+      }
       if (!swap) break;
-      u64 lt = items[j].loc;   items[j].loc   = items[j-1].loc;   items[j-1].loc   = lt;
-      u32 dt = items[j].depth; items[j].depth = items[j-1].depth; items[j-1].depth = dt;
-      Term bt = items[j].buf;  items[j].buf   = items[j-1].buf;   items[j-1].buf   = bt;
+      u64  lt = items[j].loc;   items[j].loc   = items[j-1].loc;   items[j-1].loc   = lt;
+      u32  dt = items[j].depth; items[j].depth = items[j-1].depth; items[j-1].depth = dt;
+      u32  st = items[j].seq;   items[j].seq   = items[j-1].seq;   items[j-1].seq   = st;
+      Term bt = items[j].buf;   items[j].buf   = items[j-1].buf;   items[j-1].buf   = bt;
     }
   }
   for (u32 i = 0; i < n; i++) {
