@@ -25,20 +25,26 @@ fn void apply_movement_op_shrink(u32 ndim,
                                   u32 const *begin_end,
                                   Term const *out_rngs,
                                   Term *in_rngs) {
-  // SHRINK index transform is handled DOWNSTREAM by view_apply_shrink
-  // in materialize.c, which folds the begin offset into the produced
-  // TenDesc's view.offset.  Adding it here too caused double-shift
-  // (project_thvm_composed_grad_bug -- May 20).  This pass leaves
-  // out_rngs untouched; the kernel reads via the shifted view.
-  //
-  // begin_end retained in the signature for caller compatibility
-  // (ru_apply_movement passes it) and so we have a hook here if a
-  // UOP-DAG source ever needs the index-shift fallback (no current
-  // path triggers it; the view-resolve in materialize.c bottoms out
-  // at TAG_TEN for every existing test on master).
-  (void)begin_end;
+  // tinygrad indexing.py:131  rngs = tuple(a if ss == 0 else a+ss ...):
+  // shift each consumer index by the begin offset so the kernel reads
+  // the source at out_iter + begin.  A SHRINK that feeds a kernel body
+  // (REDUCE / elementwise) or sits over a COMPUTED source (PAD result)
+  // is rangeified through here -- view_apply_shrink in materialize.c
+  // only ever sees a SHRINK that resolves to a buffer-backed view
+  // *input alias* (op_is_view_movement path), and those never reach
+  // this swizzle, so the begin offset is applied exactly once.  The
+  // a4d6ca41 double-shift came from an earlier flow that fed a
+  // view-offset-shifted alias through a +ss-swizzled index; the
+  // current rangeify/view-resolve split keeps the two paths disjoint
+  // (project_shrink_over_pad_offset_dropped).
   for (u32 i = 0; i < ndim; i++) {
-    in_rngs[i] = out_rngs[i];
+    u32 ss = begin_end[2 * i];
+    if (ss == 0) {
+      in_rngs[i] = out_rngs[i];
+    } else {
+      Term ss_const = uop_const(DT_INT32, ss);
+      in_rngs[i] = uop_int_binary(UOP_IADD, out_rngs[i], ss_const);
+    }
   }
 }
 
