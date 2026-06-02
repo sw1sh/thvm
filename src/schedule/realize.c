@@ -125,6 +125,11 @@ fn Term thvm_realize(Term expr) {
     u32 kn0   = KERNELS_NEXT;
     u64 itrs0 = ITRS;
     res = wnf(res);
+    // Count cross-subgraph consumers over the whole live graph before
+    // materialize so the arena planner won't recycle a buf read by a
+    // sibling subgraph.  Re-populated each iteration (the graph can grow
+    // across the fixpoint loop); xpass_cc_populate resets first.
+    xpass_cc_populate(res);
     Term mat = thvm_materialize(res);
     iters_used = iter + 1;
     if (KERNELS_NEXT == kn0 && ITRS == itrs0) { res = mat; break; }
@@ -228,6 +233,7 @@ fn Term thvm_realize(Term expr) {
   // run_rangeify call.
   materialized_loc_clear();
   materialized_loc_scope_leave();
+  xpass_cc_reset();
 
   return res;
 }
@@ -277,6 +283,13 @@ fn Term thvm_realize_many(Term ctr_term) {
     if (cn > 256) cn = 256;
     for (u32 i = 0; i < cn; i++) children[i] = wnf(term_ctr_at(res, i));
     Term wnf_ctr = term_new_ctr(term_ext(res), children, cn);
+    // Count cross-subgraph consumers over the whole bundle (after every
+    // child's wnf has driven its backward) so the arena planner sees a
+    // forward activation shared by sibling grad targets.  Re-populated
+    // each iteration: the backward graph can grow across the fixpoint
+    // loop, so a once-at-iter-0 walk would miss late-emerging shared
+    // consumers (see xpass_cc_populate).
+    xpass_cc_populate(wnf_ctr);
     Term mat = thvm_materialize(wnf_ctr);
     iters_used = iter + 1;
     if (kcnt_dbg) {
@@ -351,5 +364,6 @@ fn Term thvm_realize_many(Term ctr_term) {
   // re-handed-out under the same cached tid in a future realize call.
   materialized_loc_clear();
   materialized_loc_scope_leave();
+  xpass_cc_reset();
   return res;
 }

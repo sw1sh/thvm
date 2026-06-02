@@ -144,6 +144,198 @@ static void subst_journal_restore(void) {
   SUBST_JOURNAL_LEN = 0;
 }
 
+// === cross-pass consumer count ======================================
+//
+// bufferize_classify runs per inner-materialize SUBGRAPH (one CTR child,
+// one ASSIGN src), wiping BUFFERIZE_NODES each call.  So its
+// consumer_count is LOCAL to that subgraph.  But a forward activation is
+// shared across sibling subgraphs (a residual read by two grad targets,
+// or a loss read by the loss-assign AND a param-update): the FIRST
+// subgraph that materializes it sees consumer_count==1 (only its own one
+// reader) and the arena planner recycles its slot at that subgraph's
+// local last_use; a later sibling subgraph then reuses the cached tid
+// (materialized_loc_lookup) and reads the recycled-over bytes -> NaN.
+//
+// tinygrad has no such gap: schedule/memory.py plans lifetimes over ONE
+// linearized schedule of the WHOLE step (memory.py:28 enumerates every
+// linear.src; last_appearance spans every consumer across forward +
+// backward + optimizer).  thvm fragments into per-subgraph passes, so
+// the per-subgraph consumer_count can't see cross-subgraph readers.
+//
+// XPASS_CC bridges that: each materialize-loop iteration we walk EVERY
+// top-level root (each CTR child / single root) SEPARATELY, marking every
+// UOp loc it reaches.  A loc reached by >= 2 distinct roots is shared
+// across sub-passes (a forward activation read by two grad targets); the
+// FIRST sub-pass to materialize it caches the tid, and a later sibling
+// reads that cached tid via the cache.  The arena planner consults
+// xpass_is_shared() and EXTENDS such a boundary's arena lifetime to the
+// end of its pass (arena_compute) so its offset is never recycled within
+// the pass -- the cached bytes stay valid for every sibling.  The buffer
+// stays in the arena (it still shares bytes with non-overlapping
+// lifetimes), so non-shared recycling is untouched and peak is unchanged.
+// Counting distinct ROOTS (not parent edges) catches the share even when
+// each sub-pass references the loc exactly once -- the cache, not a
+// structural edge, is what unifies them.  Hash-consing keeps locs stable
+// within a realize.  Tinygrad mirror: schedule/memory.py last_appearance
+// spans the whole linearized schedule, so a buf live across multiple
+// consumers is never freed early.
+#define XPASS_CC_CAP   (1u << 17)        // 128K slots; loc-keyed open-addr
+typedef struct { u64 loc; u32 count; } XPassCCEntry;
+static XPassCCEntry XPASS_CC[XPASS_CC_CAP];
+static u32          XPASS_CC_LEN    = 0;
+static u8           XPASS_CC_ACTIVE = 0;  // 1 once a realize populated it
+
+static inline u32 xpass_cc_hash(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (XPASS_CC_CAP - 1);
+}
+
+// Bump loc's root-reach count by one (called once per root that reaches
+// it -- the per-root visited bitmap dedups within a root).
+static void xpass_cc_bump(u64 loc) {
+  if (XPASS_CC_LEN * 2 > XPASS_CC_CAP) return;   // table full: leave as-is
+  u32 h = xpass_cc_hash(loc);
+  for (u32 probe = 0; probe < XPASS_CC_CAP; probe++) {
+    u32 i = (h + probe) & (XPASS_CC_CAP - 1);
+    if (XPASS_CC[i].loc == 0 && XPASS_CC[i].count == 0) {
+      XPASS_CC[i].loc = loc; XPASS_CC[i].count = 1; XPASS_CC_LEN++; return;
+    }
+    if (XPASS_CC[i].loc == loc) { XPASS_CC[i].count++; return; }
+  }
+}
+
+static u32 xpass_root_reach(u64 loc) {
+  if (!XPASS_CC_ACTIVE) return 0;
+  u32 h = xpass_cc_hash(loc);
+  for (u32 probe = 0; probe < XPASS_CC_CAP; probe++) {
+    u32 i = (h + probe) & (XPASS_CC_CAP - 1);
+    if (XPASS_CC[i].loc == 0 && XPASS_CC[i].count == 0) return 0;
+    if (XPASS_CC[i].loc == loc) return XPASS_CC[i].count;
+  }
+  return 0;
+}
+
+// True iff `loc` is reached by >= 2 top-level roots -> shared across
+// sub-passes, unsafe for the per-pass arena planner to recycle.
+static int xpass_is_shared(u64 loc) { return xpass_root_reach(loc) >= 2; }
+
+// Non-mutating resolve of SUB-bit VAR / DP indirection.  Unlike
+// term_resolve it does NOT call alo_force: this walk runs BEFORE
+// materialize and forcing an ALO layer mutates the heap, which perturbs
+// the faithful-seed realize's downstream graph (loss drift).  An ALO not
+// yet forced is returned as-is and the wrapper-descent below stops there
+// -- a conservative MISS, which only means a shared loc behind an unforced
+// ALO is treated as non-shared (loses the safety extension for that loc,
+// never adds a spurious one).  In practice the share-relevant references
+// (forward activations read by grad targets) are already resolved by the
+// time the populate walk runs.
+static Term xpass_resolve_nf(Term t) {
+  for (int hops = 0; hops < 256; hops++) {
+    u8 tag = term_tag(t);
+    if (tag == TAG_VAR) {
+      Term cell = heap_read(term_val(t));
+      if (!term_sub_get(cell)) return t;
+      t = term_sub_set(cell, 0);
+      continue;
+    }
+    if (tag == TAG_DP0 || tag == TAG_DP1) {
+      Term cell = heap_read(term_val(t));
+      if (term_sub_get(cell)) { t = term_sub_set(cell, 0); continue; }
+      if (tag == TAG_DP0 && (term_ext(t) & DUP_GRAD_FLAG)) {
+        t = heap_read(term_val(t)); continue;
+      }
+      return t;
+    }
+    return t;
+  }
+  return t;
+}
+
+// Resolve a term to the first UOP underneath any structural wrapper
+// (DP0/DP1 grad projections, APP/LAM/SUP) the grad chain rule introduces.
+// Uses the non-mutating resolve so the pre-materialize walk doesn't force
+// ALO layers.  Returns the UOP term, or 0 if none.
+static Term xpass_resolve_uop(Term t, int depth) {
+  if (depth > 64) return 0;
+  t = xpass_resolve_nf(t);
+  u8 tag = term_tag(t);
+  if (tag == TAG_UOP) return (term_ext(t) == UOP_KERNEL) ? 0 : t;
+  u32 ar = 0;
+  switch (tag) {
+    case TAG_DP0: case TAG_DP1: case TAG_LAM: case TAG_DUP: ar = 1; break;
+    case TAG_APP: case TAG_SUP: case TAG_OP2: case TAG_MAT: ar = 2; break;
+    default: return 0;
+  }
+  u64 loc = term_val(t);
+  for (u32 i = 0; i < ar; i++) {
+    Term u = xpass_resolve_uop(heap_read(loc + i), depth + 1);
+    if (u != 0) return u;
+  }
+  return 0;
+}
+
+// Walk ONE root's UOp DAG, marking each reached loc as reached-by-this-
+// root (bump once via the per-root visited bitmap).  `visited` is sized
+// to HEAP_NEXT and reset per root by the caller.
+static void xpass_cc_walk_rec(Term t, u8 *visited, u64 cap) {
+  if (term_tag(t) != TAG_UOP) {
+    Term u = xpass_resolve_uop(t, 0);
+    if (u == 0) return;
+    t = u;
+  }
+  u32 op = term_ext(t);
+  if (op == UOP_KERNEL) return;
+  u64 loc = term_val(t);
+  if (loc >= cap) return;
+  if (visited[loc]) return;
+  visited[loc] = 1;
+  xpass_cc_bump(loc);
+  u8 ar = uop_arity((u8)op);
+  u64 seen[MAX_UOP_SRC] = {0};
+  u8  n_seen = 0;
+  for (u8 i = 0; i < ar; i++) {
+    Term child = xpass_resolve_uop(heap_read(loc + i), 0);
+    if (child == 0) continue;
+    u64 cloc = term_val(child);
+    u8 dup = 0;
+    for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+    if (dup) continue;
+    seen[n_seen++] = cloc;
+    xpass_cc_walk_rec(child, visited, cap);
+  }
+}
+
+fn void xpass_cc_reset(void) {
+  for (u32 i = 0; i < XPASS_CC_CAP; i++) { XPASS_CC[i].loc = 0; XPASS_CC[i].count = 0; }
+  XPASS_CC_LEN = 0;
+  XPASS_CC_ACTIVE = 0;
+}
+
+// Populate XPASS_CC from a realize root (single Term or a TAG_CTR
+// bundle).  Each top-level root gets a FRESH visited bitmap so a loc
+// reached by two roots is counted twice (-> shared).  Called each
+// materialize-loop iteration (resets first) so a backward graph that
+// grows across the fixpoint loop is fully covered.
+fn void xpass_cc_populate(Term root) {
+  xpass_cc_reset();
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
+  if (visited == NULL) return;
+  if (term_tag(root) == TAG_CTR) {
+    u32 n = term_ctr_n(root);
+    for (u32 i = 0; i < n && i < 256; i++) {
+      memset(visited, 0, cap);
+      xpass_cc_walk_rec(term_ctr_at(root, i), visited, cap);
+    }
+  } else {
+    xpass_cc_walk_rec(root, visited, cap);
+  }
+  free(visited);
+  XPASS_CC_ACTIVE = 1;
+}
+
 // In-realize scope counter: thvm_realize / thvm_realize_many bracket
 // their bodies with materialized_loc_scope_{enter,leave}.  The cache
 // is consulted by thvm_materialize ONLY when depth > 0 -- tests that
@@ -426,6 +618,20 @@ static u32 BOUNDARY_LAST_USE [BUFFERIZE_NODES_CAP];
 // schedule invariant (schedule/memory.py:28 enumerates linear.src).
 // 0xFFFFFFFF = unvisited (orphan preserved tensor; falls back to depth).
 static u32 BOUNDARY_FIRE_SEQ [BUFFERIZE_NODES_CAP];
+// Per-boundary maximum-consumer BOUNDARY_ORDER position (fire order).
+// boundary_compute_last_use stores a consumer DEPTH; the arena planner
+// then maps that depth back to "the last position at that depth" via
+// arena_last_pos_at_depth -- a lossy mapping that UNDERCUTS the real
+// lifetime when a buf's deepest consumer is NOT its latest-firing one
+// (a consumer at a shallower depth can fire LATER in the post-order DFS).
+// BOUNDARY_LAST_USE_POS records the true latest consumer's fire-order
+// position directly (the max BOUNDARY_ORDER index over all realized
+// parents), so the arena recycles a slot only after its genuinely-last
+// reader fires.  Tinygrad mirror: schedule/memory.py last_appearance is
+// the linearized-schedule index of the buf's last consumer.  Computed by
+// boundary_compute_last_use_pos AFTER BOUNDARY_ORDER + the loc->pos hash
+// are built.  0 = no realized-boundary consumer (sink / orphan).
+static u32 BOUNDARY_LAST_USE_POS [BUFFERIZE_NODES_CAP];
 
 #define VISIT_BAIL 0xDEADBEEFu
 // VISIT_OK signals "subgraph visited successfully".  Visit walks
@@ -800,26 +1006,6 @@ static u64 arena_boundary_nbytes(u32 ord_idx) {
   return dtype_storage_bytes(dtype, numel);
 }
 
-// BOUNDARY_LAST_USE[B] stores the consumer's depth (BOUNDARY_DEPTH).
-// We need the consumer's BOUNDARY_ORDER index for arena lifetimes.
-// boundaries at the SAME depth are sorted by loc; the LAST one at the
-// target depth is the safe latest position any consumer at that depth
-// could be at (we don't know which specific boundary at that depth is
-// the consumer, only that it's at depth D).  Conservative: use the
-// last boundary at depth D.  O(n) scan per call -- amortised across
-// the whole emit pass it's still O(n^2) worst-case but typical
-// n_boundaries < 500 so this is well below 1ms.
-static u32 arena_last_pos_at_depth(u32 depth) {
-  u32 last = 0;
-  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
-    u64 loc = BOUNDARY_ORDER[i];
-    u32 binfo = bufferize_info_find(loc);
-    if (binfo == 0xFFFFFFFFu) continue;
-    if (BOUNDARY_DEPTH[binfo] == depth) last = i;
-  }
-  return last;
-}
-
 // Build per-boundary lifetimes + run TLSF to assign offsets.  Mirror
 // of tinygrad/schedule/memory.py:25-53.  Sets up ARENA_SLOTS[] and
 // ARENA_SIZE.  No arena CpuBuf allocation here -- the first
@@ -852,9 +1038,30 @@ static void arena_compute(void) {
     if (nb == 0) continue;
     u64 loc = BOUNDARY_ORDER[i];
     u32 binfo = bufferize_info_find(loc);
-    u32 lu_depth = BOUNDARY_LAST_USE[binfo];
-    u32 last_at = arena_last_pos_at_depth(lu_depth);
+    // True last-consumer fire position (BOUNDARY_LAST_USE_POS), not the
+    // depth->position remap arena_last_pos_at_depth used to do -- that
+    // remap undercut the lifetime when a buf's deepest consumer wasn't
+    // its latest-firing one, recycling the slot before the real last
+    // read fired (the 2-layer-transformer NaN).
+    u32 last_at = BOUNDARY_LAST_USE_POS[binfo];
     if (last_at < i) last_at = i;
+    // Cross-PASS extension: a boundary reached by >= 2 top-level roots is
+    // shared across sub-passes (a forward activation read by two grad
+    // targets).  The FIRST sub-pass to materialize it caches the tid; a
+    // SIBLING sub-pass reads that cached tid via materialized_loc_lookup.
+    // If this pass recycled its arena offset (handed it to a later
+    // boundary) the sibling would read the recycled-over bytes -> NaN.
+    // bufferize_classify's local consumer_count can't see the sibling
+    // reader; xpass_is_shared (whole-realize root walk) can.  Keep the buf
+    // in the arena (it still shares bytes with non-overlapping lifetimes)
+    // but extend its lifetime to END OF PASS so its offset is never reused
+    // within the pass -- the cached bytes stay valid for every sibling.
+    // Non-shared buffers recycle normally (no peak cost).  Tinygrad
+    // mirror: schedule/memory.py last_appearance spans the whole
+    // linearized schedule, so a buf live across sub-passes is never freed
+    // early.
+    if (xpass_is_shared(loc) && BOUNDARY_ORDER_LEN > 0)
+      last_at = BOUNDARY_ORDER_LEN - 1;
     nbytes[i]   = nb;
     last_pos[i] = last_at;
     planned[i]  = 1;
@@ -1149,6 +1356,77 @@ static void boundary_compute_last_use(void) {
       if (dup) continue;
       seen[n_seen++] = cloc;
       boundary_last_use_descend(cloc, p_depth, visited);
+    }
+  }
+  free(visited);
+}
+
+// Position variant of boundary_last_use_descend: walk DOWN from
+// `from_loc` through non-realized intermediates, and for each realized
+// boundary B reached, bump BOUNDARY_LAST_USE_POS[B] to `visiting_pos`
+// (the consuming parent's BOUNDARY_ORDER index).  Same descent shape;
+// only the recorded quantity differs (fire-order position, not depth).
+static void boundary_last_use_pos_descend(u64 from_loc, u32 visiting_pos,
+                                          u8 *visited) {
+  if (from_loc >= HEAP_NEXT) return;
+  if (visited[from_loc]) return;
+  visited[from_loc] = 1;
+  u32 idx = bufferize_info_find(from_loc);
+  if (idx == 0xFFFFFFFFu) return;
+  if (BUFFERIZE_NODES[idx].realized) {
+    if (visiting_pos > BOUNDARY_LAST_USE_POS[idx]) {
+      BOUNDARY_LAST_USE_POS[idx] = visiting_pos;
+    }
+    return;
+  }
+  u8 ar = uop_arity(BUFFERIZE_NODES[idx].op);
+  u64 seen[MAX_UOP_SRC] = {0};
+  u8  n_seen = 0;
+  for (u8 c = 0; c < ar; c++) {
+    Term child = term_resolve(heap_read(from_loc + c));
+    if (term_tag(child) != TAG_UOP)         continue;
+    if (term_ext(child) == UOP_KERNEL)      continue;
+    u64 cloc = term_val(child);
+    u8  dup  = 0;
+    for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+    if (dup) continue;
+    seen[n_seen++] = cloc;
+    boundary_last_use_pos_descend(cloc, visiting_pos, visited);
+  }
+}
+
+// Compute BOUNDARY_LAST_USE_POS[]: for each realized parent (at
+// BOUNDARY_ORDER position P), descend its UOp subtree and bump every
+// realized child it reads to P.  After this, each boundary's value is
+// the fire-order position of its LATEST-firing consumer -- the lifetime
+// the arena planner closes on.  MUST run AFTER topo_sort_boundaries has
+// built BOUNDARY_ORDER + the loc->pos hash.  Mirrors
+// boundary_compute_last_use but in fire-order, not depth.
+static void boundary_compute_last_use_pos(void) {
+  for (u32 i = 0; i < BUFFERIZE_NODES_CAP; i++) BOUNDARY_LAST_USE_POS[i] = 0;
+  if (HEAP_NEXT == 0) return;
+  u8 *visited = (u8 *)calloc(HEAP_NEXT, 1);
+  if (visited == NULL) return;
+  for (u32 pos = 0; pos < BOUNDARY_ORDER_LEN; pos++) {
+    u64 ploc = BOUNDARY_ORDER[pos];
+    u32 i = bufferize_info_find(ploc);
+    if (i == 0xFFFFFFFFu)                          continue;
+    UOpInfo *p = &BUFFERIZE_NODES[i];
+    if (!p->realized)                              continue;
+    u8 ar = uop_arity(p->op);
+    u64 seen[MAX_UOP_SRC] = {0};
+    u8  n_seen = 0;
+    memset(visited, 0, HEAP_NEXT);
+    for (u8 c = 0; c < ar; c++) {
+      Term child = term_resolve(heap_read(p->loc + c));
+      if (term_tag(child) != TAG_UOP)         continue;
+      if (term_ext(child) == UOP_KERNEL)      continue;
+      u64 cloc = term_val(child);
+      u8  dup  = 0;
+      for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+      if (dup) continue;
+      seen[n_seen++] = cloc;
+      boundary_last_use_pos_descend(cloc, pos, visited);
     }
   }
   free(visited);
@@ -3567,6 +3845,10 @@ static void topo_sort_boundaries(Term root) {
       }
     }
   }
+  // Fire-order consumer lifetimes for the arena planner.  Runs here
+  // (not in topo_sort_boundaries' depth phase) because it needs the
+  // finalized BOUNDARY_ORDER + loc->pos hash.
+  boundary_compute_last_use_pos();
   {
     char const *e = getenv("THVM_DUMP_DIRECT_COUNT");
     if (e != NULL && e[0] == '1') {
