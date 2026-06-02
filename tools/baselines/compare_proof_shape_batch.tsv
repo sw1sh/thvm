@@ -1,0 +1,9 @@
+theory	thm	preset	thvm_status	thvm_secs	thvm_inf	vamp_status	vamp_secs	vamp_inf	identical
+AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	VampireUEQ	Proved	0.09	141	Proved	0.06	13	False
+AbelianGroupAxioms	ImpliesMcCuneAxioms	VampireUEQ	Proved	0.04	18	Proved	0.05	28	False
+AbelianGroupAxioms	InverseOfComposite	VampireUEQ	Proved	0.03	14	Proved	0.06	14	False
+AbelianGroupAxioms	InverseOfInverse	VampireUEQ	Proved	0.01	6	Proved	0.04	7	False
+BooleanAxioms	DoubleNegation	VampireUEQ	Proved	0.02	8	Proved	0.06	20	False
+GroupAxioms	InverseOfInverse	VampireUEQ	Proved	0.01	8	Proved	0.04	14	False
+HillmanAxioms	Commutativity	VampireUEQ	Proved	0.1	44	Proved	0.07	16	False
+MeredithAxioms	Commutativity	VampireUEQ	Proved	0.04	40	Proved	0.05	7	False
