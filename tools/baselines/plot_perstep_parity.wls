@@ -3,9 +3,16 @@ SetDirectory["/Users/swish/src/thvm"];
 print[a___] := WriteString["stdout",
     StringJoin @@ Map[ToString, {a}], "\n"];
 
-rows = Import["tools/baselines/parity_perstep.tsv", "TSV"];
-header = First[rows];
-data = AssociationThread[header -> #] & /@ Rest[rows];
+(* Pull both the easy tier (8 cases, already-committed) and the
+   hard tier (4 WolframAxioms + MeredithAxioms NotableTheorems
+   that the preset Method->Automatic can crack but where the
+   per-step match collapses because the proof space is wide). *)
+loadTsv[path_String] := Block[{rows = Import[path, "TSV"]},
+    AssociationThread[First[rows] -> #] & /@ Rest[rows]];
+
+data = Join[
+    loadTsv["tools/baselines/parity_perstep.tsv"],
+    loadTsv["tools/baselines/parity_perstep_hard.tsv"]];
 
 style[c_] := LightDarkSwitched[{c, Darker[c, 0.25]}];
 

@@ -1,0 +1,13 @@
+preset	theory	theorem	preset_constructs	cli_constructs	matched	preset_only	cli_only
+Waldmeister	WolframAxioms	DoubleNegation	40	55	1	39	54
+Automatic	WolframAxioms	DoubleNegation	28	55	1	27	54
+VampireUEQ	WolframAxioms	DoubleNegation	50	55	1	49	54
+Waldmeister	WolframAxioms	Commutativity	0	103	0	0	103
+Automatic	WolframAxioms	Commutativity	96	103	1	95	102
+VampireUEQ	WolframAxioms	Commutativity	162	103	1	161	102
+Waldmeister	MeredithAxioms	AndAssociativity	0	110	0	0	110
+Automatic	MeredithAxioms	AndAssociativity	149	110	1	148	109
+VampireUEQ	MeredithAxioms	AndAssociativity	0	110	0	0	110
+Waldmeister	MeredithAxioms	OrAssociativity	0	101	0	0	101
+Automatic	MeredithAxioms	OrAssociativity	122	101	1	121	100
+VampireUEQ	MeredithAxioms	OrAssociativity	0	101	0	0	101

@@ -49,8 +49,12 @@ alphaRename[expr_] := Block[
     {leaves, mapping},
     leaves = DeleteDuplicates @ Cases[
         {expr}, x_ /; (varQ[x] || constQ[x]), Infinity];
+    (* Use a custom CanonVar[i] head instead of Symbol[name] --
+       Symbol["1"] would fail on names starting with a digit, and
+       some hard CLI cases (Meredith / Wolfram) push integer
+       constants into the leaf set that fed Symbol[ToString[1]]. *)
     mapping = AssociationThread[leaves,
-        Symbol /@ Table["c" <> ToString[i], {i, Length[leaves]}]];
+        Table[CanonVar[i], {i, Length[leaves]}]];
     expr /. mapping
 ];
 
@@ -106,6 +110,28 @@ sortKey[k_] := With[
 
 $summary = {};
 
+(* Incremental TSV writer: appends one row per case so a mid-sweep
+   crash leaves a partial file behind.  The final batch Export at
+   the end overwrites with the full table. *)
+$partialTsv = "tools/baselines/parity_perstep_partial.tsv";
+Quiet @ DeleteFile[$partialTsv];
+Export[$partialTsv,
+    {{"preset", "theory", "theorem",
+      "preset_constructs", "cli_constructs",
+      "matched", "preset_only", "cli_only"}},
+    "TSV"];
+
+appendPartialRow[r_Association] := Block[
+    {existing = Quiet @ Import[$partialTsv, "TSV"]},
+    If[ ! ListQ[existing], existing = {}];
+    Quiet @ Export[$partialTsv,
+        Append[existing,
+            {r["Preset"], r["Theory"], r["Theorem"],
+             r["PresetN"], r["CliN"],
+             r["Matched"], r["PresetOnly"], r["CliOnly"]}],
+        "TSV"]
+];
+
 (* presetMethod is a thvm Method spec (a single-String preset like
    "Waldmeister" / "VampireUEQ" / "Portfolio", or Automatic for
    the structure-recognized auto-tune); cliBuilder is the symbol
@@ -144,14 +170,16 @@ diffOne[theory_String, thm_String,
         {i, Length[kvP]}];
     unmatchedP = Complement[Keys[dsP], Keys[matchedP]];
     unmatchedC = Complement[Keys[dsC], Keys[matchedC]];
-    AppendTo[$summary, <|
-        "Theory" -> theory, "Theorem" -> thm,
-        "Preset" -> ToString[presetMethod],
-        "PresetN" -> Length[dsP], "CliN" -> Length[dsC],
-        "Matched" -> Length[matchedP],
-        "PresetOnly" -> Length[unmatchedP],
-        "CliOnly" -> Length[unmatchedC]
-    |>];
+    Block[{row = <|
+            "Theory" -> theory, "Theorem" -> thm,
+            "Preset" -> ToString[presetMethod],
+            "PresetN" -> Length[dsP], "CliN" -> Length[dsC],
+            "Matched" -> Length[matchedP],
+            "PresetOnly" -> Length[unmatchedP],
+            "CliOnly" -> Length[unmatchedC]
+        |>},
+        AppendTo[$summary, row];
+        appendPartialRow[row]];
     print["=== ", ToString[presetMethod], " :: ", theory, " / ", thm, " ==="];
     print["preset constructs: ", Length[dsP],
         "    cli constructs: ", Length[dsC]];
@@ -194,6 +222,12 @@ diffOne[theory_String, thm_String,
 Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",
     Method -> "Completion", TimeConstraint -> 2.0];
 
+(* Easy tier (8): saturator-friendly AbelianGroup + Group + Hillman
+   + Meredith Commutativity.  Hard tier (5): WolframAxioms +
+   MeredithAxioms theorems where the preset cracks the case via
+   Method->Automatic (the structure-recognized auto-tune) -- some
+   harder Wolfram theorems (And/OrAssociativity) timeout at 20s on
+   all three presets and aren't covered by this sweep. *)
 cases = {
     {"AbelianGroupAxioms", "InverseOfInverse"},
     {"AbelianGroupAxioms", "InverseOfComposite"},
@@ -202,7 +236,11 @@ cases = {
     {"BooleanAxioms",      "DoubleNegation"},
     {"GroupAxioms",        "InverseOfInverse"},
     {"HillmanAxioms",      "Commutativity"},
-    {"MeredithAxioms",     "Commutativity"}
+    {"MeredithAxioms",     "Commutativity"},
+    {"WolframAxioms",      "DoubleNegation"},
+    {"WolframAxioms",      "Commutativity"},
+    {"MeredithAxioms",     "AndAssociativity"},
+    {"MeredithAxioms",     "OrAssociativity"}
 };
 
 (* Two-prover sweep: WM (default 2-arg diffOne) + Vampire (extra
