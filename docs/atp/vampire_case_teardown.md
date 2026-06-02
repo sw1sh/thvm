@@ -124,6 +124,53 @@ conclusion from each side.  thvm's "ProofLength" 27 includes
 SubstitutionLemma intermediates that Vampire bundles into the
 forward_demodulation step's parent chain.)
 
+### Cross-case batch (8 cases, `compare_proof_batch.sh`)
+
+| theory/thm | thvm wall | vamp wall | ratio | thvm pl | vamp pl |
+|---|---:|---:|---:|---:|---:|
+| AbelianGroup/ImpliesAbelianMcCune | 0.93s | 0.07s | 13.3x | 146 | 18 |
+| AbelianGroup/ImpliesMcCune | 0.65s | 0.07s | 9.3x | 23 | 33 |
+| AbelianGroup/InverseOfComposite | 0.72s | 0.09s | 8.0x | 19 | 19 |
+| AbelianGroup/InverseOfInverse | 0.71s | 0.08s | 8.9x | 11 | 12 |
+| BooleanAxioms/DoubleNegation | 0.69s | 0.06s | 11.5x | 15 | 27 |
+| GroupAxioms/InverseOfInverse | 0.68s | 0.05s | 13.6x | 12 | 18 |
+| HillmanAxioms/Commutativity | 0.76s | 0.07s | 10.9x | 48 | 20 |
+| MeredithAxioms/Commutativity | 0.67s | 0.05s | 13.4x | 43 | 10 |
+| **mean** | **0.73s** | **0.07s** | **11.1x** | -- | -- |
+
+**Critical observation**: thvm wall is ~0.7s **regardless of proof
+complexity** (11 to 146 steps).  Vampire wall scales with proof
+work (0.05-0.09s on these easy cases).
+
+The 11x gap is **fixed per-TFindProof-call overhead**, NOT per-step
+rewrite cost.  At the larger end (146-step proof in 0.93s = 6 ms/step)
+the per-step cost is comparable to Vampire's; at the smaller end
+(11-step proof in 0.71s = 65 ms/step) the per-step number is
+dominated by the fixed overhead.
+
+**Refined diagnosis**: the 60x per-step number from the earlier
+single-case analysis was misleading -- it conflated fixed overhead
+with per-step cost.  The real bug is the ~0.7s of fixed overhead
+per call.  Candidates:
+
+* **WL -> C term encoding** of axioms + conjecture (`atpEncode`).
+  Run-once per call; cost grows with axiom-set size but not with
+  saturation depth.
+* **LibraryFunction call setup / paclet load** (per-process, but
+  Mathematica's LibraryLink reload-per-call semantics need checking).
+* **CP-gen initial overlap computation**: the
+  `g_atp_phase_us_cp_gen` was 58-79% of wall on a tiny
+  `test_atp_wolfram_bench` run -- expected since saturating ANY 4-5
+  axiom set requires generating O(n_axioms^2) initial CPs.
+* **TFindProof option parsing / atpParseCompletionOpts**: 26-element
+  tuple build + dispatcher walk happens before the C engine starts.
+
+Profiling task: bisect the 0.7s into encoding / parse / cp-gen /
+saturation.  Test_atp_wolfram_bench profile is too coarse (0.00s
+phases on tiny cases); need millisecond instrumentation on a
+single specific case via either a custom test binary or via wiring
+a phase-dump LibraryFunction into thvmlink_atp.c.
+
 ### Proof-DAG histogram (from `compare_proof_one.wls`, 0493b8d8+)
 
 The full thvm proof DAG (`ProofObject["Properties"]`) on this case
