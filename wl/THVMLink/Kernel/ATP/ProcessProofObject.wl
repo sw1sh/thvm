@@ -83,25 +83,36 @@ Begin["`Private`"]
    String-headed compounds ("op_overtilde"[...], etc.) which the
    shape comparator already handles. *)
 $tptpToWlOp = <|
-    "and"      -> CircleTimes,
-    "or"       -> CirclePlus,
-    "not"      -> OverBar,
-    "nand_op"  -> CircleMinus,
-    "fop"      -> CircleDot,
-    "diamond"  -> Diamond,
-    "star"     -> Star,
-    "wedge"    -> Wedge,
-    "vee"      -> Vee,
-    "circ"     -> SmallCircle,
-    "mul"      -> Times,
-    "add"      -> Plus,
-    "equiv"    -> Equivalent,
-    "implies"  -> Implies,
-    "lnot"     -> Not,
-    "land"     -> And,
-    "lor"      -> Or,
-    "nand"     -> Nand,
-    "nor"      -> Nor
+    "and"          -> CircleTimes,
+    "or"           -> CirclePlus,
+    "not"          -> OverBar,
+    "nand_op"      -> CircleMinus,
+    "fop"          -> CircleDot,
+    "diamond"      -> Diamond,
+    "star"         -> Star,
+    "wedge"        -> Wedge,
+    "vee"          -> Vee,
+    "circ"         -> SmallCircle,
+    "mul"          -> Times,
+    "add"          -> Plus,
+    "equiv"        -> Equivalent,
+    "implies"      -> Implies,
+    "lnot"         -> Not,
+    "land"         -> And,
+    "lor"          -> Or,
+    "nand"         -> Nand,
+    "nor"          -> Nor,
+    (* Unicode/diacritic operators emitted as op_<name> by
+       tools/baselines/tptp_to_pr.wls (and then sanitized through
+       TPTPImport's lowercasing path to opovertilde / opoverbar /
+       etc.).  Map both spellings so reverse-encode lands on the
+       WL symbol regardless of casing. *)
+    "op_overtilde" -> OverTilde,
+    "opovertilde"  -> OverTilde,
+    "op_overbar"   -> OverBar,
+    "opoverbar"    -> OverBar,
+    "op_circle"    -> SmallCircle,
+    "opcircle"     -> SmallCircle
 |>
 
 (* Walk a parsed TPTP expression and replace String-headed
@@ -115,10 +126,17 @@ reverseEncodeFormula[expr_] := expr //. {
 (* Parse a single SZS formula-body string into a WL expression by
    wrapping it in a fof(p, axiom, ...).  on the way out, the body
    parses to WL form via TPTPImport's regular (non-SZS) mode; the
-   top-level ForAll is stripped by TPTPImport. *)
+   top-level ForAll is stripped by TPTPImport.
+
+   Pre-process: TPTPImport's grammar rejects nullary functor calls
+   written `name()` (only `name` is accepted for arity-zero), but
+   Vampire/WM SZS output writes skolem constants as `skC1()` etc.
+   Strip the trailing empty parens before parsing. *)
 parseFormulaBody[body_String] := Block[
-    {wrapped, parsed},
-    wrapped = "fof(p, axiom, " <> body <> ").";
+    {cleaned, wrapped, parsed},
+    cleaned = StringReplace[body,
+        RegularExpression["([a-zA-Z_][a-zA-Z_0-9]*)\\(\\)"] :> "$1"];
+    wrapped = "fof(p, axiom, " <> cleaned <> ").";
     parsed = Quiet @ Check[
         Wolfram`Parser`TPTPImport[wrapped],
         $Failed

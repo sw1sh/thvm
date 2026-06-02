@@ -24,19 +24,45 @@ varQ[s_Symbol] := Context[s] === "Global`";
 varQ[s_String] := StringMatchQ[s, "x" ~~ DigitCharacter ..];
 varQ[_] := False;
 
-(* Alpha-rename all variables to a canonical v1, v2, ... in order
-   of first DFS appearance.  Pull every leaf that varQ accepts from
-   inside the expression (excluding the expression's HEAD). *)
+(* Constant detector: nullary leaves that aren't variables.
+   Includes:
+     * Integers / Reals (preset uses literal 1 for identity);
+     * String tokens NOT matching the x<digits> variable shape
+       (TPTPImport's skolem constants like "k1", "skc1" land here);
+     * Non-Global` Symbols that aren't operators -- e.g. System`
+       symbols introduced as constant names; ruled out by checking
+       they don't take args anywhere in the expression. *)
+constQ[s_Integer] := True;
+constQ[s_Real]    := True;
+constQ[s_String] := ! varQ[s];
+constQ[_]         := False;
+
+(* Alpha-rename ALL leaves (variables + constants together) into a
+   single canonical c1, c2, ... sequence in DFS-first-occurrence
+   order.  Merging the two namespaces means the preset's
+   universally-quantified `a` matches the CLI's negated-conjecture
+   skolem `skC1` -- both are the same theorem-level object after
+   alpha-equivalence.  Specifically:
+     preset Hyp: ~~a == a   -> ~~c1 == c1
+     CLI   Hyp: ~~skc1 == skc1 -> ~~c1 == c1   (match) *)
 alphaRename[expr_] := Block[
-    {vars, mapping},
-    vars = DeleteDuplicates @ Cases[
-        {expr},
-        x_ /; varQ[x],
-        Infinity];
-    mapping = AssociationThread[vars,
-        Symbol /@ Table["v" <> ToString[i], {i, Length[vars]}]];
+    {leaves, mapping},
+    leaves = DeleteDuplicates @ Cases[
+        {expr}, x_ /; (varQ[x] || constQ[x]), Infinity];
+    mapping = AssociationThread[leaves,
+        Symbol /@ Table["c" <> ToString[i], {i, Length[leaves]}]];
     expr /. mapping
 ];
+
+(* Bidirectional equation canonicalizer: an equation `a == b` and
+   `b == a` are the same axiom under EquationalLogic.  Pick the
+   side-orientation that puts the lexicographically-smaller form
+   (by InputForm string) on the left so the match key is unique. *)
+canonEq[Equal[lhs_, rhs_]] := Block[
+    {a = ToString @ InputForm @ lhs, b = ToString @ InputForm @ rhs},
+    If[ OrderedQ[{a, b}], Equal[lhs, rhs], Equal[rhs, lhs]]
+];
+canonEq[e_] := e;
 
 normalizeStmt[s_] := Quiet @ Block[{e = s},
     e = e /. Inactive[Equal] -> Equal;
@@ -44,11 +70,15 @@ normalizeStmt[s_] := Quiet @ Block[{e = s},
        ProofObject builder; CLI side isn't.  Unwrap so both sides
        reach Equal[lhs, rhs] before alpha-rename. *)
     e = e /. HoldForm[x_] :> x;
-    (* TPTPImport renders TPTP variables as `"x1"[]` (a String
-       token wrapped as a zero-arg call); strip the trailing `[]`. *)
-    e = e //. h_[] /; varQ[h] :> h;
+    (* TPTPImport renders TPTP variables AND constants as String
+       tokens wrapped in a zero-arg call: "x1"[] for variables,
+       "k1"[] / "skc1"[] for constants.  Strip the trailing `[]`
+       from any String / Integer / Real leaf -- it's never a real
+       function call. *)
+    e = e //. h_[] /; (StringQ[h] || IntegerQ[h] || ! varQ[h]
+            && AtomQ[h]) :> h;
     e = e /. (Verbatim[Pattern][v_, _] :> v);
-    alphaRename[e]
+    canonEq @ alphaRename[e]
 ];
 
 statementOf[entry_] := If[
