@@ -1,0 +1,4 @@
+theory	thm	thvm_status	thvm_secs	cli_status	cli_secs	match
+AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	PROVED	0.69	PROVED	0.06	AGREE-PROVED
+AbelianGroupAxioms	ImpliesMcCuneAxioms	PROVED	0.64	PROVED	0.04	AGREE-PROVED
+AbelianGroupAxioms	InverseOfComposite	PROVED	0.62	PROVED	0.05	AGREE-PROVED
