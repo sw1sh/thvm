@@ -228,18 +228,14 @@ int main(void) {
     double t1 = now_secs();
     printf("  thvm/ac-abelian  %s  wall=%.4fs  iters=%u  n_rules=%u\n",
            status_name(st), t1 - t0, iters, s->n_rules);
-    // Stage 8 (bilateral Bachmair-Plaisted) closes this: the
-    // i(f(x,y)) = f(i(y), i(x)) derivation lands as a rule via
-    // (extended-R0) X (extended-R1) overlap + the AC-bijection
-    // unifier from Stage 7.
-    // CURRENTLY KNOWN-WEAKER: the previous pass-2 rebind bug in
-    // atp_match_ac_flat lets the engine derive over-general rules
-    // (e.g. `f(x, y) -> e`) that accidentally close the goal.  With
-    // the fix this test now ends at QUEUE_EMPTY -- the sound
-    // saturation is missing the inverse-of-product rule.  Accept
-    // either outcome until the correct inference path lands; see
-    // tests/probe_pairs.c + tests/test_atp_ac_abelian_repro.c for
-    // the localization work.
+    // Sound AC completion saturates to 4 rules (identity, inverse,
+    // inverse-of-identity, double-inverse) without deriving the
+    // i(f(x,y)) = f(i(y), i(x)) inverse-of-product rule -- the AC
+    // CP generator doesn't surface the overlap that produces it
+    // (see tests/probe_pairs.c, tests/test_atp_ac_abelian_repro.c).
+    // Accepts either PROVED (a future engine extension closes the
+    // chain) or QUEUE_EMPTY (the saturation reaches its current
+    // sound fixpoint).
     CHECK(st == ATP_PROVED || st == ATP_QUEUE_EMPTY);
     (void)ia; (void)ib; (void)iy;
 
