@@ -42,37 +42,44 @@ static const char *status_name(AtpStatus st) {
   }
 }
 
-static void run_once(u64 ac_mask, const char *label,
+static void run_once(int mode, const char *label,
                      AtpStatus *st_out, u32 *iters_out, u32 *n_rules_out) {
+  // mode 0: no AC (mask=0).
+  // mode 1: ac_mask set BEFORE init + add (the original C repro).
+  // mode 2: ac_mask set via auto_ac AFTER add, BEFORE goal (mirrors the
+  //         WL paclet's THVM_ATP_AUTO_AC=1 order).
   Term x = v(0), y = v(1), z = v(2);
   Term e = k(L_E);
   Term a = k(L_A), b = k(L_B), cc = k(L_C);
 
   // Weights all 1.  Precedence MIRRORS the WL paclet's default
   // identity precedence (prec[i] = i+1), so the regression at the
-  // WL bridge is reproduced byte-for-byte at the C level: under
-  // this layout op is the LOWEST-precedence symbol and constants
-  // / unary functions all rank above it.
-  //   L_OP=1  -> prec 2 (lowest non-zero)
-  //   L_E=2   -> prec 3
-  //   L_INV=3 -> prec 4
-  //   L_A=4   -> prec 5
-  //   L_B=5   -> prec 6
-  //   L_C=6   -> prec 7
+  // WL bridge is reproduced byte-for-byte at the C level.
   static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
   static const u32 P[8] = { 0u, 2u, 3u, 4u, 5u, 6u, 7u, 0u };
   KboConfig kbo = { .weights = W, .precedence = P,
                     .n_labels = 8, .var_weight = 1u };
 
-  thvm_atp_set_ac_mask(ac_mask);
+  if (mode == 1) {
+    thvm_atp_set_ac_mask(1ull << L_OP);
+  } else {
+    thvm_atp_set_ac_mask(0ull);
+  }
 
   AtpState *s = thvm_atp_init(&kbo, 8192);
   // Comm + assoc + identity + inverse for L_OP.
-  thvm_atp_add_equation(s, bin(L_OP, x, y), bin(L_OP, y, x));
-  thvm_atp_add_equation(s, bin(L_OP, bin(L_OP, x, y), z),
-                            bin(L_OP, x, bin(L_OP, y, z)));
-  thvm_atp_add_equation(s, bin(L_OP, x, e), x);
-  thvm_atp_add_equation(s, bin(L_OP, x, un(L_INV, x)), e);
+  Term ax_lhs[4], ax_rhs[4];
+  ax_lhs[0] = bin(L_OP, x, y);              ax_rhs[0] = bin(L_OP, y, x);
+  ax_lhs[1] = bin(L_OP, bin(L_OP, x, y), z);
+  ax_rhs[1] = bin(L_OP, x, bin(L_OP, y, z));
+  ax_lhs[2] = bin(L_OP, x, e);              ax_rhs[2] = x;
+  ax_lhs[3] = bin(L_OP, x, un(L_INV, x));   ax_rhs[3] = e;
+  for (u32 i = 0; i < 4; i++) {
+    thvm_atp_add_equation(s, ax_lhs[i], ax_rhs[i]);
+  }
+  if (mode == 2) {
+    thvm_atp_auto_ac(ax_lhs, ax_rhs, 4u);
+  }
 
   // Goal: op(op(op(a, b), c), inv(op(a, b))) = c.
   Term lhs = bin(L_OP,
@@ -87,8 +94,9 @@ static void run_once(u64 ac_mask, const char *label,
     iters++;
     if (st != ATP_RUNNING) break;
   }
-  printf("  %-18s mask=%llx  %s  iters=%u  n_rules=%u\n",
-         label, (unsigned long long)ac_mask,
+  printf("  %-22s mode=%d  mask=%llx  %s  iters=%u  n_rules=%u\n",
+         label, mode,
+         (unsigned long long)thvm_atp_get_ac_mask(),
          status_name(st), iters, s->n_rules);
 
   *st_out = st;
@@ -102,20 +110,25 @@ static void run_once(u64 ac_mask, const char *label,
 int main(void) {
   thvm_init();
 
-  AtpStatus syn_st = ATP_RUNNING, ac_st = ATP_RUNNING;
-  u32 syn_iters = 0, ac_iters = 0;
-  u32 syn_rules = 0, ac_rules = 0;
+  AtpStatus st = ATP_RUNNING;
+  u32 iters = 0, n_rules = 0;
 
   printf("== AbelianGroup/ImpliesAbelianMcCune AC reproducer ==\n");
 
-  TEST_BEGIN("abelian-syntactic-proves");
-  run_once(0ull, "syntactic", &syn_st, &syn_iters, &syn_rules);
-  CHECK(syn_st == ATP_PROVED);
+  TEST_BEGIN("abelian-no-ac-proves");
+  run_once(0, "no-ac (control)", &st, &iters, &n_rules);
+  CHECK(st == ATP_PROVED);
 
-  TEST_BEGIN("abelian-ac-proves");
-  run_once(1ull << L_OP, "ac-on", &ac_st, &ac_iters, &ac_rules);
-  // AC should NOT regress vs syntactic; failing this is the bug.
-  CHECK(ac_st == ATP_PROVED);
+  TEST_BEGIN("abelian-ac-set-before-init-proves");
+  run_once(1, "ac before init", &st, &iters, &n_rules);
+  CHECK(st == ATP_PROVED);
+
+  TEST_BEGIN("abelian-ac-auto-after-add-proves");
+  run_once(2, "auto_ac after add", &st, &iters, &n_rules);
+  // Mirrors the WL paclet's call order; if this reproduces the
+  // Saturated/Steps=0 hang seen via wolframscript, the bug is in
+  // engine state set up between add and goal.
+  CHECK(st == ATP_PROVED);
 
   thvm_free();
   TEST_REPORT();
