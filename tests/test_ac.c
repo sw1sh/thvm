@@ -469,6 +469,49 @@ int main(void) {
     CHECK(subst.bindings[1] != 0);          // z bound
   }
 
+  // -- T17d: AC-match handles MULTIPLE pass-1-bound vars (n_ub-2 path) --
+  //
+  // The pre-8a1a4a7d code path at the n_ub >= 2 branch of pass 2
+  // (atp_match_ac_flat) computed total_slots from the ORIGINAL ub_mult
+  // array without accounting for pass-1 bindings.  For a pattern with
+  // two distinct CTR-pattern child vars (both bound during pass 1)
+  // plus the same vars as bare FVR pattern leaves (consumed in pass
+  // 1's bound-FVR branch), pass 2 saw n_ub=2 total_slots=2 leftover=0
+  // and the `total_slots != leftover` check (line 456 pre-fix) would
+  // FAIL the match -- a sound match wrongly rejected.
+  //
+  // Post-fix: the ub_vid re-scan at pass-2 entry removes both x and y
+  // (both bound), n_ub becomes 0, and the leftover==0 check succeeds.
+  TEST_BEGIN("ac/match-two-bound-vars-pass2-ok");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0), y = v(1);
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    // pat = f(g(x), g(y), x, y) -- 4-leaf AC-flat, x and y each
+    // appear in a CTR-pattern child AND as a bare FVR-pattern leaf.
+    Term gx  = term_new_ctr(LAB_G, &x, 1u);
+    Term gy  = term_new_ctr(LAB_G, &y, 1u);
+    Term pat = bin(LAB_F, bin(LAB_F, gx, gy), bin(LAB_F, x, y));
+
+    // subj = f(g(a), g(b), a, b) -- AC-flat {g(a), g(b), a, b}
+    Term ga   = term_new_ctr(LAB_G, &a, 1u);
+    Term gb   = term_new_ctr(LAB_G, &b, 1u);
+    Term subj = bin(LAB_F, bin(LAB_F, ga, gb), bin(LAB_F, a, b));
+
+    RewriteSubst subst = {{0}};
+    u8 matched = atp_match_ac(pat, subj, &ac, &subst);
+
+    CHECK(matched);
+    // Bindings: x and y should cover {a, b} as a multiset (which one
+    // gets which depends on AC-canonical sort of subject leaves).
+    Term xb = subst.bindings[0];
+    Term yb = subst.bindings[1];
+    u8 cov_a = kbo_eq(xb, a) || kbo_eq(yb, a);
+    u8 cov_b = kbo_eq(xb, b) || kbo_eq(yb, b);
+    CHECK(cov_a && cov_b);
+  }
+
   // -- T18: AC-match falls through to syntactic on non-AC top -----------
   TEST_BEGIN("ac/match-non-ac-top");
   {
