@@ -423,6 +423,50 @@ static u8 atp_match_ac_flat(u32 label,
     if (!used[j]) left_buf[leftover++] = S[j];
   }
 
+  // Re-scan ub_vid for vars that pass 1 has already BOUND.  A CTR
+  // pattern leaf like OverBar[x] recursively atp_match_ac's its
+  // child, which binds x; if pass 2 then independently absorbs
+  // leftover into x via atp_ac_chain_from (lines 433-438 below),
+  // the result is two inconsistent bindings -- the second wins,
+  // producing an unsound rewrite (tests/probe_pairs: just the
+  // inverse axiom alone under AC produced
+  // `f(OverTilde[1], x) -> OverTilde[1]`).
+  //
+  // The legitimate use of pass-2 absorption on a fresh var is
+  // STILL needed for the bench's abelian-group-inv (and the WL
+  // paclet's compound-identity flows): the engine's existing
+  // Bachmair-Plaisted CP extension at atp_overlap_ij synthesises
+  // an extended rule l_ext = f(l, z) -> f(r, z) whose fresh z
+  // absorbs the leftover.  In that pattern z is unbound after
+  // pass 1, so pass 2 should still absorb the leftover into z.
+  //
+  // Fix: remove vars that pass 1 has ALREADY bound from ub_vid so
+  // pass 2 only absorbs into vars that are GENUINELY fresh.  Vars
+  // that pass 1 bound implicitly consumed their structural-eq
+  // subject leaves (lines 379-393 bound-var branch); a non-zero
+  // residual leftover after that consumption means the matcher
+  // doesn't yet support sub-multiset absorption into a bound
+  // pattern var, and we fall through to a "no match" verdict
+  // (sound -- the BP-extended rule produced at CP-gen time will
+  // pick up the slack via its own fresh z).
+  {
+    u32 still_unbound = 0u;
+    u32 nv_ub_vid[ATPFT_AC_MAX_UNBOUND];
+    u32 nv_ub_mult[ATPFT_AC_MAX_UNBOUND];
+    for (u32 k = 0; k < n_ub; k++) {
+      if (subst->bindings[ub_vid[k]] == 0) {
+        nv_ub_vid[still_unbound]  = ub_vid[k];
+        nv_ub_mult[still_unbound] = ub_mult[k];
+        still_unbound++;
+      }
+    }
+    n_ub = still_unbound;
+    for (u32 k = 0; k < still_unbound; k++) {
+      ub_vid[k]  = nv_ub_vid[k];
+      ub_mult[k] = nv_ub_mult[k];
+    }
+  }
+
   if (n_ub == 0u) {
     return leftover == 0u ? 1u : 0u;
   }
