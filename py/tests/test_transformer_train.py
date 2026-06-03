@@ -105,6 +105,57 @@ class TransformerTrainTest(unittest.TestCase):
         self.assertTrue(all(np.isfinite(x) for x in losses), f"non-finite loss: {losses}")
         self.assertLess(losses[-1], 0.85 * losses[0], f"loss did not descend: {losses[0]:.3f} -> {losses[-1]:.3f}")
 
+    def test_2layer_transformer_trains(self):
+        """Stacked (LayerNorm + attn + residual + MLP) x2 trains, no NaN.
+
+        Guards the deep-net arc: the backward-scaling memoization (5933265b,
+        4eb40566) and the arena cross-pass-shared-buffer recycling fix
+        (ca0f3892).  The residual fan-out (one activation feeding the next
+        layernorm AND the final residual add) is exactly what tripped the
+        arena planner into recycling a still-live buffer -> NaN.
+        """
+        T.training = True
+        rng = np.random.default_rng(0)
+        Bx, Sx, Dd, Hh, Dhh, Dff, L = 4, 6, 8, 2, 4, 16, 2
+        sc = 1.0 / np.sqrt(Dhh)
+        X = rng.standard_normal((Bx, Sx, Dd)).astype(np.float32)
+        Y = (X @ (rng.standard_normal((Dd, Dd)).astype(np.float32) * 0.3)).astype(np.float32)
+        xt, yt = T(X.copy()), T(Y.copy())
+
+        def P(sh, s=0.1): return T((rng.standard_normal(sh) * s).astype(np.float32)).requires_grad_(True)
+        def o(n): return T(np.ones(n, np.float32)).requires_grad_(True)
+        def z(n): return T(np.zeros(n, np.float32)).requires_grad_(True)
+        layers = [dict(Wqkv=P((Dd, 3 * Dd)), Wo=P((Dd, Dd)), g1=o(Dd), b1=z(Dd),
+                       W1=P((Dd, Dff)), bo1=z(Dff), W2=P((Dff, Dd)), bo2=z(Dd), g2=o(Dd), b2=z(Dd))
+                  for _ in range(L)]
+        params = [p for ly in layers for p in ly.values()]
+        opt = optim.Adam(params, lr=5e-3)
+
+        def attn(h, pr):
+            qkv = (h @ pr['Wqkv']).reshape(Bx, Sx, 3, Hh, Dhh)
+            q = qkv[:, :, 0].permute(0, 2, 1, 3)
+            k = qkv[:, :, 1].permute(0, 2, 1, 3)
+            v = qkv[:, :, 2].permute(0, 2, 1, 3)
+            a = ((q @ k.transpose(-2, -1)) * sc).softmax(axis=-1)
+            return (a @ v).permute(0, 2, 1, 3).reshape(Bx, Sx, Dd) @ pr['Wo']
+
+        def ln(x, g, b): return x.layernorm() * g + b
+
+        def loss():
+            x = xt
+            for pr in layers:
+                x = x + attn(ln(x, pr['g1'], pr['b1']), pr)
+                x = x + (ln(x, pr['g2'], pr['b2']).linear(pr['W1'], pr['bo1'])).relu().linear(pr['W2'], pr['bo2'])
+            d = x - yt
+            return (d * d).sum()
+
+        losses = []
+        for _ in range(16):
+            opt.zero_grad(); l = loss(); l.backward(); opt.step()
+            losses.append(float(l.numpy()))
+        self.assertTrue(all(np.isfinite(x) for x in losses), f"non-finite loss (arena recycle NaN?): {losses}")
+        self.assertLess(losses[-1], 0.85 * losses[0], f"loss did not descend: {losses[0]:.3f} -> {losses[-1]:.3f}")
+
 
 if __name__ == "__main__":
     unittest.main()
