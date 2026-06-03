@@ -76,3 +76,45 @@ VerificationTest[
     Association,
     TestID -> "Lift/default-is-Association"
 ]
+
+(* === Lift works on a different theory: Group/InverseOfInverse === *)
+
+VerificationTest[
+    If[ ! wmcliAvailable, {ProofObject, Function},
+        Module[{po = TWaldmeisterProofObject[
+                "GroupAxioms", "InverseOfInverse",
+                TimeConstraint -> 12,
+                "LiftToProofObject" -> True]},
+            {Head[po], Quiet @ Head @ po["ProofFunction"]}]],
+    {ProofObject, Function},
+    TestID -> "Lift/cross-theory/Group_InverseOfInverse"
+]
+
+(* === Lift works on BooleanAxioms/DoubleNegation === *)
+
+VerificationTest[
+    If[ ! wmcliAvailable, {ProofObject, Function},
+        Module[{po = TWaldmeisterProofObject[
+                "BooleanAxioms", "DoubleNegation",
+                TimeConstraint -> 12,
+                "LiftToProofObject" -> True]},
+            {Head[po], Quiet @ Head @ po["ProofFunction"]}]],
+    {ProofObject, Function},
+    TestID -> "Lift/cross-theory/Boolean_DoubleNegation"
+]
+
+(* === Lift also works for the Vampire builder === *)
+
+vampireAvailable := FileExistsQ["/opt/homebrew/bin/vampire"] ||
+    FileExistsQ["/usr/local/bin/vampire"];
+
+VerificationTest[
+    If[ ! vampireAvailable, {ProofObject, Function},
+        Module[{po = TVampireProofObject[
+                "AbelianGroupAxioms", "InverseOfInverse",
+                TimeConstraint -> 12,
+                "LiftToProofObject" -> True]},
+            {Head[po], Quiet @ Head @ po["ProofFunction"]}]],
+    {ProofObject, Function},
+    TestID -> "Lift/builder-Vampire/AbelianGroup_InverseOfInverse"
+]
