@@ -181,6 +181,17 @@ ATP_CP_GROUND_JOIN ?= 1
 ATP_DEFINES     += $(if $(filter-out 0,$(ATP_CP_GROUND_JOIN)),-DATP_CP_GROUND_JOIN,)
 WL_ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_GROUND_JOIN)),-DATP_CP_GROUND_JOIN,)
 
+# AC reasoning (src/atp/ac.c) shipped in the paclet too: the C-test
+# build already compiles AC in (-DTHVM_ATP_AC); the paclet was the
+# odd one out.  All AC gates are runtime-gated on engine-global
+# `g_atp_ac_info.ac_mask` (set via thvm_atp_set_ac_mask /
+# thvm_atp_auto_ac) -- ac_mask = 0 is byte-identical to a non-AC
+# build, so the default paclet behaviour is unchanged.  An opt-in
+# Environment["THVM_ATP_AUTO_AC", "1"] lights up the AC analyzer +
+# Bachmair-Plaisted extended rewriting / AC-overlap CPs / AC-eq
+# goal-check on theories whose axiom set surfaces an AC top symbol.
+WL_ATP_DEFINES  += -DTHVM_ATP_AC
+
 # Waldmeister-style critical-pair classification: -DATP_CP_CLASSIFY
 # ports Waldmeister's `NewClassification` ("new classification") and
 # `ClasFunctions` ("classification functions") killer predicates

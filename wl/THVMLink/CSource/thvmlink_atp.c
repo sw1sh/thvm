@@ -658,6 +658,35 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       return LIBRARY_FUNCTION_ERROR;
     }
   }
+#ifdef THVM_ATP_AC
+  // THVM_ATP_AUTO_AC=1 opts the saturation into Bachmair-Plaisted AC
+  // reasoning when the axiom analyzer surfaces an AC top symbol (both
+  // commutative AND associative).  Default off (env unset or != "1")
+  // resets ac_mask to 0 -- the mask is engine-global and could
+  // otherwise leak from a previous run.  All AC gates
+  // (atp_ordered_try_top extension, atp_overlap_ij CP extension,
+  // goal-check AC-eq short-circuit) read ac_mask and stay dormant at
+  // 0, so the default build remains byte-identical to a non-AC paclet.
+  // Env-var rather than an argument-slot lets a user opt in via
+  // Environment["THVM_ATP_AUTO_AC", "1"] without a LibraryFunctionLoad
+  // signature change.
+  {
+    const char *ac_ev = getenv("THVM_ATP_AUTO_AC");
+    if (ac_ev != NULL && ac_ev[0] == '1' && n_ax > 0u) {
+      Term ax_lhs[ATP_PROOF_MAX_STEPS];
+      Term ax_rhs[ATP_PROOF_MAX_STEPS];
+      u32 cap = (u32)(sizeof ax_lhs / sizeof ax_lhs[0]);
+      u32 m   = n_ax < cap ? n_ax : cap;
+      for (u32 i = 0; i < m; i++) {
+        ax_lhs[i] = (Term)data[1 + 2 * i + 0];
+        ax_rhs[i] = (Term)data[1 + 2 * i + 1];
+      }
+      thvm_atp_auto_ac(ax_lhs, ax_rhs, m);
+    } else {
+      thvm_atp_set_ac_mask(0ull);
+    }
+  }
+#endif
   Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
   Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
   // Completion mode: a (0, 0) conjecture pair means "no goal" -- the
