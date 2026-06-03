@@ -538,21 +538,7 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
                     inputEntry["Statement"],
                     constructEntry["Statement"],
                     stepEq, varSet];
-                If[ recon === $Failed,
-                    Block[{idVar = First[Append[varSet, Global`x1]],
-                           idPat},
-                        idPat = Hold[Pattern][idVar, Blank[]] /.
-                            Hold[Pattern] -> Pattern;
-                        Return[ReplacePart[entry,
-                            "Proof" -> Association[proof,
-                                "Side" -> 1,
-                                "ConstructSide" -> 1,
-                                "Position" -> {},
-                                "Orientation" -> 1,
-                                "Rule" -> (idPat -> idVar),
-                                "Source" -> "norm",
-                                "InputOrientation" -> 1,
-                                "OutputExpression" -> stepEq]]]]];
+                If[ recon === $Failed, Return[entry]];
                 Return[ReplacePart[entry,
                     "Proof" -> Association[proof, recon,
                         "Source" -> If[type === "Conclusion", "cpl", "norm"],
@@ -571,25 +557,16 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
                     constructEntry["Statement"],
                     matchingEntry["Statement"],
                     stepEq, varSet];
-                If[ recon === $Failed,
-                    Block[{idVar = First[Append[varSet, Global`x1]],
-                           idPat},
-                        idPat = Hold[Pattern][idVar, Blank[]] /.
-                            Hold[Pattern] -> Pattern;
-                        (* Placeholder fallback: use the identity
-                           rewrite rule `x_ -> x` so the verifier's
-                           Replace[expr, rule] is a no-op rather
-                           than crashing on a malformed `{} -> {}`. *)
-                        Return[ReplacePart[entry,
-                            "Proof" -> Association[proof,
-                                "Side" -> 1,
-                                "Orientation" -> 1,
-                                "MatchingSide" -> 1,
-                                "MatchingOrientation" -> 1,
-                                "Position" -> {},
-                                "Subpattern" -> idPat,
-                                "Rule" -> (idPat -> idVar),
-                                "MatchingRule" -> (idPat -> idVar)]]]]];
+                (* Bisect (5a14987a) showed: a placeholder rule that
+                   doesn't ACTUALLY derive the Statement causes a
+                   verifier Failure with "Can't unify <axiom> with
+                   <placeholder>".  So writing a fake identity rule
+                   is worse than leaving the entry unaugmented --
+                   leave it skeleton-only and let the verifier
+                   report its own KeyAbsent failure.  Real fix is
+                   making the enumeration find valid superpositions
+                   for CPL 2/3 etc. *)
+                If[ recon === $Failed, Return[entry]];
                 Return[ReplacePart[entry,
                     "Proof" -> Association[proof, recon]]]];
         entry
