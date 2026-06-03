@@ -390,6 +390,85 @@ int main(void) {
     CHECK(!atp_match_ac(pat_xy, sub3, &ac, &s2));    // bail
   }
 
+  // -- T17b: AC-match must NOT rebind a pass-1-bound var in pass 2 -----
+  //
+  // Regression guard for 8a1a4a7d's atp_match_ac_flat fix.  Pattern is
+  // f(g(x), x) -- AC-flat {g(x), x}, two leaves where x appears both
+  // as a CTR-pattern child and as a bare FVR-pattern leaf.  Subject is
+  // f(g(a), a, b) -- AC-flat {g(a), a, b}.
+  //
+  // Pass 1 matches g(x) against g(a), binding x = a.  Pass 1's bound-
+  // FVR branch then matches x's binding `a` against subject leaf `a`,
+  // consuming it.  Leftover: {b}.
+  //
+  // Pre-fix bug: pass 2 saw ub_vid still listing x, computed n_ub=1
+  // m=1 leftover=1, and OVERWROTE x's binding to b.  Match returned
+  // 1 with x = b -- the rule fired with the wrong substitution,
+  // producing unsound rewrites (e.g. inverse-only AC produced
+  // `f(OverTilde[1], x) -> OverTilde[1]`, see commit 9f36317d).
+  //
+  // Post-fix: pass 2 re-scans ub_vid, finds x already bound, removes
+  // it.  n_ub becomes 0.  Then the leftover != 0 branch returns FAIL.
+  // Sound by construction -- the bound-FVR case already consumed x's
+  // expected occurrence in pass 1.
+  TEST_BEGIN("ac/match-no-pass2-rebind");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0);
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    // pat = f(g(x), x)
+    Term gx  = term_new_ctr(LAB_G, &x, 1u);
+    Term pat = bin(LAB_F, gx, x);
+
+    // subj = f(g(a), f(a, b)) -- AC-flat {g(a), a, b}
+    Term ga   = term_new_ctr(LAB_G, &a, 1u);
+    Term subj = bin(LAB_F, ga, bin(LAB_F, a, b));
+
+    RewriteSubst subst = {{0}};
+    u8 matched = atp_match_ac(pat, subj, &ac, &subst);
+
+    // After 8a1a4a7d: match fails (leftover b can't be absorbed into
+    // the already-pass-1-bound x).
+    CHECK(!matched);
+  }
+
+  // -- T17c: AC-match still binds a FRESH pass-2 var (BP-extension
+  //          legitimate path) ----------------------------------------
+  //
+  // Companion to T17b: when the pass-2 var was NOT bound during pass
+  // 1 (e.g. the Bachmair-Plaisted extended rule's fresh z), pass 2
+  // should still absorb the leftover into it.  Verifies the fix
+  // didn't break the BP path.
+  //
+  // Pattern: f(g(x), z) where z is fresh, x is bound via g.
+  // Subject: f(g(a), a, b) -- 3 leaves.
+  // After pass 1: x = a; used g(a).  Leftover: {a, b}.
+  // n_ub: x removed (bound), z stays.  Pass 2 absorbs {a, b} into z
+  // as an AC chain.
+  TEST_BEGIN("ac/match-fresh-pass2-var-still-works");
+  {
+    AtpAcInfo ac = { .ac_mask = (1ull << LAB_F) };
+    Term x = v(0);
+    Term z = v(1);  // fresh var -- the BP extension's leftover absorber
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    // pat = f(g(x), z) -- z is the unique unbound var pass 2 should bind
+    Term gx  = term_new_ctr(LAB_G, &x, 1u);
+    Term pat = bin(LAB_F, gx, z);
+
+    // subj = f(g(a), f(a, b)) -- AC-flat {g(a), a, b}
+    Term ga   = term_new_ctr(LAB_G, &a, 1u);
+    Term subj = bin(LAB_F, ga, bin(LAB_F, a, b));
+
+    RewriteSubst subst = {{0}};
+    u8 matched = atp_match_ac(pat, subj, &ac, &subst);
+
+    CHECK(matched);
+    CHECK(kbo_eq(subst.bindings[0], a));   // x = a
+    CHECK(subst.bindings[1] != 0);          // z bound
+  }
+
   // -- T18: AC-match falls through to syntactic on non-AC top -----------
   TEST_BEGIN("ac/match-non-ac-top");
   {
