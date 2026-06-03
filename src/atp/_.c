@@ -4918,6 +4918,12 @@ static u8 atp_cp_perm_subsumed(Term lhs, Term rhs);
 static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
                                u32 reason, u32 parent_a) {
   if (s == NULL) return 0;
+  if (getenv("THVM_ATP_ENQ_DEBUG") != NULL) {
+    fprintf(stderr,
+        "[enq] reason=%u  lhs.tag=%u ext=%u  rhs.tag=%u ext=%u\n",
+        reason, term_tag(lhs), term_ext(lhs),
+        term_tag(rhs), term_ext(rhs));
+  }
   // 8.4d: when a WaldSpec is attached, reject ill-sorted inputs
   // before mutating state.  Each side must be well-sorted AND
   // both sides must share the same sort (an equation l = r in

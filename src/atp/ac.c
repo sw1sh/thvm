@@ -894,16 +894,34 @@ fn u32 atp_ac_unify_emit_cps(Term li, Term ri,
   };
 
   // Pass 1: S leaves drive the recursion (S-side FVRs absorb T leaves).
+  u32 c_before_p1 = ctx.count;
   {
     RewriteSubst subst = {{0}};
     atp_ac_unify_recurse(S, ns, 0u, T, nt, 0u, &subst, &ctx);
   }
+  u32 c_after_p1 = ctx.count;
   // Pass 2: T leaves drive the recursion (T-side FVRs absorb S leaves).
   // Skip if pass 1 already saturated the per-call cap.
   if (ctx.emits_this_call < ATP_AC_UNIFY_MAX_EMITS && ctx.count < ctx.cap) {
     ctx.emits_this_call = 0u;  // independent budget for the swapped run
     RewriteSubst subst = {{0}};
     atp_ac_unify_recurse(T, nt, 0u, S, ns, 0u, &subst, &ctx);
+  }
+  u32 c_after_p2 = ctx.count;
+
+  if (getenv("THVM_ATP_AC_UNIFY_DEBUG") != NULL) {
+    fprintf(stderr,
+        "[ac_unify] lab=%u  |S|=%u |T|=%u  pass1+=%u pass2+=%u\n",
+        lab, ns, nt,
+        c_after_p1 - c_before_p1,
+        c_after_p2 - c_after_p1);
+    fprintf(stderr, "[ac_unify]   S:");
+    for (u32 i = 0; i < ns; i++)
+      fprintf(stderr, " (tag=%u,ext=%u)", term_tag(S[i]), term_ext(S[i]));
+    fprintf(stderr, "\n[ac_unify]   T:");
+    for (u32 i = 0; i < nt; i++)
+      fprintf(stderr, " (tag=%u,ext=%u)", term_tag(T[i]), term_ext(T[i]));
+    fprintf(stderr, "\n");
   }
 
   return ctx.count;

@@ -82,8 +82,10 @@ static void run_once(int mode, const char *label,
   ax_lhs[0] = bin(L_OP, x, y);              ax_rhs[0] = bin(L_OP, y, x);
   ax_lhs[1] = bin(L_OP, bin(L_OP, x, y), z);
   ax_rhs[1] = bin(L_OP, x, bin(L_OP, y, z));
-  ax_lhs[2] = bin(L_OP, x, e);              ax_rhs[2] = x;
-  ax_lhs[3] = bin(L_OP, x, un(L_BAR, x));   ax_rhs[3] = e;
+  // Try LEFT-identity / LEFT-inverse (matches test_atp_ac_bench's
+  // abelian-group-inv test which proves under AC):
+  ax_lhs[2] = bin(L_OP, e, x);              ax_rhs[2] = x;
+  ax_lhs[3] = bin(L_OP, un(L_BAR, x), x);   ax_rhs[3] = e;
   for (u32 i = 0; i < 4; i++) {
     thvm_atp_add_equation(s, ax_lhs[i], ax_rhs[i]);
   }
@@ -108,6 +110,33 @@ static void run_once(int mode, const char *label,
          label, mode,
          (unsigned long long)thvm_atp_get_ac_mask(),
          status_name(st), iters, s->n_rules);
+  if (getenv("DUMP_RULES") != NULL) {
+    for (u32 r = 0; r < s->n_rules; r++) {
+      Term l = s->lhs[r], rh = s->rhs[r];
+      fprintf(stderr, "  rule[%u] dead=%u\n", r, s->r_dead[r]);
+      fprintf(stderr, "    lhs: tag=%u ext=%u",
+              term_tag(l), term_ext(l));
+      if (term_tag(l) == TAG_CTR) {
+        u32 n = term_ctr_n(l);
+        fprintf(stderr, " arity=%u", n);
+        for (u32 c = 0; c < n && c < 4; c++) {
+          Term ch = term_ctr_at(l, c);
+          fprintf(stderr, "  c%u(tag=%u,ext=%u)", c, term_tag(ch), term_ext(ch));
+        }
+      }
+      fprintf(stderr, "\n    rhs: tag=%u ext=%u",
+              term_tag(rh), term_ext(rh));
+      if (term_tag(rh) == TAG_CTR) {
+        u32 n = term_ctr_n(rh);
+        fprintf(stderr, " arity=%u", n);
+        for (u32 c = 0; c < n && c < 4; c++) {
+          Term ch = term_ctr_at(rh, c);
+          fprintf(stderr, "  c%u(tag=%u,ext=%u)", c, term_tag(ch), term_ext(ch));
+        }
+      }
+      fprintf(stderr, "\n");
+    }
+  }
 
   *st_out = st;
   *iters_out = iters;
