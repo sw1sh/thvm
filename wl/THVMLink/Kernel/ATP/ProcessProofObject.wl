@@ -538,7 +538,19 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
                     inputEntry["Statement"],
                     constructEntry["Statement"],
                     stepEq, varSet];
-                If[ recon === $Failed, Return[entry]];
+                If[ recon === $Failed,
+                    (* Placeholder fallback so the verifier's chain
+                       Lookup doesn't crash on KeyAbsent[Position]. *)
+                    Return[ReplacePart[entry,
+                        "Proof" -> Association[proof,
+                            "Side" -> 1,
+                            "ConstructSide" -> 1,
+                            "Position" -> {},
+                            "Orientation" -> 1,
+                            "Rule" -> ({} -> {}),
+                            "Source" -> "norm",
+                            "InputOrientation" -> 1,
+                            "OutputExpression" -> stepEq]]]];
                 Return[ReplacePart[entry,
                     "Proof" -> Association[proof, recon,
                         "Source" -> If[type === "Conclusion", "cpl", "norm"],
@@ -557,7 +569,24 @@ augmentSingleRewriteEntries[prfList_List, varSet_List : {}] := Block[
                     constructEntry["Statement"],
                     matchingEntry["Statement"],
                     stepEq, varSet];
-                If[ recon === $Failed, Return[entry]];
+                If[ recon === $Failed,
+                    (* Placeholder fallback: even when the enumeration
+                       can't find a valid superposition, write the
+                       fields the verifier walks (Position, Side,
+                       Orientation, ...) so its chain Lookup doesn't
+                       crash with KeyAbsent[Position].  The actual
+                       rewrite check will still fail for this entry,
+                       but other entries' verification can proceed. *)
+                    Return[ReplacePart[entry,
+                        "Proof" -> Association[proof,
+                            "Side" -> 1,
+                            "Orientation" -> 1,
+                            "MatchingSide" -> 1,
+                            "MatchingOrientation" -> 1,
+                            "Position" -> {},
+                            "Subpattern" -> {},
+                            "Rule" -> ({} -> {}),
+                            "MatchingRule" -> ({} -> {})]]]];
                 Return[ReplacePart[entry,
                     "Proof" -> Association[proof, recon]]]];
         entry
