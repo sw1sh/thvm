@@ -4920,9 +4920,27 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   if (s == NULL) return 0;
   if (getenv("THVM_ATP_ENQ_DEBUG") != NULL) {
     fprintf(stderr,
-        "[enq] reason=%u  lhs.tag=%u ext=%u  rhs.tag=%u ext=%u\n",
-        reason, term_tag(lhs), term_ext(lhs),
+        "[enq] reason=%u  lhs:t%u/e%u",
+        reason, term_tag(lhs), term_ext(lhs));
+    if (term_tag(lhs) == TAG_CTR) {
+      u32 n = term_ctr_n(lhs);
+      fprintf(stderr, "/n%u", n);
+      for (u32 c = 0; c < n && c < 3; c++) {
+        Term ch = term_ctr_at(lhs, c);
+        fprintf(stderr, " c%u(t%u/e%u)", c, term_tag(ch), term_ext(ch));
+      }
+    }
+    fprintf(stderr, "  rhs:t%u/e%u",
         term_tag(rhs), term_ext(rhs));
+    if (term_tag(rhs) == TAG_CTR) {
+      u32 n = term_ctr_n(rhs);
+      fprintf(stderr, "/n%u", n);
+      for (u32 c = 0; c < n && c < 3; c++) {
+        Term ch = term_ctr_at(rhs, c);
+        fprintf(stderr, " c%u(t%u/e%u)", c, term_tag(ch), term_ext(ch));
+      }
+    }
+    fprintf(stderr, "\n");
   }
   // 8.4d: when a WaldSpec is attached, reject ill-sorted inputs
   // before mutating state.  Each side must be well-sorted AND
@@ -4953,6 +4971,23 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
     s->n_cps_dropped_perm_subsumed++;
     return 0;
   }
+  // AC soundness gate for derived equations (skip user axioms).
+  // Mirrors the CP-push path's gate at atp_overlap_ij's heap-push
+  // site (see comment there).  Catches the simplify (TRACE_SIMPLIFY)
+  // re-enqueue path where interreduce produces an ill-formed
+  // equation by rewriting a rule's side via a degenerate rule that
+  // shouldn't have been there in the first place.
+#ifdef THVM_ATP_AC
+  if (parent_a != ATP_TRACE_NONE && thvm_atp_get_ac_mask() != 0ull) {
+    u8 lhs_is_var = (term_tag(lhs) == TAG_FVR);
+    u8 rhs_is_var = (term_tag(rhs) == TAG_FVR);
+    u8 fwd_sound = atp_vars_contained(rhs, lhs) && !lhs_is_var;
+    u8 rev_sound = atp_vars_contained(lhs, rhs) && !rhs_is_var;
+    if (!fwd_sound && !rev_sound) {
+      return 0;
+    }
+  }
+#endif
   u32 trace_idx = atp_trace_push(s, reason, parent_a,
                                  ATP_TRACE_NONE, lhs, rhs);
   atp_cp_heap_push(s, lhs, rhs, trace_idx);
@@ -11386,6 +11421,37 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_queue_subsumed++;
       continue;
     }
+#ifdef THVM_ATP_AC
+    // AC-overlap soundness gate: reject CPs whose orientation as a
+    // rewrite rule is unsound in BOTH directions.  Specifically the
+    // bare-variable-side case (`OverTilde[L_ONE] = var0`,
+    // `var0 = var1`) caught by the failing
+    // tests/test_atp_ac_abelian_repro:
+    //   * forward (lhs->rhs) is unsound iff vars(rhs) NOT contained
+    //     in vars(lhs) -- the rewrite would inject a free variable
+    //     into the goal term.
+    //   * reverse (rhs->lhs) is unsound iff vars(lhs) NOT contained
+    //     in vars(rhs) -- same problem flipped.
+    //
+    // Vacuous containment (empty subset) is NOT a sound direction
+    // when the matched side is a bare variable: a TAG_FVR pattern
+    // matches every CTR/FVR subject, so the rewrite then collapses
+    // ALL term identity to the (small) other side.  We treat a
+    // "bare FVR pattern + non-bare other side" as unsound in that
+    // direction.
+    if (thvm_atp_get_ac_mask() != 0ull) {
+      u8 lhs_is_var = (term_tag(cp_lhs) == TAG_FVR);
+      u8 rhs_is_var = (term_tag(cp_rhs) == TAG_FVR);
+      // Forward direction lhs->rhs is sound iff vars(rhs) contained
+      // in vars(lhs) AND lhs is NOT a bare FVR (else it matches
+      // anything and the rule is catastrophic, even if var-safe).
+      u8 fwd_sound = atp_vars_contained(cp_rhs, cp_lhs) && !lhs_is_var;
+      u8 rev_sound = atp_vars_contained(cp_lhs, cp_rhs) && !rhs_is_var;
+      if (!fwd_sound && !rev_sound) {
+        continue;
+      }
+    }
+#endif
 #ifdef ATP_CP_CLASSIFY
     if (classified_drop) {
       continue;
