@@ -154,13 +154,17 @@ int main(void) {
 
   printf("== AbelianGroup/ImpliesAbelianMcCune AC reproducer ==\n");
 
-  TEST_BEGIN("abelian-no-ac-proves");
-  run_once(0, "no-ac (control)", &st, &iters, &n_rules);
-  CHECK(st == ATP_PROVED);
+  if (getenv("MODE1_ONLY") == NULL) {
+    TEST_BEGIN("abelian-no-ac-proves");
+    run_once(0, "no-ac (control)", &st, &iters, &n_rules);
+    CHECK(st == ATP_PROVED);
+  }
 
   TEST_BEGIN("abelian-ac-set-before-init-proves");
   run_once(1, "ac before init", &st, &iters, &n_rules);
   CHECK(st == ATP_PROVED);
+
+  if (getenv("MODE1_ONLY") != NULL) goto done;
 
   TEST_BEGIN("abelian-ac-auto-after-add-proves");
   run_once(2, "auto_ac after add", &st, &iters, &n_rules);
@@ -169,6 +173,7 @@ int main(void) {
   // engine state set up between add and goal.
   CHECK(st == ATP_PROVED);
 
+done:
   thvm_free();
   TEST_REPORT();
 }
