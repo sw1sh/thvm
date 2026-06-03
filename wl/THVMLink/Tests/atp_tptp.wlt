@@ -31,14 +31,16 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* No conjecture clause -- saturation mode, returns the completed
-       rule set as default "Lemmas" projection. *)
-    MatchQ[
-        TFindProof[
+    (* No conjecture clause -- saturation mode, returns a ProofObject
+       with Theorems -> None per b25ea718.  The "Lemmas" projection
+       still works (TFindProof[axioms, "Lemmas"]) but the default is
+       now "ProofObject" for consistency with goal-directed forms. *)
+    Module[{p = TFindProof[
             "cnf(a1, axiom, mul(X, e) = X).
              cnf(a2, axiom, mul(e, X) = X).",
-            TimeConstraint -> 5],
-        {__}
+            TimeConstraint -> 5]},
+        Head[p] === ProofObject &&
+            Length @ Lookup[p[[4]], "Proof", {}] >= 2
     ],
     True,
     TestID -> "ATP/tptp/findproof-no-conjecture-completes"
