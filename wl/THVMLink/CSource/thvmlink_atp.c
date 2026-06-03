@@ -659,6 +659,22 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     }
   }
 #ifdef THVM_ATP_AC
+  if (getenv("THVM_ATP_AUTO_AC_DEBUG") != NULL) {
+    for (u32 i = 0; i < n_ax; i++) {
+      Term lhs = (Term)data[1 + 2 * i + 0];
+      Term rhs = (Term)data[1 + 2 * i + 1];
+      fprintf(stderr, "[bridge] ax%u: lhs.tag=%u ext=%u  rhs.tag=%u ext=%u\n",
+              i, term_tag(lhs), term_ext(lhs),
+              term_tag(rhs), term_ext(rhs));
+    }
+    Term gl = (Term)data[1 + 2 * n_ax + 0];
+    Term gr = (Term)data[1 + 2 * n_ax + 1];
+    fprintf(stderr, "[bridge] goal: lhs.tag=%u ext=%u  rhs.tag=%u ext=%u\n",
+            term_tag(gl), term_ext(gl),
+            term_tag(gr), term_ext(gr));
+  }
+#endif
+#ifdef THVM_ATP_AC
   // THVM_ATP_AUTO_AC=1 opts the saturation into Bachmair-Plaisted AC
   // reasoning when the axiom analyzer surfaces an AC top symbol (both
   // commutative AND associative).  Default off (env unset or != "1")

@@ -13,12 +13,21 @@
 #include "../src/thvm.c"
 #include "test.h"
 
-#define L_OP    1u   // x*y     (binary, comm+assoc -> AC)
-#define L_E     2u   // identity (const)
-#define L_INV   3u   // inverse (unary)
-#define L_A     4u
-#define L_B     5u
-#define L_C     6u
+// Mirror the WL paclet's encoding of AbelianGroupAxioms exactly:
+//   x ⊗ y                  -> L_OP (binary, AC)
+//   OverTilde[1] = identity -> L_TILDE applied to L_ONE
+//   OverBar[x]   = inverse  -> L_BAR (unary)
+// The identity element is a COMPOUND term (a unary function applied
+// to a constant), not a bare arity-0 constant.  The earlier mode=1/2
+// runs used `e = k(L_E)` -- semantically equivalent but structurally
+// different.
+#define L_OP     1u
+#define L_TILDE  2u   // OverTilde (unary)
+#define L_ONE    3u   // integer 1 (constant, arity 0)
+#define L_BAR    4u   // OverBar (unary)
+#define L_A      5u
+#define L_B      6u
+#define L_C      7u
 
 static Term k(u32 lab) { return term_new_ctr(lab, NULL, 0u); }
 static Term bin(u32 lab, Term x, Term y) {
@@ -49,14 +58,14 @@ static void run_once(int mode, const char *label,
   // mode 2: ac_mask set via auto_ac AFTER add, BEFORE goal (mirrors the
   //         WL paclet's THVM_ATP_AUTO_AC=1 order).
   Term x = v(0), y = v(1), z = v(2);
-  Term e = k(L_E);
+  // Identity element as a COMPOUND term: OverTilde[1].
+  Term e = un(L_TILDE, k(L_ONE));
   Term a = k(L_A), b = k(L_B), cc = k(L_C);
 
   // Weights all 1.  Precedence MIRRORS the WL paclet's default
-  // identity precedence (prec[i] = i+1), so the regression at the
-  // WL bridge is reproduced byte-for-byte at the C level.
+  // identity precedence (prec[i] = i+1).
   static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
-  static const u32 P[8] = { 0u, 2u, 3u, 4u, 5u, 6u, 7u, 0u };
+  static const u32 P[8] = { 0u, 2u, 3u, 4u, 5u, 6u, 7u, 8u };
   KboConfig kbo = { .weights = W, .precedence = P,
                     .n_labels = 8, .var_weight = 1u };
 
@@ -67,13 +76,14 @@ static void run_once(int mode, const char *label,
   }
 
   AtpState *s = thvm_atp_init(&kbo, 8192);
-  // Comm + assoc + identity + inverse for L_OP.
+  // Comm + assoc + identity + inverse for L_OP.  Identity element is
+  // OverTilde[1], inverse is OverBar[x], to mirror the WL encoding.
   Term ax_lhs[4], ax_rhs[4];
   ax_lhs[0] = bin(L_OP, x, y);              ax_rhs[0] = bin(L_OP, y, x);
   ax_lhs[1] = bin(L_OP, bin(L_OP, x, y), z);
   ax_rhs[1] = bin(L_OP, x, bin(L_OP, y, z));
   ax_lhs[2] = bin(L_OP, x, e);              ax_rhs[2] = x;
-  ax_lhs[3] = bin(L_OP, x, un(L_INV, x));   ax_rhs[3] = e;
+  ax_lhs[3] = bin(L_OP, x, un(L_BAR, x));   ax_rhs[3] = e;
   for (u32 i = 0; i < 4; i++) {
     thvm_atp_add_equation(s, ax_lhs[i], ax_rhs[i]);
   }
@@ -81,10 +91,10 @@ static void run_once(int mode, const char *label,
     thvm_atp_auto_ac(ax_lhs, ax_rhs, 4u);
   }
 
-  // Goal: op(op(op(a, b), c), inv(op(a, b))) = c.
+  // Goal: ((a ⊗ b) ⊗ c) ⊗ OverBar[a ⊗ b] = c.
   Term lhs = bin(L_OP,
                  bin(L_OP, bin(L_OP, a, b), cc),
-                 un(L_INV, bin(L_OP, a, b)));
+                 un(L_BAR, bin(L_OP, a, b)));
   thvm_atp_set_goal(s, lhs, cc);
 
   AtpStatus st = ATP_RUNNING;
