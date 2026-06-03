@@ -512,6 +512,63 @@ int main(void) {
     CHECK(cov_a && cov_b);
   }
 
+  // -- T17e: AC-eq goal-check short-circuit ----------------------------
+  //
+  // thvm_atp_goal_check (src/atp/_.c:9051) returns ATP_PROVED when
+  // the goal's two sides are AC-equal under the current mask, even if
+  // syntactically distinct.  Covers the documented "AC-eq goal-check
+  // short-circuit" in roadmap.md.
+  //
+  // Goal: f(a, b) = f(b, a) -- AC-flat both sides = {a, b}, equal as
+  // multisets.  No rules required; the check fires on the initial
+  // (pre-saturation) terms.
+  TEST_BEGIN("ac/goal-check-ac-eq-short-circuit");
+  {
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    // Minimal KBO; weights all 1, identity precedence.
+    static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    static const u32 P[8] = { 0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 8, .var_weight = 1u };
+
+    thvm_atp_set_ac_mask(1ull << LAB_F);
+
+    AtpState *s = thvm_atp_init(&kbo, 64);
+    thvm_atp_set_goal(s, bin(LAB_F, a, b), bin(LAB_F, b, a));
+
+    AtpStatus st = thvm_atp_goal_check(s);
+    CHECK(st == ATP_PROVED);
+
+    thvm_atp_free(s);
+    thvm_atp_set_ac_mask(0ull);
+  }
+
+  // -- T17f: same shape, NO AC mask -> not joined ----------------------
+  //
+  // Counterpart to T17e: without the AC mask, the goal-check does NOT
+  // see the two sides as joined (they normalize syntactically and
+  // f(a, b) != f(b, a)).  Verifies the short-circuit is mask-gated.
+  TEST_BEGIN("ac/goal-check-non-joined-without-mask");
+  {
+    Term a = k(LAB_A), b = k(LAB_B);
+
+    static const u32 W[8] = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    static const u32 P[8] = { 0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 8, .var_weight = 1u };
+
+    thvm_atp_set_ac_mask(0ull);  // explicitly off
+
+    AtpState *s = thvm_atp_init(&kbo, 64);
+    thvm_atp_set_goal(s, bin(LAB_F, a, b), bin(LAB_F, b, a));
+
+    AtpStatus st = thvm_atp_goal_check(s);
+    CHECK(st != ATP_PROVED);
+
+    thvm_atp_free(s);
+  }
+
   // -- T18: AC-match falls through to syntactic on non-AC top -----------
   TEST_BEGIN("ac/match-non-ac-top");
   {
