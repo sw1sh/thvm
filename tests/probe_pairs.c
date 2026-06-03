@@ -1,5 +1,13 @@
+// tests/probe_pairs.c -- diagnostic harness for the AC inverse-of-
+// product gap (see commit 9f36317d).  Standalone C program; runs
+// the inverse axiom alone + various 2-axiom subsets under AC mask,
+// prints the rule trace.  Not a test (no CHECK/TEST_REPORT) -- a
+// probe.
+//
+// Build: `make probes` -> bin/probe_pairs.  Run with
+// THVM_ATP_RULE_TRACE=1 THVM_ATP_CPRAW_DEBUG=1 ./bin/probe_pairs to
+// see every CP candidate inverse-self-overlap generates.
 #include "../src/thvm.c"
-#include "test.h"
 #define L_OP 1u
 #define L_TILDE 2u
 #define L_ONE 3u

@@ -846,6 +846,20 @@ $(BIN)/test_atp_ac_abelian_repro: tests/test_atp_ac_abelian_repro.c $(SRC) | $(B
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
+# === Diagnostic probes (tests/probe_*.c) =============================
+# Standalone C programs that drive the engine for ad-hoc diagnosis.
+# Each prints to stdout/stderr -- no CHECK/TEST_REPORT.  Built with
+# the same AC support as test_atp_ac (the probes mostly target AC
+# saturation flows).  See each probe's header for usage.
+PROBE_SRCS := $(wildcard tests/probe_*.c)
+PROBE_BINS := $(patsubst tests/probe_%.c,$(BIN)/probe_%,$(PROBE_SRCS))
+$(BIN)/probe_%: tests/probe_%.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC \
+	  -o $@ $< $(TEST_LDFLAGS)
+.PHONY: probes
+probes: $(PROBE_BINS)
+
 # === py/ ctypes bindings (libthvm_py.{dylib,so}) =====================
 # Single-TU build of src/thvm.c + extern-C wrapper that re-exports the
 # static-inline UOp constructors, so ctypes can drive thvm from Python.

@@ -1,3 +1,12 @@
+// tests/probe_abelian.c -- standalone C-level repro of the bench
+// abelian-group-inv test (test_atp_ac_bench.c "ac/bench-abelian-
+// group-inv") under AC mask.  Same axioms + goal as the bench, but
+// callable directly for clean CP-trace inspection without the other
+// 6 bench tests' output streams.
+//
+// Build: `make probes` -> bin/probe_abelian.  Run with
+// THVM_ATP_RULE_TRACE=1 THVM_ATP_CPRAW_DEBUG=1 to see the candidate
+// CPs that fail to surface the i(f(x,y)) = f(i(y), i(x)) inference.
 #include "../src/thvm.c"
 #define L_F 1u
 #define L_E 2u
