@@ -715,6 +715,21 @@ fn void thvm_atp_auto_ac(const Term *lhs, const Term *rhs, u32 n_eqns) {
   }
   atp_analyze_axioms(lhs, rhs, n_eqns, props, WALD_MAX_SYMBOLS);
   atp_acinfo_compute(&g_atp_ac_info, props, WALD_MAX_SYMBOLS);
+  if (getenv("THVM_ATP_AUTO_AC_DEBUG") != NULL) {
+    fprintf(stderr, "[auto_ac] n_eqns=%u mask=0x%016llx\n",
+            n_eqns, (unsigned long long)g_atp_ac_info.ac_mask);
+    for (u32 i = 0; i < WALD_MAX_SYMBOLS && i < 64u; i++) {
+      if (props[i].seen) {
+        fprintf(stderr,
+            "[auto_ac]   label %u arity=%u C=%u A=%u I=%u LU=%u RU=%u INV=%u\n",
+            i, props[i].arity,
+            props[i].is_commutative, props[i].is_associative,
+            props[i].is_idempotent,
+            props[i].has_left_unit, props[i].has_right_unit,
+            props[i].has_inverse);
+      }
+    }
+  }
 }
 
 // --- AC unification for CP generation -------------------------------

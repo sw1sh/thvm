@@ -833,6 +833,16 @@ $(BIN)/test_atp_ac_bench: tests/test_atp_ac_bench.c $(SRC) | $(BIN)
 	  -DTHVM_ATP_AC \
 	  -o $@ $< $(TEST_LDFLAGS)
 
+# C-level reproducer of the AC-on AbelianGroupAxioms/ImpliesAbelianMcCune
+# regression surfaced by the WL paclet's THVM_ATP_AUTO_AC=1 path.
+# Syntactic saturation proves; AC saturation hits QUEUE_EMPTY without
+# proving.  Failing test stays in until the AC pipeline finds the
+# missing inference.
+$(BIN)/test_atp_ac_abelian_repro: tests/test_atp_ac_abelian_repro.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC \
+	  -o $@ $< $(TEST_LDFLAGS)
+
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
