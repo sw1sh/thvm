@@ -355,6 +355,109 @@ int main(void) {
     thvm_atp_set_ac_mask(0ull);
   }
 
+  // ---------------------------------------------------------------------
+  // Boolean-ring idempotence (smoke).
+  //   * is AC.  Idempotence: x*x = x.
+  // Goal: m(a, a) = a    -- the rule applied directly.
+  // ---------------------------------------------------------------------
+  TEST_BEGIN("ac/bench-boolean-ring-idem-direct");
+  {
+    thvm_atp_set_ac_mask(1ull << L_M);
+
+    Term x = v(0);
+    Term a = k(L_A);
+
+    static const u32 W[16] = {
+      1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
+      1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u
+    };
+    // Precedence a > m (a=2, m=1).
+    static const u32 P[16] = {
+      0u, 0u, 0u,
+      2u,         // 3 = L_A
+      0u, 0u, 0u, 0u, 0u,
+      1u,         // 9 = L_M
+      0u, 0u, 0u, 0u, 0u, 0u
+    };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 16, .var_weight = 1u };
+
+    AtpState *s = thvm_atp_init(&kbo, 1024);
+    thvm_atp_add_equation(s, bin(L_M, x, x), x);
+    thvm_atp_set_goal(s, bin(L_M, a, a), a);
+
+    double t0 = now_secs();
+    AtpStatus st = ATP_RUNNING;
+    u32 iters = 0;
+    for (u32 i = 0; i < 1024u; i++) {
+      st = thvm_atp_step(s);
+      iters++;
+      if (st != ATP_RUNNING) break;
+    }
+    double t1 = now_secs();
+    printf("  thvm/ac-bool-idem-direct  %s  wall=%.4fs  iters=%u  n_rules=%u\n",
+           status_name(st), t1 - t0, iters, s->n_rules);
+    CHECK(st == ATP_PROVED);
+
+    thvm_atp_free(s);
+    thvm_atp_set_ac_mask(0ull);
+  }
+
+  // ---------------------------------------------------------------------
+  // Boolean-ring idempotence absorbed at AC-subset depth.
+  // Goal: m(a, m(b, a)) = m(a, b)     -- AC-flat {a, a, b} = {a, b} via
+  // the AC-subset matcher firing the idempotence rule on the embedded
+  // {a, a} sub-multiset.  Probes whether AC-match extracts non-trivial
+  // multi-leaf subsets, not just whole-term unification.
+  // wmcli reference (not yet measured -- this is an open-arc test
+  // capturing the gap if it doesn't prove).
+  // ---------------------------------------------------------------------
+  TEST_BEGIN("ac/bench-boolean-ring-idem-embed");
+  {
+    thvm_atp_set_ac_mask(1ull << L_M);
+
+    Term x = v(0);
+    Term a = k(L_A), b = k(L_B);
+
+    static const u32 W[16] = {
+      1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
+      1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u
+    };
+    // Precedence a > b > m (a=3, b=2, m=1).
+    static const u32 P[16] = {
+      0u, 0u, 0u,
+      3u,         // 3 = L_A
+      2u,         // 4 = L_B
+      0u, 0u, 0u, 0u,
+      1u,         // 9 = L_M
+      0u, 0u, 0u, 0u, 0u, 0u
+    };
+    KboConfig kbo = { .weights = W, .precedence = P,
+                      .n_labels = 16, .var_weight = 1u };
+
+    AtpState *s = thvm_atp_init(&kbo, 1024);
+    thvm_atp_add_equation(s, bin(L_M, x, x), x);
+    thvm_atp_set_goal(s,
+                      bin(L_M, a, bin(L_M, b, a)),
+                      bin(L_M, a, b));
+
+    double t0 = now_secs();
+    AtpStatus st = ATP_RUNNING;
+    u32 iters = 0;
+    for (u32 i = 0; i < 1024u; i++) {
+      st = thvm_atp_step(s);
+      iters++;
+      if (st != ATP_RUNNING) break;
+    }
+    double t1 = now_secs();
+    printf("  thvm/ac-bool-idem-embed   %s  wall=%.4fs  iters=%u  n_rules=%u\n",
+           status_name(st), t1 - t0, iters, s->n_rules);
+    CHECK(st == ATP_PROVED);
+
+    thvm_atp_free(s);
+    thvm_atp_set_ac_mask(0ull);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
