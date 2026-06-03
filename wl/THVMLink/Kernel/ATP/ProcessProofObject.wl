@@ -72,6 +72,17 @@ TTweeProofObject::usage =
     "construct-class metadata.  Used as Method -> \"TweeProcess\" in " <>
     "TFindProof."
 
+TEproverProofObject::usage =
+    "TEproverProofObject[\"Theory\", \"thm\", opts] runs the E prover " <>
+    "CLI on the canonical TPTP problem file and lifts the SZS proof " <>
+    "into the shared thvm Association shape via " <>
+    "TSZSDerivationToProofObject.  E's --proof-object --tstp-format " <>
+    "emits the same SZS-framed fof+inference DAG as Vampire's " <>
+    "--proof tptp, so the lift path is shared.  Options: TimeConstraint " <>
+    "(default 30), Binary (default Automatic), ParseFormulas " <>
+    "(default False), LiftToProofObject (default False -- when True, " <>
+    "wraps the Association into a literal ProofObject[...] head)."
+
 Begin["`Private`"]
 
 (* TPTP-symbol -> WL-operator reverse map.  Mirrors the encoder
@@ -768,9 +779,42 @@ Options[TVampireProofObject] = {
     "LiftToProofObject" -> False
 }
 
+(* E-prover wrapper: chain TEproverProof + the generic SZS-to-
+   ProofObject builder.  E's --proof-object --tstp-format emits
+   the same SZS-framed fof+inference DAG Vampire does, so the
+   downstream path is shared. *)
+Options[TEproverProofObject] = {
+    TimeConstraint  -> 30,
+    "Binary"        -> Automatic,
+    "ParseFormulas" -> False,
+    "LiftToProofObject" -> False
+}
+
+TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[
+    {epR = TEproverProof[theory, thm,
+            FilterRules[{opts}, Options[TEproverProof]]],
+        liftQ = TrueQ @ OptionValue["LiftToProofObject"],
+        parseOpt, assoc},
+    parseOpt = "ParseFormulas" -> (liftQ ||
+        TrueQ @ OptionValue["ParseFormulas"]);
+    If[ epR["Status"] =!= "Proved",
+        Failure["ExternalNoProof", <|
+            "Tool"     -> "Eprover",
+            "Status"   -> epR["Status"],
+            "Seconds"  -> epR["Seconds"],
+            "Strategy" -> epR["Strategy"]
+        |>],
+        assoc = TSZSDerivationToProofObject[
+            epR["Inferences"], parseOpt];
+        If[ liftQ,
+            THVMLink`ATP`Private`liftToProofObject[assoc],
+            assoc
+        ]
+    ]
+]
+
 (* Vampire-specific wrapper: chain TVampireProof + the generic
-   SZS-to-ProofObject builder.  Future TEProverProofObject /
-   TIProverProofObject etc. follow the same shape. *)
+   SZS-to-ProofObject builder. *)
 TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[
     {vampR = TVampireProof[theory, thm,
             FilterRules[{opts}, Options[TVampireProof]]],
