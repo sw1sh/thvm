@@ -11263,6 +11263,16 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   (void)rule_a;
   (void)rule_b;
 #endif
+  if (getenv("THVM_ATP_CPRAW_DEBUG") != NULL && ncps > 0) {
+    fprintf(stderr, "[cpraw] atp_push_cps_traced(parent_a=%u parent_b=%u rule_a=%u rule_b=%u): %u raw CPs\n",
+            parent_a, parent_b, rule_a, rule_b, ncps);
+    for (u32 i = 0; i < ncps; i++) {
+      char la[256], ra[256];
+      atp_pretty_term(cps[i].lhs, la, sizeof la);
+      atp_pretty_term(cps[i].rhs, ra, sizeof ra);
+      fprintf(stderr, "[cpraw]   %u: %s = %s\n", i, la, ra);
+    }
+  }
   for (u32 i = 0; i < ncps; i++) {
     Term cp_lhs = cps[i].lhs;
     Term cp_rhs = cps[i].rhs;

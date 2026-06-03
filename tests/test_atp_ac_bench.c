@@ -201,6 +201,11 @@ int main(void) {
                       .n_labels = 8, .var_weight = 1u };
 
     AtpState *s = thvm_atp_init(&kbo, 8192);
+    // Unfailing CP: BOTH faces of an unorientable equation are
+    // overlapped.  Comm + assoc are unorientable here, so without
+    // this the saturation misses CPs that close the inverse-of-
+    // product derivation.
+    thvm_atp_set_use_unfailing_cp(s, 1);
     thvm_atp_add_equation(s, bin(L_F, x, y), bin(L_F, y, x));
     thvm_atp_add_equation(s, bin(L_F, bin(L_F, x, y), z),
                               bin(L_F, x, bin(L_F, y, z)));
