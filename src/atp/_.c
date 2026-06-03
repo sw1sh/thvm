@@ -5470,16 +5470,12 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
         return thvm_subst_apply(rhs[i], &subst);
       }
 #ifdef THVM_ATP_AC
-      // Bachmair-Plaisted extended rewriting: for an oriented AC-top
-      // rule l -> r whose LHS doesn't match the whole goal as-is, try
-      // the extended form l_ext = f(l, z) -> f(r, z).  z absorbs the
-      // leftover AC leaves so a rule like m(x, x) -> x fires on a
-      // goal m(a, m(a, b)) (AC-flat {a, a, b}) -- matches the
-      // embedded {a, a} sub-multiset, returns the rebuilt term with
-      // the remaining {b} intact.  Mirrors the same extension already
-      // wired into CP overlap; closes the AC subset-match gap surfaced
-      // by tests/test_atp_ac_bench's ac/bench-boolean-ring-idem-embed.
-      {
+      // Bachmair-Plaisted extended rewriting (diagnostic gate added
+      // for the AbelianGroup AC investigation -- THVM_ATP_BP_EXT_OFF
+      // env var disables to verify whether this extension is the
+      // source of the wildcard unsound rule).  See ef2cde27 for the
+      // original landing.
+      if (getenv("THVM_ATP_BP_EXT_OFF") == NULL) {
         u64 acm = thvm_atp_get_ac_mask();
         if (acm != 0ull
             && term_tag(li) == TAG_CTR
@@ -11456,11 +11452,29 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     if (classified_drop) {
       continue;
     }
+    if (getenv("THVM_ATP_CPGEN_DEBUG") != NULL) {
+      char la[256], ra[256], la_raw[256], ra_raw[256];
+      atp_pretty_term(cp_lhs, la, sizeof la);
+      atp_pretty_term(cp_rhs, ra, sizeof ra);
+      atp_pretty_term(raw_lhs, la_raw, sizeof la_raw);
+      atp_pretty_term(raw_rhs, ra_raw, sizeof ra_raw);
+      fprintf(stderr, "[cpgen] from rules %u x %u: cp(raw) = %s = %s; cp(norm) = %s = %s\n",
+              rule_a, rule_b, la_raw, ra_raw, la, ra);
+    }
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len);
     atp_cp_heap_push_pri(s, cp_lhs, cp_rhs, t, clas_pri);
     pushed++;
 #else
+    if (getenv("THVM_ATP_CPGEN_DEBUG") != NULL) {
+      char la[256], ra[256], la_raw[256], ra_raw[256];
+      atp_pretty_term(cp_lhs, la, sizeof la);
+      atp_pretty_term(cp_rhs, ra, sizeof ra);
+      atp_pretty_term(raw_lhs, la_raw, sizeof la_raw);
+      atp_pretty_term(raw_rhs, ra_raw, sizeof ra_raw);
+      fprintf(stderr, "[cpgen] from rules %u x %u: cp(raw) = %s = %s; cp(norm) = %s = %s\n",
+              rule_a, rule_b, la_raw, ra_raw, la, ra);
+    }
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len);
     atp_cp_heap_push(s, cp_lhs, cp_rhs, t);
