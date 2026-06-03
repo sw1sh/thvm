@@ -5428,6 +5428,36 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
         *fired = 1;
         return thvm_subst_apply(rhs[i], &subst);
       }
+#ifdef THVM_ATP_AC
+      // Bachmair-Plaisted extended rewriting: for an oriented AC-top
+      // rule l -> r whose LHS doesn't match the whole goal as-is, try
+      // the extended form l_ext = f(l, z) -> f(r, z).  z absorbs the
+      // leftover AC leaves so a rule like m(x, x) -> x fires on a
+      // goal m(a, m(a, b)) (AC-flat {a, a, b}) -- matches the
+      // embedded {a, a} sub-multiset, returns the rebuilt term with
+      // the remaining {b} intact.  Mirrors the same extension already
+      // wired into CP overlap; closes the AC subset-match gap surfaced
+      // by tests/test_atp_ac_bench's ac/bench-boolean-ring-idem-embed.
+      {
+        u64 acm = thvm_atp_get_ac_mask();
+        if (acm != 0ull
+            && term_tag(li) == TAG_CTR
+            && term_ext(li) < 64u
+            && ((acm >> term_ext(li)) & 1ull) != 0ull
+            && t_tag == TAG_CTR
+            && term_ext(t) == term_ext(li)) {
+          AtpAcInfo ac = { .ac_mask = acm };
+          Term ext_li = 0, ext_ri = 0;
+          if (atp_ac_extend_rule(li, rhs[i], &ac, &ext_li, &ext_ri)) {
+            RewriteSubst esubst = {{0}};
+            if (atp_match_maybe_ac(ext_li, t, &esubst)) {
+              *fired = 1;
+              return thvm_subst_apply(ext_ri, &esubst);
+            }
+          }
+        }
+      }
+#endif
       continue;
     }
     // Unorientable equation -- both directions, variable-safe + order-
