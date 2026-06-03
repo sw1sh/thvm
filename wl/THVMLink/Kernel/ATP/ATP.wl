@@ -51,9 +51,11 @@ BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindProof[axioms, \"RawTrace\"]).  Bound completion with TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); TimeConstraint (wall-clock seconds, default Infinity = unbounded -- bounds non-terminating recursive-axiom saturations; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED 4-entry schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, TimeConstraint divides FAIRLY across the schedule (each remaining config gets the remaining-budget/remaining-configs share); default 60s per config when TimeConstraint is Infinity.  PortfolioFrontLoad -> n (default 0) widens the slice given to the first n entries: each receives 2x what an unweighted recurrence would assign, with entries past n reverting to fair share.  Useful when the auto-tuned front of an Automatic schedule deserves more time than 1/(total entries).  Additional presets: Method -> \"VampireUEQ\" is the flagship Vampire UEQ entry (LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce, with the MNF front on by default); Method -> \"Twee\" bundles Twee 2.x defaults (CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20); Method -> \"EProver\" bundles E's typical CASC config (CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP); Method -> \"VampirePortfolio\" expands into the 13-entry $VampirePortfolio rotation; Method -> \"VampirePortfolioCompact\" is a 3-entry rotation (VampireUEQ + Twee + Mix2-AutoPrec) sized for small TimeConstraints.  $AtpMethodPresets enumerates the named presets the dispatcher recognizes; TAtpSchedule[Method] returns the schedule a Method would expand to; TAtpDescribeMethod[Method] returns the expanded options Association of a preset.";
+TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Counterexample\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag; \"Counterexample\" the equational dual of the ProofObject -- a CounterexampleObject disproving the goal, or $Failed when there is no extractable countermodel (the goal is proved, the run timed out, or an AC/commutative-saturated theory needs ordered rewriting the extractor soundly declines).  A fully GROUND problem is decided by congruence closure and the quotient is returned as a finite model in FindFiniteModels structure (co[\"Model\"] = <|op -> Cayley table, const -> element|> over {0, ..., k-1}); a quantified problem is refuted by the saturated completion (co[\"Model\"] = a finite model when the initial term algebra closes within the cap, else the convergent rules; co[\"NormalForms\"] gives the separating normal forms).  Method -> \"SMT\" decides a ground entailment directly by congruence closure (returning a \"Proved\" decision Association, or a CounterexampleObject on refute) and accepts a TPTP File / cnf-fof string for a ground problem.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns the derived lemmas (default return \"Lemmas\"; pass a return spec as the 2nd argument, e.g. TFindProof[axioms, \"RawTrace\"]).  Bound completion with TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); TimeConstraint (wall-clock seconds, default Infinity = unbounded -- bounds non-terminating recursive-axiom saturations; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED 4-entry schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, TimeConstraint divides FAIRLY across the schedule (each remaining config gets the remaining-budget/remaining-configs share); default 60s per config when TimeConstraint is Infinity.  PortfolioFrontLoad -> n (default 0) widens the slice given to the first n entries: each receives 2x what an unweighted recurrence would assign, with entries past n reverting to fair share.  Useful when the auto-tuned front of an Automatic schedule deserves more time than 1/(total entries).  Additional presets: Method -> \"VampireUEQ\" is the flagship Vampire UEQ entry (LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce, with the MNF front on by default); Method -> \"Twee\" bundles Twee 2.x defaults (CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20); Method -> \"EProver\" bundles E's typical CASC config (CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP); Method -> \"VampirePortfolio\" expands into the 13-entry $VampirePortfolio rotation; Method -> \"VampirePortfolioCompact\" is a 3-entry rotation (VampireUEQ + Twee + Mix2-AutoPrec) sized for small TimeConstraints.  $AtpMethodPresets enumerates the named presets the dispatcher recognizes; TAtpSchedule[Method] returns the schedule a Method would expand to; TAtpDescribeMethod[Method] returns the expanded options Association of a preset.";
 
 TFindEquationalProof::usage = "TFindEquationalProof is a deprecated alias for TFindProof; every call forwards to TFindProof.  Kept for back-compat with notebooks and downstream code that already use the name.  New code should call TFindProof.";
+
+CounterexampleObject::usage = "CounterexampleObject[method, proposition, axioms, data] is the equational dual of ProofObject -- a disproof artifact returned by TFindProof[conjecture, axioms, \"Counterexample\"] when the goal is refutable, mirroring the Wolfram Function Repository's FindEquationalCounterexample result.  It renders as a summary box and supports a property interface: co[\"Method\"] (the engine that produced it), co[\"Proposition\"] / co[\"Goal\"], co[\"Axioms\"] / co[\"Hypotheses\"], co[\"Setup\"] / co[\"Model\"] (the refuting model), co[\"Counterexample\"] / co[\"Witness\"] (the falsifying assignment), co[\"NormalForms\"], co[\"Domain\"], co[\"FalsificationFunction\"] (a nullary Function that evaluates the goal in the model -- co[\"FalsificationFunction\"][] returns False, since the goal fails there), co[\"VerificationFunction\"] (co[\"VerificationFunction\"][] returns True, since the axioms hold there), co[\"Data\"], co[\"Properties\"].  When the model is finite (a ground congruence-closure quotient) co[\"Model\"] follows the FindFiniteModels structure: an Association op -> Cayley table (0-indexed nested list) for each operator and const -> domain element for each constant, over the domain {0, ..., k-1}.  When the model is the infinite initial term algebra of a saturated rewrite system, co[\"Model\"] carries the convergent rules and co[\"NormalForms\"] the two distinct normal forms that separate the goal's sides.";
 
 TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axioms the relevance filter keeps vs. drops for proving conjecture, without running a proof -- making the filter transparent.  TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.  Returns <|\"Mode\"->..., \"Kept\"->{axioms}, \"Dropped\"->{<|\"Axiom\", \"Symbols\", \"Reason\"|>...}|>.  The relevance mode is set by the Method \"AxiomRelevance\" suboption: None (keep all); \"Safe\" (default -- drop only provably dead-weight axioms: a confined symbol occurring on both sides, e.g. the Y combinator when the goal is Y-free; sound and completeness-preserving); \"Connected\" or {\"Connected\", \"FrequencyCutoff\"->f, \"MaxGenerations\"->n} (symbol-reachability pruning -- a coarse heuristic, may drop a needed axiom); \"SInE\" or {\"SInE\", \"SineTolerance\"->st, \"SineDepth\"->sd, \"SineGenerality\"->sgt} (the Hoder-Voronkov SInE premise-selection algorithm as shipped in Vampire -- D-relation + bounded BFS from the conjecture's symbols.  Defaults 3/2/8 mirror Vampire's --sine_tolerance/--sine_depth/--sine_generality_threshold, the winning option block from the parallel Vampire benchmark of thvm's uncrackable theorems).";
 
@@ -62,15 +64,15 @@ TAtpSchedule::usage = "TAtpSchedule[Method] returns the schedule (a list of sing
 TAtpDescribeMethod::usage = "TAtpDescribeMethod[Method] returns an Association describing what a Method spec resolves to.  For a named preset (Waldmeister, VampireUEQ, Twee, EProver), returns the preset's full defaults Association (the suboptions the dispatcher merges with the user's subopts).  For a list spec like {\"Twee\", subopts...}, returns the preset's defaults merged with the user's overrides -- the actual options that will reach the C engine.  For a non-preset config like {\"Completion\", subopts...}, returns Association[subopts].  For Automatic / \"Portfolio\" / \"VampirePortfolio\" / \"VampirePortfolioCompact\", returns <|\"Schedule\" -> ...|> describing the multi-entry rotation rather than a single config.";
 
 (* Forward-declare sibling-file public symbols (SMT.wl owns
-   TSatEUF / TSmtDecide / TFindProofSMT) so bare references inside
-   this file's Begin[`Private`] resolve to the shared
-   THVMLink`ATP`X symbol rather than creating a phantom
-   THVMLink`ATP`Private`X.  The alphabetical autoload order means
-   those symbols don't exist yet when this file is parsed; the bare
-   mention here pre-creates them in the public context.
-   TPTPImport now lives in Wolfram`Parser` (added to the context
-   path above) so it doesn't need pre-declaration. *)
-{TSatEUF, TSmtDecide, TFindProofSMT};
+   TSatEUF / TSmtDecide) so bare references inside this file's
+   Begin[`Private`] resolve to the shared THVMLink`ATP`X symbol
+   rather than creating a phantom THVMLink`ATP`Private`X.  The
+   alphabetical autoload order means those symbols don't exist yet
+   when this file is parsed; the bare mention here pre-creates them
+   in the public context.  TPTPImport now lives in Wolfram`Parser`
+   (added to the context path above) so it doesn't need
+   pre-declaration. *)
+{TSatEUF, TSmtDecide};
 
 (* (The IC primitives TDef / TRef / TLam / TCollapse / ... are owned by
    the depth-4 sibling Switch.wl, which already loaded before this
@@ -1316,9 +1318,17 @@ atpXVarQ[_] := False;
    varSyms plus any "x<id>" symbol decodeAtpTerm minted for a fresh
    FVR completion introduced past the signature.  Recognizing the
    x-pattern here means varSyms need only carry the named vars, so the
-   trace need not be eagerly scanned for completion vars. *)
-cplPatternize[term_, varSyms_] := term /.
-    (v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v])) :> Pattern[v, Blank[]]
+   trace need not be eagerly scanned for completion vars.
+
+   The replacement is a list of concrete `sym -> sym_` Rules (one per
+   occurring variable), NOT a single `(v_Symbol /; ...) :> Pattern[v, _]`
+   rule.  The conditional form re-binds `v` as a Pattern on a RuleDelayed
+   rhs, which the kernel flags with RuleDelayed::rhs; building the rules per
+   concrete symbol keeps every Pattern off a rule rhs and is silent. *)
+cplPatternize[term_, varSyms_] := Module[{vars},
+    vars = DeleteDuplicates @ Cases[term,
+        v_Symbol /; (MemberQ[varSyms, v] || atpXVarQ[v]), {0, Infinity}];
+    term /. (Rule[#, Pattern[#, Blank[]]] & /@ vars)]
 
 (* A completion rule {lhs, rhs} as a WL rewrite rule, with the lhs
    variables patternized so the rule actually fires. *)
@@ -3800,7 +3810,7 @@ holdToInactive[axHC_HoldComplete] :=
    bare ProofObject, so existing call shapes are unchanged. *)
 $AtpReturnSpecs = {"ProofObject", "Lemmas", "PreprocessedAxioms",
     "RelevantAxioms", "RawTrace", "Statistics", "Status",
-    "AppliedMethod", "WallTime", "PortfolioTrace"};
+    "AppliedMethod", "WallTime", "PortfolioTrace", "Counterexample"};
 
 atpReturnSpecQ[All] := True;
 atpReturnSpecQ[x_String] := MemberQ[$AtpReturnSpecs, x];
@@ -3834,6 +3844,319 @@ atpStatisticsAssoc[cRes_] := <|
     "QueueSize" -> Replace[cRes["NCps"], Except[_Integer] -> 0]
 |>;
 
+(* ----- countermodel from a saturated completion -----
+   When the C engine SATURATES (Status 4 / QUEUE_EMPTY) without proving the
+   goal, it has produced a finite ground-convergent rewrite system.  The
+   equational dual of FindEquationalProof's countermodel-bearing Failure:
+   normalize the (skolemized, hence ground) two sides of the goal against the
+   completed rules; distinct normal forms witness that the goal is NOT a
+   consequence, and the convergent system is the deciding model (the initial
+   term algebra).  A real disproof, not a timeout.
+
+   Soundness gate.  Unfailing completion can saturate with UNORIENTABLE
+   equations (e.g. commutativity `x*y == y*x`), which it stores in MainRules
+   with an arbitrary orientation and applies only via ordered rewriting.
+   Reusing the engine's order here would mean re-deriving its KBO/LPO
+   precedence; instead we restrict to the case that needs no ordered
+   rewriting: every MainRule must be strictly size-reducing under all
+   substitutions (atpRuleSizeReducingQ).  That guarantees (a) `//.`
+   terminates and (b) the saturated set contains no unorientable equation
+   (those have equal size on both sides), so the rules form an ordinary
+   terminating TRS whose joinable critical pairs (saturation) make it
+   convergent for the FULL theory -- and NF comparison decides ground
+   equality soundly and completely.  If any rule fails the gate (AC /
+   commutative-saturated theories) we decline rather than risk an unsound
+   verdict. *)
+
+(* A {lhs, rhs} rule is strictly size-reducing under every substitution iff
+   LeafCount[lhs] > LeafCount[rhs] AND no variable occurs more often in rhs
+   than in lhs (so no instantiation can flip the size).  Both conditions
+   together make the rule -- and hence any set of such rules -- terminating
+   under `//.`. *)
+atpRuleSizeReducingQ[{l_, r_}, varSyms_List] :=
+    LeafCount[l] > LeafCount[r] &&
+    AllTrue[varSyms,
+        Count[l, #, {0, Infinity}] >= Count[r, #, {0, Infinity}] &];
+atpRuleSizeReducingQ[_, _] := False;
+
+(* ===== CounterexampleObject: a summary-boxed disproof artifact =====
+   The equational dual of ProofObject, mirroring the Wolfram Function
+   Repository's FindEquationalCounterexample result shape:
+       CounterexampleObject[method, proposition, axioms,
+           <|"Setup" -> model, "Counterexample" -> witness, ...|>]
+   `co["Setup"]` follows FindFiniteModels' structure for a finite model and
+   carries the convergent rules for an infinite initial term algebra. *)
+
+$atpCeProps = {"Status", "Method", "Proposition", "Goal", "Axioms",
+    "Hypotheses", "Setup", "Model", "Counterexample", "Witness",
+    "NormalForms", "Domain", "FalsificationFunction",
+    "VerificationFunction", "Data", "Properties"};
+
+(* ----- self-certifying functions -----
+   The equational dual of ProofObject's GenerateFalsificationFunction /
+   GenerateVerificationFunction, mirroring the WFR FindEquationalCounterexample's
+   FalsificationFunction / VerificationFunction: a nullary Function that
+   evaluates the goal in the refuting model -- co["FalsificationFunction"][]
+   returns False (the goal fails there) -- or the axioms --
+   co["VerificationFunction"][] returns True (they hold there). *)
+
+atpCeKind[d_Association] := Which[
+    IntegerQ[d["Domain"]] && AssociationQ[d["Setup"]], "Finite",
+    ListQ[d["Setup"]],                                 "Rules",
+    AssociationQ[d["Setup"]],                          "Boolean",
+    True,                                              "Unknown"];
+
+(* Operator/constant interpretation rules from a finite-algebra Setup.
+   FindFiniteModels tables are 0-indexed; shift to 1-indexed so the
+   Part-indexing `table[[##]]&` and integer constants line up (the WFR form). *)
+atpCeFiniteRules[setup_Association] := Join[
+    Cases[Normal[setup],
+        (op_ -> t_List) :> (op -> With[{t1 = t + 1}, (t1[[##]] &)])],
+    Cases[Normal[setup],
+        (cn_ -> v_Integer) :> (cn -> v + 1)]];
+
+(* The universally-quantified axioms instantiated over the finite domain
+   {1, ..., k}: each ForAll body substituted at every assignment of its
+   variables to a domain element, ground axioms kept as-is.  Pre-expanded at
+   construction so the verification function's body is a literal conjunction of
+   ground formulas rather than a deferred Map. *)
+atpCeAxiomInstances[axioms_List, k_Integer] := Flatten @ Map[
+    ax |-> If[ MatchQ[ax, _ForAll],
+        With[{vars = Flatten[{ax[[1]]}], body = ax[[2]]},
+            Map[t |-> (body /. Thread[vars -> t]),
+                Tuples[Range[k], Length[vars]]]],
+        {ax}],
+    axioms];
+
+(* {lhs, rhs} of each axiom (ForAll stripped) -- the rewrite-rule case checks
+   both sides normalize to the same term. *)
+atpCeAxiomPairs[axioms_List] := Map[
+    ax |-> With[{body = If[ MatchQ[ax, _ForAll], ax[[2]], ax]},
+        {body[[1]], body[[2]]}],
+    axioms];
+
+(* The produced functions are self-contained and built only from System`
+   heads (ReplaceAll, ReplaceRepeated, And, SameQ, Apply) over the model
+   interpretation -- no private-context symbols, Slot `##` (as in the WFR's
+   `table[[##]]&`) carries operator arities. *)
+atpCeFalsificationFunction[CounterexampleObject[_, p_, _, d_Association]] :=
+    Switch[atpCeKind[d],
+        "Finite",
+            With[{prop = p, r = atpCeFiniteRules[d["Setup"]]},
+                Function[{}, prop /. r]],
+        "Boolean",
+            With[{prop = p, r = Normal[d["Setup"]]},
+                Function[{}, prop /. r]],
+        (* Initial term algebra: two ground terms are equal iff they share a
+           normal form, so the goal's Equal / Unequal evaluates as SameQ /
+           UnsameQ of the normalized sides (a symbolic `==` would not reduce). *)
+        "Rules",
+            With[{cmp = If[ MatchQ[p, _Equal], SameQ, UnsameQ],
+                  l = p[[1]], r = p[[2]], rl = d["RewriteRules"]},
+                Function[{}, cmp[l //. rl, r //. rl]]],
+        _, Missing["NotAvailable"]];
+
+atpCeVerificationFunction[CounterexampleObject[_, _, ax_, d_Association]] :=
+    Switch[atpCeKind[d],
+        "Finite",
+            With[{inst = atpCeAxiomInstances[ax, d["Domain"]],
+                  r = atpCeFiniteRules[d["Setup"]]},
+                Function[{}, And @@ (inst /. r)]],
+        "Boolean",
+            With[{hyps = ax, r = Normal[d["Setup"]]},
+                Function[{}, And @@ (hyps /. r)]],
+        "Rules",
+            With[{pairs = atpCeAxiomPairs[ax], rl = d["RewriteRules"]},
+                Function[{}, And @@ (((#1 //. rl) === (#2 //. rl) &) @@@ pairs)]],
+        _, Missing["NotAvailable"]];
+
+(co : CounterexampleObject[m_, p_, ax_, d_Association])[key_String] :=
+    Switch[key,
+        "Status",                    "Refuted",
+        "Method",                    m,
+        "Proposition" | "Goal",      p,
+        "Axioms" | "Hypotheses",     ax,
+        "Setup" | "Model",           Lookup[d, "Setup", Missing["NotAvailable"]],
+        "Counterexample" | "Witness", Lookup[d, "Counterexample", Missing["NotAvailable"]],
+        "NormalForms",               Lookup[d, "NormalForms", Missing["NotAvailable"]],
+        "Domain",                    Lookup[d, "Domain", Missing["NotAvailable"]],
+        "FalsificationFunction",     atpCeFalsificationFunction[co],
+        "VerificationFunction",      atpCeVerificationFunction[co],
+        "Data",                      d,
+        "Properties",                $atpCeProps,
+        _,                           Lookup[d, key, Missing["UnknownProperty", key]]];
+(CounterexampleObject[m_, p_, ax_, d_Association])[All] := d;
+
+(* A small static icon (a 3x3 operation-table grid with the falsifying cell
+   highlighted) -- self-contained boxes, no front end / Graph layout needed,
+   so it renders in a headless documentation build. *)
+$atpCeIcon := $atpCeIcon = With[{red = RGBColor[0.86, 0.21, 0.27]},
+    Graphics[
+        {EdgeForm[GrayLevel[0.6]], FaceForm[GrayLevel[0.93]],
+         Table[Rectangle[{i, j}, {i + 1, j + 1}], {i, 0, 2}, {j, 0, 2}],
+         FaceForm[red], Rectangle[{2, 0}, {3, 1}]},
+        ImageSize -> 22, PlotRangePadding -> 0]];
+
+CounterexampleObject /: MakeBoxes[
+        co : CounterexampleObject[m_, p_, ax_, d_Association], fmt_] :=
+    BoxForm`ArrangeSummaryBox[
+        CounterexampleObject,
+        co,
+        $atpCeIcon,
+        {BoxForm`SummaryItem[{"Method: ", m}],
+         BoxForm`SummaryItem[{"Goal: ", Short[p, 1]}]},
+        {BoxForm`SummaryItem[{"Domain: ",
+            Replace[Lookup[d, "Domain", Missing[]],
+                k_Integer :> Row[{k, " element", If[k == 1, "", "s"]}]]}],
+         BoxForm`SummaryItem[{"Model: ", Short[Lookup[d, "Setup", Missing[]], 2]}],
+         BoxForm`SummaryItem[{"Counterexample: ",
+            Short[Lookup[d, "Counterexample", Missing[]], 1]}]},
+        fmt,
+        "Interpretable" -> Automatic];
+
+(* ----- finite model from a congruence-closure quotient -----
+   Render the SAT quotient TSatEUF returns (a list of equivalence classes of
+   ground subterms) as a finite algebra in FindFiniteModels' structure: a
+   domain {0, ..., k-1} (one element per class), each n-ary operator as a
+   k^n Cayley table, each constant as its domain element.  The quotient is a
+   PARTIAL model (only the seen input combinations are determined); unseen
+   cells are completed with element 0, which is sound because the asserted
+   (dis)equalities mention only seen terms, so no completion can violate
+   them.  The result is a total finite model refuting the goal. *)
+
+(* term -> 0-based class index, as an Association for O(1) lookup. *)
+atpClassIndex[classes_List] :=
+    Association @ Flatten @ MapIndexed[
+        Function[{cls, pos}, (# -> pos[[1]] - 1) & /@ cls],
+        classes];
+
+(* The k^n Cayley table for operator f of arity n: entry [i1, ..., in]
+   (0-based domain elements) is the class of the seen compound f[t1, ..., tn]
+   whose argument classes are i1, ..., in, or 0 when no such compound was
+   seen.  Built flat over Tuples then reshaped row-major, matching
+   FindFiniteModels' `table[[i1 + 1, ..., in + 1]]` indexing. *)
+atpCayleyTable[f_, n_Integer, k_Integer, terms_List, idx_Association] :=
+    Module[{seen, dom = Range[0, k - 1]},
+        seen = Association @ Cases[terms,
+            c_ /; Head[c] === f && Length[c] === n :>
+                ((idx /@ (List @@ c)) -> idx[c])];
+        ArrayReshape[
+            Lookup[seen, Tuples[dom, n], 0],
+            ConstantArray[k, n]]];
+
+atpFiniteModelFromClasses[classes_List] :=
+    Module[{idx = atpClassIndex[classes], terms = Flatten[classes],
+            compounds, sig, model = <||>},
+        compounds = Select[terms, ! AtomQ[#] &];
+        sig = DeleteDuplicates[{Head[#], Length[#]} & /@ compounds];
+        Scan[(model[#[[1]]] = atpCayleyTable[#[[1]], #[[2]], Length[classes],
+            terms, idx]) &, sig];
+        Scan[(model[#] = idx[#]) &,
+            DeleteDuplicates @ Select[terms, AtomQ]];
+        <|"Model" -> model, "Domain" -> Length[classes], "Index" -> idx|>];
+
+(* A problem is ground when neither goal nor axioms carry a quantifier or a
+   pattern variable -- the precondition for the congruence-closure route. *)
+atpGroundProblemQ[goal_, axioms_] :=
+    FreeQ[{goal, axioms},
+        ForAll | Exists | _Pattern | _Blank | _BlankSequence | _BlankNullSequence];
+
+(* Ground entailment refutation via congruence closure: assert the hypotheses
+   together with the negated goal and run TSatEUF.  SAT means the goal is not
+   entailed and the quotient is a finite refuting model, returned as a
+   CounterexampleObject whose Setup is the FindFiniteModels-style algebra.
+   $Failed when the problem is non-ground or the entailment actually holds
+   (UNSAT). *)
+atpGroundCounterexample[goalIn_, hypsIn_List] :=
+    Module[{strip, goal, hyps, eqs, diseqs, res, fm, sides},
+        strip = # /. {Inactive[Equal][a_, b_] :> Equal[a, b],
+            Inactive[Unequal][a_, b_] :> Unequal[a, b]} &;
+        goal = strip[goalIn];
+        hyps = strip /@ hypsIn;
+        If[ ! atpGroundProblemQ[goal, hyps] ||
+            ! MatchQ[goal, _Equal | _Unequal], Return[$Failed]];
+        {eqs, diseqs} = collectLiterals[Append[hyps, negate[goal]]];
+        If[ eqs === $Failed, Return[$Failed]];
+        res = TSatEUF[eqs, diseqs];
+        If[ res["Status"] =!= "SAT", Return[$Failed]];
+        fm = atpFiniteModelFromClasses[res["Classes"]];
+        sides = List @@ goal;
+        CounterexampleObject["CongruenceClosure", Activate[goalIn],
+            Activate /@ hypsIn,
+            <|"Setup" -> fm["Model"], "Domain" -> fm["Domain"],
+              "Counterexample" ->
+                  AssociationThread[sides, Lookup[fm["Index"], sides, 0]]|>]];
+
+$atpFiniteModelCap = 64;
+
+(* Best-effort finite model for the saturated-TRS case: enumerate the initial
+   term algebra's carrier by closing the goal's ground constants under the
+   operators, normalizing at each step, until a fixpoint (finite model) or the
+   cap (treat as infinite -> decline, fall back to the rule presentation).
+   When it closes, the carrier IS the initial algebra and the operation tables
+   are exact, so the model is in FindFiniteModels structure -- the saturated
+   analog of the congruence-closure quotient. *)
+atpFiniteModelFromRules[rules_List, varSyms_List, seedTerms_List] :=
+    Module[{rl, normalize, ops, consts, dom, idxOf, model = <||>, changed = True, e},
+        rl = cplAsRule[#, varSyms] & /@ rules;
+        normalize = Function[t, t //. rl];
+        ops = DeleteDuplicates @ Cases[
+            Join[First /@ rules, Last /@ rules, seedTerms],
+            c_ /; (! AtomQ[c] && ! MatchQ[Head[c], List | Inactive]) :>
+                {Head[c], Length[c]}, {0, Infinity}];
+        consts = DeleteDuplicates @ Cases[seedTerms, a_ /; AtomQ[a], {0, Infinity}];
+        dom = DeleteDuplicates[normalize /@ consts];
+        If[ dom === {} || ops === {}, Return[$Failed]];
+        While[ changed && Length[dom] <= $atpFiniteModelCap,
+            changed = False;
+            Do[ Do[ e = normalize[op[[1]] @@ tup];
+                    If[ ! MemberQ[dom, e], AppendTo[dom, e]; changed = True],
+                   {tup, Tuples[dom, op[[2]]]}],
+               {op, ops}]];
+        If[ Length[dom] > $atpFiniteModelCap, Return[$Failed]];
+        idxOf = Association @ MapIndexed[# -> (#2[[1]] - 1) &, dom];
+        Scan[ Function[op,
+            model[op[[1]]] = ArrayReshape[
+                (idxOf[normalize[op[[1]] @@ #]] &) /@ Tuples[dom, op[[2]]],
+                ConstantArray[Length[dom], op[[2]]]]], ops];
+        Scan[ (model[#] = idxOf[normalize[#]]) &, consts];
+        <|"Model" -> model, "Domain" -> Length[dom], "Index" -> idxOf|>];
+
+atpSaturationCountermodel[bundle_] := Block[
+    {cRes = bundle["cRes"], enc = bundle["enc"], rules, varSyms, conjPair,
+     normalize, nfL, nfR, goal, axioms, fm, data},
+    If[ !AssociationQ[cRes] || cRes["Status"] =!= 4, Return[$Failed]];
+    rules = cRes["MainRules"];
+    conjPair = enc["ConjPair"];
+    varSyms = Replace[cRes["VarSyms"], Except[_List] -> {}];
+    If[ !ListQ[rules] || !ListQ[conjPair] || Length[conjPair] =!= 2,
+        Return[$Failed]];
+    (* Sound-gate: bail unless the whole saturated set is a terminating TRS
+       (no unorientable equations). *)
+    If[ !AllTrue[rules, atpRuleSizeReducingQ[#, varSyms] &], Return[$Failed]];
+    normalize = Function[t, t //. (cplAsRule[#, varSyms] & /@ rules)];
+    {nfL, nfR} = normalize /@ conjPair;
+    If[ nfL === nfR, Return[$Failed]];  (* joinable => goal holds; decline *)
+    goal = Activate @ holdToInactive[enc["ConjHCRaw"]];
+    axioms = Activate /@ holdToInactive /@ enc["AxHCsRaw"];
+    (* "when possible" build a finite model in FindFiniteModels structure;
+       else carry the convergent rules as the (infinite initial algebra). *)
+    fm = atpFiniteModelFromRules[rules, varSyms,
+        DeleteDuplicates @ Cases[conjPair, _?AtomQ, {0, Infinity}]];
+    data = If[ AssociationQ[fm],
+        <|"Setup" -> fm["Model"], "Domain" -> fm["Domain"],
+          "NormalForms" -> {nfL, nfR},
+          "Counterexample" -> AssociationThread[conjPair,
+              Lookup[fm["Index"], {nfL, nfR}]]|>,
+        <|"Setup" -> atpMainRulesLemmas[cRes],
+          "NormalForms" -> {nfL, nfR},
+          (* the patternized rewrite rules drive the Falsification /
+             Verification functions for the infinite initial-algebra case. *)
+          "RewriteRules" -> (cplAsRule[#, varSyms] & /@ rules),
+          "Counterexample" -> AssociationThread[conjPair, {nfL, nfR}]|>];
+    CounterexampleObject["SaturationNormalForm", goal, axioms, data]
+];
+
 (* Project a finished run (the prove/completion bundle) onto a return
    spec.  `bundle` carries "enc", "cRes", "ProofObject", and the lazily
    computed "RelevantAxioms" thunk.  A single String returns its value
@@ -3848,6 +4171,21 @@ atpReturnValue[bundle_, "RawTrace"] := bundle["cRes"]["Trace"];
 atpReturnValue[bundle_, "Statistics"] := atpStatisticsAssoc[bundle["cRes"]];
 atpReturnValue[bundle_, "Status"] :=
     atpReturnStatus[bundle["cRes"]["Status"]];
+(* "Counterexample" -> a CounterexampleObject disproving the goal, else
+   $Failed.  The equational dual of "ProofObject": where "ProofObject" answers
+   "is the goal derivable?", "Counterexample" answers "is the goal refutable?"
+   off the same run.  A fully GROUND problem is decided by congruence closure
+   (a complete decision procedure, and the quotient is a clean finite model in
+   FindFiniteModels structure); a quantified problem falls to the saturated-
+   completion route. *)
+atpReturnValue[bundle_, "Counterexample"] :=
+    Module[{enc, goal, axioms, gc},
+        enc = bundle["enc"];
+        goal = holdToInactive[enc["ConjHCRaw"]];
+        axioms = holdToInactive /@ enc["AxHCsRaw"];
+        gc = If[ atpGroundProblemQ[goal, axioms],
+            atpGroundCounterexample[goal, axioms], $Failed];
+        If[ gc =!= $Failed, gc, atpSaturationCountermodel[bundle]]];
 (* "AppliedMethod" -> the Method config that produced this bundle.
    For a portfolio run, this is the winning schedule entry; for a
    single-config or completion run, the only entry tried.  Useful for
@@ -3980,19 +4318,31 @@ TFindProof[thm_String, theory_String,
                ProcessProofObject.wl in the alphabetical autoloader
                order, so the symbol is unresolved when this RHS is
                first parsed.  Without qualification it would land in
-               THVMLink`ATP`Private`. *)
+               THVMLink`ATP`Private`.  Filter against the BUILDER's
+               option list (TVampireProofObject etc.), which
+               includes the CLI wrapper's options PLUS the
+               builder-only ParseFormulas. *)
             Throw[THVMLink`ATP`TVampireProofObject[theory, thm,
-                FilterRules[{opts}, Options[THVMLink`ATP`TVampireProof]]],
+                FilterRules[{opts},
+                    Options[THVMLink`ATP`TVampireProofObject]]],
                 "TATPError"]
         ];
         If[ methodOpt === "TweeProcess",
             Throw[THVMLink`ATP`TTweeProofObject[theory, thm,
-                FilterRules[{opts}, Options[THVMLink`ATP`TTweeProof]]],
+                FilterRules[{opts},
+                    Options[THVMLink`ATP`TTweeProofObject]]],
                 "TATPError"]
         ];
         If[ methodOpt === "WaldmeisterProcess",
             Throw[THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
-                FilterRules[{opts}, Options[THVMLink`ATP`TWaldmeisterProof]]],
+                FilterRules[{opts},
+                    Options[THVMLink`ATP`TWaldmeisterProofObject]]],
+                "TATPError"]
+        ];
+        If[ methodOpt === "EproverProcess",
+            Throw[THVMLink`ATP`TEproverProofObject[theory, thm,
+                FilterRules[{opts},
+                    Options[THVMLink`ATP`TEproverProofObject]]],
                 "TATPError"]
         ];
         cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
@@ -4105,28 +4455,61 @@ tptpInternalize[expr_] :=
     };
 
 tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
-    imported["Conjecture"] === None,
-    TFindProof[tptpInternalize /@ imported["Axioms"], opts],
-    TFindProof[tptpInternalize @ imported["Conjecture"],
-        tptpInternalize /@ imported["Axioms"], opts]
+    "SMT" === OptionValue[TFindProof, {opts}, Method],
+    (* Ground SMT path: the congruence-closure dispatcher checks groundness
+       (rejecting variable-bearing clauses with TFindProof::nonground) and
+       decides over the raw TPTP terms, no Symbol internalization. *)
+    tptpDispatchSMT[imported],
+    If[ imported["Conjecture"] === None,
+        TFindProof[tptpInternalize /@ imported["Axioms"], opts],
+        TFindProof[tptpInternalize @ imported["Conjecture"],
+            tptpInternalize /@ imported["Axioms"], opts]]
 ]
 
 (* The proving entry: optional LAST positional returnSpec.  Without it,
    the bare ProofObject is returned (backward compatible); with it, the
    run is projected onto the requested introspectives. *)
 (* Method -> "SMT" short-circuit: route ground equational inputs to the
-   QF_UF congruence-closure decider in Kernel/ATP/SMT.wl.  Returns the
-   SMT ProofObject-shaped Association directly (Method,Witness,...).
-   The guard form -- OptionValue[TFindProof, {opts}, Method] -- is the
-   reliable WL idiom for option-keyed dispatch: a bare OptionValue
-   inside `/;` does not always see the supplied opts. *)
+   QF_UF congruence-closure decider (atpSmtEntail, Kernel/ATP/SMT.wl).
+   Returns the SMT decision Association on a proved entailment and a
+   CounterexampleObject on a refuted one.  The guard form --
+   OptionValue[TFindProof, {opts}, Method] -- is the reliable WL idiom for
+   option-keyed dispatch: a bare OptionValue inside `/;` does not always see
+   the supplied opts. *)
 TFindProof[conjecture_, axioms_List, opts:OptionsPattern[]] /;
         ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
-    TFindProofSMT[conjecture, atpFlattenAxioms[axioms]];
+    atpSmtEntail[conjecture, atpFlattenAxioms[axioms]];
 TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] /;
         ("SMT" === OptionValue[TFindProof, {opts}, Method]) :=
-    TFindProofSMT[conjecture, atpFlattenAxioms[axioms]];
+    atpSmtProject[atpSmtEntail[conjecture, atpFlattenAxioms[axioms]], returnSpec];
+
+(* Project an atpSmtEntail result (a "Proved" decision Association or a
+   refuting CounterexampleObject) onto a TFindProof return spec. *)
+atpSmtProject[r_, "Counterexample"] :=
+    If[ Head[r] === CounterexampleObject, r, $Failed];
+atpSmtProject[r_, "Status"] := Which[
+    Head[r] === CounterexampleObject, "Refuted",
+    AssociationQ[r] && KeyExistsQ[r, "Status"], r["Status"],
+    True, "Failed"];
+atpSmtProject[r_, _] := r;
+
+(* A ground Boolean combination of (in)equality atoms (And / Or / Implies /
+   ...) is not unit-equational, so the completion engine cannot consume it.
+   Route it to the lazy DPLL(T) decider automatically -- so the unified
+   surface TFindProof[goal, hyps, "Counterexample"] works for Boolean goals
+   without an explicit Method -> "SMT". *)
+atpBooleanGoalQ[goal_] :=
+    MatchQ[Head[goal],
+        And | Or | Not | Implies | Equivalent | Xor | Nand | Nor | Xnor] &&
+    FreeQ[goal, _Pattern | _Blank | _BlankSequence | _BlankNullSequence |
+        ForAll | Exists];
+TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List,
+        opts : OptionsPattern[]] :=
+    atpSmtEntail[goal, atpFlattenAxioms[axioms]];
+TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List,
+        returnSpec_?atpReturnSpecQ, opts : OptionsPattern[]] :=
+    atpSmtProject[atpSmtEntail[goal, atpFlattenAxioms[axioms]], returnSpec];
 
 (* Strip Inactive[Equal] / Inactive[Unequal] from conjecture + axioms
    so a `TFindProof[..., "Lemmas"]` round-trip works (Lemmas spec
@@ -4155,7 +4538,7 @@ atpMaybeInternalizeTPTP[expr_] := If[
     tptpInternalize[expr], expr];
 
 (* Composed normalizers used by every user-facing entry (TFindProof,
-   TRelevantAxioms, TFindProofSMT).  Iter 71 consolidation. *)
+   TRelevantAxioms). *)
 atpNormalizeConj[c_] :=
     atpMaybeInternalizeTPTP[atpStripInactive[c]];
 atpNormalizeAxioms[ax_List] :=
