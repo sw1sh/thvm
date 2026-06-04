@@ -126,41 +126,12 @@ The default `make` target does not rebuild the WL paclet dynamic library; the ho
 
 ## Hero Image
 
-A small symbolic-tensor reduction visualized as an IC string diagram - lambda
-application binds the input tensor into the body, the UOp graph stays heap-
-resident, and the materializer rewrites in place:
+A single luminous symbolic graph morphs from an interaction-net string diagram on the left, through a stack of translucent tensor planes in the middle, into an equational rewrite proof graph on the right - the three computational surfaces THVMLink unifies behind one symbolic graph:
 
 ```wl
-With[{
-        bg     = LightDarkSwitched[White, GrayLevel[0.12]],
-        accent = StandardBlue,
-        tense  = StandardOrange,
-        op     = StandardGreen,
-        wire   = LightDarkSwitched[GrayLevel[0.3], GrayLevel[0.8]]
-    },
-    Framed[
-        Column[{
-            Style["THVMLink", 30, Bold, FontFamily -> "Source Sans Pro"],
-            Style[
-                "Interaction nets, tensors, autodiff, ATP - one symbolic graph.",
-                13, FontFamily -> "Source Sans Pro"
-            ],
-            Spacer[18],
-            Graph[
-                {1 -> 2, 1 -> 3, 2 -> 4, 2 -> 5, 4 -> 6, 5 -> 6, 6 -> 7, 3 -> 7},
-                VertexLabels    -> {1 -> "LAM", 2 -> "APP", 3 -> "TEN", 4 -> "UOP_ADD", 5 -> "UOP_MUL", 6 -> "UOP_REDUCE", 7 -> "TEN"},
-                VertexStyle     -> {1 -> accent, 2 -> accent, 3 -> tense, 4 -> op, 5 -> op, 6 -> op, 7 -> tense},
-                EdgeStyle       -> Directive[wire, Thickness[0.005]],
-                VertexSize      -> 0.45,
-                GraphLayout     -> "LayeredDigraphEmbedding",
-                ImageSize       -> {520, 280},
-                Background      -> None
-            ]},
-            Alignment -> Center, Spacings -> 0.6
-        ],
-        Background  -> bg, FrameMargins -> 30, FrameStyle -> None,
-        RoundingRadius -> 16, ImageSize -> {Automatic, 500}
-    ]
+ImageResize[
+    Import[FileNameJoin[{$THVMLinkDocsDir, "assets", "hero.png"}]],
+    {1500, Automatic}
 ]
 ```
 
