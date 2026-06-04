@@ -144,6 +144,72 @@ int main(void) {
     CHECK(verified == matched);
   }
 
+  // ---- T4: record-mode parity + trace emission -------------------
+  //
+  // atp_rewrite_normalize_ft_record must (i) return the same NF as
+  // the bare variant and (ii) emit one TRACE_NORM_STEP per fire,
+  // chained off the caller's chain_tail.  Mirrors the term-side
+  // atp_rewrite_normalize_record contract.
+  TEST_BEGIN("ft_norm/record-mode-emits-trace");
+  {
+    // Use a KBO config that strictly orients label 1 > label 2 (so
+    // `a > b` and the equation becomes the orientable rule a -> b).
+    // Without a precedence the engine would fall back to unorientable
+    // dispatch and the Term-side normalizer's order-decrease guard
+    // would block the rewrite -- diverging from the FT-side
+    // first-match-wins semantics (which is what record-mode mirrors).
+    u32 weights[]    = {0u, 1u, 1u, 1u, 1u, 1u, 1u, 1u};
+    u32 precedence[] = {0u, 8u, 1u, 2u, 3u, 4u, 5u, 6u};
+    KboConfig cfg = (KboConfig){
+      .weights     = weights,
+      .precedence  = precedence,
+      .n_labels    = 8,
+      .var_weight  = 1,
+    };
+    AtpState *s = thvm_atp_init(&cfg, 64);
+    Term a = term_new_ctr(1u, NULL, 0u);
+    Term b = term_new_ctr(2u, NULL, 0u);
+    AtpAddedRange added = thvm_atp_orient_and_add(s, a, b);
+    CHECK(added.count >= 1u);
+    CHECK(s->n_rules >= 1u);
+
+    Term kids[2] = {a, a};
+    Term subj = term_new_ctr(7u, kids, 2u);
+
+    AtpFt *arena = (AtpFt *)s->ft_arena_ptr;
+    // Term-side NF is the canonical reference -- T1-T3 above already
+    // proved the bare FT path matches it; using the Term reference
+    // for T4 too lets this case verify the record-path NF in isolation
+    // (without the bare path mutating shared FT cells first).
+    Term tnf = atp_rewrite_normalize(s, subj, s->lhs, s->rhs, s->n_rules, 64u);
+    AtpFtCell *tnf_ft = ft_from_term(arena, tnf, 0);
+
+    u32 trace_before = s->n_trace;
+    u32 chain_tail   = ATP_TRACE_NONE;
+    AtpFtCell *fsubj_rec = ft_from_term(arena, subj, 0);
+    // eq_other is recorded into each NORM_STEP's (lhs, rhs) pair via
+    // `side`; the normalize loop itself doesn't read it.  Use `b`
+    // here -- same shape contract as the term-side
+    // atp_rewrite_normalize_record.
+    AtpFtCell *fnf_rec = atp_rewrite_normalize_ft_record(
+        s, fsubj_rec, 64u, b, /*side=*/0u, &chain_tail);
+
+    // (i) NF parity (record-path NF equals Term-path NF).
+    CHECK(ft_eq(fnf_rec, tnf_ft));
+    // (ii) Two NORM_STEP entries emitted (a -> b fired twice).
+    CHECK(s->n_trace == trace_before + 2u);
+    // The chain_tail must now point to the LAST emitted step.
+    CHECK(chain_tail == s->n_trace - 1u);
+    // Each emitted entry must be a TRACE_NORM_STEP head.
+    for (u32 ti = trace_before; ti < s->n_trace; ti++) {
+      Term te = s->trace[ti];
+      CHECK_EQ(term_tag(te), TAG_CTR);
+      CHECK_EQ(term_ext(te), TRACE_NORM_STEP);
+    }
+
+    thvm_atp_free(s);
+  }
+
   TEST_REPORT();
   return 0;
 }

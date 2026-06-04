@@ -39,6 +39,16 @@
 // `ft_match` / `ft_subst_reset` keep their natural typed signatures.
 extern int  ft_eq      (const AtpFtCell *x, const AtpFtCell *y);
 
+// Forward decl for the trace-push helper -- defined in src/atp/_.c
+// further down the same TU.  ft_norm.c is included BEFORE the helper
+// (the include ordering wires _.c's later trace machinery), so a
+// matching `static` forward decl here is what the record-mode splice
+// loop below references.
+static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
+                                    Term lhs, Term rhs,
+                                    u8 side, u8 fwd,
+                                    const u8 *pos, u8 pos_len);
+
 extern AtpFtCell *ft_splice(AtpFt          *a,
                             AtpFtCell      *root,
                             AtpFtCell      *parent,
@@ -176,8 +186,80 @@ static int find_redex_ft_via_ri(AtpState        *s,
 }
 #endif
 
+// --- Position helper -------------------------------------------------
+//
+// Compute the child-index path from `root` to `target` via FT child-walk
+// semantics: the first child of a CTR cell is `cell->next`, and the next
+// sibling of a child is `child->end->next`.  Variables and consts are
+// leaves.
+//
+// On hit, fills `pos[0..*pos_len)` and returns 1.  On miss, returns 0.
+// Caller-owned `pos` of size at least ATP_PROOF_MAX_DEPTH; if the path
+// would exceed the cap, returns 0 (caller can fall back to a "no
+// recording" step -- but in practice ATP terms stay shallow under the
+// completion cap, so the cap is informational).
+static int ft_find_position(AtpFtCell *root, AtpFtCell *target,
+                            u8 *pos, u8 *pos_len) {
+  if (root == target) { *pos_len = 0u; return 1; }
+  if (root == NULL || target == NULL) return 0;
+  if ((root->sym & WF_VAR_BIT) != 0u) return 0;   // leaves don't host children
+  u16 arity = root->arity;
+  if (arity == 0u) return 0;
+  // Recursive DFS over children.  Each child's head cell is root->next
+  // for child 0, and child[i+1] = child[i]->end->next.
+  AtpFtCell *child = root->next;
+  for (u16 i = 0; i < arity; i++) {
+    if (child == NULL) return 0;
+    if (*pos_len >= ATP_PROOF_MAX_DEPTH) return 0;
+    pos[*pos_len] = (u8)i;
+    (*pos_len)++;
+    if (ft_find_position(child, target, pos, pos_len)) return 1;
+    (*pos_len)--;
+    child = (child->end != NULL) ? child->end->next : NULL;
+  }
+  return 0;
+}
+
+// Shared internal entry: optional record-mode parameters.  When
+// `record` is 0, behaves exactly like the historic `atp_rewrite_
+// normalize_ft` (zero overhead -- no Term conversions, no trace
+// pushes).  When `record` is 1, after each successful splice converts
+// the new root via ft_to_term and emits a TRACE_NORM_STEP entry
+// chained from `*chain_tail` with the rule's TRACE_ORIENT id; the
+// (side, eq_other) pair matches the term-side
+// atp_rewrite_normalize_record contract.
+extern Term ft_to_term(const AtpFtCell *x);
+static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
+                                                u32 step_cap, int record,
+                                                Term eq_other, u8 side,
+                                                u32 *chain_tail);
+
 AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap);
 AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
+  return atp_rewrite_normalize_ft_impl(s, t, step_cap, /*record=*/0,
+                                       (Term){0}, 0u, NULL);
+}
+
+// Record-mode entry.  Mirrors atp_rewrite_normalize_record's contract
+// on the term side: each FT splice emits one TRACE_NORM_STEP chained
+// off `*chain_tail`, advancing the tail.  `eq_other` is the unchanged
+// side of the equation we're normalizing (Term form); `side` is 0 for
+// the LHS, 1 for the RHS.  The new tail is left in `*chain_tail`.
+// Returns the FT NF (same allocator semantics as the bare variant).
+AtpFtCell *atp_rewrite_normalize_ft_record(AtpState *s, AtpFtCell *t,
+                                           u32 step_cap, Term eq_other,
+                                           u8 side, u32 *chain_tail);
+AtpFtCell *atp_rewrite_normalize_ft_record(AtpState *s, AtpFtCell *t,
+                                           u32 step_cap, Term eq_other,
+                                           u8 side, u32 *chain_tail) {
+  return atp_rewrite_normalize_ft_impl(s, t, step_cap, /*record=*/1,
+                                       eq_other, side, chain_tail);
+}
+
+static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
+                                                u32 step_cap, int record,
+                                                Term eq_other, u8 side,
+                                                u32 *chain_tail) {
   if (t == NULL) return NULL;
   if (s->n_rules == 0u) return t;
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
@@ -232,9 +314,46 @@ AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
     hit = find_redex_ft(s, t, &parent, &redex, &rule, &subst);
 #endif
     if (!hit) break;
+    // Record-mode metadata.  Compute the redex's position BEFORE
+    // splice -- after splice, the redex cell is freed and its DFS
+    // path no longer exists.  Hoisted inside `if (record)` so the
+    // bare path pays NOTHING (no stack alloc, no DFS): the
+    // record_norm_steps=off perf contract.
+    u8  pos[ATP_PROOF_MAX_DEPTH];
+    u8  pos_len  = 0u;
+    int have_pos = 0;
+    if (record) {
+      have_pos = ft_find_position(t, redex, pos, &pos_len);
+    }
     AtpFtCell *rhs_tmpl = s->rhs_ft[rule];
     AtpFtCell *new_root = ft_splice(a, t, parent, redex, rhs_tmpl, &subst);
     if (new_root != NULL) t = new_root;
+    if (record) {
+      // Convert the post-step FT root to a Term so the TRACE_NORM_STEP
+      // entry carries the same shape the WL extractor expects -- the
+      // term-side normalize_record emits Term children too.  Cost is
+      // O(|t|) per step; in practice ATP completion terms stay shallow
+      // and the chain is short for joined CPs (dropped) -- the larger
+      // cost is the trace push itself.
+      Term step_term = ft_to_term(t);
+      // FT-side rules fire forward only (find_redex_ft tries `lhs_ft`
+      // only -- never the rhs_ft side).
+      u8  fwd        = 1u;
+      u32 rule_trace = (rule < s->n_rules) ? s->r_trace[rule]
+                                           : ATP_TRACE_NONE;
+      Term step_lhs = (side == 0u) ? step_term : eq_other;
+      Term step_rhs = (side == 0u) ? eq_other  : step_term;
+      // ft_find_position returns 0 only when the path exceeds
+      // ATP_PROOF_MAX_DEPTH=32 -- generous for completion terms.  On
+      // overflow we still push a step but with pos_len=0; the WL
+      // extractor reads an empty path as "at the root" (a follow-up
+      // can extend the cap if profiling shows overflow rates).
+      if (!have_pos) pos_len = 0u;
+      u32 ti = atp_trace_push_norm_step(s, *chain_tail, rule_trace,
+                                        step_lhs, step_rhs, side, fwd,
+                                        pos, pos_len);
+      if (ti != ATP_TRACE_NONE) *chain_tail = ti;
+    }
   }
   return t;
 }
