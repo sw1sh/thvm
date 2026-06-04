@@ -174,13 +174,27 @@ WL_ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_GROUND_JOIN)),-DATP_CP_GROUND_JO
 # goal-check on theories whose axiom set surfaces an AC top symbol.
 WL_ATP_DEFINES  += -DTHVM_ATP_AC
 
-# AtpFt flatterm-native infrastructure shipped in the paclet for opt-in
-# acceleration of the normalizer + KBO comparison hot paths.  Without
-# the env knob the engine stays on Term recursion (byte-identical to a
-# non-FT build).  THVM_ATPFT_NORM=1 flips the runtime check so the AtpFt
-# verdict is authoritative for normalize/KBO.  Bench evidence:
-# +55% steps/sec on test_atp_wolfram_bench andassoc (9ab38b58); regression
-# clean on bin/test_atp_ft_norm 135624/135624 in both env modes.
+# AtpFt flatterm-native infrastructure.  Stage 4 (RULES) is now baked
+# in as engine-default storage: every atp_push_rule writes a parallel
+# AtpFtCell mirror into s->lhs_ft[]/s->rhs_ft[] in lockstep with the
+# Term-side rule slot, and every rule-array mutation path (grow,
+# soft-delete, set_goal, interreduce compaction, swap, free) syncs the
+# mirror via the helpers in the THVM_ATPFT_RULES blocks of src/atp/_.c.
+# All compile-time ATPFT readers (NORM verdict, RI discrim descend,
+# CPQ queue mirror, match) gate on RULES; without it they #error out.
+# Runtime activation of the read-side accelerators stays env-knob:
+# THVM_ATPFT_NORM=1 routes joinability verdicts through ft_norm,
+# THVM_ATPFT_RI=1 routes find-redex through the FT discrim descent.
+# OFF the env knobs the mirror is pure storage -- the Term path is
+# byte-identical to a no-FT build, modulo a ~720KB slab pool per
+# AtpState.  Defaulting ATPFT_RULES on lets the WL paclet and the C
+# test binaries share one configuration; the env knobs above stay the
+# user-visible toggles.  Bench evidence: +55% steps/sec on
+# test_atp_wolfram_bench andassoc (9ab38b58); regression clean on
+# bin/test_atp_ft_norm 135624/135624 in both env modes.
+ATP_DEFINES     += -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+                   -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+                   -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM
 WL_ATP_DEFINES  += -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
                    -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
                    -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM

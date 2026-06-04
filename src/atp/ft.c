@@ -13,9 +13,14 @@
 // through the same encoding (see WF_VAR_BIT in src/wmfpa/wmfpa.h:54;
 // reused here directly via the named macros).
 //
-// Gated on THVM_ATPFT_CONVERT -- Stage 2 has no live callers.
+// Gated on THVM_ATPFT_CONVERT.  src/atp/_.c pulls this TU in under
+// THVM_ATPFT_RULES (default-on); the stage-2 standalone test
+// (tests/test_ft.c) also includes it directly.  The
+// ATPFT_FT_C_INCLUDED guard makes the second textual inclusion a no-op.
 
 #ifdef THVM_ATPFT_CONVERT
+#ifndef ATPFT_FT_C_INCLUDED
+#define ATPFT_FT_C_INCLUDED 1
 
 #include "../thvm.h"
 #include "ft.h"
@@ -389,4 +394,5 @@ u32 atp_pretty_ft(const AtpFtCell *x, char *buf, u32 cap) {
   return atp_pretty_ft_rec(x, buf, cap);
 }
 
+#endif // !ATPFT_FT_C_INCLUDED
 #endif // THVM_ATPFT_CONVERT

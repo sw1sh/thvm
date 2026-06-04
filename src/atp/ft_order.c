@@ -23,9 +23,13 @@
 // lpo_flat_rec_compute wiring locally with the same epoch bump and
 // var-set incomparability check).
 //
-// Gated on THVM_ATPFT_CONVERT (same envelope as ft.c).
+// Gated on THVM_ATPFT_CONVERT (same envelope as ft.c).  Double-include
+// guard mirrors ft_alloc.c / ft.c: tests/test_ft_order.c #includes this
+// directly, and src/atp/_.c reaches it indirectly through ft.c.
 
 #ifdef THVM_ATPFT_CONVERT
+#ifndef ATPFT_FT_ORDER_C_INCLUDED
+#define ATPFT_FT_ORDER_C_INCLUDED 1
 
 #include "../thvm.h"
 #include "ft.h"
@@ -219,4 +223,5 @@ fn LpoCmp thvm_lpo_ft(const AtpFtCell *a, const AtpFtCell *b,
   return lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
 }
 
+#endif // !ATPFT_FT_ORDER_C_INCLUDED
 #endif // THVM_ATPFT_CONVERT
