@@ -36,19 +36,17 @@
 // --- env knob ------------------------------------------------------
 // Default ON.  HAND_CODED_OPTS=0 disables; NOOPT=1 (tinygrad's
 // inverse-sense knob) also disables and wins if both set.
-// Memoised: -1 = uninitialised, 0 = off, 1 = on.
-static int HAND_CODED_OPTS_ENABLED = -1;
+// Read live (not memoised): the check sits on the per-kernel hand-opt
+// entry (two cold call sites below), so re-reading getenv is free, and
+// it lets a long-lived runtime toggle NOOPT mid-process -- e.g. the
+// kernel_opts.wlt suite flips NOOPT=1 to inspect the bare axis scaffold.
 static int hand_coded_opts_enabled(void) {
-  if (HAND_CODED_OPTS_ENABLED < 0) {
-    char const *noopt = getenv("NOOPT");
-    if (noopt != NULL && noopt[0] != '\0' && noopt[0] != '0') {
-      HAND_CODED_OPTS_ENABLED = 0;            // tinygrad NOOPT=1
-    } else {
-      char const *e = getenv("HAND_CODED_OPTS");
-      HAND_CODED_OPTS_ENABLED = (e != NULL && e[0] == '0') ? 0 : 1;
-    }
+  char const *noopt = getenv("NOOPT");
+  if (noopt != NULL && noopt[0] != '\0' && noopt[0] != '0') {
+    return 0;                                 // tinygrad NOOPT=1
   }
-  return HAND_CODED_OPTS_ENABLED;
+  char const *e = getenv("HAND_CODED_OPTS");
+  return (e != NULL && e[0] == '0') ? 0 : 1;
 }
 
 // Integer env reader; falls back to `dflt` if unset / unparseable.

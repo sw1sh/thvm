@@ -12,6 +12,14 @@
      - MakeBoxes summary boxes render for both TOpt and TKernelOpts
      - applied_opts log reflects every TKernelApplyOpt invocation *)
 
+(* This suite exercises the bare axis scaffold + the apply-opt machinery.
+   tinygrad's hand_coded_optimizations (hand_opts.c) is ON by default and
+   pre-UPCASTs even tiny kernels, which masks the clean baseline these tests
+   assert -- so the whole file runs with NOOPT=1.  hand_opts itself is
+   covered by the faithful-CPU parity path, not here.  Restored at EOF. *)
+$kOptsOldNoopt = Environment["NOOPT"];
+SetEnvironment["NOOPT" -> "1"];
+
 (* === TOpt construction === *)
 
 VerificationTest[
@@ -982,3 +990,8 @@ VerificationTest[
     {TOpt["UNROLL", 0, 4], TOpt["UNROLL", 0, 3]},
     TestID -> "kernel-opts/applied-log-chronological"
 ]
+
+(* restore NOOPT to its pre-suite value (see top-of-file note) *)
+If[ StringQ[$kOptsOldNoopt],
+    SetEnvironment["NOOPT" -> $kOptsOldNoopt],
+    SetEnvironment["NOOPT" -> ""]]
