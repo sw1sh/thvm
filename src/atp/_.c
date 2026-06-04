@@ -9168,7 +9168,12 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   //                                 with a diagnostic.
   static int ft_norm_mode = -1;
   static int ft_norm_verify = -1;
-  if (ft_norm_mode   < 0) ft_norm_mode   = atp_env_on("THVM_ATPFT_NORM");
+  // Default-ON: THVM_ATPFT_NORM=0 (explicit) falls back to Term-only for
+  // A/B; anything else (unset, "1", "yes") routes the verdict through the
+  // FT path.  Mirrors the port/atpft-norm-default change (8fe431db);
+  // fix/ft-splice-unbound resolves the verify-mode mismatch that
+  // previously made this flip unsafe.
+  if (ft_norm_mode   < 0) ft_norm_mode   = atp_env_off("THVM_ATPFT_NORM");
   if (ft_norm_verify < 0) ft_norm_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
   if (ft_norm_mode || ft_norm_verify) {
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;
