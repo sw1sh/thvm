@@ -163,14 +163,6 @@ Pop (`thvm_atp_select_cp`, `src/atp/_.c:6304`) decodes via
 (FIFO/random/goal/K-D) replace the min-pop with a linear scan over
 the queue.
 
-### CP-graph mirror
-
-An optional `cp_graph` Term-DAG mirror (`#ifdef ATP_CP_GRAPH`,
-`src/atp/_.c:952..1026`) re-decodes every queued CP into a Term
-node and bundles them into a `CpSet[...]` CTR.  Used by some
-classifier / learning hooks.  Re-built after every queue mutation
-via `atp_cp_graph_sync`.
-
 ### AtpFt CP queue mirror
 
 Under `THVM_ATPFT_CPQ`, a parallel `AtpCpEntry[]` array (`src/atp/
@@ -386,9 +378,7 @@ Set via `-D` at compile time (`CFLAGS` or per-target Makefile rule).
 | `THVM_ATP_AC`                   | AC declarations + canonical form + AC-eq trivial-join hook    |
 | `ATP_RULE_INDEX`                | discrim tree over rule LHSs (default on)                       |
 | `ATP_FV_INDEX`                  | FV index over queued CPs (default on)                          |
-| `ATP_CP_GRAPH`                  | Term-DAG CP mirror (optional debug / classifier)               |
 | `ATP_CP_GROUND_JOIN`            | ground-joinability redundancy filter                            |
-| `ATP_CP_CLASSIFY`               | per-CP priority classifier hook                                 |
 | `ATP_VAR_NORM`                  | canonicalize variable ids at CP push time                       |
 | `ATP_ORDERED_REWRITE`           | order-gated rewriting (vs the linear scan)                      |
 | `ATP_FLATTERM_SELFCHECK`        | per-call flatterm-vs-tree NF assertion (build-only)             |
@@ -591,7 +581,7 @@ to zero.
 `thvm_atp_gc_collect` (`src/atp/_.c:4434`) is the engine's GC root
 provider.  It gathers Term roots — `s->lhs[]`, `s->rhs[]`,
 `s->r_dead_*_save[]`, `s->goal_*`, `s->trace[]`, witness bindings,
-CP-graph mirror, MNF colored nodes — into a Cheney evacuation
+MNF colored nodes — into a Cheney evacuation
 array, which the collector relocates.  Writeback stores the
 relocated Terms back.  Term-keyed memos (`g_kbo_wmemo`,
 `g_lpo_memo`) are invalidated; structural-hash memos
@@ -641,7 +631,7 @@ touch this file's surface:
 * **Legacy mirror retire.** The Term-side `atp_dt_*` and
   `acp_unpack_term` paths still run alongside the FT paths.  Once
   every reader of `cp_packed[]` migrates to `cp_packed_ft[]`
-  (FV-index + CP-graph mirror), the byte queue can retire.
+  (FV-index), the byte queue can retire.
 * **Unorient-step waste.** 96% of `atp_ft_unorient_step` calls on
   saturating workloads return no fire.  This is a CP-selection
   / search-strategy problem; addressing it is in roadmap.md.

@@ -166,7 +166,7 @@ int main(void) {
   if (csv == NULL) { thvm_free(); return 1; }
   fprintf(csv, "file,mode,cp_weight,status,wall_ms,step,n_rules,n_trace,"
                "drop_joinable,drop_connected,drop_rule_subsumed,"
-               "drop_queue_subsumed,drop_classified\n");
+               "drop_queue_subsumed\n");
 
   // Collect .pr file names from tests/data/atp/.
   DIR *dir = opendir("tests/data/atp");
@@ -241,15 +241,14 @@ int main(void) {
         mode_label[0] = path_names[mc][0];
         mode_label[1] = path_names[mr][0];
         mode_label[2] = 0;
-        fprintf(csv, "%s,%s,%u,%s,%.3f,%u,%u,%u,%u,%u,%u,%u,%u\n",
+        fprintf(csv, "%s,%s,%u,%s,%.3f,%u,%u,%u,%u,%u,%u,%u\n",
                 files[i], mode_label, bench_cp_weight_mode(),
                 st_str, wall_ms,
                 atp->step, atp->n_rules, atp->n_trace,
                 atp->n_cps_dropped_joinable,
                 atp->n_cps_dropped_connected,
                 atp->n_cps_dropped_rule_subsumed,
-                atp->n_cps_dropped_queue_subsumed,
-                atp->n_cps_dropped_classified);
+                atp->n_cps_dropped_queue_subsumed);
 
         // The `.expect` status encodes the default-mode (ADD)
         // outcome.  A non-default CP-weight mode reorders the CP

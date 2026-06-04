@@ -40,9 +40,6 @@ static u32  atp_cp_ft_set       (AtpState *s, u32 i, Term lhs, Term rhs,
 static void atp_cp_ft_clear     (AtpState *s, u32 i);
 static void atp_cp_ft_swap      (AtpState *s, u32 i, u32 j);
 static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
-static u8   atp_cp_trivially_joinable_ft(AtpState *s,
-                                         struct AtpFtCell **lhs,
-                                         struct AtpFtCell **rhs);
 #endif
 
 // Stage 6: AtpFt-native normalize fixpoint (push-norm joinable check).
@@ -9560,231 +9557,6 @@ static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
 }
 #endif
 
-// === ATP_CP_CLASSIFY: Waldmeister critical-pair classification =====
-//
-// Ported from Waldmeister's `NewClassification` ("new classification")
-// and `ClasFunctions` ("classification functions") modules
-// (waldmeister/sources/CLAS/NewClassification.c, ClasFunctions.c).
-//
-// Waldmeister classifies every critical pair with a list of
-// *Kriterien* ("criteria", killer predicates).  When a predicate
-// fires, an *Aktion* ("action") rescales the CP's queue weight:
-//   Act_ultimate -> minimal weight (pick first)
-//   Act_never    -> maximal weight / discard  ("last" in -clas)
-//   Act_double   -> weight * 2  (deprioritize)
-//   Act_half     -> weight / 2  (prioritize)
-//   Act_normal   -> no-op
-// See C_Classify in NewClassification.c:313.
-//
-// The predicates ported here (ClasFunctions.c:107-176):
-//   CF_KillerPraedikatR   -- CP, oriented, reduces an existing R/E LHS
-//   CF_KillerPraedikatE   -- CP, unorientable, reduces an existing LHS
-//   CF_KillerPraedikatRE  -- KillerR OR KillerE
-//   CF_EChildPraedikat    -- a parent of the CP is an equation, not a
-//                            rule (`!RE_IstRegel(parent)`)
-//
-// "Reduces an existing LHS" follows IR_TPRReduziertRE /
-// IR_TPEReduziertRE (Interreduktion.c:413, "Interreduktion" =
-// interreduction) -> TermpaarAnwendbar -> NF_TermpaarAnwendbar: the
-// CP, viewed as a rewrite rule, matches some non-variable subterm of
-// an existing rule's LHS.
-#ifdef ATP_CP_CLASSIFY
-
-// CriteriaEnumType (NewClassification.h:59).
-typedef enum {
-  ATP_CRIT_KILLER_R,
-  ATP_CRIT_KILLER_RE,
-  ATP_CRIT_KILLER_E,
-  ATP_CRIT_ECHILD
-} AtpCritKind;
-
-// ActionEnumType (NewClassification.h:68).
-typedef enum {
-  ATP_ACT_ULTIMATE,
-  ATP_ACT_NORMAL,
-  ATP_ACT_DOUBLE,
-  ATP_ACT_HALF,
-  ATP_ACT_NEVER
-} AtpCritAction;
-
-// Does `pat`, used as a rewrite rule's LHS, match `term` or any of
-// its non-variable subterms?  Mirrors NF_TermpaarAnwendbar
-// (NFBildung.c:741): walk every subterm, test match.  The match
-// makes the CP capable of rewriting that existing rule's LHS.
-static u8 atp_clas_pat_reduces(Term pat, Term term) {
-  if (term_tag(term) == TAG_CTR) {
-    RewriteSubst subst = {{0}};
-    if (thvm_match(pat, term, &subst)) return 1;
-    u32 n = term_ctr_n(term);
-    for (u32 i = 0; i < n; i++) {
-      if (atp_clas_pat_reduces(pat, term_ctr_at(term, i))) return 1;
-    }
-  }
-  return 0;
-}
-
-// Does the CP `(big -> small)`, read as a rewrite rule, reduce the
-// LHS of any existing rule in R?  TermpaarAnwendbar
-// (Interreduktion.c:398): scan all rules, test applicability.  A
-// bare-variable `big` is not a well-formed rule LHS (it would
-// rewrite every term), so it never counts as a killer -- this
-// matches Waldmeister, where a rule LHS is always a non-variable.
-static u8 atp_clas_reduces_some_rule(AtpState *s, Term big) {
-  if (term_tag(big) != TAG_CTR) return 0;
-  for (u32 k = 0; k < s->n_rules; k++) {
-    if (atp_clas_pat_reduces(big, s->lhs[k])) return 1;
-  }
-  return 0;
-}
-
-// CF_KillerPraedikatR (ClasFunctions.c:107): the CP is orientable
-// (KBO_GT / KBO_LT) and, oriented big->small, reduces an existing
-// rule LHS.
-static u8 atp_clas_killer_r(AtpState *s, Term lhs, Term rhs) {
-  switch (atp_compare(s, lhs, rhs)) {
-    case KBO_GT: return atp_clas_reduces_some_rule(s, lhs);
-    case KBO_LT: return atp_clas_reduces_some_rule(s, rhs);
-    default:     return 0;
-  }
-}
-
-// CF_KillerPraedikatE (ClasFunctions.c:132): the CP is unorientable
-// (KBO_UN / KBO_EQ) and reduces an existing rule LHS in either
-// direction.
-static u8 atp_clas_killer_e(AtpState *s, Term lhs, Term rhs) {
-  KboCmp c = atp_compare(s, lhs, rhs);
-  if (c == KBO_GT || c == KBO_LT) return 0;
-  return atp_clas_reduces_some_rule(s, lhs) ||
-         atp_clas_reduces_some_rule(s, rhs);
-}
-
-// CF_KillerPraedikatRE (ClasFunctions.c:147): KillerR OR KillerE.
-static u8 atp_clas_killer_re(AtpState *s, Term lhs, Term rhs) {
-  return atp_clas_killer_r(s, lhs, rhs) || atp_clas_killer_e(s, lhs, rhs);
-}
-
-// CF_EChildPraedikat (ClasFunctions.c:172): a parent of this CP is
-// an equation rather than a rule.  thvm does not tag a stored rule
-// as rule-vs-equation, so the closest analogue is "the parent rule
-// is itself unorientable under the active reduction order" -- the
-// non-rule case that orient_and_add routes through the unfailing
-// fallback.  `rule_a` / `rule_b` index s->lhs[] / s->rhs[]; an
-// index >= n_rules means "no parent".
-static u8 atp_clas_echild(AtpState *s, u32 rule_a, u32 rule_b) {
-  if (rule_a < s->n_rules) {
-    if (atp_compare(s, s->lhs[rule_a], s->rhs[rule_a]) == KBO_UN) return 1;
-  }
-  if (rule_b < s->n_rules) {
-    if (atp_compare(s, s->lhs[rule_b], s->rhs[rule_b]) == KBO_UN) return 1;
-  }
-  return 0;
-}
-
-// Evaluate one criterion against a CP.
-static u8 atp_clas_eval(AtpState *s, AtpCritKind crit,
-                        Term lhs, Term rhs, u32 rule_a, u32 rule_b) {
-  switch (crit) {
-    case ATP_CRIT_KILLER_R:  return atp_clas_killer_r(s, lhs, rhs);
-    case ATP_CRIT_KILLER_RE: return atp_clas_killer_re(s, lhs, rhs);
-    case ATP_CRIT_KILLER_E:  return atp_clas_killer_e(s, lhs, rhs);
-    case ATP_CRIT_ECHILD:    return atp_clas_echild(s, rule_a, rule_b);
-  }
-  return 0;
-}
-
-// One classification rule: a criterion plus the action it triggers.
-typedef struct {
-  AtpCritKind   crit;
-  AtpCritAction action;
-} AtpCriterion;
-
-// Default classification config.  Mirrors Waldmeister's ClasCriteria
-// list (NewClassification.c:222): each criterion is tried in order,
-// the first match decides the action.
-//
-//   EChild   -> double  : CPs descending from an unorientable parent
-//                         tend to be unorientable themselves; defer
-//                         them so oriented rules saturate first.
-//   KillerRE -> never   : a killer CP would remove a rule via
-//                         interreduction.  When that CP is also
-//                         rule-subsumed (checked at the call site),
-//                         dropping it is sound -- rule subsumption is
-//                         a subset of joinability, so the dropped CP
-//                         carries no equational consequence not
-//                         already implied by R.
-//
-// The KillerRE/never row only discards when paired with the
-// rule-subsumption guard in atp_classify_cp; the EChild/double row
-// only rescales priority and never drops.
-static const AtpCriterion ATP_CLAS_CRITERIA[] = {
-  { ATP_CRIT_ECHILD,    ATP_ACT_DOUBLE },
-  { ATP_CRIT_KILLER_RE, ATP_ACT_NEVER  },
-};
-#define ATP_CLAS_N_CRITERIA \
-  (sizeof(ATP_CLAS_CRITERIA) / sizeof(ATP_CLAS_CRITERIA[0]))
-
-// Classify one CP.  Returns 1 if the CP should be dropped (the
-// firing action is Act_never AND the soundness guard holds);
-// otherwise returns 0 and writes the rescaled priority into
-// `*pri`.  Mirrors C_Classify (NewClassification.c:313): walk the
-// criteria, first match wins, apply its action.
-static u8 atp_classify_cp(AtpState *s, Term lhs, Term rhs,
-                          u32 rule_a, u32 rule_b, u32 *pri) {
-  for (u32 i = 0; i < ATP_CLAS_N_CRITERIA; i++) {
-    if (!atp_clas_eval(s, ATP_CLAS_CRITERIA[i].crit, lhs, rhs,
-                       rule_a, rule_b)) {
-      continue;
-    }
-    switch (ATP_CLAS_CRITERIA[i].action) {
-      case ATP_ACT_ULTIMATE:
-        *pri = 0u;
-        return 0;
-      case ATP_ACT_NEVER:
-        // Soundness guard: only discard when the CP is also
-        // rule-subsumed (a subset of joinability -- see
-        // atp_cp_rule_subsumed).  Otherwise treat as Act_double:
-        // deprioritize without losing the CP.
-        if (atp_cp_rule_subsumed(s, lhs, rhs)) {
-          return 1;
-        }
-        if (*pri <= 0x7fffffffu) *pri *= 2u;
-        return 0;
-      case ATP_ACT_DOUBLE:
-        if (*pri <= 0x7fffffffu) *pri *= 2u;
-        return 0;
-      case ATP_ACT_HALF:
-        *pri /= 2u;
-        return 0;
-      case ATP_ACT_NORMAL:
-        return 0;
-    }
-  }
-  return 0;
-}
-
-// Push one CP onto the heap with a caller-supplied priority,
-// bypassing atp_cp_priority.  The classifier computes a rescaled
-// priority; this variant lets that value reach the queue.  Mirrors
-// atp_cp_heap_push, but takes the priority instead of computing it
-// from the packed node count.
-static void atp_cp_heap_push_pri(AtpState *s, Term lhs, Term rhs,
-                                 u32 trace, u32 pri) {
-  atp_ensure_cp_cap(s, s->n_cps + 1);
-  u32 i = s->n_cps;
-  u8 *packed     = acp_pack(lhs, rhs, NULL, NULL);
-  s->cp_packed[i]= packed;
-  s->cp_trace[i] = trace;
-  s->cp_pri[i]   = pri;
-  u32 seq        = s->cp_seq_next++;
-  s->cp_seq[i]   = seq;
-  s->n_cps++;
-  atp_cp_sift_up(s, i);
-#ifdef ATP_FV_INDEX
-  atp_fv_index_insert(s->fv_index, lhs, rhs, packed, seq);
-#endif
-}
-
-#endif  // ATP_CP_CLASSIFY
 
 // === Ground-joinability redundancy criterion ========================
 // Martin-Nipkow (1990) / Twee (CADE 2021 sec 3.1) / Avenhaus-Hillen-
@@ -10697,14 +10469,6 @@ static int atp_cp_ground_joinable(AtpState *s, Term lhs, Term rhs) {
 //                                                 (counter only, -DATP_CP_DIAG)
 //   - 7.3b: queue-subsumed by some queued CP   -> drop, tick `n_cps_dropped_queue_subsumed`
 //                                                 (real filter, orthogonal to 7.1)
-// When built with -DATP_CP_CLASSIFY, every CP is additionally run
-// through the Waldmeister classifier (atp_classify_cp).  Its drop
-// decision ticks `n_cps_dropped_classified` unconditionally for
-// measurement.  As a filter the classifier is a strict subset of
-// 7.1 (the soundness guard is rule subsumption, and rule subsumption
-// implies joinability), so it never removes a CP that 7.1 keeps --
-// the saturation status is identical with the flag on or off.  A
-// surviving CP is pushed with the classifier's rescaled priority.
 // `rule_a`/`rule_b` are the rule indices that birthed this CP batch
 // (passed through to the connectedness check); `parent_a`/`parent_b`
 // are their trace indices.  Returns count of CPs pushed.
@@ -10721,7 +10485,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
   u32 pushed = 0;
-#if !defined(ATP_CP_DIAG) && !defined(ATP_CP_CLASSIFY)
+#ifndef ATP_CP_DIAG
   (void)rule_a;
   (void)rule_b;
 #endif
@@ -10851,12 +10615,6 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_rule_subsumed++;
     }
 #endif
-#ifdef ATP_CP_CLASSIFY
-    u32 clas_pri = atp_cp_priority(s, cp_lhs, cp_rhs);
-    u8  classified_drop = atp_classify_cp(s, cp_lhs, cp_rhs,
-                                          rule_a, rule_b, &clas_pri);
-    if (classified_drop) s->n_cps_dropped_classified++;
-#endif
 #ifdef ATP_CP_GROUND_JOIN
     // Ground-joinability redundancy.  The check is expensive (ordered-
     // set-partition enumeration + ground normalization per CP), so it
@@ -10918,24 +10676,6 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       }
     }
 #endif
-#ifdef ATP_CP_CLASSIFY
-    if (classified_drop) {
-      continue;
-    }
-    if (getenv("THVM_ATP_CPGEN_DEBUG") != NULL) {
-      char la[256], ra[256], la_raw[256], ra_raw[256];
-      atp_pretty_term(cp_lhs, la, sizeof la);
-      atp_pretty_term(cp_rhs, ra, sizeof ra);
-      atp_pretty_term(raw_lhs, la_raw, sizeof la_raw);
-      atp_pretty_term(raw_rhs, ra_raw, sizeof ra_raw);
-      fprintf(stderr, "[cpgen] from rules %u x %u: cp(raw) = %s = %s; cp(norm) = %s = %s\n",
-              rule_a, rule_b, la_raw, ra_raw, la, ra);
-    }
-    u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
-                              cps[i].pos, cps[i].pos_len);
-    atp_cp_heap_push_pri(s, cp_lhs, cp_rhs, t, clas_pri);
-    pushed++;
-#else
     if (getenv("THVM_ATP_CPGEN_DEBUG") != NULL) {
       char la[256], ra[256], la_raw[256], ra_raw[256];
       atp_pretty_term(cp_lhs, la, sizeof la);
@@ -10949,7 +10689,6 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                               cps[i].pos, cps[i].pos_len);
     atp_cp_heap_push(s, cp_lhs, cp_rhs, t);
     pushed++;
-#endif
   }
   return pushed;
 }
