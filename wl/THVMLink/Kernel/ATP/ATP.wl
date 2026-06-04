@@ -3422,7 +3422,20 @@ atpAutoTuneForClass["Sheffer"] := {
         "GroundJoin" -> True, "Connectedness" -> True,
         "AutoMaxWeight" -> 20,
         "BackwardSubsume" -> True, "BackwardDemod" -> True,
-        "RHSInterreduce" -> True}};
+        "RHSInterreduce" -> True},
+    (* WM-style p>q>nand scheme (LPO + SkolemHighest, the structural
+       precedence Waldmeister's wolfram.pr / thm.pr ORDERING block
+       encodes -- see project_atp_wm_sheffer_lpo memory).  The
+       skolemized goal constants rank above the operator, so the goal
+       inequality x*y = y*x orients deterministically by the constant
+       precedence rather than depending on AutoPrecedence's arity
+       layering.  Working recipe from atp.wlt:1415 (closes
+       WolframAxioms/Commutativity in 60s).  Front-load it for the
+       cross-axiom Implies-X / *-Associativity cases the lean Mix2/Add
+       entries above wall on. *)
+    {"GoalDirected", "Ordering" -> "LPO", "SkolemHighest" -> True,
+        "CriticalPairWeight" -> "Add", "FifoTiebreak" -> True,
+        "UnfailingCP" -> True, "AutoMaxWeight" -> 20}};
 atpAutoTuneForClass["Boolean"] := {
     (* BooleanAxioms has both asymmetric (DeMorgan / Absorption /
        OrAssociativity / Distributivity) and symmetric (ExcludedMiddle /

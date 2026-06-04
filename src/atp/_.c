@@ -7398,6 +7398,41 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // climbing monotonically.
   if (atp_heap_under_pressure()) {
     thvm_atp_gc_collect(s);
+    // Hard heap-cap memory guard.  After the in-loop GC has had a
+    // chance to reclaim, if the live set STILL occupies more than
+    // THVM_ATP_HEAP_ABORT_FRAC of the semi-space, the saturation has
+    // genuinely outgrown the heap and continuing only thrashes (each
+    // subsequent step pushes a few more cells, hits pressure again,
+    // GC reclaims almost nothing).  Abort cleanly so wall-clock /
+    // memory budget is respected on hard cases like the WolframAxioms
+    // class that historically hung past TimeConstraint at multi-GB
+    // RSS (project_tfindproof_timeout_no_kill).
+    //
+    // Default 0.95 -- engine-byte-identical under all currently-
+    // shipped tests (which complete well below this threshold).
+    // Tunable via THVM_ATP_HEAP_ABORT_FRAC env var; valid range
+    // (0.5, 1.0); a 0 or out-of-range value disables the guard.
+    static double frac = -1.0;
+    if (frac < 0.0) {
+      frac = 0.95;
+      const char *e = getenv("THVM_ATP_HEAP_ABORT_FRAC");
+      if (e != NULL && *e != '\0') {
+        char *end = NULL;
+        double v = strtod(e, &end);
+        if (end != NULL && *end == '\0' && v > 0.5 && v < 1.0) {
+          frac = v;
+        } else if (end != NULL && *end == '\0' && v == 0.0) {
+          frac = 2.0;     // sentinel "guard disabled" (HEAP_NEXT
+                          // can never exceed semi-space capacity)
+        }
+      }
+    }
+    u64 lo = gc_from_start();
+    u64 hi = gc_from_end();
+    u64 cap = hi - lo;
+    if (cap > 0 && (double)(HEAP_NEXT - lo) > frac * (double)cap) {
+      return ATP_ABORTED;
+    }
   }
 
   // Auto-MaxWeight: refresh the bound against the current rule set at
