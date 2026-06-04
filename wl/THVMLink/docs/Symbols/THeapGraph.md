@@ -13,9 +13,9 @@ RelatedGuides: [THVMLink]
 
 <code>[THeapGraph]()[]</code> renders the live `thvm` heap as a Graph in the IC string-diagram style.
 
-<code>[THeapGraph]()[$term$]</code> additionally seeds the discovery walk with $term$, so heapless compounds the caller is holding directly are included.
+<code>[THeapGraph]()[*term*]</code> additionally seeds the discovery walk with *term*, so heapless compounds the caller is holding directly are included.
 
-<code>[THeapGraph]()[$\{t_1, t_2, \ldots\}$]</code> seeds with several terms.
+<code>[THeapGraph]()[{*t*<sub>1</sub>, *t*<sub>2</sub>, ...}]</code> seeds with several terms.
 
 ## Details & Options
 
@@ -25,14 +25,12 @@ RelatedGuides: [THVMLink]
 
 ## Basic Examples
 
-Render the heap for a small lambda application:
+Render the heap for a small lambda application. The `TUOpAdd[x, x]` is a <code>[TLam]()</code> binder body, where the held `x` is not a `TTerm`, so the raw UOP constructor is required:
 
 ```wl
-Needs["THVMLink`"];
-TInit[];
 THeapGraph @ TApp[TLam[x, TUOpAdd[x, x]], TTensorCreate[{1., 2., 3.}]]
 ```
-<!-- => a small Graph: APP -> LAM, LAM body = UOP_ADD over a VAR pair, TEN leaf attached -->
+<!-- => a small Graph (4 vertices): APP -> LAM, LAM body = UOP_ADD over a VAR pair, TEN leaf attached -->
 
 ## Scope
 
@@ -46,38 +44,54 @@ THeapGraph[ {shared + shared, shared*shared} ]
 
 ## Applications
 
-Combine with <code>[TReduce]()</code> to compare a heap before and after a step:
+Combine with <code>[TReduce]()</code> to compare a heap before and after a step. Before the step, the application is still a redex:
 
 ```wl
 t = TApp[TLam[w, TUOpAdd[w, w]], TTensorCreate[{1., 2., 3.}]];
-before = THeapGraph[t];
-TReduce[t];
-after  = THeapGraph[t];
-{before, after}
+THeapGraph[t]
 ```
-<!-- => the LAM and APP collapse into the inlined body; only the kernel + TEN survive on the right -->
+<!-- => a Graph with the APP -> LAM redex still intact over the TEN leaf -->
+
+Fire one reduction step, then render again; the LAM and APP collapse into the inlined body, leaving the kernel + TEN:
+
+```wl
+TReduce[t];
+THeapGraph[t]
+```
+<!-- => a Graph where the redex has fired: only the inlined UOP body + TEN survive -->
 
 ## Properties and Relations
 
-`THeapGraph` and <code>[THeapDiagram]()</code> draw the same underlying agent graph; `THeapDiagram` routes through the `DiagrammaticComputation` paclet so wires are typed diagram strings:
+[THeapGraph]() and <code>[THeapDiagram]()</code> draw the same underlying agent graph; <code>[THeapGraph]()</code> returns a plain `Graph`:
 
 ```wl
-{
-    Head @ THeapGraph[ TLam[x, x] ],
-    Head @ THeapDiagram[ TLam[x, x] ]
-}
+Head @ THeapGraph[ TLam[x, x] ]
 ```
-<!-- => {Graph, DiagramNetwork} -->
+<!-- => Graph -->
+
+while <code>[THeapDiagram]()</code> routes through the `DiagrammaticComputation` paclet, so wires are typed diagram strings and the head is a `Diagram`:
+
+```wl
+Head @ THeapDiagram[ TLam[x, x] ]
+```
+<!-- => Diagram -->
 
 ## Possible Issues
 
-Compound terms the user constructed but never wrote to the heap may not appear without a seed. Always seed the call when you want to visualize a term you are still holding:
+An un-seeded call walks the whole live heap, whose size grows with accumulated runtime state:
 
 ```wl
 t = TLam[x, TUOpMul[x, x]];
-{ Length @ VertexList @ THeapGraph[], Length @ VertexList @ THeapGraph[t] }
+Length @ VertexList @ THeapGraph[]
 ```
-<!-- => {n, n + k} where k counts the freshly added LAM + UOP_MUL + VAR cells -->
+<!-- => n -- the full live-heap vertex count, varies with accumulated state -->
+
+Seeding scopes the walk to the term you are holding, so the graph is just that term's cells. Always seed when you want to visualize a specific compound:
+
+```wl
+Length @ VertexList @ THeapGraph[t]
+```
+<!-- => 2 -- only the cells reachable from the seed -->
 
 ## Neat Examples
 

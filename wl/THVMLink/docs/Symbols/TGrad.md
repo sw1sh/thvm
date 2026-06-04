@@ -11,11 +11,11 @@ RelatedGuides: [THVMLink]
 
 ## Usage
 
-<code>[TGrad]()[$y$]</code> is `loss.backward()`: one backward walk seeded with `ones-at-y` that accumulates the cotangent of every reachable <code>[TRequiresGrad]()</code> leaf into its `TenDesc.grad`. Returns $y$ for chaining.
+<code>[TGrad]()[*y*]</code> is `loss.backward()`: one backward walk seeded with `ones-at-y` that accumulates the cotangent of every reachable <code>[TRequiresGrad]()</code> leaf into its `TenDesc.grad`. Returns *y* for chaining.
 
-<code>[TGrad]()[$y$, $target$]</code> computes $\partial y / \partial$ $target$ as a target-aware VJP, returning the gradient `TTerm` without touching other leaves.
+<code>[TGrad]()[*y*, *target*]</code> computes the gradient of *y* with respect to *target* as a target-aware vector-Jacobian product (VJP), returning the gradient `TTerm` without touching other leaves.
 
-<code>[TGrad]()[$y$, $\{x_1, \ldots, x_n\}$]</code> computes $\partial y / \partial x_i$ for every target in one shared walk and returns a list of $n$ gradient `TTerm`s in target order.
+<code>[TGrad]()[*y*, {*x*<sub>1</sub>, ..., *x*<sub>n</sub>}]</code> computes the gradient of *y* with respect to each *x*<sub>i</sub> in one shared walk and returns a list of *n* gradient `TTerm`s in target order.
 
 ## Details & Options
 
@@ -29,15 +29,13 @@ RelatedGuides: [THVMLink]
 A single backward over a small inner product:
 
 ```wl
-Needs["THVMLink`"];
-TInit[];
 w    = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
 x    = TTensorCreate[{10., 20., 30.}];
 loss = Total[w*x];
 TRealize @ TGrad[loss];
-TTensorData @ TRealize @ TGradOf[w]
+Normal @ TRealize @ TGradOf[w]
 ```
-<!-- => NumericArray[{10., 20., 30.}, "Real32"] -->
+<!-- => {10., 20., 30.} -->
 
 ## Scope
 
@@ -48,13 +46,18 @@ w1 = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
 w2 = TRequiresGrad @ TTensorCreate[{4., 5., 6.}];
 y  = Total[w1^2 + w2^2];
 {g1, g2} = TGrad[y, {w1, w2}];
-{TTensorData @ TRealize @ g1, TTensorData @ TRealize @ g2}
+Normal @ TRealize @ g1
 ```
-<!-- => {NumericArray[{2., 4., 6.}, "Real32"], NumericArray[{8., 10., 12.}, "Real32"]} -->
+<!-- => {2., 4., 6.} -->
+
+```wl
+Normal @ TRealize @ g2
+```
+<!-- => {8., 10., 12.} -->
 
 ## Applications
 
-Drive one SGD step against a tiny linear regression. Take the gradient first, then write the parameter update back through <code>[TSet]()</code> with a small learning rate:
+Drive one SGD step against a tiny linear regression. <code>[TL2Loss]()</code> wraps the squared-error of the residual into a scalar loss. Take the gradient first, then write the parameter update back through <code>[TSet]()</code> with a small learning rate:
 
 ```wl
 W = TRequiresGrad @ TGlorot[{4}];
@@ -64,27 +67,38 @@ y = TTensorCreate[{1.}];
 loss = TL2Loss[ Total[W*x] - y ];
 TClearGrad[W];
 TRealize @ TGrad[loss];
-gW = TTensorData @ TRealize @ TGradOf[W];
-TSet[W, W + (-0.01)*TGradOf[W]];
-{gW, TTensorData[W]}
+gW = Normal @ TRealize @ TGradOf[W]
 ```
-<!-- => {<gradient>, <post-step W>} - the param shifted by -0.01 * gradient -->
+<!-- => the linear-regression gradient, a length-4 list (varies with the Glorot draw) -->
+
+Apply the update; the original `W` `TTerm` still points at the same `TenDesc`, now shifted by the learning rate times the gradient:
+
+```wl
+TSet[W, W + (-0.01)*TGradOf[W]];
+Normal @ W
+```
+<!-- => the post-step W, a length-4 list -->
 
 ## Properties and Relations
 
-`TGrad[y]` is the full-graph projection; calling it again WITHOUT clearing accumulates:
+<code>[TGrad]()[*y*]</code> is the full-graph projection; calling it again WITHOUT clearing accumulates. The first walk:
 
 ```wl
 w  = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
 y1 = Total[w];
 TClearGrad[w];
 TRealize @ TGrad[y1];
-g1 = TTensorData @ TRealize @ TGradOf[w];
-TRealize @ TGrad[y1];
-g2 = TTensorData @ TRealize @ TGradOf[w];
-{g1, g2}
+Normal @ TRealize @ TGradOf[w]
 ```
-<!-- => {{1., 1., 1.}, {2., 2., 2.}} -- second TGrad accumulated again -->
+<!-- => {1., 1., 1.} -->
+
+A second <code>[TGrad]()</code> without a <code>[TClearGrad]()</code> in between accumulates on top:
+
+```wl
+TRealize @ TGrad[y1];
+Normal @ TRealize @ TGradOf[w]
+```
+<!-- => {2., 2., 2.} -- the second walk accumulated again -->
 
 ## Possible Issues
 
@@ -100,13 +114,20 @@ TGradOf[w]
 
 ---
 
-The multi-target form requires that every target reaches the seed; an unreachable target's gradient is zero, not an error:
+The multi-target form requires that every target reaches the seed; an unreachable target's gradient is zero, not an error. The reachable target:
 
 ```wl
 w        = TRequiresGrad @ TTensorCreate[{1., 2.}];
 unrelated = TRequiresGrad @ TTensorCreate[{0., 0.}];
 loss     = Total[w];
 {gw, gu} = TGrad[loss, {w, unrelated}];
-{TTensorData @ TRealize @ gw, TTensorData @ TRealize @ gu}
+Normal @ TRealize @ gw
 ```
-<!-- => {NumericArray[{1., 1.}, "Real32"], NumericArray[{0., 0.}, "Real32"]} -->
+<!-- => {1., 1.} -->
+
+and the unreachable one comes back all zeros:
+
+```wl
+Normal @ TRealize @ gu
+```
+<!-- => {0., 0.} -->

@@ -11,68 +11,97 @@ RelatedGuides: [THVMLink]
 
 ## Usage
 
-<code>[TKernel]()[$t_TTerm$]</code> wraps a UOP_KERNEL term as a typed object with a queryable property surface.
+<code>[TKernel]()[*t*]</code> wraps a `UOP_KERNEL` `TTerm` *t* as a typed object with a queryable property surface.
 
-<code>[TKernel]()[$kid_Integer$]</code> resolves a kernel id back to its pinned heap term and wraps that.
+<code>[TKernel]()[*kid*]</code> resolves a kernel id *kid* back to its pinned heap term and wraps that.
 
 A `TKernel` auto-coerces to its underlying `TTerm` inside any UOp constructor.
 
 ## Details & Options
 
-- Use `Information[k, "Properties"]` for the full property list and `k["Name"]` to query one. Calling `k[]` dispatches the kernel (same as <code>[TKernelDispatch]()</code>).
+- Use <code>[Information]()[*k*, "Properties"]</code> for the full property list and `k["DispatchKind"]` to query one. Calling `k[]` dispatches the kernel (same as <code>[TKernelDispatch]()</code>).
 - Key properties:
-  - `"Source"` - the C99 or Metal source text. <code>[TKernelSource]()[kid, backend]</code> picks the back end explicitly.
+  - `"Source"` - the C99 or Metal source text. <code>[TKernelSource]()[*kid*, *backend*]</code> picks the back end explicitly.
   - `"Flops"` - static FLOPS estimate over the lifted UOp DAG.
   - `"DispatchKind"` - the route the last fire took ("jit", "blas-gemm", "metal-jit", "metal-tile", "interpreter", ...).
-  - `"DispatchCount"`, `"TotalUs"` - cumulative fire counters since `TInit`.
+  - `"DispatchCount"`, `"TotalUs"` - cumulative fire counters since <code>[TInit]()</code>.
   - `"JitDylibPath"` - the on-disk path of the JIT-cached `.dylib` (deterministic from the program hash).
 - The kernel's scheduling plan is mutable via <code>[TKernelApplyOpt]()</code> with <code>[TOpt]()</code> actions (UPCAST, UNROLL, LOCAL, GLOBAL, TC, ...).
 - <code>[TKernelAutotune]()</code> benchmarks every <code>[TKernelProposed]()</code> candidate and applies the winner, keyed by the kernel's structural <code>[TKernelProgramKey]()</code> so other kernels with the same shape inherit it.
 
 ## Basic Examples
 
-Fire a small kernel and inspect what dispatch route it took:
+Fire a small kernel. Its id is the last entry in the kernel table, so derive it from <code>[TKernelCount]()</code> rather than hardcoding an absolute id (absolute kids drift with accumulated runtime state):
 
 ```wl
-Needs["THVMLink`"];
-TInit[];
 x = TTensorCreate[Range[1., 16.]];
 y = TTensorCreate[Range[16., 1., -1.]];
 TRealize @ (x + y);
-k = TKernel[1];
-{k["Name"], k["DispatchKind"], k["DispatchCount"]}
+kid = TKernelCount[] - 1;
+k = TKernel[kid]
 ```
-<!-- => {"...", "jit" or "blas-...", 1} -->
+<!-- => TKernel[<|"Term" -> TTerm[...], "Kid" -> _|>] -- the summary box: kid, output shape/dtype, inputs, fired -->
+
+The box shows the route the last fire took:
+
+```wl
+k["DispatchKind"]
+```
+<!-- => "jit" (or "blas-...", "metal-jit", ...) -->
+
+and the cumulative fire count:
+
+```wl
+k["DispatchCount"]
+```
+<!-- => 1 -->
 
 ## Scope
 
 Read the lifted source the JIT compiled:
 
 ```wl
-src = TKernelSource[1, "C"];
+x = TTensorCreate[Range[1., 16.]];
+y = TTensorCreate[Range[16., 1., -1.]];
+TRealize @ (x + y);
+kid = TKernelCount[] - 1;
+src = TKernelSource[kid, "C"];
 StringLength[src]
 ```
-<!-- => length of the rendered C99 string; or 0 when kernel_lift_to_uop declined -->
+<!-- => 788 -- length of the rendered C99 string; or 0 when kernel_lift_to_uop declined -->
 
 ---
 
-Inspect the axis-typed scheduling plan and the proposer's candidates:
+Inspect the axis-typed scheduling plan:
 
 ```wl
-{TKernelOpts[1], TKernelProposed[1]}
+TKernelOpts[kid]
 ```
-<!-- => {TKernelOpts[<|"AxisTypes" -> {...}, "Applied" -> {}|>], {TOpt["UPCAST", axis, factor], ...}} -->
+<!-- => TKernelOpts[<|"Kid" -> _, "AxisTypes" -> {"LOOP", "UPCAST"}, "FullShape" -> {4, 4}, "Applied" -> {TOpt["UPCAST", 0, 4]}|>] -->
+
+---
+
+and the proposer's candidate actions:
+
+```wl
+TKernelProposed[kid]
+```
+<!-- => {TOpt["UPCAST", 0, 4], TOpt["UPCAST", 0, 2]} -->
 
 ## Applications
 
 Run the autotuner across every unique kernel shape, then re-fire to pick up the winner:
 
 ```wl
+x = TTensorCreate[Range[1., 16.]];
+y = TTensorCreate[Range[16., 1., -1.]];
+TRealize @ (x + y);
+kid = TKernelCount[] - 1;
 TKernelAutotuneUnique[];
 TRealize @ (x + y);
-TKernel[1][ "DispatchCount"]
+TKernel[kid]["DispatchCount"]
 ```
-<!-- => 2 -- the second fire used the post-autotune schedule -->
+<!-- => ~19 the first time this shape is tuned (autotune fires every candidate to benchmark it, plus the final re-fire); the count is lower if the program key was already tuned and cached -->
 
 ---
 
@@ -81,14 +110,17 @@ Group running kernels by their lifted Metal source to find structural duplicates
 ```wl
 TKernelDuplicateGroups[]
 ```
-<!-- => <|"hash..." -> {kid1, kid2, ...}, ...|> -->
+<!-- => <|"hash..." -> {kid1, kid2, ...}, ...|>; <||> when every live kernel is structurally unique -->
 
 ## Properties and Relations
 
 A `TKernel` auto-coerces into UOp graphs, so it can be passed wherever a `TTerm` is expected:
 
 ```wl
-k = TKernel[1];
+x = TTensorCreate[Range[1., 16.]];
+y = TTensorCreate[Range[16., 1., -1.]];
+TRealize @ (x + y);
+k = TKernel[TKernelCount[] - 1];
 TUOpKind[k]
 ```
 <!-- => "KERNEL" -->
@@ -100,7 +132,7 @@ A kernel whose lifted DAG carries unresolved BUFFERIZE or TEN leaves emits `buf<
 ```wl
 TKernelAuditLeaks[]
 ```
-<!-- => {<|Kid -> _, BufferizeLeak -> True/False, TenLeak -> True/False|>, ...} -->
+<!-- => {<|Kid -> _, BufferizeLeak -> True/False, TenLeak -> True/False|>, ...}; {} when no live kernel leaks -->
 
 ## Neat Examples
 
@@ -110,4 +142,4 @@ Per-kernel introspection plus the memory planner pinpoints the hot allocation:
 top = TKernelMemoryTopProducers[5];
 top // First
 ```
-<!-- => <|Kid -> _, OutputBytes -> _, MSLLines -> _, HashGroup -> {...}|> -->
+<!-- => <|"Kid" -> _, "OutputBytes" -> _, "MSLLines" -> 19, "HashGroup" -> {...}|> -->
