@@ -100,6 +100,40 @@ VerificationTest[
     TestID -> "training-loop/matrix-tgrad-10iters"
 ]
 
+(* === multi-param chain: two TAssign steps chained via nested TPriForce
+   in one loop body.  Guards the redex_fire heap_replace KERNEL-skip:
+   without it the FIRST assign's src kernel is baked to its one-time TEN
+   on iter 1, so only the LAST param in the chain keeps re-firing and w1
+   freezes after one step ({0.2,0.4,0.6}).  Both must converge. *)
+VerificationTest[
+    TInit[];
+    Module[{w1, w2, t1, t2, lr, g1, g2, s1, s2},
+        w1 = TTensorCreate @ NumericArray[{0., 0., 0.}, "Real32"];
+        w2 = TTensorCreate @ NumericArray[{0., 0., 0.}, "Real32"];
+        t1 = TTensorCreate @ NumericArray[{1., 2., 3.}, "Real32"];
+        t2 = TTensorCreate @ NumericArray[{4., 5., 6.}, "Real32"];
+        lr = TUOpConst[0.1, "f32"];
+        g1 = TGrad[TL2Loss[TUOpAdd[w1, TUOpNeg[t1]]], w1];
+        g2 = TGrad[TL2Loss[TUOpAdd[w2, TUOpNeg[t2]]], w2];
+        s1 = TMaterialize[TNf[TAssign[w1, TUOpAdd[w1, TUOpNeg[TUOpMul[lr, g1]]]]]];
+        s2 = TMaterialize[TNf[TAssign[w2, TUOpAdd[w2, TUOpNeg[TUOpMul[lr, g2]]]]]];
+        TDef["mp_step1", s1];
+        TDef["mp_step2", s2];
+        TDef["mp_loop",
+            TLam[m, TIfZero[m, TUOpConst[0.0, "f32"],
+                TPriForce[TRef["mp_step1"],
+                    TPriForce[TRef["mp_step2"],
+                        TApp[TRef["mp_loop"], TOp2["-", m, TNum[1]]]]]]]];
+        TWnf @ TApp[TRef["mp_loop"], TNum[10]];
+        (* both: w_n = (1 - 0.8^10) * t *)
+        {Round[Normal @ TTensorData[w1], 0.001],
+         Round[Normal @ TTensorData[w2], 0.001]}
+    ],
+    {Round[(1 - 0.8^10) * {1., 2., 3.}, 0.001],
+     Round[(1 - 0.8^10) * {4., 5., 6.}, 0.001]},
+    TestID -> "training-loop/multi-param-chain-both-refire"
+]
+
 (* === long loop: n=200 should run in well under a second.  This
    is the smoke test that the per-iter cost stays bounded. *)
 
