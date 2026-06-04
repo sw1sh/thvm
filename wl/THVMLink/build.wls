@@ -79,10 +79,10 @@ frontmatterTemplate[srcFile_String] := Module[{ text, head, m },
     If[ m === {}, Missing["NoTemplate"], First[m] ]
 ]
 
-(* Heavy ATP tutorials accumulate too much C-engine memory if every cell
-   evaluates in the same kernel; render them without evaluation (the code
-   stays visible, just unrun). *)
-noEvaluate = {"ATP.md", "AtpMethods.md"}
+(* All docs evaluate.  Individually-heavy cells in ATP.md / AtpMethods.md
+   carry a per-cell `#| eval: false` so the code stays visible but its
+   saturation cost stays out of the shared build kernel. *)
+noEvaluate = {}
 
 (* Hard per-file time budget for example evaluation.  A cell that takes
    longer than this almost certainly indicates a hung saturator / kernel,

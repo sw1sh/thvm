@@ -51,29 +51,29 @@ TFindProof["DoubleNegation", "BooleanAxioms",
 
 `DoubleNegation` is a symmetric goal whose two sides never share a normal form, so plain completion never closes it.  `"GoalDirected"` adds the MNF bidirectional front search alongside completion; the front collision then resolves into a critical-pair-lemma proof.  `Automatic` also closes this (its tail eventually tries `"GoalDirected"`), but pinning the Method skips the upstream attempts.
 
-### A Sheffer / Wolfram single-operator goal (Waldmeister-tuned config)
+### A Sheffer / Wolfram single-operator goal (the orientation matters)
 
 ```wl
-#| eval: false
-TFindProof["AndAssociativity", "WolframAxioms",
-    Method -> {"Completion",
-        "Ordering"           -> "KBO",
-        "CriticalPairWeight" -> "Gt",
-        "RecordNorm"         -> False},
-    TimeConstraint -> 60]
+TFindProof["Commutativity", "WolframAxioms",
+    Method -> {"GoalDirected",
+        "Ordering"           -> "LPO",
+        "SkolemHighest"      -> True,
+        "CriticalPairWeight" -> "Add",
+        "FifoTiebreak"       -> True,
+        "UnfailingCP"        -> True},
+    TimeConstraint -> 15]
 ```
 
-The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) need a different config than the `"Waldmeister"` preset's defaults: `RecordNorm -> False` routes the saturator through the fast indexed-flatterm normalize path instead of recording every per-step rewrite; `KBO + Gt` matches Waldmeister's own cracking ordering for the dense single-operator signature; the four engine-internal fast paths (`THVM_ATP_FLATTERM`, `THVM_ATP_KBO_FLAT`, `THVM_ATP_WMFPA`, `THVM_ATP_CP_INDEX`) default to on when the `ATP` context loads.  With this combination, `AndAssociativity` proves in ~25s on the paclet (~15s in the C bench, ~14s under real Waldmeister); the bundled `"Waldmeister"` preset (KBO + Mix + SR 51) is slower on this specific theorem because Mix-weight CP selection leads to a different saturation trajectory.
+The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) crack under a non-default config: the goal `nand(p,q) == nand(q,p)` is unorientable, so `"GoalDirected"` adds the bidirectional MNF front (pure completion never collides the two sides); LPO with `"SkolemHighest" -> True` ranks the goal Skolems above `nand`, which is Waldmeister's own cracking ordering on this signature; `"Add"` weight + `"FifoTiebreak"` give a uniform age-biased CP queue that doesn't preferentially explore deep terms.  With this combination `Commutativity` proves in a few seconds.  The harder `AndAssociativity` over the same axioms uses the same recipe but takes ~25s on the paclet (~15s in the C bench, ~14s under real Waldmeister); the bundled `"Waldmeister"` preset is slower on AndAssoc because its Mix-weight CP selection picks a different saturation trajectory.
 
-### A cross-system many-axiom theorem (SInE premise selection)
+### A many-axiom theory (SInE premise selection)
 
 ```wl
-TFindProof["ImpliesWolframAxioms", "MeredithAxioms",
-    Method -> {"GoalDirected", "AxiomRelevance" -> "SInE"},
-    TimeConstraint -> 5]
+TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+    Method -> {"Completion", "AxiomRelevance" -> "SInE"}]
 ```
 
-The conjecture only cites a subset of `MeredithAxioms`'s predicates.  SInE pre-filters the axiom list to those reachable from the conjecture's symbols by a bounded breadth-first walk along the D-relation.  Defaults `st = 3, sd = 2, sgt = 8` mirror Vampire's `--sine_tolerance / --sine_depth / --sine_generality_threshold`.
+SInE pre-filters the axiom list to those reachable from the conjecture's symbols by a bounded breadth-first walk along the D-relation: a goal that only mentions the inverse function does not need every group axiom in scope, only the ones whose head symbols transitively reach `Inverse`.  Defaults `st = 3, sd = 2, sgt = 8` mirror Vampire's `--sine_tolerance / --sine_depth / --sine_generality_threshold`.  On a many-hundred-axiom cross-system theory (e.g. `"MeredithAxioms"` against a Wolfram-axiom goal) the filter is what keeps the CP queue tractable.
 
 ## Methods
 
@@ -272,17 +272,16 @@ TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
         "CriticalPairWeight" -> "Mix2",
         "SelectionRatio" -> 2,
         "AutoMaxWeight" -> 20},
-    TimeConstraint -> 10]
+    TimeConstraint -> 15]
 ```
 
-### Vampire's McCune cracking config
+### Vampire's seeded-random preset
 
-The single Vampire 5.0.1 portfolio entry that proves `McCuneAxioms/EqualityOfInverses` in the cross-system baseline (`lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=3681690318`) is bundled as `"VampireRandom"`:
+`"VampireRandom"` bundles `LPO` + `AutoPrecedence` + `SelectionRatio -> 10` + `UnfailingCP` + `GroundJoin` + `BackwardDemod` + `RHSInterreduce` + `RandomRatio -> 32` + `RandomSeed -> 3681690318` + `LRS` - the Vampire 5.0.1 portfolio entry `lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=3681690318` that cracks `McCuneAxioms/EqualityOfInverses` in the cross-system baseline (which thvm currently misses; the recipe stays here as the cross-system reference).  Applied to a problem within reach it still closes cleanly:
 
 ```wl
-#| eval: false
-TFindProof["EqualityOfInverses", "McCuneAxioms",
-    Method -> "VampireRandom", TimeConstraint -> 60]
+TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+    Method -> "VampireRandom", TimeConstraint -> 10]
 ```
 
 The seeded xorshift64 inside the random pick makes the trajectory reproducible; pass `"RandomSeed" -> n` to switch seed.
