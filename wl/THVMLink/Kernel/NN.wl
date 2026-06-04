@@ -906,6 +906,7 @@ headStitch[heads_List, seq_, nHeads_, dHead_] := Total @ Table[
 $layerParams[LinearLayer]        = {"Weights", "Biases"}
 $layerParams[ConvolutionLayer]   = {"Weights", "Biases"}
 $layerParams[NormalizationLayer] = {"Scaling", "Biases"}
+$layerParams[BatchNormalizationLayer] = {"Scaling", "Biases"}
 $layerParams[EmbeddingLayer]     = {"Weights"}
 $layerParams[ElementwiseLayer]   = {}
 $layerParams[ReshapeLayer]       = {}
@@ -1069,6 +1070,17 @@ fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op, applied},
 fromLayer[NormalizationLayer, layer_, x_TTerm] := Module[{gamma, beta},
     {gamma, beta} = TLayerToTensors[layer];
     TLayerNormAffine[x, gamma, beta]
+]
+
+(* BatchNormalizationLayer: normalise per channel using THIS batch's
+   statistics (training form), then the learned per-channel scale/shift.
+   Scaling = gamma, Biases = beta are the trainable params; the layer's
+   MovingMean / MovingVariance (inference running stats) are not used
+   here, so a forward built this way always normalises with batch stats
+   -- correct for training, and used for batch-wise evaluation too. *)
+fromLayer[BatchNormalizationLayer, layer_, x_TTerm] := Module[{gamma, beta},
+    {gamma, beta} = TLayerToTensors[layer];
+    TBatchNormTrain[x, gamma, beta]
 ]
 
 (* DropoutLayer at inference is identity. *)
