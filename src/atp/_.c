@@ -669,6 +669,34 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
   s->r_cap = cap;
 }
 
+// Tiny env-gate helpers consolidating ~15 callsites that each rolled the
+// same getenv-then-classify expression by hand.  Two flavors:
+//
+//   atp_env_on(name)  -> default-OFF gate.  Returns 1 iff the env var is
+//                        set to a non-empty, non-"0" value.  Matches the
+//                        historical idiom `(e != NULL && e[0] != '\0' &&
+//                        e[0] != '0')`.
+//   atp_env_off(name) -> default-ON  gate.  Returns 0 iff the env var is
+//                        set to EXACTLY "0".  Anything else (unset, "1",
+//                        "yes", "...") returns 1.  Matches the idiom
+//                        `(e != NULL && e[0] == '0' && e[1] == '\0')
+//                        ? 0 : 1`.
+//
+// Callers that want process-once caching still own the `static int gate =
+// -1` slot; the helper only standardizes the classification.  Helpers that
+// parse numeric values (THVM_ATP_TRACE_MAX, _HEAP_ABORT_FRAC, _RSS_ABORT_MB,
+// _TICK_TRACE) and pure existence checks (THVM_ATP_ENQ_DEBUG and friends)
+// stay open-coded -- their semantics differ enough that forcing the helper
+// would obscure intent.
+static int atp_env_on(const char *name) {
+  const char *e = getenv(name);
+  return (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+}
+static int atp_env_off(const char *name) {
+  const char *e = getenv(name);
+  return (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+}
+
 #ifdef THVM_ATPFT_RULES
 // Stage 4 verification probe (env THVM_ATPFT_VERIFY=1).  After every
 // rule slot k is written, re-convert the live Term pair through the
@@ -683,10 +711,7 @@ static void atp_ensure_rule_cap(AtpState *s, u32 need) {
 // only ~10-20% slower; off it is byte-identical.
 static int atp_ft_rules_verify_on(void) {
   static int on = -1;
-  if (on < 0) {
-    const char *e = getenv("THVM_ATPFT_VERIFY");
-    on = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
-  }
+  if (on < 0) on = atp_env_on("THVM_ATPFT_VERIFY");
   return on;
 }
 
@@ -1578,14 +1603,11 @@ static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
     // the patterns apart while staying near-silent on production runs.
     {
       static u32 dumped = 0u;
-      if (dumped < 4u) {
-        const char *t = getenv("THVM_ATP_DT_TRACE");
-        if (t != NULL && t[0] != '\0' && t[0] != '0') {
-          fprintf(stderr,
-                  "atp_dt_descend depth-cap hit #%u: node=%u pos=%u flatlen=%u\n",
-                  dumped + 1u, node, pos, g_atp_dt_flatlen);
-          dumped++;
-        }
+      if (dumped < 4u && atp_env_on("THVM_ATP_DT_TRACE")) {
+        fprintf(stderr,
+                "atp_dt_descend depth-cap hit #%u: node=%u pos=%u flatlen=%u\n",
+                dumped + 1u, node, pos, g_atp_dt_flatlen);
+        dumped++;
       }
     }
     return 0;
@@ -2979,10 +3001,7 @@ static u32    atp_pretty_term(Term t, char *buf, u32 cap);
 // once; default builds are silent and behaviorally byte-identical.
 static int atp_rule_trace_on(void) {
   static int trace_on = -1;
-  if (trace_on < 0) {
-    const char *e = getenv("THVM_ATP_RULE_TRACE");
-    trace_on = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
-  }
+  if (trace_on < 0) trace_on = atp_env_on("THVM_ATP_RULE_TRACE");
   return trace_on;
 }
 static Term   atp_ordered_rewrite_step(AtpState *s, Term t,
@@ -3072,10 +3091,7 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
     // so the default trajectory stays byte-identical.
     u8 spliced = 0u;
     static int dbg_subst_flat = -1;
-    if (dbg_subst_flat < 0) {
-      const char *e = getenv("THVM_ATP_SUBST_FLAT");
-      dbg_subst_flat = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
-    }
+    if (dbg_subst_flat < 0) dbg_subst_flat = atp_env_on("THVM_ATP_SUBST_FLAT");
     if (dbg_subst_flat && !g_atp_ri_ix->any_folded && !*folded) {
       spliced = atp_ri_splice_inline(flat, subsz, flatsym, flatlen, folded,
                                      redex_pos, s->rhs[redex_rule],
@@ -3187,10 +3203,7 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
   static u64 g_flathash_buf[ATP_RI_FLAT_CAP];
   atp_unf_flathash(flatsym, subsz, *flatlen, g_flathash_buf);
   static int dbg_verify = -1;
-  if (dbg_verify < 0) {
-    const char *e = getenv("THVM_DEBUG_UNF_POS_MEMO");
-    dbg_verify = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
-  }
+  if (dbg_verify < 0) dbg_verify = atp_env_on("THVM_DEBUG_UNF_POS_MEMO");
   for (u32 p = 0; p < *flatlen; p++) {
     if (p < resume && p + subsz[p] <= resume) {
       continue;                              // unchanged, known non-redex
@@ -3899,33 +3912,20 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // Opt-in CP-generation overlap-partner index.  OFF unless
   // THVM_ATP_CP_INDEX is set non-"0"; the default engine scans all
   // n_rules per new rule (byte-identical CP set either way).
-  {
-    const char *ci = getenv("THVM_ATP_CP_INDEX");
-    s->use_cp_index = (ci != NULL && ci[0] != '\0' && ci[0] != '0') ? 1u : 0u;
-  }
+  s->use_cp_index = (u8)atp_env_on("THVM_ATP_CP_INDEX");
   // Opt-in flatterm fast-path for the mixed normalize loop.  OFF unless
   // THVM_ATP_FLATTERM is set to a non-"0" value -- the default engine
   // stays byte-identical (the tree mixed loop).
-  {
-    const char *ft = getenv("THVM_ATP_FLATTERM");
-    s->use_flatterm = (ft != NULL && ft[0] != '\0' && ft[0] != '0') ? 1u : 0u;
-  }
+  s->use_flatterm = (u8)atp_env_on("THVM_ATP_FLATTERM");
   // Opt-in faithful Waldmeister-FPA normalize path.  OFF unless
   // THVM_ATP_WMFPA is set to a non-"0" value -- default stays byte-
   // identical to the discrimination-tree indexed path.
-  {
-    const char *wf = getenv("THVM_ATP_WMFPA");
-    s->use_wmfpa = (wf != NULL && wf[0] != '\0' && wf[0] != '0') ? 1u : 0u;
-    const char *wc = getenv("THVM_ATP_WMFPA_CHECK");
-    s->wmfpa_check = (wc != NULL && wc[0] != '\0' && wc[0] != '0') ? 1u : 0u;
-  }
+  s->use_wmfpa    = (u8)atp_env_on("THVM_ATP_WMFPA");
+  s->wmfpa_check  = (u8)atp_env_on("THVM_ATP_WMFPA_CHECK");
   // Incremental resume for the flatterm unorientable scan.  ON by default
   // (mirrors the orientable `clean_before` resume); cleared only by setting
   // THVM_ATP_UNORIENT_RESUME=0, used by the resume-ON==OFF differential.
-  {
-    const char *ur = getenv("THVM_ATP_UNORIENT_RESUME");
-    s->ft_unorient_resume = (ur != NULL && (ur[0] == '0' && ur[1] == '\0')) ? 0u : 1u;
-  }
+  s->ft_unorient_resume = (u8)atp_env_off("THVM_ATP_UNORIENT_RESUME");
 #endif
   // Iter 133 (workflow plan step 3): the unorientable-side rewrite step
   // has a discrimination-tree retrieval (atp_unorient_step_indexed) that
@@ -3933,18 +3933,12 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // when the index can prune.  Replaces a per-position O(n_rules) thvm_match
   // sweep that dominates Sheffer/AndAssoc completion.  Default ON; set
   // THVM_ATP_UNORIENT_INDEX=0 to opt out for A/B.
-  {
-    const char *uoi = getenv("THVM_ATP_UNORIENT_INDEX");
-    s->use_unorient_index = (uoi != NULL && uoi[0] == '0' && uoi[1] == '\0') ? 0u : 1u;
-  }
+  s->use_unorient_index = (u8)atp_env_off("THVM_ATP_UNORIENT_INDEX");
   // Opt-in Vampire Limited Resource Strategy.  OFF unless THVM_ATP_LRS is
   // set to a non-"0" value, or thvm_atp_set_use_lrs flips it on later (the
   // WL Method -> {... "LRS" -> True} surface does the latter).  Sound only
   // when a wall deadline is also set; select_cp checks both gates.
-  {
-    const char *lrs = getenv("THVM_ATP_LRS");
-    s->use_lrs = (lrs != NULL && lrs[0] != '\0' && lrs[0] != '0') ? 1u : 0u;
-  }
+  s->use_lrs = (u8)atp_env_on("THVM_ATP_LRS");
   // LRS knobs (named so the code is auditable, not magic numbers):
   //   warmup  = 256 selections before the first horizon is computed
   //             (Riazanov & Voronkov suggest a brief warmup so the
@@ -9103,10 +9097,7 @@ u64 g_atp_join_cache_misses = 0;
 static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   const u32 NORM_CAP = 64;
   static int dbg_join_cache = -1;
-  if (dbg_join_cache < 0) {
-    const char *e = getenv("THVM_ATP_JOIN_CACHE");
-    dbg_join_cache = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
-  }
+  if (dbg_join_cache < 0) dbg_join_cache = atp_env_on("THVM_ATP_JOIN_CACHE");
   u64 join_key = 0;
   u8  join_cache_eligible = 0;
   if (dbg_join_cache) {
@@ -9160,14 +9151,8 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   //                                 with a diagnostic.
   static int ft_norm_mode = -1;
   static int ft_norm_verify = -1;
-  if (ft_norm_mode < 0) {
-    const char *e = getenv("THVM_ATPFT_NORM");
-    ft_norm_mode = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
-  }
-  if (ft_norm_verify < 0) {
-    const char *e = getenv("THVM_ATPFT_NORM_VERIFY");
-    ft_norm_verify = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
-  }
+  if (ft_norm_mode   < 0) ft_norm_mode   = atp_env_on("THVM_ATPFT_NORM");
+  if (ft_norm_verify < 0) ft_norm_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
   if (ft_norm_mode || ft_norm_verify) {
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;
     AtpFtCell *fl = ft_from_term(a, *lhs, 0);
