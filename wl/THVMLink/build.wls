@@ -167,7 +167,29 @@ If[ MemberQ[Rest @ $ScriptCommandLine, "--clean"],
     Quiet @ DeleteFile[FileNameJoin[{pacletDir, "ResourceDefinition.nb"}]]
 ]
 
-print["building THVMLink documentation"]
-Scan[buildDoc, Sort @ FileNames["*.md", FileNameJoin[{pacletDir, "docs"}], Infinity]]
+(* Positional (non-flag) args restrict the build to the named docs, matched
+   by basename or filename (with or without the ".md"); with no selector
+   every doc is built.  Building one file in isolation also sidesteps a
+   sibling page poisoning the shared build kernel -- e.g. an ATP-context
+   tutorial whose Wolfram`Parser` dependency is unavailable aborts mid-load
+   and the later base-context tutorials then fail to render.
+     wolframscript -file build.wls Tensors          (* just Tensors.md *)
+     wolframscript -file build.wls --clean Tensors   (* wipe cache, then it *) *)
+allDocs = Sort @ FileNames["*.md", FileNameJoin[{pacletDir, "docs"}], Infinity]
+fileSel = Select[Rest @ $ScriptCommandLine, sel |-> ! StringStartsQ[sel, "--"]]
+toBuild = If[ fileSel === {},
+    allDocs,
+    Select[allDocs, doc |-> AnyTrue[fileSel,
+        sel |-> MemberQ[{FileBaseName[doc], FileNameTake[doc], FileBaseName[doc] <> ".md"}, sel]]]
+]
+If[ fileSel =!= {} && toBuild === {},
+    print["[error] no docs matched ", fileSel, "; available basenames: ",
+        StringRiffle[FileBaseName /@ allDocs, ", "]];
+    Exit[1]
+]
+
+print["building THVMLink documentation",
+    If[ fileSel === {}, "", " (selected: " <> StringRiffle[FileBaseName /@ toBuild, ", "] <> ")"]]
+Scan[buildDoc, toBuild]
 
 print["done"]
