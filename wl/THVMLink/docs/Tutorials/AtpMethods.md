@@ -46,7 +46,7 @@ The `Automatic` schedule detects the AbelianGroup structure (commutative + assoc
 
 ```wl
 TFindProof["DoubleNegation", "BooleanAxioms",
-    Method -> "GoalDirected", TimeConstraint -> 10]
+    Method -> "GoalDirected", TimeConstraint -> 5]
 ```
 
 `DoubleNegation` is a symmetric goal whose two sides never share a normal form, so plain completion never closes it.  `"GoalDirected"` adds the MNF bidirectional front search alongside completion; the front collision then resolves into a critical-pair-lemma proof.  `Automatic` also closes this (its tail eventually tries `"GoalDirected"`), but pinning the Method skips the upstream attempts.
@@ -54,6 +54,7 @@ TFindProof["DoubleNegation", "BooleanAxioms",
 ### A Sheffer / Wolfram single-operator goal (Waldmeister-tuned config)
 
 ```wl
+#| eval: false
 TFindProof["AndAssociativity", "WolframAxioms",
     Method -> {"Completion",
         "Ordering"           -> "KBO",
@@ -69,7 +70,7 @@ The Sheffer / nand axiomatisations (`WolframAxioms`, `ShefferAxioms`) need a dif
 ```wl
 TFindProof["ImpliesWolframAxioms", "MeredithAxioms",
     Method -> {"GoalDirected", "AxiomRelevance" -> "SInE"},
-    TimeConstraint -> 30]
+    TimeConstraint -> 5]
 ```
 
 The conjecture only cites a subset of `MeredithAxioms`'s predicates.  SInE pre-filters the axiom list to those reachable from the conjecture's symbols by a bounded breadth-first walk along the D-relation.  Defaults `st = 3, sd = 2, sgt = 8` mirror Vampire's `--sine_tolerance / --sine_depth / --sine_generality_threshold`.
@@ -238,6 +239,7 @@ A few combinations that come up often beyond the four [problem-shaped examples](
 Stack the redundancy criteria so the queue stays small over long completions.  Trades CPU time per step against queue-size growth:
 
 ```wl
+#| eval: false
 TFindProof[conjecture, axioms,
     Method -> {"Completion",
         "GroundJoin" -> True,
@@ -252,6 +254,7 @@ TFindProof[conjecture, axioms,
 Combinator-logic axioms (`S x y z = x z (y z)` etc.) require an ordering that allows variable-duplicating RHS.  LPO does; KBO does not.
 
 ```wl
+#| eval: false
 TFindProof[conjecture, axioms,
     Method -> {"Completion",
         "Ordering" -> "LPO",
@@ -269,7 +272,7 @@ TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
         "CriticalPairWeight" -> "Mix2",
         "SelectionRatio" -> 2,
         "AutoMaxWeight" -> 20},
-    TimeConstraint -> 30]
+    TimeConstraint -> 10]
 ```
 
 ### Vampire's McCune cracking config
@@ -277,6 +280,7 @@ TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
 The single Vampire 5.0.1 portfolio entry that proves `McCuneAxioms/EqualityOfInverses` in the cross-system baseline (`lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=3681690318`) is bundled as `"VampireRandom"`:
 
 ```wl
+#| eval: false
 TFindProof["EqualityOfInverses", "McCuneAxioms",
     Method -> "VampireRandom", TimeConstraint -> 60]
 ```
