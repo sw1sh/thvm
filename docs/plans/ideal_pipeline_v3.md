@@ -92,7 +92,13 @@ WINS CPU/CUDA/Metal wall via the Accelerate-BLAS matmul path.
 - Reduce-into-reduce fusion (one-reduce-per-kernel codegen rule) - **large/medium**; the
   named residual. Verify on conv-backward first.
 - Symbolic rule completion: boolean-OR validity union, full view-cancellation,
-  arange/reduce-collapse - **medium**.
+  arange/reduce-collapse - **medium**. UPDATE (2026-06-05): ported the nested-IDIV
+  collapse `(x//c1)//c2 -> x//(c1*c2)` (tinygrad symbolic.py:258) -- a genuinely-absent
+  self-contained int rule (subsumes the chained `(idx//c1)//c2` the RESHAPE flat-decompose
+  composer leaves). The three originally listed are NOT self-contained symbolic-int rules:
+  validity-union lives cross-layer in `rangeify_unified.c:838`, view-cancellation is the
+  deep lever, arange/reduce-collapse needs REDUCE-collapse infra the int-binary rewriter
+  lacks -- so they remain larger follow-ups.
 - PCONTIG per-axis ending-ranges check - **small**.
 
 **Autodiff / optim** (`gradient.py:49-82` has, `interact/uop_grad.c` lacks)

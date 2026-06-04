@@ -1020,6 +1020,23 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           return uop_int_binary(UOP_IDIV, xnum, uop_iconst(bv / c1));
         }
       }
+      // Nested IDIV collapse: (x // c1) // c2 -> x // (c1*c2).  Mirrors
+      // tinygrad/uop/symbolic.py:258.  An exact floor-division identity
+      // for any non-negative x and positive c1, c2; thvm renders IDIV as
+      // C truncation, which equals floor only for a non-negative
+      // numerator, so we guard `uop_term_nonneg(x)` (index exprs are
+      // non-negative).  Subsumes the chained `(idx // c1) // c2` stacks the
+      // flat-decompose RESHAPE composer leaves into one divide.
+      if (b_const && bv > 0
+          && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IDIV) {
+        Term inner_num = heap_read(term_val(a) + 0);
+        Term inner_den = heap_read(term_val(a) + 1);
+        i64 c1;
+        if (uop_iconst_value(inner_den, &c1) && c1 > 0
+            && uop_term_nonneg(inner_num)) {
+          return uop_int_binary(UOP_IDIV, inner_num, uop_iconst(c1 * bv));
+        }
+      }
       // Nested div-mod: (r % (k*c)) // c -> (r // c) % k when c | (k*c).
       // Mirrors tinygrad's divandmod.py:26-27 IDIV branch.  Common in
       // chained RESHAPE flat-decompose chains.

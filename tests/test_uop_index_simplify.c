@@ -289,6 +289,25 @@ int main(void) {
   Term div_2_b = uop_int_binary(UOP_IDIV, mod_7, two);
   CHECK_EQ(term_ext(div_2_b), UOP_IDIV);  // not folded
 
+  TEST_BEGIN("simplify/nested-idiv-collapses");
+  // (r2 // 6) // 2 -> r2 // 12 (6*2).  r2 is RANGE so non-negative.
+  Term r2_div6 = uop_int_binary(UOP_IDIV, r2, six_b);
+  Term nested_div = uop_int_binary(UOP_IDIV, r2_div6, two);
+  CHECK_EQ(term_ext(nested_div), UOP_IDIV);
+  CHECK_EQ(heap_read(term_val(nested_div) + 0), r2);
+  Term nested_div_den = heap_read(term_val(nested_div) + 1);
+  CHECK_EQ(term_ext(nested_div_den), UOP_CONST);
+  i64 nd_den;
+  CHECK(uop_iconst_value(nested_div_den, &nd_den));
+  CHECK_EQ(nd_den, 12);
+
+  TEST_BEGIN("simplify/nested-idiv-skips-non-const-inner-divisor");
+  // (r2 // r) // 2 -- inner divisor not a const -> no collapse.
+  Term div_var_den = uop_int_binary(UOP_IDIV, r2, r);
+  Term nested_div_skip = uop_int_binary(UOP_IDIV, div_var_den, two);
+  CHECK_EQ(term_ext(nested_div_skip), UOP_IDIV);
+  CHECK_EQ(heap_read(term_val(nested_div_skip) + 0), div_var_den);
+
   TEST_BEGIN("simplify/nested-mod-mod");
   // (r2 % 6) % 2 -> r2 % 2 (since 2 | 6).
   Term mod6_b = uop_int_binary(UOP_IMOD, r2, six_b);
