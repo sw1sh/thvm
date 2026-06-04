@@ -155,6 +155,24 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
 THVMLink`Build`Private`globalBoot =
     Join @@ (Names[# <> "*"] & /@ THVMLink`Build`Private`scratchContexts)
 
+(* `wolframscript -file build.wls --clean` wipes MTN's persistent example-
+   output cache for this paclet before building, forcing every example cell
+   to re-evaluate.  The cache is keyed by the doc's frontmatter `Name:`
+   (here `WolframInstitute/THVMLink`), NOT by the source filename, so each
+   .md file's cache lives under that single dir.  Pre-existing built .nb
+   files also wiped so a stale render can't survive the rebuild. *)
+If[ MemberQ[Rest @ $ScriptCommandLine, "--clean"],
+    print["[--clean] wiping MTN cache + previously built notebooks"];
+    Quiet @ DeleteDirectory[
+        FileNameJoin[{$HomeDirectory, "Library", "Wolfram", "Objects",
+            "Persistence", "MarkdownToNotebook", "ExampleOutput",
+            "WolframInstitute"}],
+        DeleteContents -> True
+    ];
+    Quiet @ DeleteDirectory[FileNameJoin[{pacletDir, "Documentation"}], DeleteContents -> True];
+    Quiet @ DeleteFile[FileNameJoin[{pacletDir, "ResourceDefinition.nb"}]]
+]
+
 print["building THVMLink documentation"]
 Scan[buildDoc, Sort @ FileNames["*.md", FileNameJoin[{pacletDir, "docs"}], Infinity]]
 
