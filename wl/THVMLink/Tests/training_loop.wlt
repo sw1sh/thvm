@@ -134,6 +134,41 @@ VerificationTest[
     TestID -> "training-loop/multi-param-chain-both-refire"
 ]
 
+(* === end-to-end sugared training: a TFromNet-lifted MLP trains via the
+   inert loop.  Reap collects the 4 trainable weights off "thvmNetParam",
+   each gets a materialized SGD ASSIGN step, and one TWnf drives 80 iters
+   of the chained loop.  Exercises the WHOLE sugared path: TFromNet conv/
+   linear lowering + Reap param-collection + stable TCategoricalCrossEntropy
+   + the multi-param inert loop.  A linearly-separable 2-class set must be
+   classified perfectly with the loss driven near zero. *)
+VerificationTest[
+    TInit[];
+    SeedRandom[1234];
+    Module[{xd, yd, net, xS, yT, lr, fwd, sown, params, mk, post},
+        xd = N@{{1., 1.}, {1.5, 1.2}, {0.5, 0.8}, {1.2, 0.9},
+                {-1., -1.}, {-1.2, -0.8}, {-0.7, -1.1}, {-0.9, -1.}};
+        yd = N@{{1., 0.}, {1., 0.}, {1., 0.}, {1., 0.},
+                {0., 1.}, {0., 1.}, {0., 1.}, {0., 1.}};
+        net = NetInitialize[NetChain[{LinearLayer[6], Ramp, LinearLayer[2]}, "Input" -> 2], RandomSeeding -> 7];
+        xS = TTensorCreate[xd]; yT = TTensorCreate[yd]; lr = TUOpConst[0.3, "f32"];
+        {fwd, sown} = Reap[TFromNet[net, xS], "thvmNetParam"];
+        params = Flatten[sown];
+        mk[i_] := TMaterialize[TNf[TAssign[params[[i]],
+            TUOpAdd[params[[i]], TUOpNeg[TUOpMul[lr, TGrad[TCategoricalCrossEntropy[fwd, yT], params[[i]]]]]]]]];
+        TDef["fnmlp_s1", mk[1]]; TDef["fnmlp_s2", mk[2]];
+        TDef["fnmlp_s3", mk[3]]; TDef["fnmlp_s4", mk[4]];
+        TDef["fnmlp_loop", TLam[m, TIfZero[m, TUOpConst[0.0, "f32"],
+            TPriForce[TRef["fnmlp_s1"], TPriForce[TRef["fnmlp_s2"],
+                TPriForce[TRef["fnmlp_s3"], TPriForce[TRef["fnmlp_s4"],
+                    TApp[TRef["fnmlp_loop"], TOp2["-", m, TNum[1]]]]]]]]]];
+        TWnf @ TApp[TRef["fnmlp_loop"], TNum[80]];
+        post = Normal @ TRealize @ fwd;
+        {Length[params], (Ordering[#, -1][[1]] - 1) & /@ post}
+    ],
+    {4, {0, 0, 0, 0, 1, 1, 1, 1}},
+    TestID -> "training-loop/fromnet-mlp-inert-trains"
+]
+
 (* === long loop: n=200 should run in well under a second.  This
    is the smoke test that the per-iter cost stays bounded. *)
 
