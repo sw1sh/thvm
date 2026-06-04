@@ -2699,7 +2699,13 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
 // definitions above; they are included here so those references
 // resolve.  ft_ri.c is gated on THVM_ATPFT_RI; ft_norm.c is gated on
 // THVM_ATPFT_NORM (and conditionally pulls in ft_ri.c's externs).
+//
+// ft_norm.c needs `atp_compare` (reduction-order KBO compare) for the
+// unorientable-equation gate in find_redex_ft.  atp_compare is defined
+// further down this TU; forward-declare it here so the include sees a
+// valid prototype.
 #ifdef THVM_ATPFT_NORM
+static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs);
 # ifdef THVM_ATPFT_RI
 #  include "ft_ri.c"
 # endif
@@ -5036,7 +5042,18 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
     // self-overlapping axiom.
     for (u32 i = 0; i < step_cap; i++) {
       if (atp_norm_deadline_fired(s)) return t;
-      t = atp_rewrite_normalize_indexed(s, t, step_cap);
+      // Iterate the indexed orientable fixpoint to convergence -- a single
+      // atp_rewrite_normalize_indexed call exits at step_cap regardless of
+      // whether the inner loop reached fixpoint, so when the term needs
+      // more than step_cap orientable rewrites the caller observed an
+      // incomplete NF.  Call again until the term stops changing.  Bounded
+      // by the outer step_cap so total orientable work stays
+      // O(step_cap * step_cap) -- matches the previous loose bound.
+      for (u32 j = 0; j < step_cap; j++) {
+        Term t_in = t;
+        t = atp_rewrite_normalize_indexed(s, t, step_cap);
+        if (kbo_eq(t, t_in)) break;     // true fixpoint
+      }
       u8 fired = 0;
       Term t2;
       if (s->use_unorient_index) {
@@ -9151,7 +9168,12 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   //                                 with a diagnostic.
   static int ft_norm_mode = -1;
   static int ft_norm_verify = -1;
-  if (ft_norm_mode   < 0) ft_norm_mode   = atp_env_on("THVM_ATPFT_NORM");
+  // Default-ON: THVM_ATPFT_NORM=0 (explicit) falls back to Term-only for
+  // A/B; anything else (unset, "1", "yes") routes the verdict through the
+  // FT path.  Mirrors the port/atpft-norm-default change (8fe431db);
+  // fix/ft-splice-unbound resolves the verify-mode mismatch that
+  // previously made this flip unsafe.
+  if (ft_norm_mode   < 0) ft_norm_mode   = atp_env_off("THVM_ATPFT_NORM");
   if (ft_norm_verify < 0) ft_norm_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
   if (ft_norm_mode || ft_norm_verify) {
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;

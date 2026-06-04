@@ -242,7 +242,16 @@ static int ft_splice_inplace_const_or_unbound_var(
   // pointer) as the NEW redex's next-sibling.  Pull it BEFORE overwriting
   // tail_last->next via ft_free_span.
   AtpFtCell *post_sibling = (tail_last != NULL) ? tail_last->next : NULL;
-  if (tail_first != NULL && tail_first != redex) {
+  // Inner span exists iff redex itself has children -- i.e. tail_last
+  // (== redex->end) is past redex in the cell chain.  For a leaf
+  // redex (end == redex) `tail_first` is the next-sibling pointer, NOT
+  // an inner-span cell, and freeing it would corrupt the parent's
+  // chain (ft_free_span would walk from sibling-head into unrelated
+  // memory).  Pre-existing bug surfaced by ft_norm_record bring-up:
+  // the ATP-test corpus exercises this regime via Sheffer rules whose
+  // RHS is a bound var (regime c, not regime a), so the leaf-redex
+  // case slipped through.
+  if (tail_first != NULL && tail_last != redex) {
     // Free the inner span [tail_first .. tail_last].  The span is
     // pre-threaded via `next` by the AtpFt invariant (ft.c stitches
     // children pre-order), so ft_free_span is O(span).  ft_free_span
