@@ -963,3 +963,41 @@ VerificationTest[
     True,
     TestID -> "nn/higher-order-grad-through-mlp"
 ]
+
+(* === LayerNorm gradient (reduce-broadcast backward) ===
+   f = Total[LN(x) . c], c = {1,2,3,4}, x = {1,2,3,4.5}.  Analytical
+   df/dx_j = c_j/s - (Sum c)/(N s) - (x_j-mu) Sum c_i(x_i-mu)/(N s^3),
+   = {-0.079553, 0.028901, 0.137355, -0.086668} (mu=2.625, s=sqrt(var+eps)). *)
+VerificationTest[
+    TInit[];
+    c = TTensorCreate[{1.0, 2.0, 3.0, 4.0}];
+    x = TRequiresGrad @ TTensorCreate[{1.0, 2.0, 3.0, 4.5}];
+    TClearGrad[x];
+    TGrad[Total[TLayerNorm[x]*c]];
+    Max @ Abs[Normal @ TTensorData @ TRealize @ TGradOf[x]
+             - {-0.079553, 0.028901, 0.137355, -0.086668}] < 1.0*^-3,
+    True,
+    TestID -> "nn/layernorm-grad-matches-analytic"
+]
+
+(* === Attention gradient (softmax backward), finite-diff self-check ===
+   d/dV of Total[Attn(Q,K,V)^2] checked against a central finite
+   difference.  Validates the softmax + matmul backward chain. *)
+VerificationTest[
+    TInit[];
+    qm = TTensorCreate[{{1.0, 0.0}, {0.0, 1.0}}];
+    km = TTensorCreate[{{1.0, 0.5}, {0.5, 1.0}}];
+    v0 = {{1.0, 2.0}, {3.0, 4.0}};
+    vT = TRequiresGrad @ TTensorCreate[v0];
+    TClearGrad[vT];
+    TGrad[Total[Total[TAttention[qm, km, vT]^2]]];
+    g = Normal @ TTensorData @ TRealize @ TGradOf[vT];
+    attF = Function[vv, First @ Normal @ TTensorData @ TRealize @
+        Total[Total[TAttention[qm, km, TTensorCreate[vv]]^2]]];
+    eps = 1.0*^-3;
+    fd = Table[(attF[v0 + eps*ArrayReshape[Flatten[UnitVector[2, i]\[TensorProduct]UnitVector[2, j]], {2, 2}]]
+              - attF[v0 - eps*ArrayReshape[Flatten[UnitVector[2, i]\[TensorProduct]UnitVector[2, j]], {2, 2}]])/(2 eps), {i, 2}, {j, 2}];
+    Max @ Abs @ Flatten[g - fd] < 5.0*^-3,
+    True,
+    TestID -> "nn/attention-grad-dv-finite-diff"
+]
