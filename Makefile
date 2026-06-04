@@ -185,18 +185,6 @@ WL_ATP_DEFINES  += -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
                    -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
                    -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM
 
-# Waldmeister-style critical-pair classification: -DATP_CP_CLASSIFY
-# ports Waldmeister's `NewClassification` ("new classification") and
-# `ClasFunctions` ("classification functions") killer predicates
-# (KillerR / KillerE / KillerRE / EChild).  Each CP is classified at
-# insertion time; a killer CP that is also rule-subsumed is dropped,
-# an EChild CP is deprioritized.  The drop is a sound subset of the
-# trivially-joinable filter, so saturation status is identical with
-# the flag on or off.  OFF by default until benchmarked: build with
-# `make ATP_CP_CLASSIFY=1` to opt in.
-ATP_CP_CLASSIFY ?=
-ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_CLASSIFY)),-DATP_CP_CLASSIFY,)
-
 # ATP auto-precedence (Waldmeister PhilMarlow / Praezedenzgenerator
 # port): -DATP_AUTO_PREC makes the ATP bench harness + WL glue
 # replace the syntactic `precedence[i]=i+1` default with a
@@ -770,8 +758,8 @@ $(BIN)/test_atp_ft_ri: tests/test_atp.c $(SRC) | $(BIN)
 # Stage 7: AtpFt-native CP queue (dual-store).  Pulls in ft_cpq.c on
 # top of the Stage 6 envelope; the THVM_ATPFT_CPQ flag enables the
 # parallel cp_packed_ft[] queue inside _.c.  The legacy cp_packed[]
-# byte queue stays populated alongside it (FV index + cp_graph mirror
-# + peek/stash consumers stay on the byte queue until Stages 8-9).
+# byte queue stays populated alongside it (FV index + peek/stash
+# consumers stay on the byte queue until Stages 8-9).
 #
 # test_ft_cpq      - push/pop/swap parity between legacy and FT views
 #                    + atp_cp_trivially_joinable_ft verdict parity.

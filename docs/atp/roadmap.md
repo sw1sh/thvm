@@ -335,8 +335,7 @@ Inputs from a 20 s AndAssoc profile under all AtpFt flags:
 * `atp_dt_*` legacy discrim tree + `acp_unpack_term` byte queue
   run alongside the AtpFt paths under dual-store.  ~25% of
   self-time directly removable once every byte-queue consumer
-  (FV-index keying, CP-graph mirror, peek/stash) migrates onto
-  the AtpFt entries.
+  (FV-index keying, peek/stash) migrates onto the AtpFt entries.
 * `atp_ft_unorient_step` returns "no fire" on 96% of its calls
   on saturating workloads.  The pos-memo catches 84% of the
   repeat calls, but each empty call still pays a flatten + memo

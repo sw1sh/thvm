@@ -3268,7 +3268,7 @@ fn long long thvm_kbo_term_weight(const KboConfig *cfg, Term t);
 // sequential memory instead of chasing the IC term's pointer graph.  The
 // ATP order-gate routes through this on the flatterm path (use_flatterm);
 // falls back to thvm_kbo for terms deeper than its flat buffer or with a
-// non-CTR/non-FVR head.  Byte-identical verdict (ATP_KBO_FLAT_SELFCHECK).
+// non-CTR/non-FVR head.  Byte-identical verdict vs thvm_kbo.
 fn KboCmp thvm_kbo_flat(Term s, Term t, const KboConfig *cfg);
 
 // Slice entrypoint: same decision as thvm_kbo_flat, but takes pre-
@@ -4241,16 +4241,6 @@ typedef struct {
   // normalization), so this IS a filter -- the candidate is
   // discarded.
   u32  n_cps_dropped_queue_subsumed;
-
-  // ATP_CP_CLASSIFY: count of CPs dropped by the Waldmeister-style
-  // critical-pair classifier (ported from `NewClassification` /
-  // `ClasFunctions`, "new classification" / "classification
-  // functions").  A CP is dropped when its killer-predicate
-  // classification carries an `Act_never`-equivalent action --
-  // the default config does this only for killer CPs that are
-  // also rule-subsumed, a sound subset of the joinable drops.
-  // Always 0 when the engine is built without -DATP_CP_CLASSIFY.
-  u32  n_cps_dropped_classified;
 
   // Count of rules whose RHS was right-reduced (composition) in place
   // by thvm_atp_interreduce.  Diagnostic for the DISCOUNT-loop
