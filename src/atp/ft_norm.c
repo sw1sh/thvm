@@ -73,7 +73,8 @@ static void ft_clear_subst_fresh(AtpFtCell *root) {
 // --- find_redex_ft --------------------------------------------------
 //
 // Walk `root` pre-order via `cell->next`.  For each cell whose
-// SUBST_FRESH bit is clear, try every rule's LHS.  If a rule matches,
+// SUBST_FRESH bit is clear, try the rule LHSs in the slice
+// [slice_first, slice_first + slice_count).  If a rule matches,
 // fill `subst_out`, set `redex_out` to the cell and `parent_out` to
 // the cell whose `next` reaches the redex (NULL for the root case),
 // return 1.  Return 0 if no redex.
@@ -81,14 +82,27 @@ static void ft_clear_subst_fresh(AtpFtCell *root) {
 // `parent_out`: the cell BEFORE the redex in the pre-order chain.  We
 // track it as we walk; it's the cell whose `next` is the current
 // candidate.  For the root, no predecessor exists -> NULL.
+//
+// The full-range entry point (`atp_rewrite_normalize_ft`) passes
+// slice_first=0 / slice_count=s->n_rules; the slice entry point
+// (`atp_rewrite_normalize_ft_slice`) passes the caller's [first,count)
+// directly.  Iterating only the slice is the whole point of the slice
+// path -- interreduce wants to rewrite an EXISTING rule against the
+// just-added rules, NOT against itself (would loop) or against the
+// older rules (those gave it CPs; rewriting through them is a no-op
+// since the rule is already in normal form w.r.t. the older R).
 static int find_redex_ft(AtpState        *s,
                          AtpFtCell       *root,
+                         u32              slice_first,
+                         u32              slice_count,
                          AtpFtCell      **parent_out,
                          AtpFtCell      **redex_out,
                          u32             *rule_out,
                          AtpFtSubst      *subst_buf) {
   AtpFtCell *end_after = (root->end != NULL) ? root->end->next : NULL;
   AtpFtCell *prev = NULL;
+  u32 slice_end = slice_first + slice_count;
+  if (slice_end > s->n_rules) slice_end = s->n_rules;
   for (AtpFtCell *p = root; p != NULL && p != end_after; p = p->next) {
     if ((p->flags & ATPFT_FLAG_SUBST_FRESH) != 0u) {
       prev = p;
@@ -100,7 +114,7 @@ static int find_redex_ft(AtpState        *s,
       prev = p;
       continue;
     }
-    for (u32 r = 0; r < s->n_rules; r++) {
+    for (u32 r = slice_first; r < slice_end; r++) {
       AtpFtCell *lhs = s->lhs_ft[r];
       if (lhs == NULL) continue;
       ft_subst_reset(subst_buf);
@@ -177,33 +191,56 @@ static int find_redex_ft_via_ri(AtpState        *s,
 #endif
 
 AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap);
-AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
+AtpFtCell *atp_rewrite_normalize_ft_slice(AtpState *s, AtpFtCell *t,
+                                          u32 slice_first, u32 slice_count,
+                                          u32 step_cap);
+
+// Slice-aware fixpoint.  Rewrites `t` against only the rule slice
+// [slice_first, slice_first + slice_count) of s->lhs_ft / s->rhs_ft.
+// Mirrors the Term-side `atp_proof_rewrite_step_slice` /
+// `atp_rewrite_normalize_slice_record` calling convention used by
+// interreduce, except this path does NOT record TRACE_NORM_STEP --
+// callers (e.g. the connectedness check) that want only the FT-side
+// normal form invoke this directly; norm-step recording stays on the
+// Term-side path until the FT loop owns the trace.
+//
+// When slice_first==0 && slice_count==s->n_rules this MUST be
+// bench-neutral with `atp_rewrite_normalize_ft`: the linear scan
+// iterates the same range, and the public `atp_rewrite_normalize_ft`
+// delegates here in that case.  (The RI/discrim-tree descent path is
+// skipped on slice calls -- the rule_index reflects the FULL R, so
+// a hit could resolve to an out-of-slice rule and the linear-scan
+// fallback would loop.  In the full-range delegation we keep RI on.)
+AtpFtCell *atp_rewrite_normalize_ft_slice(AtpState *s, AtpFtCell *t,
+                                          u32 slice_first, u32 slice_count,
+                                          u32 step_cap) {
   if (t == NULL) return NULL;
-  if (s->n_rules == 0u) return t;
+  if (slice_count == 0u) return t;
+  if (slice_first >= s->n_rules) return t;
+  if (slice_first + slice_count > s->n_rules) {
+    slice_count = s->n_rules - slice_first;
+  }
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   // Entry-clear pass.
   ft_clear_subst_fresh(t);
-  // Stack-allocate an AtpFtSubst.  We use a u8 buffer sized to hold a
-  // full AtpFtSubst -- the actual type is defined in ft_match.c and
-  // sized by ATPFT_MAX_VARS=64.  sizeof(AtpFtSubst) at this TU sees
-  // the full definition because ft_norm.c is included AFTER ft_match.c
-  // in every consumer TU.
+  // Stack-allocate an AtpFtSubst.  See AtpFtSubst declaration in
+  // ft_match.c; we zero before first use per the Stage 5 contract.
   AtpFtSubst subst;
-  // Zero-init: AtpFtSubst's `bind[]` must be all NULL on entry, `wm`
-  // must be 0.  Stage 5's contract: callers MUST zero the struct
-  // before first use.
   memset(&subst, 0, sizeof(subst));
 
+  int use_full_range = (slice_first == 0u && slice_count == s->n_rules);
 #ifdef THVM_ATPFT_RI
   // Stage 6b: opt-in via THVM_ATPFT_RI=1 (env knob).  Default OFF so
   // the baseline Stage 6 linear-scan path is unchanged for the default
-  // build (which also has THVM_ATPFT_RI not defined at all).
+  // build (which also has THVM_ATPFT_RI not defined at all).  The RI
+  // path indexes the FULL rule set; only enable it when the slice IS
+  // the full range.
   static int ri_env_cached = -1;
   if (ri_env_cached < 0) {
     const char *env = getenv("THVM_ATPFT_RI");
     ri_env_cached = (env != NULL && env[0] != '0') ? 1 : 0;
   }
-  int use_ri = ri_env_cached;
+  int use_ri = ri_env_cached && use_full_range;
   if (use_ri) {
     // Ensure the Term-side rule index is current; rebuild on dirty.
     if (s->rule_index == NULL || s->rule_index_dirty ||
@@ -213,6 +250,8 @@ AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
     // Refresh FT pattern mirror from s->lhs_ft[].
     atp_ri_ft_sync(s);
   }
+#else
+  (void)use_full_range;
 #endif
 
   for (u32 i = 0; i < step_cap; i++) {
@@ -224,12 +263,15 @@ AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
     if (use_ri) {
       hit = find_redex_ft_via_ri(s, t, &parent, &redex, &rule, &subst);
       // Folded rule-index or stale: fall back to linear scan THIS step.
-      if (!hit) hit = find_redex_ft(s, t, &parent, &redex, &rule, &subst);
+      if (!hit) hit = find_redex_ft(s, t, slice_first, slice_count,
+                                    &parent, &redex, &rule, &subst);
     } else {
-      hit = find_redex_ft(s, t, &parent, &redex, &rule, &subst);
+      hit = find_redex_ft(s, t, slice_first, slice_count,
+                          &parent, &redex, &rule, &subst);
     }
 #else
-    hit = find_redex_ft(s, t, &parent, &redex, &rule, &subst);
+    hit = find_redex_ft(s, t, slice_first, slice_count,
+                        &parent, &redex, &rule, &subst);
 #endif
     if (!hit) break;
     AtpFtCell *rhs_tmpl = s->rhs_ft[rule];
@@ -237,6 +279,14 @@ AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
     if (new_root != NULL) t = new_root;
   }
   return t;
+}
+
+AtpFtCell *atp_rewrite_normalize_ft(AtpState *s, AtpFtCell *t, u32 step_cap) {
+  if (t == NULL) return NULL;
+  if (s->n_rules == 0u) return t;
+  // Full-range delegation -- bench-neutral by construction (same scan
+  // bounds, same RI path, same memset).
+  return atp_rewrite_normalize_ft_slice(s, t, 0u, s->n_rules, step_cap);
 }
 
 #endif // THVM_ATPFT_NORM
