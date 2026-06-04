@@ -1,10 +1,10 @@
 # TPTP Import
 
 A practitioner's guide to the TPTP (Thousands of Problems for Theorem
-Provers) input path: how to point `TFindProof` (and `TFindProofSMT`) at
-a benchmark `.p` file or an inline string, what subset of the TPTP
-grammar is supported, and how the imported clauses become the
-`Axioms / Conjecture` shape thvm's ATP and SMT entries consume.
+Provers) input path: how to point `TFindProof` at a benchmark `.p`
+file or an inline string, what subset of the TPTP grammar is supported,
+and how the imported clauses become the `Axioms / Conjecture` shape
+thvm's ATP and SMT entries consume.
 
 Abbreviations used throughout (spelled out on first appearance):
 
@@ -24,8 +24,8 @@ quotes timings against TPTP slugs like `LCL129-1.p` or
 result, or use thvm against a problem they already have in TPTP form,
 needs an importer.
 
-The importer also lets thvm's two entries — `TFindProof` (equational
-saturator) and `TFindProofSMT` (QF_UF decision procedure, see
+The importer also lets `TFindProof` — both the default equational
+saturator and the `Method -> "SMT"` QF_UF decision procedure (see
 `docs/tutorial/smt.md`) — accept a `File["..."]` or inline string
 without forcing the caller to hand-translate clauses to WL.
 
@@ -122,21 +122,22 @@ the completed rule set as a list of `Inactive[Equal]` equations.
 ### 3.6 Inline string, ground SMT path
 
 ```mathematica
-TFindProofSMT[
+TFindProof[
     "cnf(a1, axiom, a = b).
      cnf(a2, axiom, b = c).
-     cnf(g,  negated_conjecture, a != c)."]
+     cnf(g,  negated_conjecture, a != c).", Method -> "SMT"]
 (* -> <|"Status" -> "Proved", "Method" -> "CongruenceClosure", ...|> *)
 ```
 
-Ground inputs (no `X`-style universal variables) route through
-congruence closure for a near-linear-time decision instead of
-saturation. Non-ground inputs are rejected with a clear message:
+Under `Method -> "SMT"`, ground inputs (no `X`-style universal
+variables) route through congruence closure for a near-linear-time
+decision instead of saturation. Non-ground inputs are rejected with a
+clear message:
 
 ```mathematica
-TFindProofSMT[
-    "cnf(a, axiom, and(X, Y) = and(Y, X))."]
-(* TFindProofSMT::nonground: ... -- use TFindProof instead. *)
+TFindProof[
+    "cnf(a, axiom, and(X, Y) = and(Y, X)).", Method -> "SMT"]
+(* TFindProof::nonground: ... -- drop Method -> "SMT". *)
 (* -> $Failed *)
 ```
 
@@ -243,7 +244,7 @@ status; the importer ignores these (only the clause set is parsed).
 | Clause head | Parser support | Prover support | Notes |
 |-|-|-|-|
 | `cnf` (single equational literal) | YES | YES | The UEQ fragment thvm's saturator targets. |
-| `cnf` (multi-literal disjunction) | YES | NO at the UEQ layer | Returns `Or[lit1, lit2, ...]`. Predicate atoms and negated literals (`~atom`) supported. The saturator is UEQ-only so it cannot consume `Or[...]` directly; route through `TFindProofSMT` for ground inputs. |
+| `cnf` (multi-literal disjunction) | YES | NO at the UEQ layer | Returns `Or[lit1, lit2, ...]`. Predicate atoms and negated literals (`~atom`) supported. The saturator is UEQ-only so it cannot consume `Or[...]` directly; route through `TFindProof[..., Method -> "SMT"]` for ground inputs. |
 | `fof` (single `! [...] : (l = r)` or bare equation) | YES | YES | Iter 4 (commit 98bf9243). |
 | `fof` (full Boolean combination: `&` / `\|` / `~` / `=>` / `<=` / `<=>` / `<~>` / `~&` / `~\|`) | YES | YES at the SMT layer | Returns nested `And` / `Or` / `Not` / `Implies` / `Equivalent` / `Xor` (with `~&` -> `Not[And[..]]`, `~\|` -> `Not[Or[..]]`). `TSmtDecide` handles ground Boolean combinations of `Equal`/`Unequal` atoms via DPLL(T). |
 | `fof` (existentials) | YES (structural) | NO | Inner `? [V1, ..., Vn] : body` becomes `Exists[{v1, ...}, body]` with bound variables as fresh `Unique[]` symbols (proper scoping via snapshot+restore of the per-clause var map). Leading universals (`! [...]`) are still stripped; inner `! [...]` becomes `ForAll[...]`. Downstream consumers must skolemize for ATP/SMT use. |
@@ -314,7 +315,7 @@ For TPTP **UEQ** division benchmarks the importer + saturator is a
 complete drop-in: every UEQ problem parses, and the standard ATP
 techniques apply. For wider TPTP divisions, coverage tracks the
 underlying engine: equational shape -> works; Boolean-combination
-ground shape -> route through `TFindProofSMT`; everything else
+ground shape -> route through `TFindProof[..., Method -> "SMT"]`; everything else
 (typed, higher-order, modal, general first-order with non-equality
 predicates) is unsupported.
 
@@ -449,7 +450,7 @@ before parsing.
 
 | Construct | Status |
 |-|-|
-| `cnf` / `fof` with non-equational predicates fed into the UEQ saturator | Parsed (as `"p"[args]` terms / `Or[...]`), but `TFindProof` will reject -- the saturator is unit-equational. Use `TFindProofSMT` for ground Boolean combinations. |
+| `cnf` / `fof` with non-equational predicates fed into the UEQ saturator | Parsed (as `"p"[args]` terms / `Or[...]`), but the default `TFindProof` saturator will reject -- it is unit-equational. Use `TFindProof[..., Method -> "SMT"]` for ground Boolean combinations. |
 | `tpi` (process instruction) | Silently skipped. |
 | `$let` / `$ite_f` with formula args | Mostly parsed via the generic compound path; formulas as term arguments would wedge the parser, so the anti-loop guard in `readArgs` bails out on the first non-comma after a parse step, returning a partial term. |
 | Equational rewriting modulo theory annotations | Not part of UEQ; not supported. |
@@ -466,10 +467,10 @@ before parsing.
 |>
 ```
 
-Both `TFindProof` and `TFindProofSMT` consume this directly. When
-`Conjecture` is `None`, `TFindProof[file]` falls through to the
-single-argument completion form (saturate the axioms, return the
-derived lemmas).
+`TFindProof` consumes this directly (with `Method -> "SMT"` for the
+ground congruence-closure path). When `Conjecture` is `None`,
+`TFindProof[file]` falls through to the single-argument completion form
+(saturate the axioms, return the derived lemmas).
 
 ## 7. String heads, not namespaced Symbols
 
@@ -500,9 +501,9 @@ a fresh `Pattern[Unique["v"], Blank[]]` per occurrence, so the same
 name (`X`) in different clauses gets different WL variables and the
 axioms cannot accidentally cross-bind.
 
-At dispatch time, the file/string overloads of `TFindProof` /
-`TFindProofSMT` internally convert String heads to Symbols in a
-private context (`THVMLink\`ATP\`Private\`Tptp$and` etc.) before
+At dispatch time, the file/string overloads of `TFindProof`
+internally convert String heads to Symbols in a private context
+(`THVMLink\`ATP\`Private\`Tptp$and` etc.) before
 calling the encoder, since the WL `ProofObject` verifier expects
 Symbol heads. The conversion is one-way: the parser's user-facing
 output stays String-headed for clean `InputForm` display. Underscored
@@ -513,11 +514,11 @@ rejects identifiers containing `_`.
 ## 8. The dispatch surface
 
 ```mathematica
-TFindProof[File["path.p"], opts]           (* ATP, file *)
-TFindProof["...cnf/fof source...", opts]   (* ATP, inline *)
+TFindProof[File["path.p"], opts]                  (* ATP, file *)
+TFindProof["...cnf/fof source...", opts]          (* ATP, inline *)
 
-TFindProofSMT[File["path.p"]] (* SMT, file *)
-TFindProofSMT["...source..."] (* SMT, inline *)
+TFindProof[File["path.p"], Method -> "SMT"]       (* SMT, file *)
+TFindProof["...source...", Method -> "SMT"]       (* SMT, inline *)
 ```
 
 `opts` is the usual `TFindProof` option set (see
@@ -550,9 +551,8 @@ same `Axioms / Conjecture` pair.
 - `wl/THVMLink/Kernel/ATP.wl` -- the `TFindProof[File | string]`
   overloads + `tptpDispatch` helper that routes to the appropriate
   ATP entry.
-- `wl/THVMLink/Kernel/ATP/SMT.wl` -- the parallel `TFindProofSMT[File
-  | string]` overloads with the ground-input gate (see
-  `docs/tutorial/smt.md`).
+- `wl/THVMLink/Kernel/ATP/SMT.wl` -- the `tptpDispatchSMT` ground-input
+  gate behind `Method -> "SMT"` (see `docs/tutorial/smt.md`).
 - `wl/THVMLink/Tests/atp_tptp.wlt` -- 30 `VerificationTest`s
   exercising the cnf / fof / tff / tcf / thf / ncf / include /
   sequent paths plus the inline-string / file / no-conjecture /

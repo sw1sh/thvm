@@ -1534,6 +1534,108 @@ VerificationTest[
     TestID -> "ATP/returnspec/all-projects-every-spec"
 ]
 
+(* ----- "Counterexample" return spec: countermodel from a saturated
+   completion (the equational dual of "ProofObject").  When the run
+   SATURATES into a convergent term-rewriting system whose normal forms
+   separate the goal's two sides, the goal is disproved. *)
+
+(* Involution g(g(x))=x is a one-rule convergent TRS; g[a]==a is NOT a
+   consequence, so the saturated system refutes it (NF(g[a])=g[a] =/= a) and
+   the initial term algebra is finite: a 2-element model {a, g(a)} in
+   FindFiniteModels structure, g -> {1, 0} (g(0)=1, g(1)=0), a -> 0. *)
+VerificationTest[
+    Module[{ce},
+        ce = TFindProof[g[a] == a, {ForAll[{x}, g[g[x]] == x]},
+            "Counterexample", TimeConstraint -> 10];
+        {Head[ce], ce["Status"], ce["Method"], ce["NormalForms"],
+         ce["Domain"], ce["Model"]}
+    ],
+    {CounterexampleObject, "Refuted", "SaturationNormalForm", {g[a], a},
+     2, <|g -> {1, 0}, a -> 0|>},
+    TestID -> "ATP/returnspec/counterexample-refutes-involution"
+]
+
+(* A genuine theorem has no counterexample: the spec is $Failed while the
+   ProofObject still verifies. *)
+VerificationTest[
+    TFindProof[g[g[g[g[a]]]] == a, {ForAll[{x}, g[g[x]] == x]},
+        "Counterexample", TimeConstraint -> 10],
+    $Failed,
+    TestID -> "ATP/returnspec/counterexample-none-for-theorem"
+]
+
+(* Soundness gate: a commutative axiom saturates WITH an unorientable
+   equation (x*y == y*x) that needs ordered rewriting.  The extractor must
+   DECLINE ($Failed) rather than risk an unsound verdict off a one-way
+   orientation. *)
+VerificationTest[
+    TFindProof[CircleTimes[a, b] == b,
+        {ForAll[{x, y}, CircleTimes[x, y] == CircleTimes[y, x]]},
+        "Counterexample", TimeConstraint -> 10],
+    $Failed,
+    TestID -> "ATP/returnspec/counterexample-declines-unorientable"
+]
+
+(* The size-reducing soundness predicate itself: orientable rules pass,
+   the commutativity variant is rejected. *)
+VerificationTest[
+    {THVMLink`ATP`Private`atpRuleSizeReducingQ[{g[g[x]], x}, {x}],
+     THVMLink`ATP`Private`atpRuleSizeReducingQ[{CenterDot[x, x], x}, {x}],
+     THVMLink`ATP`Private`atpRuleSizeReducingQ[
+        {CircleTimes[x, y], CircleTimes[y, x]}, {x, y}]},
+    {True, True, False},
+    TestID -> "ATP/returnspec/counterexample-size-reducing-predicate"
+]
+
+(* A fully GROUND problem is decided by congruence closure: the quotient is a
+   finite model, returned in FindFiniteModels structure ({a,b} merged to 0,
+   c apart as 1).  The "Counterexample" output kind routes ground -> CC
+   automatically, no Method -> "SMT" needed. *)
+VerificationTest[
+    Module[{ce = TFindProof[a == c, {a == b}, "Counterexample"]},
+        {Head[ce], ce["Method"], ce["Domain"], ce["Model"], ce["Witness"]}],
+    {CounterexampleObject, "CongruenceClosure", 2,
+     <|a -> 0, b -> 0, c -> 1|>, <|a -> 0, c -> 1|>},
+    TestID -> "ATP/returnspec/counterexample-ground-finite-model"
+]
+
+(* CounterexampleObject property interface + summary box render. *)
+VerificationTest[
+    Module[{ce = TFindProof[a == c, {a == b}, "Counterexample"]},
+        {ce["Status"], ce["Goal"], ce["Hypotheses"],
+         SubsetQ[ce["Properties"], {"Model", "Witness", "Domain"}],
+         Head[ToBoxes[ce]] =!= ToBoxes}],
+    {"Refuted", a == c, {a == b}, True, True},
+    TestID -> "ATP/returnspec/counterexample-object-interface"
+]
+
+(* Self-certifying functions (the WFR FindEquationalCounterexample analog):
+   co["FalsificationFunction"][] evaluates the goal in the model -> False,
+   co["VerificationFunction"][] evaluates the axioms in the model -> True.
+   Exercised across all three model kinds: ground congruence-closure quotient,
+   the finite saturated algebra (involution), the infinite initial term
+   algebra (idempotency), and the Boolean truth-assignment. *)
+VerificationTest[
+    {#["FalsificationFunction"][], #["VerificationFunction"][]} & /@ {
+        TFindProof[a == c, {a == b}, "Counterexample"],
+        TFindProof[g[a] == a, {ForAll[{x}, g[g[x]] == x]},
+            "Counterexample", TimeConstraint -> 10],
+        TFindProof[CenterDot[a, b] == a, {ForAll[{x}, CenterDot[x, x] == x]},
+            "Counterexample", TimeConstraint -> 10],
+        TFindProof[Implies[a == b, a == c], {}, "Counterexample"]},
+    {{False, True}, {False, True}, {False, True}, {False, True}},
+    TestID -> "ATP/returnspec/counterexample-falsify-verify-functions"
+]
+
+(* Method -> "SMT" is the ground decision surface: a CounterexampleObject on
+   refute, a "Proved" decision Association on entailment. *)
+VerificationTest[
+    {Head[TFindProof[a == c, {a == b}, Method -> "SMT"]],
+     TFindProof[a == c, {a == b, b == c}, Method -> "SMT"]["Status"]},
+    {CounterexampleObject, "Proved"},
+    TestID -> "ATP/returnspec/counterexample-method-smt-decision"
+]
+
 (* Backward compatibility: no return spec returns the bare ProofObject. *)
 VerificationTest[
     Head[TFindProof["InverseOfInverse", "AbelianGroupAxioms"]],

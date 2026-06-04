@@ -5,7 +5,7 @@ Context: THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSatEUF
 Keywords: [SMT, congruence closure, QF_UF, decision procedure, Downey-Sethi-Tarjan, equality]
-SeeAlso: [TSmtDecide, TFindProofSMT, TFindProof, SatisfiabilityInstances]
+SeeAlso: [TSmtDecide, TFindProof, SatisfiabilityInstances]
 RelatedGuides: [THVMLink]
 ---
 
@@ -20,7 +20,7 @@ $equalities$ is a list of `Equal[lhs, rhs]` literals; $disequalities$ is a list 
 - The implementation is Downey-Sethi-Tarjan: each subterm starts in its own union-find class with a use-list of compound parents whose arguments mention it.  Each merge unions two classes and propagates congruence: for every pair `(f[x1, ..., xn], f[y1, ..., yn])` in the merged class's use-list with matching head and arity, if all `xi` and `yi` are equivalent the parents merge too.  Path-compressed find + union-by-rank give the standard near-linear bound.
 - Sound and complete decision procedure for QF_UF.  Always terminates.
 - Atoms are uninterpreted: symbols (`a`, `b`, ...), nullary functions (`f[]`), and compound applications (`f[a, b]`) are all treated the same way.  No theory-specific reasoning beyond equality plus congruence.
-- For Boolean combinations of equality atoms, see [TSmtDecide]().  For entailment queries, see [TFindProofSMT]().  For variable-bearing axioms reach for [TFindProof]() (an unfailing Knuth-Bendix completion engine).
+- For Boolean combinations of equality atoms, see [TSmtDecide]().  For ground entailment queries, use [TFindProof]() with `Method -> "SMT"` (decision) or the `"Counterexample"` output kind (refuting model).  For variable-bearing axioms reach for [TFindProof]()'s default unfailing Knuth-Bendix completion engine.
 
 ## Basic Examples
 
@@ -48,7 +48,7 @@ TSatEUF[{a == b, c == d}, {}]
 ## Properties & Relations
 
 - [TSmtDecide]() is the natural lift to Boolean combinations of equality atoms via lazy DPLL(T).  The propositional kernel is Wolfram's [SatisfiabilityInstances](); each candidate model is theory-checked here through [TSatEUF]().
-- [TFindProofSMT]() reduces entailment to satisfiability: `H1, ..., Hn |= G` becomes `H1 && ... && Hn && !G`, then dispatched to [TSmtDecide]() (Boolean goal) or [TSatEUF]() (equality-literal goal).
+- [TFindProof]() with `Method -> "SMT"` reduces entailment to satisfiability: `H1, ..., Hn |= G` becomes `H1 && ... && Hn && !G`, then dispatched to [TSmtDecide]() (Boolean goal) or [TSatEUF]() (equality-literal goal).
 - For variable-bearing equational axioms (universally-quantified), congruence closure is the wrong tool: reach for the unfailing Knuth-Bendix completion at [TFindProof]() instead.
 
 ## Possible Issues

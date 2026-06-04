@@ -5,7 +5,7 @@ Context: THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSmtDecide
 Keywords: [SMT, DPLL(T), congruence closure, QF_UF, Boolean combination, decision procedure]
-SeeAlso: [TSatEUF, TFindProofSMT, TFindProof, SatisfiabilityInstances]
+SeeAlso: [TSatEUF, TFindProof, SatisfiabilityInstances]
 RelatedGuides: [THVMLink]
 ---
 
@@ -20,7 +20,7 @@ $formula$ is any combination of `Equal[lhs, rhs]` / `Unequal[lhs, rhs]` atoms vi
 - Each equality / disequality atom is abstracted as a fresh propositional variable.  The Boolean abstraction is handed to Wolfram's [SatisfiabilityInstances]() as the propositional kernel; every candidate model is theory-checked through [TSatEUF]().  On a T-conflict the exact assignment is forbidden by a blocking clause and the kernel is re-queried.
 - The loop terminates: there are <code>2^|atoms|</code> assignments and each iteration prunes one.  Sound and complete for QF_UF.
 - Operates over Wolfram's `Equal` / `Unequal` heads directly (no `Inactive` wrapping required).
-- For raw congruence closure on a flat (in)equality list, use [TSatEUF]().  For entailment queries, use [TFindProofSMT]().  For variable-bearing axioms reach for [TFindProof]().
+- For raw congruence closure on a flat (in)equality list, use [TSatEUF]().  For ground entailment queries, use [TFindProof]() with `Method -> "SMT"` (decision) or the `"Counterexample"` output kind (refuting model).  For variable-bearing axioms reach for [TFindProof]()'s default completion engine.
 
 ## Basic Examples
 
@@ -48,7 +48,7 @@ TSmtDecide[(a == b || c == d) && c == e]
 ## Properties & Relations
 
 - [TSatEUF]() is the inner theory solver.  [TSmtDecide]() wraps it in the lazy DPLL(T) loop.
-- [TFindProofSMT]() rephrases entailment `H1, ..., Hn |= G` as satisfiability of <code>H1 && ... && Hn && !G</code> and dispatches to either [TSatEUF]() (single equality literal goal) or [TSmtDecide]() (Boolean goal).
+- [TFindProof]() with `Method -> "SMT"` rephrases entailment `H1, ..., Hn |= G` as satisfiability of <code>H1 && ... && Hn && !G</code> and dispatches to either [TSatEUF]() (single equality literal goal) or [TSmtDecide]() (Boolean goal).
 - The propositional shell is Wolfram's [SatisfiabilityInstances](); the implementation does no Tseitin transformation, so deeply-nested formulas with many atoms can hit the <code>2^|atoms|</code> worst case before all conflicts are blocked.
 
 ## Possible Issues

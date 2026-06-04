@@ -43,7 +43,7 @@ not handle at all).
 ## 2. Loading
 
 All ATP-related public symbols live in `THVMLink\`ATP\``. One Get
-brings `TFindProof`, `TSatEUF`, `TSmtDecide`, `TFindProofSMT`,
+brings `TFindProof`, `TSatEUF`, `TSmtDecide`,
 `TPTPImport`, and the rest into scope by bare name:
 
 ```mathematica
@@ -118,43 +118,46 @@ each iteration prunes one.
 This is the standard lazy SMT architecture. It is sound and complete
 for QF_UF.
 
-### 3.3 `TFindProofSMT[goal, hypotheses]` -- entailment surface
+### 3.3 `TFindProof[goal, hypotheses, Method -> "SMT"]` -- entailment surface
 
 Reduces an entailment `H1, ..., Hn |= G` to a satisfiability query
-on `H1 /\ ... /\ Hn /\ ~G`:
+on `H1 /\ ... /\ Hn /\ ~G`, decided by congruence closure:
 
 ```mathematica
-TFindProofSMT[a == c, {a == b, b == c}]
+TFindProof[a == c, {a == b, b == c}, Method -> "SMT"]
 (* <|"Status" -> "Proved", "Method" -> "CongruenceClosure",
      "Goal" -> a == c, "Hypotheses" -> {...}, "Witness" -> ...|> *)
 
-TFindProofSMT[Implies[a == b && b == c, a == c]]
+TFindProof[Implies[a == b && b == c, a == c], {}, Method -> "SMT"]
 (* <|"Status" -> "Proved", "Method" -> "DPLL(T)+CongruenceClosure",
      ...|> *)
 
-TFindProofSMT[a == c, {a == b}]
-(* $Failed -- counter-model exists *)
+TFindProof[a == c, {a == b}, "Counterexample"]
+(* CounterexampleObject[<|"Domain" -> 2, "Model" -> <|a -> 0, b -> 0, c -> 1|>, ...|>]
+   -- counter-model: the quotient merges a,b (element 0) and keeps c apart (1) *)
 ```
 
-The `Method` field discloses which engine handled it: pure CC for
-equality literal goals, DPLL(T)+CC for Boolean-combination goals.
+The `Method` field of the decision Association discloses which engine
+handled it: pure CC for equality literal goals, DPLL(T)+CC for
+Boolean-combination goals.
 
 ## 4. TPTP overloads
 
-`TFindProofSMT[File["...p"]]` and `TFindProofSMT["...cnf/fof string..."]`
-parse a TPTP fragment via `TPTPImport` (see
-`wl/THVMLink/Kernel/ATP/TPTPImport.wl`) and dispatch the same way:
+`TFindProof[File["...p"], Method -> "SMT"]` and `TFindProof["...cnf/fof
+string...", Method -> "SMT"]` parse a TPTP fragment via `TPTPImport`
+(see `wl/THVMLink/Kernel/ATP/TPTPImport.wl`) and dispatch through
+congruence closure:
 
 ```mathematica
-TFindProofSMT[
+TFindProof[
     "cnf(a1, axiom, a = b).
      cnf(a2, axiom, b = c).
-     cnf(g, negated_conjecture, a != c)."]
+     cnf(g, negated_conjecture, a != c).", Method -> "SMT"]
 (* <|"Status" -> "Proved", ...|> *)
 
-TFindProofSMT[
+TFindProof[
     "fof(a1, axiom, a = b).
-     fof(g, negated_conjecture, f(a) != f(b))."]
+     fof(g, negated_conjecture, f(a) != f(b)).", Method -> "SMT"]
 (* <|"Status" -> "Proved", ...|> *)
 ```
 
@@ -163,15 +166,14 @@ A ground-gate rejects inputs with universally-quantified variables
 decision procedure:
 
 ```mathematica
-TFindProofSMT[
+TFindProof[
     "cnf(a1, axiom, and(X, Y) = and(Y, X)).
-     cnf(g, negated_conjecture, and(a, b) != and(b, a))."]
-(* TFindProofSMT::nonground: TFindProofSMT skipping non-ground input ...
-   $Failed *)
+     cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"]
+(* TFindProof::nonground: ... non-ground input ...   $Failed *)
 ```
 
-The user is pointed at `TFindProof` for variable-bearing axioms (the
-parser succeeded; only the SMT dispatch refused).
+For variable-bearing axioms drop `Method -> "SMT"` and use the default
+completion engine (the parser succeeded; only the SMT dispatch refused).
 
 ## 5. `Method -> "SMT"` in `TFindProof`
 
@@ -198,11 +200,11 @@ disequality whose two sides collapsed) is not a proof tree.
 
 | Input shape                                | Use                            |
 |--------------------------------------------|--------------------------------|
-| Ground equational, single goal             | `Method -> "SMT"` (or `TFindProofSMT`) |
-| Ground, Boolean combination of (in)equalities | `TSmtDecide` / `TFindProofSMT` |
+| Ground equational, single goal             | `TFindProof[g, h, Method -> "SMT"]` |
+| Ground, Boolean combination of (in)equalities | `TSmtDecide` / `TFindProof[g, h, Method -> "SMT"]` |
 | Variable-bearing equational axioms         | `TFindProof` (default)         |
 | TPTP UEQ benchmark with universal vars     | `TFindProof[File["...p"]]`     |
-| TPTP ground problem                        | `TFindProofSMT[File["...p"]]`  |
+| TPTP ground problem                        | `TFindProof[File["...p"], Method -> "SMT"]` |
 
 ## 7. Scope and limits
 
@@ -225,8 +227,8 @@ What is NOT decided:
 ## 8. Where the code lives
 
 - `wl/THVMLink/Kernel/ATP/SMT.wl` -- the package. `TSatEUF`,
-  `TSmtDecide`, `TFindProofSMT`, the TPTP overloads, the DPLL(T)
-  loop, and the DST procedure.
+  `TSmtDecide`, the `atpSmtEntail` helper behind `Method -> "SMT"`,
+  the TPTP dispatch, the DPLL(T) loop, and the DST procedure.
 - `wl/THVMLink/Kernel/ATP.wl` -- the `Method -> "SMT"` guard in
   `TFindProof`.
 - `wl/THVMLink/Tests/atp_smt.wlt` -- 27 `VerificationTest`s covering

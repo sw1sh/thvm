@@ -14,13 +14,14 @@
                              forces some declared disequality to
                              collapse) or "SAT" with the inferred
                              equivalence classes.
-     TFindProofSMT[query]    Convenience surface: decide a single
-                             ground equational goal under a list
-                             of ground hypotheses.  Returns a
-                             small ProofObject-shaped Association
-                             on UNSAT (with the participating
-                             hypotheses + diseq witness) and
-                             $Failed on SAT.
+     TSmtDecide[formula]     Decide a Boolean combination of
+                             equality atoms via lazy DPLL(T).
+
+   The entailment surface is reached through TFindProof, not a
+   separate symbol: TFindProof[goal, hyps, Method -> "SMT"] decides a
+   ground entailment by congruence closure (the private atpSmtEntail
+   helper here), and TFindProof[goal, hyps, "Counterexample"] returns
+   the refuting CounterexampleObject.
 
    Why this is in ATP/
      Congruence closure is the equality-theory satisfiability
@@ -44,27 +45,15 @@ TSatEUF::usage =
     "classes of subterms, on UNSAT a \"Witness\" key naming the " <>
     "disequality whose two sides collapsed.";
 
-TFindProofSMT::usage =
-    "TFindProofSMT[goal, hypotheses] (goal an Equal[...] or " <>
-    "Unequal[...]) decides the ground entailment hypotheses |= goal " <>
-    "by reducing it to a QF_UF satisfiability query: assert each " <>
-    "hypothesis, assert the negation of goal, and run congruence " <>
-    "closure.  Returns a small ProofObject-shaped Association on " <>
-    "UNSAT, $Failed on SAT.  TFindProofSMT[\"...cnf/fof string...\"] " <>
-    "and TFindProofSMT[File[\"path.p\"]] parse a TPTP fragment via " <>
-    "TPTPImport and dispatch the same way -- the " <>
-    "input must be ground (no variables) since congruence closure " <>
-    "is a quantifier-free decision procedure; non-ground inputs " <>
-    "return $Failed with a console message.";
+TFindProof::nonground =
+    "TFindProof Method -> \"SMT\" skipping non-ground input: the term `1` " <>
+    "contains a Pattern[]/Blank[] variable.  Congruence closure is a " <>
+    "quantifier-free decision procedure -- use the default completion engine " <>
+    "for variable-bearing axioms.";
 
-TFindProofSMT::nonground =
-    "TFindProofSMT skipping non-ground input: the term `1` contains a " <>
-    "Pattern[]/Blank[] variable.  Congruence closure is a quantifier-" <>
-    "free decision procedure -- use TFindProof for variable-bearing " <>
-    "axioms.";
-
-TFindProofSMT::noconjecture =
-    "TFindProofSMT requires a conjecture in the input; got axioms only.";
+TFindProof::noconjecture =
+    "TFindProof Method -> \"SMT\" requires a conjecture in the input; got " <>
+    "axioms only.";
 
 TSmtDecide::usage =
     "TSmtDecide[formula] decides a quantifier-free Boolean " <>
@@ -234,12 +223,21 @@ TSatEUF[eqs_List, diseqs_List] :=
         ]
     ]
 
-(* Single non-list hypothesis: auto-wrap (matches iter 68-70 shape
-   across TFindProof / TRelevantAxioms / TATP).  Iter 72. *)
-TFindProofSMT[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
-    TFindProofSMT[goal, {hyp}];
+(* ----- atpSmtEntail: the shared SMT entailment decider -----
+   The implementation behind TFindProof[goal, hyps, Method -> "SMT"] and the
+   ground branch of TFindProof[goal, hyps, "Counterexample"].  Decides a ground
+   entailment hyps |= goal by congruence closure (or DPLL(T) for a Boolean
+   combination):
+     - entailment holds  -> a small "Proved" decision Association;
+     - entailment fails   -> a CounterexampleObject built from the refuting
+                             model (the equational dual of the ProofObject);
+     - malformed input    -> $Failed. *)
 
-TFindProofSMT[goal_, hypotheses_List : {}] :=
+(* Single non-list hypothesis: auto-wrap. *)
+atpSmtEntail[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
+    atpSmtEntail[goal, {hyp}];
+
+atpSmtEntail[goal_, hypotheses_List : {}] :=
     Block[{eqs, diseqs, res},
         {eqs, diseqs} = collectLiterals[
             Append[hypotheses, negate[goal]]
@@ -247,7 +245,8 @@ TFindProofSMT[goal_, hypotheses_List : {}] :=
         If[ eqs === $Failed,
             $Failed,
             res = TSatEUF[eqs, diseqs];
-            If[ res["Status"] === "UNSAT",
+            Which[
+                res["Status"] === "UNSAT",
                 <|
                     "Status"     -> "Proved",
                     "Method"     -> "CongruenceClosure",
@@ -255,7 +254,14 @@ TFindProofSMT[goal_, hypotheses_List : {}] :=
                     "Hypotheses" -> hypotheses,
                     "Witness"    -> res["Witness"]
                 |>,
-                $Failed
+                (* SAT: hypotheses /\ ~goal is satisfiable, so the goal is NOT
+                   entailed.  Build a CounterexampleObject from the congruence-
+                   closure quotient -- a finite refuting model in FindFiniteModels
+                   structure (the ground analog of the finite algebra
+                   FindEquationalCounterexample returns). *)
+                res["Status"] === "SAT",
+                atpGroundCounterexample[goal, hypotheses],
+                True, $Failed
             ]
         ]
     ]
@@ -270,9 +276,8 @@ collectLiterals[lits_List] := Block[{e = {}, d = {}, l},
             (* Pre-evaluated True literals (e.g. a == a -> True or
                Unequal[1, 2] -> True after WL evaluates) are vacuously
                satisfied and can be skipped without affecting the
-               theory query.  Matches iter-57's TSatEUF preprocess
-               shape so an `a == a` hypothesis no longer kills the
-               whole TFindProofSMT call. *)
+               theory query.  Matches the TSatEUF preprocess shape so
+               an `a == a` hypothesis no longer kills the whole call. *)
             l === True,          Null,
             MatchQ[l, _Equal],   AppendTo[e, l],
             MatchQ[l, _Unequal], AppendTo[d, l],
@@ -283,32 +288,24 @@ collectLiterals[lits_List] := Block[{e = {}, d = {}, l},
     {e, d}
 ]
 
-(* ----- TPTP-string / File overloads -----
-   TPTPImport returns clauses with universally-quantified
-   variables as Pattern[Unique[], Blank[]] expressions, which
-   congruence closure cannot handle (it is a ground decision
-   procedure).  Reject any clause that contains a Blank[] head
-   so the user gets a clear message instead of an internal
-   crash. *)
-
-TFindProofSMT[File[path_String]] :=
-    tptpDispatchSMT @ TPTPImport[File[path]]
-
-TFindProofSMT[s_String] /;
-        StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
-    tptpDispatchSMT @ TPTPImport[s]
+(* ----- TPTP dispatch (ground SMT path) -----
+   Reached from tptpDispatch (ATP.wl) when TFindProof gets a TPTP File / cnf-
+   fof string under Method -> "SMT".  TPTPImport returns clauses with
+   universally-quantified variables as Pattern[Unique[], Blank[]] expressions,
+   which congruence closure cannot handle (it is a ground decision procedure);
+   reject any non-ground clause with TFindProof::nonground rather than crash. *)
 
 tptpDispatchSMT[imported_Association] := Block[
     {axioms = imported["Axioms"], conj = imported["Conjecture"],
      nonGround},
     Which[
         conj === None,
-            Message[TFindProofSMT::noconjecture]; $Failed,
+            Message[TFindProof::noconjecture]; $Failed,
         (nonGround = SelectFirst[Append[axioms, conj], ! groundQ[#] &,
             None]) =!= None,
-            Message[TFindProofSMT::nonground, nonGround]; $Failed,
+            Message[TFindProof::nonground, nonGround]; $Failed,
         True,
-            TFindProofSMT[conj, axioms]
+            atpSmtEntail[conj, axioms]
     ]
 ]
 
@@ -387,21 +384,28 @@ modelToLiterals[model_Association] := Block[{e = {}, d = {}},
     {e, d}
 ]
 
-(* TFindProofSMT overload taking a Boolean-combination goal.  An
-   entailment hyps |= phi is UNSAT of hyps /\ ~phi -- ask
-   TSmtDecide on that. *)
+(* Boolean-combination goal.  An entailment hyps |= phi is UNSAT of
+   hyps /\ ~phi -- ask TSmtDecide on that. *)
 
-TFindProofSMT[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File],
+atpSmtEntail[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File],
         hypotheses_List : {}] :=
     Block[{res = TSmtDecide[And @@ Append[hypotheses, Not[goal]]]},
-        If[ res["Status"] === "UNSAT",
+        Which[
+            res["Status"] === "UNSAT",
             <|
                 "Status"     -> "Proved",
                 "Method"     -> "DPLL(T)+CongruenceClosure",
                 "Goal"       -> goal,
                 "Hypotheses" -> hypotheses
             |>,
-            $Failed
+            (* SAT: hyps /\ ~goal has a model -- the goal is not entailed.
+               TSmtDecide certified a satisfying truth assignment over the
+               equality atoms; return it as the refuting CounterexampleObject.
+               No finite algebra here, so "Setup" carries the assignment. *)
+            res["Status"] === "SAT",
+            CounterexampleObject["DPLL(T)+CongruenceClosure", goal, hypotheses,
+                <|"Setup" -> res["Model"], "Counterexample" -> res["Model"]|>],
+            True, $Failed
         ]
     ]
 

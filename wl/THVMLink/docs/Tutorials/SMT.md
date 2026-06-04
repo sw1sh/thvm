@@ -7,7 +7,7 @@ Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/SMT
 Keywords: [SMT, congruence closure, QF_UF, DPLL(T), Downey-Sethi-Tarjan, TPTP, equational, decision procedure]
 RelatedGuides: [THVMLink]
-RelatedTutorials: [ATP, Overview]
+RelatedTutorials: [ATP, Overview, Disproof]
 ---
 
 ## What the SMT surface covers
@@ -18,9 +18,9 @@ When the conjecture and every axiom are *ground* - no variables - the problem co
 
 - [TSatEUF]() - raw decision procedure over a list of equalities and disequalities.
 - [TSmtDecide]() - DPLL(T) lift to arbitrary Boolean combinations of equality atoms.
-- [TFindProofSMT]() - entailment surface that reduces `H |= G` to satisfiability of `H && !G`.
+- [TFindProof]() with `Method -> "SMT"` - the entailment surface that reduces `H |= G` to satisfiability of `H && !G`, deciding it by congruence closure.
 
-The same engines are reachable from [TFindProof]() via `Method -> "SMT"`. TPTP problem files drop in directly: `File["...p"]` or a `cnf/fof` string at any of the three entries triggers the shared TPTP parser before dispatch.
+TPTP problem files drop in directly: `File["...p"]` or a `cnf/fof` string at [TFindProof]() (with `Method -> "SMT"` for the ground SMT path) triggers the shared TPTP parser before dispatch.
 
 ## Setting up
 
@@ -82,54 +82,56 @@ The algorithm is the textbook lazy DPLL(T) shell: each equality/disequality atom
 
 ## Entailment surface
 
-[TFindProofSMT]() reduces an entailment `H1, ..., Hn |= G` to a satisfiability query on `H1 && ... && Hn && !G`:
+The ground entailment surface is reached through [TFindProof](): `Method -> "SMT"` reduces `H1, ..., Hn |= G` to a satisfiability query on `H1 && ... && Hn && !G` and decides it by congruence closure (or DPLL(T) for a Boolean goal). It returns a `"Proved"` decision Association when the entailment holds:
 
 ```wl
-TFindProofSMT[a == c, {a == b, b == c}]
+TFindProof[a == c, {a == b, b == c}, Method -> "SMT"]
 ```
 <!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", ...|> -->
 
 ```wl
-TFindProofSMT[Implies[a == b && b == c, a == c]]
+TFindProof[Implies[a == b && b == c, a == c], {}, Method -> "SMT"]
 ```
 <!-- => <|"Status" -> "Proved", "Method" -> "DPLL(T)+CongruenceClosure", ...|> -->
 
-```wl
-TFindProofSMT[a == c, {a == b}]
-```
-<!-- => $Failed - counter-model exists -->
+A non-entailment is refuted with a [CounterexampleObject]() whose `"Model"` is the congruence-closure quotient as a finite algebra in [FindFiniteModels]() structure ({a, b} merged to element 0, c apart as element 1). The `"Counterexample"` output kind asks for it directly:
 
-The `Method` field discloses which engine handled the call: pure congruence closure for equality-literal goals, DPLL(T) + congruence closure for Boolean-combination goals.
+```wl
+TFindProof[a == c, {a == b}, "Counterexample"]
+```
+<!-- => CounterexampleObject[<|"Domain" -> 2, "Model" -> <|a -> 0, b -> 0, c -> 1|>, ...|>] -->
+
+The [Disproof](paclet:WolframInstitute/THVMLink/tutorial/Disproof) tech note covers the `CounterexampleObject` and the quantified case. The `"Method"` field of the decision Association discloses which engine handled the call: pure congruence closure for equality-literal goals, DPLL(T) + congruence closure for Boolean-combination goals.
 
 ## TPTP overloads
 
-`TFindProofSMT[File["...p"]]` and `TFindProofSMT["...cnf/fof string..."]` route through the same TPTP parser the equational engine uses, then dispatch the same way:
+`TFindProof[File["...p"], Method -> "SMT"]` and `TFindProof["...cnf/fof string...", Method -> "SMT"]` route through the same TPTP parser the equational engine uses, then dispatch through congruence closure:
 
 ```wl
-TFindProofSMT[
+TFindProof[
     "cnf(a1, axiom, a = b).
      cnf(a2, axiom, b = c).
-     cnf(g, negated_conjecture, a != c)."]
+     cnf(g, negated_conjecture, a != c).", Method -> "SMT"]
 ```
 <!-- => <|"Status" -> "Proved", ...|> -->
 
 ```wl
-TFindProofSMT[
+TFindProof[
     "fof(a1, axiom, a = b).
-     fof(g, negated_conjecture, f(a) != f(b))."]
+     fof(g, negated_conjecture, f(a) != f(b)).", Method -> "SMT"]
 ```
 <!-- => <|"Status" -> "Proved", ...|> -->
 
 A ground-gate rejects inputs with universally-quantified variables (`Pattern` / `Blank` heads) - congruence closure is a quantifier-free decision procedure:
 
 ```wl
-TFindProofSMT[
+TFindProof[
     "cnf(a1, axiom, and(X, Y) = and(Y, X)).
-     cnf(g, negated_conjecture, and(a, b) != and(b, a))."]
+     cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"]
 ```
-<!-- => TFindProofSMT::nonground; the user is redirected to TFindProof -->
+<!-- => TFindProof::nonground; reach for the default completion engine -->
 
-The parser succeeded; only the SMT dispatch refused. For variable-bearing axioms reach for [TFindProof]().
+The parser succeeded; only the SMT dispatch refused. For variable-bearing axioms drop `Method -> "SMT"` and use the default completion engine.
 
 ## `Method -> "SMT"` in `TFindProof`
 
@@ -151,11 +153,11 @@ Default `TFindProof` (no `Method`) still goes to the saturator and returns a Wol
 
 | Input shape                                    | Use                                              |
 |------------------------------------------------|--------------------------------------------------|
-| Ground equational, single goal                 | `Method -> "SMT"` or [TFindProofSMT]()           |
-| Ground, Boolean combination of (in)equalities  | [TSmtDecide]() or [TFindProofSMT]()              |
+| Ground equational, single goal                 | `TFindProof[g, h, Method -> "SMT"]`              |
+| Ground, Boolean combination of (in)equalities  | [TSmtDecide]() or `TFindProof[g, h, Method -> "SMT"]` |
 | Variable-bearing equational axioms             | [TFindProof]() (default)                         |
 | TPTP UEQ benchmark with universal vars         | `TFindProof[File["...p"]]`                       |
-| TPTP ground problem                            | `TFindProofSMT[File["...p"]]`                    |
+| TPTP ground problem                            | `TFindProof[File["...p"], Method -> "SMT"]`      |
 
 ## Scope and limits
 

@@ -1,5 +1,5 @@
-(* QF_UF / congruence-closure tests for TSatEUF and
-   TFindProofSMT.  Each VerificationTest is
+(* QF_UF / congruence-closure tests for TSatEUF, TSmtDecide, and the
+   TFindProof Method -> "SMT" entailment surface.  Each VerificationTest is
    self-contained; the file is exercised by wl/THVMLink/Tests/run.wls. *)
 
 VerificationTest[
@@ -60,15 +60,20 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Head @ TFindProofSMT[a == c, {a == b, b == c}],
+    Head @ TFindProof[a == c, {a == b, b == c}, Method -> "SMT"],
     Association,
     TestID -> "ATP/smt/findproof-transitivity-proves"
 ]
 
 VerificationTest[
-    TFindProofSMT[a == c, {a == b}],
-    $Failed,
-    TestID -> "ATP/smt/findproof-sat-returns-failed"
+    (* SAT: a == c is not entailed by a == b alone.  The "Counterexample"
+       output kind returns a CounterexampleObject whose Model is the
+       congruence-closure quotient as a finite algebra in FindFiniteModels
+       structure: {a, b} merged to element 0, c on its own as element 1. *)
+    Module[{r = TFindProof[a == c, {a == b}, "Counterexample"]},
+        {Head[r], r["Status"], r["Model"], r["Domain"], r["Goal"]}],
+    {CounterexampleObject, "Refuted", <|a -> 0, b -> 0, c -> 1|>, 2, a == c},
+    TestID -> "ATP/smt/findproof-sat-returns-countermodel"
 ]
 
 VerificationTest[
@@ -94,40 +99,40 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Ground TPTP CNF dispatch: transitivity. *)
-    TFindProofSMT[
+    (* Ground TPTP CNF dispatch under Method -> "SMT": transitivity. *)
+    TFindProof[
         "cnf(a1, axiom, a = b).
          cnf(a2, axiom, b = c).
-         cnf(g, negated_conjecture, a != c)."]["Status"],
+         cnf(g, negated_conjecture, a != c).", Method -> "SMT"]["Status"],
     "Proved",
     TestID -> "ATP/smt/tptp-cnf-ground-trans-proves"
 ]
 
 VerificationTest[
-    (* Ground TPTP FOF dispatch: congruence. *)
-    TFindProofSMT[
+    (* Ground TPTP FOF dispatch under Method -> "SMT": congruence. *)
+    TFindProof[
         "fof(a1, axiom, a = b).
-         fof(g, negated_conjecture, f(a) != f(b))."]["Status"],
+         fof(g, negated_conjecture, f(a) != f(b)).", Method -> "SMT"]["Status"],
     "Proved",
     TestID -> "ATP/smt/tptp-fof-ground-cong-proves"
 ]
 
 VerificationTest[
-    (* SAT TPTP input returns $Failed. *)
-    TFindProofSMT[
+    (* SAT TPTP input returns a refuting CounterexampleObject, not $Failed. *)
+    Head @ TFindProof[
         "cnf(a1, axiom, a = b).
-         cnf(g, negated_conjecture, a != c)."],
-    $Failed,
-    TestID -> "ATP/smt/tptp-sat-returns-failed"
+         cnf(g, negated_conjecture, a != c).", Method -> "SMT"],
+    CounterexampleObject,
+    TestID -> "ATP/smt/tptp-sat-returns-countermodel"
 ]
 
 VerificationTest[
-    (* Non-ground input is rejected with a message. *)
-    TFindProofSMT[
+    (* Non-ground TPTP input under Method -> "SMT" is rejected with a message. *)
+    TFindProof[
         "cnf(a1, axiom, and(X, Y) = and(Y, X)).
-         cnf(g, negated_conjecture, and(a, b) != and(b, a))."],
+         cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"],
     $Failed,
-    {TFindProofSMT::nonground},
+    {TFindProof::nonground},
     TestID -> "ATP/smt/tptp-nonground-rejected"
 ]
 
@@ -179,10 +184,22 @@ VerificationTest[
 ]
 
 VerificationTest[
-    TFindProofSMT[
-        Implies[a == b && b == c, a == c]]["Status"],
+    (* A Boolean-combination goal auto-routes to DPLL(T) -- no Method -> "SMT"
+       needed.  This implication is a tautology, so it is proved. *)
+    TFindProof[
+        Implies[a == b && b == c, a == c], {}]["Status"],
     "Proved",
     TestID -> "ATP/smt/dpllt-findproof-implication"
+]
+
+VerificationTest[
+    (* Boolean non-entailment: a == c does not follow from a == b, so the
+       DPLL(T) path returns a refuting CounterexampleObject whose Model is the
+       certified satisfying truth assignment. *)
+    Module[{r = TFindProof[Implies[a == b, a == c], {}, "Counterexample"]},
+        {Head[r], r["Status"], AssociationQ[r["Model"]]}],
+    {CounterexampleObject, "Refuted", True},
+    TestID -> "ATP/smt/dpllt-findproof-refuted"
 ]
 
 VerificationTest[
@@ -245,14 +262,12 @@ VerificationTest[
     TestID -> "SMT/preprocess/reflexive-with-real-diseq"
 ]
 
-(* TFindProofSMT with a pre-evaluated True hypothesis (iter 58):
-   a vacuous `a == a` in the hypothesis list pre-fix triggered
-   collectLiterals' catch-all reject and returned $Failed.  Now True
-   is skipped, matching the TSatEUF preprocess shape. *)
+(* Method -> "SMT" with a pre-evaluated True hypothesis: a vacuous `a == a`
+   in the hypothesis list is skipped, matching the TSatEUF preprocess shape. *)
 VerificationTest[
-    TFindProofSMT[a == c, {a == a, a == b, b == c}]["Status"],
+    TFindProof[a == c, {a == a, a == b, b == c}, Method -> "SMT"]["Status"],
     "Proved",
-    TestID -> "SMT/TFindProofSMT/skips-True-hypothesis"
+    TestID -> "SMT/method-smt/skips-True-hypothesis"
 ]
 
 (* Inactive[Equal] / Inactive[Unequal] are FindEquationalProof's
@@ -281,10 +296,10 @@ VerificationTest[
     TestID -> "SMT/method-smt-nested-axioms-flattened"
 ]
 
-(* TFindProofSMT[goal, single_hypothesis] auto-wraps (iter 72,
-   parity with TFindProof / TRelevantAxioms / TATP wraps). *)
+(* TFindProof[goal, single_hypothesis, Method -> "SMT"] auto-wraps the lone
+   hypothesis, parity with the TFindProof / TRelevantAxioms / TATP wraps. *)
 VerificationTest[
-    TFindProofSMT[a == c, a == c]["Status"],
+    TFindProof[a == c, a == c, Method -> "SMT"]["Status"],
     "Proved",
-    TestID -> "SMT/TFindProofSMT/single-hyp-wraps"
+    TestID -> "SMT/method-smt/single-hyp-wraps"
 ]

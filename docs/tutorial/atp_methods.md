@@ -50,7 +50,7 @@ existing notebooks and downstream code keep working unchanged.
 ## 2. Loading
 
 All ATP-related public symbols (`TFindProof`, `TATP`,
-`TRelevantAxioms`, `TSatEUF`, `TSmtDecide`, `TFindProofSMT`,
+`TRelevantAxioms`, `TSatEUF`, `TSmtDecide`,
 `TPTPImport`, ...) live in `THVMLink\`ATP\``. The single load entry
 brings everything into scope by bare name:
 
