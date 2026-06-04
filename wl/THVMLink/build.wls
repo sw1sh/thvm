@@ -52,12 +52,6 @@ Check[
     print["[warn] build the dylib first: cd ", FileNameJoin[{pacletDir, "..", ".."}], " && make && make wl"]
 ]
 
-(* Doc cells that need an on-disk asset (e.g. ResourceDefinition's Hero
-   Image rasterizes wl/THVMLink/docs/assets/hero.png) reference this via
-   `$THVMLinkDocsDir`, defined here in Global` so it survives the per-file
-   ClearGlobalScratch below (the boot snapshot is taken AFTER this line). *)
-$THVMLinkDocsDir = FileNameJoin[{pacletDir, "docs"}]
-
 subdirs = <|
     "Symbol"   -> {"Documentation", "English", "ReferencePages", "Symbols"},
     "Guide"    -> {"Documentation", "English", "Guides"},
