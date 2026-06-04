@@ -230,6 +230,8 @@ Normal @ TRealize @ TGradOf[x]
 ```
 <!-- => {18.}  (d/dx of 3 x^2 = 6 x at x = 3) -->
 
+This is not limited to scalars. Because every layer's backward is itself a `TTerm` graph, the second derivative composes through a real network: the filter Hessian of `Total[TConv2D[x, w]^2]`, the input Hessian across the [TReLU]() mask, and a `linear -> ReLU -> linear` MLP's input Hessian all come out correct (the last verified against a central finite difference). The `nn` test suite pins these.
+
 ## Where to go next
 
 - The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial for the tensor / UOp / kernel / autodiff machinery underneath this loop.

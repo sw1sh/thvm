@@ -894,3 +894,72 @@ VerificationTest[
     {{{54.0, 122.0}}, {{32.0, 72.0}}},
     TestID -> "nn/higher-order-grad-through-linear"
 ]
+
+(* === higher-order gradient through TConv2D ===
+   f = Total[conv^2] is quadratic in the filter, so its Hessian is
+   constant.  x = 1..9 {1,1,3,3}, w = {{1,2},{3,4}} {1,1,2,2}:
+   g1 = {{1568,2024},{2936,3392}}, g2 = {{560,720},{1040,1200}}. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate[N @ ArrayReshape[Range[9], {1, 1, 3, 3}]];
+    w = TRequiresGrad @ TTensorCreate[N @ {{{{1.0, 2.0}, {3.0, 4.0}}}}];
+    b = TZeros[{1}];
+    conv = TConv2D[x, w, b];
+    TClearGrad[w];
+    TGrad[Total[(ArrayReshape[conv, {4}])^2]];
+    g1 = Normal @ TTensorData @ TRealize @ TGradOf[w];
+    g1term = TGradOf[w];
+    TClearGrad[w];
+    TGrad[Total[ArrayReshape[g1term, {4}]]];
+    g2 = Normal @ TTensorData @ TRealize @ TGradOf[w];
+    {g1, g2},
+    {{{{{1568.0, 2024.0}, {2936.0, 3392.0}}}}, {{{{560.0, 720.0}, {1040.0, 1200.0}}}}},
+    TestID -> "nn/higher-order-grad-through-conv"
+]
+
+(* === higher-order gradient through the ReLU mask ===
+   f = Total[relu(x)^3], x = {1,-2,3}.  The CMPLT mask (x>0) is a grad
+   constant, so g1 = 3 x^2 [x>0] = {3,0,27}, g2 = 6 x [x>0] = {6,0,18}. *)
+VerificationTest[
+    TInit[];
+    x = TRequiresGrad @ TTensorCreate[{1.0, -2.0, 3.0}];
+    TClearGrad[x];
+    TGrad[Total[TReLU[x]^3]];
+    g1 = Normal @ TTensorData @ TRealize @ TGradOf[x];
+    g1term = TGradOf[x];
+    TClearGrad[x];
+    TGrad[Total[g1term]];
+    g2 = Normal @ TTensorData @ TRealize @ TGradOf[x];
+    {g1, g2},
+    {{3.0, 0.0, 27.0}, {6.0, 0.0, 18.0}},
+    TestID -> "nn/higher-order-grad-through-relu"
+]
+
+(* === higher-order gradient composes through a 2-layer MLP ===
+   d/dx of Total[d(loss)/dx] for loss = Total[(relu(x.W1+b1).W2+b2)^2],
+   checked against a central finite difference of Total[g1].  Validates
+   that grad-of-grad composes through linear -> relu -> linear. *)
+VerificationTest[
+    TInit[];
+    SeedRandom[5];
+    W1 = TTensorCreate[N @ RandomReal[{-1, 1}, {3, 4}]];
+    b1 = TTensorCreate[N @ RandomReal[{-1, 1}, {4}]];
+    W2 = TTensorCreate[N @ RandomReal[{-1, 1}, {4, 2}]];
+    b2 = TTensorCreate[N @ RandomReal[{-1, 1}, {2}]];
+    net = xt |-> Total[Total[(TLinear[TReLU[TLinear[xt, W1, b1]], W2, b2])^2]];
+    x0 = {0.7, -0.4, 0.9};
+    xT = TRequiresGrad @ TTensorCreate[{x0}];
+    TClearGrad[xT]; TGrad[net[xT]];
+    g1term = TGradOf[xT];
+    TClearGrad[xT]; TGrad[Total[Total[g1term]]];
+    g2 = First @ Normal @ TTensorData @ TRealize @ TGradOf[xT];
+    totG1 = Function[xv, Module[{xx},
+        xx = TRequiresGrad @ TTensorCreate[{xv}];
+        TClearGrad[xx]; TGrad[net[xx]];
+        Total @ First @ Normal @ TTensorData @ TRealize @ TGradOf[xx]]];
+    eps = 1.0*^-3;
+    fd = Table[(totG1[x0 + eps*UnitVector[3, i]] - totG1[x0 - eps*UnitVector[3, i]])/(2 eps), {i, 3}];
+    Max @ Abs[g2 - fd] < 1.0*^-2,
+    True,
+    TestID -> "nn/higher-order-grad-through-mlp"
+]
