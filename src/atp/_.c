@@ -1070,9 +1070,9 @@ fn void thvm_atp_cp_get(const AtpState *s, u32 i, Term *lhs, Term *rhs) {
 // appearance order, so `nand(x,x)` flattens to `nand *0 *0` and
 // `nand(x,y)` to `nand *0 *1`.  Each tree edge is keyed on a flat
 // symbol:
-//   ATP_DT_NUM             a TAG_NUM atom
-//   ATP_DT_STAR_BASE + k   the k-th DISTINCT pattern variable
-//   ATP_DT_CTR_BASE  + lab a TAG_CTR with label `lab`
+//   ATP_DTREE_NUM             a TAG_NUM atom
+//   ATP_DTREE_STAR_BASE + k   the k-th DISTINCT pattern variable
+//   ATP_DTREE_CTR_BASE  + lab a TAG_CTR with label `lab`
 //
 // INSERT renumbers the stored CP's variables (first occurrence of a
 // var -> the next free k) and walks the renumbered preorder string,
@@ -1110,16 +1110,66 @@ fn void thvm_atp_cp_get(const AtpState *s, u32 i, Term *lhs, Term *rhs) {
 // array scan, CP for CP: same drops, same proof, same step/CP
 // counts.
 
-#ifdef ATP_FV_INDEX
+#if defined(ATP_FV_INDEX) || defined(ATP_RULE_INDEX)
 
-// Flat-symbol alphabet for a perfect-discrimination-tree edge.
-// Ordering matters: NUM < every STAR(k) < every CTR(lab), so the
-// sym-ascending child list lets a descent stop scanning early.
-#define ATP_DT_NUM        0u                 // TAG_NUM atom
-#define ATP_DT_MAXVARS    64u                // distinct vars per CP
-#define ATP_DT_STAR_BASE  1u                 // STAR(k) = BASE + k
-#define ATP_DT_CTR_BASE   (ATP_DT_STAR_BASE + ATP_DT_MAXVARS)
-#define ATP_DT_NIL        0xFFFFFFFFu
+// Shared discrim-tree symbol encoding (used by both the FV-index for
+// CP subsumption and the RI-index for rule-LHS redex matching).  The
+// two indices store records of different types but use the same flat-
+// symbol space + per-term variable renumbering.
+//
+// Flat-symbol alphabet for a discrimination-tree edge.  Ordering
+// matters: NUM < every STAR(k) < every CTR(lab), so the sym-ascending
+// child list lets a descent stop scanning early.
+#define ATP_DTREE_NUM        0u                                 // TAG_NUM atom
+#define ATP_DTREE_MAXVARS    64u                                // distinct vars per term
+#define ATP_DTREE_STAR_BASE  1u                                 // STAR(k) = STAR_BASE + k
+#define ATP_DTREE_CTR_BASE   (ATP_DTREE_STAR_BASE + ATP_DTREE_MAXVARS)
+#define ATP_DTREE_NIL        0xFFFFFFFFu
+
+// Per-term variable renumbering: maps a raw TAG_FVR id to its
+// first-appearance index 0,1,2,...  `slot[id]` holds (index+1), 0 =
+// not yet seen.  Reset per term at insert and per orientation at
+// retrieval.  `folded` records whether any variable hit an imperfect
+// case -- an id >= REWRITE_MAX_VAR, or more than ATP_DTREE_MAXVARS
+// distinct vars -- where two distinct variables collapse onto one star
+// slot.  A flatten with folded == 0 distinguishes every variable, so a
+// discrimination-tree descent that reaches a leaf is then an exact
+// match proof; otherwise the leaf re-confirms via thvm_match.
+typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; u8 folded; } AtpDTreeVarMap;
+
+static void atp_dtree_varmap_reset(AtpDTreeVarMap *vm) {
+  for (u32 i = 0; i < REWRITE_MAX_VAR; i++) vm->slot[i] = 0;
+  vm->n = 0;
+  vm->folded = 0;
+}
+
+// First-appearance index of variable id `vid`.  Ids >= REWRITE_MAX_VAR,
+// or more than ATP_DTREE_MAXVARS distinct vars, fold onto the last slot
+// -- sound (folding only coarsens the tree, never drops a candidate).
+static u32 atp_dtree_var_index(AtpDTreeVarMap *vm, u32 vid) {
+  if (vid >= REWRITE_MAX_VAR) { vid = REWRITE_MAX_VAR - 1u; vm->folded = 1u; }
+  if (vm->slot[vid] == 0) {
+    u32 idx;
+    if (vm->n < ATP_DTREE_MAXVARS) { idx = vm->n; vm->n++; }
+    else                           { idx = ATP_DTREE_MAXVARS - 1u; vm->folded = 1u; }
+    vm->slot[vid] = idx + 1u;
+  }
+  return vm->slot[vid] - 1u;
+}
+
+// flatsym of one term node under variable renumbering `vm`.
+static u32 atp_dtree_flatsym(Term t, AtpDTreeVarMap *vm) {
+  switch (term_tag(t)) {
+    case TAG_CTR: return ATP_DTREE_CTR_BASE + term_ext(t);
+    case TAG_NUM: return ATP_DTREE_NUM;
+    case TAG_FVR:
+    default:      return ATP_DTREE_STAR_BASE + atp_dtree_var_index(vm, term_ext(t));
+  }
+}
+
+#endif  // ATP_FV_INDEX || ATP_RULE_INDEX
+
+#ifdef ATP_FV_INDEX
 
 // Preorder-flattened subject cap.  Sized to hold a deep-saturation
 // critical pair: at thm step ~230 a ~1% tail of queued CPs flattens
@@ -1131,45 +1181,6 @@ fn void thvm_atp_cp_get(const AtpState *s, u32 i, Term *lhs, Term *rhs) {
 // the full scan (correct, never a silent under-retrieval).
 #define ATP_DT_FLAT_CAP   32768u
 
-// Per-term variable renumbering: maps a raw TAG_FVR id to its
-// first-appearance index 0,1,2,...  `slot[id]` holds (index+1), 0 =
-// not yet seen.  Reset per CP at insert and per orientation at
-// retrieval.
-typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; u8 folded; } AtpDtVarMap;
-
-static void atp_dt_varmap_reset(AtpDtVarMap *vm) {
-  for (u32 i = 0; i < REWRITE_MAX_VAR; i++) vm->slot[i] = 0;
-  vm->n = 0;
-  vm->folded = 0;
-}
-
-// First-appearance index of variable id `vid`.  Ids >= REWRITE_MAX_VAR,
-// or more than ATP_DT_MAXVARS distinct vars, fold onto the last slot --
-// sound (folding only coarsens the tree, never drops a candidate) but
-// it makes the descent inexact: `folded` records that so the leaf
-// keeps the confirming thvm_match.  folded == 0 -> the descent is an
-// exact subsumption proof.
-static u32 atp_dt_var_index(AtpDtVarMap *vm, u32 vid) {
-  if (vid >= REWRITE_MAX_VAR) { vid = REWRITE_MAX_VAR - 1u; vm->folded = 1u; }
-  if (vm->slot[vid] == 0) {
-    u32 idx;
-    if (vm->n < ATP_DT_MAXVARS) { idx = vm->n; vm->n++; }
-    else                       { idx = ATP_DT_MAXVARS - 1u; vm->folded = 1u; }
-    vm->slot[vid] = idx + 1u;
-  }
-  return vm->slot[vid] - 1u;
-}
-
-// flatsym of one term node under variable renumbering `vm`.
-static u32 atp_dt_flatsym(Term t, AtpDtVarMap *vm) {
-  switch (term_tag(t)) {
-    case TAG_CTR: return ATP_DT_CTR_BASE + term_ext(t);
-    case TAG_NUM: return ATP_DT_NUM;
-    case TAG_FVR:
-    default:      return ATP_DT_STAR_BASE + atp_dt_var_index(vm, term_ext(t));
-  }
-}
-
 // A discrimination-tree node: a left-child / right-sibling tree in a
 // flat realloc-grown pool addressed by u32 INDEX (no pointers, so a
 // pool realloc never invalidates the structure).  `sym` is the flat
@@ -1177,9 +1188,9 @@ static u32 atp_dt_flatsym(Term t, AtpDtVarMap *vm) {
 // node's leaf record list.
 typedef struct {
   u32 sym;        // flat symbol of the in-edge
-  u32 child;      // first child node index, or ATP_DT_NIL
-  u32 sibling;    // next sibling node index, or ATP_DT_NIL
-  u32 rec_head;   // first record index, or ATP_DT_NIL
+  u32 child;      // first child node index, or ATP_DTREE_NIL
+  u32 sibling;    // next sibling node index, or ATP_DTREE_NIL
+  u32 rec_head;   // first record index, or ATP_DTREE_NIL
 } AtpDtNode;
 
 // One indexed CP.  `packed` BORROWS the queue's cp_packed[] byte
@@ -1235,9 +1246,9 @@ static u32 atp_dt_node_new(AtpFvIndex *ix, u32 sym) {
   }
   u32 i = ix->n_nodes++;
   ix->nodes[i].sym      = sym;
-  ix->nodes[i].child    = ATP_DT_NIL;
-  ix->nodes[i].sibling  = ATP_DT_NIL;
-  ix->nodes[i].rec_head = ATP_DT_NIL;
+  ix->nodes[i].child    = ATP_DTREE_NIL;
+  ix->nodes[i].sibling  = ATP_DTREE_NIL;
+  ix->nodes[i].rec_head = ATP_DTREE_NIL;
   return i;
 }
 
@@ -1255,16 +1266,16 @@ static u32 atp_dt_rec_new(AtpFvIndex *ix) {
 // Find `parent`'s child reached by edge `sym`, creating it absent.
 // Children kept in ascending-sym order -- deterministic across runs.
 static u32 atp_dt_child(AtpFvIndex *ix, u32 parent, u32 sym) {
-  u32 prev = ATP_DT_NIL;
+  u32 prev = ATP_DTREE_NIL;
   u32 cur  = ix->nodes[parent].child;
-  while (cur != ATP_DT_NIL && ix->nodes[cur].sym < sym) {
+  while (cur != ATP_DTREE_NIL && ix->nodes[cur].sym < sym) {
     prev = cur;
     cur  = ix->nodes[cur].sibling;
   }
-  if (cur != ATP_DT_NIL && ix->nodes[cur].sym == sym) return cur;
+  if (cur != ATP_DTREE_NIL && ix->nodes[cur].sym == sym) return cur;
   u32 nn = atp_dt_node_new(ix, sym);          // may realloc the pool
   ix->nodes[nn].sibling = cur;
-  if (prev == ATP_DT_NIL) ix->nodes[parent].child = nn;
+  if (prev == ATP_DTREE_NIL) ix->nodes[parent].child = nn;
   else                    ix->nodes[prev].sibling = nn;
   return nn;
 }
@@ -1275,7 +1286,7 @@ static void atp_dt_seqmap_init(AtpFvIndex *ix, u32 cap) {
   ix->seqmap_cap = cap;
   ix->seqmap = (AtpDtSeqEnt *)malloc(cap * sizeof(AtpDtSeqEnt));
   if (ix->seqmap == NULL) { fprintf(stderr, "atp_dt: seqmap OOM\n"); exit(1); }
-  for (u32 i = 0; i < cap; i++) ix->seqmap[i].seq = ATP_DT_NIL;
+  for (u32 i = 0; i < cap; i++) ix->seqmap[i].seq = ATP_DTREE_NIL;
 }
 
 static void atp_dt_seqmap_put(AtpFvIndex *ix, u32 seq, u32 rec);
@@ -1285,7 +1296,7 @@ static void atp_dt_seqmap_grow(AtpFvIndex *ix) {
   AtpDtSeqEnt *old = ix->seqmap;
   atp_dt_seqmap_init(ix, old_cap * 2u);
   for (u32 i = 0; i < old_cap; i++) {
-    if (old[i].seq != ATP_DT_NIL) atp_dt_seqmap_put(ix, old[i].seq, old[i].rec);
+    if (old[i].seq != ATP_DTREE_NIL) atp_dt_seqmap_put(ix, old[i].seq, old[i].rec);
   }
   free(old);
 }
@@ -1294,7 +1305,7 @@ static void atp_dt_seqmap_put(AtpFvIndex *ix, u32 seq, u32 rec) {
   if ((ix->n_live + 1u) * 2u > ix->seqmap_cap) atp_dt_seqmap_grow(ix);
   u32 mask = ix->seqmap_cap - 1u;
   u32 h = (seq * 2654435761u) & mask;
-  while (ix->seqmap[h].seq != ATP_DT_NIL) h = (h + 1u) & mask;
+  while (ix->seqmap[h].seq != ATP_DTREE_NIL) h = (h + 1u) & mask;
   ix->seqmap[h].seq = seq;
   ix->seqmap[h].rec = rec;
 }
@@ -1302,28 +1313,28 @@ static void atp_dt_seqmap_put(AtpFvIndex *ix, u32 seq, u32 rec) {
 static u32 atp_dt_seqmap_get(const AtpFvIndex *ix, u32 seq) {
   u32 mask = ix->seqmap_cap - 1u;
   u32 h = (seq * 2654435761u) & mask;
-  while (ix->seqmap[h].seq != ATP_DT_NIL) {
+  while (ix->seqmap[h].seq != ATP_DTREE_NIL) {
     if (ix->seqmap[h].seq == seq) return ix->seqmap[h].rec;
     h = (h + 1u) & mask;
   }
-  return ATP_DT_NIL;
+  return ATP_DTREE_NIL;
 }
 
 // Delete `seq` (Knuth back-shift, keeps probe chains intact).
 static void atp_dt_seqmap_del(AtpFvIndex *ix, u32 seq) {
   u32 mask = ix->seqmap_cap - 1u;
   u32 h = (seq * 2654435761u) & mask;
-  while (ix->seqmap[h].seq != ATP_DT_NIL && ix->seqmap[h].seq != seq) {
+  while (ix->seqmap[h].seq != ATP_DTREE_NIL && ix->seqmap[h].seq != seq) {
     h = (h + 1u) & mask;
   }
-  if (ix->seqmap[h].seq == ATP_DT_NIL) return;
+  if (ix->seqmap[h].seq == ATP_DTREE_NIL) return;
   u32 j = h;
   for (;;) {
-    ix->seqmap[h].seq = ATP_DT_NIL;
+    ix->seqmap[h].seq = ATP_DTREE_NIL;
     u32 k;
     do {
       j = (j + 1u) & mask;
-      if (ix->seqmap[j].seq == ATP_DT_NIL) return;
+      if (ix->seqmap[j].seq == ATP_DTREE_NIL) return;
       k = (ix->seqmap[j].seq * 2654435761u) & mask;
     } while ((h <= j) ? (h < k && k <= j) : (h < k || k <= j));
     ix->seqmap[h] = ix->seqmap[j];
@@ -1337,7 +1348,7 @@ static AtpFvIndex *atp_fv_index_new(void) {
   AtpFvIndex *ix = (AtpFvIndex *)calloc(1, sizeof(AtpFvIndex));
   if (ix == NULL) { fprintf(stderr, "atp_dt: index OOM\n"); exit(1); }
   atp_dt_seqmap_init(ix, 1024u);
-  ix->root = atp_dt_node_new(ix, ATP_DT_NIL);  // root edge unused
+  ix->root = atp_dt_node_new(ix, ATP_DTREE_NIL);  // root edge unused
   return ix;
 }
 
@@ -1357,8 +1368,8 @@ static void atp_fv_index_free(AtpFvIndex *ix) {
 // preorder string.  A TAG_CTR's children extend the string in
 // left-to-right order; a TAG_FVR / TAG_NUM is one symbol.
 static u32 atp_dt_insert_term(AtpFvIndex *ix, u32 node, Term t,
-                              AtpDtVarMap *vm) {
-  node = atp_dt_child(ix, node, atp_dt_flatsym(t, vm));
+                              AtpDTreeVarMap *vm) {
+  node = atp_dt_child(ix, node, atp_dtree_flatsym(t, vm));
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
     for (u32 i = 0; i < n; i++) {
@@ -1379,10 +1390,10 @@ static u32 atp_dt_insert_term(AtpFvIndex *ix, u32 node, Term t,
 // unpacked terms, needed only to descend the discrimination tree.
 static void atp_fv_index_insert(AtpFvIndex *ix, Term lhs, Term rhs,
                                 u8 *packed, u32 seq) {
-  AtpDtVarMap vm;
-  atp_dt_varmap_reset(&vm);
+  AtpDTreeVarMap vm;
+  atp_dtree_varmap_reset(&vm);
   u32 node = ix->root;
-  node = atp_dt_child(ix, node, ATP_DT_CTR_BASE + ATP_CP_LABEL);  // Cp head
+  node = atp_dt_child(ix, node, ATP_DTREE_CTR_BASE + ATP_CP_LABEL);  // Cp head
   node = atp_dt_insert_term(ix, node, lhs, &vm);
   node = atp_dt_insert_term(ix, node, rhs, &vm);
   u32 rec = atp_dt_rec_new(ix);
@@ -1401,7 +1412,7 @@ static void atp_fv_index_insert(AtpFvIndex *ix, Term lhs, Term rhs,
 // reclaims the pool slot.
 static void atp_fv_index_remove(AtpFvIndex *ix, u32 seq) {
   u32 rec = atp_dt_seqmap_get(ix, seq);
-  if (rec == ATP_DT_NIL) return;
+  if (rec == ATP_DTREE_NIL) return;
   if (ix->recs[rec].live) {
     ix->recs[rec].live = 0u;
     ix->n_live--;
@@ -1419,8 +1430,8 @@ static void atp_fv_index_rebuild(AtpState *s) {
   ix->n_nodes = 0;
   ix->n_recs  = 0;
   ix->n_live  = 0;
-  ix->root    = atp_dt_node_new(ix, ATP_DT_NIL);
-  for (u32 i = 0; i < ix->seqmap_cap; i++) ix->seqmap[i].seq = ATP_DT_NIL;
+  ix->root    = atp_dt_node_new(ix, ATP_DTREE_NIL);
+  for (u32 i = 0; i < ix->seqmap_cap; i++) ix->seqmap[i].seq = ATP_DTREE_NIL;
   for (u32 i = 0; i < s->n_cps; i++) {
     Term l = 0, r = 0;
     acp_unpack(s->cp_packed[i], &l, &r);
@@ -1439,10 +1450,10 @@ static void atp_fv_index_rebuild(AtpState *s) {
 // on success, 0 if the cap is hit (caller falls back to the full scan
 // -- never silently under-retrieves).
 static u8 atp_dt_flatten(Term t, u32 *subsz, u32 *flatsym,
-                         AtpDtVarMap *vm, u32 cap, u32 *pos) {
+                         AtpDTreeVarMap *vm, u32 cap, u32 *pos) {
   u32 here = *pos;
   if (here >= cap) return 0;
-  flatsym[here] = atp_dt_flatsym(t, vm);
+  flatsym[here] = atp_dtree_flatsym(t, vm);
   *pos = here + 1u;
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
@@ -1468,7 +1479,7 @@ static const u32  *g_atp_dt_flatsym = NULL;  // per-position flat-symbol code
 static u32         g_atp_dt_flatlen = 0;
 static Term        g_atp_dt_qlhs    = 0;
 static Term        g_atp_dt_qrhs    = 0;
-static u32         g_atp_dt_star[ATP_DT_MAXVARS];
+static u32         g_atp_dt_star[ATP_DTREE_MAXVARS];
 static u8          g_atp_dt_query_folded = 0;  // subject flatten folded a var
 
 // A leaf reached by the descent: report whether a live CP sits here.
@@ -1482,7 +1493,7 @@ static u8          g_atp_dt_query_folded = 0;  // subject flatten folded a var
 // oversized CP no longer poisons the fast path for its leaf-mates.
 static u8 atp_dt_leaf_match(u32 node) {
   AtpFvIndex *ix = g_atp_dt_ix;
-  for (u32 r = ix->nodes[node].rec_head; r != ATP_DT_NIL;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_DTREE_NIL;
        r = ix->recs[r].next) {
     AtpDtRec *rc = &ix->recs[r];
     if (!rc->live) continue;
@@ -1567,16 +1578,16 @@ static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
     u32  sz         = g_atp_dt_subsz[pos];   // preorder span of t's subtree
     u32  csym_exact = g_atp_dt_flatsym[pos]; // CTR_BASE+lab / NUM / STAR+idx
     if (sz == 0u) return 0;                  // would stall at same pos
-    u32  ctr_next   = ATP_DT_NIL;            // the lone CTR/NUM-match child
-    for (u32 c = ix->nodes[node].child; c != ATP_DT_NIL;
+    u32  ctr_next   = ATP_DTREE_NIL;            // the lone CTR/NUM-match child
+    for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
          c = ix->nodes[c].sibling) {
       u32 csym = ix->nodes[c].sym;
-      if (csym >= ATP_DT_STAR_BASE && csym < ATP_DT_CTR_BASE) {
+      if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
         // Stored variable, the (csym-STAR_BASE)-th distinct pattern
         // var.  One-way match: the FIRST occurrence binds it to this
         // subterm's preorder position; a REPEAT applies only if the two
         // subterms' flatsym slices are byte-identical.
-        u32 k = csym - ATP_DT_STAR_BASE;
+        u32 k = csym - ATP_DTREE_STAR_BASE;
         u32 bound = g_atp_dt_star[k];
         if (bound == 0) {
           g_atp_dt_star[k] = pos;             // first occurrence: bind
@@ -1594,7 +1605,7 @@ static u8 atp_dt_descend_rec(u32 node, u32 pos, u32 depth) {
         ctr_next = c;
       }
     }
-    if (ctr_next == ATP_DT_NIL) return 0;     // no CTR continuation: done
+    if (ctr_next == ATP_DTREE_NIL) return 0;     // no CTR continuation: done
     node = ctr_next;                          // tail-continue without a call
     pos  = pos + 1u;
   }
@@ -1612,8 +1623,8 @@ static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
   static u32 flatsym_s[ATP_DT_FLAT_CAP];
   // One variable renumbering spans the whole synthetic Cp(o_lhs,o_rhs)
   // -- exactly as atp_fv_index_insert renumbers the stored CP.
-  AtpDtVarMap vm;
-  atp_dt_varmap_reset(&vm);
+  AtpDTreeVarMap vm;
+  atp_dtree_varmap_reset(&vm);
   // Reserve position 0 for the synthetic `Cp` head: it spans the whole
   // subject, so subsz[0] = total positions.
   u32 pos = 1u;
@@ -1633,7 +1644,7 @@ static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
     }
     return 0;
   }
-  flatsym_s[0] = ATP_DT_CTR_BASE + ATP_CP_LABEL;  // synthetic Cp head
+  flatsym_s[0] = ATP_DTREE_CTR_BASE + ATP_CP_LABEL;  // synthetic Cp head
   subsz_s[0]   = pos;                             // whole subject span
   g_atp_dt_ix           = ix;
   g_atp_dt_subsz        = subsz_s;
@@ -1642,11 +1653,11 @@ static u8 atp_dt_query_orient(AtpFvIndex *ix, Term o_lhs, Term o_rhs) {
   g_atp_dt_qlhs         = o_lhs;
   g_atp_dt_qrhs         = o_rhs;
   g_atp_dt_query_folded = vm.folded;
-  for (u32 i = 0; i < ATP_DT_MAXVARS; i++) g_atp_dt_star[i] = 0;
+  for (u32 i = 0; i < ATP_DTREE_MAXVARS; i++) g_atp_dt_star[i] = 0;
   // Descend from the root: its single real edge is the `Cp` head,
   // which lines up with flat[0] (also a Cp-head symbol).
-  u32 cp_sym = ATP_DT_CTR_BASE + ATP_CP_LABEL;
-  for (u32 c = ix->nodes[ix->root].child; c != ATP_DT_NIL;
+  u32 cp_sym = ATP_DTREE_CTR_BASE + ATP_CP_LABEL;
+  for (u32 c = ix->nodes[ix->root].child; c != ATP_DTREE_NIL;
        c = ix->nodes[c].sibling) {
     if (ix->nodes[c].sym == cp_sym) return atp_dt_descend(c, 1u);
   }
@@ -1730,14 +1741,6 @@ fn void thvm_atp_fv_stats(const AtpState *s, u64 *calls, u64 *node_visits,
 // never fire); declared here, defined with the ordered-rewrite helpers.
 static int atp_vars_contained(Term a, Term b);
 
-// Flat-symbol alphabet -- same scheme as 7d's atp_dt_*: NUM < every
-// STAR(k) < every CTR(lab) so a sym-ascending child list lets the
-// descent stop scanning early.
-#define ATP_RI_NUM        0u
-#define ATP_RI_MAXVARS    64u
-#define ATP_RI_STAR_BASE  1u
-#define ATP_RI_CTR_BASE   (ATP_RI_STAR_BASE + ATP_RI_MAXVARS)
-#define ATP_RI_NIL        0xFFFFFFFFu
 // Preorder-flatten capacity for the indexed normalizer.  Sized to
 // hold a raw (un-reduced) critical-pair side -- the deep overlap of
 // two rules can run to tens of thousands of nodes before it is
@@ -1746,60 +1749,25 @@ static int atp_vars_contained(Term a, Term b);
 // under the cap) but pays the linear rate while it does.
 #define ATP_RI_FLAT_CAP   65536u
 
-// Per-term variable renumbering by first appearance (see 7d's
-// AtpDtVarMap).  `slot[id]` holds (index+1); 0 = not yet seen.
-typedef struct { u32 slot[REWRITE_MAX_VAR]; u32 n; u8 folded; } AtpRiVarMap;
-
-static void atp_ri_varmap_reset(AtpRiVarMap *vm) {
-  for (u32 i = 0; i < REWRITE_MAX_VAR; i++) vm->slot[i] = 0;
-  vm->n = 0;
-  vm->folded = 0;
-}
-
-// `folded` records whether any variable hit an imperfect case -- an id
-// >= REWRITE_MAX_VAR, or more than ATP_RI_MAXVARS distinct vars -- where
-// two distinct variables collapse onto one star slot.  A flatten with
-// folded == 0 distinguishes every variable, so a discrimination-tree
-// descent that reaches a leaf is then an exact match proof.
-static u32 atp_ri_var_index(AtpRiVarMap *vm, u32 vid) {
-  if (vid >= REWRITE_MAX_VAR) { vid = REWRITE_MAX_VAR - 1u; vm->folded = 1u; }
-  if (vm->slot[vid] == 0) {
-    u32 idx;
-    if (vm->n < ATP_RI_MAXVARS) { idx = vm->n; vm->n++; }
-    else                       { idx = ATP_RI_MAXVARS - 1u; vm->folded = 1u; }
-    vm->slot[vid] = idx + 1u;
-  }
-  return vm->slot[vid] - 1u;
-}
-
-static u32 atp_ri_flatsym(Term t, AtpRiVarMap *vm) {
-  switch (term_tag(t)) {
-    case TAG_CTR: return ATP_RI_CTR_BASE + term_ext(t);
-    case TAG_NUM: return ATP_RI_NUM;
-    case TAG_FVR:
-    default:      return ATP_RI_STAR_BASE + atp_ri_var_index(vm, term_ext(t));
-  }
-}
-
 // Flat symbol under RAW variable ids -- no first-appearance renumbering.
 // The subject-side flatten uses this (rule-LHS inserts keep the
 // first-appearance scheme above).  Raw ids make a flatsym position
 // independent of the rest of the term, so an incremental re-flatten can
 // SPLICE a rewritten subtree without re-deriving the whole string.  For
 // a var-normalised subject (dense [0,k) ids, first appearance == id) it
-// is bit-identical to atp_ri_flatsym; the variable-consistency relation
+// is bit-identical to atp_dtree_flatsym; the variable-consistency relation
 // the descent's repeat-var memcmp depends on is preserved either way
 // (both are consistent global encodings).  `*folded` is raised if a raw
-// id crosses ATP_RI_MAXVARS (then the descent re-confirms via thvm_match).
+// id crosses ATP_DTREE_MAXVARS (then the descent re-confirms via thvm_match).
 static u32 atp_ri_flatsym_raw(Term t, u8 *folded) {
   switch (term_tag(t)) {
-    case TAG_CTR: return ATP_RI_CTR_BASE + term_ext(t);
-    case TAG_NUM: return ATP_RI_NUM;
+    case TAG_CTR: return ATP_DTREE_CTR_BASE + term_ext(t);
+    case TAG_NUM: return ATP_DTREE_NUM;
     case TAG_FVR:
     default: {
       u32 id = term_ext(t);
-      if (id >= ATP_RI_MAXVARS) { *folded = 1u; id = ATP_RI_MAXVARS - 1u; }
-      return ATP_RI_STAR_BASE + id;
+      if (id >= ATP_DTREE_MAXVARS) { *folded = 1u; id = ATP_DTREE_MAXVARS - 1u; }
+      return ATP_DTREE_STAR_BASE + id;
     }
   }
 }
@@ -1862,9 +1830,9 @@ static u32 atp_ri_node_new(AtpRuleIndex *ix, u32 sym) {
   }
   u32 i = ix->n_nodes++;
   ix->nodes[i].sym      = sym;
-  ix->nodes[i].child    = ATP_RI_NIL;
-  ix->nodes[i].sibling  = ATP_RI_NIL;
-  ix->nodes[i].rec_head = ATP_RI_NIL;
+  ix->nodes[i].child    = ATP_DTREE_NIL;
+  ix->nodes[i].sibling  = ATP_DTREE_NIL;
+  ix->nodes[i].rec_head = ATP_DTREE_NIL;
   return i;
 }
 
@@ -1882,16 +1850,16 @@ static u32 atp_ri_rec_new(AtpRuleIndex *ix) {
 // Find `parent`'s child reached by edge `sym`, creating it absent.
 // Children kept in ascending-sym order.
 static u32 atp_ri_child(AtpRuleIndex *ix, u32 parent, u32 sym) {
-  u32 prev = ATP_RI_NIL;
+  u32 prev = ATP_DTREE_NIL;
   u32 cur  = ix->nodes[parent].child;
-  while (cur != ATP_RI_NIL && ix->nodes[cur].sym < sym) {
+  while (cur != ATP_DTREE_NIL && ix->nodes[cur].sym < sym) {
     prev = cur;
     cur  = ix->nodes[cur].sibling;
   }
-  if (cur != ATP_RI_NIL && ix->nodes[cur].sym == sym) return cur;
+  if (cur != ATP_DTREE_NIL && ix->nodes[cur].sym == sym) return cur;
   u32 nn = atp_ri_node_new(ix, sym);          // may realloc the pool
   ix->nodes[nn].sibling = cur;
-  if (prev == ATP_RI_NIL) ix->nodes[parent].child = nn;
+  if (prev == ATP_DTREE_NIL) ix->nodes[parent].child = nn;
   else                    ix->nodes[prev].sibling = nn;
   return nn;
 }
@@ -1899,7 +1867,7 @@ static u32 atp_ri_child(AtpRuleIndex *ix, u32 parent, u32 sym) {
 static AtpRuleIndex *atp_ri_new(void) {
   AtpRuleIndex *ix = (AtpRuleIndex *)calloc(1, sizeof(AtpRuleIndex));
   if (ix == NULL) { fprintf(stderr, "atp_ri: index OOM\n"); exit(1); }
-  ix->root = atp_ri_node_new(ix, ATP_RI_NIL);
+  ix->root = atp_ri_node_new(ix, ATP_DTREE_NIL);
   return ix;
 }
 
@@ -1913,8 +1881,8 @@ static void atp_ri_free(AtpRuleIndex *ix) {
 // Walk rule LHS `t` in preorder, descending the tree by flatsym per
 // node.  Returns the node reached after `t`'s whole preorder string.
 static u32 atp_ri_insert_term(AtpRuleIndex *ix, u32 node, Term t,
-                              AtpRiVarMap *vm) {
-  node = atp_ri_child(ix, node, atp_ri_flatsym(t, vm));
+                              AtpDTreeVarMap *vm) {
+  node = atp_ri_child(ix, node, atp_dtree_flatsym(t, vm));
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
     for (u32 i = 0; i < n; i++) {
@@ -1934,7 +1902,7 @@ static void atp_ri_rebuild(AtpState *s) {
   ix->n_nodes = 0;
   ix->n_recs  = 0;
   ix->any_folded = 0;
-  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
+  ix->root    = atp_ri_node_new(ix, ATP_DTREE_NIL);
   for (u32 i = 0; i < s->n_rules; i++) {
     // When unorientable equations are present, index only the
     // orientable rules (always forward-decreasing, applied without an
@@ -1945,8 +1913,8 @@ static void atp_ri_rebuild(AtpState *s) {
     // regime.
     if (s->n_unorient > 0u && !s->r_orient[i]) continue;
     if (s->r_dead != NULL && s->r_dead[i]) continue;  // bwd-subsumed: sentinel LHS
-    AtpRiVarMap vm;
-    atp_ri_varmap_reset(&vm);
+    AtpDTreeVarMap vm;
+    atp_dtree_varmap_reset(&vm);
     u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
     if (vm.folded) ix->any_folded = 1u;
     u32 rec  = atp_ri_rec_new(ix);
@@ -1971,15 +1939,15 @@ static void atp_ri_rebuild(AtpState *s) {
     ux->n_recs  = 0;
     ux->any_folded = 0;
     ux->is_unorient = 1u;
-    ux->root    = atp_ri_node_new(ux, ATP_RI_NIL);
+    ux->root    = atp_ri_node_new(ux, ATP_DTREE_NIL);
     if (s->n_unorient > 0u) {
       for (u32 i = 0; i < s->n_rules; i++) {
         if (s->r_orient[i]) continue;                 // oriented: rule_index
         if (s->r_dead != NULL && s->r_dead[i]) continue;  // bwd-subsumed: sentinel face
         // l->r face: match lhs[i], replace by rhs[i].
         if (atp_vars_contained(s->rhs[i], s->lhs[i])) {
-          AtpRiVarMap vm;
-          atp_ri_varmap_reset(&vm);
+          AtpDTreeVarMap vm;
+          atp_dtree_varmap_reset(&vm);
           u32 node = atp_ri_insert_term(ux, ux->root, s->lhs[i], &vm);
           if (vm.folded) ux->any_folded = 1u;
           u32 rec  = atp_ri_rec_new(ux);
@@ -1989,8 +1957,8 @@ static void atp_ri_rebuild(AtpState *s) {
         }
         // r->l face: match rhs[i], replace by lhs[i].
         if (atp_vars_contained(s->lhs[i], s->rhs[i])) {
-          AtpRiVarMap vm;
-          atp_ri_varmap_reset(&vm);
+          AtpDTreeVarMap vm;
+          atp_dtree_varmap_reset(&vm);
           u32 node = atp_ri_insert_term(ux, ux->root, s->rhs[i], &vm);
           if (vm.folded) ux->any_folded = 1u;
           u32 rec  = atp_ri_rec_new(ux);
@@ -2036,7 +2004,7 @@ static u8 atp_ri_flatten(Term t, Term *flat, u32 *subsz, u32 *flatsym,
 // the WHOLE subject of the current `atp_ri_rewrite_step`; a query at
 // preorder position `p` walks the slice flat[p .. p+subsz[p]).
 // `g_atp_ri_best` is the lowest rule index a reachable leaf has
-// confirmed so far -- ATP_RI_NIL = none.
+// confirmed so far -- ATP_DTREE_NIL = none.
 static AtpRuleIndex *g_atp_ri_ix      = NULL;
 static const Term   *g_atp_ri_flat    = NULL;
 static const u32    *g_atp_ri_subsz   = NULL;
@@ -2044,16 +2012,16 @@ static const u32    *g_atp_ri_flatsym = NULL;  // per-position flat-symbol code
 static const Term   *g_atp_ri_lhs     = NULL;  // s->lhs[] for the leaf guard
 static const Term   *g_atp_ri_rhs     = NULL;  // s->rhs[] for r->l face guards
 static u32           g_atp_ri_qend    = 0;     // end of the queried slice
-static u32           g_atp_ri_star[ATP_RI_MAXVARS];  // first-bind positions
-static u32           g_atp_ri_best    = ATP_RI_NIL;
-static u32           g_atp_ri_best_star[ATP_RI_MAXVARS]; // star[] at the win
+static u32           g_atp_ri_star[ATP_DTREE_MAXVARS];  // first-bind positions
+static u32           g_atp_ri_best    = ATP_DTREE_NIL;
+static u32           g_atp_ri_best_star[ATP_DTREE_MAXVARS]; // star[] at the win
 static Term          g_atp_ri_qsubj   = 0;     // subject at the query position
 static u8            g_atp_ri_query_folded = 0; // subject flatten folded a var
 
 // At a leaf node: update g_atp_ri_best with the minimum rule index
 // whose LHS genuinely one-way matches the query subject.  The
 // perfect-tree descent proves structure + variable consistency for
-// the var ids the tree distinguishes, but `atp_ri_var_index` folds
+// the var ids the tree distinguishes, but `atp_dtree_var_index` folds
 // ids >= REWRITE_MAX_VAR onto one slot (coarser tree), so the leaf
 // re-runs `thvm_match` -- the authoritative guard, exactly the test
 // `rewrite_try_top`'s linear scan applies.
@@ -2066,7 +2034,7 @@ static void atp_ri_leaf_collect(u32 node) {
   // the proof and thvm_match is skipped.  A fold makes the tree coarser
   // and the leaf re-runs thvm_match as the authoritative guard.
   u8 perfect = !ix->any_folded && !g_atp_ri_query_folded;
-  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_DTREE_NIL;
        r = ix->recs[r].next) {
     ix->q_candidates++;
     u32 rule = ix->recs[r].rule;
@@ -2076,7 +2044,7 @@ static void atp_ri_leaf_collect(u32 node) {
       // Snapshot the path's variable bindings: with a perfect descent
       // these ARE the match substitution, so atp_ri_rewrite_step reads
       // them off directly instead of re-running thvm_match.
-      for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
+      for (u32 k = 0; k < ATP_DTREE_MAXVARS; k++) {
         g_atp_ri_best_star[k] = g_atp_ri_star[k];
       }
       continue;
@@ -2118,20 +2086,20 @@ static void atp_ri_descend_rec(u32 node, u32 pos, u32 depth) {
     u32 sz         = g_atp_ri_subsz[pos];
     u32 csym_exact = g_atp_ri_flatsym[pos];   // CTR_BASE+lab / NUM / STAR+idx
     if (sz == 0u) return;                      // would stall at same pos
-    u32 ctr_next   = ATP_RI_NIL;              // the lone CTR-match child
-    for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+    u32 ctr_next   = ATP_DTREE_NIL;              // the lone CTR-match child
+    for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
          c = ix->nodes[c].sibling) {
       u32 csym = ix->nodes[c].sym;
-      if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+      if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
         // Stored rule variable: FIRST occurrence binds it to this
         // subterm's preorder position; a REPEAT applies only if the two
         // subterms' flatsym slices are byte-identical (one-way matching).
-        u32 k = csym - ATP_RI_STAR_BASE;
+        u32 k = csym - ATP_DTREE_STAR_BASE;
         u32 bound = g_atp_ri_star[k];
-        if (bound == ATP_RI_NIL) {
+        if (bound == ATP_DTREE_NIL) {
           g_atp_ri_star[k] = pos;
           atp_ri_descend_rec(c, pos + sz, depth + 1u);
-          g_atp_ri_star[k] = ATP_RI_NIL;
+          g_atp_ri_star[k] = ATP_DTREE_NIL;
         } else if (g_atp_ri_subsz[bound] == sz &&
                    memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
                           (size_t)sz * sizeof(u32)) == 0) {
@@ -2143,7 +2111,7 @@ static void atp_ri_descend_rec(u32 node, u32 pos, u32 depth) {
         ctr_next = c;
       }
     }
-    if (ctr_next == ATP_RI_NIL) return;       // no CTR continuation: done
+    if (ctr_next == ATP_DTREE_NIL) return;       // no CTR continuation: done
     node = ctr_next;                          // tail-continue without a call
     pos  = pos + 1u;
   }
@@ -2151,12 +2119,12 @@ static void atp_ri_descend_rec(u32 node, u32 pos, u32 depth) {
 
 // Retrieve the lowest rule index whose LHS one-way matches the subject
 // subterm at preorder position `qpos` of the shared flat array.
-// Returns ATP_RI_NIL if no rule LHS matches there.
+// Returns ATP_DTREE_NIL if no rule LHS matches there.
 static u32 atp_ri_query_pos(u32 qpos) {
   g_atp_ri_ix->q_queries++;
   g_atp_ri_qend  = qpos + g_atp_ri_subsz[qpos];
   g_atp_ri_qsubj = g_atp_ri_flat[qpos];
-  g_atp_ri_best  = ATP_RI_NIL;
+  g_atp_ri_best  = ATP_DTREE_NIL;
   // g_atp_ri_star is NOT reset here: atp_ri_descend pairs every
   // `star[k] = pos` with a `star[k] = NIL` on backtrack and never
   // returns early, so star[] is all-NIL on entry and exit of every
@@ -2196,7 +2164,7 @@ static u32 g_atp_ri_ncand = 0;
 static void atp_ri_leaf_collect_unorient(u32 node) {
   AtpRuleIndex *ix = g_atp_ri_ix;
   u8 perfect = !ix->any_folded && !g_atp_ri_query_folded;
-  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_DTREE_NIL;
        r = ix->recs[r].next) {
     u32 packed = ix->recs[r].rule;
     if (g_atp_ri_ncand >= ATP_RI_MAXCAND) return;   // buffer full: caller bails
@@ -2234,17 +2202,17 @@ static void atp_ri_descend_unorient_rec(u32 node, u32 pos, u32 depth) {
     u32 sz         = g_atp_ri_subsz[pos];
     u32 csym_exact = g_atp_ri_flatsym[pos];
     if (sz == 0u) return;                      // would stall at same pos
-    u32 ctr_next   = ATP_RI_NIL;
-    for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+    u32 ctr_next   = ATP_DTREE_NIL;
+    for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
          c = ix->nodes[c].sibling) {
       u32 csym = ix->nodes[c].sym;
-      if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
-        u32 k = csym - ATP_RI_STAR_BASE;
+      if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
+        u32 k = csym - ATP_DTREE_STAR_BASE;
         u32 bound = g_atp_ri_star[k];
-        if (bound == ATP_RI_NIL) {
+        if (bound == ATP_DTREE_NIL) {
           g_atp_ri_star[k] = pos;
           atp_ri_descend_unorient_rec(c, pos + sz, depth + 1u);
-          g_atp_ri_star[k] = ATP_RI_NIL;
+          g_atp_ri_star[k] = ATP_DTREE_NIL;
         } else if (g_atp_ri_subsz[bound] == sz &&
                    memcmp(&g_atp_ri_flatsym[bound], &g_atp_ri_flatsym[pos],
                           (size_t)sz * sizeof(u32)) == 0) {
@@ -2254,7 +2222,7 @@ static void atp_ri_descend_unorient_rec(u32 node, u32 pos, u32 depth) {
         ctr_next = c;
       }
     }
-    if (ctr_next == ATP_RI_NIL) return;
+    if (ctr_next == ATP_DTREE_NIL) return;
     node = ctr_next;
     pos  = pos + 1u;
   }
@@ -2294,9 +2262,9 @@ static u8 atp_ri_find_redex(u32 flatlen, u32 clean_before,
     // x->t and orient would have rejected it).  Skip without paying
     // the discrim-tree descent.  O(1) flat lookup vs the descent's
     // STAR-edge walk that always returns NIL at the leaves.
-    if (g_atp_ri_flatsym[p] < ATP_RI_CTR_BASE) continue;
+    if (g_atp_ri_flatsym[p] < ATP_DTREE_CTR_BASE) continue;
     u32 m = atp_ri_query_pos(p);
-    if (m != ATP_RI_NIL) {
+    if (m != ATP_DTREE_NIL) {
       *redex_pos  = p;
       *redex_rule = m;
       return 1;
@@ -2315,7 +2283,7 @@ static u8 atp_ri_find_redex(u32 flatlen, u32 clean_before,
 // rewrite paths gets fresh CTR blocks.
 static Term atp_ri_build(const Term *flat, const u32 *subsz,
                          const u32 *flatsym, u32 pos) {
-  if (flatsym[pos] < ATP_RI_CTR_BASE) return flat[pos];  // NUM / variable leaf
+  if (flatsym[pos] < ATP_DTREE_CTR_BASE) return flat[pos];  // NUM / variable leaf
   Term src = flat[pos];
   u32  n   = term_ctr_n(src);
   Term children[REWRITE_MAX_ARITY];
@@ -2367,7 +2335,7 @@ u64 g_atp_rhs_cache_misses = 0;
 // preorder position).  Allocation-free -- pure memcpy from
 // subject_flat / subject_subsz / subject_flatsym into dst arrays.
 // Returns 1 on success; 0 on cap overrun OR on a var binding that
-// doesn't fit ATP_RI_MAXVARS (caller falls back to the Term-tree path).
+// doesn't fit ATP_DTREE_MAXVARS (caller falls back to the Term-tree path).
 // Look up (or fill) the cached flat encoding of `rule_rhs`.  Returns
 // the entry's slot; caller checks `entry->epoch == g_atp_unf_memo_epoch`
 // and uses (flat, subsz, flatsym, len) directly.  On cache miss,
@@ -2432,7 +2400,7 @@ static u8 atp_subst_apply_to_flat_cached(Term rule_rhs,
       sp--;
     }
     u32 cell_sym = e->flatsym[i];
-    if (cell_sym >= ATP_RI_CTR_BASE) {
+    if (cell_sym >= ATP_DTREE_CTR_BASE) {
       if (*dst_pos >= cap) return 0;
       dst_flat   [*dst_pos] = e->flat[i];
       dst_flatsym[*dst_pos] = cell_sym;
@@ -2440,11 +2408,11 @@ static u8 atp_subst_apply_to_flat_cached(Term rule_rhs,
       stack_end [sp] = i + e->subsz[i];
       sp++;
       *dst_pos = *dst_pos + 1u;
-    } else if (cell_sym >= ATP_RI_STAR_BASE) {
-      u32 vid = cell_sym - ATP_RI_STAR_BASE;
-      if (vid >= ATP_RI_MAXVARS) return 0;
+    } else if (cell_sym >= ATP_DTREE_STAR_BASE) {
+      u32 vid = cell_sym - ATP_DTREE_STAR_BASE;
+      if (vid >= ATP_DTREE_MAXVARS) return 0;
       u32 spos = star[vid];
-      if (spos == ATP_RI_NIL) return 0;
+      if (spos == ATP_DTREE_NIL) return 0;
       u32 ssz = subj_subsz[spos];
       if (*dst_pos + ssz > cap) return 0;
       memcpy(&dst_flat   [*dst_pos], &subj_flat   [spos],
@@ -2489,9 +2457,9 @@ static u8 atp_subst_apply_to_flat(Term rule_rhs,
   switch (term_tag(rule_rhs)) {
     case TAG_FVR: {
       u32 vid = term_ext(rule_rhs);
-      if (vid >= ATP_RI_MAXVARS) return 0;     // folded: fall back to tree path
+      if (vid >= ATP_DTREE_MAXVARS) return 0;     // folded: fall back to tree path
       u32 spos = star[vid];
-      if (spos == ATP_RI_NIL) return 0;        // unbound: fall back
+      if (spos == ATP_DTREE_NIL) return 0;        // unbound: fall back
       u32 ssz = subj_subsz[spos];
       if (here + ssz > cap) return 0;
       memcpy(&dst_flat[here],    &subj_flat[spos],
@@ -2673,7 +2641,7 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   // atp_ri_descend leaves it all-NIL (each bind is unwound on backtrack),
   // so the per-query reset that used to live in atp_ri_query_pos was
   // redundant -- a 64-store loop on every one of millions of queries.
-  for (u32 k = 0; k < ATP_RI_MAXVARS; k++) g_atp_ri_star[k] = ATP_RI_NIL;
+  for (u32 k = 0; k < ATP_DTREE_MAXVARS; k++) g_atp_ri_star[k] = ATP_DTREE_NIL;
 
   u32 flatlen = 0u;
   u8  folded  = 0u;
@@ -2712,8 +2680,8 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
     // thvm_normalize_vars, so the star index IS the variable id.
     RewriteSubst subst = {{0}};
     if (!g_atp_ri_ix->any_folded && !folded) {
-      for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
-        if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
+      for (u32 k = 0; k < ATP_DTREE_MAXVARS; k++) {
+        if (g_atp_ri_best_star[k] != ATP_DTREE_NIL) {
           // See atp_ft_indexed_fixpoint: a star at an INTERIOR position has
           // a STALE cached flat[] cell after an in-place splice rewrote a
           // descendant, so rebuild the bound subtree rather than read the
@@ -3118,8 +3086,8 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
     }
     RewriteSubst subst = {{0}};
     if (!g_atp_ri_ix->any_folded && !*folded) {
-      for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
-        if (g_atp_ri_best_star[k] != ATP_RI_NIL) {
+      for (u32 k = 0; k < ATP_DTREE_MAXVARS; k++) {
+        if (g_atp_ri_best_star[k] != ATP_DTREE_NIL) {
           // The star position may be an INTERIOR node (a rule var binds a
           // whole subtree, not just a leaf).  An earlier in-place splice
           // updates that subtree's child cells + subsz/flatsym but NOT the
@@ -3137,7 +3105,7 @@ static u8 atp_ft_indexed_fixpoint(AtpState *s, Term *flat, u32 *subsz,
     }
     // Flatterm-native splice port (WM TermzellenT MA/SubstApply
     // analog): when the rule's var bindings are all in-range
-    // (g_atp_ri_best_star[k] != ATP_RI_NIL and < ATP_RI_MAXVARS) AND
+    // (g_atp_ri_best_star[k] != ATP_DTREE_NIL and < ATP_DTREE_MAXVARS) AND
     // neither the index nor the subject folded, splice DIRECTLY from
     // the rule rhs Term + star positions into the persistent flat
     // arrays -- no thvm_subst_apply, no atp_ri_build, no
@@ -3274,7 +3242,7 @@ static u8 atp_ft_unorient_step(AtpState *s, Term *flat, u32 *subsz,
     // unorientable equation that could fire is a bare `x = y`-style one,
     // which is never order-decreasing (and the orient check would have
     // dropped it).  Skip on every leaf -- O(1) flat lookup.
-    if (flatsym[p] < ATP_RI_CTR_BASE) continue;
+    if (flatsym[p] < ATP_DTREE_CTR_BASE) continue;
     if (ux == NULL) {
       // No unorient index -- the linear scan needs the materialised
       // subterm.  Rebuild it from the flat arrays (the un-spliced
@@ -3480,7 +3448,7 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
   g_atp_ri_flatsym = flatsym;
   g_atp_ri_lhs     = s->lhs;
   g_atp_ri_rhs     = s->rhs;
-  for (u32 k = 0; k < ATP_RI_MAXVARS; k++) g_atp_ri_star[k] = ATP_RI_NIL;
+  for (u32 k = 0; k < ATP_DTREE_MAXVARS; k++) g_atp_ri_star[k] = ATP_DTREE_NIL;
 
   u32 flatlen = 0u;
   u8  folded  = 0u;
@@ -3593,7 +3561,7 @@ static Term atp_rewrite_normalize_flatterm_selfcheck_tree(AtpState *s, Term t,
 //
 // THE PORT -- a candidate FILTER, CP-set-preserving.  cp_index is a
 // discrimination tree over the WHOLE rule-LHS terms (reusing atp_ri_*'s
-// node/rec pools, atp_ri_flatsym first-appearance scheme, atp_ri_child
+// node/rec pools, atp_dtree_flatsym first-appearance scheme, atp_ri_child
 // insert).  For the new rule i, the partners j the cross-product can
 // emit a CP for are exactly { j : lj unifies with some non-var subterm
 // of li }.  atp_cp_index_collect descends cp_index in UNIFICATION mode
@@ -3654,7 +3622,7 @@ static void atp_cp_cand_sort(void) {
 
 static void atp_cp_index_leaf(u32 node) {
   AtpRuleIndex *ix = g_atp_cp_ix;
-  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_DTREE_NIL;
        r = ix->recs[r].next) {
     atp_cp_cand_add(ix->recs[r].rule);
   }
@@ -3666,7 +3634,7 @@ static void atp_cp_index_leaf(u32 node) {
 static void atp_cp_index_collect_subtree(u32 node) {
   AtpRuleIndex *ix = g_atp_cp_ix;
   atp_cp_index_leaf(node);
-  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+  for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
        c = ix->nodes[c].sibling) {
     if (g_atp_cp_overflow) return;
     atp_cp_index_collect_subtree(c);
@@ -3680,13 +3648,13 @@ static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
   AtpRuleIndex *ix = g_atp_cp_ix;
   if (pos == qend) { atp_cp_index_leaf(node); return; }
   u32 qsym = g_atp_cp_qflatsym[pos];
-  u8  q_is_star = (qsym >= ATP_RI_STAR_BASE && qsym < ATP_RI_CTR_BASE);
+  u8  q_is_star = (qsym >= ATP_DTREE_STAR_BASE && qsym < ATP_DTREE_CTR_BASE);
   u32 sz   = g_atp_cp_qsubsz[pos];
-  for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+  for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
        c = ix->nodes[c].sibling) {
     if (g_atp_cp_overflow) return;
     u32 csym = ix->nodes[c].sym;
-    if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
+    if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
       // Stored rule var unifies with the whole query subterm at `pos`:
       // the stored side consumed one tree edge (the STAR), the query
       // consumed its whole subterm (sz positions).
@@ -3709,16 +3677,16 @@ static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
 }
 
 // Build cp_index from s->lhs[0..n_rules): one whole-LHS term per rule,
-// keyed by the atp_ri_flatsym first-appearance symbol string.  Rebuilt
+// keyed by the atp_dtree_flatsym first-appearance symbol string.  Rebuilt
 // (like rule_index) whenever R mutates.
 static void atp_cp_index_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->cp_index;
   ix->n_nodes = 0;
   ix->n_recs  = 0;
-  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
-  AtpRiVarMap vm;
+  ix->root    = atp_ri_node_new(ix, ATP_DTREE_NIL);
+  AtpDTreeVarMap vm;
   for (u32 i = 0; i < s->n_rules; i++) {
-    atp_ri_varmap_reset(&vm);
+    atp_dtree_varmap_reset(&vm);
     u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
     u32 rec  = atp_ri_rec_new(ix);
     ix->recs[rec].rule    = i;
@@ -3767,7 +3735,7 @@ static u32 atp_cp_index_collect(AtpState *s, Term li) {
   // each gathers the rules whose lhs could unify there.
   for (u32 p = 0; p < pos; p++) {
     u32 qsym = qflatsym[p];
-    if (qsym >= ATP_RI_STAR_BASE && qsym < ATP_RI_CTR_BASE) continue; // var
+    if (qsym >= ATP_DTREE_STAR_BASE && qsym < ATP_DTREE_CTR_BASE) continue; // var
     u32 qend = p + qsubsz[p];
     atp_cp_index_descend(s->cp_index->root, p, qend);
     if (g_atp_cp_overflow) return 0;
@@ -3780,7 +3748,7 @@ static u32 atp_cp_index_collect(AtpState *s, Term li) {
 // its subterms) as a separate tree path keyed to `rule`.  A var-headed
 // subterm is skipped (cp_visit never overlaps at a variable position).
 static void atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
-                                   AtpRiVarMap *vm) {
+                                   AtpDTreeVarMap *vm) {
   if (term_tag(t) == TAG_CTR) {
     u32 node = atp_ri_insert_term(ix, ix->root, t, vm);
     u32 rec  = atp_ri_rec_new(ix);
@@ -3799,10 +3767,10 @@ static void atp_cp_subindex_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->cp_subindex;
   ix->n_nodes = 0;
   ix->n_recs  = 0;
-  ix->root    = atp_ri_node_new(ix, ATP_RI_NIL);
-  AtpRiVarMap vm;
+  ix->root    = atp_ri_node_new(ix, ATP_DTREE_NIL);
+  AtpDTreeVarMap vm;
   for (u32 i = 0; i < s->n_rules; i++) {
-    atp_ri_varmap_reset(&vm);
+    atp_dtree_varmap_reset(&vm);
     atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
   }
   ix->n_rules_built = s->n_rules;

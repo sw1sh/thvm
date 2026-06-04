@@ -40,7 +40,7 @@
 
 // Symbols brought in from the Term-side rule-index in _.c (same TU):
 //   AtpRuleIndex, AtpRiNode, AtpRiRec
-//   ATP_RI_NIL, ATP_RI_NUM, ATP_RI_STAR_BASE, ATP_RI_CTR_BASE, ATP_RI_MAXVARS
+//   ATP_DTREE_NIL, ATP_DTREE_NUM, ATP_DTREE_STAR_BASE, ATP_DTREE_CTR_BASE, ATP_DTREE_MAXVARS
 //   ATP_DT_DESCENT_DEPTH_CAP
 //   ft_eq (from ft.c)
 //   ft_is_var, ft_ctr_sym (static inline in ft.c)
@@ -92,9 +92,9 @@ static void atp_ri_sync_ft_patterns(AtpState *s) {
 }
 
 // --- STAR bindings (file-static, same shape as g_atp_ri_star) -------
-static AtpFtCell *g_atp_ri_star_ft[ATP_RI_MAXVARS];
-static u32        g_atp_ri_best_ft   = ATP_RI_NIL;
-static AtpFtCell *g_atp_ri_best_star_ft[ATP_RI_MAXVARS];
+static AtpFtCell *g_atp_ri_star_ft[ATP_DTREE_MAXVARS];
+static u32        g_atp_ri_best_ft   = ATP_DTREE_NIL;
+static AtpFtCell *g_atp_ri_best_star_ft[ATP_DTREE_MAXVARS];
 
 // --- Descent helpers -------------------------------------------------
 //
@@ -110,7 +110,7 @@ static AtpFtCell *g_atp_ri_best_star_ft[ATP_RI_MAXVARS];
 // rule LHS; the SUBJECT side just consumes the symbols as it walks.
 //
 // Returns the edge sym; the caller compares against tree node syms
-// (which were inserted by atp_ri_flatsym -- a CTR_BASE+label, NUM-marker
+// (which were inserted by atp_dtree_flatsym -- a CTR_BASE+label, NUM-marker
 // CTR_BASE+ATPFT_NUM_MARKER as a CTR, or STAR_BASE+var_idx).
 //
 // Subject vars don't fold because there's no subject renumbering --
@@ -124,13 +124,13 @@ static AtpFtCell *g_atp_ri_best_star_ft[ATP_RI_MAXVARS];
 // (ft_from_term uses term_ext as the label, ft.c:170).
 static inline u32 atp_ri_ft_ctr_sym(const AtpFtCell *c) {
   // ATPFT_NUM_MARKER is what NUM converts to in AtpFt-land (ft.c:162);
-  // on the Term side NUM maps to ATP_RI_NUM (0).  Translate so the
+  // on the Term side NUM maps to ATP_DTREE_NUM (0).  Translate so the
   // edge label agrees with what the tree was built with.
   u32 raw = c->sym;
   if (raw == 0x40000000u /* ATPFT_NUM_MARKER, ft.c:162 */) {
-    return ATP_RI_NUM;
+    return ATP_DTREE_NUM;
   }
-  return ATP_RI_CTR_BASE + raw;
+  return ATP_DTREE_CTR_BASE + raw;
 }
 
 // Forward-declared recursive shape.  Depth-capped exactly like
@@ -168,7 +168,7 @@ static void atp_ri_descend_ft_rec(u32 node, AtpFtCell *subj, u32 depth);
 //
 //   - "We're at the leaf": tree node has no children AND no STAR
 //     children either (every path ends in a record at a leaf node, and
-//     that's where rec_head != ATP_RI_NIL).  The Term-path detects this
+//     that's where rec_head != ATP_DTREE_NIL).  The Term-path detects this
 //     by "pos == qend"; the FT path detects it by "we just consumed
 //     the last cell of the subterm AND the tree node has rec_head".
 //
@@ -211,14 +211,14 @@ static void atp_ri_descend_ft_rec(u32 node, AtpFtCell *subj, u32 depth);
 
 // Leaf collect: pick the minimum live rule index.  Stage 6b enforces
 // "perfect descent only" -- when ix->any_folded is set (some rule LHS
-// folded a var id beyond REWRITE_MAX_VAR or beyond ATP_RI_MAXVARS),
+// folded a var id beyond REWRITE_MAX_VAR or beyond ATP_DTREE_MAXVARS),
 // the descent does not reliably prove the match; we skip leaf
 // collection in that case, find_redex_ft returns no-hit, and the
 // caller in ft_norm.c falls back to its linear scan.  This matches
 // the design's "perfect/fallback split is shared" between Term and FT.
 static void atp_ri_leaf_collect_ft(u32 node, AtpRuleIndex *ix) {
   if (ix->any_folded) return;   // imperfect: caller handles via linear scan
-  for (u32 r = ix->nodes[node].rec_head; r != ATP_RI_NIL;
+  for (u32 r = ix->nodes[node].rec_head; r != ATP_DTREE_NIL;
        r = ix->recs[r].next) {
     ix->q_candidates++;
     u32 rule = ix->recs[r].rule;
@@ -226,7 +226,7 @@ static void atp_ri_leaf_collect_ft(u32 node, AtpRuleIndex *ix) {
     if (rule >= g_atp_ri_lhs_ft_cap) continue;
     if (g_atp_ri_lhs_ft[rule] == NULL) continue;  // dead -- no FT pattern
     g_atp_ri_best_ft = rule;
-    for (u32 k = 0; k < ATP_RI_MAXVARS; k++) {
+    for (u32 k = 0; k < ATP_DTREE_MAXVARS; k++) {
       g_atp_ri_best_star_ft[k] = g_atp_ri_star_ft[k];
     }
   }
@@ -276,13 +276,13 @@ static void atp_ri_descend_ft_at(u32 node, AtpFtCell *subj,
 
     // Walk the tree node's children: STARs fan out (may recurse),
     // CTR/NUM matches at most one child.
-    u32 ctr_next = ATP_RI_NIL;
-    for (u32 c = ix->nodes[node].child; c != ATP_RI_NIL;
+    u32 ctr_next = ATP_DTREE_NIL;
+    for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
          c = ix->nodes[c].sibling) {
       u32 csym = ix->nodes[c].sym;
-      if (csym >= ATP_RI_STAR_BASE && csym < ATP_RI_CTR_BASE) {
-        u32 k = csym - ATP_RI_STAR_BASE;
-        if (k >= ATP_RI_MAXVARS) continue;
+      if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
+        u32 k = csym - ATP_DTREE_STAR_BASE;
+        if (k >= ATP_DTREE_MAXVARS) continue;
         AtpFtCell *bound = g_atp_ri_star_ft[k];
         if (bound == NULL) {
           // First bind: this subterm.  Recurse with the subj
@@ -297,7 +297,7 @@ static void atp_ri_descend_ft_at(u32 node, AtpFtCell *subj,
         ctr_next = c;
       }
     }
-    if (ctr_next == ATP_RI_NIL) return;
+    if (ctr_next == ATP_DTREE_NIL) return;
     // CTR continuation: tail-loop.  The CTR consumes the HEAD cell;
     // its children (in the rule's pattern) line up with subj's
     // children, which in pre-order are subj->next (first child), then
@@ -347,13 +347,13 @@ static int atp_ri_find_redex_ft(AtpRuleIndex *ix, AtpFtCell *root,
     // bind on backtrack so the table is all-NULL on exit, but we
     // defensively NULL-out before each query to harden against an
     // earlier-aborted descent (depth-cap, OOM).
-    for (u32 k = 0; k < ATP_RI_MAXVARS; k++) g_atp_ri_star_ft[k] = NULL;
-    g_atp_ri_best_ft = ATP_RI_NIL;
+    for (u32 k = 0; k < ATP_DTREE_MAXVARS; k++) g_atp_ri_star_ft[k] = NULL;
+    g_atp_ri_best_ft = ATP_DTREE_NIL;
 
     ix->q_queries++;
     AtpFtCell *subj_end = p->end->next;
     atp_ri_descend_ft_at(ix->root, p, subj_end, 0u, ix);
-    if (g_atp_ri_best_ft != ATP_RI_NIL) {
+    if (g_atp_ri_best_ft != ATP_DTREE_NIL) {
       *redex_out = p;
       *rule_out  = g_atp_ri_best_ft;
       return 1;

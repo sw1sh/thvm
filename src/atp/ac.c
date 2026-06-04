@@ -140,7 +140,7 @@ static u8 atp_ac_flatten(Term t, const AtpAcInfo *ac,
 static u64 atp_term_struct_hash(Term t);
 
 // Cap on flattened leaves per AC position.  64 is the same per-rule
-// variable cap (`ATP_RI_MAXVARS`); any AC node with more than 64
+// variable cap (`ATP_DTREE_MAXVARS`); any AC node with more than 64
 // leaves falls through to syntactic representation (canonical-form
 // computation bails, returning `t` unchanged at that node).
 #define ATP_AC_FLATTEN_CAP 64u
