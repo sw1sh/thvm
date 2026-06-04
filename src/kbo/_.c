@@ -40,6 +40,25 @@
 
 #define KBO_MAX_VAR 64
 
+// Forward-decls so kbo_eq can short-circuit via the structural-hash
+// cache (g_kbo_thash) defined further below.
+#define KBO_THASH_BITS 16
+#define KBO_THASH_SIZE (1u << KBO_THASH_BITS)
+#define KBO_THASH_MASK (KBO_THASH_SIZE - 1u)
+typedef struct {
+  Term t;
+  u64  hash;
+  u32  epoch;
+  u32  wmemo_idx;
+} KboTHashEnt;
+static KboTHashEnt g_kbo_thash[KBO_THASH_SIZE];
+static u32 g_kbo_epoch = 1;
+static inline u32 kbo_thash_slot(Term t) {
+  u64 h = (u64)t * 0x9E3779B97F4A7C15ull;
+  h ^= h >> 29;
+  return (u32)h & KBO_THASH_MASK;
+}
+
 // === structural equality ============================================
 
 static u8 kbo_eq(Term s, Term t) {
@@ -47,6 +66,19 @@ static u8 kbo_eq(Term s, Term t) {
                           // share subterm cells, so this fires often
   if (term_tag(s) != term_tag(t)) return 0;
   if (term_ext(s) != term_ext(t)) return 0;
+  // CTR-tagged: structural-hash short-circuit before the recursive walk.
+  // KBO orientation + match consistency checks call kbo_eq on terms that
+  // have already been through the KBO weight memo, so their hashes are
+  // often cached in g_kbo_thash.  When both ends have a current-epoch
+  // entry and the hashes differ, the terms are guaranteed unequal -- the
+  // recursive walk would discover the same answer but pay an O(|t|) cost.
+  if (term_tag(s) == TAG_CTR) {
+    KboTHashEnt *cs = &g_kbo_thash[kbo_thash_slot(s)];
+    KboTHashEnt *ct = &g_kbo_thash[kbo_thash_slot(t)];
+    if (cs->epoch == g_kbo_epoch && cs->t == s
+        && ct->epoch == g_kbo_epoch && ct->t == t
+        && cs->hash != ct->hash) return 0;
+  }
   switch (term_tag(s)) {
     case TAG_FVR: return 1;  // same id (ext) already checked
     case TAG_CTR: {
@@ -261,29 +293,12 @@ typedef struct {
   i16       vcnt[KBO_VPROF_CAP];    // occurrence counts (signed for bump)
 } KboWMemoEnt;
 static KboWMemoEnt g_kbo_wmemo[KBO_WMEMO_SIZE];
-static u32 g_kbo_epoch = 1;
 static const KboConfig *g_kbo_last_cfg = NULL;
 
-// Per-Term-ID cache: Term ID -> (struct hash, wmemo slot index).
-// First visit of a Term ID pays the bottom-up walk (which fills both
-// this cache + g_kbo_wmemo); subsequent visits of the SAME Term ID
-// are O(1) (read hash, jump to slot).  Sized identically to wmemo.
-#define KBO_THASH_BITS 16
-#define KBO_THASH_SIZE (1u << KBO_THASH_BITS)
-#define KBO_THASH_MASK (KBO_THASH_SIZE - 1u)
-typedef struct {
-  Term t;
-  u64  hash;
-  u32  epoch;
-  u32  wmemo_idx;
-} KboTHashEnt;
-static KboTHashEnt g_kbo_thash[KBO_THASH_SIZE];
-
-static inline u32 kbo_thash_slot(Term t) {
-  u64 h = (u64)t * 0x9E3779B97F4A7C15ull;
-  h ^= h >> 29;
-  return (u32)h & KBO_THASH_MASK;
-}
+// g_kbo_thash / g_kbo_epoch / kbo_thash_slot forward-declared near the
+// top of this file so kbo_eq can short-circuit via cached structural
+// hashes.  First visit of a Term ID pays the bottom-up walk (which
+// fills both this cache + g_kbo_wmemo); subsequent visits are O(1).
 
 // Slot a structural hash into the wmemo table.
 static inline u32 kbo_wmemo_slot(u64 sh) {
