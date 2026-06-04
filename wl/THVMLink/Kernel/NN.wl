@@ -67,7 +67,7 @@ TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-
 TConv2DIm2Col::usage     = "TConv2DIm2Col[input, weights, bias] is the im2col + matmul lowering of a stride-1, no-padding 2-D convolution.  Same signature/output shape as TConv2D.  Builds the im2col matrix `xCol : {C_in*kh*kw, H_out*W_out}`, then `out = w_flat @ xCol` via TMatMul which dispatches through cblas_sgemm.  TConv2D defaults to this path.";
 TConv2DIm2ColBatched::usage = "TConv2DIm2ColBatched[input, weights, bias] is the rank-4 batched im2col lowering for input {B,C,H,W}.  It builds xCol : {C*kh*kw, B*H_out*W_out}, runs one matmul, then reshapes back to {B,C_out,H_out,W_out}.";
 TConv2DKhKw::usage       = "TConv2DKhKw[input, weights, bias] is the kh*kw partial-sum lowering -- original TConv2D body kept for reference.";
-TGlorot::usage           = "TGlorot[shape] returns a fresh f32 TTerm tensor of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (Glorot/Xavier-He init).  fan_in = product of all dims after the first.  Suitable for ReLU / linear layer weight init.";
+TGlorot::usage           = "TGlorot[shape] returns a fresh f32 TTerm tensor of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (He init for ReLU).  fan_in is the count of inputs per output unit: the FIRST dim for a 2-D linear weight {in, out} (TLinear is x . W, input-first), or C_in * kh * kw = product of the dims after the first for a conv weight {C_out, C_in, kh, kw} (output-first).  Suitable for ReLU / linear / conv weight init.";
 TZeros::usage            = "TZeros[shape] returns a fresh f32 TTerm tensor of zeros at the given shape.  Convenience for bias init / running-stat init.";
 TOnes::usage             = "TOnes[shape] returns a fresh f32 TTerm tensor of ones at the given shape.  Convenience for layer-norm gamma init / scale-1 placeholders.";
 TZerosLike::usage        = "TZerosLike[t] returns a TTensor handle of zeros matching the shape and dtype of TTerm `t`.  Suitable for seeding Adam m/v moment buffers.";
@@ -452,7 +452,16 @@ TConv2DIm2ColBatched[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
 (* === host-side init helpers for example scripts ============== *)
 
 TGlorot[shape_List, dtype_String : "f32"] := With[{
-    fanIn = If[Length[shape] >= 2, Times @@ Drop[shape, 1], shape[[1]]]
+    (* fan_in = number of inputs feeding each output unit.  thvm's two
+       weight layouts put that dim in different places: a linear weight
+       is {in, out} (TLinear is x . W, input-first) so fan_in is the
+       FIRST dim; a conv weight is {C_out, C_in, kh, kw} (output-first)
+       so fan_in is C_in * kh * kw = product of the dims after the first. *)
+    fanIn = Which[
+        Length[shape] == 2, shape[[1]],
+        Length[shape] >= 3, Times @@ Drop[shape, 1],
+        True,               shape[[1]]
+    ]
 },
     TTensorCreate[
         RandomVariate[NormalDistribution[0., Sqrt[2.0 / fanIn]], shape],
