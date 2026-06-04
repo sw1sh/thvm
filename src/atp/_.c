@@ -7378,6 +7378,7 @@ static Term atp_rewrite_normalize_slice_record(AtpState *s, Term t,
   return t;
 }
 
+#include <sys/resource.h>
 fn AtpStatus thvm_atp_step(AtpState *s) {
   if (s == NULL) return ATP_QUEUE_EMPTY;
 
@@ -7417,13 +7418,13 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     // class that historically hung past TimeConstraint at multi-GB
     // RSS (project_tfindproof_timeout_no_kill).
     //
-    // Default 0.95 -- engine-byte-identical under all currently-
-    // shipped tests (which complete well below this threshold).
+    // Default 0.85 -- aggressive enough to trip BEFORE the OS starts
+    // paging on a typical 16GB box (with a multi-GB semi-space).
     // Tunable via THVM_ATP_HEAP_ABORT_FRAC env var; valid range
     // (0.5, 1.0); a 0 or out-of-range value disables the guard.
     static double frac = -1.0;
     if (frac < 0.0) {
-      frac = 0.95;
+      frac = 0.85;
       const char *e = getenv("THVM_ATP_HEAP_ABORT_FRAC");
       if (e != NULL && *e != '\0') {
         char *end = NULL;
@@ -7441,6 +7442,41 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     u64 cap = hi - lo;
     if (cap > 0 && (double)(HEAP_NEXT - lo) > frac * (double)cap) {
       return ATP_ABORTED;
+    }
+  }
+
+  // Process-RSS memory guard.  The heap-frac guard above only sees the
+  // dyn heap; trace buffers, CP arena, FV/RI/discrim indices, the WL
+  // ProofObject reconstruction state, and the kernel/paclet overhead
+  // all live OUTSIDE it.  A run can exhaust system RAM with a perfectly
+  // happy semi-space.  Poll RSS every 1024 steps (getrusage is a syscall
+  // -- not free -- but a 1024-step amortization is in the noise vs the
+  // saturator's per-step cost).  Default cap 4 GB; env-tunable via
+  // THVM_ATP_RSS_ABORT_MB; 0 disables.  On Darwin ru_maxrss is bytes;
+  // on Linux it's KB -- this code handles both.
+  if ((s->step & 0x3ffu) == 0u) {
+    static long long rss_cap_bytes = -1;
+    if (rss_cap_bytes < 0) {
+      rss_cap_bytes = 4LL * 1024 * 1024 * 1024;
+      const char *e = getenv("THVM_ATP_RSS_ABORT_MB");
+      if (e != NULL && *e != '\0') {
+        char *end = NULL;
+        long long mb = strtoll(e, &end, 10);
+        if (end != NULL && *end == '\0' && mb >= 0) {
+          rss_cap_bytes = mb * 1024 * 1024;
+        }
+      }
+    }
+    if (rss_cap_bytes > 0) {
+      struct rusage ru;
+      if (getrusage(RUSAGE_SELF, &ru) == 0) {
+#if defined(__APPLE__)
+        long long rss = (long long)ru.ru_maxrss;             // bytes
+#else
+        long long rss = (long long)ru.ru_maxrss * 1024LL;    // KB->bytes
+#endif
+        if (rss > rss_cap_bytes) return ATP_ABORTED;
+      }
     }
   }
 
