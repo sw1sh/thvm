@@ -2031,6 +2031,13 @@ fn void materialized_loc_clear        (void);
 fn void materialized_loc_scope_enter  (void);
 fn void materialized_loc_scope_leave  (void);
 fn u32  materialized_loc_scope_depth  (void);
+// Cross-pass buffer-share detection: per-loc count of how many top-level
+// realize roots reach a heap loc, populated each materialize-loop
+// iteration so the per-subgraph arena planner can see a buffer shared by
+// sibling subgraphs (the cross-pass share the local bufferize
+// consumer_count misses).
+fn void xpass_cc_populate(Term root);
+fn void xpass_cc_reset(void);
 // JIT-capture realize-dedup span: preserve the loc->tid cache across the
 // several realizes of one captured step so shared forward/grad kernels
 // are emitted (and recorded) once.  Gated by THVM_JIT_REALIZE_DEDUP.
