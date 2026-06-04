@@ -363,9 +363,26 @@ static inline void step_parent_set(u64 loc, Term parent) {
 //   * No session -> linear scan over HEAP_NEXT (legacy semantics
 //     the inspector + nf rely on for parent-slot patching when
 //     no inverse index exists).
+// True when heap cell `cur` is the `src` slot (loc+1) of a UOP_ASSIGN.
+// An ASSIGN's src kernel must never be substituted to its one-time TEN
+// output: the recursive optimiser loop re-fires it each iteration (the
+// wnf reducer resolves the src to a fresh TEN per pass via
+// interact_assign_with, leaving this cell holding the kernel).  Baking
+// it patches the ASSIGN src to a stale constant -- training stops after
+// one step.  Relies on STEP_PARENT, valid only on the STEP_ACTIVE paths
+// (the optimiser loop runs under a T=1 step session); the sessionless
+// fallback below never carries a re-firing loop.
+static int cell_is_assign_src(u64 cur) {
+  if (cur >= STEP_SIDE_CAP) return 0;
+  Term parent = STEP_PARENT[cur];
+  return parent != 0 && term_tag(parent) == TAG_UOP
+      && term_ext(parent) == UOP_ASSIGN && term_val(parent) + 1 == cur;
+}
+
 static void heap_replace(Term old, Term new_) {
   if (old == new_) return;
   HOT_HEAP_REPLACE_CALLS++;
+  int old_is_kernel = (term_tag(old) == TAG_UOP && term_ext(old) == UOP_KERNEL);
   if (STEP_ACTIVE) {
     u32 mask = STEP_USE_HEAD_CAP - 1;
     u32 h = step_hash(old, mask);
@@ -388,7 +405,7 @@ static void heap_replace(Term old, Term new_) {
       u32 new_slot = step_use_head_slot(new_);
       while (cur != STEP_NIL) {
         u64 next = STEP_USE_NEXT[cur];
-        if (heap_read(cur) == old) {
+        if (heap_read(cur) == old && !(old_is_kernel && cell_is_assign_src(cur))) {
           // Release-store: pairs with is_redex's acquire-load above
           // so a concurrent sibling fire's is_redex sees this patch.
           heap_set_rel(cur, new_);
@@ -413,7 +430,7 @@ static void heap_replace(Term old, Term new_) {
     // reductions still progress.
     HOT_HEAP_REPLACE_CELLS += HEAP_NEXT;
     for (u64 i = 0; i < HEAP_NEXT; i++) {
-      if (heap_read(i) == old) {
+      if (heap_read(i) == old && !(old_is_kernel && cell_is_assign_src(i))) {
         heap_set(i, new_);
         if (i < STEP_SIDE_CAP) {
           Term parent = STEP_PARENT[i];
@@ -737,6 +754,13 @@ fn Term redex_fire(Term redex) {
     default: return 0;
   }
 
+  // Substitute the fired redex's result into its parent slots.  One
+  // exception, enforced inside heap_replace: a UOP_KERNEL feeding a
+  // UOP_ASSIGN's src is NOT baked to its one-time TEN -- the recursive
+  // optimiser loop re-fires that kernel each iteration (the wnf reducer
+  // resolves the src to a fresh TEN per pass via interact_assign_with,
+  // keeping the cell un-baked).  Baking it would patch the ASSIGN src to
+  // a stale constant and training would stop after one step.
   heap_replace(redex, result);
   // Incremental worklist propagation: push the result (if it's a
   // fresh redex on its own) and every newly allocated cell whose

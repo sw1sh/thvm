@@ -100,6 +100,24 @@ fn void kernel_fire_scope_end(void) {
   if (KERNEL_FIRE_SCOPE_DEPTH > 0) KERNEL_FIRE_SCOPE_DEPTH--;
 }
 
+// Open a fresh ASSIGN pass without a realize scope.  A wnf-driven
+// recursive training loop forces a SHARED materialized step (one cell
+// loc, reached via TRef/ALO) once per iteration via TPriForce; the
+// per-pass assign_fire_claim memo keys on (cell loc, ASSIGN_PASS_EPOCH).
+// Without a realize scope around the loop the epoch never advances, so
+// the shared ASSIGN cell claims-and-fires only on the first iteration
+// (every later force is a no-op) and the loop runs a single step
+// regardless of n.  prim_pri calls this before forcing each step so
+// every iteration is its own pass: multi-root assigns inside ONE step
+// still dedup (same epoch within the force), but the next iteration's
+// re-force gets a fresh epoch and re-fires.  The companion KERNEL_FIRE_GEN
+// bump that lets the upstream kernel re-fire already happens inside
+// interact_assign_with; this is the missing assign-side counterpart.
+fn void assign_pass_epoch_bump(void) {
+  ASSIGN_PASS_EPOCH++;
+  if (ASSIGN_PASS_EPOCH == 0) ASSIGN_PASS_EPOCH = 1;
+}
+
 // Per-pass ASSIGN firing memo.  An UOP_ASSIGN cell reachable from more
 // than one realize root (e.g. Adam's `m` assign is BOTH a top-level
 // schedule_step output AND embedded in the param update that reads

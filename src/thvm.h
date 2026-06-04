@@ -3169,6 +3169,10 @@ fn void kernel_fire_gen_bump(void);
 fn void kernel_assign_write_record(void *backend, u32 buf_id);
 fn void kernel_fire_scope_begin(void);
 fn void kernel_fire_scope_end(void);
+// Open a fresh ASSIGN pass with no surrounding realize scope, so a
+// wnf-driven recursive optimiser loop re-fires its shared materialized
+// step every iteration (prim_pri calls this before each TPriForce).
+fn void assign_pass_epoch_bump(void);
 // Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns
 // 1 the first time the loc is seen in the current fire-gen, 0 on every
 // re-visit (so a multiply-reachable ASSIGN writes its buffer once).

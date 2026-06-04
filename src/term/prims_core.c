@@ -43,6 +43,17 @@ static Term prim_pri(Term *args) {
   Term slot_num = wnf(args[0]);
   if (term_tag(slot_num) != TAG_NUM) return args[2];
   u32  slot = (u32)term_val(slot_num);
+  // Each PRI force is a fresh ASSIGN pass: a wnf-driven recursive
+  // training loop forces a shared materialized step (single cell loc)
+  // once per iteration, and assign_fire_claim's once-per-pass memo
+  // would otherwise fire the in-place ASSIGN only on iteration 1 (the
+  // loop converging after a single step -- training_loop.wlt / sgd
+  // recursion).  Bumping here makes every iteration its own pass so the
+  // shared step re-fires, while a multi-root assign WITHIN one step still
+  // dedups (one epoch per force).  The companion KERNEL_FIRE_GEN bump
+  // that lets the upstream kernel re-fire already happens in
+  // interact_assign_with; this is the missing assign-side counterpart.
+  assign_pass_epoch_bump();
   Term v    = wnf(args[1]);
   if (slot != 0) {
     Term override = thvm_pri_wl_invoke_returning(slot, v);
