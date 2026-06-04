@@ -1041,13 +1041,22 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
 },
     precArray = atpPrecedenceArray[precedenceSpec, enc];
     symbolWeightsArr = atpSymbolWeightsArray[symbolWeightsSpec, enc];
-    raw = Normal @ $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
+    raw = $atpRunProofFn[enc["Packed"], maxSteps, enc["MaxLab"],
         N[wallSeconds], cpWeight, ordering, autoPrec, useMnf, maxCpWeight,
         goalInterleave, groundJoin, selRatio, autoMaxWeight, rhsInterreduce,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
         recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod,
         symbolWeightsArr, varWeight, randomRatio, randomSeed, kwsMode,
         lazyNormalize];
+    (* C engine returns LibraryFunctionError on memory-guard abort
+       (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
+       hard-stop conditions.  Bail BEFORE the structural part extraction
+       so an aborted run returns a clean Failure association instead of
+       crashing the kernel via Part[][[k]] on a Failure expression. *)
+    If[ Head[raw] === LibraryFunctionError,
+        Return[<|"Status" -> "Aborted", "Reason" -> raw|>]
+    ];
+    raw = Normal @ raw;
     status = raw[[1]];
     nRules = raw[[2]]; nTrace = raw[[3]]; nSteps = raw[[5]]; nCps = raw[[4]];
     extNRules = raw[[6]]; extNSteps = raw[[7]]; mnfNSteps = raw[[8]];
@@ -4233,7 +4242,12 @@ atpProjectReturn[bundle_, spec_List] :=
 
 Options[TFindProof] = {
     MaxSteps -> 200000, Method -> Automatic,
-    TimeConstraint -> Infinity, PortfolioFrontLoad -> 0};
+    TimeConstraint -> Infinity, PortfolioFrontLoad -> 0,
+    (* Forwarded to the Process-method builders ({Vampire,Twee,
+       Waldmeister,Eprover}ProofObject) when Method is one of the
+       *Process names; ignored by the internal-engine path. *)
+    "Binary" -> Automatic, "ParseFormulas" -> False,
+    "LiftToProofObject" -> False};
 
 (* String form: resolve theorem + theory names through
    AxiomaticTheory, then run the expression form.  The conjecture
