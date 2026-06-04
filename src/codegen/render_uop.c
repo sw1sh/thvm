@@ -2498,9 +2498,18 @@ static u32 rmu_emit_inner_reduce_decomp_loops(Term const *ranges,
     Term r = ranges[i];
     if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
     u32 ext = (u32)term_val(heap_read(term_val(r) + 2));
-    if (RMU_TARGET != CG_TARGET_C && ext <= RMU_REDUCE_UNROLL_MAX) {
+    // An explicit OPT(UNROLL) factor emits its pragma on EVERY target,
+    // matching the reduce-axis UNROLL path -- otherwise a TOpt[UNROLL]
+    // that splits a reduce axis silently drops its pragma on C (the
+    // unrolled factor lands here, not on the reduce-axis loop).  The
+    // default small-K unroll (factors[i]==0) stays non-C: clang -O3
+    // already unrolls small constant-trip loops, so a pragma is noise.
+    if (factors[i]) {
       for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-      rmu_emit_unroll_pragma(fp, factors[i] ? factors[i] : ext);
+      rmu_emit_unroll_pragma(fp, factors[i]);
+    } else if (RMU_TARGET != CG_TARGET_C && ext <= RMU_REDUCE_UNROLL_MAX) {
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      rmu_emit_unroll_pragma(fp, ext);
     }
     rmu_emit_range_open(r, fp, depth, RMU_NO_OPT);
     depth++;
