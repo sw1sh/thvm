@@ -87,9 +87,10 @@ VerificationTest[
         {"Weights" -> NumericArray[{{1.0, 2.0}, {3.0, 4.0}, {5.0, 6.0}},     "Real32"],
          "Biases"  -> NumericArray[{10.0, 20.0, 30.0},                        "Real32"]}
     ];
+    (* {1, 2} is a batch of one row; LinearLayer preserves the batch axis -> {1, 3}. *)
     x = TTensor[{1, 2}, {7.0, 8.0}, "f32"];
     Normal @ TTensorData[TRealize[TFromNet[layer, x]]],
-    {33.0, 73.0, 113.0},
+    {{33.0, 73.0, 113.0}},
     TestID -> "nn/wolfram-linear-forward"
 ]
 
@@ -116,10 +117,34 @@ VerificationTest[
          {1, "Biases"}  -> NumericArray[{0.0},             "Real32"]}
     ];
     x = TTensor[{1, 3}, {2.0, 3.0, 4.0}, "f32"];
-    (* (1*2 + 1*3 + 1*4)^2 = 81 *)
+    (* {1, 3} batch of one; (1*2 + 1*3 + 1*4)^2 = 81, batch axis kept -> {1, 1}. *)
     Normal @ TTensorData[TRealize[TFromNet[chain, x]]],
-    {81.0},
+    {{81.0}},
     TestID -> "nn/wolfram-netchain-linear-square"
+]
+
+(* === batched conv classifier forward via TFromNet ===
+   A LeNet-style head (conv -> relu -> maxpool -> flatten -> linear ->
+   softmax) on a rank-4 batch {B, 1, 28, 28}.  Exercises the rank-4
+   paths of fromLayer for PoolingLayer / FlattenLayer / LinearLayer /
+   SoftmaxLayer together; asserts the lifted graph matches the Wolfram
+   net per example (and that softmax rows normalise to 1, not across
+   the batch). *)
+VerificationTest[
+    TInit[];
+    SeedRandom[7];
+    net = NetInitialize[NetChain[{
+            ConvolutionLayer[4, {3, 3}], Ramp, PoolingLayer[{2, 2}, {2, 2}],
+            FlattenLayer[], LinearLayer[10], SoftmaxLayer[]},
+            "Input" -> {1, 28, 28}],
+        RandomSeeding -> 42];
+    xb     = N @ RandomReal[1, {3, 1, 28, 28}];
+    thvm   = Normal @ TRealize @ TFromNet[net, TTensorCreate[xb]];
+    wl     = Normal[net /@ xb];
+    {Dimensions[thvm], Max @ Abs @ Flatten[thvm - wl] < 1.0*^-4,
+     Max @ Abs[(Total /@ thvm) - 1.0] < 1.0*^-4},
+    {{3, 10}, True, True},
+    TestID -> "nn/wolfram-conv-batched-forward"
 ]
 
 (* === gradient through a NetChain (square only -- LinearLayer's

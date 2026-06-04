@@ -931,10 +931,17 @@ asRowVec[x_TTerm] := With[{shape = tUopShape[x]},
     ]
 ]
 
-fromLayer[LinearLayer, layer_, x_TTerm] := Module[{w, b, x2},
+(* LinearLayer weight from TLayerToTensors is {out, in} (Wolfram
+   convention).  Rank-preserving: a single {in} vector goes through
+   the TMatVec path (-> {out}); a batched {B, in} input goes through
+   the batched TLinear with the transposed weight {in, out} (-> {B, out}),
+   keeping the leading batch axis instead of collapsing it. *)
+fromLayer[LinearLayer, layer_, x_TTerm] := Module[{w, b},
     {w, b} = TLayerToTensors[layer];
-    x2 = asRowVec[x];
-    TUOpAdd[TMatVec[w, x2], b]
+    If[ Length[tUopShape[x]] <= 1,
+        TUOpAdd[TMatVec[w, asRowVec[x]], b],
+        TLinear[x, Transpose[w], b]
+    ]
 ]
 
 (* ElementwiseLayer is dispatch-by-function.  Tinygrad-style we map
@@ -959,28 +966,38 @@ fromLayer[ReshapeLayer, layer_, x_TTerm] :=
         TUOpReshape[x, If[ListQ[out], out, {out}]]
     ]
 
-(* FlattenLayer[]: collapse the entire input to rank-1.  Sizes the
-   output via tUopShape so it works on intermediate UOP terms in a
-   chain (an uninitialised FlattenLayer reports {Automatic}, useless
-   for sizing).  Forward only. *)
+(* FlattenLayer[]: collapse a single example {C, H, W} to rank-1.  On a
+   batched rank-4 feature map {B, C, H, W} keep the leading batch axis
+   ({B, C, H, W} -> {B, C*H*W}) so the batch survives into the linear
+   head; otherwise the whole map (batch included) would fuse into one
+   vector.  Sizes the output via tUopShape so it works on intermediate
+   UOP terms in a chain (an uninitialised FlattenLayer reports
+   {Automatic}, useless for sizing).  Forward only. *)
 fromLayer[FlattenLayer, _, x_TTerm] :=
     With[{shape = tUopShape[x]},
-        TUOpReshape[x, {Times @@ shape}]
+        If[ Length[shape] >= 4,
+            TUOpReshape[x, {First[shape], Times @@ Rest[shape]}],
+            TUOpReshape[x, {Times @@ shape}]
+        ]
     ]
 
-(* SoftmaxLayer: forward only, last-axis softmax via TSoftmax helper. *)
-fromLayer[SoftmaxLayer, _, x_TTerm] := TSoftmax[x]
+(* SoftmaxLayer: forward only, stable softmax along the LAST axis (the
+   class axis).  TSoftmax is hard-coded to axis 0, which on a batched
+   {B, classes} input normalises across the batch; TSoftmaxAxis carries
+   the same max-subtract along an arbitrary axis. *)
+fromLayer[SoftmaxLayer, _, x_TTerm] :=
+    TSoftmaxAxis[x, Length[tUopShape[x]] - 1]
 
 (* PoolingLayer non-overlapping (Stride == KernelSize), 2-D Max only.
-   Channels-first input shape {C, H, W} ->
-       reshape {C, H, W} -> {C, H/kh, kh, W/kw, kw}
-       REDUCE axis 2 (kh) -> {C, H/kh, W/kw, kw}
-       REDUCE axis 3 (kw, now innermost) -> {C, H/kh, W/kw}
-   Refuses overlapping pooling, non-Max functions, or non-rank-3
-   inputs with a Failure -- those need PERMUTE / multi-axis grad
-   support not yet present. *)
+   Channels-first input {C, H, W} (or batched {B, C, H, W}); TMaxPool2d
+   pools the trailing two axes either way:
+       {..., H, W} -> {..., H/kh, kh, W/kw, kw}
+       REDUCE the kh axis, then the (now innermost) kw axis -> {..., H/kh, W/kw}
+   Refuses overlapping pooling, non-Max functions, or inputs that are
+   neither rank-3 nor rank-4 with a Failure -- those need PERMUTE /
+   multi-axis grad support not yet present. *)
 fromLayer[PoolingLayer, layer_, x_TTerm] := Module[{
-    kSize, stride, fn, shape, c, h, w, kh, kw
+    kSize, stride, fn, shape, h, w, kh, kw
 },
     fn     = NetExtract[layer, "Function"];
     kSize  = NetExtract[layer, "KernelSize"];
@@ -994,11 +1011,11 @@ fromLayer[PoolingLayer, layer_, x_TTerm] := Module[{
             <|"Message" -> "PoolingLayer overlapping (Stride != KernelSize) not yet supported",
               "KernelSize" -> kSize, "Stride" -> stride|>]];
     shape = tUopShape[x];
-    If[ Length[shape] =!= 3,
+    If[ !MemberQ[{3, 4}, Length[shape]],
         Return @ Failure["NotImplemented",
-            <|"Message" -> "PoolingLayer expects rank-3 channels-first input {C, H, W}",
+            <|"Message" -> "PoolingLayer expects rank-3 {C, H, W} or rank-4 {B, C, H, W} input",
               "InputShape" -> shape|>]];
-    {c, h, w} = shape;
+    {h, w}    = shape[[-2 ;;]];
     {kh, kw}  = kSize;
     If[ Mod[h, kh] =!= 0 || Mod[w, kw] =!= 0,
         Return @ Failure["NotImplemented",
