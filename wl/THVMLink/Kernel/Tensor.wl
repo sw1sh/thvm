@@ -760,6 +760,19 @@ TTerm /: Dot[a_TTerm ? tensorTermQ, b_TTerm ? tensorTermQ] :=
 TTerm /: ArrayReshape[t_TTerm ? tensorTermQ, shape_List] :=
     TUOpReshape[t, shape]
 
+(* ArrayReduce[Total, t, axes]: SUM-reduce the given 1-indexed axes,
+   highest first so the remaining axis indices stay valid as each one
+   collapses.  Total[t] / Total[t, axis] above cover the all-axis and
+   single-axis cases; this is the explicit multi-axis form. *)
+TTerm /: ArrayReduce[Total, t_TTerm ? tensorTermQ, axes_] :=
+    Fold[TUOpReduce[#1, #2 - 1, "SUM"] &, t,
+        Reverse @ Sort @ DeleteDuplicates @ Flatten @ {axes}]
+
+(* Normal[t]: read the realized tensor's data back as an ordinary nested
+   list, i.e. Normal[TTensorData[t]] -- so `Normal @ TRealize @ expr`
+   stands in for `Normal @ TTensorData @ TRealize @ expr`. *)
+TTerm /: Normal[t_TTerm ? tensorTermQ] := Normal[TTensorData[t]]
+
 (* Layer-call UpValues: `Layer[opts][t_TTerm]` is still a TTerm
    UpValue -- TagSetDelayed on TTerm, with the layer bound as
    `l_SoftmaxLayer` so we can read its options.  WL's "Level"
