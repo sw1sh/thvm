@@ -1001,3 +1001,21 @@ VerificationTest[
     True,
     TestID -> "nn/attention-grad-dv-finite-diff"
 ]
+
+(* === TNetTrain / TNetPredict end-to-end ===
+   The sugared one-liner: lift a NetChain, train by SGD, and classify a
+   linearly-separable 2-class set perfectly. *)
+VerificationTest[
+    TInit[];
+    SeedRandom[1234];
+    Module[{xtr, ytr, net, trained},
+        xtr = N@{{1., 1.}, {1.5, 1.2}, {0.5, 0.8}, {1.2, 0.9},
+                 {-1., -1.}, {-1.2, -0.8}, {-0.7, -1.1}, {-0.9, -1.}};
+        ytr = N@{{1., 0.}, {1., 0.}, {1., 0.}, {1., 0.},
+                 {0., 1.}, {0., 1.}, {0., 1.}, {0., 1.}};
+        net = NetInitialize[NetChain[{LinearLayer[6], Ramp, LinearLayer[2]}, "Input" -> 2], RandomSeeding -> 7];
+        trained = TNetTrain[net, xtr, ytr, "MaxTrainingRounds" -> 80];
+        (Ordering[#, -1][[1]] - 1) & /@ TNetPredict[trained, xtr]],
+    {0, 0, 0, 0, 1, 1, 1, 1},
+    TestID -> "nn/tnettrain-mlp-classifies"
+]

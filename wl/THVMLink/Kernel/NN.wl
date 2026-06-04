@@ -41,6 +41,8 @@
 BeginPackage["THVMLink`"];
 
 TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation.  The result is a TTerm of TAG=LAM that can be TApp'd to a tensor or driven through TRealize/TGrad/etc.";
+TNetTrain::usage        = "TNetTrain[net, x, y] trains an initialised NeuralNetworks net on inputs `x` and one-hot targets `y` (both rank-2 host arrays {batch, ...}).  The net is lifted with TFromNet, its weights collected, and gradient descent is driven as ONE inert TWnf loop: the per-parameter SGD step graph materialises once and re-fires every iteration (no host-side loop).  Returns <|\"Forward\" -> the lifted forward TTerm, \"Input\" -> the input tensor (a slot updated in place), \"Params\" -> the trained weight TTerms|>.  Options: \"LearningRate\" (0.3), \"MaxTrainingRounds\" (100), \"Loss\" (Automatic = TCategoricalCrossEntropy, which expects a logits net -- no final SoftmaxLayer).";
+TNetPredict::usage      = "TNetPredict[trained, x] evaluates a TNetTrain result on a fresh input batch `x` (SAME batch shape as training) by overwriting the input slot and re-realising the forward; returns the raw network output as a nested list.  For a classifier take Ordering[#, -1][[1]] - 1 along each row for the predicted class.";
 TFromLayer::usage       = "TFromLayer[layer, x] is the single-layer form of TFromNet.";
 TLayerWeights::usage    = "TLayerWeights[layer] returns the NumericArrays of every learnable parameter a layer carries (Weights, Biases, ...), in the layer-specific declaration order.";
 TLayerToTensors::usage  = "TLayerToTensors[layer] is the same as TLayerWeights but each NumericArray is wrapped in a fresh TTensorCreate handle so it can feed back into a UOp graph.";
@@ -1335,6 +1337,44 @@ TFromNet[net_] := With[{shape = netInputShape[net]},
 TFromNet::eltunsupported = "ElementwiseLayer with function `1` has no UOp equivalent yet (interact_grad would need a corresponding grad rule).";
 TFromNet::convtbd        = "ConvolutionLayer conversion not yet implemented (`1`).  Step 14 task: needs movement-op support in materialize/interpret + the matching grad rules.";
 TFromNet::noinput        = "TFromNet[`1`]: cannot infer input shape from the net's InputPorts.  Provide an explicit input via TFromNet[net, x] or supply a net with a single concrete-shape input port.";
+
+(* === TNetTrain / TNetPredict: the inert-loop training one-liner ===
+   Lifts `net` with TFromNet, Reaps the trainable weights, gives each a
+   materialised SGD ASSIGN step, and drives N iterations as ONE TWnf over
+   a recursive TLam loop (the step graph re-fires per iteration in place;
+   see wl/THVMLink/Tests/training_loop.wlt for the raw pattern). *)
+Options[TNetTrain] = {"LearningRate" -> 0.3, "MaxTrainingRounds" -> 100, "Loss" -> Automatic};
+
+TNetTrain[net_, x_List, y_List, opts : OptionsPattern[]] :=
+    Module[{xS, yT, lr, n, fwd, sown, params, lossFn, loss, grads},
+        xS = TTensorCreate[N @ x];
+        yT = TTensorCreate[N @ y];
+        lr = N @ OptionValue[TNetTrain, {opts}, "LearningRate"];
+        n  = OptionValue[TNetTrain, {opts}, "MaxTrainingRounds"];
+        lossFn = OptionValue[TNetTrain, {opts}, "Loss"] /. Automatic -> ({f, t} |-> TCategoricalCrossEntropy[f, t]);
+        {fwd, sown} = Reap[TFromNet[net, xS], "thvmNetParam"];
+        params = Flatten[sown];
+        loss   = lossFn[fwd, yT];
+        (* Realize-grads-first SGD: clear the slots, fire one shared backward
+           over every parameter, PIN the gradients with TRealize, then step
+           each weight in place.  Pinning before the update is the rule -- the
+           update writes a parameter's buffer in place and the gradient reads
+           that same buffer, so an un-pinned update races its own read.  The
+           in-place step is TRealize[TAssign[...]] (exactly what TSet does)
+           rather than TSet itself, which is defined in Tensor.wl and is not
+           yet a resolved symbol at NN.wl's parse time. *)
+        Do[
+            TClearGrad /@ params;
+            grads = TRealize[TGrad[loss, params]];
+            MapThread[TRealize[TAssign[#1, #1 + (-lr)*#2]] &, {params, grads}],
+            {n}];
+        <|"Forward" -> fwd, "Input" -> xS, "Params" -> params|>
+    ]
+
+TNetPredict[trained_Association, x_List] := (
+    TRealize @ TAssign[trained["Input"], TTensorCreate[N @ x]];
+    Normal @ TRealize @ trained["Forward"]
+)
 
 End[];
 
