@@ -323,7 +323,6 @@ u64 g_atp_phase_us_cp_gen         = 0;
 u64 g_atp_phase_us_push_normalize = 0;
 u64 g_atp_phase_us_interreduce    = 0;
 u64 g_atp_phase_us_goal_check     = 0;
-u64 g_atp_phase_us_norm_graph     = 0;
 u64 g_atp_phase_us_total          = 0;
 u64 g_atp_unorient_step_calls     = 0;
 u64 g_atp_unorient_step_fires     = 0;
@@ -1010,529 +1009,6 @@ fn void thvm_atp_cp_get(const AtpState *s, u32 i, Term *lhs, Term *rhs) {
   acp_unpack(s->cp_packed[i], lhs, rhs);
 }
 
-// === 8a: IC-native CP-set graph (-DATP_CP_GRAPH) ====================
-//
-// Under the flag the CP queue is ALSO held as one shared Term:
-// `cp_graph = CpSet[Cp[l0,r0], Cp[l1,r1], ...]`, the leaves in the
-// same slot order as the cp_packed[] queue.  Every
-// CP mutation (heap push, select pop, heap reorder, reheapify)
-// rebuilds cp_graph from the arrays so the two stay in lockstep; a
-// debug assertion checks decode(cp_graph) equals the mirror.  This
-// is a pure representation swap -- selection, priority, and search
-// are the unchanged milestone-7 array engine.  8b makes cp_graph
-// the thing reductions act on.
-#ifdef ATP_CP_GRAPH
-
-// Encode one CP as a 2-child `Cp[lhs,rhs]` CTR leaf.
-static Term atp_cp_encode_leaf(Term lhs, Term rhs) {
-  Term children[2] = { lhs, rhs };
-  return term_new_ctr(ATP_CP_LABEL, children, 2);
-}
-
-// Decode a `Cp[lhs,rhs]` leaf back into its two terms.  Returns 1
-// on a well-formed leaf, 0 otherwise.
-static int atp_cp_decode_leaf(Term leaf, Term *lhs_out, Term *rhs_out) {
-  if (term_tag(leaf) != TAG_CTR) return 0;
-  if (term_ext(leaf) != ATP_CP_LABEL) return 0;
-  if (term_ctr_n(leaf) != 2) return 0;
-  *lhs_out = term_ctr_at(leaf, 0);
-  *rhs_out = term_ctr_at(leaf, 1);
-  return 1;
-}
-
-// Rebuild s->cp_graph from the cp_packed[] queue (each slot unpacked).
-// Called at the end of every CP mutation so the graph stays in
-// lockstep.  The container is a fresh CTR each rebuild, but the
-// Cp[] leaves carry the already-hash-consed lhs/rhs cells, so two
-// CPs sharing a subterm still share its heap cells.
-static void atp_cp_graph_rebuild(AtpState *s) {
-  if (s == NULL) return;
-  if (s->n_cps == 0) {
-    s->cp_graph = term_new_ctr(ATP_CPSET_LABEL, NULL, 0);
-    return;
-  }
-  Term *leaves = (Term *)malloc((size_t)s->n_cps * sizeof(Term));
-  if (leaves == NULL) {
-    fprintf(stderr, "atp_cp_graph_rebuild: malloc for %u leaves failed\n",
-            s->n_cps);
-    exit(1);
-  }
-  for (u32 i = 0; i < s->n_cps; i++) {
-    Term l = 0, r = 0;
-    acp_unpack(s->cp_packed[i], &l, &r);
-    leaves[i] = atp_cp_encode_leaf(l, r);
-  }
-  s->cp_graph = term_new_ctr(ATP_CPSET_LABEL, leaves, s->n_cps);
-  free(leaves);
-}
-
-// Debug assertion: decode(cp_graph) must equal the cp_packed[] queue
-// (unpacked), slot for slot.  Run after every mutation so a drift
-// between the two representations aborts immediately rather than
-// corrupting a proof silently.
-static void atp_cp_graph_assert(const AtpState *s) {
-  if (s == NULL) return;
-  assert(term_tag(s->cp_graph) == TAG_CTR
-         && "cp_graph must be a CTR");
-  assert(term_ext(s->cp_graph) == ATP_CPSET_LABEL
-         && "cp_graph must carry the CpSet label");
-  assert(term_ctr_n(s->cp_graph) == s->n_cps
-         && "cp_graph leaf count must equal n_cps");
-  for (u32 i = 0; i < s->n_cps; i++) {
-    Term gl = 0, gr = 0;
-    int ok = atp_cp_decode_leaf(term_ctr_at(s->cp_graph, i), &gl, &gr);
-    assert(ok && "cp_graph child must be a well-formed Cp[lhs,rhs] leaf");
-    Term cl = 0, cr = 0;
-    acp_unpack(s->cp_packed[i], &cl, &cr);
-    assert(kbo_eq(gl, cl)
-           && "cp_graph leaf lhs must equal cp_packed[] mirror");
-    assert(kbo_eq(gr, cr)
-           && "cp_graph leaf rhs must equal cp_packed[] mirror");
-  }
-}
-
-// Maintain cp_graph after a CP mutation: rebuild + assert lockstep.
-static void atp_cp_graph_sync(AtpState *s) {
-  atp_cp_graph_rebuild(s);
-  atp_cp_graph_assert(s);
-}
-
-// === 8b: shared whole-graph CP normalization ========================
-//
-// Today (8a) normalization is lazy: thvm_atp_step rewrites only the
-// CP it pops.  8b adds atp_normalize_graph -- when a rule is oriented
-// it normalizes EVERY CP term in cp_graph in ONE sweep that threads a
-// single `input cell -> normal-form cell` memo across all CPs.
-//
-// thvm hash-conses every cell, so a subterm shared by k CPs is the
-// SAME Term value in all k.  The memo is keyed by that Term value, so
-// the shared subterm's normal form is computed once total instead of
-// once per CP -- this cross-CP memo IS the optimal-sharing win.  Per
-// the spec target, per-step normalization cost drops from
-// O(n_cps * |term|) toward O(distinct redexes).
-//
-// This is a deliberate SEMANTIC change (not bit-identical to 8a):
-// eagerly normalizing queued CPs changes which become trivially
-// joined when.  The memoized normalizer is bottom-up + top-fixpoint
-// (innermost then the existing outermost-leftmost thvm_rewrite_step
-// loop) -- it reaches a normal form under R just as the lazy path
-// does; for the confluent rule sets KB completion drives toward, the
-// normal form is the same one.
-
-// Open-addressing Term -> Term memo for one normalization sweep.
-// 0 is not a valid Term, so a 0 key marks an empty slot.
-typedef struct {
-  Term *keys;
-  Term *vals;
-  u32   cap;     // power of two
-  u32   count;
-} AtpNormMemo;
-
-static void atp_norm_memo_init(AtpNormMemo *m, u32 hint) {
-  u32 cap = 64;
-  while (cap < hint * 2u) cap *= 2u;
-  m->keys  = (Term *)calloc(cap, sizeof(Term));
-  m->vals  = (Term *)calloc(cap, sizeof(Term));
-  m->cap   = cap;
-  m->count = 0;
-  if (m->keys == NULL || m->vals == NULL) {
-    fprintf(stderr, "atp_norm_memo_init: calloc for %u slots failed\n", cap);
-    exit(1);
-  }
-}
-
-static void atp_norm_memo_free(AtpNormMemo *m) {
-  free(m->keys);
-  free(m->vals);
-  m->keys = NULL;
-  m->vals = NULL;
-}
-
-// 64-bit mix (splitmix64 finalizer) -- a Term is a packed u64, so
-// hashing the whole word spreads tag/ext/val bits across the table.
-static u64 atp_term_hash(Term t) {
-  u64 x = (u64)t;
-  x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-  x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-  x ^= x >> 31;
-  return x;
-}
-
-static void atp_norm_memo_grow(AtpNormMemo *m);
-
-// Look up t; returns 1 and sets *out if present.
-static int atp_norm_memo_get(const AtpNormMemo *m, Term t, Term *out) {
-  u32 mask = m->cap - 1u;
-  u32 i = (u32)atp_term_hash(t) & mask;
-  for (;;) {
-    Term k = m->keys[i];
-    if (k == 0) return 0;
-    if (k == t) { *out = m->vals[i]; return 1; }
-    i = (i + 1u) & mask;
-  }
-}
-
-static void atp_norm_memo_put(AtpNormMemo *m, Term t, Term v) {
-  if ((m->count + 1u) * 4u >= m->cap * 3u) atp_norm_memo_grow(m);
-  u32 mask = m->cap - 1u;
-  u32 i = (u32)atp_term_hash(t) & mask;
-  for (;;) {
-    Term k = m->keys[i];
-    if (k == 0) { m->keys[i] = t; m->vals[i] = v; m->count++; return; }
-    if (k == t) { m->vals[i] = v; return; }
-    i = (i + 1u) & mask;
-  }
-}
-
-static void atp_norm_memo_grow(AtpNormMemo *m) {
-  u32   old_cap  = m->cap;
-  Term *old_keys = m->keys;
-  Term *old_vals = m->vals;
-  m->cap  *= 2u;
-  m->keys  = (Term *)calloc(m->cap, sizeof(Term));
-  m->vals  = (Term *)calloc(m->cap, sizeof(Term));
-  m->count = 0;
-  if (m->keys == NULL || m->vals == NULL) {
-    fprintf(stderr, "atp_norm_memo_grow: calloc for %u slots failed\n", m->cap);
-    exit(1);
-  }
-  for (u32 i = 0; i < old_cap; i++) {
-    if (old_keys[i] != 0) atp_norm_memo_put(m, old_keys[i], old_vals[i]);
-  }
-  free(old_keys);
-  free(old_vals);
-}
-
-#ifdef ATP_NORM_STATS
-// 8b: instrumentation -- memo hits vs misses, summed over a run.  A
-// hit means a subterm shared by an already-visited CP: that node's
-// normal form was reused instead of recomputed.  hits/(hits+misses)
-// is the optimal-sharing ratio.  g_atp_norm_secs accumulates the
-// wall time spent inside atp_normalize_graph so the sweep cost can be
-// reported as a fraction of total runtime.
-#include <time.h>
-static u64    g_atp_norm_hits   = 0;
-static u64    g_atp_norm_misses = 0;
-static double g_atp_norm_secs   = 0.0;
-#endif
-
-// Memoized normal form of t under (lhs, rhs).  Bottom-up: each child
-// is normalized through the SAME memo first (so a shared subterm is
-// done once), the children-normalized term is rebuilt, then the
-// existing outermost-leftmost thvm_rewrite_step loop runs to fixpoint
-// at the top.  The memo is keyed by the input cell so every CP that
-// carries that cell reuses the result for free.
-static Term atp_norm_memo(AtpNormMemo *m, Term t,
-                          const Term *lhs, const Term *rhs,
-                          u32 n_rules, u32 step_cap) {
-  Term cached = 0;
-  if (atp_norm_memo_get(m, t, &cached)) {
-#ifdef ATP_NORM_STATS
-    g_atp_norm_hits++;
-#endif
-    return cached;
-  }
-#ifdef ATP_NORM_STATS
-  g_atp_norm_misses++;
-#endif
-
-  Term cur = t;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    if (n <= REWRITE_MAX_ARITY) {
-      Term children[REWRITE_MAX_ARITY];
-      int changed = 0;
-      for (u32 i = 0; i < n; i++) {
-        Term ci = term_ctr_at(t, i);
-        Term ni = atp_norm_memo(m, ci, lhs, rhs, n_rules, step_cap);
-        children[i] = ni;
-        if (ni != ci) changed = 1;
-      }
-      if (changed) cur = term_new_ctr(term_ext(t), children, n);
-    }
-  }
-
-  // Outermost-leftmost fixpoint at the top -- identical loop shape to
-  // thvm_rewrite_normalize, just applied after the children settled.
-  for (u32 i = 0; i < step_cap; i++) {
-    Term t2 = thvm_rewrite_step(cur, lhs, rhs, n_rules);
-    if (kbo_eq(cur, t2)) break;
-    cur = t2;
-  }
-
-  atp_norm_memo_put(m, t, cur);
-  return cur;
-}
-
-// 8b: simplify every CP term in cp_graph in one shared sweep.  Called
-// from thvm_atp_step once a rule is oriented, with `added` = the
-// just-oriented rule range.
-//
-// Why only the new rule(s), not full R: every queued CP was already
-// normalized under R BEFORE this step -- old CPs were normalized by an
-// earlier sweep, fresh CPs are trivial-join-filtered against full R in
-// atp_push_cps_traced.  Orienting one rule changes R by exactly that
-// rule, so the queue only needs that rule (the unfailing fallback may
-// add two) applied to reach normal form under R-new.  Re-running all
-// of R against all n_cps CPs every step is the O(n_cps*|term|*n_rules)
-// trap; restricting to the new rules makes the per-step sweep
-// O(n_cps*|term|*n_new), n_new <= 2.
-//
-// The shared memo is the optimal-sharing win WITHIN the sweep: a
-// subterm common to many CPs is the SAME hash-consed Term, so its
-// rewrite under the new rule is computed once and reused across every
-// CP carrying it -- cost is O(distinct subterm cells), not
-// O(sum of CP sizes).  A CP untouched by the new rule memo-resolves to
-// itself after one traversal and stays put.
-//
-// Trivially-joined CPs (both sides converge under the new rule) drop
-// out here -- 8c will route that through an Eql[x,x] -> ERA
-// reflexivity rule during the sweep; for 8b the kbo_eq check does the
-// same pruning.  Repacks the cp_packed[] queue, then reheapify
-// recomputes priorities and rebuilds cp_graph + the heap.
-static void atp_normalize_graph(AtpState *s, AtpAddedRange added) {
-  if (s == NULL || s->n_cps == 0 || added.count == 0) return;
-  const u32 NORM_CAP = 64;
-#ifdef ATP_NORM_STATS
-  clock_t g_t0 = clock();
-#endif
-
-  // The newly-oriented rules.  added.first/.count index s->lhs/s->rhs;
-  // copy by value so a later compaction can't move them under us.
-  u32 n_new = added.count;
-  if (n_new > 2) n_new = 2;
-  Term new_lhs[2], new_rhs[2];
-  for (u32 k = 0; k < n_new; k++) {
-    new_lhs[k] = s->lhs[added.first + k];
-    new_rhs[k] = s->rhs[added.first + k];
-  }
-
-  AtpNormMemo memo;
-  atp_norm_memo_init(&memo, s->n_cps * 4u);
-
-  u32 w = 0;
-  int touched = 0;   // any CP term rewritten or dropped this sweep?
-  for (u32 i = 0; i < s->n_cps; i++) {
-    Term ol = 0, orr = 0;
-    acp_unpack(s->cp_packed[i], &ol, &orr);
-    Term l = atp_norm_memo(&memo, ol,  new_lhs, new_rhs, n_new, NORM_CAP);
-    Term r = atp_norm_memo(&memo, orr, new_lhs, new_rhs, n_new, NORM_CAP);
-    // Trivially-joined: both sides converged.  Drop the CP -- it adds
-    // no equational consequence.
-    if (kbo_eq(l, r)) {
-      s->n_cps_dropped_joinable++;
-      free(s->cp_packed[i]);
-      s->cp_packed[i] = NULL;
-#ifdef THVM_ATPFT_CPQ
-      atp_cp_ft_clear(s, i);
-#endif
-      touched = 1;
-      continue;
-    }
-    if (l != ol || r != orr) {
-      // CP rewritten -- repack into a fresh byte string at slot w.
-      free(s->cp_packed[i]);
-      s->cp_packed[i] = NULL;
-      s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
-#ifdef THVM_ATPFT_CPQ
-      // Re-mirror the rewritten CP into the FT queue at slot w.  Free
-      // the slot-i entry first (its terms no longer match), then build
-      // a fresh entry from the new (l, r).
-      atp_cp_ft_clear(s, i);
-      atp_cp_ft_set(s, w, l, r, /*priority_hint=*/0u, /*origin=*/0xffffu);
-#endif
-      touched = 1;
-    } else if (w != i) {
-      // Unchanged -- compact the existing buffer down to slot w.
-      s->cp_packed[w] = s->cp_packed[i];
-      s->cp_packed[i] = NULL;
-#ifdef THVM_ATPFT_CPQ
-      atp_cp_ft_move(s, /*dst=*/w, /*src=*/i);
-#endif
-    }
-    s->cp_trace[w] = s->cp_trace[i];
-    // Carry the insertion age down to the compacted slot so a
-    // cp_fifo_tiebreak reheapify can preserve it (Waldmeister w1=fifo);
-    // harmless otherwise (reheapify overwrites cp_seq when the flag
-    // is off).
-    s->cp_seq[w] = s->cp_seq[i];
-    w++;
-  }
-  s->n_cps = w;
-
-  atp_norm_memo_free(&memo);
-
-  // The common case: the new rule(s) reduced no queued CP -- the queue
-  // was already in normal form under R-new (newly-pushed CPs are
-  // trivial-join-filtered against full R in atp_push_cps_traced, old
-  // CPs were swept under every earlier rule).  Then cp_pri / heap
-  // order / cp_graph are all still valid; skip the O(n_cps) rebuild.
-  // Only when a CP actually changed or dropped does reheapify run --
-  // it recomputes cp_pri/cp_seq and rebuilds cp_graph from the mirror.
-  if (touched) {
-    thvm_atp_cp_reheapify(s);
-  }
-#ifdef ATP_NORM_STATS
-  g_atp_norm_secs += (double)(clock() - g_t0) / CLOCKS_PER_SEC;
-#endif
-}
-
-#ifdef ATP_NORM_STATS
-// 8b instrumentation accessor: total memoized-normalize node visits
-// that hit vs missed the shared memo, summed over the run.  Let a
-// bench print the optimal-sharing ratio.
-fn void thvm_atp_norm_stats(u64 *hits, u64 *misses, double *secs) {
-  if (hits   != NULL) *hits   = g_atp_norm_hits;
-  if (misses != NULL) *misses = g_atp_norm_misses;
-  if (secs   != NULL) *secs   = g_atp_norm_secs;
-}
-#endif
-
-// === 8e: shared-traversal multi-match (the 91%-killer) ==============
-//
-// Milestone 7 located the wall: atp_cp_queue_subsumed scans EVERY
-// queued CP (~64k) calling thvm_match per leaf -- 7b measured ~16M
-// match calls / step, 91% of runtime.  The scan asks, for a freshly
-// generated candidate CP (lhs, rhs): is there a queued CP (qs, qt)
-// and a substitution sigma with (lhs, rhs) = (sigma qs, sigma qt)?
-// The QUEUED CP is the PATTERN (it carries the FVR variables); the
-// CANDIDATE is the SUBJECT.  This is FORWARD subsumption -- the new
-// candidate is subsumed by an existing queued CP and dropped before
-// it ever reaches the queue.
-//
-// 8e routes that scan through ONE thvm_match_multi traversal of
-// cp_graph instead of an explicit O(n_cps) loop.  cp_graph is the
-// flat CTR `CpSet[Cp[qs0,qt0], Cp[qs1,qt1], ...]`; the CpSet
-// container is the fan-out point -- thvm_match_multi forks over its
-// n leaves against the one shared (lhs, rhs) subject.
-//
-// THE THESIS-FAILING RESULT -- documented honestly, per the plan's
-// "8e's payoff depends on CPs actually sharing subterms ... report
-// it honestly" instruction.
-//
-// 8e's intended win was a (pattern_cell, subject_cell) -> match
-// memo: a subterm shared by many CPs would be matched against a
-// given subject subterm once.  That memo was BUILT, INSTRUMENTED
-// (-DATP_MATCH_STATS) and MEASURED.  Verdict on the Wolfram axiom
-// (cpl1): 0.0% memo hit rate -- 0 hits over 7.7M subterm-pair
-// lookups, three independent measurements.  Diagnosis:
-//
-//  - thvm has a BUMP allocator, NOT a hash-cons table.  term_new_ctr
-//    (src/term/new_ctr.c) always heap_allocs a fresh cell, so two
-//    structurally-equal CTR subterms are the SAME Term value ONLY
-//    when the literal same cell is reused.  The plan's premise
-//    "thvm hash-conses every cell" is factually wrong.
-//  - The memo key is the (pattern, subject) cell PAIR.  A hit needs
-//    BOTH cells to recur together.  On the flat CpSet every CP leaf
-//    has a DISTINCT top cell, so thvm_match fails fast at the leaf
-//    root -- the discrimination happens at the root, before the
-//    traversal ever descends to any deep subterm CPs might share.
-//  - A discrimination tree shares term PREFIXES (the root-anchored
-//    test).  A flat hash-consed DAG of disjoint-headed CPs shares
-//    term SUBTERMS but no prefix.  The flat CpSet provides zero
-//    prefix sharing for a root-anchored match -- so the fan-out
-//    re-traverses the subject in full per leaf.  Real prefix
-//    sharing needs the SUP fan-out CONTAINER of workstream 8f, not
-//    the flat 8a container.
-//
-// The memo, with its per-node hash + probe + partial-subst
-// bookkeeping, was pure overhead at 0% hits -- it ran cpl1 ~16x
-// SLOWER than 8b.  Per the plan's "degrades gracefully to the
-// per-CP scan -- no worse than today" requirement, 8e ships WITHOUT
-// the memo: thvm_match_multi is the fan-out over plain thvm_match,
-// which IS the per-CP scan -- behavior-identical and 8b-cost.  8e
-// is the milestone go/no-go signal and the signal is: the
-// flat-CpSet shared-traversal does not beat the scan; revisit at 8f
-// with the SUP container that actually shares prefixes.
-
-#ifdef ATP_MATCH_STATS
-#include <time.h>
-static u64    g_atp_mm_calls       = 0;  // thvm_match_multi invocations
-static u64    g_atp_mm_node_visits = 0;  // CP leaves walked
-static u64    g_atp_mm_memo_hits   = 0;  // structurally 0 -- no memo
-static u64    g_atp_mm_memo_miss   = 0;  // thvm_match calls issued
-static double g_atp_mm_secs        = 0.0;
-#endif
-
-// 8e: forward subsumption of candidate (lhs, rhs) against the whole
-// queued CP set in ONE traversal of cp_graph -- the replacement for
-// atp_cp_queue_subsumed's explicit O(n_cps) thvm_match loop.
-//
-// `graph` is cp_graph: `CpSet[Cp[qs,qt], ...]`.  The CpSet container
-// is the fan-out point: thvm_match_multi forks over its n Cp[] leaves
-// against the one shared (lhs, rhs) subject.  Each leaf runs the same
-// two-sided match the per-CP scan did -- forward (sigma qs = lhs AND
-// sigma qt = rhs, one sigma threaded through both) then symmetric --
-// via plain thvm_match.  Returns 1 on the first subsuming leaf.
-//
-// The verdict is IDENTICAL to the per-CP loop, leaf for leaf: 8e is
-// a routing change, not a semantic one.  The (P,S) memo that was
-// meant to share per-subterm work is absent BY MEASUREMENT, not
-// oversight -- see the block comment above.
-static u8 thvm_match_multi(Term graph, Term lhs, Term rhs) {
-#ifdef ATP_MATCH_STATS
-  g_atp_mm_calls++;
-#endif
-  if (term_tag(graph) != TAG_CTR) return 0;
-  if (term_ext(graph) != ATP_CPSET_LABEL) return 0;
-  u32 n = term_ctr_n(graph);
-  for (u32 k = 0; k < n; k++) {
-#ifdef ATP_MATCH_STATS
-    g_atp_mm_node_visits++;
-#endif
-    Term qs = 0, qt = 0;
-    if (!atp_cp_decode_leaf(term_ctr_at(graph, k), &qs, &qt)) continue;
-    // Forward: sigma qs = lhs AND sigma qt = rhs, one sigma threaded
-    // through both matches (equational subsumption).
-    {
-      RewriteSubst subst = {{0}};
-#ifdef ATP_MATCH_STATS
-      g_atp_mm_memo_miss += 2u;
-#endif
-      if (thvm_match(qs, lhs, &subst) &&
-          thvm_match(qt, rhs, &subst)) {
-        return 1;
-      }
-    }
-    // Symmetric: sigma qs = rhs AND sigma qt = lhs.
-    {
-      RewriteSubst subst = {{0}};
-#ifdef ATP_MATCH_STATS
-      g_atp_mm_memo_miss += 2u;
-#endif
-      if (thvm_match(qs, rhs, &subst) &&
-          thvm_match(qt, lhs, &subst)) {
-        return 1;
-      }
-    }
-  }
-  return 0;
-}
-
-#ifdef ATP_MATCH_STATS
-// 8e instrumentation accessor: thvm_match_multi calls, CP leaves
-// walked, and thvm_match calls issued.  memo_hits is structurally 0
-// -- 8e ships memo-free (the (P,S) memo measured 0% on the flat
-// CpSet; see the 8e block comment).  Kept so the bench can report
-// the scan size and confirm thvm_match is still the hot spot.
-fn void thvm_atp_match_stats(u64 *calls, u64 *node_visits,
-                             u64 *memo_hits, u64 *memo_miss,
-                             double *secs) {
-  if (calls       != NULL) *calls       = g_atp_mm_calls;
-  if (node_visits != NULL) *node_visits = g_atp_mm_node_visits;
-  if (memo_hits   != NULL) *memo_hits   = g_atp_mm_memo_hits;
-  if (memo_miss   != NULL) *memo_miss   = g_atp_mm_memo_miss;
-  if (secs        != NULL) *secs        = g_atp_mm_secs;
-}
-#endif
-
-#else  // !ATP_CP_GRAPH -- the milestone-7 array engine, byte-for-byte.
-
-// No-op so mutation sites carry one unconditional call site instead
-// of #ifdef'd blocks; the compiler elides it with the flag off.
-static inline void atp_cp_graph_sync(AtpState *s) { (void)s; }
-
-#endif // ATP_CP_GRAPH
 
 // === 7d: CP-queue subsumption index (-DATP_FV_INDEX) ===============
 //
@@ -1894,7 +1370,7 @@ static u32 atp_dt_insert_term(AtpFvIndex *ix, u32 node, Term t,
 
 // Insert CP (lhs, rhs) with stable id `seq`.  The CP is indexed as
 // the synthetic term `Cp(lhs, rhs)` so a single tree spans both
-// sides; ATP_CP_LABEL is the `Cp` head used elsewhere in the engine.
+// sides; ATP_CP_LABEL is the synthetic `Cp` head.
 // One variable renumbering spans the WHOLE CP -- a variable shared
 // between lhs and rhs (the common case for an equation) keeps one
 // star index across both sides.
@@ -1934,9 +1410,9 @@ static void atp_fv_index_remove(AtpFvIndex *ix, u32 seq) {
 }
 
 // Discard every record / node and rebuild the tree from the live CP
-// arrays.  Used when a wholesale CP-set mutation (reheapify after an
-// atp_normalize_graph compaction; a test populating the arrays
-// directly) reshuffles seqs out from under the incremental path.
+// arrays.  Used when a wholesale CP-set mutation (e.g. a test
+// populating the arrays directly) reshuffles seqs out from under
+// the incremental path.
 static void atp_fv_index_rebuild(AtpState *s) {
   AtpFvIndex *ix = s->fv_index;
   if (ix == NULL) return;
@@ -4480,11 +3956,6 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // trace buffer itself starts NULL and grows on demand (atp_trace_ensure)
   // up to t_max; thvm_atp_trace_cap resolves and bounds the env value.
   s->t_max = thvm_atp_trace_cap();
-#ifdef ATP_CP_GRAPH
-  // 8a: start cp_graph as the empty CpSet[] -- n_cps is 0 here, so
-  // the array mirror and the graph agree from the first instant.
-  atp_cp_graph_sync(s);
-#endif
 #ifdef ATP_FV_INDEX
   // 7d: an empty FV subsumption index; CPs enter it on enqueue.
   s->fv_index = atp_fv_index_new();
@@ -4723,12 +4194,6 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // has been soft-deleted by backward subsumption).
   u32 n_roots = 4u * s->n_rules + 4u /* goal + goal_nf */
               + s->n_trace + REWRITE_MAX_VAR;
-#ifdef ATP_CP_GRAPH
-  // 8b: cp_graph is now a thing reductions act on (atp_normalize_graph
-  // rewrites it), so its CTR cells must be relocated by the collector,
-  // not rebuilt afterward.  One extra root slot for the CpSet term.
-  n_roots += 1u;
-#endif
 #ifdef ATP_MNF
   // Milestone 10: every MNF coloured node holds a reached Term.  Root
   // them so the collector relocates them; the hash table (structural
@@ -4758,10 +4223,6 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     roots[w++] = s->witness_subst.bindings[i];
   }
-#ifdef ATP_CP_GRAPH
-  u32 cp_graph_root = w;
-  roots[w++] = s->cp_graph;
-#endif
 #ifdef ATP_MNF
   u32 mnf_node_root = w;
   mnf_gc_gather(s->mnf, roots, &w);
@@ -4788,14 +4249,6 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     s->witness_subst.bindings[i] = roots[w++];
   }
-#ifdef ATP_CP_GRAPH
-  // 8b: cp_graph was rooted, so the collector relocated its CpSet +
-  // Cp[] cells in place.  Write the moved CpSet back; a debug
-  // assertion confirms it still decodes to the cp_packed[] queue
-  // (unpacked) -- no rebuild-everything pass.
-  s->cp_graph = roots[cp_graph_root];
-  atp_cp_graph_assert(s);
-#endif
 #ifdef ATP_MNF
   // Write the relocated reached-Terms back into the MNF nodes.  No
   // hash-table fixup: mnf_hash is structural, so a relocated term
@@ -5749,9 +5202,7 @@ static u32 atp_symbol_count_dedup(Term t) {
   while (sp > 0) {
     Term cur = stack[--sp];
     // Probe the seen-set with an inlined splitmix64 finalizer over
-    // the Term's u64 representation (mirrors the ATP_CP_GRAPH-gated
-    // atp_term_hash above; inlined here so this code is reachable
-    // in the default WL build which does not define ATP_CP_GRAPH).
+    // the Term's u64 representation.
     u64 x = (u64)cur;
     x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
     x ^= x >> 27; x *= 0x94d049bb133111ebULL;
@@ -6361,7 +5812,6 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   s->cp_seq[i]   = seq;
   s->n_cps++;
   atp_cp_sift_up(s, i);
-  atp_cp_graph_sync(s);
 #ifdef ATP_FV_INDEX
   atp_fv_index_insert(s->fv_index, lhs, rhs, packed, seq);
 #endif
@@ -6641,8 +6091,6 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       atp_cp_sift_down(s, k);
     }
   }
-  // The wholesale mutate invalidates the cp_graph mirror (if enabled).
-  atp_cp_graph_sync(s);
 }
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL) return 0;
@@ -6783,8 +6231,6 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     atp_cp_sift_up(s, j);
     atp_cp_sift_down(s, j);
   }
-  // 8a: the pop shrank / reordered the mirror -- resync cp_graph.
-  atp_cp_graph_sync(s);
 
   if (orphan) {
     s->n_cps_dropped_orphan++;
@@ -6824,8 +6270,6 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
                       ? atp_cp_weight_base(s, l, r, s->w2_mode) : 0u;
     // Waldmeister `-:w1=fifo`: keep each surviving CP's original
     // insertion age so equal-weight ties stay oldest-first run-wide.
-    // The post-orient compaction (atp_normalize_graph) already carried
-    // cp_seq[] down to its packed slot, so leave it untouched here.
     // Default: reassign a fresh monotone seq (engine byte-identical).
     if (!s->cp_fifo_tiebreak) s->cp_seq[i] = s->cp_seq_next++;
   }
@@ -6834,8 +6278,6 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     i--;
     atp_cp_sift_down(s, i);
   }
-  // 8a: a caller populated the arrays directly -- resync cp_graph.
-  atp_cp_graph_sync(s);
 #ifdef ATP_FV_INDEX
   // 7d: reheapify reassigned every cp_seq[] (the index's stable key)
   // and a normalize-graph compaction may have dropped CPs.  The
@@ -7617,20 +7059,6 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
 
   // Re-admit any stashed CP now within the refreshed bound.
   if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_drain(s, 0u);
-
-#ifdef ATP_CP_GRAPH
-  // 8b: a rule was oriented (R changed), so every queued CP may now
-  // simplify under it.  Sweep the WHOLE cp_graph once, applying the
-  // newly-oriented rule(s) with a memo shared across all CPs -- a
-  // subterm common to many CPs is rewritten once.  Trivially-joined
-  // CPs collapse and drop out here.  The lazy per-CP normalize at the
-  // top of the next step still runs (full R, catching any cascaded
-  // redex); 8b makes the popped CP cheaper because it is already
-  // simplified under every rule oriented since it was queued.
-  u64 _ph_ng_t0 = atp_phase_now();
-  atp_normalize_graph(s, post);
-  if (g_atp_phase_enabled) g_atp_phase_us_norm_graph += atp_now_us() - _ph_ng_t0;
-#endif
 
   // Periodic full-rule-set CP-queue interreduction (Waldmeister
   // KPV_KPMengeInterreduzieren).  Gated behind cp_set_interreduce and run
@@ -9229,7 +8657,7 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
 // they would contribute.  `dead` holds the trace ids of the dropped
 // rules; a queued CP is an orphan iff its TRACE_CP entry names a dead
 // rule as a parent.  Survivors are compacted down and the queue heap
-// / FV index / cp_graph rebuilt via thvm_atp_cp_reheapify.
+// / FV index rebuilt via thvm_atp_cp_reheapify.
 static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
   if (s == NULL || n_dead == 0 || s->n_cps == 0) return;
   u32 w = 0;
@@ -9264,7 +8692,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
   }
   if (w != s->n_cps) {
     s->n_cps = w;
-    thvm_atp_cp_reheapify(s);   // rebuilds heap + FV index + cp_graph
+    thvm_atp_cp_reheapify(s);   // rebuilds heap + FV index
   }
 }
 #endif /* ATP_ORPHAN_KILL */
@@ -9272,8 +8700,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
 // Periodic critical-pair-set interreduction against the FULL rule set --
 // a port of Waldmeister's KPV_KPMengeInterreduzieren (KPVerwaltung.c:1032)
 // and its per-CP AP_generic callback (KPVerwaltung.c, the doR/doE branch).
-// The per-step atp_normalize_graph sweep only applies the 1-2 just-added
-// rules; a queued CP that became joinable through an OLDER rule (e.g. an
+// A queued CP that became joinable through an OLDER rule (e.g. an
 // interreduce cascade) stays on the heap until it is finally popped and
 // dies in thvm_atp_step's pop-time normalize.  Until then it pollutes the
 // heap-min selection -- the engine keeps picking light CPs that normalize
@@ -10158,30 +9585,15 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
 // `thvm_rewrite_normalize` because matching has no fixed-point
 // loop.
 //
-// 8e: with -DATP_CP_GRAPH the explicit per-CP loop is replaced by
-// ONE thvm_match_multi traversal of cp_graph (the CpSet container is
-// the fan-out point).  The verdict is IDENTICAL to the loop, leaf
-// for leaf -- 8e is a routing change, not a semantic one.  It is
-// memo-free: the (pattern_cell, subject_cell) memo measured 0%
-// sharing on the flat CpSet, so shipping it would be pure overhead
-// (see the 8e block comment at thvm_match_multi).
-//
 // 7d: with -DATP_FV_INDEX the O(n_cps) scan is replaced by an
 // FV-index retrieval -- componentwise-dominated FVs are pulled from
 // the trie and the SAME two-sided thvm_match runs only on those.
 // The FV filter is a sound over-approximation, so the verdict is
-// IDENTICAL to the scan, CP for CP.  The FV path takes priority over
-// the -DATP_CP_GRAPH thvm_match_multi traversal (they are the same
-// verdict; FV is the faster one).
+// IDENTICAL to the scan, CP for CP.
 #if defined(ATP_FV_INDEX)
 static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
   if (s->n_cps == 0) return 0;
   return atp_fv_index_query(s->fv_index, lhs, rhs);
-}
-#elif defined(ATP_CP_GRAPH)
-static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
-  if (s->n_cps == 0) return 0;
-  return thvm_match_multi(s->cp_graph, lhs, rhs);
 }
 #else
 static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
@@ -10417,7 +9829,6 @@ static void atp_cp_heap_push_pri(AtpState *s, Term lhs, Term rhs,
   s->cp_seq[i]   = seq;
   s->n_cps++;
   atp_cp_sift_up(s, i);
-  atp_cp_graph_sync(s);
 #ifdef ATP_FV_INDEX
   atp_fv_index_insert(s->fv_index, lhs, rhs, packed, seq);
 #endif
@@ -11360,9 +10771,6 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
   u32 pushed = 0;
-#if defined(ATP_CP_GRAPH) && defined(ATP_MATCH_STATS)
-  clock_t mm_t0 = clock();
-#endif
 #if !defined(ATP_CP_DIAG) && !defined(ATP_CP_CLASSIFY)
   (void)rule_a;
   (void)rule_b;
@@ -11482,8 +10890,6 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       s->n_cps_dropped_rule_subsumed++;
       continue;
     }
-    // 8e: under -DATP_CP_GRAPH this runs ONE thvm_match_multi
-    // traversal of cp_graph; off the flag it is the array scan.
     u8 q_subsmd    = atp_cp_queue_subsumed(s, cp_lhs, cp_rhs);
 #ifdef ATP_CP_DIAG
     if (atp_cp_source_disjoint_connected(s, cp_lhs, cp_rhs,
@@ -11595,9 +11001,6 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     pushed++;
 #endif
   }
-#if defined(ATP_CP_GRAPH) && defined(ATP_MATCH_STATS)
-  g_atp_mm_secs += (double)(clock() - mm_t0) / CLOCKS_PER_SEC;
-#endif
   return pushed;
 }
 

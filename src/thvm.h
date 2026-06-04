@@ -3774,13 +3774,11 @@ fn u8          fol_is_tseitin_aux(u32 label);
 #define TRACE_NORM_STEP 5u
 #define ATP_TRACE_NONE 0xFFFFFFFFu
 
-// 8a: CTR labels for the IC-native CP-set graph (-DATP_CP_GRAPH).
-// ATP_CP_LABEL labels a 2-child `Cp[lhs,rhs]` leaf; ATP_CPSET_LABEL
-// labels the `CpSet[...]` container whose children are those leaves
-// in cp_lhs[] / cp_rhs[] slot order.  Distinct from the TRACE_*
-// labels so a leaf is never confused with a trace entry.
+// CTR label for the synthetic `Cp(lhs, rhs)` head used by the FV
+// subsumption index to span both sides of a queued CP in a single
+// term.  Distinct from the TRACE_* labels so a Cp head is never
+// confused with a trace entry.
 #define ATP_CP_LABEL    16u  // Cp[lhs, rhs]
-#define ATP_CPSET_LABEL 17u  // CpSet[Cp, Cp, ...]
 
 // 8.1c: ATP primitives registered into the TAG_PRI table by
 // thvm_atp_init.  Tests registers them once; the saturation loop
@@ -3996,22 +3994,6 @@ typedef struct {
   // ratio -- see thvm_atp_select_cp / ATP_CP_FIFO_MODULO.
   u32   cp_select_count;
 
-  // 8a: IC-native CP-set representation.  Behind -DATP_CP_GRAPH the
-  // CP queue is also held as ONE shared Term: a CTR `CpSet[...]`
-  // whose children are 2-child `Cp[lhs,rhs]` CTR leaves, one per
-  // queued CP, in the same slot order as cp_lhs[] / cp_rhs[].
-  // Because thvm hash-conses every cell, two CPs sharing a subterm
-  // share its heap cells -- cp_graph is a maximally-shared DAG.
-  // Every CP mutation rebuilds cp_graph from the (still-maintained)
-  // arrays so it stays in lockstep; the arrays are the synced
-  // mirror tests/test_atp.c reads directly.  Selection stays the
-  // 7c' heap over cp_pri / cp_seq -- INC-priority is 8d.  Flag OFF
-  // this field is absent and the engine is byte-for-byte the
-  // milestone-7 array engine.
-#ifdef ATP_CP_GRAPH
-  Term cp_graph;
-#endif
-
   // 7d: feature-vector subsumption index over the CP queue.  Behind
   // -DATP_FV_INDEX, `atp_cp_queue_subsumed` consults this instead of
   // the O(n_cps) thvm_match scan: each queued CP carries a vector of
@@ -4023,8 +4005,8 @@ typedef struct {
   // ride the GC alongside cp_lhs[]/cp_rhs[].  Maintained
   // incrementally: insert on CP enqueue, mark-dead on dequeue.  Flag
   // OFF this field is absent and the engine is the milestone-7 array
-  // scan, byte-for-byte.  Independent of -DATP_CP_GRAPH.  Opaque
-  // pointer so the struct layout does not leak the index internals.
+  // scan, byte-for-byte.  Opaque pointer so the struct layout does
+  // not leak the index internals.
 #ifdef ATP_FV_INDEX
   struct AtpFvIndex *fv_index;
 #endif
@@ -4362,13 +4344,13 @@ typedef struct {
   u32  random_modulo;
   u64  rng_state;
   // Waldmeister `-:w1=fifo` secondary CP key.  The heap already breaks
-  // equal-weight ties by cp_seq (insertion age), but the post-orient
-  // CP-normalize sweep (atp_normalize_graph) reheapifies and reassigns
-  // every cp_seq in heap-array order, scrambling the true insertion age.
-  // When set, the sweep PRESERVES each surviving CP's original cp_seq, so
-  // equal-weight ties resolve oldest-first across the whole run -- the
-  // stable FIFO secondary sort key Waldmeister's selection uses.  Default
-  // 0: reheapify reassigns cp_seq as before, engine byte-identical.
+  // equal-weight ties by cp_seq (insertion age), but thvm_atp_cp_reheapify
+  // reassigns every cp_seq in heap-array order, scrambling the true
+  // insertion age.  When set, the reheapify PRESERVES each surviving CP's
+  // original cp_seq, so equal-weight ties resolve oldest-first across the
+  // whole run -- the stable FIFO secondary sort key Waldmeister's
+  // selection uses.  Default 0: reheapify reassigns cp_seq as before,
+  // engine byte-identical.
   u8   cp_fifo_tiebreak;
   // Waldmeister MaxWeight: discard a critical pair whose combined term
   // weight exceeds this (0 = unbounded).  Bounds the search on
@@ -4665,7 +4647,7 @@ typedef struct {
   // Parallel native AtpFt CP queue; see docs/atp/engineering.md.
   // Each populated slot owns its two FT spans in Arena A; the legacy
   // cp_packed[] byte queue stays populated in parallel (FV index +
-  // cp_graph mirror + peek/stash consumers).  Capacity tracks
+  // peek/stash consumers).  Capacity tracks
   // s->cp_cap (atp_ensure_cp_cap grows both arrays).  See
   // src/atp/ft_cpq.c for the entry layout and lifetime rules.
   //

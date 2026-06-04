@@ -306,8 +306,7 @@ int main(int argc, char **argv) {
   // Cheney collector so a long completion run floats around its live
   // working set instead of climbing into from-space exhaustion.  Off
   // by default (flat 128M heap) so the cost numbers stay comparable
-  // to earlier milestones; set it to exercise thvm_atp_gc_collect --
-  // and, under -DATP_CP_GRAPH, the 8b cp_graph GC root.
+  // to earlier milestones; set it to exercise thvm_atp_gc_collect.
   {
     const char *gc_env = getenv("ATP_BENCH_GC");
     if (gc_env != NULL && gc_env[0] != '\0') {
@@ -795,7 +794,7 @@ int main(int argc, char **argv) {
     double w = (el > 0.0) ? el : 1.0;
     u64 sumus = g_atp_phase_us_pop_normalize + g_atp_phase_us_cp_gen +
                 g_atp_phase_us_push_normalize + g_atp_phase_us_interreduce +
-                g_atp_phase_us_goal_check + g_atp_phase_us_norm_graph;
+                g_atp_phase_us_goal_check;
     double push_norm_us_per_cp = (s->n_cps_push_normalized > 0)
         ? (double)g_atp_phase_us_push_normalize /
           (double)s->n_cps_push_normalized
@@ -803,7 +802,7 @@ int main(int argc, char **argv) {
     printf("   phase: pop-norm=%.2fs (%.0f%%) cp-gen=%.2fs (%.0f%%)\n"
            "          push-norm=%.2fs (%.0f%%) [%.1fus/cp]"
            " interreduce=%.2fs (%.0f%%)\n"
-           "          goal-check=%.2fs (%.0f%%) norm-graph=%.2fs (%.0f%%)\n"
+           "          goal-check=%.2fs (%.0f%%)\n"
            "          sum=%.2fs / wall=%.2fs (%.0f%%)\n",
            g_atp_phase_us_pop_normalize / 1e6,
            100.0 * (g_atp_phase_us_pop_normalize / 1e6) / w,
@@ -816,8 +815,6 @@ int main(int argc, char **argv) {
            100.0 * (g_atp_phase_us_interreduce / 1e6) / w,
            g_atp_phase_us_goal_check / 1e6,
            100.0 * (g_atp_phase_us_goal_check / 1e6) / w,
-           g_atp_phase_us_norm_graph / 1e6,
-           100.0 * (g_atp_phase_us_norm_graph / 1e6) / w,
            sumus / 1e6, w,
            100.0 * (sumus / 1e6) / w);
     if (g_atp_unorient_step_calls > 0) {
@@ -888,46 +885,6 @@ int main(int argc, char **argv) {
     printf("   cp-size histogram (bucket=10 symbols):\n     ");
     for (u32 b = 0; b < 12u; b++) printf("[%u-%u)=%u ", b*10u, (b+1u)*10u, bins[b]);
     printf("\n"); }
-
-#ifdef ATP_NORM_STATS
-  // 8b: optimal-sharing ratio of the cross-CP normalization memo.
-  // A hit = a subterm shared with an already-visited CP whose normal
-  // form was reused; misses = distinct subterm cells actually
-  // normalized.  hits/(hits+misses) is the work the sharing saved.
-  {
-    u64 hits = 0, misses = 0;
-    double secs = 0.0;
-    thvm_atp_norm_stats(&hits, &misses, &secs);
-    u64 total = hits + misses;
-    double ratio = (total > 0) ? (100.0 * (double)hits / (double)total) : 0.0;
-    double frac  = (el > 0.0) ? (100.0 * secs / el) : 0.0;
-    printf("   norm-memo: %llu hits / %llu distinct-cells  (%.1f%% shared)\n",
-           (unsigned long long)hits, (unsigned long long)misses, ratio);
-    printf("   norm-sweep: %.2fs  (%.1f%% of %.1fs total)\n",
-           secs, frac, el);
-  }
-#endif
-
-#ifdef ATP_MATCH_STATS
-  // 8e: shared-traversal match stats.  memo_hits / (hits + misses) is
-  // the per-subterm sharing ratio -- how often a (pattern_cell,
-  // subject_cell) pair was served from the memo rather than walked.
-  // node_visits / calls is the average traversal size.
-  {
-    u64 calls = 0, nodes = 0, hits = 0, miss = 0;
-    double secs = 0.0;
-    thvm_atp_match_stats(&calls, &nodes, &hits, &miss, &secs);
-    u64 mtot = hits + miss;
-    double mratio = (mtot > 0) ? (100.0 * (double)hits / (double)mtot) : 0.0;
-    double frac   = (el > 0.0) ? (100.0 * secs / el) : 0.0;
-    printf("   match-multi: %llu calls  %llu node-visits\n",
-           (unsigned long long)calls, (unsigned long long)nodes);
-    printf("   match-memo: %llu hits / %llu miss  (%.1f%% shared)\n",
-           (unsigned long long)hits, (unsigned long long)miss, mratio);
-    printf("   match-sweep: %.2fs  (%.1f%% of %.1fs total)\n",
-           secs, frac, el);
-  }
-#endif
 
 #ifdef ATP_FV_INDEX
   // 7d: subsumption-index retrieval stats.  candidates / query is the

@@ -8,34 +8,16 @@ CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-unused-function
 BIN     := bin
 BUILD   := build
 
-# Milestone 8a: -DATP_CP_GRAPH switches the ATP CP set onto the
-# IC-native shared SUP-graph representation (src/atp/_.c).  Off by
-# default -- the milestone-7 array engine is the regression oracle
-# and ships byte-for-byte.  `make ATP_CP_GRAPH=1 bin/test_atp`
-# builds the graph path; both flag states must compile and, for 8a,
-# produce bit-identical proofs.
-ATP_CP_GRAPH ?=
-ATP_DEFINES  := $(if $(filter-out 0,$(ATP_CP_GRAPH)),-DATP_CP_GRAPH,)
-
-# Milestone 8b/8e instrumentation.  ATP_NORM_STATS reports the 8b
-# normalization-memo sharing ratio; ATP_MATCH_STATS reports the 8e
-# shared-traversal multi-match memo sharing ratio + sweep cost.
-# Both imply -DATP_CP_GRAPH (the graph path they instrument).
-ATP_NORM_STATS  ?=
-ATP_MATCH_STATS ?=
-ATP_DEFINES     += $(if $(filter-out 0,$(ATP_NORM_STATS)),-DATP_CP_GRAPH -DATP_NORM_STATS,)
-ATP_DEFINES     += $(if $(filter-out 0,$(ATP_MATCH_STATS)),-DATP_CP_GRAPH -DATP_MATCH_STATS,)
-
 # Milestone 7d: -DATP_FV_INDEX adds a feature-vector subsumption index
 # over the CP queue (and rule set) -- a sound over-approximation that
 # turns the O(n_cps) thvm_match scan in atp_cp_queue_subsumed into an
 # O(retrieval) candidate lookup + match on the survivors.  ON by
 # default: it is part of the canonical engine and ships byte-for-byte
-# (same verdict as the array scan, just faster).  Independent of
-# -DATP_CP_GRAPH.  `make ATP_FV_INDEX=0 bin/test_atp` builds the
+# (same verdict as the array scan, just faster).
+# `make ATP_FV_INDEX=0 bin/test_atp` builds the
 # milestone-7 array scan -- the regression oracle.
 ATP_FV_INDEX ?= 1
-ATP_DEFINES  += $(if $(filter-out 0,$(ATP_FV_INDEX)),-DATP_FV_INDEX,)
+ATP_DEFINES  := $(if $(filter-out 0,$(ATP_FV_INDEX)),-DATP_FV_INDEX,)
 
 # Milestone 7e (normalization wall, lever 1): -DATP_CP_DIAG re-enables
 # the two COUNTER-ONLY CP filters in `atp_push_cps_traced` --
