@@ -914,8 +914,18 @@ $layerParams[_]                  = {}
 TLayerWeights[layer_] :=
     NetExtract[layer, #] & /@ $layerParams[Head[layer]]
 
+(* Each weight becomes a TRequiresGrad leaf (the right default for a net
+   you would train -- inert for a forward-only TRealize) and is Sow'd
+   under "thvmNetParam".  A caller that wants the trainable parameters of
+   a lifted net Reaps that tag around TFromNet:
+     {fwd, {params}} = Reap[TFromNet[net, x], "thvmNetParam"]
+   yielding the very TTerms baked into the forward, so TSet updates flow
+   back into it.  Sow with no surrounding Reap is harmless. *)
 TLayerToTensors[layer_] :=
-    TTensorCreate /@ TLayerWeights[layer]
+    With[{ts = TRequiresGrad /@ (TTensorCreate /@ TLayerWeights[layer])},
+        Sow[#, "thvmNetParam"] & /@ ts;
+        ts
+    ]
 
 (* === forward dispatch =================================== *)
 
