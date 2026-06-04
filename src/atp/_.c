@@ -7379,6 +7379,11 @@ static Term atp_rewrite_normalize_slice_record(AtpState *s, Term t,
 }
 
 #include <sys/resource.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#else
+#include <unistd.h>
+#endif
 fn AtpStatus thvm_atp_step(AtpState *s) {
   if (s == NULL) return ATP_QUEUE_EMPTY;
 
@@ -7449,15 +7454,20 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // dyn heap; trace buffers, CP arena, FV/RI/discrim indices, the WL
   // ProofObject reconstruction state, and the kernel/paclet overhead
   // all live OUTSIDE it.  A run can exhaust system RAM with a perfectly
-  // happy semi-space.  Poll RSS every 1024 steps (getrusage is a syscall
-  // -- not free -- but a 1024-step amortization is in the noise vs the
-  // saturator's per-step cost).  Default cap 4 GB; env-tunable via
-  // THVM_ATP_RSS_ABORT_MB; 0 disables.  On Darwin ru_maxrss is bytes;
-  // on Linux it's KB -- this code handles both.
+  // happy semi-space.  Poll the *current* RSS every 1024 steps.
+  //
+  // ru_maxrss is the HIGH-WATER MARK (peak ever) -- useless here; once
+  // any earlier test touched the cap, every subsequent run aborts.  We
+  // need the live RSS:
+  //   Darwin: task_info(TASK_BASIC_INFO).resident_size
+  //   Linux:  /proc/self/statm field 2 * page-size
+  // 0 disables; default 8 GB (lenient enough to never trip a normal
+  // run; THVM_ATP_RSS_ABORT_MB tightens it for memory-constrained
+  // benches or paclet builds).
   if ((s->step & 0x3ffu) == 0u) {
     static long long rss_cap_bytes = -1;
     if (rss_cap_bytes < 0) {
-      rss_cap_bytes = 4LL * 1024 * 1024 * 1024;
+      rss_cap_bytes = 8LL * 1024 * 1024 * 1024;
       const char *e = getenv("THVM_ATP_RSS_ABORT_MB");
       if (e != NULL && *e != '\0') {
         char *end = NULL;
@@ -7468,15 +7478,26 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
       }
     }
     if (rss_cap_bytes > 0) {
-      struct rusage ru;
-      if (getrusage(RUSAGE_SELF, &ru) == 0) {
+      long long rss = 0;
 #if defined(__APPLE__)
-        long long rss = (long long)ru.ru_maxrss;             // bytes
-#else
-        long long rss = (long long)ru.ru_maxrss * 1024LL;    // KB->bytes
-#endif
-        if (rss > rss_cap_bytes) return ATP_ABORTED;
+      struct mach_task_basic_info info;
+      mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+      if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                    (task_info_t)&info, &cnt) == KERN_SUCCESS) {
+        rss = (long long)info.resident_size;
       }
+#else
+      FILE *fp = fopen("/proc/self/statm", "r");
+      if (fp != NULL) {
+        long pages_total = 0, pages_resident = 0;
+        if (fscanf(fp, "%ld %ld", &pages_total, &pages_resident) == 2) {
+          long pgsz = sysconf(_SC_PAGESIZE);
+          if (pgsz > 0) rss = (long long)pages_resident * (long long)pgsz;
+        }
+        fclose(fp);
+      }
+#endif
+      if (rss > 0 && rss > rss_cap_bytes) return ATP_ABORTED;
     }
   }
 
