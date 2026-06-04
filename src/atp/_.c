@@ -5856,14 +5856,18 @@ static u32 atp_unif_measure(Term lhs, Term rhs) {
   return atp_unif_measure_rec(lhs, rhs, d);
 }
 
-// Per-term KBO weight feeding the ORD / GT / MIX modes.  Ports
-// Waldmeister's `CF_Phi_KBO` ("KBO weight"; sources/CLAS/
-// ClasFunctions.c): sum the active signature's per-symbol weights
+// Per-term KBO weight feeding the ORD mode.  Ports Waldmeister's
+// `CF_Phi_KBO` ("KBO weight"; sources/CLAS/ClasFunctions.c): sum
+// the active signature's per-symbol weights
 // (`cfg->weights[label]` for a function symbol, `cfg->var_weight`
 // for a variable).  m8's KBO module only exposes the single-pass
 // differential balance, so the standalone single-term walk is
 // inlined here.  With no KboConfig attached the raw symbol count
 // is the fallback.
+//
+// GT / MIX / MIX2 / UNIF / MAX use CF_Phi (CP-weight table) not
+// CF_Phi_KBO; per WM ClasHeuristics.c that's atp_symbol_count
+// here (CP table defaults to 1 for all symbols).
 static u32 atp_kbo_weight(AtpState *s, Term t) {
   const KboConfig *cfg = (s != NULL) ? s->kbo : NULL;
   if (cfg == NULL) return atp_symbol_count(t);
@@ -5891,7 +5895,8 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
     case ATP_CP_WEIGHT_GT: {
       // CH_GtWeight: ordering-directed -- the greater side's
       // weight when the CP orients, the sum otherwise.
-      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      // CF_Phi (CP-weight table, default symbol-count), not KBO.
+      u32 wl = atp_symbol_count(lhs), wr = atp_symbol_count(rhs);
       KboCmp c = atp_compare(s, lhs, rhs);
       return (c == KBO_GT) ? wl
            : (c == KBO_LT) ? wr
@@ -5899,7 +5904,10 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
     }
     case ATP_CP_WEIGHT_MIX: {
       // CH_MixWeight: (wl+wr)*g + g + (wl+wr), g = GtWeight value.
-      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      // WM faithfully: side weights are CF_Phi (CP-weight table,
+      // default symbol-count per andassoc.pr) NOT CF_Phi_KBO; only
+      // the orient discriminator uses ordering.
+      u32 wl = atp_symbol_count(lhs), wr = atp_symbol_count(rhs);
       KboCmp c = atp_compare(s, lhs, rhs);
       u32 g = (c == KBO_GT) ? wl
             : (c == KBO_LT) ? wr
@@ -5908,8 +5916,8 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
       return sum * g + g + sum;
     }
     case ATP_CP_WEIGHT_MIX2: {
-      // CH_MixWeight2: g*10 + (wl+wr).
-      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      // CH_MixWeight2: g*10 + (wl+wr).  Same CP-weight base as MIX.
+      u32 wl = atp_symbol_count(lhs), wr = atp_symbol_count(rhs);
       KboCmp c = atp_compare(s, lhs, rhs);
       u32 g = (c == KBO_GT) ? wl
             : (c == KBO_LT) ? wr
@@ -5918,7 +5926,8 @@ static u32 atp_cp_weight_base(AtpState *s, Term lhs, Term rhs, u32 mode) {
     }
     case ATP_CP_WEIGHT_UNIF: {
       // CH_Unifikationsmass: (wl+wr) * unification-measure.
-      u32 wl = atp_kbo_weight(s, lhs), wr = atp_kbo_weight(s, rhs);
+      // CF_Phi (CP-weight table, default symbol-count), not KBO.
+      u32 wl = atp_symbol_count(lhs), wr = atp_symbol_count(rhs);
       return (wl + wr) * atp_unif_measure(lhs, rhs);
     }
     case ATP_CP_WEIGHT_TWEE: {
