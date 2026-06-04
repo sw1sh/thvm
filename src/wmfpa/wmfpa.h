@@ -73,7 +73,7 @@ typedef struct {
 // (skips) a whole subject subterm.  WM stores per-symbol successor slots
 // in a node (BK_Nachf[Symbol]); we use a child / right-sibling chain in
 // a flat node pool addressed by index (realloc-stable), the same shape
-// thvm's AtpRiNode uses.  A leaf carries the rule index.
+// thvm's AtpDTreeNode uses.  A leaf carries the rule index.
 //
 // `sym` on an edge is either WF_VAR_BIT|0 (the single star edge -- WM
 // rebinds old variables by re-walking subject subterms, but for a
