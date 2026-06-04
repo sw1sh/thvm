@@ -59,7 +59,7 @@ TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG
 TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
 TMaxPool2d::usage        = "TMaxPool2d[x] / TMaxPool2d[x, k] runs a non-overlapping kxk max-pool over the trailing two axes of a rank-3 {C, H, W} or rank-4 batched {B, C, H, W} channels-first tensor.  Default k=2.";
 TLayerNorm::usage        = "TLayerNorm[x] / TLayerNorm[x, eps] normalises along the last axis: y = (x - mean) / sqrt(var + eps).  Default eps=1e-5.  mean / var are scalar reductions broadcast back via the softmax-style reduce-broadcast pattern; the scheduler's relaxation pass collapses each reduce + its broadcast tail into one kernel where it can.";
-TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x) / sum(exp(x)) reduced along `axis`.  Generalises TSoftmax (which is hard-coded to axis 0).  The dropped axis is re-introduced as size 1 + EXPAND'd back so the elementwise mul has matching shapes; same softmax-style reduce-broadcast shape.";
+TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x - max(x)) / sum(exp(x - max(x))) reduced along `axis`.  Generalises TSoftmax (which is hard-coded to axis 0).  The dropped axis is re-introduced as size 1 + EXPAND'd back so the elementwise mul has matching shapes; same softmax-style reduce-broadcast shape.  Max-subtract along the axis keeps it numerically stable: random-init nets (LeNet) overflow exp without it.";
 TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmaxAxis + TMatMul; the two matmuls dispatch through cblas_sgemm.";
 TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x, gamma, beta, mean, var, eps] applies the inference-form batch-norm transform: y = gamma * (x - mean) / sqrt(var + eps) + beta along the channel axis.  x is rank-3 {C, H, W} or rank-4 {B, C, H, W}; gamma/beta/mean/var are all rank-1 {C}.  Default eps = 1e-5.";
 TBatchNormTrain::usage   = "TBatchNormTrain[x, gamma, beta] / TBatchNormTrain[x, gamma, beta, eps] computes batch-norm using statistics from x, then applies per-channel gamma/beta.  Supports rank-3 {C,H,W} and rank-4 {B,C,H,W}.";
@@ -73,8 +73,8 @@ TOnes::usage             = "TOnes[shape] returns a fresh f32 TTerm tensor of one
 TZerosLike::usage        = "TZerosLike[t] returns a TTensor handle of zeros matching the shape and dtype of TTerm `t`.  Suitable for seeding Adam m/v moment buffers.";
 TOneHot::usage           = "TOneHot[label, n] / TOneHot[label, n, dtype] returns a TTerm tensor of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.";
 
-TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, intLabels] computes the categorical cross-entropy loss given pre-softmax logits and integer class labels (one int per sample, NOT one-hot) -- the same convention as tinygrad / Keras.  intLabels' shape is logits' shape with the last (class) axis dropped.  Lowers to log(sum(exp(logits))) - logits[label] along the last axis, then averages over the leading batch axis.  Numerically naive (no max-subtract); for the f32 inputs the MNIST training pipeline produces the magnitudes stay well within range.  For one-hot targets, use TCategoricalCrossEntropy.";
-TCategoricalCrossEntropy::usage = "TCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to log(sum(exp(logits))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  For integer class labels, use TSparseCategoricalCrossEntropy.";
+TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, intLabels] computes the categorical cross-entropy loss given pre-softmax logits and integer class labels (one int per sample, NOT one-hot) -- the same convention as tinygrad / Keras.  intLabels' shape is logits' shape with the last (class) axis dropped.  Lowers to log(sum(exp(logits))) - logits[label] along the last axis, then averages over the leading batch axis.  Defers to TCategoricalCrossEntropy, so it inherits the stable max-subtract logsumexp.  For one-hot targets, use TCategoricalCrossEntropy.";
+TCategoricalCrossEntropy::usage = "TCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to the stable logsumexp form max(logits) + log(sum(exp(logits - max(logits)))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  The max-subtract keeps random-init conv logits from overflowing exp and is grad-transparent.  For integer class labels, use TSparseCategoricalCrossEntropy.";
 
 TEmbedding::usage        = "TEmbedding[table, idx] returns row idx of a {V, D} table as a TTerm of shape {D}.  idx is a host-side Integer; lowers as TUOpShrink[table, {{idx, idx+1}, {0, D}}] + TUOpReshape to {D}.  Dynamic-idx gather (idx as a runtime tensor) needs a future UOP_GATHER opcode.";
 TEmbeddingMatrix::usage  = "TEmbeddingMatrix[table, ids] gathers rows `ids` from a {V, D} table into a {Length[ids], D} matrix.  ids is a host-side List[Integer].  Lowers as one TEmbedding + TUOpReshape to {1, D} per id, then stitches along the leading axis via PAD + sum (same idiom as TMultiHeadAttention's per-head concat -- no STACK op in thvm).  Dynamic-id gather needs a future UOP_GATHER opcode.";
@@ -606,9 +606,11 @@ TLayerNorm[x_TTerm, eps_?NumericQ] := With[{shape = tUopShape[x]},
    softmax over the last axis of a {seq_q, seq_k} score matrix) use
    the same code path. *)
 TSoftmaxAxis[x_TTerm, axis_Integer] := With[{shape = tUopShape[x]},
-    Module[{e, sumShape},
-        e        = Exp[x];
+    Module[{m, xc, e, sumShape},
         sumShape = ReplacePart[shape, axis + 1 -> 1];
+        m        = TUOpExpand[TUOpReshape[TUOpReduce[x, axis, "MAX"], sumShape], shape];
+        xc       = x - m;
+        e        = Exp[xc];
         e * TUOpExpand[1 / TUOpReshape[TUOpReduce[e, axis, "SUM"], sumShape], shape]
     ]
 ]
@@ -719,10 +721,18 @@ TBatchNormTrain[x_TTerm, gamma_TTerm, beta_TTerm, eps_?NumericQ] :=
 TCategoricalCrossEntropy[logits_TTerm, target_TTerm] := With[{
     shape = tUopShape[logits]
 },
-    Module[{rank, classAxis, perSample},
+    Module[{rank, classAxis, sumShape, mFlat, mBcast, perSample},
         rank      = Length[shape];
         classAxis = rank - 1;
-        perSample = Log[TUOpReduce[Exp[logits], classAxis, "SUM"]]
+        sumShape  = ReplacePart[shape, classAxis + 1 -> 1];
+        (* Stable logsumexp: log(sum(exp(z))) = m + log(sum(exp(z - m)))
+           with m = max along the class axis.  Grad-transparent (the
+           softmax sums to 1, so the dm/dz terms cancel) and required:
+           without it random-init conv logits overflow exp -> NaN. *)
+        mFlat     = TUOpReduce[logits, classAxis, "MAX"];
+        mBcast    = TUOpExpand[TUOpReshape[mFlat, sumShape], shape];
+        perSample = mFlat
+                  + Log[TUOpReduce[Exp[logits - mBcast], classAxis, "SUM"]]
                   - TUOpReduce[target * logits, classAxis, "SUM"];
         If[ rank <= 1,
             perSample,
