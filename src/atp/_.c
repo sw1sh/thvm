@@ -1167,6 +1167,98 @@ static u32 atp_dtree_flatsym(Term t, AtpDTreeVarMap *vm) {
   }
 }
 
+// A discrimination-tree node: left-child / right-sibling in a flat
+// realloc-grown pool addressed by u32 INDEX (no pointers, so a pool
+// realloc never invalidates the structure).  `sym` is the flat symbol
+// of the edge INTO this node.  `rec_head` heads the leaf record list.
+// Shared layout between the FV-index (CP subsumption) and the RI-index
+// (rule-LHS redex matching) -- the only difference at the leaf is the
+// RecT type, threaded through ATP_DTREE_DEFINE_OPS below.
+typedef struct {
+  u32 sym;        // flat symbol of the in-edge
+  u32 child;      // first child node index, or ATP_DTREE_NIL
+  u32 sibling;    // next sibling node index, or ATP_DTREE_NIL
+  u32 rec_head;   // first record index, or ATP_DTREE_NIL
+} AtpDTreeNode;
+
+// Template macro for the four tree-management fns shared by the FV
+// and RI indices.  Expands to:
+//   atp_<stem>_node_new(IndexT *ix, u32 sym) -> u32     (pool alloc)
+//   atp_<stem>_rec_new (IndexT *ix)          -> u32     (pool alloc)
+//   atp_<stem>_child   (IndexT *ix, u32 par, u32 sym) -> u32
+//   atp_<stem>_insert_term(IndexT *ix, u32 node, Term t, AtpDTreeVarMap *)
+//
+// The four fns are TEXTUALLY identical apart from the IndexT / RecT
+// types and the err-print stem; macro-expanding to two specialized
+// `static` definitions keeps the call sites direct (no fn-pointer
+// indirection or void* round-trip) so the inliner stays free on the
+// hot path -- atp_dt_descend_rec reads ix->nodes[] directly and does
+// not go through these helpers at all, but the insert/rebuild paths
+// (and any other future helper added under one expansion) inline
+// identically to the hand-written form.
+#define ATP_DTREE_DEFINE_OPS(stem, IndexT, RecT)                              \
+  static u32 atp_##stem##_node_new(IndexT *ix, u32 sym) {                     \
+    if (ix->n_nodes == ix->cap_nodes) {                                       \
+      u32 cap = ix->cap_nodes ? ix->cap_nodes * 2u : 1024u;                   \
+      AtpDTreeNode *p = (AtpDTreeNode *)realloc(                              \
+        ix->nodes, cap * sizeof(AtpDTreeNode));                               \
+      if (p == NULL) { fprintf(stderr, "atp_" #stem ": node pool OOM\n"); exit(1); } \
+      ix->nodes = p;                                                          \
+      ix->cap_nodes = cap;                                                    \
+    }                                                                         \
+    u32 i = ix->n_nodes++;                                                    \
+    ix->nodes[i].sym      = sym;                                              \
+    ix->nodes[i].child    = ATP_DTREE_NIL;                                    \
+    ix->nodes[i].sibling  = ATP_DTREE_NIL;                                    \
+    ix->nodes[i].rec_head = ATP_DTREE_NIL;                                    \
+    return i;                                                                 \
+  }                                                                           \
+                                                                              \
+  static u32 atp_##stem##_rec_new(IndexT *ix) {                               \
+    if (ix->n_recs == ix->cap_recs) {                                         \
+      u32 cap = ix->cap_recs ? ix->cap_recs * 2u : 1024u;                     \
+      RecT *p = (RecT *)realloc(ix->recs, cap * sizeof(RecT));                \
+      if (p == NULL) { fprintf(stderr, "atp_" #stem ": rec pool OOM\n"); exit(1); } \
+      ix->recs = p;                                                           \
+      ix->cap_recs = cap;                                                     \
+    }                                                                         \
+    return ix->n_recs++;                                                      \
+  }                                                                           \
+                                                                              \
+  /* Find `parent`'s child reached by edge `sym`, creating it absent.    */   \
+  /* Children kept in ascending-sym order -- deterministic across runs. */    \
+  static u32 atp_##stem##_child(IndexT *ix, u32 parent, u32 sym) {            \
+    u32 prev = ATP_DTREE_NIL;                                                 \
+    u32 cur  = ix->nodes[parent].child;                                       \
+    while (cur != ATP_DTREE_NIL && ix->nodes[cur].sym < sym) {                \
+      prev = cur;                                                             \
+      cur  = ix->nodes[cur].sibling;                                          \
+    }                                                                         \
+    if (cur != ATP_DTREE_NIL && ix->nodes[cur].sym == sym) return cur;        \
+    u32 nn = atp_##stem##_node_new(ix, sym);  /* may realloc the pool */      \
+    ix->nodes[nn].sibling = cur;                                              \
+    if (prev == ATP_DTREE_NIL) ix->nodes[parent].child = nn;                  \
+    else                       ix->nodes[prev].sibling = nn;                  \
+    return nn;                                                                \
+  }                                                                           \
+                                                                              \
+  /* Walk term `t` in preorder, descending the tree by flatsym per node, */   \
+  /* creating edges as needed.  `vm` renumbers variables by first        */   \
+  /* appearance.  Returns the node reached after `t`'s whole preorder    */   \
+  /* string.  A TAG_CTR's children extend the string in left-to-right    */   \
+  /* order; a TAG_FVR / TAG_NUM is one symbol.                           */   \
+  static u32 atp_##stem##_insert_term(IndexT *ix, u32 node, Term t,           \
+                                      AtpDTreeVarMap *vm) {                   \
+    node = atp_##stem##_child(ix, node, atp_dtree_flatsym(t, vm));            \
+    if (term_tag(t) == TAG_CTR) {                                             \
+      u32 n = term_ctr_n(t);                                                  \
+      for (u32 i = 0; i < n; i++) {                                           \
+        node = atp_##stem##_insert_term(ix, node, term_ctr_at(t, i), vm);     \
+      }                                                                       \
+    }                                                                         \
+    return node;                                                              \
+  }
+
 #endif  // ATP_FV_INDEX || ATP_RULE_INDEX
 
 #ifdef ATP_FV_INDEX
@@ -1180,18 +1272,6 @@ static u32 atp_dtree_flatsym(Term t, AtpDTreeVarMap *vm) {
 // CTR spine), well within the stack.  A still-bigger term aborts to
 // the full scan (correct, never a silent under-retrieval).
 #define ATP_DT_FLAT_CAP   32768u
-
-// A discrimination-tree node: a left-child / right-sibling tree in a
-// flat realloc-grown pool addressed by u32 INDEX (no pointers, so a
-// pool realloc never invalidates the structure).  `sym` is the flat
-// symbol of the edge INTO this node.  `rec_head` is the head of this
-// node's leaf record list.
-typedef struct {
-  u32 sym;        // flat symbol of the in-edge
-  u32 child;      // first child node index, or ATP_DTREE_NIL
-  u32 sibling;    // next sibling node index, or ATP_DTREE_NIL
-  u32 rec_head;   // first record index, or ATP_DTREE_NIL
-} AtpDtNode;
 
 // One indexed CP.  `packed` BORROWS the queue's cp_packed[] byte
 // string for this CP -- the queue owns and frees it; the index only
@@ -1215,16 +1295,18 @@ typedef struct { u32 seq; u32 rec; } AtpDtSeqEnt;
 
 // The index.  Named `struct AtpFvIndex` -- the flag and the opaque
 // thvm.h forward declaration are spelled that way; the structure
-// inside is the discrimination tree the measurement settled on.
+// inside is the discrimination tree the measurement settled on.  The
+// node pool uses the shared AtpDTreeNode layout (see above); the leaf
+// records carry CP-specific lifecycle (packed pointer + live flag).
 struct AtpFvIndex {
-  AtpDtNode   *nodes;
-  u32          n_nodes, cap_nodes;
-  AtpDtRec    *recs;
-  u32          n_recs, cap_recs;        // n_recs == GC-rooted span
-  u32          n_live;                  // live record count (== n_cps)
-  AtpDtSeqEnt *seqmap;                   // seq -> rec index
-  u32          seqmap_cap;               // power of two
-  u32          root;                     // tree root node index
+  AtpDTreeNode *nodes;
+  u32           n_nodes, cap_nodes;
+  AtpDtRec     *recs;
+  u32           n_recs, cap_recs;        // n_recs == GC-rooted span
+  u32           n_live;                  // live record count (== n_cps)
+  AtpDtSeqEnt  *seqmap;                   // seq -> rec index
+  u32           seqmap_cap;               // power of two
+  u32           root;                     // tree root node index
   // Instrumentation (cheap counters, always compiled).
   u64 q_calls;            // atp_cp_queue_subsumed queries
   u64 q_candidates;       // leaf records reached by retrieval
@@ -1236,49 +1318,9 @@ struct AtpFvIndex {
 };
 typedef struct AtpFvIndex AtpFvIndex;
 
-static u32 atp_dt_node_new(AtpFvIndex *ix, u32 sym) {
-  if (ix->n_nodes == ix->cap_nodes) {
-    u32 cap = ix->cap_nodes ? ix->cap_nodes * 2u : 1024u;
-    AtpDtNode *p = (AtpDtNode *)realloc(ix->nodes, cap * sizeof(AtpDtNode));
-    if (p == NULL) { fprintf(stderr, "atp_dt: node pool OOM\n"); exit(1); }
-    ix->nodes = p;
-    ix->cap_nodes = cap;
-  }
-  u32 i = ix->n_nodes++;
-  ix->nodes[i].sym      = sym;
-  ix->nodes[i].child    = ATP_DTREE_NIL;
-  ix->nodes[i].sibling  = ATP_DTREE_NIL;
-  ix->nodes[i].rec_head = ATP_DTREE_NIL;
-  return i;
-}
-
-static u32 atp_dt_rec_new(AtpFvIndex *ix) {
-  if (ix->n_recs == ix->cap_recs) {
-    u32 cap = ix->cap_recs ? ix->cap_recs * 2u : 1024u;
-    AtpDtRec *p = (AtpDtRec *)realloc(ix->recs, cap * sizeof(AtpDtRec));
-    if (p == NULL) { fprintf(stderr, "atp_dt: rec pool OOM\n"); exit(1); }
-    ix->recs = p;
-    ix->cap_recs = cap;
-  }
-  return ix->n_recs++;
-}
-
-// Find `parent`'s child reached by edge `sym`, creating it absent.
-// Children kept in ascending-sym order -- deterministic across runs.
-static u32 atp_dt_child(AtpFvIndex *ix, u32 parent, u32 sym) {
-  u32 prev = ATP_DTREE_NIL;
-  u32 cur  = ix->nodes[parent].child;
-  while (cur != ATP_DTREE_NIL && ix->nodes[cur].sym < sym) {
-    prev = cur;
-    cur  = ix->nodes[cur].sibling;
-  }
-  if (cur != ATP_DTREE_NIL && ix->nodes[cur].sym == sym) return cur;
-  u32 nn = atp_dt_node_new(ix, sym);          // may realloc the pool
-  ix->nodes[nn].sibling = cur;
-  if (prev == ATP_DTREE_NIL) ix->nodes[parent].child = nn;
-  else                    ix->nodes[prev].sibling = nn;
-  return nn;
-}
+// Specialize the tree-management template (atp_dt_node_new / _rec_new /
+// _child / _insert_term) over AtpFvIndex + AtpDtRec.
+ATP_DTREE_DEFINE_OPS(dt, AtpFvIndex, AtpDtRec)
 
 // --- seq -> record map (open addressing, linear probe) -------------
 
@@ -1361,23 +1403,6 @@ static void atp_fv_index_free(AtpFvIndex *ix) {
 }
 
 // --- insert --------------------------------------------------------
-//
-// Walk term `t` in preorder, descending the tree by flatsym per
-// node, creating edges as needed.  `vm` renumbers variables by
-// first appearance.  Returns the node reached after `t`'s whole
-// preorder string.  A TAG_CTR's children extend the string in
-// left-to-right order; a TAG_FVR / TAG_NUM is one symbol.
-static u32 atp_dt_insert_term(AtpFvIndex *ix, u32 node, Term t,
-                              AtpDTreeVarMap *vm) {
-  node = atp_dt_child(ix, node, atp_dtree_flatsym(t, vm));
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) {
-      node = atp_dt_insert_term(ix, node, term_ctr_at(t, i), vm);
-    }
-  }
-  return node;
-}
 
 // Insert CP (lhs, rhs) with stable id `seq`.  The CP is indexed as
 // the synthetic term `Cp(lhs, rhs)` so a single tree spans both
@@ -1772,16 +1797,6 @@ static u32 atp_ri_flatsym_raw(Term t, u8 *folded) {
   }
 }
 
-// A discrimination-tree node: left-child / right-sibling in a flat
-// realloc-grown pool addressed by u32 index (a realloc never
-// invalidates the structure).  `rec_head` heads the leaf record list.
-typedef struct {
-  u32 sym;
-  u32 child;
-  u32 sibling;
-  u32 rec_head;
-} AtpRiNode;
-
 // One indexed rule: `rule` is the index into s->lhs[]/s->rhs[].
 // `next` links the leaf list.  No Term mirror -- the index is rebuilt
 // from s->lhs[] whenever R mutates, so it never outlives a GC move.
@@ -1791,28 +1806,28 @@ typedef struct {
 } AtpRiRec;
 
 struct AtpRuleIndex {
-  AtpRiNode *nodes;
-  u32        n_nodes, cap_nodes;
-  AtpRiRec  *recs;
-  u32        n_recs, cap_recs;
-  u32        root;
-  u32        n_rules_built;     // R size the tree currently reflects
+  AtpDTreeNode *nodes;
+  u32           n_nodes, cap_nodes;
+  AtpRiRec     *recs;
+  u32           n_recs, cap_recs;
+  u32           root;
+  u32           n_rules_built;  // R size the tree currently reflects
   // Retrieval instrumentation (cheap counters, always compiled).  The
   // decisive Sheffer measurement: q_candidates / q_queries is the
   // candidates-returned-per-query -- if it tracks n_rules the tree does
   // not prune; if bounded it does.
-  u64        q_queries;         // atp_ri_query_pos calls
-  u64        q_candidates;      // leaf records reached by retrieval
-  u64        q_matchcalls;      // thvm_match calls issued on candidates
-  u64        q_nodevisits;      // discrimination-tree nodes touched
-  u64        q_depth_capped;    // recursion-depth bails in atp_ri_descend /
+  u64           q_queries;      // atp_ri_query_pos calls
+  u64           q_candidates;   // leaf records reached by retrieval
+  u64           q_matchcalls;   // thvm_match calls issued on candidates
+  u64           q_nodevisits;   // discrimination-tree nodes touched
+  u64           q_depth_capped; // recursion-depth bails in atp_ri_descend /
                                 // _unorient -- nonzero = latent DT-cycle
                                 // bug worth investigating.
-  u8         any_folded;        // some rule LHS folded a var -> imperfect
+  u8            any_folded;     // some rule LHS folded a var -> imperfect
   // 1 for the unorientable-faces index: a leaf rec's `rule` field then
   // carries the direction in its high bit (ATP_RI_DIR_BIT) -- bit set =
   // r->l (matched face is rhs[i], replacement is lhs[i]); clear = l->r.
-  u8         is_unorient;
+  u8            is_unorient;
 };
 // Direction bit packed into a leaf rec's `rule` field for the
 // unorientable index.  Rule indices never approach 2^31 in completion,
@@ -1820,49 +1835,9 @@ struct AtpRuleIndex {
 #define ATP_RI_DIR_BIT  0x80000000u
 typedef struct AtpRuleIndex AtpRuleIndex;
 
-static u32 atp_ri_node_new(AtpRuleIndex *ix, u32 sym) {
-  if (ix->n_nodes == ix->cap_nodes) {
-    u32 cap = ix->cap_nodes ? ix->cap_nodes * 2u : 1024u;
-    AtpRiNode *p = (AtpRiNode *)realloc(ix->nodes, cap * sizeof(AtpRiNode));
-    if (p == NULL) { fprintf(stderr, "atp_ri: node pool OOM\n"); exit(1); }
-    ix->nodes = p;
-    ix->cap_nodes = cap;
-  }
-  u32 i = ix->n_nodes++;
-  ix->nodes[i].sym      = sym;
-  ix->nodes[i].child    = ATP_DTREE_NIL;
-  ix->nodes[i].sibling  = ATP_DTREE_NIL;
-  ix->nodes[i].rec_head = ATP_DTREE_NIL;
-  return i;
-}
-
-static u32 atp_ri_rec_new(AtpRuleIndex *ix) {
-  if (ix->n_recs == ix->cap_recs) {
-    u32 cap = ix->cap_recs ? ix->cap_recs * 2u : 1024u;
-    AtpRiRec *p = (AtpRiRec *)realloc(ix->recs, cap * sizeof(AtpRiRec));
-    if (p == NULL) { fprintf(stderr, "atp_ri: rec pool OOM\n"); exit(1); }
-    ix->recs = p;
-    ix->cap_recs = cap;
-  }
-  return ix->n_recs++;
-}
-
-// Find `parent`'s child reached by edge `sym`, creating it absent.
-// Children kept in ascending-sym order.
-static u32 atp_ri_child(AtpRuleIndex *ix, u32 parent, u32 sym) {
-  u32 prev = ATP_DTREE_NIL;
-  u32 cur  = ix->nodes[parent].child;
-  while (cur != ATP_DTREE_NIL && ix->nodes[cur].sym < sym) {
-    prev = cur;
-    cur  = ix->nodes[cur].sibling;
-  }
-  if (cur != ATP_DTREE_NIL && ix->nodes[cur].sym == sym) return cur;
-  u32 nn = atp_ri_node_new(ix, sym);          // may realloc the pool
-  ix->nodes[nn].sibling = cur;
-  if (prev == ATP_DTREE_NIL) ix->nodes[parent].child = nn;
-  else                    ix->nodes[prev].sibling = nn;
-  return nn;
-}
+// Specialize the tree-management template (atp_ri_node_new / _rec_new /
+// _child / _insert_term) over AtpRuleIndex + AtpRiRec.
+ATP_DTREE_DEFINE_OPS(ri, AtpRuleIndex, AtpRiRec)
 
 static AtpRuleIndex *atp_ri_new(void) {
   AtpRuleIndex *ix = (AtpRuleIndex *)calloc(1, sizeof(AtpRuleIndex));
@@ -1876,20 +1851,6 @@ static void atp_ri_free(AtpRuleIndex *ix) {
   free(ix->nodes);
   free(ix->recs);
   free(ix);
-}
-
-// Walk rule LHS `t` in preorder, descending the tree by flatsym per
-// node.  Returns the node reached after `t`'s whole preorder string.
-static u32 atp_ri_insert_term(AtpRuleIndex *ix, u32 node, Term t,
-                              AtpDTreeVarMap *vm) {
-  node = atp_ri_child(ix, node, atp_dtree_flatsym(t, vm));
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) {
-      node = atp_ri_insert_term(ix, node, term_ctr_at(t, i), vm);
-    }
-  }
-  return node;
 }
 
 // Discard every node / record and rebuild the tree from s->lhs[0..

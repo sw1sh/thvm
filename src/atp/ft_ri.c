@@ -39,7 +39,7 @@
 #include "ft.h"
 
 // Symbols brought in from the Term-side rule-index in _.c (same TU):
-//   AtpRuleIndex, AtpRiNode, AtpRiRec
+//   AtpRuleIndex, AtpDTreeNode, AtpRiRec
 //   ATP_DTREE_NIL, ATP_DTREE_NUM, ATP_DTREE_STAR_BASE, ATP_DTREE_CTR_BASE, ATP_DTREE_MAXVARS
 //   ATP_DT_DESCENT_DEPTH_CAP
 //   ft_eq (from ft.c)
