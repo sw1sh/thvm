@@ -7,7 +7,7 @@ Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/ATP
 Keywords: [theorem proving, ATP, equational, completion, Knuth-Bendix, Waldmeister, Vampire, congruence closure, SMT, TPTP]
 RelatedGuides: [THVMLink]
-RelatedTutorials: [Overview]
+RelatedTutorials: [Overview, Disproof]
 ---
 
 ## What the ATP surface covers
@@ -15,9 +15,9 @@ RelatedTutorials: [Overview]
 <code>THVMLink\`ATP\`</code> wraps `thvm`'s C-side proof engines and presents them through a single Wolfram surface. Two engines live behind the same `Needs["THVMLink``ATP``"]`:
 
 - **Unfailing Knuth-Bendix completion** - first-order equational logic. Saturates a set of axioms into a confluent rewrite system; tries to refute the negated conjecture. The flagship entry point is [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof) (`TATP` is the lower-level cousin that returns the raw saturation Association).
-- **Congruence closure (QF_UF)** - quantifier-free first-order theory of equality with uninterpreted functions, accessed through [TSatEUF](), [TFindProofSMT](), and [TSmtDecide](). Decides ground entailment in time linear in the term count; `TSmtDecide` lifts it to arbitrary Boolean combinations via DPLL(T).
+- **Congruence closure (QF_UF)** - quantifier-free first-order theory of equality with uninterpreted functions, accessed through [TSatEUF](), [TSmtDecide](), and [TFindProof]() with `Method -> "SMT"`. Decides ground entailment in time linear in the term count; `TSmtDecide` lifts it to arbitrary Boolean combinations via DPLL(T).
 
-Either engine takes TPTP problem files directly: pipe `Wolfram``Parser``TPTPImport[File["..."]]` straight into `TFindProof`/`TFindProofSMT`, or pass the path/string and the dispatcher does the parse for you.
+Either engine takes TPTP problem files directly: pipe `Wolfram``Parser``TPTPImport[File["..."]]` straight into `TFindProof` (add `Method -> "SMT"` for the ground congruence-closure path), or pass the path/string and the dispatcher does the parse for you.
 
 This note walks both engines end to end through a single problem family - abelian groups and the Sheffer / nand axioms - so the example shapes carry from one section to the next.
 
@@ -96,7 +96,7 @@ TFindProof[
         "PreprocessedAxioms" -> {...}, "RelevantAxioms" -> <|...|>,
         "RawTrace" -> {...}, "Statistics" -> <|...|>|> -->
 
-Available keys: `"ProofObject"` (default; the bare object), `"Lemmas"` (the completed rule set), `"PreprocessedAxioms"` (the normalised axioms fed to the engine), `"RelevantAxioms"` ([TRelevantAxioms]()'s keep / drop partition), `"RawTrace"` (the decoded completion trace), `"Statistics"` (a small run-stats Association), `"Status"` (`"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"`).
+Available keys: `"ProofObject"` (default; the bare object), `"Lemmas"` (the completed rule set), `"PreprocessedAxioms"` (the normalised axioms fed to the engine), `"RelevantAxioms"` ([TRelevantAxioms]()'s keep / drop partition), `"RawTrace"` (the decoded completion trace), `"Statistics"` (a small run-stats Association), `"Status"` (`"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"`), `"Counterexample"` (the equational dual of `"ProofObject"` - a [CounterexampleObject]() disproving the goal, or `$Failed`; see the [Disproof](paclet:WolframInstitute/THVMLink/tutorial/Disproof) tech note).
 
 ---
 
@@ -136,6 +136,7 @@ Each named preset bundles the defaults of a real-world prover so a one-name call
 - `"EProver"` - CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP.
 
 ```wl
+#| eval: false
 TFindProof["Commutativity", "ShefferAxioms",
     Method -> "VampireUEQ",
     TimeConstraint -> 30]
@@ -151,6 +152,7 @@ A portfolio is a schedule of single-config Methods tried in turn; the first that
 - `Automatic` (default) - problem-aware. Analyses the conjecture's algebraic structure (Group / AbelianGroup / Ring / Combinatory / AC / Sheffer-Nand), front-loads a tailored config, then appends the fixed `"Portfolio"` as fallback. Never proves *less* than `"Portfolio"` because the fallback is always there.
 
 ```wl
+#| eval: false
 TFindProof[
     ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z == z \[CircleTimes] (y \[CircleTimes] x)],
     "AbelianGroupAxioms",
@@ -160,6 +162,24 @@ TFindProof[
 ```
 
 `PortfolioFrontLoad -> n` widens the slice given to the first `n` entries (each gets 2x the unweighted share) - use it when an `Automatic` front genuinely deserves more time than the fair share.
+
+### External CLI process methods
+
+Four additional Method names dispatch the proof through an external prover's command-line binary instead of `thvm`'s internal saturator, then lift the SZS / TSTP output back into the same `ProofObject` shape the internal presets produce.  Useful as a comparator, for ProofObject parity checks against the upstream prover, or when a benchmark has a known-good entry on a CLI that thvm's preset can't reproduce.
+
+- `"VampireProcess"` - shells out to `/opt/homebrew/bin/vampire` (`brew install vampire`).
+- `"TweeProcess"` - shells out to `~/.cabal/bin/twee` or `/opt/homebrew/bin/twee` (`cabal install twee`).
+- `"WaldmeisterProcess"` - shells out to the binary in `$WMCLI` on a generated `.pr` file.
+- `"EproverProcess"` - shells out to `/opt/homebrew/bin/eprover` (`brew install eprover`).
+
+```wl
+#| eval: false
+TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+    Method -> "WaldmeisterProcess",
+    "LiftToProofObject" -> True]
+```
+
+When the binary isn't installed the dispatcher returns a `Failure["ExternalNoProof", ...]` rather than raising, so the absent-binary case is something a caller can detect and skip past.  See [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) for the full per-CLI surface (the `"Binary"`, `"ParseFormulas"`, and `"LiftToProofObject"` options each builder accepts).
 
 ## Schedule + method introspection
 
@@ -227,21 +247,21 @@ TATP[
 
 ## Congruence closure (SMT)
 
-For ground equational entailment - all variables substituted, no quantifiers - the unfailing-completion path is overkill. [TFindProofSMT]() reduces ground entailment to a QF_UF satisfiability check via congruence closure:
+For ground equational entailment - all variables substituted, no quantifiers - the unfailing-completion path is overkill. `TFindProof` with `Method -> "SMT"` reduces ground entailment to a QF_UF satisfiability check via congruence closure:
 
 ```wl
-TFindProofSMT[
+TFindProof[
     Inactive[Equal][a, c],
-    {Inactive[Equal][a, b], Inactive[Equal][b, c]}]
+    {Inactive[Equal][a, b], Inactive[Equal][b, c]}, Method -> "SMT"]
 ```
-<!-- => ProofObject-shaped Association on UNSAT (entailment holds);
-        $Failed on SAT (a counter-model exists) -->
+<!-- => a "Proved" decision Association on entailment;
+        a CounterexampleObject with the quotient "Model" on refute -->
 
 Inputs may be a TPTP source string or `File[path]` - the dispatcher pipes them through `Wolfram``Parser``TPTPImport` and runs the same procedure:
 
 ```wl
-TFindProofSMT["cnf(g, negated_conjecture, foo(sk) != sk).
-               cnf(a, axiom, foo(sk) = sk)."]
+TFindProof["cnf(g, negated_conjecture, foo(sk) != sk).
+            cnf(a, axiom, foo(sk) = sk).", Method -> "SMT"]
 ```
 
 For SMT-style satisfiability rather than entailment, [TSatEUF]() takes a pair `{equalities, disequalities}` and returns `<|"Status" -> "SAT"|"UNSAT", ...|>`. On `"SAT"` you also get `"Classes"` - the inferred equivalence classes of subterms.
@@ -279,6 +299,7 @@ TSmtDecide[
 The [Wolfram/WolframParser](paclet:Wolfram/WolframParser/guide/WolframParser) paclet's [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) parses a `.p` file (or inline `cnf` / `fof` / `tff` / `tcf` / `thf` source) into the shape `TFindProof` expects:
 
 ```wl
+#| eval: false
 Needs["Wolfram`Parser`"];
 TPTPImport[File["tools/baselines/vampire_tptp/AbelianGroupAxioms__InverseOfInverse.p"]]
 ```
@@ -292,7 +313,7 @@ The corpus walker side - browse 26,264 problems across 57 mathematical domains b
 
 ## Where to go next
 
-- Per-symbol pages: [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof), [TATP](), [TRelevantAxioms](), [TAtpSchedule](), [TAtpDescribeMethod](), [TSatEUF](), [TSmtDecide](), [TFindProofSMT]().
+- Per-symbol pages: [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof), [TATP](), [TRelevantAxioms](), [TAtpSchedule](), [TAtpDescribeMethod](), [TSatEUF](), [TSmtDecide]().
 - Parser side: [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) (how the parser is built from the BNF) and [TPTP Problem Library](paclet:Wolfram/WolframParser/tutorial/TPTPProblemLibrary) (using `TPTPImport` on the full corpus).
 - The portfolio + auto-tune source lives in [`wl/THVMLink/Kernel/ATP/ATP.wl`](../../Kernel/ATP/ATP.wl); the SMT module is [`SMT.wl`](../../Kernel/ATP/SMT.wl). The C-side completion engine is under `src/atp/`.
 - The algorithmic intent for the completion engine is written up in `docs/plans/waldmeister_ic_atp.md` at the source-tree root.

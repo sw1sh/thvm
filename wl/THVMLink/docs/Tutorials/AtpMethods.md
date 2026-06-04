@@ -7,7 +7,7 @@ Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/AtpMethods
 Keywords: [theorem proving, ATP, Method, preset, portfolio, Waldmeister, Vampire, Twee, EProver, SInE, AutoPrecedence, GoalDirected, MNF]
 RelatedGuides: [THVMLink]
-RelatedTutorials: [ATP, SMT, TPTPImport, Overview]
+RelatedTutorials: [ATP, SMT, TPTPImport, Overview, Disproof]
 ---
 
 ## What the Method system does
@@ -94,6 +94,45 @@ Each preset bundles the defaults of a real-world prover so a one-name call repro
 - `"Twee"` - `CriticalPairWeight -> "Twee"` + `GroundJoin` + `Connectedness` + `UnfailingCP` + `BackwardSubsume` + `BackwardDemod` + `RHSInterreduce` + `AutoMaxWeight -> 20`.  Twee 2.x defaults (Smallbone, 2021+).
 - `"EProver"` - `CriticalPairWeight -> "ConjSym"` + KBO + `AutoPrecedence -> "Occurrence"` + `SelectionRatio -> 10` + `AutoMaxWeight -> 20` + `BackwardSubsume` + `RHSInterreduce` + `UnfailingCP`.  E's typical CASC config (the `Occurrence` precedence mirrors E's `-G InvFreqRank`).
 - `"VampireRandom"` - LPO + `AutoPrecedence` + `SelectionRatio -> 10` + `UnfailingCP` + `GroundJoin` + `BackwardDemod` + `RHSInterreduce` + `RandomRatio -> 32` + `RandomSeed -> 3681690318` + `LRS`.  Vampire's `lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=...` cracking entry for `McCuneAxioms/EqualityOfInverses`.
+
+## External CLI process methods
+
+The presets above stay inside `thvm`'s own C engine.  Four more methods take the same conjecture and axioms but dispatch the proof through an external prover's command-line binary, then lift the SZS / TSTP output back into the same `ProofObject` shape the internal presets produce - so a comparator, a [ProofFunction]() verifier, or a dataset reader sees one structure across both paths.
+
+| Method                | Binary it shells out to                          | CLI strategy                                   |
+|-----------------------|--------------------------------------------------|------------------------------------------------|
+| `"VampireProcess"`    | `/opt/homebrew/bin/vampire` (`brew install vampire`)  | `--mode casc --proof tptp`                |
+| `"TweeProcess"`       | `~/.cabal/bin/twee` or `/opt/homebrew/bin/twee` (`cabal install twee`) | `--tstp --quiet`        |
+| `"WaldmeisterProcess"`| Path in `$WMCLI` (build from source)             | wmcli on a pre-generated `.pr` file            |
+| `"EproverProcess"`    | `/opt/homebrew/bin/eprover` (`brew install eprover`)  | `--auto-schedule --proof-object --tstp-format` |
+
+All four route through a per-CLI builder (`TVampireProofObject` / `TTweeProofObject` / `TWaldmeisterProofObject` / `TEproverProofObject`) which calls the binary, parses its SZS / TSTP derivation into a normalised inference list, and threads the result through the shared `TSZSDerivationToProofObject` builder.  Each inference step lands under one of the same `ProofDataset` construct keys the internal engine uses (`{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}`, `{"Conclusion", 1}`).
+
+The four Process builders share the same option set on top of `TimeConstraint`:
+
+- `"Binary" -> Automatic` - absolute path override.  `Automatic` walks the per-CLI binary-discovery list above and uses the first hit.
+- `"ParseFormulas" -> False` - when `True`, the per-step `Statement` field is `TPTPImport`-parsed into a WL expression so structural comparison against the internal engine's output works.  Slow (~5 s per formula on a multi-step proof).
+- `"LiftToProofObject" -> False` - when `True`, wraps the Association into a literal `ProofObject["EquationalLogic", goal, axioms, data]` head (implies `"ParseFormulas" -> True`).  The standard property accessors then work: `pf["ProofFunction"]`, `pf["ProofGraph"]`, `pf["ProofLength"]`, `pf["Theorems"]`.
+
+When the underlying CLI binary isn't installed, the builder returns `Failure["ExternalNoProof", <|"Tool" -> _, "Status" -> _, "Seconds" -> _|>]` rather than raising an error - so a fresh-checkout build does not break just because `eprover` hasn't been brew-installed.
+
+A quick parity check, internal `"Waldmeister"` preset vs the external `wmcli` Process route on the same conjecture:
+
+```wl
+{Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "Waldmeister"],
+ Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+        Method -> "WaldmeisterProcess", "LiftToProofObject" -> True]}
+```
+<!-- => {ProofObject, ProofObject} - same shape, different prover -->
+
+Without the lift, the Process methods return the raw Association from `TSZSDerivationToProofObject`, with `"Backend" -> "SZS"` and the same per-step keys:
+
+```wl
+TFindProof["InverseOfInverse", "AbelianGroupAxioms",
+    Method -> "VampireProcess"]
+```
+<!-- => <|"Status" -> "Proved", "Backend" -> "SZS", "Steps" -> {...}, ...|> -->
 
 ## Suboptions
 
