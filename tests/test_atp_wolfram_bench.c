@@ -419,7 +419,13 @@ int main(int argc, char **argv) {
       // mccune +10%, robbins +12%.  Just outside WM's enumerated set
       // {10, 50, 100, 200} but the YFiles problem-analysis range is
       // tunable and 141 is the empirical sweet spot for this engine.
-      thvm_atp_set_selection_ratio(s, 141u);
+      // THVM_ATP_SELECTION_RATIO env overrides for WM-exact comparison.
+      {
+        const char *sr = getenv("THVM_ATP_SELECTION_RATIO");
+        u32 ratio = (sr != NULL && sr[0] != '\0')
+                      ? (u32)strtoul(sr, NULL, 10) : 141u;
+        thvm_atp_set_selection_ratio(s, ratio);
+      }
       thvm_atp_set_use_rhs_interreduce(s, 1u);
       thvm_atp_set_use_unfailing_cp(s, 1u);
       thvm_atp_set_use_orphan_murder(s, 1u);
