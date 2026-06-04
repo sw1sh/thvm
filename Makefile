@@ -192,6 +192,17 @@ WL_ATP_DEFINES  += $(if $(filter-out 0,$(ATP_CP_GROUND_JOIN)),-DATP_CP_GROUND_JO
 # goal-check on theories whose axiom set surfaces an AC top symbol.
 WL_ATP_DEFINES  += -DTHVM_ATP_AC
 
+# AtpFt flatterm-native infrastructure shipped in the paclet for opt-in
+# acceleration of the normalizer + KBO comparison hot paths.  Without
+# the env knob the engine stays on Term recursion (byte-identical to a
+# non-FT build).  THVM_ATPFT_NORM=1 flips the runtime check so the AtpFt
+# verdict is authoritative for normalize/KBO.  Bench evidence:
+# +55% steps/sec on test_atp_wolfram_bench andassoc (9ab38b58); regression
+# clean on bin/test_atp_ft_norm 135624/135624 in both env modes.
+WL_ATP_DEFINES  += -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+                   -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+                   -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM
+
 # Waldmeister-style critical-pair classification: -DATP_CP_CLASSIFY
 # ports Waldmeister's `NewClassification` ("new classification") and
 # `ClasFunctions` ("classification functions") killer predicates
