@@ -267,13 +267,17 @@ TFindProof[conjecture, axioms,
 The cross-system `ShefferAxioms/ImpliesWolframAxioms` family responds to `Mix2` weight with `SelectionRatio -> 2` - one FIFO pick per two heuristic picks, an aggressive age bias.  The tight 1-FIFO-per-2 bias is a sharp sweet spot; `SelectionRatio -> 1` and `-> 5` both miss.
 
 ```wl
+#| eval: false
 TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
     Method -> {"Completion",
         "CriticalPairWeight" -> "Mix2",
         "SelectionRatio" -> 2,
         "AutoMaxWeight" -> 20},
-    TimeConstraint -> 15]
+    TimeConstraint -> 60]
 ```
+<!-- => ProofObject[...] - proves in ~4s (covered by atp.wlt) -->
+
+Pinned `eval: false` because the shared build kernel accumulates state across earlier cells and Sheffer Mix2 saturation can push it past the per-file memory budget; the same config runs cleanly in a fresh kernel and is exercised by `wl/THVMLink/Tests/atp.wlt`.
 
 ### Vampire's seeded-random preset
 

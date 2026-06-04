@@ -10,46 +10,16 @@
    once and persisted via the built-in caching framework, so subsequent
    builds skip unchanged cells. *)
 
-print[args___] := WriteString["stdout", StringJoin[ToString /@ {args}], "\n"]
-
 pacletDir = DirectoryName[$InputFileName]
 
-(* Prefer the cached local copy when persistence is healthy; otherwise download
-   the upstream source directly.  ResourceFunction[ResourceObject[...]] returns
-   the unapplied form (the function never runs) when $DefaultLocalBase is broken,
-   so we side-step it by Getting the source file. /tmp survives across kernels
-   and is not sandboxed inside the wolframscript-launched kernel. *)
-mtnSourceCache = "/tmp/MarkdownToNotebook.wl"
-mtnSourceUrl   = "https://raw.githubusercontent.com/sw1sh/MarkdownToNotebook/main/MarkdownToNotebook.wl"
-If[ ! FileExistsQ[mtnSourceCache] || FileByteCount[mtnSourceCache] < 1000,
-    print["fetching MarkdownToNotebook source -> ", mtnSourceCache];
-    URLDownload[mtnSourceUrl, mtnSourceCache]
-]
-Get[mtnSourceCache]
-mtn[args___] := MarkdownToNotebook[args]
-
-(* Sibling paclet used in TPTP examples and by the ATP context's load chain;
-   not on the public paclet server, so probe a few common sibling-checkout
-   locations and PacletDirectoryLoad BEFORE Needs["THVMLink`"], which otherwise
-   aborts mid-scan trying to Get Wolfram`Parser` and leaves later siblings
-   like Tensor.wl unloaded. *)
-With[ { wpRoots = Select[
-        { FileNameJoin[{pacletDir, "..", "..", "..", "wolfram", "AISkills", "examples", "WolframParser"}],
-          FileNameJoin[{pacletDir, "..", "..", "..", "wolfram", "WolframParser"}],
-          FileNameJoin[{pacletDir, "..", "..", "WolframParser"}] },
-        FileExistsQ[FileNameJoin[{#, "PacletInfo.wl"}]] &] },
-    If[ wpRoots =!= {},
-        PacletDirectoryLoad[First[wpRoots]];
-        print["loaded sibling paclet Wolfram/WolframParser from ", First[wpRoots]],
-        print["[warn] Wolfram/WolframParser not found; TPTP example cells will report Get::noopen."]
-    ]
-]
+mtn = ResourceFunction[ResourceObject["https://www.wolframcloud.com/obj/nikm/DeployedResources/Function/MarkdownToNotebook"]]
+Needs["Wolfram`Parser`"]
 
 PacletDirectoryLoad[pacletDir]
 Check[
     Needs["THVMLink`"],
-    print["[warn] could not load THVMLink`; example cells will report load errors."];
-    print["[warn] build the dylib first: cd ", FileNameJoin[{pacletDir, "..", ".."}], " && make && make wl"]
+    Print["[warn] could not load THVMLink`; example cells will report load errors."];
+    Print["[warn] build the dylib first: cd ", FileNameJoin[{pacletDir, "..", ".."}], " && make && make wl"]
 ]
 
 subdirs = <|
@@ -85,7 +55,7 @@ noEvaluate = {}
 
    Lives in a private context (not Global) so the per-file ClearGlobalScratch
    below cannot wipe it. *)
-THVMLink`Build`Private`perFileBudgetSec = 60
+Build`perFileBudgetSec = 60
 
 (* Cells inside one file share the kernel with EVERY prior file's cells, so a
    bare scratch name like `a` from one cell leaks into another file's cell
@@ -96,13 +66,13 @@ THVMLink`Build`Private`perFileBudgetSec = 60
    context once the build's setup is done, then between files ClearAll any
    new symbol in any of them - i.e. only doc-cell scratch, never the build
    harness, MTN, or the paclet's own exports. *)
-THVMLink`Build`Private`scratchContexts =
+Build`scratchContexts =
     {"Global`", "THVMLink`", "THVMLink`ATP`"}
 
 ClearGlobalScratch[] := Module[{ scratch },
     scratch = Complement[
-        Join @@ (Names[# <> "*"] & /@ THVMLink`Build`Private`scratchContexts),
-        THVMLink`Build`Private`globalBoot
+        Join @@ (Names[{# <> "*", # <> "**`*"}] & /@ Build`scratchContexts),
+        Build`globalBoot
     ];
     Quiet[Unprotect @@ scratch; ClearAll @@ scratch]
 ]
@@ -112,7 +82,7 @@ ClearGlobalScratch[] := Module[{ scratch },
 buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt, fallbackQ },
     tmpl = frontmatterTemplate[srcFile];
     If[ ! KeyExistsQ[subdirs, tmpl],
-        print["  [skip] ", FileNameTake[srcFile], " (no Template: in frontmatter)"];
+        Print["  [skip] ", FileNameTake[srcFile], " (no Template: in frontmatter)"];
         Return[Null]
     ];
     baseName = FileBaseName[srcFile];
@@ -125,17 +95,17 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
     ClearGlobalScratch[];
     res = TimeConstrained[
         mtn[srcFile, out, "Evaluate" -> evalQ],
-        THVMLink`Build`Private`perFileBudgetSec,
+        Build`perFileBudgetSec,
         $TimedOut
     ];
     If[ res === $TimedOut,
         fallbackQ = True;
-        print["  [timeout >", THVMLink`Build`Private`perFileBudgetSec, "s] ",
+        Print["  [timeout >", Build`perFileBudgetSec, "s] ",
               FileNameTake[srcFile], " - falling back to no-eval render"];
         mtn[srcFile, out, "Evaluate" -> False]
     ];
     dt = Round[AbsoluteTime[] - t0, 0.1];
-    print["  ",
+    Print["  ",
         FileNameTake[srcFile], " -> ",
         If[ subdirs[tmpl] === {}, "", "Documentation/English/" <> Last[subdirs[tmpl]] <> "/" ],
         baseName, ".nb",
@@ -146,8 +116,8 @@ buildDoc[srcFile_String] := Block[{ tmpl, baseName, dir, out, evalQ, res, t0, dt
 
 (* Snapshot every scratch-context's name set right before the loop;
    ClearGlobalScratch[] preserves these and wipes anything new between files. *)
-THVMLink`Build`Private`globalBoot =
-    Join @@ (Names[# <> "*"] & /@ THVMLink`Build`Private`scratchContexts)
+Build`globalBoot =
+    Join @@ (Names[{# <> "*", # <> "**`*"}] & /@ Build`scratchContexts)
 
 (* `wolframscript -file build.wls --clean` wipes MTN's persistent example-
    output cache for this paclet before building, forcing every example cell
@@ -156,7 +126,7 @@ THVMLink`Build`Private`globalBoot =
    .md file's cache lives under that single dir.  Pre-existing built .nb
    files also wiped so a stale render can't survive the rebuild. *)
 If[ MemberQ[Rest @ $ScriptCommandLine, "--clean"],
-    print["[--clean] wiping MTN cache + previously built notebooks"];
+    Print["[--clean] wiping MTN cache + previously built notebooks"];
     Quiet @ DeleteDirectory[
         FileNameJoin[{$HomeDirectory, "Library", "Wolfram", "Objects",
             "Persistence", "MarkdownToNotebook", "ExampleOutput",
@@ -183,13 +153,13 @@ toBuild = If[ fileSel === {},
         sel |-> MemberQ[{FileBaseName[doc], FileNameTake[doc], FileBaseName[doc] <> ".md"}, sel]]]
 ]
 If[ fileSel =!= {} && toBuild === {},
-    print["[error] no docs matched ", fileSel, "; available basenames: ",
+    Print["[error] no docs matched ", fileSel, "; available basenames: ",
         StringRiffle[FileBaseName /@ allDocs, ", "]];
     Exit[1]
 ]
 
-print["building THVMLink documentation",
+Print["building THVMLink documentation",
     If[ fileSel === {}, "", " (selected: " <> StringRiffle[FileBaseName /@ toBuild, ", "] <> ")"]]
 Scan[buildDoc, toBuild]
 
-print["done"]
+Print["done"]
