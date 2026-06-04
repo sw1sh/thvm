@@ -19,7 +19,7 @@ BeginPackage["THVMLink`"];
    Format.wl resolve to fresh `Private` symbols (Format.wl < their
    owners alphabetically), so the MakeBoxes UpValues never fire on
    the public symbol the user actually constructs. *)
-{TOpt, TKernelOpts, TKernelVariant};
+{TOpt, TKernelOpts, TKernelVariant, TJitClosure};
 
 Begin["`Private`"];
 
@@ -486,6 +486,61 @@ TKernelVariant /: MakeBoxes[v:TKernelVariant[a_Association] /; tKernelVariantQ[U
             },
             {
                 {BoxForm`SummaryItem[{"Opt full: ", If[ opt === None, "(none)", opt]}]}
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
+    ]
+
+(* === TJitClosure summary box ===
+   The capture/replay closure from Jit.wl.  A play-button icon that
+   greens up once the closure has captured a dispatch sequence, plus
+   the captured op count and the C-side capture slot.  Capture state
+   lives in $tJitState keyed by Hash of the closure association -- the
+   same key the call path uses -- so the box reflects the live state. *)
+
+tJitClosureQ[TJitClosure[a_Association]] := KeyExistsQ[a, "id"] && KeyExistsQ[a, "fn"]
+tJitClosureQ[___] := False
+
+jitClosureSummaryIcon[captured_] := Graphics[
+    {
+        EdgeForm[LightDarkSwitched[Black, White]],
+        FaceForm @ If[ captured,
+            LightDarkSwitched[Lighter[StandardGreen, 0.5], Darker[StandardGreen, 0.4]],
+            LightDarkSwitched[Lighter[StandardGray,  0.5], Darker[StandardGray,  0.4]]],
+        Disk[{0, 0}, 0.55],
+        FaceForm[LightDarkSwitched[White, Black]],
+        Polygon[{{-0.16, -0.28}, {-0.16, 0.28}, {0.34, 0}}]
+    },
+    ImageSize -> Dynamic[{Automatic, 3.0 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
+TJitClosure /: MakeBoxes[c:TJitClosure[a_Association] /; tJitClosureQ[Unevaluated[c]], fmt_] :=
+    Module[{rec, captured, slot, ops},
+        rec      = $tJitState[Hash[a]];
+        captured = ! MissingQ[rec];
+        slot     = If[captured, rec["slot"], None];
+        ops      = If[captured, $jitCaptureOpCountFn[slot], 0];
+        BoxForm`ArrangeSummaryBox[
+            "TJitClosure",
+            c,
+            jitClosureSummaryIcon[captured],
+            {
+                {
+                    BoxForm`SummaryItem[{"captured: ", If[captured, "yes", "no"]}],
+                    BoxForm`SummaryItem[{"ops: ",      ops}]
+                }
+            },
+            {
+                {
+                    BoxForm`SummaryItem[{"slot: ", If[captured, slot, "(uncaptured)"]}]
+                },
+                {
+                    BoxForm`SummaryItem[{"state: ", If[ captured,
+                        "replays captured sequence on call",
+                        "captures fn on first call"]}]
+                }
             },
             fmt,
             "Interpretable" -> Automatic
