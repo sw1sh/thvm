@@ -167,7 +167,37 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       return term_new(0, TAG_LAM, sealed_ext, b);
     }
 
-    default: {
+    case TAG_UOP: {
+      if (ext == UOP_REDUCE) {
+        // Variable-arity multi-axis REDUCE: dyn heap is
+        // [src, NUM(kind), NUM(n_axes), NUM(axis_0), ..., NUM(axis_{n-1})].
+        // dyn_arity returns 0 for it (the fixed-arity table can't express a
+        // variable tail), so without this case the default below would pass
+        // the REDUCE through verbatim -- keeping its DYNAMIC heap loc in the
+        // book template.  alo_realize then reads kind/n_axes from book heap at
+        // that stale dyn loc and gets garbage (e.g. n_axes=216), overflowing
+        // the fixed `axes[MAX_DIM]` in the REDUCE chain-rule and smashing the
+        // stack (the n>=2 recursive-SGD hang).  Clone the full 3+n_axes run so
+        // the book template owns its own metadata NUMs, matching
+        // alo_realize's alo_node_arity(UOP_REDUCE) = 3 + n_axes.
+        Term n_cell = heap_read(val + 2);
+        u32  n_axes = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
+        if (n_axes > MAX_DIM) n_axes = MAX_DIM;
+        u32 ar = 3 + n_axes;
+        u64 b = remap_lookup_or_alloc(map, map_pos, val, ar);
+        // src (slot 0) recurses; the kind/n_axes/axis NUMs are atoms and
+        // clone_to_book_rec returns them as-is.
+        for (u32 i = 0; i < ar; i++) {
+          Term child = heap_read(val + i);
+          book_set(b + i, clone_to_book_rec(child, map, map_pos));
+        }
+        return term_new(0, TAG_UOP, UOP_REDUCE, b);
+      }
+      goto generic_node;
+    }
+
+    default:
+    generic_node: {
       // Generic fixed-arity node (APP / UOP-fixed-arity).
       u32 ar = dyn_arity(tag, ext, val);
       if (ar == 0) return t;     // unsupported tag/opcode -- pass through verbatim

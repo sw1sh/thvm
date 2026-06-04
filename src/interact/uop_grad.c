@@ -467,6 +467,8 @@ static int grad_term_matches_target(Term t, Term target) {
   if (target == 0) {
     return 0;
   }
+  // Variable-identity: grad_alo_resolve follows ALO only (stops at
+  // VAR/DP), so a pre-SUB bound var compares equal across instances.
   Term ty = grad_alo_resolve(target);
   Term tt = grad_alo_resolve(t);
   if (ty == tt) {
@@ -474,8 +476,22 @@ static int grad_term_matches_target(Term t, Term target) {
   }
   Term tr = term_resolve(target);
   Term rr = term_resolve(t);
-  return term_tag(tr) == TAG_TEN && term_tag(rr) == TAG_TEN
-      && term_val(tr) == term_val(rr);
+  // Concrete-tid: both resolve to the same TEN (iter-1, w0 concrete).
+  if (term_tag(tr) == TAG_TEN && term_tag(rr) == TAG_TEN
+      && term_val(tr) == term_val(rr)) {
+    return 1;
+  }
+  // Shared-subgraph identity: both fully resolve (through ALO + VAR-SUB
+  // + DP-SUB) to the SAME dynamic term.  This is the recursive-SGD
+  // iter-2+ case: after APP-LAM beta the bound `w` is substituted to an
+  // unreduced UOP graph, and the SAME graph is reached as both the grad
+  // `target` (cell+2, via an ALO over a DP1 grad projection) and the
+  // differentiation leaf in the loss body.  grad_alo_resolve stops at
+  // the DP1 wrapper so the variable-identity check above misses; the
+  // full term_resolve collapses the ALO/DP-SUB chain to the shared loc.
+  // Pointer-equality on the resolved term -- no engine firing, safe
+  // mid-chain-rule (term_resolve is the lazy non-firing resolver).
+  return tr == rr;
 }
 
 static int grad_depends_on_target(Term t, Term target) {
@@ -819,10 +835,14 @@ static Term grad_bwd_for_child(Term child, Term gy_for_child) {
   }
 
   Term result;
-  if (target != 0) {
-    Term ty = grad_alo_resolve(target);
-    Term tc = grad_alo_resolve(child);
-    if (ty == tc) { result = gy_for_child; goto done; }
+  if (target != 0 && grad_term_matches_target(child, target)) {
+    // This child IS the differentiation target (variable-identity,
+    // concrete-tid, OR shared-subgraph after recursive-SGD beta
+    // substitution).  Return the cotangent directly -- descending into
+    // it would re-differentiate the target expression as if it were an
+    // ordinary intermediate, dropping the gradient to zero.
+    result = gy_for_child;
+    goto done;
   }
   if (term_tag(term_resolve(child)) == TAG_TEN) {
     result = grad_leaf_sup(child, gy_for_child);
