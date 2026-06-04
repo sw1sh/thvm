@@ -197,7 +197,23 @@ Do[
     {epoch, 5}]
 ```
 
-This is the most sugared end of the surface today: a Wolfram [NetChain](), lifted, trained by the same four-line step. The fully packaged `NetTrain[net, "MNIST"]` one-liner - which drives this loop as a single inert term - is the remaining nettrain work (see *Where to go next*).
+A Wolfram [NetChain](), lifted, trained by the same four-line step. And that whole loop is itself packaged as one call - the next section.
+
+### One call: TNetTrain and TNetPredict
+
+[TNetTrain]() wraps the lift-Reap-train loop: pass an initialised net plus host arrays of inputs and one-hot targets, and it returns a handle carrying the lifted `"Forward"` `TTerm`, its `"Input"` slot, and the trained `"Params"`. [TNetPredict]() then evaluates that handle on a fresh same-shape batch. A linearly-separable two-class set trains and classifies in two lines:
+
+```wl
+SeedRandom[1234];
+xs = N @ {{1., 1.}, {1.5, 1.2}, {0.5, 0.8}, {1.2, 0.9}, {-1., -1.}, {-1.2, -0.8}, {-0.7, -1.1}, {-0.9, -1.}};
+ys = N @ {{1., 0.}, {1., 0.}, {1., 0.}, {1., 0.}, {0., 1.}, {0., 1.}, {0., 1.}, {0., 1.}};
+clf = NetInitialize[NetChain[{LinearLayer[6], Ramp, LinearLayer[2]}, "Input" -> 2], RandomSeeding -> 7];
+trained = TNetTrain[clf, xs, ys, "MaxTrainingRounds" -> 80];
+(Ordering[#, -1][[1]] - 1) & /@ TNetPredict[trained, xs]
+```
+<!-- => {0, 0, 0, 0, 1, 1, 1, 1}  (both classes separated) -->
+
+`"LearningRate"` (default 0.3), `"MaxTrainingRounds"` (100), and `"Loss"` (the stable [TCategoricalCrossEntropy](), expecting a logits net - no final `SoftmaxLayer`) are options. The same call scales to the conv MNIST head above; the loop inside is exactly the realize-grads-first SGD this note opened with.
 
 ### Time and memory against tinygrad
 
@@ -237,4 +253,5 @@ This is not limited to scalars. Because every layer's backward is itself a `TTer
 - The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial for the tensor / UOp / kernel / autodiff machinery underneath this loop.
 - Per-symbol pages: [TGrad](paclet:WolframInstitute/THVMLink/ref/TGrad), [TSet](paclet:WolframInstitute/THVMLink/ref/TSet), [TLinear](paclet:WolframInstitute/THVMLink/ref/TLinear), [TConv2D](paclet:WolframInstitute/THVMLink/ref/TConv2D), [TAdam](paclet:WolframInstitute/THVMLink/ref/TAdam), [TFromNet](paclet:WolframInstitute/THVMLink/ref/TFromNet).
 - Capture a step with [TJit]() so the loop compiles once and replays every epoch (see the [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) "Capturing a step" section).
-- **Coming next (nettrain integration):** a high-level `NetTrain[net, data]` / `TNetPredict` surface installed *directly* on a [TFromNet]()-built `TTerm` - one inert recursive optimizer term that [TWnf]() drives in place, so the whole MNIST loop above collapses to `NetTrain[net, "MNIST"]`. This lands with `Kernel/Train.wl`.
+- The [TNetTrain]() / [TNetPredict]() one-liner above for the packaged surface.
+- **Still coming:** a `NetTrain[net_TTerm, data]` UpValue and a `data -> "MNIST"` convenience form so the built-in spelling carries the whole dataset, plus reconstructing a trained `NetChain` back out of the handle.
