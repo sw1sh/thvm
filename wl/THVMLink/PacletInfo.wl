@@ -20,6 +20,11 @@ PacletObject[<|
             "Documentation",
             "Language" -> "English",
             "MainPage" -> "Guides/THVMLink"
+        },
+        {
+            "Asset",
+            "Root"   -> "Assets",
+            "Assets" -> {{"Hero", "hero.png"}}
         }
     }
 |>]

@@ -130,7 +130,7 @@ A single luminous symbolic graph morphs from an interaction-net string diagram o
 
 ```wl
 ImageResize[
-    Import[FileNameJoin[{$THVMLinkDocsDir, "assets", "hero.png"}]],
+    Import[PacletObject["WolframInstitute/THVMLink"]["AssetLocation", "Hero"]],
     {1500, Automatic}
 ]
 ```
