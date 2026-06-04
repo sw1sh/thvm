@@ -741,7 +741,8 @@ TTerm /: Less[a_, b_TTerm ? tensorTermQ] :=
 
    - Transpose[t]        -> reverse-axis permute
    - Transpose[t, perm]  -> general permute (1-indexed -> 0-indexed)
-   - Dot[a, b]           -> TMatMul (rank-2 @ rank-2) / TDot (rank-1)
+   - Dot[a, b]           -> TDot (vec.vec) / TMatVec (mat.vec, vec.mat) /
+                            TMatMul (mat.mat + batched)
    - ArrayReshape[t, sh] -> TUOpReshape *)
 
 TTerm /: Transpose[t_TTerm ? tensorTermQ] :=
@@ -753,9 +754,10 @@ TTerm /: Transpose[t_TTerm ? tensorTermQ, perm_List] :=
 TTerm /: Dot[a_TTerm ? tensorTermQ, b_TTerm ? tensorTermQ] :=
     With[{ra = Length @ tUopShape[a], rb = Length @ tUopShape[b]},
         Which[
-            ra === 2 && rb === 2,  TMatMul[a, b],
-            ra === 1 && rb === 1,  TDot[a, b],
-            True, TMatMul[a, b]]]      (* fallback; refine when needed *)
+            ra === 1 && rb === 1,  TDot[a, b],               (* inner product -> scalar *)
+            ra === 2 && rb === 1,  TMatVec[a, b],            (* matrix . vector -> {m} *)
+            ra === 1 && rb === 2,  TMatVec[Transpose[b], a], (* vector . matrix -> {n} *)
+            True,                  TMatMul[a, b]]]           (* matrix . matrix (+ batched) *)
 
 TTerm /: ArrayReshape[t_TTerm ? tensorTermQ, shape_List] :=
     TUOpReshape[t, shape]

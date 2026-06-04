@@ -480,7 +480,10 @@ TZerosLike[t_TTerm] := TZeros[TTensorShape[t], TTensorDType[t]]
 TOneHot[label_Integer, n_Integer, dtype_String : "f32"] :=
     TTensorCreate[Table[If[i - 1 == label, 1.0, 0.0], {i, n}], dtype]
 
-TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
+(* tUopShape (the static shape walk) rather than TTensorShape so `w` may
+   be an unrealized UOP term -- e.g. a Transpose feeding the vector.matrix
+   case of the Dot UpValue -- not just a realized leaf. *)
+TMatVec[w_TTerm, x_TTerm] := With[{shapeW = tUopShape[w]},
     Module[{out, in, xb},
         out = shapeW[[1]];
         in  = shapeW[[2]];

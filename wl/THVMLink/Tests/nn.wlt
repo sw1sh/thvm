@@ -859,3 +859,38 @@ VerificationTest[
     SameTest -> MatchQ,
     TestID -> "nn/adam-rank1-l2-loss-matches-textbook"
 ]
+
+(* === Dot mixed rank-1/rank-2 (matrix.vector, vector.matrix) ===
+   The Dot UpValue routes mat.vec / vec.mat to TMatVec (was a TMatMul
+   fallback that indexed the vector's nonexistent 2nd axis). *)
+VerificationTest[
+    TInit[];
+    w  = TTensorCreate @ NumericArray[{{1.0, 2.0}, {3.0, 4.0}}, "Real32"];
+    xv = TTensorCreate @ NumericArray[{1.0, 2.0}, "Real32"];
+    {Normal @ TTensorData[TRealize[w . xv]],   (* {1*1+2*2, 3*1+4*2} *)
+     Normal @ TTensorData[TRealize[xv . w]]},  (* {1*1+2*3, 1*2+2*4} *)
+    {{5.0, 11.0}, {7.0, 10.0}},
+    TestID -> "nn/dot-matrix-vector"
+]
+
+(* === higher-order gradient through the matmul path ===
+   d/dx and d2/dx2 of Total[(x . W)^2] for a batched {1,2} input.
+   z = x.W = {{7,10}}; g1 = 2 x.(W.W^T) = {{54,122}};
+   Total[g1] = 2(16 x1 + 36 x2) -> g2 = {{32,72}}.  Validates grad-of-grad
+   through the EXPAND/REDUCE matmul backward (the M6 higher-order track). *)
+VerificationTest[
+    TInit[];
+    x = TRequiresGrad @ TTensorCreate @ NumericArray[{{1.0, 2.0}}, "Real32"];
+    w = TTensorCreate @ NumericArray[{{1.0, 2.0}, {3.0, 4.0}}, "Real32"];
+    b = TZeros[{2}];
+    TClearGrad[x];
+    TGrad[Total[Total[(TLinear[x, w, b])^2]]];
+    g1 = Normal @ TTensorData @ TRealize @ TGradOf[x];
+    g1term = TGradOf[x];
+    TClearGrad[x];
+    TGrad[Total[Total[g1term]]];
+    g2 = Normal @ TTensorData @ TRealize @ TGradOf[x];
+    {g1, g2},
+    {{{54.0, 122.0}}, {{32.0, 72.0}}},
+    TestID -> "nn/higher-order-grad-through-linear"
+]
