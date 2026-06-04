@@ -170,6 +170,35 @@ Do[
 
 Nothing here is a special training mode: the network, the softmax cross-entropy, and the backward pass through all of it are plain `TTerm` arithmetic differentiated by the same [TGrad]() that handled `w . x` at the top of the note.
 
+### The same net, lifted from a NetChain
+
+You need not hand-assemble the layers. Build the network as a [NetChain]() and lift it with [TFromNet](): the conv head, pooling, flatten, and linear all convert, and each lifted weight is a [TRequiresGrad]() leaf. Wrapping the lift in a [Reap]() on the `"thvmNetParam"` tag hands back exactly those weight `TTerm`s - the ones baked into the forward, so a [TSet]() update flows straight back into it. Lift the same LeNet head over a batch-shaped input slot and collect its four trainable tensors:
+
+```wl
+lenet = NetInitialize[NetChain[{ConvolutionLayer[8, {3, 3}], Ramp, PoolingLayer[{2, 2}, {2, 2}], FlattenLayer[], LinearLayer[10]}, "Input" -> {1, 28, 28}], RandomSeeding -> 1234];
+slot = TTensorCreate[N @ RandomReal[1, {64, 1, 28, 28}]];
+{fwd, {params}} = Reap[TFromNet[lenet, slot], "thvmNetParam"];
+{Length[params], TTensorShape @ TRealize @ fwd}
+```
+<!-- => {4, {64, 10}}  (4 params: conv W/b + linear W/b; forward is {batch, 10} logits) -->
+
+Now `fwd` is the logit `TTerm` and `params` are its weights - the same two ingredients the hand-built loop used. Training is identical, except each batch is fed by overwriting the input slot in place with [TAssign]() rather than rebuilding the forward. It reaches the same **~92.6% test accuracy**:
+
+```wl
+#| eval: false
+Do[
+    Do[
+        TRealize @ TAssign[slot, TTensorCreate[images[[64*(s - 1) + 1 ;; 64*s]]]];
+        target = TTensorCreate[onehots[[64*(s - 1) + 1 ;; 64*s]]];
+        TClearGrad /@ params;
+        grads = TRealize @ TGrad[TCategoricalCrossEntropy[fwd, target], params];
+        MapThread[TSet[#1, #1 - 0.1*#2] &, {params, grads}],
+        {s, 32}],
+    {epoch, 5}]
+```
+
+This is the most sugared end of the surface today: a Wolfram [NetChain](), lifted, trained by the same four-line step. The fully packaged `NetTrain[net, "MNIST"]` one-liner - which drives this loop as a single inert term - is the remaining nettrain work (see *Where to go next*).
+
 ### Time and memory against tinygrad
 
 That same network (`Conv2d[1 -> 8, 3x3]` -> ReLU -> 2x2 max-pool -> `Linear[1352 -> 10]`, batch 64, softmax cross-entropy) runs as an eager forward + backward + SGD step in both thvm and [tinygrad](https://tinygrad.org) on the CPU. Warm (post-warmup) per-step wall time and the memory the *training itself* allocates:
