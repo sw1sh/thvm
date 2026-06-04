@@ -846,6 +846,17 @@ $(BIN)/test_atp_ac_abelian_repro: tests/test_atp_ac_abelian_repro.c $(SRC) | $(B
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
+# Flatterm-enabled wolfram bench: same source as test_atp_wolfram_bench
+# but with the full AtpFt chain (ALLOC + CONVERT + LPO + MATCH + RULES
+# + NORM) so the normalizer + KBO compares run on flatterm cells
+# (cache-coherent linear sweeps) instead of Term-recursive walks.
+$(BIN)/test_atp_wolfram_bench_ft: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -o $@ $< $(TEST_LDFLAGS)
+
 # === Diagnostic probes (tests/probe_*.c) =============================
 # Standalone C programs that drive the engine for ad-hoc diagnosis.
 # Each prints to stdout/stderr -- no CHECK/TEST_REPORT.  Built with
