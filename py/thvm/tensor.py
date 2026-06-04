@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ctypes as _ct
 import math
+import warnings
 import weakref
 from typing import Any, Sequence
 
@@ -342,6 +343,23 @@ class Tensor:
                     "backward(): implicit gradient only for scalar outputs")
             gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
                         else Tensor.ones(*self._shape, dtype=self._dtype))
+        # Guard: warn if a requires_grad leaf still carries a gradient
+        # from a prior backward().  thvm ACCUMULATES into TenDesc.grad
+        # (tinygrad semantics), so a forgotten opt.zero_grad() silently
+        # piles gradients across steps -- a footgun, since PyTorch users
+        # expect a fresh .grad each backward.  Soft, de-duped warning;
+        # intentional gradient accumulation can filter it.
+        for _tid, _leaf in list(_GRAD_TENSORS.items()):
+            if (_TH.ten_get_requires_grad(_leaf.term)
+                    and _TH.ten_get_grad(_leaf.term) != 0):
+                warnings.warn(
+                    "backward(): a requires_grad leaf entered with a "
+                    "non-zero gradient from a prior backward(); thvm "
+                    "accumulates into TenDesc.grad, so call opt.zero_grad() "
+                    "between backward passes to avoid stale accumulation "
+                    "(intentional accumulation can filter this warning).",
+                    stacklevel=2)
+                break
         # Build the walk-once BWD root and drive wnf to fire the
         # chain rule (interact_grad -> grad_leaf_sup accumulator).
         bwd = _TH.grad(self.term, gradient.term)
