@@ -42,7 +42,7 @@ TInitialize[snap]
 Strip the tensor data for a portable shape-only snapshot:
 
 ```wl
-snap = TContextSnapshot @ TUOpAdd[TTensorCreate[{1., 2., 3.}], TTensorCreate[{4., 5., 6.}]];
+snap = TContextSnapshot @ (TTensorCreate[{1., 2., 3.}] + TTensorCreate[{4., 5., 6.}]);
 TContextStrip[snap]
 ```
 <!-- => a TContext where every tensor entry is <|"shape" -> _, "dtype" -> _|> -->
@@ -61,7 +61,7 @@ TContextToTermTree @ TContextSnapshot @ TLam[x, TUOpMul[x, x]]
 A snapshot's `"Cells"` length agrees with `THeapPos[] - THeapBase[]` at snapshot time:
 
 ```wl
-t       = TUOpAdd[TTensorCreate[{1.}], TTensorCreate[{2.}]];
+t       = TTensorCreate[{1.}] + TTensorCreate[{2.}];
 snap    = TContextSnapshot[t];
 liveLen = THeapPos[] - THeapBase[];
 Length[Lookup[First @ snap, "Cells"]] === liveLen
@@ -74,7 +74,7 @@ Cross-kernel restore requires `"ZeroFill" -> True` when the snapshot's tensors w
 
 ```wl
 #| eval: False
-snap = TContextStrip @ TContextSnapshot @ TUOpAdd[TTensorCreate[{1.}], TTensorCreate[{2.}]];
+snap = TContextStrip @ TContextSnapshot @ (TTensorCreate[{1.}] + TTensorCreate[{2.}]);
 TFree[]; TInit[];
 TInitialize[snap, "ZeroFill" -> True]
 ```

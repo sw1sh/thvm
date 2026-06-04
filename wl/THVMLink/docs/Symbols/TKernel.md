@@ -38,7 +38,7 @@ Needs["THVMLink`"];
 TInit[];
 x = TTensorCreate[Range[1., 16.]];
 y = TTensorCreate[Range[16., 1., -1.]];
-TRealize @ TUOpAdd[x, y];
+TRealize @ (x + y);
 k = TKernel[1];
 {k["Name"], k["DispatchKind"], k["DispatchCount"]}
 ```
@@ -69,7 +69,7 @@ Run the autotuner across every unique kernel shape, then re-fire to pick up the 
 
 ```wl
 TKernelAutotuneUnique[];
-TRealize @ TUOpAdd[x, y];
+TRealize @ (x + y);
 TKernel[1][ "DispatchCount"]
 ```
 <!-- => 2 -- the second fire used the post-autotune schedule -->

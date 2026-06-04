@@ -10,21 +10,6 @@ added below.
 
 These are non-negotiable. Strip on sight.
 
-### No `Print`
-
-Never call `Print` in a `.wl`, `.wlt`, or `.wls` file. If textual output
-is needed, define a local helper `debugPrint` that wraps either
-`WriteString[$Output, ...]` (notebook / kernel context) or
-`WriteString["stdout", ...]` (`wolframscript -c` / `-f` context) and
-call that.
-
-```wolfram
-debugPrint[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
-```
-
-`Print` also trips an IDE lint warning ("Suspicious use of session
-symbol Print") and is noisy in batch test runs.
-
 ### No em dashes (`—`, U+2014)
 
 Don't write em dashes in source files, docs, comments, or commit
@@ -455,6 +440,34 @@ When practical, organize a `.wl` file in this order:
   expectations, etc.).
 - Don't narrate obvious code.
 - Prefer one short section comment over many tiny inline comments.
+
+## Tensor surface: UpValue sugar and auto-init
+
+User code should read as ordinary Mathematica over a `TTerm`, not a soup of
+`T`-prefixed builders. Two rules keep it that way.
+
+### Idiomatic operators are UpValues on `TTerm`
+
+The standard Wolfram operators build the same lazy UOp graph the `TUOp*`
+constructors do, installed as `TTerm /:` UpValues in `Tensor.wl`: `Plus`,
+`Times`, `Power`, `Total` (including `Total[t, axis]` and `ArrayReduce[Total, t,
+axes]`), `Dot`, `Transpose`, `ArrayReshape`, and `Normal` (which means
+`Normal[TTensorData[t]]`). Bare integers and reals are accepted on the
+arithmetic operators (`t + 0.5`, `t*-0.1`).
+
+When a common array operation has no sugar yet, **add the UpValue here** rather
+than expecting callers -- or the docs -- to reach for the raw `TUOp*`. Keep the
+entry point an UpValue on `TTerm`, not a per-call `T`-prefixed alias. This is
+what lets the documentation (see
+[`THVMLink/docs/DOC_GUIDE.md`](THVMLink/docs/DOC_GUIDE.md)) teach the sugar
+instead of the UOPs.
+
+### The runtime auto-initializes
+
+Every public entry point calls `ensureInit[]`, so the first tensor touch
+initializes the runtime. **Never require an explicit `TInit[]`.** Reserve
+`TInit[]` for a full reset and `TReset[]` for zeroing the heap (the kernel
+table survives `TReset`, so only `TInit` resets the schedule + kernel count).
 
 ## CSource (LibraryLink bridge)
 

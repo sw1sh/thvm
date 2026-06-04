@@ -33,7 +33,7 @@ Needs["THVMLink`"];
 TInit[];
 w    = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
 x    = TTensorCreate[{10., 20., 30.}];
-loss = TUOpReduce[TUOpMul[w, x], 0, "SUM"];
+loss = Total[w*x];
 TRealize @ TGrad[loss];
 TTensorData @ TRealize @ TGradOf[w]
 ```
@@ -46,7 +46,7 @@ Multi-target VJP returns the gradients in target order:
 ```wl
 w1 = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
 w2 = TRequiresGrad @ TTensorCreate[{4., 5., 6.}];
-y  = TUOpReduce[ TUOpAdd[TUOpMul[w1, w1], TUOpMul[w2, w2]], 0, "SUM" ];
+y  = Total[w1^2 + w2^2];
 {g1, g2} = TGrad[y, {w1, w2}];
 {TTensorData @ TRealize @ g1, TTensorData @ TRealize @ g2}
 ```
@@ -61,11 +61,11 @@ W = TRequiresGrad @ TGlorot[{4}];
 x = TTensorCreate[{1., 2., 3., 4.}];
 y = TTensorCreate[{1.}];
 
-loss = TL2Loss[ TUOpAdd[ TUOpReduce[TUOpMul[W, x], 0, "SUM"], TUOpNeg[y] ] ];
+loss = TL2Loss[ Total[W*x] - y ];
 TClearGrad[W];
 TRealize @ TGrad[loss];
 gW = TTensorData @ TRealize @ TGradOf[W];
-TSet[W, TUOpAdd[W, TUOpMul[ TUOpConst[-0.01, "f32"], TGradOf[W] ]]];
+TSet[W, W + (-0.01)*TGradOf[W]];
 {gW, TTensorData[W]}
 ```
 <!-- => {<gradient>, <post-step W>} - the param shifted by -0.01 * gradient -->
@@ -76,7 +76,7 @@ TSet[W, TUOpAdd[W, TUOpMul[ TUOpConst[-0.01, "f32"], TGradOf[W] ]]];
 
 ```wl
 w  = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
-y1 = TUOpReduce[w, 0, "SUM"];
+y1 = Total[w];
 TClearGrad[w];
 TRealize @ TGrad[y1];
 g1 = TTensorData @ TRealize @ TGradOf[w];
@@ -92,7 +92,7 @@ Forgetting to mark a leaf with <code>[TRequiresGrad]()</code> makes its gradient
 
 ```wl
 w    = TTensorCreate[{1., 2., 3.}];
-loss = TUOpReduce[w, 0, "SUM"];
+loss = Total[w];
 TRealize @ TGrad[loss];
 TGradOf[w]
 ```
@@ -105,7 +105,7 @@ The multi-target form requires that every target reaches the seed; an unreachabl
 ```wl
 w        = TRequiresGrad @ TTensorCreate[{1., 2.}];
 unrelated = TRequiresGrad @ TTensorCreate[{0., 0.}];
-loss     = TUOpReduce[w, 0, "SUM"];
+loss     = Total[w];
 {gw, gu} = TGrad[loss, {w, unrelated}];
 {TTensorData @ TRealize @ gw, TTensorData @ TRealize @ gu}
 ```

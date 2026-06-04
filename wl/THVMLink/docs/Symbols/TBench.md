@@ -35,7 +35,7 @@ TBench[<|
         $x = TTensorCreate[ConstantArray[1., {1024}]];
         $y = TTensorCreate[ConstantArray[2., {1024}]]
     ],
-    "StepFn"   -> Function[Null, TRealize @ TUOpAdd[$x, $y]],
+    "StepFn"   -> Function[Null, TRealize @ ($x + $y)],
     "NumSteps" -> 20
 |>]
 ```
@@ -92,7 +92,7 @@ THotCountersDelta["bench-window",
             $x = TTensorCreate[ConstantArray[1., {1024}]];
             $y = TTensorCreate[ConstantArray[2., {1024}]]
         ],
-        "StepFn"   -> Function[Null, TRealize @ TUOpAdd[$x, $y]],
+        "StepFn"   -> Function[Null, TRealize @ ($x + $y)],
         "NumSteps" -> 5
     |>]
 ]
@@ -114,7 +114,7 @@ TInContext[ metal,
             $x = TTensorCreate[ConstantArray[1., {1024}]];
             $y = TTensorCreate[ConstantArray[2., {1024}]]
         ],
-        "StepFn"   -> Function[Null, TRealize @ TUOpAdd[$x, $y]],
+        "StepFn"   -> Function[Null, TRealize @ ($x + $y)],
         "NumSteps" -> 20
     |>]
 ]

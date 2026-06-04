@@ -40,7 +40,7 @@ Seed with multiple roots to render a shared subgraph between two terms:
 
 ```wl
 shared = TTensorCreate[{1., 2., 3., 4.}];
-THeapGraph[ {TUOpAdd[shared, shared], TUOpMul[shared, shared]} ]
+THeapGraph[ {shared + shared, shared*shared} ]
 ```
 <!-- => one TEN vertex with three inbound UOP edges (ADD reads it twice + MUL reads it) -->
 
@@ -85,6 +85,6 @@ The IC representation surfaces sharing visually - DUP makes a single source feed
 
 ```wl
 {x0, x1} = TDup @ TTensorCreate[{1., 2., 3.}];
-THeapGraph[ TUOpAdd[x0, x1] ]
+THeapGraph[ x0 + x1 ]
 ```
 <!-- => one TEN, one DUP, two DP0 / DP1 projections, one UOP_ADD -->

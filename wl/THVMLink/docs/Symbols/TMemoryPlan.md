@@ -22,16 +22,14 @@ RelatedGuides: [THVMLink]
 
 ## Basic Examples
 
-Snapshot the plan for a tiny forward pass:
+Snapshot the plan for a tiny forward pass. The result is a `TMemoryPlan` object that renders as a summary box - kernel and buffer counts, total live bytes, active backend:
 
 ```wl
-Needs["THVMLink`"];
-TInit[];
 W = TGlorot[{4, 8}]; b = TZeros[{8}]; x = TTensorCreate[ConstantArray[1., {1, 4}]];
 TMaterialize @ TLinear[x, W, b];
 TMemoryPlan[]
 ```
-<!-- => TMemoryPlan[<|"Kernels" -> {...}, "Tens" -> {...}, "Bufs" -> {...}, "Peak" -> <|"peak_bytes" -> _, ...|>|>] -->
+<!-- => TMemoryPlan summary box: kernels, bufs, live bytes, backend -->
 
 ## Scope
 
@@ -56,13 +54,10 @@ TMemoryPlanGantt @ TMemoryPlan[]
 Track peak memory across two graph shapes - the loss-adorned variant should retain more bytes than the bare forward:
 
 ```wl
-peakBytes = Function[ step,
-    TMaterialize[step];
-    First @ TMemoryPlan[]["Peak"]["peak_bytes"]
-];
-peakBytes /@ {TLinear[x, W, b], TL2Loss @ TLinear[x, W, b]}
+peakBytes = step |-> (TMaterialize[step]; First[TMemoryPlan[]]["Peak"]["peak_bytes"]);
+peakBytes /@ {TLinear[x, W, b], Total[TLinear[x, W, b]^2]}
 ```
-<!-- => {bytes1, bytes2} -- bytes2 >= bytes1 since L2Loss adds intermediates -->
+<!-- => {bytes1, bytes2} -- the squared-sum variant adds a reduce intermediate -->
 
 ## Properties and Relations
 
