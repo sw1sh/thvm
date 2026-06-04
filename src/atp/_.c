@@ -4767,25 +4767,7 @@ static KboCmp atp_compare_uncached(AtpState *s, Term lhs, Term rhs) {
     kbo_flat_gate = (e != NULL && e[0] == '1') ? 1 : 0;
   }
   if (s->use_flatterm && kbo_flat_gate) {
-#ifdef ATP_KBO_FLAT_SELFCHECK
-    // Build-time differential: a wrong KBO verdict silently breaks
-    // soundness/completeness, so during bring-up assert flat == IC on
-    // every live pair before trusting the fast path.  Defeats the
-    // speedup (runs both) -- compile it OUT for the measured runs.
-    KboCmp ic   = thvm_kbo(lhs, rhs, s->kbo);
-    KboCmp flat = thvm_kbo_flat(lhs, rhs, s->kbo);
-    if (ic != flat) {
-      char lb[2048], rb[2048];
-      atp_pretty_term(lhs, lb, sizeof lb);
-      atp_pretty_term(rhs, rb, sizeof rb);
-      fprintf(stderr, "KBO FLAT SELFCHECK MISMATCH ic=%d flat=%d\n"
-                      " lhs=%s\n rhs=%s\n", (int)ic, (int)flat, lb, rb);
-      abort();
-    }
-    return flat;
-#else
     return thvm_kbo_flat(lhs, rhs, s->kbo);
-#endif
   }
 #endif
   return thvm_kbo(lhs, rhs, s->kbo);
