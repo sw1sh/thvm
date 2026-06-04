@@ -9,25 +9,37 @@ Net (identical both sides): `Conv2d[1 -> 8, 3x3]` -> ReLU -> 2x2 max-pool ->
 `Linear[1352 -> 10]`, batch 64, softmax cross-entropy, eager (no JIT).
 
 ```
-wolframscript -file thvm_step.wls     # thvm: ms/step + RSS delta + WL heap
-python3 tinygrad_step.py              # tinygrad: ms/step + peak RSS (DEV=CPU forced)
+              wolframscript -file thvm_step.wls   # thvm CPU
+DEV=metal     wolframscript -file thvm_step.wls   # thvm Metal GPU
+              python3 tinygrad_step.py            # tinygrad CPU (DEV=CPU forced)
+DEV=METAL     python3 tinygrad_step.py            # tinygrad Metal GPU
 ```
 
-Representative (Apple-silicon CPU, eager):
+Representative (Apple-silicon, eager warm ms/step):
 
-| | per-step (warm) | memory |
+| | CPU | Metal GPU |
 |---|---|---|
-| thvm | ~32 ms | ~60 MB training delta (WL-heap peak ~166 MB) |
-| tinygrad | ~15 ms | ~117 MB whole process |
+| thvm | ~32 ms | ~29 ms |
+| tinygrad | ~15 ms | ~17 ms |
 
-thvm is ~2x slower for this small eager step. Absolute process RSS is not
-comparable: thvm runs inside a WolframKernel whose runtime baseline (~2.7 GB)
-dwarfs the training's own tens of megabytes, while tinygrad's lean Python
-process peaks near 120 MB. The per-step working set is comparable either way.
-The gap closes on the larger fused `beautiful_mnist` pipeline with the JIT and
-the faithful realize point (see the cross-backend perf notes).
+thvm is ~1.7-2x slower than tinygrad for this small eager step on both
+backends. Metal barely beats CPU here: the conv8 head is tiny, so per-kernel
+GPU dispatch overhead roughly equals the compute (it's dispatch-bound, not
+flop-bound). The gap and the GPU win both grow on the larger fused
+`beautiful_mnist` pipeline with the JIT and the faithful realize point (see
+the cross-backend perf notes).
 
-`tinygrad_step.py` forces `DEV=CPU`: tinygrad on Metal can over-fuse the
-backward into one watchdog-busting kernel and orphan the GPU on this box.
-Point it at a tinygrad checkout other than `../../../tinygrad` with
+Memory (training working set): thvm ~60 MB delta (WL-heap peak ~166 MB),
+tinygrad ~117-260 MB whole process. Absolute process RSS is not comparable -
+thvm runs inside a WolframKernel whose runtime baseline (~2.7 GB) dwarfs the
+training's own tens of megabytes; the per-step working set is comparable.
+
+**Metal safety:** this conv8 step schedules to only ~40 kernels, so it runs
+clean on the GPU. A *larger* training graph (e.g. the 2-conv beautiful_mnist
+net) over-fuses the backward into 1300+ kernels and can orphan the Metal GPU
+on dispatch (reboot to clear) - on both thvm and tinygrad (tinygrad's
+watchdog-busting reduce). Prescreen `TKernelCount[]` on `DEV=cpu` first; keep
+it well under a few hundred before dispatching a train step on Metal.
+`tinygrad_step.py` defaults to `DEV=CPU` for that reason; `DEV=METAL` is safe
+for this small net. Point it at a non-default tinygrad checkout with
 `TINYGRAD=/path/to/tinygrad`.
