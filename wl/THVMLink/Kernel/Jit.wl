@@ -65,8 +65,15 @@ $jitReplayFn         := $jitReplayFn         = load["thvm_wl_jit_replay",       
    Module-bound symbol rebinds, but a TJit closure value held by
    the user can't be mutated from inside the call site without
    the user knowing the symbol name.  The side-store keys on the
-   association content's hash, which is stable for the same
-   structural closure. *)
+   association content's hash.
+
+   The "id" key (a per-call Unique symbol) gives each closure its
+   own identity: copying a closure value preserves the id, so the
+   copy replays the original capture; but two closures built by
+   separate TJit calls -- even over a structurally identical fn --
+   get distinct ids, hence distinct hashes, so the second one's
+   first call captures fresh instead of colliding on the first's
+   slot and short-circuiting to a Null-returning replay. *)
 $tJitState = <||>
 
 (* TJit -- HoldFirst.  Returns a TJitClosure that wraps the fn.
@@ -74,6 +81,7 @@ $tJitState = <||>
    that's never invoked is free. *)
 SetAttributes[TJit, HoldFirst]
 TJit[fn_] := TJitClosure[<|
+    "id" -> Unique["jit$"],
     "fn" -> Function[args, fn[Sequence @@ args]]
 |>]
 
