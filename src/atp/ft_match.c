@@ -44,9 +44,13 @@
 //     splice; the deep copy is the "obviously correct" baseline
 //     against which the splice is differential-tested.
 //
-// Gated on THVM_ATPFT_MATCH.
+// Gated on THVM_ATPFT_MATCH.  ATPFT_FT_MATCH_C_INCLUDED guards against
+// double-inclusion (tests/test_ft_match.c includes this directly while
+// src/atp/_.c pulls it through under THVM_ATPFT_MATCH).
 
 #ifdef THVM_ATPFT_MATCH
+#ifndef ATPFT_FT_MATCH_C_INCLUDED
+#define ATPFT_FT_MATCH_C_INCLUDED 1
 
 #include "../thvm.h"
 #include "ft.h"
@@ -314,4 +318,5 @@ u32 ft_subst_max_vars(void) {
   return ATPFT_MAX_VARS;
 }
 
+#endif // !ATPFT_FT_MATCH_C_INCLUDED
 #endif // THVM_ATPFT_MATCH
