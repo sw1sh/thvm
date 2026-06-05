@@ -3942,6 +3942,12 @@ typedef struct {
   u32   n_rules;
   u32   r_cap;
   u32   n_unorient;          // count of unorientable rules currently in R
+  // FT-skip mode (atp_cp_trivially_joinable) probe cache: highest
+  // n_rules value at which the FT mirror was confirmed fully populated
+  // (every i in [0, n) has lhs[i]==0 OR lhs_ft[i]!=NULL).  When current
+  // n_rules <= this cap, the probe is amortised O(1).
+  u32   ft_mirror_probed_n_rules;
+  u8    ft_mirror_full;      // 1 if last probe found mirror fully synced
 
   // CP queue (open-form: not INC-wrapped here; the priority encoding
   // happens at selection time in thvm_atp_select).  cp_trace[i]

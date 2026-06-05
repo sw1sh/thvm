@@ -9155,23 +9155,37 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   // "not joined".  Detect that condition and fall back to Term.
   static int ft_skip_term_mode = -1;
   if (ft_skip_term_mode < 0) {
-    int env_off = atp_env_off("THVM_ATPFT_NORM");
-    int env_skip = atp_env_on("THVM_ATPFT_SKIP_TERM");
+    int env_norm = atp_env_off("THVM_ATPFT_NORM");
+    int env_skip = atp_env_off("THVM_ATPFT_SKIP_TERM");
     int env_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
-    ft_skip_term_mode = env_off && env_skip && !env_verify;
+    // Default-on after the broader probe validated every in-tree
+    // ATP test suite (test_atp / _ac / _ac_bench / _ft / _ft_norm /
+    // _ft_ri / _ft_cpq / _ft_rules / _enigma).  Opt-out via
+    // THVM_ATPFT_SKIP_TERM=0.
+    ft_skip_term_mode = env_norm && env_skip && !env_verify;
   }
   do_ft_only = ft_skip_term_mode;
   if (do_ft_only) {
-    // Sanity: detect partially-populated mirror (test harness setup
-    // that writes s->lhs[] directly).  Cheap: scan up to 4 first rules
-    // for any with non-zero lhs but NULL lhs_ft.
-    u32 probe = s->n_rules < 4u ? s->n_rules : 4u;
-    for (u32 i = 0; i < probe; i++) {
-      if (s->lhs[i] != 0 && s->lhs_ft[i] == NULL) {
-        do_ft_only = 0;
-        break;
+    // Detect partially-populated mirror (test harness setup that
+    // writes s->lhs[] directly).  ft_norm silently skips rules with
+    // NULL lhs_ft, so even one missing slot makes it return "not
+    // joined" when the Term path would join via that rule.
+    //
+    // Amortise the O(n_rules) probe: cache the last verdict + the
+    // n_rules value it covered.  Production saturations (atp_push_rule
+    // keeps the mirror in lockstep) probe each new rule at most once.
+    // Shrink (interreduce) is safe: if the rule set shrinks, the cap
+    // still bounds a previously-verified prefix.
+    if (!s->ft_mirror_full || s->n_rules > s->ft_mirror_probed_n_rules) {
+      u8 full = 1u;
+      u32 start = s->ft_mirror_full ? s->ft_mirror_probed_n_rules : 0u;
+      for (u32 i = start; i < s->n_rules; i++) {
+        if (s->lhs[i] != 0 && s->lhs_ft[i] == NULL) { full = 0u; break; }
       }
+      s->ft_mirror_full = full;
+      s->ft_mirror_probed_n_rules = s->n_rules;
     }
+    if (!s->ft_mirror_full) do_ft_only = 0;
   }
   if (do_ft_only) {
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;
