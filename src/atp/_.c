@@ -769,6 +769,18 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
   }
   s->cp_packed = nc; s->cp_trace = nt;
   s->cp_pri = np; s->cp_seq = nq; s->cp_goal = ng; s->cp_pri2 = np2;
+  // Lazy-grow cp_ultimate only when the flag is on; engine byte-
+  // identical when off (zero overhead).
+  if (s->use_initial_ultimate) {
+    u8 *nu = (u8  *)realloc(s->cp_ultimate, cap * sizeof(u8));
+    if (nu == NULL) {
+      fprintf(stderr, "atp_ensure_cp_cap: realloc cp_ultimate to %u failed\n",
+              cap);
+      exit(1);
+    }
+    s->cp_ultimate = nu;
+    for (u32 i = s->cp_cap; i < cap; i++) s->cp_ultimate[i] = 0u;
+  }
   for (u32 i = s->cp_cap; i < cap; i++) {
     s->cp_packed[i] = NULL;
     s->cp_trace[i]  = ATP_TRACE_NONE;
@@ -786,8 +798,11 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
 
 // 7c': push one CP onto the binary min-heap CP queue.  Defined
 // below (after atp_cp_priority); forward-declared here so the
-// earlier add_equation push site can call it.
-static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace);
+// earlier add_equation push site can call it.  `is_ultimate`=1
+// tags the CP for Waldmeister Act_ultimate (initial-axiom front)
+// ranking; effective only when s->use_initial_ultimate is on.
+static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
+                             u8 is_ultimate);
 
 // Periodic full-rule-set CP-queue interreduction (Waldmeister
 // KPV_KPMengeInterreduzieren).  Defined far below (it needs the
@@ -4017,6 +4032,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->cp_goal);
   free(s->cp_seq);
   free(s->cp_pri2);
+  free(s->cp_ultimate);
   // Auto-MaxWeight overflow stash: each packed byte string is owned
   // here too (free(NULL) is a no-op for slots already drained).
   if (s->cp_stash_packed != NULL) {
@@ -4025,6 +4041,7 @@ fn void thvm_atp_free(AtpState *s) {
   }
   free(s->cp_stash_trace);
   free(s->cp_stash_nodes);
+  free(s->cp_stash_ultimate);
   // ENIGMA training-data arrays (NULL unless recording was enabled).
   free(s->cp_feat_rows);
   free(s->cp_feat_trace);
@@ -4370,7 +4387,13 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
 #endif
   u32 trace_idx = atp_trace_push(s, reason, parent_a,
                                  ATP_TRACE_NONE, lhs, rhs);
-  atp_cp_heap_push(s, lhs, rhs, trace_idx);
+  // Waldmeister history-driven Act_ultimate (NewClassification.c:314,
+  // DEF=1 block `initial = ultimate`): tag input axioms so they pop
+  // before any derived CP regardless of heuristic weight.  Effective
+  // only when s->use_initial_ultimate is set; off by default.
+  u8 is_ultimate = (reason == TRACE_AXIOM && parent_a == ATP_TRACE_NONE)
+                     ? 1u : 0u;
+  atp_cp_heap_push(s, lhs, rhs, trace_idx, is_ultimate);
   return 1;
 }
 
@@ -5660,6 +5683,16 @@ static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
 
 // Ordering predicate: does queue slot i sort strictly before j?
 static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
+  // Waldmeister history-driven Act_ultimate: a CP tagged "ultimate"
+  // ranks strictly before every non-ultimate CP, regardless of
+  // heuristic weight (NewClassification.c sets w1 = minimalWeight()
+  // = INT32_MIN for the `initial = ultimate` action; we encode it as
+  // an out-of-band bit so reheapify cannot scramble the order).  The
+  // flag is OFF by default -- engine byte-identical.
+  if (s->use_initial_ultimate && s->cp_ultimate != NULL) {
+    u8 ui = s->cp_ultimate[i], uj = s->cp_ultimate[j];
+    if (ui != uj) return ui > uj;
+  }
   if (s->cp_pri[i] != s->cp_pri[j]) return s->cp_pri[i] < s->cp_pri[j];
   return s->cp_seq[i] < s->cp_seq[j];
 }
@@ -5676,6 +5709,11 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
   u32  tq = s->cp_seq[i];   s->cp_seq[i]   = s->cp_seq[j];   s->cp_seq[j]   = tq;
   u32  tg = s->cp_goal[i];  s->cp_goal[i]  = s->cp_goal[j];  s->cp_goal[j]  = tg;
   u32  t2 = s->cp_pri2[i];  s->cp_pri2[i]  = s->cp_pri2[j];  s->cp_pri2[j]  = t2;
+  if (s->cp_ultimate != NULL) {
+    u8 tu = s->cp_ultimate[i];
+    s->cp_ultimate[i] = s->cp_ultimate[j];
+    s->cp_ultimate[j] = tu;
+  }
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: the parallel FT queue indexes identically; swap entries
   // alongside the legacy arrays so heap sift keeps both views in
@@ -5707,15 +5745,23 @@ static void atp_cp_sift_down(AtpState *s, u32 i) {
 // Insert an already-packed CP byte string onto the heap.  Takes
 // ownership of `packed` (the queue frees it on pop/drop).  `lhs`/`rhs`
 // are the live Terms (for the FV index + goal weight); `cp_nodes` is
-// the precomputed node count.  Shared by atp_cp_heap_push (fresh CP)
+// the precomputed node count.  `is_ultimate`=1 forces the CP to the
+// heap front (Waldmeister Act_ultimate) -- effective only when
+// s->use_initial_ultimate is set; otherwise the bit is recorded but
+// atp_cp_before ignores it.  Shared by atp_cp_heap_push (fresh CP)
 // and the auto-MaxWeight stash drain (re-admitting a deferred CP).
 static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
-                                      Term lhs, Term rhs, u32 trace) {
+                                      Term lhs, Term rhs, u32 trace,
+                                      u8 is_ultimate) {
   atp_ensure_cp_cap(s, s->n_cps + 1);
   u32 i = s->n_cps;
   s->cp_packed[i]= packed;
   s->cp_trace[i] = trace;
   s->cp_pri[i]   = atp_cp_priority_sized(s, lhs, rhs, cp_nodes);
+  if (s->cp_ultimate != NULL) {
+    s->cp_ultimate[i] = is_ultimate;
+    if (is_ultimate) s->n_cps_ultimate++;
+  }
   s->cp_goal[i]  = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                      ? atp_goal_weight(s, lhs, rhs) : 0u;
 #ifdef THVM_ATPFT_CPQ
@@ -5772,27 +5818,38 @@ static u32 atp_auto_maxw_bound(AtpState *s) {
 // atp_auto_maxw_drain once the bound grows past its weight, so the CP
 // is deferred, NEVER discarded -- completeness preserved.
 static void atp_cp_stash_push(AtpState *s, u8 *packed, u32 cp_nodes,
-                              u32 trace) {
+                              u32 trace, u8 is_ultimate) {
   if (s->n_cp_stash >= s->cp_stash_cap) {
     u32 ncap = s->cp_stash_cap ? s->cp_stash_cap * 2u : 256u;
     u8 **np  = (u8 **)realloc(s->cp_stash_packed, ncap * sizeof(u8 *));
     u32 *nt  = (u32 *)realloc(s->cp_stash_trace,  ncap * sizeof(u32));
     u32 *nn  = (u32 *)realloc(s->cp_stash_nodes,  ncap * sizeof(u32));
-    if (np == NULL || nt == NULL || nn == NULL) {
+    // Lazy-grow cp_stash_ultimate only when the flag is on; engine
+    // byte-identical when off.
+    u8  *nu  = s->use_initial_ultimate
+                 ? (u8 *)realloc(s->cp_stash_ultimate, ncap * sizeof(u8))
+                 : NULL;
+    if (np == NULL || nt == NULL || nn == NULL
+        || (s->use_initial_ultimate && nu == NULL)) {
       // Allocation failure: rather than leak or lose the CP, admit it
       // directly (slow path, but sound -- never drops a proof CP).
-      free(np); free(nt); free(nn);
+      free(np); free(nt); free(nn); free(nu);
       Term l = 0, r = 0;
       acp_unpack(packed, &l, &r);
-      atp_cp_heap_insert_packed(s, packed, cp_nodes, l, r, trace);
+      atp_cp_heap_insert_packed(s, packed, cp_nodes, l, r, trace,
+                                is_ultimate);
       return;
     }
     s->cp_stash_packed = np; s->cp_stash_trace = nt; s->cp_stash_nodes = nn;
+    if (s->use_initial_ultimate) s->cp_stash_ultimate = nu;
     s->cp_stash_cap = ncap;
   }
-  s->cp_stash_packed[s->n_cp_stash] = packed;
-  s->cp_stash_trace[s->n_cp_stash]  = trace;
-  s->cp_stash_nodes[s->n_cp_stash]  = cp_nodes;
+  s->cp_stash_packed[s->n_cp_stash]  = packed;
+  s->cp_stash_trace[s->n_cp_stash]   = trace;
+  s->cp_stash_nodes[s->n_cp_stash]   = cp_nodes;
+  if (s->cp_stash_ultimate != NULL) {
+    s->cp_stash_ultimate[s->n_cp_stash] = is_ultimate;
+  }
   s->n_cp_stash++;
 }
 
@@ -5819,13 +5876,17 @@ static void atp_auto_maxw_drain(AtpState *s, u8 force) {
     if (s->cp_stash_nodes[r] <= bound) {
       Term l = 0, rr = 0;
       acp_unpack(s->cp_stash_packed[r], &l, &rr);
+      u8 ult = (s->cp_stash_ultimate != NULL) ? s->cp_stash_ultimate[r] : 0u;
       atp_cp_heap_insert_packed(s, s->cp_stash_packed[r],
                                 s->cp_stash_nodes[r], l, rr,
-                                s->cp_stash_trace[r]);
+                                s->cp_stash_trace[r], ult);
     } else {
-      s->cp_stash_packed[w] = s->cp_stash_packed[r];
-      s->cp_stash_trace[w]  = s->cp_stash_trace[r];
-      s->cp_stash_nodes[w]  = s->cp_stash_nodes[r];
+      s->cp_stash_packed[w]   = s->cp_stash_packed[r];
+      s->cp_stash_trace[w]    = s->cp_stash_trace[r];
+      s->cp_stash_nodes[w]    = s->cp_stash_nodes[r];
+      if (s->cp_stash_ultimate != NULL) {
+        s->cp_stash_ultimate[w] = s->cp_stash_ultimate[r];
+      }
       w++;
     }
   }
@@ -5834,7 +5895,10 @@ static void atp_auto_maxw_drain(AtpState *s, u8 force) {
 
 // Push one CP onto the heap.  Computes its priority once (the cost
 // the old select_cp paid n times per step) and sifts up.  O(log n).
-static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
+// `is_ultimate`=1 propagates the Waldmeister Act_ultimate front-rank
+// to the CP slot (effective only when s->use_initial_ultimate is on).
+static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
+                             u8 is_ultimate) {
   // Pack the CP into a byte string outside the managed heap.
   u32  cp_nodes  = 0u;
   u8  *packed    = acp_pack(lhs, rhs, NULL, &cp_nodes);
@@ -5851,11 +5915,12 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace) {
   if (s->auto_max_cp_weight_base > 0u) {
     u32 bound = atp_auto_maxw_bound(s);
     if (bound > 0u && cp_nodes > bound) {
-      atp_cp_stash_push(s, packed, cp_nodes, trace);
+      atp_cp_stash_push(s, packed, cp_nodes, trace, is_ultimate);
       return;
     }
   }
-  atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace);
+  atp_cp_heap_insert_packed(s, packed, cp_nodes, lhs, rhs, trace,
+                            is_ultimate);
 }
 
 // Waldmeister CP-queue interleaving (a port of KPVerwaltung.c's
@@ -5991,6 +6056,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       s->cp_seq[i]   = s->cp_seq[last];
       s->cp_goal[i]  = s->cp_goal[last];
       s->cp_pri2[i]  = s->cp_pri2[last];
+      if (s->cp_ultimate != NULL) s->cp_ultimate[i] = s->cp_ultimate[last];
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_move(s, /*dst=*/i, /*src=*/last);
 #endif
@@ -6142,6 +6208,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     s->cp_seq[j]   = s->cp_seq[last];
     s->cp_goal[j]  = s->cp_goal[last];
     s->cp_pri2[j]  = s->cp_pri2[last];
+    if (s->cp_ultimate != NULL) s->cp_ultimate[j] = s->cp_ultimate[last];
 #ifdef THVM_ATPFT_CPQ
     // Move the (still-owned) FT entry from the last slot into j; zero
     // the now-vacated tail so a later destroy / clear does not
@@ -6432,6 +6499,29 @@ fn void thvm_atp_set_use_orphan_murder(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_perm_subsume(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_perm_subsume = on ? 1u : 0u;
+}
+
+// Waldmeister history-driven Act_ultimate (NewClassification.c:314, the
+// `initial = ultimate` DEF action).  When on, CPs enqueued as input
+// axioms (TRACE_AXIOM, no parent) rank strictly before every derived
+// CP regardless of heuristic weight -- they ALWAYS pop first until
+// exhausted, exactly mirroring WM's w1 = minimalWeight() = INT32_MIN.
+// Off by default; engine byte-identical when the flag is off.
+fn void thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_initial_ultimate = on ? 1u : 0u;
+  // Lazy-allocate cp_ultimate on first enable.  Initialise every
+  // existing slot to 0 so already-queued CPs default to non-ultimate;
+  // only axioms enqueued AFTER the flag is set rank ultimate.  Off-
+  // by-default keeps the engine byte-identical when the flag is
+  // never toggled.
+  if (on && s->cp_ultimate == NULL && s->cp_cap > 0u) {
+    s->cp_ultimate = (u8 *)calloc(s->cp_cap, sizeof(u8));
+    if (s->cp_ultimate == NULL) {
+      fprintf(stderr, "thvm_atp_set_use_initial_ultimate: calloc failed\n");
+      exit(1);
+    }
+  }
 }
 
 fn void thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on) {
@@ -8607,6 +8697,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       s->cp_pri[w]    = s->cp_pri[i];
       s->cp_seq[w]    = s->cp_seq[i];
       s->cp_goal[w]   = s->cp_goal[i];
+      if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
     }
     w++;
   }
@@ -8669,6 +8760,13 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->cp_packed[i] = NULL;
     }
     s->cp_trace[w] = s->cp_trace[i];
+    // Preserve Act_ultimate across the WM AP_generic reweight: an
+    // axiom whose normalized form is still non-trivial must keep its
+    // front-rank (WM's `C_ReClassify` short-circuits on the original
+    // history tag, never re-applying the heuristic to an `initial`
+    // CP).  Without this carry-over the next reheapify resorts the
+    // axiom by Mix weight and loses the ultimate front.
+    if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
     w++;
     thvm_atp_heap_reset(hcp);
   }
@@ -10765,7 +10863,8 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len);
-    atp_cp_heap_push(s, cp_lhs, cp_rhs, t);
+    // Derived overlap CP -- never ultimate.
+    atp_cp_heap_push(s, cp_lhs, cp_rhs, t, /*is_ultimate=*/0u);
     pushed++;
   }
   return pushed;

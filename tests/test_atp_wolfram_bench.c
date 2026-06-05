@@ -467,6 +467,17 @@ int main(int argc, char **argv) {
       thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
     }
   }
+  // THVM_ATP_INITIAL_ULTIMATE=1: port of WM's `initial = ultimate` DEF
+  // action (NewClassification.c:314).  Forces input axioms to the heap
+  // front regardless of weight, so the first selections track WM's
+  // axiom-first trajectory.  Independent of the WALDMEISTER preset --
+  // set it alone, or stack on top of the preset.
+  {
+    const char *iu = getenv("THVM_ATP_INITIAL_ULTIMATE");
+    if (iu != NULL && iu[0] != '\0' && iu[0] != '0') {
+      thvm_atp_set_use_initial_ultimate(s, 1u);
+    }
+  }
   // Apply THVM_ATP_CP_WEIGHT after the WALDMEISTER preset so an
   // experiment-time env override (e.g. `THVM_ATP_CP_WEIGHT=8`) wins over
   // the preset's CH_MaxWeight default.
