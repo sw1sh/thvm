@@ -1061,10 +1061,16 @@ static int kbo_flat_vortest(KboLin *st, const KboFlatNode *a, u32 pa,
     // same CTR label (children count is implied by the signature, and
     // equal labels share arity) -- recurse over the children slices.
     if (a[pa].sz == b[pb].sz) {
-      // exact byte-identical subtree: a fast structural check avoids the
-      // per-child recursion in the common "untouched subterm" case.
-      // Children begin right after the head; advance both cursors in
-      // lockstep over each child pair.
+      // Fast path: when the two subtree slices are byte-identical,
+      // there are no divergences, so no kbo_flat_addto calls would
+      // fire and phidiff would not change.  memcmp short-circuits the
+      // recursive descent.  KboFlatNode is POD (3 ints), so byte-equal
+      // implies semantically equal.  Top hot path on AndAssoc-class
+      // saturations where the KBO comparator runs many times against
+      // pairs that share large untouched prefixes.
+      u32 nbytes = (u32)(a[pa].sz * sizeof(KboFlatNode));
+      if (memcmp(&a[pa], &b[pb], nbytes) == 0) return 1;
+      // Per-child fallback: any divergence drives the linear balance.
       u32 ca = pa + 1u, cb = pb + 1u;
       u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
       int ident = 1;
