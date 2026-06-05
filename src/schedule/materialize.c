@@ -3755,6 +3755,85 @@ static int boundary_has_offset_shrink_consumer(u64 producer_loc) {
   return 0;
 }
 
+// 1 iff some out-axis of node `i` is a collapsed unit axis: its rangeify
+// out_rng is NOT a UOP_RANGE (it became CONST(0) because the dim is size 1 --
+// ru_new_range, rangeify_unified.c:236).  Such a node has n_closed_ranges <
+// out_ndim purely from the collapse, so the `nr == ond` effectively-full gate
+// spuriously fails even though the node is a genuine full realize.
+static int boundary_has_collapsed_unit_axis(u32 node_idx) {
+  u32 ond = rangeify_unified_out_ndim_at(node_idx);
+  for (u32 a = 0; a < ond; a++) {
+    Term r = rangeify_unified_out_rng_at(node_idx, a);
+    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 1;
+  }
+  return 0;
+}
+
+// Forward-walk the consumer chain from `producer_loc` through movement /
+// elementwise UOPs and return 1 iff it reaches a UOP_REDUCE, reporting that
+// reduce's loc via out_reduce_loc.  Such a reduce READS this producer's value
+// as (part of) its reduce body; if the producer is inlined rather than
+// realized, the reduce RE-COMPUTES it per output element.  Mirrors tinygrad's
+// `buffer_in_reduce` rule (schedule/rangeify.py:276-285): a bufferize whose
+// value chain feeds a reduce that reaches a buffer/param is NOT removed.
+static int boundary_feeds_reduce_consumer(u64 producer_loc, u32 depth,
+                                          u64 *out_reduce_loc) {
+  if (depth > 32) return 0;
+  u64 cons[8];
+  u32 nc = bufferize_consumers_for_loc(producer_loc, cons, 8);
+  if (nc > 8) nc = 8;
+  for (u32 c = 0; c < nc; c++) {
+    u32 cidx = bufferize_info_find(cons[c]);
+    if (cidx == 0xFFFFFFFFu) continue;
+    u8 cop = BUFFERIZE_NODES[cidx].op;
+    if (cop == UOP_REDUCE) { if (out_reduce_loc) *out_reduce_loc = cons[c]; return 1; }
+    // Recurse through layout-preserving / elementwise ops only (movement
+    // reshape/permute/expand/pad/shrink/flip, or add/mul/where/...) whose
+    // result is still inlined into the same reduce body.  A KERNEL ends the
+    // walk (it is its own realized boundary).
+    if (cop == UOP_KERNEL) continue;
+    if (boundary_feeds_reduce_consumer(cons[c], depth + 1, out_reduce_loc)) return 1;
+  }
+  return 0;
+}
+
+// 1 iff the consuming reduce carries the 2-D conv WEIGHT-GRADIENT fingerprint
+// against a B==1 (collapsed-batch) activation:
+//   (a) its BODY rank exceeds the producer node's out rank by >= 3 -- the
+//       _pool UNFOLD of a 2-D conv adds the full window (C_in, kH, kW = 3
+//       axes), so e.g. a [1,C,H,W] (rank 4) activation feeds a rank-7 body
+//       [1,2,6,6,3,3,3]; and
+//   (b) the body still carries a size-1 axis (the genuine collapsed batch).
+// This isolates the d/dw2 conv weight-grad reduce (REALIZE) from every other
+// collapsed-unit-axis-feeds-reduce shape at B==1 (all of which must INLINE):
+//   - The conv weight-grad reduce sums grad_out against the _pool UNFOLD of
+//     the activation (an OVERLAPPING-window read), so inlining the activation
+//     re-computes it at every window offset; at B==1 the collapsed CONST(0)
+//     batch is baked into that recompute -> mis-reduce (~2x).  Realizing the
+//     activation makes the reduce INDEX_E one materialized buffer.
+//   - A dense matmul adds exactly ONE contraction axis (rank growth 1) and a
+//     multi-head attention reduce (gpt2 q@k, scores@v) adds at most TWO (head
+//     + contraction), so both fail the >= 3 test and stay inlined -- no
+//     head-split / decode regression.
+//   - A statistics reduce (softmax denom, layer-norm / batch-norm mean+var and
+//     their backward) reduces WITHIN the activation's axes (no rank growth),
+//     also inlined -- preserving fusion and the BN-backward zero cancellation.
+// The 3-axis unfold is intrinsic to a 2-D conv regardless of kernel size; a
+// 1x1 conv (rank growth 1, no overlap) behaves like a matmul and correctly
+// stays inlined.  Matches tinygrad: a size-1 RANGE collapses to CONST(0)
+// (indexing.py:53); the conv unfold's 3 extra window ranges are the growth.
+static int reduce_is_conv_weight_grad(u64 reduce_loc, u32 node_ndim) {
+  if (reduce_loc == 0) return 0;
+  Term rterm = term_new(0, TAG_UOP, UOP_REDUCE, reduce_loc);
+  Term body = uop_reduce_src(rterm);
+  Shape bsh = {0};
+  if (!term_shape_in(body, 0, &bsh)) return 0;
+  if (bsh.ndim < node_ndim + 3) return 0;       // not a 2-D conv unfold (C_in,kH,kW)
+  for (u32 d = 0; d < bsh.ndim; d++)
+    if (bsh.dims[d] == 1) return 1;              // genuine size-1 (collapsed) axis threaded in
+  return 0;
+}
+
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
@@ -3824,17 +3903,31 @@ static void topo_sort_boundaries(Term root) {
     if (!classify_real) {
       u32 nr  = uop_bufferize_n_ranges(buf);
       u32 ond = rangeify_unified_out_ndim_at(i);
-      // effectively-full: all axes closed (nr == ond), OR a full realize
-      // whose unit axis collapsed the closed-range count below out_ndim
-      // (nr < ond) but is read by a consumer SHRINK with a non-zero begin
-      // (the GPT2 head-split view offset) -- such a node MUST be realized
-      // so the consumer indexes the buffer at its own offset rather than
-      // inlining and re-decoding the addr (which drops the begin).  See
-      // boundary_has_offset_shrink_consumer.
+      // effectively-full: all axes closed (nr == ond), OR a realize whose
+      // unit axis collapsed the closed-range count below out_ndim (nr < ond):
+      //   1. a full realize read by a consumer SHRINK with a non-zero begin
+      //      (the GPT2 head-split view offset) -- realize so the consumer
+      //      indexes the buffer at its own offset rather than inlining and
+      //      re-decoding the addr (which drops the begin).  See
+      //      boundary_has_offset_shrink_consumer.
+      //   2. a collapsed-unit-axis activation feeding a conv WEIGHT-GRADIENT
+      //      reduce (reduce_is_conv_weight_grad) -- realize so the reduce
+      //      INDEX_Es the materialized buffer instead of re-computing the
+      //      activation at every overlapping conv-window offset.  At B==1 the
+      //      collapsed batch is baked into that recompute and mis-reduces the
+      //      d/dw2 weight gradient (~2x).  Mirrors tinygrad's buffer_in_reduce
+      //      (schedule/rangeify.py:276-285).  The >= 3 unfold-rank + size-1
+      //      gates keep dense matmul / attention / statistics reduces inlined.
+      u64 rloc = 0;
       int effectively_full = (ond > 0 && nr == ond)
                           || (rangeify_unified_realized_full_at(i)
                               && boundary_has_offset_shrink_consumer(
-                                   BUFFERIZE_NODES[i].loc));
+                                   BUFFERIZE_NODES[i].loc))
+                          || (nr > 0 && nr < ond
+                              && boundary_has_collapsed_unit_axis(i)
+                              && boundary_feeds_reduce_consumer(
+                                   BUFFERIZE_NODES[i].loc, 0, &rloc)
+                              && reduce_is_conv_weight_grad(rloc, ond));
       if (!rangeify_unified_is_realized(i)) continue;
       if (!effectively_full
           && !bufferize_value_would_strand_c(buf, i, &strand_cache)) continue;
