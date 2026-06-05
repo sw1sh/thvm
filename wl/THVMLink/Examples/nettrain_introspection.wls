@@ -29,7 +29,7 @@ Print["TNetParamInfo[net]  (", Length[info], " trainable params, in layer order)
 Do[ With[{e = info[[i]]},
     Print["  param ", i, ":  Layer=", e["Layer"], "  Param=", e["Param"], "  shape=", dims[e["Term"]]]],
     {i, Length[info]}];
-Print["TNetParams[net]  ->  ", Length[TNetParams[net]], " weight handles (TAG_TEN, TRequiresGrad)"];
+Print["TNetParams[net]  ->  ", Length[TNetParams[net]], " weight handles (TAG_TEN, Sow-provenance)"];
 rec = TNetOf[net];
 Print["TNetOf[net]  (faithful reconstruction from the term graph, registry-free):"];
 Print["  Head: ", Head[rec]];

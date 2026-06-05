@@ -184,7 +184,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
     def test_rmsnorm_sum_backward_vs_fd(self):
         for shp in BWD_SHAPES:
             a = self._rand(shp)
-            t = Tensor(a.copy()).requires_grad_()
+            t = Tensor(a.copy())
             self._rms_loss_thvm(t).backward()
             g = t.grad.numpy()
             g_fd = _fd_grad(self._rms_loss_np, a.copy())
@@ -195,7 +195,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
     def test_rmsnorm_sum_backward_vs_tinygrad(self):
         for shp in BWD_SHAPES:
             a = self._rand(shp)
-            t = Tensor(a.copy()).requires_grad_()
+            t = Tensor(a.copy())
             self._rms_loss_thvm(t).backward()
             g = t.grad.numpy()
             tg = TgTensor(a.copy())
@@ -215,7 +215,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
         for shp in BWD_SHAPES:
             a = self._rand(shp)
             w = self._rand(shp)
-            t = Tensor(a.copy()).requires_grad_()
+            t = Tensor(a.copy())
             (t.softmax() * Tensor(w)).sum().backward()
             g = t.grad.numpy()
             g_fd = _fd_grad(lambda x: float((self._softmax_np(x) * w).sum()), a.copy())
@@ -227,7 +227,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
         for shp in BWD_SHAPES:
             a = self._rand(shp)
             w = self._rand(shp)
-            t = Tensor(a.copy()).requires_grad_()
+            t = Tensor(a.copy())
             (t.softmax() * Tensor(w)).sum().backward()
             g = t.grad.numpy()
             tg = TgTensor(a.copy())
@@ -262,7 +262,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
         for shp in BWD_SHAPES:
             a = self._rand(shp)
             w = self._rand(shp)
-            t = Tensor(a.copy()).requires_grad_()
+            t = Tensor(a.copy())
             self._ln_thvm(t, w).backward()
             g = t.grad.numpy()
             g_fd = _fd_grad(lambda x: self._ln_np(x, w), a.copy())
@@ -274,7 +274,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
         for shp in BWD_SHAPES:
             a = self._rand(shp)
             w = self._rand(shp)
-            t = Tensor(a.copy()).requires_grad_()
+            t = Tensor(a.copy())
             self._ln_thvm(t, w).backward()
             g = t.grad.numpy()
             tg = TgTensor(a.copy())

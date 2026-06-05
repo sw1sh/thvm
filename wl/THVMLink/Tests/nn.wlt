@@ -880,7 +880,7 @@ VerificationTest[
    through the EXPAND/REDUCE matmul backward (the M6 higher-order track). *)
 VerificationTest[
     TInit[];
-    x = TRequiresGrad @ TTensorCreate @ NumericArray[{{1.0, 2.0}}, "Real32"];
+    x = TTensorCreate @ NumericArray[{{1.0, 2.0}}, "Real32"];
     w = TTensorCreate @ NumericArray[{{1.0, 2.0}, {3.0, 4.0}}, "Real32"];
     b = TZeros[{2}];
     TClearGrad[x];
@@ -902,7 +902,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     x = TTensorCreate[N @ ArrayReshape[Range[9], {1, 1, 3, 3}]];
-    w = TRequiresGrad @ TTensorCreate[N @ {{{{1.0, 2.0}, {3.0, 4.0}}}}];
+    w = TTensorCreate[N @ {{{{1.0, 2.0}, {3.0, 4.0}}}}];
     b = TZeros[{1}];
     conv = TConv2D[x, w, b];
     TClearGrad[w];
@@ -922,7 +922,7 @@ VerificationTest[
    constant, so g1 = 3 x^2 [x>0] = {3,0,27}, g2 = 6 x [x>0] = {6,0,18}. *)
 VerificationTest[
     TInit[];
-    x = TRequiresGrad @ TTensorCreate[{1.0, -2.0, 3.0}];
+    x = TTensorCreate[{1.0, -2.0, 3.0}];
     TClearGrad[x];
     TGrad[Total[TReLU[x]^3]];
     g1 = Normal @ TTensorData @ TRealize @ TGradOf[x];
@@ -948,13 +948,13 @@ VerificationTest[
     b2 = TTensorCreate[N @ RandomReal[{-1, 1}, {2}]];
     net = xt |-> Total[Total[(TLinear[TReLU[TLinear[xt, W1, b1]], W2, b2])^2]];
     x0 = {0.7, -0.4, 0.9};
-    xT = TRequiresGrad @ TTensorCreate[{x0}];
+    xT = TTensorCreate[{x0}];
     TClearGrad[xT]; TGrad[net[xT]];
     g1term = TGradOf[xT];
     TClearGrad[xT]; TGrad[Total[Total[g1term]]];
     g2 = First @ Normal @ TTensorData @ TRealize @ TGradOf[xT];
     totG1 = Function[xv, Module[{xx},
-        xx = TRequiresGrad @ TTensorCreate[{xv}];
+        xx = TTensorCreate[{xv}];
         TClearGrad[xx]; TGrad[net[xx]];
         Total @ First @ Normal @ TTensorData @ TRealize @ TGradOf[xx]]];
     eps = 1.0*^-3;
@@ -971,7 +971,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     c = TTensorCreate[{1.0, 2.0, 3.0, 4.0}];
-    x = TRequiresGrad @ TTensorCreate[{1.0, 2.0, 3.0, 4.5}];
+    x = TTensorCreate[{1.0, 2.0, 3.0, 4.5}];
     TClearGrad[x];
     TGrad[Total[TLayerNorm[x]*c]];
     Max @ Abs[Normal @ TTensorData @ TRealize @ TGradOf[x]
@@ -988,7 +988,7 @@ VerificationTest[
     qm = TTensorCreate[{{1.0, 0.0}, {0.0, 1.0}}];
     km = TTensorCreate[{{1.0, 0.5}, {0.5, 1.0}}];
     v0 = {{1.0, 2.0}, {3.0, 4.0}};
-    vT = TRequiresGrad @ TTensorCreate[v0];
+    vT = TTensorCreate[v0];
     TClearGrad[vT];
     TGrad[Total[Total[TAttention[qm, km, vT]^2]]];
     g = Normal @ TTensorData @ TRealize @ TGradOf[vT];

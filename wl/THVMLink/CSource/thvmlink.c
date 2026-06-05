@@ -1136,10 +1136,12 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_refcount(WolframLibraryData libData, mint 
   return LIBRARY_NO_ERROR;
 }
 
-// requires_grad: canonical "parameter" flag in TenDesc, set by the WL
-// frontend (TRequiresGrad) or the Python frontend.  Consulted by
-// uop_grad's leaf rule and by the autograd enumeration in either
-// frontend's backward().
+// grad-leaf mark: INTERNAL mechanism (the TenDesc.requires_grad field),
+// NOT a user-facing flag.  Both frontends auto-mark every in-scope float
+// leaf right before the grad walk (WL TGrad / Python backward) and unmark
+// after -- tinygrad spec: no requires_grad anywhere; .grad flows to every
+// reachable float leaf, and the optimizer's param list decides what
+// updates.  Consulted by uop_grad's leaf rule (grad_leaf_sup target==0).
 EXTERN_C DLLEXPORT int thvm_wl_tensor_set_requires_grad(WolframLibraryData libData,
                                                          mint argc,
                                                          MArgument *args,

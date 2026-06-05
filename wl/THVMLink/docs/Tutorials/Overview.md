@@ -109,11 +109,11 @@ StringTake[ TKernel[1]["Source"], UpTo[120] ]
 
 ## Autodiff over the heap
 
-Mark a leaf with `TRequiresGrad`, build a loss, fire `TGrad`, and read the
+Build a loss, fire `TGrad` (it auto-grads every float leaf), and read the
 accumulated gradient with `TGradOf`:
 
 ```wl
-W   = TRequiresGrad @ TGlorot[{4}];
+W   = TGlorot[{4}];
 xs  = TTensorCreate[{1., 2., 3., 4.}];
 ys  = TTensorCreate[{1.}];
 preds = TUOpReduce[ TUOpMul[W, xs], 0, "SUM" ];

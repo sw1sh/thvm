@@ -69,7 +69,7 @@ class TransformerTrainTest(unittest.TestCase):
             QKV.flat[i] = b - eps; lm = _attn_np(QKV, O)
             QKV.flat[i] = b
             g.flat[i] = (lp - lm) / (2 * eps)
-        qkv = T(QKV.copy()).requires_grad_(True)
+        qkv = T(QKV.copy())
         _attn_thvm(qkv, T(O.copy())).backward()
         gt = qkv.grad.numpy().reshape(QKV.shape)
         for slot in range(3):
@@ -84,8 +84,8 @@ class TransformerTrainTest(unittest.TestCase):
         Y = (X @ (rng.standard_normal((D, D)).astype(np.float32) * 0.3)).astype(np.float32)
         Bx, Sx = 4, 6
         xt = T(X.copy()); yt = T(Y.copy())
-        Wqkv = T((rng.standard_normal((D, 3 * D)) * 0.1).astype(np.float32)).requires_grad_(True)
-        Wo = T((rng.standard_normal((D, D)) * 0.1).astype(np.float32)).requires_grad_(True)
+        Wqkv = T((rng.standard_normal((D, 3 * D)) * 0.1).astype(np.float32))
+        Wo = T((rng.standard_normal((D, D)) * 0.1).astype(np.float32))
         opt = optim.Adam([Wqkv, Wo], lr=1e-2)
 
         def loss():
@@ -122,9 +122,9 @@ class TransformerTrainTest(unittest.TestCase):
         Y = (X @ (rng.standard_normal((Dd, Dd)).astype(np.float32) * 0.3)).astype(np.float32)
         xt, yt = T(X.copy()), T(Y.copy())
 
-        def P(sh, s=0.1): return T((rng.standard_normal(sh) * s).astype(np.float32)).requires_grad_(True)
-        def o(n): return T(np.ones(n, np.float32)).requires_grad_(True)
-        def z(n): return T(np.zeros(n, np.float32)).requires_grad_(True)
+        def P(sh, s=0.1): return T((rng.standard_normal(sh) * s).astype(np.float32))
+        def o(n): return T(np.ones(n, np.float32))
+        def z(n): return T(np.zeros(n, np.float32))
         layers = [dict(Wqkv=P((Dd, 3 * Dd)), Wo=P((Dd, Dd)), g1=o(Dd), b1=z(Dd),
                        W1=P((Dd, Dff)), bo1=z(Dff), W2=P((Dff, Dd)), bo2=z(Dd), g2=o(Dd), b2=z(Dd))
                   for _ in range(L)]

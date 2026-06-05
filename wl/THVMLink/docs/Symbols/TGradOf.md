@@ -5,7 +5,7 @@ Context: THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGradOf
 Keywords: [autodiff, gradient, accumulator, backward, read]
-SeeAlso: [TGrad, TRequiresGrad, TClearGrad, TRealize, TSet]
+SeeAlso: [TGrad, TClearGrad, TRealize, TSet]
 RelatedGuides: [THVMLink]
 ---
 
@@ -24,7 +24,7 @@ RelatedGuides: [THVMLink]
 After a backward pass, read the gradient of a sum of squares (*2w*):
 
 ```wl
-w = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
+w = TTensorCreate[{1., 2., 3.}];
 TRealize @ TGrad @ Total[w^2];
 Normal @ TRealize @ TGradOf[w]
 ```
@@ -35,7 +35,7 @@ Normal @ TRealize @ TGradOf[w]
 Before any backward pass, the gradient is missing:
 
 ```wl
-v = TRequiresGrad @ TTensorCreate[{1., 2.}];
+v = TTensorCreate[{1., 2.}];
 TGradOf[v]
 ```
 <!-- => Missing[NoGrad] -->

@@ -174,16 +174,19 @@ TTensorDType[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
 TTensorRefcount[t_ ? tensorIdQ] := $tensorRcFn[TTermVal[t]]
 TTensorRefcount[t_TTerm]        := Missing["NotATensor", TTagName[TTermTag[t]]]
 
-(* TRequiresGrad[t] / TRequiresGrad[t, on]: set the canonical
-   TenDesc.requires_grad flag.  Mirrors PyTorch / tinygrad
-   .requires_grad_().  TRequiresGradQ[t] reads the flag back. *)
-TRequiresGrad[t_ ? tensorIdQ]              := ($tensorSetReqGradFn[TTermVal[t], 1]; t)
-TRequiresGrad[t_ ? tensorIdQ, on:(True|False)] := (
+(* markGradLeaf / gradLeafQ: INTERNAL grad-leaf mark on TenDesc, NOT a
+   user-facing flag.  TGrad auto-marks every reachable float leaf right
+   before the walk (tinygrad spec: no requires_grad anywhere; .grad is
+   filled for every in-scope non-CONST float leaf, and the optimizer's
+   param list decides what updates).  The C leaf rule (grad_leaf_sup,
+   target == 0 path) consults this mark to drive the accumulation walk;
+   TGrad sets/clears it transiently and never exposes it on the surface. *)
+markGradLeaf[t_ ? tensorIdQ, on_:True] := (
     $tensorSetReqGradFn[TTermVal[t], If[ on, 1, 0]]; t)
-TRequiresGrad[t_TTerm, ___]                := Missing["NotATensor", TTagName[TTermTag[t]]]
+markGradLeaf[t_TTerm, ___]             := t
 
-TRequiresGradQ[t_ ? tensorIdQ] := $tensorReqGradFn[TTermVal[t]] === 1
-TRequiresGradQ[t_TTerm]        := False
+gradLeafQ[t_ ? tensorIdQ] := $tensorReqGradFn[TTermVal[t]] === 1
+gradLeafQ[t_TTerm]        := False
 
 (* TGradOf[t]: read TenDesc.grad (the walk-once chain-rule
    accumulator).  Returns a TTerm wrapping the lazy grad term, or
@@ -364,14 +367,37 @@ gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
     ]
 ]
 
-(* TGrad[y]: PyTorch loss.backward().  Fire ONE requires_grad backward
-   walk seeded with ones-at-y, with no explicit target -- the C leaf rule
-   (grad_leaf_sup, target == 0 path) accumulates each reachable
-   requires_grad leaf's summed cotangent into its TenDesc.grad.  Reads
-   back per-tensor with TGradOf (the param.grad analogue).  Differentiates
-   w.r.t. every tensor the caller marked via TRequiresGrad; with nothing
-   marked it is a no-op.  Returns y for chaining. *)
-TGrad[y_TTerm] := (TWnf[TUOpGrad[y, gradOnesSeed[y]]]; y)
+(* Float-dtype TEN leaves reachable from `y`, as TTerms.  thvm TEN
+   leaves are buffers (never UOP_CONST), so the tinygrad "non-CONST
+   float leaf" filter is just the float-dtype test here.  uopLeafTids
+   gives the in-scope leaf tids; the TenDesc table maps each tid to its
+   dtype so we can pack the TAG_TEN term and drop the integer ones. *)
+$gradFloatCodes := $gradFloatCodes = dtypeCode /@
+    {"f16", "bf16", "f32", "f64", "fp8e4m3", "fp8e5m2"}
+gradFloatLeafTerms[y_TTerm] := Module[{tids, tbl, n},
+    tids = uopLeafTids[y];
+    tbl  = TTensTable[];
+    n    = Length[tbl];
+    Select[
+        Map[packTerm[0, $TagTEN, tbl[[#, 3]], #] &,
+            Select[tids, 1 <= # <= n &]],
+        MemberQ[$gradFloatCodes, TTermExt[#]] &]
+]
+
+(* TGrad[y]: PyTorch loss.backward().  Auto-mark every reachable float
+   leaf, fire ONE backward walk seeded with ones-at-y (no explicit
+   target), and let the C leaf rule (grad_leaf_sup, target == 0 path)
+   accumulate each leaf's summed cotangent into its TenDesc.grad.  Read
+   back per-tensor with TGradOf (the param.grad analogue).  No
+   requires_grad flag: .grad is filled for EVERY in-scope non-CONST
+   float leaf (tinygrad spec).  Unmark afterward so a later TGrad over a
+   different loss starts from a clean mark set.  Returns y for chaining. *)
+TGrad[y_TTerm] := Module[{leaves = gradFloatLeafTerms[y]},
+    markGradLeaf /@ leaves;
+    TWnf[TUOpGrad[y, gradOnesSeed[y]]];
+    markGradLeaf[#, False] & /@ leaves;
+    y
+]
 
 TGrad[y_, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
 TGrad[y_, target_TTerm, gy_TTerm] :=
@@ -401,37 +427,35 @@ tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
    requires_grad single walk. *)
 TGrad[y_, {target_}]    := {TGrad[y, target]}
 
-(* Multi-target VJP via the requires_grad single walk.  Mark every
-   target as a parameter, fire ONE target-free backward (TUOpGrad, the
-   target==0 cell), and let interact_grad's leaf rule accumulate each
-   requires_grad leaf's summed cotangent into TenDesc.grad
-   (uop_grad.c grad_leaf_sup target==0 path).  Read the per-target
-   accumulator back via TGradOf.
+(* Multi-target VJP via the auto-grad-all-float-leaves single walk.
+   Mark every reachable float leaf, fire ONE target-free backward
+   (TUOpGrad, the target==0 cell), and let interact_grad's leaf rule
+   accumulate each leaf's summed cotangent into TenDesc.grad (uop_grad.c
+   grad_leaf_sup target==0 path).  Read the per-target accumulator back
+   via TGradOf for exactly the requested `targets` (tinygrad
+   Tensor.gradient[targets] -- .grad is filled for all leaves, the
+   caller picks which to return).
 
-   This replaces the old per-target loop (n separate target-aware grad
-   builds, each re-running the whole backward filtered to one leaf).
    The single walk computes every shared intermediate cotangent ONCE and
    threads it to all leaves -- a forward value reached by multiple
    backward consumers is one node (grad_fwd_of shares it in non-SUP/DUP
    mode), so the backward stops re-deriving the upstream stack per
    consumer.
 
-   Targets we newly mark are unmarked afterward so the global
-   GRAD_REQ_NCOUNT / requires_grad state (which gates the target-aware
-   leaf filter) is restored for any later plain TGrad. *)
-TGrad[y_, targets_List] := Module[{newlyMarked, bwd, grads},
-    newlyMarked = Select[targets, tensorIdQ[#] && ! TRequiresGradQ[#] &];
-    TRequiresGrad /@ newlyMarked;
-    TClearGrad /@ Select[targets, tensorIdQ];
-    bwd = TUOpGrad[y, gradOnesSeed[y]];
-    TWnf[bwd];                                  (* single backward walk *)
+   The float leaves are unmarked afterward so the global GRAD_REQ_NCOUNT
+   mark state is restored for any later TGrad. *)
+TGrad[y_, targets_List] := Module[{leaves, grads},
+    leaves = gradFloatLeafTerms[y];
+    markGradLeaf /@ leaves;
+    TClearGrad /@ leaves;                         (* fresh grad per walk *)
+    TWnf[TUOpGrad[y, gradOnesSeed[y]]];          (* single backward walk *)
     grads = Map[
         With[{g = TGradOf[#]},
              If[ MissingQ[g],
                  TZeros[TTensorShape[#], TTensorDType[#]],
                  g]] &,
         targets];
-    TRequiresGrad[#, False] & /@ newlyMarked;   (* restore global state *)
+    markGradLeaf[#, False] & /@ leaves;          (* restore global state *)
     grads
 ]
 

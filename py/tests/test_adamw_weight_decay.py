@@ -39,7 +39,7 @@ def _problem():
 
 def _thvm_steps(make_opt, steps):
     w0, target = _problem()
-    w = Tensor(w0.copy()).requires_grad_(True)
+    w = Tensor(w0.copy())
     opt = make_opt([w])
     Tensor.training = True
     for _ in range(steps):

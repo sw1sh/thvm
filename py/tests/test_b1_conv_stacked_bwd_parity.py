@@ -68,8 +68,8 @@ def fd_ssq_dw2(x64, w164, w264, pad, eps=1e-4):
 
 def thvm_ssq_dw2(x_np, w1_np, w2_np, pad):
     x = Tensor(x_np)
-    w1 = Tensor(w1_np, requires_grad=True)
-    w2 = Tensor(w2_np, requires_grad=True)
+    w1 = Tensor(w1_np)
+    w2 = Tensor(w2_np)
     h = x.conv2d(w1, padding=pad).relu()
     y = h.conv2d(w2, padding=pad)
     loss = (y * y).sum()

@@ -46,7 +46,7 @@ Normal @ TRealize @ TUOpReduce[TUOpMul[x, x], 0, "SUM"]
 The product rule gives the gradient of a sum of squares as *2x*:
 
 ```wl
-w = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
+w = TTensorCreate[{1., 2., 3.}];
 TRealize @ TGrad @ TUOpReduce[TUOpMul[w, w], 0, "SUM"];
 Normal @ TRealize @ TGradOf[w]
 ```

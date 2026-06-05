@@ -18,7 +18,7 @@ Three ideas carry the surface:
 
 - **A tensor is a `TTerm`.** [TTensorCreate]() wraps a list / `NumericArray` / `PackedArray` into a cell carrying a `TAG_TEN`; the buffer is shared zero-copy on CPU. The `TUOp*` constructors build a lazy compute graph over those cells, and the standard Wolfram operators ([Plus]() , [Times](), [Dot](), [Total](), ...) build the *same* graph through `TTerm` UpValues.
 - **Nothing runs until you ask.** The graph stays symbolic until [TRealize]() schedules it, fuses what it can, JIT-compiles each kernel, and dispatches. [TMaterialize]() runs the planner *without* dispatching, so you can inspect the schedule before any compute happens. [Normal]() reads a realized tensor back as an ordinary list.
-- **The whole graph is differentiable.** Mark a leaf [TRequiresGrad](), build a scalar, and [TGrad]() fires one backward walk over the heap, accumulating each leaf's gradient into its grad slot.
+- **The whole graph is differentiable.** Build a scalar and [TGrad]() fires one backward walk over the heap, auto-grading every float leaf and accumulating each one's gradient into its grad slot.
 
 The notebook loads the `THVMLink`` context from its metadata and the runtime initializes on first use, so the examples below start straight in - there is no load or init step.
 
@@ -266,10 +266,10 @@ TMemoryPlanGantt[TMemoryPlan[]]
 
 ## Automatic differentiation
 
-Autodiff is just more of the heap. Mark a leaf [TRequiresGrad](), build a scalar with the ordinary operators, and [TGrad]() fires one backward walk seeded with ones at the scalar - it *adds the backward branch to the graph* and accumulates each requires-grad leaf's gradient into its grad slot. It does not run a separate forward or keep a tape; [TGradOf]() reads the accumulated gradient term back, which you realize to compute. The gradient of <code>[Total]()[*W*^2]</code> is `2 W`:
+Autodiff is just more of the heap. Build a scalar with the ordinary operators and [TGrad]() fires one backward walk seeded with ones at the scalar - it *adds the backward branch to the graph* and auto-grads every reachable float leaf, accumulating each one's gradient into its grad slot. There is no `requires_grad` flag (matching tinygrad); it does not run a separate forward or keep a tape. [TGradOf]() reads the accumulated gradient term back, which you realize to compute. The gradient of <code>[Total]()[*W*^2]</code> is `2 W`:
 
 ```wl
-W = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
+W = TTensorCreate[{1., 2., 3.}];
 TGrad[Total[W^2]];
 Normal @ TRealize @ TGradOf[W]
 ```
@@ -278,7 +278,7 @@ Normal @ TRealize @ TGradOf[W]
 The forward must still be a live lazy graph when `TGrad` walks it - realizing a forward subexpression first collapses it to a buffer, and the backward can no longer thread the cotangent through it. A one-layer linear regression makes the shape concrete: with `W = {0.1, 0.2, 0.3, 0.4}` against input `{1, 2, 3, 4}` the prediction <code>[Total]()[*W* *x*]</code> is `3.0`, the residual against a target of `1.0` is `2.0`, and the squared-error gradient is *2 (residual) x*:
 
 ```wl
-W   = TRequiresGrad @ TTensorCreate[{0.1, 0.2, 0.3, 0.4}];
+W   = TTensorCreate[{0.1, 0.2, 0.3, 0.4}];
 xs  = TTensorCreate[{1., 2., 3., 4.}];
 tgt = TTensorCreate[{1.}];
 err = Total[W*xs] - tgt;
@@ -290,8 +290,8 @@ Normal @ TRealize @ TGradOf[W]
 The multi-target form differentiates several leaves in one backward walk. For the dot product <code>[Total]()[*A* *B*]</code> the gradient with respect to each factor is the other - here is `d/dA`:
 
 ```wl
-A = TRequiresGrad @ TTensorCreate[{2., 3.}];
-B = TRequiresGrad @ TTensorCreate[{5., 7.}];
+A = TTensorCreate[{2., 3.}];
+B = TTensorCreate[{5., 7.}];
 TGrad[Total[A*B], {A, B}];
 Normal @ TRealize @ TGradOf[A]
 ```

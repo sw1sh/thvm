@@ -3,8 +3,8 @@
 # thvm's backward() ACCUMULATES each leaf's cotangent into the canonical
 # C-side TenDesc.grad (tinygrad semantics), unlike PyTorch's fresh-each-
 # backward .grad.  So a forgotten opt.zero_grad() silently piles gradients
-# across steps and diverges/NaNs.  backward() now soft-warns when a
-# requires_grad leaf enters still carrying a gradient from a prior pass.
+# across steps and diverges/NaNs.  backward() now soft-warns when a float
+# leaf enters still carrying a gradient from a prior pass.
 import unittest
 import warnings
 
@@ -15,7 +15,7 @@ from thvm.tensor import _TH
 
 
 def _leaf():
-    return Tensor(np.array([2.0, 3.0], dtype=np.float32), requires_grad=True)
+    return Tensor(np.array([2.0, 3.0], dtype=np.float32))
 
 
 class TestZeroGradGuard(unittest.TestCase):

@@ -47,8 +47,8 @@ class TestNDMatmulParity(unittest.TestCase):
         A = rng.standard_normal(ashape).astype(np.float32)
         B = rng.standard_normal(bshape).astype(np.float32)
 
-        ah = thvm.Tensor(A.copy()).requires_grad_(True)
-        bh = thvm.Tensor(B.copy()).requires_grad_(True)
+        ah = thvm.Tensor(A.copy())
+        bh = thvm.Tensor(B.copy())
         oh = ah @ bh
         oh.sum().backward()
         out_th = oh.numpy()
@@ -111,9 +111,9 @@ class TestAttentionBlockParity(unittest.TestCase):
     def _attn_thvm(self, Q, K, V):
         import thvm
         d = Q.shape[-1]
-        qh = thvm.Tensor(Q.copy()).requires_grad_(True)
-        kh = thvm.Tensor(K.copy()).requires_grad_(True)
-        vh = thvm.Tensor(V.copy()).requires_grad_(True)
+        qh = thvm.Tensor(Q.copy())
+        kh = thvm.Tensor(K.copy())
+        vh = thvm.Tensor(V.copy())
         scores = (qh @ kh.transpose(-2, -1)) * (1.0 / float(np.sqrt(d)))
         attn = scores.softmax(axis=-1)
         out = attn @ vh

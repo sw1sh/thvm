@@ -7,9 +7,9 @@ assigns are LAZY: step() realizes them (tinygrad's
 `Tensor.realize(*self.schedule_step())`), or a training loop can fire
 them together with the loss via `loss.realize(*opt.schedule_step())`.
 
-Trainable params are those with requires_grad != False; an unset (None)
-requires_grad is promoted to True (tinygrad rule), while an explicit
-False (BatchNorm running stats) is a non-trained buffer.
+Trainable params are those with is_param == True (tinygrad's default);
+a buffer (BatchNorm running stats, Adam bias-correction state) opts out
+via .is_param_(False) and is realized but not updated.
 """
 from __future__ import annotations
 
@@ -29,18 +29,16 @@ class Optimizer:
     def __init__(self, params, lr: float):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        for x in params:
-            if x.requires_grad is None:
-                x.requires_grad_(True)
-        # Params must be realized TAG_TEN leaves for requires_grad +
-        # backward to register them (factory inits are lazy UOP graphs).
+        # Params must be realized TAG_TEN leaves so backward()'s in-scope
+        # leaf walk routes them back to their Tensor (factory inits are
+        # lazy UOP graphs).
         for x in params:
             x.realize()
-        self.params = _dedup([x for x in params if x.requires_grad])
-        self.buffers = _dedup([x for x in params if not x.requires_grad])
+        # tinygrad nn/optim.py:13-15 -- split the flat list by is_param:
+        # trainable params get updated, buffers are still realized.
+        self.params = _dedup([x for x in params if x.is_param])
+        self.buffers = _dedup([x for x in params if not x.is_param])
         assert self.params, "optimizer must have at least one param"
-        for p in self.params:
-            p.requires_grad_(True)
         self.lr = lr
 
     def zero_grad(self):

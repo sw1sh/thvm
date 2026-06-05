@@ -91,7 +91,6 @@ class TestReduceKindChain(unittest.TestCase):
 
         c = nn.Conv2d(1, 8, 5, bias=False)
         c.weight = Tensor(w.copy())
-        c.weight.requires_grad_()
         c(Tensor(x.copy())).relu().max_pool2d().sum().backward()
         ag = c.weight.grad.numpy()
 

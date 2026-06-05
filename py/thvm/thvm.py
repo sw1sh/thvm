@@ -133,9 +133,10 @@ _cpu_peak_reset = _bind("py_cpu_peak_reset", None)
 _cuda_jit_compiles = _bind("py_cuda_jit_compiles", c_uint64)
 _cuda_jit_evictions = _bind("py_cuda_jit_evictions", c_uint64)
 _cg_profile_dump = _bind("py_cg_profile_dump", None, c_uint32)
-_ten_set_requires_grad = _bind("py_ten_set_requires_grad", c_int32,
-                               c_uint64, c_int32)
-_ten_get_requires_grad = _bind("py_ten_get_requires_grad", c_int32, c_uint64)
+_ten_set_grad_leaf = _bind("py_ten_set_grad_leaf", c_int32,
+                           c_uint64, c_int32)
+_uop_leaf_tids = _bind("py_uop_leaf_tids", c_uint32,
+                       c_uint64, ctypes.POINTER(c_uint32), c_uint32)
 _grad_memo_hits   = _bind("py_grad_memo_hits",   c_uint64)
 _grad_memo_misses = _bind("py_grad_memo_misses", c_uint64)
 _grad_fires       = _bind("py_grad_fires",       c_uint64)
@@ -632,13 +633,23 @@ class Thvm:
     def cg_profile_dump(self, top_n: int = 20) -> None:
         _cg_profile_dump(c_uint32(top_n))
 
-    # ---- requires_grad (canonical on TenDesc.requires_grad) ----
-    def ten_set_requires_grad(self, t: Term, on: bool) -> bool:
-        return bool(_ten_set_requires_grad(c_uint64(int(t)),
-                                           c_int32(1 if on else 0)))
+    # ---- grad-leaf mark (INTERNAL; driven by backward(), not user-facing) ----
+    def ten_set_grad_leaf(self, t: Term, on: bool) -> bool:
+        """Mark/unmark a TEN leaf for the grad-accumulation walk.  Set
+        transiently by Tensor.backward() over the in-scope float leaves;
+        never exposed on the Tensor surface (tinygrad has no
+        requires_grad)."""
+        return bool(_ten_set_grad_leaf(c_uint64(int(t)),
+                                       c_int32(1 if on else 0)))
 
-    def ten_get_requires_grad(self, t: Term) -> bool:
-        return bool(_ten_get_requires_grad(c_uint64(int(t))))
+    def uop_leaf_tids(self, root: Term) -> "list[int]":
+        """Distinct TAG_TEN leaf tids reachable from `root` -- the
+        in-scope-leaf set backward() auto-marks (tinygrad's all_tensors
+        in-scope filter over thvm's term graph)."""
+        cap = 4096
+        buf = (c_uint32 * cap)()
+        n = int(_uop_leaf_tids(c_uint64(int(root)), buf, c_uint32(cap)))
+        return [int(buf[i]) for i in range(n)]
 
     def ten_get_buf_id(self, t: Term) -> int:
         return int(_ten_get_buf_id(c_uint64(int(t))))

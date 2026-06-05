@@ -123,7 +123,7 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
 
         Xf = X.astype(np.float32); Wf = W0.astype(np.float32)
         thvm.Tensor.training = True
-        wh = thvm.Tensor(Wf.copy()).requires_grad_(True)
+        wh = thvm.Tensor(Wf.copy())
         (THN.BatchNorm(Cout)(thvm.Tensor(Xf.copy()).conv2d(wh).relu())
          .max_pool2d().sum().backward())
         thvm.Tensor.training = False
@@ -221,7 +221,7 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         tinygrad.Tensor.training = False
 
         thvm.Tensor.training = True
-        wh = thvm.Tensor(CW).requires_grad_(True)
+        wh = thvm.Tensor(CW)
         THN.BatchNorm(8)(thvm.Tensor(X).conv2d(wh).relu()).sum().backward()
         g_th = wh.grad.numpy().reshape(g_tg.shape)
         thvm.Tensor.training = False

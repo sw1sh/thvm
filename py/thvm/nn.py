@@ -9,13 +9,12 @@ Tensor.uniform / .ones / .zeros).  Phase 3A scope:
   Conv2d     -- delegates to Tensor.conv2d (Phase-3A host-side cheat)
 
 state.get_parameters(obj) walks lists/tuples/dicts/objects, collecting
-every Tensor attribute (incl. requires_grad=False running stats, as
-tinygrad does -- tests replace ALL params via .replace).
+every Tensor attribute (incl. is_param=False running stats, as tinygrad
+does -- tests replace ALL params via .replace).
 
 Phase 3B will:
   - move conv2d / max_pool2d onto the composed reshape+expand+mul+sum
     unfold path (so they fuse into thvm kernels);
-  - wire backward() through requires_grad bookkeeping;
   - add optim.SGD + optim.Adam.
 """
 from __future__ import annotations
@@ -88,9 +87,9 @@ class BatchNorm:
         self.weight = Tensor.ones(sz) if affine else None
         self.bias = Tensor.zeros(sz) if affine else None
         if track_running_stats:
-            self.running_mean = Tensor.zeros(sz, requires_grad=False)
-            self.running_var = Tensor.ones(sz, requires_grad=False)
-        self.num_batches_tracked = Tensor.zeros(requires_grad=False)
+            self.running_mean = Tensor.zeros(sz).is_param_(False)
+            self.running_var = Tensor.ones(sz).is_param_(False)
+        self.num_batches_tracked = Tensor.zeros().is_param_(False)
 
     def calc_stats(self, x: Tensor) -> tuple[Tensor, Tensor]:
         if self.track_running_stats and not Tensor.training:
@@ -219,7 +218,7 @@ class _State:
     @staticmethod
     def get_parameters(obj) -> list[Tensor]:
         """tinygrad-compatible: returns ALL Tensors in the object tree
-        (incl. requires_grad=False BN running stats)."""
+        (incl. is_param=False BN running stats)."""
         return list(_get_state_dict(obj).values())
 
     @staticmethod

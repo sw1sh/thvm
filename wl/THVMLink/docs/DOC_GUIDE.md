@@ -123,7 +123,8 @@ Explain what actually happens, in the runtime's own terms:
   **automatically on realize** - it is not [TJit](). [TJit]() is the separate
   *capture/replay* closure over a whole dispatch sequence.
 - [TGrad]() **adds the backward branch to the heap** and fires one walk that
-  accumulates each requires-grad leaf's gradient into its grad slot. It does not
+  auto-grads every reachable float leaf, accumulating each one's gradient into
+  its grad slot (no `requires_grad` flag, matching tinygrad). It does not
   "run a forward pass" or keep a "tape" - there is no tape, it is all the heap.
 - `TKernelSource` renders `"C"` / `"Metal"` only on `main` (no CUDA/PTX backend).
 

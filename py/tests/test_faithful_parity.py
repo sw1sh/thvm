@@ -33,7 +33,7 @@ np.random.seed(0)
 Tensor.training = True
 bs = 8
 c1 = nn.Conv2d(1, 32, 5); c2 = nn.Conv2d(32, 32, 5); lin = nn.Linear(32 * 20 * 20, 10)
-# Adam registers requires_grad on the params (so backward populates .grad).
+# backward auto-fills .grad for every float leaf; Adam updates the params.
 nn.optim.Adam(nn.state.get_parameters([c1, c2, lin]), lr=0.001)
 x = Tensor(np.random.randn(bs, 1, 28, 28).astype(np.float32)); x.realize()
 oh = Tensor(np.eye(10)[np.random.randint(0, 10, bs)].astype(np.float32)); oh.realize()

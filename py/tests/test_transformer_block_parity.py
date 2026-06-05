@@ -174,7 +174,7 @@ class TestTransformerBlockParity(unittest.TestCase):
     def _thvm(self, realize_qkv=False):
         import thvm
         return _block(thvm.Tensor,
-                      lambda a: thvm.Tensor(a.copy()).requires_grad_(True),
+                      lambda a: thvm.Tensor(a.copy()),
                       self.W, self.X, realize_qkv=realize_qkv)
 
     def _tg(self):
@@ -284,7 +284,7 @@ class TestTransformerTrain(unittest.TestCase):
 
     def _train_thvm_mlp(self, opt_name, n_steps=6):
         import thvm
-        p = {k: thvm.Tensor(self.W[k].copy()).requires_grad_(True)
+        p = {k: thvm.Tensor(self.W[k].copy())
              for k in self._MLP_PARAMS}
         x = thvm.Tensor(self.X.copy())
         tgt = thvm.Tensor(self.target.copy())
@@ -395,7 +395,7 @@ class TestTransformerTrain(unittest.TestCase):
             ff = L(L(h, "ff1_w", "ff1_b").relu(), "ff2_w", "ff2_b")
             return LN(h + ff, "ln2_w", "ln2_b")
 
-        p = {k: thvm.Tensor(v.copy()).requires_grad_(True)
+        p = {k: thvm.Tensor(v.copy())
              for k, v in self.W.items()}
         x = thvm.Tensor(self.X.copy())
         tgt = thvm.Tensor(self.target.copy())

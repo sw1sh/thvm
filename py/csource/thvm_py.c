@@ -418,12 +418,15 @@ EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
 EXPORT uint32_t py_const_UOP_SHRINK(void) { return UOP_SHRINK; }
 EXPORT uint32_t py_const_MAX_DIM(void) { return MAX_DIM; }
 
-// --- requires_grad: canonical flag in TenDesc (Phase 3B follow-up) ---
-// The Python Tensor.requires_grad_() sets this; backward() filters
-// against it.  Eventually uop_grad's leaf rule can short-circuit at
-// requires_grad==0 leaves -- for now the flag is bookkeeping that
-// keeps the Python frontend honest about which tensors are parameters.
-EXPORT int py_ten_set_requires_grad(uint64_t t, int on) {
+// --- grad-leaf mark: INTERNAL mechanism, not a user-facing flag ---
+// backward() auto-marks every in-scope non-CONST float leaf right
+// before the walk (tinygrad spec: no requires_grad anywhere; .grad is
+// filled for every reachable float leaf, and the OPTIMIZER's param
+// list -- not a flag -- decides what updates).  grad_leaf_sup's
+// target==0 path consults this mark to drive the "accumulate each
+// reached leaf's cotangent into TenDesc.grad" walk; it is set/cleared
+// transiently by backward() and never exposed on the Tensor surface.
+EXPORT int py_ten_set_grad_leaf(uint64_t t, int on) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
   if (id == 0 || id >= TENS_NEXT) return 0;
@@ -434,11 +437,16 @@ EXPORT int py_ten_set_requires_grad(uint64_t t, int on) {
   else if (was && !now) grad_req_ncount_dec();
   return 1;
 }
-EXPORT int py_ten_get_requires_grad(uint64_t t) {
-  if (term_tag(t) != TAG_TEN) return 0;
-  u32 id = (u32)term_val(t);
-  if (id == 0 || id >= TENS_NEXT) return 0;
-  return (int)TENS[id].requires_grad;
+// Walk the UOP DAG rooted at `root` and write the distinct TAG_TEN
+// leaf tids into `out` (caller-allocated, `cap` slots).  Returns the
+// count written.  backward() uses this to enumerate the in-scope
+// leaves it should auto-mark + read back -- the tinygrad
+// "all_tensors whose uop is in scope" filter, done over thvm's term
+// graph instead of a Python all_tensors set.
+EXPORT uint32_t py_uop_leaf_tids(uint64_t root, uint32_t *out, uint32_t cap) {
+  u32 n = 0;
+  uop_leaf_tids((Term)root, out, cap, &n);
+  return n;
 }
 
 // Hot-path snapshots for the dedup-verification experiment.  Returns

@@ -44,12 +44,14 @@ _TAG_TEN = K.TAG_TEN
 import os as _os
 _BUNDLE_ASSIGNS = _os.environ.get('THVM_BUNDLE_ASSIGNS', '1') != '0'
 
-# Phase 3B: TenDesc.requires_grad is the canonical "this is a
-# parameter" flag (set via py_ten_set_requires_grad).  This dict
-# routes a TAG_TEN's tid back to its originating Python Tensor so
-# backward() can assign each leaf's .grad.  WeakValueDictionary so
-# dead tensors auto-drop -- nn parameters stay alive via their layer.
-_GRAD_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
+# Routes a realized TAG_TEN's tid back to its originating Python Tensor.
+# backward() walks the in-scope leaf tids of the loss term, looks each
+# up here, and (for the float ones) auto-fills .grad -- the tinygrad
+# spec, where backward() fills .grad for every in-scope non-CONST float
+# leaf with no requires_grad flag anywhere.  WeakValueDictionary so dead
+# tensors auto-drop; nn parameters stay alive via their layer.  Every
+# realized leaf registers here in _pin(), not just "parameters".
+_LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
     weakref.WeakValueDictionary()
 
 # Monotonic handle ids for live-tensor pinning.  Each realized Tensor
@@ -132,7 +134,7 @@ def _wrap_other(self_t: "Tensor", other) -> "Tensor":
 class Tensor:
     """thvm tensor: TAG_TEN handle + Python-tracked dtype + shape."""
 
-    __slots__ = ("term", "_dtype", "_shape", "requires_grad", "grad",
+    __slots__ = ("term", "_dtype", "_shape", "is_param", "grad",
                  "_pin_id", "_view_base", "_view_begin_end", "__weakref__")
 
     # tinygrad's class-level `Tensor.training` flag; BatchNorm reads it.
@@ -175,8 +177,7 @@ class Tensor:
     # ---- construction --------------------------------------------------
 
     def __init__(self, data=None, dtype: DType | None = None,
-                 device: str | None = None,
-                 requires_grad: bool | None = None):
+                 device: str | None = None):
         del device  # accepted for tinygrad compat; DEV picks at init
         if isinstance(data, Tensor):
             self.term = data.term
@@ -201,24 +202,18 @@ class Tensor:
             self.term = _TH.ten_create(dtype.thvm_id, list(self._shape))
             if arr.size > 0:
                 _TH.ten_write(self.term, arr.tobytes())
-        # None == "unset" (tinygrad semantics): an optimizer promotes it
-        # to True; an explicit False (BatchNorm running stats) stays a
-        # non-trained buffer.  Distinguishing the two is what lets
-        # nn.optim pick exactly the trainable parameters.
-        self.requires_grad = requires_grad
+        # is_param (tinygrad nn.optim semantics): every Tensor is a
+        # candidate optimizer parameter by default; a buffer opts out via
+        # .is_param_(False) (BatchNorm running stats, Adam bias-correction
+        # state).  This drives ONLY the optimizer's param/buffer split --
+        # backward() auto-fills .grad for every in-scope float leaf
+        # regardless of is_param (tinygrad has no requires_grad).
+        self.is_param: bool = True
         self.grad: Tensor | None = None
         self._pin_id = 0
         self._view_base = None
         self._view_begin_end = None
         self._pin()
-        # tinygrad: the constructor flag is sufficient -- wire the C-side
-        # TenDesc.requires_grad + tid->Tensor routing so backward() finds
-        # this leaf.  requires_grad_'s own guards (C-side TAG_TEN check,
-        # tid>0) make a graph-result / non-leaf term safely no-op.  Only
-        # route when truthy so the None-vs-False distinction the optimizer
-        # relies on (BatchNorm running stats stay non-trained) is preserved.
-        if requires_grad:
-            self.requires_grad_(True)
 
     @classmethod
     def _from_term(cls, term: Term, dtype: DType,
@@ -227,7 +222,7 @@ class Tensor:
         t.term = term
         t._dtype = dtype
         t._shape = tuple(int(d) for d in shape)
-        t.requires_grad = None
+        t.is_param = True
         t.grad = None
         t._pin_id = 0
         t._view_base = None
@@ -239,8 +234,10 @@ class Tensor:
 
     def _pin(self) -> None:
         """Pin the current term if it is a realized TAG_TEN, so reclaim()
-        keeps its buffer.  Re-pinning (term changed via realize/assign)
-        drops the stale handle entry first to avoid leaking pin slots."""
+        keeps its buffer, AND register it in _LEAF_TENSORS so backward()
+        can route the leaf's tid back to this Tensor.  Re-pinning (term
+        changed via realize/assign) drops the stale handle entry first to
+        avoid leaking pin slots."""
         global _PIN_NEXT
         if int(_TH.term_tag(self.term)) != _TAG_TEN:
             return
@@ -250,6 +247,9 @@ class Tensor:
         else:
             _TH.pin_drop(self._pin_id)
         _TH.pin_set(self._pin_id, self.term)
+        tid = int(_TH.term_val(self.term))
+        if tid > 0:
+            _LEAF_TENSORS[tid] = self
 
     def __del__(self):
         pid = getattr(self, "_pin_id", 0)
@@ -383,69 +383,83 @@ class Tensor:
         self._pin()
         return self
 
-    def requires_grad_(self, requires_grad: bool = True) -> "Tensor":
-        """Set the canonical TenDesc.requires_grad flag (C-side) AND
-        register the Python tensor in the tid->Tensor routing dict so
-        backward() can assign .grad back to this object."""
-        self.requires_grad = requires_grad
-        # Sync TenDesc; for graph-result Tensors with non-TAG_TEN term
-        # the C call no-ops (returns 0), which is fine -- backward is
-        # only meaningful for leaves anyway.
-        _TH.ten_set_requires_grad(self.term, requires_grad)
-        tid = int(_TH.term_val(self.term))
-        if requires_grad and tid > 0:
-            _GRAD_TENSORS[tid] = self
-        else:
-            _GRAD_TENSORS.pop(tid, None)
+    def is_param_(self, is_param: bool = True) -> "Tensor":
+        """Mark whether this Tensor is an optimizer parameter (tinygrad
+        Tensor.is_param_).  Buffers (BatchNorm running stats, Adam bias-
+        correction state) call .is_param_(False) so the optimizer's
+        param/buffer split skips them.  Has NO effect on backward() --
+        gradients flow to every in-scope float leaf regardless."""
+        self.is_param = is_param
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Walk-once backward (no grad_with_target).  Builds ONE
-        uop_grad(y, gy) root and drives wnf so the chain rule visits
-        every requires_grad leaf once and accumulates its cotangent
-        into TENS[tid].grad (the canonical TenDesc.grad accumulator,
-        populated by grad_leaf_sup's target==0 path).  We then wrap
-        each leaf's TenDesc.grad into a Tensor for caller consumption.
+        """Auto-grad-all-float-leaves backward (tinygrad spec): build ONE
+        uop_grad(y, gy) root and drive wnf so the chain rule visits every
+        in-scope leaf once, accumulating each one's cotangent into
+        TENS[tid].grad (grad_leaf_sup's target==0 path).  There is no
+        requires_grad flag: .grad is filled for EVERY in-scope non-CONST
+        float leaf, and the OPTIMIZER's param list (not a flag) decides
+        what updates.
 
-        wnf only drives the term-level chain-rule rewrite -- no
-        kernels, no materialize, no dispatch.  The actual gradient
-        values stay lazy inside TenDesc.grad; Tensor.realize(*grads)
-        drives the pipeline downstream just like tinygrad."""
+        In-scope leaves are the distinct TAG_TEN leaf tids reachable from
+        the loss term (uop_leaf_tids -- tinygrad's all_tensors-in-scope
+        filter over thvm's term graph).  We transiently mark the float
+        ones for the accumulation walk, fire wnf, read back each leaf's
+        TenDesc.grad, then unmark to leave global grad state untouched.
+
+        wnf only drives the term-level chain-rule rewrite -- no kernels,
+        no materialize, no dispatch.  The gradient values stay lazy inside
+        TenDesc.grad; Tensor.realize(*grads) drives the pipeline downstream
+        just like tinygrad."""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
                         else Tensor.ones(*self._shape, dtype=self._dtype))
-        # Guard: warn if a requires_grad leaf still carries a gradient
-        # from a prior backward().  thvm ACCUMULATES into TenDesc.grad
-        # (tinygrad semantics), so a forgotten opt.zero_grad() silently
-        # piles gradients across steps -- a footgun, since PyTorch users
-        # expect a fresh .grad each backward.  Soft, de-duped warning;
-        # intentional gradient accumulation can filter it.
-        for _tid, _leaf in list(_GRAD_TENSORS.items()):
-            if (_TH.ten_get_requires_grad(_leaf.term)
-                    and _TH.ten_get_grad(_leaf.term) != 0):
+        # In-scope leaves -> their live Tensors.  Mark every FLOAT leaf for
+        # the accumulation walk (thvm TEN leaves are buffers, never CONST,
+        # so the tinygrad CONST exclusion is the float filter here).
+        scope_tids = _TH.uop_leaf_tids(self.term)
+        leaves: "list[Tensor]" = []
+        for tid in scope_tids:
+            leaf = _LEAF_TENSORS.get(tid)
+            if leaf is None or not dtypes.is_float(leaf._dtype):
+                continue
+            _TH.ten_set_grad_leaf(leaf.term, True)
+            leaves.append(leaf)
+        # Guard: warn if any leaf entered with a stale gradient from a
+        # prior backward().  thvm ACCUMULATES into TenDesc.grad (tinygrad
+        # semantics), so a forgotten opt.zero_grad() silently piles
+        # gradients across steps -- a footgun, since PyTorch users expect a
+        # fresh .grad each backward.  Soft, de-duped warning; intentional
+        # gradient accumulation can filter it.
+        for leaf in leaves:
+            if _TH.ten_get_grad(leaf.term) != 0:
                 warnings.warn(
-                    "backward(): a requires_grad leaf entered with a "
-                    "non-zero gradient from a prior backward(); thvm "
-                    "accumulates into TenDesc.grad, so call opt.zero_grad() "
-                    "between backward passes to avoid stale accumulation "
-                    "(intentional accumulation can filter this warning).",
+                    "backward(): a leaf entered with a non-zero gradient "
+                    "from a prior backward(); thvm accumulates into "
+                    "TenDesc.grad, so call opt.zero_grad() between backward "
+                    "passes to avoid stale accumulation (intentional "
+                    "accumulation can filter this warning).",
                     stacklevel=2)
                 break
-        # Build the walk-once BWD root and drive wnf to fire the
-        # chain rule (interact_grad -> grad_leaf_sup accumulator).
-        bwd = _TH.grad(self.term, gradient.term)
-        _TH.wnf(bwd)
-        # Wrap each leaf's TenDesc.grad term.
-        for tid, leaf in list(_GRAD_TENSORS.items()):
-            if not _TH.ten_get_requires_grad(leaf.term):
-                continue
-            g_term = _TH.ten_get_grad(leaf.term)
-            if g_term != 0:
-                leaf.grad = Tensor._from_term(Term(g_term),
-                                              leaf._dtype, leaf._shape)
+        try:
+            # Build the walk-once BWD root and drive wnf to fire the chain
+            # rule (interact_grad -> grad_leaf_sup accumulator).
+            bwd = _TH.grad(self.term, gradient.term)
+            _TH.wnf(bwd)
+            # Wrap each in-scope leaf's TenDesc.grad term.
+            for leaf in leaves:
+                g_term = _TH.ten_get_grad(leaf.term)
+                if g_term != 0:
+                    leaf.grad = Tensor._from_term(Term(g_term),
+                                                  leaf._dtype, leaf._shape)
+        finally:
+            # Restore global grad state so a later backward() over a
+            # different loss starts from a clean mark set.
+            for leaf in leaves:
+                _TH.ten_set_grad_leaf(leaf.term, False)
         return self
 
     def sequential(self, layers) -> "Tensor":

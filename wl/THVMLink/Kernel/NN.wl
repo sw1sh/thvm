@@ -42,7 +42,7 @@ BeginPackage["THVMLink`"];
 
 TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation.  The result is a TTerm of TAG=LAM that can be TApp'd to a tensor or driven through TRealize/TGrad/etc.";
 TNetOf::usage           = "TNetOf[net] returns the original Wolfram net that TFromNet converted to produce the TTerm `net` (or $Failed if `net` was not built by TFromNet[net]).  Used by TNetTrain to rebuild a fresh batched forward over a training input slot.";
-TNetParams::usage       = "TNetParams[net] returns the trainable weight handles (TTensorCreate TTerms flagged TRequiresGrad) collected while TFromNet built the TTerm `net`, in layer order.  These are the tensors TGrad differentiates against and TNetTrain updates in place.";
+TNetParams::usage       = "TNetParams[net] returns the trainable weight handles (TTensorCreate TTerms) collected while TFromNet built the TTerm `net`, identified by the Sow-provenance recorded during the build, in layer order.  These are the tensors TNetTrain updates in place; TGrad auto-differentiates every reachable float leaf.";
 TNetParamInfo::usage    = "TNetParamInfo[net] returns the trainable weight handles of the TTerm `net` paired with their {layerHead, paramName} provenance, as a list of <|\"Term\", \"Layer\", \"Param\"|> associations in layer order.  TNetParams[net] is the same handles without the provenance.";
 TNetInitialize::usage   = "TNetInitialize[net] re-initialises the trainable weights of the TFromNet-built TTerm `net` in place: Glorot for weight matrices, ones for normalisation scalings, zeros for biases.  Installed as the NetInitialize UpValue on TTerms.";
 TFromLayer::usage       = "TFromLayer[layer, x] is the single-layer form of TFromNet.";
@@ -1016,10 +1016,12 @@ $layerParams[_]                  = {}
 TLayerWeights[layer_] :=
     NetExtract[layer, #] & /@ $layerParams[Head[layer]]
 
-(* Each weight becomes a TRequiresGrad leaf (the right default for a net
-   you would train -- inert for a forward-only TRealize) and is Sow'd
-   under "thvmNetParam".  A caller that wants the trainable parameters of
-   a lifted net Reaps that tag around TFromNet:
+(* Each weight is a plain TTensorCreate leaf Sow'd under "thvmNetParam".
+   The Sow-provenance -- NOT a per-tensor flag -- is how TNetParams /
+   TNetTrain identify the trainable weights (matching tinygrad's removal
+   of requires_grad: TGrad auto-grads every reachable float leaf, and the
+   net's param list decides what updates).  A caller that wants the
+   trainable parameters of a lifted net Reaps that tag around TFromNet:
      {fwd, {params}} = Reap[TFromNet[net, x], "thvmNetParam"]
    yielding the very TTerms baked into the forward, so TSet updates flow
    back into it.  Sow with no surrounding Reap is harmless.
@@ -1030,7 +1032,7 @@ TLayerWeights[layer_] :=
    the bare "thvmNetParam" tag stays the {x, y} contract existing callers
    Reap. *)
 TLayerToTensors[layer_] :=
-    With[{ts = TRequiresGrad /@ (TTensorCreate /@ TLayerWeights[layer])},
+    With[{ts = TTensorCreate /@ TLayerWeights[layer]},
         Sow[#, "thvmNetParam"] & /@ ts;
         MapThread[
             Sow[<|"Term" -> #1, "Layer" -> Head[layer], "Param" -> #2|>, "thvmNetParamInfo"] &,

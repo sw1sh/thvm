@@ -5,7 +5,7 @@ Context: THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TClearGrad
 Keywords: [autodiff, gradient, zero grad, reset, optimizer]
-SeeAlso: [TGrad, TGradOf, TRequiresGrad, TSet, TRealize]
+SeeAlso: [TGrad, TGradOf, TSet, TRealize]
 RelatedGuides: [THVMLink]
 ---
 
@@ -24,7 +24,7 @@ RelatedGuides: [THVMLink]
 Clearing returns the tensor for chaining:
 
 ```wl
-w = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
+w = TTensorCreate[{1., 2., 3.}];
 TRealize @ TGrad @ Total[w^2];
 MatchQ[TClearGrad[w], _TTerm]
 ```
@@ -35,7 +35,7 @@ MatchQ[TClearGrad[w], _TTerm]
 After clearing, the gradient slot is empty again:
 
 ```wl
-w = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
+w = TTensorCreate[{1., 2., 3.}];
 TRealize @ TGrad @ Total[w^2];
 TClearGrad[w];
 TGradOf[w]

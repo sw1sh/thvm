@@ -5,7 +5,7 @@ Context: THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGlorot
 Keywords: [init, Glorot, Xavier, He, weight, random]
-SeeAlso: [TZeros, TOnes, TMatMul, TTensorShape, TRequiresGrad]
+SeeAlso: [TZeros, TOnes, TMatMul, TTensorShape]
 RelatedGuides: [THVMLink]
 ---
 
@@ -18,7 +18,7 @@ RelatedGuides: [THVMLink]
 - `fan_in` is the product of all dimensions after the first, so a `{K, N}` weight draws from `N(0, Sqrt[2 / N-of-trailing-dims])`.
 - Suitable for ReLU and linear-layer weight initialization; pair with <code>[TZeros]()</code> for the bias.
 - Always f32 (see <code>[TTensorDType]()</code>); the values are random, so realize and read shape rather than exact data.
-- Mark it with <code>[TRequiresGrad]()</code> to treat it as a trainable parameter.
+- Use it directly as a trainable parameter; <code>[TGrad]()</code> auto-grads every float leaf, so no marking is needed.
 
 ## Basic Examples
 

@@ -12,16 +12,16 @@ RelatedTutorials: [Tensors, Overview]
 
 ## What training looks like on the tensor surface
 
-The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial built up tensors, the lazy UOp graph, kernels, and a single gradient. Training is just that gradient, in a loop: build a scalar *loss*, fire [TGrad]() to fill every parameter's gradient slot, read the gradients with [TGradOf](), and write the parameter updates back in place with [TSet](). No tape, no session - the parameters are ordinary `TTerm` leaves marked [TRequiresGrad](), and each step is a fresh backward walk over the heap.
+The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial built up tensors, the lazy UOp graph, kernels, and a single gradient. Training is just that gradient, in a loop: build a scalar *loss*, fire [TGrad]() to fill every float leaf's gradient slot, read the gradients with [TGradOf](), and write the parameter updates back in place with [TSet](). No tape, no session, no `requires_grad` flag (matching tinygrad) - the parameters are ordinary `TTerm` leaves, and each step is a fresh backward walk over the heap that auto-grads every reachable float leaf.
 
 One rule carries the whole note: **realize the gradients before you apply the update.** [TSet]() writes a parameter's buffer *in place*, and a parameter's gradient is computed by reading that same buffer - so an update that hasn't first pinned the gradient to its own buffer races its own read and the loop diverges. Pinning the gradient with [TRealize]() first is exactly what an optimizer's step does.
 
 ## A training loop from scratch
 
-Fit `w . x = 14` for `x = {1, 2, 3}` by gradient descent on the squared error. The parameter is a [TRequiresGrad]() leaf; the target and input are plain tensors:
+Fit `w . x = 14` for `x = {1, 2, 3}` by gradient descent on the squared error. The parameter is an ordinary leaf - [TGrad]() auto-grads every float leaf, so the target and input get gradients too (you simply ignore the ones you do not update):
 
 ```wl
-w = TRequiresGrad @ TTensorCreate[{0., 0., 0.}];
+w = TTensorCreate[{0., 0., 0.}];
 xs = TTensorCreate[{1., 2., 3.}];
 tgt = TTensorCreate[{14.}];
 Normal @ TRealize[(Total[w*xs] - tgt)^2]
@@ -57,10 +57,10 @@ Table[
 Real models stack linear layers with a nonlinearity. [TLinear]() is `x . W + b`; [TReLU]() is the elementwise `max(x, 0)` (built as `x * (0 < x)`, a CMPLT mask). Initialize the weights with [TGlorot]() (He/Glorot scaling) and the biases with [TZeros](), marking every one a parameter:
 
 ```wl
-w1 = TRequiresGrad @ TGlorot[{3, 8}];
-b1 = TRequiresGrad @ TZeros[{8}];
-w2 = TRequiresGrad @ TGlorot[{8, 1}];
-b2 = TRequiresGrad @ TZeros[{1}];
+w1 = TGlorot[{3, 8}];
+b1 = TZeros[{8}];
+w2 = TGlorot[{8, 1}];
+b2 = TZeros[{1}];
 mlp = xIn |-> TLinear[TReLU[TLinear[xIn, w1, b1]], w2, b2];
 TTensorShape @ TRealize @ mlp[TTensorCreate[{{1., 2., 3.}}]]
 ```
@@ -100,7 +100,7 @@ Pass a list of parameters and a matching list of moment buffers to step a whole 
 
 ```wl
 img = TTensorCreate[N @ ArrayReshape[Range[16], {1, 4, 4}]];
-cw = TRequiresGrad @ TTensorCreate[N @ ArrayReshape[Range[4], {1, 1, 2, 2}]];
+cw = TTensorCreate[N @ ArrayReshape[Range[4], {1, 1, 2, 2}]];
 cb = TTensorCreate[{0.}];
 Normal @ TRealize @ TConv2D[img, cw, cb]
 ```
@@ -135,8 +135,8 @@ Once lifted, the forward is an ordinary `TTerm`: differentiate it with [TGrad]()
 The pooled conv stack from the previous section is the front end of an image classifier. Cap it with a [TLinear]() head and you have a LeNet-style network. Mark every weight a parameter and confirm the forward maps a batch of `{1, 28, 28}` images to a `{batch, 10}` logit matrix - convolution, ReLU, max-pool, flatten, linear:
 
 ```wl
-w1 = TRequiresGrad @ TGlorot[{8, 1, 3, 3}]; b1 = TRequiresGrad @ TZeros[{8}];
-w2 = TRequiresGrad @ TGlorot[{8*13*13, 10}]; b2 = TRequiresGrad @ TZeros[{10}];
+w1 = TGlorot[{8, 1, 3, 3}]; b1 = TZeros[{8}];
+w2 = TGlorot[{8*13*13, 10}]; b2 = TZeros[{10}];
 lenet = x |-> TLinear[ArrayReshape[TMaxPool2d[TReLU[TConv2D[x, w1, b1]]], {64, 8*13*13}], w2, b2];
 TTensorShape @ TRealize @ lenet[TTensorCreate[N @ RandomReal[1, {64, 1, 28, 28}]]]
 ```
@@ -172,7 +172,7 @@ Nothing here is a special training mode: the network, the softmax cross-entropy,
 
 ### The same net, lifted from a NetChain
 
-You need not hand-assemble the layers. Build the network as a [NetChain]() and lift it with [TFromNet](): the conv head, pooling, flatten, and linear all convert, and each lifted weight is a [TRequiresGrad]() leaf. Wrapping the lift in a [Reap]() on the `"thvmNetParam"` tag hands back exactly those weight `TTerm`s - the ones baked into the forward, so a [TSet]() update flows straight back into it. Lift the same LeNet head over a batch-shaped input slot and collect its four trainable tensors:
+You need not hand-assemble the layers. Build the network as a [NetChain]() and lift it with [TFromNet](): the conv head, pooling, flatten, and linear all convert, and each lifted weight is a plain `TTerm` leaf [Sow]()n under the `"thvmNetParam"` tag. Wrapping the lift in a [Reap]() on that tag hands back exactly those weight `TTerm`s - the ones baked into the forward, so a [TSet]() update flows straight back into it (the Sow-provenance, not a flag, is how the trainable weights are identified). Lift the same LeNet head over a batch-shaped input slot and collect its four trainable tensors:
 
 ```wl
 lenet = NetInitialize[NetChain[{ConvolutionLayer[8, {3, 3}], Ramp, PoolingLayer[{2, 2}, {2, 2}], FlattenLayer[], LinearLayer[10]}, "Input" -> {1, 28, 28}], RandomSeeding -> 1234];
@@ -317,7 +317,7 @@ thvm is about 2x slower than tinygrad for this small eager step on the CPU. The 
 Because [TGradOf]() returns a live UOP graph, you can differentiate it again. The first gradient of `x^3` is `3 x^2`; differentiating *that* gives the second derivative `6 x`:
 
 ```wl
-x = TRequiresGrad @ TTensorCreate[{3.}];
+x = TTensorCreate[{3.}];
 TClearGrad[x];
 TGrad[Total[x^3]];
 Normal @ TRealize @ TGradOf[x]

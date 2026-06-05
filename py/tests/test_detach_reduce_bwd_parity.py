@@ -56,8 +56,10 @@ def _have_tg():
 
 def _thvm_grad(build):
     import thvm
-    x = build(thvm.Tensor, lambda t: t.requires_grad_(True),
-              lambda t: t.detach())
+    # thvm (like tinygrad) dropped requires_grad/requires_grad_(); backward()
+    # fills .grad for every in-scope non-CONST float leaf, so the rg() marker
+    # is an identity -- the leaf gets a gradient regardless.
+    x = build(thvm.Tensor, lambda t: t, lambda t: t.detach())
     return np.asarray(x.grad.numpy(), dtype=np.float32).reshape(-1)
 
 
@@ -173,7 +175,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         # tinygrad normalizes by batch stats, so the two sides diverge for a
         # mode mismatch, not a numerics bug.
         thvm.Tensor.training = True
-        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
+        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
         THN.BatchNorm(4)(x.conv2d(w).relu()).sum().backward()
         g_thvm = float(np.abs(w.grad.numpy()).sum())
         thvm.Tensor.training = False
@@ -215,7 +217,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         # thvm training flag BN reads its init running_mean=0/var=1 and the
         # two sides normalize differently.
         thvm.Tensor.training = True
-        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
+        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
         THN.BatchNorm(4)(x.conv2d(w).relu()).max_pool2d((2, 2)).sum().backward()
         g_thvm = w.grad.numpy()
         thvm.Tensor.training = False
@@ -248,7 +250,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         Xn = rng.standard_normal((1, 3, 8, 8)).astype(np.float32)
         Wn = rng.standard_normal((4, 3, 3, 3)).astype(np.float32)
 
-        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
+        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
         x.conv2d(w).relu().max_pool2d((2, 2)).sum().backward()
         g_thvm = w.grad.numpy()
 
@@ -284,7 +286,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
             yn = (yg - mu) * ((var + 1e-5).rsqrt())
             return yn.reshape(n, c, h, ww)
 
-        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
+        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
         gn(x.conv2d(w).relu(), G).max_pool2d((2, 2)).sum().backward()
         g_thvm = w.grad.numpy()
 

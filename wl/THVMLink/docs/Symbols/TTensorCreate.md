@@ -5,7 +5,7 @@ Context: THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTensorCreate
 Keywords: [tensor, numeric array, dtype, zero copy]
-SeeAlso: [TTensor, TTensorData, TTensorShape, TTensorDType, TRequiresGrad, TSet]
+SeeAlso: [TTensor, TTensorData, TTensorShape, TTensorDType, TSet]
 RelatedGuides: [THVMLink]
 ---
 
@@ -19,7 +19,7 @@ RelatedGuides: [THVMLink]
 
 - Accepts a `NumericArray`, a `PackedArray`, or a nested `List` of numbers. The first two are shared zero-copy on CPU; nested lists are first lifted to a `NumericArray` (one copy) and then shared.
 - Backend selection is global: tensors are allocated on the active context's default device (see <code>[TContext]()</code> and the `DEV` environment variable). Per-tensor backend selection is a follow-up.
-- Returns the same `TTerm[id]` shape the rest of the API consumes - feed it into any `TUOp*` constructor, mark it with <code>[TRequiresGrad]()</code>, or read it back with <code>[TTensorData]()</code>.
+- Returns the same `TTerm[id]` shape the rest of the API consumes - feed it into any `TUOp*` constructor, differentiate through it with <code>[TGrad]()</code> (every float leaf is auto-graded), or read it back with <code>[TTensorData]()</code>.
 - The `dtype` defaults to "f32" when the input is a Real list; integer inputs default to "i32".
 
 ## Basic Examples

@@ -51,7 +51,7 @@ def _linreg_problem(seed, d_in, d_out, n):
 
 def _thvm_run(make_opt, W0, X, Y, steps, mean=False):
     Tensor.training = True
-    w = Tensor(W0.copy()).requires_grad_(True)
+    w = Tensor(W0.copy())
     w.realize()
     opt = make_opt([w])
     x = Tensor(X); x.realize()

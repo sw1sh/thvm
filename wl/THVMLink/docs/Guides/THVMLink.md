@@ -69,8 +69,6 @@ the active <code>[TContext]()</code> selects.
 - `TTensorShape` returns the tensor's shape
 - `TTensorData` reads the tensor's buffer as a `NumericArray`
 - `TTensorDType` returns the dtype as a string
-- `TRequiresGrad` sets the parameter flag consulted by autodiff
-- `TRequiresGradQ` reads the parameter flag
 - `TSet` writes the bytes of one tensor into another's backing buffer in place
 
 ### UOp graph constructors
@@ -91,7 +89,7 @@ the active <code>[TContext]()</code> selects.
 - `TMaterialize` schedules the UOp DAG into kernels without dispatching
 - `TRealize` materializes then drives the result through `TWnf`
 - `TAssign` lazily writes a source UOp's result into a destination tensor
-- `TGrad` is `loss.backward()` - one walk that accumulates every `TRequiresGrad` leaf's gradient
+- `TGrad` is `loss.backward()` - one walk that auto-grads every reachable float leaf
 - `TGradOf` returns a leaf's lazy accumulated gradient
 - `TClearGrad` zeroes a leaf's gradient (PyTorch `zero_grad` analogue)
 

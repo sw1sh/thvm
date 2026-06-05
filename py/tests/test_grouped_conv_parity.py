@@ -77,8 +77,8 @@ def _make(name, cfg):
         gw_tg = wt.grad.numpy()
 
         # ---- thvm in-house (fwd + bwd) ----
-        xh = thvm.Tensor(X.copy()).requires_grad_(True)
-        wh = thvm.Tensor(W.copy()).requires_grad_(True)
+        xh = thvm.Tensor(X.copy())
+        wh = thvm.Tensor(W.copy())
         yh = xh.conv2d(wh, groups=G)
         yh.sum().backward()
         out = np.asarray(yh.numpy(), np.float32).reshape(ref.shape)

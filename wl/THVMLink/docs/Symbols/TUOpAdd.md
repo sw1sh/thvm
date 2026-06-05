@@ -72,7 +72,7 @@ TTensorData @ TRealize @ TUOpAdd[a, b] === TTensorData @ TRealize @ TUOpAdd[b, a
 The backward rule is identity in both inputs; the cotangent passes through unchanged:
 
 ```wl
-w = TRequiresGrad @ TTensorCreate[{1., 2., 3.}];
+w = TTensorCreate[{1., 2., 3.}];
 x = TTensorCreate[{10., 20., 30.}];
 TRealize @ TGrad @ TUOpReduce[TUOpAdd[w, x], 0, "SUM"];
 TTensorData @ TRealize @ TGradOf[w]

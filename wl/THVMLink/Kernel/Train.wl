@@ -52,9 +52,10 @@ freshTrainName[] := (
 )
 
 (* Reap the trainable weight provenance Sown under "thvmNetParamInfo" while a
-   TFromNet build runs (main's NN.wl Sows each TRequiresGrad weight's
-   <|"Term", "Layer", "Param"|> there).  Returns {forwardTerm, infoList}.
-   HoldFirst so the Sows fire inside the Reap. *)
+   TFromNet build runs (main's NN.wl Sows each weight's
+   <|"Term", "Layer", "Param"|> there).  This Sow-provenance -- not a
+   per-tensor flag -- is how the trainable weights are identified.  Returns
+   {forwardTerm, infoList}.  HoldFirst so the Sows fire inside the Reap. *)
 SetAttributes[reapParams, HoldFirst]
 reapParams[build_] := With[{r = Reap[build, "thvmNetParamInfo"]},
     {First[r], Flatten[Last[r]]}
