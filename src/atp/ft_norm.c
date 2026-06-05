@@ -106,6 +106,12 @@ static int ft_vars_contained(const AtpFtCell *target,
 // (src/atp/_.c) when ft_norm.c is `#include`'d after them.  No extern
 // declarations needed -- the call-site sees the in-TU defs directly.
 // AtpFtSubst typedef comes from ft_match.c (already included earlier).
+//
+// FT-native KBO compare lives in src/atp/ft_order.c, which is NOT
+// pulled in by _.c -- the symbol is fn (exported), so we forward-
+// declare it here before find_redex_ft / its discrim variant.
+extern KboCmp thvm_kbo_ft(const AtpFtCell *a, const AtpFtCell *b,
+                          const KboConfig *cfg);
 
 // --- SUBST_FRESH entry-clear ----------------------------------------
 //
@@ -238,14 +244,14 @@ static int find_redex_ft(AtpState        *s,
       if (ft_vars_contained(rhs, lhs)) {
         ft_subst_reset(subst_buf);
         if (ft_match(lhs, p, subst_buf)) {
-          // KBO gate via Term round-trip: build a Term mirror of p and
-          // the instantiated RHS, compare.  Correct + simple baseline.
+          // FT-native KBO gate via thvm_kbo_ft (src/atp/ft_order.c) -- reads
+          // AtpFtCell* directly via the shared thvm_kbo_flat_slice engine;
+          // no Term round-trip.  ~3x win on workloads dominated by
+          // unorientable rules (e.g. andassoc 115/158 unorient).
           AtpFt *a = (AtpFt *)s->ft_arena_ptr;
           AtpFtCell *repl_ft = ft_subst_apply(a, rhs, subst_buf, 0);
           if (repl_ft != NULL) {
-            Term t_term  = ft_to_term(p);
-            Term r_term  = ft_to_term(repl_ft);
-            if (atp_compare(s, t_term, r_term) == KBO_GT) {
+            if (thvm_kbo_ft(p, repl_ft, s->kbo) == KBO_GT) {
               *parent_out = (p == root) ? NULL : prev;
               *redex_out  = p;
               *rule_out   = r;
@@ -263,9 +269,7 @@ static int find_redex_ft(AtpState        *s,
           AtpFt *a = (AtpFt *)s->ft_arena_ptr;
           AtpFtCell *repl_ft = ft_subst_apply(a, lhs, subst_buf, 0);
           if (repl_ft != NULL) {
-            Term t_term  = ft_to_term(p);
-            Term r_term  = ft_to_term(repl_ft);
-            if (atp_compare(s, t_term, r_term) == KBO_GT) {
+            if (thvm_kbo_ft(p, repl_ft, s->kbo) == KBO_GT) {
               *parent_out = (p == root) ? NULL : prev;
               *redex_out  = p;
               *rule_out   = r;
@@ -527,9 +531,48 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   // exactly (each outer iteration calls atp_rewrite_normalize_indexed
   // with step_cap).
   u8 have_unorient = (u8)(s->n_unorient > 0u);
+  // Batched-orient fast path: when we have a full-range non-record call
+  // (i.e. NOT slice-restricted and NOT in trace-recording mode), the
+  // orientable fixpoint can be run by the Term-side discrim-tree
+  // normalizer (atp_rewrite_normalize_indexed) in ONE batched call.
+  // That path keeps the subject flat across many rewrites; here we pay
+  // a single ft_to_term/ft_from_term round-trip per outer iteration
+  // instead of one ft_match per cell per rule per inner step.
+  //
+  // Opt-in via THVM_ATPFT_BATCH_ORIENT=1.  When the slice path is in
+  // use, or when recording, we fall back to the per-step inner loop
+  // (the indexed path would rewrite against the full R, not the
+  // slice, and it does not emit TRACE_NORM_STEP entries).
+  static int batch_env_cached = -1;
+  if (batch_env_cached < 0) {
+    const char *env = getenv("THVM_ATPFT_BATCH_ORIENT");
+    batch_env_cached = (env != NULL && env[0] != '0' && env[0] != '\0') ? 1 : 0;
+  }
+  int use_batch_orient = batch_env_cached && use_full_range && !record;
   for (u32 outer = 0; outer < step_cap; outer++) {
     // Step 1: orientable fixpoint.
-    for (u32 i = 0; i < step_cap; i++) {
+    if (use_batch_orient) {
+      // One batched call to the Term-side indexed normalizer.  Round-
+      // trip the subject FT <-> Term across the call.  When the FT
+      // path is the authoritative normalizer (callers read t back as
+      // an FT cell), we rebuild the FT image from the post-normalize
+      // Term.  The fresh-FT bits get re-cleared by the per-call
+      // entry-clear pass below (next outer iter or unorient step).
+      Term t_term = ft_to_term(t);
+      Term n_term = atp_rewrite_normalize_indexed(s, t_term, step_cap);
+      // If the indexed normalizer didn't move the subject AND no
+      // unorientable equations are in R, this outer iter has nothing
+      // left to do -- skip the FT rebuild.
+      if (kbo_eq(t_term, n_term)) {
+        if (!have_unorient) break;
+        // No orient progress + unorient may still fire: keep current t.
+      } else {
+        t = ft_from_term(a, n_term, /*scratch=*/0);
+        // Entry-clear so the unorient pre-order walk below visits the
+        // whole rebuilt term.
+        ft_clear_subst_fresh(t);
+      }
+    } else for (u32 i = 0; i < step_cap; i++) {
       AtpFtCell *parent = NULL;
       AtpFtCell *redex  = NULL;
       u32        rule   = 0u;

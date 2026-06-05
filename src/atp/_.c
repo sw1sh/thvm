@@ -23,6 +23,7 @@
 # include "ft.h"
 # include "ft_alloc.c"
 # include "ft.c"
+# include "ft_order.c"   // thvm_kbo_ft / thvm_lpo_ft, used by ft_norm
 #endif
 
 // Stage 7 forward decls: the CP-queue helpers in ft_cpq.c are referenced
