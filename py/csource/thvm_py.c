@@ -302,6 +302,16 @@ EXPORT void     py_jit_end_with_result(uint64_t root) {
   jit_capture_end_with_result((Term)root);
 }
 EXPORT uint32_t py_jit_replay(uint32_t s)   { return jit_replay(s); }
+// Declare the JIT-input tensors' buf_ids (argument order) so replay can
+// rebind them to fresh inputs -- tinygrad input_replace baseline.
+EXPORT void py_jit_set_inputs(uint32_t s, uint32_t const *ids, uint32_t n) {
+  jit_capture_set_inputs(s, ids, n);
+}
+// Replay rebinding the captured input sites to this call's fresh inputs.
+EXPORT uint32_t py_jit_replay_with_inputs(uint32_t s, uint32_t const *new_ids,
+                                          uint32_t n) {
+  return jit_replay_with_inputs(s, new_ids, n);
+}
 EXPORT uint32_t py_jit_op_count(uint32_t s) { return jit_capture_op_count(s); }
 EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
 // Diagnostic accessors for one captured op.

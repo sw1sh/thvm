@@ -119,6 +119,10 @@ _jit_begin = _bind("py_jit_begin", c_uint32)
 _jit_end = _bind("py_jit_end", None)
 _jit_end_with_result = _bind("py_jit_end_with_result", None, c_uint64)
 _jit_replay = _bind("py_jit_replay", c_uint32, c_uint32)
+_jit_set_inputs = _bind("py_jit_set_inputs", None, c_uint32,
+                        ctypes.POINTER(c_uint32), c_uint32)
+_jit_replay_with_inputs = _bind("py_jit_replay_with_inputs", c_uint32,
+                                c_uint32, ctypes.POINTER(c_uint32), c_uint32)
 _jit_op_count = _bind("py_jit_op_count", c_uint32, c_uint32)
 _jit_drop = _bind("py_jit_drop", None, c_uint32)
 _tens_count = _bind("py_tens_count", c_uint32)
@@ -592,6 +596,14 @@ class Thvm:
     def jit_end(self) -> None:        _jit_end()
     def jit_end_with_result(self, root: int) -> None: _jit_end_with_result(c_uint64(root))
     def jit_replay(self, s: int) -> int: return int(_jit_replay(c_uint32(s)))
+    def jit_set_inputs(self, s: int, ids: list[int]) -> None:
+        n = len(ids)
+        arr = (c_uint32 * n)(*[c_uint32(int(i)) for i in ids]) if n else None
+        _jit_set_inputs(c_uint32(s), arr, c_uint32(n))
+    def jit_replay_with_inputs(self, s: int, ids: list[int]) -> int:
+        n = len(ids)
+        arr = (c_uint32 * n)(*[c_uint32(int(i)) for i in ids]) if n else None
+        return int(_jit_replay_with_inputs(c_uint32(s), arr, c_uint32(n)))
     def jit_op_count(self, s: int) -> int: return int(_jit_op_count(c_uint32(s)))
     def jit_drop(self, s: int) -> None: _jit_drop(c_uint32(s))
 

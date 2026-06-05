@@ -75,12 +75,37 @@ typedef struct {
   u32      buf_id;
 } JitCaptureBufRef;
 
+// Input-rebind site: a single (op, input-position) location in the
+// captured stream that reads a JIT-declared input buffer.  On every
+// replay the caller supplies the current call's fresh input buffer ids
+// and we overwrite each site's buf_id with the matching fresh one before
+// dispatching.  Mirrors tinygrad's `input_replace`
+// (engine/jit.py:124-126): GraphRunner records each call-arg position
+// that is an Ops.PARAM (a JIT input) and substitutes the fresh input
+// rawbuffer there before the graph runs.  pos==U32_MAX marks the
+// dispatch op's out_buf_id (a JIT input used in place as an output).
+#define JIT_INPUT_OUT_POS  0xFFFFFFFFu
+typedef struct {
+  u32 op_index;
+  u32 pos;          // input-position within the op, or JIT_INPUT_OUT_POS
+  u32 slot_index;   // index into JitCapture.input_buf_ids
+} JitInputSite;
+
 typedef struct {
   u32               in_use;        // 0 = free slot
   u32               n_ops;
   JitCaptureOp     *ops;           // calloc'd JIT_CAPTURE_OP_CAP entries
   u32               n_retained;
   JitCaptureBufRef *retained;      // buffers owned by this replay slot
+  // Input rebinding (tinygrad input_replace port).  input_buf_ids holds
+  // the buf_ids the JIT-declared input tensors carried at capture time;
+  // sites lists every captured (op, pos) that reads one of them.  Built
+  // lazily on the first jit_replay_with_inputs call.
+  u32               n_inputs_decl;
+  u32              *input_buf_ids;  // [n_inputs_decl]
+  u32               sites_built;
+  u32               n_sites;
+  JitInputSite     *sites;          // [n_sites]
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -204,11 +229,25 @@ static void jit_capture_retain_tensor_buf(JitCapture *c, u32 tid) {
   jit_capture_retain_buf(c, td->backend, td->buf_id);
 }
 
+static void jit_capture_clear_input_sites(JitCapture *c) {
+  if (c == NULL) {
+    return;
+  }
+  free(c->input_buf_ids);
+  c->input_buf_ids = NULL;
+  c->n_inputs_decl = 0;
+  free(c->sites);
+  c->sites = NULL;
+  c->n_sites = 0;
+  c->sites_built = 0;
+}
+
 static void jit_capture_clear_ops(JitCapture *c) {
   if (c == NULL) {
     return;
   }
   jit_capture_release_retained(c);
+  jit_capture_clear_input_sites(c);
   if (c->ops == NULL) {
     return;
   }
@@ -1303,6 +1342,120 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   return consumed;
 }
 #endif
+
+fn u32 jit_replay(u32 slot);
+
+// Declare the buf_ids the JIT-input tensors carried at capture time.
+// Called by the WL/py TinyJit wrapper right after jit_capture_end with
+// the (realized) argument tensors' buf_ids in argument order.  These are
+// the baseline ids jit_replay_with_inputs substitutes away on each
+// replay -- the tinygrad input_replace baseline (engine/jit.py:124).
+fn void jit_capture_set_inputs(u32 slot, u32 const *ids, u32 n) {
+  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return;
+  JitCapture *c = &JIT_CAPTURES[slot];
+  if (!c->in_use) return;
+  free(c->input_buf_ids);
+  c->input_buf_ids = NULL;
+  c->n_inputs_decl = 0;
+  c->sites_built = 0;
+  free(c->sites);
+  c->sites = NULL;
+  c->n_sites = 0;
+  if (n == 0 || ids == NULL) return;
+  c->input_buf_ids = (u32 *)malloc((size_t)n * sizeof(u32));
+  if (c->input_buf_ids == NULL) return;
+  for (u32 i = 0; i < n; i++) c->input_buf_ids[i] = ids[i];
+  c->n_inputs_decl = n;
+}
+
+// Build the input-rebind site table (tinygrad input_replace).  Walks
+// every captured op once and records each (op, input-position) -- and
+// each dispatch out_buf_id -- whose buf_id matches a declared input.
+// Lazy + cached: only runs on the first jit_replay_with_inputs.
+static void jit_capture_build_input_sites(JitCapture *c) {
+  if (c == NULL || c->sites_built) return;
+  c->sites_built = 1;
+  c->n_sites = 0;
+  free(c->sites);
+  c->sites = NULL;
+  if (c->n_inputs_decl == 0 || c->input_buf_ids == NULL) return;
+
+  // Two passes: count, then fill.
+  for (int pass = 0; pass < 2; pass++) {
+    u32 count = 0;
+    for (u32 i = 0; i < c->n_ops; i++) {
+      JitCaptureOp const *op = &c->ops[i];
+      if (op->kind != JIT_OP_DISPATCH) continue;
+      u32 const *ids = op->heap_in_buf_ids != NULL
+                     ? op->heap_in_buf_ids
+                     : op->in_buf_ids;
+      for (u32 j = 0; j < op->n_inputs; j++) {
+        for (u32 k = 0; k < c->n_inputs_decl; k++) {
+          if (ids[j] != c->input_buf_ids[k]) continue;
+          if (pass == 1) {
+            c->sites[count].op_index   = i;
+            c->sites[count].pos        = j;
+            c->sites[count].slot_index = k;
+          }
+          count++;
+          break;
+        }
+      }
+      // A JIT input used directly as a kernel output (rare, e.g. an
+      // in-place ASSIGN target captured as a dispatch out) also needs
+      // rebinding so the fresh call writes the fresh buffer.
+      for (u32 k = 0; k < c->n_inputs_decl; k++) {
+        if (op->out_buf_id != c->input_buf_ids[k]) continue;
+        if (pass == 1) {
+          c->sites[count].op_index   = i;
+          c->sites[count].pos        = JIT_INPUT_OUT_POS;
+          c->sites[count].slot_index = k;
+        }
+        count++;
+        break;
+      }
+    }
+    if (pass == 0) {
+      if (count == 0) { c->n_sites = 0; return; }
+      c->sites = (JitInputSite *)malloc((size_t)count * sizeof(JitInputSite));
+      if (c->sites == NULL) { c->n_sites = 0; return; }
+    } else {
+      c->n_sites = count;
+    }
+  }
+}
+
+// Rebind the captured input sites to this call's fresh input buffers,
+// then replay.  `new_ids[k]` is the buf_id of the k-th JIT-input tensor
+// for the CURRENT call; we overwrite every recorded site that reads
+// input-slot k with new_ids[k] before dispatch.  Idempotent across
+// calls: sites are positions (op, pos), never the stale buf_ids
+// themselves, so each replay overwrites from scratch.  This is thvm's
+// port of tinygrad's resolve_params substitution (engine/jit.py:126).
+fn u32 jit_replay_with_inputs(u32 slot, u32 const *new_ids, u32 n) {
+  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return 0;
+  JitCapture *c = &JIT_CAPTURES[slot];
+  if (!c->in_use) return 0;
+  jit_capture_build_input_sites(c);
+  if (n == c->n_inputs_decl && new_ids != NULL) {
+    for (u32 s = 0; s < c->n_sites; s++) {
+      JitInputSite const *site = &c->sites[s];
+      if (site->op_index >= c->n_ops) continue;
+      if (site->slot_index >= n) continue;
+      JitCaptureOp *op = &c->ops[site->op_index];
+      u32 fresh = new_ids[site->slot_index];
+      if (site->pos == JIT_INPUT_OUT_POS) {
+        op->out_buf_id = fresh;
+      } else if (site->pos < op->n_inputs) {
+        u32 *ids = op->heap_in_buf_ids != NULL
+                 ? op->heap_in_buf_ids
+                 : op->in_buf_ids;
+        ids[site->pos] = fresh;
+      }
+    }
+  }
+  return jit_replay(slot);
+}
 
 // Walk the captured sequence and re-dispatch each KernelEntry against
 // the recorded (in_buf_ids, out_buf_id).  Caller is responsible for
