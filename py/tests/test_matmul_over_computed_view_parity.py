@@ -1,18 +1,19 @@
-"""Pin the thvm scheduler bug: a MUL+REDUCE (matmul) whose operand is a
-movement-op VIEW (reshape/shrink/permute) over another op's UNREALIZED
-output mis-fuses -- the view's offset/strides are dropped, producing wrong
-results.  This is the GPT2 head-split pattern
+"""Regression: a MUL+REDUCE (matmul) whose operand is a movement-op VIEW
+(reshape/shrink/permute) over another op's UNREALIZED output must fuse
+correctly -- the view's offset/strides must be composed into the reduce's
+index, not dropped.  This is the GPT2 head-split pattern
 (`qkv[:, :, i].transpose(1, 2) @ ...`, a getitem-view of the c_attn
 matmul+bias output).
 
-Tensor.__matmul__ currently inserts a contiguity barrier
-(`_matmul_contiguous_operand`) that realizes such operands, so the PUBLIC
-`@` path is correct (test_public_matmul_is_correct).  The UNDERLYING
-scheduler bug is still live: test_raw_fused_matmul_over_computed_view_is_wrong
-reaches it by building the same graph WITHOUT the barrier (operating on the
-raw shrink view) and asserts the wrong answer that proves the bug is unfixed.
-When the C scheduler is fixed, the `xfail` flips to a pass and the barrier
-in Tensor.__matmul__ can be removed.
+The C scheduler bug (a `realized_full` view boundary with a leading unit
+axis was wrongly inlined, dropping the SHRINK begin offset) was fixed in
+topo_sort_boundaries (src/schedule/materialize.c): a full-realize node
+whose closed-range count dropped below its rank (a unit axis collapsed)
+and that is read by a consumer SHRINK with a non-zero begin is now
+realized as a boundary the consumer indexes at its own offset, instead of
+being inlined and re-decoded (which dropped the offset), matching
+tinygrad/schedule/indexing.py:63.  Both the public `@` path and the raw
+fused MUL+REDUCE over the unrealized view now match numpy.
 """
 import os
 import pathlib
@@ -63,12 +64,11 @@ class TestMatmulOverComputedView(unittest.TestCase):
         self.assertLess(_relmax(sc, scn), 1e-4,
                         f"public matmul relmax={_relmax(sc, scn):.4g}")
 
-    @unittest.expectedFailure
-    def test_raw_fused_matmul_over_computed_view_is_wrong(self):
-        """Bypass the barrier: feed the RAW (unrealized) views straight
-        into the fused MUL+REDUCE.  EXPECTED FAIL at HEAD -- the scheduler
-        drops the view offset/strides (relmax ~1+).  When the C fix lands,
-        this passes and the Tensor.__matmul__ barrier can be removed."""
+    def test_raw_fused_matmul_over_computed_view(self):
+        """Feed the RAW (unrealized) views straight into the fused
+        MUL+REDUCE, bypassing any contiguity barrier.  The scheduler must
+        compose the view offset/strides into the reduce index and match
+        numpy (relmax < 1e-4)."""
         q, k, scn = _build_views()
         kt = k.transpose(-2, -1)
         # Replicate __matmul__'s N-D contraction WITHOUT the barrier:

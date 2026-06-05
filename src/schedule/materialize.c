@@ -3723,6 +3723,38 @@ static void bypass_dbg_dump(char const *label, u32 kid, Term root) {
   bypass_dbg_dump_rec(root, 0, 0);
 }
 
+// A `realized_full` view boundary whose closed_range count is below its
+// out_ndim (a unit axis collapsed to CONST(0)) carries its only nonzero
+// VIEW offset in its consumer's INDEX_E addr.  When such a node is INLINED
+// (the effectively-full `nr == ond` gate fails because the unit axis isn't
+// a RANGE), the inline re-decode drops a consumer SHRINK's begin offset on
+// the collapsed axis -- the GPT2 head-split `qkv[:,:,i].transpose @ ...`
+// reads slice i but the inlined addr re-decodes to slice 0 for every i.
+// Returns 1 iff a DIRECT consumer of `producer_loc` is a UOP_SHRINK with a
+// non-zero begin on some axis: that consumer needs the producer realized so
+// it can INDEX_E the materialized buffer at its own offset (mirrors
+// tinygrad/schedule/indexing.py:63 -- a realize_map node is always a
+// boundary its consumers `.index()` into, never re-inlined).  A keepdim
+// reduce / pure broadcast (softmax denom, layer-norm mean) has no such
+// offset-bearing SHRINK consumer, so it stays inlined and its fusion is
+// preserved.
+static int boundary_has_offset_shrink_consumer(u64 producer_loc) {
+  u64 cons[8];
+  u32 nc = bufferize_consumers_for_loc(producer_loc, cons, 8);
+  if (nc > 8) nc = 8;
+  for (u32 c = 0; c < nc; c++) {
+    u32 cidx = bufferize_info_find(cons[c]);
+    if (cidx == 0xFFFFFFFFu || BUFFERIZE_NODES[cidx].op != UOP_SHRINK) continue;
+    u64 cloc = cons[c];
+    u32 ndim = (u32)term_val(heap_read(cloc + 1));
+    if (ndim > MAX_DIM) ndim = MAX_DIM;
+    for (u32 a = 0; a < ndim; a++) {
+      if ((u32)term_val(heap_read(cloc + 2 + 2 * a)) != 0) return 1;  // nonzero begin
+    }
+  }
+  return 0;
+}
+
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
@@ -3792,7 +3824,17 @@ static void topo_sort_boundaries(Term root) {
     if (!classify_real) {
       u32 nr  = uop_bufferize_n_ranges(buf);
       u32 ond = rangeify_unified_out_ndim_at(i);
-      int effectively_full = (ond > 0 && nr == ond);
+      // effectively-full: all axes closed (nr == ond), OR a full realize
+      // whose unit axis collapsed the closed-range count below out_ndim
+      // (nr < ond) but is read by a consumer SHRINK with a non-zero begin
+      // (the GPT2 head-split view offset) -- such a node MUST be realized
+      // so the consumer indexes the buffer at its own offset rather than
+      // inlining and re-decoding the addr (which drops the begin).  See
+      // boundary_has_offset_shrink_consumer.
+      int effectively_full = (ond > 0 && nr == ond)
+                          || (rangeify_unified_realized_full_at(i)
+                              && boundary_has_offset_shrink_consumer(
+                                   BUFFERIZE_NODES[i].loc));
       if (!rangeify_unified_is_realized(i)) continue;
       if (!effectively_full
           && !bufferize_value_would_strand_c(buf, i, &strand_cache)) continue;

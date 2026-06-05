@@ -99,34 +99,6 @@ def _finite_sentinel(value, dt: "DType"):
     return value
 
 
-# UOP movement-op codes (src/thvm.h): a view chain over these has a
-# `src` at heap slot 0 that uop_src returns.
-_MOVEMENT_OPS = frozenset({3, 4, 5, 6, 7, 8})  # RESHAPE PERMUTE EXPAND PAD SHRINK FLIP
-_UOP_KERNEL = 1
-
-
-def _term_is_movement_view_of_computed(term: int) -> bool:
-    """True iff `term` is a movement-op view chain whose base is a
-    COMPUTED (unrealized) op -- i.e. following the `src` edge through the
-    movement ops bottoms out at a TAG_UOP that is neither a realized
-    KERNEL nor another movement op.  A chain reaching a TAG_TEN (realized
-    leaf/buffer) or a KERNEL returns False (the view is safe to fuse)."""
-    cur = int(term)
-    for _ in range(64):
-        if int(_TH.term_tag(cur)) != K.TAG_UOP:
-            return False                       # TAG_TEN realized base -- safe
-        op = int(_TH.term_ext(cur))
-        if op == _UOP_KERNEL:
-            return False                       # buffer-backed -- safe
-        if op not in _MOVEMENT_OPS:
-            return True                        # computed compute op base
-        nxt = int(_TH.uop_src(cur))
-        if nxt == 0:
-            return False
-        cur = nxt
-    return False
-
-
 def _normalize_pairs(arg, shape, full):
     """Normalize a shrink/pad argument to a flat [b0,e0,b1,e1,...] list.
 
@@ -617,38 +589,6 @@ class Tensor:
     def mul(self, o): return self.__mul__(o)
     def div(self, o): return self.__truediv__(o)
 
-    def _matmul_contiguous_operand(self) -> "Tensor":
-        """Realize self if it is a movement-op VIEW over a COMPUTED
-        (unrealized) source.
-
-        thvm's scheduler mis-fuses a MUL+REDUCE (matmul) whose operand is
-        a reshape/shrink/permute view of another op's UNREALIZED output --
-        the view's offset/strides are dropped, yielding wrong scores (the
-        GPT2 head-split `qkv[:, :, i].transpose(1,2) @ ...` pattern: a
-        getitem-view of the c_attn matmul+bias output).  A view over an
-        already-realized leaf/buffer is fine, so realize only when the
-        movement chain bottoms out at a computed (TAG_UOP non-movement)
-        node.  This is a contiguity barrier -- semantically transparent,
-        matching tinygrad's own `.contiguous()` fusion-hazard barriers.
-
-        The underlying scheduler bug is pinned by a failing test
-        (py/tests/test_matmul_over_computed_view_parity.py); remove this
-        barrier once that lands.
-
-        Gated to the forward-INFERENCE path: the barrier realizes, which
-        detaches thvm's autograd graph, so it must NOT fire when any
-        requires_grad leaf is live (training / grad tests build a
-        differentiable matmul over computed views and need the gradient to
-        flow).  GPT2 inference registers no grad leaves, so the barrier is
-        active there."""
-        if _GRAD_TENSORS:
-            return self                        # differentiable path -- don't detach
-        if int(_TH.term_tag(self.term)) != K.TAG_UOP:
-            return self
-        if not _term_is_movement_view_of_computed(self.term):
-            return self
-        return self.contiguous()
-
     def __matmul__(self, other: "Tensor") -> "Tensor":
         """Matmul -- composes RESHAPE+EXPAND+MUL+REDUCE; thvm fuses.
 
@@ -660,8 +600,6 @@ class Tensor:
         expand the leading batch dims to the numpy-broadcast batch,
         then the same MUL + trailing-reduce as the 2-D path.
         """
-        self = self._matmul_contiguous_operand()
-        other = other._matmul_contiguous_operand()
         if self.ndim == 2 and other.ndim == 2:
             M, K_in = self._shape
             K2, N = other._shape
