@@ -717,10 +717,7 @@ class Thvm:
         opt is the (op, axis, arg) triple returned by kernel_opts_propose.
         """
         op, axis, arg = opt
-        new_root = _kernel_apply_opt(c_uint32(kid),
-                                     ctypes.c_uint8(int(op)),
-                                     ctypes.c_uint8(int(axis)),
-                                     c_uint32(int(arg)))
+        new_root = _kernel_apply_opt(int(kid), int(op), int(axis), int(arg))
         if new_root == 0:
             return None
         return Term(int(new_root))
@@ -732,10 +729,7 @@ class Thvm:
         (or None on bail).
         """
         op, axis, arg = opt
-        new_root = _uop_dag_apply_kopt(c_uint64(int(root)),
-                                       ctypes.c_uint8(int(op)),
-                                       ctypes.c_uint8(int(axis)),
-                                       c_uint32(int(arg)))
+        new_root = _uop_dag_apply_kopt(int(root), int(op), int(axis), int(arg))
         if new_root == 0:
             return None
         return Term(int(new_root))

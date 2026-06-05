@@ -70,7 +70,7 @@ def _thvm_run(make_opt, W0, X, Y, steps, mean=False):
 
 def _tg_run(make_opt, W0, X, Y, steps, mean=False):
     TgTensor.training = True
-    w = TgTensor(W0.copy(), requires_grad=True)
+    w = TgTensor(W0.copy())
     opt = make_opt([w])
     x = TgTensor(X); y = TgTensor(Y)
     traj = [w.numpy().copy()]

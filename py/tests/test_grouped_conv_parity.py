@@ -68,8 +68,8 @@ def _make(name, cfg):
         # calling .numpy() on a tensor realizes+detaches it, severing the
         # autograd tape (pre-existing, affects groups==1 too).  Mirror
         # the ordering on both backends for an apples-to-apples compare.
-        xt = tinygrad.Tensor(X, requires_grad=True)
-        wt = tinygrad.Tensor(W, requires_grad=True)
+        xt = tinygrad.Tensor(X)
+        wt = tinygrad.Tensor(W)
         yt = xt.conv2d(wt, groups=G)
         yt.sum().backward()
         ref = yt.numpy()

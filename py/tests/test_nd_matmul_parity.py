@@ -55,8 +55,8 @@ class TestNDMatmulParity(unittest.TestCase):
         ga_th = ah.grad.numpy().reshape(A.shape)
         gb_th = bh.grad.numpy().reshape(B.shape)
 
-        at = tinygrad.Tensor(A.copy(), requires_grad=True)
-        bt = tinygrad.Tensor(B.copy(), requires_grad=True)
+        at = tinygrad.Tensor(A.copy())
+        bt = tinygrad.Tensor(B.copy())
         ot = at @ bt
         ot.sum().backward()
         out_tg = ot.numpy()
@@ -125,9 +125,9 @@ class TestAttentionBlockParity(unittest.TestCase):
     def _attn_tg(self, Q, K, V):
         import tinygrad
         d = Q.shape[-1]
-        qt = tinygrad.Tensor(Q.copy(), requires_grad=True)
-        kt = tinygrad.Tensor(K.copy(), requires_grad=True)
-        vt = tinygrad.Tensor(V.copy(), requires_grad=True)
+        qt = tinygrad.Tensor(Q.copy())
+        kt = tinygrad.Tensor(K.copy())
+        vt = tinygrad.Tensor(V.copy())
         scores = (qt @ kt.transpose(-2, -1)) * (1.0 / float(np.sqrt(d)))
         attn = scores.softmax(axis=-1)
         out = attn @ vt

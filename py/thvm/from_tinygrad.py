@@ -182,19 +182,28 @@ def _find_buffer(u):
 def _movement_begin_end(u, kind: str):
     """Decode PAD / SHRINK lo+hi vectors into a flat [lo0,hi0,lo1,hi1,...].
 
-    Modern tinygrad encodes the params as the two trailing scalar srcs
-    (everything after the data src[0]): lo and hi.  Each is either a
-    per-dim VCONST (arg is a tuple) or a scalar CONST broadcast across
-    every dim (e.g. SHRINK begins of all-zero is one CONST(0)).  Older
-    tinygrad puts a ((lo,hi),...) tuple in u.arg, used as a fallback.
-    For SHRINK lo/hi are begin/end ranges; for PAD they are the
-    before/after widths -- the same two-vector layout either way.
+    Current tinygrad exposes the per-dim ((lo,hi),...) tuple directly via
+    the UOp.marg accessor (movement-arg); use it when present.  Older
+    tinygrad encoded the params as the two trailing scalar srcs after the
+    data src[0]: lo and hi, each a per-dim VCONST or a broadcast CONST,
+    or a ((lo,hi),...) tuple in u.arg -- kept as fallbacks.  For SHRINK
+    lo/hi are begin/end ranges; for PAD they are the before/after widths.
     """
     Ops = _ops()
     in_ndim = len(_shape_of(u.src[0]))
 
+    marg = getattr(u, "marg", None)
+    if marg is not None:
+        flat: list[int] = []
+        for pair in marg:
+            flat.extend([int(pair[0]), int(pair[1])])
+        return flat
+
+    # VCONST was removed in newer tinygrad; guard the attribute lookup.
+    vconst = getattr(Ops, "VCONST", None)
+
     def _vec(s, n):
-        if s.op == Ops.VCONST:
+        if vconst is not None and s.op == vconst:
             return tuple(int(x) for x in s.arg)
         if s.op == Ops.CONST:
             v = getattr(s.arg, "x", s.arg)   # unwrap ConstInt/ConstFloat
@@ -202,7 +211,8 @@ def _movement_begin_end(u, kind: str):
         raise NotImplementedError(
             f"{kind} param src is {s.op}, expected CONST/VCONST")
 
-    param_srcs = [s for s in u.src[1:] if s.op in (Ops.VCONST, Ops.CONST)]
+    param_ops = (Ops.CONST,) if vconst is None else (vconst, Ops.CONST)
+    param_srcs = [s for s in u.src[1:] if s.op in param_ops]
     if len(param_srcs) >= 2:
         lo = _vec(param_srcs[-2], in_ndim)
         hi = _vec(param_srcs[-1], in_ndim)

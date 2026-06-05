@@ -52,7 +52,7 @@ def _thvm_steps(make_opt, steps):
 
 def _tg_steps(make_opt, steps):
     w0, target = _problem()
-    w = TgTensor(w0.copy(), requires_grad=True)
+    w = TgTensor(w0.copy())
     opt = make_opt([w])
     TgTensor.training = True
     for _ in range(steps):

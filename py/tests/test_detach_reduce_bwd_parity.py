@@ -63,7 +63,10 @@ def _thvm_grad(build):
 
 def _tg_grad(build):
     from tinygrad import Tensor
-    x = build(Tensor, lambda t: t.requires_grad_(), lambda t: t.detach())
+    # Newer tinygrad dropped requires_grad/requires_grad_(); backward() fills
+    # .grad for every in-scope non-CONST float leaf (tensor.py:838), so the
+    # rg() marker is an identity here -- the leaf gets a gradient regardless.
+    x = build(Tensor, lambda t: t, lambda t: t.detach())
     return np.asarray(x.grad.numpy(), dtype=np.float32).reshape(-1)
 
 
@@ -144,19 +147,17 @@ class TestDetachReduceBwdParity(unittest.TestCase):
 
     def test_batchnorm_block_bwd_n1(self):
         # conv->relu->BatchNorm(train)->sum, N=1.  The conv-weight grad here is
-        # STRUCTURALLY ZERO (fp64 finite-diff: |grad|.sum() ~1.8e-7, base loss
-        # ~1e-14 -- sum(BN_train(.)) is a constant since each channel's
-        # normalized values sum to 0).  This is NOT the dropped-live-mean-adjoint
-        # bug above (that one returns EXACTLY the per-channel mean == sum(invstd)
-        # scale, ~26000 for this shape; thvm returns 377, four orders of
-        # magnitude smaller).  It is the SAME class as the three
-        # test_composite_reduce_bwd_parity cases: a reduction-ORDER divergence
-        # that fails to cancel to roundoff on a cancellation-to-zero, AND it is
-        # invariant to N (thvm 377/648/1218 at N=1/2/4 vs tinygrad ~1e-5), so it
-        # is not N==1-specific.  The assertion is absolute (true grad is 0).
-        # Lives here so the detach/N=1 file documents the boundary between the
-        # two distinct roots; the actual fix is the composite-reduce reduction-
-        # order arc, not the size-1-axis nested-reduce arc.
+        # STRUCTURALLY ZERO (fp64 finite-diff: |grad|.sum() ~2e-7, base loss
+        # ~3e-13 -- sum(BN_train(.)) is a constant since each channel's
+        # normalized values sum to 0).  With BN in TRAIN mode on both sides
+        # thvm cancels to ~3e-5 (vs tinygrad ~1e-5): benign reduce roundoff,
+        # same class as the test_composite_reduce_bwd_parity cases.  (An earlier
+        # revision of this test ran the thvm side without the training flag, so
+        # thvm's BN read its init running_mean=0/var=1 -> sum(x*~1) -> a real
+        # nonzero ~377 grad; that was a mode mismatch in the test, not a thvm
+        # numerics bug.  Scheduling tinygrad's OWN train-mode backward graph
+        # through thvm via from_tinygrad gives ~1e-5, confirming thvm's
+        # scheduler is correct on this graph.)
         import thvm
         import thvm.nn as THN
         import tinygrad
@@ -165,18 +166,26 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         Xn = rng.standard_normal((1, 3, 8, 8)).astype(np.float32)
         Wn = rng.standard_normal((4, 3, 3, 3)).astype(np.float32)
 
+        # Both sides MUST run BN in TRAIN mode: the structural-zero property
+        # (sum(BN_train) is constant) only holds for batch statistics.  Without
+        # the thvm training flag, thvm's BN reads its init running_mean=0/var=1
+        # and computes sum(x*~1) -- a genuinely nonzero grad (~377) -- while
+        # tinygrad normalizes by batch stats, so the two sides diverge for a
+        # mode mismatch, not a numerics bug.
+        thvm.Tensor.training = True
         x = thvm.Tensor(Xn); w = thvm.Tensor(Wn).requires_grad_(True)
         THN.BatchNorm(4)(x.conv2d(w).relu()).sum().backward()
         g_thvm = float(np.abs(w.grad.numpy()).sum())
+        thvm.Tensor.training = False
 
         tinygrad.Tensor.training = True
-        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)
+        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
         TGN.BatchNorm(4)(tx.conv2d(tw).relu()).sum().backward()
         g_tg = float(np.abs(tw.grad.numpy()).sum())
         tinygrad.Tensor.training = False
 
-        # True grad is 0 (fp64-proven); thvm must cancel to tinygrad's roundoff
-        # floor.  Currently FAILS (thvm 377 >> tinygrad 1e-5).
+        # True grad is 0 (fp64-proven).  With BN in train mode on both sides
+        # thvm cancels to ~3e-5 (vs tinygrad ~1e-5) -- benign reduce roundoff.
         self.assertLess(g_thvm, 100.0 * max(g_tg, 1e-4),
                         f"conv1 weight-grad (true=0): thvm {g_thvm} vs "
                         f"tinygrad {g_tg} -- reduction-order roundoff on a "
@@ -212,7 +221,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         thvm.Tensor.training = False
 
         tinygrad.Tensor.training = True
-        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)
+        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
         TGN.BatchNorm(4)(tx.conv2d(tw).relu()).max_pool2d((2, 2)).sum() \
             .backward()
         g_tg = tw.grad.numpy()
@@ -243,7 +252,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         x.conv2d(w).relu().max_pool2d((2, 2)).sum().backward()
         g_thvm = w.grad.numpy()
 
-        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)
+        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
         tx.conv2d(tw).relu().max_pool2d((2, 2)).sum().backward()
         g_tg = tw.grad.numpy()
 
@@ -279,7 +288,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         gn(x.conv2d(w).relu(), G).max_pool2d((2, 2)).sum().backward()
         g_thvm = w.grad.numpy()
 
-        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn, requires_grad=True)
+        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
         gn(tx.conv2d(tw).relu(), G).max_pool2d((2, 2)).sum().backward()
         g_tg = tw.grad.numpy()
 

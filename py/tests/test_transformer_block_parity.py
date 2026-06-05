@@ -180,7 +180,7 @@ class TestTransformerBlockParity(unittest.TestCase):
     def _tg(self):
         import tinygrad
         return _block(tinygrad.Tensor,
-                      lambda a: tinygrad.Tensor(a.copy(), requires_grad=True),
+                      lambda a: tinygrad.Tensor(a.copy()),
                       self.W, self.X)
 
     def test_forward_parity(self):
@@ -312,7 +312,7 @@ class TestTransformerTrain(unittest.TestCase):
 
     def _train_tg_mlp(self, opt_name, n_steps=6):
         import tinygrad
-        p = {k: tinygrad.Tensor(self.W[k].copy(), requires_grad=True)
+        p = {k: tinygrad.Tensor(self.W[k].copy())
              for k in self._MLP_PARAMS}
         x = tinygrad.Tensor(self.X.copy())
         tgt = tinygrad.Tensor(self.target.copy())
@@ -362,23 +362,19 @@ class TestTransformerTrain(unittest.TestCase):
         self.assertLess(_relmax(np.array(th), np.array(tg)), 1e-3,
                         f"muon descent thvm {th} vs tg {tg}")
 
-    def test_full_block_train_goes_nan_step1(self):
-        """GUARDRAIL for the fix workflow: the FULL block (with attention)
-        trains to a FINITE loss at step 0 but NaN at step 1 -- the wrong
-        fused-attention forward produces wrong/exploding grads.  tinygrad's
-        identical full block descends cleanly (no NaN) for 8 steps.  This
-        test pins the CURRENT broken behavior (step0 finite, step1 NaN) so
-        the fusion fix can flip it; it is EXPECTED to assert NaN at HEAD.
+    def test_full_block_train_finite_and_descends(self):
+        """The FULL transformer block (with fused attention) trains to FINITE
+        losses that DESCEND, matching tinygrad's identical block.  This was
+        the guardrail for the fused-attention forward fix: the block used to
+        go NaN at step 1 (wrong/exploding grads from the broken N-D attention
+        forward).  With the N-D matmul + rank-1 softmax work landed, both
+        steps are finite and the loss descends, tracking tinygrad.
 
-        Bounded to 2 steps: each step is ~16s on the buggy graph."""
+        Bounded to 2 steps for speed."""
         import thvm
-        p = {k: thvm.Tensor(v.copy()).requires_grad_(True)
-             for k, v in self.W.items()}
-        x = thvm.Tensor(self.X.copy())
-        tgt = thvm.Tensor(self.target.copy())
-        opt = thvm.optim.Adam(list(p.values()), lr=1e-2)
+        import tinygrad
 
-        def fwd():
+        def thvm_fwd(p, x):
             def L(t, wn, bn):
                 return t.linear(p[wn].transpose(), p[bn])
 
@@ -399,21 +395,45 @@ class TestTransformerTrain(unittest.TestCase):
             ff = L(L(h, "ff1_w", "ff1_b").relu(), "ff2_w", "ff2_b")
             return LN(h + ff, "ln2_w", "ln2_b")
 
+        p = {k: thvm.Tensor(v.copy()).requires_grad_(True)
+             for k, v in self.W.items()}
+        x = thvm.Tensor(self.X.copy())
+        tgt = thvm.Tensor(self.target.copy())
+        opt = thvm.optim.Adam(list(p.values()), lr=1e-2)
         losses = []
         with thvm.Tensor.train():
             for _ in range(2):
                 opt.zero_grad()
-                d = fwd() - tgt
+                d = thvm_fwd(p, x) - tgt
                 loss = (d * d).mean()
                 loss.backward()
                 sched = opt.schedule_step()
                 thvm.Tensor.realize(loss, *sched)
                 losses.append(float(loss.numpy()))
-        self.assertFalse(np.isnan(losses[0]),
-                         f"step0 should be finite, got {losses}")
-        self.assertTrue(np.isnan(losses[1]),
-                        f"EXPECTED step1 NaN (forward bug); got {losses} -- "
-                        "if this is finite the fusion bug may be fixed")
+
+        # tinygrad reference: the identical full block.
+        tp = {k: tinygrad.Tensor(v.copy()) for k, v in self.W.items()}
+        tx = tinygrad.Tensor(self.X.copy())
+        ttgt = tinygrad.Tensor(self.target.copy())
+        from tinygrad.nn.optim import Adam as TgAdam
+        topt = TgAdam(list(tp.values()), lr=1e-2)
+        tlosses = []
+        with tinygrad.Tensor.train():
+            for _ in range(2):
+                topt.zero_grad()
+                d = thvm_fwd(tp, tx) - ttgt
+                loss = (d * d).mean()
+                loss.backward()
+                loss.realize()
+                tlosses.append(float(loss.numpy()))
+                topt.step()
+
+        self.assertFalse(any(np.isnan(losses)),
+                         f"full block should train finite, got {losses}")
+        self.assertLess(losses[1], losses[0],
+                        f"full block should descend, got {losses}")
+        self.assertLess(_relmax(np.array(losses), np.array(tlosses)), 1e-3,
+                        f"full block thvm {losses} vs tinygrad {tlosses}")
 
 
 if __name__ == "__main__":

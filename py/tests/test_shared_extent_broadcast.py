@@ -198,7 +198,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
             t = Tensor(a.copy()).requires_grad_()
             self._rms_loss_thvm(t).backward()
             g = t.grad.numpy()
-            tg = TgTensor(a.copy(), requires_grad=True)
+            tg = TgTensor(a.copy())
             self._rms_loss_tg(tg).backward()
             g_ref = tg.grad.numpy()
             self.assertLessEqual(
@@ -230,7 +230,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
             t = Tensor(a.copy()).requires_grad_()
             (t.softmax() * Tensor(w)).sum().backward()
             g = t.grad.numpy()
-            tg = TgTensor(a.copy(), requires_grad=True)
+            tg = TgTensor(a.copy())
             (tg.softmax() * TgTensor(w)).sum().backward()
             g_ref = tg.grad.numpy()
             self.assertLessEqual(
@@ -277,7 +277,7 @@ class TestRank3BackwardBroadcast(unittest.TestCase):
             t = Tensor(a.copy()).requires_grad_()
             self._ln_thvm(t, w).backward()
             g = t.grad.numpy()
-            tg = TgTensor(a.copy(), requires_grad=True)
+            tg = TgTensor(a.copy())
             self._ln_tg(tg, w).backward()
             g_ref = tg.grad.numpy()
             self.assertLessEqual(
