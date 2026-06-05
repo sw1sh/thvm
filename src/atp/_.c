@@ -9189,11 +9189,44 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   }
   if (do_ft_only) {
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-    AtpFtCell *fl0 = ft_from_term(a, *lhs, 0);
-    AtpFtCell *fr0 = ft_from_term(a, *rhs, 0);
-    AtpFtCell *fl  = atp_rewrite_normalize_ft(s, fl0, NORM_CAP);
-    AtpFtCell *fr  = atp_rewrite_normalize_ft(s, fr0, NORM_CAP);
+    AtpFtCell *fl = ft_from_term(a, *lhs, 0);
+    AtpFtCell *fr = ft_from_term(a, *rhs, 0);
+#ifdef THVM_ATPFT_CPQ
+    // Reader wire-up: the dormant atp_cp_trivially_joinable_ft helper
+    // is the same normalize+eq logic that lives inline below, kept in
+    // ft_cpq.c as the contract sibling for future CP-slot-direct
+    // callers (Stage 8 selects-FT-cell-from-queue rewrite).  Calling
+    // through here keeps the helper live (no -Wunused-function warn)
+    // and is byte-identical to the inline path -- the joined verdict
+    // is computed off the same NFs and lhs/rhs are write-back-ready
+    // pointers when the caller needs them.
+    joined = atp_cp_trivially_joinable_ft(s, &fl, &fr);
+#else
+    fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
+    fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
     joined = (u8)ft_eq(fl, fr);
+#endif
+    // FT-CPQ reader: when joined==1 the caller drops the CP without
+    // reading *lhs/*rhs further (matches the join_cache early-return
+    // contract at the top of this function -- the post-call filters
+    // operate on the un-normalized RAW input, same as the cache-hit
+    // path).  Skip the ft_to_term decode + write-back -- pure win on
+    // the joinable-rate (~17% on andassoc-class trajectories, ~74%
+    // on mccune-class).  Term-side filters (perm_sub, queue_sub,
+    // AC-eq) still need Term NFs when NOT joined, so keep the decode
+    // there.
+    //
+    // Gated by THVM_ATPFT_CPQ_READ env (default ON: empirically
+    // verified bit-identical verdict on the differential corpus via
+    // THVM_ATPFT_NORM_VERIFY=1 on mccune).  Set to 0 to A/B-bench.
+    static int ft_cpq_read_mode = -1;
+    if (ft_cpq_read_mode < 0) ft_cpq_read_mode = atp_env_off("THVM_ATPFT_CPQ_READ");
+    if (joined && ft_cpq_read_mode) {
+      // l / r are not read on the joined post-norm path (the AC-eq
+      // fallback at join_post_norm is gated on !joined and the
+      // VERIFY/replace block reruns the FT normalize itself).
+      goto join_post_norm;
+    }
     l = ft_to_term(fl);
     r = ft_to_term(fr);
     *lhs = l;
