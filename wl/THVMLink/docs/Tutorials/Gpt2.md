@@ -1,0 +1,116 @@
+---
+Template: TechNote
+Name: Gpt2
+Title: GPT-2 Inference with THVMLink
+Context: THVMLink`
+Paclet: WolframInstitute/THVMLink
+URI: WolframInstitute/THVMLink/tutorial/Gpt2
+Keywords: [GPT-2, GPT2, transformer, attention, self-attention, causal mask, multi-head, layer normalization, LayerNorm, GELU, embedding, language model, text generation, autoregressive, NetModel, TFromNet, inference]
+RelatedGuides: [THVMLink]
+RelatedTutorials: [Train, Tensors, Overview]
+---
+
+## A transformer on the tensor surface
+
+The [Train](paclet:WolframInstitute/THVMLink/tutorial/Train) tutorial lifted a convolutional classifier through [TFromNet]() and trained it. This note lifts a *language model* - the 117M-parameter GPT-2 - and runs real inference: encode a prompt, run the transformer forward, and greedily generate a continuation.
+
+GPT-2 is a stack of twelve identical pre-norm transformer blocks. Each block is two residual branches: causal multi-head self-attention around a [LayerNorm](paclet:WolframInstitute/THVMLink/ref/TLayerNorm), then a [GELU](paclet:WolframInstitute/THVMLink/ref/TGELU) feed-forward around a second LayerNorm. A token [EmbeddingLayer]() plus a learned positional embedding feed the stack; a final LayerNorm and a tied linear head turn the last hidden state into next-token logits over the 50257-token vocabulary. Every one of those pieces is a `TTerm` graph built from the same movement and reduce primitives the rest of THVMLink uses - `Dot`, [TSoftmaxAxis](), [TLayerNorm]() - so the whole model is one lazy graph you [TRealize]() at the end.
+
+Each building block below is checked against the Wolfram layer it mirrors, to f32 tolerance. That parity is the correctness gate; the full inference script at the end strings the verified blocks into the published GPT-2 weights.
+
+## Token and positional embeddings
+
+A token id is just a row lookup into the embedding matrix. <code>[TEmbeddingMatrix]()[*table*, *ids*]</code> gathers the rows of a `{vocab, dim}` table for a host-side list of 0-indexed ids and stitches them into a `{Length[ids], dim}` matrix. Wolfram's [EmbeddingLayer]() is 1-indexed, so the lift subtracts one. Take a tiny `{6, 4}` table and gather three rows:
+
+```wl
+table = TTensorCreate[{{0., 1., 2., 3.}, {4., 5., 6., 7.}, {8., 9., 10., 11.},
+                       {12., 13., 14., 15.}, {16., 17., 18., 19.}, {20., 21., 22., 23.}}];
+Normal @ TRealize @ TEmbeddingMatrix[table, {0, 4, 2}]
+```
+<!-- => {{0., 1., 2., 3.}, {16., 17., 18., 19.}, {8., 9., 10., 11.}} -->
+
+GPT-2 sums the token embedding and the positional embedding (the embedding sub-graph's `inputCombine` is [Plus]()). With the same table standing in for positions, the combined embedding of ids `{0, 4, 2}` at positions `{0, 1, 2}` is the elementwise sum:
+
+```wl
+table = TTensorCreate[{{0., 1., 2., 3.}, {4., 5., 6., 7.}, {8., 9., 10., 11.},
+                       {12., 13., 14., 15.}, {16., 17., 18., 19.}, {20., 21., 22., 23.}}];
+tok = TEmbeddingMatrix[table, {0, 4, 2}];
+pos = TEmbeddingMatrix[table, {0, 1, 2}];
+Normal @ TRealize[tok + pos]
+```
+<!-- => {{0., 2., 4., 6.}, {20., 22., 24., 26.}, {16., 18., 20., 22.}} -->
+
+## Layer normalization
+
+GPT-2's [NormalizationLayer]() standardizes each position across the feature axis - subtract the row mean, divide by the root of the (biased) row variance plus `1.*^-5` - then applies a learned per-feature scale and shift. <code>[TLayerNormAffine]()[*x*, *gamma*, *beta*]</code> is exactly that, and it matches the Wolfram layer's own output to about `1.*^-7`. Normalize a `{2, 4}` input with unit scale and zero shift, so each row comes out mean-zero, unit-variance:
+
+```wl
+x = TTensorCreate[{{1., 2., 3., 4.}, {-2., 0., 2., 4.}}];
+gamma = TTensorCreate[{1., 1., 1., 1.}];
+beta = TTensorCreate[{0., 0., 0., 0.}];
+Normal @ TRealize @ TLayerNormAffine[x, gamma, beta]
+```
+<!-- => {{-1.34164, -0.447214, 0.447214, 1.34164}, {-1.34164, -0.447214, 0.447214, 1.34164}} -->
+
+The bare [TLayerNorm]() (no learned scale or shift) does the standardize step alone; the affine form multiplies by *gamma* and adds *beta* along the last axis.
+
+## The GELU activation
+
+The feed-forward block's nonlinearity is the tanh-approximation GELU, `0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))`. [TGELU]() composes it from [TTanh](), which thvm computes as `2 sigmoid(2x) - 1` so the exponent stays negative and the result saturates cleanly to `+-1` instead of overflowing to NaN - GELU's cubic argument grows fast enough to matter. Apply it across a span that reaches into that tail:
+
+```wl
+x = TTensorCreate[{-4., -1., 0., 1., 4., 12.}];
+Normal @ TRealize @ TGELU[x]
+```
+<!-- => {-0.00007, -0.15881, 0., 0.84119, 3.99993, 12.} -->
+
+This matches Wolfram's `ElementwiseLayer[0.5 # (1 + Tanh[0.797885 (# + 0.044715 #^3)]) &]` to about `1.*^-7` across the same range, with no overflow even at `x = 60`.
+
+## Causal multi-head self-attention
+
+Attention is the heart of the block. Project the input to queries, keys, and values; for each head, score every query against every key with a scaled dot product, mask out future positions, softmax each row, and mix the values. <code>[TMultiHeadAttention]()[*Q*, *K*, *V*, *nHeads*, *mask*]</code> does this over flat `{seq, dim}` projections (it reshapes to `{nHeads, seq, dHead}` internally), with [TCausalMask]() supplying the additive `{seq, seq}` bias that is `0` on and below the diagonal and `-1.*^9` above it - so position *i* attends only to positions `<= i`.
+
+Build a two-head example over a length-three sequence and confirm the causal structure: the first row attends only to itself, so its output is exactly the first value vector of each head:
+
+```wl
+q = TTensorCreate[{{1., 0., 0., 1.}, {0., 1., 1., 0.}, {1., 1., 0., 0.}}];
+k = TTensorCreate[{{1., 0., 0., 1.}, {0., 1., 1., 0.}, {1., 1., 0., 0.}}];
+v = TTensorCreate[{{2., 3., 4., 5.}, {6., 7., 8., 9.}, {10., 11., 12., 13.}}];
+Normal @ TRealize @ TMultiHeadAttention[q, k, v, 2, TCausalMask[3]]
+```
+<!-- => {{2., 3., 4., 5.}, {4.67905, 5.67905, 6.67905, 7.67905}, {7.02094, 8.02094, 8., 9.}} -->
+
+GPT-2's attention sub-network uses a bare-dot scoring net (no key transform), `Mask -> "Causal"`, and pre-scales the queries by `1/Sqrt[64]` in a separate node - arithmetically identical to the `1/Sqrt[dHead]` scale [TMultiHeadAttention]() folds in. The lift matches that spec, and a manual per-head bare-dot computation, to about `1.*^-8`.
+
+## One transformer block
+
+[TGPT2SelfAttention]() wires the four projections (query, key, value, output) around [TMultiHeadAttention](), and [TGPT2MLP]() is the GELU feed-forward (`linear -> GELU -> linear`). [TGPT2Block]() assembles a full pre-norm block: the input plus attention-of-its-LayerNorm, then that plus the MLP-of-its-second-LayerNorm. With twelve heads and `dim = 768`, one block maps a `{seq, 768}` hidden state to another `{seq, 768}` - this is the unit the decoder stacks twelve deep.
+
+The whole forward - token plus positional embedding, the twelve blocks, the final LayerNorm, and the tied head that projects onto the token-embedding matrix to get `{seq, vocab}` logits - is <code>[TGPT2FromArrays]()[*arrays*, *ids*]</code>. The last row of its output is the next-token distribution.
+
+## Loading the published weights
+
+The GPT-2 weights ship in the Wolfram Neural Net Repository. On recent NeuralNetworks versions the high-level [NetModel]() deserializer trips over a post-hoc `EmbeddingLayer` array and returns `$Failed`, so the example helper [`wl/THVMLink/Examples/gpt2_weights.wl`](../../Examples/gpt2_weights.wl) reads the cached `WLNet` file directly and pulls the weights out of the node tree. `GPT2ExtractArrays[]` returns the embedding matrices, the twelve per-block parameter sets, and the final-norm scale and shift; `GPT2Encoder[]` gives the BPE encoder and `GPT2Labels[]` the decoder token strings. (Run `NetModel["GPT2 Transformer Trained on WebText Data"]` once, online, to populate the cache.)
+
+The encoder turns a prompt into 1-indexed token ids, and the decoder labels turn them back into text - the round-trip is exact:
+
+```wl
+#| eval: false
+Get[FileNameJoin[{PacletObject["WolframInstitute/THVMLink"]["Location"], "Examples", "gpt2_weights.wl"}]];
+encoder = GPT2Encoder[];
+labels = GPT2Labels[];
+StringJoin[labels[[encoder["The quick brown fox"]]]]
+```
+<!-- => "The quick brown fox" -->
+
+## Generating text
+
+Greedy generation is a loop: run [TGPT2FromArrays]() over the running id sequence, take the [Ordering]() argmax of the last row, append it, and repeat. [`wl/THVMLink/Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) runs the whole pipeline. On the prompt `"The quick brown fox"` it generates:
+
+```
+The quick brown foxes are a great way to get to
+```
+
+The first generated token is id 19 (`"es"`), and that argmax agrees with an independent numpy GPT-2 forward over the same extracted weights (top-5 next tokens `{19, 118, 63, 83, 50246}`) - so thvm reproduces GPT-2's own next-token prediction. Each forward rebuilds and realizes the full twelve-block graph including the 50257-wide head, so generation on the CPU runs about 20 s per token; the script prints each token as it lands.
+
+Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmaxAxis](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.

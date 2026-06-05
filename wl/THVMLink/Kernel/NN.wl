@@ -57,7 +57,8 @@ TLinear::usage          = "TLinear[x, W, b] computes x @ W + b where x has shape
 TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
 TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
-TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(u + 1) where u = exp(2x) = EXP2(x * 2 * log2 e).  Uses only existing UOPs (no UOP_TANH primitive).  Loses precision for |x| > ~10 due to exp overflow; that's accepted for now since hidden activations rarely sit there.";
+TTanh::usage            = "TTanh[x] = elementwise tanh = 2*sigmoid(2x) - 1, where sigmoid(x) = 1/(1 + e^(-x)).  The negated exponent keeps it finite for all x (saturating to +-1) and fully differentiable -- the older (e^(2x)-1)/(e^(2x)+1) form returned NaN once 2x left the f32 exp range, which the cubic argument of tanh-form GELU triggers.  No UOP_TANH primitive needed.";
+TSigmoid::usage         = "TSigmoid[x] = 1 / (1 + e^(-x)), the numerically stable logistic sigmoid (the exponent is negated so large |x| saturates to 0 or 1 instead of overflowing to NaN).  Matches tinygrad's sigmoid lowering.";
 TSoftmax::usage         = "TSoftmax[x] = exp(x - max(x)) / sum(exp(x - max(x))) over axis 0.  exp via the EXP2 + log2(e) chain.  Numerically stable (max-subtract) and grad-correct: every reduce is re-broadcast with an explicit TUOpExpand so the SUB/MUL chain rule keeps the softmax cross-coupling term.";
 TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG2(x) * ln(2) since the runtime has UOP_LOG2 but no UOP_LOG.";
 TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
@@ -85,7 +86,11 @@ TEmbeddingMatrix::usage  = "TEmbeddingMatrix[table, ids] gathers rows `ids` from
 TGELU::usage             = "TGELU[x] applies the tanh-form GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).  Composes via existing TTanh -- no new opcode required.";
 TCausalMask::usage       = "TCausalMask[seq] returns a {seq, seq} TTerm wrapping a fresh tensor whose entries are 0 at (i, j) with j <= i and -1e9 at j > i.  Add to attention scores before softmax to zero out future-token attention.";
 TLayerNormAffine::usage  = "TLayerNormAffine[x, gamma, beta] applies TLayerNorm[x] then multiplies by gamma + adds beta along the last axis.  GPT-2's layer-norm carries learned gamma/beta; the bare TLayerNorm in this file normalises only.";
-TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q, K, V are {seq, dim} TTerms with dim = n_heads * d_head; mask is a {seq, seq} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).";
+TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q, K, V are {seq, dim} TTerms with dim = n_heads * d_head; mask is a {seq, seq} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).\n\nTMultiHeadAttention[Q, K, V, n_heads, mask, scale] uses the explicit `scale` factor in place of the default 1/Sqrt[d_head] (pass 1.0 when the caller has already pre-scaled Q, as GPT-2's NetGraph does).";
+TGPT2SelfAttention::usage = "TGPT2SelfAttention[x, wQ, bQ, wK, bK, wV, bV, wO, bO, nHeads] computes one GPT-2 causal multi-head self-attention block over a {seq, dim} input: Q/K/V = x.W + b projections (each W is the {dim,dim} input-first weight, b the {dim} bias), causal multi-head attention with the 1/Sqrt[d_head] scale, then the output projection x.wO + bO.  Mirrors the Wolfram GPT-2 attention sub-NetGraph (bare-dot ScoringNet, Mask -> Causal, the per-head scale pre-applied to Q) and matches it to f32 tolerance.";
+TGPT2MLP::usage = "TGPT2MLP[x, w1, b1, w2, b2] computes the GPT-2 feed-forward block over a {seq, dim} input: GELU(x.w1 + b1).w2 + b2.  w1 is {dim, 4*dim}, w2 is {4*dim, dim} (input-first TLinear convention).  GELU is the tanh-form approximation (TGELU).";
+TGPT2Block::usage = "TGPT2Block[x, params, nHeads] runs one full pre-norm GPT-2 transformer block over a {seq, dim} input: x + Attention(LayerNorm(x)) then h + MLP(LayerNorm(h)).  `params` is an association carrying the two NormalizationLayer scale/bias pairs and the attention + MLP weights extracted from the Wolfram net (see TGPT2FromArrays).";
+TGPT2FromArrays::usage = "TGPT2FromArrays[arrays, ids] builds the full GPT-2 forward as a TTerm over a host-side list of (1-indexed) token `ids`.  `arrays` is the weight association produced by importing the Wolfram GPT-2 net (token + positional embeddings, one entry per transformer block, the final LayerNorm, and the tied LM-head weight).  Returns the {seq, vocab} logits TTerm; the last row holds the next-token distribution.  nHeads defaults to 12 (GPT-2 117M).";
 
 Begin["`Private`"];
 
@@ -105,8 +110,17 @@ TL2Loss[x_TTerm]                := Total[x * x]
 TMSELoss[pred_TTerm, tgt_TTerm] := TL2Loss[pred - tgt]
 TReLU[x_TTerm]                  := x * (0 < x)
 
-(* tanh(x) = (e^(2x) - 1) / (e^(2x) + 1). *)
-TTanh[x_TTerm] := With[{u = Exp[2 * x]}, (u - 1) / (u + 1)]
+(* tanh(x) = 2 * sigmoid(2x) - 1 = 2 / (1 + e^(-2x)) - 1.
+   Tinygrad's lowering (mixin/elementwise.py tanh -> sigmoid): sigmoid is
+   1 / (1 + e^(-x)), whose exponent is negated so it never returns
+   Inf/Inf = NaN.  For x -> +inf, e^(-2x) -> 0 and tanh -> +1; for
+   x -> -inf, e^(-2x) -> +inf and 2/inf - 1 -> -1.  The naive
+   (e^(2x)-1)/(e^(2x)+1) form overflows to NaN once 2x leaves the f32 exp
+   range (~88), which GPT-2's tanh-form GELU hits because its argument
+   grows cubically.  This form saturates cleanly AND is fully
+   differentiable (no sign / abs), so it stays grad-correct for training. *)
+TSigmoid[x_TTerm] := 1 / (1 + Exp[-x])
+TTanh[x_TTerm]    := 2 * TSigmoid[2 * x] - 1
 
 (* TLog is kept as a public alias; new code should write Log[x]. *)
 TLog[x_TTerm] := Log[x]
@@ -865,6 +879,13 @@ TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{
 
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                     nHeads_Integer, mask_:None] := With[{
+    dHead = tUopShape[q][[2]] / nHeads
+},
+    TMultiHeadAttention[q, k, v, nHeads, mask, 1 / Sqrt[N @ dHead]]
+]
+
+TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
+                    nHeads_Integer, mask_, scale_?NumericQ] := With[{
     shapeQ = tUopShape[q]
 },
     Module[{seq, dim, dHead, headView, sliceHead, perHead, headOuts},
@@ -884,12 +905,85 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
             vS = sliceHead[headView[v], h]
         },
             Module[{scores, scoresM},
-                scores  = (qS . Transpose[kS]) / Sqrt[N @ dHead];
+                scores  = (qS . Transpose[kS]) * scale;
                 scoresM = If[ mask === None, scores, scores + mask];
                 TSoftmaxAxis[scoresM, 1] . vS]];
         headOuts = perHead /@ Range[0, nHeads - 1];
         headStitch[headOuts, seq, nHeads, dHead]
     ]
+]
+
+(* === GPT-2 attention / MLP / block (extracted-weight forward) ===
+   These compose the building blocks above into the exact GPT-2
+   transformer forward, driven by the weight arrays extracted from the
+   Wolfram net (TGPT2FromArrays below).  Each projection is the
+   standard nn.Linear `x . W + b`; W is the {dim, dim} input-first
+   weight (the Wolfram {out, in} weight transposed once on the host).
+   The per-head 1/Sqrt[d_head] scale is folded into TMultiHeadAttention
+   (the Wolfram graph pre-scales Q by 0.125 = 1/Sqrt[64] in a separate
+   Elementwise node + sets the AttentionLayer ScoreRescaling -> None;
+   the two are arithmetically identical). *)
+TGPT2SelfAttention[x_TTerm,
+                   wQ_TTerm, bQ_TTerm, wK_TTerm, bK_TTerm,
+                   wV_TTerm, bV_TTerm, wO_TTerm, bO_TTerm,
+                   nHeads_Integer] := Module[{q, k, v, mask, seq, attn},
+    seq = tUopShape[x][[1]];
+    q   = TLinear[x, wQ, bQ];
+    k   = TLinear[x, wK, bK];
+    v   = TLinear[x, wV, bV];
+    mask = TCausalMask[seq];
+    attn = TMultiHeadAttention[q, k, v, nHeads, mask];
+    TLinear[attn, wO, bO]
+]
+
+TGPT2MLP[x_TTerm, w1_TTerm, b1_TTerm, w2_TTerm, b2_TTerm] :=
+    TLinear[TGELU[TLinear[x, w1, b1]], w2, b2]
+
+(* One pre-norm transformer block: residual around LayerNorm -> attention,
+   then residual around LayerNorm -> MLP.  Matches GPT-2's two-sub-NetGraph
+   block (block.1 = norm + attention + residual add, block.2 = norm + MLP
+   + residual add). *)
+TGPT2Block[x_TTerm, params_Association, nHeads_Integer] := Module[{h, attn, mlp},
+    attn = TGPT2SelfAttention[
+        TLayerNormAffine[x, params["norm1Scale"], params["norm1Bias"]],
+        params["wQ"], params["bQ"], params["wK"], params["bK"],
+        params["wV"], params["bV"], params["wO"], params["bO"], nHeads];
+    h   = x + attn;
+    mlp = TGPT2MLP[
+        TLayerNormAffine[h, params["norm2Scale"], params["norm2Bias"]],
+        params["w1"], params["b1"], params["w2"], params["b2"]];
+    h + mlp
+]
+
+(* Full GPT-2 forward over a token-id sequence.  `arrays` carries the
+   weights extracted from the Wolfram net:
+     "TokenEmbedding"   {vocab, dim}     tied with the LM head
+     "PositionEmbedding"{maxPos, dim}
+     "Blocks"           list of per-block parameter associations
+     "FinalNormScale"/"FinalNormBias"    {dim}
+   Token + positional embeddings are gathered for the (1-indexed) `ids`
+   and the first Length[ids] positions, summed (the embedding NetGraph's
+   inputCombine = Plus), run through each transformer block, the final
+   LayerNorm, and projected onto the tied token-embedding matrix to get
+   {seq, vocab} logits.  GPT-2's classifier weight IS the token-embedding
+   matrix (weight tying), so logits = hidden . tokenEmbedding^T. *)
+TGPT2FromArrays[arrays_Association, ids_List, nHeads_Integer : 12] := Module[{
+    tokEmb, posEmb, seq, tokRows, posRows, x, blocks, finalNorm, logits
+},
+    tokEmb = arrays["TokenEmbedding"];
+    posEmb = arrays["PositionEmbedding"];
+    seq    = Length[ids];
+    (* 1-indexed Wolfram ids -> 0-indexed gather rows. *)
+    tokRows = TEmbeddingMatrix[tokEmb, ids - 1];
+    posRows = TEmbeddingMatrix[posEmb, Range[0, seq - 1]];
+    x = tokRows + posRows;
+    blocks = arrays["Blocks"];
+    x = Fold[TGPT2Block[#1, #2, nHeads] &, x, blocks];
+    finalNorm = TLayerNormAffine[x,
+        arrays["FinalNormScale"], arrays["FinalNormBias"]];
+    (* tied head: logits = hidden . tokenEmbedding^T -> {seq, vocab}. *)
+    logits = finalNorm . Transpose[tokEmb];
+    logits
 ]
 
 (* Stitch a list of nHeads {seq, dHead} TTerms into {seq, dim=
@@ -1276,8 +1370,27 @@ fromLayer[NetGraph, g_, input_] := Module[{
    we don't read it here -- callers supply the mask via the
    q,k,v packing (or use TMultiHeadAttention[..., mask] directly
    when not going through TFromNet). *)
-fromLayer[AttentionLayer, _, qkv_List] /; Length[qkv] === 3 :=
-    Module[{q, k, v}, {q, k, v} = qkv; TAttention[q, k, v]]
+fromLayer[AttentionLayer, layer_, qkv_List] /; Length[qkv] === 3 :=
+    Module[{q, k, v, params, multiHead, mask, rescale, qShape, nHeads, seq, dim, scale},
+        {q, k, v} = qkv;
+        params    = Quiet @ NetExtract[layer, "Parameters"];
+        multiHead = TrueQ @ Lookup[params, "MultiHead", False];
+        mask      = Lookup[params, "Mask", None];
+        rescale   = Lookup[params, "ScoreRescaling", None];
+        If[ !multiHead, Return @ TAttention[q, k, v]];
+        (* Multi-head: Q/K/V arrive as flat {seq, dim}; nHeads = the
+           head axis of the layer's $QueryShape ({seq, nHeads}). *)
+        qShape  = Lookup[params, "$QueryShape", Missing[]];
+        nHeads  = If[ ListQ[qShape] && Length[qShape] >= 2, Last[qShape], 1];
+        {seq, dim} = tUopShape[q];
+        scale   = Switch[ rescale,
+            None,           1.0,
+            "DimensionSqrt", 1 / Sqrt[N[dim / nHeads]],
+            _,              1 / Sqrt[N[dim / nHeads]]];
+        TMultiHeadAttention[q, k, v, nHeads,
+            If[ MatchQ[mask, "Causal" | Causal], TCausalMask[seq], None],
+            scale]
+    ]
 fromLayer[AttentionLayer, _, _] :=
     Failure["NotImplemented",
         <|"Message" -> "AttentionLayer expects {Q, K, V} TTerm triple via NetGraph multi-input dispatch"|>]
