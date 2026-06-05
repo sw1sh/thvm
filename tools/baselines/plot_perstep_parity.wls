@@ -1,8 +1,5 @@
 #!/usr/bin/env wolframscript
 SetDirectory["/Users/swish/src/thvm"];
-print[a___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {a}], "\n"];
-
 (* Pull both the easy tier (8 cases, already-committed) and the
    hard tier (4 WolframAxioms + MeredithAxioms NotableTheorems
    that the preset Method->Automatic can crack but where the
@@ -69,4 +66,4 @@ bc = BarChart[
 
 Export["tools/baselines/plots/perstep_match_rate.png", bc,
     ImageResolution -> 200];
-print["wrote tools/baselines/plots/perstep_match_rate.png"];
+Print["wrote tools/baselines/plots/perstep_match_rate.png"];

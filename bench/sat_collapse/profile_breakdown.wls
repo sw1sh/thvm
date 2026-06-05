@@ -17,10 +17,8 @@
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 ctx = TContextNew["metal"];
-If[ ctx === 0, print["SKIP: Metal context unavailable"]; Exit[0]];
+If[ ctx === 0, Print["SKIP: Metal context unavailable"]; Exit[0]];
 
 mkT[] := With[{t = Module[{ts}, ts], f = Module[{fs}, fs]},
     TLam[t, TLam[f, t]]];
@@ -127,8 +125,8 @@ randomCnf[v_, c_] := Table[
 
 fmt[t_] := StringPadLeft[ToString @ NumberForm[t*1000., {7, 2}], 8] <> "ms";
 
-print["v c | path Z (build / kernel / collapse / sat) | path Z+1 (build / kernel / collapse / sat) | CPU IC (total / sat) | WL (total / sat)"];
-print[StringJoin @@ Table["-", {130}]];
+Print["v c | path Z (build / kernel / collapse / sat) | path Z+1 (build / kernel / collapse / sat) | CPU IC (total / sat) | WL (total / sat)"];
+Print[StringJoin @@ Table["-", {130}]];
 
 (* Limited to V<=3 because the iter Z per-def MSL emit produces
    ~10K-line shaders for V>=4 / C>=8, and xcrun metallib takes
@@ -145,18 +143,18 @@ Do[
     runZ1[$cnf, $v];
     runCpu[$cnf, $v];
     {$tWL, $satWL} = runWL[$cnf, $v];
-    print["v=", $v, " c=", $c];
-    print["  Z   build=", fmt[$tBuildZ],
+    Print["v=", $v, " c=", $c];
+    Print["  Z   build=", fmt[$tBuildZ],
         " kernel=", fmt[$tKernelZ],
         " collapse=", fmt[$tCollapseZ],
         "  sat=", $satZ, " (n=", $nLeavesZ, ")"];
-    print["  Z+1 build=", fmt[$tBuildZ1],
+    Print["  Z+1 build=", fmt[$tBuildZ1],
         " kernel=", fmt[$tKernelZ1],
         " collapse=", fmt[$tCollapseZ1],
         "  sat=", $satZ1, " (n=", $nLeavesZ1, ")"];
-    print["  CPU total=", fmt[$tCpu],
+    Print["  CPU total=", fmt[$tCpu],
         "  sat=", $satCpu, " (n=", $nLeavesCpu, ")"];
-    print["  WL  total=", fmt[$tWL],
+    Print["  WL  total=", fmt[$tWL],
         "  sat=", $satWL];
-    print[""];
+    Print[""];
 , {case, cases}];

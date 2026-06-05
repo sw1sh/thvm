@@ -16,7 +16,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout", Row[{args}], "\n"];
 println[]      := WriteString["stdout", "\n"];
 formatUs[t_]   := ToString[N[t*1000000, 4]] <> "us";
 
@@ -24,7 +23,7 @@ TInit[];
 
 (* === Define some functions === *)
 
-print["Defining add2, mul_then_add, classify..."];
+Print["Defining add2, mul_then_add, classify..."];
 TDef["add2",         TLam[a, TLam[b, TOp2["+", a, b]]]];
 TDef["mul_then_add", TLam[a, TLam[b, TLam[c,
   TOp2["+", TOp2["*", a, b], c]]]]];
@@ -35,30 +34,30 @@ println[];
 
 (* === Cross-backend evaluation === *)
 
-print["=== add2(7, 11) ==="];
-print["  Metal:                          ",
+Print["=== add2(7, 11) ==="];
+Print["  Metal:                          ",
   TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
                      Method -> "Metal"]];
-print["  CPU (single-thread):            ",
+Print["  CPU (single-thread):            ",
   TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
                      Method -> "CPU"]];
-print["  CPU pool (NumThreads -> 4):     ",
+Print["  CPU pool (NumThreads -> 4):     ",
   TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
                      Method -> {"CPU", "NumThreads" -> 4}]];
 println[];
 
-print["=== mul_then_add(5, 6, 7) === (= 5*6+7 = 37)"];
-print["  Metal:                          ",
+Print["=== mul_then_add(5, 6, 7) === (= 5*6+7 = 37)"];
+Print["  Metal:                          ",
   TTermVal @ TAOTRun["mul_then_add", {TNum[5], TNum[6], TNum[7]},
                      Method -> "Metal"]];
-print["  CPU:                            ",
+Print["  CPU:                            ",
   TTermVal @ TAOTRun["mul_then_add", {TNum[5], TNum[6], TNum[7]},
                      Method -> "CPU"]];
 println[];
 
-print["=== classify(0..2, 99) ==="];
+Print["=== classify(0..2, 99) ==="];
 Do[
-  print["  classify(", k, ")  Metal -> ",
+  Print["  classify(", k, ")  Metal -> ",
         TTermVal @ TAOTRun["classify", {TNum[k]},
                            Method -> "Metal"],
         "  CPU -> ",
@@ -69,7 +68,7 @@ println[];
 
 (* === Hot-path timing comparison === *)
 
-print["=== Hot-path timing (100 runs, caches warm) ==="];
+Print["=== Hot-path timing (100 runs, caches warm) ==="];
 metalArgs = {TNum[7], TNum[11]};
 
 (* Warm caches *)
@@ -81,16 +80,16 @@ tMetal = First @ AbsoluteTiming[
 tCpu   = First @ AbsoluteTiming[
     Do[ TAOTRun["add2", metalArgs, Method -> "CPU"],   {100} ];];
 
-print["  100x add2 via Metal:  ", formatUs[tMetal],
+Print["  100x add2 via Metal:  ", formatUs[tMetal],
       "  (avg ", formatUs[tMetal/100], "/call)"];
-print["  100x add2 via CPU:    ", formatUs[tCpu],
+Print["  100x add2 via CPU:    ", formatUs[tCpu],
       "  (avg ", formatUs[tCpu/100], "/call)"];
-print["  Metal/CPU ratio:      ~", N[tMetal/tCpu, 3], "x"];
+Print["  Metal/CPU ratio:      ~", N[tMetal/tCpu, 3], "x"];
 println[];
 
-print["For tiny defs Metal is dominated by ~190 us kernel-launch"];
-print["overhead.  GPU wins when you batch many independent reductions"];
-print["per launch -- demonstrated below."];
+Print["For tiny defs Metal is dominated by ~190 us kernel-launch"];
+Print["overhead.  GPU wins when you batch many independent reductions"];
+Print["per launch -- demonstrated below."];
 println[];
 
 (* === Batch dispatch (iter QQ) ===
@@ -100,7 +99,7 @@ println[];
    TAOTRun calls.  Two orders of magnitude speedup in practice.
 *)
 
-print["=== Batch dispatch: N OP2 ADDs in one Metal launch ==="];
+Print["=== Batch dispatch: N OP2 ADDs in one Metal launch ==="];
 
 (* Build N=256 OP2(NUM(i), NUM(i+1)) cells in book_heap. *)
 N0 = 256;
@@ -130,8 +129,8 @@ tSeq = First @ AbsoluteTiming[
     Do[ TAOTRun["add2", {TNum[i], TNum[i + 1]}, Method -> "Metal"],
         {i, 0, N0 - 1} ];];
 
-print["  ", N0, " OP2 ADDs sequential (N TAOTRun calls): ", formatUs[tSeq],
+Print["  ", N0, " OP2 ADDs sequential (N TAOTRun calls): ", formatUs[tSeq],
       "  (avg ", formatUs[tSeq/N0], "/call)"];
-print["  ", N0, " OP2 ADDs batch     (1 dispatch):       ", formatUs[tBatch],
+Print["  ", N0, " OP2 ADDs batch     (1 dispatch):       ", formatUs[tBatch],
       "  (avg ", formatUs[tBatch/N0], "/call)"];
-print["  Speedup:  ~", N[tSeq/tBatch, 3], "x"];
+Print["  Speedup:  ~", N[tSeq/tBatch, 3], "x"];

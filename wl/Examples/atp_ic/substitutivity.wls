@@ -31,8 +31,6 @@ PacletDirectoryLoad[FileNameJoin[{Directory[], "wl", "THVMLink"}]];
 Needs["THVMLink`"];
 TInitContext[];
 
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 (* ---------------------------------------------------------------- *)
 (* Encoder                                                          *)
 (* ---------------------------------------------------------------- *)
@@ -210,12 +208,12 @@ cases = {
       "Expected" -> False|>
 };
 
-print["=== IC-native substitutivity toy ==="];
+Print["=== IC-native substitutivity toy ==="];
 results = Map[
     Function[case,
         Module[{got},
             got = icProvable[case["Conjecture"], case["Axioms"], case["Depth"]];
-            print[StringPadRight[case["Name"], 40],
+            Print[StringPadRight[case["Name"], 40],
                 "  got=", got,
                 "  expected=", case["Expected"],
                 If[ got === case["Expected"], "  OK", "  FAIL"]];
@@ -224,5 +222,5 @@ results = Map[
     ],
     cases
 ];
-print[""];
-print["Pass: ", Count[results, True], "/", Length[cases]];
+Print[""];
+Print["Pass: ", Count[results, True], "/", Length[cases]];

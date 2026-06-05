@@ -24,9 +24,6 @@ PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 Get["wl/Examples/_lib/Mnist.wl"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 envValue[name_String, default_String] := Module[{v = Environment[name]},
     If[StringQ[v] && StringLength[StringTrim[v]] > 0, v, default]]
 
@@ -62,9 +59,9 @@ probVector[t_TTerm] := Flatten @ N @ Normal @ TTensorData @ t
 printVariants[kid_Integer] := Module[{vars, rows},
     vars = TKernelVariants[kid];
     rows = First /@ vars;
-    print["  kid ", kid, " variants:"];
+    Print["  kid ", kid, " variants:"];
     Do[
-        print["    ", formatOpt[row["Opt"]], "  ",
+        Print["    ", formatOpt[row["Opt"]], "  ",
               Round[N @ row["WallUs"], 0.001], " us"],
         {row, rows}]
 ]
@@ -74,12 +71,12 @@ maxTune        = parseLimit["MAX_TUNE_KERNELS", 16];
 maxVariantRows = parseLimit["MAX_VARIANT_ROWS", 3];
 
 TInit[];
-print["LeNet autotune example"];
-print["  DEV=", envValue["DEV", "default-cpu"],
+Print["LeNet autotune example"];
+Print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"],
       "  AUTOTUNE=", envValue["AUTOTUNE", "off"],
       "  THVM_KGC=", envValue["THVM_KGC", "on"]];
-print["  MAX_TUNE_KERNELS=", If[maxTune === Infinity, "All", maxTune],
+Print["  MAX_TUNE_KERNELS=", If[maxTune === Infinity, "All", maxTune],
       "  MAX_VARIANT_ROWS=", If[maxVariantRows === Infinity, "All", maxVariantRows]];
 
 net   = NetInitialize @ Quiet[NetModel["LeNet"], Import::nnincmpb];
@@ -90,12 +87,12 @@ x     = TTensorCreate @ NumericArray[img, "Real32"];
 
 forward[] := TRealize @ TFromNet[net, x]
 
-print["materializing baseline LeNet forward for label ", label, "..."];
+Print["materializing baseline LeNet forward for label ", label, "..."];
 probsBefore = probVector @ forward[];
 softmaxBefore = Total[probsBefore];
-print["  baseline softmax sum: ", Round[softmaxBefore, 0.000001]];
-print["  live kernels: ", TKernelCount[] - 1];
-print["  dispatch kinds: ", formatCounts @ kindCounts[]];
+Print["  baseline softmax sum: ", Round[softmaxBefore, 0.000001]];
+Print["  live kernels: ", TKernelCount[] - 1];
+Print["  dispatch kinds: ", formatCounts @ kindCounts[]];
 
 kids = Range[1, TKernelCount[] - 1];
 proposedByKid = Association @ Table[kid -> TKernelProposed[kid], {kid, kids}];
@@ -113,11 +110,11 @@ groupSizes = Association @ Flatten @ Map[
 tuneKids = takeLimit[representativeKids, maxTune];
 variantKids = takeLimit[tuneKids, maxVariantRows];
 
-print["  kernels with proposals: ", Length[candidateKids],
+Print["  kernels with proposals: ", Length[candidateKids],
       "  tune reps: ", Length[representativeKids]];
 If[Length[representativeKids] > 0,
     Do[
-        print["    kid ", kid,
+        Print["    kid ", kid,
               " shared=", groupSizes[kid],
               " key=", TKernelProgramKey[kid],
               " kind=", TKernelDispatchKind[kid],
@@ -126,36 +123,36 @@ If[Length[representativeKids] > 0,
         {kid, Take[representativeKids, UpTo[8]]}]]
 
 If[Length[variantKids] > 0,
-    print["benchmarking variants for ", Length[variantKids], " sample kernels..."];
+    Print["benchmarking variants for ", Length[variantKids], " sample kernels..."];
     Do[printVariants[kid], {kid, variantKids}]];
 
 If[Length[tuneKids] === 0,
-    print["no kernels had proposer candidates; nothing to tune."],
-    print["autotuning ", Length[tuneKids], " representative candidate kernels..."];
+    Print["no kernels had proposer candidates; nothing to tune."],
+    Print["autotuning ", Length[tuneKids], " representative candidate kernels..."];
     tunedRows = Table[
         Module[{opts = TKernelAutotune[kid], applied},
             applied = First[opts]["Applied"];
             <|"Kid" -> kid, "Applied" -> applied|>],
         {kid, tuneKids}];
     winners = Select[tunedRows, #["Applied"] =!= {} &];
-    print["  kernels with applied winners: ", Length[winners]];
+    Print["  kernels with applied winners: ", Length[winners]];
     Do[
-        print["    kid ", row["Kid"], " applied=", formatOpts[row["Applied"]]],
+        Print["    kid ", row["Kid"], " applied=", formatOpts[row["Applied"]]],
         {row, Take[winners, UpTo[12]]}]
 ];
 
-print["rerunning LeNet forward after tuning cache updates..."];
+Print["rerunning LeNet forward after tuning cache updates..."];
 probsAfter = probVector @ forward[];
 softmaxAfter = Total[probsAfter];
 maxAbsDiff = Max[Abs[probsAfter - probsBefore]];
 
-print["  tuned softmax sum:   ", Round[softmaxAfter, 0.000001]];
-print["  max probability diff: ", Round[maxAbsDiff, 0.000001]];
-print["  live kernels now: ", TKernelCount[] - 1];
-print["  dispatch kinds now: ", formatCounts @ kindCounts[]];
+Print["  tuned softmax sum:   ", Round[softmaxAfter, 0.000001]];
+Print["  max probability diff: ", Round[maxAbsDiff, 0.000001]];
+Print["  live kernels now: ", TKernelCount[] - 1];
+Print["  dispatch kinds now: ", formatCounts @ kindCounts[]];
 
 If[Abs[softmaxAfter - 1.0] > 0.001 || maxAbsDiff > 0.001,
-    print["FAIL: autotuned LeNet forward changed probabilities too much"];
+    Print["FAIL: autotuned LeNet forward changed probabilities too much"];
     Exit[1]];
 
-print["LeNet autotune PASSED."];
+Print["LeNet autotune PASSED."];

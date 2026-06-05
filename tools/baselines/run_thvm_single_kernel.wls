@@ -10,8 +10,6 @@
    thvm_notable_theorems.tsv as it goes -- ^C-resumable. *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
-print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"];
-
 TC = 30;
 OUT = "tools/baselines/thvm_notable_theorems.tsv";
 
@@ -84,12 +82,12 @@ Scan[Function[theory,
                     Module[{h = OpenAppend[OUT]},
                         WriteString[h, line, "\n"];
                         Close[h]];
-                    print[StringPadRight[ToString[theory], 28],
+                    Print[StringPadRight[ToString[theory], 28],
                         StringPadRight[ToString[thm], 38],
                         StringPadRight[res[[1]], 8],
                         res[[2]], "s  ", res[[4]]]]
                 ], Keys[nt]]
         ]]
     ], theories];
-print["---"];
-print["DONE.  ", n, " cases. PROVED=", proved, " TimedOut=", timedOut, " Failed=", failed];
+Print["---"];
+Print["DONE.  ", n, " cases. PROVED=", proved, " TimedOut=", timedOut, " Failed=", failed];

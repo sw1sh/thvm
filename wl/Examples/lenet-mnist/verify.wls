@@ -17,9 +17,6 @@ PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 Get["wl/Examples/_lib/Mnist.wl"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 SeedRandom[42];
 nSteps = 4;
 
@@ -41,7 +38,7 @@ imgArr = Normal[TTensorData @ batch["images"]][[1]];
 label  = First @ Normal[TTensorData @ batch["labels"]];
 imgT   = TTensorCreate @ NumericArray[imgArr, "Real32"];
 tgtT   = TOneHot[label, 10];
-print["training sample: true label = ", label];
+Print["training sample: true label = ", label];
 
 (* === Forward + loss + classifier =========================== *)
 
@@ -69,8 +66,8 @@ lossOf[x_TTerm, target_TTerm] :=
 
 (* === Train + verify ========================================= *)
 
-print["initial prediction: ", predictedLabel[]];
-print["training ", nSteps, " Adam steps"];
+Print["initial prediction: ", predictedLabel[]];
+Print["training ", nSteps, " Adam steps"];
 Do[
     Module[{loss = lossOf[imgT, tgtT]},
         TRealize[loss];
@@ -79,9 +76,9 @@ Do[
 ];
 
 finalPred = predictedLabel[];
-print["final prediction:   ", finalPred, "  (target ", label, ")"];
+Print["final prediction:   ", finalPred, "  (target ", label, ")"];
 
 If[ finalPred =!= label,
-    print["FAIL: model did not learn the single sample"];
+    Print["FAIL: model did not learn the single sample"];
     Exit[1]];
-print["LeNet verify PASSED: predicted ", finalPred, " == ", label];
+Print["LeNet verify PASSED: predicted ", finalPred, " == ", label];

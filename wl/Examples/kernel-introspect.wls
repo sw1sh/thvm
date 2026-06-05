@@ -34,9 +34,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 indent[s_String, prefix_String] := StringJoin @@ Riffle[
     Map[prefix <> # &, StringSplit[s, "\n", All]], "\n"]
 
@@ -46,7 +43,7 @@ SeedRandom[42];
    Stage 0: build a TTerm expression
    =========================================================== *)
 
-print["=== Stage 0: TTerm expression  ==="];
+Print["=== Stage 0: TTerm expression  ==="];
 
 a = TGlorot[{8, 16}];
 b = TGlorot[{8, 16}];
@@ -54,71 +51,71 @@ c = TGlorot[{8, 16}];
 
 (* (a + b) * c via the WL UpValues -- lowers to TUOpMul + TUOpAdd. *)
 expr = (a + b) * c;
-print["  expression: (a + b) * c   (a, b, c : {8, 16})"];
-print["  expr term head: ", Head[expr]];
-print["  expr UOP kind:  ", TUOpKind[expr]];
-print[""];
+Print["  expression: (a + b) * c   (a, b, c : {8, 16})"];
+Print["  expr term head: ", Head[expr]];
+Print["  expr UOP kind:  ", TUOpKind[expr]];
+Print[""];
 
 (* ===========================================================
    Stage 1: UOP graph
    =========================================================== *)
 
-print["=== Stage 1: UOP graph (TUOpKind / TUOpSrcs)  ==="];
+Print["=== Stage 1: UOP graph (TUOpKind / TUOpSrcs)  ==="];
 
 walkUop[t_] := With[{kind = TUOpKind[t]},
-    print["  ", Head[t], " ", kind];
+    Print["  ", Head[t], " ", kind];
     Module[{srcs = TUOpSrcs[t]},
-        Do[ print["    src: ", Head[s], " ", TUOpKind[s]], {s, srcs}]]
+        Do[ Print["    src: ", Head[s], " ", TUOpKind[s]], {s, srcs}]]
 ];
 walkUop[expr];
-print[""];
+Print[""];
 
 (* ===========================================================
    Stage 2: KernelEntry (materialise without firing)
    =========================================================== *)
 
-print["=== Stage 2: KernelEntry (TMaterialize + TKernel)  ==="];
+Print["=== Stage 2: KernelEntry (TMaterialize + TKernel)  ==="];
 
 mat = TMaterialize[expr];
 k   = TKernel[mat];
 kid = k["Kid"];
 
-print["  kid:           ", kid];
-print["  OutputShape:   ", k["OutputShape"]];
-print["  OutputDtype:   ", k["OutputDtype"]];
-print["  InputCount:    ", k["InputCount"]];
-print["  OpCount:       ", k["OpCount"]];
-print["  TKernelTable[[kid]]: ", TKernelTable[][[kid]]];
-print["  TKernelInputs[kid]:  ", TKernelInputs[kid]];
-print[""];
+Print["  kid:           ", kid];
+Print["  OutputShape:   ", k["OutputShape"]];
+Print["  OutputDtype:   ", k["OutputDtype"]];
+Print["  InputCount:    ", k["InputCount"]];
+Print["  OpCount:       ", k["OpCount"]];
+Print["  TKernelTable[[kid]]: ", TKernelTable[][[kid]]];
+Print["  TKernelInputs[kid]:  ", TKernelInputs[kid]];
+Print[""];
 
 (* ===========================================================
    Stage 3: KProgOp[] program (linearised SSA)
    =========================================================== *)
 
-print["=== Stage 3: KProgOp[] program (TKernelProgram)  ==="];
+Print["=== Stage 3: KProgOp[] program (TKernelProgram)  ==="];
 
 prog = TKernelProgram[k];
 Do[
     With[{op = prog[[i]]},
-        print["  [", i, "] ", op["Op"],
+        Print["  [", i, "] ", op["Op"],
               "  src=", op["Sources"],
               "  arg=", op["Arg"],
               "  numel=", op["Numel"]]],
     {i, Length[prog]}];
-print[""];
+Print[""];
 
 (* ===========================================================
    Stage 4: Axis structure (TKernelOpts + Opt[] rewrites)
    =========================================================== *)
 
-print["=== Stage 4: Axis structure (TKernelOpts + Opt[...])  ==="];
+Print["=== Stage 4: Axis structure (TKernelOpts + Opt[...])  ==="];
 
 reportOpts[label_String, kid_Integer] := Module[{o = TKernelOpts[kid]},
-    print["  ", label, ":"];
-    print["    AxisTypes: ", o["AxisTypes"]];
-    print["    FullShape: ", o["FullShape"]];
-    print["    Applied:   ", o["Applied"]]];
+    Print["  ", label, ":"];
+    Print["    AxisTypes: ", o["AxisTypes"]];
+    Print["    FullShape: ", o["FullShape"]];
+    Print["    Applied:   ", o["Applied"]]];
 
 reportOpts["default", kid];
 
@@ -131,84 +128,84 @@ TKernelApplyOpt[kid, Opt["UNROLL", 0, 2]];
 reportOpts["after Opt[\"UNROLL\", 0, 2]", kid];
 
 (* Reduce kernel for completeness *)
-print[""];
+Print[""];
 red = TMaterialize @ TUOpReduce[a, 1, "SUM"];
 kr  = TKernel[red];
 reportOpts["reduce kernel", kr["Kid"]];
-print[""];
+Print[""];
 
 (* ===========================================================
    Stage 5: Rendered source
    =========================================================== *)
 
-print["=== Stage 5: Rendered source (TKernelSource)  ==="];
+Print["=== Stage 5: Rendered source (TKernelSource)  ==="];
 
 srcC = TKernelSource[kid, "C"];
-print["  C source (length ", StringLength[srcC], "):"];
+Print["  C source (length ", StringLength[srcC], "):"];
 If[ StringLength[srcC] > 0,
-    print[indent[srcC, "    | "]],
-    print["    (interpreter fallback -- program contains REDUCE / movement)"]];
+    Print[indent[srcC, "    | "]],
+    Print["    (interpreter fallback -- program contains REDUCE / movement)"]];
 
-print[""];
+Print[""];
 srcM = TKernelSource[kid, "Metal"];
-print["  Metal source (length ", StringLength[srcM], "):"];
+Print["  Metal source (length ", StringLength[srcM], "):"];
 If[ StringLength[srcM] > 0,
-    print[indent[srcM, "    | "]],
-    print["    (single-op shader fallback today)"]];
-print[""];
+    Print[indent[srcM, "    | "]],
+    Print["    (single-op shader fallback today)"]];
+Print[""];
 
 (* ===========================================================
    Stage 6: Memory plan (per-buf alloc / last-use intervals)
    =========================================================== *)
 
-print["=== Stage 6: Memory plan (TMemoryPlan + CPU buf table)  ==="];
+Print["=== Stage 6: Memory plan (TMemoryPlan + CPU buf table)  ==="];
 
 mp = TMemoryPlan[];
 mpData = First[mp];
 
-print["  total live CPU bytes: ", TTotalBufBytes[]];
-print["  TenDesc count:        ", TTensCount[]];
-print["  CPU buf table rows:   ", Length[TCpuBufTable[]]];
-print["  Bufs in TMemoryPlan:  ", Length[mpData["Bufs"]]];
-print[""];
-print["  per-buf snapshot (first 5 rows):"];
+Print["  total live CPU bytes: ", TTotalBufBytes[]];
+Print["  TenDesc count:        ", TTensCount[]];
+Print["  CPU buf table rows:   ", Length[TCpuBufTable[]]];
+Print["  Bufs in TMemoryPlan:  ", Length[mpData["Bufs"]]];
+Print[""];
+Print["  per-buf snapshot (first 5 rows):"];
 Module[{rows = Take[mpData["Bufs"], UpTo[5]]},
     Do[
         With[{r = rows[[i]]},
-            print["    buf=", r["buf_id"],
+            Print["    buf=", r["buf_id"],
                   "  nbytes=", r["nbytes"],
                   "  alloc_depth=", r["alloc_depth"],
                   "  last_use=", r["last_use_depth"],
                   "  status=", r["status"]]],
         {i, Length[rows]}]];
-print[""];
-print[indent[ToString[TMemoryPlanReport[mp]], "    "]];
-print[""];
+Print[""];
+Print[indent[ToString[TMemoryPlanReport[mp]], "    "]];
+Print[""];
 
 (* ===========================================================
    Stage 7: Dispatch profile (after firing)
    =========================================================== *)
 
-print["=== Stage 7: Dispatch profile (after firing)  ==="];
+Print["=== Stage 7: Dispatch profile (after firing)  ==="];
 
 (* Fire the materialised kernel + read its profile.  k[] dispatches
    via TWnf on the kernel term.  Per-kid counters tick on dispatch. *)
 k[];   (* fire kid *)
 prof = TKernelProfile[kid];
 
-print["  fired kid:       ", kid];
-print["  DispatchKind:    ", prof["DispatchKind"]];
-print["  DispatchCount:   ", prof["DispatchCount"]];
-print["  Flops:           ", prof["Flops"]];
-print["  TotalUs:         ", prof["TotalUs"], " us"];
-print["  AvgUs:           ", NumberForm[prof["AvgUs"], {6, 2}], " us"];
-print["  GFlopsPerSec:    ", NumberForm[prof["GFlopsPerSec"], {6, 2}]];
-print["  JitDylibPath:    ", prof["JitDylibPath"]];
-print[""];
+Print["  fired kid:       ", kid];
+Print["  DispatchKind:    ", prof["DispatchKind"]];
+Print["  DispatchCount:   ", prof["DispatchCount"]];
+Print["  Flops:           ", prof["Flops"]];
+Print["  TotalUs:         ", prof["TotalUs"], " us"];
+Print["  AvgUs:           ", NumberForm[prof["AvgUs"], {6, 2}], " us"];
+Print["  GFlopsPerSec:    ", NumberForm[prof["GFlopsPerSec"], {6, 2}]];
+Print["  JitDylibPath:    ", prof["JitDylibPath"]];
+Print[""];
 
 (* TProfileAll[] -- profile snapshot keyed by kid for every live kernel. *)
 all = TProfileAll[];
-print["  TProfileAll[] keys (live kids): ", Sort @ Keys[all]];
-print[""];
+Print["  TProfileAll[] keys (live kids): ", Sort @ Keys[all]];
+Print[""];
 
-print["PASS: every kernel-pipeline stage is observable from WL"];
+Print["PASS: every kernel-pipeline stage is observable from WL"];

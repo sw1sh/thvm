@@ -20,9 +20,6 @@ PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 Get["wl/Examples/_lib/Mnist.wl"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 envValue[name_String, default_String] := Module[{v = Environment[name]},
     If[StringQ[v] && StringLength[StringTrim[v]] > 0, v, default]]
 
@@ -154,22 +151,22 @@ runBench[name_String, doTune_] := Module[{
         lossVal
     ];
 
-    print[""];
-    print["=== ", name, " ==="];
-    print["fixed MNIST label: ", label];
-    print["warmup steps: ", warmupSteps, "  timed steps: ", nSteps];
+    Print[""];
+    Print["=== ", name, " ==="];
+    Print["fixed MNIST label: ", label];
+    Print["warmup steps: ", warmupSteps, "  timed steps: ", nSteps];
 
     warmupLosses = Table[trainStep[k], {k, warmupSteps}];
     If[warmupSteps > 0,
-        print["warmup losses: ", Map[Round[#, 0.0001] &, warmupLosses]]];
+        Print["warmup losses: ", Map[Round[#, 0.0001] &, warmupLosses]]];
 
     scan = candidateScan[];
-    print["post-warmup kernels: ", TKernelCount[] - 1,
+    Print["post-warmup kernels: ", TKernelCount[] - 1,
           "  live candidates: ", Length[scan["AllKids"]],
           "  tune reps: ", Length[scan["Kids"]]];
     If[Length[scan["Kids"]] > 0,
         Do[
-            print["  candidate kid ", kid,
+            Print["  candidate kid ", kid,
                   " shared=", scan["GroupSizes"][kid],
                   " key=", TKernelProgramKey[kid],
                   " proposals=", formatOpts[scan["Props"][kid]]],
@@ -183,12 +180,12 @@ runBench[name_String, doTune_] := Module[{
           "winner_count" -> 0, "winner_rows" -> {}, "wall_ms" -> 0|>];
 
     If[doTune,
-        print["autotune tuned ", tune["tuned_count"], "/",
+        Print["autotune tuned ", tune["tuned_count"], "/",
               tune["candidate_count"], " representative candidates",
               " (live candidates=", tune["live_candidate_count"], ") in ",
               tune["wall_ms"], " ms; winners=", tune["winner_count"]];
         Do[
-            print["  winner kid ", row["Kid"],
+            Print["  winner kid ", row["Kid"],
                   " applied=", formatOpts[row["Applied"]]],
             {row, Take[tune["winner_rows"], UpTo[8]]}]];
 
@@ -211,12 +208,12 @@ runBench[name_String, doTune_] := Module[{
         "tune" -> tune
     |>;
 
-    print["timed losses: ", Map[Round[#, 0.0001] &, losses]];
-    print["final loss:   ", Round[finalLoss, 0.0001]];
-    print["wall_ms:      ", Round[result["wall_ms"], 0.1]];
-    print["ms_per_step:  ", Round[result["ms_per_step"], 0.1]];
-    print["kernels:      ", result["kernel_count"]];
-    print["dispatch:     ", formatCounts[result["dispatch_kinds"]]];
+    Print["timed losses: ", Map[Round[#, 0.0001] &, losses]];
+    Print["final loss:   ", Round[finalLoss, 0.0001]];
+    Print["wall_ms:      ", Round[result["wall_ms"], 0.1]];
+    Print["ms_per_step:  ", Round[result["ms_per_step"], 0.1]];
+    Print["kernels:      ", result["kernel_count"]];
+    Print["dispatch:     ", formatCounts[result["dispatch_kinds"]]];
     result
 ]
 
@@ -225,10 +222,10 @@ warmupSteps = parseInt["WARMUP_STEPS", 1];
 maxTune = parseLimit["MAX_TUNE_KERNELS", 32];
 benchMode = ToLowerCase @ envValue["TRAIN_BENCH_MODE", "both"];
 
-print["LeNet training benchmark"];
-print["  DEV=", envValue["DEV", "default-cpu"],
+Print["LeNet training benchmark"];
+Print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"]];
-print["  TRAIN_BENCH_MODE=", benchMode,
+Print["  TRAIN_BENCH_MODE=", benchMode,
       "  N_STEPS=", nSteps,
       "  WARMUP_STEPS=", warmupSteps,
       "  MAX_TUNE_KERNELS=", formatLimit[maxTune]];
@@ -244,12 +241,12 @@ If[Length[results] == 2,
     base = results[[1]];
     tuned = results[[2]];
     If[tuned["ms_per_step"] > 0,
-        print[""];
-        print["speedup baseline/autotune: ",
+        Print[""];
+        Print["speedup baseline/autotune: ",
               Round[base["ms_per_step"] / tuned["ms_per_step"], 0.001], "x"]]];
 
 If[AnyTrue[results, !NumericQ[#["final_loss"]] &],
-    print["FAIL: benchmark produced non-numeric final loss"];
+    Print["FAIL: benchmark produced non-numeric final loss"];
     Exit[1]];
 
-print["LeNet training benchmark complete."];
+Print["LeNet training benchmark complete."];

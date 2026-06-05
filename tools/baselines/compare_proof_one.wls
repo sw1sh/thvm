@@ -30,8 +30,6 @@ thm    = args[[3]];
 preset = args[[4]];
 TC     = ToExpression[args[[5]]];
 
-print[args___] := WriteString["stderr",
-    StringJoin @@ Map[ToString, {args}], "\n"];
 emit[args___] := WriteString["stdout",
     StringJoin @@ Map[ToString, {args}], "\n"];
 
@@ -41,13 +39,13 @@ emit[args___] := WriteString["stdout",
    amortise (127x cold/warm).  Vampire CLI is a separate process per
    call, so its 50ms IS its cold-start.  Charge an apples-to-apples
    wall by warming the bench harness first. *)
-print["[thvm:warmup] priming LibraryFunctionLoad + caches..."];
+Print["[thvm:warmup] priming LibraryFunctionLoad + caches..."];
 Quiet @ TimeConstrained[
     TFindProof["InverseOfInverse", "GroupAxioms",
         Method -> "Completion", TimeConstraint -> 2.0],
     3, $TimedOut];
 
-print["[thvm:", preset, "] running..."];
+Print["[thvm:", preset, "] running..."];
 {thvmT, thvmR} = AbsoluteTiming @ TimeConstrained[
     TFindProof[thm, theory, Method -> preset, TimeConstraint -> N[TC]],
     TC + 10, $TimedOut];
@@ -72,7 +70,7 @@ thvmRuleCounts = If[ Head[thvmR] === ProofObject,
     <||>];
 
 (* ===================== vampire side ===================== *)
-print["[vampire-cli] running..."];
+Print["[vampire-cli] running..."];
 vampR = TVampireProof[theory, thm, TimeConstraint -> TC];
 vampStatus = vampR["Status"];
 vampPL     = vampR["ProofLength"];
@@ -83,33 +81,33 @@ vampRuleCounts = If[ vampStatus === "Proved",
     <||>];
 
 (* ===================== report ===================== *)
-print["============================================================"];
-print["theory/thm:    ", theory, "/", thm];
-print["preset:        ", preset];
-print["TC:            ", TC, "s"];
-print[];
-print["               thvm                 vampire-cli"];
-print["status         ", StringPadRight[ToString[thvmStatus], 22],
+Print["============================================================"];
+Print["theory/thm:    ", theory, "/", thm];
+Print["preset:        ", preset];
+Print["TC:            ", TC, "s"];
+Print[];
+Print["               thvm                 vampire-cli"];
+Print["status         ", StringPadRight[ToString[thvmStatus], 22],
     StringPadRight[ToString[vampStatus], 20]];
-print["seconds        ", StringPadRight[ToString[Round[thvmT, 0.01]], 22],
+Print["seconds        ", StringPadRight[ToString[Round[thvmT, 0.01]], 22],
     StringPadRight[ToString[vampSecs], 20]];
-print["proofLen       ", StringPadRight[ToString[thvmPL], 22],
+Print["proofLen       ", StringPadRight[ToString[thvmPL], 22],
     StringPadRight[ToString[vampPL], 20]];
-print["strategy       ", StringPadRight[preset, 22],
+Print["strategy       ", StringPadRight[preset, 22],
     Short[ToString[vampStrat], 40]];
-print[];
-print["thvm rule histogram:"];
-Scan[(print["  ", StringPadRight[ToString[#[[1]]], 25], #[[2]]]) &,
+Print[];
+Print["thvm rule histogram:"];
+Scan[(Print["  ", StringPadRight[ToString[#[[1]]], 25], #[[2]]]) &,
     Normal @ KeySort @ thvmRuleCounts];
-print["vampire rule histogram:"];
-Scan[(print["  ", StringPadRight[ToString[#[[1]]], 25], #[[2]]]) &,
+Print["vampire rule histogram:"];
+Scan[(Print["  ", StringPadRight[ToString[#[[1]]], 25], #[[2]]]) &,
     Normal @ vampRuleCounts];
-print[];
+Print[];
 (* Speed ratio *)
 If[ thvmStatus === "Proved" && vampStatus === "Proved" && vampSecs > 0,
-    print["thvm/vampire wall ratio:    ", Round[thvmT / vampSecs, 0.1], "x"];
-    print["thvm/vampire proofLen ratio: ", Round[thvmPL / vampPL, 0.01], "x"]];
-print["============================================================"];
+    Print["thvm/vampire wall ratio:    ", Round[thvmT / vampSecs, 0.1], "x"];
+    Print["thvm/vampire proofLen ratio: ", Round[thvmPL / vampPL, 0.01], "x"]];
+Print["============================================================"];
 
 (* TSV line (one row per call): theory thm preset thvmStatus thvmSecs thvmPL
                                 vampStatus vampSecs vampPL ratio *)

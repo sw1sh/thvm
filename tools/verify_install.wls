@@ -11,13 +11,11 @@
    it exercises the shipped library under LibraryResources/$SystemID,
    so it is a real test of the cross-compiled binary for THIS platform. *)
 
-print[args___] := WriteString["stdout", StringJoin[ToString /@ {args}], "\n"];
-
 src = If[ Length[$ScriptCommandLine] >= 2,
     Last[$ScriptCommandLine],
     First[CloudObject["THVMLink.paclet"]]
 ];
-print["[verify] installing from: ", src];
+Print["[verify] installing from: ", src];
 
 (* Remove any already-installed copy so we test the fetched artifact,
    not a stale local install. *)
@@ -25,23 +23,23 @@ Quiet @ PacletUninstall["THVMLink"];
 
 pac = PacletInstall[src, ForceVersionInstall -> True];
 If[ Head[pac] =!= PacletObject,
-    print["FAIL: PacletInstall returned ", ToString[pac]];
+    Print["FAIL: PacletInstall returned ", ToString[pac]];
     Exit[1]
 ];
-print["[verify] installed: ", pac["Name"], " ", pac["Version"], " at ", pac["Location"]];
+Print["[verify] installed: ", pac["Name"], " ", pac["Version"], " at ", pac["Location"]];
 
 Needs["THVMLink`"];
-print["[verify] Needs[\"THVMLink`\"] ok"];
+Print["[verify] Needs[\"THVMLink`\"] ok"];
 
 (* Smoke test: drive the native library through one reduction so we
    know the platform dylib actually loaded and runs. *)
 TInit[];
 id   = TApp[TLam[x, x], TLam[y, y]];   (* (\x.x)(\y.y) -> \y.y *)
 wnf  = TWnf[id];
-print["[verify] TWnf head tag = ", TTagName[TTermTag[wnf]]];
+Print["[verify] TWnf head tag = ", TTagName[TTermTag[wnf]]];
 If[ ! IntegerQ[TTermTag[wnf]],
-    print["FAIL: reduction did not return a term"];
+    Print["FAIL: reduction did not return a term"];
     Exit[1]
 ];
 
-print["[verify] PASS: PacletInstall + Needs + native call all work."];
+Print["[verify] PASS: PacletInstall + Needs + native call all work."];

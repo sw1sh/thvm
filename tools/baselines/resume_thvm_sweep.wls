@@ -6,8 +6,6 @@
    mid-sweep (the kernel can ooM on heavy theorems). *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
-print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"];
-
 TC = 30;
 OUT = "tools/baselines/thvm_notable_theorems.tsv";
 PROOFDIR = "tools/baselines/proofs_thvm";
@@ -18,7 +16,7 @@ existingLines = Select[StringSplit[Import[OUT, "Text"], "\n"], # =!= "" &];
 existingRows = StringSplit[#, "\t"] & /@ Rest[existingLines];
 existingKeys = {#[[1]], #[[2]]} & /@ existingRows;
 existingSet = Association[(# -> True) & /@ existingKeys];
-print["Resume: ", Length[existingKeys], " cases already in TSV."];
+Print["Resume: ", Length[existingKeys], " cases already in TSV."];
 
 runCase[theory_, thm_] := Module[{t, r, status, seconds, proofLen, verify, f},
     {t, r} = AbsoluteTiming @ TimeConstrained[
@@ -69,10 +67,10 @@ Scan[Function[theory,
                         h = OpenAppend[OUT];
                         WriteString[h, line, "\n"];
                         Close[h];
-                        print[StringPadRight[ToString[theory], 28],
+                        Print[StringPadRight[ToString[theory], 28],
                             StringPadRight[ToString[thm], 38],
                             StringPadRight[res[[1]], 8],
                             res[[2]], "s  ", res[[4]]]]]],
                 Keys[nt]]]]],
     AxiomaticTheory[]];
-print["Resume done: ran ", n, " new cases."];
+Print["Resume done: ran ", n, " new cases."];

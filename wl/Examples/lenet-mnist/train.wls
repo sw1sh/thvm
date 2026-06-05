@@ -17,9 +17,6 @@ PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 Get["wl/Examples/_lib/Mnist.wl"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 SeedRandom[42];
 
 nSteps = With[{n = Interpreter["Integer"][Environment["N_STEPS"]]},
@@ -46,8 +43,8 @@ label  = First @ Normal[TTensorData @ batch["labels"]];
 imgT = TTensorCreate @ NumericArray[imgArr, "Real32"];
 tgtT = TOneHot[label, 10];
 
-print["fixed MNIST sample: true label = ", label];
-print["LeNet params: ", Times @@@ Map[TTensorShape, params],
+Print["fixed MNIST sample: true label = ", label];
+Print["LeNet params: ", Times @@@ Map[TTensorShape, params],
       " = ", Total[Times @@@ Map[TTensorShape, params]], " weights"];
 
 (* === Forward + loss ======================================== *)
@@ -78,26 +75,26 @@ trainStep[step_Integer] := Module[{loss, lossVal},
     lossVal
 ]
 
-print[""];
-print["training ", nSteps, " steps:"];
+Print[""];
+Print["training ", nSteps, " steps:"];
 losses = Table[
     Module[{l = trainStep[k]},
-        print["  step ", k, ": loss = ", Round[l, 0.0001]];
+        Print["  step ", k, ": loss = ", Round[l, 0.0001]];
         l],
     {k, nSteps}];
 
 finalLoss = First @ Normal @ TTensorData @ TRealize @
                 forwardLoss[imgT, tgtT];
 AppendTo[losses, finalLoss];
-print["  final  : loss = ", Round[finalLoss, 0.0001]];
-print["loss curve: ", Map[Round[#, 0.0001] &, losses]];
+Print["  final  : loss = ", Round[finalLoss, 0.0001]];
+Print["loss curve: ", Map[Round[#, 0.0001] &, losses]];
 
 If[ Last[losses] >= First[losses],
-    print["FAIL: loss did not decrease (",
+    Print["FAIL: loss did not decrease (",
           Round[First[losses], 0.0001], " -> ",
           Round[Last[losses], 0.0001], ")"];
     Exit[1]];
 
-print["LeNet training PASSED: loss ",
+Print["LeNet training PASSED: loss ",
       Round[First[losses], 0.0001], " -> ",
       Round[Last[losses], 0.0001]];

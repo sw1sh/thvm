@@ -3,9 +3,6 @@ SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 $RecursionLimit = 16384;
-print[a___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {a}], "\n"];
-
 (* Per-step structural-identity diff of two ProofObjects.
 
    Given preset & cli ProofObjects on the same theorem, walk each
@@ -180,23 +177,23 @@ diffOne[theory_String, thm_String,
         |>},
         AppendTo[$summary, row];
         appendPartialRow[row]];
-    print["=== ", ToString[presetMethod], " :: ", theory, " / ", thm, " ==="];
-    print["preset constructs: ", Length[dsP],
+    Print["=== ", ToString[presetMethod], " :: ", theory, " / ", thm, " ==="];
+    Print["preset constructs: ", Length[dsP],
         "    cli constructs: ", Length[dsC]];
-    print["content-matched:   ", Length[matchedP], " pairs"];
-    print["preset-only:       ", Length[unmatchedP],
+    Print["content-matched:   ", Length[matchedP], " pairs"];
+    Print["preset-only:       ", Length[unmatchedP],
         " ", unmatchedP];
-    print["cli-only:          ", Length[unmatchedC],
+    Print["cli-only:          ", Length[unmatchedC],
         " ", unmatchedC];
-    print[];
-    print[StringPadRight["preset key", 28], " <->  ",
+    Print[];
+    Print[StringPadRight["preset key", 28], " <->  ",
         StringPadRight["cli key", 28], " ",
         "canonStmt"];
     Scan[
         kP |-> Block[{kC, stmt},
             kC = matchedP[kP];
             stmt = statementOf[dsP[kP]];
-            print["  ",
+            Print["  ",
                 StringPadRight[ToString[kP], 28], " <->  ",
                 StringPadRight[ToString[kC], 28], " ",
                 ToString[Short[stmt, 60]]]],
@@ -204,7 +201,7 @@ diffOne[theory_String, thm_String,
     Scan[
         kP |-> Block[{stmtP, stmtC},
             stmtP = statementOf[dsP[kP]];
-            print["  ",
+            Print["  ",
                 StringPadRight[ToString[kP], 28], " <->  ",
                 StringPadRight["(no match)", 28], " ",
                 "preset: ", ToString[Short[stmtP, 30]]]],
@@ -212,7 +209,7 @@ diffOne[theory_String, thm_String,
     Scan[
         kC |-> Block[{stmtC},
             stmtC = statementOf[dsC[kC]];
-            print["  ",
+            Print["  ",
                 StringPadRight["(no match)", 28], " <->  ",
                 StringPadRight[ToString[kC], 28], " ",
                 "cli: ", ToString[Short[stmtC, 30]]]],
@@ -275,10 +272,10 @@ Scan[
             THVMLink`ATP`TVampireProofObject]]],
     cases];
 
-print["===================================================="];
-print["per-step parity sweep summary"];
-print["===================================================="];
-print[
+Print["===================================================="];
+Print["per-step parity sweep summary"];
+Print["===================================================="];
+Print[
     StringPadRight["preset", 12], " ",
     StringPadRight["theory", 22], " ",
     StringPadRight["theorem", 26], " ",
@@ -288,7 +285,7 @@ print[
     StringPadLeft["pOnly", 7], " ",
     StringPadLeft["cOnly", 7]];
 Scan[
-    r |-> print[
+    r |-> Print[
         StringPadRight[r["Preset"],   12], " ",
         StringPadRight[r["Theory"],   22], " ",
         StringPadRight[r["Theorem"],  26], " ",
@@ -311,5 +308,5 @@ Export["tools/baselines/parity_perstep.tsv",
             "matched", "preset_only", "cli_only"}
     ],
     "TSV"];
-print[];
-print["wrote tools/baselines/parity_perstep.tsv"];
+Print[];
+Print["wrote tools/baselines/parity_perstep.tsv"];

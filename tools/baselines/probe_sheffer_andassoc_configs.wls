@@ -40,9 +40,6 @@ configs = {
         "VampireUEQ"}
 };
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"];
-
 Scan[Function[entry,
     Module[{label, cfg, t, r, status, proofLen, stats},
         {label, cfg} = entry;
@@ -59,6 +56,6 @@ Scan[Function[entry,
             Head[r] === ProofObject,
                 ToString @ Quiet @ Check[r["ProofLength"], "-"],
             True, "-"];
-        print[StringPadRight[label, 50],
+        Print[StringPadRight[label, 50],
             StringPadRight[status, 10], Round[t, 0.1], "s  pl=", proofLen]
     ]], configs];

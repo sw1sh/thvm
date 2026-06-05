@@ -15,13 +15,11 @@
 PacletDirectoryAdd[FileNameJoin[{ParentDirectory[ParentDirectory[ParentDirectory[$InputFileName]]], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 (* ---- Single SUP arg -- works. ---- *)
 TReset[];
 x = TSup[1, TNum[0], TNum[1]];
 form = TOp2["*", x, TNum[5]];
-print["OP2[*, SUP^1{0,1}, NUM(5)] -> ", FromTTerm /@ TCollapse[form]];
+Print["OP2[*, SUP^1{0,1}, NUM(5)] -> ", FromTTerm /@ TCollapse[form]];
 (* expected: {0, 5} *)
 
 (* ---- Same-label SUPs -- pairwise annihilate. ---- *)
@@ -29,7 +27,7 @@ TReset[];
 x = TSup[1, TNum[0], TNum[1]];
 y = TSup[1, TNum[0], TNum[1]];
 form = TOp2["*", x, y];
-print["OP2[*, SUP^1, SUP^1]    -> ", FromTTerm /@ TCollapse[form]];
+Print["OP2[*, SUP^1, SUP^1]    -> ", FromTTerm /@ TCollapse[form]];
 (* expected (annihilate): {0, 1} *)
 
 (* ---- DIFFERENT-label SUPs -- BLOWS UP. ---- *)
@@ -37,6 +35,6 @@ TReset[];
 x = TSup[1, TNum[0], TNum[1]];
 y = TSup[2, TNum[0], TNum[1]];
 form = TOp2["*", x, y];
-print["OP2[*, SUP^1, SUP^2]    -> ", FromTTerm /@ TCollapse[form, 4]];
+Print["OP2[*, SUP^1, SUP^2]    -> ", FromTTerm /@ TCollapse[form, 4]];
 (* expected (cross product): {0, 0, 0, 1} *)
 (* actual: heap_alloc: from-space exhausted (need 2 cells, HEAP_NEXT=134217728, ...) *)

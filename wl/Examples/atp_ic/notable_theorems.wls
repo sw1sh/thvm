@@ -17,9 +17,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"];
-
 (* {theory, theorem, Method, TimeConstraint}
 
    Automatic is a strategy schedule (Waldmeister-style portfolio): it
@@ -69,12 +66,12 @@ runCase[theory_, thm_, method_, wall_] := Module[{t, r, verify},
     {Head[r], verify, Round[t, 0.01]}
 ];
 
-print["theory/theorem", "\t", "method", "\t", "head", "\t",
+Print["theory/theorem", "\t", "method", "\t", "head", "\t",
     "verify", "\t", "t(s)"];
 Scan[
     Function[case,
         Module[{res = runCase @@ case},
-            print[case[[1]], "/", case[[2]],
+            Print[case[[1]], "/", case[[2]],
                 "\t", ToString[case[[3]]],
                 "\t", ToString[res[[1]]],
                 "\t", ToString[res[[2]]],

@@ -11,9 +11,6 @@ SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 $RecursionLimit = 16384;
-print[a___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {a}], "\n"];
-
 Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",
     Method -> "Completion", TimeConstraint -> 2.0];
 
@@ -25,7 +22,7 @@ probe[label_, po_] := Block[
     verify = If[ head === ProofObject,
         Head @ po["ProofFunction"][po["Theorems"]],
         "n/a (not ProofObject)"];
-    print[StringPadRight[label, 30], "  head=",
+    Print[StringPadRight[label, 30], "  head=",
         StringPadRight[ToString[head], 12],
         "  verify=", verify]];
 

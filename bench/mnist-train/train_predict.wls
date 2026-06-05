@@ -12,8 +12,6 @@
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
 Needs["THVMLink`"];
-print[l_, v_] := WriteString["stdout", l, " => ", ToString[v, InputForm], "\n"];
-
 SeedRandom[42];
 B = 512;
 tr = RandomSample[ResourceData["MNIST", "TrainingData"], B];
@@ -31,13 +29,13 @@ net = NetInitialize[
 
 dt = AbsoluteTiming[
     trained = TNetTrain[net, trImg, trOH, "MaxTrainingRounds" -> 250, "LearningRate" -> 0.2]][[1]];
-print["backend", Environment["DEV"]];
-print["train time (s)", Round[dt, 0.1]];
+Print["backend", " => ", Environment["DEV"]];
+Print["train time (s)", " => ", Round[dt, 0.1]];
 
 logits = TNetPredict[trained, teImg];
 dec = NetDecoder[{"Class", Range[0, 9]}];
 preds = dec /@ logits;
-print["test accuracy (512 held-out)", N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, teLab}]];
+Print["test accuracy (512 held-out)", " => ", N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, teLab}]];
 
 (* example-picture prediction: 10 test digits, decoded label, green=correct *)
 imgs = Keys[te];
@@ -52,4 +50,4 @@ viz = Labeled[
     Style["MNIST from scratch (THVMLink) -- NetDecoder predictions", 14], Top];
 out = FileNameJoin[{DirectoryName[$InputFileName], "prediction.png"}];
 Export[out, viz, ImageResolution -> 144];
-print["wrote", out];
+Print["wrote", " => ", out];

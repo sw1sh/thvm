@@ -22,7 +22,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout", Row[{args}], "\n"];
 println[]      := WriteString["stdout", "\n"];
 
 formatMs[t_] := If[ t < 1.*^-3, ToString[N[t*1000000, 4]] <> "us",
@@ -44,8 +43,8 @@ bench[label_, builder_] := (
     t = builder; iWnf = TItrs[]; tWnf = First @ AbsoluteTiming[rWnf = TWnf[t]]; iWnf = TItrs[] - iWnf;
     TInit[];
     t = builder; iCnf = TItrs[]; tCnf = First @ AbsoluteTiming[rCnf = TCnf[t]]; iCnf = TItrs[] - iCnf;
-    print[StringPadRight[label, 22], "  T=1/wnf  ", formatMs[tWnf], "  ", iWnf, "i ", peek[rWnf]];
-    print[StringPadRight[label, 22], "  T=1/cnf  ", formatMs[tCnf], "  ", iCnf, "i ", peek[rCnf]];
+    Print[StringPadRight[label, 22], "  T=1/wnf  ", formatMs[tWnf], "  ", iWnf, "i ", peek[rWnf]];
+    Print[StringPadRight[label, 22], "  T=1/cnf  ", formatMs[tCnf], "  ", iCnf, "i ", peek[rCnf]];
   ];
   Do[
     TInit[]; TThreads[T];
@@ -54,7 +53,7 @@ bench[label_, builder_] := (
       iNf = TItrs[];
       tNf = First @ AbsoluteTiming[rNf = TNf[t]];
       iNf = TItrs[] - iNf;
-      print[StringPadRight[label, 22], "  T=", T, "/nf   ", formatMs[tNf],
+      Print[StringPadRight[label, 22], "  T=", T, "/nf   ", formatMs[tNf],
             "  ", iNf, "i ", peek[rNf]]
     ],
     {T, {1, 2, 4, 8}}
@@ -84,26 +83,26 @@ mixed[n_] := Module[{t = TNum[0]},
 
 (* ---- Sweep ---- *)
 
-print[StringRepeat["=", 70]];
-print["pool profile sweep -- THVMLink ", $Version];
-print[StringRepeat["=", 70]];
+Print[StringRepeat["=", 70]];
+Print["pool profile sweep -- THVMLink ", $Version];
+Print[StringRepeat["=", 70]];
 
 println[];
-print["----- chain ADD (serial) -----"];
+Print["----- chain ADD (serial) -----"];
 Do[ bench["chain n=" <> ToString[n], chain[n]], {n, {1000, 5000, 10000}}];
 
 println[];
-print["----- tree ADD identical leaves (parallel by level) -----"];
+Print["----- tree ADD identical leaves (parallel by level) -----"];
 Do[ bench["tree-id d=" <> ToString[d], treeIter[d, TNum[1]&]], {d, {8, 10, 12, 14}}];
 
 println[];
-print["----- tree ADD distinct leaves -----"];
+Print["----- tree ADD distinct leaves -----"];
 Do[ bench["tree-d  d=" <> ToString[d], treeIter[d, TNum[#]&]], {d, {8, 10, 12, 14}}];
 
 println[];
-print["----- id-app chain (APP-LAM) -----"];
+Print["----- id-app chain (APP-LAM) -----"];
 Do[ bench["id-app n=" <> ToString[n], idApp[n]], {n, {100, 500, 1000}}];
 
 println[];
-print["----- mixed (APP-LAM + OP2) -----"];
+Print["----- mixed (APP-LAM + OP2) -----"];
 Do[ bench["mixed  n=" <> ToString[n], mixed[n]], {n, {100, 500, 1000}}];

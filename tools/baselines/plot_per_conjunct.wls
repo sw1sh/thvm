@@ -25,9 +25,6 @@ plotSuffix = If[ Length[$ScriptCommandLine] >= 2 && $ScriptCommandLine[[2]] === 
 outDir  = "tools/baselines/plots";
 If[ ! DirectoryQ[outDir], CreateDirectory[outDir]];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"];
-
 readTsv[path_] := Module[{lines, header, rows},
     lines = Select[StringSplit[Import[path, "Text"], "\n"], # =!= "" &];
     header = StringSplit[First @ lines, "\t"];
@@ -37,16 +34,16 @@ readTsv[path_] := Module[{lines, header, rows},
 {_, perConj} = readTsv[srcPath];
 {_, perThm}  = readTsv[sumPath];
 
-print[];
-print["=== Per-conjunct status counts (", Length[perConj], " conjuncts) ==="];
+Print[];
+Print["=== Per-conjunct status counts (", Length[perConj], " conjuncts) ==="];
 conjStatus = Counts[#["status"] & /@ perConj];
-Scan[(print["  ", StringPadRight[#[[1]], 15], " ", #[[2]]]) &,
+Scan[(Print["  ", StringPadRight[#[[1]], 15], " ", #[[2]]]) &,
     Normal @ KeySort @ conjStatus];
 
-print[];
-print["=== Per-theorem rolled-up status (", Length[perThm], " theorems) ==="];
+Print[];
+Print["=== Per-theorem rolled-up status (", Length[perThm], " theorems) ==="];
 thmStatus = Counts[#["status"] & /@ perThm];
-Scan[(print["  ", StringPadRight[#[[1]], 25], " ", #[[2]]]) &,
+Scan[(Print["  ", StringPadRight[#[[1]], 25], " ", #[[2]]]) &,
     Normal @ KeySort @ thmStatus];
 
 (* === Per-conjunct status overall: pie + stacked bar ============= *)
@@ -73,7 +70,7 @@ conjPie = PieChart[pieData,
     ImageSize -> {900, 700}];
 
 Export[FileNameJoin[{outDir, "thvm_per_conjunct_status" <> plotSuffix <> ".png"}], conjPie];
-print["Wrote ", outDir, "/thvm_per_conjunct_status", plotSuffix, ".png"];
+Print["Wrote ", outDir, "/thvm_per_conjunct_status", plotSuffix, ".png"];
 
 (* === Per-theorem rollup: bar chart grouped by family =========== *)
 thmStatusOrder = {"PROVED", "Partial(2/3)", "Partial(1/3)",
@@ -100,13 +97,13 @@ thmPie = PieChart[thmPieData,
         ToString[Length[perThm]], " NotableTheorems)"], Bold, 14],
     ImageSize -> {900, 700}];
 Export[FileNameJoin[{outDir, "thvm_per_theorem_rollup" <> plotSuffix <> ".png"}], thmPie];
-print["Wrote ", outDir, "/thvm_per_theorem_rollup", plotSuffix, ".png"];
+Print["Wrote ", outDir, "/thvm_per_theorem_rollup", plotSuffix, ".png"];
 
 (* === Per-theory-family breakdown =============================== *)
 families = GatherBy[perThm, #["theory"] &];
-print[];
-print["=== Per-theory family breakdown ==="];
-print[StringJoin[
+Print[];
+Print["=== Per-theory family breakdown ==="];
+Print[StringJoin[
     StringPadRight["Theory", 30], StringPadRight["Total", 7],
     StringPadRight["PROVED", 8], StringPadRight["Partial", 9],
     StringPadRight["Failed", 8], StringPadRight["Other", 7]]];
@@ -122,7 +119,7 @@ Scan[Function[fam,
         partial  = Count[statuses, s_String /; isPartialQ[s]];
         failed   = Count[statuses, "Failed"];
         other    = total - proved - partial - failed;
-        print[StringJoin[
+        Print[StringJoin[
             StringPadRight[theory, 30], StringPadRight[ToString[total], 7],
             StringPadRight[ToString[proved], 8],
             StringPadRight[ToString[partial], 9],

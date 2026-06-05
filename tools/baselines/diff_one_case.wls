@@ -19,14 +19,11 @@ PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 $RecursionLimit = 16384;
 
-print[a___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {a}], "\n"];
-
 (* Pull the canon stack from the main harness as a library. *)
 Get["tools/baselines/diff_proofobject_lib.wl"];
 
 If[ Length[$ScriptCommandLine] < 4,
-    print["usage: diff_one_case.wls THEORY THM PRESET [wm|vampire]"];
+    Print["usage: diff_one_case.wls THEORY THM PRESET [wm|vampire]"];
     Exit[2]];
 
 theory     = $ScriptCommandLine[[2]];
@@ -54,7 +51,7 @@ pC = Quiet @ cliBuilder[theory, thm,
 result = THVMBaselines`runDiff[pP, pC];
 
 (* Emit one TSV row. *)
-print[
+Print[
     StringJoin @@ Riffle[
         {presetArg, theory, thm,
          ToString[result["PresetN"]],

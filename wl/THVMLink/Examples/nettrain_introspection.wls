@@ -11,8 +11,7 @@
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], ".."}]];
 Get["THVMLink`"];
-print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"];
-banner[s_] := (print[""]; print["################ ", s, " ################"]);
+banner[s_] := (Print[""]; Print["################ ", s, " ################"]);
 dims[t_] := Dimensions[Normal @ TTensorData @ TRealize @ t];
 
 SeedRandom[7];
@@ -24,66 +23,66 @@ arch = {LinearLayer[64, "Input" -> 784], ElementwiseLayer[Ramp], LinearLayer[10]
 banner["1. NET INTROSPECTION"];
 SeedRandom[7];
 net = TFromNet[NetInitialize @ NetChain[arch, "Input" -> 784]];
-print["net = TFromNet[...]  ->  Head: ", Head[net]];
+Print["net = TFromNet[...]  ->  Head: ", Head[net]];
 info = TNetParamInfo[net];
-print["TNetParamInfo[net]  (", Length[info], " trainable params, in layer order):"];
+Print["TNetParamInfo[net]  (", Length[info], " trainable params, in layer order):"];
 Do[ With[{e = info[[i]]},
-    print["  param ", i, ":  Layer=", e["Layer"], "  Param=", e["Param"], "  shape=", dims[e["Term"]]]],
+    Print["  param ", i, ":  Layer=", e["Layer"], "  Param=", e["Param"], "  shape=", dims[e["Term"]]]],
     {i, Length[info]}];
-print["TNetParams[net]  ->  ", Length[TNetParams[net]], " weight handles (TAG_TEN, TRequiresGrad)"];
+Print["TNetParams[net]  ->  ", Length[TNetParams[net]], " weight handles (TAG_TEN, TRequiresGrad)"];
 rec = TNetOf[net];
-print["TNetOf[net]  (faithful reconstruction from the term graph, registry-free):"];
-print["  Head: ", Head[rec]];
-print["  layers: ", Head /@ (NetExtract[rec, #] & /@ Range[Length[arch]])];
-print["  forward is bit-faithful to the term graph (pinned by training.wlt tnetof-reconstructs)"];
+Print["TNetOf[net]  (faithful reconstruction from the term graph, registry-free):"];
+Print["  Head: ", Head[rec]];
+Print["  layers: ", Head /@ (NetExtract[rec, #] & /@ Range[Length[arch]])];
+Print["  forward is bit-faithful to the term graph (pinned by training.wlt tnetof-reconstructs)"];
 
 (* ===================================================================== *)
 banner["2. KERNEL + MEMORY + BUFFER STATS"];
 tn = NetTrain[net, tr, "TrainingNet", MaxTrainingRounds -> 100, "LearningRate" -> 0.05];
-print["NetTrain[net, data, \"TrainingNet\"]  ->  Head: ", Head[tn], "  (INERT: nothing has run)"];
-print["-- before TWnf --"];
-print["  TKernelCount   = ", TKernelCount[]];
-print["  TTensCount     = ", TTensCount[]];
-print["  TTotalBufBytes = ", TTotalBufBytes[], " bytes"];
+Print["NetTrain[net, data, \"TrainingNet\"]  ->  Head: ", Head[tn], "  (INERT: nothing has run)"];
+Print["-- before TWnf --"];
+Print["  TKernelCount   = ", TKernelCount[]];
+Print["  TTensCount     = ", TTensCount[]];
+Print["  TTotalBufBytes = ", TTotalBufBytes[], " bytes"];
 profBefore = TProfileAll[];
 t0 = AbsoluteTime[];
 TWnf[tn];
 trainWall = AbsoluteTime[] - t0;
 $trainWall = trainWall;
-print["-- single TWnf drove the whole 100-round optimiser (", Round[trainWall, 0.01], " s) --"];
-print["  TKernelCount   = ", TKernelCount[]];
-print["  TTensCount     = ", TTensCount[]];
-print["  TTotalBufBytes = ", TTotalBufBytes[], " bytes (live)"];
+Print["-- single TWnf drove the whole 100-round optimiser (", Round[trainWall, 0.01], " s) --"];
+Print["  TKernelCount   = ", TKernelCount[]];
+Print["  TTensCount     = ", TTensCount[]];
+Print["  TTotalBufBytes = ", TTotalBufBytes[], " bytes (live)"];
 mp = TMemoryPlan[][[1]];
-print["  TMemoryPlan: ", Length[mp["Kernels"]], " kernels, ", Length[mp["Bufs"]], " bufs, peak-concurrent-live = ", mp["Peak"], " bytes"];
+Print["  TMemoryPlan: ", Length[mp["Kernels"]], " kernels, ", Length[mp["Bufs"]], " bufs, peak-concurrent-live = ", mp["Peak"], " bytes"];
 ob = TKernelOutputBytes[];
-print["  TKernelOutputBytes: total ", Total[Values[ob]], " bytes across ", Length[ob], " kernels"];
+Print["  TKernelOutputBytes: total ", Total[Values[ob]], " bytes across ", Length[ob], " kernels"];
 ps = TPoolStats[];
-print["  TPoolStats: ", ps["Workers"], " workers, ", ps["TotalFires"], " total fires, ", ps["DrainRounds"], " drain rounds"];
+Print["  TPoolStats: ", ps["Workers"], " workers, ", ps["TotalFires"], " total fires, ", ps["DrainRounds"], " drain rounds"];
 delta = TProfileDelta[profBefore, TProfileAll[]];
-print["  TProfileDelta: ", Length[delta], " kernels fired during the TWnf window"];
+Print["  TProfileDelta: ", Length[delta], " kernels fired during the TWnf window"];
 topUs = Take[SortBy[Values[delta], -#["TotalUs"] &], UpTo[6]];
-print["  top kernels by wallclock (this training window):"];
-Do[ print["    kid ", k["Kid"], "  ", k["DispatchKind"], "  fires=", k["DispatchCount"],
+Print["  top kernels by wallclock (this training window):"];
+Do[ Print["    kid ", k["Kid"], "  ", k["DispatchKind"], "  fires=", k["DispatchCount"],
         "  totalUs=", Round[k["TotalUs"], 0.1], "  GFLOP/s=", Round[k["GFlopsPerSec"], 0.1]], {k, topUs}];
 
 (* ===================================================================== *)
 banner["3. CODEGEN: CPU (C99) + METAL (MSL)"];
-showHead[lbl_, src_, n_] := (print[""]; print["---- ", lbl, "  (", StringLength[src], " chars) ----"];
-    print[StringTake[src, UpTo[StringLength @ StringRiffle[Take[StringSplit[src, "\n"], UpTo[n]], "\n"]]]]);
+showHead[lbl_, src_, n_] := (Print[""]; Print["---- ", lbl, "  (", StringLength[src], " chars) ----"];
+    Print[StringTake[src, UpTo[StringLength @ StringRiffle[Take[StringSplit[src, "\n"], UpTo[n]], "\n"]]]]);
 gemmKids = Select[Range[0, TKernelCount[] - 1], TKernelDispatchKind[#] === "blas-gemm" &];
-print["the ", Length[gemmKids], " dense matmuls dispatch to a tuned CPU BLAS gemm (see section 2's top kernels);"];
-print["every other kernel is rendered by thvm's own codegen.  pick the heaviest codegen kernel:"];
+Print["the ", Length[gemmKids], " dense matmuls dispatch to a tuned CPU BLAS gemm (see section 2's top kernels);"];
+Print["every other kernel is rendered by thvm's own codegen.  pick the heaviest codegen kernel:"];
 (* heaviest jit (codegen) kernel that renders a non-empty C body *)
 pickable[kid_] := (TKernelDispatchKind[kid] === "jit" && TKernelFlops[kid] > 0 && StringLength[TKernelSource[kid, "C"]] > 0);
 jitKids = SortBy[Select[Range[0, TKernelCount[] - 1], pickable], -TKernelFlops[#] &];
 kid = First[jitKids];
-print["representative codegen kernel: kid ", kid, "  (", TKernelDispatchKind[kid], ", flops=", TKernelFlops[kid], ")"];
+Print["representative codegen kernel: kid ", kid, "  (", TKernelDispatchKind[kid], ", flops=", TKernelFlops[kid], ")"];
 showHead["TKernelSource[kid, \"C\"]      (C99, CPU)", TKernelSource[kid, "C"], 9];
 showHead["TKernelSource[kid, \"Metal\"]  (MSL -- pure codegen, no GPU dispatch)", TKernelSource[kid, "Metal"], 7];
-print[""]; print["TKernelJitDylibPath[kid] -> ", TKernelJitDylibPath[kid]];
-print["  (this net's small kernels run on the interpreter; hot kernels cross the JIT warmup"];
-print["   gate and clang -O3 compiles the rendered C to a native dylib)"];
+Print[""]; Print["TKernelJitDylibPath[kid] -> ", TKernelJitDylibPath[kid]];
+Print["  (this net's small kernels run on the interpreter; hot kernels cross the JIT warmup"];
+Print["   gate and clang -O3 compiles the rendered C to a native dylib)"];
 
 (* ===================================================================== *)
 banner["4. TRAINING LOSS-TRACE CALLBACK FIRING ON TWnf"];
@@ -104,29 +103,29 @@ lossSlot = nm2 <> "_loss"; TDef[lossSlot, TMaterialize[TNf[loss2]]];
 round = 0;
 lossCb = Function[v, round++;
     If[ round <= 3 || Mod[round, 10] == 0,
-        print["    [TWnf  round ", IntegerString[round, 10, 3], "]   loss = ",
+        Print["    [TWnf  round ", IntegerString[round, 10, 3], "]   loss = ",
             Round[First @ Normal @ TTensorData @ v, 0.0001]]]];
 TDef[nm2, TLam[k, TIfZero[k, TUOpConst[0.0],
     Fold[TPriForce[#2, #1] &, TPri[lossCb, TRef[lossSlot], TApp[TRef[nm2], TOp2["-", k, TNum[1]]]], Reverse[sr2]]]]];
-print["the inert loop fires N rounds under ONE TWnf; a TPri callback prints each round's loss live:"];
-print[""];
+Print["the inert loop fires N rounds under ONE TWnf; a TPri callback prints each round's loss live:"];
+Print[""];
 TWnf[TApp[TRef[nm2], TNum[100]]];
-print[""];
-print["  ", round, " callbacks fired DURING the single TWnf (loss read from an in-graph"];
-print["  materialized buffer -- never a re-entrant host TRealize, which would corrupt the loop)"];
+Print[""];
+Print["  ", round, " callbacks fired DURING the single TWnf (loss read from an in-graph"];
+Print["  materialized buffer -- never a re-entrant host TRealize, which would corrupt the loop)"];
 End[];
 
 (* ===================================================================== *)
 banner["5. EVAL METRICS + TRAIN PROFILE"];
 preds = TNetPredict[net, te[[All, 1]]];
 acc = N[Count[MapThread[#1 === #2 &, {preds, teLabels}], True] / Length[teLabels]];
-print["TNetPredict[net, testImages]  (net trained in section 2, in place):"];
-print["  held-out test accuracy (", Length[teLabels], " ex) = ", Round[acc, 0.001]];
-print[""];
-print["train profile (the section-2 TWnf):"];
-print["  wall time          = ", Round[$trainWall, 0.01], " s for 100 rounds (", Round[$trainWall/100*1000, 0.1], " ms/round)"];
-print["  kernels fired      = ", Length[delta]];
-print["  total kernel us    = ", Round[Total[#["TotalUs"] & /@ Values[delta]], 0.1]];
-print["  total dispatches   = ", Total[#["DispatchCount"] & /@ Values[delta]]];
-print["  aggregate GFLOP/s  = ", Round[Total[#["Flops"] * #["DispatchCount"] & /@ Values[delta]] / (Total[#["TotalUs"] & /@ Values[delta]] * 1000), 0.1]];
-print[""]; print["################ DONE ################"];
+Print["TNetPredict[net, testImages]  (net trained in section 2, in place):"];
+Print["  held-out test accuracy (", Length[teLabels], " ex) = ", Round[acc, 0.001]];
+Print[""];
+Print["train profile (the section-2 TWnf):"];
+Print["  wall time          = ", Round[$trainWall, 0.01], " s for 100 rounds (", Round[$trainWall/100*1000, 0.1], " ms/round)"];
+Print["  kernels fired      = ", Length[delta]];
+Print["  total kernel us    = ", Round[Total[#["TotalUs"] & /@ Values[delta]], 0.1]];
+Print["  total dispatches   = ", Total[#["DispatchCount"] & /@ Values[delta]]];
+Print["  aggregate GFLOP/s  = ", Round[Total[#["Flops"] * #["DispatchCount"] & /@ Values[delta]] / (Total[#["TotalUs"] & /@ Values[delta]] * 1000), 0.1]];
+Print[""]; Print["################ DONE ################"];

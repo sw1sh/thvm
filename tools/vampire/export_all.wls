@@ -3,10 +3,8 @@
    every Theory::Theorem listed (skipping comment lines).
    Inlines the exporter so we only pay one kernel startup. *)
 
-print[args___] := WriteString["stdout", args];
-
 If[ Length[$ScriptCommandLine] < 3,
-    print["usage: export_all.wls <list-file> <outdir>\n"];
+    Print["usage: export_all.wls <list-file> <outdir>\n"];
     Exit[2]];
 
 listFile = $ScriptCommandLine[[2]];
@@ -105,13 +103,13 @@ exportOne[theoryName_, theoremName_, outFile_] := Block[{
     $nextConstId = 0;
     axioms = AxiomaticTheory[theoryName, "Axioms"];
     If[ ! ListQ[axioms] || Length[axioms] === 0,
-        print["  no axioms for ", theoryName, "\n"]; Return[written]];
+        Print["  no axioms for ", theoryName, "\n"]; Return[written]];
     ntAssoc = AxiomaticTheory[theoryName, "NotableTheorems"];
     If[ ! AssociationQ[ntAssoc],
-        print["  no notable theorems for ", theoryName, "\n"]; Return[written]];
+        Print["  no notable theorems for ", theoryName, "\n"]; Return[written]];
     cjRaw = Lookup[ntAssoc, theoremName, None];
     If[ cjRaw === None,
-        print["  ", theoremName, " not in ", theoryName, " NotableTheorems\n"];
+        Print["  ", theoremName, " not in ", theoryName, " NotableTheorems\n"];
         Return[written]];
     conjuncts = If[ MatchQ[cjRaw, _List], cjRaw, {cjRaw}];
     axClauses = MapIndexed[
@@ -123,7 +121,7 @@ exportOne[theoryName_, theoremName_, outFile_] := Block[{
                 StringReplace[outFile, ".p" -> "__c" <> ToString[idx] <> ".p"]];
             gcl = conjToNegatedCnf[conj, "goal"];
             If[ gcl === $Failed,
-                print["  skip (non-equation): ", fn, "\n"]; Return[]];
+                Print["  skip (non-equation): ", fn, "\n"]; Return[]];
             lines = Join[
                 {"% TPTP problem: " <> theoryName <> "::" <> theoremName <>
                     If[ Length[conjuncts] > 1,
@@ -143,7 +141,7 @@ lines = Import[listFile, "Lines"];
 entries = Select[lines,
     ! StringStartsQ[#, "#"] && StringContainsQ[#, "::"] &];
 
-print["entries: ", Length[entries], "\n"];
+Print["entries: ", Length[entries], "\n"];
 
 allFiles = {};
 Do[
@@ -151,12 +149,12 @@ Do[
         theory = parts[[1]];
         theorem = parts[[2]];
         out = FileNameJoin[{outDir, theory <> "__" <> theorem <> ".p"}];
-        print["[", entry, "]\n"];
+        Print["[", entry, "]\n"];
         w = exportOne[theory, theorem, out];
         AppendTo[allFiles, w];
-        Do[ print["  -> ", f, "\n"], {f, w}];
+        Do[ Print["  -> ", f, "\n"], {f, w}];
     ],
     {entry, entries}];
 
-print["TOTAL FILES: ", Length[Flatten[allFiles]], "\n"];
+Print["TOTAL FILES: ", Length[Flatten[allFiles]], "\n"];
 Exit[0]

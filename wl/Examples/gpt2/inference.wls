@@ -53,16 +53,13 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 SeedRandom[42];
 
 (* ===========================================================
    Part 1: TFromNet vs Wolfram on real GPT-2 sub-graphs
    =========================================================== *)
 
-print["=== Part 1: TFromNet conversion of real GPT-2 sub-graphs ==="];
+Print["=== Part 1: TFromNet conversion of real GPT-2 sub-graphs ==="];
 
 net = NetInitialize @
     NetModel["GPT Transformer Trained on BookCorpus Data",
@@ -72,7 +69,7 @@ ids = {7, 13, 21, 30};
 
 (* Embedding sub-NetGraph *)
 embedG = net[[1]];
-print["embed sub-NetGraph children: ", Keys @ NetExtract[embedG, All]];
+Print["embed sub-NetGraph children: ", Keys @ NetExtract[embedG, All]];
 
 t0 = AbsoluteTime[];
 embedOut = TRealize @ TFromLayer[embedG, ids];
@@ -80,15 +77,15 @@ embedMs  = (AbsoluteTime[] - t0) * 1000.;
 embedArr = Normal @ TTensorData @ embedOut;
 embedRef = embedG[ids];
 embedDiff = Max[Abs[Flatten[embedArr - embedRef]]];
-print["  embed thvm wall: ", NumberForm[embedMs, {6, 0}], " ms"];
-print["  shape: ", Dimensions[embedArr], " (expected {4, 768})"];
-print["  max abs diff vs Wolfram: ", embedDiff];
+Print["  embed thvm wall: ", NumberForm[embedMs, {6, 0}], " ms"];
+Print["  shape: ", Dimensions[embedArr], " (expected {4, 768})"];
+Print["  max abs diff vs Wolfram: ", embedDiff];
 If[ embedDiff > 1.0*^-4 || Dimensions[embedArr] =!= {4, 768},
-    print["FAIL: embed mismatch"]; Exit[1]];
+    Print["FAIL: embed mismatch"]; Exit[1]];
 
 (* FFN sub-NetGraph (post-attn half of block 1) *)
 ffnG = net[[2,1,2]];
-print["FFN  sub-NetGraph children: ", Keys @ NetExtract[ffnG, All]];
+Print["FFN  sub-NetGraph children: ", Keys @ NetExtract[ffnG, All]];
 
 t0 = AbsoluteTime[];
 ffnOut = TRealize @ TFromLayer[ffnG, embedOut];
@@ -96,20 +93,20 @@ ffnMs  = (AbsoluteTime[] - t0) * 1000.;
 ffnArr = Normal @ TTensorData @ ffnOut;
 ffnRef = ffnG[embedArr];
 ffnDiff = Max[Abs[Flatten[ffnArr - ffnRef]]];
-print["  ffn thvm wall: ", NumberForm[ffnMs, {6, 0}], " ms"];
-print["  shape: ", Dimensions[ffnArr], " (expected {4, 768})"];
-print["  max abs diff vs Wolfram: ", ffnDiff];
+Print["  ffn thvm wall: ", NumberForm[ffnMs, {6, 0}], " ms"];
+Print["  shape: ", Dimensions[ffnArr], " (expected {4, 768})"];
+Print["  max abs diff vs Wolfram: ", ffnDiff];
 If[ ffnDiff > 1.0*^-4 || Dimensions[ffnArr] =!= {4, 768},
-    print["FAIL: ffn mismatch"]; Exit[1]];
+    Print["FAIL: ffn mismatch"]; Exit[1]];
 
-print["PASS: TFromNet matches Wolfram on embed + FFN sub-graphs"];
-print[""];
+Print["PASS: TFromNet matches Wolfram on embed + FFN sub-graphs"];
+Print[""];
 
 (* ===========================================================
    Part 2: small mini-GPT-2 forward, hand-composed
    =========================================================== *)
 
-print["=== Part 2: synthetic mini-GPT-2 forward (single token) ==="];
+Print["=== Part 2: synthetic mini-GPT-2 forward (single token) ==="];
 
 vocab   = 32;
 dim     = 64;
@@ -118,7 +115,7 @@ nLayers = 1;
 seq     = 4;
 ffDim   = 4 * dim;
 
-print["  config: vocab=", vocab, " dim=", dim,
+Print["  config: vocab=", vocab, " dim=", dim,
       " n_heads=", nHeads, " n_layers=", nLayers, " seq=", seq];
 
 mkLayer[] := <|
@@ -175,27 +172,27 @@ forward[promptIds_List] := Module[{mask, x, lnf, logits},
 ]
 
 prompt = {7, 13, 21, 30};
-print["  prompt ids: ", prompt];
+Print["  prompt ids: ", prompt];
 
 t0 = AbsoluteTime[];
 logitsTT = TRealize @ forward[prompt];
 oneTokenMs = (AbsoluteTime[] - t0) * 1000.;
-print["  single-forward wall: ", NumberForm[oneTokenMs, {6, 0}], " ms"];
+Print["  single-forward wall: ", NumberForm[oneTokenMs, {6, 0}], " ms"];
 
 logits = Normal @ TTensorData @ logitsTT;
-print["  logits shape: ", Dimensions[logits]];
+Print["  logits shape: ", Dimensions[logits]];
 flat = Flatten[logits];
 hasBad = AnyTrue[flat, !NumericQ[#] || Abs[#] > 1.0*^4 &];
 If[ hasBad || Dimensions[logits] =!= {seq, vocab},
-    print["FAIL: logits bad shape or non-finite"]; Exit[1]];
-print["  max abs logit: ", NumberForm[Max[Abs[flat]], {6, 4}]];
+    Print["FAIL: logits bad shape or non-finite"]; Exit[1]];
+Print["  max abs logit: ", NumberForm[Max[Abs[flat]], {6, 4}]];
 
 (* Greedy next-token: argmax of last-row logits *)
 nextId = First @ Position[logits[[-1]], Max[logits[[-1]]]] - 1;
-print["  greedy next token id: ", nextId];
+Print["  greedy next token id: ", nextId];
 
-print["PASS: mini-GPT-2 forward + greedy decode produces finite logits"];
-print[""];
+Print["PASS: mini-GPT-2 forward + greedy decode produces finite logits"];
+Print[""];
 
 (* ===========================================================
    Part 3: greedy generation, eager + TJit replay
@@ -205,10 +202,10 @@ print[""];
 nGen = With[{n = Interpreter["Integer"][Environment["N_GEN"]]},
     If[ FailureQ[n] || n === $Failed, 100, n]];
 
-print["=== Part 3: ", nGen, "-token greedy generation ==="];
+Print["=== Part 3: ", nGen, "-token greedy generation ==="];
 genWindow = prompt;   (* host-side rolling window of length seq *)
 
-print["  prompt: ", prompt, "  generating ", nGen, " tokens"];
+Print["  prompt: ", prompt, "  generating ", nGen, " tokens"];
 
 (* Eager loop -- TFromNet builds a fresh graph per token, runs
    through the full per-call materialise + dispatch path. *)
@@ -225,15 +222,15 @@ generated = Reap[
 ][[2]];
 eagerMs = (AbsoluteTime[] - t0) * 1000.;
 
-print["  eager ", nGen, "-token wall: ", NumberForm[eagerMs, {7, 0}], " ms"];
-print["  eager ms/token:      ", NumberForm[eagerMs / nGen, {6, 1}], " ms"];
-print["  generated tokens:    ", First[generated]];
+Print["  eager ", nGen, "-token wall: ", NumberForm[eagerMs, {7, 0}], " ms"];
+Print["  eager ms/token:      ", NumberForm[eagerMs / nGen, {6, 1}], " ms"];
+Print["  generated tokens:    ", First[generated]];
 
 (* Sanity: every step produced a finite token id within vocab range *)
 flatGen = Flatten[generated];
 If[ Length[flatGen] =!= nGen ||
     AnyTrue[flatGen, ! IntegerQ[#] || # < 0 || # >= vocab &],
-    print["FAIL: generation produced bad token ids"];
+    Print["FAIL: generation produced bad token ids"];
     Exit[1]];
 
 (* === TJit-wrapped variant ====================================
@@ -262,8 +259,8 @@ embed0 = TRealize[TEmbeddingMatrix[tokEmb, prompt] +
                   TEmbeddingMatrix[posEmb, Range[0, seq - 1]]];
 TSet[inputBuf, embed0];
 jittedStep[];   (* capture *)
-print[""];
-print["TJit captured ", TJitOpCount[jittedStep], " ops"];
+Print[""];
+Print["TJit captured ", TJitOpCount[jittedStep], " ops"];
 
 (* JIT-replay 10 tokens *)
 t0 = AbsoluteTime[];
@@ -283,14 +280,14 @@ genJit = Reap[
 ][[2]];
 jitMs = (AbsoluteTime[] - t0) * 1000.;
 
-print["  jit ", nGen, "-token wall:   ", NumberForm[jitMs, {7, 0}], " ms"];
-print["  jit ms/token:        ", NumberForm[jitMs / nGen, {6, 1}], " ms"];
-print["  jit replays/step:    ", TJitOpCount[jittedStep]];
-print["  speedup vs eager:    ", NumberForm[eagerMs / jitMs, {4, 2}], "x"];
-print["  generated tokens:    ", First[genJit]];
+Print["  jit ", nGen, "-token wall:   ", NumberForm[jitMs, {7, 0}], " ms"];
+Print["  jit ms/token:        ", NumberForm[jitMs / nGen, {6, 1}], " ms"];
+Print["  jit replays/step:    ", TJitOpCount[jittedStep]];
+Print["  speedup vs eager:    ", NumberForm[eagerMs / jitMs, {4, 2}], "x"];
+Print["  generated tokens:    ", First[genJit]];
 
 If[ Flatten[genJit] =!= Flatten[generated],
-    print["FAIL: jit and eager disagree on generated tokens"];
+    Print["FAIL: jit and eager disagree on generated tokens"];
     Exit[1]];
 
-print["PASS: jit and eager produce identical token sequences"];
+Print["PASS: jit and eager produce identical token sequences"];

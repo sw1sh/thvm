@@ -6,9 +6,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 TInit[];
 SeedRandom[7];
 
@@ -21,14 +18,14 @@ b = TTensorCreate @ NumericArray[
 (* Force kernel to materialise. *)
 TRealize @ TUOpAdd[a, b];
 kid = TKernelCount[] - 1;
-print["kid: ", kid];
-print["dispatch_pre: ", TKernelDispatchKind[kid]];
+Print["kid: ", kid];
+Print["dispatch_pre: ", TKernelDispatchKind[kid]];
 
 (* Get proposals + bench all variants.  variants[[1,1]] is the
    baseline (Opt -> None); the rest are proposed candidates with
    measured WallUs. *)
 proposals = TKernelProposed[kid];
-print["proposals: ", proposals];
+Print["proposals: ", proposals];
 
 variants = TKernelVariants[kid];
 rows = First /@ variants;
@@ -36,15 +33,15 @@ baselineRow = SelectFirst[rows, #["Opt"] === None &];
 candidateRows = Select[rows, #["Opt"] =!= None &];
 bestRow = First @ SortBy[candidateRows, #["WallUs"] &];
 
-print["variants_tried: ", Length[variants]];
-print["baseline_us: ", N @ baselineRow["WallUs"]];
-print["best_variant_us: ", N @ bestRow["WallUs"], "  opt=", bestRow["Opt"]];
+Print["variants_tried: ", Length[variants]];
+Print["baseline_us: ", N @ baselineRow["WallUs"]];
+Print["best_variant_us: ", N @ bestRow["WallUs"], "  opt=", bestRow["Opt"]];
 
 (* Autotune: applies the winner. *)
 optsPost = TKernelAutotune[kid];
 applied = First[optsPost]["Applied"];
-print["applied: ", applied];
-print["dispatch_post: ", TKernelDispatchKind[kid]];
+Print["applied: ", applied];
+Print["dispatch_post: ", TKernelDispatchKind[kid]];
 
 speedup = N[baselineRow["WallUs"] / bestRow["WallUs"]];
-print["speedup_baseline_to_best: ", speedup];
+Print["speedup_baseline_to_best: ", speedup];

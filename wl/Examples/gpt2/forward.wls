@@ -26,9 +26,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 SeedRandom[42];
 
 vocab   = 32;
@@ -40,7 +37,7 @@ ffMult  = 4;
 dHead   = dim / nHeads;
 ffDim   = ffMult * dim;
 
-print["gpt2-mini config: vocab=", vocab, " dim=", dim,
+Print["gpt2-mini config: vocab=", vocab, " dim=", dim,
       " n_heads=", nHeads, " n_layers=", nLayers,
       " seq=", seq, " ff_dim=", ffDim];
 
@@ -53,13 +50,13 @@ print["gpt2-mini config: vocab=", vocab, " dim=", dim,
 
 bench[name_, expr_] := Module[{t},
     t = First @ AbsoluteTiming[TRealize @@ {expr}];
-    print["  ", name, ": ", NumberForm[1000. * t, {6, 2}], " ms"];
+    Print["  ", name, ": ", NumberForm[1000. * t, {6, 2}], " ms"];
     t]
 
 xProf = TGlorot[{seq, dim}];
 TRealize[xProf + xProf];   (* warm caches *)
 
-print["per-layer profile (eager):"];
+Print["per-layer profile (eager):"];
 gP = TOnes[{dim}];   bP = TZeros[{dim}];
 qP = TGlorot[{seq, dim}];
 kP = TGlorot[{seq, dim}];
@@ -143,31 +140,31 @@ forward[idsArg_List] := Module[{mask, x, lnf, logits},
     logits
 ]
 
-print[""];
-print["forward through ", nLayers, " layer(s) on prompt ids=", ids];
+Print[""];
+Print["forward through ", nLayers, " layer(s) on prompt ids=", ids];
 t0 = AbsoluteTime[];
 logitsTT = TRealize @ forward[ids];
-print["  e2e wall: ",
+Print["  e2e wall: ",
     NumberForm[1000. * (AbsoluteTime[] - t0), {6, 0}], " ms"];
 
 logits = Normal @ TTensorData @ logitsTT;
-print["  logits shape: ", Dimensions[logits]];
-print["  logits[1] (first row, first 4): ", Take[logits[[1]], 4]];
+Print["  logits shape: ", Dimensions[logits]];
+Print["  logits[1] (first row, first 4): ", Take[logits[[1]], 4]];
 
 (* === Sanity assertions ====================================== *)
 
 If[ Dimensions[logits] =!= {seq, vocab},
-    print["FAIL: expected shape {", seq, ", ", vocab,
+    Print["FAIL: expected shape {", seq, ", ", vocab,
           "}, got ", Dimensions[logits]];
     Exit[1]];
 
 flat = Flatten[logits];
 hasBad = AnyTrue[flat, !NumericQ[#] || Abs[#] > 1.0*^4 &];
 If[ hasBad,
-    print["FAIL: logits contain NaN/Inf or magnitude > 1e4"];
-    print["  max abs: ", Max[Abs[flat]]];
+    Print["FAIL: logits contain NaN/Inf or magnitude > 1e4"];
+    Print["  max abs: ", Max[Abs[flat]]];
     Exit[1]];
 
-print["  max abs logit: ", NumberForm[Max[Abs[flat]], {6, 4}]];
-print["PASS: thvm gpt2 forward produced finite logits of shape {",
+Print["  max abs logit: ", NumberForm[Max[Abs[flat]], {6, 4}]];
+Print["PASS: thvm gpt2 forward produced finite logits of shape {",
       seq, ", ", vocab, "}"];

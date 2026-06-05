@@ -15,8 +15,6 @@
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], ".."}]];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"];
-
 SeedRandom[7];
 nTrain = 512; nTest = 512;
 all = RandomSample @ ResourceData["MNIST", "TrainingData"];
@@ -27,7 +25,7 @@ teLabels = #[[2]] & /@ te;
 
 arch = {LinearLayer[64], ElementwiseLayer[Ramp], LinearLayer[10]};
 
-print["=== thvm NetTrain (inert recursive loop) ==="];
+Print["=== thvm NetTrain (inert recursive loop) ==="];
 (* train at increasing round counts (fresh each) to trace progress;
    each call is ONE TWnf dispatch of the whole optimiser term. *)
 roundsList = {25, 50, 100, 200, 400};
@@ -39,12 +37,12 @@ thvmCurve = Table[
             trained = NetTrain[net, tr, MaxTrainingRounds -> r, "LearningRate" -> 0.05];
             dt = AbsoluteTime[] - t0;
             acc = N[Count[MapThread[#1 === #2 &, {TNetPredict[trained, te[[All, 1]]], teLabels}], True] / nTest];
-            print["  rounds=", r, "  testAcc=", Round[acc, 0.001], "  (", Round[dt, 0.01], "s)"];
+            Print["  rounds=", r, "  testAcc=", Round[acc, 0.001], "  (", Round[dt, 0.01], "s)"];
             {r, acc}]],
     {r, roundsList}];
 thvmBest = thvmCurve[[-1, 2]];
 
-print["=== built-in NetTrain (reference, same hidden arch) ==="];
+Print["=== built-in NetTrain (reference, same hidden arch) ==="];
 SeedRandom[7];
 clsNet = NetInitialize @ NetChain[
     Append[arch, SoftmaxLayer[]], "Input" -> 784,
@@ -52,11 +50,11 @@ clsNet = NetInitialize @ NetChain[
 biTrained = NetTrain[clsNet, (flat[#] -> #[[2]]) & /@ tr,
     MaxTrainingRounds -> 20, TrainingProgressReporting -> None, "Method" -> "ADAM"];
 biAcc = N[Count[MapThread[#1 === #2 &, {biTrained[flat /@ te], teLabels}], True] / nTest];
-print["  built-in testAcc=", Round[biAcc, 0.001]];
+Print["  built-in testAcc=", Round[biAcc, 0.001]];
 
-print["=== summary ==="];
-print["  thvm  (inert loop, 400 rounds SGD lr0.05): ", Round[thvmBest, 0.001]];
-print["  built-in (20 rounds ADAM):          ", Round[biAcc, 0.001]];
+Print["=== summary ==="];
+Print["  thvm  (inert loop, 400 rounds SGD lr0.05): ", Round[thvmBest, 0.001]];
+Print["  built-in (20 rounds ADAM):          ", Round[biAcc, 0.001]];
 
 (* === optimizer suite: SGD vs momentum vs ADAM, same net, 100 rounds ===
    The inert loop carries per-weight optimiser state (a velocity for momentum,
@@ -64,12 +62,12 @@ print["  built-in (20 rounds ADAM):          ", Round[biAcc, 0.001]];
    a single TWnf still drives the whole thing.  Adaptive optimisers reach a
    given accuracy in far fewer rounds (use a smaller LearningRate -- momentum's
    effective rate is lr/(1-momentum), ADAM's adaptive step is ~lr per weight). *)
-print["=== thvm optimizer suite (same net, 100 rounds) ==="];
+Print["=== thvm optimizer suite (same net, 100 rounds) ==="];
 optAcc[label_, opts_List] := (
     SeedRandom[7];
     With[{net = TFromNet[NetInitialize @ NetChain[arch, "Input" -> 784]]},
         With[{trained = NetTrain[net, tr, Sequence @@ opts]},
-            print["  ", label, "  testAcc=",
+            Print["  ", label, "  testAcc=",
                 Round[N[Count[MapThread[#1 === #2 &,
                     {TNetPredict[trained, te[[All, 1]]], teLabels}], True] / nTest], 0.001]]]]);
 optAcc["SGD       lr0.05       ", {MaxTrainingRounds -> 100, "LearningRate" -> 0.05}];
@@ -83,7 +81,7 @@ optAcc["ADAM      lr0.001      ", {MaxTrainingRounds -> 100, "LearningRate" -> 0
    the rank-4 batch axis kept through ConvolutionLayer / PoolingLayer /
    FlattenLayer) trains in one TWnf dispatch.  Here we overfit a small batch to
    show the loss curve descend. *)
-print["=== thvm NetTrain on a conv NetChain (direct, no TFromNet) ==="];
+Print["=== thvm NetTrain on a conv NetChain (direct, no TFromNet) ==="];
 SeedRandom[7];
 convBatch = Take[all, 32];
 convNet = NetInitialize @ NetChain[
@@ -98,10 +96,10 @@ convCurve = Table[
         trained = TNetTrain[net, convBatch, MaxTrainingRounds -> r, "LearningRate" -> 0.1];
         dt = AbsoluteTime[] - t0;
         acc = N[Count[MapThread[#1 === #2 &, {TNetPredict[trained, convBatch[[All, 1]]], convBatch[[All, 2]]}], True] / Length[convBatch]];
-        print["  rounds=", r, "  trainBatchAcc=", Round[acc, 0.001], "  (", Round[dt, 0.01], "s)"];
+        Print["  rounds=", r, "  trainBatchAcc=", Round[acc, 0.001], "  (", Round[dt, 0.01], "s)"];
         {r, acc}],
     {r, {5, 10, 20, 40}}];
-print["  conv net (40 rounds SGD lr0.1) overfits 32-batch to acc ", Round[convCurve[[-1, 2]], 0.001]];
+Print["  conv net (40 rounds SGD lr0.1) overfits 32-batch to acc ", Round[convCurve[[-1, 2]], 0.001]];
 
 (* === plot: accuracy-vs-rounds curve + built-in reference line === *)
 plot = ListLinePlot[
@@ -118,4 +116,4 @@ plot = ListLinePlot[
     Background -> LightDarkSwitched[White, Black]];
 pngPath = FileNameJoin[{DirectoryName[$InputFileName], "nettrain_tutorial.png"}];
 Export[pngPath, plot];
-print["plot saved: ", pngPath];
+Print["plot saved: ", pngPath];

@@ -17,8 +17,6 @@
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
 Needs["THVMLink`"];
-print[l_, v_] := WriteString["stdout", l, " => ", ToString[v, InputForm], "\n"];
-
 SeedRandom[42]; Ntr = 1024; B = 64;
 tr = RandomSample[ResourceData["MNIST", "TrainingData"], Ntr];
 te = RandomSample[ResourceData["MNIST", "TestData"], 512];
@@ -37,7 +35,7 @@ bm = NetInitialize[NetChain[{
 xS = TTensorCreate[trImg[[1 ;; B]]]; yT = TTensorCreate[trOH[[1 ;; B]]]; lr = 0.1;
 {fwd, sown} = Quiet @ Reap[TFromNet[bm, xS], "thvmNetParam"];
 params = Flatten[sown];
-print["beautiful_mnist params lifted (4 conv + 2 BN + linear = 14)", Length @ params];
+Print["beautiful_mnist params lifted (4 conv + 2 BN + linear = 14)", " => ", Length @ params];
 loss = TCategoricalCrossEntropy[fwd, yT]; nB = Ntr/B;
 Do[
     Do[
@@ -52,5 +50,5 @@ Do[
 preds = Join @@ Table[
     TRealize @ TAssign[xS, TTensorCreate[teImg[[(k - 1)*B + 1 ;; k*B]]]];
     (Ordering[#, -1][[1]] - 1) & /@ Normal @ TRealize @ fwd, {k, 8}];
-print["thvm-trained beautiful_mnist (1024 imgs, from scratch) test acc",
+Print["thvm-trained beautiful_mnist (1024 imgs, from scratch) test acc", " => ",
     N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, teLab}]];

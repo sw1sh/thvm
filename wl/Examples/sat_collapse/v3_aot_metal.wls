@@ -19,11 +19,9 @@
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 ctx = TContextNew["metal"];
 If[ ctx === 0,
-    print["SKIP: Metal context unavailable"];
+    Print["SKIP: Metal context unavailable"];
     Exit[0]];
 
 (* ---- Church bools as inline TLams.  No TRef needed: the AOT emit
@@ -81,7 +79,7 @@ testCases = {
     {"sat-x-or-y-or-z",   {{1, 2, 3}},                 3, True}
 };
 
-print["=== Correctness vs WL SatisfiableQ ==="];
+Print["=== Correctness vs WL SatisfiableQ ==="];
 nOk = 0; nFail = 0;
 Do[Module[{name = tc[[1]], cnf = tc[[2]], nv = tc[[3]], expected = tc[[4]],
             ours, syms, wlAns},
@@ -93,15 +91,15 @@ Do[Module[{name = tc[[1]], cnf = tc[[2]], nv = tc[[3]], expected = tc[[4]],
         syms];
     If[ours === expected && wlAns === expected,
         nOk += 1;
-        print[StringPadRight[name, 22],
+        Print[StringPadRight[name, 22],
             " ours=", ours, " wl=", wlAns, " expected=", expected, " OK"]
         ,
         nFail += 1;
-        print[StringPadRight[name, 22],
+        Print[StringPadRight[name, 22],
             " ours=", ours, " wl=", wlAns, " expected=", expected, " FAIL"]
     ]
 ], {tc, testCases}];
 
-print[""];
-print["passed: ", nOk, " / ", Length[testCases]];
+Print[""];
+Print["passed: ", nOk, " / ", Length[testCases]];
 If[nFail > 0, Exit[1]];

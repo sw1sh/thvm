@@ -35,14 +35,12 @@
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 If[ Environment["DEV"] === $Failed || Environment["DEV"] === "",
     SetEnvironment["DEV" -> "metal"]];
 
 ctx = TContextNew["metal"];
 If[ ctx === 0,
-    print["SKIP: Metal context unavailable"];
+    Print["SKIP: Metal context unavailable"];
     Exit[0]];
 
 (* Build the per-variable column tensor for nVars in [2^V, V] order:
@@ -94,7 +92,7 @@ satSolutions[cnf_, nVars_] := Module[{vec},
 
 (* ---- Correctness: compare against WL SatisfiableQ on small inputs. ---- *)
 
-print["=== Correctness ==="];
+Print["=== Correctness ==="];
 testCases = {
     {"sat-trivial",     {{1}},                                     1, True},
     {"unsat-x-and-not-x", {{1}, {-1}},                             1, False},
@@ -111,15 +109,15 @@ Do[Module[{name = tc[[1]], cnf = tc[[2]], nv = tc[[3]], expected = tc[[4]],
         And @@ (Or @@ # & /@
             Map[If[# > 0, syms[[#]], Not[syms[[-#]]]] &, cnf, {2}]),
         syms];
-    print[StringPadRight[name, 22],
+    Print[StringPadRight[name, 22],
         " ours=", ourSat, " wl=", wlAns, " expected=", expected,
         If[ourSat === expected && wlAns === expected, " OK", " FAIL"]]
 ], {tc, testCases}];
 
 (* ---- Bench: for V in {8, 12, 16, 20}, time thvm-Metal vs WL. ---- *)
 
-print[""];
-print["=== Bench thvm-Metal vs WL SatisfiabilityInstances ==="];
+Print[""];
+Print["=== Bench thvm-Metal vs WL SatisfiabilityInstances ==="];
 SeedRandom[42];
 randomCnf[nv_, nc_] := Table[
     Module[{vs = RandomSample[Range[nv], 3]},
@@ -139,7 +137,7 @@ Do[Module[{nv, nc, cnf, syms, ourSols, wlSols, tThvm, tWl},
                 Map[If[# > 0, syms[[#]], Not[syms[[-#]]]] &, cnf, {2}]),
             syms, 2^nv]
     ];
-    print["V=", nv, " C=", nc,
+    Print["V=", nv, " C=", nc,
         "  thvm:", NumberForm[tThvm * 1000., {7, 2}], "ms",
         "  WL:",   NumberForm[tWl * 1000., {7, 2}],   "ms",
         "  thvm sols=", Length[ourSols],

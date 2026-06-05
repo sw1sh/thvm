@@ -14,8 +14,6 @@
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
 Needs["THVMLink`"];
-print[l_, v_] := WriteString["stdout", l, " => ", ToString[v, InputForm], "\n"];
-
 SeedRandom[42]; Btr = 256;
 tr = RandomSample[ResourceData["MNIST", "TrainingData"], Btr];
 te = RandomSample[ResourceData["MNIST", "TestData"], 512];
@@ -29,7 +27,7 @@ init = Quiet @ NetInitialize[NetModel["LeNet"], RandomSeeding -> 7];
 xS = TTensorCreate[trImg]; yT = TTensorCreate[trOH]; lr = 0.05;
 {logits, sown} = Quiet @ Reap[Fold[TFromLayer[#2, #1] &, xS, Table[init[[i]], {i, 10}]], "thvmNetParam"];
 params = Flatten[sown];
-print["LeNet params lifted (2 conv + 2 FC = 8)", Length @ params];
+Print["LeNet params lifted (2 conv + 2 FC = 8)", " => ", Length @ params];
 loss = TCategoricalCrossEntropy[logits, yT];
 Do[
     TClearGrad /@ params;
@@ -41,6 +39,6 @@ Do[
 preds = Join @@ Table[
     TRealize @ TAssign[xS, TTensorCreate[teImg[[(k - 1)*256 + 1 ;; k*256]]]];
     (Ordering[#, -1][[1]] - 1) & /@ Normal @ TRealize @ logits, {k, 2}];
-print["thvm-trained LeNet (256 imgs, from scratch) test acc", N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, teLab}]];
-print["pretrained Wolfram LeNet (60k) test acc", N @ Mean @ MapThread[Boole[#1 == #2] &,
+Print["thvm-trained LeNet (256 imgs, from scratch) test acc", " => ", N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, teLab}]];
+Print["pretrained Wolfram LeNet (60k) test acc", " => ", N @ Mean @ MapThread[Boole[#1 == #2] &,
     {NetModel["LeNet Trained on MNIST Data"][Keys[te]], teLab}]];

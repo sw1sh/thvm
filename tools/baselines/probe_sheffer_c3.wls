@@ -26,9 +26,6 @@ cases = {
     {"WolframCommutativeAxioms", "ImpliesShefferAxioms"}
 };
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"];
-
 Scan[Function[case,
     Module[{theory, thm, cj, target, t, r, status, proofLen},
         {theory, thm} = case;
@@ -46,6 +43,6 @@ Scan[Function[case,
             Head[r] === ProofObject,
                 ToString @ Quiet @ Check[r["ProofLength"], "-"],
             True, "-"];
-        print[StringPadRight[theory, 28], " c3   ",
+        Print[StringPadRight[theory, 28], " c3   ",
             StringPadRight[status, 10], Round[t, 0.1], "s  pl=", proofLen]
     ]], cases];

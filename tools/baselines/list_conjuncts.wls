@@ -6,9 +6,6 @@
    Single wolframscript call so the bench harness's per-conjunct
    loop doesn't pay 3-5s wolframscript startup per theorem just to
    query the count. *)
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"];
-
 input = $ScriptCommandLine[[2]];
 lines = Import[input, "Lines"];
 rows = StringSplit[#, "\t"] & /@ lines;
@@ -18,5 +15,5 @@ Scan[Function[r,
         {theory, thm} = r;
         cj = AxiomaticTheory[theory, "NotableTheorems"][thm];
         n = If[ ListQ[cj], Length[cj], 1];
-        print[theory, "\t", thm, "\t", n]]],
+        Print[theory, "\t", thm, "\t", n]]],
     rows];

@@ -10,8 +10,6 @@
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 (* ---- Church-bool primitives, registered as TDefs so each use
    alo-realizes a fresh dyn copy.  The TLam binders use Module-fresh
    symbols so they don't shadow each other. ---- *)
@@ -92,7 +90,7 @@ testCases = {
                      {{1, 2, 3}},                 3, True}
 };
 
-print["=== Correctness check vs WL ==="];
+Print["=== Correctness check vs WL ==="];
 Do[Module[{name = tc[[1]], cnf = tc[[2]], nv = tc[[3]], expected = tc[[4]],
             ours, syms, wlForm, wlAns},
     ours = satCheck[cnf, nv];
@@ -100,7 +98,7 @@ Do[Module[{name = tc[[1]], cnf = tc[[2]], nv = tc[[3]], expected = tc[[4]],
     wlForm = And @@ (Or @@ # & /@
         Map[If[# > 0, syms[[#]], Not[syms[[-#]]]] &, cnf, {2}]);
     wlAns = SatisfiableQ[wlForm, syms];
-    print[StringPadRight[name, 22],
+    Print[StringPadRight[name, 22],
         " ours=", ours, " wl=", wlAns, " expected=", expected,
         If[ours === expected && wlAns === expected, " OK", " FAIL"]]
 ], {tc, testCases}]
@@ -112,8 +110,8 @@ Do[Module[{name = tc[[1]], cnf = tc[[2]], nv = tc[[3]], expected = tc[[4]],
    at wnf, book templates carry BJ, alo_realize unfolds BJ -> fresh
    dyn DP).  See CNF_DIVERGENCE.md and README.md.  v1 is now correct
    through V=9 / C=15. *)
-print[""];
-print["=== Bench (small structured CNFs) ==="];
+Print[""];
+Print["=== Bench (small structured CNFs) ==="];
 
 (* Hand-picked sat / unsat instances + tiny random ones with low
    clause ratio so the per-var auto-dup chain stays shallow. *)
@@ -131,7 +129,7 @@ Do[Module[{name = bc[[1]], cnf = bc[[2]], nv = bc[[3]],
     syms = Table[Symbol["x" <> ToString[i]], {i, nv}];
     tOurs = First @ AbsoluteTiming[ours = satCheck[cnf, nv]];
     tWl   = First @ AbsoluteTiming[wl = SatisfiableQ[cnfToWL[cnf, syms], syms]];
-    print[StringPadRight[name, 16],
+    Print[StringPadRight[name, 16],
         " thvm:", NumberForm[tOurs * 1000., {7, 2}], "ms",
         " WL:", NumberForm[tWl * 1000., {7, 2}], "ms",
         " sat=", ours, "/", wl,

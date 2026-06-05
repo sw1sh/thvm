@@ -8,11 +8,8 @@ SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 $RecursionLimit = 16384;
-print[a___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {a}], "\n"];
-
 If[ Length[$ScriptCommandLine] < 3,
-    print["usage: metadata_diff.wls THEORY THM"];
+    Print["usage: metadata_diff.wls THEORY THM"];
     Exit[2]];
 theory = $ScriptCommandLine[[2]];
 thm    = $ScriptCommandLine[[3]];
@@ -27,7 +24,7 @@ pC = THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
     "LiftToProofObject" -> True];
 
 If[ Head[pP] =!= ProofObject || Head[pC] =!= ProofObject,
-    print["ERROR: head mismatch -- pP head=", Head[pP],
+    Print["ERROR: head mismatch -- pP head=", Head[pP],
         " pC head=", Head[pC]];
     Exit[1]];
 
@@ -42,30 +39,30 @@ sortKey[k_] := Block[
         First[k], {99}][[1]]},
     {idx, Last[k]}];
 
-print["=== metadata diff: ", theory, " / ", thm, " ==="];
-print["preset entries:  ", Length[prfP]];
-print["cli entries:     ", Length[prfC]];
-print[];
+Print["=== metadata diff: ", theory, " / ", thm, " ==="];
+Print["preset entries:  ", Length[prfP]];
+Print["cli entries:     ", Length[prfC]];
+Print[];
 
 Scan[
     k |-> Block[{eP, eC, proofP, proofC, allFields},
         eP = Lookup[prfP, Key[k], Missing[]];
         eC = Lookup[prfC, Key[k], Missing[]];
-        print["--- ", k, " ---"];
+        Print["--- ", k, " ---"];
         If[ MissingQ[eP],
-            print["  ONLY-CLI"];
+            Print["  ONLY-CLI"];
             Return[]];
         If[ MissingQ[eC],
-            print["  ONLY-PRESET"];
+            Print["  ONLY-PRESET"];
             Return[]];
         (* Compare Statement first. *)
         If[ eP["Statement"] === eC["Statement"],
-            print["  Statement: MATCH ", InputForm @ Short[
+            Print["  Statement: MATCH ", InputForm @ Short[
                 eP["Statement"], 30]],
-            print["  Statement: MISMATCH"];
-            print["    preset: ", InputForm @ Short[
+            Print["  Statement: MISMATCH"];
+            Print["    preset: ", InputForm @ Short[
                 eP["Statement"], 30]];
-            print["    cli:    ", InputForm @ Short[
+            Print["    cli:    ", InputForm @ Short[
                 eC["Statement"], 30]]];
         (* Compare Proof keys. *)
         proofP = eP["Proof"];
@@ -77,14 +74,14 @@ Scan[
                 vC = Lookup[proofC, f, Missing[]];
                 Which[
                     MissingQ[vP] && MissingQ[vC], Null,
-                    MissingQ[vP], print["  Proof[", f, "]:",
+                    MissingQ[vP], Print["  Proof[", f, "]:",
                         " ONLY-CLI = ", InputForm @ Short[vC, 20]],
-                    MissingQ[vC], print["  Proof[", f, "]:",
+                    MissingQ[vC], Print["  Proof[", f, "]:",
                         " ONLY-PRESET = ", InputForm @ Short[vP, 20]],
                     vP === vC, Null,
                     True,
-                        print["  Proof[", f, "]: MISMATCH"];
-                        print["    preset: ", InputForm @ Short[vP, 20]];
-                        print["    cli:    ", InputForm @ Short[vC, 20]]]],
+                        Print["  Proof[", f, "]: MISMATCH"];
+                        Print["    preset: ", InputForm @ Short[vP, 20]];
+                        Print["    cli:    ", InputForm @ Short[vC, 20]]]],
             allFields]],
     SortBy[allKeys, sortKey]];

@@ -1,8 +1,6 @@
 PacletDirectoryLoad[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 satEval[cnf_List, vec_List] := Block[{litVal, clauseVal, formula},
     litVal[lit_] := If[ lit > 0, TNum[ vec[[lit]] ], TNum[ 1 - vec[[-lit]] ] ];
     clauseVal[lits_] := Fold[
@@ -52,7 +50,7 @@ Do[Module[{nv = sz, nc = Round[sz * 3.5], cnf, syms, ourSols, wlSols,
         wlSols = SatisfiabilityInstances[cnfToWL[cnf, syms], syms, 2^nv]
     ];
     
-    print["V=", nv, " C=", nc,
+    Print["V=", nv, " C=", nc,
         " | thvm:", NumberForm[tThvm * 1000., {6, 2}], "ms",
         " | WL: ", NumberForm[tWl * 1000., {6, 2}], "ms",
         " | thvm sols:", Length[ourSols], " WL sols:", Length[wlSols],

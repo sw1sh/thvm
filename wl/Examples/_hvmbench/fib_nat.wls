@@ -29,8 +29,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
-
 $args = Drop[$ScriptCommandLine, 1];
 $N    = If[ Length[$args] >= 1 && ! StringStartsQ[First @ $args, "--"],
             ToExpression @ First @ $args,
@@ -89,13 +87,13 @@ runOnce[n_Integer] := Module[{t0, tBuild, tWnf, term, itrs0, itrs, result},
      |>
 ];
 
-print["[thvm] fib_nat n=", $N];
+Print["[thvm] fib_nat n=", $N];
 r0 = runOnce[$N];
-print["[thvm] head=", r0["head"], "  value=", r0["value"],
+Print["[thvm] head=", r0["head"], "  value=", r0["value"],
       "  itrs=", r0["itrs"],
       "  build_ms=", NumberForm[r0["build_ms"], 4],
       "  wnf_ms=",   NumberForm[r0["wnf_ms"],   4]];
 
 (* Print expected fib(n) for the n-values we care about. *)
 fibRef[k_Integer] := With[{a = Fibonacci[k]}, a];
-print["[thvm] expected Fibonacci[", $N, "] = ", fibRef[$N]];
+Print["[thvm] expected Fibonacci[", $N, "] = ", fibRef[$N]];

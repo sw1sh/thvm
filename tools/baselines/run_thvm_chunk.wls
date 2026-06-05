@@ -5,8 +5,6 @@
    a mid-chunk crash leaves earlier results on disk. *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
-print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"];
-
 OUT = "tools/baselines/thvm_notable_theorems.tsv";
 TC = ToExpression[Environment["THVM_CHUNK_TC"]];
 If[ ! IntegerQ[TC], TC = 30];
@@ -16,7 +14,7 @@ If[ ! IntegerQ[TC], TC = 30];
    context (Global` instead of System`) and AxiomaticTheory[symbol]
    would notent on every one. *)
 theories = StringSplit[Environment["THVM_CHUNK_THEORIES"], ","];
-print["[chunk] processing ", Length[theories], " theories: ",
+Print["[chunk] processing ", Length[theories], " theories: ",
     StringRiffle[theories, ", "]];
 
 runCase[theory_, thm_] := Module[{t, r, status, verify, proofLen},
@@ -60,7 +58,7 @@ Scan[Function[theory,
                             res[[3]], "\t",
                             res[[4]], "\n"];
                         Close[h]];
-                    print[StringPadRight[ToString[theory], 28],
+                    Print[StringPadRight[ToString[theory], 28],
                         StringPadRight[ToString[thm], 38],
                         StringPadRight[res[[1]], 8],
                         res[[2]], "s  ", res[[4]]]

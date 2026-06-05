@@ -1,8 +1,6 @@
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 (* Simple SAT solver: brute-force enumerate assignments, evaluate
    formula per assignment using TWnf reduction.  Demonstrates IC
    reduction on boolean formulas; benchmark baseline. *)
@@ -48,15 +46,15 @@ satSolveBrute[cnf_List, nVars_Integer] := Module[{
 
 (* Smoke test: (x1 OR x2) AND (NOT x1 OR x3) AND (NOT x2 OR NOT x3) *)
 testCnf = {{1, 2}, {-1, 3}, {-2, -3}};
-print["Test formula: (x1 v x2) AND (~x1 v x3) AND (~x2 v ~x3)"];
-print["  satisfying assignments:"];
+Print["Test formula: (x1 v x2) AND (~x1 v x3) AND (~x2 v ~x3)"];
+Print["  satisfying assignments:"];
 sols = satSolveBrute[testCnf, 3];
-Do[print["    x1=", a[[1]], " x2=", a[[2]], " x3=", a[[3]]], {a, sols}];
-print["  count:", Length[sols]];
+Do[Print["    x1=", a[[1]], " x2=", a[[2]], " x3=", a[[3]]], {a, sols}];
+Print["  count:", Length[sols]];
 
 (* Compare with WL's SatisfiableInstances *)
-print[""];
-print["WL ground truth via SatisfiableQ:"];
+Print[""];
+Print["WL ground truth via SatisfiableQ:"];
 syms = Table[ToExpression["x" <> ToString[i]], {i, 3}];
 formula = And[
     Or[syms[[1]], syms[[2]]],
@@ -66,5 +64,5 @@ formula = And[
 ourSols = sols;
 wlSols = SatisfiabilityInstances[formula, syms, 8];
 wlVecs = Boole /@ wlSols;
-print["  WL solutions:", wlVecs];
-print["  Same set:", Sort[ourSols] === Sort[wlVecs]];
+Print["  WL solutions:", wlVecs];
+Print["  Same set:", Sort[ourSols] === Sort[wlVecs]];

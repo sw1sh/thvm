@@ -17,9 +17,6 @@
 
 PacletDirectoryLoad["wl/THVMLink"];
 << THVMLink`ATP`;
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"];
-
 $theorems = {
     {"AbelianGroupAxioms", "InverseOfInverse"},
     {"BooleanAxioms", "AndCommutativity"},
@@ -42,7 +39,7 @@ $methods = {
 
 $budget = 5;
 
-print["theorem", "\t", "method", "\t", "outcome", "\t", "wall_s",
+Print["theorem", "\t", "method", "\t", "outcome", "\t", "wall_s",
     "\t", "applied"];
 
 Do[
@@ -60,7 +57,7 @@ Do[
         applied = If[
             applied === Automatic || (! ListQ[applied] && ! StringQ[applied]),
             "n/a", ToString[InputForm @ applied]];
-        print[benchTheory, "/", benchThm, "\t",
+        Print[benchTheory, "/", benchThm, "\t",
             ToString[InputForm @ benchM], "\t",
             headStr, "\t", walls, "\t", applied]
     ],

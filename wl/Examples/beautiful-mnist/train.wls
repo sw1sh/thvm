@@ -28,9 +28,6 @@ PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 Get["wl/Examples/_lib/Mnist.wl"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 envValue[name_String, default_String] := Module[{v = Environment[name]},
     If[ StringQ[v] && StringLength[StringTrim[v]] > 0, v, default]]
 
@@ -48,10 +45,10 @@ mnistN    = If[ mnistLim === "All", All, ToExpression @ mnistLim];
 SeedRandom[42];
 TInit[];
 
-print["beautiful_mnist full-training (cold + warm JIT smoke test)"];
-print["  BS=", bs, "  N_STEPS=", nSteps, "  TEST_EVERY=", testEvery,
+Print["beautiful_mnist full-training (cold + warm JIT smoke test)"];
+Print["  BS=", bs, "  N_STEPS=", nSteps, "  TEST_EVERY=", testEvery,
       "  MNIST_LIMIT=", mnistLim];
-print["  DEV=", envValue["DEV", "default-cpu"],
+Print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"]];
 
 (* === Load MNIST once, materialise to host arrays for fast slicing.
@@ -67,7 +64,7 @@ testLabsHost  = Normal @ TTensorData @ mnist["testLabels"];
 nTrain = Length[trainImgsHost];
 nTest  = Length[testImgsHost];
 mnistDt = (AbsoluteTime[] - mnistT0) * 1000.0;
-print["MNIST loaded: nTrain=", nTrain, " nTest=", nTest,
+Print["MNIST loaded: nTrain=", nTrain, " nTest=", nTest,
       " (", NumberForm[mnistDt, {8, 1}], "ms)"];
 
 (* === Model parameters -- same init as bench-train.wls. ============ *)
@@ -90,7 +87,7 @@ W5 = randTensor[{576, 10}];       b5 = zerosTensor[{10}];
 params = {W1, b1, W2, b2, g1, bn1, W3, b3, W4, b4, g2, bn2, W5, b5};
 mState = TZerosLike /@ params;
 vState = TZerosLike /@ params;
-print["params=", Total[Times @@ TTensorShape[#] & /@ params]];
+Print["params=", Total[Times @@ TTensorShape[#] & /@ params]];
 
 (* === Pre-allocated input/target slots.  Same buf_id every step --
        the captured DAG reads from these; per-step batch data lands
@@ -155,7 +152,7 @@ runStep[step_Integer, label_String] := Module[{
     kAfter  = TKernelCount[];
     mem     = TMetalMemoryProfile[];
     lossVal = First @ Normal @ TTensorData @ lossSlot;
-    print[label, " step ", step,
+    Print[label, " step ", step,
           ": loss=", NumberForm[lossVal, {6, 3}],
           " wall=", NumberForm[dt, {8, 1}], "ms",
           " kernels(new)=", kAfter - kBefore,
@@ -226,10 +223,10 @@ testAcc[] := Module[{nBatches, correct, total, predicted, batchImg, gold},
 Do[ Module[{},
         runStep[step, If[ step == 1, "cold ", "warm "]];
         If[ testEvery > 0 && Mod[step, testEvery] == 0,
-            print["    test_acc=", NumberForm[testAcc[], {6, 2}], "%"] ]],
+            Print["    test_acc=", NumberForm[testAcc[], {6, 2}], "%"] ]],
     {step, 1, nSteps}];
 
 If[ testEvery == 0 && nSteps > 2,
-    print["final test_acc=", NumberForm[testAcc[], {6, 2}], "%"] ];
+    Print["final test_acc=", NumberForm[testAcc[], {6, 2}], "%"] ];
 
-print["done."];
+Print["done."];

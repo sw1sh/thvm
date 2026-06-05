@@ -21,10 +21,8 @@
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 ctx = TContextNew["metal"];
-If[ ctx === 0, print["SKIP: Metal context unavailable"]; Exit[0]];
+If[ ctx === 0, Print["SKIP: Metal context unavailable"]; Exit[0]];
 
 mkT[] := With[{t = Module[{ts}, ts], f = Module[{fs}, fs]},
     TLam[t, TLam[f, t]]];
@@ -116,8 +114,8 @@ randomCnf[v_, c_] := Table[
         vs * RandomChoice[{-1, 1}, Length[vs]]
     ], {c}];
 
-print["v   c   build  kernel  collapse(threads)   total   WL ms    sat (C/D)  agree?"];
-print[StringJoin @@ Table["-", {84}]];
+Print["v   c   build  kernel  collapse(threads)   total   WL ms    sat (C/D)  agree?"];
+Print[StringJoin @@ Table["-", {84}]];
 
 cases = {
     {2,  4}, {3,  6}, {4,  8}, {5, 10}, {6, 12}, {7, 14},
@@ -134,7 +132,7 @@ Do[
     {$td, $satD} = runD[$cnf, $v];
     $total = $tBuild + $tKernel + $tCollapse;
     fmt[t_] := StringPadLeft[ToString @ NumberForm[t*1000., {6, 2}], 7] <> "ms";
-    print[StringPadRight[ToString[$v], 4],
+    Print[StringPadRight[ToString[$v], 4],
         StringPadRight[ToString[$c], 4],
         fmt[$tBuild], "  ", fmt[$tKernel], "  ",
         fmt[$tCollapse], " (n=", $nLeaves, " num=", $nNum, " stk=", $nStuck, " iter-cap=", $nIterCap, " stk-cap=", $nStackCap, " era=", $nEra, ")  total=",

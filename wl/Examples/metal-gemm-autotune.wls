@@ -23,9 +23,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"]
-
 envValue[name_String, default_String] := Module[{v = Environment[name]},
     If[StringQ[v] && StringLength[StringTrim[v]] > 0, v, default]]
 
@@ -55,21 +52,21 @@ k = parseInt["K", 64];
 n = parseInt["N", 64];
 
 If[m <= 0 || k <= 0 || n <= 0,
-    print["FAIL: M, K, and N must be positive integers"];
+    Print["FAIL: M, K, and N must be positive integers"];
     Exit[1]];
 
 TInit[];
 TReset[];
 
-print["Metal GEMM autotune"];
-print["  DEV=", envValue["DEV", "default-cpu"],
+Print["Metal GEMM autotune"];
+Print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"],
       "  BEAM_RUNS=", envValue["BEAM_RUNS", "5"]];
-print["  shape: {", m, ", ", k, "} . {", k, ", ", n, "}"];
+Print["  shape: {", m, ", ", k, "} . {", k, ", ", n, "}"];
 
 ctx = TContextNew["metal"];
 If[ctx === 0,
-    print["SKIP: Metal context unavailable"];
+    Print["SKIP: Metal context unavailable"];
     Exit[0]];
 
 aData = ArrayReshape[N[Mod[Range[m * k], 17] - 8], {m, k}];
@@ -116,40 +113,40 @@ result = TInContext[ctx,
 
 TContextDestroy[ctx];
 
-print["  kid: ", result["kid"],
+Print["  kid: ", result["kid"],
       "  dispatch: ", result["kind"],
       "  default tile: ", result["plan"]["tile_size"]];
-print["  mma: M=", result["plan"]["M"],
+Print["  mma: M=", result["plan"]["M"],
       " N=", result["plan"]["N"],
       " K=", result["plan"]["K"],
       " Ainput=", result["plan"]["a_input"],
       " Binput=", result["plan"]["b_input"]];
-print["  max error before tune: ", Round[result["max_err"], 0.000001]];
-print["  proposals: ", formatOpts[result["proposed"]]];
+Print["  max error before tune: ", Round[result["max_err"], 0.000001]];
+Print["  proposals: ", formatOpts[result["proposed"]]];
 
-print["  variants:"];
+Print["  variants:"];
 Do[
-    print["    ", formatOpt[row["Opt"]], "  ",
+    Print["    ", formatOpt[row["Opt"]], "  ",
           Round[N @ row["WallUs"], 0.001], " us"],
     {row, result["variants"]}];
 
-print["  applied: ", formatOpts[result["applied"]],
+Print["  applied: ", formatOpts[result["applied"]],
       "  selected tile: ", result["after_tile"]];
-print["  rerun kid: ", result["kid2"],
+Print["  rerun kid: ", result["kid2"],
       "  dispatch: ", result["kind2"],
       "  tile: ", result["tile2"]];
-print["  max error after tune: ", Round[result["max_err2"], 0.000001]];
+Print["  max error after tune: ", Round[result["max_err2"], 0.000001]];
 
 If[result["kind"] =!= "metal-gemm" || result["kind2"] =!= "metal-gemm",
-    print["FAIL: expected metal-gemm dispatch"];
+    Print["FAIL: expected metal-gemm dispatch"];
     Exit[1]];
 
 If[result["max_err"] > 0.001 || result["max_err2"] > 0.001,
-    print["FAIL: GEMM output diverged from host reference"];
+    Print["FAIL: GEMM output diverged from host reference"];
     Exit[1]];
 
 If[Length[result["proposed"]] === 0,
-    print["FAIL: expected TC proposals for Metal GEMM"];
+    Print["FAIL: expected TC proposals for Metal GEMM"];
     Exit[1]];
 
-print["Metal GEMM autotune PASSED."];
+Print["Metal GEMM autotune PASSED."];

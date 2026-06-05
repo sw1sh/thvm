@@ -24,8 +24,6 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 
-print[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
-
 $args = Drop[$ScriptCommandLine, 1];
 $N    = If[ Length[$args] >= 1 && ! StringStartsQ[First @ $args, "--"],
             ToExpression @ First @ $args,
@@ -58,7 +56,7 @@ runOnce[n_Integer] := Module[{tBuild, tWnf, term, itrs0, itrs, result, t0},
        "head"     -> result["tagName"] |>
 ];
 
-print["[thvm] cnot_", IntegerString[$N, 10, 2], " (runs=", $Runs, ")"];
+Print["[thvm] cnot_", IntegerString[$N, 10, 2], " (runs=", $Runs, ")"];
 
 (* Discard first run as warm-up. *)
 runOnce[$N];
@@ -68,10 +66,10 @@ head    = results[[1, "head"]];
 wnfMs   = results[[All, "wnf_ms"]];
 buildMs = results[[All, "build_ms"]];
 
-print["[thvm] N=", $N,
+Print["[thvm] N=", $N,
       "  build_ms=[", StringRiffle[NumberForm[#, 4]& /@ buildMs, ", "], "]",
       "  wnf_ms=[", StringRiffle[NumberForm[#, 4]& /@ wnfMs, ", "], "]"];
-print["[thvm] best_wnf_ms=", NumberForm[Min[wnfMs], 4],
+Print["[thvm] best_wnf_ms=", NumberForm[Min[wnfMs], 4],
       "  itrs=", itrs,
       "  Mitrs/s=", NumberForm[itrs / Min[wnfMs] / 1000., 4],
       "  head=", head];

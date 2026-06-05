@@ -9,7 +9,6 @@
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", "..", "wl", "THVMLink"}]];
 Needs["THVMLink`"];
 
-print[l_, v_] := WriteString["stdout", l, " => ", ToString[v, InputForm], "\n"];
 (* The compute runs in this kernel process; ps on $ProcessID gives its
    own RSS (the wolframscript wrapper is a separate, idle process). *)
 rss[] := ToExpression @ StringTrim @ ReadString["!ps -o rss= -p " <> ToString[$ProcessID]];
@@ -32,6 +31,6 @@ step := (
 Do[step, {3}];                 (* warmup *)
 base = rss[];
 t = AbsoluteTiming[Do[step, {30}]][[1]];
-print["thvm warm ms/step (eager, B=64, conv8+relu+maxpool+linear)", Round[1000.*t/30, 0.1]];
-print["thvm training RSS delta MB", Round[(rss[] - base)/1024., 1]];
-print["thvm WL-heap MaxMemoryUsed MB", Round[MaxMemoryUsed[]/1.*^6, 1]];
+Print["thvm warm ms/step (eager, B=64, conv8+relu+maxpool+linear)", " => ", Round[1000.*t/30, 0.1]];
+Print["thvm training RSS delta MB", " => ", Round[(rss[] - base)/1024., 1]];
+Print["thvm WL-heap MaxMemoryUsed MB", " => ", Round[MaxMemoryUsed[]/1.*^6, 1]];

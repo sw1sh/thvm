@@ -12,9 +12,6 @@ SetDirectory["/Users/swish/src/thvm"];
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
 $RecursionLimit = 16384;
-print[a___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {a}], "\n"];
-
 Quiet @ TFindProof["InverseOfInverse", "GroupAxioms",
     Method -> "Completion", TimeConstraint -> 2.0];
 
@@ -50,16 +47,16 @@ probe[{theory_, thm_}] := Block[
         If[ verifyOK, "Success", ToString[verifyHead]], ToString[n]}
 ];
 
-print[StringRiffle[
+Print[StringRiffle[
     {"theory", "theorem", "head", "ProofFunction",
         "ProofGraph", "ProofLength", "Verify[Theorems]", "n"},
     "\t"]];
 rows = probe /@ cases;
-Scan[print[StringRiffle[#, "\t"]] &, rows];
+Scan[Print[StringRiffle[#, "\t"]] &, rows];
 
 Export["tools/baselines/lift_telemetry.tsv",
     Prepend[rows, {"theory", "theorem", "head", "ProofFunction",
         "ProofGraph", "ProofLength", "Verify[Theorems]", "n"}],
     "TSV"];
-print[];
-print["wrote tools/baselines/lift_telemetry.tsv"];
+Print[];
+Print["wrote tools/baselines/lift_telemetry.tsv"];

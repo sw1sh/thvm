@@ -12,19 +12,15 @@
 debugPrint[a___] := WriteString[
     "stderr", StringJoin @@ Map[ToString, {a}], "\n"
 ]
-print[a___] := WriteString[
-    "stdout", StringJoin @@ Map[ToString, {a}], "\n"
-]
-
 If[ Length[$ScriptCommandLine] < 3,
-    print["usage: tptp_to_pr.wls <in.p> <out.pr>"];
+    Print["usage: tptp_to_pr.wls <in.p> <out.pr>"];
     Exit[2]
 ]
 tptpFile = $ScriptCommandLine[[2]]
 outFile  = $ScriptCommandLine[[3]]
 
 If[ ! FileExistsQ[tptpFile],
-    print["TPTP file not found: ", tptpFile];
+    Print["TPTP file not found: ", tptpFile];
     Exit[1]
 ]
 
@@ -131,7 +127,7 @@ debugPrint["Parsed ", Length[records], " CNF records"]
 axRecs   = Select[records, #["Role"] === "axiom" &]
 goalRecs = Select[records, #["Role"] === "negated_conjecture" &]
 If[ Length[goalRecs] =!= 1,
-    print["Expected exactly 1 negated_conjecture, got ", Length[goalRecs]];
+    Print["Expected exactly 1 negated_conjecture, got ", Length[goalRecs]];
     Exit[1]
 ]
 goal = First[goalRecs]
@@ -207,6 +203,6 @@ pr = StringJoin[
 ]
 
 Export[outFile, pr, "Text"]
-print["Wrote ", outFile, " (", StringLength[pr], " bytes; ",
+Print["Wrote ", outFile, " (", StringLength[pr], " bytes; ",
     Length[sig], " symbols, ", Length[vars], " variables, ",
     Length[axRecs], " axioms)"]

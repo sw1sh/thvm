@@ -10,8 +10,6 @@ PacletDirectoryLoad[FileNameJoin[{Directory[], "wl", "THVMLink"}]];
 Needs["THVMLink`"];
 TInitContext[];
 
-print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];
-
 (* Reuse the encoders from substitutivity.wls (it covers atomic +
    structured cases). *)
 Get["wl/Examples/atp_ic/substitutivity.wls"];
@@ -33,7 +31,7 @@ runOnBoth[case_, idx_] := Module[{
     metalLeaves = If[ metalRoot === $Failed, {},
         FromTTerm /@ TCollapse[metalRoot]];
     metalAny = AnyTrue[metalLeaves, # === 1 &];
-    print[StringPadRight[name, 38],
+    Print[StringPadRight[name, 38],
         "  cpu=", cpuAny,
         "  metal=", metalAny,
         "  exp=", expected,
@@ -75,8 +73,8 @@ metalCases = {
       "Expected" -> False|>
 };
 
-print[""];
-print["=== IC-native ATP via AOT-Metal ==="];
+Print[""];
+Print["=== IC-native ATP via AOT-Metal ==="];
 results = MapIndexed[runOnBoth[#1, First[#2]] &, metalCases];
-print[""];
-print["Pass: ", Count[results, True], "/", Length[metalCases]];
+Print[""];
+Print["Pass: ", Count[results, True], "/", Length[metalCases]];

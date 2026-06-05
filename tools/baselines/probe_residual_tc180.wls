@@ -24,9 +24,6 @@ candidates = {
     {"MeredithAxioms", "ImpliesShefferAxioms"}
 };
 
-print[args___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {args}], "\n"];
-
 Scan[Function[case,
     Module[{theory, thm, t, r, status, proofLen},
         {theory, thm} = case;
@@ -44,6 +41,6 @@ Scan[Function[case,
             ListQ[r] && AllTrue[r, Head[#] === ProofObject &],
                 ToString[Total[Quiet @ Check[#["ProofLength"], 0] & /@ r]],
             True, "-"];
-        print[StringPadRight[theory, 28], StringPadRight[thm, 36],
+        Print[StringPadRight[theory, 28], StringPadRight[thm, 36],
             StringPadRight[status, 9], Round[t, 0.01], "s  pl=", proofLen]
     ]], candidates];

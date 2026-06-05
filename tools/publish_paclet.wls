@@ -15,8 +15,6 @@
    The published CloudObject is read by the round-trip check in
    tools/verify_install.wls:  PacletInstall[url]; Needs["THVMLink`"]. *)
 
-print[args___] := WriteString["stdout", StringJoin[ToString /@ {args}], "\n"];
-
 (* Repo-relative paths only; resolve against this script's location so
    the script works regardless of the caller's working directory. *)
 repoRoot   = FileNameJoin[{DirectoryName[$InputFileName], ".."}];
@@ -24,7 +22,7 @@ pacletDir  = FileNameJoin[{repoRoot, "wl", "THVMLink"}];
 outDir     = FileNameJoin[{repoRoot, "build"}];
 
 If[ ! DirectoryQ[pacletDir],
-    print["ERROR: paclet directory not found: ", pacletDir];
+    Print["ERROR: paclet directory not found: ", pacletDir];
     Exit[1]
 ];
 
@@ -37,11 +35,11 @@ libExt = <|"MacOSX-ARM64" -> "dylib", "MacOSX-x86-64" -> "dylib",
            "Windows-x86-64" -> "dll"|>;
 present = Select[wanted, FileExistsQ[FileNameJoin[{pacletDir, "LibraryResources", #, "THVMLink." <> libExt[#]}]] &];
 missing = Complement[wanted, present];
-print["[publish] platform libraries present: ", Length[present], "/", Length[wanted]];
-Scan[print["  + ", #] &, present];
-Scan[print["  - MISSING ", #] &, missing];
+Print["[publish] platform libraries present: ", Length[present], "/", Length[wanted]];
+Scan[Print["  + ", #] &, present];
+Scan[Print["  - MISSING ", #] &, missing];
 If[ missing =!= {},
-    print["[publish] note: publishing a partial paclet (run `make wl-cross` to build all five)."]
+    Print["[publish] note: publishing a partial paclet (run `make wl-cross` to build all five)."]
 ];
 
 (* Prune debug artifacts that build tools drop next to the libraries
@@ -52,25 +50,25 @@ cruft = Join[
     FileNames[{"*.pdb", "*.lib", "*.exp"}, FileNameJoin[{pacletDir, "LibraryResources"}], Infinity]
 ];
 If[ cruft =!= {},
-    print["[publish] pruning ", Length[cruft], " debug artifact(s)"];
+    Print["[publish] pruning ", Length[cruft], " debug artifact(s)"];
     Scan[If[DirectoryQ[#], DeleteDirectory[#, DeleteContents -> True], DeleteFile[#]] &, cruft]
 ];
 
 (* Pack.  CreatePacletArchive zips the directory per PacletInfo.wl and
    names the file THVMLink-<version>.paclet in outDir. *)
-print["[publish] packing ", pacletDir, " ..."];
+Print["[publish] packing ", pacletDir, " ..."];
 pacletFile = CreatePacletArchive[pacletDir, outDir];
 If[ ! StringQ[pacletFile] || ! FileExistsQ[pacletFile],
-    print["ERROR: CreatePacletArchive failed: ", ToString[pacletFile]];
+    Print["ERROR: CreatePacletArchive failed: ", ToString[pacletFile]];
     Exit[1]
 ];
-print["[publish] packed -> ", pacletFile, " (", FileByteCount[pacletFile], " bytes)"];
+Print["[publish] packed -> ", pacletFile, " (", FileByteCount[pacletFile], " bytes)"];
 
 (* Ensure a cloud session.  wolframscript usually carries one; if not,
    CloudConnect[] reads $WolframID / prompts. *)
 If[ ! TrueQ[$CloudConnected], CloudConnect[]];
 If[ ! TrueQ[$CloudConnected],
-    print["ERROR: not connected to the Wolfram Cloud (CloudConnect failed)."];
+    Print["ERROR: not connected to the Wolfram Cloud (CloudConnect failed)."];
     Exit[1]
 ];
 
@@ -80,13 +78,13 @@ If[ ! TrueQ[$CloudConnected],
 target = CloudObject["THVMLink.paclet", Permissions -> "Public"];
 co = CopyFile[pacletFile, target, OverwriteTarget -> True];
 If[ Head[co] =!= CloudObject,
-    print["ERROR: CopyFile to CloudObject failed: ", ToString[co]];
+    Print["ERROR: CopyFile to CloudObject failed: ", ToString[co]];
     Exit[1]
 ];
 
 url = First[co];
-print[""];
-print["[publish] published: ", url];
-print["[publish] install with:"];
-print["    PacletInstall[\"", url, "\"]"];
-print["    Needs[\"THVMLink`\"]"];
+Print[""];
+Print["[publish] published: ", url];
+Print["[publish] install with:"];
+Print["    PacletInstall[\"", url, "\"]"];
+Print["    Needs[\"THVMLink`\"]"];

@@ -1,8 +1,5 @@
 #!/usr/bin/env wolframscript
 SetDirectory["/Users/swish/src/thvm"];
-print[a___] := WriteString["stdout",
-    StringJoin @@ Map[ToString, {a}], "\n"];
-
 (* Read the 3 parity TSVs and build a grouped construct-count
    bar chart per theorem with one bar per (preset, cli) pair for
    each of Waldmeister / Vampire / Twee. *)
@@ -61,7 +58,7 @@ diffData = Table[
 (* Stacked bar layout: each prover gets a (preset, cli) pair
    side-by-side; row labels are the theorem cases. *)
 shortLabel = StringSplit[#, "Axioms/"][[-1]] & /@ cases;
-print["cases: ", shortLabel];
+Print["cases: ", shortLabel];
 
 (* One panel: per-theorem grouped bars of (preset, cli) construct
    counts, three provers side by side.  Use a flat 2-level dataset
@@ -121,4 +118,4 @@ bcDiff = BarChart[
 out = Column[{bcAbs, bcDiff}, Spacings -> 1];
 Export["tools/baselines/plots/atp_parity.png", out,
     ImageResolution -> 160];
-print["wrote tools/baselines/plots/atp_parity.png"];
+Print["wrote tools/baselines/plots/atp_parity.png"];

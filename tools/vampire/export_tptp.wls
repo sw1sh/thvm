@@ -11,10 +11,8 @@
    emitting an inequality (lhs != rhs).
 *)
 
-print[args___] := WriteString["stdout", args];
-
 If[ Length[$ScriptCommandLine] < 4,
-    print["usage: export_tptp.wls <Theory> <Theorem> <OutFile>\n"];
+    Print["usage: export_tptp.wls <Theory> <Theorem> <OutFile>\n"];
     Exit[2]];
 
 theoryName  = $ScriptCommandLine[[2]];
@@ -150,17 +148,17 @@ conjToNegatedCnf[expr_, name_String] := Block[{
 
 axioms = AxiomaticTheory[theoryName, "Axioms"];
 If[ ! ListQ[axioms] || Length[axioms] === 0,
-    print["error: no axioms for theory ", theoryName, "\n"]; Exit[3]];
+    Print["error: no axioms for theory ", theoryName, "\n"]; Exit[3]];
 
 ntAssoc = AxiomaticTheory[theoryName, "NotableTheorems"];
 If[ ! AssociationQ[ntAssoc],
-    print["error: notable theorems not available for ", theoryName, "\n"]; Exit[3]];
+    Print["error: notable theorems not available for ", theoryName, "\n"]; Exit[3]];
 
 cjRaw = Lookup[ntAssoc, theoremName, None];
 If[ cjRaw === None,
     (* It may instead live in another theory's NotableTheorems if the
        theorem name is "ImpliesXAxioms" -- not our concern here. *)
-    print["error: no theorem ", theoremName, " in ", theoryName, "\n"]; Exit[3]];
+    Print["error: no theorem ", theoremName, " in ", theoryName, "\n"]; Exit[3]];
 
 conjuncts = If[ MatchQ[cjRaw, _List], cjRaw, {cjRaw}];
 
@@ -172,7 +170,7 @@ emit1[idx_, conj_] := Block[{lines, fn, gcl},
     fn = If[ Length[conjuncts] === 1, outFile,
         StringReplace[outFile, ".p" -> "__c" <> ToString[idx] <> ".p"]];
     gcl = conjToNegatedCnf[conj, "goal"];
-    If[ gcl === $Failed, print["skip ", fn, " (non-equation)\n"]; Return[]];
+    If[ gcl === $Failed, Print["skip ", fn, " (non-equation)\n"]; Return[]];
     lines = Join[
         {"% TPTP problem: " <> theoryName <> "::" <> theoremName <>
             If[ Length[conjuncts] > 1, " (conjunct " <> ToString[idx] <> ")", ""],
@@ -182,7 +180,7 @@ emit1[idx_, conj_] := Block[{lines, fn, gcl},
         {gcl}
     ];
     Export[fn, StringRiffle[lines, "\n"] <> "\n", "Text"];
-    print[fn, "\n"];
+    Print[fn, "\n"];
 ];
 
 MapIndexed[ emit1[#2[[1]], #1] &, conjuncts ];
