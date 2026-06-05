@@ -56,6 +56,10 @@ static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
 #  define THVM_ATPFT_MATCH 1
 # endif
 # include "ft_match.c"
+# ifdef THVM_ATPFT_UNIFY
+#  include "ft_unify.c"
+#  include "ft_cp.c"
+# endif
 # include "ft_splice.c"
 // ft_norm.c included LATER (after AtpRuleIndex / ATP_RI_* are defined
 // further down this TU) -- ft_norm.c uses Stage 6b's extern hooks
@@ -10800,18 +10804,63 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   u8 i_un = s->use_unfailing_cp && !s->r_orient[i];
   u8 j_un = s->use_unfailing_cp && !s->r_orient[j];
 
-  // (i-face li) x (j: lj->rj)  -- the standard overlap.
-  cnt = thvm_critical_pairs_pair(li, ri, lj, rj, buf, cap, cnt);
-  if (j_un) {
-    // (i-face li) x (j: rj->lj)
-    cnt = thvm_critical_pairs_pair(li, ri, rj, lj, buf, cap, cnt);
-  }
-  if (i_un) {
-    // (i-face ri) x (j: lj->rj)
-    cnt = thvm_critical_pairs_pair(ri, li, lj, rj, buf, cap, cnt);
+#ifdef THVM_ATPFT_UNIFY
+  // FT-native overlap path: when both rules' FT mirrors are populated,
+  // the rename + cp_visit work happens on AtpFt cells directly, only
+  // converting back to Term for the CriticalPair slot.  The 4 base
+  // syntactic-overlap cases above all route through this; AC extensions
+  // (gated on THVM_ATP_AC below) stay Term-side because they rebuild
+  // Term-shaped extended rule forms.
+  AtpFt *ft_arena_local = (AtpFt *)s->ft_arena_ptr;
+  if (ft_arena_local != NULL
+      && s->lhs_ft != NULL && s->rhs_ft != NULL
+      && s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL
+      && s->lhs_ft[j] != NULL && s->rhs_ft[j] != NULL) {
+    // Rename j into scratch arena once.
+    AtpFtCell *lj_r = thvm_ft_rename_vars(ft_arena_local, s->lhs_ft[j],
+                                          REWRITE_MAX_VAR / 2, 1);
+    AtpFtCell *rj_r = thvm_ft_rename_vars(ft_arena_local, s->rhs_ft[j],
+                                          REWRITE_MAX_VAR / 2, 1);
+    AtpFtCell *li_ft = s->lhs_ft[i];
+    AtpFtCell *ri_ft = s->rhs_ft[i];
+    u8 need_peak = s->use_connectedness ? 1u : 0u;
+    cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, lj_r, rj_r,
+                                      ft_arena_local, need_peak,
+                                      buf, cap, cnt);
     if (j_un) {
-      // (i-face ri) x (j: rj->lj)
-      cnt = thvm_critical_pairs_pair(ri, li, rj, lj, buf, cap, cnt);
+      cnt = thvm_critical_pairs_pair_ft(li_ft, ri_ft, rj_r, lj_r,
+                                        ft_arena_local, need_peak,
+                                        buf, cap, cnt);
+    }
+    if (i_un) {
+      cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, lj_r, rj_r,
+                                        ft_arena_local, need_peak,
+                                        buf, cap, cnt);
+      if (j_un) {
+        cnt = thvm_critical_pairs_pair_ft(ri_ft, li_ft, rj_r, lj_r,
+                                          ft_arena_local, need_peak,
+                                          buf, cap, cnt);
+      }
+    }
+    // Scratch is reset by the caller between overlap pairs (saturation
+    // step).  Each scratch-allocated rename + working tree dies on that
+    // reset; no per-call cleanup needed here.
+  } else
+#endif
+  {
+    // (i-face li) x (j: lj->rj)  -- the standard overlap.
+    cnt = thvm_critical_pairs_pair(li, ri, lj, rj, buf, cap, cnt);
+    if (j_un) {
+      // (i-face li) x (j: rj->lj)
+      cnt = thvm_critical_pairs_pair(li, ri, rj, lj, buf, cap, cnt);
+    }
+    if (i_un) {
+      // (i-face ri) x (j: lj->rj)
+      cnt = thvm_critical_pairs_pair(ri, li, lj, rj, buf, cap, cnt);
+      if (j_un) {
+        // (i-face ri) x (j: rj->lj)
+        cnt = thvm_critical_pairs_pair(ri, li, rj, lj, buf, cap, cnt);
+      }
     }
   }
 

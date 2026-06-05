@@ -852,6 +852,30 @@ $(BIN)/test_atp_wolfram_bench_ft: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
 	  -o $@ $< $(TEST_LDFLAGS)
 
+# Same as test_atp_wolfram_bench_ft but with THVM_ATPFT_UNIFY=1 -- the
+# CP-gen path routes through ft_cp.c / ft_unify.c (FT-native cp_visit
+# + unifier).  Used for the perf differential vs the Term-side path.
+$(BIN)/test_atp_wolfram_bench_ft_unify: tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -DTHVM_ATPFT_UNIFY \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# FT-unifier-enabled ATP regression suite -- the full 135624-assertion
+# test_atp run with THVM_ATPFT_UNIFY=1 so atp_overlap_ij routes through
+# the AtpFt-native cp_visit + unifier path (ft_cp.c + ft_unify.c).
+# Existence proves: same goal trace, same proof-step counts when the FT
+# path is on.
+$(BIN)/test_atp_ft_unify: tests/test_atp.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT \
+	  -DTHVM_ATPFT_LPO -DTHVM_ATPFT_MATCH \
+	  -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM \
+	  -DTHVM_ATPFT_UNIFY \
+	  -o $@ $< $(TEST_LDFLAGS)
+
 # === Diagnostic probes (tests/probe_*.c) =============================
 # Standalone C programs that drive the engine for ad-hoc diagnosis.
 # Each prints to stdout/stderr -- no CHECK/TEST_REPORT.  Built with
