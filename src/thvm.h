@@ -4010,6 +4010,23 @@ typedef struct {
   u32   n_cps_w2_picks;  // diagnostic counter
   u32   cp_seq_next;
   u32   cp_cap;
+
+  // Waldmeister history-driven Act_ultimate (NewClassification.c:314):
+  // an input axiom is classified with action `ultimate`, forcing its CP
+  // weight to minimalWeight() = INT32_MIN so it pops FIRST regardless of
+  // the heuristic.  Cuts the "first N pops are heap-resorts of the
+  // axiom + cheap descendants" overhead a plain min-weight queue pays
+  // -- on a Sheffer/single-axiom problem the first ~10 selections
+  // dominate the next 1000 rule trajectory.  cp_ultimate[i] is 1 iff
+  // slot i was enqueued as TRACE_AXIOM (or a database lemma) AND
+  // use_initial_ultimate was on at insert time.  Ranks ultimate CPs
+  // strictly before all non-ultimate ones in atp_cp_before; survives
+  // reheapify because the bit lives outside cp_pri.  Swapped/moved
+  // with the parallel CP arrays.  Default 0 (engine byte-identical
+  // when the flag is off).
+  u8   *cp_ultimate;
+  u8    use_initial_ultimate;
+  u32   n_cps_ultimate;       // diagnostic: count of axiom-tagged CPs added
   // Waldmeister CP-queue interleaving: selection alternates between
   // the weight key (cp_pri) and the FIFO key (cp_seq, oldest first).
   // cp_select_count is the running selection counter that drives the
@@ -4391,6 +4408,7 @@ typedef struct {
   u8 **cp_stash_packed;
   u32 *cp_stash_trace;
   u32 *cp_stash_nodes;
+  u8  *cp_stash_ultimate;  // parallel u8 flag: WM Act_ultimate carry-over
   u32  n_cp_stash;
   u32  cp_stash_cap;
 
@@ -4747,6 +4765,11 @@ fn void      thvm_atp_set_cp_set_interreduce(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_orphan_murder(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_perm_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
+// Waldmeister history-driven Act_ultimate for input axioms.  When on,
+// CPs enqueued as TRACE_AXIOM rank strictly before every non-axiom CP
+// regardless of heuristic weight (mirrors `initial = ultimate` in the
+// default DEF block, NewClassification.c).  Off = engine byte-identical.
+fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
 
 #ifdef THVM_ATP_AC
 // AC reasoning controls.  See src/atp/ac.c.  `set_ac_mask` registers
