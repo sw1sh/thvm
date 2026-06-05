@@ -234,6 +234,39 @@ fn KboCmp thvm_kbo_ft_subst(const AtpFtCell *redex,
                              g_atpft_kbo_flat_b, nb, cfg);
 }
 
+// Two-stage entry: pre-encode the redex ONCE (caller threads the
+// resulting cell-count through across many rule attempts), then
+// reuse it on each subsequent kbo_ft_subst.  Callers that hit the
+// unorient gate against many rule candidates at the same cell
+// (find_redex_ft's r-loop) save N-1 redex re-encodings out of N.
+
+// Pre-encode redex into the kbo_flat_a buffer.  Returns the cell
+// count on success, or 0 on encode overflow (caller falls through
+// to the un-cached path or bails).
+fn u32 thvm_kbo_ft_subst_prepare_redex(const AtpFtCell *redex,
+                                       const KboConfig *cfg) {
+  u32 na = 0u;
+  if (!atpft_kbo_flat_encode(redex, cfg, g_atpft_kbo_flat_a, &na)) return 0u;
+  return na;
+}
+
+// Run the compare against a redex that's already in g_atpft_kbo_flat_a
+// with `na` cells (from thvm_kbo_ft_subst_prepare_redex above).  No
+// state is held across calls beyond what the caller threads.
+fn KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
+                                          const AtpFtCell *tmpl,
+                                          const void      *subst,
+                                          const KboConfig *cfg) {
+  if (na == 0u) return KBO_UN;
+  u32 nb = 0u;
+  if (!atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
+                                   g_atpft_kbo_flat_b, &nb)) {
+    return KBO_UN;
+  }
+  return thvm_kbo_flat_slice(g_atpft_kbo_flat_a, na,
+                             g_atpft_kbo_flat_b, nb, cfg);
+}
+
 // === LPO public entry ================================================
 //
 // Mirrors the dispatcher in thvm_lpo (src/lpo/_.c:680-748): encode

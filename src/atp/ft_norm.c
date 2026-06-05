@@ -118,6 +118,14 @@ extern KboCmp thvm_kbo_ft_subst(const AtpFtCell *redex,
                                 const AtpFtCell *tmpl,
                                 const void      *subst,
                                 const KboConfig *cfg);
+// Two-stage variant: encode redex once into the shared buffer, reuse
+// across many rule attempts at the same cell.
+extern u32    thvm_kbo_ft_subst_prepare_redex(const AtpFtCell *redex,
+                                              const KboConfig *cfg);
+extern KboCmp thvm_kbo_ft_subst_with_prepared(u32 na,
+                                              const AtpFtCell *tmpl,
+                                              const void      *subst,
+                                              const KboConfig *cfg);
 
 // --- SUBST_FRESH entry-clear ----------------------------------------
 //
@@ -218,6 +226,12 @@ static int find_redex_ft(AtpState        *s,
       prev = p;
       continue;
     }
+    // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
+    // every call; we attempt up to `slice_count` rules at this cell,
+    // each running the unorient gate with the SAME redex `p`.
+    // Pre-encode once, reuse across attempts.  redex_na==0 means
+    // "not yet encoded"; the FIRST gate call lazily fills it.
+    u32 redex_na = 0u;
     for (u32 r = slice_first; r < slice_end; r++) {
       // Filter dead (bwd-subsumed) rules first: their lhs_ft/rhs_ft are
       // overwritten with a sentinel FVR (id 255) at deletion time, which
@@ -250,14 +264,9 @@ static int find_redex_ft(AtpState        *s,
       if (ft_vars_contained(rhs, lhs)) {
         ft_subst_reset(subst_buf);
         if (ft_match(lhs, p, subst_buf)) {
-          // FT-native streaming KBO gate (src/atp/ft_order.c):
-          // encode (rhs_tmpl, subst) inline into the kbo_flat encoder
-          // buffer -- no ft_subst_apply, no ft_deep_copy_rec, no
-          // intermediate AtpFtCell* tree.  This was the dominant cost
-          // after thvm_kbo_ft replaced the Term round-trip (~488
-          // samples in ft_deep_copy + ft_alloc_persistent +
-          // ft_subst_apply_rec on the post-roundtrip profile).
-          if (thvm_kbo_ft_subst(p, rhs, subst_buf, s->kbo) == KBO_GT) {
+          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+          if (thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo)
+              == KBO_GT) {
             *parent_out = (p == root) ? NULL : prev;
             *redex_out  = p;
             *rule_out   = r;
@@ -271,7 +280,9 @@ static int find_redex_ft(AtpState        *s,
       if (ft_vars_contained(lhs, rhs)) {
         ft_subst_reset(subst_buf);
         if (ft_match(rhs, p, subst_buf)) {
-          if (thvm_kbo_ft_subst(p, lhs, subst_buf, s->kbo) == KBO_GT) {
+          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+          if (thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo)
+              == KBO_GT) {
             *parent_out = (p == root) ? NULL : prev;
             *redex_out  = p;
             *rule_out   = r;
