@@ -153,6 +153,25 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     // axis stays an in-kernel for-loop (still correct, just serial).
     // Without this the TC kernel would take the output_numel default
     // grid below, racing many simdgroups onto the same tiles.
+    //
+    // BUT the simdgroup_matrix template only fires when M%8==0 AND N%8==0
+    // (render_uop.c rmu_emit_matmul_tc bails to a scalar accumulator
+    // otherwise -- it can't tile a ragged 8x8 fragment).  When it bails,
+    // the kernel emits the default `tid`-decoded scalar body whose correct
+    // grid is output_numel, NOT the TC tile grid.  So if the matmul shape
+    // doesn't qualify, skip the TC tile-grid branch and fall through to
+    // the output_numel default -- otherwise we'd launch only
+    // product(M_tiles) * 32 threads and leave most output cells unwritten
+    // (e.g. a {8,K}x{K,500} matmul: M=8 -> 1 tile -> 32 threads, but the
+    // scalar kernel needs 8*500=4000 threads).
+    if (tc_template) {
+      UopDagGemmShape gemm = {0};
+      int simdgroup_fires =
+          uop_dag_classify_matmul_shape(sroot, ke, &gemm)
+          && gemm.M != 0 && gemm.N != 0
+          && (gemm.M % 8u) == 0 && (gemm.N % 8u) == 0;
+      if (!simdgroup_fires) tc_template = 0;
+    }
     if (tc_template) {
       u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
       u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,

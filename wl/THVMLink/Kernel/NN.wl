@@ -1332,16 +1332,31 @@ TFromNet[layer_, x_TTerm] := TFromLayer[layer, x]
 (* netInputShape[net]: returns the input port shape as a List of
    integers, or $Failed if the net has zero or multiple input ports
    or the port shape is symbolic / unspecified.  LinearLayer's
-   "Input -> 4" reports as the bare integer 4; wrap as {4}. *)
-netInputShape[net_] := Module[{ports, raw},
+   "Input -> 4" reports as the bare integer 4; wrap as {4}.  When the
+   port is a NetEncoder (e.g. NetModel["LeNet"]'s Image input), the
+   net-level port reports the encoder, not the array shape -- fall back
+   to the first layer's concrete input-port shape, which is the array
+   the encoder feeds (the array TFromNet actually lifts over). *)
+shapeFromPort[raw_] := Which[
+    IntegerQ[raw],            {raw},
+    VectorQ[raw, IntegerQ],   List @@ raw,
+    True,                      $Failed
+]
+
+netInputShape[net_] := Module[{ports, raw, shape},
     ports = Quiet @ Information[net, "InputPorts"];
     If[!AssociationQ[ports] || Length[ports] =!= 1, Return[$Failed]];
-    raw = First[Values[ports]];
-    Which[
-        IntegerQ[raw],            {raw},
-        VectorQ[raw, IntegerQ],   List @@ raw,
-        True,                      $Failed
-    ]
+    raw   = First[Values[ports]];
+    shape = shapeFromPort[raw];
+    If[ shape =!= $Failed, Return[shape]];
+    If[ MatchQ[net, _NetChain] && Length[net] >= 1,
+        With[{l1Ports = Quiet @ Information[NetExtract[net, 1], "InputPorts"]},
+            If[ AssociationQ[l1Ports] && Length[l1Ports] === 1,
+                Return[shapeFromPort[First[Values[l1Ports]]]]
+            ]
+        ]
+    ];
+    $Failed
 ]
 
 (* TFromNet[net]: no input argument -- builds a TLam whose bound

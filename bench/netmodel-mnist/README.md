@@ -4,13 +4,15 @@ Training real Wolfram / tinygrad architectures from scratch on MNIST through
 the THVMLink tensor surface, and comparing accuracy.
 
 ```
-wolframscript -file lenet_train.wls            # NetModel["LeNet"], as-is
-wolframscript -file beautiful_mnist_train.wls  # tinygrad beautiful_mnist arch
+wolframscript -file lenet_train.wls                              # NetModel["LeNet"], as-is (eager loop)
+DEV=metal wolframscript -file ../../wl/THVMLink/Examples/lenet_metal_tutorial.wls   # inert-loop NetTrain on the GPU
+DEV=METAL python3 lenet_tinygrad.py                              # tinygrad, same LeNet arch, same backend
+wolframscript -file beautiful_mnist_train.wls                    # tinygrad beautiful_mnist arch
 ```
 
-| Architecture | thvm-trained (from scratch, CPU) | reference |
+| Architecture | thvm-trained (from scratch) | reference |
 |---|---|---|
-| **LeNet** (`NetModel["LeNet"]`, lifted as-is) | ~89.6% (256 imgs, full-batch, 150 iters) | pretrained `"LeNet Trained on MNIST Data"`: 99.0% (60k) |
+| **LeNet** (`NetModel["LeNet"]`, lifted as-is) | ~87.9% (256 imgs, full-batch, 60 rounds; Metal GPU via inert-loop `NetTrain`) | tinygrad same arch/backend: ~0.77 (256 imgs, 60 rounds); pretrained `"LeNet Trained on MNIST Data"`: 99.0% (60k) |
 | **beautiful_mnist** (exact arch, BatchNorm) | ~95.1% (1024 imgs, mini-batch BS=64, 8 epochs) | tinygrad full-data run: ~99.5% |
 
 Both architectures train end to end on the tensor surface. The from-scratch
@@ -32,8 +34,17 @@ BatchNorm net (beautiful_mnist) beats the shallower LeNet, as expected.
 
 ## Metal
 
-Train these on **CPU**. The beautiful_mnist backward over-fuses into 1300+
-kernels and can orphan the Metal GPU on dispatch (reboot to clear) -- on both
-thvm and tinygrad. Prescreen `TKernelCount[]` on `DEV=cpu` and keep it well
-under a few hundred before any `DEV=metal` training step. (The small conv8
-head in `../mnist-step` is ~40 kernels and is Metal-safe.)
+**LeNet trains safely on the GPU.** The inert-loop `NetTrain`
+(`lenet_metal_tutorial.wls`) materialises the whole step ONCE as a fixed
+294-kernel set and a single `TWnf` re-fires it every round, so it never
+over-fuses on dispatch. Prescreen `TKernelCount[]` on the active device after
+building the `"TrainingNet"` term: 294 is well under the few-hundred
+Metal-safety bar, the count stays unchanged across rounds, and the run returns
+cleanly. On an Apple M3 Max it is ~79 ms/round (vs ~32 ms/round for tinygrad's
+fused schedule on the same net/backend).
+
+The **beautiful_mnist** backward still over-fuses into 1300+ kernels and can
+orphan the Metal GPU on dispatch (reboot to clear) -- on both thvm and
+tinygrad. Always prescreen `TKernelCount[]` and keep it well under a few
+hundred before any `DEV=metal` training step. (The small conv8 head in
+`../mnist-step` is ~40 kernels and is also Metal-safe.)

@@ -5,7 +5,7 @@ Title: Training Neural Networks with THVMLink
 Context: THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Train
-Keywords: [training, gradient descent, optimizer, Adam, MLP, convolution, conv2d, ReLU, higher-order gradient, backpropagation]
+Keywords: [training, gradient descent, optimizer, Adam, MLP, convolution, conv2d, ReLU, higher-order gradient, backpropagation, LeNet, NetModel, NetTrain, NetPredict, Metal, GPU, MNIST]
 RelatedGuides: [THVMLink]
 RelatedTutorials: [Tensors, Overview]
 ---
@@ -128,7 +128,7 @@ Normal @ TRealize @ TFromNet[net, xn]
 ```
 <!-- => {-0.504425}  (identical to net[{1., 2., 3.}]) -->
 
-Once lifted, the forward is an ordinary `TTerm`: differentiate it with [TGrad](), step its weights with [TSet](), or capture the step with [TJit]() - exactly the conv classifier the next section trains on MNIST. (A high-level `NetTrain` / `TNetPredict` surface installed *directly* on a [TFromNet]()-built `TTerm` is still in progress; see *Where to go next*.)
+Once lifted, the forward is an ordinary `TTerm`: differentiate it with [TGrad](), step its weights with [TSet](), or capture the step with [TJit]() - exactly the conv classifier the next section trains on MNIST. The high-level <code>[NetTrain]()</code> / [TNetPredict]() surface installed *directly* on a [TFromNet]()-built `TTerm` trains the published LeNet end to end on the GPU below; see *End to end: the real LeNet*.
 
 ## A convolutional MNIST classifier
 
@@ -215,6 +215,74 @@ trained = TNetTrain[clf, xs, ys, "MaxTrainingRounds" -> 80];
 
 `"LearningRate"` (default 0.3), `"MaxTrainingRounds"` (100), and `"Loss"` (the stable [TCategoricalCrossEntropy](), expecting a logits net - no final `SoftmaxLayer`) are options. The same call scales to the conv MNIST head above; the loop inside is exactly the realize-grads-first SGD this note opened with.
 
+## End to end: the real LeNet, trained on the Metal GPU
+
+Everything so far built the net by hand or as a small [NetChain](). The same pipeline lifts a *published* model unchanged. [NetModel]() carries LeNet - the original two-convolution digit classifier - as a [NetChain]() with an [Image]() input encoder and a `"Class"` output decoder. On this machine's Wolfram Language version it comes back **uninitialised** (its weights are `Automatic`), so [NetInitialize]() gives it concrete random weights: training it is training *from scratch*. [TFromNet]() then lifts the initialised net into a `TTerm`, dropping the trailing `SoftmaxLayer` internally so the loss sees logits:
+
+```wl
+init = NetInitialize[NetModel["LeNet"], RandomSeeding -> 7];
+lenet = TFromNet[init];
+Length @ TNetParams[lenet]
+```
+<!-- => 8  (2 conv + 2 fully-connected layers, each a weight + a bias) -->
+
+The lifted `lenet` is an ordinary `TTerm`, so the whole inert-loop surface applies. Real MNIST digits are [Image]() objects; [TNetTrain]() takes them as the *keys* of `image -> class` rules and reshapes each through the encoder's `{1, 28, 28}` array internally, with no host-side [ImageData]() ceremony at the call site:
+
+```wl
+data = RandomSample[ResourceData["MNIST", "TrainingData"], 256];
+First @ Keys @ data
+```
+<!-- => (a 28x28 MNIST digit Image) -->
+
+### Prescreen the step, then dispatch on the GPU
+
+The inert loop materialises the *entire* training step once - forward, cross-entropy, the shared backward, and one in-place update per weight - and a single [TWnf]() re-fires that **fixed** kernel set every round. So the kernels added while building the `"TrainingNet"` term (nothing has fired yet) are exactly the set the GPU will re-run. Counting them with [TKernelCount]() is the Metal safety check: a small, fixed set is safe to dispatch, because re-firing it cannot over-fuse the backward into the thousands-of-kernels shape that can hang the GPU. Read the count before and after the build for the loop's own contribution, isolated from kernels the rest of the page has accumulated:
+
+```wl
+init = NetInitialize[NetModel["LeNet"], RandomSeeding -> 7];
+lenet = TFromNet[init];
+data = RandomSample[ResourceData["MNIST", "TrainingData"], 256];
+before = TKernelCount[];
+loop = NetTrain[lenet, data, "TrainingNet", MaxTrainingRounds -> 60, "LearningRate" -> 0.1];
+TKernelCount[] - before
+```
+<!-- => 294  (the fixed step set; well under the few-hundred Metal-safety bar) -->
+
+294 kernels, built before a single round runs, re-fired in place by [TWnf]() - so training this LeNet on the GPU is safe. Set `DEV=metal` in the environment (the runtime reads it on init), drive the loop with one [TWnf](), and no new kernels appear: the fixed set just fires 60 times in place:
+
+```wl
+#| eval: false
+TWnf[loop];
+TKernelCount[] - before
+```
+<!-- => 294  (UNCHANGED: TWnf re-fired the fixed set; no over-fusion) -->
+
+The convenience form `NetTrain[lenet, data, MaxTrainingRounds -> 60, "LearningRate" -> 0.1]` does the [TWnf]() for you and returns the trained forward. On the Metal GPU of an Apple M3 Max the 60-round full-batch SGD over 256 digits runs at about **79 ms/round** (versus roughly 4300 ms/round on the CPU clang backend for the same step - the GPU is ~55x faster here once the fixed kernel set is warm).
+
+### Predict on held-out images
+
+[TNetPredict]() runs the trained forward on a list of [Image]() objects and returns the integer class for each (the logits' argmax - the `"Class"` decoder). Over a held-out test set it reaches about **88%** accuracy from scratch on this 256-digit subset:
+
+```wl
+#| eval: false
+test = RandomSample[ResourceData["MNIST", "TestData"], 256];
+preds = TNetPredict[trained, Keys[test]];
+N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, Values[test]}]
+```
+<!-- => 0.879  (held-out test accuracy, from scratch, 256-image subset) -->
+
+The predictions are sensible digit-by-digit - a sample of held-out images with the model's call against the truth:
+
+```wl
+#| eval: false
+test = RandomSample[ResourceData["MNIST", "TestData"], 8];
+preds = TNetPredict[trained, Keys[test]];
+Grid[{Keys[test], MapThread["pred " <> ToString[#1] <> " / true " <> ToString[#2] &, {preds, Values[test]}]}]
+```
+<!-- => (8 digit images over their predicted / true labels; most match) -->
+
+[`wl/THVMLink/Examples/lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) runs this whole pipeline - lift, prescreen, train, predict - and prints the accuracy, the per-round timing, and a sample-prediction grid. The tinygrad reference for the same architecture and backend is [`bench/netmodel-mnist/lenet_tinygrad.py`](../../../../bench/netmodel-mnist/lenet_tinygrad.py): the identical LeNet (`Conv2d[1 -> 20, 5x5]` and `Conv2d[20 -> 50, 5x5]`, two fully-connected layers) trained the same way on the same Metal GPU runs at about **32 ms/round** and reaches **~0.77** test accuracy on this subset. thvm is slower per round (the inert loop re-fires more, smaller kernels than tinygrad's fused schedule) but converges to a higher subset accuracy here; both train the real LeNet end to end on the GPU.
+
 ### Time and memory against tinygrad
 
 That same network (`Conv2d[1 -> 8, 3x3]` -> ReLU -> 2x2 max-pool -> `Linear[1352 -> 10]`, batch 64, softmax cross-entropy) runs as an eager forward + backward + SGD step in both thvm and [tinygrad](https://tinygrad.org) on the CPU. Warm (post-warmup) per-step wall time and the memory the *training itself* allocates:
@@ -253,5 +321,6 @@ This is not limited to scalars. Because every layer's backward is itself a `TTer
 - The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial for the tensor / UOp / kernel / autodiff machinery underneath this loop.
 - Per-symbol pages: [TGrad](paclet:WolframInstitute/THVMLink/ref/TGrad), [TSet](paclet:WolframInstitute/THVMLink/ref/TSet), [TLinear](paclet:WolframInstitute/THVMLink/ref/TLinear), [TConv2D](paclet:WolframInstitute/THVMLink/ref/TConv2D), [TAdam](paclet:WolframInstitute/THVMLink/ref/TAdam), [TFromNet](paclet:WolframInstitute/THVMLink/ref/TFromNet).
 - Capture a step with [TJit]() so the loop compiles once and replays every epoch (see the [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) "Capturing a step" section).
-- The [TNetTrain]() / [TNetPredict]() one-liner above for the packaged surface.
-- **Still coming:** a `NetTrain[net_TTerm, data]` UpValue and a `data -> "MNIST"` convenience form so the built-in spelling carries the whole dataset, plus reconstructing a trained `NetChain` back out of the handle.
+- The [TNetTrain]() / [TNetPredict]() one-liner above for the packaged surface - and the built-in spelling <code>[NetTrain]()[*net*, *data*, [MaxTrainingRounds]() -> *n*]</code> on any [TFromNet]()-lifted `TTerm`, with `data` a list of `input -> class` rules or the string `"MNIST"`.
+- [`wl/THVMLink/Examples/lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) for the full LeNet-on-Metal run end to end.
+- **Still coming:** reconstructing a trained [NetChain]() back out of a lifted-and-trained `TTerm` (the weights train in place; round-tripping them into a fresh Wolfram net is the open piece).

@@ -98,6 +98,35 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* TC dispatch-grid coverage: M a multiple of 8 (so the M axis is
+       GLOBAL-promoted and the kernel takes the TC tile-grid path) but N
+       NOT a multiple of 8 (so render_uop's simdgroup_matrix<8,8> template
+       bails to the scalar `tid`-decoded accumulator).  The dispatch shape
+       must mirror that bail and launch output_numel = M*N threads; the old
+       code launched only product(M_tiles)*32 = 32 threads, leaving most of
+       the output unwritten (LeNet's {8,800}x{800,500} FC layer returned
+       garbage).  Asserts the full {8,500} output is correct. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, aData, bData, ref},
+        If[ ctx === 0, Return[True]];
+        SeedRandom[11];
+        aData = RandomReal[{-1, 1}, {8, 16}];
+        bData = RandomReal[{-1, 1}, {16, 500}];
+        ref = aData . bData;
+        result = TInContext[ctx,
+            a = TTensorCreate @ NumericArray[aData, "Real32"];
+            b = TTensorCreate @ NumericArray[bData, "Real32"];
+            actual = Normal @ TTensorData @ TRealize @ TMatMul[a, b];
+            {Max[Abs[Flatten[actual - ref]]] < 0.001, Dimensions[actual]}
+        ];
+        TContextDestroy[ctx];
+        result === {True, {8, 500}}
+    ],
+    True,
+    TestID -> "metal/f32-matmul-tc-grid-ragged-n"
+]
+
+VerificationTest[
     (* Rank-1 TMatVec uses the generic metal-tile path with correct
        numerics.  TC simdgroup-matrix opts don't apply here (tiles are
        8/16/32 wide; an N=1 output would waste most of each tile), so
