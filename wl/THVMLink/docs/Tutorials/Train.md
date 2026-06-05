@@ -236,52 +236,70 @@ First @ Keys @ data
 
 ### Prescreen the step, then dispatch on the GPU
 
-The inert loop materialises the *entire* training step once - forward, cross-entropy, the shared backward, and one in-place update per weight - and a single [TWnf]() re-fires that **fixed** kernel set every round. So the kernels added while building the `"TrainingNet"` term (nothing has fired yet) are exactly the set the GPU will re-run. Counting them with [TKernelCount]() is the Metal safety check: a small, fixed set is safe to dispatch, because re-firing it cannot over-fuse the backward into the thousands-of-kernels shape that can hang the GPU. Read the count before and after the build for the loop's own contribution, isolated from kernels the rest of the page has accumulated:
+The inert loop materialises the *entire* training step once - forward, cross-entropy, the shared backward, and one in-place update per weight - and a single [TWnf]() re-fires that **fixed** kernel set every round. So the kernels added while building the `"TrainingNet"` term (nothing has fired yet) are exactly the set the GPU will re-run. Counting them with [TKernelCount]() is the Metal safety check: a small, fixed set is safe to dispatch, because re-firing it cannot over-fuse the backward into the thousands-of-kernels shape that can hang the GPU. Read the count before and after the build for the loop's own contribution, isolated from kernels the rest of the page has accumulated. A small subset (64 digits, fifteen full-batch rounds) keeps the cell quick while still training from scratch:
 
 ```wl
+SeedRandom[7];
 init = NetInitialize[NetModel["LeNet"], RandomSeeding -> 7];
 lenet = TFromNet[init];
-data = RandomSample[ResourceData["MNIST", "TrainingData"], 256];
+data = RandomSample[ResourceData["MNIST", "TrainingData"], 64];
 before = TKernelCount[];
-loop = NetTrain[lenet, data, "TrainingNet", MaxTrainingRounds -> 60, "LearningRate" -> 0.1];
+loop = NetTrain[lenet, data, "TrainingNet", MaxTrainingRounds -> 15, "LearningRate" -> 0.2];
 TKernelCount[] - before
 ```
 <!-- => 294  (the fixed step set; well under the few-hundred Metal-safety bar) -->
 
-294 kernels, built before a single round runs, re-fired in place by [TWnf]() - so training this LeNet on the GPU is safe. Set `DEV=metal` in the environment (the runtime reads it on init), drive the loop with one [TWnf](), and no new kernels appear: the fixed set just fires 60 times in place:
+294 kernels, built before a single round runs, re-fired in place by [TWnf]() - so training this LeNet on the GPU is safe. Drive the loop with one [TWnf]() and no new kernels appear: the fixed set just fires fifteen times in place. The cell below really runs the training on the CPU (the doc build never dispatches Metal), reports its per-round wall time, and asserts the kernel set never grew - exactly the safety invariant the GPU relies on:
 
 ```wl
-#| eval: false
-TWnf[loop];
-TKernelCount[] - before
+t = First @ AbsoluteTiming @ TWnf[loop];
+{TKernelCount[] - before, Round[1000.*t/15, 1]}
 ```
-<!-- => 294  (UNCHANGED: TWnf re-fired the fixed set; no over-fusion) -->
+<!-- => {294, _}  (294 UNCHANGED: TWnf re-fired the fixed set, no over-fusion; second number = live CPU ms/round) -->
 
-The convenience form `NetTrain[lenet, data, MaxTrainingRounds -> 60, "LearningRate" -> 0.1]` does the [TWnf]() for you and returns the trained forward. On the Metal GPU of an Apple M3 Max the 60-round full-batch SGD over 256 digits runs at about **79 ms/round** (versus roughly 4300 ms/round on the CPU clang backend for the same step - the GPU is ~55x faster here once the fixed kernel set is warm).
+The kernel count is unchanged: [TWnf]() re-fired the fixed 294-kernel set fifteen times in place, no over-fusion. The training really happened - the trained `lenet` now classifies its training digits well above the 10% chance baseline:
+
+```wl
+N @ Mean @ MapThread[Boole[#1 == #2] &, {TNetPredict[lenet, Keys[data]], Values[data]}]
+```
+<!-- => 0.969  (train-subset accuracy: fifteen SGD rounds carried it from ~0.1 chance) -->
+
+The convenience form `NetTrain[lenet, data, MaxTrainingRounds -> 15, "LearningRate" -> 0.2]` does the [TWnf]() for you and returns the trained forward. The same fixed 294-kernel set dispatches unchanged on the Metal GPU: set `DEV=metal` in the environment (the runtime reads it on init) and the loop runs on the GPU instead, far faster per round.
+
+The per-round wall time the cell above produces is the live CPU number; the Metal and tinygrad columns are representative measured references on an Apple M3 Max (the GPU figures come from running [`lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) with `DEV=metal`, the same fixed step set warm):
+
+| backend (this step) | ms/round | held-out accuracy |
+|---|---|---|
+| thvm CPU (clang, live above) | (the number the cell prints) | 0.97 (train subset) |
+| thvm Metal (M3 Max, measured ref) | ~53 | - |
+| thvm Metal, 256 imgs / 60 rounds (measured ref) | ~86 | 0.88 |
+| tinygrad Metal, 256 imgs / 60 rounds (measured ref) | ~32 | 0.77 |
+
+The CPU number is order-of-seconds per round; the same 294-kernel step on the Metal GPU is roughly 20x faster once warm. On the larger 256-image / 60-round run the GPU reaches **~88%** held-out accuracy at about **86 ms/round** - the figures [`lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) reports. tinygrad's fused schedule for the identical LeNet runs faster still (~32 ms/round) but converges to a lower subset accuracy here; both train the real LeNet end to end on the GPU.
 
 ### Predict on held-out images
 
-[TNetPredict]() runs the trained forward on a list of [Image]() objects and returns the integer class for each (the logits' argmax - the `"Class"` decoder). Over a held-out test set it reaches about **88%** accuracy from scratch on this 256-digit subset:
+[TNetPredict]() runs the trained forward on a list of [Image]() objects and returns the integer class for each (the logits' argmax - the `"Class"` decoder). The live cells above trained on a 64-digit subset for fifteen rounds to keep the page fast; train the full 256-image / 60-round run (the configuration [`lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) uses, ideally with `DEV=metal`) and the same `lenet`, trained in place, reaches about **88%** accuracy from scratch on a held-out test set:
 
 ```wl
 #| eval: false
 test = RandomSample[ResourceData["MNIST", "TestData"], 256];
-preds = TNetPredict[trained, Keys[test]];
+preds = TNetPredict[lenet, Keys[test]];
 N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, Values[test]}]
 ```
-<!-- => 0.879  (held-out test accuracy, from scratch, 256-image subset) -->
+<!-- => 0.879  (held-out test accuracy, from scratch, 256-image train + test subset) -->
 
 The predictions are sensible digit-by-digit - a sample of held-out images with the model's call against the truth:
 
 ```wl
 #| eval: false
 test = RandomSample[ResourceData["MNIST", "TestData"], 8];
-preds = TNetPredict[trained, Keys[test]];
+preds = TNetPredict[lenet, Keys[test]];
 Grid[{Keys[test], MapThread["pred " <> ToString[#1] <> " / true " <> ToString[#2] &, {preds, Values[test]}]}]
 ```
 <!-- => (8 digit images over their predicted / true labels; most match) -->
 
-[`wl/THVMLink/Examples/lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) runs this whole pipeline - lift, prescreen, train, predict - and prints the accuracy, the per-round timing, and a sample-prediction grid. The tinygrad reference for the same architecture and backend is [`bench/netmodel-mnist/lenet_tinygrad.py`](../../../../bench/netmodel-mnist/lenet_tinygrad.py): the identical LeNet (`Conv2d[1 -> 20, 5x5]` and `Conv2d[20 -> 50, 5x5]`, two fully-connected layers) trained the same way on the same Metal GPU runs at about **32 ms/round** and reaches **~0.77** test accuracy on this subset. thvm is slower per round (the inert loop re-fires more, smaller kernels than tinygrad's fused schedule) but converges to a higher subset accuracy here; both train the real LeNet end to end on the GPU.
+[`wl/THVMLink/Examples/lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) runs this whole pipeline at the full 256-image / 60-round size - lift, prescreen, train, predict - and prints the accuracy, the per-round timing, and a sample-prediction grid. The tinygrad reference for the same architecture and backend is [`bench/netmodel-mnist/lenet_tinygrad.py`](../../../../bench/netmodel-mnist/lenet_tinygrad.py): the identical LeNet (`Conv2d[1 -> 20, 5x5]` and `Conv2d[20 -> 50, 5x5]`, two fully-connected layers) trained the same way on the same Metal GPU runs at about **32 ms/round** and reaches **~0.77** test accuracy on this subset. thvm is slower per round (the inert loop re-fires more, smaller kernels than tinygrad's fused schedule) but converges to a higher subset accuracy here; both train the real LeNet end to end on the GPU.
 
 ### Time and memory against tinygrad
 

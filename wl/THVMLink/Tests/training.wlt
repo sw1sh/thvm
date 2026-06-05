@@ -153,3 +153,41 @@ VerificationTest[
     {True, True},
     TestID -> "training/weight-decay-shrinks-weights"
 ]
+
+(* === LeNet inert-loop perf guard: the real two-conv LeNet shape (the
+       NetModel["LeNet"] architecture, built offline as a NetChain over
+       synthetic images) materialises to a FIXED 294-kernel step that a single
+       TWnf re-fires every round.  This pins the three properties the Train
+       tutorial's Metal-safety claim rests on, so a regression that over-fuses
+       the backward (kernel-count blow-up that can hang the GPU), slows the
+       step, or balloons the working set fails loudly:
+         (a) the materialised step is EXACTLY 294 kernels and < 300 (the
+             Metal-safety bar), and re-firing it adds none;
+         (b) the 15-round train wall time stays under a generous bound
+             (measured ~2.4 s on an M3 Max CPU; bound 30 s ~= 12x for cold /
+             loaded CI machines);
+         (c) the live CPU buffer bytes stay under a generous bound (measured
+             ~34 MB; bound 120 MB ~= 3.5x).
+       Data-free + offline so it stays fast. === *)
+VerificationTest[
+    TInit[];
+    SeedRandom[42];
+    imgs   = RandomReal[{0, 1}, {8, 1, 28, 28}];
+    labels = Range[0, 7];
+    data   = MapThread[Rule, {imgs, labels}];
+    net = NetInitialize @ NetChain[
+        {ConvolutionLayer[20, {5, 5}], ElementwiseLayer[Ramp], PoolingLayer[{2, 2}, {2, 2}],
+         ConvolutionLayer[50, {5, 5}], ElementwiseLayer[Ramp], PoolingLayer[{2, 2}, {2, 2}],
+         FlattenLayer[], LinearLayer[500], ElementwiseLayer[Ramp], LinearLayer[10]},
+        "Input" -> {1, 28, 28}];
+    lifted = TFromNet[net];
+    before = TKernelCount[];
+    loop   = NetTrain[lifted, data, "TrainingNet", MaxTrainingRounds -> 15, "LearningRate" -> 0.1];
+    stepKernels = TKernelCount[] - before;
+    wall = First @ AbsoluteTiming @ TWnf[loop];
+    afterKernels = TKernelCount[] - before;
+    peakBytes = TTotalBufBytes[];
+    {stepKernels === 294, stepKernels < 300, afterKernels === stepKernels, wall < 30., peakBytes < 120*1024*1024},
+    {True, True, True, True, True},
+    TestID -> "training/lenet-inert-loop-perf-guard"
+]
