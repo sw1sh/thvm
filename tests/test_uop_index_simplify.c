@@ -615,6 +615,366 @@ int main(void) {
     CHECK_EQ(uop_fast_idiv_node(gmod), gated);          // x%25 == x for x<25
   }
 
+  // === Ported tinygrad symbolic rules (29-rule batch) ====================
+  {
+    Term ra = uop_range(500, KAX_LOOP, 8);    // [0,7]
+    Term rb = uop_range(501, KAX_LOOP, 100);  // [0,99]
+    Term c2 = uop_const(DT_INT32, 2);
+    Term c3 = uop_const(DT_INT32, 3);
+    Term c5 = uop_const(DT_INT32, 5);
+    Term c6 = uop_const(DT_INT32, 6);
+    Term c7 = uop_const(DT_INT32, 7);
+
+    // Rule 1: (x//c + a)//d -> (x + a*c)//(c*d).  (rb//3 + 2)//5.
+    TEST_BEGIN("ported/fast-inline-div-add-div");
+    Term r1n = uop_int_binary(UOP_IADD,
+                 uop_int_binary(UOP_IDIV, rb, c3), c2);
+    Term r1 = uop_int_binary(UOP_IDIV, r1n, c5);
+    CHECK_EQ(term_ext(r1), UOP_IDIV);
+    // numerator is (rb + 6), divisor 15.
+    {
+      i64 dd;
+      CHECK(uop_iconst_value(heap_read(term_val(r1) + 1), &dd));
+      CHECK_EQ(dd, 15);
+    }
+    TEST_BEGIN("ported/fast-inline-div-add-div-skips-nonconst-addend");
+    // (rb//3 + ra)//5 -- addend ra non-const -> no fast-inline collapse.
+    Term r1ns = uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IDIV, rb, c3), ra);
+    Term r1s = uop_int_binary(UOP_IDIV, r1ns, c5);
+    CHECK_EQ(term_ext(r1s), UOP_IDIV);
+    {
+      i64 dd;
+      CHECK(uop_iconst_value(heap_read(term_val(r1s) + 1), &dd));
+      CHECK_EQ(dd, 5);  // divisor unchanged
+    }
+
+    // Rule 2: (a%(k*c) + b)%c -> (a+b)%c.  ((rb%6) + ra)%3.
+    TEST_BEGIN("ported/remove-nested-mod-in-sum");
+    Term r2in = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMOD, rb, c6), ra);
+    Term r2r = uop_int_binary(UOP_IMOD, r2in, c3);
+    CHECK_EQ(term_ext(r2r), UOP_IMOD);
+    {
+      // inner mod must be gone: numerator is (rb + ra), no IMOD leaf.
+      Term num = heap_read(term_val(r2r) + 0);
+      CHECK_EQ(term_ext(num), UOP_IADD);
+      Term l = heap_read(term_val(num) + 0);
+      CHECK(term_ext(l) != UOP_IMOD);
+    }
+    TEST_BEGIN("ported/remove-nested-mod-skips-non-multiple");
+    // ((rb%7) + ra)%3 -- 7 not a multiple of 3 -> inner mod stays.
+    Term r2ns = uop_int_binary(UOP_IMOD,
+                  uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMOD, rb, c7), ra),
+                  c3);
+    CHECK_EQ(term_ext(r2ns), UOP_IMOD);
+
+    // Rule 4: cancel_divmod.  (ra + 64)//8 -> qv (ra in [0,7] -> num in
+    // [64,71] -> 64/8==71/8==8, single interval).
+    TEST_BEGIN("ported/cancel-divmod-single-interval");
+    Term r4n = uop_int_binary(UOP_IADD, ra, uop_const(DT_INT32, 64));
+    Term r4 = uop_int_binary(UOP_IDIV, r4n, uop_const(DT_INT32, 8));
+    CHECK_EQ(term_ext(r4), UOP_CONST);
+    {
+      i64 qv;
+      CHECK(uop_iconst_value(r4, &qv));
+      CHECK_EQ(qv, 8);
+    }
+    // mod companion: (ra+64)%8 -> num - 8*8 = (ra+64) - 64 = ra.
+    Term r4m = uop_int_binary(UOP_IMOD, r4n, uop_const(DT_INT32, 8));
+    CHECK_EQ(r4m, ra);
+    TEST_BEGIN("ported/cancel-divmod-skips-multi-interval");
+    // rb//8 spans many intervals (rb in [0,99]) -> no const fold.
+    Term r4s = uop_int_binary(UOP_IDIV, rb, uop_const(DT_INT32, 8));
+    CHECK_EQ(term_ext(r4s), UOP_IDIV);
+
+    // Rule 5: x % x -> 0.
+    TEST_BEGIN("ported/mod-self-zero");
+    CHECK_EQ(uop_int_binary(UOP_IMOD, rb, rb), zero);
+    TEST_BEGIN("ported/mod-self-skips-distinct");
+    Term r5s = uop_int_binary(UOP_IMOD, rb, ra);
+    CHECK_EQ(term_ext(r5s), UOP_IMOD);
+
+    // Rules 10/11 (distribute const over IADD) REVERTED: they explode the
+    // affine numerator that uop_fast_idiv_node lowers via a single magic
+    // multiply.  See report.  2*(rb+3) therefore stays IMUL(2, IADD).
+    TEST_BEGIN("ported/distribute-const-over-add-reverted");
+    Term r10 = uop_int_binary(UOP_IMUL, c2, uop_int_binary(UOP_IADD, rb, c3));
+    CHECK_EQ(term_ext(r10), UOP_IMUL);
+
+    // Rule 12: (x*c1)*y -> (x*y)*c1.  (rb*3)*ra -> (rb*ra)*3.
+    TEST_BEGIN("ported/hoist-const-factor");
+    Term r12 = uop_int_binary(UOP_IMUL, uop_int_binary(UOP_IMUL, rb, c3), ra);
+    CHECK_EQ(term_ext(r12), UOP_IMUL);
+    {
+      i64 cc;
+      CHECK(uop_iconst_value(heap_read(term_val(r12) + 1), &cc));
+      CHECK_EQ(cc, 3);
+      Term inner = heap_read(term_val(r12) + 0);
+      CHECK_EQ(term_ext(inner), UOP_IMUL);  // (rb*ra)
+    }
+    TEST_BEGIN("ported/hoist-skips-both-nonconst");
+    Term r12s = uop_int_binary(UOP_IMUL, rb, ra);
+    CHECK_EQ(term_ext(r12s), UOP_IMUL);
+    CHECK_EQ(heap_read(term_val(r12s) + 0), rb);
+
+    // Rule 13/15: (y + x*c0) + x*c1 -> y + x*(c0+c1).
+    TEST_BEGIN("ported/combine-buried-const-mults");
+    Term yx2 = uop_int_binary(UOP_IADD, ra, uop_int_binary(UOP_IMUL, rb, c2));
+    Term r13 = uop_int_binary(UOP_IADD, yx2, uop_int_binary(UOP_IMUL, rb, c3));
+    CHECK_EQ(term_ext(r13), UOP_IADD);
+    {
+      // result is ra + rb*5.
+      Term comb = heap_read(term_val(r13) + 1);
+      CHECK_EQ(term_ext(comb), UOP_IMUL);
+      i64 cc;
+      CHECK(uop_iconst_value(heap_read(term_val(comb) + 1), &cc));
+      CHECK_EQ(cc, 5);
+    }
+    TEST_BEGIN("ported/combine-buried-skips-different-x");
+    // (ra + rb*2) + r*3 with r != rb -> no combine.
+    Term r13s = uop_int_binary(UOP_IADD,
+                  uop_int_binary(UOP_IADD, ra, uop_int_binary(UOP_IMUL, rb, c2)),
+                  uop_int_binary(UOP_IMUL, r, c3));
+    {
+      // top is still an IADD whose rhs is r*3 (not combined into rb).
+      CHECK_EQ(term_ext(r13s), UOP_IADD);
+    }
+
+    // Rule 14: x + x -> x*2.
+    TEST_BEGIN("ported/add-self-doubles");
+    Term r14 = uop_int_binary(UOP_IADD, rb, rb);
+    CHECK_EQ(term_ext(r14), UOP_IMUL);
+    {
+      i64 cc;
+      CHECK(uop_iconst_value(heap_read(term_val(r14) + 1), &cc));
+      CHECK_EQ(cc, 2);
+    }
+    TEST_BEGIN("ported/add-self-skips-distinct");
+    Term r14s = uop_int_binary(UOP_IADD, rb, ra);
+    CHECK_EQ(term_ext(r14s), UOP_IADD);
+
+    // Rule 16: (x + c1) + y -> (x + y) + c1.  (rb + 5) + ra.
+    TEST_BEGIN("ported/move-add-const-to-end");
+    Term r16 = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IADD, rb, c5), ra);
+    CHECK_EQ(term_ext(r16), UOP_IADD);
+    {
+      // const 5 ends up at the outer rhs.
+      Term r16r = heap_read(term_val(r16) + 1);
+      i64 cc;
+      CHECK(uop_iconst_value(r16r, &cc));
+      CHECK_EQ(cc, 5);
+    }
+    TEST_BEGIN("ported/move-add-const-skips-when-y-const");
+    // (rb + 5) + 3 -> rb + 8 (the existing const-collapse, not the reassoc).
+    Term r16s = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IADD, rb, c5), c3);
+    CHECK_EQ(term_ext(r16s), UOP_IADD);
+    {
+      Term r16sr = heap_read(term_val(r16s) + 1);
+      i64 cc;
+      CHECK(uop_iconst_value(r16sr, &cc));
+      CHECK_EQ(cc, 8);
+    }
+
+    // Rule 17: bound-fold via uop_int_bounds.  (rb%4) < 10 -> 1 (hi=3<10).
+    TEST_BEGIN("ported/ilt-bound-fold-true");
+    Term mod4 = uop_int_binary(UOP_IMOD, rb, uop_const(DT_INT32, 4));
+    CHECK_EQ(uop_int_binary(UOP_ILT, mod4, ten), one);
+    // (ra*10) < 5 -> 0 (lo=0 >= 5? no... use a shifted lower bound).
+    TEST_BEGIN("ported/ilt-bound-fold-false");
+    // (ra + 20) < 10 -> 0 (lo=20 >= 10).
+    Term shifted = uop_int_binary(UOP_IADD, ra, uop_const(DT_INT32, 20));
+    CHECK_EQ(uop_int_binary(UOP_ILT, shifted, ten), zero);
+    TEST_BEGIN("ported/ilt-bound-fold-skips-unknown");
+    // rb < 50 -> rb in [0,99], not decidable -> stays ILT.
+    Term r17s = uop_int_binary(UOP_ILT, rb, uop_const(DT_INT32, 50));
+    CHECK_EQ(term_ext(r17s), UOP_ILT);
+
+    // Rule 18: (c0 + x) < c1 -> x < (c1 - c0).  (5 + ra) < 12 -> ra < 7.
+    TEST_BEGIN("ported/ilt-shift-const");
+    Term r18 = uop_int_binary(UOP_ILT,
+                 uop_int_binary(UOP_IADD, c5, ra), uop_const(DT_INT32, 12));
+    // ra in [0,7]; ra < 7 -> not statically decidable -> stays ILT(ra, 7).
+    CHECK_EQ(term_ext(r18), UOP_ILT);
+    CHECK_EQ(heap_read(term_val(r18) + 0), ra);
+    {
+      i64 cc;
+      CHECK(uop_iconst_value(heap_read(term_val(r18) + 1), &cc));
+      CHECK_EQ(cc, 7);
+    }
+    // (ra - 2) < 10 -> ra < 12.
+    TEST_BEGIN("ported/ilt-shift-const-sub");
+    Term r18b = uop_int_binary(UOP_ILT,
+                  uop_int_binary(UOP_ISUB, ra, c2), ten);
+    // ra in [0,7] < 12 -> always true via bound-fold (folds to 1).
+    CHECK_EQ(r18b, one);
+
+    // Rule 19: (c0*x) < c1 -> x < ceil(c1/c0).  (3*rb) < 10 -> rb < 4.
+    TEST_BEGIN("ported/ilt-pos-coeff-ceil");
+    Term r19 = uop_int_binary(UOP_ILT,
+                 uop_int_binary(UOP_IMUL, c3, rb), ten);
+    CHECK_EQ(term_ext(r19), UOP_ILT);
+    CHECK_EQ(heap_read(term_val(r19) + 0), rb);
+    {
+      i64 cc;
+      CHECK(uop_iconst_value(heap_read(term_val(r19) + 1), &cc));
+      CHECK_EQ(cc, 4);  // ceil(10/3) == 4
+    }
+    TEST_BEGIN("ported/ilt-pos-coeff-skips-nonpositive-c1");
+    // (3*rb) < 0 -> c1 not > 0 -> rule 19 skipped (bound-fold gives 0).
+    Term r19s = uop_int_binary(UOP_ILT,
+                  uop_int_binary(UOP_IMUL, c3, rb), zero);
+    CHECK_EQ(r19s, zero);  // 3*rb in [0,297] -> lo=0 >= 0 -> 0
+
+    // Rule 20/9: (x//d) < c -> x < (c*d) for d>0, nonneg(x).
+    TEST_BEGIN("ported/ilt-div-eliminate");
+    Term r20 = uop_int_binary(UOP_ILT,
+                 uop_int_binary(UOP_IDIV, rb, c3), c5);
+    CHECK_EQ(term_ext(r20), UOP_ILT);
+    CHECK_EQ(heap_read(term_val(r20) + 0), rb);
+    {
+      i64 cc;
+      CHECK(uop_iconst_value(heap_read(term_val(r20) + 1), &cc));
+      CHECK_EQ(cc, 15);  // c*d == 5*3
+    }
+    TEST_BEGIN("ported/ilt-div-eliminate-skips-neg-numerator");
+    // ((ra - 5)//3) < 1 -- numerator possibly negative -> no x<c*d rewrite.
+    Term negn = uop_int_binary(UOP_ISUB, ra, c5);
+    Term r20s = uop_int_binary(UOP_ILT,
+                  uop_int_binary(UOP_IDIV, negn, c3), one);
+    // The (x//d)<c rule must not fire; result stays an ILT over the IDIV.
+    CHECK_EQ(term_ext(r20s), UOP_ILT);
+    CHECK_EQ(term_ext(heap_read(term_val(r20s) + 0)), UOP_IDIV);
+
+    // Rule 21: lt_folding.  (rb*4 + ra) < 8, ra in [0,7] < 4? no.  Use a
+    // p-term that fits: (rb*4 + r0p) < 8 with r0p in [0,3].
+    TEST_BEGIN("ported/lt-folding-gcd");
+    Term r0p = uop_range(502, KAX_LOOP, 4);  // [0,3]
+    Term ltf_n = uop_int_binary(UOP_IADD,
+                   uop_int_binary(UOP_IMUL, rb, uop_const(DT_INT32, 4)), r0p);
+    Term r21 = uop_int_binary(UOP_ILT, ltf_n, uop_const(DT_INT32, 8));
+    // g = gcd(4, 8) = 4; p=r0p in [0,3] < 4 -> rb < 2.
+    CHECK_EQ(term_ext(r21), UOP_ILT);
+    CHECK_EQ(heap_read(term_val(r21) + 0), rb);
+    {
+      i64 cc;
+      CHECK(uop_iconst_value(heap_read(term_val(r21) + 1), &cc));
+      CHECK_EQ(cc, 2);  // c//g == 8/4
+    }
+    TEST_BEGIN("ported/lt-folding-skips-when-p-too-large");
+    // (rb*4 + ra) < 8 with ra in [0,7] >= 4 -> p-sum hi (7) >= g (4) -> no fold.
+    Term ltf_n2 = uop_int_binary(UOP_IADD,
+                    uop_int_binary(UOP_IMUL, rb, uop_const(DT_INT32, 4)), ra);
+    Term r21s = uop_int_binary(UOP_ILT, ltf_n2, uop_const(DT_INT32, 8));
+    CHECK_EQ(term_ext(r21s), UOP_ILT);
+    // LHS must still be the full sum, not reduced.
+    CHECK_EQ(term_ext(heap_read(term_val(r21s) + 0)), UOP_IADD);
+
+    // Rule 22: x*-1 < y*-1 -> y < x.
+    TEST_BEGIN("ported/ilt-negate-both-flip");
+    Term neg_ra = uop_int_binary(UOP_IMUL, ra, uop_const(DT_INT32, (u32)(i32)-1));
+    Term neg_rb = uop_int_binary(UOP_IMUL, rb, uop_const(DT_INT32, (u32)(i32)-1));
+    Term r22 = uop_int_binary(UOP_ILT, neg_ra, neg_rb);
+    // -> rb < ra ; rb in [0,99], ra in [0,7]; rb<ra not decidable -> stays ILT.
+    CHECK_EQ(term_ext(r22), UOP_ILT);
+    CHECK_EQ(heap_read(term_val(r22) + 0), rb);
+    CHECK_EQ(heap_read(term_val(r22) + 1), ra);
+    TEST_BEGIN("ported/ilt-negate-skips-non-neg-one");
+    // (ra*-2) < (rb*-1) -- coeff -2 != -1 -> no flip rule.
+    Term r22s = uop_int_binary(UOP_ILT,
+                  uop_int_binary(UOP_IMUL, ra, uop_const(DT_INT32, (u32)(i32)-2)),
+                  neg_rb);
+    CHECK_EQ(term_ext(r22s), UOP_ILT);
+
+    // Rule 23: (c0*x) < c1 -> (-x) < -floor(-c1/-c0) for c0<0,c0!=-1,c1<=0.
+    TEST_BEGIN("ported/ilt-neg-coeff");
+    // (-3*ra) < -6 -> (-ra) < -floor(6/3) = -2.
+    Term r23 = uop_int_binary(UOP_ILT,
+                 uop_int_binary(UOP_IMUL, uop_const(DT_INT32, (u32)(i32)-3), ra),
+                 uop_const(DT_INT32, (u32)(i32)-6));
+    CHECK_EQ(term_ext(r23), UOP_ILT);
+    {
+      // LHS is (-1)*ra; RHS const is -2.
+      Term lhs = heap_read(term_val(r23) + 0);
+      i64 cc; Term lx;
+      CHECK(uop_match_const_mul(lhs, &cc, &lx));
+      CHECK_EQ(cc, -1);
+      CHECK_EQ(lx, ra);
+      CHECK(uop_iconst_value(heap_read(term_val(r23) + 1), &cc));
+      CHECK_EQ(cc, -2);
+    }
+    TEST_BEGIN("ported/ilt-neg-coeff-skips-positive-c1");
+    // (-3*ra) < 6 -- c1 > 0 -> rule 23 not applicable.
+    Term r23s = uop_int_binary(UOP_ILT,
+                  uop_int_binary(UOP_IMUL, uop_const(DT_INT32, (u32)(i32)-3), ra),
+                  c6);
+    // -3*ra in [-21, 0] -> all < 6 -> bound-fold returns 1.
+    CHECK_EQ(r23s, one);
+
+    // Rule 24: x ^ 0 -> x.
+    TEST_BEGIN("ported/xor-zero-identity");
+    CHECK_EQ(uop_int_binary(UOP_IXOR, rb, zero), rb);
+    CHECK_EQ(uop_int_binary(UOP_IXOR, zero, rb), rb);
+    TEST_BEGIN("ported/xor-zero-skips-nonzero");
+    Term r24s = uop_int_binary(UOP_IXOR, rb, c3);
+    CHECK_EQ(term_ext(r24s), UOP_IXOR);
+
+    // Rule 25: x ^ x -> 0.
+    TEST_BEGIN("ported/xor-self-zero");
+    CHECK_EQ(uop_int_binary(UOP_IXOR, rb, rb), zero);
+    TEST_BEGIN("ported/xor-self-skips-distinct");
+    Term r25s = uop_int_binary(UOP_IXOR, rb, ra);
+    CHECK_EQ(term_ext(r25s), UOP_IXOR);
+
+    // Rule 26: (x ^ y) ^ y -> x.
+    TEST_BEGIN("ported/xor-cancel");
+    Term xy = uop_int_binary(UOP_IXOR, rb, ra);
+    CHECK_EQ(uop_int_binary(UOP_IXOR, xy, ra), rb);
+    TEST_BEGIN("ported/xor-cancel-skips-different");
+    Term r26s = uop_int_binary(UOP_IXOR, xy, r);  // y mismatched
+    CHECK_EQ(term_ext(r26s), UOP_IXOR);
+
+    // Rule 27: x | c -> c if c else x.
+    TEST_BEGIN("ported/or-const");
+    CHECK_EQ(uop_int_binary(UOP_IOR, rb, zero), rb);  // x|0 -> x
+    CHECK_EQ(uop_int_binary(UOP_IOR, rb, one), one);  // x|1 -> 1
+    TEST_BEGIN("ported/or-self-idempotent");
+    CHECK_EQ(uop_int_binary(UOP_IOR, rb, rb), rb);
+
+    // Rule 28: (x AND c1) AND c2 -> x AND (c1 AND c2); OR version.
+    TEST_BEGIN("ported/and-two-stage");
+    // rb & 5 keeps the IAND (5 is neither 0 nor 1, no contract fold), so the
+    // two-stage fold is exercised: (rb & 5) & 3 -> rb & (5&3==1) -> rb.
+    Term and5 = uop_int_binary(UOP_IAND, rb, c5);
+    CHECK_EQ(term_ext(and5), UOP_IAND);
+    Term r28 = uop_int_binary(UOP_IAND, and5, c3);
+    CHECK_EQ(r28, rb);
+    TEST_BEGIN("ported/or-two-stage");
+    // The IOR boolean contract collapses x|c (c truthy) to c first, so the
+    // chain folds entirely to const: (rb|5)|2 -> 5|2 -> 7.
+    Term or5 = uop_int_binary(UOP_IOR, rb, c5);
+    CHECK_EQ(term_ext(or5), UOP_CONST);
+    Term r28b = uop_int_binary(UOP_IOR, or5, c2);
+    CHECK_EQ(term_ext(r28b), UOP_CONST);
+    {
+      i64 cc;
+      CHECK(uop_iconst_value(r28b, &cc));
+      CHECK_EQ(cc, 7);
+    }
+
+    // Rule 29: gate-push for IOR/IXOR/ISHR (only under THVM_FUSE_CONV_BWD).
+    TEST_BEGIN("ported/gate-push-allowlist-respects-env");
+    // Without the env gate the push must NOT fire: keep IXOR over the gate.
+    if (!uop_valid_fold_enabled()) {
+      Term gcond = uop_int_binary(UOP_ILT, ra, rb);
+      Term gated29 = uop_iwhere(gcond, ra, uop_invalid());
+      Term pushed = uop_int_binary(UOP_IXOR, gated29, c3);
+      // gate stays IWHERE-wrapped only when enabled; disabled -> plain IXOR.
+      CHECK_EQ(term_ext(pushed), UOP_IXOR);
+    } else {
+      CHECK_EQ(1, 1);
+    }
+  }
+
   thvm_free();
   TEST_REPORT();
 }

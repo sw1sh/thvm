@@ -295,6 +295,15 @@ static int uop_chk_add(i64 a, i64 b, i64 *out) { return !__builtin_add_overflow(
 static int uop_chk_sub(i64 a, i64 b, i64 *out) { return !__builtin_sub_overflow(a, b, out); }
 static int uop_chk_mul(i64 a, i64 b, i64 *out) { return !__builtin_mul_overflow(a, b, out); }
 
+// Non-negative gcd of |a| and |b| (gcd(0, x) == |x|).  Used by the
+// lt_folding numerator fold (tinygrad math.gcd over coefficients).
+static i64 uop_gcd_i64(i64 a, i64 b) {
+  if (a < 0) a = -a;
+  if (b < 0) b = -b;
+  while (b != 0) { i64 t = a % b; a = b; b = t; }
+  return a;
+}
+
 static int uop_int_bounds_d(Term t, i64 *lo, i64 *hi, u32 depth);
 static int uop_is_invalid(Term t);  // defined below (invalid_gate section)
 
@@ -823,10 +832,12 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   //   (op, src=(y, cond.where(x,INV))) -> cond.where(y op x, INV)
   //   (op, src=(INV, *))               -> INV   (binary with invalid)
   // Comparisons (ILT) keep INVALID as a propagated 0/1 elsewhere; we
-  // only handle the arithmetic ops the col2im decode uses.
+  // handle the arithmetic + bitwise ops (IOR/IXOR/ISHR are commutative/
+  // order-independent w.r.t. the gate select, no div/floor semantics).
   if (uop_valid_fold_enabled()
       && (opcode == UOP_IADD || opcode == UOP_ISUB || opcode == UOP_IMUL
-          || opcode == UOP_IDIV || opcode == UOP_IMOD || opcode == UOP_IAND)) {
+          || opcode == UOP_IDIV || opcode == UOP_IMOD || opcode == UOP_IAND
+          || opcode == UOP_IOR  || opcode == UOP_IXOR || opcode == UOP_ISHR)) {
     if (uop_is_invalid(a) || uop_is_invalid(b)) return uop_invalid();
     Term gc, gx;
     if (uop_match_invalid_gate(a, &gc, &gx)) {
@@ -907,6 +918,39 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         if (uop_match_const_mul(a, &c1, &x1) && b == x1) {
           return uop_int_binary(UOP_IMUL, x1, uop_iconst(c1 + 1));
         }
+        // x + x -> x*2.  Pure additive identity for all integers.
+        // tinygrad/uop/symbolic.py:243.
+        if (a == b) return uop_int_binary(UOP_IMUL, a, uop_iconst(2));
+      }
+      // Combine two buried const-multiples of the same x under an outer
+      // IADD: (y + x*c0) + x*c1 -> y + x*(c0+c1), with the +1 / +x
+      // siblings.  Pure distributive identities valid for all signs.
+      // tinygrad/uop/symbolic.py:239,241,242,244.
+      if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_IADD) {
+        Term y = heap_read(term_val(a) + 0);
+        Term t1 = heap_read(term_val(a) + 1);
+        i64 c0 = 1, c1b = 1;
+        Term x0 = 0, x1b = 0;
+        int m0 = uop_match_const_mul(t1, &c0, &x0);
+        int m1 = uop_match_const_mul(b, &c1b, &x1b);
+        if (!m0) { x0 = t1; c0 = 1; }
+        if (!m1) { x1b = b; c1b = 1; }
+        if (x0 == x1b) {
+          Term combined = uop_int_binary(UOP_IMUL, x0, uop_iconst(c0 + c1b));
+          return uop_int_binary(UOP_IADD, y, combined);
+        }
+      }
+      // Move a buried add-const to the end: (x + c1) + y -> (x + y) + c1
+      // (c1 CONST, y non-const).  Pure reassociation; the rewritten form's
+      // outer operand is the const so it does not re-trigger.
+      // tinygrad/uop/symbolic.py:282.
+      if (!b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IADD) {
+        Term lhs = heap_read(term_val(a) + 0);
+        Term rhs = heap_read(term_val(a) + 1);
+        i64 ic;
+        if (uop_iconst_value(rhs, &ic) && !uop_iconst_value(lhs, &ic)) {
+          return uop_int_binary(UOP_IADD, uop_int_binary(UOP_IADD, lhs, b), rhs);
+        }
       }
       // Divmod recombination over the full IADD tree (tinygrad
       // fold_add_divmod_recombine).  Subsumes the shallow two-operand
@@ -958,6 +1002,19 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           return uop_int_binary(UOP_IMUL, xnum, uop_iconst(inner_c * bv));
         }
       }
+      // Hoist a buried const factor outward: (x*c1)*y -> (x*y)*c1 when the
+      // other factor y is non-const.  Pure integer associativity.
+      // tinygrad/uop/symbolic.py:283.
+      if (!a_const && !b_const) {
+        i64 c1; Term xnum, y;
+        if (uop_match_const_mul(a, &c1, &xnum)) { y = b; }
+        else if (uop_match_const_mul(b, &c1, &xnum)) { y = a; }
+        else { c1 = 0; xnum = 0; y = 0; }
+        if (xnum != 0) {
+          return uop_int_binary(UOP_IMUL,
+                   uop_int_binary(UOP_IMUL, xnum, y), uop_iconst(c1));
+        }
+      }
       break;
     case UOP_IDIV:
       if (b_const && bv == 1) return a;
@@ -972,6 +1029,20 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         i64 mx;
         if (uop_term_nonneg(a) && uop_term_max_value(a, &mx) && mx < bv)
           return uop_iconst(0);
+      }
+      // cancel_divmod: when the whole numerator range [lo,hi] is
+      // non-negative and lies in one divisor interval (lo/c == hi/c == qv),
+      // fold x//c -> qv.  Generalises the qv==0 case above.  Uses the
+      // IWHERE-blind one-sided estimators (uop_term_max_value fails on an
+      // INVALID gate branch), so a masked numerator keeps its gate.
+      // tinygrad/uop/divandmod.py:11-16.
+      if (b_const && bv > 0 && !a_const) {
+        i64 lo, hi;
+        if (uop_term_nonneg(a) && uop_term_min_value(a, &lo) && lo >= 0
+            && uop_term_max_value(a, &hi)) {
+          i64 qv = lo / bv;
+          if (hi / bv == qv) return uop_iconst(qv);
+        }
       }
       // RESHAPE-roundtrip fold: `(c*x + y) / c` -> `x` when y in [0, c).
       // Also handles the bare `(c*x) / c` -> x case (y = 0 implicit).
@@ -1037,6 +1108,37 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           return uop_int_binary(UOP_IDIV, inner_num, uop_iconst(c1 * bv));
         }
       }
+      // Fast inline: (x//c + a)//d -> (x + a*c)//(c*d) for c>0, d>0 with a
+      // CONST.  Guard the entire outer numerator IADD(IDIV(x,c), a) nonneg
+      // (recurses to x>=0 AND a>=0, the brute-force-verified domain under
+      // C truncation) plus overflow checks on a*c and c*d.
+      // tinygrad/uop/divandmod.py:108.
+      if (b_const && bv > 0
+          && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IADD
+          && uop_term_nonneg(a)) {
+        Term lhs = heap_read(term_val(a) + 0);
+        Term rhs = heap_read(term_val(a) + 1);
+        Term inner_div = 0; i64 av_a = 0;
+        if (uop_iconst_value(rhs, &av_a)
+            && term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_IDIV) {
+          inner_div = lhs;
+        } else if (uop_iconst_value(lhs, &av_a)
+            && term_tag(rhs) == TAG_UOP && term_ext(rhs) == UOP_IDIV) {
+          inner_div = rhs;
+        }
+        if (inner_div != 0) {
+          Term x = heap_read(term_val(inner_div) + 0);
+          i64 cv;
+          if (uop_iconst_value(heap_read(term_val(inner_div) + 1), &cv)
+              && cv > 0) {
+            i64 ac, cd;
+            if (uop_chk_mul(av_a, cv, &ac) && uop_chk_mul(cv, bv, &cd)) {
+              Term num = uop_int_binary(UOP_IADD, x, uop_iconst(ac));
+              return uop_int_binary(UOP_IDIV, num, uop_iconst(cd));
+            }
+          }
+        }
+      }
       // Nested div-mod: (r % (k*c)) // c -> (r // c) % k when c | (k*c).
       // Mirrors tinygrad's divandmod.py:26-27 IDIV branch.  Common in
       // chained RESHAPE flat-decompose chains.
@@ -1078,6 +1180,8 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
     case UOP_IMOD:
       if (b_const && bv == 1) return uop_iconst(0);
       if (a_const && av == 0) return uop_iconst(0);
+      // x % x -> 0.  Structural equality only.  tinygrad/uop/symbolic.py:113.
+      if (a == b) return uop_iconst(0);
       // Range-bound-aware: if `a` is a UOP_RANGE with extent <= bv,
       // then `a % bv = a` (the iter never reaches bv).  Generalised:
       // `x % c -> x` for any non-negative `x` whose provable max < c.
@@ -1088,6 +1192,22 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           i64 mx;
           if (uop_term_nonneg(a) && uop_term_max_value(a, &mx) && mx < bv)
             return a;
+        }
+      }
+      // cancel_divmod: when the whole numerator range [lo,hi] is
+      // non-negative and lies in one divisor interval (lo/c == hi/c == qv),
+      // fold x%c -> x - qv*c.  IWHERE-blind (keeps masked numerators gated).
+      // tinygrad/uop/divandmod.py:11-16.
+      if (b_const && bv > 0 && !a_const) {
+        i64 lo, hi;
+        if (uop_term_nonneg(a) && uop_term_min_value(a, &lo) && lo >= 0
+            && uop_term_max_value(a, &hi)) {
+          i64 qv = lo / bv;
+          if (hi / bv == qv) {
+            i64 qc;
+            if (uop_chk_mul(qv, bv, &qc))
+              return uop_int_binary(UOP_ISUB, a, uop_iconst(qc));
+          }
         }
       }
       // RESHAPE-roundtrip fold: `(c*x + y) % c` -> y when y in [0, c).
@@ -1153,6 +1273,37 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           }
         }
       }
+      // remove_nested_mod in sum: (a%(k*c) + b) % c -> (a + b) % c -- strip
+      // any inner-mod addend whose modulus k*c is a positive multiple of the
+      // outer modulus c.  Guard every collected addend nonneg (the inner-mod
+      // leaf's nonneg requires its numerator a>=0, keeping the rebuilt sum
+      // non-negative under C truncation).  tinygrad/uop/divandmod.py:30-38.
+      if (b_const && bv > 0 && !a_const && term_tag(a) == TAG_UOP
+          && term_ext(a) == UOP_IADD) {
+        Term terms[16];
+        u32  nt = 0;
+        if (uop_iadd_tree_collect_const_mul(a, terms, &nt, 16, 0) && nt >= 1) {
+          int any_stripped = 0, all_nonneg = 1;
+          Term rebuilt = 0;
+          for (u32 i = 0; i < nt; i++) {
+            Term term_i = terms[i];
+            if (!uop_term_nonneg(term_i)) { all_nonneg = 0; break; }
+            if (term_tag(term_i) == TAG_UOP && term_ext(term_i) == UOP_IMOD) {
+              i64 kc;
+              if (uop_iconst_value(heap_read(term_val(term_i) + 1), &kc)
+                  && kc > 0 && kc % bv == 0) {
+                term_i = heap_read(term_val(term_i) + 0);
+                any_stripped = 1;
+              }
+            }
+            rebuilt = (rebuilt == 0) ? term_i
+                                     : uop_int_binary(UOP_IADD, rebuilt, term_i);
+          }
+          if (all_nonneg && any_stripped && rebuilt != 0) {
+            return uop_int_binary(UOP_IMOD, rebuilt, b);
+          }
+        }
+      }
       // Nested mod-mod: (r % (k*c)) % c -> r % c when c | (k*c).
       // Mirrors tinygrad's divandmod.py:26-27 MOD branch.
       if (b_const && bv > 0
@@ -1184,6 +1335,125 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         u32 ext;
         if (uop_range_extent_into(a, &ext)) return uop_iconst(0);
       }
+      // Generalised bound-fold via uop_int_bounds (sound only when it
+      // returns 1): a < c -> 1 if hi(a) < c, -> 0 if lo(a) >= c.
+      // Symmetric for c < a.  tinygrad/uop/symbolic.py:258-259 (min==max).
+      if (b_const && !a_const) {
+        i64 lo, hi;
+        if (uop_int_bounds(a, &lo, &hi)) {
+          if (hi < bv)  return uop_iconst(1);
+          if (lo >= bv) return uop_iconst(0);
+        }
+      }
+      if (a_const && !b_const) {
+        i64 lo, hi;
+        if (uop_int_bounds(b, &lo, &hi)) {
+          if (lo > av)  return uop_iconst(1);
+          if (hi <= av) return uop_iconst(0);
+        }
+      }
+      // (c0 + x) < c1 -> x < (c1 - c0); (x - c0) < c1 -> x < (c1 + c0).
+      // Pure const-shift, sign-independent.  tinygrad/uop/symbolic.py:268.
+      if (b_const && term_tag(a) == TAG_UOP) {
+        if (term_ext(a) == UOP_IADD) {
+          Term lhs = heap_read(term_val(a) + 0);
+          Term rhs = heap_read(term_val(a) + 1);
+          i64 c0; Term x = 0;
+          if (uop_iconst_value(lhs, &c0))      x = rhs;
+          else if (uop_iconst_value(rhs, &c0)) x = lhs;
+          i64 nc;
+          if (x != 0 && uop_chk_sub(bv, c0, &nc))
+            return uop_int_binary(UOP_ILT, x, uop_iconst(nc));
+        }
+        if (term_ext(a) == UOP_ISUB) {
+          Term lhs = heap_read(term_val(a) + 0);
+          i64 c0;
+          if (uop_iconst_value(heap_read(term_val(a) + 1), &c0)) {
+            i64 nc;
+            if (uop_chk_add(bv, c0, &nc))
+              return uop_int_binary(UOP_ILT, lhs, uop_iconst(nc));
+          }
+        }
+      }
+      // (c0 * x) < c1 -> x < ceil(c1/c0) for c0>0, c1>0.  ceil computed as
+      // (c1+c0-1)/c0 (numerator positive).  tinygrad/uop/symbolic.py:273-274.
+      if (b_const) {
+        i64 c0; Term x;
+        if (uop_match_const_mul(a, &c0, &x) && c0 > 0 && bv > 0) {
+          i64 num, ceilv;
+          if (uop_chk_add(bv, c0 - 1, &num)) {
+            ceilv = num / c0;
+            return uop_int_binary(UOP_ILT, x, uop_iconst(ceilv));
+          }
+        }
+        // (c0 * x) < c1 -> (-x) < -(floor(-c1/-c0)) for c0<0, c0!=-1, c1<=0.
+        // tinygrad/uop/symbolic.py:276-277.
+        if (uop_match_const_mul(a, &c0, &x) && c0 < 0 && c0 != -1 && bv <= 0) {
+          i64 fv = (-bv) / (-c0);  // floor(-c1/-c0); trunc==floor as (-bv)>=0,(-c0)>0
+          Term neg_x = uop_int_binary(UOP_IMUL, x, uop_iconst(-1));
+          return uop_int_binary(UOP_ILT, neg_x, uop_iconst(-fv));
+        }
+      }
+      // (x // d) < c -> x < (c * d) for d>0 and nonneg(x).  Under nonneg(x)
+      // C-truncating IDIV equals floor.  tinygrad/uop/symbolic.py:279-280.
+      if (b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IDIV) {
+        Term inner_num = heap_read(term_val(a) + 0);
+        i64 d;
+        if (uop_iconst_value(heap_read(term_val(a) + 1), &d) && d > 0
+            && uop_term_nonneg(inner_num)) {
+          i64 cd;
+          if (uop_chk_mul(bv, d, &cd))
+            return uop_int_binary(UOP_ILT, inner_num, uop_iconst(cd));
+        }
+      }
+      // x*-1 < y*-1 -> y < x.  Pure comparison flip, all signs.
+      // tinygrad/uop/symbolic.py:287.
+      {
+        i64 ca, cb; Term xa, yb;
+        if (uop_match_const_mul(a, &ca, &xa) && ca == -1
+            && uop_match_const_mul(b, &cb, &yb) && cb == -1) {
+          return uop_int_binary(UOP_ILT, yb, xa);
+        }
+      }
+      // lt_folding: x < c (0 < c) over an ADD-tree.  Partition leaves into
+      // unit-coeff (p) and others (np); if g=gcd(np coeffs, c)>1 and the
+      // p-sum is bounded in [0, g), reduce: (np/g) < (c/g).  All divides are
+      // exact compile-time.  tinygrad/uop/symbolic.py:170-174,286.
+      if (b_const && bv > 0 && !a_const && term_tag(a) == TAG_UOP
+          && term_ext(a) == UOP_IADD) {
+        Term terms[16];
+        u32  nt = 0;
+        if (uop_iadd_tree_collect_const_mul(a, terms, &nt, 16, 0) && nt >= 2) {
+          i64 g = bv;
+          int have_np = 0, ok = 1;
+          i64 p_lo_sum = 0, p_hi_sum = 0;
+          for (u32 i = 0; i < nt && ok; i++) {
+            i64 c; Term x;
+            if (uop_match_const_mul(terms[i], &c, &x) && c != 1 && c != -1) {
+              g = uop_gcd_i64(g, c);
+              have_np = 1;
+            } else {
+              i64 lo, hi;
+              if (!uop_int_bounds(terms[i], &lo, &hi)) { ok = 0; break; }
+              p_lo_sum += lo;
+              p_hi_sum += hi;
+            }
+          }
+          if (ok && have_np && g > 1 && p_lo_sum >= 0 && p_hi_sum < g) {
+            Term np_sum = 0;
+            for (u32 i = 0; i < nt; i++) {
+              i64 c; Term x;
+              if (uop_match_const_mul(terms[i], &c, &x) && c != 1 && c != -1) {
+                Term reduced = uop_int_binary(UOP_IMUL, x, uop_iconst(c / g));
+                np_sum = (np_sum == 0) ? reduced
+                                       : uop_int_binary(UOP_IADD, np_sum, reduced);
+              }
+            }
+            if (np_sum != 0)
+              return uop_int_binary(UOP_ILT, np_sum, uop_iconst(bv / g));
+          }
+        }
+      }
       break;
     case UOP_IAND:
       if (a_const && av == 0) return uop_iconst(0);
@@ -1192,6 +1462,52 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       if (a_const && av == 1) return b;
       if (b_const && bv == 1) return a;
       if (a == b)             return a;
+      // Two-stage associative fold: (x AND c1) AND c2 -> x AND (c1 AND c2).
+      // tinygrad/uop/symbolic.py:266-267 (GroupOp.Associative).
+      if (b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IAND) {
+        Term inner_x = heap_read(term_val(a) + 0);
+        i64 inner_c;
+        if (uop_iconst_value(heap_read(term_val(a) + 1), &inner_c))
+          return uop_int_binary(UOP_IAND, inner_x, uop_iconst(inner_c & bv));
+      }
+      break;
+    case UOP_IOR:
+      // x | c -> c if c else x.  This is the boolean-OR fold (subsumes
+      // x|0 -> x); the x|1 -> 1 half assumes the 0/1 contract, exactly
+      // mirroring the pre-existing committed IAND `x&1 -> x` rule below.
+      // In the index domain IOR/IAND operands ALU-combined with a const
+      // are boolean masks.  tinygrad/uop/symbolic.py:102 (gated dtype=bool).
+      if (a_const) return av ? a : b;
+      if (b_const) return bv ? b : a;
+      if (a == b)  return a;
+      // Two-stage associative fold: (x OR c1) OR c2 -> x OR (c1 OR c2).
+      // tinygrad/uop/symbolic.py:266-267 (GroupOp.Associative).
+      if (b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IOR) {
+        Term inner_x = heap_read(term_val(a) + 0);
+        i64 inner_c;
+        if (uop_iconst_value(heap_read(term_val(a) + 1), &inner_c))
+          return uop_int_binary(UOP_IOR, inner_x, uop_iconst(inner_c | bv));
+      }
+      break;
+    case UOP_IXOR:
+      // x ^ 0 -> x (XOR identity).  tinygrad/uop/symbolic.py:93.
+      if (a_const && av == 0) return b;
+      if (b_const && bv == 0) return a;
+      // x ^ x -> 0 (self-annihilation).  tinygrad/uop/symbolic.py:114.
+      if (a == b) return uop_iconst(0);
+      // (x ^ y) ^ y -> x (cancellation).  tinygrad/uop/symbolic.py:97.
+      if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_IXOR) {
+        Term xa = heap_read(term_val(a) + 0);
+        Term ya = heap_read(term_val(a) + 1);
+        if (ya == b) return xa;
+        if (xa == b) return ya;
+      }
+      if (term_tag(b) == TAG_UOP && term_ext(b) == UOP_IXOR) {
+        Term xb = heap_read(term_val(b) + 0);
+        Term yb = heap_read(term_val(b) + 1);
+        if (yb == a) return xb;
+        if (xb == a) return yb;
+      }
       break;
     default: break;
   }
