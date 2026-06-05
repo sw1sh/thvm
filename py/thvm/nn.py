@@ -178,6 +178,23 @@ class LayerNorm2d(LayerNorm):
         return super().__call__(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
 
+class Embedding:
+    """Lookup table: maps integer indices to rows of a (vocab, embed)
+    weight.  Mirrors tinygrad's nn.Embedding -- forward gathers the rows
+    selected by `idx` and reshapes to (*idx.shape, embed_size)."""
+
+    def __init__(self, vocab_size: int, embed_size: int):
+        self.vocab_size = vocab_size
+        self.embed_size = embed_size
+        # tinygrad uses glorot_uniform; the checkpoint replaces this anyway.
+        bound = math.sqrt(6.0 / (vocab_size + embed_size))
+        self.weight = Tensor.uniform(vocab_size, embed_size,
+                                     low=-bound, high=bound)
+
+    def __call__(self, idx: Tensor) -> Tensor:
+        return self.weight.embedding(idx)
+
+
 # ---------------- state helpers (port of tinygrad/nn/state.get_parameters)
 
 

@@ -27,6 +27,16 @@ EXPORT uint32_t py_term_tag(uint64_t t) { return term_tag(t); }
 EXPORT uint32_t py_term_ext(uint64_t t) { return term_ext(t); }
 EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
 
+// First heap child (the `src`) of a TAG_UOP node.  Movement ops
+// (RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP) and unary ops store their
+// source at heap slot 0; the Tensor frontend walks this to detect a
+// matmul operand that is a movement VIEW over a COMPUTED (unrealized)
+// source (the GPT2 head-split fusion hazard).  Returns 0 for non-UOP.
+EXPORT uint64_t py_uop_src(uint64_t t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  return heap_read(term_val(t));
+}
+
 // ---------------- atom constructors ----------------
 EXPORT uint64_t py_term_iconst(int32_t v) {
   // UOP_CONST(DT_INT32, bits) -- the DAG-side classifiers

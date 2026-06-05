@@ -18,6 +18,28 @@ from __future__ import annotations
 import os
 
 
+class BoundVar(int):
+    """A Variable bound to a concrete value.  Subclasses int so it slots
+    into shrink/slice bounds + arithmetic transparently (thvm recompiles
+    per concrete value rather than sharing a symbolic kernel), while
+    exposing the tinygrad `.val` attribute callers read (`start_pos.val`).
+
+    Also serves as thvm's `UOp` for the gpt2 single-token decode path:
+    `isinstance(tokens, UOp)` is the test gpt2.forward uses to switch
+    between consuming a prompt Tensor and a bound single-token decode."""
+
+    @property
+    def val(self) -> int:
+        return int(self)
+
+
+# thvm's stand-in for tinygrad's symbolic UOp on the Tensor surface.
+# `Variable.bind` returns a BoundVar, which IS a UOp here -- so gpt2's
+# `isinstance(tokens, UOp)` correctly identifies the bound single-token
+# decode step.
+UOp = BoundVar
+
+
 class Variable:
     """tinygrad Variable.  Full symbolic shapes (one kernel reused across
     bound values) are pending Phase 2B; bind() resolves to the concrete
@@ -27,10 +49,14 @@ class Variable:
     def __init__(self, name: str, lower: int, upper: int):
         self.name, self.lower, self.upper = name, lower, upper
 
-    def bind(self, value: int) -> int:
+    @property
+    def val(self) -> int:
+        raise RuntimeError(f"unbound Variable {self.name} has no value")
+
+    def bind(self, value: int) -> "BoundVar":
         if not (self.lower <= value <= self.upper):
             raise ValueError(f"{value} out of [{self.lower},{self.upper}]")
-        return int(value)
+        return BoundVar(value)
 
 
 def TinyJit(fn):

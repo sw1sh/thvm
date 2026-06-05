@@ -58,6 +58,7 @@ _thvm_free = _bind("py_thvm_free", None)
 _term_tag = _bind("py_term_tag", c_uint32, c_uint64)
 _term_ext = _bind("py_term_ext", c_uint32, c_uint64)
 _term_val = _bind("py_term_val", c_uint64, c_uint64)
+_uop_src  = _bind("py_uop_src",  c_uint64, c_uint64)
 
 # ---------------- atom constructors ----------------
 _term_iconst = _bind("py_term_iconst", c_uint64, c_int32)
@@ -666,6 +667,7 @@ class Thvm:
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
     def term_ext(self, t: Term) -> int: return int(_term_ext(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))
+    def uop_src(self, t: Term) -> int: return int(_uop_src(c_uint64(int(t))))
 
     # ---------------- BEAM / autotune surface ----------------
     def kernel_alloc(self) -> int:
