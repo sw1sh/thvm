@@ -112,6 +112,12 @@ static int ft_vars_contained(const AtpFtCell *target,
 // declare it here before find_redex_ft / its discrim variant.
 extern KboCmp thvm_kbo_ft(const AtpFtCell *a, const AtpFtCell *b,
                           const KboConfig *cfg);
+// Streaming variant: encodes (tmpl, subst) inline into the kbo_flat
+// buffer instead of materialising subst(tmpl) as AtpFtCell* first.
+extern KboCmp thvm_kbo_ft_subst(const AtpFtCell *redex,
+                                const AtpFtCell *tmpl,
+                                const void      *subst,
+                                const KboConfig *cfg);
 
 // --- SUBST_FRESH entry-clear ----------------------------------------
 //
@@ -244,25 +250,19 @@ static int find_redex_ft(AtpState        *s,
       if (ft_vars_contained(rhs, lhs)) {
         ft_subst_reset(subst_buf);
         if (ft_match(lhs, p, subst_buf)) {
-          // FT-native KBO gate via thvm_kbo_ft (src/atp/ft_order.c) reads
-          // AtpFtCell* directly via thvm_kbo_flat_slice; no Term round-trip.
-          // repl_ft is throw-away (only consumed by the compare below),
-          // so allocate it in the scratch arena and reset on each
-          // attempt to keep the persistent arena flat.
-          AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-          AtpFtCell *repl_ft = ft_subst_apply(a, rhs, subst_buf, /*scratch=*/1);
-          if (repl_ft != NULL) {
-            KboCmp cmp = thvm_kbo_ft(p, repl_ft, s->kbo);
-            ft_scratch_reset(a);
-            if (cmp == KBO_GT) {
-              *parent_out = (p == root) ? NULL : prev;
-              *redex_out  = p;
-              *rule_out   = r;
-              *dir_out    = 0u;
-              return 1;
-            }
-          } else {
-            ft_scratch_reset(a);
+          // FT-native streaming KBO gate (src/atp/ft_order.c):
+          // encode (rhs_tmpl, subst) inline into the kbo_flat encoder
+          // buffer -- no ft_subst_apply, no ft_deep_copy_rec, no
+          // intermediate AtpFtCell* tree.  This was the dominant cost
+          // after thvm_kbo_ft replaced the Term round-trip (~488
+          // samples in ft_deep_copy + ft_alloc_persistent +
+          // ft_subst_apply_rec on the post-roundtrip profile).
+          if (thvm_kbo_ft_subst(p, rhs, subst_buf, s->kbo) == KBO_GT) {
+            *parent_out = (p == root) ? NULL : prev;
+            *redex_out  = p;
+            *rule_out   = r;
+            *dir_out    = 0u;
+            return 1;
           }
           ft_subst_reset(subst_buf);
         }
@@ -271,20 +271,12 @@ static int find_redex_ft(AtpState        *s,
       if (ft_vars_contained(lhs, rhs)) {
         ft_subst_reset(subst_buf);
         if (ft_match(rhs, p, subst_buf)) {
-          AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-          AtpFtCell *repl_ft = ft_subst_apply(a, lhs, subst_buf, /*scratch=*/1);
-          if (repl_ft != NULL) {
-            KboCmp cmp = thvm_kbo_ft(p, repl_ft, s->kbo);
-            ft_scratch_reset(a);
-            if (cmp == KBO_GT) {
-              *parent_out = (p == root) ? NULL : prev;
-              *redex_out  = p;
-              *rule_out   = r;
-              *dir_out    = 1u;
-              return 1;
-            }
-          } else {
-            ft_scratch_reset(a);
+          if (thvm_kbo_ft_subst(p, lhs, subst_buf, s->kbo) == KBO_GT) {
+            *parent_out = (p == root) ? NULL : prev;
+            *redex_out  = p;
+            *rule_out   = r;
+            *dir_out    = 1u;
+            return 1;
           }
           ft_subst_reset(subst_buf);
         }

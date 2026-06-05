@@ -142,6 +142,62 @@ static u8 atpft_lpo_flat_encode(const AtpFtCell *c, const LpoConfig *cfg,
   return 1;
 }
 
+// === KBO encode with inline substitution =============================
+//
+// Same shape as atpft_kbo_flat_encode, but every variable cell in `c`
+// is expanded inline through `subst` (looked up via the type-erased
+// ft_subst_lookup helper from ft_match.c).  This lets thvm_kbo_ft_subst
+// compare a redex against an instantiated rule RHS WITHOUT ever
+// materialising the substituted AtpFtCell tree -- the dominant cost
+// in find_redex_ft's unorient gate after ft_to_term was retired.
+//
+// Unbound vars in the template are emitted as plain variables (their
+// own id) -- mirrors ft_subst_apply's regime (a) fallthrough; the
+// caller's vars_contained guard ensures every template variable IS
+// bound in the unorient gate, so this branch only fires defensively.
+
+extern AtpFtCell *ft_subst_lookup(const void *subst, u32 var_id);
+
+static u8 atpft_kbo_flat_encode_subst(const AtpFtCell *c,
+                                      const KboConfig *cfg,
+                                      const void      *subst,
+                                      KboFlatNode     *out,
+                                      u32             *pos) {
+  if (c == NULL) return 0;
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    u32 vid = c->sym & ~WF_VAR_BIT;
+    AtpFtCell *bound = ft_subst_lookup(subst, vid);
+    if (bound != NULL) {
+      // Inline subst(vid): recurse into the bound subterm using the
+      // bare encoder (no further substitution -- bound subterms are
+      // already concrete, never contain rule-template vars).
+      return atpft_kbo_flat_encode(bound, cfg, out, pos);
+    }
+    // Unbound: emit the variable as itself.
+    u32 here = *pos;
+    if (here >= ATPFT_KBO_FLAT_CAP) return 0;
+    *pos = here + 1u;
+    out[here].sym = -(i32)(vid + 1u);
+    out[here].w   = (i32)cfg->var_weight;
+    out[here].sz  = 1u;
+    return 1;
+  }
+  u32 here = *pos;
+  if (here >= ATPFT_KBO_FLAT_CAP) return 0;
+  *pos = here + 1u;
+  u32 lab = c->sym;
+  out[here].sym = (i32)lab;
+  out[here].w   = (lab < cfg->n_labels) ? (i32)cfg->weights[lab] : 0;
+  u16 n = c->arity;
+  const AtpFtCell *child = c->next;
+  for (u16 i = 0; i < n; i++) {
+    if (!atpft_kbo_flat_encode_subst(child, cfg, subst, out, pos)) return 0;
+    child = child->end->next;
+  }
+  out[here].sz = *pos - here;
+  return 1;
+}
+
 // === KBO public entry ================================================
 //
 // Encode both sides into private buffers, then delegate to the
@@ -154,6 +210,24 @@ fn KboCmp thvm_kbo_ft(const AtpFtCell *a, const AtpFtCell *b,
   u32 na = 0u, nb = 0u;
   if (!atpft_kbo_flat_encode(a, cfg, g_atpft_kbo_flat_a, &na) ||
       !atpft_kbo_flat_encode(b, cfg, g_atpft_kbo_flat_b, &nb)) {
+    return KBO_UN;
+  }
+  return thvm_kbo_flat_slice(g_atpft_kbo_flat_a, na,
+                             g_atpft_kbo_flat_b, nb, cfg);
+}
+
+// Streaming variant: encode (template, subst) inline into the right-
+// hand buffer without materialising the AtpFtCell tree for subst(tmpl).
+// Used by find_redex_ft's unorient gate to skip an entire ft_subst_apply
+// + ft_deep_copy_rec round per attempted rewrite.
+fn KboCmp thvm_kbo_ft_subst(const AtpFtCell *redex,
+                            const AtpFtCell *tmpl,
+                            const void      *subst,
+                            const KboConfig *cfg) {
+  u32 na = 0u, nb = 0u;
+  if (!atpft_kbo_flat_encode(redex, cfg, g_atpft_kbo_flat_a, &na) ||
+      !atpft_kbo_flat_encode_subst(tmpl, cfg, subst,
+                                   g_atpft_kbo_flat_b, &nb)) {
     return KBO_UN;
   }
   return thvm_kbo_flat_slice(g_atpft_kbo_flat_a, na,
