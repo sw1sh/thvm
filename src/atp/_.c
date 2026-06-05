@@ -9132,11 +9132,69 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
     }
     join_cache_eligible = 1u;
   }
-  Term l = atp_rewrite_normalize(s, *lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-  Term r = atp_rewrite_normalize(s, *rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term l, r;
+  u8 joined;
+  int do_ft_only = 0;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // FT-only join verdict (opt-in via THVM_ATPFT_SKIP_TERM=1).
+  // When the FT mirror is fully populated AND we are not in VERIFY
+  // mode (which needs both paths to compare), skip the Term-side
+  // normalize entirely and derive the join verdict from FT.  *lhs/*rhs
+  // are still populated as Term cells via ft_to_term for downstream
+  // callers (subsumption indices, AC-eq fallback, join cache).
+  //
+  // The post-streaming profile pinned the Term-side normalize at
+  // ~377 thvm_match samples + ~107 thvm_subst_apply -- collectively
+  // the dominant remaining cost in andassoc.  Skipping it shifts the
+  // verdict source to the FT path that integrate/ft-residuals already
+  // proved sound on mccune VERIFY.
+  //
+  // Runtime guard: tests that set s->lhs[] directly (bypassing
+  // atp_push_rule's lockstep ft mirror write) leave lhs_ft[] NULL; the
+  // FT-only path would then find no rules and incorrectly say
+  // "not joined".  Detect that condition and fall back to Term.
+  static int ft_skip_term_mode = -1;
+  if (ft_skip_term_mode < 0) {
+    int env_off = atp_env_off("THVM_ATPFT_NORM");
+    int env_skip = atp_env_on("THVM_ATPFT_SKIP_TERM");
+    int env_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
+    ft_skip_term_mode = env_off && env_skip && !env_verify;
+  }
+  do_ft_only = ft_skip_term_mode;
+  if (do_ft_only) {
+    // Sanity: detect partially-populated mirror (test harness setup
+    // that writes s->lhs[] directly).  Cheap: scan up to 4 first rules
+    // for any with non-zero lhs but NULL lhs_ft.
+    u32 probe = s->n_rules < 4u ? s->n_rules : 4u;
+    for (u32 i = 0; i < probe; i++) {
+      if (s->lhs[i] != 0 && s->lhs_ft[i] == NULL) {
+        do_ft_only = 0;
+        break;
+      }
+    }
+  }
+  if (do_ft_only) {
+    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *fl0 = ft_from_term(a, *lhs, 0);
+    AtpFtCell *fr0 = ft_from_term(a, *rhs, 0);
+    AtpFtCell *fl  = atp_rewrite_normalize_ft(s, fl0, NORM_CAP);
+    AtpFtCell *fr  = atp_rewrite_normalize_ft(s, fr0, NORM_CAP);
+    joined = (u8)ft_eq(fl, fr);
+    l = ft_to_term(fl);
+    r = ft_to_term(fr);
+    *lhs = l;
+    *rhs = r;
+    goto join_post_norm;
+  }
+#endif
+  l = atp_rewrite_normalize(s, *lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  r = atp_rewrite_normalize(s, *rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   *lhs = l;
   *rhs = r;
-  u8 joined = kbo_eq(l, r);
+  joined = kbo_eq(l, r);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+join_post_norm:;
+#endif
 #ifdef THVM_ATP_AC
   // AC-equality redundancy: when an AC bitmask is registered (via
   // thvm_atp_set_ac_mask or thvm_atp_auto_ac), treat AC-equal normal
@@ -9176,7 +9234,11 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   // previously made this flip unsafe.
   if (ft_norm_mode   < 0) ft_norm_mode   = atp_env_off("THVM_ATPFT_NORM");
   if (ft_norm_verify < 0) ft_norm_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
-  if (ft_norm_mode || ft_norm_verify) {
+  // The ft_skip_term hoist above already ran the FT-only path when
+  // applicable; only enter this dual-path block for VERIFY mode (which
+  // compares both verdicts), or for non-skip mode (Term-side already
+  // ran, this block adds the FT replacement verdict on top).
+  if ((ft_norm_mode && !do_ft_only) || ft_norm_verify) {
     AtpFt *a = (AtpFt *)s->ft_arena_ptr;
     AtpFtCell *fl = ft_from_term(a, *lhs, 0);
     AtpFtCell *fr = ft_from_term(a, *rhs, 0);
