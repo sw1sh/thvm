@@ -244,20 +244,25 @@ static int find_redex_ft(AtpState        *s,
       if (ft_vars_contained(rhs, lhs)) {
         ft_subst_reset(subst_buf);
         if (ft_match(lhs, p, subst_buf)) {
-          // FT-native KBO gate via thvm_kbo_ft (src/atp/ft_order.c) -- reads
-          // AtpFtCell* directly via the shared thvm_kbo_flat_slice engine;
-          // no Term round-trip.  ~3x win on workloads dominated by
-          // unorientable rules (e.g. andassoc 115/158 unorient).
+          // FT-native KBO gate via thvm_kbo_ft (src/atp/ft_order.c) reads
+          // AtpFtCell* directly via thvm_kbo_flat_slice; no Term round-trip.
+          // repl_ft is throw-away (only consumed by the compare below),
+          // so allocate it in the scratch arena and reset on each
+          // attempt to keep the persistent arena flat.
           AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-          AtpFtCell *repl_ft = ft_subst_apply(a, rhs, subst_buf, 0);
+          AtpFtCell *repl_ft = ft_subst_apply(a, rhs, subst_buf, /*scratch=*/1);
           if (repl_ft != NULL) {
-            if (thvm_kbo_ft(p, repl_ft, s->kbo) == KBO_GT) {
+            KboCmp cmp = thvm_kbo_ft(p, repl_ft, s->kbo);
+            ft_scratch_reset(a);
+            if (cmp == KBO_GT) {
               *parent_out = (p == root) ? NULL : prev;
               *redex_out  = p;
               *rule_out   = r;
               *dir_out    = 0u;
               return 1;
             }
+          } else {
+            ft_scratch_reset(a);
           }
           ft_subst_reset(subst_buf);
         }
@@ -267,15 +272,19 @@ static int find_redex_ft(AtpState        *s,
         ft_subst_reset(subst_buf);
         if (ft_match(rhs, p, subst_buf)) {
           AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-          AtpFtCell *repl_ft = ft_subst_apply(a, lhs, subst_buf, 0);
+          AtpFtCell *repl_ft = ft_subst_apply(a, lhs, subst_buf, /*scratch=*/1);
           if (repl_ft != NULL) {
-            if (thvm_kbo_ft(p, repl_ft, s->kbo) == KBO_GT) {
+            KboCmp cmp = thvm_kbo_ft(p, repl_ft, s->kbo);
+            ft_scratch_reset(a);
+            if (cmp == KBO_GT) {
               *parent_out = (p == root) ? NULL : prev;
               *redex_out  = p;
               *rule_out   = r;
               *dir_out    = 1u;
               return 1;
             }
+          } else {
+            ft_scratch_reset(a);
           }
           ft_subst_reset(subst_buf);
         }
