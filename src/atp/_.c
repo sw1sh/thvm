@@ -9541,6 +9541,39 @@ static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,
 //
 // 7.3b will add queue subsumption -- which IS orthogonal to 7.1.
 static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
+#if defined(THVM_ATPFT_RULES) && defined(THVM_ATPFT_MATCH)
+  // FT path: ft_match against the lhs_ft[]/rhs_ft[] mirror.
+  // Per-CP-push this was ~200 thvm_match samples in the post-FT-skip
+  // profile; ft_match avoids the heap-cell descent.  Requires the
+  // mirror to be fully populated (test setups that bypass
+  // atp_push_rule write s->lhs[] directly and leave lhs_ft[] NULL).
+  // Mirror status is cached on AtpState by atp_cp_trivially_joinable.
+  if (s->ft_mirror_full && s->n_rules <= s->ft_mirror_probed_n_rules) {
+    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *lhs_ft_in = ft_from_term(a, lhs, /*scratch=*/1);
+    AtpFtCell *rhs_ft_in = ft_from_term(a, rhs, /*scratch=*/1);
+    AtpFtSubst subst;
+    u8 hit = 0u;
+    for (u32 k = 0; k < s->n_rules; k++) {
+      if (s->r_dead != NULL && s->r_dead[k]) continue;
+      AtpFtCell *rl = s->lhs_ft[k];
+      AtpFtCell *rr = s->rhs_ft[k];
+      if (rl == NULL || rr == NULL) continue;  // defensive
+      // Forward: σ rl = lhs AND σ rr = rhs (one σ extended via the
+      // thread-through semantics of ft_match -- it leaves bindings
+      // from a successful match in place for the next call).
+      memset(&subst, 0, sizeof(subst));
+      if (ft_match(rl, lhs_ft_in, &subst) &&
+          ft_match(rr, rhs_ft_in, &subst)) { hit = 1u; break; }
+      // Symmetric.
+      memset(&subst, 0, sizeof(subst));
+      if (ft_match(rl, rhs_ft_in, &subst) &&
+          ft_match(rr, lhs_ft_in, &subst)) { hit = 1u; break; }
+    }
+    ft_scratch_reset(a);
+    return hit;
+  }
+#endif
   for (u32 k = 0; k < s->n_rules; k++) {
     // Forward: σl_k = lhs AND σr_k = rhs (one σ extended through
     // both matches).
