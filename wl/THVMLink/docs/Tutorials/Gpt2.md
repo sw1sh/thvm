@@ -100,12 +100,14 @@ encoder["The quick brown fox"]
 
 ## Generating text
 
-Greedy generation is a loop: run <code>[TFromNet]()[*net*, *ids*]</code> over the running id sequence, take the [Ordering]() argmax of the last row, append it, and repeat. [`wl/THVMLink/Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) runs the whole pipeline. On the prompt `"The quick brown fox"` it generates:
+Generation is a loop: run <code>[TFromNet]()[*net*, *ids*]</code> over the running id sequence for the `{seq, 50257}` logits, pick the next token from the last row, append it, and repeat. Greedy [Ordering]() argmax is deterministic - useful as a correctness check: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), and that argmax agrees with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
+
+For actual text, sample instead of argmax - temperature-scale the last-row logits, keep the top-K, and draw one. [`wl/THVMLink/Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) does exactly this; on `"Once upon a time"` (temperature 0.8, top-K 40, seed 7) it generates:
 
 ```
-The quick brown foxes are a great way to get to
+Once upon a time, I had been a student of the opportunity to the time
 ```
 
-The first generated token is id 19 (`"es"`), and that argmax agrees with an independent numpy GPT-2 forward (top-5 next tokens `{19, 118, 63, 83, 50246}`) - so thvm reproduces GPT-2's own next-token prediction, token-for-token. Each forward builds and realizes the full twelve-block graph including the 50257-wide head, so generation on the CPU runs about 25 s per token; the script prints each token as it lands.
+real GPT-2 117M text out of the lifted graph. Each step builds and realizes the full twelve-block graph over the growing sequence (there is no KV cache yet), so it runs about 40 s per token on the CPU - correct, not yet perf-tuned; the script prints each token as it lands.
 
 Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmaxAxis](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.
