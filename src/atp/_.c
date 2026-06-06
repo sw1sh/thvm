@@ -8733,6 +8733,20 @@ static void atp_cp_set_interreduce(AtpState *s) {
   u32 w = 0u;
   int touched = 0;
   for (u32 i = 0; i < s->n_cps; i++) {
+    // Eager Waisenmord (WM AP_generic head): a CP whose parent rule has
+    // been retired is redundant under the surviving R, so we can drop it
+    // without paying the per-CP normalize.  Mirrors the lazy orphan check
+    // at CP-select time -- doing it inside the IR sweep means a single
+    // KPV_KPMengeInterreduzieren pass shrinks the queue by the dead-parent
+    // set in linear time, instead of waiting for select-side amortization.
+    if (s->use_orphan_murder && atp_cp_is_orphan(s, s->cp_trace[i])) {
+      s->n_cps_dropped_orphan++;
+      s->n_cp_set_ir_deleted++;
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      touched = 1;
+      continue;
+    }
     // Per-CP heap checkpoint: the normalize allocates scratch cells; the
     // reduced terms are copied out by acp_pack, so the scratch is dead
     // after the (re)pack.  Reset each iteration so a long queue cannot
