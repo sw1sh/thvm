@@ -213,7 +213,7 @@ Beyond `Method`:
 
 - `MaxSteps -> n` (default 200000) - hard cap on the CP-processing step counter.
 - `TimeConstraint -> seconds` (default `Infinity`; portfolios divide fairly across schedule entries; `TimeConstrained[...]` and `Abort[]` interrupt the running C engine).
-- `PortfolioFrontLoad -> n` (default 0) - widen the slice given to the first n schedule entries (each gets 2x what an unweighted recurrence would assign).  Use when an `Automatic` front genuinely deserves more time than the fair share.
+- `PortfolioFrontLoad -> n` (default 1) - widen the slice given to the first n schedule entries (each gets 2x what an unweighted recurrence would assign).  Use when an `Automatic` front genuinely deserves more time than the fair share.
 
 ## Return-spec selection
 
