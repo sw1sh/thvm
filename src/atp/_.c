@@ -5961,6 +5961,9 @@ static void atp_cp_feat_record(AtpState *s, Term lhs, Term rhs,
                                u32 trace_id);
 // Lazy orphan murder: defined with the orphan-murder setters below.
 static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace);
+// WM `dokgS` test (1-step join via a single existing rule); defined
+// alongside the per-CP-push subsume drop a few thousand lines down.
+static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs);
 
 // LRS horizon recomputation (Riazanov & Voronkov, JSC 36, 2003).  Given
 // the observed selection rate and the remaining wall budget, predict how
@@ -8754,6 +8757,24 @@ static void atp_cp_set_interreduce(AtpState *s) {
     u64 hcp = thvm_atp_heap_checkpoint();
     Term ol = 0, orr = 0;
     acp_unpack(s->cp_packed[i], &ol, &orr);
+    // WM `dokgS` (KPV `AP_generic` `SS_TermpaarSubsummiertVonGM` branch):
+    // a CP whose two sides are directly subsumed by an existing rule's
+    // pattern is one-step-joinable via that rule.  The trivial-join
+    // normalize below catches a strict superset (`n_cps_dropped_rule_
+    // subsumed <= n_cps_dropped_joinable`, see atp_cp_rule_subsumed
+    // header), but rule-subsume tests just match -- no rewrite -- so we
+    // short-circuit the per-CP normalize cost on the subsumed subset.
+    // Gated on `use_rule_subsume_drop`, matching the same fast-path's
+    // push-time wiring (WL Method options).
+    if (s->use_rule_subsume_drop && atp_cp_rule_subsumed(s, ol, orr)) {
+      s->n_cps_dropped_rule_subsumed++;
+      s->n_cp_set_ir_deleted++;
+      free(s->cp_packed[i]);
+      s->cp_packed[i] = NULL;
+      touched = 1;
+      thvm_atp_heap_reset(hcp);
+      continue;
+    }
     Term l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
     Term r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
     if (kbo_eq(l, r)) {
