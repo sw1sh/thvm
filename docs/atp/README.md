@@ -42,6 +42,16 @@ interactions.
 * **[roadmap.md](roadmap.md)** — what's covered today, what's open,
   ranked by impact and difficulty.  Where the next arcs live.
 
+* **[survey.md](survey.md)** — where thvm sits among the established
+  reasoners: a peer-level UEQ prover with a complete-but-single-theory
+  (EUF) SMT core.  Honest feature matrices vs SMT solvers (Z3/CVC5),
+  FOL ATPs (Vampire/E), and UEQ provers (Waldmeister/Twee).
+
+* **[unification_roadmap.md](unification_roadmap.md)** — the design arc
+  toward Z3-class SMT (multi-theory, CDCL(T), quantifier instantiation)
+  *unified* with the completion engine, built on the fact that
+  congruence closure and completion are the same calculus.
+
 The WL `Method` / preset / portfolio surface (and the proof-object
 API a user actually calls) lives in
 `wl/THVMLink/docs/Tutorials/ATP.md` and `AtpMethods.md`.  The C-level
