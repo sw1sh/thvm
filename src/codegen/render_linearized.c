@@ -154,6 +154,15 @@ static void lz_emit_const(Term t, LzCtx *ctx, FILE *fp) {
   if (dt == DT_FP32) {
     union { u32 u; float f; } cvt; cvt.u = bits;
     fprintf(fp, "%ff", cvt.f);
+  } else if (dtype_is_float(dt)) {
+    // Non-f32 float dtypes (f64 / f16 / bf16 / fp8): `bits` holds an
+    // f32 IEEE-754 pattern (the grad-chain / gradOnesSeed literal -- see
+    // const_to_tendesc, which decodes the same way).  Decode and emit a
+    // decimal literal (no `f` suffix, so it coerces to the kernel's
+    // compute type) rather than the raw bit pattern.  f32->double is
+    // exact, so %.17g round-trips losslessly.
+    union { u32 u; float f; } cvt; cvt.u = bits;
+    fprintf(fp, "%.17g", (double)cvt.f);
   } else {
     fprintf(fp, "%u", bits);
   }
@@ -185,6 +194,11 @@ static void lz_emit_value_lane(Term t, u32 lane, LzCtx *ctx, FILE *fp) {
     if (dt == DT_FP32) {
       union { u32 u; float f; } cvt; cvt.u = bits;
       fprintf(fp, "%ff", cvt.f);
+    } else if (dtype_is_float(dt)) {
+      // Non-f32 float lanes carry an f32 IEEE pattern (see lz_emit_const);
+      // decode to a decimal literal instead of the raw bit pattern.
+      union { u32 u; float f; } cvt; cvt.u = bits;
+      fprintf(fp, "%.17g", (double)cvt.f);
     } else {
       fprintf(fp, "%u", bits);
     }

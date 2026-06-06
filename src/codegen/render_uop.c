@@ -377,6 +377,19 @@ static void rmu_emit_term(Term t, FILE *fp) {
         } else {
           fprintf(fp, "as_type<float>(0x%08xu)", bits);
         }
+      } else if (dtype_is_float(dtype)) {
+        // Non-f32 float dtypes (f64 / f16 / bf16 / fp8): the `bits`
+        // field carries an f32 IEEE-754 bit pattern (the literal the
+        // grad chain rule and gradOnesSeed emit -- see const_to_tendesc,
+        // which decodes the same way at materialize time).  Decode it to
+        // an f32 value and emit a decimal literal so it lands as the
+        // correct numeric value in the kernel's compute type (`double`
+        // for f64, `float` for f16/bf16/fp8 -- see rmu_c_type_name).
+        // Emitting `(int)bits` here would inject the raw bit pattern
+        // (e.g. 1065353216 for 1.0f) into the kernel.  f32->double is
+        // exact, so %.17g round-trips losslessly.
+        f32 fv; memcpy(&fv, &bits, sizeof(fv));
+        fprintf(fp, "%.17g", (double)fv);
       } else {
         fprintf(fp, "%d", (int)bits);
       }
