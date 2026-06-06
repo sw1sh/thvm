@@ -149,11 +149,24 @@ static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
     if (binding == NULL) return NULL;
     return ft_splice_deep_copy(a, binding);
   }
+  // THVM_ATPFT_SKEL_FRESH controls whether rule-RHS skeleton cells are
+  // flagged SUBST_FRESH.  Default 1 (legacy): flag the skeleton so
+  // find_redex_ft skips it -- fast per step, but drops composition
+  // matches like mccune's R89 -> R40 (project_ft_normalize_drift).
+  // Set to 0 to clear the flag so composition matches fire; per-step
+  // cost goes up by ~5x on mccune trajectory under the WM preset.
+  // Long-term fix: make the saturator's tuning independent of which
+  // flag policy is in effect, then default to 0.
+  static int skel_fresh_cached = -1;
+  if (skel_fresh_cached < 0) {
+    const char *e = getenv("THVM_ATPFT_SKEL_FRESH");
+    skel_fresh_cached = (e != NULL && e[0] == '0') ? 0 : 1;
+  }
   u32 sym   = tmpl->sym;
   u16 arity = tmpl->arity;
   if (arity == 0u) {
     AtpFtCell *c = ftnew_const(a, sym, 0);
-    c->flags |= ATPFT_FLAG_SUBST_FRESH;
+    if (skel_fresh_cached) c->flags |= ATPFT_FLAG_SUBST_FRESH;
     return c;
   }
   AtpFtCell *stack_kids[FT_SPLICE_KIDS_STACK];
@@ -178,7 +191,7 @@ static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
     child   = child->end->next;
   }
   AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, 0);
-  out->flags |= ATPFT_FLAG_SUBST_FRESH;
+  if (skel_fresh_cached) out->flags |= ATPFT_FLAG_SUBST_FRESH;
   free(heap_kids);
   return out;
 }
