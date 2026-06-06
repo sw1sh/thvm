@@ -8799,8 +8799,25 @@ static void atp_cp_set_interreduce(AtpState *s) {
       thvm_atp_heap_reset(hcp);
       continue;
     }
-    Term l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
-    Term r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    // FT path for AC-mask=0; Term path otherwise.  Same AC-matching gap
+    // as goal_check (49caf001).
+    Term l, r;
+#ifdef THVM_ATP_AC
+    if (thvm_atp_get_ac_mask() != 0ull) {
+      l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
+      r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+    } else
+#endif
+    {
+      atp_ft_mirror_ensure(s);
+      AtpFt *ir_a = (AtpFt *)s->ft_arena_ptr;
+      AtpFtCell *ir_fl_in = ft_from_term(ir_a, ol,  0);
+      AtpFtCell *ir_fr_in = ft_from_term(ir_a, orr, 0);
+      AtpFtCell *ir_fl = atp_rewrite_normalize_ft(s, ir_fl_in, NORM_CAP);
+      AtpFtCell *ir_fr = atp_rewrite_normalize_ft(s, ir_fr_in, NORM_CAP);
+      l = ft_to_term(ir_fl);
+      r = ft_to_term(ir_fr);
+    }
     if (kbo_eq(l, r)) {
       // Joinable under R -- the CP adds no equational consequence.  Drop
       // it (WM AP_generic returns WTI_Delete).
@@ -8812,7 +8829,9 @@ static void atp_cp_set_interreduce(AtpState *s) {
       thvm_atp_heap_reset(hcp);
       continue;
     }
-    if (l != ol || r != orr) {
+    // Structural change-detect (kbo_eq, not pointer compare -- ft_to_term
+    // allocates fresh Term cells so `!= ol` would always trip).
+    if (!kbo_eq(l, ol) || !kbo_eq(r, orr)) {
       free(s->cp_packed[i]);
       s->cp_packed[i] = NULL;
       s->cp_packed[w] = acp_pack(l, r, NULL, NULL);
