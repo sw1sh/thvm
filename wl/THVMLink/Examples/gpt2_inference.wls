@@ -81,9 +81,9 @@ oneHot[seq_] := TTensorCreate @ NumericArray[
 print["Lifting + materializing the fixed-", ToString[maxSeq], " forward (once) ..."];
 slot = oneHot[ids];
 t0   = AbsoluteTime[];
-lam  = Block[{$RecursionLimit = 1*^6}, TFromNet[net, maxSeq]];
+lam  = TFromNet[net, maxSeq];
 step = TJit[Function[{}, TRealize @ TWnf @ TApp[lam, slot]]];
-out  = Block[{$RecursionLimit = 1*^6}, step[]];   (* capture: lift+materialize+dispatch *)
+out  = step[];                                    (* capture: lift+materialize+dispatch *)
 print["  lifted + captured ", ToString[TJitOpCount[step]], " kernel dispatches in ",
     ToString[Round[AbsoluteTime[] - t0, 0.1]], "s (one-time)"];
 
@@ -121,9 +121,9 @@ print["(", ToString[nTokens], " tokens in ",
 chkIds  = encoder["The quick brown fox"];
 chkN    = Length[chkIds];
 chkSlot = oneHot[chkIds];
-chkLam  = Block[{$RecursionLimit = 1*^6}, TFromNet[net, maxSeq]];
+chkLam  = TFromNet[net, maxSeq];
 chkStep = TJit[Function[{}, TRealize @ TWnf @ TApp[chkLam, chkSlot]]];
-chkOut  = Block[{$RecursionLimit = 1*^6}, chkStep[]];
+chkOut  = chkStep[];
 print[""];
 print["Verification (greedy next-token after 'The quick brown fox' == 19): ",
     ToString[greedy[Normal @ TTensorData[chkOut][[chkN]]] === 19]];

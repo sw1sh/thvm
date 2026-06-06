@@ -81,123 +81,120 @@ tenShapeOf[id_Integer] := Quiet @ Check[$tensorShapeFn[id], Missing[]]
    intermediate tensors without going through TTensorShape (which
    only handles TAG_TEN).
 
+   Driven ITERATIVELY: an explicit post-order over the term DAG with a
+   raw-keyed memo, NOT recursion -- a deep residual chain (e.g. GPT-2's
+   12 pre-norm blocks) would otherwise recurse the WL stack past
+   $RecursionLimit (1024).  The per-tag formulas (shapeOfNode below) are
+   the same as the prior recursive form; only the driver is a loop.  The
+   memo also stops a shared sub-DAG being recomputed.
+
    Returns a List of Integer dims, or $Failed for unsupported tags. *)
-tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
-    raw = ttermRaw[t];
-    tag = $termTagFn[raw];
-    val = $termValFn[raw];
-    ext = $termExtFn[raw];
+tUopShape[t_TTerm] := Module[{root, stack, memo, raw, pending},
+    root  = ttermRaw[t];
+    memo  = <||>;
+    stack = {root};
+    While[ stack =!= {},
+        raw = Last[stack];
+        If[ KeyExistsQ[memo, raw], stack = Most[stack]; Continue[]];
+        pending = Select[shapeChildRaws[raw], ! KeyExistsQ[memo, #] &];
+        If[ pending =!= {},
+            stack = Join[stack, pending],
+            memo[raw] = shapeOfNode[raw, memo];
+            stack = Most[stack]]
+    ];
+    Lookup[memo, root, $Failed]
+]
+tUopShape[_] := $Failed
+
+(* The child term raws whose shapes shapeOfNode[raw] consumes -- empty for
+   leaves (TEN / VAR / CONST) and for the movement ops that store their own
+   output dims explicitly (RESHAPE / EXPAND).  Kept in lockstep with the
+   shapeOfNode cases below. *)
+shapeChildRaws[raw_] := If[ $termTagFn[raw] =!= $TagUOP, {},
+    With[{val = $termValFn[raw], ext = $termExtFn[raw]},
+        Switch[ext,
+            $UopKernel, {$heapReadFn[val]},
+            $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,
+                {$heapReadFn[val], $heapReadFn[val + 1]},
+            $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt | $UopFlip
+                | $UopReduce | $UopShrink | $UopPad | $UopPermute,
+                {$heapReadFn[val]},
+            _, {}
+        ]
+    ]
+]
+
+(* per-tag output shape from already-computed child shapes in `memo` (raw-keyed;
+   the tUopShape driver populates it in post-order, so every child read here is
+   present).  `memo` is read-only. *)
+shapeOfNode[raw_, memo_] := Module[{tag = $termTagFn[raw], val = $termValFn[raw]},
     Switch[tag,
         $TagTEN, tenShapeOf[val],
-        (* TAG_VAR: bound by an enclosing TLam.  Read the lam_shape
-           side table via the runtime's term_shape_in (which knows
-           how to follow VAR -> SUB -> shape annotation).  Returns
-           {} when the lam wasn't shape-annotated; surface that as
-           $Failed so callers can react. *)
+        (* TAG_VAR: bound by an enclosing TLam.  Read the lam_shape side table
+           via the runtime's term_shape_in (which follows VAR -> SUB -> shape
+           annotation).  Returns {} when the lam wasn't shape-annotated;
+           surface that as $Failed so callers can react. *)
         $TagVAR,
             With[{s = Quiet @ Check[Normal @ $termShapeInFn[raw], $Failed]},
                 If[ s === {} || !ListQ[s] || !VectorQ[s, IntegerQ], $Failed, s]
             ],
         $TagUOP,
-            Switch[ext,
-                $UopKernel,
-                    (* Output buffer is heap[val] = TAG_TEN. *)
-                    tUopShape[TTerm[$heapReadFn[val]]],
-                $UopConst,
-                    {1},
+            Switch[$termExtFn[raw],
+                (* Output buffer is heap[val] = TAG_TEN. *)
+                $UopKernel, memo[$heapReadFn[val]],
+                $UopConst,  {1},
                 $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,
-                    broadcastShape[
-                        tUopShape[TTerm[$heapReadFn[val]]],
-                        tUopShape[TTerm[$heapReadFn[val + 1]]]
-                    ],
-                $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt,
-                    tUopShape[TTerm[$heapReadFn[val]]],
-                (* REDUCE heap: [src, NUM(kind), NUM(n_axes),
-                   NUM(axis_0), ..., NUM(axis_{n-1})] (uop/reduce.c).
-                   n_axes at val+2; the axes at val+3..val+2+n_axes.
-                   A multi-axis REDUCE folds N axes in one node, so drop
-                   ALL N (descending, so each Delete leaves the lower
-                   indices valid).  The old code read val+2 (= n_axes,
-                   a COUNT) as the single axis and dropped only one --
-                   correct only when n_axes happened to equal axis_0
-                   (single-axis reduce over axis 1); it produced a
-                   bogus rank-N shape for the conv-backward _pool chain
-                   (e.g. LeNet conv2: rank-4 {20,50,8,2^32-2} instead of
-                   {50,8,8}), breaking the downstream PoolingLayer's
-                   rank-3 pre-check in fromLayer. *)
+                    With[{a = memo[$heapReadFn[val]], b = memo[$heapReadFn[val + 1]]},
+                        If[ a === $Failed || b === $Failed, $Failed, broadcastShape[a, b]]],
+                $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt | $UopFlip,
+                    memo[$heapReadFn[val]],
+                (* REDUCE heap: [src, NUM(kind), NUM(n_axes), NUM(axis_0), ...].
+                   n_axes at val+2; axes at val+3..val+2+n_axes.  A multi-axis
+                   REDUCE folds N axes in one node, so drop ALL N (descending,
+                   so each Delete leaves the lower indices valid). *)
                 $UopReduce,
-                    Module[{srcShape, nAxes, axes},
-                        srcShape = tUopShape[TTerm[$heapReadFn[val]]];
-                        If[ srcShape === $Failed, Return[$Failed, Module]];
-                        nAxes = $termValFn[$heapReadFn[val + 2]];
-                        axes  = Table[$termValFn[$heapReadFn[val + 3 + i]],
-                                      {i, 0, nAxes - 1}];
-                        Fold[dropAxis, srcShape, ReverseSort[axes]]
-                    ],
-                $UopReshape,
-                    (* RESHAPE heap layout: [src, NUM(ndim), NUM(d0), ...];
-                       dims live at val+2..val+1+ndim.  ndim is stored
-                       explicitly; the previous numel-based termination
-                       hack broke on shapes containing leading 1s. *)
-                    Module[{ndim},
-                        ndim = $termValFn[$heapReadFn[val + 1]];
-                        Table[$termValFn[$heapReadFn[val + 2 + i]],
-                              {i, 0, ndim - 1}]
-                    ],
-                $UopExpand,
-                    (* EXPAND heap layout: [src, NUM(ndim), NUM(d0), ...];
-                       dims live at val+2..val+1+ndim.  ndim is stored
-                       explicitly so EXPAND can change rank. *)
-                    Module[{ndim},
-                        ndim = $termValFn[$heapReadFn[val + 1]];
-                        Table[$termValFn[$heapReadFn[val + 2 + i]],
-                              {i, 0, ndim - 1}]
-                    ],
+                    With[{srcShape = memo[$heapReadFn[val]]},
+                        If[ srcShape === $Failed, $Failed,
+                            Module[{nAxes, axes},
+                                nAxes = $termValFn[$heapReadFn[val + 2]];
+                                axes  = Table[$termValFn[$heapReadFn[val + 3 + i]],
+                                              {i, 0, nAxes - 1}];
+                                Fold[dropAxis, srcShape, ReverseSort[axes]]]]],
+                (* RESHAPE / EXPAND heap: [src, NUM(ndim), NUM(d0), ...]; dims at
+                   val+2..val+1+ndim.  ndim is stored explicitly, so the shape is
+                   read straight off the heap (no child shape needed). *)
+                $UopReshape | $UopExpand,
+                    Module[{ndim = $termValFn[$heapReadFn[val + 1]]},
+                        Table[$termValFn[$heapReadFn[val + 2 + i]], {i, 0, ndim - 1}]],
                 (* SHRINK / PAD heap: [src, NUM(ndim), NUM(b0), NUM(e0), ...].
-                   ndim cell at val+1; pairs at val+2..val+1+2*ndim.
-                   SHRINK shrinks each axis to e_i - b_i; PAD grows by
-                   b_i + e_i. *)
+                   SHRINK -> e_i - b_i per axis; PAD grows by b_i + e_i. *)
                 $UopShrink,
-                    Module[{cs, n},
-                        cs = tUopShape[TTerm[$heapReadFn[val]]];
-                        If[ cs === $Failed, Return[$Failed, Module]];
-                        n = Length[cs];
-                        Table[
-                            $termValFn[$heapReadFn[val + 3 + 2 * (i - 1)]] -
-                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]],
-                            {i, 1, n}]
-                    ],
+                    With[{cs = memo[$heapReadFn[val]]},
+                        If[ cs === $Failed, $Failed,
+                            Table[
+                                $termValFn[$heapReadFn[val + 3 + 2 (i - 1)]] -
+                                $termValFn[$heapReadFn[val + 2 + 2 (i - 1)]],
+                                {i, 1, Length[cs]}]]],
                 $UopPad,
-                    Module[{cs, n},
-                        cs = tUopShape[TTerm[$heapReadFn[val]]];
-                        If[ cs === $Failed, Return[$Failed, Module]];
-                        n = Length[cs];
-                        Table[
-                            cs[[i]] +
-                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]] +
-                            $termValFn[$heapReadFn[val + 3 + 2 * (i - 1)]],
-                            {i, 1, n}]
-                    ],
-                (* PERMUTE heap: [src, NUM(ndim), NUM(p0), NUM(p1), ...].
-                   out.dim[i] = src.dim[perm[i]]. *)
+                    With[{cs = memo[$heapReadFn[val]]},
+                        If[ cs === $Failed, $Failed,
+                            Table[
+                                cs[[i]] +
+                                $termValFn[$heapReadFn[val + 2 + 2 (i - 1)]] +
+                                $termValFn[$heapReadFn[val + 3 + 2 (i - 1)]],
+                                {i, 1, Length[cs]}]]],
+                (* PERMUTE heap: [src, NUM(ndim), NUM(p0), ...]; out.dim[i] =
+                   src.dim[perm[i]]. *)
                 $UopPermute,
-                    Module[{cs, n},
-                        cs = tUopShape[TTerm[$heapReadFn[val]]];
-                        If[ cs === $Failed, Return[$Failed, Module]];
-                        n = Length[cs];
-                        Table[
-                            cs[[1 + $termValFn[$heapReadFn[val + 1 + i]]]],
-                            {i, 1, n}]
-                    ],
-                (* FLIP doesn't change shape. *)
-                $UopFlip,
-                    tUopShape[TTerm[$heapReadFn[val]]],
+                    With[{cs = memo[$heapReadFn[val]]},
+                        If[ cs === $Failed, $Failed,
+                            Table[cs[[1 + $termValFn[$heapReadFn[val + 1 + i]]]],
+                                  {i, 1, Length[cs]}]]],
                 _, $Failed
             ],
         _, $Failed
     ]
 ]
-tUopShape[_] := $Failed
 
 End[];
 

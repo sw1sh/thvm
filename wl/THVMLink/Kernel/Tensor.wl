@@ -101,34 +101,44 @@ liftNumeric[t_TTerm,       _]            := t
    UpValues so a right-hand-side scalar lifts to the surrounding
    tensor's dtype instead of defaulting to f32 (which silently
    bit-misinterprets under f64 / f16 / bf16 kernels). *)
-inheritDType[t_TTerm] := Module[{raw, tag, val, ext},
+(* Iterative single-path descent (NOT recursion): the dtype always comes from
+   src[0] (or the kernel output / DUP body), so we follow that one edge in a
+   loop to a TEN / CONST / CAST leaf.  A recursive walk would blow
+   $RecursionLimit on a deep residual chain (e.g. GPT-2's 12 blocks) -- the
+   same depth issue tUopShape (Shape.wl) avoids the same way.  `result` stays
+   Null while descending; any terminal case sets it and ends the loop. *)
+inheritDType[t_TTerm] := Module[{raw, tag, val, ext, result = Null},
     raw = ttermRaw[t];
-    tag = $termTagFn[raw];
-    Switch[tag,
-        $TagTEN,
-            dtypeName[$termExtFn[raw]],
-        $TagUOP,
-            val = $termValFn[raw];
-            ext = $termExtFn[raw];
-            Switch[ext,
-                $UopKernel,
-                    inheritDType[TTerm[$heapReadFn[val]]],
-                $UopConst,
-                    dtypeName[$termExtFn[$heapReadFn[val]]],
-                $UopCast | $UopBitcast,
-                    dtypeName[$termValFn[$heapReadFn[val + 1]]],
-                $UopAdd  | $UopMul   | $UopCmplt | $UopCmpeq |
-                $UopNeg  | $UopRecip | $UopExp2  | $UopLog2  | $UopSqrt |
-                $UopReshape | $UopPermute | $UopExpand | $UopPad |
-                $UopShrink  | $UopFlip    | $UopReduce |
-                $UopLoad    | $UopAssign,
-                    inheritDType[TTerm[$heapReadFn[val]]],
-                _, "f32"
-            ],
-        $TagDP0 | $TagDP1 /; BitAnd[$termExtFn[raw], $DupGradFlag] =!= 0,
-            inheritDType[TTerm[$heapReadFn[$termValFn[raw]]]],
-        _, "f32"
-    ]
+    While[ result === Null,
+        tag = $termTagFn[raw];
+        Which[
+            tag === $TagTEN,
+                result = dtypeName[$termExtFn[raw]],
+            tag === $TagUOP,
+                val = $termValFn[raw];
+                ext = $termExtFn[raw];
+                Switch[ext,
+                    $UopKernel,
+                        raw = $heapReadFn[val],
+                    $UopConst,
+                        result = dtypeName[$termExtFn[$heapReadFn[val]]],
+                    $UopCast | $UopBitcast,
+                        result = dtypeName[$termValFn[$heapReadFn[val + 1]]],
+                    $UopAdd  | $UopMul   | $UopCmplt | $UopCmpeq |
+                    $UopNeg  | $UopRecip | $UopExp2  | $UopLog2  | $UopSqrt |
+                    $UopReshape | $UopPermute | $UopExpand | $UopPad |
+                    $UopShrink  | $UopFlip    | $UopReduce |
+                    $UopLoad    | $UopAssign,
+                        raw = $heapReadFn[val],
+                    _, result = "f32"
+                ],
+            (tag === $TagDP0 || tag === $TagDP1)
+                && BitAnd[$termExtFn[raw], $DupGradFlag] =!= 0,
+                raw = $heapReadFn[$termValFn[raw]],
+            True, result = "f32"
+        ]
+    ];
+    result
 ]
 inheritDType[_] := "f32"
 
