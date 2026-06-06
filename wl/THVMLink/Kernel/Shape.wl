@@ -117,7 +117,7 @@ shapeChildRaws[raw_] := If[ $termTagFn[raw] =!= $TagUOP, {},
             $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,
                 {$heapReadFn[val], $heapReadFn[val + 1]},
             $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt | $UopFlip
-                | $UopReduce | $UopShrink | $UopPad | $UopPermute,
+                | $UopReduce | $UopShrink | $UopPad | $UopPermute | $UopCopy,
                 {$heapReadFn[val]},
             _, {}
         ]
@@ -146,7 +146,8 @@ shapeOfNode[raw_, memo_] := Module[{tag = $termTagFn[raw], val = $termValFn[raw]
                 $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,
                     With[{a = memo[$heapReadFn[val]], b = memo[$heapReadFn[val + 1]]},
                         If[ a === $Failed || b === $Failed, $Failed, broadcastShape[a, b]]],
-                $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt | $UopFlip,
+                $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt | $UopFlip
+                    | $UopCopy,
                     memo[$heapReadFn[val]],
                 (* REDUCE heap: [src, NUM(kind), NUM(n_axes), NUM(axis_0), ...].
                    n_axes at val+2; axes at val+3..val+2+n_axes.  A multi-axis

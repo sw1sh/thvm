@@ -284,6 +284,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/grad.c"
 #include "uop/leaf_tids.c"
 #include "uop/load.c"
+#include "uop/copy.c"
 #include "uop/detach.c"
 #include "uop/cast.c"
 #include "uop/bitcast.c"
@@ -653,6 +654,7 @@ void thvm_init(void) {
   uop_const_cache_reset();   // CONST cache keyed by raw bits + dtype;
                              // stale entries point into a freed heap.
   uop_mov_cache_reset();     // movement-op cache, same lifecycle.
+  copy_upload_cache_reset(); // UOP_COPY device-upload cache, same lifecycle.
   lam_shape_reset();         // LAM-bound-var shape table; stale
                              // entries reference invalid lam_loc.
   extern_pin_clear();   // drop any leftover pins from a prior session
@@ -733,6 +735,7 @@ void thvm_free(void) {
   // Same order as thvm_init for obvious symmetry.
   uop_const_cache_reset();
   uop_mov_cache_reset();
+  copy_upload_cache_reset();
   lam_shape_reset();
   extern_pin_clear();
   extern_pin_handle_clear();
@@ -806,6 +809,7 @@ void thvm_reset(void) {
   // Caches whose stored Terms / locs point into the dynamic heap.
   uop_const_cache_reset();
   uop_mov_cache_reset();
+  copy_upload_cache_reset();
   lam_shape_reset();
   materialized_loc_clear();
   extern_pin_clear();          // every dynamic term dies on reset, so

@@ -44,6 +44,9 @@ fn u8 uop_arity(u8 op) {
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
     case UOP_REDUCE:  case UOP_LOAD:    case UOP_DETACH:
     case UOP_CAST:    case UOP_BITCAST:
+    // UOP_COPY heap = [src]; one recursable producer Term, like a
+    // unary/movement op.  Inherits src's shape + dtype.
+    case UOP_COPY:
     // UOP_BUFFERIZE heap: [value, NUM(addrspace), NUM(removable),
     // NUM(n_ranges), range_0, ...].  Only slot 0 (value) is a
     // recursable producer Term -- the trailing UOP_RANGE leaves are
@@ -232,7 +235,8 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     return 0;
   }
   if (uop_is_unary_elementwise(op) || op == UOP_LOAD || op == UOP_FLIP
-      || op == UOP_CAST || op == UOP_BITCAST || op == UOP_DETACH) {
+      || op == UOP_CAST || op == UOP_BITCAST || op == UOP_DETACH
+      || op == UOP_COPY) {
     return term_shape_in(heap_read(loc), 0, out);
   }
   // UOP_BUFFERIZE is a realize-boundary marker; its shape == value.shape.
@@ -366,7 +370,7 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
         || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
         || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP
         || op == UOP_REDUCE  || op == UOP_LOAD    || op == UOP_ASSIGN
-        || op == UOP_BUFFERIZE) {
+        || op == UOP_BUFFERIZE || op == UOP_COPY) {
       Term src0 = heap_read(loc);
       return term_dtype_in(src0, env_id, out);
     }

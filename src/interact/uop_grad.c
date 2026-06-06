@@ -1348,6 +1348,15 @@ static Term interact_grad_dispatch(Term grad_term) {
       return grad_zero_at(y);
     }
 
+    case UOP_COPY:
+      // d/dx copy(x) = copy(gy) back to x's device.  Value-preserving,
+      // so the cotangent passes straight through to the source.  thvm
+      // realizes on one backend per realize, so the copy-back is an
+      // identity in the backward and we credit gy directly to src.
+      // Mirrors tinygrad/gradient.py:80 (COPY -> copy_to_device of the
+      // cotangent to src[0].device).
+      return grad_bwd_for_child(heap_read(y_loc), gy);
+
     case UOP_CAST: {
       // d/dx cast(x, dt) = cast(gy, x.dtype) -- value-preserving so
       // the chain rule passes the cotangent back through the source

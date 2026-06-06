@@ -1067,6 +1067,68 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   return LIBRARY_NO_ERROR;
 }
 
+// Host-pinned variant of tensor_from_na: ALWAYS builds the tensor on
+// CPU_BACKEND via the zero-copy external-buffer path, regardless of
+// CURRENT_BACKEND.  Used by the lazy device-transfer lift (NN.wl
+// TFromNet token-LM): weights stay resident as CPU host leaves and a
+// UOP_COPY node uploads them to the realize backend lazily.  Mirror of
+// the CPU branch of thvm_wl_tensor_from_na; the non-CPU eager
+// alloc+memcpy branch is intentionally omitted.
+EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na_host(WolframLibraryData libData, mint argc,
+                                                   MArgument *args, MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+
+  numericarray_data_t t       = naf->MNumericArray_getType(na);
+  mint                 rank    = naf->MNumericArray_getRank(na);
+  mint const          *naDims  = naf->MNumericArray_getDimensions(na);
+  mint                 numel   = naf->MNumericArray_getFlattenedLength(na);
+  void                *naData  = naf->MNumericArray_getData(na);
+
+  u32 dtype;
+  switch (t) {
+    case MNumericArray_Type_Real32:  dtype = DT_FP32;   break;
+    case MNumericArray_Type_Real64:  dtype = DT_FP64;   break;
+    case MNumericArray_Type_Bit8:    dtype = DT_INT8;   break;
+    case MNumericArray_Type_UBit8:   dtype = DT_UINT8;  break;
+    case MNumericArray_Type_Bit16:   dtype = DT_INT16;  break;
+    case MNumericArray_Type_UBit16:  dtype = DT_UINT16; break;
+    case MNumericArray_Type_Bit32:   dtype = DT_INT32;  break;
+    case MNumericArray_Type_UBit32:  dtype = DT_UINT32; break;
+    case MNumericArray_Type_Bit64:   dtype = DT_INT64;  break;
+    case MNumericArray_Type_UBit64:  dtype = DT_UINT64; break;
+    default:
+      fprintf(stderr, "tensor_from_na_host: unsupported NumericArray type %d\n", (int)t);
+      return LIBRARY_FUNCTION_ERROR;
+  }
+
+  if (TENS_NEXT >= TENS_CAP) {
+    fprintf(stderr, "tensor_from_na_host: out of descriptor slots\n");
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 id = TENS_NEXT++;
+  TenDesc *d = &TENS[id];
+  Shape shape;
+  shape.ndim = (u32)rank;
+  for (mint i = 0; i < rank && i < MAX_DIM; i++) shape.dims[i] = (u32)naDims[i];
+  for (mint i = rank; i < MAX_DIM; i++)          shape.dims[i] = 0;
+  d->dtype    = dtype;
+  d->refcount = 1;
+  d->view     = view_create(shape);
+  // Force CPU residency + zero-copy external buffer regardless of the
+  // active backend; the upload (if any) is deferred to UOP_COPY.
+  d->backend  = &CPU_BACKEND;
+  u64 nbytes  = dtype_storage_bytes(dtype, (u64)numel);
+  d->buf_id   = cpu_buf_alloc_external(
+      naData, nbytes, release_numeric_array, (void *)na);
+
+  Term term = term_new(0, TAG_TEN, dtype, id);
+  MArgument_setInteger(res, (mint)term);
+  return LIBRARY_NO_ERROR;
+}
+
 // Variant of tensor_from_na that overrides the inferred dtype from
 // the NumericArray type and accepts an explicit logical shape.
 // Used by f16 / bf16 / fp8 / int4 / uint4 where the WL surface
@@ -1457,6 +1519,15 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_load(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   Term src = (Term)MArgument_getInteger(args[0]);
   Term r = uop_load(src);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_copy(WolframLibraryData libData, mint argc,
+                                        MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term src = (Term)MArgument_getInteger(args[0]);
+  Term r = uop_copy(src);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }

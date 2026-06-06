@@ -128,7 +128,7 @@ inheritDType[t_TTerm] := Module[{raw, tag, val, ext, result = Null},
                     $UopNeg  | $UopRecip | $UopExp2  | $UopLog2  | $UopSqrt |
                     $UopReshape | $UopPermute | $UopExpand | $UopPad |
                     $UopShrink  | $UopFlip    | $UopReduce |
-                    $UopLoad    | $UopAssign,
+                    $UopLoad    | $UopAssign  | $UopCopy,
                         raw = $heapReadFn[val],
                     _, result = "f32"
                 ],
@@ -285,6 +285,8 @@ TGradPair[y_, gy_] := With[{bwd = TUOpGrad[y, gy]},
 ]
 
 TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
+
+TUOpCopy[src_TTerm] := (ensureInit[]; TTerm[$uopCopyFn[ttermRaw[src]]])
 
 (* === Phase E UOp constructors ===
  * INDEX layer + BUFFER/STORE/AFTER/OPT.  Used by Rewrite.wl and the
@@ -592,6 +594,15 @@ TUnpackUInt4[na_NumericArray, numel_Integer]:= (ensureInit[]; $int4UnpackFn[na, 
 TTensorCreate[data_]                       := (
     ensureInit[];
     TTerm[$tensorFromNAFn[asSharableNA[data]]])
+
+(* Host-pinned tensor: ALWAYS CPU-resident (zero-copy NA wrap) even
+   when the active backend is non-CPU.  Pair with TUOpCopy to defer the
+   device upload to materialize time.  Used by the TFromNet token-LM
+   lift so weights stay host leaves and only the realize device upload
+   is lazy. *)
+TTensorCreateHost[data_]                   := (
+    ensureInit[];
+    TTerm[$tensorFromNAHostFn[asSharableNA[data]]])
 
 TTensorCreate[data_, dtype_String]         := (
     ensureInit[];

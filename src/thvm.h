@@ -527,7 +527,16 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_PLACEHOLDER 49
 #define UOP_END         50
 // 51 = UOP_ISHR (declared in the Symbolic INDEX layer above).
-#define UOP_COUNT       52
+// UOP_COPY: lazy device transfer.  Heap = [src] (one child); the COPY
+//   carries src's shape + dtype and uploads src to the realize backend
+//   at materialize time.  Identity (no kernel) when the realize backend
+//   already matches src's backend (e.g. CPU realize of a CPU host
+//   leaf).  Mirrors tinygrad's Ops.COPY (uop/ops.py:660 copy_to_device,
+//   engine/realize.py:158 exec_copy host-staged upload).  thvm realizes
+//   on a single backend per realize, so the COPY target is implicitly
+//   CURRENT_BACKEND -- no explicit DEVICE arg in the heap.
+#define UOP_COPY        52
+#define UOP_COUNT       53
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2033,6 +2042,9 @@ fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 fn u32  materialized_loc_lookup       (u64 loc);
 fn void materialized_loc_insert       (u64 loc, u32 tid);
 fn void materialized_loc_clear        (void);
+// UOP_COPY persistent device-upload cache (schedule/materialize.c).
+// Reset on GC compaction / thvm reset / free (its keys are heap locs).
+fn void copy_upload_cache_reset       (void);
 fn void materialized_loc_scope_enter  (void);
 fn void materialized_loc_scope_leave  (void);
 fn u32  materialized_loc_scope_depth  (void);
@@ -3078,6 +3090,9 @@ fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out);
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in
 // the cpu kernel).  Output shape == src shape; arity 1.
 fn Term uop_load(Term src);
+// UOP_COPY constructor: lazy device transfer of `src` to the realize
+// backend.  Heap = [src]; hash-cons by src.  See UOP_COPY notes above.
+fn Term uop_copy(Term src);
 
 // Build a UOP_DETACH node wrapping `src` (stop-gradient; see UOP_DETACH).
 fn Term uop_detach(Term src);

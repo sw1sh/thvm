@@ -541,6 +541,129 @@ fn void materialized_loc_insert(u64 loc, u32 tid) {
   }
 }
 
+// === UOP_COPY persistent device-upload cache ========================
+// Maps (copy_node_heap_loc, target_backend_id) -> uploaded TenDesc tid.
+// Unlike MATERIALIZED_LOC_TABLE (per-realize), this survives ACROSS
+// realizes: a UOP_COPY node is hash-consed by its src, so its heap loc
+// is stable, and the uploaded weight buffer is static (the src is an
+// immutable host leaf).  Re-realize / JIT-replay therefore reuses the
+// already-uploaded device buffer instead of re-staging the bytes every
+// realize.  The uploaded buffer is jit-pinned (sticky retain) so the
+// per-realize pool rollback in realize.c does not reclaim it.  Mirror:
+// tinygrad caches the COPY's dest Buffer on the lazy graph
+// (engine/realize.py exec_copy reuses dest.ensure_allocated()).
+#define COPY_UPLOAD_CACHE_CAP (1u << 12)        // 4K slots
+typedef struct {
+  u64 loc;                                       // copy-node heap loc, 0 = empty
+  u32 backend_id;                                // target backend
+  u32 tid;                                        // uploaded TenDesc
+} CopyUploadSlot;
+static CopyUploadSlot COPY_UPLOAD_CACHE[COPY_UPLOAD_CACHE_CAP];
+
+fn void copy_upload_cache_reset(void) {
+  memset(COPY_UPLOAD_CACHE, 0, sizeof(COPY_UPLOAD_CACHE));
+}
+
+static inline u32 copy_upload_hash(u64 loc, u32 backend_id) {
+  u64 k = loc * 0x9e3779b97f4a7c15ULL + backend_id;
+  k ^= k >> 33;
+  return (u32)k & (COPY_UPLOAD_CACHE_CAP - 1);
+}
+
+static u32 copy_upload_lookup(u64 loc, u32 backend_id) {
+  u32 h = copy_upload_hash(loc, backend_id);
+  for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
+    if (COPY_UPLOAD_CACHE[i].loc == 0) return 0;
+    if (COPY_UPLOAD_CACHE[i].loc == loc
+        && COPY_UPLOAD_CACHE[i].backend_id == backend_id)
+      return COPY_UPLOAD_CACHE[i].tid;
+  }
+  return 0;
+}
+
+static void copy_upload_insert(u64 loc, u32 backend_id, u32 tid) {
+  if (loc == 0 || tid == 0) return;
+  u32 h = copy_upload_hash(loc, backend_id);
+  for (u32 probe = 0; probe < COPY_UPLOAD_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (COPY_UPLOAD_CACHE_CAP - 1);
+    if (COPY_UPLOAD_CACHE[i].loc == 0
+        || (COPY_UPLOAD_CACHE[i].loc == loc
+            && COPY_UPLOAD_CACHE[i].backend_id == backend_id)) {
+      COPY_UPLOAD_CACHE[i].loc        = loc;
+      COPY_UPLOAD_CACHE[i].backend_id = backend_id;
+      COPY_UPLOAD_CACHE[i].tid        = tid;
+      return;
+    }
+  }
+}
+
+// Materialize a UOP_COPY[src] node onto the realize backend
+// (CURRENT_BACKEND).  Returns a TAG_TEN resident on that backend.
+//
+//   - IDENTITY when CURRENT_BACKEND already matches src's backend
+//     (e.g. CPU realize of a CPU host leaf): the COPY contributes no
+//     kernel and no buffer; the src's materialized TenDesc is reused.
+//   - Cross-backend (src on CPU, realize backend X): host-stage the
+//     src bytes (src->buf_read into a temp host buffer) and upload to
+//     a fresh X buffer (X->buf_write).  The uploaded TenDesc is cached
+//     on (copy_loc, X->id) and jit-pinned so it survives pool rollback
+//     and is reused on re-realize.
+//
+// Mirror: tinygrad/uop/ops.py:660 copy_to_device builds
+// UOp(Ops.COPY, dtype, (src, DEVICE)); engine/realize.py:158 exec_copy
+// allocates the dest on the target device and `dest.copyin(src
+// as_memoryview())` -- a host-staged upload, identity when devices match.
+static Term materialize_copy(Term term) {
+  u64  loc = term_val(term);
+  Term src = heap_read(loc);
+  // Materialize the src first.  For the token-LM lift this is a CPU
+  // host leaf (TAG_TEN) -- thvm_materialize returns it unchanged.  If
+  // the src is itself compute, this compiles its kernels; the upload
+  // then reads the producer's output buffer at fire time via buf_read.
+  Term src_mat = thvm_materialize(src);
+  if (src_mat != src) heap_set(loc, src_mat);
+  // Only a TAG_TEN src can be uploaded here (we need its backend +
+  // buffer).  A non-TEN src (a still-lazy UOP_KERNEL) is left wrapped;
+  // returning it makes COPY a transparent pass-through, which is sound
+  // -- the downstream kernel reads it as any other input.  The token-LM
+  // lift never hits this path (its srcs are host leaves).
+  if (term_tag(src_mat) != TAG_TEN) return src_mat;
+  u32 src_tid = (u32)term_val(src_mat);
+  if (src_tid == 0 || src_tid >= TENS_NEXT) return src_mat;
+  Backend *target = CURRENT_BACKEND;
+  Backend *srcb   = TENS[src_tid].backend;
+  // Identity: realize backend already holds the src.
+  if (target == NULL || target == srcb) return src_mat;
+  // Cross-backend cache hit: reuse the prior upload if its buffer is
+  // still live (jit-pinned, so pool rollback kept it).
+  u32 cached = copy_upload_lookup(loc, target->id);
+  if (cached != 0 && cached < TENS_NEXT && TENS[cached].buf_id != 0
+      && TENS[cached].backend == target) {
+    return term_new(0, TAG_TEN, TENS[cached].dtype, cached);
+  }
+  // Host-stage + upload.  Allocate the dest on the target backend, read
+  // the src bytes into a temp host buffer, write them across.
+  TenDesc *sd     = &TENS[src_tid];
+  u32      dtype  = sd->dtype;
+  u64      numel  = sd->view.numel;
+  u64      nbytes = dtype_storage_bytes(dtype, numel);
+  void    *stage  = malloc((size_t)nbytes);
+  if (stage == NULL) return src_mat;            // OOM: degrade to pass-through
+  if (srcb->buf_read(sd->buf_id, stage, nbytes) != 0) {
+    free(stage);
+    return src_mat;
+  }
+  u32 dst_tid = tensor_alloc(target, sd->view.shape, dtype);
+  target->buf_write(TENS[dst_tid].buf_id, stage, nbytes);
+  free(stage);
+  // Sticky retain so the per-realize pool rollback does not reclaim the
+  // uploaded weight buffer; cache for re-realize / JIT-replay reuse.
+  if (target->buf_jit_pin != NULL) target->buf_jit_pin(TENS[dst_tid].buf_id);
+  copy_upload_insert(loc, target->id, dst_tid);
+  return term_new(0, TAG_TEN, TENS[dst_tid].dtype, dst_tid);
+}
+
 // Recursive in-place substitution of cached UOP descendants with
 // TAG_TEN leaves.  Walks parent UOPs (NEVER UOP_KERNEL, NEVER
 // UOP_ASSIGN -- those are stop points for the materialize entry
@@ -5497,6 +5620,45 @@ static void materialize_inner_assigns(Term term) {
   free(visited);
 }
 
+// Pre-walk: replace every UOP_COPY child embedded in the DAG with its
+// materialized TAG_TEN (identity src TEN on same-backend realize, or
+// the uploaded device buffer on cross-backend).  Runs BEFORE
+// bufferize_classify so the boundary classifier + kernel emitter see a
+// plain external tensor input wherever a weight was wrapped in a COPY
+// -- exactly as they would for a bare TTensorCreate input.  Same
+// per-node memoized walk as materialize_inner_assigns.  Mirror:
+// tinygrad lowers COPY to a buffer the downstream kernel reads as an
+// input (engine/realize.py exec_copy -> buffers[dest]).
+static void materialize_inner_copies_rec(Term term, u8 *visited, u64 cap) {
+  if (term_tag(term) != TAG_UOP) return;
+  u32 op = term_ext(term);
+  if (op == UOP_KERNEL) return;
+  u8 ar = uop_arity((u8)op);
+  if (ar == 0) return;
+  u64 loc = term_val(term);
+  if (loc < cap && visited[loc]) return;
+  if (loc < cap) visited[loc] = 1;
+  for (u8 i = 0; i < ar; i++) {
+    Term child = heap_read(loc + i);
+    if (term_tag(child) != TAG_UOP) continue;
+    if (term_ext(child) == UOP_COPY) {
+      Term ten = materialize_copy(child);
+      if (ten != child) heap_set(loc + i, ten);
+    } else {
+      materialize_inner_copies_rec(child, visited, cap);
+    }
+  }
+}
+
+static void materialize_inner_copies(Term term) {
+  if (term_tag(term) != TAG_UOP) return;
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
+  if (visited == NULL) return;  // OOM: skip (re-entries stay idempotent)
+  materialize_inner_copies_rec(term, visited, cap);
+  free(visited);
+}
+
 // Recursively strip UOP_DETACH(x) -> x in place across a UOP DAG, so the
 // stop-gradient marker never reaches kernel lifting / render / the walker
 // (the gated uop_graph_simplify can't be relied on).  Detach is identity
@@ -5642,6 +5804,12 @@ fn Term thvm_materialize(Term term) {
   if (term_ext(term) == UOP_DETACH) {
     return thvm_materialize(heap_read(term_val(term) + 0));
   }
+  // UOP_COPY: lazy device transfer.  Identity on same-backend realize
+  // (CPU realize of a CPU host leaf -> returns the src TEN, no kernel),
+  // host-staged upload + cache on cross-backend.  See materialize_copy.
+  if (term_ext(term) == UOP_COPY) {
+    return materialize_copy(term);
+  }
   // GRAD is a stop point in materialize -- wnf fires interact_grad,
   // then thvm_realize loops back here to compile the unrolled UOps.
   // ASSIGN is a wnf-fired primitive (interact_assign) -- not a kernel.
@@ -5663,6 +5831,9 @@ fn Term thvm_materialize(Term term) {
   // `w - lr * mAfter / denom`) keeps a raw UOP src that wnf can't
   // reduce to a TEN, so the ASSIGN never fires.
   materialize_inner_assigns(term);
+  // Resolve UOP_COPY children to their (uploaded) TAG_TEN before the
+  // boundary classifier runs -- see materialize_inner_copies.
+  materialize_inner_copies(term);
 
   Term simplified = uop_graph_simplify_materialize(term, 0);
   if (simplified != term) {

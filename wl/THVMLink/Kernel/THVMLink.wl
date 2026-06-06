@@ -117,6 +117,7 @@ $UopScopeGlobal::usage = $UopScopeLocal::usage = $UopScopeReg::usage =
 (* === tensors === *)
 TTensor::usage         = "TTensor[shape, dtype] allocates a tensor and returns a TTerm wrapping a TAG_TEN handle.  TTensor[shape, data_List] also writes initial values.  dtype defaults to \"f32\".";
 TTensorCreate::usage   = "TTensorCreate[data] / TTensorCreate[data, dtype] builds a TTerm tensor whose shape and dtype are inferred from `data` (or coerced to the supplied dtype = \"f32\" / \"i32\").  On the active backend the buffer is shared with the input NumericArray (zero copy on CPU).  PackedArrays and nested lists are first lifted to a NumericArray (one copy) then shared.  Backend selection is global (TBackend / DEV env var); per-tensor backend is a Phase 14+ extension.";
+TTensorCreateHost::usage = "TTensorCreateHost[data] builds a TTerm tensor that is ALWAYS CPU-resident (zero-copy NumericArray wrap) regardless of the active backend.  Pair with TUOpCopy to defer the device upload to materialize time; used by the TFromNet token-LM lift to keep weights as host leaves.";
 TTensorShape::usage    = "TTensorShape[t] returns the tensor's shape as a list of integers.";
 TTermShape::usage      = "TTermShape[t] runs the runtime's `term_shape_in` shape inference: returns a list of dim extents for a TEN, a shape-inferable UOP, or a TVAR with a registered shape annotation (TLamShape).  Returns {} when the shape cannot be determined.";
 TTensorDType::usage    = "TTensorDType[t] returns the dtype as a string (\"f32\" / \"i32\").";
@@ -154,6 +155,7 @@ TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; ki
 TUOpCast::usage      = "TUOpCast[src, dtype] builds a UOP_CAST node.  dtype is one of \"f32\"/\"i32\"/\"i8\" etc.  Backward gradient (under TGrad) is a CAST back to src.dtype.";
 TUOpGrad::usage      = "TUOpGrad[y, gy] builds the BWD projection of a dup-flavored grad cell holding [y, gy].  gy is the cotangent (must match y's shape).  Reducing under TWnf threads gy down via the per-operator adjoint chain rule and emits SUP^{leaf_tid}(zero, gy_at_leaf) at each TEN leaf; outer DUPs at the WL surface (TGrad) extract the per-target gradient.";
 TUOpLoad::usage      = "TUOpLoad[src] builds a UOP_LOAD node wrapping src.  Structural marker mirroring tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in the cpu kernel).";
+TUOpCopy::usage      = "TUOpCopy[src] builds a UOP_COPY node: a lazy device transfer that uploads src to the realize backend at materialize time.  Identity (no kernel, no copy) when the realize backend already holds src (e.g. CPU realize of a CPU host leaf).  Mirrors tinygrad's Ops.COPY.";
 
 (* Phase E UOp constructors. *)
 TUOpRange::usage   = "TUOpRange[axisId, axisType, extent] builds a UOP_RANGE leaf.  axisType is one of $KaxLoop / $KaxReduce / $KaxUpcast / $KaxUnroll / $KaxLocal / $KaxGlobal / $KaxGroupReduce.";
@@ -283,6 +285,9 @@ $UopIDiv = 30;        $UopIMod = 31;    $UopILt = 32;
 $UopIAnd = 33;        $UopIWhere = 34;  $UopInvalid = 35;
 $UopBuffer = 36;      $UopStore = 37;   $UopAfter = 38;
 $UopOpt = 39;
+(* UOP_COPY: lazy device transfer (heap = [src]); inherits src's
+   shape + dtype.  Keep in sync with src/thvm.h. *)
+$UopCopy = 52;
 (* UOP_BUFFER scope tag.  Mirrors UOP_SCOPE_GLOBAL/LOCAL/REG in src/thvm.h:
    GLOBAL = device memory (Tensor argument default), LOCAL = threadgroup-
    shared, REG = per-thread fragment. *)
@@ -310,7 +315,7 @@ $uopNames = <|
     30 -> "IDIV",        31 -> "IMOD",   32 -> "ILT",
     33 -> "IAND",        34 -> "IWHERE", 35 -> "INVALID",
     36 -> "BUFFER",      37 -> "STORE",  38 -> "AFTER",
-    39 -> "OPT"
+    39 -> "OPT",         52 -> "COPY"
 |>;
 
 (* Reduce-kind constants *)
@@ -410,6 +415,7 @@ $tensorViewDbgFn := $tensorViewDbgFn = load["thvm_wl_tensor_view_debug", {Intege
    tells WL to give the C side a shared reference; C bridge stores
    the handle and disowns on release.  *)
 $tensorFromNAFn  := $tensorFromNAFn  = load["thvm_wl_tensor_from_na", {{"NumericArray", "Shared"}}, Integer];
+$tensorFromNAHostFn := $tensorFromNAHostFn = load["thvm_wl_tensor_from_na_host", {{"NumericArray", "Shared"}}, Integer];
 $tensorFromNATypedFn := $tensorFromNATypedFn = load["thvm_wl_tensor_from_na_typed", {{"NumericArray", "Shared"}, Integer, {Integer, 1}}, Integer];
 
 (* f16 / bf16 round-trip helpers: pack a Real list into a
@@ -444,6 +450,7 @@ $uopFwdFn      := $uopFwdFn      = load["thvm_wl_uop_fwd",         {Integer, Int
 $termCtrNFn    := $termCtrNFn    = load["thvm_wl_term_ctr_n",      {Integer},                        Integer];
 $termCtrAtFn   := $termCtrAtFn   = load["thvm_wl_term_ctr_at",     {Integer, Integer},               Integer];
 $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},                        Integer];
+$uopCopyFn     := $uopCopyFn     = load["thvm_wl_uop_copy",        {Integer},                        Integer];
 
 (* Phase E UOp constructors (RANGE / INDEX_E / IADD..IAND / IWHERE /
    INVALID / BUFFER / STORE / AFTER / OPT) -- mirror the matching

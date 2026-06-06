@@ -1526,12 +1526,18 @@ TFromNet[net_NetChain, maxSeq_Integer] /; tokenEmbeddingArray[net] =!= None :=
         vocab      = First[Dimensions[tokTable]];
         restLayers = Drop[Table[net[[i]], {i, Length[net]}], 1];
         TLamShape[{maxSeq, vocab}, onehot,
-            Module[{tokT, x, hidden},
-                (* share the native NumericArrays zero-copy (TTensorCreate wraps
-                   the WL buffer on CPU), exactly as TLayerToTensors does -- no
-                   Normal / NumericArray repack of the {vocab,dim} table. *)
-                tokT   = TTensorCreate[tokTable];
-                x      = onehot . tokT + TTensorCreate[posTable[[1 ;; maxSeq]]];
+            Module[{tokT, posT, x, hidden},
+                (* Keep the native NumericArrays as CPU host leaves
+                   (TTensorCreateHost wraps the WL buffer zero-copy on CPU
+                   regardless of the active backend) and wrap each in a
+                   UOP_COPY: the device upload is deferred to materialize /
+                   realize time (identity on a CPU realize, host-staged
+                   upload on a non-CPU realize).  No Normal / NumericArray
+                   repack of the {vocab,dim} table.  Mirrors tinygrad's
+                   Ops.COPY (uop/ops.py copy_to_device). *)
+                tokT   = TUOpCopy[TTensorCreateHost[tokTable]];
+                posT   = TUOpCopy[TTensorCreateHost[posTable[[1 ;; maxSeq]]]];
+                x      = onehot . tokT + posT;
                 hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
                 hidden . Transpose[tokT]]]
 ]

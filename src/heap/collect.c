@@ -383,6 +383,10 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   // cross-realize sharing on the first realize after a GC; the next
   // emit_kernel_for_boundary repopulates it.
   materialized_loc_clear();
+  // UOP_COPY device-upload cache (schedule/materialize.c) also keys off
+  // the copy-node heap loc; clear it for the same reason.  The next
+  // cross-backend realize re-uploads + repopulates.
+  copy_upload_cache_reset();
 
   // 5. Swap from / to.
   u64 swap_start = GC_FROM_START, swap_end = GC_FROM_END;
