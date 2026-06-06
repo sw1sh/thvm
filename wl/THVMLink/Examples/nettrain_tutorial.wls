@@ -8,7 +8,7 @@
    lambda, and a single TWnf dispatches every round.  No host-side Do
    loop -- the training run IS one normalisation.
 
-       trained = NetTrain[TFromNet[net], data, MaxTrainingRounds -> n]
+       trained = TNetTrain[net, data, MaxTrainingRounds -> n]   (net a NetChain)
 
    Run:  wolframscript -file wl/THVMLink/Examples/nettrain_tutorial.wls *)
 
@@ -31,10 +31,10 @@ Print["=== thvm NetTrain (inert recursive loop) ==="];
 roundsList = {25, 50, 100, 200, 400};
 thvmCurve = Table[
     SeedRandom[7];
-    With[{net = TFromNet[NetInitialize @ NetChain[arch, "Input" -> 784]]},
+    With[{net = NetInitialize @ NetChain[arch, "Input" -> 784]},
         Module[{trained, t0, dt, acc},
             t0 = AbsoluteTime[];
-            trained = NetTrain[net, tr, MaxTrainingRounds -> r, "LearningRate" -> 0.05];
+            trained = TNetTrain[net, tr, MaxTrainingRounds -> r, "LearningRate" -> 0.05];
             dt = AbsoluteTime[] - t0;
             acc = N[Count[MapThread[#1 === #2 &, {TNetPredict[trained, te[[All, 1]]], teLabels}], True] / nTest];
             Print["  rounds=", r, "  testAcc=", Round[acc, 0.001], "  (", Round[dt, 0.01], "s)"];
@@ -65,8 +65,8 @@ Print["  built-in (20 rounds ADAM):          ", Round[biAcc, 0.001]];
 Print["=== thvm optimizer suite (same net, 100 rounds) ==="];
 optAcc[label_, opts_List] := (
     SeedRandom[7];
-    With[{net = TFromNet[NetInitialize @ NetChain[arch, "Input" -> 784]]},
-        With[{trained = NetTrain[net, tr, Sequence @@ opts]},
+    With[{net = NetInitialize @ NetChain[arch, "Input" -> 784]},
+        With[{trained = TNetTrain[net, tr, Sequence @@ opts]},
             Print["  ", label, "  testAcc=",
                 Round[N[Count[MapThread[#1 === #2 &,
                     {TNetPredict[trained, te[[All, 1]]], teLabels}], True] / nTest], 0.001]]]]);

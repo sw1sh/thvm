@@ -119,9 +119,13 @@ With[{seq = 5, nh = 3, dh = 4},
     ]
 ];
 
-(* ===== Full GPT-2 self-attention block (projections + MHA + output) ===== *)
-(* End-to-end equivalence of TGPT2SelfAttention with the manual spec
-   built from the same {in, out} projection weights + biases. *)
+(* ===== Full GPT-2 self-attention block from the building blocks ===== *)
+(* The hand-assembled TGPT2SelfAttention wrapper was deleted (GPT-2 is a pure
+   graph via TFromNet[net, ids] now); this asserts the SAME block assembled
+   directly from the kept building blocks (TLinear projections + causal
+   TMultiHeadAttention + output TLinear) still matches the manual spec.  The
+   per-head 1/Sqrt[d_head] scale is the TMultiHeadAttention default (Q not
+   pre-scaled here). *)
 With[{seq = 4, nh = 2, dh = 5},
     dim = nh * dh;
     wQ = RandomReal[{-0.2, 0.2}, {dim, dim}]; bQ = RandomReal[{-0.1, 0.1}, {dim}];
@@ -144,11 +148,16 @@ With[{seq = 4, nh = 2, dh = 5},
         {h, nh}];
     manAttn = Table[Flatten[manHeads[[All, i]]], {i, seq}];
     manOut  = manAttn . wO + ConstantArray[bO, seq];
-    tOut = rd @ TGPT2SelfAttention[tc[x],
-        tc[wQ], tc[bQ], tc[wK], tc[bK], tc[wV], tc[bV], tc[wO], tc[bO], nh];
+    (* graph assembled from the building blocks *)
+    xt  = tc[x];
+    qt  = TLinear[xt, tc[wQ], tc[bQ]];
+    kt  = TLinear[xt, tc[wK], tc[bK]];
+    vt  = TLinear[xt, tc[wV], tc[bV]];
+    att = TMultiHeadAttention[qt, kt, vt, nh, TCausalMask[seq]];
+    tOut = rd @ TLinear[att, tc[wO], tc[bO]];
     VerificationTest[
         md[manOut, tOut] < 1.*^-3,
         True,
-        TestID -> "gpt2/self-attention-block-vs-spec"
+        TestID -> "gpt2/self-attention-block-from-building-blocks"
     ]
 ];

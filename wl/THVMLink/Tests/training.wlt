@@ -1,20 +1,21 @@
-(* training.wlt -- regression tests for the inert-loop NetTrain feature
-   (TNetTrain / NetTrain[_TTerm] / TNetOf / TNetPredict).  The whole
-   optimiser is emitted as one inert interaction-net term and dispatched
-   by a single TWnf; these pins assert it actually TRAINS a net end to
-   end (flat MLP + conv), not just fires once.  A broken inert loop (firing
-   the step a single time) leaves the net barely trained, so it cannot
-   overfit a tiny set and the >= 0.75 train-batch accuracy gate fails.
-   Synthetic + data-free so they stay fast and offline. *)
+(* training.wlt -- regression tests for the inert-loop training feature
+   (TNetTrain[NetChain] / TToNet / TNetPredict).  The whole optimiser is
+   emitted as one inert interaction-net term and dispatched by a single
+   TWnf; these pins assert it actually TRAINS a net end to end (flat MLP +
+   conv), not just fires once.  A broken inert loop (firing the step a single
+   time) leaves the net barely trained, so it cannot overfit a tiny set and
+   the >= 0.75 train-batch accuracy gate fails.  Training takes a NetChain
+   (its batched forward is lifted directly); a lifted TFromNet term is
+   inference-only.  Synthetic + data-free so they stay fast and offline. *)
 
 (* === flat MLP: the inert SGD loop overfits a tiny classification set === *)
 VerificationTest[
     TInit[];
     SeedRandom[1];
     data = {{1., 0., 0.} -> 0, {0., 1., 0.} -> 1, {0., 0., 1.} -> 0, {1., 1., 1.} -> 1};
-    net  = TFromNet[NetInitialize @ NetChain[
-        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}]];
-    trained = NetTrain[net, data, MaxTrainingRounds -> 150, "LearningRate" -> 0.2];
+    net  = NetInitialize @ NetChain[
+        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}];
+    trained = TNetTrain[net, data, MaxTrainingRounds -> 150, "LearningRate" -> 0.2];
     With[{preds = TNetPredict[trained, data[[All, 1]]]},
         N[Count[MapThread[#1 === #2 &, {preds, data[[All, 2]]}], True] / Length[data]] >= 0.75
     ],
@@ -42,14 +43,14 @@ VerificationTest[
     TestID -> "training/conv-net-overfits-tiny-set"
 ]
 
-(* === TNetOf reconstructs an equivalent NetChain from the term graph
+(* === TToNet reconstructs an equivalent NetChain from the term graph
        (registry-free): same structure + bit-equal forward === *)
 VerificationTest[
     TInit[];
     SeedRandom[3];
     net0 = NetInitialize @ NetChain[
         {LinearLayer[6, "Input" -> 5], ElementwiseLayer[Ramp], LinearLayer[4]}];
-    rec  = TNetOf[TFromNet[net0]];
+    rec  = TToNet[TFromNet[net0]];
     xv   = TTensorCreate @ NumericArray[RandomReal[{-1, 1}, {2, 5}], "Real32"];
     With[{
         diff = Max @ Abs[Flatten[
@@ -86,9 +87,9 @@ VerificationTest[
     TInit[];
     SeedRandom[5];
     data = {{1., 0., 0.} -> 0, {0., 1., 0.} -> 1, {0., 0., 1.} -> 0, {1., 1., 1.} -> 1};
-    net  = TFromNet[NetInitialize @ NetChain[
-        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}]];
-    tn   = NetTrain[net, data, "TrainingNet", MaxTrainingRounds -> 150, "LearningRate" -> 0.2];
+    net  = NetInitialize @ NetChain[
+        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}];
+    tn   = TNetTrain[net, data, "TrainingNet", MaxTrainingRounds -> 150, "LearningRate" -> 0.2];
     TWnf[tn];
     With[{preds = TNetPredict[tn, data[[All, 1]]]},
         {Head[tn] === TTerm,
@@ -106,9 +107,9 @@ VerificationTest[
     TInit[];
     SeedRandom[6];
     data = {{1., 0., 0.} -> 0, {0., 1., 0.} -> 1, {0., 0., 1.} -> 0, {1., 1., 1.} -> 1};
-    net  = TFromNet[NetInitialize @ NetChain[
-        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}]];
-    trained = NetTrain[net, data, MaxTrainingRounds -> 150, "LearningRate" -> 0.02, "Momentum" -> 0.9];
+    net  = NetInitialize @ NetChain[
+        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}];
+    trained = TNetTrain[net, data, MaxTrainingRounds -> 150, "LearningRate" -> 0.02, "Momentum" -> 0.9];
     With[{preds = TNetPredict[trained, data[[All, 1]]]},
         N[Count[MapThread[#1 === #2 &, {preds, data[[All, 2]]}], True] / Length[data]] >= 0.75
     ],
@@ -123,9 +124,9 @@ VerificationTest[
     TInit[];
     SeedRandom[8];
     data = {{1., 0., 0.} -> 0, {0., 1., 0.} -> 1, {0., 0., 1.} -> 0, {1., 1., 1.} -> 1};
-    net  = TFromNet[NetInitialize @ NetChain[
-        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}]];
-    trained = NetTrain[net, data, MaxTrainingRounds -> 150, "LearningRate" -> 0.005, "Method" -> "Adam"];
+    net  = NetInitialize @ NetChain[
+        {LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}];
+    trained = TNetTrain[net, data, MaxTrainingRounds -> 150, "LearningRate" -> 0.005, "Method" -> "Adam"];
     With[{preds = TNetPredict[trained, data[[All, 1]]]},
         N[Count[MapThread[#1 === #2 &, {preds, data[[All, 2]]}], True] / Length[data]] >= 0.75
     ],
@@ -140,11 +141,11 @@ VerificationTest[
     TInit[];
     SeedRandom[9];
     data = {{1., 0., 0.} -> 0, {0., 1., 0.} -> 1, {0., 0., 1.} -> 0, {1., 1., 1.} -> 1};
-    t0 = (SeedRandom[9]; NetTrain[
-        TFromNet[NetInitialize @ NetChain[{LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}]],
+    t0 = (SeedRandom[9]; TNetTrain[
+        NetInitialize @ NetChain[{LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}],
         data, MaxTrainingRounds -> 200, "LearningRate" -> 0.1, "WeightDecay" -> 0.0]);
-    tw = (SeedRandom[9]; NetTrain[
-        TFromNet[NetInitialize @ NetChain[{LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}]],
+    tw = (SeedRandom[9]; TNetTrain[
+        NetInitialize @ NetChain[{LinearLayer[8, "Input" -> 3], ElementwiseLayer[Ramp], LinearLayer[2]}],
         data, MaxTrainingRounds -> 200, "LearningRate" -> 0.1, "WeightDecay" -> 0.1]);
     With[{wn = (t |-> Total[Map[(Total[Flatten[Abs @ Normal @ TTensorData @ TRealize @ #]] &), TNetParams[t]]])},
         {N[Count[MapThread[#1 === #2 &, {TNetPredict[tw, data[[All, 1]]], data[[All, 2]]}], True] / 4] >= 0.75,
@@ -180,9 +181,8 @@ VerificationTest[
          ConvolutionLayer[50, {5, 5}], ElementwiseLayer[Ramp], PoolingLayer[{2, 2}, {2, 2}],
          FlattenLayer[], LinearLayer[500], ElementwiseLayer[Ramp], LinearLayer[10]},
         "Input" -> {1, 28, 28}];
-    lifted = TFromNet[net];
     before = TKernelCount[];
-    loop   = NetTrain[lifted, data, "TrainingNet", MaxTrainingRounds -> 15, "LearningRate" -> 0.1];
+    loop   = TNetTrain[net, data, "TrainingNet", MaxTrainingRounds -> 15, "LearningRate" -> 0.1];
     stepKernels = TKernelCount[] - before;
     wall = First @ AbsoluteTiming @ TWnf[loop];
     afterKernels = TKernelCount[] - before;

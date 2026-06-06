@@ -12,9 +12,10 @@
         (toInput maps each Image -> the {1,28,28} array the encoder feeds)
         and TNetPredict returns the integer class (logits -> argmax, the
         Class decoder).
-     3. NetTrain[lifted, data, MaxTrainingRounds -> n] drives the inert
-        recursive optimiser term: the whole step is materialised ONCE and a
-        single TWnf re-fires the fixed kernel set every round.
+     3. TNetTrain[init, data, MaxTrainingRounds -> n] lifts the NetChain's
+        batched forward and drives the inert recursive optimiser term: the
+        whole step is materialised ONCE and a single TWnf re-fires the fixed
+        kernel set every round.  (The lifted term `lifted` is for inference.)
      4. Metal safety: that fixed set is PRESCREENED on the active device
         (TKernelCount[]); when it is small (< 300) and re-fired, Metal
         training is safe.  We assert it and dispatch.
@@ -58,7 +59,7 @@ print["TFromNet lifted it to a ", Head[lifted], " with ", Length @ TNetParams[li
    "TrainingNet" returns the INERT optimiser term: the whole step is
    materialised (every kernel built) but nothing has fired.  Counting kernels
    now measures exactly the fixed set TWnf will re-fire each round. *)
-loopTerm = NetTrain[lifted, tr, "TrainingNet", MaxTrainingRounds -> rounds, "LearningRate" -> lr];
+loopTerm = TNetTrain[init, tr, "TrainingNet", MaxTrainingRounds -> rounds, "LearningRate" -> lr];
 nKernels = TKernelCount[] - 1;
 safe = nKernels < 300;
 print["prescreen: the inert step materialises to ", nKernels, " kernels (fixed; re-fired each round)"];
@@ -68,7 +69,7 @@ print["Metal-safety: ", If[ safe, "SAFE (< 300, fixed set) -> dispatch on " <> d
 t0 = AbsoluteTime[];
 TWnf[loopTerm];
 dt = AbsoluteTime[] - t0;
-trained = lifted;                            (* trained in place; lifted is the forward *)
+trained = lifted;                            (* TNetPredict key: falls back to the in-place-trained forward *)
 nAfter = TKernelCount[] - 1;
 print["trained in ", Round[dt, 0.01], "s -> ", Round[1000.*dt/rounds, 1], " ms/round on ", dev];
 print["kernels after ", rounds, " rounds: ", nAfter,

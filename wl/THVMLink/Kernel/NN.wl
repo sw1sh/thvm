@@ -40,10 +40,10 @@
 
 BeginPackage["THVMLink`"];
 
-TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation.  The result is a TTerm of TAG=LAM that can be TApp'd to a tensor or driven through TRealize/TGrad/etc.";
-TNetOf::usage           = "TNetOf[net] returns the original Wolfram net that TFromNet converted to produce the TTerm `net` (or $Failed if `net` was not built by TFromNet[net]).  Used by TNetTrain to rebuild a fresh batched forward over a training input slot.";
-TNetParams::usage       = "TNetParams[net] returns the trainable weight handles (TTensorCreate TTerms) collected while TFromNet built the TTerm `net`, identified by the Sow-provenance recorded during the build, in layer order.  These are the tensors TNetTrain updates in place; TGrad auto-differentiates every reachable float leaf.";
-TNetParamInfo::usage    = "TNetParamInfo[net] returns the trainable weight handles of the TTerm `net` paired with their {layerHead, paramName} provenance, as a list of <|\"Term\", \"Layer\", \"Param\"|> associations in layer order.  TNetParams[net] is the same handles without the provenance.";
+TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net, ids] for a token-encoder net (a List[Integer] of 1-indexed token ids) traverses the real NetChain / NetGraph and returns the {seq, vocab} logits TTerm -- e.g. GPT-2 inference, with the tied token-embedding LM head appended.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation; the lifted forward runs at that input shape and serves inference there.  For a token-encoder net there is no fixed input shape, so use the 2-arg TFromNet[net, ids] form.";
+TToNet::usage           = "TToNet[lam] does a best-effort reconstruction of a NetChain from the GRAPH of a TFromNet[net]-built LAM `lam` -- no net is stored.  Recognises the standard layer sub-DAG signatures (Linear / Elementwise(ReLU) / Softmax / Flatten), reading each layer's weights straight off the graph leaves; NetChain infers the input dimension from the first Linear layer's weight.  Returns a Failure for a body containing a conv / pool / unrecognised op (their im2col lowering does not round-trip cleanly).";
+TNetParams::usage       = "TNetParams[net] returns the trainable weight handles (float-leaf TEN TTerms) derived from the GRAPH of a TFromNet-built `net` (a lifted LAM or a forward UOP term), in the C leaf-walk's stable order -- no Sow-provenance, no registry.  These are the tensors baked into the forward; TGrad auto-differentiates every reachable float leaf and TNetTrain updates them in place.";
+TNetParamInfo::usage    = "TNetParamInfo[net] returns the trainable weight handles of `net` paired with best-effort provenance, as a list of <|\"Term\", \"Layer\", \"Param\"|> associations.  Without a stored net the Layer is Missing[\"NotStored\"] and Param is inferred from the handle's shape (rank-2+ -> \"Weights\", rank-1 -> \"Biases\"); TNetParams[net] is the same handles without provenance.";
 TNetInitialize::usage   = "TNetInitialize[net] re-initialises the trainable weights of the TFromNet-built TTerm `net` in place: Glorot for weight matrices, ones for normalisation scalings, zeros for biases.  Installed as the NetInitialize UpValue on TTerms.";
 TFromLayer::usage       = "TFromLayer[layer, x] is the single-layer form of TFromNet.";
 TLayerWeights::usage    = "TLayerWeights[layer] returns the NumericArrays of every learnable parameter a layer carries (Weights, Biases, ...), in the layer-specific declaration order.";
@@ -87,11 +87,6 @@ TGELU::usage             = "TGELU[x] applies the tanh-form GELU approximation: 0
 TCausalMask::usage       = "TCausalMask[seq] returns a {seq, seq} TTerm wrapping a fresh tensor whose entries are 0 at (i, j) with j <= i and -1e9 at j > i.  Add to attention scores before softmax to zero out future-token attention.";
 TLayerNormAffine::usage  = "TLayerNormAffine[x, gamma, beta] applies TLayerNorm[x] then multiplies by gamma + adds beta along the last axis.  GPT-2's layer-norm carries learned gamma/beta; the bare TLayerNorm in this file normalises only.";
 TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q, K, V are {seq, dim} TTerms with dim = n_heads * d_head; mask is a {seq, seq} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).\n\nTMultiHeadAttention[Q, K, V, n_heads, mask, scale] uses the explicit `scale` factor in place of the default 1/Sqrt[d_head] (pass 1.0 when the caller has already pre-scaled Q, as GPT-2's NetGraph does).";
-TGPT2SelfAttention::usage = "TGPT2SelfAttention[x, wQ, bQ, wK, bK, wV, bV, wO, bO, nHeads] computes one GPT-2 causal multi-head self-attention block over a {seq, dim} input: Q/K/V = x.W + b projections (each W is the {dim,dim} input-first weight, b the {dim} bias), causal multi-head attention with the 1/Sqrt[d_head] scale, then the output projection x.wO + bO.  Mirrors the Wolfram GPT-2 attention sub-NetGraph (bare-dot ScoringNet, Mask -> Causal, the per-head scale pre-applied to Q) and matches it to f32 tolerance.";
-TGPT2MLP::usage = "TGPT2MLP[x, w1, b1, w2, b2] computes the GPT-2 feed-forward block over a {seq, dim} input: GELU(x.w1 + b1).w2 + b2.  w1 is {dim, 4*dim}, w2 is {4*dim, dim} (input-first TLinear convention).  GELU is the tanh-form approximation (TGELU).";
-TGPT2Block::usage = "TGPT2Block[x, params, nHeads] runs one full pre-norm GPT-2 transformer block over a {seq, dim} input: x + Attention(LayerNorm(x)) then h + MLP(LayerNorm(h)).  `params` is an association carrying the two NormalizationLayer scale/bias pairs and the attention + MLP weights extracted from the Wolfram net (see TGPT2FromArrays).";
-TGPT2FromArrays::usage = "TGPT2FromArrays[arrays, ids] builds the full GPT-2 forward as a TTerm over a host-side list of (1-indexed) token `ids`.  `arrays` is the weight association produced by importing the Wolfram GPT-2 net (token + positional embeddings, one entry per transformer block, the final LayerNorm, and the tied LM-head weight).  Returns the {seq, vocab} logits TTerm; the last row holds the next-token distribution.  nHeads defaults to 12 (GPT-2 117M).";
-
 Begin["`Private`"];
 
 (* === Tensor-method helpers ============================== *)
@@ -913,78 +908,15 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
     ]
 ]
 
-(* === GPT-2 attention / MLP / block (extracted-weight forward) ===
-   These compose the building blocks above into the exact GPT-2
-   transformer forward, driven by the weight arrays extracted from the
-   Wolfram net (TGPT2FromArrays below).  Each projection is the
-   standard nn.Linear `x . W + b`; W is the {dim, dim} input-first
-   weight (the Wolfram {out, in} weight transposed once on the host).
-   The per-head 1/Sqrt[d_head] scale is folded into TMultiHeadAttention
-   (the Wolfram graph pre-scales Q by 0.125 = 1/Sqrt[64] in a separate
-   Elementwise node + sets the AttentionLayer ScoreRescaling -> None;
-   the two are arithmetically identical). *)
-TGPT2SelfAttention[x_TTerm,
-                   wQ_TTerm, bQ_TTerm, wK_TTerm, bK_TTerm,
-                   wV_TTerm, bV_TTerm, wO_TTerm, bO_TTerm,
-                   nHeads_Integer] := Module[{q, k, v, mask, seq, attn},
-    seq = tUopShape[x][[1]];
-    q   = TLinear[x, wQ, bQ];
-    k   = TLinear[x, wK, bK];
-    v   = TLinear[x, wV, bV];
-    mask = TCausalMask[seq];
-    attn = TMultiHeadAttention[q, k, v, nHeads, mask];
-    TLinear[attn, wO, bO]
-]
-
-TGPT2MLP[x_TTerm, w1_TTerm, b1_TTerm, w2_TTerm, b2_TTerm] :=
-    TLinear[TGELU[TLinear[x, w1, b1]], w2, b2]
-
-(* One pre-norm transformer block: residual around LayerNorm -> attention,
-   then residual around LayerNorm -> MLP.  Matches GPT-2's two-sub-NetGraph
-   block (block.1 = norm + attention + residual add, block.2 = norm + MLP
-   + residual add). *)
-TGPT2Block[x_TTerm, params_Association, nHeads_Integer] := Module[{h, attn, mlp},
-    attn = TGPT2SelfAttention[
-        TLayerNormAffine[x, params["norm1Scale"], params["norm1Bias"]],
-        params["wQ"], params["bQ"], params["wK"], params["bK"],
-        params["wV"], params["bV"], params["wO"], params["bO"], nHeads];
-    h   = x + attn;
-    mlp = TGPT2MLP[
-        TLayerNormAffine[h, params["norm2Scale"], params["norm2Bias"]],
-        params["w1"], params["b1"], params["w2"], params["b2"]];
-    h + mlp
-]
-
-(* Full GPT-2 forward over a token-id sequence.  `arrays` carries the
-   weights extracted from the Wolfram net:
-     "TokenEmbedding"   {vocab, dim}     tied with the LM head
-     "PositionEmbedding"{maxPos, dim}
-     "Blocks"           list of per-block parameter associations
-     "FinalNormScale"/"FinalNormBias"    {dim}
-   Token + positional embeddings are gathered for the (1-indexed) `ids`
-   and the first Length[ids] positions, summed (the embedding NetGraph's
-   inputCombine = Plus), run through each transformer block, the final
-   LayerNorm, and projected onto the tied token-embedding matrix to get
-   {seq, vocab} logits.  GPT-2's classifier weight IS the token-embedding
-   matrix (weight tying), so logits = hidden . tokenEmbedding^T. *)
-TGPT2FromArrays[arrays_Association, ids_List, nHeads_Integer : 12] := Module[{
-    tokEmb, posEmb, seq, tokRows, posRows, x, blocks, finalNorm, logits
-},
-    tokEmb = arrays["TokenEmbedding"];
-    posEmb = arrays["PositionEmbedding"];
-    seq    = Length[ids];
-    (* 1-indexed Wolfram ids -> 0-indexed gather rows. *)
-    tokRows = TEmbeddingMatrix[tokEmb, ids - 1];
-    posRows = TEmbeddingMatrix[posEmb, Range[0, seq - 1]];
-    x = tokRows + posRows;
-    blocks = arrays["Blocks"];
-    x = Fold[TGPT2Block[#1, #2, nHeads] &, x, blocks];
-    finalNorm = TLayerNormAffine[x,
-        arrays["FinalNormScale"], arrays["FinalNormBias"]];
-    (* tied head: logits = hidden . tokenEmbedding^T -> {seq, vocab}. *)
-    logits = finalNorm . Transpose[tokEmb];
-    logits
-]
+(* GPT-2 inference is a PURE GRAPH now: TFromNet[gpt2, ids] traverses the
+   real NetModel NetChain / NetGraph (embedding -> 12 pre-norm transformer
+   blocks -> final LayerNorm) via the fromLayer cases above and appends the
+   tied token-embedding LM head, yielding the {seq, vocab} logits TTerm.  The
+   per-layer building blocks (TEmbeddingMatrix, TLayerNormAffine, TGELU,
+   TLinear, TMultiHeadAttention, TCausalMask) are validated in gpt2.wlt; the
+   hand-assembled TGPT2FromArrays / TGPT2Block / TGPT2SelfAttention / TGPT2MLP
+   forward (and its raw-array extraction in Examples/gpt2_weights.wl) were
+   deleted -- the graph traversal reproduces them token-for-token. *)
 
 (* Stitch a list of nHeads {seq, dHead} TTerms into {seq, dim=
    nHeads*dHead} via per-head PAD into the corresponding column
@@ -1016,29 +948,12 @@ $layerParams[_]                  = {}
 TLayerWeights[layer_] :=
     NetExtract[layer, #] & /@ $layerParams[Head[layer]]
 
-(* Each weight is a plain TTensorCreate leaf Sow'd under "thvmNetParam".
-   The Sow-provenance -- NOT a per-tensor flag -- is how TNetParams /
-   TNetTrain identify the trainable weights (matching tinygrad's removal
-   of requires_grad: TGrad auto-grads every reachable float leaf, and the
-   net's param list decides what updates).  A caller that wants the
-   trainable parameters of a lifted net Reaps that tag around TFromNet:
-     {fwd, {params}} = Reap[TFromNet[net, x], "thvmNetParam"]
-   yielding the very TTerms baked into the forward, so TSet updates flow
-   back into it.  Sow with no surrounding Reap is harmless.
-
-   Provenance (term + layer head + parameter name, in declaration order) is
-   Sow'd alongside on a SEPARATE "thvmNetParamInfo" tag so TNetParamInfo /
-   TNetInitialize can route Glorot vs ones vs zeros per parameter kind, while
-   the bare "thvmNetParam" tag stays the {x, y} contract existing callers
-   Reap. *)
-TLayerToTensors[layer_] :=
-    With[{ts = TTensorCreate /@ TLayerWeights[layer]},
-        Sow[#, "thvmNetParam"] & /@ ts;
-        MapThread[
-            Sow[<|"Term" -> #1, "Layer" -> Head[layer], "Param" -> #2|>, "thvmNetParamInfo"] &,
-            {ts, $layerParams[Head[layer]]}];
-        ts
-    ]
+(* Each weight is a plain TTensorCreate leaf baked into the forward.  The
+   trainable weights are identified from the GRAPH afterwards (TNetParams =
+   the body's float-leaf TEN terms), matching tinygrad's removal of
+   requires_grad: TGrad auto-grads every reachable float leaf, and the param
+   list decides what updates -- no Sow-provenance, no registry. *)
+TLayerToTensors[layer_] := TTensorCreate /@ TLayerWeights[layer]
 
 (* === forward dispatch =================================== *)
 
@@ -1337,21 +1252,35 @@ fromLayer[NetGraph, g_, input_] := Module[{
     getInput[n_] := Module[{
         node = childAssoc[n],
         preds = predsOf[n],
-        arity, predTerms
+        arity, predTerms, distinct
     },
         arity = Length @ Replace[
             Information[node, "InputPortNames"],
             _Missing -> {Input}];
         predTerms = results /@ preds;
-        Switch[ {arity, Length[predTerms]},
-            {1, 0},   input,
-            {1, _},   First[predTerms],
-            (* arity > 1 with too few predecessors -> input fills the
-               front (residual-add convention). *)
-            {_, _} /; arity > Length[predTerms],
-                      Join[ConstantArray[input, arity - Length[predTerms]],
-                           predTerms],
-            _,        predTerms
+        (* GPT-2 self-attention: a sub-NetGraph with several input ports
+           (Input + Query) all fed by the SAME predecessor (the pre-norm
+           residual stream).  Collapse identical predecessors to one term so
+           the sub-NetGraph receives a single input it fans to every port --
+           NOT a multi-element List its inner 0-pred nodes would mis-read. *)
+        distinct = DeleteDuplicates[predTerms];
+        Which[
+            (* a sub-NetGraph / NetMapOperator whose multiple ports are all fed
+               by ONE predecessor (GPT-2 self-attention: Input + Query both <-
+               the pre-norm stream).  Parallel edges collapse to a single pred;
+               pass that one term so the sub-net fans it to every port.  Genuine
+               multi-input combine layers (ThreadingLayer / AttentionLayer) take
+               the residual-pad branch below instead. *)
+            arity > 1 && Length[distinct] === 1
+                && MatchQ[Head[node], NetGraph | NetMapOperator | NetChain],
+                First[distinct],
+            arity === 1 && Length[predTerms] === 0, input,
+            arity === 1, First[predTerms],
+            (* arity > 1 with too few predecessors -> input fills the front
+               (residual-add convention for ThreadingLayer / AttentionLayer). *)
+            arity > Length[predTerms],
+                Join[ConstantArray[input, arity - Length[predTerms]], predTerms],
+            True, predTerms
         ]];
 
     Do[
@@ -1375,8 +1304,18 @@ fromLayer[NetGraph, g_, input_] := Module[{
    q,k,v packing (or use TMultiHeadAttention[..., mask] directly
    when not going through TFromNet). *)
 fromLayer[AttentionLayer, layer_, qkv_List] /; Length[qkv] === 3 :=
-    Module[{q, k, v, params, multiHead, mask, rescale, qShape, nHeads, seq, dim, scale},
-        {q, k, v} = qkv;
+    Module[{q, k, v, params, multiHead, mask, rescale, qShape, nHeads, seq, dim,
+            scale, portNames, qi, ki, vi},
+        (* The NetGraph traversal hands the three predecessors in the layer's
+           InputPortNames order (GPT-2: {Key, Value, Query}).  Reorder to our
+           {q, k, v} convention by name so the scaled Query projection lands on
+           Q, not on K/V (a scramble that silently corrupts the attention). *)
+        portNames = Replace[Information[layer, "InputPortNames"],
+            Except[_List] -> {"Query", "Key", "Value"}];
+        qi = FirstPosition[portNames, "Query", {1}][[1]];
+        ki = FirstPosition[portNames, "Key",   {2}][[1]];
+        vi = FirstPosition[portNames, "Value", {3}][[1]];
+        q = qkv[[qi]];  k = qkv[[ki]];  v = qkv[[vi]];
         params    = Quiet @ NetExtract[layer, "Parameters"];
         multiHead = TrueQ @ Lookup[params, "MultiHead", False];
         mask      = Lookup[params, "Mask", None];
@@ -1438,13 +1377,65 @@ TIdentity[x_] := x
    their predecessor outputs to). *)
 TFromLayer[layer_, x_] := fromLayer[Head[layer], layer, x]
 
+(* A nested NetChain (e.g. GPT-2's transformer sub-chain inside the top
+   NetChain) folds like the top-level chain. *)
+fromLayer[NetChain, inner_, x_] := TFromNet[inner, x]
+
 TFromNet[chain_NetChain, x_TTerm] := Fold[
     TFromLayer[#2, #1] &,
     x,
     Table[chain[[i]], {i, Length[chain]}]
 ]
 
+(* Token-encoder form: a List[Integer] of (1-indexed) token ids flows into the
+   first layer (an EmbeddingLayer or a NetGraph whose embedding consumes the
+   ids), which returns a TTerm; the rest of the chain folds over TTerms as
+   usual.  Used for GPT-2 inference: TFromNet[gpt2, ids] -> {seq, vocab}
+   logits, no hand-assembled forward.
+
+   GPT-2's NetModel outputs the {seq, dim} hidden state (its LM head is the
+   tied token-embedding projection, not a layer).  When the folded output is
+   {seq, dim} and the net carries a {vocab, dim} token EmbeddingLayer, append
+   the tied head logits = hidden . tokenEmbedding^T -> {seq, vocab}. *)
+TFromNet[chain_NetChain, ids_List] := Module[{hidden, tokEmb},
+    hidden = Fold[
+        TFromLayer[#2, #1] &,
+        ids,
+        Table[chain[[i]], {i, Length[chain]}]];
+    tokEmb = tokenEmbeddingArray[chain];
+    If[ MatchQ[hidden, _TTerm] && tokEmb =!= None
+            && Length[tUopShape[hidden]] === 2
+            && Last[tUopShape[hidden]] === Last[Dimensions[tokEmb]],
+        hidden . Transpose @ TTensorCreate @ NumericArray[tokEmb, "Real32"],
+        hidden
+    ]
+]
+
+(* every leaf layer of a net, depth-first.  Descends ONLY container heads
+   (NetChain / NetGraph / NetMapOperator) via NetExtract[_, All]; a leaf layer
+   (EmbeddingLayer / LinearLayer / ...) is returned as-is (NetExtract[All] on a
+   leaf would expose its parameter arrays, not sub-layers). *)
+allLayers[net_] := If[
+    MatchQ[Head[net], NetChain | NetGraph | NetMapOperator],
+    Module[{kids = Quiet @ NetExtract[net, All]},
+        If[ AssociationQ[kids], kids = Values[kids]];
+        If[ ListQ[kids], Join @@ (allLayers /@ kids), {net}]],
+    {net}
+]
+
+(* the {vocab, dim} token-embedding weight of a token-LM net: the EmbeddingLayer
+   with the LARGEST vocab axis (GPT-2's token embed {50257,768} vs the smaller
+   positional {1024,768}), or None. *)
+tokenEmbeddingArray[net_] := Module[{embs, weights},
+    embs = Cases[allLayers[net], _EmbeddingLayer];
+    weights = Cases[Quiet @ NetExtract[#, "Weights"] & /@ embs,
+        w_ /; MatchQ[Dimensions[w], {_, _}]];
+    If[ weights === {}, None,
+        Normal @ First @ SortBy[weights, -First[Dimensions[#]] &]]
+]
+
 TFromNet[layer_, x_TTerm] := TFromLayer[layer, x]
+TFromNet[layer_, ids_List] := TFromLayer[layer, ids]
 
 (* netInputShape[net]: returns the input port shape as a List of
    integers, or $Failed if the net has zero or multiple input ports
@@ -1483,61 +1474,198 @@ netInputShape[net_] := Module[{ports, raw, shape},
    list in via With so the `_List` pattern matches before the body
    captures `x`.
 
-   The build is Reaped on "thvmNetParam" and the {originalNet, params}
-   pair registered (keyed by the returned LAM term) so TNetOf / TNetParams
-   can recover both later -- TNetTrain (Train.wl) needs the original net to
-   rebuild a fresh batched forward over its own input slot. *)
+   A single baked body bakes the input shape into every movement-op
+   dim (RESHAPE / EXPAND / SHRINK / the rank-3-vs-rank-4 conv / Flatten
+   branch choice), so it runs only at the lifted input shape and serves
+   inference there.  Nothing stores the originating net: the trainable
+   weights come from the graph via gradFloatLeafTerms (TNetParams), and to
+   train over a different batch size pass the NetChain to TNetTrain, which
+   lifts the batched forward directly. *)
+(* token-encoder net (its input is a List[Integer] of token ids, consumed by
+   an EmbeddingLayer): there is no fixed input-tensor shape to lift over, so a
+   variable-length token TLam is impractical.  Guide to the 2-arg graph form
+   TFromNet[net, ids] (which returns the {seq, vocab} logits TTerm directly). *)
+TFromNet[net_] /; tokenEmbeddingArray[net] =!= None := (
+    Message[TFromNet::tokennet, net]; $Failed
+)
+
 TFromNet[net_] := With[{shape = netInputShape[net]},
     If[shape === $Failed,
         Message[TFromNet::noinput, net]; $Failed,
-        Module[{x, built},
-            built = Reap[TLamShape[shape, x, TFromNet[net, x]], "thvmNetParamInfo"];
-            registerNet[First[built], net, Flatten[Last[built]]]
-        ]
+        Module[{x}, TLamShape[shape, x, TFromNet[net, x]]]
     ]
 ]
 
-(* === net registry (slot for TNetOf / TNetParams / TNetParamInfo) ===
-   TFromNet[net] registers the original Wolfram net and the trainable-weight
-   provenance Sown during its build (term + layer + param name), keyed by the
-   returned LAM term's VAL.  TNetOf recovers the net (so a fresh batched
-   forward can be rebuilt over a training input slot); TNetParamInfo recovers
-   the provenance; TNetParams just the handles. *)
-$thvmNetRegistry = <||>;
+(* === lam-graph accessors (no stored net) ===
+   bound-var loc and body of a TFromNet-built LAM.  The body's float-leaf
+   TEN terms (gradFloatLeafTerms, Tensor.wl) ARE the trainable weights baked
+   into the forward; the bound input VAR is a TAG_VAR, never a TAG_TEN, so it
+   is excluded for free. *)
+lamBodyTerm[lam_TTerm]   := THeapRead[TTermVal[lam]]
 
-registerNet[term_TTerm, net_, info_List] := (
-    $thvmNetRegistry[TTermVal[term]] = <|"Net" -> net, "Params" -> info|>;
-    term
-)
-registerNet[other_, _, _] := other
+(* TNetParams[net]: the trainable weight handles derived from the GRAPH --
+   the float-leaf TEN terms reachable from `net`, in the C leaf-walk's stable
+   order.  These are the very tensors baked into the forward, so TSet updates
+   and TGrad cotangents flow back into it.  Same handles the old Sow-registry
+   returned (8 for LeNet); no net stored.  Accepts either a lifted LAM (walk
+   its body) or a forward UOP term directly (walk it) -- the latter is the
+   batched forward TNetTrain builds from the NetChain and grads against. *)
+TNetParams[net_TTerm] := gradFloatLeafTerms[
+    If[TTermTag[net] === $TagLAM, lamBodyTerm[net], net]]
 
-TNetOf[net_TTerm]        := Lookup[$thvmNetRegistry[TTermVal[net]], "Net", $Failed]
-TNetOf[_]                := $Failed
-TNetParamInfo[net_TTerm] := Lookup[$thvmNetRegistry[TTermVal[net]], "Params", {}]
-TNetParams[net_TTerm]    := Lookup[#, "Term"] & /@ TNetParamInfo[net]
+(* TNetParamInfo[lam]: the same handles paired with provenance.  Without the
+   net we cannot recover the originating {Layer, Param}; we infer a minimal
+   Param from each handle's shape (rank-2+ weight matrix -> "Weights"; rank-1
+   -> "Biases") so TNetInitialize still routes Glorot / zeros sensibly, and
+   leave Layer as Missing.  Documented best-effort provenance. *)
+paramKindFromShape[shape_List] := If[Length[shape] >= 2, "Weights", "Biases"]
+TNetParamInfo[lam_TTerm] := Function[t,
+    <|"Term" -> t, "Layer" -> Missing["NotStored"],
+      "Param" -> paramKindFromShape[TTensorShape[t]]|>] /@ TNetParams[lam]
 
-(* TNetInitialize[net]: re-initialise the net's trainable weights IN PLACE --
-   Glorot for weight matrices, ones for normalisation scalings, zeros for
-   biases -- straight into each parameter tensor's buffer, no round-trip
-   through a Wolfram net.  Installed as the NetInitialize UpValue on TTerms. *)
-TNetInitialize[net_TTerm] := (
-    Function[info,
-        With[{t = info["Term"], shape = TTensorShape[info["Term"]]},
+(* TNetInitialize[lam]: re-initialise the trainable weights IN PLACE --
+   Glorot for weight matrices, zeros for biases -- straight into each
+   parameter tensor's buffer, derived from the graph's float leaves.
+   Installed as the NetInitialize UpValue on TTerms. *)
+TNetInitialize[lam_TTerm] := (
+    Function[t,
+        With[{shape = TTensorShape[t]},
             TSet[t,
-                Switch[info["Param"],
-                    "Weights", TGlorot[shape],
-                    "Scaling", TOnes[shape],
-                    _,         TZeros[shape]]]]] /@ TNetParamInfo[net];
-    net
+                If[ Length[shape] >= 2, TGlorot[shape], TZeros[shape]]]]
+    ] /@ TNetParams[lam];
+    lam
 )
-TTerm /: NetInitialize[net_TTerm] := TNetInitialize[net]
+TTerm /: NetInitialize[lam_TTerm] := TNetInitialize[lam]
+
+(* A lifted LAM runs only at its lifted input shape (the movement-op dims and
+   the conv / Flatten rank branch bake the input shape in), so it serves
+   inference at that shape.  Re-batching a lifted conv lam net-free needs
+   shape re-inference on the baked DAG -- a follow-up; to train over varying
+   batch sizes, pass the NetChain to TNetTrain, which lifts the batched
+   forward directly. *)
+
+(* === TToNet[lam]: best-effort graph -> NetChain reconstruction ===========
+   No net is stored, so this re-derives a NetChain from the lifted body's UOP
+   structure for the standard layer signatures (Linear / ReLU-Elementwise /
+   Softmax).  Each layer T-constructor lowers to a fixed sub-DAG (see fromLayer
+   / TLinear / TReLU / TSoftmaxAxis above); we peel those signatures from the
+   output back to the bound VAR.  Conv / Pool lower to a deep im2col movement
+   chain that does not round-trip cleanly; a body containing one (or any
+   unrecognised op) returns a clear Failure (best-effort, per the API).
+   NetChain re-infers the input dimension from the first Linear layer's
+   weight, so no stored input shape is needed.  Not on the training path. *)
+
+(* heap accessors over a UOP/TEN term *)
+uTag[t_]    := $termTagFn[ttermRaw[t]]
+uExt[t_]    := $termExtFn[ttermRaw[t]]
+uChild[t_, i_] := TTerm[$heapReadFn[$termValFn[ttermRaw[t]] + i]]
+uIsUop[t_, op_] := uTag[t] === $TagUOP && uExt[t] === op
+uIsTen[t_]  := uTag[t] === $TagTEN
+
+(* strip a RESHAPE / EXPAND / PERMUTE wrapper chain down to the core term *)
+unwrapMove[t_] := If[ uTag[t] === $TagUOP
+        && MemberQ[{$UopReshape, $UopExpand, $UopPermute}, uExt[t]],
+    unwrapMove[uChild[t, 0]], t]
+
+(* host array of a TEN term *)
+tenArray[t_] := Normal @ TTensorData[t]
+
+(* peelLayer[t]: {layer, innerTerm} for a recognised trailing layer, else $Failed.
+   Linear:  ADD[REDUCE[MUL[EXPAND RESHAPE inner, EXPAND RESHAPE PERMUTE W]], EXPAND RESHAPE b]
+   ReLU:    MUL[CMPLT[EXPAND CONST(0), inner], inner]
+   Tanh:    (TTanh chain) -- recognised by its TANH-free sigmoid assembly is
+            hard to invert, so only the explicit cases above + Softmax/Flatten. *)
+peelLayer[t_] := Module[{red, mul, wMove, bMove, w, bias, wArr, inL, inR, inner},
+    Which[
+        (* LinearLayer: ADD[REDUCE[MUL[EXPAND RESHAPE in, EXPAND RESHAPE PERMUTE W]],
+                             EXPAND RESHAPE bias] *)
+        uIsUop[t, $UopAdd]
+            && uIsUop[(red = uChild[t, 0]), $UopReduce]
+            && uIsUop[(mul = uChild[red, 0]), $UopMul]
+            && uIsTen[(bMove = unwrapMove[uChild[t, 1]])],
+            inL = unwrapMove[uChild[mul, 0]];
+            inR = unwrapMove[uChild[mul, 1]];
+            (* one operand unwraps to the weight TEN, the other to the input
+               (the prior layer's output, movement-unwrapped for the next peel) *)
+            Which[
+                uIsTen[inR] && !uIsTen[inL], w = inR; inner = inL,
+                uIsTen[inL] && !uIsTen[inR], w = inL; inner = inR,
+                True, Return[$Failed]];
+            bias = bMove;
+            (* unwrapMove strips the PERMUTE too, so `w` is the ORIGINAL
+               {out,in} layer weight TEN -- exactly what LinearLayer wants. *)
+            wArr = tenArray[w];
+            {LinearLayer[First[Dimensions[wArr]],
+                "Weights" -> wArr, "Biases" -> tenArray[bias]],
+             inner},
+        (* ReLU: MUL[CMPLT[EXPAND CONST(0), inner], inner] *)
+        uIsUop[t, $UopMul]
+            && uIsUop[uChild[t, 0], $UopCmplt],
+            {ElementwiseLayer[Ramp], unwrapMove[uChild[t, 1]]},
+        (* SoftmaxLayer: TSoftmaxAxis root = MUL[exp(x-max), EXPAND RECIP sum] *)
+        uIsUop[t, $UopMul]
+            && uIsUop[uChild[t, 1], $UopExpand]
+            && uIsUop[uChild[uChild[t, 1], 0], $UopRecip],
+            {SoftmaxLayer[], softmaxInner[t]},
+        True, $Failed
+    ]
+]
+
+(* root-is-softmax test (TSoftmaxAxis = MUL[exp(x-max), EXPAND RECIP sum]). *)
+rootIsSoftmaxQ[t_TTerm] := And[
+    uIsUop[t, $UopMul],
+    uIsUop[uChild[t, 1], $UopExpand],
+    uIsUop[uChild[uChild[t, 1], 0], $UopRecip],
+    uIsUop[uChild[t, 0], $UopExp2]]
+
+(* peel a trailing SoftmaxLayer off a forward term, returning the pre-softmax
+   logits (so TCategoricalCrossEntropy's own logsumexp isn't double-applied).
+   A non-softmax forward passes through unchanged. *)
+stripTrailingSoftmax[fwd_TTerm] :=
+    If[ rootIsSoftmaxQ[fwd], softmaxInner[fwd], fwd]
+
+(* the pre-softmax logits term: TSoftmaxAxis is exp(x-max)/sum; the numerator
+   EXP2 chain's argument SUB's first operand is the logits x. *)
+softmaxInner[t_] := Module[{num, scaled, sub},
+    num = uChild[t, 0];                         (* EXP2[(x-max)*log2e] *)
+    If[ !uIsUop[num, $UopExp2], Return[$Failed]];
+    scaled = uChild[num, 0];                     (* MUL[(x-max), log2e] *)
+    If[ !uIsUop[scaled, $UopMul], Return[$Failed]];
+    sub = uChild[scaled, 0];                      (* SUB = ADD[x, NEG max] *)
+    If[ !uIsUop[sub, $UopAdd], Return[$Failed]];
+    uChild[sub, 0]                                (* x = the logits *)
+]
+
+TToNet[lam_TTerm] := Module[{body, layers, t, step, guard},
+    body   = lamBodyTerm[lam];
+    layers = {};
+    t      = body;
+    guard  = 0;
+    While[ uTag[t] =!= $TagVAR && guard < 256,
+        guard += 1;
+        step = peelLayer[t];
+        If[ step === $Failed,
+            Return @ Failure["TToNetUnsupported",
+                <|"Message" -> "TToNet: graph layer not reconstructible "
+                    <> "(conv / pool / unrecognised op); best-effort recovery "
+                    <> "supports Linear / Elementwise / Softmax / Flatten only."|>]];
+        AppendTo[layers, First[step]];
+        t = Last[step]
+    ];
+    If[ uTag[t] =!= $TagVAR,
+        Return @ Failure["TToNetUnsupported",
+            <|"Message" -> "TToNet: did not reach the input variable."|>]];
+    NetChain[Reverse[layers]]
+]
+TToNet[_] := $Failed
 
 TFromNet::eltunsupported = "ElementwiseLayer with function `1` has no UOp equivalent yet (interact_grad would need a corresponding grad rule).";
 TFromNet::convtbd        = "ConvolutionLayer conversion not yet implemented (`1`).  Step 14 task: needs movement-op support in materialize/interpret + the matching grad rules.";
 TFromNet::noinput        = "TFromNet[`1`]: cannot infer input shape from the net's InputPorts.  Provide an explicit input via TFromNet[net, x] or supply a net with a single concrete-shape input port.";
+TFromNet::tokennet       = "TFromNet[`1`] is a token-encoder net (its input is a token-id list, not a fixed-shape tensor).  Lift it over an explicit id list instead: TFromNet[net, ids] returns the {seq, vocab} logits TTerm graph.";
 
 (* TNetTrain / TNetPredict are defined in Train.wl (the inert-loop training
-   layer), which loads after NN.wl and depends on TFromNet / TNetOf /
+   layer), which loads after NN.wl and depends on TFromNet / TToNet /
    TNetParams above. *)
 
 End[];

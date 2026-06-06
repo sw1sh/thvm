@@ -135,24 +135,26 @@ VerificationTest[
 ]
 
 (* === end-to-end sugared training: a TFromNet-lifted MLP trains via the
-   inert loop.  Reap collects the 4 trainable weights off "thvmNetParam",
-   each gets a materialized SGD ASSIGN step, and one TWnf drives 80 iters
-   of the chained loop.  Exercises the WHOLE sugared path: TFromNet conv/
-   linear lowering + Reap param-collection + stable TCategoricalCrossEntropy
-   + the multi-param inert loop.  A linearly-separable 2-class set must be
-   classified perfectly with the loss driven near zero. *)
+   inert loop.  TNetParams reads the 4 trainable weights off the forward
+   GRAPH (float leaves), each gets a materialized SGD ASSIGN step, and one
+   TWnf drives 80 iters of the chained loop.  Exercises the WHOLE sugared
+   path: TFromNet conv/linear lowering + graph param-collection + stable
+   TCategoricalCrossEntropy + the multi-param inert loop.  A linearly-
+   separable 2-class set must be classified perfectly with the loss driven
+   near zero. *)
 VerificationTest[
     TInit[];
     SeedRandom[1234];
-    Module[{xd, yd, net, xS, yT, lr, fwd, sown, params, mk, post},
+    Module[{xd, yd, net, xS, yT, lr, fwd, params, mk, post},
         xd = N@{{1., 1.}, {1.5, 1.2}, {0.5, 0.8}, {1.2, 0.9},
                 {-1., -1.}, {-1.2, -0.8}, {-0.7, -1.1}, {-0.9, -1.}};
         yd = N@{{1., 0.}, {1., 0.}, {1., 0.}, {1., 0.},
                 {0., 1.}, {0., 1.}, {0., 1.}, {0., 1.}};
         net = NetInitialize[NetChain[{LinearLayer[6], Ramp, LinearLayer[2]}, "Input" -> 2], RandomSeeding -> 7];
         xS = TTensorCreate[xd]; yT = TTensorCreate[yd]; lr = TUOpConst[0.3, "f32"];
-        {fwd, sown} = Reap[TFromNet[net, xS], "thvmNetParam"];
-        params = Flatten[sown];
+        fwd = TFromNet[net, xS];
+        (* float leaves of the forward minus the input slot = the 4 weights *)
+        params = Select[TNetParams[fwd], TTermVal[#] =!= TTermVal[xS] &];
         mk[i_] := TMaterialize[TNf[TAssign[params[[i]],
             TUOpAdd[params[[i]], TUOpNeg[TUOpMul[lr, TGrad[TCategoricalCrossEntropy[fwd, yT], params[[i]]]]]]]]];
         TDef["fnmlp_s1", mk[1]]; TDef["fnmlp_s2", mk[2]];

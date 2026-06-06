@@ -93,22 +93,25 @@ Reproduce: `wolframscript -file wl/THVMLink/Examples/nettrain_introspection.wls`
 
 ### Net introspection
 
-`TFromNet[net]` records the original Wolfram net and every trainable weight it
-collects, keyed by the lifted term, so the net can be taken apart later.
-`TNetParamInfo` returns each weight handle with the layer/role provenance used to
-write trained weights back; `TNetParams` is the same handles without the
-provenance; `TNetOf` returns the original `NetChain` the lift came from (so
-`TNetTrain` can rebuild a fresh batched forward over its own input slot):
+No net is stored. `TNetParams` reads the trainable weights straight off the
+lifted GRAPH - the float-leaf `TAG_TEN` terms baked into the forward - so they
+are exactly the tensors `TNetTrain` updates in place. `TNetParamInfo` is the
+same handles with best-effort provenance (the `Param` role is inferred from the
+shape - rank-2+ weight matrix vs rank-1 bias - since the originating layer is no
+longer kept). `TToNet` does a best-effort reconstruction of the `NetChain` from
+the graph itself for the standard layer signatures (Linear / Elementwise /
+Softmax / Flatten); it is not on the training path (`TNetTrain` re-batches via
+`TApp[lam, slot]`):
 
 ```
 net = TFromNet[...]  ->  Head: TTerm
-TNetParamInfo[net]  (4 trainable params, in layer order):
-  param 1:  Layer=LinearLayer  Param=Weights  shape={784, 64}
-  param 2:  Layer=LinearLayer  Param=Biases   shape={64}
-  param 3:  Layer=LinearLayer  Param=Weights  shape={64, 10}
-  param 4:  Layer=LinearLayer  Param=Biases   shape={10}
-TNetParams[net]  ->  4 weight handles (TAG_TEN, TRequiresGrad)
-TNetOf[net]  ->  NetChain[{LinearLayer, ElementwiseLayer, LinearLayer}]   (bit-faithful)
+TNetParamInfo[net]  (4 trainable params, in graph leaf order):
+  param 1:  Layer=Missing  Param=Biases   shape={10}
+  param 2:  Layer=Missing  Param=Weights  shape={784, 64}
+  param 3:  Layer=Missing  Param=Biases   shape={64}
+  param 4:  Layer=Missing  Param=Weights  shape={64, 10}
+TNetParams[net]  ->  4 weight handles (TAG_TEN, graph-derived)
+TToNet[net]  ->  NetChain[{LinearLayer, ElementwiseLayer, LinearLayer}]   (bit-faithful)
 ```
 
 These four `TAG_TEN` handles, already flagged `TRequiresGrad`, are exactly what
@@ -237,7 +240,7 @@ train profile (the single TWnf):
 ## Convolutional nets
 
 `TNetTrain` also trains a convolutional net directly from a Wolfram `NetChain`
-(no `TFromNet` wrapper, no `TNetOf` round-trip):
+(no `TFromNet` wrapper, no net round-trip):
 
 ```wolfram
 trained = TNetTrain[NetModel["LeNet"], RandomSample[ResourceData["MNIST", "TrainingData"], 32],

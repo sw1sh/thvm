@@ -82,35 +82,30 @@ Normal @ TRealize @ TMultiHeadAttention[q, k, v, 2, TCausalMask[3]]
 
 GPT-2's attention sub-network uses a bare-dot scoring net (no key transform), `Mask -> "Causal"`, and pre-scales the queries by `1/Sqrt[64]` in a separate node - arithmetically identical to the `1/Sqrt[dHead]` scale [TMultiHeadAttention]() folds in. The lift matches that spec, and a manual per-head bare-dot computation, to about `1.*^-8`.
 
-## One transformer block
+## The whole net is one graph
 
-[TGPT2SelfAttention]() wires the four projections (query, key, value, output) around [TMultiHeadAttention](), and [TGPT2MLP]() is the GELU feed-forward (`linear -> GELU -> linear`). [TGPT2Block]() assembles a full pre-norm block: the input plus attention-of-its-LayerNorm, then that plus the MLP-of-its-second-LayerNorm. With twelve heads and `dim = 768`, one block maps a `{seq, 768}` hidden state to another `{seq, 768}` - this is the unit the decoder stacks twelve deep.
+There is no hand-assembled forward. <code>[TFromNet]()[*net*, *ids*]</code> traverses the real GPT-2 [NetModel]() - a [NetChain]() of an embedding [NetGraph]() and a twelve-block transformer [NetChain]() - through the same per-layer cases the building blocks above came from. The embedding [NetGraph]() consumes the 1-indexed `ids` (token plus positional, summed), each pre-norm block is a [NetGraph]() of `norm -> attention -> residual add` then `norm -> linear -> GELU -> linear -> residual add`, and the final [NormalizationLayer]() closes the stack. GPT-2's LM head is the *tied* token-embedding projection (not a layer), so [TFromNet]() appends `hidden . tokenEmbedding^T` to produce the `{seq, vocab}` logits [TTerm](). The last row is the next-token distribution.
 
-The whole forward - token plus positional embedding, the twelve blocks, the final LayerNorm, and the tied head that projects onto the token-embedding matrix to get `{seq, vocab}` logits - is <code>[TGPT2FromArrays]()[*arrays*, *ids*]</code>. The last row of its output is the next-token distribution.
+## Loading the model
 
-## Loading the published weights
-
-The GPT-2 weights ship in the Wolfram Neural Net Repository. On recent NeuralNetworks versions the high-level [NetModel]() deserializer trips over a post-hoc `EmbeddingLayer` array and returns `$Failed`, so the example helper [`wl/THVMLink/Examples/gpt2_weights.wl`](../../Examples/gpt2_weights.wl) reads the cached `WLNet` file directly and pulls the weights out of the node tree. `GPT2ExtractArrays[]` returns the embedding matrices, the twelve per-block parameter sets, and the final-norm scale and shift; `GPT2Encoder[]` gives the BPE encoder and `GPT2Labels[]` the decoder token strings. (Run `NetModel["GPT2 Transformer Trained on WebText Data"]` once, online, to populate the cache.)
-
-The encoder turns a prompt into 1-indexed token ids, and the decoder labels turn them back into text - the round-trip is exact:
+The GPT-2 weights ship in the Wolfram Neural Net Repository; [NetModel]() loads them as a [NetChain](). The base model outputs the `{seq, 768}` hidden state (its head is the tied embedding), so its encoder turns a prompt into 1-indexed token ids and the token-label list of the `"Task" -> "LanguageModeling"` variant's output decoder turns ids back into text. Both are host-side helpers for this example - nothing is stored in the graph. (Run [NetModel]() once, online, to populate the cache.)
 
 ```wl
 #| eval: false
-Get[FileNameJoin[{PacletObject["WolframInstitute/THVMLink"]["Location"], "Examples", "gpt2_weights.wl"}]];
-encoder = GPT2Encoder[];
-labels = GPT2Labels[];
-StringJoin[labels[[encoder["The quick brown fox"]]]]
+net = NetModel["GPT2 Transformer Trained on WebText Data"];
+encoder = NetExtract[net, "Input"];
+encoder["The quick brown fox"]
 ```
-<!-- => "The quick brown fox" -->
+<!-- => {209, 1813, 7331, 21576} -->
 
 ## Generating text
 
-Greedy generation is a loop: run [TGPT2FromArrays]() over the running id sequence, take the [Ordering]() argmax of the last row, append it, and repeat. [`wl/THVMLink/Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) runs the whole pipeline. On the prompt `"The quick brown fox"` it generates:
+Greedy generation is a loop: run <code>[TFromNet]()[*net*, *ids*]</code> over the running id sequence, take the [Ordering]() argmax of the last row, append it, and repeat. [`wl/THVMLink/Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) runs the whole pipeline. On the prompt `"The quick brown fox"` it generates:
 
 ```
 The quick brown foxes are a great way to get to
 ```
 
-The first generated token is id 19 (`"es"`), and that argmax agrees with an independent numpy GPT-2 forward over the same extracted weights (top-5 next tokens `{19, 118, 63, 83, 50246}`) - so thvm reproduces GPT-2's own next-token prediction. Each forward rebuilds and realizes the full twelve-block graph including the 50257-wide head, so generation on the CPU runs about 20 s per token; the script prints each token as it lands.
+The first generated token is id 19 (`"es"`), and that argmax agrees with an independent numpy GPT-2 forward (top-5 next tokens `{19, 118, 63, 83, 50246}`) - so thvm reproduces GPT-2's own next-token prediction, token-for-token. Each forward builds and realizes the full twelve-block graph including the 50257-wide head, so generation on the CPU runs about 25 s per token; the script prints each token as it lands.
 
 Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmaxAxis](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.

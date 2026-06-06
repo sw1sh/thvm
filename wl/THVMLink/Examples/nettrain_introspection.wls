@@ -22,24 +22,25 @@ arch = {LinearLayer[64, "Input" -> 784], ElementwiseLayer[Ramp], LinearLayer[10]
 (* ===================================================================== *)
 banner["1. NET INTROSPECTION"];
 SeedRandom[7];
-net = TFromNet[NetInitialize @ NetChain[arch, "Input" -> 784]];
+chain = NetInitialize @ NetChain[arch, "Input" -> 784];
+net = TFromNet[chain];
 Print["net = TFromNet[...]  ->  Head: ", Head[net]];
 info = TNetParamInfo[net];
-Print["TNetParamInfo[net]  (", Length[info], " trainable params, in layer order):"];
+Print["TNetParamInfo[net]  (", Length[info], " trainable params, in graph leaf order):"];
 Do[ With[{e = info[[i]]},
     Print["  param ", i, ":  Layer=", e["Layer"], "  Param=", e["Param"], "  shape=", dims[e["Term"]]]],
     {i, Length[info]}];
-Print["TNetParams[net]  ->  ", Length[TNetParams[net]], " weight handles (TAG_TEN, Sow-provenance)"];
-rec = TNetOf[net];
-Print["TNetOf[net]  (faithful reconstruction from the term graph, registry-free):"];
+Print["TNetParams[net]  ->  ", Length[TNetParams[net]], " weight handles (TAG_TEN, graph-derived)"];
+rec = TToNet[net];
+Print["TToNet[net]  (best-effort reconstruction from the term graph, no net stored):"];
 Print["  Head: ", Head[rec]];
 Print["  layers: ", Head /@ (NetExtract[rec, #] & /@ Range[Length[arch]])];
 Print["  forward is bit-faithful to the term graph (pinned by training.wlt tnetof-reconstructs)"];
 
 (* ===================================================================== *)
 banner["2. KERNEL + MEMORY + BUFFER STATS"];
-tn = NetTrain[net, tr, "TrainingNet", MaxTrainingRounds -> 100, "LearningRate" -> 0.05];
-Print["NetTrain[net, data, \"TrainingNet\"]  ->  Head: ", Head[tn], "  (INERT: nothing has run)"];
+tn = TNetTrain[chain, tr, "TrainingNet", MaxTrainingRounds -> 100, "LearningRate" -> 0.05];
+Print["TNetTrain[chain, data, \"TrainingNet\"]  ->  Head: ", Head[tn], "  (INERT: nothing has run)"];
 Print["-- before TWnf --"];
 Print["  TKernelCount   = ", TKernelCount[]];
 Print["  TTensCount     = ", TTensCount[]];
@@ -90,7 +91,8 @@ Begin["THVMLink`Private`"];
 SeedRandom[7];
 net2 = stripSoftmax @ NetInitialize @ NetChain[arch];
 {xS, tgt} = batchTensors[tr, netInputShape[net2], 10];
-{fwd2, ps2} = {#1, Lookup[#2, "Term"]} & @@ reapParams[TFromNet[net2, xS]];
+fwd2 = TFromNet[net2, xS];
+ps2 = trainableParams[fwd2, xS];   (* graph float leaves minus the input slot *)
 loss2 = TCategoricalCrossEntropy[fwd2, tgt];
 g2 = TGrad[loss2, ps2]; lr2 = TUOpConst[0.05];
 nm2 = freshTrainName[];
