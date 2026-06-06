@@ -133,7 +133,12 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
   // batch-reset on a known root set.
   AtpFtCell *p = first;
   u64 n = 1;
-  while (p != last) {
+  // Defensive cap: a mis-threaded span chain (caller's first.next -> ... ->
+  // last) can otherwise loop forever or segfault on a null/garbage pointer
+  // when the FT chain is corrupted by upstream interaction.  1<<24 covers
+  // any reasonable span; break early on NULL to keep `n` honest.
+  for (u64 _s = 0; p != last && _s < (1ull << 24); _s++) {
+    if (p->next == NULL) break;
     p = p->next;
     n += 1;
   }

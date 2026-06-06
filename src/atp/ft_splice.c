@@ -380,13 +380,23 @@ AtpFtCell *ft_splice(AtpFt        *a,
   }
   *predecessor_next_slot = repl;
   repl->end->next = post_sibling;
-  // Ancestor-end patch DISABLED: the original loop walked p->next from
-  // root without an upper bound, and crashed on certain splice
-  // patterns (ac-ring trajectory in test_atp_ac_bench).  The comment
-  // says find_redex_ft re-derives end pointers via cell->end on the
-  // way down, so skipping the patch is sound -- the next normalize
-  // step will see correct ends.  If a downstream consumer needs the
-  // patched ends synchronously, restore the loop with proper bounds.
+  // Patch ancestor.end pointers that still point at span_last.  Without
+  // this, the displaced span gets freed and any ancestor whose .end
+  // still pointed at span_last will mis-thread the next find_redex_ft
+  // walk -- and ultimately cycle a future ft_free_span chain, blowing
+  // the n_persistent_alive sanity check.
+  //
+  // Bound the walk: a corrupted next chain (which we already know
+  // happens under the current runtime interaction) must not loop
+  // forever or chase NULL.  Walk until we reach `repl` or hit the cap.
+  {
+    AtpFtCell *anc = root;
+    for (u32 _s = 0; anc != NULL && _s < (1u << 24); _s++) {
+      if (anc->end == span_last) anc->end = repl->end;
+      if (anc == repl) break;
+      anc = anc->next;
+    }
+  }
   // Free the displaced span.  ft_free_span re-uses `last->next` as
   // the free-list link; the post_sibling pointer we captured above
   // is already attached to repl->end, so we are safe to clobber
