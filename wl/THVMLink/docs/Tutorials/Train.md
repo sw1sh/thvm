@@ -335,6 +335,14 @@ Normal @ TRealize @ TGradOf[x]
 
 This is not limited to scalars. Because every layer's backward is itself a `TTerm` graph, the second derivative composes through a real network: the filter Hessian of `Total[TConv2D[x, w]^2]`, the input Hessian across the [TReLU]() mask, and a `linear -> ReLU -> linear` MLP's input Hessian all come out correct (the last verified against a central finite difference). The `nn` test suite pins these.
 
+## Per-epoch hygiene: TReset
+
+Each realized forward+backward step leaves its compiled kernels and intermediate `TenDesc`s in the runtime's side tables. Those tables never recycle slots within a session - a freed kernel keeps its slot so the kid references still living in the heap's `UOP_KERNEL` cells stay valid - so across a long uninterrupted loop the kernel count and tensor-descriptor count climb monotonically. Several per-realize scheduler passes are linear in those counts (the consumer-count pass, the per-realize kernel sweep, the rangeify descriptor walk), so even though the *work per step is identical*, the time to schedule each step creeps up as the tables fill. This is a compute cost, not only a memory one.
+
+[TReset]() is the per-epoch hygiene call that fixes it: it rewinds the heap, the kernel table, and the tensor-descriptor table back to empty (keeping the arenas mapped and the backend device live, so it is cheap), and the next epoch schedules against fresh, short tables again. Rebuild the parameter leaves after a reset, since the old `TTerm` wrappers point into the rewound heap.
+
+Measured on a fixed `3 -> 8 -> 1` MLP forward+backward step realized in a tight loop (CPU, 50 steps/chunk): without a reset, per-step time drifts up with the heap as the side tables fill (roughly `6.9 -> 10.7` ms/step over 600 steps as the heap grows past 170k cells); a [TReset]() between epochs holds the heap flat (~16k cells) and the step time flat (~6.7 ms/step). The drift is gentle on a tiny model and steep on a large one - the larger the per-step kernel/descriptor footprint, the faster the tables fill and the more the scheduler scans cost. Capturing the step with [TJit]() sidesteps the issue entirely (the schedule is built once and replayed), but a plain eager loop should call [TReset]() once per epoch.
+
 ## Where to go next
 
 - The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial for the tensor / UOp / kernel / autodiff machinery underneath this loop.

@@ -78,7 +78,19 @@ fn void mark_gc_preserve(Term result) {
   Term roots[GC_ROOTS_CAP];
   u32  n_roots = 0;
   gc_collect_roots(result, roots, GC_ROOTS_CAP, &n_roots);
-  u8 *visited = (u8 *)calloc(thvm_heap_cells(), 1);
+  // gc_mark_term only ever indexes heap_visited[i] for i < HEAP_NEXT
+  // (every TAG_UOP / TAG_LAM / TAG_DUP / TAG_APP / TAG_ALO branch
+  // guards the access with a `>= HEAP_NEXT` bail before touching the
+  // bitmap; TAG_TEN / TAG_REF / leaf tags don't index it at all).
+  // So the visited bitmap need only span the live heap fill, not the
+  // full from-space capacity (1<<28 cells = 256 MB by default).  Sizing
+  // it to HEAP_NEXT keeps this calloc proportional to actual heap fill
+  // instead of paying a fixed 256 MB zero-fill per call -- this routine
+  // runs once per realized root, so a multi-param TGrad realize was
+  // doing several full-capacity callocs per step.
+  u64 cells = HEAP_NEXT;
+  if (cells == 0) cells = 1;
+  u8 *visited = (u8 *)calloc(cells, 1);
   if (visited != NULL) {
     for (u32 i = 0; i < n_roots; i++) {
       gc_mark_term(roots[i], visited);
