@@ -9430,10 +9430,22 @@ join_post_norm:;
     fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
     u8 ft_joined = (u8)ft_eq(fl, fr);
     if (ft_norm_verify && ft_joined != joined) {
+      char la[2048], ra[2048], lf[2048], rf[2048];
+      atp_pretty_term(*lhs, la, sizeof la);
+      atp_pretty_term(*rhs, ra, sizeof ra);
+      // The Term-NF that the Term-side normalize produced is in *lhs / *rhs.
+      // For the FT NF, decode the FT cells back through ft_to_term so we can
+      // print both NFs in the same syntax.
+      Term term_fl = ft_to_term(fl);
+      Term term_fr = ft_to_term(fr);
+      atp_pretty_term(term_fl, lf, sizeof lf);
+      atp_pretty_term(term_fr, rf, sizeof rf);
       fprintf(stderr,
               "ATPFT NORM VERIFY: joinable verdict mismatch "
               "(term=%u ft=%u) at n_rules=%u\n",
               (unsigned)joined, (unsigned)ft_joined, s->n_rules);
+      fprintf(stderr, "  term-NF: %s == %s\n", la, ra);
+      fprintf(stderr, "  ft-NF:   %s == %s\n", lf, rf);
       abort();
     }
     if (ft_norm_mode) {
