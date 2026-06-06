@@ -1411,7 +1411,7 @@ TFromNet[chain_NetChain, ids_List] := Module[{hidden, tokEmb},
     If[ MatchQ[hidden, _TTerm] && tokEmb =!= None
             && Length[tUopShape[hidden]] === 2
             && Last[tUopShape[hidden]] === Last[Dimensions[tokEmb]],
-        hidden . Transpose @ TTensorCreate @ NumericArray[tokEmb, "Real32"],
+        hidden . Transpose @ TTensorCreate[tokEmb],
         hidden
     ]
 ]
@@ -1430,24 +1430,28 @@ allLayers[net_] := If[
 
 (* the {vocab, dim} token-embedding weight of a token-LM net: the EmbeddingLayer
    with the LARGEST vocab axis (GPT-2's token embed {50257,768} vs the smaller
-   positional {1024,768}), or None. *)
+   positional {1024,768}), or None.  Returns the layer's NATIVE NumericArray
+   (NOT Normal'd to a nested list) so TTensorCreate shares its buffer zero-copy
+   on CPU -- a Normal + NumericArray repack would copy the {50257,768} table
+   (~154MB) twice. *)
 tokenEmbeddingArray[net_] := Module[{embs, weights},
     embs = Cases[allLayers[net], _EmbeddingLayer];
     weights = Cases[Quiet @ NetExtract[#, "Weights"] & /@ embs,
         w_ /; MatchQ[Dimensions[w], {_, _}]];
     If[ weights === {}, None,
-        Normal @ First @ SortBy[weights, -First[Dimensions[#]] &]]
+        First @ SortBy[weights, -First[Dimensions[#]] &]]
 ]
 
 (* the {n_ctx, dim} positional-embedding weight: the EmbeddingLayer with the
    SMALLEST vocab axis (GPT-2's positional {1024,768} vs the token {50257,768}),
-   or None when the net has fewer than two embedding tables. *)
+   or None when the net has fewer than two embedding tables.  Native
+   NumericArray, like tokenEmbeddingArray (zero-copy share). *)
 positionEmbeddingArray[net_] := Module[{embs, weights},
     embs = Cases[allLayers[net], _EmbeddingLayer];
     weights = Cases[Quiet @ NetExtract[#, "Weights"] & /@ embs,
         w_ /; MatchQ[Dimensions[w], {_, _}]];
     If[ Length[weights] < 2, None,
-        Normal @ First @ SortBy[weights, First[Dimensions[#]] &]]
+        First @ SortBy[weights, First[Dimensions[#]] &]]
 ]
 
 TFromNet[layer_, x_TTerm] := TFromLayer[layer, x]
@@ -1523,9 +1527,11 @@ TFromNet[net_NetChain, maxSeq_Integer] /; tokenEmbeddingArray[net] =!= None :=
         restLayers = Drop[Table[net[[i]], {i, Length[net]}], 1];
         TLamShape[{maxSeq, vocab}, onehot,
             Module[{tokT, x, hidden},
-                tokT   = TTensorCreate @ NumericArray[tokTable, "Real32"];
-                x      = onehot . tokT
-                         + TTensorCreate @ NumericArray[posTable[[1 ;; maxSeq]], "Real32"];
+                (* share the native NumericArrays zero-copy (TTensorCreate wraps
+                   the WL buffer on CPU), exactly as TLayerToTensors does -- no
+                   Normal / NumericArray repack of the {vocab,dim} table. *)
+                tokT   = TTensorCreate[tokTable];
+                x      = onehot . tokT + TTensorCreate[posTable[[1 ;; maxSeq]]];
                 hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
                 hidden . Transpose[tokT]]]
 ]
