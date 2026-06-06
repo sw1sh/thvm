@@ -150,17 +150,17 @@ static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
     return ft_splice_deep_copy(a, binding);
   }
   // THVM_ATPFT_SKEL_FRESH controls whether rule-RHS skeleton cells are
-  // flagged SUBST_FRESH.  Default 1 (legacy): flag the skeleton so
-  // find_redex_ft skips it -- fast per step, but drops composition
-  // matches like mccune's R89 -> R40 (project_ft_normalize_drift).
-  // Set to 0 to clear the flag so composition matches fire; per-step
-  // cost goes up by ~5x on mccune trajectory under the WM preset.
-  // Long-term fix: make the saturator's tuning independent of which
-  // flag policy is in effect, then default to 0.
+  // flagged SUBST_FRESH.  Default 0: clear the flag so composition
+  // matches fire (mccune's R89 -> R40, see project_ft_normalize_drift).
+  // The per-step cost increase from the corrected NF is offset by
+  // dropping MNF from the WM preset, which under SKEL_FRESH=1 + MNF
+  // diverts the saturator -- mccune cracks in 28s under the dual-flip
+  // (vs 49s under the legacy SKEL_FRESH=1 + MNF=1 baseline).  Legacy
+  // policy still accessible via THVM_ATPFT_SKEL_FRESH=1.
   static int skel_fresh_cached = -1;
   if (skel_fresh_cached < 0) {
     const char *e = getenv("THVM_ATPFT_SKEL_FRESH");
-    skel_fresh_cached = (e != NULL && e[0] == '0') ? 0 : 1;
+    skel_fresh_cached = (e != NULL && e[0] == '1') ? 1 : 0;
   }
   u32 sym   = tmpl->sym;
   u16 arity = tmpl->arity;

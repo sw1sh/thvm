@@ -442,10 +442,11 @@ int main(int argc, char **argv) {
       // backward demodulation together give +31% on AndAssoc.)
       thvm_atp_set_use_bwd_subsume(s, 1u);
       thvm_atp_set_use_bwd_demod(s, 1u);
-      // MNF goal-directed front search.  +1.6% on AndAssoc (iter 163);
-      // gated against lazy_normalize at the push site (use_lazy_normalize
-      // && !use_mnf) so the combination stays sound.
-      thvm_atp_set_use_mnf(s, 1u);
+      // MNF goal-directed front search -- DROPPED from the preset after
+      // SKEL_FRESH=0 became the default: under the corrected FT NF, MNF
+      // diverts the saturator's trajectory on mccune (49s -> 60s+ with
+      // MNF on, 28s with MNF off) and slows thm (1.9s vs 0.4s).  THVM_ATP
+      // _MNF=1 still opts in for problems where MNF helps.
       // Auto-MaxWeight base=30 (iter 164): grows with rule depth (slope=2),
       // bounds CP weight so heavy junk gets stashed.  +9.5% on AndAssoc,
       // +13% on wolfram, neutral on mccune/robbins.  Default-on as part
