@@ -8581,19 +8581,34 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     return ATP_RUNNING;
   }
 
-  // Stays on Term-side `atp_rewrite_normalize` (-> atp_rewrite_normalize_
-  // ordered).  FT-only would require atp_rewrite_normalize_ft_impl's
-  // orient/unorient phase ordering to match the Term-side leftmost-
-  // outermost descent exactly -- diagnosed via the THVM_ATPFT_KBO_DIFF
-  // probe in find_redex_ft (which surfaced ZERO unorient-gate KBO
-  // divergences across the AC bench, so the gap is upstream in the
-  // phase loop, not in the streaming KBO).  Until that's closed, the
-  // FT-only normalize stops at a different NF than the Term-side on
-  // AC-class goals and the AC bench hangs at step_cap.
-  Term l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
-                                 s->n_rules, NORM_CAP);
-  Term r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
-                                 s->n_rules, NORM_CAP);
+  // FT path for AC-mask=0; Term path otherwise.  ft_match doesn't do
+  // AC-matching, so AC-class goals miss the rule-direction-flipped
+  // matches that the Term-side atp_match_maybe_ac catches.  Once
+  // ft_match gains AC-awareness this branch can go away.
+  Term l, r;
+#ifdef THVM_ATP_AC
+  if (thvm_atp_get_ac_mask() != 0ull) {
+    l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
+                              s->n_rules, NORM_CAP);
+    r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
+                              s->n_rules, NORM_CAP);
+  } else
+#endif
+  {
+    atp_ft_mirror_ensure(s);
+    AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *fl_in = ft_from_term(gft, s->goal_lhs, 0);
+    AtpFtCell *fr_in = ft_from_term(gft, s->goal_rhs, 0);
+    AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, NORM_CAP);
+    AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, NORM_CAP);
+    l = ft_to_term(fl);
+    r = ft_to_term(fr);
+    if (ft_eq(fl, fr)) {
+      s->goal_lhs_nf = l;
+      s->goal_rhs_nf = r;
+      return ATP_PROVED;
+    }
+  }
   s->goal_lhs_nf = l;
   s->goal_rhs_nf = r;
   if (kbo_eq(l, r)) return ATP_PROVED;
