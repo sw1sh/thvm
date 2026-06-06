@@ -582,100 +582,39 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
     batch_env_cached = (env != NULL && env[0] != '0' && env[0] != '\0') ? 1 : 0;
   }
   int use_batch_orient = batch_env_cached && use_full_range && !record;
-  for (u32 outer = 0; outer < step_cap; outer++) {
-    // Step 1: orientable fixpoint.
-    if (use_batch_orient) {
-      // One batched call to the Term-side indexed normalizer.  Round-
-      // trip the subject FT <-> Term across the call.  When the FT
-      // path is the authoritative normalizer (callers read t back as
-      // an FT cell), we rebuild the FT image from the post-normalize
-      // Term.  The fresh-FT bits get re-cleared by the per-call
-      // entry-clear pass below (next outer iter or unorient step).
-      Term t_term = ft_to_term(t);
-      Term n_term = atp_rewrite_normalize_indexed(s, t_term, step_cap);
-      // If the indexed normalizer didn't move the subject AND no
-      // unorientable equations are in R, this outer iter has nothing
-      // left to do -- skip the FT rebuild.
-      if (kbo_eq(t_term, n_term)) {
-        if (!have_unorient) break;
-        // No orient progress + unorient may still fire: keep current t.
-      } else {
-        t = ft_from_term(a, n_term, /*scratch=*/0);
-        // Entry-clear so the unorient pre-order walk below visits the
-        // whole rebuilt term.
-        ft_clear_subst_fresh(t);
-      }
-    } else for (u32 i = 0; i < step_cap; i++) {
-      AtpFtCell *parent = NULL;
-      AtpFtCell *redex  = NULL;
-      u32        rule   = 0u;
-      u8         dir    = 0u;
-      int hit = 0;
-#ifdef THVM_ATPFT_RI
-      if (use_ri) {
-        hit = find_redex_ft_via_ri(s, t, &parent, &redex, &rule, &dir,
-                                   &subst, /*try_orient=*/1u);
-        if (!hit) {
-          hit = find_redex_ft(s, t, slice_first, slice_count,
-                              &parent, &redex, &rule, &dir, &subst,
-                              /*try_orient=*/1u, /*try_unorient=*/0u);
-        }
-      } else {
-        hit = find_redex_ft(s, t, slice_first, slice_count,
-                            &parent, &redex, &rule, &dir, &subst,
-                            /*try_orient=*/1u, /*try_unorient=*/0u);
-      }
-#else
-      hit = find_redex_ft(s, t, slice_first, slice_count,
-                          &parent, &redex, &rule, &dir, &subst,
-                          /*try_orient=*/1u, /*try_unorient=*/0u);
-#endif
-      if (!hit) break;
-      // Record-mode metadata.  Compute the redex's position BEFORE
-      // splice -- after splice, the redex cell is freed and its DFS
-      // path no longer exists.  Bare path pays nothing (gated on
-      // `record`): no stack alloc, no DFS, no Term conversion.
-      u8  pos[ATP_PROOF_MAX_DEPTH];
-      u8  pos_len  = 0u;
-      int have_pos = 0;
-      if (record) {
-        have_pos = ft_find_position(t, redex, pos, &pos_len);
-      }
-      AtpFtCell *rhs_tmpl = (dir == 0u) ? s->rhs_ft[rule] : s->lhs_ft[rule];
-      AtpFtCell *new_root = ft_splice(a, t, parent, redex, rhs_tmpl, &subst);
-      if (new_root != NULL) t = new_root;
-      if (record) {
-        Term step_term = ft_to_term(t);
-        // Orient phase: find_redex_ft only ever fires the rule forward
-        // (`dir==0`) here -- find_redex_ft_via_ri also sets dir=0
-        // unconditionally.  Backward orientable fires don't happen.
-        u8  fwd        = (dir == 0u) ? 1u : 0u;
-        u32 rule_trace = (rule < s->n_rules) ? s->r_trace[rule]
-                                             : ATP_TRACE_NONE;
-        Term step_lhs = (side == 0u) ? step_term : eq_other;
-        Term step_rhs = (side == 0u) ? eq_other  : step_term;
-        if (!have_pos) pos_len = 0u;
-        u32 ti = atp_trace_push_norm_step(s, *chain_tail, rule_trace,
-                                          step_lhs, step_rhs, side, fwd,
-                                          pos, pos_len);
-        if (ti != ATP_TRACE_NONE) *chain_tail = ti;
-      }
-    }
-    if (!have_unorient) break;
-    // Step 2: one unorient step.
+  (void)use_batch_orient;  // legacy batched-orient hint; per-position loop below subsumes it
+  // Single per-position try-all-rules loop (matches WM `BL_Normalform*` and
+  // Term-side `atp_ordered_try_top` -- both try R + E AT EACH POSITION in
+  // one pass instead of running orient to fixpoint before unorient).
+  // The prior split-phase (orient-fixpoint, ONE unorient, repeat) produced
+  // different NFs from Term/WM on AC-class workloads; blocked migrations
+  // of goal_check + CP-set-IR.
+  for (u32 i = 0; i < step_cap; i++) {
     AtpFtCell *parent = NULL;
     AtpFtCell *redex  = NULL;
     u32        rule   = 0u;
     u8         dir    = 0u;
-    int hit = find_redex_ft(s, t, slice_first, slice_count,
+    int hit = 0;
+#ifdef THVM_ATPFT_RI
+    if (use_ri) {
+      hit = find_redex_ft_via_ri(s, t, &parent, &redex, &rule, &dir,
+                                 &subst, /*try_orient=*/1u);
+      if (!hit) {
+        hit = find_redex_ft(s, t, slice_first, slice_count,
                             &parent, &redex, &rule, &dir, &subst,
-                            /*try_orient=*/0u, /*try_unorient=*/1u);
-    if (!hit) break;                  // joint fixpoint -- done.
-    // Record-mode metadata.  Compute the redex's position BEFORE
-    // splice -- after splice, the redex cell is freed and its DFS
-    // path no longer exists.  Hoisted inside `if (record)` so the
-    // bare path pays NOTHING (no stack alloc, no DFS): the
-    // record_norm_steps=off perf contract.
+                            /*try_orient=*/1u, /*try_unorient=*/have_unorient);
+      }
+    } else {
+      hit = find_redex_ft(s, t, slice_first, slice_count,
+                          &parent, &redex, &rule, &dir, &subst,
+                          /*try_orient=*/1u, /*try_unorient=*/have_unorient);
+    }
+#else
+    hit = find_redex_ft(s, t, slice_first, slice_count,
+                        &parent, &redex, &rule, &dir, &subst,
+                        /*try_orient=*/1u, /*try_unorient=*/have_unorient);
+#endif
+    if (!hit) break;
     u8  pos[ATP_PROOF_MAX_DEPTH];
     u8  pos_len  = 0u;
     int have_pos = 0;
@@ -686,26 +625,12 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
     AtpFtCell *new_root = ft_splice(a, t, parent, redex, rhs_tmpl, &subst);
     if (new_root != NULL) t = new_root;
     if (record) {
-      // Convert the post-step FT root to a Term so the TRACE_NORM_STEP
-      // entry carries the same shape the WL extractor expects -- the
-      // term-side normalize_record emits Term children too.  Cost is
-      // O(|t|) per step; in practice ATP completion terms stay shallow
-      // and the chain is short for joined CPs (dropped) -- the larger
-      // cost is the trace push itself.
       Term step_term = ft_to_term(t);
-      // Unorient step: dir==0 means l->r (forward), dir==1 means r->l
-      // (backward).  Mirror that into the TRACE_NORM_STEP `fwd` flag so
-      // the WL extractor can replay the same direction.
       u8  fwd        = (dir == 0u) ? 1u : 0u;
       u32 rule_trace = (rule < s->n_rules) ? s->r_trace[rule]
                                            : ATP_TRACE_NONE;
       Term step_lhs = (side == 0u) ? step_term : eq_other;
       Term step_rhs = (side == 0u) ? eq_other  : step_term;
-      // ft_find_position returns 0 only when the path exceeds
-      // ATP_PROOF_MAX_DEPTH=32 -- generous for completion terms.  On
-      // overflow we still push a step but with pos_len=0; the WL
-      // extractor reads an empty path as "at the root" (a follow-up
-      // can extend the cap if profiling shows overflow rates).
       if (!have_pos) pos_len = 0u;
       u32 ti = atp_trace_push_norm_step(s, *chain_tail, rule_trace,
                                         step_lhs, step_rhs, side, fwd,
