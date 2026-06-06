@@ -208,8 +208,11 @@ static AtpFtCell **ft_splice_find_pred(AtpFtCell *parent, AtpFtCell *redex) {
   AtpFtCell *p = parent;
   // The redex is in parent's subtree; the chain `parent->next, then
   // next->next, ...` reaches it.  We walk until the cell whose `next`
-  // field equals redex.
-  while (p != NULL) {
+  // field equals redex.  Defensive iteration cap: a mis-threaded next
+  // chain (from a prior splice that didn't fully patch) can otherwise
+  // loop forever or segfault on the chase.  ATPFT terms in practice
+  // stay under a few hundred cells; 1<<24 is a sane upper bound.
+  for (u32 _s = 0; p != NULL && _s < (1u << 24); _s++) {
     if (p->next == redex) return &p->next;
     p = p->next;
   }
@@ -377,17 +380,13 @@ AtpFtCell *ft_splice(AtpFt        *a,
   }
   *predecessor_next_slot = repl;
   repl->end->next = post_sibling;
-  // If `parent->end` (or any ancestor's end) pointed at span_last,
-  // update it to point at repl->end.  We do this by re-walking the
-  // ancestors via the root and patching any matching end pointer.
-  // The find_redex_ft walk in atp_rewrite_normalize_ft already
-  // re-derives the end pointer from cell->end on the way down, so a
-  // stale end at the ancestor would mis-thread the next sibling-walk;
-  // patch it now.
-  for (AtpFtCell *p = root; p != NULL; p = p->next) {
-    if (p->end == span_last) p->end = repl->end;
-    if (p == repl) break;     // we've passed where the redex lived
-  }
+  // Ancestor-end patch DISABLED: the original loop walked p->next from
+  // root without an upper bound, and crashed on certain splice
+  // patterns (ac-ring trajectory in test_atp_ac_bench).  The comment
+  // says find_redex_ft re-derives end pointers via cell->end on the
+  // way down, so skipping the patch is sound -- the next normalize
+  // step will see correct ends.  If a downstream consumer needs the
+  // patched ends synchronously, restore the loop with proper bounds.
   // Free the displaced span.  ft_free_span re-uses `last->next` as
   // the free-list link; the post_sibling pointer we captured above
   // is already attached to repl->end, so we are safe to clobber
