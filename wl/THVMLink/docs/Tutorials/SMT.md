@@ -171,3 +171,5 @@ Not decided:
 - Quantified formulas. Reach for [TFindProof]() for the equational fragment.
 - Linear arithmetic, arrays, bit-vectors. Separate theory solvers, not yet ported; could plug behind the same DPLL(T) shell.
 - Anything where the propositional structure has exponentially many candidate models: lazy DPLL(T) pays for each one. An eager T-propagation pass that pushes congruence facts into the SAT kernel as additional clauses is the natural extension.
+
+For how this single-theory core compares to the broader field - general SMT solvers (Z3, CVC5), first-order ATPs (Vampire, E), and unit-equational provers (Waldmeister, Twee) - see the positioning survey in `src/atp/survey.md`, which lays out the feature matrices honestly: thvm decides the EUF theory completely, and routes everything quantified to the completion engine rather than to SMT.

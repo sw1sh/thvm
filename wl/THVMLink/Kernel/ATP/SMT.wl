@@ -135,7 +135,7 @@ ccUnion[a_, b_] := Block[{ra = ccFind[a], rb = ccFind[b]},
         ];
         (* relocate b's use list into a's so future congruence
            probes see all parents of the merged class. *)
-        $use[ra] = Join[$use[ra], $use[rb]];
+        $use[ra] = DeleteDuplicates @ Join[$use[ra], $use[rb]];
         $use[rb] = {};
         (* congruence step: for every pair of compound parents
            now sharing the merged class, if their heads and
@@ -145,22 +145,23 @@ ccUnion[a_, b_] := Block[{ra = ccFind[a], rb = ccFind[b]},
     ]
 ]
 
-congruencePropagate[rep_] := Block[{parents = $use[rep], n, u, v},
+congruencePropagate[rep_] := Module[{parents = $use[rep], n, u, v},
     n = Length[parents];
     Do[
-        u = parents[[i]];
+        u = parents[[ii]];
         Do[
-            v = parents[[j]];
+            v = parents[[jj]];
             If[ congruentQ[u, v] && ccFind[u] =!= ccFind[v],
                 ccUnion[u, v]
             ],
-            {j, i + 1, n}
+            {jj, ii + 1, n}
         ],
-        {i, 1, n}
+        {ii, 1, n}
     ]
 ]
 
 congruentQ[u_, v_] :=
+    u =!= v &&
     Head[u] === Head[v] &&
     Length[u] === Length[v] &&
     AllTrue[
@@ -270,7 +271,7 @@ negate[Equal[a_, b_]]    := Unequal[a, b]
 negate[Unequal[a_, b_]]  := Equal[a, b]
 negate[other_]           := (Message[TSatEUF::badin, other, {}]; $Failed)
 
-collectLiterals[lits_List] := Block[{e = {}, d = {}, l},
+collectLiterals[lits_List] := Module[{eqAcc = {}, diseqAcc = {}, l},
     Do[ l = lits[[i]];
         Which[
             (* Pre-evaluated True literals (e.g. a == a -> True or
@@ -279,13 +280,13 @@ collectLiterals[lits_List] := Block[{e = {}, d = {}, l},
                theory query.  Matches the TSatEUF preprocess shape so
                an `a == a` hypothesis no longer kills the whole call. *)
             l === True,          Null,
-            MatchQ[l, _Equal],   AppendTo[e, l],
-            MatchQ[l, _Unequal], AppendTo[d, l],
+            MatchQ[l, _Equal],   AppendTo[eqAcc, l],
+            MatchQ[l, _Unequal], AppendTo[diseqAcc, l],
             True, Return[{$Failed, $Failed}]
         ],
         {i, Length[lits]}
     ];
-    {e, d}
+    {eqAcc, diseqAcc}
 ]
 
 (* ----- TPTP dispatch (ground SMT path) -----
@@ -368,20 +369,20 @@ TSmtDecide[formula_] := Block[
 collectAtoms[formula_] := Sort @ DeleteDuplicates @ Cases[
     formula, (_Equal | _Unequal), {0, Infinity}, Heads -> False]
 
-modelToLiterals[model_Association] := Block[{e = {}, d = {}},
+modelToLiterals[model_Association] := Module[{eqAcc = {}, diseqAcc = {}},
     KeyValueMap[
         Function[{atom, val},
             Which[
-                MatchQ[atom, _Equal] && val,    AppendTo[e, atom],
-                MatchQ[atom, _Equal] && ! val,  AppendTo[d, Unequal @@ atom],
-                MatchQ[atom, _Unequal] && val,  AppendTo[d, atom],
+                MatchQ[atom, _Equal] && val,    AppendTo[eqAcc, atom],
+                MatchQ[atom, _Equal] && ! val,  AppendTo[diseqAcc, Unequal @@ atom],
+                MatchQ[atom, _Unequal] && val,  AppendTo[diseqAcc, atom],
                 MatchQ[atom, _Unequal] && ! val,
-                    AppendTo[e, Equal @@ atom]
+                    AppendTo[eqAcc, Equal @@ atom]
             ]
         ],
         model
     ];
-    {e, d}
+    {eqAcc, diseqAcc}
 ]
 
 (* Boolean-combination goal.  An entailment hyps |= phi is UNSAT of
