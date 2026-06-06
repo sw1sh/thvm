@@ -27,6 +27,7 @@ tilelang
 brain
 
 build/
+*.paclet
 
 # Hackathon-prep WIP. Untrack selectively when ready.
 bench/metal-problems/
