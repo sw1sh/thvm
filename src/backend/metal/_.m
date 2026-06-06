@@ -247,6 +247,26 @@ fn void thvm_metal_jit_counters_reset(void);
 static void metal_pso_cache_init(void);
 
 static int metal_init(void) {
+  // Idempotent re-init: a prior metal_init already created the device,
+  // queue, and loaded the metallib, and metal_shutdown deliberately kept
+  // them alive.  Skip the (disk) metallib reload and the banner print --
+  // just re-arm the per-session counters + PSO cache dir.  This makes
+  // TInit-per-episode cheap + quiet on Metal (issue #1, Metal follow-up).
+  if (METAL_DEVICE != nil && METAL_QUEUE != nil && METAL_LIB != nil) {
+    METAL_FREELIST_LEN = 0;
+    METAL_BATCH_CMD    = nil;
+    METAL_BATCH_DEPTH  = 0;
+    METAL_DEFER_DECREF_LEN = 0;
+    METAL_DEFER_DECREF_BYTES = 0;
+    METAL_PEAK_LIVE_BYTES = 0;
+    METAL_PEAK_RETAINED_BYTES = 0;
+    METAL_PEAK_DEFERRED_BYTES = 0;
+    METAL_GPU_US_TOTAL = 0;
+    METAL_GPU_FLUSH_COUNT = 0;
+    thvm_metal_jit_counters_reset();
+    metal_pso_cache_init();
+    return 0;
+  }
   METAL_DEVICE = MTLCreateSystemDefaultDevice();
   if (METAL_DEVICE == nil) {
     fprintf(stderr, "thvm: metal_init -- no Metal device available\n");
@@ -808,11 +828,11 @@ static void metal_shutdown(void) {
     METAL_BUFS[i].preserved = 0;
   }
   METAL_BUFS_NEXT = 1;
-  // Drop every cached PSO -- they reference the MTLLibrary we're
-  // about to nil, and a re-init will produce fresh pipelines from
-  // a fresh MTLLibrary.  The metal_jit PSO cache is cleared on the
-  // next metal_init (defined further down so it can see
-  // METAL_JIT_CACHE / METAL_JIT_PSOS).
+  // Drop every cached PSO.  The preserved MTLLibrary stays valid, so
+  // these would survive too, but a fresh session rebuilds them lazily
+  // from the live lib on first dispatch (cheap, in-memory -- no disk
+  // reload) and clearing keeps teardown state simple.  The metal_jit
+  // PSO cache is reset just below.
   for (u32 op = 0; op < UOP_COUNT; op++)
     for (u32 dt = 0; dt < 32; dt++)
       METAL_PIPELINES_CACHE[op][dt] = nil;
@@ -826,9 +846,15 @@ static void metal_shutdown(void) {
   AOT_METAL_HEAP_BUF = nil;
   AOT_METAL_HEAP_PTR = NULL;
   AOT_METAL_HEAP_LEN = 0;
-  METAL_LIB    = nil;
-  METAL_QUEUE  = nil;
-  METAL_DEVICE = nil;
+  // Deliberately keep METAL_DEVICE / METAL_QUEUE / METAL_LIB alive across
+  // teardown.  The device is a process singleton and the metallib is an
+  // immutable on-disk blob, so reloading them on every TInit (the only
+  // mid-session reclaim path on Metal before TReset[] worked) re-ran
+  // newLibraryWithURL from disk and re-printed the "metal_init -- device
+  // ..." banner once per episode (issue #1, Metal follow-up).  metal_init
+  // reuses them when already loaded; only the per-session buffer table,
+  // PSO/jit caches, and the AOT book-heap wrapper (nil'd above, since the
+  // book pages are remapped) are torn down here.
 }
 
 // === metal_jit: fused-program shaders ==================================

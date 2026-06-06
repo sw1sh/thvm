@@ -32,6 +32,7 @@
 #include <assert.h>
 #include <math.h>        // INFINITY / fabsf etc. (uop_walk reduce init)
 #include <stdatomic.h>   // _Atomic typing for the per-context counters
+#include <sys/mman.h>    // mmap/munmap for the big heap + book arenas
 
 // Windows (CPU-only mingw cross-build) lacks the POSIX/glibc functions
 // the runtime uses; map them to Win32 equivalents.  No-op elsewhere.
@@ -1447,8 +1448,12 @@ fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1); // pair subst
 // === gc/ === (Cheney semi-space copying GC; defined in heap/collect.c)
 // Runtime heap allowance in cells.  Defaults to HEAP_CAP; overridable
 // once per process via the THVM_HEAP_CELLS env var (read at first call).
-// Drives the calloc size, gc_init split, and the gc_mark visited bitmap.
+// Drives the mmap size, gc_init split, and the gc_mark visited bitmap.
 fn u64  thvm_heap_cells(void);
+// Static def-template (book) heap allowance in cells.  Defaults to
+// BOOK_CAP; overridable once per process via THVM_BOOK_CELLS.  Drives
+// the book-heap mmap size in init_ctx_arrays.
+fn u64  thvm_book_cells(void);
 fn void gc_init(u64 space_words);
 fn void gc_reset(void);
 fn int  gc_enabled(void);
@@ -5453,5 +5458,10 @@ fn void redex_step_detach(void);
 // === runtime lifecycle ===
 void thvm_init(void);
 void thvm_free(void);
+// Cheap per-frame reclaim: rewind the dynamic heap + every dynamic
+// descriptor/cache to a fresh state while keeping the arenas mapped,
+// the backend device live, and the static book heap / DEFS intact.
+// Backs TReset[].
+void thvm_reset(void);
 
 #endif // THVM_H

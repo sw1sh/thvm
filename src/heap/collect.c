@@ -54,6 +54,27 @@ fn u64 thvm_heap_cells(void) {
   return cells;
 }
 
+// Static def-template (book) heap allowance in cells.  Mirrors
+// thvm_heap_cells: resolved once from THVM_BOOK_CELLS, default BOOK_CAP.
+// Now that the book heap is mmap-backed (lazily zero-faulted), the large
+// default costs no RSS until cells are actually written -- but a workload
+// that wants a smaller virtual reservation can still shrink it here.
+fn u64 thvm_book_cells(void) {
+  static u64 cells = 0;
+  if (cells == 0) {
+    cells = BOOK_CAP;
+    const char *e = getenv("THVM_BOOK_CELLS");
+    if (e != NULL && *e != '\0') {
+      char *end = NULL;
+      unsigned long long v = strtoull(e, &end, 0);
+      if (end != NULL && *end == '\0' && v >= (1ULL << 16) && v <= (1ULL << 37)) {
+        cells = (u64)v;
+      }
+    }
+  }
+  return cells;
+}
+
 fn void gc_reset(void) {
   GC_ENABLED    = 0;
   GC_SPACE_SZ   = 0;

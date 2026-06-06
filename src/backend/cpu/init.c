@@ -25,7 +25,15 @@ fn int cpu_init(void) {
   return CPU_BUFS == NULL ? -1 : 0;
 }
 
-fn void cpu_shutdown(void) {
+// Release every live buffer's payload and rewind the descriptor +
+// freelist cursors back to empty.  Shared by cpu_shutdown (teardown,
+// where the CPU_BUFS array is freed right after) and thvm_reset (per-
+// frame reclaim, where the array stays mapped for the next frame): in
+// both cases the owning TenDescs are about to disappear, so any
+// surviving payload would leak.  CPU_BUFS itself is freed by
+// thvm_free / thvm_context_destroy, not here.
+fn void cpu_buf_free_all(void) {
+  extern u64 CPU_MEM_LIVE;   // defined in buf_alloc.c (included after this)
   if (CPU_BUFS == NULL) return;
   for (u64 i = 1; i < CPU_BUFS_NEXT; i++) {
     CpuBuf *b = &CPU_BUFS[i];
@@ -35,7 +43,15 @@ fn void cpu_shutdown(void) {
     } else if (b->on_release) {
       b->on_release(b->handle);
     }
+    // Zero the slot so a re-issued descriptor starts clean and a stale
+    // arena-view parent ref can't drive a double free on the next pass.
+    *b = (CpuBuf){0};
   }
-  // CPU_BUFS itself is freed by thvm_free / thvm_context_destroy --
-  // we just walk the live entries here to release their payloads.
+  CPU_MEM_LIVE     = 0;
+  CPU_BUFS_NEXT    = 1;
+  CPU_FREELIST_LEN = 0;
+}
+
+fn void cpu_shutdown(void) {
+  cpu_buf_free_all();
 }

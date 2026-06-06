@@ -393,6 +393,15 @@ endif
 # runtime change retriggers a rebuild.
 SRC := $(shell find src -name '*.c' -o -name '*.h') tests/test.h
 
+# Default goal: build the WL paclet dylib only.  Every C test depends on
+# all of $(SRC), so a bare `make` used to recompile ~100 test binaries on
+# any header edit (each is a full standalone build of the runtime) -- far
+# too slow for the edit / rebuild / WL-repro loop.  The paclet dylib is
+# the actual dev artifact and is itself a full compile-check of the
+# runtime, so `make` now produces just that.  Use `make test` to build +
+# run the C tests, `make all` to build them, `make bin/test_foo` for one.
+.DEFAULT_GOAL := wl
+
 .PHONY: all test clean wl wl-test wl-examples bench-twee
 all: $(TESTS)
 
