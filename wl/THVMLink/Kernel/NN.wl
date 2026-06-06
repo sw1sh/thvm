@@ -40,7 +40,7 @@
 
 BeginPackage["THVMLink`"];
 
-TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net, ids] for a token-encoder net (a List[Integer] of 1-indexed token ids) traverses the real NetChain / NetGraph and returns the {seq, vocab} logits TTerm -- e.g. GPT-2 inference, with the tied token-embedding LM head appended.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation; the lifted forward runs at that input shape and serves inference there.  For a token-encoder net there is no fixed input shape, so use the 2-arg TFromNet[net, ids] form.";
+TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net, ids] for a token-encoder net (a List[Integer] of 1-indexed token ids) traverses the real NetChain / NetGraph and returns the {seq, vocab} logits TTerm -- e.g. GPT-2 inference, with the tied token-embedding LM head appended.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation; the lifted forward runs at that input shape and serves inference there.\n\nTFromNet[net, maxSeq_Integer] for a token-LM NetChain returns a fixed-sequence TLam over a {maxSeq, vocab} one-hot input: the variable-length id gather is replaced by onehot . tokenTable so the WHOLE forward has a fixed shape and is built ONCE -- materialize it (or TJit a single application over an input slot) and generate by refreshing the one-hot each step (positions 0..maxSeq-1 are constant; causal masking keeps the padded tail inert).  TFromNet[net] on a token-LM NetChain uses the default maxSeq.";
 TToNet::usage           = "TToNet[lam] does a best-effort reconstruction of a NetChain from the GRAPH of a TFromNet[net]-built LAM `lam` -- no net is stored.  Recognises the standard layer sub-DAG signatures (Linear / Elementwise(ReLU) / Softmax / Flatten), reading each layer's weights straight off the graph leaves; NetChain infers the input dimension from the first Linear layer's weight.  Returns a Failure for a body containing a conv / pool / unrecognised op (their im2col lowering does not round-trip cleanly).";
 TNetParams::usage       = "TNetParams[net] returns the trainable weight handles (float-leaf TEN TTerms) derived from the GRAPH of a TFromNet-built `net` (a lifted LAM or a forward UOP term), in the C leaf-walk's stable order -- no Sow-provenance, no registry.  These are the tensors baked into the forward; TGrad auto-differentiates every reachable float leaf and TNetTrain updates them in place.";
 TNetParamInfo::usage    = "TNetParamInfo[net] returns the trainable weight handles of `net` paired with best-effort provenance, as a list of <|\"Term\", \"Layer\", \"Param\"|> associations.  Without a stored net the Layer is Missing[\"NotStored\"] and Param is inferred from the handle's shape (rank-2+ -> \"Weights\", rank-1 -> \"Biases\"); TNetParams[net] is the same handles without provenance.";
@@ -1439,6 +1439,17 @@ tokenEmbeddingArray[net_] := Module[{embs, weights},
         Normal @ First @ SortBy[weights, -First[Dimensions[#]] &]]
 ]
 
+(* the {n_ctx, dim} positional-embedding weight: the EmbeddingLayer with the
+   SMALLEST vocab axis (GPT-2's positional {1024,768} vs the token {50257,768}),
+   or None when the net has fewer than two embedding tables. *)
+positionEmbeddingArray[net_] := Module[{embs, weights},
+    embs = Cases[allLayers[net], _EmbeddingLayer];
+    weights = Cases[Quiet @ NetExtract[#, "Weights"] & /@ embs,
+        w_ /; MatchQ[Dimensions[w], {_, _}]];
+    If[ Length[weights] < 2, None,
+        Normal @ First @ SortBy[weights, First[Dimensions[#]] &]]
+]
+
 TFromNet[layer_, x_TTerm] := TFromLayer[layer, x]
 TFromNet[layer_, ids_List] := TFromLayer[layer, ids]
 
@@ -1486,10 +1497,45 @@ netInputShape[net_] := Module[{ports, raw, shape},
    weights come from the graph via gradFloatLeafTerms (TNetParams), and to
    train over a different batch size pass the NetChain to TNetTrain, which
    lifts the batched forward directly. *)
-(* token-encoder net (its input is a List[Integer] of token ids, consumed by
-   an EmbeddingLayer): there is no fixed input-tensor shape to lift over, so a
-   variable-length token TLam is impractical.  Guide to the 2-arg graph form
-   TFromNet[net, ids] (which returns the {seq, vocab} logits TTerm directly). *)
+(* default fixed sequence length for the token-LM lift below. *)
+$tFromNetMaxSeq = 64;
+
+(* Token-LM fixed-sequence lift: a reusable, materialize-once forward.  The
+   variable-length id list is replaced by a fixed {maxSeq, vocab} ONE-HOT
+   input (built host-side per step from the running ids), so the WHOLE graph
+   -- embedding, blocks, tied head -- has a FIXED shape and is built ONCE.
+   The ~23s re-lift that dominates per-step generation (it is constant in seq
+   length -- the 12-block net traversal, not the forward compute) is then paid
+   a single time; each subsequent TApp on a new one-hot is a warm sub-second
+   TWnf+TRealize on the same materialized kernels.  Token embedding =
+   onehot . tokenTable; positional embedding = the first maxSeq rows of the
+   positional table (positions 0..maxSeq-1 are constant, so no per-step
+   gather); tied LM head = hidden . tokenTable^T.  Causal masking in the
+   blocks plus reading the logits at the current length keep the padded tail
+   positions inert.  Returns a TLam over the {maxSeq, vocab} one-hot, so
+   TMaterialize[TFromNet[net]] is a single reusable forward and
+   NestList[... @* TWnf @* TApp[lam, #] &, ...] generates. *)
+TFromNet[net_NetChain, maxSeq_Integer] /; tokenEmbeddingArray[net] =!= None :=
+    Module[{tokTable, posTable, vocab, restLayers, onehot},
+        tokTable   = tokenEmbeddingArray[net];
+        posTable   = positionEmbeddingArray[net];
+        vocab      = First[Dimensions[tokTable]];
+        restLayers = Drop[Table[net[[i]], {i, Length[net]}], 1];
+        TLamShape[{maxSeq, vocab}, onehot,
+            Module[{tokT, x, hidden},
+                tokT   = TTensorCreate @ NumericArray[tokTable, "Real32"];
+                x      = onehot . tokT
+                         + TTensorCreate @ NumericArray[posTable[[1 ;; maxSeq]], "Real32"];
+                hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
+                hidden . Transpose[tokT]]]
+]
+
+(* TFromNet[net] for a token-LM NetChain: the fixed-sequence lift at the
+   default maxSeq.  A non-NetChain token net (a bare EmbeddingLayer) has no
+   blocks to fold, so it still guides to the 2-arg id graph form. *)
+TFromNet[net_NetChain] /; tokenEmbeddingArray[net] =!= None :=
+    TFromNet[net, $tFromNetMaxSeq]
+
 TFromNet[net_] /; tokenEmbeddingArray[net] =!= None := (
     Message[TFromNet::tokennet, net]; $Failed
 )
