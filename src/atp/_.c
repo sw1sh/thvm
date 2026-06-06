@@ -5964,6 +5964,11 @@ static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace);
 // WM `dokgS` test (1-step join via a single existing rule); defined
 // alongside the per-CP-push subsume drop a few thousand lines down.
 static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs);
+// On-demand FT-mirror population for any caller of atp_rewrite_normalize_ft
+// (definition with atp_cp_trivially_joinable, far below).
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static inline void atp_ft_mirror_ensure(AtpState *s);
+#endif
 
 // LRS horizon recomputation (Riazanov & Voronkov, JSC 36, 2003).  Given
 // the observed selection rate and the remaining wall budget, predict how
@@ -9249,6 +9254,29 @@ static AtpJoinCacheEnt g_atp_join_cache[ATP_JOIN_CACHE_SIZE];
 u64 g_atp_join_cache_hits   = 0;
 u64 g_atp_join_cache_misses = 0;
 
+// Ensure the FT mirror is populated for every live rule before any
+// caller of atp_rewrite_normalize_ft / atp_cp_trivially_joinable_ft.
+// Production saturations (atp_push_rule) populate in lockstep with
+// s->lhs[] writes, so this loop is empty after the first probe; test
+// harnesses that write s->lhs[] directly get the mirror built on
+// demand here so the FT normalize sees the whole rule set instead of
+// silently skipping NULL-mirror slots.
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static inline void atp_ft_mirror_ensure(AtpState *s) {
+  if (s->ft_mirror_full && s->n_rules <= s->ft_mirror_probed_n_rules) return;
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  u32 start = s->ft_mirror_full ? s->ft_mirror_probed_n_rules : 0u;
+  for (u32 i = start; i < s->n_rules; i++) {
+    if (s->lhs[i] != 0 && s->lhs_ft[i] == NULL) {
+      s->lhs_ft[i] = ft_from_term(a, s->lhs[i], 0);
+      s->rhs_ft[i] = ft_from_term(a, s->rhs[i], 0);
+    }
+  }
+  s->ft_mirror_full = 1u;
+  s->ft_mirror_probed_n_rules = s->n_rules;
+}
+#endif
+
 // FT-only trivial-joinable check.  Term cells in (*lhs / *rhs), the work
 // happens entirely in FT (ft_from_term / atp_rewrite_normalize_ft / ft_eq),
 // and the NFs are decoded back to Term only when the NOT-joined path's
@@ -9277,24 +9305,8 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   }
   u8 joined = 0u;
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  // Ensure the FT mirror is populated for every live rule.  Production
-  // saturations (atp_push_rule) populate in lockstep with s->lhs[] writes,
-  // so this loop is empty after the first probe.  Test harnesses that
-  // write s->lhs[] without going through atp_push_rule -- if any -- get
-  // the FT mirror built on demand here, so the FT normalize sees the
-  // whole rule set instead of silently skipping NULL-mirror slots.
+  atp_ft_mirror_ensure(s);
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-  if (!s->ft_mirror_full || s->n_rules > s->ft_mirror_probed_n_rules) {
-    u32 start = s->ft_mirror_full ? s->ft_mirror_probed_n_rules : 0u;
-    for (u32 i = start; i < s->n_rules; i++) {
-      if (s->lhs[i] != 0 && s->lhs_ft[i] == NULL) {
-        s->lhs_ft[i] = ft_from_term(a, s->lhs[i], 0);
-        s->rhs_ft[i] = ft_from_term(a, s->rhs[i], 0);
-      }
-    }
-    s->ft_mirror_full = 1u;
-    s->ft_mirror_probed_n_rules = s->n_rules;
-  }
   AtpFtCell *fl = ft_from_term(a, *lhs, 0);
   AtpFtCell *fr = ft_from_term(a, *rhs, 0);
 #ifdef THVM_ATPFT_CPQ
