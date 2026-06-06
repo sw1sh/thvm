@@ -9249,8 +9249,15 @@ static AtpJoinCacheEnt g_atp_join_cache[ATP_JOIN_CACHE_SIZE];
 u64 g_atp_join_cache_hits   = 0;
 u64 g_atp_join_cache_misses = 0;
 
+// FT-only trivial-joinable check.  Term cells in (*lhs / *rhs), the work
+// happens entirely in FT (ft_from_term / atp_rewrite_normalize_ft / ft_eq),
+// and the NFs are decoded back to Term only when the NOT-joined path's
+// downstream filters (perm_sub, queue_sub, AC-eq) need them.  The Term-side
+// `atp_rewrite_normalize` legacy path used to live behind a default-off
+// VERIFY toggle but only ever lagged the FT verdict (and aborted spuriously
+// on AndAssoc post-1d0a8035, where Term-side stops one rewrite step short
+// of the FT-side NF -- see project_ftnorm_andassoc_verify_break); deleted.
 static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
-  const u32 NORM_CAP = 64;
   static int dbg_join_cache = -1;
   if (dbg_join_cache < 0) dbg_join_cache = atp_env_on("THVM_ATP_JOIN_CACHE");
   u64 join_key = 0;
@@ -9264,194 +9271,62 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
     if (e->key == join_key && e->epoch == g_atp_unf_memo_epoch
         && e->n_rules == s->n_rules && e->joined == 1u) {
       g_atp_join_cache_hits++;
-      // Caller drops CP without reading *lhs/*rhs further.
       return 1u;
     }
     join_cache_eligible = 1u;
   }
-  Term l, r;
-  u8 joined;
-  int do_ft_only = 0;
+  u8 joined = 0u;
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  // FT-only join verdict (opt-in via THVM_ATPFT_SKIP_TERM=1).
-  // When the FT mirror is fully populated AND we are not in VERIFY
-  // mode (which needs both paths to compare), skip the Term-side
-  // normalize entirely and derive the join verdict from FT.  *lhs/*rhs
-  // are still populated as Term cells via ft_to_term for downstream
-  // callers (subsumption indices, AC-eq fallback, join cache).
-  //
-  // The post-streaming profile pinned the Term-side normalize at
-  // ~377 thvm_match samples + ~107 thvm_subst_apply -- collectively
-  // the dominant remaining cost in andassoc.  Skipping it shifts the
-  // verdict source to the FT path that integrate/ft-residuals already
-  // proved sound on mccune VERIFY.
-  //
-  // Runtime guard: tests that set s->lhs[] directly (bypassing
-  // atp_push_rule's lockstep ft mirror write) leave lhs_ft[] NULL; the
-  // FT-only path would then find no rules and incorrectly say
-  // "not joined".  Detect that condition and fall back to Term.
-  static int ft_skip_term_mode = -1;
-  if (ft_skip_term_mode < 0) {
-    int env_norm = atp_env_off("THVM_ATPFT_NORM");
-    int env_skip = atp_env_off("THVM_ATPFT_SKIP_TERM");
-    int env_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
-    // Default-on after the broader probe validated every in-tree
-    // ATP test suite (test_atp / _ac / _ac_bench / _ft / _ft_norm /
-    // _ft_ri / _ft_cpq / _ft_rules / _enigma).  Opt-out via
-    // THVM_ATPFT_SKIP_TERM=0.
-    ft_skip_term_mode = env_norm && env_skip && !env_verify;
-  }
-  do_ft_only = ft_skip_term_mode;
-  if (do_ft_only) {
-    // Detect partially-populated mirror (test harness setup that
-    // writes s->lhs[] directly).  ft_norm silently skips rules with
-    // NULL lhs_ft, so even one missing slot makes it return "not
-    // joined" when the Term path would join via that rule.
-    //
-    // Amortise the O(n_rules) probe: cache the last verdict + the
-    // n_rules value it covered.  Production saturations (atp_push_rule
-    // keeps the mirror in lockstep) probe each new rule at most once.
-    // Shrink (interreduce) is safe: if the rule set shrinks, the cap
-    // still bounds a previously-verified prefix.
-    if (!s->ft_mirror_full || s->n_rules > s->ft_mirror_probed_n_rules) {
-      u8 full = 1u;
-      u32 start = s->ft_mirror_full ? s->ft_mirror_probed_n_rules : 0u;
-      for (u32 i = start; i < s->n_rules; i++) {
-        if (s->lhs[i] != 0 && s->lhs_ft[i] == NULL) { full = 0u; break; }
+  // Ensure the FT mirror is populated for every live rule.  Production
+  // saturations (atp_push_rule) populate in lockstep with s->lhs[] writes,
+  // so this loop is empty after the first probe.  Test harnesses that
+  // write s->lhs[] without going through atp_push_rule -- if any -- get
+  // the FT mirror built on demand here, so the FT normalize sees the
+  // whole rule set instead of silently skipping NULL-mirror slots.
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  if (!s->ft_mirror_full || s->n_rules > s->ft_mirror_probed_n_rules) {
+    u32 start = s->ft_mirror_full ? s->ft_mirror_probed_n_rules : 0u;
+    for (u32 i = start; i < s->n_rules; i++) {
+      if (s->lhs[i] != 0 && s->lhs_ft[i] == NULL) {
+        s->lhs_ft[i] = ft_from_term(a, s->lhs[i], 0);
+        s->rhs_ft[i] = ft_from_term(a, s->rhs[i], 0);
       }
-      s->ft_mirror_full = full;
-      s->ft_mirror_probed_n_rules = s->n_rules;
     }
-    if (!s->ft_mirror_full) do_ft_only = 0;
+    s->ft_mirror_full = 1u;
+    s->ft_mirror_probed_n_rules = s->n_rules;
   }
-  if (do_ft_only) {
-    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-    AtpFtCell *fl = ft_from_term(a, *lhs, 0);
-    AtpFtCell *fr = ft_from_term(a, *rhs, 0);
+  AtpFtCell *fl = ft_from_term(a, *lhs, 0);
+  AtpFtCell *fr = ft_from_term(a, *rhs, 0);
 #ifdef THVM_ATPFT_CPQ
-    // Reader wire-up: the dormant atp_cp_trivially_joinable_ft helper
-    // is the same normalize+eq logic that lives inline below, kept in
-    // ft_cpq.c as the contract sibling for future CP-slot-direct
-    // callers (Stage 8 selects-FT-cell-from-queue rewrite).  Calling
-    // through here keeps the helper live (no -Wunused-function warn)
-    // and is byte-identical to the inline path -- the joined verdict
-    // is computed off the same NFs and lhs/rhs are write-back-ready
-    // pointers when the caller needs them.
-    joined = atp_cp_trivially_joinable_ft(s, &fl, &fr);
+  joined = atp_cp_trivially_joinable_ft(s, &fl, &fr);
 #else
-    fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
-    fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
-    joined = (u8)ft_eq(fl, fr);
+  fl = atp_rewrite_normalize_ft(s, fl, 64u);
+  fr = atp_rewrite_normalize_ft(s, fr, 64u);
+  joined = (u8)ft_eq(fl, fr);
 #endif
-    // FT-CPQ reader: when joined==1 the caller drops the CP without
-    // reading *lhs/*rhs further (matches the join_cache early-return
-    // contract at the top of this function -- the post-call filters
-    // operate on the un-normalized RAW input, same as the cache-hit
-    // path).  Skip the ft_to_term decode + write-back -- pure win on
-    // the joinable-rate (~17% on andassoc-class trajectories, ~74%
-    // on mccune-class).  Term-side filters (perm_sub, queue_sub,
-    // AC-eq) still need Term NFs when NOT joined, so keep the decode
-    // there.
-    //
-    // Gated by THVM_ATPFT_CPQ_READ env (default ON: empirically
-    // verified bit-identical verdict on the differential corpus via
-    // THVM_ATPFT_NORM_VERIFY=1 on mccune).  Set to 0 to A/B-bench.
-    static int ft_cpq_read_mode = -1;
-    if (ft_cpq_read_mode < 0) ft_cpq_read_mode = atp_env_off("THVM_ATPFT_CPQ_READ");
-    if (joined && ft_cpq_read_mode) {
-      // l / r are not read on the joined post-norm path (the AC-eq
-      // fallback at join_post_norm is gated on !joined and the
-      // VERIFY/replace block reruns the FT normalize itself).
-      goto join_post_norm;
-    }
-    l = ft_to_term(fl);
-    r = ft_to_term(fr);
+  // Decode NFs back to Term only on the NOT-joined branch -- downstream
+  // filters (perm_sub, queue_sub, AC-eq) need them; the joined branch
+  // drops the CP and never reads *lhs/*rhs again.
+  if (!joined) {
+    Term l = ft_to_term(fl);
+    Term r = ft_to_term(fr);
     *lhs = l;
     *rhs = r;
-    goto join_post_norm;
-  }
-#endif
-  l = atp_rewrite_normalize(s, *lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-  r = atp_rewrite_normalize(s, *rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-  *lhs = l;
-  *rhs = r;
-  joined = kbo_eq(l, r);
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-join_post_norm:;
-#endif
 #ifdef THVM_ATP_AC
-  // AC-equality redundancy: when an AC bitmask is registered (via
-  // thvm_atp_set_ac_mask or thvm_atp_auto_ac), treat AC-equal normal
-  // forms as joinable.  Sound iff the AC axioms (commutativity +
-  // associativity) for every masked label are present in the rule
-  // set -- normalize would have closed any AC-equal pair via those
-  // axioms eventually, so the CP is redundant.  No-op when the mask
-  // is 0.
-  if (!joined && thvm_atp_get_ac_mask() != 0ull) {
-    AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
-    if (atp_ac_eq(l, r, &ac)) {
-      joined = 1u;
+    // AC-equality redundancy: when an AC bitmask is registered, treat
+    // AC-equal NFs as joinable.  Sound iff the AC axioms for every masked
+    // label are present in R (normalize would have closed any AC-equal
+    // pair via those axioms eventually, so the CP is redundant).
+    if (thvm_atp_get_ac_mask() != 0ull) {
+      AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
+      if (atp_ac_eq(l, r, &ac)) joined = 1u;
     }
-  }
 #endif
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  // Stage 6: AtpFt-native push-norm joinable check.
-  //
-  // Three modes:
-  //   THVM_ATPFT_NORM=0 / unset  -> Term path only (above).
-  //   THVM_ATPFT_NORM=1          -> AtpFt path is authoritative; the
-  //                                 Term verdict is REPLACED by the
-  //                                 AtpFt verdict.  *lhs / *rhs are
-  //                                 left at the Term-path NF (caller
-  //                                 reads them for downstream
-  //                                 bookkeeping; the AtpFt cells leak
-  //                                 into Arena A until the Stage 4 GC
-  //                                 sweep).
-  //   THVM_ATPFT_NORM_VERIFY=1   -> both paths run; mismatch -> abort
-  //                                 with a diagnostic.
-  static int ft_norm_mode = -1;
-  static int ft_norm_verify = -1;
-  // Default-ON: THVM_ATPFT_NORM=0 (explicit) falls back to Term-only for
-  // A/B; anything else (unset, "1", "yes") routes the verdict through the
-  // FT path.  Mirrors the port/atpft-norm-default change (8fe431db);
-  // fix/ft-splice-unbound resolves the verify-mode mismatch that
-  // previously made this flip unsafe.
-  if (ft_norm_mode   < 0) ft_norm_mode   = atp_env_off("THVM_ATPFT_NORM");
-  if (ft_norm_verify < 0) ft_norm_verify = atp_env_on("THVM_ATPFT_NORM_VERIFY");
-  // The ft_skip_term hoist above already ran the FT-only path when
-  // applicable; only enter this dual-path block for VERIFY mode (which
-  // compares both verdicts), or for non-skip mode (Term-side already
-  // ran, this block adds the FT replacement verdict on top).
-  if ((ft_norm_mode && !do_ft_only) || ft_norm_verify) {
-    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-    AtpFtCell *fl = ft_from_term(a, *lhs, 0);
-    AtpFtCell *fr = ft_from_term(a, *rhs, 0);
-    fl = atp_rewrite_normalize_ft(s, fl, NORM_CAP);
-    fr = atp_rewrite_normalize_ft(s, fr, NORM_CAP);
-    u8 ft_joined = (u8)ft_eq(fl, fr);
-    if (ft_norm_verify && ft_joined != joined) {
-      char la[2048], ra[2048], lf[2048], rf[2048];
-      atp_pretty_term(*lhs, la, sizeof la);
-      atp_pretty_term(*rhs, ra, sizeof ra);
-      // The Term-NF that the Term-side normalize produced is in *lhs / *rhs.
-      // For the FT NF, decode the FT cells back through ft_to_term so we can
-      // print both NFs in the same syntax.
-      Term term_fl = ft_to_term(fl);
-      Term term_fr = ft_to_term(fr);
-      atp_pretty_term(term_fl, lf, sizeof lf);
-      atp_pretty_term(term_fr, rf, sizeof rf);
-      fprintf(stderr,
-              "ATPFT NORM VERIFY: joinable verdict mismatch "
-              "(term=%u ft=%u) at n_rules=%u\n",
-              (unsigned)joined, (unsigned)ft_joined, s->n_rules);
-      fprintf(stderr, "  term-NF: %s == %s\n", la, ra);
-      fprintf(stderr, "  ft-NF:   %s == %s\n", lf, rf);
-      abort();
-    }
-    if (ft_norm_mode) {
-      joined = ft_joined;
-    }
   }
+#else
+  // No FT compiled in: caller must use a Term-only joinable check.  This
+  // function isn't usable, so the cache write is skipped too.
+  (void)lhs; (void)rhs;
 #endif
   if (join_cache_eligible) {
     g_atp_join_cache_misses++;
