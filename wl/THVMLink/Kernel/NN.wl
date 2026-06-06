@@ -1216,8 +1216,10 @@ fromLayer[EmbeddingLayer, _, _TTerm] :=
    predecessor outputs.  We extract the function and apply it. *)
 fromLayer[ThreadingLayer, layer_, xs_List] := Module[{f, isPlus, isTimes},
     f = NetExtract[layer, "Function"];
-    isPlus  = f === Plus  || MatchQ[f, Function[Plus[Slot[_]..]]];
-    isTimes = f === Times || MatchQ[f, Function[Times[Slot[_]..]]];
+    (* HoldPattern keeps the Slot-pattern literal from evaluating as a real
+       Function -- a bare Function[Plus[Slot[_]..]] trips Function::slot. *)
+    isPlus  = f === Plus  || MatchQ[f, HoldPattern[Function[Plus[Slot[_]..]]]];
+    isTimes = f === Times || MatchQ[f, HoldPattern[Function[Times[Slot[_]..]]]];
     Which[
         (* Plus / Times forms: Total[xs] / (Times @@ xs) expand to
            Plus @@ xs / Times @@ xs, which the WL Plus / Times
