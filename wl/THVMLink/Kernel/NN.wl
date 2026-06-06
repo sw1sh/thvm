@@ -1611,19 +1611,6 @@ peelLayer[t_] := Module[{red, mul, wMove, bMove, w, bias, wArr, inL, inR, inner}
     ]
 ]
 
-(* root-is-softmax test (TSoftmaxAxis = MUL[exp(x-max), EXPAND RECIP sum]). *)
-rootIsSoftmaxQ[t_TTerm] := And[
-    uIsUop[t, $UopMul],
-    uIsUop[uChild[t, 1], $UopExpand],
-    uIsUop[uChild[uChild[t, 1], 0], $UopRecip],
-    uIsUop[uChild[t, 0], $UopExp2]]
-
-(* peel a trailing SoftmaxLayer off a forward term, returning the pre-softmax
-   logits (so TCategoricalCrossEntropy's own logsumexp isn't double-applied).
-   A non-softmax forward passes through unchanged. *)
-stripTrailingSoftmax[fwd_TTerm] :=
-    If[ rootIsSoftmaxQ[fwd], softmaxInner[fwd], fwd]
-
 (* the pre-softmax logits term: TSoftmaxAxis is exp(x-max)/sum; the numerator
    EXP2 chain's argument SUB's first operand is the logits x. *)
 softmaxInner[t_] := Module[{num, scaled, sub},
