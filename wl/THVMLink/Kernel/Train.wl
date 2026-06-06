@@ -221,9 +221,9 @@ inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Modu
 
 (* the trainable weights of a forward built over a concrete input slot: the
    float leaves of `fwd` minus the input slot `xSlot` (a float TEN leaf too,
-   but the data to feed, not a weight). *)
-trainableParams[fwd_, xSlot_TTerm] := With[{xv = TTermVal[xSlot]},
-    Select[TNetParams[fwd], TTermVal[#] =!= xv &]]
+   but the data to feed, not a weight).  The forward-UOP TNetParams[fwd, x]
+   form does exactly this. *)
+trainableParams[fwd_, xSlot_TTerm] := TNetParams[fwd, xSlot]
 
 (* === inert training-loop core over a prebuilt batched forward ===
    `fwd` is the batched forward TTerm (logits), `params` its trainable

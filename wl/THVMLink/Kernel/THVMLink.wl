@@ -535,13 +535,25 @@ $initialized := TrueQ @ Lookup[$initializedContexts, $contextCurrentFn[], False]
    so a TInit[] in slot 1 doesn't fool a slot-0 caller. *)
 ensureInit[] := If[ ! $initialized, TInit[]]
 
+(* Side state cleared whenever the heap is rebuilt: term VALs are reissued
+   from zero after a free / init / reset, so any VAL-keyed set (e.g. the
+   TFromNet input-slot set in NN.wl, which TNetParams subtracts) would alias
+   a fresh term and must be wiped here.  A sibling that owns such a set
+   appends its reset thunk to $heapSideStateClearers; clearHeapSideState
+   runs them all. *)
+$heapSideStateClearers = {}
+clearHeapSideState[]    := Scan[#[] &, $heapSideStateClearers]
+
 TInit[]      := ($labelCounters[$contextCurrentFn[]] = 1;
                  $initializedContexts[$contextCurrentFn[]] = True;
+                 clearHeapSideState[];
                  $initFn[] === 1)
 TFree[]      := ($initializedContexts[$contextCurrentFn[]] = False;
+                 clearHeapSideState[];
                  $freeFn[])
 TReset[]     := ($labelCounters[$contextCurrentFn[]] = 1;
                  ensureInit[];
+                 clearHeapSideState[];
                  $resetFn[])
 
 (* Explicit-context lifecycle overloads.  TInit[ctx]/TReset[ctx] run
