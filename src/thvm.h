@@ -4776,6 +4776,74 @@ fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // default DEF block, NewClassification.c).  Off = engine byte-identical.
 fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
 
+// === Phase 0: ground congruence closure (QF_UF), src/cc/_.c ===
+//
+// A standalone Downey-Sethi-Tarjan congruence-closure decision
+// procedure over its OWN integer-encoded egraph node ids (not tied to
+// the Term/IC heap; a later phase integrates that).  Decides ground
+// QF_UF: union-find over subterm nodes + per-class use lists +
+// signature-table congruence propagation.  UNSAT iff some asserted
+// disequality's two sides are congruent.  Mirrors the WL TSatEUF
+// prototype (wl/THVMLink/Kernel/ATP/SMT.wl).
+typedef struct CcState CcState;
+
+typedef enum {
+  CC_SAT   = 0,
+  CC_UNSAT = 1,
+} CcResult;
+
+// lifecycle
+fn CcState  *cc_init      (void);
+fn void      cc_free      (CcState *s);
+// term construction (returns an egraph node id)
+fn u32       cc_atom      (CcState *s, u32 atom_id);
+fn u32       cc_app       (CcState *s, u32 fn_id,
+                           const u32 *arg_nodes, u32 nargs);
+// assertions
+fn void      cc_assert_eq (CcState *s, u32 a, u32 b);
+fn void      cc_assert_ne (CcState *s, u32 a, u32 b);
+// decision + class-representative readout (for SAT equivalence classes)
+fn CcResult  cc_check     (CcState *s);
+fn u32       cc_find      (CcState *s, u32 node);
+// backtracking: cc_push returns a checkpoint mark; cc_pop undoes every
+// destructive op (unions, signature-table edits, use-list prepends,
+// node creations, disequality assertions) recorded since that mark.
+fn u32       cc_push      (CcState *s);
+fn void      cc_pop       (CcState *s, u32 mark);
+
+// === Phase 0: finite-model "ExpressionPrune" enumeration, src/ffmep/_.c ===
+//
+// The C half of the hybrid "ExpressionPruneC" method of WL
+// TFindFiniteModels.  WL clausifies the grounded relation into a clause
+// DB (epClauseDB); this engine runs the hot enumeration the WL
+// "ExpressionPrune" branch does (pruneSelectTuples + extend + FromDigits)
+// so "ExpressionPruneC" is differential-identical to "ExpressionPrune".
+//
+// Clause DB: a list of clause-sets; each clause-set a list of clauses;
+// each clause a list of literals.  A literal "cell c holds value v" is
+// encoded as the integer c * k + v, where cell id c = op_off[op] + pos
+// numbers every operation-table cell across all operators (op_off[op] =
+// cumulative cell offset, op_size[op] = k^arity; ncells = op_off[nops]).
+typedef struct {
+  u32  k;                // domain size
+  u32  ncells;           // total operation-table cells (op_off[nops])
+  u32  nops;             // number of operators
+  const u32 *op_off;     // [nops+1] cumulative cell offsets
+  const u32 *op_size;    // [nops]   table size k^arity per operator
+  const i64 *lit;        // all literal-ints, contiguous per clause
+  const u32 *clause_off; // [nclauses+1] into lit[]
+  u32  nsets;
+  const u32 *set_off;    // [nsets+1] into set_clause[]
+  const u32 *set_clause; // clause ids grouped per set
+} FfmepDb;
+
+// Solve the clause DB; returns a malloc'd i64 buffer of
+// (*out_nmodels) * nops ints (row-major), one row per model (per-operator
+// FromDigits index, operator order).  max_items < 0 == Infinity; it caps
+// the number of solution tuples (pre-extend), mirroring the WL MapTake.
+// Caller owns + frees the buffer.  NULL on alloc failure.
+fn i64 *ffmep_solve(const FfmepDb *db, i64 max_items, u32 *out_nmodels);
+
 #ifdef THVM_ATP_AC
 // AC reasoning controls.  See src/atp/ac.c.  `set_ac_mask` registers
 // a u64 bit-mask of CTR labels that are associative + commutative;

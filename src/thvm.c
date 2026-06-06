@@ -489,6 +489,19 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // add_equation / set_goal.  Step + run drivers land in 5.2.
 #include "atp/_.c"
 
+// === cc/ ===
+// Phase 0 shared substrate: a standalone ground congruence-closure
+// decision procedure for QF_UF (the C port of WL TSatEUF).  Uses its
+// own integer egraph node ids; independent of AtpState.
+#include "cc/_.c"
+
+// === ffmep/ ===
+// Finite-model "ExpressionPrune" hot enumeration: the C half of the
+// hybrid "ExpressionPruneC" method of WL TFindFiniteModels.  WL
+// clausifies the grounded relation into an integer clause DB; this engine
+// runs pruneSelectTuples + extend + FromDigits over it.
+#include "ffmep/_.c"
+
 // === fol/ ===
 // First-order clausal reasoning (Vampire/E-class).  Generalises the
 // unit-equational saturator with multi-literal clauses + binary

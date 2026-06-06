@@ -285,6 +285,8 @@ TESTS := \
   $(BIN)/test_icc \
   $(BIN)/test_wald \
   $(BIN)/test_atp \
+  $(BIN)/test_cc \
+  $(BIN)/test_ffmep \
   $(BIN)/test_atp_analysis \
   $(BIN)/test_atp_enigma \
   $(BIN)/test_bench_atp \

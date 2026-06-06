@@ -1219,3 +1219,316 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_file(WolframLibraryData libData,
   MArgument_setMNumericArray(res, out);
   return LIBRARY_NO_ERROR;
 }
+
+// === ground QF_UF decider via src/cc congruence closure ==========
+//
+// Decides a ground quantifier-free uninterpreted-equality problem
+// through the module's own congruence-closure engine (src/cc/_.c),
+// the C twin of the WL prototype TSatEUF.  Returns 1 (SAT) / 0
+// (UNSAT) so the WL FindFiniteModels "C" Method can prune partial
+// operation tables exactly like its "CongruenceClosure" Method.
+//
+// Inputs (all Integer MTensors, rank-1 / flat):
+//   args[0] = terms   : the distinct subterms in topological order
+//                       (args precede the application that uses
+//                       them).  A flat record stream where term id
+//                       t (0-based, assigned in stream order) is
+//                       [tag, sym, nargs, arg0 .. arg_{nargs-1}]:
+//                         tag 0 -> atom, sym is the atom label;
+//                         tag 1 -> application, sym is the fn label
+//                                  and the nargs trailing entries
+//                                  are the (already-built) child
+//                                  term ids.
+//   args[1] = eqPairs : flat even-length list a0,b0,a1,b1,.. of
+//                       asserted-equal term-id pairs.
+//   args[2] = nePairs : flat even-length list of asserted-unequal
+//                       term-id pairs.
+//
+// Output: Integer 1 (CC_SAT) / 0 (CC_UNSAT).
+// === incremental congruence-closure handle table ====================
+//
+// A persistent CcState exposed to WL by an integer handle so a whole
+// finite-model search shares ONE engine: intern atoms/apps once, then
+// push / assert / check / pop per backtracking node instead of
+// re-deciding the entire problem at every cell.  Handles index a small
+// grow-on-demand table; thvm_cc_free_handle nulls a slot for reuse.
+static CcState **g_cc_handles = NULL;
+static u32        g_cc_handle_cap = 0;
+
+static int cc_handle_alloc(CcState *s) {
+  u32 i = 0;
+  for (; i < g_cc_handle_cap; i++) {
+    if (g_cc_handles[i] == NULL) break;
+  }
+  if (i == g_cc_handle_cap) {
+    u32 cap = g_cc_handle_cap ? g_cc_handle_cap * 2u : 8u;
+    g_cc_handles = (CcState **)realloc(g_cc_handles, cap * sizeof(CcState *));
+    for (u32 j = g_cc_handle_cap; j < cap; j++) g_cc_handles[j] = NULL;
+    g_cc_handle_cap = cap;
+  }
+  g_cc_handles[i] = s;
+  return (int)i;
+}
+
+static CcState *cc_handle_get(mint h) {
+  if (h < 0 || (u32)h >= g_cc_handle_cap) return NULL;
+  return g_cc_handles[h];
+}
+
+// thvm_cc_new[] -> handle (Integer).
+EXTERN_C DLLEXPORT int thvm_cc_new(WolframLibraryData libData, mint argc,
+                                   MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  CcState *s = cc_init();
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  MArgument_setInteger(res, (mint)cc_handle_alloc(s));
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_free_handle[handle] -> 0.
+EXTERN_C DLLEXPORT int thvm_cc_free_handle(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)libData; (void)argc;
+  mint h = MArgument_getInteger(args[0]);
+  CcState *s = cc_handle_get(h);
+  if (s != NULL) { cc_free(s); g_cc_handles[h] = NULL; }
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_intern_atom[handle, atomId] -> node (Integer).
+EXTERN_C DLLEXPORT int thvm_cc_intern_atom(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)libData; (void)argc;
+  CcState *s = cc_handle_get(MArgument_getInteger(args[0]));
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  MArgument_setInteger(res, (mint)cc_atom(s, (u32)MArgument_getInteger(args[1])));
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_intern_app[handle, fnId, argNodes (Integer,1)] -> node.
+EXTERN_C DLLEXPORT int thvm_cc_intern_app(WolframLibraryData libData,
+                                          mint argc, MArgument *args,
+                                          MArgument res) {
+  (void)argc;
+  CcState *s = cc_handle_get(MArgument_getInteger(args[0]));
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  mint fn_id   = MArgument_getInteger(args[1]);
+  MTensor at   = MArgument_getMTensor(args[2]);
+  mint n       = libData->MTensor_getFlattenedLength(at);
+  const mint *d = libData->MTensor_getIntegerData(at);
+  if ((u32)n > REWRITE_MAX_ARITY) return LIBRARY_FUNCTION_ERROR;
+  u32 argbuf[REWRITE_MAX_ARITY];
+  for (mint i = 0; i < n; i++) argbuf[i] = (u32)d[i];
+  MArgument_setInteger(res, (mint)cc_app(s, (u32)fn_id, argbuf, (u32)n));
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_push[handle] -> mark (Integer).
+EXTERN_C DLLEXPORT int thvm_cc_push(WolframLibraryData libData, mint argc,
+                                    MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  CcState *s = cc_handle_get(MArgument_getInteger(args[0]));
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  MArgument_setInteger(res, (mint)cc_push(s));
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_pop[handle, mark] -> 0.
+EXTERN_C DLLEXPORT int thvm_cc_pop(WolframLibraryData libData, mint argc,
+                                   MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  CcState *s = cc_handle_get(MArgument_getInteger(args[0]));
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  cc_pop(s, (u32)MArgument_getInteger(args[1]));
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_assert_eq[handle, a, b] -> 0.
+EXTERN_C DLLEXPORT int thvm_cc_assert_eq(WolframLibraryData libData,
+                                         mint argc, MArgument *args,
+                                         MArgument res) {
+  (void)libData; (void)argc;
+  CcState *s = cc_handle_get(MArgument_getInteger(args[0]));
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  cc_assert_eq(s, (u32)MArgument_getInteger(args[1]),
+                  (u32)MArgument_getInteger(args[2]));
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_assert_ne[handle, a, b] -> 0.
+EXTERN_C DLLEXPORT int thvm_cc_assert_ne(WolframLibraryData libData,
+                                         mint argc, MArgument *args,
+                                         MArgument res) {
+  (void)libData; (void)argc;
+  CcState *s = cc_handle_get(MArgument_getInteger(args[0]));
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  cc_assert_ne(s, (u32)MArgument_getInteger(args[1]),
+                  (u32)MArgument_getInteger(args[2]));
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_cc_check[handle] -> 1 (SAT) / 0 (UNSAT).
+EXTERN_C DLLEXPORT int thvm_cc_check(WolframLibraryData libData, mint argc,
+                                     MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  CcState *s = cc_handle_get(MArgument_getInteger(args[0]));
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+  MArgument_setInteger(res, cc_check(s) == CC_SAT ? 1 : 0);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_cc_decide(WolframLibraryData libData,
+                                         mint argc, MArgument *args,
+                                         MArgument res) {
+  (void)argc;
+  MTensor terms_t = MArgument_getMTensor(args[0]);
+  MTensor eq_t    = MArgument_getMTensor(args[1]);
+  MTensor ne_t    = MArgument_getMTensor(args[2]);
+
+  mint terms_len = libData->MTensor_getFlattenedLength(terms_t);
+  mint eq_len    = libData->MTensor_getFlattenedLength(eq_t);
+  mint ne_len    = libData->MTensor_getFlattenedLength(ne_t);
+  const mint *td = libData->MTensor_getIntegerData(terms_t);
+  const mint *ed = libData->MTensor_getIntegerData(eq_t);
+  const mint *nd = libData->MTensor_getIntegerData(ne_t);
+
+  CcState *s = cc_init();
+  if (s == NULL) return LIBRARY_FUNCTION_ERROR;
+
+  // Map term id (stream order) -> cc node id.
+  u32  node_stack[REWRITE_MAX_ARITY];
+  u32 *node = (u32 *)malloc(sizeof(u32) * (size_t)(terms_len + 1));
+  if (node == NULL) { cc_free(s); return LIBRARY_FUNCTION_ERROR; }
+  u32  n_terms = 0;
+
+  mint i = 0;
+  while (i + 3 <= terms_len) {
+    mint tag   = td[i];
+    mint sym   = td[i + 1];
+    mint nargs = td[i + 2];
+    i += 3;
+    if (tag == 0) {
+      node[n_terms] = cc_atom(s, (u32)sym);
+    } else {
+      if ((u32)nargs > REWRITE_MAX_ARITY || i + nargs > terms_len) {
+        free(node); cc_free(s); return LIBRARY_FUNCTION_ERROR;
+      }
+      for (mint a = 0; a < nargs; a++) node_stack[a] = node[td[i + a]];
+      node[n_terms] = cc_app(s, (u32)sym, node_stack, (u32)nargs);
+      i += nargs;
+    }
+    n_terms++;
+  }
+
+  for (mint p = 0; p + 2 <= eq_len; p += 2) {
+    cc_assert_eq(s, node[ed[p]], node[ed[p + 1]]);
+  }
+  for (mint p = 0; p + 2 <= ne_len; p += 2) {
+    cc_assert_ne(s, node[nd[p]], node[nd[p + 1]]);
+  }
+
+  CcResult r = cc_check(s);
+  free(node);
+  cc_free(s);
+  MArgument_setInteger(res, r == CC_SAT ? 1 : 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// === finite-model "ExpressionPruneC" enumeration =====================
+//
+// thvm_wl_ffmep_solve marshals the WL-built clause DB into FfmepDb and
+// returns the per-operator model index lists.  Inputs (all Integer
+// MTensors / scalars), matching epClauseDB's emitted arrays:
+//   args[0] = opSize   (Integer,1) : per-operator table size k^arity
+//                                    (operator order), length nops.
+//   args[1] = litFlat  (Integer,1) : every literal-int (cell*k + value),
+//                                    contiguous per clause.
+//   args[2] = clauseOff(Integer,1) : [nclauses+1] offsets into litFlat.
+//   args[3] = setOff   (Integer,1) : [nsets+1] offsets into setClause.
+//   args[4] = setClause(Integer,1) : clause ids grouped per clause-set.
+//   args[5] = k        (Integer)   : domain size.
+//   args[6] = maxItems (Integer)   : solution-tuple cap; -1 == Infinity.
+// Output: Integer MTensor, nmodels x nops (row-major), one row per model
+// (per-operator FromDigits index, operator order).  WL Union-sorts +
+// applies the shared Take[UpTo[MaxItems]] tail.
+EXTERN_C DLLEXPORT int thvm_wl_ffmep_solve(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)argc;
+  MTensor opsize_t   = MArgument_getMTensor(args[0]);
+  MTensor lit_t      = MArgument_getMTensor(args[1]);
+  MTensor clauseoff_t= MArgument_getMTensor(args[2]);
+  MTensor setoff_t   = MArgument_getMTensor(args[3]);
+  MTensor setcl_t    = MArgument_getMTensor(args[4]);
+  mint    k          = MArgument_getInteger(args[5]);
+  mint    max_items  = MArgument_getInteger(args[6]);
+
+  mint nops      = libData->MTensor_getFlattenedLength(opsize_t);
+  mint nlit      = libData->MTensor_getFlattenedLength(lit_t);
+  mint nclauseo  = libData->MTensor_getFlattenedLength(clauseoff_t);
+  mint nseto     = libData->MTensor_getFlattenedLength(setoff_t);
+  mint nsetcl    = libData->MTensor_getFlattenedLength(setcl_t);
+  const mint *opsize_d = libData->MTensor_getIntegerData(opsize_t);
+  const mint *lit_d    = libData->MTensor_getIntegerData(lit_t);
+  const mint *clo_d    = libData->MTensor_getIntegerData(clauseoff_t);
+  const mint *seto_d   = libData->MTensor_getIntegerData(setoff_t);
+  const mint *setcl_d  = libData->MTensor_getIntegerData(setcl_t);
+
+  // Build op_off (cumulative) + op_size from the WL opSize array.
+  u32 *op_off  = (u32 *)malloc((size_t)(nops + 1) * sizeof(u32));
+  u32 *op_size = (u32 *)malloc((size_t)(nops ? nops : 1) * sizeof(u32));
+  i64 *lit     = (i64 *)malloc((size_t)(nlit ? nlit : 1) * sizeof(i64));
+  u32 *clo     = (u32 *)malloc((size_t)(nclauseo ? nclauseo : 1) * sizeof(u32));
+  u32 *seto    = (u32 *)malloc((size_t)(nseto ? nseto : 1) * sizeof(u32));
+  u32 *setcl   = (u32 *)malloc((size_t)(nsetcl ? nsetcl : 1) * sizeof(u32));
+  if (!op_off || !op_size || !lit || !clo || !seto || !setcl) {
+    free(op_off); free(op_size); free(lit); free(clo); free(seto); free(setcl);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 acc = 0;
+  for (mint i = 0; i < nops; i++) {
+    op_off[i]  = acc;
+    op_size[i] = (u32)opsize_d[i];
+    acc       += (u32)opsize_d[i];
+  }
+  op_off[nops] = acc;
+  for (mint i = 0; i < nlit;     i++) lit[i]   = (i64)lit_d[i];
+  for (mint i = 0; i < nclauseo; i++) clo[i]   = (u32)clo_d[i];
+  for (mint i = 0; i < nseto;    i++) seto[i]  = (u32)seto_d[i];
+  for (mint i = 0; i < nsetcl;   i++) setcl[i] = (u32)setcl_d[i];
+
+  FfmepDb db;
+  memset(&db, 0, sizeof(db));
+  db.k          = (u32)k;
+  db.ncells     = acc;
+  db.nops       = (u32)nops;
+  db.op_off     = op_off;
+  db.op_size    = op_size;
+  db.lit        = lit;
+  db.clause_off = clo;
+  db.nsets      = (nseto > 0) ? (u32)(nseto - 1) : 0u;
+  db.set_off    = seto;
+  db.set_clause = setcl;
+
+  u32 nmodels = 0;
+  i64 *models = ffmep_solve(&db, (i64)max_items, &nmodels);
+
+  free(op_off); free(op_size); free(lit); free(clo); free(seto); free(setcl);
+  if (models == NULL && nmodels != 0) return LIBRARY_FUNCTION_ERROR;
+
+  MTensor out;
+  mint dims[2] = { (mint)nmodels, nops };
+  int err = libData->MTensor_new(MType_Integer, 2, dims, &out);
+  if (err != LIBRARY_NO_ERROR) { free(models); return err; }
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (mint i = 0; i < (mint)nmodels * nops; i++) dst[i] = (mint)models[i];
+  free(models);
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
