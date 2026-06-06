@@ -94,7 +94,56 @@ Normal @ TTensorData[wA]
 
 Pass a list of parameters and a matching list of moment buffers to step a whole network's weights at once - that is how an optimizer loops over the [TGrad]()-filled `params` from the previous section.
 
-The `t`-integer form folds the bias correction `1 / (1 - beta^t)` in at emit time, which is correct in an eager loop. Under [TJit]() it would freeze that correction at the step the loop was captured. For a JIT-captured step, use the `b1pow` / `b2pow` form instead: seed two shape-`{1}` scalar buffers to `1.0` (with [TOnes]()) and pass them as the last two arguments. Each step advances `beta^t` in-graph, so the correction is read from the live buffer and tracks every replay:
+## Capture the step once, then replay it: TJit + TSet
+
+The loops above rebuild the loss `TTerm` every iteration, and that is the single most expensive mistake you can make on the tensor surface. **Do not reconstruct the graph per step.** Each rebuild re-schedules and re-compiles the whole forward + backward, and because every step leaves its kernels on the live heap, the per-step cost *grows without bound* as the heap fills - a measured forward+grad step drifts from `~25` ms to `~120` ms over a few hundred steps. Reconstruct-and-realize is roughly **8x slower** than the right pattern, and it degrades the longer you run.
+
+The right pattern is *build once, capture once, replay*: assemble the forward and the optimizer step over **concrete weight and input `TTerm`s a single time**, capture that whole dispatch sequence with [TJit](), then feed each minibatch by overwriting the input buffers in place with [TSet]() and calling the captured closure again. The graph is never rebuilt; every step after the first is a pure replay of a fixed kernel set.
+
+Build the pieces once. A two-layer MLP fitting `Ramp[x] . W`, its weights [TGlorot]()/[TZeros]() leaves, and the input/target buffers `x`/`y` that every step will reuse:
+
+```wl
+SeedRandom[1];
+W = RandomReal[{-1, 1}, {4, 2}];
+minibatch[] := With[{xx = RandomReal[{-1, 1}, {32, 4}]}, {N @ xx, N @ Ramp[xx] . W}];
+{w1, b1, w2, b2} = {TGlorot[{4, 64}], TZeros[{64}], TGlorot[{64, 2}], TZeros[{2}]};
+params = {w1, b1, w2, b2};
+{x, y} = TTensorCreate /@ minibatch[];
+forward = TLinear[TReLU[TLinear[x, w1, b1]], w2, b2];
+TTensorShape @ TRealize @ forward
+```
+<!-- => {32, 2}  (batch 32, 2 outputs) -->
+
+Wrap the *whole step* - forward, the one shared backward [TGrad]() walk, and the in-place SGD update - in a no-argument function and hand it to [TJit](). [TAssign]() writes each stepped weight straight back into its own buffer, so the step has no return value worth reading; the closure starts uncaptured (gray play-button, op count `0`):
+
+```wl
+trainStep = TJit @ Function[{},
+    TRealize @ MapThread[TAssign[#1, #1 - 0.002*#2] &, {params, TGrad[TMSELoss[forward, y], params]}]]
+```
+<!-- => TJitClosure summary box: captured: no, ops: 0 -->
+
+The first call captures the dispatch sequence; [TJitOpCount]() then reports how many dispatches it pinned (forward + backward + four weight updates fuse to a small fixed set):
+
+```wl
+trainStep[];
+TJitOpCount[trainStep]
+```
+<!-- => 20  (the fixed dispatch set captured once) -->
+
+Now the loop is *feed and replay*: each step overwrites the input and target buffers in place with [TSet]() - never rebuilding `forward` - and calls the captured closure, which re-fires the same `20` dispatches on the new data and steps the weights in place. A thousand steps drives the loss from `~28` down past `0.2`:
+
+```wl
+Do[
+    MapThread[TSet[#1, TTensorCreate[#2]] &, {{x, y}, minibatch[]}];
+    trainStep[],
+    {1000}];
+Round[Total @ Normal @ TRealize @ TMSELoss[forward, y], 0.01]
+```
+<!-- => 0.12  (loss after 1000 captured-and-replayed steps; started at ~28.21) -->
+
+That is the canonical training step, and [`wl/THVMLink/Examples/train_step_canonical.wls`](../../Examples/train_step_canonical.wls) is the runnable version (CPU by default, `DEV=metal` for the GPU). The same closure replays unchanged on the Metal GPU: because [TJit]() re-fires a *fixed* kernel set, replay can never over-fuse the backward into the thousands-of-kernels shape that hangs the GPU. For an on-device adaptive step, swap the hand-written SGD line for [TAdam]() inside the same captured function, in its `b1pow` / `b2pow` buffer form below so the bias correction tracks each replay instead of freezing at the capture-time step.
+
+The `t`-integer [TAdam]() form folds the bias correction `1 / (1 - beta^t)` in at emit time, which is correct in an eager loop. Under [TJit]() it would freeze that correction at the step the loop was captured. For a JIT-captured step, use the `b1pow` / `b2pow` form instead: seed two shape-`{1}` scalar buffers to `1.0` (with [TOnes]()) and pass them as the last two arguments. Each step advances `beta^t` in-graph, so the correction is read from the live buffer and tracks every replay:
 
 ```wl
 wB = TTensorCreate[{1.}];
@@ -362,7 +411,7 @@ Measured on a fixed `3 -> 8 -> 1` MLP forward+backward step realized in a tight 
 
 - The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial for the tensor / UOp / kernel / autodiff machinery underneath this loop.
 - Per-symbol pages: [TGrad](paclet:WolframInstitute/THVMLink/ref/TGrad), [TSet](paclet:WolframInstitute/THVMLink/ref/TSet), [TLinear](paclet:WolframInstitute/THVMLink/ref/TLinear), [TConv2D](paclet:WolframInstitute/THVMLink/ref/TConv2D), [TAdam](paclet:WolframInstitute/THVMLink/ref/TAdam), [TFromNet](paclet:WolframInstitute/THVMLink/ref/TFromNet).
-- Capture a step with [TJit]() so the loop compiles once and replays every epoch (see the [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) "Capturing a step" section).
+- *Build once, capture once, replay* with [TJit]() + [TSet]() is THE training pattern - see *Capture the step once, then replay it* above; rebuilding the graph per step is ~8x slower and degrades without bound. The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) "Capturing a step" section covers the same capture mechanism on a single kernel.
 - The [TNetTrain]() / [TNetPredict]() one-liner above for the packaged surface - <code>[TNetTrain]()[*net*, *data*, [MaxTrainingRounds]() -> *n*]</code> on a [NetChain]() (its batched forward lifted directly), with `data` a list of `input -> class` rules or the string `"MNIST"`.
 - [`wl/THVMLink/Examples/lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) for the full LeNet-on-Metal run end to end.
 - **Still coming:** reconstructing a trained [NetChain]() back out of a lifted-and-trained `TTerm` (the weights train in place; round-tripping them into a fresh Wolfram net is the open piece).
