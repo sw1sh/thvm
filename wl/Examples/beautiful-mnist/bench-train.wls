@@ -232,6 +232,10 @@ W5 = randTensor[{576, 10}];       b5 = zerosTensor[{10}];
 params = {W1, b1, W2, b2, g1, bn1, W3, b3, W4, b4, g2, bn2, W5, b5};
 mState = TZerosLike /@ params;
 vState = TZerosLike /@ params;
+(* beta^t accumulators advanced in-graph each step; keeps bias
+   correction correct under TJit replay (see Optim.wl TAdam). *)
+b1Pow = TOnes[{1}];
+b2Pow = TOnes[{1}];
 
 {xSlot, tgtSlot, labels} = makeSyntheticBatch[bs];
 Print["params=", Total[Times @@ TTensorShape[#] & /@ params],
@@ -277,7 +281,7 @@ trainStep = Switch[benchMode,
             TRealize @ TGrad[loss, params[[idx]]]; Null]],
     _,
         Function[{stepIdx}, Module[{loss = forwardLoss[xSlot, tgtSlot]},
-            TAdam[loss, params, mState, vState, stepIdx]; Null]]
+            TAdam[loss, params, mState, vState, b1Pow, b2Pow]; Null]]
 ];
 
 jittedStep = TJit[trainStep];

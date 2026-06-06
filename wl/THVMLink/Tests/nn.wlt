@@ -860,6 +860,67 @@ VerificationTest[
     TestID -> "nn/adam-rank1-l2-loss-matches-textbook"
 ]
 
+(* Buffer-form TAdam (b1pow/b2pow) one step matches the same textbook
+   target as the legacy t-integer form: with b1pow = b2pow = 1.0 seeded,
+   the in-graph advance gives 1 - beta1^1 / 1 - beta2^1 -- identical
+   bias correction to t = 1. *)
+VerificationTest[
+    TInit[];
+    w    = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+    tgt  = TTensorCreate @ NumericArray[{0.05}, "Real32"];
+    m    = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    v    = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    b1p  = TOnes[{1}];
+    b2p  = TOnes[{1}];
+    loss = TL2Loss[w - tgt];
+    TAdam[loss, {w}, {m}, {v}, b1p, b2p];
+    Max @ Abs @ Flatten @ {
+        Normal @ TTensorData[w] - {0.999},
+        Normal @ TTensorData[m] - {0.19},
+        Normal @ TTensorData[v] - {0.00361},
+        Normal @ TTensorData[b1p] - {0.9},
+        Normal @ TTensorData[b2p] - {0.999}
+    },
+    _ ? (# < 1.0*^-5 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/adam-buffer-form-one-step-matches-textbook"
+]
+
+(* TJit-captured Adam loop must match an eager (non-JIT) Adam loop to
+   f32 across the first 10 steps.  The b1pow/b2pow buffers carry t as
+   in-graph state -- the advance is a captured replayable assign -- so
+   bias correction tracks each replay rather than freezing at the t the
+   step was captured at.  Regression for the "JIT freezes bias-correction
+   t" bug: the host-folded form baked 1/(1-beta^t) in as a compile-time
+   constant, so a captured Adam step replayed every step with the
+   capture-time correction (max param divergence ~0.7 by step 10). *)
+VerificationTest[
+    runAdam10[useJit_] := Module[{
+        w, tgt, m, v, b1p, b2p, step, jstep, ws = {}
+    },
+        TInit[];
+        w   = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+        tgt = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+        m   = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+        v   = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+        b1p = TOnes[{1}];
+        b2p = TOnes[{1}];
+        step = Function[dummy, Module[{loss = TL2Loss[w - tgt]},
+            TAdam[loss, {w}, {m}, {v}, b1p, b2p,
+                  "lr" -> 0.1, "beta1" -> 0.9, "beta2" -> 0.999]; Null]];
+        If[ useJit,
+            jstep = TJit[step];
+            Do[jstep[k]; ws = Append[ws, Normal @ TTensorData[w]], {k, 1, 10}],
+            Do[step[k];  ws = Append[ws, Normal @ TTensorData[w]], {k, 1, 10}]
+        ];
+        ws
+    ];
+    Max @ Abs @ Flatten[runAdam10[False] - runAdam10[True]],
+    _ ? (# < 1.0*^-5 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/adam-jit-replay-matches-eager-10-steps"
+]
+
 (* === Dot mixed rank-1/rank-2 (matrix.vector, vector.matrix) ===
    The Dot UpValue routes mat.vec / vec.mat to TMatVec (was a TMatMul
    fallback that indexed the vector's nonexistent 2nd axis). *)

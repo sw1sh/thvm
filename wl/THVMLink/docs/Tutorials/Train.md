@@ -94,6 +94,21 @@ Normal @ TTensorData[wA]
 
 Pass a list of parameters and a matching list of moment buffers to step a whole network's weights at once - that is how an optimizer loops over the [TGrad]()-filled `params` from the previous section.
 
+The `t`-integer form folds the bias correction `1 / (1 - beta^t)` in at emit time, which is correct in an eager loop. Under [TJit]() it would freeze that correction at the step the loop was captured. For a JIT-captured step, use the `b1pow` / `b2pow` form instead: seed two shape-`{1}` scalar buffers to `1.0` (with [TOnes]()) and pass them as the last two arguments. Each step advances `beta^t` in-graph, so the correction is read from the live buffer and tracks every replay:
+
+```wl
+wB = TTensorCreate[{1.}];
+mB = TTensorCreate[{0.}];
+vB = TTensorCreate[{0.}];
+b1B = TOnes[{1}];
+b2B = TOnes[{1}];
+TAdam[TL2Loss[wB - TTensorCreate[{0.05}]], {wB}, {mB}, {vB}, b1B, b2B];
+Normal @ TTensorData[wB]
+```
+<!-- => {0.999}  (same first step; correction comes from b1pow/b2pow now) -->
+
+These two forms agree to f32 on the first step; the buffer form stays correct across an arbitrary number of [TJit]() replays.
+
 ## Convolutional layers
 
 [TConv2D]() is a stride-1, no-padding 2-D convolution: *input* `{C_in, H, W}` (or batched `{B, C_in, H, W}`), *weights* `{C_out, C_in, kh, kw}`, *bias* `{C_out}`. It lowers through im2col + a fused matmul. Here a single 2x2 filter over a 4x4 image:

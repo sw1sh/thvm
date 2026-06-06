@@ -87,6 +87,11 @@ W5 = randTensor[{576, 10}];       b5 = zerosTensor[{10}];
 params = {W1, b1, W2, b2, g1, bn1, W3, b3, W4, b4, g2, bn2, W5, b5};
 mState = TZerosLike /@ params;
 vState = TZerosLike /@ params;
+(* beta^t accumulators (shape {1}, seeded to 1.0).  TAdam advances
+   them in-graph each step so bias correction tracks t under TJit
+   replay rather than freezing at capture. *)
+b1Pow = TOnes[{1}];
+b2Pow = TOnes[{1}];
 Print["params=", Total[Times @@ TTensorShape[#] & /@ params]];
 
 (* === Pre-allocated input/target slots.  Same buf_id every step --
@@ -138,7 +143,7 @@ lossSlot = TTensorCreate @ NumericArray[{0.0}, "Real32"];
 
 trainStep = Function[{stepIdx}, Module[{loss = forwardLoss[xSlot, tgtSlot]},
     TRealize @ {TAssign[lossSlot, 0.0 * lossSlot + loss]};
-    TAdam[loss, params, mState, vState, stepIdx]; Null]];
+    TAdam[loss, params, mState, vState, b1Pow, b2Pow]; Null]];
 jittedStep = TJit[trainStep];
 
 runStep[step_Integer, label_String] := Module[{

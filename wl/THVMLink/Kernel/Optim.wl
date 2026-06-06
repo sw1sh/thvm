@@ -20,7 +20,7 @@ BeginPackage["THVMLink`"];
 
 TOptim::usage = "TOptim[\"SGD\", lr] returns a function {gradFn, w0, n} -> TTerm that, when realised, performs n SGD steps from w0 with learning rate `lr`.  TOptim[\"Adam\", lr, beta1, beta2, eps] likewise for Adam.  gradFn is a host-side function w_TTerm -> TTerm carrying the gradient w.r.t. w.";
 
-TAdam::usage = "TAdam[loss, params, m, v, t, opts] applies one Adam step in tensor-land.\n\nArguments:\n    loss    -- TTerm scalar; the value being minimised.  Grads w.r.t.\n               every entry of `params` are computed internally via\n               TGrad[loss, params] (one shared requires_grad backward\n               walk) and realized together via TRealize[grads].\n    params  -- List of TTerm tensor handles (TAG_TEN) to update.\n    m, v    -- Same-shape running first/second moment buffers (TTerm\n               tensors); seed with `TZerosLike /@ params`.\n    t       -- Integer step index (host-side).  Bias-correction\n               constants 1/(1-beta1^t) and 1/sqrt(1-beta2^t) are\n               precomputed at emit time so the kernel program stays\n               POW-free.\n    opts    -- Hyperparameters as Wolfram options.  Defaults:\n                   \"lr\"    -> 0.001\n                   \"beta1\" -> 0.9\n                   \"beta2\" -> 0.999\n                   \"eps\"   -> 1.0*^-8\n\nThe per-param body is the textbook Adam update built as a lazy\nUOP_ASSIGN chain:\n    m := beta1*m + (1-beta1)*grad\n    v := beta2*v + (1-beta2)*grad*grad\n    w := w - lrHat*m / (sqrt(v)*invSqrtB2cor + eps)\nReturns `params` for chainability.";
+TAdam::usage = "TAdam[loss, params, m, v, b1pow, b2pow, opts] applies one Adam step in tensor-land.\n\nArguments:\n    loss    -- TTerm scalar; the value being minimised.  Grads w.r.t.\n               every entry of `params` are computed internally via\n               TGrad[loss, params] (one shared requires_grad backward\n               walk) and realized together via TRealize[grads].\n    params  -- List of TTerm tensor handles (TAG_TEN) to update.\n    m, v    -- Same-shape running first/second moment buffers (TTerm\n               tensors); seed with `TZerosLike /@ params`.\n    b1pow,  -- Shape-{1} scalar buffers carrying beta1^t / beta2^t.\n    b2pow      Seed each to 1.0 (e.g. `TOnes[{1}]`).  Each step advances\n               them in-graph (b1pow := beta1*b1pow), so bias correction\n               (1 - beta^t) is read from the LIVE buffer rather than\n               baked in as a compile-time constant.  This keeps the\n               step correct under TJit: the advance is a captured\n               UOP_ASSIGN that re-runs on every replay, so t is never\n               frozen at capture time.  Tinygrad analogue:\n               LAMB.b1_t / b2_t (tinygrad/nn/optim.py:152,158-159,163).\n    opts    -- Hyperparameters as Wolfram options.  Defaults:\n                   \"lr\"    -> 0.001\n                   \"beta1\" -> 0.9\n                   \"beta2\" -> 0.999\n                   \"eps\"   -> 1.0*^-8\n\nThe per-param body is the textbook Adam update built as a lazy\nUOP_ASSIGN chain:\n    b1pow := beta1*b1pow ;  b2pow := beta2*b2pow\n    m := beta1*m + (1-beta1)*grad\n    v := beta2*v + (1-beta2)*grad*grad\n    w := w - lr * (m/(1-b1pow)) / (sqrt(v/(1-b2pow)) + eps)\nReturns `params` for chainability.\n\nThe legacy form TAdam[loss, params, m, v, t_Integer, opts] folds the\nbias correction in at emit time -- correct only outside TJit; under\nTJit it freezes t at capture.  Use the b1pow/b2pow buffer form when\nthe step is JIT-captured.";
 
 (* Forward-declare symbols owned by later-loading siblings (Ref.wl,
    Switch.wl, Tensor.wl).  Without this, bare references to TDef /
@@ -117,14 +117,25 @@ TOptim["Adam", lr_TTerm, beta1_, beta2_, eps_] :=
 
 (* === TAdam: TAssign-form Adam (graph-resident) ===
 
-   Each call returns a flat list of TAssign TTerms (3 per param: m, v,
-   then w in that order so Realize'ing in sequence sees the freshly-
+   Each call returns a flat list of TAssign TTerms (m, v, then w per
+   param, in that order so Realize'ing in sequence sees the freshly-
    computed m and v when computing m_hat / v_hat).  The math sits
-   inside one TUOpAdd / TUOpMul chain per buffer; bias-correction
-   terms (1 - beta1^t), (1 - beta2^t) are computed host-side at emit
-   time and folded into the lr_hat scalar so the graph stays
-   POW-free.  This keeps the Adam step inside the kernel surface
-   that Phase 7's TJit will capture verbatim. *)
+   inside one TUOpAdd / TUOpMul chain per buffer.
+
+   Bias correction (1 - beta^t).  The step counter t lives in two
+   shape-{1} scalar buffers b1pow = beta1^t, b2pow = beta2^t that the
+   step ADVANCES in-graph (b1pow := beta1*b1pow) and reads back as
+   m_hat = m/(1 - b1pow).  Because the advance is a captured
+   UOP_ASSIGN, it re-runs on every TJit replay -- so a JIT-captured
+   Adam step self-corrects t at each replay rather than freezing the
+   correction at capture-time t.  Tinygrad does the same: LAMB keeps
+   b1_t / b2_t as runtime (1,) tensors, does `b1_t *= b1` per _step,
+   and computes `m_hat = m / (1 - b1_t)`
+   (tinygrad/nn/optim.py:152, 158-159, 163-164).
+
+   Carrying beta^t in a buffer also keeps the kernel program POW-free
+   (no exponent UOP): each step is one MUL by the host-side beta
+   scalar. *)
 Options[TAdam] = {
     "lr"    -> 0.001,
     "beta1" -> 0.9,
@@ -132,38 +143,13 @@ Options[TAdam] = {
     "eps"   -> 1.0*^-8
 };
 
-TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
-      opts : OptionsPattern[]] :=
-    (* Bias-correction folded in at emit time so the kernel program
-       stays POW-free.  Algebra:
-           step = lr * m_hat / (sqrt(v_hat) + eps)
-                = (lr / (1 - b1^t)) * m_new
-                          / (sqrt(v_new) / sqrt(1 - b2^t) + eps)
-                = lrHat * m_new / (sqrt(v_new) * invSqrtB2cor + eps)
-       so lrHat and invSqrtB2cor are precomputed scalars.
-
-       Grads come from TGrad[loss, params] -- one shared requires_grad
-       backward walk -- and are realized together via TRealize[grads]
-       (one bundled materialize pass; the shared upstream cotangent
-       chain is emitted once, see the note below).
-
-       Per-param ASSIGNs are bundled into one TRealize so the Adam
-       step's mutations land in one pool boundary -- this IS the
-       real win of multi-root realize (no kernel slot blowup vs N
-       separate TRealize calls).  Tinygrad analogue: loss.realize
-       opt.schedule_step -- one scheduler pass over the whole step.
-       The earlier Do[..., TRealize @ assign] form re-walked the
-       gradient chain for every param, emitting ~5K kernel slots/step
-       on LeNet (~89x tinygrad's 57). *)
-    Block[{
-        lr     = OptionValue["lr"],
-        beta1  = OptionValue["beta1"],
-        beta2  = OptionValue["beta2"],
-        eps    = OptionValue["eps"],
-        lrHat, invSqrtB2cor, lossK, grads, gradsRealized, paramAssigns
-    },
-        lrHat        = lr  / (1.0 - beta1^t);
-        invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
+(* Shared backward + per-param update.  mHatFn / vHatFn map an
+   m/v buffer's post-assign term to its bias-corrected hat term;
+   the two callers below supply either a committed-buffer divide
+   (JIT-safe) or a host-folded scalar multiply (legacy). *)
+adamStep[loss_, params_, mList_, vList_, lr_, beta1_, beta2_, eps_,
+         mHatFn_, vHatFn_] :=
+    Module[{lossK, grads, gradsRealized, paramAssigns},
         lossK        = TMaterialize[loss];
         grads        = TGrad[lossK, params];
         (* Realize all gradients in ONE bundled materialize pass.
@@ -185,16 +171,74 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
             Block[{
                 wTen = params[[i]], gTen = gradsRealized[[i]],
                 mTen = mList[[i]],  vTen = vList[[i]],
-                mAfter, vAfter, denom
+                mAfter, vAfter, mHat, vHat
             },
                 mAfter = TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen];
                 vAfter = TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
-                denom  = Sqrt[vAfter] * invSqrtB2cor + eps;
-                TAssign[wTen, wTen - lrHat * mAfter / denom]
+                mHat   = mHatFn[mAfter];
+                vHat   = vHatFn[vAfter];
+                TAssign[wTen, wTen - lr * mHat / (Sqrt[vHat] + eps)]
             ],
             {i, Length[params]}];
         TRealize @ paramAssigns;
         params
+    ]
+
+(* Canonical JIT-safe form.  b1pow / b2pow are caller-owned shape-{1}
+   scalar buffers seeded to 1.0; the step advances them in-graph and
+   reads the committed value for bias correction.
+
+   The advance (b1pow := beta1*b1pow) is realized in its OWN bundled
+   pass BEFORE the param updates, then the param updates read the
+   committed b1pow / b2pow buffer as plain TEN handles.  The two-pass
+   ordering is load-bearing: a single realize that both overwrites a
+   scalar buffer AND reads it (1 - b1pow) in another root miscompiles
+   the read-after-write under TJit replay (the captured consumer
+   dispatch reads a stale buffer slot).  Committing the advance first
+   makes the read a clean buffer load -- the SSA shape tinygrad gets
+   for free (b1_t *= b1 ; m_hat = m/(1 - b1_t),
+   tinygrad/nn/optim.py:158-159,163-164).  The advance assign is itself
+   a captured replayable op, so t tracks replays rather than freezing
+   at capture. *)
+TAdam[loss_TTerm, params_List, mList_List, vList_List,
+      b1pow_TTerm, b2pow_TTerm, opts : OptionsPattern[]] :=
+    Module[{
+        lr    = OptionValue["lr"],
+        beta1 = OptionValue["beta1"],
+        beta2 = OptionValue["beta2"],
+        eps   = OptionValue["eps"],
+        oneMinusB1, oneMinusB2
+    },
+        TRealize @ {
+            TAssign[b1pow, beta1 * b1pow],
+            TAssign[b2pow, beta2 * b2pow]};
+        oneMinusB1 = 1.0 - b1pow;
+        oneMinusB2 = 1.0 - b2pow;
+        adamStep[loss, params, mList, vList, lr, beta1, beta2, eps,
+            (# / oneMinusB1) &,
+            (# / oneMinusB2) &]
+    ]
+
+(* Legacy host-folded form: t is a host-side Integer and the
+   bias correction is baked in at emit time.  Correct outside TJit;
+   under TJit it freezes the correction at capture-time t (use the
+   b1pow / b2pow buffer form there). *)
+TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
+      opts : OptionsPattern[]] :=
+    Module[{
+        lr    = OptionValue["lr"],
+        beta1 = OptionValue["beta1"],
+        beta2 = OptionValue["beta2"],
+        eps   = OptionValue["eps"],
+        lrHat, invSqrtB2cor
+    },
+        (* step = lrHat * m_new / (sqrt(v_new) * invSqrtB2cor + eps),
+           folding lr/(1-b1^t) and 1/sqrt(1-b2^t) into m_hat / v_hat. *)
+        lrHat        = lr / (1.0 - beta1^t);
+        invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
+        adamStep[loss, params, mList, vList, lrHat, beta1, beta2, eps,
+            (# &),
+            (# * invSqrtB2cor^2) &]
     ]
 
 End[];
