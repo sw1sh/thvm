@@ -95,10 +95,12 @@ EXTERN_C DLLEXPORT int thvm_wl_reset(WolframLibraryData libData, mint argc,
   if (HEAP == NULL) {
     thvm_init();
   } else {
-    memset(HEAP, 0, HEAP_CAP * sizeof(Term));
-    HEAP_NEXT = 0;
-    WNF_S_POS = 0;
-    ITRS      = 0;
+    // thvm_reset rewinds the dyn heap AND drops every cache that
+    // shadows a dyn-heap loc (uop_const / uop_mov / lam_shape /
+    // materialized_loc / pins / kernels).  The old in-line memset left
+    // those caches intact, so the next rebuilt graph dereferenced a
+    // stale const cell into the overwritten heap -> SIGSEGV (issue #2).
+    thvm_reset();
   }
   MArgument_setInteger(res, 1);
   return LIBRARY_NO_ERROR;

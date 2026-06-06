@@ -538,24 +538,58 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // transparently so the per-field assignments below look identical
 // to the pre-context version.
 
+// The dyn heap and the book heap are the two large arenas (default
+// 2 GiB each).  mmap(MAP_ANON) gives page-aligned, zero-filled, lazily-
+// faulted pages, which buys three things over calloc / aligned_alloc:
+//   1. Reserving a big virtual range costs no RSS until cells are
+//      actually touched -- the old book heap was aligned_alloc'd and
+//      then memset to zero, faulting in the full 2 GiB at every TInit
+//      (issue #1: "reserves ~5 GB at init").
+//   2. munmap returns the pages to the OS immediately on teardown,
+//      vs free() which libmalloc may retain in its large cache (issue
+//      #1: "TFree no-op for RSS").
+//   3. Page alignment (16 KB on Apple Silicon) satisfies Metal's
+//      newBufferWithBytesNoCopy page-aligned requirement for wrapping
+//      the book heap as a shared MTLBuffer on the AOT path -- the
+//      reason the book heap used aligned_alloc(16384, ...) before.
+static void *arena_map(u64 bytes) {
+    void *p = mmap(NULL, (size_t)bytes, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) {
+        fprintf(stderr, "thvm: arena mmap of %llu bytes failed\n",
+                (unsigned long long)bytes);
+        exit(1);
+    }
+    return p;
+}
+
+static void arena_unmap(void *p, u64 bytes) {
+    if (p != NULL) munmap(p, (size_t)bytes);
+}
+
 // init_ctx_arrays + init_ctx_backends are the per-slot worker for
 // thvm_init AND thvm_context_create.  Picks default_device by name
 // ("cpu" / "metal" / NULL).
 static void init_ctx_arrays(TContext *ctx) {
-    ctx->heap             = (Term *)calloc(thvm_heap_cells(), sizeof(Term));
+    // All the big tables go through arena_map (mmap MAP_ANON): zero-filled
+    // and lazily faulted, so reserving the full caps costs ~0 RSS until
+    // cells/slots are actually written, and arena_unmap returns the pages
+    // to the OS on teardown.  The descriptor tables (tens / kernels /
+    // alo_states / cpu_bufs) were calloc'd before, which on macOS dirties
+    // the whole ~576 MB up front (libmalloc memsets reused large blocks)
+    // and never returns it to the OS via free() -- the bulk of issue #1's
+    // "reserves ~5 GB at init" / "TFree no-op for RSS".  The small WNF
+    // stacks stay on calloc (1 MB total).
+    ctx->heap             = (Term *)       arena_map(thvm_heap_cells() * sizeof(Term));
     ctx->wnf_state.stack  = (Term *)calloc(WNF_CAP,      sizeof(Term));
     ctx->wnf_last_stack   = (Term *)calloc(WNF_CAP,      sizeof(Term));
-    ctx->tens           = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
-    ctx->kernels        = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
-    // book_heap: 16KB page-aligned so it can be wrapped as a
-    // shared MTLBuffer via newBufferWithBytesNoCopy without an
-    // intermediate copy on the AOT-on-Metal path.  BOOK_CAP *
-    // sizeof(Term) = 2 MiB = 128 pages on Apple Silicon, satisfying
-    // aligned_alloc's "size is a multiple of alignment" requirement.
-    ctx->book_heap      = (Term *)aligned_alloc(16384, BOOK_CAP * sizeof(Term));
-    memset(ctx->book_heap, 0, BOOK_CAP * sizeof(Term));
-    ctx->alo_states     = (AloState *)calloc(ALO_STATE_CAP, sizeof(AloState));
-    ctx->cpu_bufs       = (CpuBuf *)calloc(CPU_BUFS_CAP, sizeof(CpuBuf));
+    ctx->tens             = (TenDesc *)    arena_map(TENS_CAP    * sizeof(TenDesc));
+    ctx->kernels          = (KernelEntry *)arena_map(KERNELS_CAP * sizeof(KernelEntry));
+    // Page-aligned (mmap) so the book heap can be wrapped as a shared
+    // MTLBuffer via newBufferWithBytesNoCopy on the AOT-on-Metal path.
+    ctx->book_heap        = (Term *)       arena_map(thvm_book_cells() * sizeof(Term));
+    ctx->alo_states       = (AloState *)   arena_map(ALO_STATE_CAP * sizeof(AloState));
+    ctx->cpu_bufs         = (CpuBuf *)     arena_map(CPU_BUFS_CAP  * sizeof(CpuBuf));
     init_default_ctx_scalars(ctx);
     memset(ctx->defs,             0, sizeof(ctx->defs));
     memset(ctx->book_ref_visited, 0, sizeof(ctx->book_ref_visited));
@@ -692,20 +726,20 @@ void thvm_free(void) {
   jit_capture_reset_all();
   cpu_jit_cache_reset();
   cg_profile_reset();
-  free(HEAP);            HEAP            = NULL;
+  arena_unmap(HEAP, thvm_heap_cells() * sizeof(Term));            HEAP = NULL;
   free(WNF_STACK);       WNF_STACK       = NULL;
   free(WNF_LAST_STACK);  WNF_LAST_STACK  = NULL;
-  free(TENS);            TENS            = NULL;
-  // Free per-kernel heap arrays before freeing the KERNELS table
-  // itself (each KernelEntry owns input_*[] on the heap; calloc-
-  // zeroed entries have NULL pointers, free is NULL-safe).
+  // Free per-kernel heap arrays before unmapping the KERNELS table
+  // itself (each KernelEntry owns input_*[] on the heap; zeroed
+  // entries have NULL pointers, free is NULL-safe).
   if (KERNELS) {
     for (u32 i = 0; i < KERNELS_NEXT; i++) kernel_free_arrays(&KERNELS[i]);
   }
-  free(KERNELS);         KERNELS         = NULL;
-  free(BOOK_HEAP);       BOOK_HEAP       = NULL;
-  free(ALO_STATES);      ALO_STATES      = NULL;
-  free(CPU_BUFS);        CPU_BUFS        = NULL;
+  arena_unmap(TENS,    TENS_CAP    * sizeof(TenDesc));            TENS = NULL;
+  arena_unmap(KERNELS, KERNELS_CAP * sizeof(KernelEntry));        KERNELS = NULL;
+  arena_unmap(BOOK_HEAP, thvm_book_cells() * sizeof(Term));       BOOK_HEAP = NULL;
+  arena_unmap(ALO_STATES, ALO_STATE_CAP * sizeof(AloState));      ALO_STATES = NULL;
+  arena_unmap(CPU_BUFS,   CPU_BUFS_CAP  * sizeof(CpuBuf));        CPU_BUFS = NULL;
   gc_reset();
   HEAP_NEXT       = 0;
   WNF_S_POS       = 0;
@@ -723,6 +757,66 @@ void thvm_free(void) {
   for (u32 i = 0; i < THVM_MAX_BACKENDS; i++) CURRENT_CTX->backends[i] = NULL;
   CURRENT_CTX->n_backends     = 0;
   CURRENT_CTX->default_device = 0;
+}
+
+// Cheap per-frame reclaim: rewind the dynamic working state to a just-
+// initialized state WITHOUT freeing the big arenas, tearing down the
+// backend device, or clearing the static book heap / DEFS / ALO
+// templates.  This is the per-step / per-episode reset path
+// (TReset[] -> thvm_wl_reset -> here).  Unlike thvm_free + thvm_init it
+// keeps the mmap'd arenas mapped (so the next frame reuses the same
+// resident pages -> flat RSS) and the Metal device + metallib loaded
+// (no per-reset metallib reload).
+//
+// The bug this fixes (issue #2): the old reset zeroed HEAP + rewound
+// HEAP_NEXT but left every cache that shadows a dynamic-heap loc intact.
+// After the bump cursor rewinds, a surviving uop_const / uop_mov /
+// lam_shape / materialized_loc entry resolves to a cell the next frame
+// overwrites -> garbage deref / SIGSEGV.  We must drop the same caches
+// thvm_init/thvm_free clear, plus rewind the per-frame descriptor
+// cursors so a long reset loop neither leaks nor exhausts the caps.
+void thvm_reset(void) {
+  // Release per-frame backend buffer payloads orphaned by the heap
+  // rewind below (the owning TenDescs disappear), without releasing the
+  // backend device.  cpu_buf_free_all rewinds CPU_BUFS_NEXT + the
+  // freelist.  (Metal/CUDA device-buffer reclaim on reset is a
+  // follow-up; today metal users reclaim via TInit-per-episode.)
+  cpu_buf_free_all();
+  // Free per-kernel heap-array payloads, then rewind the kernel table.
+  // Kernels reference dynamic-heap locs (source_uop / input_terms[])
+  // and the JIT fn cache is keyed by kid, so the table, the dlopen'd
+  // JIT variants, and the capture slots must all drop together with the
+  // heap or a re-issued kid resolves to a stale compiled function.
+  if (KERNELS) {
+    for (u32 i = 0; i < KERNELS_NEXT; i++) kernel_free_arrays(&KERNELS[i]);
+  }
+  // Caches whose stored Terms / locs point into the dynamic heap.
+  uop_const_cache_reset();
+  uop_mov_cache_reset();
+  lam_shape_reset();
+  materialized_loc_clear();
+  extern_pin_clear();          // every dynamic term dies on reset, so
+  extern_pin_handle_clear();   // outstanding pins / handles are invalid.
+  jit_capture_reset_all();
+  cpu_jit_cache_reset();
+  cg_profile_reset();
+  // Rewind the Cheney semi-spaces (from-space = lower half,
+  // HEAP_NEXT = 0).  No heap zeroing: gc_collect already hands out
+  // non-zeroed cells after a space swap (see heap/collect.c step 7), so
+  // the runtime always writes a cell before reading it -- the old
+  // full-heap memset was both unnecessary and faulted in the entire
+  // heap capacity on every reset.
+  gc_init(thvm_heap_cells() / 2);
+  // Dynamic cursors / counters.  DEFS, BOOK_HEAP, BOOK_NEXT, and
+  // BOOK_REF_VISITED are intentionally preserved (static def templates
+  // survive a reset; that is the whole point of reset vs free).
+  WNF_S_POS          = 0;
+  WNF_LAST_STACK_LEN = 0;
+  ITRS               = 0;
+  TENS_NEXT          = 1;
+  KERNELS_NEXT       = 1;
+  ALO_STATES_NEXT    = 1;
+  alo_dup_share_reset();
 }
 
 // === Multi-context API ===
@@ -772,14 +866,18 @@ void thvm_context_destroy(u32 slot) {
     // are all file-static globals shared across every context, not
     // per-ctx state.  Wiping them here would clobber live entries from
     // other contexts.  thvm_free() is the only correct site.
-    free(ctx->heap);
+    if (ctx->kernels) {
+      for (u32 i = 0; i < ctx->kernels_next; i++)
+        kernel_free_arrays(&ctx->kernels[i]);  // owns input_*[] on the heap
+    }
+    arena_unmap(ctx->heap,       thvm_heap_cells() * sizeof(Term));
     free(ctx->wnf_state.stack);
     free(ctx->wnf_last_stack);
-    free(ctx->tens);
-    free(ctx->kernels);
-    free(ctx->book_heap);
-    free(ctx->alo_states);
-    free(ctx->cpu_bufs);
+    arena_unmap(ctx->tens,       TENS_CAP    * sizeof(TenDesc));
+    arena_unmap(ctx->kernels,    KERNELS_CAP * sizeof(KernelEntry));
+    arena_unmap(ctx->book_heap,  thvm_book_cells() * sizeof(Term));
+    arena_unmap(ctx->alo_states, ALO_STATE_CAP * sizeof(AloState));
+    arena_unmap(ctx->cpu_bufs,   CPU_BUFS_CAP  * sizeof(CpuBuf));
     thvm_set_current_ctx(prev);
     if (CURRENT_CTX == ctx) thvm_set_current_ctx(CONTEXTS[0]);
     free(ctx);
