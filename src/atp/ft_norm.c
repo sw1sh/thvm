@@ -259,14 +259,35 @@ static int find_redex_ft(AtpState        *s,
       if (!try_unorient) continue;
       // Unorientable equation: try forward (l -> r) then backward (r -> l).
       // Forward: lhs matches p, rhs's vars are subset of lhs's vars,
-      // and the instantiated repl is strictly less than the redex under
-      // the reduction order.
+      // instantiated repl < redex under the reduction order.  Streaming
+      // KBO via thvm_kbo_ft_subst_with_prepared; THVM_ATPFT_KBO_DIFF=1
+      // runs a side-by-side Term-side atp_compare to surface verdict
+      // divergences (a probe across the AC bench found zero -- the
+      // streaming KBO matches atp_compare on the unorient gate inputs).
       if (ft_vars_contained(rhs, lhs)) {
         ft_subst_reset(subst_buf);
         if (ft_match(lhs, p, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          if (thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo)
-              == KBO_GT) {
+          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
+          static int dbg_diff = -1;
+          if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
+          if (dbg_diff) {
+            AtpFt *arena_chk = (AtpFt *)s->ft_arena_ptr;
+            AtpFtCell *repl = ft_subst_apply(arena_chk, rhs, subst_buf, 1);
+            if (repl != NULL) {
+              Term t_p    = ft_to_term(p);
+              Term t_repl = ft_to_term(repl);
+              KboCmp tt_v = atp_compare(s, t_p, t_repl);
+              if (ft_v != tt_v) {
+                fprintf(stderr,
+                        "[KBO DIFF fwd] ft=%d tt=%d  p=0x%016llx  sigma_r=0x%016llx\n",
+                        (int)ft_v, (int)tt_v,
+                        (unsigned long long)t_p,
+                        (unsigned long long)t_repl);
+              }
+            }
+          }
+          if (ft_v == KBO_GT) {
             *parent_out = (p == root) ? NULL : prev;
             *redex_out  = p;
             *rule_out   = r;
@@ -281,8 +302,8 @@ static int find_redex_ft(AtpState        *s,
         ft_subst_reset(subst_buf);
         if (ft_match(rhs, p, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
-          if (thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo)
-              == KBO_GT) {
+          KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
+          if (ft_v == KBO_GT) {
             *parent_out = (p == root) ? NULL : prev;
             *redex_out  = p;
             *rule_out   = r;

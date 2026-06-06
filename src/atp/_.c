@@ -8581,29 +8581,19 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     return ATP_RUNNING;
   }
 
-  // Single-normal-form check: sound and cheap.  If both goal sides
-  // rewrite to the same normal form under R the goal is proved.  This
-  // catches every goal whose two sides share a normal form (e.g. thm,
-  // whose deep lhs reduces to its rhs).
-  //
-  // Stays on the Term-side `atp_rewrite_normalize` (which dispatches to
-  // `atp_rewrite_normalize_ordered` under ATP_ORDERED_REWRITE) -- the
-  // FT-side `atp_rewrite_normalize_ft` is faster per call (4x at
-  // n_rules~90, measured) BUT has divergent NF semantics on
-  // unorientable rules: the AC bench's "no-ac" case proves in 6 iters
-  // via Term path (which closes commutativity via its ordered rewriter)
-  // but never closes via FT path (which leaves a non-canonical NF on
-  // the AC-equivalent goal pair).  The trivially_joinable migration
-  // (30012780) is safe because its NORM_CAP=64 and the "joined" verdict
-  // is sound either way -- both paths' YES is correct, and disagreeing
-  // NOs just affect CP volume.  Migrating goal_check would change the
-  // PROVED gate's semantics, so it stays on Term until the FT
-  // normalizer matches the ordered rewriter on unorientable rules.
+  // Stays on Term-side `atp_rewrite_normalize` (-> atp_rewrite_normalize_
+  // ordered).  FT-only would require atp_rewrite_normalize_ft_impl's
+  // orient/unorient phase ordering to match the Term-side leftmost-
+  // outermost descent exactly -- diagnosed via the THVM_ATPFT_KBO_DIFF
+  // probe in find_redex_ft (which surfaced ZERO unorient-gate KBO
+  // divergences across the AC bench, so the gap is upstream in the
+  // phase loop, not in the streaming KBO).  Until that's closed, the
+  // FT-only normalize stops at a different NF than the Term-side on
+  // AC-class goals and the AC bench hangs at step_cap.
   Term l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
   Term r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
-  // Cache the live (normalized) goal for the CPinGoal heuristic.
   s->goal_lhs_nf = l;
   s->goal_rhs_nf = r;
   if (kbo_eq(l, r)) return ATP_PROVED;
