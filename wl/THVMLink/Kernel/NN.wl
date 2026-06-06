@@ -86,7 +86,7 @@ TEmbeddingMatrix::usage  = "TEmbeddingMatrix[table, ids] gathers rows `ids` from
 TGELU::usage             = "TGELU[x] applies the tanh-form GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).  Composes via existing TTanh -- no new opcode required.";
 TCausalMask::usage       = "TCausalMask[seq] returns a {seq, seq} TTerm wrapping a fresh tensor whose entries are 0 at (i, j) with j <= i and -1e9 at j > i.  Add to attention scores before softmax to zero out future-token attention.";
 TLayerNormAffine::usage  = "TLayerNormAffine[x, gamma, beta] applies TLayerNorm[x] then multiplies by gamma + adds beta along the last axis.  GPT-2's layer-norm carries learned gamma/beta; the bare TLayerNorm in this file normalises only.";
-TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q, K, V are {seq, dim} TTerms with dim = n_heads * d_head; mask is a {seq, seq} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).\n\nTMultiHeadAttention[Q, K, V, n_heads, mask, scale] uses the explicit `scale` factor in place of the default 1/Sqrt[d_head] (pass 1.0 when the caller has already pre-scaled Q, as GPT-2's NetGraph does).";
+TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q is {seq_q, dim}; K, V are {seq_k, dim} (read independently, so seq_k may differ from seq_q -- cross-attention, or a single-query step over a KV cache); dim = n_heads * d_head; mask is a {seq_q, seq_k} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq_q, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).\n\nTMultiHeadAttention[Q, K, V, n_heads, mask, scale] uses the explicit `scale` factor in place of the default 1/Sqrt[d_head] (pass 1.0 when the caller has already pre-scaled Q, as GPT-2's NetGraph does).";
 Begin["`Private`"];
 
 (* === Tensor-method helpers ============================== *)
@@ -881,30 +881,34 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
 
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                     nHeads_Integer, mask_, scale_?NumericQ] := With[{
-    shapeQ = tUopShape[q]
+    shapeQ = tUopShape[q],
+    shapeK = tUopShape[k]
 },
-    Module[{seq, dim, dHead, headView, sliceHead, perHead, headOuts},
-        seq   = shapeQ[[1]];
+    Module[{seqQ, seqK, dim, dHead, headView, sliceHead, perHead, headOuts},
+        seqQ  = shapeQ[[1]];
+        seqK  = shapeK[[1]];      (* K / V carry their own length: seqK may
+                                     differ from seqQ for cross-attention and
+                                     for a single-query step over a KV cache. *)
         dim   = shapeQ[[2]];
         dHead = dim / nHeads;
-        (* {seq, dim} -> {seq, nHeads, dHead} -> {nHeads, seq, dHead}.
+        (* {s, dim} -> {s, nHeads, dHead} -> {nHeads, s, dHead}.
            Transpose with 1-indexed perm via the WL UpValue. *)
-        headView[t_] := Transpose[ArrayReshape[t, {seq, nHeads, dHead}],
+        headView[t_, s_] := Transpose[ArrayReshape[t, {s, nHeads, dHead}],
                                   {2, 1, 3}];
-        sliceHead[hView_, h_] := ArrayReshape[
-            TUOpShrink[hView, {{h, h + 1}, {0, seq}, {0, dHead}}],
-            {seq, dHead}];
+        sliceHead[hView_, h_, s_] := ArrayReshape[
+            TUOpShrink[hView, {{h, h + 1}, {0, s}, {0, dHead}}],
+            {s, dHead}];
         perHead[h_] := With[{
-            qS = sliceHead[headView[q], h],
-            kS = sliceHead[headView[k], h],
-            vS = sliceHead[headView[v], h]
+            qS = sliceHead[headView[q, seqQ], h, seqQ],
+            kS = sliceHead[headView[k, seqK], h, seqK],
+            vS = sliceHead[headView[v, seqK], h, seqK]
         },
             Module[{scores, scoresM},
-                scores  = (qS . Transpose[kS]) * scale;
+                scores  = (qS . Transpose[kS]) * scale;   (* {seqQ, seqK} *)
                 scoresM = If[ mask === None, scores, scores + mask];
-                TSoftmaxAxis[scoresM, 1] . vS]];
+                TSoftmaxAxis[scoresM, 1] . vS]];          (* {seqQ, dHead} *)
         headOuts = perHead /@ Range[0, nHeads - 1];
-        headStitch[headOuts, seq, nHeads, dHead]
+        headStitch[headOuts, nHeads, dHead]
     ]
 ]
 
@@ -918,10 +922,11 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
    forward (and its raw-array extraction in Examples/gpt2_weights.wl) were
    deleted -- the graph traversal reproduces them token-for-token. *)
 
-(* Stitch a list of nHeads {seq, dHead} TTerms into {seq, dim=
+(* Stitch a list of nHeads {seq_q, dHead} TTerms into {seq_q, dim=
    nHeads*dHead} via per-head PAD into the corresponding column
-   slice + sum.  No STACK op in thvm. *)
-headStitch[heads_List, seq_, nHeads_, dHead_] := Total @ Table[
+   slice + sum.  No STACK op in thvm.  The row (seq_q) axis is left
+   untouched, so the stitch needs only nHeads and dHead. *)
+headStitch[heads_List, nHeads_, dHead_] := Total @ Table[
     TUOpPad[heads[[h + 1]],
         {{0, 0}, {h * dHead, (nHeads - h - 1) * dHead}}],
     {h, 0, nHeads - 1}]

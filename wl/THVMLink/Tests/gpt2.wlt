@@ -161,3 +161,30 @@ With[{seq = 4, nh = 2, dh = 5},
         TestID -> "gpt2/self-attention-block-from-building-blocks"
     ]
 ];
+
+(* ===== single-query attention over a KV cache == full-sequence row ===== *)
+(* The decode-time KV-cache step queries ONE new token (seq_q = 1) against
+   the cached K / V of every past position (seq_k = cacheLen) with a {1,
+   seq_k} additive mask.  This must reproduce the full-sequence causal MHA's
+   row at that position bit-for-bit -- the correctness gate for incremental
+   GPT-2 generation.  Cross-attention shape (seq_q != seq_k) exercises the
+   generalised TMultiHeadAttention. *)
+With[{seq = 6, nh = 3, dh = 4},
+    dim  = nh * dh;
+    q    = RandomReal[{-1, 1}, {seq, dim}];
+    k    = RandomReal[{-1, 1}, {seq, dim}];
+    v    = RandomReal[{-1, 1}, {seq, dim}];
+    full = rd @ TMultiHeadAttention[tc[q], tc[k], tc[v], nh, TCausalMask[seq]];
+    (* one query row p (1-indexed) attending over the whole {seq, dim} cache,
+       masked to positions <= p -- equals the full result's row p. *)
+    queryStep[p_] := With[{
+        qRow = tc[q[[{p}]]],                                  (* {1, dim} *)
+        mRow = tc[Table[If[j <= p, 0., -1.*^9], {1}, {j, seq}]] (* {1, seq} *)
+    },
+        First @ rd @ TMultiHeadAttention[qRow, tc[k], tc[v], nh, mRow]];
+    VerificationTest[
+        Max[Table[md[full[[p]], queryStep[p]], {p, seq}]] < 1.*^-4,
+        True,
+        TestID -> "gpt2/cached-single-query-attention-vs-full-row"
+    ]
+];
