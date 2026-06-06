@@ -107,3 +107,61 @@ VerificationTest[
     Round[(1 - 0.8^5) * {1., 2., 3.}, 0.0001],
     TestID -> "assign/recursive-loop-converges"
 ]
+
+(* === TSetData: in-place host upload, NO fresh TenDesc per feed.
+       The fast per-step input feed -- writes the NumericArray bytes
+       straight into the dst's existing buffer. === *)
+
+VerificationTest[
+    TInit[];
+    dst = TTensorCreate @ NumericArray[{0., 0., 0., 0.}, "Real32"];
+    TSetData[dst, NumericArray[{7., 8., 9., 10.}, "Real32"]];
+    Normal @ TTensorData[dst],
+    {7., 8., 9., 10.},
+    TestID -> "setdata/basic-write"
+]
+
+VerificationTest[
+    TInit[];
+    dst = TTensorCreate @ NumericArray[{0., 0.}, "Real32"];
+    res = TSetData[dst, NumericArray[{1., 2.}, "Real32"]];
+    (* Returns dst (the same TTerm) so feed chains compose. *)
+    res === dst,
+    True,
+    TestID -> "setdata/returns-dst"
+]
+
+(* No TenDesc churn: repeated TSetData feeds do NOT grow the tid table,
+   unlike TSet[dst, TTensorCreate[...]] which allocates one per feed. *)
+VerificationTest[
+    TInit[];
+    dst = TTensorCreate @ NumericArray[{0., 0., 0.}, "Real32"];
+    c0 = TTensCount[];
+    Do[TSetData[dst, NumericArray[{1.*i, 2.*i, 3.*i}, "Real32"]], {i, 1, 20}];
+    c1 = TTensCount[];
+    {c1 - c0, Normal @ TTensorData[dst]},
+    {0, {20., 40., 60.}},
+    TestID -> "setdata/no-tid-growth"
+]
+
+(* A plain list / PackedArray feed is lifted to a NumericArray first
+   (matching TTensorCreate's input handling). *)
+VerificationTest[
+    TInit[];
+    dst = TTensorCreate @ NumericArray[{0., 0., 0.}, "Real32"];
+    TSetData[dst, {3., 4., 5.}];
+    Normal @ TTensorData[dst],
+    {3., 4., 5.},
+    TestID -> "setdata/list-input-lifted"
+]
+
+(* Numel mismatch is refused (returns LIBRARY_FUNCTION_ERROR, so the
+   dst's buffer is left untouched). *)
+VerificationTest[
+    TInit[];
+    dst = TTensorCreate @ NumericArray[{0., 0., 0.}, "Real32"];
+    Quiet @ TSetData[dst, NumericArray[{1., 2.}, "Real32"]];
+    Normal @ TTensorData[dst],
+    {0., 0., 0.},
+    TestID -> "setdata/numel-mismatch-refused"
+]

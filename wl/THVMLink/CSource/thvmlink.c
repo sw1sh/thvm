@@ -1067,6 +1067,84 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   return LIBRARY_NO_ERROR;
 }
 
+// In-place host upload: write a NumericArray's bytes straight into an
+// EXISTING buffer's storage, allocating NO new TenDesc / buf_id.  This
+// is the fast feed path for per-step training inputs: a fixed input
+// tensor is built once, then re-fed every step via this entry, instead
+// of churning a fresh tensor_from_na TenDesc + ASSIGN graph per step.
+// Mirrors tinygrad's Buffer.copyin -> Allocator._copyin, which writes
+// into the existing dest buffer rather than reallocating
+// (tinygrad/device.py:205-210 Buffer.copyin: asserts the byte count
+// matches + the buffer is allocated, then _copyin into self._buf).
+//
+// args[0] = dest TenDesc id (a TAG_TEN already holding a buffer).
+// args[1] = source NumericArray (Shared passing mode).
+// The dtype must map identically and the element count must match; the
+// raw bytes are copied via the dest's backend buf_write.  The
+// NumericArray is disowned before returning (we copied, we don't retain
+// it).  Returns 1 on success.
+EXTERN_C DLLEXPORT int thvm_wl_tensor_write_na(WolframLibraryData libData, mint argc,
+                                               MArgument *args, MArgument res) {
+  (void)argc;
+  mint                id = MArgument_getInteger(args[0]);
+  MNumericArray       na = MArgument_getMNumericArray(args[1]);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+
+  numericarray_data_t t      = naf->MNumericArray_getType(na);
+  mint                numel  = naf->MNumericArray_getFlattenedLength(na);
+  void               *naData = naf->MNumericArray_getData(na);
+
+  u32 dtype;
+  switch (t) {
+    case MNumericArray_Type_Real32:  dtype = DT_FP32;   break;
+    case MNumericArray_Type_Real64:  dtype = DT_FP64;   break;
+    case MNumericArray_Type_Bit8:    dtype = DT_INT8;   break;
+    case MNumericArray_Type_UBit8:   dtype = DT_UINT8;  break;
+    case MNumericArray_Type_Bit16:   dtype = DT_INT16;  break;
+    case MNumericArray_Type_UBit16:  dtype = DT_UINT16; break;
+    case MNumericArray_Type_Bit32:   dtype = DT_INT32;  break;
+    case MNumericArray_Type_UBit32:  dtype = DT_UINT32; break;
+    case MNumericArray_Type_Bit64:   dtype = DT_INT64;  break;
+    case MNumericArray_Type_UBit64:  dtype = DT_UINT64; break;
+    default:
+      fprintf(stderr, "tensor_write_na: unsupported NumericArray type %d\n", (int)t);
+      naf->MNumericArray_disown(na);
+      return LIBRARY_FUNCTION_ERROR;
+  }
+
+  TenDesc *d = &TENS[id];
+  // The dest must hold a real buffer and the source must line up
+  // exactly: same logical dtype and element count.  A mismatch means
+  // the caller built the dest with a different shape/dtype than the
+  // NumericArray it is now feeding, which would scribble past the
+  // buffer; refuse rather than corrupt memory.
+  if (d->buf_id == 0) {
+    fprintf(stderr, "tensor_write_na: dest tensor %lld has no buffer\n", (long long)id);
+    naf->MNumericArray_disown(na);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  if (d->dtype != dtype) {
+    fprintf(stderr, "tensor_write_na: dtype mismatch dest=%s src=%s\n",
+            dtype_name(d->dtype), dtype_name(dtype));
+    naf->MNumericArray_disown(na);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  if ((u64)numel != (u64)d->view.numel) {
+    fprintf(stderr, "tensor_write_na: numel mismatch dest=%llu src=%lld\n",
+            (unsigned long long)d->view.numel, (long long)numel);
+    naf->MNumericArray_disown(na);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+
+  u64 nbytes = dtype_storage_bytes(dtype, (u64)numel);
+  d->backend->buf_write(d->buf_id, naData, nbytes);
+  naf->MNumericArray_disown(na);
+
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
 // Host-pinned variant of tensor_from_na: ALWAYS builds the tensor on
 // CPU_BACKEND via the zero-copy external-buffer path, regardless of
 // CURRENT_BACKEND.  Used by the lazy device-transfer lift (NN.wl

@@ -415,6 +415,7 @@ $tensorViewDbgFn := $tensorViewDbgFn = load["thvm_wl_tensor_view_debug", {Intege
    tells WL to give the C side a shared reference; C bridge stores
    the handle and disowns on release.  *)
 $tensorFromNAFn  := $tensorFromNAFn  = load["thvm_wl_tensor_from_na", {{"NumericArray", "Shared"}}, Integer];
+$tensorWriteNAFn := $tensorWriteNAFn = load["thvm_wl_tensor_write_na", {Integer, {"NumericArray", "Shared"}}, Integer];
 $tensorFromNAHostFn := $tensorFromNAHostFn = load["thvm_wl_tensor_from_na_host", {{"NumericArray", "Shared"}}, Integer];
 $tensorFromNATypedFn := $tensorFromNATypedFn = load["thvm_wl_tensor_from_na_typed", {{"NumericArray", "Shared"}, Integer, {Integer, 1}}, Integer];
 

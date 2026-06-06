@@ -20,6 +20,8 @@ BeginPackage["THVMLink`"];
 
 TSet::usage = "TSet[dst, src] writes the bytes of `src` into `dst`'s backing buffer in place; `dst` keeps its TenDesc id so callers still holding it observe the new contents.  Equivalent to `TRealize[TAssign[dst, src]]; dst`.  Also installed as the WL Set UpValue on literal-TTerm LHSes, so `Evaluate[w] = expr` mutates `w` rather than rebinding the symbol.";
 
+TSetData::usage = "TSetData[dst, na] writes the raw bytes of NumericArray (or list/PackedArray) `na` directly into `dst`'s existing backing buffer in place, allocating NO fresh TenDesc.  The fast per-step feed path: build the input tensor once, then re-feed each step via TSetData instead of `TSet[dst, TTensorCreate[na]]`, which churns a new TenDesc + ASSIGN graph every step.  `na`'s dtype and element count must match `dst`.  Returns `dst`.  Mirrors tinygrad's Buffer.copyin (writes into the existing dest buffer, no realloc).";
+
 (* === C-side TenDesc side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
    tensor-introspection bridge.  Kernel.wl owns the parallel
@@ -850,6 +852,17 @@ TTerm /: Set[t_TTerm, src_] := TSet[t, src]
    can pass a Module-bound symbol) before dispatching the literal-form
    TAssign + TRealize.  Returns dst so chains compose. *)
 TSet[dst_TTerm, src_] := (TRealize[TAssign[dst, src]]; dst)
+
+(* TSetData[dst, na]: in-place host upload.  Writes the NumericArray's
+   bytes straight into dst's existing buffer via tensor_write_na, with
+   NO fresh TenDesc and no ASSIGN graph -- the fast per-step feed path.
+   `asSharableNA` lifts a plain list / PackedArray to a NumericArray
+   first (one copy), matching TTensorCreate's input handling so dtype
+   inference is consistent.  Returns dst. *)
+TSetData[dst_TTerm, na_] := (
+    ensureInit[];
+    $tensorWriteNAFn[TTermVal[dst], asSharableNA[na]];
+    dst)
 
 End[];
 
