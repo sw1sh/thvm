@@ -3,7 +3,7 @@
 How to write the THVMLink documentation sources under `docs/` - the
 `Template: TechNote` tutorials, the `Template: Symbol` reference pages, and the
 `Template: Guide` guide. They are literate-markdown files that
-[`build.wls`](../build.wls) turns into evaluated Wolfram notebooks via
+[`build_docs.wls`](../../scripts/build_docs.wls) turns into evaluated Wolfram notebooks via
 `MarkdownToNotebook` (MTN). This guide is the house style; it captures rules the
 user has called out, and it overrides the upstream
 [wolfram-symbol-page skill](https://github.com/sw1sh/MarkdownToNotebook/blob/main/skills/wolfram-symbol-page/SKILL.md)
@@ -16,7 +16,7 @@ Every page is a *twin*: the `.md` source and the evaluated `.nb` MTN builds from
 it. A page is not done until you have **built it and inspected every output
 cell**. Run the build and read back the output cells; each one's value must be
 correct (probe it against the live paclet first and paste the real result into
-the `<!-- => ... -->` hint - a wrong hint is worse than none). `build.wls`
+the `<!-- => ... -->` hint - a wrong hint is worse than none). `build_docs.wls`
 auto-discovers every `docs/**/*.md`, so a new file builds with no wiring.
 
 ## Symbols are always autolinked, never bare backticks

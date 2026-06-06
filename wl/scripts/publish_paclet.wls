@@ -1,10 +1,10 @@
 #!/usr/bin/env wolframscript
-(* tools/publish_paclet.wls - pack wl/THVMLink into a .paclet and copy
-   it to a public CloudObject so it installs with PacletInstall[url].
+(* wl/scripts/publish_paclet.wls - pack wl/THVMLink into a .paclet and
+   copy it to a public CloudObject so it installs with PacletInstall[url].
 
-   Run from the repo root:
+   Run from anywhere:
 
-       wolframscript -f tools/publish_paclet.wls
+       wolframscript -f wl/scripts/publish_paclet.wls
 
    Assumes the per-platform libraries under
    wl/THVMLink/LibraryResources/<SystemID>/ have already been built
@@ -13,11 +13,11 @@
    on the platforms it does ship.
 
    The published CloudObject is read by the round-trip check in
-   tools/verify_install.wls:  PacletInstall[url]; Needs["THVMLink`"]. *)
+   wl/scripts/verify_install.wls:  PacletInstall[url]; Needs["THVMLink`"]. *)
 
 (* Repo-relative paths only; resolve against this script's location so
    the script works regardless of the caller's working directory. *)
-repoRoot   = FileNameJoin[{DirectoryName[$InputFileName], ".."}];
+repoRoot   = FileNameJoin[{DirectoryName[$InputFileName], "..", ".."}];
 pacletDir  = FileNameJoin[{repoRoot, "wl", "THVMLink"}];
 outDir     = FileNameJoin[{repoRoot, "build"}];
 

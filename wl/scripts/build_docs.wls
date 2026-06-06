@@ -10,7 +10,7 @@
    once and persisted via the built-in caching framework, so subsequent
    builds skip unchanged cells. *)
 
-pacletDir = DirectoryName[$InputFileName]
+pacletDir = FileNameJoin[{DirectoryName[$InputFileName], "..", "THVMLink"}]
 
 mtn = ResourceFunction[ResourceObject["https://www.wolframcloud.com/obj/nikm/DeployedResources/Function/MarkdownToNotebook"]]
 Needs["Wolfram`Parser`"]
@@ -19,7 +19,7 @@ PacletDirectoryLoad[pacletDir]
 Check[
     Needs["THVMLink`"],
     Print["[warn] could not load THVMLink`; example cells will report load errors."];
-    Print["[warn] build the dylib first: cd ", FileNameJoin[{pacletDir, "..", ".."}], " && make && make wl"]
+    Print["[warn] build the dylib first: cd ", FileNameJoin[{pacletDir, "..", ".."}], " && make wl"]
 ]
 
 subdirs = <|

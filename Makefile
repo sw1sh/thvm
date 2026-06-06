@@ -494,8 +494,8 @@ wl-examples-test: $(WL_LIB)
 # `make wl-cross` populates wl/THVMLink/LibraryResources/<SystemID>/ for
 # every typical Wolfram $SystemID, so PacletPack bundles one paclet that
 # installs everywhere.  Then publish + round-trip:
-#     wolframscript -f tools/publish_paclet.wls    # -> public CloudObject
-#     wolframscript -f tools/verify_install.wls    # PacletInstall + Needs
+#     wolframscript -f wl/scripts/publish_paclet.wls  # -> public CloudObject
+#     wolframscript -f wl/scripts/verify_install.wls  # PacletInstall + Needs
 #
 #   MacOSX-ARM64 + MacOSX-x86-64   native clang, full Metal GPU
 #                                  (one universal2 dylib in both dirs)

@@ -43,16 +43,16 @@ the worked example every skill points to.
 
 ## Building the notebooks
 
-Run the paclet's [`build.wls`](../build.wls) from anywhere; it scans
+Run [`build_docs.wls`](../../scripts/build_docs.wls) from anywhere; it scans
 `docs/**.md`, routes each source to the standard paclet documentation layout
 under `Documentation/English/`, and also builds the submission notebook at
 `ResourceDefinition.nb` at the paclet root:
 
 ```
-wolframscript -file wl/THVMLink/build.wls
+wolframscript -file wl/scripts/build_docs.wls
 ```
 
-`build.wls` fetches `MarkdownToNotebook` from its public cloud deployment
+`build_docs.wls` fetches `MarkdownToNotebook` from its public cloud deployment
 (`https://www.wolframcloud.com/obj/nikm/DeployedResources/Function/MarkdownToNotebook`),
 so no local clone of the converter is required.
 

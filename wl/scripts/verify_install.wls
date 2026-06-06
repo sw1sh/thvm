@@ -1,11 +1,11 @@
 #!/usr/bin/env wolframscript
-(* tools/verify_install.wls - prove the published paclet installs and
-   loads from its URL in a clean kernel, the way an end user would:
+(* wl/scripts/verify_install.wls - prove the published paclet installs
+   and loads from its URL in a clean kernel, the way an end user would:
 
-       wolframscript -f tools/verify_install.wls <paclet-url-or-file>
+       wolframscript -f wl/scripts/verify_install.wls <paclet-url-or-file>
 
    With no argument it reads the URL of the public CloudObject named
-   "THVMLink.paclet" (what tools/publish_paclet.wls writes).
+   "THVMLink.paclet" (what wl/scripts/publish_paclet.wls writes).
 
    This deliberately does NOT add the repo's wl/ directory to $Path:
    it exercises the shipped library under LibraryResources/$SystemID,
