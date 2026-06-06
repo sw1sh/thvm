@@ -220,3 +220,39 @@ VerificationTest[
     {{2., 4., 6.}, 1},
     TestID -> "lam-shape/single-kernel-from-materialized-body"
 ]
+
+(* === sugar over a shape-annotated binder ================================
+   The numeric UpValue SUGAR (`x + 1`, `2 x`, `x . Transpose[x]`) over a
+   TLamShape-annotated binder must build a tensor UOP graph, NOT a numeric
+   IC OP2.  tensorTermQ recognises the annotated TVAR as a tensor (so the
+   Tensor.wl UpValues fire) and numericTermQ excludes it (so the Switch.wl
+   numeric OP2 UpValues do not intercept).  APP-LAM then JIT-materializes
+   the body and the forward realizes.  Pre-fix the body fell through to a
+   numeric TAG_OP2 that stranded at realize (Missing[NotATensor, OP2]) --
+   the whole functional `TRealize @ TWnf @ TApp[lam, ten]` path was broken
+   for any sugar-built tensor lambda. *)
+
+VerificationTest[
+    TInit[];
+    Module[{lam, ten},
+        lam = Module[{x}, TLamShape[{2, 2}, x, 2 x + 1]];
+        ten = TTensorCreate @ NumericArray[{{1., 2.}, {3., 4.}}, "Real32"];
+        Normal @ TTensorData @ TRealize @ TWnf @ TApp[lam, ten]
+    ],
+    {{3., 5.}, {7., 9.}},
+    TestID -> "lam-shape/sugar-elementwise-body-realizes-via-app"
+]
+
+(* Binary tensorTermQ (both Dot operands must qualify) + a mix of matmul,
+   Transpose and Plus sugar in one body. *)
+
+VerificationTest[
+    TInit[];
+    Module[{lam, ten},
+        lam = Module[{x}, TLamShape[{2, 2}, x, x . Transpose[x] + x]];
+        ten = TTensorCreate @ NumericArray[{{1., 2.}, {3., 4.}}, "Real32"];
+        Normal @ TTensorData @ TRealize @ TWnf @ TApp[lam, ten]
+    ],
+    {{6., 13.}, {14., 29.}},
+    TestID -> "lam-shape/sugar-matmul-body-realizes-via-app"
+]

@@ -168,11 +168,20 @@ TMatChain[arms_Association, fallback_] := Fold[
    `OP2(DP1_x, DP1_x)`-self rule for -- the OP2 stays symbolic, no
    weight update fires.  Let those fall through to Tensor.wl's
    tensor-arithmetic Times UpValue, which routes through TUOpMul and
-   produces a clean TAG_UOP. *)
+   produces a clean TAG_UOP.
+
+   A TAG_VAR carrying a TLamShape annotation is the bound variable of
+   a TENSOR lambda, also not a numeric scalar: the same fall-through
+   lets `x + 1` / `2 x` over such a binder build a UOP graph (via
+   Tensor.wl's tensorTermQ UpValues) that APP-LAM can JIT-materialize,
+   instead of a numeric TAG_OP2 that strands at realize.  A plain
+   binder (no annotation) stays numeric so ordinary IC lambdas reduce
+   as before. *)
 numericTermQ[t_TTerm] := With[{raw = ttermRaw[t], tag = $termTagFn[ttermRaw[t]]},
-    tag === $TagNUM || tag === $TagVAR ||
+    tag === $TagNUM ||
     tag === $TagOP2 || tag === $TagMAT ||
     tag === $TagSUP ||
+    And[ tag === $TagVAR, TTermShape[t] === {} ] ||
     And[ Or[tag === $TagDP0, tag === $TagDP1],
          BitAnd[$termExtFn[raw], $DupGradFlag] === 0 ]
 ]

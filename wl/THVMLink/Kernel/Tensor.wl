@@ -62,12 +62,17 @@ TTotalBufBytes[] := (ensureInit[]; $totalBufBytesFn[])
 
 (* === predicates ===
    tensorTermQ[t]: true iff t is a TTerm whose tag makes it a
-   tensor-shaped value (TAG_TEN, TAG_UOP, or TAG_DP0/DP1 with
-   the DUP_GRAD_FLAG bit set on its ext -- a chain-rule
-   projection from TUOpGradWithTarget that fires to a tensor).
-   Used to guard the numerical UpValues so we never intercept IC
-   combinators (LAM, APP, regular DUP, ...) -- those still follow
-   the normal IC reduction rules. *)
+   tensor-shaped value (TAG_TEN, TAG_UOP, TAG_DP0/DP1 with the
+   DUP_GRAD_FLAG bit set on its ext -- a chain-rule projection from
+   TUOpGradWithTarget that fires to a tensor -- or a TAG_VAR carrying a
+   TLamShape shape annotation, i.e. the bound variable of a tensor
+   lambda).  The VAR case is what lets the numeric UpValue sugar
+   (Plus / Dot / Transpose / ...) build a UOP graph inside a TLamShape
+   body, so the APP-LAM interaction can JIT-materialize the forward;
+   without it `x + 1` over a bound `x` falls through to the generic IC
+   OP2, which strands at realize because OP2 is numeric, not tensor.
+   A plain TLam binder (no annotation) stays non-tensor so ordinary IC
+   combinators (LAM, APP, regular DUP, ...) follow IC reduction. *)
 
 tensorTermQ[t_TTerm] := With[{
     raw = ttermRaw[t], tag = $termTagFn[ttermRaw[t]]
@@ -75,7 +80,8 @@ tensorTermQ[t_TTerm] := With[{
     Or[
         tag === $TagTEN, tag === $TagUOP,
         And[ Or[tag === $TagDP0, tag === $TagDP1],
-             BitAnd[$termExtFn[raw], $DupGradFlag] =!= 0 ]
+             BitAnd[$termExtFn[raw], $DupGradFlag] =!= 0 ],
+        And[ tag === $TagVAR, TTermShape[t] =!= {} ]
     ]
 ]
 tensorTermQ[_]       := False
