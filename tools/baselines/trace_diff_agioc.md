@@ -163,3 +163,29 @@ during the per-step "chase" cycle) with the same ultimate bit
 INITIAL_ULTIMATE uses.  See `s->cp_ultimate` field +
 `atp_cp_before`.  The cascade should match WM's depth-first
 trajectory on hard cases like wolfram.
+
+## Phase 6 outcome (d1913175)
+
+DATABASE_ULTIMATE shipped as opt-in `THVM_ATP_DATABASE_ULTIMATE=1`.
+Empirical (all THVM_ATP_WALDMEISTER=1):
+
+  config                                             wolfram (300s)
+  baseline                                           RUNNING 339r
+  +DB_U                                              RUNNING 190r
+  +DB_U +IU                                          RUNNING 605r
+  +DB_U +IU +SR=51                                   RUNNING 491r
+  +DB_U +IU +CP_SET_IR_PERIOD=1                      RUNNING 216r 5k cps
+  +DB_U +IU +CP_SET_IR_PERIOD=1 (300s)               RUNNING 480r
+
+WM cracks the same problem in **2.5s** with 661 rules and 738k CPs.
+
+The remaining gap is engine throughput, not heuristic config:
+  WM:    738928 CPs / 2.5s = **300k CPs/sec**
+  thvm:  IR_PERIOD=1 gives ~30 CPs/sec processed (aggressive IR
+         dominates per-step cost).
+
+Engine-level perf is needed -- incremental rule-database
+interreduce, CP-batch normalization, or term-index sharing.  Out
+of scope for this trace-diff session; the algorithmic ports
+(Mix + precedence + DB_U + IU) are correct and aligned with WM's
+WM-default classification.
