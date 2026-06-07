@@ -200,19 +200,25 @@ static void ft_clear_subst_fresh(AtpFtCell *root) {
 // older rules (those gave it CPs; rewriting through them is a no-op
 // since the rule is already in normal form w.r.t. the older R).
 
-// AC-aware match dispatch.  When THVM_ATPFT_AC_MATCH=1 in env AND an
-// AC mask has been registered (thvm_atp_get_ac_mask() != 0), we route
-// through the AC-modulo matcher in ft_ac_match.c.  Otherwise we keep
-// the syntactic ft_match path (current default).  The env flag is
-// cached on first call -- changing it mid-process has no effect, by
-// design (same convention as the THVM_ATPFT_KBO_DIFF probe above).
+// AC-aware match dispatch.  When an AC mask has been registered
+// (thvm_atp_get_ac_mask() != 0), we route through the AC-modulo
+// matcher in ft_ac_match.c by default.  Set THVM_ATPFT_AC_MATCH=0 in
+// env to fall back to the syntactic ft_match path.  Flipped on by
+// default 2026-06-07 after measuring: ac-ring iters 24 -> 14 (-42%),
+// ac-abelian QUEUE_EMPTY iters 14 -> 10, no regression on mccune
+// (14.9s) / thm / test_atp (135623/135623) / test_atp_ft_rules.
+// The env flag is cached on first call -- changing it mid-process
+// has no effect, by design (same convention as THVM_ATPFT_KBO_DIFF).
 static inline int ft_match_maybe_ac(AtpFt *a,
                                     const AtpFtCell *pat,
                                     const AtpFtCell *subj,
                                     AtpFtSubst *subst) {
 #if defined(THVM_ATP_AC) && defined(THVM_ATPFT_MATCH)
   static int ac_on = -1;
-  if (ac_on < 0) ac_on = atp_env_on("THVM_ATPFT_AC_MATCH");
+  if (ac_on < 0) {
+    const char *e = getenv("THVM_ATPFT_AC_MATCH");
+    ac_on = (e == NULL || (e[0] != '0' && e[0] != '\0')) ? 1 : 0;
+  }
   if (ac_on) {
     u64 mask = thvm_atp_get_ac_mask();
     if (mask != 0ull) {
