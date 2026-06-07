@@ -298,6 +298,25 @@ int main(int argc, char **argv) {
   // line with the Fuchs arity ladder atp_auto_precedence would derive.
   static u32 weights[7]    = { 0u, 1u, 1u, 1u, 1u, 1u, 1u };
   static u32 precedence[7] = { 0u, 4u, 3u, 2u, 1u, 6u, 5u };
+  // AbelianGroup-class problems need the WM precedence shape
+  // (constants > unary > binary, the Fuchs arity ladder), since
+  // the default `and`-highest precedence orients assoc differently
+  // and diverts the rule-derivation trajectory away from WM's.
+  // For agioc (the AbelianGroup/InverseOfComposite probe), set:
+  //   L_P=skC1, L_Q=skC2, L_R=e  -- 0-arity constants -- HIGHEST
+  //   L_NOT=inv                  -- 1-arity            -- MID
+  //   L_AND=group_op             -- 2-arity            -- LOWEST
+  // matching `k1 > skC1 > skC2 > not > opOvertilde > and` from the
+  // wm_pr/AbelianGroupAxioms__InverseOfComposite.pr ORDERING block.
+  static u32 precedence_ag[7] = { 0u, 4u, 6u, 5u, 4u, 1u, 2u };
+  // Selecting the precedence at runtime based on goal name happens
+  // below after `goal` is read; the static defaults above stay for
+  // every other path.
+  // Pick the AbelianGroup precedence for AbelianGroup-class goals so
+  // assoc orients the WM way (rule #2-ish) rather than #5.
+  if (strcmp(goal, "agioc") == 0) {
+    for (u32 k = 0; k < 7; k++) precedence[k] = precedence_ag[k];
+  }
   KboConfig cfg = {
     .weights    = weights,
     .precedence = precedence,
@@ -494,7 +513,14 @@ int main(int argc, char **argv) {
       //   THVM_HEAP_CELLS=$((1<<30)) ./bin/test_atp_wolfram_bench \
       //       andassoc 99999999 60
       // (no THVM_ATP_WALDMEISTER; just default GT weight + larger heap).
-      thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MAX);
+      // WM CLI's faithful default is CH_MixWeight (CriticalPairWeight ->
+      // Mix in the WL preset), NOT Max.  Direct trace diff on
+      // AbelianGroup/InverseOfComposite (tools/baselines/trace_diff_agioc.md):
+      //   MAX  -> assoc picked as rule #5 (875 CP picks to PROVE).
+      //   Mix  -> assoc picked as rule #2 (matching WM), 16 picks to PROVE.
+      //   mccune drops from 14.4s -> 10.5s under the same flip.
+      // Mix is byte-identical to WM's CH_MixWeight formula.
+      thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MIX);
     }
   }
   // THVM_ATP_INITIAL_ULTIMATE=1: port of WM's `initial = ultimate` DEF
