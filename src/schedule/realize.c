@@ -68,6 +68,22 @@ fn Term thvm_realize(Term expr) {
   // boundary.  Per-param TAdam ASSIGNs land here.
   if (term_tag(resolved) == TAG_CTR) return thvm_realize_many(resolved);
 
+  // Device routing (tinygrad's "the device is in the graph"): realize the
+  // graph on the device its leaves place it on (term_device_in), not a
+  // global session backend.  A uniform-device graph -- all leaves COPY'd
+  // to one device -- realizes wholly on that backend; default_device is
+  // scoped for THIS call and restored at the single return below, so a
+  // CPU-default session realizes a Metal-placed graph on Metal with no
+  // DEV= switch.  dev < 0 (no device in the graph) keeps the session
+  // default.  Mixed-device graphs report their first-found device here;
+  // true per-op cross-backend routing is a later phase.
+  u32 saved_default_device = CURRENT_CTX->default_device;
+  i32 want_device = term_device_in(resolved);
+  if (want_device >= 0 && want_device != (i32)saved_default_device
+      && ctx_ensure_backend(want_device) != NULL) {
+    CURRENT_CTX->default_device = (u32)want_device;
+  }
+
   grad_memo_begin_realize();
   u32 cpu_wm   = cpu_buf_pool_begin();
   u32 metal_wm = thvm_metal_buf_pool_begin();
@@ -235,6 +251,8 @@ fn Term thvm_realize(Term expr) {
   materialized_loc_scope_leave();
   xpass_cc_reset();
 
+  // Restore the session default device (scoped device routing, above).
+  CURRENT_CTX->default_device = saved_default_device;
   return res;
 }
 

@@ -527,14 +527,16 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_PLACEHOLDER 49
 #define UOP_END         50
 // 51 = UOP_ISHR (declared in the Symbolic INDEX layer above).
-// UOP_COPY: lazy device transfer.  Heap = [src] (one child); the COPY
-//   carries src's shape + dtype and uploads src to the realize backend
-//   at materialize time.  Identity (no kernel) when the realize backend
-//   already matches src's backend (e.g. CPU realize of a CPU host
-//   leaf).  Mirrors tinygrad's Ops.COPY (uop/ops.py:660 copy_to_device,
-//   engine/realize.py:158 exec_copy host-staged upload).  thvm realizes
-//   on a single backend per realize, so the COPY target is implicitly
-//   CURRENT_BACKEND -- no explicit DEVICE arg in the heap.
+// UOP_COPY: lazy device transfer.  Heap = [src, NUM(device+1)] (arity 1,
+//   src is the only child; the trailing NUM holds the EXPLICIT target
+//   device, device+1 so generic=-1 stores as 0).  The COPY carries src's
+//   shape + dtype and uploads src to its target device at materialize
+//   time.  Identity (no kernel) when the target already holds src (e.g.
+//   CPU realize of a CPU host leaf).  An explicit device (CPU/METAL)
+//   names the backend directly; the generic sentinel (-1) uploads to
+//   CURRENT_BACKEND.  Mirrors tinygrad's Ops.COPY, which carries the
+//   target as src[1] (uop/ops.py:660 copy_to_device, ops.py:756
+//   COPY.device == src[1].device; engine/realize.py:158 exec_copy).
 #define UOP_COPY        52
 #define UOP_COUNT       53
 
@@ -1857,6 +1859,8 @@ fn u8   uop_is_unary_elementwise(u8 op);
 fn u8   uop_is_binary_elementwise(u8 op);
 fn int  term_shape_in(Term t, u32 env_id, Shape *out);
 fn int  term_dtype_in(Term t, u32 env_id, u32 *out);
+// Device of a term (THVM_DEV_*), -1 = unknown/default.  See uop_meta.c.
+fn i32  term_device_in(Term t);
 fn Term materialize_uop_in_env(Term t, u32 env_id);
 
 // === interact/ ===
@@ -3090,9 +3094,15 @@ fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out);
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in
 // the cpu kernel).  Output shape == src shape; arity 1.
 fn Term uop_load(Term src);
-// UOP_COPY constructor: lazy device transfer of `src` to the realize
-// backend.  Heap = [src]; hash-cons by src.  See UOP_COPY notes above.
+// UOP_COPY constructor: lazy device transfer of `src`.  uop_copy_dev
+// carries an EXPLICIT target device (THVM_DEV_CPU/METAL, or -1 = generic
+// "realize backend").  uop_copy is the generic (-1) form.  Heap =
+// [src, NUM(device+1)]; hash-cons by (device, src).  uop_copy_device
+// reads a COPY heap loc's target device (-1 if generic).  See the
+// UOP_COPY notes above and uop/copy.c.
+fn Term uop_copy_dev(Term src, i32 device);
 fn Term uop_copy(Term src);
+fn i32  uop_copy_device(u64 loc);
 
 // Build a UOP_DETACH node wrapping `src` (stop-gradient; see UOP_DETACH).
 fn Term uop_detach(Term src);
@@ -3177,6 +3187,9 @@ void  cg_profile_dump(FILE *fp, u32 top_n);
 // Metal lands in step 14 behind the same Backend struct.
 extern Backend CPU_BACKEND;
 extern Backend METAL_BACKEND;
+// Install (on first use) + return the backend for device `dev`
+// (THVM_DEV_*) in the current context; NULL if unavailable.  See thvm.c.
+Backend *ctx_ensure_backend(i32 dev);
 // CUDA backend -- defined only in the Linux+CUDA build (THVM_HAS_CUDA).
 // Plain C99 (driver API + nvrtc are C), so it lives in this single-TU
 // build rather than a separate object like the Objective-C Metal one.

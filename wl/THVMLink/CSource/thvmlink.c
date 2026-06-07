@@ -1624,8 +1624,20 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_copy(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   Term src = (Term)MArgument_getInteger(args[0]);
-  Term r = uop_copy(src);
+  // args[1] = explicit target device (THVM_DEV_*), or -1 for the generic
+  // realize-backend COPY.
+  i32  dev = (i32)MArgument_getInteger(args[1]);
+  Term r = uop_copy_dev(src, dev);
   MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+// Device of a term (THVM_DEV_*), -1 = unknown/default.  Backs TDevice.
+EXTERN_C DLLEXPORT int thvm_wl_term_device(WolframLibraryData libData, mint argc,
+                                           MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)term_device_in(t));
   return LIBRARY_NO_ERROR;
 }
 

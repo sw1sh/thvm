@@ -645,6 +645,33 @@ static void install_ctx_backends(TContext *ctx, const char *want) {
 #endif
 }
 
+// Ensure the backend for device `dev` (THVM_DEV_CPU/METAL/CUDA) is
+// installed in the current context, initialising it on first use, and
+// return it (NULL if `dev` is out of range or its backend is a no-op
+// stub on this build).  Lets an explicit-device UOP_COPY upload to a
+// device the session did not start on -- the context's default_device is
+// UNTOUCHED (the device lives in the graph, not the context, per
+// tinygrad's model); only the per-device vtable slot is populated so a
+// Metal-targeted COPY works from a CPU-default session.
+Backend *ctx_ensure_backend(i32 dev) {
+    TContext *ctx = CURRENT_CTX;
+    if (dev < 0 || dev >= THVM_MAX_BACKENDS) return NULL;
+    if (ctx->backends[dev] != NULL) return ctx->backends[dev];
+    Backend *b = NULL;
+    switch (dev) {
+        case THVM_DEV_CPU:   b = &CPU_BACKEND;   break;
+        case THVM_DEV_METAL: b = &METAL_BACKEND; break;
+#ifdef THVM_HAS_CUDA
+        case THVM_DEV_CUDA:  b = &CUDA_BACKEND;  break;
+#endif
+        default: return NULL;
+    }
+    ctx->backends[dev] = b;
+    if ((u32)dev + 1 > ctx->n_backends) ctx->n_backends = (u32)dev + 1;
+    b->init();
+    return b;
+}
+
 void thvm_init(void) {
   init_ctx_arrays(CURRENT_CTX);
   // Bind the main thread's WNF spine routing to the just-allocated

@@ -152,6 +152,11 @@ static u32 gc_node_size(Term t) {
         case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
         case UOP_LOG2: case UOP_SQRT: case UOP_LOAD:
           return 1;
+        // UOP_COPY heap = [src, NUM(device+1)] -- src plus the trailing
+        // device payload.  (Before the explicit-device COPY this had no
+        // case and fell to `default: return 0`, leaving its src cell
+        // unevacuated -- latent had a GC ever fired with a live COPY.)
+        case UOP_COPY: return 2;
         case UOP_ADD: case UOP_MUL:
         case UOP_CMPLT: case UOP_CMPEQ:
           return 2;

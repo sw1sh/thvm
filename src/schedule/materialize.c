@@ -631,7 +631,14 @@ static Term materialize_copy(Term term) {
   if (term_tag(src_mat) != TAG_TEN) return src_mat;
   u32 src_tid = (u32)term_val(src_mat);
   if (src_tid == 0 || src_tid >= TENS_NEXT) return src_mat;
-  Backend *target = CURRENT_BACKEND;
+  // Target = the COPY's EXPLICIT device if it carries one, else (generic
+  // sentinel) the realize backend.  An explicit device installs its
+  // backend in the current context on demand; if it is unavailable
+  // (e.g. Metal on a non-Metal build) degrade to the realize backend so
+  // the COPY stays a sound pass-through rather than failing the realize.
+  i32      dev    = uop_copy_device(loc);
+  Backend *target = (dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(dev);
+  if (target == NULL) target = CURRENT_BACKEND;
   Backend *srcb   = TENS[src_tid].backend;
   // Identity: realize backend already holds the src.
   if (target == NULL || target == srcb) return src_mat;

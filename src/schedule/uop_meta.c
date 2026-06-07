@@ -44,8 +44,9 @@ fn u8 uop_arity(u8 op) {
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
     case UOP_REDUCE:  case UOP_LOAD:    case UOP_DETACH:
     case UOP_CAST:    case UOP_BITCAST:
-    // UOP_COPY heap = [src]; one recursable producer Term, like a
-    // unary/movement op.  Inherits src's shape + dtype.
+    // UOP_COPY heap = [src, NUM(device+1)]; one recursable producer Term
+    // (src; the device NUM is trailing payload, like REDUCE's axes).
+    // Inherits src's shape + dtype.
     case UOP_COPY:
     // UOP_BUFFERIZE heap: [value, NUM(addrspace), NUM(removable),
     // NUM(n_ranges), range_0, ...].  Only slot 0 (value) is a
@@ -403,6 +404,51 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
     return term_dtype_in(y, env_id, out);
   }
   *out = DT_FP32; return 1;
+}
+
+// Map a resident Backend* to its device code (THVM_DEV_*), or -1.
+// Backend.id is its own numbering (CPU=1, METAL=2) and is NOT the
+// device code, so compare against the known backend singletons.
+static i32 backend_device_code(Backend *b) {
+  if (b == NULL) return -1;
+  if (b == &CPU_BACKEND)   return THVM_DEV_CPU;
+  if (b == &METAL_BACKEND) return THVM_DEV_METAL;
+#ifdef THVM_HAS_CUDA
+  if (b == &CUDA_BACKEND)  return THVM_DEV_CUDA;
+#endif
+  return -1;
+}
+
+// Device of a term (THVM_DEV_*), or -1 = unknown (-> the default device).
+// Ported from tinygrad's UOp.device (uop/ops.py:756): an explicit COPY
+// names its target (src[1].device there; the device NUM here); a resident
+// TEN reports its backend; every other op propagates the device of its
+// first source that has one.  A graph whose leaves are all on one device
+// therefore reports that device at the root -- which thvm_realize uses to
+// pick the single realize backend, so the device lives in the GRAPH, not
+// the context.  (Mixed-device graphs report their first-found device;
+// true per-op routing across backends is a later phase.)
+fn i32 term_device_in(Term t) {
+  u8 tag = term_tag(t);
+  if (tag == TAG_TEN) {
+    u32 tid = (u32)term_val(t);
+    if (tid != 0 && tid < TENS_NEXT) return backend_device_code(TENS[tid].backend);
+    return -1;
+  }
+  if (tag != TAG_UOP) return -1;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_COPY) {
+    i32 dev = uop_copy_device(loc);
+    if (dev >= 0) return dev;                 // explicit target
+    return term_device_in(heap_read(loc));    // generic: follow src
+  }
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    i32 d = term_device_in(heap_read(loc + i));
+    if (d >= 0) return d;
+  }
+  return -1;
 }
 
 typedef struct {

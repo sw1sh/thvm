@@ -288,7 +288,26 @@ TGradPair[y_, gy_] := With[{bwd = TUOpGrad[y, gy]},
 
 TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
 
-TUOpCopy[src_TTerm] := (ensureInit[]; TTerm[$uopCopyFn[ttermRaw[src]]])
+(* Generic transfer to the realize backend (device -1): the legacy
+   device-agnostic COPY.  TUOpCopy[src, "metal"|"cpu"] carries an EXPLICIT
+   target device in the graph (tinygrad's `.to(device)` / Ops.COPY with a
+   DEVICE src), so the node records where its data lives regardless of the
+   realize backend. *)
+TUOpCopy[src_TTerm] := (ensureInit[]; TTerm[$uopCopyFn[ttermRaw[src], -1]])
+TUOpCopy[src_TTerm, device_String] :=
+    (ensureInit[]; TTerm[$uopCopyFn[ttermRaw[src], deviceCode[device]]])
+
+(* TDevice[t]: the device t's data lives on ("cpu"/"metal"/...) or None
+   for the default.  Ported from tinygrad's UOp.device (uop/ops.py:756). *)
+TDevice[t_TTerm] := (ensureInit[]; deviceName[$termDeviceFn[ttermRaw[t]]])
+
+(* TToDevice[t, "metal"|"cpu"]: move t to a device -- tinygrad's
+   Tensor.to(device).  A device-targeted UOP_COPY, so t's data lives on
+   that device IN THE GRAPH; TRealize then routes the whole realize to it
+   (interior generic COPYs upload there too).  To run an imported forward
+   on the GPU, wrap its input and result: e.g.
+   TToDevice[net[TToDevice[x, "metal"]], "metal"]. *)
+TToDevice[t_TTerm, device_String] := TUOpCopy[t, device]
 
 (* === Phase E UOp constructors ===
  * INDEX layer + BUFFER/STORE/AFTER/OPT.  Used by Rewrite.wl and the

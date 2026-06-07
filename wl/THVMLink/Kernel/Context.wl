@@ -54,6 +54,13 @@ deviceCode[None]      := -1
 deviceCode[Automatic] := -1
 deviceCode[s_]        := -1
 
+(* Inverse: device code (the THVM_DEV_ enum) -> name; -1/unknown -> None
+   (the default device). *)
+deviceName[0]  := "cpu"
+deviceName[1]  := "metal"
+deviceName[2]  := "cuda"
+deviceName[_]  := None
+
 (* === Default context binding === *)
 
 $TContext = TContext[0]
