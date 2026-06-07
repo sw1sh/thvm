@@ -24,6 +24,13 @@
 #if defined(__linux__) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
+// Defining _POSIX_C_SOURCE disables glibc's *implicit* _DEFAULT_SOURCE,
+// which hides the BSD extensions we use (MAP_ANONYMOUS in arena_map).
+// Re-request it so a strict `-std=c11` test build (no -D_GNU_SOURCE, which
+// the WL/py builds pass) still exposes them.  Linux only; macOS is fine.
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
 
 #include <stdint.h>
 #include <stdio.h>

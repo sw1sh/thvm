@@ -387,6 +387,7 @@ ifeq ($(shell uname -s),Linux)
                       -L/usr/lib/x86_64-linux-gnu -lcuda -lnvrtc
     TESTS          += $(BIN)/test_cuda_backend
     TESTS          += $(BIN)/test_cuda_ptx
+    TESTS          += $(BIN)/test_cuda_mixed
   endif
 endif
 
@@ -641,6 +642,11 @@ $(BIN)/test_cuda_backend: tests/test_cuda_backend.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_cuda_ptx: tests/test_cuda_ptx.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
+
+# Mixed CPU+CUDA realize (device-in-graph per-op routing + cross-device
+# COPY transfer).  Linux+CUDA only, like the other CUDA tests.
+$(BIN)/test_cuda_mixed: tests/test_cuda_mixed.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
 # Cross-backend dispatch microbench.  One binary; the backend is chosen
