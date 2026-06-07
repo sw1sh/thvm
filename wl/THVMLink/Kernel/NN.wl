@@ -979,11 +979,24 @@ asRowVec[x_TTerm] := With[{shape = tUopShape[x]},
    the TMatVec path (-> {out}); a batched {B, in} input goes through
    the batched TLinear with the transposed weight {in, out} (-> {B, out}),
    keeping the leading batch axis instead of collapsing it. *)
-fromLayer[LinearLayer, layer_, x_TTerm] := Module[{w, b},
-    {w, b} = TLayerToTensors[layer];
-    If[ Length[tUopShape[x]] <= 1,
-        TUOpAdd[TMatVec[w, asRowVec[x]], b],
-        TLinear[x, Transpose[w], b]
+fromLayer[LinearLayer, layer_, x_TTerm] := Module[{wArr, bArr, w},
+    wArr = NetExtract[layer, "Weights"];
+    bArr = NetExtract[layer, "Biases"];
+    w    = TTensorCreate[wArr];
+    (* A biasless LinearLayer (Biases -> None) is just the matmul -- e.g.
+       GPT-2's tied classifier head in the "LanguageModeling" net.  Feeding
+       TTensorCreate[None] as a bias poisons the lift, so branch on it. *)
+    If[ bArr === None,
+        If[ Length[tUopShape[x]] <= 1,
+            TMatVec[w, asRowVec[x]],
+            TMatMul[x, Transpose[w]]
+        ],
+        With[{b = TTensorCreate[bArr]},
+            If[ Length[tUopShape[x]] <= 1,
+                TUOpAdd[TMatVec[w, asRowVec[x]], b],
+                TLinear[x, Transpose[w], b]
+            ]
+        ]
     ]
 ]
 
@@ -1112,6 +1125,19 @@ fromLayer[BatchNormalizationLayer, layer_, x_TTerm] := Module[{gamma, beta},
 
 (* DropoutLayer at inference is identity. *)
 fromLayer[DropoutLayer, _, x_TTerm] := x
+
+(* SequenceLastLayer: take the last element along the leading (sequence)
+   axis, {seq, ...} -> {...}.  A last-row gather, lowered like TEmbedding:
+   shrink axis 0 to its final slot and drop the resulting unit axis.  (The
+   fixed-sequence LM lift drops this layer rather than folding it -- its
+   padded window reads logits at the running length, not the last padded
+   row -- so this case serves the variable-length TFromNet[net, ids] path,
+   where the last position IS the last real token.) *)
+fromLayer[SequenceLastLayer, _, x_TTerm] := With[{shape = tUopShape[x]},
+    With[{ranges = ReplacePart[{0, #} & /@ shape, 1 -> {shape[[1]] - 1, shape[[1]]}]},
+        TUOpReshape[TUOpShrink[x, ranges], Rest[shape]]
+    ]
+]
 
 (* EmbeddingLayer takes integer indices and returns embedded
    vectors.  Static-int input (a List[Integer]) lowers via
@@ -1376,6 +1402,12 @@ TIdentity[x_] := x
 
 (* === entry points ====================================== *)
 
+(* Catch-all: a layer head with no fromLayer rule fails LOUDLY rather than
+   leaving an unevaluated fromLayer[...] to masquerade as a tensor and
+   realize to garbage downstream.  Least specific (h_ first arg), so WL
+   orders it after every concrete fromLayer case above. *)
+fromLayer[h_, layer_, _] := (Message[TFromNet::unsupportedlayer, h]; $Failed)
+
 (* Entry-level dispatch.  Accepts a TTerm (the usual case), a
    List[Integer] (EmbeddingLayer ids), or a List[TTerm] (multi-
    input layers like ThreadingLayer that NetGraph traversal feeds
@@ -1520,11 +1552,31 @@ $tFromNetMaxSeq = 64;
    TMaterialize[TFromNet[net]] is a single reusable forward and
    NestList[... @* TWnf @* TApp[lam, #] &, ...] generates. *)
 TFromNet[net_NetChain, maxSeq_Integer] /; tokenEmbeddingArray[net] =!= None :=
-    Module[{tokTable, posTable, vocab, restLayers, onehot},
+    Module[{tokTable, posTable, vocab, dim, restLayers, onehot, outDims, needsHead},
         tokTable   = tokenEmbeddingArray[net];
         posTable   = positionEmbeddingArray[net];
         vocab      = First[Dimensions[tokTable]];
-        restLayers = Drop[Table[net[[i]], {i, Length[net]}], 1];
+        dim        = Last[Dimensions[tokTable]];
+        (* Drop layer 1 (the embedding -- replaced by the one-hot matmul
+           below) and any SequenceLastLayer: the fixed window emits ALL
+           positions' logits so the per-step read can pick the running
+           length, whereas SequenceLastLayer would collapse to the last
+           (padded) row.  Same spirit as replacing the variable-length
+           gather with the one-hot: position selection moves to read time. *)
+        restLayers = DeleteCases[
+            Drop[Table[net[[i]], {i, Length[net]}], 1], _SequenceLastLayer];
+        (* Append the tied token-embedding LM head ONLY when the folded net
+           still outputs the {seq, dim} hidden state (the base GPT-2 model,
+           whose head is the tied projection, not a layer).  An LM net that
+           already carries the classifier -- NetModel[{..,"Task"->
+           "LanguageModeling"}] or NetDrop[lm,-1] -- outputs {seq, vocab}
+           logits, so its last output dim is vocab, not dim; folding the
+           classifier produces the logits directly and a manual head would
+           double-project ({seq,vocab} . {dim,vocab}^T is a shape error).
+           Detect host-side from the output port so no shape inference runs
+           inside the held lam body. *)
+        outDims    = Cases[Flatten @ {First @ Values @ Quiet @ Information[net, "OutputPorts"]}, _Integer];
+        needsHead  = outDims === {} || Last[outDims] === dim;
         TLamShape[{maxSeq, vocab}, onehot,
             Module[{tokT, posT, x, hidden},
                 (* Keep the native NumericArrays as CPU host leaves
@@ -1539,7 +1591,7 @@ TFromNet[net_NetChain, maxSeq_Integer] /; tokenEmbeddingArray[net] =!= None :=
                 posT   = TUOpCopy[TTensorCreateHost[posTable[[1 ;; maxSeq]]]];
                 x      = onehot . tokT + posT;
                 hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
-                hidden . Transpose[tokT]]]
+                If[ needsHead, hidden . Transpose[tokT], hidden]]]
 ]
 
 (* TFromNet[net] for a token-LM NetChain: the fixed-sequence lift at the
@@ -1720,6 +1772,7 @@ TToNet[lam_TTerm] := Module[{body, layers, t, step, guard},
 ]
 TToNet[_] := $Failed
 
+TFromNet::unsupportedlayer = "No TFromNet lift rule for layer head `1`.  Add a fromLayer[`1`, ...] case (forward, plus a grad rule if it is to be trained).";
 TFromNet::eltunsupported = "ElementwiseLayer with function `1` has no UOp equivalent yet (interact_grad would need a corresponding grad rule).";
 TFromNet::convtbd        = "ConvolutionLayer conversion not yet implemented (`1`).  Step 14 task: needs movement-op support in materialize/interpret + the matching grad rules.";
 TFromNet::noinput        = "TFromNet[`1`]: cannot infer input shape from the net's InputPorts.  Provide an explicit input via TFromNet[net, x] or supply a net with a single concrete-shape input port.";
