@@ -3772,6 +3772,33 @@ static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
 // (like rule_index) whenever R mutates.
 static void atp_cp_index_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->cp_index;
+  // Incremental fast-path: when only new rules were appended (no kill,
+  // no rule_index_dirty), insert only the tail.  Same soundness logic
+  // as atp_ri_extend on rule_index: existing leaves carry correct
+  // indices.  Cuts O(R) rebuild to O(rules-added) per cp-gen call.
+  if (ix->n_rules_built > 0u && ix->n_rules_built < s->n_rules
+      && ix->root != ATP_DTREE_NIL && !s->rule_index_dirty) {
+    AtpDTreeVarMap vm;
+    for (u32 i = ix->n_rules_built; i < s->n_rules; i++) {
+      atp_dtree_varmap_reset(&vm);
+      u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
+      u32 rec  = atp_ri_rec_new(ix);
+      ix->recs[rec].rule    = i;
+      ix->recs[rec].next    = ix->nodes[node].rec_head;
+      ix->nodes[node].rec_head = rec;
+    }
+    ix->n_rules_built = s->n_rules;
+    if (g_atp_cp_seencap < s->n_rules) {
+      u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
+      while (cap < s->n_rules) cap *= 2u;
+      u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
+      if (p == NULL) { fprintf(stderr, "atp_cp_index: seen OOM\n"); exit(1); }
+      g_atp_cp_seen   = p;
+      for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
+      g_atp_cp_seencap = cap;
+    }
+    return;
+  }
   ix->n_nodes = 0;
   ix->n_recs  = 0;
   ix->root    = atp_ri_node_new(ix, ATP_DTREE_NIL);
@@ -3856,6 +3883,19 @@ static void atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
 // Build cp_subindex: every non-var subterm of every rule LHS -> rule.
 static void atp_cp_subindex_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->cp_subindex;
+  // Incremental fast-path: same shape as atp_cp_index_rebuild.  Inserts
+  // only [n_rules_built, n_rules) when no kill/dirty event has shrunk
+  // the rule set since last build.
+  if (ix->n_rules_built > 0u && ix->n_rules_built < s->n_rules
+      && ix->root != ATP_DTREE_NIL && !s->rule_index_dirty) {
+    AtpDTreeVarMap vm;
+    for (u32 i = ix->n_rules_built; i < s->n_rules; i++) {
+      atp_dtree_varmap_reset(&vm);
+      atp_cp_subindex_insert(ix, s->lhs[i], i, &vm);
+    }
+    ix->n_rules_built = s->n_rules;
+    return;
+  }
   ix->n_nodes = 0;
   ix->n_recs  = 0;
   ix->root    = atp_ri_node_new(ix, ATP_DTREE_NIL);
