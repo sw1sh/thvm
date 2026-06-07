@@ -5794,7 +5794,8 @@ static int atp_cp_before(const AtpState *s, u32 i, u32 j) {
   // = INT32_MIN for the `initial = ultimate` action; we encode it as
   // an out-of-band bit so reheapify cannot scramble the order).  The
   // flag is OFF by default -- engine byte-identical.
-  if (s->use_initial_ultimate && s->cp_ultimate != NULL) {
+  if ((s->use_initial_ultimate || s->use_database_ultimate)
+      && s->cp_ultimate != NULL) {
     u8 ui = s->cp_ultimate[i], uj = s->cp_ultimate[j];
     if (ui != uj) return ui > uj;
   }
@@ -6658,6 +6659,28 @@ fn void thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on) {
 fn void thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_rule_subsume_drop = on ? 1u : 0u;
+}
+
+// Waldmeister `database=ultimate` (NewClassification.c:711, Parameter.c
+// default of `initial=ultimate:database=ultimate`).  When on, derived
+// CPs from rule-database overlap (atp_push_cps_traced) ALSO rank
+// ultimate -- the depth-first bias that lets WM crack wolfram
+// commutativity in 2.5s.  The atp_cp_before comparator already inspects
+// cp_ultimate iff use_initial_ultimate is set, so this flag composes
+// with INITIAL_ULTIMATE -- enable both for full WM-default parity.
+// Off = engine byte-identical.
+fn void thvm_atp_set_use_database_ultimate(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_database_ultimate = on ? 1u : 0u;
+  // Lazy-allocate cp_ultimate on first enable (mirrors the INITIAL
+  // setter -- the comparator dereferences cp_ultimate iff non-NULL).
+  if (on && s->cp_ultimate == NULL && s->cp_cap > 0u) {
+    s->cp_ultimate = (u8 *)calloc(s->cp_cap, sizeof(u8));
+    if (s->cp_ultimate == NULL) {
+      fprintf(stderr, "thvm_atp_set_use_database_ultimate: calloc failed\n");
+      exit(1);
+    }
+  }
 }
 
 fn void thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode) {
@@ -10970,8 +10993,13 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
     u32 t = atp_trace_push_cp(s, parent_a, parent_b, raw_lhs, raw_rhs,
                               cps[i].pos, cps[i].pos_len);
-    // Derived overlap CP -- never ultimate.
-    atp_cp_heap_push(s, cp_lhs, cp_rhs, t, /*is_ultimate=*/0u);
+    // Derived overlap CP: ultimate iff WM's `database=ultimate` flag is
+    // on (NewClassification.c:711; Parameter.c default).  Off-by-default
+    // = byte-identical to the pre-port behaviour.  When on, derived CPs
+    // jump the heap so depth-first chains finish before older axiom CPs
+    // -- the trajectory that lets WM crack wolfram in 2.5s.
+    u8 cp_ult = s->use_database_ultimate ? 1u : 0u;
+    atp_cp_heap_push(s, cp_lhs, cp_rhs, t, cp_ult);
     pushed++;
   }
   return pushed;

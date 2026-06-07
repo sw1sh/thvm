@@ -541,6 +541,19 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_initial_ultimate(s, 1u);
     }
   }
+  // THVM_ATP_DATABASE_ULTIMATE=1: port of WM's `database = ultimate`
+  // (Parameter.c:166 -- the other half of the WM default classification
+  // alongside initial=ultimate).  Tags every CP derived from rule-
+  // database overlap as ultimate so newly-derived chains finish before
+  // older axiom-CPs are revisited.  This depth-first bias is what lets
+  // WM crack wolfram commutativity in 2.5s where breadth-first thvm
+  // runs 90s+.
+  {
+    const char *du = getenv("THVM_ATP_DATABASE_ULTIMATE");
+    if (du != NULL && du[0] != '\0' && du[0] != '0') {
+      thvm_atp_set_use_database_ultimate(s, 1u);
+    }
+  }
   // Apply THVM_ATP_CP_WEIGHT after the WALDMEISTER preset so an
   // experiment-time env override (e.g. `THVM_ATP_CP_WEIGHT=8`) wins over
   // the preset's CH_MaxWeight default.

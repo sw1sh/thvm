@@ -4066,6 +4066,14 @@ typedef struct {
   // when the flag is off).
   u8   *cp_ultimate;
   u8    use_initial_ultimate;
+  // Waldmeister `database=ultimate` action (Parameter.c:166 -- the WM
+  // default along with initial=ultimate).  Tags CPs derived during
+  // CP-set IR (overlap-derived from already-stored rules) as ultimate
+  // so they jump to the heap front.  Creates a depth-first bias on
+  // newly-derived chains, which is what lets WM crack hard cases
+  // like wolfram commutativity in 2.5s where breadth-first thvm runs
+  // 90s+ without closing.  Engine byte-identical when off.
+  u8    use_database_ultimate;
   u32   n_cps_ultimate;       // diagnostic: count of axiom-tagged CPs added
   // Waldmeister CP-queue interleaving: selection alternates between
   // the weight key (cp_pri) and the FIFO key (cp_seq, oldest first).
@@ -4810,6 +4818,11 @@ fn void      thvm_atp_set_perm_subsume_mask(u64 mask);
 // regardless of heuristic weight (mirrors `initial = ultimate` in the
 // default DEF block, NewClassification.c).  Off = engine byte-identical.
 fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
+// Waldmeister `database=ultimate` (Parameter.c:166).  When on, CPs
+// derived from rule-database overlap also rank ultimate -- creates
+// the depth-first bias on newly-derived chains that lets WM crack
+// wolfram commutativity in 2.5s.  Off = engine byte-identical.
+fn void      thvm_atp_set_use_database_ultimate(AtpState *s, u8 on);
 
 // === Phase 0: ground congruence closure (QF_UF), src/cc/_.c ===
 //
