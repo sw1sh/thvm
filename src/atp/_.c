@@ -56,6 +56,9 @@ static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
 #  define THVM_ATPFT_MATCH 1
 # endif
 # include "ft_match.c"
+# ifdef THVM_ATP_AC
+#  include "ft_ac_match.c"
+# endif
 # ifdef THVM_ATPFT_UNIFY
 #  include "ft_unify.c"
 #  include "ft_cp.c"

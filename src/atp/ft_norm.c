@@ -199,6 +199,32 @@ static void ft_clear_subst_fresh(AtpFtCell *root) {
 // just-added rules, NOT against itself (would loop) or against the
 // older rules (those gave it CPs; rewriting through them is a no-op
 // since the rule is already in normal form w.r.t. the older R).
+
+// AC-aware match dispatch.  When THVM_ATPFT_AC_MATCH=1 in env AND an
+// AC mask has been registered (thvm_atp_get_ac_mask() != 0), we route
+// through the AC-modulo matcher in ft_ac_match.c.  Otherwise we keep
+// the syntactic ft_match path (current default).  The env flag is
+// cached on first call -- changing it mid-process has no effect, by
+// design (same convention as the THVM_ATPFT_KBO_DIFF probe above).
+static inline int ft_match_maybe_ac(AtpFt *a,
+                                    const AtpFtCell *pat,
+                                    const AtpFtCell *subj,
+                                    AtpFtSubst *subst) {
+#if defined(THVM_ATP_AC) && defined(THVM_ATPFT_MATCH)
+  static int ac_on = -1;
+  if (ac_on < 0) ac_on = atp_env_on("THVM_ATPFT_AC_MATCH");
+  if (ac_on) {
+    u64 mask = thvm_atp_get_ac_mask();
+    if (mask != 0ull) {
+      AtpAcInfo ac = { .ac_mask = mask };
+      return ft_match_ac(a, pat, subj, &ac, subst);
+    }
+  }
+#endif
+  (void)a;
+  return ft_match(pat, subj, subst);
+}
+
 static int find_redex_ft(AtpState        *s,
                          AtpFtCell       *root,
                          u32              slice_first,
@@ -215,6 +241,10 @@ static int find_redex_ft(AtpState        *s,
   u8 have_unorient = (u8)(s->n_unorient > 0u);
   u32 slice_end = slice_first + slice_count;
   if (slice_end > s->n_rules) slice_end = s->n_rules;
+  // Arena handle for the AC-match dispatch (AC-chain bindings allocate
+  // into the scratch arena).  NULL-safe: the dispatch only deref's it
+  // when the AC path actually fires.
+  AtpFt *ft_arena_local = (AtpFt *)s->ft_arena_ptr;
   for (AtpFtCell *p = root; p != NULL && p != end_after; p = p->next) {
     if ((p->flags & ATPFT_FLAG_SUBST_FRESH) != 0u) {
       prev = p;
@@ -247,7 +277,7 @@ static int find_redex_ft(AtpState        *s,
         if (!try_orient) continue;
         // Forward rewrite, no order check needed (oriented).
         ft_subst_reset(subst_buf);
-        if (ft_match(lhs, p, subst_buf)) {
+        if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
           *parent_out = (p == root) ? NULL : prev;
           *redex_out  = p;
           *rule_out   = r;
@@ -266,7 +296,7 @@ static int find_redex_ft(AtpState        *s,
       // streaming KBO matches atp_compare on the unorient gate inputs).
       if (ft_vars_contained(rhs, lhs)) {
         ft_subst_reset(subst_buf);
-        if (ft_match(lhs, p, subst_buf)) {
+        if (ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, rhs, subst_buf, s->kbo);
           static int dbg_diff = -1;
@@ -300,7 +330,7 @@ static int find_redex_ft(AtpState        *s,
       // Backward: same gates with l/r swapped.
       if (ft_vars_contained(lhs, rhs)) {
         ft_subst_reset(subst_buf);
-        if (ft_match(rhs, p, subst_buf)) {
+        if (ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf)) {
           if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           KboCmp ft_v = thvm_kbo_ft_subst_with_prepared(redex_na, lhs, subst_buf, s->kbo);
           if (ft_v == KBO_GT) {
