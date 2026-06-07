@@ -1,0 +1,17 @@
+NAME          GroupAxiomsInverseOfComposite
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     and: ANY ANY -> ANY
+              k1: -> ANY
+              not: ANY -> ANY
+              opOvertilde: ANY -> ANY
+              skC1: -> ANY
+              skC2: -> ANY
+ORDERING      KBO
+              and=1, k1=1, not=1, opOvertilde=1, skC1=1, skC2=1
+              k1 > skC1 > skC2 > not > opOvertilde > and
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     and(X1,and(X2,X3)) = and(and(X1,X2),X3)
+              and(X1,opOvertilde(k1)) = X1
+              and(X1,not(X1)) = opOvertilde(k1)
+CONCLUSION    not(and(skC1,skC2)) = and(not(skC2),not(skC1))

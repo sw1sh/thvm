@@ -1,9 +1,13 @@
 theory	theorem	preset_constructs	wmcli_constructs	cli_minus_preset	notes
-AbelianGroupAxioms	InverseOfInverse	12	12	0	**PARITY achieved (c0354f0c trivial-Conclusion split)**
-AbelianGroupAxioms	InverseOfComposite	18	20	+2	per-rule vs per-normalize-call granularity gap
+AbelianGroupAxioms	InverseOfInverse	12	12	0	**PARITY achieved (c0354f0c)**
+AbelianGroupAxioms	InverseOfComposite	18	20	+2	per-rule vs per-normalize-call granularity gap (deferred)
 AbelianGroupAxioms	ImpliesMcCuneAxioms	28	28	0	**PARITY achieved** at 120s wall
 AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	20	20	0	**PARITY achieved**
 BooleanAxioms	DoubleNegation	20	20	0	**PARITY achieved**
 GroupAxioms	InverseOfInverse	14	14	0	**PARITY achieved**
-HillmanAxioms	Commutativity	-	38	-	preset FAILs; design tension: Method->"Waldmeister" is faithful WM default for UNRECOGNIZED problems; real WM CLI auto-selects per-problem strategy (Mix2+SR=2+AMW=20 cracks at 27); use Method->Automatic for WM-CLI-equivalent dispatch
-MeredithAxioms	Commutativity	-	11	-	preset FAILs; same design tension; Add+AMW=20 cracks at 11 = WM CLI; Method->Automatic dispatches to it
+GroupAxioms	LeftIdentity	12	12	0	**PARITY achieved** (new -- .pr generated)
+GroupAxioms	LeftInverse	15	15	0	**PARITY achieved** (new -- .pr generated)
+GroupAxioms	InverseOfComposite	21	20	-1	thvm slightly longer
+GroupAxioms	ImpliesMcCuneAxioms	30	28	-2	thvm slightly longer (similar per-rule pattern as AbelianGroup IOC)
+HillmanAxioms	Commutativity	-	38	-	preset FAILs; design tension; Method->Automatic dispatches (Mix2+SR=2+AMW=20 cracks at 27)
+MeredithAxioms	Commutativity	-	11	-	preset FAILs; design tension; Method->Automatic dispatches (Add+AMW=20 cracks at 11)

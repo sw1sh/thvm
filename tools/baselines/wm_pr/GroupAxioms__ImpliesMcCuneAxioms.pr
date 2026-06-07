@@ -1,0 +1,19 @@
+NAME          GroupAxiomsImpliesMcCuneAxioms
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     and: ANY ANY -> ANY
+              k1: -> ANY
+              not: ANY -> ANY
+              opOvertilde: ANY -> ANY
+              skC1: -> ANY
+              skC2: -> ANY
+              skC3: -> ANY
+              skC4: -> ANY
+ORDERING      KBO
+              and=1, k1=1, not=1, opOvertilde=1, skC1=1, skC2=1, skC3=1, skC4=1
+              k1 > skC1 > skC2 > skC3 > skC4 > not > opOvertilde > and
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     and(X1,and(X2,X3)) = and(and(X1,X2),X3)
+              and(X1,opOvertilde(k1)) = X1
+              and(X1,not(X1)) = opOvertilde(k1)
+CONCLUSION    and(skC1,not(and(skC2,and(and(and(skC3,not(skC3)),not(and(skC4,skC2))),skC1)))) = skC4
