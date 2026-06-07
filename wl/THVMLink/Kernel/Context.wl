@@ -50,6 +50,7 @@ $contextCountFn   := $contextCountFn   = load["thvm_wl_context_count",   {},    
    -1 = "use default" (NULL on the C side). *)
 deviceCode["cpu"]     := 0
 deviceCode["metal"]   := 1
+deviceCode["cuda"]    := 2
 deviceCode[None]      := -1
 deviceCode[Automatic] := -1
 deviceCode[s_]        := -1
