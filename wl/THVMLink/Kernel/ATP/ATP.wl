@@ -3696,6 +3696,12 @@ atpAutoTuneForClass["Sheffer"] := {
        thrashing.  AndAssociativity-class deep saturations stay out of
        this lean schedule (need Waldmeister preset + minutes of
        saturation; the safety tail's Gt entry still picks them up). *)
+    (* Mix2 + SR=2 without AutoMaxWeight cracks Hillman/Commutativity at
+       len 27 in 0.04s; the AMW=20 variant below FAILS Hillman (AMW
+       defers + drains CPs that this trajectory needs immediately).
+       Run the AMW-free variant FIRST so Hillman + ImpliesWolfram cases
+       crack on entry 1 instead of falling through to the safety tail. *)
+    {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2},
     {"Completion", "CriticalPairWeight" -> "Mix2",
         "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
     {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},
