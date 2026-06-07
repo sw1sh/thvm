@@ -1,0 +1,17 @@
+# AbelianGroupAxioms/InverseOfInverse parity divergence
+# thvm Method->Waldmeister vs WaldmeisterProcess (CLI)
+# Captured 2026-06-07 with WMCLI=/Users/swish/src/wolfram/waldmeister/wmcli
+
+step	thvm_construct	thvm_statement	wmcli_statement	notes
+1	{Axiom,1}	assoc	and(x1,and(x2,x3))=and(and(x1,x2),x3)	axiom-only step (match)
+2	{Axiom,2}	comm	and(x1,x2)=and(x2,x1)	axiom-only step (match)
+3	{Axiom,3}	right-identity	x1=and(x1,opOvertilde(k1()))	WM lists axioms in different order
+4	{Axiom,4}	right-inverse	and(x1,not(x1))=opOvertilde(k1())	match
+5	{Hypothesis,1}	not(not(a))=a	not(not(skC1()))=skC1()	match
+6	{CriticalPairLemma,1}	b*(b'*a)=1*a	and(opOvertilde(k1()),x1)=x1	WM normalizes left-identity FIRST as separate CPL
+7	{CriticalPairLemma,2}	1*a=a	and(x1,and(not(x1),x2))=and(opOvertilde(k1()),x2)	WM separates CPLs differently
+8	{SubstitutionLemma,1}	b*(b'*a)=a	and(x1,and(not(x1),x2))=x2	WM normalize uses 1*a=a directly (= thvm SL1)
+9	{CriticalPairLemma,3}	not(not(a))=a*1	not(not(x1))=and(x1,opOvertilde(k1()))	match
+10	{SubstitutionLemma,2}	not(not(a))=a	not(not(x1))=x1	match
+11	-(MISSING)-	-	skC1()=skC1()	**WM extra SL: normalize hypothesis with SL2 to skC1=skC1**
+12	{Conclusion,1}	a=a	skC1()=skC1()	thvm inlines step 11 into Conclusion
