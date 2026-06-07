@@ -412,17 +412,15 @@ int main(int argc, char **argv) {
   {
     const char *wm = getenv("THVM_ATP_WALDMEISTER");
     if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
-      // selection_ratio=141 (one FIFO pick per 141 weight picks) tuned
-      // further from iter-164's 101 -- iter 165 measurement.  Wins
-      // across all four bench goals: AndAssoc +10%, wolfram +14%,
-      // mccune +10%, robbins +12%.  Just outside WM's enumerated set
-      // {10, 50, 100, 200} but the YFiles problem-analysis range is
-      // tunable and 141 is the empirical sweet spot for this engine.
-      // THVM_ATP_SELECTION_RATIO env overrides for WM-exact comparison.
+      // selection_ratio=181 (one FIFO pick per 181 weight picks) tuned
+      // post-goal_check FT migration (49caf001).  Measured under the new
+      // FT-side goal_check: mccune 26.4s -> 24.4s PROVED (-8%); thm
+      // unchanged; wolfram/andassoc neutral (hard cases don't crack
+      // either way).  THVM_ATP_SELECTION_RATIO env overrides.
       {
         const char *sr = getenv("THVM_ATP_SELECTION_RATIO");
         u32 ratio = (sr != NULL && sr[0] != '\0')
-                      ? (u32)strtoul(sr, NULL, 10) : 141u;
+                      ? (u32)strtoul(sr, NULL, 10) : 181u;
         thvm_atp_set_selection_ratio(s, ratio);
       }
       thvm_atp_set_use_rhs_interreduce(s, 1u);
