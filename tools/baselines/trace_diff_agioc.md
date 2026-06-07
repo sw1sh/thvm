@@ -71,11 +71,45 @@ WM's final goal-closure has 4 entries (77-80); thvm has 1
 +2 gap in parity_wm_wmcli.tsv stems from the trajectory difference,
 not just the trivial-Conclusion split.
 
-## Phase 4 work
+## Phase 4 findings
 
-1. Implement `THVM_ATP_CP_PICK_TRACE=2` mode that also prints the
-   CP-weight components (size_l, size_r, mix_mode, computed pri).
-2. Read `sources/CLP/ClasHeuristics.c CH_MixWeight` and port its
-   exact formula into `src/atp/_.c`'s mix-weight path.
-3. Re-run agioc trace, confirm rule #2 is assoc.
-4. Re-run parity_wm_wmcli benches, confirm IOC closes.
+**The Mix formula is already byte-identical**: thvm's
+`atp_cp_priority_mix` (`src/atp/_.c:5330`) is exactly WM's
+`CH_MixWeight` (`sources/CLAS/ClasHeuristics.c:131`) -- both:
+
+  res = (lhs>rhs) ? w_lhs : (lhs<rhs) ? w_rhs : w_lhs+w_rhs
+  return (w_lhs+w_rhs)*res + res + (w_lhs+w_rhs)
+
+**The real divergence is in the SYMBOL WEIGHT TABLE used by both
+sides of the formula**:
+  WM:    `CF_Phi` sums per-symbol weights from `SG_SymbolGewichtCP`,
+         which is AUTO-DERIVED per problem from `atp_analyze_axioms`.
+  thvm:  uses uniform `atp_symbol_count` (every symbol weight 1).
+
+Empirical: with `THVM_ATP_CP_WEIGHT=4` (Mix) + uniform weights:
+  - thvm picks comm pri=48, id-rt pri=19, inv-rt pri=29, assoc pri=65.
+  - Selection order: id-rt(rule 1), inv-rt(rule 2), comm(eq), id-lt(rule 3), inv-of-e(rule 4), assoc(rule 5).
+
+WM picks assoc as rule #2, not #5.  So WM's auto-derived weights
+give assoc a much lower priority -- probably by weighting binary
+operators lower than terminals, or by ranking variables higher.
+
+**INITIAL_ULTIMATE shifts assoc to rank 3**: porting WM's
+"initial = ultimate" action (axioms forced to heap front) closes
+part of the gap but not all of it.
+
+**Endgame chain is the remaining +2**: even with all rule-orders
+matched, WM emits 3 SubstitutionLemma steps at the endgame where
+thvm collapses into 1.  The CP-set IR sweep's per-rule emission
+granularity is the next algorithmic mismatch.
+
+## Phase 5 work
+
+1. **Port WM's auto-weight derivation**.  Read
+   `sources/CLAS/NewClassification.c` (atp_auto_precedence-style
+   logic).  Add `atp_auto_weights` producing a per-label weight
+   array.  Wire into `atp_cp_weight_base` (Mix / Mix2 / Max paths).
+2. **Re-trace agioc**.  Confirm assoc moves to rule #2 with both
+   auto-weights AND INITIAL_ULTIMATE.
+3. **Verify**: IOC closes from 18 -> 20 OR the endgame chain
+   becomes 3-step.
