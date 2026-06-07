@@ -115,7 +115,7 @@ static u32 JIT_ACTIVE_SLOT = 0;     // 0 = not capturing; otherwise the
 static u32 JIT_PAUSE_DEPTH = 0;     // nested suppression for internal
                                     // benchmark fires (autotune, variants)
 
-static void jit_capture_finalize(u32 slot, Term root);
+static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots);
 
 static void jit_capture_mark_buf(Backend *b, u32 buf_id) {
   if (b == NULL || buf_id == 0) {
@@ -316,7 +316,7 @@ fn void jit_capture_end(void) {
   // recorded op list.
   materialized_loc_jit_span_end();
   if (JIT_ACTIVE_SLOT != 0) {
-    jit_capture_finalize(JIT_ACTIVE_SLOT, 0);
+    jit_capture_finalize(JIT_ACTIVE_SLOT, NULL, 0);
   }
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
@@ -325,7 +325,23 @@ fn void jit_capture_end(void) {
 fn void jit_capture_end_with_result(Term root) {
   materialized_loc_jit_span_end();
   if (JIT_ACTIVE_SLOT != 0) {
-    jit_capture_finalize(JIT_ACTIVE_SLOT, root);
+    jit_capture_finalize(JIT_ACTIVE_SLOT, &root, root != 0 ? 1u : 0u);
+  }
+  JIT_ACTIVE_SLOT = 0;
+  JIT_PAUSE_DEPTH = 0;
+}
+
+// Multi-root variant: a JIT-captured function whose return is a LIST (or
+// nested structure) of tensor handles -- e.g. TGrad over several params --
+// must mark EVERY returned buffer as needed, else they're treated as dead
+// (replay_skip + not pinned), reclaimed by the next step's arena, and read
+// back as freed-memory garbage on the first call AND not re-dispatched on
+// replay (issue #5).  The single-root end_with_result only covered a bare
+// _TTerm return.  roots[] are the resolved result Terms (one per handle).
+fn void jit_capture_end_with_results(const Term *roots, u32 n_roots) {
+  materialized_loc_jit_span_end();
+  if (JIT_ACTIVE_SLOT != 0) {
+    jit_capture_finalize(JIT_ACTIVE_SLOT, roots, n_roots);
   }
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
@@ -1036,10 +1052,14 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
 }
 #endif
 
-static void jit_capture_finalize(u32 slot, Term root) {
+static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
     return;
   }
+  // `has_result` mirrors the old single-Term `root != 0` flag: the
+  // sink-assigns / pack-temporaries passes below only run for the
+  // no-result (jit_capture_end) case.
+  Term has_result = n_roots > 0 ? 1 : 0;
   JitCapture *c = &JIT_CAPTURES[slot];
   if (!c->in_use || c->ops == NULL) {
     return;
@@ -1051,7 +1071,9 @@ static void jit_capture_finalize(u32 slot, Term root) {
     return;
   }
   u32 n_needed = 0;
-  jit_capture_root_needed(root, needed, &n_needed);
+  for (u32 ri = 0; ri < n_roots; ri++) {
+    jit_capture_root_needed(roots[ri], needed, &n_needed);
+  }
 
   int noskip = jit_replay_noskip();
   for (u32 rev = c->n_ops; rev > 0; rev--) {
@@ -1092,8 +1114,8 @@ static void jit_capture_finalize(u32 slot, Term root) {
     }
   }
 
-  jit_capture_sink_assigns(c, root);
-  jit_capture_pack_replay_temporaries(c, root);
+  jit_capture_sink_assigns(c, has_result);
+  jit_capture_pack_replay_temporaries(c, has_result);
 
   // Dedup pass: if a DISPATCH writes (kid, in_buf_ids, out_buf_id) IDENTICAL
   // to a prior DISPATCH and nothing between them writes to any of the
