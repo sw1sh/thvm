@@ -31,7 +31,7 @@
 
 BeginPackage["THVMLink`"];
 
-TJit::usage        = "TJit[fn] returns a closure that captures fn's kernel-dispatch sequence on first call and replays it on subsequent calls.  Per-call wallclock drops from materialize+dispatch to just dispatch.  HoldFirst.  Recapture by TJitDrop[closure] then re-create.";
+TJit::usage        = "TJit[fn] returns a closure that captures fn's kernel-dispatch sequence on the first call and replays it (returning the same result handle, whose buffer the replay rewrites) on subsequent calls.  Per-call wallclock drops from materialize+dispatch to just dispatch.  The closure's TTerm ARGUMENTS are the per-call inputs: `closure[x]` captures over `x` on the first call and rebinds each later call's input in place on replay (tinygrad's input_replace), so a fixed forward generates by `closure[next]` with no explicit TSet.  HoldFirst.  Recapture by TJitDrop[closure] then re-create.";
 TJitOpCount::usage = "TJitOpCount[closure] returns the number of kernel dispatches captured for the JIT closure (0 before the first call).";
 TJitCaptureOps::usage = "TJitCaptureOps[closure] returns the decoded captured TJit replay sequence as associations.  Dispatch rows include Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, TileUopCount, ReplaySkip, and ReplayPacked; assign rows include DstTid and SrcTid.";
 TJitCaptureRuns::usage = "TJitCaptureRuns[closure] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries.";
@@ -54,6 +54,8 @@ $jitCaptureDropFn    := $jitCaptureDropFn    = load["thvm_wl_jit_capture_drop", 
 $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_count", {Integer}, Integer]
 $jitCaptureOpsFn     := $jitCaptureOpsFn     = load["thvm_wl_jit_capture_ops",      {Integer}, {Integer, 1}]
 $jitReplayFn         := $jitReplayFn         = load["thvm_wl_jit_replay",           {Integer}, Integer]
+$jitCaptureSetInputsFn := $jitCaptureSetInputsFn = load["thvm_wl_jit_capture_set_inputs", {Integer, {Integer, 1}}, Integer]
+$jitReplayWithInputsFn := $jitReplayWithInputsFn = load["thvm_wl_jit_replay_with_inputs", {Integer, {Integer, 1}}, Integer]
 
 (* Side-store of captured slot ids, keyed by the closure's
    association hash.  Each TJit closure starts un-captured; the
@@ -89,19 +91,31 @@ TJit[fn_] := TJitClosure[<|
 (* Direct invocation: dispatch through the side store.  Two paths:
      (a) closure has captured -> replay only
      (b) first call -> capture-begin, run fn, capture-end, store slot. *)
+(* The TenDesc tids of the call's TTerm arguments, realized so each has a
+   live buffer.  These are the per-call INPUTS: on capture they declare the
+   input_replace baseline; on replay each call's fresh tids are substituted
+   at the captured input sites, so passing a new input rebinds it with no
+   explicit TSet.  No TTerm args (the slot-feeding TJit[fn] usage) -> {}. *)
+jitArgTids[args_List] := TTermVal /@ TRealize /@ Cases[args, _TTerm]
+
 TJitClosure[a_Association][args___] := Module[{
     key = Hash[a],
-    rec, slot, fnRes
+    rec, slot, fnRes, inTids
 },
     ensureInit[];
+    (* Realize inputs + collect tids BEFORE capture/replay so the input's
+       own realization is not captured -- only the fn body is. *)
+    inTids = jitArgTids[{args}];
     rec = $tJitState[key];
     If[ !MissingQ[rec],
-        (* (a) replay: re-dispatch the captured kernels, then return the
-           SAME result handles captured on the first call.  Replay writes
-           into the pinned output buffers those handles point at, so reading
-           them surfaces the fresh result -- returning Null here was the bug
-           that made captured TGrad/realize results unreadable (issue #5). *)
-        $jitReplayFn[rec["slot"]];
+        (* (a) replay: substitute THIS call's fresh input buffers at the
+           captured sites (tinygrad input_replace), re-dispatch, and return
+           the SAME result handle -- the replay rewrites its pinned output
+           buffer, so reading it surfaces the fresh result.  No inputs ->
+           plain re-dispatch (the slot-feeding usage). *)
+        If[ inTids === {},
+            $jitReplayFn[rec["slot"]],
+            $jitReplayWithInputsFn[rec["slot"], inTids]];
         rec["result"],
         (* (b) capture *)
         slot = $jitCaptureBeginFn[];
@@ -122,6 +136,9 @@ TJitClosure[a_Association][args___] := Module[{
                         $jitCaptureEndResultFn[0],
                         $jitCaptureEndResultMultiFn[roots]]]
             ];
+            (* Declare this call's input tensors so later calls rebind them
+               in place of an explicit TSet. *)
+            If[ inTids =!= {}, $jitCaptureSetInputsFn[slot, inTids]];
             $tJitState[key] = <|"slot" -> slot, "result" -> fnRes|>;
             fnRes
         ]

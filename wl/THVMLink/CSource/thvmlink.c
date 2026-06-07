@@ -391,6 +391,60 @@ EXTERN_C DLLEXPORT int thvm_wl_jit_replay(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Convert a rank-1 Integer MTensor of TenDesc tids into their buf_ids.
+// `out` must hold at least `*n` u32; returns the buf_id array (== out).
+static u32 *jit_tids_to_buf_ids(WolframLibraryData libData, MTensor t,
+                                u32 *out_stack, u32 cap, u32 *n_out) {
+  mint  n   = libData->MTensor_getFlattenedLength(t);
+  mint *src = libData->MTensor_getIntegerData(t);
+  u32  *ids = ((u32)n <= cap) ? out_stack
+                              : (u32 *)malloc((size_t)n * sizeof(u32));
+  if (ids == NULL) { *n_out = 0; return NULL; }
+  for (mint i = 0; i < n; i++) {
+    u32 tid = (u32)src[i];
+    ids[i]  = (tid != 0 && tid < TENS_NEXT) ? TENS[tid].buf_id : 0;
+  }
+  *n_out = (u32)n;
+  return ids;
+}
+
+// Declare this JIT slot's input tensors (by tid); their buf_ids become the
+// input_replace baseline (jit_capture_set_inputs).  Called after capture.
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_set_inputs(WolframLibraryData libData,
+                                                      mint argc, MArgument *args,
+                                                      MArgument res) {
+  (void)argc;
+  u32     slot = (u32)MArgument_getInteger(args[0]);
+  MTensor t    = MArgument_getMTensor(args[1]);
+  u32     stack[16], n = 0;
+  u32    *ids = jit_tids_to_buf_ids(libData, t, stack, 16, &n);
+  if (ids != NULL) {
+    jit_capture_set_inputs(slot, ids, n);
+    if (ids != stack) free(ids);
+  }
+  MArgument_setInteger(res, (mint)n);
+  return LIBRARY_NO_ERROR;
+}
+
+// Replay substituting this call's fresh input tensors (by tid) at the
+// captured input sites (tinygrad input_replace; jit_replay_with_inputs).
+EXTERN_C DLLEXPORT int thvm_wl_jit_replay_with_inputs(WolframLibraryData libData,
+                                                      mint argc, MArgument *args,
+                                                      MArgument res) {
+  (void)argc;
+  u32     slot = (u32)MArgument_getInteger(args[0]);
+  MTensor t    = MArgument_getMTensor(args[1]);
+  u32     stack[16], n = 0;
+  u32    *ids = jit_tids_to_buf_ids(libData, t, stack, 16, &n);
+  u32     r   = 0;
+  if (ids != NULL) {
+    r = jit_replay_with_inputs(slot, ids, n);
+    if (ids != stack) free(ids);
+  }
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_heap_alloc(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
   (void)libData; (void)argc;
