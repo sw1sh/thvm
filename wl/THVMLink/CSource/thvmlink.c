@@ -317,6 +317,25 @@ EXTERN_C DLLEXPORT int thvm_wl_jit_capture_end_result(WolframLibraryData libData
   return LIBRARY_NO_ERROR;
 }
 
+// Multi-root capture-end: args[0] is a rank-1 Integer MTensor of the
+// captured function's result handle Terms.  Used when the JIT'd function
+// returns a LIST of tensors (e.g. TGrad over several params) so every
+// returned buffer is marked needed -> pinned + replayed (issue #5).
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_end_result_multi(WolframLibraryData libData,
+                                                            mint argc, MArgument *args,
+                                                            MArgument res) {
+  (void)libData; (void)argc;
+  MTensor t   = MArgument_getMTensor(args[0]);
+  mint    n   = libData->MTensor_getFlattenedLength(t);
+  mint   *src = libData->MTensor_getIntegerData(t);
+  Term roots[256];
+  u32  n_roots = (n > 256) ? 256 : (u32)n;
+  for (u32 i = 0; i < n_roots; i++) roots[i] = (Term)src[i];
+  jit_capture_end_with_results(roots, n_roots);
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_jit_capture_drop(WolframLibraryData libData,
                                                 mint argc, MArgument *args,
                                                 MArgument res) {

@@ -49,6 +49,7 @@ Begin["`Private`"];
 $jitCaptureBeginFn   := $jitCaptureBeginFn   = load["thvm_wl_jit_capture_begin",    {},        Integer]
 $jitCaptureEndFn     := $jitCaptureEndFn     = load["thvm_wl_jit_capture_end",      {},        Integer]
 $jitCaptureEndResultFn := $jitCaptureEndResultFn = load["thvm_wl_jit_capture_end_result", {Integer}, Integer]
+$jitCaptureEndResultMultiFn := $jitCaptureEndResultMultiFn = load["thvm_wl_jit_capture_end_result_multi", {{Integer, 1}}, Integer]
 $jitCaptureDropFn    := $jitCaptureDropFn    = load["thvm_wl_jit_capture_drop",     {Integer}, Integer]
 $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_count", {Integer}, Integer]
 $jitCaptureOpsFn     := $jitCaptureOpsFn     = load["thvm_wl_jit_capture_ops",      {Integer}, {Integer, 1}]
@@ -95,9 +96,13 @@ TJitClosure[a_Association][args___] := Module[{
     ensureInit[];
     rec = $tJitState[key];
     If[ !MissingQ[rec],
-        (* (a) replay *)
+        (* (a) replay: re-dispatch the captured kernels, then return the
+           SAME result handles captured on the first call.  Replay writes
+           into the pinned output buffers those handles point at, so reading
+           them surfaces the fresh result -- returning Null here was the bug
+           that made captured TGrad/realize results unreadable (issue #5). *)
         $jitReplayFn[rec["slot"]];
-        Null,
+        rec["result"],
         (* (b) capture *)
         slot = $jitCaptureBeginFn[];
         If[ slot === 0,
@@ -107,10 +112,17 @@ TJitClosure[a_Association][args___] := Module[{
             Internal`WithLocalSettings[
                 Null,
                 fnRes = a["fn"][{args}],
-                $jitCaptureEndResultFn[
-                    If[MatchQ[fnRes, _TTerm], ttermRaw[fnRes], 0]]
+                (* Mark EVERY returned tensor handle (a bare TTerm, or any
+                   in a list / nested structure) as a capture result, so all
+                   their output buffers are pinned + replayed.  A list return
+                   (TGrad over several params) previously passed root 0 and
+                   was reclaimed as garbage. *)
+                With[{roots = Cases[{fnRes}, t_TTerm :> ttermRaw[t], Infinity]},
+                    If[ roots === {},
+                        $jitCaptureEndResultFn[0],
+                        $jitCaptureEndResultMultiFn[roots]]]
             ];
-            $tJitState[key] = <|"slot" -> slot|>;
+            $tJitState[key] = <|"slot" -> slot, "result" -> fnRes|>;
             fnRes
         ]
     ]
