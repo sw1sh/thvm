@@ -675,6 +675,22 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // (LHS half).  args[24].  0 = off (engine byte-identical).
   mint use_bwd_demod = MArgument_getInteger(args[24]);
   thvm_atp_set_use_bwd_demod(atp, (u8)(use_bwd_demod != 0));
+  // INCR_IR + CP_INDEX (0a98478e, d86fa599 in the C bench): pure perf
+  // wins, byte-identical PROOF output by construction (incremental
+  // discrimination-tree rebuilds + skip-CP-on-no-new-rule-top-sym).
+  // Always-on in the WL bridge: every Method that fires up the C engine
+  // benefits, no option plumbing churn.  Both can be force-disabled
+  // via env THVM_ATP_INCR_IR=0 / THVM_ATP_CP_INDEX=0.
+  {
+    const char *iir = getenv("THVM_ATP_INCR_IR");
+    if (iir == NULL || !(iir[0] == '0' && iir[1] == '\0')) {
+      thvm_atp_set_use_incr_ir(atp, 1u);
+    }
+    const char *cpi = getenv("THVM_ATP_CP_INDEX");
+    if (cpi == NULL || !(cpi[0] == '0' && cpi[1] == '\0')) {
+      thvm_atp_set_use_cp_index(atp, 1u);
+    }
+  }
 
   for (u32 i = 0; i < n_ax; i++) {
     Term lhs = (Term)data[1 + 2 * i + 0];
