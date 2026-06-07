@@ -297,26 +297,15 @@ int main(int argc, char **argv) {
   // ranks `and` (arity 2) above `not` (arity 1) on the McCune side, in
   // line with the Fuchs arity ladder atp_auto_precedence would derive.
   static u32 weights[7]    = { 0u, 1u, 1u, 1u, 1u, 1u, 1u };
-  static u32 precedence[7] = { 0u, 4u, 3u, 2u, 1u, 6u, 5u };
-  // AbelianGroup-class problems need the WM precedence shape
-  // (constants > unary > binary, the Fuchs arity ladder), since
-  // the default `and`-highest precedence orients assoc differently
-  // and diverts the rule-derivation trajectory away from WM's.
-  // For agioc (the AbelianGroup/InverseOfComposite probe), set:
-  //   L_P=skC1, L_Q=skC2, L_R=e  -- 0-arity constants -- HIGHEST
-  //   L_NOT=inv                  -- 1-arity            -- MID
-  //   L_AND=group_op             -- 2-arity            -- LOWEST
-  // matching `k1 > skC1 > skC2 > not > opOvertilde > and` from the
-  // wm_pr/AbelianGroupAxioms__InverseOfComposite.pr ORDERING block.
-  static u32 precedence_ag[7] = { 0u, 4u, 6u, 5u, 4u, 1u, 2u };
-  // Selecting the precedence at runtime based on goal name happens
-  // below after `goal` is read; the static defaults above stay for
-  // every other path.
-  // Pick the AbelianGroup precedence for AbelianGroup-class goals so
-  // assoc orients the WM way (rule #2-ish) rather than #5.
-  if (strcmp(goal, "agioc") == 0) {
-    for (u32 k = 0; k < 7; k++) precedence[k] = precedence_ag[k];
-  }
+  // Default precedence (Sheffer): WM .pr files put `skC > nand` --
+  // skolem constants HIGH, binary operator LOW.  Previously thvm had
+  // nand HIGH which orients axiom CPs differently than WM and diverts
+  // the trajectory.  Mirrors wm_pr/WolframAxioms__*.pr ORDERING.
+  // Labels: 1=nand, 2-4=skolems (P,Q,R), 5=and, 6=not.
+  static u32 precedence[7] = { 0u, 1u, 6u, 5u, 4u, 3u, 2u };
+  // The default precedence above already matches WM's Fuchs arity
+  // ladder (constants > unary > binary) for both Sheffer and AbelianGroup
+  // paths -- L_P/Q/R skolems HIGH, L_NOT MID, L_NAND/L_AND LOW.
   KboConfig cfg = {
     .weights    = weights,
     .precedence = precedence,
