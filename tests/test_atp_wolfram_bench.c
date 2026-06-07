@@ -269,6 +269,24 @@ static void goal_aboig_ioc(Term *l, Term *r) {
   *r = and_op(not_op(q), not_op(p));
 }
 
+// GroupAxioms (3 equations): same f/inv/e as agioc but no commutativity.
+// Conjecture (LeftIdentity): f(e, p) = p -- the right-id-and-right-inv
+// implies left-id derivation.  Mirrors wm_pr/GroupAxioms__LeftIdentity.pr.
+static void group_axioms(Term *l1, Term *r1, Term *l2, Term *r2,
+                         Term *l3, Term *r3) {
+  Term x = fv(0), y = fv(1), z = fv(2);
+  Term e = konst(L_AG_E);
+  *l1 = and_op(and_op(x, y), z); *r1 = and_op(x, and_op(y, z));
+  *l2 = and_op(x, e);            *r2 = x;
+  *l3 = and_op(x, not_op(x));    *r3 = e;
+}
+static void goal_group_leftid(Term *l, Term *r) {
+  Term p = konst(L_P);
+  Term e = konst(L_AG_E);
+  *l = and_op(e, p);
+  *r = p;
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -687,6 +705,12 @@ int main(int argc, char **argv) {
     thvm_atp_add_equation(s, a2l, a2r);
     thvm_atp_add_equation(s, a3l, a3r);
     thvm_atp_add_equation(s, a4l, a4r);
+  } else if (strcmp(goal, "glid") == 0) {
+    Term g1l,g1r,g2l,g2r,g3l,g3r;
+    group_axioms(&g1l,&g1r, &g2l,&g2r, &g3l,&g3r);
+    thvm_atp_add_equation(s, g1l, g1r);
+    thvm_atp_add_equation(s, g2l, g2r);
+    thvm_atp_add_equation(s, g3l, g3r);
   } else {
     thvm_atp_add_equation(s, axiom_lhs(), fv(2));
   }
@@ -711,6 +735,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "mccune")  == 0) goal_mccune(&gl, &gr);
   else if (strcmp(goal, "robbins") == 0) goal_robbins(&gl, &gr);
   else if (strcmp(goal, "agioc") == 0)   goal_aboig_ioc(&gl, &gr);
+  else if (strcmp(goal, "glid") == 0)    goal_group_leftid(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
