@@ -5,5 +5,5 @@ AbelianGroupAxioms	ImpliesMcCuneAxioms	28	28	0	**PARITY achieved** at 120s wall
 AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	20	20	0	**PARITY achieved**
 BooleanAxioms	DoubleNegation	20	20	0	**PARITY achieved**
 GroupAxioms	InverseOfInverse	14	14	0	**PARITY achieved**
-HillmanAxioms	Commutativity	-	38	-	preset FAILs under Method->Waldmeister; Automatic still proves
-MeredithAxioms	Commutativity	-	11	-	preset FAILs under Method->Waldmeister; Automatic still proves
+HillmanAxioms	Commutativity	-	38	-	preset FAILs; design tension: Method->"Waldmeister" is faithful WM default for UNRECOGNIZED problems; real WM CLI auto-selects per-problem strategy (Mix2+SR=2+AMW=20 cracks at 27); use Method->Automatic for WM-CLI-equivalent dispatch
+MeredithAxioms	Commutativity	-	11	-	preset FAILs; same design tension; Add+AMW=20 cracks at 11 = WM CLI; Method->Automatic dispatches to it
