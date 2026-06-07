@@ -103,13 +103,39 @@ matched, WM emits 3 SubstitutionLemma steps at the endgame where
 thvm collapses into 1.  The CP-set IR sweep's per-rule emission
 granularity is the next algorithmic mismatch.
 
-## Phase 5 work
+## Phase 5 findings
 
-1. **Port WM's auto-weight derivation**.  Read
-   `sources/CLAS/NewClassification.c` (atp_auto_precedence-style
-   logic).  Add `atp_auto_weights` producing a per-label weight
-   array.  Wire into `atp_cp_weight_base` (Mix / Mix2 / Max paths).
-2. **Re-trace agioc**.  Confirm assoc moves to rule #2 with both
-   auto-weights AND INITIAL_ULTIMATE.
-3. **Verify**: IOC closes from 18 -> 20 OR the endgame chain
-   becomes 3-step.
+The auto-weight hypothesis was WRONG.  WM .pr files for these cases
+specify ALL symbol weights = 1 (matches thvm's `atp_symbol_count`).
+The Mix formula matches.  Yet WM picks axiom-orient order differently.
+
+**The remaining divergence is subtle**: under `initial=ultimate` +
+`heuristic=mixweight`, both WM and thvm should pick lowest-Mix-pri
+ultimate first.  For glid:
+  id-rt    pri 19
+  inv-rt   pri 29
+  assoc    pri 65
+thvm picks in this order (id-rt, inv-rt, assoc) -- matches the
+formula.  WM picks (id-rt, assoc, inv-rt).
+
+Possible causes:
+- WM's CP-set IR reweights initial CPs after first orient, dropping
+  assoc's apparent priority.
+- WM's "database=ultimate" classification of derived CPs cascades
+  differently than thvm's ultimate-only.
+- WM's PCL protocol re-numbers axioms by some canonical order, and
+  the orient(N,x) protocol's N doesn't refer to .pr position.
+
+Without source-level instrumentation in wmcli, the next move is to
+either:
+1. Rebuild wmcli with WRITE_TRACES=1 to dump per-CP selection details
+   (cmake + mathlink dep -- substantial work).
+2. Accept the close-but-not-byte-identical match (8 cases at byte
+   parity vs WM CLI; 4 cases within 1-2 picks).
+
+## Status
+
+**Cumulative wins**: mccune 49s -> 10.0s (-80%) via Mix flip
+(b409b6ef) + precedence flip (e3334d46).  WL parity TSV unaffected
+because WL's preset was already on Mix.  The C-bench WM-faithful
+preset is now correctly aligned.
