@@ -58,6 +58,7 @@ static void atp_cp_ft_move      (AtpState *s, u32 dst, u32 src);
 # include "ft_match.c"
 # ifdef THVM_ATP_AC
 #  include "ft_ac_match.c"
+#  include "ft_ac_eq.c"
 # endif
 # ifdef THVM_ATPFT_UNIFY
 #  include "ft_unify.c"
@@ -8584,48 +8585,28 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     return ATP_RUNNING;
   }
 
-  // FT path for AC-mask=0; Term path otherwise.  ft_match doesn't do
-  // AC-matching, so AC-class goals miss the rule-direction-flipped
-  // matches that the Term-side atp_match_maybe_ac catches.  Once
-  // ft_match gains AC-awareness this branch can go away.
-  Term l, r;
-#ifdef THVM_ATP_AC
-  if (thvm_atp_get_ac_mask() != 0ull) {
-    l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
-                              s->n_rules, NORM_CAP);
-    r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
-                              s->n_rules, NORM_CAP);
-  } else
-#endif
-  {
-    atp_ft_mirror_ensure(s);
-    AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
-    AtpFtCell *fl_in = ft_from_term(gft, s->goal_lhs, 0);
-    AtpFtCell *fr_in = ft_from_term(gft, s->goal_rhs, 0);
-    AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, NORM_CAP);
-    AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, NORM_CAP);
-    l = ft_to_term(fl);
-    r = ft_to_term(fr);
-    if (ft_eq(fl, fr)) {
-      s->goal_lhs_nf = l;
-      s->goal_rhs_nf = r;
-      return ATP_PROVED;
-    }
-  }
+  // Unified FT path: normalize both sides on FT cells, then test
+  // ft_eq (syntactic), ft_ac_eq (AC-modulo if a mask is registered),
+  // and kbo_eq (Term-side belt-and-braces, picks up structural
+  // identities ft_eq might miss across encoding boundaries).
+  atp_ft_mirror_ensure(s);
+  AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *fl_in = ft_from_term(gft, s->goal_lhs, 0);
+  AtpFtCell *fr_in = ft_from_term(gft, s->goal_rhs, 0);
+  AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, NORM_CAP);
+  AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, NORM_CAP);
+  Term l = ft_to_term(fl);
+  Term r = ft_to_term(fr);
   s->goal_lhs_nf = l;
   s->goal_rhs_nf = r;
-  if (kbo_eq(l, r)) return ATP_PROVED;
+  if (ft_eq(fl, fr)) return ATP_PROVED;
 #ifdef THVM_ATP_AC
-  // AC-equality join: when an AC mask is registered, two normal
-  // forms that are syntactically distinct but AC-equal still close
-  // the goal.  Sound iff every masked label's commutativity +
-  // associativity is reachable via the rewrite system (the AC mask
-  // is a declaration; the engine treats it as such).
   if (thvm_atp_get_ac_mask() != 0ull) {
     AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
-    if (atp_ac_eq(l, r, &ac)) return ATP_PROVED;
+    if (ft_ac_eq(fl, fr, &ac)) return ATP_PROVED;
   }
 #endif
+  if (kbo_eq(l, r)) return ATP_PROVED;
 #ifdef ATP_MNF
   // Milestone 10: the MNF bidirectional search AUGMENTS the single-NF
   // check -- it does not replace it.  goal_lhs seeds a GREEN front,
