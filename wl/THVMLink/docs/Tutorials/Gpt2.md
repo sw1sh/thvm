@@ -104,22 +104,23 @@ Lifting the twelve-block net is a constant ~20 s regardless of sequence length -
 
 ## Generating text
 
-Generation is then: materialize the fixed forward ONCE, capture its kernel dispatch with [TJit]() over a one-hot input slot, and each step refresh the slot and replay. Greedy [Ordering]() argmax is deterministic - a correctness anchor: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), agreeing with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
+Generation is then: materialize the fixed forward ONCE, capture its kernel dispatch with [TJit]() over a one-hot input slot, and each step overwrite the slot in place with [TSetData]() and replay. Greedy [PositionLargest]() argmax is deterministic - a correctness anchor: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), agreeing with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
 
 ```wl
 #| eval: false
 net    = NetModel["GPT2 Transformer Trained on WebText Data"];
 labels = NetExtract[NetExtract[NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}], "Output"], "Labels"];
 ids    = NetExtract[net, "Input"]["Once upon a time"];   maxSeq = Length[ids] + 12;
-oneHot = id |-> TTensorCreate @ NumericArray[Normal @ SparseArray[Table[{i, id[[i]]} -> 1., {i, Length[id]}], {maxSeq, 50257}], "Real32"];
-slot   = oneHot[ids];   lam = TFromNet[net, maxSeq];
-step   = TJit[Function[{}, TRealize @ TWnf @ TApp[lam, slot]]];   out = step[];
-gen    = Nest[g |-> (g2 = Append[g, Last @ Ordering[Normal @ TTensorData[out][[Length[g]]], -1]]; TSet[slot, oneHot[g2]]; step[]; g2), ids, 12];
+hot    = seq |-> NumericArray[Normal @ SparseArray[Table[{i, seq[[i]]} -> 1., {i, Length[seq]}], {maxSeq, 50257}], "Real32"];
+slot   = TTensorCreate @ hot[ids];   lam = TFromNet[net, maxSeq];
+step   = TJit[TRealize @ TWnf @ lam[slot] &];   out = step[];
+gen    = Nest[g |-> With[{g2 = Append[g, First @ PositionLargest @ Normal[out][[Length[g]]]]},
+            TSetData[slot, hot[g2]]; step[]; g2], ids, 12];
 StringJoin @ labels[[gen]]
 ```
-<!-- => "Once upon a time, the world was a place of great" -->
+<!-- => "Once upon a time, the world was a place of great beauty and great danger" -->
 
-real GPT-2 117M text out of the lifted graph - and FAST: the lift + materialize + capture is paid once (~20 s), then every step is a sub-second [TJit]() replay over the refreshed one-hot (the prior re-lift-every-step loop ran ~40 s *per token*). [`Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) wraps this with temperature / top-K sampling. The fixed-window forward matches the variable-length path's argmax token-for-token on identical input (logits differ by ~1e-4 from the different matmul shapes, the same f32 reduction-order noise as elsewhere), so over a long enough generation a near-tie can flip and the two paths' token streams diverge - both are valid GPT-2 output.
+real GPT-2 117M text out of the lifted graph - and FAST: the lift + materialize + capture is paid once (a few seconds), then every step is a [TJit]() replay that reuses the input buffer in place ([TSetData]() writes the new one-hot's bytes into `slot` with no fresh tensor per step), so each token is well under a millisecond - the prior re-lift-every-step loop ran ~40 s *per token*. [`Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) wraps this with temperature / top-K sampling. The fixed-window forward matches the variable-length path's argmax token-for-token on identical input (logits differ by ~1e-4 from the different matmul shapes, the same f32 reduction-order noise as elsewhere), so over a long enough generation a near-tie can flip and the two paths' token streams diverge - both are valid GPT-2 output.
 
 Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmaxAxis](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.
 
