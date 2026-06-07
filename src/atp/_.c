@@ -1923,9 +1923,76 @@ static void atp_ri_free(AtpRuleIndex *ix) {
 // n_rules).  Rules are inserted in ascending index order -- the leaf
 // list at a node is then index-descending (push-front), which the
 // retrieval's min-tracking does not depend on but keeps deterministic.
+// Incremental discrimination-tree extension: insert only the rules in
+// [ix->n_rules_built, s->n_rules) -- the just-added tail.  Callable only
+// when the existing tree is sound (no rule removed / killed since the
+// last build).  Returns 1 on success, 0 if the index needs a full rebuild
+// (n_rules_built > n_rules, indicating the rule set shrunk, or a special
+// state the caller should treat as dirty).  Engine byte-identical: the
+// inserted leaves carry the same rule indices as a full rebuild would.
+static u8 atp_ri_extend(AtpState *s) {
+  AtpRuleIndex *ix = s->rule_index;
+  if (ix == NULL || ix->root == ATP_DTREE_NIL) return 0;
+  if (ix->n_rules_built > s->n_rules) return 0;  // shrunk -- caller forces full
+  if (ix->n_rules_built == s->n_rules) return 1; // up to date
+  for (u32 i = ix->n_rules_built; i < s->n_rules; i++) {
+    if (s->n_unorient > 0u && !s->r_orient[i]) continue;
+    if (s->r_dead != NULL && s->r_dead[i]) continue;
+    AtpDTreeVarMap vm;
+    atp_dtree_varmap_reset(&vm);
+    u32 node = atp_ri_insert_term(ix, ix->root, s->lhs[i], &vm);
+    if (vm.folded) ix->any_folded = 1u;
+    u32 rec  = atp_ri_rec_new(ix);
+    ix->recs[rec].rule = i;
+    ix->recs[rec].next = ix->nodes[node].rec_head;
+    ix->nodes[node].rec_head = rec;
+  }
+  ix->n_rules_built = s->n_rules;
+
+  AtpRuleIndex *ux = s->unorient_index;
+  if (ux != NULL && ux->root != ATP_DTREE_NIL && ux->n_rules_built <= s->n_rules) {
+    if (s->n_unorient > 0u) {
+      for (u32 i = ux->n_rules_built; i < s->n_rules; i++) {
+        if (s->r_orient[i]) continue;
+        if (s->r_dead != NULL && s->r_dead[i]) continue;
+        if (atp_vars_contained(s->rhs[i], s->lhs[i])) {
+          AtpDTreeVarMap vm; atp_dtree_varmap_reset(&vm);
+          u32 node = atp_ri_insert_term(ux, ux->root, s->lhs[i], &vm);
+          if (vm.folded) ux->any_folded = 1u;
+          u32 rec  = atp_ri_rec_new(ux);
+          ux->recs[rec].rule = i;
+          ux->recs[rec].next = ux->nodes[node].rec_head;
+          ux->nodes[node].rec_head = rec;
+        }
+        if (atp_vars_contained(s->lhs[i], s->rhs[i])) {
+          AtpDTreeVarMap vm; atp_dtree_varmap_reset(&vm);
+          u32 node = atp_ri_insert_term(ux, ux->root, s->rhs[i], &vm);
+          if (vm.folded) ux->any_folded = 1u;
+          u32 rec  = atp_ri_rec_new(ux);
+          ux->recs[rec].rule = i | ATP_RI_DIR_BIT;
+          ux->recs[rec].next = ux->nodes[node].rec_head;
+          ux->nodes[node].rec_head = rec;
+        }
+      }
+    }
+    ux->n_rules_built = s->n_rules;
+  }
+  return 1;
+}
+
 static void atp_ri_rebuild(AtpState *s) {
   AtpRuleIndex *ix = s->rule_index;
   if (ix == NULL) return;
+  // Incremental fast-path: when no rule has been killed / unorient flipped
+  // since the last build (dirty bit clear at caller), and only new rules
+  // were appended, just insert the tail.  Cuts O(R) rebuild to O(rules-
+  // added).  Soundness: the existing tree is unchanged; new leaves carry
+  // the correct rule indices.  Skipped when the rule set shrunk
+  // (n_rules_built > n_rules) -- atp_ri_extend signals via return 0.
+  if (ix->n_rules_built > 0u && ix->n_rules_built < s->n_rules
+      && !s->rule_index_dirty) {
+    if (atp_ri_extend(s)) return;
+  }
   ix->n_nodes = 0;
   ix->n_recs  = 0;
   ix->any_folded = 0;
