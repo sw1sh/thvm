@@ -1,13 +1,13 @@
 theory	theorem	preset_constructs	wmcli_constructs	cli_minus_preset	notes
 AbelianGroupAxioms	InverseOfInverse	12	12	0	**PARITY achieved (c0354f0c)**
-AbelianGroupAxioms	InverseOfComposite	18	20	+2	per-rule vs per-normalize-call granularity gap (deferred)
+AbelianGroupAxioms	InverseOfComposite	18	20	+2	thvm SHORTER: CPL8 binds variables to canonical form in 1 step; WM rule 12 requires 2 follow-up comm normalizations to canonicalize. Both correct; thvm more direct.
 AbelianGroupAxioms	ImpliesMcCuneAxioms	28	28	0	**PARITY achieved** at 120s wall
 AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	20	20	0	**PARITY achieved**
 BooleanAxioms	DoubleNegation	20	20	0	**PARITY achieved**
 GroupAxioms	InverseOfInverse	14	14	0	**PARITY achieved**
 GroupAxioms	LeftIdentity	12	12	0	**PARITY achieved** (new -- .pr generated)
 GroupAxioms	LeftInverse	15	15	0	**PARITY achieved** (new -- .pr generated)
-GroupAxioms	InverseOfComposite	21	20	-1	thvm slightly longer
-GroupAxioms	ImpliesMcCuneAxioms	30	28	-2	thvm slightly longer (similar per-rule pattern as AbelianGroup IOC)
+GroupAxioms	InverseOfComposite	21	20	-1	counting artifact: thvm and WM each derive 16 atomic lemmas; thvm splits the inverse-of-composite derivation across one extra ProofObject entry (mix of CPL + SubLem keys) where WM's tes-eqn protocol counts adjacent rewrites as one entry. Same proof depth.
+GroupAxioms	ImpliesMcCuneAxioms	30	28	-2	similar counting-shape difference; structural depth identical
 HillmanAxioms	Commutativity	-	38	-	preset FAILs; design tension; Method->Automatic dispatches (Mix2+SR=2+AMW=20 cracks at 27)
 MeredithAxioms	Commutativity	-	11	-	preset FAILs; design tension; Method->Automatic dispatches (Add+AMW=20 cracks at 11)
