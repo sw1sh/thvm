@@ -9,5 +9,5 @@ GroupAxioms	LeftIdentity	12	12	0	**PARITY achieved** (new -- .pr generated)
 GroupAxioms	LeftInverse	15	15	0	**PARITY achieved** (new -- .pr generated)
 GroupAxioms	InverseOfComposite	21	20	-1	counting artifact: thvm and WM each derive 16 atomic lemmas; thvm splits the inverse-of-composite derivation across one extra ProofObject entry (mix of CPL + SubLem keys) where WM's tes-eqn protocol counts adjacent rewrites as one entry. Same proof depth.
 GroupAxioms	ImpliesMcCuneAxioms	30	28	-2	similar counting-shape difference; structural depth identical
-HillmanAxioms	Commutativity	-	38	-	preset FAILs; design tension; Method->Automatic dispatches (Mix2+SR=2+AMW=20 cracks at 27)
-MeredithAxioms	Commutativity	-	11	-	preset FAILs; design tension; Method->Automatic dispatches (Add+AMW=20 cracks at 11)
+HillmanAxioms	Commutativity	-	38	-	preset FAILs; Method->Automatic cracks in 0.7s at len 57 (longer than WM CLI's 38 -- different trajectory)
+MeredithAxioms	Commutativity	11	11	0	**PARITY via Automatic** (Waldmeister preset FAILs; Automatic dispatches Add+AMW=20 -> len 11 in 0.5s)
