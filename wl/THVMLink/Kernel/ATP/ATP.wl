@@ -51,7 +51,7 @@ BeginPackage["THVMLink`ATP`", {"THVMLink`", "Wolfram`Parser`"}];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Counterexample\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag; \"Counterexample\" the equational dual of the ProofObject -- a CounterexampleObject disproving the goal, or $Failed when there is no extractable countermodel (the goal is proved, the run timed out, or an AC/commutative-saturated theory needs ordered rewriting the extractor soundly declines).  A fully GROUND problem is decided by congruence closure and the quotient is returned as a finite model in FindFiniteModels structure (co[\"Model\"] = <|op -> Cayley table, const -> element|> over {0, ..., k-1}); a quantified problem is refuted by the saturated completion (co[\"Model\"] = a finite model when the initial term algebra closes within the cap, else the convergent rules; co[\"NormalForms\"] gives the separating normal forms).  Method -> \"SMT\" decides a ground entailment directly by congruence closure (returning a \"Proved\" decision Association, or a CounterexampleObject on refute) and accepts a TPTP File / cnf-fof string for a ground problem.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns a ProofObject with Theorems -> None whose Proof field lists the input axioms (default return \"ProofObject\" per b25ea718; pass an explicit \"Lemmas\" spec for the saturated rule set as Inactive[Equal] pairs, or \"RawTrace\" / \"Statistics\" / etc.).  Bound completion with TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); TimeConstraint (wall-clock seconds, default Infinity = unbounded -- bounds non-terminating recursive-axiom saturations; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED 4-entry schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, TimeConstraint divides FAIRLY across the schedule (each remaining config gets the remaining-budget/remaining-configs share); default 60s per config when TimeConstraint is Infinity.  PortfolioFrontLoad -> n (default 1) widens the slice given to the first n entries: each receives 2x what an unweighted recurrence would assign, with entries past n reverting to fair share.  Useful when the auto-tuned front of an Automatic schedule deserves more time than 1/(total entries).  Additional presets: Method -> \"VampireUEQ\" is the flagship Vampire UEQ entry (LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce, with the MNF front on by default); Method -> \"Twee\" bundles Twee 2.x defaults (CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20); Method -> \"EProver\" bundles E's typical CASC config (CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP); Method -> \"VampirePortfolio\" expands into the 13-entry $VampirePortfolio rotation; Method -> \"VampirePortfolioCompact\" is a 3-entry rotation (VampireUEQ + Twee + Mix2-AutoPrec) sized for small TimeConstraints.  $AtpMethodPresets enumerates the named presets the dispatcher recognizes; TAtpSchedule[Method] returns the schedule a Method would expand to; TAtpDescribeMethod[Method] returns the expanded options Association of a preset.";
+TFindProof::usage = "TFindProof[conjecture, axioms] runs thvm's C ATP completion engine and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  Primary use is equational logic (the engine's unfailing Knuth-Bendix completion + reconstruction path); the name is broadened beyond the original TFindEquationalProof so future first-order / Horn / propositional engines can plug in behind the same surface.  TFindProof[\"Theorem\", \"Theory\"] resolves the theorem and theory names through AxiomaticTheory; a theorem stated as a multi-equation conjunction (an n-element list, e.g. BooleanAxioms `DeMorgan`) returns a List of n ProofObjects, one per conjunct.  TFindProof[conjecture, \"Theory\"] proves a given conjecture (an equation, a list of equations, or an Association whose Values are taken -- e.g. the whole AxiomaticTheory[\"Theory\", \"NotableTheorems\"] table) against the axioms of the named theory.  The C engine saturates the axioms; the resulting equational rewrite chain is decoded into a verifier-shaped ProofObject.  Returns $Failed when the conjecture is not proved.  An optional LAST positional argument selects the return type: a String, a list of Strings, or All, drawn from {\"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Counterexample\"}.  A single String returns that one value bare; a list returns an Association keyed by the requested names; All returns an Association of every spec.  The default (\"ProofObject\") returns the bare ProofObject, so existing calls are unchanged.  \"Lemmas\" gives the completed rule set as Inactive[Equal] equations; \"PreprocessedAxioms\" the normalized axioms fed to the engine; \"RelevantAxioms\" the TRelevantAxioms <|\"Mode\",\"Kept\",\"Dropped\"|> partition; \"RawTrace\" the decoded completion trace; \"Statistics\" a small run-stats Association; \"Status\" a \"Proved\"/\"Saturated\"/\"TimedOut\"/\"Failed\" tag; \"Counterexample\" the equational dual of the ProofObject -- a CounterexampleObject disproving the goal, or $Failed when there is no extractable countermodel (the goal is proved, the run timed out, or an AC/commutative-saturated theory needs ordered rewriting the extractor soundly declines).  A fully GROUND problem is decided by congruence closure and the quotient is returned as a finite model in FindFiniteModels structure (co[\"Model\"] = <|op -> Cayley table, const -> element|> over {0, ..., k-1}); a quantified problem is refuted by the saturated completion (co[\"Model\"] = a finite model when the initial term algebra closes within the cap, else the convergent rules; co[\"NormalForms\"] gives the separating normal forms).  Method -> \"SMT\" decides a ground entailment directly by congruence closure (returning a \"Proved\" decision Association, or a CounterexampleObject on refute) and accepts a TPTP File / cnf-fof string for a ground problem.  SINGLE-ARGUMENT COMPLETION: TFindProof[axioms] (a list of axiom equations) or TFindProof[\"Theory\"] (a named theory) runs a time-constrained completion with NO goal -- it saturates the axioms and returns a ProofObject with Theorems -> None whose Proof field lists the input axioms (default return \"ProofObject\" per b25ea718; pass an explicit \"Lemmas\" spec for the saturated rule set as Inactive[Equal] pairs, or \"RawTrace\" / \"Statistics\" / etc.).  Bound completion with TimeConstraint, since a non-terminating axiom set never saturates.  Options: MaxSteps (CP-processing cap, default 200000); TimeConstraint (wall-clock seconds, default Infinity = unbounded -- bounds non-terminating recursive-axiom saturations; TimeConstrained[...] and Abort[] also interrupt the running C engine); Method (Automatic | \"Portfolio\" -- Waldmeister-style strategy schedules that try a list of configs in turn, returning the first that proves+verifies.  \"Portfolio\" is the FIXED 4-entry schedule (Mix2 weight, then LPO+AutoPrecedence, then GT weight, then GoalDirected).  Automatic is PROBLEM-AWARE: it analyzes the axioms + conjecture, detects the algebraic structure (a port of Waldmeister's PhilMarlow/XFiles structure recognition), and FRONT-LOADS a tailored config for that structure (e.g. Group/AbelianGroup -> GT weight + AutoPrecedence; Ring -> KBO + AutoPrecedence; Combinatory -> Add weight + LPO; AC -> GT weight; Sheffer/Nand -> GoalDirected MNF front), then APPENDS the full fixed \"Portfolio\" as a fallback tail -- so Automatic only REORDERS and can never prove less than \"Portfolio\".  Or a single explicit config {\"Completion\" (or \"GoalDirected\"), \"CriticalPairWeight\"->\"Add\"|\"Max\"|\"Ord\"|\"Gt\"|\"Mix\"|\"Mix2\"|\"Unif\"|\"Goal\"(CPinGoal goal-directed), \"Ordering\"->\"KBO\"|\"LPO\", \"AutoPrecedence\"->True|False, \"AxiomRelevance\"->None|\"Safe\"|\"Connected\"|\"SInE\"|{\"SInE\",\"SineTolerance\"->st,\"SineDepth\"->sd,\"SineGenerality\"->sgt} (the latter ports Vampire's SInE -- Hoder-Voronkov D-relation + bounded BFS, defaults 3/2/8), \"MaxWeight\"->n (drop CPs over n symbols; 0=unbounded), \"GoalInterleave\"->n (every n-th selection is goal-directed), \"GroundJoin\"->True (delete ground-joinable CPs -- a sound Martin-Nipkow/Twee redundancy criterion), \"Connectedness\"->True (delete a critical pair whose two sides join through terms strictly below the peak -- the sound Bachmair-Dershowitz connectedness criterion, Twee section 6.2), \"SelectionRatio\"->n (Waldmeister CPdimension fairness: 1 FIFO pick per n selections, default 11), \"AutoMaxWeight\"->b (growing CP-weight bound b + 2*deepest-rule-weight: defers over-weight CPs to a stash and force-drains them when the active queue empties; keeps the CP queue small without losing completeness, default 0 = off), \"RHSInterreduce\"->True (Waldmeister IR_InterreduktionRechts: normalize the RHS of every rule against each new rule, keeping R reduced), \"UnfailingCP\"->True (superpose BOTH faces of an unorientable equation -- unfailing completion's completeness requirement; the default overlaps the stored lhs only), \"CPSetInterreduce\"->True (Waldmeister KPV_KPMengeInterreduzieren: periodically re-normalize the whole CP queue against the rule set, deleting CPs that became joinable and reweighting the rest, so the heap-min selection tracks live, irreducible CPs), \"Precedence\"->{sym1,sym2,...} (an explicit reduction-ordering precedence, symbol names highest-to-lowest, mirroring Waldmeister's `p > q > nand` ORDERING block; resolved against the engine's symbol labels and applied to both LPO and KBO), \"SkolemHighest\"->True (rank the goal's ground/skolemized constants above every operator -- the structural rule Waldmeister's `p > q > nand` precedence encodes; takes effect only when supplied, leaving the default precedence byte-identical otherwise), \"FifoTiebreak\"->True (Waldmeister `-:w1=fifo` secondary CP key: preserve each surviving critical pair's insertion age across the post-orient CP-normalize sweep, so equal-weight ties resolve oldest-first run-wide; off by default, engine byte-identical), \"RecordNorm\"->True|False (per-step normalize-trace recording for the ProofObject builder; default True is the historical path -- WL walks CP -> NORM_STEP* -> ORIENT linearly; False routes search through the fast indexed/flatterm normalize so a long completion saturates at the C-bench rate, and WL then reconstructs the chain through the emitNorm BFS over the CP/ORIENT/SIMPLIFY trace DAG)}.  Method->\"Waldmeister\" is a preset for Waldmeister's faithful DEFAULT strategy on an unrecognized (single-operator Sheffer/Wolfram nand) problem: Mix weight + KBO + AutoPrecedence + SelectionRatio 51 (itl(mi)) + RHSInterreduce + UnfailingCP + CPSetInterreduce.  Method exposes the saturator's CP-selection heuristic, reduction ordering, Waldmeister structure-driven precedence, the axiom-relevance filter (inspect with TRelevantAxioms), critical-pair redundancy, interreduction, and queue fairness.  Under a portfolio, TimeConstraint divides FAIRLY across the schedule (each remaining config gets the remaining-budget/remaining-configs share); default 60s per config when TimeConstraint is Infinity.  PortfolioFrontLoad -> n (default 1) widens the slice given to the first n entries: each receives 2x what an unweighted recurrence would assign, with entries past n reverting to fair share.  Useful when the auto-tuned front of an Automatic schedule deserves more time than 1/(total entries).  Additional presets: Method -> \"VampireUEQ\" is the flagship Vampire UEQ entry (LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce, with the MNF front on by default); Method -> \"Twee\" bundles Twee 2.x defaults (CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20); Method -> \"EProver\" bundles E's typical CASC config (CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP); Method -> \"VampirePortfolio\" expands into the 13-entry $VampirePortfolio rotation; Method -> \"VampirePortfolioCompact\" is a 3-entry rotation (VampireUEQ + Twee + Mix2-AutoPrec) sized for small TimeConstraints.  $AtpMethodPresets enumerates the named presets the dispatcher recognizes; TAtpSchedule[Method] returns the schedule a Method would expand to; TAtpDescribeMethod[Method] returns the expanded options Association of a preset.  Method -> \"ENIGMA\" runs ML-guided critical-pair selection -- the trained proof-relevance scorer (CriticalPairWeight -> \"Learned\") on a sound bounded-queue completion base (KBO + AutoPrecedence + UnfailingCP + RHSInterreduce + AutoMaxWeight 20); push a custom model with TAtpSetLearnedScorer (build one from TAtpCpDataset + TAtpTrainScorer), else the baked-in logistic regression is used; completeness holds regardless of the model via the engine's periodic FIFO selection.";
 
 TFindEquationalProof::usage = "TFindEquationalProof is a deprecated alias for TFindProof; every call forwards to TFindProof.  Kept for back-compat with notebooks and downstream code that already use the name.  New code should call TFindProof.";
 
@@ -62,6 +62,12 @@ TRelevantAxioms::usage = "TRelevantAxioms[conjecture, axioms] reports which axio
 TAtpSchedule::usage = "TAtpSchedule[Method] returns the schedule (a list of single-config Methods) that TFindProof[..., Method -> spec] would expand to, without running the C engine.  Useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.  TAtpSchedule[Method, conjecture, axioms] threads the conjecture + axioms through Automatic's structure-recognized auto-tune, so the returned schedule matches what TFindProof[conjecture, axioms, Method -> spec] would dispatch.  TAtpSchedule[Method, \"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.";
 
 TAtpDescribeMethod::usage = "TAtpDescribeMethod[Method] returns an Association describing what a Method spec resolves to.  For a named preset (Waldmeister, VampireUEQ, Twee, EProver), returns the preset's full defaults Association (the suboptions the dispatcher merges with the user's subopts).  For a list spec like {\"Twee\", subopts...}, returns the preset's defaults merged with the user's overrides -- the actual options that will reach the C engine.  For a non-preset config like {\"Completion\", subopts...}, returns Association[subopts].  For Automatic / \"Portfolio\" / \"VampirePortfolio\" / \"VampirePortfolioCompact\", returns <|\"Schedule\" -> ...|> describing the multi-entry rotation rather than a single config.";
+
+TAtpCpDataset::usage = "TAtpCpDataset[conjectures, axioms] proves each conjecture against the shared axioms with per-critical-pair feature recording on, labels the processed critical pairs by trace-DAG reachability from each proof (1 = proof-relevant, 0 = not), and returns the accumulated dataset as <|\"Features\" -> (n x 14 matrix), \"Labels\" -> (n vector of 0/1), \"FeatureNames\" -> {...}, \"NRows\" -> n, \"NPositive\" -> p, \"NProofs\" -> k|>.  TAtpCpDataset[theory] runs all of AxiomaticTheory[theory, \"NotableTheorems\"] against the theory's axioms.  Only PROVED runs contribute rows (an unproved goal has no proof set to label against).  This is the ENIGMA training-data foundation: feed \"Features\" / \"Labels\" to a classifier (e.g. TNetTrain) and push the result back with TAtpSetLearnedScorer.  Options: Method (default {\"Completion\"}), TimeConstraint (per proof, default 30), MaxSteps.  The 14 features are documented in docs/plans/atp_enigma_cp_selector.md.";
+
+TAtpTrainScorer::usage = "TAtpTrainScorer[dataset] trains a critical-pair selection model on a dataset from TAtpCpDataset (or any <|\"Features\" -> matrix, \"Labels\" -> 0/1 vector|>) using thvm's own deep-learning stack (TNetTrain), and returns <|\"Model\" -> model, \"TrainAUC\" -> auc, \"NRows\" -> n, \"NPositive\" -> p, \"Hidden\" -> H|>.  The returned \"Model\" is exactly the Association TAtpSetLearnedScorer consumes (feature standardization folded in via Mean / InvStd computed from the data).  A two-class softmax network is trained (proof-relevant vs not) and its output head collapsed to the single proof-relevance logit the engine ranks by.  Options: \"Hidden\" -> H (hidden width; H = 0 trains a linear / logistic model, H > 0 a one-hidden-layer ReLU MLP, default 16, H <= 64), MaxTrainingRounds (default 300), \"LearningRate\" (default 0.01), \"Method\" (the OPTIMIZER, \"Adam\" default).  TAtpTrainScorer[theory] and TAtpTrainScorer[conjectures, axioms] are convenience forms that prep the dataset via TAtpCpDataset AND train in one call -- TAtpCpDataset's options (Method = the base prover, TimeConstraint, MaxSteps) are forwarded to the proof phase, the rest drive training; the result also reports \"NProofs\".  Pair with TAtpSetLearnedScorer to close the ENIGMA learning loop: prove a corpus -> dataset -> train -> push -> reprove (Method -> \"ENIGMA\" then uses the pushed model).";
+
+TAtpSetLearnedScorer::usage = "TAtpSetLearnedScorer[model] pushes a trained critical-pair selection model into the C ATP engine; subsequent proofs run with Method -> {..., \"CriticalPairWeight\" -> \"Learned\"} use it instead of the baked-in logistic regression.  model is an Association: <|\"Kind\" -> \"Linear\", \"Mean\" -> {14 reals}, \"InvStd\" -> {14 reals}, \"W\" -> {14 reals}, \"B\" -> real|> for a linear model, or <|\"Kind\" -> \"MLP\", \"Mean\" -> ..., \"InvStd\" -> ..., \"W1\" -> H x 14 matrix, \"B1\" -> {H reals}, \"W2\" -> {H reals}, \"B2\" -> real|> for a one-hidden-layer ReLU network (H <= 64).  Features are standardized as (feature - Mean)*InvStd before the forward pass (pass Mean -> 0, InvStd -> 1 to disable); the model outputs a raw logit (higher = more proof-relevant = selected sooner).  Mean / InvStd default to identity if omitted.  TAtpSetLearnedScorer[Clear] (or None) drops the model and reverts to the baked-in scorer.  Returns True on success, False on a malformed model.  The 14 features are documented in docs/plans/atp_enigma_cp_selector.md (size_sum, max_depth, n_distinct_vars, n_var_occ, weight_add, weight_gt, weight_mix2, goal_weight, age, top_symbol_l, top_symbol_r, shares_goal_sub, orientable, unif_measure).";
 
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
@@ -180,6 +186,225 @@ $atpRunFileFn := $atpRunFileFn = load[
     {"UTF8String", Integer},
     "NumericArray"
 ]
+
+(* ENIGMA Tier 1: push a trained CP-selection model into the engine.
+   Takes a flat Real parameter vector (kind, hidden, mean[14],
+   inv_std[14], then LINEAR or MLP weights -- see TAtpSetLearnedScorer);
+   an EMPTY list clears the model and reverts to the baked-in logistic
+   regression.  Returns 1 on success, 0 on a malformed blob. *)
+$atpSetLearnedScorerFn := $atpSetLearnedScorerFn = load[
+    "thvm_wl_atp_set_learned_scorer",
+    {{Real, 1}},
+    Integer
+]
+
+(* Flatten a model Association into the C parameter blob
+   (thvm_atp_set_learned_scorer layout): {kind, hidden, mean[14],
+   inv_std[14], <weights>}.  Clear / None / {} -> {} (clears the
+   model).  $AtpFeatureDim mirrors the C ATP_CP_FEATURE_DIM. *)
+$AtpFeatureDim = 14;
+
+serializeLearnedModel[Clear | None | {}] := {}
+serializeLearnedModel[m_Association] := Block[{
+    kind = Lookup[m, "Kind", "Linear"],
+    mean = N[Lookup[m, "Mean", ConstantArray[0., $AtpFeatureDim]]],
+    invStd = N[Lookup[m, "InvStd", ConstantArray[1., $AtpFeatureDim]]],
+    w1, h
+},
+    If[ MemberQ[{"Linear", "Logistic"}, kind],
+        Join[{1., 0.}, mean, invStd, N[m["W"]], {N[m["B"]]}],
+        (* MLP: W1 is an H x 14 matrix, flattened row-major (one row per
+           hidden unit, matching the C forward's per-unit weight row). *)
+        w1 = N[m["W1"]];
+        h = Length[w1];
+        Join[{2., N[h]}, mean, invStd,
+             Flatten[w1], N[m["B1"]], N[m["W2"]], {N[m["B2"]]}]
+    ]
+]
+
+TAtpSetLearnedScorer[model_] := $atpSetLearnedScorerFn[
+    N[serializeLearnedModel[model]]] === 1
+
+(* ENIGMA Tier 1a: generate a labelled critical-pair dataset by proving
+   a corpus with feature recording on.  The C bridge records + labels +
+   appends a TSV when THVM_ATP_CP_DATASET names a file (one row per
+   PROCESSED CP on each PROVED run); we set it to a fresh temp file,
+   prove, then read it back.  Robust to the bridge's once-per-session
+   header line: Import "TSV" parses numeric rows and we drop any header
+   row (non-numeric first field). *)
+$AtpFeatureNames = {"size_sum", "max_depth", "n_distinct_vars",
+    "n_var_occ", "weight_add", "weight_gt", "weight_mix2", "goal_weight",
+    "age", "top_symbol_l", "top_symbol_r", "shares_goal_sub",
+    "orientable", "unif_measure"};
+
+Options[TAtpCpDataset] = {Method -> {"Completion"}, TimeConstraint -> 30,
+    MaxSteps -> Automatic};
+
+(* Run `proveFn[]` for its dataset side-effect with the recorder pointed
+   at a fresh temp file, then parse the accumulated TSV into the result
+   Association.  `proveFn` returns the proof statuses (used only for the
+   proof count). *)
+atpDatasetCollect[proveFn_, nProofs_] := Module[{
+    path = FileNameJoin[{$TemporaryDirectory,
+        "thvm_enigma_cp_" <> ToString[$ProcessID] <> "_"
+            <> ToString[RandomInteger[10^9]] <> ".tsv"}],
+    raw, dataRows, labels
+},
+    Quiet @ DeleteFile[path];
+    SetEnvironment["THVM_ATP_CP_DATASET" -> path];
+    proveFn[];
+    SetEnvironment["THVM_ATP_CP_DATASET" -> None];
+    raw = If[ FileExistsQ[path], Import[path, "TSV"], {}];
+    Quiet @ DeleteFile[path];
+    dataRows = Select[raw,
+        ListQ[#] && Length[#] === 15 && NumberQ[First[#]] &];
+    If[ dataRows === {},
+        Return[<|"Features" -> {}, "Labels" -> {},
+            "FeatureNames" -> $AtpFeatureNames, "NRows" -> 0,
+            "NPositive" -> 0, "NProofs" -> nProofs|>]];
+    labels = Round[dataRows[[All, 1]]];
+    <|
+        "Features" -> dataRows[[All, 2 ;; 15]],
+        "Labels" -> labels,
+        "FeatureNames" -> $AtpFeatureNames,
+        "NRows" -> Length[dataRows],
+        "NPositive" -> Total[labels],
+        "NProofs" -> nProofs
+    |>
+]
+
+TAtpCpDataset[theory_String, opts : OptionsPattern[]] := Module[{
+    thms = AxiomaticTheory[theory, "NotableTheorems"],
+    m = OptionValue[TAtpCpDataset, {opts}, Method],
+    tc = OptionValue[TAtpCpDataset, {opts}, TimeConstraint]
+},
+    atpDatasetCollect[
+        Function[TFindProof[thms, theory, "Status",
+            Method -> m, TimeConstraint -> tc]],
+        Length[thms]]
+]
+
+TAtpCpDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] := Module[{
+    m = OptionValue[TAtpCpDataset, {opts}, Method],
+    tc = OptionValue[TAtpCpDataset, {opts}, TimeConstraint]
+},
+    atpDatasetCollect[
+        Function[Scan[
+            TFindProof[#, axioms, "Status", Method -> m, TimeConstraint -> tc] &,
+            conjectures]],
+        Length[conjectures]]
+]
+
+(* ENIGMA Tier 1c: train a scorer on a dataset via thvm's TNetTrain. *)
+
+(* The single proof-relevance logit a model assigns a STANDARDIZED
+   feature row z (length 14).  Mirrors the C atp_learned_forward so the
+   WL-side AUC matches what the engine ranks by. *)
+atpScorerLogit[model_Association, z_List] := If[
+    MemberQ[{"Linear", "Logistic"}, Lookup[model, "Kind", "Linear"]],
+    model["B"] + model["W"] . z,
+    model["B2"] + model["W2"] . (Ramp /@ (model["B1"] + model["W1"] . z))
+]
+
+(* Mann-Whitney AUC: P(score of a positive > score of a negative). *)
+atpScorerAuc[scores_List, labels_List] := Module[{nP, nN, ranks},
+    nP = Total[labels];
+    nN = Length[labels] - nP;
+    If[ nP == 0 || nN == 0, Return[Missing["DegenerateLabels"]]];
+    ranks = Ordering[Ordering[scores]];
+    N[(Total[Pick[ranks, labels, 1]] - nP (nP + 1)/2) / (nP nN)]
+]
+
+Options[TAtpTrainScorer] = {"Hidden" -> 16, MaxTrainingRounds -> 300,
+    "LearningRate" -> 0.01, "Method" -> "Adam"};
+
+TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
+    x = N[dataset["Features"]], y = dataset["Labels"], mean, sd, invStd,
+    z, h = OptionValue["Hidden"], net, yOneHot, trained, pv,
+    w1, b1, w2, b2, wMat, bVec, model, scores
+},
+    If[ Length[x] === 0, Return[$Failed]];
+    mean   = Mean[x];
+    sd     = StandardDeviation[x];
+    invStd = MapThread[If[ # > 0., 1./#, 1.] &, {sd}] // Quiet;
+    z      = (# - mean) * invStd & /@ x;
+    yOneHot = (If[ # == 1, {0., 1.}, {1., 0.}] &) /@ y;
+    net = If[ h > 0,
+        NetChain[{LinearLayer[h], Ramp, LinearLayer[2], SoftmaxLayer[]},
+            "Input" -> 14],
+        NetChain[{LinearLayer[2], SoftmaxLayer[]}, "Input" -> 14]];
+    net = NetInitialize[net];
+    trained = TNetTrain[net, z, yOneHot,
+        MaxTrainingRounds -> OptionValue[MaxTrainingRounds],
+        "LearningRate" -> OptionValue["LearningRate"],
+        "Method" -> OptionValue["Method"]];
+    If[ trained === $Failed, Return[$Failed]];
+    (* Read trained parameters back, identifying each by shape.  thvm may
+       store a LinearLayer's weight transposed relative to WL's
+       {output, input}; orientW forces columns = inDim (so W . z works
+       with z a length-inDim row). *)
+    pv = Normal /@ trained["Params"];
+    With[{
+        mats = Select[pv, MatrixQ],
+        vecs = Select[pv, VectorQ],
+        orientW = Function[{w, inDim},
+            If[ Last[Dimensions[w]] === inDim, w, Transpose[w]]]
+    },
+        If[ h > 0,
+            w1 = orientW[SelectFirst[mats, MemberQ[Dimensions[#], 14] &], 14];
+            w2 = orientW[SelectFirst[mats, FreeQ[Dimensions[#], 14] &], h];
+            b1 = SelectFirst[vecs, Length[#] === h &];
+            b2 = SelectFirst[vecs, Length[#] === 2 &];
+            (* Collapse the 2-class head to a single proof-relevance logit:
+               score = z1 - z0 (the log-odds). *)
+            model = <|"Kind" -> "MLP", "Mean" -> mean, "InvStd" -> invStd,
+                "W1" -> w1, "B1" -> b1,
+                "W2" -> (w2[[2]] - w2[[1]]), "B2" -> (b2[[2]] - b2[[1]])|>,
+            wMat = orientW[First[mats], 14];
+            bVec = SelectFirst[vecs, Length[#] === 2 &];
+            model = <|"Kind" -> "Linear", "Mean" -> mean, "InvStd" -> invStd,
+                "W" -> (wMat[[2]] - wMat[[1]]), "B" -> (bVec[[2]] - bVec[[1]])|>
+        ]
+    ];
+    scores = atpScorerLogit[model, #] & /@ z;
+    <|
+        "Model" -> model,
+        "TrainAUC" -> atpScorerAuc[scores, y],
+        "NRows" -> Length[x],
+        "NPositive" -> Total[y],
+        "Hidden" -> h
+    |>
+]
+
+(* Corpus overloads: prep the dataset (TAtpCpDataset) AND train in one
+   call, so `TAtpTrainScorer["GroupTheory"]` or
+   `TAtpTrainScorer[conjectures, axioms]` returns a ready model.  Dataset
+   options (Method = the base prover, TimeConstraint, MaxSteps) and
+   training options ("Hidden", MaxTrainingRounds, "LearningRate",
+   "Method" = the optimizer -- a STRING key, distinct from the Method
+   symbol) are routed to the right callee by FilterRules.  The result
+   carries the dataset stats back too (NProofs).  Push the model with
+   TAtpSetLearnedScorer to activate Method -> "ENIGMA". *)
+TAtpTrainScorer[theory_String, opts : OptionsPattern[]] :=
+    atpTrainOnCorpus[
+        TAtpCpDataset[theory,
+            Sequence @@ FilterRules[{opts}, Options[TAtpCpDataset]]],
+        {opts}]
+
+TAtpTrainScorer[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
+    atpTrainOnCorpus[
+        TAtpCpDataset[conjectures, axioms,
+            Sequence @@ FilterRules[{opts}, Options[TAtpCpDataset]]],
+        {opts}]
+
+atpTrainOnCorpus[ds_Association, opts_List] := If[
+    ds["NRows"] === 0,
+    $Failed,
+    Join[
+        TAtpTrainScorer[ds,
+            Sequence @@ FilterRules[opts, Options[TAtpTrainScorer]]],
+        <|"NProofs" -> ds["NProofs"]|>]]
+atpTrainOnCorpus[_, _] := $Failed
 
 (* CTR-builder for the expression encoder: takes a label + a
    NumericArray of child Term values, returns the packed Term value
@@ -2134,6 +2359,50 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            goal chain.  The verifier replays entries in order and
            needs every Construct / Input already defined, so this
            dependency order must NOT be re-sorted. *)
+        (* WM-CLI parity: if the last chain entry is a Conclusion whose
+           Statement is a trivial `lhs == lhs` (i.e. the last rewrite
+           landed on an identity), WM emits TWO entries -- the normalize
+           step as a SubstitutionLemma, then a trivial Conclusion -- where
+           thvm currently emits ONE Conclusion with Source -> "cpl".  Split
+           to match the CLI sequence (parity_wm_wmcli +1 trajectory gap on
+           every AbelianGroup/Group/Boolean case). *)
+        If[ Length[chainEntries] > 0 &&
+            chainEntries[[-1, 1, 1]] === $ConclusionSym &&
+            Extract[chainEntries[[-1, 2, "Statement"]], {1, 1}, HoldForm] ===
+                Extract[chainEntries[[-1, 2, "Statement"]], {1, 2}, HoldForm],
+            Module[{lastEntry = chainEntries[[-1]], lastProof, lastStmt,
+                    lhsHF, newSlKey, newSubLem, newConclusion},
+                lastStmt = lastEntry[[2, "Statement"]];
+                lastProof = lastEntry[[2, "Proof"]];
+                lhsHF = Extract[lastStmt, {1, 1}, HoldForm];
+                slN += 1;
+                newSlKey = {$SubstitutionLemmaSym, slN};
+                newSubLem = newSlKey -> <|
+                    "Statement" -> lastStmt,
+                    "Proof" -> Append[lastProof, "Source" -> "norm"]
+                |>;
+                newConclusion = {$ConclusionSym, 1} -> <|
+                    "Statement" -> lastStmt,
+                    "Proof" -> <|
+                        "Input" -> newSlKey,
+                        "Construct" -> newSlKey,
+                        "Position" -> {},
+                        "Rule" -> ReleaseHold[Hold[Rule][lhsHF, lhsHF]],
+                        "Orientation" -> 1,
+                        "ConstructSide" -> 1,
+                        "InputOrientation" -> 1,
+                        "Side" -> 1,
+                        "OutputExpression" -> lastStmt,
+                        "Source" -> "trivial"
+                    |>
+                |>;
+                chainEntries = Join[
+                    Most[chainEntries],
+                    {newSubLem, newConclusion}
+                ];
+            ]
+        ];
+
         allEntries = Join[
             axiomEntries,
             {hypKey -> <|
@@ -2539,7 +2808,21 @@ $AtpPresetDefaults = <|
         "GroundJoin" -> True, "BackwardDemod" -> True,
         "RHSInterreduce" -> True,
         "RandomRatio" -> 32, "RandomSeed" -> 3681690318,
-        "LRS" -> True|>
+        "LRS" -> True|>,
+    (* "ENIGMA": ML-guided critical-pair selection.  CriticalPairWeight
+       -> "Learned" ranks CPs by the trained proof-relevance scorer
+       (the baked-in logistic regression, or a model pushed via
+       TAtpSetLearnedScorer) instead of a hand-tuned weight; the rest is
+       a sound bounded-queue completion base (KBO + AutoPrecedence +
+       UnfailingCP + RHSInterreduce + AutoMaxWeight 20) so the learned
+       ranking operates on a tractable, reduced queue.  Completeness is
+       preserved by the engine's periodic FIFO selection regardless of
+       the learned score, so a cold/over-fit model only slows a proof,
+       never loses one.  See docs/plans/atp_ml_roadmap.md. *)
+    "ENIGMA" -> <|
+        "CriticalPairWeight" -> "Learned", "Ordering" -> "KBO",
+        "AutoPrecedence" -> True, "UnfailingCP" -> True,
+        "RHSInterreduce" -> True, "AutoMaxWeight" -> 20|>
 |>;
 
 (* Per-preset default for the GoalDirected (MNF front) toggle.  Mostly
@@ -2551,7 +2834,8 @@ $AtpPresetGoalDirected = <|
     "VampireUEQDefault" -> False,  (* matches Vampire's UEQ portfolio default slot which doesn't enable goal-MNF *)
     "Twee"        -> False,
     "EProver"     -> False,
-    "VampireRandom" -> True
+    "VampireRandom" -> True,
+    "ENIGMA"      -> False
 |>;
 
 (* Shared suboption decoder for the completion-family methods.  Returns
@@ -2783,13 +3067,26 @@ atpParseMethod[{"VampireRandom", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["VampireRandom"],
         $AtpPresetGoalDirected["VampireRandom"], {subopts}];
 
+(* Method -> "ENIGMA": ML-guided critical-pair selection (the learned
+   scorer of docs/plans/atp_ml_roadmap.md) as a first-class preset, so
+   `TFindProof[conj, ax, Method -> "ENIGMA"]` runs the trained model
+   instead of requiring the explicit {"Completion", "CriticalPairWeight"
+   -> "Learned"} spec.  Push a custom model with TAtpSetLearnedScorer
+   first; with none pushed it uses the baked-in logistic regression.
+   Subopts override any default (e.g. Method -> {"ENIGMA", "Ordering" ->
+   "LPO"}). *)
+atpParseMethod["ENIGMA"] := atpParseMethod[{"ENIGMA"}];
+atpParseMethod[{"ENIGMA", subopts___Rule}] :=
+    atpDispatchPreset[$AtpPresetDefaults["ENIGMA"],
+        $AtpPresetGoalDirected["ENIGMA"], {subopts}];
+
 (* Registry of the named Method presets `atpParseMethod` recognizes.
    "Portfolio" / "VampirePortfolio" expand to schedules (a list of
    configs); the rest are single-config presets.  Exposed as
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
 $AtpMethodPresets = {"Waldmeister", "VampireUEQ", "Twee", "EProver",
-    "VampireRandom",
+    "VampireRandom", "ENIGMA",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
     "AllPresets"};
 
