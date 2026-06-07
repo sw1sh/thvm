@@ -103,7 +103,7 @@ Lifting the twelve-block net is a constant ~20 s regardless of sequence length -
 
 ## Generating text
 
-Generation is then: lift the classifier-headed forward ONCE, capture its kernel dispatch with [TJit](), and each step feed the running one-hot through the input slot and replay. `step[onehot]` is the whole per-token kernel: <code>[TSet]()[*slot*, *onehot*]</code> copies the fresh one-hot into the captured input `slot` (a [TAssign]() the runtime fires in place - tinygrad's `Buffer.copyin`), [TJit]() replays the cached twelve-block dispatch over the refreshed slot, and the captured result handle `out` - whose output buffer the replay rewrites - reads back the `{maxSeq, vocab}` logits. The one-hot itself is <code>[TOneHot]()[*ids* - 1, *vocab*]</code> over the (0-indexed) ids, padded to `maxSeq` with an out-of-range label so the tail rows stay zero. Greedy [PositionLargest]() argmax is deterministic - a correctness anchor: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), agreeing with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
+Generation is then: lift the classifier-headed forward ONCE and capture it with <code>[TJit]()[*forward*]</code> as a function of the one-hot input. `step[onehot]` is the whole per-token kernel: the first call captures the cached twelve-block dispatch over that one-hot, and every later call REBINDS the fresh one-hot in place and re-dispatches - the [TJit]() closure's argument *is* the per-call input (tinygrad's `input_replace`: it substitutes the new input's buffer at the captured read sites), and `step` returns the `{maxSeq, vocab}` logits handle whose buffer the replay rewrote. No explicit copy or slot - passing `step[hot[g]]` is the entire feed. The one-hot itself is <code>[TOneHot]()[*ids* - 1, *vocab*]</code> over the (0-indexed) ids, padded to `maxSeq` with an out-of-range label so the tail rows stay zero. Greedy [PositionLargest]() argmax is deterministic - a correctness anchor: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), agreeing with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
 
 ```wl
 #| eval: false
@@ -112,13 +112,12 @@ ids    = NetExtract[lm, "Input"]["Once upon a time"];   maxSeq = Length[ids] + 1
 labels = NetExtract[NetExtract[lm, "Output"], "Labels"];
 lam    = TFromNet[NetDrop[lm, -1], maxSeq];
 hot    = seq |-> TOneHot[PadRight[seq - 1, maxSeq, 50257], 50257];
-slot   = TRealize @ hot[ids];
-step   = Module[{jit, out}, jit = TJit[(out = TRealize @ TWnf @ lam[slot]) &]; in |-> (TSet[slot, in]; jit[]; out)];
+step   = TJit[TRealize @ TWnf @ lam[#] &];
 gen    = Nest[g |-> Append[g, First @ PositionLargest @ Normal[step[hot[g]]][[Length[g]]]], ids, 12];
 StringJoin @ labels[[gen]]
 ```
 <!-- => "Once upon a time, the world was a place of great beauty and great danger" -->
 
-real GPT-2 117M text out of the lifted graph - and FAST: the lift + capture is paid once (~0.9 s), then every step is a [TJit]() replay of the cached forward, ~25 ms per token (no re-lift, just the one-hot copyin + the twelve-block dispatch + the logit readback) against the ~tens of *seconds* per token the re-lift-every-step loop spent rebuilding the graph - a ~1000x per-token speedup. [`Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) wraps this with temperature / top-K sampling. The fixed-window forward matches the variable-length path's argmax token-for-token on identical input (logits differ by ~1e-4 from the different matmul shapes, the same f32 reduction-order noise as elsewhere), so over a long enough generation a near-tie can flip and the two paths' token streams diverge - both are valid GPT-2 output.
+real GPT-2 117M text out of the lifted graph - and FAST: the lift + capture is paid once (~0.9 s), then every step is a [TJit]() replay of the cached forward, ~25 ms per token (no re-lift, just the input rebind + the twelve-block dispatch + the logit readback) against the ~tens of *seconds* per token the re-lift-every-step loop spent rebuilding the graph - a ~1000x per-token speedup. [`Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) wraps this with temperature / top-K sampling. The fixed-window forward matches the variable-length path's argmax token-for-token on identical input (logits differ by ~1e-4 from the different matmul shapes, the same f32 reduction-order noise as elsewhere), so over a long enough generation a near-tie can flip and the two paths' token streams diverge - both are valid GPT-2 output.
 
 Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmaxAxis](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.
