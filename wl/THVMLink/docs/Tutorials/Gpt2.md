@@ -84,44 +84,41 @@ GPT-2's attention sub-network uses a bare-dot scoring net (no key transform), `M
 
 ## The whole net is one graph
 
-There is no hand-assembled forward. <code>[TFromNet]()[*net*, *ids*]</code> traverses the real GPT-2 [NetModel]() - a [NetChain]() of an embedding [NetGraph]() and a twelve-block transformer [NetChain]() - through the same per-layer cases the building blocks above came from. The embedding [NetGraph]() consumes the 1-indexed `ids` (token plus positional, summed), each pre-norm block is a [NetGraph]() of `norm -> attention -> residual add` then `norm -> linear -> GELU -> linear -> residual add`, and the final [NormalizationLayer]() closes the stack. GPT-2's LM head is the *tied* token-embedding projection (not a layer), so [TFromNet]() appends `hidden . tokenEmbedding^T` to produce the `{seq, vocab}` logits [TTerm](). The last row is the next-token distribution.
+There is no hand-assembled forward. <code>[TFromNet]()[*net*, *ids*]</code> traverses the real GPT-2 [NetModel]() - a [NetChain]() of an embedding [NetGraph]() and a twelve-block transformer [NetChain]() - through the same per-layer cases the building blocks above came from. The embedding [NetGraph]() consumes the 1-indexed `ids` (token plus positional, summed), each pre-norm block is a [NetGraph]() of `norm -> attention -> residual add` then `norm -> linear -> GELU -> linear -> residual add`, and the final [NormalizationLayer]() closes the stack. The base model's LM head is the *tied* token-embedding projection (not a layer), so [TFromNet]() appends `hidden . tokenEmbedding^T` to produce the `{seq, vocab}` logits [TTerm](). The last row is the next-token distribution. When the net already carries that head as a real layer - the `"Task" -> "LanguageModeling"` variant's tied `classifier` [LinearLayer]() - [TFromNet]() folds it and skips the manual projection, so either net yields the same logits (bit-for-bit).
 
 ## Loading the model
 
-The GPT-2 weights ship in the Wolfram Neural Net Repository; [NetModel]() loads them as a [NetChain](). The base model outputs the `{seq, 768}` hidden state (its head is the tied embedding), so its encoder turns a prompt into 1-indexed token ids and the token-label list of the `"Task" -> "LanguageModeling"` variant's output decoder turns ids back into text. Both are host-side helpers for this example - nothing is stored in the graph. (Run [NetModel]() once, online, to populate the cache.)
+The GPT-2 weights ship in the Wolfram Neural Net Repository; [NetModel]() loads them as a [NetChain](). The `"Task" -> "LanguageModeling"` variant bundles everything this example needs in one net: its layers are `{embedding, decoder, last, classifier, probabilities}`, its input encoder (the `"Input"` port) turns a prompt into 1-indexed token ids, and its output decoder (the `"Output"` port's `"Labels"`) turns ids back into text. The `classifier` is the tied token-embedding head as a real [LinearLayer](), so dropping the final probabilities layer with <code>[NetDrop]()[*lm*, -1]</code> leaves a net that outputs the `{seq, 50257}` next-token logits directly - no hand-appended head, and one net for the forward, the encoder, and the decoder. (Run [NetModel]() once, online, to populate the cache.)
 
 ```wl
 #| eval: false
-net = NetModel["GPT2 Transformer Trained on WebText Data"];
-encoder = NetExtract[net, "Input"];
-encoder["The quick brown fox"]
+lm = NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}];
+NetExtract[lm, "Input"]["The quick brown fox"]
 ```
 <!-- => {209, 1813, 7331, 21576} -->
 
 ## A reusable fixed-sequence forward
 
-Lifting the twelve-block net is a constant ~20 s regardless of sequence length - it is graph *construction*, not compute - so re-lifting the growing sequence every step (`TFromNet[net, ids]` in a loop) costs tens of seconds per token. The fix is to lift ONCE into a fixed-shape forward and reuse it. <code>[TFromNet]()[*net*, *maxSeq*]</code> does this for a token-LM [NetChain](): it returns a [TLam]() over a `{maxSeq, vocab}` ONE-HOT input, replacing the variable-length id gather with `onehot . tokenEmbedding` so the whole graph - embedding, blocks, tied head - has a fixed shape. Positions `0..maxSeq-1` are constant (no per-step positional gather), and the causal mask plus reading the logits at the current length keep the padded tail positions inert. The one-hot of a prompt feeds it exactly the same rows the gather would, so its logits match the variable-length path to f32 (argmax token-for-token; see the parity note below).
+Lifting the twelve-block net is a constant ~20 s regardless of sequence length - it is graph *construction*, not compute - so re-lifting the growing sequence every step (`TFromNet[net, ids]` in a loop) costs tens of seconds per token. The fix is to lift ONCE into a fixed-shape forward and reuse it. <code>[TFromNet]()[*net*, *maxSeq*]</code> does this for a token-LM [NetChain](): it returns a [TLam]() over a `{maxSeq, vocab}` ONE-HOT input, replacing the variable-length id gather with `onehot . tokenEmbedding` so the whole graph - embedding, blocks, classifier head - has a fixed shape. (On a net carrying a [SequenceLastLayer](), which would collapse to the last *padded* row, the fixed-window lift drops it: the window emits all positions and the per-step read picks the running length.) Positions `0..maxSeq-1` are constant (no per-step positional gather), and the causal mask plus reading the logits at the current length keep the padded tail positions inert. The one-hot of a prompt feeds it exactly the same rows the gather would, so its logits match the variable-length path to f32 (argmax token-for-token; see the parity note below).
 
 ## Generating text
 
-Generation is then: materialize the fixed forward ONCE, capture its kernel dispatch with [TJit]() over a one-hot input slot, and each step overwrite the slot in place with [TSetData]() and replay. Greedy [PositionLargest]() argmax is deterministic - a correctness anchor: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), agreeing with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
+Generation is then: lift the classifier-headed forward ONCE, capture its kernel dispatch with [TJit](), and each step feed the running one-hot through the input slot and replay. `step[onehot]` is the whole per-token kernel: <code>[TSet]()[*slot*, *onehot*]</code> copies the fresh one-hot into the captured input `slot` (a [TAssign]() the runtime fires in place - tinygrad's `Buffer.copyin`), [TJit]() replays the cached twelve-block dispatch over the refreshed slot, and the captured result handle `out` - whose output buffer the replay rewrites - reads back the `{maxSeq, vocab}` logits. The one-hot itself is <code>[TOneHot]()[*ids* - 1, *vocab*]</code> over the (0-indexed) ids, padded to `maxSeq` with an out-of-range label so the tail rows stay zero. Greedy [PositionLargest]() argmax is deterministic - a correctness anchor: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), agreeing with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
 
 ```wl
 #| eval: false
-net    = NetModel["GPT2 Transformer Trained on WebText Data"];
-labels = NetExtract[NetExtract[NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}], "Output"], "Labels"];
-ids    = NetExtract[net, "Input"]["Once upon a time"];   maxSeq = Length[ids] + 12;
-hot    = seq |-> NumericArray[Normal @ SparseArray[Table[{i, seq[[i]]} -> 1., {i, Length[seq]}], {maxSeq, 50257}], "Real32"];
-slot   = TTensorCreate @ hot[ids];   lam = TFromNet[net, maxSeq];
-step   = TJit[TRealize @ TWnf @ lam[slot] &];   out = step[];
-gen    = Nest[g |-> With[{g2 = Append[g, First @ PositionLargest @ Normal[out][[Length[g]]]]},
-            TSetData[slot, hot[g2]]; step[]; g2], ids, 12];
+lm     = NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}];
+ids    = NetExtract[lm, "Input"]["Once upon a time"];   maxSeq = Length[ids] + 12;
+labels = NetExtract[NetExtract[lm, "Output"], "Labels"];
+lam    = TFromNet[NetDrop[lm, -1], maxSeq];
+hot    = seq |-> TOneHot[PadRight[seq - 1, maxSeq, 50257], 50257];
+slot   = TRealize @ hot[ids];
+step   = Module[{jit, out}, jit = TJit[(out = TRealize @ TWnf @ lam[slot]) &]; in |-> (TSet[slot, in]; jit[]; out)];
+gen    = Nest[g |-> Append[g, First @ PositionLargest @ Normal[step[hot[g]]][[Length[g]]]], ids, 12];
 StringJoin @ labels[[gen]]
 ```
 <!-- => "Once upon a time, the world was a place of great beauty and great danger" -->
 
-real GPT-2 117M text out of the lifted graph - and FAST: the lift + materialize + capture is paid once (a few seconds), then every step is a [TJit]() replay that reuses the input buffer in place ([TSetData]() writes the new one-hot's bytes into `slot` with no fresh tensor per step), so each token is well under a millisecond - the prior re-lift-every-step loop ran ~40 s *per token*. [`Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) wraps this with temperature / top-K sampling. The fixed-window forward matches the variable-length path's argmax token-for-token on identical input (logits differ by ~1e-4 from the different matmul shapes, the same f32 reduction-order noise as elsewhere), so over a long enough generation a near-tie can flip and the two paths' token streams diverge - both are valid GPT-2 output.
-
-Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmaxAxis](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.
+real GPT-2 117M text out of the lifted graph - and FAST: the lift + capture is paid once (~0.9 s), then every step is a [TJit]() replay of the cached forward, ~25 ms per token (no re-lift, just the one-hot copyin + the twelve-block dispatch + the logit readback) against the ~tens of *seconds* per token the re-lift-every-step loop spent rebuilding the graph - a ~1000x per-token speedup. [`Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) wraps this with temperature / top-K sampling. The fixed-window forward matches the variable-length path's argmax token-for-token on identical input (logits differ by ~1e-4 from the different matmul shapes, the same f32 reduction-order noise as elsewhere), so over a long enough generation a near-tie can flip and the two paths' token streams diverge - both are valid GPT-2 output.
 
 Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmaxAxis](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.
