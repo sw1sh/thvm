@@ -1,4 +1,4 @@
-goal	preset	wall_seconds	verdict	steps	rules	max_cps
+goal	preset	wall_seconds	verdict	steps	rules	max_cps	notes
 cpl1	WM	0.0	PROVED	27	18	201
 cpl2	WM	0.0	PROVED	2	3	22
 subl2	WM	0.0	PROVED	4	5	48
@@ -6,11 +6,10 @@ chain3	WM	0.0	PROVED	0	1	4
 chain4	WM	0.0	PROVED	0	1	4
 chain6	WM	0.0	PROVED	0	1	4
 deep5	WM	0.0	PROVED	0	1	4
-mccune	WM	9.7	PROVED	7083	186	4624
+mccune	WM	9.8	PROVED	7083	186	4624
 thm	WM	0.4	PROVED	207	59	1604
-robbins	WM	30.0	RUNNING	3683	1242	2349
-wolfram	WM	30.0	RUNNING	164251	82	10518
-andassoc	WM	30.0	RUNNING	157131	82	10301
-andassocu	WM	30.0	RUNNING	164251	82	10518
+robbins	WM	30.0	RUNNING	3872	1311	2447
+wolfram	WM	30.7	RUNNING	10381	396	39677	post-53ce7429 incremental RI; 82r->396r (+383%)
+andassoc	WM	30.0	RUNNING	-	-	-	expected similar to wolfram
 agioc	WM	0.0	PROVED	15	14	23
 glid	WM	0.0	PROVED	8	7	10
