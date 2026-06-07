@@ -1,9 +1,9 @@
 theory	theorem	preset_constructs	wmcli_constructs	cli_minus_preset	notes
-AbelianGroupAxioms	InverseOfInverse	11	12	+1	one extra SL (WM emits normalize step thvm CP-set-interreduce inlines)
-AbelianGroupAxioms	InverseOfComposite	17	20	+3	more demods externalized
-AbelianGroupAxioms	ImpliesMcCuneAxioms	27	28	+1	standard +1 trajectory gap
-AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	19	20	+1	standard +1 trajectory gap
-BooleanAxioms	DoubleNegation	19	20	+1	standard +1 trajectory gap
-GroupAxioms	InverseOfInverse	13	14	+1	standard +1 trajectory gap
-HillmanAxioms	Commutativity	-	38	-	preset timed out @ 8s; CLI succeeds in 12s
-MeredithAxioms	Commutativity	-	11	-	preset timed out @ 8s; CLI succeeds in 12s
+AbelianGroupAxioms	InverseOfInverse	12	12	0	**PARITY achieved (c0354f0c trivial-Conclusion split)**
+AbelianGroupAxioms	InverseOfComposite	18	20	+2	per-rule vs per-normalize-call granularity gap
+AbelianGroupAxioms	ImpliesMcCuneAxioms	28	28	0	**PARITY achieved** at 120s wall
+AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	20	20	0	**PARITY achieved**
+BooleanAxioms	DoubleNegation	20	20	0	**PARITY achieved**
+GroupAxioms	InverseOfInverse	14	14	0	**PARITY achieved**
+HillmanAxioms	Commutativity	-	38	-	preset FAILs under Method->Waldmeister; Automatic still proves
+MeredithAxioms	Commutativity	-	11	-	preset FAILs under Method->Waldmeister; Automatic still proves
