@@ -73,8 +73,8 @@ size-at-`value` reallocates per length and defeats the purpose.
 | interpreter loops the bound value | `uop_walk.c` `kvar_extent_runtime` | wired (M1) |
 | codegen emits a symbolic bound | `render_uop.c` `V_<name>` | wired (emission) |
 | op coverage: elementwise, multi-axis reduce | inherit the RANGE path | wired (interpreter) |
-| compiled kernel receives the bound | cpu-jit / Metal / CUDA dispatch | **M2** |
-| matmul (GEMM) `M = bound` | GEMM dispatch | **M2** (the interpreter path works) |
+| matmul (GEMM) `M = bound` | `blas_try_gemm` `kvar_extent_runtime` | wired (M2) |
+| compiled elementwise/reduce kernel gets the bound | cpu-jit / Metal / CUDA dispatch | **M2** (pending) |
 | WL surface (a symbolic-dim constructor) | — | **M2** |
 | JIT rebinds the dim on replay | `jit` capture/replay | **M3** |
 

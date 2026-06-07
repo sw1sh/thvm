@@ -229,6 +229,7 @@ TESTS := \
   $(BIN)/test_uop_symbolic \
   $(BIN)/test_uop_symbolic_shape \
   $(BIN)/test_sym_m2 \
+  $(BIN)/test_sym_matmul \
   $(BIN)/test_uop_linearize \
   $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \

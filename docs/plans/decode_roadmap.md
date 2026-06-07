@@ -78,9 +78,13 @@ true at this layer -- but unwired end to end.
   `constant uint &V_s` buffer arg on Metal), so the cpu-jit / Metal / CUDA
   launchers just need to PASS `kvar_runtime(id)` for each (today a kvar kernel
   either gets it or cpu-jit declines and it falls to the correct interpreter);
-  (b) **matmul / GEMM** -- a symbolic-`M` matmul is GEMM-dispatched, so the GEMM
-  call must read `M` via `kvar_extent_runtime`, not the static dim.  Target: a
-  mini single-head attention over `{S, S}` JITted, correct at two `S`.
+  (b) **matmul / GEMM -- DONE** (`tests/test_sym_matmul.c`): a symbolic-`M`
+  matmul is GEMM-dispatched, and `blas_try_gemm` now resolves `gemm.M/N/K/ld`
+  via `kvar_extent_runtime` after classify, so `{S,K}.{K,N}` runs on cblas at a
+  bound `S` (correct at S=40 and S=96, GEMM confirmed firing; the output buffer
+  is sized at the kvar upper bound, GEMM writes the first `S` rows).  Remaining:
+  the cpu-jit/Metal/CUDA elementwise/reduce bound-passing (a), and a mini
+  single-head attention over `{S, S}` (its `{S,S}` mask is an M3 hard part).
 - **M3**: the GPT-2 forward symbolic end to end -- no `maxSeq`, JIT-captured once,
   replayed at the running length. The example collapses to
   `step = TJit[... TFromNet[net, ids] ...]` over the raw growing ids (the one-hot

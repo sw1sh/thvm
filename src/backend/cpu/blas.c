@@ -203,6 +203,16 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &gemm)) {
     return 0;
   }
+  // Resolve symbolic (kvar) shape dims to their per-dispatch bound value.
+  // classify returns the output leading dim M kvar-packed for a symbolic-M
+  // matmul ({S, dim} = onehot . tokT, S the seq kvar); the bind is set before
+  // fire, so GEMM runs the actual M (buffers are sized at the kvar upper
+  // bound, GEMM writes the first M rows).  Identity for literal dims.
+  gemm.M   = kvar_extent_runtime(gemm.M);
+  gemm.N   = kvar_extent_runtime(gemm.N);
+  gemm.K   = kvar_extent_runtime(gemm.K);
+  gemm.ldA = kvar_extent_runtime(gemm.ldA);
+  gemm.ldB = kvar_extent_runtime(gemm.ldB);
   if (gemm.N <= 1) return 0;
   // Buffer-size sanity: a_input / b_input are pinned by BUFFER.instance
   // so storage sanity reduces to "buffer ids exist + at least M*K /
