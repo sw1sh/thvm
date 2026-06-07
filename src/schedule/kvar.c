@@ -38,6 +38,13 @@ typedef struct {
 static KVar KVARS[KVAR_CAP];
 static u32  KVARS_NEXT = 1;   // slot 0 reserved
 
+// Per-realize runtime bindings.  A symbolic dim's RANGE extent packs a
+// kvar id (kvar_pack_extent); buffers + the dispatch shape are sized at
+// kvar_hi (worst case) via kvar_extent_static, but the actual loop count
+// at execution is the BOUND value set here before realize.  0 = unbound
+// (falls back to kvar_hi so a never-bound kvar still runs at worst case).
+static u32 KVAR_RUNTIME[KVAR_CAP];
+
 u32 kvar_alloc(const char *name, u32 lo, u32 hi) {
   if (KVARS_NEXT >= KVAR_CAP) {
     fprintf(stderr, "kvar_alloc: registry full (cap=%u)\n", KVAR_CAP);
@@ -78,10 +85,27 @@ u32 kvar_hi(u32 id) {
 
 u32 kvar_count(void) { return KVARS_NEXT - 1; }
 
+// Bind / read a kvar's runtime value (the loop count to run THIS realize).
+void kvar_set_runtime(u32 id, u32 value) {
+  if (id != 0 && id < KVAR_CAP) KVAR_RUNTIME[id] = value;
+}
+u32 kvar_runtime(u32 id) {
+  if (id == 0 || id >= KVAR_CAP) return 0;
+  return KVAR_RUNTIME[id] != 0 ? KVAR_RUNTIME[id] : kvar_hi(id);
+}
+// Resolve a packed extent to its RUNTIME loop count: the bound value for a
+// kvar (kvar_hi if unbound), the literal otherwise.  Distinct from
+// kvar_extent_static (which always returns kvar_hi for sizing).
+u32 kvar_extent_runtime(u32 packed_extent) {
+  if (!kvar_extent_is_var(packed_extent)) return packed_extent;
+  return kvar_runtime(kvar_extent_var_id(packed_extent));
+}
+
 // Reset the registry.  Used by tests that exercise multiple
 // independent kvar scenarios in one process.
 void kvar_reset(void) {
   memset(KVARS, 0, sizeof(KVARS));
+  memset(KVAR_RUNTIME, 0, sizeof(KVAR_RUNTIME));
   KVARS_NEXT = 1;
 }
 

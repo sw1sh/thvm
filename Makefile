@@ -227,6 +227,7 @@ TESTS := \
   $(BIN)/test_uop_expand \
   $(BIN)/test_uop_devectorize \
   $(BIN)/test_uop_symbolic \
+  $(BIN)/test_uop_symbolic_shape \
   $(BIN)/test_uop_linearize \
   $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \

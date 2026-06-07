@@ -799,7 +799,9 @@ static double uwalk_run_reduce(UWalkCtx *c, Term red) {
       for (u32 i = 0; i < n_src_r; i++) {
         u32 ax = term_val(heap_read(term_val(src_ranges[i]) + 0));
         if (ax == caxis) {
-          cext = term_val(heap_read(term_val(src_ranges[i]) + 2));
+          // kvar_extent_runtime: a symbolic reduce axis loops the BOUND
+          // value (kvar_hi if unbound), a literal axis its own extent.
+          cext = kvar_extent_runtime(term_val(heap_read(term_val(src_ranges[i]) + 2)));
           break;
         }
       }
@@ -1001,7 +1003,8 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
   for (u32 i = 0; i < n_out; i++) {
     Term r = out_ranges[i];
     u32 axis_id = term_val(heap_read(term_val(r) + 0));
-    u32 ext     = term_val(heap_read(term_val(r) + 2));
+    // kvar_extent_runtime: a symbolic output axis iterates the BOUND value.
+    u32 ext     = kvar_extent_runtime(term_val(heap_read(term_val(r) + 2)));
     u32 slot = uwalk_push_range_slot(c, axis_id);
     if (slot >= UWALK_MAX_RANGES) {
       // Overflow: pop already-pushed slots and bail.
