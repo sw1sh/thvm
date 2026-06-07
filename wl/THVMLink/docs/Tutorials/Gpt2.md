@@ -99,7 +99,7 @@ NetExtract[lm, "Input"]["The quick brown fox"]
 
 ## A reusable fixed-sequence forward
 
-Lifting the twelve-block net is a constant ~20 s regardless of sequence length - it is graph *construction*, not compute - so re-lifting the growing sequence every step (`TFromNet[net, ids]` in a loop) costs tens of seconds per token. The fix is to lift ONCE into a fixed-shape forward and reuse it. <code>[TFromNet]()[*net*, *maxSeq*]</code> does this for a token-LM [NetChain](): it returns a [TLam]() over a `{maxSeq, vocab}` ONE-HOT input, replacing the variable-length id gather with `onehot . tokenEmbedding` so the whole graph - embedding, blocks, classifier head - has a fixed shape. (On a net carrying a [SequenceLastLayer](), which would collapse to the last *padded* row, the fixed-window lift drops it: the window emits all positions and the per-step read picks the running length.) Positions `0..maxSeq-1` are constant (no per-step positional gather), and the causal mask plus reading the logits at the current length keep the padded tail positions inert. The one-hot of a prompt feeds it exactly the same rows the gather would, so its logits match the variable-length path to f32 (argmax token-for-token; see the parity note below).
+Lifting the twelve-block net is a constant ~20 s regardless of sequence length - it is graph *construction*, not compute - so re-lifting the growing sequence every step (`TFromNet[net, ids]` in a loop) costs tens of seconds per token. The fix is to lift ONCE into a fixed-shape forward and reuse it. <code>[TFromNet]()[*net*, *onehot*]</code> does this for a token-LM [NetChain](): applied to a `{maxSeq, vocab}` ONE-HOT input it replaces the variable-length id gather with `onehot . tokenEmbedding`, so the whole graph - embedding, blocks, classifier head - has a fixed shape determined by the one-hot itself (`maxSeq` is the window you pad to - there is no separate integer argument). Capturing that forward once under [TJit]() makes it reusable across steps. (On a net carrying a [SequenceLastLayer](), which would collapse to the last *padded* row, the fixed-window lift drops it: the window emits all positions and the per-step read picks the running length.) Positions `0..maxSeq-1` are constant (no per-step positional gather), and the causal mask plus reading the logits at the current length keep the padded tail positions inert. The one-hot of a prompt feeds it exactly the same rows the gather would, so its logits match the variable-length path to f32 (argmax token-for-token; see the parity note below).
 
 ## Generating text
 
@@ -110,9 +110,8 @@ Generation is then: lift the classifier-headed forward ONCE and capture it with 
 lm     = NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}];
 ids    = NetExtract[lm, "Input"]["Once upon a time"];   maxSeq = Length[ids] + 12;
 labels = NetExtract[NetExtract[lm, "Output"], "Labels"];
-lam    = TFromNet[NetDrop[lm, -1], maxSeq];
 hot    = seq |-> TOneHot[PadRight[seq - 1, maxSeq, 50257], 50257];
-step   = TJit[TRealize @ TWnf @ lam[#] &];
+step   = TJit[TRealize @ TWnf @ TFromNet[NetDrop[lm, -1], #] &];
 gen    = Nest[g |-> Append[g, First @ PositionLargest @ Normal[step[hot[g]]][[Length[g]]]], ids, 12];
 StringJoin @ labels[[gen]]
 ```

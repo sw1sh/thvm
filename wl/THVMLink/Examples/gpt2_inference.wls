@@ -1,10 +1,11 @@
 #!/usr/bin/env wolframscript
 (* gpt2_inference.wls - real GPT-2 117M text generation on the thvm tensor
    surface, FAST: the whole Wolfram GPT-2 net is lifted ONCE through
-   TFromNet[net, maxSeq] into a fixed-sequence forward (a TLam over a
-   {maxSeq, vocab} one-hot input), materialized + captured ONCE with TJit,
-   and then each generation step is a sub-second TJit replay over a refreshed
-   one-hot -- no per-step re-lift.
+   TFromNet[net, onehot] into a fixed-sequence forward over a {maxSeq, vocab}
+   one-hot input (maxSeq is the one-hot's own shape, no integer window arg),
+   captured ONCE with TJit, and then each generation step is a sub-second TJit
+   replay that rebinds the fresh one-hot in place -- no per-step re-lift, no
+   slot, no TSet.
 
    Why this is the fast path: lifting the 12-block net is a CONSTANT ~20s
    regardless of sequence length (it is graph construction, not compute), and
@@ -76,14 +77,15 @@ oneHot[seq_] := TTensorCreate @ NumericArray[
         Table[{i, seq[[i]]} -> 1., {i, Length[seq]}], {maxSeq, vocab}],
     "Real32"];
 
-(* Lift ONCE: a fixed-sequence forward over a one-hot input slot, captured by
-   TJit on the first call and replayed each subsequent step. *)
+(* Lift ONCE: a fixed-sequence forward over the one-hot input, captured by
+   TJit on the first call and replayed each subsequent step.  maxSeq is the
+   one-hot's own shape (no integer window arg to TFromNet); the TJit closure's
+   argument IS the per-call one-hot, rebound in place on replay -- no slot,
+   no TSet. *)
 print["Lifting + materializing the fixed-", ToString[maxSeq], " forward (once) ..."];
-slot = oneHot[ids];
 t0   = AbsoluteTime[];
-lam  = TFromNet[net, maxSeq];
-step = TJit[Function[{}, TRealize @ TWnf @ TApp[lam, slot]]];
-out  = step[];                                    (* capture: lift+materialize+dispatch *)
+step = TJit[TRealize @ TWnf @ TFromNet[net, #] &];
+out  = step[oneHot[ids]];                         (* capture: lift+materialize+dispatch *)
 print["  lifted + captured ", ToString[TJitOpCount[step]], " kernel dispatches in ",
     ToString[Round[AbsoluteTime[] - t0, 0.1]], "s (one-time)"];
 
@@ -103,8 +105,7 @@ Do[
     With[{tok = sampleTok[logitsAt[Length[gen]], temperature, topK]},
         gen = Append[gen, tok];
         WriteString["stdout", decode[{tok}]]];
-    TSet[slot, oneHot[gen]];
-    step[],                                          (* fast replay *)
+    step[oneHot[gen]],                               (* fast replay, rebinds the one-hot *)
     {nTokens}];
 print[""];
 
@@ -120,10 +121,8 @@ print["(", ToString[nTokens], " tokens in ",
    forward over the same weights (top-5: {19, 118, 63, 83, 50246}). *)
 chkIds  = encoder["The quick brown fox"];
 chkN    = Length[chkIds];
-chkSlot = oneHot[chkIds];
-chkLam  = TFromNet[net, maxSeq];
-chkStep = TJit[Function[{}, TRealize @ TWnf @ TApp[chkLam, chkSlot]]];
-chkOut  = chkStep[];
+chkStep = TJit[TRealize @ TWnf @ TFromNet[net, #] &];
+chkOut  = chkStep[oneHot[chkIds]];
 print[""];
 print["Verification (greedy next-token after 'The quick brown fox' == 19): ",
     ToString[greedy[Normal @ TTensorData[chkOut][[chkN]]] === 19]];

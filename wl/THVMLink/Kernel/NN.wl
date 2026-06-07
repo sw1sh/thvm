@@ -40,7 +40,7 @@
 
 BeginPackage["THVMLink`"];
 
-TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net, ids] for a token-encoder net (a List[Integer] of 1-indexed token ids) traverses the real NetChain / NetGraph and returns the {seq, vocab} logits TTerm -- e.g. GPT-2 inference, with the tied token-embedding LM head appended.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation; the lifted forward runs at that input shape and serves inference there.\n\nTFromNet[net, maxSeq_Integer] for a token-LM NetChain returns a fixed-sequence TLam over a {maxSeq, vocab} one-hot input: the variable-length id gather is replaced by onehot . tokenTable so the WHOLE forward has a fixed shape and is built ONCE -- materialize it (or TJit a single application over an input slot) and generate by refreshing the one-hot each step (positions 0..maxSeq-1 are constant; causal masking keeps the padded tail inert).  TFromNet[net] on a token-LM NetChain uses the default maxSeq.";
+TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net, ids] for a token-encoder net (a List[Integer] of 1-indexed token ids) traverses the real NetChain / NetGraph and returns the {seq, vocab} logits TTerm -- e.g. GPT-2 inference, with the tied token-embedding LM head appended.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation; the lifted forward runs at that input shape and serves inference there.\n\nTFromNet[net, onehot] for a token-LM NetChain, where `onehot` is a {maxSeq, vocab} one-hot TTerm, returns the fixed-sequence forward applied to it: the variable-length id gather is replaced by onehot . tokenTable so the WHOLE forward has a FIXED shape (maxSeq is the one-hot's own sequence length -- there is no integer window knob).  Build it ONCE under TJit -- step = TJit[TRealize @ TWnf @ TFromNet[net, #] &] -- and generate by passing each step's fresh one-hot; TJit replays the cached dispatch and rebinds the one-hot (positions 0..maxSeq-1 are constant; causal masking keeps the padded tail inert).  TFromNet[net] on a token-LM NetChain returns a reusable forward fwd such that fwd[onehot] is that applied forward.";
 TToNet::usage           = "TToNet[lam] does a best-effort reconstruction of a NetChain from the GRAPH of a TFromNet[net]-built LAM `lam` -- no net is stored.  Recognises the standard layer sub-DAG signatures (Linear / Elementwise(ReLU) / Softmax / Flatten), reading each layer's weights straight off the graph leaves; NetChain infers the input dimension from the first Linear layer's weight.  Returns a Failure for a body containing a conv / pool / unrecognised op (their im2col lowering does not round-trip cleanly).";
 TNetParams::usage       = "TNetParams[lam] returns the trainable weight handles (float-leaf TEN TTerms) of a TFromNet[net] LAM, in the C leaf-walk's stable order -- no Sow-provenance, no registry.  The LAM's bound input is a TAG_VAR (a hole), so it is excluded for free, leaving exactly the weights baked into the forward; TGrad auto-differentiates every reachable float leaf and TNetTrain updates them in place.  Parameters come from the network's structure, as in tinygrad's get_parameters: an applied forward TFromNet[net, x] (concrete input) is an evaluation with no distinguished parameters -- lift with TFromNet[net] instead.";
 TNetParamInfo::usage    = "TNetParamInfo[lam] returns the trainable weight handles of a TFromNet[net] LAM paired with best-effort provenance, as a list of <|\"Term\", \"Layer\", \"Param\"|> associations.  Without a stored net the Layer is Missing[\"NotStored\"] and Param is inferred from the handle's shape (rank-2+ -> \"Weights\", rank-1 -> \"Biases\"); TNetParams[lam] is the same handles without provenance.";
@@ -1549,28 +1549,21 @@ netInputShape[net_] := Module[{ports, raw, shape},
    train over a different batch size pass the NetChain to TNetTrain, which
    lifts the batched forward directly. *)
 (* default fixed sequence length for the token-LM lift below. *)
-$tFromNetMaxSeq = 64;
-
-(* Token-LM fixed-sequence lift: a reusable, materialize-once forward.  The
-   variable-length id list is replaced by a fixed {maxSeq, vocab} ONE-HOT
-   input (built host-side per step from the running ids), so the WHOLE graph
-   -- embedding, blocks, tied head -- has a FIXED shape and is built ONCE.
-   The ~23s re-lift that dominates per-step generation (it is constant in seq
-   length -- the 12-block net traversal, not the forward compute) is then paid
-   a single time; each subsequent TApp on a new one-hot is a warm sub-second
-   TWnf+TRealize on the same materialized kernels.  Token embedding =
-   onehot . tokenTable; positional embedding = the first maxSeq rows of the
-   positional table (positions 0..maxSeq-1 are constant, so no per-step
-   gather); tied LM head = hidden . tokenTable^T.  Causal masking in the
-   blocks plus reading the logits at the current length keep the padded tail
-   positions inert.  Returns a TLam over the {maxSeq, vocab} one-hot, so
-   TMaterialize[TFromNet[net]] is a single reusable forward and
-   NestList[... @* TWnf @* TApp[lam, #] &, ...] generates. *)
-TFromNet[net_NetChain, maxSeq_Integer] /; tokenEmbeddingArray[net] =!= None :=
-    Module[{tokTable, posTable, vocab, dim, restLayers, onehot, outDims, needsHead},
+(* Token-LM fixed-sequence forward over a {maxSeq, vocab} ONE-HOT input.
+   The variable-length id gather is replaced by `onehot . tokenTable` so the
+   WHOLE graph -- embedding, blocks, tied head -- has a FIXED shape; lifting
+   it is a constant ~20s (the 12-block traversal, not compute) so it is meant
+   to be built ONCE and reused via TJit (capture once + replay, rebinding the
+   one-hot per step).  Token embedding = onehot . tokenTable; positional =
+   the first maxSeq rows of the positional table (positions 0..maxSeq-1 are
+   constant, no per-step gather); tied LM head = hidden . tokenTable^T.
+   Causal masking in the blocks plus reading the logits at the current length
+   keep the padded tail inert.  `onehot` is any {maxSeq, vocab} TTerm -- a
+   concrete one-hot (the applied forward) or a bound VAR (the TLam form). *)
+tokenLmForward[net_, onehot_, maxSeq_Integer] :=
+    Module[{tokTable, posTable, dim, restLayers, outDims, needsHead, tokT, posT, x, hidden},
         tokTable   = tokenEmbeddingArray[net];
         posTable   = positionEmbeddingArray[net];
-        vocab      = First[Dimensions[tokTable]];
         dim        = Last[Dimensions[tokTable]];
         (* Drop layer 1 (the embedding -- replaced by the one-hot matmul
            below) and any SequenceLastLayer: the fixed window emits ALL
@@ -1585,35 +1578,42 @@ TFromNet[net_NetChain, maxSeq_Integer] /; tokenEmbeddingArray[net] =!= None :=
            whose head is the tied projection, not a layer).  An LM net that
            already carries the classifier -- NetModel[{..,"Task"->
            "LanguageModeling"}] or NetDrop[lm,-1] -- outputs {seq, vocab}
-           logits, so its last output dim is vocab, not dim; folding the
-           classifier produces the logits directly and a manual head would
-           double-project ({seq,vocab} . {dim,vocab}^T is a shape error).
-           Detect host-side from the output port so no shape inference runs
-           inside the held lam body. *)
+           logits, so a manual head would double-project.  Detect host-side
+           from the output port. *)
         outDims    = Cases[Flatten @ {First @ Values @ Quiet @ Information[net, "OutputPorts"]}, _Integer];
         needsHead  = outDims === {} || Last[outDims] === dim;
-        TLamShape[{maxSeq, vocab}, onehot,
-            Module[{tokT, posT, x, hidden},
-                (* Keep the native NumericArrays as CPU host leaves
-                   (TTensorCreateHost wraps the WL buffer zero-copy on CPU
-                   regardless of the active backend) and wrap each in a
-                   UOP_COPY: the device upload is deferred to materialize /
-                   realize time (identity on a CPU realize, host-staged
-                   upload on a non-CPU realize).  No Normal / NumericArray
-                   repack of the {vocab,dim} table.  Mirrors tinygrad's
-                   Ops.COPY (uop/ops.py copy_to_device). *)
-                tokT   = TUOpCopy[TTensorCreateHost[tokTable]];
-                posT   = TUOpCopy[TTensorCreateHost[posTable[[1 ;; maxSeq]]]];
-                x      = onehot . tokT + posT;
-                hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
-                If[ needsHead, hidden . Transpose[tokT], hidden]]]
-]
+        (* Native NumericArrays as CPU host leaves (TTensorCreateHost wraps
+           the WL buffer zero-copy) wrapped in UOP_COPY: the device upload is
+           deferred to realize time (identity on CPU, staged upload on GPU).
+           Mirrors tinygrad Ops.COPY. *)
+        tokT   = TUOpCopy[TTensorCreateHost[tokTable]];
+        posT   = TUOpCopy[TTensorCreateHost[posTable[[1 ;; maxSeq]]]];
+        x      = onehot . tokT + posT;
+        hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
+        If[ needsHead, hidden . Transpose[tokT], hidden]
+    ]
 
-(* TFromNet[net] for a token-LM NetChain: the fixed-sequence lift at the
-   default maxSeq.  A non-NetChain token net (a bare EmbeddingLayer) has no
-   blocks to fold, so it still guides to the 2-arg id graph form. *)
+(* True when `oneHot` is a {seq, vocab} one-hot over net's token vocabulary
+   -- the input shape that selects the fixed-sequence LM forward. *)
+tokenLmOneHotQ[net_, oneHot_TTerm] := With[{emb = tokenEmbeddingArray[net]},
+    emb =!= None && MatchQ[tUopShape[oneHot], {_Integer, First[Dimensions[emb]]}]]
+tokenLmOneHotQ[_, _] := False
+
+(* TFromNet[net, oneHot]: the fixed-sequence forward APPLIED to a {maxSeq,
+   vocab} one-hot.  maxSeq is the one-hot's own sequence length -- no integer
+   knob.  Build it ONCE under TJit (TJit[TRealize@TWnf@TFromNet[net, #] &])
+   and generate by passing each step's fresh one-hot; TJit replays + rebinds
+   it.  Takes precedence over the generic NetChain/x_TTerm fold (its guard is
+   more specific). *)
+TFromNet[net_NetChain, oneHot_TTerm] /; tokenLmOneHotQ[net, oneHot] :=
+    tokenLmForward[net, oneHot, First[tUopShape[oneHot]]]
+
+(* TFromNet[net] for a token-LM NetChain: a reusable forward you apply to a
+   one-hot -- fwd = TFromNet[net]; fwd[onehot] builds at the one-hot's shape.
+   (A non-NetChain token net -- a bare EmbeddingLayer -- has no blocks and
+   still guides to the 2-arg id graph form.) *)
 TFromNet[net_NetChain] /; tokenEmbeddingArray[net] =!= None :=
-    TFromNet[net, $tFromNetMaxSeq]
+    Function[oneHot, TFromNet[net, oneHot]]
 
 TFromNet[net_] /; tokenEmbeddingArray[net] =!= None := (
     Message[TFromNet::tokennet, net]; $Failed
