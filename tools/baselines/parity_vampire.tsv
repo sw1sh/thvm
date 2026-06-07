@@ -1,9 +1,9 @@
 theory	theorem	preset_constructs	vampire_constructs	cli_minus_preset	notes
-AbelianGroupAxioms	InverseOfInverse	11	12	+1	matches WM trajectory pattern
-AbelianGroupAxioms	InverseOfComposite	17	19	+2	preset shortened 19->17 since June (tunings)
-AbelianGroupAxioms	ImpliesMcCuneAxioms	27	33	+6	preset grew 23->27 (was +10, now +6)
-AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	19	18	-1	preset 146->19 -- blowup fixed by tunings
-BooleanAxioms	DoubleNegation	19	27	+8	preset 15->19 (was +12, now +8)
-GroupAxioms	InverseOfInverse	13	18	+5	preset 12->13 (was +6, now +5)
-HillmanAxioms	Commutativity	0	20	+20	**REGRESSION** preset 48->FAIL under Waldmeister method since June; Automatic still proves
-MeredithAxioms	Commutativity	0	10	+10	**REGRESSION** preset 43->FAIL under Waldmeister method; Automatic still proves (len 10)
+AbelianGroupAxioms	InverseOfInverse	12	12	0	**PARITY achieved (c0354f0c trivial-Conclusion split)**
+AbelianGroupAxioms	InverseOfComposite	18	19	+1	per-rule expansion gap (see divergence_abelian_inverse_of_composite.tsv)
+AbelianGroupAxioms	ImpliesMcCuneAxioms	28	33	+5	vampire portfolio takes longer path; was +10
+AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	20	18	-2	preset slightly longer; was 146 -- now -2 only
+BooleanAxioms	DoubleNegation	20	27	+7	different decomposition; was +12
+GroupAxioms	InverseOfInverse	14	18	+4	vampire externalizes more steps; was +6
+HillmanAxioms	Commutativity	-	20	-	preset FAIL (design tension; Mix2+SR=2+AMW=20 cracks at 27)
+MeredithAxioms	Commutativity	-	10	-	preset FAIL (design tension; Add+AMW=20 cracks at 11)
