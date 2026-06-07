@@ -70,7 +70,17 @@ true at this layer -- but unwired end to end.
   rest of the infra (rangeify `ru_new_range`, render_uop var extents) was already
   kvar-ready. Backends still to cover for M2+: cpu-jit + Metal/CUDA pass the bound to
   the compiled loop (uop_walk interpreter only, today).
-- **M2**: symbolic matmul + reduce (a mini single-head attention over `{S, S}`).
+- **M2**: the compiled backends + matmul.  Op coverage on the interpreter is
+  basically FREE -- elementwise + multi-axis reduce over a symbolic dim already
+  work (`tests/test_sym_m2.c`), since they inherit the RANGE path.  The real M2
+  work is two things: (a) **compiled-kernel bound-passing** -- `render_uop`
+  already DECLARES the kvar as a kernel arg (`unsigned V_s` on C/CUDA, a
+  `constant uint &V_s` buffer arg on Metal), so the cpu-jit / Metal / CUDA
+  launchers just need to PASS `kvar_runtime(id)` for each (today a kvar kernel
+  either gets it or cpu-jit declines and it falls to the correct interpreter);
+  (b) **matmul / GEMM** -- a symbolic-`M` matmul is GEMM-dispatched, so the GEMM
+  call must read `M` via `kvar_extent_runtime`, not the static dim.  Target: a
+  mini single-head attention over `{S, S}` JITted, correct at two `S`.
 - **M3**: the GPT-2 forward symbolic end to end -- no `maxSeq`, JIT-captured once,
   replayed at the running length. The example collapses to
   `step = TJit[... TFromNet[net, ids] ...]` over the raw growing ids (the one-hot
