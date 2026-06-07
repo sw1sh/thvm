@@ -172,6 +172,101 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Runtime-loadable scorer: LINEAR reproduces the baked-in logreg ==
+  // A LINEAR blob carrying the baked-in W/B with identity standardization
+  // (mean 0, inv_std 1) must score, and prioritize, exactly like the
+  // default (inactive) baked-in path.
+  TEST_BEGIN("atp/enigma/learned-linear-matches-bakedin");
+  {
+    AtpState *s = thvm_atp_init(&GROUP_CFG, 64);
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    Term l = mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x)));
+    Term r = mk_e();
+    float feat[ATP_CP_FEATURE_DIM];
+    thvm_atp_cp_features(s, l, r, 3u, feat);
+
+    // Baseline priority via the baked-in scorer (model inactive).
+    CHECK_EQ(g_atp_learned_active, 0);
+    u32 base_pri = atp_cp_learned_priority(s, l, r);
+
+    double blob[45];
+    blob[0] = (double)ATP_LEARNED_LINEAR;
+    blob[1] = 0.0;
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) blob[2 + i]  = 0.0;  // mean
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) blob[16 + i] = 1.0;  // inv_std
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) blob[30 + i] = (double)ATP_LEARNED_W[i];
+    blob[44] = (double)ATP_LEARNED_B;
+    CHECK_EQ(thvm_atp_set_learned_scorer(blob, 45u), 1);
+    CHECK_EQ(g_atp_learned_active, 1);
+
+    float ref = ATP_LEARNED_B;
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) ref += ATP_LEARNED_W[i] * feat[i];
+    float got = atp_learned_forward(&g_atp_learned, feat);
+    CHECK(fabsf(got - ref) < 1e-3f);
+
+    // Same features -> same priority as the baked-in path.
+    CHECK_EQ(atp_cp_learned_priority(s, l, r), base_pri);
+
+    thvm_atp_clear_learned_scorer();
+    CHECK_EQ(g_atp_learned_active, 0);
+    thvm_atp_free(s);
+  }
+
+  // === Runtime-loadable scorer: MLP forward is hand-checkable =========
+  TEST_BEGIN("atp/enigma/learned-mlp-forward");
+  {
+    u32 H   = 2u;
+    u32 len = 31u + 16u * H;  // 63
+    double blob[63];
+    blob[0] = (double)ATP_LEARNED_MLP;
+    blob[1] = (double)H;
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) blob[2 + i]  = 0.0;  // mean
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) blob[16 + i] = 1.0;  // inv_std
+    u32 p = 30u;
+    // W1 row 0 reads feature 0 (w 1); row 1 reads feature 1 (w -1).
+    for (u32 j = 0; j < H; j++) {
+      for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) {
+        blob[p++] = (j == 0u && i == 0u) ?  1.0
+                  : (j == 1u && i == 1u) ? -1.0 : 0.0;
+      }
+    }
+    blob[p++] = 0.0;  // b1[0]
+    blob[p++] = 0.0;  // b1[1]
+    blob[p++] = 2.0;  // w2[0]
+    blob[p++] = 3.0;  // w2[1]
+    blob[p++] = 0.5;  // b2
+    CHECK_EQ(p, len);
+    CHECK_EQ(thvm_atp_set_learned_scorer(blob, len), 1);
+
+    float feat[ATP_CP_FEATURE_DIM] = {0};
+    feat[0] = 4.0f;   // h0 = relu(4)  = 4
+    feat[1] = 5.0f;   // h1 = relu(-5) = 0
+    // score = b2 + w2[0]*h0 + w2[1]*h1 = 0.5 + 2*4 + 3*0 = 8.5
+    float got = atp_learned_forward(&g_atp_learned, feat);
+    CHECK(fabsf(got - 8.5f) < 1e-4f);
+
+    thvm_atp_clear_learned_scorer();
+  }
+
+  // === Runtime-loadable scorer: malformed blobs are rejected ==========
+  // A bad push leaves the baked-in scorer active (g_atp_learned_active 0).
+  TEST_BEGIN("atp/enigma/learned-rejects-malformed");
+  {
+    double blob[45] = {0};
+    blob[0] = (double)ATP_LEARNED_LINEAR;
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) blob[16 + i] = 1.0;
+    CHECK_EQ(thvm_atp_set_learned_scorer(blob, 44u), 0);   // wrong length
+    CHECK_EQ(g_atp_learned_active, 0);
+    blob[0] = 7.0;
+    CHECK_EQ(thvm_atp_set_learned_scorer(blob, 45u), 0);   // bad kind
+    double m65[30] = {0};
+    m65[0] = (double)ATP_LEARNED_MLP;
+    m65[1] = (double)(ATP_LEARNED_MAX_HIDDEN + 1u);
+    CHECK_EQ(thvm_atp_set_learned_scorer(m65, 30u), 0);    // hidden over cap
+    CHECK_EQ(thvm_atp_set_learned_scorer(NULL, 45u), 0);   // NULL
+    CHECK_EQ(g_atp_learned_active, 0);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

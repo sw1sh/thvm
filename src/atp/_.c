@@ -5659,11 +5659,85 @@ static const float ATP_LEARNED_W[ATP_CP_FEATURE_DIM] = {
   1.999360f, -0.012683f};
 static const float ATP_LEARNED_B = -1.598045f;
 
+// Runtime-loadable model (default inactive -> baked-in logreg above).
+// Process-global: a WL-trained model is pushed once via
+// thvm_atp_set_learned_scorer and reused by every subsequent
+// ATP_CP_WEIGHT_LEARNED run, mirroring the abort-hook / dataset-env
+// globals this bridge already uses.
+static AtpLearnedScorer g_atp_learned;
+static int g_atp_learned_active = 0;
+
+// Forward pass: standardized features -> raw logit (no sigmoid head).
+static float atp_learned_forward(const AtpLearnedScorer *m, const float *feat) {
+  float z[ATP_CP_FEATURE_DIM];
+  for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) {
+    z[i] = (feat[i] - m->mean[i]) * m->inv_std[i];
+  }
+  if (m->kind == ATP_LEARNED_LINEAR) {
+    float s = m->b2;
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) s += m->w1[i] * z[i];
+    return s;
+  }
+  // ATP_LEARNED_MLP: one ReLU hidden layer, single linear output.
+  float s = m->b2;
+  for (u32 j = 0; j < m->hidden; j++) {
+    const float *wrow = m->w1 + (size_t)j * ATP_CP_FEATURE_DIM;
+    float h = m->b1[j];
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) h += wrow[i] * z[i];
+    if (h < 0.0f) h = 0.0f;
+    s += m->w2[j] * h;
+  }
+  return s;
+}
+
+fn int thvm_atp_set_learned_scorer(const double *blob, u32 len) {
+  if (blob == NULL || len < 30u) return 0;
+  u32 kind   = (u32)blob[0];
+  u32 hidden = (u32)blob[1];
+  if (kind != ATP_LEARNED_LINEAR && kind != ATP_LEARNED_MLP) return 0;
+  u32 want = (kind == ATP_LEARNED_LINEAR)
+               ? 45u                              // 2 + 14 + 14 + (14 + 1)
+               : 31u + 16u * hidden;              // 2 + 14 + 14 + H*14 + H + H + 1
+  if (kind == ATP_LEARNED_MLP &&
+      (hidden == 0u || hidden > ATP_LEARNED_MAX_HIDDEN)) {
+    return 0;
+  }
+  if (len != want) return 0;
+
+  AtpLearnedScorer m;
+  m.kind   = (u8)kind;
+  m.hidden = (kind == ATP_LEARNED_LINEAR) ? 0u : hidden;
+  u32 p = 2u;
+  for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) m.mean[i]    = (float)blob[p++];
+  for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) m.inv_std[i] = (float)blob[p++];
+  if (kind == ATP_LEARNED_LINEAR) {
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) m.w1[i] = (float)blob[p++];
+    m.b2 = (float)blob[p++];
+  } else {
+    for (u32 i = 0; i < hidden * ATP_CP_FEATURE_DIM; i++) m.w1[i] = (float)blob[p++];
+    for (u32 i = 0; i < hidden; i++) m.b1[i] = (float)blob[p++];
+    for (u32 i = 0; i < hidden; i++) m.w2[i] = (float)blob[p++];
+    m.b2 = (float)blob[p++];
+  }
+  g_atp_learned        = m;
+  g_atp_learned_active = 1;
+  return 1;
+}
+
+fn void thvm_atp_clear_learned_scorer(void) {
+  g_atp_learned_active = 0;
+}
+
 static u32 atp_cp_learned_priority(AtpState *s, Term lhs, Term rhs) {
   float feat[ATP_CP_FEATURE_DIM];
   thvm_atp_cp_features(s, lhs, rhs, s->cp_seq_next, feat);
-  float score = ATP_LEARNED_B;
-  for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) score += ATP_LEARNED_W[i] * feat[i];
+  float score;
+  if (g_atp_learned_active) {
+    score = atp_learned_forward(&g_atp_learned, feat);
+  } else {
+    score = ATP_LEARNED_B;
+    for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) score += ATP_LEARNED_W[i] * feat[i];
+  }
   // Map score (typically ~[-6, 4]) to a u32 priority, higher score ->
   // lower priority.  Clamp into a safe positive band.
   float pr = 1.0e6f - 1.0e4f * score;

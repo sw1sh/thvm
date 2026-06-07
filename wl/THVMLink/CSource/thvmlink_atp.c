@@ -292,6 +292,32 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// === ENIGMA Tier 1: push a trained CP-selection model ============
+//
+// Loads a runtime model used by ATP_CP_WEIGHT_LEARNED (CriticalPairWeight
+// -> "Learned").  args[0] is a flat Real (f64) parameter vector in the
+// thvm_atp_set_learned_scorer layout (kind, hidden, mean[14], inv_std[14],
+// then LINEAR or MLP weights).  An EMPTY array clears the model and
+// reverts to the baked-in logistic regression.  Returns 1 on success,
+// 0 on a malformed blob (engine keeps the baked-in scorer).  Process-
+// global: set once, used by every subsequent proof run.
+EXTERN_C DLLEXPORT int thvm_wl_atp_set_learned_scorer(WolframLibraryData libData,
+                                                      mint argc, MArgument *args,
+                                                      MArgument res) {
+  (void)argc;
+  MTensor t = MArgument_getMTensor(args[0]);
+  mint len  = libData->MTensor_getFlattenedLength(t);
+  if (len == 0) {
+    thvm_atp_clear_learned_scorer();
+    MArgument_setInteger(res, 1);
+    return LIBRARY_NO_ERROR;
+  }
+  const double *blob = libData->MTensor_getRealData(t);
+  int ok = thvm_atp_set_learned_scorer(blob, (u32)len);
+  MArgument_setInteger(res, ok);
+  return LIBRARY_NO_ERROR;
+}
+
 // === ATP runner with proof extraction ============================
 //
 // Mirrors thvm_wl_atp_run, but on a goal closed by the single-NF

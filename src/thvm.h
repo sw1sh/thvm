@@ -5209,6 +5209,52 @@ fn u32       thvm_atp_cp_label(AtpState *s);
 fn u32       thvm_atp_cp_dataset_append(const AtpState *s,
                                         const char *path, u8 header);
 
+// === Runtime-loadable learned CP scorer (ENIGMA Tier 1) =============
+// The baked-in ATP_LEARNED_W/B logistic regression is the default
+// fallback for ATP_CP_WEIGHT_LEARNED.  This block lets a model trained
+// in WL (TNetTrain over the exported dataset) be pushed into the engine
+// at run time -- no recompile -- so the prove -> label -> train -> reload
+// loop can close.  Two model kinds share one parameter blob:
+//   LINEAR: score = b + sum_i w_lin[i] * z[i]
+//   MLP:    h_j = relu(b1_j + sum_i W1[j][i] * z[i]); score = b2 + sum_j w2[j] h_j
+// where z[i] = (feat[i] - mean[i]) * inv_std[i] is the standardized
+// feature (mean/inv_std shipped with the model, so training standardizes
+// freely and the C side stays a plain forward).  `score` is a raw logit
+// (no sigmoid head): higher == more proof-relevant == selected sooner,
+// matching the baked-in scorer's score -> priority mapping.
+#define ATP_LEARNED_MAX_HIDDEN 64u
+typedef enum {
+  ATP_LEARNED_NONE   = 0,
+  ATP_LEARNED_LINEAR = 1,
+  ATP_LEARNED_MLP    = 2,
+} AtpLearnedKind;
+typedef struct {
+  u8    kind;                                          // AtpLearnedKind
+  u32   hidden;                                        // MLP width (0 for linear)
+  float mean[ATP_CP_FEATURE_DIM];                      // per-feature mean
+  float inv_std[ATP_CP_FEATURE_DIM];                   // 1 / per-feature std
+  float w1[ATP_LEARNED_MAX_HIDDEN * ATP_CP_FEATURE_DIM]; // MLP layer-1, or w_lin in [0,14)
+  float b1[ATP_LEARNED_MAX_HIDDEN];                    // MLP layer-1 bias
+  float w2[ATP_LEARNED_MAX_HIDDEN];                    // MLP output weights
+  float b2;                                            // output bias (linear bias too)
+} AtpLearnedScorer;
+
+// Push a trained model.  `blob` is a flat f64 parameter vector:
+//   [0]      kind   (1 = LINEAR, 2 = MLP)
+//   [1]      hidden (H; 0 for linear)
+//   [2..16)  mean[14]
+//   [16..30) inv_std[14]
+//   LINEAR (len 45):  w_lin[14], b
+//   MLP    (len 31 + 16*H):  W1[H*14], b1[H], w2[H], b2
+// Returns 1 on success (model active for subsequent ATP_CP_WEIGHT_LEARNED
+// runs), 0 on a malformed blob (the engine then keeps the baked-in
+// scorer).  Process-global: set once, used by every later run until
+// cleared.
+fn int       thvm_atp_set_learned_scorer(const double *blob, u32 len);
+// Drop the runtime model; ATP_CP_WEIGHT_LEARNED reverts to the baked-in
+// logistic regression.
+fn void      thvm_atp_clear_learned_scorer(void);
+
 // === wald/ ===
 // Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
 // docs/plans/waldmeister_ic_atp_tasks.md.  WaldSpec holds the
