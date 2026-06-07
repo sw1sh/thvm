@@ -34,8 +34,7 @@ fn Term interact_assign_with(Term dst, Term src) {
   TenDesc *dd = &TENS[dst_tid];
   TenDesc *sd = &TENS[src_tid];
 
-  if (dd->backend != sd->backend) return dst;
-  if (dd->backend == NULL) return dst;
+  if (dd->backend == NULL || sd->backend == NULL) return dst;
 
   u32 numel = dd->view.numel;
   if (sd->view.numel != numel) return dst;
@@ -55,7 +54,8 @@ fn Term interact_assign_with(Term dst, Term src) {
     jit_capture_record_assign(dst_tid, src_tid);
   }
 
-  if (dd->backend->buf_copy != NULL
+  // Same-backend: a native buf_copy is the fast path.
+  if (dd->backend == sd->backend && dd->backend->buf_copy != NULL
       && dd->backend->buf_copy(dd->buf_id, sd->buf_id, nbytes) == 0) {
     kernel_assign_write_record(dd->backend, dd->buf_id);
     kernel_fire_gen_bump();
@@ -64,11 +64,16 @@ fn Term interact_assign_with(Term dst, Term src) {
     return dst;
   }
 
-  // Fallback round-trip via host buffer for backends without a
-  // native copy path.
+  // Round-trip via a host buffer.  Cross-backend (a device transfer --
+  // the fire-time half of a UOP_COPY whose src is compute on another
+  // device) reads through the SOURCE backend and writes through the DEST
+  // backend; same-backend without a native buf_copy uses one backend for
+  // both.  This is the memcpy a COPY boundary lowers to, fired in
+  // dependency order (after the src kernel) by wnf -- mirrors tinygrad
+  // engine/realize.py exec_copy.
   void *tmp = malloc((size_t)nbytes);
   if (!tmp) return dst;
-  dd->backend->buf_read (sd->buf_id, tmp, nbytes);
+  sd->backend->buf_read (sd->buf_id, tmp, nbytes);
   dd->backend->buf_write(dd->buf_id, tmp, nbytes);
   free(tmp);
 

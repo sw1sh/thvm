@@ -617,31 +617,61 @@ static void copy_upload_insert(u64 loc, u32 backend_id, u32 tid) {
 static Term materialize_copy(Term term) {
   u64  loc = term_val(term);
   Term src = heap_read(loc);
-  // Materialize the src first.  For the token-LM lift this is a CPU
-  // host leaf (TAG_TEN) -- thvm_materialize returns it unchanged.  If
-  // the src is itself compute, this compiles its kernels; the upload
-  // then reads the producer's output buffer at fire time via buf_read.
+  // Capture the src sub-graph's device / shape / dtype BEFORE materialize
+  // rewrites it: a compute src becomes a UOP_KERNEL whose own node no
+  // longer carries the device-bearing leaves.
+  i32   src_dev   = term_device_in(src);
+  Shape src_shape = {0};
+  int   shape_ok  = term_shape_in(src, 0, &src_shape);
+  u32   src_dtype = DT_FP32;
+  term_dtype_in(src, 0, &src_dtype);
+  i32   cpy_dev   = uop_copy_device(loc);
+
+  // Materialize the src.  A host-leaf weight returns a TAG_TEN (its bytes
+  // exist now -> eager upload below).  A compute src returns a UOP_KERNEL
+  // not yet fired.
   Term src_mat = thvm_materialize(src);
   if (src_mat != src) heap_set(loc, src_mat);
-  // Only a TAG_TEN src can be uploaded here (we need its backend +
-  // buffer).  A non-TEN src (a still-lazy UOP_KERNEL) is left wrapped;
-  // returning it makes COPY a transparent pass-through, which is sound
-  // -- the downstream kernel reads it as any other input.  The token-LM
-  // lift never hits this path (its srcs are host leaves).
-  if (term_tag(src_mat) != TAG_TEN) return src_mat;
-  u32 src_tid = (u32)term_val(src_mat);
-  if (src_tid == 0 || src_tid >= TENS_NEXT) return src_mat;
+
   // Target = the COPY's EXPLICIT device if it carries one, else (generic
   // sentinel) the realize backend.  An explicit device installs its
-  // backend in the current context on demand; if it is unavailable
-  // (e.g. Metal on a non-Metal build) degrade to the realize backend so
-  // the COPY stays a sound pass-through rather than failing the realize.
-  i32      dev    = uop_copy_device(loc);
-  Backend *target = (dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(dev);
+  // backend on demand; if unavailable (Metal on a non-Metal build) degrade
+  // to the realize backend so the COPY stays a sound pass-through.
+  Backend *target      = (cpy_dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(cpy_dev);
   if (target == NULL) target = CURRENT_BACKEND;
-  Backend *srcb   = TENS[src_tid].backend;
-  // Identity: realize backend already holds the src.
+  Backend *src_backend = (src_dev >= 0) ? ctx_ensure_backend(src_dev) : NULL;
+
+  // Compute src (a UOP_KERNEL not yet fired): the transfer must run AFTER
+  // the src kernel computes.  Cross-device -> defer to a fire-time
+  // cross-backend ASSIGN (interact_assign reads src's backend, writes
+  // dst's).  wnf drives src -> TEN first, so the memcpy the COPY boundary
+  // lowers to runs in dependency order (tinygrad engine/realize exec_copy).
+  // Same device (or unknown) -> the COPY is a transparent pass-through:
+  // the downstream kernel reads src as any other input.
+  if (term_tag(src_mat) != TAG_TEN) {
+    if (shape_ok && src_backend != NULL && src_backend != target) {
+      u32 d_tid = tensor_alloc(target, src_shape, src_dtype);
+      if (d_tid != 0)
+        return uop_binary(UOP_ASSIGN,
+                          term_new(0, TAG_TEN, TENS[d_tid].dtype, d_tid),
+                          src_mat);
+    }
+    return src_mat;
+  }
+  u32 src_tid = (u32)term_val(src_mat);
+  if (src_tid == 0 || src_tid >= TENS_NEXT) return src_mat;
+  Backend *srcb = TENS[src_tid].backend;
+  // Identity: target already holds the src.
   if (target == NULL || target == srcb) return src_mat;
+  // A COMPUTED-output TEN on a different device (producer_kid != 0) is also
+  // computed at fire, not now -- defer like the UOP_KERNEL case above.
+  if (TENS[src_tid].producer_kid != 0) {
+    u32 d_tid = tensor_alloc(target, TENS[src_tid].view.shape, TENS[src_tid].dtype);
+    if (d_tid == 0) return src_mat;
+    return uop_binary(UOP_ASSIGN,
+                      term_new(0, TAG_TEN, TENS[d_tid].dtype, d_tid),
+                      src_mat);
+  }
   // Cross-backend cache hit: reuse the prior upload if its buffer is
   // still live (jit-pinned, so pool rollback kept it).
   u32 cached = copy_upload_lookup(loc, target->id);
@@ -5256,12 +5286,25 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // same-depth conv outputs occupy only ~3x one output's size in the
   // arena (live set), not 40x.  Fall through to tensor_alloc on miss
   // (multi-consumer / root / arena-disabled).
-  u32 out_tid = arena_tensor_alloc(bi, out_shape, out_dtype);
+  // Per-op device: this boundary's output lives on the device its uop
+  // places it on (term_device_in), NOT a single realize-wide backend --
+  // the device is in the graph (tinygrad).  Dispatch follows
+  // TENS[output_tid].backend (uop_kernel.c), so allocating the output on
+  // op_backend is all it takes to run this kernel there; a COPY uop is
+  // the natural boundary that moves data between devices.  When op_backend
+  // is the realize backend the arena planner applies as before; a kernel
+  // on a DIFFERENT device skips the arena (which is keyed to
+  // CURRENT_BACKEND) and allocates directly on its backend.
+  i32      op_dev     = term_device_in(root_term);
+  Backend *op_backend = (op_dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(op_dev);
+  if (op_backend == NULL) op_backend = CURRENT_BACKEND;
+  u32 out_tid = (op_backend == CURRENT_BACKEND)
+                  ? arena_tensor_alloc(bi, out_shape, out_dtype) : 0;
   if (out_tid == 0) {
-    out_tid = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
-    if (out_tid != 0 && CURRENT_BACKEND == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
+    out_tid = tensor_alloc(op_backend, out_shape, out_dtype);
+    if (out_tid != 0 && op_backend == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
 #ifdef THVM_HAS_CUDA
-    if (out_tid != 0 && CURRENT_BACKEND == &CUDA_BACKEND) ARENA_ALLOCS_LEGACY++;
+    if (out_tid != 0 && op_backend == &CUDA_BACKEND) ARENA_ALLOCS_LEGACY++;
 #endif
   }
   u32 kid     = kernel_alloc();
