@@ -1,0 +1,39 @@
+# AbelianGroupAxioms/InverseOfComposite parity divergence
+# After c0354f0c's trivial-Conclusion split: thvm=18, WM CLI dataset=20
+# Captured 2026-06-07 with WMCLI=/Users/swish/src/wolfram/waldmeister/wmcli
+
+step	thvm_construct	thvm_statement	wmcli_statement	notes
+1-4	axioms	-	-	identical (axiom set)
+5	{Hypothesis,1}	not(a*b) == not(b)*not(a)	not(and(skC1,skC2))=and(not(skC2),not(skC1))	match
+6-9	CPL 1-3 + SL 1-2	derive double-negation lemmas	derive double-negation lemmas	match (similar structure)
+10-13	CPL 4-7	derive intermediate lemmas	derive intermediate lemmas	match
+14	{SubstitutionLemma,3}	OverBar[a] == b * OverBar[a*b]	-	thvm normalize step
+15	{CriticalPairLemma,8}	OverBar[b*a] == OverBar[a]*OverBar[b]	not(and(x1,x2))=and(not(x2),not(x1))	match (sides swapped via comm)
+16	{SubstitutionLemma,4}	not(a*b) == not(a*b)	not(and(skC1,skC2))=not(and(skC1,skC2))	thvm applies CPL8 to hyp's RHS COMPOUND (one rule, deep rewrite)
+17	-(MISSING)-	-	not(and(skC2,skC1))=not(and(skC1,skC2))	**WM intermediate normalize step thvm collapses**
+18	-(MISSING)-	-	not(and(skC2,skC1))=not(and(skC2,skC1))	**WM second intermediate step thvm collapses**
+17/19	{Conclusion,1}	trivial closure	not(and(skC2,skC1))=not(and(skC2,skC1))	trivial closure match
+
+## Root cause
+
+thvm's `atp_rewrite_normalize` applies a rule and runs the result
+through further rewrites in ONE call before returning, then records
+the entire chain as one MainStep with Source -> "norm".  WM emits a
+SubstitutionLemma per single-rule application; its normalize traces
+each intermediate.
+
+For InverseOfComposite, thvm's final SubLem 4 uses Rule
+`OverBar[a]*OverBar[b] -> OverBar[b*a]` (reversed CPL 8) to rewrite
+`not(b)*not(a)` to `not(a*b)` in ONE step.  WM gets there in 3 steps
+via the same rule + commutativity steps inside.
+
+## Fix path
+
+- (Heavy) Change the C engine's `atp_rewrite_normalize` to record a
+  trace event per rule application (not per normalize-call).  WL
+  extraction then naturally emits per-rule SubLems.
+- (Light) Post-process the WL chain to re-walk each compound rewrite
+  via single-rule replays and emit one SL per intermediate.  Sound
+  but expensive.
+
+Deferred for next iter.
