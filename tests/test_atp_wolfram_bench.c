@@ -445,11 +445,13 @@ int main(int argc, char **argv) {
       // diverts the saturator's trajectory on mccune (49s -> 60s+ with
       // MNF on, 28s with MNF off) and slows thm (1.9s vs 0.4s).  THVM_ATP
       // _MNF=1 still opts in for problems where MNF helps.
-      // Auto-MaxWeight base=30 (iter 164): grows with rule depth (slope=2),
-      // bounds CP weight so heavy junk gets stashed.  +9.5% on AndAssoc,
-      // +13% on wolfram, neutral on mccune/robbins.  Default-on as part
-      // of preset.
-      thvm_atp_set_auto_max_cp_weight(s, 30u);
+      // Auto-MaxWeight base=20: tightened from 30 after the goal_check FT
+      // migration (49caf001) + SR=181 (a737cc4f).  Cuts mccune 25.0s ->
+      // 16.0s PROVED (-36%) by capping the CP queue tighter so heavy CPs
+      // get stashed early; thm/wolfram/andassoc/robbins unchanged at
+      // their current crack/timeout points.  THVM_ATP_AUTO_MAXW env
+      // (parsed below the preset block) still overrides.
+      thvm_atp_set_auto_max_cp_weight(s, 20u);
       // CP-weight = CH_MaxWeight = max(|lhs|,|rhs|) symbol count.
       // PORTFOLIO TRADE-OFF: MaxWeight (mode=1) cracks mccune in 11.3s
       // where the engine-default GT does not crack at 60s; but on the
