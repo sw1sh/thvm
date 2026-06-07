@@ -412,15 +412,14 @@ int main(int argc, char **argv) {
   {
     const char *wm = getenv("THVM_ATP_WALDMEISTER");
     if (wm != NULL && wm[0] != '\0' && wm[0] != '0') {
-      // selection_ratio=181 (one FIFO pick per 181 weight picks) tuned
-      // post-goal_check FT migration (49caf001).  Measured under the new
-      // FT-side goal_check: mccune 26.4s -> 24.4s PROVED (-8%); thm
-      // unchanged; wolfram/andassoc neutral (hard cases don't crack
-      // either way).  THVM_ATP_SELECTION_RATIO env overrides.
+      // selection_ratio=201 (one FIFO pick per 201 weight picks).
+      // Sweep with AMW=20 (ddf6206b): SR=181 -> 15.5s, SR=201 -> 14.5s,
+      // SR=211 -> 15.3s.  thm/wolfram/andassoc unchanged.
+      // THVM_ATP_SELECTION_RATIO env overrides.
       {
         const char *sr = getenv("THVM_ATP_SELECTION_RATIO");
         u32 ratio = (sr != NULL && sr[0] != '\0')
-                      ? (u32)strtoul(sr, NULL, 10) : 181u;
+                      ? (u32)strtoul(sr, NULL, 10) : 201u;
         thvm_atp_set_selection_ratio(s, ratio);
       }
       thvm_atp_set_use_rhs_interreduce(s, 1u);
