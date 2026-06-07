@@ -149,9 +149,14 @@ Options[TAdam] = {
    (JIT-safe) or a host-folded scalar multiply (legacy). *)
 adamStep[loss_, params_, mList_, vList_, lr_, beta1_, beta2_, eps_,
          mHatFn_, vHatFn_] :=
-    Module[{lossK, grads, gradsRealized, paramAssigns},
-        lossK        = TMaterialize[loss];
-        grads        = TGrad[lossK, params];
+    Module[{grads, gradsRealized, mvAssigns, paramAssigns},
+        (* Differentiate the loss graph directly.  Do NOT TMaterialize[loss]
+           first: scheduling the forward into kernels before the backward
+           walk severs the requires_grad provenance for non-trivial graphs,
+           so TGrad returns ZERO gradients (the moment buffers then stay at
+           their seed and Adam never converges -- issue #4).  SGD takes
+           TGrad on the live loss directly and works; this matches it. *)
+        grads        = TGrad[loss, params];
         (* Realize all gradients in ONE bundled materialize pass.
            TGrad[loss, params] does a single requires_grad backward walk, so the
            N grads share one backward DAG; bundling the realize lets
@@ -167,16 +172,24 @@ adamStep[loss_, params_, mList_, vList_, lr_, beta1_, beta2_, eps_,
            each target was a separate target-aware DP1 walk that recomputed
            on each read, so per-param realize was the only safe form.) *)
         gradsRealized = TRealize[grads];
+        (* Commit the first/second moment buffers in their OWN bundled pass
+           BEFORE the param update reads them, mirroring the b1pow / b2pow
+           two-pass ordering above.  An m / v ASSIGN consumed INLINE by the
+           w-update root (mHat / vHat folded into the w kernel) miscompiles
+           the read-after-write under TJit replay -- the committed buffer is
+           read stale / the store is dropped, which NaNs the step once real
+           gradients flow (issue #4).  Committing m / v as realize ROOTS
+           makes each write a real dispatched store; the w-update then reads
+           the committed buffers as plain TEN handles. *)
+        mvAssigns = Table[
+            {TAssign[mList[[i]], beta1 * mList[[i]] + (1.0 - beta1) * gradsRealized[[i]]],
+             TAssign[vList[[i]], beta2 * vList[[i]] + (1.0 - beta2) * (gradsRealized[[i]] * gradsRealized[[i]])]},
+            {i, Length[params]}];
+        TRealize @ Flatten[mvAssigns];
         paramAssigns = Table[
-            Block[{
-                wTen = params[[i]], gTen = gradsRealized[[i]],
-                mTen = mList[[i]],  vTen = vList[[i]],
-                mAfter, vAfter, mHat, vHat
-            },
-                mAfter = TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen];
-                vAfter = TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
-                mHat   = mHatFn[mAfter];
-                vHat   = vHatFn[vAfter];
+            Block[{wTen = params[[i]], mHat, vHat},
+                mHat = mHatFn[mList[[i]]];
+                vHat = vHatFn[vList[[i]]];
                 TAssign[wTen, wTen - lr * mHat / (Sqrt[vHat] + eps)]
             ],
             {i, Length[params]}];
