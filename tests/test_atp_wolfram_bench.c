@@ -539,6 +539,11 @@ int main(int argc, char **argv) {
       // gives +58% rules in 60s (219 -> 346).  Safe to enable by default
       // in the bench preset.
       thvm_atp_set_use_incr_ir(s, 1u);
+      // CP_INDEX: discrimination-tree partner retrieval for cp-gen
+      // overlap loops.  mccune 9.8s -> 8.3s (-15%); all PROVED cases
+      // unchanged.  Wolfram trajectory shifts (fewer rules per second
+      // but different exploration).  Safe to enable.
+      thvm_atp_set_use_cp_index(s, 1u);
     }
   }
   // THVM_ATP_INITIAL_ULTIMATE=1: port of WM's `initial = ultimate` DEF
