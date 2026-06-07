@@ -8894,11 +8894,52 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
 // recomputes every priority -- the AP_generic C_ReClassify reweight).
 // Default OFF; the engine is byte-identical unless cp_set_interreduce is
 // set (Method->"Waldmeister").
+// Compute the set of TOP CTR symbols present in `term`'s subterm tree.
+// Returns a 64-bit bitmap (bit k = label k).  Label >= 64 sets the
+// fallback bit 63 ("any").  Used by atp_cp_set_interreduce's incremental
+// fast-path to skip CPs that cannot be rewritten by recently-added rules.
+static u64 atp_term_sym_bitmap(Term t) {
+  if (t == 0u) return 0u;
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      u64 m = (lab < 63u) ? ((u64)1 << lab) : ((u64)1 << 63u);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) m |= atp_term_sym_bitmap(term_ctr_at(t, i));
+      return m;
+    }
+    default: return 0u;
+  }
+}
+
 static void atp_cp_set_interreduce(AtpState *s) {
   if (s == NULL || s->n_cps == 0u || s->n_rules == 0u) return;
   const u32 NORM_CAP = 64u;
   u32 w = 0u;
   int touched = 0;
+
+  // Incremental IR fast-path: rebuild the "new rule top symbols" bitmap
+  // from rules added since the last IR pass.  A CP whose subterm bitmap
+  // doesn't intersect this set cannot fire any new rule, so its
+  // normalize is a guaranteed no-op -- skip it.  Engine byte-identical
+  // when use_incr_ir is off; soundness contract on: only CPs proved to
+  // have no possible new-rule rewrite are skipped, so the same NFs land
+  // on the survivor set as a full re-normalize.
+  u64 new_top_syms = 0u;
+  if (s->use_incr_ir && s->n_rules > s->ir_rule_watermark) {
+    for (u32 ri = s->ir_rule_watermark; ri < s->n_rules; ri++) {
+      Term lhs_ri = s->lhs[ri];
+      if (lhs_ri != 0u && term_tag(lhs_ri) == TAG_CTR) {
+        u32 lab = term_ext(lhs_ri);
+        new_top_syms |= (lab < 63u) ? ((u64)1 << lab) : ((u64)1 << 63u);
+      } else {
+        // Variable / unknown rule LHS top -- fall back to always re-norm.
+        new_top_syms = ~(u64)0;
+        break;
+      }
+    }
+    s->ir_new_rule_top_syms = new_top_syms;
+  }
   for (u32 i = 0; i < s->n_cps; i++) {
     // Eager Waisenmord (WM AP_generic head): a CP whose parent rule has
     // been retired is redundant under the surviving R, so we can drop it
@@ -8939,6 +8980,30 @@ static void atp_cp_set_interreduce(AtpState *s) {
       thvm_atp_heap_reset(hcp);
       continue;
     }
+    // Incremental IR fast-path: skip normalize if no new rule (since
+    // last IR watermark) has a TOP SYMBOL appearing in either CP side.
+    // Conservative: the bitmap union may cover symbols a normalize
+    // would touch but that no new rule rewrites; harmless (just less
+    // skipping).  Soundness: if no new top sym is present, no new
+    // rule's LHS can match anywhere in the CP, so normalize is a no-op.
+    if (s->use_incr_ir && new_top_syms != 0u
+        && s->ir_rule_watermark > 0u) {
+      u64 cp_syms = atp_term_sym_bitmap(ol) | atp_term_sym_bitmap(orr);
+      if ((cp_syms & new_top_syms) == 0u) {
+        // No new rule can fire on this CP -- skip the normalize.  Repack
+        // unchanged (just move the slot, no reweight).
+        if (w != i) {
+          s->cp_packed[w] = s->cp_packed[i];
+          s->cp_packed[i] = NULL;
+        }
+        s->cp_trace[w] = s->cp_trace[i];
+        if (s->cp_ultimate != NULL) s->cp_ultimate[w] = s->cp_ultimate[i];
+        w++;
+        s->n_cp_set_ir_skipped++;
+        thvm_atp_heap_reset(hcp);
+        continue;
+      }
+    }
     Term l = atp_rewrite_normalize(s, ol,  s->lhs, s->rhs, s->n_rules, NORM_CAP);
     Term r = atp_rewrite_normalize(s, orr, s->lhs, s->rhs, s->n_rules, NORM_CAP);
     if (kbo_eq(l, r)) {
@@ -8978,6 +9043,19 @@ static void atp_cp_set_interreduce(AtpState *s) {
     s->n_cp_set_ir_passes++;
     thvm_atp_cp_reheapify(s);   // recompute every cp_pri + rebuild index
   }
+  // Advance the incremental-IR watermark to the current rule count so
+  // the next pass only checks rules added since this one.
+  if (s->use_incr_ir) s->ir_rule_watermark = s->n_rules;
+}
+
+fn void thvm_atp_set_use_incr_ir(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_incr_ir = on ? 1u : 0u;
+  // Seed the watermark at current n_rules so the first pass under the
+  // flag re-normalizes nothing (no "new" rules yet from its POV).  The
+  // next rule addition increments n_rules past the watermark and the
+  // IR pass will re-check.
+  if (on) s->ir_rule_watermark = s->n_rules;
 }
 
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {

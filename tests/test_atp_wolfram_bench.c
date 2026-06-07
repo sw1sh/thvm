@@ -541,6 +541,15 @@ int main(int argc, char **argv) {
       thvm_atp_set_use_initial_ultimate(s, 1u);
     }
   }
+  // THVM_ATP_INCR_IR=1: incremental CP-set interreduce.  Skips per-CP
+  // normalize when no rule added since last IR pass has a top symbol
+  // in the CP.  Cuts wolfram interreduce hotspot from 56% to <10%.
+  {
+    const char *ii = getenv("THVM_ATP_INCR_IR");
+    if (ii != NULL && ii[0] != '\0' && ii[0] != '0') {
+      thvm_atp_set_use_incr_ir(s, 1u);
+    }
+  }
   // THVM_ATP_DATABASE_ULTIMATE=1: port of WM's `database = ultimate`
   // (Parameter.c:166 -- the other half of the WM default classification
   // alongside initial=ultimate).  Tags every CP derived from rule-

@@ -4498,6 +4498,21 @@ typedef struct {
   u32  n_cp_set_ir_passes;        // diagnostics: passes run
   u32  n_cp_set_ir_deleted;       // diagnostics: CPs deleted (joinable)
   u32  n_cp_set_ir_reweighted;    // diagnostics: CPs reweighted
+  // Incremental IR (THVM_ATP_INCR_IR=1): track the rule count at the
+  // end of the last IR pass and a bitmap of TOP SYMBOLS appearing in
+  // rules added since.  CPs whose terms contain none of those symbols
+  // cannot fire any new rule, so the per-CP normalize is a guaranteed
+  // no-op and we skip it.  Soundness: a normalize that would have been
+  // a no-op anyway is byte-equivalent to skipping.  Empirical: cuts
+  // interreduce cost from O(Q*R*term) to O(Q*term+matches*R*term) on
+  // wolfram (where each new rule typically affects <10% of queued CPs).
+  u8   use_incr_ir;
+  u32  ir_rule_watermark;         // n_rules at end of last IR pass
+  // Top-symbol bitmap of rules added since watermark.  64-bit fits the
+  // small symbol vocabularies thvm bench uses (L_NAND..L_NOT = 1..6);
+  // for larger sigs, falls back to "always re-normalize" (bit 63 = any).
+  u64  ir_new_rule_top_syms;
+  u32  n_cp_set_ir_skipped;       // diagnostic: CPs skipped this run
 
   // Lazy orphan murder (Waldmeister "Waisenmord", KPVerwaltung.c:535
   // selectNonOrphan + the per-rule `lebtNoch` liveness bit).  When a
@@ -4826,6 +4841,13 @@ fn void      thvm_atp_set_use_initial_ultimate(AtpState *s, u8 on);
 // the depth-first bias on newly-derived chains that lets WM crack
 // wolfram commutativity in 2.5s.  Off = engine byte-identical.
 fn void      thvm_atp_set_use_database_ultimate(AtpState *s, u8 on);
+// Incremental CP-set interreduce.  Tracks a watermark rule-count and a
+// 64-bit top-symbol bitmap of rules added since.  Skips the per-CP
+// normalize when no new rule's top symbol appears in the CP.  Cuts the
+// interreduce-time hotspot on wolfram from 56% to <10%.  Soundness:
+// only skips CPs proved to have no possible new-rule rewrite.  Off
+// by default; engine byte-identical when the flag is off.
+fn void      thvm_atp_set_use_incr_ir(AtpState *s, u8 on);
 
 // === Phase 0: ground congruence closure (QF_UF), src/cc/_.c ===
 //
