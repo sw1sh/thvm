@@ -76,7 +76,7 @@ TGlorot::usage           = "TGlorot[shape] returns a fresh f32 TTerm tensor of t
 TZeros::usage            = "TZeros[shape] returns a fresh f32 TTerm tensor of zeros at the given shape.  Convenience for bias init / running-stat init.";
 TOnes::usage             = "TOnes[shape] returns a fresh f32 TTerm tensor of ones at the given shape.  Convenience for layer-norm gamma init / scale-1 placeholders.";
 TZerosLike::usage        = "TZerosLike[t] returns a TTensor handle of zeros matching the shape and dtype of TTerm `t`.  Suitable for seeding Adam m/v moment buffers.";
-TOneHot::usage           = "TOneHot[label, n] / TOneHot[label, n, dtype] returns a TTerm tensor of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.";
+TOneHot::usage           = "TOneHot[label, n] / TOneHot[label, n, dtype] returns a TTerm tensor of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.  TOneHot[labels_List, n] returns the {Length[labels], n} one-hot matrix (one row per label) -- the sequence-one-hot a fixed-window LM forward consumes; a label outside 0..n-1 yields an all-zero row (padding).";
 
 TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, intLabels] computes the categorical cross-entropy loss given pre-softmax logits and integer class labels (one int per sample, NOT one-hot) -- the same convention as tinygrad / Keras.  intLabels' shape is logits' shape with the last (class) axis dropped.  Lowers to log(sum(exp(logits))) - logits[label] along the last axis, then averages over the leading batch axis.  Defers to TCategoricalCrossEntropy, so it inherits the stable max-subtract logsumexp.  For one-hot targets, use TCategoricalCrossEntropy.";
 TCategoricalCrossEntropy::usage = "TCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to the stable logsumexp form max(logits) + log(sum(exp(logits - max(logits)))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  The max-subtract keeps random-init conv logits from overflowing exp and is grad-transparent.  For integer class labels, use TSparseCategoricalCrossEntropy.";
@@ -492,6 +492,21 @@ TZerosLike[t_TTerm] := TZeros[TTensorShape[t], TTensorDType[t]]
 
 TOneHot[label_Integer, n_Integer, dtype_String : "f32"] :=
     TTensorCreate[Table[If[i - 1 == label, 1.0, 0.0], {i, n}], dtype]
+
+(* Batched form: a list of (0-indexed) labels -> a {Length[labels], n}
+   one-hot matrix, one row per label.  The sequence-one-hot encoder a
+   fixed-window LM forward consumes (onehot . tokenTable replaces the
+   variable-length gather).  Built via SparseArray (a C-level fill of the
+   one nonzero per row), not a dense Table[If[...]] -- the latter evaluates
+   the test n times per row, ~1.5x slower for a {seq, vocab} one-hot.  A
+   label outside 0..n-1 contributes no entry, leaving that row all-zero
+   (the fixed window's padding rows). *)
+TOneHot[labels_List, n_Integer, dtype_String : "f32"] :=
+    TTensorCreate[
+        Normal @ SparseArray[
+            MapIndexed[If[0 <= #1 < n, {First[#2], #1 + 1} -> 1.0, Nothing] &, labels],
+            {Length[labels], n}],
+        dtype]
 
 (* tUopShape (the static shape walk) rather than TTensorShape so `w` may
    be an unrealized UOP term -- e.g. a Transpose feeding the vector.matrix
