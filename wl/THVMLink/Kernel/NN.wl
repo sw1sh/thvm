@@ -42,9 +42,9 @@ BeginPackage["THVMLink`"];
 
 TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net, ids] for a token-encoder net (a List[Integer] of 1-indexed token ids) traverses the real NetChain / NetGraph and returns the {seq, vocab} logits TTerm -- e.g. GPT-2 inference, with the tied token-embedding LM head appended.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation; the lifted forward runs at that input shape and serves inference there.\n\nTFromNet[net, maxSeq_Integer] for a token-LM NetChain returns a fixed-sequence TLam over a {maxSeq, vocab} one-hot input: the variable-length id gather is replaced by onehot . tokenTable so the WHOLE forward has a fixed shape and is built ONCE -- materialize it (or TJit a single application over an input slot) and generate by refreshing the one-hot each step (positions 0..maxSeq-1 are constant; causal masking keeps the padded tail inert).  TFromNet[net] on a token-LM NetChain uses the default maxSeq.";
 TToNet::usage           = "TToNet[lam] does a best-effort reconstruction of a NetChain from the GRAPH of a TFromNet[net]-built LAM `lam` -- no net is stored.  Recognises the standard layer sub-DAG signatures (Linear / Elementwise(ReLU) / Softmax / Flatten), reading each layer's weights straight off the graph leaves; NetChain infers the input dimension from the first Linear layer's weight.  Returns a Failure for a body containing a conv / pool / unrecognised op (their im2col lowering does not round-trip cleanly).";
-TNetParams::usage       = "TNetParams[net] returns the trainable weight handles (float-leaf TEN TTerms) derived from the GRAPH of a TFromNet-built `net` (a lifted LAM or a forward UOP term), in the C leaf-walk's stable order -- no Sow-provenance, no registry.  These are the tensors baked into the forward; TGrad auto-differentiates every reachable float leaf and TNetTrain updates them in place.\n\nFor a forward built over a CONCRETE input -- net = TFromNet[layer, x] with x a TEN -- the input is itself a float TEN leaf but not a weight; it is excluded automatically (the outermost TFromNet[_, x] records its input slot).  TNetParams[net, x] drops a given input x explicitly.";
-TNetParamInfo::usage    = "TNetParamInfo[net] (or TNetParamInfo[net, x] for a forward built over a concrete input x) returns the trainable weight handles of `net` paired with best-effort provenance, as a list of <|\"Term\", \"Layer\", \"Param\"|> associations.  Without a stored net the Layer is Missing[\"NotStored\"] and Param is inferred from the handle's shape (rank-2+ -> \"Weights\", rank-1 -> \"Biases\"); TNetParams[net] is the same handles without provenance.";
-TNetInitialize::usage   = "TNetInitialize[net] (or TNetInitialize[net, x] for a forward built over a concrete input x) re-initialises the trainable weights of the TFromNet-built TTerm `net` in place: Glorot for weight matrices, ones for normalisation scalings, zeros for biases.  Installed as the NetInitialize UpValue on TTerms.";
+TNetParams::usage       = "TNetParams[lam] returns the trainable weight handles (float-leaf TEN TTerms) of a TFromNet[net] LAM, in the C leaf-walk's stable order -- no Sow-provenance, no registry.  The LAM's bound input is a TAG_VAR (a hole), so it is excluded for free, leaving exactly the weights baked into the forward; TGrad auto-differentiates every reachable float leaf and TNetTrain updates them in place.  Parameters come from the network's structure, as in tinygrad's get_parameters: an applied forward TFromNet[net, x] (concrete input) is an evaluation with no distinguished parameters -- lift with TFromNet[net] instead.";
+TNetParamInfo::usage    = "TNetParamInfo[lam] returns the trainable weight handles of a TFromNet[net] LAM paired with best-effort provenance, as a list of <|\"Term\", \"Layer\", \"Param\"|> associations.  Without a stored net the Layer is Missing[\"NotStored\"] and Param is inferred from the handle's shape (rank-2+ -> \"Weights\", rank-1 -> \"Biases\"); TNetParams[lam] is the same handles without provenance.";
+TNetInitialize::usage   = "TNetInitialize[lam] re-initialises the trainable weights of a TFromNet[net] LAM in place: Glorot for weight matrices, ones for normalisation scalings, zeros for biases.  Installed as the NetInitialize UpValue on TTerms.";
 TFromLayer::usage       = "TFromLayer[layer, x] is the single-layer form of TFromNet.";
 TLayerWeights::usage    = "TLayerWeights[layer] returns the NumericArrays of every learnable parameter a layer carries (Weights, Biases, ...), in the layer-specific declaration order.";
 TLayerToTensors::usage  = "TLayerToTensors[layer] is the same as TLayerWeights but each NumericArray is wrapped in a fresh TTensorCreate handle so it can feed back into a UOp graph.";
@@ -1386,11 +1386,11 @@ TFromLayer[layer_, x_] := fromLayer[Head[layer], layer, x]
    NetChain) folds like the top-level chain. *)
 fromLayer[NetChain, inner_, x_] := TFromNet[inner, x]
 
-TFromNet[chain_NetChain, x_TTerm] := withInputSlot[x,
-    Fold[
-        TFromLayer[#2, #1] &,
-        x,
-        Table[chain[[i]], {i, Length[chain]}]]]
+TFromNet[chain_NetChain, x_TTerm] := Fold[
+    TFromLayer[#2, #1] &,
+    x,
+    Table[chain[[i]], {i, Length[chain]}]
+]
 
 (* Token-encoder form: a List[Integer] of (1-indexed) token ids flows into the
    first layer (an EmbeddingLayer or a NetGraph whose embedding consumes the
@@ -1454,7 +1454,7 @@ positionEmbeddingArray[net_] := Module[{embs, weights},
         First @ SortBy[weights, First[Dimensions[#]] &]]
 ]
 
-TFromNet[layer_, x_TTerm] := withInputSlot[x, TFromLayer[layer, x]]
+TFromNet[layer_, x_TTerm] := TFromLayer[layer, x]
 TFromNet[layer_, ids_List] := TFromLayer[layer, ids]
 
 (* netInputShape[net]: returns the input port shape as a List of
@@ -1566,50 +1566,25 @@ TFromNet[net_] := With[{shape = netInputShape[net]},
    is excluded for free. *)
 lamBodyTerm[lam_TTerm]   := THeapRead[TTermVal[lam]]
 
-(* === TFromNet input-slot set ============================================
-   A forward built over a CONCRETE input tensor -- TFromNet[net, x] with
-   x a TEN -- bakes that input in as an ordinary float TEN leaf, so the
-   graph cannot tell it apart from a trainable weight (the LAM form gets
-   this for free: its input is a bound TAG_VAR, not a TEN).  To keep the
-   forward-UOP form's TNetParams faithful, the OUTERMOST TFromNet[_, x]
-   records the input's VAL here; TNetParams subtracts any recorded input
-   VAL that is still a leaf of the queried forward.  No net is stored --
-   just "this VAL is an input, not a weight".  VALs are reissued from
-   zero on a heap rebuild, so clearHeapSideState (THVMLink.wl) wipes the
-   set; within one heap epoch the heap grows monotonically, so no live
-   weight's VAL ever collides with a stale input VAL.  withInputSlot is a
-   depth guard so a nested chain's intermediate term (passed as the input
-   of an inner TFromNet) is NOT mistaken for the user's input. *)
-$tFromNetInputSlots = <||>
-$inFromNetBuild     = False
-AppendTo[$heapSideStateClearers, Function[$tFromNetInputSlots = <||>]]
-SetAttributes[withInputSlot, HoldRest]
-withInputSlot[x_TTerm, body_] := If[ TrueQ[$inFromNetBuild],
-    body,
-    Block[{$inFromNetBuild = True},
-        If[ TTermTag[x] === $TagTEN, $tFromNetInputSlots[TTermVal[x]] = True];
-        body]]
+(* TNetParams[lam]: the trainable weight handles derived from the GRAPH --
+   the float-leaf TEN terms of the lifted LAM's body, in the C leaf-walk's
+   stable order.  These are the very tensors baked into the forward, so TSet
+   updates and TGrad cotangents flow back into it.  Same handles the old
+   Sow-registry returned (8 for LeNet); no net stored.
 
-(* trainable float leaves of a forward graph, minus any recorded input
-   slot still present (the input is a float TEN leaf of a forward built
-   over a concrete input, but is data to feed, not a weight). *)
-weightLeafTerms[graph_TTerm] := Select[
-    gradFloatLeafTerms[graph],
-    ! KeyExistsQ[$tFromNetInputSlots, TTermVal[#]] &]
-
-(* TNetParams[net]: the trainable weight handles derived from the GRAPH --
-   the float-leaf TEN terms reachable from `net`, in the C leaf-walk's stable
-   order.  These are the very tensors baked into the forward, so TSet updates
-   and TGrad cotangents flow back into it.  Same handles the old Sow-registry
-   returned (8 for LeNet); no net stored.  Accepts either a lifted LAM (walk
-   its body) or a forward UOP term directly (walk it, minus the recorded
-   input slot) -- the latter is the batched forward TNetTrain builds from the
-   NetChain and grads against.  TNetParams[net, x] drops a known input x
-   explicitly (e.g. when the input was built before the heap recorded it). *)
-TNetParams[net_TTerm] := weightLeafTerms[
-    If[TTermTag[net] === $TagLAM, lamBodyTerm[net], net]]
-TNetParams[net_TTerm, x_TTerm] := With[{xv = TTermVal[x]},
-    Select[TNetParams[net], TTermVal[#] =!= xv &]]
+   A network's parameters come from its STRUCTURE, not from analysing a
+   realized graph: the LAM's bound input is a TAG_VAR (a hole, never a float
+   TEN), so it is excluded for free, leaving exactly the weights -- the same
+   way tinygrad's get_parameters walks the model object's Tensor attributes
+   and never sees the input, which is only ever an argument (nn/state.py:112).
+   An APPLIED forward TFromNet[net, x] (x a concrete TEN) is an evaluation,
+   not a network: its input is baked in as a float leaf indistinguishable
+   from a weight, so it has no well-defined parameter set.  Lift with
+   TFromNet[net] (the LAM) and the input stays a bound variable. *)
+TNetParams::applied = "TNetParams expects a network (the TFromNet[net] LAM, whose input is a bound variable).  `1` is an applied forward TFromNet[net, x] with a concrete input baked in as a leaf, so it has no distinguished parameters; lift with TFromNet[net] instead.";
+TNetParams[lam_TTerm] := If[ TTermTag[lam] === $TagLAM,
+    gradFloatLeafTerms[lamBodyTerm[lam]],
+    (Message[TNetParams::applied, lam]; $Failed)]
 
 (* TNetParamInfo[lam]: the same handles paired with provenance.  Without the
    net we cannot recover the originating {Layer, Param}; we infer a minimal
@@ -1620,8 +1595,7 @@ paramKindFromShape[shape_List] := If[Length[shape] >= 2, "Weights", "Biases"]
 paramInfoOf[handles_List] := Function[t,
     <|"Term" -> t, "Layer" -> Missing["NotStored"],
       "Param" -> paramKindFromShape[TTensorShape[t]]|>] /@ handles
-TNetParamInfo[lam_TTerm]            := paramInfoOf[TNetParams[lam]]
-TNetParamInfo[net_TTerm, x_TTerm]   := paramInfoOf[TNetParams[net, x]]
+TNetParamInfo[lam_TTerm] := paramInfoOf[TNetParams[lam]]
 
 (* TNetInitialize[lam]: re-initialise the trainable weights IN PLACE --
    Glorot for weight matrices, zeros for biases -- straight into each
@@ -1634,8 +1608,7 @@ initParams[handles_List] := (
                 If[ Length[shape] >= 2, TGlorot[shape], TZeros[shape]]]]
     ] /@ handles;
 )
-TNetInitialize[lam_TTerm]          := (initParams[TNetParams[lam]]; lam)
-TNetInitialize[net_TTerm, x_TTerm] := (initParams[TNetParams[net, x]]; net)
+TNetInitialize[lam_TTerm] := (initParams[TNetParams[lam]]; lam)
 TTerm /: NetInitialize[lam_TTerm] := TNetInitialize[lam]
 
 (* A lifted LAM runs only at its lifted input shape (the movement-op dims and

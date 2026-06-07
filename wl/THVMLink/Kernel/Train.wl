@@ -221,9 +221,21 @@ inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Modu
 
 (* the trainable weights of a forward built over a concrete input slot: the
    float leaves of `fwd` minus the input slot `xSlot` (a float TEN leaf too,
-   but the data to feed, not a weight).  The forward-UOP TNetParams[fwd, x]
-   form does exactly this. *)
-trainableParams[fwd_, xSlot_TTerm] := TNetParams[fwd, xSlot]
+   but the data to feed, not a weight).  This is internal -- it KNOWS the
+   input slot, so it excludes it directly; the public TNetParams takes the
+   LAM (TFromNet[net]) where the input is a bound variable, not a concrete
+   forward. *)
+trainableParams[fwd_, xSlot_TTerm] := With[{xv = TTermVal[xSlot]},
+    Select[gradFloatLeafTerms[fwd], TTermVal[#] =!= xv &]]
+
+(* A TNetTrain-trained forward IS a known network: the training registry
+   recorded its input slot explicitly (for TNetPredict), so TNetParams on it
+   returns the trained weights by excluding that input -- the same result the
+   LAM form gives, for a forward that was built over a concrete input slot.
+   An UNregistered concrete forward stays an applied evaluation (NN.wl's
+   TNetParams messages on it); a LAM falls through to the structural form. *)
+TNetParams[fwd_TTerm] /; KeyExistsQ[$thvmTrainRegistry, TTermVal[fwd]] :=
+    trainableParams[fwd, $thvmTrainRegistry[TTermVal[fwd]]["Input"]]
 
 (* === inert training-loop core over a prebuilt batched forward ===
    `fwd` is the batched forward TTerm (logits), `params` its trainable
