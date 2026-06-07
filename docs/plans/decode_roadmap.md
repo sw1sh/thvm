@@ -52,10 +52,23 @@ true at this layer -- but unwired end to end.
 
 ### Risks / hard parts
 
-- The `{S, S}` causal mask + attention (symbolic on BOTH axes).
+- **The inner-symbolic addr layer (M2.5 -- the `{S, S}` blocker).** An OUTER
+  symbolic dim (`{S, dim}`, all of GPT-2 so far) works because the kvar never
+  enters a stride product. An INNER symbolic dim (`{A, S}`, and the `{S, S}`
+  attention scores) does: a tensor's outer stride = product of its inner
+  extents, and the lift bakes that coefficient straight from the raw kvar
+  extent -> a kvar-packed stride -> wild addresses (a `{3, S}` reduce segfaults
+  in `uwalk_load_f64`). The fix is to split every extent read by intent:
+  **stride / sizing / addr-coefficient -> `kvar_extent_static` (hi); loop bound
+  -> `kvar_extent_runtime`**. `view_create` + `shape_numel` already do this;
+  the remaining ~two dozen `uop_range_extent` sites (the lift's addr builder in
+  `rangeify_unified.c` / `indexing.c`, plus the 12 `render_uop` codegen sites)
+  must be audited the same way. DONE so far: `view_create` strides
+  (`tests/test_sym_inner.c`). This is the real content of the `{S, S}` mask +
+  attention work below.
 - Buffers sized at the upper bound (memory ~ `nCtx`, not `S`) unless dynamic alloc.
-- Every backend must bind the kvar; the CPU interpreter path (`uop_walk`) has no
-  kvar handling yet.
+- Every backend must bind the kvar; cpu-jit / Metal / CUDA still pass the bound
+  to the compiled loop (the interpreter reads it -- M1).
 
 ### Milestone ladder
 
