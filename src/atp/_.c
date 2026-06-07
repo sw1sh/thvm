@@ -8585,28 +8585,46 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     return ATP_RUNNING;
   }
 
-  // Unified FT path: normalize both sides on FT cells, then test
-  // ft_eq (syntactic), ft_ac_eq (AC-modulo if a mask is registered),
-  // and kbo_eq (Term-side belt-and-braces, picks up structural
-  // identities ft_eq might miss across encoding boundaries).
-  atp_ft_mirror_ensure(s);
-  AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
-  AtpFtCell *fl_in = ft_from_term(gft, s->goal_lhs, 0);
-  AtpFtCell *fr_in = ft_from_term(gft, s->goal_rhs, 0);
-  AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, NORM_CAP);
-  AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, NORM_CAP);
-  Term l = ft_to_term(fl);
-  Term r = ft_to_term(fr);
+  // FT path for AC-mask=0; Term path otherwise.  Earlier commit
+  // 2133702a tried to unify on FT via ft_ac_eq, but ac-bool-idem-embed
+  // still regresses to QUEUE_EMPTY iters=2 because the FT NF reaches
+  // a different fixpoint than the Term NF on the f(x,x)=x reduction
+  // trajectory.  Keep the Term-side path for AC workloads until the
+  // FT normalize semantics match the Term-side leftmost-outermost
+  // descent under AC.
+  Term l, r;
+#ifdef THVM_ATP_AC
+  if (thvm_atp_get_ac_mask() != 0ull) {
+    l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
+                              s->n_rules, NORM_CAP);
+    r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
+                              s->n_rules, NORM_CAP);
+  } else
+#endif
+  {
+    atp_ft_mirror_ensure(s);
+    AtpFt *gft = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *fl_in = ft_from_term(gft, s->goal_lhs, 0);
+    AtpFtCell *fr_in = ft_from_term(gft, s->goal_rhs, 0);
+    AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, NORM_CAP);
+    AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, NORM_CAP);
+    l = ft_to_term(fl);
+    r = ft_to_term(fr);
+    if (ft_eq(fl, fr)) {
+      s->goal_lhs_nf = l;
+      s->goal_rhs_nf = r;
+      return ATP_PROVED;
+    }
+  }
   s->goal_lhs_nf = l;
   s->goal_rhs_nf = r;
-  if (ft_eq(fl, fr)) return ATP_PROVED;
+  if (kbo_eq(l, r)) return ATP_PROVED;
 #ifdef THVM_ATP_AC
   if (thvm_atp_get_ac_mask() != 0ull) {
     AtpAcInfo ac = { .ac_mask = thvm_atp_get_ac_mask() };
-    if (ft_ac_eq(fl, fr, &ac)) return ATP_PROVED;
+    if (atp_ac_eq(l, r, &ac)) return ATP_PROVED;
   }
 #endif
-  if (kbo_eq(l, r)) return ATP_PROVED;
 #ifdef ATP_MNF
   // Milestone 10: the MNF bidirectional search AUGMENTS the single-NF
   // check -- it does not replace it.  goal_lhs seeds a GREEN front,
