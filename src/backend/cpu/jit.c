@@ -261,8 +261,27 @@ static u64 cpu_src_hash(const char *src) {
 
 // Try the JIT path; returns 1 on success, 0 if the kernel can't be
 // JITted (caller dispatches via the interpreter).
+// A narrow float (FP16 / BF16 / FP8: a float dtype under 4 bytes) is
+// rendered by the CPU codegen as "float" (promote-to-f32) but WITHOUT the
+// fp_convert at load/store -- the generated kernel casts the packed
+// <4-byte buffer to float* and reads at the wrong width, returning
+// garbage.  No faithful CPU narrow-float kernel path exists, so decline
+// the JIT and let the caller dispatch via the scalar interpreter
+// (uop_walk), which loads/stores through fp16_to_f32 / f32_to_fp16
+// correctly.  Metal / CUDA render native half and gate separately, so
+// they are unaffected.
+static int cpu_jit_narrow_float(u32 dt) {
+  return dtype_is_float(dt) && dtype_itemsize(dt) < 4;
+}
+
 fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (!cg_supports(ke)) return 0;
+  if (cpu_jit_narrow_float(ke->output_dtype)) return 0;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes != NULL && cpu_jit_narrow_float(ke->input_dtypes[i])) {
+      return 0;
+    }
+  }
   // Per-kid fast path: if this kid was already compiled to a JIT fn
   // pointer, reuse it directly -- skips cpu_jit_render_canon (heap
   // walk into a tmpfile) and the source hash entirely.  The kid -> fn
