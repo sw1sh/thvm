@@ -706,6 +706,29 @@ static int atp_env_off(const char *name) {
   return (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
 }
 
+// S-expression-style term print to FILE *.  Variables print as "Vn",
+// constants as "Cs", CTRs as "(s arg1 arg2 ...)".  Used by the env-
+// gated CP-trace dump (THVM_ATP_CP_PICK_TRACE) to compare thvm's
+// CP-selection trajectory against external provers' verbose dumps.
+static void atp_dbg_print_term(FILE *fp, Term t) {
+  if (t == 0) { fputs("()", fp); return; }
+  u32 tag = term_tag(t);
+  if (tag == TAG_FVR) { fprintf(fp, "V%u", term_ext(t)); return; }
+  if (tag == TAG_NUM) { fprintf(fp, "#%u", term_ext(t)); return; }
+  if (tag == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n == 0u) { fprintf(fp, "C%u", term_ext(t)); return; }
+    fprintf(fp, "(C%u", term_ext(t));
+    for (u32 i = 0; i < n; i++) {
+      fputc(' ', fp);
+      atp_dbg_print_term(fp, term_ctr_at(t, i));
+    }
+    fputc(')', fp);
+    return;
+  }
+  fprintf(fp, "?%u/%u", tag, term_ext(t));
+}
+
 #ifdef THVM_ATPFT_RULES
 // Stage 4 verification probe (env THVM_ATPFT_VERIFY=1).  After every
 // rule slot k is written, re-convert the live Term pair through the
@@ -6270,6 +6293,24 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // Terms for the caller to normalize.
   acp_unpack(s->cp_packed[j], lhs_out, rhs_out);
   s->last_popped_trace = s->cp_trace[j];
+
+  // Env-gated CP-selection trajectory dump for parity comparison vs
+  // external provers (WaldmeisterProcess / VampireProcess).  Emits
+  // one line per selected CP: pick number, queue index, sequence id,
+  // priority, current rule count, then S-expr LHS/RHS.  Diff against
+  // `wmcli -:l0 -P verbose` finds the algorithmic divergence point.
+  {
+    static int cp_pick_trace = -1;
+    if (cp_pick_trace < 0) cp_pick_trace = atp_env_on("THVM_ATP_CP_PICK_TRACE");
+    if (cp_pick_trace) {
+      fprintf(stderr, "CPSEL pick=%u j=%u seq=%u pri=%u rules=%u lhs=",
+              s->cp_select_count, j, s->cp_seq[j], s->cp_pri[j], s->n_rules);
+      atp_dbg_print_term(stderr, *lhs_out);
+      fputs(" rhs=", stderr);
+      atp_dbg_print_term(stderr, *rhs_out);
+      fputc('\n', stderr);
+    }
+  }
 #ifdef ATP_FV_INDEX
   // 7d: the popped CP leaves the queue -- drop it from the index so a
   // later subsumption query never matches a stale, no-longer-queued
