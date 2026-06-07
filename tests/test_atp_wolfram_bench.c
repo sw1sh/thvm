@@ -487,6 +487,11 @@ int main(int argc, char **argv) {
       // interreduction against the rule set.  +6% on AndAssoc post-fix
       // (iter 160); part of standard Waldmeister.
       thvm_atp_set_cp_set_interreduce(s, 1u);
+      // IR_PERIOD=4 sweet spot under INCR_IR (a6f31247): mccune sweep
+      // shows IR=1 best (8.2s) but hurts thm (0.6s vs 0.3s); IR=4 keeps
+      // mccune at 9.9s (-7% vs IR=16) with thm at 0.3s (unchanged).
+      // env THVM_ATP_CP_SET_IR_PERIOD overrides if user wants IR=1 etc.
+      if (s->cp_set_ir_period == 0u) s->cp_set_ir_period = 4u;
       // Backward subsumption (WM standard): scan existing rules and
       // soft-delete any subsumed by the newly-added rule.  +30% on
       // AndAssoc post-fix (iter 162) -- the kill churn pays off because
