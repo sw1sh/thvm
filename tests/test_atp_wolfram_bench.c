@@ -528,6 +528,12 @@ int main(int argc, char **argv) {
       //   mccune drops from 14.4s -> 10.5s under the same flip.
       // Mix is byte-identical to WM's CH_MixWeight formula.
       thvm_atp_set_cp_weight_mode(s, ATP_CP_WEIGHT_MIX);
+      // INCR_IR: incremental CP-set interreduce (0a98478e).  Sound by
+      // construction; verified PROVED on agioc/glid/mccune/thm/cpl1/subl2
+      // (thm even slightly faster 0.4s -> 0.3s).  On wolfram with IR=1,
+      // gives +58% rules in 60s (219 -> 346).  Safe to enable by default
+      // in the bench preset.
+      thvm_atp_set_use_incr_ir(s, 1u);
     }
   }
   // THVM_ATP_INITIAL_ULTIMATE=1: port of WM's `initial = ultimate` DEF
