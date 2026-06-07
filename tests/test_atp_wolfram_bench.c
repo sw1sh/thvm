@@ -239,6 +239,36 @@ static void goal_robbins(Term *l, Term *r) {
   *r = p;
 }
 
+// AbelianGroupAxioms (4 equations) reused via L_AND as group op `f` and
+// L_NOT as inverse `inv`.  Identity element reuses L_R (a free constant
+// label that isn't touched by Sheffer goals).  This is the
+// AbelianGroup/InverseOfComposite conjecture from AxiomaticTheory:
+//   inv(f(p, q)) = f(inv(q), inv(p))
+// over the axioms:
+//   f(f(x,y), z)   = f(x, f(y,z))      -- associativity
+//   f(x, y)        = f(y, x)           -- commutativity
+//   f(x, e)        = x                 -- right identity (e = L_R const)
+//   f(x, inv(x))   = e                 -- right inverse
+// Used to dump the CP-pick trajectory (THVM_ATP_CP_PICK_TRACE=1) and
+// compare against wmcli's trace from the matching .pr file under
+// tools/baselines/wm_pr/AbelianGroupAxioms__InverseOfComposite.pr -- the
+// first divergent pick is the algorithmic-parity mismatch point.
+#define L_AG_E L_R
+static void aboig_axioms(Term *l1, Term *r1, Term *l2, Term *r2,
+                         Term *l3, Term *r3, Term *l4, Term *r4) {
+  Term x = fv(0), y = fv(1), z = fv(2);
+  Term e = konst(L_AG_E);
+  *l1 = and_op(and_op(x, y), z); *r1 = and_op(x, and_op(y, z));
+  *l2 = and_op(x, y);            *r2 = and_op(y, x);
+  *l3 = and_op(x, e);            *r3 = x;
+  *l4 = and_op(x, not_op(x));    *r4 = e;
+}
+static void goal_aboig_ioc(Term *l, Term *r) {
+  Term p = konst(L_P), q = konst(L_Q);
+  *l = not_op(and_op(p, q));
+  *r = and_op(not_op(q), not_op(p));
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -635,6 +665,13 @@ int main(int argc, char **argv) {
     thvm_atp_add_equation(s, r_l1, r_r1);
     thvm_atp_add_equation(s, r_l2, r_r2);
     thvm_atp_add_equation(s, r_l3, r_r3);
+  } else if (strcmp(goal, "agioc") == 0) {
+    Term a1l,a1r,a2l,a2r,a3l,a3r,a4l,a4r;
+    aboig_axioms(&a1l,&a1r, &a2l,&a2r, &a3l,&a3r, &a4l,&a4r);
+    thvm_atp_add_equation(s, a1l, a1r);
+    thvm_atp_add_equation(s, a2l, a2r);
+    thvm_atp_add_equation(s, a3l, a3r);
+    thvm_atp_add_equation(s, a4l, a4r);
   } else {
     thvm_atp_add_equation(s, axiom_lhs(), fv(2));
   }
@@ -658,6 +695,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "andassocu")==0) goal_andassocu(&gl, &gr);
   else if (strcmp(goal, "mccune")  == 0) goal_mccune(&gl, &gr);
   else if (strcmp(goal, "robbins") == 0) goal_robbins(&gl, &gr);
+  else if (strcmp(goal, "agioc") == 0)   goal_aboig_ioc(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
