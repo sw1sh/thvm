@@ -189,3 +189,39 @@ interreduce, CP-batch normalization, or term-index sharing.  Out
 of scope for this trace-diff session; the algorithmic ports
 (Mix + precedence + DB_U + IU) are correct and aligned with WM's
 WM-default classification.
+
+## Profile hotspot (THVM_ATP_PROFILE=1 on wolfram at 10s)
+
+  IR_PERIOD=16 (default):
+    pop-norm     0.03s ( 0%)
+    cp-gen       2.29s (23%)
+    push-norm    1.11s (11%) [1.7us/cp]
+    interreduce  5.61s (56%)  <-- hotspot
+    78 rules / 21k steps  = 7.8 rules/sec
+
+  IR_PERIOD=64:
+    cp-gen       5.76s (58%)  <-- bottleneck migrates
+    interreduce  drops
+    139 rules / 10k steps = 13.9 rules/sec
+
+  WM CLI: 661 rules / 2.5s = 264 rules/sec
+
+The bottleneck migrates between cp-gen and interreduce depending
+on IR_PERIOD, but absolute rule throughput stays in 7-14 rules/sec.
+Bridging the 15-30x gap to WM needs:
+
+1. **Incremental rule-database interreduce**: only re-normalize
+   queued CPs whose subterms could match the newly-added rule's
+   LHS.  Use the discrimination tree to find affected CPs in
+   O(Q*log) instead of O(Q*R).  ~99% interreduce-cost reduction.
+
+2. **CP-batch normalization**: amortize term-flattening + index
+   setup across many CPs from the same rule pair.  Reduces
+   cp-gen per-CP overhead.
+
+3. **Term-index sharing**: rule_index + unorient_index rebuild
+   currently fires per-rule-change.  Lazy / incremental rebuild
+   would avoid the 3M wasted unorient-step calls (95% memo hit
+   means most work is amortized but the lookup overhead stays).
+
+These are engine-perf projects, multiple hours each.
