@@ -139,3 +139,27 @@ either:
 (b409b6ef) + precedence flip (e3334d46).  WL parity TSV unaffected
 because WL's preset was already on Mix.  The C-bench WM-faithful
 preset is now correctly aligned.
+
+## Phase 6 -- the wolfram-cracking gap
+
+WM CLI cracks `WolframAxioms__Commutativity` in **2.5s** with 661
+rules / 738k critical pairs.  thvm `wolfram` bench (same axiom +
+goal) runs 90s+ at 80k steps, 529 rules, never closes.
+
+Root cause: WM's default config sets BOTH `initial=ultimate` AND
+`database=ultimate` (Parameter.c:166).  The second flag means CPs
+derived from chasing the rule-database during the CP-set IR sweep
+ALSO get ULTIMATE classification (heap-front).  This creates a
+depth-first bias -- newly-derived CPs are processed BEFORE older
+axiom-CPs.
+
+thvm has `INITIAL_ULTIMATE` (port of WM's first flag) but no
+`DATABASE_ULTIMATE` equivalent.  Without it, thvm's saturator stays
+breadth-first on the axiom-CP-set and doesn't dive into the deep
+derived chain that contains the closure.
+
+**Port target**: tag CPs derived during atp_cp_set_interreduce (or
+during the per-step "chase" cycle) with the same ultimate bit
+INITIAL_ULTIMATE uses.  See `s->cp_ultimate` field +
+`atp_cp_before`.  The cascade should match WM's depth-first
+trajectory on hard cases like wolfram.
