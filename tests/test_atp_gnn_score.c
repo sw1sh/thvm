@@ -292,6 +292,22 @@ int main(void) {
     thvm_atp_clear_gnn_scorer();
   }
 
+  // Bucketing invariance: thvm_atp_gnn_score_batch buckets B and N to
+  // powers of two so the JIT kernel source is identical across re-ranks
+  // (the CPU on-disk dylib cache then hits instead of recompiling every
+  // time the live-queue size changes).  Padded rows are masked out of
+  // the pool and have no edges, so a CP's score must be IDENTICAL whether
+  // it is scored alone (B=1, padded to bucket 4) or inside a batch (B=3).
+  TEST_BEGIN("atp/gnn_score/bucketing-invariance");
+  {
+    CHECK_EQ(thvm_atp_set_gnn_scorer(blob, blob_len), 1);
+    float solo[1], batch3[3];
+    CHECK_EQ(thvm_atp_gnn_score_batch(&lhs[0], &rhs[0], 1u, solo), 1);
+    CHECK_EQ(thvm_atp_gnn_score_batch(lhs, rhs, 3u, batch3), 1);
+    CHECK(fabsf(solo[0] - batch3[0]) < 1.0e-6f);
+    thvm_atp_clear_gnn_scorer();
+  }
+
   // A model-free call is a no-op (returns 0), and clear unloads.
   TEST_BEGIN("atp/gnn_score/clear-and-noop");
   thvm_atp_clear_gnn_scorer();

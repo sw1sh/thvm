@@ -5898,6 +5898,19 @@ static u32 atp_gnn_in_dim(const AtpGnnScorer *m, u32 r) {
   return (r == 0u) ? ATP_CPG_FEAT_DIM : m->hidden;
 }
 
+// Round up to the next power of two.  The GCN score-batch buckets its
+// batch (B) and per-graph node (N) dims to powers of two so the rendered
+// kernel source is identical across re-ranks with different live-queue
+// sizes -- which makes the CPU JIT's on-disk dylib cache hit (one ~2s
+// compile per distinct (B,N) bucket, then ~5ms per re-rank, vs a 2s
+// recompile every time the queue size changed).  Padded rows stay zero
+// and their scores are discarded, so bucketing is numerically invisible.
+static u32 atp_gnn_pow2_ceil(u32 v) {
+  u32 p = 1u;
+  while (p < v) p <<= 1;
+  return p;
+}
+
 // Total flat element count for an (R, H) model - the on-wire blob
 // length minus the leading 2 header words.
 static u32 atp_gnn_param_count(u32 rounds, u32 hidden) {
@@ -6023,16 +6036,24 @@ fn int thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
     return 0;
   }
   const AtpGnnScorer *m = &g_atp_gnn;
-  const u32 F = ATP_CPG_FEAT_DIM, H = m->hidden, R = m->rounds, B = n;
+  const u32 F = ATP_CPG_FEAT_DIM, H = m->hidden, R = m->rounds;
+  const u32 n_real = n;
 
   // 1) Build every CP graph; track the max node count for padding.
-  AtpCpGraph *gs = (AtpCpGraph *)malloc((size_t)n * sizeof(AtpCpGraph));
+  AtpCpGraph *gs = (AtpCpGraph *)malloc((size_t)n_real * sizeof(AtpCpGraph));
   if (gs == NULL) return 0;
-  u32 N = 1u;
-  for (u32 i = 0u; i < n; i++) {
+  u32 maxN = 1u;
+  for (u32 i = 0u; i < n_real; i++) {
     if (!thvm_atp_cp_graph(lhs[i], rhs[i], &gs[i])) { free(gs); return 0; }
-    if (gs[i].n_nodes > N) N = gs[i].n_nodes;
+    if (gs[i].n_nodes > maxN) maxN = gs[i].n_nodes;
   }
+
+  // Bucket the batch (B) and node (N) dims to powers of two (floors of 4
+  // and 16) so the GCN kernel source is identical across re-ranks and the
+  // CPU JIT's on-disk dylib cache hits -- see atp_gnn_pow2_ceil.  Real
+  // rows fill [0, n_real) / [0, n_nodes); the padded tail stays zero.
+  const u32 B = atp_gnn_pow2_ceil(n_real < 4u  ? 4u  : n_real);
+  const u32 N = atp_gnn_pow2_ceil(maxN   < 16u ? 16u : maxN);
 
   // 2) Pad into host arrays: X (B,N,F), A (B,N,N row-normalised adjacency
   //    with self-loops + merged edge types), MaskRow (B,1,N), NNodes (B,1,1).
@@ -6045,7 +6066,11 @@ fn int thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
     free(gs); free(xArr); free(aArr); free(maskArr); free(nnArr);
     return 0;
   }
-  for (u32 bi = 0u; bi < B; bi++) {
+  // Padded batch rows (bi >= n_real) keep NNodes = 1 so the pooled-mean
+  // reciprocal is finite (recip(0) would be inf -> nan); their all-zero
+  // X/A/mask make the row inert and its discarded score harmless.
+  for (u32 bi = n_real; bi < B; bi++) nnArr[bi] = 1.0f;
+  for (u32 bi = 0u; bi < n_real; bi++) {
     const AtpCpGraph *g = &gs[bi];
     u32 nn = g->n_nodes;
     nnArr[bi] = (float)nn;
@@ -6128,7 +6153,9 @@ fn int thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
     if (out != NULL) {
       TENS[tid].backend->buf_read(TENS[tid].buf_id, out,
                                   (u64)B * 2u * sizeof(float));
-      for (u32 i = 0u; i < B; i++) {
+      // Only the first n_real rows are real CPs; the bucketed-padding
+      // tail is discarded.
+      for (u32 i = 0u; i < n_real; i++) {
         out_scores[i] = out[(size_t)i * 2u + 1u] - out[(size_t)i * 2u + 0u];
       }
       free(out);
