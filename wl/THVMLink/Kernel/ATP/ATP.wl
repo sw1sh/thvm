@@ -155,7 +155,7 @@ $atpRunProofFn := $atpRunProofFn = load[
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
      Integer, Integer, Integer, Integer, Integer, Integer, {Integer, 1},
-     Integer, Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer, Integer, Integer},
     "NumericArray"
 ]
 
@@ -1259,7 +1259,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     fifoTiebreak_, recordNorm_, useLRS_, useSOS_,
     useFwdSub_, useBwdSub_, useBwdDemod_, symbolWeightsSpec_,
     varWeight_, randomRatio_, randomSeed_, kwsMode_,
-    lazyNormalize_] := Block[{
+    lazyNormalize_, coopWeight_, coopRatio_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
@@ -1272,7 +1272,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
         recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod,
         symbolWeightsArr, varWeight, randomRatio, randomSeed, kwsMode,
-        lazyNormalize];
+        lazyNormalize, coopWeight, coopRatio];
     (* C engine returns LibraryFunctionError on memory-guard abort
        (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
        hard-stop conditions.  Bail BEFORE the structural part extraction
@@ -2538,6 +2538,19 @@ atpSelectionRatioOpt[o_Association] := With[{n = Lookup[o, "SelectionRatio", 0]}
    0/Automatic = off. *)
 atpAutoMaxWeightOpt[o_Association] := With[{b = Lookup[o, "AutoMaxWeight", 0]},
     If[ IntegerQ[b] && b > 0, b, 0]];
+(* ENIGMA "coop": interleave the primary CP weight (e.g. the learned
+   scorer) with a hand-tuned SECONDARY weight, the WM CPdimension d=1
+   mechanism (thvm_atp_set_w2).  "CoopWeight" -> a CriticalPairWeight name
+   names the secondary (default Automatic = -1 = off); "CoopRatio" -> n
+   makes every n-th selection use the secondary instead of the primary.
+   Pairing a "Learned" primary with a "Gt" secondary mirrors real ENIGMA,
+   which selects cooperatively with the base heuristic, not by the model
+   alone.  Note: the secondary uses the engine's structural weight base,
+   so naming "Learned" here is a no-op (it is not the learned scorer). *)
+atpCoopWeightOpt[o_Association] := Lookup[$AtpCpWeightCodes,
+    Lookup[o, "CoopWeight", Automatic], -1];
+atpCoopRatioOpt[o_Association] := With[{n = Lookup[o, "CoopRatio", 0]},
+    If[ IntegerQ[n] && n > 0, n, 0]];
 (* "RandomRatio" -> n: Vampire-style random CP-selection.  When n > 0,
    every n-th CP selection picks a uniformly-random queued CP via a
    deterministic xorshift64 stream (seedable via "RandomSeed").  Default
@@ -2818,11 +2831,17 @@ $AtpPresetDefaults = <|
        ranking operates on a tractable, reduced queue.  Completeness is
        preserved by the engine's periodic FIFO selection regardless of
        the learned score, so a cold/over-fit model only slows a proof,
-       never loses one.  See docs/plans/atp_ml_roadmap.md. *)
+       never loses one.  Coops by default ("CoopWeight" -> "Gt",
+       "CoopRatio" -> 2): every 2nd selection uses the hand-tuned GT
+       weight, the rest the learned scorer -- pure-learned selection is
+       markedly slower (measured), so this mirrors real ENIGMA's
+       cooperative selection.  Override with "CoopRatio" -> 0 for
+       pure-learned.  See docs/atp/ml_guidance.md. *)
     "ENIGMA" -> <|
         "CriticalPairWeight" -> "Learned", "Ordering" -> "KBO",
         "AutoPrecedence" -> True, "UnfailingCP" -> True,
-        "RHSInterreduce" -> True, "AutoMaxWeight" -> 20|>
+        "RHSInterreduce" -> True, "AutoMaxWeight" -> 20,
+        "CoopWeight" -> "Gt", "CoopRatio" -> 2|>
 |>;
 
 (* Per-preset default for the GoalDirected (MNF front) toggle.  Mostly
@@ -2864,7 +2883,7 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o],
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
          atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o],
-         atpLazyNormalizeOpt[o]}
+         atpLazyNormalizeOpt[o], atpCoopWeightOpt[o], atpCoopRatioOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -3393,6 +3412,27 @@ atpAxiomParts[ax_] := Block[{vars, eq, l, r},
     eq = eq /. Inactive[Equal] -> Equal;
     If[ Head[eq] =!= Equal || Length[eq] =!= 2, Return[$Failed]];
     {l, r} = List @@ eq;
+    (* Also extract Pattern-bound variables from an UNQUANTIFIED axiom
+       (Pattern[v, Blank[]] form).  atpProveBundle passes axioms post-
+       unquantifyFormula + CanonicalizePatterns (atpProveFromTheory
+       line ~4601), so the ForAll wrapper is gone and the Switch above
+       yields vars = {}.  Without this fallback, every symbol looks
+       like an operator -- atpIsVar always false -- and the Sheffer /
+       Boolean / AC discriminators in atpAnalyzeStructure can never
+       fire.  Consequence: Method->Automatic loses its tuned schedule
+       and falls back to the generic $AtpSchedule (debugged via
+       Hillman/Commutativity 27-vs-57 dispatch divergence). *)
+    If[ vars === {},
+        vars = DeleteDuplicates @ Cases[eq,
+            Verbatim[Pattern][s_Symbol, _] :> s,
+            {0, Infinity}];
+        (* Strip the Pattern wrappers from l/r too so downstream
+           atpBinHead etc. don't misclassify Pattern[a, Blank[]] as a
+           binary op (its 2 children make `MatchQ[Pattern[a,_], _[_,_]]`
+           true). *)
+        l = l /. Verbatim[Pattern][s_Symbol, _] :> s;
+        r = r /. Verbatim[Pattern][s_Symbol, _] :> s
+    ];
     {vars, l, r}
 ];
 
