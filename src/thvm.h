@@ -40,6 +40,9 @@
 #include <math.h>        // INFINITY / fabsf etc. (uop_walk reduce init)
 #include <stdatomic.h>   // _Atomic typing for the per-context counters
 #include <sys/mman.h>    // mmap/munmap for the big heap + book arenas
+#include <sys/stat.h>    // fstat for disk-tensor file size validation
+#include <fcntl.h>       // open() for the mmap-backed disk tensor
+#include <unistd.h>      // close/sysconf(_SC_PAGESIZE) for disk-tensor mmap
 
 // Windows (CPU-only mingw cross-build) lacks the POSIX/glibc functions
 // the runtime uses; map them to Win32 equivalents.  No-op elsewhere.

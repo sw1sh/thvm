@@ -2807,5 +2807,66 @@ VerificationTest[
     TestID -> "ATP/enigma/gnn-score"
 ]
 
+(* TAtpSaveGnnScorer -> TAtpLoadGnnScorer round-trips a trained GCN
+   through a .safetensors file (each weight array a named tensor; the
+   scalar config in __metadata__).  The reloaded weights are bit-
+   identical to the originals, so the engine sees the same model. *)
+VerificationTest[
+    Module[{ds, r, model, path, m2},
+        ds = <|"Graphs" -> {
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], e]],
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, e], a]],
+            TAtpCpGraph[Inactive[Equal][a, a]],
+            TAtpCpGraph[Inactive[Equal][b, b]]},
+            "Labels" -> {1, 1, 0, 0}|>;
+        r = TAtpTrainGnn[ds, "Hidden" -> 8, "Rounds" -> 2, MaxTrainingRounds -> 80];
+        model = r["Model"];
+        path = FileNameJoin[{$TemporaryDirectory,
+            "thvm_gcn_" <> ToString[$ProcessID] <> ".safetensors"}];
+        TAtpSaveGnnScorer[model, path];
+        m2 = TAtpLoadGnnScorer[path];
+        Quiet @ DeleteFile[path];
+        {m2["Rounds"] === model["Rounds"], m2["Hidden"] === model["Hidden"],
+         m2["W1"] === model["W1"], m2["Ws"] === model["Ws"],
+         m2["Bh"] === model["Bh"], m2["Wout"] === model["Wout"],
+         m2["Bout"] === model["Bout"]}],
+    {True, True, True, True, True, True, True},
+    TestID -> "ATP/enigma/gnn-safetensors-roundtrip"
+]
+
+(* TAtpSetGnnScorer accepts a .safetensors path: it loads the model
+   (lazy mmap-backed) and pushes it to the C engine.  Returns True. *)
+VerificationTest[
+    Module[{ds, r, path, ok},
+        ds = <|"Graphs" -> {
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], e]],
+            TAtpCpGraph[Inactive[Equal][a, a]]},
+            "Labels" -> {1, 0}|>;
+        r = TAtpTrainGnn[ds, "Hidden" -> 4, "Rounds" -> 1, MaxTrainingRounds -> 30];
+        path = FileNameJoin[{$TemporaryDirectory,
+            "thvm_gcn_set_" <> ToString[$ProcessID] <> ".safetensors"}];
+        TAtpSaveGnnScorer[r["Model"], path];
+        ok = TAtpSetGnnScorer[path];
+        TAtpSetGnnScorer[Clear];
+        Quiet @ DeleteFile[path];
+        ok],
+    True,
+    TestID -> "ATP/enigma/gnn-set-from-safetensors-path"
+]
+
+(* The pretrained GCN ships as a paclet asset; TAtpGnnScorerAsset[]
+   resolves it and TAtpSetGnnScorer[assetPath] loads it. *)
+VerificationTest[
+    Module[{ap},
+        ap = TAtpGnnScorerAsset[];
+        If[ MissingQ[ap],
+            Missing["NotBundled"],     (* asset not built in this checkout *)
+            {FileExistsQ[ap], TAtpSetGnnScorer[ap]}
+        ]] /. {True, True} -> "loaded",
+    "loaded",
+    TestID -> "ATP/enigma/gnn-asset-loads"
+]
+TAtpSetGnnScorer[Clear];
+
 (* Reset so later tests / sessions see the baked-in scorer. *)
 TAtpSetLearnedScorer[Clear];

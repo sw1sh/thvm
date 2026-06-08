@@ -260,6 +260,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 
 // === tensor/ ===
 #include "tensor/alloc.c"
+#include "tensor/mmap.c"
 #include "tensor/incref.c"
 #include "tensor/release.c"
 #include "tensor/mark_buf_preserved.c"

@@ -218,6 +218,7 @@ TESTS := \
   $(BIN)/test_dup_lam \
   $(BIN)/test_lam_era \
   $(BIN)/test_tensor \
+  $(BIN)/test_disk_tensor \
   $(BIN)/test_uop \
   $(BIN)/test_uop_index \
   $(BIN)/test_uop_index_simplify \

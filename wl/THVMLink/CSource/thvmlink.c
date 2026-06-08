@@ -1453,6 +1453,40 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na_typed(WolframLibraryData libData, 
   return LIBRARY_NO_ERROR;
 }
 
+// Lazy mmap-backed disk tensor: map [byte_offset, byte_offset + nbytes)
+// of `path` read-only and wrap it as a CPU TAG_TEN of the given dtype +
+// shape, via the runtime's thvm_tensor_mmap (src/tensor/mmap.c).  This is
+// the WL surface for tinygrad's DISK device; TSafeLoad builds one of
+// these per tensor at its data_offset, so a .safetensors file's weights
+// are paged in on demand rather than read up front.  The mapping is
+// munmap'd when the tensor's buffer refcount drops to zero.
+//
+// args[0] = path (UTF8String), args[1] = byte_offset, args[2] = nbytes,
+// args[3] = dtype code (DT_*), args[4] = shape (Integer MTensor).
+EXTERN_C DLLEXPORT int thvm_wl_tensor_mmap(WolframLibraryData libData, mint argc,
+                                           MArgument *args, MArgument res) {
+  (void)argc;
+  char *path        = MArgument_getUTF8String(args[0]);
+  mint  byte_offset = MArgument_getInteger(args[1]);
+  mint  nbytes      = MArgument_getInteger(args[2]);
+  mint  dtype_arg   = MArgument_getInteger(args[3]);
+  MTensor sh        = MArgument_getMTensor(args[4]);
+
+  mint *shape_dims = libData->MTensor_getIntegerData(sh);
+  mint  shape_rank = libData->MTensor_getFlattenedLength(sh);
+
+  u32 dims[MAX_DIM];
+  u32 ndim = (shape_rank < (mint)MAX_DIM) ? (u32)shape_rank : (u32)MAX_DIM;
+  for (u32 i = 0u; i < ndim; i++) dims[i] = (u32)shape_dims[i];
+
+  Term term = thvm_tensor_mmap(path, (u64)byte_offset, (u64)nbytes,
+                               (u32)dtype_arg, ndim, dims);
+  libData->UTF8String_disown(path);
+  if (term == 0) return LIBRARY_FUNCTION_ERROR;
+  MArgument_setInteger(res, (mint)term);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_tensor_shape(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)libData; (void)argc;

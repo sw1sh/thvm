@@ -80,7 +80,13 @@ TAtpGnnScore::usage = "TAtpGnnScore[model, dataset] scores a graph dataset (TAtp
 
 TFindProofReranked::usage = "TFindProofReranked[conjecture, axioms, model] proves the conjecture while re-ranking the critical-pair queue with a trained GNN `model` (the \"Model\" from TAtpTrainGnn): it drives the C saturation in chunks of \"RerankPeriod\" steps and, between chunks, pulls the live queued critical pairs, encodes each to its anonymised graph, scores them with TAtpGnnScore, and pushes GNN-derived priorities back into the engine's selection heap.  Returns the status string (\"PROVED\" / \"TIMEOUT\" / \"QUEUE_EMPTY\" / ...).  This is the ENIGMA inference loop -- the GNN guides selection on a live proof -- realised as a WL-driven amortised eval over the persistent-handle bridge.  Completeness is preserved (re-ranking only permutes selection order; the engine's periodic FIFO pick still fires).  Options: \"RerankPeriod\" (steps between re-ranks, default 200), MaxSteps (default 30000), \"CriticalPairWeight\" (the base weight for newly-generated CPs between re-ranks, default \"Gt\"), \"Ordering\" (\"KBO\" default / \"LPO\"), \"AutoPrecedence\" (default True), \"QueueCap\".";
 
-TAtpSetGnnScorer::usage = "TAtpSetGnnScorer[model] pushes a trained GCN model (the \"Model\" Association returned by TAtpTrainGnn) into the C ATP engine, so a persistent proof handle with a non-zero re-rank period (TFindProofGnnReranked) re-ranks the critical-pair queue by running the GCN forward on thvm's OWN tensor runtime, in C, every N selections -- no WL round-trip in the proof loop.  TAtpSetGnnScorer[Clear] (or None) drops the model.  Returns True on success, False on a malformed model.  The blob layout mirrors thvm_atp_set_gnn_scorer in src/atp/_.c.";
+TAtpSetGnnScorer::usage = "TAtpSetGnnScorer[model] pushes a trained GCN model (the \"Model\" Association returned by TAtpTrainGnn) into the C ATP engine, so a persistent proof handle with a non-zero re-rank period (TFindProofGnnReranked) re-ranks the critical-pair queue by running the GCN forward on thvm's OWN tensor runtime, in C, every N selections -- no WL round-trip in the proof loop.  TAtpSetGnnScorer[\"path.safetensors\"] loads a pretrained GCN from a .safetensors file (TSafeLoad, lazy mmap-backed) and pushes it.  TAtpSetGnnScorer[Clear] (or None) drops the model.  Returns True on success, False on a malformed model.  The blob layout mirrors thvm_atp_set_gnn_scorer in src/atp/_.c.";
+
+TAtpSaveGnnScorer::usage = "TAtpSaveGnnScorer[model, path] saves a trained GCN model (the \"Model\" Association from TAtpTrainGnn) to `path` as a .safetensors file (TSafeSave): each weight array (W1[r] / Ws[r] / Bh[r] / Wout / Bout) is one named tensor, and the scalar config (Rounds / Hidden / NMax) rides in the file's __metadata__.  TAtpSetGnnScorer[path] reloads it.  Returns `path`.  This is how a pretrained GCN ships as a paclet asset.";
+
+TAtpGnnScorerAsset::usage = "TAtpGnnScorerAsset[] returns the bundled-asset path of the pretrained GCN scorer (wl/THVMLink/Assets/gcn_atp.safetensors).  TAtpSetGnnScorer[TAtpGnnScorerAsset[]] loads it.  Returns Missing[\"NotBundled\"] if the asset file is absent.";
+
+TAtpLoadGnnScorer::usage = "TAtpLoadGnnScorer[path] loads a GCN scorer .safetensors file (saved by TAtpSaveGnnScorer) and returns the \"Model\" Association (W1 / Ws / Bh / Wout / Bout + Rounds / Hidden / NMax).  TAtpSetGnnScorer[path] = TAtpSetGnnScorer[TAtpLoadGnnScorer[path]].";
 
 TFindProofGnnReranked::usage = "TFindProofGnnReranked[conjecture, axioms, model] proves the conjecture with the trained GCN `model` (the \"Model\" from TAtpTrainGnn) guiding critical-pair selection ENTIRELY IN C: it pushes the GCN weights into the engine (TAtpSetGnnScorer), then drives one saturation in which thvm_atp_step itself re-ranks the live queue every \"RerankPeriod\" selections by running the GCN forward on thvm's own tensor runtime.  Unlike TFindProofReranked there is NO WL round-trip in the proof loop (no per-chunk pull/score/push over the persistent-handle bridge), so it is far faster.  Returns the status string (\"PROVED\" / \"TIMEOUT\" / \"QUEUE_EMPTY\" / ...).  Completeness is preserved (re-ranking only permutes selection order; the engine's periodic FIFO pick still fires).  Options: \"RerankPeriod\" (selections between re-ranks, default 200), MaxSteps (default 30000), \"CriticalPairWeight\" (base weight for newly-generated CPs, default \"Gt\"), \"Ordering\" (\"KBO\" default / \"LPO\"), \"AutoPrecedence\" (default True).";
 
@@ -94,6 +100,10 @@ TFindProofGnnReranked::usage = "TFindProofGnnReranked[conjecture, axioms, model]
    (added to the context path above) so it doesn't need
    pre-declaration. *)
 {TSatEUF, TSmtDecide};
+
+(* SafeTensors.wl (a depth-4 sibling, loaded earlier) owns these; the
+   bare mention keeps GCN save/load resolving to the public symbols. *)
+{TSafeSave, TSafeLoad, TSafeLoadMetadata, TTensorCreate};
 
 (* (The IC primitives TDef / TRef / TLam / TCollapse / ... are owned by
    the depth-4 sibling Switch.wl, which already loaded before this
@@ -304,8 +314,87 @@ serializeGnnModel[m_Association] := Block[{
     ]
 ]
 
-TAtpSetGnnScorer[model_] := $atpSetGnnScorerFn[
+TAtpSetGnnScorer[model_Association] := $atpSetGnnScorerFn[
     N[serializeGnnModel[model]]] === 1
+TAtpSetGnnScorer[Clear | None | {}] := $atpSetGnnScorerFn[{}] === 1
+
+(* Path overload: load a pretrained GCN from a .safetensors file (lazy,
+   mmap-backed via TSafeLoad), rebuild the "Model" Association, and push
+   it to the C engine.  This is how a bundled paclet asset loads. *)
+TAtpSetGnnScorer[path_String] := With[{m = TAtpLoadGnnScorer[path]},
+    If[ AssociationQ[m], TAtpSetGnnScorer[m], False]]
+
+(* === GCN <-> .safetensors ===
+   Each weight array becomes one named tensor: W1_<r>, Ws_<r>, Bh_<r>
+   (r = 0-based round), plus Wout and Bout.  The scalar config (Rounds,
+   Hidden, NMax) rides in the file's __metadata__ (string values, per the
+   safetensors spec).  TAtpLoadGnnScorer reverses this into the Model
+   Association that serializeGnnModel + the C engine consume. *)
+gnnModelTensors[m_Association] := Module[{rR, tens},
+    rR = Lookup[m, "Rounds", Length[m["W1"]]];
+    tens = <||>;
+    Do[
+        tens["W1_" <> ToString[r - 1]] = TTensorCreate[N[m["W1"][[r]]], "f32"];
+        tens["Ws_" <> ToString[r - 1]] = TTensorCreate[N[m["Ws"][[r]]], "f32"];
+        tens["Bh_" <> ToString[r - 1]] = TTensorCreate[N[m["Bh"][[r]]], "f32"],
+        {r, rR}
+    ];
+    tens["Wout"] = TTensorCreate[N[m["Wout"]], "f32"];
+    tens["Bout"] = TTensorCreate[N[m["Bout"]], "f32"];
+    tens
+]
+
+TAtpSaveGnnScorer[model_Association, path_String] := Module[{rR, hH, nMax, meta},
+    rR   = Lookup[model, "Rounds", Length[model["W1"]]];
+    hH   = Lookup[model, "Hidden", Length[model["Bh"][[1]]]];
+    nMax = Lookup[model, "NMax", 0];
+    meta = <|"Kind" -> "GNN", "Rounds" -> rR, "Hidden" -> hH, "NMax" -> nMax|>;
+    TSafeSave[gnnModelTensors[model], path, meta]
+]
+
+(* Rebuild the Model Association from a .safetensors file (lazy tensors
+   read via Normal). *)
+TAtpLoadGnnScorer[path_String] := Module[{meta, tens, rR},
+    If[ ! FileExistsQ[path], Return[$Failed]];
+    meta = TSafeLoadMetadata[path];
+    tens = TSafeLoad[path];
+    rR = ToExpression @ Lookup[meta, "Rounds",
+        ToString @ Length @ Select[Keys[tens], StringStartsQ["W1_"]]];
+    <|
+        "Kind" -> "GNN",
+        "W1"   -> Table[Normal @ tens["W1_" <> ToString[r - 1]], {r, rR}],
+        "Ws"   -> Table[Normal @ tens["Ws_" <> ToString[r - 1]], {r, rR}],
+        "Bh"   -> Table[Normal @ tens["Bh_" <> ToString[r - 1]], {r, rR}],
+        "Wout" -> Normal @ tens["Wout"],
+        "Bout" -> Normal @ tens["Bout"],
+        "Rounds" -> rR,
+        "Hidden" -> ToExpression @ Lookup[meta, "Hidden",
+            ToString @ Length @ First @ Normal @ tens["Bh_0"]],
+        "NMax"   -> ToExpression @ Lookup[meta, "NMax", "0"]
+    |>
+]
+
+(* Bundled-asset path: wl/THVMLink/Assets/gcn_atp.safetensors.  Captured
+   at file-LOAD time (when $InputFileName names this Kernel/ATP/ file);
+   $InputFileName is empty in the running session, so the directory is
+   frozen here exactly as THVMLink.wl freezes $libDir.  When the paclet
+   is installed, PacletObject["..."]["AssetLocation", "GCNAtpScorer"]
+   resolves too; we prefer that when it succeeds. *)
+$atpGnnAssetDir = FileNameJoin[{
+    DirectoryName[$InputFileName], "..", "..", "Assets"}];
+
+atpGnnAssetCandidate[] := Module[{viaPaclet},
+    viaPaclet = Quiet @ Check[
+        PacletObject["WolframInstitute/THVMLink"]["AssetLocation", "GCNAtpScorer"],
+        $Failed];
+    If[ StringQ[viaPaclet] && FileExistsQ[viaPaclet],
+        viaPaclet,
+        FileNameJoin[{$atpGnnAssetDir, "gcn_atp.safetensors"}]
+    ]
+]
+
+TAtpGnnScorerAsset[] := With[{p = atpGnnAssetCandidate[]},
+    If[ FileExistsQ[p], p, Missing["NotBundled"]]]
 
 (* ENIGMA Tier 1a: generate a labelled critical-pair dataset by proving
    a corpus with feature recording on.  The C bridge records + labels +

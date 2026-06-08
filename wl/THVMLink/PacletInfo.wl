@@ -24,7 +24,10 @@ PacletObject[<|
         {
             "Asset",
             "Root"   -> "Assets",
-            "Assets" -> {{"Hero", "hero.png"}}
+            "Assets" -> {
+                {"Hero", "hero.png"},
+                {"GCNAtpScorer", "gcn_atp.safetensors"}
+            }
         }
     }
 |>]
