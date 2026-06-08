@@ -1044,6 +1044,25 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_write(WolframLibraryData libData, mint arg
 // C-side buffer layout (no f32 -> f64 conversion), so a Real32
 // tensor round-trips back to a Real32 NumericArray with no loss
 // or copy beyond the single memcpy into NumericArray-owned storage.
+// A NumericArray read above this many elements is treated as a runaway (e.g. an
+// unbound/unresolved symbolic dim) and refused -- the WolframKernel stays alive
+// rather than OOM'ing, in the spirit of the heap-exhaust longjmp guard.
+#define THVM_WL_READ_NUMEL_CAP (1ULL << 31)
+
+// Resolve a tensor's view dims to their per-realize BOUND (kvar_extent_runtime),
+// stripping any kvar-packed extent so a symbolic dim can never reach
+// MNumericArray_new (or WL-side shape arithmetic) at its raw 2^31-ish id.
+// Writes the resolved dims into out_dims and returns the element count.
+static u64 wl_resolved_dims(TenDesc const *d, mint *out_dims) {
+  u64 numel = 1;
+  for (u32 i = 0; i < d->view.shape.ndim; i++) {
+    u32 e = kvar_extent_runtime(d->view.shape.dims[i]);
+    out_dims[i] = (mint)e;
+    numel *= (u64)e;
+  }
+  return numel;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)argc;
@@ -1052,7 +1071,15 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
 
   mint dims[MAX_DIM];
   mint rank = (mint)d->view.shape.ndim;
-  for (mint i = 0; i < rank; i++) dims[i] = (mint)d->view.shape.dims[i];
+  // GUARD: resolve symbolic (kvar) dims to their bound so a kvar-packed extent
+  // can never drive the NumericArray alloc; refuse a runaway count cleanly.
+  u64 numel = wl_resolved_dims(d, dims);
+  if (numel > THVM_WL_READ_NUMEL_CAP) {
+    fprintf(stderr, "tensor_read: refusing a %llu-element read -- shape carries "
+            "an unresolved / runaway dim (bind the symbolic dim with TKVarSet "
+            "first); WolframKernel preserved.\n", (unsigned long long)numel);
+    return LIBRARY_FUNCTION_ERROR;
+  }
   // A rank-0 (scalar) result -- e.g. a full reduce like TDot -- has
   // numel 1.  WL's MNumericArray_new mishandles rank 0, so emit a
   // rank-1 length-1 array; the logical scalar shape is recovered via
@@ -1066,7 +1093,7 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
   // TTensorShape[]; the byte count = ceil(numel/2).
   if (d->dtype == DT_INT4 || d->dtype == DT_UINT4) {
     rank = 1;
-    dims[0] = (mint)dtype_storage_bytes(d->dtype, d->view.numel);
+    dims[0] = (mint)dtype_storage_bytes(d->dtype, numel);
   }
 
   numericarray_data_t t;
@@ -1105,7 +1132,10 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
   MNumericArray out;
   libData->numericarrayLibraryFunctions->MNumericArray_new(t, rank, dims, &out);
   void *dst = libData->numericarrayLibraryFunctions->MNumericArray_getData(out);
-  u64   nbytes = dtype_storage_bytes(d->dtype, d->view.numel);
+  // Copy the BOUND region (resolved numel), not d->view.numel (which is the
+  // hi-padded buffer size) -- for an outer-symbolic output the valid data is
+  // the first `numel` contiguous elements.
+  u64   nbytes = dtype_storage_bytes(d->dtype, numel);
   d->backend->buf_read(d->buf_id, dst, nbytes);
 
   MArgument_setMNumericArray(res, out);
@@ -1381,7 +1411,9 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_shape(WolframLibraryData libData, mint arg
   MTensor out;
   libData->MTensor_new(MType_Integer, 1, &n, &out);
   mint *dst = libData->MTensor_getIntegerData(out);
-  for (mint i = 0; i < n; i++) dst[i] = (mint)d->view.shape.dims[i];
+  // Resolve symbolic (kvar) dims to their bound so TTensorShape never reports
+  // a kvar-packed 2^31-ish extent (which downstream Times@@shape would blow up).
+  for (mint i = 0; i < n; i++) dst[i] = (mint)kvar_extent_runtime(d->view.shape.dims[i]);
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
 }

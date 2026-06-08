@@ -32,3 +32,20 @@ VerificationTest[
     {{5., 5., 5., 5.}, {7., 7., 7., 7.}, {12., 12., 12., 12.}},
     TestID -> "symbolic/rebind-same-graph"
 ]
+
+(* A symbolic-OUTPUT op -- a {S,4}.{4,3} matmul -> {S,3} -- reads back at the
+   BOUND length, not the kvar upper bound.  The readback resolves symbolic dims
+   (thvm_wl_tensor_read via kvar_extent_runtime), so it returns the valid
+   {bound,3} region instead of trying to allocate a NumericArray at the raw
+   kvar-packed 2^31-ish extent (which would spike RAM by ~25 GB). *)
+VerificationTest[
+    TInit[];
+    vid = TKVarAlloc[1, 16];
+    a   = TSymbolicAxis[TTensorCreate[ConstantArray[1., {16, 4}]], 0, vid];
+    w   = TTensorCreate[ConstantArray[1., {4, 3}]];
+    r   = a . w;
+    TKVarSet[vid, 5];
+    Normal @ TTensorData @ TRealize @ r,
+    ConstantArray[4., {5, 3}],
+    TestID -> "symbolic/readback-symbolic-output-bounded"
+]
