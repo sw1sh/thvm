@@ -1374,6 +1374,7 @@ static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
   d->nviews       = 0;
   d->requires_grad = 0;
   d->grad         = 0;
+  d->assign_kvar_id = 0;
   d->backend      = CURRENT_BACKEND;
   d->producer_kid = 0;
   u64 off    = ARENA_SLOTS[ord_idx].offset;
@@ -4783,7 +4784,23 @@ static u32 view_resolve_inner(Term t, int boundary_base) {
     case UOP_FLIP:    ok = view_apply_flip   (src_view, loc, &nv); break;
     default: return 0;                      // PAD + non-movement ops bail
   }
-  if (ok) return tensor_view_of(src_tid, nv);
+  if (ok) {
+    u32 alias = tensor_view_of(src_tid, nv);
+    // KV-cache append: a SHRINK whose LEADING-axis begin is a kvar-packed
+    // value (start_pos) is the dst of an in-place cache write at a RUNTIME
+    // row offset.  Stamp that kvar id on the alias so the JIT ASSIGN replay
+    // re-resolves the row from kvar_runtime at FIRE (view.offset bakes only
+    // the capture step's row).  Read-side `{0, pack(S)}` shrinks have a
+    // LITERAL begin -> not flagged.  Harmless on non-assign aliases: only the
+    // ASSIGN replay path consults assign_kvar_id.
+    if (op == UOP_SHRINK && alias != 0) {
+      u32 b0 = (u32)term_val(heap_read(loc + 2));   // axis-0 begin
+      if (kvar_extent_is_var(b0)) {
+        TENS[alias].assign_kvar_id = kvar_extent_var_id(b0);
+      }
+    }
+    return alias;
+  }
   // Single-view absorb failed.  For RESHAPE this is one of:
   //   (a) malformed (t_numel != src numel, or t_ndim > MAX_DIM) -- no
   //       chain can help; fall through to the kernel-op-emit path.

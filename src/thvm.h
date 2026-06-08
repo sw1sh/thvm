@@ -625,6 +625,14 @@ typedef struct {
                                 // grad_leaf_sup (target==0 path, requires_grad)
                                 // as the chain rule walks; 0 = no grad yet.
                                 // Python/WL backward reads this after realize.
+  u32      assign_kvar_id;      // KV-cache append dst: the kvar whose RUNTIME
+                                // value is the leading-axis ROW offset of this
+                                // shrink-view alias (start_pos).  0 = not a
+                                // kvar-offset assign dst (a plain offset-0
+                                // weight ASSIGN).  Lets the JIT ASSIGN replay
+                                // re-resolve the write offset from kvar_runtime
+                                // at FIRE (the offset baked into view.offset at
+                                // capture is only that step's row).
 } TenDesc;
 
 // Forward declaration for the dispatch callback.

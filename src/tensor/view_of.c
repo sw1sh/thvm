@@ -31,6 +31,9 @@ fn u32 tensor_view_of(u32 src_id, View new_view) {
   // upstream kernel that fills the shared buffer.  Without this
   // the alias acts like an external (uninitialized) tensor.
   d->producer_kid = src->producer_kid;
+  // Not a kvar-offset assign dst by default; view_resolve's SHRINK branch
+  // stamps the real kvar id when this alias is a KV-cache append target.
+  d->assign_kvar_id = 0;
   if (d->backend && d->backend->buf_incref) d->backend->buf_incref(d->buf_id);
   return id;
 }
@@ -78,6 +81,7 @@ fn u32 tensor_view_chain_append(u32 src_id, View new_outermost) {
   d->buf_id       = src->buf_id;
   d->backend      = src->backend;
   d->producer_kid = src->producer_kid;
+  d->assign_kvar_id = 0;
   if (d->backend && d->backend->buf_incref) d->backend->buf_incref(d->buf_id);
   return id;
 }

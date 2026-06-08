@@ -134,6 +134,7 @@ fn Term thvm_tensor_mmap(const char *path, u64 byte_offset, u64 nbytes,
   d->nviews        = 0;
   d->requires_grad = 0;
   d->grad          = 0;
+  d->assign_kvar_id = 0;
   // The disk tensor is always CPU-resident: a CPU op reads the mapped
   // bytes directly; a non-CPU realize routes through UOP_COPY, which
   // uploads.  Mirror tensor_from_na_host's force-CPU residency.
