@@ -4980,6 +4980,18 @@ fn void      thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now);
 // no host abort source (the default).
 extern int (*thvm_atp_abort_hook)(void);
 
+// Heap-exhaust recovery target.  When non-NULL, heap_alloc on exhaust
+// longjmps to *thvm_heap_exhaust_jmp (with value 1) instead of exit(1).
+// Set by a LibraryLink entry that wraps its run in setjmp; on a longjmp
+// return the entry returns LIBRARY_FUNCTION_ERROR so WolframKernel
+// keeps running and wolframscript can reap the kernel cleanly.  Without
+// this hook a heap-exhaust orphans the kernel under wolframscript --
+// the multi-GB ghost-kernel accumulation that crashes the box (see
+// feedback_wolframscript_oom_risk.md).
+#include <setjmp.h>
+extern jmp_buf  *thvm_heap_exhaust_jmp;
+extern volatile int thvm_heap_exhausted;
+
 // === atp/precedence -- algebraic-structure detection =================
 // Ported from Waldmeister's `PhilMarlow` (algebraic-structure
 // recognition; "Erkennung algebraischer Strukturen") and

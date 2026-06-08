@@ -386,6 +386,29 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                              mint argc, MArgument *args,
                                              MArgument res) {
   (void)argc;
+  // Heap-exhaust recovery: when thvm's bump allocator runs out of cells
+  // (a diverging saturation on a hard NotableTheorem), instead of
+  // exit(1) -- which orphans WolframKernel and ghost-kernels accumulate
+  // until the OS panics -- longjmp back here and return
+  // LIBRARY_FUNCTION_ERROR.  WL handles that as $Failed and the kernel
+  // keeps running cleanly.  See feedback_wolframscript_oom_risk.md.
+  //
+  // Static-storage jmp_buf so a setjmp/longjmp pair survives early
+  // returns from this entry: thvm_heap_exhaust_jmp can't safely point
+  // at a stack-local jmp_buf because the many `return
+  // LIBRARY_FUNCTION_ERROR` paths below leave it dangling between
+  // calls.  A static buffer lives across calls; we just overwrite it
+  // on each entry's setjmp.  Not thread-safe, which is fine -- thvm
+  // is single-threaded inside a LibraryLink entry.
+  static jmp_buf jb;
+  thvm_heap_exhaust_jmp = &jb;
+  thvm_heap_exhausted   = 0;
+  if (setjmp(jb) != 0) {
+    thvm_heap_exhaust_jmp = NULL;
+    fprintf(stderr, "thvm_wl_atp_run_proof: heap exhausted -- returning "
+                    "LIBRARY_FUNCTION_ERROR (kernel preserved)\n");
+    return LIBRARY_FUNCTION_ERROR;
+  }
   MNumericArray na = MArgument_getMNumericArray(args[0]);
   mint max_steps   = MArgument_getInteger(args[1]);
   mint max_label   = MArgument_getInteger(args[2]);
@@ -1069,6 +1092,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   if (ext != NULL) thvm_atp_free(ext);
   thvm_atp_free(atp);
   MArgument_setMNumericArray(res, out);
+  thvm_heap_exhaust_jmp = NULL;
   return LIBRARY_NO_ERROR;
 }
 
