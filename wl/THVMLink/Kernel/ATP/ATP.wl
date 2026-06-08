@@ -1025,12 +1025,12 @@ atpGnnTensors[dataset_Association] := Module[{
                 {ni, n}]],
         {bi, b}];
     aArr = Table[
-        Module[{g = graphs[[bi]], adj, rowSums},
+        Module[{g = graphs[[bi]], adj, rowSums, edge},
             adj = ConstantArray[0., {n, n}];
-            Do[ With[{src = e[[1]] + 1, dst = e[[2]] + 1},
+            Do[ With[{src = edge[[1]] + 1, dst = edge[[2]] + 1},
                     adj[[src, dst]] = 1.;
                     adj[[dst, src]] = 1.],
-                {e, g["Edges"]}];
+                {edge, g["Edges"]}];
             Do[ adj[[i, i]] = 1., {i, g["NNodes"]}];
             rowSums = Total /@ adj;
             Table[
@@ -1315,6 +1315,32 @@ applyForAllSubst[hcBody_HoldComplete, vars_List] := Block[{
    like `f[x] == f[x]` from evaluating to True before substitution
    runs. *)
 forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
+    (* ForAll wrapping Rule / Inactive[Rule]: strip the quantifier AND
+       convert to Equal in one pass (Replace runs each rule once, so
+       a separate Rule->Equal rule below would never fire after the
+       ForAll-strip rule consumed the input).  The pre-orient flag is
+       picked up by axiomOrientationFlag on the ORIGINAL HoldComplete
+       before this rewrite runs.
+
+       Why `HoldComplete @@ Hold[Equal[a, b]]` instead of bare
+       `HoldComplete[Equal[a, b]]`: the RHS of a RuleDelayed evaluates
+       at match time, so writing `HoldComplete[Equal[a, b]]` collapses
+       a reflexive `Equal[a, a]` to `HoldComplete[True]` before
+       HoldComplete's HoldAllComplete attribute can protect it.  Apply
+       via `@@` substitutes the head AFTER the inner Equal is already
+       inside a Hold, so the Equal stays unevaluated and reaches the
+       Pattern-substituting downstream as a proper Equal[lhs, rhs]. *)
+    HoldComplete[ForAll[v_Symbol, Rule[a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]], {v}],
+    HoldComplete[ForAll[Verbatim[List][vars__Symbol], Rule[a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]],
+            List @@ Hold[vars]],
+    HoldComplete[ForAll[v_Symbol, Inactive[Rule][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]], {v}],
+    HoldComplete[ForAll[Verbatim[List][vars__Symbol],
+            Inactive[Rule][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]],
+            List @@ Hold[vars]],
     HoldComplete[ForAll[v_Symbol, body_]] :>
         applyForAllSubst[HoldComplete[body], {v}],
     HoldComplete[ForAll[Verbatim[List][vars__Symbol], body_]] :>
@@ -1322,12 +1348,36 @@ forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
     (* Inactive[Equal] / Inactive[Unequal] = FindEquationalProof's
        inert ProofObject lemma form.  Strip the Inactive wrapper so
        downstream encodeEquation's strict HoldComplete[Equal[_, _]]
-       check fires.  Iter 64. *)
+       check fires.  Iter 64.  Same `HoldComplete @@ Hold[..]` trick
+       to keep a reflexive Equal from collapsing at RHS evaluation. *)
     HoldComplete[Inactive[Equal][a_, b_]] :>
-        HoldComplete[Equal[a, b]],
+        HoldComplete @@ Hold[Equal[a, b]],
     HoldComplete[Inactive[Unequal][a_, b_]] :>
-        HoldComplete[Unequal[a, b]],
+        HoldComplete @@ Hold[Unequal[a, b]],
+    (* Bare Rule / Inactive[Rule] (no ForAll wrapper): convert to
+       Equal so encodeEquation accepts it.  The orientation flag
+       was already captured by axiomOrientationFlag. *)
+    HoldComplete[Rule[a_, b_]] :>
+        HoldComplete @@ Hold[Equal[a, b]],
+    HoldComplete[Inactive[Rule][a_, b_]] :>
+        HoldComplete @@ Hold[Equal[a, b]],
     _ :> axHC
+}]
+
+(* Inspect the raw HoldComplete-wrapped axiom (BEFORE forAllToPattern
+   converts Rule to Equal) and return its orientation flag: 0 =
+   equation (engine orients via KBO), 1 = pre-oriented (use lhs ->
+   rhs directly).  Read off the syntactic head only -- a bare `Rule`
+   or `Inactive[Rule]` (with or without a ForAll wrapper) means the
+   user wants direction trust.  No HoldAll: the caller always passes
+   HoldComplete-wrapped values, which already prevent inner
+   evaluation, so a plain pattern match is enough. *)
+axiomOrientationFlag[axHC_HoldComplete] := Replace[axHC, {
+    HoldComplete[ForAll[_, Rule[_, _]]] -> 1,
+    HoldComplete[ForAll[_, Inactive[Rule][_, _]]] -> 1,
+    HoldComplete[Rule[_, _]] -> 1,
+    HoldComplete[Inactive[Rule][_, _]] -> 1,
+    _ -> 0
 }]
 
 (* Encode a single equation HoldComplete[Equal[lhs, rhs]] (or
@@ -1368,7 +1418,7 @@ SetAttributes[atpEncodeProblem, HoldAll];
 atpEncodeProblem[axioms_, conjecture_] :=
     atpEncodeProblem[axioms, conjecture, False];
 atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
-    axHCsRaw, axHCs, cjHC, axTermsAndState, axTerms, st,
+    axHCsRaw, axHCs, cjHC, axTermsAndState, axTerms, st, axFlags,
     goalRes, goalLhs, goalRhs, axPairs, conjPair, n
 },
     If[ ! ListQ[Unevaluated[axioms]],
@@ -1379,6 +1429,11 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
     ensureInit[];
     n = Length[Unevaluated[axioms]];
     axHCsRaw = HoldComplete /@ Unevaluated[axioms];
+    (* Orientation flag must be read off the ORIGINAL HoldComplete
+       (before ForAll-strip / Rule->Equal conversion) so the syntactic
+       Rule head is still visible.  Mapped here, not inside the fold,
+       to keep the existing encodeAxiomFold signature intact. *)
+    axFlags = axiomOrientationFlag /@ axHCsRaw;
     (* Normalize each axiom: strip the outermost ForAll wrapper (if
        present) and rewrite bound bare-symbol occurrences as
        Pattern[var, Blank[]]. *)
@@ -1417,14 +1472,25 @@ atpEncodeProblem[axioms_, conjecture_, skolemize_] := Block[{
     );
     conjPair = If[ Unevaluated[conjecture] === None, {0, 0},
         {Extract[cjHC, {1, 1}], Extract[cjHC, {1, 2}]}];
+    (* Wire layout: [n, lhs_0, rhs_0, ..., lhs_{n-1}, rhs_{n-1},
+       goal_lhs, goal_rhs, flag_0, ..., flag_{n-1}].  Pre-fix layout
+       was the prefix up through goal_rhs; the per-axiom flag tail
+       is APPENDED so every existing reader's lhs/rhs/goal offset
+       (data[1 + 2*i + 0/1], data[1 + 2*n + 0/1]) stays valid -- only
+       the length check bumps from 1 + 2*n + 2 to 3*n + 3, and the
+       axiom-install loops gain a flag read at data[1 + 2*n + 2 + i]
+       to dispatch between thvm_atp_add_equation (flag == 0) and
+       thvm_atp_install_oriented_rule (flag == 1).  See
+       [[project_atp_oriented_rules]]. *)
     <|
         "Packed" -> NumericArray[
-            Join[{n}, axTerms, {goalLhs, goalRhs}],
+            Join[{n}, axTerms, {goalLhs, goalRhs}, axFlags],
             "Integer64"
         ],
         "MaxLab" -> st["next_lab"],
         "State" -> st,
         "AxPairs" -> axPairs,
+        "AxFlags" -> axFlags,
         "ConjPair" -> conjPair,
         "AxHCsRaw" -> axHCsRaw,
         "ConjHCRaw" -> If[skolemize, cjHC, HoldComplete[conjecture]]
@@ -1636,6 +1702,12 @@ drop a needed axiom.  Inspect with TRelevantAxioms, or set \
 \"AxiomRelevance\" -> None in Method to keep every axiom.";
 TFindProof::badrel =
     "Unrecognized \"AxiomRelevance\" `1`; using \"Safe\".";
+TFindProof::badorient =
+    "Pre-oriented axiom `1` has variables on the right-hand side not \
+present on the left -- the rewrite would introduce fresh variables \
+and may loop the rewriter.  Use `lhs == rhs` instead, or rewrite the \
+axiom so vars(rhs) is a subset of vars(lhs).  The rule was installed \
+anyway; downstream behavior is undefined.";
 
 (* parse a Method spec into {cpWeight, ordering, autoPrec, useMnf} ints
    for cEngineProof.  Automatic = Mix2 critical-pair weight
@@ -2708,7 +2780,7 @@ $atpFiniteModelCap = 64;
    are exact, so the model is in FindFiniteModels structure -- the saturated
    analog of the congruence-closure quotient. *)
 atpFiniteModelFromRules[rules_List, varSyms_List, seedTerms_List] :=
-    Module[{rl, normalize, ops, consts, dom, idxOf, model = <||>, changed = True, e},
+    Module[{rl, normalize, ops, consts, dom, idxOf, model = <||>, changed = True, elt},
         rl = cplAsRule[#, varSyms] & /@ rules;
         normalize = Function[t, t //. rl];
         ops = DeleteDuplicates @ Cases[
@@ -2720,8 +2792,8 @@ atpFiniteModelFromRules[rules_List, varSyms_List, seedTerms_List] :=
         If[ dom === {} || ops === {}, Return[$Failed]];
         While[ changed && Length[dom] <= $atpFiniteModelCap,
             changed = False;
-            Do[ Do[ e = normalize[op[[1]] @@ tup];
-                    If[ ! MemberQ[dom, e], AppendTo[dom, e]; changed = True],
+            Do[ Do[ elt = normalize[op[[1]] @@ tup];
+                    If[ ! MemberQ[dom, elt], AppendTo[dom, elt]; changed = True],
                    {tup, Tuples[dom, op[[2]]]}],
                {op, ops}]];
         If[ Length[dom] > $atpFiniteModelCap, Return[$Failed]];
@@ -3162,12 +3234,14 @@ atpNormalizeAxioms[ax_List] :=
 (* A single Equal / Inactive[Equal] / ForAll axiom (no enclosing
    List) is a common shape -- the user pastes one ax directly.
    Wrap in a 1-element List and re-dispatch.  Iter 68. *)
-TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
+        | Inactive[Rule][_, _]),
         opts:OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, opts];
-TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll
-        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]),
+TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
+        | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
+        | Inactive[Rule][_, _]),
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, returnSpec, opts];
 
@@ -3536,6 +3610,7 @@ Options[TFindEquationalProof] = Options[TFindProof];
 TFindEquationalProof::badmethod = TFindProof::badmethod;
 TFindEquationalProof::badcpw    = TFindProof::badcpw;
 TFindEquationalProof::dropax    = TFindProof::dropax;
+TFindEquationalProof::badorient = TFindProof::badorient;
 TFindEquationalProof::badrel    = TFindProof::badrel;
 TFindEquationalProof[args___] := TFindProof[args];
 

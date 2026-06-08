@@ -72,8 +72,14 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ctr(WolframLibraryData libData,
 // Inputs:
 //   args[0] = MNumericArray (Int64) of packed Term values:
 //             [n_axioms, lhs_0, rhs_0, lhs_1, rhs_1, ...,
-//              lhs_{n-1}, rhs_{n-1}, goal_lhs, goal_rhs].
-//             Length = 1 + 2*n_axioms + 2.
+//              lhs_{n-1}, rhs_{n-1}, goal_lhs, goal_rhs,
+//              flag_0, flag_1, ..., flag_{n-1}].
+//             Length = 1 + 2*n_axioms + 2 + n_axioms = 3*n_axioms + 3.
+//             flag_i: 0 = equation (engine orients via KBO),
+//                     1 = pre-oriented (use lhs -> rhs directly).
+//             The flag tail is APPENDED so every existing reader's
+//             lhs/rhs/goal offset stays valid; only the length check
+//             and the axiom-add loops change.
 //   args[1] = max_steps  (mint)
 //   args[2] = max_label  (mint; sizes the trivial precedence /
 //             weights tables.  v0 uses a uniform config that
@@ -123,7 +129,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_existential(
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
   int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2) {
+  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
     return LIBRARY_FUNCTION_ERROR;
   }
   u32 n_ax = (u32)n_ax_i;
@@ -168,9 +174,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_existential(
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
 
   for (u32 i = 0; i < n_ax; i++) {
-    Term lhs = (Term)data[1 + 2 * i + 0];
-    Term rhs = (Term)data[1 + 2 * i + 1];
-    if (!thvm_atp_add_equation(atp, lhs, rhs)) {
+    Term lhs  = (Term)data[1 + 2 * i + 0];
+    Term rhs  = (Term)data[1 + 2 * i + 1];
+    int64_t f = data[1 + 2 * n_ax + 2 + i];
+    if (f == 1) {
+      // Pre-oriented: install returns count=0 on duplicate (benign),
+      // count=1 on success.  Either is fine for the FFI -- only a NULL
+      // state would matter, which we already checked.
+      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
+    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
       thvm_atp_free(atp);
       return LIBRARY_FUNCTION_ERROR;
     }
@@ -220,7 +232,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
   int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2) {
+  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
     return LIBRARY_FUNCTION_ERROR;
   }
   u32 n_ax = (u32)n_ax_i;
@@ -247,11 +259,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
   AtpState *atp = thvm_atp_init(&wl_kbo, (u32)max_steps);
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
 
-  // Push axioms.
+  // Push axioms.  flag_i (tail block) dispatches between equation
+  // (engine orients via KBO) and pre-oriented (lhs -> rhs directly).
   for (u32 i = 0; i < n_ax; i++) {
-    Term lhs = (Term)data[1 + 2 * i + 0];
-    Term rhs = (Term)data[1 + 2 * i + 1];
-    if (!thvm_atp_add_equation(atp, lhs, rhs)) {
+    Term lhs  = (Term)data[1 + 2 * i + 0];
+    Term rhs  = (Term)data[1 + 2 * i + 1];
+    int64_t f = data[1 + 2 * n_ax + 2 + i];
+    if (f == 1) {
+      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
+    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
       thvm_atp_free(atp);
       return LIBRARY_FUNCTION_ERROR;
     }
@@ -471,7 +487,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
   int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2) {
+  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
     return LIBRARY_FUNCTION_ERROR;
   }
   u32 n_ax = (u32)n_ax_i;
@@ -765,9 +781,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
 
   for (u32 i = 0; i < n_ax; i++) {
-    Term lhs = (Term)data[1 + 2 * i + 0];
-    Term rhs = (Term)data[1 + 2 * i + 1];
-    if (!thvm_atp_add_equation(atp, lhs, rhs)) {
+    Term lhs  = (Term)data[1 + 2 * i + 0];
+    Term rhs  = (Term)data[1 + 2 * i + 1];
+    int64_t f = data[1 + 2 * n_ax + 2 + i];
+    if (f == 1) {
+      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
+    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
       thvm_atp_free(atp);
       return LIBRARY_FUNCTION_ERROR;
     }
@@ -1001,8 +1020,14 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     if (ext != NULL) {
       ext->wall_deadline_us = atp->wall_deadline_us;
       for (u32 i = 0; i < n_ax; i++) {
-        thvm_atp_orient_and_add(ext, (Term)data[1 + 2 * i + 0],
-                                     (Term)data[1 + 2 * i + 1]);
+        Term lhs  = (Term)data[1 + 2 * i + 0];
+        Term rhs  = (Term)data[1 + 2 * i + 1];
+        int64_t f = data[1 + 2 * n_ax + 2 + i];
+        if (f == 1) {
+          thvm_atp_install_oriented_rule(ext, lhs, rhs);
+        } else {
+          thvm_atp_orient_and_add(ext, lhs, rhs);
+        }
       }
       thvm_atp_set_goal(ext, goal_lhs, goal_rhs);
       ext_n_steps = thvm_atp_proof_extract(ext, ext_proof, ATP_PROOF_MAX_STEPS);
@@ -1163,7 +1188,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
 
   int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2) {
+  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
     return LIBRARY_FUNCTION_ERROR;
   }
   u32 n_ax = (u32)n_ax_i;
@@ -1190,9 +1215,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
 
   for (u32 i = 0; i < n_ax; i++) {
-    Term lhs = (Term)data[1 + 2 * i + 0];
-    Term rhs = (Term)data[1 + 2 * i + 1];
-    if (!thvm_atp_add_equation(atp, lhs, rhs)) {
+    Term lhs  = (Term)data[1 + 2 * i + 0];
+    Term rhs  = (Term)data[1 + 2 * i + 1];
+    int64_t f = data[1 + 2 * n_ax + 2 + i];
+    if (f == 1) {
+      (void)thvm_atp_install_oriented_rule(atp, lhs, rhs);
+    } else if (!thvm_atp_add_equation(atp, lhs, rhs)) {
       thvm_atp_free(atp);
       return LIBRARY_FUNCTION_ERROR;
     }
@@ -1759,7 +1787,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_proof_init(WolframLibraryData libData,
   if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
   const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
   int64_t n_ax_i = data[0];
-  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2) {
+  if (n_ax_i < 0 || (int64_t)flat_len != 3 * n_ax_i + 3) {
     return LIBRARY_FUNCTION_ERROR;
   }
   u32 n_ax = (u32)n_ax_i;
@@ -1803,8 +1831,14 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_proof_init(WolframLibraryData libData,
   // problem-class once the re-rank latency is addressed.)
   thvm_atp_set_record_norm_steps(atp, 0u);
   for (u32 i = 0; i < n_ax; i++) {
-    thvm_atp_add_equation(atp, (Term)data[1 + 2 * i + 0],
-                          (Term)data[1 + 2 * i + 1]);
+    Term lhs  = (Term)data[1 + 2 * i + 0];
+    Term rhs  = (Term)data[1 + 2 * i + 1];
+    int64_t f = data[1 + 2 * n_ax + 2 + i];
+    if (f == 1) {
+      thvm_atp_install_oriented_rule(atp, lhs, rhs);
+    } else {
+      thvm_atp_add_equation(atp, lhs, rhs);
+    }
   }
   Term gl = (Term)data[1 + 2 * n_ax + 0];
   Term gr = (Term)data[1 + 2 * n_ax + 1];

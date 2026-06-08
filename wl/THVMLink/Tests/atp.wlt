@@ -840,6 +840,37 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Pre-oriented (Rule[]) axioms: a group's left-inverse and
+       left-identity axioms can be supplied as oriented rewrite rules
+       (lhs -> rhs) instead of equations.  The engine installs them as
+       forward rules without going through KBO orientation, which is
+       harmless for axioms whose natural reading IS the rewrite
+       direction (inv[x] ** x -> e and e ** x -> x).  Asserts:
+       (a) the proof succeeds against the mixed axiom list, and
+       (b) it succeeds equally against the all-Equal form, since the
+           engine's KBO would have oriented these same axioms the same
+           way anyway.  See [[project_atp_oriented_rules]]. *)
+    Module[{poRule, poEq, ax1, ax2},
+        (* `g` is a user binary function -- NOT NonCommutativeMultiply
+           (`**`), which has the Flat attribute and would auto-
+           associate the associativity axiom into `True` at parse
+           time, breaking the test before the engine ever runs. *)
+        ax1 = {
+            ForAll[{x, y, z}, g[x, g[y, z]] == g[g[x, y], z]],
+            ForAll[{x}, g[inv[x], x] -> idElem],
+            ForAll[{x}, g[idElem, x] -> x]};
+        ax2 = ax1 /. (a_ -> b_) :> (a == b);
+        poRule = TFindProof[ForAll[{x}, g[idElem, x] == x], ax1,
+            TimeConstraint -> 30];
+        poEq   = TFindProof[ForAll[{x}, g[idElem, x] == x], ax2,
+            TimeConstraint -> 30];
+        And[ Head[poRule] === ProofObject, Head[poEq] === ProofObject]
+    ],
+    True,
+    TestID -> "ATP/Rule/pre-oriented-group-identity"
+];
+
+VerificationTest[
     (* Method -> "VampireUEQ" preset (LPO + AutoPrecedence +
        SelectionRatio 10 + UnfailingCP + AutoMaxWeight + MNF front)
        proves a baseline theorem too -- bundled knob smoke check. *)

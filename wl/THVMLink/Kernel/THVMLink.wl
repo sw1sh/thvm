@@ -8,6 +8,20 @@
    TTagName), and the IC-style heap renderer (THeapGraph).
 *)
 
+(* Suppress shadow warnings for the duration of the paclet load.  ATP
+   sub-packages (ATP.wl, ATP_Method.wl, ATP_Relevance.wl,
+   ATP_ProofGraph.wl) use bare short names (`s`, `e`, `i`, `t`) as
+   pattern locals (e.g. `Pattern[s_Symbol, _] :> s`) and Do/Module
+   iterators -- a textbook WL idiom.  Each creates the unqualified
+   symbol in the THVMLink`ATP` context at parse time, which conflicts
+   with the `Global`s/`e/`i/`t` names the TFindProof dispatch's Block
+   localizes for the C decoder leak guard
+   ([[project_atp_tfindproof_iter_leak]]).  The shdw messages are
+   informational only -- the Block fires at runtime under the package
+   context, not at parse -- but they're noisy at every paclet load.
+   Restored at the bottom of this file after all sub-package loads. *)
+Off[General::shdw];
+
 BeginPackage["THVMLink`", {"GeneralUtilities`"}];
 
 (* === lifecycle === *)
@@ -1230,15 +1244,26 @@ EndPackage[];
    loads before Kernel/ATP/*.wl regardless of WL Sort's char-order
    quirks.  Subdirectory files that depend on a parent's BeginPackage
    can rely on this. *)
+(* Quiet the sibling-file loader's Get calls against General::shdw --
+   parse-time shdw messages don't go through Message[] (they're emitted
+   directly by the symbol resolver), so plain Off doesn't catch them;
+   Quiet, applied at the Scan boundary, does. *)
 With[{base = DirectoryName[$InputFileName]},
-    Scan[
-        Get,
-        SortBy[
-            Select[
-                FileNames["*.wl", base, Infinity],
-                FileBaseName[#] =!= "THVMLink" &
-            ],
-            f |-> {Length @ FileNameSplit[f], ToLowerCase[f]}
-        ]
+    Quiet[
+        Scan[
+            Get,
+            SortBy[
+                Select[
+                    FileNames["*.wl", base, Infinity],
+                    FileBaseName[#] =!= "THVMLink" &
+                ],
+                f |-> {Length @ FileNameSplit[f], ToLowerCase[f]}
+            ]
+        ],
+        {General::shdw}
     ]
 ]
+
+(* Restore General::shdw now that every sub-package is loaded.  See
+   the matching `Off[General::shdw]` at the top of this file. *)
+On[General::shdw];

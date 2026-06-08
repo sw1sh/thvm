@@ -5806,6 +5806,16 @@ typedef struct {
 // Returns count = 0 if R doesn't have room for the rule(s).
 fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs);
 
+// Install a pre-oriented axiom as a forward rule (lhs -> rhs),
+// bypassing KBO orientation.  Forces r_orient[idx] = 1 even when KBO
+// says the direction is unorientable, and generates CPs against
+// earlier rules immediately.  Caller is responsible for verifying
+// variable-safety (vars(rhs) subset of vars(lhs)) and termination
+// (a non-decreasing rule may loop the rewriter).  Returns the added
+// range; count = 0 if the rule was rejected as a duplicate.
+fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
+                                                Term rhs);
+
 // Generate fresh CPs after an orient_and_add: enumerate (new x all_R)
 // + (old x new), push survivors onto the CP queue.  Returns count
 // pushed.  Drops overflow silently.

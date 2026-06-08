@@ -4547,6 +4547,54 @@ fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
   return atp_enqueue_equation(s, lhs, rhs, TRACE_AXIOM, ATP_TRACE_NONE);
 }
 
+// Forward decls (defined further down the file).
+static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs);
+
+// Install a pre-oriented axiom directly as a rewrite rule, bypassing
+// the engine's KBO orientation step.  The caller asserts `lhs -> rhs`
+// is the intended direction; the engine uses it as-is.  Used for the
+// WL Rule[lhs, rhs] axiom surface (TFindProof[..., {a == b, c -> d}]).
+//
+// Semantics:
+//   * No KBO compare.  atp_push_rule still writes r_orient[] based on
+//     KBO, but we OVERRIDE to 1 below so ordered-rewrite + indexing
+//     treat the rule as forward-only.
+//   * Decrements n_unorient back if KBO would have classified it as
+//     unorientable (keeps the unorient bookkeeping accurate).
+//   * Generates CPs against existing rules immediately, mirroring the
+//     post-orient_and_add CP-gen step at thvm_atp_step's tail.
+//
+// Soundness: forcing an orientation that violates KBO does NOT break
+// soundness -- the rewrite `lhs -> rhs` is still a valid equational
+// consequence.  But it CAN break completion's termination guarantee:
+// a non-decreasing rule may loop the rewriter.  The variable-safety
+// check (vars(rhs) subset of vars(lhs)) at the WL surface catches the
+// outright-unsafe case (introducing fresh vars); the still-unsafe
+// case of a non-terminating direction is the user's responsibility.
+fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
+                                                Term rhs) {
+  AtpAddedRange r = {0, 0};
+  if (s == NULL) return r;
+  u32 idx = s->n_rules;
+  if (!atp_push_rule(s, lhs, rhs)) return r;
+  // atp_push_rule may have rejected as duplicate -- if n_rules didn't
+  // bump, nothing to override.
+  if (s->n_rules == idx) return r;
+  u32 i = s->n_rules - 1u;
+  if (!s->r_orient[i]) {
+    s->r_orient[i] = 1u;
+    if (s->n_unorient > 0u) s->n_unorient--;
+  }
+  r.first = idx;
+  r.count = 1;
+  // Generate CPs between this newly-installed rule and the rules
+  // installed earlier in this init batch.  At step 0 of the engine
+  // this catches all the pre-init oriented rules so the saturation
+  // can later overlap them with the equation-axiom rules.
+  thvm_atp_generate_cps(s, r);
+  return r;
+}
+
 // Re-queue a simplified older rule (interreduce path).  Records a
 // TRACE_SIMPLIFY entry whose parent_a is the dropped rule's trace
 // index, so a proof consumer can replay the reduction chain instead
