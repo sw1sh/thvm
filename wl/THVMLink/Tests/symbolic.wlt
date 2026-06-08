@@ -626,3 +626,85 @@ VerificationTest[
     TestID -> "symbolic/decode-attend-wl",
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
 ]
+
+(* LEVEL A (decode roadmap Lever 2 step 3): a SINGLE toy transformer block
+   processed two ways at a fixed position t over a small prefix, asserting the
+   DECODE block output equals the FULL block's LAST row.  This is the
+   block-decode ASSEMBLY check -- attention (cache-append + single-query attend)
+   + residual + MLP -- without GPT-2.
+
+   Toy block: dim=4, nHeads=2, dHead=2.  Q=K=V=x per head (identity
+   projection, as in symbolic/transformer-block-eager); causal multi-head
+   self-attention -> residual add -> MLP (x.w1 -> relu -> .w2) -> residual add.
+   The new {1,dim} token's k/v are appended into a prefilled cache (rows
+   0..t-1 = the past tokens' k/v == the past x rows), the single query attends
+   the t+1-row prefix, and the SAME residual + MLP run on the {1,dim} result.
+
+   FULL path: the host-side block oracle over the {t+1,dim} prefix, last row.
+   Decode == full's last row at t=3 then t=5 (rebinding posVid + lenVid),
+   proving the runtime append offset + prefix length + the assembled block are
+   correct across positions. *)
+VerificationTest[
+    Module[
+        {nCtx = 8, dim = 4, nHeads = 2, dHead = 2, dff = 8, scale, xRow, w1, w2,
+         relu, hostMHALast, hostBlockLast, decodeBlock},
+        scale = 1. / Sqrt[N @ dHead];
+        relu  = Max[#, 0.] &;
+        (* per-position input rows (the residual stream entering the block) *)
+        xRow[i_]   := Table[N[0.15 (i + 1) + 0.02 c - 0.01 i c], {c, 0, dim - 1}];
+        w1 = Table[N[0.05 (a - b) + 0.01], {a, 0, dim - 1}, {b, 0, dff - 1}];
+        w2 = Table[N[0.03 (a + b) - 0.02], {a, 0, dff - 1}, {b, 0, dim - 1}];
+        (* host single-query MHA: the LAST query (row t) attends rows 0..t
+           (causal -> all prior + self), per head q.K^T softmax .V, concat *)
+        hostMHALast[t_] := Module[{rows, qLast, perHead},
+            rows  = Table[xRow[i], {i, 0, t}];                  (* {t+1,dim} *)
+            qLast = xRow[t];                                    (* {dim}     *)
+            perHead[h_] := Module[{qh, kh, vh, sc, w},
+                qh = qLast[[h dHead + 1 ;; (h + 1) dHead]];     (* {dHead}   *)
+                kh = rows[[All, h dHead + 1 ;; (h + 1) dHead]]; (* {t+1,dHead} *)
+                vh = kh;
+                sc = (kh . qh) scale;                           (* {t+1}     *)
+                w  = Exp[sc - Max[sc]] / Total[Exp[sc - Max[sc]]];
+                w . vh];                                        (* {dHead}   *)
+            Flatten[Table[perHead[h], {h, 0, nHeads - 1}]]];    (* {dim}     *)
+        (* host FULL block, last row: x_t + attn_t, then + relu MLP *)
+        hostBlockLast[t_] := Module[{r1},
+            r1 = xRow[t] + hostMHALast[t];
+            r1 + (relu /@ (r1 . w1)) . w2];
+        (* thvm DECODE block at position t: caches prefilled with rows 0..t-1's
+           k/v (== past x rows), TDecodeAttend appends row t's k/v + attends,
+           then the SAME residual + MLP over the {1,dim} result. *)
+        decodeBlock[t_] := Module[
+            {posVid, lenVid, kInit, vInit, kCache, vCache, q1, kNew, vNew, xNew,
+             attn, r1, hid, w1T, w2T},
+            TInit[];
+            posVid = TKVarAlloc[1, nCtx];
+            lenVid = TKVarAlloc[1, nCtx];
+            (* caches rows 0..t-1 = the past tokens' k/v (== x rows) *)
+            kInit = Table[If[ i < t, xRow[i], ConstantArray[0., dim]],
+                {i, 0, nCtx - 1}];
+            vInit = kInit;
+            kCache = TRealize[TTensorCreate[N @ kInit]];
+            vCache = TRealize[TTensorCreate[N @ vInit]];
+            xNew  = {xRow[t]};                                  (* {1,dim} *)
+            q1    = TTensorCreate[N @ xNew];
+            kNew  = TTensorCreate[N @ xNew];
+            vNew  = TTensorCreate[N @ xNew];
+            w1T   = TTensorCreate[N @ w1];
+            w2T   = TTensorCreate[N @ w2];
+            TKVarSet[posVid, t];
+            TKVarSet[lenVid, t + 1];
+            attn = TDecodeAttend[q1, kCache, vCache, kNew, vNew, nHeads,
+                posVid, lenVid, scale];                         (* {1,dim} *)
+            r1   = TRealize @ TUOpAdd[TTensorCreate[N @ xNew], attn];
+            hid  = With[{pre = TRealize[r1 . w1T]},
+                TRealize @ TUOpMul[pre, TUOpCmplt[TUOpConst[0.], pre]]];
+            Chop[Normal @ TTensorData @ TRealize @ TUOpAdd[r1, hid . w2T],
+                1.*^-6]];
+        {Max @ Abs[Flatten[decodeBlock[3] - {hostBlockLast[3]}]],
+         Max @ Abs[Flatten[decodeBlock[5] - {hostBlockLast[5]}]]}
+    ],
+    {0., 0.},  (* decode block output == full block's last row at t=3 and t=5 *)
+    TestID -> "symbolic/decode-block-vs-full-last-row",
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
+]

@@ -1551,6 +1551,17 @@ fromLayer[NetGraph, g_, input_] := Module[{
     results[Last[sorted]]
 ]
 
+(* DECODE context (Lever 2 step 3): when set, the AttentionLayer dispatch
+   below routes through TDecodeAttend (the single-query KV-cache fork) instead
+   of TMultiHeadAttention -- the ONLY cache-aware op in the block; everything
+   else (LayerNorm / GELU MLP / residual) is ordinary {1, dim}.  $decodeAttn is
+   an Association <|"k" -> {kCache..}, "v" -> {vCache..}, "posVid", "lenVid",
+   "scale", "idx"|>; `idx` is a mutable per-step block counter advanced by each
+   attention hit, so the b-th MultiHead AttentionLayer the fold visits picks the
+   b-th block's cache.  tokenLmDecodeStep Block-scopes it; outside decode it is
+   None and the attention dispatch is the ordinary symbolic/literal MHA. *)
+$decodeAttn = None;
+
 (* AttentionLayer: Wolfram's built-in.  For GPT-2 it's a
    single-head dot-product attention with optional masking.  We
    map it to TAttention (Q @ K^T / sqrt(d_k) softmax @ V).  Note
@@ -1563,7 +1574,39 @@ fromLayer[NetGraph, g_, input_] := Module[{
    Mask handling: AttentionLayer can carry a "Mask" option;
    we don't read it here -- callers supply the mask via the
    q,k,v packing (or use TMultiHeadAttention[..., mask] directly
-   when not going through TFromNet). *)
+   when not going through TFromNet).
+
+   DECODE fork: when $decodeAttn is set, q/k/v arrive as the {1, dim}
+   single-token projections; route them through TDecodeAttend over THIS
+   block's KV cache ($decodeAttn["k"/"v"][[idx]]) instead of
+   TMultiHeadAttention, advancing the block counter. *)
+fromLayer[AttentionLayer, layer_, qkv_List] /;
+        Length[qkv] === 3 && AssociationQ[$decodeAttn] :=
+    Module[{q, k, v, params, mask, rescale, nHeads, dim, scale, qShape,
+            portNames, qi, ki, vi, b, kCache, vCache},
+        portNames = Replace[Information[layer, "InputPortNames"],
+            Except[_List] -> {"Query", "Key", "Value"}];
+        qi = FirstPosition[portNames, "Query", {1}][[1]];
+        ki = FirstPosition[portNames, "Key",   {2}][[1]];
+        vi = FirstPosition[portNames, "Value", {3}][[1]];
+        q = qkv[[qi]];  k = qkv[[ki]];  v = qkv[[vi]];
+        params  = Quiet @ NetExtract[layer, "Parameters"];
+        rescale = Lookup[params, "ScoreRescaling", None];
+        qShape  = Lookup[params, "$QueryShape", Missing[]];
+        nHeads  = If[ ListQ[qShape] && Length[qShape] >= 2, Last[qShape], 1];
+        dim     = tUopShape[q][[2]];
+        scale   = Switch[ rescale,
+            None,            1.0,
+            "DimensionSqrt", 1 / Sqrt[N[dim / nHeads]],
+            _,               1 / Sqrt[N[dim / nHeads]]];
+        (* advance to this block's cache (1-indexed mutable counter) *)
+        b = $decodeAttn["idx"]; $decodeAttn["idx"] = b + 1;
+        kCache = $decodeAttn["k"][[b]];
+        vCache = $decodeAttn["v"][[b]];
+        TDecodeAttend[q, kCache, vCache, k, v, nHeads,
+            $decodeAttn["posVid"], $decodeAttn["lenVid"], scale]
+    ]
+
 fromLayer[AttentionLayer, layer_, qkv_List] /; Length[qkv] === 3 :=
     Module[{q, k, v, params, multiHead, mask, rescale, qShape, nHeads, seq, dim,
             scale, portNames, qi, ki, vi},
@@ -1826,6 +1869,62 @@ tokenLmForward[net_, onehot_, maxSeq_Integer] :=
         hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
         If[ needsHead, hidden . Transpose[tokT], hidden]
     ]
+
+(* tokenLmDecodeStep[net, oneHotRow, kCaches, vCaches, posVid, lenVid] -- the
+   single-token DECODE forward (decode roadmap Lever 2 step 3).  Process ONE new
+   token (a {1, vocab} one-hot) through GPT-2's blocks, each block APPENDING its
+   new K/V into the persistent per-block cache (kCaches[[b]], vCaches[[b]]) and
+   ATTENDING the single query over the cached prefix -> {1, vocab} logits.
+   Mirrors tokenLmForward exactly EXCEPT:
+     (a) posRow: the SINGLE positional row at the current position, a kvar-BEGIN
+         {1, dim} slice of the position table at TKVarPack[posVid] (the c74f7d1c
+         shrink-decode path).  x = oneHotRow . tokT + posRow ({1, dim}).
+     (b) the 12 blocks fold ordinarily (LayerNorm / GELU MLP / residual are all
+         literal {1, dim}), but the attention layer in each block routes through
+         TDecodeAttend over THAT block's cache -- arranged by Block-scoping
+         $decodeAttn (the per-block cache + kvars + a mutable block counter that
+         fromLayer[AttentionLayer] advances) around the fold.
+     (c) head: x . Transpose[tokT] -> {1, vocab}.
+   After a prefill, the step's logits match the full forward's logits at that
+   position. *)
+tokenLmDecodeStep[net_, oneHotRow_TTerm, kCaches_List, vCaches_List,
+                  posVid_Integer, lenVid_Integer] :=
+    Module[{tokTable, posTable, dim, restLayers, outDims, needsHead, tokT, posT,
+            posLeaf, x, hidden},
+        tokTable   = tokenEmbeddingArray[net];
+        posTable   = positionEmbeddingArray[net];
+        dim        = Last[Dimensions[tokTable]];
+        restLayers = DeleteCases[
+            Drop[Table[net[[i]], {i, Length[net]}], 1], _SequenceLastLayer];
+        outDims    = Cases[Flatten @ {First @ Values @ Quiet @ Information[net, "OutputPorts"]}, _Integer];
+        needsHead  = outDims === {} || Last[outDims] === dim;
+        tokT       = TUOpCopy[TTensorCreateHost[tokTable]];
+        (* (a) the SINGLE positional row at the current position.  Size the table
+           at the kvar's static upper bound, then SHRINK the {pos, pos+1} row at
+           TKVarPack[posVid] -> {1, dim}; view_apply_shrink decodes the kvar
+           begin (the c74f7d1c if-branch) to the runtime row. *)
+        posLeaf = TUOpCopy[TTensorCreateHost[posTable[[1 ;; TKVarHi[posVid]]]]];
+        posT    = TUOpShrink[posLeaf,
+            {{TKVarPack[posVid], TKVarPack[posVid] + 1}, {0, dim}}];
+        x       = oneHotRow . tokT + posT;
+        (* (b) fold the blocks with the per-block decode caches in scope.  Block
+           localises the counter mutation; idx starts at 1 (the first attention
+           layer the fold meets picks block 1). *)
+        hidden  = Block[{$decodeAttn = <|
+                "k" -> kCaches, "v" -> vCaches,
+                "posVid" -> posVid, "lenVid" -> lenVid, "idx" -> 1|>},
+            Fold[TFromLayer[#2, #1] &, x, restLayers]];
+        (* (c) tied LM head -> {1, vocab} *)
+        If[ needsHead, hidden . Transpose[tokT], hidden]
+    ]
+
+(* TDecodeStep[net, oneHotRow, state] -- the public per-step decode entry.
+   `state` is <|"kCaches" -> {..12..}, "vCaches" -> {..12..}, "posVid", "lenVid"|>
+   (the persistent per-block KV caches + the two position kvars, both set per
+   step via TKVarSet before TRealize).  Returns the {1, vocab} logits TTerm. *)
+TDecodeStep[net_, oneHotRow_TTerm, state_Association] :=
+    tokenLmDecodeStep[net, oneHotRow,
+        state["kCaches"], state["vCaches"], state["posVid"], state["lenVid"]]
 
 (* True when `oneHot` is a {seq, vocab} one-hot over net's token vocabulary
    -- the input shape that selects the fixed-sequence LM forward. *)
