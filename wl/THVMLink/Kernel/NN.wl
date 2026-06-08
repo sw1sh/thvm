@@ -1488,7 +1488,11 @@ fromLayer[AttentionLayer, layer_, qkv_List] /; Length[qkv] === 3 :=
             "DimensionSqrt", 1 / Sqrt[N[dim / nHeads]],
             _,              1 / Sqrt[N[dim / nHeads]]];
         TMultiHeadAttention[q, k, v, nHeads,
-            If[ MatchQ[mask, "Causal" | Causal], TCausalMask[seq], None],
+            If[ MatchQ[mask, "Causal" | Causal],
+                If[ symLeadingQ[q],
+                    TCausalMaskSym[symVid[seq], TKVarHi[symVid[seq]]],
+                    TCausalMask[seq]],
+                None],
             scale]
     ]
 fromLayer[AttentionLayer, _, _] :=
@@ -1698,7 +1702,22 @@ tokenLmForward[net_, onehot_, maxSeq_Integer] :=
            deferred to realize time (identity on CPU, staged upload on GPU).
            Mirrors tinygrad Ops.COPY. *)
         tokT   = TUOpCopy[TTensorCreateHost[tokTable]];
-        posT   = TUOpCopy[TTensorCreateHost[posTable[[1 ;; maxSeq]]]];
+        (* Positional embedding.  Integer-maxSeq path: the first maxSeq
+           rows, a fixed {maxSeq, dim} const.  SYMBOLIC-onehot path: size
+           the table at the kvar's static upper bound `hi` and mark axis 0
+           symbolic so the {S,dim} + {S,dim} add aligns with the symbolic
+           `onehot . tokT` (onehot is already symbolic on its leading axis,
+           so the matmul output is outer-symbolic {S,dim}). *)
+        posT   = If[ symLeadingQ[onehot],
+            With[{vid = symVid[First @ tUopShape[onehot]]},
+                (* Mark axis 0 symbolic on the host LEAF, THEN wrap in COPY:
+                   TSymbolicAxis must see a buffer-backed leaf -- applied to a
+                   UOP_COPY node it collapses the shape to rank 0. *)
+                TUOpCopy[
+                    TSymbolicAxis[
+                        TTensorCreateHost[posTable[[1 ;; TKVarHi[vid]]]],
+                        0, vid]]],
+            TUOpCopy[TTensorCreateHost[posTable[[1 ;; maxSeq]]]]];
         x      = onehot . tokT + posT;
         hidden = Fold[TFromLayer[#2, #1] &, x, restLayers];
         If[ needsHead, hidden . Transpose[tokT], hidden]

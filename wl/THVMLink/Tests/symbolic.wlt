@@ -455,3 +455,34 @@ VerificationTest[
     TestID -> "symbolic/multihead-causal-attention-public-op",
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
 ]
+
+(* REPEATED fresh-kvar TCausalMaskSym crashes the CPU dispatch (OPEN C bug).
+   Allocating a NEW kvar with TKVarAlloc and realizing a TCausalMaskSym {S,S}
+   over it crashes the kernel on the ~4th allocation: cpu_dispatch_kernel
+   (src/backend/cpu/interpret.c) dereferences a doubly-kvar-packed {S,S}
+   extent (far address 0x8000000080000000 = (2^31)<<32 | 2^31, a Data Abort
+   translation fault) -- the runtime kvar bound substitution is not applied to
+   a doubly-symbolic {S,S} tensor during kernel fire, so the raw packed
+   extents leak into an address computation.  Stack: thvm_wl_realize ->
+   thvm_realize -> wnf_n -> kernel_fire_by_id -> cpu_dispatch_kernel.  A SHARED
+   vid reused across many realizes is FINE (the per-fresh-vid path is the bug);
+   a SINGLE fresh-vid mask at full GPT-2 scale (dim 768, 12 heads) is also
+   fine.  This blocks the real GPT-2 forward over a symbolic sequence (its
+   per-block attention issues enough fresh symbolic realizes to cross the
+   threshold).  Run in a SUBPROCESS so the SIGABRT does not take down this
+   suite; the test asserts the child exits cleanly. *)
+VerificationTest[
+    Module[{script, res},
+        script = "
+PacletDirectoryLoad[\"wl/THVMLink\"]; Get[\"THVMLink`\"];
+Do[ Module[{vid, m},
+        vid = TKVarAlloc[1, 8]; TKVarSet[vid, 4];
+        m   = TCausalMaskSym[vid, 8];
+        Normal @ TTensorData @ TRealize @ m], {6}];
+WriteString[\"stdout\", \"OK\"];";
+        res = RunProcess[{"wolframscript", "-code", script}];
+        res["ExitCode"]
+    ],
+    0,
+    TestID -> "symbolic/repeated-fresh-kvar-causal-mask-no-crash"
+]
