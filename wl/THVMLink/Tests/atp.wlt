@@ -1713,6 +1713,33 @@ VerificationTest[
     TestID -> "ATP/autotune/analyze-Ring"
 ]
 
+(* AbelianMcCuneAxioms: single CAG axiom over 1 binary + 1 unary, all
+   law detectors hidden in the compound -> "CancellativeAbelianGroup".
+   Closes the WL Method->Automatic dispatch gap exposed by
+   tests/test_atp_wolfram_bench.c's amc_assoc probe (1464ab1a):
+   pre-fix this class fell through to "General" -> $AtpSchedule's
+   Mix2-bare first entry, which fails to crack the CAG saturation
+   in reasonable time.  Post-fix the GT-bare front cracks it. *)
+VerificationTest[
+    THVMLink`ATP`Private`atpAnalyzeStructure["AbelianMcCuneAxioms"]["Class"],
+    "CancellativeAbelianGroup",
+    TestID -> "ATP/autotune/analyze-AbelianMcCune-CAG"
+]
+VerificationTest[
+    THVMLink`ATP`Private`atpAnalyzeStructure["McCuneAxioms"]["Class"],
+    "CancellativeAbelianGroup",
+    TestID -> "ATP/autotune/analyze-McCune-CAG"
+]
+(* atpAutoTune for CAG returns the GT-front schedule. *)
+VerificationTest[
+    Module[{sched = THVMLink`ATP`Private`atpAutoTune["AbelianMcCuneAxioms"]},
+        And[Length[sched] >= 1,
+            First[sched] === {"Completion", "CriticalPairWeight" -> "Gt"}]
+    ],
+    True,
+    TestID -> "ATP/autotune/autotune-CAG-front-loads-GT"
+]
+
 (* atpAutoTune returns a non-empty list of valid Method configs. *)
 VerificationTest[
     Module[{sched},
