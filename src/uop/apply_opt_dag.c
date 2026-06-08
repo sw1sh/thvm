@@ -372,6 +372,17 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
     return 0;
   }
   u32 extent = uop_range_extent(old_leaf);
+  // A symbolic (kvar) axis packs its id (0x80000000|id) into the extent
+  // slot; `extent % k` / `extent / k` here would shred the packed value
+  // (0x80000004 / 4 = 0x20000001) into a bogus literal stride/loop bound.
+  // tinygrad excludes symbolic dims from upcastable/unrollable_dims, so a
+  // well-formed opt never targets one -- bail defensively if one slips in.
+  if (kvar_extent_is_var(extent)) {
+    if (getenv("THVM_HANDOPT_TRACE"))
+      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: symbolic kvar extent (id=%u)\n",
+              op, target_axis, k, kvar_extent_var_id(extent));
+    return 0;
+  }
   if (extent % k != 0) {
     if (getenv("THVM_HANDOPT_TRACE"))
       fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: extent=%u %% k != 0\n",

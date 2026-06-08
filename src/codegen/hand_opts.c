@@ -97,13 +97,20 @@ static int hand_opt_snapshot_axes(KernelEntry const *ke, HandOptAxes *out) {
 // --- tinygrad scheduler primitives over HandOptAxes -----------------
 
 // tinygrad: k.upcastable_dims = [i for i in axes_of(GLOBAL, LOCAL, LOOP)
-//                                if full_shape[i] > 1].  thvm's axis types
-// are KAX_LOOP/GLOBAL/LOCAL (no separate WARP); LOOP corresponds to GLOBAL
-// pre-promotion.  Returns count; out[] gets the axis indices.
+//                                if isinstance(s:=full_shape[i], int) and s > 1].
+// thvm's axis types are KAX_LOOP/GLOBAL/LOCAL (no separate WARP); LOOP
+// corresponds to GLOBAL pre-promotion.  The `isinstance(s, int)` guard
+// excludes symbolic (kvar) axes: a kvar-bound axis carries its id PACKED
+// into the extent slot (0x80000000|id), which `> 1` would wrongly admit
+// as a giant literal -- the split's `extent % k`/`extent / k` would then
+// shred the packed value (e.g. 0x80000004 / 4 = 0x20000001) into a bogus
+// 500M-iter loop.  tinygrad never upcasts/unrolls a symbolic dim; nor do
+// we.  Returns count; out[] gets the axis indices.
 static u32 hand_opt_upcastable_dims(HandOptAxes const *ax, u32 *out) {
   u32 n = 0;
   for (u32 i = 0; i < ax->n; i++) {
     u8 t = ax->kax_type[i];
+    if (kvar_extent_is_var(ax->extent[i])) continue;   // isinstance(s, int)
     if ((t == KAX_LOOP || t == KAX_GLOBAL || t == KAX_LOCAL) && ax->extent[i] > 1) {
       out[n++] = i;
     }
@@ -112,11 +119,14 @@ static u32 hand_opt_upcastable_dims(HandOptAxes const *ax, u32 *out) {
 }
 
 // tinygrad: k.unrollable_dims = [i for i in axes_of(GROUP_REDUCE, REDUCE)
-//                                if full_shape[i] > 1].
+//                                if isinstance(s:=full_shape[i], int) and s > 1].
+// Symbolic (kvar) reduce axes are excluded for the same reason as
+// hand_opt_upcastable_dims.
 static u32 hand_opt_unrollable_dims(HandOptAxes const *ax, u32 *out) {
   u32 n = 0;
   for (u32 i = 0; i < ax->n; i++) {
     u8 t = ax->kax_type[i];
+    if (kvar_extent_is_var(ax->extent[i])) continue;   // isinstance(s, int)
     if ((t == KAX_REDUCE || t == KAX_GROUP_REDUCE) && ax->extent[i] > 1) {
       out[n++] = i;
     }
@@ -136,11 +146,13 @@ static u32 hand_opt_axes_of_n(HandOptAxes const *ax, u8 const *types, u32 n_type
 }
 
 // tinygrad: k.upcast_size() = prod(full_shape[a] for a in axes_of(UPCAST, UNROLL)).
+// A symbolic (kvar) axis contributes its static upper bound (kvar_hi), never
+// the raw packed extent.
 static u64 hand_opt_upcast_size(HandOptAxes const *ax) {
   u64 p = 1;
   for (u32 i = 0; i < ax->n; i++) {
     if (ax->kax_type[i] == KAX_UPCAST || ax->kax_type[i] == KAX_UNROLL) {
-      p *= (u64)ax->extent[i];
+      p *= (u64)kvar_extent_static(ax->extent[i]);
     }
   }
   return p;
