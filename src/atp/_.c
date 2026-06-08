@@ -7251,9 +7251,14 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
         }
       }
     }
-    u64 lo = gc_from_start();
-    u64 hi = gc_from_end();
-    u64 cap = hi - lo;
+    u64 lo, cap;
+    if (gc_enabled()) {
+      lo  = gc_from_start();
+      cap = gc_from_end() - lo;
+    } else {
+      lo  = 0;
+      cap = thvm_heap_cells();
+    }
     if (cap > 0 && (double)(HEAP_NEXT - lo) > frac * (double)cap) {
       return ATP_ABORTED;
     }
