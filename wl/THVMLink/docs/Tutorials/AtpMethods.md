@@ -95,6 +95,21 @@ Each preset bundles the defaults of a real-world prover so a one-name call repro
 - `"Twee"` - `CriticalPairWeight -> "Twee"` + `GroundJoin` + `Connectedness` + `UnfailingCP` + `BackwardSubsume` + `BackwardDemod` + `RHSInterreduce` + `AutoMaxWeight -> 20`.  Twee 2.x defaults (Smallbone, 2021+).
 - `"EProver"` - `CriticalPairWeight -> "ConjSym"` + KBO + `AutoPrecedence -> "Occurrence"` + `SelectionRatio -> 10` + `AutoMaxWeight -> 20` + `BackwardSubsume` + `RHSInterreduce` + `UnfailingCP`.  E's typical CASC config (the `Occurrence` precedence mirrors E's `-G InvFreqRank`).
 - `"VampireRandom"` - LPO + `AutoPrecedence` + `SelectionRatio -> 10` + `UnfailingCP` + `GroundJoin` + `BackwardDemod` + `RHSInterreduce` + `RandomRatio -> 32` + `RandomSeed -> 3681690318` + `LRS`.  Vampire's `lrs+10_32:to=lpo:sp=arity:fgj=on:bd=all:random_seed=...` cracking entry for `McCuneAxioms/EqualityOfInverses`.
+- `"ENIGMA"` - ML-guided critical-pair selection: a trained proof-relevance scorer (`"CriticalPairWeight" -> "Learned"`) on a sound bounded-queue base (KBO + `AutoPrecedence` + `UnfailingCP` + `RHSInterreduce` + `AutoMaxWeight -> 20`).  Uses the model pushed by `TAtpSetLearnedScorer`, or a baked-in logistic regression otherwise; completeness holds regardless because the engine still takes a periodic FIFO pick.  See the learn loop below.
+
+### Learned critical-pair selection (ENIGMA)
+
+`Method -> "ENIGMA"` ranks the critical-pair queue with a learned proof-relevance model instead of a hand-tuned weight.  Close the loop in four steps - prove a corpus with per-CP feature recording on, label the processed CPs by proof-trace reachability, train a scorer on thvm's own deep-learning stack, then push it back into the engine:
+
+```wl
+#| eval: false
+ds      = TAtpCpDataset["AbelianGroupAxioms"];
+trained = TAtpTrainScorer[ds];
+TAtpSetLearnedScorer[trained["Model"]];
+TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "ENIGMA"]
+```
+
+`TAtpTrainScorer["AbelianGroupAxioms"]` collapses the dataset + train steps into one call.  A structural graph variant - `TAtpCpGraph` / `TAtpGraphDataset` - emits symbol/variable-anonymised hypergraphs for a graph neural network instead of the 14-feature vectors.  `TAtpSetLearnedScorer[Clear]` drops the model and reverts to the baked-in scorer.
 
 ## External CLI process methods
 
@@ -141,7 +156,7 @@ The list-form spec accepts any of the following; defaults match the C engine's d
 
 | Suboption                       | Values                                                 | What it changes |
 |---------------------------------|--------------------------------------------------------|-----------------|
-| `"CriticalPairWeight"`          | `"Add" \| "Max" \| "Ord" \| "Gt" \| "Mix" \| "Mix2" \| "Unif" \| "Goal" \| "Twee" \| "ConjSym" \| "Diversity" \| "RelLevel" \| "Staggered"` | Sorts the CP queue.  `Gt` is the engine default; `Mix2` is the strongest general baseline; `Twee` is Twee's asymmetric-bias scorer; `ConjSym` is E's conjecture-symbol bias. |
+| `"CriticalPairWeight"`          | `"Add" \| "Max" \| "Ord" \| "Gt" \| "Mix" \| "Mix2" \| "Unif" \| "Goal" \| "Twee" \| "ConjSym" \| "Diversity" \| "RelLevel" \| "Staggered" \| "Learned"` | Sorts the CP queue.  `Gt` is the engine default; `Mix2` is the strongest general baseline; `Twee` is Twee's asymmetric-bias scorer; `ConjSym` is E's conjecture-symbol bias; `Learned` ranks by the pushed ENIGMA model (`Method -> "ENIGMA"`). |
 | `"Ordering"`                    | `"KBO" \| "LPO"`                                       | The reduction ordering used for orientation.  KBO orients more rules; LPO supports variable-duplicating rules KBO refuses. |
 | `"AutoPrecedence"`              | `True \| False \| "Occurrence"`                        | `True` runs Waldmeister's structure-driven Praezedenzgenerator; `"Occurrence"` runs Vampire `sp=occurrence` / E `InvFreqRank` (rare symbols rank highest). |
 | `"Precedence"` / `"SkolemHighest"` | `{sym1, sym2, ...}` / `True`                        | An explicit per-symbol precedence chain; `SkolemHighest` ranks goal Skolem constants above every operator. |
@@ -292,6 +307,7 @@ The seeded xorshift64 inside the random pick makes the trajectory reproducible; 
 
 ## Where the code lives
 
-- `wl/THVMLink/Kernel/ATP/ATP.wl` - the WL surface: method parser, preset dispatcher, portfolio scheduler, `Automatic` problem-aware front-load.
+- `wl/THVMLink/Kernel/ATP/ATP.wl` - the WL surface: method parser (`atpParseMethod`) and preset dispatcher.
+- `wl/THVMLink/Kernel/ATP/ATP_Method.wl` - the portfolio scheduler, `atpAnalyzeStructure`, and the `Automatic` problem-aware front-load (`atpAutoTune`).
 - `src/atp/_.c` and `src/atp/precedence.c` - the C engine: completion loop, CP selection, redundancy checks, precedence generation.
 - `docs/tutorial/atp_methods.md` - the long-form reference covering every single suboption and every method head.

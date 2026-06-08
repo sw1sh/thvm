@@ -12,7 +12,7 @@ RelatedTutorials: [Overview, Disproof]
 
 ## What the ATP surface covers
 
-<code>THVMLink\`ATP\`</code> wraps `thvm`'s C-side proof engines and presents them through a single Wolfram surface. Two engines live behind the same `Needs["THVMLink``ATP``"]`:
+<code>THVMLink\`ATP\`</code> wraps `thvm`'s C-side proof engines and presents them through a single Wolfram surface. Two engines live behind the same <code>[Needs]()["THVMLink\`ATP\`"]</code>:
 
 - **Unfailing Knuth-Bendix completion** - first-order equational logic. Saturates a set of axioms into a confluent rewrite system; tries to refute the negated conjecture. The flagship entry point is [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof) (`TATP` is the lower-level cousin that returns the raw saturation Association).
 - **Congruence closure (QF_UF)** - quantifier-free first-order theory of equality with uninterpreted functions, accessed through [TSatEUF](), [TSmtDecide](), and [TFindProof]() with `Method -> "SMT"`. Decides ground entailment in time linear in the term count; `TSmtDecide` lifts it to arbitrary Boolean combinations via DPLL(T).
@@ -134,6 +134,8 @@ Each named preset bundles the defaults of a real-world prover so a one-name call
 - `"VampireUEQ"` - LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce + MNF front.
 - `"Twee"` - CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20.
 - `"EProver"` - CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP.
+- `"VampireRandom"` - LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + GroundJoin + BackwardDemod + RHSInterreduce + a seeded random CP-pick ratio + LRS; the Vampire 5.0.1 portfolio entry that cracks `McCuneAxioms/EqualityOfInverses` in the cross-system baseline.
+- `"ENIGMA"` - ML-guided critical-pair selection. A trained proof-relevance scorer (`"CriticalPairWeight" -> "Learned"`) rides a sound bounded-queue base (KBO + AutoPrecedence + UnfailingCP + RHSInterreduce + AutoMaxWeight 20); completeness holds regardless of the model because the engine still takes a periodic FIFO pick. Build and push a model with the learn loop in [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods); absent one, a baked-in logistic regression is used.
 
 ```wl
 #| eval: false
@@ -315,5 +317,5 @@ The corpus walker side - browse 26,264 problems across 57 mathematical domains b
 
 - Per-symbol pages: [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof), [TATP](), [TRelevantAxioms](), [TAtpSchedule](), [TAtpDescribeMethod](), [TSatEUF](), [TSmtDecide]().
 - Parser side: [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) (how the parser is built from the BNF) and [TPTP Problem Library](paclet:Wolfram/WolframParser/tutorial/TPTPProblemLibrary) (using `TPTPImport` on the full corpus).
-- The portfolio + auto-tune source lives in [`wl/THVMLink/Kernel/ATP/ATP.wl`](../../Kernel/ATP/ATP.wl); the SMT module is [`SMT.wl`](../../Kernel/ATP/SMT.wl). The C-side completion engine is under `src/atp/`.
+- The dispatcher, encoder, `TFindProof` core, and method parser live in [`ATP.wl`](../../Kernel/ATP/ATP.wl); the structure auto-tune + schedule introspection in [`ATP_Method.wl`](../../Kernel/ATP/ATP_Method.wl), the `ProofObject` reconstruction (proof decoder + critical-pair-lemma DAG) in [`ATP_ProofGraph.wl`](../../Kernel/ATP/ATP_ProofGraph.wl), the relevance filter in [`ATP_Relevance.wl`](../../Kernel/ATP/ATP_Relevance.wl), and the congruence-closure SMT path in [`SMT.wl`](../../Kernel/ATP/SMT.wl). The C-side completion engine is under `src/atp/`.
 - The algorithmic intent for the completion engine is written up in `docs/plans/waldmeister_ic_atp.md` at the source-tree root.

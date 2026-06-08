@@ -168,7 +168,7 @@ atpAxiomParts[ax_] := Block[{vars, eq, l, r},
     (* Also extract Pattern-bound variables from an UNQUANTIFIED axiom
        (Pattern[v, Blank[]] form).  atpProveBundle passes axioms post-
        unquantifyFormula + CanonicalizePatterns (atpProveFromTheory
-       line ~4601), so the ForAll wrapper is gone and the Switch above
+       in ATP.wl), so the ForAll wrapper is gone and the Switch above
        yields vars = {}.  Without this fallback, every symbol looks
        like an operator -- atpIsVar always false -- and the Sheffer /
        Boolean / AC discriminators in atpAnalyzeStructure can never
