@@ -30,3 +30,8 @@ BooleanAxioms	AbsorptionOrAnd	28	-	43	35	OK.  chain=28 vs WM_rules=43.
 BooleanAxioms	ImpliesHuntingtonAxioms__c1	1	-	4	8	OK.  chain=1 vs WM_rules=4 -- same AndComm-style 1-step proof shape.
 BooleanAxioms	ImpliesHuntingtonAxioms__c2	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close to parity, slightly longer.
 BooleanAxioms	ImpliesHuntingtonAxioms__c3	103	-	189	110	OK.  chain=103 vs WM_rules=189 -- thvm noticeably shorter (chain compression on a deep goal).
+McCuneAxioms	InverseOfInverse	70	-	33	72	OK.  chain=70 vs WM_rules=33 -- thvm 2x LONGER.  McCune is a single-axiom group; the absence of AC structure removes thvm's chain-compression advantage, and the single complex axiom expands aggressively.
+McCuneAxioms	InverseOfComposite	71	-	41	73	OK.  chain=71 vs WM_rules=41 -- same pattern as InverseOfInverse, thvm ~2x longer.
+RingAxioms	ZeroIsAbsorbing	27	-	48	35	OK.  chain=27 vs WM_rules=48 -- thvm shorter (AC-rich axiom set benefits from chain compression).
+CommutativeRingAxioms	ZeroIsAbsorbing	22	-	54	30	OK.  chain=22 vs WM_rules=54 -- thvm 2.5x shorter (AC + Comm structure aligns with chain compression).
+CommutativeRingWithIdentityAxioms	ZeroIsAbsorbing	32	-	49	41	OK.  chain=32 vs WM_rules=49 -- thvm shorter.

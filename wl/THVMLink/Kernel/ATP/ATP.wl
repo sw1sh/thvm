@@ -112,6 +112,16 @@ TFindProofGnnReranked::usage = "TFindProofGnnReranked[conjecture, axioms, model]
 
 Begin["`Private`"];
 
+(* Suppress General::shdw during definition load.  The TFindProof
+   dispatch defensively Block-localizes Global`a..z + xN names
+   (see [[project_atp_tfindproof_iter_leak]]) and some of those
+   names (i, s, t, e) overlap private context symbols inside this
+   package -- the shdw message is benign (the Block fires at runtime
+   under the package context, not load) but the warning is noisy.
+   Restored at End[] below so the user's own shdw conditions still
+   surface. *)
+Off[General::shdw];
+
 (* Default-on the C-engine fast paths.  Without these, Sheffer / nand
    theorems like WolframAxioms / AndAssociativity time out at 60s
    even with KBO + Gt + RecordNorm -> False; with them, the same
@@ -3483,6 +3493,7 @@ TFindEquationalProof::dropax    = TFindProof::dropax;
 TFindEquationalProof::badrel    = TFindProof::badrel;
 TFindEquationalProof[args___] := TFindProof[args];
 
+On[General::shdw];
 End[];
 EndPackage[];
 
