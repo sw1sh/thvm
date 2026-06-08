@@ -45,9 +45,19 @@
 //                       The TJit-friendly optimiser-step idiom mutates weight
 //                       tensors via TAssign, so we have to replay those writes
 //                       too or the captured kernels would read stale weights.
+// JIT_OP_GATHER -- a host-side strided gather (materialize_root_alias):
+//   read the SOURCE buffer through a (possibly broadcast / chained) view
+//   and write a fresh contiguous DST buffer.  Captured when a movement-op
+//   realize root resolves to an alias over a VOLATILE buffer (a kernel
+//   output that re-fires, or a KV cache an append ASSIGN mutates): the
+//   eager capture-time gather is a one-shot host memcpy that bakes the
+//   capture-step bytes, so we re-run it per replay off the re-derived
+//   source.  Stores the source View (+ chain) inline so replay survives
+//   the post-realize TENS rewind that drops the transient alias TenDesc.
 typedef enum {
   JIT_OP_DISPATCH = 0,
-  JIT_OP_ASSIGN   = 1
+  JIT_OP_ASSIGN   = 1,
+  JIT_OP_GATHER   = 2
 } JitOpKind;
 
 // Full fused forward kernels can legitimately have dozens of input
@@ -68,6 +78,16 @@ typedef struct {
   // ASSIGN path:
   u32  assign_dst_tid;
   u32  assign_src_tid;
+  // GATHER path: source buffer + the strided view to read it through,
+  // and the destination buffer to fill.  The View (+ chain) is copied
+  // inline so the replay doesn't depend on the transient alias TenDesc.
+  void    *gather_backend;
+  u32      gather_src_buf;
+  u32      gather_dst_buf;
+  u32      gather_dtype;
+  View     gather_view;
+  u8       gather_nviews;
+  View    *gather_prior;       // [gather_nviews]; NULL when nviews == 0
 } JitCaptureOp;
 
 typedef struct {
@@ -83,8 +103,11 @@ typedef struct {
 // (engine/jit.py:124-126): GraphRunner records each call-arg position
 // that is an Ops.PARAM (a JIT input) and substitutes the fresh input
 // rawbuffer there before the graph runs.  pos==U32_MAX marks the
-// dispatch op's out_buf_id (a JIT input used in place as an output).
+// dispatch op's out_buf_id (a JIT input used in place as an output);
+// the GATHER_* sentinels mark a JIT input read/written by a regather op.
 #define JIT_INPUT_OUT_POS  0xFFFFFFFFu
+#define JIT_GATHER_SRC_POS 0xFFFFFFFEu
+#define JIT_GATHER_DST_POS 0xFFFFFFFDu
 typedef struct {
   u32 op_index;
   u32 pos;          // input-position within the op, or JIT_INPUT_OUT_POS
@@ -254,6 +277,10 @@ static void jit_capture_clear_ops(JitCapture *c) {
   for (u32 i = 0; i < c->n_ops; i++) {
     free(c->ops[i].heap_in_buf_ids);
     c->ops[i].heap_in_buf_ids = NULL;
+    if (c->ops[i].kind == JIT_OP_GATHER) {
+      free(c->ops[i].gather_prior);
+      c->ops[i].gather_prior = NULL;
+    }
   }
   c->n_ops = 0;
 }
@@ -560,6 +587,43 @@ fn void jit_capture_record_assign(u32 dst_tid, u32 src_tid) {
   op->assign_src_tid  = src_tid;
   jit_capture_retain_tensor_buf(c, dst_tid);
   jit_capture_retain_tensor_buf(c, src_tid);
+}
+
+// Called from materialize_root_alias right after a host-side strided
+// gather, when the SOURCE buffer is volatile under replay (a kernel
+// output that re-fires, or an append-mutated KV cache).  Records the
+// (src buf, src view, dst buf) so jit_replay re-runs the same gather off
+// the freshly produced source bytes each step.  `src` is the alias
+// TenDesc (its view + chain describe how to read the underlying buffer);
+// `dst_buf` is the contiguous gather destination.
+fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf) {
+  if (JIT_ACTIVE_SLOT == 0) return;
+  if (src_tid == 0 || src_tid >= TENS_NEXT) return;
+  JitCapture *c = &JIT_CAPTURES[JIT_ACTIVE_SLOT];
+  if (c->n_ops >= JIT_CAPTURE_OP_CAP) return;
+  TenDesc const *sd = &TENS[src_tid];
+  JitCaptureOp *op = &c->ops[c->n_ops++];
+  op->kind            = JIT_OP_GATHER;
+  op->replay_skip     = 0;
+  op->replay_packed   = 0;
+  op->heap_in_buf_ids = NULL;
+  op->gather_backend  = (void *)sd->backend;
+  op->gather_src_buf  = sd->buf_id;
+  op->gather_dst_buf  = dst_buf;
+  op->gather_dtype    = sd->dtype;
+  op->gather_view     = sd->view;
+  op->gather_nviews   = sd->nviews;
+  op->gather_prior    = NULL;
+  if (sd->nviews > 0 && sd->prior_views != NULL) {
+    op->gather_prior = (View *)malloc(sizeof(View) * sd->nviews);
+    if (op->gather_prior != NULL)
+      memcpy(op->gather_prior, sd->prior_views, sizeof(View) * sd->nviews);
+    else
+      op->gather_nviews = 0;   // OOM: degrade to single-view (still correct
+                               // for the nviews==0 broadcast case)
+  }
+  jit_capture_retain_buf(c, sd->backend, sd->buf_id);
+  jit_capture_retain_buf(c, sd->backend, dst_buf);
 }
 
 fn void jit_capture_mark_preserved(void) {
@@ -1111,6 +1175,20 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
         }
         break;
       }
+      case JIT_OP_GATHER: {
+        // Live only if the gathered dst is needed downstream; if so, its
+        // SOURCE buffer must re-fire too, so add it to `needed` (reconnects
+        // the liveness chain the eager one-shot gather would have severed).
+        Backend *gb = (Backend *)op->gather_backend;
+        int dst_needed = noskip || jit_bufref_contains(needed, n_needed,
+                                                       gb, op->gather_dst_buf);
+        if (!dst_needed) {
+          op->replay_skip = 1;
+          break;
+        }
+        jit_bufref_add(needed, &n_needed, gb, op->gather_src_buf);
+        break;
+      }
     }
   }
 
@@ -1407,6 +1485,31 @@ static void jit_capture_build_input_sites(JitCapture *c) {
     u32 count = 0;
     for (u32 i = 0; i < c->n_ops; i++) {
       JitCaptureOp const *op = &c->ops[i];
+      // A regather over a JIT-declared input buffer must rebind its src
+      // (and dst) to the fresh per-call buffer, the same way a dispatch
+      // input does -- otherwise the regather re-reads the capture-time
+      // input on every replay.
+      if (op->kind == JIT_OP_GATHER) {
+        for (u32 k = 0; k < c->n_inputs_decl; k++) {
+          if (op->gather_src_buf == c->input_buf_ids[k]) {
+            if (pass == 1) {
+              c->sites[count].op_index   = i;
+              c->sites[count].pos        = JIT_GATHER_SRC_POS;
+              c->sites[count].slot_index = k;
+            }
+            count++;
+          }
+          if (op->gather_dst_buf == c->input_buf_ids[k]) {
+            if (pass == 1) {
+              c->sites[count].op_index   = i;
+              c->sites[count].pos        = JIT_GATHER_DST_POS;
+              c->sites[count].slot_index = k;
+            }
+            count++;
+          }
+        }
+        continue;
+      }
       if (op->kind != JIT_OP_DISPATCH) continue;
       u32 const *ids = op->heap_in_buf_ids != NULL
                      ? op->heap_in_buf_ids
@@ -1468,6 +1571,10 @@ fn u32 jit_replay_with_inputs(u32 slot, u32 const *new_ids, u32 n) {
       u32 fresh = new_ids[site->slot_index];
       if (site->pos == JIT_INPUT_OUT_POS) {
         op->out_buf_id = fresh;
+      } else if (site->pos == JIT_GATHER_SRC_POS) {
+        op->gather_src_buf = fresh;
+      } else if (site->pos == JIT_GATHER_DST_POS) {
+        op->gather_dst_buf = fresh;
       } else if (site->pos < op->n_inputs) {
         u32 *ids = op->heap_in_buf_ids != NULL
                  ? op->heap_in_buf_ids
@@ -1636,6 +1743,55 @@ fn u32 jit_replay(u32 slot) {
           dd->backend->buf_write(dd->buf_id, tmp, nbytes);   // whole-buffer (byte_off == 0)
         }
         free(tmp);
+        ITRS++;
+        break;
+      }
+      case JIT_OP_GATHER: {
+        // Re-run the host-side strided gather off the LIVE source bytes
+        // (its producer kernel re-fired earlier in this replay, or the KV
+        // cache was just re-appended) into the contiguous dst buffer.
+        Backend *b = (Backend *)op->gather_backend;
+        if (b == NULL || b->buf_read == NULL || b->buf_write == NULL) break;
+        if (op->gather_dtype != DT_FP32 && op->gather_dtype != DT_INT32) break;
+        u32 esz = dtype_itemsize(op->gather_dtype);
+        if (esz == 0) break;
+        // Rebuild a TenDesc shell from the stored view + chain so the
+        // shared strided-index walker maps each dst element to its source
+        // offset (handles broadcast strides and ShapeTracker chains).
+        TenDesc sh = {0};
+        sh.dtype       = op->gather_dtype;
+        sh.view        = op->gather_view;
+        sh.nviews      = op->gather_nviews;
+        sh.prior_views = op->gather_prior;
+        u32 numel = sh.view.numel;
+        // Source byte ceiling = max reachable index + 1 (matches the
+        // capture-time sizing in materialize_root_alias).
+        u32 max_idx = 0;
+        for (u32 k = 0; k < numel; k++) {
+          u32 bidx = tendesc_strided_index(&sh, k);
+          if (bidx > max_idx) max_idx = bidx;
+        }
+        size_t src_bytes = (size_t)dtype_storage_bytes(op->gather_dtype, (u64)(max_idx + 1));
+        void *raw = malloc(src_bytes);
+        if (raw == NULL) break;
+        b->buf_read(op->gather_src_buf, raw, src_bytes);
+        size_t dst_bytes = (size_t)dtype_storage_bytes(op->gather_dtype, numel);
+        void *dst = malloc(dst_bytes);
+        if (dst == NULL) { free(raw); break; }
+        switch (esz) {
+          case 4: { u32 *o = (u32 *)dst; u32 const *s = (u32 const *)raw;
+                    for (u32 k = 0; k < numel; k++) o[k] = s[tendesc_strided_index(&sh, k)]; break; }
+          case 1: { u8  *o = (u8  *)dst; u8  const *s = (u8  const *)raw;
+                    for (u32 k = 0; k < numel; k++) o[k] = s[tendesc_strided_index(&sh, k)]; break; }
+          case 2: { u16 *o = (u16 *)dst; u16 const *s = (u16 const *)raw;
+                    for (u32 k = 0; k < numel; k++) o[k] = s[tendesc_strided_index(&sh, k)]; break; }
+          case 8: { u64 *o = (u64 *)dst; u64 const *s = (u64 const *)raw;
+                    for (u32 k = 0; k < numel; k++) o[k] = s[tendesc_strided_index(&sh, k)]; break; }
+          default: free(raw); free(dst); raw = NULL; dst = NULL; break;
+        }
+        if (dst != NULL) b->buf_write(op->gather_dst_buf, dst, dst_bytes);
+        free(raw);
+        free(dst);
         ITRS++;
         break;
       }

@@ -12,6 +12,13 @@
 //      on unsupported shapes, making the boundary's emit bail and
 //      thvm_materialize fall back to returning the input unchanged.
 
+// Forward decls into jit/capture.c (included AFTER this file in the unity
+// build).  The movement-op-root gather needs to know whether a TJit
+// closure is mid-record, and to record a replayable JIT_OP_GATHER so the
+// one-shot host gather re-runs off the live source on every replay.
+fn int  jit_is_capturing(void);
+fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf);
+
 #define BOUNDARY_ORDER_CAP 16384
 static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_TID  [BOUNDARY_ORDER_CAP];   // emitted output TenDesc id
@@ -4857,7 +4864,7 @@ static u8 op_is_view_movement(u8 op) {
 // view_strided_index.  Used by thvm_materialize when the root is a
 // movement-op chain that resolves to a view alias the caller will
 // read through (wnf expects flat-buffer reads).
-static Term materialize_root_alias(Term t) {
+static Term materialize_root_alias_rec(Term t, int record_replay) {
   if (term_tag(t) != TAG_TEN) return t;
   u32 tid = (u32)term_val(t);
   if (tid == 0 || tid >= TENS_NEXT) return t;
@@ -4918,7 +4925,20 @@ static Term materialize_root_alias(Term t) {
   d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, dst_bytes);
   free(raw);
   free(dst_host);
+  // Under TJit capture, this gather is a one-shot host memcpy that never
+  // enters the recorded dispatch stream -- so a per-step replay keeps the
+  // capture-step bytes even when the source is recomputed (a re-firing
+  // reduce broadcast) or mutated (a KV cache an append rewrites).  Record
+  // it as a replayable JIT_OP_GATHER off the (now committed) dst buffer so
+  // each replay re-gathers the live source.
+  if (record_replay) {
+    jit_capture_record_gather(tid, TENS[dst_tid].buf_id);
+  }
   return term_new(0, TAG_TEN, d->dtype, dst_tid);
+}
+
+static Term materialize_root_alias(Term t) {
+  return materialize_root_alias_rec(t, 0);
 }
 
 // === build_kernel: visit() recursion (g2b) ===
@@ -5979,7 +5999,13 @@ fn Term thvm_materialize(Term term) {
       int unsafe_chain_root = (ad->nviews > 0 && ad->producer_kid != 0);
       if (!unsafe_chain_root) {
         Term alias_term = term_new(0, TAG_TEN, ad->dtype, alias_tid);
-        return materialize_root_alias(alias_term);
+        // Under TJit capture, record the host gather as a replayable
+        // JIT_OP_GATHER so it re-runs off the live source each step
+        // (the one-shot capture gather otherwise bakes the capture-step
+        // bytes -- stale on replay when the source is a re-firing reduce
+        // broadcast or an append-mutated KV cache).  Idempotent for
+        // genuinely static sources (re-copies identical bytes).
+        return materialize_root_alias_rec(alias_term, jit_is_capturing());
       }
     }
   }

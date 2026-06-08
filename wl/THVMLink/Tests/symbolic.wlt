@@ -811,3 +811,37 @@ VerificationTest[
     {2, 2, {5, 8}, True, 0},
     TestID -> "symbolic/decode-init-allocates-caches"
 ]
+
+(* STEP 5: the decode loop under TJit -- capture ONCE, replay per step rebinding
+   the kvars (posVid/lenVid) AND the new token's projected k/v.  kNew/vNew are
+   COMPUTED (matmul dispatch outputs), as in the real decode (W_k/W_v
+   projections), so they recompute from the rebound per-step inputs on replay;
+   the cache-append offset re-resolves from kvar_runtime at fire (the JIT
+   offset-rebind) and the eager softmax's host gather re-runs off the live cache
+   (the JIT_OP_GATHER replay).  Captured at the loop's MAX prefix (lenVid=4),
+   then replayed at lenVid=1..4 -> out_t = avg(V[0..t]) = t/2 = {0,.5,1,1.5}.
+   Guards the full decode-under-TJit chain: append offset rebind + cache-read
+   regather + kvar loop-bound rebind. *)
+VerificationTest[
+    Module[{posVid, lenVid, kC, vC, idn, ones, fn},
+        TInit[];
+        posVid = TKVarAlloc[1, 8]; lenVid = TKVarAlloc[1, 8];
+        kC  = TRealize[TTensorCreate[ConstantArray[0., {8, 4}]]];
+        vC  = TRealize[TTensorCreate[ConstantArray[0., {8, 4}]]];
+        idn = TTensorCreate[N @ IdentityMatrix[4]];
+        ones = TTensorCreate[ConstantArray[1., {1, 4}]];
+        fn = TJit[{q, kin, vin} |-> Module[{kn, vn},
+            kn = TRealize[kin . idn]; vn = TRealize[vin . idn];
+            TRealize @ TDecodeAttend[q, kC, vC, kn, vn, 2, posVid, lenVid, 1.0]]];
+        TKVarSet[posVid, 3]; TKVarSet[lenVid, 4];     (* capture at the max prefix *)
+        fn[ones, ones, TTensorCreate[ConstantArray[0., {1, 4}]]];
+        Table[
+            TKVarSet[posVid, t]; TKVarSet[lenVid, t + 1];
+            First @ First @ Normal @ TTensorData @ fn[ones, ones,
+                TTensorCreate[ConstantArray[N[t], {1, 4}]]],
+            {t, 0, 3}]
+    ],
+    {0., 0.5, 1., 1.5},
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &),
+    TestID -> "symbolic/decode-loop-jit-replay"
+]
