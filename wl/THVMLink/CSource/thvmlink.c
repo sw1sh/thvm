@@ -1132,11 +1132,54 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
   MNumericArray out;
   libData->numericarrayLibraryFunctions->MNumericArray_new(t, rank, dims, &out);
   void *dst = libData->numericarrayLibraryFunctions->MNumericArray_getData(out);
-  // Copy the BOUND region (resolved numel), not d->view.numel (which is the
-  // hi-padded buffer size) -- for an outer-symbolic output the valid data is
-  // the first `numel` contiguous elements.
-  u64   nbytes = dtype_storage_bytes(d->dtype, numel);
-  d->backend->buf_read(d->buf_id, dst, nbytes);
+
+  // The buffer is sized at the kvar STATIC (hi) extent on every symbolic axis,
+  // so an INNER symbolic axis leaves the valid bound region hi-strided -- the
+  // first `numel` elements are NOT the {S, ..} corner (e.g. a {S,S} mask is a
+  // {hi,hi}-strided buffer whose valid {S,S} lives at stride hi, not S).  Only
+  // a purely outer-symbolic output ({S} leading, literal-contiguous trailing)
+  // is contiguous in its first `numel` elements.  Detect contiguity by
+  // comparing the view's strides to the C-order strides the bound dims imply;
+  // gather element-by-element through the static strides otherwise.
+  u32 nd = d->view.shape.ndim;
+  int contiguous = 1;
+  {
+    i64 expect = 1;  // C-order stride the bound shape would have if packed tight
+    for (int i = (int)nd - 1; i >= 0; i--) {
+      if (d->view.strides[i] != (i32)expect) { contiguous = 0; break; }
+      expect *= (i64)dims[i];
+    }
+  }
+  if (contiguous || nd == 0) {
+    // Fast path: the bound region is the first `numel` contiguous elements.
+    u64 nbytes = dtype_storage_bytes(d->dtype, numel);
+    d->backend->buf_read(d->buf_id, dst, nbytes);
+  } else {
+    // Strided gather: walk the bound index space, reading each element from
+    // its static-strided buffer offset.  Read the whole hi-padded buffer once,
+    // then scatter the bound corner into the tight NumericArray.  elem-size
+    // dtypes only (the symbolic path is f32/f64/int) -- nibble dtypes never
+    // carry a symbolic dim here.
+    u64 esz       = dtype_storage_bytes(d->dtype, 1);
+    u64 buf_numel = d->view.numel;
+    u8 *full      = (u8 *)malloc((size_t)(buf_numel * esz));
+    d->backend->buf_read(d->buf_id, full, buf_numel * esz);
+    u8 *out_b     = (u8 *)dst;
+    // Iterate the bound shape in C-order; map each multi-index to its static
+    // buffer offset via the view strides.
+    u32 idx[MAX_DIM] = {0};
+    for (u64 lin = 0; lin < numel; lin++) {
+      i64 off = 0;
+      for (u32 k = 0; k < nd; k++) off += (i64)idx[k] * (i64)d->view.strides[k];
+      memcpy(out_b + lin * esz, full + (u64)off * esz, (size_t)esz);
+      // increment the mixed-radix counter over the BOUND dims
+      for (int k = (int)nd - 1; k >= 0; k--) {
+        if (++idx[k] < (u32)dims[k]) break;
+        idx[k] = 0;
+      }
+    }
+    free(full);
+  }
 
   MArgument_setMNumericArray(res, out);
   return LIBRARY_NO_ERROR;
