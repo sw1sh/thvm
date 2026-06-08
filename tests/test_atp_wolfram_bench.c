@@ -313,6 +313,15 @@ static void goal_mc_ioi(Term *l, Term *r) {
   *r = p;
 }
 
+// McCune Associativity: associativity over 3 skolem constants, same
+// McCune-single-axiom characterization as goal_mc_ioi.  Equivalent to
+// amc_assoc but with the long McCune axiom instead of the short AbelianMcCune.
+static void goal_mc_assoc(Term *l, Term *r) {
+  Term p = konst(L_P), q = konst(L_Q), rr = konst(L_R);
+  *l = and_op(p, and_op(q, rr));
+  *r = and_op(and_op(p, q), rr);
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -779,11 +788,11 @@ int main(int argc, char **argv) {
     Term al, ar;
     amc_axiom(&al, &ar);
     thvm_atp_add_equation(s, al, ar);
-  } else if (strcmp(goal, "mc_ioi") == 0) {
-    /* Reuse the existing McCune axiom from mccune_axiom_lhs; no
-       additional setup -- already added in the mccune-goal branch
-       below.  But that branch is taken on goal == "mccune"; we need
-       to add it here for the mc_ioi name too. */
+  } else if (strcmp(goal, "mc_ioi") == 0 ||
+             strcmp(goal, "mc_assoc") == 0) {
+    /* Reuse the existing McCune axiom from mccune_axiom_lhs.  Both
+       mc_ioi (not(not(p))=p) and mc_assoc (3-skolem associativity)
+       share the McCune single-equation characterization. */
     thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));
   } else {
     thvm_atp_add_equation(s, axiom_lhs(), fv(2));
@@ -812,6 +821,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "glid") == 0)    goal_group_leftid(&gl, &gr);
   else if (strcmp(goal, "amc_assoc") == 0) goal_amc_assoc(&gl, &gr);
   else if (strcmp(goal, "mc_ioi") == 0)  goal_mc_ioi(&gl, &gr);
+  else if (strcmp(goal, "mc_assoc") == 0) goal_mc_assoc(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
