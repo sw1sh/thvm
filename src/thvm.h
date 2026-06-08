@@ -5313,6 +5313,81 @@ fn int       thvm_atp_set_learned_scorer(const double *blob, u32 len);
 // logistic regression.
 fn void      thvm_atp_clear_learned_scorer(void);
 
+// === ENIGMA Tier 2: anonymised CP hypergraph (for a GNN) ============
+// The Tier-1 path (thvm_atp_cp_features) hand-rolls a fixed 14-D vector;
+// a graph neural network instead wants the CP's STRUCTURE as a typed
+// graph it can message-pass over.  thvm_atp_cp_graph turns a critical
+// pair (lhs, rhs) into a small typed hypergraph whose node features are
+// PURELY STRUCTURAL -- they encode node kind / arity / occurrence count
+// but NEVER the concrete symbol label, variable id, or numeric value.
+// This anonymisation is the whole point: two CPs that are equal up to a
+// consistent renaming of symbols + variables produce bit-identical
+// graphs, so a model trained on one transfers to the other (and to
+// symbols it never saw).  Concrete identities only drive the
+// first-appearance dedup, which is itself rename-invariant because it is
+// positional.
+//
+// Node kinds:
+//   CPSUPER  one per graph (node 0): the critical-pair root.
+//   TERM     one per subterm OCCURRENCE in the preorder walk of lhs/rhs.
+//   SYMBOL   one per distinct CTR label (deduped, first-appearance order);
+//            a TAG_NUM atom also lands here, deduped by its raw value, as
+//            a nullary constant-like symbol.
+//   VAR      one per distinct TAG_FVR id (deduped, first-appearance order).
+//
+// Edge kinds (all directed):
+//   E_TERM_SYM   a TERM node  -> its root SYMBOL or VAR node.
+//   E_TERM_CHILD a TERM node  -> each of its child TERM nodes (in order).
+//   E_CP_LHS     the CPSUPER  -> the root TERM of lhs.
+//   E_CP_RHS     the CPSUPER  -> the root TERM of rhs.
+//
+// Feature columns (ATP_CPG_FEAT_DIM, all f32, all integer-valued and
+// strictly structural):
+//   0 is_term           1 for a TERM node, else 0
+//   1 is_symbol         1 for a SYMBOL node, else 0
+//   2 is_var            1 for a VAR node, else 0
+//   3 arity             CTR arity for a SYMBOL (0 for a NUM-atom symbol,
+//                       var, term, cpsuper)
+//   4 occurrence_count  how many times this symbol/var occurs across the
+//                       two terms (1 for TERM/CPSUPER -- a single occ)
+//   5 is_cpsuper        1 for the CP super-node, else 0
+#define ATP_CPG_FEAT_DIM  6u
+#define ATP_CPG_MAX_NODES 1024u
+#define ATP_CPG_MAX_EDGES 4096u
+
+typedef enum {
+  ATP_CPG_CPSUPER = 0,  // the critical-pair super-node (node 0)
+  ATP_CPG_TERM    = 1,  // a subterm occurrence
+  ATP_CPG_SYMBOL  = 2,  // a distinct CTR label / NUM-atom value
+  ATP_CPG_VAR     = 3,  // a distinct FVR id
+} AtpCpgNodeType;
+
+typedef enum {
+  ATP_CPG_E_TERM_SYM   = 0,  // term -> its root symbol/var
+  ATP_CPG_E_TERM_CHILD = 1,  // term -> child term
+  ATP_CPG_E_CP_LHS     = 2,  // cp-super -> lhs root term
+  ATP_CPG_E_CP_RHS     = 3,  // cp-super -> rhs root term
+} AtpCpgEdgeType;
+
+typedef struct {
+  u32   n_nodes;
+  u8    node_type[ATP_CPG_MAX_NODES];                  // AtpCpgNodeType
+  float node_feat[ATP_CPG_MAX_NODES * ATP_CPG_FEAT_DIM];
+  u32   n_edges;
+  u32   edge_src[ATP_CPG_MAX_EDGES];
+  u32   edge_dst[ATP_CPG_MAX_EDGES];
+  u8    edge_type[ATP_CPG_MAX_EDGES];                  // AtpCpgEdgeType
+  u8    overflow;                                      // 1 if a cap was hit
+} AtpCpGraph;
+
+// Build the anonymised hypergraph for the CP (lhs, rhs) into `out`.  A
+// pure read of the two Terms -- no AtpState, no engine config, no
+// mutation.  Returns 1 on success; on overflow (more than
+// ATP_CPG_MAX_NODES / ATP_CPG_MAX_EDGES) it sets out->overflow = 1,
+// leaves the partially-built graph in place, and returns 0 so the caller
+// can fall back to the Tier-1 vector.
+fn int       thvm_atp_cp_graph(Term lhs, Term rhs, AtpCpGraph *out);
+
 // === wald/ ===
 // Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
 // docs/plans/waldmeister_ic_atp_tasks.md.  WaldSpec holds the

@@ -7823,6 +7823,160 @@ static int atp_cp_shares_goal_symbol(const AtpState *s, Term l, Term r) {
   return (goal_labels & cp_labels) != 0u;
 }
 
+// === ENIGMA Tier 2: anonymised CP hypergraph builder ================
+// Build state threaded through the preorder walk.  The dedup map keys a
+// SYMBOL/VAR node by (kind, identity): SYM_CTR uses the CTR label,
+// SYM_NUM uses the raw numeric value, and VAR uses the FVR id.  These
+// share one positional key table (distinct `kind` keeps a CTR label `3`
+// and a NUM value `3` from colliding).  `node_idx` is the graph node the
+// key maps to; `occ` counts occurrences so we can write the structural
+// occurrence_count feature after the walk.  Crucially the key VALUE is
+// only ever used for dedup equality -- it never reaches node_feat, so
+// the graph is invariant under any consistent renaming.
+typedef enum {
+  ATP_CPG_KEY_CTR = 0,   // a CTR label
+  ATP_CPG_KEY_NUM = 1,   // a NUM raw value
+  ATP_CPG_KEY_VAR = 2,   // an FVR id
+} AtpCpgKeyKind;
+
+typedef struct {
+  u8         kind;        // AtpCpgKeyKind
+  u64        key;         // the concrete identity (label / value / var id)
+  u32        node_idx;    // the SYMBOL/VAR graph node for this key
+  u32        occ;         // occurrence count across both CP sides
+} AtpCpgKeyEnt;
+
+typedef struct {
+  AtpCpGraph   *g;
+  AtpCpgKeyEnt  keys[ATP_CPG_MAX_NODES];   // one entry per distinct sym/var
+  u32           n_keys;
+} AtpCpgBuild;
+
+// Append a node of the given type; returns its index, or U32_MAX on cap
+// overflow (b->g->overflow is set).  node_feat is cleared here; the
+// caller patches in the type-specific structural columns.
+static u32 atp_cpg_add_node(AtpCpgBuild *b, u8 type) {
+  AtpCpGraph *g = b->g;
+  if (g->n_nodes >= ATP_CPG_MAX_NODES) { g->overflow = 1u; return 0xffffffffu; }
+  u32 idx = g->n_nodes++;
+  g->node_type[idx] = type;
+  float *f = g->node_feat + (size_t)idx * ATP_CPG_FEAT_DIM;
+  for (u32 j = 0; j < ATP_CPG_FEAT_DIM; j++) f[j] = 0.0f;
+  return idx;
+}
+
+// Append a directed edge; sets overflow on cap.
+static void atp_cpg_add_edge(AtpCpgBuild *b, u32 src, u32 dst, u8 type) {
+  AtpCpGraph *g = b->g;
+  if (g->n_edges >= ATP_CPG_MAX_EDGES) { g->overflow = 1u; return; }
+  u32 e = g->n_edges++;
+  g->edge_src[e]  = src;
+  g->edge_dst[e]  = dst;
+  g->edge_type[e] = type;
+}
+
+// Find-or-create the SYMBOL/VAR node for (kind, key) in first-appearance
+// order; bumps its occurrence count.  Returns the node index, or
+// U32_MAX on overflow.  `node_type` is ATP_CPG_SYMBOL or ATP_CPG_VAR;
+// `arity` is the CTR arity for a symbol (0 otherwise) and is written
+// only when the node is first created.
+static u32 atp_cpg_intern(AtpCpgBuild *b, u8 kind, u64 key,
+                          u8 node_type, u32 arity) {
+  for (u32 i = 0; i < b->n_keys; i++) {
+    if (b->keys[i].kind == kind && b->keys[i].key == key) {
+      b->keys[i].occ++;
+      return b->keys[i].node_idx;
+    }
+  }
+  u32 idx = atp_cpg_add_node(b, node_type);
+  if (idx == 0xffffffffu) return idx;
+  // Set the structural type columns now; occurrence_count is patched in
+  // after the whole walk so repeat occurrences are all counted.
+  float *f = b->g->node_feat + (size_t)idx * ATP_CPG_FEAT_DIM;
+  if (node_type == ATP_CPG_SYMBOL) { f[1] = 1.0f; f[3] = (float)arity; }
+  else /* ATP_CPG_VAR */           { f[2] = 1.0f; }
+  if (b->n_keys < ATP_CPG_MAX_NODES) {
+    AtpCpgKeyEnt *ke = &b->keys[b->n_keys++];
+    ke->kind = kind; ke->key = key; ke->node_idx = idx; ke->occ = 1u;
+  }
+  return idx;
+}
+
+// Preorder walk: create a TERM node for `t`, wire it to its root
+// symbol/var node (E_TERM_SYM), recurse into children wiring
+// E_TERM_CHILD edges.  Returns the TERM node index for `t`, or U32_MAX
+// on overflow (which short-circuits the rest of the walk).
+static u32 atp_cpg_walk(AtpCpgBuild *b, Term t) {
+  u32 tn = atp_cpg_add_node(b, ATP_CPG_TERM);
+  if (tn == 0xffffffffu) return tn;
+  // A TERM node is a single occurrence; mark is_term + occ 1.
+  float *f = b->g->node_feat + (size_t)tn * ATP_CPG_FEAT_DIM;
+  f[0] = 1.0f; f[4] = 1.0f;
+
+  u8  tag = term_tag(t);
+  u32 root;
+  if (tag == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    root = atp_cpg_intern(b, ATP_CPG_KEY_CTR, (u64)term_ext(t),
+                          ATP_CPG_SYMBOL, n);
+    if (root == 0xffffffffu) return root;
+    atp_cpg_add_edge(b, tn, root, ATP_CPG_E_TERM_SYM);
+    for (u32 i = 0; i < n; i++) {
+      u32 cn = atp_cpg_walk(b, term_ctr_at(t, i));
+      if (cn == 0xffffffffu) return cn;
+      atp_cpg_add_edge(b, tn, cn, ATP_CPG_E_TERM_CHILD);
+    }
+  } else if (tag == TAG_FVR) {
+    root = atp_cpg_intern(b, ATP_CPG_KEY_VAR, (u64)term_ext(t),
+                          ATP_CPG_VAR, 0u);
+    if (root == 0xffffffffu) return root;
+    atp_cpg_add_edge(b, tn, root, ATP_CPG_E_TERM_SYM);
+  } else { /* TAG_NUM and any other atom: a nullary constant-like symbol */
+    root = atp_cpg_intern(b, ATP_CPG_KEY_NUM, (u64)term_val(t),
+                          ATP_CPG_SYMBOL, 0u);
+    if (root == 0xffffffffu) return root;
+    atp_cpg_add_edge(b, tn, root, ATP_CPG_E_TERM_SYM);
+  }
+  return tn;
+}
+
+fn int thvm_atp_cp_graph(Term lhs, Term rhs, AtpCpGraph *out) {
+  if (out == NULL) return 0;
+  out->n_nodes  = 0u;
+  out->n_edges  = 0u;
+  out->overflow = 0u;
+
+  AtpCpgBuild b;
+  b.g = out;
+  b.n_keys = 0u;
+
+  // Node 0 is always the CP super-node.
+  u32 super = atp_cpg_add_node(&b, ATP_CPG_CPSUPER);
+  if (super == 0xffffffffu) return 0;     // cap of 0 -- defensive
+  {
+    float *f = out->node_feat + (size_t)super * ATP_CPG_FEAT_DIM;
+    f[5] = 1.0f; f[4] = 1.0f;             // is_cpsuper + single occurrence
+  }
+
+  // Walk lhs then rhs in preorder.
+  u32 lroot = atp_cpg_walk(&b, lhs);
+  if (lroot == 0xffffffffu) return 0;
+  u32 rroot = atp_cpg_walk(&b, rhs);
+  if (rroot == 0xffffffffu) return 0;
+
+  atp_cpg_add_edge(&b, super, lroot, ATP_CPG_E_CP_LHS);
+  atp_cpg_add_edge(&b, super, rroot, ATP_CPG_E_CP_RHS);
+  if (out->overflow) return 0;
+
+  // Patch each SYMBOL/VAR node's occurrence_count from the dedup table.
+  for (u32 i = 0; i < b.n_keys; i++) {
+    float *f = out->node_feat
+             + (size_t)b.keys[i].node_idx * ATP_CPG_FEAT_DIM;
+    f[4] = (float)b.keys[i].occ;
+  }
+  return 1;
+}
+
 fn void thvm_atp_cp_features(const AtpState *s, Term lhs, Term rhs,
                              u32 age, float *out) {
   if (out == NULL) return;

@@ -294,6 +294,7 @@ TESTS := \
   $(BIN)/test_atp_analysis \
   $(BIN)/test_atp_enigma \
   $(BIN)/test_atp_multiproof \
+  $(BIN)/test_atp_cp_graph \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
   $(BIN)/test_app_sup \
