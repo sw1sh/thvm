@@ -1256,7 +1256,11 @@ static Term ru_build_addr_with_dims(Term const *rngs, u8 ndim,
   u32 strides[RU_MAX_AXES] = {0};
   strides[ndim - 1] = 1;
   for (i8 a = (i8)ndim - 2; a >= 0; a--) {
-    strides[a] = strides[a + 1] * dims[a + 1];
+    // A symbolic (kvar) inner dim contributes its UPPER BOUND to the outer
+    // stride (matching shape_numel / view_create): the addr layout is the
+    // hi-padded buffer, the loop iterates only the bound extent.  Baking the
+    // raw kvar-packed extent here would corrupt every outer addr coefficient.
+    strides[a] = strides[a + 1] * kvar_extent_static(dims[a + 1]);
   }
   Term acc = 0;
   for (u8 a = 0; a < ndim; a++) {
