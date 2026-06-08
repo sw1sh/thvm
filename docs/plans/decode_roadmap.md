@@ -237,7 +237,15 @@ So sequence: **symbolic-seq (M1->M3) first, then KV-cache on top.**
 
 - Fixed-window forward: DONE + clean (TJit input-rebind, no slot/TSet; `maxSeq` only
   in the host one-hot padding). See [[Gpt2.md]].
-- Symbolic-seq: **M1 DONE** (a symbolic dim realizes + rebinds on the CPU
-  interpreter); M2 (symbolic matmul/reduce + the other backends) and M3 (symbolic
-  GPT-2 + JIT kvar-rebind) remain.
-- KV-cache: blocked on symbolic-seq for the general form; NOT started.
+- Symbolic-seq: **COMPLETE** (M1/M2/M3) -- the real GPT-2 117M forward runs over a
+  symbolic sequence, correct (argmax byte-identical at S=4/5/6) and fast (TJit
+  capture-at-hi then ~18ms/step replay, ~1355x). `maxSeq` is gone. See the STATUS
+  block at the top.
+- KV-cache: dependency (symbolic-seq) now MET; core compute VALIDATED
+  (`tests/test_sym_kvcache.c`: a single new token Q{1,d} attends a symbolic {t,d}
+  K/V cache -> the correct cache average, at a runtime-bound t).  REMAINING for the
+  full feature: (a) the in-place cache APPEND -- ASSIGN K_t,V_t at a symbolic/runtime
+  offset t into the {nCtx,dim} cache buffer (validate the UOP_ASSIGN-at-kvar-offset
+  mechanism); (b) wire tokenLmForward into a single-new-token forward that reads each
+  layer's cache (a WL integration parallel to the symbolic full forward); (c) TJit
+  capture-once + per-step replay (rebind t + the new token + the grown cache).

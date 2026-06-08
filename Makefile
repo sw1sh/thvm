@@ -235,6 +235,7 @@ TESTS := \
   $(BIN)/test_sym_attn_causal \
   $(BIN)/test_sym_attn_block \
   $(BIN)/test_sym_repeat \
+  $(BIN)/test_sym_kvcache \
   $(BIN)/test_sym_pad \
   $(BIN)/test_kvar_clamp \
   $(BIN)/test_sym_m2 \
