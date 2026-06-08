@@ -304,6 +304,15 @@ static void goal_amc_assoc(Term *l, Term *r) {
   *r = and_op(and_op(p, q), rr);
 }
 
+// McCune InverseOfInverse: not(not(skC1)) = skC1 (the McCune-single-axiom
+// CAG characterization derives double-negation).  Same axiom shape as
+// goal_mccune (mccune_axiom_lhs) -- L_AND binary, L_NOT unary, skC1 ground.
+static void goal_mc_ioi(Term *l, Term *r) {
+  Term p = konst(L_P);
+  *l = not_op(not_op(p));
+  *r = p;
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -770,6 +779,12 @@ int main(int argc, char **argv) {
     Term al, ar;
     amc_axiom(&al, &ar);
     thvm_atp_add_equation(s, al, ar);
+  } else if (strcmp(goal, "mc_ioi") == 0) {
+    /* Reuse the existing McCune axiom from mccune_axiom_lhs; no
+       additional setup -- already added in the mccune-goal branch
+       below.  But that branch is taken on goal == "mccune"; we need
+       to add it here for the mc_ioi name too. */
+    thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));
   } else {
     thvm_atp_add_equation(s, axiom_lhs(), fv(2));
   }
@@ -796,6 +811,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "agioc") == 0)   goal_aboig_ioc(&gl, &gr);
   else if (strcmp(goal, "glid") == 0)    goal_group_leftid(&gl, &gr);
   else if (strcmp(goal, "amc_assoc") == 0) goal_amc_assoc(&gl, &gr);
+  else if (strcmp(goal, "mc_ioi") == 0)  goal_mc_ioi(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
