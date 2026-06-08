@@ -99,6 +99,15 @@ true at this layer -- but unwired end to end.
   is sized at the kvar upper bound, GEMM writes the first `S` rows).  Remaining:
   the cpu-jit/Metal/CUDA elementwise/reduce bound-passing (a), and a mini
   single-head attention over `{S, S}` (its `{S,S}` mask is an M3 hard part).
+- **Symbolic attention compute VALIDATED** (`tests/test_sym_attn.c`): the three
+  building blocks a single-head attention needs all compute correctly on the
+  interpreter at a runtime-bound `S` -- (1) a matmul contracting a symbolic dim
+  (`{M,S}.{S,N}`, the `scores.V` step), (2) a matmul with a symbolic `{S,S}`
+  output (`Q.Kt`, both axes symbolic -> padded row-stride-`hi` layout, read
+  strided), and (3) softmax over the symbolic key axis (reduce-max +
+  broadcast-expand + exp + reduce-sum + recip, giving `1/S` on uniform rows).
+  So the transformer block is symbolic-capable; M3 is now plumbing
+  (`{S,S}` causal mask + the WL surface + the JIT path), not unknown compute.
 - **M3**: the GPT-2 forward symbolic end to end -- no `maxSeq`, JIT-captured once,
   replayed at the running length. The example collapses to
   `step = TJit[... TFromNet[net, ids] ...]` over the raw growing ids (the one-hot

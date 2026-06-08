@@ -231,6 +231,8 @@ TESTS := \
   $(BIN)/test_sym_m2 \
   $(BIN)/test_sym_matmul \
   $(BIN)/test_sym_inner \
+  $(BIN)/test_sym_inner_realize \
+  $(BIN)/test_sym_attn \
   $(BIN)/test_uop_linearize \
   $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \
