@@ -6121,6 +6121,11 @@ static Term atp_gnn_relu(Term x) {
 // persisted on disk), and peak scratch is bounded by B_CAP * N_CAP^2.
 #define ATP_GNN_N_CAP 64u
 #define ATP_GNN_B_CAP 1024u
+// Neutral secondary priority for a not-yet-GNN-scored CP in coop mode:
+// the score-0 point of the GNN priority map (1e6 - 1e4*score), so fresh
+// CPs sit mid-band until the next re-rank instead of on the heuristic
+// weight scale (~tens), which would otherwise always out-rank GNN picks.
+#define ATP_GNN_COOP_NEUTRAL_PRI 1000000u
 
 // Score one chunk of <= ATP_GNN_B_CAP CP graphs at the FIXED node dim
 // N = ATP_GNN_N_CAP.  Must run inside the sandbox context (g_atp_gnn_ctx).
@@ -6296,14 +6301,22 @@ fn u32 thvm_atp_gnn_rerank(AtpState *s) {
     return 0u;
   }
   // Higher score -> lower priority, clamped to a safe u32 band - the
-  // same map atp_cp_learned_priority + atpRerankPriority use.
+  // same map atp_cp_learned_priority + atpRerankPriority use.  Neutral
+  // (score 0) maps to 1.0e6, the cp_pri2 push-time default in coop mode.
   for (u32 i = 0u; i < got; i++) {
     float pr = 1.0e6f - 1.0e4f * sc[i];
     if (pr < 0.0f) pr = 0.0f;
     if (pr > 2.0e9f) pr = 2.0e9f;
     pri[i] = (u32)pr;
   }
-  thvm_atp_set_cp_pri_by_seq(s, seq, pri, got);
+  // Coop mode: write the SECONDARY dimension (cp_pri2) so the GNN drives
+  // the w2 coop pick while the primary heap stays the hand heuristic
+  // (e.g. Waldmeister).  Otherwise overwrite the primary heap (GT-mode).
+  if (s->gnn_coop) {
+    thvm_atp_set_cp_pri2_by_seq(s, seq, pri, got);
+  } else {
+    thvm_atp_set_cp_pri_by_seq(s, seq, pri, got);
+  }
   s->n_gnn_reranks++;
 
   free(lhs); free(rhs); free(seq); free(sc); free(pri);
@@ -6313,6 +6326,19 @@ fn u32 thvm_atp_gnn_rerank(AtpState *s) {
 fn void thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period) {
   if (s == NULL) return;
   s->gnn_rerank_period = period;
+}
+
+// Enable GNN coop: the re-rank writes the secondary dimension (cp_pri2)
+// and select_cp picks the GNN's top CP every `ratio`-th selection (the w2
+// coop branch), while the primary heap keeps the hand heuristic.  ratio 0
+// disables coop (GNN overwrites the primary heap).  Sets w2_modulo so the
+// coop pick fires; the caller still sets gnn_rerank_period (how often the
+// GNN re-scores) and loads the scorer.
+fn void thvm_atp_set_gnn_coop(AtpState *s, u32 ratio) {
+  if (s == NULL) return;
+  if (ratio == 0u) { s->gnn_coop = 0u; return; }
+  s->gnn_coop  = 1u;
+  s->w2_modulo = ratio;
 }
 
 static u32 atp_cp_learned_priority(AtpState *s, Term lhs, Term rhs) {
@@ -6441,9 +6467,12 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
 #endif
   // K-D Heap secondary dimension: compute cp_pri2 with the alternate
   // weight mode (w2_mode, set via thvm_atp_set_w2).  Cheap -- ~one
-  // symbol-count walk per CP -- and only filled when w2_modulo > 0.
-  s->cp_pri2[i]  = (s->w2_modulo > 0u)
-                     ? atp_cp_weight_base(s, lhs, rhs, s->w2_mode) : 0u;
+  // symbol-count walk per CP -- and only filled when w2_modulo > 0.  In
+  // GNN coop the GNN owns cp_pri2, so a fresh CP gets the neutral band
+  // value until the next re-rank scores it (see ATP_GNN_COOP_NEUTRAL_PRI).
+  s->cp_pri2[i]  = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
+                 : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, lhs, rhs, s->w2_mode)
+                 :                        0u;
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
   s->n_cps++;
@@ -6949,8 +6978,9 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
     s->cp_pri[i] = atp_cp_priority(s, l, r);
     s->cp_goal[i] = (s->use_goal_interleave > 0u && s->goal_lhs != 0)
                       ? atp_goal_weight(s, l, r) : 0u;
-    s->cp_pri2[i] = (s->w2_modulo > 0u)
-                      ? atp_cp_weight_base(s, l, r, s->w2_mode) : 0u;
+    s->cp_pri2[i] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
+                  : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
+                  :                        0u;
     // Waldmeister `-:w1=fifo`: keep each surviving CP's original
     // insertion age so equal-weight ties stay oldest-first run-wide.
     // Default: reassign a fresh monotone seq (engine byte-identical).
@@ -7064,6 +7094,48 @@ fn void thvm_atp_set_cp_pri_by_seq(AtpState *s, const u32 *seq,
     i--;
     atp_cp_sift_down(s, i);
   }
+}
+
+// Write the SECONDARY priority cp_pri2[slot] for the CPs named by `seq`.
+// Unlike cp_pri (the heap-ordered primary), cp_pri2 is scanned linearly by
+// select_cp's w2 coop branch, so there is no heap to rebuild -- just the
+// seq -> slot remap.  This is the GNN-coop write path (gnn_coop): the GNN
+// drives the coop dimension while the primary heap stays the hand
+// heuristic.  Mirrors thvm_atp_set_cp_pri_by_seq's hash map.
+fn void thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
+                                    const u32 *pri, u32 n) {
+  if (s == NULL || s->n_cps == 0u || n == 0u || seq == NULL || pri == NULL) {
+    return;
+  }
+  u32 cap = 16u;
+  while (cap < s->n_cps * 2u) cap <<= 1;
+  u32 mask = cap - 1u;
+  u32 *map_seq  = (u32 *)calloc(cap, sizeof(u32));
+  u32 *map_slot = (u32 *)malloc(cap * sizeof(u32));
+  if (map_seq == NULL || map_slot == NULL) {
+    free(map_seq); free(map_slot);
+    for (u32 j = 0; j < n; j++) {
+      for (u32 i = 0; i < s->n_cps; i++) {
+        if (s->cp_seq[i] == seq[j]) { s->cp_pri2[i] = pri[j]; break; }
+      }
+    }
+    return;
+  }
+  for (u32 i = 0; i < s->n_cps; i++) {
+    u32 h = (s->cp_seq[i] * 2654435761u) & mask;
+    while (map_seq[h] != 0u) h = (h + 1u) & mask;
+    map_seq[h]  = s->cp_seq[i] + 1u;
+    map_slot[h] = i;
+  }
+  for (u32 j = 0; j < n; j++) {
+    u32 h = (seq[j] * 2654435761u) & mask;
+    while (map_seq[h] != 0u) {
+      if (map_seq[h] == seq[j] + 1u) { s->cp_pri2[map_slot[h]] = pri[j]; break; }
+      h = (h + 1u) & mask;
+    }
+  }
+  free(map_seq);
+  free(map_slot);
 }
 
 // Measurement-only: walk the live CP queue, reporting min/max/mean

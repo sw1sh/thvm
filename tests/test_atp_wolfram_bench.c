@@ -435,8 +435,16 @@ int main(int argc, char **argv) {
     const char *ga = getenv("THVM_ATP_GNN_ASSET");
     if (ga != NULL && ga[0] != '\0') {
       int loaded = thvm_atp_load_gnn_safetensors(ga);
-      printf("gnn-scorer: %s from %s  (rerank period=%u)\n",
-             loaded ? "LOADED" : "FAILED-TO-LOAD", ga, s->gnn_rerank_period);
+      // THVM_ATP_GNN_COOP_RATIO=N: route the GNN to the coop secondary
+      // dimension (cp_pri2) and pick from it every N-th selection, so the
+      // GNN guides selection alongside the primary preset (e.g.
+      // THVM_ATP_WALDMEISTER) instead of overwriting its heap.  Unset =
+      // GT-mode (GNN overwrites the primary priorities).
+      const char *gc = getenv("THVM_ATP_GNN_COOP_RATIO");
+      u32 coop = (gc != NULL) ? (u32)strtoul(gc, NULL, 10) : 0u;
+      if (coop > 0u) thvm_atp_set_gnn_coop(s, coop);
+      printf("gnn-scorer: %s from %s  (rerank period=%u, coop ratio=%u)\n",
+             loaded ? "LOADED" : "FAILED-TO-LOAD", ga, s->gnn_rerank_period, coop);
     }
   }
   // CP-weight mode: when `THVM_ATP_CP_WEIGHT` (an `AtpCpWeightMode`

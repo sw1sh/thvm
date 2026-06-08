@@ -330,6 +330,50 @@ int main(void) {
     thvm_atp_clear_gnn_scorer();
   }
 
+  // === Coop: GNN drives the SECONDARY dimension, primary heap intact ===
+  // With gnn_coop set, the re-rank writes cp_pri2 (the w2 coop dimension)
+  // and leaves cp_pri (the primary heap) untouched, so the GNN guides the
+  // every-w2_modulo-th selection while the primary preset (e.g.
+  // Waldmeister) still drives the heap root.  Fresh CPs get the neutral
+  // cp_pri2 band until scored.
+  {
+    CHECK_EQ(thvm_atp_set_gnn_scorer(blob, blob_len), 1);
+    static u32 cw[5] = {0, 1, 0, 1, 1};
+    static u32 cp[5] = {0, 2, 4, 3, 1};
+    static const KboConfig COOP_CFG = {cw, cp, 5, 1};
+    AtpState *s = thvm_atp_init(&COOP_CFG, 256);
+    thvm_atp_set_gnn_coop(s, 2);     // GNN -> cp_pri2, coop pick every 2nd
+    thvm_atp_add_equation(s, ctr2(LAB_f, mk_v(VAR_x), ctr0(LAB_e)), mk_v(VAR_x));
+    thvm_atp_add_equation(s, ctr2(LAB_f, mk_v(VAR_x), ctr1(LAB_i, mk_v(VAR_x))),
+                          ctr0(LAB_e));
+    thvm_atp_add_equation(s,
+        ctr2(LAB_f, ctr2(LAB_f, mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+        ctr2(LAB_f, mk_v(VAR_x), ctr2(LAB_f, mk_v(1u), mk_v(2u))));
+    for (u32 k = 0; k < 64u; k++) {
+      if (thvm_atp_queued_cp_count(s) > 4u) break;
+      if (thvm_atp_step(s) != ATP_RUNNING) break;
+    }
+    TEST_BEGIN("atp/gnn_score/coop-targets-secondary");
+    u32 nq = thvm_atp_queued_cp_count(s);
+    CHECK(nq > 1u);
+    u32 priBefore[64], pri2Before[64];
+    for (u32 i = 0; i < nq; i++) { priBefore[i] = s->cp_pri[i]; pri2Before[i] = s->cp_pri2[i]; }
+    // Fresh CPs got the neutral secondary (gnn_coop set before any push).
+    for (u32 i = 0; i < nq; i++) CHECK_EQ(pri2Before[i], ATP_GNN_COOP_NEUTRAL_PRI);
+    CHECK_EQ(thvm_atp_gnn_rerank(s), nq);
+    // Primary heap untouched: the WM/primary preset still owns the root.
+    for (u32 i = 0; i < nq; i++) CHECK_EQ(s->cp_pri[i], priBefore[i]);
+    // Secondary now carries GNN priorities (>= one moved off neutral, band-bounded).
+    int any2 = 0;
+    for (u32 i = 0; i < nq; i++) {
+      if (s->cp_pri2[i] != pri2Before[i]) any2 = 1;
+      CHECK(s->cp_pri2[i] <= 2000000000u);
+    }
+    CHECK(any2);
+    thvm_atp_free(s);
+    thvm_atp_clear_gnn_scorer();
+  }
+
   // Bucketing invariance: thvm_atp_gnn_score_batch buckets B and N to
   // powers of two so the JIT kernel source is identical across re-ranks
   // (the CPU on-disk dylib cache then hits instead of recompiling every

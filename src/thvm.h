@@ -4607,6 +4607,13 @@ typedef struct {
   // init or by thvm_atp_set_gnn_rerank_period.
   u32  gnn_rerank_period;         // selections between GNN re-ranks (0 = off)
   u32  n_gnn_reranks;             // diagnostics: GNN re-rank invocations
+  // ENIGMA coop: when set, the GNN re-rank writes the SECONDARY priority
+  // (cp_pri2) instead of the primary heap (cp_pri), so the GNN drives the
+  // w2 coop dimension -- every w2_modulo-th selection picks the GNN's top
+  // CP while the primary heap stays the (e.g. Waldmeister) hand heuristic.
+  // This is "GNN as a coop queue with the WM preset": set gnn_coop=1 and
+  // w2_modulo=ratio.  When 0, the re-rank overwrites cp_pri (GT-mode).
+  u8   gnn_coop;                  // GNN re-rank targets cp_pri2 (coop) not cp_pri
 
   // Indexed unorientable-rewrite pass.  When set, the default tree mixed
   // normalizer replaces its O(n_rules) linear KBO-gated unorientable step
@@ -4998,6 +5005,10 @@ fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 // Selections between GNN re-ranks (0 = off, the default).  Only takes
 // effect while a GNN model is loaded (thvm_atp_set_gnn_scorer).
 fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);
+// ENIGMA coop: route the GNN re-rank to the secondary (cp_pri2) dimension
+// and pick from it every `ratio`-th selection (sets gnn_coop + w2_modulo).
+// ratio 0 disables coop (GNN overwrites the primary heap, GT-mode).
+fn void      thvm_atp_set_gnn_coop(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
@@ -5332,6 +5343,8 @@ fn u32       thvm_atp_queued_cps  (const AtpState *s, Term *lhs_out,
 // requests), never O(n*m).  Unknown / already-popped seqs are ignored.
 fn void      thvm_atp_set_cp_pri_by_seq(AtpState *s, const u32 *seq,
                                         const u32 *pri, u32 n);
+fn void      thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
+                                         const u32 *pri, u32 n);
 
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by
 // default: select_cp records nothing and the engine is byte-identical.
