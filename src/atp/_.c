@@ -6513,6 +6513,102 @@ fn void thvm_atp_cp_reheapify(AtpState *s) {
 #endif
 }
 
+// === Live CP-queue re-rank seam (WL-side GNN scorer) ================
+// The CP heap is a compact array: slots [0, n_cps) all hold a live
+// packed CP (a pop backfills the vacated slot from the tail), so there
+// are no holes and the live count is exactly s->n_cps.
+
+fn u32 thvm_atp_queued_cp_count(const AtpState *s) {
+  if (s == NULL) return 0u;
+  return s->n_cps;
+}
+
+// Snapshot the live queue: unpack each slot's CP into a fresh pair of
+// transient heap Terms and copy lhs/rhs/seq into the caller's arrays
+// (up to `cap`).  Any out pointer may be NULL to skip that column.
+// Pure read -- no engine state is mutated.
+fn u32 thvm_atp_queued_cps(const AtpState *s, Term *lhs_out, Term *rhs_out,
+                           u32 *seq_out, u32 cap) {
+  if (s == NULL) return 0u;
+  u32 n = s->n_cps < cap ? s->n_cps : cap;
+  for (u32 i = 0; i < n; i++) {
+    Term l = 0, r = 0;
+    acp_unpack(s->cp_packed[i], &l, &r);
+    if (lhs_out != NULL) lhs_out[i] = l;
+    if (rhs_out != NULL) rhs_out[i] = r;
+    if (seq_out != NULL) seq_out[i] = s->cp_seq[i];
+  }
+  return n;
+}
+
+// Re-key the live queue by cp_seq, then rebuild the heap.  For each
+// (seq[j], pri[j]) the live slot whose cp_seq == seq[j] gets cp_pri =
+// pri[j]; unknown / already-popped seqs are ignored.  After all keys
+// are applied the heap is rebuilt with the same Floyd build-heap loop
+// thvm_atp_cp_reheapify uses (atp_cp_sift_down over every internal node,
+// last to first), so the new priorities take effect on the next select.
+//
+// Soundness: this only PERMUTES selection order.  No CP is added or
+// dropped and cp_seq is left untouched, so (a) completeness is
+// unaffected -- the periodic FIFO pick + auto-MaxWeight force-drain
+// still surface every CP eventually -- and (b) the FV-index records
+// (which borrow cp_packed[] and key on cp_seq, never on slot position)
+// stay valid through the slot swaps, so no index rebuild is required.
+//
+// seq->slot resolution is an O(n + m) pass: build a seq->slot open-
+// addressing map over the n live slots once, then do m O(1) lookups,
+// avoiding the O(n*m) scan the queue can grow large enough (~64k) to
+// punish.
+fn void thvm_atp_set_cp_pri_by_seq(AtpState *s, const u32 *seq,
+                                   const u32 *pri, u32 n) {
+  if (s == NULL || s->n_cps == 0u || n == 0u
+      || seq == NULL || pri == NULL) {
+    return;
+  }
+  // Power-of-two table sized >= 2*n_cps for a <50% load factor.
+  u32 cap = 16u;
+  while (cap < s->n_cps * 2u) cap <<= 1;
+  u32 mask = cap - 1u;
+  // map[h] packs (seq+1, slot) so 0 marks an empty bucket (cp_seq can
+  // be 0; the +1 bias keeps the empty sentinel distinct).
+  u32 *map_seq  = (u32 *)calloc(cap, sizeof(u32));
+  u32 *map_slot = (u32 *)malloc(cap * sizeof(u32));
+  if (map_seq == NULL || map_slot == NULL) {
+    // Allocation failure: fall back to an O(n*m) scan rather than skip
+    // the re-key (the queue is small here or we would not have failed).
+    free(map_seq); free(map_slot);
+    for (u32 j = 0; j < n; j++) {
+      for (u32 i = 0; i < s->n_cps; i++) {
+        if (s->cp_seq[i] == seq[j]) { s->cp_pri[i] = pri[j]; break; }
+      }
+    }
+    for (u32 i = s->n_cps / 2u; i > 0; ) { i--; atp_cp_sift_down(s, i); }
+    return;
+  }
+  for (u32 i = 0; i < s->n_cps; i++) {
+    u32 h = (s->cp_seq[i] * 2654435761u) & mask;
+    while (map_seq[h] != 0u) h = (h + 1u) & mask;
+    map_seq[h]  = s->cp_seq[i] + 1u;
+    map_slot[h] = i;
+  }
+  for (u32 j = 0; j < n; j++) {
+    u32 h = (seq[j] * 2654435761u) & mask;
+    while (map_seq[h] != 0u) {
+      if (map_seq[h] == seq[j] + 1u) { s->cp_pri[map_slot[h]] = pri[j]; break; }
+      h = (h + 1u) & mask;
+    }
+  }
+  free(map_seq);
+  free(map_slot);
+  // Floyd build-heap: sift down every internal node, last to first.
+  // cp_seq is preserved, so atp_cp_before's tie-break is unchanged and
+  // the FV index (keyed on cp_seq) needs no rebuild.
+  for (u32 i = s->n_cps / 2u; i > 0; ) {
+    i--;
+    atp_cp_sift_down(s, i);
+  }
+}
+
 // Measurement-only: walk the live CP queue, reporting min/max/mean
 // node count (the acp_pack symbol count) and a coarse size histogram
 // into the caller's `bins` array (bins[k] counts CPs with node-count

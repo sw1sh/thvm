@@ -5260,6 +5260,36 @@ fn u32       thvm_atp_proof_serialize(const AtpProofStep *steps,
 fn void      thvm_atp_cp_features(const AtpState *s, Term lhs, Term rhs,
                                   u32 age, float *out);
 
+// === Live CP-queue re-rank seam (WL-side GNN scorer) ================
+// A scorer running mid-saturation pulls the current queue, scores each
+// CP, then re-keys priorities to permute selection order.  Re-ranking
+// only PERMUTES selection (no CP added/dropped), so completeness is
+// preserved -- the periodic FIFO / force-drain selection still fires.
+
+// Number of LIVE queued CPs.  The CP heap is a compact array: slots
+// [0, n_cps) all hold a packed CP (pops backfill from the tail), so
+// this is exactly s->n_cps.  NULL-safe (returns 0).
+fn u32       thvm_atp_queued_cp_count(const AtpState *s);
+
+// Snapshot the live queue for scoring.  For each live slot, unpacks the
+// CP into a fresh pair of transient heap Terms and writes lhs/rhs/seq
+// into the caller's out arrays (up to `cap` entries; any out pointer
+// may be NULL to skip that column).  Returns the number written
+// (min(n_cps, cap)).  Pure read of the queue; engine state untouched.
+fn u32       thvm_atp_queued_cps  (const AtpState *s, Term *lhs_out,
+                                   Term *rhs_out, u32 *seq_out, u32 cap);
+
+// Re-key + re-heapify.  For each j in [0, n), finds the live slot whose
+// cp_seq == seq[j] and sets its cp_pri = pri[j]; then rebuilds the heap
+// (Floyd build-heap over atp_cp_sift_down) so the new priorities take
+// effect on the next select.  Only PERMUTES selection order: no CP is
+// added or dropped, cp_seq is preserved (the FV-index borrow stays
+// sound, no rebuild needed), so completeness is unaffected.  The
+// seq->slot resolution is an O(n + m) hashed pass (n live slots, m
+// requests), never O(n*m).  Unknown / already-popped seqs are ignored.
+fn void      thvm_atp_set_cp_pri_by_seq(AtpState *s, const u32 *seq,
+                                        const u32 *pri, u32 n);
+
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by
 // default: select_cp records nothing and the engine is byte-identical.
 // ON (1): every CP returned by thvm_atp_select_cp appends a row
