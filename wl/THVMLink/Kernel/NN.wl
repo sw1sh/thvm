@@ -880,6 +880,11 @@ symVid[d_]    := d - $kvarPackBase            (* recover vid from a packed dim *
 symLeadingQ[t_TTerm] := With[{s = tUopShape[t]},
     ListQ[s] && Length[s] >= 1 && symDimQ[First[s]]]
 
+(* The kvar-PACKED extent for symbolic dim vid (KVAR_FLAG | vid in C): pass it
+   as a SHRINK bound / reshape dim so the movement op carries the symbolic
+   axis (view_apply_shrink decodes a packed bound via kvar_extent_runtime). *)
+TKVarPack[vid_Integer] := $kvarPackBase + vid
+
 (* TCausalMaskSym[vid, hi] -- the symbolic-sequence causal mask, built
    EAGER from a symbolic ramp (the validated construction in
    symbolic.wlt's "symbolic/causal-attention-eager").  Each reduce /
@@ -896,6 +901,21 @@ TCausalMaskSym[vid_Integer, hi_Integer] := Module[
     er @ TUOpMul[
         TUOpCmplt[TUOpAdd[ri, TUOpNeg[rj]], TUOpConst[0.]], TUOpConst[-30.]]
 ]
+
+(* TAppendAt[cache, src, posVid] -- the in-place KV-cache APPEND: write `src`
+   (a {1, ...} row) into `cache` ({nCtx, ...}) at the runtime row offset bound
+   to kvar `posVid`, leaving other rows untouched.  An ASSIGN whose dst is a
+   SHRUNK view of the cache at the kvar offset (tinygrad's
+   `cache[..., start_pos:start_pos+1, ...] = src`); the C mechanism is the
+   validated tests/test_sym_kvcache_append.c path (view_apply_shrink decodes
+   the kvar begin, the offset-aware buf write lands at row t).  `cache`'s
+   buffer is mutated in place, so callers holding it observe the write;
+   returns `cache`. *)
+TAppendAt[cache_TTerm, src_TTerm, posVid_Integer] := Module[
+    {p = TKVarPack[posVid], tailRanges},
+    tailRanges = (d |-> {0, d}) /@ Rest[tUopShape[cache]];
+    TRealize[TAssign[TUOpShrink[cache, Join[{{p, p + 1}}, tailRanges]], src]];
+    cache]
 
 TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{
     shape = tUopShape[x],

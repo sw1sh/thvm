@@ -538,3 +538,23 @@ VerificationTest[
     TestID -> "symbolic/jit-capture-replay-rebind-S",
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
 ]
+
+(* TAppendAt: the WL KV-cache append surface (decode roadmap Lever 2 step 1).
+   Write a {1,4} row into a {8,4} cache at a runtime kvar offset 3 then 5
+   (rebound), confirming only those rows change -- the WL wrapper over the
+   validated C append (tests/test_sym_kvcache_append.c). *)
+VerificationTest[
+    Module[{posVid, cache},
+        TInit[];
+        posVid = TKVarAlloc[1, 8];
+        cache  = TRealize[TTensorCreate[ConstantArray[0., {8, 4}]]];
+        TKVarSet[posVid, 3];
+        TAppendAt[cache, TTensorCreate[ConstantArray[1., {1, 4}]], posVid];
+        TKVarSet[posVid, 5];
+        TAppendAt[cache, TTensorCreate[ConstantArray[2., {1, 4}]], posVid];
+        Normal @ TTensorData @ cache
+    ],
+    ReplacePart[ConstantArray[0., {8, 4}],
+        {4 -> ConstantArray[1., 4], 6 -> ConstantArray[2., 4]}],
+    TestID -> "symbolic/kvcache-append-wl"
+]
