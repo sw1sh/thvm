@@ -4460,8 +4460,8 @@ static int view_apply_expand(View const *src, u64 expr_loc, View *out) {
   u32 t_numel = 1;
   for (u32 i = 0; i < t_ndim; i++) {
     u32 td = (u32)term_val(heap_read(expr_loc + 2 + i));
-    ts.dims[i] = td;
-    t_numel  *= td;
+    ts.dims[i] = td;                          // shape keeps the kvar-packed extent
+    t_numel  *= kvar_extent_static(td);       // hi product (raw kvar would overflow u32)
     // Existing axis: must match exactly or be 1 (broadcast).
     if (i < src->shape.ndim
         && src->shape.dims[i] != td && src->shape.dims[i] != 1) return 0;

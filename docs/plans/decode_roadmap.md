@@ -130,14 +130,22 @@ true at this layer -- but unwired end to end.
   DOES propagate kvar dims and the `.`/`+` sugar build + realize -- correcting
   the note above.  So GPT-2's embed + MLP (the outer-symbolic `{S, dim}` path)
   is done end to end.  REMAINING for the full block: the `{S, S}` attention.
-- **`{S, S}` attention -- the open M3 piece.** The COMPUTED `{S,S}` path
-  (Q.Kt -> softmax -> .V) is validated (`test_sym_attn`).  The causal mask
-  needs no symbolic iota -- a host `{nCtx,nCtx}` 0/-inf mask marked symbolic on
-  both axes has the right `{S,S}` corner -- BUT realizing a hand-MARKED `{S,S}`
-  input through the softmax JIT hits an addressing bug (crashes, no longer
-  spikes -- the kvar loop-bound cap `9e930cfc` made that an immediate fault).
-  Investigate via `TKernelSource[kid,"C"]` (render, don't run); a computed
-  iota-mask is the fallback.
+- **`{S, S}` causal mask -- a symbolic broadcast-addr SUB-PROJECT (open).** The
+  COMPUTED `{S,S}` path (Q.Kt -> softmax -> .V) is validated (`test_sym_attn`),
+  so the mask is built from a `{S}` ramp: `ramp -> reshape -> EXPAND {S,S} ->
+  compare`.  This peels symbolic broadcast-addr bugs one at a time, each a raw
+  kvar dim feeding numel / a stride / a flat-index suffix where it must resolve
+  to the upper bound (`kvar_extent_static`):
+    - FIXED `7528654c`: `view_apply_reshape` numel + merge strides.
+    - FIXED (this commit): `view_apply_expand` numel (`(2^31)^2` overflowed u32
+      to garbage) + `ru_compose_one_view` flat-index suffix/mod.
+    - OPEN: `expand {S,1}->{S,S}` (broadcast the INNER axis, real stride on the
+      OUTER kvar axis) still reads element 0 for every row -- the outer-axis
+      coord collapses somewhere I haven't pinned (NOT `ru_compose_one_view`;
+      `test_sym_expand` diagnoses it).  `{1,S}->{S,S}` works.  Next: render the
+      `{S,1}` sum kernel (`TKernelSource`/`cpu_jit_render_canon`, DON'T run) to
+      see which addr coefficient drops the outer stride.  Workaround if it stays
+      stubborn: get `i` via `transpose` of the working `{1,S}` ramp.
 - **M3**: the GPT-2 forward symbolic end to end -- no `maxSeq`, JIT-captured once,
   replayed at the running length. The example collapses to
   `step = TJit[... TFromNet[net, ids] ...]` over the raw growing ids (the one-hot

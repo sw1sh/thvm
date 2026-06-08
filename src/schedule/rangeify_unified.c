@@ -1379,7 +1379,10 @@ static Term ru_compose_one_view(Term cur, View const *pv) {
   u32 suffix[MAX_DIM];
   suffix[ndim - 1] = 1;
   for (i32 d = (i32)ndim - 2; d >= 0; d--) {
-    suffix[d] = suffix[d + 1] * pv->shape.dims[d + 1];
+    // A symbolic (kvar) inner dim contributes its upper bound to the flat-index
+    // suffix (the layout is worst-case); the raw kvar-packed extent (2^31) would
+    // make `cur / suffix` collapse to 0 -> every coord reads element 0.
+    suffix[d] = suffix[d + 1] * kvar_extent_static(pv->shape.dims[d + 1]);
   }
   Term acc = pv->offset != 0 ? uop_const(DT_INT32, pv->offset) : 0;
   for (u32 d = 0; d < ndim; d++) {
@@ -1389,7 +1392,9 @@ static Term ru_compose_one_view(Term cur, View const *pv) {
       coord = uop_int_binary(UOP_IDIV, coord, uop_const(DT_INT32, suffix[d]));
     }
     if (d != 0) {
-      coord = uop_int_binary(UOP_IMOD, coord, uop_const(DT_INT32, pv->shape.dims[d]));
+      // Resolve a symbolic modulus to its upper bound (matches the suffix above).
+      coord = uop_int_binary(UOP_IMOD, coord,
+                             uop_const(DT_INT32, kvar_extent_static(pv->shape.dims[d])));
     }
     if (pv->strides[d] != 1) {
       coord = uop_int_binary(UOP_IMUL, coord, uop_const(DT_INT32, pv->strides[d]));
