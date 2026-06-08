@@ -49,3 +49,9 @@ AbelianTarskiAxioms	Commutativity	6	-	15	8	OK.  chain=6 vs WM_rules=15 -- thvm 6
 AbelianTarskiAxioms	Associativity	12	-	14	14	OK.  chain=12 vs WM_rules=14 -- close parity.
 HigmanNeumannAxioms	Associativity	36	-	21	38	OK.  chain=36 vs WM_rules=21 -- thvm 70% LONGER (same single-axiom non-AC pattern as McCune cases).
 HigmanNeumannAxioms	EqualityOfIdentities	13	-	8	15	OK.  chain=13 vs WM_rules=8 -- thvm 60% longer (same pattern).
+GroupAxioms	ImpliesMcCuneAxioms	26	-	22	30	OK under Waldmeister.  chain=26 vs WM_rules=22 -- close parity (thvm +18%).  Note: parity_wm_wmcli.tsv has preset_constructs=30 from before SkolemHighest=True default; the fix brought it to 26.
+GroupAxioms	InverseOfComposite	17	-	16	21	OK.  chain=17 vs WM_rules=16 -- close parity (+1 chain row).  Note: parity_wm_wmcli.tsv has preset_constructs=21 from before the SkolemHighest fix.
+AbelianGroupAxioms	InverseOfComposite	15	-	12	20	OK.  chain=15 vs WM_rules=12 -- thvm 25% longer.  Note: parity_wm_wmcli.tsv has preset_constructs=18; the SkolemHighest fix brought it to 15.
+AbelianMcCuneAxioms	InverseOfComposite	21	-	18	23	OK.  chain=21 vs WM_rules=18 -- thvm 17% longer.
+AbelianMcCuneAxioms	ImpliesMcCuneAxioms	41	-	37	43	OK.  chain=41 vs WM_rules=37 -- close parity (+11%).
+CommutativeRingWithIdentityAxioms	MinusOneYieldsInverse	39	-	57	48	OK.  chain=39 vs WM_rules=57 -- thvm 31% shorter (AC+ring structure compresses well).
