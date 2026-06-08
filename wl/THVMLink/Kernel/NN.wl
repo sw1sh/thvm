@@ -1926,6 +1926,46 @@ TDecodeStep[net_, oneHotRow_TTerm, state_Association] :=
     tokenLmDecodeStep[net, oneHotRow,
         state["kCaches"], state["vCaches"], state["posVid"], state["lenVid"]]
 
+(* TDecodeInit[net] -- allocate an incremental-decode session (Lever 2 step 4).
+   One zeroed {nCtx, dim} KV cache per block (one per AttentionLayer the decode
+   fold visits, since fromLayer[AttentionLayer] advances $decodeAttn["idx"] once
+   per attention hit and indexes kCaches[[idx]]), the two position kvars, and
+   the running write position 0.  nCtx = the position table's length (max
+   context), dim = the embedding width.  Returns the `state` Association
+   TDecodeStep / TDecodeNext consume. *)
+TDecodeInit::tokennet = "`1` is not a token-LM net (needs a token + a position EmbeddingLayer).";
+TDecodeInit[net_] := Module[{tokTable, posTable, dim, nCtx, nBlocks},
+    tokTable = tokenEmbeddingArray[net];
+    posTable = positionEmbeddingArray[net];
+    If[ tokTable === None || posTable === None,
+        Message[TDecodeInit::tokennet, net]; Return[$Failed]];
+    dim      = Last[Dimensions[tokTable]];
+    nCtx     = First[Dimensions[posTable]];
+    nBlocks  = Count[allLayers[net], _AttentionLayer];
+    <|"kCaches" -> Table[TRealize[TTensorCreate[ConstantArray[0., {nCtx, dim}]]], {nBlocks}],
+      "vCaches" -> Table[TRealize[TTensorCreate[ConstantArray[0., {nCtx, dim}]]], {nBlocks}],
+      "posVid"  -> TKVarAlloc[1, nCtx],
+      "lenVid"  -> TKVarAlloc[1, nCtx],
+      "pos"     -> 0|>]
+
+(* TDecodeNext[net, state, tokenId] -- one decode step: bind the position kvars
+   for the current step, feed `tokenId` as a {1, vocab} one-hot, run TDecodeStep
+   (appends K/V into every block's cache + attends the cached prefix), and read
+   back the {vocab} logits.  Returns the updated state with `pos` advanced, the
+   greedy next-token `token` (argmax, 0-indexed), and the `logits`.  Chain with
+   NestList over a prompt then its own `token` to generate. *)
+TDecodeNext[net_, state_Association, tokenId_Integer] := Module[
+    {vocab, oneHotRow, logits},
+    vocab = First[Dimensions[tokenEmbeddingArray[net]]];
+    TKVarSet[state["posVid"], state["pos"]];
+    TKVarSet[state["lenVid"], state["pos"] + 1];
+    oneHotRow = TTensorCreate[N @ {Normal @ SparseArray[{tokenId + 1 -> 1.}, vocab]}];
+    logits = First @ Normal @ TTensorData @ TRealize @
+        TDecodeStep[net, oneHotRow, state];
+    <|state, "pos" -> state["pos"] + 1,
+      "token"  -> First[Ordering[logits, -1]] - 1,
+      "logits" -> logits|>]
+
 (* True when `oneHot` is a {seq, vocab} one-hot over net's token vocabulary
    -- the input shape that selects the fixed-sequence LM forward. *)
 tokenLmOneHotQ[net_, oneHot_TTerm] := With[{emb = tokenEmbeddingArray[net]},

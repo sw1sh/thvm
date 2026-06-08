@@ -729,3 +729,85 @@ VerificationTest[
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &),
     TestID -> "symbolic/decode-loop-accumulate"
 ]
+
+(* STEP 4: the full DECODE LOOP over a toy transformer block, cache built
+   INCREMENTALLY from EMPTY (token 0 appends row 0 -- the offset-0 path -- then
+   each step reads the accumulated cache + appends its own row), asserting EVERY
+   step's output equals the full forward's row at that position.  This is the
+   real prefill->decode equivalence: decode step t over a t-row cache == the
+   full block's row t, for t = 0..3.  (decode-block-vs-full-last-row PREFILLED
+   rows 0..t-1 + appended row t; here the cache is grown only through the decode
+   path, so step 0's row-0 append is on the critical path.)  Toy block matches
+   symbolic/transformer-block-eager: dim=4, nHeads=2, identity Q=K=V projection,
+   causal MHA -> residual -> ReLU MLP -> residual. *)
+VerificationTest[
+    Module[
+        {nCtx = 8, dim = 4, nHeads = 2, dHead = 2, dff = 8, scale, xRow, w1, w2,
+         relu, hostBlock, kC, vC, posVid, lenVid, w1T, w2T, decStep},
+        scale = 1. / Sqrt[N @ dHead];
+        relu  = Max[#, 0.] &;
+        xRow[i_] := Table[N[0.15 (i + 1) + 0.02 c - 0.01 i c], {c, 0, dim - 1}];
+        w1 = Table[N[0.05 (a - b) + 0.01], {a, 0, dim - 1}, {b, 0, dff - 1}];
+        w2 = Table[N[0.03 (a + b) - 0.02], {a, 0, dff - 1}, {b, 0, dim - 1}];
+        (* host full-block oracle: row t attends rows 0..t (causal), then the
+           same residual + ReLU MLP -- the row the FULL forward produces at t. *)
+        hostBlock[t_] := Module[{rows, qLast, perHead, attn, r1},
+            rows  = Table[xRow[i], {i, 0, t}];
+            qLast = xRow[t];
+            perHead[h_] := Module[{qh, kh, sc, w},
+                qh = qLast[[h dHead + 1 ;; (h + 1) dHead]];
+                kh = rows[[All, h dHead + 1 ;; (h + 1) dHead]];
+                sc = (kh . qh) scale;
+                w  = Exp[sc - Max[sc]] / Total[Exp[sc - Max[sc]]];
+                w . kh];                                         (* V == K *)
+            attn = Flatten[Table[perHead[h], {h, 0, nHeads - 1}]];
+            r1   = qLast + attn;
+            r1 + (relu /@ (r1 . w1)) . w2];
+        TInit[];
+        posVid = TKVarAlloc[1, nCtx]; lenVid = TKVarAlloc[1, nCtx];
+        kC  = TRealize[TTensorCreate[ConstantArray[0., {nCtx, dim}]]];
+        vC  = TRealize[TTensorCreate[ConstantArray[0., {nCtx, dim}]]];
+        w1T = TTensorCreate[N @ w1]; w2T = TTensorCreate[N @ w2];
+        (* one decode step at the CURRENT position t over the growing cache *)
+        decStep[t_] := Module[{xNew, attn, r1, hid},
+            TKVarSet[posVid, t]; TKVarSet[lenVid, t + 1];
+            xNew = {xRow[t]};                                    (* {1,dim} *)
+            attn = TDecodeAttend[TTensorCreate[N @ xNew], kC, vC,
+                TTensorCreate[N @ xNew], TTensorCreate[N @ xNew],
+                nHeads, posVid, lenVid, scale];
+            r1   = TRealize @ TUOpAdd[TTensorCreate[N @ xNew], attn];
+            hid  = With[{pre = TRealize[r1 . w1T]},
+                TRealize @ TUOpMul[pre, TUOpCmplt[TUOpConst[0.], pre]]];
+            Chop[Normal @ TTensorData @ TRealize @ TUOpAdd[r1, hid . w2T],
+                1.*^-6]];
+        Max @ Abs @ Flatten[
+            Table[decStep[t], {t, 0, 3}] - Table[{hostBlock[t]}, {t, 0, 3}]]
+    ],
+    0.,
+    SameTest -> (Abs[#1 - #2] < 1.*^-4 &),
+    TestID -> "symbolic/decode-loop-vs-full-block"
+]
+
+(* STEP 4 session allocation: TDecodeInit[net] sizes the decode state from the
+   net STRUCTURE alone (no forward eval) -- one {nCtx, dim} KV cache per
+   AttentionLayer the decode fold visits, two position kvars, write position 0.
+   A synthetic NetGraph (token embed dim=8/vocab=20, position embed nCtx=5,
+   two AttentionLayers) stands in for GPT-2's structure; {count, shape, kvars,
+   pos} must match what TDecodeStep consumes.  (End-to-end decode over a REAL
+   GPT-2 is the LEVEL B notebook check -- NetModel eval is unavailable here.) *)
+VerificationTest[
+    Module[{net, st},
+        net = Quiet @ NetInitialize @ NetGraph[
+            <|"tok" -> EmbeddingLayer[8, 20], "pos" -> EmbeddingLayer[8, 5],
+              "a1" -> AttentionLayer[], "a2" -> AttentionLayer[]|>,
+            {NetPort["tokIn"] -> "tok", NetPort["posIn"] -> "pos",
+             {"tok", "tok", "tok"} -> "a1", {"a1", "a1", "a1"} -> "a2"},
+            "tokIn" -> {3, "Integer"}, "posIn" -> {3, "Integer"}];
+        st = TDecodeInit[net];
+        {Length[st["kCaches"]], Length[st["vCaches"]],
+         Dimensions[Normal @ TTensorData @ First @ st["kCaches"]],
+         st["posVid"] =!= st["lenVid"], st["pos"]}
+    ],
+    {2, 2, {5, 8}, True, 0},
+    TestID -> "symbolic/decode-init-allocates-caches"
+]

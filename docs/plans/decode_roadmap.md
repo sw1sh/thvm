@@ -254,7 +254,26 @@ So sequence: **symbolic-seq (M1->M3) first, then KV-cache on top.**
   jit): K_t lands at row t for t=4 then t=2, other rows untouched, runtime offset is
   live not baked.  test_cc 86463/86463.  (Minimal-viable slice-length encoding:
   end=pack(s)+T recovers T from the raw packed delta; a cleaner length-field encoding
-  is a follow-up.)  REMAINING: (b) wire tokenLmForward into a single-new-token forward
-  that reads each layer's cache (WL integration); (c) TJit capture-once + per-step
-  replay (rebind t + the new token + the grown cache; the offset must re-read
-  kvar_runtime at fire, not bake at capture).
+  is a follow-up.)
+  (b) DONE -- the WL decode surface: `TAppendAt` / `TDecodeAttend` / `TDecodeStep`
+  (single-new-token forward routing each block's attention through its cache) +
+  `TDecodeInit` (allocate one {nCtx,dim} cache per AttentionLayer + the two position
+  kvars) + `TDecodeNext` (per-step driver: bind the kvars, feed a {1,vocab} one-hot,
+  read back the {vocab} logits, greedy-sample).  The MULTI-STEP loop (cache grown
+  token-by-token through the decode path) is VALIDATED at the block level:
+  `symbolic/decode-loop-vs-full-block` -- decode step t over a t-row cache equals the
+  full block's row t for t=0..3, cache built only via the decode path (so step 0's
+  row-0 append is on the critical path); `symbolic/decode-loop-accumulate` (the
+  attention-only accumulation -> avg(V[0..t])); `symbolic/decode-init-allocates-caches`
+  (state shape from net structure).  TWO root-cause engine bugs were fixed to make the
+  loop correct: (i) `kvar.c` -- `kvar_runtime` used `!= 0` for "is bound", so an
+  explicit bind to 0 (the append ROW OFFSET on the first decode step, start_pos=0)
+  read as unbound and fell back to hi -> the row-0 shrink ran out of bounds and the
+  ASSIGN silently never fired -> token 0's K/V dropped; fixed with a KVAR_RUNTIME_SET
+  flag (`2076931e`); (ii) `thvmlink.c` -- `thvm_wl_mark_symbolic_axis` mutated the
+  view in place, so a persistent cache re-marked each step failed the hi-match guard
+  -> NotATensor; fixed to return a non-mutating view alias (`ac23859a`).
+  REMAINING: (c) TJit capture-once + per-step replay (rebind t + the new token + the
+  grown cache; the offset must re-read kvar_runtime at fire, not bake at capture); and
+  LEVEL B -- end-to-end prefill->decode over the REAL GPT-2 (argmax vs the full forward)
+  in a NetModel-capable env (the bench wolframscript here cannot eval NetModel).
