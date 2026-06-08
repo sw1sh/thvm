@@ -558,3 +558,71 @@ VerificationTest[
         {4 -> ConstantArray[1., 4], 6 -> ConstantArray[2., 4]}],
     TestID -> "symbolic/kvcache-append-wl"
 ]
+
+(* TDecodeAttend: GPT-2's per-step DECODE attention over a KV cache (decode
+   roadmap Lever 2 step 2).  A single new query q1 ({1,dim}) attends a
+   symbolic-length cached K/V prefix.  The toy: nCtx=8, dim=4, nHeads=2.
+   Pre-fill t "past" rows in the caches, append a NEW {1,dim} kNew/vNew row at
+   posVid=t, then decode-attend with q1 over the first t+1 cached rows (incl.
+   the appended token).  Asserted against a host-side single-query multi-head
+   attention oracle (per head: q.cachedK^T -> softmax -> .cachedV, concat).
+   Run at t=3 then t=5 (rebinding posVid + lenVid=t+1) to prove the runtime
+   append offset + prefix length are LIVE across positions.
+
+   q1 leading axis is the LITERAL 1, the caches' is the kvar lenVid -- the
+   seqQ=1 / seqK=len decode fork that symLeadingQ[q1] (False) does NOT route
+   through the symbolic TMultiHeadAttention clause. *)
+VerificationTest[
+    Module[
+        {nCtx = 8, dim = 4, nHeads = 2, dHead = 2, scale, kPast, vPast,
+         q1Host, kNewHost, vNewHost, kAll, vAll, hostDecode, runStep},
+        scale = 1. / Sqrt[N @ dHead];
+        (* distinct known values for every row.  Rows 0..nCtx-2 are candidate
+           "past" tokens; the last appended row is kNew/vNew. *)
+        kPast[i_]   := Table[N[0.1 (i + 1) - 0.013 c], {c, 0, dim - 1}];
+        vPast[i_]   := Table[N[(i + 0.7) + 0.3 c], {c, 0, dim - 1}];
+        q1Host      = {Table[N[0.2 - 0.05 c], {c, 0, dim - 1}]};   (* {1,dim} *)
+        kNewHost[t_] := {Table[N[0.4 + 0.02 c - 0.01 t], {c, 0, dim - 1}]};
+        vNewHost[t_] := {Table[N[9.0 + 0.5 c + 0.1 t], {c, 0, dim - 1}]};
+        (* host oracle: single-query multi-head attention over the first t+1
+           cached rows (rows 0..t-1 = past, row t = appended new token). *)
+        hostDecode[t_] := Module[{kRows, vRows, perHead},
+            kRows = Append[Table[kPast[i], {i, 0, t - 1}], kNewHost[t][[1]]];
+            vRows = Append[Table[vPast[i], {i, 0, t - 1}], vNewHost[t][[1]]];
+            perHead[h_] := Module[{qh, kh, vh, sc, w},
+                qh = q1Host[[All, h dHead + 1 ;; (h + 1) dHead]];        (* {1,dHead} *)
+                kh = kRows[[All, h dHead + 1 ;; (h + 1) dHead]];        (* {t+1,dHead} *)
+                vh = vRows[[All, h dHead + 1 ;; (h + 1) dHead]];        (* {t+1,dHead} *)
+                sc = (qh . Transpose[kh]) scale;                       (* {1,t+1} *)
+                w  = Map[(Exp[# - Max[#]] / Total[Exp[# - Max[#]]]) &, sc];
+                w . vh];                                               (* {1,dHead} *)
+            ArrayFlatten[{Table[perHead[h], {h, 0, nHeads - 1}]}]];     (* {1,dim} *)
+        (* thvm decode step at position t: a fresh kvar pair, caches pre-filled
+           with the t past rows (rows >= t left zero -- only 0..t-1 matter for
+           the prefix), then TDecodeAttend appends + attends. *)
+        runStep[t_] := Module[
+            {posVid, lenVid, kInit, vInit, kCache, vCache, kNewT, vNewT},
+            TInit[];
+            posVid = TKVarAlloc[1, nCtx];     (* append ROW   = t      *)
+            lenVid = TKVarAlloc[1, nCtx];     (* prefix LEN   = t + 1  *)
+            (* caches sized {nCtx,dim}; rows 0..t-1 = the past tokens *)
+            kInit = Table[If[ i < t, kPast[i], ConstantArray[0., dim]],
+                {i, 0, nCtx - 1}];
+            vInit = Table[If[ i < t, vPast[i], ConstantArray[0., dim]],
+                {i, 0, nCtx - 1}];
+            kCache = TRealize[TTensorCreate[N @ kInit]];
+            vCache = TRealize[TTensorCreate[N @ vInit]];
+            kNewT  = TTensorCreate[N @ kNewHost[t]];
+            vNewT  = TTensorCreate[N @ vNewHost[t]];
+            TKVarSet[posVid, t];              (* append at row t      *)
+            TKVarSet[lenVid, t + 1];          (* attend over t+1 rows *)
+            Chop[Normal @ TTensorData @ TRealize @ TDecodeAttend[
+                TTensorCreate[N @ q1Host], kCache, vCache, kNewT, vNewT,
+                nHeads, posVid, lenVid, scale], 1.*^-6]];
+        {Max @ Abs[Flatten[runStep[3] - hostDecode[3]]],
+         Max @ Abs[Flatten[runStep[5] - hostDecode[5]]]}
+    ],
+    {0., 0.},  (* decode output == host oracle at t=3 and t=5 *)
+    TestID -> "symbolic/decode-attend-wl",
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
+]
