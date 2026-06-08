@@ -384,6 +384,19 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
        schedule -- so this is a "GoalDirected first, then AC" variant. *)
     isACWithComplement = ! isBoolean && hasComm && hasAssoc &&
         AnyTrue[Values[ops], #["Arity"] == 1 &];
+    (* CancellativeAbelianGroup -- the single-axiom McCune / AbelianMcCune
+       characterization.  Shape: ONE axiom over a single binary op + a
+       single unary op (the inverse), with no standard law detector
+       firing (assoc, comm, unit, inverse, distrib all hidden inside a
+       complex compound).  Example: `and(and(and(x,y),z), not(and(x,z)))
+       = y` (AbelianMcCune single CAG axiom).  Front-load GT weight --
+       Mix2 from the default $AtpSchedule fallback doesn't crack these
+       in reasonable time, but GT-bare cracks in 0.0s on the C bench
+       (see test_atp_wolfram_bench's amc_assoc probe). *)
+    isCAG = Length[parts] == 1 &&
+        Length[Select[Values[ops], #["Arity"] == 2 &]] == 1 &&
+        AnyTrue[Values[ops], #["Arity"] == 1 &] &&
+        ! hasAssoc && ! hasComm && ! hasUnit && ! hasInv && ! hasDistrib;
     class = Which[
         isComb, "Combinatory",
         isSheffer, "Sheffer",
@@ -395,6 +408,7 @@ atpAnalyzeStructure[axioms_List, conjecture_ : Null] := Block[{
         hasUnit && hasAssoc, "Monoid",
         isACWithComplement, "ACWithComplement",
         hasComm && hasAssoc, "AC",
+        isCAG, "CancellativeAbelianGroup",
         True, "General"];
     <|"Operators" -> ops, "ACOperators" -> acOps, "Class" -> class,
       "NOperators" -> Length[ops], "MaxArity" -> maxArity,
@@ -574,6 +588,16 @@ atpAutoTuneForClass["ACWithComplement"] := {
        first; bulk completion (GtS) is the fallback. *)
     "GoalDirected",
     atpGtS};
+(* CancellativeAbelianGroup: GT weight cracks the single-axiom CAG
+   (AbelianMcCune / McCune characterization) in 0.0s on the C bench
+   where Mix2-bare from the default tail can wall.  Empirical: GT
+   without preset is the cracker.  Verified via test_atp_wolfram_bench
+   amc_assoc probe (commit 1464ab1a). *)
+atpAutoTuneForClass["CancellativeAbelianGroup"] := {
+    {"Completion", "CriticalPairWeight" -> "Gt"},
+    atpGtS,
+    {"Completion"}};
+
 atpAutoTuneForClass[_] := {};   (* "General": no front-load, just tail *)
 
 (* Front-load the tuned configs, then APPEND the full fixed portfolio
