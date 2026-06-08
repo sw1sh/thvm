@@ -287,6 +287,23 @@ static void goal_group_leftid(Term *l, Term *r) {
   *r = p;
 }
 
+// AbelianMcCuneAxioms (1 single CAG equation): cancellative abelian group
+// in one equation, `and(and(and(x,y),z), not(and(x,z))) = y`.  L_AND
+// stays the binary op, L_NOT the inverse, no identity (CAG has none).
+// Mirrors wm_pr/AbelianMcCuneAxioms__Associativity.pr.
+static void amc_axiom(Term *l, Term *r) {
+  Term x = fv(0), y = fv(1), z = fv(2);
+  *l = and_op(and_op(and_op(x, y), z), not_op(and_op(x, z)));
+  *r = y;
+}
+// Associativity conjecture: and(skC1, and(skC2, skC3)) =
+// and(and(skC1, skC2), skC3).  L_P, L_Q, L_R are 0-arity skolems.
+static void goal_amc_assoc(Term *l, Term *r) {
+  Term p = konst(L_P), q = konst(L_Q), rr = konst(L_R);
+  *l = and_op(p, and_op(q, rr));
+  *r = and_op(and_op(p, q), rr);
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -749,6 +766,10 @@ int main(int argc, char **argv) {
     thvm_atp_add_equation(s, g1l, g1r);
     thvm_atp_add_equation(s, g2l, g2r);
     thvm_atp_add_equation(s, g3l, g3r);
+  } else if (strcmp(goal, "amc_assoc") == 0) {
+    Term al, ar;
+    amc_axiom(&al, &ar);
+    thvm_atp_add_equation(s, al, ar);
   } else {
     thvm_atp_add_equation(s, axiom_lhs(), fv(2));
   }
@@ -774,6 +795,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "robbins") == 0) goal_robbins(&gl, &gr);
   else if (strcmp(goal, "agioc") == 0)   goal_aboig_ioc(&gl, &gr);
   else if (strcmp(goal, "glid") == 0)    goal_group_leftid(&gl, &gr);
+  else if (strcmp(goal, "amc_assoc") == 0) goal_amc_assoc(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
