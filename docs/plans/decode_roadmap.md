@@ -87,11 +87,18 @@ true at this layer -- but unwired end to end.
 - **M2**: the compiled backends + matmul.  Op coverage on the interpreter is
   basically FREE -- elementwise + multi-axis reduce over a symbolic dim already
   work (`tests/test_sym_m2.c`), since they inherit the RANGE path.  The real M2
-  work is two things: (a) **compiled-kernel bound-passing** -- `render_uop`
-  already DECLARES the kvar as a kernel arg (`unsigned V_s` on C/CUDA, a
-  `constant uint &V_s` buffer arg on Metal), so the cpu-jit / Metal / CUDA
-  launchers just need to PASS `kvar_runtime(id)` for each (today a kvar kernel
-  either gets it or cpu-jit declines and it falls to the correct interpreter);
+  work is two things: (a) **compiled-kernel bound-passing -- cpu-jit DONE.** The
+  CPU JIT now compiles + runs symbolic kernels at the bound: `CpuJitFn` gained a
+  `const unsigned *kvar_vals` param, the CPU render emits `unsigned V_<name> =
+  kvar_vals[i]` from it (`cg_emit_cpu_kvar_decls`, both C entry points), and the
+  dispatch fills it via `cpu_jit_kvar_vals` (`kvar_runtime` in
+  `kvar_collect_from_dag` order).  Before, `V_s` was undeclared so a symbolic
+  kernel failed to compile and fell to the interpreter; now it JIT-dispatches
+  (verified: a `{3,S}` reduce JITs with `V=5`, rebinds to `V=4` on the same
+  compiled fn -- the bound is a per-dispatch arg, not baked).  Identity for
+  non-symbolic kernels (`test_cc 86463/86463`, jit-forced too).  Metal / CUDA
+  already declare the arg; their launchers (`setBytes:` / `cuLaunchKernel`)
+  still need the same pass -- pending.
   (b) **matmul / GEMM -- DONE** (`tests/test_sym_matmul.c`): a symbolic-`M`
   matmul is GEMM-dispatched, and `blas_try_gemm` now resolves `gemm.M/N/K/ld`
   via `kvar_extent_runtime` after classify, so `{S,K}.{K,N}` runs on cblas at a

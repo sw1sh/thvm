@@ -5089,6 +5089,19 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
 // Scope: single-store elementwise / reduce-tail kernels (matmul TC
 // template stays MSL-only since C lacks simdgroup_matrix). Caller
 // gates on uop_recognise_tc NOT having wrapped the root.
+// Emit `unsigned V_<name> = kvar_vals[i];` for each symbolic dim the kernel
+// uses (kvar_collect_from_dag order, matching cpu/jit.c's cpu_jit_kvar_vals).
+// The loop-bound emit (cg_emit_range_open) references these `V_<name>` locals.
+static void cg_emit_cpu_kvar_decls(Term root, FILE *fp) {
+  u32 used_vars[KVAR_USED_CAP];
+  u32 n_vars = kvar_collect_from_dag(root, used_vars, KVAR_USED_CAP);
+  for (u32 i = 0; i < n_vars; i++) {
+    const char *vn = kvar_name(used_vars[i]);
+    fprintf(fp, "  unsigned V_%s = kvar_vals[%u];\n", vn ? vn : "V", i);
+  }
+  fputs("  (void)kvar_vals;\n", fp);
+}
+
 fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
                                Term out_buf, Term const *in_bufs,
                                u32 n_inputs, FILE *fp) {
@@ -5127,7 +5140,8 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   // CPU-JIT entry-point signature; cpu/jit.c dlsyms "k" and calls
   // it directly with caller pointers.
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
-  fputs("              unsigned n, const unsigned *in_numels) {\n", fp);
+  fputs("              unsigned n, const unsigned *in_numels,\n", fp);
+  fputs("              const unsigned *kvar_vals) {\n", fp);
   fputs("  (void)n; (void)in_numels;\n", fp);
   u32 out_dtype = uop_buffer_dtype(out_buf);
   fprintf(fp, "  %s *out = (%s *)out_v;\n",
@@ -5137,6 +5151,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
     fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
+  cg_emit_cpu_kvar_decls(root, fp);
   RMU_TARGET = CG_TARGET_C;
   // Late fast_idiv lowering (tinygrad get_late_rewrite_patterns,
   // codegen/__init__.py:89): rewrite every constant-divisor `x // c`,
@@ -5241,7 +5256,8 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   fputs("typedef float float4 __attribute__((aligned(4),"
         "ext_vector_type(4)));\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
-  fputs("              unsigned n, const unsigned *in_numels) {\n", fp);
+  fputs("              unsigned n, const unsigned *in_numels,\n", fp);
+  fputs("              const unsigned *kvar_vals) {\n", fp);
   fputs("  (void)n; (void)in_numels;\n", fp);
   u32 out_dtype = uop_buffer_dtype(out_buf);
   fprintf(fp, "  %s *out = (%s *)out_v;\n",
@@ -5252,6 +5268,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
     fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
+  cg_emit_cpu_kvar_decls(root, fp);
   RMU_TARGET = CG_TARGET_C;
   // Late fast_idiv lowering (tinygrad get_late_rewrite_patterns,
   // codegen/__init__.py:89): rewrite every constant-divisor `x // c`,

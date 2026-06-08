@@ -7,7 +7,8 @@
 //   void k(void *out_v,
 //          const void *const *ins_v,
 //          unsigned out_numel,
-//          const unsigned *in_numels);
+//          const unsigned *in_numels,
+//          const unsigned *kvar_vals);   // symbolic-shape loop bounds
 //
 // The renderer casts `out_v` and each `ins_v[i]` to the program's
 // dtype-typed pointer in the prologue, so the generated kernel
@@ -24,8 +25,23 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+// `kvar_vals` carries the per-dispatch symbolic-shape bindings: kvar_vals[i]
+// is the loop bound for the i-th kvar of this kernel in kvar_collect_from_dag
+// order (the same order render_uop declares `unsigned V_<name> = kvar_vals[i]`).
+// Empty / ignored for non-symbolic kernels.
 typedef void (*CpuJitFn)(void *out, const void *const *ins,
-                         unsigned n, const unsigned *in_numels);
+                         unsigned n, const unsigned *in_numels,
+                         const unsigned *kvar_vals);
+
+// Fill `out_vals` with this kernel's kvar runtime bounds (kvar_collect_from_dag
+// order).  out_vals must hold KVAR_USED_CAP entries.
+static void cpu_jit_kvar_vals(KernelEntry const *ke, unsigned *out_vals) {
+  u32 ids[KVAR_USED_CAP];
+  u32 nkv = ke->cached_lift.store_root
+          ? kvar_collect_from_dag(ke->cached_lift.store_root, ids, KVAR_USED_CAP)
+          : 0;
+  for (u32 i = 0; i < nkv; i++) out_vals[i] = (unsigned)kvar_runtime(ids[i]);
+}
 
 #define CPU_JIT_CACHE_CAP 256
 // JIT warmup gate: a kernel hash must fire CPU_JIT_WARMUP times before
@@ -303,7 +319,9 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     }
     void *out = CPU_BUFS[out_buf_id].data;
     unsigned numel = (unsigned)ke->output_numel;
-    _jfn(out, ins_buf, numel, nums_buf);
+    unsigned kvar_vals[KVAR_USED_CAP];
+    cpu_jit_kvar_vals(ke, kvar_vals);
+    _jfn(out, ins_buf, numel, nums_buf, kvar_vals);
     return 1;
   }
   char *src = cpu_jit_render_canon(ke);
@@ -430,7 +448,9 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   void *out = CPU_BUFS[out_buf_id].data;
   // Read the output numel directly from KernelEntry.
   unsigned numel = (unsigned)ke->output_numel;
-  jfn(out, ins_buf, numel, nums_buf);
+  unsigned kvar_vals[KVAR_USED_CAP];
+  cpu_jit_kvar_vals(ke, kvar_vals);
+  jfn(out, ins_buf, numel, nums_buf, kvar_vals);
   return 1;
 }
 
