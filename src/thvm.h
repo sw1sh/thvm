@@ -4991,6 +4991,12 @@ extern int (*thvm_atp_abort_hook)(void);
 #include <setjmp.h>
 extern jmp_buf  *thvm_heap_exhaust_jmp;
 extern volatile int thvm_heap_exhausted;
+// Unified fatal-condition recovery: longjmp via thvm_heap_exhaust_jmp
+// when set, exit(1) otherwise.  Replaces ad-hoc exit(1) calls in OOM
+// paths so a LibraryLink entry can recover and return
+// LIBRARY_FUNCTION_ERROR instead of killing the WolframKernel.
+__attribute__((noreturn))
+fn void thvm_fatal(const char *msg);
 
 // === atp/precedence -- algebraic-structure detection =================
 // Ported from Waldmeister's `PhilMarlow` (algebraic-structure
