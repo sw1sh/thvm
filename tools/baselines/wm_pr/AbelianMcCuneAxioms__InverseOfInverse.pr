@@ -1,0 +1,12 @@
+NAME          AbelianMcCuneAxiomsInverseOfInverse
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     and: ANY ANY -> ANY
+              not: ANY -> ANY
+              skC1: -> ANY
+ORDERING      KBO
+              and=1, not=1, skC1=1
+              skC1 > not > and
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     and(and(and(X1,X2),X3),not(and(X1,X3))) = X2
+CONCLUSION    not(not(skC1)) = skC1

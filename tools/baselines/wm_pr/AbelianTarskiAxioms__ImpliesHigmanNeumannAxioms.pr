@@ -1,0 +1,13 @@
+NAME          AbelianTarskiAxiomsImpliesHigmanNeumannAxioms
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     fop: ANY ANY -> ANY
+              skC1: -> ANY
+              skC2: -> ANY
+              skC3: -> ANY
+ORDERING      KBO
+              fop=1, skC1=1, skC2=1, skC3=1
+              skC1 > skC2 > skC3 > fop
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     fop(X1,fop(X2,fop(X3,fop(X1,X2)))) = X3
+CONCLUSION    fop(skC1,fop(fop(fop(fop(skC1,skC1),skC2),skC3),fop(fop(fop(skC1,skC1),skC1),skC3))) = skC2

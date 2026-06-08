@@ -1,0 +1,23 @@
+NAME          CommutativeRingWithIdentityAxiomsZeroIsAbsorbing
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     and: ANY ANY -> ANY
+              k1: -> ANY
+              k2: -> ANY
+              not: ANY -> ANY
+              opOvertilde: ANY -> ANY
+              or: ANY ANY -> ANY
+              skC1: -> ANY
+ORDERING      KBO
+              and=1, k1=1, k2=1, not=1, opOvertilde=1, or=1, skC1=1
+              k1 > k2 > skC1 > not > opOvertilde > and > or
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     or(X1,or(X2,X3)) = or(or(X1,X2),X3)
+              or(X1,X2) = or(X2,X1)
+              or(X1,opOvertilde(k1)) = X1
+              or(X1,not(X1)) = opOvertilde(k1)
+              and(X1,or(X2,X3)) = or(and(X1,X2),and(X1,X3))
+              and(X1,and(X2,X3)) = and(and(X1,X2),X3)
+              and(X1,X2) = and(X2,X1)
+              and(X1,opOvertilde(k2)) = X1
+CONCLUSION    and(skC1,opOvertilde(k1)) = opOvertilde(k1)

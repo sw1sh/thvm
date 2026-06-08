@@ -1,0 +1,19 @@
+NAME          BooleanAxiomsDeMorganC1
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     and: ANY ANY -> ANY
+              not: ANY -> ANY
+              or: ANY ANY -> ANY
+              skC1: -> ANY
+              skC2: -> ANY
+ORDERING      KBO
+              and=1, not=1, or=1, skC1=1, skC2=1
+              skC1 > skC2 > not > and > or
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     and(X1,X2) = and(X2,X1)
+              and(X1,or(X2,X3)) = or(and(X1,X2),and(X1,X3))
+              or(X1,and(X2,not(X2))) = X1
+              and(X1,or(X2,not(X2))) = X1
+              or(X1,X2) = or(X2,X1)
+              or(X1,and(X2,X3)) = and(or(X1,X2),or(X1,X3))
+CONCLUSION    not(or(skC1,skC2)) = and(not(skC1),not(skC2))

@@ -1,0 +1,26 @@
+NAME          CombinatorAxiomsBCKWToSKIC2
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     cCombinatorB: -> ANY
+              cCombinatorC: -> ANY
+              cCombinatorI: -> ANY
+              cCombinatorK: -> ANY
+              cCombinatorS: -> ANY
+              cCombinatorW: -> ANY
+              cCombinatorY: -> ANY
+              opApplication: ANY ANY -> ANY
+              skC1: -> ANY
+              skC2: -> ANY
+              skC3: -> ANY
+ORDERING      KBO
+              cCombinatorB=1, cCombinatorC=1, cCombinatorI=1, cCombinatorK=1, cCombinatorS=1, cCombinatorW=1, cCombinatorY=1, opApplication=1, skC1=1, skC2=1, skC3=1
+              cCombinatorB > cCombinatorC > cCombinatorI > cCombinatorK > cCombinatorS > cCombinatorW > cCombinatorY > skC1 > skC2 > skC3 > opApplication
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     opApplication(cCombinatorI,X1) = X1
+              opApplication(opApplication(cCombinatorK,X1),X2) = X1
+              opApplication(opApplication(opApplication(cCombinatorS,X1),X2),X3) = opApplication(opApplication(X1,X3),opApplication(X2,X3))
+              opApplication(opApplication(opApplication(cCombinatorC,X1),X2),X3) = opApplication(opApplication(X1,X3),X2)
+              opApplication(opApplication(opApplication(cCombinatorB,X1),X2),X3) = opApplication(X1,opApplication(X2,X3))
+              opApplication(opApplication(cCombinatorW,X1),X2) = opApplication(opApplication(X1,X2),X2)
+              opApplication(cCombinatorY,X1) = opApplication(X1,opApplication(cCombinatorY,X1))
+CONCLUSION    opApplication(opApplication(opApplication(cCombinatorC,skC1),skC2),skC3) = opApplication(opApplication(opApplication(opApplication(opApplication(cCombinatorS,opApplication(opApplication(cCombinatorS,opApplication(cCombinatorK,opApplication(opApplication(cCombinatorS,opApplication(cCombinatorK,cCombinatorS)),cCombinatorK))),cCombinatorS)),opApplication(cCombinatorK,cCombinatorK)),skC1),skC2),skC3)

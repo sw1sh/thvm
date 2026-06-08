@@ -1,0 +1,14 @@
+NAME          RobbinsAxiomsDoubleNegation
+MODE          PROOF
+SORTS         ANY
+SIGNATURE     not: ANY -> ANY
+              or: ANY ANY -> ANY
+              skC1: -> ANY
+ORDERING      KBO
+              not=1, or=1, skC1=1
+              skC1 > not > or
+VARIABLES     X1, X2, X3: ANY
+EQUATIONS     or(X1,or(X2,X3)) = or(or(X1,X2),X3)
+              or(X1,X2) = or(X2,X1)
+              not(or(not(or(X1,X2)),not(or(X1,not(X2))))) = X1
+CONCLUSION    not(not(skC1)) = skC1
