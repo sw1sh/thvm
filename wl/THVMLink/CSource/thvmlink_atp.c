@@ -1695,3 +1695,176 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_cp_graph(WolframLibraryData libData,
   MArgument_setMNumericArray(res, out);
   return LIBRARY_NO_ERROR;
 }
+
+// === ENIGMA Tier 2: persistent step-wise proof handle (GNN re-rank) ===
+//
+// thvm_wl_atp_run_proof runs the saturation atomically (init -> run ->
+// free in one call).  These expose a PERSISTENT AtpState across
+// LibraryLink calls so a WL driver can step the loop, pull the queued
+// CPs, score them with the GNN, and push re-ranked priorities back
+// (thvm_atp_set_cp_pri_by_seq) -- the amortised-eval-server loop.  The
+// handle is the AtpState pointer returned as an Integer.  ONE proof at a
+// time: the config arrays below are file-static, valid until the next
+// _init (the re-rank measure runs proofs sequentially).  This path
+// measures status + step count, not the proof chain, so record-norm is
+// off and no proof-object reconstruction is wired here.
+
+EXTERN_C DLLEXPORT int thvm_wl_atp_proof_init(WolframLibraryData libData,
+                                              mint argc, MArgument *args,
+                                              MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  mint max_steps = MArgument_getInteger(args[1]);
+  mint max_label = MArgument_getInteger(args[2]);
+  mint cp_weight = MArgument_getInteger(args[3]);
+  mint ordering  = MArgument_getInteger(args[4]);
+  mint auto_prec = MArgument_getInteger(args[5]);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  mint flat_len = naf->MNumericArray_getFlattenedLength(na);
+  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
+  const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
+  int64_t n_ax_i = data[0];
+  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 n_ax = (u32)n_ax_i;
+  if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) return LIBRARY_FUNCTION_ERROR;
+  static u32 rr_weights[ATP_WL_CFG_MAX_LABELS];
+  static u32 rr_prec[ATP_WL_CFG_MAX_LABELS];
+  for (u32 i = 0; i < (u32)max_label + 1; i++) {
+    rr_weights[i] = 1;
+    rr_prec[i]    = i + 1;
+  }
+  if (auto_prec != 0) {
+    static Term ax_lhs[ATP_WL_CFG_MAX_LABELS];
+    static Term ax_rhs[ATP_WL_CFG_MAX_LABELS];
+    u32 m = n_ax < ATP_WL_CFG_MAX_LABELS ? n_ax : ATP_WL_CFG_MAX_LABELS;
+    for (u32 i = 0; i < m; i++) {
+      ax_lhs[i] = (Term)data[1 + 2 * i + 0];
+      ax_rhs[i] = (Term)data[1 + 2 * i + 1];
+    }
+    atp_auto_precedence(ax_lhs, ax_rhs, m, (u32)max_label + 1, rr_prec);
+  }
+  static KboConfig rr_kbo;
+  rr_kbo.weights = rr_weights;
+  rr_kbo.precedence = rr_prec;
+  rr_kbo.n_labels = (u32)max_label + 1;
+  rr_kbo.var_weight = 1;
+  AtpState *atp = thvm_atp_init(&rr_kbo, (u32)max_steps);
+  if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  static LpoConfig rr_lpo;
+  if (ordering == 1) {
+    rr_lpo.precedence = rr_prec;
+    rr_lpo.n_labels = (u32)max_label + 1;
+    thvm_atp_set_lpo(atp, &rr_lpo);
+  }
+  if (cp_weight >= 0) thvm_atp_set_cp_weight_mode(atp, (u32)cp_weight);
+  // Lean base config (KBO/LPO + cp_weight + auto-precedence), matching
+  // the fast structure-recognized completion path; the re-rank overrides
+  // selection order via thvm_atp_set_cp_pri_by_seq between chunks.
+  // Record-norm off: this path measures status, not the proof chain.
+  // (UnfailingCP / AutoMaxWeight / RHSInterreduce intentionally NOT set
+  // here -- they exploded the queue on easy orientable goals; add per
+  // problem-class once the re-rank latency is addressed.)
+  thvm_atp_set_record_norm_steps(atp, 0u);
+  for (u32 i = 0; i < n_ax; i++) {
+    thvm_atp_add_equation(atp, (Term)data[1 + 2 * i + 0],
+                          (Term)data[1 + 2 * i + 1]);
+  }
+  Term gl = (Term)data[1 + 2 * n_ax + 0];
+  Term gr = (Term)data[1 + 2 * n_ax + 1];
+  if (gl != 0u || gr != 0u) thvm_atp_set_goal(atp, gl, gr);
+  MArgument_setInteger(res, (mint)(intptr_t)atp);
+  return LIBRARY_NO_ERROR;
+}
+
+// Run up to k saturation steps; return the AtpStatus code (stops early
+// on a terminal status).
+EXTERN_C DLLEXPORT int thvm_wl_atp_proof_step(WolframLibraryData libData,
+                                              mint argc, MArgument *args,
+                                              MArgument res) {
+  (void)libData; (void)argc;
+  AtpState *atp = (AtpState *)(intptr_t)MArgument_getInteger(args[0]);
+  mint k = MArgument_getInteger(args[1]);
+  if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  AtpStatus st = ATP_RUNNING;
+  for (mint i = 0; i < k; i++) {
+    st = thvm_atp_step(atp);
+    if (st != ATP_RUNNING) break;
+  }
+  MArgument_setInteger(res, (mint)st);
+  return LIBRARY_NO_ERROR;
+}
+
+// Pull the live queued CPs as a packed Int64 array
+// [count, lhs_0, rhs_0, seq_0, lhs_1, ...].
+EXTERN_C DLLEXPORT int thvm_wl_atp_proof_queued(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)argc;
+  AtpState *atp = (AtpState *)(intptr_t)MArgument_getInteger(args[0]);
+  mint cap = MArgument_getInteger(args[1]);
+  if (atp == NULL || cap <= 0) return LIBRARY_FUNCTION_ERROR;
+  Term *lhs = (Term *)malloc((size_t)cap * sizeof(Term));
+  Term *rhs = (Term *)malloc((size_t)cap * sizeof(Term));
+  u32  *seq = (u32 *)malloc((size_t)cap * sizeof(u32));
+  if (lhs == NULL || rhs == NULL || seq == NULL) {
+    free(lhs); free(rhs); free(seq);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 cnt = thvm_atp_queued_cps(atp, lhs, rhs, seq, (u32)cap);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  mint dims[1] = {1 + 3 * (mint)cnt};
+  MNumericArray out;
+  naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out);
+  int64_t *o = (int64_t *)naf->MNumericArray_getData(out);
+  o[0] = (int64_t)cnt;
+  for (u32 i = 0; i < cnt; i++) {
+    o[1 + 3 * i + 0] = (int64_t)lhs[i];
+    o[1 + 3 * i + 1] = (int64_t)rhs[i];
+    o[1 + 3 * i + 2] = (int64_t)seq[i];
+  }
+  free(lhs); free(rhs); free(seq);
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// Push WL-computed priorities: args[1] seq (Int,1), args[2] pri (Int,1).
+EXTERN_C DLLEXPORT int thvm_wl_atp_proof_setpri(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)argc;
+  AtpState *atp = (AtpState *)(intptr_t)MArgument_getInteger(args[0]);
+  MTensor seqT = MArgument_getMTensor(args[1]);
+  MTensor priT = MArgument_getMTensor(args[2]);
+  if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  mint n = libData->MTensor_getFlattenedLength(seqT);
+  if (libData->MTensor_getFlattenedLength(priT) != n) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  const mint *sd = libData->MTensor_getIntegerData(seqT);
+  const mint *pd = libData->MTensor_getIntegerData(priT);
+  u32 *seq = (u32 *)malloc((size_t)(n > 0 ? n : 1) * sizeof(u32));
+  u32 *pri = (u32 *)malloc((size_t)(n > 0 ? n : 1) * sizeof(u32));
+  if (seq == NULL || pri == NULL) { free(seq); free(pri); return LIBRARY_FUNCTION_ERROR; }
+  for (mint i = 0; i < n; i++) { seq[i] = (u32)sd[i]; pri[i] = (u32)pd[i]; }
+  thvm_atp_set_cp_pri_by_seq(atp, seq, pri, (u32)n);
+  free(seq); free(pri);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_atp_proof_free(WolframLibraryData libData,
+                                              mint argc, MArgument *args,
+                                              MArgument res) {
+  (void)libData; (void)argc;
+  AtpState *atp = (AtpState *)(intptr_t)MArgument_getInteger(args[0]);
+  if (atp != NULL) thvm_atp_free(atp);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}

@@ -78,6 +78,8 @@ TAtpTrainGnn::usage = "TAtpTrainGnn[dataset] trains a graph convolutional networ
 
 TAtpGnnScore::usage = "TAtpGnnScore[model, dataset] scores a graph dataset (TAtpGraphDataset output, or any <|\"Graphs\" -> {..}|>) with a trained GNN `model` (the \"Model\" returned by TAtpTrainGnn), returning the per-graph proof-relevance score (the readout's logit_pos - logit_neg) as a list, one entry per graph in dataset[\"Graphs\"].  It runs the same forward as training with the model's weights held constant -- the inference path.  Because the GCN is node-count agnostic, a model trained on one corpus scores graphs of any size, so this is what a held-out (by-problem) evaluation and the engine's critical-pair re-rank use.";
 
+TFindProofReranked::usage = "TFindProofReranked[conjecture, axioms, model] proves the conjecture while re-ranking the critical-pair queue with a trained GNN `model` (the \"Model\" from TAtpTrainGnn): it drives the C saturation in chunks of \"RerankPeriod\" steps and, between chunks, pulls the live queued critical pairs, encodes each to its anonymised graph, scores them with TAtpGnnScore, and pushes GNN-derived priorities back into the engine's selection heap.  Returns the status string (\"PROVED\" / \"TIMEOUT\" / \"QUEUE_EMPTY\" / ...).  This is the ENIGMA inference loop -- the GNN guides selection on a live proof -- realised as a WL-driven amortised eval over the persistent-handle bridge.  Completeness is preserved (re-ranking only permutes selection order; the engine's periodic FIFO pick still fires).  Options: \"RerankPeriod\" (steps between re-ranks, default 200), MaxSteps (default 30000), \"CriticalPairWeight\" (the base weight for newly-generated CPs between re-ranks, default \"Gt\"), \"Ordering\" (\"KBO\" default / \"LPO\"), \"AutoPrecedence\" (default True), \"QueueCap\".";
+
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
    Begin[`Private`] resolve to the shared THVMLink`ATP`X symbol
@@ -218,6 +220,24 @@ $atpCpGraphFn := $atpCpGraphFn = load[
     {Integer, Integer},
     "NumericArray"
 ]
+
+(* ENIGMA Tier 2: persistent step-wise proof handle (GNN re-rank).
+   _init returns an AtpState handle (an Integer); _step runs k steps and
+   returns the AtpStatus code (0 = RUNNING); _queued packs the live CPs
+   as [count, lhs, rhs, seq, ...]; _setpri pushes WL-computed priorities
+   by seq; _free releases the handle. *)
+$atpProofInitFn := $atpProofInitFn = load[
+    "thvm_wl_atp_proof_init",
+    {{"NumericArray", "Shared"}, Integer, Integer, Integer, Integer, Integer},
+    Integer]
+$atpProofStepFn := $atpProofStepFn = load[
+    "thvm_wl_atp_proof_step", {Integer, Integer}, Integer]
+$atpProofQueuedFn := $atpProofQueuedFn = load[
+    "thvm_wl_atp_proof_queued", {Integer, Integer}, "NumericArray"]
+$atpProofSetPriFn := $atpProofSetPriFn = load[
+    "thvm_wl_atp_proof_setpri", {Integer, {Integer, 1}, {Integer, 1}}, Integer]
+$atpProofFreeFn := $atpProofFreeFn = load[
+    "thvm_wl_atp_proof_free", {Integer}, Integer]
 
 (* Flatten a model Association into the C parameter blob
    (thvm_atp_set_learned_scorer layout): {kind, hidden, mean[14],
@@ -985,6 +1005,59 @@ TAtpGnnScore[model_Association, dataset_Association] := Module[{
         w1s, wss, bhs, wout, bout, b, n, f, hH, rR];
     p = Normal @ TRealize @ logits;
     p[[All, 2]] - p[[All, 1]]
+]
+
+(* === ENIGMA Tier 2: GNN-guided critical-pair re-rank ============== *)
+
+(* Map a GNN proof-relevance score to a CP-queue priority: higher score
+   -> lower priority (selected sooner), clamped to a safe u32 band, the
+   same shape the baked-in learned scorer uses. *)
+atpRerankPriority[score_] := Round[Clip[1000000. - 10000. * score, {0., 2.*^9}]]
+
+Options[TFindProofReranked] = {"RerankPeriod" -> 200, MaxSteps -> 30000,
+    "CriticalPairWeight" -> "Gt", "Ordering" -> "KBO",
+    "AutoPrecedence" -> True, "QueueCap" -> 4096}
+
+(* Drive a proof in chunks, re-ranking the live CP queue with the GNN
+   every "RerankPeriod" steps: pull the queued CPs, encode each to its
+   anonymised graph, score with TAtpGnnScore, push priorities back.
+   Between re-ranks the base "CriticalPairWeight" orders newly-generated
+   CPs.  Returns the status string ("PROVED" / "TIMEOUT" / ...).  This is
+   the inference loop that wires the Tier 2 GNN into live selection;
+   completeness holds (re-ranking only permutes order + the periodic FIFO
+   pick still fires). *)
+TFindProofReranked[conjecture_, axioms_List, model_Association,
+    opts : OptionsPattern[]] := Module[{
+    enc = atpEncodeProblem[axioms, conjecture],
+    k = OptionValue["RerankPeriod"], maxSteps = OptionValue[MaxSteps],
+    cpw = Lookup[$AtpCpWeightCodes, OptionValue["CriticalPairWeight"], 3],
+    ord = If[ OptionValue["Ordering"] === "LPO", 1, 0],
+    ap = If[ TrueQ[OptionValue["AutoPrecedence"]], 1, 0],
+    cap = OptionValue["QueueCap"],
+    handle, st = 0, chunks, q, cnt, tri, seq, graphs, scores
+},
+    handle = $atpProofInitFn[enc["Packed"], maxSteps, enc["MaxLab"],
+        cpw, ord, ap];
+    If[ handle == 0, Return[$Failed]];
+    chunks = Ceiling[maxSteps / k] + 2;
+    Do[
+        st = $atpProofStepFn[handle, k];
+        If[ st =!= 0, Break[]];
+        q = Normal @ $atpProofQueuedFn[handle, cap];
+        cnt = First[q];
+        If[ cnt > 0,
+            tri = Partition[Rest[q], 3];
+            seq = tri[[All, 3]];
+            graphs = MapThread[
+                atpCpGraphDecode[Normal[$atpCpGraphFn[#1, #2]]] &,
+                {tri[[All, 1]], tri[[All, 2]]}];
+            scores = TAtpGnnScore[model,
+                <|"Graphs" -> graphs, "Labels" -> ConstantArray[0, cnt]|>];
+            $atpProofSetPriFn[handle, seq, atpRerankPriority /@ scores]
+        ],
+        {chunks}];
+    $atpProofFreeFn[handle];
+    atpStatusFor[st]
 ]
 
 (* === Status decoder + stats Association builder =================== *)
