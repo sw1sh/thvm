@@ -9,9 +9,27 @@ each step as a TJit replay. `maxSeq` is the window you pad to. Two levers remove
 2. **Incremental KV-cache** -- O(1)/step decode instead of recomputing the whole
    `{maxSeq, ...}` forward + `{maxSeq, maxSeq}` attention every step.
 
+> **STATUS (2026-06-08): LEVER 1 COMPLETE -- `maxSeq` is gone, correct AND fast.**
+> The real GPT-2 117M forward runs over a symbolic (kvar) sequence S via
+> `TFromNet[net, TSymbolicAxis[onehot, 0, vid]]`: argmax byte-identical to the
+> fixed-window forward at S=4/5/6, one construction rebinding across lengths.
+> Attention runs EAGER (each `{S,S}` intermediate realized to a contiguous leaf
+> -- the eager-execution insight sidesteps the fused-broadcast `{S,S}` bugs),
+> and the whole eager forward is **TJit-able**: capture once at S=hi (~24s), then
+> replay ~18ms/step at the running length (~1355x), rebinding S in place (the
+> kvar bound is a per-dispatch arg). So Lever 1 needs neither a fused `{S,S}`
+> softmax nor a per-step re-lift.  Key commits: `7528654c` (mask reshape) ->
+> `e41e1f63` (`view_strided_index` mask root) -> `0cd3f13e`/`7a44cec0` (eager
+> attention) -> `c7f9ed70` (WL eager attention) -> `577fafc6` (multi-head +
+> block) -> `79df1f7c` (symbolic-aware TMultiHeadAttention) -> `c8caad2b`
+> (tokenLmForward wiring) -> `e6e2163c` (dispatch crash: hand-opt kvar guard) ->
+> `d9cf2de5` (uop_pad-over-kvar) -> `beeb926e` (TJit capture/replay perf).
+> Remaining = Lever 2 (KV-cache, below) + optional polish (shared-kernel
+> cross-contamination, the latent raw-kvar audit sites, Metal/CUDA launchers).
+
 ---
 
-## 1. Symbolic sequence length (drop `maxSeq`)
+## 1. Symbolic sequence length (drop `maxSeq`)  -- DONE (see STATUS above)
 
 ### State: the symbolic-shape infra is PRESENT but DORMANT (never wired)
 
