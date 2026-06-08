@@ -53,6 +53,14 @@ interactions.
   / `Method -> "ENIGMA"`), the 14 features, the C scorer, and the honest
   measured baseline.  Staged plan in `docs/plans/atp_ml_roadmap.md`.
 
+* **[gnn_pipeline.md](gnn_pipeline.md)**: the concrete end-to-end GNN
+  recipe and its open design problems.  How to build a labelled CP-graph
+  dataset from `AxiomaticTheory` or raw TPTP files (`TAtpGraphDataset`),
+  train the GCN (`TAtpTrainGnn`), save it as a safetensors paclet asset,
+  and plug it into selection as a coop secondary queue alongside the
+  Waldmeister preset.  Flags the OOM-safe generation, label, train/test,
+  and `Method -> {"ENIGMA", "Model" -> ...}` fold problems.
+
 * **[unification_roadmap.md](unification_roadmap.md)** — the design arc
   toward Z3-class SMT (multi-theory, CDCL(T), quantifier instantiation)
   *unified* with the completion engine, built on the fact that
