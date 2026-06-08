@@ -972,8 +972,14 @@ EXTERN_C DLLEXPORT int thvm_wl_mark_symbolic_axis(WolframLibraryData libData, mi
   u32  tid  = (u32)term_val(ten);
   if (tid != 0 && tid < TENS_NEXT && axis < TENS[tid].view.shape.ndim
       && kvar_hi(vid) == TENS[tid].view.shape.dims[axis]) {
-    TENS[tid].view.shape.dims[axis] = kvar_pack_extent(vid);
-    MArgument_setInteger(res, (mint)ten);
+    // Non-mutating: build a VIEW ALIAS (shares the buffer) with the marked
+    // axis, leaving the original tensor UNCHANGED -- so a persistent KV-cache
+    // can be re-marked every decode step without its extent drifting (a
+    // mutated cache re-marked at step 2 had extent != hi -> wrong view).
+    View v = TENS[tid].view;
+    v.shape.dims[axis] = kvar_pack_extent(vid);
+    u32 nv = tensor_view_of(tid, v);
+    MArgument_setInteger(res, (mint)term_new(0, TAG_TEN, TENS[nv].dtype, nv));
   } else {
     MArgument_setInteger(res, 0);
   }

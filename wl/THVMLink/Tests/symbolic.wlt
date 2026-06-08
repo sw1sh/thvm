@@ -708,3 +708,24 @@ VerificationTest[
     TestID -> "symbolic/decode-block-vs-full-last-row",
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
 ]
+
+(* Multi-step decode ACCUMULATION (Lever 2 step 4 core): cache persists + grows
+   across TDecodeAttend calls.  V_t=t -> out_t = avg(V[0..t]) = t/2. *)
+VerificationTest[
+    Module[{kC, vC, posVid, lenVid, q},
+        TInit[];
+        posVid = TKVarAlloc[1, 8]; lenVid = TKVarAlloc[1, 8];
+        kC = TRealize[TTensorCreate[ConstantArray[0., {8, 4}]]];
+        vC = TRealize[TTensorCreate[ConstantArray[0., {8, 4}]]];
+        q  = TTensorCreate[ConstantArray[1., {1, 4}]];
+        Table[
+            TKVarSet[posVid, t]; TKVarSet[lenVid, t + 1];
+            First @ First @ Normal @ TTensorData @ TRealize @ TDecodeAttend[
+                q, kC, vC, TTensorCreate[ConstantArray[1., {1, 4}]],
+                TTensorCreate[ConstantArray[N[t], {1, 4}]], 2, posVid, lenVid, 1.0],
+            {t, 0, 3}]
+    ],
+    {0., 0.5, 1., 1.5},
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &),
+    TestID -> "symbolic/decode-loop-accumulate"
+]
