@@ -484,3 +484,57 @@ WriteString[\"stdout\", \"OK\"];";
     0,
     TestID -> "symbolic/repeated-fresh-kvar-causal-mask-no-crash"
 ]
+
+(* === TJit captures + replays the symbolic EAGER forward, rebinding S ========
+
+   The public-op symbolic MHA (the "...-public-op" test above) is built ONCE
+   and wrapped in TJit; the first call CAPTURES its eager-realize dispatch
+   sequence and each later call REPLAYS the cached dispatches, rebinding the
+   sequence length S in place via TKVarSet (the kvar's runtime bound is a
+   per-dispatch argument -- cpu_jit_kvar_vals re-reads kvar_runtime() at fire
+   time, src/backend/cpu/jit.c).  This is the symbolic generation pattern: lift
+   once, then re-dispatch at the running length with no re-lift.
+
+   CAPTURE-AT-HI is load-bearing.  Every intermediate is realized to a
+   contiguous leaf sized at the kvar UPPER BOUND `hi` (view_create strides via
+   kvar_extent_static, src/view/create.c), but each kernel's store loop only
+   writes `a0 < V_S` rows.  Capturing at S < hi leaves rows [S, hi) of the
+   leaves un-primed; replaying UPWARD then reads that stale tail.  Capturing at
+   S = hi primes every row, so replaying at any S <= hi is correct.  This test
+   captures at hi and asserts the replay matches the freshly-rebuilt non-JIT
+   symbolic forward at S = hi, hi-2, AND hi-3. *)
+VerificationTest[
+    Module[
+        {hi = 8, dim = 4, nHeads = 2, vid, qH, kH, vH, qI, kI, vI, mask,
+         fn, nonJit, jit},
+        TInit[];
+        qH = Table[N[0.1 (i + 1) + 0.01 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        kH = Table[N[0.1 (i + 1) - 0.01 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        vH = Table[N[i + 0.5 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        (* non-JIT oracle: rebuild the symbolic forward fresh at each S *)
+        nonJit[Sv_] := Module[{v, q, k, vt, o},
+            TInit[];
+            v = TKVarAlloc[1, hi]; TKVarSet[v, Sv];
+            q = TSymbolicAxis[TTensorCreate[qH], 0, v];
+            k = TSymbolicAxis[TTensorCreate[kH], 0, v];
+            vt = TSymbolicAxis[TTensorCreate[vH], 0, v];
+            o = TMultiHeadAttention[q, k, vt, nHeads, TCausalMaskSym[v, hi]];
+            Chop[Normal @ TTensorData @ TRealize @ o, 1.*^-6]];
+        (* JIT path: ONE kvar, ONE closure, captured at S = hi *)
+        vid = TKVarAlloc[1, hi];
+        qI = TSymbolicAxis[TTensorCreate[qH], 0, vid];
+        kI = TSymbolicAxis[TTensorCreate[kH], 0, vid];
+        vI = TSymbolicAxis[TTensorCreate[vH], 0, vid];
+        mask = TCausalMaskSym[vid, hi];
+        fn = TJit[ TRealize @ TMultiHeadAttention[qI, kI, vI, nHeads, mask] & ];
+        TKVarSet[vid, hi];
+        Chop[Normal @ TTensorData @ fn[], 1.*^-6];   (* CAPTURE at hi *)
+        jit[Sv_] := (TKVarSet[vid, Sv]; Chop[Normal @ TTensorData @ fn[], 1.*^-6]);
+        {Max @ Abs[Flatten[jit[hi]     - nonJit[hi]]],
+         Max @ Abs[Flatten[jit[hi - 2] - nonJit[hi - 2]]],
+         Max @ Abs[Flatten[jit[hi - 3] - nonJit[hi - 3]]]}
+    ],
+    {0., 0., 0.},
+    TestID -> "symbolic/jit-capture-replay-rebind-S",
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
+]
