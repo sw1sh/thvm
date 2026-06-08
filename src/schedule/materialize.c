@@ -4530,9 +4530,14 @@ static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
       u32 t_len = kvar_extent_is_var(e) ? (e - b) : 0;  // raw delta = slice length
       b = kvar_extent_runtime(b);
       e = b + t_len;
-    } else {
-      e = kvar_extent_runtime(e);  // literal begin, e is literal or its own kvar
     }
+    // else (literal begin): keep b, e RAW.  A literal e is unchanged (e - b is
+    // the literal dim).  A `{0, pack(S)}` slice over a SYMBOLIC axis (the
+    // per-head multi-head-attention seq shrink) keeps its kvar-packed end, so
+    // `e - b` = pack(S) preserves the symbolic dim.  Decoding the end to its
+    // runtime bound here collapsed that symbolic axis to a literal and broke the
+    // symbolic attention (a sub-slice of a literal axis at a kvar length is a
+    // separate, not-yet-needed case).
     if (e <= b || e > src->shape.dims[i]) return 0;
     ts.dims[i] = e - b;
     t_numel  *= (e - b);
