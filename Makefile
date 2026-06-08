@@ -232,6 +232,7 @@ TESTS := \
   $(BIN)/test_sym_expand \
   $(BIN)/test_sym_gather \
   $(BIN)/test_sym_cmask \
+  $(BIN)/test_sym_attn_causal \
   $(BIN)/test_kvar_clamp \
   $(BIN)/test_sym_m2 \
   $(BIN)/test_sym_matmul \

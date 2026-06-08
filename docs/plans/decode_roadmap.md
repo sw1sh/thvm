@@ -145,9 +145,18 @@ true at this layer -- but unwired end to end.
       coordinate to element 0.  This was the `expand{S,1}` root (verified:
       `tests/test_sym_gather.c`, a `{S,1}->{S,S}` direct realize now gives
       `ri[i,j]=i`).  Plus the `materialize_root_alias` gather-size companion.
-  KNOWN-OPEN (documented, NOT blocking -- the mask realizes the broadcast
-  expands to contiguous via the gather path, sidestepping these FUSED-path
-  bugs; fix them later for fused/no-gather perf):
+- **Full causal-masked SOFTMAX (attention weights) -- DONE EAGER**
+  (`tests/test_sym_attn_causal.c`).  Composing the gathered mask with a softmax
+  over the key axis (reduce_max -> broadcast-sub -> exp2 -> reduce_sum ->
+  broadcast-div) gives the exact causal weights (row i: `1/(i+1)` for `j<=i`, 0
+  else) at a runtime-bound S.  THE KEY FINDING: symbolic ops over broadcasts
+  compute correctly when executed FULLY EAGER -- each reduce / binary-op /
+  expand realized to contiguous (`er()` in the test) -- which sidesteps every
+  FUSED-broadcast bug below.  So symbolic attention (incl. the causal mask) is
+  CORRECT; fusion is now a PERF optimization, NOT a correctness blocker.  This
+  retires the "composition wall": the symbolic GPT-2 forward can be built eager
+  end to end, then fused incrementally as the bugs below are fixed.
+  KNOWN-OPEN (FUSED-path only -- eager execution is correct; fix for perf):
     - `uop_walk.c:808` partial-collapse reduce: a multi-axis reduce whose body
       lost one axis to a broadcast-collapse (EXPAND->CONST(0)) returns the reduce
       IDENTITY instead of folding the collapsed axis's extent (so a
