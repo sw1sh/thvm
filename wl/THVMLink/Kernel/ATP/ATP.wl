@@ -72,7 +72,7 @@ TAtpSetLearnedScorer::usage = "TAtpSetLearnedScorer[model] pushes a trained crit
 
 TAtpCpGraph::usage = "TAtpCpGraph[lhs == rhs] encodes one equation / critical pair (also accepts Inactive[Equal][lhs, rhs] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over.  Returns <|\"NodeTypes\" -> {...}, \"NodeFeatures\" -> (NNodes x 6 matrix), \"Edges\" -> {{src, dst, type}, ...}, \"NNodes\" -> n, \"NEdges\" -> m|>.  Node 0 is the critical-pair super-node; the remaining nodes are TERM occurrences (one per subterm in the preorder walk of lhs then rhs), SYMBOL nodes (one per distinct operator / numeric constant), and VAR nodes (one per distinct variable).  Node types are coded 0 = CPSuper, 1 = Term, 2 = Symbol, 3 = Var; edge types 0 = term->symbol, 1 = term->child, 2 = cp->lhs-root, 3 = cp->rhs-root.  The six node-feature columns are PURELY STRUCTURAL -- {is_term, is_symbol, is_var, arity, occurrence_count, is_cpsuper} -- and never encode the concrete symbol label, variable id, or numeric value, so two equations equal up to a consistent renaming of symbols + variables produce bit-identical graphs.  lhs and rhs share one encoder state, so a symbol or variable common to both sides is a single deduped node.  This is the per-equation graph encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset.";
 
-TAtpGraphDataset::usage = "TAtpGraphDataset[conjectures, axioms] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset for an ENIGMA Tier 2 graph neural network: <|\"Graphs\" -> {graph...}, \"Labels\" -> {0/1...}, \"NPos\" -> p, \"NNeg\" -> n, \"NProofs\" -> k|>, where each graph is a TAtpCpGraph Association and label 1 marks a proof-essential lemma, 0 a saturated-but-unused rule.  TAtpGraphDataset[theory] runs all of AxiomaticTheory[theory, \"NotableTheorems\"] against the theory's axioms.  POSITIVES are the equations of types CriticalPairLemma / SubstitutionLemma in the ProofObject's proof chain (the lemmas the proof actually used); NEGATIVES are the saturated rule set (TFindProof[..., \"Lemmas\"]) minus any rule structurally equal to a positive.  Structural equality uses a canonical key that renames pattern / Slot / FVR variables to positional placeholders in first-appearance order and treats the equation as an unordered pair (so l == r and r == l collapse), which both separates positives from negatives and drops duplicate rows.  Only PROVED runs contribute graphs.  Unlike TAtpCpDataset's per-critical-pair feature rows, this sources CLEAN positives straight from the verified proof object (it works even for a minimal-normal-form-only proof that records no per-CP features), and its graphs are the symbol/variable-anonymised structural counterpart of the Tier-1 14-feature vectors -- feed \"Graphs\" / \"Labels\" to a GNN.  Options: Method (default {\"Completion\"}), TimeConstraint (per proof, default 30), MaxSteps.";
+TAtpGraphDataset::usage = "TAtpGraphDataset[conjectures, axioms] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset for an ENIGMA Tier 2 graph neural network: <|\"Graphs\" -> {graph...}, \"Labels\" -> {0/1...}, \"NPos\" -> p, \"NNeg\" -> n, \"NProofs\" -> k|>, where each graph is a TAtpCpGraph Association and label 1 marks a proof-essential lemma, 0 a saturated-but-unused rule.  TAtpGraphDataset[theory] runs all of AxiomaticTheory[theory, \"NotableTheorems\"] against the theory's axioms.  TAtpGraphDataset[proofObject] (or a list of ProofObjects) is the core source the conjecture / theory forms reduce to -- it yields the proof-essential POSITIVES only (a bare ProofObject does not carry the saturated rule set); TAtpGraphDataset[proofObject, lemmas] adds the NEGATIVES from a supplied saturated set (TFindProof[..., \"Lemmas\"]).  POSITIVES are the equations of types CriticalPairLemma / SubstitutionLemma in the ProofObject's proof chain (the lemmas the proof actually used); NEGATIVES are the saturated rule set (TFindProof[..., \"Lemmas\"]) minus any rule structurally equal to a positive.  Structural equality uses a canonical key that renames pattern / Slot / FVR variables to positional placeholders in first-appearance order and treats the equation as an unordered pair (so l == r and r == l collapse), which both separates positives from negatives and drops duplicate rows.  Only PROVED runs contribute graphs.  Unlike TAtpCpDataset's per-critical-pair feature rows, this sources CLEAN positives straight from the verified proof object (it works even for a minimal-normal-form-only proof that records no per-CP features), and its graphs are the symbol/variable-anonymised structural counterpart of the Tier-1 14-feature vectors -- feed \"Graphs\" / \"Labels\" to a GNN.  Options: Method (default {\"Completion\"}), TimeConstraint (per proof, default 30), MaxSteps.";
 
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
@@ -292,8 +292,8 @@ atpDatasetCollect[proveFn_, nProofs_] := Module[{
 
 TAtpCpDataset[theory_String, opts : OptionsPattern[]] := Module[{
     thms = AxiomaticTheory[theory, "NotableTheorems"],
-    m = OptionValue[TAtpCpDataset, {opts}, Method],
-    tc = OptionValue[TAtpCpDataset, {opts}, TimeConstraint]
+    m = OptionValue[Method],
+    tc = OptionValue[TimeConstraint]
 },
     atpDatasetCollect[
         Function[TFindProof[thms, theory, "Status",
@@ -302,8 +302,8 @@ TAtpCpDataset[theory_String, opts : OptionsPattern[]] := Module[{
 ]
 
 TAtpCpDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] := Module[{
-    m = OptionValue[TAtpCpDataset, {opts}, Method],
-    tc = OptionValue[TAtpCpDataset, {opts}, TimeConstraint]
+    m = OptionValue[Method],
+    tc = OptionValue[TimeConstraint]
 },
     atpDatasetCollect[
         Function[Scan[
@@ -737,10 +737,25 @@ atpGraphDatasetFromRows[rows_, nProofs_] := Module[{
     |>
 ]
 
+(* From verified ProofObjects directly -- the core source the
+   conjecture / theory forms reduce to.  TAtpGraphDataset[po] yields
+   POSITIVES only (the proof-essential CriticalPairLemma /
+   SubstitutionLemma lemmas, label 1); a bare ProofObject does not carry
+   the saturated rule set, so pass it (TFindProof[..., "Lemmas"]) as the
+   second argument to add the unused-rule NEGATIVES, or use the
+   conjecture / theory forms which collect both.  A list of ProofObjects
+   is the positives-only union. *)
+TAtpGraphDataset[po_ProofObject] :=
+    atpGraphDatasetFromRows[atpGraphRows[po, {}], 1]
+TAtpGraphDataset[po_ProofObject, sat_List] :=
+    atpGraphDatasetFromRows[atpGraphRows[po, sat], 1]
+TAtpGraphDataset[pos : {__ProofObject}] :=
+    atpGraphDatasetFromRows[Catenate[atpGraphRows[#, {}] & /@ pos], Length[pos]]
+
 TAtpGraphDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
     Module[{
-        m = OptionValue[TAtpGraphDataset, {opts}, Method],
-        tc = OptionValue[TAtpGraphDataset, {opts}, TimeConstraint],
+        m = OptionValue[Method],
+        tc = OptionValue[TimeConstraint],
         results, rows, nProofs
     },
         results = (atpGraphRowsForProof[#, axioms, m, tc] & /@ conjectures);
@@ -751,8 +766,8 @@ TAtpGraphDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
 
 TAtpGraphDataset[theory_String, opts : OptionsPattern[]] := Module[{
     thms = AxiomaticTheory[theory, "NotableTheorems"],
-    m = OptionValue[TAtpGraphDataset, {opts}, Method],
-    tc = OptionValue[TAtpGraphDataset, {opts}, TimeConstraint],
+    m = OptionValue[Method],
+    tc = OptionValue[TimeConstraint],
     results, rows, nProofs
 },
     results = (atpGraphRowsForProof[#, theory, m, tc] & /@ Values[thms]);
