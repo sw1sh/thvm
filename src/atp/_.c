@@ -955,7 +955,7 @@ static Term acp_unpack_term(const u8 **pp) {
 static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len, u32 *out_nodes) {
   u32 bound = acp_packed_bound(lhs) + acp_packed_bound(rhs);
   u8 *buf = (u8 *)malloc(bound);
-  if (buf == NULL) { fprintf(stderr, "acp_pack: OOM\n"); exit(1); }
+  if (buf == NULL) thvm_fatal("acp_pack: OOM");
   u8 *p = buf;
   u32 nodes = 0u;
   acp_pack_term(lhs, &p, &nodes);
@@ -1271,7 +1271,7 @@ typedef struct {
       u32 cap = ix->cap_nodes ? ix->cap_nodes * 2u : 1024u;                   \
       AtpDTreeNode *p = (AtpDTreeNode *)realloc(                              \
         ix->nodes, cap * sizeof(AtpDTreeNode));                               \
-      if (p == NULL) { fprintf(stderr, "atp_" #stem ": node pool OOM\n"); exit(1); } \
+      if (p == NULL) thvm_fatal("atp_" #stem ": node pool OOM"); \
       ix->nodes = p;                                                          \
       ix->cap_nodes = cap;                                                    \
     }                                                                         \
@@ -1287,7 +1287,7 @@ typedef struct {
     if (ix->n_recs == ix->cap_recs) {                                         \
       u32 cap = ix->cap_recs ? ix->cap_recs * 2u : 1024u;                     \
       RecT *p = (RecT *)realloc(ix->recs, cap * sizeof(RecT));                \
-      if (p == NULL) { fprintf(stderr, "atp_" #stem ": rec pool OOM\n"); exit(1); } \
+      if (p == NULL) thvm_fatal("atp_" #stem ": rec pool OOM"); \
       ix->recs = p;                                                           \
       ix->cap_recs = cap;                                                     \
     }                                                                         \
@@ -1396,7 +1396,7 @@ ATP_DTREE_DEFINE_OPS(dt, AtpFvIndex, AtpDtRec)
 static void atp_dt_seqmap_init(AtpFvIndex *ix, u32 cap) {
   ix->seqmap_cap = cap;
   ix->seqmap = (AtpDtSeqEnt *)malloc(cap * sizeof(AtpDtSeqEnt));
-  if (ix->seqmap == NULL) { fprintf(stderr, "atp_dt: seqmap OOM\n"); exit(1); }
+  if (ix->seqmap == NULL) thvm_fatal("atp_dt: seqmap OOM");
   for (u32 i = 0; i < cap; i++) ix->seqmap[i].seq = ATP_DTREE_NIL;
 }
 
@@ -1457,7 +1457,7 @@ static void atp_dt_seqmap_del(AtpFvIndex *ix, u32 seq) {
 
 static AtpFvIndex *atp_fv_index_new(void) {
   AtpFvIndex *ix = (AtpFvIndex *)calloc(1, sizeof(AtpFvIndex));
-  if (ix == NULL) { fprintf(stderr, "atp_dt: index OOM\n"); exit(1); }
+  if (ix == NULL) thvm_fatal("atp_dt: index OOM");
   atp_dt_seqmap_init(ix, 1024u);
   ix->root = atp_dt_node_new(ix, ATP_DTREE_NIL);  // root edge unused
   return ix;
@@ -1907,7 +1907,7 @@ ATP_DTREE_DEFINE_OPS(ri, AtpRuleIndex, AtpRiRec)
 
 static AtpRuleIndex *atp_ri_new(void) {
   AtpRuleIndex *ix = (AtpRuleIndex *)calloc(1, sizeof(AtpRuleIndex));
-  if (ix == NULL) { fprintf(stderr, "atp_ri: index OOM\n"); exit(1); }
+  if (ix == NULL) thvm_fatal("atp_ri: index OOM");
   ix->root = atp_ri_node_new(ix, ATP_DTREE_NIL);
   return ix;
 }
@@ -3792,7 +3792,7 @@ static void atp_cp_index_rebuild(AtpState *s) {
       u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
       while (cap < s->n_rules) cap *= 2u;
       u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
-      if (p == NULL) { fprintf(stderr, "atp_cp_index: seen OOM\n"); exit(1); }
+      if (p == NULL) thvm_fatal("atp_cp_index: seen OOM");
       g_atp_cp_seen   = p;
       for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
       g_atp_cp_seencap = cap;
@@ -3816,7 +3816,7 @@ static void atp_cp_index_rebuild(AtpState *s) {
     u32 cap = g_atp_cp_seencap ? g_atp_cp_seencap : 1024u;
     while (cap < s->n_rules) cap *= 2u;
     u32 *p = (u32 *)realloc(g_atp_cp_seen, (size_t)cap * sizeof(u32));
-    if (p == NULL) { fprintf(stderr, "atp_cp_index: seen OOM\n"); exit(1); }
+    if (p == NULL) thvm_fatal("atp_cp_index: seen OOM");
     g_atp_cp_seen   = p;
     for (u32 k = g_atp_cp_seencap; k < cap; k++) g_atp_cp_seen[k] = 0u;
     g_atp_cp_seencap = cap;
@@ -8626,9 +8626,7 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
     u8  *nv = (u8  *)realloc(g_mnf_vc, cap);
     u32 *nl = (u32 *)realloc(g_mnf_ln, cap * sizeof(u32));
     u32 *nr = (u32 *)realloc(g_mnf_rn, cap * sizeof(u32));
-    if (nv == NULL || nl == NULL || nr == NULL) {
-      fprintf(stderr, "mnf_step: rule cache OOM\n"); exit(1);
-    }
+    if (nv == NULL || nl == NULL || nr == NULL) thvm_fatal("mnf_step: rule cache OOM");
     g_mnf_vc = nv; g_mnf_ln = nl; g_mnf_rn = nr; g_mnf_vc_cap = cap;
   }
   for (u32 j = 0; j < s->n_rules; j++) {
