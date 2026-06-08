@@ -3676,6 +3676,22 @@ atpKombS = {"Completion", "CriticalPairWeight" -> "Add",
     "Ordering" -> "LPO", "AutoPrecedence" -> True};
 
 atpAutoTuneForClass["AbelianGroup" | "Group"] := {
+    (* Mix + KBO + AutoPrec + SR=51 + RHSI + UnfailingCP + CPSetIR --
+       the Waldmeister-faithful default config.  Measured on the
+       AbelianGroup NotableTheorems sweep post-05e6a63c structure-
+       detection fix (iter 27):
+         IOI: 12     IOC: 18
+         ImpliesMcCune: 28    ImpliesAbelianMcCune: 20
+       Total 78 constructs vs Gt-first's 81 (3 shorter overall);
+       hits 2 byte-identical with WM CLI (IOI, ImpliesMcCune,
+       ImpliesAbelianMcCune) + 1 thvm-shorter (IOC).  Tafel2's
+       GtS (below) wins on IOC + ImpliesMcCune but loses on
+       ImpliesAbelianMcCune by +8; Mix-first hedges.  Front-load
+       Mix; keep GtS as the fallback. *)
+    {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
+        "AutoPrecedence" -> True, "SelectionRatio" -> 51,
+        "RHSInterreduce" -> True, "UnfailingCP" -> True,
+        "CPSetInterreduce" -> True},
     (* Tafel2: Gruppe -> GtS (Sinai.h:115).  AutoPrecedence puts the
        unary inverse on top (Sinai Group precedence "+-0", Sinai.h:117/
        precedence.c:329) so i(i(x)) -> x orients cleanly. *)
