@@ -1456,7 +1456,7 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na_typed(WolframLibraryData libData, 
 // Lazy mmap-backed disk tensor: map [byte_offset, byte_offset + nbytes)
 // of `path` read-only and wrap it as a CPU TAG_TEN of the given dtype +
 // shape, via the runtime's thvm_tensor_mmap (src/tensor/mmap.c).  This is
-// the WL surface for tinygrad's DISK device; TSafeLoad builds one of
+// the WL surface for tinygrad's DISK device; TSafeTensorLoad builds one of
 // these per tensor at its data_offset, so a .safetensors file's weights
 // are paged in on demand rather than read up front.  The mapping is
 // munmap'd when the tensor's buffer refcount drops to zero.

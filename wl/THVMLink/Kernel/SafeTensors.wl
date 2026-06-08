@@ -14,11 +14,11 @@
      [8+H:]     concatenated little-endian tensor bytes.
 
    Public surface
-     TSafeLoad[path]        -> Association name -> TTerm, each tensor a
+     TSafeTensorLoad[path]        -> Association name -> TTerm, each tensor a
                                LAZY mmap-backed disk view at its
                                data_offset (thvm_tensor_mmap), reshaped
                                per the header.  Bytes page in on demand.
-     TSafeSave[assoc, path] -> write `assoc` (name -> TTerm) as a valid
+     TSafeTensorSave[assoc, path] -> write `assoc` (name -> TTerm) as a valid
                                .safetensors file.  Returns `path`.
      TTensorMMap[path, byteOffset, nbytes, dtype, shape]
                             -> the low-level disk-tensor constructor.
@@ -26,13 +26,13 @@
 
 BeginPackage["THVMLink`"];
 
-TSafeLoad::usage = "TSafeLoad[path] loads a .safetensors file and returns an Association `name -> TTerm`, where each tensor is a LAZY mmap-backed disk view (TTensorMMap) into the file at its data offset, reshaped to the header's shape.  The bytes page in on demand (tinygrad's DISK device); a CPU op consumes them directly, a realize on a non-CPU backend uploads via UOP_COPY.  Ported from tinygrad/nn/state.py safe_load.";
+TSafeTensorLoad::usage = "TSafeTensorLoad[path] loads a .safetensors file and returns an Association `name -> TTerm`, where each tensor is a LAZY mmap-backed disk view (TTensorMMap) into the file at its data offset, reshaped to the header's shape.  The bytes page in on demand (tinygrad's DISK device); a CPU op consumes them directly, a realize on a non-CPU backend uploads via UOP_COPY.  Ported from tinygrad/nn/state.py safe_load.";
 
-TSafeSave::usage = "TSafeSave[assoc, path] saves an Association `name -> TTerm` to `path` as a valid .safetensors file: an 8-byte little-endian header length, a space-padded JSON header (dtype / shape / data_offsets per tensor), then each tensor's little-endian bytes.  Each TTerm is realized + read once.  TSafeSave[assoc, path, metadata] additionally writes a string-valued `__metadata__` Association into the header (tinygrad safe_save's metadata).  Returns `path`.  Ported from tinygrad/nn/state.py safe_save.";
+TSafeTensorSave::usage = "TSafeTensorSave[assoc, path] saves an Association `name -> TTerm` to `path` as a valid .safetensors file: an 8-byte little-endian header length, a space-padded JSON header (dtype / shape / data_offsets per tensor), then each tensor's little-endian bytes.  Each TTerm is realized + read once.  TSafeTensorSave[assoc, path, metadata] additionally writes a string-valued `__metadata__` Association into the header (tinygrad safe_save's metadata).  Returns `path`.  Ported from tinygrad/nn/state.py safe_save.";
 
-TSafeLoadMetadata::usage = "TSafeLoadMetadata[path] returns the `__metadata__` Association of a .safetensors file (an empty Association if absent), without loading any tensors.  Ported from tinygrad/nn/state.py safe_load_metadata.";
+TSafeTensorLoadMetadata::usage = "TSafeTensorLoadMetadata[path] returns the `__metadata__` Association of a .safetensors file (an empty Association if absent), without loading any tensors.  Ported from tinygrad/nn/state.py safe_load_metadata.";
 
-TTensorMMap::usage = "TTensorMMap[path, byteOffset, nbytes, dtype, shape] maps the file region [byteOffset, byteOffset + nbytes) of `path` read-only and wraps it as a CPU TTerm of the given `dtype` (a thvm dtype string like \"f32\") and integer `shape` list.  This is tinygrad's DISK device: a lazy, mmap-backed, zero-copy tensor view; the bytes page in on demand and the mapping is munmap'd when the tensor is released.  Used by TSafeLoad.";
+TTensorMMap::usage = "TTensorMMap[path, byteOffset, nbytes, dtype, shape] maps the file region [byteOffset, byteOffset + nbytes) of `path` read-only and wraps it as a CPU TTerm of the given `dtype` (a thvm dtype string like \"f32\") and integer `shape` list.  This is tinygrad's DISK device: a lazy, mmap-backed, zero-copy tensor view; the bytes page in on demand and the mapping is munmap'd when the tensor is released.  Used by TSafeTensorLoad.";
 
 Begin["`Private`"];
 
@@ -63,7 +63,7 @@ $safeToThvm = <|
 $thvmToSafe = Association[Reverse /@ Normal[$safeToThvm]];
 
 (* thvm dtype string -> WL NumericArray type.  Drives the little-endian
-   byte write in TSafeSave. *)
+   byte write in TSafeTensorSave. *)
 $thvmNAType = <|
     "bool" -> "UnsignedInteger8",
     "i8" -> "Integer8",
@@ -114,7 +114,7 @@ safeReadHeader[path_String] := Module[{strm, hlen, jsonBytes, json},
 ]
 
 (* The header's __metadata__ (string -> string), or an empty Association. *)
-TSafeLoadMetadata[path_String] := Lookup[Last @ safeReadHeader[path], "__metadata__", <||>]
+TSafeTensorLoadMetadata[path_String] := Lookup[Last @ safeReadHeader[path], "__metadata__", <||>]
 
 (* One lazy mmap-backed disk tensor for a single safetensors header entry.
    $Failed if the entry's dtype is outside the byte-aligned round-trip set. *)
@@ -127,7 +127,7 @@ loadSafeEntry[path_String, dataStart_Integer, spec_Association] := Module[{thvmD
     ]
 ]
 
-TSafeLoad[path_String] := Module[{dataStart, json, entries},
+TSafeTensorLoad[path_String] := Module[{dataStart, json, entries},
     ensureInit[];
     {dataStart, json} = safeReadHeader[path];
     entries = KeyDrop[json, "__metadata__"];
@@ -152,9 +152,9 @@ saveTensorInfo[t_TTerm] := Module[{r, na, dt, safeDt, shape, numel},
     |>
 ]
 
-TSafeSave[assoc_Association, path_String] := TSafeSave[assoc, path, <||>]
+TSafeTensorSave[assoc_Association, path_String] := TSafeTensorSave[assoc, path, <||>]
 
-TSafeSave[assoc_Association, path_String, metadata_Association] := Module[{names, infos, offsets, offset, headers, json, pad, hbytes, strm},
+TSafeTensorSave[assoc_Association, path_String, metadata_Association] := Module[{names, infos, offsets, offset, headers, json, pad, hbytes, strm},
     ensureInit[];
     names = Keys[assoc];
     infos = saveTensorInfo /@ Values[assoc];
