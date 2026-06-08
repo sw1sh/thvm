@@ -322,6 +322,24 @@ static void goal_mc_assoc(Term *l, Term *r) {
   *r = and_op(and_op(p, q), rr);
 }
 
+// HigmanNeumann single-axiom group: single binary op `fop` (reuse L_NAND
+// because both are 1-binary-op shapes; KBO doesn't care about the label
+// name).  Axiom: fop(x, fop(fop(fop(fop(x,x),y),z), fop(fop(fop(x,x),x),z))) = y.
+// Goal LeftIdentity: fop(fop(p,p), fop(fop(p,p), p)) = p.
+// Mirrors wm_pr/HigmanNeumannAxioms__LeftIdentity.pr.
+static Term hn_axiom_lhs(void) {
+  Term x = fv(0), y = fv(1), z = fv(2);
+  Term xx = nand2(x, x);
+  Term i1 = nand2(nand2(nand2(xx, y), z), nand2(nand2(xx, x), z));
+  return nand2(x, i1);
+}
+static void goal_hn_leftid(Term *l, Term *r) {
+  Term p = konst(L_P);
+  Term pp = nand2(p, p);
+  *l = nand2(pp, nand2(pp, p));
+  *r = p;
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -794,6 +812,9 @@ int main(int argc, char **argv) {
        mc_ioi (not(not(p))=p) and mc_assoc (3-skolem associativity)
        share the McCune single-equation characterization. */
     thvm_atp_add_equation(s, mccune_axiom_lhs(), fv(3));
+  } else if (strcmp(goal, "hn_leftid") == 0) {
+    /* HigmanNeumann single-axiom group; axiom rhs is x2 = fv(1). */
+    thvm_atp_add_equation(s, hn_axiom_lhs(), fv(1));
   } else {
     thvm_atp_add_equation(s, axiom_lhs(), fv(2));
   }
@@ -822,6 +843,7 @@ int main(int argc, char **argv) {
   else if (strcmp(goal, "amc_assoc") == 0) goal_amc_assoc(&gl, &gr);
   else if (strcmp(goal, "mc_ioi") == 0)  goal_mc_ioi(&gl, &gr);
   else if (strcmp(goal, "mc_assoc") == 0) goal_mc_assoc(&gl, &gr);
+  else if (strcmp(goal, "hn_leftid") == 0) goal_hn_leftid(&gl, &gr);
   else if (!saturate)                   goal_thm(&gl, &gr);
   if (!saturate) thvm_atp_set_goal(s, gl, gr);
 
