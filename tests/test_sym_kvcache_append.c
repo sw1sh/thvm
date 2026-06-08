@@ -75,5 +75,22 @@ int main(void){ thvm_init(); int f=0;
   for(u32 j=0;j<nctx;j++) if(j!=2 && j!=4)
     for(u32 k=0;k<d;k++) CHECK(o[j*d+k]==0.0f);
 
+  // (7) append at runtime offset t = 0 (byte_off == 0 -- the row-0
+  //     decode-step write).  This is the path the multi-step decode
+  //     loop hits on its FIRST step; must land at row 0, not be dropped.
+  kvar_set_runtime(s,0);
+  float kt0[3]={5,6,7}; CPU_BACKEND.buf_write(TENS[qid].buf_id,kt0,d*4);
+  u32 be2[4]={ P, P+1, 0, d };
+  Term dst3=uop_shrink(term_new(0,TAG_TEN,DT_FP32,Kc), 2, be2);
+  Term app3=mk_assign(dst3, term_new(0,TAG_TEN,DT_FP32,qid));
+  thvm_realize(app3);
+
+  CPU_BACKEND.buf_read(TENS[Kc].buf_id,o,(u64)nctx*d*4);
+  printf("  after append@0: row0 = %.1f %.1f %.1f (want 5 6 7)\n",
+         o[0],o[1],o[2]);
+  CHECK(o[0]==5.0f && o[1]==6.0f && o[2]==7.0f);   // row-0 write landed
+  CHECK(o[6]==1.0f && o[7]==2.0f && o[8]==3.0f);   // row 2 survives
+  CHECK(o[12]==7.0f && o[13]==8.0f && o[14]==9.0f); // row 4 survives
+
   TEST_REPORT();
 }

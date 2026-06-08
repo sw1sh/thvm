@@ -41,9 +41,14 @@ static u32  KVARS_NEXT = 1;   // slot 0 reserved
 // Per-realize runtime bindings.  A symbolic dim's RANGE extent packs a
 // kvar id (kvar_pack_extent); buffers + the dispatch shape are sized at
 // kvar_hi (worst case) via kvar_extent_static, but the actual loop count
-// at execution is the BOUND value set here before realize.  0 = unbound
-// (falls back to kvar_hi so a never-bound kvar still runs at worst case).
+// at execution is the BOUND value set here before realize.  An UNBOUND
+// kvar falls back to kvar_hi (so a never-bound kvar still runs at worst
+// case).  KVAR_RUNTIME_SET distinguishes "explicitly bound" from
+// "never bound" so a legitimate bind to 0 (the KV-cache append's row
+// offset on the FIRST decode step -- start_pos = 0) is honoured rather
+// than mis-read as unbound and clamped up to hi.
 static u32 KVAR_RUNTIME[KVAR_CAP];
+static u8  KVAR_RUNTIME_SET[KVAR_CAP];
 
 u32 kvar_alloc(const char *name, u32 lo, u32 hi) {
   if (KVARS_NEXT >= KVAR_CAP) {
@@ -97,11 +102,12 @@ void kvar_set_runtime(u32 id, u32 value) {
     fprintf(stderr, "kvar_set_runtime: clamping V%u=%u to hi=%u\n", id, value, hi);
     value = hi;
   }
-  KVAR_RUNTIME[id] = value;
+  KVAR_RUNTIME[id]     = value;
+  KVAR_RUNTIME_SET[id] = 1;
 }
 u32 kvar_runtime(u32 id) {
   if (id == 0 || id >= KVAR_CAP) return 0;
-  u32 v  = KVAR_RUNTIME[id] != 0 ? KVAR_RUNTIME[id] : kvar_hi(id);
+  u32 v  = KVAR_RUNTIME_SET[id] ? KVAR_RUNTIME[id] : kvar_hi(id);
   u32 hi = kvar_hi(id);
   return (hi != 0 && v > hi) ? hi : v;   // never exceed the worst-case alloc
 }
@@ -118,6 +124,7 @@ u32 kvar_extent_runtime(u32 packed_extent) {
 void kvar_reset(void) {
   memset(KVARS, 0, sizeof(KVARS));
   memset(KVAR_RUNTIME, 0, sizeof(KVAR_RUNTIME));
+  memset(KVAR_RUNTIME_SET, 0, sizeof(KVAR_RUNTIME_SET));
   KVARS_NEXT = 1;
 }
 
