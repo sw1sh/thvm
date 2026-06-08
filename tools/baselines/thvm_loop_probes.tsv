@@ -1,0 +1,3 @@
+theory	theorem	thvm_len	wm_rules	delta	notes
+BooleanAxioms	AndCommutativity	8	4	+4	Method->Automatic via guarded wolframscript (5f14b436). Mostly boilerplate (3 axioms + 1 hyp + 1 conclusion = 5); real derivation 3 vs WM's 1.
+BooleanAxioms	DroppingAlwaysTrue	8	1	+7	Same boilerplate floor.  WM's 1-rule cracker is a direct rewrite.  Investigate: can thvm collapse trivial cases to a shorter ProofObject?
