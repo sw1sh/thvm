@@ -1750,11 +1750,13 @@ atpDispatchPreset[defaults_Association, defaultGD_, subopts_List] :=
 $AtpPresetDefaults = <|
     "Waldmeister" -> <|
         "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
-        "AutoPrecedence" -> True, "SelectionRatio" -> 51,
+        "AutoPrecedence" -> True, "SkolemHighest" -> True,
+        "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
+        "SkolemHighest" -> True,
         "LazyNormalize" -> True,
         "CPSetInterreduce" -> True,
         "AutoMaxWeight" -> 30,
@@ -1905,6 +1907,11 @@ atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
        CH_MixWeight formula, ClasHeuristics.c:130)
      - Ordering -> "KBO", AutoPrecedence -> True  (kbo(std) with the
        Praezedenzgenerator auto-precedence)
+     - SkolemHighest -> True  (WM CLI's .pr files pin goal skolems above
+       all operators in the ORDERING block; without this, AndCommutativity
+       /OrCommutativity-class goals fail because skC1/skC2 sit at the
+       bottom of the Fuchs arity ladder and instance-rewriting can't
+       orient the goal's commutativity equation)
      - SelectionRatio -> 51  (itl(mi) = interleave fifo:heuristic 1:50,
        YFiles.c:114-122; CPdimension fairness, KPVerwaltung.c:582)
      - RHSInterreduce -> True  (IR_InterreduktionRechts -- the
