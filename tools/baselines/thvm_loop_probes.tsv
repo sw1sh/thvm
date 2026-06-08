@@ -35,3 +35,9 @@ McCuneAxioms	InverseOfComposite	71	-	41	73	OK.  chain=71 vs WM_rules=41 -- same 
 RingAxioms	ZeroIsAbsorbing	27	-	48	35	OK.  chain=27 vs WM_rules=48 -- thvm shorter (AC-rich axiom set benefits from chain compression).
 CommutativeRingAxioms	ZeroIsAbsorbing	22	-	54	30	OK.  chain=22 vs WM_rules=54 -- thvm 2.5x shorter (AC + Comm structure aligns with chain compression).
 CommutativeRingWithIdentityAxioms	ZeroIsAbsorbing	32	-	49	41	OK.  chain=32 vs WM_rules=49 -- thvm shorter.
+HillmanAxioms	Commutativity	16	-	33	20	OK under Method->"Waldmeister" (post ad806378 + a7e4bcd8).  chain=16 vs WM_rules=33 -- thvm noticeably shorter (chain compression).  Note: parity_wm_wmcli.tsv has an older row at preset_constructs=27; SkolemHighest=True default improved this further to 16.
+HillmanAxioms	AndAssociativity	29	-	-	33	OK.  chain=29.  WM CLI baseline not in wm_cli_sweep.tsv (.pr not generated for this case).
+HillmanAxioms	OrAssociativity	22	-	-	26	OK.  chain=22.  WM CLI baseline not available.
+AbelianMcCuneAxioms	Commutativity	19	-	14	21	OK.  chain=19 vs WM_rules=14 -- thvm 36% longer (slight compression loss).
+AbelianMcCuneAxioms	Associativity	57	-	44	59	OK.  chain=57 vs WM_rules=44 -- thvm 30% longer.
+RobbinsAxioms	DoubleNegation	FAIL	FAIL	-	-	Both engines FAIL: WM CLI reports FAIL in wm_cli_sweep.tsv, thvm Method->"Waldmeister" times out at 60s.  Robbins is a known-hard equational completion problem.
