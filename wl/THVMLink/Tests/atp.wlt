@@ -2762,5 +2762,23 @@ VerificationTest[
     TestID -> "ATP/enigma/gnn-train"
 ]
 
+(* TAtpGnnScore runs the trained model's forward over a dataset and
+   returns one proof-relevance score per graph (the inference path the
+   held-out measure + the engine re-rank reuse). *)
+VerificationTest[
+    Module[{ds, r, sc},
+        ds = <|"Graphs" -> {
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], e]],
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, e], a]],
+            TAtpCpGraph[Inactive[Equal][a, a]],
+            TAtpCpGraph[Inactive[Equal][b, b]]},
+            "Labels" -> {1, 1, 0, 0}|>;
+        r = TAtpTrainGnn[ds, MaxTrainingRounds -> 100];
+        sc = TAtpGnnScore[r["Model"], ds];
+        {Length[sc], VectorQ[sc, NumberQ]}],
+    {4, True},
+    TestID -> "ATP/enigma/gnn-score"
+]
+
 (* Reset so later tests / sessions see the baked-in scorer. *)
 TAtpSetLearnedScorer[Clear];

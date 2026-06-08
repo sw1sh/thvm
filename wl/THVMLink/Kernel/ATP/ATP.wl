@@ -76,6 +76,8 @@ TAtpGraphDataset::usage = "TAtpGraphDataset[conjectures, axioms] proves each con
 
 TAtpTrainGnn::usage = "TAtpTrainGnn[dataset] trains a graph convolutional network (GCN) on a TAtpGraphDataset (or any <|\"Graphs\" -> {..}, \"Labels\" -> {0/1..}|>) in thvm's own tensor stack and returns <|\"Model\" -> <|\"Kind\" -> \"GNN\", weights, \"NMax\", \"Hidden\", \"Rounds\"|>, \"TrainAUC\" -> auc, \"LossStart\", \"LossEnd\", \"NPos\", \"NNeg\"|>.  The forward batches every graph to a common padded node count, runs \"Rounds\" rounds of row-normalised-adjacency message passing (H' = relu(A.H.W1 + H.Ws + b)), masked-mean-pools to a graph embedding, and reads out a two-class proof-relevance head trained with categorical cross-entropy + Adam.  The reported TrainAUC is the Mann-Whitney rank AUC of the proof-relevance score on the training graphs.  TAtpTrainGnn[theory] and TAtpTrainGnn[conjectures, axioms] prep the dataset via TAtpGraphDataset and train in one call.  Options: \"Hidden\" -> H (hidden width, default 32), \"Rounds\" -> R (message-passing rounds, default 3), MaxTrainingRounds (Adam steps, default 300), \"LearningRate\" (default 0.01).  This is the Tier 2 deliverable: a symbol-independent network that learns proof relevance from clause structure, complementing the Tier 1 hand-feature scorer.";
 
+TAtpGnnScore::usage = "TAtpGnnScore[model, dataset] scores a graph dataset (TAtpGraphDataset output, or any <|\"Graphs\" -> {..}|>) with a trained GNN `model` (the \"Model\" returned by TAtpTrainGnn), returning the per-graph proof-relevance score (the readout's logit_pos - logit_neg) as a list, one entry per graph in dataset[\"Graphs\"].  It runs the same forward as training with the model's weights held constant -- the inference path.  Because the GCN is node-count agnostic, a model trained on one corpus scores graphs of any size, so this is what a held-out (by-problem) evaluation and the engine's critical-pair re-rank use.";
+
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
    Begin[`Private`] resolve to the shared THVMLink`ATP`X symbol
@@ -841,6 +843,31 @@ atpGnnTensors[dataset_Association] := Module[{
     |>
 ]
 
+(* The GCN forward, shared by training (params = trainable TGlorot
+   weights) and inference (params = a trained model's weights as
+   TTensors): R rounds of row-normalised-adjacency message passing
+   (relu(A.H.W1 + H.Ws + b)), masked-mean pool, two-class readout ->
+   (B, 2) logits.  Node-count agnostic: the weights are per-feature and
+   the pool is masked-mean, so a model trained at one N scores graphs at
+   any other N. *)
+atpGnnForwardLogits[xT_, aT_, maskRowT_, nNodesT_,
+    w1s_, wss_, bhs_, wout_, bout_, b_, n_, f_, hH_, rR_] :=
+    Module[{h = xT, lastDim = f, ah, neighbour, self, msg, pooled3, pooled},
+        Do[
+            ah = atpBatchMatMul[aT, h, b, n, n, lastDim];
+            neighbour = atpGnnApplyW[ah, w1s[[r]], b, n, lastDim, hH];
+            self = atpGnnApplyW[h, wss[[r]], b, n, lastDim, hH];
+            msg = neighbour + self + atpGnnBcastBias[bhs[[r]], b, n, hH];
+            h = TReLU[msg];
+            lastDim = hH,
+            {r, rR}];
+        pooled3 = atpBatchMatMul[maskRowT, h, b, 1, n, hH];
+        pooled  = ArrayReshape[
+            pooled3 * TUOpRecip[TUOpExpand[nNodesT, {b, 1, hH}]],
+            {b, hH}];
+        pooled . wout + TUOpExpand[TUOpReshape[bout, {1, 2}], {b, 2}]
+    ]
+
 (* Defaults: Hidden 32 + Rounds 3.  The term graphs are shallow but the
    lemma corpus is small and class-skewed, so 2 rounds at width 16
    under-propagates and the rank AUC stays near chance; H = 32 / R = 3
@@ -852,7 +879,7 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
     bt, b, n, f, hH, rR, lrVal, rounds,
     xT, aT, maskRowT, nNodesT, yT,
     w1s, wss, bhs, wout, bout, params, ms, vs,
-    forward, logits, loss, grads, lr, name,
+    logits, loss, grads, lr, name,
     lossStart, lossEnd, p, scores, auc, model
 },
     bt = atpGnnTensors[dataset];
@@ -876,25 +903,8 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
     wout = TGlorot[{hH, 2}];
     bout = TZeros[{2}];
     params = Join[w1s, wss, bhs, {wout, bout}];
-    (* R rounds of row-normalised-adjacency message passing, masked-mean
-       pool, two-class readout. *)
-    forward = Function[{},
-        Module[{h = xT, lastDim = f, ah, neighbour, self, msg, pooled3, pooled},
-            Do[
-                ah = atpBatchMatMul[aT, h, b, n, n, lastDim];
-                neighbour = atpGnnApplyW[ah, w1s[[r]], b, n, lastDim, hH];
-                self = atpGnnApplyW[h, wss[[r]], b, n, lastDim, hH];
-                msg = neighbour + self + atpGnnBcastBias[bhs[[r]], b, n, hH];
-                h = TReLU[msg];
-                lastDim = hH,
-                {r, rR}];
-            pooled3 = atpBatchMatMul[maskRowT, h, b, 1, n, hH];
-            pooled  = ArrayReshape[
-                pooled3 * TUOpRecip[TUOpExpand[nNodesT, {b, 1, hH}]],
-                {b, hH}];
-            pooled . wout + TUOpExpand[TUOpReshape[bout, {1, 2}], {b, 2}]
-        ]];
-    logits = forward[];
+    logits = atpGnnForwardLogits[xT, aT, maskRowT, nNodesT,
+        w1s, wss, bhs, wout, bout, b, n, f, hH, rR];
     loss   = TCategoricalCrossEntropy[logits, yT];
     lossStart = First[Normal @ TRealize @ loss];
     grads = TGrad[loss, params];
@@ -946,6 +956,36 @@ atpTrainGnnOnCorpus[ds_Association, opts_List] := If[
         TAtpTrainGnn[ds, FilterRules[opts, Options[TAtpTrainGnn]]],
         <|"NProofs" -> ds["NProofs"]|>]]
 atpTrainGnnOnCorpus[_, _] := $Failed
+
+(* Score a graph dataset with a trained GNN model (the "Model" from
+   TAtpTrainGnn): run the same forward with the model's weights as
+   constant TTensors, returning the per-graph proof-relevance score
+   logit_pos - logit_neg.  This is the inference path -- used for the
+   held-out (by-problem) measure and, later, the engine re-rank hook. *)
+TAtpGnnScore[model_Association, dataset_Association] := Module[{
+    bt, b, n, f, hH, rR, xT, aT, maskRowT, nNodesT,
+    w1s, wss, bhs, wout, bout, logits, p
+},
+    bt = atpGnnTensors[dataset];
+    If[ bt === $Failed, Return[$Failed]];
+    b = bt["B"];  n = bt["N"];  f = bt["F"];
+    hH = model["Hidden"];  rR = model["Rounds"];
+    xT       = TTensorCreate @ NumericArray[bt["X"], "Real32"];
+    aT       = TTensorCreate @ NumericArray[bt["A"], "Real32"];
+    maskRowT = TTensorCreate @ NumericArray[
+        ArrayReshape[bt["Mask"], {b, 1, n}], "Real32"];
+    nNodesT  = TTensorCreate @ NumericArray[
+        ArrayReshape[bt["NNodes"], {b, 1, 1}], "Real32"];
+    w1s  = TTensorCreate @ NumericArray[#, "Real32"] & /@ model["W1"];
+    wss  = TTensorCreate @ NumericArray[#, "Real32"] & /@ model["Ws"];
+    bhs  = TTensorCreate @ NumericArray[#, "Real32"] & /@ model["Bh"];
+    wout = TTensorCreate @ NumericArray[model["Wout"], "Real32"];
+    bout = TTensorCreate @ NumericArray[model["Bout"], "Real32"];
+    logits = atpGnnForwardLogits[xT, aT, maskRowT, nNodesT,
+        w1s, wss, bhs, wout, bout, b, n, f, hH, rR];
+    p = Normal @ TRealize @ logits;
+    p[[All, 2]] - p[[All, 1]]
+]
 
 (* === Status decoder + stats Association builder =================== *)
 
