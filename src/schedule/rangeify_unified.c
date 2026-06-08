@@ -1917,7 +1917,23 @@ static Term ru_pad_wrap_where(u64 loc, RuRangeMap const *rm, Term body) {
   Term cond_acc = 0;
   for (u32 d = 0; d < ndim; d++) {
     u32 begin = (u32)term_val(heap_read(loc + 2 + 2 * d));
-    u32 in_dim = src_shape.dims[d];
+    u32 end   = (u32)term_val(heap_read(loc + 2 + 2 * d + 1));
+    // Skip axes that aren't padded (begin == end == 0).  Such an axis
+    // needs no value-side guard: the consumer iter never strays outside
+    // the kept window.  This also mirrors apply_movement_op_pad
+    // (schedule/indexing.c:107), which passes an unpadded axis straight
+    // through.  Crucially it skips an unpadded SYMBOLIC (kvar) leading
+    // axis whose `in_dim` is the raw kvar-packed extent (high bit set):
+    // building `ILT(RANGE, CONST(in_dim))` there feeds a negative i32
+    // constant to the ILT simplifier, which folds it to constant FALSE
+    // (index_simplify.c:1334-1337, RANGE < non-positive const) and
+    // collapses the whole IWHERE to INVALID -- zeroing the entire output.
+    if (begin == 0 && end == 0) continue;
+    // Resolve a symbolic (kvar) padded dim to its static upper bound
+    // before using it as the hi-bound constant.  Same template as the
+    // stride/suffix sites in ru_build_addr_with_dims / ru_compose_one_view:
+    // a kvar dim contributes its hi extent to any layout/bound coefficient.
+    u32 in_dim = kvar_extent_static(src_shape.dims[d]);
     Term r = rm->out_rngs[d];
     if (r == 0) continue;
     Term lo = 0;

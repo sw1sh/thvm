@@ -1,9 +1,10 @@
-// KNOWN BUG (surfaced, not hidden): uop_pad over a tensor whose leading axis is
-// symbolic (kvar) zeroes the ORIGINAL data region, not just the pad -- it reads
-// through the static (hi) strides instead of the bound layout.  A symbolic
-// multi-head attention concat works around this with a PAD-free one-hot stitch
-// (wl/THVMLink/Tests/symbolic.wlt).  This test asserts the CORRECT behavior and
-// is expected to FAIL until the pad lowering resolves the kvar dim.
+// Regression guard: uop_pad over a tensor whose leading axis is symbolic (kvar)
+// must preserve the original data region (zero only the pad columns).  It once
+// zeroed EVERYTHING: ru_pad_wrap_where built a value-side bound `ILT(RANGE,
+// CONST(in_dim))` using the raw kvar-packed extent (0x80000001) for the
+// unpadded leading axis; as a negative i32 the ILT simplifier folded it to
+// constant FALSE -> the whole IWHERE collapsed to INVALID.  Fixed by skipping
+// unpadded axes + resolving the padded dim via kvar_extent_static.
 #include "../src/thvm.c"
 #include "test.h"
 int main(void){ thvm_init(); int f=0;
