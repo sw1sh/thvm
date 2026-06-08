@@ -426,6 +426,19 @@ int main(int argc, char **argv) {
 
   AtpState *s = thvm_atp_init(&cfg, step_cap);
   if (use_lpo) thvm_atp_set_lpo(s, &lpo);
+  // ENIGMA Tier 2: THVM_ATP_GNN_ASSET=<path.safetensors> loads a
+  // pretrained GCN scorer (the bundled GCNAtpScorer asset or a
+  // TAtpSaveGnnScorer file) C-direct, and THVM_ATP_GNN_RERANK_PERIOD
+  // (read in thvm_atp_init) > 0 makes thvm_atp_step re-rank the live CP
+  // queue with it.  Off unless both are set, so the baseline is unchanged.
+  {
+    const char *ga = getenv("THVM_ATP_GNN_ASSET");
+    if (ga != NULL && ga[0] != '\0') {
+      int loaded = thvm_atp_load_gnn_safetensors(ga);
+      printf("gnn-scorer: %s from %s  (rerank period=%u)\n",
+             loaded ? "LOADED" : "FAILED-TO-LOAD", ga, s->gnn_rerank_period);
+    }
+  }
   // CP-weight mode: when `THVM_ATP_CP_WEIGHT` (an `AtpCpWeightMode`
   // integer) is exported, override the mode for the experiment;
   // otherwise leave the engine default (ATP_CP_WEIGHT_GT) in place

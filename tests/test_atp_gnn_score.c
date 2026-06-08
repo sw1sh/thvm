@@ -33,6 +33,44 @@ static Term ctr0(u32 l)                 { return term_new_ctr(l, NULL, 0); }
 static Term ctr1(u32 l, Term a)         { Term cs[1] = {a};    return term_new_ctr(l, cs, 1); }
 static Term ctr2(u32 l, Term a, Term b) { Term cs[2] = {a, b}; return term_new_ctr(l, cs, 2); }
 
+// Write the on-wire GCN blob [R, H, per-round W1/Ws/Bh, Wout, Bout] to a
+// .safetensors file (named f32 tensors + Rounds/Hidden in __metadata__),
+// matching what TAtpSaveGnnScorer writes, so thvm_atp_load_gnn_safetensors
+// can be round-trip tested without WL.  Shapes are written 1-D (the loader
+// keys on element count); offsets are sequential in canonical order.
+static void write_gcn_safetensors(const char *path, const double *blob) {
+  u32 rR = (u32)blob[0], hH = (u32)blob[1];
+  char  nm[64][16]; u32 ct[64]; u32 nt = 0u;
+  for (u32 r = 0u; r < rR; r++) {
+    u32 inr = (r == 0u) ? (u32)ATP_CPG_FEAT_DIM : hH;
+    snprintf(nm[nt], 16, "W1_%u", r); ct[nt++] = inr * hH;
+    snprintf(nm[nt], 16, "Ws_%u", r); ct[nt++] = inr * hH;
+    snprintf(nm[nt], 16, "Bh_%u", r); ct[nt++] = hH;
+  }
+  snprintf(nm[nt], 16, "Wout"); ct[nt++] = hH * 2u;
+  snprintf(nm[nt], 16, "Bout"); ct[nt++] = 2u;
+
+  char json[8192]; int jp = 0; u32 off = 0u;
+  jp += snprintf(json + jp, sizeof json - jp, "{");
+  for (u32 i = 0u; i < nt; i++) {
+    jp += snprintf(json + jp, sizeof json - jp,
+      "\"%s\":{\"dtype\":\"F32\",\"shape\":[%u],\"data_offsets\":[%u,%u]},",
+      nm[i], ct[i], off, off + ct[i] * 4u);
+    off += ct[i] * 4u;
+  }
+  jp += snprintf(json + jp, sizeof json - jp,
+    "\"__metadata__\":{\"Rounds\":\"%u\",\"Hidden\":\"%u\"}}", rR, hH);
+  while (jp % 8 != 0) json[jp++] = ' ';
+
+  FILE *f = fopen(path, "wb");
+  u64 hl = (u64)jp;
+  fwrite(&hl, 8u, 1u, f);
+  fwrite(json, 1u, (size_t)jp, f);
+  u32 total = 0u; for (u32 i = 0u; i < nt; i++) total += ct[i];
+  for (u32 k = 0u; k < total; k++) { float v = (float)blob[2u + k]; fwrite(&v, 4u, 1u, f); }
+  fclose(f);
+}
+
 // A tiny known model: R = 2 rounds, H = 3 hidden, in_0 = 6 (ATP_CPG_FEAT_DIM),
 // in_1 = 3.  Weights are arbitrary fixed values (deterministic, spread
 // positive + negative so ReLU actually clips).  Built as the on-wire f64
@@ -305,6 +343,60 @@ int main(void) {
     CHECK_EQ(thvm_atp_gnn_score_batch(&lhs[0], &rhs[0], 1u, solo), 1);
     CHECK_EQ(thvm_atp_gnn_score_batch(lhs, rhs, 3u, batch3), 1);
     CHECK(fabsf(solo[0] - batch3[0]) < 1.0e-6f);
+    thvm_atp_clear_gnn_scorer();
+  }
+
+  // C-side safetensors load: thvm_atp_load_gnn_safetensors reads a GCN
+  // .safetensors (the bundled GCNAtpScorer asset / TAtpSaveGnnScorer
+  // output) and pushes it to the engine with no WL.  Round-trip the known
+  // blob through a temp file and confirm the reloaded weights are bit-
+  // identical to the originals.
+  TEST_BEGIN("atp/gnn_score/safetensors-load-roundtrip");
+  {
+    char p[] = "/tmp/thvm_gcn_load_XXXXXX";
+    int fd = mkstemp(p);
+    CHECK(fd >= 0);
+    close(fd);
+    write_gcn_safetensors(p, blob);
+    thvm_atp_clear_gnn_scorer();
+    CHECK_EQ(thvm_atp_load_gnn_safetensors(p), 1);
+    CHECK_EQ(g_atp_gnn.rounds, (u32)blob[0]);
+    CHECK_EQ(g_atp_gnn.hidden, (u32)blob[1]);
+    for (u32 i = 0u; i < blob_len - 2u; i++) {
+      CHECK(fabsf(g_atp_gnn.w[i] - (float)blob[2u + i]) < 1.0e-6f);
+    }
+    thvm_atp_clear_gnn_scorer();
+    unlink(p);
+  }
+
+  // Regression: a CP whose graph exceeds the node cap (ATP_GNN_N_CAP) used
+  // to force a giant dense {B,N,N} adjacency and SIGBUS the realized
+  // kernel; and a batch larger than ATP_GNN_B_CAP must chunk.  Score both
+  // and confirm no crash + finite scores.  (A ~200-node left-nested
+  // f-tower well exceeds the 64-node cap; it is truncated.)
+  TEST_BEGIN("atp/gnn_score/giant-graph-and-chunk-no-crash");
+  {
+    CHECK_EQ(thvm_atp_set_gnn_scorer(blob, blob_len), 1);
+    Term big = ctr0(LAB_a);
+    for (u32 d = 0u; d < 200u; d++) big = ctr2(LAB_f, big, ctr0(LAB_a));
+    Term bl[2] = {big, lhs[0]}, br[2] = {ctr0(LAB_a), rhs[0]};
+    float gsc[2];
+    CHECK_EQ(thvm_atp_gnn_score_batch(bl, br, 2u, gsc), 1);
+    CHECK(isfinite(gsc[0]) && isfinite(gsc[1]));
+    // Batch > ATP_GNN_B_CAP (1024) exercises the chunk loop.
+    enum { NB = 1100u };
+    Term *bbl = (Term *)malloc(NB * sizeof(Term));
+    Term *bbr = (Term *)malloc(NB * sizeof(Term));
+    float *bsc = (float *)malloc(NB * sizeof(float));
+    for (u32 i = 0u; i < NB; i++) { bbl[i] = lhs[i % 3u]; bbr[i] = rhs[i % 3u]; }
+    CHECK_EQ(thvm_atp_gnn_score_batch(bbl, bbr, NB, bsc), 1);
+    CHECK(isfinite(bsc[0]) && isfinite(bsc[NB - 1u]));
+    // A CP scored in a >cap batch matches the same CP scored small (batch
+    // independence holds across chunks).
+    float one[1];
+    CHECK_EQ(thvm_atp_gnn_score_batch(&lhs[0], &rhs[0], 1u, one), 1);
+    CHECK(fabsf(one[0] - bsc[0]) < 1.0e-5f);
+    free(bbl); free(bbr); free(bsc);
     thvm_atp_clear_gnn_scorer();
   }
 
