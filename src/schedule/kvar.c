@@ -86,12 +86,24 @@ u32 kvar_hi(u32 id) {
 u32 kvar_count(void) { return KVARS_NEXT - 1; }
 
 // Bind / read a kvar's runtime value (the loop count to run THIS realize).
+// HARD CAP: the value is clamped to [1, hi].  A bound above hi would loop past
+// the worst-case buffer size (which is sized at hi) -> out-of-bounds / a RAM
+// spike; clamping makes "loop count never exceeds the allocation" an invariant
+// no binding bug can violate.
 void kvar_set_runtime(u32 id, u32 value) {
-  if (id != 0 && id < KVAR_CAP) KVAR_RUNTIME[id] = value;
+  if (id == 0 || id >= KVAR_CAP) return;
+  u32 hi = kvar_hi(id);
+  if (hi != 0 && value > hi) {
+    fprintf(stderr, "kvar_set_runtime: clamping V%u=%u to hi=%u\n", id, value, hi);
+    value = hi;
+  }
+  KVAR_RUNTIME[id] = value;
 }
 u32 kvar_runtime(u32 id) {
   if (id == 0 || id >= KVAR_CAP) return 0;
-  return KVAR_RUNTIME[id] != 0 ? KVAR_RUNTIME[id] : kvar_hi(id);
+  u32 v  = KVAR_RUNTIME[id] != 0 ? KVAR_RUNTIME[id] : kvar_hi(id);
+  u32 hi = kvar_hi(id);
+  return (hi != 0 && v > hi) ? hi : v;   // never exceed the worst-case alloc
 }
 // Resolve a packed extent to its RUNTIME loop count: the bound value for a
 // kvar (kvar_hi if unbound), the literal otherwise.  Distinct from

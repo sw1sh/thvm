@@ -34,8 +34,13 @@ typedef void (*CpuJitFn)(void *out, const void *const *ins,
                          const unsigned *kvar_vals);
 
 // Fill `out_vals` with this kernel's kvar runtime bounds (kvar_collect_from_dag
-// order).  out_vals must hold KVAR_USED_CAP entries.
+// order).  out_vals must hold KVAR_USED_CAP entries.  ZERO-INIT first: an
+// unfilled slot must read 0 (a no-op loop), NEVER uninitialized stack garbage
+// -- a garbage `V_<name>` was looping ~2^31 times and OOB-spamming memory.
+// kvar_runtime already clamps to [.., hi], so every filled bound fits the
+// worst-case allocation.
 static void cpu_jit_kvar_vals(KernelEntry const *ke, unsigned *out_vals) {
+  for (u32 i = 0; i < KVAR_USED_CAP; i++) out_vals[i] = 0;
   u32 ids[KVAR_USED_CAP];
   u32 nkv = ke->cached_lift.store_root
           ? kvar_collect_from_dag(ke->cached_lift.store_root, ids, KVAR_USED_CAP)
