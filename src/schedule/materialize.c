@@ -4392,8 +4392,8 @@ static int view_apply_reshape(View const *src, u64 expr_loc, View *out) {
   u32 t_numel = 1;
   for (u32 i = 0; i < t_ndim; i++) {
     u32 d = (u32)term_val(heap_read(expr_loc + 2 + i));
-    ts.dims[i] = d;
-    t_numel *= d;
+    ts.dims[i] = d;                       // shape keeps the kvar-packed extent
+    t_numel *= kvar_extent_static(d);     // numel is the worst-case (hi) product
   }
   if (t_numel != src->numel) return 0;
   if (t_ndim > MAX_DIM) return 0;
@@ -4421,7 +4421,9 @@ static int view_apply_reshape(View const *src, u64 expr_loc, View *out) {
     while (acc < merged[mi].merged_dim
         && acc != merged[mi].merged_dim
         && r_idx >= 0) {
-      u32 new_dim = ts.dims[r_idx];
+      // A symbolic (kvar) dim contributes its upper bound to the merge math
+      // (the buffer layout is worst-case); the shape itself keeps the kvar.
+      u32 new_dim = kvar_extent_static(ts.dims[r_idx]);
       r_idx--;
       strides_rev[strides_n++] = new_stride;
       if (new_dim != 1) {

@@ -228,6 +228,7 @@ TESTS := \
   $(BIN)/test_uop_devectorize \
   $(BIN)/test_uop_symbolic \
   $(BIN)/test_uop_symbolic_shape \
+  $(BIN)/test_sym_reshape \
   $(BIN)/test_kvar_clamp \
   $(BIN)/test_sym_m2 \
   $(BIN)/test_sym_matmul \
