@@ -239,6 +239,7 @@ TESTS := \
   $(BIN)/test_sym_kvcache \
   $(BIN)/test_sym_kvcache_append \
   $(BIN)/test_sym_kvcache_jit \
+  $(BIN)/test_sym_kvbegin_read \
   $(BIN)/test_sym_decode_step \
   $(BIN)/test_sym_pad \
   $(BIN)/test_kvar_clamp \
