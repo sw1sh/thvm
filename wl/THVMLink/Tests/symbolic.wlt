@@ -405,3 +405,53 @@ VerificationTest[
     TestID -> "symbolic/transformer-block-eager",
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
 ]
+
+(* === PUBLIC-OP symbolic multi-head attention =========================
+
+   The construction above is now packaged behind the PUBLIC ops:
+   TMultiHeadAttention auto-selects the eager symbolic branch when Q's
+   leading (sequence) axis is kvar-PACKED (>= 2^31), and TCausalMaskSym
+   builds the symbolic {S,S} causal bias.  This test calls only those
+   public ops -- TMultiHeadAttention[Q, K, V, nHeads, TCausalMaskSym[vid,
+   hi]] on symbolic-seq {S,dim} Q,K,V -- and asserts against an
+   independent host-side multi-head causal-attention oracle at S=4 AND
+   S=6.  The default per-head scale is 1/Sqrt[dHead]; the oracle uses the
+   same.  This proves the surface op (not an inlined graph) now flows a
+   symbolic sequence. *)
+VerificationTest[
+    Module[
+        {hi = 8, dim = 4, nHeads = 2, dHead = 2, qHost, kHost, vHost, scale,
+         hostMHA, mhaPublic},
+        qHost = Table[N[0.1 (i + 1) + 0.01 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        kHost = Table[N[0.1 (i + 1) - 0.01 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        vHost = Table[N[i + 0.5 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        scale = 1. / Sqrt[N @ dHead];
+        (* host oracle: split columns, per-head causal softmax-attn, concat *)
+        hostMHA[S_] := ArrayFlatten[{Table[
+            Module[{qh, kh, vh, sc, w},
+                qh = qHost[[1 ;; S, h dHead + 1 ;; (h + 1) dHead]];
+                kh = kHost[[1 ;; S, h dHead + 1 ;; (h + 1) dHead]];
+                vh = vHost[[1 ;; S, h dHead + 1 ;; (h + 1) dHead]];
+                sc = (qh . Transpose[kh]) scale +
+                    Table[If[ j <= i, 0., -10.^9], {i, 0, S - 1}, {j, 0, S - 1}];
+                w = Table[Exp[sc[[r]] - Max[sc[[r]]]], {r, 1, S}];
+                w = w / Total[w, {2}];
+                w . vh],
+            {h, 0, nHeads - 1}]}];
+        mhaPublic[Sval_] := Module[{vid, qT, kT, vT, out},
+            TInit[];
+            vid = TKVarAlloc[1, hi];
+            TKVarSet[vid, Sval];
+            qT = TSymbolicAxis[TTensorCreate[qHost], 0, vid];
+            kT = TSymbolicAxis[TTensorCreate[kHost], 0, vid];
+            vT = TSymbolicAxis[TTensorCreate[vHost], 0, vid];
+            out = TMultiHeadAttention[qT, kT, vT, nHeads,
+                TCausalMaskSym[vid, hi]];
+            Chop[Normal @ TTensorData @ TRealize @ out, 1.*^-6]];
+        {Max @ Abs[Flatten[mhaPublic[4] - hostMHA[4]]],
+         Max @ Abs[Flatten[mhaPublic[6] - hostMHA[6]]]}
+    ],
+    {0., 0.},  (* public-op output == host oracle at S=4 and S=6 *)
+    TestID -> "symbolic/multihead-causal-attention-public-op",
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
+]

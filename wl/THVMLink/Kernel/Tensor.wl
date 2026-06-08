@@ -263,6 +263,7 @@ TUOpReduce[src_, axis_Integer, kind_String] := (
    case); TKVarSet binds the actual loop bound before TRealize.  Usage messages
    are declared public in THVMLink.wl. *)
 TKVarAlloc[lo_Integer, hi_Integer] := (ensureInit[]; $kvarAllocFn[lo, hi])
+TKVarHi[vid_Integer]               := (ensureInit[]; $kvarHiFn[vid])
 TKVarSet[vid_Integer, v_Integer]   := (ensureInit[]; $kvarSetRuntimeFn[vid, v])
 TSymbolicAxis[t_, axis_Integer, vid_Integer] := (ensureInit[]; TTerm[$markSymbolicAxisFn[ttermRaw[t], axis, vid]])
 

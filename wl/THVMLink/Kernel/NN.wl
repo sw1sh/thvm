@@ -85,6 +85,7 @@ TEmbedding::usage        = "TEmbedding[table, idx] returns row idx of a {V, D} t
 TEmbeddingMatrix::usage  = "TEmbeddingMatrix[table, ids] gathers rows `ids` from a {V, D} table into a {Length[ids], D} matrix.  ids is a host-side List[Integer].  Lowers as one TEmbedding + TUOpReshape to {1, D} per id, then stitches along the leading axis via PAD + sum (same idiom as TMultiHeadAttention's per-head concat -- no STACK op in thvm).  Dynamic-id gather needs a future UOP_GATHER opcode.";
 TGELU::usage             = "TGELU[x] applies the tanh-form GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).  Composes via existing TTanh -- no new opcode required.";
 TCausalMask::usage       = "TCausalMask[seq] returns a {seq, seq} TTerm wrapping a fresh tensor whose entries are 0 at (i, j) with j <= i and -1e9 at j > i.  Add to attention scores before softmax to zero out future-token attention.";
+TCausalMaskSym::usage    = "TCausalMaskSym[vid, hi] returns the SYMBOLIC-sequence causal mask: a {S, S} TTerm (S the kvar dimension `vid`, upper bound `hi`) whose entries are 0 at (i, j) with j <= i and a large negative bias at j > i.  Built EAGER from a symbolic ramp (TUOpExpand of a {hi} ramp marked symbolic on axis 0) so a symbolic-seq TMultiHeadAttention can add it to scores before softmax.  Use in place of TCausalMask[seq] when the sequence axis is a kvar; pass the resulting TTerm as TMultiHeadAttention's `mask` argument.";
 TLayerNormAffine::usage  = "TLayerNormAffine[x, gamma, beta] applies TLayerNorm[x] then multiplies by gamma + adds beta along the last axis.  GPT-2's layer-norm carries learned gamma/beta; the bare TLayerNorm in this file normalises only.";
 TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q is {seq_q, dim}; K, V are {seq_k, dim} (read independently, so seq_k may differ from seq_q -- cross-attention, or a single-query step over a KV cache); dim = n_heads * d_head; mask is a {seq_q, seq_k} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq_q, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).\n\nTMultiHeadAttention[Q, K, V, n_heads, mask, scale] uses the explicit `scale` factor in place of the default 1/Sqrt[d_head] (pass 1.0 when the caller has already pre-scaled Q, as GPT-2's NetGraph does).";
 Begin["`Private`"];
@@ -866,6 +867,36 @@ TCausalMask[seq_Integer] := TTensorCreate @ NumericArray[
     Table[ If[ j <= i, 0.0, -1.0*^9], {i, seq}, {j, seq}],
     "Real32"]
 
+(* A kvar-PACKED shape dim is 2^31 + vid: the leading axis of a
+   symbolic-sequence tensor reads back >= 2^31 from tUopShape.  This is
+   the discriminator the symbolic-seq attention branch keys off. *)
+$kvarPackBase = 2^31;
+symDimQ[d_]   := IntegerQ[d] && d >= $kvarPackBase
+symVid[d_]    := d - $kvarPackBase            (* recover vid from a packed dim *)
+
+(* True when a TTerm's leading axis is a kvar-packed (symbolic) dim.
+   Safe on a $Failed shape -- symLeadingQ short-circuits to False rather
+   than indexing into $Failed -- so it can guard the symbolic dispatch. *)
+symLeadingQ[t_TTerm] := With[{s = tUopShape[t]},
+    ListQ[s] && Length[s] >= 1 && symDimQ[First[s]]]
+
+(* TCausalMaskSym[vid, hi] -- the symbolic-sequence causal mask, built
+   EAGER from a symbolic ramp (the validated construction in
+   symbolic.wlt's "symbolic/causal-attention-eager").  Each reduce /
+   broadcast-EXPAND is realized to a contiguous leaf before the next op
+   consumes it, so the doubly-symbolic {S,S} fused-broadcast addressing
+   never arises.  mask[i,j] = 0 for j <= i, -30 for j > i. *)
+TCausalMaskSym[vid_Integer, hi_Integer] := Module[
+    {sym, er, ramp, ri, rj},
+    sym  = $kvarPackBase + vid;
+    er[t_] := TRealize[t];
+    ramp = TSymbolicAxis[TTensorCreate[N @ Range[0, hi - 1]], 0, vid];
+    ri   = er @ TUOpExpand[TUOpReshape[ramp, {sym, 1}], {sym, sym}];
+    rj   = er @ TUOpExpand[TUOpReshape[ramp, {1, sym}], {sym, sym}];
+    er @ TUOpMul[
+        TUOpCmplt[TUOpAdd[ri, TUOpNeg[rj]], TUOpConst[0.]], TUOpConst[-30.]]
+]
+
 TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{
     shape = tUopShape[x],
     norm  = TLayerNorm[x]
@@ -892,6 +923,86 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
     dHead = tUopShape[q][[2]] / nHeads
 },
     TMultiHeadAttention[q, k, v, nHeads, mask, 1 / Sqrt[N @ dHead]]
+]
+
+(* Symbolic-SEQUENCE multi-head attention.  Selected when Q's leading
+   (sequence) axis is kvar-PACKED (>= 2^31): the seq length S is a
+   symbolic dimension, so the whole construction runs EAGER -- every
+   reduce / binary-op / broadcast-EXPAND realized to a contiguous leaf
+   before the next op -- to sidestep the doubly-symbolic {S,S}
+   fused-broadcast addressing.  This is the validated construction in
+   symbolic.wlt's "symbolic/multihead-causal-attention-eager".
+
+   Q,K,V are {S, dim}; `mask` is a SYMBOLIC {S,S} additive bias
+   (TCausalMaskSym) or None; `scale` and the n_heads / d_head split
+   match the integer path's semantics exactly.  SPLIT per head via a
+   kvar reshape {S,dim}->{S,nHeads,dHead} + PERMUTE {1,0,2} + per-head
+   SHRINK; per-head eager causal attention; PAD-free concat via a
+   symbolic one-hot column selector (TUOpPad over a kvar axis zeros the
+   data -- a known addressing bug -- so concat must avoid PAD). *)
+TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
+                    nHeads_Integer, mask_, scale_?NumericQ] /;
+                    symLeadingQ[q] := With[{
+    shapeQ = tUopShape[q]
+},
+    Module[{vid, sym, hi, dim, dHead, er, splitHead, perHead, heads,
+            buildSlot},
+        vid   = symVid[shapeQ[[1]]];
+        sym   = shapeQ[[1]];          (* already kvar-packed *)
+        hi    = TKVarHi[vid];         (* static buffer extent for axis 0 *)
+        dim   = shapeQ[[2]];
+        dHead = dim / nHeads;
+        er[t_] := TRealize[t];        (* realize -> contiguous leaf *)
+        (* {S,dim} -> {S,nHeads,dHead} -> PERMUTE {1,0,2} -> SHRINK head h *)
+        splitHead[t_, h_] := er @ TUOpReshape[
+            TUOpShrink[
+                TUOpPermute[TUOpReshape[t, {sym, nHeads, dHead}], {1, 0, 2}],
+                {{h, h + 1}, {0, sym}, {0, dHead}}],
+            {sym, dHead}];
+        perHead[h_] := Module[
+            {qh, kh, vh, qe, ke, scores, masked, m, me, e, sm, se, w, we, ve},
+            qh = splitHead[q, h];
+            kh = splitHead[k, h];
+            vh = splitHead[v, h];
+            (* scores = scale * einsum ik,jk->ij (reduce over dHead axis) *)
+            qe = er @ TUOpExpand[TUOpReshape[qh, {sym, 1, dHead}],
+                {sym, sym, dHead}];
+            ke = er @ TUOpExpand[TUOpReshape[kh, {1, sym, dHead}],
+                {sym, sym, dHead}];
+            scores = er @ TUOpMul[
+                er @ TUOpReduce[er @ TUOpMul[qe, ke], 2, "SUM"],
+                TUOpConst[N @ scale]];
+            masked = If[ mask === None, scores, er @ TUOpAdd[scores, mask]];
+            (* softmax over the key axis (axis 1), EXP2 + log2(e) chain *)
+            m  = er @ TUOpReduce[masked, 1, "MAX"];
+            me = er @ TUOpExpand[TUOpReshape[m, {sym, 1}], {sym, sym}];
+            e  = er @ TUOpExp2[er @ TUOpMul[
+                er @ TUOpAdd[masked, TUOpNeg[me]], TUOpConst[N @ Log2[E]]]];
+            sm = er @ TUOpReduce[e, 1, "SUM"];
+            se = er @ TUOpExpand[TUOpReshape[sm, {sym, 1}], {sym, sym}];
+            w  = er @ TUOpMul[e, TUOpRecip[se]];           (* {S,S} weights *)
+            (* out = einsum ij,jk->ik (reduce over key axis 1) *)
+            we = er @ TUOpExpand[TUOpReshape[w, {sym, sym, 1}],
+                {sym, sym, dHead}];
+            ve = er @ TUOpExpand[TUOpReshape[vh, {1, sym, dHead}],
+                {sym, sym, dHead}];
+            er @ TUOpReduce[er @ TUOpMul[we, ve], 1, "SUM"]];  (* {S,dHead} *)
+        heads = perHead /@ Range[0, nHeads - 1];
+        (* PAD-free concat: place each head's {S,dHead} into its column
+           slot of {S,nHeads,dHead} via a symbolic one-hot selector, sum
+           over heads, reshape -> {S,dim}. *)
+        buildSlot[hh_, h_] := Module[{he, ohS},
+            he = er @ TUOpExpand[TUOpReshape[hh, {sym, 1, dHead}],
+                {sym, nHeads, dHead}];
+            ohS = TSymbolicAxis[
+                TTensorCreate[
+                    Table[N @ Boole[s == h], {hi}, {s, 0, nHeads - 1}, {1}]],
+                0, vid];
+            er @ TUOpMul[he, er @ TUOpExpand[ohS, {sym, nHeads, dHead}]]];
+        er @ TUOpReshape[
+            er @ Total @ Table[buildSlot[heads[[h + 1]], h], {h, 0, nHeads - 1}],
+            {sym, dim}]
+    ]
 ]
 
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,

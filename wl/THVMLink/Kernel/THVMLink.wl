@@ -153,6 +153,7 @@ TUOpCmplt::usage     = "TUOpCmplt[a, b] builds a UOP_CMPLT node.";
 TUOpCmpeq::usage     = "TUOpCmpeq[a, b] builds a UOP_CMPEQ node (elementwise a == b mask).";
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
 TKVarAlloc::usage    = "TKVarAlloc[lo, hi] allocates a symbolic-shape dimension Variable in [lo, hi] and returns its integer id.  Bind it with TKVarSet before TRealize and mark a tensor axis symbolic with TSymbolicAxis.";
+TKVarHi::usage       = "TKVarHi[vid] returns the upper bound a symbolic dimension vid was allocated with (the static extent its buffers carry).  Used to size host constants whose leading axis is then marked symbolic on vid.";
 TKVarSet::usage      = "TKVarSet[vid, value] binds the symbolic dimension vid to value (the loop bound) for the next TRealize; buffers stay sized at the upper bound.";
 TSymbolicAxis::usage = "TSymbolicAxis[t, axis, vid] reinterprets tensor t's axis as the symbolic dimension vid (the axis's current extent must equal the kvar upper bound), so the lifted forward runs that axis at the bound TKVarSet value.";
 TUOpCast::usage      = "TUOpCast[src, dtype] builds a UOP_CAST node.  dtype is one of \"f32\"/\"i32\"/\"i8\" etc.  Backward gradient (under TGrad) is a CAST back to src.dtype.";
@@ -445,6 +446,7 @@ $uopBitcastFn  := $uopBitcastFn  = load["thvm_wl_uop_bitcast",  {Integer, Intege
 $uopBinaryFn   := $uopBinaryFn   = load["thvm_wl_uop_binary",   {Integer, Integer, Integer},         Integer];
 $uopReduceFn   := $uopReduceFn   = load["thvm_wl_uop_reduce",   {Integer, Integer, Integer},         Integer];
 $kvarAllocFn       := $kvarAllocFn       = load["thvm_wl_kvar_alloc",         {Integer, Integer},          Integer];
+$kvarHiFn          := $kvarHiFn          = load["thvm_wl_kvar_hi",            {Integer},                   Integer];
 $kvarSetRuntimeFn  := $kvarSetRuntimeFn  = load["thvm_wl_kvar_set_runtime",   {Integer, Integer},          Integer];
 $markSymbolicAxisFn := $markSymbolicAxisFn = load["thvm_wl_mark_symbolic_axis", {Integer, Integer, Integer}, Integer];
 $uopReshapeFn  := $uopReshapeFn  = load["thvm_wl_uop_reshape",  {Integer, {Integer, 1}},             Integer];

@@ -940,6 +940,14 @@ EXTERN_C DLLEXPORT int thvm_wl_kvar_alloc(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Return a kvar's upper bound (the static buffer extent its axes carry).
+EXTERN_C DLLEXPORT int thvm_wl_kvar_hi(WolframLibraryData libData, mint argc,
+                                       MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  MArgument_setInteger(res, (mint)kvar_hi((u32)MArgument_getInteger(args[0])));
+  return LIBRARY_NO_ERROR;
+}
+
 // Bind a kvar's runtime value (the loop bound) for the next realize.
 EXTERN_C DLLEXPORT int thvm_wl_kvar_set_runtime(WolframLibraryData libData, mint argc,
                                                 MArgument *args, MArgument res) {
