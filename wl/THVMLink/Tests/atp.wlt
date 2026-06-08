@@ -2724,5 +2724,43 @@ VerificationTest[
     TestID -> "ATP/enigma/graphdataset-wellformed"
 ]
 
+(* atpGnnTensors pads + batches a graph dataset to dense host arrays:
+   X is B x N x 6, A is B x N x N, Y is B x 2 (N = max node count). *)
+VerificationTest[
+    Module[{ds, nMax, bt},
+        ds = <|"Graphs" -> {
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, b], b]],
+            TAtpCpGraph[Inactive[Equal][a, a]]}, "Labels" -> {1, 0}|>;
+        nMax = Max[#["NNodes"] & /@ ds["Graphs"]];
+        bt = THVMLink`ATP`Private`atpGnnTensors[ds];
+        {Dimensions[bt["X"]] === {2, nMax, 6},
+         Dimensions[bt["A"]] === {2, nMax, nMax},
+         Dimensions[bt["Y"]] === {2, 2}, bt["B"] === 2, bt["F"] === 6}],
+    {True, True, True, True, True},
+    TestID -> "ATP/enigma/gnn-tensors-shape"
+]
+
+(* TAtpTrainGnn trains the GCN on a small explicit graph dataset and
+   returns a finite train AUC in [0, 1] with the loss decreasing.
+   Hand-built corpus (no proving) so the test is fast + deterministic;
+   the proving-backed path is exercised by the GroupAxioms headline run. *)
+VerificationTest[
+    Module[{ds, r},
+        ds = <|"Graphs" -> {
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, CircleTimes[b, c]],
+                CircleTimes[CircleTimes[a, b], c]]],
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], e]],
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, e], a]],
+            TAtpCpGraph[Inactive[Equal][a, a]],
+            TAtpCpGraph[Inactive[Equal][b, b]],
+            TAtpCpGraph[Inactive[Equal][CircleTimes[a, b], CircleTimes[a, b]]]},
+            "Labels" -> {1, 1, 1, 0, 0, 0}|>;
+        r = TAtpTrainGnn[ds, MaxTrainingRounds -> 200];
+        {NumberQ[r["TrainAUC"]], 0. <= r["TrainAUC"] <= 1.,
+         r["LossEnd"] < r["LossStart"], r["Model"]["Kind"]}],
+    {True, True, True, "GNN"},
+    TestID -> "ATP/enigma/gnn-train"
+]
+
 (* Reset so later tests / sessions see the baked-in scorer. *)
 TAtpSetLearnedScorer[Clear];

@@ -74,6 +74,8 @@ TAtpCpGraph::usage = "TAtpCpGraph[lhs == rhs] encodes one equation / critical pa
 
 TAtpGraphDataset::usage = "TAtpGraphDataset[conjectures, axioms] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset for an ENIGMA Tier 2 graph neural network: <|\"Graphs\" -> {graph...}, \"Labels\" -> {0/1...}, \"NPos\" -> p, \"NNeg\" -> n, \"NProofs\" -> k|>, where each graph is a TAtpCpGraph Association and label 1 marks a proof-essential lemma, 0 a saturated-but-unused rule.  TAtpGraphDataset[theory] runs all of AxiomaticTheory[theory, \"NotableTheorems\"] against the theory's axioms.  TAtpGraphDataset[proofObject] (or a list of ProofObjects) is the core source the conjecture / theory forms reduce to -- it yields the proof-essential POSITIVES only (a bare ProofObject does not carry the saturated rule set); TAtpGraphDataset[proofObject, lemmas] adds the NEGATIVES from a supplied saturated set (TFindProof[..., \"Lemmas\"]).  POSITIVES are the equations of types CriticalPairLemma / SubstitutionLemma in the ProofObject's proof chain (the lemmas the proof actually used); NEGATIVES are the saturated rule set (TFindProof[..., \"Lemmas\"]) minus any rule structurally equal to a positive.  Structural equality uses a canonical key that renames pattern / Slot / FVR variables to positional placeholders in first-appearance order and treats the equation as an unordered pair (so l == r and r == l collapse), which both separates positives from negatives and drops duplicate rows.  Only PROVED runs contribute graphs.  Unlike TAtpCpDataset's per-critical-pair feature rows, this sources CLEAN positives straight from the verified proof object (it works even for a minimal-normal-form-only proof that records no per-CP features), and its graphs are the symbol/variable-anonymised structural counterpart of the Tier-1 14-feature vectors -- feed \"Graphs\" / \"Labels\" to a GNN.  Options: Method (default {\"Completion\"}), TimeConstraint (per proof, default 30), MaxSteps.";
 
+TAtpTrainGnn::usage = "TAtpTrainGnn[dataset] trains a graph convolutional network (GCN) on a TAtpGraphDataset (or any <|\"Graphs\" -> {..}, \"Labels\" -> {0/1..}|>) in thvm's own tensor stack and returns <|\"Model\" -> <|\"Kind\" -> \"GNN\", weights, \"NMax\", \"Hidden\", \"Rounds\"|>, \"TrainAUC\" -> auc, \"LossStart\", \"LossEnd\", \"NPos\", \"NNeg\"|>.  The forward batches every graph to a common padded node count, runs \"Rounds\" rounds of row-normalised-adjacency message passing (H' = relu(A.H.W1 + H.Ws + b)), masked-mean-pools to a graph embedding, and reads out a two-class proof-relevance head trained with categorical cross-entropy + Adam.  The reported TrainAUC is the Mann-Whitney rank AUC of the proof-relevance score on the training graphs.  TAtpTrainGnn[theory] and TAtpTrainGnn[conjectures, axioms] prep the dataset via TAtpGraphDataset and train in one call.  Options: \"Hidden\" -> H (hidden width, default 32), \"Rounds\" -> R (message-passing rounds, default 3), MaxTrainingRounds (Adam steps, default 300), \"LearningRate\" (default 0.01).  This is the Tier 2 deliverable: a symbol-independent network that learns proof relevance from clause structure, complementing the Tier 1 hand-feature scorer.";
+
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
    Begin[`Private`] resolve to the shared THVMLink`ATP`X symbol
@@ -775,6 +777,175 @@ TAtpGraphDataset[theory_String, opts : OptionsPattern[]] := Module[{
     nProofs = Total[Last /@ results];
     atpGraphDatasetFromRows[rows, nProofs]
 ]
+
+(* === ENIGMA Tier 2: GCN over the CP hypergraph dataset =========== *)
+
+(* Batched matmul (B, P, K) . (B, K, Q) -> (B, P, Q), built from the
+   RESHAPE / EXPAND / MUL / REDUCE_SUM pattern (TMatMul is 2-D only).
+   Used for the adjacency propagation A.H and the masked-mean pool. *)
+atpBatchMatMul[a_TTerm, b_TTerm, bs_, p_, k_, q_] := Module[{ae, be},
+    ae = TUOpExpand[TUOpReshape[a, {bs, p, k, 1}], {bs, p, k, q}];
+    be = TUOpExpand[TUOpReshape[b, {bs, 1, k, q}], {bs, p, k, q}];
+    TUOpReduce[TUOpMul[ae, be], 2, "SUM"]
+]
+
+(* Apply a (K x H) weight to a (B, P, K) node tensor: flatten the batch
+   + node axes to (B*P, K), 2-D matmul, reshape back to (B, P, H). *)
+atpGnnApplyW[h_TTerm, w_TTerm, bs_, p_, k_, hi_] :=
+    ArrayReshape[TMatMul[ArrayReshape[h, {bs * p, k}], w], {bs, p, hi}]
+
+(* Broadcast a length-D bias over a (B, P, D) tensor. *)
+atpGnnBcastBias[bias_TTerm, bs_, p_, d_] :=
+    TUOpExpand[TUOpReshape[bias, {1, 1, d}], {bs, p, d}]
+
+(* Batch a graph dataset into padded host arrays for the GCN: X
+   (B x N x 6 features), A (B x N x N row-normalised adjacency with
+   self-loops, edge types merged), Mask + NNodes for the masked-mean
+   pool, Y (B x 2 one-hot).  Reads the TAtpCpGraph schema (NodeFeatures
+   matrix, 0-indexed Edges, NNodes). *)
+atpGnnTensors[dataset_Association] := Module[{
+    graphs = dataset["Graphs"], labels = dataset["Labels"],
+    b, n, f = 6, xArr, aArr, maskArr, nNodesArr, yArr
+},
+    b = Length[graphs];
+    If[ b === 0, Return[$Failed]];
+    n = Max[#["NNodes"] & /@ graphs];
+    xArr = Table[
+        With[{g = graphs[[bi]], feats = graphs[[bi]]["NodeFeatures"]},
+            Table[
+                If[ ni <= g["NNodes"], feats[[ni]], ConstantArray[0., f]],
+                {ni, n}]],
+        {bi, b}];
+    aArr = Table[
+        Module[{g = graphs[[bi]], adj, rowSums},
+            adj = ConstantArray[0., {n, n}];
+            Do[ With[{src = e[[1]] + 1, dst = e[[2]] + 1},
+                    adj[[src, dst]] = 1.;
+                    adj[[dst, src]] = 1.],
+                {e, g["Edges"]}];
+            Do[ adj[[i, i]] = 1., {i, g["NNodes"]}];
+            rowSums = Total /@ adj;
+            Table[
+                If[ rowSums[[i]] > 0., adj[[i]] / rowSums[[i]], adj[[i]]],
+                {i, n}]],
+        {bi, b}];
+    maskArr = Table[
+        Table[If[ ni <= graphs[[bi]]["NNodes"], 1., 0.], {ni, n}],
+        {bi, b}];
+    nNodesArr = N[#["NNodes"] & /@ graphs];
+    yArr = (If[ # == 1, {0., 1.}, {1., 0.}] &) /@ labels;
+    <|
+        "X" -> xArr, "A" -> aArr, "Mask" -> maskArr,
+        "NNodes" -> nNodesArr, "Y" -> yArr,
+        "N" -> n, "B" -> b, "F" -> f
+    |>
+]
+
+(* Defaults: Hidden 32 + Rounds 3.  The term graphs are shallow but the
+   lemma corpus is small and class-skewed, so 2 rounds at width 16
+   under-propagates and the rank AUC stays near chance; H = 32 / R = 3
+   reliably lifts the train AUC.  See docs/plans/atp_tier2_gnn.md. *)
+Options[TAtpTrainGnn] = {"Hidden" -> 32, "Rounds" -> 3,
+    MaxTrainingRounds -> 300, "LearningRate" -> 0.01}
+
+TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
+    bt, b, n, f, hH, rR, lrVal, rounds,
+    xT, aT, maskRowT, nNodesT, yT,
+    w1s, wss, bhs, wout, bout, params, ms, vs,
+    forward, logits, loss, grads, lr, name,
+    lossStart, lossEnd, p, scores, auc, model
+},
+    bt = atpGnnTensors[dataset];
+    If[ bt === $Failed, Return[$Failed]];
+    b = bt["B"];  n = bt["N"];  f = bt["F"];
+    hH = OptionValue["Hidden"];  rR = OptionValue["Rounds"];
+    lrVal = N @ OptionValue["LearningRate"];
+    rounds = OptionValue[MaxTrainingRounds];
+    xT       = TTensorCreate @ NumericArray[bt["X"], "Real32"];
+    aT       = TTensorCreate @ NumericArray[bt["A"], "Real32"];
+    maskRowT = TTensorCreate @ NumericArray[
+        ArrayReshape[bt["Mask"], {b, 1, n}], "Real32"];
+    nNodesT  = TTensorCreate @ NumericArray[
+        ArrayReshape[bt["NNodes"], {b, 1, 1}], "Real32"];
+    yT       = TTensorCreate @ NumericArray[bt["Y"], "Real32"];
+    (* per-round params: A.H branch (W1), self branch (Ws), bias (b);
+       lastDim is F on round 1, H thereafter. *)
+    w1s = Table[TGlorot[{If[ r == 1, f, hH], hH}], {r, rR}];
+    wss = Table[TGlorot[{If[ r == 1, f, hH], hH}], {r, rR}];
+    bhs = Table[TZeros[{hH}], {r, rR}];
+    wout = TGlorot[{hH, 2}];
+    bout = TZeros[{2}];
+    params = Join[w1s, wss, bhs, {wout, bout}];
+    (* R rounds of row-normalised-adjacency message passing, masked-mean
+       pool, two-class readout. *)
+    forward = Function[{},
+        Module[{h = xT, lastDim = f, ah, neighbour, self, msg, pooled3, pooled},
+            Do[
+                ah = atpBatchMatMul[aT, h, b, n, n, lastDim];
+                neighbour = atpGnnApplyW[ah, w1s[[r]], b, n, lastDim, hH];
+                self = atpGnnApplyW[h, wss[[r]], b, n, lastDim, hH];
+                msg = neighbour + self + atpGnnBcastBias[bhs[[r]], b, n, hH];
+                h = TReLU[msg];
+                lastDim = hH,
+                {r, rR}];
+            pooled3 = atpBatchMatMul[maskRowT, h, b, 1, n, hH];
+            pooled  = ArrayReshape[
+                pooled3 * TUOpRecip[TUOpExpand[nNodesT, {b, 1, hH}]],
+                {b, hH}];
+            pooled . wout + TUOpExpand[TUOpReshape[bout, {1, 2}], {b, 2}]
+        ]];
+    logits = forward[];
+    loss   = TCategoricalCrossEntropy[logits, yT];
+    lossStart = First[Normal @ TRealize @ loss];
+    grads = TGrad[loss, params];
+    ms = (TZeros[TTensorShape[#]] &) /@ params;
+    vs = (TZeros[TTensorShape[#]] &) /@ params;
+    lr = TUOpConst[lrVal];
+    name = THVMLink`Private`freshTrainName[];
+    THVMLink`Private`buildLoopAdam[params, grads, ms, vs, lr, name];
+    TWnf @ TApp[TRef[name], TNum[rounds]];
+    lossEnd = First[Normal @ TRealize @ loss];
+    p = Normal @ TRealize @ logits;
+    scores = p[[All, 2]] - p[[All, 1]];
+    auc = atpScorerAuc[scores, dataset["Labels"]];
+    model = <|
+        "Kind" -> "GNN",
+        "W1" -> (Normal @ TRealize @ # & /@ w1s),
+        "Ws" -> (Normal @ TRealize @ # & /@ wss),
+        "Bh" -> (Normal @ TRealize @ # & /@ bhs),
+        "Wout" -> (Normal @ TRealize @ wout),
+        "Bout" -> (Normal @ TRealize @ bout),
+        "NMax" -> n, "Hidden" -> hH, "Rounds" -> rR
+    |>;
+    <|
+        "Model" -> model,
+        "TrainAUC" -> auc,
+        "LossStart" -> lossStart,
+        "LossEnd" -> lossEnd,
+        "NPos" -> Total[dataset["Labels"]],
+        "NNeg" -> (Length[dataset["Labels"]] - Total[dataset["Labels"]])
+    |>
+]
+
+(* Corpus overloads: prep the dataset (TAtpGraphDataset) AND train. *)
+TAtpTrainGnn[theory_String, opts : OptionsPattern[]] :=
+    atpTrainGnnOnCorpus[
+        TAtpGraphDataset[theory, FilterRules[{opts}, Options[TAtpGraphDataset]]],
+        {opts}]
+
+TAtpTrainGnn[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
+    atpTrainGnnOnCorpus[
+        TAtpGraphDataset[conjectures, axioms,
+            FilterRules[{opts}, Options[TAtpGraphDataset]]],
+        {opts}]
+
+atpTrainGnnOnCorpus[ds_Association, opts_List] := If[
+    Length[ds["Graphs"]] === 0,
+    $Failed,
+    Join[
+        TAtpTrainGnn[ds, FilterRules[opts, Options[TAtpTrainGnn]]],
+        <|"NProofs" -> ds["NProofs"]|>]]
+atpTrainGnnOnCorpus[_, _] := $Failed
 
 (* === Status decoder + stats Association builder =================== *)
 
