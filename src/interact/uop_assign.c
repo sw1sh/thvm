@@ -45,6 +45,17 @@ fn Term interact_assign_with(Term dst, Term src) {
   if (dd->dtype != DT_FP32 && dd->dtype != DT_INT32) return dst;
   u64 nbytes = dtype_storage_bytes(dd->dtype, numel);
 
+  // Offset-aware in-place write.  A plain weight ASSIGN has a contig
+  // dst at offset 0 (byte_off == 0 -> identical to the old whole-buffer
+  // path).  A KV-cache append's dst is a SHRUNK row view: dd->view.numel
+  // is the SHRUNK element count (e.g. dim), dd->view.offset the start
+  // element (e.g. row*dim).  We size from the shrunk numel and write at
+  // the element offset so the other rows stay untouched.  The CONTIGUOUS
+  // single-row case ({1,dim} into {nCtx,dim} row-major) is a pure offset
+  // memcpy -- the shrunk view's strides match the cache's row-major
+  // layout, so no strided scatter is needed.
+  u64 byte_off = dtype_storage_bytes(dd->dtype, (u64)(u32)dd->view.offset);
+
   // JIT capture: record the (dst, src) tid pair so a TJit closure
   // can replay the assign as part of its captured sequence.  This
   // happens BEFORE the memcpy so a capture failure (table full)
@@ -54,8 +65,19 @@ fn Term interact_assign_with(Term dst, Term src) {
     jit_capture_record_assign(dst_tid, src_tid);
   }
 
-  // Same-backend: a native buf_copy is the fast path.
-  if (dd->backend == sd->backend && dd->backend->buf_copy != NULL
+  // Same-backend: a native buf_copy is the fast path.  Prefer the
+  // offset-aware buf_copy_at when the backend wires it (writes the
+  // shrunk span at byte_off, leaving the rest of the dst buffer alone);
+  // fall back to whole-buffer buf_copy only at byte_off == 0.
+  if (dd->backend == sd->backend && dd->backend->buf_copy_at != NULL
+      && dd->backend->buf_copy_at(dd->buf_id, byte_off, sd->buf_id, nbytes) == 0) {
+    kernel_assign_write_record(dd->backend, dd->buf_id);
+    kernel_fire_gen_bump();
+    ITRS++;
+    multi_emit(RULE_UOP_ASSIGN, MULTI_TERM, (u64)dst, (u64)src, 0);
+    return dst;
+  }
+  if (byte_off == 0 && dd->backend == sd->backend && dd->backend->buf_copy != NULL
       && dd->backend->buf_copy(dd->buf_id, sd->buf_id, nbytes) == 0) {
     kernel_assign_write_record(dd->backend, dd->buf_id);
     kernel_fire_gen_bump();
@@ -74,7 +96,11 @@ fn Term interact_assign_with(Term dst, Term src) {
   void *tmp = malloc((size_t)nbytes);
   if (!tmp) return dst;
   sd->backend->buf_read (sd->buf_id, tmp, nbytes);
-  dd->backend->buf_write(dd->buf_id, tmp, nbytes);
+  if (dd->backend->buf_write_at != NULL) {
+    dd->backend->buf_write_at(dd->buf_id, byte_off, tmp, nbytes);
+  } else {
+    dd->backend->buf_write(dd->buf_id, tmp, nbytes);  // whole-buffer (byte_off == 0)
+  }
   free(tmp);
 
   kernel_assign_write_record(dd->backend, dd->buf_id);

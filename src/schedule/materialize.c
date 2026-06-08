@@ -4514,6 +4514,25 @@ static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
   for (u32 i = 0; i < src->shape.ndim; i++) {
     u32 b = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
     u32 e = (u32)term_val(heap_read(expr_loc + 3 + 2 * i));
+    // KV-cache append: a kvar-packed begin (KVAR_FLAG set) is a RUNTIME
+    // row offset -- the symbolic `start_pos` of tinygrad's
+    // `cache[..., start_pos:start_pos+T, ...].assign(k)` (gpt2.py:201).
+    // Resolve it to the value bound via kvar_set_runtime BEFORE it
+    // enters the offset arithmetic.  The slice end is `start_pos + T`
+    // for a literal length T: the caller packs it as `pack(begin)+T`,
+    // which still has KVAR_FLAG set, so `e - b` (on the raw packed
+    // u32s) recovers T and the resolved end is `begin_runtime + T`.
+    // (Decoding the end's id directly would read a DIFFERENT kvar -- the
+    // +T bumps the id field, not the value.)  A LITERAL bound (flag
+    // clear) is identity through kvar_extent_runtime, so every existing
+    // compile-time SHRINK is byte-unchanged.
+    if (kvar_extent_is_var(b)) {
+      u32 t_len = kvar_extent_is_var(e) ? (e - b) : 0;  // raw delta = slice length
+      b = kvar_extent_runtime(b);
+      e = b + t_len;
+    } else {
+      e = kvar_extent_runtime(e);  // literal begin, e is literal or its own kvar
+    }
     if (e <= b || e > src->shape.dims[i]) return 0;
     ts.dims[i] = e - b;
     t_numel  *= (e - b);
@@ -5875,6 +5894,22 @@ fn Term thvm_materialize(Term term) {
   // memcpys it into dst.buf.
   if (term_ext(term) == UOP_ASSIGN) {
     u64  loc        = term_val(term);
+    // KV-cache append: the ASSIGN's DST is a SHRUNK view of a persistent
+    // cache (tinygrad's `cache[..., start_pos:start_pos+T, ...]`).  A
+    // movement-op dst never reduces on its own (interact_assign bails
+    // forever -- dst isn't a TAG_TEN), so resolve the movement chain to
+    // a TAG_TEN view-alias here: tensor_view_of shares the cache buffer
+    // and stamps view.offset/strides from the SHRINK.  interact_assign
+    // then writes the src bytes at that offset (FIX-2).  Scoped to a
+    // movement-op dst, so an in-place weight ASSIGN (TAdam etc., dst
+    // already TAG_TEN) is byte-unaffected.
+    Term dst_cell = heap_read(loc + 0);
+    if (term_tag(dst_cell) == TAG_UOP && op_is_view_movement(term_ext(dst_cell))) {
+      u32 dst_alias = view_resolve(dst_cell);
+      if (dst_alias != 0) {
+        heap_set(loc + 0, term_new(0, TAG_TEN, TENS[dst_alias].dtype, dst_alias));
+      }
+    }
     Term src_cell   = heap_read(loc + 1);
     Term src_mat    = thvm_materialize(src_cell);
     if (src_mat != src_cell) heap_set(loc + 1, src_mat);

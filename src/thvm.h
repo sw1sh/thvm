@@ -758,6 +758,16 @@ struct Backend {
   int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
   int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
   int   (*buf_copy) (u32 dst_buf_id, u32 src_buf_id, u64 nbytes);
+  // Offset-aware variants for an in-place ASSIGN whose dst is a SHRUNK
+  // view of a persistent buffer (KV-cache append: a {1,dim} K_t into a
+  // {nCtx,dim} cache at a runtime row offset).  buf_write_at writes the
+  // host bytes at `byte_off`; buf_copy_at copies nbytes from src buf
+  // (byte 0) into dst buf at `byte_off`.  Both bounds-check
+  // byte_off+nbytes against the dst buffer's size.  May be NULL on
+  // backends without offset writes -- interact_assign_with then falls
+  // back to the byte-0 buf_copy/buf_write (whole-buffer) path.
+  int   (*buf_write_at)(u32 buf_id, u64 byte_off, const void *src, u64 nbytes);
+  int   (*buf_copy_at) (u32 dst_buf_id, u64 dst_byte_off, u32 src_buf_id, u64 nbytes);
   // Optional (may be NULL): refcount probe + free-list hand-off used by
   // the per-realize memory planner (materialize.c) for in-pass
   // physical-buffer reuse.  buf_freelist_push(b) marks b's storage

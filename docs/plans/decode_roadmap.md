@@ -244,8 +244,17 @@ So sequence: **symbolic-seq (M1->M3) first, then KV-cache on top.**
 - KV-cache: dependency (symbolic-seq) now MET; core compute VALIDATED
   (`tests/test_sym_kvcache.c`: a single new token Q{1,d} attends a symbolic {t,d}
   K/V cache -> the correct cache average, at a runtime-bound t).  REMAINING for the
-  full feature: (a) the in-place cache APPEND -- ASSIGN K_t,V_t at a symbolic/runtime
-  offset t into the {nCtx,dim} cache buffer (validate the UOP_ASSIGN-at-kvar-offset
-  mechanism); (b) wire tokenLmForward into a single-new-token forward that reads each
-  layer's cache (a WL integration parallel to the symbolic full forward); (c) TJit
-  capture-once + per-step replay (rebind t + the new token + the grown cache).
+  full feature: (a) DONE -- the in-place cache APPEND (ASSIGN K_t into a SHRUNK view
+  of the {nCtx,dim} cache at a runtime kvar offset, tinygrad-faithful `cache[...,
+  start_pos:start_pos+T, ...] = k`).  Three engine fixes: ASSIGN's movement-op dst
+  now view_resolves to a TAG_TEN alias (materialize.c, scoped to the ASSIGN branch);
+  interact_assign is offset-aware (byte_off from dst.view.offset; new backend
+  buf_write_at/buf_copy_at); view_apply_shrink decodes kvar-packed begin/end bounds
+  (literal bounds byte-identical).  `tests/test_sym_kvcache_append.c` 42/42 (interp+
+  jit): K_t lands at row t for t=4 then t=2, other rows untouched, runtime offset is
+  live not baked.  test_cc 86463/86463.  (Minimal-viable slice-length encoding:
+  end=pack(s)+T recovers T from the raw packed delta; a cleaner length-field encoding
+  is a follow-up.)  REMAINING: (b) wire tokenLmForward into a single-new-token forward
+  that reads each layer's cache (WL integration); (c) TJit capture-once + per-step
+  replay (rebind t + the new token + the grown cache; the offset must re-read
+  kvar_runtime at fire, not bake at capture).
