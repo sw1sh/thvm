@@ -47,6 +47,12 @@ interactions.
   (EUF) SMT core.  Honest feature matrices vs SMT solvers (Z3/CVC5),
   FOL ATPs (Vampire/E), and UEQ provers (Waldmeister/Twee).
 
+* **[ml_guidance.md](ml_guidance.md)** -- machine-learned critical-pair
+  selection: ENIGMA + the ML-in-ATP landscape, and thvm's shipped
+  toolchain (`TAtpCpDataset` / `TAtpTrainScorer` / `TAtpSetLearnedScorer`
+  / `Method -> "ENIGMA"`), the 14 features, the C scorer, and the honest
+  measured baseline.  Staged plan in `docs/plans/atp_ml_roadmap.md`.
+
 * **[unification_roadmap.md](unification_roadmap.md)** — the design arc
   toward Z3-class SMT (multi-theory, CDCL(T), quantifier instantiation)
   *unified* with the completion engine, built on the fact that

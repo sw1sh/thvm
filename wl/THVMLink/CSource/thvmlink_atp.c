@@ -572,6 +572,29 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   if (cp_weight >= 0) {
     thvm_atp_set_cp_weight_mode(atp, (u32)cp_weight);
   }
+  // ENIGMA "coop" interleave (Method "CoopWeight" / "CoopRatio"): every
+  // coop_modulo-th selection picks by the secondary weight coop_mode (an
+  // AtpCpWeightMode int, e.g. 3 = GT) instead of the primary.  Pairing the
+  // learned primary scorer (cp_weight = 9 LEARNED) with a hand-tuned GT
+  // secondary mirrors real ENIGMA, which selects cooperatively with the
+  // base heuristic rather than by the model alone.  args[31]/[32] are the
+  // suboptions; when off (modulo <= 0) fall back to the THVM_ATP_W2_*
+  // env vars.  Both off -> the positional-arg path is byte-identical.
+  {
+    mint coop_mode   = MArgument_getInteger(args[31]);
+    mint coop_modulo = MArgument_getInteger(args[32]);
+    if (coop_modulo <= 0) {
+      const char *w2m = getenv("THVM_ATP_W2_MODE");
+      const char *w2k = getenv("THVM_ATP_W2_MODULO");
+      if (w2m != NULL && w2k != NULL) {
+        coop_mode   = atoi(w2m);
+        coop_modulo = atoi(w2k);
+      }
+    }
+    if (coop_mode >= 0 && coop_modulo > 0) {
+      thvm_atp_set_w2(atp, (u32)coop_modulo, (u8)coop_mode);
+    }
+  }
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[19] gates it: the default (any

@@ -233,7 +233,7 @@ static AtpFtCell **ft_splice_find_pred(AtpFtCell *parent, AtpFtCell *redex) {
 static int ft_splice_inplace_const_or_unbound_var(
     AtpFt *a, AtpFtCell *root, AtpFtCell *parent, AtpFtCell *redex,
     const AtpFtCell *rhs_tmpl, const void *subst) {
-  (void)root; (void)parent;
+  (void)parent;
   // Snapshot the displaced inner span BEFORE we overwrite redex's
   // fields.  The span runs from redex->next through redex->end (when
   // redex has children); for a single-cell redex it is empty.
@@ -267,6 +267,29 @@ static int ft_splice_inplace_const_or_unbound_var(
   // the ATP-test corpus exercises this regime via Sheffer rules whose
   // RHS is a bound var (regime c, not regime a), so the leaf-redex
   // case slipped through.
+  // Bubble the ancestor end-pointer fix-up BEFORE freeing the inner
+  // span.  Collapsing a multi-cell subtree to a single cell shrinks the
+  // pre-order span, so any ANCESTOR whose `->end` pointed at the old
+  // deepest cell (`tail_last`) must now point at `redex` -- the new, and
+  // only, cell of this subtree.  find_redex_ft (ft_norm.c) TRUSTS `->end`
+  // as the subtree boundary; it does not re-derive it from the head
+  // chain.  So an unfixed ancestor `->end` dangles into the freed span,
+  // and a later ft_splice is handed a redex whose `->end` precedes it in
+  // memory -- ft_free_span then walks the free-list chain and trips the
+  // n_persistent_alive underflow.  The fix is latent for a rightmost
+  // collapse (no ancestor `->end` points past the redex) and required
+  // for any inner-branch collapse, e.g. a group-completion CP normalize.
+  // This is the same ancestor bubble regime (c) runs below.  Walk from
+  // `root` down the head chain to `redex`, capped against a corrupted
+  // chain (the same 1<<24 bound as ft_splice_find_pred).
+  if (tail_last != redex) {
+    AtpFtCell *anc = root;
+    for (u32 _s = 0; anc != NULL && _s < (1u << 24); _s++) {
+      if (anc->end == tail_last) anc->end = redex;
+      if (anc == redex) break;
+      anc = anc->next;
+    }
+  }
   if (tail_first != NULL && tail_last != redex) {
     // Free the inner span [tail_first .. tail_last].  The span is
     // pre-threaded via `next` by the AtpFt invariant (ft.c stitches

@@ -2556,3 +2556,93 @@ VerificationTest[
     ProofObject,
     TestID -> "ATP/sheffer/ImpliesWolframAlternateAxioms-Mix2-SR2"
 ]
+
+(* === ENIGMA Tier 1: learned CP scorer (WL surface) + coop ========= *)
+
+$enigmaBakedW = {0.003216, -0.271657, 0.460614, -0.096104, 0.003216,
+    0.042247, 0.003216, -0.000402, -0.005740, -0.156174, -0.023514,
+    1.121586, 1.999360, -0.012683};
+$enigmaLin = <|"Kind" -> "Linear", "Mean" -> ConstantArray[0., 14],
+    "InvStd" -> ConstantArray[1., 14], "W" -> $enigmaBakedW, "B" -> -1.598045|>;
+
+(* Push a baked-in-equivalent linear model. *)
+VerificationTest[
+    TAtpSetLearnedScorer[$enigmaLin],
+    True,
+    TestID -> "ATP/enigma/set-linear-model"
+]
+
+(* Push a one-hidden-layer MLP (H = 8). *)
+VerificationTest[
+    TAtpSetLearnedScorer[<|"Kind" -> "MLP", "Mean" -> ConstantArray[0., 14],
+        "InvStd" -> ConstantArray[1., 14], "W1" -> ConstantArray[0.01, {8, 14}],
+        "B1" -> ConstantArray[0., 8], "W2" -> ConstantArray[0.1, 8],
+        "B2" -> 0.0|>],
+    True,
+    TestID -> "ATP/enigma/set-mlp-model"
+]
+
+(* A malformed model is rejected; the engine keeps the baked-in scorer. *)
+VerificationTest[
+    TAtpSetLearnedScorer[<|"Kind" -> "Linear", "W" -> {1., 2., 3.}, "B" -> 0.|>],
+    False,
+    TestID -> "ATP/enigma/reject-malformed-model"
+]
+
+VerificationTest[
+    TAtpSetLearnedScorer[Clear],
+    True,
+    TestID -> "ATP/enigma/clear-model"
+]
+
+(* Method -> "ENIGMA" is a first-class preset = learned CP selection that
+   coops with a GT secondary every 2nd pick by default. *)
+VerificationTest[
+    Lookup[TAtpDescribeMethod["ENIGMA"],
+        {"CriticalPairWeight", "CoopWeight", "CoopRatio"}],
+    {"Learned", "Gt", 2},
+    TestID -> "ATP/enigma/method-preset-describe"
+]
+
+(* A proof via Method -> "ENIGMA" (baked-in scorer, coop default)
+   completes -- the preset + the W2 coop suboptions are wired through. *)
+VerificationTest[
+    TAtpSetLearnedScorer[Clear];
+    TFindProof[f[e, x_] == x,
+        {f[x_, e] == x, f[x_, i[x_]] == e,
+         f[f[x_, y_], z_] == f[x_, f[y_, z_]]},
+        "Status", Method -> "ENIGMA", TimeConstraint -> 30],
+    "Proved",
+    TestID -> "ATP/enigma/method-preset-proves"
+]
+
+(* TAtpCpDataset returns a labelled feature matrix; TAtpTrainScorer trains
+   a model on it via thvm's TNetTrain.  Small group corpus. *)
+VerificationTest[
+    Module[{ds},
+        ds = TAtpCpDataset[
+            {f[e, x_] == x, f[i[x_], x_] == e, i[i[x_]] == x},
+            {f[x_, e] == x, f[x_, i[x_]] == e,
+             f[f[x_, y_], z_] == f[x_, f[y_, z_]]},
+            TimeConstraint -> 20];
+        {Dimensions[ds["Features"]][[2]], ds["NRows"] === Length[ds["Labels"]],
+         SubsetQ[{0, 1}, Union[ds["Labels"]]]}],
+    {14, True, True},
+    TestID -> "ATP/enigma/dataset-shape"
+]
+
+VerificationTest[
+    Module[{ds, r},
+        ds = TAtpCpDataset[
+            {f[e, x_] == x, f[i[x_], x_] == e, i[i[x_]] == x},
+            {f[x_, e] == x, f[x_, i[x_]] == e,
+             f[f[x_, y_], z_] == f[x_, f[y_, z_]]},
+            TimeConstraint -> 20];
+        r = TAtpTrainScorer[ds, "Hidden" -> 0, MaxTrainingRounds -> 50];
+        {Lookup[r["Model"], "Kind"], Length[r["Model"]["W"]]}],
+    {"Linear", 14},
+    TestID -> "ATP/enigma/train-linear"
+]
+
+(* Reset so later tests / sessions see the baked-in scorer. *)
+TAtpSetLearnedScorer[Clear];
