@@ -581,14 +581,35 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
            completion introduced past the original signature.  Both
            the dataset builder and the ProofObject "Variables" list
            need the complete set, or the verifier reads a stray
-           completion variable as a constant. *)
-        "VarSyms" -> Union[
-            Symbol /@ Values[idToName],
-            Cases[{mainRules, mainSteps, extSteps, mnfSteps},
-                s_Symbol /; StringMatchQ[SymbolName[s],
-                    "x" ~~ DigitCharacter ..],
-                {0, Infinity}]
-        ]
+           completion variable as a constant.
+
+           Block-localize the common short alphabet names around the
+           Symbol[name] construction: Symbol["c"] returns the symbol
+           Global`c, and any List that contains it eagerly evaluates --
+           so a caller with `Do[..., {c, ...}]` would otherwise see the
+           Do iter's value land in "VarSyms" instead of the bare symbol.
+           CanonicalizePatterns escapes axiom-side names upstream
+           (atpFreshGlobalSymbol -> c$Atp1), but the encoder's idToName
+           still carries the original short labels, so a Block here is
+           the right boundary. *)
+        "VarSyms" -> Quiet[Block[{
+                Global`a, Global`b, Global`c, Global`d, Global`e,
+                Global`f, Global`g, Global`h, Global`i, Global`j,
+                Global`k, Global`l, Global`m, Global`n, Global`o,
+                Global`p, Global`q, Global`r, Global`s, Global`t,
+                Global`u, Global`v, Global`w, Global`x, Global`y, Global`z,
+                Global`x1, Global`x2, Global`x3, Global`x4, Global`x5,
+                Global`x6, Global`x7, Global`x8, Global`x9, Global`x10,
+                Global`x11, Global`x12,
+                Global`y1, Global`y2, Global`y3,
+                Global`z1, Global`z2, Global`z3},
+            Union[
+                Symbol /@ Values[idToName],
+                Cases[{mainRules, mainSteps, extSteps, mnfSteps},
+                    s_Symbol /; StringMatchQ[SymbolName[s],
+                        "x" ~~ DigitCharacter ..],
+                    {0, Infinity}]
+            ]], {General::shdw}]
     |>
 ]
 

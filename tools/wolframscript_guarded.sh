@@ -62,7 +62,7 @@ if [ -n "$STALE_KERNS" ]; then
     echo "        $STALE_KERNS" >&2
     if [ -n "$BIG_KERNS" ]; then
       echo "        big kernels (>500MB RSS): $BIG_KERNS" >&2
-      echo "        kill those manually (`kill -9 ...`) then retry" >&2
+      echo "        kill those manually (kill -9 $BIG_KERNS) then retry" >&2
     fi
     exit 3
   fi
@@ -131,6 +131,29 @@ done
 
 wait "$WS_PID" 2>/dev/null
 RC=$?
+
+# Post-wait reap.  Even on a clean wolframscript exit, the WolframKernel
+# child can survive (the wrapper exits before sending the kernel a
+# disconnect over its SharedMemory mathlink).  Per
+# [[feedback_wolframscript_kill_child]], an orphan ATP kernel sits at
+# hundreds-of-MB-to-multi-GB until manually killed -- the guard's
+# next-spawn refusal then blocks legitimate work.  Hunt for any
+# WolframKernel that (a) isn't in the PRE_KERNS snapshot AND (b) is
+# specifically a wolframscript-spawned one (script-mode signature), and
+# SIGKILL each.  Skips the user's notebook/MCP kernels (they wear the
+# -wstp -linkprotocol signature, not the -runfirst Unprotect signature).
+LEFTOVER_KERNS=$(ps -axo pid,command | awk '
+  /WolframKernel/ && /-runfirst Unprotect/ && !/awk/ { print $1 }
+')
+if [ -n "$LEFTOVER_KERNS" ]; then
+  for p in $LEFTOVER_KERNS; do
+    if [ -z "$PRE_KERNS" ] || ! echo "$p" | grep -qE "^(${PRE_KERNS})$"; then
+      kill -KILL "$p" 2>/dev/null && \
+        echo "[guard] post-exit reap: killed orphan script-mode WolframKernel pid=$p" >&2
+    fi
+  done
+fi
+
 if [ "$KILLED" -eq 1 ]; then
   echo "[guard] killed on RSS cap; exit code overridden to 137" >&2
   exit 137

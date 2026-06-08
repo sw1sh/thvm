@@ -3115,25 +3115,59 @@ TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, returnSpec, opts];
 
+(* Block-localize the common short variable names a caller's outer
+   scope might have bound (e.g. `Do[..., {c, ...}]`).  The C engine's
+   term decoder reconstructs symbols via bare `Symbol[name]` from the
+   encoder's idToName label table -- if Global`c is set to a list when
+   the decode runs, the decoded `c` collapses into that list and the
+   verifier sees the wrong shape.  CanonicalizePatterns escapes the
+   axiom-side NAMES upstream (atpFreshGlobalSymbol -> name$Atp1) but
+   the decode + verify path reads bare names downstream where this
+   Block is the cleanest guard.  The full lowercase alphabet covers
+   the FuchsPraezedenz / CanonicalizePatterns name table; xN/yN/zN
+   cover the engine's "x<id>" FVR-fallback names.  See
+   [[project_atp_tfindproof_iter_leak]]. *)
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
-    atpProjectReturn[
-        atpProveBundle[
-            atpNormalizeConj[conjecture],
-            atpNormalizeAxioms[axioms],
-            MaxSteps -> OptionValue[MaxSteps],
-            Method -> OptionValue[Method],
-            TimeConstraint -> OptionValue[TimeConstraint]],
-        "ProofObject"];
+    Quiet[Block[{
+            Global`a, Global`b, Global`c, Global`d, Global`e,
+            Global`f, Global`g, Global`h, Global`i, Global`j,
+            Global`k, Global`l, Global`m, Global`n, Global`o,
+            Global`p, Global`q, Global`r, Global`s, Global`t,
+            Global`u, Global`v, Global`w, Global`x, Global`y, Global`z,
+            Global`x1, Global`x2, Global`x3, Global`x4, Global`x5,
+            Global`x6, Global`x7, Global`x8, Global`x9, Global`x10,
+            Global`x11, Global`x12,
+            Global`y1, Global`y2, Global`y3,
+            Global`z1, Global`z2, Global`z3},
+        atpProjectReturn[
+            atpProveBundle[
+                atpNormalizeConj[conjecture],
+                atpNormalizeAxioms[axioms],
+                MaxSteps -> OptionValue[MaxSteps],
+                Method -> OptionValue[Method],
+                TimeConstraint -> OptionValue[TimeConstraint]],
+            "ProofObject"]], {General::shdw}];
 TFindProof[conjecture_, axioms_List,
         returnSpec_?atpReturnSpecQ, OptionsPattern[]] :=
-    atpProjectReturn[
-        atpProveBundle[
-            atpNormalizeConj[conjecture],
-            atpNormalizeAxioms[axioms],
-            MaxSteps -> OptionValue[MaxSteps],
-            Method -> OptionValue[Method],
-            TimeConstraint -> OptionValue[TimeConstraint]],
-        returnSpec];
+    Quiet[Block[{
+            Global`a, Global`b, Global`c, Global`d, Global`e,
+            Global`f, Global`g, Global`h, Global`i, Global`j,
+            Global`k, Global`l, Global`m, Global`n, Global`o,
+            Global`p, Global`q, Global`r, Global`s, Global`t,
+            Global`u, Global`v, Global`w, Global`x, Global`y, Global`z,
+            Global`x1, Global`x2, Global`x3, Global`x4, Global`x5,
+            Global`x6, Global`x7, Global`x8, Global`x9, Global`x10,
+            Global`x11, Global`x12,
+            Global`y1, Global`y2, Global`y3,
+            Global`z1, Global`z2, Global`z3},
+        atpProjectReturn[
+            atpProveBundle[
+                atpNormalizeConj[conjecture],
+                atpNormalizeAxioms[axioms],
+                MaxSteps -> OptionValue[MaxSteps],
+                Method -> OptionValue[Method],
+                TimeConstraint -> OptionValue[TimeConstraint]],
+            returnSpec]], {General::shdw}];
 
 (* Run a goal-directed proof and return a bundle:
      <|"enc", "cRes", "ProofObject", "RelevantAxioms"|>
