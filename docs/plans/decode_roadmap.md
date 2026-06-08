@@ -130,22 +130,38 @@ true at this layer -- but unwired end to end.
   DOES propagate kvar dims and the `.`/`+` sugar build + realize -- correcting
   the note above.  So GPT-2's embed + MLP (the outer-symbolic `{S, dim}` path)
   is done end to end.  REMAINING for the full block: the `{S, S}` attention.
-- **`{S, S}` causal mask -- a symbolic broadcast-addr SUB-PROJECT (open).** The
-  COMPUTED `{S,S}` path (Q.Kt -> softmax -> .V) is validated (`test_sym_attn`),
-  so the mask is built from a `{S}` ramp: `ramp -> reshape -> EXPAND {S,S} ->
-  compare`.  This peels symbolic broadcast-addr bugs one at a time, each a raw
-  kvar dim feeding numel / a stride / a flat-index suffix where it must resolve
-  to the upper bound (`kvar_extent_static`):
+- **`{S, S}` causal mask -- DONE** (`tests/test_sym_cmask.c`).  The COMPUTED
+  `{S,S}` attention path (Q.Kt -> softmax -> .V) was already validated
+  (`test_sym_attn`); the mask is built from a `{S}` ramp:
+  `ramp -> reshape -> EXPAND {S,S} -> compare`, giving the exact lower-triangular
+  0/-1e9 mask at a runtime-bound S.  Two workflow audits (read-only, both
+  archived as the bug map below) peeled the symbolic-broadcast-addr layer:
     - FIXED `7528654c`: `view_apply_reshape` numel + merge strides.
-    - FIXED (this commit): `view_apply_expand` numel (`(2^31)^2` overflowed u32
-      to garbage) + `ru_compose_one_view` flat-index suffix/mod.
-    - OPEN: `expand {S,1}->{S,S}` (broadcast the INNER axis, real stride on the
-      OUTER kvar axis) still reads element 0 for every row -- the outer-axis
-      coord collapses somewhere I haven't pinned (NOT `ru_compose_one_view`;
-      `test_sym_expand` diagnoses it).  `{1,S}->{S,S}` works.  Next: render the
-      `{S,1}` sum kernel (`TKernelSource`/`cpu_jit_render_canon`, DON'T run) to
-      see which addr coefficient drops the outer stride.  Workaround if it stays
-      stubborn: get `i` via `transpose` of the working `{1,S}` ramp.
+    - FIXED `a8292d88`: `view_apply_expand` numel ((2^31)^2 u32-overflow) +
+      `ru_compose_one_view` flat-index suffix/mod.
+    - FIXED (this commit): `view_strided_index` (+ its Metal clone) used the RAW
+      kvar dim as the back-to-front unravel divisor/modulus -> dividing by the
+      inner kvar extent (~2^31) zeroed `rem` and dropped every OUTER-axis
+      coordinate to element 0.  This was the `expand{S,1}` root (verified:
+      `tests/test_sym_gather.c`, a `{S,1}->{S,S}` direct realize now gives
+      `ri[i,j]=i`).  Plus the `materialize_root_alias` gather-size companion.
+  KNOWN-OPEN (documented, NOT blocking -- the mask realizes the broadcast
+  expands to contiguous via the gather path, sidestepping these FUSED-path
+  bugs; fix them later for fused/no-gather perf):
+    - `uop_walk.c:808` partial-collapse reduce: a multi-axis reduce whose body
+      lost one axis to a broadcast-collapse (EXPAND->CONST(0)) returns the reduce
+      IDENTITY instead of folding the collapsed axis's extent (so a
+      sum-over-a-broadcast-expand reads 0).  The existing repairs
+      (`ru_reduce_repair_broadcast_body`, `repair_collapsed_reduces_rec`) only
+      handle FULL collapse.  `test_sym_expand` diagnoses the `{S,1}` reduce.
+    - a fused binary-op over two broadcast expands still faults (separate, not
+      yet pinned).
+    - ~15 latent raw-kvar coefficient/sizing sites from the audits (high-conf:
+      `materialize.c:2155` want_strides mirror of the fixed `rangeify:1263`;
+      `materialize.c:4553` view_apply_flip offset; `materialize.c:4793`
+      view_resolve_inner numel; `dag_scan.c` 114/162/1855/2388/2390/2723/2724
+      sizing products via `uop_range_extent`/`uop_buffer_dim`).  Apply with the
+      stride/sizing->`kvar_extent_static` rule when their paths are exercised.
 - **M3**: the GPT-2 forward symbolic end to end -- no `maxSeq`, JIT-captured once,
   replayed at the running length. The example collapses to
   `step = TJit[... TFromNet[net, ids] ...]` over the raw growing ids (the one-hot

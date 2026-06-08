@@ -20,7 +20,11 @@ fn u32 view_strided_index(View const *v, u32 flat_idx) {
   u32 rem = flat_idx;
   // Walk axes back-to-front so c[i] = (rem / product_after) % dim.
   for (i32 axis = (i32)v->shape.ndim - 1; axis >= 0; axis--) {
-    u32 dim = v->shape.dims[axis];
+    // Resolve a symbolic (kvar) dim to its upper bound: the buffer layout is
+    // hi-padded, so this back-to-front unravel must divide/mod by hi.  The raw
+    // kvar-packed extent (~2^31) would zero `rem` on the inner axis and drop
+    // every outer-axis coordinate to 0 (all reads collapse to element 0).
+    u32 dim = kvar_extent_static(v->shape.dims[axis]);
     if (dim == 0) continue;
     u32 c = rem % dim;
     rem /= dim;

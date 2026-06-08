@@ -1224,7 +1224,8 @@ static u32 metal_view_strided_index(View const *v, u32 flat_idx) {
   int64_t acc = v->offset;
   u32 rem = flat_idx;
   for (i32 axis = (i32)v->shape.ndim - 1; axis >= 0; axis--) {
-    u32 dim = v->shape.dims[axis];
+    // Resolve a symbolic (kvar) dim to its hi bound (see view_strided_index).
+    u32 dim = kvar_extent_static(v->shape.dims[axis]);
     if (dim == 0) {
       continue;
     }

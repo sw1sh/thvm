@@ -4838,8 +4838,12 @@ static Term materialize_root_alias(Term t) {
   if (d->nviews == 0) {
     i32 m = d->view.offset;
     for (u32 i = 0; i < d->view.shape.ndim; i++) {
-      if (d->view.shape.dims[i] > 1 && d->view.strides[i] > 0)
-        m += (i32)(d->view.shape.dims[i] - 1) * d->view.strides[i];
+      // Resolve a symbolic (kvar) dim to its hi bound: the gather buffer is
+      // sized at the worst case; the raw kvar-packed extent would make
+      // (dim-1)*stride ~= INT_MAX*stride and corrupt the allocation size.
+      u32 dim_s = kvar_extent_static(d->view.shape.dims[i]);
+      if (dim_s > 1 && d->view.strides[i] > 0)
+        m += (i32)(dim_s - 1) * d->view.strides[i];
     }
     max_idx = (u32)m;
   } else {
