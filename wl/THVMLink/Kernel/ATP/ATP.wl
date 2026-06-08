@@ -69,6 +69,10 @@ TAtpTrainScorer::usage = "TAtpTrainScorer[dataset] trains a critical-pair select
 
 TAtpSetLearnedScorer::usage = "TAtpSetLearnedScorer[model] pushes a trained critical-pair selection model into the C ATP engine; subsequent proofs run with Method -> {..., \"CriticalPairWeight\" -> \"Learned\"} use it instead of the baked-in logistic regression.  model is an Association: <|\"Kind\" -> \"Linear\", \"Mean\" -> {14 reals}, \"InvStd\" -> {14 reals}, \"W\" -> {14 reals}, \"B\" -> real|> for a linear model, or <|\"Kind\" -> \"MLP\", \"Mean\" -> ..., \"InvStd\" -> ..., \"W1\" -> H x 14 matrix, \"B1\" -> {H reals}, \"W2\" -> {H reals}, \"B2\" -> real|> for a one-hidden-layer ReLU network (H <= 64).  Features are standardized as (feature - Mean)*InvStd before the forward pass (pass Mean -> 0, InvStd -> 1 to disable); the model outputs a raw logit (higher = more proof-relevant = selected sooner).  Mean / InvStd default to identity if omitted.  TAtpSetLearnedScorer[Clear] (or None) drops the model and reverts to the baked-in scorer.  Returns True on success, False on a malformed model.  The 14 features are documented in docs/plans/atp_enigma_cp_selector.md (size_sum, max_depth, n_distinct_vars, n_var_occ, weight_add, weight_gt, weight_mix2, goal_weight, age, top_symbol_l, top_symbol_r, shares_goal_sub, orientable, unif_measure).";
 
+TAtpCpGraph::usage = "TAtpCpGraph[lhs == rhs] encodes one equation / critical pair (also accepts Inactive[Equal][lhs, rhs] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over.  Returns <|\"NodeTypes\" -> {...}, \"NodeFeatures\" -> (NNodes x 6 matrix), \"Edges\" -> {{src, dst, type}, ...}, \"NNodes\" -> n, \"NEdges\" -> m|>.  Node 0 is the critical-pair super-node; the remaining nodes are TERM occurrences (one per subterm in the preorder walk of lhs then rhs), SYMBOL nodes (one per distinct operator / numeric constant), and VAR nodes (one per distinct variable).  Node types are coded 0 = CPSuper, 1 = Term, 2 = Symbol, 3 = Var; edge types 0 = term->symbol, 1 = term->child, 2 = cp->lhs-root, 3 = cp->rhs-root.  The six node-feature columns are PURELY STRUCTURAL -- {is_term, is_symbol, is_var, arity, occurrence_count, is_cpsuper} -- and never encode the concrete symbol label, variable id, or numeric value, so two equations equal up to a consistent renaming of symbols + variables produce bit-identical graphs.  lhs and rhs share one encoder state, so a symbol or variable common to both sides is a single deduped node.  This is the per-equation graph encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset.";
+
+TAtpGraphDataset::usage = "TAtpGraphDataset[conjectures, axioms] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset for an ENIGMA Tier 2 graph neural network: <|\"Graphs\" -> {graph...}, \"Labels\" -> {0/1...}, \"NPos\" -> p, \"NNeg\" -> n, \"NProofs\" -> k|>, where each graph is a TAtpCpGraph Association and label 1 marks a proof-essential lemma, 0 a saturated-but-unused rule.  TAtpGraphDataset[theory] runs all of AxiomaticTheory[theory, \"NotableTheorems\"] against the theory's axioms.  POSITIVES are the equations of types CriticalPairLemma / SubstitutionLemma in the ProofObject's proof chain (the lemmas the proof actually used); NEGATIVES are the saturated rule set (TFindProof[..., \"Lemmas\"]) minus any rule structurally equal to a positive.  Structural equality uses a canonical key that renames pattern / Slot / FVR variables to positional placeholders in first-appearance order and treats the equation as an unordered pair (so l == r and r == l collapse), which both separates positives from negatives and drops duplicate rows.  Only PROVED runs contribute graphs.  Unlike TAtpCpDataset's per-critical-pair feature rows, this sources CLEAN positives straight from the verified proof object (it works even for a minimal-normal-form-only proof that records no per-CP features), and its graphs are the symbol/variable-anonymised structural counterpart of the Tier-1 14-feature vectors -- feed \"Graphs\" / \"Labels\" to a GNN.  Options: Method (default {\"Completion\"}), TimeConstraint (per proof, default 30), MaxSteps.";
+
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
    Begin[`Private`] resolve to the shared THVMLink`ATP`X symbol
@@ -196,6 +200,18 @@ $atpSetLearnedScorerFn := $atpSetLearnedScorerFn = load[
     "thvm_wl_atp_set_learned_scorer",
     {{Real, 1}},
     Integer
+]
+
+(* ENIGMA Tier 2: anonymised CP hypergraph for a single equation.  Takes
+   the two Term integer values (lhs, rhs); returns one self-describing
+   Real (f64) NumericArray -- a 4-real header [ok, n_nodes, n_edges,
+   feat_dim] followed by node_type[n_nodes], node_feat[n_nodes*feat_dim]
+   (row-major), edge_src[n_edges], edge_dst[n_edges], edge_type[n_edges]
+   (see thvm_wl_atp_cp_graph in thvmlink_atp.c). *)
+$atpCpGraphFn := $atpCpGraphFn = load[
+    "thvm_wl_atp_cp_graph",
+    {Integer, Integer},
+    "NumericArray"
 ]
 
 (* Flatten a model Association into the C parameter blob
@@ -509,6 +525,240 @@ encodeAtpTerm[expr_, state_Association] := Block[{
 ]
 
 encodeAtpTermInit[] := <|"sym" -> <||>, "var" -> <||>, "next_lab" -> 1|>
+
+(* === ENIGMA Tier 2: anonymised CP hypergraph export ================ *)
+
+(* Strip the equation wrappers TAtpCpGraph accepts down to a held
+   {lhs, rhs} pair.  IgnoringInactive[Equal[...]] matches an equation
+   whether or not its head is wrapped in Inactive, so the bare == and the
+   Inactive[Equal] forms collapse to one clause each (with vs without an
+   outer HoldForm).  The two sides stay held (HoldComplete) so pattern
+   variables (`x_`) and tautology shapes (`a == a`) survive intact for
+   the encoder. *)
+SetAttributes[atpCpSides, HoldAllComplete];
+atpCpSides[HoldPattern[HoldForm[IgnoringInactive[Equal[l_, r_]]]]] :=
+    {HoldComplete[l], HoldComplete[r]}
+atpCpSides[HoldPattern[IgnoringInactive[Equal[l_, r_]]]] :=
+    {HoldComplete[l], HoldComplete[r]}
+atpCpSides[_] := $Failed
+
+(* Decode the self-describing f64 NumericArray $atpCpGraphFn returns into
+   the public graph Association.  Header [ok, n_nodes, n_edges, feat_dim]
+   then node_type, node_feat (row-major), edge_src, edge_dst, edge_type. *)
+atpCpGraphDecode[raw_List] := Module[{
+    ok = Round[raw[[1]]], nN = Round[raw[[2]]], nE = Round[raw[[3]]],
+    fd = Round[raw[[4]]], off, nodeTypes, nodeFeat, eSrc, eDst, eType
+},
+    If[ ok =!= 1,
+        Return[<|"NodeTypes" -> {}, "NodeFeatures" -> {}, "Edges" -> {},
+            "NNodes" -> 0, "NEdges" -> 0|>]];
+    off = 4;
+    nodeTypes = Round[raw[[off + 1 ;; off + nN]]];
+    off += nN;
+    nodeFeat = If[ nN > 0,
+        Partition[raw[[off + 1 ;; off + nN*fd]], fd], {}];
+    off += nN*fd;
+    eSrc  = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
+    eDst  = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
+    eType = Round[raw[[off + 1 ;; off + nE]]];
+    <|
+        "NodeTypes" -> nodeTypes,
+        "NodeFeatures" -> nodeFeat,
+        "Edges" -> Transpose[{eSrc, eDst, eType}],
+        "NNodes" -> nN,
+        "NEdges" -> nE
+    |>
+]
+
+(* Encode a held {lhs, rhs} pair into the anonymised hypergraph: one
+   shared encoder state so a symbol / variable common to both sides is a
+   single deduped node, then call the C extractor + decode. *)
+atpCpGraphFromSides[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{
+    st = encodeAtpTermInit[], lr, rr, lt, rt
+},
+    lr = encodeAtpTerm[lhsHC[[1]], st];
+    rr = encodeAtpTerm[rhsHC[[1]], lr[[2]]];
+    lt = lr[[1]];
+    rt = rr[[1]];
+    atpCpGraphDecode[Normal[$atpCpGraphFn[lt, rt]]]
+]
+
+TAtpCpGraph[eq_] := Module[{sides = atpCpSides[eq]},
+    If[ sides === $Failed, $Failed, atpCpGraphFromSides[sides]]]
+SetAttributes[TAtpCpGraph, HoldAllComplete];
+
+(* === ENIGMA Tier 2: canonical equation key (rename-invariant dedup) === *)
+
+(* The canonical key normalises a held equation so two equations equal
+   up to a consistent renaming of VARIABLES, AND up to swapping the two
+   sides, collapse to the same key.  Only pattern (`x_`) / Slot / Blank
+   variables are anonymised to positional placeholders (first-appearance
+   order over the {lhs, rhs} preorder); concrete constant + operator
+   symbols and numeric literals keep their literal identity, so genuinely
+   different ground equations (`a == b` vs `c == a`) stay distinct while
+   `f[x_, i[x_]]` and `f[y_, i[y_]]` collapse.  This is the WL-level
+   dedup key for separating proof-essential positives from the saturated
+   negatives + dropping duplicate rows.  (The C extractor anonymises far
+   more aggressively -- it is structural by design for the GNN -- but
+   that bit-identity is too coarse for distinguishing dataset rows.) *)
+
+(* Rewrite an (inert) equation side to its canonical form, threading a
+   <|varname -> placeholder, "n" -> next|> variable-renaming state.
+   Returns {canonExpr, state'}.  Mirrors encodeAtpTerm's clause shape:
+   only the variable clauses intern a fresh placeholder; constants,
+   numerics and compound heads keep their literal identity. *)
+atpCanonRec[Verbatim[Pattern][name_Symbol, Blank[]], st_] :=
+    atpCanonVar["v$" <> SymbolName[Unevaluated[name]], st]
+atpCanonRec[Verbatim[Slot][k_], st_] := atpCanonVar["s$" <> ToString[k], st]
+atpCanonRec[Verbatim[Blank][], st_] := atpCanonVar["b$", st]
+atpCanonRec[s_Symbol, st_] := {$atpCanonConst[ToString[Unevaluated[s]]], st}
+atpCanonRec[n:(_Integer | _Real | _Rational), st_] :=
+    {$atpCanonConst[ToString[n, InputForm]], st}
+atpCanonRec[expr_, st_] := Module[{st2, childCanon},
+    {childCanon, st2} = Fold[atpCanonStep, {{}, st}, List @@ expr];
+    {$atpCanonNode[ToString[Head[expr]], childCanon], st2}
+]
+
+(* Intern a variable name into a positional placeholder (first-appearance
+   order); a repeat occurrence reuses its placeholder so shared variables
+   are tracked. *)
+atpCanonVar[id_String, st_Association] := If[
+    KeyExistsQ[st, id],
+    {$atpCanonVar[st[id]], st},
+    With[{p = st["n"]},
+        {$atpCanonVar[p], Append[Append[st, id -> p], "n" -> p + 1]}]
+]
+
+atpCanonStep[{acc_, st_}, child_] := Block[{r = atpCanonRec[child, st]},
+    {Append[acc, r[[1]]], r[[2]]}]
+
+(* === ENIGMA Tier 2: ProofObject lemmas -> labelled graph dataset === *)
+
+(* The proof-essential lemma types: a CriticalPairLemma or a
+   SubstitutionLemma in the ProofObject's proof chain is a lemma the
+   proof actually used (a clean positive). *)
+$AtpPositiveLemmaTypes = {"CriticalPairLemma", "SubstitutionLemma"};
+
+(* Pull a ProofObject's proof chain as a genuine Association keyed by
+   the {Type, k} tuples.  The bare 4th arg's "Proof" value is a List of
+   Rules, so we go through the public ProofDataset property (a Dataset)
+   and Normal it -- that yields the {Type, k} -> <|Statement, ...|>
+   Association the entry lookups below need. *)
+atpProofChain[p_] := If[ MatchQ[p, _ProofObject],
+    With[{nd = Quiet[Normal[p["ProofDataset"]]]},
+        If[ AssociationQ[nd], nd, <||>]],
+    <||>]
+
+(* The held {lhs, rhs} sides of a proof-chain entry whose Statement is a
+   HoldForm[lhs == rhs].  Returns $Failed on an unexpected shape. *)
+atpEntrySides[entry_Association] := With[{st = Lookup[entry, "Statement"]},
+    If[ MissingQ[st], $Failed, atpCpSides[st]]]
+atpEntrySides[_] := $Failed
+
+(* The proof-essential POSITIVE equations of a ProofObject: the held
+   {lhs, rhs} sides of every CriticalPairLemma / SubstitutionLemma
+   entry.  Keyed by type-string match on the {Type, k} chain keys; each
+   key is a list, so index the chain Association via Key[...]. *)
+atpProofPositives[p_] := Module[{chain = atpProofChain[p], keys},
+    keys = Select[Keys[chain],
+        MatchQ[#, {t_String, _} /; MemberQ[$AtpPositiveLemmaTypes, t]] &];
+    DeleteCases[atpEntrySides[Lookup[chain, Key[#]]] & /@ keys, $Failed]
+]
+
+(* The saturated NEGATIVE candidates: TFindProof[..., "Lemmas"] yields
+   Inactive[Equal][l, r] rules; peel each to held {lhs, rhs} sides. *)
+atpSatSides[lemmas_List] := DeleteCases[atpCpSides /@ lemmas, $Failed]
+atpSatSides[_] := {}
+
+(* Assemble one proof's labelled rows: positives (label 1) from the
+   proof chain, negatives (label 0) from the saturated set minus any
+   rule structurally equal (canonical key) to a positive; then dedup
+   rows by canonical key (positives win a tie).  Each row is
+   {heldSides, label}. *)
+atpGraphRows[p_, lemmas_] := Block[{posKept, posKeySet, negKept},
+    (* Positives: drop unkeyable sides, keep the first row per canonical
+       key. *)
+    posKept = DeleteDuplicatesBy[
+        Select[atpProofPositives[p], atpEqCanonKeyOf[#] =!= $Failed &],
+        atpEqCanonKeyOf];
+    posKeySet = atpEqCanonKeyOf /@ posKept;
+    (* Negatives: keyable, not already a positive, first row per key. *)
+    negKept = DeleteDuplicatesBy[
+        Select[atpSatSides[lemmas],
+            With[{k = atpEqCanonKeyOf[#]},
+                k =!= $Failed && ! MemberQ[posKeySet, k]] &],
+        atpEqCanonKeyOf];
+    Join[{#, 1} & /@ posKept, {#, 0} & /@ negKept]
+]
+
+(* Canonical key directly off a held {lhsHC, rhsHC} pair (the shape
+   atpProofPositives / atpSatSides produce).  ONE shared renaming state
+   threads lhs-then-rhs so a symbol / variable common to both sides maps
+   to the same placeholder (cross-side sharing is part of the equation's
+   identity), then the two canonical sides are sorted into an UNORDERED
+   pair so l == r and r == l collapse. *)
+atpEqCanonKeyOf[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{lr, rr},
+    lr = atpCanonRec[lhsHC[[1]], <|"n" -> 0|>];
+    rr = atpCanonRec[rhsHC[[1]], lr[[2]]];
+    Sort[{lr[[1]], rr[[1]]}]
+]
+atpEqCanonKeyOf[_] := $Failed
+
+Options[TAtpGraphDataset] = {Method -> {"Completion"}, TimeConstraint -> 30,
+    MaxSteps -> Automatic};
+
+(* Prove `conj` against `axioms`, collect its labelled graph rows.
+   Returns {rows, proved} where proved is 1 when the run yielded a
+   ProofObject (so the proof contributed), else 0. *)
+atpGraphRowsForProof[conj_, axioms_, m_, tc_] := Module[{p, lemmas},
+    p = Quiet[TFindProof[conj, axioms, Method -> m, TimeConstraint -> tc]];
+    If[ ! MatchQ[p, _ProofObject], Return[{{}, 0}]];
+    lemmas = Quiet[TFindProof[conj, axioms, "Lemmas",
+        Method -> m, TimeConstraint -> tc]];
+    If[ ! ListQ[lemmas], lemmas = {}];
+    {atpGraphRows[p, lemmas], 1}
+]
+
+(* Turn a list of {heldSides, label} rows into the dataset Association,
+   encoding each kept equation to a graph via the C extractor. *)
+atpGraphDatasetFromRows[rows_, nProofs_] := Module[{
+    graphs, labels, nPos
+},
+    graphs = atpCpGraphFromSides[#[[1]]] & /@ rows;
+    labels = #[[2]] & /@ rows;
+    nPos = Total[labels];
+    <|
+        "Graphs" -> graphs,
+        "Labels" -> labels,
+        "NPos" -> nPos,
+        "NNeg" -> Length[labels] - nPos,
+        "NProofs" -> nProofs
+    |>
+]
+
+TAtpGraphDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
+    Module[{
+        m = OptionValue[TAtpGraphDataset, {opts}, Method],
+        tc = OptionValue[TAtpGraphDataset, {opts}, TimeConstraint],
+        results, rows, nProofs
+    },
+        results = (atpGraphRowsForProof[#, axioms, m, tc] & /@ conjectures);
+        rows = Catenate[First /@ results];
+        nProofs = Total[Last /@ results];
+        atpGraphDatasetFromRows[rows, nProofs]
+    ]
+
+TAtpGraphDataset[theory_String, opts : OptionsPattern[]] := Module[{
+    thms = AxiomaticTheory[theory, "NotableTheorems"],
+    m = OptionValue[TAtpGraphDataset, {opts}, Method],
+    tc = OptionValue[TAtpGraphDataset, {opts}, TimeConstraint],
+    results, rows, nProofs
+},
+    results = (atpGraphRowsForProof[#, theory, m, tc] & /@ Values[thms]);
+    rows = Catenate[First /@ results];
+    nProofs = Total[Last /@ results];
+    atpGraphDatasetFromRows[rows, nProofs]
+]
 
 (* === Status decoder + stats Association builder =================== *)
 

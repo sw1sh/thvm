@@ -2644,5 +2644,85 @@ VerificationTest[
     TestID -> "ATP/enigma/train-linear"
 ]
 
+(* === ENIGMA Tier 2: anonymised CP hypergraph + graph dataset ====== *)
+
+(* TAtpCpGraph emits the C extractor's schema: 1 CPSuper (type 0) + the
+   TERM occurrences (type 1) of lhs/rhs preorder + the distinct SYMBOL
+   (type 2) + VAR (type 3) nodes, an n x 6 structural feature matrix, and
+   the typed edge list.  For f[x_, i[x_]] == e: 5 TERM (f, x, i, x, e),
+   3 SYMBOL (f, i, e), 1 VAR (x), 1 CPSuper = 10 nodes / 10 edges. *)
+VerificationTest[
+    Module[{g = TAtpCpGraph[f[x_, i[x_]] == e]},
+        {g["NNodes"], g["NEdges"], Dimensions[g["NodeFeatures"]],
+         Count[g["NodeTypes"], 0], Count[g["NodeTypes"], 1],
+         Count[g["NodeTypes"], 2], Count[g["NodeTypes"], 3],
+         Sort[Keys[g]]}],
+    {10, 10, {10, 6}, 1, 5, 3, 1,
+     Sort[{"NodeTypes", "NodeFeatures", "Edges", "NNodes", "NEdges"}]},
+    TestID -> "ATP/enigma/cpgraph-schema"
+]
+
+(* The node features are PURELY STRUCTURAL, so two equations equal up to
+   a consistent renaming of symbols + variables give identical graphs --
+   the whole point of the anonymisation (a model transfers across
+   symbols it never saw). *)
+VerificationTest[
+    Module[{a = TAtpCpGraph[f[x_, i[x_]] == e],
+            b = TAtpCpGraph[gg[y_, j[y_]] == d]},
+        {a["NodeTypes"] === b["NodeTypes"],
+         a["NodeFeatures"] === b["NodeFeatures"],
+         a["Edges"] === b["Edges"]}],
+    {True, True, True},
+    TestID -> "ATP/enigma/cpgraph-rename-invariant"
+]
+
+(* TAtpCpGraph also accepts the Inactive[Equal] / HoldForm lemma shapes
+   the ProofObject + saturated set ship. *)
+VerificationTest[
+    Module[{base = TAtpCpGraph[f[x_, i[x_]] == e]},
+        {TAtpCpGraph[Inactive[Equal][f[x_, i[x_]], e]] === base,
+         TAtpCpGraph[HoldForm[f[x_, i[x_]] == e]] === base}],
+    {True, True},
+    TestID -> "ATP/enigma/cpgraph-accepts-lemma-shapes"
+]
+
+(* TAtpGraphDataset turns verified ProofObject lemmas into labelled
+   graphs: proof-essential CriticalPairLemma / SubstitutionLemma rows
+   (label 1) + saturated-but-unused rows (label 0), deduped by the
+   rename-invariant canonical key.  A chained-equality corpus
+   reconstructs ProofObjects whose SubstitutionLemma positives + extra
+   saturated rules give both labels. *)
+VerificationTest[
+    Module[{ds = TAtpGraphDataset[{a == c, u == w},
+        {a == b, b == c, u == v, v == w}, TimeConstraint -> 20]},
+        {ds["NProofs"], ds["NPos"] >= 1, ds["NNeg"] >= 0,
+         Length[ds["Graphs"]] === Length[ds["Labels"]],
+         SubsetQ[{0, 1}, Union[ds["Labels"]]],
+         AllTrue[ds["Graphs"], AssociationQ[#] &&
+             Sort[Keys[#]] === Sort[{"NodeTypes", "NodeFeatures",
+                 "Edges", "NNodes", "NEdges"}] &],
+         Sort[Keys[ds]]}],
+    {2, True, True, True, True, True,
+     Sort[{"Graphs", "Labels", "NPos", "NNeg", "NProofs"}]},
+    TestID -> "ATP/enigma/graphdataset-labelled"
+]
+
+(* The dataset honours its NPos / NNeg / NProofs accounting and never
+   fabricates rows when a corpus does not reconstruct a ProofObject (a
+   group completion proof whose WL ProofObject decode currently
+   declines): the result is still a well-formed empty dataset. *)
+VerificationTest[
+    Module[{ds = TAtpGraphDataset[
+        {f[e, x_] == x, f[i[x_], x_] == e},
+        {f[x_, e] == x, f[x_, i[x_]] == e,
+         f[f[x_, y_], z_] == f[x_, f[y_, z_]]}, TimeConstraint -> 20]},
+        {Length[ds["Graphs"]] === Length[ds["Labels"]],
+         ds["NPos"] + ds["NNeg"] === Length[ds["Labels"]],
+         SubsetQ[{0, 1}, Union[ds["Labels"]]] || ds["Labels"] === {},
+         AllTrue[ds["Graphs"], AssociationQ]}],
+    {True, True, True, True},
+    TestID -> "ATP/enigma/graphdataset-wellformed"
+]
+
 (* Reset so later tests / sessions see the baked-in scorer. *)
 TAtpSetLearnedScorer[Clear];

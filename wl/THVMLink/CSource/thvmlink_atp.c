@@ -1597,3 +1597,77 @@ EXTERN_C DLLEXPORT int thvm_wl_ffmep_solve(WolframLibraryData libData,
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
 }
+
+// === ENIGMA Tier 2: anonymised CP hypergraph export ==================
+//
+// Bridges thvm_atp_cp_graph (src/atp/_.c) to WL.  Builds the purely
+// structural typed graph for the critical pair (lhs, rhs) and ships it
+// as ONE self-describing f64 NumericArray the WL side unpacks:
+//
+//   [0] ok        (1 success / 0 overflow-or-failure)
+//   [1] n_nodes
+//   [2] n_edges
+//   [3] feat_dim  (= ATP_CPG_FEAT_DIM)
+//   then  node_type[n_nodes]                       (n_nodes f64)
+//   then  node_feat[n_nodes * feat_dim] row-major  (n_nodes*feat_dim f64)
+//   then  edge_src[n_edges]                         (n_edges f64)
+//   then  edge_dst[n_edges]                         (n_edges f64)
+//   then  edge_type[n_edges]                        (n_edges f64)
+//
+// On overflow / failure the header is [0, 0, 0, feat_dim] with no body,
+// so the WL caller can fall back to the Tier-1 feature vector.  Node
+// features are PURELY STRUCTURAL (kind / arity / occurrence count); the
+// concrete symbol labels and variable ids never reach WL.
+//
+// Inputs:
+//   args[0] = lhs Term (mint, packed Term value).
+//   args[1] = rhs Term (mint, packed Term value).
+//
+// The graph is large (~78 KB) so it is malloc'd rather than stacked.
+EXTERN_C DLLEXPORT int thvm_wl_atp_cp_graph(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)argc;
+  Term lhs = (Term)MArgument_getInteger(args[0]);
+  Term rhs = (Term)MArgument_getInteger(args[1]);
+
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+
+  AtpCpGraph *g = (AtpCpGraph *)malloc(sizeof(AtpCpGraph));
+  if (g == NULL) return LIBRARY_FUNCTION_ERROR;
+
+  int ok = thvm_atp_cp_graph(lhs, rhs, g);
+
+  // On overflow / failure ship just the 4-int header so WL falls back.
+  u32 n_nodes = ok ? g->n_nodes : 0u;
+  u32 n_edges = ok ? g->n_edges : 0u;
+  mint total  = 4
+              + (mint)n_nodes                         // node_type
+              + (mint)n_nodes * (mint)ATP_CPG_FEAT_DIM // node_feat
+              + (mint)n_edges * 3;                     // src/dst/type
+
+  MNumericArray out;
+  mint dims[1] = { total };
+  if (naf->MNumericArray_new(MNumericArray_Type_Real64, 1, dims, &out)
+        != 0) {
+    free(g);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  double *o = (double *)naf->MNumericArray_getData(out);
+  mint at = 0;
+  o[at++] = (double)(ok ? 1 : 0);
+  o[at++] = (double)n_nodes;
+  o[at++] = (double)n_edges;
+  o[at++] = (double)ATP_CPG_FEAT_DIM;
+  for (u32 i = 0; i < n_nodes; i++) o[at++] = (double)g->node_type[i];
+  for (u32 i = 0; i < n_nodes * ATP_CPG_FEAT_DIM; i++)
+    o[at++] = (double)g->node_feat[i];
+  for (u32 i = 0; i < n_edges; i++) o[at++] = (double)g->edge_src[i];
+  for (u32 i = 0; i < n_edges; i++) o[at++] = (double)g->edge_dst[i];
+  for (u32 i = 0; i < n_edges; i++) o[at++] = (double)g->edge_type[i];
+
+  free(g);
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
