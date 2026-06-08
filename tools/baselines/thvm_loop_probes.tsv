@@ -43,3 +43,9 @@ AbelianMcCuneAxioms	Associativity	57	-	44	59	OK.  chain=57 vs WM_rules=44 -- thv
 RobbinsAxioms	DoubleNegation	FAIL	FAIL	-	-	Both engines FAIL: WM CLI reports FAIL in wm_cli_sweep.tsv, thvm Method->"Waldmeister" AND Method->"VampireUEQ" AND Method->Automatic all time out at 60-120s.  Robbins -> Boolean is famously hard (McCune's million-step proof historically).
 HillmanAxioms	ImpliesWolframAxioms	50	-	-	54	OK under Automatic.  WM CLI baseline not in sweep.
 HillmanAxioms	ImpliesShefferAxioms	FAIL	-	-	-	Sheffer is the deep equational case (analogous to WolframAxioms); thvm Automatic FAILs at 60s.  WM CLI baseline not in sweep.
+BooleanAxioms	OrDistributivity	3	-	4	10	OK under Waldmeister.  chain=3 vs WM_rules=4 -- close parity.
+BooleanAxioms	Transposition	14	-	23	21	OK.  chain=14 vs WM_rules=23 -- thvm 40% shorter.
+AbelianTarskiAxioms	Commutativity	6	-	15	8	OK.  chain=6 vs WM_rules=15 -- thvm 60% shorter (AC structure compresses well).
+AbelianTarskiAxioms	Associativity	12	-	14	14	OK.  chain=12 vs WM_rules=14 -- close parity.
+HigmanNeumannAxioms	Associativity	36	-	21	38	OK.  chain=36 vs WM_rules=21 -- thvm 70% LONGER (same single-axiom non-AC pattern as McCune cases).
+HigmanNeumannAxioms	EqualityOfIdentities	13	-	8	15	OK.  chain=13 vs WM_rules=8 -- thvm 60% longer (same pattern).
