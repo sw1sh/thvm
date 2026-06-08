@@ -55,3 +55,7 @@ AbelianGroupAxioms	InverseOfComposite	15	-	12	20	OK.  chain=15 vs WM_rules=12 --
 AbelianMcCuneAxioms	InverseOfComposite	21	-	18	23	OK.  chain=21 vs WM_rules=18 -- thvm 17% longer.
 AbelianMcCuneAxioms	ImpliesMcCuneAxioms	41	-	37	43	OK.  chain=41 vs WM_rules=37 -- close parity (+11%).
 CommutativeRingWithIdentityAxioms	MinusOneYieldsInverse	39	-	57	48	OK.  chain=39 vs WM_rules=57 -- thvm 31% shorter (AC+ring structure compresses well).
+BooleanAxioms	AndAssociativity	72	-	135	79	OK under Method->"Waldmeister".  chain=72 vs WM_rules=135 -- thvm 47% shorter.
+BooleanAxioms	OrAssociativity	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close parity (+1.5%).
+BooleanAxioms	DeMorgan__c1	97	-	192	104	OK.  chain=97 vs WM_rules=192 -- thvm 50% shorter (deep AC compression).
+BooleanAxioms	DeMorgan__c2	90	-	188	97	OK.  chain=90 vs WM_rules=188 -- thvm 52% shorter.

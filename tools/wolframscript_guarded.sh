@@ -46,24 +46,26 @@ fi
 SCRIPT="$1"
 shift
 
-# Refuse if any non-trivial WolframKernel is already running.  Each
-# WolframKernel pre-reserves ~443GB VSZ on macOS (built into the binary,
-# independent of thvm), and accumulated kernels strain Darwin VM
-# accounting even at low RSS.  An interactive notebook / MCP server
-# kernel typically sits at ~50MB; an active ATP one runs hundreds of MB.
-# Cap: refuse if >1 alive (one is plausibly user notebook/MCP), or any
-# kernel above 500MB RSS (probably leftover from a prior crash).
+# Refuse if any individual WolframKernel is over 500MB RSS -- that's
+# the actual danger pattern (one runaway ATP kernel diverging).  The
+# OS-crash incidents the original guard was built around (see
+# [[feedback_wolframscript_oom_risk]]) were caused by a SINGLE
+# diverging kernel eating heap until heap_alloc exit(1)'d -- not by
+# the count of small kernels alive.  Concurrent agents / MCP / a user
+# notebook can all coexist at low RSS without strain.  After the
+# heap_alloc longjmp-recovery fix (ebfc1742, thvm_fatal -> longjmp
+# back to the WL bridge instead of exit(1)), even a diverging kernel
+# survives -- so this gate is now a soft-cap on the per-kernel
+# footprint, not a hard count.  The watchdog below still SIGKILLs a
+# spawned kernel that exceeds RSS_CAP mid-run.
 STALE_KERNS=$(ps -axo pid,rss,command | awk '/WolframKernel/ && !/awk/ {print $1":"$2}')
 if [ -n "$STALE_KERNS" ]; then
-  N_KERNS=$(echo "$STALE_KERNS" | wc -l | tr -d ' ')
   BIG_KERNS=$(echo "$STALE_KERNS" | awk -F: '$2 > 512000 {print $1}' | tr '\n' ' ')
-  if [ "$N_KERNS" -gt 1 ] || [ -n "$BIG_KERNS" ]; then
-    echo "[guard] REFUSING SPAWN: $N_KERNS WolframKernel(s) already alive" >&2
+  if [ -n "$BIG_KERNS" ]; then
+    echo "[guard] REFUSING SPAWN: WolframKernel(s) over 500MB RSS already alive" >&2
     echo "        $STALE_KERNS" >&2
-    if [ -n "$BIG_KERNS" ]; then
-      echo "        big kernels (>500MB RSS): $BIG_KERNS" >&2
-      echo "        kill those manually (kill -9 $BIG_KERNS) then retry" >&2
-    fi
+    echo "        big kernels (>500MB RSS): $BIG_KERNS" >&2
+    echo "        kill those manually (kill -9 $BIG_KERNS) then retry" >&2
     exit 3
   fi
 fi
