@@ -18,3 +18,15 @@ MeredithAxioms	Commutativity	8	1	4	11	OK under Waldmeister preset (post ad806378
 HigmanNeumannAxioms	RightIdentity	8	1	6	10	OK post a7e4bcd8.  An earlier /loop iteration recorded this as FAIL due to TFindProof's Do-iter leak (probe used `c` as Do iter -> bare Symbol[c] decoded into user's binding).  Fixed at the dispatch level with a Block of Global` short names.  WM chain depth = 8 events (3 orient + 1 cp + 1 orient + 1 cp + 1 orient + 1 reduce + 1 final), matches thvm chain=8 EXACTLY.
 HigmanNeumannAxioms	LeftIdentity	12	-	8	14	OK post a7e4bcd8 (same Do-iter leak as RightIdentity).  thvm chain=12 vs WM_rules_stat=8.
 AbelianGroupAxioms	InverseOfInverse	7	-	7	12	OK both pre and post a7e4bcd8 (axioms here don't bind `c`, so the Do-iter leak didn't apply -- this row stable across the fix).  Already reflects parity_wm_wmcli.tsv (PARITY).
+HuntingtonAxioms	DoubleNegation	20	-	32	24	OK.  chain=20 vs WM_rules=32 -- thvm shorter (compression).
+AbelianMcCuneAxioms	InverseOfInverse	12	-	10	14	OK.  chain=12 vs WM_rules=10 -- thvm slightly longer; investigate later if a non-AC-aware preset fits better.
+CombinatorAxioms	BCKWToSKI__c1	5	-	5	12	OK under Waldmeister preset.  EXACT PARITY: chain=5 == WM_rules=5.  Combinatory logic family -- no commutativity-class structure, so chain-vs-rules tend to match closely.
+CombinatorAxioms	BCKWToSKI__c2	19	-	19	26	OK.  EXACT PARITY: chain=19 == WM_rules=19.
+CombinatorAxioms	BCKWToSKI__c3	5	-	5	12	OK.  EXACT PARITY: chain=5 == WM_rules=5.
+CombinatorAxioms	SKIToBCKW__c3	3	-	7	10	OK (c3 only -- c1/c2 are HARD; WM CLI reports 9377/7473 rules with overflow search time, both engines effectively saturated and timeout under 30s).  chain=3 vs WM_rules=7 -- thvm shorter.
+AbelianTarskiAxioms	ImpliesHigmanNeumannAxioms	8	-	5	10	OK.  chain=8 vs WM_rules=5 -- thvm slightly longer (new theory family).
+BooleanAxioms	Absorption	27	-	44	34	OK.  chain=27 vs WM_rules=44 -- thvm noticeably shorter (chain compression on a medium-hard goal).
+BooleanAxioms	AbsorptionOrAnd	28	-	43	35	OK.  chain=28 vs WM_rules=43.
+BooleanAxioms	ImpliesHuntingtonAxioms__c1	1	-	4	8	OK.  chain=1 vs WM_rules=4 -- same AndComm-style 1-step proof shape.
+BooleanAxioms	ImpliesHuntingtonAxioms__c2	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close to parity, slightly longer.
+BooleanAxioms	ImpliesHuntingtonAxioms__c3	103	-	189	110	OK.  chain=103 vs WM_rules=189 -- thvm noticeably shorter (chain compression on a deep goal).
