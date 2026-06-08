@@ -39,48 +39,67 @@ Begin["`Private`"];
 (* Forward-declare sibling-owned symbols so bare references resolve to the
    real THVMLink` symbols rather than phantom Private ones (alphabetical
    load order means Tensor.wl loads AFTER this file). *)
-{TTensorData, TTensorShape, TTensorDType, TRealize, dtypeCode, dtypeName,
- ensureInit};
+{TTensorData, TTensorShape, TTensorDType, TRealize, dtypeCode, dtypeName, ensureInit};
 
-$tensorMMapFn := $tensorMMapFn = load[
-    "thvm_wl_tensor_mmap", {"UTF8String", Integer, Integer, Integer, {Integer, 1}},
-    Integer]
+$tensorMMapFn := $tensorMMapFn = load["thvm_wl_tensor_mmap", {"UTF8String", Integer, Integer, Integer, {Integer, 1}}, Integer]
 
 (* safetensors dtype name <-> thvm dtype string (tinygrad safe_dtypes /
    inverse_safe_dtypes).  Only the byte-aligned dtypes the thvm runtime
    wires through the NumericArray carrier; the nibble + narrow-float
    dtypes are not part of the round-trip surface. *)
 $safeToThvm = <|
-    "BOOL" -> "bool", "I8" -> "i8", "U8" -> "u8",
-    "I16" -> "i16", "U16" -> "u16", "I32" -> "i32", "U32" -> "u32",
-    "I64" -> "i64", "U64" -> "u64", "F32" -> "f32", "F64" -> "f64"
+    "BOOL" -> "bool",
+    "I8" -> "i8",
+    "U8" -> "u8",
+    "I16" -> "i16",
+    "U16" -> "u16",
+    "I32" -> "i32",
+    "U32" -> "u32",
+    "I64" -> "i64",
+    "U64" -> "u64",
+    "F32" -> "f32",
+    "F64" -> "f64"
 |>;
 $thvmToSafe = Association[Reverse /@ Normal[$safeToThvm]];
 
 (* thvm dtype string -> WL NumericArray type.  Drives the little-endian
    byte write in TSafeSave. *)
 $thvmNAType = <|
-    "bool" -> "UnsignedInteger8", "i8" -> "Integer8", "u8" -> "UnsignedInteger8",
-    "i16" -> "Integer16", "u16" -> "UnsignedInteger16",
-    "i32" -> "Integer32", "u32" -> "UnsignedInteger32",
-    "i64" -> "Integer64", "u64" -> "UnsignedInteger64",
-    "f32" -> "Real32", "f64" -> "Real64"
+    "bool" -> "UnsignedInteger8",
+    "i8" -> "Integer8",
+    "u8" -> "UnsignedInteger8",
+    "i16" -> "Integer16",
+    "u16" -> "UnsignedInteger16",
+    "i32" -> "Integer32",
+    "u32" -> "UnsignedInteger32",
+    "i64" -> "Integer64",
+    "u64" -> "UnsignedInteger64",
+    "f32" -> "Real32",
+    "f64" -> "Real64"
 |>;
 
 (* thvm dtype string -> on-disk byte width per element. *)
 $thvmByteWidth = <|
-    "bool" -> 1, "i8" -> 1, "u8" -> 1, "i16" -> 2, "u16" -> 2,
-    "i32" -> 4, "u32" -> 4, "i64" -> 8, "u64" -> 8, "f32" -> 4, "f64" -> 8
+    "bool" -> 1,
+    "i8" -> 1,
+    "u8" -> 1,
+    "i16" -> 2,
+    "u16" -> 2,
+    "i32" -> 4,
+    "u32" -> 4,
+    "i64" -> 8,
+    "u64" -> 8,
+    "f32" -> 4,
+    "f64" -> 8
 |>;
 
 (* Disk-tensor constructor: dtype string + integer shape. *)
-TTensorMMap[path_String, byteOffset_Integer, nbytes_Integer,
-            dtype_String, shape_List] := (
+TTensorMMap[path_String, byteOffset_Integer, nbytes_Integer, dtype_String, shape_List] := (
     ensureInit[];
-    With[{t = $tensorMMapFn[path, byteOffset, nbytes,
-                            dtypeCode[dtype], shape]},
-        If[ IntegerQ[t] && t =!= 0, TTerm[t], $Failed]
-    ])
+    With[{t = $tensorMMapFn[path, byteOffset, nbytes, dtypeCode[dtype], shape]},
+        If[IntegerQ[t] && t =!= 0, TTerm[t], $Failed]
+    ]
+)
 
 (* Read the 8-byte LE header-length + the JSON header from a file.
    Returns {dataStart, metadataAssoc} where dataStart is the absolute
@@ -95,28 +114,24 @@ safeReadHeader[path_String] := Module[{strm, hlen, jsonBytes, json},
 ]
 
 (* The header's __metadata__ (string -> string), or an empty Association. *)
-TSafeLoadMetadata[path_String] := Lookup[
-    Last @ safeReadHeader[path], "__metadata__", <||>]
+TSafeLoadMetadata[path_String] := Lookup[Last @ safeReadHeader[path], "__metadata__", <||>]
+
+(* One lazy mmap-backed disk tensor for a single safetensors header entry.
+   $Failed if the entry's dtype is outside the byte-aligned round-trip set. *)
+loadSafeEntry[path_String, dataStart_Integer, spec_Association] := Module[{thvmDt, begin, end},
+    thvmDt = Lookup[$safeToThvm, spec["dtype"], $Failed];
+    {begin, end} = spec["data_offsets"];
+    If[ thvmDt === $Failed,
+        $Failed,
+        TTensorMMap[path, dataStart + begin, end - begin, thvmDt, spec["shape"]]
+    ]
+]
 
 TSafeLoad[path_String] := Module[{dataStart, json, entries},
     ensureInit[];
     {dataStart, json} = safeReadHeader[path];
     entries = KeyDrop[json, "__metadata__"];
-    Association @ KeyValueMap[
-        (#1 -> Module[{spec = #2, safeDt, thvmDt, shape, begin, end},
-            safeDt = spec["dtype"];
-            thvmDt = Lookup[$safeToThvm, safeDt,
-                $Failed (* unsupported safetensors dtype *)];
-            shape  = spec["shape"];
-            {begin, end} = spec["data_offsets"];
-            If[ thvmDt === $Failed,
-                $Failed,
-                TTensorMMap[path, dataStart + begin, end - begin,
-                            thvmDt, shape]
-            ]
-        ]) &,
-        entries
-    ]
+    Map[loadSafeEntry[path, dataStart, #] &, entries]   (* maps values, keeps names *)
 ]
 
 (* Realize a TTerm, read its NumericArray + shape + safetensors dtype. *)
@@ -124,26 +139,26 @@ saveTensorInfo[t_TTerm] := Module[{r, na, dt, safeDt, shape, numel},
     r = TRealize[t];
     dt = TTensorDType[r];
     safeDt = Lookup[$thvmToSafe, dt, $Failed];
-    If[ safeDt === $Failed,
-        Return[$Failed]];
+    If[safeDt === $Failed, Return[$Failed]];
     na = TTensorData[r];                 (* NumericArray, tensor dtype *)
     shape = TTensorShape[r];
-    numel = If[ shape === {}, 1, Times @@ shape];
-    <|"safeDt" -> safeDt, "naType" -> $thvmNAType[dt],
-      "shape" -> shape, "na" -> na,
-      "nbytes" -> numel * $thvmByteWidth[dt]|>
+    numel = If[shape === {}, 1, Times @@ shape];
+    <|
+        "safeDt" -> safeDt,
+        "naType" -> $thvmNAType[dt],
+        "shape" -> shape,
+        "na" -> na,
+        "nbytes" -> numel * $thvmByteWidth[dt]
+    |>
 ]
 
 TSafeSave[assoc_Association, path_String] := TSafeSave[assoc, path, <||>]
 
-TSafeSave[assoc_Association, path_String, metadata_Association] := Module[{
-    names, infos, offsets, offset, headers, json, pad, hbytes, strm
-},
+TSafeSave[assoc_Association, path_String, metadata_Association] := Module[{names, infos, offsets, offset, headers, json, pad, hbytes, strm},
     ensureInit[];
     names = Keys[assoc];
     infos = saveTensorInfo /@ Values[assoc];
-    If[ MemberQ[infos, $Failed],
-        Return[$Failed]];
+    If[MemberQ[infos, $Failed], Return[$Failed]];
     (* Lay out the data section: each tensor's byte span end-to-end. *)
     offset = 0;
     offsets = Reap[
@@ -159,11 +174,9 @@ TSafeSave[assoc_Association, path_String, metadata_Association] := Module[{
        one entry per tensor in insertion order.  Metadata values are
        coerced to strings (the safetensors spec requires string values). *)
     headers = Join[
-        If[ metadata === <||>, <||>,
-            <|"__metadata__" -> (ToString /@ metadata)|>],
+        If[metadata === <||>, <||>, <|"__metadata__" -> (ToString /@ metadata)|>],
         Association @ MapThread[
-            (#1 -> <|"dtype" -> #2["safeDt"], "shape" -> #2["shape"],
-                     "data_offsets" -> #3|>) &,
+            (#1 -> <|"dtype" -> #2["safeDt"], "shape" -> #2["shape"], "data_offsets" -> #3|>) &,
             {names, infos, offsets}
         ]
     ];
@@ -178,12 +191,10 @@ TSafeSave[assoc_Association, path_String, metadata_Association] := Module[{
        bytes. *)
     Quiet @ DeleteFile[path];
     strm = OpenWrite[path, BinaryFormat -> True];
-    BinaryWrite[strm, Length[hbytes],
-        "UnsignedInteger64", ByteOrdering -> -1];
+    BinaryWrite[strm, Length[hbytes], "UnsignedInteger64", ByteOrdering -> -1];
     BinaryWrite[strm, hbytes, "Byte"];
     Do[
-        BinaryWrite[strm, Normal[infos[[i]]["na"]],
-            infos[[i]]["naType"], ByteOrdering -> -1],
+        BinaryWrite[strm, Normal[infos[[i]]["na"]], infos[[i]]["naType"], ByteOrdering -> -1],
         {i, Length[infos]}
     ];
     Close[strm];
