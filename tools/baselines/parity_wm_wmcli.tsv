@@ -1,7 +1,7 @@
 theory	theorem	preset_constructs	wmcli_constructs	cli_minus_preset	notes
 AbelianGroupAxioms	InverseOfInverse	12	12	0	**PARITY achieved (c0354f0c)**
 AbelianGroupAxioms	InverseOfComposite	18	20	+2	thvm SHORTER (post-b523cd48 Mix-front-load for AbelianGroup auto-tune); CPL8 binds variables to canonical form in 1 step; WM rule 12 requires 2 follow-up comm normalizations.
-AbelianGroupAxioms	ImpliesMcCuneAxioms	28	28	0	**PARITY** via Method->Automatic post-b523cd48 Mix-front-load.
+AbelianGroupAxioms	ImpliesMcCuneAxioms	26	28	+2	thvm SHORTER (Method->Automatic post-b523cd48 Mix-front + portfolio fallback).
 AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	20	20	0	**PARITY achieved** via Method->Automatic (post-b523cd48 Mix-front-load fix).
 BooleanAxioms	DoubleNegation	20	20	0	**PARITY achieved**
 GroupAxioms	InverseOfInverse	14	14	0	**PARITY achieved**
