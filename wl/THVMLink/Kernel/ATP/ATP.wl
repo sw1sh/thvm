@@ -70,7 +70,9 @@ TAtpTrainScorer::usage = "TAtpTrainScorer[dataset] trains a critical-pair select
 
 TAtpSetLearnedScorer::usage = "TAtpSetLearnedScorer[model] pushes a trained critical-pair selection model into the C ATP engine; subsequent proofs run with Method -> {..., \"CriticalPairWeight\" -> \"Learned\"} use it instead of the baked-in logistic regression.  model is an Association: <|\"Kind\" -> \"Linear\", \"Mean\" -> {14 reals}, \"InvStd\" -> {14 reals}, \"W\" -> {14 reals}, \"B\" -> real|> for a linear model, or <|\"Kind\" -> \"MLP\", \"Mean\" -> ..., \"InvStd\" -> ..., \"W1\" -> H x 14 matrix, \"B1\" -> {H reals}, \"W2\" -> {H reals}, \"B2\" -> real|> for a one-hidden-layer ReLU network (H <= 64).  Features are standardized as (feature - Mean)*InvStd before the forward pass (pass Mean -> 0, InvStd -> 1 to disable); the model outputs a raw logit (higher = more proof-relevant = selected sooner).  Mean / InvStd default to identity if omitted.  TAtpSetLearnedScorer[Clear] (or None) drops the model and reverts to the baked-in scorer.  Returns True on success, False on a malformed model.  The 14 features are documented in docs/plans/atp_enigma_cp_selector.md (size_sum, max_depth, n_distinct_vars, n_var_occ, weight_add, weight_gt, weight_mix2, goal_weight, age, top_symbol_l, top_symbol_r, shares_goal_sub, orientable, unif_measure).";
 
-TAtpCpGraph::usage = "TAtpCpGraph[lhs == rhs] encodes one equation / critical pair (also accepts Inactive[Equal][lhs, rhs] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over.  Returns <|\"NodeTypes\" -> {...}, \"NodeFeatures\" -> (NNodes x 6 matrix), \"Edges\" -> {{src, dst, type}, ...}, \"NNodes\" -> n, \"NEdges\" -> m|>.  Node 0 is the critical-pair super-node; the remaining nodes are TERM occurrences (one per subterm in the preorder walk of lhs then rhs), SYMBOL nodes (one per distinct operator / numeric constant), and VAR nodes (one per distinct variable).  Node types are coded 0 = CPSuper, 1 = Term, 2 = Symbol, 3 = Var; edge types 0 = term->symbol, 1 = term->child, 2 = cp->lhs-root, 3 = cp->rhs-root.  The six node-feature columns are PURELY STRUCTURAL -- {is_term, is_symbol, is_var, arity, occurrence_count, is_cpsuper} -- and never encode the concrete symbol label, variable id, or numeric value, so two equations equal up to a consistent renaming of symbols + variables produce bit-identical graphs.  lhs and rhs share one encoder state, so a symbol or variable common to both sides is a single deduped node.  This is the per-equation graph encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset.";
+TAtpCpGraph::usage = "TAtpCpGraph[lhs == rhs] encodes one equation / critical pair (also accepts Inactive[Equal][lhs, rhs] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over.  Returns <|\"NodeTypes\" -> {...}, \"NodeFeatures\" -> (NNodes x 6 matrix), \"Edges\" -> {{src, dst, type}, ...}, \"NNodes\" -> n, \"NEdges\" -> m|>.  Node 0 is the critical-pair super-node; the remaining nodes are TERM occurrences (one per subterm in the preorder walk of lhs then rhs), SYMBOL nodes (one per distinct operator / numeric constant), and VAR nodes (one per distinct variable).  Node types are coded 0 = CPSuper, 1 = Term, 2 = Symbol, 3 = Var; edge types 0 = term->symbol, 1 = term->child, 2 = cp->lhs-root, 3 = cp->rhs-root.  The six node-feature columns are PURELY STRUCTURAL -- {is_term, is_symbol, is_var, arity, occurrence_count, is_cpsuper} -- and never encode the concrete symbol label, variable id, or numeric value, so two equations equal up to a consistent renaming of symbols + variables produce bit-identical graphs.  Alongside the anonymised features the graph also stores the concrete identity per node: \"NodeLabels\" is the raw intern key (CTR label / FVR id) and \"Symbols\" is the resolved name string (the operator / variable name for a SYMBOL / VAR node, Missing[] for a TERM / CPSuper node), so TAtpCpGraphEquation reconstructs the original equation exactly.  lhs and rhs share one encoder state, so a symbol or variable common to both sides is a single deduped node.  This is the per-equation graph encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset.";
+
+TAtpCpGraphEquation::usage = "TAtpCpGraphEquation[graph] reconstructs the original equation from a TAtpCpGraph result, returning Inactive[Equal][lhs, rhs].  It is the exact inverse of TAtpCpGraph: it reads the per-node \"Symbols\" identities and the term structure in \"Edges\" (each TERM node's head via its term->symbol edge, its children in order via the term->child edges, and the two side roots via the cp->lhs-root / cp->rhs-root edges).  Returns $Failed if the graph carries no \"Symbols\" (e.g. a graph decoded without the live encoder state).";
 
 TAtpGraphDataset::usage = "TAtpGraphDataset[conjectures, axioms] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset for an ENIGMA Tier 2 graph neural network: <|\"Graphs\" -> {graph...}, \"Labels\" -> {0/1...}, \"NPos\" -> p, \"NNeg\" -> n, \"NProofs\" -> k|>, where each graph is a TAtpCpGraph Association and label 1 marks a proof-essential lemma, 0 a saturated-but-unused rule.  TAtpGraphDataset[theory] runs all of AxiomaticTheory[theory, \"NotableTheorems\"] against the theory's axioms.  TAtpGraphDataset[proofObject] (or a list of ProofObjects) is the core source the conjecture / theory forms reduce to -- it yields the proof-essential POSITIVES only (a bare ProofObject does not carry the saturated rule set); TAtpGraphDataset[proofObject, lemmas] adds the NEGATIVES from a supplied saturated set (TFindProof[..., \"Lemmas\"]).  POSITIVES are the equations of types CriticalPairLemma / SubstitutionLemma in the ProofObject's proof chain (the lemmas the proof actually used); NEGATIVES are the saturated rule set (TFindProof[..., \"Lemmas\"]) minus any rule structurally equal to a positive.  Structural equality uses a canonical key that renames pattern / Slot / FVR variables to positional placeholders in first-appearance order and treats the equation as an unordered pair (so l == r and r == l collapse), which both separates positives from negatives and drops duplicate rows.  Only PROVED runs contribute graphs.  Unlike TAtpCpDataset's per-critical-pair feature rows, this sources CLEAN positives straight from the verified proof object (it works even for a minimal-normal-form-only proof that records no per-CP features), and its graphs are the symbol/variable-anonymised structural counterpart of the Tier-1 14-feature vectors -- feed \"Graphs\" / \"Labels\" to a GNN.  Options: Method (default {\"Completion\"}), TimeConstraint (per proof, default 30), MaxSteps.";
 
@@ -709,14 +711,17 @@ atpCpSides[_] := $Failed
 
 (* Decode the self-describing f64 NumericArray $atpCpGraphFn returns into
    the public graph Association.  Header [ok, n_nodes, n_edges, feat_dim]
-   then node_type, node_feat (row-major), edge_src, edge_dst, edge_type. *)
+   then node_type, node_feat (row-major), edge_src, edge_dst, edge_type,
+   and (tail) node_label -- the concrete symbol identity per node for exact
+   reconstruction.  "NodeLabels" are the raw intern keys; atpCpGraphFromSides
+   resolves them to "Symbols" using the live encoder state. *)
 atpCpGraphDecode[raw_List] := Module[{
     ok = Round[raw[[1]]], nN = Round[raw[[2]]], nE = Round[raw[[3]]],
-    fd = Round[raw[[4]]], off, nodeTypes, nodeFeat, eSrc, eDst, eType
+    fd = Round[raw[[4]]], off, nodeTypes, nodeFeat, eSrc, eDst, eType, nLabel
 },
     If[ ok =!= 1,
         Return[<|"NodeTypes" -> {}, "NodeFeatures" -> {}, "Edges" -> {},
-            "NNodes" -> 0, "NEdges" -> 0|>]];
+            "NodeLabels" -> {}, "NNodes" -> 0, "NEdges" -> 0|>]];
     off = 4;
     nodeTypes = Round[raw[[off + 1 ;; off + nN]]];
     off += nN;
@@ -725,11 +730,13 @@ atpCpGraphDecode[raw_List] := Module[{
     off += nN*fd;
     eSrc  = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
     eDst  = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
-    eType = Round[raw[[off + 1 ;; off + nE]]];
+    eType = Round[raw[[off + 1 ;; off + nE]]];   off += nE;
+    nLabel = If[ Length[raw] >= off + nN, Round[raw[[off + 1 ;; off + nN]]], ConstantArray[0, nN]];
     <|
         "NodeTypes" -> nodeTypes,
         "NodeFeatures" -> nodeFeat,
         "Edges" -> Transpose[{eSrc, eDst, eType}],
+        "NodeLabels" -> nLabel,
         "NNodes" -> nN,
         "NEdges" -> nE
     |>
@@ -737,20 +744,59 @@ atpCpGraphDecode[raw_List] := Module[{
 
 (* Encode a held {lhs, rhs} pair into the anonymised hypergraph: one
    shared encoder state so a symbol / variable common to both sides is a
-   single deduped node, then call the C extractor + decode. *)
+   single deduped node, then call the C extractor + decode.  The final
+   encoder state carries the symbol/variable name <-> label maps, so we
+   resolve each SYMBOL / VAR node's raw label to its concrete name and
+   attach the per-node "Symbols" list -- the un-anonymised identity that
+   makes TAtpCpGraphEquation an exact inverse. *)
 atpCpGraphFromSides[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{
-    st = encodeAtpTermInit[], lr, rr, lt, rt
+    st = encodeAtpTermInit[], lr, rr, lt, rt, fin, symInv, varInv, g
 },
     lr = encodeAtpTerm[lhsHC[[1]], st];
     rr = encodeAtpTerm[rhsHC[[1]], lr[[2]]];
     lt = lr[[1]];
     rt = rr[[1]];
-    atpCpGraphDecode[Normal[$atpCpGraphFn[lt, rt]]]
+    fin = rr[[2]];
+    g = atpCpGraphDecode[Normal[$atpCpGraphFn[lt, rt]]];
+    symInv = Association[Reverse /@ Normal[fin["sym"]]];
+    varInv = Association[Reverse /@ Normal[fin["var"]]];
+    Append[g, "Symbols" -> MapThread[
+        Switch[#1,
+            2, Lookup[symInv, #2, Missing["Unresolved"]],
+            3, Lookup[varInv, #2, Missing["Unresolved"]],
+            _, Missing["NotASymbol"]] &,
+        {g["NodeTypes"], g["NodeLabels"]}]]
 ]
 
 TAtpCpGraph[eq_] := Module[{sides = atpCpSides[eq]},
     If[ sides === $Failed, $Failed, atpCpGraphFromSides[sides]]]
 SetAttributes[TAtpCpGraph, HoldAllComplete];
+
+(* Exact inverse of TAtpCpGraph: rebuild the original equation from a graph
+   carrying per-node "Symbols".  The CP super-node's E_CP_LHS / E_CP_RHS
+   edges (type 2 / 3) name the two side roots; each TERM node's E_TERM_SYM
+   edge (type 0) names its head and its E_TERM_CHILD edges (type 1) its
+   children in order.  Node ids in "Edges" are 0-based; "Symbols" is
+   1-based.  Returns Inactive[Equal][lhs, rhs], or $Failed without symbols. *)
+TAtpCpGraphEquation[graph_Association] := Module[{
+    types = graph["NodeTypes"], syms = graph["Symbols"], edges = graph["Edges"],
+    symOf, childOf, rootSide, rebuild
+},
+    If[ MissingQ[syms] || syms === {}, Return[$Failed]];
+    symOf[t_]    := SelectFirst[edges, MatchQ[#, {t, _, 0}] &][[2]];
+    childOf[t_]  := Cases[edges, {t, c_, 1} :> c];
+    rootSide[e_] := SelectFirst[edges, MatchQ[#, {0, _, e}] &][[2]];
+    rebuild[t_] := With[{s = symOf[t]},
+        With[{name = syms[[s + 1]], kids = rebuild /@ childOf[t]},
+            Which[
+                types[[s + 1]] === 3, ToExpression[name <> "_"],
+                kids === {},          ToExpression[name],
+                True,                 ToExpression[name] @@ kids
+            ]
+        ]
+    ];
+    Inactive[Equal][rebuild[rootSide[2]], rebuild[rootSide[3]]]
+]
 
 (* === ENIGMA Tier 2: canonical equation key (rename-invariant dedup) === *)
 

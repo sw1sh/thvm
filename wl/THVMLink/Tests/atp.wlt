@@ -2703,6 +2703,36 @@ VerificationTest[
     TestID -> "ATP/enigma/cpgraph-rename-invariant"
 ]
 
+(* The anonymised features transfer across signatures, but the per-node
+   "Symbols" still record the concrete identity, so the two renamed graphs
+   differ exactly there. *)
+VerificationTest[
+    Module[{a = TAtpCpGraph[f[x_, i[x_]] == e],
+            b = TAtpCpGraph[gg[y_, j[y_]] == d]},
+        a["Symbols"] =!= b["Symbols"]],
+    True,
+    TestID -> "ATP/enigma/cpgraph-symbols-distinguish"
+]
+
+(* TAtpCpGraphEquation is the EXACT inverse of TAtpCpGraph: the stored
+   symbols + term structure rebuild the original equation, through nested
+   terms, shared variables, and repeated symbols (deduped to one node). *)
+VerificationTest[
+    (TAtpCpGraphEquation[TAtpCpGraph[#]] === #) & /@ {
+        Inactive[Equal][CircleTimes[a, OverBar[a]], ident],
+        Inactive[Equal][f[x_, gg[y_]], h[x_]],
+        Inactive[Equal][CircleTimes[CircleTimes[p, q], p], p]},
+    {True, True, True},
+    TestID -> "ATP/enigma/cpgraph-reconstructs-equation"
+]
+
+(* No symbols (a graph decoded without the live encoder state) -> $Failed. *)
+VerificationTest[
+    TAtpCpGraphEquation[<|"NodeTypes" -> {}, "Edges" -> {}, "Symbols" -> {}|>],
+    $Failed,
+    TestID -> "ATP/enigma/cpgraph-equation-no-symbols"
+]
+
 (* TAtpCpGraph also accepts the Inactive[Equal] / HoldForm lemma shapes
    the ProofObject + saturated set ship. *)
 VerificationTest[

@@ -1,7 +1,7 @@
 ---
 Template: TechNote
 Name: GnnGuidance
-Title: Learned Guidance: a GNN for Critical-Pair Selection
+Title: "Learned Guidance: a GNN for Critical-Pair Selection"
 Context: THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/GnnGuidance
@@ -36,22 +36,33 @@ push it into the engine to guide selection.
 
 [TAtpCpGraph]() encodes one equation as an anonymized hypergraph: a node for
 the critical-pair super-node, one per function-symbol occurrence, and one
-per variable occurrence, wired by the term structure. The node features are
+per variable occurrence, wired by the term structure. The node *features* are
 purely structural (node kind, arity, occurrence count, side), never the
 symbol name, so the network sees shape, not `nand` versus `CircleTimes`.
 
 ```wl
 Keys @ TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]
 ```
-<!-- => {NodeTypes, NodeFeatures, Edges, NNodes, NEdges} -->
+<!-- => {NodeTypes, NodeFeatures, Edges, NodeLabels, NNodes, NEdges, Symbols} -->
 
-The node-type vector marks each node as the super-node (`0`), a symbol
-(`1`), or a variable (`2`):
+The node-type vector marks each node as the super-node (`0`), a term (`1`),
+a symbol (`2`), or a variable (`3`):
 
 ```wl
 TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]["NodeTypes"]
 ```
 <!-- => {0, 1, 2, 1, 2, 1, 2, 1, 1, 2} -->
+
+The features are anonymized, but the graph *also* stores the concrete
+identity of each node in `"Symbols"` (and the raw label in `"NodeLabels"`),
+so the encoding is lossless: [TAtpCpGraphEquation]() is its exact inverse and
+rebuilds the original equation from the stored symbols plus the term
+structure.
+
+```wl
+TAtpCpGraphEquation @ TAtpCpGraph[Inactive[Equal][CircleTimes[a, OverBar[a]], ident]]
+```
+<!-- => Inactive[Equal][a \[CircleTimes] OverBar[a], ident] -->
 
 ## Building a dataset
 

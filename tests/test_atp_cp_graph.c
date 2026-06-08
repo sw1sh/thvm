@@ -138,6 +138,35 @@ int main(void) {
     }
   }
 
+  // === node_label: the un-anonymised symbol identity per node ========
+  // Each SYMBOL node carries its CTR label, each VAR node its FVR id, and
+  // TERM / CP-super nodes carry 0 -- the identity the WL surface resolves
+  // to reconstruct the original equation exactly.
+  TEST_BEGIN("atp/cp_graph/node-label-identity");
+  {
+    Term lhs = ctr2(LAB_f, mk_v(VAR_x), ctr1(LAB_i, mk_v(VAR_x)));
+    Term rhs = ctr0(LAB_e);
+    AtpCpGraph g;
+    CHECK_EQ(thvm_atp_cp_graph(lhs, rhs, &g), 1);
+    u32 sym_seen = 0u;
+    for (u32 i = 0; i < g.n_nodes; i++) {
+      switch (g.node_type[i]) {
+        case ATP_CPG_SYMBOL:
+          CHECK(g.node_label[i] == LAB_f || g.node_label[i] == LAB_i
+                || g.node_label[i] == LAB_e);
+          sym_seen |= 1u << (u32)g.node_label[i];
+          break;
+        case ATP_CPG_VAR:
+          CHECK_EQ((u32)g.node_label[i], VAR_x);
+          break;
+        default:   // TERM / CPSUPER carry no symbol
+          CHECK_EQ((u32)g.node_label[i], 0u);
+      }
+    }
+    // All three distinct symbol labels are present exactly once each.
+    CHECK_EQ(sym_seen, (1u << LAB_f) | (1u << LAB_i) | (1u << LAB_e));
+  }
+
   // === RENAMING INVARIANCE (headline) ================================
   // Same structure, every symbol + variable remapped by a bijection.
   // The two graphs must be bit-for-bit identical: same n_nodes, same

@@ -5477,6 +5477,12 @@ typedef struct {
   u32   n_nodes;
   u8    node_type[ATP_CPG_MAX_NODES];                  // AtpCpgNodeType
   float node_feat[ATP_CPG_MAX_NODES * ATP_CPG_FEAT_DIM];
+  // Concrete symbol identity per node, so the equation reconstructs
+  // exactly: the intern key -- CTR label / FVR id / NUM value -- for a
+  // SYMBOL or VAR node, 0 for a TERM or CP-super node.  The node_feat
+  // columns stay anonymised (the GNN never sees this); a caller that
+  // wants the un-anonymised symbol reads node_label.
+  u64   node_label[ATP_CPG_MAX_NODES];
   u32   n_edges;
   u32   edge_src[ATP_CPG_MAX_EDGES];
   u32   edge_dst[ATP_CPG_MAX_EDGES];

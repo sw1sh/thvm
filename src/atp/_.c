@@ -8501,6 +8501,7 @@ static u32 atp_cpg_add_node(AtpCpgBuild *b, u8 type) {
   if (g->n_nodes >= ATP_CPG_MAX_NODES) { g->overflow = 1u; return 0xffffffffu; }
   u32 idx = g->n_nodes++;
   g->node_type[idx] = type;
+  g->node_label[idx] = 0u;   // TERM / CP-super carry no symbol; intern overwrites
   float *f = g->node_feat + (size_t)idx * ATP_CPG_FEAT_DIM;
   for (u32 j = 0; j < ATP_CPG_FEAT_DIM; j++) f[j] = 0.0f;
   return idx;
@@ -8531,6 +8532,9 @@ static u32 atp_cpg_intern(AtpCpgBuild *b, u8 kind, u64 key,
   }
   u32 idx = atp_cpg_add_node(b, node_type);
   if (idx == 0xffffffffu) return idx;
+  // Record the concrete symbol identity (CTR label / FVR id / NUM value)
+  // for exact reconstruction; the feature columns below stay anonymised.
+  b->g->node_label[idx] = key;
   // Set the structural type columns now; occurrence_count is patched in
   // after the whole walk so repeat occurrences are all counted.
   float *f = b->g->node_feat + (size_t)idx * ATP_CPG_FEAT_DIM;

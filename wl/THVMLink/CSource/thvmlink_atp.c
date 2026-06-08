@@ -1695,7 +1695,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_cp_graph(WolframLibraryData libData,
   mint total  = 4
               + (mint)n_nodes                         // node_type
               + (mint)n_nodes * (mint)ATP_CPG_FEAT_DIM // node_feat
-              + (mint)n_edges * 3;                     // src/dst/type
+              + (mint)n_edges * 3                      // src/dst/type
+              + (mint)n_nodes;                         // node_label
 
   MNumericArray out;
   mint dims[1] = { total };
@@ -1716,6 +1717,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_cp_graph(WolframLibraryData libData,
   for (u32 i = 0; i < n_edges; i++) o[at++] = (double)g->edge_src[i];
   for (u32 i = 0; i < n_edges; i++) o[at++] = (double)g->edge_dst[i];
   for (u32 i = 0; i < n_edges; i++) o[at++] = (double)g->edge_type[i];
+  // Concrete symbol identity per node (the un-anonymised reconstruction
+  // key), tail of the array so older decoders that stop after edge_type
+  // are unaffected.
+  for (u32 i = 0; i < n_nodes; i++) o[at++] = (double)g->node_label[i];
 
   free(g);
   MArgument_setMNumericArray(res, out);
