@@ -6,10 +6,14 @@ chain3	WM	0.0	PROVED	0	1	4
 chain4	WM	0.0	PROVED	0	1	4
 chain6	WM	0.0	PROVED	0	1	4
 deep5	WM	0.0	PROVED	0	1	4
-mccune	WM	8.3	PROVED	5427	191	8119	49s->8.3s (-83%) cumulative this loop run
-thm	WM	0.4	PROVED	207	59	1618
-robbins	WM	30.0	RUNNING	3917	1326	2447
-wolfram	WM	30.0	RUNNING	37942	485	21812	82r->485r in 30s = 6x baseline from incremental indices
-andassoc	WM	30.1	RUNNING	37033	480	20919
+mccune	WM	7.9	PROVED	5427	191	8119	49s -> 7.9s (-84%) cumulative this loop run
+thm	WM	0.3	PROVED	207	59	1618
+robbins	WM	10.0	RUNNING	1883	614	1094
+wolfram	WM	10.0	RUNNING	14526	52	6287	post-recent-commits step rate similar; rule count converging slower
+andassoc	WM	10.0	RUNNING	14415	52	6212
 agioc	WM	0.0	PROVED	15	14	23
 glid	WM	0.0	PROVED	8	7	10
+amc_assoc	WM	0.1	PROVED	688	54	275	CAG family probe
+mc_ioi	WM	0.1	PROVED	301	18	1951	CAG family probe (WM CLI: 33 rules)
+mc_assoc	WM	0.1	PROVED	386	20	1951	CAG family probe (WM CLI: 44 rules)
+hn_leftid	WM	0.0	PROVED	14	8	117	BYTE PARITY with WM CLI (8 rules = 8)
