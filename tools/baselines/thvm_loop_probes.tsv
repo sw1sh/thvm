@@ -40,4 +40,6 @@ HillmanAxioms	AndAssociativity	29	-	-	33	OK.  chain=29.  WM CLI baseline not in 
 HillmanAxioms	OrAssociativity	22	-	-	26	OK.  chain=22.  WM CLI baseline not available.
 AbelianMcCuneAxioms	Commutativity	19	-	14	21	OK.  chain=19 vs WM_rules=14 -- thvm 36% longer (slight compression loss).
 AbelianMcCuneAxioms	Associativity	57	-	44	59	OK.  chain=57 vs WM_rules=44 -- thvm 30% longer.
-RobbinsAxioms	DoubleNegation	FAIL	FAIL	-	-	Both engines FAIL: WM CLI reports FAIL in wm_cli_sweep.tsv, thvm Method->"Waldmeister" times out at 60s.  Robbins is a known-hard equational completion problem.
+RobbinsAxioms	DoubleNegation	FAIL	FAIL	-	-	Both engines FAIL: WM CLI reports FAIL in wm_cli_sweep.tsv, thvm Method->"Waldmeister" AND Method->"VampireUEQ" AND Method->Automatic all time out at 60-120s.  Robbins -> Boolean is famously hard (McCune's million-step proof historically).
+HillmanAxioms	ImpliesWolframAxioms	50	-	-	54	OK under Automatic.  WM CLI baseline not in sweep.
+HillmanAxioms	ImpliesShefferAxioms	FAIL	-	-	-	Sheffer is the deep equational case (analogous to WolframAxioms); thvm Automatic FAILs at 60s.  WM CLI baseline not in sweep.
