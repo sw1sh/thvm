@@ -49,3 +49,20 @@ VerificationTest[
     ConstantArray[4., {5, 3}],
     TestID -> "symbolic/readback-symbolic-output-bounded"
 ]
+
+(* A multi-layer symbolic-SEQUENCE forward -- two matmuls + an elementwise over
+   a symbolic seq dim S -- realized at two lengths from ONE graph (no re-lift,
+   no maxSeq).  This is the outer-symbolic {S, dim} path that GPT-2's embedding
+   + MLP run on: x{S,8}.W1{8,12} -> +self -> .W2{12,8}, each output = 48. *)
+VerificationTest[
+    TInit[];
+    vid = TKVarAlloc[1, 16];
+    x   = TSymbolicAxis[TTensorCreate[ConstantArray[1., {16, 8}]], 0, vid];
+    h   = x . TTensorCreate[ConstantArray[0.5, {8, 12}]];
+    h2  = h + h;
+    y   = h2 . TTensorCreate[ConstantArray[0.5, {12, 8}]];
+    {TKVarSet[vid, 5]; Normal @ TTensorData @ TRealize @ y,
+     TKVarSet[vid, 7]; Normal @ TTensorData @ TRealize @ y},
+    {ConstantArray[48., {5, 8}], ConstantArray[48., {7, 8}]},
+    TestID -> "symbolic/multi-layer-seq-forward"
+]
