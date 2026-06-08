@@ -703,6 +703,12 @@ void thvm_init(void) {
                              // the process-global cache table.
   cg_profile_reset();        // per-kid FLOPS / dispatch counters; reset
                              // so each session starts at zero.
+  kvar_reset();              // symbolic-axis (kvar) registry + runtime
+                             // bindings; a prior session's KVARS_NEXT /
+                             // KVAR_RUNTIME entries reference a freed heap
+                             // and (since the registry only ever bumps)
+                             // would leak slots toward KVAR_CAP across
+                             // many TInit cycles in one kernel.
   // Cheney semi-spaces: split HEAP_CAP in half.  heap_alloc bumps
   // within the active from-space; gc_collect evacuates live cells
   // into to-space and swaps when triggered from thvm_realize.

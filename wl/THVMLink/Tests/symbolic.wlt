@@ -164,3 +164,244 @@ VerificationTest[
     TestID -> "symbolic/causal-attention-eager-rebind-S6",
     SameTest -> (Max @ Abs[Flatten[#1] - Flatten[#2]] < 1.*^-5 &)
 ]
+
+(* === Symbolic MULTI-HEAD attention ====================================
+
+   The single-head primitive above runs per head; multi-head needs a SPLIT
+   of {S, dim} into n_heads x {S, d_head} and a CONCAT back to {S, dim},
+   both over the symbolic sequence S.
+
+   SPLIT route (a): reshape {S,dim} -> {S,n_heads,d_head} (kvar extent `sym`
+   for the seq dim) then PERMUTE {1,0,2} -> {n_heads,S,d_head} and SHRINK one
+   head -> {S,d_head}.  A kvar PERMUTE survives the addressing: this test
+   reshapes a known column pattern (x[i,c]=10 i+c), permutes, and asserts the
+   per-head columns land correctly.  (PERMUTE of a kvar axis WORKS.)
+
+   CONCAT: the {seq,dim} headStitch idiom (TUOpPad each head into its column
+   slice + sum) is UNUSABLE over a symbolic axis -- TUOpPad of a kvar tensor
+   reads through the static hi-strides and returns ALL ZEROS (a kvar PAD
+   addressing bug; tested both inner-axis-only and middle-axis pads).  The
+   PAD-free concat used below instead: reshape each head {S,d_head} ->
+   {S,1,d_head}, EXPAND to {S,n_heads,d_head}, multiply by a SYMBOLIC one-hot
+   column selector (a {hi,n_heads,1} host const marked symbolic on axis 0,
+   expanded to {S,n_heads,d_head}), sum the heads, reshape -> {S,dim}.  Every
+   op is one the single-head eager primitive already exercises over kvar. *)
+
+(* SPLIT route (a): a kvar reshape + PERMUTE + per-head SHRINK preserves the
+   per-head columns.  x[i,c] = 10 i + c ; head 0 = cols {0,1}, head 1 = cols
+   {2,3}; after permute to {n_heads,S,d_head} head h row i = {10 i + 2 h,
+   10 i + 2 h + 1}.  Asserted at S=4. *)
+VerificationTest[
+    Module[{hi = 8, dim = 4, nHeads = 2, dHead = 2, vid, sym, er, x, splitHead},
+        TInit[];
+        vid = TKVarAlloc[1, hi];
+        sym = 2^31 + vid;
+        er[t_] := TRealize[t];
+        TKVarSet[vid, 4];
+        x = TSymbolicAxis[
+            TTensorCreate[Table[N[10 i + c], {i, 0, hi - 1}, {c, 0, dim - 1}]],
+            0, vid];
+        splitHead[t_, h_] := er @ TUOpReshape[
+            TUOpShrink[
+                TUOpPermute[TUOpReshape[t, {sym, nHeads, dHead}], {1, 0, 2}],
+                {{h, h + 1}, {0, sym}, {0, dHead}}],
+            {sym, dHead}];
+        {Normal @ TTensorData @ TRealize @ splitHead[x, 0],
+         Normal @ TTensorData @ TRealize @ splitHead[x, 1]}
+    ],
+    {Table[N[10 i + c], {i, 0, 3}, {c, 0, 1}],
+     Table[N[10 i + 2 + c], {i, 0, 3}, {c, 0, 1}]},
+    TestID -> "symbolic/multihead-split-permute",
+    SameTest -> (Max @ Abs[Flatten[#1] - Flatten[#2]] < 1.*^-5 &)
+]
+
+(* FULL symbolic multi-head causal attention, EAGER, realized at S=4 then the
+   SAME construction re-run at S=6.  n_heads=2, d_head=2, dim=4.  Q,K,V are
+   fixed {hi,dim} host tensors; the result is asserted against an independent
+   host-side multi-head causal-attention oracle at each bound. *)
+VerificationTest[
+    Module[
+        {hi = 8, dim = 4, nHeads = 2, dHead = 2, qHost, kHost, vHost, scale,
+         hostMHA, mhaSym},
+        qHost = Table[N[0.1 (i + 1) + 0.01 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        kHost = Table[N[0.1 (i + 1) - 0.01 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        vHost = Table[N[i + 0.5 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        scale = 1. / Sqrt[N @ dHead];
+        (* host oracle: split columns, per-head causal softmax-attn, concat *)
+        hostMHA[S_] := ArrayFlatten[{Table[
+            Module[{qh, kh, vh, sc, msk, w},
+                qh = qHost[[1 ;; S, h dHead + 1 ;; (h + 1) dHead]];
+                kh = kHost[[1 ;; S, h dHead + 1 ;; (h + 1) dHead]];
+                vh = vHost[[1 ;; S, h dHead + 1 ;; (h + 1) dHead]];
+                sc = (qh . Transpose[kh]) scale +
+                    Table[If[ j <= i, 0., -10.^9], {i, 0, S - 1}, {j, 0, S - 1}];
+                w = Table[Exp[sc[[r]] - Max[sc[[r]]]], {r, 1, S}];
+                w = w / Total[w, {2}];
+                w . vh],
+            {h, 0, nHeads - 1}]}];
+        mhaSym[Sval_] := Module[
+            {vid, sym, er, qT, kT, vT, ramp, ri, rj, mask, splitHead, perHead,
+             heads, buildSlot},
+            TInit[];
+            vid = TKVarAlloc[1, hi];
+            sym = 2^31 + vid;
+            er[t_] := TRealize[t];
+            TKVarSet[vid, Sval];
+            qT = TSymbolicAxis[TTensorCreate[qHost], 0, vid];
+            kT = TSymbolicAxis[TTensorCreate[kHost], 0, vid];
+            vT = TSymbolicAxis[TTensorCreate[vHost], 0, vid];
+            ramp = TSymbolicAxis[TTensorCreate[N @ Range[0, hi - 1]], 0, vid];
+            ri = er @ TUOpExpand[TUOpReshape[ramp, {sym, 1}], {sym, sym}];
+            rj = er @ TUOpExpand[TUOpReshape[ramp, {1, sym}], {sym, sym}];
+            mask = er @ TUOpMul[
+                TUOpCmplt[TUOpAdd[ri, TUOpNeg[rj]], TUOpConst[0.]],
+                TUOpConst[-30.]];
+            splitHead[t_, h_] := er @ TUOpReshape[
+                TUOpShrink[
+                    TUOpPermute[TUOpReshape[t, {sym, nHeads, dHead}], {1, 0, 2}],
+                    {{h, h + 1}, {0, sym}, {0, dHead}}],
+                {sym, dHead}];
+            perHead[h_] := Module[
+                {qh, kh, vh, qe, ke, scores, masked, m, me, e, sm, se, w, we, ve},
+                qh = splitHead[qT, h];
+                kh = splitHead[kT, h];
+                vh = splitHead[vT, h];
+                qe = er @ TUOpExpand[TUOpReshape[qh, {sym, 1, dHead}],
+                    {sym, sym, dHead}];
+                ke = er @ TUOpExpand[TUOpReshape[kh, {1, sym, dHead}],
+                    {sym, sym, dHead}];
+                scores = er @ TUOpMul[
+                    er @ TUOpReduce[er @ TUOpMul[qe, ke], 2, "SUM"],
+                    TUOpConst[scale]];
+                masked = er @ TUOpAdd[scores, mask];
+                m  = er @ TUOpReduce[masked, 1, "MAX"];
+                me = er @ TUOpExpand[TUOpReshape[m, {sym, 1}], {sym, sym}];
+                e  = er @ TUOpExp2[er @ TUOpMul[
+                    er @ TUOpAdd[masked, TUOpNeg[me]], TUOpConst[N @ Log2[E]]]];
+                sm = er @ TUOpReduce[e, 1, "SUM"];
+                se = er @ TUOpExpand[TUOpReshape[sm, {sym, 1}], {sym, sym}];
+                w  = er @ TUOpMul[e, TUOpRecip[se]];
+                we = er @ TUOpExpand[TUOpReshape[w, {sym, sym, 1}],
+                    {sym, sym, dHead}];
+                ve = er @ TUOpExpand[TUOpReshape[vh, {1, sym, dHead}],
+                    {sym, sym, dHead}];
+                er @ TUOpReduce[er @ TUOpMul[we, ve], 1, "SUM"]];
+            heads = perHead /@ Range[0, nHeads - 1];
+            (* PAD-free concat: symbolic one-hot column selector + sum *)
+            buildSlot[hh_, h_] := Module[{he, ohS},
+                he = er @ TUOpExpand[TUOpReshape[hh, {sym, 1, dHead}],
+                    {sym, nHeads, dHead}];
+                ohS = TSymbolicAxis[
+                    TTensorCreate[
+                        Table[N @ Boole[s == h], {hi}, {s, 0, nHeads - 1}, {1}]],
+                    0, vid];
+                er @ TUOpMul[he,
+                    er @ TUOpExpand[ohS, {sym, nHeads, dHead}]]];
+            Chop[Normal @ TTensorData @ TRealize @ er @ TUOpReshape[
+                er @ Total @ Table[buildSlot[heads[[h + 1]], h],
+                    {h, 0, nHeads - 1}],
+                {sym, dim}], 1.*^-6]];
+        {Max @ Abs[Flatten[mhaSym[4] - hostMHA[4]]],
+         Max @ Abs[Flatten[mhaSym[6] - hostMHA[6]]]}
+    ],
+    {0., 0.},  (* sym output == host oracle at S=4 and S=6 *)
+    TestID -> "symbolic/multihead-causal-attention-eager",
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
+]
+
+(* BONUS: a full symbolic TRANSFORMER BLOCK, EAGER --
+   x -> multi-head causal self-attention -> residual add -> ReLU MLP
+   ({S,dim}.{dim,4 dim} -> relu -> .{4 dim,dim}) -> residual add.
+   ReLU is x*(0<x) via TUOpCmplt (no binary-max UOP).  Realized at S=4 and
+   S=6, asserted against an independent host-side block oracle. *)
+VerificationTest[
+    Module[
+        {hi = 8, dim = 4, nHeads = 2, dHead = 2, dff = 16, xHost, w1Host,
+         w2Host, scale, hostMHA, hostBlock, symBlock, relu},
+        xHost  = Table[N[0.1 (i + 1) + 0.01 c], {i, 0, hi - 1}, {c, 0, dim - 1}];
+        w1Host = Table[N[0.05 (a - b)], {a, 0, dim - 1}, {b, 0, dff - 1}];
+        w2Host = Table[N[0.03 (a + b)], {a, 0, dff - 1}, {b, 0, dim - 1}];
+        scale = 1. / Sqrt[N @ dHead];
+        relu  = Max[#, 0.] &;
+        hostMHA[x_, S_] := ArrayFlatten[{Table[
+            Module[{qh, sc, w},
+                qh = x[[All, h dHead + 1 ;; (h + 1) dHead]];
+                sc = (qh . Transpose[qh]) scale +
+                    Table[If[ j <= i, 0., -10.^9], {i, 0, S - 1}, {j, 0, S - 1}];
+                w = Table[Exp[sc[[r]] - Max[sc[[r]]]], {r, 1, S}];
+                w = w / Total[w, {2}];
+                w . qh],
+            {h, 0, nHeads - 1}]}];
+        hostBlock[S_] := Module[{x, r1},
+            x  = xHost[[1 ;; S]];
+            r1 = x + hostMHA[x, S];
+            r1 + Map[relu, r1 . w1Host, {2}] . w2Host];
+        symBlock[Sval_] := Module[
+            {vid, sym, er, xT, ramp, ri, rj, mask, splitHead, perHead, heads,
+             buildSlot, attn, r1, hid},
+            TInit[];
+            vid = TKVarAlloc[1, hi];
+            sym = 2^31 + vid;
+            er[t_] := TRealize[t];
+            TKVarSet[vid, Sval];
+            xT = TSymbolicAxis[TTensorCreate[xHost], 0, vid];
+            ramp = TSymbolicAxis[TTensorCreate[N @ Range[0, hi - 1]], 0, vid];
+            ri = er @ TUOpExpand[TUOpReshape[ramp, {sym, 1}], {sym, sym}];
+            rj = er @ TUOpExpand[TUOpReshape[ramp, {1, sym}], {sym, sym}];
+            mask = er @ TUOpMul[
+                TUOpCmplt[TUOpAdd[ri, TUOpNeg[rj]], TUOpConst[0.]],
+                TUOpConst[-30.]];
+            splitHead[t_, h_] := er @ TUOpReshape[
+                TUOpShrink[
+                    TUOpPermute[TUOpReshape[t, {sym, nHeads, dHead}], {1, 0, 2}],
+                    {{h, h + 1}, {0, sym}, {0, dHead}}],
+                {sym, dHead}];
+            perHead[h_] := Module[
+                {qh, qe, ke, scores, masked, m, me, e, sm, se, w, we, ve},
+                qh = splitHead[xT, h];     (* Q = K = V = x per head *)
+                qe = er @ TUOpExpand[TUOpReshape[qh, {sym, 1, dHead}],
+                    {sym, sym, dHead}];
+                ke = er @ TUOpExpand[TUOpReshape[qh, {1, sym, dHead}],
+                    {sym, sym, dHead}];
+                scores = er @ TUOpMul[
+                    er @ TUOpReduce[er @ TUOpMul[qe, ke], 2, "SUM"],
+                    TUOpConst[scale]];
+                masked = er @ TUOpAdd[scores, mask];
+                m  = er @ TUOpReduce[masked, 1, "MAX"];
+                me = er @ TUOpExpand[TUOpReshape[m, {sym, 1}], {sym, sym}];
+                e  = er @ TUOpExp2[er @ TUOpMul[
+                    er @ TUOpAdd[masked, TUOpNeg[me]], TUOpConst[N @ Log2[E]]]];
+                sm = er @ TUOpReduce[e, 1, "SUM"];
+                se = er @ TUOpExpand[TUOpReshape[sm, {sym, 1}], {sym, sym}];
+                w  = er @ TUOpMul[e, TUOpRecip[se]];
+                we = er @ TUOpExpand[TUOpReshape[w, {sym, sym, 1}],
+                    {sym, sym, dHead}];
+                ve = er @ TUOpExpand[TUOpReshape[qh, {1, sym, dHead}],
+                    {sym, sym, dHead}];
+                er @ TUOpReduce[er @ TUOpMul[we, ve], 1, "SUM"]];
+            heads = perHead /@ Range[0, nHeads - 1];
+            buildSlot[hh_, h_] := Module[{he, ohS},
+                he = er @ TUOpExpand[TUOpReshape[hh, {sym, 1, dHead}],
+                    {sym, nHeads, dHead}];
+                ohS = TSymbolicAxis[
+                    TTensorCreate[
+                        Table[N @ Boole[s == h], {hi}, {s, 0, nHeads - 1}, {1}]],
+                    0, vid];
+                er @ TUOpMul[he,
+                    er @ TUOpExpand[ohS, {sym, nHeads, dHead}]]];
+            attn = er @ TUOpReshape[
+                er @ Total @ Table[buildSlot[heads[[h + 1]], h],
+                    {h, 0, nHeads - 1}],
+                {sym, dim}];
+            r1  = er @ TUOpAdd[xT, attn];          (* residual *)
+            hid = With[{pre = er[r1 . TTensorCreate[w1Host]]},
+                er @ TUOpMul[pre, TUOpCmplt[TUOpConst[0.], pre]]];  (* relu *)
+            Chop[Normal @ TTensorData @ TRealize @ er @ TUOpAdd[
+                r1, er[hid . TTensorCreate[w2Host]]], 1.*^-6]];  (* residual *)
+        {Max @ Abs[Flatten[symBlock[4] - hostBlock[4]]],
+         Max @ Abs[Flatten[symBlock[6] - hostBlock[6]]]}
+    ],
+    {0., 0.},
+    TestID -> "symbolic/transformer-block-eager",
+    SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
+]
