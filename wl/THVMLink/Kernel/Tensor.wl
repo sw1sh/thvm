@@ -256,6 +256,16 @@ TUOpReduce[src_, axis_Integer, kind_String] := (
     TTerm[$uopReduceFn[reduceKindCode[kind], axis, ttermRaw[src]]]
 )
 
+(* === Symbolic-shape (kvar) surface ===
+   Build a forward over a runtime-variable dimension so a single materialized
+   graph runs at any length without re-lift (tinygrad symbolic shapes).  The
+   axis is sized at its upper bound `hi` (buffers / dispatch shape are worst
+   case); TKVarSet binds the actual loop bound before TRealize.  Usage messages
+   are declared public in THVMLink.wl. *)
+TKVarAlloc[lo_Integer, hi_Integer] := (ensureInit[]; $kvarAllocFn[lo, hi])
+TKVarSet[vid_Integer, v_Integer]   := (ensureInit[]; $kvarSetRuntimeFn[vid, v])
+TSymbolicAxis[t_, axis_Integer, vid_Integer] := (ensureInit[]; TTerm[$markSymbolicAxisFn[ttermRaw[t], axis, vid]])
+
 TUOpReshape[src_, shape_List] := (ensureInit[]; TTerm[$uopReshapeFn[ttermRaw[src], shape]])
 TUOpPermute[src_, axes_List]  := (ensureInit[]; TTerm[$uopPermuteFn[ttermRaw[src], axes]])
 TUOpExpand [src_, shape_List] := (ensureInit[]; TTerm[$uopExpandFn [ttermRaw[src], shape]])

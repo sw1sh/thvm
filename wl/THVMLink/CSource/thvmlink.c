@@ -929,6 +929,49 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_alloc(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// === Symbolic-shape (kvar) surface =================================
+// Allocate a symbolic dim Variable in [lo, hi]; returns its id.
+EXTERN_C DLLEXPORT int thvm_wl_kvar_alloc(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 lo = (u32)MArgument_getInteger(args[0]);
+  u32 hi = (u32)MArgument_getInteger(args[1]);
+  MArgument_setInteger(res, (mint)kvar_alloc(NULL, lo, hi));
+  return LIBRARY_NO_ERROR;
+}
+
+// Bind a kvar's runtime value (the loop bound) for the next realize.
+EXTERN_C DLLEXPORT int thvm_wl_kvar_set_runtime(WolframLibraryData libData, mint argc,
+                                                MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  kvar_set_runtime((u32)MArgument_getInteger(args[0]),
+                   (u32)MArgument_getInteger(args[1]));
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+// Reinterpret a TEN's axis as a symbolic (kvar) dim.  The buffer stays sized
+// at the axis's current literal extent (which MUST equal kvar_hi(vid)); the
+// shape dim becomes kvar-packed so the lift emits a kvar RANGE there and the
+// loop runs the bound value.  Returns the (in-place mutated) term, 0 on a
+// hi-mismatch / bad axis.
+EXTERN_C DLLEXPORT int thvm_wl_mark_symbolic_axis(WolframLibraryData libData, mint argc,
+                                                  MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term ten  = (Term)MArgument_getInteger(args[0]);
+  u32  axis = (u32)MArgument_getInteger(args[1]);
+  u32  vid  = (u32)MArgument_getInteger(args[2]);
+  u32  tid  = (u32)term_val(ten);
+  if (tid != 0 && tid < TENS_NEXT && axis < TENS[tid].view.shape.ndim
+      && kvar_hi(vid) == TENS[tid].view.shape.dims[axis]) {
+    TENS[tid].view.shape.dims[axis] = kvar_pack_extent(vid);
+    MArgument_setInteger(res, (mint)ten);
+  } else {
+    MArgument_setInteger(res, 0);
+  }
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_tensor_write(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)libData; (void)argc;

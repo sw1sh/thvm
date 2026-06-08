@@ -115,6 +115,15 @@ true at this layer -- but unwired end to end.
   broadcast-expand + exp + reduce-sum + recip, giving `1/S` on uniform rows).
   So the transformer block is symbolic-capable; M3 is now plumbing
   (`{S,S}` causal mask + the WL surface + the JIT path), not unknown compute.
+- **WL symbolic-dim surface DONE** (`wl/THVMLink/Tests/symbolic.wlt`): three
+  bridges (`thvm_wl_kvar_alloc` / `_kvar_set_runtime` / `_mark_symbolic_axis`)
+  + the WL wrappers `TKVarAlloc[lo,hi]`, `TKVarSet[vid,val]`,
+  `TSymbolicAxis[t,axis,vid]`.  `TSymbolicAxis` reinterprets a concrete
+  `{hi, ..}` tensor's axis as a kvar (no copy -- the buffer is already the
+  worst-case size); then ONE materialized graph runs at any length by
+  rebinding: a `{S,4}` sum-over-S realizes to 5, 7, 12 with no re-lift between
+  calls.  Low-level (`TUOpReduce` etc.); the sugar / `tUopShape` don't yet read
+  kvar dims, and `TFromNet` doesn't yet build a symbolic-seq forward (M3).
 - **M3**: the GPT-2 forward symbolic end to end -- no `maxSeq`, JIT-captured once,
   replayed at the running length. The example collapses to
   `step = TJit[... TFromNet[net, ids] ...]` over the raw growing ids (the one-hot
