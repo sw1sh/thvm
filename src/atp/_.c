@@ -4110,6 +4110,14 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   //             default deadline).
   s->lrs_warmup_selections = 256u;
   s->lrs_recompute_period  = 128u;
+  // ENIGMA Tier 2 GNN re-rank period.  OFF (0) unless THVM_ATP_GNN_RERANK_PERIOD
+  // names a positive count, or thvm_atp_set_gnn_rerank_period sets it later
+  // (the WL "RerankPeriod" surface does the latter).  Only fires while a GNN
+  // model is loaded, so an unset model leaves the step path byte-identical.
+  {
+    const char *e = getenv("THVM_ATP_GNN_RERANK_PERIOD");
+    s->gnn_rerank_period = (e != NULL) ? (u32)strtoul(e, NULL, 10) : 0u;
+  }
   return s;
 }
 
@@ -5858,6 +5866,321 @@ fn void thvm_atp_clear_learned_scorer(void) {
   g_atp_learned_active = 0;
 }
 
+// === ENIGMA Tier 2: in-engine GCN critical-pair scorer ==============
+// Runs the GCN forward on thvm's OWN tensor runtime: it builds a UOP
+// graph out of the documented constructors (uop_reshape / uop_expand /
+// uop_binary / uop_reduce / uop_unary), thvm_realize's it, and reads the
+// per-graph proof-relevance score back from the realized buffer.  This
+// REPLICATES the WL reference forward (atpGnnForwardLogits in
+// wl/THVMLink/Kernel/ATP/ATP.wl): the same row-normalised-adjacency
+// message passing, masked-mean pool, and two-class readout, so a model
+// trained in WL scores identically in the engine (the test_atp_gnn_score
+// differential pins this to ~1e-3).
+
+// The loaded model.  Weights live in one heap-allocated f32 blob laid
+// out exactly as the on-the-wire f64 blob documents (see thvm.h): per
+// round r, W1[r] (in_r*H), Ws[r] (in_r*H), Bh[r] (H), with in_r = 6 on
+// round 0 and H thereafter; then Wout (H*2), Bout (2).  Offsets are
+// recomputed on the fly from R/H so the struct stays a single owned
+// buffer rather than a fixed-cap matrix.
+typedef struct {
+  u32    rounds;     // R >= 1
+  u32    hidden;     // H >= 1
+  float *w;          // owned flat parameter buffer
+  u32    w_len;      // element count of `w`
+} AtpGnnScorer;
+
+static AtpGnnScorer g_atp_gnn = {0u, 0u, NULL, 0u};
+static int          g_atp_gnn_active = 0;
+
+// Input dim feeding round r: ATP_CPG_FEAT_DIM on round 0, H thereafter.
+static u32 atp_gnn_in_dim(const AtpGnnScorer *m, u32 r) {
+  return (r == 0u) ? ATP_CPG_FEAT_DIM : m->hidden;
+}
+
+// Total flat element count for an (R, H) model - the on-wire blob
+// length minus the leading 2 header words.
+static u32 atp_gnn_param_count(u32 rounds, u32 hidden) {
+  u32 n = 0u;
+  for (u32 r = 0u; r < rounds; r++) {
+    u32 in_r = (r == 0u) ? ATP_CPG_FEAT_DIM : hidden;
+    n += 2u * in_r * hidden;   // W1[r] + Ws[r]
+    n += hidden;               // Bh[r]
+  }
+  n += hidden * 2u;            // Wout
+  n += 2u;                     // Bout
+  return n;
+}
+
+// Offset (into m->w) of W1[r] / Ws[r] / Bh[r] / Wout / Bout.
+static u32 atp_gnn_off_round(const AtpGnnScorer *m, u32 r) {
+  u32 off = 0u;
+  for (u32 i = 0u; i < r; i++) {
+    u32 in_i = atp_gnn_in_dim(m, i);
+    off += 2u * in_i * m->hidden + m->hidden;
+  }
+  return off;
+}
+static const float *atp_gnn_w1(const AtpGnnScorer *m, u32 r) {
+  return m->w + atp_gnn_off_round(m, r);
+}
+static const float *atp_gnn_ws(const AtpGnnScorer *m, u32 r) {
+  return m->w + atp_gnn_off_round(m, r) + atp_gnn_in_dim(m, r) * m->hidden;
+}
+static const float *atp_gnn_bh(const AtpGnnScorer *m, u32 r) {
+  return m->w + atp_gnn_off_round(m, r) + 2u * atp_gnn_in_dim(m, r) * m->hidden;
+}
+static const float *atp_gnn_wout(const AtpGnnScorer *m) {
+  return m->w + atp_gnn_off_round(m, m->rounds);   // past the last round block
+}
+static const float *atp_gnn_bout(const AtpGnnScorer *m) {
+  return atp_gnn_wout(m) + m->hidden * 2u;
+}
+
+fn int thvm_atp_set_gnn_scorer(const double *blob, u32 len) {
+  if (blob == NULL || len < 4u) return 0;
+  u32 rounds = (u32)blob[0];
+  u32 hidden = (u32)blob[1];
+  if (rounds == 0u || hidden == 0u) return 0;
+  u32 want = 2u + atp_gnn_param_count(rounds, hidden);
+  if (len != want) return 0;
+
+  float *w = (float *)malloc((size_t)(want - 2u) * sizeof(float));
+  if (w == NULL) return 0;
+  for (u32 i = 0u; i < want - 2u; i++) w[i] = (float)blob[2u + i];
+
+  free(g_atp_gnn.w);
+  g_atp_gnn.rounds = rounds;
+  g_atp_gnn.hidden = hidden;
+  g_atp_gnn.w      = w;
+  g_atp_gnn.w_len  = want - 2u;
+  g_atp_gnn_active = 1;
+  return 1;
+}
+
+fn void thvm_atp_clear_gnn_scorer(void) {
+  free(g_atp_gnn.w);
+  g_atp_gnn.w = NULL;
+  g_atp_gnn.w_len = 0u;
+  g_atp_gnn.rounds = 0u;
+  g_atp_gnn.hidden = 0u;
+  g_atp_gnn_active = 0;
+}
+
+fn int thvm_atp_gnn_loaded(void) { return g_atp_gnn_active; }
+
+// Wrap a host f32 buffer as a fresh CPU-backend TAG_TEN of the given
+// shape.  Allocates an owning buffer (tensor_alloc) and copies `data`
+// into it, so the caller's buffer can be reused/freed immediately.
+static Term atp_gnn_ten(const float *data, u32 ndim, const u32 *dims) {
+  Shape sh = {0};
+  sh.ndim = ndim;
+  for (u32 i = 0u; i < ndim; i++) sh.dims[i] = dims[i];
+  u32 tid = tensor_alloc(&CPU_BACKEND, sh, DT_FP32);
+  u64 nbytes = dtype_storage_bytes(DT_FP32, (u64)TENS[tid].view.numel);
+  CPU_BACKEND.buf_write(TENS[tid].buf_id, (void *)data, nbytes);
+  return term_new(0, TAG_TEN, DT_FP32, tid);
+}
+
+// Batched matmul (B,P,K).(B,K,Q) -> (B,P,Q) via the reshape/expand/
+// MUL/reduce-SUM pattern - the exact lowering atpBatchMatMul uses in
+// the WL reference.
+static Term atp_gnn_bmm(Term a, Term b, u32 B, u32 P, u32 K, u32 Q) {
+  u32 a4[4] = {B, P, K, 1u}, e4[4] = {B, P, K, Q}, b4[4] = {B, 1u, K, Q};
+  Term ae = uop_expand(uop_reshape(a, 4u, a4), 4u, e4);
+  Term be = uop_expand(uop_reshape(b, 4u, b4), 4u, e4);
+  return uop_reduce(REDUCE_SUM, 2u, uop_binary(UOP_MUL, ae, be));   // {B,P,Q}
+}
+
+// Apply a per-feature weight w {K,H} to node tensor h {B,P,K} -> {B,P,H}.
+// The WL reference does a 2-D TMatMul over the flattened (B*P, K); here
+// we broadcast w to {B,K,H} and reuse the batched matmul - numerically
+// identical (a sum over K of h[b,p,k]*w[k,hh]), keeping every op on the
+// thvm runtime with one primitive.
+static Term atp_gnn_applyw(Term h, Term w, u32 B, u32 P, u32 K, u32 H) {
+  u32 w3[3] = {1u, K, H}, we[3] = {B, K, H};
+  Term wb = uop_expand(uop_reshape(w, 3u, w3), 3u, we);
+  return atp_gnn_bmm(h, wb, B, P, K, H);
+}
+
+// Broadcast a length-D bias to a {B,P,D} tensor.
+static Term atp_gnn_bcast_bias(Term bias, u32 B, u32 P, u32 D) {
+  u32 b3[3] = {1u, 1u, D}, be[3] = {B, P, D};
+  return uop_expand(uop_reshape(bias, 3u, b3), 3u, be);
+}
+
+// ReLU(x) = x * (0 < x), the TReLU lowering (MUL[x, CMPLT[const0, x]]).
+static Term atp_gnn_relu(Term x) {
+  Term zero = uop_const(DT_FP32, 0u);          // 0.0f bits
+  return uop_binary(UOP_MUL, x, uop_binary(UOP_CMPLT, zero, x));
+}
+
+// M2: score `n` CPs with the loaded GNN, all on the thvm UOP runtime.
+fn int thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
+                                u32 n, float *out_scores) {
+  if (!g_atp_gnn_active || n == 0u || lhs == NULL || rhs == NULL
+      || out_scores == NULL) {
+    return 0;
+  }
+  const AtpGnnScorer *m = &g_atp_gnn;
+  const u32 F = ATP_CPG_FEAT_DIM, H = m->hidden, R = m->rounds, B = n;
+
+  // 1) Build every CP graph; track the max node count for padding.
+  AtpCpGraph *gs = (AtpCpGraph *)malloc((size_t)n * sizeof(AtpCpGraph));
+  if (gs == NULL) return 0;
+  u32 N = 1u;
+  for (u32 i = 0u; i < n; i++) {
+    if (!thvm_atp_cp_graph(lhs[i], rhs[i], &gs[i])) { free(gs); return 0; }
+    if (gs[i].n_nodes > N) N = gs[i].n_nodes;
+  }
+
+  // 2) Pad into host arrays: X (B,N,F), A (B,N,N row-normalised adjacency
+  //    with self-loops + merged edge types), MaskRow (B,1,N), NNodes (B,1,1).
+  //    These mirror atpGnnTensors byte-for-byte.
+  float *xArr    = (float *)calloc((size_t)B * N * F, sizeof(float));
+  float *aArr    = (float *)calloc((size_t)B * N * N, sizeof(float));
+  float *maskArr = (float *)calloc((size_t)B * N, sizeof(float));
+  float *nnArr   = (float *)calloc((size_t)B, sizeof(float));
+  if (xArr == NULL || aArr == NULL || maskArr == NULL || nnArr == NULL) {
+    free(gs); free(xArr); free(aArr); free(maskArr); free(nnArr);
+    return 0;
+  }
+  for (u32 bi = 0u; bi < B; bi++) {
+    const AtpCpGraph *g = &gs[bi];
+    u32 nn = g->n_nodes;
+    nnArr[bi] = (float)nn;
+    for (u32 ni = 0u; ni < nn; ni++) {
+      maskArr[(size_t)bi * N + ni] = 1.0f;
+      for (u32 fj = 0u; fj < F; fj++) {
+        xArr[((size_t)bi * N + ni) * F + fj] =
+            g->node_feat[(size_t)ni * ATP_CPG_FEAT_DIM + fj];
+      }
+    }
+    // Undirected adjacency (both directions) + self-loops.
+    float *adj = aArr + (size_t)bi * N * N;
+    for (u32  e = 0u; e < g->n_edges; e++) {
+      u32 src = g->edge_src[e], dst = g->edge_dst[e];
+      adj[(size_t)src * N + dst] = 1.0f;
+      adj[(size_t)dst * N + src] = 1.0f;
+    }
+    for (u32 ii = 0u; ii < nn; ii++) adj[(size_t)ii * N + ii] = 1.0f;
+    // Row-normalise (rows with no entries, i.e. padded nodes, stay zero).
+    for (u32 ii = 0u; ii < N; ii++) {
+      float rowsum = 0.0f;
+      for (u32 jj = 0u; jj < N; jj++) rowsum += adj[(size_t)ii * N + jj];
+      if (rowsum > 0.0f) {
+        for (u32 jj = 0u; jj < N; jj++) adj[(size_t)ii * N + jj] /= rowsum;
+      }
+    }
+  }
+
+  // 3) Wrap the host arrays + weights as thvm tensors, then build the
+  //    forward as a UOP graph (no kernels fire until thvm_realize).
+  Term xT    = atp_gnn_ten(xArr, 3u, (u32[]){B, N, F});
+  Term aT    = atp_gnn_ten(aArr, 3u, (u32[]){B, N, N});
+  Term maskT = atp_gnn_ten(maskArr, 3u, (u32[]){B, 1u, N});
+  Term nnT   = atp_gnn_ten(nnArr, 3u, (u32[]){B, 1u, 1u});
+
+  Term h = xT;
+  u32 lastDim = F;
+  for (u32 r = 0u; r < R; r++) {
+    u32 inr = atp_gnn_in_dim(m, r);
+    Term w1T = atp_gnn_ten(atp_gnn_w1(m, r), 2u, (u32[]){inr, H});
+    Term wsT = atp_gnn_ten(atp_gnn_ws(m, r), 2u, (u32[]){inr, H});
+    Term bhT = atp_gnn_ten(atp_gnn_bh(m, r), 1u, (u32[]){H});
+    Term ah  = atp_gnn_bmm(aT, h, B, N, N, lastDim);          // A.H {B,N,lastDim}
+    Term nb  = atp_gnn_applyw(ah, w1T, B, N, lastDim, H);     // (A.H).W1
+    Term sf  = atp_gnn_applyw(h, wsT, B, N, lastDim, H);      // H.Ws
+    Term msg = uop_binary(UOP_ADD,
+                          uop_binary(UOP_ADD, nb, sf),
+                          atp_gnn_bcast_bias(bhT, B, N, H));
+    h = atp_gnn_relu(msg);
+    lastDim = H;
+  }
+
+  // Masked-mean pool: (B,1,N).(B,N,H) -> (B,1,H), divide by NNodes,
+  // reshape to (B,H).
+  Term pooled3 = atp_gnn_bmm(maskT, h, B, 1u, N, H);          // {B,1,H}
+  Term nnInv   = uop_unary(UOP_RECIP, nnT);                   // {B,1,1}
+  Term nnInvE  = uop_expand(nnInv, 3u, (u32[]){B, 1u, H});
+  Term pooled  = uop_reshape(uop_binary(UOP_MUL, pooled3, nnInvE),
+                             2u, (u32[]){B, H});              // {B,H}
+
+  // Readout: pooled.Wout + Bout -> {B,2}.  Reuse the batched matmul by
+  // treating pooled as {B,1,H} and Wout broadcast to {B,H,2}.
+  Term woutT   = atp_gnn_ten(atp_gnn_wout(m), 2u, (u32[]){H, 2u});
+  Term boutT   = atp_gnn_ten(atp_gnn_bout(m), 1u, (u32[]){2u});
+  Term pooled3b = uop_reshape(pooled, 3u, (u32[]){B, 1u, H});
+  Term woutE   = uop_expand(uop_reshape(woutT, 3u, (u32[]){1u, H, 2u}),
+                            3u, (u32[]){B, H, 2u});
+  Term logit3  = atp_gnn_bmm(pooled3b, woutE, B, 1u, H, 2u);  // {B,1,2}
+  Term logits  = uop_reshape(logit3, 2u, (u32[]){B, 2u});
+  Term boutE   = uop_expand(uop_reshape(boutT, 2u, (u32[]){1u, 2u}),
+                            2u, (u32[]){B, 2u});
+  logits = uop_binary(UOP_ADD, logits, boutE);               // {B,2}
+
+  // 4) Realize on the thvm runtime + read back; score = logit_pos - logit_neg.
+  Term realized = term_resolve(thvm_realize(logits));
+  int ok = 0;
+  if (term_tag(realized) == TAG_TEN) {
+    u32 tid = (u32)term_val(realized);
+    float *out = (float *)malloc((size_t)B * 2u * sizeof(float));
+    if (out != NULL) {
+      TENS[tid].backend->buf_read(TENS[tid].buf_id, out,
+                                  (u64)B * 2u * sizeof(float));
+      for (u32 i = 0u; i < B; i++) {
+        out_scores[i] = out[(size_t)i * 2u + 1u] - out[(size_t)i * 2u + 0u];
+      }
+      free(out);
+      ok = 1;
+    }
+  }
+
+  free(gs); free(xArr); free(aArr); free(maskArr); free(nnArr);
+  return ok;
+}
+
+// M3: re-rank the live CP queue with the loaded GNN.  Pull -> score ->
+// map to priority -> push back.  Only permutes order (completeness safe).
+fn u32 thvm_atp_gnn_rerank(AtpState *s) {
+  if (s == NULL || !g_atp_gnn_active) return 0u;
+  u32 nq = thvm_atp_queued_cp_count(s);
+  if (nq == 0u) return 0u;
+
+  Term *lhs  = (Term *)malloc((size_t)nq * sizeof(Term));
+  Term *rhs  = (Term *)malloc((size_t)nq * sizeof(Term));
+  u32  *seq  = (u32 *)malloc((size_t)nq * sizeof(u32));
+  float *sc  = (float *)malloc((size_t)nq * sizeof(float));
+  u32  *pri  = (u32 *)malloc((size_t)nq * sizeof(u32));
+  if (lhs == NULL || rhs == NULL || seq == NULL || sc == NULL || pri == NULL) {
+    free(lhs); free(rhs); free(seq); free(sc); free(pri);
+    return 0u;
+  }
+  u32 got = thvm_atp_queued_cps(s, lhs, rhs, seq, nq);
+  if (got == 0u || !thvm_atp_gnn_score_batch(lhs, rhs, got, sc)) {
+    free(lhs); free(rhs); free(seq); free(sc); free(pri);
+    return 0u;
+  }
+  // Higher score -> lower priority, clamped to a safe u32 band - the
+  // same map atp_cp_learned_priority + atpRerankPriority use.
+  for (u32 i = 0u; i < got; i++) {
+    float pr = 1.0e6f - 1.0e4f * sc[i];
+    if (pr < 0.0f) pr = 0.0f;
+    if (pr > 2.0e9f) pr = 2.0e9f;
+    pri[i] = (u32)pr;
+  }
+  thvm_atp_set_cp_pri_by_seq(s, seq, pri, got);
+  s->n_gnn_reranks++;
+
+  free(lhs); free(rhs); free(seq); free(sc); free(pri);
+  return got;
+}
+
+fn void thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period) {
+  if (s == NULL) return;
+  s->gnn_rerank_period = period;
+}
+
 static u32 atp_cp_learned_priority(AtpState *s, Term lhs, Term rhs) {
   float feat[ATP_CP_FEATURE_DIM];
   thvm_atp_cp_features(s, lhs, rhs, s->cp_seq_next, feat);
@@ -7319,6 +7642,17 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // the top of the step so this step's first pushes (and the empty-
   // queue force-drain inside select_cp) see a bound consistent with R.
   if (s->auto_max_cp_weight_base > 0u) atp_auto_maxw_recompute(s);
+
+  // ENIGMA Tier 2: GNN-guided re-rank.  Every gnn_rerank_period
+  // SELECTIONS (and only while a model is loaded), permute the live CP
+  // queue by the network's proof-relevance score before the next pick.
+  // The whole forward runs on thvm's tensor runtime in C, no WL in the
+  // loop.  Completeness holds (re-ranking only permutes order).  Default
+  // OFF (period 0) so the unguided step is byte-identical.
+  if (s->gnn_rerank_period > 0u && thvm_atp_gnn_loaded()
+      && (s->cp_select_count % s->gnn_rerank_period) == 0u) {
+    thvm_atp_gnn_rerank(s);
+  }
 
   Term cp_lhs = 0, cp_rhs = 0;
   if (!thvm_atp_select_cp(s, &cp_lhs, &cp_rhs)) {

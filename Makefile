@@ -311,6 +311,7 @@ TESTS := \
   $(BIN)/test_atp_multiproof \
   $(BIN)/test_atp_cp_graph \
   $(BIN)/test_atp_rerank \
+  $(BIN)/test_atp_gnn_score \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
   $(BIN)/test_app_sup \

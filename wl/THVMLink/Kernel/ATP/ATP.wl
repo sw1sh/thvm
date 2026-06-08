@@ -80,6 +80,10 @@ TAtpGnnScore::usage = "TAtpGnnScore[model, dataset] scores a graph dataset (TAtp
 
 TFindProofReranked::usage = "TFindProofReranked[conjecture, axioms, model] proves the conjecture while re-ranking the critical-pair queue with a trained GNN `model` (the \"Model\" from TAtpTrainGnn): it drives the C saturation in chunks of \"RerankPeriod\" steps and, between chunks, pulls the live queued critical pairs, encodes each to its anonymised graph, scores them with TAtpGnnScore, and pushes GNN-derived priorities back into the engine's selection heap.  Returns the status string (\"PROVED\" / \"TIMEOUT\" / \"QUEUE_EMPTY\" / ...).  This is the ENIGMA inference loop -- the GNN guides selection on a live proof -- realised as a WL-driven amortised eval over the persistent-handle bridge.  Completeness is preserved (re-ranking only permutes selection order; the engine's periodic FIFO pick still fires).  Options: \"RerankPeriod\" (steps between re-ranks, default 200), MaxSteps (default 30000), \"CriticalPairWeight\" (the base weight for newly-generated CPs between re-ranks, default \"Gt\"), \"Ordering\" (\"KBO\" default / \"LPO\"), \"AutoPrecedence\" (default True), \"QueueCap\".";
 
+TAtpSetGnnScorer::usage = "TAtpSetGnnScorer[model] pushes a trained GCN model (the \"Model\" Association returned by TAtpTrainGnn) into the C ATP engine, so a persistent proof handle with a non-zero re-rank period (TFindProofGnnReranked) re-ranks the critical-pair queue by running the GCN forward on thvm's OWN tensor runtime, in C, every N selections -- no WL round-trip in the proof loop.  TAtpSetGnnScorer[Clear] (or None) drops the model.  Returns True on success, False on a malformed model.  The blob layout mirrors thvm_atp_set_gnn_scorer in src/atp/_.c.";
+
+TFindProofGnnReranked::usage = "TFindProofGnnReranked[conjecture, axioms, model] proves the conjecture with the trained GCN `model` (the \"Model\" from TAtpTrainGnn) guiding critical-pair selection ENTIRELY IN C: it pushes the GCN weights into the engine (TAtpSetGnnScorer), then drives one saturation in which thvm_atp_step itself re-ranks the live queue every \"RerankPeriod\" selections by running the GCN forward on thvm's own tensor runtime.  Unlike TFindProofReranked there is NO WL round-trip in the proof loop (no per-chunk pull/score/push over the persistent-handle bridge), so it is far faster.  Returns the status string (\"PROVED\" / \"TIMEOUT\" / \"QUEUE_EMPTY\" / ...).  Completeness is preserved (re-ranking only permutes selection order; the engine's periodic FIFO pick still fires).  Options: \"RerankPeriod\" (selections between re-ranks, default 200), MaxSteps (default 30000), \"CriticalPairWeight\" (base weight for newly-generated CPs, default \"Gt\"), \"Ordering\" (\"KBO\" default / \"LPO\"), \"AutoPrecedence\" (default True).";
+
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
    Begin[`Private`] resolve to the shared THVMLink`ATP`X symbol
@@ -239,6 +243,18 @@ $atpProofSetPriFn := $atpProofSetPriFn = load[
 $atpProofFreeFn := $atpProofFreeFn = load[
     "thvm_wl_atp_proof_free", {Integer}, Integer]
 
+(* ENIGMA Tier 2 (in-engine GCN): push the trained GCN weights into the
+   C engine as a flat Real blob (thvm_atp_set_gnn_scorer layout: [R, H],
+   then per-round W1/Ws/Bh, then Wout/Bout); an EMPTY list clears it.
+   _set_gnn_period sets the re-rank period on a persistent proof handle,
+   so thvm_atp_step itself re-ranks the queue every N selections by
+   running the GCN forward on thvm's OWN tensor runtime -- no WL in the
+   per-step loop. *)
+$atpSetGnnScorerFn := $atpSetGnnScorerFn = load[
+    "thvm_wl_atp_set_gnn_scorer", {{Real, 1}}, Integer]
+$atpProofSetGnnPeriodFn := $atpProofSetGnnPeriodFn = load[
+    "thvm_wl_atp_proof_set_gnn_period", {Integer, Integer}, Integer]
+
 (* Flatten a model Association into the C parameter blob
    (thvm_atp_set_learned_scorer layout): {kind, hidden, mean[14],
    inv_std[14], <weights>}.  Clear / None / {} -> {} (clears the
@@ -265,6 +281,31 @@ serializeLearnedModel[m_Association] := Block[{
 
 TAtpSetLearnedScorer[model_] := $atpSetLearnedScorerFn[
     N[serializeLearnedModel[model]]] === 1
+
+(* Flatten a trained GCN model (the "Model" from TAtpTrainGnn) into the C
+   parameter blob (thvm_atp_set_gnn_scorer layout): {R, H}, then per round
+   r the row-major W1[r] ({in_r, H}), Ws[r] ({in_r, H}), Bh[r] ({H}), then
+   Wout ({H, 2}) and Bout ({2}).  in_r is the GCN feature dim (6) on round
+   0 and H thereafter -- TAtpTrainGnn builds W1/Ws as {in_r, H} TGlorot
+   matrices, so Flatten gives the row-major order the C side reads.  Clear
+   / None / {} -> {} (clears the model). *)
+serializeGnnModel[Clear | None | {}] := {}
+serializeGnnModel[m_Association] := Block[{
+    rR = Lookup[m, "Rounds", Length[m["W1"]]],
+    hH = Lookup[m, "Hidden", Length[m["Bh"][[1]]]]
+},
+    Join[
+        {N[rR], N[hH]},
+        Flatten @ Table[
+            Join[Flatten[N[m["W1"][[r]]]], Flatten[N[m["Ws"][[r]]]],
+                 N[m["Bh"][[r]]]],
+            {r, rR}],
+        Flatten[N[m["Wout"]]], N[m["Bout"]]
+    ]
+]
+
+TAtpSetGnnScorer[model_] := $atpSetGnnScorerFn[
+    N[serializeGnnModel[model]]] === 1
 
 (* ENIGMA Tier 1a: generate a labelled critical-pair dataset by proving
    a corpus with feature recording on.  The C bridge records + labels +
@@ -1057,6 +1098,35 @@ TFindProofReranked[conjecture_, axioms_List, model_Association,
         ],
         {chunks}];
     $atpProofFreeFn[handle];
+    atpStatusFor[st]
+]
+
+Options[TFindProofGnnReranked] = {"RerankPeriod" -> 200, MaxSteps -> 30000,
+    "CriticalPairWeight" -> "Gt", "Ordering" -> "KBO",
+    "AutoPrecedence" -> True}
+
+(* C-driven inference loop: push the model once, set the re-rank period on
+   the persistent handle, run the saturation in a SINGLE chunk (the C
+   engine re-ranks itself between selections), then free.  The GCN forward
+   runs in C on thvm's tensor runtime, so the WL kernel is idle while the
+   proof runs. *)
+TFindProofGnnReranked[conjecture_, axioms_List, model_Association,
+    opts : OptionsPattern[]] := Module[{
+    enc = atpEncodeProblem[axioms, conjecture],
+    k = OptionValue["RerankPeriod"], maxSteps = OptionValue[MaxSteps],
+    cpw = Lookup[$AtpCpWeightCodes, OptionValue["CriticalPairWeight"], 3],
+    ord = If[ OptionValue["Ordering"] === "LPO", 1, 0],
+    ap = If[ TrueQ[OptionValue["AutoPrecedence"]], 1, 0],
+    handle, st
+},
+    If[ TAtpSetGnnScorer[model] =!= True, Return[$Failed]];
+    handle = $atpProofInitFn[enc["Packed"], maxSteps, enc["MaxLab"],
+        cpw, ord, ap];
+    If[ handle == 0, TAtpSetGnnScorer[Clear]; Return[$Failed]];
+    $atpProofSetGnnPeriodFn[handle, k];
+    st = $atpProofStepFn[handle, maxSteps];
+    $atpProofFreeFn[handle];
+    TAtpSetGnnScorer[Clear];
     atpStatusFor[st]
 ]
 

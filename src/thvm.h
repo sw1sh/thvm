@@ -3135,6 +3135,15 @@ fn Term uop_detach(Term src);
 // (TMaterialize / TRealize).
 fn Term thvm_materialize(Term term);
 
+// One-shot materialize + wnf under a per-call buffer-pool boundary
+// (src/schedule/realize.c).  The C entry the WL TRealize wraps; also
+// callable from other in-tree passes (e.g. the in-engine GNN scorer)
+// that need to drive a UOP graph to a realized TAG_TEN and read the
+// result buffer back.  thvm_realize_many bundles a TAG_CTR of
+// independent roots into one pass.
+fn Term thvm_realize(Term expr);
+fn Term thvm_realize_many(Term ctr_term);
+
 // === interact/uop_grad ===
 // Forward-declared so materialize_expr can reduce UOP_GRAD nodes
 // inline before kernelizing.  Defined later in src/interact/uop_grad.c.
@@ -4578,6 +4587,16 @@ typedef struct {
   u32  n_cps_dropped_lrs;         // diagnostics: CPs pruned by horizon
   u32  n_lrs_recomputes;          // diagnostics: horizon recomputations
 
+  // ENIGMA Tier 2: GNN-guided CP-queue re-rank.  When gnn_rerank_period
+  // is non-zero AND a GNN model is loaded (thvm_atp_gnn_loaded), the
+  // saturation loop calls thvm_atp_gnn_rerank every gnn_rerank_period
+  // selections to permute the queue by the network's proof-relevance
+  // score.  Default OFF (period 0): the step path is byte-identical to
+  // the unguided engine.  Flipped on by THVM_ATP_GNN_RERANK_PERIOD at
+  // init or by thvm_atp_set_gnn_rerank_period.
+  u32  gnn_rerank_period;         // selections between GNN re-ranks (0 = off)
+  u32  n_gnn_reranks;             // diagnostics: GNN re-rank invocations
+
   // Indexed unorientable-rewrite pass.  When set, the default tree mixed
   // normalizer replaces its O(n_rules) linear KBO-gated unorientable step
   // (atp_ordered_rewrite_step with the skip-oriented flag) with a
@@ -4965,6 +4984,9 @@ fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
 // subset it can actually reach.  Sound (incomplete in principle, complete
 // in budget); 0 = off (default) -> engine byte-identical.
 fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
+// Selections between GNN re-ranks (0 = off, the default).  Only takes
+// effect while a GNN model is loaded (thvm_atp_set_gnn_scorer).
+fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_fwd_subsume(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bwd_subsume(AtpState *s, u8 on);
@@ -5445,6 +5467,58 @@ typedef struct {
 // leaves the partially-built graph in place, and returns 0 so the caller
 // can fall back to the Tier-1 vector.
 fn int       thvm_atp_cp_graph(Term lhs, Term rhs, AtpCpGraph *out);
+
+// === ENIGMA Tier 2: in-engine GCN critical-pair scorer ==============
+// The Tier-2 GCN runs its forward on thvm's OWN tensor runtime (a UOP
+// graph built + thvm_realize'd), not a hand-rolled matmul and not a WL
+// round-trip.  It replicates the WL reference forward (atpGnnForwardLogits
+// in wl/THVMLink/Kernel/ATP/ATP.wl) bit-for-bit: R rounds of
+// row-normalised-adjacency message passing relu(A.H.W1 + H.Ws + b),
+// masked-mean pool, and a two-class readout whose per-graph score is
+// logit_pos - logit_neg.
+//
+// Blob layout (flat f64, mirroring thvm_atp_set_learned_scorer's style):
+//   [0]              R   (message-passing rounds, R >= 1)
+//   [1]              H   (hidden width, H >= 1)
+// then, for each round r in [0, R), with in_r = ATP_CPG_FEAT_DIM (6) on
+// round 0 and H on every later round, all row-major:
+//   W1[r]  in_r * H      (A.H branch weight, shape {in_r, H})
+//   Ws[r]  in_r * H      (self branch weight, shape {in_r, H})
+//   Bh[r]  H             (per-round message bias)
+// then the readout:
+//   Wout   H * 2         (shape {H, 2})
+//   Bout   2
+// The total length is  2 + sum_r (2*in_r*H + H) + 2*H + 2.  Returns 1 on
+// a well-formed blob (model active for subsequent gnn-score / rerank
+// calls), 0 on a malformed one (the model stays whatever it was).
+// Process-global, set once and reused, like the Tier-1 scorer.
+fn int       thvm_atp_set_gnn_scorer(const double *blob, u32 len);
+// Drop the loaded GNN model.  A later gnn-score / rerank call with no
+// model loaded is a no-op.
+fn void      thvm_atp_clear_gnn_scorer(void);
+// 1 if a GNN model is currently loaded, else 0.
+fn int       thvm_atp_gnn_loaded(void);
+
+// M2 (correctness anchor): score a BATCH of `n` critical pairs with the
+// loaded GNN.  For each i, builds thvm_atp_cp_graph(lhs[i], rhs[i]),
+// pads every graph to a common node count, assembles the GCN forward as
+// a thvm UOP graph, thvm_realize's it on the CPU backend, and writes the
+// per-graph score (logit_pos - logit_neg) into out_scores[i].  Returns 1
+// on success (model loaded, all graphs built); 0 if no model is loaded,
+// a graph overflows the node cap, or n == 0.  A pure read of the Terms;
+// no AtpState needed.
+fn int       thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
+                                      u32 n, float *out_scores);
+
+// M3 (integration): re-rank the live CP queue with the loaded GNN.
+// Pulls the queued CPs (thvm_atp_queued_cps), scores them with
+// thvm_atp_gnn_score_batch, maps each score to a queue priority (higher
+// score -> lower priority, the same 1e6 - 1e4*score band the Tier-1
+// scorer uses), and pushes them back via thvm_atp_set_cp_pri_by_seq.
+// Only PERMUTES selection order, so completeness is preserved.  A no-op
+// when no model is loaded or the queue is empty.  Returns the number of
+// CPs re-ranked.
+fn u32       thvm_atp_gnn_rerank(AtpState *s);
 
 // === wald/ ===
 // Parser for Waldmeister .pr-style spec files.  Stage 6.3 of

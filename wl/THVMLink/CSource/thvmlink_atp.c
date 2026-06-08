@@ -318,6 +318,32 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_set_learned_scorer(WolframLibraryData libData
   return LIBRARY_NO_ERROR;
 }
 
+// === ENIGMA Tier 2: push a trained GCN model ====================
+//
+// Loads the GNN used by the in-engine C re-rank (thvm_atp_gnn_rerank).
+// args[0] is a flat Real (f64) parameter vector in the
+// thvm_atp_set_gnn_scorer layout ([R, H], then per-round W1/Ws/Bh, then
+// Wout/Bout).  An EMPTY array clears the model.  Returns 1 on success, 0
+// on a malformed blob.  Process-global, set once and reused.  The GCN
+// forward runs entirely on thvm's own tensor runtime in C, no WL in
+// the per-step loop.
+EXTERN_C DLLEXPORT int thvm_wl_atp_set_gnn_scorer(WolframLibraryData libData,
+                                                  mint argc, MArgument *args,
+                                                  MArgument res) {
+  (void)argc;
+  MTensor t = MArgument_getMTensor(args[0]);
+  mint len  = libData->MTensor_getFlattenedLength(t);
+  if (len == 0) {
+    thvm_atp_clear_gnn_scorer();
+    MArgument_setInteger(res, 1);
+    return LIBRARY_NO_ERROR;
+  }
+  const double *blob = libData->MTensor_getRealData(t);
+  int ok = thvm_atp_set_gnn_scorer(blob, (u32)len);
+  MArgument_setInteger(res, ok);
+  return LIBRARY_NO_ERROR;
+}
+
 // === ATP runner with proof extraction ============================
 //
 // Mirrors thvm_wl_atp_run, but on a goal closed by the single-NF
@@ -1855,6 +1881,24 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_proof_setpri(WolframLibraryData libData,
   for (mint i = 0; i < n; i++) { seq[i] = (u32)sd[i]; pri[i] = (u32)pd[i]; }
   thvm_atp_set_cp_pri_by_seq(atp, seq, pri, (u32)n);
   free(seq); free(pri);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+// Set the in-engine GNN re-rank period on a persistent proof handle.
+// With this period > 0 AND a GNN model loaded (thvm_wl_atp_set_gnn_scorer),
+// thvm_atp_step itself re-ranks the CP queue every `period` selections --
+// the whole GCN forward runs in C on thvm's tensor runtime, so a driver
+// can just step the handle in big chunks with NO WL round-trip between
+// re-ranks.  args[1] = period (0 = off).
+EXTERN_C DLLEXPORT int thvm_wl_atp_proof_set_gnn_period(WolframLibraryData libData,
+                                                        mint argc, MArgument *args,
+                                                        MArgument res) {
+  (void)libData; (void)argc;
+  AtpState *atp = (AtpState *)(intptr_t)MArgument_getInteger(args[0]);
+  mint period   = MArgument_getInteger(args[1]);
+  if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+  thvm_atp_set_gnn_rerank_period(atp, period < 0 ? 0u : (u32)period);
   MArgument_setInteger(res, 1);
   return LIBRARY_NO_ERROR;
 }
