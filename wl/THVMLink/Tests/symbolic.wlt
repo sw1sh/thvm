@@ -456,21 +456,19 @@ VerificationTest[
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &)
 ]
 
-(* REPEATED fresh-kvar TCausalMaskSym crashes the CPU dispatch (OPEN C bug).
-   Allocating a NEW kvar with TKVarAlloc and realizing a TCausalMaskSym {S,S}
-   over it crashes the kernel on the ~4th allocation: cpu_dispatch_kernel
-   (src/backend/cpu/interpret.c) dereferences a doubly-kvar-packed {S,S}
-   extent (far address 0x8000000080000000 = (2^31)<<32 | 2^31, a Data Abort
-   translation fault) -- the runtime kvar bound substitution is not applied to
-   a doubly-symbolic {S,S} tensor during kernel fire, so the raw packed
-   extents leak into an address computation.  Stack: thvm_wl_realize ->
-   thvm_realize -> wnf_n -> kernel_fire_by_id -> cpu_dispatch_kernel.  A SHARED
-   vid reused across many realizes is FINE (the per-fresh-vid path is the bug);
-   a SINGLE fresh-vid mask at full GPT-2 scale (dim 768, 12 heads) is also
-   fine.  This blocks the real GPT-2 forward over a symbolic sequence (its
-   per-block attention issues enough fresh symbolic realizes to cross the
-   threshold).  Run in a SUBPROCESS so the SIGABRT does not take down this
-   suite; the test asserts the child exits cleanly. *)
+(* REGRESSION GUARD: repeated fresh-kvar TCausalMaskSym {S,S} realizes.
+   Allocating a NEW kvar each time and realizing a TCausalMaskSym {S,S} once
+   crashed on the ~4th fresh kvar: the hand-coded UPCAST/UNROLL opt admitted a
+   symbolic axis (its extent is kvar-PACKED, 0x80000000|id, which `> 1` wrongly
+   passed), then uop_dag_apply_split's raw `extent / k` CLEARED the kvar flag
+   (0x80000004 / 4 = 0x20000001) -> a ~500M-iter loop -> out-of-bounds store.
+   The "every 4th fresh kvar" signature was exact: split bails on `extent % k
+   != 0`, so 0x80000001/2/3 escaped; 0x80000004 was the first fresh id divisible
+   by k=4.  A SHARED vid (id stays 1) never divided evenly, so it only surfaced
+   on the multi-block GPT-2 forward.  FIXED e6e2163c (exclude kvar axes from
+   upcast/unroll, per tinygrad codegen/opt/postrange.py).  Run in a SUBPROCESS
+   so any regression's SIGABRT does not take down this suite; asserts the child
+   exits cleanly. *)
 VerificationTest[
     Module[{script, res},
         script = "
