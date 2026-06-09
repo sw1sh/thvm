@@ -1294,6 +1294,27 @@ fromLayer[NetMapOperator, layer_, x_TTerm] := Module[{inner},
     ]
 ]
 
+(* CatenateLayer[Level -> n]: concatenate a list of equal-rank tensors along the
+   1-indexed axis `n`.  GPT-2's attention NetGraph catenates its 12 per-head
+   {seq, 64} outputs into {seq, 768} at Level -> 2 (the feature axis).  thvm has
+   no STACK / CAT op, so place each input into its column slice of the output via
+   TUOpPad (zero-pad before/after along the concat axis) and sum -- the headStitch
+   idiom generalised to arbitrary widths.  The concat axis is a feature axis
+   (literal), so the PAD is safe even when another axis is symbolic. *)
+fromLayer[CatenateLayer, layer_, xs_List] := Module[
+    {axis, rank, widths, offsets, total},
+    axis    = NetExtract[layer, "Level"];          (* 1-indexed *)
+    rank    = Length @ tUopShape[First[xs]];
+    widths  = tUopShape[#][[axis]] & /@ xs;
+    offsets = Prepend[Accumulate[Most[widths]], 0];
+    total   = Total[widths];
+    Total @ MapThread[
+        Function[{t, off, w},
+            TUOpPad[t, Table[If[ a === axis, {off, total - off - w}, {0, 0}],
+                {a, rank}]]],
+        {xs, offsets, widths}]
+]
+
 (* SequenceIndicesLayer: produces a sequence of integer position
    indices [1..len] for use as Embedding lookup ids.  Wolfram's
    layer is 1-indexed (matching its EmbeddingLayer convention), so
@@ -1376,14 +1397,18 @@ fromLayer[NetGraph, g_, input_] := Module[{
         distinct = DeleteDuplicates[predTerms];
         Which[
             (* a sub-NetGraph / NetMapOperator whose multiple ports are all fed
-               by ONE predecessor (GPT-2 self-attention: Input + Query both <-
-               the pre-norm stream).  Parallel edges collapse to a single pred;
-               pass that one term so the sub-net fans it to every port.  Genuine
-               multi-input combine layers (ThreadingLayer / AttentionLayer) take
-               the residual-pad branch below instead. *)
-            arity > 1 && Length[distinct] === 1
+               by ONE source (GPT-2 self-attention: Input + Query both <- the
+               pre-norm stream).  That source is either a single shared
+               predecessor (distinct == 1) or the NetGraph's OWN input port fanned
+               to every port (distinct == 0, e.g. the per-head sub-NetGraphs whose
+               Input + Query both read the attention graph's input).  Pass that one
+               term so the sub-net fans it to every port -- NOT a multi-element
+               List its inner 0-pred nodes would mis-read.  Genuine multi-input
+               combine layers (ThreadingLayer / AttentionLayer) take the
+               residual-pad branch below instead. *)
+            arity > 1 && Length[distinct] <= 1
                 && MatchQ[Head[node], NetGraph | NetMapOperator | NetChain],
-                First[distinct],
+                If[ Length[distinct] === 1, First[distinct], input],
             arity === 1 && Length[predTerms] === 0, input,
             arity === 1, First[predTerms],
             (* arity > 1 with too few predecessors -> input fills the front
@@ -1457,7 +1482,7 @@ fromLayer[AttentionLayer, layer_, qkv_List] /;
     ]
 
 fromLayer[AttentionLayer, layer_, qkv_List] /; Length[qkv] === 3 :=
-    Module[{q, k, v, params, multiHead, mask, rescale, qShape, nHeads, seq, dim,
+    Module[{q, k, v, params, mask, rescale, qShape, nHeads, seq, dim,
             scale, portNames, qi, ki, vi},
         (* The NetGraph traversal hands the three predecessors in the layer's
            InputPortNames order (GPT-2: {Key, Value, Query}).  Reorder to our
@@ -1470,12 +1495,16 @@ fromLayer[AttentionLayer, layer_, qkv_List] /; Length[qkv] === 3 :=
         vi = FirstPosition[portNames, "Value", {3}][[1]];
         q = qkv[[qi]];  k = qkv[[ki]];  v = qkv[[vi]];
         params    = Quiet @ NetExtract[layer, "Parameters"];
-        multiHead = TrueQ @ Lookup[params, "MultiHead", False];
         mask      = Lookup[params, "Mask", None];
         rescale   = Lookup[params, "ScoreRescaling", None];
-        If[ !multiHead, Return @ TAttention[q, k, v]];
-        (* Multi-head: Q/K/V arrive as flat {seq, dim}; nHeads = the
-           head axis of the layer's $QueryShape ({seq, nHeads}). *)
+        (* nHeads = the head axis of the layer's $QueryShape ({seq, nHeads});
+           a single-head AttentionLayer (MultiHead -> False, $QueryShape ->
+           {Automatic}) falls through to nHeads = 1.  Routing it through
+           TMultiHeadAttention (rather than TAttention) is what respects the
+           layer's ScoreRescaling AND Mask: GPT-2's per-head AttentionLayer is
+           ScoreRescaling -> None (the 1/Sqrt[d] is an external scaling layer on
+           the query) + Mask -> Causal, so TAttention would both double-scale and
+           drop the causal mask. *)
         qShape  = Lookup[params, "$QueryShape", Missing[]];
         nHeads  = If[ ListQ[qShape] && Length[qShape] >= 2, Last[qShape], 1];
         {seq, dim} = tUopShape[q];
