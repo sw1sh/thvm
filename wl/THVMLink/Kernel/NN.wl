@@ -920,88 +920,26 @@ TAppendAt[cache_TTerm, src_TTerm, posVid_Integer] := Module[
     TRealize[TAssign[TUOpShrink[cache, Join[{{p, p + 1}}, tailRanges]], src]];
     cache]
 
-(* TDecodeAttend -- GPT-2's per-step DECODE attention over a KV cache
-   (tinygrad gpt2.py with T=1, start_pos driving the append + prefix length).
-   A single new query q1 ({1, dim}) attends a symbolic-length cached K/V
-   prefix.  Two kvars: `posVid` (the append ROW, runtime = pos) and `lenVid`
-   (the cached PREFIX LENGTH, runtime = pos + 1 incl. the just-appended token);
-   both set per step, both hi = nCtx.
-
-   1. APPEND the new token's kNew/vNew ({1, dim}) into the {nCtx, dim} caches at
-      row posVid (TAppendAt -- in-place, validated C path).
-   2. MARK the cache prefix length symbolic on lenVid: {len, dim}.
-   3. Multi-head attend.  Q's seq axis is the LITERAL 1; K/V's seq axis is the
-      kvar `lenVid` (sym).  symLeadingQ[q1] is FALSE (Q leading == literal 1) so
-      the symbolic TMultiHeadAttention clause does NOT fire -- this is the
-      seqQ=1 / seqK=len decode fork.  Built directly, EAGER (every sub-op
-      TRealize'd to a contiguous leaf), mirroring the symbolic-MHA discipline
-      at seqQ=1 and the validated single-head test_sym_decode_step.c compute.
-      Per head: scores = (q_h{1,dHead} . k_h^T{dHead,len}) * scale -> {1,len};
-      softmax over the key axis (axis 1, the kvar len); . v_h{len,dHead} ->
-      {1,dHead}.  NO causal mask (a single new query attends ALL cached keys,
-      all causally prior -- tinygrad's T=1 mask=None).  Concat heads via
-      headStitch (PAD over the LITERAL row axis 0 + column slots -- no kvar in
-      the concat, so PAD is safe) -> {1, dim}. *)
+(* TDecodeAttend -- GPT-2's per-step DECODE attention over a KV cache (tinygrad
+   gpt2.py with T=1, start_pos driving the append + prefix length).  A single new
+   query q1 ({1, dim}) attends a symbolic-length cached K/V prefix.  Two kvars:
+   `posVid` (the append ROW, runtime = pos) and `lenVid` (the cached PREFIX
+   LENGTH, runtime = pos + 1).  This is JUST `TMultiHeadAttention` at seqQ == 1
+   (literal) over a symbolic seqK == len, with no causal mask (a single new query
+   attends every cached key, all causally prior -- tinygrad's T=1 mask=None):
+     1. APPEND kNew/vNew ({1, dim}) into the {nCtx, dim} caches at row posVid.
+     2. MARK the {len, dim} cached prefix symbolic on lenVid.
+     3. Attend q1 over the symbolic prefix via the unified TMultiHeadAttention.
+   The per-head output's row axis is the literal 1 (the symbolic key axis is
+   reduced away by the softmax), so headStitch's PAD is over a literal axis and
+   no per-head realize is needed. *)
 TDecodeAttend[q1_TTerm, kCache_TTerm, vCache_TTerm, kNew_TTerm, vNew_TTerm,
               nHeads_Integer, posVid_Integer, lenVid_Integer,
-              scale_?NumericQ] := Module[
-    {sym, dim, dHead, er, kSym, vSym, splitHeadQ, splitHeadKV, perHead, heads},
-    sym   = TKVarPack[lenVid];                     (* kvar-packed prefix length *)
-    dim   = tUopShape[q1][[2]];
-    dHead = dim / nHeads;
-    er[t_] := TRealize[t];                         (* realize -> contiguous leaf *)
-    (* 1. append the new token into both caches at row posVid *)
+              scale_?NumericQ] := (
     TAppendAt[kCache, kNew, posVid];
     TAppendAt[vCache, vNew, posVid];
-    (* 2. mark the {len, dim} cached prefix symbolic on lenVid *)
-    kSym = TSymbolicAxis[kCache, 0, lenVid];
-    vSym = TSymbolicAxis[vCache, 0, lenVid];
-    (* Q split: literal seq=1.  {1,dim} -> {1,nHeads,dHead} -> PERMUTE {1,0,2}
-       -> SHRINK head h -> {1,dHead}.  All literal axes (no kvar). *)
-    splitHeadQ[t_, h_] := er @ TUOpReshape[
-        TUOpShrink[
-            TUOpPermute[TUOpReshape[t, {1, nHeads, dHead}], {1, 0, 2}],
-            {{h, h + 1}, {0, 1}, {0, dHead}}],
-        {1, dHead}];
-    (* K/V split: symbolic seq=len.  {len,dim} -> {len,nHeads,dHead} ->
-       PERMUTE {1,0,2} -> SHRINK head h (the {0, pack(len)} symbolic seq slice,
-       c74f7d1c-preserved) -> {len,dHead}. *)
-    splitHeadKV[t_, h_] := er @ TUOpReshape[
-        TUOpShrink[
-            TUOpPermute[TUOpReshape[t, {sym, nHeads, dHead}], {1, 0, 2}],
-            {{h, h + 1}, {0, sym}, {0, dHead}}],
-        {sym, dHead}];
-    perHead[h_] := Module[
-        {qh, kh, vh, qe, ke, scores, m, me, e, sm, se, w, we, ve},
-        qh = splitHeadQ[q1, h];                    (* {1, dHead} *)
-        kh = splitHeadKV[kSym, h];                 (* {len, dHead} *)
-        vh = splitHeadKV[vSym, h];                 (* {len, dHead} *)
-        (* scores = scale * einsum 1k,lk->1l (reduce over dHead axis 2) *)
-        qe = er @ TUOpExpand[TUOpReshape[qh, {1, 1, dHead}],
-            {1, sym, dHead}];
-        ke = er @ TUOpExpand[TUOpReshape[kh, {1, sym, dHead}],
-            {1, sym, dHead}];
-        scores = er @ TUOpMul[
-            er @ TUOpReduce[er @ TUOpMul[qe, ke], 2, "SUM"],
-            TUOpConst[N @ scale]];                 (* {1, len} *)
-        (* softmax over the key axis (axis 1, the kvar len), EXP2 chain *)
-        m  = er @ TUOpReduce[scores, 1, "MAX"];    (* {1, 1} *)
-        me = er @ TUOpExpand[TUOpReshape[m, {1, 1}], {1, sym}];
-        e  = er @ TUOpExp2[er @ TUOpMul[
-            er @ TUOpAdd[scores, TUOpNeg[me]], TUOpConst[N @ Log2[E]]]];
-        sm = er @ TUOpReduce[e, 1, "SUM"];         (* {1, 1} *)
-        se = er @ TUOpExpand[TUOpReshape[sm, {1, 1}], {1, sym}];
-        w  = er @ TUOpMul[e, TUOpRecip[se]];       (* {1, len} weights *)
-        (* out = einsum 1l,lk->1k (reduce over key axis 1) *)
-        we = er @ TUOpExpand[TUOpReshape[w, {1, sym, 1}],
-            {1, sym, dHead}];
-        ve = er @ TUOpExpand[TUOpReshape[vh, {1, sym, dHead}],
-            {1, sym, dHead}];
-        er @ TUOpReduce[er @ TUOpMul[we, ve], 1, "SUM"]];  (* {1, dHead} *)
-    heads = perHead /@ Range[0, nHeads - 1];
-    (* concat heads -> {1, dim}.  The row axis (seq_q == 1) is LITERAL, so
-       headStitch's PAD over it is safe (no kvar in the concat). *)
-    er @ headStitch[heads, nHeads, dHead]]
+    TMultiHeadAttention[q1, TSymbolicAxis[kCache, 0, lenVid],
+        TSymbolicAxis[vCache, 0, lenVid], nHeads, None, scale])
 
 TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{
     shape = tUopShape[x],
@@ -1031,86 +969,19 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
     TMultiHeadAttention[q, k, v, nHeads, mask, 1 / Sqrt[N @ dHead]]
 ]
 
-(* Symbolic-SEQUENCE multi-head attention.  Selected when Q's leading
-   (sequence) axis is kvar-PACKED (>= 2^31): the seq length S is a
-   symbolic dimension, so the whole construction runs EAGER -- every
-   reduce / binary-op / broadcast-EXPAND realized to a contiguous leaf
-   before the next op -- to sidestep the doubly-symbolic {S,S}
-   fused-broadcast addressing.  This is the validated construction in
-   symbolic.wlt's "symbolic/multihead-causal-attention-eager".
+(* Multi-head attention, one clause for every sequence regime.  Q,K,V are
+   {seq, dim}; K/V carry their own length, so seqK may differ from seqQ (cross-
+   attention, and the single-query decode step over a KV cache).  `mask` is an
+   additive {seqQ, seqK} bias (TCausalMask / TCausalMaskSym) or None.
 
-   Q,K,V are {S, dim}; `mask` is a SYMBOLIC {S,S} additive bias
-   (TCausalMaskSym) or None; `scale` and the n_heads / d_head split
-   match the integer path's semantics exactly.  SPLIT per head via a
-   kvar reshape {S,dim}->{S,nHeads,dHead} + PERMUTE {1,0,2} + per-head
-   SHRINK; per-head eager causal attention; PAD-free concat via a
-   symbolic one-hot column selector (TUOpPad over a kvar axis zeros the
-   data -- a known addressing bug -- so concat must avoid PAD). *)
-TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
-                    nHeads_Integer, mask_, scale_?NumericQ] /;
-                    symLeadingQ[q] := With[{
-    shapeQ = tUopShape[q]
-},
-    Module[{vid, sym, hi, dim, dHead, er, splitHead, perHead, heads,
-            buildSlot},
-        vid   = symVid[shapeQ[[1]]];
-        sym   = shapeQ[[1]];          (* already kvar-packed *)
-        hi    = TKVarHi[vid];         (* static buffer extent for axis 0 *)
-        dim   = shapeQ[[2]];
-        dHead = dim / nHeads;
-        er[t_] := TRealize[t];        (* realize -> contiguous leaf *)
-        (* {S,dim} -> {S,nHeads,dHead} -> PERMUTE {1,0,2} -> SHRINK head h *)
-        splitHead[t_, h_] := er @ TUOpReshape[
-            TUOpShrink[
-                TUOpPermute[TUOpReshape[t, {sym, nHeads, dHead}], {1, 0, 2}],
-                {{h, h + 1}, {0, sym}, {0, dHead}}],
-            {sym, dHead}];
-        perHead[h_] := Module[
-            {qh, kh, vh, qe, ke, scores, masked, m, me, e, sm, se, w, we, ve},
-            qh = splitHead[q, h];
-            kh = splitHead[k, h];
-            vh = splitHead[v, h];
-            (* scores = scale * einsum ik,jk->ij (reduce over dHead axis) *)
-            qe = er @ TUOpExpand[TUOpReshape[qh, {sym, 1, dHead}],
-                {sym, sym, dHead}];
-            ke = er @ TUOpExpand[TUOpReshape[kh, {1, sym, dHead}],
-                {sym, sym, dHead}];
-            scores = er @ TUOpMul[
-                er @ TUOpReduce[er @ TUOpMul[qe, ke], 2, "SUM"],
-                TUOpConst[N @ scale]];
-            masked = If[ mask === None, scores, er @ TUOpAdd[scores, mask]];
-            (* softmax over the key axis (axis 1), EXP2 + log2(e) chain *)
-            m  = er @ TUOpReduce[masked, 1, "MAX"];
-            me = er @ TUOpExpand[TUOpReshape[m, {sym, 1}], {sym, sym}];
-            e  = er @ TUOpExp2[er @ TUOpMul[
-                er @ TUOpAdd[masked, TUOpNeg[me]], TUOpConst[N @ Log2[E]]]];
-            sm = er @ TUOpReduce[e, 1, "SUM"];
-            se = er @ TUOpExpand[TUOpReshape[sm, {sym, 1}], {sym, sym}];
-            w  = er @ TUOpMul[e, TUOpRecip[se]];           (* {S,S} weights *)
-            (* out = einsum ij,jk->ik (reduce over key axis 1) *)
-            we = er @ TUOpExpand[TUOpReshape[w, {sym, sym, 1}],
-                {sym, sym, dHead}];
-            ve = er @ TUOpExpand[TUOpReshape[vh, {1, sym, dHead}],
-                {sym, sym, dHead}];
-            er @ TUOpReduce[er @ TUOpMul[we, ve], 1, "SUM"]];  (* {S,dHead} *)
-        heads = perHead /@ Range[0, nHeads - 1];
-        (* PAD-free concat: place each head's {S,dHead} into its column
-           slot of {S,nHeads,dHead} via a symbolic one-hot selector, sum
-           over heads, reshape -> {S,dim}. *)
-        buildSlot[hh_, h_] := Module[{he, ohS},
-            he = er @ TUOpExpand[TUOpReshape[hh, {sym, 1, dHead}],
-                {sym, nHeads, dHead}];
-            ohS = TSymbolicAxis[
-                TTensorCreate[
-                    Table[N @ Boole[s == h], {hi}, {s, 0, nHeads - 1}, {1}]],
-                0, vid];
-            er @ TUOpMul[he, er @ TUOpExpand[ohS, {sym, nHeads, dHead}]]];
-        er @ TUOpReshape[
-            er @ Total @ Table[buildSlot[heads[[h + 1]], h], {h, 0, nHeads - 1}],
-            {sym, dim}]
-    ]
-]
-
+   The seq axes may be LITERAL or kvar-PACKED (symbolic length S): `ArrayReshape`
+   / `Transpose` / `TUOpShrink` / `Dot` / `TSoftmaxAxis` all index a symbolic
+   axis correctly (view_apply_shrink sizes numel at the kvar hi bound, so the
+   per-head split no longer mis-addresses -- the bug that forced a separate eager
+   raw-UOp clause).  The ONE symbolic concession is realizing each per-head
+   {seqQ, dHead} output before headStitch: a lazy symbolic-axis reduction can't
+   yet be consumed by the cross-head concat (the reduce window strands), and the
+   realize also primes the capture-at-hi leaves the symbolic TJit replay needs. *)
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                     nHeads_Integer, mask_, scale_?NumericQ] := With[{
     shapeQ = tUopShape[q],
@@ -1135,10 +1006,11 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
             kS = sliceHead[headView[k, seqK], h, seqK],
             vS = sliceHead[headView[v, seqK], h, seqK]
         },
-            Module[{scores, scoresM},
+            Module[{scores, scoresM, out},
                 scores  = (qS . Transpose[kS]) * scale;   (* {seqQ, seqK} *)
                 scoresM = If[ mask === None, scores, scores + mask];
-                TSoftmaxAxis[scoresM, 1] . vS]];          (* {seqQ, dHead} *)
+                out = TSoftmaxAxis[scoresM, 1] . vS;      (* {seqQ, dHead} *)
+                If[ symLeadingQ[q], TRealize @ out, out]]];
         headOuts = perHead /@ Range[0, nHeads - 1];
         headStitch[headOuts, nHeads, dHead]
     ]
