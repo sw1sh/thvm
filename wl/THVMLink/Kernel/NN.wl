@@ -953,14 +953,14 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
    attention, and the single-query decode step over a KV cache).  `mask` is an
    additive {seqQ, seqK} bias (TCausalMask / TCausalMaskSym) or None.
 
-   The seq axes may be LITERAL or kvar-PACKED (symbolic length S): `ArrayReshape`
-   / `Transpose` / `TUOpShrink` / `Dot` / `TSoftmax` all index a symbolic
-   axis correctly (view_apply_shrink sizes numel at the kvar hi bound, so the
-   per-head split no longer mis-addresses -- the bug that forced a separate eager
-   raw-UOp clause).  The ONE symbolic concession is realizing each per-head
-   {seqQ, dHead} output before headStitch: a lazy symbolic-axis reduction can't
-   yet be consumed by the cross-head concat (the reduce window strands), and the
-   realize also primes the capture-at-hi leaves the symbolic TJit replay needs. *)
+   The seq axes may be LITERAL or kvar-PACKED (symbolic length S) -- ONE fully
+   lazy body either way, no eager realize, no special-casing.  `ArrayReshape` /
+   `Transpose` / `TUOpShrink` / `Dot` / `TSoftmax` / `headStitch` all index a
+   symbolic axis correctly once two engine bugs are fixed: view_apply_shrink
+   sizes numel at the kvar hi bound (the per-head split no longer mis-addresses)
+   and the BLAS GEMM dispatch writes the QK^T scores at the output's hi row
+   stride, not the runtime N.  These were the reasons the symbolic path once
+   needed a separate eager raw-UOp clause; it is gone. *)
 TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                     nHeads_Integer, mask_, scale_?NumericQ] := With[{
     shapeQ = tUopShape[q],
@@ -985,11 +985,10 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
             kS = sliceHead[headView[k, seqK], h, seqK],
             vS = sliceHead[headView[v, seqK], h, seqK]
         },
-            Module[{scores, scoresM, out},
+            Module[{scores, scoresM},
                 scores  = (qS . Transpose[kS]) * scale;   (* {seqQ, seqK} *)
                 scoresM = If[ mask === None, scores, scores + mask];
-                out = TSoftmax[scoresM, 1] . vS;      (* {seqQ, dHead} *)
-                If[ symLeadingQ[q], TRealize @ out, out]]];
+                TSoftmax[scoresM, 1] . vS]];          (* {seqQ, dHead} *)
         headOuts = perHead /@ Range[0, nHeads - 1];
         headStitch[headOuts, nHeads, dHead]
     ]
