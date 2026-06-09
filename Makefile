@@ -384,6 +384,8 @@ ifeq ($(shell uname -s),Darwin)
   METAL_DEFINES  := -DTHVM_METAL_METALLIB='"$(METAL_LIBPATH)"'
   TESTS          += $(BIN)/test_metal_real
   TESTS          += $(BIN)/test_metal_pad_softmax
+  TESTS          += $(BIN)/test_metal_mixed_input
+  TESTS          += $(BIN)/test_metal_tc_transpose
   TESTS          += $(BIN)/test_aot_metal
   TESTS          += $(BIN)/test_aot_metal_run
 else
@@ -663,6 +665,12 @@ $(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBP
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_metal_pad_softmax: tests/test_metal_pad_softmax.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+$(BIN)/test_metal_mixed_input: tests/test_metal_mixed_input.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+$(BIN)/test_metal_tc_transpose: tests/test_metal_tc_transpose.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_aot_metal: tests/test_aot_metal.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)

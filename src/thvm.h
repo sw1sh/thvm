@@ -2080,6 +2080,7 @@ fn void materialized_loc_clear        (void);
 // UOP_COPY persistent device-upload cache (schedule/materialize.c).
 // Reset on GC compaction / thvm reset / free (its keys are heap locs).
 fn void copy_upload_cache_reset       (void);
+fn void kernel_input_upload_reset     (void);
 fn void materialized_loc_scope_enter  (void);
 fn void materialized_loc_scope_leave  (void);
 fn u32  materialized_loc_scope_depth  (void);
@@ -2999,6 +3000,11 @@ fn Term uop_graph_rewrite(Term root,
                           u32 n_rules,
                           void *user);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
+// Move a compute graph to `dev` by wrapping every TAG_TEN leaf in COPY(leaf,
+// dev): the routed realize then COMPUTES the graph on `dev` (each leaf uploaded
+// once), rather than computing on CPU and copying only the result.  Backs
+// TToDevice / Tensor.to(device).
+fn Term uop_to_device_leaves(Term root, i32 dev);
 
 // === Expander (src/uop/expander.c) ===
 // Port of tinygrad codegen/late/expander.py: lowers KAX_UPCAST /

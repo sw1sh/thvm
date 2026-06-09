@@ -1935,6 +1935,66 @@ static void rmu_emit_reduce_init(u32 kind, FILE *fp) {
   else                    fputs("0.0f", fp);
 }
 
+// Defined later in this TU; used by rmu_range_coeff below.
+static int rmu_const_int(Term t, i64 *out);
+static int rmu_term_refs_axis(Term t, u32 axis_id);
+
+// Integer constant from an address-arithmetic leaf: TAG_NUM, or an int
+// UOP_CONST (via rmu_const_int).  Returns 1 + writes *out on success.
+static int rmu_addr_const_int(Term t, i64 *out) {
+  t = term_resolve(t);
+  if (term_tag(t) == TAG_NUM) { *out = (i64)(i32)(u32)term_val(t); return 1; }
+  return rmu_const_int(t, out);
+}
+
+// Linear-stride coefficient of RANGE(axis_id) in an affine address expression
+// (sums of IMUL(RANGE, const) / bare RANGE joined by IADD/ISUB).  This is the
+// buffer stride along that axis -- the simdgroup_matrix template uses it to
+// pick each operand's leading dimension and whether the load is transposed
+// (a Transpose[w] matmul RHS has its N-axis carrying the source row stride and
+// the K-axis carrying stride 1).  Returns -1 when the address cannot be
+// decomposed affinely, so callers fall back to the scalar accumulator rather
+// than emit a wrong simdgroup_load.
+static i64 rmu_range_coeff(Term addr, u32 axis_id) {
+  Term t = term_resolve(addr);
+  if (term_tag(t) != TAG_UOP) return 0;
+  u8  op  = term_ext(t);
+  u64 loc = term_val(t);
+  switch (op) {
+    case UOP_RANGE:
+      return (term_val(heap_read(loc + 0)) == axis_id) ? 1 : 0;
+    case UOP_IADD: {
+      i64 a = rmu_range_coeff(heap_read(loc + 0), axis_id);
+      i64 b = rmu_range_coeff(heap_read(loc + 1), axis_id);
+      if (a < 0 || b < 0) return -1;
+      return a + b;
+    }
+    case UOP_ISUB: {
+      i64 a = rmu_range_coeff(heap_read(loc + 0), axis_id);
+      i64 b = rmu_range_coeff(heap_read(loc + 1), axis_id);
+      if (a < 0 || b < 0) return -1;
+      return a - b;
+    }
+    case UOP_IMUL: {
+      Term x  = heap_read(loc + 0), y = heap_read(loc + 1);
+      Term xr = term_resolve(x),    yr = term_resolve(y);
+      int x_axis = (term_tag(xr) == TAG_UOP && term_ext(xr) == UOP_RANGE
+                    && term_val(heap_read(term_val(xr) + 0)) == axis_id);
+      int y_axis = (term_tag(yr) == TAG_UOP && term_ext(yr) == UOP_RANGE
+                    && term_val(heap_read(term_val(yr) + 0)) == axis_id);
+      i64 c;
+      if (x_axis && rmu_addr_const_int(y, &c)) return c;
+      if (y_axis && rmu_addr_const_int(x, &c)) return c;
+      // axis nested non-linearly under the multiply -> can't represent.
+      if (rmu_term_refs_axis(x, axis_id)
+          || rmu_term_refs_axis(y, axis_id)) return -1;
+      return 0;
+    }
+    default:
+      return rmu_term_refs_axis(t, axis_id) ? -1 : 0;
+  }
+}
+
 // Specialised simdgroup_matrix MSL template for the matmul pattern.
 // Called when rmu_detect_matmul_tc fires.  Emits an 8x8
 // simdgroup_matrix-tiled K-loop: load A and B subblocks, multiply-
@@ -2014,6 +2074,28 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     return 0;
   }
 
+  // Operand layout from the address strides.  simdgroup_load(dst, ptr, ld)
+  // reads dst[i][j] = ptr[i*ld + j], so each matrix needs ONE axis with unit
+  // stride (the contiguous inner axis).  A is read as {M,K} and B as {K,N}:
+  //   A: K unit-stride -> row-major, ld = M-stride (= k_extent when packed).
+  //      M unit-stride -> transposed, ld = K-stride.
+  //   B: N unit-stride -> row-major, ld = K-stride (= n_extent when packed).
+  //      K unit-stride -> transposed, ld = N-stride  (a Transpose[w] RHS: its
+  //      N-axis carries the source row stride, its K-axis carries stride 1).
+  // Neither axis unit-stride (a genuinely strided gather) -> bail to scalar.
+  i64 a_k = rmu_range_coeff(addr_a, red_axis);
+  i64 a_m = rmu_range_coeff(addr_a, m_axis_id);
+  i64 b_k = rmu_range_coeff(addr_b, red_axis);
+  i64 b_n = rmu_range_coeff(addr_b, n_axis_id_v);
+  int a_trans, b_trans; i64 lda, ldb;
+  if      (a_k == 1) { a_trans = 0; lda = a_m; }
+  else if (a_m == 1) { a_trans = 1; lda = a_k; }
+  else return 0;
+  if      (b_n == 1) { b_trans = 0; ldb = b_k; }
+  else if (b_k == 1) { b_trans = 1; ldb = b_n; }
+  else return 0;
+  if (lda <= 0 || ldb <= 0) return 0;
+
   // CUDA WMMA path.  The simdgroup_matrix template below is Metal-
   // only; CUDA gets its own emit.  WMMA's natural fp32-accumulate
   // fragment is 16x16x16, so M/N/K must all be multiples of 16 for the
@@ -2026,6 +2108,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       // Non-conforming shape: scalar-accumulator fallback.
       return 0;
     }
+    // A WMMA fragment's transpose is fixed by its row_major/col_major layout
+    // at declaration, not a load-time flag.  This template declares both as
+    // row_major, so a transposed operand (e.g. a Transpose[w] RHS) must take
+    // the scalar fallback rather than load with the wrong stride.
+    if (a_trans || b_trans) return 0;
     // WMMA matrix_a / matrix_b fragments need a `half` source.  The
     // pod is a Volta V100 (SM70) -- pre-Ampere, so wmma::precision::tf32
     // is unavailable and WMMA is fp16-only.  Gate the tensor-core
@@ -2177,11 +2264,13 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "simdgroup_load(_a_mat, &%s[", rmu_buf_name(buf_a));
   rmu_emit_term(addr_a, fp);
-  fprintf(fp, "], %u);\n", k_extent);
+  if (a_trans) fprintf(fp, "], %lld, ulong2(0), true);\n", (long long)lda);
+  else         fprintf(fp, "], %lld);\n", (long long)lda);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "simdgroup_load(_b_mat, &%s[", rmu_buf_name(buf_b));
   rmu_emit_term(addr_b, fp);
-  fprintf(fp, "], %u);\n", n_extent);
+  if (b_trans) fprintf(fp, "], %lld, ulong2(0), true);\n", (long long)ldb);
+  else         fprintf(fp, "], %lld);\n", (long long)ldb);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fputs("simdgroup_multiply_accumulate(_c_mat, _a_mat, _b_mat, _c_mat);\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);

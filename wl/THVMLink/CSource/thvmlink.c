@@ -1852,6 +1852,18 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_copy(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Move a graph to a device by COPYing every tensor leaf, so the whole forward
+// COMPUTES on that device (not just its result).  Backs TToDevice.
+EXTERN_C DLLEXPORT int thvm_wl_uop_to_device(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term src = (Term)MArgument_getInteger(args[0]);
+  i32  dev = (i32)MArgument_getInteger(args[1]);
+  Term r = uop_to_device_leaves(src, dev);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // Device of a term (THVM_DEV_*), -1 = unknown/default.  Backs TDevice.
 EXTERN_C DLLEXPORT int thvm_wl_term_device(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {

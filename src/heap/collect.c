@@ -392,6 +392,7 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   // the copy-node heap loc; clear it for the same reason.  The next
   // cross-backend realize re-uploads + repopulates.
   copy_upload_cache_reset();
+  kernel_input_upload_reset();
 
   // 5. Swap from / to.
   u64 swap_start = GC_FROM_START, swap_end = GC_FROM_END;

@@ -151,6 +151,60 @@ fn int assign_fire_claim(u64 loc) {
   return 1;
 }
 
+// === Cross-backend kernel-input upload ===============================
+// A kernel runs on its OUTPUT's backend.  When one of its inputs lives on a
+// DIFFERENT backend -- a CPU weight leaf feeding a Metal-routed net -- the
+// dispatch would otherwise hand the input's CPU buf id straight to the Metal
+// queue, which reads its own buffer pool at that id (garbage / zeros).  Host-
+// stage the input src->dst once and reuse across re-fires (a weight leaf is
+// static within a realize), keyed by (src_tid, dst_backend_id).  Mirrors
+// tinygrad moving an op's operands to the kernel's device before dispatch.
+// Reset on the same lifecycle as the UOP_COPY upload cache
+// (copy_upload_cache_reset sites).
+#define KIN_UP_CAP (1u << 15)
+static struct { u32 src_tid; u32 backend_id; u32 dst_tid; } KIN_UP[KIN_UP_CAP];
+fn void kernel_input_upload_reset(void) { memset(KIN_UP, 0, sizeof(KIN_UP)); }
+// Return a tid whose buffer holds src_tid's bytes on dst_b (src_tid itself if it
+// is already on dst_b, or on any failure -- the dispatch then proceeds as before
+// rather than aborting).  Leaves are contiguous, so the kernel's input view
+// (strides/offset) applies unchanged over the uploaded contiguous buffer.
+static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
+  if (src_tid == 0 || src_tid >= TENS_NEXT || dst_b == NULL) return src_tid;
+  Backend *sb = TENS[src_tid].backend;
+  if (sb == NULL || sb == dst_b) return src_tid;            // already on dst
+  if (sb->buf_read == NULL || dst_b->buf_write == NULL) return src_tid;
+  u32 h = (src_tid * 0x9e3779b1u + dst_b->id) & (KIN_UP_CAP - 1);
+  for (u32 p = 0; p < KIN_UP_CAP; p++) {
+    u32 i = (h + p) & (KIN_UP_CAP - 1);
+    if (KIN_UP[i].src_tid == 0) break;
+    if (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == dst_b->id) {
+      u32 dt = KIN_UP[i].dst_tid;
+      if (dt < TENS_NEXT && TENS[dt].buf_id != 0 && TENS[dt].backend == dst_b
+          && (dst_b->buf_refcount == NULL
+              || dst_b->buf_refcount(TENS[dt].buf_id) != 0))
+        return dt;                                           // live cache hit
+      break;                                                 // stale -> re-upload
+    }
+  }
+  u64 numel  = TENS[src_tid].view.numel;
+  u64 nbytes = dtype_storage_bytes(TENS[src_tid].dtype, numel);
+  void *stage = malloc((size_t)nbytes);
+  if (stage == NULL) return src_tid;
+  if (sb->buf_read(TENS[src_tid].buf_id, stage, nbytes) != 0) { free(stage); return src_tid; }
+  u32 dst_tid = tensor_alloc(dst_b, TENS[src_tid].view.shape, TENS[src_tid].dtype);
+  dst_b->buf_write(TENS[dst_tid].buf_id, stage, nbytes);
+  free(stage);
+  for (u32 p = 0; p < KIN_UP_CAP; p++) {
+    u32 i = (h + p) & (KIN_UP_CAP - 1);
+    if (KIN_UP[i].src_tid == 0
+        || (KIN_UP[i].src_tid == src_tid && KIN_UP[i].backend_id == dst_b->id)) {
+      KIN_UP[i].src_tid = src_tid; KIN_UP[i].backend_id = dst_b->id; KIN_UP[i].dst_tid = dst_tid;
+      break;
+    }
+  }
+  return dst_tid;
+}
+
 fn void kernel_fire_by_id(u32 kid) {
   if (kid == 0 || kid >= KERNELS_NEXT) return;
   KernelEntry *ke = &KERNELS[kid];
@@ -230,9 +284,12 @@ fn void kernel_fire_by_id(u32 kid) {
   }
 
   // Resolve concrete buffer ids now that all upstream outputs are filled.
+  // An input on a different backend than this kernel (a CPU weight feeding a
+  // Metal-routed net) is uploaded to the kernel's backend first.
+  Backend *out_b = TENS[ke->output_tid].backend;
   u32 in_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    in_buf_ids[i] = TENS[resolved_tids[i]].buf_id;
+    in_buf_ids[i] = TENS[kernel_input_on_backend(resolved_tids[i], out_b)].buf_id;
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
 
@@ -247,7 +304,6 @@ fn void kernel_fire_by_id(u32 kid) {
   // recycled cleanly by the same freelist machinery), and we re-bind
   // TENS[output_tid].buf_id so subsequent fires see the live slot.
   // Tinygrad parity: their Buffer.ensure_allocated() at fire time.
-  Backend *out_b = TENS[ke->output_tid].backend;
   if (out_b != NULL && out_b->buf_refcount != NULL && out_b->buf_alloc != NULL
       && (out_buf_id == 0 || out_b->buf_refcount(out_buf_id) == 0)) {
     u64 nbytes = dtype_storage_bytes(ke->output_dtype, (u64)ke->output_numel);

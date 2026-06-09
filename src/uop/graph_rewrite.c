@@ -445,3 +445,73 @@ fn Term uop_graph_rewrite(Term root,
   uop_graph_rewrite_stats_dump();
   return out;
 }
+
+// === Move a compute graph to a device by COPYing every tensor leaf =======
+// A lazy graph "lives on device D" iff it is COMPUTED on D, which means each
+// op's operands must be on D, recursively down to the leaves.  So TToDevice /
+// Tensor.to(D) wraps every TAG_TEN leaf (weights, realized tensors, host
+// inputs) in COPY(leaf, D); the routed realize then computes the whole graph
+// on D with each leaf uploaded once.  This is what makes an imported forward
+// actually run on the GPU -- a single COPY around the root would compute the
+// whole thing on CPU and only move the result.  Mirrors tinygrad moving a
+// model's parameters with model.to(D), not copying only the output.
+//
+// A bare realized tensor is the degenerate single-leaf case (one upload).  An
+// existing COPY is left intact: it already names its src's device, so we don't
+// recurse into it (which would double-wrap its leaf).  Memoized by term so a
+// shared leaf yields one COPY (uploaded once).
+static Term uop_to_device_leaves_rec(Term t, i32 dev,
+                                     UOpGraphRewriteMemoSlot *memo,
+                                     u32 cap, u32 *used, u32 depth) {
+  if (depth > 4096) return term_resolve(t);
+  Term r   = term_resolve(t);
+  u8   tag = term_tag(r);
+  if (tag == TAG_TEN) return uop_copy_dev(r, dev);     // the leaf upload
+  if (tag != TAG_UOP) return r;                        // NUM / VAR: leave as-is
+  u8 op = term_ext(r);
+  if (op == UOP_COPY || op == UOP_KERNEL) return r;    // already placed / opaque
+
+  Term memo_hit = 0;
+  if (cap != 0) {
+    u32 h = uop_graph_rewrite_hash(r, cap);
+    for (u32 p = 0; p < cap; p++) {
+      u32 i = (h + p) & (cap - 1);
+      if (memo[i].key == 0) break;
+      if (memo[i].key == r) { memo_hit = memo[i].value; break; }
+    }
+    if (memo_hit != 0) return memo_hit;
+  }
+
+  u8  ar  = uop_arity(op);
+  u64 loc = term_val(r);
+  Term srcs[MAX_UOP_SRC] = {0};
+  int changed = 0;
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old_child = heap_read(loc + i);
+    Term new_child = uop_to_device_leaves_rec(old_child, dev, memo, cap, used, depth + 1);
+    srcs[i] = new_child;
+    if (new_child != old_child) changed = 1;
+  }
+  Term cur = changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
+
+  if (cap != 0 && *used * 2 < cap) {
+    u32 h = uop_graph_rewrite_hash(r, cap);
+    for (u32 p = 0; p < cap; p++) {
+      u32 i = (h + p) & (cap - 1);
+      if (memo[i].key == r)  { memo[i].value = cur; break; }
+      if (memo[i].key == 0)  { memo[i].key = r; memo[i].value = cur; (*used)++; break; }
+    }
+  }
+  return cur;
+}
+
+fn Term uop_to_device_leaves(Term root, i32 dev) {
+  u32 cap = uop_graph_rewrite_memo_cap();
+  UOpGraphRewriteMemoSlot *memo =
+      (UOpGraphRewriteMemoSlot *)calloc(cap, sizeof(memo[0]));
+  if (memo == NULL) cap = 0;     // OOM: still correct, just unshared COPYs
+  u32 used = 0;
+  Term out = uop_to_device_leaves_rec(root, dev, memo, cap, &used, 0);
+  free(memo);
+  return out;
+}

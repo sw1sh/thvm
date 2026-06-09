@@ -313,12 +313,17 @@ TUOpCopy[src_TTerm, device_String] :=
 TDevice[t_TTerm] := (ensureInit[]; deviceName[$termDeviceFn[ttermRaw[t]]])
 
 (* TToDevice[t, "metal"|"cpu"]: move t to a device -- tinygrad's
-   Tensor.to(device).  A device-targeted UOP_COPY, so t's data lives on
-   that device IN THE GRAPH; TRealize then routes the whole realize to it
-   (interior generic COPYs upload there too).  To run an imported forward
-   on the GPU, wrap its input and result: e.g.
-   TToDevice[net[TToDevice[x, "metal"]], "metal"]. *)
-TToDevice[t_TTerm, device_String] := TUOpCopy[t, device]
+   Tensor.to(device).  A lazy graph "lives on" a device iff it is COMPUTED
+   there, so this pushes a device-targeted UOP_COPY down to every tensor leaf
+   (weights, host inputs, realized tensors); TRealize then routes the whole
+   realize to that device and computes the forward there, uploading each leaf
+   once.  A single COPY around the root would instead compute the whole graph
+   on CPU and move only the result -- so to run an imported forward on the GPU
+   you just write TToDevice[net[x], "metal"] (no need to wrap the input
+   separately).  A bare realized tensor is the degenerate one-leaf upload.
+   Mirrors tinygrad's model.to(device) moving the parameters. *)
+TToDevice[t_TTerm, device_String] :=
+    (ensureInit[]; TTerm[$uopToDeviceFn[ttermRaw[t], deviceCode[device]]])
 
 (* === Phase E UOp constructors ===
  * INDEX layer + BUFFER/STORE/AFTER/OPT.  Used by Rewrite.wl and the

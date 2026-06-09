@@ -180,7 +180,7 @@ TUOpGrad::usage      = "TUOpGrad[y, gy] builds the BWD projection of a dup-flavo
 TUOpLoad::usage      = "TUOpLoad[src] builds a UOP_LOAD node wrapping src.  Structural marker mirroring tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in the cpu kernel).";
 TUOpCopy::usage      = "TUOpCopy[src] builds a generic UOP_COPY node: a lazy device transfer that uploads src to the realize backend at materialize time.  TUOpCopy[src, \"metal\"|\"cpu\"] carries an EXPLICIT target device in the graph (tinygrad's Ops.COPY with a DEVICE src), so the node records where its data lives regardless of the realize backend.  Identity (no kernel, no copy) when the target already holds src (e.g. CPU realize of a CPU host leaf).  Mirrors tinygrad's Ops.COPY.";
 TDevice::usage       = "TDevice[t] returns the device a TTerm's data lives on (\"cpu\", \"metal\", ...), or None when it inherits the default device.  Ported from tinygrad's UOp.device: an explicit TUOpCopy names its target, a realized tensor reports its backend, and every other op propagates the device of its first source that has one.";
-TToDevice::usage     = "TToDevice[t, \"metal\"|\"cpu\"] moves t to a device (tinygrad's Tensor.to) -- a device-targeted TUOpCopy, so t's data lives on that device IN THE GRAPH and TRealize routes the whole realize there (no DEV= switch; the context default is untouched).  Interior generic TUOpCopy weights upload to the routed device automatically, so running an imported forward on the GPU is TToDevice[net[TToDevice[x, \"metal\"]], \"metal\"].";
+TToDevice::usage     = "TToDevice[t, \"metal\"|\"cpu\"] moves t to a device (tinygrad's Tensor.to).  A lazy graph lives on a device iff it is COMPUTED there, so this pushes a device-targeted COPY down to every tensor leaf (weights, host inputs, realized tensors); TRealize routes the whole realize to that device and computes the forward there, uploading each leaf once (no DEV= switch; the context default is untouched).  A single COPY around the root would compute the whole graph on CPU and move only the result, so running an imported forward on the GPU is just TToDevice[net[x], \"metal\"] -- the input need not be wrapped separately.  A bare realized tensor is the degenerate one-leaf upload.  Mirrors tinygrad's model.to(device) moving the parameters.";
 
 (* Phase E UOp constructors. *)
 TUOpRange::usage   = "TUOpRange[axisId, axisType, extent] builds a UOP_RANGE leaf.  axisType is one of $KaxLoop / $KaxReduce / $KaxUpcast / $KaxUnroll / $KaxLocal / $KaxGlobal / $KaxGroupReduce.";
@@ -481,6 +481,7 @@ $termCtrNFn    := $termCtrNFn    = load["thvm_wl_term_ctr_n",      {Integer},   
 $termCtrAtFn   := $termCtrAtFn   = load["thvm_wl_term_ctr_at",     {Integer, Integer},               Integer];
 $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},                        Integer];
 $uopCopyFn     := $uopCopyFn     = load["thvm_wl_uop_copy",        {Integer, Integer},               Integer];
+$uopToDeviceFn := $uopToDeviceFn = load["thvm_wl_uop_to_device",   {Integer, Integer},               Integer];
 $termDeviceFn  := $termDeviceFn  = load["thvm_wl_term_device",     {Integer},                        Integer];
 
 (* Phase E UOp constructors (RANGE / INDEX_E / IADD..IAND / IWHERE /
