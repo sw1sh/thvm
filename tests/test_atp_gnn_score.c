@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 // Hand-built CP labels + a variable id.
 #define LAB_e 1u
@@ -390,6 +391,51 @@ int main(void) {
     thvm_atp_clear_gnn_scorer();
   }
 
+  // JIT capture/replay: the first score at a batch bucket B captures the
+  // forward; later scores at the same bucket rewrite the persistent input
+  // buffers in place and replay the recorded kernel sequence (no
+  // re-schedule).  The replay path MUST produce scores bit-identical to the
+  // cold realize path.  This is the whole correctness contract of the cache.
+  //   (a) Same batch scored twice -> warm replay == cold realize, exactly.
+  //   (b) A DIFFERENT batch at the same bucket through the warm path ==
+  //       the same different batch scored cold in a fresh model (which
+  //       drops the cache, forcing a re-capture).  This proves the in-place
+  //       buffer rewrite actually feeds the replayed kernels fresh data.
+  TEST_BEGIN("atp/gnn_score/jit-replay-bit-identical");
+  {
+    CHECK_EQ(thvm_atp_set_gnn_scorer(blob, blob_len), 1);
+    // (a) cold then warm over the IDENTICAL batch (B padded to bucket 4).
+    float cold[3], warm[3];
+    CHECK_EQ(thvm_atp_gnn_score_batch(lhs, rhs, 3u, cold), 1);   // captures
+    CHECK_EQ(thvm_atp_gnn_score_batch(lhs, rhs, 3u, warm), 1);   // replays
+    for (u32 i = 0; i < 3u; i++) {
+      printf("  replay-same CP %u: cold=% .8f warm=% .8f\n", i, cold[i], warm[i]);
+      CHECK(cold[i] == warm[i]);   // bit-identical: same buffers, same kernels
+    }
+
+    // (b) a DIFFERENT batch through the now-warm bucket-4 capture.
+    Term lhs2[2], rhs2[2];
+    lhs2[0] = ctr2(LAB_f, ctr1(LAB_i, mk_v(VAR_x)), mk_v(VAR_x));   // i(x).x
+    rhs2[0] = ctr0(LAB_e);
+    lhs2[1] = ctr1(LAB_i, ctr1(LAB_i, mk_v(VAR_x)));                // i(i(x))
+    rhs2[1] = mk_v(VAR_x);
+    float warm2[2];
+    CHECK_EQ(thvm_atp_gnn_score_batch(lhs2, rhs2, 2u, warm2), 1);   // replays
+
+    // Reference: clear (drops cache) + reload, then cold-score lhs2/rhs2.
+    thvm_atp_clear_gnn_scorer();
+    CHECK_EQ(thvm_atp_set_gnn_scorer(blob, blob_len), 1);
+    float cold2[2];
+    CHECK_EQ(thvm_atp_gnn_score_batch(lhs2, rhs2, 2u, cold2), 1);
+    for (u32 i = 0; i < 2u; i++) {
+      printf("  replay-diff CP %u: cold=% .8f warm=% .8f  |diff|=%.2e\n",
+             i, cold2[i], warm2[i], fabsf(cold2[i] - warm2[i]));
+      // Same data through the SAME compiled kernels -> bit-identical.
+      CHECK(warm2[i] == cold2[i]);
+    }
+    thvm_atp_clear_gnn_scorer();
+  }
+
   // C-side safetensors load: thvm_atp_load_gnn_safetensors reads a GCN
   // .safetensors (the bundled GCNAtpScorer asset / TAtpSaveGnnScorer
   // output) and pushes it to the engine with no WL.  Round-trip the known
@@ -451,6 +497,35 @@ int main(void) {
   float dummy[3];
   CHECK_EQ(thvm_atp_gnn_score_batch(lhs, rhs, B, dummy), 0);
   CHECK_EQ(thvm_atp_gnn_rerank(NULL), 0u);
+
+  // Optional microbenchmark (THVM_ATP_GNN_BENCH=1): score a large fixed
+  // batch repeatedly and report the COLD (first, full realize + capture)
+  // vs WARM (subsequent, jit-replay) per-call wall time.  Isolates the
+  // documented per-re-rank scheduler cost the capture cache removes.
+  if (getenv("THVM_ATP_GNN_BENCH") != NULL) {
+    CHECK_EQ(thvm_atp_set_gnn_scorer(blob, blob_len), 1);
+    const u32 NB = 256u;          // bucketed to B = 256
+    Term *bl = (Term *)malloc(NB * sizeof(Term));
+    Term *br = (Term *)malloc(NB * sizeof(Term));
+    float *sc = (float *)malloc(NB * sizeof(float));
+    for (u32 i = 0; i < NB; i++) { bl[i] = lhs[i % 3u]; br[i] = rhs[i % 3u]; }
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    thvm_atp_gnn_score_batch(bl, br, NB, sc);     // cold: realize + capture
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double cold_ms = (t1.tv_sec - t0.tv_sec) * 1e3
+                   + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    enum { REP = 50 };
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (u32 k = 0; k < REP; k++) thvm_atp_gnn_score_batch(bl, br, NB, sc);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double warm_ms = ((t1.tv_sec - t0.tv_sec) * 1e3
+                   + (t1.tv_nsec - t0.tv_nsec) / 1e6) / (double)REP;
+    printf("  [gnn-bench] B=%u  cold=%.3f ms  warm=%.3f ms  speedup=%.1fx\n",
+           NB, cold_ms, warm_ms, cold_ms / warm_ms);
+    free(bl); free(br); free(sc);
+    thvm_atp_clear_gnn_scorer();
+  }
 
   free(blob);
   (void)f;

@@ -6101,6 +6101,8 @@ fn int thvm_atp_set_gnn_scorer(const double *blob, u32 len) {
   return 1;
 }
 
+static void atp_gnn_capture_cache_clear(void);
+
 fn void thvm_atp_clear_gnn_scorer(void) {
   free(g_atp_gnn.w);
   g_atp_gnn.w = NULL;
@@ -6108,6 +6110,12 @@ fn void thvm_atp_clear_gnn_scorer(void) {
   g_atp_gnn.rounds = 0u;
   g_atp_gnn.hidden = 0u;
   g_atp_gnn_active = 0;
+  // The captured forward bakes the model weights as constants; a reload
+  // with different weights must re-capture, so invalidate the cache.  The
+  // sandbox context is not selected here, so the drop only frees the jit
+  // slots (the buffers are reclaimed by the next reset); that is fine --
+  // the cache entries are zeroed, forcing a fresh capture next use.
+  atp_gnn_capture_cache_clear();
 }
 
 fn int thvm_atp_gnn_loaded(void) { return g_atp_gnn_active; }
@@ -6253,26 +6261,98 @@ static Term atp_gnn_relu(Term x) {
 // weight scale (~tens), which would otherwise always out-rank GNN picks.
 #define ATP_GNN_COOP_NEUTRAL_PRI 1000000u
 
-// Score one chunk of <= ATP_GNN_B_CAP CP graphs at the FIXED node dim
-// N = ATP_GNN_N_CAP.  Must run inside the sandbox context (g_atp_gnn_ctx).
-// Writes `nc` scores to out[0..nc); returns 1 on success.
-static int atp_gnn_score_chunk(const AtpGnnScorer *m, const AtpCpGraph *gs,
-                               u32 nc, float *out) {
-  const u32 F = ATP_CPG_FEAT_DIM, H = m->hidden, R = m->rounds;
-  const u32 N = ATP_GNN_N_CAP;
-  const u32 B = atp_gnn_pow2_ceil(nc < 4u ? 4u : nc);   // <= ATP_GNN_B_CAP
+// Per-batch-shape JIT capture cache.  The GCN forward is structurally
+// IDENTICAL across re-ranks at a given batch bucket B (the node dim N is
+// fixed; weights are constant for the run), so re-running the scheduler
+// (realize_classify / topo-sort / materialize / codegen) on every re-rank
+// is ~4-5 ms of pure waste -- the kernels themselves are cheap.  We use
+// thvm's JIT capture/replay (src/jit/capture.c): the first re-rank at a
+// bucket builds the forward, captures the kernel-dispatch sequence around
+// one thvm_realize, and pins the persistent input + output buffers; later
+// re-ranks at the same bucket rewrite the input buffer bytes in place and
+// jit_replay the recorded sequence -- no re-schedule, no re-codegen.
+//
+// B is bucketed to a power of two in [4, ATP_GNN_B_CAP=1024], so at most
+// 9 distinct buckets ever compile (each captured once).  thvm_reset (fired
+// near the descriptor caps) drops every capture slot AND frees the sandbox
+// buffers, so it must invalidate this cache; atp_gnn_capture_cache_clear
+// does that wherever the reset is issued.
+typedef struct {
+  u32  B;            // batch bucket this capture serves (0 = empty slot)
+  u32  slot;         // jit capture slot id (>= 1 when valid)
+  u32  x_tid;        // persistent input TenDescs (stable buf_ids)
+  u32  a_tid;
+  u32  mask_tid;
+  u32  nn_tid;
+  u32  x_buf;        // their buf_ids, declared as the jit input baseline
+  u32  a_buf;
+  u32  mask_buf;
+  u32  nn_buf;
+  u32  out_tid;      // realized logits tensor (its buf is rewritten by replay)
+} AtpGnnCapture;
 
-  // X (B,N,F), A (B,N,N row-normalised adjacency + self-loops), MaskRow
-  // (B,1,N), NNodes (B,1,1).  Padded batch rows keep NNodes=1 (finite
-  // pooled reciprocal) and all-zero X/A/mask, so they are inert.
-  float *xArr    = (float *)calloc((size_t)B * N * F, sizeof(float));
-  float *aArr    = (float *)calloc((size_t)B * N * N, sizeof(float));
-  float *maskArr = (float *)calloc((size_t)B * N, sizeof(float));
-  float *nnArr   = (float *)calloc((size_t)B, sizeof(float));
-  if (xArr == NULL || aArr == NULL || maskArr == NULL || nnArr == NULL) {
-    free(xArr); free(aArr); free(maskArr); free(nnArr);
-    return 0;
+// One entry per power-of-two bucket from 4 up to ATP_GNN_B_CAP.
+#define ATP_GNN_CAP_SLOTS 12
+static AtpGnnCapture g_atp_gnn_captures[ATP_GNN_CAP_SLOTS];
+
+// Drop every cached GCN capture.  Called wherever thvm_reset is issued in
+// the sandbox context: the reset frees the captured buffers + slots, so the
+// cached (B, slot, tid, buf_id) tuples are stale and the next re-rank at any
+// bucket must re-capture from scratch.
+static void atp_gnn_capture_cache_clear(void) {
+  for (u32 i = 0u; i < ATP_GNN_CAP_SLOTS; i++) {
+    if (g_atp_gnn_captures[i].slot != 0u) {
+      jit_capture_drop(g_atp_gnn_captures[i].slot);
+    }
+    g_atp_gnn_captures[i] = (AtpGnnCapture){0};
   }
+}
+
+// Find the cache entry for bucket B, or the first empty slot to fill.
+// Returns NULL only when every slot is taken by a different bucket (cannot
+// happen: at most 9 distinct buckets, 12 slots).
+static AtpGnnCapture *atp_gnn_capture_for(u32 B) {
+  AtpGnnCapture *empty = NULL;
+  for (u32 i = 0u; i < ATP_GNN_CAP_SLOTS; i++) {
+    if (g_atp_gnn_captures[i].B == B && g_atp_gnn_captures[i].slot != 0u) {
+      return &g_atp_gnn_captures[i];
+    }
+    if (empty == NULL && g_atp_gnn_captures[i].slot == 0u) {
+      empty = &g_atp_gnn_captures[i];
+    }
+  }
+  return empty;
+}
+
+// Allocate a persistent f32 input tensor of the given shape in the current
+// (sandbox) context.  Unlike atp_gnn_ten this leaves the buffer un-written:
+// the caller fills it via atp_gnn_buf_fill before each capture/replay.
+static u32 atp_gnn_input_tensor(u32 ndim, const u32 *dims) {
+  Shape sh = {0};
+  sh.ndim = ndim;
+  for (u32 i = 0u; i < ndim; i++) sh.dims[i] = dims[i];
+  return tensor_alloc(&CPU_BACKEND, sh, DT_FP32);
+}
+
+// Write `n` floats into a tensor's buffer in place (the captured kernels
+// read this buf_id, so this refreshes their input bytes for replay).
+static void atp_gnn_buf_fill(u32 tid, const float *data, u64 n) {
+  CPU_BACKEND.buf_write(TENS[tid].buf_id, (const void *)data,
+                        (u64)n * sizeof(float));
+}
+
+// Build the host X / A / mask / NNodes arrays for one chunk of `nc` CP
+// graphs padded to batch B at the fixed node dim N.  Padded rows keep
+// NNodes=1 (finite pooled reciprocal) and all-zero X/A/mask, so they are
+// inert and their scores are discarded.
+static void atp_gnn_build_host(const AtpCpGraph *gs, u32 nc, u32 B,
+                               float *xArr, float *aArr, float *maskArr,
+                               float *nnArr) {
+  const u32 F = ATP_CPG_FEAT_DIM, N = ATP_GNN_N_CAP;
+  memset(xArr,    0, (size_t)B * N * F * sizeof(float));
+  memset(aArr,    0, (size_t)B * N * N * sizeof(float));
+  memset(maskArr, 0, (size_t)B * N * sizeof(float));
+  memset(nnArr,   0, (size_t)B * sizeof(float));
   for (u32 bi = nc; bi < B; bi++) nnArr[bi] = 1.0f;
   for (u32 bi = 0u; bi < nc; bi++) {
     const AtpCpGraph *g = &gs[bi];
@@ -6301,12 +6381,14 @@ static int atp_gnn_score_chunk(const AtpGnnScorer *m, const AtpCpGraph *gs,
       }
     }
   }
+}
 
-  // Build the forward as a UOP graph (no kernels fire until thvm_realize).
-  Term xT    = atp_gnn_ten(xArr, 3u, (u32[]){B, N, F});
-  Term aT    = atp_gnn_ten(aArr, 3u, (u32[]){B, N, N});
-  Term maskT = atp_gnn_ten(maskArr, 3u, (u32[]){B, 1u, N});
-  Term nnT   = atp_gnn_ten(nnArr, 3u, (u32[]){B, 1u, 1u});
+// Build the GCN forward UOP graph over the four input Terms and return the
+// {B,2} logits node.  No kernels fire here (lazy until thvm_realize).
+static Term atp_gnn_forward(const AtpGnnScorer *m, u32 B,
+                            Term xT, Term aT, Term maskT, Term nnT) {
+  const u32 F = ATP_CPG_FEAT_DIM, H = m->hidden, R = m->rounds;
+  const u32 N = ATP_GNN_N_CAP;
 
   Term h = xT;
   u32 lastDim = F;
@@ -6342,25 +6424,106 @@ static int atp_gnn_score_chunk(const AtpGnnScorer *m, const AtpCpGraph *gs,
   Term logits  = uop_reshape(logit3, 2u, (u32[]){B, 2u});
   Term boutE   = uop_expand(uop_reshape(boutT, 2u, (u32[]){1u, 2u}),
                             2u, (u32[]){B, 2u});
-  logits = uop_binary(UOP_ADD, logits, boutE);               // {B,2}
+  return uop_binary(UOP_ADD, logits, boutE);                 // {B,2}
+}
 
-  // Realize + read back; score = logit_pos - logit_neg.  Only the first
-  // nc rows are real CPs; the padded tail is discarded.
-  Term realized = term_resolve(thvm_realize(logits));
-  int ok = 0;
-  if (term_tag(realized) == TAG_TEN) {
-    u32 tid = (u32)term_val(realized);
-    float *o = (float *)malloc((size_t)B * 2u * sizeof(float));
-    if (o != NULL) {
-      TENS[tid].backend->buf_read(TENS[tid].buf_id, o,
+// Read the {B,2} logits buffer and write nc scores (logit_pos - logit_neg).
+static int atp_gnn_read_scores(u32 out_tid, u32 B, u32 nc, float *out) {
+  if (out_tid == 0u || out_tid >= TENS_NEXT) return 0;
+  float *o = (float *)malloc((size_t)B * 2u * sizeof(float));
+  if (o == NULL) return 0;
+  TENS[out_tid].backend->buf_read(TENS[out_tid].buf_id, o,
                                   (u64)B * 2u * sizeof(float));
-      for (u32 i = 0u; i < nc; i++) {
-        out[i] = o[(size_t)i * 2u + 1u] - o[(size_t)i * 2u + 0u];
+  for (u32 i = 0u; i < nc; i++) {
+    out[i] = o[(size_t)i * 2u + 1u] - o[(size_t)i * 2u + 0u];
+  }
+  free(o);
+  return 1;
+}
+
+// Score one chunk of <= ATP_GNN_B_CAP CP graphs at the FIXED node dim
+// N = ATP_GNN_N_CAP.  Must run inside the sandbox context (g_atp_gnn_ctx).
+// Writes `nc` scores to out[0..nc); returns 1 on success.
+//
+// First call at a given batch bucket B captures the forward's kernel-
+// dispatch sequence; every later call at the same bucket rewrites the
+// persistent input buffers in place and replays the capture -- bypassing
+// the scheduler entirely.
+static int atp_gnn_score_chunk(const AtpGnnScorer *m, const AtpCpGraph *gs,
+                               u32 nc, float *out) {
+  const u32 F = ATP_CPG_FEAT_DIM;
+  const u32 N = ATP_GNN_N_CAP;
+  const u32 B = atp_gnn_pow2_ceil(nc < 4u ? 4u : nc);   // <= ATP_GNN_B_CAP
+
+  // X (B,N,F), A (B,N,N row-normalised adjacency + self-loops), MaskRow
+  // (B,1,N), NNodes (B,1,1).
+  float *xArr    = (float *)malloc((size_t)B * N * F * sizeof(float));
+  float *aArr    = (float *)malloc((size_t)B * N * N * sizeof(float));
+  float *maskArr = (float *)malloc((size_t)B * N * sizeof(float));
+  float *nnArr   = (float *)malloc((size_t)B * sizeof(float));
+  if (xArr == NULL || aArr == NULL || maskArr == NULL || nnArr == NULL) {
+    free(xArr); free(aArr); free(maskArr); free(nnArr);
+    return 0;
+  }
+  atp_gnn_build_host(gs, nc, B, xArr, aArr, maskArr, nnArr);
+
+  int ok = 0;
+  AtpGnnCapture *cap = atp_gnn_capture_for(B);
+
+  if (cap != NULL && cap->slot != 0u) {
+    // Warm path: rewrite the persistent input buffers in place, replay the
+    // recorded dispatch sequence (no re-schedule), read the output buffer.
+    atp_gnn_buf_fill(cap->x_tid,    xArr,    (u64)B * N * F);
+    atp_gnn_buf_fill(cap->a_tid,    aArr,    (u64)B * N * N);
+    atp_gnn_buf_fill(cap->mask_tid, maskArr, (u64)B * N);
+    atp_gnn_buf_fill(cap->nn_tid,   nnArr,   (u64)B);
+    u32 ids[4] = {cap->x_buf, cap->a_buf, cap->mask_buf, cap->nn_buf};
+    jit_replay_with_inputs(cap->slot, ids, 4u);
+    ok = atp_gnn_read_scores(cap->out_tid, B, nc, out);
+  } else if (cap != NULL) {
+    // Cold path: allocate persistent inputs, fill them, build + capture the
+    // forward around one realize, declare the input baseline, and cache it.
+    u32 xTid    = atp_gnn_input_tensor(3u, (u32[]){B, N, F});
+    u32 aTid    = atp_gnn_input_tensor(3u, (u32[]){B, N, N});
+    u32 maskTid = atp_gnn_input_tensor(3u, (u32[]){B, 1u, N});
+    u32 nnTid   = atp_gnn_input_tensor(3u, (u32[]){B, 1u, 1u});
+    atp_gnn_buf_fill(xTid,    xArr,    (u64)B * N * F);
+    atp_gnn_buf_fill(aTid,    aArr,    (u64)B * N * N);
+    atp_gnn_buf_fill(maskTid, maskArr, (u64)B * N);
+    atp_gnn_buf_fill(nnTid,   nnArr,   (u64)B);
+
+    Term xT    = term_new(0, TAG_TEN, DT_FP32, xTid);
+    Term aT    = term_new(0, TAG_TEN, DT_FP32, aTid);
+    Term maskT = term_new(0, TAG_TEN, DT_FP32, maskTid);
+    Term nnT   = term_new(0, TAG_TEN, DT_FP32, nnTid);
+    Term logits = atp_gnn_forward(m, B, xT, aT, maskT, nnT);
+
+    u32 slot = jit_capture_begin();
+    Term realized = term_resolve(thvm_realize(logits));
+    if (slot != 0u) {
+      jit_capture_end_with_result(realized);
+    }
+    if (term_tag(realized) == TAG_TEN) {
+      u32 outTid = (u32)term_val(realized);
+      ok = atp_gnn_read_scores(outTid, B, nc, out);
+      if (ok && slot != 0u) {
+        u32 ids[4] = {TENS[xTid].buf_id, TENS[aTid].buf_id,
+                      TENS[maskTid].buf_id, TENS[nnTid].buf_id};
+        jit_capture_set_inputs(slot, ids, 4u);
+        *cap = (AtpGnnCapture){
+          .B = B, .slot = slot,
+          .x_tid = xTid, .a_tid = aTid, .mask_tid = maskTid, .nn_tid = nnTid,
+          .x_buf = ids[0], .a_buf = ids[1], .mask_buf = ids[2], .nn_buf = ids[3],
+          .out_tid = outTid
+        };
+      } else if (slot != 0u) {
+        jit_capture_drop(slot);
       }
-      free(o);
-      ok = 1;
+    } else if (slot != 0u) {
+      jit_capture_drop(slot);
     }
   }
+
   free(xArr); free(aArr); free(maskArr); free(nnArr);
   return ok;
 }
@@ -6392,7 +6555,13 @@ fn int thvm_atp_gnn_score_batch(const Term *lhs, const Term *rhs,
   if (g_atp_gnn_ctx == 0u) g_atp_gnn_ctx = thvm_context_create("cpu");
   if (g_atp_gnn_ctx == 0u) { free(gs); return 0; }
   thvm_context_select(g_atp_gnn_ctx);
-  if (TENS_NEXT > TENS_CAP / 2u || KERNELS_NEXT > KERNELS_CAP / 2u) thvm_reset();
+  if (TENS_NEXT > TENS_CAP / 2u || KERNELS_NEXT > KERNELS_CAP / 2u) {
+    // thvm_reset frees the sandbox buffers + every capture slot, so the
+    // cached forward captures are now stale -- drop them before reset so
+    // the next re-rank at each bucket re-captures from scratch.
+    atp_gnn_capture_cache_clear();
+    thvm_reset();
+  }
 
   int ok = 1;
   for (u32 off = 0u; ok && off < n; off += ATP_GNN_B_CAP) {
