@@ -84,8 +84,16 @@ static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
   if (group_reduce_extent != 0) {
     if (group_reduce_extent > 256) return 0;
     if (total > 0xFFFFFFFFu) return 0;
+    // A GROUP_REDUCE axis that COEXISTS with LOCAL axes (tinygrad matvec:
+    // GROUP the reduce + LOCAL the output row) needs BOTH in the
+    // threadgroup -- local_total rows * group_extent reduce-threads.  The
+    // render_uop GROUP template lays the group out as the innermost tt dim.
+    // local_total == 1 (GROUP-only / GROUPTOP) -> threads = group_extent,
+    // unchanged.
+    u64 t = (u64)group_reduce_extent * local_total;
+    if (t > 1024) return 0;                 // Apple maxTotalThreadsPerTG
     groups  = (u32)total;
-    threads = group_reduce_extent;
+    threads = (u32)t;
   } else if (local_total > 1) {
     if (local_total > 1024) return 0;     // Apple maxTotalThreadsPerTG
     // tg/tt split (mirrors render_uop.c's RmuGlobalDecode.has_local):

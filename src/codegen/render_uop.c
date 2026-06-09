@@ -57,8 +57,48 @@ static int RMU_SIMD_WARP = 0;
 // into one shared accumulator: data-race / OOB.
 static int RMU_HAS_GROUP_REDUCE = 0;
 
+// When a GROUP_REDUCE axis COEXISTS with LOCAL axes (tinygrad's matvec:
+// GROUP the reduce + LOCAL the output row), the grouped axis is the INNERMOST
+// local dim: the threadgroup is `local_total * group_extent` threads, `tt`
+// decodes group_idx = tt % group_extent and the LOCAL axes from tt /
+// group_extent.  RMU_GROUP_EXTENT shifts the LOCAL decode strides up by that
+// factor; RMU_GROUP_LOCAL_TOTAL sizes the shared accumulator (local_total *
+// group_extent) and drives the per-local final combine.  Both are inert when
+// no LOCAL axis coexists (local_total == 1) -- the GROUP-only / GROUPTOP path
+// (conv reductions) is byte-identical.
+static int RMU_GROUP_EXTENT      = 0;   // group factor, 0 if no GROUP_REDUCE
+static u32 RMU_GROUP_LOCAL_TOTAL = 1;   // product of LOCAL extents in the kernel
+
 // Forward decl: defined alongside rmu_dag_has_simd_reduce below.
 static int rmu_dag_has_group_reduce(Term t);
+// The OPT_GROUP_REDUCE FACTOR (e.g. 8 -- the cooperative thread count, NOT the
+// reduce axis's full extent), found by walking the OPT tree.
+static u32 rmu_group_reduce_factor(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t); u64 loc = term_val(t);
+  if (op == UOP_OPT) {
+    if ((u32)term_val(heap_read(loc + 1)) == UOP_OPT_GROUP_REDUCE)
+      return (u32)term_val(heap_read(loc + 2));
+    return rmu_group_reduce_factor(heap_read(loc + 0));
+  }
+  if (op == UOP_RANGE || op == UOP_BUFFER || op == UOP_CONST
+      || op == UOP_INVALID) return 0;
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    u32 f = rmu_group_reduce_factor(heap_read(loc + i));
+    if (f != 0) return f;
+  }
+  return 0;
+}
+// Compute (group_factor, product-of-LOCAL-extents) for a GROUP_REDUCE kernel.
+static void rmu_group_local_dims(Term root, int *group_ext, u32 *local_total) {
+  *group_ext = (int)rmu_group_reduce_factor(root);
+  *local_total = 1;
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(root, ids, types, exts, MAX_AXES);
+  for (u32 i = 0; i < n; i++)
+    if (exts[i] != 0 && types[i] == KAX_LOCAL) *local_total *= exts[i];
+}
 
 // CONV-BWD REDUCE TILING knob.  Default OFF (-1 uninit, 0 off, 1 on).
 // When ON, a SIMD_REDUCE-wrapped *multi-axis* reduce (e.g. the conv
@@ -1409,10 +1449,13 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   // With a single LOCAL axis: `uint aN = tt;`.  With >=2, decode each
   // from `tt` with its own (stride, modulus) -- mirrors multi-GLOBAL.
   if (opt_kind == UOP_OPT_LOCAL || axis_type == 4) {
-    if (gctx != NULL
-        && rmu_gd_l_mod(gctx, axis_id) != 0 && gctx->n_locals >= 2) {
-      u32 lstride = rmu_gd_l_stride(gctx, axis_id);
-      u32 lmod    = rmu_gd_l_mod(gctx, axis_id);
+    // Decode (tt / stride) % mod when >=2 LOCAL axes OR a coexisting
+    // GROUP_REDUCE shifted this single axis up a group_extent stride
+    // (lstride > 1) -- the plain `aN = tt` fast path is only the lone-axis,
+    // stride-1 case.
+    u32 lstride = (gctx != NULL) ? rmu_gd_l_stride(gctx, axis_id) : 0;
+    u32 lmod    = (gctx != NULL) ? rmu_gd_l_mod   (gctx, axis_id) : 0;
+    if (lmod != 0 && (gctx->n_locals >= 2 || lstride > 1)) {
       if (lstride <= 1) {
         fprintf(fp, "uint a%u = tt %% %uu; /* local ext=%u */\n",
                 axis_id, lmod, extent);
@@ -1565,8 +1608,10 @@ static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
   if (RMU_TARGET != CG_TARGET_C) {
     // LOCAL axes: right-to-left so the innermost (last in ranges[]) gets
     // stride 1.  `tt = sum_K lK * local_stride[K]` mirrors the GLOBAL
-    // flat decode over `tg`.
-    u32 lstride = 1;
+    // flat decode over `tg`.  When a GROUP_REDUCE axis coexists, it owns the
+    // INNERMOST group_extent threads of `tt`, so the LOCAL axes start one
+    // group_extent stride up (a1 = (tt / group_extent) % ext).
+    u32 lstride = (RMU_GROUP_EXTENT > 0) ? (u32)RMU_GROUP_EXTENT : 1;
     u32 n_loc   = 0;
     u64 ltotal  = 1;
     for (i32 i = (i32)n_ranges - 1; i >= 0; i--) {
@@ -2386,9 +2431,14 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
   char acc_slot[40];
   snprintf(acc_slot, sizeof(acc_slot), "%s[tt]", acc_name);
-  // Shared-mem accumulator declaration.
+  // Shared-mem accumulator declaration.  One slot per THREAD: with a
+  // coexisting LOCAL axis the threadgroup is local_total*group_extent and
+  // each thread owns _acc[tt] (group is the innermost tt dim).  GROUP-only
+  // (local_total==1) reduces to the plain `_acc[group_extent]`.
+  u32 grp_local_total = (RMU_GROUP_LOCAL_TOTAL > 0) ? RMU_GROUP_LOCAL_TOTAL : 1;
+  u32 acc_size        = grp_local_total * group_extent;
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "%s %s[%u];\n", shared_kw, acc_name, group_extent);
+  fprintf(fp, "%s %s[%u];\n", shared_kw, acc_name, acc_size);
   // Per-thread init.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s = ", acc_slot);
@@ -2414,10 +2464,13 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
             ax, ax, ext, ax);
     loop_depth++;
   }
-  // Per-thread strided walk over the GROUP axis.
+  // Per-thread strided walk over the GROUP axis.  The group sub-index is
+  // tt % group_extent (the innermost tt dim); the LOCAL row is tt /
+  // group_extent.  GROUP-only -> tt % group_extent == tt (threadgroup is
+  // exactly group_extent), so this is unchanged there.
   for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
-  fprintf(fp, "for (uint a%u = tt; a%u < %u; a%u += %u) {\n",
-          red_axis, red_axis, red_extent, red_axis, group_extent);
+  fprintf(fp, "for (uint a%u = (tt %% %uu); a%u < %u; a%u += %u) {\n",
+          red_axis, group_extent, red_axis, red_extent, red_axis, group_extent);
   loop_depth++;
   for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
   rmu_emit_group_combine_line(acc_slot, red_kind, red_src, fp);
@@ -2431,9 +2484,13 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   // Post-loop barrier.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s\n", barrier_stmt);
-  // Final combine + store on a single thread.
+  // Final combine + store, ONE thread per LOCAL row: the threads whose group
+  // sub-index is 0 (tt % group_extent == 0).  Each owns group_extent
+  // contiguous slots [tt, tt+group_extent) (group is the innermost tt dim),
+  // sums them, and writes its own output addr (a_local = tt / group_extent).
+  // GROUP-only -> the lone tt==0 thread sums _acc[0..group_extent), unchanged.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fputs("if (tt == 0) {\n", fp);
+  fprintf(fp, "if (tt %% %uu == 0u) {\n", group_extent);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fputs("float _total = ", fp);
   rmu_emit_reduce_init(red_kind, fp);
@@ -2442,9 +2499,9 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   fprintf(fp, "for (uint _i = 0; _i < %u; _i++) {\n", group_extent);
   for (u32 d = 0; d < body_depth + 2; d++) fputs("  ", fp);
   if (red_kind == REDUCE_SUM) {
-    fprintf(fp, "_total = _total + %s[_i];\n", acc_name);
+    fprintf(fp, "_total = _total + %s[tt + _i];\n", acc_name);
   } else {
-    fprintf(fp, "_total = (_total > %s[_i]) ? _total : %s[_i];\n",
+    fprintf(fp, "_total = (_total > %s[tt + _i]) ? _total : %s[tt + _i];\n",
             acc_name, acc_name);
   }
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
@@ -5151,6 +5208,7 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   // come from `tg` (one threadgroup per output tuple).  Same flag the
   // CUDA entry uses.
   RMU_HAS_GROUP_REDUCE = rmu_dag_has_group_reduce(root);
+  rmu_group_local_dims(root, &RMU_GROUP_EXTENT, &RMU_GROUP_LOCAL_TOTAL);
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
@@ -5162,6 +5220,7 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
     fputs("  /* empty kernel */\n", fp);
   }
   RMU_HAS_GROUP_REDUCE = 0;
+  RMU_GROUP_EXTENT = 0; RMU_GROUP_LOCAL_TOTAL = 1;
   fputs("}\n", fp);
 }
 
@@ -5689,6 +5748,7 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   // logic as SIMD_REDUCE but for the GROUP_REDUCE template (block =
   // group_extent, grid = output product).
   RMU_HAS_GROUP_REDUCE = rmu_dag_has_group_reduce(root);
+  rmu_group_local_dims(root, &RMU_GROUP_EXTENT, &RMU_GROUP_LOCAL_TOTAL);
   if (rmu_dag_has_tc(root)) {
     fputs("#include <mma.h>\n", fp);
     fputs("#include <cuda_fp16.h>\n", fp);
@@ -5766,5 +5826,6 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   RMU_TARGET = CG_TARGET_METAL;
   RMU_SIMD_WARP = 0;
   RMU_HAS_GROUP_REDUCE = 0;
+  RMU_GROUP_EXTENT = 0; RMU_GROUP_LOCAL_TOTAL = 1;
   fputs("}\n", fp);
 }

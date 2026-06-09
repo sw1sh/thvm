@@ -747,9 +747,15 @@ fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
     return 1;
   }
   if (group_reduce_extent != 0) {
-    if (group_reduce_extent > 1024) return 0;   // V100 maxThreadsPerBlock
+    // A GROUP_REDUCE that COEXISTS with LOCAL axes (tinygrad matvec: GROUP
+    // the reduce + LOCAL the output row) puts BOTH in the block -- local_total
+    // rows * group_extent reduce-threads, the group laid out as the innermost
+    // tt dim (render_uop.c).  local_total == 1 (GROUP-only) -> block =
+    // group_extent, unchanged.
+    u64 b = (u64)group_reduce_extent * local_total;
+    if (b > 1024) return 0;   // V100 maxThreadsPerBlock
     grid  = (u32)total;
-    block = group_reduce_extent;
+    block = (u32)b;
   } else if (local_total > 1) {
     if (local_total > 1024) return 0;           // V100 maxThreadsPerBlock
     // tg/tt split: GLOBAL/LOOP extents -> grid (one block per LOOP
