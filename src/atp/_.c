@@ -329,6 +329,7 @@ u64 g_atp_phase_us_cp_gen         = 0;
 u64 g_atp_phase_us_push_normalize = 0;
 u64 g_atp_phase_us_interreduce    = 0;
 u64 g_atp_phase_us_goal_check     = 0;
+u64 g_atp_phase_us_cp_set_ir      = 0;
 u64 g_atp_phase_us_total          = 0;
 u64 g_atp_unorient_step_calls     = 0;
 u64 g_atp_unorient_step_fires     = 0;
@@ -8298,7 +8299,9 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     u32 period = s->cp_set_ir_period ? s->cp_set_ir_period
                                      : ATP_CP_SET_IR_PERIOD;
     if (s->n_rules % period == 0u) {
+      u64 _ph_cpir_t0 = atp_phase_now();
       atp_cp_set_interreduce(s);
+      if (g_atp_phase_enabled) g_atp_phase_us_cp_set_ir += atp_now_us() - _ph_cpir_t0;
     }
   }
 
