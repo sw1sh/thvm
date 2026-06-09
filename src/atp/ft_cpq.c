@@ -214,6 +214,11 @@ static void atp_cp_ft_transfer_out(AtpState *s, u32 i,
 static u8 atp_cp_trivially_joinable_ft(AtpState *s,
                                        AtpFtCell **lhs,
                                        AtpFtCell **rhs) {
+  // Syntactic-equality fast-path: degenerate overlaps where the CP's
+  // two sides are already equal are trivially joined; skip both
+  // normalize calls.  ft_eq early-exits on the first symbol mismatch
+  // so the overhead is sub-microsecond when sides differ.
+  if (ft_eq(*lhs, *rhs)) return 1u;
   const u32 NORM_CAP = 64u;
   AtpFtCell *l = atp_rewrite_normalize_ft(s, *lhs, NORM_CAP);
   AtpFtCell *r = atp_rewrite_normalize_ft(s, *rhs, NORM_CAP);
