@@ -27,8 +27,7 @@ SeedRandom[20240605];
 (* ===== EmbeddingLayer: token-id gather ===== *)
 With[{vocab = 24, dim = 8},
     embW = RandomReal[{-1, 1}, {vocab, dim}];
-    el   = NetReplacePart[EmbeddingLayer[dim, vocab],
-        {"Weights" -> embW, "Scales" -> None}];
+    el   = NetReplacePart[EmbeddingLayer[dim, vocab], "Weights" -> embW];
     ids  = {3, 11, 1, 24, 7};                 (* 1-indexed Wolfram ids *)
     VerificationTest[
         md[el[ids], rd @ TEmbeddingMatrix[tc[embW], ids - 1]] < 1.*^-5,
