@@ -885,6 +885,23 @@ VerificationTest[
 ];
 
 VerificationTest[
+    (* Bare String atoms (`f["a"] == f["b"]`) are normalized to private
+       Tptp$ symbols by atpMaybeInternalizeTPTP, so the encoder, the
+       C engine, and the ProofObject decoder all round-trip uniformly
+       through Symbol-headed terms.  Without the bare-string rule in
+       tptpInternalize, the decoder reconstructs label "a" as
+       Symbol[a] (Global`a), which the verifier then compares against
+       the user's literal "a" -- they don't match and the ProofObject
+       check fails.  Trivial-but-non-reflexive goal: `f["xx"] == "xx"`
+       under the axiom `ForAll[{x}, f[x] -> x]`. *)
+    Head @ TFindProof[f["xx"] == "xx",
+        {ForAll[{x}, f[x] -> x]},
+        TimeConstraint -> 10],
+    ProofObject,
+    TestID -> "ATP/strings/atoms-as-symbols"
+];
+
+VerificationTest[
     (* Method -> "VampireUEQ" preset (LPO + AutoPrecedence +
        SelectionRatio 10 + UnfailingCP + AutoMaxWeight + MNF front)
        proves a baseline theorem too -- bundled knob smoke check. *)

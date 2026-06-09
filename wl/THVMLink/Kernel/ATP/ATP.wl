@@ -673,6 +673,22 @@ encodeAtpTerm[n:(_Integer | _Real | _Rational), state_Association] := Block[{
     {THVMLink`Private`$termNewCtrFn[lab, {}], st}
 ]
 
+(* A String literal -- the user spelling an atom as `"a"` instead of
+   bare `a` (useful when the symbol name isn't a valid WL identifier,
+   e.g. starts with a digit or contains punctuation; also the natural
+   TPTP-import form before tptpInternalize runs).  Encode it as a
+   0-arity constant whose label uses the string verbatim, so two
+   distinct strings -> two distinct labels and equal strings collapse
+   to the same label.  Without this rule the general clause below
+   folds over List @@ "a" -- a non-list for an atom -- and the
+   encoder diverges. *)
+encodeAtpTerm[s_String, state_Association] := Block[{
+    lab, st
+},
+    {lab, st} = ensureSym[s, state];
+    {THVMLink`Private`$termNewCtrFn[lab, {}], st}
+]
+
 (* Fold step that threads the encoder state through a list of
    children: accumulator is {encoded_terms_so_far, state}. *)
 encodeChildStep[{terms_, state_}, child_] := Block[{
@@ -3160,7 +3176,16 @@ tptpStringToSymbol[s_String] :=
 tptpInternalize[expr_] :=
     expr //. {
         h_String[] :> tptpStringToSymbol[h],
-        h_String[args__] :> tptpStringToSymbol[h][args]
+        h_String[args__] :> tptpStringToSymbol[h][args],
+        (* Bare string atom (`"a"` inside `f["a"] == "b"`, not a
+           String head with args): convert to the same Tptp$ symbol
+           the head-form gets, so the encoder's symbol table sees one
+           label for "a" / Tptp$a / both, and the decoder's reverse
+           map (Symbol[name]) round-trips back to the same symbol.
+           Without this rule the verifier sees `Symbol["a"]` (a bare
+           Global`a) where the goal had the literal `"a"`, and the
+           ProofObject reconstruction fails the verify check. *)
+        s_String /; StringLength[s] > 0 :> tptpStringToSymbol[s]
     };
 
 tptpDispatch[imported_Association, opts:OptionsPattern[TFindProof]] := If[
@@ -3243,7 +3268,12 @@ atpFlattenAxioms[ax_List] := Flatten[ax, 1];
    Iter 65: lets users pipe TPTPImport["..."] output directly into
    TFindProof[conj, ax] without the manual tptpInternalize step.  *)
 atpMaybeInternalizeTPTP[expr_] := If[
-    !FreeQ[expr, _String[___]],
+    (* Trigger on either: a String-headed compound (`"f"[X]`, the
+       TPTPImport shape), OR a bare String atom inside a term tree
+       (`f["a"]`, `"a" == "b"`).  Both forms need tptpInternalize to
+       rename strings to private Tptp$ Symbols so the encoder and
+       the ProofObject decoder agree on the round-trip. *)
+    !FreeQ[expr, _String[___]] || !FreeQ[expr, _String],
     tptpInternalize[expr], expr];
 
 (* Composed normalizers used by every user-facing entry (TFindProof,
