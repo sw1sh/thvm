@@ -72,3 +72,5 @@ MeredithAxioms	OrAssociativity	-	-	409	-	Symmetric to AndAssociativity; not dire
 BooleanAxioms	ImpliesRobbinsAxioms__c1	1	-	4	8	OK.  chain=1 vs WM_rules=4 -- thvm shorter.
 BooleanAxioms	ImpliesRobbinsAxioms__c2	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close parity.
 BooleanAxioms	ImpliesRobbinsAxioms__c3	82	-	189	89	OK.  chain=82 vs WM_rules=189 -- thvm 57% shorter (deep AC compression).
+WolframAxioms	DoubleNegation	39	-	614	41	OK at 60s under Waldmeister.  chain=39 vs WM_rules=614 -- thvm 94% shorter!  Massive compression on Sheffer-deep saturation.
+WolframAxioms	Commutativity	128	-	661	130	OK at 60s.  chain=128 vs WM_rules=661 -- thvm 80% shorter.
