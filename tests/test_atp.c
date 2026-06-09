@@ -500,7 +500,7 @@ int main(void) {
   TEST_BEGIN("atp/generate-cps-empty-added-no-op");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    AtpAddedRange empty = {0, 0};
+    AtpAddedRange empty = {0, 0, 0};
     u32 pushed = thvm_atp_generate_cps(s, empty);
     CHECK_EQ(pushed, 0u);
     CHECK_EQ(s->n_cps, 0u);
@@ -577,7 +577,7 @@ int main(void) {
   TEST_BEGIN("atp/interreduce-empty-added-no-op");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    AtpAddedRange empty = {0, 0};
+    AtpAddedRange empty = {0, 0, 0};
     CHECK_EQ(thvm_atp_interreduce(s, empty), 0u);
     thvm_atp_free(s);
   }
@@ -1165,7 +1165,7 @@ int main(void) {
     s->r_trace[0] = ATP_TRACE_NONE;
     s->n_rules = 1;
 
-    AtpAddedRange added = {0, 1};
+    AtpAddedRange added = {0, 1, 0};
     CHECK_EQ(s->n_cps_dropped_joinable, 0u);
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK_EQ(pushed, 0u);
@@ -1189,7 +1189,7 @@ int main(void) {
     s->r_trace[1] = ATP_TRACE_NONE;
     s->n_rules = 2;
 
-    AtpAddedRange added = {1, 1};
+    AtpAddedRange added = {1, 1, 0};
     u32 pushed = thvm_atp_generate_cps(s, added);
     CHECK(pushed >= 1u);
     thvm_atp_free(s);
@@ -1226,7 +1226,7 @@ int main(void) {
     s->r_trace[0] = ATP_TRACE_NONE;
     s->n_rules = 1;
 
-    AtpAddedRange added = {0, 1};
+    AtpAddedRange added = {0, 1, 0};
     CHECK_EQ(s->n_cps_dropped_joinable,  0u);
     CHECK_EQ(s->n_cps_dropped_connected, 0u);
     (void)thvm_atp_generate_cps(s, added);

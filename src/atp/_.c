@@ -4030,6 +4030,19 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // engine-wide default-on caused a measurable atp.wlt slowdown.
   atp_register_primitives();
   acp_selftest();   // verify the Stringterms pack/unpack round-trip
+  // Waldmeister `SO_minimaleKonstante` (SymbolOperationen.c:121): cache
+  // the engine-reserved 0-arity CTR at ATP_RESERVED_LABEL_MIN_CONST so
+  // the FVI hook in `thvm_atp_orient_and_add` can substitute it for
+  // free variables in unorientable equations.  The WL encoder
+  // (`encodeAtpTermInit` in ATP.wl) pre-seeds its symbol table with
+  // this label; max_label flowing through thvmlink_atp.c already
+  // covers it.  Cheap: one heap cell allocated at init, reused for
+  // every FVI emission.
+  s->min_const = term_new_ctr(ATP_RESERVED_LABEL_MIN_CONST, NULL, 0);
+  // FVI rule emission (Waldmeister `RechtsUnfreiErzeugen`, default OFF):
+  // env knob THVM_ATP_FVI=1 turns it on for CLI bench runs.  WL side
+  // calls thvm_atp_set_use_fvi when Method "FreeVarInstance" -> True.
+  s->use_fvi = (u8)atp_env_on("THVM_ATP_FVI");
 #ifdef THVM_ATPFT_RULES
   // Stage 4: stand up the AtpFt slab pool BEFORE atp_ensure_rule_cap
   // grows the parallel slot arrays (those start NULL; cells get
@@ -4290,9 +4303,13 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // Count the root slots so we can size the array exactly.
   // 2 per rule for lhs/rhs, plus 2 per rule for dead-save (originals
   // are kept live so proof reconstruction can read them when the slot
-  // has been soft-deleted by backward subsumption).
+  // has been soft-deleted by backward subsumption).  +1 for
+  // s->min_const (the FVI reserved constant; allocated once in
+  // thvm_atp_init and reused across orient_and_add calls, so a GC
+  // mid-completion would otherwise leave a dangling cell).
   u32 n_roots = 4u * s->n_rules + 4u /* goal + goal_nf */
-              + s->n_trace + REWRITE_MAX_VAR;
+              + s->n_trace + REWRITE_MAX_VAR
+              + 1u /* min_const */;
 #ifdef ATP_MNF
   // Milestone 10: every MNF coloured node holds a reached Term.  Root
   // them so the collector relocates them; the hash table (structural
@@ -4322,6 +4339,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     roots[w++] = s->witness_subst.bindings[i];
   }
+  // FVI reserved constant: cached in init, used in orient_and_add.
+  // Must be relocated by every GC so the cached Term stays valid.
+  u32 min_const_root = w;
+  roots[w++] = s->min_const;
 #ifdef ATP_MNF
   u32 mnf_node_root = w;
   mnf_gc_gather(s->mnf, roots, &w);
@@ -4348,6 +4369,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     s->witness_subst.bindings[i] = roots[w++];
   }
+  s->min_const = roots[w++];
+  (void)min_const_root;
 #ifdef ATP_MNF
   // Write the relocated reached-Terms back into the MNF nodes.  No
   // hash-table fixup: mnf_hash is structural, so a relocated term
@@ -4582,7 +4605,7 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs);
 // case of a non-terminating direction is the user's responsibility.
 fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
                                                 Term rhs) {
-  AtpAddedRange r = {0, 0};
+  AtpAddedRange r = {0, 0, 0};
   if (s == NULL) return r;
   u32 idx = s->n_rules;
   if (!atp_push_rule(s, lhs, rhs)) return r;
@@ -7488,6 +7511,17 @@ fn void thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on) {
   s->use_lazy_normalize = on ? 1u : 0u;
 }
 
+// Waldmeister `RechtsUnfreiErzeugen` FVI rule emission (RUndEVerwaltung.c:
+// 366-397).  When ON, an unorientable equation also generates a
+// grounded sibling rule substituting ATP_RESERVED_LABEL_MIN_CONST for
+// every free RHS variable absent from the LHS.  Default OFF; turning
+// it on is required to crack ExcludedMiddle / Noncontradiction /
+// EqualityOfInverses under Method->"Waldmeister".
+fn void thvm_atp_set_use_fvi(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_fvi = on ? 1u : 0u;
+}
+
 // Vampire-style Limited Resource Strategy (Riazanov & Voronkov, JSC 36,
 // 2003).  See AtpState.use_lrs / thvm_atp_select_cp / atp_lrs_recompute_
 // horizon for the algorithm.  Resets the per-run horizon state so a
@@ -8002,12 +8036,23 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // PCL output can identify each rule individually.  Stash the trace
   // index in r_trace[] so generate_cps can record TRACE_CP parents
   // for any CP born from this rule.
+  //
+  // Waldmeister `RechtsUnfreiErzeugen` (RUndEVerwaltung.c:366-397):
+  // trailing `fvi_count` slots in [first, first+count) are grounded
+  // free-variable instances of the leading orientation, not direct
+  // orientations.  Stamp them with TRACE_FVI so the WL proof renderer
+  // labels them "FreeVarInstance"; downstream chain-walking treats
+  // TRACE_FVI as a TRACE_ORIENT sibling (same children layout, same
+  // tolerant decoder fallback).
+  u32 fvi_lo = added.first + added.count - added.fvi_count;
   for (u32 k = 0; k < added.count; k++) {
-    Term rl = s->lhs[added.first + k];
-    Term rr = s->rhs[added.first + k];
-    u32  t  = atp_trace_push(s, TRACE_ORIENT, chain_tail,
+    u32 rid = added.first + k;
+    Term rl = s->lhs[rid];
+    Term rr = s->rhs[rid];
+    u32  reason = (rid >= fvi_lo) ? TRACE_FVI : TRACE_ORIENT;
+    u32  t  = atp_trace_push(s, reason, chain_tail,
                              ATP_TRACE_NONE, rl, rr);
-    s->r_trace[added.first + k] = t;
+    s->r_trace[rid] = t;
   }
 
   // Interreduce shifts new-rule indices down by `dropped`.
@@ -8118,6 +8163,7 @@ fn u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap) {
       case TRACE_ORIENT:   type_str = "orient";   break;
       case TRACE_CP:       type_str = "cp";       break;
       case TRACE_SIMPLIFY: type_str = "simplify"; break;
+      case TRACE_FVI:      type_str = "fvi";      break;
     }
 
     int n;
@@ -9483,7 +9529,7 @@ static u32 mnf_historical_rules(AtpState *s, Term *out_l, Term *out_r,
     Term e = s->trace[i];
     u32  reason = term_ext(e);
     if (reason == TRACE_ORIENT || reason == TRACE_AXIOM ||
-        reason == TRACE_SIMPLIFY) {
+        reason == TRACE_SIMPLIFY || reason == TRACE_FVI) {
       out_l[n] = term_ctr_at(e, 2);
       out_r[n] = term_ctr_at(e, 3);
       out_trace[n] = i;
@@ -12446,11 +12492,52 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
   return thvm_atp_generate_cps_c(s, added);
 }
 
+#ifdef ATP_ORDERED_REWRITE
+// Walk `t` and substitute `min_const` for every TAG_FVR cell whose
+// var-id does not occur in `lhs`.  Port of the variable-binding loop
+// in Waldmeister's `PCL_FreieVarInstanz` (PCL/pcl.c:458-472): binds
+// every "free" RHS variable to `SO_minimaleKonstante` before the rule
+// is grounded.  Returns `t` unchanged when no substitution fires.
+//
+// Used by `thvm_atp_orient_and_add` to emit a grounded sibling for a
+// KBO_UN equation whose RHS introduces variables not on the LHS.  The
+// ordered-rewrite gate at the call site requires the result to be
+// KBO_GT against `lhs`, so a no-op substitution (the result equals the
+// original unorientable RHS) drops cleanly with no extra rule push.
+static Term atp_grounded_instance(AtpState *s, Term t, Term lhs,
+                                  Term min_const) {
+  switch (term_tag(t)) {
+    case TAG_FVR:
+      // Variable: ground it iff it does not occur on the LHS.  The
+      // not-on-LHS guard mirrors PCL_FreieVarInstanz's "frei in r"
+      // condition -- a bound variable is left alone, so the resulting
+      // rule still unifies with redexes that previously matched lhs.
+      return atp_term_has_var(lhs, term_ext(t)) ? t : min_const;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n == 0) return t;
+      if (n > REWRITE_MAX_ARITY) return t;
+      Term children[REWRITE_MAX_ARITY];
+      u8 changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term ch = term_ctr_at(t, i);
+        Term sub = atp_grounded_instance(s, ch, lhs, min_const);
+        children[i] = sub;
+        if (sub != ch) changed = 1;
+      }
+      if (!changed) return t;
+      return term_new_ctr(term_ext(t), children, n);
+    }
+    default: return t;
+  }
+}
+#endif /* ATP_ORDERED_REWRITE */
+
 // Orient via KBO and push the rule(s).  See header comment for the
 // dispatch table.  Atomic: if the unfailing fallback can't fit both
 // orientations, neither is added.
 fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
-  AtpAddedRange r = {0, 0};
+  AtpAddedRange r = {0, 0, 0};
   if (s == NULL) return r;
 
   // Permutation-subsumption: drop AC-equal-at-top equations before
@@ -12484,7 +12571,40 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       // equation in whichever direction decreases, so store it ONCE
       // (no looping u->v / v->u pair, no doubled CP generation).
       u32 idx = s->n_rules;
-      if (atp_push_rule(s, lhs, rhs)) { r.first = idx; r.count = 1; }
+      u8 pushed = atp_push_rule(s, lhs, rhs);
+      if (pushed) { r.first = idx; r.count = 1; }
+      // Waldmeister `RechtsUnfreiErzeugen` (RUndEVerwaltung.c:366-397):
+      // an unorientable equation whose RHS has variables not on its
+      // LHS gates ExcludedMiddle / Noncontradiction / EqualityOfInverses
+      // -- the rewriter cannot orient it, but the GROUNDED instance
+      // (replace each such free RHS variable with `SO_minimaleKonstante`)
+      // is KBO-decidable and unblocks the proof.  Skipped when:
+      //   * The grounded instance is term-identical (no free RHS vars).
+      //   * KBO still rules the pair unorientable (then the
+      //     ordered-rewrite cache at line 5032 would mis-orient it).
+      // The emitted rule is tagged TRACE_FVI so the WL proof renderer
+      // can label it as a free-variable-instance step.
+      // Gated by AtpState.use_fvi (Method "FreeVarInstance" -> True on
+      // the WL side, or THVM_ATP_FVI env on the C side).  Default OFF
+      // for byte-identical pre-port behavior on the OK_OK baseline;
+      // turning it on unblocks the FVI-gated theorems (ExcludedMiddle,
+      // Noncontradiction, EqualityOfInverses) at the cost of a slight
+      // trajectory shift on other Booleans.
+      if (pushed && s->use_fvi) {
+        Term g_rhs = atp_grounded_instance(s, rhs, lhs, s->min_const);
+        if (g_rhs != rhs) {
+          if (atp_compare(s, lhs, g_rhs) == KBO_GT) {
+            if (atp_push_rule(s, lhs, g_rhs)) {
+              r.count++;
+              r.fvi_count++;
+              // r.first is unchanged; the FVI rule is the trailing
+              // slot in [first, first+count).  The atp_step trace
+              // loop reads added.fvi_count to stamp this rule with
+              // TRACE_FVI instead of TRACE_ORIENT.
+            }
+          }
+        }
+      }
       return r;
 #else
       // Unfailing fallback: reserve 2 slots up front so the pair is

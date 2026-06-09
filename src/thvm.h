@@ -3861,6 +3861,17 @@ fn u8          fol_is_tseitin_aux(u32 label);
 // lhs->rhs rule application, 0 for an unorientable rule fired
 // reversed under ordered rewriting.
 #define TRACE_NORM_STEP 5u
+// TRACE_FVI: Waldmeister's `RechtsUnfreiErzeugen` "free-variable
+// instance" event (RUndEVerwaltung.c:366-397).  When the precedence is
+// total and an equation is unorientable under KBO/LPO, WM also
+// generates a grounded instance of the equation by substituting the
+// reserved minimal constant for every variable in the RHS that does
+// not occur on the LHS.  The grounded instance is order-decidable and
+// drives completion past the unorientable stall (gates ExcludedMiddle,
+// Noncontradiction, EqualityOfInverses).  Recorded as a separate
+// reason so the proof renderer can label these steps "FreeVarInstance".
+// Children: same layout as TRACE_ORIENT.
+#define TRACE_FVI      6u
 #define ATP_TRACE_NONE 0xFFFFFFFFu
 
 // CTR label for the synthetic `Cp(lhs, rhs)` head used by the FV
@@ -3868,6 +3879,25 @@ fn u8          fol_is_tseitin_aux(u32 label);
 // term.  Distinct from the TRACE_* labels so a Cp head is never
 // confused with a trace entry.
 #define ATP_CP_LABEL    16u  // Cp[lhs, rhs]
+
+// === Reserved CTR labels (engine-introduced constants) ==============
+//
+// Waldmeister's signature analysis pre-reserves `SO_const1` /
+// `SO_const2` at the top of the symbol table (SymbolOperationen.c:386-
+// 389) so the FVI rewrite has a constant to substitute for free
+// variables when generating a grounded instance.  thvm reserves the
+// SAME role at the BOTTOM of the user-label range (labels 1 and 2);
+// the WL encoder pre-seeds its symbol table with these so user labels
+// start at 3, and the C engine materializes the 0-arity terms in
+// `thvm_atp_init` and ranks them LOWEST in any auto-generated
+// precedence (`atp_generate_precedence` / `atp_occurrence_precedence` /
+// `atp_reverse_frequency_precedence` all skip them; precedence.c
+// gives reserved labels rank 0).
+#define ATP_RESERVED_LABEL_MIN_CONST 1u   // SO_minimaleKonstante
+#define ATP_RESERVED_LABEL_MIN_CONST2 2u  // SO_const2 (reserved, unused)
+#define ATP_RESERVED_LABEL_FIRST     1u
+#define ATP_RESERVED_LABEL_LAST      2u
+#define ATP_RESERVED_LABEL_COUNT     2u
 
 // 8.1c: ATP primitives registered into the TAG_PRI table by
 // thvm_atp_init.  Tests registers them once; the saturation loop
@@ -4031,6 +4061,14 @@ typedef struct {
   u32   n_rules;
   u32   r_cap;
   u32   n_unorient;          // count of unorientable rules currently in R
+  // Waldmeister `SO_minimaleKonstante` (SymbolOperationen.c:121): the
+  // lowest-precedence 0-arity CTR reserved by the WL encoder at label
+  // ATP_RESERVED_LABEL_MIN_CONST (see thvm.h's ATP_RESERVED_LABEL
+  // block).  Used by the FVI rule emission in `thvm_atp_orient_and_add`
+  // to substitute for free variables in an unorientable equation's
+  // RHS that do not occur on its LHS.  Materialized in `thvm_atp_init`
+  // as `term_new_ctr(ATP_RESERVED_LABEL_MIN_CONST, NULL, 0)`.
+  Term  min_const;
   // FT-skip mode (atp_cp_trivially_joinable) probe cache: highest
   // n_rules value at which the FT mirror was confirmed fully populated
   // (every i in [0, n) has lhs[i]==0 OR lhs_ft[i]!=NULL).  When current
@@ -4648,6 +4686,16 @@ typedef struct {
   u8   use_lazy_normalize;
   u64  n_cps_push_normalized;     // diagnostics: full-R normalizes at push
 
+  // FVI rule emission (Waldmeister `RechtsUnfreiErzeugen`,
+  // RUndEVerwaltung.c:366-397): when an unorientable equation is added
+  // to R, also push a grounded sibling that substitutes
+  // ATP_RESERVED_LABEL_MIN_CONST for every free RHS variable absent
+  // from the LHS.  Unblocks FVI-gated theorems (ExcludedMiddle,
+  // Noncontradiction, EqualityOfInverses).  Default OFF for byte-
+  // identical baseline; ON for Method->"Waldmeister" via
+  // thvm_atp_set_use_fvi or THVM_ATP_FVI env.
+  u8   use_fvi;
+
   // Set-of-Support (SOS) heuristic: bias CP priority toward CPs whose
   // terms share symbols with the goal.  Sound (completeness preserved
   // -- no CP is dropped; only the heap key is reduced for goal-touching
@@ -4995,6 +5043,14 @@ fn void      thvm_atp_set_use_rule_subsume_drop(AtpState *s, u8 on);
 fn void      thvm_atp_set_w2(AtpState *s, u32 modulo, u8 mode);
 fn void      thvm_atp_set_use_unorient_index(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_lazy_normalize(AtpState *s, u8 on);
+// Waldmeister `RechtsUnfreiErzeugen` FVI rule emission
+// (RUndEVerwaltung.c:366-397).  Default OFF; ON makes
+// thvm_atp_orient_and_add emit a grounded sibling rule for every
+// unorientable equation whose RHS has variables absent from its LHS,
+// substituting ATP_RESERVED_LABEL_MIN_CONST for the free variables.
+// Required to crack the FVI-gated theorems (ExcludedMiddle,
+// Noncontradiction, EqualityOfInverses) under Method->"Waldmeister".
+fn void      thvm_atp_set_use_fvi(AtpState *s, u8 on);
 // Vampire-style Limited Resource Strategy.  When set together with a
 // wall-clock deadline (thvm_atp_set_wall_deadline), thvm_atp_select_cp
 // periodically prunes the CP queue of CPs above a budget-derived weight
@@ -5790,10 +5846,17 @@ fn void      thvm_atp_cp_get      (const AtpState *s, u32 i,
 // Index range of rules just added by orient_and_add.
 //   {first: 0, count: 0}     -> nothing added (KBO_EQ, or R full)
 //   {first: i, count: 1}     -> one rule at s->lhs[i] / s->rhs[i]
-//   {first: i, count: 2}     -> two rules at i, i+1 (unfailing fallback)
+//   {first: i, count: 2}     -> two rules at i, i+1 (unfailing fallback OR
+//                                base + FVI rule from RechtsUnfreiErzeugen)
+// `fvi_count` (default 0) is the number of trailing rules in this range
+// that are Waldmeister `RechtsUnfreiErzeugen` free-variable instances
+// (RUndEVerwaltung.c:366-397) rather than direct orientations.  The
+// trace pusher uses this to stamp those rules with TRACE_FVI instead
+// of TRACE_ORIENT so the proof renderer can label them distinctly.
 typedef struct {
   u32 first;
   u32 count;
+  u32 fvi_count;
 } AtpAddedRange;
 
 // Orient `lhs == rhs` (assumed already reduced to NF and not

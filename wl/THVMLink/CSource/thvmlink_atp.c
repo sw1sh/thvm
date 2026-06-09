@@ -497,6 +497,13 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
   static u32 wl_weights_p[ATP_WL_CFG_MAX_LABELS];
   static u32 wl_precedence_p[ATP_WL_CFG_MAX_LABELS];
+  // Identity precedence: byte-identical to the pre-FVI default
+  // (`wl_precedence_p[i] = i + 1`).  Reserved labels 1 and 2 happen
+  // to land at ranks 2 and 3 here -- below all user labels (3..N) at
+  // ranks 4..N+1.  The FVI hook in `thvm_atp_orient_and_add` only
+  // needs the grounded LHS-vs-min_const compare to return KBO_GT,
+  // which is satisfied as long as `min_const` sits BELOW the LHS
+  // symbols (it does here, since user labels start at 3).
   for (u32 i = 0; i < (u32)max_label + 1; i++) {
     wl_weights_p[i]    = 1;
     wl_precedence_p[i] = i + 1;
@@ -660,6 +667,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       thvm_atp_set_w2(atp, (u32)coop_modulo, (u8)coop_mode);
     }
   }
+  // Method -> {... "FreeVarInstance" -> True}: Waldmeister
+  // RechtsUnfreiErzeugen (FVI) -- when an unorientable equation is
+  // added to R, also push a grounded sibling rule substituting
+  // ATP_RESERVED_LABEL_MIN_CONST for every free RHS variable absent
+  // from the LHS.  Unblocks ExcludedMiddle / Noncontradiction /
+  // EqualityOfInverses under Method->"Waldmeister".  args[33];
+  // 0 = off (default, engine byte-identical).
+  mint use_fvi = MArgument_getInteger(args[33]);
+  thvm_atp_set_use_fvi(atp, (u8)(use_fvi != 0));
   // Record per-step normalization chains so the WL ProofObject
   // builder walks (CP -> NORM_STEP* -> ORIENT) linearly instead of
   // reconstructing it by search.  args[19] gates it: the default (any

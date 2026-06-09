@@ -406,26 +406,34 @@ atpPrecedenceArray[order_List, enc_] := Block[{
 ];
 atpPrecedenceArray["SkolemHighest", enc_] := Block[{
     sym = enc["State"]["sym"], maxLab = enc["MaxLab"], skNames, arr,
-    nNonSk, skRankOf
+    nNonSk, skRankOf,
+    reservedNames = {"cAtp1", "cAtp2"}
 },
     (* Skolem constants get strict order above every operator, matching
        Waldmeister's `p > q > r > nand` ORDERING block: first-occurring
        skolem name (k of them) ranks highest, second next, etc.  Equal-
        ranking the skolems leaves LPO with several incomparable ground
        constants which prevents many Sheffer-style orientation choices;
-       the strict order is what real WM's andassoc.pr uses. *)
+       the strict order is what real WM's andassoc.pr uses.
+       The engine-reserved constants cAtp1 / cAtp2 (used by the FVI rule
+       emission in `thvm_atp_orient_and_add`) get rank 0 = LOWEST so a
+       grounded equation `lhs > cAtp1` actually orients KBO_GT (mirrors
+       Waldmeister's `SO_minimaleKonstante` at the bottom of the
+       precedence chain). *)
     skNames = atpGroundConstNames[enc];
     arr = ConstantArray[0, maxLab + 1];
-    nNonSk = Count[Keys[sym], nm_ /; ! MemberQ[skNames, nm]];
+    nNonSk = Count[Keys[sym],
+        nm_ /; ! MemberQ[skNames, nm] && ! MemberQ[reservedNames, nm]];
     skRankOf = AssociationThread[skNames,
         Range[nNonSk + Length[skNames], nNonSk + 1, -1]];
     Block[{nonSkRank = 0},
         KeyValueMap[
             Function[{nm, lab},
                 If[ lab >= 1 && lab <= maxLab,
-                    arr[[lab + 1]] = If[ MemberQ[skNames, nm],
-                        skRankOf[nm],
-                        nonSkRank = nonSkRank + 1; nonSkRank]]],
+                    arr[[lab + 1]] = Which[
+                        MemberQ[reservedNames, nm], 0,
+                        MemberQ[skNames, nm], skRankOf[nm],
+                        True, nonSkRank = nonSkRank + 1; nonSkRank]]],
             sym]];
     arr
 ];
@@ -480,7 +488,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     fifoTiebreak_, recordNorm_, useLRS_, useSOS_,
     useFwdSub_, useBwdSub_, useBwdDemod_, symbolWeightsSpec_,
     varWeight_, randomRatio_, randomSeed_, kwsMode_,
-    lazyNormalize_, coopWeight_, coopRatio_] := Block[{
+    lazyNormalize_, coopWeight_, coopRatio_, useFvi_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
     mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr
@@ -493,7 +501,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         unfailingCP, cpSetInterreduce, connectedness, precArray, fifoTiebreak,
         recordNorm, useLRS, useSOS, useFwdSub, useBwdSub, useBwdDemod,
         symbolWeightsArr, varWeight, randomRatio, randomSeed, kwsMode,
-        lazyNormalize, coopWeight, coopRatio];
+        lazyNormalize, coopWeight, coopRatio, useFvi];
     (* C engine returns LibraryFunctionError on memory-guard abort
        (THVM_ATP_RSS_ABORT_MB / THVM_ATP_HEAP_ABORT_FRAC) or other
        hard-stop conditions.  Bail BEFORE the structural part extraction

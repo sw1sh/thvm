@@ -192,7 +192,9 @@ $atpRunProofFn := $atpRunProofFn = load[
      Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
      Integer, Integer, Integer, Integer, Integer, {Integer, 1}, Integer,
      Integer, Integer, Integer, Integer, Integer, Integer, {Integer, 1},
-     Integer, Integer, Integer, Integer, Integer, Integer, Integer},
+     Integer, Integer, Integer, Integer, Integer, Integer, Integer,
+     (* args[33] = use_fvi: Waldmeister RechtsUnfreiErzeugen (FVI) toggle *)
+     Integer},
     "NumericArray"
 ]
 
@@ -707,7 +709,19 @@ encodeAtpTerm[expr_, state_Association] := Block[{
     {THVMLink`Private`$termNewCtrFn[lab, childEncs], st}
 ]
 
-encodeAtpTermInit[] := <|"sym" -> <||>, "var" -> <||>, "next_lab" -> 1|>
+(* Waldmeister `SO_const1` / `SO_const2` (SymbolOperationen.c:386-389):
+   pre-reserve labels 1 and 2 for engine-introduced constants.  The C
+   engine materializes `s->min_const = term_new_ctr(1, NULL, 0)` in
+   `thvm_atp_init` and uses it in the FVI rule emission within
+   `thvm_atp_orient_and_add` to ground free RHS variables of
+   unorientable equations.  Reserving them here means user labels start
+   at 3 and `max_label` (passed to the C runner as `args[2]`) already
+   covers the reserved range.  Decoder names them `cAtp1` / `cAtp2`. *)
+encodeAtpTermInit[] := <|
+    "sym" -> <|"cAtp1" -> 1, "cAtp2" -> 2|>,
+    "var" -> <||>,
+    "next_lab" -> 3
+|>
 
 (* === ENIGMA Tier 2: anonymised CP hypergraph export ================ *)
 
@@ -1927,6 +1941,15 @@ atpVarWeightOpt[o_Association] :=
    True = on; False/Automatic = off (engine byte-identical). *)
 atpFifoTiebreakOpt[o_Association] := Switch[Lookup[o, "FifoTiebreak", Automatic],
     True, 1, False | Automatic, 0, _, 0];
+(* "FreeVarInstance" -> True: Waldmeister RechtsUnfreiErzeugen (FVI) --
+   when an unorientable equation is added to R, also push a grounded
+   sibling that substitutes the engine-reserved minimal constant
+   (cAtp1) for every free RHS variable absent from the LHS.  Required
+   to crack the FVI-gated theorems (ExcludedMiddle, Noncontradiction,
+   EqualityOfInverses) under Method->"Waldmeister".  Default off
+   (engine byte-identical on the OK_OK baseline). *)
+atpFreeVarInstanceOpt[o_Association] := Switch[Lookup[o, "FreeVarInstance", Automatic],
+    True, 1, False | Automatic, 0, _, 0];
 (* "RecordNorm" -> True/False: per-step normalize-trace recording for the
    ProofObject builder.  Default True (engine byte-identical, the
    historical path: WL walks CP -> NORM_STEP* -> ORIENT linearly).  False
@@ -1985,7 +2008,7 @@ atpBwdSubsumeOpt[o_Association] :=
 atpBwdDemodOpt[o_Association] :=
     Switch[Lookup[o, "BackwardDemod", Automatic],
         True, 1, False | Automatic, 0, _, 0];
-atpParseMethod[Automatic] := {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0, 0};
+atpParseMethod[Automatic] := atpParseCompletionOpts[{}, 0];
 (* Accept the string form "Automatic" as a synonym for the symbol --
    users typing Method -> "Automatic" alongside the other string-named
    presets ("Waldmeister", "Twee", ...) shouldn't trip the badmethod
@@ -2023,6 +2046,19 @@ $AtpPresetDefaults = <|
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True|>,
+    (* "WaldmeisterFVI": Waldmeister + RechtsUnfreiErzeugen (FVI).  WM's
+       gates for ExcludedMiddle / Noncontradiction / EqualityOfInverses
+       (RUndEVerwaltung.c:366-397).  Kept as a separate preset because
+       the FVI emission shifts the saturation trajectory on some
+       Boolean theorems (Absorption / AbsorptionOrAnd) -- callers opt
+       in explicitly when targeting an FVI-gated proof. *)
+    "WaldmeisterFVI" -> <|
+        "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
+        "AutoPrecedence" -> True, "SkolemHighest" -> True,
+        "SelectionRatio" -> 51,
+        "RHSInterreduce" -> True, "UnfailingCP" -> True,
+        "CPSetInterreduce" -> True,
+        "FreeVarInstance" -> True|>,
     "WaldmeisterLazy" -> <|
         "Ordering" -> "LPO", "AutoPrecedence" -> True,
         "SkolemHighest" -> True,
@@ -2115,6 +2151,7 @@ $AtpPresetDefaults = <|
    False -- VampireUEQ is the lone True per Vampire's `tgt=full`. *)
 $AtpPresetGoalDirected = <|
     "Waldmeister" -> False,
+    "WaldmeisterFVI" -> False,
     "WaldmeisterLazy" -> False,
     "VampireUEQ"  -> True,
     "VampireUEQDefault" -> False,  (* matches Vampire's UEQ portfolio default slot which doesn't enable goal-MNF *)
@@ -2150,7 +2187,8 @@ atpParseCompletionOpts[subopts_List, mnf_] :=
          atpLRSOpt[o], atpSOSOpt[o], atpFwdSubsumeOpt[o], atpBwdSubsumeOpt[o],
          atpBwdDemodOpt[o], atpSymbolWeightsOpt[o], atpVarWeightOpt[o],
          atpRandomRatioOpt[o], atpRandomSeedOpt[o], atpKboWeightSchemeOpt[o],
-         atpLazyNormalizeOpt[o], atpCoopWeightOpt[o], atpCoopRatioOpt[o]}
+         atpLazyNormalizeOpt[o], atpCoopWeightOpt[o], atpCoopRatioOpt[o],
+         atpFreeVarInstanceOpt[o]}
     ];
 atpParseMethod[{"Completion", subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 0];
@@ -2161,7 +2199,7 @@ atpParseMethod[{"Completion", subopts___Rule}] :=
    Ordering / AutoPrecedence / CriticalPairWeight knobs as "Completion"
    so the front search can run over an LPO-oriented, structure-precedence
    rule set -- the combination the hard Sheffer cross-axiom goals need. *)
-atpParseMethod[m : ("GoalDirected" | "MNF")] := {5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0, 0, 0, 0, 0};
+atpParseMethod[m : ("GoalDirected" | "MNF")] := atpParseCompletionOpts[{}, 1];
 atpParseMethod[{("GoalDirected" | "MNF"), subopts___Rule}] :=
     atpParseCompletionOpts[{subopts}, 1];
 
@@ -2212,6 +2250,14 @@ atpParseMethod["Waldmeister"] := atpParseMethod[{"Waldmeister"}];
 atpParseMethod[{"Waldmeister", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["Waldmeister"],
         $AtpPresetGoalDirected["Waldmeister"], {subopts}];
+
+(* Method -> "WaldmeisterFVI": Waldmeister + RechtsUnfreiErzeugen FVI
+   (see $AtpPresetDefaults note above).  Opt-in preset for FVI-gated
+   theorems; everything else should stay on plain "Waldmeister". *)
+atpParseMethod["WaldmeisterFVI"] := atpParseMethod[{"WaldmeisterFVI"}];
+atpParseMethod[{"WaldmeisterFVI", subopts___Rule}] :=
+    atpDispatchPreset[$AtpPresetDefaults["WaldmeisterFVI"],
+        Lookup[$AtpPresetGoalDirected, "WaldmeisterFVI", False], {subopts}];
 
 (* Method -> "WaldmeisterLazy": Waldmeister DISCOUNT-style preset
    bundling the spec-safe LazyNormalize combo (see b2acc699 for the
