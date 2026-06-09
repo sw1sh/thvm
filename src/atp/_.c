@@ -10756,9 +10756,11 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
     join_key = (lh + rh) ^ (lh * rh + 0x9e3779b97f4a7c15ull);
     AtpJoinCacheEnt *e = &g_atp_join_cache[(u32)join_key & ATP_JOIN_CACHE_MASK];
     if (e->key == join_key && e->epoch == g_atp_unf_memo_epoch
-        && e->n_rules == s->n_rules && e->joined == 1u) {
+        && e->n_rules == s->n_rules) {
+      // Cached verdict is sound under (epoch + n_rules) gating: any R change
+      // bumps one of them.  Short-circuit both branches, not just joined=1.
       g_atp_join_cache_hits++;
-      return 1u;
+      return e->joined;
     }
     join_cache_eligible = 1u;
   }
