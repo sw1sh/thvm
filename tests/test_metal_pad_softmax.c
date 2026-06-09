@@ -1,31 +1,19 @@
-// Metal device-COPY (TToDevice) divergence repro -- FAILING TEST (open bug).
+// Regression: device-COPY (TToDevice) over a CPU-src graph must compute on CPU.
 //
-// pad(softmax(xa)) + pad(softmax(xb)) -- two STRUCTURALLY-IDENTICAL softmax
-// reduce+broadcast chains, each padded into a complementary column slice, summed.
-// Realized via uop_copy_dev(.., THVM_DEV_METAL) (the WL TToDevice path) it
-// DIVERGES from the host oracle; a plain CPU realize of the SAME graph, and
-// GLOBAL Metal (DEV=metal default), both compute it CORRECTLY.
+// pad(softmax(xa)) + pad(softmax(xb)), realized via uop_copy_dev(.., METAL) (the
+// WL TToDevice path) over a CPU-DEFAULT runtime.  This once DIVERGED from the
+// host oracle while a plain CPU realize and GLOBAL Metal both computed it right.
 //
-// Diagnosis (fully instrumented -- it is NOT a Metal bug):
-//  - The wrong result is already in the src TEN ON CPU before the cross-backend
-//    copy runs; interact_assign's memcpy and Metal compute are both fine.
-//  - A=softmax(xa) and B=softmax(xb) are structurally identical, so their per-op
-//    kernels share a slot-based store_root (correct CSE).  But B's exp-chain
-//    kernel mis-binds ONE input slot: the "view-of-x" slot lists A's view-alias
-//    TenDesc (a view over xa's buffer) instead of B's view over xb -- so in that
-//    slot B reads xa.  (Confirmed: A's and B's exp kernels share store_root and
-//    BOTH carry A's view-alias tid in the same input slot; tensor_view_of never
-//    caches, so the collapse is already in the value tree the COPY materialize
-//    hands the lift, not in view_resolve.)
-//  - Plain CPU realize of the SAME graph, and GLOBAL Metal, are both correct --
-//    only wrapping it in COPY -> ASSIGN(metal_dst, src) triggers the value-tree
-//    substitution that collapses B's view-of-xb onto A's view-of-xa alias.
-// So: a CPU-side hash-cons / simplify collision between two structurally-
-// identical branches, EXPOSED by the device-COPY (TToDevice) materialize order.
-// Root of the GPT-2 multi-head-attention divergence through TToDevice (the 12
-// heads are identical; headStitch sums PADs of their softmax.V outputs).  Fix
-// lives in schedule/materialize.c (the COPY-path value-tree materialize /
-// bufferize boundary-input resolution) -- left FAILING for whoever fixes it.
+// Root cause (NOT a Metal bug): thvm_realize routed the whole realize to the
+// COPY's TARGET device (Metal) via term_device_in, even though the COMPUTE (and
+// all its leaves) lived on CPU.  Materialize then allocated the CPU-compute
+// intermediates -- e.g. the softmax's log2(e) scalar from const_to_tendesc -- on
+// METAL, and a Metal buf id read by the CPU kernels as the same-numbered CPU
+// buffer (xa's) returned wrong data: both branches read a constant -> flat
+// softmax.  Fix (schedule/realize.c): route the realize to the COMPUTE device
+// (unwrap the output COPY); materialize_copy's fire-time cross-backend ASSIGN
+// still moves the result to the COPY's target.  This is the root of the GPT-2
+// multi-head-attention divergence seen through a CPU-src TToDevice.
 //
 // Built -DTHVM_HAS_METAL so backend_metal.o owns METAL_BACKEND.
 #include "../src/thvm.c"

@@ -78,7 +78,20 @@ fn Term thvm_realize(Term expr) {
   // default.  Mixed-device graphs report their first-found device here;
   // true per-op cross-backend routing is a later phase.
   u32 saved_default_device = CURRENT_CTX->default_device;
-  i32 want_device = term_device_in(resolved);
+  // A COPY at the RESULT copies the output to a device; the COMPUTE still runs
+  // on its SRC's device, and materialize_copy lowers the output transfer to a
+  // fire-time cross-backend ASSIGN.  Route the realize to the COMPUTE device
+  // (unwrap the output COPY), NOT the COPY's output TARGET: otherwise a CPU-src
+  // graph whose result is TToDevice'd to Metal would allocate its CPU-compute
+  // intermediates (e.g. const_to_tendesc scalars) on Metal, and a Metal buf id
+  // read as the same-numbered CPU buffer yields wrong data.  Uniform-device
+  // graphs (all leaves already on the target) are unaffected: term_device_in of
+  // the unwrapped src still finds that device.
+  Term route_term = resolved;
+  while (term_tag(route_term) == TAG_UOP && term_ext(route_term) == UOP_COPY) {
+    route_term = term_resolve(heap_read(term_val(route_term) + 0));
+  }
+  i32 want_device = term_device_in(route_term);
   if (want_device >= 0 && want_device != (i32)saved_default_device
       && ctx_ensure_backend(want_device) != NULL) {
     CURRENT_CTX->default_device = (u32)want_device;
