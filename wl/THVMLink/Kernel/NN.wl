@@ -1327,6 +1327,70 @@ fromLayer[SequenceIndicesLayer, _, _] :=
     Failure["NotImplemented",
         <|"Message" -> "SequenceIndicesLayer needs host-side List[Integer] input"|>]
 
+(* Multi-head self-attention NetGraph recognition.  A Wolfram transformer
+   encodes multi-head attention STRUCTURALLY as N parallel per-head sub-NetGraphs
+   (each a q/k/v LinearLayer projection 768->64 + a single-head AttentionLayer)
+   feeding a CatenateLayer + an output LinearLayer.  Walking that literally lifts
+   144 single-head attentions + a PAD catenate per block -- a kernel explosion.
+   Instead RECOGNISE the pattern and emit ONE TMultiHeadAttention over the full
+   {dim, dim} Q/K/V projections (the N per-head {dHead, dim} weights stacked
+   row-wise, so column block h is head h -- the layout TMultiHeadAttention's
+   reshape-to-heads split expects).  Bit-identical to the per-head walk; a handful
+   of fusable kernels instead of ~2000.  Self-attention only: fires when the
+   graph's Input + Query ports collapse to a single TTerm (getInput fan-out). *)
+mhaGraphNodes[g_] := With[{c = Quiet @ NetExtract[g, All]},
+    Which[ AssociationQ[c], Values[c], ListQ[c], c, True, {}]]
+
+mhaHeadQ[h_] := Head[h] === NetGraph &&
+    MemberQ[Head /@ mhaGraphNodes[h], AttentionLayer]
+
+mhaSelfAttnGraphQ[g_] := Head[g] === NetGraph && Module[{ns = mhaGraphNodes[g]},
+    Length[ns] >= 3
+        && Head[Last[ns]] === NetMapOperator
+        && Head[ns[[-2]]] === CatenateLayer
+        && AllTrue[ns[[1 ;; -3]], mhaHeadQ]]
+
+fromLayer[NetGraph, g_, x_TTerm] /; mhaSelfAttnGraphQ[g] := Module[
+    {ns, heads, nH, dim, dH, stackW, stackB, Wq, bq, Wk, bk, Wv, bv, outProj,
+     Wo, bo, scaleFn, scale, maskSpec, lin, q, k, v, attn, seq, b, kC, vC},
+    ns      = mhaGraphNodes[g];
+    heads   = ns[[1 ;; -3]];
+    outProj = Last[ns];
+    nH      = Length[heads];
+    (* stack the per-head {dHead, dim} projections row-wise -> {dim, dim} *)
+    stackW[port_] := Join @@ (Normal @ NetExtract[#, {port, "Net", "Weights"}] & /@ heads);
+    stackB[port_] := Join @@ (Normal @ NetExtract[#, {port, "Net", "Biases"}] & /@ heads);
+    Wq = stackW["query"]; bq = stackB["query"];
+    Wk = stackW["key"];   bk = stackB["key"];
+    Wv = stackW["value"]; bv = stackB["value"];
+    Wo = Normal @ NetExtract[outProj, {"Net", "Weights"}];
+    bo = Normal @ NetExtract[outProj, {"Net", "Biases"}];
+    dim = Length[Wq]; dH = dim / nH;
+    (* the per-head scaling ElementwiseLayer (a #&) carries the 1/Sqrt[dHead]
+       externally; apply it as the attention scale.  Default to 1/Sqrt[dHead]. *)
+    scaleFn = Quiet @ NetExtract[First[heads], {"scaling", "Function"}];
+    scale   = If[ Head[scaleFn] === Function, N @ scaleFn[1.0], 1 / Sqrt[N @ dH]];
+    maskSpec = Quiet @ Lookup[
+        NetExtract[First[heads], {"attention", "Parameters"}], "Mask", None];
+    lin[t_, w_, bb_] := TLinear[t, TTensorCreate[N @ Transpose @ w], TTensorCreate[N @ bb]];
+    q = lin[x, Wq, bq]; k = lin[x, Wk, bk]; v = lin[x, Wv, bv];
+    attn = If[ AssociationQ[$decodeAttn],
+        (* decode fork: one {nCtx, dim} cache per block (not 144 per-head) *)
+        b = $decodeAttn["idx"]; $decodeAttn["idx"] = b + 1;
+        kC = $decodeAttn["k"][[b]]; vC = $decodeAttn["v"][[b]];
+        TDecodeAttend[q, kC, vC, k, v, nH,
+            $decodeAttn["posVid"], $decodeAttn["lenVid"], scale],
+        seq = First @ tUopShape[q];
+        TMultiHeadAttention[q, k, v, nH,
+            If[ MatchQ[maskSpec, "Causal" | Causal],
+                If[ symLeadingQ[q],
+                    TCausalMaskSym[symVid[seq], TKVarHi[symVid[seq]]],
+                    TCausalMask[seq]],
+                None],
+            scale]];
+    lin[attn, Wo, bo]
+]
+
 (* NetGraph: topological evaluation of TOP-LEVEL subnodes.
    `NetExtract[g, All]` returns an Association of name -> sub-net
    (or a List for positional NetGraphs); we treat the keys as the
