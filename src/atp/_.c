@@ -380,6 +380,17 @@ typedef struct {
 } AtpUnfMemoEnt;
 static AtpUnfMemoEnt g_atp_unf_memo[ATP_UNF_MEMO_SIZE];
 static u32 g_atp_unf_memo_epoch = 1u;
+// Unorient-step memo epoch.  Split from the broader unf_memo_epoch
+// because the empty-call verdict at atp_unorient_step_indexed (and the
+// per-position descent memo) depends ONLY on the unorient_index
+// (orientable rules absent from the index data).  Adding an orientable
+// rule rebuilds rule_index but leaves unorient_index unchanged -- so
+// the step-memo verdicts stay valid across orientable-only R changes.
+// Bumped from atp_unf_memo_invalidate ONLY when n_unorient actually
+// changed since the last invalidate (or at init/GC where cell ids may
+// be reused).  See project_atp_unf_step_epoch_split memory note.
+static u32 g_atp_unf_step_epoch = 1u;
+static u32 g_atp_last_n_unorient = 0u;
 
 // Bounded preorder FNV-64 hash.  Recurses to subterms; on Sheffer-size
 // terms (<= 100 symbols) the cost is O(|term|) and amortizes well
@@ -443,7 +454,35 @@ static inline u8 atp_match_maybe_ac(Term pat, Term subj, RewriteSubst *subst) {
 #define ATP_NORM_CACHE_MASK (ATP_NORM_CACHE_SIZE - 1u)
 typedef struct { u64 hash; u32 epoch; u32 n_rules; Term nf; } AtpNormCacheEnt;
 static AtpNormCacheEnt g_atp_norm_cache[ATP_NORM_CACHE_SIZE];
-fn void atp_unf_memo_invalidate(void) {
+// Per-position no-fire memo storage (typedef + sizes) lives here so the
+// step-epoch invalidate can clear its slots on wrap.  The cache helpers
+// (get/put) live below near their natural callers; the soundness
+// contract is documented there.
+#define ATP_UNF_POS_MEMO_BITS 14
+#define ATP_UNF_POS_MEMO_SIZE (1u << ATP_UNF_POS_MEMO_BITS)
+#define ATP_UNF_POS_MEMO_MASK (ATP_UNF_POS_MEMO_SIZE - 1u)
+typedef struct { u64 hash; u32 epoch; u8 folded; } AtpUnfPosMemoEnt;
+static AtpUnfPosMemoEnt g_atp_unf_pos_memo[ATP_UNF_POS_MEMO_SIZE];
+// Bump just the step epoch (the unorient-step empty-call memo + the
+// per-position descent memo).  Wrap-around clears their slots so a
+// stale verdict can't be aliased into the post-wrap epoch.
+static void atp_unf_step_memo_invalidate(void) {
+  if (++g_atp_unf_step_epoch == 0u) {
+    for (u32 i = 0; i < ATP_UNF_MEMO_SIZE; i++)
+      g_atp_unf_memo[i].epoch = 0u;
+    for (u32 i = 0; i < ATP_UNF_POS_MEMO_SIZE; i++)
+      g_atp_unf_pos_memo[i].epoch = 0u;
+    g_atp_unf_step_epoch = 1u;
+  }
+}
+// Bump the broader cell-keyed epoch (RHS flat cache, norm-result cache,
+// join cache).  Optionally also bumps the step epoch -- callers pass
+// `force_step_bump = 1` when cell identity may have shifted (init / GC)
+// or when they cannot cheaply prove n_unorient is unchanged.  Otherwise
+// the step epoch is bumped only on an n_unorient delta, sparing the
+// dominant "orientable rule added" case where the unorient_index data
+// doesn't change.
+fn void atp_unf_memo_invalidate(u32 n_unorient_now, u8 force_step_bump) {
   if (++g_atp_unf_memo_epoch == 0u) {
     for (u32 i = 0; i < ATP_UNF_MEMO_SIZE; i++)
       g_atp_unf_memo[i].epoch = 0u;
@@ -453,15 +492,19 @@ fn void atp_unf_memo_invalidate(void) {
       g_atp_norm_cache[i].epoch = 0u;
     g_atp_unf_memo_epoch = 1u;
   }
+  if (force_step_bump || n_unorient_now != g_atp_last_n_unorient) {
+    atp_unf_step_memo_invalidate();
+    g_atp_last_n_unorient = n_unorient_now;
+  }
 }
 static inline u8 atp_unf_memo_get(u64 h) {
   AtpUnfMemoEnt *e = &g_atp_unf_memo[(u32)h & ATP_UNF_MEMO_MASK];
-  return (e->hash == h && e->epoch == g_atp_unf_memo_epoch) ? 1u : 0u;
+  return (e->hash == h && e->epoch == g_atp_unf_step_epoch) ? 1u : 0u;
 }
 static inline void atp_unf_memo_put(u64 h) {
   AtpUnfMemoEnt *e = &g_atp_unf_memo[(u32)h & ATP_UNF_MEMO_MASK];
   e->hash  = h;
-  e->epoch = g_atp_unf_memo_epoch;
+  e->epoch = g_atp_unf_step_epoch;
 }
 u64 g_atp_unf_memo_hits   = 0;
 u64 g_atp_unf_memo_misses = 0;
@@ -482,31 +525,29 @@ u64 g_atp_norm_cache_misses = 0;
 // descent at atp_ri_query_pos_unorient.  Keyed by (subtree-phash,
 // query_folded).  Soundness: the descent's verdict depends on
 // (subtree structure, R's unorient_index, ix->any_folded, query_folded).
-// The first two are bound to the current epoch (invalidated on every
-// atp_ri_rebuild via atp_unf_memo_invalidate).  ix->any_folded is
-// per-index, refreshed at rebuild.  query_folded is per-CALL (depends
-// on whole subject), so MUST be in the key -- otherwise a verdict
-// stored at folded=X is looked up at folded=Y and disagrees via
-// leaf_collect_unorient's `perfect = !any_folded && !query_folded` flag.
-// Caches NEGATIVE verdicts only (ncand==0): a positive verdict has
-// data (the candidate list) we'd have to cache too, and the positive
-// path is rare and short-circuits early so the win is in the
-// dominant "no fire here" no-op path.
-#define ATP_UNF_POS_MEMO_BITS 14
-#define ATP_UNF_POS_MEMO_SIZE (1u << ATP_UNF_POS_MEMO_BITS)
-#define ATP_UNF_POS_MEMO_MASK (ATP_UNF_POS_MEMO_SIZE - 1u)
-typedef struct { u64 hash; u32 epoch; u8 folded; } AtpUnfPosMemoEnt;
-static AtpUnfPosMemoEnt g_atp_unf_pos_memo[ATP_UNF_POS_MEMO_SIZE];
-// Epoch tracks g_atp_unf_memo_epoch -- same R-change invalidation.
+// The first two are bound to the step epoch (bumped via
+// atp_unf_step_memo_invalidate when n_unorient changes, or
+// unconditionally at init/GC).  ix->any_folded is per-index, refreshed
+// at rebuild.  query_folded is per-CALL (depends on whole subject), so
+// MUST be in the key -- otherwise a verdict stored at folded=X is
+// looked up at folded=Y and disagrees via leaf_collect_unorient's
+// `perfect = !any_folded && !query_folded` flag.  Caches NEGATIVE
+// verdicts only (ncand==0): a positive verdict has data (the candidate
+// list) we'd have to cache too, and the positive path is rare and
+// short-circuits early so the win is in the dominant "no fire here"
+// no-op path.  Storage + sizing macros are declared above (near the
+// step-epoch invalidate) so the wrap-around clear can touch them.
+// Epoch tracks g_atp_unf_step_epoch -- same soundness contract as the
+// whole-subject step memo (depends only on unorient_index data).
 static inline u8 atp_unf_pos_memo_get(u64 h, u8 folded) {
   AtpUnfPosMemoEnt *e = &g_atp_unf_pos_memo[(u32)h & ATP_UNF_POS_MEMO_MASK];
-  return (e->hash == h && e->epoch == g_atp_unf_memo_epoch
+  return (e->hash == h && e->epoch == g_atp_unf_step_epoch
           && e->folded == folded) ? 1u : 0u;
 }
 static inline void atp_unf_pos_memo_put(u64 h, u8 folded) {
   AtpUnfPosMemoEnt *e = &g_atp_unf_pos_memo[(u32)h & ATP_UNF_POS_MEMO_MASK];
   e->hash   = h;
-  e->epoch  = g_atp_unf_memo_epoch;
+  e->epoch  = g_atp_unf_step_epoch;
   e->folded = folded;
 }
 u64 g_atp_unf_pos_memo_hits   = 0;
@@ -2721,7 +2762,10 @@ static Term atp_rewrite_normalize_indexed(AtpState *s, Term t, u32 step_cap) {
   if (s->rule_index == NULL) s->rule_index = atp_ri_new();
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
-    atp_unf_memo_invalidate();   // R changed -> unorient_index rebuilt too
+    // R changed -> always bump norm-cache/rhs/join epoch.  Step epoch
+    // is bumped only if n_unorient differs from the last invalidate
+    // (orientable-only R changes leave unorient_index unchanged).
+    atp_unf_memo_invalidate(s->n_unorient, 0u);
   }
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
@@ -3457,7 +3501,7 @@ static Term atp_unorient_step_indexed(AtpState *s, Term t, u8 *fired) {
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules ||
       s->unorient_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
-    atp_unf_memo_invalidate();   // R changed -> stored verdicts may flip
+    atp_unf_memo_invalidate(s->n_unorient, 0u);  // step epoch bumps only on n_unorient delta
   }
   // No-fire structural-hash memo: catches the mandatory "fixpoint
   // reached, no more unorient redex" call at the end of every mixed-
@@ -3528,7 +3572,7 @@ static Term atp_rewrite_normalize_flatterm_mixed(AtpState *s, Term t,
   if (s->rule_index_dirty || s->rule_index->n_rules_built != s->n_rules ||
       s->unorient_index->n_rules_built != s->n_rules) {
     atp_ri_rebuild(s);
-    atp_unf_memo_invalidate();   // R changed -> unorient verdicts may flip
+    atp_unf_memo_invalidate(s->n_unorient, 0u);  // step epoch bumps only on n_unorient delta
   }
   static Term flat[ATP_RI_FLAT_CAP];
   static u32  subsz[ATP_RI_FLAT_CAP];
@@ -4005,9 +4049,11 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // Persistent unf_memo / norm-cache: an init may inherit stale entries
   // keyed by Terms reused across distinct atp states (e.g. test harness
   // builds two AtpStates with different rule sets but shared Term IDs
-  // when the cell allocator recycles slots).  Bump the epoch to drop
-  // any survivors.
-  atp_unf_memo_invalidate();
+  // when the cell allocator recycles slots).  Bump both epochs (incl.
+  // the step epoch) so no survivor from a prior atp state's
+  // unorient_index is keyed in -- s is fresh, n_unorient == 0 isn't
+  // proof the unorient_index hasn't changed since the last invalidate.
+  atp_unf_memo_invalidate(s->n_unorient, 1u);
   s->kbo      = cfg;
   s->step_cap = step_cap;
   // CP-priority weight: the ordering-directed GT heuristic is the
@@ -4393,10 +4439,10 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // The normalize-result cache stores Term values (cell addresses), so
   // GC relocation makes its entries stale.  Bump the unf_memo_epoch so
   // every cached NF is invalidated.  Whole-subject + per-position
-  // no-fire memos are hash-keyed (cell-relocation-safe), but they
-  // share the same epoch counter so they invalidate together -- a
-  // small over-invalidation we accept for code simplicity.
-  atp_unf_memo_invalidate();
+  // no-fire memos are hash-keyed (cell-relocation-safe), but we still
+  // force-bump the step epoch here: GC is a coarse phase boundary
+  // (workload shifts post-GC) and the rare-event cost is negligible.
+  atp_unf_memo_invalidate(s->n_unorient, 1u);
   return 1;
 }
 
