@@ -54,7 +54,7 @@ TUOpBitcast::usage = "TUOpBitcast[src, dtype] returns a UOP node that bit-level 
 (* Forward-decl: these are defined in NN.wl (loads alphabetically
    after Tensor.wl).  Without this, the UpValues below resolve to
    phantoms in `THVMLink`Private`* with no DownValue. *)
-{TTanh, TMatMul, TDot, TSoftmaxAxis};
+{TTanh, TMatMul, TDot, TSoftmax};
 
 Begin["`Private`"];
 
@@ -861,9 +861,9 @@ TTerm /: Normal[t_TTerm ? tensorTermQ] := Normal[TTensorData[t]]
 (* Layer-call UpValues: `Layer[opts][t_TTerm]` is still a TTerm
    UpValue -- TagSetDelayed on TTerm, with the layer bound as
    `l_SoftmaxLayer` so we can read its options.  WL's "Level"
-   parameter is 1-indexed; thvm's TSoftmaxAxis is 0-indexed. *)
+   parameter is 1-indexed; thvm's TSoftmax is 0-indexed. *)
 TTerm /: l_SoftmaxLayer[t_TTerm ? tensorTermQ] :=
-    TSoftmaxAxis[t, NetExtract[l, "Parameters"]["Level"] - 1]
+    TSoftmax[t, NetExtract[l, "Parameters"]["Level"] - 1]
 
 (* Set on a literal-TTerm LHS rewrites in place: realises src into a
    fresh TenDesc, memcpys those bytes into dst's backing buffer.  dst

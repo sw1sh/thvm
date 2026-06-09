@@ -23,7 +23,7 @@
         - `a . b`              -> TMatMul (rank-2) / TDot (rank-1)
         - `Transpose[t]`       -> reverse-axis permute
         - `ArrayReshape[t, s]` -> TUOpReshape
-        - `SoftmaxLayer[2][t]` -> TSoftmaxAxis[t, 1]
+        - `SoftmaxLayer[2][t]` -> TSoftmax[t, 1]
         - `Tanh[t]`, `t^3`, `Sqrt[t]`, `Exp[t]`, `Log[t]`, `Total[t]`
           all already routed.
    2. The embedding sub-NetGraph and the FFN half of one transformer

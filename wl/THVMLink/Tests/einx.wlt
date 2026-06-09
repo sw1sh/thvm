@@ -1,7 +1,7 @@
 (* einx.wlt -- einx-style verbs over the TTerm UOp graph.
    Validates the WL parser + alignment + per-verb lowering against
    hand-computed expected outputs and (where natural) existing thvm
-   primitives (TSoftmaxAxis, TEmbeddingMatrix, TMatMul). *)
+   primitives (TSoftmax, TEmbeddingMatrix, TMatMul). *)
 
 (* === parser sanity =============================================== *)
 
@@ -259,7 +259,7 @@ VerificationTest[
     TestID -> "einx/div/elem"
 ]
 
-(* === Softmax vs TSoftmaxAxis ===================================== *)
+(* === Softmax vs TSoftmax ===================================== *)
 
 VerificationTest[
     TInit[];
@@ -268,12 +268,12 @@ VerificationTest[
         "Real32"];
     With[{
         viaEinx = Normal @ TTensorData @ TRealize @ TEinSoftmax["b [d]", x],
-        viaAxis = Normal @ TTensorData @ TRealize @ TSoftmaxAxis[x, 1]
+        viaAxis = Normal @ TTensorData @ TRealize @ TSoftmax[x, 1]
     },
         Max @ Flatten @ Abs[viaEinx - viaAxis] < 1.0*^-5
     ],
     True,
-    TestID -> "einx/softmax/matchesTSoftmaxAxis"
+    TestID -> "einx/softmax/matchesTSoftmax"
 ]
 
 (* === LayerNorm =================================================== *)

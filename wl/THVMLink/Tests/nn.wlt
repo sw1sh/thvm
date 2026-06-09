@@ -577,7 +577,7 @@ VerificationTest[
 ]
 
 (* === Phase-5 NN building blocks ===
-   TMaxPool2d / TLayerNorm / TSoftmaxAxis / TAttention.  Pin both
+   TMaxPool2d / TLayerNorm / TSoftmax / TAttention.  Pin both
    the numerics and the kernel-count claim so the scheduler can't
    silently regress fusion. *)
 
@@ -607,13 +607,13 @@ VerificationTest[
     TestID -> "nn/layernorm-rank1-zero-mean-unit-var"
 ]
 
-(* TSoftmaxAxis along the last axis of a rank-2 input.  Each row
+(* TSoftmax along the last axis of a rank-2 input.  Each row
    independently sums to 1.  Same KProgOp[] shape as the row-wise
    softmax inside attention. *)
 VerificationTest[
     TInit[];
     x = TTensorCreate @ NumericArray[N @ {{1, 2, 3}, {0, 0, 0}}, "Real32"];
-    r = TRealize @ TSoftmaxAxis[x, 1];
+    r = TRealize @ TSoftmax[x, 1];
     Total /@ Normal @ TTensorData[r],
     {1.0, 1.0},
     SameTest -> (Max[Abs[#1 - #2]] < 1.0*^-4 &),

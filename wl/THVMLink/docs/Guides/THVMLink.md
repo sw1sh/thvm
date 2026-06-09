@@ -98,7 +98,7 @@ the active <code>[TContext]()</code> selects.
 - `TLinear` is the `nn.Linear` analogue, `x @ W + b` with broadcasted bias
 - `TConv2D` is a stride-1, no-pad 2-D convolution, dispatched via im2col + `cblas_sgemm`
 - `TMatMul`, `TMatVec`, `TDot` are the matrix / vector / inner-product surface
-- `TReLU`, `TTanh`, `TGELU`, `TSoftmax`, `TSoftmaxAxis`, `TLog` are the activations
+- `TReLU`, `TTanh`, `TGELU`, `TSoftmax`, `TLog` are the activations
 - `TLayerNorm`, `TLayerNormAffine`, `TBatchNorm`, `TBatchNormTrain` are the normalization layers
 - `TAttention`, `TMultiHeadAttention`, `TCausalMask`, `TEmbedding`, `TEmbeddingMatrix` are the transformer primitives
 - `TCrossEntropyLoss`, `TCategoricalCrossEntropy`, `TSparseCategoricalCrossEntropy`, `TMSELoss`, `TL2Loss` are the losses

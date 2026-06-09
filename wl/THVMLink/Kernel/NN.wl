@@ -59,13 +59,12 @@ TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
 TTanh::usage            = "TTanh[x] = elementwise tanh = 2*sigmoid(2x) - 1, where sigmoid(x) = 1/(1 + e^(-x)).  The negated exponent keeps it finite for all x (saturating to +-1) and fully differentiable -- the older (e^(2x)-1)/(e^(2x)+1) form returned NaN once 2x left the f32 exp range, which the cubic argument of tanh-form GELU triggers.  No UOP_TANH primitive needed.";
 TSigmoid::usage         = "TSigmoid[x] = 1 / (1 + e^(-x)), the numerically stable logistic sigmoid (the exponent is negated so large |x| saturates to 0 or 1 instead of overflowing to NaN).  Matches tinygrad's sigmoid lowering.";
-TSoftmax::usage         = "TSoftmax[x] = exp(x - max(x)) / sum(exp(x - max(x))) over axis 0.  exp via the EXP2 + log2(e) chain.  Numerically stable (max-subtract) and grad-correct: every reduce is re-broadcast with an explicit TUOpExpand so the SUB/MUL chain rule keeps the softmax cross-coupling term.";
+TSoftmax::usage         = "TSoftmax[x] = exp(x - max(x)) / sum(exp(x - max(x))) over the LAST axis (the conventional class / key axis); TSoftmax[x, axis] reduces along `axis` (0-indexed).  exp via the EXP2 + log2(e) chain.  Numerically stable (max-subtract) and grad-correct: every reduce is re-broadcast with an explicit TUOpExpand so the SUB/MUL chain rule keeps the softmax cross-coupling term.";
 TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG2(x) * ln(2) since the runtime has UOP_LOG2 but no UOP_LOG.";
 TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
 TMaxPool2d::usage        = "TMaxPool2d[x] / TMaxPool2d[x, k] runs a non-overlapping kxk max-pool over the trailing two axes of a rank-3 {C, H, W} or rank-4 batched {B, C, H, W} channels-first tensor.  Default k=2.";
 TLayerNorm::usage        = "TLayerNorm[x] / TLayerNorm[x, eps] normalises along the last axis: y = (x - mean) / sqrt(var + eps).  Default eps=1e-5.  mean / var are scalar reductions broadcast back via the softmax-style reduce-broadcast pattern; the scheduler's relaxation pass collapses each reduce + its broadcast tail into one kernel where it can.";
-TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x - max(x)) / sum(exp(x - max(x))) reduced along `axis`.  Generalises TSoftmax (which is hard-coded to axis 0).  The dropped axis is re-introduced as size 1 + EXPAND'd back so the elementwise mul has matching shapes; same softmax-style reduce-broadcast shape.  Max-subtract along the axis keeps it numerically stable: random-init nets (LeNet) overflow exp without it.";
-TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmaxAxis + TMatMul; the two matmuls dispatch through cblas_sgemm.";
+TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmax + TMatMul; the two matmuls dispatch through cblas_sgemm.";
 TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x, gamma, beta, mean, var, eps] applies the inference-form batch-norm transform: y = gamma * (x - mean) / sqrt(var + eps) + beta along the channel axis.  x is rank-3 {C, H, W} or rank-4 {B, C, H, W}; gamma/beta/mean/var are all rank-1 {C}.  Default eps = 1e-5.";
 TBatchNormTrain::usage   = "TBatchNormTrain[x, gamma, beta] / TBatchNormTrain[x, gamma, beta, eps] computes batch-norm using statistics from x, then applies per-channel gamma/beta.  Supports rank-3 {C,H,W} and rank-4 {B,C,H,W}.";
 TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W} or batched {B, C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}.  Rank-3 routes through TConv2DIm2Col; rank-4 routes through TConv2DIm2ColBatched.";
@@ -135,13 +134,15 @@ TLog[x_TTerm] := Log[x]
    subtracted term's contribution cancel) so we keep it for
    numerical stability -- random-init networks (LeNet) overflow exp
    without it. *)
-TSoftmax[x_TTerm] := With[{shape = tUopShape[x], sumShape = ReplacePart[tUopShape[x], 1 -> 1]},
-    Module[{m, xc, e, s},
-        m  = TUOpExpand[TUOpReshape[TUOpReduce[x, 0, "MAX"], sumShape], shape];
-        xc = x - m;
-        e  = Exp[xc];
-        s  = TUOpExpand[TUOpReshape[TUOpReduce[e, 0, "SUM"], sumShape], shape];
-        e / s
+TSoftmax[x_TTerm] := TSoftmax[x, Length[tUopShape[x]] - 1]
+
+TSoftmax[x_TTerm, axis_Integer] := With[{shape = tUopShape[x]},
+    Module[{m, xc, e, sumShape},
+        sumShape = ReplacePart[shape, axis + 1 -> 1];
+        m        = TUOpExpand[TUOpReshape[TUOpReduce[x, axis, "MAX"], sumShape], shape];
+        xc       = x - m;
+        e        = Exp[xc];
+        e * TUOpExpand[1 / TUOpReshape[TUOpReduce[e, axis, "SUM"], sumShape], shape]
     ]
 ]
 
@@ -616,7 +617,7 @@ TMaxPool2d[x_TTerm, k_Integer] := With[{shape = tUopShape[x]},
    For a rank-1 input {N}, both reductions collapse to true scalars.
    For higher rank, reductions drop the last axis and we reshape +
    EXPAND back to broadcast across that axis (same shape pattern as
-   TSoftmaxAxis below).
+   TSoftmax below).
 
    Two REDUCEs (mean + var) means the Phase-3 single-REDUCE relaxation
    doesn't fire; layernorm currently materializes mean as its own
@@ -636,26 +637,6 @@ TLayerNorm[x_TTerm, eps_?NumericQ] := With[{shape = tUopShape[x]},
         centered  = x - mean;
         var       = broadcast[TUOpReduce[centered * centered, axis, "SUM"] / n];
         centered / Sqrt[var + eps]
-    ]
-]
-
-(* TSoftmaxAxis[x, axis] -- softmax along an arbitrary axis of a
-   rank-N tensor.  Generalises TSoftmax (axis = 0 only).  The
-   reduced axis is re-introduced as a unit dim via TUOpReshape so
-   TUOpExpand can broadcast back.
-
-   For axis = 0 on a rank-1 input the math reduces to TSoftmax: the
-   sumShape is {1}, the reshape is contig, the expand fans the
-   scalar back to {N}.  Higher-rank cases (e.g. attention's row-wise
-   softmax over the last axis of a {seq_q, seq_k} score matrix) use
-   the same code path. *)
-TSoftmaxAxis[x_TTerm, axis_Integer] := With[{shape = tUopShape[x]},
-    Module[{m, xc, e, sumShape},
-        sumShape = ReplacePart[shape, axis + 1 -> 1];
-        m        = TUOpExpand[TUOpReshape[TUOpReduce[x, axis, "MAX"], sumShape], shape];
-        xc       = x - m;
-        e        = Exp[xc];
-        e * TUOpExpand[1 / TUOpReshape[TUOpReduce[e, axis, "SUM"], sumShape], shape]
     ]
 ]
 
@@ -832,7 +813,7 @@ TAttention[q_TTerm, k_TTerm, v_TTerm] := With[{dk = tUopShape[k][[2]]},
 
 (* === GPT-2 building blocks ==================================
    The five entries below are pure WL composition over the layers
-   above (TLayerNorm, TMatMul, TSoftmaxAxis, TTanh) plus existing
+   above (TLayerNorm, TMatMul, TSoftmax, TTanh) plus existing
    movement primitives.  Modeled on tinygrad's `extra/models/gpt2.py`
    surface but expressed in thvm's `T*` flavor.  No new C/IR work. *)
 
@@ -975,7 +956,7 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
    additive {seqQ, seqK} bias (TCausalMask / TCausalMaskSym) or None.
 
    The seq axes may be LITERAL or kvar-PACKED (symbolic length S): `ArrayReshape`
-   / `Transpose` / `TUOpShrink` / `Dot` / `TSoftmaxAxis` all index a symbolic
+   / `Transpose` / `TUOpShrink` / `Dot` / `TSoftmax` all index a symbolic
    axis correctly (view_apply_shrink sizes numel at the kvar hi bound, so the
    per-head split no longer mis-addresses -- the bug that forced a separate eager
    raw-UOp clause).  The ONE symbolic concession is realizing each per-head
@@ -1009,7 +990,7 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
             Module[{scores, scoresM, out},
                 scores  = (qS . Transpose[kS]) * scale;   (* {seqQ, seqK} *)
                 scoresM = If[ mask === None, scores, scores + mask];
-                out = TSoftmaxAxis[scoresM, 1] . vS;      (* {seqQ, dHead} *)
+                out = TSoftmax[scoresM, 1] . vS;      (* {seqQ, dHead} *)
                 If[ symLeadingQ[q], TRealize @ out, out]]];
         headOuts = perHead /@ Range[0, nHeads - 1];
         headStitch[headOuts, nHeads, dHead]
@@ -1142,11 +1123,8 @@ fromLayer[FlattenLayer, _, x_TTerm] :=
     ]
 
 (* SoftmaxLayer: forward only, stable softmax along the LAST axis (the
-   class axis).  TSoftmax is hard-coded to axis 0, which on a batched
-   {B, classes} input normalises across the batch; TSoftmaxAxis carries
-   the same max-subtract along an arbitrary axis. *)
-fromLayer[SoftmaxLayer, _, x_TTerm] :=
-    TSoftmaxAxis[x, Length[tUopShape[x]] - 1]
+   class axis) -- TSoftmax's default. *)
+fromLayer[SoftmaxLayer, _, x_TTerm] := TSoftmax[x]
 
 (* PoolingLayer non-overlapping (Stride == KernelSize), 2-D Max only.
    Channels-first input {C, H, W} (or batched {B, C, H, W}); TMaxPool2d
@@ -2012,7 +1990,7 @@ TTerm /: NetInitialize[lam_TTerm] := TNetInitialize[lam]
    No net is stored, so this re-derives a NetChain from the lifted body's UOP
    structure for the standard layer signatures (Linear / ReLU-Elementwise /
    Softmax).  Each layer T-constructor lowers to a fixed sub-DAG (see fromLayer
-   / TLinear / TReLU / TSoftmaxAxis above); we peel those signatures from the
+   / TLinear / TReLU / TSoftmax above); we peel those signatures from the
    output back to the bound VAR.  Conv / Pool lower to a deep im2col movement
    chain that does not round-trip cleanly; a body containing one (or any
    unrecognised op) returns a clear Failure (best-effort, per the API).
@@ -2066,7 +2044,7 @@ peelLayer[t_] := Module[{red, mul, wMove, bMove, w, bias, wArr, inL, inR, inner}
         uIsUop[t, $UopMul]
             && uIsUop[uChild[t, 0], $UopCmplt],
             {ElementwiseLayer[Ramp], unwrapMove[uChild[t, 1]]},
-        (* SoftmaxLayer: TSoftmaxAxis root = MUL[exp(x-max), EXPAND RECIP sum] *)
+        (* SoftmaxLayer: TSoftmax root = MUL[exp(x-max), EXPAND RECIP sum] *)
         uIsUop[t, $UopMul]
             && uIsUop[uChild[t, 1], $UopExpand]
             && uIsUop[uChild[uChild[t, 1], 0], $UopRecip],
@@ -2075,7 +2053,7 @@ peelLayer[t_] := Module[{red, mul, wMove, bMove, w, bias, wArr, inL, inR, inner}
     ]
 ]
 
-(* the pre-softmax logits term: TSoftmaxAxis is exp(x-max)/sum; the numerator
+(* the pre-softmax logits term: TSoftmax is exp(x-max)/sum; the numerator
    EXP2 chain's argument SUB's first operand is the logits x. *)
 softmaxInner[t_] := Module[{num, scaled, sub},
     num = uChild[t, 0];                         (* EXP2[(x-max)*log2e] *)
