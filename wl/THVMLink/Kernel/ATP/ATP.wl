@@ -3352,20 +3352,6 @@ TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
    cover the engine's "x<id>" FVR-fallback names.  See
    [[project_atp_tfindproof_iter_leak]]. *)
 
-(* HoldFirst on TFindProof: lets a caller write
-   `TFindProof[Unevaluated[a == a], {}]` to defeat the WL parser's
-   reflexive-Equal collapse to True.  Without HoldFirst the
-   Unevaluated wrapper strips at the parameter-binding boundary and
-   `a == a` evaluates before any of our code sees it.  With
-   HoldFirst the held form survives into the body, where
-   `Unevaluated[conjecture]` at the atpNormalizeConj call propagates
-   it one further level, atpNormalizeConj's own HoldFirst pins it,
-   and Inactivate finally replaces the Equal head with
-   `Inactive[Equal]` -- which forAllToPattern then strips under
-   HoldComplete protection.  Existing literal-conjecture callers
-   are unaffected: HoldFirst just suppresses an evaluation that
-   wouldn't have changed the value anyway. *)
-SetAttributes[TFindProof, HoldFirst];
 
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     Quiet[Block[{
@@ -3381,8 +3367,8 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
             Global`z1, Global`z2, Global`z3},
         atpProjectReturn[
             atpProveBundle[
-                atpNormalizeConj[Unevaluated[conjecture]],
-                atpNormalizeAxioms[Unevaluated[axioms]],
+                atpNormalizeConj[conjecture],
+                atpNormalizeAxioms[axioms],
                 MaxSteps -> OptionValue[MaxSteps],
                 Method -> OptionValue[Method],
                 TimeConstraint -> OptionValue[TimeConstraint]],
@@ -3402,8 +3388,8 @@ TFindProof[conjecture_, axioms_List,
             Global`z1, Global`z2, Global`z3},
         atpProjectReturn[
             atpProveBundle[
-                atpNormalizeConj[Unevaluated[conjecture]],
-                atpNormalizeAxioms[Unevaluated[axioms]],
+                atpNormalizeConj[conjecture],
+                atpNormalizeAxioms[axioms],
                 MaxSteps -> OptionValue[MaxSteps],
                 Method -> OptionValue[Method],
                 TimeConstraint -> OptionValue[TimeConstraint]],

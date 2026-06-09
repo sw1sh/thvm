@@ -59,3 +59,8 @@ BooleanAxioms	AndAssociativity	72	-	135	79	OK under Method->"Waldmeister".  chai
 BooleanAxioms	OrAssociativity	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close parity (+1.5%).
 BooleanAxioms	DeMorgan__c1	97	-	192	104	OK.  chain=97 vs WM_rules=192 -- thvm 50% shorter (deep AC compression).
 BooleanAxioms	DeMorgan__c2	90	-	188	97	OK.  chain=90 vs WM_rules=188 -- thvm 52% shorter.
+AbelianGroupAxioms	ImpliesAbelianMcCuneAxioms	15	-	11	20	OK.  chain=15 vs WM_rules=11 -- thvm 36% longer.
+AbelianGroupAxioms	ImpliesMcCuneAxioms	23	-	21	28	OK.  chain=23 vs WM_rules=21 -- close parity.
+McCuneAxioms	Associativity	82	-	50	84	OK.  chain=82 vs WM_rules=50 -- thvm 64% longer (single-axiom McCune compression deficit pattern continues).
+McCuneAxioms	EqualityOfInverses	FAIL	-	44	-	thvm Waldmeister times out at 60s.  WM CLI proves with 44 rules.  Worth investigating further.
+RingWithIdentityAxioms	ZeroIsAbsorbing	26	-	53	35	OK.  chain=26 vs WM_rules=53 -- thvm 51% shorter (AC+ring compresses well).
