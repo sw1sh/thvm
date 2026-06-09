@@ -1372,6 +1372,21 @@ forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
             Inactive[TwoWayRule][a_, b_]]] :>
         applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]],
             List @@ Hold[vars]],
+    (* ForAll wrapping Inactive[Equal] / Inactive[Unequal]: same
+       reason as Rule -- single-pass Replace would leave the Inactive
+       wrapper if only the generic ForAll-strip below fired. *)
+    HoldComplete[ForAll[v_Symbol, Inactive[Equal][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]], {v}],
+    HoldComplete[ForAll[Verbatim[List][vars__Symbol],
+            Inactive[Equal][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]],
+            List @@ Hold[vars]],
+    HoldComplete[ForAll[v_Symbol, Inactive[Unequal][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Unequal[a, b]], {v}],
+    HoldComplete[ForAll[Verbatim[List][vars__Symbol],
+            Inactive[Unequal][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Unequal[a, b]],
+            List @@ Hold[vars]],
     HoldComplete[ForAll[v_Symbol, body_]] :>
         applyForAllSubst[HoldComplete[body], {v}],
     HoldComplete[ForAll[Verbatim[List][vars__Symbol], body_]] :>
@@ -3250,9 +3265,16 @@ TFindProof[goal_ /; atpBooleanGoalQ[goal], axioms_List,
    returns Inactive-headed equations to keep them from collapsing on
    display).  Cheap top-level rewrite; the dispatcher + encoder
    downstream see bare Equal / Unequal heads.  Iter 60. *)
-atpStripInactive[expr_] := expr /. {
-    Inactive[Equal][a_, b_] :> a == b,
-    Inactive[Unequal][a_, b_] :> Unequal[a, b]};
+(* Pass Inactive[Equal] / Inactive[Unequal] THROUGH unchanged --
+   stripping them here with `Inactive[Equal][a_, b_] :> a == b`
+   evaluates `Equal[a, b]` at match time on the rule RHS, which
+   collapses a reflexive form (`Inactive[Equal]["a", "a"]` --
+   a user's escape hatch around WL's parser short-circuiting
+   `"a" == "a"` to True) into True before encodeEquation can see
+   it.  Let `forAllToPattern` strip the wrapper later under
+   HoldComplete protection (via `HoldComplete @@ Hold[Equal[a, b]]`),
+   which preserves the held Equal. *)
+atpStripInactive[expr_] := expr;
 
 (* Flatten one level of nesting in the axiom list.  Users
    concatenating axiom subsets via `{theory_axioms, extra_lemmas}`

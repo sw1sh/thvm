@@ -902,6 +902,22 @@ VerificationTest[
 ];
 
 VerificationTest[
+    (* Reflexive escape hatches around the WL parser's collapse of
+       `"a" == "a"` to True: TwoWayRule and Inactive[Equal] both stay
+       held until forAllToPattern strips them under HoldComplete
+       protection, so the encoder sees Equal["a", "a"] held and the
+       engine closes the goal via reflexivity. *)
+    And[
+        Head @ TFindProof["a" \[TwoWayRule] "a", {},
+            TimeConstraint -> 5] === ProofObject,
+        Head @ TFindProof[Inactive[Equal]["a", "a"], {},
+            TimeConstraint -> 5] === ProofObject
+    ],
+    True,
+    TestID -> "ATP/strings/reflexive-escapes"
+];
+
+VerificationTest[
     (* Method -> "VampireUEQ" preset (LPO + AutoPrecedence +
        SelectionRatio 10 + UnfailingCP + AutoMaxWeight + MNF front)
        proves a baseline theorem too -- bundled knob smoke check. *)
