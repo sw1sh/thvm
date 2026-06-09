@@ -38,7 +38,17 @@ fn void apply_movement_op_shrink(u32 ndim,
   // current rangeify/view-resolve split keeps the two paths disjoint
   // (project_shrink_over_pad_offset_dropped).
   for (u32 i = 0; i < ndim; i++) {
-    u32 ss = begin_end[2 * i];
+    // A kvar-packed begin (KVAR_FLAG set) is the RUNTIME row offset of a
+    // single-row slice at a symbolic position -- the GPT-2 decode
+    // posTable[pos:pos+1] read.  Resolve it to the value bound via
+    // kvar_set_runtime (kvar_hi if unbound) so the shifted consumer index
+    // reads the right source row.  kvar_extent_static (the hi bound, for
+    // sizing/strides) would read a FIXED row and the raw packed u32 has
+    // bit 31 set -> a garbage offset.  A LITERAL begin (flag clear) is
+    // identity through kvar_extent_runtime, so every compile-time SHRINK is
+    // byte-unchanged.  Mirrors view_apply_shrink (materialize.c) which
+    // resolves the standalone-realize begin the same way.
+    u32 ss = kvar_extent_runtime(begin_end[2 * i]);
     if (ss == 0) {
       in_rngs[i] = out_rngs[i];
     } else {
