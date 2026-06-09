@@ -58,11 +58,19 @@ shift
 # survives -- so this gate is now a soft-cap on the per-kernel
 # footprint, not a hard count.  The watchdog below still SIGKILLs a
 # spawned kernel that exceeds RSS_CAP mid-run.
-STALE_KERNS=$(ps -axo pid,rss,command | awk '/WolframKernel/ && !/awk/ {print $1":"$2}')
+# Only check SCRIPT-MODE kernels (the `-runfirst Unprotect $EvaluationEnvironment`
+# signature wolframscript spawns); EXEMPT the user's interactive kernels
+# (`-wstp -linkprotocol` -- the notebook / MCP server / Wolfram Desktop).
+# An MCP eval can legitimately grow the user's WSTP kernel above the cap
+# without it being a runaway script-mode leak.  This guard only cares about
+# diverging ATP script-mode kernels.
+STALE_KERNS=$(ps -axo pid,rss,command | awk '
+    /WolframKernel/ && /-runfirst Unprotect/ && !/awk/ {print $1":"$2}
+')
 if [ -n "$STALE_KERNS" ]; then
   BIG_KERNS=$(echo "$STALE_KERNS" | awk -F: '$2 > 512000 {print $1}' | tr '\n' ' ')
   if [ -n "$BIG_KERNS" ]; then
-    echo "[guard] REFUSING SPAWN: WolframKernel(s) over 500MB RSS already alive" >&2
+    echo "[guard] REFUSING SPAWN: script-mode WolframKernel(s) over 500MB RSS already alive" >&2
     echo "        $STALE_KERNS" >&2
     echo "        big kernels (>500MB RSS): $BIG_KERNS" >&2
     echo "        kill those manually (kill -9 $BIG_KERNS) then retry" >&2
