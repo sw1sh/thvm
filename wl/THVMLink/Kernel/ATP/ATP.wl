@@ -1341,6 +1341,21 @@ forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
             Inactive[Rule][a_, b_]]] :>
         applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]],
             List @@ Hold[vars]],
+    (* ForAll wrapping TwoWayRule / Inactive[TwoWayRule] (`a <-> b`):
+       semantically an equation, just a different surface syntax.  Flag
+       stays 0 -- the engine still picks the orientation via KBO. *)
+    HoldComplete[ForAll[v_Symbol, TwoWayRule[a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]], {v}],
+    HoldComplete[ForAll[Verbatim[List][vars__Symbol],
+            TwoWayRule[a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]],
+            List @@ Hold[vars]],
+    HoldComplete[ForAll[v_Symbol, Inactive[TwoWayRule][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]], {v}],
+    HoldComplete[ForAll[Verbatim[List][vars__Symbol],
+            Inactive[TwoWayRule][a_, b_]]] :>
+        applyForAllSubst[HoldComplete @@ Hold[Equal[a, b]],
+            List @@ Hold[vars]],
     HoldComplete[ForAll[v_Symbol, body_]] :>
         applyForAllSubst[HoldComplete[body], {v}],
     HoldComplete[ForAll[Verbatim[List][vars__Symbol], body_]] :>
@@ -1360,6 +1375,12 @@ forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
     HoldComplete[Rule[a_, b_]] :>
         HoldComplete @@ Hold[Equal[a, b]],
     HoldComplete[Inactive[Rule][a_, b_]] :>
+        HoldComplete @@ Hold[Equal[a, b]],
+    (* Bare TwoWayRule / Inactive[TwoWayRule] (`a <-> b`): an
+       equation, no orientation hint. *)
+    HoldComplete[TwoWayRule[a_, b_]] :>
+        HoldComplete @@ Hold[Equal[a, b]],
+    HoldComplete[Inactive[TwoWayRule][a_, b_]] :>
         HoldComplete @@ Hold[Equal[a, b]],
     _ :> axHC
 }]
@@ -3235,13 +3256,15 @@ atpNormalizeAxioms[ax_List] :=
    List) is a common shape -- the user pastes one ax directly.
    Wrap in a 1-element List and re-dispatch.  Iter 68. *)
 TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
+        | _TwoWayRule
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
-        | Inactive[Rule][_, _]),
+        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]),
         opts:OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, opts];
 TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
+        | _TwoWayRule
         | Inactive[Equal][_, _] | Inactive[Unequal][_, _]
-        | Inactive[Rule][_, _]),
+        | Inactive[Rule][_, _] | Inactive[TwoWayRule][_, _]),
         returnSpec_?atpReturnSpecQ, opts:OptionsPattern[]] :=
     TFindProof[conjecture, {axiom}, returnSpec, opts];
 

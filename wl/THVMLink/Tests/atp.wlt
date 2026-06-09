@@ -871,6 +871,20 @@ VerificationTest[
 ];
 
 VerificationTest[
+    (* TwoWayRule (`a <-> b`, `\[TwoWayRule]`) is a surface-syntax
+       alias for `a == b` -- semantically still an equation, no
+       orientation hint.  The engine treats it identically to Equal:
+       KBO picks the rewrite direction, no `Rule`-style preorient. *)
+    Head @ TFindProof[ForAll[{x}, g[idElem, x] == x],
+        {ForAll[{x, y, z}, g[x, g[y, z]] \[TwoWayRule] g[g[x, y], z]],
+         ForAll[{x}, g[inv[x], x] \[TwoWayRule] idElem],
+         ForAll[{x}, g[idElem, x] \[TwoWayRule] x]},
+        TimeConstraint -> 30],
+    ProofObject,
+    TestID -> "ATP/Rule/twowayrule-as-equal"
+];
+
+VerificationTest[
     (* Method -> "VampireUEQ" preset (LPO + AutoPrecedence +
        SelectionRatio 10 + UnfailingCP + AutoMaxWeight + MNF front)
        proves a baseline theorem too -- bundled knob smoke check. *)
