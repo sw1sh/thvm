@@ -253,6 +253,7 @@ TESTS := \
   $(BIN)/test_lit_split_fuse \
   $(BIN)/test_sym_pad_concat \
   $(BIN)/test_sym_scores_fuse \
+  $(BIN)/test_sym_mha_bisect \
   $(BIN)/test_uop_linearize \
   $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \

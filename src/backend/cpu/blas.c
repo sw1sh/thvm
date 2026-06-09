@@ -169,7 +169,7 @@ fn void cpu_blas_gemm_dispatch_counters_reset(void) {
 // legacy program[] path funnel through this so the actual dispatch
 // site stays single-source.
 static void blas_emit_gemm(u32 dt, u32 M, u32 N, u32 K,
-                           u32 ldA, u32 ldB,
+                           u32 ldA, u32 ldB, u32 ldC,
                            u32 trans_a, u32 trans_b,
                            u32 a_buf, u32 b_buf, u32 out_buf_id) {
   enum CBLAS_TRANSPOSE transA = trans_a ? CblasTrans : CblasNoTrans;
@@ -181,7 +181,7 @@ static void blas_emit_gemm(u32 dt, u32 M, u32 N, u32 K,
     cblas_sgemm(CblasRowMajor, transA, transB,
                 (int)M, (int)N, (int)K,
                 1.0f, A, (int)ldA, B, (int)ldB,
-                0.0f, C, (int)N);
+                0.0f, C, (int)ldC);
   } else {
     double const *A = (double const *)CPU_BUFS[a_buf].data;
     double const *B = (double const *)CPU_BUFS[b_buf].data;
@@ -189,7 +189,7 @@ static void blas_emit_gemm(u32 dt, u32 M, u32 N, u32 K,
     cblas_dgemm(CblasRowMajor, transA, transB,
                 (int)M, (int)N, (int)K,
                 1.0, A, (int)ldA, B, (int)ldB,
-                0.0, C, (int)N);
+                0.0, C, (int)ldC);
   }
 }
 
@@ -225,7 +225,14 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   u32 b_elems = (u32)(CPU_BUFS[b_buf].nbytes / elem_bytes);
   if (a_elems < gemm.M * gemm.K) return 0;
   if (b_elems < gemm.K * gemm.N) return 0;
-  blas_emit_gemm(gemm.dtype, gemm.M, gemm.N, gemm.K, gemm.ldA, gemm.ldB,
+  // ldC is the OUTPUT buffer's logical row stride, NOT N: a symbolic-seq
+  // matmul output ({S, *}) is allocated at the kvar STATIC upper bound, so its
+  // row stride is hi >= N (the runtime extent).  Passing N would pack the
+  // cblas rows at the wrong pitch into a buffer every consumer indexes at the
+  // static stride.  Identity for literal matmuls (strides[0] == N).
+  u32 ldC = (u32) TENS[ke->output_tid].view.strides[0];
+  if (ldC == 0) ldC = gemm.N;
+  blas_emit_gemm(gemm.dtype, gemm.M, gemm.N, gemm.K, gemm.ldA, gemm.ldB, ldC,
                  gemm.flags & 1u, gemm.flags & 2u,
                  a_buf, b_buf, out_buf_id);
   BLAS_GEMM_DISPATCH_DAG++;
