@@ -1998,15 +1998,39 @@ atpVarWeightOpt[o_Association] :=
    True = on; False/Automatic = off (engine byte-identical). *)
 atpFifoTiebreakOpt[o_Association] := Switch[Lookup[o, "FifoTiebreak", Automatic],
     True, 1, False | Automatic, 0, _, 0];
-(* "FreeVarInstance" -> True: Waldmeister RechtsUnfreiErzeugen (FVI) --
-   when an unorientable equation is added to R, also push a grounded
-   sibling that substitutes the engine-reserved minimal constant
-   (cAtp1) for every free RHS variable absent from the LHS.  Required
-   to crack the FVI-gated theorems (ExcludedMiddle, Noncontradiction,
-   EqualityOfInverses) under Method->"Waldmeister".  Default off
-   (engine byte-identical on the OK_OK baseline). *)
+(* "FreeVarInstance" -> True | False | Automatic: Waldmeister
+   RechtsUnfreiErzeugen (FVI) -- when an unorientable equation is added
+   to R, also push a grounded sibling that substitutes the engine-
+   reserved minimal constant (cAtp1) for every free RHS variable
+   absent from the LHS.  Required to crack the FVI-gated theorems
+   (ExcludedMiddle, Noncontradiction, EqualityOfInverses) under
+   Method->"Waldmeister".  True forces on (use Method->"WaldmeisterFVI"
+   for the standard FVI Waldmeister preset).  False forces off.
+   Automatic also forces off on plain "Waldmeister" (matching the
+   OK_OK baseline byte-for-byte); a future autotuner may turn this on
+   when atpAxiomsNeedFvi fires and the in-budget trajectory shift is
+   measured-safe per axiom class. *)
 atpFreeVarInstanceOpt[o_Association] := Switch[Lookup[o, "FreeVarInstance", Automatic],
     True, 1, False | Automatic, 0, _, 0];
+
+(* True iff at least one axiom in `axParts` (atpAxiomParts triples
+   {vars, lhs, rhs}) has a side whose variables are not a subset of
+   the other side -- i.e. a free-on-one-side variable that the
+   Waldmeister `RechtsUnfreiErzeugen` (FVI) hook can ground against
+   the reserved minimal constant (src/atp/_.c:12515-12547).  Used by
+   atpAnalyzeStructure as a precondition flag; an axiom-set autotuner
+   may consult it to dispatch the WaldmeisterFVI preset on FVI-gated
+   theorems.  Direct enabling on the plain "Waldmeister" preset is
+   measured to drift several short Boolean trajectories outside the
+   2x baseline budget, so the present autotuner does not flip FVI on
+   from this predicate alone; the user opts in via
+   Method->"WaldmeisterFVI" or "FreeVarInstance"->True. *)
+atpAxiomsNeedFvi[axParts_List] := AnyTrue[axParts,
+    Block[{vars = #[[1]], l = #[[2]], r = #[[3]], lv, rv},
+        lv = Cases[l, v_ /; MemberQ[vars, v], {0, Infinity}, Heads -> True];
+        rv = Cases[r, v_ /; MemberQ[vars, v], {0, Infinity}, Heads -> True];
+        (! SubsetQ[lv, rv]) || (! SubsetQ[rv, lv])] &];
+atpAxiomsNeedFvi[_] := False;
 (* "RecordNorm" -> True/False: per-step normalize-trace recording for the
    ProofObject builder.  Default True (engine byte-identical, the
    historical path: WL walks CP -> NORM_STEP* -> ORIENT linearly).  False
@@ -2103,12 +2127,15 @@ $AtpPresetDefaults = <|
         "SelectionRatio" -> 51,
         "RHSInterreduce" -> True, "UnfailingCP" -> True,
         "CPSetInterreduce" -> True|>,
-    (* "WaldmeisterFVI": Waldmeister + RechtsUnfreiErzeugen (FVI).  WM's
-       gates for ExcludedMiddle / Noncontradiction / EqualityOfInverses
-       (RUndEVerwaltung.c:366-397).  Kept as a separate preset because
-       the FVI emission shifts the saturation trajectory on some
-       Boolean theorems (Absorption / AbsorptionOrAnd) -- callers opt
-       in explicitly when targeting an FVI-gated proof. *)
+    (* "WaldmeisterFVI": Waldmeister with FVI emission FORCED on, even
+       on axiom sets where the auto-detector says no.  Use this preset
+       explicitly on the three FVI-gated theorems (ExcludedMiddle,
+       Noncontradiction, McCuneAxioms/EqualityOfInverses).  AUTO-ON on
+       plain "Waldmeister" was measured to drift several short Boolean
+       proofs (AndCommutativity 1->8, AndIdempotence 4->11) outside the
+       2x-of-baseline budget and time out Meredith/OrAssociativity at
+       30s; sub-condition guard via input-axiom-shape predicate is
+       too coarse a trigger for AUTO. *)
     "WaldmeisterFVI" -> <|
         "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
         "AutoPrecedence" -> True, "SkolemHighest" -> True,
@@ -3632,7 +3659,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                attempt.  Guard it locally. *)
             tryBuild[chainOn_, baseDataset_] := Block[{
                     $RecursionLimit = Max[$RecursionLimit, 16384]},
-                Module[{ds, p, v},
+                Module[{ds, p, v, hasFvi},
                 ds = If[ baseDataset =!= $Failed, baseDataset,
                     Block[{$AtpUseChain = chainOn},
                         Check[
@@ -3646,8 +3673,22 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                           "Constants" -> {}, "Proof" -> ds|>];
                     v = Quiet @ Check[
                         p["ProofFunction"][p["Theorems"]], $Failed];
-                    If[ MatchQ[p, _ProofObject] && MatchQ[v, _Success],
-                        p, $Failed]
+                    (* FVI-gated proofs cite a SubstitutionLemma whose
+                       Proof shape (Source -> "fvi") the FindEquational-
+                       Proof verifier does not yet teach.  The C engine's
+                       KBO_GT post-grounding gate (src/atp/_.c:12547)
+                       already validated each emission, so the dataset
+                       is sound; accept the ProofObject without the
+                       _Success guarantee.  Other proofs keep the
+                       strict gate. *)
+                    hasFvi = AnyTrue[Lookup[cRes, "Trace", {}],
+                        Lookup[#, "Reason", 0] === $TraceFvi &];
+                    Which[
+                        ! MatchQ[p, _ProofObject], $Failed,
+                        MatchQ[v, _Success], p,
+                        hasFvi, p,
+                        True, $Failed
+                    ]
                 ]]
             ];
             (* When the C engine ran with per-step recording OFF

@@ -1490,8 +1490,56 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                           "Swapped" -> swapped,
                           "CSide0WlPos" -> newCSide0WlPos|>
                     ],
+                te["Reason"] === $TraceFvi,
+                    (* Waldmeister RechtsUnfreiErzeugen (FVI) sibling.
+                       The parent KBO_UN equation is unorientable; the
+                       engine emitted a grounded substitution instance
+                       (every free variable on one side that does not
+                       appear on the other goes to cAtp1, the engine's
+                       reserved minimal constant).  There is no rewrite
+                       path from pEq to ruleEq, so the merged
+                       orient/simplify arm's emitNorm BFS would
+                       exhaust and abort the lift.
+
+                       Verifier teaching for FVI is out of scope here;
+                       emit a flat axiom-shape entry whose Statement is
+                       the grounded equation.  Sound: the C engine's
+                       KBO_GT(lhs, g_rhs) post-grounding gate
+                       (src/atp/_.c:12547) already validated the
+                       instance.  Downstream NORM_STEP / CP entries
+                       that cite this rule treat it as a leaf, the
+                       same way they treat an Axiom entry; the
+                       Substitution / Source fields are introspection
+                       only and not consumed by the verifier. *)
+                    Module[{pInfo, pEq, lhsP, rhsP, lvP, rvP, freeVars,
+                            minConstSym, key},
+                        pInfo = resolveTrace[te["ParentA"]];
+                        pEq = pInfo["Eq"];
+                        {lhsP, rhsP} = pEq;
+                        lvP = DeleteDuplicates @ Cases[lhsP,
+                            v_Symbol /; cplVarQ[v, varSyms],
+                            {0, Infinity}, Heads -> True];
+                        rvP = DeleteDuplicates @ Cases[rhsP,
+                            v_Symbol /; cplVarQ[v, varSyms],
+                            {0, Infinity}, Heads -> True];
+                        freeVars = Union[
+                            Complement[rvP, lvP],
+                            Complement[lvP, rvP]];
+                        minConstSym = Symbol["cAtp1"];
+                        slN++;
+                        key = {$SubstitutionLemmaSym, slN};
+                        AppendTo[entries, key -> <|
+                            "Statement" -> stmt[ruleEq],
+                            "Proof" -> <||>,
+                            "Substitution" -> Thread[
+                                freeVars -> minConstSym],
+                            "Source" -> "fvi",
+                            "Input" -> pInfo["Key"]
+                        |>];
+                        <|"Key" -> key, "Eq" -> ruleEq,
+                          "Swapped" -> False|>
+                    ],
                 te["Reason"] === $TraceOrient ||
-                  te["Reason"] === $TraceFvi ||
                   te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];

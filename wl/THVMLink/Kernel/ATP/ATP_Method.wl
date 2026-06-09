@@ -576,19 +576,13 @@ atpAutoTuneForClass["Boolean"] := {
        OrAssociativity / Distributivity) and symmetric (ExcludedMiddle /
        Noncontradiction / DoubleNegation) NotableTheorems.  The
        symmetric tautology cases (ExcludedMiddle, Noncontradiction)
-       require Waldmeister's ###FVI primitive (RechtsUnfreiErzeugen --
-       grounding free-rhs vars with a reserved minimal constant) to
-       crack the KBO_UN symmetric equation, which thvm does not have.
-       Empirically (commit ad806378+e7b35d25 probes), Method ->
-       "VampireUEQ" closes both: ExcludedMiddle chain=7 in <60s,
-       Noncontradiction chain=30 in <60s.  The LPO+AutoMaxWeight+
-       BackwardSubsume+BackwardDemod combo navigates the symmetric
-       eqn space differently from KBO/Mix2/GoalDirected, and finds
-       the closing CP without needing FVI.  Front-load VampireUEQ
-       so Automatic catches the symmetric class; the rest of the
-       tail still handles asymmetric Boolean goals (DeMorgan etc.).
-       Open: [[project_atp_wm_fvi]] for a proper FVI port; until
-       then VampireUEQ is the parity bridge for these cases. *)
+       are FVI-gated: Method->"WaldmeisterFVI" closes both via the
+       Waldmeister RechtsUnfreiErzeugen primitive; the lifter teaches
+       the resulting $TraceFvi sibling to produce a real ProofObject.
+       VampireUEQ stays at the front of the schedule as the parallel
+       parity bridge -- AUTO-FVI on plain Waldmeister was measured to
+       shift Boolean-tautology trajectories outside the 2x baseline
+       budget, so the autotuner does not enable it. *)
     "VampireUEQ",
     "GoalDirected",
     {"Completion", "CriticalPairWeight" -> "Mix2"}};
