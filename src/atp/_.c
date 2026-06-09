@@ -4117,6 +4117,15 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   {
     const char *e = getenv("THVM_ATP_GNN_RERANK_PERIOD");
     s->gnn_rerank_period = (e != NULL) ? (u32)strtoul(e, NULL, 10) : 0u;
+    // THVM_ATP_GNN_COOP_RATIO routes the GNN re-rank to the secondary
+    // (cp_pri2) coop dimension at this ratio, so the GNN guides selection
+    // alongside the primary preset (e.g. Waldmeister) on the normal atomic
+    // run -- the WL surface sets it before TFindProof, no bridge change.
+    const char *c = getenv("THVM_ATP_GNN_COOP_RATIO");
+    if (c != NULL) {
+      u32 ratio = (u32)strtoul(c, NULL, 10);
+      if (ratio > 0u) thvm_atp_set_gnn_coop(s, ratio);
+    }
   }
   return s;
 }
