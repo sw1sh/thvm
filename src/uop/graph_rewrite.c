@@ -469,7 +469,20 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
   if (tag == TAG_TEN) return uop_copy_dev(r, dev);     // the leaf upload
   if (tag != TAG_UOP) return r;                        // NUM / VAR: leave as-is
   u8 op = term_ext(r);
-  if (op == UOP_COPY || op == UOP_KERNEL) return r;    // already placed / opaque
+  if (op == UOP_KERNEL) return r;                      // opaque
+  if (op == UOP_COPY) {
+    // An EXPLICIT-device COPY already names where its src lives -- respect it.
+    // A GENERIC COPY (device -1, the deferred-upload a TFromNet weight uses via
+    // TUOpCopy[TTensorCreateHost[...]]) otherwise resolves its target to
+    // CURRENT_BACKEND at materialize time, which is CPU during a routed realize
+    // -- so the weight would stay on CPU while leaf-inserted inputs go to `dev`,
+    // and the mixed-device kernel computes garbage.  Re-target it to `dev` so
+    // every operand lands on the same device.
+    if (uop_copy_device(term_val(r)) >= 0) return r;
+    Term csrc = uop_to_device_leaves_rec(heap_read(term_val(r) + 0),
+                                         dev, memo, cap, used, depth + 1);
+    return uop_copy_dev(csrc, dev);
+  }
 
   Term memo_hit = 0;
   if (cap != 0) {
