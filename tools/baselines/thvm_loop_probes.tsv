@@ -67,8 +67,8 @@ RingWithIdentityAxioms	ZeroIsAbsorbing	26	-	53	35	OK.  chain=26 vs WM_rules=53 -
 GroupAxioms	InverseOfInverse	10	-	10	14	EXACT PARITY.  chain=10 == WM_rules=10.
 GroupAxioms	LeftIdentity	8	-	9	12	OK.  chain=8 vs WM_rules=9 -- thvm 1 shorter.
 GroupAxioms	LeftInverse	11	-	12	15	OK.  chain=11 vs WM_rules=12 -- thvm 1 shorter.
-MeredithAxioms	AndAssociativity	FAIL	-	409	-	thvm Waldmeister times out at 45s.  WM CLI proves at 409 rules in 0.5s (hard case, 600k CPs).  May need a longer budget or different preset; both Meredith Assoc variants symmetric.
-MeredithAxioms	OrAssociativity	FAIL	-	409	-	Same shape as AndAssociativity (symmetric).
+MeredithAxioms	AndAssociativity	131	-	409	138	OK at 120s.  chain=131 vs WM_rules=409 -- thvm 68% shorter!  Previous FAIL at 45s was just budget; raising to 120s clears it.
+MeredithAxioms	OrAssociativity	-	-	409	-	Symmetric to AndAssociativity; not directly tested but expected to behave similarly.
 BooleanAxioms	ImpliesRobbinsAxioms__c1	1	-	4	8	OK.  chain=1 vs WM_rules=4 -- thvm shorter.
 BooleanAxioms	ImpliesRobbinsAxioms__c2	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close parity.
 BooleanAxioms	ImpliesRobbinsAxioms__c3	82	-	189	89	OK.  chain=82 vs WM_rules=189 -- thvm 57% shorter (deep AC compression).
