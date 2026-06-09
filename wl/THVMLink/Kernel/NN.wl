@@ -88,8 +88,6 @@ TCausalMaskSym::usage    = "TCausalMaskSym[vid, hi] returns the SYMBOLIC-sequenc
 TLayerNormAffine::usage  = "TLayerNormAffine[x, gamma, beta] applies TLayerNorm[x] then multiplies by gamma + adds beta along the last axis.  GPT-2's layer-norm carries learned gamma/beta; the bare TLayerNorm in this file normalises only.";
 TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q is {seq_q, dim}; K, V are {seq_k, dim} (read independently, so seq_k may differ from seq_q -- cross-attention, or a single-query step over a KV cache); dim = n_heads * d_head; mask is a {seq_q, seq_k} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq_q, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).\n\nTMultiHeadAttention[Q, K, V, n_heads, mask, scale] uses the explicit `scale` factor in place of the default 1/Sqrt[d_head] (pass 1.0 when the caller has already pre-scaled Q, as GPT-2's NetGraph does).";
 TDecodeAttend::usage = "TDecodeAttend[q1, kCache, vCache, kNew, vNew, nHeads, posVid, lenVid, scale] -- GPT-2 per-step DECODE attention over a KV cache.  See the public symbol page; appends kNew/vNew into kCache/vCache at row `posVid`, marks the {len, dim} prefix symbolic on `lenVid`, and attends the single query q1 ({1, dim}) over the cached prefix multi-head -> {1, dim}.";
-TDecodeJitInit::usage = "TDecodeJitInit[net] allocates a CONSTANT-MEMORY (TJit) incremental-decode session for a token-LM NetChain (GPT-2): like TDecodeInit but the per-step positional row is supplied as a rebindable INPUT (a host slice of the position table) instead of an in-graph kvar shrink, so a TJit capture replays it across steps (the in-graph shrink freezes the capture-time position -> positionless echo).  Extends TDecodeInit's state with the position table, the vocab size, and a `fn` slot (the TJit closure, captured lazily on the first TDecodeJitNext).  Returns the `state` Association TDecodeJitNext consumes.  NOTE: capture-once/replay gives CONSTANT memory (no per-step re-lift), but per-step latency is currently dominated by the host-side cache-read gather (the symbolic cache reads replay as JIT_OP_GATHER), so it is NOT yet faster than the fixed-window forward -- routing the cache reads through on-device kernels is a speed follow-up.";
-TDecodeJitNext::usage = "TDecodeJitNext[net, state, tokenId] drives ONE decode step: like TDecodeNext but captures a TJit closure over {oneHotRow, posRow} on the first call (at that step's prefix) and reuses it after, replaying with the per-step one-hot AND host-sliced positional row rebound (posVid drives the cache append offset, which rebinds at fire; lenVid the prefix length).  CONSTANT memory after the one-time capture (no per-step re-lift); output is token-identical to TDecodeNext.  (Per-step latency is currently gated by the host cache-read gather -- constant memory, not yet faster than the fixed-window forward.)  `state` comes from TDecodeJitInit.  Returns the updated state with \"pos\" advanced, \"token\" the greedy next-token id, \"logits\" the {vocab} logits.";
 Begin["`Private`"];
 
 (* === Tensor-method helpers ============================== *)
@@ -1809,10 +1807,11 @@ TDecodeStep[net_, oneHotRow_TTerm, posRow_TTerm, state_Association] :=
 (* TDecodeInit[net] -- allocate an incremental-decode session (Lever 2 step 4).
    One zeroed {nCtx, dim} KV cache per block (one per AttentionLayer the decode
    fold visits, since fromLayer[AttentionLayer] advances $decodeAttn["idx"] once
-   per attention hit and indexes kCaches[[idx]]), the two position kvars, and
-   the running write position 0.  nCtx = the position table's length (max
-   context), dim = the embedding width.  Returns the `state` Association
-   TDecodeStep / TDecodeNext consume. *)
+   per attention hit and indexes kCaches[[idx]]), the two position kvars, the
+   running write position 0, and the JIT-driver slots (the position table, the
+   vocab size, and a lazily-captured TJit closure `fn`).  nCtx = the position
+   table's length (max context), dim = the embedding width.  Returns the `state`
+   Association TDecodeStep / TDecodeNext consume. *)
 TDecodeInit::tokennet = "`1` is not a token-LM net (needs a token + a position EmbeddingLayer).";
 TDecodeInit[net_] := Module[{tokTable, posTable, dim, nCtx, nBlocks},
     tokTable = tokenEmbeddingArray[net];
@@ -1824,66 +1823,37 @@ TDecodeInit[net_] := Module[{tokTable, posTable, dim, nCtx, nBlocks},
     nBlocks  = Count[allLayers[net], _AttentionLayer];
     <|"kCaches" -> Table[TRealize[TTensorCreate[ConstantArray[0., {nCtx, dim}]]], {nBlocks}],
       "vCaches" -> Table[TRealize[TTensorCreate[ConstantArray[0., {nCtx, dim}]]], {nBlocks}],
-      "posVid"  -> TKVarAlloc[1, nCtx],
-      "lenVid"  -> TKVarAlloc[1, nCtx],
-      "pos"     -> 0|>]
-
-(* TDecodeNext[net, state, tokenId] -- one decode step: bind the position kvars
-   for the current step, feed `tokenId` as a {1, vocab} one-hot, run TDecodeStep
-   (appends K/V into every block's cache + attends the cached prefix), and read
-   back the {vocab} logits.  Returns the updated state with `pos` advanced, the
-   greedy next-token `token` (argmax, 0-indexed), and the `logits`.  Chain with
-   NestList over a prompt then its own `token` to generate. *)
-TDecodeNext[net_, state_Association, tokenId_Integer] := Module[
-    {vocab, oneHotRow, logits},
-    vocab = First[Dimensions[tokenEmbeddingArray[net]]];
-    TKVarSet[state["posVid"], state["pos"]];
-    TKVarSet[state["lenVid"], state["pos"] + 1];
-    oneHotRow = TTensorCreate[N @ {Normal @ SparseArray[{tokenId + 1 -> 1.}, vocab]}];
-    logits = First @ Normal @ TTensorData @ TRealize @
-        TDecodeStep[net, oneHotRow, state];
-    <|state, "pos" -> state["pos"] + 1,
-      "token"  -> First[Ordering[logits, -1]] - 1,
-      "logits" -> logits|>]
-
-(* TDecodeJitInit[net] -- allocate a CONSTANT-MEMORY (TJit) incremental-decode
-   session.  Extends TDecodeInit's state with a captured-once TJit closure `fn`
-   over {oneHotRow, posRow} (the posRow-as-input decode step), the embedding
-   tables, and a `vocab` slot.  The closure is NOT captured here -- the first
-   TDecodeJitNext call captures it at that step's prefix and reuses it after.
-   posRow is supplied per step as a host slice of the position table, so the
-   captured graph rebinds the positional row on replay (the in-graph kvar shrink
-   would freeze it -> positionless echo).  Returns the `state` Association.
-   Capture-once/replay gives CONSTANT memory (no per-step re-lift); per-step
-   latency is currently gated by the host cache-read gather (the symbolic cache
-   reads replay as JIT_OP_GATHER) -- not yet faster than the fixed-window
-   forward.  Speed follow-up: route the cache reads through on-device kernels. *)
-TDecodeJitInit[net_] := Module[{base, posTable, tokTable},
-    base     = TDecodeInit[net];
-    If[ base === $Failed, Return[$Failed]];
-    posTable = positionEmbeddingArray[net];
-    tokTable = tokenEmbeddingArray[net];
-    <|base, "posTable" -> posTable, "vocab" -> First[Dimensions[tokTable]],
-      "fn" -> None|>]
+      "posVid"   -> TKVarAlloc[1, nCtx],
+      "lenVid"   -> TKVarAlloc[1, nCtx],
+      "pos"      -> 0,
+      "posTable" -> posTable,
+      "vocab"    -> First[Dimensions[tokTable]],
+      "fn"       -> None|>]
 
 (* posRow at position `pos` (0-indexed): the {1, dim} positional row, a HOST
    slice of the session's position table -- the per-step input the captured TJit
-   closure rebinds (replacing the in-graph kvar shrink). *)
+   closure rebinds (replacing the in-graph kvar shrink, which would freeze the
+   capture-time position -> positionless echo). *)
 decodePosRow[state_Association, pos_Integer] :=
     TTensorCreate[N @ {Normal @ state["posTable"][[pos + 1]]}]
 
-(* TDecodeJitNext[net, state, tokenId] -- one FAST decode step.  Like
-   TDecodeNext but: (1) captures a TJit closure over {oneHotRow, posRow} on the
-   first call (at that step's prefix) and reuses it after, replaying with the
-   per-step one-hot AND host-sliced posRow rebound; (2) sets posVid (cache
-   append offset, rebinds at fire) + lenVid (prefix length) each step.  Constant
-   memory + fast after the one-time capture.  Output matches TDecodeNext. *)
-TDecodeJitNext[net_, state_Association, tokenId_Integer] := Module[
-    {vocab, oneHotRow, posRow, fn, logits, st},
-    vocab = state["vocab"];
+(* TDecodeNext[net, state, tokenId] -- one decode step.  Sets the position kvars
+   (posVid drives the cache append offset, rebinding at fire; lenVid the prefix
+   length), feeds `tokenId` as a {1, vocab} one-hot, and runs the decode forward
+   through a TJit closure captured ONCE over {oneHotRow, posRow} on the first
+   call and replayed after -- CONSTANT memory (no per-step re-lift), output
+   token-identical to a fresh forward.  Returns the updated state with `pos`
+   advanced, the greedy next-token `token` (argmax, 0-indexed), and the `logits`.
+   Chain with NestList over a prompt then its own `token` to generate.  (Per-step
+   latency is currently gated by the host cache-read gather -- the symbolic cache
+   reads replay as JIT_OP_GATHER -- so it is constant-memory, not yet faster than
+   the fixed-window forward; routing those reads through on-device kernels is the
+   open speed follow-up.) *)
+TDecodeNext[net_, state_Association, tokenId_Integer] := Module[
+    {oneHotRow, posRow, fn, logits, st},
     TKVarSet[state["posVid"], state["pos"]];
     TKVarSet[state["lenVid"], state["pos"] + 1];
-    oneHotRow = TTensorCreate[N @ {Normal @ SparseArray[{tokenId + 1 -> 1.}, vocab]}];
+    oneHotRow = TTensorCreate[N @ {Normal @ SparseArray[{tokenId + 1 -> 1.}, state["vocab"]]}];
     posRow    = decodePosRow[state, state["pos"]];
     fn = state["fn"];
     If[ fn === None,
