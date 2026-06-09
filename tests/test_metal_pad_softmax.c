@@ -6,17 +6,26 @@
 // DIVERGES from the host oracle; a plain CPU realize of the SAME graph, and
 // GLOBAL Metal (DEV=metal default), both compute it CORRECTLY.
 //
-// Diagnosis (instrumented): the wrong result is already present in the src TEN
-// ON CPU (src.backend==CPU) BEFORE the cross-backend copy runs -- so it is NOT
-// the Metal compute and NOT interact_assign's cross-backend memcpy.  Wrapping
-// the fused subgraph in COPY -> ASSIGN(metal_dst, src_kernel) corrupts the src's
-// OWN cpu_jit computation: the value reads like a BLEND of the two identical
-// softmax branches (kernel dedup / materialize under the COPY boundary).  This
-// is the root of the GPT-2 multi-head-attention Metal divergence through
-// TToDevice (headStitch = Total of PADs over the per-head softmax.V outputs, the
-// heads being structurally identical).  Fix lives in the device-COPY
-// materialize path (schedule/materialize.c materialize_copy) -- left FAILING for
-// whoever fixes it.
+// Diagnosis (fully instrumented -- it is NOT a Metal bug):
+//  - The wrong result is already in the src TEN ON CPU before the cross-backend
+//    copy runs; interact_assign's memcpy and Metal compute are both fine.
+//  - A=softmax(xa) and B=softmax(xb) are structurally identical, so their per-op
+//    kernels share a slot-based store_root (correct CSE).  But B's exp-chain
+//    kernel mis-binds ONE input slot: the "view-of-x" slot lists A's view-alias
+//    TenDesc (a view over xa's buffer) instead of B's view over xb -- so in that
+//    slot B reads xa.  (Confirmed: A's and B's exp kernels share store_root and
+//    BOTH carry A's view-alias tid in the same input slot; tensor_view_of never
+//    caches, so the collapse is already in the value tree the COPY materialize
+//    hands the lift, not in view_resolve.)
+//  - Plain CPU realize of the SAME graph, and GLOBAL Metal, are both correct --
+//    only wrapping it in COPY -> ASSIGN(metal_dst, src) triggers the value-tree
+//    substitution that collapses B's view-of-xb onto A's view-of-xa alias.
+// So: a CPU-side hash-cons / simplify collision between two structurally-
+// identical branches, EXPOSED by the device-COPY (TToDevice) materialize order.
+// Root of the GPT-2 multi-head-attention divergence through TToDevice (the 12
+// heads are identical; headStitch sums PADs of their softmax.V outputs).  Fix
+// lives in schedule/materialize.c (the COPY-path value-tree materialize /
+// bufferize boundary-input resolution) -- left FAILING for whoever fixes it.
 //
 // Built -DTHVM_HAS_METAL so backend_metal.o owns METAL_BACKEND.
 #include "../src/thvm.c"
