@@ -248,6 +248,11 @@ TESTS := \
   $(BIN)/test_sym_inner \
   $(BIN)/test_sym_inner_realize \
   $(BIN)/test_sym_attn \
+  $(BIN)/test_sym_attn_lazy \
+  $(BIN)/test_sym_split_fuse \
+  $(BIN)/test_lit_split_fuse \
+  $(BIN)/test_sym_pad_concat \
+  $(BIN)/test_sym_scores_fuse \
   $(BIN)/test_uop_linearize \
   $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \

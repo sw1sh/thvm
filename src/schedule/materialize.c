@@ -4548,7 +4548,15 @@ static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
     // separate, not-yet-needed case).
     if (e <= b || e > src->shape.dims[i]) return 0;
     ts.dims[i] = e - b;
-    t_numel  *= (e - b);
+    // numel sizes at the static (hi) bound, matching view_create /
+    // view_apply_reshape / view_apply_expand.  For a `{0, pack(S)}`
+    // full-extent slice over a SYMBOLIC axis (the multi-head-attention
+    // per-head seq shrink) `e - b` keeps the KVAR_FLAG, so the raw packed
+    // value would overflow the u32 accumulator (1*pack(S)*dH wraps mod 2^32);
+    // kvar_extent_static recovers the hi bound.  For a literal slice it is
+    // the identity, so every compile-time SHRINK is byte-unchanged.
+    // ts.dims[i] keeps the packed extent so the symbolic axis survives.
+    t_numel  *= kvar_extent_static(e - b);
     add_off  += (i32)b * src->strides[i];
   }
   out->shape  = ts;
