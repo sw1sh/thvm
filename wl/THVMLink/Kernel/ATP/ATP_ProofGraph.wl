@@ -678,6 +678,14 @@ $TraceOrient = 2;
 $TraceCp = 3;
 $TraceSimplify = 4;
 $TraceNormStep = 5;
+(* TRACE_FVI: a Waldmeister `RechtsUnfreiErzeugen` (FVI) sibling rule
+   pushed alongside an unorientable KBO_UN equation; the rule grounds
+   every free variable on one side that does not appear on the other
+   against `s->min_const` (the precedence-minimum reserved label).  See
+   `atp_emit_fvi_pair` in src/atp/_.c.  Same `(lhs, rhs)` cell layout
+   as TRACE_ORIENT; the lifter walks the parent KBO_UN equation's
+   chain to recover provenance. *)
+$TraceFvi = 6;
 $AtpTraceNone = 4294967295;
 
 (* Assemble a verifier-shaped ProofObject dataset for a
@@ -979,7 +987,8 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Table[
                 {t, {tL[trace[[t + 1]]], tR[trace[[t + 1]]]}},
                 {t, Select[Range[0, ti - 1],
-                    trace[[# + 1]]["Reason"] === $TraceOrient &&
+                    (trace[[# + 1]]["Reason"] === $TraceOrient ||
+                     trace[[# + 1]]["Reason"] === $TraceFvi) &&
                     ! MemberQ[dropped, #] &]}
             ]
         ];
@@ -1426,6 +1435,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                inheriting it flips the mapping when
                                atp_orient_and_add swapped the CP. *)
                             parentReason === $TraceOrient ||
+                              parentReason === $TraceFvi ||
                               parentReason === $TraceSimplify,
                                 If[ tL[parentTe] === pInfo["Eq"][[1]],
                                     1, 2],
@@ -1481,6 +1491,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                           "CSide0WlPos" -> newCSide0WlPos|>
                     ],
                 te["Reason"] === $TraceOrient ||
+                  te["Reason"] === $TraceFvi ||
                   te["Reason"] === $TraceSimplify,
                     pInfo = resolveTrace[te["ParentA"]];
                     pEq = pInfo["Eq"];

@@ -12531,6 +12531,48 @@ static Term atp_grounded_instance(AtpState *s, Term t, Term lhs,
     default: return t;
   }
 }
+
+// One leg of the Waldmeister FVI two-direction wrapper.  Grounds the
+// vars of `rhs` that do NOT occur in `lhs` against `s->min_const`,
+// gates the resulting pair on KBO_GT(lhs, g_rhs), and pushes it as a
+// regular rule when accepted.  On success bumps both `r->count` and
+// `r->fvi_count` (the trailing-N FVI sibling-count consumed by the
+// trace stamp loop at `thvm_atp_step`).
+//
+// Returns 1 when a new rule was pushed, 0 otherwise.
+static u8 atp_try_ground_and_push(AtpState *s, Term lhs, Term rhs,
+                                  AtpAddedRange *r) {
+  Term g_rhs = atp_grounded_instance(s, rhs, lhs, s->min_const);
+  if (g_rhs == rhs) return 0;
+  if (atp_compare(s, lhs, g_rhs) != KBO_GT) return 0;
+  if (!atp_push_rule(s, lhs, g_rhs)) return 0;
+  r->count++;
+  r->fvi_count++;
+  return 1;
+}
+
+// Waldmeister's `RechtsUnfreiErzeugen` is called on BOTH the principal
+// direction (`linkeSeite -> rechteSeite`) AND the reversed direction
+// (the `Antigleichung`, `rechteSeite -> linkeSeite`); see
+// `RUndEVerwaltung.c:425, 430, 439, 445`.  thvm has no separate
+// reversed-direction slot, so we emulate by trying both legs here.
+// Each leg is gated independently: the grounded RHS must (a) actually
+// change (some var present on the dropped side is absent from the kept
+// side) and (b) remain KBO_GT under the kept side after grounding.
+//
+// May push 0, 1, or 2 sibling rules into the rule array; bumps
+// `r->count` and `r->fvi_count` accordingly.  The trace-stamp loop at
+// `thvm_atp_step` reads the final `fvi_count` to label the trailing N
+// slots as TRACE_FVI.
+static void atp_emit_fvi_pair(AtpState *s, Term lhs, Term rhs,
+                              AtpAddedRange *r) {
+  // Principal direction: ground free vars of rhs absent from lhs,
+  // emit (lhs -> g_rhs).
+  atp_try_ground_and_push(s, lhs, rhs, r);
+  // Reversed direction (Antigleichung): ground free vars of lhs absent
+  // from rhs, emit (rhs -> g_lhs).
+  atp_try_ground_and_push(s, rhs, lhs, r);
+}
 #endif /* ATP_ORDERED_REWRITE */
 
 // Orient via KBO and push the rule(s).  See header comment for the
@@ -12578,33 +12620,21 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       // LHS gates ExcludedMiddle / Noncontradiction / EqualityOfInverses
       // -- the rewriter cannot orient it, but the GROUNDED instance
       // (replace each such free RHS variable with `SO_minimaleKonstante`)
-      // is KBO-decidable and unblocks the proof.  Skipped when:
-      //   * The grounded instance is term-identical (no free RHS vars).
-      //   * KBO still rules the pair unorientable (then the
-      //     ordered-rewrite cache at line 5032 would mis-orient it).
-      // The emitted rule is tagged TRACE_FVI so the WL proof renderer
-      // can label it as a free-variable-instance step.
+      // is KBO-decidable and unblocks the proof.  WM fires the helper on
+      // BOTH the principal and reversed (`Antigleichung`) directions
+      // (RUndEVerwaltung.c:425, 430, 439, 445); the two-direction
+      // wrapper `atp_emit_fvi_pair` emulates this since thvm has no
+      // per-equation reversed slot.  Each direction is gated on
+      // (a) the grounding actually changing the term and (b) KBO_GT
+      // after grounding.  Emitted rules are tagged TRACE_FVI by the
+      // step trace loop (using `added.fvi_count`).
       // Gated by AtpState.use_fvi (Method "FreeVarInstance" -> True on
       // the WL side, or THVM_ATP_FVI env on the C side).  Default OFF
       // for byte-identical pre-port behavior on the OK_OK baseline;
       // turning it on unblocks the FVI-gated theorems (ExcludedMiddle,
       // Noncontradiction, EqualityOfInverses) at the cost of a slight
       // trajectory shift on other Booleans.
-      if (pushed && s->use_fvi) {
-        Term g_rhs = atp_grounded_instance(s, rhs, lhs, s->min_const);
-        if (g_rhs != rhs) {
-          if (atp_compare(s, lhs, g_rhs) == KBO_GT) {
-            if (atp_push_rule(s, lhs, g_rhs)) {
-              r.count++;
-              r.fvi_count++;
-              // r.first is unchanged; the FVI rule is the trailing
-              // slot in [first, first+count).  The atp_step trace
-              // loop reads added.fvi_count to stamp this rule with
-              // TRACE_FVI instead of TRACE_ORIENT.
-            }
-          }
-        }
-      }
+      if (pushed && s->use_fvi) atp_emit_fvi_pair(s, lhs, rhs, &r);
       return r;
 #else
       // Unfailing fallback: reserve 2 slots up front so the pair is
