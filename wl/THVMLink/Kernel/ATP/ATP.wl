@@ -3299,11 +3299,30 @@ atpMaybeInternalizeTPTP[expr_] := If[
     tptpInternalize[expr], expr];
 
 (* Composed normalizers used by every user-facing entry (TFindProof,
-   TRelevantAxioms). *)
+   TRelevantAxioms).
+
+   HoldFirst + `Inactivate[c, Equal]`: a user who needs the WL parser
+   to NOT collapse a reflexive `a == a` (or `"a" == "a"`) conjecture
+   can wrap with `Unevaluated[...]` at the call site --
+   `TFindProof[Unevaluated[a == a], {}]`.  The chain that protects it:
+   TFindProof's HoldFirst (below) holds the conjecture in its scope;
+   TFindProof's body passes `Unevaluated[conjecture]` to
+   atpNormalizeConj so the held form survives the function boundary;
+   atpNormalizeConj's HoldFirst here pins it inside the body; and
+   Inactivate (its own HoldFirst) sees the still-held `Equal[a, a]`,
+   replaces the head with `Inactive[Equal]`.  Downstream
+   forAllToPattern strips the `Inactive[Equal]` under HoldComplete
+   protection.  No Unevaluated needed inside the Inactivate call --
+   c is already held by atpNormalizeConj's attribute. *)
+SetAttributes[atpNormalizeConj, HoldFirst];
 atpNormalizeConj[c_] :=
-    atpMaybeInternalizeTPTP[atpStripInactive[c]];
+    atpMaybeInternalizeTPTP[
+        atpStripInactive[Inactivate[c, Equal]]];
+SetAttributes[atpNormalizeAxioms, HoldFirst];
 atpNormalizeAxioms[ax_List] :=
-    atpMaybeInternalizeTPTP[atpStripInactive[atpFlattenAxioms[ax]]];
+    atpMaybeInternalizeTPTP[
+        atpStripInactive[
+            atpFlattenAxioms[Inactivate[ax, Equal]]]];
 (* A single Equal / Inactive[Equal] / ForAll axiom (no enclosing
    List) is a common shape -- the user pastes one ax directly.
    Wrap in a 1-element List and re-dispatch.  Iter 68. *)
@@ -3332,6 +3351,22 @@ TFindProof[conjecture_, axiom : (_Equal | _Unequal | _ForAll | _Rule
    the FuchsPraezedenz / CanonicalizePatterns name table; xN/yN/zN
    cover the engine's "x<id>" FVR-fallback names.  See
    [[project_atp_tfindproof_iter_leak]]. *)
+
+(* HoldFirst on TFindProof: lets a caller write
+   `TFindProof[Unevaluated[a == a], {}]` to defeat the WL parser's
+   reflexive-Equal collapse to True.  Without HoldFirst the
+   Unevaluated wrapper strips at the parameter-binding boundary and
+   `a == a` evaluates before any of our code sees it.  With
+   HoldFirst the held form survives into the body, where
+   `Unevaluated[conjecture]` at the atpNormalizeConj call propagates
+   it one further level, atpNormalizeConj's own HoldFirst pins it,
+   and Inactivate finally replaces the Equal head with
+   `Inactive[Equal]` -- which forAllToPattern then strips under
+   HoldComplete protection.  Existing literal-conjecture callers
+   are unaffected: HoldFirst just suppresses an evaluation that
+   wouldn't have changed the value anyway. *)
+SetAttributes[TFindProof, HoldFirst];
+
 TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
     Quiet[Block[{
             Global`a, Global`b, Global`c, Global`d, Global`e,
@@ -3346,8 +3381,8 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
             Global`z1, Global`z2, Global`z3},
         atpProjectReturn[
             atpProveBundle[
-                atpNormalizeConj[conjecture],
-                atpNormalizeAxioms[axioms],
+                atpNormalizeConj[Unevaluated[conjecture]],
+                atpNormalizeAxioms[Unevaluated[axioms]],
                 MaxSteps -> OptionValue[MaxSteps],
                 Method -> OptionValue[Method],
                 TimeConstraint -> OptionValue[TimeConstraint]],
@@ -3367,8 +3402,8 @@ TFindProof[conjecture_, axioms_List,
             Global`z1, Global`z2, Global`z3},
         atpProjectReturn[
             atpProveBundle[
-                atpNormalizeConj[conjecture],
-                atpNormalizeAxioms[axioms],
+                atpNormalizeConj[Unevaluated[conjecture]],
+                atpNormalizeAxioms[Unevaluated[axioms]],
                 MaxSteps -> OptionValue[MaxSteps],
                 Method -> OptionValue[Method],
                 TimeConstraint -> OptionValue[TimeConstraint]],

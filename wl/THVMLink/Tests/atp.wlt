@@ -903,14 +903,22 @@ VerificationTest[
 
 VerificationTest[
     (* Reflexive escape hatches around the WL parser's collapse of
-       `"a" == "a"` to True: TwoWayRule and Inactive[Equal] both stay
-       held until forAllToPattern strips them under HoldComplete
-       protection, so the encoder sees Equal["a", "a"] held and the
-       engine closes the goal via reflexivity. *)
+       `"a" == "a"` to True: TwoWayRule, Inactive[Equal], and
+       Unevaluated all defeat the short-circuit.  TwoWayRule and
+       Inactive[Equal] stay held until forAllToPattern strips them
+       under HoldComplete protection; Unevaluated requires HoldFirst
+       on TFindProof + Unevaluated[] propagation at the
+       atpNormalizeConj call so the held form survives into Inactivate
+       (where its HoldFirst sees Equal[a, a] and rewrites to
+       Inactive[Equal][a, a]). *)
     And[
         Head @ TFindProof["a" \[TwoWayRule] "a", {},
             TimeConstraint -> 5] === ProofObject,
         Head @ TFindProof[Inactive[Equal]["a", "a"], {},
+            TimeConstraint -> 5] === ProofObject,
+        Head @ TFindProof[Unevaluated[a == a], {},
+            TimeConstraint -> 5] === ProofObject,
+        Head @ TFindProof[Unevaluated["a" == "a"], {},
             TimeConstraint -> 5] === ProofObject
     ],
     True,
