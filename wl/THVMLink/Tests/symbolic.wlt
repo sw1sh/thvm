@@ -845,3 +845,53 @@ VerificationTest[
     SameTest -> (Max @ Abs[#1 - #2] < 1.*^-4 &),
     TestID -> "symbolic/decode-loop-jit-replay"
 ]
+
+(* STEP 5b: posRow-as-INPUT rebinds under TJit (GPT-2-free guard for the fast
+   decode driver).  Models the decode's positional path: x = oneHot . tokT +
+   posRow, with posRow a {1, dim} INPUT (NOT an in-graph kvar shrink), feeding
+   the cache append (kn/vn = x . idn) + the single-query attend.  Captured ONCE
+   at the max prefix, then replayed per step rebinding BOTH the one-hot AND
+   posRow, over a FRESHLY zeroed cache each step (kn=vn=x so the attend over the
+   just-appended single row returns x itself -> isolates the positional path).
+   If posRow rebinds (the fix), step t's output == oneHot_t . tokT + posRow_t
+   (the per-step non-JIT reference) and the steps DIFFER; if posRow were frozen
+   (the echo bug) every replay reuses the capture-time row -> identical steps. *)
+VerificationTest[
+    Module[{posVid, lenVid, kC, vC, idn, tokT, vocab, dim, freshC, step, fn,
+            oh, posRowFor, ref, jit},
+        TInit[];
+        vocab = 4; dim = 4;
+        posVid = TKVarAlloc[1, 8]; lenVid = TKVarAlloc[1, 8];
+        idn  = TTensorCreate[N @ IdentityMatrix[dim]];
+        tokT = TTensorCreate[N @ IdentityMatrix[vocab]];   (* {vocab, dim} *)
+        kC   = TRealize[TTensorCreate[ConstantArray[0., {8, dim}]]];
+        vC   = TRealize[TTensorCreate[ConstantArray[0., {8, dim}]]];
+        oh[tok_]      := TTensorCreate[N @ {Normal @ SparseArray[{tok + 1 -> 1.}, vocab]}];
+        posRowFor[p_] := TTensorCreate[ConstantArray[N[p], {1, dim}]];
+        (* re-zero the CAPTURED cache buffers in place (the closure keeps using
+           kC/vC, so re-zeroing the same handles -- not a fresh TTerm -- keeps
+           the per-step append starting from zero). *)
+        freshC[] := (TSet[kC, TTensorCreate[ConstantArray[0., {8, dim}]]];
+                     TSet[vC, TTensorCreate[ConstantArray[0., {8, dim}]]]);
+        step[ohIn_, prIn_] := Module[{x, kn, vn},
+            x  = ohIn . tokT + prIn;            (* {1, dim} embed + posRow *)
+            kn = TRealize[x . idn]; vn = TRealize[x . idn];
+            TDecodeAttend[x, kC, vC, kn, vn, 2, posVid, lenVid, 1.0]];
+        (* non-JIT per-step reference: x_t = oneHot_t . tokT + posRow_t *)
+        ref = Table[ freshC[]; TKVarSet[posVid, t]; TKVarSet[lenVid, t + 1];
+            First @ Normal @ TTensorData @ TRealize @ step[oh[t], posRowFor[t]],
+            {t, 0, 3}];
+        (* capture ONCE at the max prefix, replay rebinding oh + posRow *)
+        fn  = TJit[{ohIn, prIn} |-> TRealize @ step[ohIn, prIn]];
+        freshC[]; TKVarSet[posVid, 3]; TKVarSet[lenVid, 4];
+        fn[oh[3], posRowFor[3]];
+        jit = Table[ freshC[]; TKVarSet[posVid, t]; TKVarSet[lenVid, t + 1];
+            First @ Normal @ TTensorData @ fn[oh[t], posRowFor[t]],
+            {t, 0, 3}];
+        {Max @ Abs[Flatten[jit - ref]] < 1.*^-4,   (* replay == per-step ref *)
+         (* and the steps are DISTINCT (posRow really rebinds, not frozen) *)
+         Max @ Abs[jit[[1]] - jit[[4]]] > 0.1}
+    ],
+    {True, True},
+    TestID -> "symbolic/decode-loop-jit-posrow-input"
+]
