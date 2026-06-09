@@ -68,7 +68,9 @@ GroupAxioms	InverseOfInverse	10	-	10	14	EXACT PARITY.  chain=10 == WM_rules=10.
 GroupAxioms	LeftIdentity	8	-	9	12	OK.  chain=8 vs WM_rules=9 -- thvm 1 shorter.
 GroupAxioms	LeftInverse	11	-	12	15	OK.  chain=11 vs WM_rules=12 -- thvm 1 shorter.
 MeredithAxioms	AndAssociativity	131	-	409	138	OK at 120s.  chain=131 vs WM_rules=409 -- thvm 68% shorter!  Previous FAIL at 45s was just budget; raising to 120s clears it.
-MeredithAxioms	OrAssociativity	-	-	409	-	Symmetric to AndAssociativity; not directly tested but expected to behave similarly.
+MeredithAxioms	OrAssociativity	118	-	409	121	OK at 120s under Waldmeister.  chain=118 vs WM_rules=409 -- thvm 71% shorter (matching AndAssoc's 68%).
+WolframAxioms	AndAssociativity	FAIL	-	1601	-	Both engines walls eventually -- WM CLI 5.8s with 1601 rules + 3.7M CPs; thvm Waldmeister times out at 120s.  Deep Sheffer saturation -- not a divergence but a real budget gap.
+WolframAxioms	OrAssociativity	FAIL	-	1601	-	Symmetric to AndAssoc.  Same outcome.
 BooleanAxioms	ImpliesRobbinsAxioms__c1	1	-	4	8	OK.  chain=1 vs WM_rules=4 -- thvm shorter.
 BooleanAxioms	ImpliesRobbinsAxioms__c2	138	-	136	145	OK.  chain=138 vs WM_rules=136 -- close parity.
 BooleanAxioms	ImpliesRobbinsAxioms__c3	82	-	189	89	OK.  chain=82 vs WM_rules=189 -- thvm 57% shorter (deep AC compression).
