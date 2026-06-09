@@ -89,8 +89,8 @@ TCausalMaskSym::usage    = "TCausalMaskSym[vid, hi] returns the SYMBOLIC-sequenc
 TLayerNormAffine::usage  = "TLayerNormAffine[x, gamma, beta] applies TLayerNorm[x] then multiplies by gamma + adds beta along the last axis.  GPT-2's layer-norm carries learned gamma/beta; the bare TLayerNorm in this file normalises only.";
 TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q is {seq_q, dim}; K, V are {seq_k, dim} (read independently, so seq_k may differ from seq_q -- cross-attention, or a single-query step over a KV cache); dim = n_heads * d_head; mask is a {seq_q, seq_k} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq_q, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).\n\nTMultiHeadAttention[Q, K, V, n_heads, mask, scale] uses the explicit `scale` factor in place of the default 1/Sqrt[d_head] (pass 1.0 when the caller has already pre-scaled Q, as GPT-2's NetGraph does).";
 TDecodeAttend::usage = "TDecodeAttend[q1, kCache, vCache, kNew, vNew, nHeads, posVid, lenVid, scale] -- GPT-2 per-step DECODE attention over a KV cache.  See the public symbol page; appends kNew/vNew into kCache/vCache at row `posVid`, marks the {len, dim} prefix symbolic on `lenVid`, and attends the single query q1 ({1, dim}) over the cached prefix multi-head -> {1, dim}.";
-TDecodeJitInit::usage = "TDecodeJitInit[net] allocates a FAST (TJit) incremental-decode session for a token-LM NetChain (GPT-2): like TDecodeInit but the per-step positional row is supplied as a rebindable INPUT (a host slice of the position table) instead of an in-graph kvar shrink, so a TJit capture replays it across steps (the in-graph shrink freezes the capture-time position -> positionless echo).  Extends TDecodeInit's state with the position table, the vocab size, and a `fn` slot (the TJit closure, captured lazily on the first TDecodeJitNext).  Returns the `state` Association TDecodeJitNext consumes.";
-TDecodeJitNext::usage = "TDecodeJitNext[net, state, tokenId] drives ONE FAST decode step: like TDecodeNext but captures a TJit closure over {oneHotRow, posRow} on the first call (at that step's prefix) and reuses it after, replaying with the per-step one-hot AND host-sliced positional row rebound (posVid drives the cache append offset, which rebinds at fire; lenVid the prefix length).  Constant memory + fast after the one-time capture; output matches TDecodeNext.  `state` comes from TDecodeJitInit.  Returns the updated state with \"pos\" advanced, \"token\" the greedy next-token id, \"logits\" the {vocab} logits.";
+TDecodeJitInit::usage = "TDecodeJitInit[net] allocates a CONSTANT-MEMORY (TJit) incremental-decode session for a token-LM NetChain (GPT-2): like TDecodeInit but the per-step positional row is supplied as a rebindable INPUT (a host slice of the position table) instead of an in-graph kvar shrink, so a TJit capture replays it across steps (the in-graph shrink freezes the capture-time position -> positionless echo).  Extends TDecodeInit's state with the position table, the vocab size, and a `fn` slot (the TJit closure, captured lazily on the first TDecodeJitNext).  Returns the `state` Association TDecodeJitNext consumes.  NOTE: capture-once/replay gives CONSTANT memory (no per-step re-lift), but per-step latency is currently dominated by the host-side cache-read gather (the symbolic cache reads replay as JIT_OP_GATHER), so it is NOT yet faster than the fixed-window forward -- routing the cache reads through on-device kernels is a speed follow-up.";
+TDecodeJitNext::usage = "TDecodeJitNext[net, state, tokenId] drives ONE decode step: like TDecodeNext but captures a TJit closure over {oneHotRow, posRow} on the first call (at that step's prefix) and reuses it after, replaying with the per-step one-hot AND host-sliced positional row rebound (posVid drives the cache append offset, which rebinds at fire; lenVid the prefix length).  CONSTANT memory after the one-time capture (no per-step re-lift); output is token-identical to TDecodeNext.  (Per-step latency is currently gated by the host cache-read gather -- constant memory, not yet faster than the fixed-window forward.)  `state` comes from TDecodeJitInit.  Returns the updated state with \"pos\" advanced, \"token\" the greedy next-token id, \"logits\" the {vocab} logits.";
 Begin["`Private`"];
 
 (* === Tensor-method helpers ============================== *)
@@ -1996,14 +1996,18 @@ TDecodeNext[net_, state_Association, tokenId_Integer] := Module[
       "token"  -> First[Ordering[logits, -1]] - 1,
       "logits" -> logits|>]
 
-(* TDecodeJitInit[net] -- allocate a FAST (TJit) incremental-decode session.
-   Extends TDecodeInit's state with a captured-once TJit closure `fn` over
-   {oneHotRow, posRow} (the posRow-as-input decode step), the embedding tables,
-   and a `vocab` slot.  The closure is NOT captured here -- the first
+(* TDecodeJitInit[net] -- allocate a CONSTANT-MEMORY (TJit) incremental-decode
+   session.  Extends TDecodeInit's state with a captured-once TJit closure `fn`
+   over {oneHotRow, posRow} (the posRow-as-input decode step), the embedding
+   tables, and a `vocab` slot.  The closure is NOT captured here -- the first
    TDecodeJitNext call captures it at that step's prefix and reuses it after.
    posRow is supplied per step as a host slice of the position table, so the
    captured graph rebinds the positional row on replay (the in-graph kvar shrink
-   would freeze it -> positionless echo).  Returns the `state` Association. *)
+   would freeze it -> positionless echo).  Returns the `state` Association.
+   Capture-once/replay gives CONSTANT memory (no per-step re-lift); per-step
+   latency is currently gated by the host cache-read gather (the symbolic cache
+   reads replay as JIT_OP_GATHER) -- not yet faster than the fixed-window
+   forward.  Speed follow-up: route the cache reads through on-device kernels. *)
 TDecodeJitInit[net_] := Module[{base, posTable, tokTable},
     base     = TDecodeInit[net];
     If[ base === $Failed, Return[$Failed]];

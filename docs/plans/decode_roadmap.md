@@ -235,6 +235,29 @@ So sequence: **symbolic-seq (M1->M3) first, then KV-cache on top.**
 
 ## Status
 
+**CORRECT + CONSTANT-MEMORY (2026-06-09); SPEED is the open follow-up.** Lever 1 (drop
+`maxSeq`): the real GPT-2 117M forward runs over a symbolic sequence -- DONE. Lever 2
+(incremental KV-cache decode): `TDecodeInit`/`TDecodeNext` (correct, re-lift each step) and
+`TDecodeJitInit`/`TDecodeJitNext` (capture once + replay per token, **constant memory** -- ~few
+MB total vs ~100MB/token re-lift growth). The KV-cache decode generates **token-identical** text
+to the fixed-window forward over real autoregressive generation ("The quick brown fox" -> "es are
+a great way to get a little bit of a"). LEVEL B surfaced two lowering bugs the toy tests missed:
+a kvar-begin shrink reading the wrong row in a kernel (`apply_movement_op_shrink` used the kvar id
+not `kvar_runtime`; fix `ec6bdab4`) and the positional shrink baking at TJit capture (fixed by
+supplying the positional row as a per-step rebindable input; `c201868c`). Validation:
+`symbolic.wlt` 20/0, `test_cc` 86463/86463.
+
+> **SPEED NOT YET MET (open).** The TJit decode replay is ~30 s/token on the 12-block model --
+> SLOWER than the fixed-window forward (~18 ms/step). The bottleneck is the per-step host-side
+> cache-read GATHER: the eager decode's symbolic cache reads (`TSymbolicAxis` + per-head split)
+> materialize through `materialize_root_alias` as host strided gathers (per-element
+> `tendesc_strided_index` over `{1024, dim}` buffers x 12 blocks), which the JIT replay re-runs
+> every step (`JIT_OP_GATHER`). The fixed-window forward is pure on-device dispatch, hence fast.
+> So the TJit decode's win is constant MEMORY, not speed. To make decode FAST, route the symbolic
+> cache reads through on-device kernel dispatches (so the JIT replays them as fast dispatches, not
+> host gathers) -- the real remaining Lever 2 work. Until then, the fixed-window forward is the
+> faster generation path for short sequences; the KV-cache decode is the constant-memory path.
+
 - Fixed-window forward: DONE + clean (TJit input-rebind, no slot/TSet; `maxSeq` only
   in the host one-hot padding). See [[Gpt2.md]].
 - Symbolic-seq: **COMPLETE** (M1/M2/M3) -- the real GPT-2 117M forward runs over a
